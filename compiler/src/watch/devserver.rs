@@ -716,7 +716,7 @@ fn guess_content_type(path: &Path) -> &'static str {
         Some("pdf") => "application/pdf",
         Some("zip") => "application/zip",
         Some("wasm") => "application/wasm",
-        Some("d") => "text/x-sounio",
+        Some("d") | Some("sio") => "text/x-sounio",
         _ => "application/octet-stream",
     }
 }

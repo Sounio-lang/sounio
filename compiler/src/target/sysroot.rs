@@ -811,7 +811,7 @@ mod tests {
     fn test_sysroot_component() {
         assert_eq!(SysrootComponent::CRuntime.dir_name(), "lib");
         assert_eq!(SysrootComponent::Headers.dir_name(), "include");
-        assert_eq!(SysrootComponent::DStdlib.sioir_name(), "lib/d");
+        assert_eq!(SysrootComponent::DStdlib.dir_name(), "lib/d");
     }
 
     #[test]

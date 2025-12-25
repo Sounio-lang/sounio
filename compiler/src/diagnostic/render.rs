@@ -29,7 +29,7 @@ impl TerminalCaps {
     pub fn detect() -> Self {
         let colors = std::env::var("NO_COLOR").is_err() && is_terminal_stderr();
 
-        let unicode = std::env::var("DEMETRIOS_ASCII").is_err();
+        let unicode = std::env::var("SOUNIO_ASCII").is_err();
 
         let width = terminal_width().unwrap_or(80);
 

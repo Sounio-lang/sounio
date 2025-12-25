@@ -2701,7 +2701,7 @@ impl<'a> Parser<'a> {
         }
     }
 
-    // ==================== DEMETRIOS EPISTEMIC TYPE PARSING ====================
+    // ==================== SOUNIO EPISTEMIC TYPE PARSING ====================
 
     /// Parse Knowledge[T, ε < 0.05, Valid(duration), Derived]
     fn parse_knowledge_type(&mut self) -> Result<TypeExpr> {
@@ -3831,7 +3831,7 @@ impl<'a> Parser<'a> {
                 })
             }
 
-            // ==================== DEMETRIOS EPISTEMIC EXPRESSIONS ====================
+            // ==================== SOUNIO EPISTEMIC EXPRESSIONS ====================
 
             // do(X = 1) - Pearl's causal intervention
             TokenKind::Do => self.parse_do_expr(),
@@ -3861,7 +3861,7 @@ impl<'a> Parser<'a> {
         }
     }
 
-    // ==================== DEMETRIOS EPISTEMIC EXPRESSION PARSING ====================
+    // ==================== SOUNIO EPISTEMIC EXPRESSION PARSING ====================
 
     /// Parse do(X = value, Y = value, ...) - causal intervention expression
     fn parse_do_expr(&mut self) -> Result<Expr> {

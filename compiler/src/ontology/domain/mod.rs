@@ -130,7 +130,7 @@ impl DomainOntologies {
     /// Get default database path
     fn default_db_path() -> PathBuf {
         // Check environment variable
-        if let Ok(path) = std::env::var("DEMETRIOS_ONTOLOGY_DB") {
+        if let Ok(path) = std::env::var("SOUNIO_ONTOLOGY_DB") {
             return PathBuf::from(path);
         }
 

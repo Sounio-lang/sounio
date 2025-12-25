@@ -200,7 +200,7 @@ impl FoundationOntologies {
 
     fn find_stdlib_path() -> Result<PathBuf, OntologyError> {
         // Check environment variable first
-        if let Ok(path) = std::env::var("DEMETRIOS_STDLIB") {
+        if let Ok(path) = std::env::var("SOUNIO_STDLIB") {
             return Ok(path.into());
         }
 

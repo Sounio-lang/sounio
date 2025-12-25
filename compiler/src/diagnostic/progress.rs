@@ -68,7 +68,7 @@ impl Progress {
             message: Mutex::new(message.into()),
             start: Instant::now(),
             is_terminal: is_terminal_stderr(),
-            unicode: std::env::var("DEMETRIOS_ASCII").is_err(),
+            unicode: std::env::var("SOUNIO_ASCII").is_err(),
             width: 40,
             finished: AtomicBool::new(false),
         }

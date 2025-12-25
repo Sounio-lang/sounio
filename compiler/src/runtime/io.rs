@@ -552,10 +552,10 @@ mod tests {
     fn test_get_env() {
         // Set a test env var
         unsafe {
-            env::set_var("DEMETRIOS_TEST_VAR", "test_value");
+            env::set_var("SOUNIO_TEST_VAR", "test_value");
         }
 
-        let name = "DEMETRIOS_TEST_VAR";
+        let name = "SOUNIO_TEST_VAR";
         let mut out_ptr: *mut u8 = ptr::null_mut();
         let mut out_len: i64 = 0;
 

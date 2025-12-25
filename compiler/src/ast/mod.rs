@@ -1022,7 +1022,7 @@ pub enum TypeExpr {
     /// Infer type: _
     Infer,
 
-    // ==================== DEMETRIOS EPISTEMIC TYPES ====================
+    // ==================== SOUNIO EPISTEMIC TYPES ====================
     /// Knowledge type: Knowledge[T, ε < 0.05, Valid(duration), Derived]
     /// The core epistemic type tracking uncertainty, validity, and provenance
     Knowledge {
@@ -1377,7 +1377,7 @@ pub enum Expr {
     /// Macro invocation
     MacroInvocation(MacroInvocation),
 
-    // ==================== DEMETRIOS ONTOLOGY EXPRESSIONS ====================
+    // ==================== SOUNIO ONTOLOGY EXPRESSIONS ====================
     /// Ontology term literal: prefix:term (e.g., drugbank:DB00945, chebi:15365)
     OntologyTerm {
         id: NodeId,
@@ -1387,7 +1387,7 @@ pub enum Expr {
         term: String,
     },
 
-    // ==================== DEMETRIOS EPISTEMIC EXPRESSIONS ====================
+    // ==================== SOUNIO EPISTEMIC EXPRESSIONS ====================
     /// Causal do expression: do(X = 1)
     /// Represents intervention in causal inference (Pearl's do-calculus)
     Do {

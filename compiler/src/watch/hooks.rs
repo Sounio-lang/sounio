@@ -286,17 +286,17 @@ impl HookContext {
     pub fn to_env(&self) -> HashMap<String, String> {
         let mut env = HashMap::new();
         env.insert(
-            "DEMETRIOS_PROJECT_ROOT".to_string(),
+            "SOUNIO_PROJECT_ROOT".to_string(),
             self.project_root.display().to_string(),
         );
         env.insert(
-            "DEMETRIOS_HOOK_POINT".to_string(),
+            "SOUNIO_HOOK_POINT".to_string(),
             self.hook_point.as_str().to_string(),
         );
 
         if !self.changed_files.is_empty() {
             env.insert(
-                "DEMETRIOS_CHANGED_FILES".to_string(),
+                "SOUNIO_CHANGED_FILES".to_string(),
                 self.changed_files
                     .iter()
                     .map(|p| p.display().to_string())
@@ -306,19 +306,19 @@ impl HookContext {
         }
 
         if let Some(success) = self.build_success {
-            env.insert("DEMETRIOS_BUILD_SUCCESS".to_string(), success.to_string());
+            env.insert("SOUNIO_BUILD_SUCCESS".to_string(), success.to_string());
         }
 
         if let Some(success) = self.test_success {
-            env.insert("DEMETRIOS_TEST_SUCCESS".to_string(), success.to_string());
+            env.insert("SOUNIO_TEST_SUCCESS".to_string(), success.to_string());
         }
 
         if let Some(ref msg) = self.error_message {
-            env.insert("DEMETRIOS_ERROR_MESSAGE".to_string(), msg.clone());
+            env.insert("SOUNIO_ERROR_MESSAGE".to_string(), msg.clone());
         }
 
         for (key, value) in &self.variables {
-            env.insert(format!("DEMETRIOS_{}", key.to_uppercase()), value.clone());
+            env.insert(format!("SOUNIO_{}", key.to_uppercase()), value.clone());
         }
 
         env
@@ -944,18 +944,18 @@ mod tests {
 
         let env = context.to_env();
         assert_eq!(
-            env.get("DEMETRIOS_PROJECT_ROOT"),
+            env.get("SOUNIO_PROJECT_ROOT"),
             Some(&"/test".to_string())
         );
         assert_eq!(
-            env.get("DEMETRIOS_HOOK_POINT"),
+            env.get("SOUNIO_HOOK_POINT"),
             Some(&"pre-build".to_string())
         );
         assert_eq!(
-            env.get("DEMETRIOS_BUILD_SUCCESS"),
+            env.get("SOUNIO_BUILD_SUCCESS"),
             Some(&"true".to_string())
         );
-        assert_eq!(env.get("DEMETRIOS_CUSTOM"), Some(&"value".to_string()));
+        assert_eq!(env.get("SOUNIO_CUSTOM"), Some(&"value".to_string()));
     }
 
     #[test]
