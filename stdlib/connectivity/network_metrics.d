@@ -162,9 +162,9 @@ fn global_metrics_new() -> GlobalMetrics {
 fn threshold_matrix(
     weighted: &[[f64; 500]; 500],
     threshold: f64,
-    n: i64,
-    binary: &![[bool; 500]; 500]
-) {
+    n: i64
+) -> [[bool; 500]; 500] {
+    var binary = [[false; 500]; 500]
     var i: i64 = 0
     while i < n {
         var j: i64 = 0
@@ -174,6 +174,7 @@ fn threshold_matrix(
         }
         i = i + 1
     }
+    binary
 }
 
 /// Count edges
@@ -281,9 +282,9 @@ fn degree_with_uncertainty(
 /// All-pairs shortest paths
 fn floyd_warshall(
     weights: &[[f64; 500]; 500],
-    n: i64,
-    distances: &![[f64; 500]; 500]
-) {
+    n: i64
+) -> [[f64; 500]; 500] {
+    var distances = [[0.0; 500]; 500]
     // Initialize
     var i: i64 = 0
     while i < n {
@@ -318,6 +319,7 @@ fn floyd_warshall(
         }
         k = k + 1
     }
+    distances
 }
 
 // ============================================================================
@@ -382,7 +384,7 @@ fn local_efficiency_node(
     threshold: f64
 ) -> f64 {
     // Get neighbors
-    var neighbors = [0i64; 500]
+    var neighbors = [0; 500]
     var n_neighbors: i64 = 0
 
     var i: i64 = 0
@@ -430,7 +432,7 @@ fn clustering_coefficient_node(
     node: i64
 ) -> f64 {
     // Get neighbors
-    var neighbors = [0i64; 500]
+    var neighbors = [0; 500]
     var k: i64 = 0
 
     var i: i64 = 0
@@ -473,7 +475,7 @@ fn clustering_coefficient_weighted(
     node: i64
 ) -> f64 {
     // Get neighbors and strengths
-    var neighbors = [0i64; 500]
+    var neighbors = [0; 500]
     var k: i64 = 0
     var strength: f64 = 0.0
 
@@ -717,7 +719,7 @@ fn rich_club_coefficient(
     k: i64
 ) -> f64 {
     // Find nodes with degree > k
-    var rich_nodes = [0i64; 500]
+    var rich_nodes = [0; 500]
     var n_rich: i64 = 0
 
     var i: i64 = 0
@@ -817,20 +819,18 @@ fn compute_global_metrics(
     global.n_nodes = n
 
     // Binary threshold
-    var binary = [[false; 500]; 500]
-    threshold_matrix(weighted, threshold, n, &!binary)
+    let binary = threshold_matrix(weighted, threshold, n)
 
     // Edge count and density
     global.n_edges = count_edges(&binary, n)
     global.density = metric_value_new(network_density(n, global.n_edges), 0.0)
 
     // Degrees
-    var degrees = [0i64; 500]
+    var degrees = [0; 500]
     degree_binary(&binary, n, &!degrees)
 
     // Shortest paths
-    var distances = [[0.0; 500]; 500]
-    floyd_warshall(weighted, n, &!distances)
+    let distances = floyd_warshall(weighted, n)
 
     // Global path metrics
     global.char_path_length = metric_value_new(characteristic_path_length(&distances, n), 0.0)
@@ -848,7 +848,7 @@ fn compute_global_metrics(
     global.transitivity = metric_value_new(transitivity(&binary, n), 0.0)
 
     // Modularity
-    var modules = [0i32; 500]
+    var modules = [0; 500]
     let q = louvain_modularity(weighted, n, &!modules)
     global.modularity = metric_value_new(q, 0.0)
 
@@ -904,18 +904,17 @@ fn compute_node_metrics(
     node_metrics: &![NodeMetrics; 500]
 ) {
     // Binary threshold
-    var binary = [[false; 500]; 500]
-    threshold_matrix(weighted, threshold, n, &!binary)
+    let binary = threshold_matrix(weighted, threshold, n)
 
     // Degrees
-    var degrees = [0i64; 500]
+    var degrees = [0; 500]
     degree_binary(&binary, n, &!degrees)
 
     var strengths = [0.0; 500]
     strength_weighted(weighted, threshold, n, &!strengths)
 
     // Modularity for participation coefficient
-    var modules = [0i32; 500]
+    var modules = [0; 500]
     louvain_modularity(weighted, n, &!modules)
 
     // Mean and std of degrees for hub classification
@@ -1003,7 +1002,7 @@ fn test_modularity() -> bool {
     weights[3][5] = 1.0; weights[5][3] = 1.0
     weights[4][5] = 1.0; weights[5][4] = 1.0
 
-    var modules = [0i32; 500]
+    var modules = [0; 500]
     let q = louvain_modularity(&weights, 6, &!modules)
     q > 0.4  // Should have high modularity
 }
@@ -1018,7 +1017,7 @@ fn test_rich_club() -> bool {
         i = i + 1
     }
 
-    var degrees = [0i64; 500]
+    var degrees = [0; 500]
     degrees[0] = 4
     degrees[1] = 1; degrees[2] = 1; degrees[3] = 1; degrees[4] = 1
 

@@ -143,8 +143,8 @@ struct AtlasRegion {
 fn atlas_region_new() -> AtlasRegion {
     AtlasRegion {
         index: 0,
-        label: [0i8; 64],
-        abbreviation: [0i8; 16],
+        label: [0; 64],
+        abbreviation: [0; 16],
         hemisphere: Hemisphere::Bilateral,
         lobe: Lobe::Unknown,
         mni_x: 0.0,
@@ -195,15 +195,15 @@ struct Atlas {
 
 fn atlas_new() -> Atlas {
     Atlas {
-        name: [0i8; 64],
-        description: [0i8; 256],
+        name: [0; 64],
+        description: [0; 256],
         atlas_type: AtlasType::Custom,
-        version: [0i8; 16],
+        version: [0; 16],
         regions: [atlas_region_new(); 1000],
         n_regions: 0,
-        network_names: [[0i8; 32]; 20],
+        network_names: [[0; 32]; 20],
         n_networks: 0,
-        space: [0i8; 16],
+        space: [0; 16],
         resolution_mm: 2.0,
         dim_x: 91,
         dim_y: 109,

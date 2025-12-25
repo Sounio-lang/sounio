@@ -242,7 +242,7 @@ struct TissueDefNode {
 
 fn tissue_def_node_new() -> TissueDefNode {
     TissueDefNode {
-        name: [0i8; 64],
+        name: [0; 64],
         tissue_type: TissueTypeAST::Custom,
         has_volume: false,
         volume_value: 1.0,
@@ -345,11 +345,11 @@ fn quantum_spec_node_new() -> QuantumSpecNode {
         functional: FunctionalAST::M062X,
         basis: BasisSetAST::cc_pVTZ,
         solvent_model: SolventModelAST::SMD,
-        solvent_name: [0i8; 32],
+        solvent_name: [0; 32],
         dispersion: 2,
-        receptor_file: [0i8; 256],
-        ligand_file: [0i8; 256],
-        complex_file: [0i8; 256],
+        receptor_file: [0; 256],
+        ligand_file: [0; 256],
+        complex_file: [0; 256],
         include_bsse: true,
         include_thermal: false,
         temperature: 298.15,
@@ -368,7 +368,7 @@ struct BindingDefNode {
 
 fn binding_def_node_new() -> BindingDefNode {
     BindingDefNode {
-        name: [0i8; 64],
+        name: [0; 64],
         qm_spec: quantum_spec_node_new(),
         line: 0,
         col: 0,
@@ -438,8 +438,8 @@ struct CovariateDefNode {
 
 fn covariate_def_node_new() -> CovariateDefNode {
     CovariateDefNode {
-        covariate_name: [0i8; 64],
-        param_name: [0i8; 64],
+        covariate_name: [0; 64],
+        param_name: [0; 64],
         effect_type: CovariateEffectType::Power,
         reference_value: 70.0,
         exponent: 0.75,
@@ -467,7 +467,7 @@ struct ExtToken {
 fn ext_token_new() -> ExtToken {
     ExtToken {
         token_type: 0,
-        text: [0i8; 64],
+        text: [0; 64],
         value: 0.0,
         line: 0,
         col: 0,
@@ -515,7 +515,7 @@ struct ExtendedModelNode {
 
 fn extended_model_node_new() -> ExtendedModelNode {
     ExtendedModelNode {
-        name: [0i8; 64],
+        name: [0; 64],
         tissues: [tissue_def_node_new(); 20],
         n_tissues: 0,
         bindings: [binding_def_node_new(); 5],
@@ -561,7 +561,7 @@ fn extended_parser_new() -> ExtendedParser {
         pos: 0,
         current_model: extended_model_node_new(),
         has_error: false,
-        error_msg: [0i8; 256],
+        error_msg: [0; 256],
         error_line: 0,
         error_col: 0,
     }
