@@ -9,7 +9,7 @@ This module implements Pearl's causal inference framework with integrated Bayesi
 "The causal effect is 0.5"
 ```
 
-**Demetrios epistemic causal inference:**
+**Sounio epistemic causal inference:**
 ```
 "The causal effect is Beta(6, 4), giving 0.6 ± 0.15 with epistemic uncertainty"
 ```
@@ -156,7 +156,7 @@ The epistemic framework enables:
 
 ## Comparison to Traditional Approaches
 
-| Aspect | Traditional | Demetrios Epistemic |
+| Aspect | Traditional | Sounio Epistemic |
 |--------|-------------|---------------------|
 | Effect estimate | Point estimate | Full Beta posterior |
 | Edge existence | Binary (yes/no) | Probabilistic (Beta) |

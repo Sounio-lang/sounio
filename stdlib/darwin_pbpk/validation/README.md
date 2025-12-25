@@ -1,10 +1,10 @@
-# Validation Metrics Module for Demetrios
+# Validation Metrics Module for Sounio
 
 ## Overview
 
 The metrics.d module provides regulatory-grade validation metrics for PBPK model assessment.
 
-Location: /mnt/e/workspace/demetrios/stdlib/darwin_pbpk/validation/metrics.d
+Location: /mnt/e/workspace/sounio/stdlib/darwin_pbpk/validation/metrics.d
 Size: 736 lines, 20KB
 
 ## Core Data Structures

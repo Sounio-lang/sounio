@@ -1,0 +1,314 @@
+//! Debugging and Profiling Demo
+//!
+//! This example demonstrates how to use the Sounio debugging
+//! and profiling infrastructure.
+//!
+//! # Profiling
+//!
+//! Run with CPU profiling:
+//! ```bash
+//! dc profile examples/debug_profile_demo.d --profile-type cpu --flamegraph profile.svg
+//! ```
+//!
+//! Run with memory profiling:
+//! ```bash
+//! dc profile examples/debug_profile_demo.d --profile-type memory
+//! ```
+//!
+//! # Debugging
+//!
+//! Compile with debug info and run in GDB:
+//! ```bash
+//! dc build -g examples/debug_profile_demo.d
+//! dc debug examples/debug_profile_demo.d --debugger gdb --pretty
+//! ```
+//!
+//! # Tracing
+//!
+//! The tracing framework provides structured logging:
+//! ```d
+//! import trace;
+//!
+//! fn process_data(data: &[int]) with IO, Trace {
+//!     let _span = span!("process_data", data_len = data.len());
+//!     event!(Level::Info, "Starting data processing");
+//!     // ... processing ...
+//!     event!(Level::Debug, "Processing complete");
+//! }
+//! ```
+
+module debug_profile_demo
+
+use profile::*;
+use trace::*;
+
+//-----------------------------------------------------------------------------
+// Data Structures for Profiling Demo
+//-----------------------------------------------------------------------------
+
+/// A binary search tree node
+struct TreeNode {
+    value: int,
+    left: Option<Box<TreeNode>>,
+    right: Option<Box<TreeNode>>,
+}
+
+impl TreeNode {
+    /// Create a new leaf node
+    fn new(value: int) -> Self {
+        TreeNode {
+            value: value,
+            left: None,
+            right: None,
+        }
+    }
+
+    /// Insert a value into the tree
+    fn insert(&!self, value: int) {
+        if value < self.value {
+            match &mut self.left {
+                Some(left) => left.insert(value),
+                None => self.left = Some(Box::new(TreeNode::new(value))),
+            }
+        } else {
+            match &mut self.right {
+                Some(right) => right.insert(value),
+                None => self.right = Some(Box::new(TreeNode::new(value))),
+            }
+        }
+    }
+
+    /// Search for a value
+    fn contains(&self, value: int) -> bool {
+        if value == self.value {
+            true
+        } else if value < self.value {
+            match &self.left {
+                Some(left) => left.contains(value),
+                None => false,
+            }
+        } else {
+            match &self.right {
+                Some(right) => right.contains(value),
+                None => false,
+            }
+        }
+    }
+
+    /// Count nodes in tree
+    fn size(&self) -> int {
+        let left_size = match &self.left {
+            Some(left) => left.size(),
+            None => 0,
+        };
+        let right_size = match &self.right {
+            Some(right) => right.size(),
+            None => 0,
+        };
+        1 + left_size + right_size
+    }
+}
+
+//-----------------------------------------------------------------------------
+// CPU-Intensive Computation
+//-----------------------------------------------------------------------------
+
+/// Fibonacci number (intentionally slow for profiling)
+fn fib(n: int) -> int {
+    if n <= 1 {
+        n
+    } else {
+        fib(n - 1) + fib(n - 2)
+    }
+}
+
+/// Matrix multiplication (for profiling)
+fn matrix_multiply(a: &[[f64]], b: &[[f64]]) -> Vec<Vec<f64>> with Alloc {
+    let rows_a = a.len();
+    let cols_a = a[0].len();
+    let cols_b = b[0].len();
+
+    let mut result: Vec<Vec<f64>> = Vec::new();
+
+    for i in 0..rows_a {
+        let mut row: Vec<f64> = Vec::new();
+        for j in 0..cols_b {
+            var sum = 0.0;
+            for k in 0..cols_a {
+                sum += a[i][k] * b[k][j];
+            }
+            row.push(sum);
+        }
+        result.push(row);
+    }
+
+    result
+}
+
+//-----------------------------------------------------------------------------
+// Memory-Intensive Operations
+//-----------------------------------------------------------------------------
+
+/// Allocate many small objects
+fn allocate_many(count: int) -> Vec<Box<int>> with Alloc {
+    let mut items: Vec<Box<int>> = Vec::new();
+    for i in 0..count {
+        items.push(Box::new(i));
+    }
+    items
+}
+
+/// Create a large string
+fn create_large_string(size: int) -> string with Alloc {
+    var result = String::new();
+    for i in 0..size {
+        result.push('x');
+    }
+    result
+}
+
+//-----------------------------------------------------------------------------
+// Async Task Demo (for async profiling)
+//-----------------------------------------------------------------------------
+
+/// Simulated async task
+async fn async_task(id: int, delay_ms: int) -> int with Async {
+    event!(Level::Debug, task_id = id, "Task starting");
+
+    // Simulate work
+    sleep_ms(delay_ms).await;
+
+    event!(Level::Debug, task_id = id, result = id * 2, "Task complete");
+    id * 2
+}
+
+/// Run multiple async tasks
+async fn run_async_demo() with Async, IO {
+    let _span = span!("run_async_demo");
+
+    event!(Level::Info, "Starting async demo");
+
+    // Spawn several tasks
+    let tasks = vec![
+        spawn(async_task(1, 100)),
+        spawn(async_task(2, 50)),
+        spawn(async_task(3, 75)),
+        spawn(async_task(4, 25)),
+    ];
+
+    // Wait for all tasks
+    var total = 0;
+    for task in tasks {
+        total += task.await;
+    }
+
+    event!(Level::Info, total = total, "Async demo complete");
+}
+
+//-----------------------------------------------------------------------------
+// Tracing Demo
+//-----------------------------------------------------------------------------
+
+/// Process data with detailed tracing
+fn process_with_tracing(data: &[int]) -> int with IO, Trace {
+    let _span = span!("process_with_tracing",
+        data_len = data.len()
+    );
+
+    event!(Level::Info, "Starting data processing");
+
+    var sum = 0;
+    var count = 0;
+
+    for &value in data {
+        event!(Level::Trace, value = value, "Processing value");
+        sum += value;
+        count += 1;
+
+        if count % 100 == 0 {
+            event!(Level::Debug, processed = count, "Progress update");
+        }
+    }
+
+    let average = if count > 0 { sum / count } else { 0 };
+
+    event!(Level::Info,
+        sum = sum,
+        count = count,
+        average = average,
+        "Processing complete"
+    );
+
+    sum
+}
+
+//-----------------------------------------------------------------------------
+// Error Demonstration (for diagnostic system)
+//-----------------------------------------------------------------------------
+
+/// Demonstrate error handling with rich diagnostics
+fn demonstrate_errors() with IO {
+    // This function shows how errors would be reported
+    // In practice, these would be compile-time errors
+
+    println("Demonstrating error codes:");
+    println("  T0001 - Type mismatch");
+    println("  O0001 - Use of moved value");
+    println("  F0001 - Unhandled effect");
+    println("");
+    println("Use 'dc explain T0001' for details on any error code");
+    println("Use 'dc error-index' to see all error codes");
+}
+
+//-----------------------------------------------------------------------------
+// Main Entry Point
+//-----------------------------------------------------------------------------
+
+fn main() with IO {
+    println("=== Sounio Debugging & Profiling Demo ===");
+    println("");
+
+    // CPU profiling demo
+    println("1. CPU-intensive computation (Fibonacci):");
+    let fib_result = fib(25);
+    println("   fib(25) = {}", fib_result);
+    println("");
+
+    // Memory profiling demo
+    println("2. Memory allocation demo:");
+    let items = allocate_many(1000);
+    println("   Allocated {} boxed integers", items.len());
+    println("");
+
+    // Tree operations demo
+    println("3. Binary search tree demo:");
+    var tree = TreeNode::new(50);
+    let values = [25, 75, 12, 37, 62, 87, 6, 18, 31, 43];
+    for &v in &values {
+        tree.insert(v);
+    }
+    println("   Tree size: {} nodes", tree.size());
+    println("   Contains 37: {}", tree.contains(37));
+    println("   Contains 99: {}", tree.contains(99));
+    println("");
+
+    // Tracing demo
+    println("4. Tracing demo:");
+    let data: Vec<int> = (1..=100).collect();
+    let sum = process_with_tracing(&data);
+    println("   Sum of 1..100 = {}", sum);
+    println("");
+
+    // Error codes demo
+    println("5. Error diagnostics:");
+    demonstrate_errors();
+    println("");
+
+    println("=== Demo Complete ===");
+    println("");
+    println("Try these commands:");
+    println("  dc profile examples/debug_profile_demo.d --profile-type cpu");
+    println("  dc profile examples/debug_profile_demo.d --profile-type memory");
+    println("  dc explain T0001");
+    println("  dc error-index --category type");
+}

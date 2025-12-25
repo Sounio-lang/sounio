@@ -1,0 +1,14 @@
+/mnt/e/workspace/demetrios/sounio-lang/sounio/compiler/target/release/deps/serde-0b3c57f6b664283e.d: /home/agourakis82/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.228/src/lib.rs /home/agourakis82/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.228/src/integer128.rs /home/agourakis82/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.228/src/private/mod.rs /home/agourakis82/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.228/src/private/de.rs /home/agourakis82/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.228/src/private/ser.rs /mnt/e/workspace/demetrios/sounio-lang/sounio/compiler/target/release/build/serde-af21d27f4d44b9be/out/private.rs
+
+/mnt/e/workspace/demetrios/sounio-lang/sounio/compiler/target/release/deps/libserde-0b3c57f6b664283e.rlib: /home/agourakis82/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.228/src/lib.rs /home/agourakis82/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.228/src/integer128.rs /home/agourakis82/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.228/src/private/mod.rs /home/agourakis82/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.228/src/private/de.rs /home/agourakis82/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.228/src/private/ser.rs /mnt/e/workspace/demetrios/sounio-lang/sounio/compiler/target/release/build/serde-af21d27f4d44b9be/out/private.rs
+
+/mnt/e/workspace/demetrios/sounio-lang/sounio/compiler/target/release/deps/libserde-0b3c57f6b664283e.rmeta: /home/agourakis82/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.228/src/lib.rs /home/agourakis82/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.228/src/integer128.rs /home/agourakis82/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.228/src/private/mod.rs /home/agourakis82/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.228/src/private/de.rs /home/agourakis82/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.228/src/private/ser.rs /mnt/e/workspace/demetrios/sounio-lang/sounio/compiler/target/release/build/serde-af21d27f4d44b9be/out/private.rs
+
+/home/agourakis82/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.228/src/lib.rs:
+/home/agourakis82/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.228/src/integer128.rs:
+/home/agourakis82/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.228/src/private/mod.rs:
+/home/agourakis82/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.228/src/private/de.rs:
+/home/agourakis82/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.228/src/private/ser.rs:
+/mnt/e/workspace/demetrios/sounio-lang/sounio/compiler/target/release/build/serde-af21d27f4d44b9be/out/private.rs:
+
+# env-dep:OUT_DIR=/mnt/e/workspace/demetrios/sounio-lang/sounio/compiler/target/release/build/serde-af21d27f4d44b9be/out

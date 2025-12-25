@@ -1,0 +1,341 @@
+// dense_layer.d - Simple dense (fully-connected) neural network layer
+//
+// Implements a basic dense layer: y = activation(W * x + b)
+// where:
+//   - x is the input vector (size N)
+//   - W is the weight matrix (M x N)
+//   - b is the bias vector (size M)
+//   - y is the output vector (size M)
+//
+// For simplicity, this implements a 4x4 dense layer (4 inputs -> 4 outputs)
+// using fixed-size arrays.
+
+// ============================================================================
+// MATH HELPERS
+// ============================================================================
+
+fn abs_val(x: f64) -> f64 {
+    if x < 0.0 {
+        return 0.0 - x
+    }
+    return x
+}
+
+fn exp_val(x: f64) -> f64 {
+    if x > 20.0 {
+        let half = exp_val(x / 2.0)
+        return half * half
+    }
+    if x < 0.0 - 20.0 {
+        return 1.0 / exp_val(0.0 - x)
+    }
+
+    let mut sum = 1.0
+    let mut term = 1.0
+    let mut count = 1
+    while count <= 20 {
+        term = term * x / count
+        sum = sum + term
+        count = count + 1
+    }
+    return sum
+}
+
+// ============================================================================
+// ACTIVATION FUNCTIONS
+// ============================================================================
+
+fn relu(x: f64) -> f64 {
+    if x > 0.0 {
+        return x
+    }
+    return 0.0
+}
+
+fn sigmoid(x: f64) -> f64 {
+    if x >= 0.0 {
+        return 1.0 / (1.0 + exp_val(0.0 - x))
+    } else {
+        let ex = exp_val(x)
+        return ex / (1.0 + ex)
+    }
+}
+
+fn tanh_val(x: f64) -> f64 {
+    if x >= 0.0 {
+        if x > 20.0 { return 1.0 }
+        let e2x = exp_val(2.0 * x)
+        return (e2x - 1.0) / (e2x + 1.0)
+    } else {
+        return 0.0 - tanh_val(0.0 - x)
+    }
+}
+
+fn identity(x: f64) -> f64 {
+    return x
+}
+
+// ============================================================================
+// VEC4 - 4-ELEMENT VECTOR
+// ============================================================================
+
+struct Vec4 {
+    e0: f64,
+    e1: f64,
+    e2: f64,
+    e3: f64
+}
+
+fn vec4_new(v0: f64, v1: f64, v2: f64, v3: f64) -> Vec4 {
+    return Vec4 { e0: v0, e1: v1, e2: v2, e3: v3 }
+}
+
+fn vec4_zero() -> Vec4 {
+    return Vec4 { e0: 0.0, e1: 0.0, e2: 0.0, e3: 0.0 }
+}
+
+fn vec4_ones() -> Vec4 {
+    return Vec4 { e0: 1.0, e1: 1.0, e2: 1.0, e3: 1.0 }
+}
+
+fn vec4_add(a: Vec4, b: Vec4) -> Vec4 {
+    return Vec4 { e0: a.e0 + b.e0, e1: a.e1 + b.e1, e2: a.e2 + b.e2, e3: a.e3 + b.e3 }
+}
+
+fn vec4_scale(vec: Vec4, scalar: f64) -> Vec4 {
+    return Vec4 { e0: vec.e0 * scalar, e1: vec.e1 * scalar, e2: vec.e2 * scalar, e3: vec.e3 * scalar }
+}
+
+fn vec4_dot(a: Vec4, b: Vec4) -> f64 {
+    return a.e0 * b.e0 + a.e1 * b.e1 + a.e2 * b.e2 + a.e3 * b.e3
+}
+
+fn vec4_apply_activation(vec: Vec4, activation: i64) -> Vec4 {
+    let ACT_RELU = 1
+    let ACT_SIGMOID = 2
+    let ACT_TANH = 3
+    let ACT_IDENTITY = 4
+
+    if activation == ACT_RELU {
+        return Vec4 { e0: relu(vec.e0), e1: relu(vec.e1), e2: relu(vec.e2), e3: relu(vec.e3) }
+    } else {
+        if activation == ACT_SIGMOID {
+            return Vec4 { e0: sigmoid(vec.e0), e1: sigmoid(vec.e1), e2: sigmoid(vec.e2), e3: sigmoid(vec.e3) }
+        } else {
+            if activation == ACT_TANH {
+                return Vec4 { e0: tanh_val(vec.e0), e1: tanh_val(vec.e1), e2: tanh_val(vec.e2), e3: tanh_val(vec.e3) }
+            } else {
+                return vec  // Identity or unknown
+            }
+        }
+    }
+}
+
+// ============================================================================
+// MAT4X4 - 4x4 WEIGHT MATRIX (row-major)
+// ============================================================================
+// Each row represents weights for one output neuron
+
+struct Mat4x4 {
+    r0c0: f64, r0c1: f64, r0c2: f64, r0c3: f64,
+    r1c0: f64, r1c1: f64, r1c2: f64, r1c3: f64,
+    r2c0: f64, r2c1: f64, r2c2: f64, r2c3: f64,
+    r3c0: f64, r3c1: f64, r3c2: f64, r3c3: f64
+}
+
+fn mat4x4_identity() -> Mat4x4 {
+    return Mat4x4 {
+        r0c0: 1.0, r0c1: 0.0, r0c2: 0.0, r0c3: 0.0,
+        r1c0: 0.0, r1c1: 1.0, r1c2: 0.0, r1c3: 0.0,
+        r2c0: 0.0, r2c1: 0.0, r2c2: 1.0, r2c3: 0.0,
+        r3c0: 0.0, r3c1: 0.0, r3c2: 0.0, r3c3: 1.0
+    }
+}
+
+fn mat4x4_zeros() -> Mat4x4 {
+    return Mat4x4 {
+        r0c0: 0.0, r0c1: 0.0, r0c2: 0.0, r0c3: 0.0,
+        r1c0: 0.0, r1c1: 0.0, r1c2: 0.0, r1c3: 0.0,
+        r2c0: 0.0, r2c1: 0.0, r2c2: 0.0, r2c3: 0.0,
+        r3c0: 0.0, r3c1: 0.0, r3c2: 0.0, r3c3: 0.0
+    }
+}
+
+// Matrix-vector multiplication: y = W * x
+fn mat4x4_mul_vec(weights: Mat4x4, input: Vec4) -> Vec4 {
+    let row0 = Vec4 { e0: weights.r0c0, e1: weights.r0c1, e2: weights.r0c2, e3: weights.r0c3 }
+    let row1 = Vec4 { e0: weights.r1c0, e1: weights.r1c1, e2: weights.r1c2, e3: weights.r1c3 }
+    let row2 = Vec4 { e0: weights.r2c0, e1: weights.r2c1, e2: weights.r2c2, e3: weights.r2c3 }
+    let row3 = Vec4 { e0: weights.r3c0, e1: weights.r3c1, e2: weights.r3c2, e3: weights.r3c3 }
+
+    return Vec4 {
+        e0: vec4_dot(row0, input),
+        e1: vec4_dot(row1, input),
+        e2: vec4_dot(row2, input),
+        e3: vec4_dot(row3, input)
+    }
+}
+
+// ============================================================================
+// DENSE LAYER
+// ============================================================================
+
+struct DenseLayer4 {
+    weights: Mat4x4,
+    bias: Vec4,
+    activation: i64  // 1=ReLU, 2=Sigmoid, 3=Tanh, 4=Identity
+}
+
+fn dense_layer4_new(weights: Mat4x4, bias: Vec4, activation: i64) -> DenseLayer4 {
+    return DenseLayer4 { weights: weights, bias: bias, activation: activation }
+}
+
+// Create a simple identity layer for testing
+fn dense_layer4_identity() -> DenseLayer4 {
+    return DenseLayer4 {
+        weights: mat4x4_identity(),
+        bias: vec4_zero(),
+        activation: 4  // Identity
+    }
+}
+
+// Forward pass: output = activation(W * input + bias)
+fn dense_layer4_forward(layer: DenseLayer4, input: Vec4) -> Vec4 {
+    let lin_out = mat4x4_mul_vec(layer.weights, input)
+    let with_bias = vec4_add(lin_out, layer.bias)
+    return vec4_apply_activation(with_bias, layer.activation)
+}
+
+// ============================================================================
+// SIMPLE 2-LAYER MLP (4->4->4)
+// ============================================================================
+
+struct MLP_4_4_4 {
+    layer1: DenseLayer4,
+    layer2: DenseLayer4
+}
+
+fn mlp_4_4_4_new(layer1: DenseLayer4, layer2: DenseLayer4) -> MLP_4_4_4 {
+    return MLP_4_4_4 { layer1: layer1, layer2: layer2 }
+}
+
+fn mlp_4_4_4_forward(model: MLP_4_4_4, input: Vec4) -> Vec4 {
+    let hidden = dense_layer4_forward(model.layer1, input)
+    let output = dense_layer4_forward(model.layer2, hidden)
+    return output
+}
+
+// ============================================================================
+// TESTS
+// ============================================================================
+
+fn main() -> i32 {
+    println("=== Sounio Dense Layer Test ===")
+    println("")
+
+    // Test 1: Identity layer (weights=I, bias=0, activation=identity)
+    println("Test 1: Identity layer")
+    let identity_layer = dense_layer4_identity()
+    let input1 = vec4_new(1.0, 2.0, 3.0, 4.0)
+    let output1 = dense_layer4_forward(identity_layer, input1)
+    println("  Input: [1.0, 2.0, 3.0, 4.0]")
+    println("  Output: ")
+    println(output1.e0)
+    println(output1.e1)
+    println(output1.e2)
+    println(output1.e3)
+    println("")
+
+    // Test 2: Simple weighted layer with bias and ReLU
+    println("Test 2: Weighted layer with bias and ReLU")
+    let weights2 = Mat4x4 {
+        r0c0: 0.5, r0c1: 0.5, r0c2: 0.0, r0c3: 0.0,
+        r1c0: 0.0, r1c1: 0.0, r1c2: 0.5, r1c3: 0.5,
+        r2c0: 0.25, r2c1: 0.25, r2c2: 0.25, r2c3: 0.25,
+        r3c0: 1.0, r3c1: 0.0, r3c2: 0.0, r3c3: 0.0
+    }
+    let bias2 = vec4_new(0.0, 0.0, 0.0, 0.0 - 1.0)
+    let layer2 = dense_layer4_new(weights2, bias2, 1)  // ReLU activation
+
+    let input2 = vec4_new(2.0, 2.0, 2.0, 2.0)
+    let output2 = dense_layer4_forward(layer2, input2)
+    println("  Input: [2.0, 2.0, 2.0, 2.0]")
+    println("  Output (with ReLU): ")
+    println(output2.e0)
+    println(output2.e1)
+    println(output2.e2)
+    println(output2.e3)
+    // Expected:
+    // Row 0: 0.5*2 + 0.5*2 = 2.0 -> ReLU -> 2.0
+    // Row 1: 0.5*2 + 0.5*2 = 2.0 -> ReLU -> 2.0
+    // Row 2: 0.25*2 + 0.25*2 + 0.25*2 + 0.25*2 = 2.0 -> ReLU -> 2.0
+    // Row 3: 1.0*2 + 0 - 1.0 = 1.0 -> ReLU -> 1.0
+    println("")
+
+    // Test 3: Sigmoid activation
+    println("Test 3: Sigmoid activation")
+    let weights3 = mat4x4_identity()
+    let bias3 = vec4_zero()
+    let layer3 = dense_layer4_new(weights3, bias3, 2)  // Sigmoid activation
+
+    let input3 = vec4_new(0.0, 1.0, 0.0 - 1.0, 2.0)
+    let output3 = dense_layer4_forward(layer3, input3)
+    println("  Input: [0.0, 1.0, -1.0, 2.0]")
+    println("  Output (sigmoid): ")
+    println(output3.e0)
+    println(output3.e1)
+    println(output3.e2)
+    println(output3.e3)
+    // Expected: sigmoid(0)=0.5, sigmoid(1)≈0.731, sigmoid(-1)≈0.269, sigmoid(2)≈0.881
+    println("")
+
+    // Test 4: 2-layer MLP
+    println("Test 4: 2-layer MLP (4->4->4)")
+    let mlp_layer1 = dense_layer4_new(mat4x4_identity(), vec4_zero(), 1)  // ReLU
+    let mlp_layer2 = dense_layer4_new(mat4x4_identity(), vec4_zero(), 4)  // Identity
+    let mlp_model = mlp_4_4_4_new(mlp_layer1, mlp_layer2)
+
+    let input4 = vec4_new(0.0 - 1.0, 2.0, 0.0 - 3.0, 4.0)
+    let output4 = mlp_4_4_4_forward(mlp_model, input4)
+    println("  Input: [-1.0, 2.0, -3.0, 4.0]")
+    println("  Output (after ReLU in layer1): ")
+    println(output4.e0)
+    println(output4.e1)
+    println(output4.e2)
+    println(output4.e3)
+    // Expected: ReLU([-1,2,-3,4]) = [0,2,0,4], then identity = [0,2,0,4]
+    println("")
+
+    // Verify Test 1: Identity should preserve input
+    let test1_err = abs_val(output1.e0 - 1.0) + abs_val(output1.e1 - 2.0)
+                   + abs_val(output1.e2 - 3.0) + abs_val(output1.e3 - 4.0)
+
+    // Verify Test 2: Expected [2.0, 2.0, 2.0, 1.0]
+    let test2_err = abs_val(output2.e0 - 2.0) + abs_val(output2.e1 - 2.0)
+                   + abs_val(output2.e2 - 2.0) + abs_val(output2.e3 - 1.0)
+
+    // Verify Test 3: sigmoid(0) = 0.5
+    let test3_err = abs_val(output3.e0 - 0.5)
+
+    // Verify Test 4: Expected [0, 2, 0, 4]
+    let test4_err = abs_val(output4.e0 - 0.0) + abs_val(output4.e1 - 2.0)
+                   + abs_val(output4.e2 - 0.0) + abs_val(output4.e3 - 4.0)
+
+    let total_err = test1_err + test2_err + test3_err + test4_err
+
+    if total_err < 0.01 {
+        println("TEST PASSED: All dense layer operations correct")
+        return 0
+    } else {
+        println("TEST FAILED: Dense layer operation errors")
+        println("  test1_err = ")
+        println(test1_err)
+        println("  test2_err = ")
+        println(test2_err)
+        println("  test3_err = ")
+        println(test3_err)
+        println("  test4_err = ")
+        println(test4_err)
+        return 1
+    }
+}

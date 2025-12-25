@@ -1,0 +1,293 @@
+// Metformin PBPK Simulation with Epistemic Types
+//
+// This example demonstrates what NO OTHER programming language can do:
+//
+// 1. Type-safe units (mg, L, h) - caught at compile time
+// 2. Epistemic confidence tracking - propagates through computation
+// 3. Ontology validation - ChEBI:6801 is verified as a valid drug
+// 4. FDA-ready provenance - complete audit trail
+//
+// Compare to:
+// - Python: No units, no confidence, runtime errors
+// - Julia: Units via Unitful.jl, but no epistemic tracking
+// - R/NONMEM: No type safety at all
+//
+// Developed solo in 2 months by the Sounio team
+// Inspired by Darwin PBPK Platform
+
+module metformin_simulation
+
+use pbpk::*
+use units::{mg, L, h, kg, cm, g, mol}
+
+fn main() with IO, Alloc {
+    println("=== Metformin PBPK Simulation ===")
+    println("Demonstrating Epistemic Computing in Sounio\n")
+
+    // =========================================================================
+    // 1. Define Drug with Ontology Validation
+    // =========================================================================
+
+    // ChEBI:6801 is validated at COMPILE TIME against the ontology
+    // If you write ChEBI:9999999, you get a compile error, not a runtime error
+    let metformin = Drug {
+        chebi_id: "CHEBI:6801",  // Validated!
+        name: "Metformin",
+        mw: 129.16 : g/mol,
+        logp: -1.43,
+        fu: Knowledge::new(
+            value: 1.0,  // Metformin is not protein-bound
+            confidence: 0.95,
+            provenance: Provenance::source("DrugBank:DB00331"),
+        ),
+    };
+
+    println("Drug: {} ({})", metformin.name, metformin.chebi_id)
+    println("  MW: {} g/mol", metformin.mw)
+    println("  Fu: {} (ε={:.2})", metformin.fu.value, metformin.fu.confidence)
+
+    // =========================================================================
+    // 2. Define PBPK Parameters with Confidence
+    // =========================================================================
+
+    // Each parameter carries its epistemic qualification
+    // The GNN model from Darwin predicted these with known confidence
+    let params = PBPKParams {
+        // Hepatic clearance from population model
+        cl_hepatic: Knowledge::new(
+            value: 35.0 : L/h,
+            confidence: 0.88,
+            provenance: Provenance::source("Darwin_GNN_v2.5"),
+        ),
+
+        // Renal clearance (metformin is renally excreted)
+        cl_renal: Knowledge::new(
+            value: 25.0 : L/h,
+            confidence: 0.92,
+            provenance: Provenance::source("Scheen_1996"),
+        ),
+
+        // Volume of distribution
+        vd: Knowledge::new(
+            value: 654.0 : L,  // Large Vd for metformin
+            confidence: 0.85,
+            provenance: Provenance::source("Graham_2011"),
+        ),
+
+        // Absorption rate
+        ka: Knowledge::new(
+            value: 2.1 : 1/h,
+            confidence: 0.78,
+            provenance: Provenance::source("PopPK_Meta"),
+        ),
+
+        // Partition coefficients (simplified)
+        kp: default_partition_coefficients(),
+    };
+
+    println("\nPBPK Parameters:")
+    println("  CL_hepatic: {:.1} L/h (ε={:.2})",
+        params.cl_hepatic.value, params.cl_hepatic.confidence)
+    println("  CL_renal: {:.1} L/h (ε={:.2})",
+        params.cl_renal.value, params.cl_renal.confidence)
+    println("  Vd: {:.1} L (ε={:.2})",
+        params.vd.value, params.vd.confidence)
+    println("  Ka: {:.2} 1/h (ε={:.2})",
+        params.ka.value, params.ka.confidence)
+
+    // =========================================================================
+    // 3. Define Patient
+    // =========================================================================
+
+    let patient = Patient {
+        id: "SUBJ001",
+        weight: 82.0 : kg,
+        height: 175.0 : cm,
+        age: 55 : years,
+        sex: Sex::Male,
+        genotype: Some(Genotype {
+            cyp2d6: CYP2D6Status::EM,  // Extensive metabolizer
+            cyp3a4: CYP3A4Status::Normal,
+        }),
+    };
+
+    println("\nPatient: {}", patient.id)
+    println("  Weight: {} kg, Height: {} cm", patient.weight, patient.height)
+    println("  Age: {} years, Sex: {:?}", patient.age, patient.sex)
+
+    // =========================================================================
+    // 4. Run Simulation with Epistemic Tracking
+    // =========================================================================
+
+    println("\n--- Running 24h Simulation ---")
+
+    let dose = 500.0 : mg;  // Standard metformin dose
+    let duration = 24.0 : h;
+    let dt = 0.1 : h;
+
+    // The simulation PROPAGATES confidence through all computations
+    // If any parameter has low confidence, the output reflects this
+    let result = simulate(
+        &metformin,
+        &params,
+        &patient,
+        dose,
+        duration,
+        dt,
+    );
+
+    println("\nSimulation completed!")
+    println("  Time points: {}", result.times.len())
+    println("  Overall confidence: {:.2}", result.confidence)
+    println("  Provenance: {}", result.provenance.to_audit_trail())
+
+    // =========================================================================
+    // 5. Extract Key PK Metrics
+    // =========================================================================
+
+    // Get plasma concentrations (index 0 = blood)
+    let plasma_conc: Vec<Knowledge[mg/L]> = result.concentrations
+        .iter()
+        .map(|c| c[0])  // Blood compartment
+        .collect();
+
+    // Find Cmax and Tmax
+    let (cmax_idx, cmax) = plasma_conc.iter()
+        .enumerate()
+        .max_by(|a, b| a.1.value.partial_cmp(&b.1.value).unwrap())
+        .unwrap();
+    let tmax = result.times[cmax_idx];
+
+    println("\nPK Metrics (with epistemic confidence):")
+    println("  Cmax: {:.2} mg/L (ε={:.2})", cmax.value, cmax.confidence)
+    println("  Tmax: {:.1} h", tmax)
+
+    // AUC via trapezoidal rule
+    let auc = calculate_auc(&result.times, &plasma_conc);
+    println("  AUC0-24: {:.1} mg·h/L (ε={:.2})", auc.value, auc.confidence)
+
+    // =========================================================================
+    // 6. FDA Validation (Requires ε >= 0.80)
+    // =========================================================================
+
+    println("\n--- FDA Validation Check ---")
+
+    // Simulated observed data (from clinical study)
+    let observed_times = [1.0, 2.0, 4.0, 8.0, 12.0, 24.0] : [h; 6];
+    let observed_conc = [0.8, 1.2, 0.9, 0.5, 0.3, 0.1] : [mg/L; 6];
+
+    // Get predicted at observed times
+    let predicted: Vec<Knowledge[mg/L, ε >= 0.80]> = observed_times.iter()
+        .map(|t| interpolate_concentration(&result, *t))
+        .collect();
+
+    // This ONLY compiles if predictions have ε >= 0.80
+    // If confidence is too low, you get a COMPILE ERROR
+    match validate_for_fda(&predicted, &observed_conc) {
+        Ok(metrics) => {
+            println("  GMFE: {:.2}", metrics.gmfe)
+            println("  Within 2-fold: {:.1}%", metrics.within_2fold * 100.0)
+            println("  R²: {:.3}", metrics.r_squared)
+            println("  RMSE: {:.3} mg/L", metrics.rmse)
+
+            if metrics.gmfe <= 2.0 && metrics.within_2fold >= 0.80 {
+                println("\n  ✓ PASSES FDA PBPK Guidance criteria")
+            } else {
+                println("\n  ✗ Does not meet FDA criteria")
+            }
+        }
+        Err(ValidationError::InsufficientConfidence { index, required, actual }) => {
+            println("  ✗ Prediction {} has insufficient confidence", index)
+            println("    Required: ε >= {:.2}, Actual: ε = {:.2}", required, actual)
+            println("    Cannot submit to FDA without higher confidence data")
+        }
+        Err(e) => {
+            println("  ✗ Validation error: {:?}", e)
+        }
+    }
+
+    // =========================================================================
+    // 7. Export Provenance for Audit
+    // =========================================================================
+
+    println("\n--- Provenance Audit Trail ---")
+    println("{}", result.provenance.to_audit_trail())
+
+    println("\n=== Simulation Complete ===")
+}
+
+// Helper functions
+
+fn default_partition_coefficients() -> [Knowledge[f64, ε >= 0.60]; 14] {
+    // Simplified Kp values for metformin (hydrophilic drug)
+    let kps = [
+        1.0,   // blood
+        2.5,   // liver (OCT1 uptake)
+        3.0,   // kidney (accumulates)
+        0.5,   // brain (poor BBB penetration)
+        1.2,   // heart
+        1.0,   // lung
+        1.5,   // muscle
+        0.3,   // adipose (low lipophilicity)
+        2.0,   // gut
+        0.8,   // skin
+        0.5,   // bone
+        1.5,   // spleen
+        1.8,   // pancreas (target organ!)
+        1.0,   // other
+    ];
+
+    kps.map(|kp| Knowledge::new(
+        value: kp,
+        confidence: 0.70,
+        provenance: Provenance::source("Rodgers_Rowland_2006"),
+    ))
+}
+
+fn calculate_auc(times: &[h], conc: &[Knowledge[mg/L]]) -> Knowledge[mg*h/L] {
+    let mut auc = 0.0 : mg*h/L;
+    let mut min_conf = 1.0;
+
+    for i in 1..times.len() {
+        let dt = times[i] - times[i-1];
+        let avg_conc = (conc[i].value + conc[i-1].value) / 2.0;
+        auc += avg_conc * dt;
+        min_conf = min_conf.min(conc[i].confidence);
+    }
+
+    Knowledge::new(
+        value: auc,
+        confidence: min_conf * 0.98,  // Integration slightly degrades confidence
+        provenance: Provenance::derived("trapezoidal_auc"),
+    )
+}
+
+fn interpolate_concentration(
+    result: &SimulationResult,
+    time: h
+) -> Knowledge[mg/L, ε >= 0.80] {
+    // Find bracketing time points
+    let idx = result.times.iter()
+        .position(|t| *t >= time)
+        .unwrap_or(result.times.len() - 1);
+
+    if idx == 0 {
+        return result.concentrations[0][0];
+    }
+
+    let t0 = result.times[idx - 1];
+    let t1 = result.times[idx];
+    let c0 = result.concentrations[idx - 1][0];
+    let c1 = result.concentrations[idx][0];
+
+    // Linear interpolation
+    let frac = (time - t0) / (t1 - t0);
+    let value = c0.value + frac * (c1.value - c0.value);
+    let conf = c0.confidence.min(c1.confidence) * 0.99;  // Interpolation degrades
+
+    Knowledge::new(
+        value: value,
+        confidence: conf,
+        provenance: Provenance::derived("linear_interpolation"),
+    )
+}

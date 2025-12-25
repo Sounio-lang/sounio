@@ -1,12 +1,12 @@
 # Epistemic Computing Semantics
 
-This document defines the formal semantics and invariants for Demetrios epistemic types. These invariants are non-negotiable and enforced by the type system and runtime.
+This document defines the formal semantics and invariants for Sounio epistemic types. These invariants are non-negotiable and enforced by the type system and runtime.
 
 ---
 
 ## Core Principle: Two Orthogonal Channels
 
-Epistemic computing in Demetrios maintains **two orthogonal channels** that must never be conflated:
+Epistemic computing in Sounio maintains **two orthogonal channels** that must never be conflated:
 
 ### Channel A: Uncertainty of the Value (Metrology)
 

@@ -1,0 +1,88 @@
+// GPU Kernel Example in Sounio
+module gpu_example
+
+// Vector addition kernel
+kernel fn vector_add(
+    a: &[f32],
+    b: &[f32],
+    c: &mut [f32],
+    n: u32
+) {
+    let i = gpu.thread_id.x + gpu.block_id.x * gpu.block_dim.x
+
+    if i < n {
+        c[i] = a[i] + b[i]
+    }
+}
+
+// Matrix multiplication kernel
+kernel fn matmul(
+    a: &[f32],
+    b: &[f32],
+    c: &mut [f32],
+    m: u32,
+    n: u32,
+    k: u32
+) {
+    let row = gpu.thread_id.y + gpu.block_id.y * gpu.block_dim.y
+    let col = gpu.thread_id.x + gpu.block_id.x * gpu.block_dim.x
+
+    if row < m && col < n {
+        let mut sum = 0.0<f32>
+        for i in 0..k {
+            sum += a[row * k + i] * b[i * n + col]
+        }
+        c[row * n + col] = sum
+    }
+}
+
+// Reduction kernel using shared memory
+kernel fn reduce_sum(
+    input: &[f32],
+    output: &mut [f32],
+    n: u32
+) {
+    shared sdata: [f32; 256]
+
+    let tid = gpu.thread_id.x
+    let i = gpu.block_id.x * gpu.block_dim.x + tid
+
+    // Load into shared memory
+    sdata[tid] = if i < n { input[i] } else { 0.0 }
+    gpu.sync()
+
+    // Reduction in shared memory
+    let mut s = gpu.block_dim.x / 2
+    while s > 0 {
+        if tid < s {
+            sdata[tid] += sdata[tid + s]
+        }
+        gpu.sync()
+        s /= 2
+    }
+
+    // Write result
+    if tid == 0 {
+        output[gpu.block_id.x] = sdata[0]
+    }
+}
+
+fn main() with GPU, Alloc {
+    let n = 1024<u32>
+
+    // Allocate GPU memory
+    let a = gpu.alloc<f32>(n)
+    let b = gpu.alloc<f32>(n)
+    let c = gpu.alloc<f32>(n)
+
+    // Initialize data (would use IO in real code)
+
+    // Launch kernel
+    let grid = (n / 256, 1, 1)
+    let block = (256, 1, 1)
+
+    perform GPU.launch(vector_add, grid, block)(a, b, c, n)
+    perform GPU.sync()
+
+    // Result is now in c
+}

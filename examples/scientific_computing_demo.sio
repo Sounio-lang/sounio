@@ -1,0 +1,293 @@
+//! Comprehensive scientific computing demonstration
+//! 
+//! This example showcases the integration of all major scientific computing
+//! capabilities in the Sounio language, including:
+//! - Linear algebra with BLAS/LAPACK
+//! - Numerical methods (ODE, optimization, integration)
+//! - Automatic differentiation
+//! - Probabilistic programming and MCMC
+//! - Pharmacokinetic modeling
+//! - Interoperability with NumPy/R
+
+use linalg::{Matrix, Vector}
+use linalg::lapack::{svd, eig}
+use numerics::ode::{odeint, ODESystem}
+use numerics::optimize::{BFGS}
+use autodiff::reverse::{Var, gradient}
+use prob::distributions::{Normal, MultivariateNormal}
+use prob::mcmc::{MetropolisHastings}
+use prob::vi::{ADVI, MeanFieldGaussian}
+use pkpd::compartment::{PKParameters, simulate_pk, DoseEvent}
+use pkpd::population::{PopulationPKModel, Individual, Observation}
+use pkpd::nca::{nca_analysis}
+use units::{mg, L, h, mg_L, L_h}
+
+/// Comprehensive drug development pipeline demonstration
+fn main() with IO, Alloc, Prob {
+    println!("🧬 Sounio Scientific Computing Demo");
+    println!("=====================================");
+    
+    // 1. Linear Algebra Foundation
+    println!("\n1. Linear Algebra Operations");
+    demonstrate_linear_algebra();
+    
+    // 2. Pharmacokinetic Modeling
+    println!("\n2. Pharmacokinetic Modeling");
+    demonstrate_pk_modeling();
+    
+    // 3. Population Analysis with MCMC
+    println!("\n3. Population PK Analysis");
+    demonstrate_population_pk();
+    
+    // 4. Optimization and Parameter Estimation
+    println!("\n4. Parameter Estimation");
+    demonstrate_parameter_estimation();
+    
+    // 5. Bayesian Analysis
+    println!("\n5. Bayesian Analysis");
+    demonstrate_bayesian_analysis();
+    
+    // 6. Non-compartmental Analysis
+    println!("\n6. Non-compartmental Analysis");
+    demonstrate_nca();
+    
+    println!("\n✅ Scientific computing demonstration completed!");
+}
+
+/// Demonstrate linear algebra capabilities
+fn demonstrate_linear_algebra() with IO {
+    // Create a covariance matrix for multivariate analysis
+    let cov = Matrix::from_nested(&[
+        [4.0, 2.0, 1.0],
+        [2.0, 3.0, 0.5],
+        [1.0, 0.5, 2.0],
+    ]);
+    
+    println!("Original covariance matrix:");
+    print_matrix(&cov);
+    
+    // Eigenvalue decomposition for principal component analysis
+    let eig_result = eig(&cov).unwrap();
+    println!("Eigenvalues: {:?}", eig_result.values_real);
+    
+    // SVD for dimensionality reduction
+    let svd_result = svd(&cov).unwrap();
+    println!("Singular values: {:?}", svd_result.s);
+    
+    // Condition number analysis
+    let cond_num = linalg::cond(&cov).unwrap();
+    println!("Condition number: {:.2}", cond_num);
+}
+
+/// Demonstrate pharmacokinetic modeling
+fn demonstrate_pk_modeling() with IO, Alloc {
+    // Define a 2-compartment PK model
+    let pk_params = PKParameters::two_compartment(
+        10.0: L_h,  // Clearance
+        50.0: L,    // Central volume
+        100.0: L,   // Peripheral volume
+        5.0: L_h    // Intercompartmental clearance
+    );
+    
+    // Multiple dosing regimen
+    let doses = vec![
+        DoseEvent::iv_bolus(0.0: h, 100.0: mg),
+        DoseEvent::iv_bolus(12.0: h, 100.0: mg),
+        DoseEvent::iv_bolus(24.0: h, 100.0: mg),
+    ];
+    
+    // Simulation time points
+    let times: Vec<f64> = (0..=48).map(|t| t as f64).collect();
+    
+    // Simulate PK profile
+    let pk_result = simulate_pk(&pk_params, &doses, &times);
+    
+    println!("PK Simulation Results:");
+    println!("Cmax: {:.2} mg/L", pk_result.cmax);
+    println!("Tmax: {:.1} h", pk_result.tmax);
+    println!("AUC(0-48h): {:.1} mg·h/L", pk_result.auc[pk_result.auc.len()-1]);
+    
+    // Calculate derived parameters
+    let half_life = pk_params.half_life();
+    println!("Half-life: {:.1} h", half_life);
+}
+
+/// Demonstrate population PK analysis
+fn demonstrate_population_pk() with IO, Alloc, Prob {
+    // Create a population PK model
+    let mut pop_model = PopulationPKModel::new(
+        4, // CL, V1, V2, Q
+        2, // Weight, Age
+        vec!["CL".to_string(), "V1".to_string(), "V2".to_string(), "Q".to_string()],
+        vec!["Weight".to_string(), "Age".to_string()],
+    );
+    
+    // Set typical parameter values
+    pop_model.theta = Vector::from_slice(&[10.0, 50.0, 100.0, 5.0]);
+    
+    // Set between-subject variability (30% CV)
+    pop_model.omega = Matrix::eye(4) * 0.09; // (0.3)^2
+    
+    // Create synthetic population data
+    let mut individuals = Vec::new();
+    let mut rng = rand::thread_rng();
+    
+    for i in 0..10 {
+        let weight = 70.0 + rng.normal(0.0, 10.0);
+        let age = 40.0 + rng.normal(0.0, 15.0);
+        
+        let individual = Individual {
+            id: format!("Subject_{}", i+1),
+            covariates: Vector::from_slice(&[weight, age]),
+            doses: vec![DoseEvent::iv_bolus(0.0: h, 100.0: mg)],
+            observations: vec![
+                Observation {
+                    time: 1.0: h,
+                    concentration: 1.8: mg_L + rng.normal(0.0, 0.1),
+                    compartment: 1,
+                    error: Some(0.1),
+                    bloq: false,
+                },
+                Observation {
+                    time: 4.0: h,
+                    concentration: 1.2: mg_L + rng.normal(0.0, 0.1),
+                    compartment: 1,
+                    error: Some(0.1),
+                    bloq: false,
+                },
+            ],
+            pk_params: None,
+        };
+        
+        individuals.push(individual);
+    }
+    
+    println!("Created population with {} individuals", individuals.len());
+    
+    // Fit population model using MCMC
+    let mcmc_samples = pop_model.fit_mcmc(&individuals, 1000, &!rng);
+    
+    println!("MCMC Results:");
+    println!("Acceptance rate: {:.1}%", mcmc_samples.acceptance_rate * 100.0);
+    println!("Number of samples: {}", mcmc_samples.n_samples);
+}
+
+/// Demonstrate parameter estimation using optimization
+fn demonstrate_parameter_estimation() with IO, Alloc {
+    // Define a pharmacokinetic model for parameter estimation
+    let observed_data = vec![
+        (0.0, 0.0),   // (time, concentration)
+        (1.0, 1.8),
+        (2.0, 1.5),
+        (4.0, 1.2),
+        (8.0, 0.8),
+        (12.0, 0.5),
+        (24.0, 0.1),
+    ];
+    
+    // Objective function: sum of squared residuals
+    let objective = |params: &Vector<Var>| -> Var {
+        let cl = params[0];
+        let v = params[1];
+        let ke = cl / v;
+        
+        let mut sse = Var::new(0.0);
+        
+        for &(time, obs_conc) in &observed_data {
+            if time > 0.0 {
+                // 1-compartment model: C(t) = (Dose/V) * exp(-ke*t)
+                let pred_conc = (Var::new(100.0) / v) * (-ke * Var::new(time)).exp();
+                let residual = pred_conc - Var::new(obs_conc);
+                sse = sse + residual * residual;
+            }
+        }
+        
+        sse
+    };
+    
+    // Initial parameter estimates
+    let x0 = Vector::from_slice(&[8.0, 40.0]); // CL, V
+    
+    // Optimize using BFGS
+    let optimizer = BFGS::new();
+    let result = optimizer.minimize(objective, &x0);
+    
+    if result.success {
+        println!("Parameter Estimation Results:");
+        println!("Clearance: {:.2} L/h", result.x[0]);
+        println!("Volume: {:.1} L", result.x[1]);
+        println!("Final SSE: {:.4}", result.fun);
+        println!("Gradient norm: {:.2e}", result.grad.norm());
+    } else {
+        println!("Optimization failed: {}", result.message);
+    }
+}
+
+/// Demonstrate Bayesian analysis with variational inference
+fn demonstrate_bayesian_analysis() with IO, Alloc, Prob {
+    // Define a Bayesian pharmacokinetic model
+    let log_posterior = |params: &Vector<Var>| -> Var {
+        let cl = params[0];
+        let v = params[1];
+        let sigma = params[2];
+        
+        // Prior distributions (log-normal for positive parameters)
+        let log_prior = Normal::new(2.3, 0.5).log_pdf(cl.value()) +  // CL ~ LogNormal(10, CV=50%)
+                       Normal::new(3.9, 0.3).log_pdf(v.value()) +   // V ~ LogNormal(50, CV=30%)
+                       Normal::new(-2.3, 0.5).log_pdf(sigma.value()); // sigma ~ LogNormal(0.1, CV=50%)
+        
+        // Likelihood (simplified)
+        let mut log_likelihood = Var::new(0.0);
+        // ... likelihood calculation would go here
+        
+        log_likelihood + Var::new(log_prior)
+    };
+    
+    // Variational inference
+    let mut variational = MeanFieldGaussian::new(3);
+    let advi = ADVI::new();
+    let mut rng = rand::thread_rng();
+    
+    let vi_result = advi.fit(log_posterior, variational, &!rng);
+    
+    println!("Variational Inference Results:");
+    println!("Final ELBO: {:.2}", vi_result.final_elbo);
+    println!("Converged: {}", vi_result.converged);
+    println!("Iterations: {}", vi_result.n_iter);
+}
+
+/// Demonstrate non-compartmental analysis
+fn demonstrate_nca() with IO {
+    // Synthetic concentration-time data
+    let times = Vector::from_slice(&[0.0, 0.5, 1.0, 2.0, 4.0, 8.0, 12.0, 24.0]);
+    let concentrations = Vector::from_slice(&[0.0, 1.8, 1.6, 1.3, 0.9, 0.4, 0.2, 0.05]);
+    
+    // Perform NCA
+    let nca_result = nca_analysis(&times, &concentrations, 100.0: mg, 0.0: h, 3);
+    
+    println!("Non-compartmental Analysis Results:");
+    println!("Cmax: {:.2} mg/L", nca_result.cmax);
+    println!("Tmax: {:.1} h", nca_result.tmax);
+    println!("AUC(0-last): {:.1} mg·h/L", nca_result.auc_last);
+    println!("AUC(0-∞): {:.1} mg·h/L", nca_result.auc_inf);
+    println!("Half-life: {:.1} h", nca_result.t_half);
+    println!("Clearance: {:.1} L/h", nca_result.cl);
+    println!("Volume (Vz): {:.1} L", nca_result.vz);
+    println!("MRT: {:.1} h", nca_result.mrt);
+    println!("% AUC extrapolated: {:.1}%", nca_result.auc_extrap_percent);
+    println!("R²: {:.3}", nca_result.r_squared);
+}
+
+/// Helper function to print matrices
+fn print_matrix(matrix: &Matrix<f64>) {
+    for i in 0..matrix.nrows() {
+        print!("  [");
+        for j in 0..matrix.ncols() {
+            print!("{:8.3}", matrix[(i, j)]);
+            if j < matrix.ncols() - 1 {
+                print!(", ");
+            }
+        }
+        println!("]");
+    }
+}

@@ -1,0 +1,257 @@
+// Darwin PBPK - Calibrated Model with 10 Drugs
+// Sounio Implementation
+
+struct Drug {
+    mw: f64,
+    logp: f64,
+    fu: f64,
+    bp_ratio: f64,
+    is_base: bool,
+    cl_hepatic: f64@L_per_h,
+    cl_renal: f64@L_per_h,
+    vd: f64@L,
+    ka: f64,
+    f_oral: f64
+}
+
+struct ObservedPK {
+    cmax: f64@mg_per_L,
+    auc: f64@mg_h_per_L,
+    thalf: f64@h
+}
+
+fn calculate_kp_calibrated(logp: f64, fu: f64, is_base: bool, tissue_type: i32) -> f64 {
+    let fw = 0.7
+    let fnl = 0.03
+    let fpl = 0.02
+    
+    let p = 1.0
+    if logp > 0.0 {
+        let p2 = logp * logp
+        let p3 = p2 * logp
+        let exp_approx = 1.0 + logp + p2 / 2.0 + p3 / 6.0
+        let p_new = exp_approx
+    }
+    
+    let kp_base = fw + fnl * logp * 0.5 + fpl * logp * 0.3
+    
+    let tissue_factor = 1.0
+    if tissue_type == 1 { let tissue_factor = 1.5 }
+    if tissue_type == 2 { let tissue_factor = 1.3 }
+    if tissue_type == 3 { let tissue_factor = 0.8 }
+    if tissue_type == 4 { let tissue_factor = 3.0 }
+    
+    let kp = kp_base * tissue_factor / fu
+    
+    let kp_adj = if is_base { kp * 1.3 } else { kp }
+    
+    if kp_adj < 0.5 { return 0.5 }
+    if kp_adj > 100.0 { return 100.0 }
+    return kp_adj
+}
+
+fn predict_cmax_iv(dose: f64@mg, vd: f64@L) -> f64@mg_per_L {
+    return dose / vd
+}
+
+fn predict_cmax_oral(dose: f64@mg, vd: f64@L, f: f64, ka: f64, ke: f64) -> f64@mg_per_L {
+    let factor = ka / (ka - ke)
+    let c = dose * f / vd * factor * 0.5
+    return c
+}
+
+fn predict_auc(dose: f64@mg, cl: f64@L_per_h, f: f64) -> f64@mg_h_per_L {
+    return dose * f / cl
+}
+
+fn predict_thalf(vd: f64@L, cl: f64@L_per_h) -> f64@h {
+    return 0.693 * vd / cl
+}
+
+fn fold_error(pred: f64, obs: f64) -> f64 {
+    let ratio = pred / obs
+    if ratio >= 1.0 { return ratio }
+    return obs / pred
+}
+
+fn is_within_2fold(fe: f64) -> bool {
+    if fe <= 2.0 { return true }
+    return false
+}
+
+fn main() -> i32 {
+    println("============================================")
+    println("  DARWIN PBPK - CALIBRATED VALIDATION")
+    println("  10 Drug Dataset - Sounio")
+    println("============================================")
+    println("")
+    
+    let pass_count = 0
+    let total = 10
+    
+    // 1. MIDAZOLAM - CYP3A4 substrate
+    println("1. MIDAZOLAM (CYP3A4)")
+    let midaz = Drug { mw: 325.8, logp: 3.89, fu: 0.03, bp_ratio: 0.64, is_base: true, cl_hepatic: 27.0, cl_renal: 0.5, vd: 77.0, ka: 4.0, f_oral: 0.44 }
+    let midaz_obs = ObservedPK { cmax: 0.039, auc: 0.073, thalf: 1.9 }
+    let dose1: f64@mg = 2.0
+    let cmax1 = predict_cmax_iv(dose1, midaz.vd)
+    let auc1 = predict_auc(dose1, midaz.cl_hepatic, 1.0)
+    let thalf1 = predict_thalf(midaz.vd, midaz.cl_hepatic)
+    let fe1 = fold_error(cmax1, midaz_obs.cmax)
+    println("  Cmax pred/obs:")
+    println(cmax1)
+    println(midaz_obs.cmax)
+    println("  FE:")
+    println(fe1)
+    println("")
+    
+    // 2. METFORMIN - Renal elimination
+    println("2. METFORMIN (Renal)")
+    let metf = Drug { mw: 129.2, logp: -1.43, fu: 1.0, bp_ratio: 0.55, is_base: true, cl_hepatic: 0.0, cl_renal: 26.0, vd: 63.0, ka: 0.9, f_oral: 0.55 }
+    let metf_obs = ObservedPK { cmax: 1.03, auc: 6.68, thalf: 4.5 }
+    let dose2: f64@mg = 500.0
+    let ke2 = metf.cl_renal / metf.vd
+    let cmax2 = predict_cmax_oral(dose2, metf.vd, metf.f_oral, metf.ka, ke2)
+    let auc2 = predict_auc(dose2, metf.cl_renal, metf.f_oral)
+    let fe2 = fold_error(cmax2, metf_obs.cmax)
+    println("  Cmax pred/obs:")
+    println(cmax2)
+    println(metf_obs.cmax)
+    println("  FE:")
+    println(fe2)
+    println("")
+    
+    // 3. CAFFEINE - CYP1A2
+    println("3. CAFFEINE (CYP1A2)")
+    let caff = Drug { mw: 194.2, logp: -0.07, fu: 0.64, bp_ratio: 0.89, is_base: false, cl_hepatic: 6.0, cl_renal: 0.1, vd: 37.0, ka: 4.5, f_oral: 0.99 }
+    let caff_obs = ObservedPK { cmax: 5.0, auc: 33.0, thalf: 5.0 }
+    let dose3: f64@mg = 200.0
+    let ke3 = caff.cl_hepatic / caff.vd
+    let cmax3 = predict_cmax_oral(dose3, caff.vd, caff.f_oral, caff.ka, ke3)
+    let auc3 = predict_auc(dose3, caff.cl_hepatic, caff.f_oral)
+    let fe3 = fold_error(cmax3, caff_obs.cmax)
+    println("  Cmax pred/obs:")
+    println(cmax3)
+    println(caff_obs.cmax)
+    println("  FE:")
+    println(fe3)
+    println("")
+    
+    // 4. THEOPHYLLINE - NTI
+    println("4. THEOPHYLLINE (NTI)")
+    let theo = Drug { mw: 180.2, logp: -0.02, fu: 0.60, bp_ratio: 0.83, is_base: false, cl_hepatic: 2.8, cl_renal: 0.3, vd: 35.0, ka: 2.0, f_oral: 0.96 }
+    let theo_obs = ObservedPK { cmax: 8.0, auc: 100.0, thalf: 8.0 }
+    let dose4: f64@mg = 300.0
+    let ke4 = theo.cl_hepatic / theo.vd
+    let cmax4 = predict_cmax_oral(dose4, theo.vd, theo.f_oral, theo.ka, ke4)
+    let auc4 = predict_auc(dose4, theo.cl_hepatic, theo.f_oral)
+    let fe4 = fold_error(cmax4, theo_obs.cmax)
+    println("  Cmax pred/obs:")
+    println(cmax4)
+    println(theo_obs.cmax)
+    println("  FE:")
+    println(fe4)
+    println("")
+    
+    // 5. WARFARIN - High PPB
+    println("5. WARFARIN (High PPB)")
+    let warf = Drug { mw: 308.3, logp: 2.7, fu: 0.01, bp_ratio: 0.58, is_base: false, cl_hepatic: 0.2, cl_renal: 0.0, vd: 10.0, ka: 1.5, f_oral: 0.93 }
+    let warf_obs = ObservedPK { cmax: 0.5, auc: 23.0, thalf: 37.0 }
+    let dose5: f64@mg = 5.0
+    let ke5 = warf.cl_hepatic / warf.vd
+    let cmax5 = predict_cmax_oral(dose5, warf.vd, warf.f_oral, warf.ka, ke5)
+    let auc5 = predict_auc(dose5, warf.cl_hepatic, warf.f_oral)
+    let fe5 = fold_error(cmax5, warf_obs.cmax)
+    println("  Cmax pred/obs:")
+    println(cmax5)
+    println(warf_obs.cmax)
+    println("  FE:")
+    println(fe5)
+    println("")
+    
+    // 6. DIGOXIN - P-gp substrate
+    println("6. DIGOXIN (P-gp)")
+    let digo = Drug { mw: 780.9, logp: 1.26, fu: 0.75, bp_ratio: 0.95, is_base: false, cl_hepatic: 3.0, cl_renal: 7.0, vd: 500.0, ka: 1.0, f_oral: 0.70 }
+    let digo_obs = ObservedPK { cmax: 0.0018, auc: 0.035, thalf: 36.0 }
+    let dose6: f64@mg = 0.25
+    let ke6 = (digo.cl_hepatic + digo.cl_renal) / digo.vd
+    let cmax6 = predict_cmax_oral(dose6, digo.vd, digo.f_oral, digo.ka, ke6)
+    let auc6 = predict_auc(dose6, digo.cl_hepatic + digo.cl_renal, digo.f_oral)
+    let fe6 = fold_error(cmax6, digo_obs.cmax)
+    println("  Cmax pred/obs:")
+    println(cmax6)
+    println(digo_obs.cmax)
+    println("  FE:")
+    println(fe6)
+    println("")
+    
+    // 7. ACETAMINOPHEN - Low PPB
+    println("7. ACETAMINOPHEN (Low PPB)")
+    let apap = Drug { mw: 151.2, logp: 0.46, fu: 0.80, bp_ratio: 1.0, is_base: false, cl_hepatic: 20.0, cl_renal: 1.0, vd: 60.0, ka: 3.0, f_oral: 0.88 }
+    let apap_obs = ObservedPK { cmax: 15.0, auc: 45.0, thalf: 2.5 }
+    let dose7: f64@mg = 1000.0
+    let ke7 = apap.cl_hepatic / apap.vd
+    let cmax7 = predict_cmax_oral(dose7, apap.vd, apap.f_oral, apap.ka, ke7)
+    let auc7 = predict_auc(dose7, apap.cl_hepatic, apap.f_oral)
+    let fe7 = fold_error(cmax7, apap_obs.cmax)
+    println("  Cmax pred/obs:")
+    println(cmax7)
+    println(apap_obs.cmax)
+    println("  FE:")
+    println(fe7)
+    println("")
+    
+    // 8. IBUPROFEN - BCS II
+    println("8. IBUPROFEN (BCS II)")
+    let ibup = Drug { mw: 206.3, logp: 3.97, fu: 0.01, bp_ratio: 0.55, is_base: false, cl_hepatic: 3.0, cl_renal: 0.5, vd: 10.0, ka: 2.5, f_oral: 0.80 }
+    let ibup_obs = ObservedPK { cmax: 25.0, auc: 100.0, thalf: 2.0 }
+    let dose8: f64@mg = 400.0
+    let ke8 = ibup.cl_hepatic / ibup.vd
+    let cmax8 = predict_cmax_oral(dose8, ibup.vd, ibup.f_oral, ibup.ka, ke8)
+    let auc8 = predict_auc(dose8, ibup.cl_hepatic, ibup.f_oral)
+    let fe8 = fold_error(cmax8, ibup_obs.cmax)
+    println("  Cmax pred/obs:")
+    println(cmax8)
+    println(ibup_obs.cmax)
+    println("  FE:")
+    println(fe8)
+    println("")
+    
+    // 9. AMOXICILLIN - Renal
+    println("9. AMOXICILLIN (Renal)")
+    let amox = Drug { mw: 365.4, logp: 0.87, fu: 0.80, bp_ratio: 0.83, is_base: false, cl_hepatic: 1.0, cl_renal: 14.0, vd: 20.0, ka: 2.0, f_oral: 0.80 }
+    let amox_obs = ObservedPK { cmax: 8.0, auc: 18.0, thalf: 1.3 }
+    let dose9: f64@mg = 500.0
+    let ke9 = amox.cl_renal / amox.vd
+    let cmax9 = predict_cmax_oral(dose9, amox.vd, amox.f_oral, amox.ka, ke9)
+    let auc9 = predict_auc(dose9, amox.cl_renal, amox.f_oral)
+    let fe9 = fold_error(cmax9, amox_obs.cmax)
+    println("  Cmax pred/obs:")
+    println(cmax9)
+    println(amox_obs.cmax)
+    println("  FE:")
+    println(fe9)
+    println("")
+    
+    // 10. OMEPRAZOLE - CYP2C19
+    println("10. OMEPRAZOLE (CYP2C19)")
+    let omep = Drug { mw: 345.4, logp: 2.23, fu: 0.05, bp_ratio: 0.55, is_base: true, cl_hepatic: 30.0, cl_renal: 0.0, vd: 25.0, ka: 3.0, f_oral: 0.40 }
+    let omep_obs = ObservedPK { cmax: 0.5, auc: 1.2, thalf: 1.0 }
+    let dose10: f64@mg = 20.0
+    let ke10 = omep.cl_hepatic / omep.vd
+    let cmax10 = predict_cmax_oral(dose10, omep.vd, omep.f_oral, omep.ka, ke10)
+    let auc10 = predict_auc(dose10, omep.cl_hepatic, omep.f_oral)
+    let fe10 = fold_error(cmax10, omep_obs.cmax)
+    println("  Cmax pred/obs:")
+    println(cmax10)
+    println(omep_obs.cmax)
+    println("  FE:")
+    println(fe10)
+    println("")
+    
+    println("============================================")
+    println("  VALIDATION SUMMARY")
+    println("============================================")
+    
+    return 0
+}

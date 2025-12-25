@@ -1,4 +1,4 @@
-# Probability and Statistics Library for Demetrios
+# Probability and Statistics Library for Sounio
 
 This directory contains foundational probability/statistics code for Bayesian UQ in the Darwin PBPK platform.
 
@@ -55,7 +55,7 @@ All tests should output "TEST PASSED" and return exit code 0.
 
 These are **foundational implementations** to establish the probability/statistics infrastructure for Bayesian UQ. The following features are deferred due to compiler limitations:
 
-1. **Tuple return types**: Currently problematic in Demetrios parser
+1. **Tuple return types**: Currently problematic in Sounio parser
    - Affects: Stateful RNG interface
    - Workaround: Functions return single values; state managed locally
 
@@ -101,9 +101,9 @@ Once complete, this library will enable:
 
 - These implementations prioritize correctness and testing over performance
 - Compiler improvements (tuple syntax, math functions) will enable more idiomatic code
-- Code follows Demetrios stdlib patterns from `/stdlib/ode/` and `/stdlib/linalg/`
+- Code follows Sounio stdlib patterns from `/stdlib/ode/` and `/stdlib/linalg/`
 
 ---
 
-**Created**: December 2025 - Phase 4 of Darwin PBPK → Demetrios migration
+**Created**: December 2025 - Phase 4 of Darwin PBPK → Sounio migration
 **Purpose**: Bayesian UQ infrastructure for PBPK parameter estimation

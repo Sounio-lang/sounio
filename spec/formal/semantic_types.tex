@@ -1,0 +1,293 @@
+\documentclass{article}
+\usepackage{amsmath,amssymb,amsthm}
+\usepackage{mathpartir}
+\usepackage{stmaryrd}
+\usepackage{xcolor}
+
+\newtheorem{theorem}{Theorem}[section]
+\newtheorem{lemma}[theorem]{Lemma}
+\newtheorem{definition}[theorem]{Definition}
+\newtheorem{corollary}[theorem]{Corollary}
+
+\title{Sounio: A Type System with Semantic Distance}
+\author{Demetrios Chiuratto Agourakis}
+\date{December 2024}
+
+\begin{document}
+
+\maketitle
+
+\begin{abstract}
+We present a formal type system where types are ontological terms and type
+compatibility is determined by semantic distance in a metric space. This
+document provides the formal foundations for the Sounio programming
+language, including syntax, typing rules, and soundness proofs.
+\end{abstract}
+
+\section{Semantic Metric Types}
+
+\subsection{Syntax}
+
+\begin{definition}[Type Syntax]
+\begin{align*}
+\text{Types } \tau &::= i \mid \tau_1 \to \tau_2 \mid \forall \alpha. \tau \mid \text{Knowledge}[\tau, \epsilon, \delta, \Phi] \\
+\text{IRIs } i &::= \text{CURIE} \mid \text{URI} \\
+\text{Distance } d &\in [0, 1] \\
+\text{Confidence } c &\in [0, 1] \\
+\text{Threshold } \theta &\in [0, 1] \\
+\text{Provenance } \Phi &::= \text{Source} \mid \Phi_1 \cdot \Phi_2 \mid \text{Coerce}(d)
+\end{align*}
+\end{definition}
+
+\begin{definition}[Expression Syntax]
+\begin{align*}
+\text{Expressions } e &::= x \mid \lambda x:\tau. e \mid e_1 \, e_2 \mid e : \tau \\
+                      &\mid \text{let } x = e_1 \text{ in } e_2 \\
+                      &\mid \text{Knowledge}(e, c, \delta, \Phi) \\
+                      &\mid e \text{ as } \tau
+\end{align*}
+\end{definition}
+
+\subsection{Semantic Distance Function}
+
+\begin{definition}[Semantic Distance]
+We define $d : \text{IRI} \times \text{IRI} \to [0, 1]$ as:
+\[
+d(i, j) = w_p \cdot d_{\text{path}}(i, j) + w_c \cdot d_{\text{IC}}(i, j) + w_e \cdot d_{\text{emb}}(i, j)
+\]
+where $w_p + w_c + w_e = 1$ and:
+\begin{itemize}
+\item $d_{\text{path}}(i, j) = \frac{\text{path\_length}(i, j)}{2 \cdot \text{max\_depth}}$ is normalized path distance
+\item $d_{\text{IC}}(i, j) = 1 - \frac{2 \cdot \text{IC}(\text{LCA}(i,j))}{\text{IC}(i) + \text{IC}(j)}$ is information content distance
+\item $d_{\text{emb}}(i, j) = \frac{1 - \cos(\vec{v}_i, \vec{v}_j)}{2}$ is embedding distance
+\end{itemize}
+\end{definition}
+
+\begin{theorem}[Metric Properties]
+The distance function $d$ satisfies:
+\begin{enumerate}
+\item $d(i, i) = 0$ \hfill (Identity)
+\item $d(i, j) = d(j, i)$ \hfill (Symmetry)
+\item $d(i, k) \leq d(i, j) + d(j, k)$ \hfill (Triangle inequality)
+\end{enumerate}
+\end{theorem}
+
+\begin{proof}
+Each component satisfies metric properties:
+\begin{enumerate}
+\item Path distance: shortest path from $i$ to $i$ is 0.
+\item IC distance: When $i = j$, LCA$(i,i) = i$, so numerator equals denominator.
+\item Embedding distance: $\cos(\vec{v}_i, \vec{v}_i) = 1$, so distance is 0.
+\end{enumerate}
+Symmetry follows from symmetry of each component. Triangle inequality follows
+from the triangle inequality of each component and convex combination.
+\end{proof}
+
+\subsection{Subtyping with Distance}
+
+Traditional subtyping: $\tau_1 <: \tau_2$ (boolean)
+
+Semantic subtyping: $\tau_1 <:_d \tau_2$ where $d = d(\tau_1, \tau_2)$
+
+\begin{mathpar}
+\inferrule[S-Refl]
+  { }
+  {\tau <:_0 \tau}
+
+\inferrule[S-Onto-Sub]
+  {i_1 \sqsubseteq_{\mathcal{O}} i_2 \\ d = d_{\text{path}}(i_1, i_2)}
+  {i_1 <:_d i_2}
+
+\inferrule[S-Onto-Prox]
+  {d(i_1, i_2) = d \\ d \leq \theta_{\text{max}}}
+  {i_1 <:_d i_2}
+
+\inferrule[S-Trans]
+  {\tau_1 <:_{d_1} \tau_2 \\ \tau_2 <:_{d_2} \tau_3}
+  {\tau_1 <:_{\min(d_1 + d_2, 1)} \tau_3}
+
+\inferrule[S-Arrow]
+  {\tau_1' <:_{d_1} \tau_1 \\ \tau_2 <:_{d_2} \tau_2'}
+  {\tau_1 \to \tau_2 <:_{\max(d_1, d_2)} \tau_1' \to \tau_2'}
+
+\inferrule[S-Knowledge]
+  {\tau <:_d \tau' \\ c' = c \cdot (1 - \alpha \cdot d)}
+  {\text{Knowledge}[\tau, c, \delta, \Phi] <:_d \text{Knowledge}[\tau', c', \delta, \Phi \cdot \text{Coerce}(d)]}
+\end{mathpar}
+
+\subsection{Typing Rules}
+
+\begin{definition}[Typing Judgment]
+We write $\Gamma \vdash e : \tau \triangleright d$ to mean that under context
+$\Gamma$, expression $e$ has type $\tau$ with accumulated semantic distance $d$.
+\end{definition}
+
+\begin{mathpar}
+\inferrule[T-Var]
+  {x : \tau \in \Gamma}
+  {\Gamma \vdash x : \tau \triangleright 0}
+
+\inferrule[T-Abs]
+  {\Gamma, x : \tau_1 \vdash e : \tau_2 \triangleright d}
+  {\Gamma \vdash \lambda x:\tau_1. e : \tau_1 \to \tau_2 \triangleright d}
+
+\inferrule[T-App]
+  {\Gamma \vdash e_1 : \tau_1 \to \tau_2 \triangleright d_1 \\
+   \Gamma \vdash e_2 : \tau_1' \triangleright d_2 \\
+   \tau_1' <:_{d_s} \tau_1 \\
+   d_s \leq \theta_{\text{implicit}}}
+  {\Gamma \vdash e_1 \, e_2 : \tau_2 \triangleright d_1 + d_2 + d_s}
+
+\inferrule[T-App-Explicit]
+  {\Gamma \vdash e_1 : \tau_1 \to \tau_2 \triangleright d_1 \\
+   \Gamma \vdash e_2 : \tau_1' \triangleright d_2 \\
+   \tau_1' <:_{d_s} \tau_1 \\
+   \theta_{\text{implicit}} < d_s \leq \theta_{\text{explicit}}}
+  {\Gamma \vdash e_1 \, (e_2 \text{ as } \tau_1) : \tau_2 \triangleright d_1 + d_2 + d_s}
+
+\inferrule[T-Let]
+  {\Gamma \vdash e_1 : \tau_1 \triangleright d_1 \\
+   \Gamma, x : \tau_1 \vdash e_2 : \tau_2 \triangleright d_2}
+  {\Gamma \vdash \text{let } x = e_1 \text{ in } e_2 : \tau_2 \triangleright d_1 + d_2}
+
+\inferrule[T-Knowledge]
+  {\Gamma \vdash e : \tau \triangleright d \\
+   c \in [0, 1] \\
+   \delta : \text{Domain} \\
+   \Phi : \text{Provenance}}
+  {\Gamma \vdash \text{Knowledge}(e, c, \delta, \Phi) : \text{Knowledge}[\tau, c, \delta, \Phi] \triangleright d}
+
+\inferrule[T-Coerce]
+  {\Gamma \vdash e : \text{Knowledge}[\tau_1, c, \delta, \Phi] \triangleright d \\
+   \tau_1 <:_{d_s} \tau_2 \\
+   c' = c \cdot (1 - \alpha \cdot d_s)}
+  {\Gamma \vdash e \text{ as } \tau_2 : \text{Knowledge}[\tau_2, c', \delta, \Phi \cdot \text{Coerce}(d_s)] \triangleright d + d_s}
+
+\inferrule[T-Sub]
+  {\Gamma \vdash e : \tau \triangleright d \\
+   \tau <:_{d_s} \tau' \\
+   d_s \leq \theta_{\text{implicit}}}
+  {\Gamma \vdash e : \tau' \triangleright d + d_s}
+\end{mathpar}
+
+\subsection{Confidence Propagation}
+
+\begin{definition}[Confidence Degradation]
+When types are coerced across semantic distance $d$, confidence degrades:
+\[
+c' = c \cdot (1 - \alpha \cdot d)
+\]
+where $\alpha \in [0, 1]$ is the degradation factor (typically 0.1--0.2).
+\end{definition}
+
+\begin{lemma}[Confidence Bounds]
+For any sequence of coercions with distances $d_1, \ldots, d_n$:
+\[
+c_n = c_0 \cdot \prod_{i=1}^{n} (1 - \alpha \cdot d_i) \geq c_0 \cdot (1 - \alpha)^n
+\]
+\end{lemma}
+
+\section{Soundness}
+
+\begin{theorem}[Type Safety]
+If $\Gamma \vdash e : \tau \triangleright d$ and $e \to^* v$, then
+$\Gamma \vdash v : \tau' \triangleright d'$ where $\tau' <:_{d''} \tau$
+and $d' \leq d$.
+\end{theorem}
+
+\begin{proof}[Proof Sketch]
+By induction on the derivation of $\Gamma \vdash e : \tau \triangleright d$
+and the evaluation steps. The key insight is that each evaluation step
+either preserves the type exactly or reduces to a subtype with accumulated
+distance. The distance tracking ensures we never exceed the original
+type's compatibility bound.
+\end{proof}
+
+\begin{theorem}[Distance Monotonicity]
+If $\Gamma \vdash e_1 : \tau \triangleright d_1$ and $e_1 \to e_2$,
+then $\Gamma \vdash e_2 : \tau \triangleright d_2$ where $d_2 \leq d_1$.
+\end{theorem}
+
+\begin{proof}[Proof Sketch]
+Evaluation does not introduce new type coercions. Each step either:
+\begin{enumerate}
+\item Substitutes values of compatible types (distance preserved)
+\item Reduces applications (distance from source preserved)
+\item Eliminates let bindings (distance combined but not increased)
+\end{enumerate}
+\end{proof}
+
+\begin{theorem}[Confidence Preservation]
+For any well-typed computation $e \to^* v$ where $e : \text{Knowledge}[\tau, c, \delta, \Phi]$:
+\[
+\text{conf}(v) \leq c
+\]
+Confidence is non-increasing through computation.
+\end{theorem}
+
+\begin{proof}
+Confidence only changes through explicit coercion operations (T-Coerce),
+each of which multiplies by $(1 - \alpha \cdot d) \leq 1$. Pure computation
+preserves confidence exactly.
+\end{proof}
+
+\begin{corollary}[Epistemic Soundness]
+If a value $v$ has $\text{Knowledge}[\tau, c, \delta, \Phi]$ type at runtime,
+then the confidence $c$ accurately reflects the accumulated uncertainty from
+all type coercions in its derivation, as recorded in provenance $\Phi$.
+\end{corollary}
+
+\section{Disjointness}
+
+\begin{definition}[Disjoint Types]
+Types $\tau_1$ and $\tau_2$ are disjoint, written $\tau_1 \perp \tau_2$,
+if the ontology declares them as disjoint classes.
+\end{definition}
+
+\begin{mathpar}
+\inferrule[Disjoint-Error]
+  {\tau_1 \perp \tau_2}
+  {\tau_1 \not<:_d \tau_2 \text{ for any } d}
+\end{mathpar}
+
+\begin{theorem}[Disjoint Safety]
+If $\tau_1 \perp \tau_2$ in the ontology, then no well-typed program can
+coerce a value of type $\tau_1$ to type $\tau_2$.
+\end{theorem}
+
+\section{Cross-Ontology Compatibility}
+
+\begin{definition}[SSSOM Mapping]
+A mapping $m : i_1 \leftrightarrow i_2$ with predicate $p$ and confidence $c_m$
+relates IRIs across ontologies.
+\end{definition}
+
+\begin{mathpar}
+\inferrule[S-Cross-Onto]
+  {m : i_1 \leftrightarrow i_2 \\
+   p \in \{\text{exactMatch}, \text{closeMatch}\} \\
+   c_m \geq \theta_{\text{mapping}}}
+  {i_1 <:_{1 - c_m} i_2}
+\end{mathpar}
+
+\section{Implementation Notes}
+
+\subsection{Threshold Configuration}
+
+\begin{itemize}
+\item $\theta_{\text{implicit}} = 0.15$: Maximum distance for implicit coercion
+\item $\theta_{\text{explicit}} = 0.40$: Maximum distance for explicit coercion
+\item $\theta_{\text{max}} = 0.60$: Maximum distance for any coercion
+\item $\alpha = 0.15$: Confidence degradation factor
+\end{itemize}
+
+\subsection{Distance Weight Configuration}
+
+Default weights for multi-modal distance:
+\begin{itemize}
+\item $w_p = 0.35$: Path distance weight
+\item $w_c = 0.25$: Information content weight
+\item $w_e = 0.40$: Embedding distance weight
+\end{itemize}
+
+\end{document}

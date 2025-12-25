@@ -1,0 +1,875 @@
+//! I/O Module for Sounio
+//!
+//! Provides file I/O operations, process control, and environment access.
+//! All I/O operations require the `IO` effect.
+
+// =============================================================================
+// Error Types
+// =============================================================================
+
+// Error type for I/O operations
+pub enum IoError {
+    // File or directory not found
+    NotFound { path: String },
+    // Permission denied
+    PermissionDenied { path: String },
+    // Error reading file
+    ReadError { path: String, message: String },
+    // Error writing file
+    WriteError { path: String, message: String },
+    // Invalid path encoding
+    InvalidPath { path: String },
+    // File already exists (when creating exclusively)
+    AlreadyExists { path: String },
+    // Directory not empty (when removing)
+    DirectoryNotEmpty { path: String },
+    // Operation interrupted
+    Interrupted,
+    // Other I/O error
+    Other { message: String },
+}
+
+impl IoError {
+    // Create a "not found" error
+    pub fn not_found(path: String) -> IoError {
+        IoError::NotFound { path: path }
+    }
+
+    // Create a "permission denied" error
+    pub fn permission_denied(path: String) -> IoError {
+        IoError::PermissionDenied { path: path }
+    }
+
+    // Create a "read error"
+    pub fn read_error(path: String, message: String) -> IoError {
+        IoError::ReadError { path: path, message: message }
+    }
+
+    // Create a "write error"
+    pub fn write_error(path: String, message: String) -> IoError {
+        IoError::WriteError { path: path, message: message }
+    }
+
+    // Create an "other" error
+    pub fn other(message: String) -> IoError {
+        IoError::Other { message: message }
+    }
+
+    // Get error message
+    pub fn message(self) -> String {
+        match self {
+            IoError::NotFound { path } => "File not found: " ++ path,
+            IoError::PermissionDenied { path } => "Permission denied: " ++ path,
+            IoError::ReadError { path, message } => "Read error on " ++ path ++ ": " ++ message,
+            IoError::WriteError { path, message } => "Write error on " ++ path ++ ": " ++ message,
+            IoError::InvalidPath { path } => "Invalid path: " ++ path,
+            IoError::AlreadyExists { path } => "File already exists: " ++ path,
+            IoError::DirectoryNotEmpty { path } => "Directory not empty: " ++ path,
+            IoError::Interrupted => "Operation interrupted".to_string(),
+            IoError::Other { message } => message,
+        }
+    }
+}
+
+impl ToString for IoError {
+    fn to_string(self) -> String {
+        self.message()
+    }
+}
+
+impl Debug for IoError {
+    fn fmt(self, f: &mut Formatter) -> Result<(), FmtError> {
+        f.write_str(self.message())
+    }
+}
+
+// =============================================================================
+// File Operations
+// =============================================================================
+
+// Read entire file contents as a string
+//
+// # Arguments
+// * `path` - Path to the file to read
+//
+// # Returns
+// * `Ok(String)` - File contents as a string
+// * `Err(IoError)` - Error if file cannot be read
+//
+// # Example
+// ```d
+// let content = read_file("config.txt")?;
+// println("File contains: {}", content);
+// ```
+pub fn read_file(path: &str) -> Result<String, IoError> with IO {
+    // Implementation via FFI to system calls
+    // This is a specification - actual implementation in compiler runtime
+    extern "C" {
+        fn __sounio_read_file(path: *const u8, path_len: i64, out_ptr: *mut *mut u8, out_len: *mut i64) -> i32;
+    }
+
+    var out_ptr: *mut u8 = null_ptr();
+    var out_len: i64 = 0;
+
+    let result = unsafe {
+        __sounio_read_file(path.as_ptr(), path.len() as i64, &mut out_ptr, &mut out_len)
+    };
+
+    match result {
+        0 => {
+            // Success - convert raw bytes to String
+            let content = unsafe { String::from_raw_parts(out_ptr, out_len as usize) };
+            Ok(content)
+        },
+        1 => Err(IoError::not_found(path.to_string())),
+        2 => Err(IoError::permission_denied(path.to_string())),
+        _ => Err(IoError::read_error(path.to_string(), "Unknown error".to_string())),
+    }
+}
+
+// Write string contents to a file
+//
+// Creates the file if it doesn't exist, overwrites if it does.
+//
+// # Arguments
+// * `path` - Path to the file to write
+// * `content` - String content to write
+//
+// # Returns
+// * `Ok(())` - Success
+// * `Err(IoError)` - Error if file cannot be written
+//
+// # Example
+// ```d
+// write_file("output.txt", "Hello, world!")?;
+// ```
+pub fn write_file(path: &str, content: &str) -> Result<(), IoError> with IO {
+    extern "C" {
+        fn __sounio_write_file(path: *const u8, path_len: i64, content: *const u8, content_len: i64) -> i32;
+    }
+
+    let result = unsafe {
+        __sounio_write_file(
+            path.as_ptr(), path.len() as i64,
+            content.as_ptr(), content.len() as i64
+        )
+    };
+
+    match result {
+        0 => Ok(()),
+        1 => Err(IoError::not_found(path.to_string())),
+        2 => Err(IoError::permission_denied(path.to_string())),
+        _ => Err(IoError::write_error(path.to_string(), "Unknown error".to_string())),
+    }
+}
+
+// Append string contents to a file
+//
+// Creates the file if it doesn't exist.
+//
+// # Arguments
+// * `path` - Path to the file
+// * `content` - String content to append
+//
+// # Returns
+// * `Ok(())` - Success
+// * `Err(IoError)` - Error if file cannot be written
+pub fn append_file(path: &str, content: &str) -> Result<(), IoError> with IO {
+    extern "C" {
+        fn __sounio_append_file(path: *const u8, path_len: i64, content: *const u8, content_len: i64) -> i32;
+    }
+
+    let result = unsafe {
+        __sounio_append_file(
+            path.as_ptr(), path.len() as i64,
+            content.as_ptr(), content.len() as i64
+        )
+    };
+
+    match result {
+        0 => Ok(()),
+        1 => Err(IoError::not_found(path.to_string())),
+        2 => Err(IoError::permission_denied(path.to_string())),
+        _ => Err(IoError::write_error(path.to_string(), "Unknown error".to_string())),
+    }
+}
+
+// Check if a file exists
+//
+// # Arguments
+// * `path` - Path to check
+//
+// # Returns
+// * `true` if file exists, `false` otherwise
+pub fn file_exists(path: &str) -> bool with IO {
+    extern "C" {
+        fn __sounio_file_exists(path: *const u8, path_len: i64) -> i32;
+    }
+
+    let result = unsafe {
+        __sounio_file_exists(path.as_ptr(), path.len() as i64)
+    };
+
+    result == 1
+}
+
+// Delete a file
+//
+// # Arguments
+// * `path` - Path to the file to delete
+//
+// # Returns
+// * `Ok(())` - Success
+// * `Err(IoError)` - Error if file cannot be deleted
+pub fn remove_file(path: &str) -> Result<(), IoError> with IO {
+    extern "C" {
+        fn __sounio_remove_file(path: *const u8, path_len: i64) -> i32;
+    }
+
+    let result = unsafe {
+        __sounio_remove_file(path.as_ptr(), path.len() as i64)
+    };
+
+    match result {
+        0 => Ok(()),
+        1 => Err(IoError::not_found(path.to_string())),
+        2 => Err(IoError::permission_denied(path.to_string())),
+        _ => Err(IoError::other("Failed to remove file".to_string())),
+    }
+}
+
+// Copy a file from source to destination
+//
+// # Arguments
+// * `from` - Source file path
+// * `to` - Destination file path
+//
+// # Returns
+// * `Ok(())` - Success
+// * `Err(IoError)` - Error if file cannot be copied
+pub fn copy_file(from: &str, to: &str) -> Result<(), IoError> with IO {
+    extern "C" {
+        fn __sounio_copy_file(from: *const u8, from_len: i64, to: *const u8, to_len: i64) -> i32;
+    }
+
+    let result = unsafe {
+        __sounio_copy_file(
+            from.as_ptr(), from.len() as i64,
+            to.as_ptr(), to.len() as i64
+        )
+    };
+
+    match result {
+        0 => Ok(()),
+        1 => Err(IoError::not_found(from.to_string())),
+        2 => Err(IoError::permission_denied(to.to_string())),
+        _ => Err(IoError::other("Failed to copy file".to_string())),
+    }
+}
+
+// Rename/move a file
+//
+// # Arguments
+// * `from` - Current file path
+// * `to` - New file path
+//
+// # Returns
+// * `Ok(())` - Success
+// * `Err(IoError)` - Error if file cannot be renamed
+pub fn rename(from: &str, to: &str) -> Result<(), IoError> with IO {
+    extern "C" {
+        fn __sounio_rename(from: *const u8, from_len: i64, to: *const u8, to_len: i64) -> i32;
+    }
+
+    let result = unsafe {
+        __sounio_rename(
+            from.as_ptr(), from.len() as i64,
+            to.as_ptr(), to.len() as i64
+        )
+    };
+
+    match result {
+        0 => Ok(()),
+        1 => Err(IoError::not_found(from.to_string())),
+        2 => Err(IoError::permission_denied(to.to_string())),
+        3 => Err(IoError::AlreadyExists { path: to.to_string() }),
+        _ => Err(IoError::other("Failed to rename file".to_string())),
+    }
+}
+
+// =============================================================================
+// Directory Operations
+// =============================================================================
+
+// Directory entry metadata
+pub struct DirEntry {
+    // Name of the file or directory
+    pub name: String,
+    // Full path
+    pub path: String,
+    // Whether this is a directory
+    pub is_dir: bool,
+    // Whether this is a file
+    pub is_file: bool,
+    // File size in bytes (0 for directories)
+    pub size: u64,
+}
+
+// Create a directory
+//
+// Creates the directory and any missing parent directories.
+//
+// # Arguments
+// * `path` - Path of directory to create
+//
+// # Returns
+// * `Ok(())` - Success
+// * `Err(IoError)` - Error if directory cannot be created
+pub fn create_dir(path: &str) -> Result<(), IoError> with IO {
+    extern "C" {
+        fn __sounio_create_dir(path: *const u8, path_len: i64) -> i32;
+    }
+
+    let result = unsafe {
+        __sounio_create_dir(path.as_ptr(), path.len() as i64)
+    };
+
+    match result {
+        0 => Ok(()),
+        1 => Err(IoError::AlreadyExists { path: path.to_string() }),
+        2 => Err(IoError::permission_denied(path.to_string())),
+        _ => Err(IoError::other("Failed to create directory".to_string())),
+    }
+}
+
+// Create a directory and all parent directories
+//
+// # Arguments
+// * `path` - Path of directory to create
+//
+// # Returns
+// * `Ok(())` - Success
+// * `Err(IoError)` - Error if directory cannot be created
+pub fn create_dir_all(path: &str) -> Result<(), IoError> with IO {
+    extern "C" {
+        fn __sounio_create_dir_all(path: *const u8, path_len: i64) -> i32;
+    }
+
+    let result = unsafe {
+        __sounio_create_dir_all(path.as_ptr(), path.len() as i64)
+    };
+
+    match result {
+        0 => Ok(()),
+        2 => Err(IoError::permission_denied(path.to_string())),
+        _ => Err(IoError::other("Failed to create directory".to_string())),
+    }
+}
+
+// Remove an empty directory
+//
+// # Arguments
+// * `path` - Path of directory to remove
+//
+// # Returns
+// * `Ok(())` - Success
+// * `Err(IoError)` - Error if directory cannot be removed
+pub fn remove_dir(path: &str) -> Result<(), IoError> with IO {
+    extern "C" {
+        fn __sounio_remove_dir(path: *const u8, path_len: i64) -> i32;
+    }
+
+    let result = unsafe {
+        __sounio_remove_dir(path.as_ptr(), path.len() as i64)
+    };
+
+    match result {
+        0 => Ok(()),
+        1 => Err(IoError::not_found(path.to_string())),
+        2 => Err(IoError::permission_denied(path.to_string())),
+        3 => Err(IoError::DirectoryNotEmpty { path: path.to_string() }),
+        _ => Err(IoError::other("Failed to remove directory".to_string())),
+    }
+}
+
+// Remove a directory and all its contents recursively
+//
+// # Arguments
+// * `path` - Path of directory to remove
+//
+// # Returns
+// * `Ok(())` - Success
+// * `Err(IoError)` - Error if directory cannot be removed
+pub fn remove_dir_all(path: &str) -> Result<(), IoError> with IO {
+    extern "C" {
+        fn __sounio_remove_dir_all(path: *const u8, path_len: i64) -> i32;
+    }
+
+    let result = unsafe {
+        __sounio_remove_dir_all(path.as_ptr(), path.len() as i64)
+    };
+
+    match result {
+        0 => Ok(()),
+        1 => Err(IoError::not_found(path.to_string())),
+        2 => Err(IoError::permission_denied(path.to_string())),
+        _ => Err(IoError::other("Failed to remove directory".to_string())),
+    }
+}
+
+// Check if a path is a directory
+//
+// # Arguments
+// * `path` - Path to check
+//
+// # Returns
+// * `true` if path is a directory, `false` otherwise
+pub fn is_dir(path: &str) -> bool with IO {
+    extern "C" {
+        fn __sounio_is_dir(path: *const u8, path_len: i64) -> i32;
+    }
+
+    let result = unsafe {
+        __sounio_is_dir(path.as_ptr(), path.len() as i64)
+    };
+
+    result == 1
+}
+
+// Read directory contents
+//
+// # Arguments
+// * `path` - Path of directory to read
+//
+// # Returns
+// * `Ok(entries)` - List of directory entries
+// * `Err(IoError)` - Error if directory cannot be read
+//
+// # Example
+// ```d
+// let entries = read_dir(".")?;
+// for entry in entries {
+//     println("Found: {}", entry.name);
+// }
+// ```
+pub fn read_dir(path: &str) -> Result<Vec<DirEntry>, IoError> with IO {
+    extern "C" {
+        fn __sounio_read_dir_count(path: *const u8, path_len: i64) -> i32;
+        fn __sounio_read_dir_entry(
+            path: *const u8, path_len: i64, index: i32,
+            name_ptr: *mut *const u8, name_len: *mut i64,
+            is_dir: *mut i32, size: *mut u64
+        ) -> i32;
+    }
+
+    let count = unsafe {
+        __sounio_read_dir_count(path.as_ptr(), path.len() as i64)
+    };
+
+    if count < 0 {
+        return match count {
+            -1 => Err(IoError::not_found(path.to_string())),
+            -2 => Err(IoError::permission_denied(path.to_string())),
+            _ => Err(IoError::other("Failed to read directory".to_string())),
+        };
+    }
+
+    var entries: Vec<DirEntry> = Vec::with_capacity(count as usize);
+
+    for i in 0..count {
+        var name_ptr: *const u8 = null_ptr();
+        var name_len: i64 = 0;
+        var is_dir: i32 = 0;
+        var file_size: u64 = 0;
+
+        let status = unsafe {
+            __sounio_read_dir_entry(
+                path.as_ptr(), path.len() as i64, i,
+                &mut name_ptr, &mut name_len,
+                &mut is_dir, &mut file_size
+            )
+        };
+
+        if status == 0 {
+            let name = unsafe { String::from_raw_parts(name_ptr as *mut u8, name_len as usize) };
+            let full_path = path::join(path, &name);
+            entries.push(DirEntry {
+                name: name,
+                path: full_path,
+                is_dir: is_dir == 1,
+                is_file: is_dir == 0,
+                size: file_size,
+            });
+        }
+    }
+
+    Ok(entries)
+}
+
+// =============================================================================
+// File Metadata
+// =============================================================================
+
+// File metadata
+pub struct Metadata {
+    // File size in bytes
+    pub size: u64,
+    // Whether this is a file
+    pub is_file: bool,
+    // Whether this is a directory
+    pub is_dir: bool,
+    // Whether this is a symbolic link
+    pub is_symlink: bool,
+    // Last modification time (Unix timestamp)
+    pub modified: i64,
+    // Creation time (Unix timestamp, may not be available)
+    pub created: i64,
+}
+
+// Get file metadata
+//
+// # Arguments
+// * `path` - Path to get metadata for
+//
+// # Returns
+// * `Ok(metadata)` - File metadata
+// * `Err(IoError)` - Error if metadata cannot be read
+pub fn metadata(path: &str) -> Result<Metadata, IoError> with IO {
+    extern "C" {
+        fn __sounio_metadata(
+            path: *const u8, path_len: i64,
+            size: *mut u64, is_file: *mut i32, is_dir: *mut i32,
+            is_symlink: *mut i32, modified: *mut i64, created: *mut i64
+        ) -> i32;
+    }
+
+    var size: u64 = 0;
+    var is_file: i32 = 0;
+    var is_dir: i32 = 0;
+    var is_symlink: i32 = 0;
+    var modified: i64 = 0;
+    var created: i64 = 0;
+
+    let result = unsafe {
+        __sounio_metadata(
+            path.as_ptr(), path.len() as i64,
+            &mut size, &mut is_file, &mut is_dir,
+            &mut is_symlink, &mut modified, &mut created
+        )
+    };
+
+    match result {
+        0 => Ok(Metadata {
+            size: size,
+            is_file: is_file == 1,
+            is_dir: is_dir == 1,
+            is_symlink: is_symlink == 1,
+            modified: modified,
+            created: created,
+        }),
+        1 => Err(IoError::not_found(path.to_string())),
+        2 => Err(IoError::permission_denied(path.to_string())),
+        _ => Err(IoError::other("Failed to get metadata".to_string())),
+    }
+}
+
+// =============================================================================
+// Process Control
+// =============================================================================
+
+// Exit the process with the given exit code
+//
+// This function never returns (divergent type `!`).
+//
+// # Arguments
+// * `code` - Exit code (0 for success, non-zero for error)
+//
+// # Example
+// ```d
+// if error_occurred {
+//     exit(1);
+// }
+// exit(0);
+// ```
+pub fn exit(code: i32) -> ! with IO {
+    extern "C" {
+        fn __sounio_exit(code: i32) -> !;
+    }
+
+    unsafe {
+        __sounio_exit(code)
+    }
+}
+
+// =============================================================================
+// Environment
+// =============================================================================
+
+// Module for environment access
+pub mod env {
+    // Get command line arguments
+    //
+    // Returns a vector of strings where:
+    // - First element is the program name
+    // - Subsequent elements are command line arguments
+    //
+    // # Example
+    // ```d
+    // // If run as: ./program input.txt output.txt
+    // let args = env::args();
+    // // args = ["./program", "input.txt", "output.txt"]
+    // let input = args[1];
+    // let output = args[2];
+    // ```
+    pub fn args() -> Vec<String> with IO {
+        extern "C" {
+            fn __sounio_get_argc() -> i32;
+            fn __sounio_get_argv(index: i32, out_ptr: *mut *const u8, out_len: *mut i64) -> i32;
+        }
+
+        let argc = unsafe { __sounio_get_argc() };
+        var result: Vec<String> = Vec::with_capacity(argc as usize);
+
+        for i in 0..argc {
+            var arg_ptr: *const u8 = null_ptr();
+            var arg_len: i64 = 0;
+
+            let status = unsafe {
+                __sounio_get_argv(i, &mut arg_ptr, &mut arg_len)
+            };
+
+            if status == 0 {
+                let arg = unsafe { String::from_raw_parts(arg_ptr as *mut u8, arg_len as usize) };
+                result.push(arg);
+            }
+        }
+
+        result
+    }
+
+    // Get an environment variable
+    //
+    // # Arguments
+    // * `key` - Environment variable name
+    //
+    // # Returns
+    // * `Some(value)` if the variable exists
+    // * `None` if the variable doesn't exist
+    //
+    // # Example
+    // ```d
+    // match env::var("HOME") {
+    //     Some(home) => println("Home directory: {}", home),
+    //     None => println("HOME not set"),
+    // }
+    // ```
+    pub fn var(key: &str) -> Option<String> with IO {
+        extern "C" {
+            fn __sounio_get_env(key: *const u8, key_len: i64, out_ptr: *mut *const u8, out_len: *mut i64) -> i32;
+        }
+
+        var out_ptr: *const u8 = null_ptr();
+        var out_len: i64 = 0;
+
+        let result = unsafe {
+            __sounio_get_env(key.as_ptr(), key.len() as i64, &mut out_ptr, &mut out_len)
+        };
+
+        if result == 0 {
+            let value = unsafe { String::from_raw_parts(out_ptr as *mut u8, out_len as usize) };
+            Some(value)
+        } else {
+            None
+        }
+    }
+
+    // Set an environment variable
+    //
+    // # Arguments
+    // * `key` - Environment variable name
+    // * `value` - Value to set
+    pub fn set_var(key: &str, value: &str) with IO {
+        extern "C" {
+            fn __sounio_set_env(key: *const u8, key_len: i64, value: *const u8, value_len: i64);
+        }
+
+        unsafe {
+            __sounio_set_env(
+                key.as_ptr(), key.len() as i64,
+                value.as_ptr(), value.len() as i64
+            )
+        }
+    }
+
+    // Get the current working directory
+    //
+    // # Returns
+    // * `Ok(path)` - Current directory path
+    // * `Err(IoError)` - Error if cannot determine current directory
+    pub fn current_dir() -> Result<String, IoError> with IO {
+        extern "C" {
+            fn __sounio_current_dir(out_ptr: *mut *const u8, out_len: *mut i64) -> i32;
+        }
+
+        var out_ptr: *const u8 = null_ptr();
+        var out_len: i64 = 0;
+
+        let result = unsafe {
+            __sounio_current_dir(&mut out_ptr, &mut out_len)
+        };
+
+        if result == 0 {
+            let path = unsafe { String::from_raw_parts(out_ptr as *mut u8, out_len as usize) };
+            Ok(path)
+        } else {
+            Err(IoError::other("Cannot determine current directory".to_string()))
+        }
+    }
+}
+
+// =============================================================================
+// Standard Streams
+// =============================================================================
+
+// Print to standard output
+pub fn print(s: &str) with IO {
+    extern "C" {
+        fn __sounio_print(s: *const u8, len: i64);
+    }
+
+    unsafe {
+        __sounio_print(s.as_ptr(), s.len() as i64)
+    }
+}
+
+// Print to standard output with newline
+pub fn println(s: &str) with IO {
+    print(s);
+    print("\n");
+}
+
+// Print to standard error
+pub fn eprint(s: &str) with IO {
+    extern "C" {
+        fn __sounio_eprint(s: *const u8, len: i64);
+    }
+
+    unsafe {
+        __sounio_eprint(s.as_ptr(), s.len() as i64)
+    }
+}
+
+// Print to standard error with newline
+pub fn eprintln(s: &str) with IO {
+    eprint(s);
+    eprint("\n");
+}
+
+// Read a line from standard input
+pub fn read_line() -> Result<String, IoError> with IO {
+    extern "C" {
+        fn __sounio_read_line(out_ptr: *mut *mut u8, out_len: *mut i64) -> i32;
+    }
+
+    var out_ptr: *mut u8 = null_ptr();
+    var out_len: i64 = 0;
+
+    let result = unsafe {
+        __sounio_read_line(&mut out_ptr, &mut out_len)
+    };
+
+    if result == 0 {
+        let line = unsafe { String::from_raw_parts(out_ptr, out_len as usize) };
+        Ok(line)
+    } else {
+        Err(IoError::other("Failed to read from stdin".to_string()))
+    }
+}
+
+// =============================================================================
+// Path Utilities
+// =============================================================================
+
+// Module for path manipulation
+pub mod path {
+    // Join two path components
+    //
+    // # Example
+    // ```d
+    // let full = path::join("dir", "file.txt");
+    // // full = "dir/file.txt"
+    // ```
+    pub fn join(base: &str, component: &str) -> String {
+        if base.is_empty() {
+            return component.to_string();
+        }
+        if component.is_empty() {
+            return base.to_string();
+        }
+        if base.ends_with("/") || base.ends_with("\\") {
+            return base.to_string() ++ component;
+        }
+        base.to_string() ++ "/" ++ component
+    }
+
+    // Get the file name from a path
+    //
+    // # Example
+    // ```d
+    // let name = path::file_name("/home/user/file.txt");
+    // // name = Some("file.txt")
+    // ```
+    pub fn file_name(p: &str) -> Option<String> {
+        let last_slash = p.rfind('/').or_else(|| p.rfind('\\'));
+        match last_slash {
+            Some(idx) => {
+                let name = p[(idx + 1)..];
+                if name.is_empty() {
+                    None
+                } else {
+                    Some(name.to_string())
+                }
+            },
+            None => {
+                if p.is_empty() {
+                    None
+                } else {
+                    Some(p.to_string())
+                }
+            },
+        }
+    }
+
+    // Get the parent directory from a path
+    //
+    // # Example
+    // ```d
+    // let parent = path::parent("/home/user/file.txt");
+    // // parent = Some("/home/user")
+    // ```
+    pub fn parent(p: &str) -> Option<String> {
+        let last_slash = p.rfind('/').or_else(|| p.rfind('\\'));
+        match last_slash {
+            Some(0) => Some("/".to_string()),
+            Some(idx) => Some(p[..idx].to_string()),
+            None => None,
+        }
+    }
+
+    // Get the file extension
+    //
+    // # Example
+    // ```d
+    // let ext = path::extension("file.txt");
+    // // ext = Some("txt")
+    // ```
+    pub fn extension(p: &str) -> Option<String> {
+        let name = file_name(p)?;
+        let last_dot = name.rfind('.')?;
+        if last_dot == 0 {
+            None
+        } else {
+            Some(name[(last_dot + 1)..].to_string())
+        }
+    }
+}

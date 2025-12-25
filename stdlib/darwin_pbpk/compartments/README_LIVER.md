@@ -1,4 +1,4 @@
-# Advanced Liver Compartment Module - Demetrios
+# Advanced Liver Compartment Module - Sounio
 
 **Location**: 
 **Size**: 17KB (480 lines)

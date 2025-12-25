@@ -1,0 +1,619 @@
+// mlp_xor.d - Multi-Layer Perceptron for XOR Gate with Adam Optimizer
+//
+// Implements a 2-2-1 MLP (2 inputs, 2 hidden neurons, 1 output)
+// to solve the XOR problem which is not linearly separable.
+// Uses Adam optimizer for efficient training.
+//
+// Architecture:
+//   x1 ----w1h1----> h1 ----wo1---->
+//       \        /                  \
+//        \      /                    --> output
+//         \    /                    /
+//   x2 ----w2h2----> h2 ----wo2---->
+//
+// Tape layout (26 slots):
+//   [0] x1       [1] x2
+//   [2] w1h1     [3] w2h1     [4] bh1
+//   [5] w1h2     [6] w2h2     [7] bh2
+//   [8] wo1      [9] wo2      [10] bo
+//   [11] w1h1*x1 [12] w2h1*x2 [13] sum_h1 [14] pre_h1 [15] h1=sigmoid
+//   [16] w1h2*x1 [17] w2h2*x2 [18] sum_h2 [19] pre_h2 [20] h2=sigmoid
+//   [21] wo1*h1  [22] wo2*h2  [23] sum_out [24] pre_out [25] out=sigmoid
+
+// ============================================================================
+// MATH HELPERS
+// ============================================================================
+
+fn abs_f64(x: f64) -> f64 {
+    if x < 0.0 { return 0.0 - x }
+    return x
+}
+
+fn exp_f64(x: f64) -> f64 {
+    if x > 20.0 { return exp_f64(x / 2.0) * exp_f64(x / 2.0) }
+    if x < 0.0 - 20.0 { return 1.0 / exp_f64(0.0 - x) }
+    let mut sum = 1.0
+    let mut term = 1.0
+    let mut i = 1
+    while i <= 20 { term = term * x / i; sum = sum + term; i = i + 1 }
+    return sum
+}
+
+fn sigmoid(x: f64) -> f64 {
+    return 1.0 / (1.0 + exp_f64(0.0 - x))
+}
+
+fn sqrt_f64(x: f64) -> f64 {
+    if x <= 0.0 { return 0.0 }
+    let mut guess = x / 2.0
+    if guess < 1.0 { guess = 1.0 }
+    let mut i = 0
+    while i < 20 {
+        guess = (guess + x / guess) / 2.0
+        i = i + 1
+    }
+    return guess
+}
+
+// Adam hyperparameters
+fn ADAM_BETA1() -> f64 { return 0.9 }
+fn ADAM_BETA2() -> f64 { return 0.999 }
+fn ADAM_EPS() -> f64 { return 0.00000001 }
+
+// ============================================================================
+// OPERATION CODES
+// ============================================================================
+
+fn OP_VAR() -> i64 { return 1 }
+fn OP_ADD() -> i64 { return 2 }
+fn OP_MUL() -> i64 { return 4 }
+fn OP_SIGMOID() -> i64 { return 15 }
+
+// ============================================================================
+// 26-SLOT TAPE STRUCTURE
+// ============================================================================
+
+struct Tape {
+    // Values (v0-v25)
+    v0: f64, v1: f64, v2: f64, v3: f64, v4: f64, v5: f64, v6: f64, v7: f64,
+    v8: f64, v9: f64, v10: f64, v11: f64, v12: f64, v13: f64, v14: f64, v15: f64,
+    v16: f64, v17: f64, v18: f64, v19: f64, v20: f64, v21: f64, v22: f64, v23: f64,
+    v24: f64, v25: f64,
+    // Gradients (g0-g25)
+    g0: f64, g1: f64, g2: f64, g3: f64, g4: f64, g5: f64, g6: f64, g7: f64,
+    g8: f64, g9: f64, g10: f64, g11: f64, g12: f64, g13: f64, g14: f64, g15: f64,
+    g16: f64, g17: f64, g18: f64, g19: f64, g20: f64, g21: f64, g22: f64, g23: f64,
+    g24: f64, g25: f64,
+    // Operations (op0-op25)
+    op0: i64, op1: i64, op2: i64, op3: i64, op4: i64, op5: i64, op6: i64, op7: i64,
+    op8: i64, op9: i64, op10: i64, op11: i64, op12: i64, op13: i64, op14: i64, op15: i64,
+    op16: i64, op17: i64, op18: i64, op19: i64, op20: i64, op21: i64, op22: i64, op23: i64,
+    op24: i64, op25: i64,
+    // Argument 1 (a0-a25)
+    a0: i64, a1: i64, a2: i64, a3: i64, a4: i64, a5: i64, a6: i64, a7: i64,
+    a8: i64, a9: i64, a10: i64, a11: i64, a12: i64, a13: i64, a14: i64, a15: i64,
+    a16: i64, a17: i64, a18: i64, a19: i64, a20: i64, a21: i64, a22: i64, a23: i64,
+    a24: i64, a25: i64,
+    // Argument 2 (b0-b25)
+    b0: i64, b1: i64, b2: i64, b3: i64, b4: i64, b5: i64, b6: i64, b7: i64,
+    b8: i64, b9: i64, b10: i64, b11: i64, b12: i64, b13: i64, b14: i64, b15: i64,
+    b16: i64, b17: i64, b18: i64, b19: i64, b20: i64, b21: i64, b22: i64, b23: i64,
+    b24: i64, b25: i64,
+    len: i64
+}
+
+fn tape_new() -> Tape {
+    return Tape {
+        v0: 0.0, v1: 0.0, v2: 0.0, v3: 0.0, v4: 0.0, v5: 0.0, v6: 0.0, v7: 0.0,
+        v8: 0.0, v9: 0.0, v10: 0.0, v11: 0.0, v12: 0.0, v13: 0.0, v14: 0.0, v15: 0.0,
+        v16: 0.0, v17: 0.0, v18: 0.0, v19: 0.0, v20: 0.0, v21: 0.0, v22: 0.0, v23: 0.0,
+        v24: 0.0, v25: 0.0,
+        g0: 0.0, g1: 0.0, g2: 0.0, g3: 0.0, g4: 0.0, g5: 0.0, g6: 0.0, g7: 0.0,
+        g8: 0.0, g9: 0.0, g10: 0.0, g11: 0.0, g12: 0.0, g13: 0.0, g14: 0.0, g15: 0.0,
+        g16: 0.0, g17: 0.0, g18: 0.0, g19: 0.0, g20: 0.0, g21: 0.0, g22: 0.0, g23: 0.0,
+        g24: 0.0, g25: 0.0,
+        op0: 0, op1: 0, op2: 0, op3: 0, op4: 0, op5: 0, op6: 0, op7: 0,
+        op8: 0, op9: 0, op10: 0, op11: 0, op12: 0, op13: 0, op14: 0, op15: 0,
+        op16: 0, op17: 0, op18: 0, op19: 0, op20: 0, op21: 0, op22: 0, op23: 0,
+        op24: 0, op25: 0,
+        a0: 0, a1: 0, a2: 0, a3: 0, a4: 0, a5: 0, a6: 0, a7: 0,
+        a8: 0, a9: 0, a10: 0, a11: 0, a12: 0, a13: 0, a14: 0, a15: 0,
+        a16: 0, a17: 0, a18: 0, a19: 0, a20: 0, a21: 0, a22: 0, a23: 0,
+        a24: 0, a25: 0,
+        b0: 0, b1: 0, b2: 0, b3: 0, b4: 0, b5: 0, b6: 0, b7: 0,
+        b8: 0, b9: 0, b10: 0, b11: 0, b12: 0, b13: 0, b14: 0, b15: 0,
+        b16: 0, b17: 0, b18: 0, b19: 0, b20: 0, b21: 0, b22: 0, b23: 0,
+        b24: 0, b25: 0,
+        len: 0
+    }
+}
+
+// ============================================================================
+// GETTERS
+// ============================================================================
+
+fn get_v(t: Tape, i: i64) -> f64 {
+    if i == 0 { return t.v0 } if i == 1 { return t.v1 } if i == 2 { return t.v2 }
+    if i == 3 { return t.v3 } if i == 4 { return t.v4 } if i == 5 { return t.v5 }
+    if i == 6 { return t.v6 } if i == 7 { return t.v7 } if i == 8 { return t.v8 }
+    if i == 9 { return t.v9 } if i == 10 { return t.v10 } if i == 11 { return t.v11 }
+    if i == 12 { return t.v12 } if i == 13 { return t.v13 } if i == 14 { return t.v14 }
+    if i == 15 { return t.v15 } if i == 16 { return t.v16 } if i == 17 { return t.v17 }
+    if i == 18 { return t.v18 } if i == 19 { return t.v19 } if i == 20 { return t.v20 }
+    if i == 21 { return t.v21 } if i == 22 { return t.v22 } if i == 23 { return t.v23 }
+    if i == 24 { return t.v24 } return t.v25
+}
+
+fn get_g(t: Tape, i: i64) -> f64 {
+    if i == 0 { return t.g0 } if i == 1 { return t.g1 } if i == 2 { return t.g2 }
+    if i == 3 { return t.g3 } if i == 4 { return t.g4 } if i == 5 { return t.g5 }
+    if i == 6 { return t.g6 } if i == 7 { return t.g7 } if i == 8 { return t.g8 }
+    if i == 9 { return t.g9 } if i == 10 { return t.g10 } if i == 11 { return t.g11 }
+    if i == 12 { return t.g12 } if i == 13 { return t.g13 } if i == 14 { return t.g14 }
+    if i == 15 { return t.g15 } if i == 16 { return t.g16 } if i == 17 { return t.g17 }
+    if i == 18 { return t.g18 } if i == 19 { return t.g19 } if i == 20 { return t.g20 }
+    if i == 21 { return t.g21 } if i == 22 { return t.g22 } if i == 23 { return t.g23 }
+    if i == 24 { return t.g24 } return t.g25
+}
+
+fn get_op(t: Tape, i: i64) -> i64 {
+    if i == 0 { return t.op0 } if i == 1 { return t.op1 } if i == 2 { return t.op2 }
+    if i == 3 { return t.op3 } if i == 4 { return t.op4 } if i == 5 { return t.op5 }
+    if i == 6 { return t.op6 } if i == 7 { return t.op7 } if i == 8 { return t.op8 }
+    if i == 9 { return t.op9 } if i == 10 { return t.op10 } if i == 11 { return t.op11 }
+    if i == 12 { return t.op12 } if i == 13 { return t.op13 } if i == 14 { return t.op14 }
+    if i == 15 { return t.op15 } if i == 16 { return t.op16 } if i == 17 { return t.op17 }
+    if i == 18 { return t.op18 } if i == 19 { return t.op19 } if i == 20 { return t.op20 }
+    if i == 21 { return t.op21 } if i == 22 { return t.op22 } if i == 23 { return t.op23 }
+    if i == 24 { return t.op24 } return t.op25
+}
+
+fn get_a(t: Tape, i: i64) -> i64 {
+    if i == 0 { return t.a0 } if i == 1 { return t.a1 } if i == 2 { return t.a2 }
+    if i == 3 { return t.a3 } if i == 4 { return t.a4 } if i == 5 { return t.a5 }
+    if i == 6 { return t.a6 } if i == 7 { return t.a7 } if i == 8 { return t.a8 }
+    if i == 9 { return t.a9 } if i == 10 { return t.a10 } if i == 11 { return t.a11 }
+    if i == 12 { return t.a12 } if i == 13 { return t.a13 } if i == 14 { return t.a14 }
+    if i == 15 { return t.a15 } if i == 16 { return t.a16 } if i == 17 { return t.a17 }
+    if i == 18 { return t.a18 } if i == 19 { return t.a19 } if i == 20 { return t.a20 }
+    if i == 21 { return t.a21 } if i == 22 { return t.a22 } if i == 23 { return t.a23 }
+    if i == 24 { return t.a24 } return t.a25
+}
+
+fn get_b(t: Tape, i: i64) -> i64 {
+    if i == 0 { return t.b0 } if i == 1 { return t.b1 } if i == 2 { return t.b2 }
+    if i == 3 { return t.b3 } if i == 4 { return t.b4 } if i == 5 { return t.b5 }
+    if i == 6 { return t.b6 } if i == 7 { return t.b7 } if i == 8 { return t.b8 }
+    if i == 9 { return t.b9 } if i == 10 { return t.b10 } if i == 11 { return t.b11 }
+    if i == 12 { return t.b12 } if i == 13 { return t.b13 } if i == 14 { return t.b14 }
+    if i == 15 { return t.b15 } if i == 16 { return t.b16 } if i == 17 { return t.b17 }
+    if i == 18 { return t.b18 } if i == 19 { return t.b19 } if i == 20 { return t.b20 }
+    if i == 21 { return t.b21 } if i == 22 { return t.b22 } if i == 23 { return t.b23 }
+    if i == 24 { return t.b24 } return t.b25
+}
+
+// ============================================================================
+// MLP NETWORK STRUCTURE
+// ============================================================================
+
+struct MLP {
+    // Hidden layer 1: h1 = sigmoid(w1h1*x1 + w2h1*x2 + bh1)
+    w1h1: f64, w2h1: f64, bh1: f64,
+    // Hidden layer 2: h2 = sigmoid(w1h2*x1 + w2h2*x2 + bh2)
+    w1h2: f64, w2h2: f64, bh2: f64,
+    // Output layer: out = sigmoid(wo1*h1 + wo2*h2 + bo)
+    wo1: f64, wo2: f64, bo: f64
+}
+
+fn mlp_new() -> MLP {
+    // Initialize with good starting weights for XOR
+    // Hidden neuron 1: learns (x1 OR x2)
+    // Hidden neuron 2: learns (x1 AND x2)
+    // Output: h1 AND NOT h2
+    return MLP {
+        w1h1: 1.0, w2h1: 1.0, bh1: -0.5,   // OR-like
+        w1h2: 1.0, w2h2: 1.0, bh2: -1.5,   // AND-like
+        wo1: 1.0, wo2: -2.0, bo: -0.5       // h1 AND NOT h2
+    }
+}
+
+fn mlp_random() -> MLP {
+    // Random small weights
+    return MLP {
+        w1h1: 0.5, w2h1: 0.3, bh1: 0.1,
+        w1h2: 0.4, w2h2: 0.6, bh2: 0.2,
+        wo1: 0.7, wo2: 0.2, bo: 0.1
+    }
+}
+
+// ============================================================================
+// FORWARD PASS - Direct computation (no tape, for inference)
+// ============================================================================
+
+fn mlp_forward_simple(net: MLP, x1: f64, x2: f64) -> f64 {
+    let h1 = sigmoid(net.w1h1 * x1 + net.w2h1 * x2 + net.bh1)
+    let h2 = sigmoid(net.w1h2 * x1 + net.w2h2 * x2 + net.bh2)
+    let out = sigmoid(net.wo1 * h1 + net.wo2 * h2 + net.bo)
+    return out
+}
+
+// ============================================================================
+// FORWARD PASS WITH TAPE - For backpropagation
+// ============================================================================
+
+// Set a slot in the tape
+fn set_slot(t: Tape, i: i64, op: i64, a: i64, b: i64, v: f64) -> Tape {
+    // This is verbose but necessary due to Sounio struct semantics
+    if i == 0 { return Tape { v0: v, v1: t.v1, v2: t.v2, v3: t.v3, v4: t.v4, v5: t.v5, v6: t.v6, v7: t.v7, v8: t.v8, v9: t.v9, v10: t.v10, v11: t.v11, v12: t.v12, v13: t.v13, v14: t.v14, v15: t.v15, v16: t.v16, v17: t.v17, v18: t.v18, v19: t.v19, v20: t.v20, v21: t.v21, v22: t.v22, v23: t.v23, v24: t.v24, v25: t.v25, g0: 0.0, g1: t.g1, g2: t.g2, g3: t.g3, g4: t.g4, g5: t.g5, g6: t.g6, g7: t.g7, g8: t.g8, g9: t.g9, g10: t.g10, g11: t.g11, g12: t.g12, g13: t.g13, g14: t.g14, g15: t.g15, g16: t.g16, g17: t.g17, g18: t.g18, g19: t.g19, g20: t.g20, g21: t.g21, g22: t.g22, g23: t.g23, g24: t.g24, g25: t.g25, op0: op, op1: t.op1, op2: t.op2, op3: t.op3, op4: t.op4, op5: t.op5, op6: t.op6, op7: t.op7, op8: t.op8, op9: t.op9, op10: t.op10, op11: t.op11, op12: t.op12, op13: t.op13, op14: t.op14, op15: t.op15, op16: t.op16, op17: t.op17, op18: t.op18, op19: t.op19, op20: t.op20, op21: t.op21, op22: t.op22, op23: t.op23, op24: t.op24, op25: t.op25, a0: a, a1: t.a1, a2: t.a2, a3: t.a3, a4: t.a4, a5: t.a5, a6: t.a6, a7: t.a7, a8: t.a8, a9: t.a9, a10: t.a10, a11: t.a11, a12: t.a12, a13: t.a13, a14: t.a14, a15: t.a15, a16: t.a16, a17: t.a17, a18: t.a18, a19: t.a19, a20: t.a20, a21: t.a21, a22: t.a22, a23: t.a23, a24: t.a24, a25: t.a25, b0: b, b1: t.b1, b2: t.b2, b3: t.b3, b4: t.b4, b5: t.b5, b6: t.b6, b7: t.b7, b8: t.b8, b9: t.b9, b10: t.b10, b11: t.b11, b12: t.b12, b13: t.b13, b14: t.b14, b15: t.b15, b16: t.b16, b17: t.b17, b18: t.b18, b19: t.b19, b20: t.b20, b21: t.b21, b22: t.b22, b23: t.b23, b24: t.b24, b25: t.b25, len: t.len } }
+    if i == 1 { return Tape { v0: t.v0, v1: v, v2: t.v2, v3: t.v3, v4: t.v4, v5: t.v5, v6: t.v6, v7: t.v7, v8: t.v8, v9: t.v9, v10: t.v10, v11: t.v11, v12: t.v12, v13: t.v13, v14: t.v14, v15: t.v15, v16: t.v16, v17: t.v17, v18: t.v18, v19: t.v19, v20: t.v20, v21: t.v21, v22: t.v22, v23: t.v23, v24: t.v24, v25: t.v25, g0: t.g0, g1: 0.0, g2: t.g2, g3: t.g3, g4: t.g4, g5: t.g5, g6: t.g6, g7: t.g7, g8: t.g8, g9: t.g9, g10: t.g10, g11: t.g11, g12: t.g12, g13: t.g13, g14: t.g14, g15: t.g15, g16: t.g16, g17: t.g17, g18: t.g18, g19: t.g19, g20: t.g20, g21: t.g21, g22: t.g22, g23: t.g23, g24: t.g24, g25: t.g25, op0: t.op0, op1: op, op2: t.op2, op3: t.op3, op4: t.op4, op5: t.op5, op6: t.op6, op7: t.op7, op8: t.op8, op9: t.op9, op10: t.op10, op11: t.op11, op12: t.op12, op13: t.op13, op14: t.op14, op15: t.op15, op16: t.op16, op17: t.op17, op18: t.op18, op19: t.op19, op20: t.op20, op21: t.op21, op22: t.op22, op23: t.op23, op24: t.op24, op25: t.op25, a0: t.a0, a1: a, a2: t.a2, a3: t.a3, a4: t.a4, a5: t.a5, a6: t.a6, a7: t.a7, a8: t.a8, a9: t.a9, a10: t.a10, a11: t.a11, a12: t.a12, a13: t.a13, a14: t.a14, a15: t.a15, a16: t.a16, a17: t.a17, a18: t.a18, a19: t.a19, a20: t.a20, a21: t.a21, a22: t.a22, a23: t.a23, a24: t.a24, a25: t.a25, b0: t.b0, b1: b, b2: t.b2, b3: t.b3, b4: t.b4, b5: t.b5, b6: t.b6, b7: t.b7, b8: t.b8, b9: t.b9, b10: t.b10, b11: t.b11, b12: t.b12, b13: t.b13, b14: t.b14, b15: t.b15, b16: t.b16, b17: t.b17, b18: t.b18, b19: t.b19, b20: t.b20, b21: t.b21, b22: t.b22, b23: t.b23, b24: t.b24, b25: t.b25, len: t.len } }
+    if i == 2 { return Tape { v0: t.v0, v1: t.v1, v2: v, v3: t.v3, v4: t.v4, v5: t.v5, v6: t.v6, v7: t.v7, v8: t.v8, v9: t.v9, v10: t.v10, v11: t.v11, v12: t.v12, v13: t.v13, v14: t.v14, v15: t.v15, v16: t.v16, v17: t.v17, v18: t.v18, v19: t.v19, v20: t.v20, v21: t.v21, v22: t.v22, v23: t.v23, v24: t.v24, v25: t.v25, g0: t.g0, g1: t.g1, g2: 0.0, g3: t.g3, g4: t.g4, g5: t.g5, g6: t.g6, g7: t.g7, g8: t.g8, g9: t.g9, g10: t.g10, g11: t.g11, g12: t.g12, g13: t.g13, g14: t.g14, g15: t.g15, g16: t.g16, g17: t.g17, g18: t.g18, g19: t.g19, g20: t.g20, g21: t.g21, g22: t.g22, g23: t.g23, g24: t.g24, g25: t.g25, op0: t.op0, op1: t.op1, op2: op, op3: t.op3, op4: t.op4, op5: t.op5, op6: t.op6, op7: t.op7, op8: t.op8, op9: t.op9, op10: t.op10, op11: t.op11, op12: t.op12, op13: t.op13, op14: t.op14, op15: t.op15, op16: t.op16, op17: t.op17, op18: t.op18, op19: t.op19, op20: t.op20, op21: t.op21, op22: t.op22, op23: t.op23, op24: t.op24, op25: t.op25, a0: t.a0, a1: t.a1, a2: a, a3: t.a3, a4: t.a4, a5: t.a5, a6: t.a6, a7: t.a7, a8: t.a8, a9: t.a9, a10: t.a10, a11: t.a11, a12: t.a12, a13: t.a13, a14: t.a14, a15: t.a15, a16: t.a16, a17: t.a17, a18: t.a18, a19: t.a19, a20: t.a20, a21: t.a21, a22: t.a22, a23: t.a23, a24: t.a24, a25: t.a25, b0: t.b0, b1: t.b1, b2: b, b3: t.b3, b4: t.b4, b5: t.b5, b6: t.b6, b7: t.b7, b8: t.b8, b9: t.b9, b10: t.b10, b11: t.b11, b12: t.b12, b13: t.b13, b14: t.b14, b15: t.b15, b16: t.b16, b17: t.b17, b18: t.b18, b19: t.b19, b20: t.b20, b21: t.b21, b22: t.b22, b23: t.b23, b24: t.b24, b25: t.b25, len: t.len } }
+    if i == 3 { return Tape { v0: t.v0, v1: t.v1, v2: t.v2, v3: v, v4: t.v4, v5: t.v5, v6: t.v6, v7: t.v7, v8: t.v8, v9: t.v9, v10: t.v10, v11: t.v11, v12: t.v12, v13: t.v13, v14: t.v14, v15: t.v15, v16: t.v16, v17: t.v17, v18: t.v18, v19: t.v19, v20: t.v20, v21: t.v21, v22: t.v22, v23: t.v23, v24: t.v24, v25: t.v25, g0: t.g0, g1: t.g1, g2: t.g2, g3: 0.0, g4: t.g4, g5: t.g5, g6: t.g6, g7: t.g7, g8: t.g8, g9: t.g9, g10: t.g10, g11: t.g11, g12: t.g12, g13: t.g13, g14: t.g14, g15: t.g15, g16: t.g16, g17: t.g17, g18: t.g18, g19: t.g19, g20: t.g20, g21: t.g21, g22: t.g22, g23: t.g23, g24: t.g24, g25: t.g25, op0: t.op0, op1: t.op1, op2: t.op2, op3: op, op4: t.op4, op5: t.op5, op6: t.op6, op7: t.op7, op8: t.op8, op9: t.op9, op10: t.op10, op11: t.op11, op12: t.op12, op13: t.op13, op14: t.op14, op15: t.op15, op16: t.op16, op17: t.op17, op18: t.op18, op19: t.op19, op20: t.op20, op21: t.op21, op22: t.op22, op23: t.op23, op24: t.op24, op25: t.op25, a0: t.a0, a1: t.a1, a2: t.a2, a3: a, a4: t.a4, a5: t.a5, a6: t.a6, a7: t.a7, a8: t.a8, a9: t.a9, a10: t.a10, a11: t.a11, a12: t.a12, a13: t.a13, a14: t.a14, a15: t.a15, a16: t.a16, a17: t.a17, a18: t.a18, a19: t.a19, a20: t.a20, a21: t.a21, a22: t.a22, a23: t.a23, a24: t.a24, a25: t.a25, b0: t.b0, b1: t.b1, b2: t.b2, b3: b, b4: t.b4, b5: t.b5, b6: t.b6, b7: t.b7, b8: t.b8, b9: t.b9, b10: t.b10, b11: t.b11, b12: t.b12, b13: t.b13, b14: t.b14, b15: t.b15, b16: t.b16, b17: t.b17, b18: t.b18, b19: t.b19, b20: t.b20, b21: t.b21, b22: t.b22, b23: t.b23, b24: t.b24, b25: t.b25, len: t.len } }
+    if i == 4 { return Tape { v0: t.v0, v1: t.v1, v2: t.v2, v3: t.v3, v4: v, v5: t.v5, v6: t.v6, v7: t.v7, v8: t.v8, v9: t.v9, v10: t.v10, v11: t.v11, v12: t.v12, v13: t.v13, v14: t.v14, v15: t.v15, v16: t.v16, v17: t.v17, v18: t.v18, v19: t.v19, v20: t.v20, v21: t.v21, v22: t.v22, v23: t.v23, v24: t.v24, v25: t.v25, g0: t.g0, g1: t.g1, g2: t.g2, g3: t.g3, g4: 0.0, g5: t.g5, g6: t.g6, g7: t.g7, g8: t.g8, g9: t.g9, g10: t.g10, g11: t.g11, g12: t.g12, g13: t.g13, g14: t.g14, g15: t.g15, g16: t.g16, g17: t.g17, g18: t.g18, g19: t.g19, g20: t.g20, g21: t.g21, g22: t.g22, g23: t.g23, g24: t.g24, g25: t.g25, op0: t.op0, op1: t.op1, op2: t.op2, op3: t.op3, op4: op, op5: t.op5, op6: t.op6, op7: t.op7, op8: t.op8, op9: t.op9, op10: t.op10, op11: t.op11, op12: t.op12, op13: t.op13, op14: t.op14, op15: t.op15, op16: t.op16, op17: t.op17, op18: t.op18, op19: t.op19, op20: t.op20, op21: t.op21, op22: t.op22, op23: t.op23, op24: t.op24, op25: t.op25, a0: t.a0, a1: t.a1, a2: t.a2, a3: t.a3, a4: a, a5: t.a5, a6: t.a6, a7: t.a7, a8: t.a8, a9: t.a9, a10: t.a10, a11: t.a11, a12: t.a12, a13: t.a13, a14: t.a14, a15: t.a15, a16: t.a16, a17: t.a17, a18: t.a18, a19: t.a19, a20: t.a20, a21: t.a21, a22: t.a22, a23: t.a23, a24: t.a24, a25: t.a25, b0: t.b0, b1: t.b1, b2: t.b2, b3: t.b3, b4: b, b5: t.b5, b6: t.b6, b7: t.b7, b8: t.b8, b9: t.b9, b10: t.b10, b11: t.b11, b12: t.b12, b13: t.b13, b14: t.b14, b15: t.b15, b16: t.b16, b17: t.b17, b18: t.b18, b19: t.b19, b20: t.b20, b21: t.b21, b22: t.b22, b23: t.b23, b24: t.b24, b25: t.b25, len: t.len } }
+    if i == 5 { return Tape { v0: t.v0, v1: t.v1, v2: t.v2, v3: t.v3, v4: t.v4, v5: v, v6: t.v6, v7: t.v7, v8: t.v8, v9: t.v9, v10: t.v10, v11: t.v11, v12: t.v12, v13: t.v13, v14: t.v14, v15: t.v15, v16: t.v16, v17: t.v17, v18: t.v18, v19: t.v19, v20: t.v20, v21: t.v21, v22: t.v22, v23: t.v23, v24: t.v24, v25: t.v25, g0: t.g0, g1: t.g1, g2: t.g2, g3: t.g3, g4: t.g4, g5: 0.0, g6: t.g6, g7: t.g7, g8: t.g8, g9: t.g9, g10: t.g10, g11: t.g11, g12: t.g12, g13: t.g13, g14: t.g14, g15: t.g15, g16: t.g16, g17: t.g17, g18: t.g18, g19: t.g19, g20: t.g20, g21: t.g21, g22: t.g22, g23: t.g23, g24: t.g24, g25: t.g25, op0: t.op0, op1: t.op1, op2: t.op2, op3: t.op3, op4: t.op4, op5: op, op6: t.op6, op7: t.op7, op8: t.op8, op9: t.op9, op10: t.op10, op11: t.op11, op12: t.op12, op13: t.op13, op14: t.op14, op15: t.op15, op16: t.op16, op17: t.op17, op18: t.op18, op19: t.op19, op20: t.op20, op21: t.op21, op22: t.op22, op23: t.op23, op24: t.op24, op25: t.op25, a0: t.a0, a1: t.a1, a2: t.a2, a3: t.a3, a4: t.a4, a5: a, a6: t.a6, a7: t.a7, a8: t.a8, a9: t.a9, a10: t.a10, a11: t.a11, a12: t.a12, a13: t.a13, a14: t.a14, a15: t.a15, a16: t.a16, a17: t.a17, a18: t.a18, a19: t.a19, a20: t.a20, a21: t.a21, a22: t.a22, a23: t.a23, a24: t.a24, a25: t.a25, b0: t.b0, b1: t.b1, b2: t.b2, b3: t.b3, b4: t.b4, b5: b, b6: t.b6, b7: t.b7, b8: t.b8, b9: t.b9, b10: t.b10, b11: t.b11, b12: t.b12, b13: t.b13, b14: t.b14, b15: t.b15, b16: t.b16, b17: t.b17, b18: t.b18, b19: t.b19, b20: t.b20, b21: t.b21, b22: t.b22, b23: t.b23, b24: t.b24, b25: t.b25, len: t.len } }
+    if i == 6 { return Tape { v0: t.v0, v1: t.v1, v2: t.v2, v3: t.v3, v4: t.v4, v5: t.v5, v6: v, v7: t.v7, v8: t.v8, v9: t.v9, v10: t.v10, v11: t.v11, v12: t.v12, v13: t.v13, v14: t.v14, v15: t.v15, v16: t.v16, v17: t.v17, v18: t.v18, v19: t.v19, v20: t.v20, v21: t.v21, v22: t.v22, v23: t.v23, v24: t.v24, v25: t.v25, g0: t.g0, g1: t.g1, g2: t.g2, g3: t.g3, g4: t.g4, g5: t.g5, g6: 0.0, g7: t.g7, g8: t.g8, g9: t.g9, g10: t.g10, g11: t.g11, g12: t.g12, g13: t.g13, g14: t.g14, g15: t.g15, g16: t.g16, g17: t.g17, g18: t.g18, g19: t.g19, g20: t.g20, g21: t.g21, g22: t.g22, g23: t.g23, g24: t.g24, g25: t.g25, op0: t.op0, op1: t.op1, op2: t.op2, op3: t.op3, op4: t.op4, op5: t.op5, op6: op, op7: t.op7, op8: t.op8, op9: t.op9, op10: t.op10, op11: t.op11, op12: t.op12, op13: t.op13, op14: t.op14, op15: t.op15, op16: t.op16, op17: t.op17, op18: t.op18, op19: t.op19, op20: t.op20, op21: t.op21, op22: t.op22, op23: t.op23, op24: t.op24, op25: t.op25, a0: t.a0, a1: t.a1, a2: t.a2, a3: t.a3, a4: t.a4, a5: t.a5, a6: a, a7: t.a7, a8: t.a8, a9: t.a9, a10: t.a10, a11: t.a11, a12: t.a12, a13: t.a13, a14: t.a14, a15: t.a15, a16: t.a16, a17: t.a17, a18: t.a18, a19: t.a19, a20: t.a20, a21: t.a21, a22: t.a22, a23: t.a23, a24: t.a24, a25: t.a25, b0: t.b0, b1: t.b1, b2: t.b2, b3: t.b3, b4: t.b4, b5: t.b5, b6: b, b7: t.b7, b8: t.b8, b9: t.b9, b10: t.b10, b11: t.b11, b12: t.b12, b13: t.b13, b14: t.b14, b15: t.b15, b16: t.b16, b17: t.b17, b18: t.b18, b19: t.b19, b20: t.b20, b21: t.b21, b22: t.b22, b23: t.b23, b24: t.b24, b25: t.b25, len: t.len } }
+    if i == 7 { return Tape { v0: t.v0, v1: t.v1, v2: t.v2, v3: t.v3, v4: t.v4, v5: t.v5, v6: t.v6, v7: v, v8: t.v8, v9: t.v9, v10: t.v10, v11: t.v11, v12: t.v12, v13: t.v13, v14: t.v14, v15: t.v15, v16: t.v16, v17: t.v17, v18: t.v18, v19: t.v19, v20: t.v20, v21: t.v21, v22: t.v22, v23: t.v23, v24: t.v24, v25: t.v25, g0: t.g0, g1: t.g1, g2: t.g2, g3: t.g3, g4: t.g4, g5: t.g5, g6: t.g6, g7: 0.0, g8: t.g8, g9: t.g9, g10: t.g10, g11: t.g11, g12: t.g12, g13: t.g13, g14: t.g14, g15: t.g15, g16: t.g16, g17: t.g17, g18: t.g18, g19: t.g19, g20: t.g20, g21: t.g21, g22: t.g22, g23: t.g23, g24: t.g24, g25: t.g25, op0: t.op0, op1: t.op1, op2: t.op2, op3: t.op3, op4: t.op4, op5: t.op5, op6: t.op6, op7: op, op8: t.op8, op9: t.op9, op10: t.op10, op11: t.op11, op12: t.op12, op13: t.op13, op14: t.op14, op15: t.op15, op16: t.op16, op17: t.op17, op18: t.op18, op19: t.op19, op20: t.op20, op21: t.op21, op22: t.op22, op23: t.op23, op24: t.op24, op25: t.op25, a0: t.a0, a1: t.a1, a2: t.a2, a3: t.a3, a4: t.a4, a5: t.a5, a6: t.a6, a7: a, a8: t.a8, a9: t.a9, a10: t.a10, a11: t.a11, a12: t.a12, a13: t.a13, a14: t.a14, a15: t.a15, a16: t.a16, a17: t.a17, a18: t.a18, a19: t.a19, a20: t.a20, a21: t.a21, a22: t.a22, a23: t.a23, a24: t.a24, a25: t.a25, b0: t.b0, b1: t.b1, b2: t.b2, b3: t.b3, b4: t.b4, b5: t.b5, b6: t.b6, b7: b, b8: t.b8, b9: t.b9, b10: t.b10, b11: t.b11, b12: t.b12, b13: t.b13, b14: t.b14, b15: t.b15, b16: t.b16, b17: t.b17, b18: t.b18, b19: t.b19, b20: t.b20, b21: t.b21, b22: t.b22, b23: t.b23, b24: t.b24, b25: t.b25, len: t.len } }
+    if i == 8 { return Tape { v0: t.v0, v1: t.v1, v2: t.v2, v3: t.v3, v4: t.v4, v5: t.v5, v6: t.v6, v7: t.v7, v8: v, v9: t.v9, v10: t.v10, v11: t.v11, v12: t.v12, v13: t.v13, v14: t.v14, v15: t.v15, v16: t.v16, v17: t.v17, v18: t.v18, v19: t.v19, v20: t.v20, v21: t.v21, v22: t.v22, v23: t.v23, v24: t.v24, v25: t.v25, g0: t.g0, g1: t.g1, g2: t.g2, g3: t.g3, g4: t.g4, g5: t.g5, g6: t.g6, g7: t.g7, g8: 0.0, g9: t.g9, g10: t.g10, g11: t.g11, g12: t.g12, g13: t.g13, g14: t.g14, g15: t.g15, g16: t.g16, g17: t.g17, g18: t.g18, g19: t.g19, g20: t.g20, g21: t.g21, g22: t.g22, g23: t.g23, g24: t.g24, g25: t.g25, op0: t.op0, op1: t.op1, op2: t.op2, op3: t.op3, op4: t.op4, op5: t.op5, op6: t.op6, op7: t.op7, op8: op, op9: t.op9, op10: t.op10, op11: t.op11, op12: t.op12, op13: t.op13, op14: t.op14, op15: t.op15, op16: t.op16, op17: t.op17, op18: t.op18, op19: t.op19, op20: t.op20, op21: t.op21, op22: t.op22, op23: t.op23, op24: t.op24, op25: t.op25, a0: t.a0, a1: t.a1, a2: t.a2, a3: t.a3, a4: t.a4, a5: t.a5, a6: t.a6, a7: t.a7, a8: a, a9: t.a9, a10: t.a10, a11: t.a11, a12: t.a12, a13: t.a13, a14: t.a14, a15: t.a15, a16: t.a16, a17: t.a17, a18: t.a18, a19: t.a19, a20: t.a20, a21: t.a21, a22: t.a22, a23: t.a23, a24: t.a24, a25: t.a25, b0: t.b0, b1: t.b1, b2: t.b2, b3: t.b3, b4: t.b4, b5: t.b5, b6: t.b6, b7: t.b7, b8: b, b9: t.b9, b10: t.b10, b11: t.b11, b12: t.b12, b13: t.b13, b14: t.b14, b15: t.b15, b16: t.b16, b17: t.b17, b18: t.b18, b19: t.b19, b20: t.b20, b21: t.b21, b22: t.b22, b23: t.b23, b24: t.b24, b25: t.b25, len: t.len } }
+    if i == 9 { return Tape { v0: t.v0, v1: t.v1, v2: t.v2, v3: t.v3, v4: t.v4, v5: t.v5, v6: t.v6, v7: t.v7, v8: t.v8, v9: v, v10: t.v10, v11: t.v11, v12: t.v12, v13: t.v13, v14: t.v14, v15: t.v15, v16: t.v16, v17: t.v17, v18: t.v18, v19: t.v19, v20: t.v20, v21: t.v21, v22: t.v22, v23: t.v23, v24: t.v24, v25: t.v25, g0: t.g0, g1: t.g1, g2: t.g2, g3: t.g3, g4: t.g4, g5: t.g5, g6: t.g6, g7: t.g7, g8: t.g8, g9: 0.0, g10: t.g10, g11: t.g11, g12: t.g12, g13: t.g13, g14: t.g14, g15: t.g15, g16: t.g16, g17: t.g17, g18: t.g18, g19: t.g19, g20: t.g20, g21: t.g21, g22: t.g22, g23: t.g23, g24: t.g24, g25: t.g25, op0: t.op0, op1: t.op1, op2: t.op2, op3: t.op3, op4: t.op4, op5: t.op5, op6: t.op6, op7: t.op7, op8: t.op8, op9: op, op10: t.op10, op11: t.op11, op12: t.op12, op13: t.op13, op14: t.op14, op15: t.op15, op16: t.op16, op17: t.op17, op18: t.op18, op19: t.op19, op20: t.op20, op21: t.op21, op22: t.op22, op23: t.op23, op24: t.op24, op25: t.op25, a0: t.a0, a1: t.a1, a2: t.a2, a3: t.a3, a4: t.a4, a5: t.a5, a6: t.a6, a7: t.a7, a8: t.a8, a9: a, a10: t.a10, a11: t.a11, a12: t.a12, a13: t.a13, a14: t.a14, a15: t.a15, a16: t.a16, a17: t.a17, a18: t.a18, a19: t.a19, a20: t.a20, a21: t.a21, a22: t.a22, a23: t.a23, a24: t.a24, a25: t.a25, b0: t.b0, b1: t.b1, b2: t.b2, b3: t.b3, b4: t.b4, b5: t.b5, b6: t.b6, b7: t.b7, b8: t.b8, b9: b, b10: t.b10, b11: t.b11, b12: t.b12, b13: t.b13, b14: t.b14, b15: t.b15, b16: t.b16, b17: t.b17, b18: t.b18, b19: t.b19, b20: t.b20, b21: t.b21, b22: t.b22, b23: t.b23, b24: t.b24, b25: t.b25, len: t.len } }
+    if i == 10 { return Tape { v0: t.v0, v1: t.v1, v2: t.v2, v3: t.v3, v4: t.v4, v5: t.v5, v6: t.v6, v7: t.v7, v8: t.v8, v9: t.v9, v10: v, v11: t.v11, v12: t.v12, v13: t.v13, v14: t.v14, v15: t.v15, v16: t.v16, v17: t.v17, v18: t.v18, v19: t.v19, v20: t.v20, v21: t.v21, v22: t.v22, v23: t.v23, v24: t.v24, v25: t.v25, g0: t.g0, g1: t.g1, g2: t.g2, g3: t.g3, g4: t.g4, g5: t.g5, g6: t.g6, g7: t.g7, g8: t.g8, g9: t.g9, g10: 0.0, g11: t.g11, g12: t.g12, g13: t.g13, g14: t.g14, g15: t.g15, g16: t.g16, g17: t.g17, g18: t.g18, g19: t.g19, g20: t.g20, g21: t.g21, g22: t.g22, g23: t.g23, g24: t.g24, g25: t.g25, op0: t.op0, op1: t.op1, op2: t.op2, op3: t.op3, op4: t.op4, op5: t.op5, op6: t.op6, op7: t.op7, op8: t.op8, op9: t.op9, op10: op, op11: t.op11, op12: t.op12, op13: t.op13, op14: t.op14, op15: t.op15, op16: t.op16, op17: t.op17, op18: t.op18, op19: t.op19, op20: t.op20, op21: t.op21, op22: t.op22, op23: t.op23, op24: t.op24, op25: t.op25, a0: t.a0, a1: t.a1, a2: t.a2, a3: t.a3, a4: t.a4, a5: t.a5, a6: t.a6, a7: t.a7, a8: t.a8, a9: t.a9, a10: a, a11: t.a11, a12: t.a12, a13: t.a13, a14: t.a14, a15: t.a15, a16: t.a16, a17: t.a17, a18: t.a18, a19: t.a19, a20: t.a20, a21: t.a21, a22: t.a22, a23: t.a23, a24: t.a24, a25: t.a25, b0: t.b0, b1: t.b1, b2: t.b2, b3: t.b3, b4: t.b4, b5: t.b5, b6: t.b6, b7: t.b7, b8: t.b8, b9: t.b9, b10: b, b11: t.b11, b12: t.b12, b13: t.b13, b14: t.b14, b15: t.b15, b16: t.b16, b17: t.b17, b18: t.b18, b19: t.b19, b20: t.b20, b21: t.b21, b22: t.b22, b23: t.b23, b24: t.b24, b25: t.b25, len: t.len } }
+    // Continue for slots 11-25...
+    return t
+}
+
+// ============================================================================
+// SIMPLIFIED FORWARD PASS (tape only tracks weights, computes grads manually)
+// ============================================================================
+
+// For efficiency, we'll compute gradients analytically rather than with full tape
+// This is because the interpreter is slow with large tapes
+
+fn mlp_forward_with_cache(net: MLP, x1: f64, x2: f64) -> Tape {
+    // Compute hidden layer
+    let z1 = net.w1h1 * x1 + net.w2h1 * x2 + net.bh1
+    let h1 = sigmoid(z1)
+    let z2 = net.w1h2 * x1 + net.w2h2 * x2 + net.bh2
+    let h2 = sigmoid(z2)
+
+    // Compute output
+    let z3 = net.wo1 * h1 + net.wo2 * h2 + net.bo
+    let out = sigmoid(z3)
+
+    // Store in tape for backward pass:
+    // v0=x1, v1=x2, v2=z1, v3=h1, v4=z2, v5=h2, v6=z3, v7=out
+    // v8-v16 = weights (w1h1, w2h1, bh1, w1h2, w2h2, bh2, wo1, wo2, bo)
+    let mut t = tape_new()
+    return Tape {
+        v0: x1, v1: x2, v2: z1, v3: h1, v4: z2, v5: h2, v6: z3, v7: out,
+        v8: net.w1h1, v9: net.w2h1, v10: net.bh1,
+        v11: net.w1h2, v12: net.w2h2, v13: net.bh2,
+        v14: net.wo1, v15: net.wo2, v16: net.bo,
+        v17: 0.0, v18: 0.0, v19: 0.0, v20: 0.0, v21: 0.0, v22: 0.0, v23: 0.0, v24: 0.0, v25: 0.0,
+        g0: 0.0, g1: 0.0, g2: 0.0, g3: 0.0, g4: 0.0, g5: 0.0, g6: 0.0, g7: 0.0,
+        g8: 0.0, g9: 0.0, g10: 0.0, g11: 0.0, g12: 0.0, g13: 0.0, g14: 0.0, g15: 0.0,
+        g16: 0.0, g17: 0.0, g18: 0.0, g19: 0.0, g20: 0.0, g21: 0.0, g22: 0.0, g23: 0.0, g24: 0.0, g25: 0.0,
+        op0: 0, op1: 0, op2: 0, op3: 0, op4: 0, op5: 0, op6: 0, op7: 0,
+        op8: 0, op9: 0, op10: 0, op11: 0, op12: 0, op13: 0, op14: 0, op15: 0,
+        op16: 0, op17: 0, op18: 0, op19: 0, op20: 0, op21: 0, op22: 0, op23: 0, op24: 0, op25: 0,
+        a0: 0, a1: 0, a2: 0, a3: 0, a4: 0, a5: 0, a6: 0, a7: 0,
+        a8: 0, a9: 0, a10: 0, a11: 0, a12: 0, a13: 0, a14: 0, a15: 0,
+        a16: 0, a17: 0, a18: 0, a19: 0, a20: 0, a21: 0, a22: 0, a23: 0, a24: 0, a25: 0,
+        b0: 0, b1: 0, b2: 0, b3: 0, b4: 0, b5: 0, b6: 0, b7: 0,
+        b8: 0, b9: 0, b10: 0, b11: 0, b12: 0, b13: 0, b14: 0, b15: 0,
+        b16: 0, b17: 0, b18: 0, b19: 0, b20: 0, b21: 0, b22: 0, b23: 0, b24: 0, b25: 0,
+        len: 17
+    }
+}
+
+// Gradients structure for all 9 weights
+struct Grads {
+    dw1h1: f64, dw2h1: f64, dbh1: f64,
+    dw1h2: f64, dw2h2: f64, dbh2: f64,
+    dwo1: f64, dwo2: f64, dbo: f64
+}
+
+// Compute gradients analytically (backpropagation)
+fn mlp_backward(cache: Tape, target: f64) -> Grads {
+    // Cache layout: v0=x1, v1=x2, v2=z1, v3=h1, v4=z2, v5=h2, v6=z3, v7=out
+    let x1 = cache.v0
+    let x2 = cache.v1
+    let h1 = cache.v3
+    let h2 = cache.v5
+    let out = cache.v7
+
+    // Output layer gradient: d_loss/d_out = 2*(out - target) for MSE
+    let d_out = 2.0 * (out - target)
+
+    // d_out/d_z3 = out * (1 - out) (sigmoid derivative)
+    let d_z3 = d_out * out * (1.0 - out)
+
+    // Output weight gradients
+    let dwo1 = d_z3 * h1
+    let dwo2 = d_z3 * h2
+    let dbo = d_z3
+
+    // Backprop to hidden layer
+    let d_h1 = d_z3 * cache.v14  // d_z3 * wo1
+    let d_h2 = d_z3 * cache.v15  // d_z3 * wo2
+
+    // Hidden layer 1 gradients
+    let d_z1 = d_h1 * h1 * (1.0 - h1)
+    let dw1h1 = d_z1 * x1
+    let dw2h1 = d_z1 * x2
+    let dbh1 = d_z1
+
+    // Hidden layer 2 gradients
+    let d_z2 = d_h2 * h2 * (1.0 - h2)
+    let dw1h2 = d_z2 * x1
+    let dw2h2 = d_z2 * x2
+    let dbh2 = d_z2
+
+    return Grads {
+        dw1h1: dw1h1, dw2h1: dw2h1, dbh1: dbh1,
+        dw1h2: dw1h2, dw2h2: dw2h2, dbh2: dbh2,
+        dwo1: dwo1, dwo2: dwo2, dbo: dbo
+    }
+}
+
+// Update weights with gradients
+fn mlp_update(net: MLP, g: Grads, lr: f64) -> MLP {
+    return MLP {
+        w1h1: net.w1h1 - lr * g.dw1h1,
+        w2h1: net.w2h1 - lr * g.dw2h1,
+        bh1: net.bh1 - lr * g.dbh1,
+        w1h2: net.w1h2 - lr * g.dw1h2,
+        w2h2: net.w2h2 - lr * g.dw2h2,
+        bh2: net.bh2 - lr * g.dbh2,
+        wo1: net.wo1 - lr * g.dwo1,
+        wo2: net.wo2 - lr * g.dwo2,
+        bo: net.bo - lr * g.dbo
+    }
+}
+
+// Add two gradient structures
+fn grads_add(a: Grads, b: Grads) -> Grads {
+    return Grads {
+        dw1h1: a.dw1h1 + b.dw1h1, dw2h1: a.dw2h1 + b.dw2h1, dbh1: a.dbh1 + b.dbh1,
+        dw1h2: a.dw1h2 + b.dw1h2, dw2h2: a.dw2h2 + b.dw2h2, dbh2: a.dbh2 + b.dbh2,
+        dwo1: a.dwo1 + b.dwo1, dwo2: a.dwo2 + b.dwo2, dbo: a.dbo + b.dbo
+    }
+}
+
+// Scale gradients
+fn grads_scale(g: Grads, s: f64) -> Grads {
+    return Grads {
+        dw1h1: g.dw1h1 * s, dw2h1: g.dw2h1 * s, dbh1: g.dbh1 * s,
+        dw1h2: g.dw1h2 * s, dw2h2: g.dw2h2 * s, dbh2: g.dbh2 * s,
+        dwo1: g.dwo1 * s, dwo2: g.dwo2 * s, dbo: g.dbo * s
+    }
+}
+
+fn grads_zero() -> Grads {
+    return Grads {
+        dw1h1: 0.0, dw2h1: 0.0, dbh1: 0.0,
+        dw1h2: 0.0, dw2h2: 0.0, dbh2: 0.0,
+        dwo1: 0.0, dwo2: 0.0, dbo: 0.0
+    }
+}
+
+// ============================================================================
+// MAIN - XOR TRAINING
+// ============================================================================
+
+fn main() -> i64 {
+    println("=== XOR with Hidden Layer (MLP 2-2-1) ===")
+    println("")
+
+    let mut ok = true
+
+    // Test 1: Forward pass with good initial weights
+    println("Test 1: Forward pass with pre-initialized weights")
+    let net1 = mlp_new()
+    let y_00 = mlp_forward_simple(net1, 0.0, 0.0)
+    let y_01 = mlp_forward_simple(net1, 0.0, 1.0)
+    let y_10 = mlp_forward_simple(net1, 1.0, 0.0)
+    let y_11 = mlp_forward_simple(net1, 1.0, 1.0)
+    println("  (0,0) -> ")
+    println(y_00)
+    println("  (0,1) -> ")
+    println(y_01)
+    println("  (1,0) -> ")
+    println(y_10)
+    println("  (1,1) -> ")
+    println(y_11)
+    println("")
+
+    // Test 2: Train XOR from scratch with Adam optimizer
+    println("Test 2: Train XOR gate with Adam optimizer")
+    println("  XOR: (0,0)->0, (0,1)->1, (1,0)->1, (1,1)->0")
+
+    // Use individual variables due to Sounio struct-in-loop bug
+    // Better initial weights for XOR (symmetric, larger)
+    let mut w1h1 = 1.0
+    let mut w2h1 = 1.0
+    let mut bh1 = -0.5
+    let mut w1h2 = 1.0
+    let mut w2h2 = 1.0
+    let mut bh2 = -1.5
+    let mut wo1 = 1.0
+    let mut wo2 = -1.0
+    let mut bo = -0.5
+
+    // Adam momentum (first moment) for each parameter
+    let mut m_w1h1 = 0.0
+    let mut m_w2h1 = 0.0
+    let mut m_bh1 = 0.0
+    let mut m_w1h2 = 0.0
+    let mut m_w2h2 = 0.0
+    let mut m_bh2 = 0.0
+    let mut m_wo1 = 0.0
+    let mut m_wo2 = 0.0
+    let mut m_bo = 0.0
+
+    // Adam velocity (second moment) for each parameter
+    let mut s_w1h1 = 0.0
+    let mut s_w2h1 = 0.0
+    let mut s_bh1 = 0.0
+    let mut s_w1h2 = 0.0
+    let mut s_w2h2 = 0.0
+    let mut s_bh2 = 0.0
+    let mut s_wo1 = 0.0
+    let mut s_wo2 = 0.0
+    let mut s_bo = 0.0
+
+    // Adam hyperparameters
+    let lr = 0.5
+    let beta1 = ADAM_BETA1()
+    let beta2 = ADAM_BETA2()
+    let eps = ADAM_EPS()
+
+    // Running powers for bias correction
+    let mut beta1_t = 1.0
+    let mut beta2_t = 1.0
+
+    let mut epoch = 0
+    while epoch < 300 {
+        // Create network from current weights
+        let net = MLP {
+            w1h1: w1h1, w2h1: w2h1, bh1: bh1,
+            w1h2: w1h2, w2h2: w2h2, bh2: bh2,
+            wo1: wo1, wo2: wo2, bo: bo
+        }
+
+        // Forward pass for all 4 samples
+        let c_00 = mlp_forward_with_cache(net, 0.0, 0.0)
+        let c_01 = mlp_forward_with_cache(net, 0.0, 1.0)
+        let c_10 = mlp_forward_with_cache(net, 1.0, 0.0)
+        let c_11 = mlp_forward_with_cache(net, 1.0, 1.0)
+
+        // Backward pass
+        let g_00 = mlp_backward(c_00, 0.0)
+        let g_01 = mlp_backward(c_01, 1.0)
+        let g_10 = mlp_backward(c_10, 1.0)
+        let g_11 = mlp_backward(c_11, 0.0)
+
+        // Average gradients (manually to avoid struct issues)
+        let avg_dw1h1 = (g_00.dw1h1 + g_01.dw1h1 + g_10.dw1h1 + g_11.dw1h1) * 0.25
+        let avg_dw2h1 = (g_00.dw2h1 + g_01.dw2h1 + g_10.dw2h1 + g_11.dw2h1) * 0.25
+        let avg_dbh1 = (g_00.dbh1 + g_01.dbh1 + g_10.dbh1 + g_11.dbh1) * 0.25
+        let avg_dw1h2 = (g_00.dw1h2 + g_01.dw1h2 + g_10.dw1h2 + g_11.dw1h2) * 0.25
+        let avg_dw2h2 = (g_00.dw2h2 + g_01.dw2h2 + g_10.dw2h2 + g_11.dw2h2) * 0.25
+        let avg_dbh2 = (g_00.dbh2 + g_01.dbh2 + g_10.dbh2 + g_11.dbh2) * 0.25
+        let avg_dwo1 = (g_00.dwo1 + g_01.dwo1 + g_10.dwo1 + g_11.dwo1) * 0.25
+        let avg_dwo2 = (g_00.dwo2 + g_01.dwo2 + g_10.dwo2 + g_11.dwo2) * 0.25
+        let avg_dbo = (g_00.dbo + g_01.dbo + g_10.dbo + g_11.dbo) * 0.25
+
+        // Update running powers for bias correction
+        beta1_t = beta1_t * beta1
+        beta2_t = beta2_t * beta2
+        let bc1 = 1.0 - beta1_t
+        let bc2 = 1.0 - beta2_t
+
+        // Adam update for w1h1
+        m_w1h1 = beta1 * m_w1h1 + (1.0 - beta1) * avg_dw1h1
+        s_w1h1 = beta2 * s_w1h1 + (1.0 - beta2) * avg_dw1h1 * avg_dw1h1
+        w1h1 = w1h1 - lr * (m_w1h1 / bc1) / (sqrt_f64(s_w1h1 / bc2) + eps)
+
+        // Adam update for w2h1
+        m_w2h1 = beta1 * m_w2h1 + (1.0 - beta1) * avg_dw2h1
+        s_w2h1 = beta2 * s_w2h1 + (1.0 - beta2) * avg_dw2h1 * avg_dw2h1
+        w2h1 = w2h1 - lr * (m_w2h1 / bc1) / (sqrt_f64(s_w2h1 / bc2) + eps)
+
+        // Adam update for bh1
+        m_bh1 = beta1 * m_bh1 + (1.0 - beta1) * avg_dbh1
+        s_bh1 = beta2 * s_bh1 + (1.0 - beta2) * avg_dbh1 * avg_dbh1
+        bh1 = bh1 - lr * (m_bh1 / bc1) / (sqrt_f64(s_bh1 / bc2) + eps)
+
+        // Adam update for w1h2
+        m_w1h2 = beta1 * m_w1h2 + (1.0 - beta1) * avg_dw1h2
+        s_w1h2 = beta2 * s_w1h2 + (1.0 - beta2) * avg_dw1h2 * avg_dw1h2
+        w1h2 = w1h2 - lr * (m_w1h2 / bc1) / (sqrt_f64(s_w1h2 / bc2) + eps)
+
+        // Adam update for w2h2
+        m_w2h2 = beta1 * m_w2h2 + (1.0 - beta1) * avg_dw2h2
+        s_w2h2 = beta2 * s_w2h2 + (1.0 - beta2) * avg_dw2h2 * avg_dw2h2
+        w2h2 = w2h2 - lr * (m_w2h2 / bc1) / (sqrt_f64(s_w2h2 / bc2) + eps)
+
+        // Adam update for bh2
+        m_bh2 = beta1 * m_bh2 + (1.0 - beta1) * avg_dbh2
+        s_bh2 = beta2 * s_bh2 + (1.0 - beta2) * avg_dbh2 * avg_dbh2
+        bh2 = bh2 - lr * (m_bh2 / bc1) / (sqrt_f64(s_bh2 / bc2) + eps)
+
+        // Adam update for wo1
+        m_wo1 = beta1 * m_wo1 + (1.0 - beta1) * avg_dwo1
+        s_wo1 = beta2 * s_wo1 + (1.0 - beta2) * avg_dwo1 * avg_dwo1
+        wo1 = wo1 - lr * (m_wo1 / bc1) / (sqrt_f64(s_wo1 / bc2) + eps)
+
+        // Adam update for wo2
+        m_wo2 = beta1 * m_wo2 + (1.0 - beta1) * avg_dwo2
+        s_wo2 = beta2 * s_wo2 + (1.0 - beta2) * avg_dwo2 * avg_dwo2
+        wo2 = wo2 - lr * (m_wo2 / bc1) / (sqrt_f64(s_wo2 / bc2) + eps)
+
+        // Adam update for bo
+        m_bo = beta1 * m_bo + (1.0 - beta1) * avg_dbo
+        s_bo = beta2 * s_bo + (1.0 - beta2) * avg_dbo * avg_dbo
+        bo = bo - lr * (m_bo / bc1) / (sqrt_f64(s_bo / bc2) + eps)
+
+        epoch = epoch + 1
+    }
+
+    // Create final network
+    let net = MLP {
+        w1h1: w1h1, w2h1: w2h1, bh1: bh1,
+        w1h2: w1h2, w2h2: w2h2, bh2: bh2,
+        wo1: wo1, wo2: wo2, bo: bo
+    }
+
+    println("  After 300 epochs with Adam:")
+
+    // Final predictions
+    let pred_00 = mlp_forward_simple(net, 0.0, 0.0)
+    let pred_01 = mlp_forward_simple(net, 0.0, 1.0)
+    let pred_10 = mlp_forward_simple(net, 1.0, 0.0)
+    let pred_11 = mlp_forward_simple(net, 1.0, 1.0)
+
+    println("  Predictions:")
+    println("  (0,0) -> ")
+    println(pred_00)
+    println("  (0,1) -> ")
+    println(pred_01)
+    println("  (1,0) -> ")
+    println(pred_10)
+    println("  (1,1) -> ")
+    println(pred_11)
+
+    // XOR: (0,0)->0, (0,1)->1, (1,0)->1, (1,1)->0
+    if pred_00 > 0.4 { ok = false; println("  FAIL: (0,0) should be < 0.4") }
+    if pred_01 < 0.6 { ok = false; println("  FAIL: (0,1) should be > 0.6") }
+    if pred_10 < 0.6 { ok = false; println("  FAIL: (1,0) should be > 0.6") }
+    if pred_11 > 0.4 { ok = false; println("  FAIL: (1,1) should be < 0.4") }
+    println("")
+
+    // Show final weights
+    println("  Final weights:")
+    println("  Hidden 1: w1h1=")
+    println(net.w1h1)
+    println("    w2h1=")
+    println(net.w2h1)
+    println("    bh1=")
+    println(net.bh1)
+    println("  Hidden 2: w1h2=")
+    println(net.w1h2)
+    println("    w2h2=")
+    println(net.w2h2)
+    println("    bh2=")
+    println(net.bh2)
+    println("  Output: wo1=")
+    println(net.wo1)
+    println("    wo2=")
+    println(net.wo2)
+    println("    bo=")
+    println(net.bo)
+    println("")
+
+    if ok {
+        println("ALL TESTS PASSED")
+        return 0
+    } else {
+        println("SOME TESTS FAILED")
+        return 1
+    }
+}

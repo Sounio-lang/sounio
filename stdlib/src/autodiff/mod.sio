@@ -1,0 +1,402 @@
+// mod.d - Automatic Differentiation Library for Sounio
+//
+// Implements forward-mode AD using dual numbers.
+// Simplified implementation compatible with current Sounio syntax.
+//
+// Module: autodiff (for future module system)
+
+// =============================================================================
+// MATH HELPERS
+// =============================================================================
+
+fn abs_f64(x: f64) -> f64 {
+    if x < 0.0 { return 0.0 - x }
+    return x
+}
+
+fn sqrt_f64(x: f64) -> f64 {
+    if x <= 0.0 { return 0.0 }
+    let mut y = x
+    let mut i = 0
+    while i < 15 {
+        y = 0.5 * (y + x / y)
+        i = i + 1
+    }
+    return y
+}
+
+fn exp_f64(x: f64) -> f64 {
+    if x > 20.0 { return exp_f64(x / 2.0) * exp_f64(x / 2.0) }
+    if x < 0.0 - 20.0 { return 1.0 / exp_f64(0.0 - x) }
+    let mut sum = 1.0
+    let mut term = 1.0
+    let mut i = 1
+    while i <= 20 {
+        term = term * x / i
+        sum = sum + term
+        i = i + 1
+    }
+    return sum
+}
+
+fn ln_f64(x: f64) -> f64 {
+    if x <= 0.0 { return 0.0 - 1000000.0 }
+    let e = 2.718281828459045
+    let mut val = x
+    let mut k = 0.0
+    while val > e { val = val / e; k = k + 1.0 }
+    while val < 1.0 / e { val = val * e; k = k - 1.0 }
+    let u = (val - 1.0) / (val + 1.0)
+    let u2 = u * u
+    let mut sum = u
+    let mut term = u
+    term = term * u2; sum = sum + term / 3.0
+    term = term * u2; sum = sum + term / 5.0
+    term = term * u2; sum = sum + term / 7.0
+    term = term * u2; sum = sum + term / 9.0
+    term = term * u2; sum = sum + term / 11.0
+    return 2.0 * sum + k
+}
+
+fn pow_f64(x: f64, n: f64) -> f64 {
+    if x <= 0.0 { return 0.0 }
+    return exp_f64(n * ln_f64(x))
+}
+
+fn sin_f64(x: f64) -> f64 {
+    let pi = 3.141592653589793
+    let mut y = x
+    while y > pi { y = y - 2.0 * pi }
+    while y < 0.0 - pi { y = y + 2.0 * pi }
+    let y2 = y * y
+    let mut sum = y
+    let mut term = y
+    term = term * (0.0 - y2) / 6.0; sum = sum + term
+    term = term * (0.0 - y2) / 20.0; sum = sum + term
+    term = term * (0.0 - y2) / 42.0; sum = sum + term
+    term = term * (0.0 - y2) / 72.0; sum = sum + term
+    term = term * (0.0 - y2) / 110.0; sum = sum + term
+    return sum
+}
+
+fn cos_f64(x: f64) -> f64 {
+    let pi = 3.141592653589793
+    let mut y = x
+    while y > pi { y = y - 2.0 * pi }
+    while y < 0.0 - pi { y = y + 2.0 * pi }
+    let y2 = y * y
+    let mut sum = 1.0
+    let mut term = 1.0
+    term = term * (0.0 - y2) / 2.0; sum = sum + term
+    term = term * (0.0 - y2) / 12.0; sum = sum + term
+    term = term * (0.0 - y2) / 30.0; sum = sum + term
+    term = term * (0.0 - y2) / 56.0; sum = sum + term
+    term = term * (0.0 - y2) / 90.0; sum = sum + term
+    return sum
+}
+
+// =============================================================================
+// DUAL NUMBER TYPE (Forward-Mode AD)
+// =============================================================================
+
+// Dual number: value + epsilon * derivative
+// Used for forward-mode automatic differentiation
+struct Dual {
+    val: f64,   // The primal value
+    dot: f64    // The tangent (derivative)
+}
+
+// Create a dual number
+fn dual_new(val: f64, dot: f64) -> Dual {
+    return Dual { val: val, dot: dot }
+}
+
+// Create a constant (derivative = 0)
+fn dual_const(val: f64) -> Dual {
+    return Dual { val: val, dot: 0.0 }
+}
+
+// Create a variable (derivative = 1)
+fn dual_var(val: f64) -> Dual {
+    return Dual { val: val, dot: 1.0 }
+}
+
+// Extract value
+fn dual_value(d: Dual) -> f64 {
+    return d.val
+}
+
+// Extract derivative
+fn dual_deriv(d: Dual) -> f64 {
+    return d.dot
+}
+
+// =============================================================================
+// ARITHMETIC OPERATIONS
+// =============================================================================
+
+fn dual_add(a: Dual, b: Dual) -> Dual {
+    return Dual {
+        val: a.val + b.val,
+        dot: a.dot + b.dot
+    }
+}
+
+fn dual_sub(a: Dual, b: Dual) -> Dual {
+    return Dual {
+        val: a.val - b.val,
+        dot: a.dot - b.dot
+    }
+}
+
+fn dual_mul(a: Dual, b: Dual) -> Dual {
+    // Product rule: (f*g)' = f'*g + f*g'
+    return Dual {
+        val: a.val * b.val,
+        dot: a.dot * b.val + a.val * b.dot
+    }
+}
+
+fn dual_div(a: Dual, b: Dual) -> Dual {
+    // Quotient rule: (f/g)' = (f'*g - f*g') / g^2
+    let g2 = b.val * b.val
+    return Dual {
+        val: a.val / b.val,
+        dot: (a.dot * b.val - a.val * b.dot) / g2
+    }
+}
+
+fn dual_neg(a: Dual) -> Dual {
+    return Dual { val: 0.0 - a.val, dot: 0.0 - a.dot }
+}
+
+// Scale by constant
+fn dual_scale(a: Dual, s: f64) -> Dual {
+    return Dual { val: a.val * s, dot: a.dot * s }
+}
+
+// Add constant
+fn dual_add_const(a: Dual, c: f64) -> Dual {
+    return Dual { val: a.val + c, dot: a.dot }
+}
+
+// =============================================================================
+// MATHEMATICAL FUNCTIONS
+// =============================================================================
+
+fn dual_sqrt(a: Dual) -> Dual {
+    let v = sqrt_f64(a.val)
+    return Dual {
+        val: v,
+        dot: a.dot / (2.0 * v)
+    }
+}
+
+fn dual_exp(a: Dual) -> Dual {
+    let e = exp_f64(a.val)
+    return Dual {
+        val: e,
+        dot: a.dot * e
+    }
+}
+
+fn dual_ln(a: Dual) -> Dual {
+    return Dual {
+        val: ln_f64(a.val),
+        dot: a.dot / a.val
+    }
+}
+
+fn dual_pow(a: Dual, n: f64) -> Dual {
+    let v = pow_f64(a.val, n)
+    return Dual {
+        val: v,
+        dot: a.dot * n * pow_f64(a.val, n - 1.0)
+    }
+}
+
+fn dual_sin(a: Dual) -> Dual {
+    return Dual {
+        val: sin_f64(a.val),
+        dot: a.dot * cos_f64(a.val)
+    }
+}
+
+fn dual_cos(a: Dual) -> Dual {
+    return Dual {
+        val: cos_f64(a.val),
+        dot: 0.0 - a.dot * sin_f64(a.val)
+    }
+}
+
+fn dual_abs(a: Dual) -> Dual {
+    if a.val >= 0.0 {
+        return a
+    }
+    return Dual { val: 0.0 - a.val, dot: 0.0 - a.dot }
+}
+
+// =============================================================================
+// COMMON ACTIVATION FUNCTIONS
+// =============================================================================
+
+fn dual_relu(a: Dual) -> Dual {
+    if a.val > 0.0 {
+        return a
+    }
+    return Dual { val: 0.0, dot: 0.0 }
+}
+
+fn dual_sigmoid(a: Dual) -> Dual {
+    let s = 1.0 / (1.0 + exp_f64(0.0 - a.val))
+    return Dual {
+        val: s,
+        dot: a.dot * s * (1.0 - s)
+    }
+}
+
+fn dual_tanh(a: Dual) -> Dual {
+    let ep = exp_f64(a.val)
+    let em = exp_f64(0.0 - a.val)
+    let t = (ep - em) / (ep + em)
+    return Dual {
+        val: t,
+        dot: a.dot * (1.0 - t * t)
+    }
+}
+
+// =============================================================================
+// GRADIENT COMPUTATION HELPERS
+// =============================================================================
+
+// Compute df/dx at point x using forward-mode AD
+// f must be a function that takes Dual and returns Dual
+fn derivative_at(x: f64, f_val: f64, f_deriv: f64) -> f64 {
+    return f_deriv
+}
+
+// Finite difference check (for validation)
+fn finite_diff(x: f64, fx: f64, fx_plus_h: f64, h: f64) -> f64 {
+    return (fx_plus_h - fx) / h
+}
+
+// =============================================================================
+// TESTS
+// =============================================================================
+
+fn main() -> i32 {
+    println("=== Automatic Differentiation Tests ===")
+    println("")
+
+    // Test 1: Basic arithmetic derivatives
+    println("Test 1: d/dx(x^2) at x=3")
+    let x1 = dual_var(3.0)
+    let y1 = dual_mul(x1, x1)  // x^2
+    println("  f(3) = ")
+    println(y1.val)
+    println("  f'(3) = ")
+    println(y1.dot)
+    // Expected: f(3) = 9, f'(3) = 6
+    println("")
+
+    // Test 2: Chain rule
+    println("Test 2: d/dx(exp(x^2)) at x=1")
+    let x2 = dual_var(1.0)
+    let x2_sq = dual_mul(x2, x2)
+    let y2 = dual_exp(x2_sq)  // exp(x^2)
+    println("  f(1) = ")
+    println(y2.val)
+    println("  f'(1) = ")
+    println(y2.dot)
+    // Expected: f(1) = e, f'(1) = 2*e ≈ 5.436
+    println("")
+
+    // Test 3: Product rule
+    println("Test 3: d/dx(x * sin(x)) at x=pi/2")
+    let pi = 3.141592653589793
+    let x3 = dual_var(pi / 2.0)
+    let sin_x3 = dual_sin(x3)
+    let y3 = dual_mul(x3, sin_x3)  // x * sin(x)
+    println("  f(pi/2) = ")
+    println(y3.val)
+    println("  f'(pi/2) = ")
+    println(y3.dot)
+    // Expected: f(pi/2) = pi/2, f'(pi/2) = sin(pi/2) + (pi/2)*cos(pi/2) = 1
+    println("")
+
+    // Test 4: Quotient rule
+    println("Test 4: d/dx(x / (1 + x^2)) at x=1")
+    let x4 = dual_var(1.0)
+    let one = dual_const(1.0)
+    let x4_sq = dual_mul(x4, x4)
+    let denom = dual_add(one, x4_sq)
+    let y4 = dual_div(x4, denom)  // x / (1 + x^2)
+    println("  f(1) = ")
+    println(y4.val)
+    println("  f'(1) = ")
+    println(y4.dot)
+    // Expected: f(1) = 0.5, f'(1) = (1*(1+1) - 1*2*1) / (1+1)^2 = 0
+    println("")
+
+    // Test 5: Sigmoid derivative
+    println("Test 5: d/dx(sigmoid(x)) at x=0")
+    let x5 = dual_var(0.0)
+    let y5 = dual_sigmoid(x5)
+    println("  sigmoid(0) = ")
+    println(y5.val)
+    println("  sigmoid'(0) = ")
+    println(y5.dot)
+    // Expected: sigmoid(0) = 0.5, sigmoid'(0) = 0.25
+    println("")
+
+    // Test 6: Compose multiple operations
+    println("Test 6: d/dx(sqrt(1 + x^2)) at x=2")
+    let x6 = dual_var(2.0)
+    let x6_sq = dual_mul(x6, x6)
+    let sum6 = dual_add(dual_const(1.0), x6_sq)
+    let y6 = dual_sqrt(sum6)
+    println("  f(2) = ")
+    println(y6.val)
+    println("  f'(2) = ")
+    println(y6.dot)
+    // Expected: f(2) = sqrt(5) ≈ 2.236, f'(2) = 2/sqrt(5) ≈ 0.894
+    println("")
+
+    // Validation
+    let err1 = abs_f64(y1.val - 9.0)
+    let err2 = abs_f64(y1.dot - 6.0)
+    let err3 = abs_f64(y4.val - 0.5)
+    let err4 = abs_f64(y4.dot - 0.0)
+    let err5 = abs_f64(y5.val - 0.5)
+    let err6 = abs_f64(y5.dot - 0.25)
+
+    if err1 < 0.001 {
+        if err2 < 0.001 {
+            if err3 < 0.001 {
+                if err4 < 0.001 {
+                    if err5 < 0.001 {
+                        if err6 < 0.001 {
+                            println("ALL TESTS PASSED")
+                            return 0
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    println("TESTS FAILED")
+    println("  err1:")
+    println(err1)
+    println("  err2:")
+    println(err2)
+    println("  err3:")
+    println(err3)
+    println("  err4:")
+    println(err4)
+    println("  err5:")
+    println(err5)
+    println("  err6:")
+    println(err6)
+    return 1
+}

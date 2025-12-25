@@ -1,16 +1,16 @@
-# Darwin PBPK Platform - Demetrios Implementation
+# Darwin PBPK Platform - Sounio Implementation
 
-Complete physiologically-based pharmacokinetic (PBPK) modeling system implemented in the Demetrios language.
+Complete physiologically-based pharmacokinetic (PBPK) modeling system implemented in the Sounio language.
 
 ## Architecture Overview
 
-Total: 10 modules, ~150KB of Demetrios code
+Total: 10 modules, ~150KB of Sounio code
 
 ## Module: simulation.d (THIS MODULE)
 
 **Purpose:** Top-level PBPK simulation orchestrator that integrates all components.
 
-**Location:** /mnt/e/workspace/demetrios/stdlib/darwin_pbpk/simulation.d
+**Location:** /mnt/e/workspace/sounio/stdlib/darwin_pbpk/simulation.d
 
 **Size:** 23KB, 680 lines, 19 functions, 3 structs
 
@@ -48,7 +48,7 @@ The module provides wrapper functions for common scenarios and detailed example 
 - Functions: 19
 - Structs: 3
 - Size: 23KB
-- Language: Demetrios with unit annotations
+- Language: Sounio with unit annotations
 
 ## Created
 

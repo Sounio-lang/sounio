@@ -1,0 +1,191 @@
+/// Async Runtime Demo
+///
+/// Demonstrates async/await features in Sounio.
+
+import async::*
+
+// Basic async function
+async fn fetch_data(url: string) -> string with Async, IO {
+    // Simulate network delay
+    sleep(Duration::from_millis(100)).await
+    "data from " + url
+}
+
+// Async function with timeout
+async fn fetch_with_timeout(url: string, timeout_ms: u64) -> Result<string, string> with Async, IO {
+    match timeout(Duration::from_millis(timeout_ms), fetch_data(url)).await {
+        Ok(data) => Ok(data),
+        Err(_) => Err("request timed out"),
+    }
+}
+
+// Concurrent fetching
+async fn fetch_all(urls: Vec<string>) -> Vec<string> with Async, IO {
+    let futures = urls.into_iter()
+        .map(|url| fetch_data(url))
+        .collect();
+
+    join_all(futures).await
+}
+
+// Select example - race two operations
+async fn first_response(url1: string, url2: string) -> string with Async, IO {
+    match select(fetch_data(url1), fetch_data(url2)).await {
+        SelectResult::First(data) => "first: " + data,
+        SelectResult::Second(data) => "second: " + data,
+    }
+}
+
+// Channel example
+async fn producer_consumer() with Async {
+    let (tx, mut rx) = mpsc::unbounded();
+
+    // Producer
+    let producer = spawn async move {
+        for i in 0..5 {
+            tx.send(i).unwrap();
+            sleep(Duration::from_millis(10)).await;
+        }
+    };
+
+    // Consumer
+    while let Some(value) = rx.recv().await {
+        println("Received: {}", value);
+    }
+
+    producer.await;
+}
+
+// Mutex example
+async fn shared_counter() with Async {
+    let counter = Mutex::new(0);
+
+    let tasks: Vec<_> = (0..10).map(|_| {
+        let c = &counter;
+        spawn async move {
+            let mut guard = c.lock().await;
+            *guard += 1;
+        }
+    }).collect();
+
+    join_all(tasks).await;
+
+    let final_value = *counter.lock().await;
+    println("Final count: {}", final_value);
+}
+
+// Semaphore for rate limiting
+async fn rate_limited_fetch(urls: Vec<string>, max_concurrent: usize) -> Vec<string> with Async, IO {
+    let sem = Semaphore::new(max_concurrent);
+
+    let futures = urls.into_iter().map(|url| {
+        let s = &sem;
+        async move {
+            let _permit = s.acquire().await;
+            fetch_data(url).await
+        }
+    }).collect();
+
+    join_all(futures).await
+}
+
+// Stream example
+async fn process_stream() with Async {
+    let numbers = stream::iter(vec![1, 2, 3, 4, 5]);
+
+    let result = numbers
+        .map(|x| x * 2)
+        .filter(|x| *x > 4)
+        .collect::<Vec<_>>()
+        .await;
+
+    println("Processed: {:?}", result);
+}
+
+// Interval timer example
+async fn periodic_task() with Async {
+    let mut interval = interval(Duration::from_millis(100));
+
+    for _ in 0..5 {
+        interval.tick().await;
+        println("Tick!");
+    }
+}
+
+// Watch channel for configuration updates
+async fn config_watcher() with Async {
+    let (tx, mut rx) = watch::channel(Config { debug: false });
+
+    // Watcher task
+    let watcher = spawn async move {
+        while rx.changed().await.is_ok() {
+            let config = rx.borrow();
+            println("Config updated: debug={}", config.debug);
+        }
+    };
+
+    // Update config
+    sleep(Duration::from_millis(50)).await;
+    tx.send(Config { debug: true }).unwrap();
+
+    sleep(Duration::from_millis(50)).await;
+    drop(tx);  // Close channel
+
+    watcher.await;
+}
+
+struct Config {
+    debug: bool,
+}
+
+// Main entry point
+fn main() {
+    let runtime = Runtime::new();
+
+    runtime.block_on(async {
+        println("=== Async Demo ===\n");
+
+        // Basic async
+        println("1. Basic async function:");
+        let data = fetch_data("https://example.com").await;
+        println("   {}", data);
+
+        // Concurrent fetching
+        println("\n2. Concurrent fetching:");
+        let urls = vec![
+            "https://api.example.com/1".to_string(),
+            "https://api.example.com/2".to_string(),
+            "https://api.example.com/3".to_string(),
+        ];
+        let results = fetch_all(urls).await;
+        for result in results {
+            println("   {}", result);
+        }
+
+        // Select
+        println("\n3. Select (race):");
+        let first = first_response(
+            "https://slow.example.com".to_string(),
+            "https://fast.example.com".to_string()
+        ).await;
+        println("   {}", first);
+
+        // Channels
+        println("\n4. Producer/Consumer:");
+        producer_consumer().await;
+
+        // Shared state
+        println("\n5. Shared counter:");
+        shared_counter().await;
+
+        // Streams
+        println("\n6. Stream processing:");
+        process_stream().await;
+
+        // Timers
+        println("\n7. Periodic timer:");
+        periodic_task().await;
+
+        println("\n=== Demo Complete ===");
+    });
+}

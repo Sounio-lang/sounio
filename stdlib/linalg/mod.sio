@@ -1,0 +1,697 @@
+// mod.d - Linear Algebra Module for Sounio
+//
+// Comprehensive linear algebra library providing:
+//
+// ## Fixed-Size Types (Stack-Allocated, SIMD-Optimized)
+// - Vec2, Vec3, Vec4: Small fixed-size vectors
+// - Vec14: 14-element vector for PBPK compartment states
+// - Mat2, Mat3, Mat4: Fixed-size matrices
+// - Mat14Diag, Mat14Tridiag: Sparse PBPK Jacobian matrices
+//
+// ## Dynamic Types (Heap-Allocated, BLAS-Accelerated)
+// - DenseVector: Arbitrary-length vector backed by BLAS
+// - DenseMatrix: Arbitrary-size matrix backed by BLAS
+//
+// ## BLAS Operations (Level 1, 2, 3)
+// - Level 1: Vector-vector operations (daxpy, ddot, dnrm2, dscal)
+// - Level 2: Matrix-vector operations (dgemv, dsymv, dtrsv)
+// - Level 3: Matrix-matrix operations (dgemm, dsyrk, dtrsm)
+//
+// ## LAPACK Operations
+// - LU factorization and solve
+// - Cholesky, QR, SVD decompositions
+// - Eigenvalue problems (eig, eigh)
+// - Matrix functions (inv, det, cond, rank, pinv)
+//
+// All fixed-size types are stack-allocated and optimized for small dimensions.
+// Dynamic types use BLAS when available, with pure D fallback otherwise.
+
+module linalg
+
+// ============================================================================
+// RE-EXPORTS: Fixed-Size Types
+// ============================================================================
+
+// Export all fixed-size vector operations
+pub use vector::*
+
+// Export all fixed-size matrix operations
+pub use matrix::*
+
+// ============================================================================
+// RE-EXPORTS: BLAS Operations
+// ============================================================================
+
+// Level 1 BLAS: Vector-vector operations
+pub use blas::daxpy      // y = alpha*x + y
+pub use blas::ddot       // dot product
+pub use blas::dnrm2      // Euclidean norm
+pub use blas::dscal      // x = alpha*x
+pub use blas::dasum      // sum of absolute values
+pub use blas::idamax     // index of max absolute value
+pub use blas::dcopy      // copy vector
+
+// Level 2 BLAS: Matrix-vector operations
+pub use blas::dgemv      // y = alpha*A*x + beta*y
+pub use blas::dsymv      // symmetric matrix-vector multiply
+pub use blas::dtrsv      // triangular solve
+
+// Level 3 BLAS: Matrix-matrix operations
+pub use blas::dgemm      // C = alpha*A*B + beta*C
+pub use blas::dsyrk      // symmetric rank-k update
+pub use blas::dtrsm      // triangular matrix solve
+
+// BLAS enums
+pub use blas::BlasOrder
+pub use blas::BlasTranspose
+pub use blas::BlasUplo
+pub use blas::BlasDiag
+pub use blas::BlasSide
+
+// ============================================================================
+// RE-EXPORTS: LAPACK Operations
+// ============================================================================
+
+// Matrix factorizations
+pub use lapack::lu           // LU factorization
+pub use lapack::cholesky     // Cholesky factorization
+pub use lapack::qr           // QR factorization
+pub use lapack::svd          // Singular value decomposition
+
+// Linear solvers
+pub use lapack::solve        // Solve Ax = b via LU
+
+// Matrix properties
+pub use lapack::inv          // Matrix inverse
+pub use lapack::det          // Determinant
+pub use lapack::cond         // Condition number
+pub use lapack::rank         // Matrix rank
+pub use lapack::pinv         // Pseudoinverse
+
+// Eigenvalue problems
+pub use lapack::eig          // General eigenvalue problem
+pub use lapack::eigh         // Symmetric/Hermitian eigenvalue problem
+
+// ============================================================================
+// DYNAMIC VECTOR TYPE
+// ============================================================================
+
+/// A dynamically-sized vector backed by contiguous memory.
+/// Uses BLAS operations when available for high performance.
+pub struct DenseVector {
+    /// Contiguous storage for vector elements
+    data: &![f64],
+    /// Number of elements
+    len: usize,
+}
+
+impl DenseVector {
+    /// Create a new zero vector of given length
+    pub fn zeros(n: usize) -> DenseVector with Alloc {
+        let data = alloc_array::<f64>(n)
+        for i in 0..n {
+            data[i] = 0.0
+        }
+        DenseVector { data, len: n }
+    }
+
+    /// Create a new vector filled with ones
+    pub fn ones(n: usize) -> DenseVector with Alloc {
+        let data = alloc_array::<f64>(n)
+        for i in 0..n {
+            data[i] = 1.0
+        }
+        DenseVector { data, len: n }
+    }
+
+    /// Create a vector from a slice
+    pub fn from_slice(slice: &[f64]) -> DenseVector with Alloc {
+        let n = slice.len()
+        let data = alloc_array::<f64>(n)
+        for i in 0..n {
+            data[i] = slice[i]
+        }
+        DenseVector { data, len: n }
+    }
+
+    /// Get the length of the vector
+    pub fn len(&self) -> usize {
+        self.len
+    }
+
+    /// Check if vector is empty
+    pub fn is_empty(&self) -> bool {
+        self.len == 0
+    }
+
+    /// Get element at index
+    pub fn get(&self, i: usize) -> f64 {
+        self.data[i]
+    }
+
+    /// Set element at index
+    pub fn set(&!self, i: usize, value: f64) {
+        self.data[i] = value
+    }
+
+    /// Get raw data pointer for BLAS operations
+    pub fn as_ptr(&self) -> &[f64] {
+        self.data
+    }
+
+    /// Get mutable raw data pointer for BLAS operations
+    pub fn as_mut_ptr(&!self) -> &![f64] {
+        self.data
+    }
+
+    // --- BLAS Level 1 Operations ---
+
+    /// Compute dot product: self . other
+    /// Uses BLAS ddot when available
+    pub fn dot(&self, other: &DenseVector) -> f64 {
+        ddot(self.len as i32, self.data, 1, other.data, 1)
+    }
+
+    /// Compute Euclidean norm: ||self||_2
+    /// Uses BLAS dnrm2
+    pub fn norm2(&self) -> f64 {
+        dnrm2(self.len as i32, self.data, 1)
+    }
+
+    /// Compute L1 norm: ||self||_1 = sum(|x_i|)
+    /// Uses BLAS dasum
+    pub fn norm1(&self) -> f64 {
+        dasum(self.len as i32, self.data, 1)
+    }
+
+    /// Scale vector in-place: self = alpha * self
+    /// Uses BLAS dscal
+    pub fn scale(&!self, alpha: f64) {
+        dscal(self.len as i32, alpha, self.data, 1)
+    }
+
+    /// AXPY operation: self = alpha * x + self
+    /// Uses BLAS daxpy
+    pub fn axpy(&!self, alpha: f64, x: &DenseVector) {
+        daxpy(self.len as i32, alpha, x.data, 1, self.data, 1)
+    }
+
+    /// Find index of element with maximum absolute value
+    /// Uses BLAS idamax
+    pub fn imax_abs(&self) -> usize {
+        idamax(self.len as i32, self.data, 1) as usize
+    }
+
+    /// Copy from another vector
+    /// Uses BLAS dcopy
+    pub fn copy_from(&!self, other: &DenseVector) {
+        dcopy(self.len as i32, other.data, 1, self.data, 1)
+    }
+
+    // --- Element-wise Operations ---
+
+    /// Add two vectors: self + other
+    pub fn add(&self, other: &DenseVector) -> DenseVector with Alloc {
+        let mut result = DenseVector::zeros(self.len)
+        result.copy_from(self)
+        result.axpy(1.0, other)
+        result
+    }
+
+    /// Subtract two vectors: self - other
+    pub fn sub(&self, other: &DenseVector) -> DenseVector with Alloc {
+        let mut result = DenseVector::zeros(self.len)
+        result.copy_from(self)
+        result.axpy(-1.0, other)
+        result
+    }
+
+    /// Element-wise multiply: self .* other
+    pub fn hadamard(&self, other: &DenseVector) -> DenseVector with Alloc {
+        let mut result = DenseVector::zeros(self.len)
+        for i in 0..self.len {
+            result.data[i] = self.data[i] * other.data[i]
+        }
+        result
+    }
+
+    /// Sum of all elements
+    pub fn sum(&self) -> f64 {
+        let mut s = 0.0
+        for i in 0..self.len {
+            s = s + self.data[i]
+        }
+        s
+    }
+
+    /// Normalize vector in-place (L2 normalization)
+    pub fn normalize(&!self) {
+        let n = self.norm2()
+        if n > 1e-15 {
+            self.scale(1.0 / n)
+        }
+    }
+
+    /// Return normalized copy
+    pub fn normalized(&self) -> DenseVector with Alloc {
+        let mut result = DenseVector::zeros(self.len)
+        result.copy_from(self)
+        result.normalize()
+        result
+    }
+}
+
+// ============================================================================
+// DYNAMIC MATRIX TYPE
+// ============================================================================
+
+/// A dynamically-sized matrix stored in column-major order (for BLAS compatibility).
+/// Uses BLAS/LAPACK operations when available for high performance.
+pub struct DenseMatrix {
+    /// Contiguous column-major storage
+    data: &![f64],
+    /// Number of rows
+    rows: usize,
+    /// Number of columns
+    cols: usize,
+}
+
+impl DenseMatrix {
+    /// Create a new zero matrix of given dimensions
+    pub fn zeros(rows: usize, cols: usize) -> DenseMatrix with Alloc {
+        let data = alloc_array::<f64>(rows * cols)
+        for i in 0..(rows * cols) {
+            data[i] = 0.0
+        }
+        DenseMatrix { data, rows, cols }
+    }
+
+    /// Create an identity matrix
+    pub fn eye(n: usize) -> DenseMatrix with Alloc {
+        let mut m = DenseMatrix::zeros(n, n)
+        for i in 0..n {
+            m.set(i, i, 1.0)
+        }
+        m
+    }
+
+    /// Create a diagonal matrix from a vector
+    pub fn diag(v: &DenseVector) -> DenseMatrix with Alloc {
+        let n = v.len()
+        let mut m = DenseMatrix::zeros(n, n)
+        for i in 0..n {
+            m.set(i, i, v.get(i))
+        }
+        m
+    }
+
+    /// Create matrix from 2D slice (row-major input, stored column-major)
+    pub fn from_rows(data: &[&[f64]]) -> DenseMatrix with Alloc {
+        let rows = data.len()
+        let cols = if rows > 0 { data[0].len() } else { 0 }
+        let mut m = DenseMatrix::zeros(rows, cols)
+        for i in 0..rows {
+            for j in 0..cols {
+                m.set(i, j, data[i][j])
+            }
+        }
+        m
+    }
+
+    /// Get number of rows
+    pub fn rows(&self) -> usize {
+        self.rows
+    }
+
+    /// Get number of columns
+    pub fn cols(&self) -> usize {
+        self.cols
+    }
+
+    /// Check if matrix is square
+    pub fn is_square(&self) -> bool {
+        self.rows == self.cols
+    }
+
+    /// Get element at (i, j) - column-major indexing
+    pub fn get(&self, i: usize, j: usize) -> f64 {
+        self.data[j * self.rows + i]  // column-major
+    }
+
+    /// Set element at (i, j)
+    pub fn set(&!self, i: usize, j: usize, value: f64) {
+        self.data[j * self.rows + i] = value
+    }
+
+    /// Get raw data pointer for BLAS operations
+    pub fn as_ptr(&self) -> &[f64] {
+        self.data
+    }
+
+    /// Get mutable raw data pointer
+    pub fn as_mut_ptr(&!self) -> &![f64] {
+        self.data
+    }
+
+    /// Get leading dimension (for BLAS, this is rows for column-major)
+    pub fn ld(&self) -> i32 {
+        self.rows as i32
+    }
+
+    // --- BLAS Level 2 Operations ---
+
+    /// Matrix-vector multiply: y = alpha * A * x + beta * y
+    /// Uses BLAS dgemv
+    pub fn gemv(&self, alpha: f64, x: &DenseVector, beta: f64, y: &!DenseVector) {
+        dgemv(
+            BlasOrder::ColMajor,
+            BlasTranspose::NoTrans,
+            self.rows as i32,
+            self.cols as i32,
+            alpha,
+            self.data,
+            self.ld(),
+            x.data,
+            1,
+            beta,
+            y.data,
+            1
+        )
+    }
+
+    /// Simple matrix-vector multiply: A * x
+    pub fn mul_vec(&self, x: &DenseVector) -> DenseVector with Alloc {
+        let mut y = DenseVector::zeros(self.rows)
+        self.gemv(1.0, x, 0.0, &!y)
+        y
+    }
+
+    // --- BLAS Level 3 Operations ---
+
+    /// General matrix multiply: C = alpha * A * B + beta * C
+    /// Uses BLAS dgemm
+    pub fn gemm(&self, alpha: f64, b: &DenseMatrix, beta: f64, c: &!DenseMatrix) {
+        dgemm(
+            BlasOrder::ColMajor,
+            BlasTranspose::NoTrans,
+            BlasTranspose::NoTrans,
+            self.rows as i32,
+            b.cols as i32,
+            self.cols as i32,
+            alpha,
+            self.data,
+            self.ld(),
+            b.data,
+            b.ld(),
+            beta,
+            c.data,
+            c.ld()
+        )
+    }
+
+    /// Simple matrix multiply: A * B
+    pub fn mul(&self, b: &DenseMatrix) -> DenseMatrix with Alloc {
+        let mut c = DenseMatrix::zeros(self.rows, b.cols)
+        self.gemm(1.0, b, 0.0, &!c)
+        c
+    }
+
+    /// Matrix addition: A + B
+    pub fn add(&self, b: &DenseMatrix) -> DenseMatrix with Alloc {
+        let mut c = DenseMatrix::zeros(self.rows, self.cols)
+        for i in 0..(self.rows * self.cols) {
+            c.data[i] = self.data[i] + b.data[i]
+        }
+        c
+    }
+
+    /// Matrix subtraction: A - B
+    pub fn sub(&self, b: &DenseMatrix) -> DenseMatrix with Alloc {
+        let mut c = DenseMatrix::zeros(self.rows, self.cols)
+        for i in 0..(self.rows * self.cols) {
+            c.data[i] = self.data[i] - b.data[i]
+        }
+        c
+    }
+
+    /// Scalar multiply: alpha * A
+    pub fn scale(&self, alpha: f64) -> DenseMatrix with Alloc {
+        let mut c = DenseMatrix::zeros(self.rows, self.cols)
+        for i in 0..(self.rows * self.cols) {
+            c.data[i] = alpha * self.data[i]
+        }
+        c
+    }
+
+    /// Transpose: A^T
+    pub fn transpose(&self) -> DenseMatrix with Alloc {
+        let mut c = DenseMatrix::zeros(self.cols, self.rows)
+        for i in 0..self.rows {
+            for j in 0..self.cols {
+                c.set(j, i, self.get(i, j))
+            }
+        }
+        c
+    }
+
+    /// Trace: sum of diagonal elements
+    pub fn trace(&self) -> f64 {
+        let n = if self.rows < self.cols { self.rows } else { self.cols }
+        let mut t = 0.0
+        for i in 0..n {
+            t = t + self.get(i, i)
+        }
+        t
+    }
+
+    /// Frobenius norm: ||A||_F = sqrt(sum(a_ij^2))
+    pub fn frobenius_norm(&self) -> f64 {
+        let v = DenseVector { data: self.data, len: self.rows * self.cols }
+        v.norm2()
+    }
+
+    // --- LAPACK Operations ---
+
+    /// Solve linear system: A * x = b
+    /// Returns x
+    pub fn solve(&self, b: &DenseVector) -> Result<DenseVector, string> with Alloc {
+        lapack::solve(self, b)
+    }
+
+    /// Compute matrix inverse: A^(-1)
+    pub fn inverse(&self) -> Result<DenseMatrix, string> with Alloc {
+        lapack::inv(self)
+    }
+
+    /// Compute determinant
+    pub fn determinant(&self) -> Result<f64, string> with Alloc {
+        lapack::det(self)
+    }
+
+    /// Compute condition number
+    pub fn condition_number(&self) -> Result<f64, string> with Alloc {
+        lapack::cond(self)
+    }
+
+    /// Compute matrix rank
+    pub fn rank(&self, tol: f64) -> Result<usize, string> with Alloc {
+        lapack::rank(self, tol)
+    }
+
+    /// LU factorization: A = P * L * U
+    pub fn lu(&self) -> Result<LUFactorization, string> with Alloc {
+        lapack::lu(self)
+    }
+
+    /// QR factorization: A = Q * R
+    pub fn qr(&self) -> Result<QRFactorization, string> with Alloc {
+        lapack::qr(self)
+    }
+
+    /// Cholesky factorization: A = L * L^T (for symmetric positive definite)
+    pub fn cholesky(&self) -> Result<DenseMatrix, string> with Alloc {
+        lapack::cholesky(self)
+    }
+
+    /// SVD: A = U * S * V^T
+    pub fn svd(&self) -> Result<SVDFactorization, string> with Alloc {
+        lapack::svd(self)
+    }
+
+    /// Eigenvalue decomposition (general matrix)
+    pub fn eig(&self) -> Result<EigenDecomposition, string> with Alloc {
+        lapack::eig(self)
+    }
+
+    /// Eigenvalue decomposition (symmetric matrix)
+    pub fn eigh(&self) -> Result<SymmetricEigenDecomposition, string> with Alloc {
+        lapack::eigh(self)
+    }
+
+    /// Pseudoinverse (Moore-Penrose)
+    pub fn pinv(&self) -> Result<DenseMatrix, string> with Alloc {
+        lapack::pinv(self)
+    }
+
+    // --- Row/Column Operations ---
+
+    /// Get row as vector
+    pub fn row(&self, i: usize) -> DenseVector with Alloc {
+        let mut v = DenseVector::zeros(self.cols)
+        for j in 0..self.cols {
+            v.set(j, self.get(i, j))
+        }
+        v
+    }
+
+    /// Get column as vector
+    pub fn col(&self, j: usize) -> DenseVector with Alloc {
+        let mut v = DenseVector::zeros(self.rows)
+        for i in 0..self.rows {
+            v.set(i, self.get(i, j))
+        }
+        v
+    }
+
+    /// Set row from vector
+    pub fn set_row(&!self, i: usize, v: &DenseVector) {
+        for j in 0..self.cols {
+            self.set(i, j, v.get(j))
+        }
+    }
+
+    /// Set column from vector
+    pub fn set_col(&!self, j: usize, v: &DenseVector) {
+        for i in 0..self.rows {
+            self.set(i, j, v.get(i))
+        }
+    }
+}
+
+// ============================================================================
+// FACTORIZATION RESULT TYPES
+// ============================================================================
+
+/// LU factorization result: A = P * L * U
+pub struct LUFactorization {
+    /// Combined L and U (L is unit lower triangular, U is upper triangular)
+    pub lu: DenseMatrix,
+    /// Pivot indices
+    pub ipiv: &[i32],
+}
+
+/// QR factorization result: A = Q * R
+pub struct QRFactorization {
+    /// Orthogonal matrix Q
+    pub q: DenseMatrix,
+    /// Upper triangular matrix R
+    pub r: DenseMatrix,
+}
+
+/// SVD result: A = U * diag(S) * V^T
+pub struct SVDFactorization {
+    /// Left singular vectors (m x m)
+    pub u: DenseMatrix,
+    /// Singular values (min(m,n) vector)
+    pub s: DenseVector,
+    /// Right singular vectors transposed (n x n)
+    pub vt: DenseMatrix,
+}
+
+/// Eigenvalue decomposition result
+pub struct EigenDecomposition {
+    /// Eigenvalues (may be complex, stored as pairs)
+    pub eigenvalues_real: DenseVector,
+    pub eigenvalues_imag: DenseVector,
+    /// Right eigenvectors (columns)
+    pub eigenvectors: DenseMatrix,
+}
+
+/// Symmetric eigenvalue decomposition result
+pub struct SymmetricEigenDecomposition {
+    /// Eigenvalues (real for symmetric)
+    pub eigenvalues: DenseVector,
+    /// Eigenvectors (columns, orthonormal)
+    pub eigenvectors: DenseMatrix,
+}
+
+// ============================================================================
+// SPARSE MATRIX TYPES (for future extension)
+// ============================================================================
+
+// TODO: Add CSR, CSC sparse matrix formats
+// TODO: Add sparse BLAS operations (SpBLAS)
+// TODO: Add iterative solvers (CG, GMRES, BiCGSTAB)
+
+// ============================================================================
+// CONVENIENCE CONSTRUCTORS
+// ============================================================================
+
+/// Create a vector from variadic arguments
+/// vec![1.0, 2.0, 3.0]
+// Note: This would be a macro in full implementation
+
+/// Create a matrix from row data
+/// mat![[1.0, 2.0], [3.0, 4.0]]
+// Note: This would be a macro in full implementation
+
+// ============================================================================
+// TESTS
+// ============================================================================
+
+#[test]
+fn test_dense_vector_basic() {
+    let v = DenseVector::zeros(5)
+    assert_eq(v.len(), 5)
+    assert_eq(v.get(0), 0.0)
+}
+
+#[test]
+fn test_dense_vector_ops() {
+    let v1 = DenseVector::from_slice(&[1.0, 2.0, 3.0])
+    let v2 = DenseVector::from_slice(&[4.0, 5.0, 6.0])
+
+    // Dot product: 1*4 + 2*5 + 3*6 = 32
+    assert_approx(v1.dot(&v2), 32.0)
+
+    // Norm: sqrt(1 + 4 + 9) = sqrt(14)
+    assert_approx(v1.norm2(), 3.7416573867739413)
+}
+
+#[test]
+fn test_dense_matrix_basic() {
+    let m = DenseMatrix::eye(3)
+    assert_eq(m.rows(), 3)
+    assert_eq(m.cols(), 3)
+    assert_eq(m.get(0, 0), 1.0)
+    assert_eq(m.get(0, 1), 0.0)
+    assert_eq(m.trace(), 3.0)
+}
+
+#[test]
+fn test_dense_matrix_mul_vec() {
+    // 2x2 matrix [[1, 2], [3, 4]] * [1, 1] = [3, 7]
+    let mut m = DenseMatrix::zeros(2, 2)
+    m.set(0, 0, 1.0)
+    m.set(0, 1, 2.0)
+    m.set(1, 0, 3.0)
+    m.set(1, 1, 4.0)
+
+    let x = DenseVector::ones(2)
+    let y = m.mul_vec(&x)
+
+    assert_approx(y.get(0), 3.0)
+    assert_approx(y.get(1), 7.0)
+}
+
+#[test]
+fn test_dense_matrix_mul() {
+    let a = DenseMatrix::eye(3)
+    let b = DenseMatrix::eye(3)
+    let c = a.mul(&b)
+
+    // I * I = I
+    assert_eq(c.get(0, 0), 1.0)
+    assert_eq(c.get(1, 1), 1.0)
+    assert_eq(c.get(0, 1), 0.0)
+}

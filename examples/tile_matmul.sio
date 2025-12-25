@@ -1,0 +1,226 @@
+// tile_matmul.d - Tile-based Matrix Multiplication using CUDA 13 Tile Abstraction
+//
+// This example demonstrates the Sounio tile-based GPU programming model,
+// which provides a higher-level abstraction over CUDA's cooperative groups
+// and Tensor Core operations (WMMA/WGMMA).
+//
+// The compiler automatically handles:
+// - Thread block configuration
+// - Shared memory allocation and layout
+// - Cooperative group partitioning
+// - WMMA/WGMMA instruction emission based on architecture
+// - TMA async bulk transfers on Hopper+ (sm_90+)
+//
+// Target: CUDA 13+ (Blackwell sm_100+), with fallback for Ampere/Hopper
+
+module tile_matmul
+
+import gpu
+import gpu.tile
+import gpu.memory
+
+// Tile dimensions for matrix multiplication
+// These must be powers of 2 and match WMMA/WGMMA supported shapes
+const TILE_M: u32 = 16
+const TILE_N: u32 = 16
+const TILE_K: u32 = 16
+
+/// 16x16 tile-based matrix multiplication kernel
+/// Each thread block computes one 16x16 output tile using Tensor Cores
+///
+/// Arguments:
+///   A: Input matrix A [M x K], row-major
+///   B: Input matrix B [K x N], row-major
+///   C: Output matrix C [M x N], row-major
+///   M, N, K: Matrix dimensions
+///   lda, ldb, ldc: Leading dimensions (row strides)
+kernel fn matmul_tile_16x16(
+    A: *const f16,
+    B: *const f16,
+    C: *mut f32,
+    M: i32,
+    N: i32,
+    K: i32,
+    lda: i32,
+    ldb: i32,
+    ldc: i32,
+) {
+    // Get block cooperative group
+    let block = gpu.this_block()
+
+    // Compute output tile position
+    let tile_row = gpu.block_id().y * TILE_M
+    let tile_col = gpu.block_id().x * TILE_N
+
+    // Create accumulator tile (f32 for precision)
+    // Compiler allocates shared memory automatically
+    var c_tile: tile<f32, TILE_M, TILE_N> = tile.zeros()
+
+    // Loop over K dimension in TILE_K chunks
+    for k in range(0, K, TILE_K) {
+        // Load A tile: [tile_row:tile_row+TILE_M, k:k+TILE_K]
+        let a_tile: tile<f16, TILE_M, TILE_K> = tile.load(
+            A + tile_row * lda + k,
+            lda,
+        )
+
+        // Load B tile: [k:k+TILE_K, tile_col:tile_col+TILE_N]
+        let b_tile: tile<f16, TILE_K, TILE_N> = tile.load(
+            B + k * ldb + tile_col,
+            ldb,
+        )
+
+        // Synchronize: ensure all threads have loaded their data
+        tile.sync()
+
+        // Matrix multiply-accumulate using Tensor Cores
+        // On Blackwell: WGMMA (warpgroup MMA)
+        // On Ampere/Hopper: MMA (warp-scoped)
+        c_tile = tile.mma(c_tile, a_tile, b_tile)
+
+        // Synchronize before next iteration
+        tile.sync()
+    }
+
+    // Store result tile to global memory
+    tile.store(
+        c_tile,
+        C + tile_row * ldc + tile_col,
+        ldc,
+    )
+}
+
+/// Alternative kernel using swizzled layout for bank conflict avoidance
+kernel fn matmul_tile_swizzled(
+    A: *const f16,
+    B: *const f16,
+    C: *mut f32,
+    M: i32,
+    N: i32,
+    K: i32,
+    lda: i32,
+    ldb: i32,
+    ldc: i32,
+) {
+    let tile_row = gpu.block_id().y * TILE_M
+    let tile_col = gpu.block_id().x * TILE_N
+
+    // Use swizzled layout to avoid shared memory bank conflicts
+    var c_tile: tile<f32, TILE_M, TILE_N, "swizzled"> = tile.zeros()
+
+    for k in range(0, K, TILE_K) {
+        let a_tile: tile<f16, TILE_M, TILE_K, "swizzled"> = tile.load(
+            A + tile_row * lda + k,
+            lda,
+        )
+
+        let b_tile: tile<f16, TILE_K, TILE_N, "swizzled"> = tile.load(
+            B + k * ldb + tile_col,
+            ldb,
+        )
+
+        tile.sync()
+        c_tile = tile.mma(c_tile, a_tile, b_tile)
+        tile.sync()
+    }
+
+    tile.store(c_tile, C + tile_row * ldc + tile_col, ldc)
+}
+
+/// Host function to launch the tiled matrix multiplication
+fn matmul(
+    A: gpu.Buffer<f16>,
+    B: gpu.Buffer<f16>,
+    C: gpu.Buffer<f32>,
+    M: i32,
+    N: i32,
+    K: i32,
+) {
+    // Compute grid dimensions based on tile size
+    let grid_x = (N + TILE_N - 1) / TILE_N
+    let grid_y = (M + TILE_M - 1) / TILE_M
+    let grid = (grid_x, grid_y, 1)
+
+    // Thread block: one warp (32 threads) per tile
+    // For larger tiles, use multiple warps
+    let block = (32, 1, 1)
+
+    // Launch kernel
+    matmul_tile_16x16.launch(grid, block)(
+        A.ptr(),
+        B.ptr(),
+        C.ptr(),
+        M, N, K,
+        K,  // lda = K (row-major A)
+        N,  // ldb = N (row-major B)
+        N,  // ldc = N (row-major C)
+    )
+
+    // Synchronize to ensure completion
+    gpu.sync()
+}
+
+/// Main entry point demonstrating tiled matrix multiplication
+fn main() {
+    println("Tile-based Matrix Multiplication Example")
+    println("=========================================")
+
+    // Matrix dimensions (must be multiples of tile size for simplicity)
+    let M = 1024
+    let N = 1024
+    let K = 1024
+
+    println("Matrix dimensions: {}x{}x{}", M, N, K)
+    println("Tile size: {}x{}x{}", TILE_M, TILE_N, TILE_K)
+
+    // Allocate GPU buffers
+    let A = gpu.alloc::<f16>(M * K)
+    let B = gpu.alloc::<f16>(K * N)
+    let C = gpu.alloc::<f32>(M * N)
+
+    // Initialize with random data (in real code)
+    // A.fill_random()
+    // B.fill_random()
+    // C.fill(0.0)
+
+    // Perform tiled matrix multiplication
+    matmul(A, B, C, M, N, K)
+
+    println("Matrix multiplication completed.")
+
+    // Cleanup
+    A.free()
+    B.free()
+    C.free()
+}
+
+// Expected PTX output (partial) for sm_100 (Blackwell):
+//
+// .version 8.5
+// .target sm_100
+// .address_size 64
+//
+// .entry matmul_tile_16x16(
+//     .param .u64 A,
+//     .param .u64 B,
+//     .param .u64 C,
+//     .param .u32 M,
+//     .param .u32 N,
+//     .param .u32 K,
+//     .param .u32 lda,
+//     .param .u32 ldb,
+//     .param .u32 ldc
+// ) {
+//     .shared .align 16 .b8 a_smem[512];   // 16x16 f16 = 512 bytes
+//     .shared .align 16 .b8 b_smem[512];   // 16x16 f16 = 512 bytes
+//     .shared .align 16 .b8 c_smem[1024];  // 16x16 f32 = 1024 bytes
+//
+//     // ... tile load/store operations ...
+//
+//     // Blackwell WGMMA instruction (warpgroup-scoped)
+//     wgmma.mma_async.sync.aligned.m16n16k16.f32.bf16.bf16 {...}, {...}, {...};
+//
+//     // ... store operations ...
+//
+//     ret;
+// }

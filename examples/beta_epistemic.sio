@@ -1,0 +1,354 @@
+//! Beta-Epistemic Computing in Sounio
+//!
+//! This example demonstrates the revolutionary Beta distribution-based
+//! epistemic type system. Instead of scalar confidence values, every
+//! piece of knowledge carries its full uncertainty distribution.
+//!
+//! Key Innovation: "I know that I don't know how much I know"
+//! - Traditional: confidence = 0.8 (point estimate)
+//! - Beta-epistemic: confidence ~ Beta(8, 2) with mean=0.8, variance=0.015
+//!
+//! The variance tells us HOW CERTAIN we are about being 80% confident.
+
+// =============================================================================
+// Part 1: Basic Beta-Epistemic Types
+// =============================================================================
+
+/// BetaConfidence represents a full Beta posterior distribution
+/// Alpha = successes + prior_alpha, Beta = failures + prior_beta
+struct BetaConfidence {
+    alpha: f64,  // Success pseudo-counts
+    beta: f64,   // Failure pseudo-counts
+}
+
+impl BetaConfidence {
+    /// Create from success/failure counts
+    fn new(alpha: f64, beta: f64) -> BetaConfidence {
+        BetaConfidence { alpha: alpha, beta: beta }
+    }
+
+    /// Mean of the Beta distribution: E[X] = alpha / (alpha + beta)
+    fn mean(self) -> f64 {
+        self.alpha / (self.alpha + self.beta)
+    }
+
+    /// Variance: Var[X] = alpha*beta / ((alpha+beta)^2 * (alpha+beta+1))
+    fn variance(self) -> f64 {
+        let n = self.alpha + self.beta;
+        (self.alpha * self.beta) / (n * n * (n + 1.0))
+    }
+
+    /// Epistemic uncertainty: sqrt(variance)
+    fn uncertainty(self) -> f64 {
+        sqrt(self.variance())
+    }
+
+    /// Effective sample size: alpha + beta
+    fn sample_size(self) -> f64 {
+        self.alpha + self.beta
+    }
+
+    /// Update with new observation
+    fn observe(self, success: bool) -> BetaConfidence {
+        if success {
+            BetaConfidence::new(self.alpha + 1.0, self.beta)
+        } else {
+            BetaConfidence::new(self.alpha, self.beta + 1.0)
+        }
+    }
+}
+
+// =============================================================================
+// Part 2: Pluggable Decay Models
+// =============================================================================
+
+/// Decay models control how confidence propagates through transformations
+enum DecayModel {
+    /// Linear: new_conf = old_conf * factor^depth
+    Linear { factor: f64 },
+
+    /// Exponential: faster decay for uncertain transformations
+    Exponential { base: f64 },
+
+    /// Logarithmic: slow decay for established knowledge
+    Logarithmic { rate: f64 },
+
+    /// Perfect: no decay (for mathematical derivations)
+    Perfect,
+}
+
+impl DecayModel {
+    /// Apply decay to a BetaConfidence
+    fn apply(self, conf: BetaConfidence, depth: i32) -> BetaConfidence {
+        match self {
+            DecayModel::Linear { factor } => {
+                let decay = pow(factor, depth);
+                let new_alpha = conf.alpha * decay;
+                let new_beta = conf.beta + (1.0 - decay) * conf.alpha;
+                BetaConfidence::new(max(new_alpha, 0.5), max(new_beta, 0.5))
+            },
+            DecayModel::Exponential { base } => {
+                let decay = pow(base, to_f64(depth));
+                let effective_n = conf.sample_size() * decay;
+                BetaConfidence::new(
+                    conf.mean() * decay * effective_n,
+                    (1.0 - conf.mean() * decay) * effective_n
+                )
+            },
+            DecayModel::Perfect => conf,
+            _ => conf  // Default: no decay
+        }
+    }
+}
+
+// =============================================================================
+// Part 3: Hierarchical Priors
+// =============================================================================
+
+/// Prior types for Bayesian combination
+enum PriorType {
+    /// Uniform prior Beta(1, 1) - maximum ignorance
+    Uniform,
+
+    /// Jeffreys prior Beta(0.5, 0.5) - uninformative
+    Jeffreys,
+
+    /// Weak informative prior centered at value
+    Weak { center: f64, strength: f64 },
+
+    /// Strong prior from domain expertise
+    Strong { center: f64, strength: f64 },
+}
+
+impl PriorType {
+    /// Convert to BetaConfidence
+    fn to_beta(self) -> BetaConfidence {
+        match self {
+            PriorType::Uniform => BetaConfidence::new(1.0, 1.0),
+            PriorType::Jeffreys => BetaConfidence::new(0.5, 0.5),
+            PriorType::Weak { center, strength } => {
+                BetaConfidence::new(center * strength, (1.0 - center) * strength)
+            },
+            PriorType::Strong { center, strength } => {
+                BetaConfidence::new(center * strength, (1.0 - center) * strength)
+            }
+        }
+    }
+}
+
+// =============================================================================
+// Part 4: Active Inference Metrics
+// =============================================================================
+
+/// Metrics for ignorance-driven exploration (active inference)
+struct ActiveInferenceMetrics {
+    /// Expected information gain from acquiring more data
+    expected_info_gain: f64,
+
+    /// Variance reduction achieved so far
+    variance_reduction: f64,
+
+    /// Number of observations
+    observation_count: i32,
+
+    /// Should we acquire more data?
+    should_explore: bool,
+}
+
+impl ActiveInferenceMetrics {
+    /// Compute from a BetaConfidence
+    fn from_beta(beta: BetaConfidence, threshold: f64) -> ActiveInferenceMetrics {
+        let variance = beta.variance();
+        let expected_info_gain = sqrt(variance) * 2.0;
+
+        ActiveInferenceMetrics {
+            expected_info_gain: expected_info_gain,
+            variance_reduction: 0.0,
+            observation_count: to_i32(beta.sample_size() - 2.0),
+            should_explore: expected_info_gain > threshold
+        }
+    }
+
+    /// Exploration priority (higher = should explore first)
+    fn priority(self) -> f64 {
+        self.expected_info_gain * (1.0 + 1.0 / (to_f64(self.observation_count) + 1.0))
+    }
+}
+
+// =============================================================================
+// Part 5: BetaKnowledge - The Revolutionary Type
+// =============================================================================
+
+/// Knowledge with full Beta posterior epistemic status
+/// This is what makes Sounio unique among programming languages.
+struct BetaKnowledge<T> {
+    value: T,
+    confidence: BetaConfidence,
+    decay_model: DecayModel,
+    prior: PriorType,
+}
+
+impl BetaKnowledge<T> {
+    /// Create empirical knowledge from observations
+    fn empirical(value: T, successes: f64, failures: f64) -> BetaKnowledge<T> {
+        BetaKnowledge {
+            value: value,
+            confidence: BetaConfidence::new(successes + 1.0, failures + 1.0),
+            decay_model: DecayModel::Linear { factor: 0.95 },
+            prior: PriorType::Uniform
+        }
+    }
+
+    /// Create axiomatic knowledge (near-certain)
+    fn axiomatic(value: T) -> BetaKnowledge<T> {
+        BetaKnowledge {
+            value: value,
+            confidence: BetaConfidence::new(1000.0, 1.0),
+            decay_model: DecayModel::Perfect,
+            prior: PriorType::Strong { center: 1.0, strength: 1000.0 }
+        }
+    }
+
+    /// Get mean confidence
+    fn mean(self) -> f64 {
+        self.confidence.mean()
+    }
+
+    /// Get epistemic uncertainty
+    fn uncertainty(self) -> f64 {
+        self.confidence.uncertainty()
+    }
+
+    /// Should we explore to reduce uncertainty?
+    fn should_explore(self, threshold: f64) -> bool {
+        let metrics = ActiveInferenceMetrics::from_beta(self.confidence, threshold);
+        metrics.should_explore
+    }
+
+    /// Update with new observation
+    fn observe(self, success: bool) -> BetaKnowledge<T> {
+        BetaKnowledge {
+            value: self.value,
+            confidence: self.confidence.observe(success),
+            decay_model: self.decay_model,
+            prior: self.prior
+        }
+    }
+}
+
+// =============================================================================
+// Part 6: Variance-Weighted Combination
+// =============================================================================
+
+/// Combine multiple BetaConfidences with variance-based weighting
+/// Lower variance sources get higher weight (they're more certain)
+fn combine_weighted(sources: [BetaConfidence]) -> BetaConfidence {
+    var total_weight = 0.0;
+    var weighted_alpha = 0.0;
+    var weighted_beta = 0.0;
+
+    for source in sources {
+        let weight = 1.0 / (source.variance() + 0.001);
+        total_weight = total_weight + weight;
+        weighted_alpha = weighted_alpha + source.alpha * weight;
+        weighted_beta = weighted_beta + source.beta * weight;
+    }
+
+    BetaConfidence::new(
+        weighted_alpha / total_weight,
+        weighted_beta / total_weight
+    )
+}
+
+// =============================================================================
+// Part 7: Training Loss with Variance Penalty
+// =============================================================================
+
+/// Compute variance penalty for neural network training
+/// This encourages networks to minimize ignorance
+fn variance_penalty(knowledges: [BetaConfidence], lambda: f64) -> f64 {
+    var penalty = 0.0;
+    for k in knowledges {
+        penalty = penalty + lambda * k.variance();
+    }
+    penalty
+}
+
+/// Multi-task loss with variance penalty
+/// L = L_policy + L_value + λ * Var
+fn epistemic_loss(
+    policy_loss: f64,
+    value_loss: f64,
+    confidences: [BetaConfidence],
+    lambda: f64
+) -> f64 {
+    policy_loss + value_loss + variance_penalty(confidences, lambda)
+}
+
+// =============================================================================
+// Part 8: Demonstration
+// =============================================================================
+
+fn main() {
+    // Create knowledge from experimental observations
+    // 8 successes, 2 failures → Beta(9, 3)
+    let measurement = BetaKnowledge::empirical(42.0, 8.0, 2.0);
+
+    print("Measurement value: ");
+    print(measurement.value);
+    print("\n");
+
+    print("Mean confidence: ");
+    print(measurement.mean());
+    print("\n");
+
+    print("Epistemic uncertainty: ");
+    print(measurement.uncertainty());
+    print("\n");
+
+    // Check if we should acquire more data
+    let explore_threshold = 0.05;
+    if measurement.should_explore(explore_threshold) {
+        print("High uncertainty - should acquire more data!\n");
+    } else {
+        print("Confidence is sufficient.\n");
+    }
+
+    // Update with new observation
+    let updated = measurement.observe(true);
+    print("After observing success, new confidence: ");
+    print(updated.mean());
+    print("\n");
+
+    // Create axiomatic knowledge
+    let axiom = BetaKnowledge::axiomatic(3.14159);
+    print("Axiom uncertainty: ");
+    print(axiom.uncertainty());
+    print(" (very low!)\n");
+
+    // Combine multiple sources
+    let source1 = BetaConfidence::new(10.0, 2.0);  // High confidence
+    let source2 = BetaConfidence::new(5.0, 5.0);   // Uncertain
+    let combined = combine_weighted([source1, source2]);
+
+    print("Combined confidence: ");
+    print(combined.mean());
+    print("\n");
+
+    // Compute training loss with variance penalty
+    let policy_loss = 0.5;
+    let value_loss = 0.3;
+    let lambda = 0.1;
+    let total_loss = epistemic_loss(
+        policy_loss,
+        value_loss,
+        [source1, source2],
+        lambda
+    );
+
+    print("Total epistemic loss: ");
+    print(total_loss);
+    print("\n");
+
+    print("\n=== Beta-Epistemic Computing Demo Complete ===\n");
+}

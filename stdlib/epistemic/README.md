@@ -4,7 +4,7 @@
 
 ## Overview
 
-The `epistemic` module provides first-class uncertainty quantification for Demetrios. Unlike traditional programming where numbers are treated as exact, epistemic types track:
+The `epistemic` module provides first-class uncertainty quantification for Sounio. Unlike traditional programming where numbers are treated as exact, epistemic types track:
 
 - **Variance**: How uncertain is this value?
 - **Confidence**: How reliable is our uncertainty estimate?
@@ -14,7 +14,7 @@ The `epistemic` module provides first-class uncertainty quantification for Demet
 
 ### `knowledge.d` - Core Types
 
-```demetrios
+```sounio
 use epistemic::{Knowledge, BetaConfidence}
 
 // Create epistemic values
@@ -34,7 +34,7 @@ println("95% CI: {:?}", concentration.ci95())
 
 Implements the delta method for variance propagation through arbitrary functions:
 
-```demetrios
+```sounio
 use epistemic::propagate
 
 let x = Knowledge::measured(2.0, 0.1, "sensor")
@@ -65,7 +65,7 @@ let complex = propagate::monte_carlo(x, |v| my_complex_fn(v), 10000)
 
 Combine results across multiple studies:
 
-```demetrios
+```sounio
 use epistemic::meta
 
 let trial1 = Knowledge::measured(0.35, 0.04, "RCT_2021")
@@ -90,7 +90,7 @@ let bayes = meta::bayesian_pool([trial1, trial2, trial3], 0.40, 0.1)
 
 Exploration/exploitation based on uncertainty:
 
-```demetrios
+```sounio
 use epistemic::active
 
 // Which variable needs more data?
@@ -110,7 +110,7 @@ let efe = active::expected_free_energy(&current, 0.5, 1.0, 1.0)
 
 Tamper-evident audit trails:
 
-```demetrios
+```sounio
 use epistemic::merkle::{MerkleDAG, Hash256}
 
 var dag = MerkleDAG::new()
@@ -152,9 +152,9 @@ BetaConfidence
 
 ## Integration with Units
 
-Epistemic types compose with Demetrios units of measure:
+Epistemic types compose with Sounio units of measure:
 
-```demetrios
+```sounio
 use epistemic::Knowledge
 use units::{mg, mL}
 
@@ -179,4 +179,4 @@ let concentration: Knowledge<mg/mL> = dose / volume
 
 ## License
 
-MIT / Apache-2.0 (same as Demetrios)
+MIT / Apache-2.0 (same as Sounio)

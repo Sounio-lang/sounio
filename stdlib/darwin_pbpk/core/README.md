@@ -1,6 +1,6 @@
-# Darwin PBPK Core Module - Demetrios Implementation
+# Darwin PBPK Core Module - Sounio Implementation
 
-This module provides the core PBPK (Physiologically-Based Pharmacokinetic) data structures and functions for the Darwin PBPK Platform, implemented in the Demetrios language.
+This module provides the core PBPK (Physiologically-Based Pharmacokinetic) data structures and functions for the Darwin PBPK Platform, implemented in the Sounio language.
 
 ## File: pbpk_params.d
 
@@ -84,7 +84,7 @@ Calculates cardiac output by summing all organ blood flows (excluding lung which
 
 ## Integration
 This module is designed to integrate with:
-- Demetrios ODE solver for PBPK simulations
+- Sounio ODE solver for PBPK simulations
 - MedLang DSL for pharmacometric modeling
 - Darwin PBPK Platform's Julia implementation
 

@@ -1,4 +1,4 @@
-# PBPK Models in Demetrios
+# PBPK Models in Sounio
 
 ## Quick Summary
 
@@ -126,7 +126,7 @@ Combined with reduced blood flows (50% reduction), RK4 enables stable simulation
 **Issue**: Struct mutation in while loops stops working after ~2 iterations
 
 **Minimal reproduction**:
-```demetrios
+```sounio
 let mut st = State { x: 100.0 }
 let mut i = 0
 while i < 10 {
@@ -148,7 +148,7 @@ while i < 10 {
 Once compiler is fixed, validate against Julia implementation:
 
 ```bash
-# In Darwin-demetrios
+# In Darwin-sounio
 ./compiler/target/release/dc run stdlib/ode/pbpk3_stable.d
 
 # Compare with Julia

@@ -1,0 +1,516 @@
+// population.d - Population PK/NLME Structures for Sounio
+//
+// Implements the hierarchical population pharmacokinetic model structure
+// following MedLang Track D Pharmacometrics QSP Specification.
+//
+// Three-level hierarchy:
+// 1. Individual (deterministic): ODE model with fixed θ
+// 2. Population (hierarchical): θ_i ~ Population distribution
+// 3. Observation (measurement): y ~ ErrorModel(prediction)
+//
+// Reference: MedLang (github.com/agourakis82/medlang)
+// FDA Population PK Guidance, EMA PBPK Guidelines
+//
+// Module: pbpk::population (for future module system)
+
+// =============================================================================
+// MATH HELPERS (must be defined first - no forward declarations)
+// =============================================================================
+
+fn abs_f64(x: f64) -> f64 {
+    if x < 0.0 { return 0.0 - x }
+    return x
+}
+
+fn exp_f64(x: f64) -> f64 {
+    if x > 20.0 { return exp_f64(x / 2.0) * exp_f64(x / 2.0) }
+    if x < 0.0 - 20.0 { return 1.0 / exp_f64(0.0 - x) }
+    let mut sum = 1.0
+    let mut term = 1.0
+    let mut i = 1
+    while i <= 15 {
+        term = term * x / i
+        sum = sum + term
+        i = i + 1
+    }
+    return sum
+}
+
+fn ln_f64(x: f64) -> f64 {
+    if x <= 0.0 { return 0.0 - 1000000.0 }
+    let e = 2.718281828459045
+    let mut val = x
+    let mut k = 0.0
+    while val > e { val = val / e; k = k + 1.0 }
+    while val < 1.0 / e { val = val * e; k = k - 1.0 }
+    let u = (val - 1.0) / (val + 1.0)
+    let u2 = u * u
+    let mut sum = u
+    let mut term = u
+    term = term * u2; sum = sum + term / 3.0
+    term = term * u2; sum = sum + term / 5.0
+    term = term * u2; sum = sum + term / 7.0
+    term = term * u2; sum = sum + term / 9.0
+    return 2.0 * sum + k
+}
+
+fn pow_f64(x: f64, n: f64) -> f64 {
+    if x <= 0.0 { return 0.0 }
+    return exp_f64(n * ln_f64(x))
+}
+
+fn sqrt_f64(x: f64) -> f64 {
+    if x <= 0.0 { return 0.0 }
+    let mut y = x
+    let mut iter = 0
+    while iter < 10 { y = 0.5 * (y + x / y); iter = iter + 1 }
+    return y
+}
+
+fn cos_f64(x: f64) -> f64 {
+    let pi = 3.141592653589793
+    let mut y = x
+    while y > pi { y = y - 2.0 * pi }
+    while y < 0.0 - pi { y = y + 2.0 * pi }
+    let x2 = y * y
+    let mut sum = 1.0
+    let mut term = 1.0
+    term = term * (0.0 - x2) / 2.0; sum = sum + term
+    term = term * (0.0 - x2) / 12.0; sum = sum + term
+    term = term * (0.0 - x2) / 30.0; sum = sum + term
+    term = term * (0.0 - x2) / 56.0; sum = sum + term
+    return sum
+}
+
+// Simple pseudo-random number generator (0-1)
+fn pseudo_random(seed: i64) -> f64 {
+    // LCG: simple but sufficient for demonstration
+    let a = 1103515245
+    let c = 12345
+    let m = 2147483648  // 2^31
+    let next = (a * seed + c) % m
+    let result = next / m
+    // Ensure non-zero for Box-Muller
+    if result < 0.0001 { return 0.0001 }
+    if result > 0.9999 { return 0.9999 }
+    return result
+}
+
+// =============================================================================
+// FIXED EFFECTS (THETA - POPULATION PARAMETERS)
+// =============================================================================
+
+// Population fixed effects for a one-compartment model
+struct OneCompFixedEffects {
+    cl_pop: f64,      // Population clearance (L/h)
+    v_pop: f64,       // Population volume (L)
+    ka_pop: f64       // Population absorption rate (1/h)
+}
+
+// Population fixed effects for a two-compartment model
+struct TwoCompFixedEffects {
+    cl_pop: f64,      // Central clearance (L/h)
+    v1_pop: f64,      // Central volume (L)
+    v2_pop: f64,      // Peripheral volume (L)
+    q_pop: f64,       // Inter-compartmental clearance (L/h)
+    ka_pop: f64       // Absorption rate (1/h)
+}
+
+// Generic 14-compartment PBPK fixed effects
+struct PBPKFixedEffects {
+    // Organ volumes (scaled from reference 70kg adult)
+    v_blood: f64,
+    v_liver: f64,
+    v_kidney: f64,
+    v_brain: f64,
+    v_heart: f64,
+    v_lung: f64,
+    v_muscle: f64,
+    v_adipose: f64,
+    v_gut: f64,
+    v_skin: f64,
+    v_bone: f64,
+    v_spleen: f64,
+    v_pancreas: f64,
+    v_other: f64,
+
+    // Blood flows
+    q_liver: f64,
+    q_kidney: f64,
+    q_brain: f64,
+    q_heart: f64,
+    q_lung: f64,
+    q_muscle: f64,
+    q_adipose: f64,
+    q_gut: f64,
+    q_skin: f64,
+    q_bone: f64,
+    q_spleen: f64,
+    q_pancreas: f64,
+    q_other: f64,
+
+    // Clearances
+    cl_hepatic: f64,
+    cl_renal: f64,
+
+    // Drug-specific
+    fu: f64,          // Fraction unbound
+    rb: f64,          // Blood:plasma ratio
+    ka: f64           // Absorption rate
+}
+
+// =============================================================================
+// RANDOM EFFECTS (ETA - INTER-INDIVIDUAL VARIABILITY)
+// =============================================================================
+
+// Random effects for one-compartment model
+// η ~ MVN(0, Ω)
+struct OneCompRandomEffects {
+    eta_cl: f64,      // IIV on clearance
+    eta_v: f64,       // IIV on volume
+    eta_ka: f64       // IIV on absorption
+}
+
+// Random effects for two-compartment model
+struct TwoCompRandomEffects {
+    eta_cl: f64,
+    eta_v1: f64,
+    eta_v2: f64,
+    eta_q: f64,
+    eta_ka: f64
+}
+
+// =============================================================================
+// VARIABILITY PARAMETERS (OMEGA - IIV MAGNITUDE)
+// =============================================================================
+
+// Omega parameters (SD of log-normal random effects)
+struct OneCompOmega {
+    omega_cl: f64,    // SD of log(CL)
+    omega_v: f64,     // SD of log(V)
+    omega_ka: f64,    // SD of log(Ka)
+    rho_cl_v: f64     // Correlation between CL and V
+}
+
+struct TwoCompOmega {
+    omega_cl: f64,
+    omega_v1: f64,
+    omega_v2: f64,
+    omega_q: f64,
+    omega_ka: f64,
+    // Correlation matrix (lower triangle)
+    rho_cl_v1: f64,
+    rho_cl_v2: f64,
+    rho_v1_v2: f64
+}
+
+// =============================================================================
+// PATIENT COVARIATES
+// =============================================================================
+
+// Individual patient covariates
+struct PatientCovariates {
+    id: i32,
+    weight: f64,      // kg
+    height: f64,      // cm
+    age: f64,         // years
+    sex: i32,         // 0=male, 1=female
+    crcl: f64,        // mL/min (creatinine clearance)
+    albumin: f64,     // g/dL
+    cyp2d6: i32,      // 0=PM, 1=IM, 2=EM, 3=UM
+    cyp3a4: i32       // 0=Low, 1=Normal, 2=High
+}
+
+// Create default patient (70kg male adult)
+fn default_patient() -> PatientCovariates {
+    return PatientCovariates {
+        id: 0,
+        weight: 70.0,
+        height: 170.0,
+        age: 40.0,
+        sex: 0,
+        crcl: 120.0,
+        albumin: 4.0,
+        cyp2d6: 2,
+        cyp3a4: 1
+    }
+}
+
+// =============================================================================
+// INDIVIDUAL PARAMETERS (DERIVED FROM POPULATION + COVARIATES + ETA)
+// =============================================================================
+
+// Individual PK parameters for one-compartment model
+struct OneCompIndividual {
+    cl: f64,          // Individual clearance (L/h)
+    v: f64,           // Individual volume (L)
+    ka: f64,          // Individual absorption rate (1/h)
+    ke: f64           // Derived: elimination rate = CL/V
+}
+
+// Individual PK parameters for two-compartment model
+struct TwoCompIndividual {
+    cl: f64,
+    v1: f64,
+    v2: f64,
+    q: f64,
+    ka: f64,
+    k10: f64,         // Derived: CL/V1
+    k12: f64,         // Derived: Q/V1
+    k21: f64          // Derived: Q/V2
+}
+
+// =============================================================================
+// PARAMETER BINDING (POPULATION -> INDIVIDUAL)
+// =============================================================================
+
+// Bind population parameters to individual using covariates and random effects
+// Implements: θ_i = θ_pop * cov_effect * exp(η_i)
+fn bind_one_comp_params(
+    pop: OneCompFixedEffects,
+    cov: PatientCovariates,
+    eta: OneCompRandomEffects
+) -> OneCompIndividual {
+    // Weight-normalized allometric scaling
+    let wt_cl = pow_f64(cov.weight / 70.0, 0.75)
+    let wt_v = cov.weight / 70.0
+
+    // Calculate individual parameters
+    let cl = pop.cl_pop * wt_cl * exp_f64(eta.eta_cl)
+    let v = pop.v_pop * wt_v * exp_f64(eta.eta_v)
+    let ka = pop.ka_pop * exp_f64(eta.eta_ka)
+
+    return OneCompIndividual {
+        cl: cl,
+        v: v,
+        ka: ka,
+        ke: cl / v
+    }
+}
+
+// Bind two-compartment parameters
+fn bind_two_comp_params(
+    pop: TwoCompFixedEffects,
+    cov: PatientCovariates,
+    eta: TwoCompRandomEffects
+) -> TwoCompIndividual {
+    let wt_cl = pow_f64(cov.weight / 70.0, 0.75)
+    let wt_v = cov.weight / 70.0
+
+    let cl = pop.cl_pop * wt_cl * exp_f64(eta.eta_cl)
+    let v1 = pop.v1_pop * wt_v * exp_f64(eta.eta_v1)
+    let v2 = pop.v2_pop * wt_v * exp_f64(eta.eta_v2)
+    let q = pop.q_pop * wt_cl * exp_f64(eta.eta_q)
+    let ka = pop.ka_pop * exp_f64(eta.eta_ka)
+
+    return TwoCompIndividual {
+        cl: cl,
+        v1: v1,
+        v2: v2,
+        q: q,
+        ka: ka,
+        k10: cl / v1,
+        k12: q / v1,
+        k21: q / v2
+    }
+}
+
+// =============================================================================
+// RANDOM EFFECT SAMPLING
+// =============================================================================
+
+// Sample random effects from multivariate normal
+// Using Box-Muller transform for univariate normal
+fn sample_normal(mean: f64, sd: f64, u1: f64, u2: f64) -> f64 {
+    // Box-Muller transform
+    let pi = 3.141592653589793
+    let z = sqrt_f64(0.0 - 2.0 * ln_f64(u1)) * cos_f64(2.0 * pi * u2)
+    return mean + sd * z
+}
+
+// Sample one-compartment random effects (independent)
+fn sample_one_comp_eta(
+    omega: OneCompOmega,
+    u1: f64, u2: f64, u3: f64, u4: f64, u5: f64, u6: f64
+) -> OneCompRandomEffects {
+    // For simplicity, ignore correlation (rho_cl_v)
+    // Full implementation would use Cholesky decomposition
+    return OneCompRandomEffects {
+        eta_cl: sample_normal(0.0, omega.omega_cl, u1, u2),
+        eta_v: sample_normal(0.0, omega.omega_v, u3, u4),
+        eta_ka: sample_normal(0.0, omega.omega_ka, u5, u6)
+    }
+}
+
+// Generate N random subjects from population
+fn simulate_population(
+    pop: OneCompFixedEffects,
+    omega: OneCompOmega,
+    base_cov: PatientCovariates,
+    n_subjects: i32,
+    seed: i64
+) -> f64 {
+    // Simple demonstration - returns mean CL across population
+    // Real implementation would return full parameter vectors
+    let mut sum_cl = 0.0
+    let mut i = 0
+    while i < n_subjects {
+        // Simple LCG random numbers (for demonstration)
+        let r1 = pseudo_random(seed + i * 6)
+        let r2 = pseudo_random(seed + i * 6 + 1)
+        let r3 = pseudo_random(seed + i * 6 + 2)
+        let r4 = pseudo_random(seed + i * 6 + 3)
+        let r5 = pseudo_random(seed + i * 6 + 4)
+        let r6 = pseudo_random(seed + i * 6 + 5)
+
+        let eta = sample_one_comp_eta(omega, r1, r2, r3, r4, r5, r6)
+        let ind = bind_one_comp_params(pop, base_cov, eta)
+        sum_cl = sum_cl + ind.cl
+        i = i + 1
+    }
+    return sum_cl / n_subjects
+}
+
+// =============================================================================
+// POPULATION DATASET STRUCTURE
+// =============================================================================
+
+// Observation record (one row of NONMEM-style dataset)
+struct Observation {
+    id: i32,          // Subject ID
+    time: f64,        // Time (h)
+    amt: f64,         // Dose amount (0 if observation)
+    dv: f64,          // Dependent variable (concentration)
+    mdv: i32,         // Missing DV flag (1=dose, 0=obs)
+    evid: i32         // Event ID (1=dose, 0=obs)
+}
+
+// Complete population dataset
+struct PopulationDataset {
+    n_subjects: i32,
+    n_observations: i32,
+    // In real implementation: Vec<Observation>
+    // For now, store summary statistics
+    mean_dose: f64,
+    mean_conc: f64,
+    time_range: f64
+}
+
+// =============================================================================
+// TESTS
+// =============================================================================
+
+fn main() -> i32 {
+    println("=== Population PK Model Tests ===")
+    println("")
+
+    // Test 1: Parameter binding
+    println("Test 1: Individual parameter binding")
+    let pop = OneCompFixedEffects {
+        cl_pop: 10.0,
+        v_pop: 50.0,
+        ka_pop: 1.0
+    }
+    let cov = default_patient()
+    let eta = OneCompRandomEffects {
+        eta_cl: 0.0,
+        eta_v: 0.0,
+        eta_ka: 0.0
+    }
+    let ind = bind_one_comp_params(pop, cov, eta)
+    println("  Population: CL=10 L/h, V=50 L, Ka=1 /h")
+    println("  Individual (70kg, eta=0):")
+    println("    CL = ")
+    println(ind.cl)
+    println("    V = ")
+    println(ind.v)
+    println("    Ka = ")
+    println(ind.ka)
+    println("    Ke = ")
+    println(ind.ke)
+    println("")
+
+    // Test 2: Allometric scaling effect
+    println("Test 2: 100kg patient (allometric scaling)")
+    let cov_100kg = PatientCovariates {
+        id: 1,
+        weight: 100.0,
+        height: 180.0,
+        age: 40.0,
+        sex: 0,
+        crcl: 120.0,
+        albumin: 4.0,
+        cyp2d6: 2,
+        cyp3a4: 1
+    }
+    let ind_100kg = bind_one_comp_params(pop, cov_100kg, eta)
+    println("  CL @ 100kg = ")
+    println(ind_100kg.cl)
+    println("  V @ 100kg = ")
+    println(ind_100kg.v)
+    // Expected: CL = 10 * (100/70)^0.75 ≈ 12.5, V = 50 * 100/70 ≈ 71.4
+    println("")
+
+    // Test 3: Random effects (eta_cl = 0.3)
+    // Using fresh 70kg patient to avoid variable scoping issues
+    println("Test 3: Random effects (eta_cl = 0.3)")
+    let cov_70kg = PatientCovariates {
+        id: 2,
+        weight: 70.0,
+        height: 170.0,
+        age: 40.0,
+        sex: 0,
+        crcl: 120.0,
+        albumin: 4.0,
+        cyp2d6: 2,
+        cyp3a4: 1
+    }
+    let eta_var = OneCompRandomEffects {
+        eta_cl: 0.3,
+        eta_v: 0.0,
+        eta_ka: 0.0
+    }
+    let ind_var = bind_one_comp_params(pop, cov_70kg, eta_var)
+    println("  CL with eta_cl=0.3: ")
+    println(ind_var.cl)
+    // Expected: 10 * exp(0.3) ≈ 13.5
+    println("")
+
+    // Test 4: Population simulation
+    println("Test 4: Population simulation (N=100)")
+    let omega = OneCompOmega {
+        omega_cl: 0.3,
+        omega_v: 0.2,
+        omega_ka: 0.4,
+        rho_cl_v: 0.0
+    }
+    let mean_cl = simulate_population(pop, omega, cov, 100, 12345)
+    println("  Mean CL across 100 subjects: ")
+    println(mean_cl)
+    println("  (Population mean: 10 L/h)")
+    println("")
+
+    // Validation
+    // Expected: 10 (70kg), 13.07 (100kg), 13.5 (70kg + eta=0.3)
+    let err1 = abs_f64(ind.cl - 10.0)
+    let err2 = abs_f64(ind_100kg.cl - 13.07)
+    let err3 = abs_f64(ind_var.cl - 13.5)
+
+    if err1 < 0.1 {
+        if err2 < 0.5 {
+            if err3 < 0.5 {
+                println("ALL TESTS PASSED")
+                return 0
+            }
+        }
+    }
+
+    println("TESTS FAILED")
+    println("  err1 = ")
+    println(err1)
+    println("  err2 = ")
+    println(err2)
+    println("  err3 = ")
+    println(err3)
+    return 1
+}

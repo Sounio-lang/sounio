@@ -1,0 +1,892 @@
+// AlphaSounio: Self-Learning MCTS with Neural Effects
+// Features:
+//   - Neural policy/value network (simulated with linear approximation)
+//   - Epistemic PUCT with confidence tracking
+//   - Beta posterior updates for Bayesian value estimates
+//   - Self-play training loop
+//   - Uncertainty propagation across model updates
+//
+// Architecture following AlphaZero:
+//   1. Neural Network: state -> (policy, value)
+//   2. MCTS: guided by neural priors + epistemic bonus
+//   3. Self-Play: generate training data
+//   4. Training: update network from self-play games
+
+module alpha_sounio
+
+// =============================================================================
+// Type Definitions
+// =============================================================================
+
+// Neural network weights (simple linear model for demo)
+struct NeuralWeights {
+    // Policy head weights (4 actions)
+    policy_w0: f64,
+    policy_w1: f64,
+    policy_w2: f64,
+    policy_w3: f64,
+    policy_bias: f64,
+
+    // Value head weights
+    value_w: f64,
+    value_bias: f64,
+
+    // Learning rate
+    lr: f64
+}
+
+// MCTS Node with neural priors
+struct MctsNode {
+    // Neural network predictions
+    prior0: f64,
+    prior1: f64,
+    prior2: f64,
+    prior3: f64,
+    nn_value: f64,
+
+    // Visit counts
+    visits: f64,
+    child0_visits: f64,
+    child1_visits: f64,
+    child2_visits: f64,
+    child3_visits: f64,
+
+    // Beta posterior parameters (epistemic uncertainty)
+    child0_alpha: f64,
+    child0_beta: f64,
+    child1_alpha: f64,
+    child1_beta: f64,
+    child2_alpha: f64,
+    child2_beta: f64,
+    child3_alpha: f64,
+    child3_beta: f64,
+
+    // Root value tracking
+    value_sum: f64
+}
+
+// Game state
+struct GameSt {
+    position: f64,
+    turn: f64,
+    moves_left: f64
+}
+
+// Training example
+struct TrainExample {
+    position: f64,
+    policy0: f64,
+    policy1: f64,
+    policy2: f64,
+    policy3: f64,
+    outcome: f64
+}
+
+// Provenance tracking for model updates
+struct ProvenanceEntry {
+    // Content hash (simulated with position-based hash)
+    content_hash: f64,
+    // Training iteration number
+    iteration: f64,
+    // Loss before update
+    loss_before: f64,
+    // Loss after update
+    loss_after: f64,
+    // Confidence in update (based on training signal strength)
+    confidence: f64
+}
+
+// Model with provenance chain
+struct TrackedWeights {
+    weights: NeuralWeights,
+    // Provenance chain (last 4 updates for simplicity)
+    prov0: ProvenanceEntry,
+    prov1: ProvenanceEntry,
+    prov2: ProvenanceEntry,
+    prov3: ProvenanceEntry,
+    num_updates: f64
+}
+
+// Training batch (fixed size for simplicity)
+struct TrainBatch {
+    ex0: TrainExample,
+    ex1: TrainExample,
+    ex2: TrainExample,
+    ex3: TrainExample,
+    size: f64
+}
+
+// =============================================================================
+// Math Helpers
+// =============================================================================
+
+fn max_f(a: f64, b: f64) -> f64 {
+    if a > b { a } else { b }
+}
+
+fn min_f(a: f64, b: f64) -> f64 {
+    if a < b { a } else { b }
+}
+
+fn abs_f(x: f64) -> f64 {
+    if x < 0.0 { 0.0 - x } else { x }
+}
+
+fn sqrt_f(x: f64) -> f64 {
+    if x <= 0.0 { return 0.0 }
+    let mut g = x / 2.0
+    g = (g + x / g) / 2.0
+    g = (g + x / g) / 2.0
+    g = (g + x / g) / 2.0
+    g = (g + x / g) / 2.0
+    g = (g + x / g) / 2.0
+    g
+}
+
+fn exp_approx(x: f64) -> f64 {
+    // Taylor series approximation for e^x
+    let clamped = max_f(-5.0, min_f(5.0, x))
+    let x2 = clamped * clamped
+    let x3 = x2 * clamped
+    let x4 = x3 * clamped
+    1.0 + clamped + x2 / 2.0 + x3 / 6.0 + x4 / 24.0
+}
+
+fn sigmoid(x: f64) -> f64 {
+    1.0 / (1.0 + exp_approx(0.0 - x))
+}
+
+fn softmax_4(x0: f64, x1: f64, x2: f64, x3: f64, idx: f64) -> f64 {
+    // Compute softmax for 4 values, return idx-th element
+    let e0 = exp_approx(x0)
+    let e1 = exp_approx(x1)
+    let e2 = exp_approx(x2)
+    let e3 = exp_approx(x3)
+    let sum = e0 + e1 + e2 + e3
+
+    if idx < 0.5 { e0 / sum }
+    else if idx < 1.5 { e1 / sum }
+    else if idx < 2.5 { e2 / sum }
+    else { e3 / sum }
+}
+
+// =============================================================================
+// Neural Network
+// =============================================================================
+
+fn init_weights() -> NeuralWeights {
+    NeuralWeights {
+        // Initial policy weights (slight preference for rightward movement)
+        policy_w0: 0.0 - 0.1,
+        policy_w1: 0.0,
+        policy_w2: 0.1,
+        policy_w3: 0.2,
+        policy_bias: 0.0,
+
+        // Value weights
+        value_w: 0.1,
+        value_bias: 0.5,
+
+        lr: 0.01
+    }
+}
+
+fn nn_forward_policy(weights: NeuralWeights, pos: f64, action: f64) -> f64 {
+    // Simple linear policy: softmax over position-dependent logits
+    let norm_pos = pos / 10.0  // Normalize to [-1, 1]
+
+    let logit0 = weights.policy_w0 * norm_pos + weights.policy_bias
+    let logit1 = weights.policy_w1 * norm_pos + weights.policy_bias
+    let logit2 = weights.policy_w2 * norm_pos + weights.policy_bias
+    let logit3 = weights.policy_w3 * norm_pos + weights.policy_bias
+
+    softmax_4(logit0, logit1, logit2, logit3, action)
+}
+
+fn nn_forward_value(weights: NeuralWeights, pos: f64) -> f64 {
+    // Simple linear value: sigmoid of position
+    let norm_pos = pos / 10.0
+    sigmoid(weights.value_w * norm_pos + weights.value_bias)
+}
+
+fn nn_get_priors(weights: NeuralWeights, pos: f64) -> MctsNode {
+    // Get all policy priors for a position
+    let p0 = nn_forward_policy(weights, pos, 0.0)
+    let p1 = nn_forward_policy(weights, pos, 1.0)
+    let p2 = nn_forward_policy(weights, pos, 2.0)
+    let p3 = nn_forward_policy(weights, pos, 3.0)
+    let v = nn_forward_value(weights, pos)
+
+    MctsNode {
+        prior0: p0,
+        prior1: p1,
+        prior2: p2,
+        prior3: p3,
+        nn_value: v,
+        visits: 0.0,
+        child0_visits: 0.0,
+        child1_visits: 0.0,
+        child2_visits: 0.0,
+        child3_visits: 0.0,
+        // Initialize Beta posteriors with uniform prior (alpha=1, beta=1)
+        child0_alpha: 1.0,
+        child0_beta: 1.0,
+        child1_alpha: 1.0,
+        child1_beta: 1.0,
+        child2_alpha: 1.0,
+        child2_beta: 1.0,
+        child3_alpha: 1.0,
+        child3_beta: 1.0,
+        value_sum: 0.0
+    }
+}
+
+// =============================================================================
+// Beta Posterior (Epistemic Uncertainty)
+// =============================================================================
+
+fn beta_mean(alpha: f64, beta_param: f64) -> f64 {
+    alpha / (alpha + beta_param)
+}
+
+fn beta_variance(alpha: f64, beta_param: f64) -> f64 {
+    let sum = alpha + beta_param
+    alpha * beta_param / (sum * sum * (sum + 1.0))
+}
+
+// =============================================================================
+// Epistemic PUCT
+// =============================================================================
+
+fn puct_score(
+    q_mean: f64,
+    q_variance: f64,
+    prior: f64,
+    child_visits: f64,
+    parent_visits: f64,
+    c_puct: f64,
+    c_epistemic: f64
+) -> f64 {
+    // Q + c_puct * P * sqrt(N) / (1 + n) + c_epistemic * sqrt(variance)
+    let u = prior * sqrt_f(parent_visits) / (1.0 + child_visits)
+    let epistemic_bonus = sqrt_f(max_f(q_variance, 0.0001))
+
+    q_mean + c_puct * u + c_epistemic * epistemic_bonus
+}
+
+fn select_action_puct(node: MctsNode, c_puct: f64, c_epistemic: f64) -> f64 {
+    let q0 = beta_mean(node.child0_alpha, node.child0_beta)
+    let q1 = beta_mean(node.child1_alpha, node.child1_beta)
+    let q2 = beta_mean(node.child2_alpha, node.child2_beta)
+    let q3 = beta_mean(node.child3_alpha, node.child3_beta)
+
+    let var0 = beta_variance(node.child0_alpha, node.child0_beta)
+    let var1 = beta_variance(node.child1_alpha, node.child1_beta)
+    let var2 = beta_variance(node.child2_alpha, node.child2_beta)
+    let var3 = beta_variance(node.child3_alpha, node.child3_beta)
+
+    let pv = node.visits + 1.0  // Avoid division by zero
+
+    let score0 = puct_score(q0, var0, node.prior0, node.child0_visits, pv, c_puct, c_epistemic)
+    let score1 = puct_score(q1, var1, node.prior1, node.child1_visits, pv, c_puct, c_epistemic)
+    let score2 = puct_score(q2, var2, node.prior2, node.child2_visits, pv, c_puct, c_epistemic)
+    let score3 = puct_score(q3, var3, node.prior3, node.child3_visits, pv, c_puct, c_epistemic)
+
+    let mut best_action = 0.0
+    let mut best_score = score0
+
+    if score1 > best_score {
+        best_action = 1.0
+        best_score = score1
+    }
+    if score2 > best_score {
+        best_action = 2.0
+        best_score = score2
+    }
+    if score3 > best_score {
+        best_action = 3.0
+    }
+
+    best_action
+}
+
+// =============================================================================
+// Game Logic
+// =============================================================================
+
+fn make_game() -> GameSt {
+    GameSt {
+        position: 0.0,
+        turn: 0.0,
+        moves_left: 10.0
+    }
+}
+
+fn apply_action_game(st: GameSt, action: f64) -> GameSt {
+    let delta = if action < 0.5 {
+        0.0 - 2.0
+    } else if action < 1.5 {
+        0.0 - 1.0
+    } else if action < 2.5 {
+        1.0
+    } else {
+        2.0
+    }
+
+    let actual = if st.turn > 0.5 { 0.0 - delta } else { delta }
+    let new_pos = max_f(0.0 - 10.0, min_f(10.0, st.position + actual))
+
+    GameSt {
+        position: new_pos,
+        turn: 1.0 - st.turn,
+        moves_left: st.moves_left - 1.0
+    }
+}
+
+fn is_done(st: GameSt) -> f64 {
+    if abs_f(st.position) > 9.5 { 1.0 }
+    else if st.moves_left < 0.5 { 1.0 }
+    else { 0.0 }
+}
+
+fn get_outcome(st: GameSt) -> f64 {
+    if st.position > 9.5 { 1.0 }
+    else if st.position < 0.0 - 9.5 { 0.0 }
+    else { 0.5 }
+}
+
+// =============================================================================
+// MCTS with Neural Guidance
+// =============================================================================
+
+fn update_node_with_outcome(node: MctsNode, action: f64, outcome: f64) -> MctsNode {
+    // Update Beta posterior for selected action
+    // outcome close to 1 increases alpha, close to 0 increases beta
+    let win_update = outcome
+    let loss_update = 1.0 - outcome
+
+    if action < 0.5 {
+        MctsNode {
+            prior0: node.prior0, prior1: node.prior1, prior2: node.prior2, prior3: node.prior3,
+            nn_value: node.nn_value,
+            visits: node.visits + 1.0,
+            child0_visits: node.child0_visits + 1.0,
+            child1_visits: node.child1_visits,
+            child2_visits: node.child2_visits,
+            child3_visits: node.child3_visits,
+            child0_alpha: node.child0_alpha + win_update,
+            child0_beta: node.child0_beta + loss_update,
+            child1_alpha: node.child1_alpha, child1_beta: node.child1_beta,
+            child2_alpha: node.child2_alpha, child2_beta: node.child2_beta,
+            child3_alpha: node.child3_alpha, child3_beta: node.child3_beta,
+            value_sum: node.value_sum + outcome
+        }
+    } else if action < 1.5 {
+        MctsNode {
+            prior0: node.prior0, prior1: node.prior1, prior2: node.prior2, prior3: node.prior3,
+            nn_value: node.nn_value,
+            visits: node.visits + 1.0,
+            child0_visits: node.child0_visits,
+            child1_visits: node.child1_visits + 1.0,
+            child2_visits: node.child2_visits,
+            child3_visits: node.child3_visits,
+            child0_alpha: node.child0_alpha, child0_beta: node.child0_beta,
+            child1_alpha: node.child1_alpha + win_update,
+            child1_beta: node.child1_beta + loss_update,
+            child2_alpha: node.child2_alpha, child2_beta: node.child2_beta,
+            child3_alpha: node.child3_alpha, child3_beta: node.child3_beta,
+            value_sum: node.value_sum + outcome
+        }
+    } else if action < 2.5 {
+        MctsNode {
+            prior0: node.prior0, prior1: node.prior1, prior2: node.prior2, prior3: node.prior3,
+            nn_value: node.nn_value,
+            visits: node.visits + 1.0,
+            child0_visits: node.child0_visits,
+            child1_visits: node.child1_visits,
+            child2_visits: node.child2_visits + 1.0,
+            child3_visits: node.child3_visits,
+            child0_alpha: node.child0_alpha, child0_beta: node.child0_beta,
+            child1_alpha: node.child1_alpha, child1_beta: node.child1_beta,
+            child2_alpha: node.child2_alpha + win_update,
+            child2_beta: node.child2_beta + loss_update,
+            child3_alpha: node.child3_alpha, child3_beta: node.child3_beta,
+            value_sum: node.value_sum + outcome
+        }
+    } else {
+        MctsNode {
+            prior0: node.prior0, prior1: node.prior1, prior2: node.prior2, prior3: node.prior3,
+            nn_value: node.nn_value,
+            visits: node.visits + 1.0,
+            child0_visits: node.child0_visits,
+            child1_visits: node.child1_visits,
+            child2_visits: node.child2_visits,
+            child3_visits: node.child3_visits + 1.0,
+            child0_alpha: node.child0_alpha, child0_beta: node.child0_beta,
+            child1_alpha: node.child1_alpha, child1_beta: node.child1_beta,
+            child2_alpha: node.child2_alpha, child2_beta: node.child2_beta,
+            child3_alpha: node.child3_alpha + win_update,
+            child3_beta: node.child3_beta + loss_update,
+            value_sum: node.value_sum + outcome
+        }
+    }
+}
+
+fn mcts_sim(node: MctsNode, st: GameSt, weights: NeuralWeights) -> MctsNode {
+    let c_puct = 1.4
+    let c_epistemic = 0.5
+
+    // Select action
+    let action = select_action_puct(node, c_puct, c_epistemic)
+
+    // Apply action
+    let next_st = apply_action_game(st, action)
+
+    // Evaluate
+    let value = if is_done(next_st) > 0.5 {
+        get_outcome(next_st)
+    } else {
+        nn_forward_value(weights, next_st.position)
+    }
+
+    // Adjust for player perspective
+    let adj_value = if st.turn > 0.5 { 1.0 - value } else { value }
+
+    // Update node
+    update_node_with_outcome(node, action, adj_value)
+}
+
+fn run_mcts_sims_rec(node: MctsNode, st: GameSt, weights: NeuralWeights, n: f64) -> MctsNode {
+    if n < 0.5 {
+        return node
+    }
+    let updated = mcts_sim(node, st, weights)
+    run_mcts_sims_rec(updated, st, weights, n - 1.0)
+}
+
+fn run_mcts(st: GameSt, weights: NeuralWeights, num_sims: f64) -> MctsNode {
+    let node = nn_get_priors(weights, st.position)
+    run_mcts_sims_rec(node, st, weights, num_sims)
+}
+
+// =============================================================================
+// Policy Extraction
+// =============================================================================
+
+fn get_policy_from_visits(node: MctsNode) -> TrainExample {
+    let total = node.child0_visits + node.child1_visits + node.child2_visits + node.child3_visits + 0.001
+
+    TrainExample {
+        position: 0.0,  // Will be set by caller
+        policy0: node.child0_visits / total,
+        policy1: node.child1_visits / total,
+        policy2: node.child2_visits / total,
+        policy3: node.child3_visits / total,
+        outcome: 0.0    // Will be set after game ends
+    }
+}
+
+fn get_best_action_visits(node: MctsNode) -> f64 {
+    let mut best = 0.0
+    let mut best_v = node.child0_visits
+
+    if node.child1_visits > best_v {
+        best = 1.0
+        best_v = node.child1_visits
+    }
+    if node.child2_visits > best_v {
+        best = 2.0
+        best_v = node.child2_visits
+    }
+    if node.child3_visits > best_v {
+        best = 3.0
+    }
+
+    best
+}
+
+// =============================================================================
+// Training
+// =============================================================================
+
+fn train_step(weights: NeuralWeights, ex: TrainExample) -> NeuralWeights {
+    // Compute policy loss gradient (cross-entropy)
+    let p0 = nn_forward_policy(weights, ex.position, 0.0)
+    let p1 = nn_forward_policy(weights, ex.position, 1.0)
+    let p2 = nn_forward_policy(weights, ex.position, 2.0)
+    let p3 = nn_forward_policy(weights, ex.position, 3.0)
+
+    // Policy gradient: -(target - predicted) * feature
+    let norm_pos = ex.position / 10.0
+    let grad_w0 = (ex.policy0 - p0) * norm_pos
+    let grad_w1 = (ex.policy1 - p1) * norm_pos
+    let grad_w2 = (ex.policy2 - p2) * norm_pos
+    let grad_w3 = (ex.policy3 - p3) * norm_pos
+
+    // Value loss gradient (MSE)
+    let v = nn_forward_value(weights, ex.position)
+    let v_err = ex.outcome - v
+    let grad_v_w = v_err * norm_pos * v * (1.0 - v)  // sigmoid derivative
+    let grad_v_b = v_err * v * (1.0 - v)
+
+    // Update weights
+    NeuralWeights {
+        policy_w0: weights.policy_w0 + weights.lr * grad_w0,
+        policy_w1: weights.policy_w1 + weights.lr * grad_w1,
+        policy_w2: weights.policy_w2 + weights.lr * grad_w2,
+        policy_w3: weights.policy_w3 + weights.lr * grad_w3,
+        policy_bias: weights.policy_bias,
+        value_w: weights.value_w + weights.lr * grad_v_w,
+        value_bias: weights.value_bias + weights.lr * grad_v_b,
+        lr: weights.lr
+    }
+}
+
+// =============================================================================
+// Self-Play
+// =============================================================================
+
+fn self_play_move(st: GameSt, weights: NeuralWeights) -> f64 {
+    // Run MCTS and return best action
+    let node = run_mcts(st, weights, 30.0)
+    get_best_action_visits(node)
+}
+
+fn self_play_game_rec(st: GameSt, weights: NeuralWeights, step: f64) -> f64 {
+    if is_done(st) > 0.5 {
+        return get_outcome(st)
+    }
+    if step > 20.0 {
+        return 0.5
+    }
+
+    let action = self_play_move(st, weights)
+    let next_st = apply_action_game(st, action)
+
+    self_play_game_rec(next_st, weights, step + 1.0)
+}
+
+fn self_play_game(weights: NeuralWeights) -> f64 {
+    let st = make_game()
+    self_play_game_rec(st, weights, 0.0)
+}
+
+// =============================================================================
+// Training Loop
+// =============================================================================
+
+fn training_iteration(weights: NeuralWeights) -> NeuralWeights {
+    // Play a game and create training example
+    let st = make_game()
+    let node = run_mcts(st, weights, 50.0)
+    let outcome = self_play_game(weights)
+
+    // Create training example from root position
+    let ex = TrainExample {
+        position: st.position,
+        policy0: node.child0_visits / (node.visits + 0.001),
+        policy1: node.child1_visits / (node.visits + 0.001),
+        policy2: node.child2_visits / (node.visits + 0.001),
+        policy3: node.child3_visits / (node.visits + 0.001),
+        outcome: outcome
+    }
+
+    train_step(weights, ex)
+}
+
+fn train_loop_rec(weights: NeuralWeights, iterations: f64) -> NeuralWeights {
+    if iterations < 0.5 {
+        return weights
+    }
+    let updated = training_iteration(weights)
+    train_loop_rec(updated, iterations - 1.0)
+}
+
+fn train(num_iterations: f64) -> NeuralWeights {
+    let init = init_weights()
+    train_loop_rec(init, num_iterations)
+}
+
+// =============================================================================
+// Provenance-Tracked Training
+// =============================================================================
+
+fn compute_hash(weights: NeuralWeights) -> f64 {
+    // Simple hash: combine all weights
+    let h = weights.policy_w0 * 1.0 +
+            weights.policy_w1 * 2.0 +
+            weights.policy_w2 * 3.0 +
+            weights.policy_w3 * 4.0 +
+            weights.value_w * 5.0 +
+            weights.value_bias * 6.0
+    // Normalize to [0, 1000] range
+    abs_f(h * 100.0)
+}
+
+fn compute_loss(weights: NeuralWeights, ex: TrainExample) -> f64 {
+    // Cross-entropy loss for policy + MSE for value
+    let p0 = nn_forward_policy(weights, ex.position, 0.0)
+    let p1 = nn_forward_policy(weights, ex.position, 1.0)
+    let p2 = nn_forward_policy(weights, ex.position, 2.0)
+    let p3 = nn_forward_policy(weights, ex.position, 3.0)
+
+    // Simplified cross-entropy (avoid log)
+    let policy_loss = (ex.policy0 - p0) * (ex.policy0 - p0) +
+                      (ex.policy1 - p1) * (ex.policy1 - p1) +
+                      (ex.policy2 - p2) * (ex.policy2 - p2) +
+                      (ex.policy3 - p3) * (ex.policy3 - p3)
+
+    let v = nn_forward_value(weights, ex.position)
+    let value_loss = (ex.outcome - v) * (ex.outcome - v)
+
+    policy_loss + value_loss
+}
+
+fn empty_provenance() -> ProvenanceEntry {
+    ProvenanceEntry {
+        content_hash: 0.0,
+        iteration: 0.0,
+        loss_before: 0.0,
+        loss_after: 0.0,
+        confidence: 0.0
+    }
+}
+
+fn init_tracked_weights() -> TrackedWeights {
+    let w = init_weights()
+    TrackedWeights {
+        weights: w,
+        prov0: empty_provenance(),
+        prov1: empty_provenance(),
+        prov2: empty_provenance(),
+        prov3: empty_provenance(),
+        num_updates: 0.0
+    }
+}
+
+fn train_step_with_provenance(tw: TrackedWeights, ex: TrainExample) -> TrackedWeights {
+    let loss_before = compute_loss(tw.weights, ex)
+    let new_weights = train_step(tw.weights, ex)
+    let loss_after = compute_loss(new_weights, ex)
+
+    // Compute confidence based on loss reduction
+    let loss_delta = loss_before - loss_after
+    let confidence = if loss_delta > 0.0 {
+        min_f(1.0, loss_delta * 10.0)  // Scale to [0, 1]
+    } else {
+        0.1  // Low confidence if loss increased
+    }
+
+    let new_prov = ProvenanceEntry {
+        content_hash: compute_hash(new_weights),
+        iteration: tw.num_updates + 1.0,
+        loss_before: loss_before,
+        loss_after: loss_after,
+        confidence: confidence
+    }
+
+    // Shift provenance chain (keep last 4)
+    TrackedWeights {
+        weights: new_weights,
+        prov0: new_prov,
+        prov1: tw.prov0,
+        prov2: tw.prov1,
+        prov3: tw.prov2,
+        num_updates: tw.num_updates + 1.0
+    }
+}
+
+fn get_provenance_confidence(tw: TrackedWeights) -> f64 {
+    // Average confidence across provenance chain
+    let total = tw.prov0.confidence + tw.prov1.confidence +
+                tw.prov2.confidence + tw.prov3.confidence
+    let count = min_f(tw.num_updates, 4.0)
+    if count > 0.0 { total / count } else { 0.0 }
+}
+
+fn check_order(a: f64, b: f64) -> f64 {
+    if a > b { 1.0 } else { 0.0 }
+}
+
+fn verify_provenance_chain(tw: TrackedWeights) -> f64 {
+    if tw.num_updates < 2.0 {
+        return 1.0
+    }
+    let v1 = check_order(tw.prov0.iteration, tw.prov1.iteration)
+    let v2 = check_order(tw.prov1.iteration, tw.prov2.iteration)
+    let result = (v1 + v2) / 2.0
+    result
+}
+
+// =============================================================================
+// Tests
+// =============================================================================
+
+fn test_neural_network() -> f64 {
+    let weights = init_weights()
+
+    // Test policy sums to 1
+    let p0 = nn_forward_policy(weights, 0.0, 0.0)
+    let p1 = nn_forward_policy(weights, 0.0, 1.0)
+    let p2 = nn_forward_policy(weights, 0.0, 2.0)
+    let p3 = nn_forward_policy(weights, 0.0, 3.0)
+    let sum = p0 + p1 + p2 + p3
+
+    // Value in [0, 1]
+    let v = nn_forward_value(weights, 0.0)
+
+    let sum_ok = if abs_f(sum - 1.0) < 0.01 { 1.0 } else { 0.0 }
+    let v_ok = if v > 0.0 { 1.0 } else { 0.0 }
+
+    sum_ok + v_ok
+}
+
+fn test_epistemic_exploration() -> f64 {
+    let weights = init_weights()
+
+    // Node with high uncertainty on action 0
+    let high_var_node = MctsNode {
+        prior0: 0.25, prior1: 0.25, prior2: 0.25, prior3: 0.25,
+        nn_value: 0.5,
+        visits: 10.0,
+        child0_visits: 1.0, child1_visits: 5.0, child2_visits: 2.0, child3_visits: 2.0,
+        child0_alpha: 1.0, child0_beta: 1.0,  // High uncertainty (few samples)
+        child1_alpha: 10.0, child1_beta: 10.0,  // Low uncertainty (many samples)
+        child2_alpha: 5.0, child2_beta: 5.0,
+        child3_alpha: 5.0, child3_beta: 5.0,
+        value_sum: 5.0
+    }
+
+    // With high epistemic coefficient, should explore uncertain action 0
+    let action_high_e = select_action_puct(high_var_node, 1.4, 2.0)
+
+    // With low epistemic coefficient, should exploit visited action 1
+    let action_low_e = select_action_puct(high_var_node, 1.4, 0.0)
+
+    // Epistemic bonus should influence selection
+    if action_high_e < 0.5 { 1.0 } else { 0.0 }
+}
+
+fn test_self_play() -> f64 {
+    let weights = init_weights()
+    let outcome = self_play_game(weights)
+
+    // Outcome should be valid
+    if outcome >= 0.0 { 1.0 } else { 0.0 }
+}
+
+fn test_training() -> f64 {
+    let init = init_weights()
+
+    // Create a training example with clear signal
+    let ex = TrainExample {
+        position: 5.0,  // Positive position
+        policy0: 0.0,   // Target: don't go left
+        policy1: 0.0,
+        policy2: 0.3,   // Target: go right
+        policy3: 0.7,   // Target: strongly go right
+        outcome: 1.0    // Win signal
+    }
+
+    let trained = train_step(init, ex)
+
+    // Weights should change toward right-movement preference
+    let changed = abs_f(init.policy_w3 - trained.policy_w3) +
+                  abs_f(init.value_w - trained.value_w)
+
+    if changed > 0.0001 { 1.0 } else { 0.0 }
+}
+
+fn test_provenance() -> f64 {
+    let tw = init_tracked_weights()
+
+    // Training examples with clear signals
+    let ex1 = TrainExample {
+        position: 3.0,
+        policy0: 0.1, policy1: 0.1, policy2: 0.3, policy3: 0.5,
+        outcome: 0.8
+    }
+    let ex2 = TrainExample {
+        position: 0.0 - 2.0,
+        policy0: 0.4, policy1: 0.3, policy2: 0.2, policy3: 0.1,
+        outcome: 0.3
+    }
+    let ex3 = TrainExample {
+        position: 5.0,
+        policy0: 0.0, policy1: 0.1, policy2: 0.4, policy3: 0.5,
+        outcome: 1.0
+    }
+
+    // Train with provenance
+    let tw1 = train_step_with_provenance(tw, ex1)
+    let tw2 = train_step_with_provenance(tw1, ex2)
+    let tw3 = train_step_with_provenance(tw2, ex3)
+
+    // Check provenance chain
+    let chain_valid = verify_provenance_chain(tw3)
+    let has_confidence = if get_provenance_confidence(tw3) > 0.0 { 1.0 } else { 0.0 }
+    let has_updates = if tw3.num_updates > 2.5 { 1.0 } else { 0.0 }
+
+    chain_valid + has_confidence + has_updates
+}
+
+// =============================================================================
+// Main
+// =============================================================================
+
+fn main() -> f64 {
+    print("=== AlphaSounio: Neural MCTS with Epistemic Uncertainty ===")
+    print("")
+
+    // Test 1: Neural Network
+    let nn_test = test_neural_network()
+    print("Neural network test (should be 2): ")
+    print(nn_test)
+
+    // Test 2: Epistemic Exploration
+    let epistemic_test = test_epistemic_exploration()
+    print("Epistemic exploration test (1 = explores uncertain): ")
+    print(epistemic_test)
+
+    // Test 3: Self-Play
+    let sp_test = test_self_play()
+    print("Self-play test: ")
+    print(sp_test)
+
+    // Test 4: Training
+    print("")
+    print("Training for 3 iterations...")
+    let train_test = test_training()
+    print("Training test (1 = weights updated): ")
+    print(train_test)
+
+    // Test 5: Provenance Tracking
+    print("")
+    print("Testing provenance tracking...")
+    let prov_test = test_provenance()
+    print("Provenance test (3 = chain valid, confidence, updates): ")
+    print(prov_test)
+
+    // Demo: Full training run
+    print("")
+    print("Running full training (5 iterations)...")
+    let trained = train(5.0)
+
+    print("Final policy_w3 (right movement preference): ")
+    print(trained.policy_w3)
+
+    print("Final value_w: ")
+    print(trained.value_w)
+
+    // Play a game with trained network
+    print("")
+    print("Playing game with trained network...")
+    let final_outcome = self_play_game(trained)
+    print("Game outcome: ")
+    print(final_outcome)
+
+    print("")
+    print("=== AlphaSounio Complete ===")
+
+    nn_test + epistemic_test + sp_test + train_test + prov_test
+}

@@ -1,0 +1,981 @@
+// autodiff.d - Automatic Differentiation for Machine Learning in Sounio
+//
+// Comprehensive automatic differentiation (AD) system designed specifically for
+// neural network training and optimization. Combines forward-mode AD (dual numbers)
+// with reverse-mode AD (tape-based backpropagation) for efficient gradient computation.
+//
+// Key Features:
+//   1. Dual Numbers: Forward-mode AD for functions with few inputs
+//   2. Tape-based Reverse AD: Efficient backpropagation for ML (R^n -> R)
+//   3. Epistemic Derivative Tracking: Uncertainty quantification in gradients
+//   4. Vector Jacobian Products (VJP): Essential for backprop through layers
+//   5. Numerical Derivative Verification: Testing and debugging
+//
+// Mathematical Foundation:
+//   Forward Mode:  Computes J·v (Jacobian-vector product) efficiently
+//   Reverse Mode:  Computes v^T·J (vector-Jacobian product) - ideal for ML
+//
+//   For loss L(θ) where θ ∈ R^n, reverse mode computes ∇L in O(1) backward pass
+//   versus O(n) forward passes, making it essential for high-dimensional optimization.
+//
+// References:
+//   - Baydin et al., "Automatic Differentiation in Machine Learning", JMLR 2018
+//   - Griewank & Walther, "Evaluating Derivatives", SIAM 2008
+//   - Goodfellow et al., "Deep Learning", MIT Press 2016 (Chapter 6)
+
+// ============================================================================
+// MATHEMATICAL HELPER FUNCTIONS
+// ============================================================================
+
+fn abs_f64(x: f64) -> f64 {
+    if x < 0.0 { return 0.0 - x }
+    return x
+}
+
+fn max_f64(a: f64, b: f64) -> f64 {
+    if a > b { return a }
+    return b
+}
+
+fn sqrt_f64(x: f64) -> f64 {
+    if x <= 0.0 { return 0.0 }
+    var y = x
+    y = 0.5 * (y + x / y)
+    y = 0.5 * (y + x / y)
+    y = 0.5 * (y + x / y)
+    y = 0.5 * (y + x / y)
+    y = 0.5 * (y + x / y)
+    y = 0.5 * (y + x / y)
+    y = 0.5 * (y + x / y)
+    y = 0.5 * (y + x / y)
+    return y
+}
+
+fn exp_f64(x: f64) -> f64 {
+    if x > 20.0 { return exp_f64(x / 2.0) * exp_f64(x / 2.0) }
+    if x < 0.0 - 20.0 { return 1.0 / exp_f64(0.0 - x) }
+    var sum = 1.0
+    var term = 1.0
+    term = term * x / 1.0
+    sum = sum + term
+    term = term * x / 2.0
+    sum = sum + term
+    term = term * x / 3.0
+    sum = sum + term
+    term = term * x / 4.0
+    sum = sum + term
+    term = term * x / 5.0
+    sum = sum + term
+    term = term * x / 6.0
+    sum = sum + term
+    term = term * x / 7.0
+    sum = sum + term
+    term = term * x / 8.0
+    sum = sum + term
+    term = term * x / 9.0
+    sum = sum + term
+    term = term * x / 10.0
+    sum = sum + term
+    term = term * x / 11.0
+    sum = sum + term
+    term = term * x / 12.0
+    sum = sum + term
+    term = term * x / 13.0
+    sum = sum + term
+    term = term * x / 14.0
+    sum = sum + term
+    term = term * x / 15.0
+    sum = sum + term
+    return sum
+}
+
+fn log_f64(x: f64) -> f64 {
+    if x <= 0.0 { return 0.0 - 1000000.0 }
+    var val = x
+    var k = 0.0
+    let e = 2.718281828459045
+    while val > e {
+        val = val / e
+        k = k + 1.0
+    }
+    while val < 1.0 / e {
+        val = val * e
+        k = k - 1.0
+    }
+    let u = (val - 1.0) / (val + 1.0)
+    let u2 = u * u
+    var sum = u
+    var term = u
+    term = term * u2
+    sum = sum + term / 3.0
+    term = term * u2
+    sum = sum + term / 5.0
+    term = term * u2
+    sum = sum + term / 7.0
+    term = term * u2
+    sum = sum + term / 9.0
+    term = term * u2
+    sum = sum + term / 11.0
+    term = term * u2
+    sum = sum + term / 13.0
+    term = term * u2
+    sum = sum + term / 15.0
+    term = term * u2
+    sum = sum + term / 17.0
+    return 2.0 * sum + k
+}
+
+fn sin_f64(x: f64) -> f64 {
+    let pi = 3.141592653589793
+    var y = x
+    while y > pi { y = y - 2.0 * pi }
+    while y < 0.0 - pi { y = y + 2.0 * pi }
+    let x2 = y * y
+    var sum = y
+    var term = y
+    term = term * (0.0 - x2) / (2.0 * 3.0)
+    sum = sum + term
+    term = term * (0.0 - x2) / (4.0 * 5.0)
+    sum = sum + term
+    term = term * (0.0 - x2) / (6.0 * 7.0)
+    sum = sum + term
+    term = term * (0.0 - x2) / (8.0 * 9.0)
+    sum = sum + term
+    term = term * (0.0 - x2) / (10.0 * 11.0)
+    sum = sum + term
+    return sum
+}
+
+fn cos_f64(x: f64) -> f64 {
+    let pi = 3.141592653589793
+    var y = x
+    while y > pi { y = y - 2.0 * pi }
+    while y < 0.0 - pi { y = y + 2.0 * pi }
+    let x2 = y * y
+    var sum = 1.0
+    var term = 1.0
+    term = term * (0.0 - x2) / (1.0 * 2.0)
+    sum = sum + term
+    term = term * (0.0 - x2) / (3.0 * 4.0)
+    sum = sum + term
+    term = term * (0.0 - x2) / (5.0 * 6.0)
+    sum = sum + term
+    term = term * (0.0 - x2) / (7.0 * 8.0)
+    sum = sum + term
+    term = term * (0.0 - x2) / (9.0 * 10.0)
+    sum = sum + term
+    return sum
+}
+
+fn tanh_f64(x: f64) -> f64 {
+    let e2x = exp_f64(2.0 * x)
+    return (e2x - 1.0) / (e2x + 1.0)
+}
+
+// ============================================================================
+// PART 1: DUAL NUMBERS (FORWARD MODE AD)
+// ============================================================================
+// Dual numbers: a + b·ε where ε² = 0
+// Enables automatic derivative computation via chain rule
+
+struct Dual {
+    value: f64,
+    derivative: f64
+}
+
+// Create dual number with explicit value and derivative
+fn dual_new(value: f64, derivative: f64) -> Dual {
+    return Dual { value: value, derivative: derivative }
+}
+
+// Create constant (derivative = 0)
+fn dual_constant(value: f64) -> Dual {
+    return Dual { value: value, derivative: 0.0 }
+}
+
+// Create variable (derivative = 1)
+fn dual_variable(value: f64) -> Dual {
+    return Dual { value: value, derivative: 1.0 }
+}
+
+// ============================================================================
+// DUAL ARITHMETIC OPERATIONS
+// ============================================================================
+
+fn dual_add(a: Dual, b: Dual) -> Dual {
+    return Dual {
+        value: a.value + b.value,
+        derivative: a.derivative + b.derivative
+    }
+}
+
+fn dual_sub(a: Dual, b: Dual) -> Dual {
+    return Dual {
+        value: a.value - b.value,
+        derivative: a.derivative - b.derivative
+    }
+}
+
+fn dual_mul(a: Dual, b: Dual) -> Dual {
+    // Product rule: (f·g)' = f'·g + f·g'
+    return Dual {
+        value: a.value * b.value,
+        derivative: a.derivative * b.value + a.value * b.derivative
+    }
+}
+
+fn dual_div(a: Dual, b: Dual) -> Dual {
+    // Quotient rule: (f/g)' = (f'·g - f·g') / g²
+    let g2 = b.value * b.value
+    return Dual {
+        value: a.value / b.value,
+        derivative: (a.derivative * b.value - a.value * b.derivative) / g2
+    }
+}
+
+fn dual_neg(d: Dual) -> Dual {
+    return Dual {
+        value: 0.0 - d.value,
+        derivative: 0.0 - d.derivative
+    }
+}
+
+// ============================================================================
+// DUAL MATHEMATICAL FUNCTIONS
+// ============================================================================
+
+fn dual_exp(d: Dual) -> Dual {
+    // d/dx exp(x) = exp(x)
+    let e = exp_f64(d.value)
+    return Dual { value: e, derivative: d.derivative * e }
+}
+
+fn dual_log(d: Dual) -> Dual {
+    // d/dx log(x) = 1/x
+    return Dual {
+        value: log_f64(d.value),
+        derivative: d.derivative / d.value
+    }
+}
+
+fn dual_sin(d: Dual) -> Dual {
+    // d/dx sin(x) = cos(x)
+    return Dual {
+        value: sin_f64(d.value),
+        derivative: d.derivative * cos_f64(d.value)
+    }
+}
+
+fn dual_cos(d: Dual) -> Dual {
+    // d/dx cos(x) = -sin(x)
+    return Dual {
+        value: cos_f64(d.value),
+        derivative: 0.0 - d.derivative * sin_f64(d.value)
+    }
+}
+
+fn dual_tanh(d: Dual) -> Dual {
+    // d/dx tanh(x) = 1 - tanh²(x)
+    let t = tanh_f64(d.value)
+    return Dual {
+        value: t,
+        derivative: d.derivative * (1.0 - t * t)
+    }
+}
+
+fn dual_pow(d: Dual, p: f64) -> Dual {
+    // d/dx x^p = p·x^(p-1)
+    let v = exp_f64(p * log_f64(d.value))
+    let dv = p * exp_f64((p - 1.0) * log_f64(d.value))
+    return Dual { value: v, derivative: d.derivative * dv }
+}
+
+fn dual_sqrt(d: Dual) -> Dual {
+    // d/dx sqrt(x) = 1/(2·sqrt(x))
+    let v = sqrt_f64(d.value)
+    return Dual {
+        value: v,
+        derivative: d.derivative / (2.0 * v)
+    }
+}
+
+// ============================================================================
+// DUAL NEURAL NETWORK ACTIVATIONS
+// ============================================================================
+
+fn dual_relu(d: Dual) -> Dual {
+    // ReLU(x) = max(0, x)
+    // d/dx ReLU(x) = 1 if x > 0, else 0
+    if d.value > 0.0 {
+        return Dual { value: d.value, derivative: d.derivative }
+    }
+    return Dual { value: 0.0, derivative: 0.0 }
+}
+
+fn dual_sigmoid(d: Dual) -> Dual {
+    // sigmoid(x) = 1/(1 + exp(-x))
+    // d/dx sigmoid(x) = sigmoid(x)·(1 - sigmoid(x))
+    let s = 1.0 / (1.0 + exp_f64(0.0 - d.value))
+    return Dual {
+        value: s,
+        derivative: d.derivative * s * (1.0 - s)
+    }
+}
+
+// ============================================================================
+// PART 2: TAPE-BASED REVERSE MODE AD
+// ============================================================================
+// Efficient for R^n -> R (many inputs, one output) - ideal for ML loss functions
+
+// Maximum tape size for computational graph
+fn max_tape_entries() -> i64 { return 50 }
+
+// Operation type codes
+fn op_const() -> i64 { return 0 }
+fn op_var() -> i64 { return 1 }
+fn op_add() -> i64 { return 2 }
+fn op_mul() -> i64 { return 3 }
+fn op_exp() -> i64 { return 4 }
+fn op_log() -> i64 { return 5 }
+fn op_sin() -> i64 { return 6 }
+fn op_tanh() -> i64 { return 7 }
+fn op_relu() -> i64 { return 8 }
+fn op_sigmoid() -> i64 { return 9 }
+
+// Tape entry: records one operation in computational graph
+struct TapeEntry {
+    op_type: i64,       // Operation type
+    input1_idx: i64,    // Index of first input (-1 if none)
+    input2_idx: i64,    // Index of second input (-1 if unary)
+    output_idx: i64     // Index where output is stored in values array
+}
+
+// Fixed-size gradient tape
+struct ADTape {
+    // Values array (forward pass results)
+    v0: f64, v1: f64, v2: f64, v3: f64, v4: f64, v5: f64, v6: f64, v7: f64, v8: f64, v9: f64,
+    v10: f64, v11: f64, v12: f64, v13: f64, v14: f64, v15: f64, v16: f64, v17: f64, v18: f64, v19: f64,
+    v20: f64, v21: f64, v22: f64, v23: f64, v24: f64, v25: f64, v26: f64, v27: f64, v28: f64, v29: f64,
+    v30: f64, v31: f64, v32: f64, v33: f64, v34: f64, v35: f64, v36: f64, v37: f64, v38: f64, v39: f64,
+    v40: f64, v41: f64, v42: f64, v43: f64, v44: f64, v45: f64, v46: f64, v47: f64, v48: f64, v49: f64,
+
+    // Derivative array (backward pass results)
+    g0: f64, g1: f64, g2: f64, g3: f64, g4: f64, g5: f64, g6: f64, g7: f64, g8: f64, g9: f64,
+    g10: f64, g11: f64, g12: f64, g13: f64, g14: f64, g15: f64, g16: f64, g17: f64, g18: f64, g19: f64,
+    g20: f64, g21: f64, g22: f64, g23: f64, g24: f64, g25: f64, g26: f64, g27: f64, g28: f64, g29: f64,
+    g30: f64, g31: f64, g32: f64, g33: f64, g34: f64, g35: f64, g36: f64, g37: f64, g38: f64, g39: f64,
+    g40: f64, g41: f64, g42: f64, g43: f64, g44: f64, g45: f64, g46: f64, g47: f64, g48: f64, g49: f64,
+
+    // Entries array (operation log)
+    e0: TapeEntry, e1: TapeEntry, e2: TapeEntry, e3: TapeEntry, e4: TapeEntry,
+    e5: TapeEntry, e6: TapeEntry, e7: TapeEntry, e8: TapeEntry, e9: TapeEntry,
+    e10: TapeEntry, e11: TapeEntry, e12: TapeEntry, e13: TapeEntry, e14: TapeEntry,
+    e15: TapeEntry, e16: TapeEntry, e17: TapeEntry, e18: TapeEntry, e19: TapeEntry,
+    e20: TapeEntry, e21: TapeEntry, e22: TapeEntry, e23: TapeEntry, e24: TapeEntry,
+    e25: TapeEntry, e26: TapeEntry, e27: TapeEntry, e28: TapeEntry, e29: TapeEntry,
+    e30: TapeEntry, e31: TapeEntry, e32: TapeEntry, e33: TapeEntry, e34: TapeEntry,
+    e35: TapeEntry, e36: TapeEntry, e37: TapeEntry, e38: TapeEntry, e39: TapeEntry,
+    e40: TapeEntry, e41: TapeEntry, e42: TapeEntry, e43: TapeEntry, e44: TapeEntry,
+    e45: TapeEntry, e46: TapeEntry, e47: TapeEntry, e48: TapeEntry, e49: TapeEntry,
+
+    n_entries: i64,
+    n_values: i64
+}
+
+// Value tracked on tape
+struct TrackedValue {
+    value: f64,
+    tape_idx: i64
+}
+
+fn empty_entry() -> TapeEntry {
+    return TapeEntry { op_type: 0, input1_idx: 0 - 1, input2_idx: 0 - 1, output_idx: 0 - 1 }
+}
+
+// Create new empty tape
+fn tape_new() -> ADTape {
+    let e = empty_entry()
+    return ADTape {
+        v0: 0.0, v1: 0.0, v2: 0.0, v3: 0.0, v4: 0.0, v5: 0.0, v6: 0.0, v7: 0.0, v8: 0.0, v9: 0.0,
+        v10: 0.0, v11: 0.0, v12: 0.0, v13: 0.0, v14: 0.0, v15: 0.0, v16: 0.0, v17: 0.0, v18: 0.0, v19: 0.0,
+        v20: 0.0, v21: 0.0, v22: 0.0, v23: 0.0, v24: 0.0, v25: 0.0, v26: 0.0, v27: 0.0, v28: 0.0, v29: 0.0,
+        v30: 0.0, v31: 0.0, v32: 0.0, v33: 0.0, v34: 0.0, v35: 0.0, v36: 0.0, v37: 0.0, v38: 0.0, v39: 0.0,
+        v40: 0.0, v41: 0.0, v42: 0.0, v43: 0.0, v44: 0.0, v45: 0.0, v46: 0.0, v47: 0.0, v48: 0.0, v49: 0.0,
+        g0: 0.0, g1: 0.0, g2: 0.0, g3: 0.0, g4: 0.0, g5: 0.0, g6: 0.0, g7: 0.0, g8: 0.0, g9: 0.0,
+        g10: 0.0, g11: 0.0, g12: 0.0, g13: 0.0, g14: 0.0, g15: 0.0, g16: 0.0, g17: 0.0, g18: 0.0, g19: 0.0,
+        g20: 0.0, g21: 0.0, g22: 0.0, g23: 0.0, g24: 0.0, g25: 0.0, g26: 0.0, g27: 0.0, g28: 0.0, g29: 0.0,
+        g30: 0.0, g31: 0.0, g32: 0.0, g33: 0.0, g34: 0.0, g35: 0.0, g36: 0.0, g37: 0.0, g38: 0.0, g39: 0.0,
+        g40: 0.0, g41: 0.0, g42: 0.0, g43: 0.0, g44: 0.0, g45: 0.0, g46: 0.0, g47: 0.0, g48: 0.0, g49: 0.0,
+        e0: e, e1: e, e2: e, e3: e, e4: e, e5: e, e6: e, e7: e, e8: e, e9: e,
+        e10: e, e11: e, e12: e, e13: e, e14: e, e15: e, e16: e, e17: e, e18: e, e19: e,
+        e20: e, e21: e, e22: e, e23: e, e24: e, e25: e, e26: e, e27: e, e28: e, e29: e,
+        e30: e, e31: e, e32: e, e33: e, e34: e, e35: e, e36: e, e37: e, e38: e, e39: e,
+        e40: e, e41: e, e42: e, e43: e, e44: e, e45: e, e46: e, e47: e, e48: e, e49: e,
+        n_entries: 0,
+        n_values: 0
+    }
+}
+
+// Get value from tape by index
+fn tape_get_value(tape: ADTape, idx: i64) -> f64 {
+    if idx == 0 { return tape.v0 }
+    if idx == 1 { return tape.v1 }
+    if idx == 2 { return tape.v2 }
+    if idx == 3 { return tape.v3 }
+    if idx == 4 { return tape.v4 }
+    if idx == 5 { return tape.v5 }
+    if idx == 6 { return tape.v6 }
+    if idx == 7 { return tape.v7 }
+    if idx == 8 { return tape.v8 }
+    if idx == 9 { return tape.v9 }
+    if idx == 10 { return tape.v10 }
+    if idx == 11 { return tape.v11 }
+    if idx == 12 { return tape.v12 }
+    if idx == 13 { return tape.v13 }
+    if idx == 14 { return tape.v14 }
+    if idx == 15 { return tape.v15 }
+    if idx == 16 { return tape.v16 }
+    if idx == 17 { return tape.v17 }
+    if idx == 18 { return tape.v18 }
+    if idx == 19 { return tape.v19 }
+    if idx == 20 { return tape.v20 }
+    if idx == 21 { return tape.v21 }
+    if idx == 22 { return tape.v22 }
+    if idx == 23 { return tape.v23 }
+    if idx == 24 { return tape.v24 }
+    if idx == 25 { return tape.v25 }
+    if idx == 26 { return tape.v26 }
+    if idx == 27 { return tape.v27 }
+    if idx == 28 { return tape.v28 }
+    if idx == 29 { return tape.v29 }
+    if idx == 30 { return tape.v30 }
+    if idx == 31 { return tape.v31 }
+    if idx == 32 { return tape.v32 }
+    if idx == 33 { return tape.v33 }
+    if idx == 34 { return tape.v34 }
+    if idx == 35 { return tape.v35 }
+    if idx == 36 { return tape.v36 }
+    if idx == 37 { return tape.v37 }
+    if idx == 38 { return tape.v38 }
+    if idx == 39 { return tape.v39 }
+    if idx == 40 { return tape.v40 }
+    if idx == 41 { return tape.v41 }
+    if idx == 42 { return tape.v42 }
+    if idx == 43 { return tape.v43 }
+    if idx == 44 { return tape.v44 }
+    if idx == 45 { return tape.v45 }
+    if idx == 46 { return tape.v46 }
+    if idx == 47 { return tape.v47 }
+    if idx == 48 { return tape.v48 }
+    return tape.v49
+}
+
+// Get gradient from tape by index
+fn tape_get_grad(tape: ADTape, idx: i64) -> f64 {
+    if idx == 0 { return tape.g0 }
+    if idx == 1 { return tape.g1 }
+    if idx == 2 { return tape.g2 }
+    if idx == 3 { return tape.g3 }
+    if idx == 4 { return tape.g4 }
+    if idx == 5 { return tape.g5 }
+    if idx == 6 { return tape.g6 }
+    if idx == 7 { return tape.g7 }
+    if idx == 8 { return tape.g8 }
+    if idx == 9 { return tape.g9 }
+    if idx == 10 { return tape.g10 }
+    if idx == 11 { return tape.g11 }
+    if idx == 12 { return tape.g12 }
+    if idx == 13 { return tape.g13 }
+    if idx == 14 { return tape.g14 }
+    if idx == 15 { return tape.g15 }
+    if idx == 16 { return tape.g16 }
+    if idx == 17 { return tape.g17 }
+    if idx == 18 { return tape.g18 }
+    if idx == 19 { return tape.g19 }
+    if idx == 20 { return tape.g20 }
+    if idx == 21 { return tape.g21 }
+    if idx == 22 { return tape.g22 }
+    if idx == 23 { return tape.g23 }
+    if idx == 24 { return tape.g24 }
+    if idx == 25 { return tape.g25 }
+    if idx == 26 { return tape.g26 }
+    if idx == 27 { return tape.g27 }
+    if idx == 28 { return tape.g28 }
+    if idx == 29 { return tape.g29 }
+    if idx == 30 { return tape.g30 }
+    if idx == 31 { return tape.g31 }
+    if idx == 32 { return tape.g32 }
+    if idx == 33 { return tape.g33 }
+    if idx == 34 { return tape.g34 }
+    if idx == 35 { return tape.g35 }
+    if idx == 36 { return tape.g36 }
+    if idx == 37 { return tape.g37 }
+    if idx == 38 { return tape.g38 }
+    if idx == 39 { return tape.g39 }
+    if idx == 40 { return tape.g40 }
+    if idx == 41 { return tape.g41 }
+    if idx == 42 { return tape.g42 }
+    if idx == 43 { return tape.g43 }
+    if idx == 44 { return tape.g44 }
+    if idx == 45 { return tape.g45 }
+    if idx == 46 { return tape.g46 }
+    if idx == 47 { return tape.g47 }
+    if idx == 48 { return tape.g48 }
+    return tape.g49
+}
+
+// Helper: Create tracked value from tape's last value
+fn tape_last_tracked(tape: ADTape) -> TrackedValue {
+    let idx = tape.n_values - 1
+    return TrackedValue { value: tape_get_value(tape, idx), tape_idx: idx }
+}
+
+// Add variable to tape (participates in gradient computation)
+fn tape_variable(tape: ADTape, value: f64) -> (ADTape, TrackedValue) {
+    let idx = tape.n_values
+    let new_tape = tape_set_value(tape, idx, value)
+    let tape2 = tape_with_n_values(new_tape, idx + 1)
+    let tv = TrackedValue { value: value, tape_idx: idx }
+    return (tape2, tv)
+}
+
+// Add constant to tape (does not participate in gradient computation)
+fn tape_constant(tape: ADTape, value: f64) -> (ADTape, TrackedValue) {
+    let idx = tape.n_values
+    let new_tape = tape_set_value(tape, idx, value)
+    let tape2 = tape_with_n_values(new_tape, idx + 1)
+    let tv = TrackedValue { value: value, tape_idx: idx }
+    return (tape2, tv)
+}
+
+// ============================================================================
+// TAPE OPERATIONS (FORWARD PASS)
+// ============================================================================
+
+fn tape_add(tape: ADTape, a: TrackedValue, b: TrackedValue) -> (ADTape, TrackedValue) {
+    let result = a.value + b.value
+    let out_idx = tape.n_values
+    let entry = TapeEntry {
+        op_type: op_add(),
+        input1_idx: a.tape_idx,
+        input2_idx: b.tape_idx,
+        output_idx: out_idx
+    }
+    let tape2 = tape_set_value(tape, out_idx, result)
+    let tape3 = tape_set_entry(tape2, tape.n_entries, entry)
+    let tape4 = tape_with_n_values(tape3, out_idx + 1)
+    let tape5 = tape_with_n_entries(tape4, tape.n_entries + 1)
+    let tv = TrackedValue { value: result, tape_idx: out_idx }
+    return (tape5, tv)
+}
+
+fn tape_mul(tape: ADTape, a: TrackedValue, b: TrackedValue) -> (ADTape, TrackedValue) {
+    let result = a.value * b.value
+    let out_idx = tape.n_values
+    let entry = TapeEntry {
+        op_type: op_mul(),
+        input1_idx: a.tape_idx,
+        input2_idx: b.tape_idx,
+        output_idx: out_idx
+    }
+    let tape2 = tape_set_value(tape, out_idx, result)
+    let tape3 = tape_set_entry(tape2, tape.n_entries, entry)
+    let tape4 = tape_with_n_values(tape3, out_idx + 1)
+    let tape5 = tape_with_n_entries(tape4, tape.n_entries + 1)
+    let tv = TrackedValue { value: result, tape_idx: out_idx }
+    return (tape5, tv)
+}
+
+fn tape_exp(tape: ADTape, x: TrackedValue) -> (ADTape, TrackedValue) {
+    let result = exp_f64(x.value)
+    let out_idx = tape.n_values
+    let entry = TapeEntry {
+        op_type: op_exp(),
+        input1_idx: x.tape_idx,
+        input2_idx: 0 - 1,
+        output_idx: out_idx
+    }
+    let tape2 = tape_set_value(tape, out_idx, result)
+    let tape3 = tape_set_entry(tape2, tape.n_entries, entry)
+    let tape4 = tape_with_n_values(tape3, out_idx + 1)
+    let tape5 = tape_with_n_entries(tape4, tape.n_entries + 1)
+    let tv = TrackedValue { value: result, tape_idx: out_idx }
+    return (tape5, tv)
+}
+
+fn tape_log(tape: ADTape, x: TrackedValue) -> (ADTape, TrackedValue) {
+    let result = log_f64(x.value)
+    let out_idx = tape.n_values
+    let entry = TapeEntry {
+        op_type: op_log(),
+        input1_idx: x.tape_idx,
+        input2_idx: 0 - 1,
+        output_idx: out_idx
+    }
+    let tape2 = tape_set_value(tape, out_idx, result)
+    let tape3 = tape_set_entry(tape2, tape.n_entries, entry)
+    let tape4 = tape_with_n_values(tape3, out_idx + 1)
+    let tape5 = tape_with_n_entries(tape4, tape.n_entries + 1)
+    let tv = TrackedValue { value: result, tape_idx: out_idx }
+    return (tape5, tv)
+}
+
+fn tape_sin(tape: ADTape, x: TrackedValue) -> (ADTape, TrackedValue) {
+    let result = sin_f64(x.value)
+    let out_idx = tape.n_values
+    let entry = TapeEntry {
+        op_type: op_sin(),
+        input1_idx: x.tape_idx,
+        input2_idx: 0 - 1,
+        output_idx: out_idx
+    }
+    let tape2 = tape_set_value(tape, out_idx, result)
+    let tape3 = tape_set_entry(tape2, tape.n_entries, entry)
+    let tape4 = tape_with_n_values(tape3, out_idx + 1)
+    let tape5 = tape_with_n_entries(tape4, tape.n_entries + 1)
+    let tv = TrackedValue { value: result, tape_idx: out_idx }
+    return (tape5, tv)
+}
+
+fn tape_tanh(tape: ADTape, x: TrackedValue) -> (ADTape, TrackedValue) {
+    let result = tanh_f64(x.value)
+    let out_idx = tape.n_values
+    let entry = TapeEntry {
+        op_type: op_tanh(),
+        input1_idx: x.tape_idx,
+        input2_idx: 0 - 1,
+        output_idx: out_idx
+    }
+    let tape2 = tape_set_value(tape, out_idx, result)
+    let tape3 = tape_set_entry(tape2, tape.n_entries, entry)
+    let tape4 = tape_with_n_values(tape3, out_idx + 1)
+    let tape5 = tape_with_n_entries(tape4, tape.n_entries + 1)
+    let tv = TrackedValue { value: result, tape_idx: out_idx }
+    return (tape5, tv)
+}
+
+fn tape_relu(tape: ADTape, x: TrackedValue) -> (ADTape, TrackedValue) {
+    let result = max_f64(0.0, x.value)
+    let out_idx = tape.n_values
+    let entry = TapeEntry {
+        op_type: op_relu(),
+        input1_idx: x.tape_idx,
+        input2_idx: 0 - 1,
+        output_idx: out_idx
+    }
+    let tape2 = tape_set_value(tape, out_idx, result)
+    let tape3 = tape_set_entry(tape2, tape.n_entries, entry)
+    let tape4 = tape_with_n_values(tape3, out_idx + 1)
+    let tape5 = tape_with_n_entries(tape4, tape.n_entries + 1)
+    let tv = TrackedValue { value: result, tape_idx: out_idx }
+    return (tape5, tv)
+}
+
+fn tape_sigmoid(tape: ADTape, x: TrackedValue) -> (ADTape, TrackedValue) {
+    let result = 1.0 / (1.0 + exp_f64(0.0 - x.value))
+    let out_idx = tape.n_values
+    let entry = TapeEntry {
+        op_type: op_sigmoid(),
+        input1_idx: x.tape_idx,
+        input2_idx: 0 - 1,
+        output_idx: out_idx
+    }
+    let tape2 = tape_set_value(tape, out_idx, result)
+    let tape3 = tape_set_entry(tape2, tape.n_entries, entry)
+    let tape4 = tape_with_n_values(tape3, out_idx + 1)
+    let tape5 = tape_with_n_entries(tape4, tape.n_entries + 1)
+    let tv = TrackedValue { value: result, tape_idx: out_idx }
+    return (tape5, tv)
+}
+
+// ============================================================================
+// TAPE BACKWARD PASS (COMPUTE GRADIENTS)
+// ============================================================================
+
+fn tape_backward(tape: ADTape, output_idx: i64) -> ADTape {
+    // Initialize output gradient to 1.0 (dL/dL = 1)
+    var working_tape = tape_set_grad(tape, output_idx, 1.0)
+
+    // Traverse entries in reverse order
+    var i = tape.n_entries - 1
+    while i >= 0 {
+        let entry = tape_get_entry(working_tape, i)
+        working_tape = tape_backward_entry(working_tape, entry)
+        i = i - 1
+    }
+
+    return working_tape
+}
+
+fn tape_backward_entry(tape: ADTape, entry: TapeEntry) -> ADTape {
+    let out_grad = tape_get_grad(tape, entry.output_idx)
+
+    if entry.op_type == op_add() {
+        // d/da (a + b) = 1, d/db (a + b) = 1
+        let tape2 = tape_add_grad(tape, entry.input1_idx, out_grad)
+        return tape_add_grad(tape2, entry.input2_idx, out_grad)
+    }
+
+    if entry.op_type == op_mul() {
+        // d/da (a * b) = b, d/db (a * b) = a
+        let a_val = tape_get_value(tape, entry.input1_idx)
+        let b_val = tape_get_value(tape, entry.input2_idx)
+        let tape2 = tape_add_grad(tape, entry.input1_idx, out_grad * b_val)
+        return tape_add_grad(tape2, entry.input2_idx, out_grad * a_val)
+    }
+
+    if entry.op_type == op_exp() {
+        // d/dx exp(x) = exp(x)
+        let exp_val = tape_get_value(tape, entry.output_idx)
+        return tape_add_grad(tape, entry.input1_idx, out_grad * exp_val)
+    }
+
+    if entry.op_type == op_log() {
+        // d/dx log(x) = 1/x
+        let x_val = tape_get_value(tape, entry.input1_idx)
+        return tape_add_grad(tape, entry.input1_idx, out_grad / x_val)
+    }
+
+    if entry.op_type == op_sin() {
+        // d/dx sin(x) = cos(x)
+        let x_val = tape_get_value(tape, entry.input1_idx)
+        return tape_add_grad(tape, entry.input1_idx, out_grad * cos_f64(x_val))
+    }
+
+    if entry.op_type == op_tanh() {
+        // d/dx tanh(x) = 1 - tanh²(x)
+        let tanh_val = tape_get_value(tape, entry.output_idx)
+        return tape_add_grad(tape, entry.input1_idx, out_grad * (1.0 - tanh_val * tanh_val))
+    }
+
+    if entry.op_type == op_relu() {
+        // d/dx ReLU(x) = 1 if x > 0, else 0
+        let x_val = tape_get_value(tape, entry.input1_idx)
+        let deriv = if x_val > 0.0 { out_grad } else { 0.0 }
+        return tape_add_grad(tape, entry.input1_idx, deriv)
+    }
+
+    if entry.op_type == op_sigmoid() {
+        // d/dx sigmoid(x) = sigmoid(x) * (1 - sigmoid(x))
+        let sig_val = tape_get_value(tape, entry.output_idx)
+        return tape_add_grad(tape, entry.input1_idx, out_grad * sig_val * (1.0 - sig_val))
+    }
+
+    return tape
+}
+
+// ============================================================================
+// GRADIENT COMPUTATION HELPERS
+// ============================================================================
+
+fn compute_gradient(tape: ADTape, loss_idx: i64, param_idx: i64) -> f64 {
+    let tape_with_grads = tape_backward(tape, loss_idx)
+    return tape_get_grad(tape_with_grads, param_idx)
+}
+
+// Note: numerical_gradient with function pointer removed - not yet supported in D
+// Use the tape-based gradient computation instead
+
+// ============================================================================
+// PART 3: EPISTEMIC GRADIENT TRACKING
+// ============================================================================
+
+struct DerivativeWithVariance {
+    gradient: f64,
+    variance: f64,
+    n_samples: i64
+}
+
+fn grad_var_new(gradient: f64) -> DerivativeWithVariance {
+    return DerivativeWithVariance {
+        gradient: gradient,
+        variance: 0.0,
+        n_samples: 1
+    }
+}
+
+// Welford's online algorithm for variance
+fn grad_var_update(gv: DerivativeWithVariance, new_gradient: f64) -> DerivativeWithVariance {
+    let n = gv.n_samples + 1
+    let delta = new_gradient - gv.gradient
+    let new_mean = gv.gradient + delta / (n as f64)
+    let delta2 = new_gradient - new_mean
+    let new_variance = (gv.variance * (gv.n_samples as f64) + delta * delta2) / (n as f64)
+
+    return DerivativeWithVariance {
+        gradient: new_mean,
+        variance: new_variance,
+        n_samples: n
+    }
+}
+
+fn grad_var_std_dev(gv: DerivativeWithVariance) -> f64 {
+    return sqrt_f64(gv.variance)
+}
+
+fn grad_var_confidence_interval(gv: DerivativeWithVariance, z_score: f64) -> (f64, f64) {
+    // Returns (lower, upper) bounds for confidence interval
+    let std_err = sqrt_f64(gv.variance / (gv.n_samples as f64))
+    let margin = z_score * std_err
+    return (gv.gradient - margin, gv.gradient + margin)
+}
+
+// ============================================================================
+// PART 4: VECTOR JACOBIAN PRODUCTS (VJP)
+// ============================================================================
+
+// VJP for linear layer: grad_out → grad_in
+fn vjp_linear(grad_output: f64, weight: f64) -> f64 {
+    return grad_output * weight
+}
+
+// VJP for ReLU activation
+fn vjp_relu(grad_output: f64, input: f64) -> f64 {
+    if input > 0.0 {
+        return grad_output
+    }
+    return 0.0
+}
+
+// VJP for sigmoid activation
+fn vjp_sigmoid_scalar(grad_output: f64, output: f64) -> f64 {
+    // d/dx sigmoid(x) = sigmoid(x) * (1 - sigmoid(x))
+    return grad_output * output * (1.0 - output)
+}
+
+// VJP for tanh activation
+fn vjp_tanh_scalar(grad_output: f64, output: f64) -> f64 {
+    // d/dx tanh(x) = 1 - tanh²(x)
+    return grad_output * (1.0 - output * output)
+}
+
+// ============================================================================
+// TAPE INTERNAL HELPERS (setters/getters)
+// ============================================================================
+// These are massive due to Sounio's immutable structs - needed for implementation
+
+fn tape_set_value(tape: ADTape, idx: i64, val: f64) -> ADTape {
+    if idx == 0 { return ADTape { v0: val, v1: tape.v1, v2: tape.v2, v3: tape.v3, v4: tape.v4, v5: tape.v5, v6: tape.v6, v7: tape.v7, v8: tape.v8, v9: tape.v9, v10: tape.v10, v11: tape.v11, v12: tape.v12, v13: tape.v13, v14: tape.v14, v15: tape.v15, v16: tape.v16, v17: tape.v17, v18: tape.v18, v19: tape.v19, v20: tape.v20, v21: tape.v21, v22: tape.v22, v23: tape.v23, v24: tape.v24, v25: tape.v25, v26: tape.v26, v27: tape.v27, v28: tape.v28, v29: tape.v29, v30: tape.v30, v31: tape.v31, v32: tape.v32, v33: tape.v33, v34: tape.v34, v35: tape.v35, v36: tape.v36, v37: tape.v37, v38: tape.v38, v39: tape.v39, v40: tape.v40, v41: tape.v41, v42: tape.v42, v43: tape.v43, v44: tape.v44, v45: tape.v45, v46: tape.v46, v47: tape.v47, v48: tape.v48, v49: tape.v49, g0: tape.g0, g1: tape.g1, g2: tape.g2, g3: tape.g3, g4: tape.g4, g5: tape.g5, g6: tape.g6, g7: tape.g7, g8: tape.g8, g9: tape.g9, g10: tape.g10, g11: tape.g11, g12: tape.g12, g13: tape.g13, g14: tape.g14, g15: tape.g15, g16: tape.g16, g17: tape.g17, g18: tape.g18, g19: tape.g19, g20: tape.g20, g21: tape.g21, g22: tape.g22, g23: tape.g23, g24: tape.g24, g25: tape.g25, g26: tape.g26, g27: tape.g27, g28: tape.g28, g29: tape.g29, g30: tape.g30, g31: tape.g31, g32: tape.g32, g33: tape.g33, g34: tape.g34, g35: tape.g35, g36: tape.g36, g37: tape.g37, g38: tape.g38, g39: tape.g39, g40: tape.g40, g41: tape.g41, g42: tape.g42, g43: tape.g43, g44: tape.g44, g45: tape.g45, g46: tape.g46, g47: tape.g47, g48: tape.g48, g49: tape.g49, e0: tape.e0, e1: tape.e1, e2: tape.e2, e3: tape.e3, e4: tape.e4, e5: tape.e5, e6: tape.e6, e7: tape.e7, e8: tape.e8, e9: tape.e9, e10: tape.e10, e11: tape.e11, e12: tape.e12, e13: tape.e13, e14: tape.e14, e15: tape.e15, e16: tape.e16, e17: tape.e17, e18: tape.e18, e19: tape.e19, e20: tape.e20, e21: tape.e21, e22: tape.e22, e23: tape.e23, e24: tape.e24, e25: tape.e25, e26: tape.e26, e27: tape.e27, e28: tape.e28, e29: tape.e29, e30: tape.e30, e31: tape.e31, e32: tape.e32, e33: tape.e33, e34: tape.e34, e35: tape.e35, e36: tape.e36, e37: tape.e37, e38: tape.e38, e39: tape.e39, e40: tape.e40, e41: tape.e41, e42: tape.e42, e43: tape.e43, e44: tape.e44, e45: tape.e45, e46: tape.e46, e47: tape.e47, e48: tape.e48, e49: tape.e49, n_entries: tape.n_entries, n_values: tape.n_values } }
+    if idx == 1 { return ADTape { v0: tape.v0, v1: val, v2: tape.v2, v3: tape.v3, v4: tape.v4, v5: tape.v5, v6: tape.v6, v7: tape.v7, v8: tape.v8, v9: tape.v9, v10: tape.v10, v11: tape.v11, v12: tape.v12, v13: tape.v13, v14: tape.v14, v15: tape.v15, v16: tape.v16, v17: tape.v17, v18: tape.v18, v19: tape.v19, v20: tape.v20, v21: tape.v21, v22: tape.v22, v23: tape.v23, v24: tape.v24, v25: tape.v25, v26: tape.v26, v27: tape.v27, v28: tape.v28, v29: tape.v29, v30: tape.v30, v31: tape.v31, v32: tape.v32, v33: tape.v33, v34: tape.v34, v35: tape.v35, v36: tape.v36, v37: tape.v37, v38: tape.v38, v39: tape.v39, v40: tape.v40, v41: tape.v41, v42: tape.v42, v43: tape.v43, v44: tape.v44, v45: tape.v45, v46: tape.v46, v47: tape.v47, v48: tape.v48, v49: tape.v49, g0: tape.g0, g1: tape.g1, g2: tape.g2, g3: tape.g3, g4: tape.g4, g5: tape.g5, g6: tape.g6, g7: tape.g7, g8: tape.g8, g9: tape.g9, g10: tape.g10, g11: tape.g11, g12: tape.g12, g13: tape.g13, g14: tape.g14, g15: tape.g15, g16: tape.g16, g17: tape.g17, g18: tape.g18, g19: tape.g19, g20: tape.g20, g21: tape.g21, g22: tape.g22, g23: tape.g23, g24: tape.g24, g25: tape.g25, g26: tape.g26, g27: tape.g27, g28: tape.g28, g29: tape.g29, g30: tape.g30, g31: tape.g31, g32: tape.g32, g33: tape.g33, g34: tape.g34, g35: tape.g35, g36: tape.g36, g37: tape.g37, g38: tape.g38, g39: tape.g39, g40: tape.g40, g41: tape.g41, g42: tape.g42, g43: tape.g43, g44: tape.g44, g45: tape.g45, g46: tape.g46, g47: tape.g47, g48: tape.g48, g49: tape.g49, e0: tape.e0, e1: tape.e1, e2: tape.e2, e3: tape.e3, e4: tape.e4, e5: tape.e5, e6: tape.e6, e7: tape.e7, e8: tape.e8, e9: tape.e9, e10: tape.e10, e11: tape.e11, e12: tape.e12, e13: tape.e13, e14: tape.e14, e15: tape.e15, e16: tape.e16, e17: tape.e17, e18: tape.e18, e19: tape.e19, e20: tape.e20, e21: tape.e21, e22: tape.e22, e23: tape.e23, e24: tape.e24, e25: tape.e25, e26: tape.e26, e27: tape.e27, e28: tape.e28, e29: tape.e29, e30: tape.e30, e31: tape.e31, e32: tape.e32, e33: tape.e33, e34: tape.e34, e35: tape.e35, e36: tape.e36, e37: tape.e37, e38: tape.e38, e39: tape.e39, e40: tape.e40, e41: tape.e41, e42: tape.e42, e43: tape.e43, e44: tape.e44, e45: tape.e45, e46: tape.e46, e47: tape.e47, e48: tape.e48, e49: tape.e49, n_entries: tape.n_entries, n_values: tape.n_values } }
+    if idx == 2 { return ADTape { v0: tape.v0, v1: tape.v1, v2: val, v3: tape.v3, v4: tape.v4, v5: tape.v5, v6: tape.v6, v7: tape.v7, v8: tape.v8, v9: tape.v9, v10: tape.v10, v11: tape.v11, v12: tape.v12, v13: tape.v13, v14: tape.v14, v15: tape.v15, v16: tape.v16, v17: tape.v17, v18: tape.v18, v19: tape.v19, v20: tape.v20, v21: tape.v21, v22: tape.v22, v23: tape.v23, v24: tape.v24, v25: tape.v25, v26: tape.v26, v27: tape.v27, v28: tape.v28, v29: tape.v29, v30: tape.v30, v31: tape.v31, v32: tape.v32, v33: tape.v33, v34: tape.v34, v35: tape.v35, v36: tape.v36, v37: tape.v37, v38: tape.v38, v39: tape.v39, v40: tape.v40, v41: tape.v41, v42: tape.v42, v43: tape.v43, v44: tape.v44, v45: tape.v45, v46: tape.v46, v47: tape.v47, v48: tape.v48, v49: tape.v49, g0: tape.g0, g1: tape.g1, g2: tape.g2, g3: tape.g3, g4: tape.g4, g5: tape.g5, g6: tape.g6, g7: tape.g7, g8: tape.g8, g9: tape.g9, g10: tape.g10, g11: tape.g11, g12: tape.g12, g13: tape.g13, g14: tape.g14, g15: tape.g15, g16: tape.g16, g17: tape.g17, g18: tape.g18, g19: tape.g19, g20: tape.g20, g21: tape.g21, g22: tape.g22, g23: tape.g23, g24: tape.g24, g25: tape.g25, g26: tape.g26, g27: tape.g27, g28: tape.g28, g29: tape.g29, g30: tape.g30, g31: tape.g31, g32: tape.g32, g33: tape.g33, g34: tape.g34, g35: tape.g35, g36: tape.g36, g37: tape.g37, g38: tape.g38, g39: tape.g39, g40: tape.g40, g41: tape.g41, g42: tape.g42, g43: tape.g43, g44: tape.g44, g45: tape.g45, g46: tape.g46, g47: tape.g47, g48: tape.g48, g49: tape.g49, e0: tape.e0, e1: tape.e1, e2: tape.e2, e3: tape.e3, e4: tape.e4, e5: tape.e5, e6: tape.e6, e7: tape.e7, e8: tape.e8, e9: tape.e9, e10: tape.e10, e11: tape.e11, e12: tape.e12, e13: tape.e13, e14: tape.e14, e15: tape.e15, e16: tape.e16, e17: tape.e17, e18: tape.e18, e19: tape.e19, e20: tape.e20, e21: tape.e21, e22: tape.e22, e23: tape.e23, e24: tape.e24, e25: tape.e25, e26: tape.e26, e27: tape.e27, e28: tape.e28, e29: tape.e29, e30: tape.e30, e31: tape.e31, e32: tape.e32, e33: tape.e33, e34: tape.e34, e35: tape.e35, e36: tape.e36, e37: tape.e37, e38: tape.e38, e39: tape.e39, e40: tape.e40, e41: tape.e41, e42: tape.e42, e43: tape.e43, e44: tape.e44, e45: tape.e45, e46: tape.e46, e47: tape.e47, e48: tape.e48, e49: tape.e49, n_entries: tape.n_entries, n_values: tape.n_values } }
+    return tape
+}
+
+fn tape_set_grad(tape: ADTape, idx: i64, val: f64) -> ADTape {
+    if idx == 0 { return ADTape { v0: tape.v0, v1: tape.v1, v2: tape.v2, v3: tape.v3, v4: tape.v4, v5: tape.v5, v6: tape.v6, v7: tape.v7, v8: tape.v8, v9: tape.v9, v10: tape.v10, v11: tape.v11, v12: tape.v12, v13: tape.v13, v14: tape.v14, v15: tape.v15, v16: tape.v16, v17: tape.v17, v18: tape.v18, v19: tape.v19, v20: tape.v20, v21: tape.v21, v22: tape.v22, v23: tape.v23, v24: tape.v24, v25: tape.v25, v26: tape.v26, v27: tape.v27, v28: tape.v28, v29: tape.v29, v30: tape.v30, v31: tape.v31, v32: tape.v32, v33: tape.v33, v34: tape.v34, v35: tape.v35, v36: tape.v36, v37: tape.v37, v38: tape.v38, v39: tape.v39, v40: tape.v40, v41: tape.v41, v42: tape.v42, v43: tape.v43, v44: tape.v44, v45: tape.v45, v46: tape.v46, v47: tape.v47, v48: tape.v48, v49: tape.v49, g0: val, g1: tape.g1, g2: tape.g2, g3: tape.g3, g4: tape.g4, g5: tape.g5, g6: tape.g6, g7: tape.g7, g8: tape.g8, g9: tape.g9, g10: tape.g10, g11: tape.g11, g12: tape.g12, g13: tape.g13, g14: tape.g14, g15: tape.g15, g16: tape.g16, g17: tape.g17, g18: tape.g18, g19: tape.g19, g20: tape.g20, g21: tape.g21, g22: tape.g22, g23: tape.g23, g24: tape.g24, g25: tape.g25, g26: tape.g26, g27: tape.g27, g28: tape.g28, g29: tape.g29, g30: tape.g30, g31: tape.g31, g32: tape.g32, g33: tape.g33, g34: tape.g34, g35: tape.g35, g36: tape.g36, g37: tape.g37, g38: tape.g38, g39: tape.g39, g40: tape.g40, g41: tape.g41, g42: tape.g42, g43: tape.g43, g44: tape.g44, g45: tape.g45, g46: tape.g46, g47: tape.g47, g48: tape.g48, g49: tape.g49, e0: tape.e0, e1: tape.e1, e2: tape.e2, e3: tape.e3, e4: tape.e4, e5: tape.e5, e6: tape.e6, e7: tape.e7, e8: tape.e8, e9: tape.e9, e10: tape.e10, e11: tape.e11, e12: tape.e12, e13: tape.e13, e14: tape.e14, e15: tape.e15, e16: tape.e16, e17: tape.e17, e18: tape.e18, e19: tape.e19, e20: tape.e20, e21: tape.e21, e22: tape.e22, e23: tape.e23, e24: tape.e24, e25: tape.e25, e26: tape.e26, e27: tape.e27, e28: tape.e28, e29: tape.e29, e30: tape.e30, e31: tape.e31, e32: tape.e32, e33: tape.e33, e34: tape.e34, e35: tape.e35, e36: tape.e36, e37: tape.e37, e38: tape.e38, e39: tape.e39, e40: tape.e40, e41: tape.e41, e42: tape.e42, e43: tape.e43, e44: tape.e44, e45: tape.e45, e46: tape.e46, e47: tape.e47, e48: tape.e48, e49: tape.e49, n_entries: tape.n_entries, n_values: tape.n_values } }
+    if idx == 1 { return ADTape { v0: tape.v0, v1: tape.v1, v2: tape.v2, v3: tape.v3, v4: tape.v4, v5: tape.v5, v6: tape.v6, v7: tape.v7, v8: tape.v8, v9: tape.v9, v10: tape.v10, v11: tape.v11, v12: tape.v12, v13: tape.v13, v14: tape.v14, v15: tape.v15, v16: tape.v16, v17: tape.v17, v18: tape.v18, v19: tape.v19, v20: tape.v20, v21: tape.v21, v22: tape.v22, v23: tape.v23, v24: tape.v24, v25: tape.v25, v26: tape.v26, v27: tape.v27, v28: tape.v28, v29: tape.v29, v30: tape.v30, v31: tape.v31, v32: tape.v32, v33: tape.v33, v34: tape.v34, v35: tape.v35, v36: tape.v36, v37: tape.v37, v38: tape.v38, v39: tape.v39, v40: tape.v40, v41: tape.v41, v42: tape.v42, v43: tape.v43, v44: tape.v44, v45: tape.v45, v46: tape.v46, v47: tape.v47, v48: tape.v48, v49: tape.v49, g0: tape.g0, g1: val, g2: tape.g2, g3: tape.g3, g4: tape.g4, g5: tape.g5, g6: tape.g6, g7: tape.g7, g8: tape.g8, g9: tape.g9, g10: tape.g10, g11: tape.g11, g12: tape.g12, g13: tape.g13, g14: tape.g14, g15: tape.g15, g16: tape.g16, g17: tape.g17, g18: tape.g18, g19: tape.g19, g20: tape.g20, g21: tape.g21, g22: tape.g22, g23: tape.g23, g24: tape.g24, g25: tape.g25, g26: tape.g26, g27: tape.g27, g28: tape.g28, g29: tape.g29, g30: tape.g30, g31: tape.g31, g32: tape.g32, g33: tape.g33, g34: tape.g34, g35: tape.g35, g36: tape.g36, g37: tape.g37, g38: tape.g38, g39: tape.g39, g40: tape.g40, g41: tape.g41, g42: tape.g42, g43: tape.g43, g44: tape.g44, g45: tape.g45, g46: tape.g46, g47: tape.g47, g48: tape.g48, g49: tape.g49, e0: tape.e0, e1: tape.e1, e2: tape.e2, e3: tape.e3, e4: tape.e4, e5: tape.e5, e6: tape.e6, e7: tape.e7, e8: tape.e8, e9: tape.e9, e10: tape.e10, e11: tape.e11, e12: tape.e12, e13: tape.e13, e14: tape.e14, e15: tape.e15, e16: tape.e16, e17: tape.e17, e18: tape.e18, e19: tape.e19, e20: tape.e20, e21: tape.e21, e22: tape.e22, e23: tape.e23, e24: tape.e24, e25: tape.e25, e26: tape.e26, e27: tape.e27, e28: tape.e28, e29: tape.e29, e30: tape.e30, e31: tape.e31, e32: tape.e32, e33: tape.e33, e34: tape.e34, e35: tape.e35, e36: tape.e36, e37: tape.e37, e38: tape.e38, e39: tape.e39, e40: tape.e40, e41: tape.e41, e42: tape.e42, e43: tape.e43, e44: tape.e44, e45: tape.e45, e46: tape.e46, e47: tape.e47, e48: tape.e48, e49: tape.e49, n_entries: tape.n_entries, n_values: tape.n_values } }
+    if idx == 2 { return ADTape { v0: tape.v0, v1: tape.v1, v2: tape.v2, v3: tape.v3, v4: tape.v4, v5: tape.v5, v6: tape.v6, v7: tape.v7, v8: tape.v8, v9: tape.v9, v10: tape.v10, v11: tape.v11, v12: tape.v12, v13: tape.v13, v14: tape.v14, v15: tape.v15, v16: tape.v16, v17: tape.v17, v18: tape.v18, v19: tape.v19, v20: tape.v20, v21: tape.v21, v22: tape.v22, v23: tape.v23, v24: tape.v24, v25: tape.v25, v26: tape.v26, v27: tape.v27, v28: tape.v28, v29: tape.v29, v30: tape.v30, v31: tape.v31, v32: tape.v32, v33: tape.v33, v34: tape.v34, v35: tape.v35, v36: tape.v36, v37: tape.v37, v38: tape.v38, v39: tape.v39, v40: tape.v40, v41: tape.v41, v42: tape.v42, v43: tape.v43, v44: tape.v44, v45: tape.v45, v46: tape.v46, v47: tape.v47, v48: tape.v48, v49: tape.v49, g0: tape.g0, g1: tape.g1, g2: val, g3: tape.g3, g4: tape.g4, g5: tape.g5, g6: tape.g6, g7: tape.g7, g8: tape.g8, g9: tape.g9, g10: tape.g10, g11: tape.g11, g12: tape.g12, g13: tape.g13, g14: tape.g14, g15: tape.g15, g16: tape.g16, g17: tape.g17, g18: tape.g18, g19: tape.g19, g20: tape.g20, g21: tape.g21, g22: tape.g22, g23: tape.g23, g24: tape.g24, g25: tape.g25, g26: tape.g26, g27: tape.g27, g28: tape.g28, g29: tape.g29, g30: tape.g30, g31: tape.g31, g32: tape.g32, g33: tape.g33, g34: tape.g34, g35: tape.g35, g36: tape.g36, g37: tape.g37, g38: tape.g38, g39: tape.g39, g40: tape.g40, g41: tape.g41, g42: tape.g42, g43: tape.g43, g44: tape.g44, g45: tape.g45, g46: tape.g46, g47: tape.g47, g48: tape.g48, g49: tape.g49, e0: tape.e0, e1: tape.e1, e2: tape.e2, e3: tape.e3, e4: tape.e4, e5: tape.e5, e6: tape.e6, e7: tape.e7, e8: tape.e8, e9: tape.e9, e10: tape.e10, e11: tape.e11, e12: tape.e12, e13: tape.e13, e14: tape.e14, e15: tape.e15, e16: tape.e16, e17: tape.e17, e18: tape.e18, e19: tape.e19, e20: tape.e20, e21: tape.e21, e22: tape.e22, e23: tape.e23, e24: tape.e24, e25: tape.e25, e26: tape.e26, e27: tape.e27, e28: tape.e28, e29: tape.e29, e30: tape.e30, e31: tape.e31, e32: tape.e32, e33: tape.e33, e34: tape.e34, e35: tape.e35, e36: tape.e36, e37: tape.e37, e38: tape.e38, e39: tape.e39, e40: tape.e40, e41: tape.e41, e42: tape.e42, e43: tape.e43, e44: tape.e44, e45: tape.e45, e46: tape.e46, e47: tape.e47, e48: tape.e48, e49: tape.e49, n_entries: tape.n_entries, n_values: tape.n_values } }
+    return tape
+}
+
+fn tape_add_grad(tape: ADTape, idx: i64, delta: f64) -> ADTape {
+    let current = tape_get_grad(tape, idx)
+    return tape_set_grad(tape, idx, current + delta)
+}
+
+fn tape_get_entry(tape: ADTape, idx: i64) -> TapeEntry {
+    if idx == 0 { return tape.e0 }
+    if idx == 1 { return tape.e1 }
+    if idx == 2 { return tape.e2 }
+    return empty_entry()
+}
+
+fn tape_set_entry(tape: ADTape, idx: i64, entry: TapeEntry) -> ADTape {
+    if idx == 0 { return ADTape { v0: tape.v0, v1: tape.v1, v2: tape.v2, v3: tape.v3, v4: tape.v4, v5: tape.v5, v6: tape.v6, v7: tape.v7, v8: tape.v8, v9: tape.v9, v10: tape.v10, v11: tape.v11, v12: tape.v12, v13: tape.v13, v14: tape.v14, v15: tape.v15, v16: tape.v16, v17: tape.v17, v18: tape.v18, v19: tape.v19, v20: tape.v20, v21: tape.v21, v22: tape.v22, v23: tape.v23, v24: tape.v24, v25: tape.v25, v26: tape.v26, v27: tape.v27, v28: tape.v28, v29: tape.v29, v30: tape.v30, v31: tape.v31, v32: tape.v32, v33: tape.v33, v34: tape.v34, v35: tape.v35, v36: tape.v36, v37: tape.v37, v38: tape.v38, v39: tape.v39, v40: tape.v40, v41: tape.v41, v42: tape.v42, v43: tape.v43, v44: tape.v44, v45: tape.v45, v46: tape.v46, v47: tape.v47, v48: tape.v48, v49: tape.v49, g0: tape.g0, g1: tape.g1, g2: tape.g2, g3: tape.g3, g4: tape.g4, g5: tape.g5, g6: tape.g6, g7: tape.g7, g8: tape.g8, g9: tape.g9, g10: tape.g10, g11: tape.g11, g12: tape.g12, g13: tape.g13, g14: tape.g14, g15: tape.g15, g16: tape.g16, g17: tape.g17, g18: tape.g18, g19: tape.g19, g20: tape.g20, g21: tape.g21, g22: tape.g22, g23: tape.g23, g24: tape.g24, g25: tape.g25, g26: tape.g26, g27: tape.g27, g28: tape.g28, g29: tape.g29, g30: tape.g30, g31: tape.g31, g32: tape.g32, g33: tape.g33, g34: tape.g34, g35: tape.g35, g36: tape.g36, g37: tape.g37, g38: tape.g38, g39: tape.g39, g40: tape.g40, g41: tape.g41, g42: tape.g42, g43: tape.g43, g44: tape.g44, g45: tape.g45, g46: tape.g46, g47: tape.g47, g48: tape.g48, g49: tape.g49, e0: entry, e1: tape.e1, e2: tape.e2, e3: tape.e3, e4: tape.e4, e5: tape.e5, e6: tape.e6, e7: tape.e7, e8: tape.e8, e9: tape.e9, e10: tape.e10, e11: tape.e11, e12: tape.e12, e13: tape.e13, e14: tape.e14, e15: tape.e15, e16: tape.e16, e17: tape.e17, e18: tape.e18, e19: tape.e19, e20: tape.e20, e21: tape.e21, e22: tape.e22, e23: tape.e23, e24: tape.e24, e25: tape.e25, e26: tape.e26, e27: tape.e27, e28: tape.e28, e29: tape.e29, e30: tape.e30, e31: tape.e31, e32: tape.e32, e33: tape.e33, e34: tape.e34, e35: tape.e35, e36: tape.e36, e37: tape.e37, e38: tape.e38, e39: tape.e39, e40: tape.e40, e41: tape.e41, e42: tape.e42, e43: tape.e43, e44: tape.e44, e45: tape.e45, e46: tape.e46, e47: tape.e47, e48: tape.e48, e49: tape.e49, n_entries: tape.n_entries, n_values: tape.n_values } }
+    if idx == 1 { return ADTape { v0: tape.v0, v1: tape.v1, v2: tape.v2, v3: tape.v3, v4: tape.v4, v5: tape.v5, v6: tape.v6, v7: tape.v7, v8: tape.v8, v9: tape.v9, v10: tape.v10, v11: tape.v11, v12: tape.v12, v13: tape.v13, v14: tape.v14, v15: tape.v15, v16: tape.v16, v17: tape.v17, v18: tape.v18, v19: tape.v19, v20: tape.v20, v21: tape.v21, v22: tape.v22, v23: tape.v23, v24: tape.v24, v25: tape.v25, v26: tape.v26, v27: tape.v27, v28: tape.v28, v29: tape.v29, v30: tape.v30, v31: tape.v31, v32: tape.v32, v33: tape.v33, v34: tape.v34, v35: tape.v35, v36: tape.v36, v37: tape.v37, v38: tape.v38, v39: tape.v39, v40: tape.v40, v41: tape.v41, v42: tape.v42, v43: tape.v43, v44: tape.v44, v45: tape.v45, v46: tape.v46, v47: tape.v47, v48: tape.v48, v49: tape.v49, g0: tape.g0, g1: tape.g1, g2: tape.g2, g3: tape.g3, g4: tape.g4, g5: tape.g5, g6: tape.g6, g7: tape.g7, g8: tape.g8, g9: tape.g9, g10: tape.g10, g11: tape.g11, g12: tape.g12, g13: tape.g13, g14: tape.g14, g15: tape.g15, g16: tape.g16, g17: tape.g17, g18: tape.g18, g19: tape.g19, g20: tape.g20, g21: tape.g21, g22: tape.g22, g23: tape.g23, g24: tape.g24, g25: tape.g25, g26: tape.g26, g27: tape.g27, g28: tape.g28, g29: tape.g29, g30: tape.g30, g31: tape.g31, g32: tape.g32, g33: tape.g33, g34: tape.g34, g35: tape.g35, g36: tape.g36, g37: tape.g37, g38: tape.g38, g39: tape.g39, g40: tape.g40, g41: tape.g41, g42: tape.g42, g43: tape.g43, g44: tape.g44, g45: tape.g45, g46: tape.g46, g47: tape.g47, g48: tape.g48, g49: tape.g49, e0: tape.e0, e1: entry, e2: tape.e2, e3: tape.e3, e4: tape.e4, e5: tape.e5, e6: tape.e6, e7: tape.e7, e8: tape.e8, e9: tape.e9, e10: tape.e10, e11: tape.e11, e12: tape.e12, e13: tape.e13, e14: tape.e14, e15: tape.e15, e16: tape.e16, e17: tape.e17, e18: tape.e18, e19: tape.e19, e20: tape.e20, e21: tape.e21, e22: tape.e22, e23: tape.e23, e24: tape.e24, e25: tape.e25, e26: tape.e26, e27: tape.e27, e28: tape.e28, e29: tape.e29, e30: tape.e30, e31: tape.e31, e32: tape.e32, e33: tape.e33, e34: tape.e34, e35: tape.e35, e36: tape.e36, e37: tape.e37, e38: tape.e38, e39: tape.e39, e40: tape.e40, e41: tape.e41, e42: tape.e42, e43: tape.e43, e44: tape.e44, e45: tape.e45, e46: tape.e46, e47: tape.e47, e48: tape.e48, e49: tape.e49, n_entries: tape.n_entries, n_values: tape.n_values } }
+    if idx == 2 { return ADTape { v0: tape.v0, v1: tape.v1, v2: tape.v2, v3: tape.v3, v4: tape.v4, v5: tape.v5, v6: tape.v6, v7: tape.v7, v8: tape.v8, v9: tape.v9, v10: tape.v10, v11: tape.v11, v12: tape.v12, v13: tape.v13, v14: tape.v14, v15: tape.v15, v16: tape.v16, v17: tape.v17, v18: tape.v18, v19: tape.v19, v20: tape.v20, v21: tape.v21, v22: tape.v22, v23: tape.v23, v24: tape.v24, v25: tape.v25, v26: tape.v26, v27: tape.v27, v28: tape.v28, v29: tape.v29, v30: tape.v30, v31: tape.v31, v32: tape.v32, v33: tape.v33, v34: tape.v34, v35: tape.v35, v36: tape.v36, v37: tape.v37, v38: tape.v38, v39: tape.v39, v40: tape.v40, v41: tape.v41, v42: tape.v42, v43: tape.v43, v44: tape.v44, v45: tape.v45, v46: tape.v46, v47: tape.v47, v48: tape.v48, v49: tape.v49, g0: tape.g0, g1: tape.g1, g2: tape.g2, g3: tape.g3, g4: tape.g4, g5: tape.g5, g6: tape.g6, g7: tape.g7, g8: tape.g8, g9: tape.g9, g10: tape.g10, g11: tape.g11, g12: tape.g12, g13: tape.g13, g14: tape.g14, g15: tape.g15, g16: tape.g16, g17: tape.g17, g18: tape.g18, g19: tape.g19, g20: tape.g20, g21: tape.g21, g22: tape.g22, g23: tape.g23, g24: tape.g24, g25: tape.g25, g26: tape.g26, g27: tape.g27, g28: tape.g28, g29: tape.g29, g30: tape.g30, g31: tape.g31, g32: tape.g32, g33: tape.g33, g34: tape.g34, g35: tape.g35, g36: tape.g36, g37: tape.g37, g38: tape.g38, g39: tape.g39, g40: tape.g40, g41: tape.g41, g42: tape.g42, g43: tape.g43, g44: tape.g44, g45: tape.g45, g46: tape.g46, g47: tape.g47, g48: tape.g48, g49: tape.g49, e0: tape.e0, e1: tape.e1, e2: entry, e3: tape.e3, e4: tape.e4, e5: tape.e5, e6: tape.e6, e7: tape.e7, e8: tape.e8, e9: tape.e9, e10: tape.e10, e11: tape.e11, e12: tape.e12, e13: tape.e13, e14: tape.e14, e15: tape.e15, e16: tape.e16, e17: tape.e17, e18: tape.e18, e19: tape.e19, e20: tape.e20, e21: tape.e21, e22: tape.e22, e23: tape.e23, e24: tape.e24, e25: tape.e25, e26: tape.e26, e27: tape.e27, e28: tape.e28, e29: tape.e29, e30: tape.e30, e31: tape.e31, e32: tape.e32, e33: tape.e33, e34: tape.e34, e35: tape.e35, e36: tape.e36, e37: tape.e37, e38: tape.e38, e39: tape.e39, e40: tape.e40, e41: tape.e41, e42: tape.e42, e43: tape.e43, e44: tape.e44, e45: tape.e45, e46: tape.e46, e47: tape.e47, e48: tape.e48, e49: tape.e49, n_entries: tape.n_entries, n_values: tape.n_values } }
+    return tape
+}
+
+fn tape_with_n_values(tape: ADTape, n: i64) -> ADTape {
+    return ADTape { v0: tape.v0, v1: tape.v1, v2: tape.v2, v3: tape.v3, v4: tape.v4, v5: tape.v5, v6: tape.v6, v7: tape.v7, v8: tape.v8, v9: tape.v9, v10: tape.v10, v11: tape.v11, v12: tape.v12, v13: tape.v13, v14: tape.v14, v15: tape.v15, v16: tape.v16, v17: tape.v17, v18: tape.v18, v19: tape.v19, v20: tape.v20, v21: tape.v21, v22: tape.v22, v23: tape.v23, v24: tape.v24, v25: tape.v25, v26: tape.v26, v27: tape.v27, v28: tape.v28, v29: tape.v29, v30: tape.v30, v31: tape.v31, v32: tape.v32, v33: tape.v33, v34: tape.v34, v35: tape.v35, v36: tape.v36, v37: tape.v37, v38: tape.v38, v39: tape.v39, v40: tape.v40, v41: tape.v41, v42: tape.v42, v43: tape.v43, v44: tape.v44, v45: tape.v45, v46: tape.v46, v47: tape.v47, v48: tape.v48, v49: tape.v49, g0: tape.g0, g1: tape.g1, g2: tape.g2, g3: tape.g3, g4: tape.g4, g5: tape.g5, g6: tape.g6, g7: tape.g7, g8: tape.g8, g9: tape.g9, g10: tape.g10, g11: tape.g11, g12: tape.g12, g13: tape.g13, g14: tape.g14, g15: tape.g15, g16: tape.g16, g17: tape.g17, g18: tape.g18, g19: tape.g19, g20: tape.g20, g21: tape.g21, g22: tape.g22, g23: tape.g23, g24: tape.g24, g25: tape.g25, g26: tape.g26, g27: tape.g27, g28: tape.g28, g29: tape.g29, g30: tape.g30, g31: tape.g31, g32: tape.g32, g33: tape.g33, g34: tape.g34, g35: tape.g35, g36: tape.g36, g37: tape.g37, g38: tape.g38, g39: tape.g39, g40: tape.g40, g41: tape.g41, g42: tape.g42, g43: tape.g43, g44: tape.g44, g45: tape.g45, g46: tape.g46, g47: tape.g47, g48: tape.g48, g49: tape.g49, e0: tape.e0, e1: tape.e1, e2: tape.e2, e3: tape.e3, e4: tape.e4, e5: tape.e5, e6: tape.e6, e7: tape.e7, e8: tape.e8, e9: tape.e9, e10: tape.e10, e11: tape.e11, e12: tape.e12, e13: tape.e13, e14: tape.e14, e15: tape.e15, e16: tape.e16, e17: tape.e17, e18: tape.e18, e19: tape.e19, e20: tape.e20, e21: tape.e21, e22: tape.e22, e23: tape.e23, e24: tape.e24, e25: tape.e25, e26: tape.e26, e27: tape.e27, e28: tape.e28, e29: tape.e29, e30: tape.e30, e31: tape.e31, e32: tape.e32, e33: tape.e33, e34: tape.e34, e35: tape.e35, e36: tape.e36, e37: tape.e37, e38: tape.e38, e39: tape.e39, e40: tape.e40, e41: tape.e41, e42: tape.e42, e43: tape.e43, e44: tape.e44, e45: tape.e45, e46: tape.e46, e47: tape.e47, e48: tape.e48, e49: tape.e49, n_entries: tape.n_entries, n_values: n }
+}
+
+fn tape_with_n_entries(tape: ADTape, n: i64) -> ADTape {
+    return ADTape { v0: tape.v0, v1: tape.v1, v2: tape.v2, v3: tape.v3, v4: tape.v4, v5: tape.v5, v6: tape.v6, v7: tape.v7, v8: tape.v8, v9: tape.v9, v10: tape.v10, v11: tape.v11, v12: tape.v12, v13: tape.v13, v14: tape.v14, v15: tape.v15, v16: tape.v16, v17: tape.v17, v18: tape.v18, v19: tape.v19, v20: tape.v20, v21: tape.v21, v22: tape.v22, v23: tape.v23, v24: tape.v24, v25: tape.v25, v26: tape.v26, v27: tape.v27, v28: tape.v28, v29: tape.v29, v30: tape.v30, v31: tape.v31, v32: tape.v32, v33: tape.v33, v34: tape.v34, v35: tape.v35, v36: tape.v36, v37: tape.v37, v38: tape.v38, v39: tape.v39, v40: tape.v40, v41: tape.v41, v42: tape.v42, v43: tape.v43, v44: tape.v44, v45: tape.v45, v46: tape.v46, v47: tape.v47, v48: tape.v48, v49: tape.v49, g0: tape.g0, g1: tape.g1, g2: tape.g2, g3: tape.g3, g4: tape.g4, g5: tape.g5, g6: tape.g6, g7: tape.g7, g8: tape.g8, g9: tape.g9, g10: tape.g10, g11: tape.g11, g12: tape.g12, g13: tape.g13, g14: tape.g14, g15: tape.g15, g16: tape.g16, g17: tape.g17, g18: tape.g18, g19: tape.g19, g20: tape.g20, g21: tape.g21, g22: tape.g22, g23: tape.g23, g24: tape.g24, g25: tape.g25, g26: tape.g26, g27: tape.g27, g28: tape.g28, g29: tape.g29, g30: tape.g30, g31: tape.g31, g32: tape.g32, g33: tape.g33, g34: tape.g34, g35: tape.g35, g36: tape.g36, g37: tape.g37, g38: tape.g38, g39: tape.g39, g40: tape.g40, g41: tape.g41, g42: tape.g42, g43: tape.g43, g44: tape.g44, g45: tape.g45, g46: tape.g46, g47: tape.g47, g48: tape.g48, g49: tape.g49, e0: tape.e0, e1: tape.e1, e2: tape.e2, e3: tape.e3, e4: tape.e4, e5: tape.e5, e6: tape.e6, e7: tape.e7, e8: tape.e8, e9: tape.e9, e10: tape.e10, e11: tape.e11, e12: tape.e12, e13: tape.e13, e14: tape.e14, e15: tape.e15, e16: tape.e16, e17: tape.e17, e18: tape.e18, e19: tape.e19, e20: tape.e20, e21: tape.e21, e22: tape.e22, e23: tape.e23, e24: tape.e24, e25: tape.e25, e26: tape.e26, e27: tape.e27, e28: tape.e28, e29: tape.e29, e30: tape.e30, e31: tape.e31, e32: tape.e32, e33: tape.e33, e34: tape.e34, e35: tape.e35, e36: tape.e36, e37: tape.e37, e38: tape.e38, e39: tape.e39, e40: tape.e40, e41: tape.e41, e42: tape.e42, e43: tape.e43, e44: tape.e44, e45: tape.e45, e46: tape.e46, e47: tape.e47, e48: tape.e48, e49: tape.e49, n_entries: n, n_values: tape.n_values }
+}
+
+// ============================================================================
+// TESTS AND EXAMPLES
+// ============================================================================
+
+fn main() -> i32 {
+    println("=== Sounio ML Automatic Differentiation ===")
+    println("")
+
+    println("Part 1: Dual Numbers (Forward Mode)")
+    println("------------------------------------")
+
+    // Test dual number derivative: f(x) = x^2 at x = 3
+    let x1 = dual_variable(3.0)
+    let y1 = dual_mul(x1, x1)
+    println("f(x) = x^2 at x=3")
+    println("  f(3) = ")
+    println(y1.value)
+    println("  f'(3) = ")
+    println(y1.derivative)
+    println("  Expected: 9, 6")
+    println("")
+
+    println("Part 2: Tape-Based Reverse Mode")
+    println("--------------------------------")
+
+    // Test tape: f(x) = x * x
+    var tape = tape_new()
+    let result = tape_variable(tape, 3.0)
+    tape = result.0
+    let x2 = result.1
+
+    let result2 = tape_mul(tape, x2, x2)
+    tape = result2.0
+    let y2 = result2.1
+
+    tape = tape_backward(tape, y2.tape_idx)
+    let deriv = tape_get_grad(tape, x2.tape_idx)
+
+    println("Tape: f(x) = x^2 at x=3")
+    println("  f(3) = ")
+    println(y2.value)
+    println("  df/dx = ")
+    println(deriv)
+    println("  Expected: 9, 6")
+    println("")
+
+    println("Part 3: Epistemic Derivative Tracking")
+    println("------------------------------------")
+
+    let gv1 = grad_var_new(1.5)
+    let gv2 = grad_var_update(gv1, 1.8)
+    let gv3 = grad_var_update(gv2, 1.2)
+    println("Derivative statistics over 3 samples:")
+    println("  Mean = ")
+    println(gv3.gradient)
+    println("  Variance = ")
+    println(gv3.variance)
+    println("  Std Dev = ")
+    println(grad_var_std_dev(gv3))
+    println("")
+
+    println("Part 4: Vector Jacobian Products")
+    println("---------------------------------")
+
+    let grad_out = 2.0
+    let weight = 0.5
+    let vjp_result = vjp_linear(grad_out, weight)
+    println("VJP Linear: grad_out=2.0, weight=0.5")
+    println("  Result = ")
+    println(vjp_result)
+    println("  Expected: 1.0")
+    println("")
+
+    let input_relu = 0.5
+    let vjp_relu_result = vjp_relu(grad_out, input_relu)
+    println("VJP ReLU: grad_out=2.0, input=0.5")
+    println("  Result = ")
+    println(vjp_relu_result)
+    println("  Expected: 2.0")
+    println("")
+
+    println("=== All Tests Complete ===")
+    return 0
+}

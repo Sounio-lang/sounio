@@ -1,0 +1,359 @@
+/// FFI Demo - Foreign Function Interface Examples
+///
+/// This example demonstrates the FFI capabilities of Sounio,
+/// including calling C functions, string interop, and dynamic library loading.
+
+module examples::ffi_demo;
+
+use ffi::*;
+
+// =============================================================================
+// Basic C Function Declarations
+// =============================================================================
+
+/// Declare standard C library functions
+extern "C" {
+    // String functions
+    fn strlen(s: *const c_char) -> c_size_t;
+    fn strcpy(dst: *mut c_char, src: *const c_char) -> *mut c_char;
+    fn strcmp(a: *const c_char, b: *const c_char) -> c_int;
+
+    // Memory functions
+    fn malloc(size: c_size_t) -> *mut c_void;
+    fn free(ptr: *mut c_void);
+    fn memset(dst: *mut c_void, val: c_int, len: c_size_t) -> *mut c_void;
+
+    // Standard I/O
+    fn printf(format: *const c_char, ...) -> c_int;
+    fn puts(s: *const c_char) -> c_int;
+
+    // Environment
+    fn getenv(name: *const c_char) -> *const c_char;
+
+    // Math functions
+    fn sin(x: c_double) -> c_double;
+    fn cos(x: c_double) -> c_double;
+    fn sqrt(x: c_double) -> c_double;
+}
+
+// =============================================================================
+// Using CString for Safe String Passing
+// =============================================================================
+
+/// Demonstrate safe string interop with C
+fn demo_cstring() with IO, Alloc {
+    println("=== CString Demo ===");
+
+    // Create a CString from a D string
+    let greeting = CString::new("Hello from Sounio!").unwrap();
+
+    // Pass to C function
+    unsafe {
+        puts(greeting.as_ptr());
+    }
+
+    // Get the length using C's strlen
+    let len = unsafe { strlen(greeting.as_ptr()) };
+    println("String length (via strlen): {}", len);
+
+    // String comparison
+    let s1 = CString::new("apple").unwrap();
+    let s2 = CString::new("banana").unwrap();
+    let cmp = unsafe { strcmp(s1.as_ptr(), s2.as_ptr()) };
+    println("strcmp(\"apple\", \"banana\") = {}", cmp);
+
+    // Reading from C
+    let home = CString::new("HOME").unwrap();
+    let home_value = unsafe { getenv(home.as_ptr()) };
+
+    if is_not_null(home_value) {
+        let home_str = unsafe { CStr::from_ptr(home_value) };
+        println("HOME = {}", home_str.to_string_lossy());
+    } else {
+        println("HOME not set");
+    }
+}
+
+// =============================================================================
+// Using C Math Functions
+// =============================================================================
+
+/// Demonstrate calling C math functions
+fn demo_math() with IO {
+    println("\n=== C Math Functions Demo ===");
+
+    let pi = 3.14159265358979;
+
+    // Call sin, cos, sqrt
+    let sin_val = unsafe { sin(pi / 2.0) };
+    let cos_val = unsafe { cos(pi) };
+    let sqrt_val = unsafe { sqrt(2.0) };
+
+    println("sin(pi/2) = {}", sin_val);
+    println("cos(pi) = {}", cos_val);
+    println("sqrt(2) = {}", sqrt_val);
+}
+
+// =============================================================================
+// Manual Memory Management
+// =============================================================================
+
+/// Demonstrate C memory allocation
+fn demo_memory() with IO, Alloc {
+    println("\n=== C Memory Management Demo ===");
+
+    // Allocate a buffer
+    let size: c_size_t = 100;
+    let buffer = unsafe { malloc(size) };
+
+    if is_null(buffer) {
+        println("Failed to allocate memory!");
+        return;
+    }
+
+    // Zero the buffer
+    unsafe { memset(buffer, 0, size); }
+
+    println("Allocated {} bytes at {:p}", size, buffer);
+
+    // Write some data
+    let typed_buffer = buffer as *mut c_int;
+    unsafe {
+        write(typed_buffer, 42);
+        write(offset_mut(typed_buffer, 1), 123);
+    }
+
+    // Read it back
+    let val1 = unsafe { read(typed_buffer) };
+    let val2 = unsafe { read(offset(typed_buffer as *const c_int, 1)) };
+    println("Values: {}, {}", val1, val2);
+
+    // Free the buffer
+    unsafe { free(buffer); }
+    println("Memory freed");
+}
+
+// =============================================================================
+// Dynamic Library Loading
+// =============================================================================
+
+/// Demonstrate loading libraries at runtime
+fn demo_dynamic_library() with IO, Alloc {
+    println("\n=== Dynamic Library Loading Demo ===");
+
+    // Try to load the math library
+    #[cfg(target_os = "windows")]
+    let lib_name = "msvcrt.dll";
+
+    #[cfg(target_os = "macos")]
+    let lib_name = "libm.dylib";
+
+    #[cfg(all(not(target_os = "windows"), not(target_os = "macos")))]
+    let lib_name = "libm.so.6";
+
+    match Library::open(lib_name) {
+        Ok(lib) => {
+            println("Loaded library: {}", lib.path());
+
+            // Look up the sin function
+            let sin_fn: fn(c_double) -> c_double = unsafe {
+                match lib.get_fn("sin") {
+                    Ok(f) => f,
+                    Err(e) => {
+                        println("Failed to find 'sin': {}", e.message());
+                        return;
+                    }
+                }
+            };
+
+            // Call it
+            let result = sin_fn(1.0);
+            println("sin(1.0) via dynamic loading = {}", result);
+
+            // Check for other symbols
+            if lib.contains("cos") {
+                println("Library also has 'cos'");
+            }
+
+            if lib.contains("tan") {
+                println("Library also has 'tan'");
+            }
+        }
+        Err(e) => {
+            println("Failed to load {}: {}", lib_name, e.message());
+            println("(This is expected on some systems)");
+        }
+    }
+}
+
+// =============================================================================
+// C Structs and repr(C)
+// =============================================================================
+
+/// A C-compatible point struct
+#[repr(C)]
+pub struct CPoint {
+    x: c_int,
+    y: c_int,
+}
+
+/// A C-compatible rectangle
+#[repr(C)]
+pub struct CRect {
+    origin: CPoint,
+    width: c_int,
+    height: c_int,
+}
+
+/// Calculate area of a rectangle (D function, C-compatible signature)
+extern "C" fn rect_area(rect: *const CRect) -> c_int {
+    if is_null(rect) {
+        return 0;
+    }
+
+    unsafe {
+        let r = &*rect;
+        r.width * r.height
+    }
+}
+
+fn demo_c_structs() with IO {
+    println("\n=== C Structs Demo ===");
+
+    let rect = CRect {
+        origin: CPoint { x: 10, y: 20 },
+        width: 100,
+        height: 50,
+    };
+
+    let area = rect_area(&rect as *const CRect);
+    println("Rectangle at ({}, {}), size {}x{}",
+            rect.origin.x, rect.origin.y, rect.width, rect.height);
+    println("Area: {}", area);
+
+    // Check sizes match C expectations
+    println("sizeof(CPoint) = {}", size_of::<CPoint>());
+    println("sizeof(CRect) = {}", size_of::<CRect>());
+}
+
+// =============================================================================
+// Callbacks and Function Pointers
+// =============================================================================
+
+/// Comparison function for sorting (C compatible)
+extern "C" fn compare_ints(a: *const c_void, b: *const c_void) -> c_int {
+    catch_panic(|| {
+        let a_val = unsafe { *(a as *const c_int) };
+        let b_val = unsafe { *(b as *const c_int) };
+        a_val - b_val
+    }, 0)
+}
+
+// Declare qsort
+extern "C" {
+    fn qsort(
+        base: *mut c_void,
+        nmemb: c_size_t,
+        size: c_size_t,
+        compar: extern "C" fn(*const c_void, *const c_void) -> c_int,
+    );
+}
+
+fn demo_callbacks() with IO {
+    println("\n=== Callbacks Demo ===");
+
+    // Create an array to sort
+    var numbers: [c_int; 10] = [64, 34, 25, 12, 22, 11, 90, 87, 45, 33];
+
+    println("Before sorting: {:?}", numbers);
+
+    // Sort using qsort with our callback
+    unsafe {
+        qsort(
+            numbers.as_mut_ptr() as *mut c_void,
+            numbers.len() as c_size_t,
+            size_of::<c_int>() as c_size_t,
+            compare_ints,
+        );
+    }
+
+    println("After sorting:  {:?}", numbers);
+}
+
+// =============================================================================
+// Panic Safety at FFI Boundaries
+// =============================================================================
+
+/// A callback that might panic
+extern "C" fn risky_callback(value: c_int) -> c_int {
+    ffi_safe! {
+        if value < 0 {
+            panic("negative value not allowed!");
+        }
+        value * 2
+    } else {
+        -1  // Return -1 on panic
+    }
+}
+
+fn demo_panic_safety() with IO {
+    println("\n=== Panic Safety Demo ===");
+
+    // Safe call
+    let result1 = risky_callback(21);
+    println("risky_callback(21) = {}", result1);
+
+    // Call that would panic, but is caught
+    let result2 = risky_callback(-5);
+    println("risky_callback(-5) = {} (panic caught!)", result2);
+}
+
+// =============================================================================
+// Variadic Functions
+// =============================================================================
+
+fn demo_variadic() with IO, Alloc {
+    println("\n=== Variadic Functions Demo ===");
+
+    // Using printf (variadic C function)
+    let format = CString::new("The answer is %d and pi is %.2f\n").unwrap();
+
+    unsafe {
+        printf(format.as_ptr(), 42 as c_int, 3.14159 as c_double);
+    }
+}
+
+// =============================================================================
+// Platform Information
+// =============================================================================
+
+fn demo_platform_info() with IO {
+    println("\n=== Platform Information ===");
+    println("OS: {}", platform::OS);
+    println("Architecture: {}", platform::ARCH);
+    println("Pointer size: {} bytes", platform::POINTER_SIZE);
+    println("Library extension: {}", platform::LIB_EXTENSION);
+    println("Library prefix: '{}'", platform::LIB_PREFIX);
+}
+
+// =============================================================================
+// Main Entry Point
+// =============================================================================
+
+fn main() with IO, Alloc {
+    println("Sounio FFI Demonstration");
+    println("============================\n");
+
+    demo_cstring();
+    demo_math();
+    demo_memory();
+    demo_dynamic_library();
+    demo_c_structs();
+    demo_callbacks();
+    demo_panic_safety();
+    demo_variadic();
+    demo_platform_info();
+
+    println("\n============================");
+    println("FFI Demo Complete!");
+}

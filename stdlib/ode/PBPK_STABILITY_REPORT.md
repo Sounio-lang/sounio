@@ -2,7 +2,7 @@
 
 ## Summary
 
-Investigated improving numerical stability of PBPK models in Demetrios. Created multiple implementations using RK4 integration (more stable than Euler) and simplified model structures. **However, discovered a critical compiler limitation that prevents long-running ODE simulations.**
+Investigated improving numerical stability of PBPK models in Sounio. Created multiple implementations using RK4 integration (more stable than Euler) and simplified model structures. **However, discovered a critical compiler limitation that prevents long-running ODE simulations.**
 
 ## Compiler Limitation Discovered
 
@@ -14,7 +14,7 @@ Investigated improving numerical stability of PBPK models in Demetrios. Created 
 - Affects ALL ODE solvers (Euler, RK4, Tsit5) when running >10 steps
 
 ### Evidence
-```demetrios
+```sounio
 // This pattern fails after ~2 iterations:
 let mut st = State { x: 100.0 }
 let mut i = 0
@@ -121,7 +121,7 @@ Demonstrates the compiler bug:
 
 ## Recommendations
 
-### For Current Demetrios Development
+### For Current Sounio Development
 
 1. **Document the compiler limitation** in stdlib/ode/README.md
 2. **Use these files as test cases** for fixing the while-loop mutation bug
@@ -135,7 +135,7 @@ Demonstrates the compiler bug:
 - ~0.04-0.36ms per simulation
 - Already validated against regulatory benchmarks
 
-### For Demetrios Compiler Team
+### For Sounio Compiler Team
 
 **Priority Bug**: Fix struct mutation in while loops
 - Affects all ODE solvers
@@ -143,7 +143,7 @@ Demonstrates the compiler bug:
 - Reproducible with simple test case (pbpk_tiny.d)
 
 Suggested investigation:
-```demetrios
+```sounio
 // Minimal reproduction case
 struct State { x: f64 }
 struct Result { state_new: State }

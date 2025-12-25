@@ -1,0 +1,589 @@
+//! stdlib/epistemic/meta.d
+//!
+//! Meta-Analysis: Combining Knowledge Across Studies
+//!
+//! When you have multiple Knowledge values from different sources
+//! (experiments, measurements, studies), this module combines them
+//! using principled statistical methods.
+//!
+//! # Methods Implemented
+//!
+//! - Fixed-effects pooling (inverse-variance weighted)
+//! - Random-effects pooling (DerSimonian-Laird)
+//! - Heterogeneity statistics (Q, I², τ²)
+//! - Bayesian hierarchical combination
+//!
+//! # Example
+//!
+//! ```sounio
+//! use epistemic::{Knowledge, meta}
+//!
+//! // Results from 3 clinical trials
+//! let trial1 = Knowledge::measured(0.35, 0.04, "RCT_2021")
+//! let trial2 = Knowledge::measured(0.42, 0.06, "RCT_2022")
+//! let trial3 = Knowledge::measured(0.38, 0.03, "RCT_2023")
+//!
+//! let pooled = meta::random_effects([trial1, trial2, trial3])
+//! println("Pooled effect: {} ± {}", pooled.value, pooled.std())
+//! println("Heterogeneity I²: {}%", pooled.heterogeneity.i_squared * 100)
+//! ```
+
+use core::{Option, Result}
+use epistemic::knowledge::{Knowledge, BetaConfidence, Source, Provenance}
+
+// ============================================================================
+// HETEROGENEITY STATISTICS
+// ============================================================================
+
+/// Heterogeneity metrics from meta-analysis
+pub struct Heterogeneity {
+    /// Cochran's Q statistic (chi-squared test for heterogeneity)
+    q: f64,
+
+    /// Degrees of freedom (k - 1 where k = number of studies)
+    df: i64,
+
+    /// I² statistic: percentage of variability due to heterogeneity
+    /// 0% = no heterogeneity, 25% = low, 50% = moderate, 75% = high
+    i_squared: f64,
+
+    /// τ² (tau-squared): between-study variance
+    tau_squared: f64,
+
+    /// p-value for Q statistic
+    p_value: f64,
+}
+
+impl Heterogeneity {
+    /// Create from Q statistic and degrees of freedom
+    pub fn from_q(q: f64, df: i64) -> Heterogeneity {
+        let tau_sq = if q > df as f64 {
+            (q - df as f64) / compute_c(df)  // Simplified
+        } else {
+            0.0
+        }
+
+        let i_sq = if q > 0.0 {
+            max_f64((q - df as f64) / q, 0.0)
+        } else {
+            0.0
+        }
+
+        Heterogeneity {
+            q: q,
+            df: df,
+            i_squared: i_sq,
+            tau_squared: tau_sq,
+            p_value: chi_squared_pvalue(q, df),
+        }
+    }
+
+    /// Is there significant heterogeneity?
+    pub fn is_significant(self: &Heterogeneity, alpha: f64) -> bool {
+        self.p_value < alpha
+    }
+
+    /// Qualitative interpretation of I²
+    pub fn interpretation(self: &Heterogeneity) -> string {
+        if self.i_squared < 0.25 {
+            "low heterogeneity"
+        } else if self.i_squared < 0.50 {
+            "moderate heterogeneity"
+        } else if self.i_squared < 0.75 {
+            "substantial heterogeneity"
+        } else {
+            "considerable heterogeneity"
+        }
+    }
+}
+
+// ============================================================================
+// META-ANALYSIS RESULT
+// ============================================================================
+
+/// Result of meta-analysis combining multiple Knowledge values
+pub struct MetaResult {
+    /// Pooled effect estimate
+    pooled: Knowledge<f64>,
+
+    /// Heterogeneity statistics
+    heterogeneity: Heterogeneity,
+
+    /// Number of studies combined
+    k: i64,
+
+    /// Method used
+    method: string,
+
+    /// Individual study weights
+    weights: Vec<f64>,
+}
+
+impl MetaResult {
+    /// Get the pooled Knowledge value
+    pub fn get(self: &MetaResult) -> &Knowledge<f64> {
+        &self.pooled
+    }
+
+    /// Get heterogeneity
+    pub fn het(self: &MetaResult) -> &Heterogeneity {
+        &self.heterogeneity
+    }
+
+    /// Should we use random effects instead of fixed?
+    /// Returns true if significant heterogeneity detected
+    pub fn needs_random_effects(self: &MetaResult) -> bool {
+        self.heterogeneity.is_significant(0.10) || self.heterogeneity.i_squared > 0.50
+    }
+
+    /// Forest plot data (study index, effect, weight)
+    pub fn forest_data(self: &MetaResult) -> Vec<(i64, f64, f64)> {
+        // Would need original values stored
+        Vec::new()
+    }
+}
+
+// ============================================================================
+// FIXED-EFFECTS META-ANALYSIS
+// ============================================================================
+
+/// Fixed-effects meta-analysis using inverse-variance weighting
+///
+/// Assumes all studies estimate the same underlying effect.
+/// Appropriate when heterogeneity is low (I² < 25%).
+///
+/// Formula:
+/// θ̂ = Σ(wᵢθᵢ) / Σwᵢ  where wᵢ = 1/Var(θᵢ)
+/// Var(θ̂) = 1/Σwᵢ
+pub fn fixed_effects(studies: &[Knowledge<f64>]) -> MetaResult {
+    let k = studies.len() as i64
+
+    if k == 0 {
+        return MetaResult {
+            pooled: Knowledge::constant(0.0),
+            heterogeneity: Heterogeneity::from_q(0.0, 0),
+            k: 0,
+            method: "fixed_effects",
+            weights: Vec::new(),
+        }
+    }
+
+    if k == 1 {
+        return MetaResult {
+            pooled: studies[0].clone(),
+            heterogeneity: Heterogeneity::from_q(0.0, 0),
+            k: 1,
+            method: "fixed_effects",
+            weights: vec![1.0],
+        }
+    }
+
+    // Compute weights (inverse variance)
+    var weights = Vec::new()
+    var sum_weights = 0.0
+    for study in studies {
+        let w = 1.0 / max_f64(study.variance, 0.0000001)
+        weights.push(w)
+        sum_weights = sum_weights + w
+    }
+
+    // Compute weighted mean
+    var weighted_sum = 0.0
+    var i = 0
+    while i < k {
+        weighted_sum = weighted_sum + weights[i] * studies[i].value
+        i = i + 1
+    }
+    let pooled_mean = weighted_sum / sum_weights
+
+    // Pooled variance
+    let pooled_variance = 1.0 / sum_weights
+
+    // Cochran's Q statistic
+    var q = 0.0
+    i = 0
+    while i < k {
+        let diff = studies[i].value - pooled_mean
+        q = q + weights[i] * diff * diff
+        i = i + 1
+    }
+
+    // Combine confidence from all studies
+    var combined_conf = BetaConfidence::uniform()
+    for study in studies {
+        combined_conf = combined_conf.combine(&study.confidence)
+    }
+
+    let pooled = Knowledge {
+        value: pooled_mean,
+        variance: pooled_variance,
+        confidence: combined_conf,
+        provenance: Provenance {
+            source: Source::Computed { operation: "fixed_effects_meta" },
+            steps: Vec::new(),
+        },
+    }
+
+    MetaResult {
+        pooled: pooled,
+        heterogeneity: Heterogeneity::from_q(q, k - 1),
+        k: k,
+        method: "fixed_effects",
+        weights: weights,
+    }
+}
+
+// ============================================================================
+// RANDOM-EFFECTS META-ANALYSIS
+// ============================================================================
+
+/// Random-effects meta-analysis using DerSimonian-Laird method
+///
+/// Assumes studies estimate different but related effects.
+/// Appropriate when heterogeneity exists (I² > 25%).
+///
+/// Adds between-study variance τ² to weights:
+/// w*ᵢ = 1/(Var(θᵢ) + τ²)
+pub fn random_effects(studies: &[Knowledge<f64>]) -> MetaResult {
+    let k = studies.len() as i64
+
+    if k == 0 {
+        return MetaResult {
+            pooled: Knowledge::constant(0.0),
+            heterogeneity: Heterogeneity::from_q(0.0, 0),
+            k: 0,
+            method: "random_effects",
+            weights: Vec::new(),
+        }
+    }
+
+    if k == 1 {
+        return MetaResult {
+            pooled: studies[0].clone(),
+            heterogeneity: Heterogeneity::from_q(0.0, 0),
+            k: 1,
+            method: "random_effects",
+            weights: vec![1.0],
+        }
+    }
+
+    // First, compute fixed-effects to get Q
+    let fe = fixed_effects(studies)
+    let q = fe.heterogeneity.q
+    let df = fe.heterogeneity.df
+
+    // Estimate τ² (DerSimonian-Laird)
+    let c = compute_c_from_weights(&fe.weights)
+    let tau_sq = if q > df as f64 {
+        (q - df as f64) / c
+    } else {
+        0.0
+    }
+
+    // Compute random-effects weights
+    var weights = Vec::new()
+    var sum_weights = 0.0
+    for study in studies {
+        let w = 1.0 / max_f64(study.variance + tau_sq, 0.0000001)
+        weights.push(w)
+        sum_weights = sum_weights + w
+    }
+
+    // Compute weighted mean with new weights
+    var weighted_sum = 0.0
+    var i = 0
+    while i < k {
+        weighted_sum = weighted_sum + weights[i] * studies[i].value
+        i = i + 1
+    }
+    let pooled_mean = weighted_sum / sum_weights
+
+    // Pooled variance includes between-study variance
+    let pooled_variance = 1.0 / sum_weights
+
+    // Recalculate Q with random-effects estimate (for diagnostics)
+    var q_re = 0.0
+    i = 0
+    while i < k {
+        let diff = studies[i].value - pooled_mean
+        q_re = q_re + weights[i] * diff * diff
+        i = i + 1
+    }
+
+    // Combine confidence
+    var combined_conf = BetaConfidence::uniform()
+    for study in studies {
+        combined_conf = combined_conf.combine(&study.confidence)
+    }
+
+    let pooled = Knowledge {
+        value: pooled_mean,
+        variance: pooled_variance,
+        confidence: combined_conf,
+        provenance: Provenance {
+            source: Source::Computed { operation: "random_effects_meta" },
+            steps: Vec::new(),
+        },
+    }
+
+    var het = Heterogeneity::from_q(q, df)
+    het.tau_squared = tau_sq
+
+    MetaResult {
+        pooled: pooled,
+        heterogeneity: het,
+        k: k,
+        method: "random_effects",
+        weights: weights,
+    }
+}
+
+// ============================================================================
+// BAYESIAN HIERARCHICAL META-ANALYSIS
+// ============================================================================
+
+/// Bayesian hierarchical pooling with informative prior
+///
+/// Uses precision-weighted combination with prior beliefs:
+/// - Prior on pooled effect (can be informative or non-informative)
+/// - Partial pooling: studies contribute based on their precision
+///
+/// This is especially useful when:
+/// - You have domain knowledge about plausible effect sizes
+/// - Small studies shouldn't dominate
+/// - You want to properly quantify uncertainty
+pub fn bayesian_pool(
+    studies: &[Knowledge<f64>],
+    prior_mean: f64,
+    prior_variance: f64,
+) -> MetaResult {
+    let k = studies.len() as i64
+
+    if k == 0 {
+        // Return prior as posterior
+        return MetaResult {
+            pooled: Knowledge {
+                value: prior_mean,
+                variance: prior_variance,
+                confidence: BetaConfidence::uniform(),
+                provenance: Provenance {
+                    source: Source::Assertion { author: "prior" },
+                    steps: Vec::new(),
+                },
+            },
+            heterogeneity: Heterogeneity::from_q(0.0, 0),
+            k: 0,
+            method: "bayesian_hierarchical",
+            weights: Vec::new(),
+        }
+    }
+
+    // Prior precision
+    let prior_precision = 1.0 / max_f64(prior_variance, 0.0000001)
+
+    // Likelihood precisions
+    var total_precision = prior_precision
+    var weighted_sum = prior_precision * prior_mean
+    var weights = Vec::new()
+
+    for study in studies {
+        let precision = 1.0 / max_f64(study.variance, 0.0000001)
+        weights.push(precision)
+        total_precision = total_precision + precision
+        weighted_sum = weighted_sum + precision * study.value
+    }
+
+    // Posterior mean and variance
+    let posterior_mean = weighted_sum / total_precision
+    let posterior_variance = 1.0 / total_precision
+
+    // Compute Q for heterogeneity assessment
+    var q = 0.0
+    var i = 0
+    while i < k {
+        let diff = studies[i].value - posterior_mean
+        q = q + weights[i] * diff * diff
+        i = i + 1
+    }
+
+    // Build posterior confidence from evidence
+    // More evidence (higher total precision) → higher confidence
+    let evidence_strength = total_precision / prior_precision
+    let conf = BetaConfidence::from_rate(0.8, min_f64(evidence_strength, 100.0))
+
+    let pooled = Knowledge {
+        value: posterior_mean,
+        variance: posterior_variance,
+        confidence: conf,
+        provenance: Provenance {
+            source: Source::Computed { operation: "bayesian_meta" },
+            steps: Vec::new(),
+        },
+    }
+
+    MetaResult {
+        pooled: pooled,
+        heterogeneity: Heterogeneity::from_q(q, k - 1),
+        k: k,
+        method: "bayesian_hierarchical",
+        weights: weights,
+    }
+}
+
+/// Bayesian pooling with non-informative prior
+pub fn bayesian_pool_flat(studies: &[Knowledge<f64>]) -> MetaResult {
+    // Use very wide prior (non-informative)
+    bayesian_pool(studies, 0.0, 1000000.0)
+}
+
+// ============================================================================
+// CONVENIENCE FUNCTIONS
+// ============================================================================
+
+/// Automatically choose fixed or random effects based on heterogeneity
+pub fn auto_pool(studies: &[Knowledge<f64>]) -> MetaResult {
+    let fe = fixed_effects(studies)
+
+    if fe.needs_random_effects() {
+        random_effects(studies)
+    } else {
+        fe
+    }
+}
+
+/// Pool with sensitivity analysis (returns both FE and RE)
+pub struct SensitivityResult {
+    fixed: MetaResult,
+    random: MetaResult,
+    recommendation: string,
+}
+
+pub fn sensitivity_analysis(studies: &[Knowledge<f64>]) -> SensitivityResult {
+    let fe = fixed_effects(studies)
+    let re = random_effects(studies)
+
+    let recommendation = if fe.needs_random_effects() {
+        "Use random-effects due to significant heterogeneity"
+    } else {
+        "Fixed-effects appropriate, low heterogeneity"
+    }
+
+    SensitivityResult {
+        fixed: fe,
+        random: re,
+        recommendation: recommendation,
+    }
+}
+
+// ============================================================================
+// HELPER FUNCTIONS
+// ============================================================================
+
+/// Compute C for DerSimonian-Laird estimator
+fn compute_c(df: i64) -> f64 {
+    // Simplified: C ≈ df for equal-variance case
+    df as f64
+}
+
+fn compute_c_from_weights(weights: &[f64]) -> f64 {
+    var sum_w = 0.0
+    var sum_w2 = 0.0
+    for w in weights {
+        sum_w = sum_w + w
+        sum_w2 = sum_w2 + w * w
+    }
+    sum_w - sum_w2 / sum_w
+}
+
+/// Chi-squared p-value approximation
+fn chi_squared_pvalue(x: f64, df: i64) -> f64 {
+    if df <= 0 { return 1.0 }
+    if x <= 0.0 { return 1.0 }
+
+    // Wilson-Hilferty approximation
+    let k = df as f64
+    let cube_root = pow_f64(x / k, 1.0 / 3.0)
+    let z = (cube_root - (1.0 - 2.0 / (9.0 * k)))
+          / sqrt_f64(2.0 / (9.0 * k))
+
+    // Standard normal CDF approximation
+    0.5 * (1.0 - erf_approx(z / 1.4142135623730951))
+}
+
+fn sqrt_f64(x: f64) -> f64 {
+    if x <= 0.0 { return 0.0 }
+    var y = x
+    y = 0.5 * (y + x / y)
+    y = 0.5 * (y + x / y)
+    y = 0.5 * (y + x / y)
+    y = 0.5 * (y + x / y)
+    y = 0.5 * (y + x / y)
+    y = 0.5 * (y + x / y)
+    y = 0.5 * (y + x / y)
+    y = 0.5 * (y + x / y)
+    y
+}
+
+fn pow_f64(base: f64, exp: f64) -> f64 {
+    exp_f64(exp * ln_f64(base))
+}
+
+fn exp_f64(x: f64) -> f64 {
+    if x > 10.0 { return 22026.0 * exp_f64(x - 10.0) }
+    if x < -10.0 { return 0.000045 * exp_f64(x + 10.0) }
+
+    var result = 1.0
+    var term = 1.0
+    var i = 1
+    while i < 15 {
+        term = term * x / (i as f64)
+        result = result + term
+        i = i + 1
+    }
+    result
+}
+
+fn ln_f64(x: f64) -> f64 {
+    if x <= 0.0 { return 0.0 - 999999.0 }
+    if x == 1.0 { return 0.0 }
+
+    let y = (x - 1.0) / (x + 1.0)
+    var result = 0.0
+    var term = y
+    var i = 1
+    while i < 30 {
+        result = result + term / (i as f64)
+        term = term * y * y
+        i = i + 2
+    }
+    2.0 * result
+}
+
+fn erf_approx(x: f64) -> f64 {
+    let a1 = 0.254829592
+    let a2 = 0.0 - 0.284496736
+    let a3 = 1.421413741
+    let a4 = 0.0 - 1.453152027
+    let a5 = 1.061405429
+    let p = 0.3275911
+
+    let sign = if x < 0.0 { 0.0 - 1.0 } else { 1.0 }
+    let x_abs = if x < 0.0 { 0.0 - x } else { x }
+
+    let t = 1.0 / (1.0 + p * x_abs)
+    let y = 1.0 - (((((a5 * t + a4) * t) + a3) * t + a2) * t + a1) * t * exp_f64(0.0 - x_abs * x_abs)
+
+    sign * y
+}
+
+fn max_f64(a: f64, b: f64) -> f64 {
+    if a > b { a } else { b }
+}
+
+fn min_f64(a: f64, b: f64) -> f64 {
+    if a < b { a } else { b }
+}
+
+fn abs_f64(x: f64) -> f64 {
+    if x < 0.0 { 0.0 - x } else { x }
+}
