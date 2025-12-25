@@ -37,7 +37,7 @@ let clearance = Knowledge::new(
     uncertainty: 1.2 L/h,
     source: Source {
         origin: "Phase III Trial NCT04123456",
-        timestamp: 2024-03-15,
+        timestamp: 2025-03-15,
         method: "Population PK analysis",
         confidence: 0.95
     }
@@ -158,4 +158,6 @@ If you believe that science deserves better tools—that uncertainty should be c
 
 ---
 
-*Last updated: December 2024*
+*Last updated: December 2025*
+
+**Author:** Demetrios Chiuratto Agourakis

@@ -227,4 +227,6 @@ https://github.com/sounio-lang/sounio
 
 ---
 
-*Last updated: December 2024*
+*Last updated: December 2025*
+
+**Author:** Demetrios Chiuratto Agourakis

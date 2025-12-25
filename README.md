@@ -244,10 +244,10 @@ cargo clippy
 If you use Sounio in academic work, please cite:
 
 ```bibtex
-@software{sounio2024,
+@software{sounio2025,
   title = {Sounio: A Systems Language for Epistemic Computing},
-  author = {Sounio Contributors},
-  year = {2024},
+  author = {Agourakis, Demetrios Chiuratto},
+  year = {2025},
   url = {https://github.com/sounio-lang/sounio}
 }
 ```
