@@ -1,0 +1,432 @@
+// tsit5_multicomp.d - Tsit5 ODE Solver for Multi-Compartment Systems
+//
+// Demonstrates the Tsit5 algorithm working with a simplified 3-compartment
+// pharmacokinetic model (central, peripheral, elimination).
+//
+// This serves as a stepping stone toward the full 14-compartment PBPK model.
+
+// ============================================================================
+// TSIT5 BUTCHER TABLEAU COEFFICIENTS
+// ============================================================================
+
+fn tsit5_c2() -> f64 { return 0.161 }
+fn tsit5_c3() -> f64 { return 0.327 }
+fn tsit5_c4() -> f64 { return 0.9 }
+fn tsit5_c5() -> f64 { return 0.9800255409045097 }
+fn tsit5_c6() -> f64 { return 1.0 }
+fn tsit5_c7() -> f64 { return 1.0 }
+
+fn tsit5_a21() -> f64 { return 0.161 }
+fn tsit5_a31() -> f64 { return 0.0 - 0.008480655492356989 }
+fn tsit5_a32() -> f64 { return 0.335480655492357 }
+fn tsit5_a41() -> f64 { return 2.8971530571054935 }
+fn tsit5_a42() -> f64 { return 0.0 - 6.359448489975075 }
+fn tsit5_a43() -> f64 { return 4.3622954328695815 }
+fn tsit5_a51() -> f64 { return 5.325864828439257 }
+fn tsit5_a52() -> f64 { return 0.0 - 11.748883564062828 }
+fn tsit5_a53() -> f64 { return 7.4955393428898365 }
+fn tsit5_a54() -> f64 { return 0.0 - 0.09249506636175525 }
+fn tsit5_a61() -> f64 { return 5.86145544294642 }
+fn tsit5_a62() -> f64 { return 0.0 - 12.92096931784711 }
+fn tsit5_a63() -> f64 { return 8.159367898576159 }
+fn tsit5_a64() -> f64 { return 0.0 - 0.071584973281401 }
+fn tsit5_a65() -> f64 { return 0.0 - 0.028269050394068383 }
+fn tsit5_a71() -> f64 { return 0.09646076681806523 }
+fn tsit5_a72() -> f64 { return 0.01 }
+fn tsit5_a73() -> f64 { return 0.4798896504144996 }
+fn tsit5_a74() -> f64 { return 1.379008574103742 }
+fn tsit5_a75() -> f64 { return 0.0 - 3.290069515436081 }
+fn tsit5_a76() -> f64 { return 2.324710524099774 }
+
+fn tsit5_b1() -> f64 { return 0.09646076681806523 }
+fn tsit5_b2() -> f64 { return 0.01 }
+fn tsit5_b3() -> f64 { return 0.4798896504144996 }
+fn tsit5_b4() -> f64 { return 1.379008574103742 }
+fn tsit5_b5() -> f64 { return 0.0 - 3.290069515436081 }
+fn tsit5_b6() -> f64 { return 2.324710524099774 }
+fn tsit5_b7() -> f64 { return 0.0 }
+
+fn tsit5_e1() -> f64 { return 0.00178001105222577714 }
+fn tsit5_e2() -> f64 { return 0.0008164344596567469 }
+fn tsit5_e3() -> f64 { return 0.0 - 0.007880878010261995 }
+fn tsit5_e4() -> f64 { return 0.1447110071732629 }
+fn tsit5_e5() -> f64 { return 0.0 - 0.5823571654525552 }
+fn tsit5_e6() -> f64 { return 0.45808210592918697 }
+fn tsit5_e7() -> f64 { return 0.0 - 0.01515151515151515 }
+
+// ============================================================================
+// HELPER FUNCTIONS
+// ============================================================================
+
+fn abs_val(x: f64) -> f64 {
+    if x < 0.0 { return 0.0 - x }
+    return x
+}
+
+fn max_val(a: f64, b: f64) -> f64 {
+    if a > b { return a }
+    return b
+}
+
+fn min_val(a: f64, b: f64) -> f64 {
+    if a < b { return a }
+    return b
+}
+
+fn fifth_root(x: f64) -> f64 {
+    if x <= 0.0 { return 0.0 }
+    let mut y = 1.0
+    y = y - (y * y * y * y * y - x) / (5.0 * y * y * y * y)
+    y = y - (y * y * y * y * y - x) / (5.0 * y * y * y * y)
+    y = y - (y * y * y * y * y - x) / (5.0 * y * y * y * y)
+    y = y - (y * y * y * y * y - x) / (5.0 * y * y * y * y)
+    y = y - (y * y * y * y * y - x) / (5.0 * y * y * y * y)
+    y = y - (y * y * y * y * y - x) / (5.0 * y * y * y * y)
+    y = y - (y * y * y * y * y - x) / (5.0 * y * y * y * y)
+    y = y - (y * y * y * y * y - x) / (5.0 * y * y * y * y)
+    y = y - (y * y * y * y * y - x) / (5.0 * y * y * y * y)
+    y = y - (y * y * y * y * y - x) / (5.0 * y * y * y * y)
+    return y
+}
+
+fn sqrt_val(x: f64) -> f64 {
+    if x <= 0.0 { return 0.0 }
+    let mut y = x
+    y = (y + x / y) / 2.0
+    y = (y + x / y) / 2.0
+    y = (y + x / y) / 2.0
+    y = (y + x / y) / 2.0
+    y = (y + x / y) / 2.0
+    y = (y + x / y) / 2.0
+    y = (y + x / y) / 2.0
+    y = (y + x / y) / 2.0
+    return y
+}
+
+// ============================================================================
+// 3-COMPARTMENT PK MODEL
+// ============================================================================
+// Simplified 2-compartment model with absorption:
+// - Gut (oral dose absorption, ka)
+// - Central (blood/plasma, elimination ke)
+// - Peripheral (tissue distribution, k12, k21)
+
+struct PKState {
+    gut: f64,      // Amount in gut lumen (mg)
+    central: f64,  // Amount in central compartment (mg)
+    periph: f64    // Amount in peripheral compartment (mg)
+}
+
+struct PKDeriv {
+    d_gut: f64,
+    d_central: f64,
+    d_periph: f64
+}
+
+// PK parameters for a typical oral drug
+struct PKParams {
+    ka: f64,   // Absorption rate constant (1/h)
+    ke: f64,   // Elimination rate constant (1/h)
+    k12: f64,  // Central to peripheral (1/h)
+    k21: f64   // Peripheral to central (1/h)
+}
+
+fn default_pk_params() -> PKParams {
+    return PKParams {
+        ka: 1.5,    // Fast absorption
+        ke: 0.1,    // ~7h half-life
+        k12: 0.3,   // Distribution
+        k21: 0.15   // Redistribution
+    }
+}
+
+// ODE function for 3-compartment model
+fn pk_ode(state_in: PKState, t: f64, p: PKParams) -> PKDeriv {
+    // dA_gut/dt = -ka * A_gut
+    let d_gut = 0.0 - p.ka * state_in.gut
+
+    // dA_central/dt = ka*A_gut - ke*A_central - k12*A_central + k21*A_periph
+    let d_central = p.ka * state_in.gut - p.ke * state_in.central - p.k12 * state_in.central + p.k21 * state_in.periph
+
+    // dA_periph/dt = k12*A_central - k21*A_periph
+    let d_periph = p.k12 * state_in.central - p.k21 * state_in.periph
+
+    return PKDeriv {
+        d_gut: d_gut,
+        d_central: d_central,
+        d_periph: d_periph
+    }
+}
+
+// ============================================================================
+// TSIT5 STEP FOR 3-COMPARTMENT
+// ============================================================================
+
+struct PKStepResult {
+    state_new: PKState,
+    err_gut: f64,
+    err_central: f64,
+    err_periph: f64
+}
+
+fn add_scaled_deriv(state_in: PKState, deriv: PKDeriv, scale: f64) -> PKState {
+    return PKState {
+        gut: state_in.gut + deriv.d_gut * scale,
+        central: state_in.central + deriv.d_central * scale,
+        periph: state_in.periph + deriv.d_periph * scale
+    }
+}
+
+fn tsit5_step_pk(state_in: PKState, t: f64, dt: f64, p: PKParams) -> PKStepResult {
+    // Stage 1
+    let k1 = pk_ode(state_in, t, p)
+
+    // Stage 2
+    let stage_2 = add_scaled_deriv(state_in, k1, dt * tsit5_a21())
+    let k2 = pk_ode(stage_2, t + tsit5_c2() * dt, p)
+
+    // Stage 3
+    let stage_3 = PKState {
+        gut: state_in.gut + dt * (tsit5_a31() * k1.d_gut + tsit5_a32() * k2.d_gut),
+        central: state_in.central + dt * (tsit5_a31() * k1.d_central + tsit5_a32() * k2.d_central),
+        periph: state_in.periph + dt * (tsit5_a31() * k1.d_periph + tsit5_a32() * k2.d_periph)
+    }
+    let k3 = pk_ode(stage_3, t + tsit5_c3() * dt, p)
+
+    // Stage 4
+    let stage_4 = PKState {
+        gut: state_in.gut + dt * (tsit5_a41() * k1.d_gut + tsit5_a42() * k2.d_gut + tsit5_a43() * k3.d_gut),
+        central: state_in.central + dt * (tsit5_a41() * k1.d_central + tsit5_a42() * k2.d_central + tsit5_a43() * k3.d_central),
+        periph: state_in.periph + dt * (tsit5_a41() * k1.d_periph + tsit5_a42() * k2.d_periph + tsit5_a43() * k3.d_periph)
+    }
+    let k4 = pk_ode(stage_4, t + tsit5_c4() * dt, p)
+
+    // Stage 5
+    let stage_5 = PKState {
+        gut: state_in.gut + dt * (tsit5_a51() * k1.d_gut + tsit5_a52() * k2.d_gut + tsit5_a53() * k3.d_gut + tsit5_a54() * k4.d_gut),
+        central: state_in.central + dt * (tsit5_a51() * k1.d_central + tsit5_a52() * k2.d_central + tsit5_a53() * k3.d_central + tsit5_a54() * k4.d_central),
+        periph: state_in.periph + dt * (tsit5_a51() * k1.d_periph + tsit5_a52() * k2.d_periph + tsit5_a53() * k3.d_periph + tsit5_a54() * k4.d_periph)
+    }
+    let k5 = pk_ode(stage_5, t + tsit5_c5() * dt, p)
+
+    // Stage 6
+    let stage_6 = PKState {
+        gut: state_in.gut + dt * (tsit5_a61() * k1.d_gut + tsit5_a62() * k2.d_gut + tsit5_a63() * k3.d_gut + tsit5_a64() * k4.d_gut + tsit5_a65() * k5.d_gut),
+        central: state_in.central + dt * (tsit5_a61() * k1.d_central + tsit5_a62() * k2.d_central + tsit5_a63() * k3.d_central + tsit5_a64() * k4.d_central + tsit5_a65() * k5.d_central),
+        periph: state_in.periph + dt * (tsit5_a61() * k1.d_periph + tsit5_a62() * k2.d_periph + tsit5_a63() * k3.d_periph + tsit5_a64() * k4.d_periph + tsit5_a65() * k5.d_periph)
+    }
+    let k6 = pk_ode(stage_6, t + tsit5_c6() * dt, p)
+
+    // Stage 7 (same as b weights for FSAL)
+    let stage_7 = PKState {
+        gut: state_in.gut + dt * (tsit5_a71() * k1.d_gut + tsit5_a72() * k2.d_gut + tsit5_a73() * k3.d_gut + tsit5_a74() * k4.d_gut + tsit5_a75() * k5.d_gut + tsit5_a76() * k6.d_gut),
+        central: state_in.central + dt * (tsit5_a71() * k1.d_central + tsit5_a72() * k2.d_central + tsit5_a73() * k3.d_central + tsit5_a74() * k4.d_central + tsit5_a75() * k5.d_central + tsit5_a76() * k6.d_central),
+        periph: state_in.periph + dt * (tsit5_a71() * k1.d_periph + tsit5_a72() * k2.d_periph + tsit5_a73() * k3.d_periph + tsit5_a74() * k4.d_periph + tsit5_a75() * k5.d_periph + tsit5_a76() * k6.d_periph)
+    }
+    let k7 = pk_ode(stage_7, t + tsit5_c7() * dt, p)
+
+    // 5th order solution
+    let state_new = stage_7
+
+    // Error estimate
+    let err_gut = dt * (tsit5_e1() * k1.d_gut + tsit5_e2() * k2.d_gut + tsit5_e3() * k3.d_gut + tsit5_e4() * k4.d_gut + tsit5_e5() * k5.d_gut + tsit5_e6() * k6.d_gut + tsit5_e7() * k7.d_gut)
+    let err_central = dt * (tsit5_e1() * k1.d_central + tsit5_e2() * k2.d_central + tsit5_e3() * k3.d_central + tsit5_e4() * k4.d_central + tsit5_e5() * k5.d_central + tsit5_e6() * k6.d_central + tsit5_e7() * k7.d_central)
+    let err_periph = dt * (tsit5_e1() * k1.d_periph + tsit5_e2() * k2.d_periph + tsit5_e3() * k3.d_periph + tsit5_e4() * k4.d_periph + tsit5_e5() * k5.d_periph + tsit5_e6() * k6.d_periph + tsit5_e7() * k7.d_periph)
+
+    return PKStepResult {
+        state_new: state_new,
+        err_gut: abs_val(err_gut),
+        err_central: abs_val(err_central),
+        err_periph: abs_val(err_periph)
+    }
+}
+
+// ============================================================================
+// ERROR NORM AND STEP SIZE CONTROL
+// ============================================================================
+
+fn compute_error_norm(
+    err_gut: f64, err_central: f64, err_periph: f64,
+    state_old: PKState, state_new: PKState,
+    rtol: f64, atol: f64
+) -> f64 {
+    // Weighted RMS norm across 3 components
+    let scale_gut = atol + rtol * max_val(abs_val(state_old.gut), abs_val(state_new.gut))
+    let scale_central = atol + rtol * max_val(abs_val(state_old.central), abs_val(state_new.central))
+    let scale_periph = atol + rtol * max_val(abs_val(state_old.periph), abs_val(state_new.periph))
+
+    let e1 = err_gut / scale_gut
+    let e2 = err_central / scale_central
+    let e3 = err_periph / scale_periph
+
+    return sqrt_val((e1*e1 + e2*e2 + e3*e3) / 3.0)
+}
+
+fn optimal_step(dt: f64, err_norm: f64, safety: f64, max_growth: f64, min_shrink: f64) -> f64 {
+    if err_norm <= 0.0 {
+        return dt * max_growth
+    }
+    let factor = safety * fifth_root(1.0 / err_norm)
+    let factor_limited = max_val(min_shrink, min_val(max_growth, factor))
+    return dt * factor_limited
+}
+
+// ============================================================================
+// SOLVER CONFIGURATION
+// ============================================================================
+
+struct SolverConfig {
+    rtol: f64,
+    atol: f64,
+    dt_init: f64,
+    dt_min: f64,
+    dt_max: f64,
+    max_steps: i64,
+    safety: f64,
+    max_growth: f64,
+    min_shrink: f64
+}
+
+fn default_config() -> SolverConfig {
+    return SolverConfig {
+        rtol: 0.0001,
+        atol: 0.0000001,
+        dt_init: 0.1,
+        dt_min: 0.000000000001,
+        dt_max: 10.0,
+        max_steps: 10000,
+        safety: 0.9,
+        max_growth: 10.0,
+        min_shrink: 0.2
+    }
+}
+
+// ============================================================================
+// SOLUTION STRUCTURE
+// ============================================================================
+
+struct PKSolution {
+    success: bool,
+    nsteps: i64,
+    nfeval: i64,
+    nreject: i64,
+    t_final: f64,
+    state_final: PKState
+}
+
+// ============================================================================
+// MAIN SOLVER
+// ============================================================================
+
+fn solve_pk(
+    init_state: PKState,
+    pk_p: PKParams,
+    t_end: f64,
+    cfg: SolverConfig
+) -> PKSolution {
+    let mut state_curr = init_state
+    let mut t_curr = 0.0
+    let mut dt_curr = cfg.dt_init
+    let mut steps = 0
+    let mut evals = 0
+    let mut rejects = 0
+
+    while t_curr < t_end && steps < cfg.max_steps {
+        let dt_use = if t_curr + dt_curr > t_end { t_end - t_curr } else { dt_curr }
+
+        let result = tsit5_step_pk(state_curr, t_curr, dt_use, pk_p)
+        evals = evals + 7
+
+        let err_n = compute_error_norm(
+            result.err_gut, result.err_central, result.err_periph,
+            state_curr, result.state_new,
+            cfg.rtol, cfg.atol
+        )
+
+        if err_n <= 1.0 {
+            t_curr = t_curr + dt_use
+            state_curr = result.state_new
+            steps = steps + 1
+            dt_curr = optimal_step(dt_use, err_n, cfg.safety, cfg.max_growth, cfg.min_shrink)
+        } else {
+            rejects = rejects + 1
+            dt_curr = optimal_step(dt_use, err_n, cfg.safety, cfg.max_growth, cfg.min_shrink)
+        }
+
+        dt_curr = max_val(cfg.dt_min, min_val(cfg.dt_max, dt_curr))
+    }
+
+    let success = t_curr >= t_end - cfg.dt_min
+
+    return PKSolution {
+        success: success,
+        nsteps: steps,
+        nfeval: evals,
+        nreject: rejects,
+        t_final: t_curr,
+        state_final: state_curr
+    }
+}
+
+// ============================================================================
+// TEST
+// ============================================================================
+
+fn main() -> i32 {
+    println("=== Demetrios Tsit5: 3-Compartment PK Model ===")
+    println("")
+    println("Model: Oral dosing with distribution")
+    println("- Gut absorption (ka=1.5/h)")
+    println("- Central elimination (ke=0.1/h, t1/2~7h)")
+    println("- Peripheral distribution (k12=0.3, k21=0.15)")
+    println("- Dose: 500 mg oral")
+    println("")
+
+    let dose = 500.0
+    let init_st = PKState {
+        gut: dose,
+        central: 0.0,
+        periph: 0.0
+    }
+
+    let pk_params = default_pk_params()
+    let solver_cfg = default_config()
+
+    let sol = solve_pk(init_st, pk_params, 24.0, solver_cfg)
+
+    println("Results at t=24h:")
+    println("  Gut amount (mg):")
+    println(sol.state_final.gut)
+    println("  Central amount (mg):")
+    println(sol.state_final.central)
+    println("  Peripheral amount (mg):")
+    println(sol.state_final.periph)
+
+    let total = sol.state_final.gut + sol.state_final.central + sol.state_final.periph
+    let eliminated = dose - total
+    println("  Total remaining (mg):")
+    println(total)
+    println("  Eliminated (mg):")
+    println(eliminated)
+    println("")
+    println("Solver statistics:")
+    println("  Steps taken:")
+    println(sol.nsteps)
+    println("  Function evals:")
+    println(sol.nfeval)
+    println("  Rejected steps:")
+    println(sol.nreject)
+    println("  Success:")
+    println(sol.success)
+    println("")
+
+    // Mass balance check: gut absorption should be nearly complete (ka=1.5, 24h)
+    // Expected: gut ≈ 0, central + periph + eliminated = 500
+    if sol.state_final.gut < 0.01 && sol.success {
+        println("TEST PASSED: Absorption complete, solver converged")
+        return 0
+    } else {
+        println("TEST FAILED")
+        return 1
+    }
+}

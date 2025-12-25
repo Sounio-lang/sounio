@@ -1,0 +1,699 @@
+//! stdlib/epistemic/knowledge.d
+//!
+//! Knowledge<T> - The core epistemic type for Demetrios
+//!
+//! Every value knows its uncertainty. Every computation propagates variance.
+//! Every result carries its provenance.
+//!
+//! This is not a wrapper around T with metadata. This is a fundamental
+//! epistemic primitive that changes how we compute.
+//!
+//! # Philosophy
+//!
+//! Traditional: `let mass = 3.14`
+//! Epistemic:   `let mass: Knowledge<f64> = 3.14 ± 0.01 from "scale_A"`
+//!
+//! The ± is not syntax sugar. It's an assertion about reality.
+//! The variance tells us HOW CERTAIN we are about the value.
+//! The provenance tells us WHERE the certainty came from.
+//!
+//! # Example
+//!
+//! ```demetrios
+//! use epistemic::{Knowledge, BetaConfidence}
+//! use units::{mg, mL}
+//!
+//! let dose: Knowledge<mg> = measure(500.0_mg, variance: 25.0)
+//! let volume: Knowledge<mL> = measure(10.0_mL, variance: 0.1)
+//! let concentration = dose / volume  // Variance auto-propagates
+//!
+//! // P(concentration > 45 mg/mL) computed from posterior
+//! if concentration.prob_gt(45.0) > 0.95 {
+//!     println("Therapeutic range achieved with 95% confidence")
+//! }
+//! ```
+
+use core::{Option, Result}
+use prob::beta::{Beta, beta_new, beta_mean, beta_variance, beta_std, beta_posterior}
+
+// ============================================================================
+// PROVENANCE TYPES
+// ============================================================================
+
+/// Source of knowledge - where did this value come from?
+pub enum Source {
+    /// Direct measurement from instrument
+    Measurement { instrument: string, timestamp: i64 },
+
+    /// Computed from other values
+    Computed { operation: string },
+
+    /// User assertion (not independently verified)
+    Assertion { author: string },
+
+    /// External data source
+    External { source: string, url: string },
+
+    /// Unknown origin
+    Unknown,
+}
+
+/// Single step in the provenance chain
+pub struct ProvenanceStep {
+    /// What operation was performed
+    operation: string,
+
+    /// When (unix timestamp)
+    timestamp: i64,
+
+    /// Confidence decay from this operation
+    decay_factor: f64,
+}
+
+/// Complete provenance chain
+pub struct Provenance {
+    /// Original source
+    source: Source,
+
+    /// Chain of transformations
+    steps: Vec<ProvenanceStep>,
+}
+
+// ============================================================================
+// BETA CONFIDENCE
+// ============================================================================
+
+/// BetaConfidence wraps Beta distribution for epistemic use
+///
+/// Provides the semantic layer on top of raw Beta parameters:
+/// - `concentration()` = how much evidence we have
+/// - `uncertainty()` = how much we don't know
+/// - `needs_exploration()` = should we acquire more data?
+pub struct BetaConfidence {
+    /// Underlying Beta distribution
+    dist: Beta,
+}
+
+impl BetaConfidence {
+    /// Create from raw alpha, beta parameters
+    pub fn new(alpha: f64, b: f64) -> BetaConfidence {
+        BetaConfidence { dist: beta_new(alpha, b) }
+    }
+
+    /// Uniform prior (maximum ignorance)
+    pub fn uniform() -> BetaConfidence {
+        BetaConfidence { dist: Beta { alpha: 1.0, beta: 1.0 } }
+    }
+
+    /// Jeffreys prior (uninformative)
+    pub fn jeffreys() -> BetaConfidence {
+        BetaConfidence { dist: Beta { alpha: 0.5, beta: 0.5 } }
+    }
+
+    /// From success rate and sample size
+    /// e.g., observed 8 successes in 10 trials → from_rate(0.8, 10)
+    pub fn from_rate(rate: f64, n: f64) -> BetaConfidence {
+        let alpha = rate * n + 1.0
+        let b = (1.0 - rate) * n + 1.0
+        BetaConfidence { dist: beta_new(alpha, b) }
+    }
+
+    /// From observations
+    pub fn from_observations(successes: i64, failures: i64) -> BetaConfidence {
+        let prior = Beta { alpha: 1.0, beta: 1.0 }
+        BetaConfidence { dist: beta_posterior(prior, successes, failures) }
+    }
+
+    /// Strong confidence centered at value
+    pub fn strong(center: f64, strength: f64) -> BetaConfidence {
+        let alpha = center * strength + 1.0
+        let b = (1.0 - center) * strength + 1.0
+        BetaConfidence { dist: beta_new(alpha, b) }
+    }
+
+    // Accessors
+
+    /// Mean confidence (point estimate)
+    pub fn mean(self: &BetaConfidence) -> f64 {
+        beta_mean(self.dist)
+    }
+
+    /// Variance (measure of uncertainty about the confidence)
+    pub fn variance(self: &BetaConfidence) -> f64 {
+        beta_variance(self.dist)
+    }
+
+    /// Standard deviation
+    pub fn std(self: &BetaConfidence) -> f64 {
+        beta_std(self.dist)
+    }
+
+    /// Concentration (effective sample size)
+    /// Higher = more evidence backing this confidence
+    pub fn concentration(self: &BetaConfidence) -> f64 {
+        self.dist.alpha + self.dist.beta
+    }
+
+    /// Uncertainty score: inverse of concentration
+    /// Higher = we should explore more
+    pub fn uncertainty(self: &BetaConfidence) -> f64 {
+        1.0 / self.concentration()
+    }
+
+    /// Should we acquire more data?
+    /// Returns true if variance is high (we don't know much)
+    pub fn needs_exploration(self: &BetaConfidence, threshold: f64) -> bool {
+        self.variance() > threshold
+    }
+
+    /// Update with new evidence
+    pub fn update(self: &BetaConfidence, successes: i64, failures: i64) -> BetaConfidence {
+        BetaConfidence { dist: beta_posterior(self.dist, successes, failures) }
+    }
+
+    /// Combine two confidences (independent evidence)
+    /// Result has combined evidence: α_new = α1 + α2 - 1, β_new = β1 + β2 - 1
+    pub fn combine(self: &BetaConfidence, other: &BetaConfidence) -> BetaConfidence {
+        let alpha = self.dist.alpha + other.dist.alpha - 1.0
+        let b = self.dist.beta + other.dist.beta - 1.0
+        BetaConfidence { dist: beta_new(alpha, b) }
+    }
+
+    /// Decay confidence (for propagation through transformations)
+    pub fn decay(self: &BetaConfidence, factor: f64) -> BetaConfidence {
+        // Reduce effective sample size while preserving mean
+        let m = self.mean()
+        let n = self.concentration() * factor
+        BetaConfidence::from_rate(m, n)
+    }
+
+    /// Raw access to alpha
+    pub fn alpha(self: &BetaConfidence) -> f64 {
+        self.dist.alpha
+    }
+
+    /// Raw access to beta
+    pub fn beta_param(self: &BetaConfidence) -> f64 {
+        self.dist.beta
+    }
+}
+
+// ============================================================================
+// KNOWLEDGE<T> - THE CORE EPISTEMIC TYPE
+// ============================================================================
+
+/// Knowledge<T> wraps a value with epistemic metadata
+///
+/// This is THE fundamental type for scientific computing in Demetrios.
+/// Every Knowledge value knows:
+/// - Its point estimate (value)
+/// - Its uncertainty (variance)
+/// - Its credibility (confidence as Beta posterior)
+/// - Its history (provenance chain)
+///
+/// Arithmetic operations propagate variance using the delta method.
+/// Confidence decays through transformations.
+/// Provenance accumulates through the computation graph.
+pub struct Knowledge<T> {
+    /// The point estimate
+    value: T,
+
+    /// Variance (uncertainty in the value)
+    variance: f64,
+
+    /// Confidence as Beta posterior
+    confidence: BetaConfidence,
+
+    /// Where this knowledge came from
+    provenance: Provenance,
+}
+
+impl<T> Knowledge<T> {
+    /// Create new knowledge with full specification
+    pub fn new(
+        value: T,
+        variance: f64,
+        confidence: BetaConfidence,
+        source: Source,
+    ) -> Knowledge<T> {
+        Knowledge {
+            value: value,
+            variance: variance,
+            confidence: confidence,
+            provenance: Provenance { source: source, steps: Vec::new() },
+        }
+    }
+
+    /// Create from measurement (typical lab scenario)
+    pub fn measured(value: T, variance: f64, instrument: string) -> Knowledge<T> {
+        Knowledge {
+            value: value,
+            variance: variance,
+            confidence: BetaConfidence::uniform(),
+            provenance: Provenance {
+                source: Source::Measurement { instrument: instrument, timestamp: 0 },
+                steps: Vec::new(),
+            },
+        }
+    }
+
+    /// Create constant (zero variance, maximum confidence)
+    pub fn constant(value: T) -> Knowledge<T> {
+        Knowledge {
+            value: value,
+            variance: 0.0,
+            confidence: BetaConfidence::strong(0.99, 1000.0),
+            provenance: Provenance {
+                source: Source::Assertion { author: "constant" },
+                steps: Vec::new(),
+            },
+        }
+    }
+
+    /// Create from assertion (user says this is true)
+    pub fn asserted(value: T, variance: f64, author: string) -> Knowledge<T> {
+        Knowledge {
+            value: value,
+            variance: variance,
+            confidence: BetaConfidence::uniform(),
+            provenance: Provenance {
+                source: Source::Assertion { author: author },
+                steps: Vec::new(),
+            },
+        }
+    }
+
+    // Accessors
+
+    /// Get the point estimate
+    pub fn get(self: &Knowledge<T>) -> &T {
+        &self.value
+    }
+
+    /// Get variance
+    pub fn var(self: &Knowledge<T>) -> f64 {
+        self.variance
+    }
+
+    /// Get standard deviation
+    pub fn std(self: &Knowledge<T>) -> f64 {
+        sqrt_f64(self.variance)
+    }
+
+    /// Get confidence
+    pub fn conf(self: &Knowledge<T>) -> &BetaConfidence {
+        &self.confidence
+    }
+
+    /// Get provenance
+    pub fn prov(self: &Knowledge<T>) -> &Provenance {
+        &self.provenance
+    }
+
+    /// Map the inner value while preserving epistemic metadata
+    pub fn map<U, F>(self: Knowledge<T>, f: F, operation: string) -> Knowledge<U>
+    where F: fn(T) -> U
+    {
+        let new_value = f(self.value)
+        let step = ProvenanceStep {
+            operation: operation,
+            timestamp: 0,
+            decay_factor: 0.95,
+        }
+        var new_steps = self.provenance.steps.clone()
+        new_steps.push(step)
+
+        Knowledge {
+            value: new_value,
+            variance: self.variance,  // Note: may need adjustment based on f
+            confidence: self.confidence.decay(0.95),
+            provenance: Provenance {
+                source: self.provenance.source,
+                steps: new_steps,
+            },
+        }
+    }
+
+    /// Add provenance step without changing value
+    pub fn with_provenance(self: Knowledge<T>, operation: string) -> Knowledge<T> {
+        let step = ProvenanceStep {
+            operation: operation,
+            timestamp: 0,
+            decay_factor: 1.0,
+        }
+        var new_steps = self.provenance.steps.clone()
+        new_steps.push(step)
+
+        Knowledge {
+            value: self.value,
+            variance: self.variance,
+            confidence: self.confidence,
+            provenance: Provenance {
+                source: self.provenance.source,
+                steps: new_steps,
+            },
+        }
+    }
+}
+
+// ============================================================================
+// KNOWLEDGE<f64> - ARITHMETIC WITH VARIANCE PROPAGATION
+// ============================================================================
+
+impl Knowledge<f64> {
+    /// Standard deviation
+    pub fn std_dev(self: &Knowledge<f64>) -> f64 {
+        sqrt_f64(self.variance)
+    }
+
+    /// 95% confidence interval (normal approximation)
+    pub fn ci95(self: &Knowledge<f64>) -> (f64, f64) {
+        let z = 1.96
+        let lo = self.value - z * self.std_dev()
+        let hi = self.value + z * self.std_dev()
+        (lo, hi)
+    }
+
+    /// P(X > threshold) using normal approximation
+    pub fn prob_gt(self: &Knowledge<f64>, threshold: f64) -> f64 {
+        if self.variance <= 0.0000001 {
+            if self.value > threshold { return 1.0 }
+            return 0.0
+        }
+        let z = (self.value - threshold) / self.std_dev()
+        // Approximation of Φ(z) using erf
+        0.5 * (1.0 + erf_approx(z / 1.4142135623730951))
+    }
+
+    /// P(X < threshold)
+    pub fn prob_lt(self: &Knowledge<f64>, threshold: f64) -> f64 {
+        1.0 - self.prob_gt(threshold)
+    }
+
+    /// P(lo < X < hi)
+    pub fn prob_between(self: &Knowledge<f64>, lo: f64, hi: f64) -> f64 {
+        self.prob_lt(hi) - self.prob_lt(lo)
+    }
+}
+
+// Arithmetic operators with variance propagation
+
+impl Add for Knowledge<f64> {
+    type Output = Knowledge<f64>
+
+    /// X + Y: Var(X + Y) = Var(X) + Var(Y) for independent X, Y
+    fn add(self: Knowledge<f64>, other: Knowledge<f64>) -> Knowledge<f64> {
+        let new_value = self.value + other.value
+        let new_variance = self.variance + other.variance
+        let new_confidence = self.confidence.combine(&other.confidence)
+
+        let step = ProvenanceStep {
+            operation: "add",
+            timestamp: 0,
+            decay_factor: 0.99,
+        }
+        var new_steps = self.provenance.steps.clone()
+        new_steps.extend(other.provenance.steps.clone())
+        new_steps.push(step)
+
+        Knowledge {
+            value: new_value,
+            variance: new_variance,
+            confidence: new_confidence.decay(0.99),
+            provenance: Provenance {
+                source: Source::Computed { operation: "add" },
+                steps: new_steps,
+            },
+        }
+    }
+}
+
+impl Sub for Knowledge<f64> {
+    type Output = Knowledge<f64>
+
+    /// X - Y: Var(X - Y) = Var(X) + Var(Y) for independent X, Y
+    fn sub(self: Knowledge<f64>, other: Knowledge<f64>) -> Knowledge<f64> {
+        let new_value = self.value - other.value
+        let new_variance = self.variance + other.variance
+        let new_confidence = self.confidence.combine(&other.confidence)
+
+        Knowledge {
+            value: new_value,
+            variance: new_variance,
+            confidence: new_confidence.decay(0.99),
+            provenance: Provenance {
+                source: Source::Computed { operation: "sub" },
+                steps: Vec::new(),
+            },
+        }
+    }
+}
+
+impl Mul for Knowledge<f64> {
+    type Output = Knowledge<f64>
+
+    /// X * Y: Var(XY) ≈ Y²Var(X) + X²Var(Y) (delta method)
+    fn mul(self: Knowledge<f64>, other: Knowledge<f64>) -> Knowledge<f64> {
+        let new_value = self.value * other.value
+        // Delta method for product
+        let new_variance = other.value * other.value * self.variance
+                         + self.value * self.value * other.variance
+        let new_confidence = self.confidence.combine(&other.confidence)
+
+        Knowledge {
+            value: new_value,
+            variance: new_variance,
+            confidence: new_confidence.decay(0.98),
+            provenance: Provenance {
+                source: Source::Computed { operation: "mul" },
+                steps: Vec::new(),
+            },
+        }
+    }
+}
+
+impl Div for Knowledge<f64> {
+    type Output = Knowledge<f64>
+
+    /// X / Y: Var(X/Y) ≈ (1/Y²)Var(X) + (X²/Y⁴)Var(Y) (delta method)
+    fn div(self: Knowledge<f64>, other: Knowledge<f64>) -> Knowledge<f64> {
+        let new_value = self.value / other.value
+        // Delta method for quotient
+        let y2 = other.value * other.value
+        let y4 = y2 * y2
+        let new_variance = self.variance / y2
+                         + self.value * self.value * other.variance / y4
+        let new_confidence = self.confidence.combine(&other.confidence)
+
+        Knowledge {
+            value: new_value,
+            variance: new_variance,
+            confidence: new_confidence.decay(0.97),
+            provenance: Provenance {
+                source: Source::Computed { operation: "div" },
+                steps: Vec::new(),
+            },
+        }
+    }
+}
+
+// Scalar operations
+
+impl Knowledge<f64> {
+    /// Multiply by scalar constant
+    pub fn scale(self: Knowledge<f64>, c: f64) -> Knowledge<f64> {
+        Knowledge {
+            value: self.value * c,
+            variance: self.variance * c * c,  // Var(cX) = c²Var(X)
+            confidence: self.confidence,
+            provenance: self.provenance.with_step("scale"),
+        }
+    }
+
+    /// Add scalar constant
+    pub fn shift(self: Knowledge<f64>, c: f64) -> Knowledge<f64> {
+        Knowledge {
+            value: self.value + c,
+            variance: self.variance,  // Var(X + c) = Var(X)
+            confidence: self.confidence,
+            provenance: self.provenance.with_step("shift"),
+        }
+    }
+
+    /// Square: Var(X²) ≈ 4X²Var(X)
+    pub fn square(self: Knowledge<f64>) -> Knowledge<f64> {
+        Knowledge {
+            value: self.value * self.value,
+            variance: 4.0 * self.value * self.value * self.variance,
+            confidence: self.confidence.decay(0.98),
+            provenance: self.provenance.with_step("square"),
+        }
+    }
+
+    /// Square root: Var(√X) ≈ Var(X)/(4X)
+    pub fn sqrt(self: Knowledge<f64>) -> Knowledge<f64> {
+        let new_value = sqrt_f64(self.value)
+        let new_variance = self.variance / (4.0 * self.value)
+        Knowledge {
+            value: new_value,
+            variance: new_variance,
+            confidence: self.confidence.decay(0.98),
+            provenance: self.provenance.with_step("sqrt"),
+        }
+    }
+
+    /// Exponential: Var(e^X) ≈ e^(2X) Var(X)
+    pub fn exp(self: Knowledge<f64>) -> Knowledge<f64> {
+        let new_value = exp_f64(self.value)
+        let new_variance = exp_f64(2.0 * self.value) * self.variance
+        Knowledge {
+            value: new_value,
+            variance: new_variance,
+            confidence: self.confidence.decay(0.95),
+            provenance: self.provenance.with_step("exp"),
+        }
+    }
+
+    /// Natural log: Var(ln X) ≈ Var(X)/X²
+    pub fn ln(self: Knowledge<f64>) -> Knowledge<f64> {
+        let new_value = ln_f64(self.value)
+        let new_variance = self.variance / (self.value * self.value)
+        Knowledge {
+            value: new_value,
+            variance: new_variance,
+            confidence: self.confidence.decay(0.95),
+            provenance: self.provenance.with_step("ln"),
+        }
+    }
+}
+
+// ============================================================================
+// PROVENANCE HELPERS
+// ============================================================================
+
+impl Provenance {
+    /// Add a step to provenance
+    pub fn with_step(self: Provenance, operation: string) -> Provenance {
+        let step = ProvenanceStep {
+            operation: operation,
+            timestamp: 0,
+            decay_factor: 1.0,
+        }
+        var new_steps = self.steps.clone()
+        new_steps.push(step)
+        Provenance {
+            source: self.source,
+            steps: new_steps,
+        }
+    }
+
+    /// Format provenance as string
+    pub fn to_string(self: &Provenance) -> string {
+        var result = match &self.source {
+            Source::Measurement { instrument, .. } => instrument.clone(),
+            Source::Computed { operation } => operation.clone(),
+            Source::Assertion { author } => author.clone(),
+            Source::External { source, .. } => source.clone(),
+            Source::Unknown => "unknown".to_string(),
+        }
+
+        for step in &self.steps {
+            result = result + " → " + &step.operation
+        }
+
+        result
+    }
+
+    /// Count transformation depth
+    pub fn depth(self: &Provenance) -> i64 {
+        self.steps.len() as i64
+    }
+}
+
+// ============================================================================
+// NUMERIC HELPERS (copied from beta.d for standalone compilation)
+// ============================================================================
+
+fn sqrt_f64(x: f64) -> f64 {
+    if x <= 0.0 { return 0.0 }
+    var y = x
+    y = 0.5 * (y + x / y)
+    y = 0.5 * (y + x / y)
+    y = 0.5 * (y + x / y)
+    y = 0.5 * (y + x / y)
+    y = 0.5 * (y + x / y)
+    y = 0.5 * (y + x / y)
+    y = 0.5 * (y + x / y)
+    y = 0.5 * (y + x / y)
+    y = 0.5 * (y + x / y)
+    y = 0.5 * (y + x / y)
+    return y
+}
+
+fn exp_f64(x: f64) -> f64 {
+    // Taylor series approximation for small x
+    if x > 10.0 { return 22026.465794806718 * exp_f64(x - 10.0) }
+    if x < -10.0 { return 0.00004539992976248485 * exp_f64(x + 10.0) }
+
+    var result = 1.0
+    var term = 1.0
+    var i = 1
+    while i < 20 {
+        term = term * x / (i as f64)
+        result = result + term
+        i = i + 1
+    }
+    return result
+}
+
+fn ln_f64(x: f64) -> f64 {
+    if x <= 0.0 { return 0.0 - 999999.0 }  // -inf approximation
+    if x == 1.0 { return 0.0 }
+
+    // ln(x) = 2 * arctanh((x-1)/(x+1)) for x > 0
+    let y = (x - 1.0) / (x + 1.0)
+    var result = 0.0
+    var term = y
+    var i = 1
+    while i < 30 {
+        result = result + term / (i as f64)
+        term = term * y * y
+        i = i + 2
+    }
+    return 2.0 * result
+}
+
+fn erf_approx(x: f64) -> f64 {
+    // Abramowitz and Stegun approximation
+    let a1 = 0.254829592
+    let a2 = 0.0 - 0.284496736
+    let a3 = 1.421413741
+    let a4 = 0.0 - 1.453152027
+    let a5 = 1.061405429
+    let p = 0.3275911
+
+    let sign = if x < 0.0 { 0.0 - 1.0 } else { 1.0 }
+    let x_abs = if x < 0.0 { 0.0 - x } else { x }
+
+    let t = 1.0 / (1.0 + p * x_abs)
+    let y = 1.0 - (((((a5 * t + a4) * t) + a3) * t + a2) * t + a1) * t * exp_f64(0.0 - x_abs * x_abs)
+
+    return sign * y
+}
+
+// ============================================================================
+// DISPLAY / DEBUG
+// ============================================================================
+
+impl Debug for Knowledge<f64> {
+    fn fmt(self: &Knowledge<f64>, f: &!Formatter) -> Result<unit, FmtError> {
+        f.write_str("Knowledge { value: ")?
+        f.write_f64(self.value)?
+        f.write_str(" ± ")?
+        f.write_f64(self.std_dev())?
+        f.write_str(", confidence: ")?
+        f.write_f64(self.confidence.mean())?
+        f.write_str(" }")?
+        Result::Ok(())
+    }
+}

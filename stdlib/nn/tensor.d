@@ -1,0 +1,432 @@
+// tensor.d - Basic tensor/vector types for neural networks
+//
+// Provides simple fixed-size vector operations needed for ML:
+// - Tensor8: 8-element vector (common for small feature vectors)
+// - Tensor16: 16-element vector (common for hidden layers)
+// - Tensor32: 32-element vector (for larger layers)
+//
+// Operations: add, scale, dot product, hadamard product, norm
+//
+// These are stack-allocated for performance, no dynamic allocation.
+
+// ============================================================================
+// MATH HELPERS
+// ============================================================================
+
+fn abs_val(x: f64) -> f64 {
+    if x < 0.0 {
+        return 0.0 - x
+    }
+    return x
+}
+
+fn sqrt_val(x: f64) -> f64 {
+    if x <= 0.0 { return 0.0 }
+    let mut result = x
+    result = 0.5 * (result + x / result)
+    result = 0.5 * (result + x / result)
+    result = 0.5 * (result + x / result)
+    result = 0.5 * (result + x / result)
+    result = 0.5 * (result + x / result)
+    result = 0.5 * (result + x / result)
+    result = 0.5 * (result + x / result)
+    result = 0.5 * (result + x / result)
+    result = 0.5 * (result + x / result)
+    result = 0.5 * (result + x / result)
+    return result
+}
+
+fn max_val(a: f64, b: f64) -> f64 {
+    if a > b { return a }
+    return b
+}
+
+fn min_val(a: f64, b: f64) -> f64 {
+    if a < b { return a }
+    return b
+}
+
+// ============================================================================
+// TENSOR8 - 8-ELEMENT VECTOR
+// ============================================================================
+
+struct Tensor8 {
+    e0: f64, e1: f64, e2: f64, e3: f64,
+    e4: f64, e5: f64, e6: f64, e7: f64
+}
+
+fn tensor8_new(v0: f64, v1: f64, v2: f64, v3: f64, v4: f64, v5: f64, v6: f64, v7: f64) -> Tensor8 {
+    return Tensor8 { e0: v0, e1: v1, e2: v2, e3: v3, e4: v4, e5: v5, e6: v6, e7: v7 }
+}
+
+fn tensor8_zero() -> Tensor8 {
+    return Tensor8 { e0: 0.0, e1: 0.0, e2: 0.0, e3: 0.0, e4: 0.0, e5: 0.0, e6: 0.0, e7: 0.0 }
+}
+
+fn tensor8_ones() -> Tensor8 {
+    return Tensor8 { e0: 1.0, e1: 1.0, e2: 1.0, e3: 1.0, e4: 1.0, e5: 1.0, e6: 1.0, e7: 1.0 }
+}
+
+fn tensor8_fill(val: f64) -> Tensor8 {
+    return Tensor8 { e0: val, e1: val, e2: val, e3: val, e4: val, e5: val, e6: val, e7: val }
+}
+
+fn tensor8_add(a: Tensor8, b: Tensor8) -> Tensor8 {
+    return Tensor8 {
+        e0: a.e0 + b.e0, e1: a.e1 + b.e1, e2: a.e2 + b.e2, e3: a.e3 + b.e3,
+        e4: a.e4 + b.e4, e5: a.e5 + b.e5, e6: a.e6 + b.e6, e7: a.e7 + b.e7
+    }
+}
+
+fn tensor8_sub(a: Tensor8, b: Tensor8) -> Tensor8 {
+    return Tensor8 {
+        e0: a.e0 - b.e0, e1: a.e1 - b.e1, e2: a.e2 - b.e2, e3: a.e3 - b.e3,
+        e4: a.e4 - b.e4, e5: a.e5 - b.e5, e6: a.e6 - b.e6, e7: a.e7 - b.e7
+    }
+}
+
+fn tensor8_scale(vec: Tensor8, scalar: f64) -> Tensor8 {
+    return Tensor8 {
+        e0: vec.e0 * scalar, e1: vec.e1 * scalar, e2: vec.e2 * scalar, e3: vec.e3 * scalar,
+        e4: vec.e4 * scalar, e5: vec.e5 * scalar, e6: vec.e6 * scalar, e7: vec.e7 * scalar
+    }
+}
+
+fn tensor8_neg(vec: Tensor8) -> Tensor8 {
+    return Tensor8 {
+        e0: 0.0 - vec.e0, e1: 0.0 - vec.e1, e2: 0.0 - vec.e2, e3: 0.0 - vec.e3,
+        e4: 0.0 - vec.e4, e5: 0.0 - vec.e5, e6: 0.0 - vec.e6, e7: 0.0 - vec.e7
+    }
+}
+
+fn tensor8_dot(a: Tensor8, b: Tensor8) -> f64 {
+    return a.e0 * b.e0 + a.e1 * b.e1 + a.e2 * b.e2 + a.e3 * b.e3
+         + a.e4 * b.e4 + a.e5 * b.e5 + a.e6 * b.e6 + a.e7 * b.e7
+}
+
+fn tensor8_hadamard(a: Tensor8, b: Tensor8) -> Tensor8 {
+    return Tensor8 {
+        e0: a.e0 * b.e0, e1: a.e1 * b.e1, e2: a.e2 * b.e2, e3: a.e3 * b.e3,
+        e4: a.e4 * b.e4, e5: a.e5 * b.e5, e6: a.e6 * b.e6, e7: a.e7 * b.e7
+    }
+}
+
+fn tensor8_norm_sq(vec: Tensor8) -> f64 {
+    return tensor8_dot(vec, vec)
+}
+
+fn tensor8_norm(vec: Tensor8) -> f64 {
+    return sqrt_val(tensor8_norm_sq(vec))
+}
+
+fn tensor8_sum(vec: Tensor8) -> f64 {
+    return vec.e0 + vec.e1 + vec.e2 + vec.e3 + vec.e4 + vec.e5 + vec.e6 + vec.e7
+}
+
+fn tensor8_mean(vec: Tensor8) -> f64 {
+    return tensor8_sum(vec) / 8.0
+}
+
+fn tensor8_max(vec: Tensor8) -> f64 {
+    let m01 = max_val(vec.e0, vec.e1)
+    let m23 = max_val(vec.e2, vec.e3)
+    let m45 = max_val(vec.e4, vec.e5)
+    let m67 = max_val(vec.e6, vec.e7)
+    let m03 = max_val(m01, m23)
+    let m47 = max_val(m45, m67)
+    return max_val(m03, m47)
+}
+
+fn tensor8_min(vec: Tensor8) -> f64 {
+    let m01 = min_val(vec.e0, vec.e1)
+    let m23 = min_val(vec.e2, vec.e3)
+    let m45 = min_val(vec.e4, vec.e5)
+    let m67 = min_val(vec.e6, vec.e7)
+    let m03 = min_val(m01, m23)
+    let m47 = min_val(m45, m67)
+    return min_val(m03, m47)
+}
+
+// ============================================================================
+// TENSOR16 - 16-ELEMENT VECTOR
+// ============================================================================
+
+struct Tensor16 {
+    e0: f64, e1: f64, e2: f64, e3: f64, e4: f64, e5: f64, e6: f64, e7: f64,
+    e8: f64, e9: f64, e10: f64, e11: f64, e12: f64, e13: f64, e14: f64, e15: f64
+}
+
+fn tensor16_zero() -> Tensor16 {
+    return Tensor16 {
+        e0: 0.0, e1: 0.0, e2: 0.0, e3: 0.0, e4: 0.0, e5: 0.0, e6: 0.0, e7: 0.0,
+        e8: 0.0, e9: 0.0, e10: 0.0, e11: 0.0, e12: 0.0, e13: 0.0, e14: 0.0, e15: 0.0
+    }
+}
+
+fn tensor16_ones() -> Tensor16 {
+    return Tensor16 {
+        e0: 1.0, e1: 1.0, e2: 1.0, e3: 1.0, e4: 1.0, e5: 1.0, e6: 1.0, e7: 1.0,
+        e8: 1.0, e9: 1.0, e10: 1.0, e11: 1.0, e12: 1.0, e13: 1.0, e14: 1.0, e15: 1.0
+    }
+}
+
+fn tensor16_fill(val: f64) -> Tensor16 {
+    return Tensor16 {
+        e0: val, e1: val, e2: val, e3: val, e4: val, e5: val, e6: val, e7: val,
+        e8: val, e9: val, e10: val, e11: val, e12: val, e13: val, e14: val, e15: val
+    }
+}
+
+fn tensor16_add(a: Tensor16, b: Tensor16) -> Tensor16 {
+    return Tensor16 {
+        e0: a.e0 + b.e0, e1: a.e1 + b.e1, e2: a.e2 + b.e2, e3: a.e3 + b.e3,
+        e4: a.e4 + b.e4, e5: a.e5 + b.e5, e6: a.e6 + b.e6, e7: a.e7 + b.e7,
+        e8: a.e8 + b.e8, e9: a.e9 + b.e9, e10: a.e10 + b.e10, e11: a.e11 + b.e11,
+        e12: a.e12 + b.e12, e13: a.e13 + b.e13, e14: a.e14 + b.e14, e15: a.e15 + b.e15
+    }
+}
+
+fn tensor16_sub(a: Tensor16, b: Tensor16) -> Tensor16 {
+    return Tensor16 {
+        e0: a.e0 - b.e0, e1: a.e1 - b.e1, e2: a.e2 - b.e2, e3: a.e3 - b.e3,
+        e4: a.e4 - b.e4, e5: a.e5 - b.e5, e6: a.e6 - b.e6, e7: a.e7 - b.e7,
+        e8: a.e8 - b.e8, e9: a.e9 - b.e9, e10: a.e10 - b.e10, e11: a.e11 - b.e11,
+        e12: a.e12 - b.e12, e13: a.e13 - b.e13, e14: a.e14 - b.e14, e15: a.e15 - b.e15
+    }
+}
+
+fn tensor16_scale(vec: Tensor16, scalar: f64) -> Tensor16 {
+    return Tensor16 {
+        e0: vec.e0 * scalar, e1: vec.e1 * scalar, e2: vec.e2 * scalar, e3: vec.e3 * scalar,
+        e4: vec.e4 * scalar, e5: vec.e5 * scalar, e6: vec.e6 * scalar, e7: vec.e7 * scalar,
+        e8: vec.e8 * scalar, e9: vec.e9 * scalar, e10: vec.e10 * scalar, e11: vec.e11 * scalar,
+        e12: vec.e12 * scalar, e13: vec.e13 * scalar, e14: vec.e14 * scalar, e15: vec.e15 * scalar
+    }
+}
+
+fn tensor16_neg(vec: Tensor16) -> Tensor16 {
+    return Tensor16 {
+        e0: 0.0 - vec.e0, e1: 0.0 - vec.e1, e2: 0.0 - vec.e2, e3: 0.0 - vec.e3,
+        e4: 0.0 - vec.e4, e5: 0.0 - vec.e5, e6: 0.0 - vec.e6, e7: 0.0 - vec.e7,
+        e8: 0.0 - vec.e8, e9: 0.0 - vec.e9, e10: 0.0 - vec.e10, e11: 0.0 - vec.e11,
+        e12: 0.0 - vec.e12, e13: 0.0 - vec.e13, e14: 0.0 - vec.e14, e15: 0.0 - vec.e15
+    }
+}
+
+fn tensor16_dot(a: Tensor16, b: Tensor16) -> f64 {
+    return a.e0 * b.e0 + a.e1 * b.e1 + a.e2 * b.e2 + a.e3 * b.e3
+         + a.e4 * b.e4 + a.e5 * b.e5 + a.e6 * b.e6 + a.e7 * b.e7
+         + a.e8 * b.e8 + a.e9 * b.e9 + a.e10 * b.e10 + a.e11 * b.e11
+         + a.e12 * b.e12 + a.e13 * b.e13 + a.e14 * b.e14 + a.e15 * b.e15
+}
+
+fn tensor16_hadamard(a: Tensor16, b: Tensor16) -> Tensor16 {
+    return Tensor16 {
+        e0: a.e0 * b.e0, e1: a.e1 * b.e1, e2: a.e2 * b.e2, e3: a.e3 * b.e3,
+        e4: a.e4 * b.e4, e5: a.e5 * b.e5, e6: a.e6 * b.e6, e7: a.e7 * b.e7,
+        e8: a.e8 * b.e8, e9: a.e9 * b.e9, e10: a.e10 * b.e10, e11: a.e11 * b.e11,
+        e12: a.e12 * b.e12, e13: a.e13 * b.e13, e14: a.e14 * b.e14, e15: a.e15 * b.e15
+    }
+}
+
+fn tensor16_norm_sq(vec: Tensor16) -> f64 {
+    return tensor16_dot(vec, vec)
+}
+
+fn tensor16_norm(vec: Tensor16) -> f64 {
+    return sqrt_val(tensor16_norm_sq(vec))
+}
+
+fn tensor16_sum(vec: Tensor16) -> f64 {
+    return vec.e0 + vec.e1 + vec.e2 + vec.e3 + vec.e4 + vec.e5 + vec.e6 + vec.e7
+         + vec.e8 + vec.e9 + vec.e10 + vec.e11 + vec.e12 + vec.e13 + vec.e14 + vec.e15
+}
+
+fn tensor16_mean(vec: Tensor16) -> f64 {
+    return tensor16_sum(vec) / 16.0
+}
+
+// ============================================================================
+// TENSOR32 - 32-ELEMENT VECTOR
+// ============================================================================
+
+struct Tensor32 {
+    e0: f64, e1: f64, e2: f64, e3: f64, e4: f64, e5: f64, e6: f64, e7: f64,
+    e8: f64, e9: f64, e10: f64, e11: f64, e12: f64, e13: f64, e14: f64, e15: f64,
+    e16: f64, e17: f64, e18: f64, e19: f64, e20: f64, e21: f64, e22: f64, e23: f64,
+    e24: f64, e25: f64, e26: f64, e27: f64, e28: f64, e29: f64, e30: f64, e31: f64
+}
+
+fn tensor32_zero() -> Tensor32 {
+    return Tensor32 {
+        e0: 0.0, e1: 0.0, e2: 0.0, e3: 0.0, e4: 0.0, e5: 0.0, e6: 0.0, e7: 0.0,
+        e8: 0.0, e9: 0.0, e10: 0.0, e11: 0.0, e12: 0.0, e13: 0.0, e14: 0.0, e15: 0.0,
+        e16: 0.0, e17: 0.0, e18: 0.0, e19: 0.0, e20: 0.0, e21: 0.0, e22: 0.0, e23: 0.0,
+        e24: 0.0, e25: 0.0, e26: 0.0, e27: 0.0, e28: 0.0, e29: 0.0, e30: 0.0, e31: 0.0
+    }
+}
+
+fn tensor32_ones() -> Tensor32 {
+    return Tensor32 {
+        e0: 1.0, e1: 1.0, e2: 1.0, e3: 1.0, e4: 1.0, e5: 1.0, e6: 1.0, e7: 1.0,
+        e8: 1.0, e9: 1.0, e10: 1.0, e11: 1.0, e12: 1.0, e13: 1.0, e14: 1.0, e15: 1.0,
+        e16: 1.0, e17: 1.0, e18: 1.0, e19: 1.0, e20: 1.0, e21: 1.0, e22: 1.0, e23: 1.0,
+        e24: 1.0, e25: 1.0, e26: 1.0, e27: 1.0, e28: 1.0, e29: 1.0, e30: 1.0, e31: 1.0
+    }
+}
+
+fn tensor32_add(a: Tensor32, b: Tensor32) -> Tensor32 {
+    return Tensor32 {
+        e0: a.e0 + b.e0, e1: a.e1 + b.e1, e2: a.e2 + b.e2, e3: a.e3 + b.e3,
+        e4: a.e4 + b.e4, e5: a.e5 + b.e5, e6: a.e6 + b.e6, e7: a.e7 + b.e7,
+        e8: a.e8 + b.e8, e9: a.e9 + b.e9, e10: a.e10 + b.e10, e11: a.e11 + b.e11,
+        e12: a.e12 + b.e12, e13: a.e13 + b.e13, e14: a.e14 + b.e14, e15: a.e15 + b.e15,
+        e16: a.e16 + b.e16, e17: a.e17 + b.e17, e18: a.e18 + b.e18, e19: a.e19 + b.e19,
+        e20: a.e20 + b.e20, e21: a.e21 + b.e21, e22: a.e22 + b.e22, e23: a.e23 + b.e23,
+        e24: a.e24 + b.e24, e25: a.e25 + b.e25, e26: a.e26 + b.e26, e27: a.e27 + b.e27,
+        e28: a.e28 + b.e28, e29: a.e29 + b.e29, e30: a.e30 + b.e30, e31: a.e31 + b.e31
+    }
+}
+
+fn tensor32_scale(vec: Tensor32, scalar: f64) -> Tensor32 {
+    return Tensor32 {
+        e0: vec.e0 * scalar, e1: vec.e1 * scalar, e2: vec.e2 * scalar, e3: vec.e3 * scalar,
+        e4: vec.e4 * scalar, e5: vec.e5 * scalar, e6: vec.e6 * scalar, e7: vec.e7 * scalar,
+        e8: vec.e8 * scalar, e9: vec.e9 * scalar, e10: vec.e10 * scalar, e11: vec.e11 * scalar,
+        e12: vec.e12 * scalar, e13: vec.e13 * scalar, e14: vec.e14 * scalar, e15: vec.e15 * scalar,
+        e16: vec.e16 * scalar, e17: vec.e17 * scalar, e18: vec.e18 * scalar, e19: vec.e19 * scalar,
+        e20: vec.e20 * scalar, e21: vec.e21 * scalar, e22: vec.e22 * scalar, e23: vec.e23 * scalar,
+        e24: vec.e24 * scalar, e25: vec.e25 * scalar, e26: vec.e26 * scalar, e27: vec.e27 * scalar,
+        e28: vec.e28 * scalar, e29: vec.e29 * scalar, e30: vec.e30 * scalar, e31: vec.e31 * scalar
+    }
+}
+
+fn tensor32_dot(a: Tensor32, b: Tensor32) -> f64 {
+    let sum0 = a.e0 * b.e0 + a.e1 * b.e1 + a.e2 * b.e2 + a.e3 * b.e3
+    let sum1 = a.e4 * b.e4 + a.e5 * b.e5 + a.e6 * b.e6 + a.e7 * b.e7
+    let sum2 = a.e8 * b.e8 + a.e9 * b.e9 + a.e10 * b.e10 + a.e11 * b.e11
+    let sum3 = a.e12 * b.e12 + a.e13 * b.e13 + a.e14 * b.e14 + a.e15 * b.e15
+    let sum4 = a.e16 * b.e16 + a.e17 * b.e17 + a.e18 * b.e18 + a.e19 * b.e19
+    let sum5 = a.e20 * b.e20 + a.e21 * b.e21 + a.e22 * b.e22 + a.e23 * b.e23
+    let sum6 = a.e24 * b.e24 + a.e25 * b.e25 + a.e26 * b.e26 + a.e27 * b.e27
+    let sum7 = a.e28 * b.e28 + a.e29 * b.e29 + a.e30 * b.e30 + a.e31 * b.e31
+    return sum0 + sum1 + sum2 + sum3 + sum4 + sum5 + sum6 + sum7
+}
+
+fn tensor32_norm(vec: Tensor32) -> f64 {
+    return sqrt_val(tensor32_dot(vec, vec))
+}
+
+fn tensor32_sum(vec: Tensor32) -> f64 {
+    let s0 = vec.e0 + vec.e1 + vec.e2 + vec.e3 + vec.e4 + vec.e5 + vec.e6 + vec.e7
+    let s1 = vec.e8 + vec.e9 + vec.e10 + vec.e11 + vec.e12 + vec.e13 + vec.e14 + vec.e15
+    let s2 = vec.e16 + vec.e17 + vec.e18 + vec.e19 + vec.e20 + vec.e21 + vec.e22 + vec.e23
+    let s3 = vec.e24 + vec.e25 + vec.e26 + vec.e27 + vec.e28 + vec.e29 + vec.e30 + vec.e31
+    return s0 + s1 + s2 + s3
+}
+
+// ============================================================================
+// TESTS
+// ============================================================================
+
+fn main() -> i32 {
+    println("=== Demetrios Tensor Types Test ===")
+    println("")
+
+    // Test Tensor8
+    println("Testing Tensor8:")
+    let t8a = tensor8_new(1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0)
+    let t8b = tensor8_new(8.0, 7.0, 6.0, 5.0, 4.0, 3.0, 2.0, 1.0)
+
+    let t8_sum = tensor8_add(t8a, t8b)
+    println("  t8a + t8b (first element, should be 9.0): ")
+    println(t8_sum.e0)
+
+    let t8_dot = tensor8_dot(t8a, t8b)
+    println("  t8a . t8b (should be 120.0): ")
+    println(t8_dot)
+    // Dot: 1*8 + 2*7 + 3*6 + 4*5 + 5*4 + 6*3 + 7*2 + 8*1
+    //    = 8 + 14 + 18 + 20 + 20 + 18 + 14 + 8 = 120
+
+    let t8_scaled = tensor8_scale(t8a, 2.0)
+    println("  2 * t8a (first element, should be 2.0): ")
+    println(t8_scaled.e0)
+
+    let t8_norm = tensor8_norm(t8a)
+    println("  |t8a| (should be ~14.2829): ")
+    println(t8_norm)
+    // Norm: sqrt(1 + 4 + 9 + 16 + 25 + 36 + 49 + 64) = sqrt(204) ≈ 14.2829
+
+    let t8_total = tensor8_sum(t8a)
+    println("  sum(t8a) (should be 36.0): ")
+    println(t8_total)
+    println("")
+
+    // Test Tensor16
+    println("Testing Tensor16:")
+    let t16a = tensor16_ones()
+    let t16b = tensor16_fill(2.0)
+
+    let t16_sum = tensor16_add(t16a, t16b)
+    println("  ones + fill(2.0) (first element, should be 3.0): ")
+    println(t16_sum.e0)
+
+    let t16_dot = tensor16_dot(t16a, t16b)
+    println("  ones . fill(2.0) (should be 32.0): ")
+    println(t16_dot)
+
+    let t16_total = tensor16_sum(t16a)
+    println("  sum(ones) (should be 16.0): ")
+    println(t16_total)
+
+    let t16_avg = tensor16_mean(t16a)
+    println("  mean(ones) (should be 1.0): ")
+    println(t16_avg)
+    println("")
+
+    // Test Tensor32
+    println("Testing Tensor32:")
+    let t32a = tensor32_ones()
+    let t32_scaled = tensor32_scale(t32a, 3.0)
+
+    println("  3 * ones (first element, should be 3.0): ")
+    println(t32_scaled.e0)
+
+    let t32_dot = tensor32_dot(t32a, t32_scaled)
+    println("  ones . (3*ones) (should be 96.0): ")
+    println(t32_dot)
+
+    let t32_total = tensor32_sum(t32a)
+    println("  sum(ones) (should be 32.0): ")
+    println(t32_total)
+    println("")
+
+    // Verify expected values
+    let t8_dot_expected = 120.0
+    let t8_dot_err = abs_val(t8_dot - t8_dot_expected)
+
+    let t8_sum_expected = 36.0
+    let t8_sum_err = abs_val(t8_total - t8_sum_expected)
+
+    let t16_dot_expected = 32.0
+    let t16_dot_err = abs_val(t16_dot - t16_dot_expected)
+
+    let t32_dot_expected = 96.0
+    let t32_dot_err = abs_val(t32_dot - t32_dot_expected)
+
+    if t8_dot_err < 0.0001 && t8_sum_err < 0.0001 && t16_dot_err < 0.0001 && t32_dot_err < 0.0001 {
+        println("TEST PASSED: All tensor operations correct")
+        return 0
+    } else {
+        println("TEST FAILED: Tensor operation errors")
+        println("  t8_dot_err = ")
+        println(t8_dot_err)
+        println("  t8_sum_err = ")
+        println(t8_sum_err)
+        println("  t16_dot_err = ")
+        println(t16_dot_err)
+        println("  t32_dot_err = ")
+        println(t32_dot_err)
+        return 1
+    }
+}

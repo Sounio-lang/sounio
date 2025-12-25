@@ -1,0 +1,1418 @@
+/// epistemic::pde — Epistemic Partial Differential Equation Solvers
+///
+/// Production-grade PDE solvers with uncertainty quantification:
+/// - **Finite Difference Methods**: Forward, backward, Crank-Nicolson with truncation error
+/// - **Method of Lines (MOL)**: Convert PDEs to ODE systems for time integration
+/// - **Spectral Methods**: Fourier and Chebyshev with aliasing error bounds
+/// - **Boundary Conditions**: Dirichlet, Neumann, periodic, Robin
+/// - **Error Propagation**: Spatial discretization + temporal + boundary errors
+///
+/// # Philosophy
+///
+/// PDEs introduce multiple sources of uncertainty:
+/// - Spatial discretization error (mesh-dependent)
+/// - Temporal discretization error (time-step dependent)
+/// - Boundary condition uncertainty
+/// - Initial condition uncertainty
+/// - Parameter uncertainty in coefficients
+///
+/// We track all sources and propagate them through the solution.
+///
+/// # Quick Start
+///
+/// ```demetrios
+/// use std::epistemic::pde::{Grid1D, HeatEquation1D, solve_heat_1d}
+///
+/// // Define 1D heat equation: u_t = alpha * u_xx
+/// let alpha = Knowledge::from_measurement(0.01, 0.001)  // Diffusivity with uncertainty
+/// let grid = grid_1d(0.0, 1.0, 100)  // 100 points from 0 to 1
+///
+/// // Initial condition with uncertainty
+/// fn initial(x: f64) -> Knowledge<f64> {
+///     Knowledge::exact(sin(3.14159 * x))
+/// }
+///
+/// // Solve
+/// let solution = solve_heat_1d(grid, alpha, initial, 0.0, 1.0, 0.001)
+/// // solution.values carries full uncertainty from all sources
+/// ```
+
+use std::epistemic::knowledge::{Knowledge, Confidence, Provenance}
+use std::epistemic::linalg::{EVector, EMatrix, evec_new, evec_zeros, emat_zeros, emat_solve}
+use std::epistemic::ode::{ODESystem, ODESolution, solve_ivp, SolverOptions}
+
+// ============================================================================
+// Grid Types
+// ============================================================================
+
+/// 1D uniform grid
+struct Grid1D {
+    x_min: f64,
+    x_max: f64,
+    n_points: i32,
+    dx: f64,
+    points: [f64],
+}
+
+/// 2D uniform grid
+struct Grid2D {
+    x_min: f64,
+    x_max: f64,
+    y_min: f64,
+    y_max: f64,
+    nx: i32,
+    ny: i32,
+    dx: f64,
+    dy: f64,
+    x_points: [f64],
+    y_points: [f64],
+}
+
+/// 3D uniform grid
+struct Grid3D {
+    x_min: f64,
+    x_max: f64,
+    y_min: f64,
+    y_max: f64,
+    z_min: f64,
+    z_max: f64,
+    nx: i32,
+    ny: i32,
+    nz: i32,
+    dx: f64,
+    dy: f64,
+    dz: f64,
+}
+
+/// Non-uniform grid with variable spacing
+struct AdaptiveGrid1D {
+    points: [f64],
+    spacing: [f64],  // dx[i] = points[i+1] - points[i]
+    n_points: i32,
+}
+
+// ============================================================================
+// Boundary Condition Types
+// ============================================================================
+
+/// Boundary condition specification
+enum BoundaryCondition {
+    /// u = value at boundary
+    Dirichlet(Knowledge<f64>),
+    /// du/dn = value at boundary (normal derivative)
+    Neumann(Knowledge<f64>),
+    /// Periodic: u(left) = u(right)
+    Periodic,
+    /// a*u + b*du/dn = c (Robin/mixed)
+    Robin(Knowledge<f64>, Knowledge<f64>, Knowledge<f64>),
+    /// Open boundary (extrapolation)
+    Open,
+}
+
+/// Boundary conditions for 1D domain
+struct BC1D {
+    left: BoundaryCondition,
+    right: BoundaryCondition,
+}
+
+/// Boundary conditions for 2D domain
+struct BC2D {
+    left: BoundaryCondition,
+    right: BoundaryCondition,
+    bottom: BoundaryCondition,
+    top: BoundaryCondition,
+}
+
+// ============================================================================
+// PDE Solution Types
+// ============================================================================
+
+/// Solution field on 1D grid
+struct Field1D {
+    grid: Grid1D,
+    values: [Knowledge<f64>],     // Solution at each grid point
+    time: f64,                     // Current time
+    truncation_error: f64,         // Spatial truncation error estimate
+    temporal_error: f64,           // Temporal error estimate
+}
+
+/// Solution field on 2D grid
+struct Field2D {
+    grid: Grid2D,
+    values: [[Knowledge<f64>]],   // values[i][j] at (x_i, y_j)
+    time: f64,
+    truncation_error: f64,
+    temporal_error: f64,
+}
+
+/// Time history of 1D solution
+struct Solution1D {
+    times: [f64],
+    fields: [Field1D],
+    total_spatial_error: Knowledge<f64>,
+    total_temporal_error: Knowledge<f64>,
+    stability_estimate: f64,       // CFL or similar
+}
+
+/// Time history of 2D solution
+struct Solution2D {
+    times: [f64],
+    fields: [Field2D],
+    total_spatial_error: Knowledge<f64>,
+    total_temporal_error: Knowledge<f64>,
+    stability_estimate: f64,
+}
+
+// ============================================================================
+// Grid Constructors
+// ============================================================================
+
+/// Create uniform 1D grid
+fn grid_1d(x_min: f64, x_max: f64, n_points: i32) -> Grid1D with Alloc {
+    let dx = (x_max - x_min) / (n_points - 1) as f64
+    var points: [f64] = []
+
+    for i in 0..n_points {
+        points = points ++ [x_min + i as f64 * dx]
+    }
+
+    Grid1D {
+        x_min: x_min,
+        x_max: x_max,
+        n_points: n_points,
+        dx: dx,
+        points: points,
+    }
+}
+
+/// Create uniform 2D grid
+fn grid_2d(x_min: f64, x_max: f64, nx: i32, y_min: f64, y_max: f64, ny: i32) -> Grid2D with Alloc {
+    let dx = (x_max - x_min) / (nx - 1) as f64
+    let dy = (y_max - y_min) / (ny - 1) as f64
+
+    var x_points: [f64] = []
+    var y_points: [f64] = []
+
+    for i in 0..nx {
+        x_points = x_points ++ [x_min + i as f64 * dx]
+    }
+    for j in 0..ny {
+        y_points = y_points ++ [y_min + j as f64 * dy]
+    }
+
+    Grid2D {
+        x_min: x_min,
+        x_max: x_max,
+        y_min: y_min,
+        y_max: y_max,
+        nx: nx,
+        ny: ny,
+        dx: dx,
+        dy: dy,
+        x_points: x_points,
+        y_points: y_points,
+    }
+}
+
+/// Create adaptive grid with refinement near endpoints
+fn adaptive_grid_1d(x_min: f64, x_max: f64, n_points: i32, refinement: f64) -> AdaptiveGrid1D with Alloc {
+    var points: [f64] = []
+    var spacing: [f64] = []
+
+    // Use hyperbolic tangent stretching
+    for i in 0..n_points {
+        let xi = i as f64 / (n_points - 1) as f64
+        // Transform: cluster near boundaries
+        let stretched = 0.5 * (1.0 + tanh(refinement * (2.0 * xi - 1.0)) / tanh(refinement))
+        points = points ++ [x_min + stretched * (x_max - x_min)]
+    }
+
+    for i in 0..(n_points - 1) {
+        spacing = spacing ++ [points[i + 1] - points[i]]
+    }
+
+    AdaptiveGrid1D {
+        points: points,
+        spacing: spacing,
+        n_points: n_points,
+    }
+}
+
+// ============================================================================
+// Finite Difference Operators
+// ============================================================================
+
+/// Differentiation scheme
+enum DiffScheme {
+    Forward,       // O(dx)
+    Backward,      // O(dx)
+    Central,       // O(dx^2)
+    Compact4th,    // O(dx^4) compact scheme
+}
+
+/// First derivative using specified scheme
+fn diff_1(u: &[Knowledge<f64>], dx: f64, scheme: DiffScheme, bc: &BC1D) -> [Knowledge<f64>] with Alloc {
+    let n = len(u) as i32
+    var result: [Knowledge<f64>] = []
+
+    match scheme {
+        DiffScheme::Forward => {
+            for i in 0..(n - 1) {
+                let du = (u[i + 1].value - u[i].value) / dx
+                let var = (u[i + 1].variance + u[i].variance) / (dx * dx)
+                let trunc_err = dx / 2.0  // O(dx) truncation error
+                result = result ++ [Knowledge {
+                    value: du,
+                    variance: var + trunc_err * trunc_err,
+                    confidence: combine_confidence(u[i].confidence, u[i + 1].confidence),
+                    provenance: Provenance::FiniteDifference { scheme: "forward", order: 1 },
+                }]
+            }
+            // Boundary handling
+            result = result ++ [apply_bc_derivative(&bc.right, u[n - 1], u[n - 2], dx)]
+        },
+        DiffScheme::Backward => {
+            // Left boundary
+            result = result ++ [apply_bc_derivative(&bc.left, u[0], u[1], dx)]
+            for i in 1..n {
+                let du = (u[i].value - u[i - 1].value) / dx
+                let var = (u[i].variance + u[i - 1].variance) / (dx * dx)
+                let trunc_err = dx / 2.0
+                result = result ++ [Knowledge {
+                    value: du,
+                    variance: var + trunc_err * trunc_err,
+                    confidence: combine_confidence(u[i].confidence, u[i - 1].confidence),
+                    provenance: Provenance::FiniteDifference { scheme: "backward", order: 1 },
+                }]
+            }
+        },
+        DiffScheme::Central => {
+            // Left boundary: use forward
+            result = result ++ [Knowledge {
+                value: (-3.0 * u[0].value + 4.0 * u[1].value - u[2].value) / (2.0 * dx),
+                variance: (9.0 * u[0].variance + 16.0 * u[1].variance + u[2].variance) / (4.0 * dx * dx),
+                confidence: u[0].confidence,
+                provenance: Provenance::FiniteDifference { scheme: "central-biased", order: 2 },
+            }]
+
+            // Interior: central difference
+            for i in 1..(n - 1) {
+                let du = (u[i + 1].value - u[i - 1].value) / (2.0 * dx)
+                let var = (u[i + 1].variance + u[i - 1].variance) / (4.0 * dx * dx)
+                let trunc_err = dx * dx / 6.0  // O(dx^2) truncation error
+                result = result ++ [Knowledge {
+                    value: du,
+                    variance: var + trunc_err * trunc_err,
+                    confidence: combine_confidence(u[i - 1].confidence, u[i + 1].confidence),
+                    provenance: Provenance::FiniteDifference { scheme: "central", order: 2 },
+                }]
+            }
+
+            // Right boundary: use backward
+            let nm1 = n - 1
+            result = result ++ [Knowledge {
+                value: (3.0 * u[nm1].value - 4.0 * u[nm1 - 1].value + u[nm1 - 2].value) / (2.0 * dx),
+                variance: (9.0 * u[nm1].variance + 16.0 * u[nm1 - 1].variance + u[nm1 - 2].variance) / (4.0 * dx * dx),
+                confidence: u[nm1].confidence,
+                provenance: Provenance::FiniteDifference { scheme: "central-biased", order: 2 },
+            }]
+        },
+        DiffScheme::Compact4th => {
+            // 4th order compact scheme: (1/3)u'_{i-1} + u'_i + (1/3)u'_{i+1} = (u_{i+1} - u_{i-1}) / dx
+            // Requires solving tridiagonal system
+            diff_compact_4th(u, dx, bc)
+        },
+    }
+
+    result
+}
+
+/// Second derivative (Laplacian in 1D)
+fn diff_2(u: &[Knowledge<f64>], dx: f64, bc: &BC1D) -> [Knowledge<f64>] with Alloc {
+    let n = len(u) as i32
+    var result: [Knowledge<f64>] = []
+
+    // Left boundary
+    let (u_ghost_left, ghost_var_left) = apply_bc_ghost(&bc.left, u[0], u[1], dx)
+    let d2u_left = (u[1].value - 2.0 * u[0].value + u_ghost_left) / (dx * dx)
+    let var_left = (u[1].variance + 4.0 * u[0].variance + ghost_var_left) / (dx * dx * dx * dx)
+    let trunc_2 = dx * dx / 12.0  // O(dx^2) truncation error for 2nd derivative
+    result = result ++ [Knowledge {
+        value: d2u_left,
+        variance: var_left + trunc_2 * trunc_2,
+        confidence: u[0].confidence,
+        provenance: Provenance::FiniteDifference { scheme: "central", order: 2 },
+    }]
+
+    // Interior points
+    for i in 1..(n - 1) {
+        let d2u = (u[i + 1].value - 2.0 * u[i].value + u[i - 1].value) / (dx * dx)
+        let var = (u[i + 1].variance + 4.0 * u[i].variance + u[i - 1].variance) / (dx * dx * dx * dx)
+        result = result ++ [Knowledge {
+            value: d2u,
+            variance: var + trunc_2 * trunc_2,
+            confidence: combine_confidence(u[i - 1].confidence, u[i + 1].confidence),
+            provenance: Provenance::FiniteDifference { scheme: "central", order: 2 },
+        }]
+    }
+
+    // Right boundary
+    let nm1 = n - 1
+    let (u_ghost_right, ghost_var_right) = apply_bc_ghost(&bc.right, u[nm1], u[nm1 - 1], dx)
+    let d2u_right = (u_ghost_right - 2.0 * u[nm1].value + u[nm1 - 1].value) / (dx * dx)
+    let var_right = (ghost_var_right + 4.0 * u[nm1].variance + u[nm1 - 1].variance) / (dx * dx * dx * dx)
+    result = result ++ [Knowledge {
+        value: d2u_right,
+        variance: var_right + trunc_2 * trunc_2,
+        confidence: u[nm1].confidence,
+        provenance: Provenance::FiniteDifference { scheme: "central", order: 2 },
+    }]
+
+    result
+}
+
+/// 4th order compact scheme implementation
+fn diff_compact_4th(u: &[Knowledge<f64>], dx: f64, bc: &BC1D) -> [Knowledge<f64>] with Alloc {
+    let n = len(u) as i32
+
+    // Build tridiagonal system: A * u' = b
+    // Diagonal: 1, off-diagonal: 1/3
+    // RHS: (u_{i+1} - u_{i-1}) / dx
+
+    var lower: [f64] = []  // Lower diagonal
+    var diag: [f64] = []   // Main diagonal
+    var upper: [f64] = []  // Upper diagonal
+    var rhs: [f64] = []    // Right-hand side
+
+    // Interior equations
+    for i in 0..n {
+        if i == 0 {
+            // Left boundary: use one-sided
+            diag = diag ++ [1.0]
+            upper = upper ++ [0.0]
+            lower = lower ++ [0.0]
+            rhs = rhs ++ [(-25.0 * u[0].value + 48.0 * u[1].value - 36.0 * u[2].value + 16.0 * u[3].value - 3.0 * u[4].value) / (12.0 * dx)]
+        } else if i == n - 1 {
+            // Right boundary: use one-sided
+            diag = diag ++ [1.0]
+            upper = upper ++ [0.0]
+            lower = lower ++ [0.0]
+            let nm = n - 1
+            rhs = rhs ++ [(25.0 * u[nm].value - 48.0 * u[nm - 1].value + 36.0 * u[nm - 2].value - 16.0 * u[nm - 3].value + 3.0 * u[nm - 4].value) / (12.0 * dx)]
+        } else {
+            lower = lower ++ [1.0 / 3.0]
+            diag = diag ++ [1.0]
+            upper = upper ++ [1.0 / 3.0]
+            rhs = rhs ++ [(u[i + 1].value - u[i - 1].value) / dx]
+        }
+    }
+
+    // Solve tridiagonal system
+    let derivatives = solve_tridiagonal(&lower, &diag, &upper, &rhs)
+
+    // Package with uncertainty
+    var result: [Knowledge<f64>] = []
+    let trunc_4 = pow(dx, 4.0) / 30.0  // O(dx^4) truncation error
+
+    for i in 0..n {
+        let var = if i == 0 || i == n - 1 {
+            // Boundary points have higher uncertainty
+            u[i].variance / (dx * dx) + 4.0 * trunc_4 * trunc_4
+        } else {
+            (u[i - 1].variance + u[i + 1].variance) / (dx * dx) + trunc_4 * trunc_4
+        }
+
+        result = result ++ [Knowledge {
+            value: derivatives[i],
+            variance: var,
+            confidence: u[i].confidence,
+            provenance: Provenance::FiniteDifference { scheme: "compact4th", order: 4 },
+        }]
+    }
+
+    result
+}
+
+/// 2D Laplacian
+fn laplacian_2d(u: &[[Knowledge<f64>]], grid: &Grid2D, bc: &BC2D) -> [[Knowledge<f64>]] with Alloc {
+    let nx = grid.nx
+    let ny = grid.ny
+    let dx = grid.dx
+    let dy = grid.dy
+    let dx2 = dx * dx
+    let dy2 = dy * dy
+
+    var result: [[Knowledge<f64>]] = []
+
+    for i in 0..nx {
+        var row: [Knowledge<f64>] = []
+        for j in 0..ny {
+            // Get neighbor values with boundary handling
+            let u_im = if i == 0 { get_bc_value(&bc.left, u[i][j]) } else { u[i - 1][j].value }
+            let u_ip = if i == nx - 1 { get_bc_value(&bc.right, u[i][j]) } else { u[i + 1][j].value }
+            let u_jm = if j == 0 { get_bc_value(&bc.bottom, u[i][j]) } else { u[i][j - 1].value }
+            let u_jp = if j == ny - 1 { get_bc_value(&bc.top, u[i][j]) } else { u[i][j + 1].value }
+
+            // 5-point stencil Laplacian
+            let lap = (u_im - 2.0 * u[i][j].value + u_ip) / dx2 +
+                      (u_jm - 2.0 * u[i][j].value + u_jp) / dy2
+
+            // Variance propagation
+            let var = (u[i][j].variance * 4.0 + get_bc_variance(&bc.left, u[i][j]) +
+                       get_bc_variance(&bc.right, u[i][j])) / (dx2 * dx2) +
+                      (u[i][j].variance * 4.0 + get_bc_variance(&bc.bottom, u[i][j]) +
+                       get_bc_variance(&bc.top, u[i][j])) / (dy2 * dy2)
+
+            let trunc_err = (dx2 + dy2) / 12.0
+
+            row = row ++ [Knowledge {
+                value: lap,
+                variance: var + trunc_err * trunc_err,
+                confidence: u[i][j].confidence,
+                provenance: Provenance::FiniteDifference { scheme: "5-point", order: 2 },
+            }]
+        }
+        result = result ++ [row]
+    }
+
+    result
+}
+
+// ============================================================================
+// Time Integration Schemes
+// ============================================================================
+
+/// Time integration scheme
+enum TimeScheme {
+    ForwardEuler,     // Explicit, O(dt), conditionally stable
+    BackwardEuler,    // Implicit, O(dt), unconditionally stable
+    CrankNicolson,    // Implicit, O(dt^2), unconditionally stable
+    RK4,              // Explicit, O(dt^4), conditionally stable
+    BDF2,             // Implicit, O(dt^2), A-stable
+}
+
+/// Time stepper options
+struct TimeStepperOptions {
+    scheme: TimeScheme,
+    dt: f64,
+    t_final: f64,
+    adaptive: bool,
+    tol: f64,
+    max_steps: i32,
+}
+
+/// Default time stepper options
+fn time_stepper_default(dt: f64, t_final: f64) -> TimeStepperOptions {
+    TimeStepperOptions {
+        scheme: TimeScheme::CrankNicolson,
+        dt: dt,
+        t_final: t_final,
+        adaptive: false,
+        tol: 1e-6,
+        max_steps: 1000000,
+    }
+}
+
+// ============================================================================
+// Heat Equation Solver
+// ============================================================================
+
+/// 1D Heat equation: u_t = alpha * u_xx
+struct HeatEquation1D {
+    alpha: Knowledge<f64>,     // Thermal diffusivity
+    source: fn(f64, f64) -> Knowledge<f64>,  // Source term f(x, t)
+}
+
+/// Solve 1D heat equation with Crank-Nicolson
+fn solve_heat_1d(
+    grid: Grid1D,
+    alpha: Knowledge<f64>,
+    initial: fn(f64) -> Knowledge<f64>,
+    bc: BC1D,
+    t_final: f64,
+    dt: f64
+) -> Solution1D with Alloc {
+    let n = grid.n_points
+    let dx = grid.dx
+    let r = alpha.value * dt / (dx * dx)  // Stability parameter
+
+    // CFL check
+    let cfl = 2.0 * r
+    let stability = if cfl > 1.0 {
+        // Crank-Nicolson is unconditionally stable but accuracy degrades
+        cfl
+    } else {
+        cfl
+    }
+
+    // Initialize solution
+    var u: [Knowledge<f64>] = []
+    for i in 0..n {
+        u = u ++ [initial(grid.points[i])]
+    }
+
+    var times: [f64] = [0.0]
+    var fields: [Field1D] = [Field1D {
+        grid: grid,
+        values: u,
+        time: 0.0,
+        truncation_error: dx * dx / 12.0,
+        temporal_error: 0.0,
+    }]
+
+    // Build Crank-Nicolson matrices
+    // (I - r/2 * D2) * u^{n+1} = (I + r/2 * D2) * u^n
+    let half_r = r / 2.0
+
+    // Coefficient for tridiagonal system
+    var lower: [f64] = []
+    var diag: [f64] = []
+    var upper: [f64] = []
+
+    for i in 0..n {
+        if i == 0 || i == n - 1 {
+            // Boundary points (will be set by BC)
+            lower = lower ++ [0.0]
+            diag = diag ++ [1.0]
+            upper = upper ++ [0.0]
+        } else {
+            lower = lower ++ [-half_r]
+            diag = diag ++ [1.0 + 2.0 * half_r]
+            upper = upper ++ [-half_r]
+        }
+    }
+
+    // Time stepping
+    var t = 0.0
+    var step = 0
+    let max_steps = (t_final / dt) as i32 + 1
+
+    while t < t_final && step < max_steps {
+        // Build RHS: (I + r/2 * D2) * u^n
+        var rhs: [f64] = []
+        for i in 0..n {
+            if i == 0 {
+                rhs = rhs ++ [get_bc_time_value(&bc.left, u[0], t + dt)]
+            } else if i == n - 1 {
+                rhs = rhs ++ [get_bc_time_value(&bc.right, u[n - 1], t + dt)]
+            } else {
+                let val = half_r * u[i - 1].value + (1.0 - 2.0 * half_r) * u[i].value + half_r * u[i + 1].value
+                rhs = rhs ++ [val]
+            }
+        }
+
+        // Solve system
+        let new_values = solve_tridiagonal(&lower, &diag, &upper, &rhs)
+
+        // Update solution with uncertainty propagation
+        var new_u: [Knowledge<f64>] = []
+        for i in 0..n {
+            // Variance propagation through Crank-Nicolson
+            let var = if i == 0 || i == n - 1 {
+                get_bc_variance(&bc.left, u[i]) if i == 0 else get_bc_variance(&bc.right, u[i])
+            } else {
+                // Variance from stencil
+                half_r * half_r * u[i - 1].variance +
+                (1.0 - 2.0 * half_r) * (1.0 - 2.0 * half_r) * u[i].variance +
+                half_r * half_r * u[i + 1].variance +
+                // Plus alpha uncertainty contribution
+                dt * dt * alpha.variance * (u[i + 1].value - 2.0 * u[i].value + u[i - 1].value) / (dx * dx)
+            }
+
+            new_u = new_u ++ [Knowledge {
+                value: new_values[i],
+                variance: var,
+                confidence: u[i].confidence,
+                provenance: Provenance::PDE {
+                    method: "Crank-Nicolson",
+                    dx: dx,
+                    dt: dt,
+                },
+            }]
+        }
+
+        u = new_u
+        t = t + dt
+        step = step + 1
+
+        // Store every 10 steps to save memory
+        if step % 10 == 0 || t >= t_final {
+            times = times ++ [t]
+            fields = fields ++ [Field1D {
+                grid: grid,
+                values: u,
+                time: t,
+                truncation_error: dx * dx / 12.0 + dt * dt / 12.0,
+                temporal_error: dt * dt / 12.0,
+            }]
+        }
+    }
+
+    // Total error estimation
+    let spatial_err = dx * dx / 12.0
+    let temporal_err = dt * dt / 12.0
+
+    Solution1D {
+        times: times,
+        fields: fields,
+        total_spatial_error: Knowledge {
+            value: spatial_err,
+            variance: spatial_err * spatial_err * 0.1,
+            confidence: Confidence::Theoretical { derivation: "Taylor expansion" },
+            provenance: Provenance::TruncationError,
+        },
+        total_temporal_error: Knowledge {
+            value: temporal_err,
+            variance: temporal_err * temporal_err * 0.1,
+            confidence: Confidence::Theoretical { derivation: "Taylor expansion" },
+            provenance: Provenance::TruncationError,
+        },
+        stability_estimate: stability,
+    }
+}
+
+// ============================================================================
+// Wave Equation Solver
+// ============================================================================
+
+/// 1D Wave equation: u_tt = c^2 * u_xx
+struct WaveEquation1D {
+    c: Knowledge<f64>,         // Wave speed
+    source: fn(f64, f64) -> Knowledge<f64>,  // Source term
+}
+
+/// Solve 1D wave equation with leapfrog scheme
+fn solve_wave_1d(
+    grid: Grid1D,
+    c: Knowledge<f64>,
+    initial_u: fn(f64) -> Knowledge<f64>,
+    initial_v: fn(f64) -> Knowledge<f64>,  // Initial velocity
+    bc: BC1D,
+    t_final: f64,
+    dt: f64
+) -> Solution1D with Alloc {
+    let n = grid.n_points
+    let dx = grid.dx
+    let r = c.value * dt / dx  // Courant number
+
+    // CFL stability condition: r <= 1
+    if r > 1.0 {
+        // Unstable! Return with warning
+        return Solution1D {
+            times: [0.0],
+            fields: [],
+            total_spatial_error: Knowledge {
+                value: f64::MAX,
+                variance: f64::MAX,
+                confidence: Confidence::None,
+                provenance: Provenance::Unstable { cfl: r },
+            },
+            total_temporal_error: Knowledge {
+                value: f64::MAX,
+                variance: f64::MAX,
+                confidence: Confidence::None,
+                provenance: Provenance::Unstable { cfl: r },
+            },
+            stability_estimate: r,
+        }
+    }
+
+    let r2 = r * r
+
+    // Initialize u at t=0
+    var u_prev: [Knowledge<f64>] = []
+    for i in 0..n {
+        u_prev = u_prev ++ [initial_u(grid.points[i])]
+    }
+
+    // Initialize u at t=dt using initial velocity
+    var u_curr: [Knowledge<f64>] = []
+    for i in 0..n {
+        let u0 = initial_u(grid.points[i])
+        let v0 = initial_v(grid.points[i])
+        // Second-order initialization
+        let u1_val = if i == 0 || i == n - 1 {
+            u0.value  // Boundary
+        } else {
+            u0.value + dt * v0.value +
+            0.5 * r2 * (u_prev[i + 1].value - 2.0 * u_prev[i].value + u_prev[i - 1].value)
+        }
+        u_curr = u_curr ++ [Knowledge {
+            value: u1_val,
+            variance: u0.variance + dt * dt * v0.variance,
+            confidence: u0.confidence,
+            provenance: u0.provenance,
+        }]
+    }
+
+    var times: [f64] = [0.0, dt]
+    var fields: [Field1D] = [
+        Field1D {
+            grid: grid,
+            values: u_prev,
+            time: 0.0,
+            truncation_error: dx * dx / 12.0,
+            temporal_error: 0.0,
+        },
+        Field1D {
+            grid: grid,
+            values: u_curr,
+            time: dt,
+            truncation_error: dx * dx / 12.0,
+            temporal_error: dt * dt / 12.0,
+        },
+    ]
+
+    // Time stepping with leapfrog
+    var t = dt
+    var step = 1
+
+    while t < t_final {
+        var u_next: [Knowledge<f64>] = []
+
+        for i in 0..n {
+            if i == 0 {
+                u_next = u_next ++ [Knowledge {
+                    value: get_bc_time_value(&bc.left, u_curr[0], t + dt),
+                    variance: get_bc_variance(&bc.left, u_curr[0]),
+                    confidence: u_curr[0].confidence,
+                    provenance: Provenance::BoundaryCondition,
+                }]
+            } else if i == n - 1 {
+                u_next = u_next ++ [Knowledge {
+                    value: get_bc_time_value(&bc.right, u_curr[n - 1], t + dt),
+                    variance: get_bc_variance(&bc.right, u_curr[n - 1]),
+                    confidence: u_curr[n - 1].confidence,
+                    provenance: Provenance::BoundaryCondition,
+                }]
+            } else {
+                // Leapfrog: u^{n+1} = 2*u^n - u^{n-1} + r^2 * (u_{i+1}^n - 2*u_i^n + u_{i-1}^n)
+                let laplacian = u_curr[i + 1].value - 2.0 * u_curr[i].value + u_curr[i - 1].value
+                let u_new = 2.0 * u_curr[i].value - u_prev[i].value + r2 * laplacian
+
+                // Variance propagation
+                let var = 4.0 * u_curr[i].variance + u_prev[i].variance +
+                          r2 * r2 * (u_curr[i + 1].variance + 4.0 * u_curr[i].variance + u_curr[i - 1].variance) +
+                          // Wave speed uncertainty
+                          dt * dt / (dx * dx) * c.variance * laplacian * laplacian
+
+                u_next = u_next ++ [Knowledge {
+                    value: u_new,
+                    variance: var,
+                    confidence: u_curr[i].confidence,
+                    provenance: Provenance::PDE {
+                        method: "Leapfrog",
+                        dx: dx,
+                        dt: dt,
+                    },
+                }]
+            }
+        }
+
+        u_prev = u_curr
+        u_curr = u_next
+        t = t + dt
+        step = step + 1
+
+        // Store periodically
+        if step % 10 == 0 || t >= t_final {
+            times = times ++ [t]
+            fields = fields ++ [Field1D {
+                grid: grid,
+                values: u_curr,
+                time: t,
+                truncation_error: dx * dx / 12.0,
+                temporal_error: dt * dt / 12.0,
+            }]
+        }
+    }
+
+    Solution1D {
+        times: times,
+        fields: fields,
+        total_spatial_error: Knowledge {
+            value: dx * dx / 12.0,
+            variance: pow(dx, 4.0) / 144.0 * 0.1,
+            confidence: Confidence::Theoretical { derivation: "Taylor expansion" },
+            provenance: Provenance::TruncationError,
+        },
+        total_temporal_error: Knowledge {
+            value: dt * dt / 12.0,
+            variance: pow(dt, 4.0) / 144.0 * 0.1,
+            confidence: Confidence::Theoretical { derivation: "Taylor expansion" },
+            provenance: Provenance::TruncationError,
+        },
+        stability_estimate: r,
+    }
+}
+
+// ============================================================================
+// Advection Equation Solver
+// ============================================================================
+
+/// 1D Advection equation: u_t + a * u_x = 0
+fn solve_advection_1d(
+    grid: Grid1D,
+    velocity: Knowledge<f64>,
+    initial: fn(f64) -> Knowledge<f64>,
+    bc: BC1D,
+    t_final: f64,
+    dt: f64
+) -> Solution1D with Alloc {
+    let n = grid.n_points
+    let dx = grid.dx
+    let a = velocity.value
+    let cfl = abs(a) * dt / dx
+
+    // CFL stability for upwind: cfl <= 1
+    if cfl > 1.0 {
+        return Solution1D {
+            times: [0.0],
+            fields: [],
+            total_spatial_error: Knowledge {
+                value: f64::MAX,
+                variance: f64::MAX,
+                confidence: Confidence::None,
+                provenance: Provenance::Unstable { cfl: cfl },
+            },
+            total_temporal_error: Knowledge {
+                value: f64::MAX,
+                variance: f64::MAX,
+                confidence: Confidence::None,
+                provenance: Provenance::Unstable { cfl: cfl },
+            },
+            stability_estimate: cfl,
+        }
+    }
+
+    // Initialize
+    var u: [Knowledge<f64>] = []
+    for i in 0..n {
+        u = u ++ [initial(grid.points[i])]
+    }
+
+    var times: [f64] = [0.0]
+    var fields: [Field1D] = [Field1D {
+        grid: grid,
+        values: u,
+        time: 0.0,
+        truncation_error: dx,  // Upwind is O(dx)
+        temporal_error: 0.0,
+    }]
+
+    // Upwind scheme
+    var t = 0.0
+    var step = 0
+
+    while t < t_final {
+        var u_new: [Knowledge<f64>] = []
+
+        for i in 0..n {
+            let du = if a > 0.0 {
+                // Upwind: use left point
+                if i == 0 {
+                    0.0  // Inflow boundary
+                } else {
+                    (u[i].value - u[i - 1].value) / dx
+                }
+            } else {
+                // Downwind: use right point
+                if i == n - 1 {
+                    0.0  // Outflow boundary
+                } else {
+                    (u[i + 1].value - u[i].value) / dx
+                }
+            }
+
+            let u_next = u[i].value - a * dt * du
+
+            // Variance propagation
+            let var = u[i].variance +
+                      a * a * dt * dt * (u[i].variance + (if a > 0.0 && i > 0 { u[i - 1].variance } else if a < 0.0 && i < n - 1 { u[i + 1].variance } else { 0.0 })) / (dx * dx) +
+                      dt * dt * du * du * velocity.variance
+
+            u_new = u_new ++ [Knowledge {
+                value: u_next,
+                variance: var,
+                confidence: u[i].confidence,
+                provenance: Provenance::PDE {
+                    method: "Upwind",
+                    dx: dx,
+                    dt: dt,
+                },
+            }]
+        }
+
+        u = u_new
+        t = t + dt
+        step = step + 1
+
+        if step % 10 == 0 || t >= t_final {
+            times = times ++ [t]
+            fields = fields ++ [Field1D {
+                grid: grid,
+                values: u,
+                time: t,
+                truncation_error: dx,
+                temporal_error: dt,
+            }]
+        }
+    }
+
+    Solution1D {
+        times: times,
+        fields: fields,
+        total_spatial_error: Knowledge {
+            value: dx,
+            variance: dx * dx * 0.1,
+            confidence: Confidence::Theoretical { derivation: "Upwind scheme" },
+            provenance: Provenance::TruncationError,
+        },
+        total_temporal_error: Knowledge {
+            value: dt,
+            variance: dt * dt * 0.1,
+            confidence: Confidence::Theoretical { derivation: "Forward Euler" },
+            provenance: Provenance::TruncationError,
+        },
+        stability_estimate: cfl,
+    }
+}
+
+// ============================================================================
+// Method of Lines (MOL)
+// ============================================================================
+
+/// Convert PDE to ODE system via method of lines
+fn pde_to_ode<const N: usize>(
+    grid: Grid1D,
+    diffusivity: Knowledge<f64>,
+    bc: BC1D
+) -> ODESystem<N, 1> {
+    let dx = grid.dx
+    let alpha = diffusivity.value
+
+    // RHS: du/dt = alpha * d^2u/dx^2
+    fn rhs(t: f64, u: &EVector<N>, params: &EVector<1>) -> EVector<N> {
+        let alpha = params.values[0]
+        let dx = 1.0 / (N - 1) as f64  // Assuming [0,1] domain
+
+        var dudt = evec_zeros::<N>()
+
+        // Boundaries (Dirichlet = 0)
+        dudt.values[0] = 0.0
+        dudt.values[N - 1] = 0.0
+
+        // Interior points
+        for i in 1..(N - 1) {
+            let d2u = (u.values[i + 1] - 2.0 * u.values[i] + u.values[i - 1]) / (dx * dx)
+            dudt.values[i] = alpha * d2u
+            // Propagate variance
+            dudt.variances[i] = alpha * alpha * (u.variances[i + 1] + 4.0 * u.variances[i] + u.variances[i - 1]) / (dx * dx * dx * dx)
+        }
+
+        dudt
+    }
+
+    ODESystem {
+        rhs: rhs,
+        jacobian: None,
+        mass_matrix: None,
+        dim: N,
+        param_dim: 1,
+    }
+}
+
+// ============================================================================
+// Spectral Methods
+// ============================================================================
+
+/// Fourier spectral derivative (for periodic domains)
+fn fourier_derivative(u: &[Knowledge<f64>]) -> [Knowledge<f64>] with Alloc {
+    let n = len(u) as i32
+
+    // FFT (simplified real-to-complex)
+    var u_hat_re: [f64] = []
+    var u_hat_im: [f64] = []
+
+    for k in 0..n {
+        var re = 0.0
+        var im = 0.0
+        for j in 0..n {
+            let angle = -2.0 * PI * k as f64 * j as f64 / n as f64
+            re = re + u[j].value * cos(angle)
+            im = im + u[j].value * sin(angle)
+        }
+        u_hat_re = u_hat_re ++ [re / n as f64]
+        u_hat_im = u_hat_im ++ [im / n as f64]
+    }
+
+    // Multiply by ik for derivative
+    var du_hat_re: [f64] = []
+    var du_hat_im: [f64] = []
+
+    for k in 0..n {
+        let wave_k = if k <= n / 2 { k } else { k - n }
+        let kk = 2.0 * PI * wave_k as f64
+        // (ik) * (a + ib) = -kb + ika
+        du_hat_re = du_hat_re ++ [-kk * u_hat_im[k]]
+        du_hat_im = du_hat_im ++ [kk * u_hat_re[k]]
+    }
+
+    // Inverse FFT
+    var du: [Knowledge<f64>] = []
+
+    for j in 0..n {
+        var re = 0.0
+        var im = 0.0
+        for k in 0..n {
+            let angle = 2.0 * PI * k as f64 * j as f64 / n as f64
+            re = re + du_hat_re[k] * cos(angle) - du_hat_im[k] * sin(angle)
+            im = im + du_hat_re[k] * sin(angle) + du_hat_im[k] * cos(angle)
+        }
+
+        // Spectral error estimate (aliasing)
+        let max_k = n / 2
+        let aliasing_error = pow(max_k as f64 * PI, -2.0) * u[j].value  // Approximate
+
+        du = du ++ [Knowledge {
+            value: re,
+            variance: u[j].variance * pow(2.0 * PI * max_k as f64, 2.0) + aliasing_error * aliasing_error,
+            confidence: u[j].confidence,
+            provenance: Provenance::SpectralMethod { order: n / 2 },
+        }]
+    }
+
+    du
+}
+
+// ============================================================================
+// Helper Functions
+// ============================================================================
+
+/// Solve tridiagonal system Ax = b
+fn solve_tridiagonal(lower: &[f64], diag: &[f64], upper: &[f64], rhs: &[f64]) -> [f64] with Alloc {
+    let n = len(diag)
+
+    // Forward elimination
+    var c_prime: [f64] = []
+    var d_prime: [f64] = []
+
+    c_prime = c_prime ++ [upper[0] / diag[0]]
+    d_prime = d_prime ++ [rhs[0] / diag[0]]
+
+    for i in 1..n {
+        let m = 1.0 / (diag[i] - lower[i] * c_prime[i - 1])
+        c_prime = c_prime ++ [upper[i] * m]
+        d_prime = d_prime ++ [(rhs[i] - lower[i] * d_prime[i - 1]) * m]
+    }
+
+    // Back substitution
+    var x: [f64] = []
+    for i in 0..n {
+        x = x ++ [0.0]
+    }
+    x[n - 1] = d_prime[n - 1]
+
+    for i in (0..(n - 1)).rev() {
+        x[i] = d_prime[i] - c_prime[i] * x[i + 1]
+    }
+
+    x
+}
+
+/// Apply boundary condition for derivative
+fn apply_bc_derivative(bc: &BoundaryCondition, u: Knowledge<f64>, u_neighbor: Knowledge<f64>, dx: f64) -> Knowledge<f64> {
+    match bc {
+        BoundaryCondition::Dirichlet(val) => Knowledge {
+            value: 0.0,  // Derivative is determined by interior
+            variance: val.variance / (dx * dx),
+            confidence: val.confidence,
+            provenance: Provenance::BoundaryCondition,
+        },
+        BoundaryCondition::Neumann(val) => val,
+        BoundaryCondition::Periodic => u_neighbor,  // Will wrap around
+        BoundaryCondition::Robin(a, b, c) => {
+            // a*u + b*du = c => du = (c - a*u) / b
+            let du_val = (c.value - a.value * u.value) / b.value
+            let du_var = (c.variance + a.variance * u.value * u.value + a.value * a.value * u.variance) / (b.value * b.value)
+            Knowledge {
+                value: du_val,
+                variance: du_var,
+                confidence: combine_confidence(a.confidence, c.confidence),
+                provenance: Provenance::BoundaryCondition,
+            }
+        },
+        BoundaryCondition::Open => {
+            // Linear extrapolation
+            Knowledge {
+                value: (u.value - u_neighbor.value) / dx,
+                variance: (u.variance + u_neighbor.variance) / (dx * dx),
+                confidence: u.confidence,
+                provenance: Provenance::BoundaryCondition,
+            }
+        },
+    }
+}
+
+/// Apply boundary condition to get ghost cell value
+fn apply_bc_ghost(bc: &BoundaryCondition, u_boundary: Knowledge<f64>, u_interior: Knowledge<f64>, dx: f64) -> (f64, f64) {
+    match bc {
+        BoundaryCondition::Dirichlet(val) => (2.0 * val.value - u_boundary.value, val.variance + u_boundary.variance),
+        BoundaryCondition::Neumann(val) => (u_boundary.value - 2.0 * dx * val.value, u_boundary.variance + 4.0 * dx * dx * val.variance),
+        BoundaryCondition::Periodic => (u_interior.value, u_interior.variance),
+        BoundaryCondition::Robin(a, b, c) => {
+            let ghost = u_boundary.value - 2.0 * dx * (c.value - a.value * u_boundary.value) / b.value
+            let var = u_boundary.variance  // Simplified
+            (ghost, var)
+        },
+        BoundaryCondition::Open => (2.0 * u_boundary.value - u_interior.value, u_boundary.variance + u_interior.variance),
+    }
+}
+
+fn get_bc_value(bc: &BoundaryCondition, u: Knowledge<f64>) -> f64 {
+    match bc {
+        BoundaryCondition::Dirichlet(val) => val.value,
+        BoundaryCondition::Neumann(_) => u.value,  // Use interior approximation
+        BoundaryCondition::Periodic => u.value,
+        BoundaryCondition::Robin(_, _, c) => c.value,
+        BoundaryCondition::Open => u.value,
+    }
+}
+
+fn get_bc_variance(bc: &BoundaryCondition, u: Knowledge<f64>) -> f64 {
+    match bc {
+        BoundaryCondition::Dirichlet(val) => val.variance,
+        BoundaryCondition::Neumann(val) => u.variance + val.variance,
+        BoundaryCondition::Periodic => u.variance,
+        BoundaryCondition::Robin(a, b, c) => a.variance + b.variance + c.variance,
+        BoundaryCondition::Open => u.variance * 2.0,
+    }
+}
+
+fn get_bc_time_value(bc: &BoundaryCondition, u: Knowledge<f64>, t: f64) -> f64 {
+    // Simplified: assume time-independent BC
+    get_bc_value(bc, u)
+}
+
+fn combine_confidence(c1: Confidence, c2: Confidence) -> Confidence {
+    // Take the weaker confidence
+    match (c1, c2) {
+        (Confidence::None, _) => Confidence::None,
+        (_, Confidence::None) => Confidence::None,
+        (Confidence::Unknown, _) => Confidence::Unknown,
+        (_, Confidence::Unknown) => Confidence::Unknown,
+        (c, _) => c,  // Default to first
+    }
+}
+
+// Math functions
+fn sin(x: f64) -> f64 { @extern("sin") }
+fn cos(x: f64) -> f64 { @extern("cos") }
+fn tanh(x: f64) -> f64 { @extern("tanh") }
+fn log(x: f64) -> f64 { @extern("log") }
+fn exp(x: f64) -> f64 { @extern("exp") }
+fn sqrt(x: f64) -> f64 { @extern("sqrt") }
+fn pow(x: f64, y: f64) -> f64 { @extern("pow") }
+fn abs(x: f64) -> f64 { if x < 0.0 { -x } else { x } }
+fn min(a: f64, b: f64) -> f64 { if a < b { a } else { b } }
+fn max(a: f64, b: f64) -> f64 { if a > b { a } else { b } }
+fn len<T>(arr: [T]) -> usize { @extern("array_len") }
+
+const PI: f64 = 3.14159265358979323846
+
+// ============================================================================
+// Unit Tests
+// ============================================================================
+
+#[test]
+fn test_grid_1d() {
+    let grid = grid_1d(0.0, 1.0, 11)
+
+    assert(grid.n_points == 11)
+    assert(abs(grid.dx - 0.1) < 1e-10)
+    assert(abs(grid.points[0] - 0.0) < 1e-10)
+    assert(abs(grid.points[10] - 1.0) < 1e-10)
+}
+
+#[test]
+fn test_grid_2d() {
+    let grid = grid_2d(0.0, 1.0, 11, 0.0, 2.0, 21)
+
+    assert(grid.nx == 11)
+    assert(grid.ny == 21)
+    assert(abs(grid.dx - 0.1) < 1e-10)
+    assert(abs(grid.dy - 0.1) < 1e-10)
+}
+
+#[test]
+fn test_diff_2_constant() {
+    // Second derivative of constant should be zero
+    let n = 10
+    var u: [Knowledge<f64>] = []
+    for i in 0..n {
+        u = u ++ [Knowledge::exact(5.0)]
+    }
+
+    let bc = BC1D {
+        left: BoundaryCondition::Dirichlet(Knowledge::exact(5.0)),
+        right: BoundaryCondition::Dirichlet(Knowledge::exact(5.0)),
+    }
+
+    let d2u = diff_2(&u, 0.1, &bc)
+
+    for i in 1..(n - 1) {
+        assert(abs(d2u[i].value) < 1e-10)
+    }
+}
+
+#[test]
+fn test_diff_2_quadratic() {
+    // Second derivative of x^2 should be 2
+    let n = 11
+    let dx = 1.0 / (n - 1) as f64
+    var u: [Knowledge<f64>] = []
+    for i in 0..n {
+        let x = i as f64 * dx
+        u = u ++ [Knowledge::exact(x * x)]
+    }
+
+    let bc = BC1D {
+        left: BoundaryCondition::Dirichlet(Knowledge::exact(0.0)),
+        right: BoundaryCondition::Dirichlet(Knowledge::exact(1.0)),
+    }
+
+    let d2u = diff_2(&u, dx, &bc)
+
+    for i in 1..(n - 1) {
+        assert(abs(d2u[i].value - 2.0) < 0.1)  // Truncation error
+    }
+}
+
+#[test]
+fn test_tridiagonal_solver() {
+    // Simple system: 2x1 - x2 = 1, -x1 + 2x2 = 1
+    // Solution: x1 = 1, x2 = 1
+    let lower = [0.0, -1.0]
+    let diag = [2.0, 2.0]
+    let upper = [-1.0, 0.0]
+    let rhs = [1.0, 1.0]
+
+    let x = solve_tridiagonal(&lower, &diag, &upper, &rhs)
+
+    assert(abs(x[0] - 1.0) < 1e-10)
+    assert(abs(x[1] - 1.0) < 1e-10)
+}
+
+#[test]
+fn test_heat_stability() {
+    let grid = grid_1d(0.0, 1.0, 11)
+    let alpha = Knowledge::exact(0.01)
+    let bc = BC1D {
+        left: BoundaryCondition::Dirichlet(Knowledge::exact(0.0)),
+        right: BoundaryCondition::Dirichlet(Knowledge::exact(0.0)),
+    }
+
+    fn initial(x: f64) -> Knowledge<f64> {
+        Knowledge::exact(sin(PI * x))
+    }
+
+    // Crank-Nicolson should be stable even with large dt
+    let solution = solve_heat_1d(grid, alpha, initial, bc, 0.1, 0.01)
+
+    // Solution should decay (heat dissipation)
+    let initial_max = 1.0
+    let final_field = solution.fields[len(solution.fields) - 1]
+    var final_max = 0.0
+    for i in 0..final_field.grid.n_points {
+        if abs(final_field.values[i].value) > final_max {
+            final_max = abs(final_field.values[i].value)
+        }
+    }
+
+    assert(final_max < initial_max)
+}
+
+#[test]
+fn test_wave_cfl() {
+    let grid = grid_1d(0.0, 1.0, 11)
+    let c = Knowledge::exact(1.0)
+    let bc = BC1D {
+        left: BoundaryCondition::Dirichlet(Knowledge::exact(0.0)),
+        right: BoundaryCondition::Dirichlet(Knowledge::exact(0.0)),
+    }
+
+    fn initial_u(x: f64) -> Knowledge<f64> {
+        Knowledge::exact(sin(PI * x))
+    }
+
+    fn initial_v(x: f64) -> Knowledge<f64> {
+        Knowledge::exact(0.0)
+    }
+
+    // dt = 0.2, dx = 0.1, c = 1 => CFL = 2 (unstable)
+    let unstable = solve_wave_1d(grid, c, initial_u, initial_v, bc, 1.0, 0.2)
+    assert(unstable.stability_estimate > 1.0)
+
+    // dt = 0.05, dx = 0.1, c = 1 => CFL = 0.5 (stable)
+    let stable = solve_wave_1d(grid, c, initial_u, initial_v, bc, 1.0, 0.05)
+    assert(stable.stability_estimate <= 1.0)
+}
+
+#[test]
+fn test_advection_upwind() {
+    let grid = grid_1d(0.0, 1.0, 21)
+    let velocity = Knowledge::exact(1.0)
+    let bc = BC1D {
+        left: BoundaryCondition::Dirichlet(Knowledge::exact(0.0)),
+        right: BoundaryCondition::Open,
+    }
+
+    fn initial(x: f64) -> Knowledge<f64> {
+        // Gaussian pulse
+        let center = 0.3
+        let width = 0.1
+        Knowledge::exact(exp(-(x - center) * (x - center) / (2.0 * width * width)))
+    }
+
+    let dt = 0.01  // CFL = 1.0 * 0.01 / 0.05 = 0.2 (stable)
+    let solution = solve_advection_1d(grid, velocity, initial, bc, 0.2, dt)
+
+    // Pulse should move to the right
+    assert(solution.stability_estimate <= 1.0)
+    assert(len(solution.fields) > 1)
+}
+
+#[test]
+fn test_fourier_derivative_sin() with Alloc {
+    let n = 32
+    var u: [Knowledge<f64>] = []
+
+    for i in 0..n {
+        let x = 2.0 * PI * i as f64 / n as f64
+        u = u ++ [Knowledge::exact(sin(x))]
+    }
+
+    let du = fourier_derivative(&u)
+
+    // Derivative of sin(x) is cos(x)
+    for i in 0..n {
+        let x = 2.0 * PI * i as f64 / n as f64
+        let expected = cos(x)
+        // Spectral methods should be very accurate
+        assert(abs(du[i].value - expected) < 0.01)
+    }
+}
+
+#[test]
+fn test_adaptive_grid() {
+    let grid = adaptive_grid_1d(0.0, 1.0, 21, 2.0)
+
+    assert(grid.n_points == 21)
+    assert(abs(grid.points[0] - 0.0) < 1e-10)
+    assert(abs(grid.points[20] - 1.0) < 1e-10)
+
+    // Should have finer spacing near boundaries
+    let dx_left = grid.spacing[0]
+    let dx_center = grid.spacing[10]
+    assert(dx_left < dx_center)
+}

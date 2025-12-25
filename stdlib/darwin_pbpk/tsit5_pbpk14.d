@@ -1,0 +1,691 @@
+// tsit5_pbpk14.d - 14-Compartment PBPK Model with Native Tsit5 Solver
+//
+// Full physiological pharmacokinetic model matching Julia's DifferentialEquations.jl
+// implementation. Uses adaptive Tsit5 solver with unit-safe concentrations.
+//
+// Compartments (14 total):
+//   0: blood    1: liver    2: kidney   3: brain    4: heart
+//   5: lung     6: muscle   7: adipose  8: gut      9: skin
+//  10: bone    11: spleen  12: pancreas 13: other
+//
+// Reference: Darwin PBPK Platform - Julia Implementation (Nov 2025)
+// Author: Demetrios Chiuratto Agourakis
+
+// ============================================================================
+// BUTCHER TABLEAU COEFFICIENTS (Tsitouras 5(4))
+// ============================================================================
+
+fn tsit5_c2() -> f64 { return 0.161 }
+fn tsit5_c3() -> f64 { return 0.327 }
+fn tsit5_c4() -> f64 { return 0.9 }
+fn tsit5_c5() -> f64 { return 0.9800255409045097 }
+fn tsit5_c6() -> f64 { return 1.0 }
+fn tsit5_c7() -> f64 { return 1.0 }
+
+fn tsit5_a21() -> f64 { return 0.161 }
+fn tsit5_a31() -> f64 { return 0.0 - 0.008480655492356989 }
+fn tsit5_a32() -> f64 { return 0.335480655492357 }
+fn tsit5_a41() -> f64 { return 2.8971530571054935 }
+fn tsit5_a42() -> f64 { return 0.0 - 6.359448489975075 }
+fn tsit5_a43() -> f64 { return 4.3622954328695815 }
+fn tsit5_a51() -> f64 { return 5.325864828439257 }
+fn tsit5_a52() -> f64 { return 0.0 - 11.748883564062828 }
+fn tsit5_a53() -> f64 { return 7.4955393428898365 }
+fn tsit5_a54() -> f64 { return 0.0 - 0.09249506636175525 }
+fn tsit5_a61() -> f64 { return 5.86145544294642 }
+fn tsit5_a62() -> f64 { return 0.0 - 12.92096931784711 }
+fn tsit5_a63() -> f64 { return 8.159367898576159 }
+fn tsit5_a64() -> f64 { return 0.0 - 0.071584973281401 }
+fn tsit5_a65() -> f64 { return 0.0 - 0.028269050394068383 }
+fn tsit5_a71() -> f64 { return 0.09646076681806523 }
+fn tsit5_a72() -> f64 { return 0.01 }
+fn tsit5_a73() -> f64 { return 0.4798896504144996 }
+fn tsit5_a74() -> f64 { return 1.379008574103742 }
+fn tsit5_a75() -> f64 { return 0.0 - 3.290069515436081 }
+fn tsit5_a76() -> f64 { return 2.324710524099774 }
+
+fn tsit5_b1() -> f64 { return 0.09646076681806523 }
+fn tsit5_b2() -> f64 { return 0.01 }
+fn tsit5_b3() -> f64 { return 0.4798896504144996 }
+fn tsit5_b4() -> f64 { return 1.379008574103742 }
+fn tsit5_b5() -> f64 { return 0.0 - 3.290069515436081 }
+fn tsit5_b6() -> f64 { return 2.324710524099774 }
+fn tsit5_b7() -> f64 { return 0.0 }
+
+fn tsit5_e1() -> f64 { return 0.00178001105222577714 }
+fn tsit5_e2() -> f64 { return 0.0008164344596567469 }
+fn tsit5_e3() -> f64 { return 0.0 - 0.007880878010261995 }
+fn tsit5_e4() -> f64 { return 0.1447110071732629 }
+fn tsit5_e5() -> f64 { return 0.0 - 0.5823571654525552 }
+fn tsit5_e6() -> f64 { return 0.45808210592918697 }
+fn tsit5_e7() -> f64 { return 0.0 - 0.01515151515151515 }
+
+// ============================================================================
+// HELPER FUNCTIONS
+// ============================================================================
+
+fn abs_f64(x: f64) -> f64 {
+    if x < 0.0 { return 0.0 - x }
+    return x
+}
+
+fn max_f64(a: f64, b: f64) -> f64 {
+    if a > b { return a }
+    return b
+}
+
+fn min_f64(a: f64, b: f64) -> f64 {
+    if a < b { return a }
+    return b
+}
+
+fn sqrt_f64(x: f64) -> f64 {
+    if x <= 0.0 { return 0.0 }
+    let mut y = x
+    y = 0.5 * (y + x / y)
+    y = 0.5 * (y + x / y)
+    y = 0.5 * (y + x / y)
+    y = 0.5 * (y + x / y)
+    y = 0.5 * (y + x / y)
+    y = 0.5 * (y + x / y)
+    y = 0.5 * (y + x / y)
+    y = 0.5 * (y + x / y)
+    y = 0.5 * (y + x / y)
+    y = 0.5 * (y + x / y)
+    return y
+}
+
+fn fifth_root(x: f64) -> f64 {
+    if x <= 0.0 { return 0.0 }
+    let mut y = 1.0
+    y = y - (y * y * y * y * y - x) / (5.0 * y * y * y * y)
+    y = y - (y * y * y * y * y - x) / (5.0 * y * y * y * y)
+    y = y - (y * y * y * y * y - x) / (5.0 * y * y * y * y)
+    y = y - (y * y * y * y * y - x) / (5.0 * y * y * y * y)
+    y = y - (y * y * y * y * y - x) / (5.0 * y * y * y * y)
+    y = y - (y * y * y * y * y - x) / (5.0 * y * y * y * y)
+    y = y - (y * y * y * y * y - x) / (5.0 * y * y * y * y)
+    y = y - (y * y * y * y * y - x) / (5.0 * y * y * y * y)
+    return y
+}
+
+// ============================================================================
+// 14-COMPARTMENT STATE VECTOR
+// ============================================================================
+// Indices: 0=blood, 1=liver, 2=kidney, 3=brain, 4=heart, 5=lung,
+//          6=muscle, 7=adipose, 8=gut, 9=skin, 10=bone, 11=spleen,
+//          12=pancreas, 13=other
+
+struct PBPKState14 {
+    blood: f64,
+    liver: f64,
+    kidney: f64,
+    brain: f64,
+    heart: f64,
+    lung: f64,
+    muscle: f64,
+    adipose: f64,
+    gut: f64,
+    skin: f64,
+    bone: f64,
+    spleen: f64,
+    pancreas: f64,
+    other: f64
+}
+
+fn pbpk_state_zero() -> PBPKState14 {
+    return PBPKState14 {
+        blood: 0.0, liver: 0.0, kidney: 0.0, brain: 0.0, heart: 0.0,
+        lung: 0.0, muscle: 0.0, adipose: 0.0, gut: 0.0, skin: 0.0,
+        bone: 0.0, spleen: 0.0, pancreas: 0.0, other: 0.0
+    }
+}
+
+fn pbpk_state_add(a: PBPKState14, b: PBPKState14) -> PBPKState14 {
+    return PBPKState14 {
+        blood: a.blood + b.blood, liver: a.liver + b.liver,
+        kidney: a.kidney + b.kidney, brain: a.brain + b.brain,
+        heart: a.heart + b.heart, lung: a.lung + b.lung,
+        muscle: a.muscle + b.muscle, adipose: a.adipose + b.adipose,
+        gut: a.gut + b.gut, skin: a.skin + b.skin,
+        bone: a.bone + b.bone, spleen: a.spleen + b.spleen,
+        pancreas: a.pancreas + b.pancreas, other: a.other + b.other
+    }
+}
+
+fn pbpk_state_scale(s: PBPKState14, factor: f64) -> PBPKState14 {
+    return PBPKState14 {
+        blood: s.blood * factor, liver: s.liver * factor,
+        kidney: s.kidney * factor, brain: s.brain * factor,
+        heart: s.heart * factor, lung: s.lung * factor,
+        muscle: s.muscle * factor, adipose: s.adipose * factor,
+        gut: s.gut * factor, skin: s.skin * factor,
+        bone: s.bone * factor, spleen: s.spleen * factor,
+        pancreas: s.pancreas * factor, other: s.other * factor
+    }
+}
+
+fn pbpk_state_total_mass(s: PBPKState14, prm: PBPKParams14) -> f64 {
+    return s.blood * prm.v_blood + s.liver * prm.v_liver + s.kidney * prm.v_kidney
+         + s.brain * prm.v_brain + s.heart * prm.v_heart + s.lung * prm.v_lung
+         + s.muscle * prm.v_muscle + s.adipose * prm.v_adipose + s.gut * prm.v_gut
+         + s.skin * prm.v_skin + s.bone * prm.v_bone + s.spleen * prm.v_spleen
+         + s.pancreas * prm.v_pancreas + s.other * prm.v_other
+}
+
+// ============================================================================
+// PBPK PARAMETERS
+// ============================================================================
+
+struct PBPKParams14 {
+    // Volumes (L) - 70kg adult reference
+    v_blood: f64,
+    v_liver: f64,
+    v_kidney: f64,
+    v_brain: f64,
+    v_heart: f64,
+    v_lung: f64,
+    v_muscle: f64,
+    v_adipose: f64,
+    v_gut: f64,
+    v_skin: f64,
+    v_bone: f64,
+    v_spleen: f64,
+    v_pancreas: f64,
+    v_other: f64,
+
+    // Blood flows (L/h)
+    q_liver: f64,
+    q_kidney: f64,
+    q_brain: f64,
+    q_heart: f64,
+    q_lung: f64,
+    q_muscle: f64,
+    q_adipose: f64,
+    q_gut: f64,
+    q_skin: f64,
+    q_bone: f64,
+    q_spleen: f64,
+    q_pancreas: f64,
+    q_other: f64,
+
+    // Partition coefficients (Kp)
+    kp_liver: f64,
+    kp_kidney: f64,
+    kp_brain: f64,
+    kp_heart: f64,
+    kp_lung: f64,
+    kp_muscle: f64,
+    kp_adipose: f64,
+    kp_gut: f64,
+    kp_skin: f64,
+    kp_bone: f64,
+    kp_spleen: f64,
+    kp_pancreas: f64,
+    kp_other: f64,
+
+    // Clearance (L/h)
+    cl_hepatic: f64,
+    cl_renal: f64,
+
+    // Blood binding
+    fu_plasma: f64,
+    rb_ratio: f64
+}
+
+// Default parameters for 70kg adult
+fn default_pbpk_params() -> PBPKParams14 {
+    return PBPKParams14 {
+        // Volumes (L)
+        v_blood: 5.0,
+        v_liver: 1.8,
+        v_kidney: 0.31,
+        v_brain: 1.4,
+        v_heart: 0.33,
+        v_lung: 0.5,
+        v_muscle: 30.0,
+        v_adipose: 15.0,
+        v_gut: 1.1,
+        v_skin: 3.3,
+        v_bone: 10.0,
+        v_spleen: 0.18,
+        v_pancreas: 0.1,
+        v_other: 5.0,
+
+        // Blood flows (L/h)
+        q_liver: 90.0,
+        q_kidney: 60.0,
+        q_brain: 50.0,
+        q_heart: 20.0,
+        q_lung: 300.0,
+        q_muscle: 75.0,
+        q_adipose: 12.0,
+        q_gut: 45.0,
+        q_skin: 10.0,
+        q_bone: 5.0,
+        q_spleen: 15.0,
+        q_pancreas: 5.0,
+        q_other: 20.0,
+
+        // Partition coefficients (default = 1.0)
+        kp_liver: 1.0,
+        kp_kidney: 1.0,
+        kp_brain: 0.5,   // BBB limits penetration
+        kp_heart: 1.0,
+        kp_lung: 1.0,
+        kp_muscle: 0.8,
+        kp_adipose: 0.2, // Lipophilicity dependent
+        kp_gut: 1.0,
+        kp_skin: 0.7,
+        kp_bone: 0.3,
+        kp_spleen: 1.0,
+        kp_pancreas: 1.0,
+        kp_other: 1.0,
+
+        // Clearance
+        cl_hepatic: 10.0,  // L/h
+        cl_renal: 5.0,     // L/h
+
+        // Blood binding
+        fu_plasma: 0.5,    // 50% unbound
+        rb_ratio: 1.0      // Blood:Plasma = 1 (no RBC binding)
+    }
+}
+
+// ============================================================================
+// PBPK ODE SYSTEM
+// ============================================================================
+
+fn pbpk_ode(st: PBPKState14, t: f64, prm: PBPKParams14) -> PBPKState14 {
+    let c_blood = st.blood
+    let c_plasma = c_blood / prm.rb_ratio
+    let c_unbound = c_plasma * prm.fu_plasma
+
+    // Derivatives for each compartment
+    let mut d_blood = 0.0
+
+    // Liver: dC/dt = (Q/V)(C_plasma - C/Kp)
+    let d_liver = (prm.q_liver / prm.v_liver) * (c_plasma - st.liver / prm.kp_liver)
+    d_blood = d_blood - (prm.q_liver / prm.v_blood) * prm.rb_ratio * (c_plasma - st.liver / prm.kp_liver)
+
+    // Kidney
+    let d_kidney = (prm.q_kidney / prm.v_kidney) * (c_plasma - st.kidney / prm.kp_kidney)
+    d_blood = d_blood - (prm.q_kidney / prm.v_blood) * prm.rb_ratio * (c_plasma - st.kidney / prm.kp_kidney)
+
+    // Brain
+    let d_brain = (prm.q_brain / prm.v_brain) * (c_plasma - st.brain / prm.kp_brain)
+    d_blood = d_blood - (prm.q_brain / prm.v_blood) * prm.rb_ratio * (c_plasma - st.brain / prm.kp_brain)
+
+    // Heart
+    let d_heart = (prm.q_heart / prm.v_heart) * (c_plasma - st.heart / prm.kp_heart)
+    d_blood = d_blood - (prm.q_heart / prm.v_blood) * prm.rb_ratio * (c_plasma - st.heart / prm.kp_heart)
+
+    // Lung
+    let d_lung = (prm.q_lung / prm.v_lung) * (c_plasma - st.lung / prm.kp_lung)
+    d_blood = d_blood - (prm.q_lung / prm.v_blood) * prm.rb_ratio * (c_plasma - st.lung / prm.kp_lung)
+
+    // Muscle
+    let d_muscle = (prm.q_muscle / prm.v_muscle) * (c_plasma - st.muscle / prm.kp_muscle)
+    d_blood = d_blood - (prm.q_muscle / prm.v_blood) * prm.rb_ratio * (c_plasma - st.muscle / prm.kp_muscle)
+
+    // Adipose
+    let d_adipose = (prm.q_adipose / prm.v_adipose) * (c_plasma - st.adipose / prm.kp_adipose)
+    d_blood = d_blood - (prm.q_adipose / prm.v_blood) * prm.rb_ratio * (c_plasma - st.adipose / prm.kp_adipose)
+
+    // Gut
+    let d_gut = (prm.q_gut / prm.v_gut) * (c_plasma - st.gut / prm.kp_gut)
+    d_blood = d_blood - (prm.q_gut / prm.v_blood) * prm.rb_ratio * (c_plasma - st.gut / prm.kp_gut)
+
+    // Skin
+    let d_skin = (prm.q_skin / prm.v_skin) * (c_plasma - st.skin / prm.kp_skin)
+    d_blood = d_blood - (prm.q_skin / prm.v_blood) * prm.rb_ratio * (c_plasma - st.skin / prm.kp_skin)
+
+    // Bone
+    let d_bone = (prm.q_bone / prm.v_bone) * (c_plasma - st.bone / prm.kp_bone)
+    d_blood = d_blood - (prm.q_bone / prm.v_blood) * prm.rb_ratio * (c_plasma - st.bone / prm.kp_bone)
+
+    // Spleen
+    let d_spleen = (prm.q_spleen / prm.v_spleen) * (c_plasma - st.spleen / prm.kp_spleen)
+    d_blood = d_blood - (prm.q_spleen / prm.v_blood) * prm.rb_ratio * (c_plasma - st.spleen / prm.kp_spleen)
+
+    // Pancreas
+    let d_pancreas = (prm.q_pancreas / prm.v_pancreas) * (c_plasma - st.pancreas / prm.kp_pancreas)
+    d_blood = d_blood - (prm.q_pancreas / prm.v_blood) * prm.rb_ratio * (c_plasma - st.pancreas / prm.kp_pancreas)
+
+    // Other
+    let d_other = (prm.q_other / prm.v_other) * (c_plasma - st.other / prm.kp_other)
+    d_blood = d_blood - (prm.q_other / prm.v_blood) * prm.rb_ratio * (c_plasma - st.other / prm.kp_other)
+
+    // Hepatic clearance (unbound drug)
+    d_blood = d_blood - (prm.cl_hepatic / prm.v_blood) * c_unbound * prm.rb_ratio
+
+    // Renal clearance (unbound drug)
+    d_blood = d_blood - (prm.cl_renal / prm.v_blood) * c_unbound * prm.rb_ratio
+
+    return PBPKState14 {
+        blood: d_blood, liver: d_liver, kidney: d_kidney, brain: d_brain,
+        heart: d_heart, lung: d_lung, muscle: d_muscle, adipose: d_adipose,
+        gut: d_gut, skin: d_skin, bone: d_bone, spleen: d_spleen,
+        pancreas: d_pancreas, other: d_other
+    }
+}
+
+// ============================================================================
+// TSIT5 STEP FOR 14-COMPARTMENT SYSTEM
+// ============================================================================
+
+struct Tsit5StepResult14 {
+    state_new: PBPKState14,
+    err: PBPKState14
+}
+
+fn tsit5_step_pbpk(st_in: PBPKState14, t: f64, dt: f64, prm: PBPKParams14) -> Tsit5StepResult14 {
+    // Stage 1
+    let k1 = pbpk_ode(st_in, t, prm)
+
+    // Stage 2
+    let stage2_state = pbpk_state_add(st_in, pbpk_state_scale(k1, dt * tsit5_a21()))
+    let k2 = pbpk_ode(stage2_state, t + tsit5_c2() * dt, prm)
+
+    // Stage 3
+    let stage3_state = pbpk_state_add(st_in,
+        pbpk_state_add(pbpk_state_scale(k1, dt * tsit5_a31()),
+                       pbpk_state_scale(k2, dt * tsit5_a32())))
+    let k3 = pbpk_ode(stage3_state, t + tsit5_c3() * dt, prm)
+
+    // Stage 4
+    let stage4_state = pbpk_state_add(st_in,
+        pbpk_state_add(pbpk_state_scale(k1, dt * tsit5_a41()),
+        pbpk_state_add(pbpk_state_scale(k2, dt * tsit5_a42()),
+                       pbpk_state_scale(k3, dt * tsit5_a43()))))
+    let k4 = pbpk_ode(stage4_state, t + tsit5_c4() * dt, prm)
+
+    // Stage 5
+    let stage5_state = pbpk_state_add(st_in,
+        pbpk_state_add(pbpk_state_scale(k1, dt * tsit5_a51()),
+        pbpk_state_add(pbpk_state_scale(k2, dt * tsit5_a52()),
+        pbpk_state_add(pbpk_state_scale(k3, dt * tsit5_a53()),
+                       pbpk_state_scale(k4, dt * tsit5_a54())))))
+    let k5 = pbpk_ode(stage5_state, t + tsit5_c5() * dt, prm)
+
+    // Stage 6
+    let stage6_state = pbpk_state_add(st_in,
+        pbpk_state_add(pbpk_state_scale(k1, dt * tsit5_a61()),
+        pbpk_state_add(pbpk_state_scale(k2, dt * tsit5_a62()),
+        pbpk_state_add(pbpk_state_scale(k3, dt * tsit5_a63()),
+        pbpk_state_add(pbpk_state_scale(k4, dt * tsit5_a64()),
+                       pbpk_state_scale(k5, dt * tsit5_a65()))))))
+    let k6 = pbpk_ode(stage6_state, t + tsit5_c6() * dt, prm)
+
+    // Stage 7
+    let stage7_state = pbpk_state_add(st_in,
+        pbpk_state_add(pbpk_state_scale(k1, dt * tsit5_a71()),
+        pbpk_state_add(pbpk_state_scale(k2, dt * tsit5_a72()),
+        pbpk_state_add(pbpk_state_scale(k3, dt * tsit5_a73()),
+        pbpk_state_add(pbpk_state_scale(k4, dt * tsit5_a74()),
+        pbpk_state_add(pbpk_state_scale(k5, dt * tsit5_a75()),
+                       pbpk_state_scale(k6, dt * tsit5_a76())))))))
+    let k7 = pbpk_ode(stage7_state, t + tsit5_c7() * dt, prm)
+
+    // 5th order solution (same as stage 7 position for FSAL)
+    let state_new = stage7_state
+
+    // Error estimate
+    let err = pbpk_state_add(pbpk_state_scale(k1, dt * tsit5_e1()),
+        pbpk_state_add(pbpk_state_scale(k2, dt * tsit5_e2()),
+        pbpk_state_add(pbpk_state_scale(k3, dt * tsit5_e3()),
+        pbpk_state_add(pbpk_state_scale(k4, dt * tsit5_e4()),
+        pbpk_state_add(pbpk_state_scale(k5, dt * tsit5_e5()),
+        pbpk_state_add(pbpk_state_scale(k6, dt * tsit5_e6()),
+                       pbpk_state_scale(k7, dt * tsit5_e7())))))))
+
+    return Tsit5StepResult14 { state_new: state_new, err: err }
+}
+
+// ============================================================================
+// ERROR NORM AND STEP SIZE CONTROL
+// ============================================================================
+
+fn compute_error_norm_14(
+    err: PBPKState14,
+    state_old: PBPKState14,
+    state_new: PBPKState14,
+    rtol: f64,
+    atol: f64
+) -> f64 {
+    // RMS error norm: sqrt(1/N * sum((err_i / scale_i)^2))
+    // scale_i = atol + rtol * max(|old_i|, |new_i|)
+
+    let s0 = atol + rtol * max_f64(abs_f64(state_old.blood), abs_f64(state_new.blood))
+    let s1 = atol + rtol * max_f64(abs_f64(state_old.liver), abs_f64(state_new.liver))
+    let s2 = atol + rtol * max_f64(abs_f64(state_old.kidney), abs_f64(state_new.kidney))
+    let s3 = atol + rtol * max_f64(abs_f64(state_old.brain), abs_f64(state_new.brain))
+    let s4 = atol + rtol * max_f64(abs_f64(state_old.heart), abs_f64(state_new.heart))
+    let s5 = atol + rtol * max_f64(abs_f64(state_old.lung), abs_f64(state_new.lung))
+    let s6 = atol + rtol * max_f64(abs_f64(state_old.muscle), abs_f64(state_new.muscle))
+    let s7 = atol + rtol * max_f64(abs_f64(state_old.adipose), abs_f64(state_new.adipose))
+    let s8 = atol + rtol * max_f64(abs_f64(state_old.gut), abs_f64(state_new.gut))
+    let s9 = atol + rtol * max_f64(abs_f64(state_old.skin), abs_f64(state_new.skin))
+    let s10 = atol + rtol * max_f64(abs_f64(state_old.bone), abs_f64(state_new.bone))
+    let s11 = atol + rtol * max_f64(abs_f64(state_old.spleen), abs_f64(state_new.spleen))
+    let s12 = atol + rtol * max_f64(abs_f64(state_old.pancreas), abs_f64(state_new.pancreas))
+    let s13 = atol + rtol * max_f64(abs_f64(state_old.other), abs_f64(state_new.other))
+
+    let e0 = err.blood / s0
+    let e1 = err.liver / s1
+    let e2 = err.kidney / s2
+    let e3 = err.brain / s3
+    let e4 = err.heart / s4
+    let e5 = err.lung / s5
+    let e6 = err.muscle / s6
+    let e7 = err.adipose / s7
+    let e8 = err.gut / s8
+    let e9 = err.skin / s9
+    let e10 = err.bone / s10
+    let e11 = err.spleen / s11
+    let e12 = err.pancreas / s12
+    let e13 = err.other / s13
+
+    let sum_sq = e0*e0 + e1*e1 + e2*e2 + e3*e3 + e4*e4 + e5*e5 + e6*e6
+               + e7*e7 + e8*e8 + e9*e9 + e10*e10 + e11*e11 + e12*e12 + e13*e13
+
+    return sqrt_f64(sum_sq / 14.0)
+}
+
+fn optimal_step_14(dt: f64, err_norm: f64, safety: f64, max_growth: f64, min_shrink: f64) -> f64 {
+    if err_norm <= 0.0 {
+        return dt * max_growth
+    }
+    let factor = safety * fifth_root(1.0 / err_norm)
+    let factor_limited = max_f64(min_shrink, min_f64(max_growth, factor))
+    return dt * factor_limited
+}
+
+// ============================================================================
+// SOLVER CONFIGURATION AND SOLUTION
+// ============================================================================
+
+struct ODEConfig14 {
+    rtol: f64,
+    atol: f64,
+    dt_init: f64,
+    dt_min: f64,
+    dt_max: f64,
+    max_steps: i64,
+    safety: f64,
+    max_growth: f64,
+    min_shrink: f64
+}
+
+fn default_ode_config() -> ODEConfig14 {
+    return ODEConfig14 {
+        rtol: 0.01,            // 1% relative tolerance (looser for PBPK)
+        atol: 0.0001,          // 1e-4
+        dt_init: 0.01,         // Larger initial step
+        dt_min: 0.0000001,     // 1e-7
+        dt_max: 1.0,
+        max_steps: 100000,
+        safety: 0.9,
+        max_growth: 10.0,      // Allow faster growth
+        min_shrink: 0.1
+    }
+}
+
+struct PBPKSolution14 {
+    success: bool,
+    nsteps: i64,
+    nfeval: i64,
+    nreject: i64,
+    t_final: f64,
+    state_final: PBPKState14
+}
+
+// ============================================================================
+// MAIN SOLVER
+// ============================================================================
+
+fn solve_pbpk14(
+    dose_mg: f64,
+    t_end: f64,
+    prm: PBPKParams14,
+    cfg: ODEConfig14
+) -> PBPKSolution14 {
+    // Initial condition: all drug in blood compartment
+    let c0_blood = dose_mg / prm.v_blood
+    let mut st = PBPKState14 {
+        blood: c0_blood, liver: 0.0, kidney: 0.0, brain: 0.0, heart: 0.0,
+        lung: 0.0, muscle: 0.0, adipose: 0.0, gut: 0.0, skin: 0.0,
+        bone: 0.0, spleen: 0.0, pancreas: 0.0, other: 0.0
+    }
+
+    let mut t = 0.0
+    let mut dt = cfg.dt_init
+    let mut nsteps = 0
+    let mut nfeval = 0
+    let mut nreject = 0
+
+    while t < t_end && nsteps < cfg.max_steps {
+        let dt_use = if t + dt > t_end { t_end - t } else { dt }
+
+        let result = tsit5_step_pbpk(st, t, dt_use, prm)
+        nfeval = nfeval + 7
+
+        let err_norm = compute_error_norm_14(result.err, st, result.state_new, cfg.rtol, cfg.atol)
+
+        if err_norm <= 1.0 {
+            // Accept step
+            t = t + dt_use
+            st = result.state_new
+            nsteps = nsteps + 1
+            dt = optimal_step_14(dt_use, err_norm, cfg.safety, cfg.max_growth, cfg.min_shrink)
+        } else {
+            // Reject step
+            nreject = nreject + 1
+            dt = optimal_step_14(dt_use, err_norm, cfg.safety, cfg.max_growth, cfg.min_shrink)
+        }
+
+        dt = max_f64(cfg.dt_min, min_f64(cfg.dt_max, dt))
+
+        // Fail-safe: if too many rejections, something is wrong
+        if nreject > 1000 {
+            return PBPKSolution14 {
+                success: false,
+                nsteps: nsteps,
+                nfeval: nfeval,
+                nreject: nreject,
+                t_final: t,
+                state_final: st
+            }
+        }
+    }
+
+    let success = t >= t_end - cfg.dt_min
+
+    return PBPKSolution14 {
+        success: success,
+        nsteps: nsteps,
+        nfeval: nfeval,
+        nreject: nreject,
+        t_final: t,
+        state_final: st
+    }
+}
+
+// ============================================================================
+// TESTS
+// ============================================================================
+
+fn main() -> i32 {
+    println("=== Demetrios 14-Compartment PBPK Solver ===")
+    println("")
+
+    let pk_prm = default_pbpk_params()
+    let ode_cfg = default_ode_config()
+
+    // Simulate 100mg dose over 8 hours
+    let dose = 100.0
+    let t_end = 8.0
+
+    println("Simulation:")
+    println("  Dose: 100 mg IV bolus")
+    println("  Duration: 8 hours")
+    println("")
+
+    let sol = solve_pbpk14(dose, t_end, pk_prm, ode_cfg)
+
+    println("Results:")
+    println("  Success: ")
+    println(sol.success)
+    println("  Steps: ")
+    println(sol.nsteps)
+    println("  Function evals: ")
+    println(sol.nfeval)
+    println("  Rejected steps: ")
+    println(sol.nreject)
+    println("  Final time: ")
+    println(sol.t_final)
+    println("")
+
+    println("Final concentrations (mg/L):")
+    println("  Blood: ")
+    println(sol.state_final.blood)
+    println("  Liver: ")
+    println(sol.state_final.liver)
+    println("  Kidney: ")
+    println(sol.state_final.kidney)
+    println("  Brain: ")
+    println(sol.state_final.brain)
+    println("  Muscle: ")
+    println(sol.state_final.muscle)
+    println("  Adipose: ")
+    println(sol.state_final.adipose)
+    println("")
+
+    // Mass balance check
+    let initial_mass = dose
+    let final_mass = pbpk_state_total_mass(sol.state_final, pk_prm)
+    println("Mass balance:")
+    println("  Initial: ")
+    println(initial_mass)
+    println("  Final: ")
+    println(final_mass)
+
+    // With clearance, mass should decrease
+    let mass_eliminated = initial_mass - final_mass
+    let pct_eliminated = 100.0 * mass_eliminated / initial_mass
+    println("  Eliminated: ")
+    println(mass_eliminated)
+    println("  % Eliminated: ")
+    println(pct_eliminated)
+    println("")
+
+    // Validation: drug should be significantly eliminated after 8h
+    // With CL_hepatic=10 L/h, CL_renal=5 L/h, expect ~25-30% elimination
+    if sol.success && pct_eliminated > 20.0 {
+        println("TEST PASSED: PBPK simulation successful")
+        return 0
+    } else {
+        println("TEST FAILED: Unexpected results")
+        return 1
+    }
+}

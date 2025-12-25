@@ -1,0 +1,1265 @@
+//! Profiling Infrastructure for Demetrios
+//!
+//! This module provides comprehensive profiling capabilities:
+//! - CPU sampling profiler
+//! - Memory allocation tracking
+//! - Flame graph generation
+//! - Profile report generation
+//!
+//! # Example
+//! ```d
+//! import profile;
+//!
+//! fn main() with IO {
+//!     let profiler = CpuProfiler::new(ProfileConfig::default());
+//!     profiler.start();
+//!
+//!     // ... code to profile ...
+//!
+//!     profiler.stop();
+//!     let report = profiler.report();
+//!     report.write_flamegraph("profile.svg");
+//! }
+//! ```
+
+// Re-export submodules
+pub use cpu::*;
+pub use memory::*;
+pub use flamegraph::*;
+pub use report::*;
+
+//-----------------------------------------------------------------------------
+// Configuration
+//-----------------------------------------------------------------------------
+
+/// Profiler configuration
+pub struct ProfileConfig {
+    /// Sampling interval in microseconds (default: 1000 = 1ms)
+    pub sample_interval_us: u64,
+    /// Maximum stack depth to capture (default: 128)
+    pub max_stack_depth: u32,
+    /// Whether to include native frames (default: true)
+    pub include_native: bool,
+    /// Whether to track memory allocations (default: false)
+    pub track_memory: bool,
+    /// Output format for reports
+    pub output_format: OutputFormat,
+    /// Whether to symbolicate addresses (default: true)
+    pub symbolicate: bool,
+}
+
+impl ProfileConfig {
+    /// Create default configuration
+    pub fn default() -> Self {
+        ProfileConfig {
+            sample_interval_us: 1000,
+            max_stack_depth: 128,
+            include_native: true,
+            track_memory: false,
+            output_format: OutputFormat::Text,
+            symbolicate: true,
+        }
+    }
+
+    /// Create high-frequency sampling config (100us)
+    pub fn high_frequency() -> Self {
+        ProfileConfig {
+            sample_interval_us: 100,
+            max_stack_depth: 128,
+            include_native: true,
+            track_memory: false,
+            output_format: OutputFormat::Text,
+            symbolicate: true,
+        }
+    }
+
+    /// Create memory profiling config
+    pub fn memory() -> Self {
+        ProfileConfig {
+            sample_interval_us: 1000,
+            max_stack_depth: 64,
+            include_native: false,
+            track_memory: true,
+            output_format: OutputFormat::Text,
+            symbolicate: true,
+        }
+    }
+}
+
+/// Output format for profile reports
+pub enum OutputFormat {
+    /// Human-readable text
+    Text,
+    /// JSON format
+    Json,
+    /// Chrome tracing format
+    ChromeTracing,
+    /// Folded stacks (for flame graphs)
+    FoldedStacks,
+    /// pprof protobuf format
+    Pprof,
+}
+
+//-----------------------------------------------------------------------------
+// CPU Profiler
+//-----------------------------------------------------------------------------
+
+pub mod cpu {
+    use super::*;
+
+    /// A stack frame captured during sampling
+    pub struct Frame {
+        /// Instruction pointer / program counter
+        pub ip: u64,
+        /// Symbol name (if resolved)
+        pub symbol: Option<string>,
+        /// Source file (if available)
+        pub file: Option<string>,
+        /// Line number (if available)
+        pub line: Option<u32>,
+        /// Column number (if available)
+        pub column: Option<u32>,
+        /// Module/library name
+        pub module: Option<string>,
+        /// Whether this is an inlined frame
+        pub is_inline: bool,
+    }
+
+    impl Frame {
+        /// Create a new unresolved frame
+        pub fn new(ip: u64) -> Self {
+            Frame {
+                ip: ip,
+                symbol: None,
+                file: None,
+                line: None,
+                column: None,
+                module: None,
+                is_inline: false,
+            }
+        }
+
+        /// Format frame for display
+        pub fn display(&self) -> string {
+            match &self.symbol {
+                Some(sym) => {
+                    match (&self.file, self.line) {
+                        (Some(f), Some(l)) => format!("{} at {}:{}", sym, f, l),
+                        _ => sym.clone(),
+                    }
+                }
+                None => format!("0x{:016x}", self.ip),
+            }
+        }
+    }
+
+    /// A single sample captured by the profiler
+    pub struct Sample {
+        /// Timestamp in nanoseconds since profiler start
+        pub timestamp_ns: u64,
+        /// Thread ID that was sampled
+        pub thread_id: u64,
+        /// Thread name (if available)
+        pub thread_name: Option<string>,
+        /// Stack frames (innermost first)
+        pub frames: Vec<Frame>,
+        /// CPU on which this sample was taken
+        pub cpu: Option<u32>,
+        /// Sample weight (usually 1, but can be higher for merged samples)
+        pub weight: u64,
+    }
+
+    impl Sample {
+        /// Create new sample
+        pub fn new(timestamp_ns: u64, thread_id: u64) -> Self {
+            Sample {
+                timestamp_ns: timestamp_ns,
+                thread_id: thread_id,
+                thread_name: None,
+                frames: Vec::new(),
+                cpu: None,
+                weight: 1,
+            }
+        }
+
+        /// Add a frame to this sample
+        pub fn push_frame(&!self, frame: Frame) {
+            self.frames.push(frame);
+        }
+    }
+
+    /// Symbol resolver for converting addresses to function names
+    pub struct SymbolResolver {
+        /// Cached symbols
+        cache: HashMap<u64, Frame>,
+        /// Debug info paths
+        debug_paths: Vec<string>,
+        /// Whether to demangle symbols
+        demangle: bool,
+    }
+
+    impl SymbolResolver {
+        /// Create new symbol resolver
+        pub fn new() -> Self {
+            SymbolResolver {
+                cache: HashMap::new(),
+                debug_paths: Vec::new(),
+                demangle: true,
+            }
+        }
+
+        /// Add a path to search for debug info
+        pub fn add_debug_path(&!self, path: string) {
+            self.debug_paths.push(path);
+        }
+
+        /// Resolve an address to a frame with symbol info
+        pub fn resolve(&!self, ip: u64) -> Frame with IO {
+            // Check cache first
+            if let Some(cached) = self.cache.get(&ip) {
+                return cached.clone();
+            }
+
+            // Try to resolve using debug info
+            let frame = self.resolve_uncached(ip);
+            self.cache.insert(ip, frame.clone());
+            frame
+        }
+
+        /// Resolve without caching
+        fn resolve_uncached(&self, ip: u64) -> Frame with IO {
+            // Platform-specific symbol resolution
+            // This would call into libbacktrace, addr2line, or platform APIs
+
+            // For now, return unresolved frame
+            // In real implementation, this would:
+            // 1. Find the module containing this address
+            // 2. Load DWARF debug info
+            // 3. Look up the address in .debug_info
+            // 4. Get file/line from .debug_line
+            // 5. Demangle the symbol name
+
+            Frame::new(ip)
+        }
+
+        /// Demangle a symbol name
+        pub fn demangle(&self, mangled: &string) -> string {
+            // D symbol demangling
+            // Format: _D<length><name>...
+            if mangled.starts_with("_D") {
+                self.demangle_d_symbol(mangled)
+            } else if mangled.starts_with("_Z") {
+                // C++ mangling (Itanium ABI)
+                self.demangle_cxx_symbol(mangled)
+            } else {
+                mangled.clone()
+            }
+        }
+
+        fn demangle_d_symbol(&self, mangled: &string) -> string {
+            // Simplified D demangling
+            // Full implementation would handle all D mangling rules
+            mangled.clone()
+        }
+
+        fn demangle_cxx_symbol(&self, mangled: &string) -> string {
+            // Simplified C++ demangling
+            mangled.clone()
+        }
+    }
+
+    /// CPU sampling profiler
+    pub struct CpuProfiler {
+        /// Configuration
+        config: ProfileConfig,
+        /// Collected samples
+        samples: Vec<Sample>,
+        /// Symbol resolver
+        resolver: SymbolResolver,
+        /// Profiler state
+        state: ProfilerState,
+        /// Start time in nanoseconds
+        start_time_ns: u64,
+        /// Total samples collected
+        sample_count: u64,
+        /// Samples dropped due to buffer full
+        dropped_samples: u64,
+    }
+
+    /// Profiler state
+    enum ProfilerState {
+        Idle,
+        Running,
+        Paused,
+        Stopped,
+    }
+
+    impl CpuProfiler {
+        /// Create a new CPU profiler with the given configuration
+        pub fn new(config: ProfileConfig) -> Self {
+            CpuProfiler {
+                config: config,
+                samples: Vec::new(),
+                resolver: SymbolResolver::new(),
+                state: ProfilerState::Idle,
+                start_time_ns: 0,
+                sample_count: 0,
+                dropped_samples: 0,
+            }
+        }
+
+        /// Create with default configuration
+        pub fn default() -> Self {
+            Self::new(ProfileConfig::default())
+        }
+
+        /// Start profiling
+        pub fn start(&!self) with IO {
+            match self.state {
+                ProfilerState::Idle | ProfilerState::Stopped => {
+                    self.state = ProfilerState::Running;
+                    self.start_time_ns = clock_gettime_ns();
+                    self.samples.clear();
+                    self.sample_count = 0;
+                    self.dropped_samples = 0;
+
+                    // Start sampling timer
+                    self.start_sampling();
+                }
+                ProfilerState::Paused => {
+                    self.state = ProfilerState::Running;
+                    self.start_sampling();
+                }
+                ProfilerState::Running => {
+                    // Already running
+                }
+            }
+        }
+
+        /// Stop profiling
+        pub fn stop(&!self) with IO {
+            if let ProfilerState::Running = self.state {
+                self.stop_sampling();
+                self.state = ProfilerState::Stopped;
+
+                // Symbolicate all samples if configured
+                if self.config.symbolicate {
+                    self.symbolicate_samples();
+                }
+            }
+        }
+
+        /// Pause profiling (can be resumed)
+        pub fn pause(&!self) with IO {
+            if let ProfilerState::Running = self.state {
+                self.stop_sampling();
+                self.state = ProfilerState::Paused;
+            }
+        }
+
+        /// Resume paused profiling
+        pub fn resume(&!self) with IO {
+            if let ProfilerState::Paused = self.state {
+                self.state = ProfilerState::Running;
+                self.start_sampling();
+            }
+        }
+
+        /// Get the number of samples collected
+        pub fn sample_count(&self) -> u64 {
+            self.sample_count
+        }
+
+        /// Get the number of dropped samples
+        pub fn dropped_samples(&self) -> u64 {
+            self.dropped_samples
+        }
+
+        /// Generate a profile report
+        pub fn report(&self) -> ProfileReport {
+            ProfileReport::from_samples(&self.samples, &self.config)
+        }
+
+        /// Write folded stacks (for flame graph generation)
+        pub fn write_folded(&self, path: &string) with IO {
+            let folded = self.generate_folded_stacks();
+            write_file(path, &folded);
+        }
+
+        /// Generate flame graph SVG
+        pub fn write_flamegraph(&self, path: &string) with IO {
+            let data = FlameGraphData::from_samples(&self.samples);
+            let svg = data.render_svg();
+            write_file(path, &svg);
+        }
+
+        // Internal methods
+
+        fn start_sampling(&!self) with IO {
+            // Platform-specific: set up signal handler or timer
+            // On Linux: use setitimer with SIGPROF
+            // On macOS: use dispatch_source_create
+            // On Windows: use SetThreadpoolTimer
+
+            // Register signal handler for SIGPROF
+            // signal(SIGPROF, self.signal_handler);
+
+            // Set up interval timer
+            // let interval = self.config.sample_interval_us;
+            // setitimer(ITIMER_PROF, interval, interval);
+        }
+
+        fn stop_sampling(&self) with IO {
+            // Stop the interval timer
+            // setitimer(ITIMER_PROF, 0, 0);
+        }
+
+        fn signal_handler(&!self) with IO {
+            // Called on each sample interrupt
+            let sample = self.capture_sample();
+
+            // Check buffer space
+            if self.samples.len() < 1_000_000 {
+                self.samples.push(sample);
+                self.sample_count += 1;
+            } else {
+                self.dropped_samples += 1;
+            }
+        }
+
+        fn capture_sample(&self) -> Sample with IO {
+            let now = clock_gettime_ns() - self.start_time_ns;
+            let tid = get_thread_id();
+
+            let mut sample = Sample::new(now, tid);
+            sample.thread_name = get_thread_name(tid);
+            sample.cpu = get_current_cpu();
+
+            // Capture stack trace
+            let mut depth = 0u32;
+            let max_depth = self.config.max_stack_depth;
+
+            // Walk the stack using frame pointers or DWARF unwinding
+            // This is platform-specific
+            walk_stack(|ip| {
+                if depth < max_depth {
+                    sample.push_frame(Frame::new(ip));
+                    depth += 1;
+                    true // continue walking
+                } else {
+                    false // stop walking
+                }
+            });
+
+            sample
+        }
+
+        fn symbolicate_samples(&!self) with IO {
+            for sample in &mut self.samples {
+                for frame in &mut sample.frames {
+                    let resolved = self.resolver.resolve(frame.ip);
+                    frame.symbol = resolved.symbol;
+                    frame.file = resolved.file;
+                    frame.line = resolved.line;
+                    frame.column = resolved.column;
+                    frame.module = resolved.module;
+                    frame.is_inline = resolved.is_inline;
+                }
+            }
+        }
+
+        fn generate_folded_stacks(&self) -> string {
+            // Generate folded stack format: "func1;func2;func3 count\n"
+            let mut stacks: HashMap<string, u64> = HashMap::new();
+
+            for sample in &self.samples {
+                let stack = sample.frames
+                    .iter()
+                    .rev()
+                    .map(|f| f.symbol.clone().unwrap_or(format!("0x{:x}", f.ip)))
+                    .collect::<Vec<_>>()
+                    .join(";");
+
+                let count = stacks.get(&stack).unwrap_or(&0);
+                stacks.insert(stack, count + sample.weight);
+            }
+
+            let mut result = String::new();
+            for (stack, count) in stacks {
+                result.push_str(&format!("{} {}\n", stack, count));
+            }
+            result
+        }
+    }
+}
+
+//-----------------------------------------------------------------------------
+// Memory Profiler
+//-----------------------------------------------------------------------------
+
+pub mod memory {
+    use super::*;
+
+    /// An allocation record
+    pub struct Allocation {
+        /// Address of allocation
+        pub address: u64,
+        /// Size in bytes
+        pub size: u64,
+        /// Timestamp of allocation
+        pub timestamp_ns: u64,
+        /// Stack trace at allocation
+        pub backtrace: Vec<Frame>,
+        /// Thread that made the allocation
+        pub thread_id: u64,
+        /// Allocation type tag (if available)
+        pub type_tag: Option<string>,
+    }
+
+    /// A deallocation record
+    pub struct Deallocation {
+        /// Address being freed
+        pub address: u64,
+        /// Timestamp of deallocation
+        pub timestamp_ns: u64,
+        /// Thread that made the deallocation
+        pub thread_id: u64,
+    }
+
+    /// Memory profiler statistics
+    pub struct MemoryStats {
+        /// Total bytes allocated
+        pub total_allocated: u64,
+        /// Total bytes freed
+        pub total_freed: u64,
+        /// Current live bytes
+        pub live_bytes: u64,
+        /// Peak live bytes
+        pub peak_bytes: u64,
+        /// Total allocation count
+        pub allocation_count: u64,
+        /// Total deallocation count
+        pub deallocation_count: u64,
+        /// Current live allocation count
+        pub live_count: u64,
+    }
+
+    impl MemoryStats {
+        pub fn new() -> Self {
+            MemoryStats {
+                total_allocated: 0,
+                total_freed: 0,
+                live_bytes: 0,
+                peak_bytes: 0,
+                allocation_count: 0,
+                deallocation_count: 0,
+                live_count: 0,
+            }
+        }
+    }
+
+    /// Memory profiler
+    pub struct MemoryProfiler {
+        /// Configuration
+        config: ProfileConfig,
+        /// Live allocations
+        live: HashMap<u64, Allocation>,
+        /// All allocations (for leak detection)
+        all_allocations: Vec<Allocation>,
+        /// Statistics
+        stats: MemoryStats,
+        /// Symbol resolver
+        resolver: SymbolResolver,
+        /// Whether profiler is active
+        active: bool,
+        /// Start time
+        start_time_ns: u64,
+    }
+
+    impl MemoryProfiler {
+        /// Create new memory profiler
+        pub fn new(config: ProfileConfig) -> Self {
+            MemoryProfiler {
+                config: config,
+                live: HashMap::new(),
+                all_allocations: Vec::new(),
+                stats: MemoryStats::new(),
+                resolver: SymbolResolver::new(),
+                active: false,
+                start_time_ns: 0,
+            }
+        }
+
+        /// Create with default config
+        pub fn default() -> Self {
+            Self::new(ProfileConfig::memory())
+        }
+
+        /// Start memory profiling
+        pub fn start(&!self) with IO {
+            self.active = true;
+            self.start_time_ns = clock_gettime_ns();
+            self.live.clear();
+            self.all_allocations.clear();
+            self.stats = MemoryStats::new();
+
+            // Hook into allocator
+            self.install_hooks();
+        }
+
+        /// Stop memory profiling
+        pub fn stop(&!self) with IO {
+            self.active = false;
+            self.remove_hooks();
+
+            // Symbolicate backtraces if configured
+            if self.config.symbolicate {
+                self.symbolicate_allocations();
+            }
+        }
+
+        /// Record an allocation
+        pub fn record_alloc(&!self, address: u64, size: u64) with IO {
+            if !self.active {
+                return;
+            }
+
+            let now = clock_gettime_ns() - self.start_time_ns;
+            let tid = get_thread_id();
+
+            let mut alloc = Allocation {
+                address: address,
+                size: size,
+                timestamp_ns: now,
+                backtrace: Vec::new(),
+                thread_id: tid,
+                type_tag: None,
+            };
+
+            // Capture backtrace
+            let max_depth = self.config.max_stack_depth;
+            let mut depth = 0u32;
+            walk_stack(|ip| {
+                if depth < max_depth {
+                    alloc.backtrace.push(Frame::new(ip));
+                    depth += 1;
+                    true
+                } else {
+                    false
+                }
+            });
+
+            // Update stats
+            self.stats.total_allocated += size;
+            self.stats.allocation_count += 1;
+            self.stats.live_bytes += size;
+            self.stats.live_count += 1;
+
+            if self.stats.live_bytes > self.stats.peak_bytes {
+                self.stats.peak_bytes = self.stats.live_bytes;
+            }
+
+            // Store allocation
+            self.live.insert(address, alloc.clone());
+            self.all_allocations.push(alloc);
+        }
+
+        /// Record a deallocation
+        pub fn record_free(&!self, address: u64) with IO {
+            if !self.active {
+                return;
+            }
+
+            if let Some(alloc) = self.live.remove(&address) {
+                self.stats.total_freed += alloc.size;
+                self.stats.deallocation_count += 1;
+                self.stats.live_bytes -= alloc.size;
+                self.stats.live_count -= 1;
+            }
+        }
+
+        /// Get current statistics
+        pub fn stats(&self) -> &MemoryStats {
+            &self.stats
+        }
+
+        /// Get live allocations (potential leaks)
+        pub fn live_allocations(&self) -> &HashMap<u64, Allocation> {
+            &self.live
+        }
+
+        /// Generate memory report
+        pub fn report(&self) -> MemoryReport {
+            MemoryReport {
+                stats: self.stats.clone(),
+                leaks: self.live.values().cloned().collect(),
+                top_allocators: self.find_top_allocators(10),
+            }
+        }
+
+        /// Find top allocation sites
+        fn find_top_allocators(&self, n: usize) -> Vec<AllocationSite> {
+            // Group allocations by call site
+            let mut sites: HashMap<string, AllocationSite> = HashMap::new();
+
+            for alloc in &self.all_allocations {
+                let key = if alloc.backtrace.len() > 0 {
+                    alloc.backtrace[0].display()
+                } else {
+                    "unknown".to_string()
+                };
+
+                let site = sites.entry(key.clone()).or_insert(AllocationSite {
+                    location: key,
+                    count: 0,
+                    total_bytes: 0,
+                    avg_size: 0.0,
+                });
+
+                site.count += 1;
+                site.total_bytes += alloc.size;
+            }
+
+            // Calculate averages and sort
+            let mut result: Vec<_> = sites.values().cloned().collect();
+            for site in &mut result {
+                site.avg_size = site.total_bytes as f64 / site.count as f64;
+            }
+            result.sort_by(|a, b| b.total_bytes.cmp(&a.total_bytes));
+            result.truncate(n);
+            result
+        }
+
+        fn install_hooks(&self) with IO {
+            // Platform-specific: hook malloc/free
+            // Options:
+            // 1. LD_PRELOAD with custom allocator
+            // 2. Use jemalloc's prof feature
+            // 3. Override global allocator
+        }
+
+        fn remove_hooks(&self) with IO {
+            // Remove allocation hooks
+        }
+
+        fn symbolicate_allocations(&!self) with IO {
+            for alloc in &mut self.all_allocations {
+                for frame in &mut alloc.backtrace {
+                    let resolved = self.resolver.resolve(frame.ip);
+                    frame.symbol = resolved.symbol;
+                    frame.file = resolved.file;
+                    frame.line = resolved.line;
+                }
+            }
+        }
+    }
+
+    /// Allocation site summary
+    pub struct AllocationSite {
+        /// Source location
+        pub location: string,
+        /// Number of allocations
+        pub count: u64,
+        /// Total bytes allocated
+        pub total_bytes: u64,
+        /// Average allocation size
+        pub avg_size: f64,
+    }
+
+    /// Memory profile report
+    pub struct MemoryReport {
+        /// Overall statistics
+        pub stats: MemoryStats,
+        /// Detected leaks
+        pub leaks: Vec<Allocation>,
+        /// Top allocation sites
+        pub top_allocators: Vec<AllocationSite>,
+    }
+
+    impl MemoryReport {
+        /// Print report to stdout
+        pub fn print(&self) with IO {
+            println!("=== Memory Profile Report ===");
+            println!("");
+            println!("Statistics:");
+            println!("  Total allocated: {} bytes", self.stats.total_allocated);
+            println!("  Total freed:     {} bytes", self.stats.total_freed);
+            println!("  Peak usage:      {} bytes", self.stats.peak_bytes);
+            println!("  Allocations:     {}", self.stats.allocation_count);
+            println!("  Deallocations:   {}", self.stats.deallocation_count);
+            println!("");
+
+            if self.leaks.len() > 0 {
+                println!("Potential Leaks ({} allocations, {} bytes):",
+                    self.stats.live_count, self.stats.live_bytes);
+                for leak in &self.leaks {
+                    println!("  {} bytes at 0x{:x}", leak.size, leak.address);
+                    for (i, frame) in leak.backtrace.iter().enumerate() {
+                        println!("    #{}: {}", i, frame.display());
+                    }
+                }
+                println!("");
+            }
+
+            println!("Top Allocation Sites:");
+            for (i, site) in self.top_allocators.iter().enumerate() {
+                println!("  {}. {} - {} allocs, {} bytes (avg {:.1})",
+                    i + 1, site.location, site.count, site.total_bytes, site.avg_size);
+            }
+        }
+    }
+}
+
+//-----------------------------------------------------------------------------
+// Flame Graph Generation
+//-----------------------------------------------------------------------------
+
+pub mod flamegraph {
+    use super::*;
+
+    /// Flame graph data structure
+    pub struct FlameGraphData {
+        /// Root node
+        root: FlameNode,
+        /// Total sample count
+        total_samples: u64,
+        /// Title for the graph
+        title: string,
+    }
+
+    /// A node in the flame graph tree
+    struct FlameNode {
+        /// Function name
+        name: string,
+        /// Sample count for this node
+        count: u64,
+        /// Children nodes
+        children: HashMap<string, FlameNode>,
+    }
+
+    impl FlameNode {
+        fn new(name: string) -> Self {
+            FlameNode {
+                name: name,
+                count: 0,
+                children: HashMap::new(),
+            }
+        }
+
+        fn add_stack(&!self, frames: &[string], weight: u64) {
+            self.count += weight;
+
+            if frames.len() > 0 {
+                let name = &frames[0];
+                let child = self.children
+                    .entry(name.clone())
+                    .or_insert(FlameNode::new(name.clone()));
+                child.add_stack(&frames[1..], weight);
+            }
+        }
+    }
+
+    impl FlameGraphData {
+        /// Create flame graph from CPU samples
+        pub fn from_samples(samples: &[Sample]) -> Self {
+            let mut root = FlameNode::new("root".to_string());
+            let mut total = 0u64;
+
+            for sample in samples {
+                // Reverse frames (outermost first for flame graph)
+                let frames: Vec<string> = sample.frames
+                    .iter()
+                    .rev()
+                    .map(|f| f.symbol.clone().unwrap_or(format!("0x{:x}", f.ip)))
+                    .collect();
+
+                root.add_stack(&frames, sample.weight);
+                total += sample.weight;
+            }
+
+            FlameGraphData {
+                root: root,
+                total_samples: total,
+                title: "CPU Profile".to_string(),
+            }
+        }
+
+        /// Set custom title
+        pub fn with_title(&!self, title: string) {
+            self.title = title;
+        }
+
+        /// Render to SVG
+        pub fn render_svg(&self) -> string {
+            let width = 1200;
+            let height = self.calculate_height();
+            let frame_height = 16;
+
+            let mut svg = String::new();
+
+            // SVG header
+            svg.push_str(&format!(
+                r#"<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg"
+     viewBox="0 0 {} {}"
+     width="{}" height="{}"
+     style="font-family: monospace; font-size: 12px;">
+<style>
+    .frame {{ fill: #ff6600; stroke: #d44a00; }}
+    .frame:hover {{ fill: #ff8833; cursor: pointer; }}
+    .frame text {{ fill: white; pointer-events: none; }}
+</style>
+<rect width="100%" height="100%" fill="#f8f8f8"/>
+<text x="20" y="20" font-size="16" font-weight="bold">{}</text>
+<text x="20" y="40" font-size="12">Total samples: {}</text>
+"#,
+                width, height, width, height, self.title, self.total_samples
+            ));
+
+            // Render frames
+            self.render_node(&self.root, &mut svg, 0.0, width as f64, 60, frame_height);
+
+            svg.push_str("</svg>");
+            svg
+        }
+
+        fn render_node(
+            &self,
+            node: &FlameNode,
+            svg: &mut String,
+            x: f64,
+            width: f64,
+            y: i32,
+            height: i32
+        ) {
+            if node.count == 0 || width < 1.0 {
+                return;
+            }
+
+            // Choose color based on name hash
+            let color = self.hash_color(&node.name);
+
+            // Draw this frame
+            if node.name != "root" {
+                svg.push_str(&format!(
+                    r#"<g class="frame">
+    <rect x="{:.1}" y="{}" width="{:.1}" height="{}" fill="{}"/>
+    <text x="{:.1}" y="{}" clip-path="url(#clip)">{}</text>
+</g>
+"#,
+                    x, y, width, height, color,
+                    x + 2.0, y + height - 4,
+                    self.truncate_name(&node.name, (width / 7.0) as usize)
+                ));
+            }
+
+            // Render children
+            let mut child_x = x;
+            let child_y = if node.name == "root" { y } else { y + height };
+
+            for child in node.children.values() {
+                let child_width = (child.count as f64 / node.count as f64) * width;
+                self.render_node(child, svg, child_x, child_width, child_y, height);
+                child_x += child_width;
+            }
+        }
+
+        fn calculate_height(&self) -> i32 {
+            let depth = self.max_depth(&self.root, 0);
+            60 + (depth * 16) + 20
+        }
+
+        fn max_depth(&self, node: &FlameNode, current: i32) -> i32 {
+            let mut max = current;
+            for child in node.children.values() {
+                let child_depth = self.max_depth(child, current + 1);
+                if child_depth > max {
+                    max = child_depth;
+                }
+            }
+            max
+        }
+
+        fn hash_color(&self, name: &string) -> string {
+            // Generate color from name hash
+            let mut hash = 0u32;
+            for b in name.bytes() {
+                hash = hash.wrapping_mul(31).wrapping_add(b as u32);
+            }
+
+            // Orange-red palette for hot functions
+            let r = 200 + (hash % 55);
+            let g = 50 + (hash / 2 % 100);
+            let b = hash % 50;
+
+            format!("rgb({},{},{})", r, g, b)
+        }
+
+        fn truncate_name(&self, name: &string, max_len: usize) -> string {
+            if name.len() <= max_len {
+                name.clone()
+            } else if max_len > 3 {
+                format!("{}...", &name[..max_len-3])
+            } else {
+                "".to_string()
+            }
+        }
+    }
+}
+
+//-----------------------------------------------------------------------------
+// Profile Reports
+//-----------------------------------------------------------------------------
+
+pub mod report {
+    use super::*;
+
+    /// A profile report
+    pub struct ProfileReport {
+        /// Summary statistics
+        pub summary: ProfileSummary,
+        /// Hot functions
+        pub hot_functions: Vec<FunctionProfile>,
+        /// Call graph
+        pub call_graph: CallGraph,
+        /// Raw samples (if retained)
+        samples: Option<Vec<Sample>>,
+    }
+
+    /// Summary statistics
+    pub struct ProfileSummary {
+        /// Total samples collected
+        pub total_samples: u64,
+        /// Duration of profiling in nanoseconds
+        pub duration_ns: u64,
+        /// Number of threads sampled
+        pub thread_count: u32,
+        /// Dropped samples
+        pub dropped_samples: u64,
+    }
+
+    /// Profile for a single function
+    pub struct FunctionProfile {
+        /// Function name
+        pub name: string,
+        /// Self time (samples where this was the top frame)
+        pub self_samples: u64,
+        /// Total time (samples where this was anywhere on stack)
+        pub total_samples: u64,
+        /// Self percentage
+        pub self_percent: f64,
+        /// Total percentage
+        pub total_percent: f64,
+        /// Callers
+        pub callers: Vec<string>,
+        /// Callees
+        pub callees: Vec<string>,
+    }
+
+    /// Call graph
+    pub struct CallGraph {
+        /// Nodes (functions)
+        nodes: HashMap<string, CallGraphNode>,
+        /// Edges (caller -> callee)
+        edges: Vec<CallGraphEdge>,
+    }
+
+    struct CallGraphNode {
+        name: string,
+        samples: u64,
+    }
+
+    struct CallGraphEdge {
+        caller: string,
+        callee: string,
+        count: u64,
+    }
+
+    impl CallGraph {
+        fn new() -> Self {
+            CallGraph {
+                nodes: HashMap::new(),
+                edges: Vec::new(),
+            }
+        }
+    }
+
+    impl ProfileReport {
+        /// Create report from samples
+        pub fn from_samples(samples: &[Sample], config: &ProfileConfig) -> Self {
+            let mut self_counts: HashMap<string, u64> = HashMap::new();
+            let mut total_counts: HashMap<string, u64> = HashMap::new();
+            let mut thread_ids: HashSet<u64> = HashSet::new();
+
+            let total_samples = samples.len() as u64;
+            let duration = if samples.len() > 0 {
+                samples.last().unwrap().timestamp_ns - samples[0].timestamp_ns
+            } else {
+                0
+            };
+
+            for sample in samples {
+                thread_ids.insert(sample.thread_id);
+
+                // Count self time (top of stack)
+                if sample.frames.len() > 0 {
+                    let top = &sample.frames[0];
+                    let name = top.symbol.clone().unwrap_or(format!("0x{:x}", top.ip));
+                    let count = self_counts.get(&name).unwrap_or(&0);
+                    self_counts.insert(name, count + sample.weight);
+                }
+
+                // Count total time (anywhere on stack)
+                let mut seen: HashSet<string> = HashSet::new();
+                for frame in &sample.frames {
+                    let name = frame.symbol.clone().unwrap_or(format!("0x{:x}", frame.ip));
+                    if !seen.contains(&name) {
+                        seen.insert(name.clone());
+                        let count = total_counts.get(&name).unwrap_or(&0);
+                        total_counts.insert(name, count + sample.weight);
+                    }
+                }
+            }
+
+            // Build hot functions list
+            let mut hot_functions: Vec<FunctionProfile> = Vec::new();
+            for (name, &self_samples) in &self_counts {
+                let total_samples = total_counts.get(name).unwrap_or(&0);
+                hot_functions.push(FunctionProfile {
+                    name: name.clone(),
+                    self_samples: self_samples,
+                    total_samples: *total_samples,
+                    self_percent: (self_samples as f64 / total_samples as f64) * 100.0,
+                    total_percent: (*total_samples as f64 / total_samples as f64) * 100.0,
+                    callers: Vec::new(),
+                    callees: Vec::new(),
+                });
+            }
+
+            // Sort by self time
+            hot_functions.sort_by(|a, b| b.self_samples.cmp(&a.self_samples));
+
+            ProfileReport {
+                summary: ProfileSummary {
+                    total_samples: total_samples,
+                    duration_ns: duration,
+                    thread_count: thread_ids.len() as u32,
+                    dropped_samples: 0,
+                },
+                hot_functions: hot_functions,
+                call_graph: CallGraph::new(),
+                samples: None,
+            }
+        }
+
+        /// Print text report
+        pub fn print(&self) with IO {
+            println!("=== CPU Profile Report ===");
+            println!("");
+            println!("Summary:");
+            println!("  Total samples:  {}", self.summary.total_samples);
+            println!("  Duration:       {:.2}ms", self.summary.duration_ns as f64 / 1_000_000.0);
+            println!("  Threads:        {}", self.summary.thread_count);
+            println!("");
+            println!("Hot Functions (by self time):");
+            println!("{:<50} {:>10} {:>8} {:>10} {:>8}",
+                "Function", "Self", "Self%", "Total", "Total%");
+            println!("{}", "-".repeat(86));
+
+            for (i, func) in self.hot_functions.iter().take(20).enumerate() {
+                println!("{:<50} {:>10} {:>7.2}% {:>10} {:>7.2}%",
+                    truncate(&func.name, 50),
+                    func.self_samples,
+                    func.self_percent,
+                    func.total_samples,
+                    func.total_percent);
+            }
+        }
+
+        /// Write to JSON file
+        pub fn write_json(&self, path: &string) with IO {
+            // Serialize to JSON
+            let json = self.to_json();
+            write_file(path, &json);
+        }
+
+        fn to_json(&self) -> string {
+            // Simple JSON serialization
+            let mut json = String::new();
+            json.push_str("{\n");
+            json.push_str(&format!("  \"total_samples\": {},\n", self.summary.total_samples));
+            json.push_str(&format!("  \"duration_ns\": {},\n", self.summary.duration_ns));
+            json.push_str("  \"hot_functions\": [\n");
+
+            for (i, func) in self.hot_functions.iter().enumerate() {
+                if i > 0 {
+                    json.push_str(",\n");
+                }
+                json.push_str(&format!(
+                    "    {{\"name\": \"{}\", \"self\": {}, \"total\": {}}}",
+                    escape_json(&func.name), func.self_samples, func.total_samples
+                ));
+            }
+
+            json.push_str("\n  ]\n}");
+            json
+        }
+    }
+}
+
+//-----------------------------------------------------------------------------
+// Utility Functions
+//-----------------------------------------------------------------------------
+
+/// Get current time in nanoseconds
+fn clock_gettime_ns() -> u64 with IO {
+    // Platform-specific implementation
+    0
+}
+
+/// Get current thread ID
+fn get_thread_id() -> u64 with IO {
+    // Platform-specific implementation
+    0
+}
+
+/// Get thread name for a thread ID
+fn get_thread_name(tid: u64) -> Option<string> with IO {
+    None
+}
+
+/// Get current CPU number
+fn get_current_cpu() -> Option<u32> with IO {
+    None
+}
+
+/// Walk the call stack, calling the callback for each frame
+fn walk_stack(callback: fn(u64) -> bool) with IO {
+    // Platform-specific stack walking
+    // Uses frame pointers or DWARF unwinding
+}
+
+/// Write content to a file
+fn write_file(path: &string, content: &string) with IO {
+    // File I/O
+}
+
+/// Truncate a string to max length
+fn truncate(s: &string, max_len: usize) -> string {
+    if s.len() <= max_len {
+        s.clone()
+    } else if max_len > 3 {
+        format!("{}...", &s[..max_len-3])
+    } else {
+        "...".to_string()
+    }
+}
+
+/// Escape special characters for JSON
+fn escape_json(s: &string) -> string {
+    s.replace("\\", "\\\\")
+     .replace("\"", "\\\"")
+     .replace("\n", "\\n")
+     .replace("\r", "\\r")
+     .replace("\t", "\\t")
+}

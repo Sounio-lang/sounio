@@ -1,0 +1,1160 @@
+//! Structured Tracing Framework for Demetrios
+//!
+//! This module provides a comprehensive tracing system for observability:
+//! - Structured spans and events
+//! - Multiple output formats (JSON, text, OpenTelemetry)
+//! - Hierarchical context propagation
+//! - Performance metrics integration
+//!
+//! # Example
+//! ```d
+//! import trace;
+//!
+//! fn process_request(req: Request) -> Response with IO, Trace {
+//!     let _span = span!("process_request",
+//!         request_id = req.id,
+//!         method = req.method
+//!     );
+//!
+//!     event!(Level::Info, "Processing request");
+//!
+//!     let user = fetch_user(req.user_id)?;
+//!     event!(Level::Debug, user_name = user.name, "Found user");
+//!
+//!     // ... process request ...
+//!
+//!     Response::ok()
+//! }
+//! ```
+
+//-----------------------------------------------------------------------------
+// Log Levels
+//-----------------------------------------------------------------------------
+
+/// Severity level for events
+pub enum Level {
+    /// Very detailed debugging information
+    Trace,
+    /// Debugging information
+    Debug,
+    /// Informational messages
+    Info,
+    /// Warning conditions
+    Warn,
+    /// Error conditions
+    Error,
+}
+
+impl Level {
+    pub fn as_str(&self) -> &str {
+        match self {
+            Level::Trace => "TRACE",
+            Level::Debug => "DEBUG",
+            Level::Info => "INFO",
+            Level::Warn => "WARN",
+            Level::Error => "ERROR",
+        }
+    }
+
+    pub fn as_number(&self) -> u8 {
+        match self {
+            Level::Trace => 0,
+            Level::Debug => 1,
+            Level::Info => 2,
+            Level::Warn => 3,
+            Level::Error => 4,
+        }
+    }
+}
+
+//-----------------------------------------------------------------------------
+// Field Values
+//-----------------------------------------------------------------------------
+
+/// A value that can be attached to spans and events
+pub enum Value {
+    /// String value
+    String(string),
+    /// Integer value
+    Int(i64),
+    /// Unsigned integer value
+    Uint(u64),
+    /// Floating point value
+    Float(f64),
+    /// Boolean value
+    Bool(bool),
+    /// Debug representation of a value
+    Debug(string),
+    /// Bytes
+    Bytes(Vec<u8>),
+    /// Null/none
+    None,
+}
+
+impl Value {
+    pub fn as_string(&self) -> string {
+        match self {
+            Value::String(s) => s.clone(),
+            Value::Int(n) => format!("{}", n),
+            Value::Uint(n) => format!("{}", n),
+            Value::Float(f) => format!("{}", f),
+            Value::Bool(b) => if *b { "true" } else { "false" }.to_string(),
+            Value::Debug(s) => s.clone(),
+            Value::Bytes(b) => format!("{:?}", b),
+            Value::None => "null".to_string(),
+        }
+    }
+}
+
+/// A key-value field
+pub struct Field {
+    /// Field name
+    pub key: string,
+    /// Field value
+    pub value: Value,
+}
+
+impl Field {
+    pub fn new(key: string, value: Value) -> Self {
+        Field { key, value }
+    }
+
+    pub fn string(key: &str, value: &str) -> Self {
+        Field::new(key.to_string(), Value::String(value.to_string()))
+    }
+
+    pub fn int(key: &str, value: i64) -> Self {
+        Field::new(key.to_string(), Value::Int(value))
+    }
+
+    pub fn uint(key: &str, value: u64) -> Self {
+        Field::new(key.to_string(), Value::Uint(value))
+    }
+
+    pub fn float(key: &str, value: f64) -> Self {
+        Field::new(key.to_string(), Value::Float(value))
+    }
+
+    pub fn bool(key: &str, value: bool) -> Self {
+        Field::new(key.to_string(), Value::Bool(value))
+    }
+}
+
+//-----------------------------------------------------------------------------
+// Span ID and Trace ID
+//-----------------------------------------------------------------------------
+
+/// Unique identifier for a span
+pub struct SpanId(u64);
+
+impl SpanId {
+    pub fn new(id: u64) -> Self {
+        SpanId(id)
+    }
+
+    pub fn to_hex(&self) -> string {
+        format!("{:016x}", self.0)
+    }
+}
+
+/// Unique identifier for a trace (across distributed systems)
+pub struct TraceId {
+    high: u64,
+    low: u64,
+}
+
+impl TraceId {
+    pub fn new(high: u64, low: u64) -> Self {
+        TraceId { high, low }
+    }
+
+    pub fn generate() -> Self with IO {
+        // Generate random trace ID
+        TraceId {
+            high: random_u64(),
+            low: random_u64(),
+        }
+    }
+
+    pub fn to_hex(&self) -> string {
+        format!("{:016x}{:016x}", self.high, self.low)
+    }
+
+    pub fn from_hex(s: &str) -> Option<Self> {
+        if s.len() != 32 {
+            return None;
+        }
+
+        let high = u64::from_str_radix(&s[0..16], 16).ok()?;
+        let low = u64::from_str_radix(&s[16..32], 16).ok()?;
+        Some(TraceId { high, low })
+    }
+}
+
+//-----------------------------------------------------------------------------
+// Span
+//-----------------------------------------------------------------------------
+
+/// Span metadata
+pub struct SpanMetadata {
+    /// Span name
+    pub name: string,
+    /// Target (module path)
+    pub target: string,
+    /// Level
+    pub level: Level,
+    /// Source file
+    pub file: Option<string>,
+    /// Source line
+    pub line: Option<u32>,
+}
+
+/// A span representing a unit of work
+pub struct Span {
+    /// Span ID
+    id: SpanId,
+    /// Parent span ID
+    parent_id: Option<SpanId>,
+    /// Trace ID
+    trace_id: TraceId,
+    /// Metadata
+    metadata: SpanMetadata,
+    /// Fields attached to this span
+    fields: Vec<Field>,
+    /// Start timestamp (ns)
+    start_ns: u64,
+    /// End timestamp (ns)
+    end_ns: Option<u64>,
+    /// Whether this span is currently entered
+    entered: bool,
+}
+
+impl Span {
+    /// Create a new span
+    pub fn new(name: &str) -> SpanBuilder {
+        SpanBuilder::new(name.to_string())
+    }
+
+    /// Enter this span (make it the current span)
+    pub fn enter(&!self) -> SpanGuard {
+        self.entered = true;
+        SUBSCRIBER.with(|s| s.enter(&self));
+        SpanGuard { span: self }
+    }
+
+    /// Record a field on this span
+    pub fn record(&!self, field: Field) {
+        self.fields.push(field);
+        SUBSCRIBER.with(|s| s.record(&self, &field));
+    }
+
+    /// Check if span is currently entered
+    pub fn is_entered(&self) -> bool {
+        self.entered
+    }
+
+    /// Get span duration (if completed)
+    pub fn duration_ns(&self) -> Option<u64> {
+        self.end_ns.map(|end| end - self.start_ns)
+    }
+}
+
+/// Guard that exits span when dropped
+pub struct SpanGuard<'a> {
+    span: &'a Span,
+}
+
+impl<'a> Drop for SpanGuard<'a> {
+    fn drop(&!self) {
+        self.span.entered = false;
+        self.span.end_ns = Some(clock_gettime_ns());
+        SUBSCRIBER.with(|s| s.exit(&self.span));
+    }
+}
+
+/// Builder for creating spans
+pub struct SpanBuilder {
+    name: string,
+    target: Option<string>,
+    level: Level,
+    fields: Vec<Field>,
+    file: Option<string>,
+    line: Option<u32>,
+}
+
+impl SpanBuilder {
+    pub fn new(name: string) -> Self {
+        SpanBuilder {
+            name: name,
+            target: None,
+            level: Level::Info,
+            fields: Vec::new(),
+            file: None,
+            line: None,
+        }
+    }
+
+    pub fn target(&!self, target: &str) -> &!Self {
+        self.target = Some(target.to_string());
+        self
+    }
+
+    pub fn level(&!self, level: Level) -> &!Self {
+        self.level = level;
+        self
+    }
+
+    pub fn field(&!self, field: Field) -> &!Self {
+        self.fields.push(field);
+        self
+    }
+
+    pub fn file(&!self, file: &str) -> &!Self {
+        self.file = Some(file.to_string());
+        self
+    }
+
+    pub fn line(&!self, line: u32) -> &!Self {
+        self.line = Some(line);
+        self
+    }
+
+    pub fn build(&self) -> Span with IO {
+        let id = SpanId::new(generate_span_id());
+        let parent = current_span_id();
+        let trace = current_trace_id().unwrap_or_else(|| TraceId::generate());
+
+        let span = Span {
+            id: id,
+            parent_id: parent,
+            trace_id: trace,
+            metadata: SpanMetadata {
+                name: self.name.clone(),
+                target: self.target.clone().unwrap_or("".to_string()),
+                level: self.level.clone(),
+                file: self.file.clone(),
+                line: self.line,
+            },
+            fields: self.fields.clone(),
+            start_ns: clock_gettime_ns(),
+            end_ns: None,
+            entered: false,
+        };
+
+        SUBSCRIBER.with(|s| s.new_span(&span));
+        span
+    }
+}
+
+//-----------------------------------------------------------------------------
+// Event
+//-----------------------------------------------------------------------------
+
+/// An event (point-in-time occurrence)
+pub struct Event {
+    /// Metadata
+    pub metadata: EventMetadata,
+    /// Fields
+    pub fields: Vec<Field>,
+    /// Timestamp
+    pub timestamp_ns: u64,
+    /// Parent span
+    pub span_id: Option<SpanId>,
+}
+
+/// Event metadata
+pub struct EventMetadata {
+    /// Message
+    pub message: string,
+    /// Target
+    pub target: string,
+    /// Level
+    pub level: Level,
+    /// Source file
+    pub file: Option<string>,
+    /// Source line
+    pub line: Option<u32>,
+}
+
+impl Event {
+    /// Create and record an event
+    pub fn emit(level: Level, message: &str) with IO, Trace {
+        let event = Event {
+            metadata: EventMetadata {
+                message: message.to_string(),
+                target: "".to_string(),
+                level: level,
+                file: None,
+                line: None,
+            },
+            fields: Vec::new(),
+            timestamp_ns: clock_gettime_ns(),
+            span_id: current_span_id(),
+        };
+
+        SUBSCRIBER.with(|s| s.event(&event));
+    }
+
+    /// Create event builder
+    pub fn builder(level: Level, message: &str) -> EventBuilder {
+        EventBuilder::new(level, message.to_string())
+    }
+}
+
+/// Builder for events
+pub struct EventBuilder {
+    level: Level,
+    message: string,
+    target: Option<string>,
+    fields: Vec<Field>,
+    file: Option<string>,
+    line: Option<u32>,
+}
+
+impl EventBuilder {
+    pub fn new(level: Level, message: string) -> Self {
+        EventBuilder {
+            level: level,
+            message: message,
+            target: None,
+            fields: Vec::new(),
+            file: None,
+            line: None,
+        }
+    }
+
+    pub fn target(&!self, target: &str) -> &!Self {
+        self.target = Some(target.to_string());
+        self
+    }
+
+    pub fn field(&!self, field: Field) -> &!Self {
+        self.fields.push(field);
+        self
+    }
+
+    pub fn file(&!self, file: &str) -> &!Self {
+        self.file = Some(file.to_string());
+        self
+    }
+
+    pub fn line(&!self, line: u32) -> &!Self {
+        self.line = Some(line);
+        self
+    }
+
+    pub fn emit(&self) with IO, Trace {
+        let event = Event {
+            metadata: EventMetadata {
+                message: self.message.clone(),
+                target: self.target.clone().unwrap_or("".to_string()),
+                level: self.level.clone(),
+                file: self.file.clone(),
+                line: self.line,
+            },
+            fields: self.fields.clone(),
+            timestamp_ns: clock_gettime_ns(),
+            span_id: current_span_id(),
+        };
+
+        SUBSCRIBER.with(|s| s.event(&event));
+    }
+}
+
+//-----------------------------------------------------------------------------
+// Subscriber (Output Handler)
+//-----------------------------------------------------------------------------
+
+/// Trait for handling trace events
+pub trait Subscriber {
+    /// Called when a new span is created
+    fn new_span(&!self, span: &Span);
+
+    /// Called when a span is entered
+    fn enter(&!self, span: &Span);
+
+    /// Called when a field is recorded on a span
+    fn record(&!self, span: &Span, field: &Field);
+
+    /// Called when a span is exited
+    fn exit(&!self, span: &Span);
+
+    /// Called when an event occurs
+    fn event(&!self, event: &Event);
+
+    /// Called when a span is dropped
+    fn close(&!self, span: &Span);
+
+    /// Check if this subscriber is interested in a given level
+    fn enabled(&self, level: &Level) -> bool;
+}
+
+/// Thread-local subscriber
+thread_local static SUBSCRIBER: Box<dyn Subscriber> = Box::new(NoopSubscriber);
+
+/// Set the global subscriber
+pub fn set_subscriber(subscriber: Box<dyn Subscriber>) {
+    SUBSCRIBER.with(|s| *s = subscriber);
+}
+
+/// No-op subscriber (discards all events)
+pub struct NoopSubscriber;
+
+impl Subscriber for NoopSubscriber {
+    fn new_span(&!self, _: &Span) {}
+    fn enter(&!self, _: &Span) {}
+    fn record(&!self, _: &Span, _: &Field) {}
+    fn exit(&!self, _: &Span) {}
+    fn event(&!self, _: &Event) {}
+    fn close(&!self, _: &Span) {}
+    fn enabled(&self, _: &Level) -> bool { false }
+}
+
+//-----------------------------------------------------------------------------
+// Built-in Subscribers
+//-----------------------------------------------------------------------------
+
+/// Text format subscriber (for console output)
+pub struct FmtSubscriber {
+    /// Minimum level to output
+    min_level: Level,
+    /// Whether to include timestamps
+    with_timestamp: bool,
+    /// Whether to include span context
+    with_spans: bool,
+    /// Whether to include source location
+    with_location: bool,
+    /// Whether to use ANSI colors
+    with_ansi: bool,
+    /// Output writer
+    writer: Box<dyn Write>,
+}
+
+impl FmtSubscriber {
+    pub fn new() -> Self {
+        FmtSubscriber {
+            min_level: Level::Info,
+            with_timestamp: true,
+            with_spans: true,
+            with_location: false,
+            with_ansi: true,
+            writer: Box::new(Stderr),
+        }
+    }
+
+    pub fn with_level(&!self, level: Level) -> &!Self {
+        self.min_level = level;
+        self
+    }
+
+    pub fn with_timestamp(&!self, enabled: bool) -> &!Self {
+        self.with_timestamp = enabled;
+        self
+    }
+
+    pub fn with_ansi(&!self, enabled: bool) -> &!Self {
+        self.with_ansi = enabled;
+        self
+    }
+
+    fn format_level(&self, level: &Level) -> string {
+        if self.with_ansi {
+            match level {
+                Level::Trace => "\x1b[35mTRACE\x1b[0m",
+                Level::Debug => "\x1b[34mDEBUG\x1b[0m",
+                Level::Info => "\x1b[32m INFO\x1b[0m",
+                Level::Warn => "\x1b[33m WARN\x1b[0m",
+                Level::Error => "\x1b[31mERROR\x1b[0m",
+            }.to_string()
+        } else {
+            format!("{:5}", level.as_str())
+        }
+    }
+}
+
+impl Subscriber for FmtSubscriber {
+    fn new_span(&!self, span: &Span) {
+        // Optionally log span creation
+    }
+
+    fn enter(&!self, span: &Span) {
+        // Optionally log span entry
+    }
+
+    fn record(&!self, span: &Span, field: &Field) {
+        // Optionally log field recording
+    }
+
+    fn exit(&!self, span: &Span) {
+        if let Some(duration) = span.duration_ns() {
+            let msg = format!(
+                "{} {} ({}ms)\n",
+                self.format_level(&span.metadata.level),
+                span.metadata.name,
+                duration as f64 / 1_000_000.0
+            );
+            self.writer.write(&msg);
+        }
+    }
+
+    fn event(&!self, event: &Event) with IO {
+        if !self.enabled(&event.metadata.level) {
+            return;
+        }
+
+        let mut line = String::new();
+
+        // Timestamp
+        if self.with_timestamp {
+            let now = clock_gettime_ns();
+            let secs = now / 1_000_000_000;
+            let nanos = now % 1_000_000_000;
+            line.push_str(&format!("{}.{:09} ", secs, nanos));
+        }
+
+        // Level
+        line.push_str(&self.format_level(&event.metadata.level));
+        line.push_str(" ");
+
+        // Target
+        if event.metadata.target.len() > 0 {
+            line.push_str(&event.metadata.target);
+            line.push_str(": ");
+        }
+
+        // Message
+        line.push_str(&event.metadata.message);
+
+        // Fields
+        if event.fields.len() > 0 {
+            line.push_str(" {");
+            for (i, field) in event.fields.iter().enumerate() {
+                if i > 0 {
+                    line.push_str(", ");
+                }
+                line.push_str(&format!("{}={}", field.key, field.value.as_string()));
+            }
+            line.push_str("}");
+        }
+
+        // Location
+        if self.with_location {
+            if let (Some(file), Some(line_num)) = (&event.metadata.file, event.metadata.line) {
+                line.push_str(&format!(" at {}:{}", file, line_num));
+            }
+        }
+
+        line.push_str("\n");
+        self.writer.write(&line);
+    }
+
+    fn close(&!self, _: &Span) {}
+
+    fn enabled(&self, level: &Level) -> bool {
+        level.as_number() >= self.min_level.as_number()
+    }
+}
+
+/// JSON format subscriber
+pub struct JsonSubscriber {
+    /// Minimum level
+    min_level: Level,
+    /// Output writer
+    writer: Box<dyn Write>,
+}
+
+impl JsonSubscriber {
+    pub fn new(writer: Box<dyn Write>) -> Self {
+        JsonSubscriber {
+            min_level: Level::Info,
+            writer: writer,
+        }
+    }
+}
+
+impl Subscriber for JsonSubscriber {
+    fn new_span(&!self, span: &Span) {
+        let json = format!(
+            r#"{{"type":"span_new","span_id":"{}","trace_id":"{}","name":"{}","ts":{}}}"#,
+            span.id.to_hex(),
+            span.trace_id.to_hex(),
+            span.metadata.name,
+            span.start_ns
+        );
+        self.writer.write(&json);
+        self.writer.write("\n");
+    }
+
+    fn enter(&!self, span: &Span) {
+        let json = format!(
+            r#"{{"type":"span_enter","span_id":"{}","ts":{}}}"#,
+            span.id.to_hex(),
+            clock_gettime_ns()
+        );
+        self.writer.write(&json);
+        self.writer.write("\n");
+    }
+
+    fn record(&!self, span: &Span, field: &Field) {
+        let json = format!(
+            r#"{{"type":"span_record","span_id":"{}","field":"{}","value":{}}}"#,
+            span.id.to_hex(),
+            field.key,
+            field.value.as_string()
+        );
+        self.writer.write(&json);
+        self.writer.write("\n");
+    }
+
+    fn exit(&!self, span: &Span) {
+        let json = format!(
+            r#"{{"type":"span_exit","span_id":"{}","ts":{},"duration_ns":{}}}"#,
+            span.id.to_hex(),
+            span.end_ns.unwrap_or(0),
+            span.duration_ns().unwrap_or(0)
+        );
+        self.writer.write(&json);
+        self.writer.write("\n");
+    }
+
+    fn event(&!self, event: &Event) {
+        if !self.enabled(&event.metadata.level) {
+            return;
+        }
+
+        let mut json = format!(
+            r#"{{"type":"event","level":"{}","message":"{}","ts":{}"#,
+            event.metadata.level.as_str(),
+            escape_json(&event.metadata.message),
+            event.timestamp_ns
+        );
+
+        if let Some(span_id) = &event.span_id {
+            json.push_str(&format!(r#","span_id":"{}""#, span_id.to_hex()));
+        }
+
+        if event.fields.len() > 0 {
+            json.push_str(r#","fields":{"#);
+            for (i, field) in event.fields.iter().enumerate() {
+                if i > 0 {
+                    json.push_str(",");
+                }
+                json.push_str(&format!(r#""{}":"{}""#, field.key, escape_json(&field.value.as_string())));
+            }
+            json.push_str("}");
+        }
+
+        json.push_str("}\n");
+        self.writer.write(&json);
+    }
+
+    fn close(&!self, span: &Span) {
+        let json = format!(
+            r#"{{"type":"span_close","span_id":"{}"}}"#,
+            span.id.to_hex()
+        );
+        self.writer.write(&json);
+        self.writer.write("\n");
+    }
+
+    fn enabled(&self, level: &Level) -> bool {
+        level.as_number() >= self.min_level.as_number()
+    }
+}
+
+//-----------------------------------------------------------------------------
+// OpenTelemetry Export
+//-----------------------------------------------------------------------------
+
+/// OpenTelemetry exporter
+pub struct OtelExporter {
+    /// Endpoint URL
+    endpoint: string,
+    /// Service name
+    service_name: string,
+    /// Pending spans to export
+    pending_spans: Vec<OtelSpan>,
+    /// Batch size
+    batch_size: usize,
+}
+
+/// OpenTelemetry span format
+struct OtelSpan {
+    trace_id: string,
+    span_id: string,
+    parent_span_id: Option<string>,
+    name: string,
+    start_time_ns: u64,
+    end_time_ns: u64,
+    attributes: Vec<(string, string)>,
+}
+
+impl OtelExporter {
+    pub fn new(endpoint: &str, service_name: &str) -> Self {
+        OtelExporter {
+            endpoint: endpoint.to_string(),
+            service_name: service_name.to_string(),
+            pending_spans: Vec::new(),
+            batch_size: 100,
+        }
+    }
+
+    /// Export pending spans
+    pub fn flush(&!self) with IO {
+        if self.pending_spans.is_empty() {
+            return;
+        }
+
+        let payload = self.build_payload();
+
+        // HTTP POST to endpoint
+        http_post(&self.endpoint, "application/json", &payload);
+
+        self.pending_spans.clear();
+    }
+
+    fn build_payload(&self) -> string {
+        // Build OTLP JSON payload
+        let mut spans_json = Vec::new();
+
+        for span in &self.pending_spans {
+            let mut attrs = String::new();
+            for (i, (k, v)) in span.attributes.iter().enumerate() {
+                if i > 0 {
+                    attrs.push_str(",");
+                }
+                attrs.push_str(&format!(
+                    r#"{{"key":"{}","value":{{"stringValue":"{}"}}}}"#,
+                    k, v
+                ));
+            }
+
+            let span_json = format!(
+                r#"{{"traceId":"{}","spanId":"{}","name":"{}","startTimeUnixNano":"{}","endTimeUnixNano":"{}","attributes":[{}]}}"#,
+                span.trace_id,
+                span.span_id,
+                span.name,
+                span.start_time_ns,
+                span.end_time_ns,
+                attrs
+            );
+            spans_json.push(span_json);
+        }
+
+        format!(
+            r#"{{"resourceSpans":[{{"resource":{{"attributes":[{{"key":"service.name","value":{{"stringValue":"{}"}}}}]}},"scopeSpans":[{{"spans":[{}]}}]}}]}}"#,
+            self.service_name,
+            spans_json.join(",")
+        )
+    }
+}
+
+impl Subscriber for OtelExporter {
+    fn new_span(&!self, _: &Span) {}
+    fn enter(&!self, _: &Span) {}
+    fn record(&!self, _: &Span, _: &Field) {}
+
+    fn exit(&!self, span: &Span) {
+        let otel_span = OtelSpan {
+            trace_id: span.trace_id.to_hex(),
+            span_id: span.id.to_hex(),
+            parent_span_id: span.parent_id.map(|id| id.to_hex()),
+            name: span.metadata.name.clone(),
+            start_time_ns: span.start_ns,
+            end_time_ns: span.end_ns.unwrap_or(0),
+            attributes: span.fields.iter()
+                .map(|f| (f.key.clone(), f.value.as_string()))
+                .collect(),
+        };
+
+        self.pending_spans.push(otel_span);
+
+        if self.pending_spans.len() >= self.batch_size {
+            self.flush();
+        }
+    }
+
+    fn event(&!self, _: &Event) {}
+    fn close(&!self, _: &Span) {}
+    fn enabled(&self, _: &Level) -> bool { true }
+}
+
+//-----------------------------------------------------------------------------
+// Metrics
+//-----------------------------------------------------------------------------
+
+/// A metric counter
+pub struct Counter {
+    name: string,
+    value: AtomicU64,
+    labels: HashMap<string, string>,
+}
+
+impl Counter {
+    pub fn new(name: &str) -> Self {
+        Counter {
+            name: name.to_string(),
+            value: AtomicU64::new(0),
+            labels: HashMap::new(),
+        }
+    }
+
+    pub fn with_label(&!self, key: &str, value: &str) -> &!Self {
+        self.labels.insert(key.to_string(), value.to_string());
+        self
+    }
+
+    pub fn inc(&self) {
+        self.value.fetch_add(1, Ordering::Relaxed);
+    }
+
+    pub fn add(&self, n: u64) {
+        self.value.fetch_add(n, Ordering::Relaxed);
+    }
+
+    pub fn get(&self) -> u64 {
+        self.value.load(Ordering::Relaxed)
+    }
+}
+
+/// A metric gauge
+pub struct Gauge {
+    name: string,
+    value: AtomicI64,
+    labels: HashMap<string, string>,
+}
+
+impl Gauge {
+    pub fn new(name: &str) -> Self {
+        Gauge {
+            name: name.to_string(),
+            value: AtomicI64::new(0),
+            labels: HashMap::new(),
+        }
+    }
+
+    pub fn set(&self, value: i64) {
+        self.value.store(value, Ordering::Relaxed);
+    }
+
+    pub fn inc(&self) {
+        self.value.fetch_add(1, Ordering::Relaxed);
+    }
+
+    pub fn dec(&self) {
+        self.value.fetch_sub(1, Ordering::Relaxed);
+    }
+
+    pub fn get(&self) -> i64 {
+        self.value.load(Ordering::Relaxed)
+    }
+}
+
+/// A histogram for measuring distributions
+pub struct Histogram {
+    name: string,
+    buckets: Vec<f64>,
+    counts: Vec<AtomicU64>,
+    sum: AtomicU64,
+    count: AtomicU64,
+}
+
+impl Histogram {
+    pub fn new(name: &str, buckets: Vec<f64>) -> Self {
+        let counts = buckets.iter().map(|_| AtomicU64::new(0)).collect();
+        Histogram {
+            name: name.to_string(),
+            buckets: buckets,
+            counts: counts,
+            sum: AtomicU64::new(0),
+            count: AtomicU64::new(0),
+        }
+    }
+
+    /// Record a value
+    pub fn observe(&self, value: f64) {
+        self.sum.fetch_add(value.to_bits(), Ordering::Relaxed);
+        self.count.fetch_add(1, Ordering::Relaxed);
+
+        for (i, &bound) in self.buckets.iter().enumerate() {
+            if value <= bound {
+                self.counts[i].fetch_add(1, Ordering::Relaxed);
+                break;
+            }
+        }
+    }
+
+    /// Time a closure and record the duration
+    pub fn time<T, F: fn() -> T>(&self, f: F) -> T with IO {
+        let start = clock_gettime_ns();
+        let result = f();
+        let duration = (clock_gettime_ns() - start) as f64 / 1_000_000.0; // ms
+        self.observe(duration);
+        result
+    }
+}
+
+//-----------------------------------------------------------------------------
+// Context Propagation
+//-----------------------------------------------------------------------------
+
+/// Trace context for distributed tracing
+pub struct TraceContext {
+    /// Trace ID
+    pub trace_id: TraceId,
+    /// Parent span ID
+    pub span_id: SpanId,
+    /// Trace flags
+    pub flags: u8,
+    /// Trace state
+    pub state: HashMap<string, string>,
+}
+
+impl TraceContext {
+    /// Extract context from W3C traceparent header
+    pub fn from_traceparent(header: &str) -> Option<Self> {
+        // Format: version-trace_id-parent_id-flags
+        let parts: Vec<_> = header.split('-').collect();
+        if parts.len() != 4 {
+            return None;
+        }
+
+        let _version = parts[0];
+        let trace_id = TraceId::from_hex(parts[1])?;
+        let span_id = SpanId::new(u64::from_str_radix(parts[2], 16).ok()?);
+        let flags = u8::from_str_radix(parts[3], 16).ok()?;
+
+        Some(TraceContext {
+            trace_id: trace_id,
+            span_id: span_id,
+            flags: flags,
+            state: HashMap::new(),
+        })
+    }
+
+    /// Format as W3C traceparent header
+    pub fn to_traceparent(&self) -> string {
+        format!(
+            "00-{}-{}-{:02x}",
+            self.trace_id.to_hex(),
+            self.span_id.to_hex(),
+            self.flags
+        )
+    }
+
+    /// Inject context into headers
+    pub fn inject(&self, headers: &mut HashMap<string, string>) {
+        headers.insert("traceparent".to_string(), self.to_traceparent());
+
+        if !self.state.is_empty() {
+            let state: Vec<_> = self.state.iter()
+                .map(|(k, v)| format!("{}={}", k, v))
+                .collect();
+            headers.insert("tracestate".to_string(), state.join(","));
+        }
+    }
+}
+
+//-----------------------------------------------------------------------------
+// Utility Functions
+//-----------------------------------------------------------------------------
+
+/// Get current timestamp in nanoseconds
+fn clock_gettime_ns() -> u64 with IO {
+    // Platform-specific
+    0
+}
+
+/// Generate random u64
+fn random_u64() -> u64 with IO {
+    // Platform-specific
+    0
+}
+
+/// Generate unique span ID
+fn generate_span_id() -> u64 with IO {
+    random_u64()
+}
+
+/// Get current span ID (from thread-local context)
+fn current_span_id() -> Option<SpanId> {
+    // Thread-local span stack
+    None
+}
+
+/// Get current trace ID (from thread-local context)
+fn current_trace_id() -> Option<TraceId> {
+    // Thread-local context
+    None
+}
+
+/// Escape JSON special characters
+fn escape_json(s: &string) -> string {
+    s.replace("\\", "\\\\")
+     .replace("\"", "\\\"")
+     .replace("\n", "\\n")
+     .replace("\r", "\\r")
+     .replace("\t", "\\t")
+}
+
+/// HTTP POST (stub)
+fn http_post(url: &str, content_type: &str, body: &str) with IO {
+    // HTTP client implementation
+}
+
+/// Write trait for output
+pub trait Write {
+    fn write(&!self, data: &str) with IO;
+}
+
+/// Stderr writer
+pub struct Stderr;
+
+impl Write for Stderr {
+    fn write(&!self, data: &str) with IO {
+        // Write to stderr
+    }
+}
+
+//-----------------------------------------------------------------------------
+// Macros (represented as functions in stdlib)
+//-----------------------------------------------------------------------------
+
+/// Create a span (macro helper)
+pub fn span_macro(name: &str, fields: Vec<Field>) -> Span with IO {
+    let mut builder = SpanBuilder::new(name.to_string());
+    for field in fields {
+        builder.field(field);
+    }
+    builder.build()
+}
+
+/// Emit an event (macro helper)
+pub fn event_macro(level: Level, message: &str, fields: Vec<Field>) with IO, Trace {
+    let mut builder = EventBuilder::new(level, message.to_string());
+    for field in fields {
+        builder.field(field);
+    }
+    builder.emit();
+}
+
+// Convenience functions for common event levels
+pub fn trace_event(message: &str) with IO, Trace {
+    Event::emit(Level::Trace, message);
+}
+
+pub fn debug_event(message: &str) with IO, Trace {
+    Event::emit(Level::Debug, message);
+}
+
+pub fn info_event(message: &str) with IO, Trace {
+    Event::emit(Level::Info, message);
+}
+
+pub fn warn_event(message: &str) with IO, Trace {
+    Event::emit(Level::Warn, message);
+}
+
+pub fn error_event(message: &str) with IO, Trace {
+    Event::emit(Level::Error, message);
+}

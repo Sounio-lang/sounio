@@ -1,0 +1,66 @@
+// stdlib/data/mod.d
+// DataFrame Module - Tabular Data with Epistemic Integration
+//
+// This module provides pandas-like DataFrame functionality for Demetrios,
+// with first-class support for epistemic uncertainty tracking.
+//
+// # Modules
+//
+// - `series` - Typed columns (FloatSeries, IntSeries, StringSeries, BoolSeries, EpistemicSeries)
+// - `frame` - DataFrame with type-erased columns and row access
+// - `io` - CSV reading/writing with uncertainty notation support
+// - `ops` - GroupBy, aggregations, rolling, cumulative operations
+//
+// # Epistemic Features
+//
+// Unlike traditional DataFrames, Demetrios tracks:
+// - **Uncertainty** (Channel A): Measurement uncertainty per value
+// - **Confidence** (Channel B): Trust level per value
+//
+// Aggregations like mean() automatically propagate uncertainty using GUM rules.
+//
+// # Quick Start
+//
+// ```demetrios
+// use std::data::io::{read_csv_simple}
+// use std::data::ops::{groupby, groupby_mean}
+//
+// // Load CSV with uncertainty notation (e.g., "100.0+-2.0")
+// let df = read_csv_simple("data.csv")
+//
+// // Group and aggregate with uncertainty propagation
+// let gb = groupby(df, "category")
+// let means = groupby_mean(gb, df, "value")
+// ```
+//
+// # Module Structure
+//
+// The module is organized to separate concerns:
+// - `series.d` - Foundation: typed arrays with metadata
+// - `frame.d` - Core: heterogeneous column storage
+// - `io.d` - I/O: CSV parsing with uncertainty specs
+// - `ops.d` - Operations: groupby, aggregate, transform
+
+// ============================================================================
+// MODULE TEST
+// ============================================================================
+
+fn main() -> i32 {
+    print("DataFrame Module - stdlib/data\n")
+    print("==============================\n\n")
+
+    print("Submodules:\n")
+    print("  - series.d: Typed columns with epistemic support\n")
+    print("  - frame.d:  DataFrame with type-erased columns\n")
+    print("  - io.d:     CSV parsing with uncertainty specs\n")
+    print("  - ops.d:    GroupBy, aggregations, fillna\n\n")
+
+    print("Run individual module tests:\n")
+    print("  dc run stdlib/data/series.d\n")
+    print("  dc run stdlib/data/frame.d\n")
+    print("  dc run stdlib/data/io.d\n")
+    print("  dc run stdlib/data/ops.d\n\n")
+
+    print("Module loaded successfully.\n")
+    0
+}

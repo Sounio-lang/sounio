@@ -1,0 +1,225 @@
+// causal::uplift — Uplift Modeling with Epistemic Uncertainty
+//
+// Placeholder module - full implementation requires Demetrios-native rewrite.
+// The original design includes:
+// - Meta-Learners: S-Learner, T-Learner, X-Learner, R-Learner
+// - CATE Estimation: Conditional Average Treatment Effects
+// - Uplift Trees: Decision trees for treatment effect heterogeneity
+// - Evaluation: Qini curves, AUUC with uncertainty
+
+// ============================================================================
+// BASIC TYPES
+// ============================================================================
+
+struct Beta {
+    alpha: f64,
+    beta: f64,
+}
+
+fn beta_new(alpha: f64, beta: f64) -> Beta {
+    Beta { alpha: alpha, beta: beta }
+}
+
+fn beta_mean(b: Beta) -> f64 {
+    return b.alpha / (b.alpha + b.beta)
+}
+
+/// Treatment effect estimate
+struct TreatmentEffect {
+    cate: f64,           // Conditional Average Treatment Effect
+    variance: f64,       // Uncertainty in CATE
+    confidence: Beta,    // Epistemic confidence
+    n_similar: i64,      // Number of similar individuals
+}
+
+fn treatment_effect_new(cate: f64, variance: f64, n: i64) -> TreatmentEffect {
+    // Higher sample size = more confidence
+    let alpha = (n as f64) / 10.0 + 1.0
+    let beta_val = 10.0 / (n as f64 + 1.0) + 1.0
+    TreatmentEffect {
+        cate: cate,
+        variance: variance,
+        confidence: beta_new(alpha, beta_val),
+        n_similar: n,
+    }
+}
+
+// ============================================================================
+// SIMPLE T-LEARNER
+// ============================================================================
+
+/// T-Learner trains separate models for treated and control groups
+struct TLearner {
+    // In full implementation: separate regression models
+    // Here: just store mean outcomes per group
+    mean_treated: f64,
+    mean_control: f64,
+    var_treated: f64,
+    var_control: f64,
+    n_treated: i64,
+    n_control: i64,
+}
+
+fn t_learner_new() -> TLearner {
+    TLearner {
+        mean_treated: 0.0,
+        mean_control: 0.0,
+        var_treated: 1.0,
+        var_control: 1.0,
+        n_treated: 0,
+        n_control: 0,
+    }
+}
+
+/// Fit T-Learner on data (simplified: just compute means)
+fn t_learner_fit(outcomes_treated: [f64], outcomes_control: [f64]) -> TLearner {
+    var sum_t = 0.0
+    var sum_c = 0.0
+    let n_t = outcomes_treated.len()
+    let n_c = outcomes_control.len()
+
+    var i: usize = 0
+    while i < n_t {
+        sum_t = sum_t + outcomes_treated[i]
+        i = i + 1
+    }
+
+    i = 0
+    while i < n_c {
+        sum_c = sum_c + outcomes_control[i]
+        i = i + 1
+    }
+
+    let mean_t = sum_t / (n_t as f64)
+    let mean_c = sum_c / (n_c as f64)
+
+    // Compute variances
+    var var_t = 0.0
+    var var_c = 0.0
+
+    i = 0
+    while i < n_t {
+        let diff = outcomes_treated[i] - mean_t
+        var_t = var_t + diff * diff
+        i = i + 1
+    }
+    var_t = var_t / (n_t as f64)
+
+    i = 0
+    while i < n_c {
+        let diff = outcomes_control[i] - mean_c
+        var_c = var_c + diff * diff
+        i = i + 1
+    }
+    var_c = var_c / (n_c as f64)
+
+    TLearner {
+        mean_treated: mean_t,
+        mean_control: mean_c,
+        var_treated: var_t,
+        var_control: var_c,
+        n_treated: n_t as i64,
+        n_control: n_c as i64,
+    }
+}
+
+/// Predict CATE using T-Learner
+fn t_learner_predict_cate(model: TLearner) -> TreatmentEffect {
+    let cate = model.mean_treated - model.mean_control
+    // Combined variance (simplified)
+    let var_cate = model.var_treated / (model.n_treated as f64) + model.var_control / (model.n_control as f64)
+    let n_total = model.n_treated + model.n_control
+    return treatment_effect_new(cate, var_cate, n_total)
+}
+
+// ============================================================================
+// SIMPLE S-LEARNER
+// ============================================================================
+
+/// S-Learner uses single model with treatment as feature
+struct SLearner {
+    // Simplified: linear model coefficients
+    intercept: f64,
+    treatment_coef: f64,
+    n_samples: i64,
+}
+
+fn s_learner_from_means(mean_control: f64, treatment_effect: f64, n: i64) -> SLearner {
+    SLearner {
+        intercept: mean_control,
+        treatment_coef: treatment_effect,
+        n_samples: n,
+    }
+}
+
+fn s_learner_predict_cate(model: SLearner) -> TreatmentEffect {
+    // CATE is just the treatment coefficient
+    let var_est = 1.0 / (model.n_samples as f64)  // Simplified variance
+    return treatment_effect_new(model.treatment_coef, var_est, model.n_samples)
+}
+
+// ============================================================================
+// QINI CURVE (EVALUATION)
+// ============================================================================
+
+/// Point on Qini curve
+struct QiniPoint {
+    fraction_treated: f64,
+    cumulative_gain: f64,
+}
+
+/// Compute Area Under Uplift Curve (simplified)
+fn auuc(predictions: [f64], treatments: [bool], outcomes: [f64]) -> f64 {
+    // In full implementation: sort by predicted uplift, compute cumulative gain
+    // Here: return placeholder
+    let n = predictions.len()
+    if n == 0 { return 0.0 }
+
+    var sum_gain = 0.0
+    var i: usize = 0
+    while i < n {
+        if treatments[i] {
+            sum_gain = sum_gain + outcomes[i]
+        }
+        i = i + 1
+    }
+
+    return sum_gain / (n as f64)
+}
+
+// ============================================================================
+// TESTS
+// ============================================================================
+
+fn main() -> i32 {
+    print("Testing causal::uplift module...\n")
+
+    // Test Beta
+    let b = beta_new(8.0, 2.0)
+    if beta_mean(b) < 0.7 { return 1 }
+    print("Beta: PASS\n")
+
+    // Test TreatmentEffect
+    let te = treatment_effect_new(0.3, 0.05, 100)
+    if te.cate < 0.2 || te.cate > 0.4 { return 2 }
+    print("TreatmentEffect: PASS\n")
+
+    // Test T-Learner
+    let outcomes_t: [f64] = [1.0, 1.2, 0.8, 1.1, 0.9]
+    let outcomes_c: [f64] = [0.5, 0.6, 0.4, 0.7, 0.5]
+    let model = t_learner_fit(outcomes_t, outcomes_c)
+    let cate = t_learner_predict_cate(model)
+    // Treatment group mean ~1.0, control ~0.54, so CATE ~0.46
+    if cate.cate < 0.3 || cate.cate > 0.7 { return 3 }
+    print("T-Learner: PASS\n")
+
+    // Test S-Learner
+    let s_model = s_learner_from_means(0.5, 0.4, 100)
+    let s_cate = s_learner_predict_cate(s_model)
+    if s_cate.cate < 0.3 || s_cate.cate > 0.5 { return 4 }
+    print("S-Learner: PASS\n")
+
+    print("All causal::uplift tests PASSED\n")
+    print("NOTE: Full meta-learners need Demetrios-native rewrite\n")
+    return 0
+}

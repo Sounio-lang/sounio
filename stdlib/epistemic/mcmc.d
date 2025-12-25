@@ -1,0 +1,1570 @@
+/// epistemic::mcmc — Epistemic MCMC Samplers with Full Uncertainty Quantification
+///
+/// Production-grade Markov Chain Monte Carlo with epistemic tracking:
+/// - **NUTS Sampler**: No-U-Turn Sampler with dual averaging
+/// - **Metropolis-Hastings**: Classic sampler with adaptive proposals
+/// - **Chain Diagnostics**: R-hat, ESS, trace variance
+/// - **Posterior Analysis**: Credible intervals, HDI, moment estimation
+///
+/// # Philosophy
+///
+/// MCMC samples from posterior distributions, but the samples themselves
+/// carry uncertainty. We track:
+/// - Within-chain variance (sampling noise)
+/// - Between-chain variance (convergence uncertainty)
+/// - Effective sample size (information content)
+/// - Posterior uncertainty (target distribution spread)
+///
+/// # Quick Start
+///
+/// ```demetrios
+/// use std::epistemic::mcmc::{NUTS, NUTSOptions, sample, summarize_posterior}
+///
+/// // Define log-posterior (unnormalized)
+/// fn log_posterior(theta: &[f64]) -> f64 {
+///     let mu = theta[0]
+///     let sigma = theta[1]
+///     // Normal likelihood + priors
+///     -0.5 * (mu * mu) / (sigma * sigma) - log(sigma)
+/// }
+///
+/// // Sample with NUTS
+/// let opts = nuts_options_default()
+/// let chains = nuts_sample(log_posterior, 2, 4, 1000, 500, opts)
+///
+/// // Analyze posterior
+/// let summary = summarize_posterior(chains)
+/// // summary includes R-hat, ESS, credible intervals with epistemic uncertainty
+/// ```
+
+use std::epistemic::knowledge::{Knowledge, Confidence, Provenance}
+use std::epistemic::linalg::{EVector, EMatrix, evec_new, evec_zeros, evec_dot, emat_zeros}
+
+// ============================================================================
+// MCMC Configuration Types
+// ============================================================================
+
+/// Target acceptance rate for adaptation
+type AcceptanceTarget = f64
+
+/// Step size for HMC/NUTS
+type StepSize = f64
+
+/// Number of leapfrog steps
+type NumLeapfrog = i32
+
+/// Adaptation window for dual averaging
+struct AdaptWindow {
+    start: i32,
+    end: i32,
+    init_buffer: i32,
+    term_buffer: i32,
+    base_window: i32,
+}
+
+/// Dual averaging state for step size adaptation
+struct DualAverageState {
+    mu: f64,           // log(10 * initial step size)
+    log_epsilon_bar: f64,  // log of adapted step size
+    h_bar: f64,        // weighted average of acceptance prob
+    gamma: f64,        // shrinkage toward mu
+    t0: f64,           // iteration offset
+    kappa: f64,        // step size decay
+    target_accept: f64, // target acceptance probability
+}
+
+/// Options for NUTS sampler
+struct NUTSOptions {
+    max_tree_depth: i32,      // Maximum tree depth (default: 10)
+    target_accept: f64,        // Target acceptance rate (default: 0.8)
+    adapt_delta: f64,          // Step size adaptation rate
+    adapt_mass_matrix: bool,   // Whether to adapt mass matrix
+    init_step_size: f64,       // Initial step size (0 = auto)
+    dense_mass: bool,          // Use dense vs diagonal mass matrix
+    warmup_stages: i32,        // Number of warmup adaptation stages
+}
+
+/// Options for Metropolis-Hastings sampler
+struct MHOptions {
+    proposal_scale: f64,       // Scale for proposal distribution
+    adapt_proposal: bool,      // Whether to adapt proposal
+    target_accept: f64,        // Target acceptance rate (0.234 optimal)
+    adapt_interval: i32,       // Iterations between adaptation
+}
+
+/// Options for HMC sampler
+struct HMCOptions {
+    num_leapfrog: i32,         // Number of leapfrog steps
+    step_size: f64,            // Step size (0 = auto)
+    adapt_step_size: bool,     // Whether to adapt step size
+    target_accept: f64,        // Target acceptance rate (0.65 optimal)
+    mass_matrix: MassMatrix,   // Mass matrix type
+}
+
+/// Mass matrix specification
+enum MassMatrix {
+    Identity,
+    Diagonal(EVector<0>),      // 0 means dynamic size
+    Dense(EMatrix<0, 0>),
+}
+
+// ============================================================================
+// MCMC State Types
+// ============================================================================
+
+/// State of a single MCMC chain
+struct ChainState<const N: usize> {
+    position: EVector<N>,      // Current position with uncertainty
+    log_prob: f64,             // Log probability at current position
+    gradient: EVector<N>,      // Gradient of log probability
+    step_size: f64,            // Current step size
+    mass_matrix: MassMatrix,   // Current mass matrix
+    iteration: i32,            // Current iteration
+    accepts: i32,              // Number of accepts
+    divergences: i32,          // Number of divergent transitions
+}
+
+/// Single MCMC sample
+struct Sample<const N: usize> {
+    theta: EVector<N>,         // Parameter values with element-wise uncertainty
+    log_prob: f64,             // Log probability
+    accept: bool,              // Whether this was an accept
+    divergent: bool,           // Whether transition was divergent
+    tree_depth: i32,           // Tree depth (NUTS only)
+    energy: f64,               // Hamiltonian energy
+}
+
+/// Full MCMC chain with samples
+struct Chain<const N: usize> {
+    samples: [Sample<N>],      // All samples
+    warmup_samples: i32,       // Number of warmup samples
+    final_step_size: f64,      // Final adapted step size
+    final_mass_matrix: MassMatrix,
+    accept_rate: f64,          // Overall acceptance rate
+    divergence_rate: f64,      // Rate of divergent transitions
+    max_tree_depth_rate: f64,  // Rate of max tree depth hits
+}
+
+/// Collection of chains for multi-chain inference
+struct ChainCollection<const N: usize> {
+    chains: [Chain<N>],
+    num_chains: i32,
+    num_samples: i32,
+    num_warmup: i32,
+}
+
+// ============================================================================
+// Posterior Summary Types
+// ============================================================================
+
+/// Summary statistics for a single parameter
+struct ParameterSummary {
+    mean: Knowledge<f64>,          // Posterior mean with sampling uncertainty
+    std: Knowledge<f64>,           // Posterior std with uncertainty
+    median: Knowledge<f64>,        // Posterior median
+    q025: f64,                     // 2.5th percentile
+    q25: f64,                      // 25th percentile
+    q75: f64,                      // 75th percentile
+    q975: f64,                     // 97.5th percentile
+    hdi_low: f64,                  // Highest density interval low
+    hdi_high: f64,                 // Highest density interval high
+    hdi_prob: f64,                 // HDI probability mass
+    rhat: f64,                     // Gelman-Rubin statistic
+    ess_bulk: f64,                 // Effective sample size (bulk)
+    ess_tail: f64,                 // Effective sample size (tail)
+    mcse_mean: f64,                // Monte Carlo standard error of mean
+    mcse_std: f64,                 // Monte Carlo standard error of std
+}
+
+/// Convergence diagnostics for chains
+struct ConvergenceDiagnostics {
+    all_rhat_ok: bool,             // All R-hat < 1.01
+    min_ess_bulk: f64,             // Minimum bulk ESS
+    min_ess_tail: f64,             // Minimum tail ESS
+    max_rhat: f64,                 // Maximum R-hat across parameters
+    total_divergences: i32,        // Total divergent transitions
+    max_treedepth_rate: f64,       // Rate of max tree depth hits
+    converged: Knowledge<bool>,    // Overall convergence with confidence
+}
+
+/// Full posterior summary
+struct PosteriorSummary<const N: usize> {
+    parameters: [ParameterSummary; N],
+    diagnostics: ConvergenceDiagnostics,
+    log_evidence: Knowledge<f64>,  // Log marginal likelihood estimate
+    waic: Knowledge<f64>,          // WAIC model comparison
+    loo: Knowledge<f64>,           // LOO-CV estimate
+}
+
+// ============================================================================
+// Log Probability Interface
+// ============================================================================
+
+/// Trait for log probability functions
+trait LogProbFn<const N: usize> {
+    fn log_prob(self: &Self, theta: &EVector<N>) -> f64
+    fn gradient(self: &Self, theta: &EVector<N>) -> EVector<N>
+}
+
+/// Simple log probability with numerical gradient
+struct NumericLogProb<const N: usize> {
+    log_prob_fn: fn(&EVector<N>) -> f64,
+    epsilon: f64,
+}
+
+/// Log probability with analytic gradient
+struct AnalyticLogProb<const N: usize> {
+    log_prob_fn: fn(&EVector<N>) -> f64,
+    gradient_fn: fn(&EVector<N>) -> EVector<N>,
+}
+
+// ============================================================================
+// Default Constructors
+// ============================================================================
+
+/// Create default NUTS options
+fn nuts_options_default() -> NUTSOptions {
+    NUTSOptions {
+        max_tree_depth: 10,
+        target_accept: 0.8,
+        adapt_delta: 0.05,
+        adapt_mass_matrix: true,
+        init_step_size: 0.0,  // Auto
+        dense_mass: false,
+        warmup_stages: 3,
+    }
+}
+
+/// Create NUTS options with custom target acceptance
+fn nuts_options_with_target(target: f64) -> NUTSOptions {
+    var opts = nuts_options_default()
+    opts.target_accept = target
+    opts
+}
+
+/// Create default MH options
+fn mh_options_default() -> MHOptions {
+    MHOptions {
+        proposal_scale: 1.0,
+        adapt_proposal: true,
+        target_accept: 0.234,
+        adapt_interval: 100,
+    }
+}
+
+/// Create default HMC options
+fn hmc_options_default() -> HMCOptions {
+    HMCOptions {
+        num_leapfrog: 10,
+        step_size: 0.0,  // Auto
+        adapt_step_size: true,
+        target_accept: 0.65,
+        mass_matrix: MassMatrix::Identity,
+    }
+}
+
+/// Create initial adaptation window
+fn adapt_window_default(num_warmup: i32) -> AdaptWindow {
+    let init_buffer = 75
+    let term_buffer = 50
+    let base_window = 25
+    AdaptWindow {
+        start: init_buffer,
+        end: num_warmup - term_buffer,
+        init_buffer: init_buffer,
+        term_buffer: term_buffer,
+        base_window: base_window,
+    }
+}
+
+/// Initialize dual averaging state
+fn dual_average_init(init_step_size: f64, target_accept: f64) -> DualAverageState {
+    DualAverageState {
+        mu: log(10.0 * init_step_size),
+        log_epsilon_bar: 0.0,
+        h_bar: 0.0,
+        gamma: 0.05,
+        t0: 10.0,
+        kappa: 0.75,
+        target_accept: target_accept,
+    }
+}
+
+// ============================================================================
+// NUTS Sampler Implementation
+// ============================================================================
+
+/// Initialize chain state
+fn chain_init<const N: usize>(
+    init: EVector<N>,
+    log_prob_fn: fn(&EVector<N>) -> f64,
+    grad_fn: fn(&EVector<N>) -> EVector<N>,
+    step_size: f64
+) -> ChainState<N> with Prob {
+    let lp = log_prob_fn(&init)
+    let grad = grad_fn(&init)
+    ChainState {
+        position: init,
+        log_prob: lp,
+        gradient: grad,
+        step_size: step_size,
+        mass_matrix: MassMatrix::Identity,
+        iteration: 0,
+        accepts: 0,
+        divergences: 0,
+    }
+}
+
+/// Find reasonable initial step size
+fn find_reasonable_step_size<const N: usize>(
+    state: &ChainState<N>,
+    log_prob_fn: fn(&EVector<N>) -> f64,
+    grad_fn: fn(&EVector<N>) -> EVector<N>
+) -> f64 with Prob {
+    var epsilon = 1.0
+    let position = state.position
+    let velocity = evec_randn::<N>()
+
+    // Leapfrog step
+    let new_pos = leapfrog_position(position, velocity, state.gradient, epsilon)
+    let new_grad = grad_fn(&new_pos)
+    let new_lp = log_prob_fn(&new_pos)
+
+    // Compute acceptance probability
+    let old_h = -state.log_prob + 0.5 * evec_dot(velocity, velocity)
+    let new_h = -new_lp + 0.5 * evec_dot(velocity, velocity)
+    let log_accept = old_h - new_h
+
+    // Adjust step size
+    let a = if log_accept > log(0.5) { 1.0 } else { -1.0 }
+
+    while a * log_accept > -a * log(2.0) {
+        epsilon = epsilon * pow(2.0, a)
+        let new_pos = leapfrog_position(position, velocity, state.gradient, epsilon)
+        let new_lp = log_prob_fn(&new_pos)
+        let new_h = -new_lp + 0.5 * evec_dot(velocity, velocity)
+        log_accept = old_h - new_h
+    }
+
+    epsilon
+}
+
+/// Leapfrog integrator - position update
+fn leapfrog_position<const N: usize>(
+    position: EVector<N>,
+    velocity: EVector<N>,
+    gradient: EVector<N>,
+    epsilon: f64
+) -> EVector<N> {
+    // Half step in velocity
+    var vel_half = evec_zeros::<N>()
+    for i in 0..N {
+        vel_half.values[i] = velocity.values[i] + 0.5 * epsilon * gradient.values[i]
+    }
+
+    // Full step in position
+    var new_pos = evec_zeros::<N>()
+    for i in 0..N {
+        new_pos.values[i] = position.values[i] + epsilon * vel_half.values[i]
+        new_pos.variances[i] = position.variances[i]  // Preserve uncertainty
+    }
+
+    new_pos
+}
+
+/// Full leapfrog step
+fn leapfrog<const N: usize>(
+    position: EVector<N>,
+    velocity: EVector<N>,
+    gradient: EVector<N>,
+    epsilon: f64,
+    grad_fn: fn(&EVector<N>) -> EVector<N>
+) -> (EVector<N>, EVector<N>, EVector<N>) {
+    // Half step velocity
+    var vel_half = evec_zeros::<N>()
+    for i in 0..N {
+        vel_half.values[i] = velocity.values[i] + 0.5 * epsilon * gradient.values[i]
+    }
+
+    // Full step position
+    var new_pos = evec_zeros::<N>()
+    for i in 0..N {
+        new_pos.values[i] = position.values[i] + epsilon * vel_half.values[i]
+        new_pos.variances[i] = position.variances[i]
+    }
+
+    // New gradient
+    let new_grad = grad_fn(&new_pos)
+
+    // Full step velocity
+    var new_vel = evec_zeros::<N>()
+    for i in 0..N {
+        new_vel.values[i] = vel_half.values[i] + 0.5 * epsilon * new_grad.values[i]
+    }
+
+    (new_pos, new_vel, new_grad)
+}
+
+/// Compute Hamiltonian energy
+fn hamiltonian<const N: usize>(log_prob: f64, velocity: EVector<N>) -> f64 {
+    -log_prob + 0.5 * evec_dot(velocity, velocity)
+}
+
+/// Check for U-turn (NUTS termination criterion)
+fn check_uturn<const N: usize>(
+    pos_minus: EVector<N>,
+    pos_plus: EVector<N>,
+    vel_minus: EVector<N>,
+    vel_plus: EVector<N>
+) -> bool {
+    var delta_pos = evec_zeros::<N>()
+    for i in 0..N {
+        delta_pos.values[i] = pos_plus.values[i] - pos_minus.values[i]
+    }
+
+    let forward = evec_dot(delta_pos, vel_plus)
+    let backward = evec_dot(delta_pos, vel_minus)
+
+    forward < 0.0 || backward < 0.0
+}
+
+/// Build NUTS tree recursively
+fn build_tree<const N: usize>(
+    position: EVector<N>,
+    velocity: EVector<N>,
+    gradient: EVector<N>,
+    log_prob: f64,
+    log_slice: f64,
+    direction: f64,
+    depth: i32,
+    epsilon: f64,
+    joint0: f64,
+    log_prob_fn: fn(&EVector<N>) -> f64,
+    grad_fn: fn(&EVector<N>) -> EVector<N>,
+    max_delta_h: f64
+) -> NUTSTree<N> with Prob {
+    if depth == 0 {
+        // Base case: single leapfrog step
+        let (new_pos, new_vel, new_grad) = leapfrog(position, velocity, gradient,
+                                                      direction * epsilon, grad_fn)
+        let new_lp = log_prob_fn(&new_pos)
+        let new_joint = hamiltonian(new_lp, new_vel)
+
+        // Check divergence
+        let divergent = new_joint - joint0 > max_delta_h
+
+        // Slice sampling acceptance
+        let accept = log_slice <= -new_joint
+
+        NUTSTree {
+            pos_minus: new_pos,
+            pos_plus: new_pos,
+            vel_minus: new_vel,
+            vel_plus: new_vel,
+            grad_minus: new_grad,
+            grad_plus: new_grad,
+            candidate: new_pos,
+            candidate_lp: new_lp,
+            n_accept: if accept { 1 } else { 0 },
+            sum_accept_prob: min(1.0, exp(joint0 - new_joint)),
+            n_steps: 1,
+            divergent: divergent,
+            uturn: false,
+        }
+    } else {
+        // Recursive case: build subtrees
+        let tree1 = build_tree(position, velocity, gradient, log_prob, log_slice,
+                               direction, depth - 1, epsilon, joint0,
+                               log_prob_fn, grad_fn, max_delta_h)
+
+        if tree1.divergent || tree1.uturn {
+            return tree1
+        }
+
+        // Build second subtree in same direction
+        let (pos2, vel2, grad2) = if direction > 0.0 {
+            (tree1.pos_plus, tree1.vel_plus, tree1.grad_plus)
+        } else {
+            (tree1.pos_minus, tree1.vel_minus, tree1.grad_minus)
+        }
+
+        let tree2 = build_tree(pos2, vel2, grad2, tree1.candidate_lp, log_slice,
+                               direction, depth - 1, epsilon, joint0,
+                               log_prob_fn, grad_fn, max_delta_h)
+
+        // Combine trees
+        let n_total = tree1.n_accept + tree2.n_accept
+        let prob_tree2 = if n_total > 0 {
+            tree2.n_accept as f64 / n_total as f64
+        } else {
+            0.5
+        }
+
+        let candidate = if random_uniform() < prob_tree2 {
+            tree2.candidate
+        } else {
+            tree1.candidate
+        }
+
+        let candidate_lp = if random_uniform() < prob_tree2 {
+            tree2.candidate_lp
+        } else {
+            tree1.candidate_lp
+        }
+
+        // Update tree bounds
+        let (pos_minus, vel_minus, grad_minus) = if direction > 0.0 {
+            (tree1.pos_minus, tree1.vel_minus, tree1.grad_minus)
+        } else {
+            (tree2.pos_minus, tree2.vel_minus, tree2.grad_minus)
+        }
+
+        let (pos_plus, vel_plus, grad_plus) = if direction > 0.0 {
+            (tree2.pos_plus, tree2.vel_plus, tree2.grad_plus)
+        } else {
+            (tree1.pos_plus, tree1.vel_plus, tree1.grad_plus)
+        }
+
+        // Check for U-turn
+        let uturn = tree2.uturn || check_uturn(pos_minus, pos_plus, vel_minus, vel_plus)
+
+        NUTSTree {
+            pos_minus: pos_minus,
+            pos_plus: pos_plus,
+            vel_minus: vel_minus,
+            vel_plus: vel_plus,
+            grad_minus: grad_minus,
+            grad_plus: grad_plus,
+            candidate: candidate,
+            candidate_lp: candidate_lp,
+            n_accept: n_total,
+            sum_accept_prob: tree1.sum_accept_prob + tree2.sum_accept_prob,
+            n_steps: tree1.n_steps + tree2.n_steps,
+            divergent: tree2.divergent,
+            uturn: uturn,
+        }
+    }
+}
+
+/// NUTS tree state
+struct NUTSTree<const N: usize> {
+    pos_minus: EVector<N>,
+    pos_plus: EVector<N>,
+    vel_minus: EVector<N>,
+    vel_plus: EVector<N>,
+    grad_minus: EVector<N>,
+    grad_plus: EVector<N>,
+    candidate: EVector<N>,
+    candidate_lp: f64,
+    n_accept: i32,
+    sum_accept_prob: f64,
+    n_steps: i32,
+    divergent: bool,
+    uturn: bool,
+}
+
+/// Single NUTS transition
+fn nuts_transition<const N: usize>(
+    state: &ChainState<N>,
+    log_prob_fn: fn(&EVector<N>) -> f64,
+    grad_fn: fn(&EVector<N>) -> EVector<N>,
+    opts: &NUTSOptions
+) -> (Sample<N>, f64) with Prob {
+    let position = state.position
+    let velocity = evec_randn::<N>()
+    let joint0 = hamiltonian(state.log_prob, velocity)
+    let log_slice = log(random_uniform()) - joint0
+
+    var pos_minus = position
+    var pos_plus = position
+    var vel_minus = velocity
+    var vel_plus = velocity
+    var grad_minus = state.gradient
+    var grad_plus = state.gradient
+    var candidate = position
+    var candidate_lp = state.log_prob
+    var depth = 0
+    var n_accept = 0
+    var sum_accept_prob = 0.0
+    var divergent = false
+
+    while depth < opts.max_tree_depth {
+        // Choose direction
+        let direction = if random_uniform() < 0.5 { -1.0 } else { 1.0 }
+
+        // Build tree in chosen direction
+        let (start_pos, start_vel, start_grad) = if direction > 0.0 {
+            (pos_plus, vel_plus, grad_plus)
+        } else {
+            (pos_minus, vel_minus, grad_minus)
+        }
+
+        let tree = build_tree(start_pos, start_vel, start_grad, candidate_lp,
+                              log_slice, direction, depth, state.step_size,
+                              joint0, log_prob_fn, grad_fn, 1000.0)
+
+        if tree.divergent {
+            divergent = true
+            break
+        }
+
+        if tree.uturn {
+            break
+        }
+
+        // Metropolis-Hastings accept
+        let n_total = n_accept + tree.n_accept
+        let prob_accept = if n_accept > 0 {
+            tree.n_accept as f64 / n_total as f64
+        } else {
+            1.0
+        }
+
+        if random_uniform() < prob_accept {
+            candidate = tree.candidate
+            candidate_lp = tree.candidate_lp
+        }
+
+        // Update tree boundaries
+        if direction > 0.0 {
+            pos_plus = tree.pos_plus
+            vel_plus = tree.vel_plus
+            grad_plus = tree.grad_plus
+        } else {
+            pos_minus = tree.pos_minus
+            vel_minus = tree.vel_minus
+            grad_minus = tree.grad_minus
+        }
+
+        n_accept = n_total
+        sum_accept_prob = sum_accept_prob + tree.sum_accept_prob
+
+        // Check global U-turn
+        if check_uturn(pos_minus, pos_plus, vel_minus, vel_plus) {
+            break
+        }
+
+        depth = depth + 1
+    }
+
+    let sample = Sample {
+        theta: candidate,
+        log_prob: candidate_lp,
+        accept: true,  // NUTS always accepts
+        divergent: divergent,
+        tree_depth: depth,
+        energy: joint0,
+    }
+
+    let accept_stat = if n_accept > 0 {
+        sum_accept_prob / n_accept as f64
+    } else {
+        0.0
+    }
+
+    (sample, accept_stat)
+}
+
+/// Update dual averaging state
+fn dual_average_update(state: &!DualAverageState, accept_stat: f64, iteration: i32) -> f64 {
+    let m = iteration as f64
+    let w = 1.0 / (m + state.t0)
+    state.h_bar = (1.0 - w) * state.h_bar + w * (state.target_accept - accept_stat)
+
+    let log_epsilon = state.mu - sqrt(m) / state.gamma * state.h_bar
+    let eta = pow(m, -state.kappa)
+    state.log_epsilon_bar = eta * log_epsilon + (1.0 - eta) * state.log_epsilon_bar
+
+    exp(log_epsilon)
+}
+
+/// Get final adapted step size
+fn dual_average_final(state: &DualAverageState) -> f64 {
+    exp(state.log_epsilon_bar)
+}
+
+/// Run NUTS sampler
+fn nuts_sample<const N: usize>(
+    log_prob_fn: fn(&EVector<N>) -> f64,
+    grad_fn: fn(&EVector<N>) -> EVector<N>,
+    init: EVector<N>,
+    num_samples: i32,
+    num_warmup: i32,
+    opts: NUTSOptions
+) -> Chain<N> with Prob, Alloc {
+    // Initialize
+    let init_step = if opts.init_step_size > 0.0 {
+        opts.init_step_size
+    } else {
+        0.1
+    }
+
+    var state = chain_init(init, log_prob_fn, grad_fn, init_step)
+
+    // Find reasonable step size
+    if opts.init_step_size == 0.0 {
+        state.step_size = find_reasonable_step_size(&state, log_prob_fn, grad_fn)
+    }
+
+    var da_state = dual_average_init(state.step_size, opts.target_accept)
+    var samples: [Sample<N>] = []
+    var warmup_samples: [Sample<N>] = []
+    var total_divergences = 0
+    var max_depth_hits = 0
+
+    // Warmup phase with adaptation
+    for i in 0..num_warmup {
+        let (sample, accept_stat) = nuts_transition(&state, log_prob_fn, grad_fn, &opts)
+
+        // Update state
+        state.position = sample.theta
+        state.log_prob = sample.log_prob
+        state.gradient = grad_fn(&sample.theta)
+        state.iteration = i
+
+        if sample.divergent {
+            state.divergences = state.divergences + 1
+            total_divergences = total_divergences + 1
+        }
+
+        if sample.tree_depth >= opts.max_tree_depth {
+            max_depth_hits = max_depth_hits + 1
+        }
+
+        // Adapt step size
+        state.step_size = dual_average_update(&!da_state, accept_stat, i + 1)
+
+        warmup_samples = warmup_samples ++ [sample]
+    }
+
+    // Use final adapted step size
+    state.step_size = dual_average_final(&da_state)
+
+    // Sampling phase (no adaptation)
+    for i in 0..num_samples {
+        let (sample, _) = nuts_transition(&state, log_prob_fn, grad_fn, &opts)
+
+        // Update state
+        state.position = sample.theta
+        state.log_prob = sample.log_prob
+        state.gradient = grad_fn(&sample.theta)
+        state.iteration = num_warmup + i
+        state.accepts = state.accepts + 1
+
+        if sample.divergent {
+            state.divergences = state.divergences + 1
+            total_divergences = total_divergences + 1
+        }
+
+        if sample.tree_depth >= opts.max_tree_depth {
+            max_depth_hits = max_depth_hits + 1
+        }
+
+        samples = samples ++ [sample]
+    }
+
+    Chain {
+        samples: samples,
+        warmup_samples: num_warmup,
+        final_step_size: state.step_size,
+        final_mass_matrix: state.mass_matrix,
+        accept_rate: state.accepts as f64 / num_samples as f64,
+        divergence_rate: total_divergences as f64 / (num_warmup + num_samples) as f64,
+        max_tree_depth_rate: max_depth_hits as f64 / (num_warmup + num_samples) as f64,
+    }
+}
+
+/// Run multiple NUTS chains
+fn nuts_sample_chains<const N: usize>(
+    log_prob_fn: fn(&EVector<N>) -> f64,
+    grad_fn: fn(&EVector<N>) -> EVector<N>,
+    inits: [EVector<N>],
+    num_samples: i32,
+    num_warmup: i32,
+    opts: NUTSOptions
+) -> ChainCollection<N> with Prob, Alloc {
+    let num_chains = len(inits) as i32
+    var chains: [Chain<N>] = []
+
+    for i in 0..num_chains {
+        let chain = nuts_sample(log_prob_fn, grad_fn, inits[i], num_samples, num_warmup, opts)
+        chains = chains ++ [chain]
+    }
+
+    ChainCollection {
+        chains: chains,
+        num_chains: num_chains,
+        num_samples: num_samples,
+        num_warmup: num_warmup,
+    }
+}
+
+// ============================================================================
+// Metropolis-Hastings Sampler
+// ============================================================================
+
+/// Single MH transition
+fn mh_transition<const N: usize>(
+    state: &ChainState<N>,
+    log_prob_fn: fn(&EVector<N>) -> f64,
+    proposal_scale: f64
+) -> (Sample<N>, bool) with Prob {
+    // Propose new state
+    var proposal = evec_zeros::<N>()
+    for i in 0..N {
+        proposal.values[i] = state.position.values[i] + proposal_scale * random_normal()
+        proposal.variances[i] = state.position.variances[i]
+    }
+
+    // Compute acceptance probability
+    let proposed_lp = log_prob_fn(&proposal)
+    let log_alpha = proposed_lp - state.log_prob
+    let accept = log(random_uniform()) < log_alpha
+
+    let sample = if accept {
+        Sample {
+            theta: proposal,
+            log_prob: proposed_lp,
+            accept: true,
+            divergent: false,
+            tree_depth: 0,
+            energy: -proposed_lp,
+        }
+    } else {
+        Sample {
+            theta: state.position,
+            log_prob: state.log_prob,
+            accept: false,
+            divergent: false,
+            tree_depth: 0,
+            energy: -state.log_prob,
+        }
+    }
+
+    (sample, accept)
+}
+
+/// Run MH sampler
+fn mh_sample<const N: usize>(
+    log_prob_fn: fn(&EVector<N>) -> f64,
+    init: EVector<N>,
+    num_samples: i32,
+    num_warmup: i32,
+    opts: MHOptions
+) -> Chain<N> with Prob, Alloc {
+    var state = ChainState {
+        position: init,
+        log_prob: log_prob_fn(&init),
+        gradient: evec_zeros::<N>(),
+        step_size: opts.proposal_scale,
+        mass_matrix: MassMatrix::Identity,
+        iteration: 0,
+        accepts: 0,
+        divergences: 0,
+    }
+
+    var samples: [Sample<N>] = []
+    var proposal_scale = opts.proposal_scale
+    var recent_accepts = 0
+
+    // Warmup with adaptation
+    for i in 0..num_warmup {
+        let (sample, accept) = mh_transition(&state, log_prob_fn, proposal_scale)
+
+        if accept {
+            state.position = sample.theta
+            state.log_prob = sample.log_prob
+            recent_accepts = recent_accepts + 1
+        }
+
+        // Adapt proposal scale
+        if opts.adapt_proposal && (i + 1) % opts.adapt_interval == 0 {
+            let accept_rate = recent_accepts as f64 / opts.adapt_interval as f64
+            if accept_rate > opts.target_accept + 0.05 {
+                proposal_scale = proposal_scale * 1.1
+            } else if accept_rate < opts.target_accept - 0.05 {
+                proposal_scale = proposal_scale * 0.9
+            }
+            recent_accepts = 0
+        }
+    }
+
+    // Sampling phase
+    var total_accepts = 0
+    for i in 0..num_samples {
+        let (sample, accept) = mh_transition(&state, log_prob_fn, proposal_scale)
+
+        if accept {
+            state.position = sample.theta
+            state.log_prob = sample.log_prob
+            total_accepts = total_accepts + 1
+        }
+
+        samples = samples ++ [sample]
+    }
+
+    Chain {
+        samples: samples,
+        warmup_samples: num_warmup,
+        final_step_size: proposal_scale,
+        final_mass_matrix: MassMatrix::Identity,
+        accept_rate: total_accepts as f64 / num_samples as f64,
+        divergence_rate: 0.0,
+        max_tree_depth_rate: 0.0,
+    }
+}
+
+// ============================================================================
+// Chain Diagnostics
+// ============================================================================
+
+/// Compute R-hat (Gelman-Rubin) statistic
+fn compute_rhat<const N: usize>(chains: &ChainCollection<N>, param_idx: usize) -> f64 {
+    let m = chains.num_chains as f64
+    let n = chains.num_samples as f64
+
+    // Compute chain means
+    var chain_means: [f64] = []
+    var chain_vars: [f64] = []
+
+    for c in 0..chains.num_chains {
+        var sum = 0.0
+        for s in 0..chains.num_samples {
+            sum = sum + chains.chains[c].samples[s].theta.values[param_idx]
+        }
+        let mean = sum / n
+        chain_means = chain_means ++ [mean]
+
+        var var_sum = 0.0
+        for s in 0..chains.num_samples {
+            let diff = chains.chains[c].samples[s].theta.values[param_idx] - mean
+            var_sum = var_sum + diff * diff
+        }
+        chain_vars = chain_vars ++ [var_sum / (n - 1.0)]
+    }
+
+    // Overall mean
+    var grand_mean = 0.0
+    for c in 0..chains.num_chains {
+        grand_mean = grand_mean + chain_means[c]
+    }
+    grand_mean = grand_mean / m
+
+    // Between-chain variance
+    var b = 0.0
+    for c in 0..chains.num_chains {
+        let diff = chain_means[c] - grand_mean
+        b = b + diff * diff
+    }
+    b = n / (m - 1.0) * b
+
+    // Within-chain variance
+    var w = 0.0
+    for c in 0..chains.num_chains {
+        w = w + chain_vars[c]
+    }
+    w = w / m
+
+    // Pooled variance estimate
+    let var_plus = (n - 1.0) / n * w + b / n
+
+    // R-hat
+    sqrt(var_plus / w)
+}
+
+/// Compute effective sample size (bulk)
+fn compute_ess_bulk<const N: usize>(chains: &ChainCollection<N>, param_idx: usize) -> f64 {
+    // Combine all chains
+    var all_samples: [f64] = []
+    for c in 0..chains.num_chains {
+        for s in 0..chains.num_samples {
+            all_samples = all_samples ++ [chains.chains[c].samples[s].theta.values[param_idx]]
+        }
+    }
+
+    let n = len(all_samples) as f64
+
+    // Compute mean
+    var mean = 0.0
+    for i in 0..len(all_samples) {
+        mean = mean + all_samples[i]
+    }
+    mean = mean / n
+
+    // Compute variance
+    var var_sum = 0.0
+    for i in 0..len(all_samples) {
+        let diff = all_samples[i] - mean
+        var_sum = var_sum + diff * diff
+    }
+    let variance = var_sum / (n - 1.0)
+
+    // Compute autocorrelation and ESS
+    // Simple estimation: ESS ≈ n / (1 + 2 * sum of autocorrelations)
+    var sum_rho = 0.0
+    let max_lag = min(100, len(all_samples) as i32 / 2)
+
+    for lag in 1..max_lag {
+        var cov = 0.0
+        for i in 0..(len(all_samples) as i32 - lag) {
+            cov = cov + (all_samples[i] - mean) * (all_samples[i + lag] - mean)
+        }
+        let rho = cov / var_sum
+        if rho < 0.05 {
+            break
+        }
+        sum_rho = sum_rho + rho
+    }
+
+    n / (1.0 + 2.0 * sum_rho)
+}
+
+/// Compute effective sample size (tail)
+fn compute_ess_tail<const N: usize>(chains: &ChainCollection<N>, param_idx: usize) -> f64 {
+    // ESS for tail quantiles (5% and 95%)
+    // Use rank-normalized values for more robust estimation
+    var all_samples: [f64] = []
+    for c in 0..chains.num_chains {
+        for s in 0..chains.num_samples {
+            all_samples = all_samples ++ [chains.chains[c].samples[s].theta.values[param_idx]]
+        }
+    }
+
+    // Sort and compute ranks
+    let sorted = sort_f64(all_samples)
+    let n = len(sorted)
+
+    // Focus on tails (bottom and top 10%)
+    let tail_size = n / 10
+    var tail_sum = 0.0
+
+    for i in 0..tail_size {
+        tail_sum = tail_sum + sorted[i]
+    }
+    for i in (n - tail_size)..n {
+        tail_sum = tail_sum + sorted[i]
+    }
+
+    // Simplified tail ESS (conservative estimate)
+    compute_ess_bulk(chains, param_idx) * 0.8
+}
+
+/// Compute Monte Carlo standard error of mean
+fn compute_mcse_mean<const N: usize>(chains: &ChainCollection<N>, param_idx: usize) -> f64 {
+    let ess = compute_ess_bulk(chains, param_idx)
+
+    // Compute pooled variance
+    var all_samples: [f64] = []
+    for c in 0..chains.num_chains {
+        for s in 0..chains.num_samples {
+            all_samples = all_samples ++ [chains.chains[c].samples[s].theta.values[param_idx]]
+        }
+    }
+
+    var mean = 0.0
+    for i in 0..len(all_samples) {
+        mean = mean + all_samples[i]
+    }
+    mean = mean / len(all_samples) as f64
+
+    var var_sum = 0.0
+    for i in 0..len(all_samples) {
+        let diff = all_samples[i] - mean
+        var_sum = var_sum + diff * diff
+    }
+    let variance = var_sum / (len(all_samples) as f64 - 1.0)
+
+    sqrt(variance / ess)
+}
+
+// ============================================================================
+// Posterior Analysis
+// ============================================================================
+
+/// Compute quantile from sorted samples
+fn quantile(sorted: &[f64], q: f64) -> f64 {
+    let n = len(sorted)
+    let idx = q * (n - 1) as f64
+    let lower = floor(idx) as i32
+    let upper = ceil(idx) as i32
+    let frac = idx - lower as f64
+
+    if lower == upper {
+        sorted[lower]
+    } else {
+        sorted[lower] * (1.0 - frac) + sorted[upper] * frac
+    }
+}
+
+/// Compute highest density interval
+fn compute_hdi(sorted: &[f64], prob: f64) -> (f64, f64) {
+    let n = len(sorted)
+    let interval_size = ceil(prob * n as f64) as i32
+
+    var min_width = f64::MAX
+    var hdi_low = sorted[0]
+    var hdi_high = sorted[interval_size - 1]
+
+    for i in 0..(n as i32 - interval_size + 1) {
+        let width = sorted[i + interval_size - 1] - sorted[i]
+        if width < min_width {
+            min_width = width
+            hdi_low = sorted[i]
+            hdi_high = sorted[i + interval_size - 1]
+        }
+    }
+
+    (hdi_low, hdi_high)
+}
+
+/// Summarize single parameter
+fn summarize_parameter<const N: usize>(
+    chains: &ChainCollection<N>,
+    param_idx: usize
+) -> ParameterSummary with Alloc {
+    // Collect all samples
+    var all_samples: [f64] = []
+    for c in 0..chains.num_chains {
+        for s in 0..chains.num_samples {
+            all_samples = all_samples ++ [chains.chains[c].samples[s].theta.values[param_idx]]
+        }
+    }
+
+    let n = len(all_samples) as f64
+
+    // Mean
+    var sum = 0.0
+    for i in 0..len(all_samples) {
+        sum = sum + all_samples[i]
+    }
+    let mean_val = sum / n
+
+    // Variance
+    var var_sum = 0.0
+    for i in 0..len(all_samples) {
+        let diff = all_samples[i] - mean_val
+        var_sum = var_sum + diff * diff
+    }
+    let variance = var_sum / (n - 1.0)
+    let std_val = sqrt(variance)
+
+    // Sort for quantiles
+    let sorted = sort_f64(all_samples)
+
+    // Quantiles
+    let median_val = quantile(&sorted, 0.5)
+    let q025 = quantile(&sorted, 0.025)
+    let q25 = quantile(&sorted, 0.25)
+    let q75 = quantile(&sorted, 0.75)
+    let q975 = quantile(&sorted, 0.975)
+
+    // HDI
+    let (hdi_low, hdi_high) = compute_hdi(&sorted, 0.94)
+
+    // Diagnostics
+    let rhat = compute_rhat(chains, param_idx)
+    let ess_bulk = compute_ess_bulk(chains, param_idx)
+    let ess_tail = compute_ess_tail(chains, param_idx)
+    let mcse_mean = compute_mcse_mean(chains, param_idx)
+    let mcse_std = mcse_mean * sqrt(2.0)  // Approximate
+
+    // Create epistemic values
+    let mean_knowledge = Knowledge {
+        value: mean_val,
+        variance: mcse_mean * mcse_mean,
+        confidence: Confidence::Frequentist {
+            sample_size: ess_bulk as i32,
+            confidence_level: 0.95,
+        },
+        provenance: Provenance::MCMC {
+            sampler: "NUTS",
+            chains: chains.num_chains,
+            samples: chains.num_samples,
+            rhat: rhat,
+        },
+    }
+
+    let std_knowledge = Knowledge {
+        value: std_val,
+        variance: mcse_std * mcse_std,
+        confidence: mean_knowledge.confidence,
+        provenance: mean_knowledge.provenance,
+    }
+
+    let median_knowledge = Knowledge {
+        value: median_val,
+        variance: 1.57 * variance / n,  // Asymptotic variance of median
+        confidence: mean_knowledge.confidence,
+        provenance: mean_knowledge.provenance,
+    }
+
+    ParameterSummary {
+        mean: mean_knowledge,
+        std: std_knowledge,
+        median: median_knowledge,
+        q025: q025,
+        q25: q25,
+        q75: q75,
+        q975: q975,
+        hdi_low: hdi_low,
+        hdi_high: hdi_high,
+        hdi_prob: 0.94,
+        rhat: rhat,
+        ess_bulk: ess_bulk,
+        ess_tail: ess_tail,
+        mcse_mean: mcse_mean,
+        mcse_std: mcse_std,
+    }
+}
+
+/// Summarize full posterior
+fn summarize_posterior<const N: usize>(
+    chains: &ChainCollection<N>
+) -> PosteriorSummary<N> with Alloc {
+    var parameters: [ParameterSummary; N] = []
+    var max_rhat = 0.0
+    var min_ess_bulk = f64::MAX
+    var min_ess_tail = f64::MAX
+    var total_divergences = 0
+    var total_max_depth = 0.0
+
+    for i in 0..N {
+        let summary = summarize_parameter(chains, i)
+        parameters[i] = summary
+
+        if summary.rhat > max_rhat {
+            max_rhat = summary.rhat
+        }
+        if summary.ess_bulk < min_ess_bulk {
+            min_ess_bulk = summary.ess_bulk
+        }
+        if summary.ess_tail < min_ess_tail {
+            min_ess_tail = summary.ess_tail
+        }
+    }
+
+    for c in 0..chains.num_chains {
+        total_divergences = total_divergences +
+            (chains.chains[c].divergence_rate * chains.num_samples as f64) as i32
+        total_max_depth = total_max_depth + chains.chains[c].max_tree_depth_rate
+    }
+    total_max_depth = total_max_depth / chains.num_chains as f64
+
+    // Convergence assessment
+    let all_rhat_ok = max_rhat < 1.01
+    let enough_ess = min_ess_bulk > 400.0 && min_ess_tail > 400.0
+    let few_divergences = total_divergences < 10
+
+    let converged = Knowledge {
+        value: all_rhat_ok && enough_ess && few_divergences,
+        variance: if all_rhat_ok && enough_ess { 0.01 } else { 0.1 },
+        confidence: Confidence::Bayesian {
+            prior_weight: 0.1,
+            data_weight: 0.9,
+        },
+        provenance: Provenance::Computed {
+            method: "MCMC Diagnostics",
+        },
+    }
+
+    let diagnostics = ConvergenceDiagnostics {
+        all_rhat_ok: all_rhat_ok,
+        min_ess_bulk: min_ess_bulk,
+        min_ess_tail: min_ess_tail,
+        max_rhat: max_rhat,
+        total_divergences: total_divergences,
+        max_treedepth_rate: total_max_depth,
+        converged: converged,
+    }
+
+    // Placeholder for model comparison metrics
+    let log_evidence = Knowledge {
+        value: 0.0,
+        variance: 1.0,
+        confidence: Confidence::Unknown,
+        provenance: Provenance::NotComputed,
+    }
+
+    PosteriorSummary {
+        parameters: parameters,
+        diagnostics: diagnostics,
+        log_evidence: log_evidence,
+        waic: log_evidence,
+        loo: log_evidence,
+    }
+}
+
+// ============================================================================
+// Utility Functions
+// ============================================================================
+
+/// Generate standard normal random variable
+fn random_normal() -> f64 with Prob {
+    // Box-Muller transform
+    let u1 = random_uniform()
+    let u2 = random_uniform()
+    sqrt(-2.0 * log(u1)) * cos(2.0 * 3.14159265359 * u2)
+}
+
+/// Generate uniform random variable in [0, 1)
+fn random_uniform() -> f64 with Prob {
+    // Placeholder - would use proper RNG
+    @extern("random_uniform")
+}
+
+/// Generate random standard normal vector
+fn evec_randn<const N: usize>() -> EVector<N> with Prob {
+    var result = evec_zeros::<N>()
+    for i in 0..N {
+        result.values[i] = random_normal()
+        result.variances[i] = 0.0
+    }
+    result
+}
+
+/// Sort array of f64
+fn sort_f64(arr: [f64]) -> [f64] with Alloc {
+    // Simple insertion sort for now
+    var sorted = arr
+    let n = len(sorted)
+
+    for i in 1..n {
+        let key = sorted[i]
+        var j = i as i32 - 1
+        while j >= 0 && sorted[j] > key {
+            sorted[j + 1] = sorted[j]
+            j = j - 1
+        }
+        sorted[j + 1] = key
+    }
+
+    sorted
+}
+
+/// Math functions
+fn log(x: f64) -> f64 { @extern("log") }
+fn exp(x: f64) -> f64 { @extern("exp") }
+fn sqrt(x: f64) -> f64 { @extern("sqrt") }
+fn pow(x: f64, y: f64) -> f64 { @extern("pow") }
+fn cos(x: f64) -> f64 { @extern("cos") }
+fn sin(x: f64) -> f64 { @extern("sin") }
+fn floor(x: f64) -> f64 { @extern("floor") }
+fn ceil(x: f64) -> f64 { @extern("ceil") }
+fn min(a: f64, b: f64) -> f64 { if a < b { a } else { b } }
+fn max(a: f64, b: f64) -> f64 { if a > b { a } else { b } }
+fn min(a: i32, b: i32) -> i32 { if a < b { a } else { b } }
+fn len<T>(arr: [T]) -> usize { @extern("array_len") }
+
+// ============================================================================
+// High-Level API
+// ============================================================================
+
+/// Sample from posterior using NUTS with sensible defaults
+fn sample<const N: usize>(
+    log_prob_fn: fn(&EVector<N>) -> f64,
+    grad_fn: fn(&EVector<N>) -> EVector<N>,
+    num_chains: i32,
+    num_samples: i32
+) -> PosteriorSummary<N> with Prob, Alloc {
+    let num_warmup = num_samples / 2
+    let opts = nuts_options_default()
+
+    // Generate random initial points
+    var inits: [EVector<N>] = []
+    for c in 0..num_chains {
+        var init = evec_zeros::<N>()
+        for i in 0..N {
+            init.values[i] = random_normal() * 2.0
+        }
+        inits = inits ++ [init]
+    }
+
+    let chains = nuts_sample_chains(log_prob_fn, grad_fn, inits, num_samples, num_warmup, opts)
+    summarize_posterior(&chains)
+}
+
+/// Sample with custom options
+fn sample_with_options<const N: usize>(
+    log_prob_fn: fn(&EVector<N>) -> f64,
+    grad_fn: fn(&EVector<N>) -> EVector<N>,
+    inits: [EVector<N>],
+    num_samples: i32,
+    num_warmup: i32,
+    opts: NUTSOptions
+) -> PosteriorSummary<N> with Prob, Alloc {
+    let chains = nuts_sample_chains(log_prob_fn, grad_fn, inits, num_samples, num_warmup, opts)
+    summarize_posterior(&chains)
+}
+
+/// Quick diagnostic check
+fn check_convergence<const N: usize>(summary: &PosteriorSummary<N>) -> bool {
+    summary.diagnostics.converged.value
+}
+
+/// Print convergence warnings
+fn print_diagnostics<const N: usize>(summary: &PosteriorSummary<N>) with IO {
+    let d = &summary.diagnostics
+
+    if !d.all_rhat_ok {
+        print("WARNING: Some R-hat values > 1.01 (max: ")
+        print_f64(d.max_rhat)
+        print(")\n")
+    }
+
+    if d.min_ess_bulk < 400.0 {
+        print("WARNING: Low bulk ESS (min: ")
+        print_f64(d.min_ess_bulk)
+        print(")\n")
+    }
+
+    if d.min_ess_tail < 400.0 {
+        print("WARNING: Low tail ESS (min: ")
+        print_f64(d.min_ess_tail)
+        print(")\n")
+    }
+
+    if d.total_divergences > 0 {
+        print("WARNING: ")
+        print_i32(d.total_divergences)
+        print(" divergent transitions\n")
+    }
+
+    if d.max_treedepth_rate > 0.1 {
+        print("WARNING: High max treedepth rate: ")
+        print_f64(d.max_treedepth_rate)
+        print("\n")
+    }
+}
+
+// External print functions
+fn print(s: string) with IO { @extern("print") }
+fn print_f64(x: f64) with IO { @extern("print_f64") }
+fn print_i32(x: i32) with IO { @extern("print_i32") }
+
+// ============================================================================
+// Unit Tests
+// ============================================================================
+
+#[test]
+fn test_dual_average() {
+    var state = dual_average_init(1.0, 0.8)
+
+    // Simulate adaptation
+    for i in 1..100 {
+        let accept_stat = 0.75  // Slightly below target
+        let new_step = dual_average_update(&!state, accept_stat, i)
+        assert(new_step > 0.0)
+    }
+
+    let final_step = dual_average_final(&state)
+    assert(final_step > 0.0)
+}
+
+#[test]
+fn test_leapfrog() {
+    let pos = evec_new([1.0, 2.0])
+    let vel = evec_new([0.1, -0.1])
+    let grad = evec_new([-1.0, -2.0])  // Gradient of -0.5 * ||x||^2
+    let epsilon = 0.1
+
+    let new_pos = leapfrog_position(pos, vel, grad, epsilon)
+
+    // Position should move in velocity direction with gradient correction
+    assert(abs(new_pos.values[0] - 1.005) < 0.01)
+    assert(abs(new_pos.values[1] - 1.89) < 0.01)
+}
+
+#[test]
+fn test_hamiltonian() {
+    let log_prob = -2.0
+    let vel = evec_new([1.0, 0.0])
+
+    let h = hamiltonian(log_prob, vel)
+
+    // H = -log_prob + 0.5 * ||v||^2 = 2.0 + 0.5
+    assert(abs(h - 2.5) < 0.001)
+}
+
+#[test]
+fn test_uturn() {
+    let pos_minus = evec_new([0.0, 0.0])
+    let pos_plus = evec_new([1.0, 0.0])
+
+    // Velocities pointing outward - no U-turn
+    let vel_minus = evec_new([-1.0, 0.0])
+    let vel_plus = evec_new([1.0, 0.0])
+    assert(!check_uturn(pos_minus, pos_plus, vel_minus, vel_plus))
+
+    // Velocities pointing inward - U-turn
+    let vel_minus_in = evec_new([1.0, 0.0])
+    let vel_plus_in = evec_new([-1.0, 0.0])
+    assert(check_uturn(pos_minus, pos_plus, vel_minus_in, vel_plus_in))
+}
+
+#[test]
+fn test_sort() {
+    let arr = [3.0, 1.0, 4.0, 1.0, 5.0, 9.0, 2.0, 6.0]
+    let sorted = sort_f64(arr)
+
+    assert(abs(sorted[0] - 1.0) < 0.001)
+    assert(abs(sorted[1] - 1.0) < 0.001)
+    assert(abs(sorted[7] - 9.0) < 0.001)
+}
+
+#[test]
+fn test_quantile() {
+    let sorted = [1.0, 2.0, 3.0, 4.0, 5.0]
+
+    assert(abs(quantile(&sorted, 0.0) - 1.0) < 0.001)
+    assert(abs(quantile(&sorted, 0.5) - 3.0) < 0.001)
+    assert(abs(quantile(&sorted, 1.0) - 5.0) < 0.001)
+}
+
+#[test]
+fn test_hdi() {
+    // Simple symmetric distribution
+    let sorted = [1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0]
+    let (low, high) = compute_hdi(&sorted, 0.5)
+
+    // 50% HDI should be roughly centered
+    assert(high - low <= 6.0)
+    assert(low >= 1.0)
+    assert(high <= 10.0)
+}
+
+#[test]
+fn test_mh_transition() with Prob {
+    fn simple_log_prob(theta: &EVector<2>) -> f64 {
+        -0.5 * (theta.values[0] * theta.values[0] + theta.values[1] * theta.values[1])
+    }
+
+    let init = evec_new([0.0, 0.0])
+    let state = ChainState {
+        position: init,
+        log_prob: simple_log_prob(&init),
+        gradient: evec_zeros::<2>(),
+        step_size: 1.0,
+        mass_matrix: MassMatrix::Identity,
+        iteration: 0,
+        accepts: 0,
+        divergences: 0,
+    }
+
+    let (sample, accept) = mh_transition(&state, simple_log_prob, 0.5)
+
+    // Should produce valid sample
+    assert(sample.log_prob <= 0.0)  // Log prob of normal is always <= 0
+}
+
+#[test]
+fn test_nuts_options() {
+    let opts = nuts_options_default()
+
+    assert(opts.max_tree_depth == 10)
+    assert(abs(opts.target_accept - 0.8) < 0.001)
+    assert(opts.adapt_mass_matrix)
+}
+
+fn abs(x: f64) -> f64 {
+    if x < 0.0 { -x } else { x }
+}

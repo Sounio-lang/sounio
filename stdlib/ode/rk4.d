@@ -1,0 +1,289 @@
+// rk4.d - Classic 4th-order Runge-Kutta ODE Solver for Demetrios
+//
+// Fixed-step RK4 method. Simple, robust, but requires user to specify step size.
+// Use when you need predictable timing or when Tsit5's adaptivity isn't needed.
+//
+// Note: Due to compiler limitations with nested function calls, state is wrapped
+// in structs for proper loop iteration behavior.
+//
+// Reference: Standard RK4 method (Kutta 1901)
+
+// ============================================================================
+// HELPER FUNCTIONS
+// ============================================================================
+
+fn abs_val(x: f64) -> f64 {
+    if x < 0.0 { return 0.0 - x }
+    return x
+}
+
+fn sqrt_val(x: f64) -> f64 {
+    if x <= 0.0 { return 0.0 }
+    let mut y = x
+    y = (y + x / y) / 2.0
+    y = (y + x / y) / 2.0
+    y = (y + x / y) / 2.0
+    y = (y + x / y) / 2.0
+    y = (y + x / y) / 2.0
+    y = (y + x / y) / 2.0
+    y = (y + x / y) / 2.0
+    y = (y + x / y) / 2.0
+    return y
+}
+
+// ============================================================================
+// SCALAR ODE STATE
+// ============================================================================
+
+struct ScalarState {
+    u: f64,
+    t: f64
+}
+
+struct ScalarStepResult {
+    state_new: ScalarState
+}
+
+struct RK4Solution {
+    t_final: f64,
+    u_final: f64,
+    nsteps: i64,
+    nfeval: i64
+}
+
+// Example ODE: exponential decay du/dt = -k*u
+fn exp_decay_f(u: f64, t: f64) -> f64 {
+    let k = 0.1
+    return 0.0 - k * u
+}
+
+// Single RK4 step for scalar ODE du/dt = f(u, t)
+fn rk4_step_scalar(s: ScalarState, dt: f64) -> ScalarStepResult {
+    let u = s.u
+    let t = s.t
+    let k1 = exp_decay_f(u, t)
+    let k2 = exp_decay_f(u + 0.5 * dt * k1, t + 0.5 * dt)
+    let k3 = exp_decay_f(u + 0.5 * dt * k2, t + 0.5 * dt)
+    let k4 = exp_decay_f(u + dt * k3, t + dt)
+    let u_new = u + (dt / 6.0) * (k1 + 2.0 * k2 + 2.0 * k3 + k4)
+    return ScalarStepResult {
+        state_new: ScalarState { u: u_new, t: t + dt }
+    }
+}
+
+fn solve_rk4_scalar(u0: f64, t0: f64, t_end: f64, n_steps: i64) -> RK4Solution {
+    let dt = (t_end - t0) / (n_steps as f64)
+    let mut s = ScalarState { u: u0, t: t0 }
+    let mut i: i64 = 0
+
+    while i < n_steps {
+        let result = rk4_step_scalar(s, dt)
+        s = result.state_new
+        i = i + 1
+    }
+
+    return RK4Solution {
+        t_final: s.t,
+        u_final: s.u,
+        nsteps: n_steps,
+        nfeval: n_steps * 4
+    }
+}
+
+// ============================================================================
+// 3-COMPARTMENT PK MODEL (matching tsit5_multicomp.d)
+// ============================================================================
+
+struct PKState3 {
+    gut: f64,
+    central: f64,
+    periph: f64,
+    t: f64
+}
+
+struct PKDeriv3 {
+    d_gut: f64,
+    d_central: f64,
+    d_periph: f64
+}
+
+struct PKParams3 {
+    ka: f64,
+    ke: f64,
+    k12: f64,
+    k21: f64
+}
+
+struct PKStepResult3 {
+    state_new: PKState3
+}
+
+fn default_pk3_params() -> PKParams3 {
+    return PKParams3 {
+        ka: 1.5,
+        ke: 0.1,
+        k12: 0.3,
+        k21: 0.15
+    }
+}
+
+fn pk3_ode(gut: f64, central: f64, periph: f64, t: f64, p: PKParams3) -> PKDeriv3 {
+    return PKDeriv3 {
+        d_gut: 0.0 - p.ka * gut,
+        d_central: p.ka * gut - p.ke * central - p.k12 * central + p.k21 * periph,
+        d_periph: p.k12 * central - p.k21 * periph
+    }
+}
+
+fn rk4_step_pk3(s: PKState3, dt: f64, p: PKParams3) -> PKStepResult3 {
+    let t = s.t
+
+    // Stage 1
+    let k1 = pk3_ode(s.gut, s.central, s.periph, t, p)
+
+    // Stage 2
+    let gut2 = s.gut + 0.5 * dt * k1.d_gut
+    let central2 = s.central + 0.5 * dt * k1.d_central
+    let periph2 = s.periph + 0.5 * dt * k1.d_periph
+    let k2 = pk3_ode(gut2, central2, periph2, t + 0.5 * dt, p)
+
+    // Stage 3
+    let gut3 = s.gut + 0.5 * dt * k2.d_gut
+    let central3 = s.central + 0.5 * dt * k2.d_central
+    let periph3 = s.periph + 0.5 * dt * k2.d_periph
+    let k3 = pk3_ode(gut3, central3, periph3, t + 0.5 * dt, p)
+
+    // Stage 4
+    let gut4 = s.gut + dt * k3.d_gut
+    let central4 = s.central + dt * k3.d_central
+    let periph4 = s.periph + dt * k3.d_periph
+    let k4 = pk3_ode(gut4, central4, periph4, t + dt, p)
+
+    // Combine
+    let gut_new = s.gut + (dt / 6.0) * (k1.d_gut + 2.0*k2.d_gut + 2.0*k3.d_gut + k4.d_gut)
+    let central_new = s.central + (dt / 6.0) * (k1.d_central + 2.0*k2.d_central + 2.0*k3.d_central + k4.d_central)
+    let periph_new = s.periph + (dt / 6.0) * (k1.d_periph + 2.0*k2.d_periph + 2.0*k3.d_periph + k4.d_periph)
+
+    return PKStepResult3 {
+        state_new: PKState3 {
+            gut: gut_new,
+            central: central_new,
+            periph: periph_new,
+            t: t + dt
+        }
+    }
+}
+
+struct RK4SolutionPK3 {
+    t_final: f64,
+    gut: f64,
+    central: f64,
+    periph: f64,
+    nsteps: i64,
+    nfeval: i64
+}
+
+fn solve_rk4_pk3(s0: PKState3, p: PKParams3, t_end: f64, n_steps: i64) -> RK4SolutionPK3 {
+    let dt = t_end / (n_steps as f64)
+    let mut s = s0
+    let mut i: i64 = 0
+
+    while i < n_steps {
+        let result = rk4_step_pk3(s, dt, p)
+        s = result.state_new
+        i = i + 1
+    }
+
+    return RK4SolutionPK3 {
+        t_final: s.t,
+        gut: s.gut,
+        central: s.central,
+        periph: s.periph,
+        nsteps: n_steps,
+        nfeval: n_steps * 4
+    }
+}
+
+// ============================================================================
+// ANALYTICAL SOLUTION FOR VALIDATION
+// ============================================================================
+
+fn exp_approx(x: f64) -> f64 {
+    let x2 = x * x
+    let x3 = x2 * x
+    let x4 = x3 * x
+    let x5 = x4 * x
+    let x6 = x5 * x
+    let x7 = x6 * x
+    let x8 = x7 * x
+    return 1.0 + x + x2/2.0 + x3/6.0 + x4/24.0 + x5/120.0 + x6/720.0 + x7/5040.0 + x8/40320.0
+}
+
+fn exp_decay_analytical(u0: f64, k: f64, t: f64) -> f64 {
+    return u0 * exp_approx(0.0 - k * t)
+}
+
+// ============================================================================
+// TEST
+// ============================================================================
+
+fn main() -> i32 {
+    println("=== Demetrios RK4 Fixed-Step ODE Solver ===")
+    println("")
+
+    // Test 1: Scalar exponential decay
+    println("Test 1: Exponential Decay du/dt = -0.1*u")
+    println("  u0 = 100, t: 0 -> 10, n_steps = 100")
+
+    let sol1 = solve_rk4_scalar(100.0, 0.0, 10.0, 100)
+    let analytical1 = exp_decay_analytical(100.0, 0.1, 10.0)
+    let err1 = abs_val(sol1.u_final - analytical1)
+    let rel_err1 = err1 / analytical1
+
+    println("  Numerical:")
+    println(sol1.u_final)
+    println("  Analytical:")
+    println(analytical1)
+    println("  Relative error:")
+    println(rel_err1)
+    println("  Function evals:")
+    println(sol1.nfeval)
+    println("")
+
+    // Test 2: 3-compartment PK model
+    println("Test 2: 3-Compartment PK Model")
+    println("  Dose: 500 mg oral, t: 0 -> 24h, n_steps = 1000")
+
+    let s0 = PKState3 { gut: 500.0, central: 0.0, periph: 0.0, t: 0.0 }
+    let p = default_pk3_params()
+    let sol2 = solve_rk4_pk3(s0, p, 24.0, 1000)
+
+    println("  Gut amount (mg):")
+    println(sol2.gut)
+    println("  Central amount (mg):")
+    println(sol2.central)
+    println("  Peripheral amount (mg):")
+    println(sol2.periph)
+
+    let total = sol2.gut + sol2.central + sol2.periph
+    let eliminated = 500.0 - total
+    println("  Eliminated (mg):")
+    println(eliminated)
+    println("  Function evals:")
+    println(sol2.nfeval)
+    println("")
+
+    // Validation
+    let pass1 = rel_err1 < 0.0001
+    let pass2 = sol2.gut < 0.01
+
+    if pass1 && pass2 {
+        println("TEST PASSED: Both RK4 tests correct")
+        return 0
+    } else {
+        println("TEST FAILED")
+        if !pass1 { println("  Scalar test failed") }
+        if !pass2 { println("  PK test failed") }
+        return 1
+    }
+}

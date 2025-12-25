@@ -1,0 +1,33 @@
+// random.d - Simple random number generation for Demetrios
+
+// Linear congruential generator
+fn lcg(seed: i64) -> i64 {
+    let a: i64 = 1664525
+    let c: i64 = 1013904223
+    let m: i64 = 4294967296
+    return (a * seed + c) % m
+}
+
+fn main() -> i32 {
+    println("=== RNG Test ===")
+    
+    let s0: i64 = 12345
+    let s1 = lcg(s0)
+    let s2 = lcg(s1)
+    
+    println("Seed 0 = ")
+    println(s0)
+    println("Seed 1 = ")
+    println(s1)
+    println("Seed 2 = ")
+    println(s2)
+    
+    // Check seeds are changing
+    if s1 != s0 && s2 != s1 {
+        println("TEST PASSED - LCG generates different seeds")
+        return 0
+    }
+    
+    println("TEST FAILED")
+    return 1
+}

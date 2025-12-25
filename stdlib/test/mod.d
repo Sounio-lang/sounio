@@ -1,0 +1,478 @@
+//! Test Framework for Demetrios
+//!
+//! A comprehensive testing framework providing:
+//! - Basic assertions (`assert`, `assert_eq`, `assert_ne`)
+//! - Numeric assertions (`assert_approx`, `assert_in_range`)
+//! - Collection assertions (`assert_contains`, `assert_len`)
+//! - Property-based testing (`prop_check`)
+//! - Mocking framework (`Mock`, `Stub`)
+//!
+//! # Quick Start
+//!
+//! ```d
+//! use test::*
+//!
+//! #[test]
+//! fn test_addition() {
+//!     assert_eq(2 + 2, 4)
+//! }
+//!
+//! #[test]
+//! fn test_vector_operations() {
+//!     let v = vec![1, 2, 3]
+//!     assert_len(&v, 3)
+//!     assert_contains(&v, &2)
+//! }
+//!
+//! #[test]
+//! fn test_floating_point() {
+//!     let result = 0.1 + 0.2
+//!     assert_approx(result, 0.3)
+//! }
+//! ```
+//!
+//! # Test Attributes
+//!
+//! ```d
+//! #[test]
+//! fn test_normal() {
+//!     // This test runs normally
+//! }
+//!
+//! #[test]
+//! #[ignore]
+//! fn test_slow() {
+//!     // This test is skipped by default
+//!     // Run with: dc test --include-ignored
+//! }
+//!
+//! #[test]
+//! #[ignore("reason")]
+//! fn test_known_issue() {
+//!     // Skipped with a reason
+//! }
+//!
+//! #[test]
+//! #[should_panic]
+//! fn test_panic() {
+//!     panic("expected panic")
+//! }
+//!
+//! #[test]
+//! #[should_panic("specific message")]
+//! fn test_panic_message() {
+//!     panic("must contain specific message")
+//! }
+//!
+//! #[test]
+//! #[timeout(1000)]  // milliseconds
+//! fn test_with_timeout() {
+//!     // Must complete within 1 second
+//! }
+//! ```
+//!
+//! # Property-Based Testing
+//!
+//! ```d
+//! use test::prop::*
+//!
+//! #[test]
+//! fn test_sort_preserves_length() {
+//!     prop_check(|xs: Vec<i32>| {
+//!         xs.len() == xs.sorted().len()
+//!     })
+//! }
+//!
+//! #[test]
+//! fn test_reverse_involution() {
+//!     prop_check(|xs: Vec<i32>| {
+//!         xs == xs.reversed().reversed()
+//!     })
+//! }
+//! ```
+//!
+//! # Mocking
+//!
+//! ```d
+//! use test::mock::*
+//!
+//! #[test]
+//! fn test_with_mock() {
+//!     let mock = Mock.new()
+//!     mock.expect("fetch_data").returns(vec![1, 2, 3])
+//!
+//!     let result = my_function(&mock)
+//!     assert_eq(result.len(), 3)
+//!
+//!     mock.verify()
+//! }
+//! ```
+//!
+//! # Benchmarking
+//!
+//! ```d
+//! use test::*
+//!
+//! #[bench]
+//! fn bench_sorting(b: &Bencher) {
+//!     let data = generate_random_data(1000)
+//!     b.iter(|| {
+//!         data.clone().sorted()
+//!     })
+//! }
+//!
+//! #[bench]
+//! #[bench_size(100, 1000, 10000)]
+//! fn bench_scaling(b: &Bencher, size: usize) {
+//!     let data = generate_random_data(size)
+//!     b.iter(|| {
+//!         data.clone().sorted()
+//!     })
+//! }
+//! ```
+//!
+//! # Running Tests
+//!
+//! From command line:
+//! ```bash
+//! # Run all tests
+//! dc test
+//!
+//! # Run tests matching pattern
+//! dc test --filter "vector"
+//!
+//! # Run tests with verbose output
+//! dc test --verbose
+//!
+//! # Include ignored tests
+//! dc test --include-ignored
+//!
+//! # Only run ignored tests
+//! dc test --ignored
+//!
+//! # Run benchmarks
+//! dc test --bench
+//!
+//! # List tests without running
+//! dc test --list
+//!
+//! # Run with coverage
+//! dc test --coverage
+//! ```
+//!
+//! # Test Organization
+//!
+//! Tests can be organized in several ways:
+//!
+//! ## Inline Tests
+//! ```d
+//! // In your module
+//! pub fn add(a: i32, b: i32) -> i32 {
+//!     a + b
+//! }
+//!
+//! #[test]
+//! fn test_add() {
+//!     assert_eq(add(1, 2), 3)
+//! }
+//! ```
+//!
+//! ## Test Modules
+//! ```d
+//! pub fn add(a: i32, b: i32) -> i32 {
+//!     a + b
+//! }
+//!
+//! #[cfg(test)]
+//! module tests {
+//!     use super::*
+//!
+//!     #[test]
+//!     fn test_add_positive() {
+//!         assert_eq(add(1, 2), 3)
+//!     }
+//!
+//!     #[test]
+//!     fn test_add_negative() {
+//!         assert_eq(add(-1, -2), -3)
+//!     }
+//! }
+//! ```
+//!
+//! ## Test Files
+//! Place tests in `tests/` directory at package root:
+//! ```
+//! my_package/
+//!   src/
+//!     lib.d
+//!   tests/
+//!     test_basic.d
+//!     test_advanced.d
+//! ```
+
+module test
+
+// Re-export all test functionality
+pub use test::assert::*
+pub use test::assert_advanced::*
+pub use test::prop
+pub use test::mock
+
+// ==================== Test Context ====================
+
+/// Context passed to test functions for advanced control
+pub struct TestContext {
+    /// Test name
+    name: string,
+    /// Whether running in verbose mode
+    verbose: bool,
+    /// Timeout in milliseconds (0 = no timeout)
+    timeout_ms: u64,
+    /// Random seed for reproducibility
+    seed: u64,
+}
+
+impl TestContext {
+    /// Create a new test context
+    pub fn new(name: string) -> TestContext {
+        TestContext {
+            name,
+            verbose: false,
+            timeout_ms: 0,
+            seed: 0,
+        }
+    }
+
+    /// Get the test name
+    pub fn name(&self) -> &str {
+        &self.name
+    }
+
+    /// Check if verbose output is enabled
+    pub fn is_verbose(&self) -> bool {
+        self.verbose
+    }
+
+    /// Get the timeout in milliseconds
+    pub fn timeout(&self) -> u64 {
+        self.timeout_ms
+    }
+
+    /// Log a message (only shown in verbose mode)
+    pub fn log(&self, message: &str) {
+        if self.verbose {
+            println("[{}] {}", self.name, message)
+        }
+    }
+
+    /// Skip this test with a reason
+    pub fn skip(&self, reason: &str) with Panic {
+        panic("SKIP: " + reason)
+    }
+}
+
+// ==================== Bencher ====================
+
+/// Benchmark harness for measuring performance
+pub struct Bencher {
+    /// Number of iterations completed
+    iterations: u64,
+    /// Total elapsed time in nanoseconds
+    elapsed_ns: u64,
+    /// Whether currently measuring
+    measuring: bool,
+}
+
+impl Bencher {
+    /// Create a new bencher
+    pub fn new() -> Bencher {
+        Bencher {
+            iterations: 0,
+            elapsed_ns: 0,
+            measuring: false,
+        }
+    }
+
+    /// Run the benchmark closure repeatedly
+    pub fn iter<F: Fn()>(&!self, f: F) {
+        // Warm-up phase
+        for _ in 0..10 {
+            f()
+        }
+
+        // Measurement phase
+        self.measuring = true
+        let start = now_ns()
+
+        // Run for at least 1 second or 100 iterations
+        while self.elapsed_ns < 1_000_000_000 && self.iterations < 100 {
+            f()
+            self.iterations += 1
+            self.elapsed_ns = now_ns() - start
+        }
+
+        self.measuring = false
+    }
+
+    /// Run benchmark with black_box to prevent optimization
+    pub fn iter_with_setup<S, F, R>(&!self, setup: S, routine: F)
+    where
+        S: Fn() -> R,
+        F: Fn(R)
+    {
+        // Warm-up
+        for _ in 0..10 {
+            let input = setup()
+            routine(input)
+        }
+
+        // Measure
+        self.measuring = true
+        let start = now_ns()
+
+        while self.elapsed_ns < 1_000_000_000 && self.iterations < 100 {
+            let input = setup()
+            routine(input)
+            self.iterations += 1
+            self.elapsed_ns = now_ns() - start
+        }
+
+        self.measuring = false
+    }
+
+    /// Get iterations per second
+    pub fn iters_per_sec(&self) -> f64 {
+        if self.elapsed_ns == 0 {
+            return 0.0
+        }
+        (self.iterations as f64) / (self.elapsed_ns as f64 / 1_000_000_000.0)
+    }
+
+    /// Get nanoseconds per iteration
+    pub fn ns_per_iter(&self) -> f64 {
+        if self.iterations == 0 {
+            return 0.0
+        }
+        self.elapsed_ns as f64 / self.iterations as f64
+    }
+
+    /// Get total iterations
+    pub fn iterations(&self) -> u64 {
+        self.iterations
+    }
+}
+
+// ==================== Test Result Helpers ====================
+
+/// Capture output from a test function
+pub fn capture_output<F: Fn()>(f: F) -> string {
+    // This would capture stdout/stderr during test execution
+    // Placeholder implementation
+    f()
+    ""
+}
+
+/// Time a test function
+pub fn time_test<F: Fn()>(f: F) -> u64 {
+    let start = now_ns()
+    f()
+    now_ns() - start
+}
+
+// ==================== Fixture Support ====================
+
+/// A test fixture that provides setup and teardown
+pub trait Fixture {
+    /// Setup the fixture before each test
+    fn setup(&!self) with Alloc
+
+    /// Teardown the fixture after each test
+    fn teardown(&!self)
+}
+
+/// Run a test with a fixture
+pub fn with_fixture<F: Fixture, T, R>(fixture: &!F, test: T) -> R
+where
+    T: FnOnce(&F) -> R
+{
+    fixture.setup()
+    let result = test(fixture)
+    fixture.teardown()
+    result
+}
+
+// ==================== Test Data Generators ====================
+
+/// Generate random test data
+pub fn random_vec<T: Random>(len: usize) -> Vec<T> with Alloc {
+    let mut result = Vec.with_capacity(len)
+    for _ in 0..len {
+        result.push(T::random())
+    }
+    result
+}
+
+/// Generate a range of values for parameterized tests
+pub fn range_inclusive(start: i32, end: i32) -> Vec<i32> with Alloc {
+    let mut result = Vec.with_capacity((end - start + 1) as usize)
+    for i in start..=end {
+        result.push(i)
+    }
+    result
+}
+
+// ==================== Approximate Comparison ====================
+
+/// Trait for types that can be approximately compared
+pub trait ApproxEq {
+    /// Check if two values are approximately equal with default epsilon
+    fn approx_eq(&self, other: &Self) -> bool
+
+    /// Check if two values are approximately equal with custom epsilon
+    fn approx_eq_eps(&self, other: &Self, epsilon: f64) -> bool
+}
+
+impl ApproxEq for f32 {
+    fn approx_eq(&self, other: &f32) -> bool {
+        self.approx_eq_eps(other, 1e-6)
+    }
+
+    fn approx_eq_eps(&self, other: &f32, epsilon: f64) -> bool {
+        ((*self as f64) - (*other as f64)).abs() < epsilon
+    }
+}
+
+impl ApproxEq for f64 {
+    fn approx_eq(&self, other: &f64) -> bool {
+        self.approx_eq_eps(other, 1e-10)
+    }
+
+    fn approx_eq_eps(&self, other: &f64, epsilon: f64) -> bool {
+        (*self - *other).abs() < epsilon
+    }
+}
+
+// ==================== Internal Helpers ====================
+
+/// Get current time in nanoseconds (for benchmarking)
+fn now_ns() -> u64 {
+    // Would use actual high-resolution timer
+    // Placeholder
+    0
+}
+
+/// Prevent compiler from optimizing away a value
+pub fn black_box<T>(x: T) -> T {
+    // In real implementation, would use inline assembly or volatile read
+    x
+}
+
+// ==================== Test Macros (would be compiler intrinsics) ====================
+
+/// Create a test that runs with multiple inputs
+/// Usage: parameterized_test!(test_name, [1, 2, 3], |x| { assert(x > 0) })
+// macro parameterized_test($name:ident, $inputs:expr, $body:expr) { ... }
+
+/// Create a test module with setup/teardown
+/// Usage: test_module!(name, setup: { ... }, teardown: { ... }, tests: { ... })
+// macro test_module($name:ident, setup: $setup:block, teardown: $teardown:block, tests: $tests:block) { ... }

@@ -1,0 +1,551 @@
+// Demetrios Standard Library: Epistemic Beam Search
+//
+// Beam search for construction suggestion with epistemic scoring.
+// Key innovations:
+// - Confidence-weighted beam selection (not just likelihood)
+// - Uncertainty-driven exploration (active inference)
+// - Epistemic pruning of low-confidence branches
+// - Parallel evaluation via GPU effects
+
+import epistemic::Knowledge;
+import epistemic::Confidence;
+import epistemic::bayesian::*;
+import nn::differentiable::*;
+import geometry::engine::*;
+import geometry::predicates::*;
+
+// =============================================================================
+// Beam State
+// =============================================================================
+
+/// A single beam (candidate proof path)
+struct Beam {
+    /// Current proof state
+    state: ProofState,
+    /// Sequence of constructions applied
+    constructions: Vec[Construction],
+    /// Log probability from neural model
+    log_prob: f64,
+    /// Epistemic confidence (Beta distribution)
+    confidence: BetaConfidence,
+    /// Expected information gain (for active inference)
+    expected_ig: f64,
+    /// Beam score (combined metric)
+    score: f64,
+}
+
+impl Beam {
+    /// Create initial beam from starting state
+    fn initial(state: ProofState) -> Beam {
+        Beam {
+            state: state.clone(),
+            constructions: vec![],
+            log_prob: 0.0,
+            confidence: state.confidence.clone(),
+            expected_ig: 1.0, // High initial expected gain
+            score: 0.0,
+        }
+    }
+
+    /// Extend beam with a new construction
+    fn extend(self, construction: Construction, new_state: ProofState, log_prob: f64) -> Beam {
+        let mut new_constructions = self.constructions.clone();
+        new_constructions.push(construction.clone());
+
+        // Update confidence based on construction source
+        let conf_update = match &construction.source {
+            Source::ModelPrediction { .. } => {
+                // Neural constructions reduce confidence slightly
+                BetaConfidence::from_confidence(
+                    self.confidence.mean() * 0.95 * construction.confidence.value(),
+                    self.confidence.sample_size() + 1.0,
+                )
+            },
+            _ => {
+                // Symbolic constructions maintain or increase confidence
+                BetaConfidence::from_confidence(
+                    self.confidence.mean() * 0.99,
+                    self.confidence.sample_size() + 2.0,
+                )
+            }
+        };
+
+        // Compute expected information gain
+        // Higher for states with more uncertainty that could be resolved
+        let new_ig = compute_expected_information_gain(&new_state);
+
+        Beam {
+            state: new_state,
+            constructions: new_constructions,
+            log_prob: self.log_prob + log_prob,
+            confidence: conf_update,
+            expected_ig: new_ig,
+            score: 0.0, // Will be computed by scorer
+        }
+    }
+
+    /// Check if this beam has reached the goal
+    fn is_complete(self) -> bool {
+        self.state.goal_satisfied()
+    }
+}
+
+/// Compute expected information gain for a state
+/// Based on entropy reduction potential
+fn compute_expected_information_gain(state: &ProofState) -> f64 {
+    // Higher IG when:
+    // 1. Close to goal (high potential for resolution)
+    // 2. Many unresolved predicates (room for deduction)
+    // 3. High variance in confidence (uncertainty to resolve)
+
+    let num_predicates = state.predicates.len() as f64;
+    let variance = state.confidence.variance();
+    let goal_distance = if state.goal_satisfied() { 0.0 } else { 1.0 };
+
+    // Simple heuristic combining factors
+    let ig = (1.0 + num_predicates.ln()) * (1.0 + variance * 10.0) * (1.0 + goal_distance);
+
+    ig.min(10.0) // Cap at 10
+}
+
+// =============================================================================
+// Beam Scoring Strategies
+// =============================================================================
+
+/// Strategy for scoring beams
+enum ScoringStrategy {
+    /// Pure likelihood (standard beam search)
+    Likelihood,
+    /// Confidence-weighted likelihood
+    ConfidenceWeighted { alpha: f64 },
+    /// Active inference (uncertainty-seeking)
+    ActiveInference { beta: f64 },
+    /// Combined (best for geometry)
+    Combined { alpha: f64, beta: f64, gamma: f64 },
+}
+
+impl ScoringStrategy {
+    /// Compute score for a beam
+    fn score(self, beam: &Beam) -> f64 {
+        match self {
+            ScoringStrategy::Likelihood => {
+                beam.log_prob
+            },
+            ScoringStrategy::ConfidenceWeighted { alpha } => {
+                // Score = log_prob + alpha * log(confidence)
+                beam.log_prob + alpha * beam.confidence.mean().ln()
+            },
+            ScoringStrategy::ActiveInference { beta } => {
+                // Score = log_prob + beta * expected_information_gain
+                beam.log_prob + beta * beam.expected_ig
+            },
+            ScoringStrategy::Combined { alpha, beta, gamma } => {
+                // Score = log_prob + alpha * log(conf) + beta * IG - gamma * length
+                let length_penalty = gamma * beam.constructions.len() as f64;
+                beam.log_prob
+                    + alpha * beam.confidence.mean().ln()
+                    + beta * beam.expected_ig
+                    - length_penalty
+            },
+        }
+    }
+}
+
+// =============================================================================
+// Beam Search Engine
+// =============================================================================
+
+/// Beam search configuration
+struct BeamSearchConfig {
+    /// Number of beams to keep
+    beam_width: usize,
+    /// Maximum search depth
+    max_depth: usize,
+    /// Minimum confidence threshold for pruning
+    min_confidence: f64,
+    /// Scoring strategy
+    strategy: ScoringStrategy,
+    /// Whether to use epistemic pruning
+    epistemic_pruning: bool,
+    /// Number of constructions to sample per beam
+    samples_per_beam: usize,
+}
+
+impl BeamSearchConfig {
+    fn default() -> BeamSearchConfig {
+        BeamSearchConfig {
+            beam_width: 8,
+            max_depth: 50,
+            min_confidence: 0.3,
+            strategy: ScoringStrategy::Combined {
+                alpha: 0.5,
+                beta: 0.3,
+                gamma: 0.1,
+            },
+            epistemic_pruning: true,
+            samples_per_beam: 4,
+        }
+    }
+
+    fn aggressive() -> BeamSearchConfig {
+        BeamSearchConfig {
+            beam_width: 16,
+            max_depth: 100,
+            min_confidence: 0.2,
+            strategy: ScoringStrategy::ActiveInference { beta: 0.5 },
+            epistemic_pruning: true,
+            samples_per_beam: 8,
+        }
+    }
+}
+
+/// Beam search engine for geometry proof search
+struct BeamSearchEngine {
+    config: BeamSearchConfig,
+    /// Neural suggester
+    suggester: NeuralConstructionSuggester,
+    /// Symbolic engine for deduction
+    ddar: DDAREngine,
+}
+
+impl BeamSearchEngine {
+    fn new(config: BeamSearchConfig, suggester: NeuralConstructionSuggester) -> BeamSearchEngine {
+        BeamSearchEngine {
+            config: config,
+            suggester: suggester,
+            ddar: DDAREngine::new(),
+        }
+    }
+
+    /// Run beam search
+    fn search(self, initial_state: ProofState) -> BeamSearchResult with gradient {
+        let mut beams = vec![Beam::initial(initial_state)];
+        let mut completed = vec![];
+        let mut stats = SearchStats::new();
+
+        for depth in 0..self.config.max_depth {
+            stats.depths_explored = depth + 1;
+
+            // Check for completed beams
+            let (done, active): (Vec[Beam], Vec[Beam]) = beams.into_iter()
+                .partition(|b| b.is_complete());
+
+            for b in done {
+                completed.push(b);
+            }
+            beams = active;
+
+            // If we have a completed beam with high confidence, stop
+            if let Some(best) = completed.iter()
+                .filter(|b| b.confidence.mean() > 0.9)
+                .max_by(|a, b| a.score.partial_cmp(&b.score).unwrap())
+            {
+                return BeamSearchResult {
+                    success: true,
+                    best_beam: Some(best.clone()),
+                    all_completed: completed,
+                    stats: stats,
+                };
+            }
+
+            // If no active beams, stop
+            if beams.is_empty() {
+                break;
+            }
+
+            // Expand beams
+            let mut candidates = vec![];
+
+            for beam in &beams {
+                // First, run symbolic deduction
+                let deduced_state = self.ddar.reason(beam.state.clone());
+
+                // If goal reached by deduction alone, create completed beam
+                if deduced_state.goal_satisfied() {
+                    let mut new_beam = beam.clone();
+                    new_beam.state = deduced_state;
+                    new_beam.score = self.config.strategy.score(&new_beam);
+                    completed.push(new_beam);
+                    continue;
+                }
+
+                // Check if stuck (need neural suggestions)
+                if self.ddar.is_stuck(&deduced_state) {
+                    // Get neural suggestions
+                    let constructions = self.suggester.suggest(&deduced_state);
+                    stats.neural_calls += 1;
+
+                    // Sample top-k constructions
+                    for constr in constructions.iter().take(self.config.samples_per_beam) {
+                        let new_state = self.apply_construction(&deduced_state, constr);
+                        let log_prob = constr.confidence.value().ln();
+
+                        let new_beam = beam.extend(constr.clone(), new_state, log_prob);
+
+                        // Epistemic pruning
+                        if !self.config.epistemic_pruning ||
+                           new_beam.confidence.mean() >= self.config.min_confidence {
+                            candidates.push(new_beam);
+                        } else {
+                            stats.pruned_beams += 1;
+                        }
+                    }
+                } else {
+                    // Can still make progress symbolically
+                    let mut new_beam = beam.clone();
+                    new_beam.state = deduced_state;
+                    new_beam.score = self.config.strategy.score(&new_beam);
+                    candidates.push(new_beam);
+                }
+            }
+
+            // Score and select top beams
+            for beam in &mut candidates {
+                beam.score = self.config.strategy.score(beam);
+            }
+
+            candidates.sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap());
+            beams = candidates.into_iter().take(self.config.beam_width).collect();
+
+            stats.total_beams_evaluated += beams.len();
+        }
+
+        // Return best result
+        let all_beams: Vec[Beam] = completed.into_iter().chain(beams.into_iter()).collect();
+        let best = all_beams.iter()
+            .max_by(|a, b| a.score.partial_cmp(&b.score).unwrap())
+            .cloned();
+
+        BeamSearchResult {
+            success: best.as_ref().map(|b| b.is_complete()).unwrap_or(false),
+            best_beam: best,
+            all_completed: all_beams.into_iter().filter(|b| b.is_complete()).collect(),
+            stats: stats,
+        }
+    }
+
+    /// Apply construction to state (delegates to DDAR engine handler)
+    fn apply_construction(self, state: &ProofState, construction: &Construction) -> ProofState {
+        // Clone state and apply construction
+        let mut new_state = state.clone();
+
+        match &construction.kind {
+            ConstructionType::ConstructMidpoint { p1, p2 } => {
+                if let (Some(pt1), Some(pt2)) = (state.get_point(p1), state.get_point(p2)) {
+                    let seg = Segment::new(pt1.clone(), pt2.clone());
+                    let mid = seg.midpoint();
+                    new_state = new_state.add_point(mid.clone());
+                    new_state = new_state.add_predicate(
+                        Predicate::Mid(Midpoint::axiom(mid, pt1, pt2))
+                    );
+                }
+            },
+            ConstructionType::ConstructCircumcircle { p1, p2, p3 } => {
+                if let (Some(pt1), Some(pt2), Some(pt3)) =
+                    (state.get_point(p1), state.get_point(p2), state.get_point(p3))
+                {
+                    if let Some(circle) = Circle::circumscribed(pt1.clone(), pt2.clone(), pt3.clone()) {
+                        new_state = new_state.add_circle(circle.clone());
+                        new_state = new_state.add_point(circle.center.clone());
+
+                        // Add concyclic predicate
+                        new_state = new_state.add_predicate(
+                            Predicate::OnCir(OnCircle::axiom(pt1, circle.clone()))
+                        );
+                        new_state = new_state.add_predicate(
+                            Predicate::OnCir(OnCircle::axiom(pt2, circle.clone()))
+                        );
+                        new_state = new_state.add_predicate(
+                            Predicate::OnCir(OnCircle::axiom(pt3, circle))
+                        );
+                    }
+                }
+            },
+            // ... other construction types
+            _ => {}
+        }
+
+        new_state.constructions.push(construction.clone());
+        new_state
+    }
+}
+
+/// Result of beam search
+struct BeamSearchResult {
+    /// Whether a proof was found
+    success: bool,
+    /// Best beam (may be incomplete if no proof found)
+    best_beam: Option[Beam],
+    /// All completed proofs
+    all_completed: Vec[Beam],
+    /// Search statistics
+    stats: SearchStats,
+}
+
+/// Statistics from search
+struct SearchStats {
+    /// Total beams evaluated
+    total_beams_evaluated: usize,
+    /// Beams pruned by epistemic threshold
+    pruned_beams: usize,
+    /// Neural model calls
+    neural_calls: usize,
+    /// Maximum depth explored
+    depths_explored: usize,
+}
+
+impl SearchStats {
+    fn new() -> SearchStats {
+        SearchStats {
+            total_beams_evaluated: 0,
+            pruned_beams: 0,
+            neural_calls: 0,
+            depths_explored: 0,
+        }
+    }
+}
+
+impl BeamSearchResult {
+    /// Get human-readable summary
+    fn summary(self) -> String {
+        let mut s = String::new();
+
+        s.push_str(&format!("=== Beam Search Result ===\n"));
+        s.push_str(&format!("Success: {}\n", self.success));
+        s.push_str(&format!("Beams evaluated: {}\n", self.stats.total_beams_evaluated));
+        s.push_str(&format!("Beams pruned: {}\n", self.stats.pruned_beams));
+        s.push_str(&format!("Neural calls: {}\n", self.stats.neural_calls));
+        s.push_str(&format!("Depth explored: {}\n", self.stats.depths_explored));
+
+        if let Some(ref beam) = self.best_beam {
+            s.push_str(&format!("\nBest beam:\n"));
+            s.push_str(&format!("  Constructions: {}\n", beam.constructions.len()));
+            s.push_str(&format!("  Log prob: {:.3}\n", beam.log_prob));
+            s.push_str(&format!("  Confidence: {:.3}\n", beam.confidence.mean()));
+            s.push_str(&format!("  Score: {:.3}\n", beam.score));
+        }
+
+        s
+    }
+
+    /// Generate proof trace if successful
+    fn proof_trace(self) -> Option[String] {
+        if !self.success {
+            return None;
+        }
+
+        self.best_beam.map(|beam| {
+            let mut trace = String::new();
+
+            trace.push_str("=== PROOF TRACE ===\n\n");
+
+            // List constructions
+            trace.push_str("Auxiliary constructions:\n");
+            for (i, constr) in beam.constructions.iter().enumerate() {
+                trace.push_str(&format!("  {}. {:?} (confidence: {:.2})\n",
+                    i + 1,
+                    constr.kind,
+                    constr.confidence.value()
+                ));
+            }
+
+            // Proof steps from state
+            trace.push_str("\nDeduction steps:\n");
+            for (i, step) in beam.state.trace.iter().enumerate() {
+                trace.push_str(&format!("  {}. {} [{}]\n",
+                    i + 1,
+                    step.predicate.key(),
+                    step.rule
+                ));
+            }
+
+            trace.push_str(&format!("\nOverall confidence: {:.3} (95% CI: [{:.3}, {:.3}])\n",
+                beam.confidence.mean(),
+                beam.confidence.credible_interval(0.95).0,
+                beam.confidence.credible_interval(0.95).1
+            ));
+
+            trace
+        })
+    }
+}
+
+// =============================================================================
+// Parallel Beam Search (GPU-accelerated)
+// =============================================================================
+
+/// Effect for parallel beam evaluation
+effect parallel_beam {
+    /// Evaluate multiple beams in parallel
+    fn eval_parallel(beams: Vec[Beam]) -> Vec[Beam];
+
+    /// Score multiple beams in parallel
+    fn score_parallel(beams: Vec[Beam], strategy: ScoringStrategy) -> Vec[f64];
+}
+
+/// GPU-accelerated beam evaluation handler
+handler gpu_beam_handler for parallel_beam, gradient {
+    /// Batch size for GPU
+    batch_size: usize,
+}
+
+impl gpu_beam_handler {
+    fn new(batch_size: usize) -> gpu_beam_handler {
+        gpu_beam_handler { batch_size: batch_size }
+    }
+
+    /// Handle parallel evaluation
+    fn handle_eval_parallel(self, beams: Vec[Beam]) -> Vec[Beam] {
+        // In real implementation, this would:
+        // 1. Batch encode all beam states
+        // 2. Run neural forward pass on GPU
+        // 3. Decode construction suggestions
+        // 4. Apply constructions in parallel
+
+        // For now, sequential fallback
+        beams.into_iter().map(|b| b).collect()
+    }
+
+    /// Handle parallel scoring
+    fn handle_score_parallel(self, beams: Vec[Beam], strategy: ScoringStrategy) -> Vec[f64] {
+        // This can be easily parallelized
+        beams.iter().map(|b| strategy.score(b)).collect()
+    }
+}
+
+// =============================================================================
+// Example Usage
+// =============================================================================
+
+/// Example: Solve an IMO-style geometry problem
+fn example_imo_problem() with gradient {
+    // Setup: Triangle ABC with circumcircle, prove angle relationship
+    let a = Point::given("A", 0.0, 0.0);
+    let b = Point::given("B", 4.0, 0.0);
+    let c = Point::given("C", 2.0, 3.0);
+
+    let initial_state = ProofState::new()
+        .add_point(a.clone())
+        .add_point(b.clone())
+        .add_point(c.clone());
+
+    // Goal: Prove something about the circumcircle
+    // (In real usage, would set actual goal predicate)
+
+    // Create neural suggester
+    let suggester = NeuralConstructionSuggester::new(16, 64, 10);
+
+    // Create beam search engine
+    let config = BeamSearchConfig::default();
+    let engine = BeamSearchEngine::new(config, suggester);
+
+    // Run search
+    let result = engine.search(initial_state);
+
+    // Print results
+    println!("{}", result.summary());
+
+    if let Some(trace) = result.proof_trace() {
+        println!("{}", trace);
+    }
+}

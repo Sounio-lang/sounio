@@ -1,0 +1,66 @@
+// distributions.d - Basic probability distributions for Demetrios
+//
+// NOTE: Foundational implementation for testing.
+// Full distributions need more math helpers.
+
+// Helper: absolute value
+fn abs_dist(x: f64) -> f64 {
+    if x < 0.0 { return 0.0 - x }
+    return x
+}
+
+// Uniform distribution PDF
+struct Uniform {
+    a: f64,
+    b: f64
+}
+
+fn uniform_new(min_val: f64, max_val: f64) -> Uniform {
+    return Uniform { a: min_val, b: max_val }
+}
+
+fn uniform_pdf(dist: Uniform, x: f64) -> f64 {
+    if x < dist.a || x > dist.b {
+        return 0.0
+    }
+    let range = dist.b - dist.a
+    if range <= 0.0 { return 0.0 }
+    return 1.0 / range
+}
+
+// Test distributions
+fn main() -> i32 {
+    println("=== Probability Distributions Test ===")
+    println("")
+
+    // Test Uniform(0, 10)
+    println("Testing Uniform(0, 10):")
+    let u = uniform_new(0.0, 10.0)
+
+    let pdf_5 = uniform_pdf(u, 5.0)
+    let pdf_neg1 = uniform_pdf(u, 0.0 - 1.0)
+    let pdf_15 = uniform_pdf(u, 15.0)
+
+    println("  pdf(5) = ")
+    println(pdf_5)
+    println("  pdf(-1) = ")
+    println(pdf_neg1)
+    println("  pdf(15) = ")
+    println(pdf_15)
+
+    // Expected: pdf(5) = 0.1, pdf(-1) = 0.0, pdf(15) = 0.0
+    let expected_pdf_5 = 0.1
+    let err = abs_dist(pdf_5 - expected_pdf_5)
+
+    println("  Error = ")
+    println(err)
+    println("")
+
+    if err < 0.01 && pdf_neg1 == 0.0 && pdf_15 == 0.0 {
+        println("TEST PASSED - Uniform distribution correct")
+        return 0
+    }
+
+    println("TEST FAILED")
+    return 1
+}

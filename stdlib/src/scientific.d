@@ -1,0 +1,279 @@
+//! Scientific Computing Library for Demetrios
+//! 
+//! This module provides state-of-the-art scientific computing capabilities
+//! including linear algebra, numerical methods, automatic differentiation,
+//! probabilistic programming, and domain-specific libraries for pharmacokinetics.
+
+/// Linear algebra with BLAS/LAPACK backend
+pub mod linalg {
+    pub use super::linalg::matrix::*;
+    pub use super::linalg::blas::*;
+    pub use super::linalg::lapack::*;
+}
+
+/// Numerical methods and algorithms
+pub mod numerics {
+    pub use super::numerics::ode::*;
+    pub use super::numerics::optimize::*;
+    pub use super::numerics::integrate::*;
+    pub use super::numerics::fft::*;
+}
+
+/// Automatic differentiation
+pub mod autodiff {
+    pub use super::autodiff::mod::*;
+    pub use super::autodiff::higher::*;
+}
+
+/// Probabilistic programming and statistical inference
+pub mod prob {
+    pub use super::prob::distributions::*;
+    pub use super::prob::mcmc::*;
+    pub use super::prob::vi::*;
+}
+
+/// Pharmacokinetic and pharmacodynamic modeling
+pub mod pkpd {
+    pub use super::pkpd::compartment::*;
+    pub use super::pkpd::population::*;
+    pub use super::pkpd::nca::*;
+}
+
+/// Interoperability with other scientific computing ecosystems
+pub mod interop {
+    pub use super::interop::numpy::*;
+    pub use super::interop::r::*;
+}
+
+/// Comprehensive test suite
+pub mod test {
+    pub use super::test_scientific::*;
+}
+
+/// High-level scientific computing workflows
+pub mod workflows {
+    use super::*;
+    
+    /// Drug development workflow
+    pub struct DrugDevelopmentWorkflow {
+        /// Population PK model
+        pub pop_pk_model: pkpd::PopulationPKModel,
+        
+        /// MCMC sampler for Bayesian analysis
+        pub mcmc_sampler: prob::MetropolisHastings,
+        
+        /// Optimization algorithm for parameter estimation
+        pub optimizer: numerics::BFGS,
+    }
+    
+    impl DrugDevelopmentWorkflow {
+        pub fn new() -> Self {
+            DrugDevelopmentWorkflow {
+                pop_pk_model: pkpd::PopulationPKModel::new(
+                    4, 3, 
+                    vec!["CL".to_string(), "V1".to_string(), "V2".to_string(), "Q".to_string()],
+                    vec!["Weight".to_string(), "Age".to_string(), "Sex".to_string()]
+                ),
+                mcmc_sampler: prob::MetropolisHastings::new(10),
+                optimizer: numerics::BFGS::new(),
+            }
+        }
+        
+        /// Complete PK analysis pipeline
+        pub fn analyze_pk_data(
+            &mut self,
+            individuals: &[pkpd::Individual],
+        ) -> DrugDevelopmentResult with IO, Alloc, Prob {
+            // 1. Non-compartmental analysis
+            let mut nca_results = Vec::new();
+            for individual in individuals {
+                if let Some(first_obs) = individual.observations.first() {
+                    let times: linalg::Vector<f64> = individual.observations.iter()
+                        .map(|obs| obs.time)
+                        .collect();
+                    let concentrations: linalg::Vector<f64> = individual.observations.iter()
+                        .map(|obs| obs.concentration)
+                        .collect();
+                    
+                    let dose = individual.doses.first()
+                        .map(|d| d.amount)
+                        .unwrap_or(100.0);
+                    
+                    let nca = pkpd::nca_analysis(&times, &concentrations, dose, 0.0, 3);
+                    nca_results.push(nca);
+                }
+            }
+            
+            // 2. Population PK modeling with MCMC
+            let mut rng = rand::thread_rng();
+            let mcmc_samples = self.pop_pk_model.fit_mcmc(individuals, 5000, &!rng);
+            
+            // 3. Model diagnostics and validation
+            let diagnostics = ModelDiagnostics {
+                convergence_rhat: prob::rhat(&[mcmc_samples.samples.clone()]),
+                effective_sample_size: prob::effective_sample_size(&mcmc_samples.samples),
+                acceptance_rate: mcmc_samples.acceptance_rate,
+            };
+            
+            DrugDevelopmentResult {
+                nca_results,
+                population_parameters: mcmc_samples,
+                diagnostics,
+            }
+        }
+    }
+    
+    /// Result of drug development analysis
+    pub struct DrugDevelopmentResult {
+        /// Non-compartmental analysis results
+        pub nca_results: Vec<pkpd::NCAResult>,
+        
+        /// Population PK parameters
+        pub population_parameters: prob::MCMCSample,
+        
+        /// Model diagnostics
+        pub diagnostics: ModelDiagnostics,
+    }
+    
+    /// Model diagnostics
+    pub struct ModelDiagnostics {
+        /// R-hat convergence diagnostic
+        pub convergence_rhat: linalg::Vector<f64>,
+        
+        /// Effective sample size
+        pub effective_sample_size: linalg::Vector<f64>,
+        
+        /// MCMC acceptance rate
+        pub acceptance_rate: f64,
+    }
+    
+    /// Bioequivalence study workflow
+    pub struct BioequivalenceWorkflow;
+    
+    impl BioequivalenceWorkflow {
+        /// Perform bioequivalence analysis
+        pub fn analyze_bioequivalence(
+            test_data: &[pkpd::NCAResult],
+            reference_data: &[pkpd::NCAResult],
+        ) -> pkpd::BioequivalenceResult {
+            pkpd::bioequivalence_analysis(test_data, reference_data)
+        }
+    }
+    
+    /// Clinical trial simulation workflow
+    pub struct ClinicalTrialSimulation {
+        /// Population model
+        pub population_model: pkpd::PopulationPKModel,
+        
+        /// Trial design parameters
+        pub n_subjects: usize,
+        pub dose_levels: Vec<f64>,
+        pub sampling_times: Vec<f64>,
+    }
+    
+    impl ClinicalTrialSimulation {
+        pub fn new(n_subjects: usize) -> Self {
+            ClinicalTrialSimulation {
+                population_model: pkpd::PopulationPKModel::new(
+                    4, 2,
+                    vec!["CL".to_string(), "V1".to_string(), "V2".to_string(), "Q".to_string()],
+                    vec!["Weight".to_string(), "Age".to_string()]
+                ),
+                n_subjects,
+                dose_levels: vec![10.0, 30.0, 100.0, 300.0],
+                sampling_times: vec![0.0, 0.5, 1.0, 2.0, 4.0, 8.0, 12.0, 24.0],
+            }
+        }
+        
+        /// Simulate clinical trial
+        pub fn simulate_trial(&self, rng: &!rand::Rng) -> TrialSimulationResult with Alloc, Prob {
+            let mut results = Vec::new();
+            
+            for &dose in &self.dose_levels {
+                let mut dose_group_results = Vec::new();
+                
+                for subject_id in 0..self.n_subjects {
+                    // Generate subject covariates
+                    let weight = 70.0 + rng.normal(0.0, 15.0);
+                    let age = 40.0 + rng.normal(0.0, 20.0);
+                    let covariates = linalg::Vector::from_slice(&[weight, age]);
+                    
+                    // Sample individual PK parameters
+                    let individual_params = self.population_model.sample_individual(&covariates, rng);
+                    
+                    // Simulate PK profile
+                    let pk_params = pkpd::PKParameters::two_compartment(
+                        individual_params[0], individual_params[1],
+                        individual_params[2], individual_params[3]
+                    );
+                    
+                    let dose_event = pkpd::DoseEvent::iv_bolus(0.0, dose);
+                    let pk_result = pkpd::simulate_pk(&pk_params, &[dose_event], &self.sampling_times);
+                    
+                    dose_group_results.push(SubjectResult {
+                        subject_id,
+                        dose,
+                        covariates,
+                        pk_profile: pk_result,
+                    });
+                }
+                
+                results.push(DoseGroupResult {
+                    dose,
+                    subjects: dose_group_results,
+                });
+            }
+            
+            TrialSimulationResult { dose_groups: results }
+        }
+    }
+    
+    /// Trial simulation result
+    pub struct TrialSimulationResult {
+        pub dose_groups: Vec<DoseGroupResult>,
+    }
+    
+    /// Dose group result
+    pub struct DoseGroupResult {
+        pub dose: f64,
+        pub subjects: Vec<SubjectResult>,
+    }
+    
+    /// Individual subject result
+    pub struct SubjectResult {
+        pub subject_id: usize,
+        pub dose: f64,
+        pub covariates: linalg::Vector<f64>,
+        pub pk_profile: pkpd::PKResult,
+    }
+}
+
+/// Re-export commonly used types and functions
+pub use linalg::{Matrix, Vector};
+pub use numerics::{odeint, quad};
+pub use autodiff::{gradient};
+pub use prob::{Normal, MultivariateNormal};
+pub use pkpd::{PKParameters, simulate_pk, nca_analysis};
+
+/// Version information
+pub const VERSION: &str = "1.0.0";
+pub const BUILD_DATE: &str = env!("BUILD_DATE");
+
+/// Library information
+pub fn info() {
+    println!("Demetrios Scientific Computing Library v{}", VERSION);
+    println!("Built on: {}", BUILD_DATE);
+    println!();
+    println!("Features:");
+    println!("  ✓ Linear Algebra (BLAS/LAPACK)");
+    println!("  ✓ Numerical Methods (ODE, Optimization, Integration)");
+    println!("  ✓ Automatic Differentiation (Forward/Reverse Mode)");
+    println!("  ✓ Probabilistic Programming (MCMC, VI)");
+    println!("  ✓ Pharmacokinetic/Pharmacodynamic Modeling");
+    println!("  ✓ Non-compartmental Analysis");
+    println!("  ✓ Population Modeling");
+    println!("  ✓ NumPy/R Interoperability");
+    println!("  ✓ GPU Acceleration");
+    println!("  ✓ Units of Measure");
+    println!("  ✓ Effect System Integration");
+}

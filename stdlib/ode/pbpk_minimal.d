@@ -1,0 +1,326 @@
+// pbpk_minimal.d - Minimal 2-Compartment PBPK Model
+//
+// The simplest physiologically-based model that still captures essential PK:
+// - Gut lumen (absorption)
+// - Central compartment (systemic circulation + all tissues lumped together)
+//
+// Includes:
+// - First-order absorption (ka)
+// - Volume of distribution (Vd)
+// - First-order elimination (ke = CL/Vd)
+//
+// This is essentially a 1-compartment PK model with absorption, but structured
+// as a PBPK model for consistency with the more complex models.
+//
+// Maximum numerical stability - should work even with Euler integration.
+
+// ============================================================================
+// 2-COMPARTMENT STATE
+// ============================================================================
+
+struct PBPKMinimalState {
+    gut: f64,      // GI lumen [mg]
+    central: f64   // Central compartment [mg]
+}
+
+struct PBPKMinimalDeriv {
+    d_gut: f64,
+    d_central: f64
+}
+
+struct PBPKMinimalStepResult {
+    state_new: PBPKMinimalState
+}
+
+// ============================================================================
+// PARAMETERS
+// ============================================================================
+
+struct PBPKMinimalParams {
+    ka: f64,   // Absorption rate constant [1/h]
+    ke: f64,   // Elimination rate constant [1/h]
+    vd: f64    // Volume of distribution [L]
+}
+
+fn default_minimal_params() -> PBPKMinimalParams {
+    return PBPKMinimalParams {
+        ka: 1.0,    // 1/h (moderate absorption)
+        ke: 0.1,    // 1/h (10h half-life)
+        vd: 50.0    // L (typical Vd)
+    }
+}
+
+// For comparison with actual drug (e.g., metformin-like)
+fn metformin_like_params() -> PBPKMinimalParams {
+    return PBPKMinimalParams {
+        ka: 1.5,    // 1/h (rapid absorption)
+        ke: 0.231,  // 1/h (3h half-life)
+        vd: 200.0   // L (high Vd due to tissue distribution)
+    }
+}
+
+// ============================================================================
+// ODE FUNCTION
+// ============================================================================
+
+fn pbpk_minimal_ode(st: PBPKMinimalState, t: f64, p: PBPKMinimalParams) -> PBPKMinimalDeriv {
+    // Simple mass balance
+    // Gut: loss via absorption
+    let d_gut = 0.0 - p.ka * st.gut
+
+    // Central: gain via absorption, loss via elimination
+    let d_central = p.ka * st.gut - p.ke * st.central
+
+    return PBPKMinimalDeriv {
+        d_gut: d_gut,
+        d_central: d_central
+    }
+}
+
+// ============================================================================
+// RK4 STEP
+// ============================================================================
+
+fn rk4_step_minimal(st: PBPKMinimalState, t: f64, dt: f64, p: PBPKMinimalParams) -> PBPKMinimalStepResult {
+    // Stage 1
+    let k1 = pbpk_minimal_ode(st, t, p)
+
+    // Stage 2
+    let st2 = PBPKMinimalState {
+        gut: st.gut + 0.5 * dt * k1.d_gut,
+        central: st.central + 0.5 * dt * k1.d_central
+    }
+    let k2 = pbpk_minimal_ode(st2, t + 0.5 * dt, p)
+
+    // Stage 3
+    let st3 = PBPKMinimalState {
+        gut: st.gut + 0.5 * dt * k2.d_gut,
+        central: st.central + 0.5 * dt * k2.d_central
+    }
+    let k3 = pbpk_minimal_ode(st3, t + 0.5 * dt, p)
+
+    // Stage 4
+    let st4 = PBPKMinimalState {
+        gut: st.gut + dt * k3.d_gut,
+        central: st.central + dt * k3.d_central
+    }
+    let k4 = pbpk_minimal_ode(st4, t + dt, p)
+
+    // Combine
+    return PBPKMinimalStepResult {
+        state_new: PBPKMinimalState {
+            gut: st.gut + (dt / 6.0) * (k1.d_gut + 2.0*k2.d_gut + 2.0*k3.d_gut + k4.d_gut),
+            central: st.central + (dt / 6.0) * (k1.d_central + 2.0*k2.d_central + 2.0*k3.d_central + k4.d_central)
+        }
+    }
+}
+
+// ============================================================================
+// EULER STEP (for comparison - less stable)
+// ============================================================================
+
+fn euler_step_minimal(st: PBPKMinimalState, t: f64, dt: f64, p: PBPKMinimalParams) -> PBPKMinimalStepResult {
+    let deriv = pbpk_minimal_ode(st, t, p)
+
+    return PBPKMinimalStepResult {
+        state_new: PBPKMinimalState {
+            gut: st.gut + dt * deriv.d_gut,
+            central: st.central + dt * deriv.d_central
+        }
+    }
+}
+
+// ============================================================================
+// SOLVER
+// ============================================================================
+
+struct PBPKMinimalSolution {
+    gut: f64,
+    central: f64,
+    concentration: f64,  // C = amount/Vd [mg/L]
+    cmax: f64,           // Maximum concentration [mg/L]
+    tmax: f64,           // Time of maximum concentration [h]
+    auc: f64,            // Area under curve [mg*h/L]
+    nsteps: i64
+}
+
+fn solve_pbpk_minimal(init: PBPKMinimalState, p: PBPKMinimalParams, t_sim: f64, n_steps: i64, use_rk4: bool) -> PBPKMinimalSolution {
+    let dt = t_sim / (n_steps as f64)
+    let mut curr = init
+    let mut iter: i64 = 0
+    let mut auc = 0.0
+    let mut cmax = 0.0
+    let mut tmax = 0.0
+
+    while iter < n_steps {
+        let t_curr = (iter as f64) * dt
+
+        // Current concentration
+        let c_curr = curr.central / p.vd
+
+        // Update Cmax and Tmax
+        if c_curr > cmax {
+            cmax = c_curr
+            tmax = t_curr
+        }
+
+        // Take step
+        let result = if use_rk4 {
+            rk4_step_minimal(curr, t_curr, dt, p)
+        } else {
+            euler_step_minimal(curr, t_curr, dt, p)
+        }
+        curr = result.state_new
+
+        // Update AUC using trapezoidal rule
+        let c_next = curr.central / p.vd
+        auc = auc + 0.5 * dt * (c_curr + c_next)
+
+        iter = iter + 1
+    }
+
+    let c_final = curr.central / p.vd
+
+    return PBPKMinimalSolution {
+        gut: curr.gut,
+        central: curr.central,
+        concentration: c_final,
+        cmax: cmax,
+        tmax: tmax,
+        auc: auc,
+        nsteps: iter
+    }
+}
+
+// ============================================================================
+// ANALYTICAL SOLUTION (for validation)
+// ============================================================================
+
+fn exp_approx(x: f64) -> f64 {
+    let x2 = x * x
+    let x3 = x2 * x
+    let x4 = x3 * x
+    let x5 = x4 * x
+    let x6 = x5 * x
+    let x7 = x6 * x
+    let x8 = x7 * x
+    return 1.0 + x + x2/2.0 + x3/6.0 + x4/24.0 + x5/120.0 + x6/720.0 + x7/5040.0 + x8/40320.0
+}
+
+// Analytical solution for 1-compartment model with first-order absorption
+// C(t) = (F * Dose * ka) / (Vd * (ka - ke)) * (exp(-ke*t) - exp(-ka*t))
+fn one_comp_analytical_conc(dose: f64, ka: f64, ke: f64, vd: f64, t: f64) -> f64 {
+    let factor = dose * ka / (vd * (ka - ke))
+    let exp_ke = exp_approx(0.0 - ke * t)
+    let exp_ka = exp_approx(0.0 - ka * t)
+    return factor * (exp_ke - exp_ka)
+}
+
+// ============================================================================
+// HELPER FUNCTIONS
+// ============================================================================
+
+fn is_nan(x: f64) -> bool {
+    return x != x
+}
+
+fn abs_f64(x: f64) -> f64 {
+    if x < 0.0 { return 0.0 - x }
+    return x
+}
+
+fn max_f64(a: f64, b: f64) -> f64 {
+    if a > b { return a }
+    return b
+}
+
+// ============================================================================
+// TEST
+// ============================================================================
+
+fn main() -> i32 {
+    println("=== Demetrios Minimal PBPK Model ===")
+    println("")
+    println("2-compartment model: Gut + Central (with elimination)")
+    println("Validates against analytical solution")
+    println("")
+
+    // Test 1: RK4 integration
+    println("Test 1: RK4 Integration")
+    println("  500 mg oral dose, ka=1/h, ke=0.1/h, Vd=50L")
+    println("  Simulation: 0 -> 24h, n_steps=480")
+    println("")
+
+    let s0 = PBPKMinimalState {
+        gut: 500.0,
+        central: 0.0
+    }
+
+    let p = default_minimal_params()
+
+    let sol_rk4 = solve_pbpk_minimal(s0, p, 24.0, 480, true)
+
+    println("  Results:")
+    println("    Gut (mg):")
+    println(sol_rk4.gut)
+    println("    Central (mg):")
+    println(sol_rk4.central)
+    println("    Concentration at 24h (mg/L):")
+    println(sol_rk4.concentration)
+    println("    Cmax (mg/L):")
+    println(sol_rk4.cmax)
+    println("    Tmax (h):")
+    println(sol_rk4.tmax)
+    println("    AUC_0-24h (mg*h/L):")
+    println(sol_rk4.auc)
+    println("")
+
+    // Compare with analytical solution at t=24h
+    let c_analytical = one_comp_analytical_conc(500.0, p.ka, p.ke, p.vd, 24.0)
+    let err_rk4 = abs_f64(sol_rk4.concentration - c_analytical)
+    let rel_err_rk4 = err_rk4 / max_f64(c_analytical, 0.0001)
+
+    println("  Analytical C(24h):")
+    println(c_analytical)
+    println("  Relative error:")
+    println(rel_err_rk4)
+    println("")
+
+    // Test 2: Euler integration (for comparison)
+    println("Test 2: Euler Integration (same problem)")
+    let sol_euler = solve_pbpk_minimal(s0, p, 24.0, 480, false)
+
+    println("  Concentration at 24h (mg/L):")
+    println(sol_euler.concentration)
+    let err_euler = abs_f64(sol_euler.concentration - c_analytical)
+    let rel_err_euler = err_euler / max_f64(c_analytical, 0.0001)
+    println("  Relative error:")
+    println(rel_err_euler)
+    println("")
+
+    // Validation
+    let rk4_accurate = rel_err_rk4 < 0.001
+    let euler_works = rel_err_euler < 0.01  // Euler less accurate but should still work
+    let gut_absorbed = sol_rk4.gut < 0.01
+    let all_positive = sol_rk4.central > 0.0 && sol_rk4.cmax > 0.0
+    let all_finite = !is_nan(sol_rk4.central) && !is_nan(sol_rk4.cmax)
+
+    let all_valid = rk4_accurate && euler_works && gut_absorbed && all_positive && all_finite
+
+    if all_valid {
+        println("TEST PASSED: Minimal PBPK model working correctly")
+        println("  - RK4 matches analytical solution (< 0.1% error)")
+        println("  - Euler also stable (< 1% error)")
+        println("  - Absorption complete")
+        println("  - PK metrics computed (Cmax, Tmax, AUC)")
+        return 0
+    } else {
+        println("TEST FAILED")
+        if !rk4_accurate { println("  - RK4 accuracy insufficient") }
+        if !euler_works { println("  - Euler integration failed") }
+        if !gut_absorbed { println("  - Absorption incomplete") }
+        if !all_positive { println("  - Negative values detected") }
+        if !all_finite { println("  - NaN detected") }
+        return 1
+    }
+}

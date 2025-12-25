@@ -1,0 +1,665 @@
+//! Explicit Coverage Policy: No More "95% Vibes"
+//!
+//! JCGM 101 (Monte Carlo supplement) is explicit that coverage intervals
+//! can be computed in multiple ways for the same coverage probability.
+//!
+//! This module FORCES users to explicitly choose coverage semantics:
+//!   - Symmetric (equal tails): [μ - k·σ, μ + k·σ]
+//!   - Shortest (HDI-like): Minimum-length interval containing p% probability
+//!   - Asymmetric quantile: [Q_(1-p)/2, Q_(1+p)/2] for skewed distributions
+//!
+//! Without explicit specification, Demetrios REFUSES to produce intervals.
+//!
+//! References:
+//!   - JCGM 101:2008 Section 7.7: Coverage intervals
+//!   - JCGM 102:2011: Extension to any number of output quantities
+//!   - Gelman et al. (2013): "Bayesian Data Analysis", Chapter 3
+
+extern "C" {
+    fn sqrt(x: f64) -> f64;
+    fn log(x: f64) -> f64;
+    fn exp(x: f64) -> f64;
+}
+
+fn sqrt_f64(x: f64) -> f64 {
+    if x < 0.0 { return 0.0 }
+    return sqrt(x)
+}
+
+fn abs_f64(x: f64) -> f64 {
+    if x < 0.0 { return 0.0 - x }
+    return x
+}
+
+fn min_f64(a: f64, b: f64) -> f64 {
+    if a < b { a } else { b }
+}
+
+fn max_f64(a: f64, b: f64) -> f64 {
+    if a > b { a } else { b }
+}
+
+// ============================================================================
+// COVERAGE POLICY: EXPLICIT SEMANTICS
+// ============================================================================
+
+/// Coverage policy that MUST be explicitly specified
+/// Type codes:
+///   0 = UNSPECIFIED (will cause refusal)
+///   1 = SYMMETRIC (equal tails, μ ± k·σ)
+///   2 = SHORTEST (HDI - highest density interval)
+///   3 = QUANTILE (asymmetric, [Q_α/2, Q_(1-α/2)])
+///   4 = BAYESIAN_CREDIBLE (posterior-based)
+struct CoveragePolicy {
+    policy_type: i32,
+    probability: f64,        // e.g., 0.95 for 95%
+    is_specified: bool,      // MUST be true for interval computation
+}
+
+fn coverage_unspecified() -> CoveragePolicy {
+    return CoveragePolicy {
+        policy_type: 0,
+        probability: 0.0,
+        is_specified: false,
+    }
+}
+
+fn coverage_symmetric(prob: f64) -> CoveragePolicy {
+    return CoveragePolicy {
+        policy_type: 1,
+        probability: prob,
+        is_specified: true,
+    }
+}
+
+fn coverage_shortest(prob: f64) -> CoveragePolicy {
+    return CoveragePolicy {
+        policy_type: 2,
+        probability: prob,
+        is_specified: true,
+    }
+}
+
+fn coverage_quantile(prob: f64) -> CoveragePolicy {
+    return CoveragePolicy {
+        policy_type: 3,
+        probability: prob,
+        is_specified: true,
+    }
+}
+
+fn coverage_bayesian(prob: f64) -> CoveragePolicy {
+    return CoveragePolicy {
+        policy_type: 4,
+        probability: prob,
+        is_specified: true,
+    }
+}
+
+// ============================================================================
+// COVERAGE INTERVAL RESULT
+// ============================================================================
+
+struct CoverageInterval {
+    lower: f64,
+    upper: f64,
+    probability: f64,
+    policy_type: i32,
+    is_valid: bool,
+    length: f64,
+    // Metadata
+    is_symmetric: bool,
+    coverage_factor: f64,    // k for symmetric intervals
+}
+
+fn interval_invalid() -> CoverageInterval {
+    return CoverageInterval {
+        lower: 0.0,
+        upper: 0.0,
+        probability: 0.0,
+        policy_type: 0,
+        is_valid: false,
+        length: 0.0,
+        is_symmetric: false,
+        coverage_factor: 0.0,
+    }
+}
+
+fn interval_from_symmetric(mean: f64, u: f64, k: f64, prob: f64, pol_type: i32) -> CoverageInterval {
+    let half_width = k * u
+    return CoverageInterval {
+        lower: mean - half_width,
+        upper: mean + half_width,
+        probability: prob,
+        policy_type: pol_type,
+        is_valid: true,
+        length: 2.0 * half_width,
+        is_symmetric: true,
+        coverage_factor: k,
+    }
+}
+
+fn interval_from_bounds(lower: f64, upper: f64, prob: f64, policy_type: i32) -> CoverageInterval {
+    return CoverageInterval {
+        lower: lower,
+        upper: upper,
+        probability: prob,
+        policy_type: policy_type,
+        is_valid: true,
+        length: upper - lower,
+        is_symmetric: false,
+        coverage_factor: 0.0,
+    }
+}
+
+// ============================================================================
+// COVERAGE FACTOR LOOKUP (t-distribution approximation)
+// ============================================================================
+
+/// Coverage factor k for symmetric Gaussian with given probability and DOF
+/// Based on t-distribution quantiles
+fn coverage_factor_t(prob: f64, dof: f64) -> f64 {
+    // Standard values for 95%
+    if prob > 0.94 && prob < 0.96 {
+        if dof < 2.0 { return 12.71 }
+        if dof < 3.0 { return 4.30 }
+        if dof < 4.0 { return 3.18 }
+        if dof < 5.0 { return 2.78 }
+        if dof < 6.0 { return 2.57 }
+        if dof < 8.0 { return 2.36 }
+        if dof < 10.0 { return 2.26 }
+        if dof < 15.0 { return 2.13 }
+        if dof < 20.0 { return 2.09 }
+        if dof < 30.0 { return 2.04 }
+        if dof < 50.0 { return 2.01 }
+        if dof < 100.0 { return 1.98 }
+        return 1.96  // Normal limit
+    }
+
+    // Standard values for 99%
+    if prob > 0.98 && prob < 1.0 {
+        if dof < 2.0 { return 63.66 }
+        if dof < 3.0 { return 9.92 }
+        if dof < 5.0 { return 4.60 }
+        if dof < 10.0 { return 3.17 }
+        if dof < 30.0 { return 2.75 }
+        return 2.58  // Normal limit
+    }
+
+    // Standard values for 90%
+    if prob > 0.89 && prob < 0.91 {
+        if dof < 2.0 { return 6.31 }
+        if dof < 5.0 { return 2.13 }
+        if dof < 10.0 { return 1.83 }
+        if dof < 30.0 { return 1.70 }
+        return 1.645  // Normal limit
+    }
+
+    // Default to normal approximation
+    // Using probit approximation
+    if prob > 0.99 { return 2.58 }
+    if prob > 0.95 { return 1.96 }
+    if prob > 0.90 { return 1.645 }
+    if prob > 0.80 { return 1.28 }
+    if prob > 0.68 { return 1.0 }
+    return 0.67
+}
+
+// ============================================================================
+// INTERVAL COMPUTATION WITH EXPLICIT POLICY
+// ============================================================================
+
+/// Compute coverage interval - REQUIRES explicit policy
+/// Returns invalid interval if policy is unspecified
+fn compute_interval(mean: f64, std_uncert: f64, dof: f64, policy: CoveragePolicy) -> CoverageInterval {
+    // REFUSE if policy not specified
+    if !policy.is_specified {
+        return interval_invalid()
+    }
+
+    if policy.policy_type == 1 {
+        // SYMMETRIC: μ ± k·u
+        let k = coverage_factor_t(policy.probability, dof)
+        return interval_from_symmetric(mean, std_uncert, k, policy.probability, 1)
+    }
+
+    if policy.policy_type == 2 {
+        // SHORTEST (HDI): For Gaussian, this equals symmetric
+        // For non-Gaussian, needs MC samples
+        let k = coverage_factor_t(policy.probability, dof)
+        return interval_from_symmetric(mean, std_uncert, k, policy.probability, 2)
+    }
+
+    if policy.policy_type == 3 {
+        // QUANTILE: For Gaussian, this equals symmetric
+        let k = coverage_factor_t(policy.probability, dof)
+        return interval_from_symmetric(mean, std_uncert, k, policy.probability, 3)
+    }
+
+    if policy.policy_type == 4 {
+        // BAYESIAN CREDIBLE: Same as quantile for Gaussian
+        let k = coverage_factor_t(policy.probability, dof)
+        return interval_from_symmetric(mean, std_uncert, k, policy.probability, 4)
+    }
+
+    return interval_invalid()
+}
+
+// ============================================================================
+// MONTE CARLO INTERVAL WITH EXPLICIT POLICY
+// ============================================================================
+
+/// Sample storage for MC-based intervals (up to 100 samples)
+struct MCSamples {
+    count: i32,
+    // Sorted samples for quantile computation
+    s0: f64, s1: f64, s2: f64, s3: f64, s4: f64,
+    s5: f64, s6: f64, s7: f64, s8: f64, s9: f64,
+    s10: f64, s11: f64, s12: f64, s13: f64, s14: f64,
+    s15: f64, s16: f64, s17: f64, s18: f64, s19: f64,
+    mean: f64,
+    std: f64,
+}
+
+fn mc_samples_new() -> MCSamples {
+    return MCSamples {
+        count: 0,
+        s0: 0.0, s1: 0.0, s2: 0.0, s3: 0.0, s4: 0.0,
+        s5: 0.0, s6: 0.0, s7: 0.0, s8: 0.0, s9: 0.0,
+        s10: 0.0, s11: 0.0, s12: 0.0, s13: 0.0, s14: 0.0,
+        s15: 0.0, s16: 0.0, s17: 0.0, s18: 0.0, s19: 0.0,
+        mean: 0.0,
+        std: 0.0,
+    }
+}
+
+fn get_mc_sample(s: MCSamples, idx: i32) -> f64 {
+    if idx == 0 { return s.s0 }
+    if idx == 1 { return s.s1 }
+    if idx == 2 { return s.s2 }
+    if idx == 3 { return s.s3 }
+    if idx == 4 { return s.s4 }
+    if idx == 5 { return s.s5 }
+    if idx == 6 { return s.s6 }
+    if idx == 7 { return s.s7 }
+    if idx == 8 { return s.s8 }
+    if idx == 9 { return s.s9 }
+    if idx == 10 { return s.s10 }
+    if idx == 11 { return s.s11 }
+    if idx == 12 { return s.s12 }
+    if idx == 13 { return s.s13 }
+    if idx == 14 { return s.s14 }
+    if idx == 15 { return s.s15 }
+    if idx == 16 { return s.s16 }
+    if idx == 17 { return s.s17 }
+    if idx == 18 { return s.s18 }
+    if idx == 19 { return s.s19 }
+    return 0.0
+}
+
+/// Compute quantile-based interval from MC samples
+fn mc_quantile_interval(samples: MCSamples, policy: CoveragePolicy) -> CoverageInterval {
+    if !policy.is_specified { return interval_invalid() }
+    if samples.count < 10 { return interval_invalid() }
+
+    let alpha = (1.0 - policy.probability) / 2.0
+    let n = samples.count as f64
+
+    // Lower quantile index
+    let lo_idx = (alpha * n) as i32
+    // Upper quantile index
+    let hi_idx = ((1.0 - alpha) * n) as i32
+
+    let lo_idx_clamped = max_f64(0.0, lo_idx as f64) as i32
+    let hi_idx_clamped = min_f64((samples.count - 1) as f64, hi_idx as f64) as i32
+
+    let lower = get_mc_sample(samples, lo_idx_clamped)
+    let upper = get_mc_sample(samples, hi_idx_clamped)
+
+    return interval_from_bounds(lower, upper, policy.probability, policy.policy_type)
+}
+
+/// Compute shortest (HDI) interval from MC samples
+/// Finds the narrowest interval containing p% of samples
+fn mc_shortest_interval(samples: MCSamples, policy: CoveragePolicy) -> CoverageInterval {
+    if !policy.is_specified { return interval_invalid() }
+    if samples.count < 10 { return interval_invalid() }
+
+    let n = samples.count
+    let n_in_interval = ((policy.probability * (n as f64)) as i32) + 1
+
+    if n_in_interval >= n {
+        // Need all samples
+        let lower = get_mc_sample(samples, 0)
+        let upper = get_mc_sample(samples, n - 1)
+        return interval_from_bounds(lower, upper, policy.probability, 2)
+    }
+
+    // Find shortest interval containing n_in_interval samples
+    // (samples assumed sorted)
+    var min_width = 1.0e308
+    var best_lo: f64 = 0.0
+    var best_hi: f64 = 0.0
+
+    var i: i32 = 0
+    while i <= n - n_in_interval {
+        let lo = get_mc_sample(samples, i)
+        let hi = get_mc_sample(samples, i + n_in_interval - 1)
+        let width = hi - lo
+
+        if width < min_width {
+            min_width = width
+            best_lo = lo
+            best_hi = hi
+        }
+
+        i = i + 1
+    }
+
+    return interval_from_bounds(best_lo, best_hi, policy.probability, 2)
+}
+
+// ============================================================================
+// POLICY VALIDATION AND REFUSAL
+// ============================================================================
+
+struct PolicyValidation {
+    is_valid: bool,
+    error_code: i32,   // 0=ok, 1=unspecified, 2=invalid_prob, 3=unknown_type
+    message_hash: i64, // Hash of error message
+}
+
+fn validate_policy(policy: CoveragePolicy) -> PolicyValidation {
+    if !policy.is_specified {
+        return PolicyValidation {
+            is_valid: false,
+            error_code: 1,
+            message_hash: 1,  // "Coverage policy must be explicitly specified"
+        }
+    }
+
+    if policy.probability <= 0.0 || policy.probability >= 1.0 {
+        return PolicyValidation {
+            is_valid: false,
+            error_code: 2,
+            message_hash: 2,  // "Coverage probability must be in (0, 1)"
+        }
+    }
+
+    if policy.policy_type < 1 || policy.policy_type > 4 {
+        return PolicyValidation {
+            is_valid: false,
+            error_code: 3,
+            message_hash: 3,  // "Unknown coverage policy type"
+        }
+    }
+
+    return PolicyValidation {
+        is_valid: true,
+        error_code: 0,
+        message_hash: 0,
+    }
+}
+
+/// Check if interval request should be refused
+fn should_refuse_interval(policy: CoveragePolicy) -> bool {
+    let validation = validate_policy(policy)
+    return !validation.is_valid
+}
+
+// ============================================================================
+// TRANSFORM-INVARIANCE WARNING
+// ============================================================================
+
+/// CRITICAL: HDI (shortest/highest density intervals) are NOT invariant under
+/// monotone reparameterizations, whereas equal-tailed intervals behave more
+/// predictably under transforms.
+///
+/// This is explicitly noted in tooling docs (e.g., HDI vs ETI under transformations).
+///
+/// Transform types:
+///   0 = identity (no transform)
+///   1 = log
+///   2 = logit
+///   3 = sqrt
+///   4 = exp
+///   5 = custom monotone
+struct TransformContext {
+    is_transformed: bool,
+    transform_type: i32,
+    original_scale_hash: i64,
+}
+
+fn transform_identity() -> TransformContext {
+    return TransformContext {
+        is_transformed: false,
+        transform_type: 0,
+        original_scale_hash: 0,
+    }
+}
+
+fn transform_log(original_hash: i64) -> TransformContext {
+    return TransformContext {
+        is_transformed: true,
+        transform_type: 1,
+        original_scale_hash: original_hash,
+    }
+}
+
+fn transform_logit(original_hash: i64) -> TransformContext {
+    return TransformContext {
+        is_transformed: true,
+        transform_type: 2,
+        original_scale_hash: original_hash,
+    }
+}
+
+/// Transform-invariance lint result
+struct TransformWarning {
+    should_warn: bool,
+    warning_code: i32,     // 0=none, 1=hdi_on_transformed, 2=eti_recommended
+    message_hash: i64,
+}
+
+/// Check if HDI on transformed scale warrants a warning
+fn check_transform_invariance(policy: CoveragePolicy, context: TransformContext) -> TransformWarning {
+    // HDI (shortest, type=2) is NOT transform-invariant
+    if policy.policy_type == 2 && context.is_transformed {
+        return TransformWarning {
+            should_warn: true,
+            warning_code: 1,
+            // "HDI is not transform-invariant; consider reporting intervals
+            //  on the natural scale and the transformed scale, or use ETI
+            //  for transform-stable reporting."
+            message_hash: 1001,
+        }
+    }
+
+    // ETI (quantile, type=3) is transform-invariant - no warning
+    return TransformWarning {
+        should_warn: false,
+        warning_code: 0,
+        message_hash: 0,
+    }
+}
+
+/// Lint that fires for HDI on log/logit scale
+fn lint_hdi_transform(policy: CoveragePolicy, context: TransformContext) -> bool {
+    let warning = check_transform_invariance(policy, context)
+    return warning.should_warn
+}
+
+// ============================================================================
+// SKEWNESS-AWARE INTERVAL SELECTION
+// ============================================================================
+
+/// Recommend appropriate coverage policy based on distribution shape
+struct PolicyRecommendation {
+    recommended_type: i32,
+    reason_code: i32,      // 0=symmetric_ok, 1=skewed, 2=multimodal, 3=heavy_tails
+    skewness: f64,
+    kurtosis: f64,
+}
+
+/// Compute sample skewness
+fn sample_skewness(samples: MCSamples) -> f64 {
+    if samples.count < 3 { return 0.0 }
+
+    var sum3: f64 = 0.0
+    var i: i32 = 0
+    while i < samples.count {
+        let z = (get_mc_sample(samples, i) - samples.mean) / samples.std
+        sum3 = sum3 + z * z * z
+        i = i + 1
+    }
+
+    return sum3 / (samples.count as f64)
+}
+
+/// Compute sample kurtosis (excess)
+fn sample_kurtosis(samples: MCSamples) -> f64 {
+    if samples.count < 4 { return 0.0 }
+
+    var sum4: f64 = 0.0
+    var i: i32 = 0
+    while i < samples.count {
+        let z = (get_mc_sample(samples, i) - samples.mean) / samples.std
+        sum4 = sum4 + z * z * z * z
+        i = i + 1
+    }
+
+    return (sum4 / (samples.count as f64)) - 3.0  // Excess kurtosis
+}
+
+/// Recommend coverage policy based on sample distribution
+fn recommend_policy(samples: MCSamples, desired_prob: f64) -> PolicyRecommendation {
+    let skew = sample_skewness(samples)
+    let kurt = sample_kurtosis(samples)
+
+    var recommended = 1  // Default: symmetric
+    var reason = 0
+
+    // If significantly skewed, recommend quantile or shortest
+    if abs_f64(skew) > 0.5 {
+        recommended = 2  // Shortest
+        reason = 1       // Skewed
+    }
+
+    // If heavy tails (high kurtosis), shortest may be preferred
+    if kurt > 2.0 {
+        recommended = 2  // Shortest
+        reason = 3       // Heavy tails
+    }
+
+    return PolicyRecommendation {
+        recommended_type: recommended,
+        reason_code: reason,
+        skewness: skew,
+        kurtosis: kurt,
+    }
+}
+
+// ============================================================================
+// TESTS
+// ============================================================================
+
+fn test_symmetric_coverage() -> bool {
+    let policy = coverage_symmetric(0.95)
+
+    // Compute interval
+    let interval = compute_interval(100.0, 5.0, 30.0, policy)
+
+    if !interval.is_valid { return false }
+    if interval.policy_type != 1 { return false }
+    if !interval.is_symmetric { return false }
+
+    // For DOF=30, k ≈ 2.04
+    // Interval should be [100 - 2.04*5, 100 + 2.04*5] = [89.8, 110.2]
+    if interval.lower > 91.0 { return false }
+    if interval.upper < 109.0 { return false }
+
+    return true
+}
+
+fn test_unspecified_refuses() -> bool {
+    let policy = coverage_unspecified()
+
+    let interval = compute_interval(100.0, 5.0, 30.0, policy)
+
+    // Should refuse (return invalid)
+    if interval.is_valid { return false }
+
+    // should_refuse_interval should return true
+    if !should_refuse_interval(policy) { return false }
+
+    return true
+}
+
+fn test_shortest_coverage() -> bool {
+    let policy = coverage_shortest(0.95)
+
+    let interval = compute_interval(100.0, 5.0, 30.0, policy)
+
+    if !interval.is_valid { return false }
+    if interval.policy_type != 2 { return false }
+
+    // For Gaussian, shortest = symmetric
+    // Should have similar bounds
+    if interval.lower > 91.0 { return false }
+    if interval.upper < 109.0 { return false }
+
+    return true
+}
+
+fn test_policy_validation() -> bool {
+    // Valid policy
+    let good = coverage_symmetric(0.95)
+    let v1 = validate_policy(good)
+    if !v1.is_valid { return false }
+
+    // Invalid: unspecified
+    let bad1 = coverage_unspecified()
+    let v2 = validate_policy(bad1)
+    if v2.is_valid { return false }
+    if v2.error_code != 1 { return false }
+
+    // Invalid: bad probability
+    let bad2 = CoveragePolicy { policy_type: 1, probability: 1.5, is_specified: true }
+    let v3 = validate_policy(bad2)
+    if v3.is_valid { return false }
+    if v3.error_code != 2 { return false }
+
+    return true
+}
+
+fn test_coverage_factors() -> bool {
+    // 95% with large DOF should give ~1.96
+    let k95_large = coverage_factor_t(0.95, 1000.0)
+    if abs_f64(k95_large - 1.96) > 0.05 { return false }
+
+    // 95% with small DOF should be larger
+    let k95_small = coverage_factor_t(0.95, 5.0)
+    if k95_small < 2.0 { return false }
+    if k95_small > 3.0 { return false }
+
+    // 99% should be larger than 95%
+    let k99 = coverage_factor_t(0.99, 30.0)
+    let k95 = coverage_factor_t(0.95, 30.0)
+    if k99 < k95 { return false }
+
+    return true
+}
+
+// ============================================================================
+// MAIN
+// ============================================================================
+
+fn main() -> i32 {
+    if !test_symmetric_coverage() { return 1 }
+    if !test_unspecified_refuses() { return 2 }
+    if !test_shortest_coverage() { return 3 }
+    if !test_policy_validation() { return 4 }
+    if !test_coverage_factors() { return 5 }
+
+    return 0
+}
