@@ -1,0 +1,205 @@
+//! Two-compartment pharmacokinetic model
+//!
+//! Demonstrates MedLang DSL for PK/PD modeling
+//! with epistemic uncertainty propagation.
+
+import sounio::medlang::*
+import sounio::epistemic::*
+
+/// Two-compartment PK model with inter-individual variability
+model TwoCompartmentPK {
+    // Parameters with inter-individual variability
+    param CL: Knowledge<f64> = Knowledge::new(
+        value: 10.0,       // L/h (clearance)
+        uncertainty: 3.0,  // 30% CV
+        confidence: 0.95
+    )
+
+    param V1: Knowledge<f64> = Knowledge::new(
+        value: 50.0,       // L (central volume)
+        uncertainty: 12.5, // 25% CV
+        confidence: 0.95
+    )
+
+    param V2: Knowledge<f64> = Knowledge::new(
+        value: 100.0,      // L (peripheral volume)
+        uncertainty: 30.0, // 30% CV
+        confidence: 0.95
+    )
+
+    param Q: Knowledge<f64> = Knowledge::new(
+        value: 15.0,       // L/h (inter-compartmental clearance)
+        uncertainty: 3.0,  // 20% CV
+        confidence: 0.95
+    )
+
+    // Compartments
+    compartment Central {
+        volume: V1,
+        initial: 0.0
+    }
+
+    compartment Peripheral {
+        volume: V2,
+        initial: 0.0
+    }
+
+    // Flows between compartments
+    flow Central -> Peripheral: Q
+    flow Peripheral -> Central: Q
+    flow Central -> Elimination: CL
+
+    // Observation
+    observe Cp = Central.concentration
+}
+
+/// Simulate concentration at time t after IV bolus
+fn simulate_bolus(model: &TwoCompartmentPK, dose: f64, time: f64) -> Knowledge<f64> {
+    // Analytical solution for two-compartment IV bolus
+    // Using macro-constants approach
+
+    let cl = model.CL.value()
+    let v1 = model.V1.value()
+    let v2 = model.V2.value()
+    let q = model.Q.value()
+
+    // Calculate micro-constants
+    let k10 = cl / v1
+    let k12 = q / v1
+    let k21 = q / v2
+
+    // Calculate hybrid constants (alpha, beta)
+    let sum = k10 + k12 + k21
+    let product = k10 * k21
+    let discriminant = sqrt(sum * sum - 4.0 * product)
+
+    let alpha = (sum + discriminant) / 2.0
+    let beta = (sum - discriminant) / 2.0
+
+    // Calculate coefficients
+    let A = dose / v1 * (alpha - k21) / (alpha - beta)
+    let B = dose / v1 * (k21 - beta) / (alpha - beta)
+
+    // Calculate concentration
+    let cp = A * exp(-alpha * time) + B * exp(-beta * time)
+
+    // Propagate uncertainty (simplified - using relative uncertainty)
+    let rel_uncertainty = 0.25  // ~25% from parameter uncertainty
+
+    Knowledge::new(
+        value: cp,
+        uncertainty: cp * rel_uncertainty,
+        confidence: 0.95
+    )
+}
+
+fn main() -> i32 {
+    print("=== Two-Compartment PK Simulation ===")
+    println()
+    println()
+
+    let model = TwoCompartmentPK::new()
+
+    // Display model parameters
+    print("Model Parameters:")
+    println()
+    print("-".repeat(40))
+    println()
+
+    print("CL (Clearance): ")
+    print(model.CL.to_string())
+    print(" L/h")
+    println()
+
+    print("V1 (Central Volume): ")
+    print(model.V1.to_string())
+    print(" L")
+    println()
+
+    print("V2 (Peripheral Volume): ")
+    print(model.V2.to_string())
+    print(" L")
+    println()
+
+    print("Q (Inter-compartmental CL): ")
+    print(model.Q.to_string())
+    print(" L/h")
+    println()
+
+    println()
+
+    // Simulate 500mg IV bolus
+    let dose = 500.0  // mg
+
+    print("Simulation: ")
+    print(dose)
+    print(" mg IV bolus")
+    println()
+    print("-".repeat(40))
+    println()
+
+    print("Time (h)")
+    print("\t")
+    print("Cp (mg/L)")
+    println()
+    print("--------")
+    print("\t")
+    print("---------")
+    println()
+
+    // Time points
+    let times = [0.5, 1.0, 2.0, 4.0, 6.0, 8.0, 12.0, 24.0, 48.0]
+
+    for t in times {
+        let cp = simulate_bolus(&model, dose, t)
+
+        print(t)
+        print("\t\t")
+        print(cp.to_string())
+        println()
+    }
+
+    println()
+
+    // Calculate half-lives
+    print("Pharmacokinetic Parameters:")
+    println()
+    print("-".repeat(40))
+    println()
+
+    let cl = model.CL.value()
+    let v1 = model.V1.value()
+    let v2 = model.V2.value()
+    let q = model.Q.value()
+
+    let k10 = cl / v1
+    let k12 = q / v1
+    let k21 = q / v2
+
+    let sum = k10 + k12 + k21
+    let product = k10 * k21
+    let discriminant = sqrt(sum * sum - 4.0 * product)
+
+    let alpha = (sum + discriminant) / 2.0
+    let beta = (sum - discriminant) / 2.0
+
+    let t_half_alpha = 0.693 / alpha
+    let t_half_beta = 0.693 / beta
+
+    print("Distribution half-life (t1/2 alpha): ")
+    print(t_half_alpha)
+    print(" h")
+    println()
+
+    print("Elimination half-life (t1/2 beta): ")
+    print(t_half_beta)
+    print(" h")
+    println()
+
+    print("Volume of distribution at steady state: ")
+    print(v1 + v2)
+    print(" L")
+    println()
+
+    0
+}
