@@ -5,6 +5,7 @@
 //!
 //! - Epistemic type runtime representations (Full/Compact/Erased modes)
 //! - GPU memory layouts for vectorized epistemic operations
+//! - GPU kernel execution runtime (cudarc-based)
 //! - Runtime support for confidence tracking
 //! - Provenance chain management
 //! - ODE solvers (Euler, RK4, Dormand-Prince)
@@ -18,12 +19,15 @@
 //! - Model discovery (SINDy-like sparse regression)
 //! - PDE solvers (heat, wave, advection, diffusion-reaction)
 //! - GPU kernels for scientific primitives
+//! - Async/await runtime for concurrent execution
 
+pub mod async_runtime;
 pub mod causal;
 pub mod discover;
 pub mod einsum;
 pub mod epistemic;
 pub mod gpu_epistemic;
+pub mod gpu_executor;
 pub mod gpu_scientific;
 pub mod io;
 pub mod ode;
@@ -76,3 +80,15 @@ pub use tensor::{
     Dim, Shape, ShapeError, Tensor, verify_elementwise, verify_matmul, verify_reshape,
 };
 pub use uncertain::{Uncertain, UncertainOps};
+
+// Async runtime
+pub use async_runtime::{
+    AsyncContext, AsyncState, SounioFuture, SounioRuntime, SounioValue, TaskHandle,
+    TaskId, block_on, init_runtime, runtime, spawn,
+};
+
+// GPU Executor (cudarc-based kernel execution runtime)
+pub use gpu_executor::{
+    DeviceInfo as GpuDeviceInfo, EpistemicBuffer, ExecutorBuffer, GpuExecutor, GpuExecutorError,
+    KernelLauncher, KernelParam,
+};

@@ -12,6 +12,7 @@ use tower_lsp::{Client, LanguageServer};
 use super::analysis::AnalysisHost;
 use super::document::Document;
 use super::semantic_tokens::{semantic_token_modifiers, semantic_token_types};
+use super::workspace::Workspace;
 
 /// The Sounio Language Server
 pub struct SounioLanguageServer {
@@ -23,15 +24,22 @@ pub struct SounioLanguageServer {
 
     /// Analysis host for semantic analysis
     analysis: Arc<RwLock<AnalysisHost>>,
+
+    /// Multi-file workspace manager
+    workspace: Arc<RwLock<Workspace>>,
 }
 
 impl SounioLanguageServer {
     /// Create a new language server instance
     pub fn new(client: Client) -> Self {
+        let workspace = Arc::new(RwLock::new(Workspace::new()));
+        let analysis = Arc::new(RwLock::new(AnalysisHost::with_workspace(workspace.clone())));
+
         Self {
             client,
             documents: DashMap::new(),
-            analysis: Arc::new(RwLock::new(AnalysisHost::new())),
+            analysis,
+            workspace,
         }
     }
 
@@ -128,6 +136,13 @@ impl SounioLanguageServer {
             let source = doc.text();
             let version = doc.version();
 
+            // Update workspace index
+            {
+                let mut workspace = self.workspace.write().await;
+                workspace.update_file(uri, source.clone());
+            }
+
+            // Run analysis
             let mut analysis = self.analysis.write().await;
             let diagnostics = analysis.analyze(&source, uri);
 
@@ -136,11 +151,48 @@ impl SounioLanguageServer {
                 .await;
         }
     }
+
+    /// Initialize workspace with root URI
+    async fn initialize_workspace(&self, root_uri: Option<Url>) {
+        let mut workspace = self.workspace.write().await;
+        workspace.initialize(root_uri);
+
+        // Scan for files
+        let files = workspace.scan_workspace();
+
+        // Log discovered files
+        drop(workspace);
+
+        self.client
+            .log_message(
+                MessageType::INFO,
+                format!("Discovered {} source files in workspace", files.len()),
+            )
+            .await;
+
+        // Index each file (in background)
+        for path in files {
+            if let Ok(uri) = Url::from_file_path(&path) {
+                if let Ok(source) = std::fs::read_to_string(&path) {
+                    let mut workspace = self.workspace.write().await;
+                    workspace.update_file(&uri, source);
+                }
+            }
+        }
+    }
 }
 
 #[tower_lsp::async_trait]
 impl LanguageServer for SounioLanguageServer {
-    async fn initialize(&self, _params: InitializeParams) -> Result<InitializeResult> {
+    async fn initialize(&self, params: InitializeParams) -> Result<InitializeResult> {
+        // Extract root URI from params
+        let root_uri = params
+            .root_uri
+            .or_else(|| params.root_path.as_ref().and_then(|p| Url::from_file_path(p).ok()));
+
+        // Initialize workspace with root URI
+        self.initialize_workspace(root_uri).await;
+
         Ok(InitializeResult {
             capabilities: Self::server_capabilities(),
             server_info: Some(ServerInfo {
@@ -152,7 +204,7 @@ impl LanguageServer for SounioLanguageServer {
 
     async fn initialized(&self, _params: InitializedParams) {
         self.client
-            .log_message(MessageType::INFO, "Sounio LSP initialized")
+            .log_message(MessageType::INFO, "Sounio LSP initialized with workspace support")
             .await;
     }
 
@@ -223,7 +275,8 @@ impl LanguageServer for SounioLanguageServer {
 
         if let Some(doc) = self.documents.get(uri) {
             let analysis = self.analysis.read().await;
-            return Ok(analysis.goto_definition(&doc, position, uri));
+            // Use cross-file definition lookup
+            return Ok(analysis.goto_definition_cross_file(&doc, position, uri).await);
         }
 
         Ok(None)
@@ -234,10 +287,12 @@ impl LanguageServer for SounioLanguageServer {
     async fn references(&self, params: ReferenceParams) -> Result<Option<Vec<Location>>> {
         let uri = &params.text_document_position.text_document.uri;
         let position = params.text_document_position.position;
+        let include_declaration = params.context.include_declaration;
 
         if let Some(doc) = self.documents.get(uri) {
             let analysis = self.analysis.read().await;
-            return Ok(analysis.find_references(&doc, position, uri));
+            // Use cross-file references lookup
+            return Ok(analysis.find_references_cross_file(&doc, position, uri, include_declaration).await);
         }
 
         Ok(None)
@@ -375,6 +430,23 @@ impl LanguageServer for SounioLanguageServer {
         }
 
         Ok(None)
+    }
+
+    // === Workspace Symbols ===
+
+    async fn symbol(
+        &self,
+        params: WorkspaceSymbolParams,
+    ) -> Result<Option<Vec<SymbolInformation>>> {
+        let query = &params.query;
+        let analysis = self.analysis.read().await;
+        let symbols = analysis.workspace_symbols(query).await;
+
+        if symbols.is_empty() {
+            Ok(None)
+        } else {
+            Ok(Some(symbols))
+        }
     }
 }
 

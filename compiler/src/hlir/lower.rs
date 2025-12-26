@@ -799,6 +799,77 @@ impl<'a> LoweringContext<'a> {
                         .build_const(HlirConstant::String(term_str), string_ty),
                 )
             }
+
+            // ==================== ASYNC EXPRESSIONS ====================
+            HirExprKind::Await { future } => {
+                // For HLIR lowering, await becomes a runtime call
+                // In a full implementation, this would call into the async runtime
+                // For now, we lower it as a placeholder call
+                let future_val = self.lower_expr(future)?;
+                // Call runtime await function
+                Some(self.builder.build_call(
+                    "sounio_await".to_string(),
+                    vec![future_val],
+                    HlirType::from_hir(&expr.ty),
+                ))
+            }
+
+            HirExprKind::Spawn { expr: spawn_expr } => {
+                // Spawn creates a new task - call runtime spawn
+                let inner_val = self.lower_expr(spawn_expr)?;
+                Some(self.builder.build_call(
+                    "sounio_spawn".to_string(),
+                    vec![inner_val],
+                    HlirType::Ptr(Box::new(HlirType::Struct("Task".to_string()))),
+                ))
+            }
+
+            HirExprKind::AsyncBlock { body } => {
+                // Async block creates a future - lower the body and wrap
+                let block_val = self.lower_block(body);
+                // Get the value or unit (avoiding borrow issues with closure)
+                let arg_val = match block_val {
+                    Some(v) => v,
+                    None => self.builder.build_unit(),
+                };
+                // Wrap in a future structure
+                Some(self.builder.build_call(
+                    "sounio_make_future".to_string(),
+                    vec![arg_val],
+                    HlirType::Ptr(Box::new(HlirType::Struct("Future".to_string()))),
+                ))
+            }
+
+            HirExprKind::Join { futures } => {
+                // Join waits for multiple futures concurrently
+                let mut future_vals = Vec::new();
+                for f in futures {
+                    if let Some(v) = self.lower_expr(f) {
+                        future_vals.push(v);
+                    }
+                }
+                // For now, return a tuple of results
+                Some(self.builder.build_call(
+                    "sounio_join".to_string(),
+                    future_vals,
+                    HlirType::from_hir(&expr.ty),
+                ))
+            }
+
+            HirExprKind::Select { arms } => {
+                // Select waits for the first ready future
+                // For now, just evaluate the first arm
+                if let Some(arm) = arms.first() {
+                    let future_val = self.lower_expr(&arm.future)?;
+                    Some(self.builder.build_call(
+                        "sounio_select".to_string(),
+                        vec![future_val],
+                        HlirType::from_hir(&expr.ty),
+                    ))
+                } else {
+                    Some(self.builder.build_unit())
+                }
+            }
         }
     }
 

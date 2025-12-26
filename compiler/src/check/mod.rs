@@ -4358,6 +4358,11 @@ impl TypeChecker {
             HirType::Quat => Type::Quat,
             // Automatic differentiation
             HirType::Dual => Type::Dual,
+            // Async types
+            HirType::Future { output } => Type::Named {
+                name: "Future".to_string(),
+                args: vec![self.hir_type_to_type(output)],
+            },
         }
     }
 

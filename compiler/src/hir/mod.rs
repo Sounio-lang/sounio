@@ -6,6 +6,13 @@
 //! - Desugared constructs
 //! - Ownership and borrowing information
 
+pub mod async_transform;
+
+pub use async_transform::{
+    AsyncStateKind, AsyncStateMachine, AsyncStateNode, AsyncTransformer, AwaitExpr,
+    CapturedLocal, StateTransition, is_async_function, transform_async_functions,
+};
+
 use crate::ast::Abi;
 use crate::common::NodeId;
 
@@ -311,6 +318,13 @@ pub enum HirType {
     Ontology {
         namespace: String,
         term: String,
+    },
+
+    // ==================== ASYNC TYPES ====================
+    /// Future type: Future<T> represents an async computation that will produce T
+    Future {
+        /// The output type of the future
+        output: Box<HirType>,
     },
 }
 
@@ -686,6 +700,33 @@ pub enum HirExprKind {
     // ==================== ONTOLOGY EXPRESSIONS ====================
     /// Ontology term literal: prefix:term (e.g., chebi:aspirin, drugbank:DB00945)
     OntologyTerm { namespace: String, term: String },
+
+    // ==================== ASYNC EXPRESSIONS ====================
+    /// Await expression: future.await
+    Await {
+        /// The future expression being awaited
+        future: Box<HirExpr>,
+    },
+    /// Spawn expression: spawn { expr }
+    Spawn {
+        /// The expression to spawn as a new task
+        expr: Box<HirExpr>,
+    },
+    /// Async block: async { ... }
+    AsyncBlock {
+        /// The block of statements to execute asynchronously
+        body: HirBlock,
+    },
+    /// Join expression: join(future1, future2, ...)
+    Join {
+        /// The futures to wait on concurrently
+        futures: Vec<HirExpr>,
+    },
+    /// Select expression: select { arm1, arm2, ... }
+    Select {
+        /// The select arms
+        arms: Vec<HirSelectArm>,
+    },
 }
 
 /// HIR provenance marker
@@ -769,6 +810,19 @@ pub enum HirUnaryOp {
 pub struct HirMatchArm {
     pub pattern: HirPattern,
     pub guard: Option<Box<HirExpr>>,
+    pub body: HirExpr,
+}
+
+/// HIR select arm (for async select expressions)
+#[derive(Debug, Clone)]
+pub struct HirSelectArm {
+    /// The future expression to wait on
+    pub future: HirExpr,
+    /// Pattern to bind the result
+    pub pattern: HirPattern,
+    /// Optional guard condition
+    pub guard: Option<Box<HirExpr>>,
+    /// Body expression to execute when this arm matches
     pub body: HirExpr,
 }
 

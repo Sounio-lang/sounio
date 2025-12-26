@@ -24,6 +24,7 @@
 use crate::epistemic::{EpistemicStatus, Revisability, Source};
 use crate::hir;
 use crate::interp::{Interpreter, Value};
+use miette::{Diagnostic, SourceSpan};
 use rustyline::completion::{Completer, FilenameCompleter, Pair};
 use rustyline::error::ReadlineError;
 use rustyline::highlight::Highlighter;
@@ -33,6 +34,7 @@ use rustyline::validate::Validator;
 use rustyline::{Config, Context, Editor, Helper, Result as RlResult};
 use std::borrow::Cow;
 use std::collections::HashMap;
+use thiserror::Error;
 
 // =============================================================================
 // ANSI COLOR CODES
@@ -42,6 +44,7 @@ mod colors {
     pub const RESET: &str = "\x1b[0m";
     pub const BOLD: &str = "\x1b[1m";
     pub const DIM: &str = "\x1b[2m";
+    pub const UNDERLINE: &str = "\x1b[4m";
 
     pub const RED: &str = "\x1b[31m";
     pub const GREEN: &str = "\x1b[32m";
@@ -51,10 +54,458 @@ mod colors {
     pub const CYAN: &str = "\x1b[36m";
     pub const WHITE: &str = "\x1b[37m";
 
+    pub const BRIGHT_RED: &str = "\x1b[91m";
     pub const BRIGHT_GREEN: &str = "\x1b[92m";
     pub const BRIGHT_YELLOW: &str = "\x1b[93m";
     pub const BRIGHT_BLUE: &str = "\x1b[94m";
     pub const BRIGHT_CYAN: &str = "\x1b[96m";
+}
+
+// =============================================================================
+// REPL ERROR DISPLAY
+// =============================================================================
+
+/// Error category for REPL errors
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ReplErrorKind {
+    /// Lexical error (tokenization failed)
+    Lex,
+    /// Parse error (syntax error)
+    Parse,
+    /// Type error (type checking failed)
+    Type,
+    /// Runtime error (execution failed)
+    Runtime,
+    /// JIT compilation error
+    Jit,
+}
+
+impl ReplErrorKind {
+    /// Get the display name for this error kind
+    pub fn name(&self) -> &'static str {
+        match self {
+            ReplErrorKind::Lex => "Lex error",
+            ReplErrorKind::Parse => "Parse error",
+            ReplErrorKind::Type => "Type error",
+            ReplErrorKind::Runtime => "Runtime error",
+            ReplErrorKind::Jit => "JIT error",
+        }
+    }
+
+    /// Get the error code prefix
+    pub fn code_prefix(&self) -> &'static str {
+        match self {
+            ReplErrorKind::Lex => "L",
+            ReplErrorKind::Parse => "P",
+            ReplErrorKind::Type => "E",
+            ReplErrorKind::Runtime => "R",
+            ReplErrorKind::Jit => "J",
+        }
+    }
+
+    /// Get the color for this error kind
+    pub fn color(&self) -> &'static str {
+        match self {
+            ReplErrorKind::Lex => colors::BRIGHT_RED,
+            ReplErrorKind::Parse => colors::RED,
+            ReplErrorKind::Type => colors::RED,
+            ReplErrorKind::Runtime => colors::BRIGHT_RED,
+            ReplErrorKind::Jit => colors::MAGENTA,
+        }
+    }
+}
+
+/// A REPL-specific diagnostic error with source context
+#[derive(Error, Debug, Diagnostic)]
+#[error("{kind}: {message}")]
+#[diagnostic(code(repl::error))]
+pub struct ReplDiagnostic {
+    /// The source code
+    #[source_code]
+    pub src: String,
+    /// Error message
+    pub message: String,
+    /// Error kind
+    pub kind: ReplErrorKind,
+    /// Primary error span
+    #[label("{label}")]
+    pub span: Option<SourceSpan>,
+    /// Label for the span
+    pub label: String,
+    /// Help text
+    #[help]
+    pub help: Option<String>,
+}
+
+impl std::fmt::Display for ReplErrorKind {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.name())
+    }
+}
+
+/// Information about an error location in source
+#[derive(Debug, Clone)]
+pub struct ErrorLocation {
+    /// 0-based line number
+    pub line: usize,
+    /// 0-based column number
+    pub column: usize,
+    /// Length of the error span
+    pub length: usize,
+    /// Byte offset in source
+    pub offset: usize,
+}
+
+impl ErrorLocation {
+    /// Create from a byte offset in source
+    pub fn from_offset(source: &str, offset: usize, length: usize) -> Self {
+        let mut line = 0;
+        let mut column = 0;
+        let mut current_offset = 0;
+
+        for (i, ch) in source.char_indices() {
+            if i >= offset {
+                break;
+            }
+            if ch == '\n' {
+                line += 1;
+                column = 0;
+            } else {
+                column += 1;
+            }
+            current_offset = i + ch.len_utf8();
+        }
+
+        // If offset is past current_offset, we're at end
+        if offset > current_offset && offset > 0 {
+            column += offset - current_offset;
+        }
+
+        Self {
+            line,
+            column,
+            length: length.max(1),
+            offset,
+        }
+    }
+
+    /// Try to extract location from a miette error
+    pub fn from_miette_error(source: &str, error: &miette::Report) -> Option<Self> {
+        // Try to get labels from the diagnostic
+        if let Some(labels) = error.labels() {
+            for label in labels {
+                let offset = label.offset();
+                let len = label.len();
+                return Some(Self::from_offset(source, offset, len));
+            }
+        }
+        None
+    }
+}
+
+/// Render a REPL error with source context
+///
+/// This function produces a nicely formatted error message with:
+/// - The source line with line numbers
+/// - A caret (^) pointing to the error location
+/// - Color-coded output (red for errors)
+/// - The error message below
+pub fn render_repl_error(
+    user_input: &str,
+    full_source: &str,
+    kind: ReplErrorKind,
+    message: &str,
+    location: Option<ErrorLocation>,
+    help: Option<&str>,
+) -> String {
+    let mut output = String::new();
+
+    // Error header
+    output.push_str(&format!(
+        "{}{}{}:{} {}\n",
+        kind.color(),
+        colors::BOLD,
+        kind.name(),
+        colors::RESET,
+        message
+    ));
+
+    // If we have location info, show source context
+    if let Some(loc) = location {
+        // Get the source lines
+        let lines: Vec<&str> = full_source.lines().collect();
+
+        // Calculate the line in the user's input vs the full source
+        // The user input is typically embedded in a wrapper like `fn main() { ... }`
+        // We want to show context around the error
+
+        // Find which line(s) to show
+        let start_line = loc.line.saturating_sub(1);
+        let end_line = (loc.line + 2).min(lines.len());
+
+        // Calculate line number width for alignment
+        let line_num_width = format!("{}", end_line).len();
+
+        output.push_str(&format!(
+            "{}   --> {}repl input{}\n",
+            colors::BLUE,
+            colors::DIM,
+            colors::RESET
+        ));
+
+        // Show the context lines
+        for i in start_line..end_line {
+            if i >= lines.len() {
+                break;
+            }
+
+            let line = lines[i];
+            let line_num = i + 1; // 1-based line numbers for display
+
+            if i == loc.line {
+                // This is the error line - highlight it
+                output.push_str(&format!(
+                    "{}{}{}{}   | {}{}{}",
+                    colors::BLUE,
+                    colors::BOLD,
+                    format!("{:>width$}", line_num, width = line_num_width),
+                    colors::RESET,
+                    colors::WHITE,
+                    line,
+                    colors::RESET
+                ));
+                output.push('\n');
+
+                // Add the caret line
+                let padding = " ".repeat(line_num_width);
+                let arrow_padding = " ".repeat(loc.column);
+                let carets = "^".repeat(loc.length.min(line.len().saturating_sub(loc.column)).max(1));
+
+                output.push_str(&format!(
+                    "{}{}   | {}{}{}{}{}",
+                    colors::BLUE,
+                    padding,
+                    arrow_padding,
+                    kind.color(),
+                    colors::BOLD,
+                    carets,
+                    colors::RESET
+                ));
+                output.push('\n');
+            } else {
+                // Context line
+                output.push_str(&format!(
+                    "{}{}{}{}   | {}{}{}",
+                    colors::BLUE,
+                    format!("{:>width$}", line_num, width = line_num_width),
+                    colors::RESET,
+                    colors::DIM,
+                    colors::DIM,
+                    line,
+                    colors::RESET
+                ));
+                output.push('\n');
+            }
+        }
+    } else {
+        // No location info - just show the input if it's short
+        if !user_input.is_empty() && user_input.lines().count() <= 3 {
+            output.push_str(&format!(
+                "{}   --> {}repl input{}\n",
+                colors::BLUE,
+                colors::DIM,
+                colors::RESET
+            ));
+            for (i, line) in user_input.lines().enumerate() {
+                output.push_str(&format!(
+                    "{}{}{}   | {}{}{}\n",
+                    colors::BLUE,
+                    i + 1,
+                    colors::RESET,
+                    colors::DIM,
+                    line,
+                    colors::RESET
+                ));
+            }
+        }
+    }
+
+    // Add help text if provided
+    if let Some(help_text) = help {
+        output.push_str(&format!(
+            "\n{}{}help:{} {}\n",
+            colors::CYAN,
+            colors::BOLD,
+            colors::RESET,
+            help_text
+        ));
+    }
+
+    output
+}
+
+/// Try to extract error location from a miette error message
+fn extract_location_from_error(source: &str, error_msg: &str) -> Option<ErrorLocation> {
+    let error_lower = error_msg.to_lowercase();
+
+    // Pattern 1: "at line X, column Y" or "line X column Y"
+    if let Some(line_idx) = error_lower.find("line ") {
+        let after_line = &error_msg[line_idx + 5..];
+        let line_num_end = after_line.find(|c: char| !c.is_ascii_digit()).unwrap_or(after_line.len());
+        if line_num_end > 0 {
+            if let Ok(line) = after_line[..line_num_end].parse::<usize>() {
+                // Try to find column
+                let rest = &after_line[line_num_end..].to_lowercase();
+                let mut column = 0usize;
+                if let Some(col_idx) = rest.find("column ").or_else(|| rest.find("col ")) {
+                    let col_start = if rest.find("column ").is_some() { col_idx + 7 } else { col_idx + 4 };
+                    let after_col = &after_line[line_num_end..][col_start..];
+                    let col_end = after_col.find(|c: char| !c.is_ascii_digit()).unwrap_or(after_col.len());
+                    if col_end > 0 {
+                        column = after_col[..col_end].parse().unwrap_or(0);
+                    }
+                }
+                return Some(ErrorLocation {
+                    line: line.saturating_sub(1), // Convert to 0-based
+                    column: column.saturating_sub(1),
+                    length: 1,
+                    offset: 0,
+                });
+            }
+        }
+    }
+
+    // Pattern 2: "position X" or "offset X"
+    for prefix in &["position ", "offset "] {
+        if let Some(pos_idx) = error_lower.find(prefix) {
+            let after_pos = &error_msg[pos_idx + prefix.len()..];
+            let num_end = after_pos.find(|c: char| !c.is_ascii_digit()).unwrap_or(after_pos.len());
+            if num_end > 0 {
+                if let Ok(offset) = after_pos[..num_end].parse::<usize>() {
+                    return Some(ErrorLocation::from_offset(source, offset, 1));
+                }
+            }
+        }
+    }
+
+    None
+}
+
+/// Try to extract help text from a miette error
+fn extract_help_from_error(error: &miette::Report) -> Option<String> {
+    error.help().map(|h| h.to_string())
+}
+
+/// Display a REPL error using miette if possible, falling back to custom rendering
+pub fn display_repl_error(
+    user_input: &str,
+    full_source: &str,
+    kind: ReplErrorKind,
+    error: &miette::Report,
+) {
+    // First, try to use miette's native rendering
+    let error_string = format!("{:?}", error);
+
+    // Check if miette produced useful output (has source context)
+    if error_string.contains("-->") || error_string.contains("│") || error_string.contains("|") {
+        // Miette rendered something useful, use it with our header
+        eprintln!(
+            "{}{}{}: {}{}",
+            kind.color(),
+            colors::BOLD,
+            kind.name(),
+            colors::RESET,
+            error
+        );
+        return;
+    }
+
+    // Fall back to our custom rendering
+    let message = error.to_string();
+    let location = ErrorLocation::from_miette_error(full_source, error)
+        .or_else(|| extract_location_from_error(full_source, &message));
+    let help = extract_help_from_error(error);
+
+    let rendered = render_repl_error(
+        user_input,
+        full_source,
+        kind,
+        &message,
+        location,
+        help.as_deref(),
+    );
+    eprint!("{}", rendered);
+}
+
+/// Display a simple error (without miette)
+pub fn display_simple_error(
+    user_input: &str,
+    full_source: &str,
+    kind: ReplErrorKind,
+    message: &str,
+    help: Option<&str>,
+) {
+    let location = extract_location_from_error(full_source, message);
+    let rendered = render_repl_error(user_input, full_source, kind, message, location, help);
+    eprint!("{}", rendered);
+}
+
+/// Create a ReplDiagnostic for use with miette's rendering
+///
+/// This allows using miette's native error reporting if preferred.
+/// Example:
+/// ```ignore
+/// let diag = create_repl_diagnostic(
+///     "let x =",
+///     ReplErrorKind::Parse,
+///     "unexpected end of input",
+///     Some(ErrorLocation { line: 0, column: 7, length: 1, offset: 7 }),
+///     Some("expected expression after '='"),
+/// );
+/// eprintln!("{:?}", miette::Report::new(diag));
+/// ```
+pub fn create_repl_diagnostic(
+    source: &str,
+    kind: ReplErrorKind,
+    message: &str,
+    location: Option<ErrorLocation>,
+    help: Option<&str>,
+) -> ReplDiagnostic {
+    let span = location.map(|loc| SourceSpan::new(loc.offset.into(), loc.length));
+    ReplDiagnostic {
+        src: source.to_string(),
+        message: message.to_string(),
+        kind,
+        span,
+        label: match kind {
+            ReplErrorKind::Lex => "tokenization failed here".to_string(),
+            ReplErrorKind::Parse => "syntax error here".to_string(),
+            ReplErrorKind::Type => "type error here".to_string(),
+            ReplErrorKind::Runtime => "error occurred here".to_string(),
+            ReplErrorKind::Jit => "compilation failed here".to_string(),
+        },
+        help: help.map(|s| s.to_string()),
+    }
+}
+
+/// Display a warning (non-fatal message)
+pub fn display_repl_warning(message: &str, help: Option<&str>) {
+    eprint!(
+        "{}{}warning:{} {}\n",
+        colors::YELLOW,
+        colors::BOLD,
+        colors::RESET,
+        message
+    );
+    if let Some(help_text) = help {
+        eprint!(
+            "{}{}help:{} {}\n",
+            colors::CYAN,
+            colors::BOLD,
+            colors::RESET,
+            help_text
+        );
+    }
 }
 
 // =============================================================================
@@ -1191,17 +1642,17 @@ impl Repl {
                                 }
                             }
                             Err(e) => {
-                                eprintln!("Type error: {}", e);
+                                display_repl_error(expr, &source, ReplErrorKind::Type, &e);
                             }
                         }
                     }
                     Err(e) => {
-                        eprintln!("Parse error: {:?}", e);
+                        display_repl_error(expr, &source, ReplErrorKind::Parse, &e);
                     }
                 }
             }
             Err(e) => {
-                eprintln!("Lex error: {:?}", e);
+                display_repl_error(expr, &source, ReplErrorKind::Lex, &e);
             }
         }
     }
@@ -1260,7 +1711,7 @@ impl Repl {
         let tokens = match crate::lexer::lex(&source) {
             Ok(t) => t,
             Err(e) => {
-                eprintln!("Lex error: {:?}", e);
+                display_repl_error(input, &source, ReplErrorKind::Lex, &e);
                 return;
             }
         };
@@ -1268,7 +1719,7 @@ impl Repl {
         let ast = match crate::parser::parse(&tokens, &source) {
             Ok(ast) => ast,
             Err(e) => {
-                eprintln!("Parse error: {:?}", e);
+                display_repl_error(input, &source, ReplErrorKind::Parse, &e);
                 return;
             }
         };
@@ -1281,7 +1732,7 @@ impl Repl {
         let hir = match crate::check::check(&ast) {
             Ok(hir) => hir,
             Err(e) => {
-                eprintln!("Type error: {}", e);
+                display_repl_error(input, &source, ReplErrorKind::Type, &e);
                 return;
             }
         };
@@ -1292,13 +1743,13 @@ impl Repl {
 
         // Execute
         if self.config.use_jit {
-            self.eval_jit(&hir);
+            self.eval_jit(&hir, input, &source);
         } else {
-            self.eval_interp(&hir, is_binding, input);
+            self.eval_interp(&hir, is_binding, input, &source);
         }
     }
 
-    fn eval_interp(&mut self, hir: &hir::Hir, is_binding: bool, input: &str) {
+    fn eval_interp(&mut self, hir: &hir::Hir, is_binding: bool, input: &str, source: &str) {
         let mut interp = Interpreter::new();
 
         // Pre-populate environment with existing bindings
@@ -1362,17 +1813,12 @@ impl Repl {
                 }
             }
             Err(e) => {
-                eprintln!(
-                    "{}Runtime error:{} {}",
-                    colors::RED,
-                    colors::RESET,
-                    e
-                );
+                display_repl_error(input, source, ReplErrorKind::Runtime, &e);
             }
         }
     }
 
-    fn eval_jit(&self, hir: &hir::Hir) {
+    fn eval_jit(&self, hir: &hir::Hir, input: &str, source: &str) {
         #[cfg(feature = "jit")]
         {
             use crate::codegen::cranelift::CraneliftJit;
@@ -1388,7 +1834,13 @@ impl Repl {
                     println!("=> {}", result);
                 }
                 Err(e) => {
-                    eprintln!("JIT error: {}", e);
+                    display_simple_error(
+                        input,
+                        source,
+                        ReplErrorKind::Jit,
+                        &e.to_string(),
+                        Some("Try using interpreter mode with :jit to toggle off JIT"),
+                    );
                 }
             }
         }
@@ -1396,7 +1848,15 @@ impl Repl {
         #[cfg(not(feature = "jit"))]
         {
             let _ = hir;
-            eprintln!("JIT not enabled. Compile with --features jit");
+            let _ = input;
+            let _ = source;
+            display_simple_error(
+                "",
+                "",
+                ReplErrorKind::Jit,
+                "JIT not enabled",
+                Some("Compile with --features jit to enable JIT compilation"),
+            );
         }
     }
 
@@ -1486,4 +1946,174 @@ pub fn run() -> RlResult<()> {
 pub fn run_with_config(config: ReplConfig) -> RlResult<()> {
     let mut repl = Repl::new(config);
     repl.run()
+}
+
+// =============================================================================
+// TESTS
+// =============================================================================
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_error_location_from_offset() {
+        let source = "line one\nline two\nline three";
+
+        // First line
+        let loc = ErrorLocation::from_offset(source, 0, 4);
+        assert_eq!(loc.line, 0);
+        assert_eq!(loc.column, 0);
+        assert_eq!(loc.length, 4);
+
+        // Middle of first line
+        let loc = ErrorLocation::from_offset(source, 5, 3);
+        assert_eq!(loc.line, 0);
+        assert_eq!(loc.column, 5);
+
+        // Second line
+        let loc = ErrorLocation::from_offset(source, 9, 4);
+        assert_eq!(loc.line, 1);
+        assert_eq!(loc.column, 0);
+
+        // Third line
+        let loc = ErrorLocation::from_offset(source, 18, 5);
+        assert_eq!(loc.line, 2);
+        assert_eq!(loc.column, 0);
+    }
+
+    #[test]
+    fn test_extract_location_from_error_line_column() {
+        let source = "let x = 42\nlet y = x + z";
+
+        // Test "line X column Y" pattern
+        let loc = extract_location_from_error(source, "undefined variable at line 2 column 13");
+        assert!(loc.is_some());
+        let loc = loc.unwrap();
+        assert_eq!(loc.line, 1); // 0-indexed
+        assert_eq!(loc.column, 12); // 0-indexed
+
+        // Test "Line X, Column Y" pattern (case insensitive)
+        let loc = extract_location_from_error(source, "Error at Line 1, Column 5");
+        assert!(loc.is_some());
+        let loc = loc.unwrap();
+        assert_eq!(loc.line, 0);
+        assert_eq!(loc.column, 4);
+    }
+
+    #[test]
+    fn test_extract_location_from_error_offset() {
+        let source = "let x = 42\nlet y = x + z";
+
+        // Test "position X" pattern
+        let loc = extract_location_from_error(source, "error at position 15");
+        assert!(loc.is_some());
+        let loc = loc.unwrap();
+        assert_eq!(loc.offset, 15);
+
+        // Test "offset X" pattern
+        let loc = extract_location_from_error(source, "unexpected token at offset 22");
+        assert!(loc.is_some());
+        let loc = loc.unwrap();
+        assert_eq!(loc.offset, 22);
+    }
+
+    #[test]
+    fn test_render_repl_error_basic() {
+        let input = "let x =";
+        let source = "fn main() -> i64 {\n    let x =\n}\n";
+        let message = "unexpected end of input";
+
+        let rendered = render_repl_error(
+            input,
+            source,
+            ReplErrorKind::Parse,
+            message,
+            Some(ErrorLocation {
+                line: 1,
+                column: 11,
+                length: 1,
+                offset: 23,
+            }),
+            Some("expected expression after '='"),
+        );
+
+        // Check that the output contains expected parts
+        assert!(rendered.contains("Parse error"));
+        assert!(rendered.contains("unexpected end of input"));
+        assert!(rendered.contains("let x ="));
+        assert!(rendered.contains("^")); // Caret marker
+        assert!(rendered.contains("help:"));
+        assert!(rendered.contains("expected expression"));
+    }
+
+    #[test]
+    fn test_render_repl_error_no_location() {
+        let input = "1 / 0";
+        let source = "fn main() -> i64 {\n    1 / 0\n}\n";
+        let message = "division by zero";
+
+        let rendered = render_repl_error(
+            input,
+            source,
+            ReplErrorKind::Runtime,
+            message,
+            None,
+            None,
+        );
+
+        // Check that the output contains expected parts
+        assert!(rendered.contains("Runtime error"));
+        assert!(rendered.contains("division by zero"));
+        // Should still show the input
+        assert!(rendered.contains("1 / 0"));
+    }
+
+    #[test]
+    fn test_repl_error_kind_properties() {
+        assert_eq!(ReplErrorKind::Lex.name(), "Lex error");
+        assert_eq!(ReplErrorKind::Parse.name(), "Parse error");
+        assert_eq!(ReplErrorKind::Type.name(), "Type error");
+        assert_eq!(ReplErrorKind::Runtime.name(), "Runtime error");
+        assert_eq!(ReplErrorKind::Jit.name(), "JIT error");
+
+        assert_eq!(ReplErrorKind::Lex.code_prefix(), "L");
+        assert_eq!(ReplErrorKind::Parse.code_prefix(), "P");
+        assert_eq!(ReplErrorKind::Type.code_prefix(), "E");
+        assert_eq!(ReplErrorKind::Runtime.code_prefix(), "R");
+        assert_eq!(ReplErrorKind::Jit.code_prefix(), "J");
+    }
+
+    #[test]
+    fn test_create_repl_diagnostic() {
+        let source = "let x = @invalid";
+        let diag = create_repl_diagnostic(
+            source,
+            ReplErrorKind::Lex,
+            "unexpected character '@'",
+            Some(ErrorLocation {
+                line: 0,
+                column: 8,
+                length: 1,
+                offset: 8,
+            }),
+            Some("remove the '@' character"),
+        );
+
+        assert_eq!(diag.message, "unexpected character '@'");
+        assert_eq!(diag.kind, ReplErrorKind::Lex);
+        assert!(diag.span.is_some());
+        assert_eq!(diag.help, Some("remove the '@' character".to_string()));
+        assert!(diag.label.contains("tokenization"));
+    }
+
+    #[test]
+    fn test_confidence_badge() {
+        assert_eq!(confidence_badge(1.0), "🟢");
+        assert_eq!(confidence_badge(0.95), "🟢");
+        assert_eq!(confidence_badge(0.85), "🟡");
+        assert_eq!(confidence_badge(0.70), "🟠");
+        assert_eq!(confidence_badge(0.40), "🔴");
+        assert_eq!(confidence_badge(0.10), "⚫");
+    }
 }

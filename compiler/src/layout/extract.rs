@@ -520,6 +520,33 @@ impl HirConceptExtractor {
                 let curie = format!("{}:{}", namespace, term);
                 self.usage.concepts.insert(curie);
             }
+
+            // Async expressions - visit inner expressions
+            HirExprKind::Await { future } => {
+                self.visit_expr(future);
+            }
+            HirExprKind::Spawn { expr } => {
+                self.visit_expr(expr);
+            }
+            HirExprKind::AsyncBlock { body } => {
+                for stmt in &body.stmts {
+                    self.visit_stmt(stmt);
+                }
+            }
+            HirExprKind::Join { futures } => {
+                for f in futures {
+                    self.visit_expr(f);
+                }
+            }
+            HirExprKind::Select { arms } => {
+                for arm in arms {
+                    self.visit_expr(&arm.future);
+                    if let Some(guard) = &arm.guard {
+                        self.visit_expr(guard);
+                    }
+                    self.visit_expr(&arm.body);
+                }
+            }
         }
     }
 

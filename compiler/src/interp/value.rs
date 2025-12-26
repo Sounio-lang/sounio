@@ -7,6 +7,7 @@ use std::rc::Rc;
 
 use crate::hir::HirFn;
 use crate::interp::symbolic::Expr as SymbolicExprType;
+use crate::runtime::async_runtime::{SounioFuture, TaskHandle, TaskId};
 
 /// ODE solver statistics
 #[derive(Clone, Debug, Default)]
@@ -127,6 +128,18 @@ pub enum Value {
         /// Fusion strategy: how to combine neural and symbolic outputs
         fusion: HybridFusion,
     },
+
+    // Async types
+    /// A future that represents an async computation
+    Future {
+        /// The underlying Sounio future
+        future: SounioFuture,
+    },
+    /// A handle to a spawned async task
+    Task {
+        /// The task handle
+        handle: TaskHandle,
+    },
 }
 
 impl Value {
@@ -158,6 +171,8 @@ impl Value {
             Value::Uncertain { .. } => "Uncertain",
             Value::CausalModel(_) => "CausalModel",
             Value::HybridModel { .. } => "HybridModel",
+            Value::Future { .. } => "Future",
+            Value::Task { .. } => "Task",
         }
     }
 
@@ -262,6 +277,41 @@ impl Value {
     pub fn as_causal_model(&self) -> Option<&str> {
         match self {
             Value::CausalModel(m) => Some(m),
+            _ => None,
+        }
+    }
+
+    /// Try to get as future
+    pub fn as_future(&self) -> Option<&SounioFuture> {
+        match self {
+            Value::Future { future } => Some(future),
+            _ => None,
+        }
+    }
+
+    /// Try to get as task handle
+    pub fn as_task(&self) -> Option<&TaskHandle> {
+        match self {
+            Value::Task { handle } => Some(handle),
+            _ => None,
+        }
+    }
+
+    /// Check if this value is a future
+    pub fn is_future(&self) -> bool {
+        matches!(self, Value::Future { .. })
+    }
+
+    /// Check if this value is a task
+    pub fn is_task(&self) -> bool {
+        matches!(self, Value::Task { .. })
+    }
+
+    /// Get the task ID if this is a future or task
+    pub fn task_id(&self) -> Option<TaskId> {
+        match self {
+            Value::Future { future } => Some(future.task_id()),
+            Value::Task { handle } => Some(handle.task_id()),
             _ => None,
         }
     }
@@ -373,6 +423,20 @@ impl fmt::Debug for Value {
                     write!(f, "*mut 0x{:x}", address)
                 } else {
                     write!(f, "*const 0x{:x}", address)
+                }
+            }
+            Value::Future { future } => {
+                if future.is_completed() {
+                    write!(f, "Future(completed)")
+                } else {
+                    write!(f, "Future(pending)")
+                }
+            }
+            Value::Task { handle } => {
+                if handle.is_completed() {
+                    write!(f, "Task({:?}, completed)", handle.task_id())
+                } else {
+                    write!(f, "Task({:?}, pending)", handle.task_id())
                 }
             }
         }
@@ -491,6 +555,20 @@ impl fmt::Display for Value {
                     write!(f, "*mut 0x{:x}", address)
                 } else {
                     write!(f, "*const 0x{:x}", address)
+                }
+            }
+            Value::Future { future } => {
+                if future.is_completed() {
+                    write!(f, "Future(completed)")
+                } else {
+                    write!(f, "Future(pending)")
+                }
+            }
+            Value::Task { handle } => {
+                if handle.is_completed() {
+                    write!(f, "Task(completed)")
+                } else {
+                    write!(f, "Task(pending)")
                 }
             }
         }

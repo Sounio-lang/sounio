@@ -99,6 +99,57 @@ pub struct Mapping {
 
     /// Name index (optional)
     pub name: Option<u32>,
+
+    /// Is this a statement boundary? (for stepping in debuggers)
+    pub is_stmt: bool,
+
+    /// Is this the end of function prologue? (first executable statement)
+    pub prologue_end: bool,
+
+    /// Is this the beginning of function epilogue?
+    pub epilogue_begin: bool,
+
+    /// Is this a basic block start?
+    pub basic_block: bool,
+
+    /// Discriminator for same line/column multiple statements
+    pub discriminator: u32,
+}
+
+/// Statement boundary marker for DWARF line tables
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StatementKind {
+    /// Not a statement (expression result, etc.)
+    None,
+    /// Regular statement
+    Statement,
+    /// Block start (opening brace)
+    BlockStart,
+    /// Block end (closing brace)
+    BlockEnd,
+    /// Control flow statement (if, while, for, match)
+    ControlFlow,
+    /// Return statement
+    Return,
+    /// Function call
+    Call,
+    /// Assignment
+    Assignment,
+}
+
+/// Column-accurate source position with enhanced metadata
+#[derive(Debug, Clone)]
+pub struct EnhancedPosition {
+    /// Line number (1-indexed for user display)
+    pub line: u32,
+    /// Column number (1-indexed for user display)
+    pub column: u32,
+    /// End column (for range highlighting)
+    pub end_column: Option<u32>,
+    /// Length in bytes from source
+    pub byte_length: Option<u32>,
+    /// Statement kind for this position
+    pub stmt_kind: StatementKind,
 }
 
 impl SourceMapBuilder {
@@ -162,7 +213,7 @@ impl SourceMapBuilder {
         idx
     }
 
-    /// Add a mapping
+    /// Add a mapping with default flags (is_stmt=true, others=false)
     pub fn add_mapping(
         &mut self,
         gen_line: u32,
@@ -182,7 +233,144 @@ impl SourceMapBuilder {
             orig_line,
             orig_column,
             name: name_idx,
+            is_stmt: true,
+            prologue_end: false,
+            epilogue_begin: false,
+            basic_block: false,
+            discriminator: 0,
         });
+    }
+
+    /// Add a mapping with full control over flags
+    pub fn add_mapping_with_flags(
+        &mut self,
+        gen_line: u32,
+        gen_column: u32,
+        source: &PathBuf,
+        orig_line: u32,
+        orig_column: u32,
+        name: Option<&str>,
+        is_stmt: bool,
+        prologue_end: bool,
+        epilogue_begin: bool,
+    ) {
+        let source_idx = self.add_source(source.clone());
+        let name_idx = name.map(|n| self.add_name(n));
+
+        self.mappings.push(Mapping {
+            gen_line,
+            gen_column,
+            source: source_idx,
+            orig_line,
+            orig_column,
+            name: name_idx,
+            is_stmt,
+            prologue_end,
+            epilogue_begin,
+            basic_block: false,
+            discriminator: 0,
+        });
+    }
+
+    /// Add a prologue end marker (first statement after function entry)
+    pub fn add_prologue_end_mapping(
+        &mut self,
+        gen_line: u32,
+        gen_column: u32,
+        source: &PathBuf,
+        orig_line: u32,
+        orig_column: u32,
+        name: Option<&str>,
+    ) {
+        self.add_mapping_with_flags(
+            gen_line,
+            gen_column,
+            source,
+            orig_line,
+            orig_column,
+            name,
+            true,  // is_stmt
+            true,  // prologue_end
+            false, // epilogue_begin
+        );
+    }
+
+    /// Add an epilogue begin marker (start of function exit)
+    pub fn add_epilogue_begin_mapping(
+        &mut self,
+        gen_line: u32,
+        gen_column: u32,
+        source: &PathBuf,
+        orig_line: u32,
+        orig_column: u32,
+    ) {
+        self.add_mapping_with_flags(
+            gen_line,
+            gen_column,
+            source,
+            orig_line,
+            orig_column,
+            None,
+            true,  // is_stmt
+            false, // prologue_end
+            true,  // epilogue_begin
+        );
+    }
+
+    /// Add a non-statement mapping (for expressions within statements)
+    pub fn add_expression_mapping(
+        &mut self,
+        gen_line: u32,
+        gen_column: u32,
+        source: &PathBuf,
+        orig_line: u32,
+        orig_column: u32,
+    ) {
+        self.add_mapping_with_flags(
+            gen_line,
+            gen_column,
+            source,
+            orig_line,
+            orig_column,
+            None,
+            false, // is_stmt - not a statement boundary
+            false,
+            false,
+        );
+    }
+
+    /// Add a mapping with discriminator (for multiple statements on same line)
+    pub fn add_discriminated_mapping(
+        &mut self,
+        gen_line: u32,
+        gen_column: u32,
+        source: &PathBuf,
+        orig_line: u32,
+        orig_column: u32,
+        discriminator: u32,
+    ) {
+        let source_idx = self.add_source(source.clone());
+
+        self.mappings.push(Mapping {
+            gen_line,
+            gen_column,
+            source: source_idx,
+            orig_line,
+            orig_column,
+            name: None,
+            is_stmt: true,
+            prologue_end: false,
+            epilogue_begin: false,
+            basic_block: false,
+            discriminator,
+        });
+    }
+
+    /// Mark the last mapping as a basic block start
+    pub fn mark_basic_block(&mut self) {
+        if let Some(mapping) = self.mappings.last_mut() {
+            mapping.basic_block = true;
+        }
     }
 
     /// Add a simple mapping (no name)

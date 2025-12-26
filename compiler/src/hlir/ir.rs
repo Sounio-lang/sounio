@@ -220,6 +220,11 @@ impl HlirType {
             HirType::Quat => HlirType::Quat,
             // Automatic differentiation
             HirType::Dual => HlirType::Dual,
+            // Async types - Future is lowered to a pointer to a task structure
+            HirType::Future { output } => {
+                // Future<T> is represented as a pointer to a task struct
+                HlirType::Ptr(Box::new(HlirType::Struct("Future".to_string())))
+            }
         }
     }
 

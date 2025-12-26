@@ -471,6 +471,31 @@ impl SemanticTypeChecker {
             | HirExprKind::Break(_)
             | HirExprKind::Continue
             | HirExprKind::OntologyTerm { .. } => {}
+
+            // Async expressions
+            HirExprKind::Await { future } => {
+                self.check_expr(future)?;
+            }
+            HirExprKind::Spawn { expr } => {
+                self.check_expr(expr)?;
+            }
+            HirExprKind::AsyncBlock { body } => {
+                self.check_block(body)?;
+            }
+            HirExprKind::Join { futures } => {
+                for f in futures.iter_mut() {
+                    self.check_expr(f)?;
+                }
+            }
+            HirExprKind::Select { arms } => {
+                for arm in arms.iter_mut() {
+                    self.check_expr(&mut arm.future)?;
+                    if let Some(guard) = &mut arm.guard {
+                        self.check_expr(guard)?;
+                    }
+                    self.check_expr(&mut arm.body)?;
+                }
+            }
         }
 
         Ok(())

@@ -296,6 +296,33 @@ impl CoercionInserter {
 
             // Ontology terms are leaf expressions - no sub-expressions
             HirExprKind::OntologyTerm { .. } => {}
+
+            // Async expressions
+            HirExprKind::Await { future } => {
+                Self::apply_to_expr_inner_static(future, coercion_map);
+            }
+            HirExprKind::Spawn { expr } => {
+                Self::apply_to_expr_inner_static(expr, coercion_map);
+            }
+            HirExprKind::AsyncBlock { body } => {
+                for stmt in &mut body.stmts {
+                    Self::apply_to_stmt_static(stmt, coercion_map);
+                }
+            }
+            HirExprKind::Join { futures } => {
+                for future in futures {
+                    Self::apply_to_expr_inner_static(future, coercion_map);
+                }
+            }
+            HirExprKind::Select { arms } => {
+                for arm in arms {
+                    Self::apply_to_expr_inner_static(&mut arm.future, coercion_map);
+                    if let Some(guard) = &mut arm.guard {
+                        Self::apply_to_expr_inner_static(guard, coercion_map);
+                    }
+                    Self::apply_to_expr_inner_static(&mut arm.body, coercion_map);
+                }
+            }
         }
     }
 

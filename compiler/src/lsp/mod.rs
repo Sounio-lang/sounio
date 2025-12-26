@@ -44,5 +44,7 @@ pub mod inlay_hints;
 pub mod references;
 pub mod semantic_tokens;
 pub mod server;
+pub mod workspace;
 
 pub use server::SounioLanguageServer;
+pub use workspace::Workspace;

@@ -182,6 +182,289 @@ pub fn interpret(source: &str) -> miette::Result<interp::Value> {
     interpreter.interpret(&hir)
 }
 
+// ============================================================================
+// WASM Bindings for Browser Playground
+// ============================================================================
+
+#[cfg(feature = "wasm")]
+pub mod wasm {
+    use super::*;
+    use wasm_bindgen::prelude::*;
+
+    /// Initialize panic hook for better error messages in browser console
+    #[wasm_bindgen(start)]
+    pub fn init() {
+        #[cfg(feature = "console_error_panic_hook")]
+        console_error_panic_hook::set_once();
+    }
+
+    /// Compile Sounio source code and return result as JSON
+    ///
+    /// Returns JSON with structure:
+    /// ```json
+    /// {
+    ///   "success": bool,
+    ///   "diagnostics": [{ "severity": "error"|"warning"|"note", "message": string, "line": number, "column": number }],
+    ///   "wasm": [u8] | null
+    /// }
+    /// ```
+    #[wasm_bindgen]
+    pub fn compile(source: &str) -> String {
+        match compile_internal(source) {
+            Ok(result) => result,
+            Err(e) => {
+                serde_json::json!({
+                    "success": false,
+                    "diagnostics": [{
+                        "severity": "error",
+                        "message": format!("{}", e),
+                        "line": null,
+                        "column": null
+                    }],
+                    "wasm": null
+                })
+                .to_string()
+            }
+        }
+    }
+
+    fn compile_internal(source: &str) -> Result<String, Box<dyn std::error::Error>> {
+        let mut diagnostics = Vec::new();
+
+        // Lex
+        let tokens = match lexer::lex(source) {
+            Ok(tokens) => tokens,
+            Err(e) => {
+                return Ok(serde_json::json!({
+                    "success": false,
+                    "diagnostics": [{
+                        "severity": "error",
+                        "message": format!("Lexer error: {}", e),
+                        "line": null,
+                        "column": null
+                    }],
+                    "wasm": null
+                })
+                .to_string());
+            }
+        };
+
+        // Parse
+        let ast = match parser::parse(&tokens, source) {
+            Ok(ast) => ast,
+            Err(e) => {
+                return Ok(serde_json::json!({
+                    "success": false,
+                    "diagnostics": [{
+                        "severity": "error",
+                        "message": format!("Parse error: {}", e),
+                        "line": null,
+                        "column": null
+                    }],
+                    "wasm": null
+                })
+                .to_string());
+            }
+        };
+
+        // Type check
+        let hir = match check::check(&ast) {
+            Ok(hir) => hir,
+            Err(e) => {
+                return Ok(serde_json::json!({
+                    "success": false,
+                    "diagnostics": [{
+                        "severity": "error",
+                        "message": format!("Type error: {}", e),
+                        "line": null,
+                        "column": null
+                    }],
+                    "wasm": null
+                })
+                .to_string());
+            }
+        };
+
+        // Lower to HLIR
+        let _hlir = hlir::lower(&hir);
+
+        // For now, return success without actual WASM output
+        // Full WASM codegen would require additional infrastructure
+        Ok(serde_json::json!({
+            "success": true,
+            "diagnostics": diagnostics,
+            "wasm": null
+        })
+        .to_string())
+    }
+
+    /// Run Sounio source code via interpreter and return result as JSON
+    ///
+    /// Returns JSON with structure:
+    /// ```json
+    /// {
+    ///   "success": bool,
+    ///   "output": string,
+    ///   "diagnostics": [{ "severity": "error"|"warning"|"note", "message": string, "line": number, "column": number }],
+    ///   "returnValue": any
+    /// }
+    /// ```
+    #[wasm_bindgen]
+    pub fn run(source: &str) -> String {
+        match run_internal(source) {
+            Ok(result) => result,
+            Err(e) => {
+                serde_json::json!({
+                    "success": false,
+                    "output": "",
+                    "diagnostics": [{
+                        "severity": "error",
+                        "message": format!("{}", e),
+                        "line": null,
+                        "column": null
+                    }],
+                    "returnValue": null
+                })
+                .to_string()
+            }
+        }
+    }
+
+    fn run_internal(source: &str) -> Result<String, Box<dyn std::error::Error>> {
+        // Lex
+        let tokens = match lexer::lex(source) {
+            Ok(tokens) => tokens,
+            Err(e) => {
+                return Ok(serde_json::json!({
+                    "success": false,
+                    "output": "",
+                    "diagnostics": [{
+                        "severity": "error",
+                        "message": format!("Lexer error: {}", e),
+                        "line": null,
+                        "column": null
+                    }],
+                    "returnValue": null
+                })
+                .to_string());
+            }
+        };
+
+        // Parse
+        let ast = match parser::parse(&tokens, source) {
+            Ok(ast) => ast,
+            Err(e) => {
+                return Ok(serde_json::json!({
+                    "success": false,
+                    "output": "",
+                    "diagnostics": [{
+                        "severity": "error",
+                        "message": format!("Parse error: {}", e),
+                        "line": null,
+                        "column": null
+                    }],
+                    "returnValue": null
+                })
+                .to_string());
+            }
+        };
+
+        // Type check
+        let hir = match check::check(&ast) {
+            Ok(hir) => hir,
+            Err(e) => {
+                return Ok(serde_json::json!({
+                    "success": false,
+                    "output": "",
+                    "diagnostics": [{
+                        "severity": "error",
+                        "message": format!("Type error: {}", e),
+                        "line": null,
+                        "column": null
+                    }],
+                    "returnValue": null
+                })
+                .to_string());
+            }
+        };
+
+        // Interpret
+        let mut interpreter = interp::Interpreter::new();
+        match interpreter.interpret(&hir) {
+            Ok(value) => {
+                let output = interpreter.get_output().join("\n");
+                let return_value = format!("{:?}", value);
+                Ok(serde_json::json!({
+                    "success": true,
+                    "output": output,
+                    "diagnostics": [],
+                    "returnValue": return_value
+                })
+                .to_string())
+            }
+            Err(e) => {
+                let output = interpreter.get_output().join("\n");
+                Ok(serde_json::json!({
+                    "success": false,
+                    "output": output,
+                    "diagnostics": [{
+                        "severity": "error",
+                        "message": format!("Runtime error: {}", e),
+                        "line": null,
+                        "column": null
+                    }],
+                    "returnValue": null
+                })
+                .to_string())
+            }
+        }
+    }
+
+    /// Format Sounio source code
+    #[wasm_bindgen]
+    pub fn format(source: &str) -> String {
+        // Use the formatter module
+        let mut formatter = fmt::Formatter::new(fmt::FormatConfig::default());
+        match formatter.format(source) {
+            Ok(formatted) => formatted,
+            Err(_) => source.to_string(),
+        }
+    }
+
+    /// Get the compiler version
+    #[wasm_bindgen]
+    pub fn version() -> String {
+        VERSION.to_string()
+    }
+
+    /// Parse source code and return AST as JSON
+    #[wasm_bindgen]
+    pub fn parse_to_json(source: &str) -> String {
+        match lexer::lex(source).and_then(|tokens| parser::parse(&tokens, source)) {
+            Ok(ast) => serde_json::to_string_pretty(&ast).unwrap_or_else(|_| "{}".to_string()),
+            Err(e) => serde_json::json!({
+                "error": format!("{}", e)
+            })
+            .to_string(),
+        }
+    }
+
+    /// Type check source code and return type information as JSON
+    #[wasm_bindgen]
+    pub fn typecheck_to_json(source: &str) -> String {
+        match lexer::lex(source)
+            .and_then(|tokens| parser::parse(&tokens, source))
+            .and_then(|ast| check::check(&ast))
+        {
+            Ok(hir) => serde_json::to_string_pretty(&hir).unwrap_or_else(|_| "{}".to_string()),
+            Err(e) => serde_json::json!({
+                "error": format!("{}", e)
+            })
+            .to_string(),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

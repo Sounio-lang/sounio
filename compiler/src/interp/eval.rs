@@ -7,6 +7,7 @@ use std::rc::Rc;
 use miette::{Result, miette};
 
 use crate::hir::*;
+use crate::runtime::async_runtime::{SounioFuture, SounioRuntime, SounioValue};
 
 use super::builtins::BuiltinRegistry;
 use super::env::Environment;
@@ -26,6 +27,8 @@ pub struct Interpreter {
     builtins: BuiltinRegistry,
     /// Output buffer for testing
     output: Vec<String>,
+    /// Async runtime for spawn/await
+    async_runtime: SounioRuntime,
 }
 
 impl Interpreter {
@@ -38,7 +41,13 @@ impl Interpreter {
             enums: HashMap::new(),
             builtins: BuiltinRegistry::new(),
             output: Vec::new(),
+            async_runtime: SounioRuntime::new(),
         }
+    }
+
+    /// Get the async runtime
+    pub fn async_runtime(&self) -> &SounioRuntime {
+        &self.async_runtime
     }
 
     /// Get captured output (for testing)
@@ -755,6 +764,256 @@ impl Interpreter {
                 // Ontology terms are represented as strings at runtime
                 Ok(Value::String(format!("{}:{}", namespace, term)))
             }
+
+            // ==================== ASYNC EXPRESSIONS ====================
+            HirExprKind::Await { future } => {
+                // Evaluate the future expression
+                let future_val = self.eval_expr(future)?;
+
+                // If it's a Value::Future, block until completion and return result
+                match future_val {
+                    Value::Future { future: sounio_future } => {
+                        // Block on the future and get the result
+                        let result = self.async_runtime.block_on_future(&sounio_future);
+                        Ok(self.sounio_value_to_value(result))
+                    }
+                    Value::Task { handle } => {
+                        // For a task, wait for it to complete
+                        loop {
+                            if let Some(result) = handle.try_get() {
+                                return Ok(self.sounio_value_to_value(result));
+                            }
+                            // Yield to allow other work
+                            std::thread::yield_now();
+                        }
+                    }
+                    // If it's not a future, just return the value
+                    other => Ok(other),
+                }
+            }
+
+            HirExprKind::Spawn { expr } => {
+                // Create a future for the spawned expression
+                let future = SounioFuture::new();
+                let future_clone = future.clone();
+
+                // Evaluate the expression and complete the future
+                let result = self.eval_expr(expr)?;
+                let sounio_result = self.value_to_sounio_value(&result);
+                future_clone.complete(sounio_result);
+
+                // Return a task handle
+                Ok(Value::Task {
+                    handle: self.async_runtime.spawn_future(future),
+                })
+            }
+
+            HirExprKind::AsyncBlock { body } => {
+                // Create a future for the async block
+                let future = SounioFuture::new();
+                let future_clone = future.clone();
+
+                // Evaluate the block
+                let result = match self.eval_block(body) {
+                    Ok(v) => v,
+                    Err(ControlFlow::Return(v)) => v,
+                    Err(e) => return Err(e),
+                };
+
+                // Complete the future with the result
+                let sounio_result = self.value_to_sounio_value(&result);
+                future_clone.complete(sounio_result);
+
+                // Return the future as a Value
+                Ok(Value::Future { future })
+            }
+
+            HirExprKind::Join { futures } => {
+                // Evaluate all future expressions
+                let mut results = Vec::new();
+                for future_expr in futures {
+                    let future_val = self.eval_expr(future_expr)?;
+                    // Await each future (in order for now - a real implementation would be concurrent)
+                    match future_val {
+                        Value::Future { future: sounio_future } => {
+                            let result = self.async_runtime.block_on_future(&sounio_future);
+                            results.push(self.sounio_value_to_value(result));
+                        }
+                        Value::Task { handle } => {
+                            loop {
+                                if let Some(result) = handle.try_get() {
+                                    results.push(self.sounio_value_to_value(result));
+                                    break;
+                                }
+                                std::thread::yield_now();
+                            }
+                        }
+                        other => {
+                            results.push(other);
+                        }
+                    }
+                }
+                // Return results as a tuple
+                Ok(Value::Tuple(results))
+            }
+
+            HirExprKind::Select { arms } => {
+                // Simple select implementation: check each arm in order
+                // A real implementation would use proper async polling
+                for arm in arms {
+                    let future_val = self.eval_expr(&arm.future)?;
+
+                    let result = match future_val {
+                        Value::Future { future: ref sounio_future } if sounio_future.is_completed() => {
+                            sounio_future.try_get()
+                        }
+                        Value::Task { ref handle } if handle.is_completed() => {
+                            handle.try_get()
+                        }
+                        _ => continue, // Not ready, try next arm
+                    };
+
+                    if let Some(sounio_val) = result {
+                        let val = self.sounio_value_to_value(sounio_val);
+                        // Bind the result to the pattern
+                        if let Some(bindings) = self.match_pattern(&arm.pattern, &val) {
+                            // Check guard if present
+                            if let Some(guard) = &arm.guard {
+                                self.env.push_scope();
+                                for (name, value) in &bindings {
+                                    self.env.define(name.clone(), value.clone());
+                                }
+                                let guard_result = self.eval_expr(guard)?;
+                                self.env.pop_scope();
+
+                                if !guard_result.is_truthy() {
+                                    continue;
+                                }
+                            }
+
+                            // Execute arm body with bindings
+                            self.env.push_scope();
+                            for (name, value) in bindings {
+                                self.env.define(name, value);
+                            }
+                            let result = self.eval_expr(&arm.body);
+                            self.env.pop_scope();
+                            return result;
+                        }
+                    }
+                }
+                // No arm was ready - in a real implementation we'd block
+                // For now, return unit
+                Ok(Value::Unit)
+            }
+        }
+    }
+
+    /// Convert a SounioValue to a Value
+    fn sounio_value_to_value(&self, sounio: SounioValue) -> Value {
+        match sounio {
+            SounioValue::Unit => Value::Unit,
+            SounioValue::Bool(b) => Value::Bool(b),
+            SounioValue::Int(n) => Value::Int(n),
+            SounioValue::Float(f) => Value::Float(f),
+            SounioValue::String(s) => Value::String(s),
+            SounioValue::Future(id) => {
+                // Try to get the future from the runtime
+                if let Some(future) = self.async_runtime.get_task(id) {
+                    Value::Future { future }
+                } else {
+                    Value::None
+                }
+            }
+            SounioValue::Array(arr) => {
+                let values: Vec<Value> = arr.into_iter().map(|v| self.sounio_value_to_value(v)).collect();
+                Value::Array(Rc::new(RefCell::new(values)))
+            }
+            SounioValue::Tuple(t) => {
+                let values: Vec<Value> = t.into_iter().map(|v| self.sounio_value_to_value(v)).collect();
+                Value::Tuple(values)
+            }
+            SounioValue::Struct { name, fields } => {
+                let converted_fields: HashMap<String, Value> = fields
+                    .into_iter()
+                    .map(|(k, v)| (k, self.sounio_value_to_value(v)))
+                    .collect();
+                Value::Struct {
+                    name,
+                    fields: converted_fields,
+                }
+            }
+            SounioValue::Variant {
+                enum_name,
+                variant_name,
+                fields,
+            } => {
+                let converted_fields: Vec<Value> =
+                    fields.into_iter().map(|v| self.sounio_value_to_value(v)).collect();
+                Value::Variant {
+                    enum_name,
+                    variant_name,
+                    fields: converted_fields,
+                }
+            }
+            SounioValue::None => Value::None,
+            SounioValue::Some(v) => Value::Some(Box::new(self.sounio_value_to_value(*v))),
+            SounioValue::Ok(v) => Value::Ok(Box::new(self.sounio_value_to_value(*v))),
+            SounioValue::Err(v) => Value::Err(Box::new(self.sounio_value_to_value(*v))),
+        }
+    }
+
+    /// Convert a Value to a SounioValue
+    fn value_to_sounio_value(&self, value: &Value) -> SounioValue {
+        match value {
+            Value::Unit => SounioValue::Unit,
+            Value::Bool(b) => SounioValue::Bool(*b),
+            Value::Int(n) => SounioValue::Int(*n),
+            Value::Float(f) => SounioValue::Float(*f),
+            Value::String(s) => SounioValue::String(s.clone()),
+            Value::Future { future } => SounioValue::Future(future.task_id()),
+            Value::Task { handle } => SounioValue::Future(handle.task_id()),
+            Value::Array(arr) => {
+                let values: Vec<SounioValue> = arr
+                    .borrow()
+                    .iter()
+                    .map(|v| self.value_to_sounio_value(v))
+                    .collect();
+                SounioValue::Array(values)
+            }
+            Value::Tuple(t) => {
+                let values: Vec<SounioValue> = t.iter().map(|v| self.value_to_sounio_value(v)).collect();
+                SounioValue::Tuple(values)
+            }
+            Value::Struct { name, fields } => {
+                let converted_fields: HashMap<String, SounioValue> = fields
+                    .iter()
+                    .map(|(k, v)| (k.clone(), self.value_to_sounio_value(v)))
+                    .collect();
+                SounioValue::Struct {
+                    name: name.clone(),
+                    fields: converted_fields,
+                }
+            }
+            Value::Variant {
+                enum_name,
+                variant_name,
+                fields,
+            } => {
+                let converted_fields: Vec<SounioValue> =
+                    fields.iter().map(|v| self.value_to_sounio_value(v)).collect();
+                SounioValue::Variant {
+                    enum_name: enum_name.clone(),
+                    variant_name: variant_name.clone(),
+                    fields: converted_fields,
+                }
+            }
+            Value::None => SounioValue::None,
+            Value::Some(v) => SounioValue::Some(Box::new(self.value_to_sounio_value(v))),
+            Value::Ok(v) => SounioValue::Ok(Box::new(self.value_to_sounio_value(v))),
+            Value::Err(v) => SounioValue::Err(Box::new(self.value_to_sounio_value(v))),
+            // For other types, convert to a sensible default
+            _ => SounioValue::Unit,
         }
     }
 

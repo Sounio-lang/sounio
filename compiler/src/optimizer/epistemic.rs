@@ -366,6 +366,31 @@ impl EpistemicOptimizer {
 
             // Ontology terms are terminals - no optimization needed
             HirExprKind::OntologyTerm { .. } => {}
+
+            // Async expressions - recurse into sub-expressions
+            HirExprKind::Await { future } => {
+                self.optimize_expr(future, ctx);
+            }
+            HirExprKind::Spawn { expr } => {
+                self.optimize_expr(expr, ctx);
+            }
+            HirExprKind::AsyncBlock { body } => {
+                self.optimize_block(body, ctx);
+            }
+            HirExprKind::Join { futures } => {
+                for future in futures {
+                    self.optimize_expr(future, ctx);
+                }
+            }
+            HirExprKind::Select { arms } => {
+                for arm in arms {
+                    self.optimize_expr(&mut arm.future, ctx);
+                    if let Some(guard) = &mut arm.guard {
+                        self.optimize_expr(guard, ctx);
+                    }
+                    self.optimize_expr(&mut arm.body, ctx);
+                }
+            }
         }
     }
 

@@ -2,8 +2,11 @@
 
 use std::path::PathBuf;
 
-use super::build::{BuildContext, BuildExecutor, BuildProfile, num_cpus};
+use super::build::{num_cpus, BuildContext, BuildExecutor, BuildProfile};
 use super::manifest::{Dependency, DependencyDetail, Manifest};
+
+#[allow(unused_imports)]
+use super::manifest::Version;
 use super::registry::DefaultRegistry;
 use super::resolver::{Lockfile, Resolver};
 
@@ -647,6 +650,47 @@ pub fn cmd_add(
     let manifest_path = cwd.join("d.toml");
     let mut manifest = Manifest::from_path(&manifest_path)?;
 
+    // Determine the version to use
+    let resolved_version = if let Some(v) = version {
+        v
+    } else if git.is_none() && path.is_none() {
+        // Query registry for latest version
+        #[cfg(feature = "pkg")]
+        {
+            let rt = tokio::runtime::Runtime::new()?;
+            let version = rt.block_on(async {
+                use super::auth::TokenManager;
+                use super::registry::async_client::HttpRegistry;
+
+                let mut registry = HttpRegistry::default_registry();
+
+                // Try to load auth token
+                if let Ok(token_manager) = TokenManager::new() {
+                    if let Some(token) = token_manager.get_default_token() {
+                        registry.set_token(Some(token.to_string()));
+                    }
+                }
+
+                match registry.get_latest_version(name).await {
+                    Ok(v) => Ok(format!("^{}", v)),
+                    Err(e) => {
+                        eprintln!("warning: could not query registry: {}", e);
+                        eprintln!("         using wildcard version");
+                        Ok("*".to_string())
+                    }
+                }
+            })?;
+            version
+        }
+
+        #[cfg(not(feature = "pkg"))]
+        {
+            "*".to_string()
+        }
+    } else {
+        "*".to_string()
+    };
+
     let dep = if git.is_some()
         || path.is_some()
         || !features.is_empty()
@@ -654,7 +698,7 @@ pub fn cmd_add(
         || optional
     {
         Dependency::Detailed(DependencyDetail {
-            version: version.or(Some("*".to_string())),
+            version: Some(resolved_version.clone()),
             git,
             branch,
             tag: None,
@@ -667,7 +711,7 @@ pub fn cmd_add(
             package: None,
         })
     } else {
-        Dependency::Simple(version.unwrap_or("*".to_string()))
+        Dependency::Simple(resolved_version.clone())
     };
 
     let section = if dev {
@@ -688,7 +732,60 @@ pub fn cmd_add(
 
     manifest.to_path(&manifest_path)?;
 
-    println!("      Adding {} to {}", name, section);
+    println!("      Adding {} v{} to {}", name, resolved_version, section);
+
+    // Run dependency resolution
+    println!("    Updating dependencies...");
+    let registry = DefaultRegistry::new();
+    let mut resolver = Resolver::new(&registry, &manifest);
+    let resolution = resolver.resolve()?;
+
+    // Save lockfile
+    let lockfile = Lockfile::from_resolution(&resolution);
+    lockfile.save(&cwd.join("d.lock"))?;
+
+    // Download package to cache
+    #[cfg(feature = "pkg")]
+    {
+        use super::cache::PackageCache;
+
+        if let Ok(mut cache) = PackageCache::new() {
+            // Check if already cached
+            if let Some(resolved_pkg) = resolution.packages.get(name) {
+                if !cache.is_cached(name, &resolved_pkg.id.version) {
+                    println!("  Downloading {} v{}...", name, resolved_pkg.id.version);
+
+                    let rt = tokio::runtime::Runtime::new()?;
+                    rt.block_on(async {
+                        use super::auth::TokenManager;
+                        use super::registry::async_client::HttpRegistry;
+
+                        let mut registry_client = HttpRegistry::default_registry();
+
+                        if let Ok(token_manager) = TokenManager::new() {
+                            if let Some(token) = token_manager.get_default_token() {
+                                registry_client.set_token(Some(token.to_string()));
+                            }
+                        }
+
+                        match registry_client
+                            .download_package(name, &resolved_pkg.id.version, cache.root())
+                            .await
+                        {
+                            Ok(path) => {
+                                println!("   Downloaded to {}", path.display());
+                            }
+                            Err(e) => {
+                                eprintln!("warning: could not download package: {}", e);
+                            }
+                        }
+                    });
+                }
+            }
+        }
+    }
+
+    println!("      Finished");
 
     Ok(())
 }
@@ -723,67 +820,271 @@ pub fn cmd_search(query: &str, limit: usize) -> Result<()> {
 
     println!("Searching for '{}'...", query);
 
-    let registry = DefaultRegistry::new();
-    let results = registry.search(query, limit)?;
+    #[cfg(feature = "pkg")]
+    {
+        let rt = tokio::runtime::Runtime::new()?;
+        rt.block_on(async {
+            use super::registry::async_client::HttpRegistry;
 
-    if results.is_empty() {
-        println!("No packages found");
-    } else {
-        for pkg in &results {
-            println!(
-                "  {} v{} - {}",
-                pkg.name,
-                pkg.version,
-                pkg.description.as_deref().unwrap_or("No description")
-            );
-        }
-        println!("Found {} packages", results.len());
+            let registry = HttpRegistry::default_registry();
+
+            match registry.search_packages(query, 1, limit).await {
+                Ok(results) => {
+                    if results.packages.is_empty() {
+                        println!("No packages found");
+                    } else {
+                        for pkg in &results.packages {
+                            println!(
+                                "  {} v{} - {}",
+                                pkg.name,
+                                pkg.version,
+                                pkg.description.as_deref().unwrap_or("No description")
+                            );
+                        }
+                        println!("Found {} packages (showing {})", results.total, results.packages.len());
+                    }
+                }
+                Err(e) => {
+                    eprintln!("error: {}", e);
+                }
+            }
+        });
+
+        return Ok(());
     }
 
-    Ok(())
+    #[cfg(not(feature = "pkg"))]
+    {
+        let registry = DefaultRegistry::new();
+        let results = registry.search(query, limit)?;
+
+        if results.is_empty() {
+            println!("No packages found");
+        } else {
+            for pkg in &results {
+                println!(
+                    "  {} v{} - {}",
+                    pkg.name,
+                    pkg.version,
+                    pkg.description.as_deref().unwrap_or("No description")
+                );
+            }
+            println!("Found {} packages", results.len());
+        }
+
+        Ok(())
+    }
 }
 
 /// Publish package to registry
-pub fn cmd_publish(dry_run: bool, _allow_dirty: bool, _registry: Option<String>) -> Result<()> {
+pub fn cmd_publish(dry_run: bool, allow_dirty: bool, _registry: Option<String>) -> Result<()> {
     let cwd = std::env::current_dir()?;
     let manifest = Manifest::from_path(&cwd.join("d.toml"))?;
+
+    // Step 1: Validate manifest
+    println!(
+        "  Validating {} v{}...",
+        manifest.package.name, manifest.package.version
+    );
+
+    if let Err(errors) = manifest.validate() {
+        for error in &errors {
+            eprintln!("error: {}", error);
+        }
+        return Err(format!("{} validation error(s)", errors.len()).into());
+    }
+
+    if !manifest.package.publish {
+        return Err("Package is marked as publish = false".into());
+    }
+
+    // Step 2: Check for uncommitted changes
+    if !allow_dirty {
+        let git_status = std::process::Command::new("git")
+            .args(["status", "--porcelain"])
+            .current_dir(&cwd)
+            .output();
+
+        if let Ok(output) = git_status {
+            if !output.stdout.is_empty() {
+                return Err(
+                    "There are uncommitted changes. Use --allow-dirty to proceed anyway.".into(),
+                );
+            }
+        }
+    }
+
+    // Step 3: Build and test
+    println!("    Building...");
+    cmd_build(
+        BuildProfile::Release,
+        None,
+        false,
+        vec![],
+        false,
+        false,
+        None,
+        false,
+        None,
+    )?;
+
+    println!("    Testing...");
+    cmd_test(None, true, None, false, vec![])?;
+
+    // Step 4: Create tarball
+    println!("    Packaging...");
+
+    #[cfg(feature = "pkg")]
+    let tarball = {
+        use super::cache::create_tarball;
+
+        // Default exclude patterns
+        let exclude = vec![
+            "target/*",
+            ".git/*",
+            ".gitignore",
+            "*.lock",
+            ".sounio_history",
+        ];
+
+        create_tarball(&cwd, &exclude)?
+    };
+
+    #[cfg(not(feature = "pkg"))]
+    let tarball: Vec<u8> = Vec::new();
+
+    let tarball_size = tarball.len();
+    println!(
+        "    Packaged {} bytes ({:.2} KB)",
+        tarball_size,
+        tarball_size as f64 / 1024.0
+    );
 
     if dry_run {
         println!(
             "    (dry run) Would publish {} v{}",
             manifest.package.name, manifest.package.version
         );
-    } else {
+        return Ok(());
+    }
+
+    // Step 5: Upload to registry
+    #[cfg(feature = "pkg")]
+    {
+        let rt = tokio::runtime::Runtime::new()?;
+        rt.block_on(async {
+            use super::auth::TokenManager;
+            use super::registry::async_client::HttpRegistry;
+
+            // Load auth token
+            let token_manager = TokenManager::new().map_err(|e| {
+                format!("Failed to load credentials: {}. Run `souc login` first.", e)
+            })?;
+
+            let token = token_manager
+                .get_default_token()
+                .ok_or("Not logged in. Run `souc login` first.")?;
+
+            let registry = HttpRegistry::default_registry().with_token(token.to_string());
+
+            println!(
+                "  Publishing {} v{}...",
+                manifest.package.name, manifest.package.version
+            );
+
+            match registry.publish_package(&manifest, tarball).await {
+                Ok(response) => {
+                    println!(
+                        "   Published {} v{} (checksum: {})",
+                        response.name,
+                        response.version,
+                        &response.checksum[..12]
+                    );
+                    Ok(())
+                }
+                Err(e) => Err(format!("Failed to publish: {}", e).into()),
+            }
+        })?;
+    }
+
+    #[cfg(not(feature = "pkg"))]
+    {
         println!(
             "  Publishing {} v{}...",
             manifest.package.name, manifest.package.version
         );
-        // Would actually publish here
+        println!("    (pkg feature not enabled, simulating publish)");
     }
 
     Ok(())
 }
 
 /// Login to registry
-pub fn cmd_login(token: Option<String>, _registry: Option<String>) -> Result<()> {
+pub fn cmd_login(token: Option<String>, registry_url: Option<String>) -> Result<()> {
+    let registry = registry_url.unwrap_or_else(|| DefaultRegistry::DEFAULT_URL.to_string());
+
     let token = match token {
         Some(t) => t,
         None => {
             // Read from stdin
-            println!("Please paste your API token:");
-            let mut input = String::new();
-            std::io::stdin().read_line(&mut input)?;
-            input.trim().to_string()
+            use super::auth::read_token_from_stdin;
+            read_token_from_stdin()?
         }
     };
 
-    // Would save token to config
+    // Validate token
+    use super::auth::validate_token;
+    validate_token(&token)?;
+
+    // Save token
+    use super::auth::TokenManager;
+    let mut token_manager = TokenManager::new().unwrap_or_default();
+    token_manager.login(&registry, token.clone(), None)?;
+
     println!(
-        "Login successful (token: {}...)",
+        "Login successful for {} (token: {}...)",
+        registry,
         &token[..8.min(token.len())]
     );
 
     Ok(())
+}
+
+/// Logout from registry
+pub fn cmd_logout(registry_url: Option<String>) -> Result<()> {
+    use super::auth::TokenManager;
+
+    let mut token_manager = TokenManager::new()?;
+
+    let registry = registry_url
+        .or_else(|| token_manager.default_registry().map(|s| s.to_string()))
+        .ok_or("No registry specified and no default registry set")?;
+
+    if token_manager.logout(&registry)? {
+        println!("Logged out from {}", registry);
+    } else {
+        println!("Not logged in to {}", registry);
+    }
+
+    Ok(())
+}
+
+/// Show login status
+pub fn cmd_whoami(registry_url: Option<String>) -> Result<()> {
+    use super::auth::TokenManager;
+
+    let token_manager = TokenManager::new()?;
+
+    let registry = registry_url
+        .or_else(|| token_manager.default_registry().map(|s| s.to_string()))
+        .ok_or("No registry specified and no default registry set")?;
+
+    if token_manager.is_logged_in(&registry) {
+        println!("Logged in to {}", registry);
+        Ok(())
+    } else {
+        Err(format!("Not logged in to {}", registry).into())
+    }
 }
 
 /// Show package tree
@@ -805,6 +1106,67 @@ pub fn cmd_tree(_package: Option<String>, _invert: bool, _depth: Option<usize>) 
             "\u{251c}\u{2500}\u{2500}"
         };
         println!("{} {} {}", prefix, name, version);
+    }
+
+    Ok(())
+}
+
+/// Show cache statistics
+pub fn cmd_cache_stats() -> Result<()> {
+    use super::cache::{format_size, PackageCache};
+
+    let cache = PackageCache::new()?;
+    let stats = cache.stats();
+
+    println!("Cache statistics:");
+    println!("  Location: {}", cache.root().display());
+    println!("  Packages: {}", stats.package_count);
+    println!("  Versions: {}", stats.version_count);
+    println!("  Total size: {}", format_size(stats.total_size));
+
+    if let Some(ref oldest) = stats.oldest_entry {
+        println!("  Oldest entry: {}", oldest);
+    }
+    if let Some(ref newest) = stats.newest_entry {
+        println!("  Newest entry: {}", newest);
+    }
+
+    Ok(())
+}
+
+/// Clean package cache
+pub fn cmd_cache_clean(max_age_days: Option<u32>) -> Result<()> {
+    use super::cache::PackageCache;
+
+    let mut cache = PackageCache::new()?;
+
+    let removed = if let Some(days) = max_age_days {
+        println!("Cleaning entries older than {} days...", days);
+        cache.cleanup(days)?
+    } else {
+        println!("Clearing entire cache...");
+        cache.clear()?
+    };
+
+    println!("Removed {} cached packages", removed);
+
+    Ok(())
+}
+
+/// Verify package cache integrity
+pub fn cmd_cache_verify() -> Result<()> {
+    use super::cache::PackageCache;
+
+    let cache = PackageCache::new()?;
+    let mismatches = cache.verify();
+
+    if mismatches.is_empty() {
+        println!("All cached packages verified successfully");
+    } else {
+        println!("Found {} verification failures:", mismatches.len());
+        for (name, version, reason) in &mismatches {
+            println!("  {} v{}: {}", name, version, reason);
+        }
     }
 
     Ok(())

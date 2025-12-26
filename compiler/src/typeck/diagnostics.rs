@@ -489,6 +489,8 @@ fn format_type(ty: &HirType) -> String {
         HirType::Quat => "quat".to_string(),
         // Automatic differentiation
         HirType::Dual => "dual".to_string(),
+        // Async types
+        HirType::Future { output } => format!("Future<{}>", format_type(output)),
     }
 }
 

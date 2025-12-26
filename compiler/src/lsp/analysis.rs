@@ -3,6 +3,8 @@
 //! Manages parsing, name resolution, and type checking with caching.
 
 use std::collections::HashMap;
+use std::sync::Arc;
+use tokio::sync::RwLock;
 use tower_lsp::lsp_types::*;
 
 use super::completion::CompletionProvider;
@@ -12,6 +14,7 @@ use super::document::Document;
 use super::hover::HoverProvider;
 use super::references::ReferencesProvider;
 use super::semantic_tokens::SemanticTokensProvider;
+use super::workspace::Workspace;
 
 use crate::ast::Ast;
 use crate::common::Span;
@@ -68,6 +71,9 @@ pub struct AnalysisHost {
 
     /// Diagnostics provider
     diagnostics_provider: DiagnosticsProvider,
+
+    /// Workspace reference for cross-file features
+    workspace: Option<Arc<RwLock<Workspace>>>,
 }
 
 impl AnalysisHost {
@@ -81,7 +87,32 @@ impl AnalysisHost {
             references: ReferencesProvider::new(),
             semantic_tokens: SemanticTokensProvider::new(),
             diagnostics_provider: DiagnosticsProvider::new(),
+            workspace: None,
         }
+    }
+
+    /// Create a new analysis host with workspace
+    pub fn with_workspace(workspace: Arc<RwLock<Workspace>>) -> Self {
+        Self {
+            cache: HashMap::new(),
+            completion: CompletionProvider::new(),
+            hover: HoverProvider::new(),
+            definition: DefinitionProvider::new(),
+            references: ReferencesProvider::new(),
+            semantic_tokens: SemanticTokensProvider::new(),
+            diagnostics_provider: DiagnosticsProvider::new(),
+            workspace: Some(workspace),
+        }
+    }
+
+    /// Set workspace reference
+    pub fn set_workspace(&mut self, workspace: Arc<RwLock<Workspace>>) {
+        self.workspace = Some(workspace);
+    }
+
+    /// Get workspace reference
+    pub fn workspace(&self) -> Option<&Arc<RwLock<Workspace>>> {
+        self.workspace.as_ref()
     }
 
     /// Analyze a document and return diagnostics
@@ -153,10 +184,40 @@ impl AnalysisHost {
     ) -> Option<GotoDefinitionResponse> {
         let (word, _) = doc.word_at(pos)?;
 
+        // First try local file symbols
         if let Some(result) = self.cache.get(uri) {
             if let Some(ref symbols) = result.symbols {
-                return self.definition.find_definition(&word, symbols, uri);
+                if let Some(response) = self.definition.find_definition(&word, symbols, uri) {
+                    return Some(response);
+                }
             }
+        }
+
+        None
+    }
+
+    /// Cross-file goto definition using workspace
+    pub async fn goto_definition_cross_file(
+        &self,
+        doc: &Document,
+        pos: Position,
+        uri: &Url,
+    ) -> Option<GotoDefinitionResponse> {
+        let (word, _) = doc.word_at(pos)?;
+
+        // First try local file symbols
+        if let Some(result) = self.cache.get(uri) {
+            if let Some(ref symbols) = result.symbols {
+                if let Some(response) = self.definition.find_definition(&word, symbols, uri) {
+                    return Some(response);
+                }
+            }
+        }
+
+        // Fall back to workspace-wide lookup
+        if let Some(ref workspace) = self.workspace {
+            let ws = workspace.read().await;
+            return ws.goto_definition(&word, uri);
         }
 
         None
@@ -178,6 +239,54 @@ impl AnalysisHost {
         }
 
         None
+    }
+
+    /// Cross-file find references using workspace
+    pub async fn find_references_cross_file(
+        &self,
+        doc: &Document,
+        pos: Position,
+        uri: &Url,
+        include_declaration: bool,
+    ) -> Option<Vec<Location>> {
+        let (word, _) = doc.word_at(pos)?;
+
+        // Get local references first
+        let mut locations = Vec::new();
+        if let Some(result) = self.cache.get(uri) {
+            if let Some(ref symbols) = result.symbols {
+                locations.extend(self.references.find_references(&word, symbols, uri));
+            }
+        }
+
+        // Add workspace-wide references
+        if let Some(ref workspace) = self.workspace {
+            let ws = workspace.read().await;
+            let workspace_refs = ws.find_references(&word, include_declaration);
+
+            // Merge and deduplicate
+            for loc in workspace_refs {
+                if !locations.iter().any(|l| l.uri == loc.uri && l.range == loc.range) {
+                    locations.push(loc);
+                }
+            }
+        }
+
+        if locations.is_empty() {
+            None
+        } else {
+            Some(locations)
+        }
+    }
+
+    /// Get workspace symbols for workspace/symbol request
+    pub async fn workspace_symbols(&self, query: &str) -> Vec<SymbolInformation> {
+        if let Some(ref workspace) = self.workspace {
+            let ws = workspace.read().await;
+            ws.workspace_symbols(query)
+        } else {
+            Vec::new()
+        }
     }
 
     /// Get completions at a position
