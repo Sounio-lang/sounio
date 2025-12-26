@@ -78,23 +78,33 @@ let z = x + y  // z.uncertainty = sqrt(0.5² + 0.3²) = 0.583
 ### MedLang DSL for PK/PD Modeling
 
 ```sio
+import stdlib.medlang::pk::one_compartment::*
+
 model PopPKModel {
-    param CL ~ LogNormal(10.0 L/h, omega: 0.30)
-    param V  ~ LogNormal(100.0 L, omega: 0.25)
+    param CL: Knowledge<L/h> ~ LogNormal(mean: 10.0 L/h, omega: 0.30)
+    param V: Knowledge<L> ~ LogNormal(mean: 100.0 L, omega: 0.25)
     
     compartment Central {
         volume: V
-        elimination: CL
     }
     
-    dosing IV {
+    flow Central -> Elimination {
+        rate: CL
+    }
+    
+    dose IV {
         into: Central
-        amount: 500 mg
     }
     
-    observe Cp = Central.concentration
+    observe Cp: Concentration = Central.concentration
 }
 ```
+
+**MedLang** is now part of Sounio's standard library (`stdlib/medlang/`), providing:
+- PK models (one/two compartment, oral/IV)
+- Dosing protocols (weekly, Q3W, daily)
+- Dosing policies (ANC-based, tumor response-based)
+- All with native `Knowledge<T>` uncertainty propagation
 
 ### GPU-Accelerated Neuroimaging
 
