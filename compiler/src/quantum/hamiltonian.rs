@@ -27,7 +27,6 @@
 
 use std::collections::HashMap;
 
-use super::amplitude::EpistemicAmplitude;
 
 /// Pauli operator types
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]

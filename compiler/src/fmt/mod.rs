@@ -830,6 +830,19 @@ impl Formatter {
                 parts.push(Doc::Text(">".to_string()));
                 Doc::Concat(parts)
             }
+            TypeExpr::Refinement {
+                var,
+                base_type,
+                predicate,
+            } => {
+                let mut parts = Vec::new();
+                parts.push(Doc::Text(format!("{{ {}: ", var)));
+                parts.push(self.type_to_doc(base_type));
+                parts.push(Doc::Text(" | ".to_string()));
+                parts.push(self.expr_to_doc(predicate));
+                parts.push(Doc::Text(" }".to_string()));
+                Doc::Concat(parts)
+            }
         }
     }
 

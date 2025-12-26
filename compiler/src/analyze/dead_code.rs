@@ -927,6 +927,9 @@ impl DeadCodeAnalyzer {
             TypeExpr::Tile { element_type, .. } => {
                 self.collect_type_references(element_type);
             }
+            TypeExpr::Refinement { base_type, .. } => {
+                self.collect_type_references(base_type);
+            }
         }
     }
 

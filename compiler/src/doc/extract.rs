@@ -965,6 +965,18 @@ impl DocExtractor {
                 }
                 s
             }
+            TypeExpr::Refinement {
+                var,
+                base_type,
+                predicate,
+            } => {
+                format!(
+                    "{{ {}: {} | {} }}",
+                    var,
+                    self.type_expr_to_string(base_type),
+                    self.expr_to_string(predicate)
+                )
+            }
         }
     }
 

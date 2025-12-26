@@ -244,6 +244,71 @@ impl ErrorIndex {
             category: ErrorCategory::Parser,
         });
 
+        // Parser errors for unimplemented/unsupported features (P001x)
+        self.register(ErrorCode {
+            code: "P0010",
+            title: "Refinement type syntax not implemented",
+            explanation: "Refinement types using the syntax `{ x: Type | constraint }` are planned but not yet available in Sounio. Refinement types allow constraining values beyond their base type, such as `{ x: i32 | x > 0 }` for positive integers.",
+            example: Some("type Positive = { x: i32 | x > 0 };  // not yet implemented\n// Use a type alias with runtime validation instead:\ntype Positive = i32;"),
+            category: ErrorCategory::Parser,
+        });
+
+        self.register(ErrorCode {
+            code: "P0011",
+            title: "Rust-style mutable reference",
+            explanation: "Sounio uses `&!T` for mutable (exclusive) references, not Rust's `&mut T` syntax. This is a deliberate design choice to emphasize the exclusive nature of mutable borrows.",
+            example: Some("fn modify(x: &mut i32) {}  // WRONG: Rust syntax\nfn modify(x: &!i32) {}     // CORRECT: Sounio syntax"),
+            category: ErrorCategory::Parser,
+        });
+
+        self.register(ErrorCode {
+            code: "P0012",
+            title: "Tuple destructuring not implemented",
+            explanation: "Destructuring tuples directly in let bindings or patterns is not yet implemented. Access tuple elements using `.0`, `.1`, etc.",
+            example: Some("let (a, b) = pair;  // not yet implemented\n// Use instead:\nlet a = pair.0;\nlet b = pair.1;"),
+            category: ErrorCategory::Parser,
+        });
+
+        self.register(ErrorCode {
+            code: "P0013",
+            title: "Rust macro syntax not supported",
+            explanation: "Sounio does not support Rust-style macro invocations with `!`. Functions like print, assert, etc. are regular functions in Sounio.",
+            example: Some("println!(\"hello\");  // WRONG: Rust macro syntax\nprint(\"hello\");      // CORRECT: Sounio function (with IO effect)"),
+            category: ErrorCategory::Parser,
+        });
+
+        self.register(ErrorCode {
+            code: "P0014",
+            title: "Rust attribute not supported",
+            explanation: "Rust-specific attributes like `#[derive(...)]`, `#[test]`, and `#[cfg(...)]` are not available in Sounio. Sounio has its own attribute system.",
+            example: Some("#[derive(Debug)]  // not supported\nstruct Point { x: i32, y: i32 }"),
+            category: ErrorCategory::Parser,
+        });
+
+        self.register(ErrorCode {
+            code: "P0015",
+            title: "Closure tuple destructuring not supported",
+            explanation: "Tuple destructuring in closure parameters is not supported. Use a single parameter and access tuple elements explicitly.",
+            example: Some("|(a, b)| a + b  // not supported\n|pair| pair.0 + pair.1  // use instead"),
+            category: ErrorCategory::Parser,
+        });
+
+        self.register(ErrorCode {
+            code: "P0020",
+            title: "Feature not implemented",
+            explanation: "This language feature is planned but not yet available in the current version of Sounio.",
+            example: None,
+            category: ErrorCategory::Parser,
+        });
+
+        self.register(ErrorCode {
+            code: "P0021",
+            title: "Invalid module-level item",
+            explanation: "This syntax is not valid at the module level. Only declarations (fn, struct, enum, type, etc.) can appear at the top level.",
+            example: Some("// At module level:\nlet x = 5;  // WRONG: statements not allowed\nfn main() { let x = 5; }  // CORRECT: inside a function"),
+            category: ErrorCategory::Parser,
+        });
+
         // Name resolution errors (R0xxx)
         self.register(ErrorCode {
             code: "R0001",

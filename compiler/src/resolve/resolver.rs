@@ -539,6 +539,9 @@ impl Resolver {
             TypeExpr::Tile { element_type, .. } => {
                 self.resolve_type_expr(element_type);
             }
+            TypeExpr::Refinement { base_type, .. } => {
+                self.resolve_type_expr(base_type);
+            }
         }
     }
 

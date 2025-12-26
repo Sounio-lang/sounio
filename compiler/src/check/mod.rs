@@ -4203,6 +4203,11 @@ impl TypeChecker {
                     size: None,
                 }
             }
+            TypeExpr::Refinement { base_type, .. } => {
+                // For type checking purposes, refinement types are their base type
+                // The predicate will be verified separately by the refinement checker
+                self.lower_type_expr(base_type)
+            }
         }
     }
 

@@ -2,6 +2,7 @@
 //!
 //! A recursive descent parser that produces an AST from a token stream.
 
+pub mod errors;
 pub mod recovery;
 
 #[cfg(test)]
@@ -11,6 +12,8 @@ use crate::ast::*;
 use crate::common::{IdGenerator, NodeId, Span};
 use crate::lexer::{Token, TokenKind};
 use miette::Result;
+
+use errors::{type_error_for_token, expr_error_for_token, pattern_error_for_token};
 
 /// Parse a token stream into an AST
 pub fn parse(tokens: &[Token], source: &str) -> Result<Ast> {
@@ -186,12 +189,27 @@ impl<'a> Parser<'a> {
         if self.at(kind) {
             Ok(self.advance())
         } else {
-            Err(miette::miette!(
-                "Expected {:?}, found {:?} at position {}",
-                kind,
-                self.peek(),
-                self.current().span.start
-            ))
+            // Check for common syntax mistakes and provide better error messages
+            let found = self.peek();
+            let span = self.span();
+
+            // Detect &mut (Rust syntax) when expecting a type
+            if kind == TokenKind::Ident && found == TokenKind::Mut {
+                return Err(errors::ParserError::RustMutReference {
+                    span: errors::ParserError::from_span(span),
+                }.into());
+            }
+
+            // Provide context-specific error message
+            let expected_str = kind.as_str();
+            let found_str = found.as_str();
+
+            Err(errors::ParserError::UnexpectedToken {
+                span: errors::ParserError::from_span(span),
+                expected: expected_str.to_string(),
+                found: found_str.to_string(),
+                context: format!("expected `{}`", expected_str),
+            }.into())
         }
     }
 
@@ -313,10 +331,35 @@ impl<'a> Parser<'a> {
             TokenKind::Pde => self.parse_pde_def(visibility),
             TokenKind::Causal => self.parse_causal_model_def(visibility),
             TokenKind::Module => self.parse_module_decl(visibility),
-            _ => Err(miette::miette!(
-                "Unexpected token {:?} at start of item",
-                self.peek()
-            )),
+            _ => {
+                let found = self.peek();
+                let span = self.span();
+
+                // Check for common mistakes at module level
+                let help = match found {
+                    TokenKind::IntLit | TokenKind::FloatLit | TokenKind::StringLit => {
+                        Some("Literal values cannot appear at the module level. Did you mean to put this inside a function?".to_string())
+                    }
+                    TokenKind::If | TokenKind::While | TokenKind::For | TokenKind::Loop => {
+                        Some("Control flow statements cannot appear at the module level. Put them inside a function.".to_string())
+                    }
+                    TokenKind::Return | TokenKind::Break | TokenKind::Continue => {
+                        Some("This statement can only be used inside a function.".to_string())
+                    }
+                    _ => {
+                        Some(format!(
+                            "Expected a declaration (fn, struct, enum, type, impl, etc.), found `{}`.\n\
+                             Valid module-level items: fn, struct, enum, type, trait, impl, const, use, extern",
+                            found.as_str()
+                        ))
+                    }
+                };
+
+                Err(errors::ParserError::InvalidModuleLevelItem {
+                    span: errors::ParserError::from_span(span),
+                    help,
+                }.into())
+            }
         }
     }
 
@@ -2697,7 +2740,14 @@ impl<'a> Parser<'a> {
             // Ontology type: OntologyTerm[SNOMED:12345]
             TokenKind::OntologyTerm => self.parse_ontology_type(),
 
-            _ => Err(miette::miette!("Expected type, found {:?}", self.peek())),
+            // Refinement type: { x: T | predicate }
+            TokenKind::LBrace => self.parse_refinement_type(),
+
+            _ => {
+                // Generate context-aware error message
+                let lookahead = [self.peek_n(0), self.peek_n(1), self.peek_n(2)];
+                Err(type_error_for_token(self.peek(), self.span(), &lookahead).into())
+            }
         }
     }
 
@@ -3071,6 +3121,51 @@ impl<'a> Parser<'a> {
         self.expect(TokenKind::RBracket)?;
 
         Ok(TypeExpr::Ontology { ontology, term })
+    }
+
+    /// Parse refinement type: { x: T | predicate }
+    ///
+    /// Syntax: `{ identifier: type | predicate_expression }`
+    /// Examples:
+    /// - `{ x: i32 | x > 0 }` - positive integers
+    /// - `{ p: f64 | 0.0 <= p && p <= 1.0 }` - probabilities
+    /// - `{ dose: mg | dose > 0.0 && dose <= max_dose }` - safe doses
+    fn parse_refinement_type(&mut self) -> Result<TypeExpr> {
+        self.expect(TokenKind::LBrace)?;
+
+        // Parse the refinement variable name
+        let var = self.parse_ident()?;
+
+        // Expect colon
+        self.expect(TokenKind::Colon)?;
+
+        // Parse the base type
+        let base_type = Box::new(self.parse_type()?);
+
+        // Expect the pipe separator '|'
+        self.expect(TokenKind::Pipe)?;
+
+        // Parse the predicate expression
+        // We need to parse until we hit the closing brace
+        let predicate = Box::new(self.parse_refinement_predicate()?);
+
+        // Expect closing brace
+        self.expect(TokenKind::RBrace)?;
+
+        Ok(TypeExpr::Refinement {
+            var,
+            base_type,
+            predicate,
+        })
+    }
+
+    /// Parse a refinement predicate expression
+    /// This is similar to parse_expr but stops at `}`
+    fn parse_refinement_predicate(&mut self) -> Result<Expr> {
+        // Use the normal expression parser but we know we're in a refinement context
+        // The closing brace will naturally stop parsing since it's not a valid
+        // continuation of an expression
+        self.parse_expr()
     }
 
     // ==================== EXPRESSIONS ====================
@@ -3854,10 +3949,10 @@ impl<'a> Parser<'a> {
                 Ok(Expr::MacroInvocation(macro_inv))
             }
 
-            _ => Err(miette::miette!(
-                "Unexpected token {:?} in expression",
-                self.peek()
-            )),
+            _ => {
+                // Generate context-aware error message
+                Err(expr_error_for_token(self.peek(), self.span()).into())
+            }
         }
     }
 
@@ -4639,7 +4734,11 @@ impl<'a> Parser<'a> {
                     mutable: true,
                 })
             }
-            _ => Err(miette::miette!("Expected pattern, found {:?}", self.peek())),
+            _ => {
+                // Generate context-aware error message
+                let lookahead = [self.peek_n(0), self.peek_n(1), self.peek_n(2)];
+                Err(pattern_error_for_token(self.peek(), self.span(), &lookahead).into())
+            }
         }
     }
 

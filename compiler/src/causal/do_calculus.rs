@@ -33,8 +33,7 @@
 
 use std::collections::HashSet;
 
-use super::dag::{CausalDAG, EffectEstimate};
-use super::graph::CausalGraph;
+use super::dag::CausalDAG;
 
 /// Do-calculus query for causal effects
 #[derive(Clone, Debug)]

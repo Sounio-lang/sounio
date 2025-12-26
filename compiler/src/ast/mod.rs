@@ -1089,6 +1089,18 @@ pub enum TypeExpr {
         inner: Box<TypeExpr>,
         effects: EffectRow,
     },
+
+    /// Refinement type: { x: T | predicate }
+    /// A base type refined by a logical predicate
+    /// Example: `{ x: i32 | x > 0 }` for positive integers
+    Refinement {
+        /// The refinement variable name (e.g., "x")
+        var: String,
+        /// The base type (e.g., i32)
+        base_type: Box<TypeExpr>,
+        /// The predicate expression constraining the value
+        predicate: Box<Expr>,
+    },
 }
 
 // ==================== EPISTEMIC TYPE COMPONENTS ====================
