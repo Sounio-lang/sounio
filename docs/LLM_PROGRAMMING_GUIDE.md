@@ -7,15 +7,17 @@ This comprehensive guide enables LLMs to correctly generate Sounio code. Sounio 
 1. [Core Syntax](#core-syntax)
 2. [Type System](#type-system)
 3. [Effects System](#effects-system)
-4. [Units of Measure](#units-of-measure)
-5. [GPU Programming](#gpu-programming)
-6. [Scientific Computing](#scientific-computing)
-7. [Epistemic Types](#epistemic-types)
-8. [FFI (Foreign Function Interface)](#ffi-foreign-function-interface)
-9. [Standard Library](#standard-library)
-10. [What is NOT Supported](#what-is-not-supported)
-11. [Idiomatic Patterns](#idiomatic-patterns)
-12. [Common Mistakes](#common-mistakes)
+4. [Async Programming](#async-programming)
+5. [Units of Measure](#units-of-measure)
+6. [GPU Programming](#gpu-programming)
+7. [Scientific Computing](#scientific-computing)
+8. [Epistemic Types](#epistemic-types)
+9. [FFI (Foreign Function Interface)](#ffi-foreign-function-interface)
+10. [Standard Library](#standard-library)
+11. [Package Manager](#package-manager)
+12. [What is NOT Supported](#what-is-not-supported)
+13. [Idiomatic Patterns](#idiomatic-patterns)
+14. [Common Mistakes](#common-mistakes)
 
 ---
 
@@ -434,6 +436,167 @@ fn safe_divide(a: i32, b: i32) -> Option<i32> {
         throw(msg) => None,
         return(v) => Some(v),
     }
+}
+```
+
+---
+
+## Async Programming
+
+Sounio has first-class async/await support with structured concurrency.
+
+### Async Functions
+
+```sio
+// Async function declaration
+async fn fetch_data(url: string) -> Data with Async, IO {
+    // Async operations here
+}
+
+// Call and await
+fn main() with Async, IO {
+    let data = fetch_data("https://api.example.com").await
+    process(data)
+}
+```
+
+### Async Blocks
+
+```sio
+// Create a future from a block
+let future = async {
+    // Computation runs when awaited
+    expensive_computation()
+}
+
+// Await the result
+let result = future.await
+```
+
+### Spawn (Background Tasks)
+
+```sio
+// Spawn a background task
+let handle = spawn {
+    long_running_task()
+}
+
+// Continue with other work...
+do_other_work()
+
+// Wait for the spawned task to complete
+let result = handle.await
+```
+
+### Channels
+
+```sio
+// Create a channel for communication
+let (sender, receiver) = channel::<Message>()
+
+// Producer task
+spawn {
+    for item in items {
+        sender.send(item).await
+    }
+}
+
+// Consumer
+while let Some(msg) = receiver.recv().await {
+    process(msg)
+}
+```
+
+### Join (Wait for All)
+
+```sio
+// Wait for multiple futures concurrently
+let (result1, result2, result3) = join(
+    fetch_users(),
+    fetch_posts(),
+    fetch_comments()
+).await
+
+// All three complete before continuing
+```
+
+### Select (First Ready)
+
+```sio
+// Wait for the first future to complete
+select {
+    msg = receiver.recv() => {
+        handle_message(msg)
+    }
+    result = timeout(5.seconds) => {
+        handle_timeout()
+    }
+    _ = shutdown_signal() => {
+        cleanup_and_exit()
+    }
+}
+```
+
+### Async Closures
+
+```sio
+// Async closure
+let fetch = async |id: i32| -> Result<User, Error> {
+    let response = http_get(format("/users/{}", id)).await
+    parse_user(response)
+}
+
+// Use in higher-order functions
+let users = ids.map(fetch).collect().await
+```
+
+### Timeout and Cancellation
+
+```sio
+// With timeout
+let result = timeout(Duration::seconds(30), async {
+    slow_operation()
+}).await
+
+match result {
+    Ok(value) => use_value(value),
+    Err(TimeoutError) => handle_timeout(),
+}
+
+// Cancellation token
+let token = CancellationToken::new()
+
+spawn {
+    loop {
+        if token.is_cancelled() {
+            break
+        }
+        do_work()
+    }
+}
+
+// Cancel after some condition
+token.cancel()
+```
+
+### Effect Tracking
+
+Async operations must declare the `Async` effect:
+
+```sio
+// Must declare Async effect
+async fn process() -> i32 with Async {
+    compute().await
+}
+
+// IO operations need both effects
+async fn fetch() -> string with Async, IO {
+    http_get(url).await
+}
+
+// Pure async computation
+async fn pure_async() -> i32 with Async {
+    42  // No side effects other than async
 }
 ```
 
@@ -1134,6 +1297,165 @@ let front = deque.pop_front();
 
 ---
 
+## Package Manager
+
+Sounio includes a built-in package manager (`sou pkg`) for dependency management.
+
+### Project Setup
+
+Create a new project with a `Sounio.toml` manifest:
+
+```toml
+[package]
+name = "my-project"
+version = "0.1.0"
+authors = ["Your Name <you@example.com>"]
+description = "A Sounio project"
+
+[dependencies]
+serde = "1.0"
+tokio = { version = "1.0", features = ["full"] }
+local-lib = { path = "../local-lib" }
+git-dep = { git = "https://github.com/user/repo" }
+```
+
+### CLI Commands
+
+```bash
+# Initialize a new project
+sou pkg init my-project
+
+# Add a dependency
+sou pkg add serde
+sou pkg add tokio --features full
+sou pkg add ./local-lib --path
+
+# Remove a dependency
+sou pkg remove serde
+
+# Install all dependencies
+sou pkg install
+
+# Update dependencies
+sou pkg update
+sou pkg update serde  # Update specific package
+
+# Search the registry
+sou pkg search json
+
+# Show package info
+sou pkg info serde
+
+# Build the project
+sou pkg build
+sou pkg build --release
+
+# Run the project
+sou pkg run
+sou pkg run --release
+
+# Run tests
+sou pkg test
+
+# Publish to registry
+sou pkg publish
+```
+
+### Authentication
+
+```bash
+# Login to registry
+sou pkg login
+# Prompts for API token
+
+# Logout
+sou pkg logout
+
+# Check login status
+sou pkg whoami
+```
+
+### Workspaces
+
+For multi-package projects, use a workspace:
+
+```toml
+# Root Sounio.toml
+[workspace]
+members = [
+    "core",
+    "cli",
+    "lib/*"
+]
+
+[workspace.dependencies]
+serde = "1.0"
+```
+
+```toml
+# core/Sounio.toml
+[package]
+name = "my-core"
+version = "0.1.0"
+
+[dependencies]
+serde.workspace = true  # Inherit from workspace
+```
+
+### Lock File
+
+Dependencies are locked in `Sounio.lock`:
+
+```toml
+# This file is auto-generated by Sounio
+# Do not edit manually
+
+[[package]]
+name = "serde"
+version = "1.0.193"
+checksum = "sha256:abc123..."
+
+[[package]]
+name = "tokio"
+version = "1.35.0"
+checksum = "sha256:def456..."
+dependencies = ["mio", "bytes"]
+```
+
+### Private Registries
+
+Configure custom registries in `~/.sounio/config.toml`:
+
+```toml
+[registries]
+my-company = { url = "https://registry.company.com" }
+
+[registries.my-company]
+token = "env:COMPANY_REGISTRY_TOKEN"
+```
+
+Then use in `Sounio.toml`:
+
+```toml
+[dependencies]
+internal-lib = { version = "1.0", registry = "my-company" }
+```
+
+### Credentials
+
+Credentials are stored in `~/.sounio/credentials.toml`:
+
+```toml
+[registries.default]
+token = "your-api-token"
+
+[registries.my-company]
+token = "company-token"
+username = "your-username"
+```
+
+---
+
 ## What is NOT Supported
 
 **CRITICAL: The following syntax/features do NOT exist in Sounio L0:**
@@ -1514,7 +1836,8 @@ module import use export fn let var mut const type struct enum
 trait impl if else match for while loop break continue return
 in as where pub self Self effect handler handle with perform
 resume linear affine move copy drop kernel tile device shared
-gpu async await spawn sample observe infer proof ode pde causal
+gpu async await spawn join select channel sample observe infer
+proof ode pde causal timeout cancel
 Knowledge Quantity Tensor vec2 vec3 vec4 mat2 mat3 mat4 quat
 dual grad jacobian hessian do counterfactual query invariant
 requires ensures assert assume unsafe extern static true false
@@ -1576,5 +1899,15 @@ This guide is for **Sounio L0** (low-level systems syntax).
 For questions about specific features, check the compiler source at `compiler/src/` or run:
 
 ```bash
-cargo run -- check your_file.d --show-ast --show-types
+# Check a Sounio file
+souc check your_file.sio --show-ast --show-types
+
+# Run a Sounio program
+souc run your_file.sio
+
+# Start the REPL
+souc repl
+
+# Package manager
+sou pkg --help
 ```
