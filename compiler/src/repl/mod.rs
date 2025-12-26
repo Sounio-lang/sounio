@@ -558,6 +558,8 @@ pub struct Repl {
     types: HashMap<String, String>,
     /// Variable bindings from previous expressions (raw values)
     bindings: HashMap<String, Value>,
+    /// Binding statements for type checker (ordered)
+    binding_stmts: Vec<(String, String)>, // (name, statement)
     /// Epistemic bindings with full metadata
     epistemic_bindings: HashMap<String, EpistemicValue>,
     /// Line counter
@@ -571,6 +573,7 @@ impl Repl {
             functions: HashMap::new(),
             types: HashMap::new(),
             bindings: HashMap::new(),
+            binding_stmts: Vec::new(),
             epistemic_bindings: HashMap::new(),
             line_count: 0,
         }
@@ -732,6 +735,7 @@ impl Repl {
                 self.functions.clear();
                 self.types.clear();
                 self.bindings.clear();
+                self.binding_stmts.clear();
                 self.epistemic_bindings.clear();
                 println!(
                     "{}Cleared{} all definitions and bindings.",
@@ -1228,13 +1232,20 @@ impl Repl {
             return;
         }
 
-        // Check if this is a let binding
+        // Check if this is a let or var binding
         let is_let = input.starts_with("let ");
+        let is_var = input.starts_with("var ");
+        let is_binding = is_let || is_var;
 
         // Wrap expression in a main function for evaluation
-        let wrapped = if is_let {
-            // let x = expr -> we need to capture the value
-            format!("{}\n__repl_result__", input)
+        let wrapped = if is_binding {
+            // let x = expr -> wrap as: let x = expr; x
+            // This allows us to capture the bound value
+            if let Some(name) = self.extract_binding_name(input) {
+                format!("{}\n    {}", input, name)
+            } else {
+                input.to_string()
+            }
         } else {
             input.to_string()
         };
@@ -1283,11 +1294,11 @@ impl Repl {
         if self.config.use_jit {
             self.eval_jit(&hir);
         } else {
-            self.eval_interp(&hir, is_let, input);
+            self.eval_interp(&hir, is_binding, input);
         }
     }
 
-    fn eval_interp(&mut self, hir: &hir::Hir, is_let: bool, input: &str) {
+    fn eval_interp(&mut self, hir: &hir::Hir, is_binding: bool, input: &str) {
         let mut interp = Interpreter::new();
 
         // Pre-populate environment with existing bindings
@@ -1297,9 +1308,9 @@ impl Repl {
 
         match interp.run(hir) {
             Ok(value) => {
-                if is_let {
+                if is_binding {
                     // Extract binding name and store value
-                    if let Some(name) = self.extract_let_name(input) {
+                    if let Some(name) = self.extract_binding_name(input) {
                         // Create epistemic value with tracking
                         let ev = EpistemicValue::from_value(
                             value.clone(),
@@ -1320,7 +1331,12 @@ impl Repl {
                             println!("{} = {:?}", name, value);
                         }
 
-                        // Store in both maps
+                        // Store binding statement for type checker
+                        // Remove any existing binding with the same name
+                        self.binding_stmts.retain(|(n, _)| n != &name);
+                        self.binding_stmts.push((name.clone(), input.to_string()));
+
+                        // Store in value maps
                         self.bindings.insert(name.clone(), value);
                         self.epistemic_bindings.insert(name, ev);
                     }
@@ -1399,8 +1415,20 @@ impl Repl {
             source.push('\n');
         }
 
-        // Wrap expression in main function
-        source.push_str(&format!("fn main() -> i64 {{\n    {}\n}}\n", expr));
+        // Build main function with previous bindings
+        source.push_str("fn main() -> i64 {\n");
+
+        // Add previous binding statements so type checker can see them
+        for (_, stmt) in &self.binding_stmts {
+            source.push_str("    ");
+            source.push_str(stmt);
+            source.push('\n');
+        }
+
+        // Add the new expression
+        source.push_str("    ");
+        source.push_str(expr);
+        source.push_str("\n}\n");
 
         source
     }
@@ -1429,6 +1457,20 @@ impl Repl {
     fn extract_let_name(&self, input: &str) -> Option<String> {
         // let name = ...
         let input = input.strip_prefix("let ")?.trim_start();
+        let end = input.find(|c: char| c == '=' || c == ':' || c.is_whitespace())?;
+        Some(input[..end].trim().to_string())
+    }
+
+    fn extract_binding_name(&self, input: &str) -> Option<String> {
+        // let name = ... or var name = ...
+        let input = if input.starts_with("let ") {
+            input.strip_prefix("let ")?
+        } else if input.starts_with("var ") {
+            input.strip_prefix("var ")?
+        } else {
+            return None;
+        };
+        let input = input.trim_start();
         let end = input.find(|c: char| c == '=' || c == ':' || c.is_whitespace())?;
         Some(input[..end].trim().to_string())
     }
