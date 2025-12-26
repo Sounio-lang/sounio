@@ -2305,6 +2305,179 @@ impl TypeChecker {
                 )
             }
 
+            Expr::For {
+                id: _,
+                pattern,
+                iter,
+                body,
+            } => {
+                // Desugar: for i in start..end { body }
+                // Into: { var __counter = start; while __counter < end { let i = __counter; body; __counter = __counter + 1 } }
+
+                // Get the loop variable name from the pattern
+                let loop_var = self.pattern_name(pattern);
+
+                // Check if the iterator is a range expression
+                match iter.as_ref() {
+                    Expr::Range {
+                        id: _,
+                        start,
+                        end,
+                        inclusive,
+                    } => {
+                        // Type check start and end - let type inference determine the type
+                        let start_expr = start
+                            .as_ref()
+                            .map(|e| self.check_expr(e, None))
+                            .transpose()?
+                            .unwrap_or_else(|| HirExpr {
+                                id: NodeId::dummy(),
+                                kind: HirExprKind::Literal(HirLiteral::Int(0)),
+                                ty: HirType::I32,
+                            });
+
+                        let end_expr = end
+                            .as_ref()
+                            .map(|e| self.check_expr(e, None))
+                            .transpose()?;
+
+                        // Determine element type from start expression
+                        let elem_ty = start_expr.ty.clone();
+                        let is_inclusive = *inclusive;
+
+                        // Generate unique counter variable name
+                        let counter_var = format!("__for_counter_{}", self.next_type_var);
+                        self.next_type_var += 1;
+
+                        // Build the while condition: counter < end (or counter <= end for inclusive)
+                        let cond_expr = if let Some(end_e) = end_expr {
+                            HirExpr {
+                                id: NodeId::dummy(),
+                                kind: HirExprKind::Binary {
+                                    op: if is_inclusive {
+                                        HirBinaryOp::Le
+                                    } else {
+                                        HirBinaryOp::Lt
+                                    },
+                                    left: Box::new(HirExpr {
+                                        id: NodeId::dummy(),
+                                        kind: HirExprKind::Local(counter_var.clone()),
+                                        ty: elem_ty.clone(),
+                                    }),
+                                    right: Box::new(end_e),
+                                },
+                                ty: HirType::Bool,
+                            }
+                        } else {
+                            // Infinite range (1..) - always true
+                            HirExpr {
+                                id: NodeId::dummy(),
+                                kind: HirExprKind::Literal(HirLiteral::Bool(true)),
+                                ty: HirType::Bool,
+                            }
+                        };
+
+                        // Push scope for the for loop body
+                        self.env.push_scope();
+
+                        // Define the loop variable in scope (immutable - it gets a new value each iteration)
+                        self.env.bind(loop_var.clone(), self.hir_type_to_type(&elem_ty), false);
+
+                        // Check the body
+                        let body_block = self.check_block(body, None)?;
+
+                        self.env.pop_scope();
+
+                        // Build the loop body: let i = counter; <original body>; counter = counter + 1
+                        let mut loop_stmts = Vec::new();
+
+                        // let i = counter
+                        loop_stmts.push(HirStmt::Let {
+                            name: loop_var.clone(),
+                            ty: elem_ty.clone(),
+                            value: Some(HirExpr {
+                                id: NodeId::dummy(),
+                                kind: HirExprKind::Local(counter_var.clone()),
+                                ty: elem_ty.clone(),
+                            }),
+                            is_mut: false,
+                            layout_hint: None,
+                        });
+
+                        // Add original body statements
+                        loop_stmts.extend(body_block.stmts);
+
+                        // counter = counter + 1
+                        loop_stmts.push(HirStmt::Assign {
+                            target: HirExpr {
+                                id: NodeId::dummy(),
+                                kind: HirExprKind::Local(counter_var.clone()),
+                                ty: elem_ty.clone(),
+                            },
+                            value: HirExpr {
+                                id: NodeId::dummy(),
+                                kind: HirExprKind::Binary {
+                                    op: HirBinaryOp::Add,
+                                    left: Box::new(HirExpr {
+                                        id: NodeId::dummy(),
+                                        kind: HirExprKind::Local(counter_var.clone()),
+                                        ty: elem_ty.clone(),
+                                    }),
+                                    right: Box::new(HirExpr {
+                                        id: NodeId::dummy(),
+                                        kind: HirExprKind::Literal(HirLiteral::Int(1)),
+                                        ty: elem_ty.clone(),
+                                    }),
+                                },
+                                ty: elem_ty.clone(),
+                            },
+                        });
+
+                        let while_body = HirBlock {
+                            stmts: loop_stmts,
+                            ty: HirType::Unit,
+                        };
+
+                        // Build the while loop
+                        let while_expr = HirExpr {
+                            id: NodeId::dummy(),
+                            kind: HirExprKind::While {
+                                condition: Box::new(cond_expr),
+                                body: while_body,
+                            },
+                            ty: HirType::Unit,
+                        };
+
+                        // Build the outer block: { var counter = start; while ... }
+                        let outer_stmts = vec![
+                            HirStmt::Let {
+                                name: counter_var,
+                                ty: elem_ty.clone(),
+                                value: Some(start_expr),
+                                is_mut: true,
+                                layout_hint: None,
+                            },
+                            HirStmt::Expr(while_expr),
+                        ];
+
+                        (
+                            HirExprKind::Block(HirBlock {
+                                stmts: outer_stmts,
+                                ty: HirType::Unit,
+                            }),
+                            HirType::Unit,
+                        )
+                    }
+                    _ => {
+                        // For now, only range-based for loops are supported
+                        // TODO: Support iterators over arrays, slices, etc.
+                        return Err(miette::miette!(
+                            "for loops currently only support range expressions (e.g., for i in 1..10)"
+                        ));
+                    }
+                }
+            }
+
             Expr::Break { id, value } => {
                 let val = value
                     .as_ref()
