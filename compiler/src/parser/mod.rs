@@ -2508,10 +2508,16 @@ impl<'a> Parser<'a> {
                 })
             }
 
-            // Reference types
+            // Reference types: &T (shared) or &!T (mutable/exclusive)
+            // Also supports &mut T for Rust compatibility
             TokenKind::Amp => {
                 self.advance();
-                let is_mut = if self.at(TokenKind::Mut) {
+                let is_mut = if self.at(TokenKind::Bang) {
+                    // Sounio canonical syntax: &!T for mutable reference
+                    self.advance();
+                    true
+                } else if self.at(TokenKind::Mut) {
+                    // Rust compatibility: &mut T also accepted
                     self.advance();
                     true
                 } else {
