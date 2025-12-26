@@ -52,6 +52,10 @@ pub mod provenance;
 pub mod temporal;
 pub mod time_travel;
 
+// Uncertainty promotion lattice and KEC auto-selection
+pub mod kec;
+pub mod promotion;
+
 pub use confidence::{Confidence, EpistemicStatus, Evidence, EvidenceKind, Revisability, Source};
 pub use heterogeneity::{
     HeterogeneityConfig, HeterogeneityResolver, ResolutionResult, ResolutionStrategy,
@@ -101,4 +105,15 @@ pub use time_travel::{
     DegradationReason, DegradingOperation, EpistemicBreakpoint, EpistemicSnapshot,
     FDAComplianceProof, ProofVerificationError, TimeTravelResult, TimelineGraph, TimelineState,
     VerificationResult, verify_external,
+};
+
+// KEC auto-selection for optimal uncertainty model
+pub use kec::{
+    ComplexityMetrics, KECConfig, KECResult, KECSelector, UncertaintyMetrics,
+    auto_select_model, select_for_operation,
+};
+
+// Uncertainty promotion lattice
+pub use promotion::{
+    PromotedValue, Promoter, Promotable, PromotionLattice, UncertaintyLevel,
 };
