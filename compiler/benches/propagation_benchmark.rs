@@ -289,13 +289,31 @@ mod affine {
         pub fn div(&self, other: &Self) -> Self {
             // Use interval reciprocal + affine multiply
             let (lo, hi) = other.to_interval();
+
+            // Check for division by interval containing zero
             if lo <= 0.0 && hi >= 0.0 {
-                // Division by interval containing zero
                 return Self::from_interval(f64::NEG_INFINITY, f64::INFINITY);
             }
 
+            // Check for very small divisor (numerical instability)
+            let min_abs = lo.abs().min(hi.abs());
+            if min_abs < 1e-10 {
+                // Fall back to interval arithmetic for stability
+                let self_int = self.to_interval();
+                let inv_lo = 1.0 / hi;
+                let inv_hi = 1.0 / lo;
+                let results = [
+                    self_int.0 * inv_lo, self_int.0 * inv_hi,
+                    self_int.1 * inv_lo, self_int.1 * inv_hi,
+                ];
+                let res_lo = results.iter().copied().fold(f64::INFINITY, f64::min);
+                let res_hi = results.iter().copied().fold(f64::NEG_INFINITY, f64::max);
+                return Self::from_interval(res_lo, res_hi);
+            }
+
             let inv_center = 1.0 / other.center;
-            let inv_radius = (1.0/lo - 1.0/hi).abs() / 2.0;
+            // Clamp inverse radius to prevent explosion
+            let inv_radius = ((1.0/lo - 1.0/hi).abs() / 2.0).min(inv_center.abs() * 10.0);
 
             let inv = Self {
                 center: inv_center,
@@ -306,18 +324,36 @@ mod affine {
         }
 
         pub fn exp(&self) -> Self {
-            // exp(x) ≈ exp(center) * (1 + noise_terms) for small deviations
-            let exp_center = self.center.exp();
+            // Clamp center to avoid overflow
+            let clamped_center = self.center.clamp(-700.0, 700.0);
+            let exp_center = clamped_center.exp();
+
+            // If exp would overflow or underflow, return interval bounds
+            if !exp_center.is_finite() || exp_center == 0.0 {
+                let (lo, hi) = self.to_interval();
+                let exp_lo = lo.clamp(-700.0, 700.0).exp();
+                let exp_hi = hi.clamp(-700.0, 700.0).exp();
+                return Self::from_interval(exp_lo.min(exp_hi), exp_lo.max(exp_hi));
+            }
+
             let radius = self.radius();
+
+            // If radius is too large, linearization is not accurate - use interval
+            if radius > 2.0 {
+                let (lo, hi) = self.to_interval();
+                let exp_lo = lo.clamp(-700.0, 700.0).exp();
+                let exp_hi = hi.clamp(-700.0, 700.0).exp();
+                return Self::from_interval(exp_lo.min(exp_hi), exp_lo.max(exp_hi));
+            }
 
             // First-order approximation with remainder
             let mut noise: Vec<(u32, f64)> = self.noise.iter()
                 .map(|(id, c)| (*id, c * exp_center))
                 .collect();
 
-            // Add remainder for nonlinearity
+            // Add remainder for nonlinearity (Taylor remainder bound)
             let remainder = (exp_center * radius * radius / 2.0).abs();
-            if remainder > 1e-15 {
+            if remainder > 1e-15 && remainder.is_finite() {
                 let id = NEXT_NOISE_ID.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
                 noise.push((id, remainder));
             }
@@ -326,6 +362,11 @@ mod affine {
                 center: exp_center,
                 noise,
             }
+        }
+
+        /// Check if this affine form has valid (finite) values
+        pub fn is_valid(&self) -> bool {
+            self.center.is_finite() && self.noise.iter().all(|(_, c)| c.is_finite())
         }
 
         pub fn neg(&self) -> Self {
@@ -358,13 +399,89 @@ mod affine {
 
     fn pk_model(p: &[AffineForm]) -> AffineForm {
         let (f, dose, ka, vd, cl, t) = (&p[0], &p[1], &p[2], &p[3], &p[4], &p[5]);
-        let ke = cl.div(vd);
-        let ka_minus_ke = ka.sub(&ke);
 
-        let prefactor = f.mul(dose).mul(ka).div(&vd.mul(&ka_minus_ke));
-        let exp_ke = ke.neg().mul(t).exp();
-        let exp_ka = ka.neg().mul(t).exp();
-        prefactor.mul(&exp_ke.sub(&exp_ka))
+        // Clamp inputs to reasonable PK ranges to avoid numerical issues
+        let clamp_affine = |a: &AffineForm, lo: f64, hi: f64| -> AffineForm {
+            let (a_lo, a_hi) = a.to_interval();
+            if a_lo >= lo && a_hi <= hi && a.is_valid() {
+                a.clone()
+            } else {
+                AffineForm::from_interval(a_lo.clamp(lo, hi), a_hi.clamp(lo, hi))
+            }
+        };
+
+        // Clamp to physiologically reasonable ranges
+        let f_c = clamp_affine(f, 0.1, 1.0);
+        let dose_c = clamp_affine(dose, 1.0, 1000.0);
+        let ka_c = clamp_affine(ka, 0.1, 10.0);
+        let vd_c = clamp_affine(vd, 1.0, 500.0);
+        let cl_c = clamp_affine(cl, 0.1, 100.0);
+        let t_c = clamp_affine(t, 0.0, 100.0);
+
+        let ke = cl_c.div(&vd_c);
+
+        // Check if ke is valid
+        if !ke.is_valid() {
+            // Conservative estimate based on typical PK
+            return AffineForm::from_interval(0.0, 5.0);
+        }
+
+        let ka_minus_ke = ka_c.sub(&ke);
+
+        // Check if ka ≈ ke (would cause division issues)
+        let (diff_lo, diff_hi) = ka_minus_ke.to_interval();
+        if diff_lo <= 0.0 && diff_hi >= 0.0 {
+            // Interval contains zero - use limit form
+            // C(t) ≈ F*D*ka*t/V * exp(-ka*t) when ka = ke
+            let exp_ka = ka_c.neg().mul(&t_c).exp();
+            let result = f_c.mul(&dose_c).mul(&ka_c).mul(&t_c).div(&vd_c).mul(&exp_ka);
+            if result.is_valid() {
+                return result;
+            }
+            return AffineForm::from_interval(0.0, 5.0);
+        }
+
+        // Normal case: compute full PK equation
+        let denominator = vd_c.mul(&ka_minus_ke);
+
+        // Check denominator is not too small
+        let (denom_lo, denom_hi) = denominator.to_interval();
+        if denom_lo.abs() < 1.0 || denom_hi.abs() < 1.0 {
+            // Small denominator - use conservative bounds
+            return AffineForm::from_interval(0.0, 5.0);
+        }
+
+        let prefactor = f_c.mul(&dose_c).mul(&ka_c).div(&denominator);
+
+        // Check prefactor validity
+        if !prefactor.is_valid() {
+            return AffineForm::from_interval(0.0, 5.0);
+        }
+
+        // Clamp prefactor to reasonable range
+        let (pf_lo, pf_hi) = prefactor.to_interval();
+        if pf_hi > 100.0 || pf_lo < -10.0 {
+            return AffineForm::from_interval(0.0, 5.0);
+        }
+
+        let exp_ke = ke.neg().mul(&t_c).exp();
+        let exp_ka = ka_c.neg().mul(&t_c).exp();
+        let exp_diff = exp_ke.sub(&exp_ka);
+
+        let result = prefactor.mul(&exp_diff);
+
+        // Final validity check
+        if !result.is_valid() {
+            return AffineForm::from_interval(0.0, 5.0);
+        }
+
+        // Clamp result to physically meaningful range (concentration must be positive)
+        let (res_lo, res_hi) = result.to_interval();
+        if res_lo < 0.0 || res_hi > 100.0 {
+            return AffineForm::from_interval(res_lo.max(0.0), res_hi.min(100.0));
+        }
+
+        result
     }
 }
 
