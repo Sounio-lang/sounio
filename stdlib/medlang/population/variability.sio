@@ -1,0 +1,526 @@
+//! stdlib/medlang/population/variability.sio
+//!
+//! Inter-Individual Variability and Residual Error Models
+//!
+//! Provides structures for random effects (omega matrices) and
+//! residual unexplained variability (RUV) models.
+
+// ============================================================================
+// HELPER FUNCTIONS
+// ============================================================================
+
+fn abs_f64(x: f64) -> f64 {
+    if x < 0.0 { 0.0 - x } else { x }
+}
+
+fn sqrt_f64(x: f64) -> f64 {
+    if x <= 0.0 { return 0.0 }
+    var y = x
+    for _ in 0..10 { y = 0.5 * (y + x / y) }
+    y
+}
+
+fn ln_f64(x: f64) -> f64 {
+    if x <= 0.0 { return -1000000.0 }
+    let ln2 = 0.6931471805599453
+    var v = x
+    var k: i64 = 0
+    while v > 2.0 { v = v / 2.0; k = k + 1 }
+    while v < 1.0 { v = v * 2.0; k = k - 1 }
+    let y = v - 1.0
+    var result = 0.0
+    var power = y
+    for i in 1..=15 {
+        if i % 2 == 1 { result = result + power / (i as f64) }
+        else { result = result - power / (i as f64) }
+        power = power * y
+    }
+    result + (k as f64) * ln2
+}
+
+fn exp_f64(x: f64) -> f64 {
+    let ln2 = 0.6931471805599453
+    var v = x
+    if v > 700.0 { v = 700.0 }
+    if v < -700.0 { return 0.0 }
+    let k = (v / ln2) as i64
+    let r = v - (k as f64) * ln2
+    var result = 1.0
+    var term = 1.0
+    for i in 1..=15 {
+        term = term * r / (i as f64)
+        result = result + term
+    }
+    if k >= 0 { for _ in 0..k { result = result * 2.0 } }
+    else { for _ in 0..(-k) { result = result / 2.0 } }
+    result
+}
+
+fn pi() -> f64 { 3.14159265358979323846 }
+
+// ============================================================================
+// OMEGA MATRIX (VARIANCE-COVARIANCE OF RANDOM EFFECTS)
+// ============================================================================
+
+/// Omega matrix storage (symmetric, stored as lower triangular)
+pub struct OmegaMatrix {
+    pub elements: Vec<f64>,
+    pub dimension: i64,
+    pub block_structure: i64,
+}
+
+pub fn omega_matrix_new(dim: i64) -> OmegaMatrix {
+    let n_elements = (dim * (dim + 1) / 2) as usize
+    var elements: Vec<f64> = vec![]
+    for _ in 0..n_elements {
+        elements.push(0.0)
+    }
+    OmegaMatrix {
+        elements: elements,
+        dimension: dim,
+        block_structure: 0,
+    }
+}
+
+pub fn omega_matrix_diagonal(variances: &Vec<f64>) -> OmegaMatrix {
+    let dim = variances.len() as i64
+    var elements: Vec<f64> = vec![]
+
+    for i in 0..dim {
+        for j in 0..=i {
+            if i == j {
+                elements.push(variances[i as usize])
+            } else {
+                elements.push(0.0)
+            }
+        }
+    }
+
+    OmegaMatrix {
+        elements: elements,
+        dimension: dim,
+        block_structure: 1,
+    }
+}
+
+/// Get element (i, j) from lower triangular storage
+pub fn omega_get(omega: &OmegaMatrix, i: i64, j: i64) -> f64 {
+    var row = i
+    var col = j
+    if col > row {
+        let temp = row
+        row = col
+        col = temp
+    }
+    let idx = row * (row + 1) / 2 + col
+    if idx < 0 || (idx as usize) >= omega.elements.len() {
+        return 0.0
+    }
+    omega.elements[idx as usize]
+}
+
+/// Set element (i, j) in lower triangular storage
+pub fn omega_set(omega: &OmegaMatrix, i: i64, j: i64, value: f64) {
+    var row = i
+    var col = j
+    if col > row {
+        let temp = row
+        row = col
+        col = temp
+    }
+    let idx = row * (row + 1) / 2 + col
+    if idx >= 0 && (idx as usize) < omega.elements.len() {
+        omega.elements[idx as usize] = value
+    }
+}
+
+/// Compute variance from diagonal
+pub fn omega_variance(omega: &OmegaMatrix, i: i64) -> f64 {
+    omega_get(omega, i, i)
+}
+
+/// Compute standard deviation
+pub fn omega_std(omega: &OmegaMatrix, i: i64) -> f64 {
+    sqrt_f64(omega_get(omega, i, i))
+}
+
+/// Compute correlation between parameters i and j
+pub fn omega_correlation(omega: &OmegaMatrix, i: i64, j: i64) -> f64 {
+    let var_i = omega_get(omega, i, i)
+    let var_j = omega_get(omega, j, j)
+    if var_i <= 0.0 || var_j <= 0.0 {
+        return 0.0
+    }
+    let cov_ij = omega_get(omega, i, j)
+    cov_ij / sqrt_f64(var_i * var_j)
+}
+
+/// Compute coefficient of variation (CV%) from omega
+pub fn omega_cv_percent(omega: &OmegaMatrix, i: i64) -> f64 {
+    let variance = omega_get(omega, i, i)
+    if variance < 0.0 { return 0.0 }
+    sqrt_f64(exp_f64(variance) - 1.0) * 100.0
+}
+
+// ============================================================================
+// INTER-INDIVIDUAL VARIABILITY (IIV)
+// ============================================================================
+
+/// Inter-individual variability specification
+pub struct InterIndividualVariability {
+    pub omega: OmegaMatrix,
+    pub param_names: Vec<i64>,
+    pub distribution: i64,
+    pub shrinkage: Vec<f64>,
+}
+
+pub fn iiv_new(n_params: i64) -> InterIndividualVariability {
+    var param_names: Vec<i64> = vec![]
+    var shrinkage: Vec<f64> = vec![]
+    for i in 0..n_params {
+        param_names.push(i)
+        shrinkage.push(0.0)
+    }
+
+    InterIndividualVariability {
+        omega: omega_matrix_new(n_params),
+        param_names: param_names,
+        distribution: 1,
+        shrinkage: shrinkage,
+    }
+}
+
+pub fn iiv_from_variances(variances: &Vec<f64>) -> InterIndividualVariability {
+    let n = variances.len()
+    var param_names: Vec<i64> = vec![]
+    var shrinkage: Vec<f64> = vec![]
+    for i in 0..n {
+        param_names.push(i as i64)
+        shrinkage.push(0.0)
+    }
+
+    InterIndividualVariability {
+        omega: omega_matrix_diagonal(variances),
+        param_names: param_names,
+        distribution: 1,
+        shrinkage: shrinkage,
+    }
+}
+
+/// Compute eta shrinkage: 1 - SD(EBE_eta) / omega
+pub fn compute_shrinkage(iiv: &InterIndividualVariability, ebe_etas: &Vec<Vec<f64>>) -> Vec<f64> {
+    let n_subjects = ebe_etas.len()
+    let n_params = iiv.omega.dimension as usize
+
+    var shrinkage: Vec<f64> = vec![]
+
+    for p in 0..n_params {
+        var sum = 0.0
+        var sum_sq = 0.0
+        var count = 0.0
+
+        for s in 0..n_subjects {
+            if p < ebe_etas[s].len() {
+                sum = sum + ebe_etas[s][p]
+                sum_sq = sum_sq + ebe_etas[s][p] * ebe_etas[s][p]
+                count = count + 1.0
+            }
+        }
+
+        if count > 1.0 {
+            let mean = sum / count
+            let var_ebe = (sum_sq - count * mean * mean) / (count - 1.0)
+            let sd_ebe = sqrt_f64(var_ebe)
+            let omega_sd = sqrt_f64(omega_get(&iiv.omega, p as i64, p as i64))
+
+            if omega_sd > 0.0 {
+                shrinkage.push(1.0 - sd_ebe / omega_sd)
+            } else {
+                shrinkage.push(0.0)
+            }
+        } else {
+            shrinkage.push(0.0)
+        }
+    }
+
+    shrinkage
+}
+
+// ============================================================================
+// RESIDUAL ERROR MODELS
+// ============================================================================
+
+/// Residual error model type
+pub struct ResidualError {
+    pub model_type: i64,
+    pub sigma_add: f64,
+    pub sigma_prop: f64,
+    pub power: f64,
+}
+
+pub fn residual_additive(sigma: f64) -> ResidualError {
+    ResidualError {
+        model_type: 0,
+        sigma_add: sigma,
+        sigma_prop: 0.0,
+        power: 0.0,
+    }
+}
+
+pub fn residual_proportional(sigma: f64) -> ResidualError {
+    ResidualError {
+        model_type: 1,
+        sigma_add: 0.0,
+        sigma_prop: sigma,
+        power: 0.0,
+    }
+}
+
+pub fn residual_combined(sigma_add: f64, sigma_prop: f64) -> ResidualError {
+    ResidualError {
+        model_type: 2,
+        sigma_add: sigma_add,
+        sigma_prop: sigma_prop,
+        power: 0.0,
+    }
+}
+
+pub fn residual_power(sigma: f64, power: f64) -> ResidualError {
+    ResidualError {
+        model_type: 3,
+        sigma_add: sigma,
+        sigma_prop: 0.0,
+        power: power,
+    }
+}
+
+/// Compute standard deviation of residual error given predicted value
+pub fn residual_std(error: &ResidualError, prediction: f64) -> f64 {
+    if error.model_type == 0 {
+        return error.sigma_add
+    }
+    if error.model_type == 1 {
+        return error.sigma_prop * abs_f64(prediction)
+    }
+    if error.model_type == 2 {
+        let add_sq = error.sigma_add * error.sigma_add
+        let prop_sq = error.sigma_prop * error.sigma_prop * prediction * prediction
+        return sqrt_f64(add_sq + prop_sq)
+    }
+    if error.model_type == 3 {
+        if abs_f64(prediction) < 1e-10 { return error.sigma_add }
+        return error.sigma_add * exp_f64(error.power * ln_f64(abs_f64(prediction)))
+    }
+    error.sigma_add
+}
+
+/// Compute log-likelihood contribution for a single observation
+pub fn residual_log_likelihood(error: &ResidualError, observed: f64, predicted: f64) -> f64 {
+    let sd = residual_std(error, predicted)
+    if sd <= 0.0 {
+        return -1e100
+    }
+
+    let z = (observed - predicted) / sd
+    0.0 - 0.5 * ln_f64(2.0 * pi()) - ln_f64(sd) - 0.5 * z * z
+}
+
+/// Compute weighted residual (WRES)
+pub fn weighted_residual(error: &ResidualError, observed: f64, predicted: f64) -> f64 {
+    let sd = residual_std(error, predicted)
+    if sd <= 0.0 {
+        return 0.0
+    }
+    (observed - predicted) / sd
+}
+
+/// Compute conditional weighted residual (CWRES)
+pub fn conditional_weighted_residual(
+    error: &ResidualError,
+    observed: f64,
+    ipred: f64,
+    pred: f64,
+    h: f64,
+    omega: f64,
+) -> f64 {
+    let g = residual_std(error, ipred) / residual_std(error, pred)
+    let f_derivative = h
+
+    let var_approx = g * g + f_derivative * f_derivative * omega
+    let sd_approx = sqrt_f64(var_approx)
+
+    if sd_approx <= 0.0 {
+        return 0.0
+    }
+
+    (observed - ipred) / (residual_std(error, ipred) * sd_approx)
+}
+
+// ============================================================================
+// BETWEEN-OCCASION VARIABILITY (BOV)
+// ============================================================================
+
+/// Between-occasion variability specification
+pub struct BetweenOccasionVariability {
+    pub gamma: OmegaMatrix,
+    pub param_names: Vec<i64>,
+    pub n_occasions: i64,
+}
+
+pub fn bov_new(n_params: i64, n_occasions: i64) -> BetweenOccasionVariability {
+    var param_names: Vec<i64> = vec![]
+    for i in 0..n_params {
+        param_names.push(i)
+    }
+
+    BetweenOccasionVariability {
+        gamma: omega_matrix_new(n_params),
+        param_names: param_names,
+        n_occasions: n_occasions,
+    }
+}
+
+// ============================================================================
+// CHOLESKY DECOMPOSITION FOR CORRELATION
+// ============================================================================
+
+/// Cholesky decomposition of omega matrix for correlated sampling
+pub fn cholesky_decompose(omega: &OmegaMatrix) -> OmegaMatrix {
+    let n = omega.dimension
+    var L = omega_matrix_new(n)
+
+    for i in 0..n {
+        for j in 0..=i {
+            var sum = 0.0
+
+            if j == i {
+                for k in 0..j {
+                    let l_jk = omega_get(&L, j, k)
+                    sum = sum + l_jk * l_jk
+                }
+                let diag = omega_get(omega, i, i) - sum
+                if diag > 0.0 {
+                    omega_set(&L, i, j, sqrt_f64(diag))
+                }
+            } else {
+                for k in 0..j {
+                    let l_ik = omega_get(&L, i, k)
+                    let l_jk = omega_get(&L, j, k)
+                    sum = sum + l_ik * l_jk
+                }
+                let l_jj = omega_get(&L, j, j)
+                if l_jj > 0.0 {
+                    omega_set(&L, i, j, (omega_get(omega, i, j) - sum) / l_jj)
+                }
+            }
+        }
+    }
+
+    L
+}
+
+/// Sample correlated random effects using Cholesky factor
+pub fn sample_correlated_etas(L: &OmegaMatrix, z: &Vec<f64>) -> Vec<f64> {
+    let n = L.dimension as usize
+    var eta: Vec<f64> = vec![]
+
+    for i in 0..n {
+        var sum = 0.0
+        for j in 0..=i {
+            if j < z.len() {
+                sum = sum + omega_get(L, i as i64, j as i64) * z[j]
+            }
+        }
+        eta.push(sum)
+    }
+
+    eta
+}
+
+// ============================================================================
+// TESTS
+// ============================================================================
+
+fn test_omega_diagonal() -> bool {
+    var variances: Vec<f64> = vec![]
+    variances.push(0.09)
+    variances.push(0.0625)
+
+    let omega = omega_matrix_diagonal(&variances)
+
+    abs_f64(omega_get(&omega, 0, 0) - 0.09) < 0.001 &&
+        abs_f64(omega_get(&omega, 1, 1) - 0.0625) < 0.001 &&
+        abs_f64(omega_get(&omega, 0, 1)) < 0.001
+}
+
+fn test_omega_cv() -> bool {
+    var variances: Vec<f64> = vec![]
+    variances.push(0.09)
+
+    let omega = omega_matrix_diagonal(&variances)
+    let cv = omega_cv_percent(&omega, 0)
+
+    abs_f64(cv - 30.5) < 1.0
+}
+
+fn test_residual_combined() -> bool {
+    let error = residual_combined(0.1, 0.1)
+    let sd = residual_std(&error, 10.0)
+    abs_f64(sd - 1.005) < 0.01
+}
+
+fn test_weighted_residual() -> bool {
+    let error = residual_additive(1.0)
+    let wres = weighted_residual(&error, 12.0, 10.0)
+    abs_f64(wres - 2.0) < 0.001
+}
+
+fn test_cholesky() -> bool {
+    var omega = omega_matrix_new(2)
+    omega_set(&omega, 0, 0, 1.0)
+    omega_set(&omega, 1, 1, 1.0)
+    omega_set(&omega, 1, 0, 0.5)
+
+    let L = cholesky_decompose(&omega)
+
+    abs_f64(omega_get(&L, 0, 0) - 1.0) < 0.01 &&
+        abs_f64(omega_get(&L, 1, 0) - 0.5) < 0.01 &&
+        abs_f64(omega_get(&L, 1, 1) - 0.866) < 0.01
+}
+
+fn main() -> i32 {
+    print("Testing medlang::population::variability...\n")
+
+    if !test_omega_diagonal() {
+        print("FAIL: omega_diagonal\n")
+        return 1
+    }
+    print("PASS: omega_diagonal\n")
+
+    if !test_omega_cv() {
+        print("FAIL: omega_cv\n")
+        return 2
+    }
+    print("PASS: omega_cv\n")
+
+    if !test_residual_combined() {
+        print("FAIL: residual_combined\n")
+        return 3
+    }
+    print("PASS: residual_combined\n")
+
+    if !test_weighted_residual() {
+        print("FAIL: weighted_residual\n")
+        return 4
+    }
+    print("PASS: weighted_residual\n")
+
+    if !test_cholesky() {
+        print("FAIL: cholesky\n")
+        return 5
+    }
+    print("PASS: cholesky\n")
+
+    print("All population::variability tests PASSED\n")
+    0
+}

@@ -1,0 +1,516 @@
+//! stdlib/medlang/population/model.sio
+//!
+//! Population Model Definitions
+//!
+//! Core structures for defining population pharmacokinetic models including
+//! fixed effects, random effects, covariates, and prior distributions.
+
+// ============================================================================
+// HELPER FUNCTIONS
+// ============================================================================
+
+fn abs_f64(x: f64) -> f64 {
+    if x < 0.0 { 0.0 - x } else { x }
+}
+
+fn sqrt_f64(x: f64) -> f64 {
+    if x <= 0.0 { return 0.0 }
+    var y = x
+    for _ in 0..10 { y = 0.5 * (y + x / y) }
+    y
+}
+
+fn ln_f64(x: f64) -> f64 {
+    if x <= 0.0 { return 0.0 - 1000000.0 }
+    let ln2 = 0.6931471805599453
+    var v = x
+    var k: i64 = 0
+    while v > 2.0 { v = v / 2.0; k = k + 1 }
+    while v < 1.0 { v = v * 2.0; k = k - 1 }
+    let y = v - 1.0
+    var result = 0.0
+    var power = y
+    for i in 1..=15 {
+        if i % 2 == 1 { result = result + power / (i as f64) }
+        else { result = result - power / (i as f64) }
+        power = power * y
+    }
+    result + (k as f64) * ln2
+}
+
+fn exp_f64(x: f64) -> f64 {
+    let ln2 = 0.6931471805599453
+    var v = x
+    if v > 700.0 { v = 700.0 }
+    if v < 0.0 - 700.0 { return 0.0 }
+    let k = (v / ln2) as i64
+    let r = v - (k as f64) * ln2
+    var result = 1.0
+    var term = 1.0
+    for i in 1..=15 {
+        term = term * r / (i as f64)
+        result = result + term
+    }
+    if k >= 0 { for _ in 0..k { result = result * 2.0 } }
+    else { for _ in 0..(-k) { result = result / 2.0 } }
+    result
+}
+
+fn pi() -> f64 { 3.14159265358979323846 }
+
+// ============================================================================
+// PARAMETER TYPES
+// ============================================================================
+
+/// Fixed effect parameter (typical value in population)
+pub struct FixedEffect {
+    pub name_id: i64,
+    pub value: f64,
+    pub lower_bound: f64,
+    pub upper_bound: f64,
+    pub fixed: bool,
+    pub transform: i64,
+}
+
+pub fn fixed_effect_new(name_id: i64, value: f64) -> FixedEffect {
+    FixedEffect {
+        name_id: name_id,
+        value: value,
+        lower_bound: 0.0 - 1e100,
+        upper_bound: 1e100,
+        fixed: false,
+        transform: 0,
+    }
+}
+
+pub fn fixed_effect_log(name_id: i64, value: f64) -> FixedEffect {
+    FixedEffect {
+        name_id: name_id,
+        value: value,
+        lower_bound: 1e-10,
+        upper_bound: 1e100,
+        fixed: false,
+        transform: 1,
+    }
+}
+
+pub fn fixed_effect_logit(name_id: i64, value: f64, lower: f64, upper: f64) -> FixedEffect {
+    FixedEffect {
+        name_id: name_id,
+        value: value,
+        lower_bound: lower,
+        upper_bound: upper,
+        fixed: false,
+        transform: 2,
+    }
+}
+
+/// Apply transform to unconstrained parameter
+pub fn fixed_effect_from_unconstrained(fe: &FixedEffect, x: f64) -> f64 {
+    if fe.transform == 1 {
+        return exp_f64(x)
+    }
+    if fe.transform == 2 {
+        let sigmoid = 1.0 / (1.0 + exp_f64(0.0 - x))
+        return fe.lower_bound + (fe.upper_bound - fe.lower_bound) * sigmoid
+    }
+    x
+}
+
+/// Apply inverse transform to get unconstrained parameter
+pub fn fixed_effect_to_unconstrained(fe: &FixedEffect, x: f64) -> f64 {
+    if fe.transform == 1 {
+        if x <= 0.0 { return 0.0 - 100.0 }
+        return ln_f64(x)
+    }
+    if fe.transform == 2 {
+        let range = fe.upper_bound - fe.lower_bound
+        if range <= 0.0 { return 0.0 }
+        let p = (x - fe.lower_bound) / range
+        var p_clamped = p
+        if p_clamped < 0.001 { p_clamped = 0.001 }
+        if p_clamped > 0.999 { p_clamped = 0.999 }
+        return ln_f64(p_clamped / (1.0 - p_clamped))
+    }
+    x
+}
+
+// ============================================================================
+// PRIOR DISTRIBUTIONS
+// ============================================================================
+
+/// Prior distribution specification
+pub struct Prior {
+    pub dist_type: i64,
+    pub param1: f64,
+    pub param2: f64,
+}
+
+pub fn prior_normal(mean: f64, std: f64) -> Prior {
+    Prior { dist_type: 0, param1: mean, param2: std }
+}
+
+pub fn prior_lognormal(log_mean: f64, log_std: f64) -> Prior {
+    Prior { dist_type: 1, param1: log_mean, param2: log_std }
+}
+
+pub fn prior_uniform(lower: f64, upper: f64) -> Prior {
+    Prior { dist_type: 2, param1: lower, param2: upper }
+}
+
+pub fn prior_half_normal(scale: f64) -> Prior {
+    Prior { dist_type: 3, param1: 0.0, param2: scale }
+}
+
+pub fn prior_inverse_wishart(df: f64) -> Prior {
+    Prior { dist_type: 4, param1: df, param2: 0.0 }
+}
+
+/// Evaluate log-probability of prior at value x
+pub fn prior_log_prob(prior: &Prior, x: f64) -> f64 {
+    let neg_inf = 0.0 - 1e100
+    if prior.dist_type == 0 {
+        if prior.param2 <= 0.0 { return neg_inf }
+        let z = (x - prior.param1) / prior.param2
+        return 0.0 - 0.5 * ln_f64(2.0 * pi()) - ln_f64(prior.param2) - 0.5 * z * z
+    }
+    if prior.dist_type == 1 {
+        if x <= 0.0 || prior.param2 <= 0.0 { return neg_inf }
+        let log_x = ln_f64(x)
+        let z = (log_x - prior.param1) / prior.param2
+        return 0.0 - 0.5 * ln_f64(2.0 * pi()) - ln_f64(prior.param2) - log_x - 0.5 * z * z
+    }
+    if prior.dist_type == 2 {
+        if x < prior.param1 || x > prior.param2 { return neg_inf }
+        return 0.0 - ln_f64(prior.param2 - prior.param1)
+    }
+    if prior.dist_type == 3 {
+        if x < 0.0 || prior.param2 <= 0.0 { return neg_inf }
+        let z = x / prior.param2
+        return ln_f64(2.0) - 0.5 * ln_f64(2.0 * pi()) - ln_f64(prior.param2) - 0.5 * z * z
+    }
+    neg_inf
+}
+
+// ============================================================================
+// COVARIATE MODEL
+// ============================================================================
+
+/// Covariate effect specification
+pub struct CovariateEffect {
+    pub param_id: i64,
+    pub covariate_id: i64,
+    pub effect_type: i64,
+    pub coefficient: f64,
+    pub reference: f64,
+}
+
+pub fn covariate_power(param_id: i64, cov_id: i64, coef: f64, ref_val: f64) -> CovariateEffect {
+    CovariateEffect {
+        param_id: param_id,
+        covariate_id: cov_id,
+        effect_type: 0,
+        coefficient: coef,
+        reference: ref_val,
+    }
+}
+
+pub fn covariate_linear(param_id: i64, cov_id: i64, coef: f64, ref_val: f64) -> CovariateEffect {
+    CovariateEffect {
+        param_id: param_id,
+        covariate_id: cov_id,
+        effect_type: 1,
+        coefficient: coef,
+        reference: ref_val,
+    }
+}
+
+pub fn covariate_exponential(param_id: i64, cov_id: i64, coef: f64) -> CovariateEffect {
+    CovariateEffect {
+        param_id: param_id,
+        covariate_id: cov_id,
+        effect_type: 2,
+        coefficient: coef,
+        reference: 0.0,
+    }
+}
+
+/// Apply covariate effect to parameter
+pub fn apply_covariate_effect(effect: &CovariateEffect, base_value: f64, cov_value: f64) -> f64 {
+    if effect.effect_type == 0 {
+        if cov_value <= 0.0 || effect.reference <= 0.0 { return base_value }
+        let ratio = cov_value / effect.reference
+        var power_result = 1.0
+        let coef = effect.coefficient
+        if ratio > 0.0 {
+            power_result = exp_f64(coef * ln_f64(ratio))
+        }
+        return base_value * power_result
+    }
+    if effect.effect_type == 1 {
+        return base_value * (1.0 + effect.coefficient * (cov_value - effect.reference))
+    }
+    if effect.effect_type == 2 {
+        return base_value * exp_f64(effect.coefficient * cov_value)
+    }
+    base_value
+}
+
+// ============================================================================
+// POPULATION MODEL
+// ============================================================================
+
+/// Complete population model specification
+pub struct PopulationModel {
+    pub n_fixed: i64,
+    pub n_random: i64,
+    pub n_covariates: i64,
+    pub n_observations: i64,
+    pub model_type: i64,
+    pub structural_model: i64,
+    pub has_absorption: bool,
+    pub has_lag: bool,
+}
+
+pub fn population_model_new() -> PopulationModel {
+    PopulationModel {
+        n_fixed: 0,
+        n_random: 0,
+        n_covariates: 0,
+        n_observations: 1,
+        model_type: 0,
+        structural_model: 0,
+        has_absorption: false,
+        has_lag: false,
+    }
+}
+
+pub fn population_model_pk_1cmt_iv() -> PopulationModel {
+    PopulationModel {
+        n_fixed: 2,
+        n_random: 2,
+        n_covariates: 0,
+        n_observations: 1,
+        model_type: 0,
+        structural_model: 0,
+        has_absorption: false,
+        has_lag: false,
+    }
+}
+
+pub fn population_model_pk_1cmt_oral() -> PopulationModel {
+    PopulationModel {
+        n_fixed: 4,
+        n_random: 3,
+        n_covariates: 0,
+        n_observations: 1,
+        model_type: 0,
+        structural_model: 0,
+        has_absorption: true,
+        has_lag: false,
+    }
+}
+
+pub fn population_model_pk_2cmt_iv() -> PopulationModel {
+    PopulationModel {
+        n_fixed: 4,
+        n_random: 4,
+        n_covariates: 0,
+        n_observations: 1,
+        model_type: 0,
+        structural_model: 1,
+        has_absorption: false,
+        has_lag: false,
+    }
+}
+
+// ============================================================================
+// INDIVIDUAL PARAMETERS
+// ============================================================================
+
+/// Individual parameter vector
+pub struct IndividualParameters {
+    pub values: Vec<f64>,
+    pub etas: Vec<f64>,
+    pub subject_id: i64,
+    pub valid: bool,
+}
+
+pub fn individual_parameters_new(n_params: usize) -> IndividualParameters {
+    var values: Vec<f64> = vec![]
+    var etas: Vec<f64> = vec![]
+    for _ in 0..n_params {
+        values.push(0.0)
+        etas.push(0.0)
+    }
+    IndividualParameters {
+        values: values,
+        etas: etas,
+        subject_id: 0,
+        valid: true,
+    }
+}
+
+/// Compute individual parameters from population parameters and random effects
+pub fn compute_individual_parameters(
+    thetas: &Vec<f64>,
+    etas: &Vec<f64>,
+    transforms: &Vec<i64>,
+) -> Vec<f64> {
+    var result: Vec<f64> = vec![]
+    let n = thetas.len()
+
+    for i in 0..n {
+        var eta = 0.0
+        if i < etas.len() {
+            eta = etas[i]
+        }
+
+        var transform: i64 = 1
+        if i < transforms.len() {
+            transform = transforms[i]
+        }
+
+        if transform == 0 {
+            result.push(thetas[i] + eta)
+        } else if transform == 1 {
+            result.push(thetas[i] * exp_f64(eta))
+        } else if transform == 2 {
+            let f = thetas[i]
+            if f > 0.0 && f < 1.0 {
+                let p = f / (f + (1.0 - f) * exp_f64(0.0 - eta))
+                result.push(p)
+            } else {
+                result.push(f)
+            }
+        } else {
+            result.push(thetas[i])
+        }
+    }
+
+    result
+}
+
+// ============================================================================
+// DATA STRUCTURES
+// ============================================================================
+
+/// Single observation record
+pub struct Observation {
+    pub subject_id: i64,
+    pub time: f64,
+    pub dv: f64,
+    pub mdv: i64,
+    pub evid: i64,
+    pub cmt: i64,
+    pub amt: f64,
+    pub rate: f64,
+}
+
+pub fn observation_new() -> Observation {
+    Observation {
+        subject_id: 0,
+        time: 0.0,
+        dv: 0.0,
+        mdv: 0,
+        evid: 0,
+        cmt: 1,
+        amt: 0.0,
+        rate: 0.0,
+    }
+}
+
+/// Subject-level covariate record
+pub struct SubjectCovariates {
+    pub subject_id: i64,
+    pub weight: f64,
+    pub age: f64,
+    pub sex: i64,
+    pub creatinine: f64,
+    pub bmi: f64,
+}
+
+pub fn subject_covariates_new() -> SubjectCovariates {
+    SubjectCovariates {
+        subject_id: 0,
+        weight: 70.0,
+        age: 40.0,
+        sex: 0,
+        creatinine: 1.0,
+        bmi: 25.0,
+    }
+}
+
+// ============================================================================
+// TESTS
+// ============================================================================
+
+fn test_fixed_effect_transform() -> bool {
+    let fe = fixed_effect_log(1, 10.0)
+    let x_unc = fixed_effect_to_unconstrained(&fe, 10.0)
+    let x_real = fixed_effect_from_unconstrained(&fe, x_unc)
+    abs_f64(x_real - 10.0) < 0.01
+}
+
+fn test_prior_log_prob() -> bool {
+    let prior = prior_normal(0.0, 1.0)
+    let lp = prior_log_prob(&prior, 0.0)
+    abs_f64(lp + 0.919) < 0.01
+}
+
+fn test_covariate_power() -> bool {
+    let effect = covariate_power(0, 0, 0.75, 70.0)
+    let cl_ind = apply_covariate_effect(&effect, 10.0, 84.0)
+    abs_f64(cl_ind - 11.46) < 0.1
+}
+
+fn test_individual_parameters() -> bool {
+    var thetas: Vec<f64> = vec![]
+    thetas.push(10.0)
+    thetas.push(50.0)
+
+    var etas: Vec<f64> = vec![]
+    etas.push(0.3)
+    etas.push(0.0 - 0.2)
+
+    var transforms: Vec<i64> = vec![]
+    transforms.push(1)
+    transforms.push(1)
+
+    let ind_params = compute_individual_parameters(&thetas, &etas, &transforms)
+
+    ind_params.len() == 2 &&
+        abs_f64(ind_params[0] - 13.5) < 0.5 &&
+        abs_f64(ind_params[1] - 41.0) < 1.0
+}
+
+fn main() -> i32 {
+    print("Testing medlang::population::model...\n")
+
+    if !test_fixed_effect_transform() {
+        print("FAIL: fixed_effect_transform\n")
+        return 1
+    }
+    print("PASS: fixed_effect_transform\n")
+
+    if !test_prior_log_prob() {
+        print("FAIL: prior_log_prob\n")
+        return 2
+    }
+    print("PASS: prior_log_prob\n")
+
+    if !test_covariate_power() {
+        print("FAIL: covariate_power\n")
+        return 3
+    }
+    print("PASS: covariate_power\n")
+
+    if !test_individual_parameters() {
+        print("FAIL: individual_parameters\n")
+        return 4
+    }
+    print("PASS: individual_parameters\n")
+
+    print("All population::model tests PASSED\n")
+    0
+}

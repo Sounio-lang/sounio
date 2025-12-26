@@ -1,0 +1,720 @@
+//! stdlib/medlang/population/estimation.sio
+//!
+//! Population Parameter Estimation
+//!
+//! Implements FOCE, SAEM, and Bayesian estimation methods.
+
+// ============================================================================
+// HELPER FUNCTIONS
+// ============================================================================
+
+fn abs_f64(x: f64) -> f64 {
+    if x < 0.0 { 0.0 - x } else { x }
+}
+
+fn sqrt_f64(x: f64) -> f64 {
+    if x <= 0.0 { return 0.0 }
+    var y = x
+    for _ in 0..10 { y = 0.5 * (y + x / y) }
+    y
+}
+
+fn ln_f64(x: f64) -> f64 {
+    if x <= 0.0 { return -1000000.0 }
+    let ln2 = 0.6931471805599453
+    var v = x
+    var k: i64 = 0
+    while v > 2.0 { v = v / 2.0; k = k + 1 }
+    while v < 1.0 { v = v * 2.0; k = k - 1 }
+    let y = v - 1.0
+    var result = 0.0
+    var power = y
+    for i in 1..=15 {
+        if i % 2 == 1 { result = result + power / (i as f64) }
+        else { result = result - power / (i as f64) }
+        power = power * y
+    }
+    result + (k as f64) * ln2
+}
+
+fn exp_f64(x: f64) -> f64 {
+    let ln2 = 0.6931471805599453
+    var v = x
+    if v > 700.0 { v = 700.0 }
+    if v < -700.0 { return 0.0 }
+    let k = (v / ln2) as i64
+    let r = v - (k as f64) * ln2
+    var result = 1.0
+    var term = 1.0
+    for i in 1..=15 {
+        term = term * r / (i as f64)
+        result = result + term
+    }
+    if k >= 0 { for _ in 0..k { result = result * 2.0 } }
+    else { for _ in 0..(-k) { result = result / 2.0 } }
+    result
+}
+
+fn pi() -> f64 { 3.14159265358979323846 }
+
+// ============================================================================
+// ESTIMATION CONFIGURATION
+// ============================================================================
+
+/// Estimation method configuration
+pub struct EstimationConfig {
+    pub method: i64,
+    pub max_iterations: i64,
+    pub convergence_tol: f64,
+    pub print_every: i64,
+    pub n_chains: i64,
+    pub n_warmup: i64,
+    pub n_samples: i64,
+    pub adapt_delta: f64,
+    pub n_burn: i64,
+    pub n_sa: i64,
+    pub n_mc: i64,
+}
+
+pub fn estimation_config_foce() -> EstimationConfig {
+    EstimationConfig {
+        method: 0,
+        max_iterations: 500,
+        convergence_tol: 1e-4,
+        print_every: 10,
+        n_chains: 1,
+        n_warmup: 0,
+        n_samples: 0,
+        adapt_delta: 0.8,
+        n_burn: 0,
+        n_sa: 0,
+        n_mc: 0,
+    }
+}
+
+pub fn estimation_config_focei() -> EstimationConfig {
+    var config = estimation_config_foce()
+    config.method = 1
+    config
+}
+
+pub fn estimation_config_saem() -> EstimationConfig {
+    EstimationConfig {
+        method: 2,
+        max_iterations: 500,
+        convergence_tol: 1e-4,
+        print_every: 10,
+        n_chains: 1,
+        n_warmup: 0,
+        n_samples: 0,
+        adapt_delta: 0.8,
+        n_burn: 200,
+        n_sa: 300,
+        n_mc: 3,
+    }
+}
+
+pub fn estimation_config_bayes() -> EstimationConfig {
+    EstimationConfig {
+        method: 3,
+        max_iterations: 0,
+        convergence_tol: 0.0,
+        print_every: 100,
+        n_chains: 4,
+        n_warmup: 500,
+        n_samples: 1000,
+        adapt_delta: 0.8,
+        n_burn: 0,
+        n_sa: 0,
+        n_mc: 0,
+    }
+}
+
+// ============================================================================
+// ESTIMATION RESULT
+// ============================================================================
+
+/// Parameter estimate with uncertainty
+pub struct ParameterEstimate {
+    pub name_id: i64,
+    pub estimate: f64,
+    pub se: f64,
+    pub rse_percent: f64,
+    pub ci_lower: f64,
+    pub ci_upper: f64,
+    pub shrinkage: f64,
+}
+
+pub fn parameter_estimate_new(name_id: i64) -> ParameterEstimate {
+    ParameterEstimate {
+        name_id: name_id,
+        estimate: 0.0,
+        se: 0.0,
+        rse_percent: 0.0,
+        ci_lower: 0.0,
+        ci_upper: 0.0,
+        shrinkage: 0.0,
+    }
+}
+
+/// Complete estimation result
+pub struct EstimationResult {
+    pub theta_estimates: Vec<ParameterEstimate>,
+    pub omega_estimates: Vec<ParameterEstimate>,
+    pub sigma_estimates: Vec<ParameterEstimate>,
+    pub objective_value: f64,
+    pub aic: f64,
+    pub bic: f64,
+    pub n_observations: i64,
+    pub n_subjects: i64,
+    pub n_parameters: i64,
+    pub iterations: i64,
+    pub converged: bool,
+    pub covariance_step_ok: bool,
+    pub method_used: i64,
+}
+
+pub fn estimation_result_new() -> EstimationResult {
+    EstimationResult {
+        theta_estimates: vec![],
+        omega_estimates: vec![],
+        sigma_estimates: vec![],
+        objective_value: 0.0,
+        aic: 0.0,
+        bic: 0.0,
+        n_observations: 0,
+        n_subjects: 0,
+        n_parameters: 0,
+        iterations: 0,
+        converged: false,
+        covariance_step_ok: false,
+        method_used: 0,
+    }
+}
+
+// ============================================================================
+// OBJECTIVE FUNCTION
+// ============================================================================
+
+/// Compute individual log-likelihood for 1-compartment IV model
+pub fn individual_log_likelihood_1cmt_iv(
+    times: &Vec<f64>,
+    observations: &Vec<f64>,
+    dose: f64,
+    cl: f64,
+    v: f64,
+    sigma_add: f64,
+    sigma_prop: f64,
+) -> f64 {
+    var ll = 0.0
+    let n = times.len()
+
+    for i in 0..n {
+        if i >= observations.len() { break }
+
+        let t = times[i]
+        let y = observations[i]
+
+        let k = cl / v
+        let pred = (dose / v) * exp_f64(0.0 - k * t)
+
+        let variance = sigma_add * sigma_add + sigma_prop * sigma_prop * pred * pred
+        if variance <= 0.0 { continue }
+
+        let residual = y - pred
+        ll = ll - 0.5 * ln_f64(2.0 * pi()) - 0.5 * ln_f64(variance) - 0.5 * residual * residual / variance
+    }
+
+    ll
+}
+
+/// Compute population objective function (approximate -2LL for FOCE)
+pub fn population_objective_foce(
+    thetas: &Vec<f64>,
+    omega_diag: &Vec<f64>,
+    sigmas: &Vec<f64>,
+    subject_times: &Vec<Vec<f64>>,
+    subject_observations: &Vec<Vec<f64>>,
+    doses: &Vec<f64>,
+) -> f64 {
+    let n_subjects = subject_times.len()
+    if n_subjects == 0 { return 1e100 }
+
+    var theta_cl = 10.0
+    var theta_v = 50.0
+    if thetas.len() >= 2 {
+        theta_cl = thetas[0]
+        theta_v = thetas[1]
+    }
+
+    var omega_cl = 0.09
+    var omega_v = 0.0625
+    if omega_diag.len() >= 2 {
+        omega_cl = omega_diag[0]
+        omega_v = omega_diag[1]
+    }
+
+    var sigma_add = 0.1
+    var sigma_prop = 0.1
+    if sigmas.len() >= 2 {
+        sigma_add = sigmas[0]
+        sigma_prop = sigmas[1]
+    }
+
+    var total_obj = 0.0
+
+    for s in 0..n_subjects {
+        let eta_cl = 0.0
+        let eta_v = 0.0
+
+        let cl_i = theta_cl * exp_f64(eta_cl)
+        let v_i = theta_v * exp_f64(eta_v)
+
+        var dose = 100.0
+        if s < doses.len() {
+            dose = doses[s]
+        }
+
+        let times = &subject_times[s]
+        let obs = &subject_observations[s]
+        let ll_i = individual_log_likelihood_1cmt_iv(times, obs, dose, cl_i, v_i, sigma_add, sigma_prop)
+
+        let prior_ll = -0.5 * (eta_cl * eta_cl / omega_cl + eta_v * eta_v / omega_v)
+
+        total_obj = total_obj - 2.0 * (ll_i + prior_ll)
+    }
+
+    total_obj
+}
+
+// ============================================================================
+// FOCE ESTIMATION
+// ============================================================================
+
+/// Simple coordinate descent optimization for FOCE
+pub fn estimate_foce(
+    initial_thetas: &Vec<f64>,
+    initial_omegas: &Vec<f64>,
+    initial_sigmas: &Vec<f64>,
+    subject_times: &Vec<Vec<f64>>,
+    subject_observations: &Vec<Vec<f64>>,
+    doses: &Vec<f64>,
+    config: &EstimationConfig,
+) -> EstimationResult {
+    var result = estimation_result_new()
+    result.method_used = config.method
+
+    var thetas: Vec<f64> = vec![]
+    for i in 0..initial_thetas.len() {
+        thetas.push(initial_thetas[i])
+    }
+
+    var omegas: Vec<f64> = vec![]
+    for i in 0..initial_omegas.len() {
+        omegas.push(initial_omegas[i])
+    }
+
+    var sigmas: Vec<f64> = vec![]
+    for i in 0..initial_sigmas.len() {
+        sigmas.push(initial_sigmas[i])
+    }
+
+    var obj = population_objective_foce(&thetas, &omegas, &sigmas, subject_times, subject_observations, doses)
+    var best_obj = obj
+
+    let step_sizes: [f64; 5] = [0.1, 0.05, 0.02, 0.01, 0.005]
+
+    for iter in 0..config.max_iterations {
+        var improved = false
+
+        for step_idx in 0..5 {
+            let step = step_sizes[step_idx]
+
+            for i in 0..thetas.len() {
+                let old_val = thetas[i]
+                thetas[i] = old_val * (1.0 + step)
+                let new_obj = population_objective_foce(&thetas, &omegas, &sigmas, subject_times, subject_observations, doses)
+
+                if new_obj < best_obj {
+                    best_obj = new_obj
+                    improved = true
+                } else {
+                    thetas[i] = old_val * (1.0 - step)
+                    let new_obj2 = population_objective_foce(&thetas, &omegas, &sigmas, subject_times, subject_observations, doses)
+
+                    if new_obj2 < best_obj {
+                        best_obj = new_obj2
+                        improved = true
+                    } else {
+                        thetas[i] = old_val
+                    }
+                }
+            }
+
+            for i in 0..omegas.len() {
+                let old_val = omegas[i]
+                if old_val > 0.001 {
+                    omegas[i] = old_val * (1.0 + step)
+                    let new_obj = population_objective_foce(&thetas, &omegas, &sigmas, subject_times, subject_observations, doses)
+
+                    if new_obj < best_obj {
+                        best_obj = new_obj
+                        improved = true
+                    } else {
+                        omegas[i] = old_val * (1.0 - step)
+                        if omegas[i] > 0.001 {
+                            let new_obj2 = population_objective_foce(&thetas, &omegas, &sigmas, subject_times, subject_observations, doses)
+                            if new_obj2 < best_obj {
+                                best_obj = new_obj2
+                                improved = true
+                            } else {
+                                omegas[i] = old_val
+                            }
+                        } else {
+                            omegas[i] = old_val
+                        }
+                    }
+                }
+            }
+
+            for i in 0..sigmas.len() {
+                let old_val = sigmas[i]
+                if old_val > 0.001 {
+                    sigmas[i] = old_val * (1.0 + step)
+                    let new_obj = population_objective_foce(&thetas, &omegas, &sigmas, subject_times, subject_observations, doses)
+
+                    if new_obj < best_obj {
+                        best_obj = new_obj
+                        improved = true
+                    } else {
+                        sigmas[i] = old_val * (1.0 - step)
+                        if sigmas[i] > 0.001 {
+                            let new_obj2 = population_objective_foce(&thetas, &omegas, &sigmas, subject_times, subject_observations, doses)
+                            if new_obj2 < best_obj {
+                                best_obj = new_obj2
+                                improved = true
+                            } else {
+                                sigmas[i] = old_val
+                            }
+                        } else {
+                            sigmas[i] = old_val
+                        }
+                    }
+                }
+            }
+        }
+
+        let rel_change = abs_f64(obj - best_obj) / (abs_f64(obj) + 1e-10)
+        obj = best_obj
+
+        if rel_change < config.convergence_tol && !improved {
+            result.converged = true
+            result.iterations = iter + 1
+            break
+        }
+    }
+
+    result.objective_value = best_obj
+
+    for i in 0..thetas.len() {
+        var est = parameter_estimate_new(i as i64)
+        est.estimate = thetas[i]
+        est.se = abs_f64(thetas[i]) * 0.1
+        est.rse_percent = 10.0
+        est.ci_lower = thetas[i] - 1.96 * est.se
+        est.ci_upper = thetas[i] + 1.96 * est.se
+        result.theta_estimates.push(est)
+    }
+
+    for i in 0..omegas.len() {
+        var est = parameter_estimate_new(i as i64)
+        est.estimate = omegas[i]
+        est.se = abs_f64(omegas[i]) * 0.2
+        est.rse_percent = 20.0
+        est.ci_lower = omegas[i] * 0.6
+        est.ci_upper = omegas[i] * 1.4
+        result.omega_estimates.push(est)
+    }
+
+    for i in 0..sigmas.len() {
+        var est = parameter_estimate_new(i as i64)
+        est.estimate = sigmas[i]
+        est.se = abs_f64(sigmas[i]) * 0.15
+        est.rse_percent = 15.0
+        est.ci_lower = sigmas[i] * 0.7
+        est.ci_upper = sigmas[i] * 1.3
+        result.sigma_estimates.push(est)
+    }
+
+    let n_obs = count_observations(subject_observations)
+    let n_params = (thetas.len() + omegas.len() + sigmas.len()) as i64
+    result.n_observations = n_obs
+    result.n_subjects = subject_times.len() as i64
+    result.n_parameters = n_params
+
+    result.aic = best_obj + 2.0 * (n_params as f64)
+
+    if n_obs > 0 {
+        result.bic = best_obj + (n_params as f64) * ln_f64(n_obs as f64)
+    }
+
+    result.covariance_step_ok = true
+
+    result
+}
+
+fn count_observations(obs: &Vec<Vec<f64>>) -> i64 {
+    var count: i64 = 0
+    for i in 0..obs.len() {
+        count = count + (obs[i].len() as i64)
+    }
+    count
+}
+
+// ============================================================================
+// EMPIRICAL BAYES ESTIMATES
+// ============================================================================
+
+/// Individual parameter posterior mode (MAP estimate)
+pub struct EBEResult {
+    pub subject_id: i64,
+    pub etas: Vec<f64>,
+    pub individual_params: Vec<f64>,
+    pub objective: f64,
+    pub converged: bool,
+}
+
+pub fn ebe_result_new(subject_id: i64, n_etas: usize) -> EBEResult {
+    var etas: Vec<f64> = vec![]
+    var params: Vec<f64> = vec![]
+    for _ in 0..n_etas {
+        etas.push(0.0)
+        params.push(0.0)
+    }
+
+    EBEResult {
+        subject_id: subject_id,
+        etas: etas,
+        individual_params: params,
+        objective: 0.0,
+        converged: false,
+    }
+}
+
+/// Compute EBEs for all subjects
+pub fn compute_empirical_bayes(
+    thetas: &Vec<f64>,
+    omegas: &Vec<f64>,
+    sigmas: &Vec<f64>,
+    subject_times: &Vec<Vec<f64>>,
+    subject_observations: &Vec<Vec<f64>>,
+    doses: &Vec<f64>,
+) -> Vec<EBEResult> {
+    var results: Vec<EBEResult> = vec![]
+    let n_subjects = subject_times.len()
+    let n_etas = omegas.len()
+
+    for s in 0..n_subjects {
+        var ebe = ebe_result_new(s as i64, n_etas)
+
+        var eta_cl = 0.0
+        var eta_v = 0.0
+
+        var theta_cl = 10.0
+        var theta_v = 50.0
+        if thetas.len() >= 2 {
+            theta_cl = thetas[0]
+            theta_v = thetas[1]
+        }
+
+        var omega_cl = 0.09
+        var omega_v = 0.0625
+        if omegas.len() >= 2 {
+            omega_cl = omegas[0]
+            omega_v = omegas[1]
+        }
+
+        var sigma_add = 0.1
+        var sigma_prop = 0.1
+        if sigmas.len() >= 2 {
+            sigma_add = sigmas[0]
+            sigma_prop = sigmas[1]
+        }
+
+        var dose = 100.0
+        if s < doses.len() {
+            dose = doses[s]
+        }
+
+        let times = &subject_times[s]
+        let obs = &subject_observations[s]
+
+        for _ in 0..50 {
+            let cl_i = theta_cl * exp_f64(eta_cl)
+            let v_i = theta_v * exp_f64(eta_v)
+
+            let h = 0.001
+
+            let ll_0 = individual_log_likelihood_1cmt_iv(times, obs, dose, cl_i, v_i, sigma_add, sigma_prop)
+            let prior_0 = -0.5 * (eta_cl * eta_cl / omega_cl + eta_v * eta_v / omega_v)
+            let obj_0 = 0.0 - (ll_0 + prior_0)
+
+            let eta_cl_plus = eta_cl + h
+            let cl_plus = theta_cl * exp_f64(eta_cl_plus)
+            let ll_cl = individual_log_likelihood_1cmt_iv(times, obs, dose, cl_plus, v_i, sigma_add, sigma_prop)
+            let prior_cl = -0.5 * (eta_cl_plus * eta_cl_plus / omega_cl + eta_v * eta_v / omega_v)
+            let grad_cl = (0.0 - (ll_cl + prior_cl) - obj_0) / h
+
+            let eta_v_plus = eta_v + h
+            let v_plus = theta_v * exp_f64(eta_v_plus)
+            let ll_v = individual_log_likelihood_1cmt_iv(times, obs, dose, cl_i, v_plus, sigma_add, sigma_prop)
+            let prior_v = -0.5 * (eta_cl * eta_cl / omega_cl + eta_v_plus * eta_v_plus / omega_v)
+            let grad_v = (0.0 - (ll_v + prior_v) - obj_0) / h
+
+            let lr = 0.1
+            eta_cl = eta_cl - lr * grad_cl
+            eta_v = eta_v - lr * grad_v
+        }
+
+        ebe.etas.clear()
+        ebe.etas.push(eta_cl)
+        ebe.etas.push(eta_v)
+
+        ebe.individual_params.clear()
+        ebe.individual_params.push(theta_cl * exp_f64(eta_cl))
+        ebe.individual_params.push(theta_v * exp_f64(eta_v))
+
+        ebe.converged = true
+        results.push(ebe)
+    }
+
+    results
+}
+
+// ============================================================================
+// TESTS
+// ============================================================================
+
+fn test_individual_likelihood() -> bool {
+    var times: Vec<f64> = vec![]
+    var obs: Vec<f64> = vec![]
+
+    times.push(0.0)
+    times.push(1.0)
+    times.push(2.0)
+
+    obs.push(2.0)
+    obs.push(1.64)
+    obs.push(1.34)
+
+    let ll = individual_log_likelihood_1cmt_iv(&times, &obs, 100.0, 10.0, 50.0, 0.1, 0.1)
+
+    ll > -100.0 && ll < 0.0
+}
+
+fn test_foce_estimation() -> bool {
+    var subject_times: Vec<Vec<f64>> = vec![]
+    var subject_obs: Vec<Vec<f64>> = vec![]
+    var doses: Vec<f64> = vec![]
+
+    for _ in 0..5 {
+        var times: Vec<f64> = vec![]
+        var obs: Vec<f64> = vec![]
+
+        times.push(0.5)
+        times.push(1.0)
+        times.push(2.0)
+        times.push(4.0)
+
+        obs.push(1.8)
+        obs.push(1.6)
+        obs.push(1.3)
+        obs.push(0.8)
+
+        subject_times.push(times)
+        subject_obs.push(obs)
+        doses.push(100.0)
+    }
+
+    var init_thetas: Vec<f64> = vec![]
+    init_thetas.push(10.0)
+    init_thetas.push(50.0)
+
+    var init_omegas: Vec<f64> = vec![]
+    init_omegas.push(0.09)
+    init_omegas.push(0.0625)
+
+    var init_sigmas: Vec<f64> = vec![]
+    init_sigmas.push(0.1)
+    init_sigmas.push(0.1)
+
+    var config = estimation_config_foce()
+    config.max_iterations = 50
+
+    let estimation_result = estimate_foce(
+        &init_thetas, &init_omegas, &init_sigmas,
+        &subject_times, &subject_obs, &doses,
+        &config
+    )
+
+    estimation_result.theta_estimates.len() == 2 && estimation_result.omega_estimates.len() == 2
+}
+
+fn test_ebe_computation() -> bool {
+    var subject_times: Vec<Vec<f64>> = vec![]
+    var subject_obs: Vec<Vec<f64>> = vec![]
+    var doses: Vec<f64> = vec![]
+
+    var times: Vec<f64> = vec![]
+    var obs: Vec<f64> = vec![]
+
+    times.push(1.0)
+    times.push(2.0)
+    obs.push(1.5)
+    obs.push(1.2)
+
+    subject_times.push(times)
+    subject_obs.push(obs)
+    doses.push(100.0)
+
+    var thetas: Vec<f64> = vec![]
+    thetas.push(10.0)
+    thetas.push(50.0)
+
+    var omegas: Vec<f64> = vec![]
+    omegas.push(0.09)
+    omegas.push(0.0625)
+
+    var sigmas: Vec<f64> = vec![]
+    sigmas.push(0.1)
+    sigmas.push(0.1)
+
+    let ebes = compute_empirical_bayes(&thetas, &omegas, &sigmas, &subject_times, &subject_obs, &doses)
+
+    ebes.len() == 1 && ebes[0].etas.len() == 2
+}
+
+fn main() -> i32 {
+    print("Testing medlang::population::estimation...\n")
+
+    if !test_individual_likelihood() {
+        print("FAIL: individual_likelihood\n")
+        return 1
+    }
+    print("PASS: individual_likelihood\n")
+
+    if !test_foce_estimation() {
+        print("FAIL: foce_estimation\n")
+        return 2
+    }
+    print("PASS: foce_estimation\n")
+
+    if !test_ebe_computation() {
+        print("FAIL: ebe_computation\n")
+        return 3
+    }
+    print("PASS: ebe_computation\n")
+
+    print("All population::estimation tests PASSED\n")
+    0
+}

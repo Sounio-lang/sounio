@@ -1,0 +1,635 @@
+//! stdlib/medlang/population/simulation.sio
+//!
+//! Population Simulation Engine
+//!
+//! Monte Carlo simulation for population pharmacokinetic models.
+
+// ============================================================================
+// HELPER FUNCTIONS
+// ============================================================================
+
+fn abs_f64(x: f64) -> f64 {
+    if x < 0.0 { 0.0 - x } else { x }
+}
+
+fn sqrt_f64(x: f64) -> f64 {
+    if x <= 0.0 { return 0.0 }
+    var y = x
+    for _ in 0..10 { y = 0.5 * (y + x / y) }
+    y
+}
+
+fn ln_f64(x: f64) -> f64 {
+    if x <= 0.0 { return -1000000.0 }
+    let ln2 = 0.6931471805599453
+    var v = x
+    var k: i64 = 0
+    while v > 2.0 { v = v / 2.0; k = k + 1 }
+    while v < 1.0 { v = v * 2.0; k = k - 1 }
+    let y = v - 1.0
+    var result = 0.0
+    var power = y
+    for i in 1..=15 {
+        if i % 2 == 1 { result = result + power / (i as f64) }
+        else { result = result - power / (i as f64) }
+        power = power * y
+    }
+    result + (k as f64) * ln2
+}
+
+fn exp_f64(x: f64) -> f64 {
+    let ln2 = 0.6931471805599453
+    var v = x
+    if v > 700.0 { v = 700.0 }
+    if v < -700.0 { return 0.0 }
+    let k = (v / ln2) as i64
+    let r = v - (k as f64) * ln2
+    var result = 1.0
+    var term = 1.0
+    for i in 1..=15 {
+        term = term * r / (i as f64)
+        result = result + term
+    }
+    if k >= 0 { for _ in 0..k { result = result * 2.0 } }
+    else { for _ in 0..(-k) { result = result / 2.0 } }
+    result
+}
+
+fn pi() -> f64 { 3.14159265358979323846 }
+
+// ============================================================================
+// RANDOM NUMBER GENERATION
+// ============================================================================
+
+/// Linear congruential generator state
+pub struct RNG {
+    pub seed: i64,
+    pub last: f64,
+}
+
+pub fn rng_new(seed: i64) -> RNG {
+    RNG { seed: seed, last: 0.0 }
+}
+
+/// Generate uniform random in [0, 1)
+pub fn rng_uniform(rng: &RNG) -> RNG {
+    let a: i64 = 1103515245
+    let c: i64 = 12345
+    let m: i64 = 2147483648
+
+    let new_seed = (a * rng.seed + c) % m
+    let u = (new_seed as f64) / (m as f64)
+    RNG { seed: new_seed, last: u }
+}
+
+/// Generate standard normal using Box-Muller
+pub fn rng_normal(rng: &RNG) -> RNG {
+    var r = rng_uniform(rng)
+    var u1 = r.last
+    if u1 < 1e-10 { u1 = 1e-10 }
+
+    r = rng_uniform(&r)
+    let u2 = r.last
+
+    let z = sqrt_f64(-2.0 * ln_f64(u1)) * cos_approx(2.0 * pi() * u2)
+    RNG { seed: r.seed, last: z }
+}
+
+/// Generate normal with mean and std
+pub fn rng_normal_params(rng: &RNG, mean: f64, std: f64) -> RNG {
+    let r = rng_normal(rng)
+    RNG { seed: r.seed, last: mean + std * r.last }
+}
+
+/// Cosine approximation
+fn cos_approx(x: f64) -> f64 {
+    var t = x
+    let two_pi = 2.0 * pi()
+    while t < 0.0 { t = t + two_pi }
+    while t >= two_pi { t = t - two_pi }
+
+    let x2 = t * t
+    let x4 = x2 * x2
+    let x6 = x4 * x2
+    1.0 - x2 / 2.0 + x4 / 24.0 - x6 / 720.0
+}
+
+// ============================================================================
+// SIMULATION CONFIGURATION
+// ============================================================================
+
+/// Population simulation configuration
+pub struct SimulationConfig {
+    pub n_subjects: i64,
+    pub n_samples_per_subject: i64,
+    pub time_start: f64,
+    pub time_end: f64,
+    pub n_time_points: i64,
+    pub seed: i64,
+    pub include_residual: bool,
+    pub n_replicates: i64,
+}
+
+pub fn simulation_config_default() -> SimulationConfig {
+    SimulationConfig {
+        n_subjects: 100,
+        n_samples_per_subject: 10,
+        time_start: 0.0,
+        time_end: 24.0,
+        n_time_points: 25,
+        seed: 12345,
+        include_residual: true,
+        n_replicates: 200,
+    }
+}
+
+/// Simulation result for a single subject
+pub struct SubjectSimulation {
+    pub subject_id: i64,
+    pub times: Vec<f64>,
+    pub predictions: Vec<f64>,
+    pub observations: Vec<f64>,
+    pub etas: Vec<f64>,
+    pub parameters: Vec<f64>,
+}
+
+pub fn subject_simulation_new(subject_id: i64) -> SubjectSimulation {
+    SubjectSimulation {
+        subject_id: subject_id,
+        times: vec![],
+        predictions: vec![],
+        observations: vec![],
+        etas: vec![],
+        parameters: vec![],
+    }
+}
+
+/// Population simulation result
+pub struct PopulationSimulation {
+    pub subjects: Vec<SubjectSimulation>,
+    pub config: SimulationConfig,
+    pub converged: bool,
+}
+
+pub fn population_simulation_new() -> PopulationSimulation {
+    PopulationSimulation {
+        subjects: vec![],
+        config: simulation_config_default(),
+        converged: true,
+    }
+}
+
+// ============================================================================
+// ONE-COMPARTMENT PK MODEL
+// ============================================================================
+
+/// One-compartment IV bolus concentration
+pub fn pk_1cmt_iv(dose: f64, cl: f64, v: f64, t: f64) -> f64 {
+    if v <= 0.0 || t < 0.0 { return 0.0 }
+    let k = cl / v
+    (dose / v) * exp_f64(0.0 - k * t)
+}
+
+/// One-compartment oral concentration
+pub fn pk_1cmt_oral(dose: f64, cl: f64, v: f64, ka: f64, f_bio: f64, t: f64) -> f64 {
+    if v <= 0.0 || t < 0.0 || ka <= 0.0 { return 0.0 }
+    let k = cl / v
+
+    if abs_f64(ka - k) < 1e-6 {
+        return (f_bio * dose / v) * k * t * exp_f64(0.0 - k * t)
+    }
+
+    let coef = (f_bio * dose * ka) / (v * (ka - k))
+    coef * (exp_f64(0.0 - k * t) - exp_f64(0.0 - ka * t))
+}
+
+/// Two-compartment IV bolus concentration
+pub fn pk_2cmt_iv(dose: f64, cl: f64, v1: f64, q: f64, v2: f64, t: f64) -> f64 {
+    if v1 <= 0.0 || v2 <= 0.0 || t < 0.0 { return 0.0 }
+
+    let k10 = cl / v1
+    let k12 = q / v1
+    let k21 = q / v2
+
+    let sum_k = k10 + k12 + k21
+    let prod_k = k10 * k21
+    let discriminant = sum_k * sum_k - 4.0 * prod_k
+    if discriminant < 0.0 { return 0.0 }
+
+    let sqrt_disc = sqrt_f64(discriminant)
+    let alpha = (sum_k + sqrt_disc) / 2.0
+    let beta = (sum_k - sqrt_disc) / 2.0
+
+    let a = (dose / v1) * (alpha - k21) / (alpha - beta)
+    let b = (dose / v1) * (k21 - beta) / (alpha - beta)
+
+    a * exp_f64(0.0 - alpha * t) + b * exp_f64(0.0 - beta * t)
+}
+
+// ============================================================================
+// POPULATION SIMULATION
+// ============================================================================
+
+/// Simulate a single subject with 1-compartment IV model
+pub fn simulate_subject_1cmt_iv(
+    subject_id: i64,
+    dose: f64,
+    theta_cl: f64,
+    theta_v: f64,
+    omega_cl: f64,
+    omega_v: f64,
+    sigma_add: f64,
+    sigma_prop: f64,
+    times: &Vec<f64>,
+    rng: &RNG,
+) -> SubjectSimulation {
+    var result = subject_simulation_new(subject_id)
+    var r = rng_normal(rng)
+
+    let eta_cl = r.last * sqrt_f64(omega_cl)
+    r = rng_normal(&r)
+    let eta_v = r.last * sqrt_f64(omega_v)
+
+    result.etas.push(eta_cl)
+    result.etas.push(eta_v)
+
+    let cl_i = theta_cl * exp_f64(eta_cl)
+    let v_i = theta_v * exp_f64(eta_v)
+
+    result.parameters.push(cl_i)
+    result.parameters.push(v_i)
+
+    for i in 0..times.len() {
+        let t = times[i]
+        result.times.push(t)
+
+        let ipred = pk_1cmt_iv(dose, cl_i, v_i, t)
+        result.predictions.push(ipred)
+
+        let sd = sqrt_f64(sigma_add * sigma_add + sigma_prop * sigma_prop * ipred * ipred)
+        r = rng_normal(&r)
+        let dv = ipred + r.last * sd
+        result.observations.push(dv)
+    }
+
+    result
+}
+
+/// Simulate entire population
+pub fn simulate_population_1cmt_iv(
+    n_subjects: i64,
+    dose: f64,
+    theta_cl: f64,
+    theta_v: f64,
+    omega_cl: f64,
+    omega_v: f64,
+    sigma_add: f64,
+    sigma_prop: f64,
+    times: &Vec<f64>,
+    seed: i64,
+) -> PopulationSimulation {
+    var result = population_simulation_new()
+    var rng = rng_new(seed)
+
+    for i in 0..n_subjects {
+        rng = rng_uniform(&rng)
+        let subj = simulate_subject_1cmt_iv(
+            i,
+            dose,
+            theta_cl, theta_v,
+            omega_cl, omega_v,
+            sigma_add, sigma_prop,
+            times,
+            &rng
+        )
+        result.subjects.push(subj)
+        rng = rng_new(rng.seed + 1)
+    }
+
+    result.converged = true
+    result
+}
+
+// ============================================================================
+// VISUAL PREDICTIVE CHECK (VPC)
+// ============================================================================
+
+/// VPC percentile result at a time point
+pub struct VPCPoint {
+    pub time: f64,
+    pub median_obs: f64,
+    pub lower_obs: f64,
+    pub upper_obs: f64,
+    pub median_pred: f64,
+    pub lower_pred: f64,
+    pub upper_pred: f64,
+    pub median_ci_lower: f64,
+    pub median_ci_upper: f64,
+}
+
+pub fn vpc_point_new() -> VPCPoint {
+    VPCPoint {
+        time: 0.0,
+        median_obs: 0.0,
+        lower_obs: 0.0,
+        upper_obs: 0.0,
+        median_pred: 0.0,
+        lower_pred: 0.0,
+        upper_pred: 0.0,
+        median_ci_lower: 0.0,
+        median_ci_upper: 0.0,
+    }
+}
+
+/// Compute percentile from sorted array
+fn percentile(sorted: &Vec<f64>, p: f64) -> f64 {
+    let n = sorted.len()
+    if n == 0 { return 0.0 }
+
+    let idx = (p * (n as f64 - 1.0)) as usize
+    if idx >= n { return sorted[n - 1] }
+    sorted[idx]
+}
+
+/// Sort vector (bubble sort)
+fn sort_vec(v: &Vec<f64>) -> Vec<f64> {
+    var result: Vec<f64> = vec![]
+    for i in 0..v.len() {
+        result.push(v[i])
+    }
+
+    let n = result.len()
+    for i in 0..n {
+        for j in 0..(n - 1 - i) {
+            if result[j] > result[j + 1] {
+                let temp = result[j]
+                result[j] = result[j + 1]
+                result[j + 1] = temp
+            }
+        }
+    }
+
+    result
+}
+
+/// Compute VPC from simulation and observed data
+pub fn compute_vpc(
+    simulation: &PopulationSimulation,
+    observed_times: &Vec<f64>,
+    observed_values: &Vec<Vec<f64>>,
+) -> Vec<VPCPoint> {
+    var result: Vec<VPCPoint> = vec![]
+    let n_times = observed_times.len()
+
+    for t_idx in 0..n_times {
+        var point = vpc_point_new()
+        point.time = observed_times[t_idx]
+
+        var obs_at_time: Vec<f64> = vec![]
+        if t_idx < observed_values.len() {
+            for j in 0..observed_values[t_idx].len() {
+                obs_at_time.push(observed_values[t_idx][j])
+            }
+        }
+
+        var sim_at_time: Vec<f64> = vec![]
+        for s in 0..simulation.subjects.len() {
+            if t_idx < simulation.subjects[s].observations.len() {
+                sim_at_time.push(simulation.subjects[s].observations[t_idx])
+            }
+        }
+
+        if obs_at_time.len() > 0 {
+            let sorted_obs = sort_vec(&obs_at_time)
+            point.median_obs = percentile(&sorted_obs, 0.5)
+            point.lower_obs = percentile(&sorted_obs, 0.05)
+            point.upper_obs = percentile(&sorted_obs, 0.95)
+        }
+
+        if sim_at_time.len() > 0 {
+            let sorted_sim = sort_vec(&sim_at_time)
+            point.median_pred = percentile(&sorted_sim, 0.5)
+            point.lower_pred = percentile(&sorted_sim, 0.05)
+            point.upper_pred = percentile(&sorted_sim, 0.95)
+        }
+
+        result.push(point)
+    }
+
+    result
+}
+
+// ============================================================================
+// MCMC CHAIN STRUCTURES
+// ============================================================================
+
+/// MCMC chain state for population model
+pub struct MCMCChainState {
+    pub chain_id: i64,
+    pub iteration: i64,
+    pub thetas: Vec<f64>,
+    pub omegas: Vec<f64>,
+    pub sigmas: Vec<f64>,
+    pub log_posterior: f64,
+    pub acceptance_rate: f64,
+}
+
+pub fn mcmc_chain_state_new(chain_id: i64, n_theta: usize, n_omega: usize, n_sigma: usize) -> MCMCChainState {
+    var thetas: Vec<f64> = vec![]
+    var omegas: Vec<f64> = vec![]
+    var sigmas: Vec<f64> = vec![]
+
+    for _ in 0..n_theta { thetas.push(0.0) }
+    for _ in 0..n_omega { omegas.push(0.0) }
+    for _ in 0..n_sigma { sigmas.push(0.0) }
+
+    MCMCChainState {
+        chain_id: chain_id,
+        iteration: 0,
+        thetas: thetas,
+        omegas: omegas,
+        sigmas: sigmas,
+        log_posterior: -1e100,
+        acceptance_rate: 0.0,
+    }
+}
+
+/// Multi-chain MCMC result
+pub struct MCMCResult {
+    pub chains: Vec<MCMCChainState>,
+    pub n_chains: i64,
+    pub n_iterations: i64,
+    pub n_warmup: i64,
+    pub r_hat: Vec<f64>,
+    pub ess: Vec<f64>,
+    pub converged: bool,
+}
+
+pub fn mcmc_result_new(n_chains: i64) -> MCMCResult {
+    var chains: Vec<MCMCChainState> = vec![]
+    for i in 0..n_chains {
+        chains.push(mcmc_chain_state_new(i, 0, 0, 0))
+    }
+
+    MCMCResult {
+        chains: chains,
+        n_chains: n_chains,
+        n_iterations: 0,
+        n_warmup: 0,
+        r_hat: vec![],
+        ess: vec![],
+        converged: false,
+    }
+}
+
+/// Compute Gelman-Rubin R-hat diagnostic
+pub fn compute_r_hat(chain_means: &Vec<f64>, chain_vars: &Vec<f64>, n_samples: i64) -> f64 {
+    let m = chain_means.len()
+    if m < 2 || n_samples < 2 {
+        return 1.0
+    }
+
+    var grand_mean = 0.0
+    for i in 0..m {
+        grand_mean = grand_mean + chain_means[i]
+    }
+    grand_mean = grand_mean / (m as f64)
+
+    var b = 0.0
+    for i in 0..m {
+        let diff = chain_means[i] - grand_mean
+        b = b + diff * diff
+    }
+    b = b * (n_samples as f64) / ((m as f64) - 1.0)
+
+    var w = 0.0
+    for i in 0..m {
+        w = w + chain_vars[i]
+    }
+    w = w / (m as f64)
+
+    let var_plus = ((n_samples as f64 - 1.0) / (n_samples as f64)) * w +
+        (1.0 / (n_samples as f64)) * b
+
+    if w > 0.0 {
+        sqrt_f64(var_plus / w)
+    } else {
+        1.0
+    }
+}
+
+// ============================================================================
+// TESTS
+// ============================================================================
+
+fn test_pk_1cmt_iv() -> bool {
+    let c0 = pk_1cmt_iv(100.0, 10.0, 50.0, 0.0)
+    abs_f64(c0 - 2.0) < 0.01
+}
+
+fn test_pk_1cmt_iv_decay() -> bool {
+    let cl = 10.0
+    let v = 50.0
+    let k = cl / v
+    let t_half = 0.693 / k
+
+    let c_half = pk_1cmt_iv(100.0, cl, v, t_half)
+    let c_0 = pk_1cmt_iv(100.0, cl, v, 0.0)
+
+    abs_f64(c_half / c_0 - 0.5) < 0.01
+}
+
+fn test_rng_normal() -> bool {
+    var rng = rng_new(42)
+    var sum = 0.0
+    var sum_sq = 0.0
+    let n = 100
+
+    for _ in 0..n {
+        rng = rng_normal(&rng)
+        sum = sum + rng.last
+        sum_sq = sum_sq + rng.last * rng.last
+    }
+
+    let mean = sum / (n as f64)
+    let variance = sum_sq / (n as f64) - mean * mean
+
+    abs_f64(mean) < 0.3 && abs_f64(variance - 1.0) < 0.5
+}
+
+fn test_population_simulation() -> bool {
+    var times: Vec<f64> = vec![]
+    for i in 0..5 {
+        times.push((i as f64) * 2.0)
+    }
+
+    let sim = simulate_population_1cmt_iv(
+        10,
+        100.0,
+        10.0,
+        50.0,
+        0.09,
+        0.0625,
+        0.1,
+        0.1,
+        &times,
+        42
+    )
+
+    sim.subjects.len() == 10 && sim.converged
+}
+
+fn test_r_hat() -> bool {
+    var means: Vec<f64> = vec![]
+    means.push(5.0)
+    means.push(5.1)
+    means.push(4.9)
+    means.push(5.05)
+
+    var vars: Vec<f64> = vec![]
+    vars.push(1.0)
+    vars.push(1.1)
+    vars.push(0.9)
+    vars.push(1.05)
+
+    let r_hat = compute_r_hat(&means, &vars, 100)
+
+    abs_f64(r_hat - 1.0) < 0.1
+}
+
+fn main() -> i32 {
+    print("Testing medlang::population::simulation...\n")
+
+    if !test_pk_1cmt_iv() {
+        print("FAIL: pk_1cmt_iv\n")
+        return 1
+    }
+    print("PASS: pk_1cmt_iv\n")
+
+    if !test_pk_1cmt_iv_decay() {
+        print("FAIL: pk_1cmt_iv_decay\n")
+        return 2
+    }
+    print("PASS: pk_1cmt_iv_decay\n")
+
+    if !test_rng_normal() {
+        print("FAIL: rng_normal\n")
+        return 3
+    }
+    print("PASS: rng_normal\n")
+
+    if !test_population_simulation() {
+        print("FAIL: population_simulation\n")
+        return 4
+    }
+    print("PASS: population_simulation\n")
+
+    if !test_r_hat() {
+        print("FAIL: r_hat\n")
+        return 5
+    }
+    print("PASS: r_hat\n")
+
+    print("All population::simulation tests PASSED\n")
+    0
+}
