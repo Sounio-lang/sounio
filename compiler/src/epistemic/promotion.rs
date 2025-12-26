@@ -369,8 +369,10 @@ mod tests {
     #[test]
     fn test_meet_join() {
         let l = PromotionLattice::new();
+        // Interval and Fuzzy are on different branches - their meet is Point (greatest lower bound)
         assert_eq!(l.meet(UncertaintyLevel::Interval, UncertaintyLevel::Fuzzy), UncertaintyLevel::Point);
-        assert_eq!(l.join(UncertaintyLevel::Interval, UncertaintyLevel::Fuzzy), UncertaintyLevel::Affine);
+        // Interval and Fuzzy are on different branches - their join is Distribution (least upper bound)
+        assert_eq!(l.join(UncertaintyLevel::Interval, UncertaintyLevel::Fuzzy), UncertaintyLevel::Distribution);
     }
 
     #[test]
