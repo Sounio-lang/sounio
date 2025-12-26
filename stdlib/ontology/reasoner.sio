@@ -1,0 +1,623 @@
+// stdlib/ontology/reasoner.sio
+//
+// Basic OWL Reasoning
+//
+// Provides subsumption checking, transitive closure computation,
+// and classification for OWL ontologies.
+
+// ============================================================================
+// HELPER FUNCTIONS
+// ============================================================================
+
+fn abs_f64(x: f64) -> f64 {
+    if x < 0.0 { 0.0 - x } else { x }
+}
+
+fn sqrt_f64(x: f64) -> f64 {
+    if x <= 0.0 { return 0.0 }
+    var y = x
+    for _ in 0..10 { y = 0.5 * (y + x / y) }
+    y
+}
+
+fn min_i64(a: i64, b: i64) -> i64 {
+    if a < b { a } else { b }
+}
+
+fn max_i64(a: i64, b: i64) -> i64 {
+    if a > b { a } else { b }
+}
+
+// ============================================================================
+// IRI HELPERS (from model)
+// ============================================================================
+
+pub struct IRI {
+    pub id: i64,
+    pub namespace_id: i64,
+    pub local_id: i64,
+}
+
+pub fn iri_new(id: i64) -> IRI {
+    IRI {
+        id: id,
+        namespace_id: 0,
+        local_id: id,
+    }
+}
+
+pub fn iri_equals(a: &IRI, b: &IRI) -> bool {
+    a.id == b.id
+}
+
+pub fn iri_clone(iri: &IRI) -> IRI {
+    IRI {
+        id: iri.id,
+        namespace_id: iri.namespace_id,
+        local_id: iri.local_id,
+    }
+}
+
+// ============================================================================
+// CLASS HIERARCHY ENTRY
+// ============================================================================
+
+// Entry in the class hierarchy representing a class and its superclasses
+pub struct ClassHierarchyEntry {
+    pub class_id: i64,
+    pub direct_superclasses: Vec<i64>,
+    pub all_superclasses: Vec<i64>,
+    pub depth: i64,
+}
+
+pub fn class_hierarchy_entry_new(class_id: i64) -> ClassHierarchyEntry {
+    var direct: Vec<i64> = vec![]
+    var all: Vec<i64> = vec![]
+    // Every class is a subclass of itself
+    all.push(class_id)
+    ClassHierarchyEntry {
+        class_id: class_id,
+        direct_superclasses: direct,
+        all_superclasses: all,
+        depth: 0,
+    }
+}
+
+pub fn class_hierarchy_add_direct_super(entry: &ClassHierarchyEntry, super_id: i64) {
+    entry.direct_superclasses.push(super_id)
+}
+
+pub fn class_hierarchy_has_super(entry: &ClassHierarchyEntry, super_id: i64) -> bool {
+    let n = entry.all_superclasses.len()
+    for i in 0..n {
+        if entry.all_superclasses[i] == super_id {
+            return true
+        }
+    }
+    false
+}
+
+// ============================================================================
+// INDIVIDUAL CLASSIFICATION ENTRY
+// ============================================================================
+
+// Entry for individual classification with inferred types
+pub struct IndividualClassification {
+    pub individual_id: i64,
+    pub asserted_types: Vec<i64>,
+    pub inferred_types: Vec<i64>,
+}
+
+pub fn individual_classification_new(ind_id: i64) -> IndividualClassification {
+    IndividualClassification {
+        individual_id: ind_id,
+        asserted_types: vec![],
+        inferred_types: vec![],
+    }
+}
+
+pub fn individual_has_type(entry: &IndividualClassification, type_id: i64) -> bool {
+    let n = entry.inferred_types.len()
+    for i in 0..n {
+        if entry.inferred_types[i] == type_id {
+            return true
+        }
+    }
+    false
+}
+
+// ============================================================================
+// REASONING RESULT
+// ============================================================================
+
+// Result of a reasoning query with confidence
+pub struct ReasoningResult {
+    pub value: bool,
+    pub confidence: f64,
+    pub is_direct: bool,
+    pub is_inferred: bool,
+}
+
+pub fn reasoning_result_true(confidence: f64, is_direct: bool) -> ReasoningResult {
+    ReasoningResult {
+        value: true,
+        confidence: confidence,
+        is_direct: is_direct,
+        is_inferred: !is_direct,
+    }
+}
+
+pub fn reasoning_result_false() -> ReasoningResult {
+    ReasoningResult {
+        value: false,
+        confidence: 1.0,
+        is_direct: false,
+        is_inferred: false,
+    }
+}
+
+// ============================================================================
+// REASONER
+// ============================================================================
+
+// Reasoner state for ontology inference
+pub struct Reasoner {
+    // Class hierarchy entries (indexed by class position)
+    pub class_hierarchy: Vec<ClassHierarchyEntry>,
+    // Individual classifications
+    pub individual_types: Vec<IndividualClassification>,
+    // Whether materialization is complete
+    pub materialized: bool,
+    // Number of inferences made
+    pub inference_count: i64,
+}
+
+pub fn reasoner_new() -> Reasoner {
+    Reasoner {
+        class_hierarchy: vec![],
+        individual_types: vec![],
+        materialized: false,
+        inference_count: 0,
+    }
+}
+
+// Initialize class hierarchy from ontology class list
+// Takes: number of classes, and for each class its direct superclass IDs
+pub fn reasoner_init_classes(r: &Reasoner, n_classes: usize) {
+    for i in 0..n_classes {
+        let entry = class_hierarchy_entry_new(i as i64)
+        r.class_hierarchy.push(entry)
+    }
+}
+
+// Add direct superclass relationship
+pub fn reasoner_add_superclass(r: &Reasoner, sub_idx: usize, super_id: i64) {
+    if sub_idx < r.class_hierarchy.len() {
+        r.class_hierarchy[sub_idx].direct_superclasses.push(super_id)
+    }
+}
+
+// Initialize individuals
+pub fn reasoner_init_individuals(r: &Reasoner, n_individuals: usize) {
+    for i in 0..n_individuals {
+        let entry = individual_classification_new(i as i64)
+        r.individual_types.push(entry)
+    }
+}
+
+// Add asserted type for individual
+pub fn reasoner_add_individual_type(r: &Reasoner, ind_idx: usize, type_id: i64) {
+    if ind_idx < r.individual_types.len() {
+        r.individual_types[ind_idx].asserted_types.push(type_id)
+    }
+}
+
+// ============================================================================
+// MATERIALIZATION
+// ============================================================================
+
+// Compute transitive closure of class hierarchy
+pub fn reasoner_compute_closure(r: &Reasoner) {
+    let n = r.class_hierarchy.len()
+
+    // Iterate until no changes (Floyd-Warshall style)
+    var changed = true
+    var iterations = 0
+    let max_iter = (n * n) as i64
+
+    while changed && iterations < max_iter {
+        changed = false
+        iterations = iterations + 1
+
+        for i in 0..n {
+            // For each direct superclass, add its superclasses
+            let n_direct = r.class_hierarchy[i].direct_superclasses.len()
+            for j in 0..n_direct {
+                let super_id = r.class_hierarchy[i].direct_superclasses[j]
+                let super_idx = super_id as usize
+
+                if super_idx < n {
+                    // Add all superclasses of this superclass
+                    let n_trans = r.class_hierarchy[super_idx].all_superclasses.len()
+                    for k in 0..n_trans {
+                        let trans_id = r.class_hierarchy[super_idx].all_superclasses[k]
+
+                        // Check if already in our list
+                        var found = false
+                        let n_all = r.class_hierarchy[i].all_superclasses.len()
+                        for m in 0..n_all {
+                            if r.class_hierarchy[i].all_superclasses[m] == trans_id {
+                                found = true
+                                break
+                            }
+                        }
+
+                        if !found {
+                            r.class_hierarchy[i].all_superclasses.push(trans_id)
+                            r.inference_count = r.inference_count + 1
+                            changed = true
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+// Compute depths in hierarchy
+pub fn reasoner_compute_depths(r: &Reasoner) {
+    let n = r.class_hierarchy.len()
+
+    for i in 0..n {
+        // Depth is number of superclasses (excluding self)
+        let depth = (r.class_hierarchy[i].all_superclasses.len() as i64) - 1
+        r.class_hierarchy[i].depth = if depth > 0 { depth } else { 0 }
+    }
+}
+
+// Classify individuals by propagating types through hierarchy
+pub fn reasoner_classify_individuals(r: &Reasoner) {
+    let n_ind = r.individual_types.len()
+    let n_class = r.class_hierarchy.len()
+
+    for i in 0..n_ind {
+        // Start with asserted types
+        let n_asserted = r.individual_types[i].asserted_types.len()
+        for j in 0..n_asserted {
+            let type_id = r.individual_types[i].asserted_types[j]
+
+            // Add this type and all its superclasses
+            let type_idx = type_id as usize
+            if type_idx < n_class {
+                let n_sups = r.class_hierarchy[type_idx].all_superclasses.len()
+                for k in 0..n_sups {
+                    let sup_id = r.class_hierarchy[type_idx].all_superclasses[k]
+
+                    // Check if already in inferred types
+                    var found = false
+                    let n_inf = r.individual_types[i].inferred_types.len()
+                    for m in 0..n_inf {
+                        if r.individual_types[i].inferred_types[m] == sup_id {
+                            found = true
+                            break
+                        }
+                    }
+
+                    if !found {
+                        r.individual_types[i].inferred_types.push(sup_id)
+                        r.inference_count = r.inference_count + 1
+                    }
+                }
+            }
+        }
+    }
+}
+
+// Full materialization
+pub fn reasoner_materialize(r: &Reasoner) {
+    reasoner_compute_closure(r)
+    reasoner_compute_depths(r)
+    reasoner_classify_individuals(r)
+    r.materialized = true
+}
+
+// ============================================================================
+// QUERIES
+// ============================================================================
+
+// Check if class A is subclass of class B
+pub fn reasoner_is_subclass(r: &Reasoner, sub_idx: usize, super_id: i64) -> ReasoningResult {
+    if sub_idx >= r.class_hierarchy.len() {
+        return reasoning_result_false()
+    }
+
+    // Check direct superclasses first
+    let n_direct = r.class_hierarchy[sub_idx].direct_superclasses.len()
+    for i in 0..n_direct {
+        if r.class_hierarchy[sub_idx].direct_superclasses[i] == super_id {
+            return reasoning_result_true(1.0, true)
+        }
+    }
+
+    // Check transitive closure
+    if r.materialized {
+        let n_all = r.class_hierarchy[sub_idx].all_superclasses.len()
+        for i in 0..n_all {
+            if r.class_hierarchy[sub_idx].all_superclasses[i] == super_id {
+                return reasoning_result_true(1.0, false)
+            }
+        }
+    }
+
+    reasoning_result_false()
+}
+
+// Check if individual is instance of class
+pub fn reasoner_is_instance(r: &Reasoner, ind_idx: usize, class_id: i64) -> ReasoningResult {
+    if ind_idx >= r.individual_types.len() {
+        return reasoning_result_false()
+    }
+
+    // Check asserted types first
+    let n_asserted = r.individual_types[ind_idx].asserted_types.len()
+    for i in 0..n_asserted {
+        if r.individual_types[ind_idx].asserted_types[i] == class_id {
+            return reasoning_result_true(1.0, true)
+        }
+    }
+
+    // Check inferred types
+    if r.materialized {
+        let n_inferred = r.individual_types[ind_idx].inferred_types.len()
+        for i in 0..n_inferred {
+            if r.individual_types[ind_idx].inferred_types[i] == class_id {
+                return reasoning_result_true(1.0, false)
+            }
+        }
+    }
+
+    reasoning_result_false()
+}
+
+// Get all superclasses of a class
+pub fn reasoner_all_superclasses(r: &Reasoner, class_idx: usize) -> Vec<i64> {
+    var result: Vec<i64> = vec![]
+    if class_idx < r.class_hierarchy.len() {
+        let n = r.class_hierarchy[class_idx].all_superclasses.len()
+        for i in 0..n {
+            result.push(r.class_hierarchy[class_idx].all_superclasses[i])
+        }
+    }
+    result
+}
+
+// Get all subclasses of a class
+pub fn reasoner_all_subclasses(r: &Reasoner, class_id: i64) -> Vec<i64> {
+    var result: Vec<i64> = vec![]
+    let n = r.class_hierarchy.len()
+    for i in 0..n {
+        let n_sups = r.class_hierarchy[i].all_superclasses.len()
+        for j in 0..n_sups {
+            if r.class_hierarchy[i].all_superclasses[j] == class_id {
+                // Don't include self
+                if (i as i64) != class_id {
+                    result.push(i as i64)
+                }
+                break
+            }
+        }
+    }
+    result
+}
+
+// Get all instances of a class
+pub fn reasoner_all_instances(r: &Reasoner, class_id: i64) -> Vec<i64> {
+    var result: Vec<i64> = vec![]
+    let n = r.individual_types.len()
+    for i in 0..n {
+        let n_types = r.individual_types[i].inferred_types.len()
+        for j in 0..n_types {
+            if r.individual_types[i].inferred_types[j] == class_id {
+                result.push(i as i64)
+                break
+            }
+        }
+    }
+    result
+}
+
+// ============================================================================
+// SEMANTIC SIMILARITY
+// ============================================================================
+
+// Find common superclasses of two classes
+pub fn reasoner_common_superclasses(r: &Reasoner, class1_idx: usize, class2_idx: usize) -> Vec<i64> {
+    var result: Vec<i64> = vec![]
+
+    if class1_idx >= r.class_hierarchy.len() || class2_idx >= r.class_hierarchy.len() {
+        return result
+    }
+
+    let n1 = r.class_hierarchy[class1_idx].all_superclasses.len()
+    let n2 = r.class_hierarchy[class2_idx].all_superclasses.len()
+
+    for i in 0..n1 {
+        let sup1 = r.class_hierarchy[class1_idx].all_superclasses[i]
+        for j in 0..n2 {
+            if r.class_hierarchy[class2_idx].all_superclasses[j] == sup1 {
+                result.push(sup1)
+                break
+            }
+        }
+    }
+
+    result
+}
+
+// Find least common subsumer (most specific common ancestor)
+pub fn reasoner_least_common_subsumer(r: &Reasoner, class1_idx: usize, class2_idx: usize) -> i64 {
+    let common = reasoner_common_superclasses(r, class1_idx, class2_idx)
+    let n = common.len()
+
+    if n == 0 {
+        return 0 - 1
+    }
+
+    // Find the one with maximum depth (most specific)
+    var best_id: i64 = common[0]
+    var best_depth: i64 = 0
+
+    for i in 0..n {
+        let sup_id = common[i]
+        let sup_idx = sup_id as usize
+        if sup_idx < r.class_hierarchy.len() {
+            let depth = r.class_hierarchy[sup_idx].depth
+            if depth > best_depth {
+                best_depth = depth
+                best_id = sup_id
+            }
+        }
+    }
+
+    best_id
+}
+
+// Wu-Palmer semantic similarity
+pub fn reasoner_wu_palmer_similarity(r: &Reasoner, class1_idx: usize, class2_idx: usize) -> f64 {
+    let lcs_id = reasoner_least_common_subsumer(r, class1_idx, class2_idx)
+
+    if lcs_id < 0 {
+        return 0.0
+    }
+
+    let lcs_idx = lcs_id as usize
+    if lcs_idx >= r.class_hierarchy.len() {
+        return 0.0
+    }
+
+    let depth_lcs = (r.class_hierarchy[lcs_idx].depth + 1) as f64
+    let depth_1 = (r.class_hierarchy[class1_idx].depth + 1) as f64
+    let depth_2 = (r.class_hierarchy[class2_idx].depth + 1) as f64
+
+    if depth_1 + depth_2 <= 0.0 {
+        return 0.0
+    }
+
+    (2.0 * depth_lcs) / (depth_1 + depth_2)
+}
+
+// ============================================================================
+// TESTS
+// ============================================================================
+
+fn test_class_hierarchy_entry() -> bool {
+    var entry = class_hierarchy_entry_new(1)
+    entry.direct_superclasses.push(2)
+
+    entry.class_id == 1 && entry.direct_superclasses.len() == 1
+}
+
+fn test_reasoner_creation() -> bool {
+    let r = reasoner_new()
+    !r.materialized && r.inference_count == 0
+}
+
+fn test_subsumption() -> bool {
+    var r = reasoner_new()
+
+    // Create 3 classes: Thing (0), Animal (1), Dog (2)
+    // Dog subClassOf Animal, Animal subClassOf Thing
+    reasoner_init_classes(&r, 3)
+    reasoner_add_superclass(&r, 1, 0)  // Animal subClassOf Thing
+    reasoner_add_superclass(&r, 2, 1)  // Dog subClassOf Animal
+
+    reasoner_materialize(&r)
+
+    // Dog should be subclass of Animal (direct)
+    let r1 = reasoner_is_subclass(&r, 2, 1)
+    // Dog should be subclass of Thing (inferred)
+    let r2 = reasoner_is_subclass(&r, 2, 0)
+    // Animal should NOT be subclass of Dog
+    let r3 = reasoner_is_subclass(&r, 1, 2)
+
+    r1.value && r2.value && !r3.value
+}
+
+fn test_instance_classification() -> bool {
+    var r = reasoner_new()
+
+    // Create classes: Thing (0), Animal (1)
+    reasoner_init_classes(&r, 2)
+    reasoner_add_superclass(&r, 1, 0)  // Animal subClassOf Thing
+
+    // Create individual: Fido (0) of type Animal
+    reasoner_init_individuals(&r, 1)
+    reasoner_add_individual_type(&r, 0, 1)  // Fido is Animal
+
+    reasoner_materialize(&r)
+
+    // Fido should be instance of Animal (asserted)
+    let r1 = reasoner_is_instance(&r, 0, 1)
+    // Fido should be instance of Thing (inferred)
+    let r2 = reasoner_is_instance(&r, 0, 0)
+
+    r1.value && r2.value
+}
+
+fn test_similarity() -> bool {
+    var r = reasoner_new()
+
+    // Create classes: Thing (0), Animal (1), Mammal (2), Dog (3), Cat (4)
+    reasoner_init_classes(&r, 5)
+    reasoner_add_superclass(&r, 1, 0)  // Animal subClassOf Thing
+    reasoner_add_superclass(&r, 2, 1)  // Mammal subClassOf Animal
+    reasoner_add_superclass(&r, 3, 2)  // Dog subClassOf Mammal
+    reasoner_add_superclass(&r, 4, 2)  // Cat subClassOf Mammal
+
+    reasoner_materialize(&r)
+
+    // Dog and Cat should have Mammal as LCS
+    let lcs = reasoner_least_common_subsumer(&r, 3, 4)
+
+    // Similarity between Dog and Cat should be > 0
+    let sim = reasoner_wu_palmer_similarity(&r, 3, 4)
+
+    lcs == 2 && sim > 0.5
+}
+
+fn main() -> i32 {
+    print("Testing ontology::reasoner...\n")
+
+    if !test_class_hierarchy_entry() {
+        print("FAIL: class_hierarchy_entry\n")
+        return 1
+    }
+    print("PASS: class_hierarchy_entry\n")
+
+    if !test_reasoner_creation() {
+        print("FAIL: reasoner_creation\n")
+        return 2
+    }
+    print("PASS: reasoner_creation\n")
+
+    if !test_subsumption() {
+        print("FAIL: subsumption\n")
+        return 3
+    }
+    print("PASS: subsumption\n")
+
+    if !test_instance_classification() {
+        print("FAIL: instance_classification\n")
+        return 4
+    }
+    print("PASS: instance_classification\n")
+
+    if !test_similarity() {
+        print("FAIL: similarity\n")
+        return 5
+    }
+    print("PASS: similarity\n")
+
+    print("All ontology::reasoner tests PASSED\n")
+    0
+}
