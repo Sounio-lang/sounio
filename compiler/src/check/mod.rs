@@ -2469,19 +2469,209 @@ impl TypeChecker {
                         )
                     }
                     _ => {
-                        // For now, only range-based for loops are supported
-                        // TODO: Support iterators over arrays, slices, etc.
-                        self.error(
-                            "for loops currently only support range expressions (e.g., for i in 1..10)",
-                            Span::dummy(),
-                        );
-                        // Return an error expression to allow error recovery
+                        // Collection iteration: for item in collection { body }
+                        // Desugar to: { var __idx = 0; while __idx < collection.len() { let item = collection[__idx]; body; __idx = __idx + 1 } }
+
+                        // Type check the collection expression
+                        let collection_expr = self.check_expr(iter.as_ref(), None)?;
+                        let collection_ty = collection_expr.ty.clone();
+
+                        // Extract element type from the collection type
+                        let elem_ty = match &collection_ty {
+                            HirType::Array { element, .. } => (**element).clone(),
+                            HirType::Named { name, args } if name == "Vec" && !args.is_empty() => {
+                                args[0].clone()
+                            }
+                            HirType::Ref { inner, .. } => {
+                                // Handle references to arrays/vecs
+                                match inner.as_ref() {
+                                    HirType::Array { element, .. } => (**element).clone(),
+                                    HirType::Named { name, args } if name == "Vec" && !args.is_empty() => {
+                                        args[0].clone()
+                                    }
+                                    _ => {
+                                        self.error(
+                                            format!("cannot iterate over type `{:?}`; expected array, Vec, or range", collection_ty),
+                                            Span::dummy(),
+                                        );
+                                        return Ok(HirExpr {
+                                            id: NodeId::dummy(),
+                                            kind: HirExprKind::Block(HirBlock {
+                                                stmts: vec![],
+                                                ty: HirType::Error,
+                                            }),
+                                            ty: HirType::Error,
+                                        });
+                                    }
+                                }
+                            }
+                            _ => {
+                                self.error(
+                                    format!("cannot iterate over type `{:?}`; expected array, Vec, or range", collection_ty),
+                                    Span::dummy(),
+                                );
+                                return Ok(HirExpr {
+                                    id: NodeId::dummy(),
+                                    kind: HirExprKind::Block(HirBlock {
+                                        stmts: vec![],
+                                        ty: HirType::Error,
+                                    }),
+                                    ty: HirType::Error,
+                                });
+                            }
+                        };
+
+                        // Generate unique index variable name
+                        let idx_var = format!("__for_idx_{}", self.next_type_var);
+                        self.next_type_var += 1;
+
+                        // Generate unique collection variable name (to avoid re-evaluating the expression)
+                        let coll_var = format!("__for_coll_{}", self.next_type_var);
+                        self.next_type_var += 1;
+
+                        // Build: collection.len()
+                        let len_expr = HirExpr {
+                            id: NodeId::dummy(),
+                            kind: HirExprKind::MethodCall {
+                                receiver: Box::new(HirExpr {
+                                    id: NodeId::dummy(),
+                                    kind: HirExprKind::Local(coll_var.clone()),
+                                    ty: collection_ty.clone(),
+                                }),
+                                method: "len".to_string(),
+                                args: vec![],
+                            },
+                            ty: HirType::Usize,
+                        };
+
+                        // Build: __idx < collection.len()
+                        let cond_expr = HirExpr {
+                            id: NodeId::dummy(),
+                            kind: HirExprKind::Binary {
+                                op: HirBinaryOp::Lt,
+                                left: Box::new(HirExpr {
+                                    id: NodeId::dummy(),
+                                    kind: HirExprKind::Local(idx_var.clone()),
+                                    ty: HirType::Usize,
+                                }),
+                                right: Box::new(len_expr),
+                            },
+                            ty: HirType::Bool,
+                        };
+
+                        // Push scope for the for loop body
+                        self.env.push_scope();
+
+                        // Define the loop variable in scope
+                        self.env.bind(loop_var.clone(), self.hir_type_to_type(&elem_ty), false);
+
+                        // Check the body
+                        let body_block = self.check_block(body, None)?;
+
+                        self.env.pop_scope();
+
+                        // Build the loop body: let item = collection[__idx]; <original body>; __idx = __idx + 1
+                        let mut loop_stmts = Vec::new();
+
+                        // let item = collection[__idx]
+                        loop_stmts.push(HirStmt::Let {
+                            name: loop_var.clone(),
+                            ty: elem_ty.clone(),
+                            value: Some(HirExpr {
+                                id: NodeId::dummy(),
+                                kind: HirExprKind::Index {
+                                    base: Box::new(HirExpr {
+                                        id: NodeId::dummy(),
+                                        kind: HirExprKind::Local(coll_var.clone()),
+                                        ty: collection_ty.clone(),
+                                    }),
+                                    index: Box::new(HirExpr {
+                                        id: NodeId::dummy(),
+                                        kind: HirExprKind::Local(idx_var.clone()),
+                                        ty: HirType::Usize,
+                                    }),
+                                },
+                                ty: elem_ty.clone(),
+                            }),
+                            is_mut: false,
+                            layout_hint: None,
+                        });
+
+                        // Add original body statements
+                        loop_stmts.extend(body_block.stmts);
+
+                        // __idx = __idx + 1
+                        loop_stmts.push(HirStmt::Assign {
+                            target: HirExpr {
+                                id: NodeId::dummy(),
+                                kind: HirExprKind::Local(idx_var.clone()),
+                                ty: HirType::Usize,
+                            },
+                            value: HirExpr {
+                                id: NodeId::dummy(),
+                                kind: HirExprKind::Binary {
+                                    op: HirBinaryOp::Add,
+                                    left: Box::new(HirExpr {
+                                        id: NodeId::dummy(),
+                                        kind: HirExprKind::Local(idx_var.clone()),
+                                        ty: HirType::Usize,
+                                    }),
+                                    right: Box::new(HirExpr {
+                                        id: NodeId::dummy(),
+                                        kind: HirExprKind::Literal(HirLiteral::Int(1)),
+                                        ty: HirType::Usize,
+                                    }),
+                                },
+                                ty: HirType::Usize,
+                            },
+                        });
+
+                        let while_body = HirBlock {
+                            stmts: loop_stmts,
+                            ty: HirType::Unit,
+                        };
+
+                        // Build the while loop
+                        let while_expr = HirExpr {
+                            id: NodeId::dummy(),
+                            kind: HirExprKind::While {
+                                condition: Box::new(cond_expr),
+                                body: while_body,
+                            },
+                            ty: HirType::Unit,
+                        };
+
+                        // Build the outer block: { let __coll = collection; var __idx = 0; while ... }
+                        let outer_stmts = vec![
+                            // Store collection in a local to avoid re-evaluation
+                            HirStmt::Let {
+                                name: coll_var,
+                                ty: collection_ty,
+                                value: Some(collection_expr),
+                                is_mut: false,
+                                layout_hint: None,
+                            },
+                            // Initialize index to 0
+                            HirStmt::Let {
+                                name: idx_var,
+                                ty: HirType::Usize,
+                                value: Some(HirExpr {
+                                    id: NodeId::dummy(),
+                                    kind: HirExprKind::Literal(HirLiteral::Int(0)),
+                                    ty: HirType::Usize,
+                                }),
+                                is_mut: true,
+                                layout_hint: None,
+                            },
+                            HirStmt::Expr(while_expr),
+                        ];
+
                         (
                             HirExprKind::Block(HirBlock {
-                                stmts: vec![],
-                                ty: HirType::Error,
+                                stmts: outer_stmts,
+                                ty: HirType::Unit,
                             }),
-                            HirType::Error,
+                            HirType::Unit,
                         )
                     }
                 }
