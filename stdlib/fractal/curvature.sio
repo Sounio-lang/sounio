@@ -1,0 +1,404 @@
+//! stdlib/fractal/curvature.sio
+//!
+//! Curvature Computation with Uncertainty Propagation
+//!
+//! This module computes Gaussian and mean curvature from surface meshes.
+
+// ============================================================================
+// HELPER FUNCTIONS
+// ============================================================================
+
+fn abs_f64(x: f64) -> f64 {
+    if x < 0.0 { 0.0 - x } else { x }
+}
+
+fn sqrt_f64(x: f64) -> f64 {
+    if x <= 0.0 { return 0.0 }
+    var y = x
+    for _ in 0..10 { y = 0.5 * (y + x / y) }
+    y
+}
+
+fn min_f64(a: f64, b: f64) -> f64 { if a < b { a } else { b } }
+fn max_f64(a: f64, b: f64) -> f64 { if a > b { a } else { b } }
+
+fn acos_f64(x: f64) -> f64 {
+    var v = x
+    if v > 1.0 { v = 1.0 }
+    if v < -1.0 { v = -1.0 }
+    let pi = 3.141592653589793
+    let pi_half = pi / 2.0
+    let x2 = v * v
+    let asin_approx = v + v * x2 * (1.0/6.0 + x2 * (3.0/40.0 + x2 * 15.0/336.0))
+    pi_half - asin_approx
+}
+
+// ============================================================================
+// TYPES
+// ============================================================================
+
+/// 3D vertex
+pub struct Vertex {
+    pub x: f64,
+    pub y: f64,
+    pub z: f64,
+}
+
+/// Triangle face (vertex indices)
+pub struct Face {
+    pub i0: u32,
+    pub i1: u32,
+    pub i2: u32,
+}
+
+/// Triangle mesh
+pub struct TriMesh {
+    pub vertices: Vec<Vertex>,
+    pub faces: Vec<Face>,
+}
+
+/// Curvature result with uncertainty
+pub struct CurvatureResult {
+    pub kappa1: f64,
+    pub kappa1_std: f64,
+    pub kappa2: f64,
+    pub kappa2_std: f64,
+    pub gaussian: f64,
+    pub gaussian_std: f64,
+    pub mean: f64,
+    pub mean_std: f64,
+    pub area: f64,
+}
+
+// ============================================================================
+// VECTOR OPERATIONS
+// ============================================================================
+
+fn vec_sub(a: &Vertex, b: &Vertex) -> Vertex {
+    Vertex { x: a.x - b.x, y: a.y - b.y, z: a.z - b.z }
+}
+
+fn vec_add(a: &Vertex, b: &Vertex) -> Vertex {
+    Vertex { x: a.x + b.x, y: a.y + b.y, z: a.z + b.z }
+}
+
+fn vec_scale(v: &Vertex, s: f64) -> Vertex {
+    Vertex { x: v.x * s, y: v.y * s, z: v.z * s }
+}
+
+fn vec_dot(a: &Vertex, b: &Vertex) -> f64 {
+    a.x * b.x + a.y * b.y + a.z * b.z
+}
+
+fn vec_cross(a: &Vertex, b: &Vertex) -> Vertex {
+    Vertex {
+        x: a.y * b.z - a.z * b.y,
+        y: a.z * b.x - a.x * b.z,
+        z: a.x * b.y - a.y * b.x,
+    }
+}
+
+fn vec_length(v: &Vertex) -> f64 {
+    sqrt_f64(v.x * v.x + v.y * v.y + v.z * v.z)
+}
+
+fn vec_normalize(v: &Vertex) -> Vertex {
+    let len = vec_length(v)
+    if len < 1e-10 {
+        return Vertex { x: 0.0, y: 0.0, z: 0.0 }
+    }
+    vec_scale(v, 1.0 / len)
+}
+
+// ============================================================================
+// GAUSSIAN CURVATURE
+// ============================================================================
+
+/// Compute Gaussian curvature using the angle deficit method
+pub fn gaussian_curvature(mesh: &TriMesh) -> CurvatureResult {
+    let n_vertices = mesh.vertices.len()
+
+    if n_vertices == 0 {
+        return CurvatureResult {
+            kappa1: 0.0, kappa1_std: 1.0,
+            kappa2: 0.0, kappa2_std: 1.0,
+            gaussian: 0.0, gaussian_std: 1.0,
+            mean: 0.0, mean_std: 1.0,
+            area: 0.0,
+        }
+    }
+
+    let two_pi = 2.0 * 3.141592653589793
+
+    var total_curvature: f64 = 0.0
+    var total_area: f64 = 0.0
+    var curvature_variance: f64 = 0.0
+
+    // For each vertex, compute local Gaussian curvature
+    for v_idx in 0..n_vertices {
+        var angle_sum: f64 = 0.0
+        var local_area: f64 = 0.0
+
+        for f_idx in 0..mesh.faces.len() {
+            let face = &mesh.faces[f_idx]
+            let i0 = face.i0
+            let i1 = face.i1
+            let i2 = face.i2
+
+            var vertex_in_face = false
+            var angle: f64 = 0.0
+            var face_area: f64 = 0.0
+
+            if (i0 as usize) == v_idx {
+                vertex_in_face = true
+                angle = compute_angle(&mesh.vertices[i0 as usize], &mesh.vertices[i1 as usize], &mesh.vertices[i2 as usize])
+                face_area = triangle_area(&mesh.vertices[i0 as usize], &mesh.vertices[i1 as usize], &mesh.vertices[i2 as usize])
+            } else if (i1 as usize) == v_idx {
+                vertex_in_face = true
+                angle = compute_angle(&mesh.vertices[i1 as usize], &mesh.vertices[i2 as usize], &mesh.vertices[i0 as usize])
+                face_area = triangle_area(&mesh.vertices[i0 as usize], &mesh.vertices[i1 as usize], &mesh.vertices[i2 as usize])
+            } else if (i2 as usize) == v_idx {
+                vertex_in_face = true
+                angle = compute_angle(&mesh.vertices[i2 as usize], &mesh.vertices[i0 as usize], &mesh.vertices[i1 as usize])
+                face_area = triangle_area(&mesh.vertices[i0 as usize], &mesh.vertices[i1 as usize], &mesh.vertices[i2 as usize])
+            }
+
+            if vertex_in_face {
+                angle_sum = angle_sum + angle
+                local_area = local_area + face_area / 3.0
+            }
+        }
+
+        if local_area > 1e-10 {
+            let k_local = (two_pi - angle_sum) / local_area
+            total_curvature = total_curvature + k_local * local_area
+            total_area = total_area + local_area
+            curvature_variance = curvature_variance + k_local * k_local * local_area
+        }
+    }
+
+    let mean_k = if total_area > 1e-10 {
+        total_curvature / total_area
+    } else {
+        0.0
+    }
+
+    let var_k = if total_area > 1e-10 && n_vertices > 1 {
+        (curvature_variance / total_area - mean_k * mean_k) / (n_vertices as f64)
+    } else {
+        1.0
+    }
+
+    CurvatureResult {
+        kappa1: 0.0, kappa1_std: 0.0,
+        kappa2: 0.0, kappa2_std: 0.0,
+        gaussian: mean_k, gaussian_std: sqrt_f64(var_k),
+        mean: 0.0, mean_std: 0.0,
+        area: total_area,
+    }
+}
+
+// ============================================================================
+// MEAN CURVATURE
+// ============================================================================
+
+/// Compute mean curvature using the Laplace-Beltrami operator
+pub fn mean_curvature(mesh: &TriMesh) -> CurvatureResult {
+    let n_vertices = mesh.vertices.len()
+
+    if n_vertices == 0 {
+        return CurvatureResult {
+            kappa1: 0.0, kappa1_std: 1.0,
+            kappa2: 0.0, kappa2_std: 1.0,
+            gaussian: 0.0, gaussian_std: 1.0,
+            mean: 0.0, mean_std: 1.0,
+            area: 0.0,
+        }
+    }
+
+    var total_mean: f64 = 0.0
+    var total_area: f64 = 0.0
+    var variance_sum: f64 = 0.0
+
+    for v_idx in 0..n_vertices {
+        var h_normal = Vertex { x: 0.0, y: 0.0, z: 0.0 }
+        var local_area: f64 = 0.0
+
+        for f_idx in 0..mesh.faces.len() {
+            let face = &mesh.faces[f_idx]
+            let i0 = face.i0
+            let i1 = face.i1
+            let i2 = face.i2
+            let v0 = &mesh.vertices[i0 as usize]
+            let v1 = &mesh.vertices[i1 as usize]
+            let v2 = &mesh.vertices[i2 as usize]
+
+            if (i0 as usize) == v_idx {
+                let cot_alpha = cotangent_opposite(v0, v1, v2)
+                let cot_beta = cotangent_opposite(v0, v2, v1)
+                let e1 = vec_sub(v1, v0)
+                let e2 = vec_sub(v2, v0)
+                h_normal = vec_add(&h_normal, &vec_scale(&e1, cot_alpha))
+                h_normal = vec_add(&h_normal, &vec_scale(&e2, cot_beta))
+                local_area = local_area + triangle_area(v0, v1, v2) / 3.0
+            } else if (i1 as usize) == v_idx {
+                let cot_alpha = cotangent_opposite(v1, v2, v0)
+                let cot_beta = cotangent_opposite(v1, v0, v2)
+                let e1 = vec_sub(v2, v1)
+                let e2 = vec_sub(v0, v1)
+                h_normal = vec_add(&h_normal, &vec_scale(&e1, cot_alpha))
+                h_normal = vec_add(&h_normal, &vec_scale(&e2, cot_beta))
+                local_area = local_area + triangle_area(v0, v1, v2) / 3.0
+            } else if (i2 as usize) == v_idx {
+                let cot_alpha = cotangent_opposite(v2, v0, v1)
+                let cot_beta = cotangent_opposite(v2, v1, v0)
+                let e1 = vec_sub(v0, v2)
+                let e2 = vec_sub(v1, v2)
+                h_normal = vec_add(&h_normal, &vec_scale(&e1, cot_alpha))
+                h_normal = vec_add(&h_normal, &vec_scale(&e2, cot_beta))
+                local_area = local_area + triangle_area(v0, v1, v2) / 3.0
+            }
+        }
+
+        if local_area > 1e-10 {
+            let h_mag = vec_length(&h_normal) / (4.0 * local_area)
+            total_mean = total_mean + h_mag * local_area
+            total_area = total_area + local_area
+            variance_sum = variance_sum + h_mag * h_mag * local_area
+        }
+    }
+
+    let mean_h = if total_area > 1e-10 {
+        total_mean / total_area
+    } else {
+        0.0
+    }
+
+    let var_h = if total_area > 1e-10 && n_vertices > 1 {
+        (variance_sum / total_area - mean_h * mean_h) / (n_vertices as f64)
+    } else {
+        1.0
+    }
+
+    CurvatureResult {
+        kappa1: 0.0, kappa1_std: 0.0,
+        kappa2: 0.0, kappa2_std: 0.0,
+        gaussian: 0.0, gaussian_std: 0.0,
+        mean: mean_h, mean_std: sqrt_f64(var_h),
+        area: total_area,
+    }
+}
+
+// ============================================================================
+// PRINCIPAL CURVATURES
+// ============================================================================
+
+/// Compute principal curvatures from Gaussian and mean curvature
+pub fn principal_curvatures(mesh: &TriMesh) -> CurvatureResult {
+    let k_result = gaussian_curvature(mesh)
+    let h_result = mean_curvature(mesh)
+
+    let k_val = k_result.gaussian
+    let h_val = h_result.mean
+
+    // κ₁,₂ = H ± √(H² - K)
+    let discriminant = h_val * h_val - k_val
+    let sqrt_disc = if discriminant >= 0.0 {
+        sqrt_f64(discriminant)
+    } else {
+        0.0
+    }
+
+    let kappa1_val = h_val + sqrt_disc
+    let kappa2_val = h_val - sqrt_disc
+
+    // Propagate uncertainty
+    let k_var = k_result.gaussian_std * k_result.gaussian_std
+    let h_var = h_result.mean_std * h_result.mean_std
+
+    let dk1_dh = if sqrt_disc > 1e-10 { 1.0 + h_val / sqrt_disc } else { 1.0 }
+    let dk1_dk = if sqrt_disc > 1e-10 { -0.5 / sqrt_disc } else { 0.0 }
+
+    let kappa1_var = dk1_dh * dk1_dh * h_var + dk1_dk * dk1_dk * k_var
+    let kappa2_var = kappa1_var
+
+    CurvatureResult {
+        kappa1: kappa1_val,
+        kappa1_std: sqrt_f64(kappa1_var),
+        kappa2: kappa2_val,
+        kappa2_std: sqrt_f64(kappa2_var),
+        gaussian: k_val,
+        gaussian_std: k_result.gaussian_std,
+        mean: h_val,
+        mean_std: h_result.mean_std,
+        area: h_result.area,
+    }
+}
+
+// ============================================================================
+// HELPER FUNCTIONS
+// ============================================================================
+
+/// Compute angle at vertex a in triangle (a, b, c)
+fn compute_angle(a: &Vertex, b: &Vertex, c: &Vertex) -> f64 {
+    let ab = vec_sub(b, a)
+    let ac = vec_sub(c, a)
+
+    let dot = vec_dot(&ab, &ac)
+    let len_ab = vec_length(&ab)
+    let len_ac = vec_length(&ac)
+
+    if len_ab < 1e-10 || len_ac < 1e-10 {
+        return 0.0
+    }
+
+    let cos_angle = dot / (len_ab * len_ac)
+    acos_f64(cos_angle)
+}
+
+/// Compute cotangent of angle opposite to edge (v_edge1, v_edge2) at v_opposite
+fn cotangent_opposite(v_edge1: &Vertex, v_edge2: &Vertex, v_opposite: &Vertex) -> f64 {
+    let e1 = vec_sub(v_edge1, v_opposite)
+    let e2 = vec_sub(v_edge2, v_opposite)
+
+    let dot = vec_dot(&e1, &e2)
+    let cross = vec_cross(&e1, &e2)
+    let sin_angle = vec_length(&cross)
+
+    if abs_f64(sin_angle) < 1e-10 {
+        return 0.0
+    }
+
+    dot / sin_angle
+}
+
+/// Compute triangle area
+fn triangle_area(a: &Vertex, b: &Vertex, c: &Vertex) -> f64 {
+    let ab = vec_sub(b, a)
+    let ac = vec_sub(c, a)
+    let cross = vec_cross(&ab, &ac)
+    vec_length(&cross) / 2.0
+}
+
+fn main() -> i32 {
+    print("Curvature module loaded\n")
+
+    // Simple test: create a triangle
+    var mesh = TriMesh {
+        vertices: vec![],
+        faces: vec![],
+    }
+
+    mesh.vertices.push(Vertex { x: 0.0, y: 0.0, z: 0.0 })
+    mesh.vertices.push(Vertex { x: 1.0, y: 0.0, z: 0.0 })
+    mesh.vertices.push(Vertex { x: 0.5, y: 1.0, z: 0.0 })
+
+    mesh.faces.push(Face { i0: 0, i1: 1, i2: 2 })
+
+    let result = gaussian_curvature(&mesh)
+    print("Gaussian curvature: ")
+    print(result.gaussian)
+    print("\n")
+
+    0
+}

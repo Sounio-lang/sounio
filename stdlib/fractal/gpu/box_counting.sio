@@ -1,0 +1,352 @@
+//! stdlib/fractal/gpu/box_counting.sio
+//!
+//! GPU-Accelerated Box-Counting Dimension
+//!
+//! This module provides a parallel GPU implementation of the box-counting
+//! algorithm for fractal dimension estimation.
+
+// ============================================================================
+// HELPER FUNCTIONS
+// ============================================================================
+
+fn abs_f64(x: f64) -> f64 {
+    if x < 0.0 { 0.0 - x } else { x }
+}
+
+fn sqrt_f64(x: f64) -> f64 {
+    if x <= 0.0 { return 0.0 }
+    var y = x
+    for _ in 0..10 { y = 0.5 * (y + x / y) }
+    y
+}
+
+fn ln_f64(x: f64) -> f64 {
+    if x <= 0.0 { return -1000000.0 }
+    let ln2 = 0.6931471805599453
+    var v = x
+    var k: i64 = 0
+    while v > 2.0 { v = v / 2.0; k = k + 1 }
+    while v < 1.0 { v = v * 2.0; k = k - 1 }
+    let y = v - 1.0
+    var result = 0.0
+    var power = y
+    for i in 1..=15 {
+        if i % 2 == 1 { result = result + power / (i as f64) }
+        else { result = result - power / (i as f64) }
+        power = power * y
+    }
+    result + (k as f64) * ln2
+}
+
+fn exp_f64(x: f64) -> f64 {
+    let ln2 = 0.6931471805599453
+    var v = x
+    if v > 700.0 { v = 700.0 }
+    if v < -700.0 { return 0.0 }
+    let k = (v / ln2) as i64
+    let r = v - (k as f64) * ln2
+    var result = 1.0
+    var term = 1.0
+    for i in 1..=15 {
+        term = term * r / (i as f64)
+        result = result + term
+    }
+    if k >= 0 { for _ in 0..k { result = result * 2.0 } }
+    else { for _ in 0..(-k) { result = result / 2.0 } }
+    result
+}
+
+fn min_u32(a: u32, b: u32) -> u32 { if a < b { a } else { b } }
+
+// ============================================================================
+// TYPES
+// ============================================================================
+
+/// Result of fractal dimension analysis
+pub struct FractalDimensionResult {
+    pub dimension: f64,
+    pub dimension_std: f64,
+    pub r_squared: f64,
+    pub scales: Vec<u32>,
+    pub counts: Vec<u64>,
+    pub valid: bool,
+}
+
+/// Simple voxel grid
+pub struct VoxelGrid3D {
+    pub data: Vec<bool>,
+    pub size_x: u32,
+    pub size_y: u32,
+    pub size_z: u32,
+}
+
+/// Regression result
+struct RegressionResult {
+    pub slope: f64,
+    pub r_squared: f64,
+    pub var_slope: f64,
+}
+
+// ============================================================================
+// GPU BOX COUNTING DIMENSION
+// ============================================================================
+
+/// Compute box-counting dimension with GPU acceleration (or CPU fallback)
+pub fn gpu_box_counting_dimension(
+    data: &VoxelGrid3D,
+    min_scale: u32,
+    max_scale: u32,
+    num_scales: u32,
+) -> FractalDimensionResult {
+    // Validate inputs
+    if min_scale >= max_scale {
+        return FractalDimensionResult {
+            dimension: 0.0, dimension_std: 1.0, r_squared: 0.0,
+            scales: vec![], counts: vec![], valid: false,
+        }
+    }
+
+    let nx = data.size_x
+    let ny = data.size_y
+    let nz = data.size_z
+    let min_dim = min_u32(min_u32(nx, ny), nz)
+
+    // Generate logarithmically spaced scales
+    var scales: Vec<u32> = vec![]
+    let log_min = ln_f64(min_scale as f64)
+    let log_max = ln_f64(min_u32(max_scale, min_dim) as f64)
+    let log_step = (log_max - log_min) / ((num_scales - 1) as f64)
+
+    for i in 0..num_scales {
+        let log_scale = log_min + (i as f64) * log_step
+        let scale = exp_f64(log_scale) as u32
+        if scale >= 1 {
+            var is_duplicate = false
+            if scales.len() > 0 && scale == scales[scales.len() - 1] {
+                is_duplicate = true
+            }
+            if !is_duplicate {
+                scales.push(scale)
+            }
+        }
+    }
+
+    if scales.len() < 2 {
+        return FractalDimensionResult {
+            dimension: 0.0, dimension_std: 1.0, r_squared: 0.0,
+            scales: scales, counts: vec![], valid: false,
+        }
+    }
+
+    // Check GPU availability and dispatch
+    let use_gpu = is_gpu_available() && data.data.len() > 100000
+
+    var counts: Vec<u64> = vec![]
+
+    if use_gpu {
+        counts = gpu_count_boxes(data, &scales)
+    } else {
+        counts = cpu_count_boxes(data, &scales)
+    }
+
+    // Prepare for log-log regression
+    var log_inv_scales: Vec<f64> = vec![]
+    var log_counts: Vec<f64> = vec![]
+    var weights: Vec<f64> = vec![]
+
+    for i in 0..scales.len() {
+        if i < counts.len() && counts[i] > 0 {
+            log_inv_scales.push(ln_f64(1.0 / (scales[i] as f64)))
+            log_counts.push(ln_f64(counts[i] as f64))
+            let rel_err = sqrt_f64(counts[i] as f64) / (counts[i] as f64)
+            weights.push(1.0 / (rel_err * rel_err + 0.01))
+        }
+    }
+
+    if log_inv_scales.len() < 2 {
+        return FractalDimensionResult {
+            dimension: 0.0, dimension_std: 1.0, r_squared: 0.0,
+            scales: scales, counts: counts, valid: false,
+        }
+    }
+
+    // Weighted linear regression
+    let reg = weighted_linear_regression(&log_inv_scales, &log_counts, &weights)
+
+    FractalDimensionResult {
+        dimension: reg.slope,
+        dimension_std: sqrt_f64(reg.var_slope),
+        r_squared: reg.r_squared,
+        scales: scales,
+        counts: counts,
+        valid: reg.r_squared >= 0.90,
+    }
+}
+
+// ============================================================================
+// INTERNAL FUNCTIONS
+// ============================================================================
+
+/// Check GPU availability
+fn is_gpu_available() -> bool {
+    false
+}
+
+/// GPU box counting (stub - falls back to CPU)
+fn gpu_count_boxes(data: &VoxelGrid3D, scales: &Vec<u32>) -> Vec<u64> {
+    cpu_count_boxes(data, scales)
+}
+
+/// CPU box counting fallback
+fn cpu_count_boxes(data: &VoxelGrid3D, scales: &Vec<u32>) -> Vec<u64> {
+    var counts: Vec<u64> = vec![]
+
+    for i in 0..scales.len() {
+        let scale = scales[i]
+        let count = count_boxes_at_scale(data, scale)
+        counts.push(count)
+    }
+
+    counts
+}
+
+/// Count occupied boxes at a specific scale
+fn count_boxes_at_scale(data: &VoxelGrid3D, scale: u32) -> u64 {
+    let nx = data.size_x
+    let ny = data.size_y
+    let nz = data.size_z
+
+    var count: u64 = 0
+
+    let boxes_x = (nx + scale - 1) / scale
+    let boxes_y = (ny + scale - 1) / scale
+    let boxes_z = (nz + scale - 1) / scale
+
+    for bz in 0..boxes_z {
+        for by in 0..boxes_y {
+            for bx in 0..boxes_x {
+                var found = false
+
+                for dz in 0..scale {
+                    if found { break }
+                    for dy in 0..scale {
+                        if found { break }
+                        for dx in 0..scale {
+                            let x = bx * scale + dx
+                            let y = by * scale + dy
+                            let z = bz * scale + dz
+
+                            if x < nx && y < ny && z < nz {
+                                let idx = ((z as usize) * (ny as usize) + (y as usize)) * (nx as usize) + (x as usize)
+                                if idx < data.data.len() && data.data[idx] {
+                                    found = true
+                                    break
+                                }
+                            }
+                        }
+                    }
+                }
+
+                if found {
+                    count = count + 1
+                }
+            }
+        }
+    }
+
+    count
+}
+
+/// Weighted linear regression
+fn weighted_linear_regression(
+    x: &Vec<f64>,
+    y: &Vec<f64>,
+    w: &Vec<f64>,
+) -> RegressionResult {
+    let n = x.len()
+    if n < 2 {
+        return RegressionResult { slope: 0.0, r_squared: 0.0, var_slope: 1.0 }
+    }
+
+    var sum_w = 0.0
+    var sum_wx = 0.0
+    var sum_wy = 0.0
+    var sum_wxy = 0.0
+    var sum_wx2 = 0.0
+    var sum_wy2 = 0.0
+
+    for i in 0..n {
+        sum_w = sum_w + w[i]
+        sum_wx = sum_wx + w[i] * x[i]
+        sum_wy = sum_wy + w[i] * y[i]
+        sum_wxy = sum_wxy + w[i] * x[i] * y[i]
+        sum_wx2 = sum_wx2 + w[i] * x[i] * x[i]
+        sum_wy2 = sum_wy2 + w[i] * y[i] * y[i]
+    }
+
+    let denom = sum_w * sum_wx2 - sum_wx * sum_wx
+
+    if abs_f64(denom) < 1e-10 {
+        return RegressionResult { slope: 0.0, r_squared: 0.0, var_slope: 1.0 }
+    }
+
+    let slope = (sum_w * sum_wxy - sum_wx * sum_wy) / denom
+    let intercept = (sum_wy - slope * sum_wx) / sum_w
+
+    // Weighted R²
+    let y_mean = sum_wy / sum_w
+    var ss_tot = 0.0
+    var ss_res = 0.0
+
+    for i in 0..n {
+        let pred = intercept + slope * x[i]
+        ss_tot = ss_tot + w[i] * (y[i] - y_mean) * (y[i] - y_mean)
+        ss_res = ss_res + w[i] * (y[i] - pred) * (y[i] - pred)
+    }
+
+    let r_sq = if ss_tot > 0.0 { 1.0 - ss_res / ss_tot } else { 0.0 }
+
+    // Variance of slope
+    let mse = if n > 2 { ss_res / (sum_w * (1.0 - 2.0 / (n as f64))) } else { ss_res / sum_w }
+    let var_slope = if denom > 0.0 { mse * sum_w / denom } else { 1.0 }
+
+    RegressionResult {
+        slope: slope,
+        r_squared: r_sq,
+        var_slope: var_slope,
+    }
+}
+
+fn main() -> i32 {
+    print("GPU Box-Counting module loaded\n")
+    if is_gpu_available() {
+        print("GPU: AVAILABLE\n")
+    } else {
+        print("GPU: NOT AVAILABLE (CPU fallback)\n")
+    }
+
+    // Simple test
+    var grid = VoxelGrid3D {
+        data: vec![],
+        size_x: 8,
+        size_y: 8,
+        size_z: 8,
+    }
+
+    for i in 0..512 {
+        grid.data.push(i % 2 == 0)
+    }
+
+    let result = gpu_box_counting_dimension(&grid, 2, 8, 4)
+    print("Dimension: ")
+    print(result.dimension)
+    print("\n")
+    print("R²: ")
+    print(result.r_squared)
+    print("\n")
+    print("Valid: ")
+    print(result.valid)
+    print("\n")
+
+    0
+}

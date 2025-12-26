@@ -1,0 +1,537 @@
+//! stdlib/fractal/kec.sio
+//!
+//! KEC Framework: Entropy-Curvature-Coherence Analysis
+//!
+//! The KEC Framework integrates fractal analysis with biomaterial characterization.
+
+// ============================================================================
+// CONSTANTS
+// ============================================================================
+
+/// Golden ratio
+pub const PHI: f64 = 1.6180339887498949
+pub const PI: f64 = 3.141592653589793
+
+// ============================================================================
+// HELPER FUNCTIONS
+// ============================================================================
+
+fn abs_f64(x: f64) -> f64 {
+    if x < 0.0 { 0.0 - x } else { x }
+}
+
+fn sqrt_f64(x: f64) -> f64 {
+    if x <= 0.0 { return 0.0 }
+    var y = x
+    for _ in 0..10 { y = 0.5 * (y + x / y) }
+    y
+}
+
+fn ln_f64(x: f64) -> f64 {
+    if x <= 0.0 { return -1000000.0 }
+    let ln2 = 0.6931471805599453
+    var v = x
+    var k: i64 = 0
+    while v > 2.0 { v = v / 2.0; k = k + 1 }
+    while v < 1.0 { v = v * 2.0; k = k - 1 }
+    let y = v - 1.0
+    var result = 0.0
+    var power = y
+    for i in 1..=15 {
+        if i % 2 == 1 { result = result + power / (i as f64) }
+        else { result = result - power / (i as f64) }
+        power = power * y
+    }
+    result + (k as f64) * ln2
+}
+
+fn min_f64(a: f64, b: f64) -> f64 { if a < b { a } else { b } }
+fn max_f64(a: f64, b: f64) -> f64 { if a > b { a } else { b } }
+fn min_u32(a: u32, b: u32) -> u32 { if a < b { a } else { b } }
+
+// ============================================================================
+// TYPES
+// ============================================================================
+
+/// KEC analysis parameters
+pub struct KECParams {
+    pub w_entropy: f64,
+    pub w_curvature: f64,
+    pub w_coherence: f64,
+    pub target_dimension: f64,
+    pub target_curvature: f64,
+    pub min_r_squared: f64,
+    pub entropy_bins: u32,
+    pub min_scale: u32,
+    pub max_scale: u32,
+}
+
+/// Create default KEC parameters
+pub fn kec_params_default() -> KECParams {
+    KECParams {
+        w_entropy: 1.0,
+        w_curvature: 1.0,
+        w_coherence: 1.0,
+        target_dimension: PHI,
+        target_curvature: 0.0,
+        min_r_squared: 0.95,
+        entropy_bins: 50,
+        min_scale: 2,
+        max_scale: 64,
+    }
+}
+
+/// Create bone scaffold parameters
+pub fn kec_params_bone() -> KECParams {
+    KECParams {
+        w_entropy: 1.2,
+        w_curvature: 0.8,
+        w_coherence: 1.0,
+        target_dimension: PHI,
+        target_curvature: -0.05,
+        min_r_squared: 0.90,
+        entropy_bins: 100,
+        min_scale: 2,
+        max_scale: 128,
+    }
+}
+
+/// Complete KEC metrics for a scaffold
+pub struct KECMetrics {
+    pub entropy: f64,
+    pub entropy_std: f64,
+    pub curvature: f64,
+    pub curvature_std: f64,
+    pub coherence: f64,
+    pub coherence_std: f64,
+    pub r_squared: f64,
+    pub entropy_score: f64,
+    pub curvature_score: f64,
+    pub coherence_score: f64,
+    pub score: f64,
+    pub score_std: f64,
+    pub valid: bool,
+}
+
+/// 3D voxel scaffold
+pub struct VoxelScaffold {
+    pub data: Vec<bool>,
+    pub size_x: u32,
+    pub size_y: u32,
+    pub size_z: u32,
+}
+
+/// Regression result
+struct RegressionResult {
+    pub slope: f64,
+    pub intercept: f64,
+    pub r_squared: f64,
+    pub var_slope: f64,
+}
+
+// ============================================================================
+// KEC COMPUTATION
+// ============================================================================
+
+/// Compute full KEC metrics for a scaffold
+pub fn compute_kec(scaffold: &VoxelScaffold, params: &KECParams) -> KECMetrics {
+    // =========================================
+    // 1. ENTROPY COMPONENT
+    // =========================================
+    let pore_sizes = extract_pore_sizes(scaffold)
+
+    if pore_sizes.len() < 10 {
+        return KECMetrics {
+            entropy: 0.0, entropy_std: 1.0,
+            curvature: 0.0, curvature_std: 1.0,
+            coherence: 0.0, coherence_std: 1.0,
+            r_squared: 0.0,
+            entropy_score: 0.0, curvature_score: 0.0, coherence_score: 0.0,
+            score: 0.0, score_std: 1.0,
+            valid: false,
+        }
+    }
+
+    let entropy_result = compute_shannon_entropy(&pore_sizes, params.entropy_bins)
+    let entropy = entropy_result.value
+    let entropy_std = entropy_result.std_dev
+
+    let max_entropy = ln_f64(params.entropy_bins as f64)
+    let entropy_score_val = if max_entropy > 0.0 {
+        min_f64(entropy / max_entropy, 1.0)
+    } else {
+        0.0
+    }
+
+    // =========================================
+    // 2. CURVATURE COMPONENT (simplified)
+    // =========================================
+    let curvature = 0.0  // Would compute from surface mesh
+    let curvature_std = 0.1
+    let curv_deviation = curvature - params.target_curvature
+    let curvature_score_val = 1.0 / (1.0 + curv_deviation * curv_deviation)
+
+    // =========================================
+    // 3. COHERENCE COMPONENT (FRACTAL DIMENSION)
+    // =========================================
+    let fractal_result = compute_box_counting(
+        scaffold, params.min_scale, params.max_scale
+    )
+
+    let coherence = fractal_result.dimension
+    let coherence_std = fractal_result.dimension_std
+    let r_squared = fractal_result.r_squared
+
+    if r_squared < params.min_r_squared {
+        return KECMetrics {
+            entropy: entropy, entropy_std: entropy_std,
+            curvature: curvature, curvature_std: curvature_std,
+            coherence: coherence, coherence_std: coherence_std,
+            r_squared: r_squared,
+            entropy_score: entropy_score_val, curvature_score: curvature_score_val, coherence_score: 0.0,
+            score: 0.0, score_std: 1.0,
+            valid: false,
+        }
+    }
+
+    let dim_deviation = coherence - params.target_dimension
+    let coherence_score_val = 1.0 / (1.0 + dim_deviation * dim_deviation * 4.0)
+
+    // =========================================
+    // 4. COMBINED KEC SCORE
+    // =========================================
+    let total_weight = params.w_entropy + params.w_curvature + params.w_coherence
+
+    let score_val = (
+        params.w_entropy * entropy_score_val +
+        params.w_curvature * curvature_score_val +
+        params.w_coherence * coherence_score_val
+    ) / total_weight
+
+    let score_var = (
+        params.w_entropy * params.w_entropy * 0.01 +
+        params.w_curvature * params.w_curvature * 0.01 +
+        params.w_coherence * params.w_coherence * coherence_std * coherence_std
+    ) / (total_weight * total_weight)
+
+    KECMetrics {
+        entropy: entropy, entropy_std: entropy_std,
+        curvature: curvature, curvature_std: curvature_std,
+        coherence: coherence, coherence_std: coherence_std,
+        r_squared: r_squared,
+        entropy_score: entropy_score_val,
+        curvature_score: curvature_score_val,
+        coherence_score: coherence_score_val,
+        score: score_val,
+        score_std: sqrt_f64(score_var),
+        valid: true,
+    }
+}
+
+/// Check if scaffold is optimal
+pub fn kec_is_optimal(metrics: &KECMetrics) -> bool {
+    metrics.valid &&
+    metrics.score > 0.7 &&
+    metrics.entropy_score > 0.5 &&
+    metrics.curvature_score > 0.5 &&
+    metrics.coherence_score > 0.5
+}
+
+// ============================================================================
+// ENTROPY COMPUTATION
+// ============================================================================
+
+struct EntropyResult {
+    pub value: f64,
+    pub std_dev: f64,
+}
+
+fn compute_shannon_entropy(data: &Vec<f64>, bins: u32) -> EntropyResult {
+    let n = data.len()
+
+    if n == 0 {
+        return EntropyResult { value: 0.0, std_dev: 0.0 }
+    }
+
+    // Find range
+    var min_val = data[0]
+    var max_val = data[0]
+    for i in 1..n {
+        min_val = min_f64(min_val, data[i])
+        max_val = max_f64(max_val, data[i])
+    }
+
+    if max_val == min_val {
+        return EntropyResult { value: 0.0, std_dev: 0.0 }
+    }
+
+    // Build histogram
+    var counts: Vec<u64> = vec![]
+    for _ in 0..bins { counts.push(0) }
+
+    let bin_width = (max_val - min_val) / (bins as f64)
+    for i in 0..n {
+        var bin = ((data[i] - min_val) / bin_width) as usize
+        if bin >= bins as usize { bin = (bins - 1) as usize }
+        counts[bin] = counts[bin] + 1
+    }
+
+    // Compute entropy
+    var entropy = 0.0
+    var non_zero = 0
+    for i in 0..bins as usize {
+        if counts[i] > 0 {
+            let p = (counts[i] as f64) / (n as f64)
+            entropy = entropy - p * ln_f64(p)
+            non_zero = non_zero + 1
+        }
+    }
+
+    // Miller-Madow bias correction
+    let bias = ((non_zero - 1) as f64) / (2.0 * (n as f64))
+    entropy = entropy + bias
+
+    // Variance estimate
+    var sum_p_log2 = 0.0
+    for i in 0..bins as usize {
+        if counts[i] > 0 {
+            let p = (counts[i] as f64) / (n as f64)
+            let log_p = ln_f64(p)
+            sum_p_log2 = sum_p_log2 + p * log_p * log_p
+        }
+    }
+    let var_term = sum_p_log2 - entropy * entropy
+    let sample_var = if var_term > 0.0 { var_term / (n as f64) } else { 0.0 }
+
+    EntropyResult {
+        value: entropy,
+        std_dev: sqrt_f64(sample_var),
+    }
+}
+
+// ============================================================================
+// FRACTAL DIMENSION
+// ============================================================================
+
+struct FractalResult {
+    pub dimension: f64,
+    pub dimension_std: f64,
+    pub r_squared: f64,
+}
+
+fn compute_box_counting(
+    scaffold: &VoxelScaffold,
+    min_scale: u32,
+    max_scale: u32,
+) -> FractalResult {
+    let nx = scaffold.size_x
+    let ny = scaffold.size_y
+    let nz = scaffold.size_z
+
+    // Generate scales
+    var scales: Vec<u32> = vec![]
+    var r = min_scale
+    let min_dim = min_u32(min_u32(nx, ny), nz)
+    while r <= max_scale && r <= min_dim {
+        scales.push(r)
+        r = r * 2
+    }
+
+    if scales.len() < 2 {
+        return FractalResult { dimension: 0.0, dimension_std: 1.0, r_squared: 0.0 }
+    }
+
+    var log_inv_scales: Vec<f64> = vec![]
+    var log_counts: Vec<f64> = vec![]
+
+    for i in 0..scales.len() {
+        let scale = scales[i]
+        let count = count_boxes_3d(scaffold, scale)
+
+        if count > 0 {
+            log_inv_scales.push(ln_f64(1.0 / (scale as f64)))
+            log_counts.push(ln_f64(count as f64))
+        }
+    }
+
+    let reg = linear_regression(&log_inv_scales, &log_counts)
+
+    FractalResult {
+        dimension: reg.slope,
+        dimension_std: sqrt_f64(reg.var_slope),
+        r_squared: reg.r_squared,
+    }
+}
+
+fn count_boxes_3d(scaffold: &VoxelScaffold, scale: u32) -> u64 {
+    let nx = scaffold.size_x
+    let ny = scaffold.size_y
+    let nz = scaffold.size_z
+
+    var count: u64 = 0
+    let bx_max = (nx + scale - 1) / scale
+    let by_max = (ny + scale - 1) / scale
+    let bz_max = (nz + scale - 1) / scale
+
+    for bx in 0..bx_max {
+        for by in 0..by_max {
+            for bz in 0..bz_max {
+                var found = false
+                for dx in 0..scale {
+                    if found { break }
+                    for dy in 0..scale {
+                        if found { break }
+                        for dz in 0..scale {
+                            let x = bx * scale + dx
+                            let y = by * scale + dy
+                            let z = bz * scale + dz
+
+                            if x < nx && y < ny && z < nz {
+                                let idx = ((z as usize) * (ny as usize) + (y as usize)) * (nx as usize) + (x as usize)
+                                if idx < scaffold.data.len() && scaffold.data[idx] {
+                                    found = true
+                                    break
+                                }
+                            }
+                        }
+                    }
+                }
+                if found { count = count + 1 }
+            }
+        }
+    }
+
+    count
+}
+
+fn linear_regression(x: &Vec<f64>, y: &Vec<f64>) -> RegressionResult {
+    let n = x.len()
+    if n < 2 {
+        return RegressionResult { slope: 0.0, intercept: 0.0, r_squared: 0.0, var_slope: 1.0 }
+    }
+
+    var sum_x = 0.0
+    var sum_y = 0.0
+    var sum_xy = 0.0
+    var sum_x2 = 0.0
+    var sum_y2 = 0.0
+
+    for i in 0..n {
+        sum_x = sum_x + x[i]
+        sum_y = sum_y + y[i]
+        sum_xy = sum_xy + x[i] * y[i]
+        sum_x2 = sum_x2 + x[i] * x[i]
+        sum_y2 = sum_y2 + y[i] * y[i]
+    }
+
+    let nf = n as f64
+    let denom = nf * sum_x2 - sum_x * sum_x
+
+    if abs_f64(denom) < 1e-10 {
+        return RegressionResult { slope: 0.0, intercept: sum_y / nf, r_squared: 0.0, var_slope: 1.0 }
+    }
+
+    let slope = (nf * sum_xy - sum_x * sum_y) / denom
+    let intercept = (sum_y - slope * sum_x) / nf
+
+    let ss_tot = sum_y2 - sum_y * sum_y / nf
+    var ss_res = 0.0
+    for i in 0..n {
+        let pred = intercept + slope * x[i]
+        let residual = y[i] - pred
+        ss_res = ss_res + residual * residual
+    }
+    let r_sq = if ss_tot > 0.0 { 1.0 - ss_res / ss_tot } else { 0.0 }
+
+    let mse = if n > 2 { ss_res / (nf - 2.0) } else { ss_res }
+    let var_slope = if denom > 0.0 { mse * nf / denom } else { 1.0 }
+
+    RegressionResult {
+        slope: slope,
+        intercept: intercept,
+        r_squared: r_sq,
+        var_slope: var_slope,
+    }
+}
+
+// ============================================================================
+// PORE EXTRACTION
+// ============================================================================
+
+fn extract_pore_sizes(scaffold: &VoxelScaffold) -> Vec<f64> {
+    var sizes: Vec<f64> = vec![]
+
+    let nx = scaffold.size_x as usize
+    let ny = scaffold.size_y as usize
+    let nz = scaffold.size_z as usize
+
+    for z in 0..nz {
+        for y in 0..ny {
+            for x in 0..nx {
+                let idx = z * ny * nx + y * nx + x
+
+                if idx < scaffold.data.len() && !scaffold.data[idx] {
+                    // Count connected void voxels in small neighborhood
+                    var pore_count: u64 = 0
+
+                    for dz in 0..3 {
+                        for dy in 0..3 {
+                            for dx in 0..3 {
+                                let nx2 = x + dx
+                                let ny2 = y + dy
+                                let nz2 = z + dz
+                                if nx2 < nx && ny2 < ny && nz2 < nz {
+                                    let idx2 = nz2 * ny * nx + ny2 * nx + nx2
+                                    if idx2 < scaffold.data.len() && !scaffold.data[idx2] {
+                                        pore_count = pore_count + 1
+                                    }
+                                }
+                            }
+                        }
+                    }
+
+                    if pore_count > 1 {
+                        sizes.push(pore_count as f64)
+                    }
+                }
+            }
+        }
+    }
+
+    sizes
+}
+
+fn main() -> i32 {
+    print("KEC Framework loaded\n")
+    print("Golden ratio target: ")
+    print(PHI)
+    print("\n")
+
+    // Simple test
+    var scaffold = VoxelScaffold {
+        data: vec![],
+        size_x: 10,
+        size_y: 10,
+        size_z: 10,
+    }
+
+    // Fill with pattern
+    for i in 0..1000 {
+        scaffold.data.push(i % 2 == 0)
+    }
+
+    let params = kec_params_default()
+    let metrics = compute_kec(&scaffold, &params)
+
+    print("KEC Score: ")
+    print(metrics.score)
+    print("\n")
+    print("Coherence (D): ")
+    print(metrics.coherence)
+    print("\n")
+    print("Valid: ")
+    print(metrics.valid)
+    print("\n")
+
+    0
+}

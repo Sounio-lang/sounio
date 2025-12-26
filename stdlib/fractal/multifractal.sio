@@ -1,0 +1,437 @@
+//! stdlib/fractal/multifractal.sio
+//!
+//! Multifractal Analysis with Uncertainty Propagation
+//!
+//! Multifractal analysis extends fractal dimension to characterize
+//! heterogeneous structures with multiple scaling behaviors.
+
+// ============================================================================
+// HELPER FUNCTIONS
+// ============================================================================
+
+fn abs_f64(x: f64) -> f64 {
+    if x < 0.0 { 0.0 - x } else { x }
+}
+
+fn sqrt_f64(x: f64) -> f64 {
+    if x <= 0.0 { return 0.0 }
+    var y = x
+    for _ in 0..10 { y = 0.5 * (y + x / y) }
+    y
+}
+
+fn ln_f64(x: f64) -> f64 {
+    if x <= 0.0 { return -1000000.0 }
+    let ln2 = 0.6931471805599453
+    var v = x
+    var k: i64 = 0
+    while v > 2.0 { v = v / 2.0; k = k + 1 }
+    while v < 1.0 { v = v * 2.0; k = k - 1 }
+    let y = v - 1.0
+    var result = 0.0
+    var power = y
+    for i in 1..=15 {
+        if i % 2 == 1 { result = result + power / (i as f64) }
+        else { result = result - power / (i as f64) }
+        power = power * y
+    }
+    result + (k as f64) * ln2
+}
+
+fn pow_f64(x: f64, y: f64) -> f64 {
+    if x <= 0.0 { return 0.0 }
+    exp_f64(y * ln_f64(x))
+}
+
+fn exp_f64(x: f64) -> f64 {
+    let ln2 = 0.6931471805599453
+    var v = x
+    if v > 700.0 { v = 700.0 }
+    if v < -700.0 { return 0.0 }
+    let k = (v / ln2) as i64
+    let r = v - (k as f64) * ln2
+    var result = 1.0
+    var term = 1.0
+    for i in 1..=15 {
+        term = term * r / (i as f64)
+        result = result + term
+    }
+    if k >= 0 { for _ in 0..k { result = result * 2.0 } }
+    else { for _ in 0..(-k) { result = result / 2.0 } }
+    result
+}
+
+fn min_f64(a: f64, b: f64) -> f64 { if a < b { a } else { b } }
+fn max_f64(a: f64, b: f64) -> f64 { if a > b { a } else { b } }
+
+// ============================================================================
+// TYPES
+// ============================================================================
+
+/// Multifractal spectrum result
+pub struct MultifractalSpectrum {
+    pub alpha: Vec<f64>,
+    pub alpha_std: Vec<f64>,
+    pub f_alpha: Vec<f64>,
+    pub f_alpha_std: Vec<f64>,
+    pub q_values: Vec<f64>,
+    pub d_q: Vec<f64>,
+    pub d_q_std: Vec<f64>,
+    pub spectrum_width: f64,
+    pub f_max: f64,
+}
+
+/// 3D measure grid
+pub struct MeasureGrid {
+    pub data: Vec<f64>,
+    pub size_x: u32,
+    pub size_y: u32,
+    pub size_z: u32,
+}
+
+/// Regression result
+struct RegressionResult {
+    pub slope: f64,
+    pub var_slope: f64,
+}
+
+// ============================================================================
+// BOX PROBABILITIES
+// ============================================================================
+
+/// Compute box probabilities for a measure grid at given scale
+fn box_probabilities(grid: &MeasureGrid, scale: u32) -> Vec<f64> {
+    let nx = (grid.size_x + scale - 1) / scale
+    let ny = (grid.size_y + scale - 1) / scale
+    let nz = (grid.size_z + scale - 1) / scale
+
+    var masses: Vec<f64> = vec![]
+    var total_mass: f64 = 0.0
+
+    for bx in 0..nx {
+        for by in 0..ny {
+            for bz in 0..nz {
+                var box_mass: f64 = 0.0
+                for dx in 0..scale {
+                    for dy in 0..scale {
+                        for dz in 0..scale {
+                            let x = bx * scale + dx
+                            let y = by * scale + dy
+                            let z = bz * scale + dz
+                            if x < grid.size_x && y < grid.size_y && z < grid.size_z {
+                                let idx = ((z as usize) * (grid.size_y as usize) + (y as usize)) * (grid.size_x as usize) + (x as usize)
+                                if idx < grid.data.len() {
+                                    box_mass = box_mass + grid.data[idx]
+                                }
+                            }
+                        }
+                    }
+                }
+                masses.push(box_mass)
+                total_mass = total_mass + box_mass
+            }
+        }
+    }
+
+    // Normalize to probabilities
+    if total_mass > 0.0 {
+        for i in 0..masses.len() {
+            masses[i] = masses[i] / total_mass
+        }
+    }
+
+    masses
+}
+
+// ============================================================================
+// MULTIFRACTAL SPECTRUM
+// ============================================================================
+
+/// Compute the multifractal f(α) spectrum
+pub fn multifractal_spectrum(
+    data: &MeasureGrid,
+    q_min: f64,
+    q_max: f64,
+    n_q: u32,
+    scales: &Vec<u32>,
+) -> MultifractalSpectrum {
+    // Generate q values
+    var q_values: Vec<f64> = vec![]
+    let q_step = (q_max - q_min) / ((n_q - 1) as f64)
+    for i in 0..n_q {
+        q_values.push(q_min + (i as f64) * q_step)
+    }
+
+    var alpha_vec: Vec<f64> = vec![]
+    var alpha_std_vec: Vec<f64> = vec![]
+    var f_alpha_vec: Vec<f64> = vec![]
+    var f_alpha_std_vec: Vec<f64> = vec![]
+    var d_q_vec: Vec<f64> = vec![]
+    var d_q_std_vec: Vec<f64> = vec![]
+
+    for i in 0..q_values.len() {
+        let q = q_values[i]
+
+        // Compute alpha(q) and f(q) using linear regression over scales
+        var log_scales: Vec<f64> = vec![]
+        var alpha_sums: Vec<f64> = vec![]
+        var f_sums: Vec<f64> = vec![]
+        var tau_sums: Vec<f64> = vec![]
+
+        for j in 0..scales.len() {
+            let scale = scales[j]
+            let probs = box_probabilities(data, scale)
+
+            if probs.len() == 0 { continue }
+
+            // Compute partition function terms
+            var sum_pq: f64 = 0.0
+            for k in 0..probs.len() {
+                if probs[k] > 0.0 {
+                    sum_pq = sum_pq + pow_f64(probs[k], q)
+                }
+            }
+
+            if sum_pq <= 0.0 { continue }
+
+            // Compute normalized measures μᵢ(q)
+            var alpha_sum: f64 = 0.0
+            var f_sum: f64 = 0.0
+
+            for k in 0..probs.len() {
+                if probs[k] > 0.0 {
+                    let mu_i = pow_f64(probs[k], q) / sum_pq
+                    if mu_i > 0.0 {
+                        alpha_sum = alpha_sum + mu_i * ln_f64(probs[k])
+                        f_sum = f_sum + mu_i * ln_f64(mu_i)
+                    }
+                }
+            }
+
+            log_scales.push(ln_f64(scale as f64))
+            alpha_sums.push(alpha_sum)
+            f_sums.push(f_sum)
+            tau_sums.push(ln_f64(sum_pq))
+        }
+
+        // Linear regression for alpha(q), f(q), and tau(q)
+        let alpha_reg = if log_scales.len() >= 2 {
+            regress_slope(&log_scales, &alpha_sums)
+        } else {
+            RegressionResult { slope: 0.0, var_slope: 1.0 }
+        }
+
+        let f_reg = if log_scales.len() >= 2 {
+            regress_slope(&log_scales, &f_sums)
+        } else {
+            RegressionResult { slope: 0.0, var_slope: 1.0 }
+        }
+
+        let tau_reg = if log_scales.len() >= 2 {
+            regress_slope(&log_scales, &tau_sums)
+        } else {
+            RegressionResult { slope: 0.0, var_slope: 1.0 }
+        }
+
+        // D_q = tau(q) / (q - 1) for q != 1
+        let d_q = if abs_f64(q - 1.0) > 0.01 {
+            tau_reg.slope / (q - 1.0)
+        } else {
+            alpha_reg.slope
+        }
+
+        let d_q_var = if abs_f64(q - 1.0) > 0.01 {
+            tau_reg.var_slope / ((q - 1.0) * (q - 1.0))
+        } else {
+            alpha_reg.var_slope
+        }
+
+        alpha_vec.push(alpha_reg.slope)
+        alpha_std_vec.push(sqrt_f64(alpha_reg.var_slope))
+        f_alpha_vec.push(f_reg.slope)
+        f_alpha_std_vec.push(sqrt_f64(f_reg.var_slope))
+        d_q_vec.push(d_q)
+        d_q_std_vec.push(sqrt_f64(d_q_var))
+    }
+
+    // Compute spectrum width (alpha_max - alpha_min)
+    var alpha_min = 1000000.0
+    var alpha_max = -1000000.0
+    var f_max_val = -1000000.0
+
+    for i in 0..alpha_vec.len() {
+        alpha_min = min_f64(alpha_min, alpha_vec[i])
+        alpha_max = max_f64(alpha_max, alpha_vec[i])
+        f_max_val = max_f64(f_max_val, f_alpha_vec[i])
+    }
+
+    let spectrum_width = alpha_max - alpha_min
+
+    MultifractalSpectrum {
+        alpha: alpha_vec,
+        alpha_std: alpha_std_vec,
+        f_alpha: f_alpha_vec,
+        f_alpha_std: f_alpha_std_vec,
+        q_values: q_values,
+        d_q: d_q_vec,
+        d_q_std: d_q_std_vec,
+        spectrum_width: spectrum_width,
+        f_max: f_max_val,
+    }
+}
+
+/// Compute generalized dimension D_q for a specific q
+pub fn generalized_dimension(
+    data: &MeasureGrid,
+    q: f64,
+    scales: &Vec<u32>,
+) -> f64 {
+    var log_scales: Vec<f64> = vec![]
+    var tau_sums: Vec<f64> = vec![]
+
+    for i in 0..scales.len() {
+        let scale = scales[i]
+        let probs = box_probabilities(data, scale)
+
+        if probs.len() == 0 { continue }
+
+        // Compute partition function
+        var sum_pq: f64 = 0.0
+        for j in 0..probs.len() {
+            if probs[j] > 0.0 {
+                sum_pq = sum_pq + pow_f64(probs[j], q)
+            }
+        }
+
+        if sum_pq > 0.0 {
+            log_scales.push(ln_f64(scale as f64))
+            tau_sums.push(ln_f64(sum_pq))
+        }
+    }
+
+    let tau_reg = if log_scales.len() >= 2 {
+        regress_slope(&log_scales, &tau_sums)
+    } else {
+        return 0.0
+    }
+
+    // D_q = τ(q) / (q - 1)
+    if abs_f64(q - 1.0) > 0.01 {
+        tau_reg.slope / (q - 1.0)
+    } else {
+        tau_reg.slope
+    }
+}
+
+// ============================================================================
+// HELPER FUNCTIONS
+// ============================================================================
+
+/// Linear regression returning slope and variance
+fn regress_slope(x: &Vec<f64>, y: &Vec<f64>) -> RegressionResult {
+    let n = x.len()
+    if n < 2 {
+        return RegressionResult { slope: 0.0, var_slope: 1.0 }
+    }
+
+    var sum_x = 0.0
+    var sum_y = 0.0
+    var sum_xy = 0.0
+    var sum_x2 = 0.0
+
+    for i in 0..n {
+        sum_x = sum_x + x[i]
+        sum_y = sum_y + y[i]
+        sum_xy = sum_xy + x[i] * y[i]
+        sum_x2 = sum_x2 + x[i] * x[i]
+    }
+
+    let nf = n as f64
+    let denom = nf * sum_x2 - sum_x * sum_x
+
+    if abs_f64(denom) < 1e-10 {
+        return RegressionResult { slope: 0.0, var_slope: 1.0 }
+    }
+
+    let slope = (nf * sum_xy - sum_x * sum_y) / denom
+    let intercept = (sum_y - slope * sum_x) / nf
+
+    // Compute residual variance
+    var ss_res = 0.0
+    for i in 0..n {
+        let pred = intercept + slope * x[i]
+        let residual = y[i] - pred
+        ss_res = ss_res + residual * residual
+    }
+
+    let mse = if n > 2 { ss_res / (nf - 2.0) } else { ss_res }
+    let var_slope = if denom > 0.0 { mse * nf / denom } else { 1.0 }
+
+    RegressionResult {
+        slope: slope,
+        var_slope: var_slope,
+    }
+}
+
+/// Check if the structure is truly multifractal (spectrum width > threshold)
+pub fn is_multifractal(spectrum: &MultifractalSpectrum, threshold: f64) -> bool {
+    spectrum.spectrum_width > threshold
+}
+
+/// Get capacity dimension D_0 from spectrum
+pub fn capacity_dimension(spectrum: &MultifractalSpectrum) -> f64 {
+    for i in 0..spectrum.q_values.len() {
+        if abs_f64(spectrum.q_values[i]) < 0.01 {
+            return spectrum.d_q[i]
+        }
+    }
+    0.0
+}
+
+/// Get information dimension D_1 from spectrum
+pub fn information_dimension(spectrum: &MultifractalSpectrum) -> f64 {
+    for i in 0..spectrum.q_values.len() {
+        if abs_f64(spectrum.q_values[i] - 1.0) < 0.01 {
+            return spectrum.d_q[i]
+        }
+    }
+    0.0
+}
+
+/// Get correlation dimension D_2 from spectrum
+pub fn correlation_dimension(spectrum: &MultifractalSpectrum) -> f64 {
+    for i in 0..spectrum.q_values.len() {
+        if abs_f64(spectrum.q_values[i] - 2.0) < 0.01 {
+            return spectrum.d_q[i]
+        }
+    }
+    0.0
+}
+
+fn main() -> i32 {
+    print("Multifractal module loaded\n")
+
+    // Simple test
+    var test_grid = MeasureGrid {
+        data: vec![],
+        size_x: 8,
+        size_y: 8,
+        size_z: 8,
+    }
+
+    // Fill with random-ish pattern
+    for i in 0..512 {
+        test_grid.data.push((i % 7 + 1) as f64)
+    }
+
+    var scales: Vec<u32> = vec![]
+    scales.push(2)
+    scales.push(4)
+
+    let spectrum = multifractal_spectrum(&test_grid, -2.0, 2.0, 5, &scales)
+    print("Spectrum width: ")
+    print(spectrum.spectrum_width)
+    print("\n")
+
+    0
+}

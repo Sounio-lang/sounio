@@ -1,0 +1,385 @@
+//! stdlib/fractal/lacunarity.sio
+//!
+//! Lacunarity Analysis with Uncertainty Propagation
+//!
+//! Lacunarity measures the "gappiness" or texture heterogeneity of a pattern.
+
+// ============================================================================
+// HELPER FUNCTIONS
+// ============================================================================
+
+fn abs_f64(x: f64) -> f64 {
+    if x < 0.0 { 0.0 - x } else { x }
+}
+
+fn sqrt_f64(x: f64) -> f64 {
+    if x <= 0.0 { return 0.0 }
+    var y = x
+    for _ in 0..10 { y = 0.5 * (y + x / y) }
+    y
+}
+
+fn ln_f64(x: f64) -> f64 {
+    if x <= 0.0 { return -1000000.0 }
+    let ln2 = 0.6931471805599453
+    var v = x
+    var k: i64 = 0
+    while v > 2.0 { v = v / 2.0; k = k + 1 }
+    while v < 1.0 { v = v * 2.0; k = k - 1 }
+    let y = v - 1.0
+    var result = 0.0
+    var power = y
+    for i in 1..=15 {
+        if i % 2 == 1 { result = result + power / (i as f64) }
+        else { result = result - power / (i as f64) }
+        power = power * y
+    }
+    result + (k as f64) * ln2
+}
+
+fn pow_f64(x: f64, y: f64) -> f64 {
+    if x <= 0.0 { return 0.0 }
+    exp_f64(y * ln_f64(x))
+}
+
+fn exp_f64(x: f64) -> f64 {
+    let ln2 = 0.6931471805599453
+    var v = x
+    if v > 700.0 { v = 700.0 }
+    if v < -700.0 { return 0.0 }
+    let k = (v / ln2) as i64
+    let r = v - (k as f64) * ln2
+    var result = 1.0
+    var term = 1.0
+    for i in 1..=15 {
+        term = term * r / (i as f64)
+        result = result + term
+    }
+    if k >= 0 { for _ in 0..k { result = result * 2.0 } }
+    else { for _ in 0..(-k) { result = result / 2.0 } }
+    result
+}
+
+fn min_i64(a: i64, b: i64) -> i64 { if a < b { a } else { b } }
+fn max_i64(a: i64, b: i64) -> i64 { if a > b { a } else { b } }
+
+// ============================================================================
+// RESULT TYPES
+// ============================================================================
+
+/// Single lacunarity value with uncertainty
+pub struct LacunarityValue {
+    pub value: f64,
+    pub std_dev: f64,
+}
+
+/// Result of lacunarity analysis
+pub struct LacunarityResult {
+    pub lacunarity: Vec<f64>,
+    pub lacunarity_std: Vec<f64>,
+    pub scales: Vec<u32>,
+    pub prefactor: f64,
+    pub exponent: f64,
+    pub r_squared: f64,
+    pub exponent_std: f64,
+}
+
+/// Linear regression result
+struct RegressionResult {
+    pub intercept: f64,
+    pub slope: f64,
+    pub r_squared: f64,
+    pub var_intercept: f64,
+    pub var_slope: f64,
+}
+
+/// 3D binary voxel grid
+pub struct VoxelGrid {
+    pub data: Vec<bool>,
+    pub size_x: u32,
+    pub size_y: u32,
+    pub size_z: u32,
+}
+
+// ============================================================================
+// LACUNARITY COMPUTATION
+// ============================================================================
+
+/// Compute lacunarity for a voxel grid
+pub fn lacunarity(
+    grid: &VoxelGrid,
+    min_scale: u32,
+    max_scale: u32,
+) -> LacunarityResult {
+    let nx = grid.size_x
+    let ny = grid.size_y
+    let nz = grid.size_z
+
+    // Determine scales (powers of 2)
+    var scales: Vec<u32> = vec![]
+    var r = min_scale
+    let min_dim = min_i64(min_i64(nx as i64, ny as i64), nz as i64) as u32
+    while r <= max_scale && r <= min_dim {
+        scales.push(r)
+        r = r * 2
+    }
+
+    if scales.len() == 0 {
+        scales.push(1)
+    }
+
+    // Compute lacunarity at each scale
+    var lacunarity_values: Vec<f64> = vec![]
+    var lacunarity_stds: Vec<f64> = vec![]
+    var log_scales: Vec<f64> = vec![]
+    var log_lac: Vec<f64> = vec![]
+
+    for i in 0..scales.len() {
+        let scale = scales[i]
+        let lac = compute_lacunarity_at_scale(grid, scale)
+        lacunarity_values.push(lac.value)
+        lacunarity_stds.push(lac.std_dev)
+
+        if lac.value > 0.0 {
+            log_scales.push(ln_f64(scale as f64))
+            log_lac.push(ln_f64(lac.value))
+        }
+    }
+
+    // Power-law fit: log(Λ) = log(A) + β * log(r)
+    let reg = if log_scales.len() >= 2 {
+        linear_regression(&log_scales, &log_lac)
+    } else {
+        RegressionResult {
+            intercept: 0.0,
+            slope: 0.0,
+            r_squared: 0.0,
+            var_intercept: 1.0,
+            var_slope: 1.0,
+        }
+    }
+
+    let prefactor = exp_f64(reg.intercept)
+
+    LacunarityResult {
+        lacunarity: lacunarity_values,
+        lacunarity_std: lacunarity_stds,
+        scales: scales,
+        prefactor: prefactor,
+        exponent: reg.slope,
+        r_squared: reg.r_squared,
+        exponent_std: sqrt_f64(reg.var_slope),
+    }
+}
+
+/// Compute lacunarity at a specific scale
+fn compute_lacunarity_at_scale(grid: &VoxelGrid, box_size: u32) -> LacunarityValue {
+    let nx = grid.size_x
+    let ny = grid.size_y
+    let nz = grid.size_z
+    let r = box_size
+
+    if r > nx || r > ny || r > nz {
+        return LacunarityValue { value: 0.0, std_dev: 1.0 }
+    }
+
+    // Gliding box positions
+    let n_x = (nx - r + 1) as usize
+    let n_y = (ny - r + 1) as usize
+    let n_z = (nz - r + 1) as usize
+    let n_boxes = n_x * n_y * n_z
+
+    if n_boxes == 0 {
+        return LacunarityValue { value: 0.0, std_dev: 1.0 }
+    }
+
+    // Compute mass statistics
+    var sum_m: f64 = 0.0
+    var sum_m2: f64 = 0.0
+
+    for bx in 0..n_x {
+        for by in 0..n_y {
+            for bz in 0..n_z {
+                // Count occupied voxels in this box
+                var mass: u64 = 0
+                for dx in 0..r {
+                    for dy in 0..r {
+                        for dz in 0..r {
+                            let x = (bx as u32) + dx
+                            let y = (by as u32) + dy
+                            let z = (bz as u32) + dz
+                            if x < nx && y < ny && z < nz {
+                                let idx = ((z as usize) * (ny as usize) + (y as usize)) * (nx as usize) + (x as usize)
+                                if idx < grid.data.len() && grid.data[idx] {
+                                    mass = mass + 1
+                                }
+                            }
+                        }
+                    }
+                }
+
+                sum_m = sum_m + (mass as f64)
+                sum_m2 = sum_m2 + ((mass * mass) as f64)
+            }
+        }
+    }
+
+    // Compute lacunarity: Λ = <M²> / <M>² - 1
+    let mean_m = sum_m / (n_boxes as f64)
+    let mean_m2 = sum_m2 / (n_boxes as f64)
+
+    let lac = if mean_m > 0.0 {
+        mean_m2 / (mean_m * mean_m) - 1.0
+    } else {
+        0.0
+    }
+
+    // Uncertainty estimation
+    let var_m = (mean_m2 - mean_m * mean_m) / (n_boxes as f64)
+    let relative_var = if mean_m > 0.0 { 4.0 * var_m / (mean_m * mean_m) } else { 1.0 }
+    let total_var = relative_var * lac * lac
+
+    LacunarityValue {
+        value: lac,
+        std_dev: sqrt_f64(total_var),
+    }
+}
+
+/// Linear regression
+fn linear_regression(x: &Vec<f64>, y: &Vec<f64>) -> RegressionResult {
+    let n = x.len()
+    if n < 2 {
+        return RegressionResult {
+            intercept: 0.0,
+            slope: 0.0,
+            r_squared: 0.0,
+            var_intercept: 1.0,
+            var_slope: 1.0,
+        }
+    }
+
+    var sum_x = 0.0
+    var sum_y = 0.0
+    var sum_xy = 0.0
+    var sum_x2 = 0.0
+    var sum_y2 = 0.0
+
+    for i in 0..n {
+        sum_x = sum_x + x[i]
+        sum_y = sum_y + y[i]
+        sum_xy = sum_xy + x[i] * y[i]
+        sum_x2 = sum_x2 + x[i] * x[i]
+        sum_y2 = sum_y2 + y[i] * y[i]
+    }
+
+    let nf = n as f64
+    let denom = nf * sum_x2 - sum_x * sum_x
+
+    if abs_f64(denom) < 1e-10 {
+        return RegressionResult {
+            intercept: sum_y / nf,
+            slope: 0.0,
+            r_squared: 0.0,
+            var_intercept: 1.0,
+            var_slope: 1.0,
+        }
+    }
+
+    let slope = (nf * sum_xy - sum_x * sum_y) / denom
+    let intercept = (sum_y - slope * sum_x) / nf
+
+    // R² computation
+    let ss_tot = sum_y2 - sum_y * sum_y / nf
+    var ss_res = 0.0
+    for i in 0..n {
+        let pred = intercept + slope * x[i]
+        let residual = y[i] - pred
+        ss_res = ss_res + residual * residual
+    }
+
+    let r_squared = if ss_tot > 0.0 { 1.0 - ss_res / ss_tot } else { 0.0 }
+
+    // Variance estimates
+    let mse = if n > 2 { ss_res / (nf - 2.0) } else { ss_res }
+    let var_slope = if denom > 0.0 { mse * nf / denom } else { 1.0 }
+    let var_intercept = mse * sum_x2 / denom
+
+    RegressionResult {
+        intercept: intercept,
+        slope: slope,
+        r_squared: r_squared,
+        var_intercept: var_intercept,
+        var_slope: var_slope,
+    }
+}
+
+// ============================================================================
+// SIMPLIFIED GLIDING BOX
+// ============================================================================
+
+/// Simplified gliding box lacunarity for 1D data
+pub fn gliding_box_lacunarity(data: &Vec<f64>, box_size: u32) -> LacunarityValue {
+    let n = data.len()
+    let r = box_size as usize
+
+    if n < r {
+        return LacunarityValue { value: 0.0, std_dev: 1.0 }
+    }
+
+    let n_boxes = n - r + 1
+
+    // Compute box sums
+    var sum_m: f64 = 0.0
+    var sum_m2: f64 = 0.0
+
+    for i in 0..n_boxes {
+        var mass = 0.0
+        for j in 0..r {
+            mass = mass + data[i + j]
+        }
+        sum_m = sum_m + mass
+        sum_m2 = sum_m2 + mass * mass
+    }
+
+    let mean_m = sum_m / (n_boxes as f64)
+    let mean_m2 = sum_m2 / (n_boxes as f64)
+
+    let lac = if mean_m > 0.0 {
+        mean_m2 / (mean_m * mean_m) - 1.0
+    } else {
+        0.0
+    }
+
+    let var_m = (mean_m2 - mean_m * mean_m) / (n_boxes as f64)
+    let relative_var = if mean_m > 0.0 { 4.0 * var_m / (mean_m * mean_m) } else { 1.0 }
+    let total_var = relative_var * lac * lac
+
+    LacunarityValue {
+        value: lac,
+        std_dev: sqrt_f64(total_var),
+    }
+}
+
+fn main() -> i32 {
+    print("Lacunarity module loaded\n")
+
+    // Simple test
+    var test_grid = VoxelGrid {
+        data: vec![],
+        size_x: 10,
+        size_y: 10,
+        size_z: 10,
+    }
+
+    // Fill with some pattern
+    for i in 0..1000 {
+        test_grid.data.push(i % 3 == 0)
+    }
+
+    let result = lacunarity(&test_grid, 2, 8)
+    print("Lacunarity scales: ")
+    print(result.scales.len())
+    print("\n")
+
+    0
+}

@@ -1,0 +1,312 @@
+//! stdlib/fractal/dimension.sio
+//!
+//! Fractal Dimension Estimation with Uncertainty Propagation
+
+// ============================================================================
+// HELPER FUNCTIONS
+// ============================================================================
+
+fn abs_f64(x: f64) -> f64 {
+    if x < 0.0 { 0.0 - x } else { x }
+}
+
+fn sqrt_f64(x: f64) -> f64 {
+    if x <= 0.0 { return 0.0 }
+    var y = x
+    for _ in 0..10 { y = 0.5 * (y + x / y) }
+    y
+}
+
+const LN2: f64 = 0.6931471805599453
+
+fn ln_f64(x: f64) -> f64 {
+    if x <= 0.0 { return -1000000.0 }
+    var v = x
+    var k: i64 = 0
+    while v > 2.0 { v = v / 2.0; k = k + 1 }
+    while v < 1.0 { v = v * 2.0; k = k - 1 }
+    let y = v - 1.0
+    var result = 0.0
+    var power = y
+    for i in 1..=15 {
+        if i % 2 == 1 { result = result + power / (i as f64) }
+        else { result = result - power / (i as f64) }
+        power = power * y
+    }
+    result + (k as f64) * LN2
+}
+
+fn exp_f64(x: f64) -> f64 {
+    var v = x
+    if v > 700.0 { v = 700.0 }
+    if v < -700.0 { return 0.0 }
+    let k = (v / LN2) as i64
+    let r = v - (k as f64) * LN2
+    var result = 1.0
+    var term = 1.0
+    for i in 1..=15 {
+        term = term * r / (i as f64)
+        result = result + term
+    }
+    if k >= 0 { for _ in 0..k { result = result * 2.0 } }
+    else { for _ in 0..(-k) { result = result / 2.0 } }
+    result
+}
+
+fn min_u32(a: u32, b: u32) -> u32 { if a < b { a } else { b } }
+
+// ============================================================================
+// RESULT TYPES
+// ============================================================================
+
+/// Result of linear regression
+struct RegressionResult {
+    pub slope: f64,
+    pub intercept: f64,
+    pub r_squared: f64,
+    pub var_slope: f64,
+}
+
+/// Result of fractal dimension computation
+pub struct FractalDimensionResult {
+    pub dimension: f64,
+    pub std_dev: f64,
+    pub r_squared: f64,
+    pub num_scales: u32,
+}
+
+// ============================================================================
+// LINEAR REGRESSION
+// ============================================================================
+
+fn linear_regression(x: &Vec<f64>, y: &Vec<f64>) -> RegressionResult {
+    let n = x.len()
+    if n < 2 {
+        return RegressionResult {
+            slope: 0.0,
+            intercept: 0.0,
+            r_squared: 0.0,
+            var_slope: 1.0,
+        }
+    }
+
+    var sum_x = 0.0
+    var sum_y = 0.0
+    var sum_xy = 0.0
+    var sum_x2 = 0.0
+    var sum_y2 = 0.0
+
+    for i in 0..n {
+        sum_x = sum_x + x[i]
+        sum_y = sum_y + y[i]
+        sum_xy = sum_xy + x[i] * y[i]
+        sum_x2 = sum_x2 + x[i] * x[i]
+        sum_y2 = sum_y2 + y[i] * y[i]
+    }
+
+    let nf = n as f64
+    let denom = nf * sum_x2 - sum_x * sum_x
+
+    if abs_f64(denom) < 1e-10 {
+        return RegressionResult {
+            slope: 0.0,
+            intercept: sum_y / nf,
+            r_squared: 0.0,
+            var_slope: 1.0,
+        }
+    }
+
+    let slope = (nf * sum_xy - sum_x * sum_y) / denom
+    let intercept = (sum_y - slope * sum_x) / nf
+
+    let ss_tot = sum_y2 - sum_y * sum_y / nf
+    var ss_res = 0.0
+    for i in 0..n {
+        let pred = intercept + slope * x[i]
+        let residual = y[i] - pred
+        ss_res = ss_res + residual * residual
+    }
+
+    let r_squared = if ss_tot > 0.0 { 1.0 - ss_res / ss_tot } else { 0.0 }
+
+    let mse = if n > 2 { ss_res / (nf - 2.0) } else { ss_res }
+    let var_slope = if denom > 0.0 { mse * nf / denom } else { 1.0 }
+
+    RegressionResult {
+        slope: slope,
+        intercept: intercept,
+        r_squared: r_squared,
+        var_slope: var_slope,
+    }
+}
+
+// ============================================================================
+// BOX COUNTING DIMENSION
+// ============================================================================
+
+/// Compute box-counting dimension from 3D voxel data
+pub fn box_counting_dimension(
+    voxels: &Vec<bool>,
+    nx: u32,
+    ny: u32,
+    nz: u32,
+    min_scale: u32,
+    max_scale: u32,
+) -> FractalDimensionResult {
+    var scales: Vec<u32> = vec![]
+    var r = min_scale
+    let max_dim = min_u32(min_u32(nx, ny), nz)
+    while r <= max_scale && r <= max_dim {
+        scales.push(r)
+        r = r * 2
+    }
+
+    if scales.len() < 2 {
+        scales.push(1)
+        scales.push(2)
+    }
+
+    var log_inv_scales: Vec<f64> = vec![]
+    var log_counts: Vec<f64> = vec![]
+
+    for i in 0..scales.len() {
+        let scale = scales[i]
+        let count = count_boxes(voxels, nx, ny, nz, scale)
+
+        if count > 0 {
+            log_inv_scales.push(ln_f64(1.0 / (scale as f64)))
+            log_counts.push(ln_f64(count as f64))
+        }
+    }
+
+    let reg = linear_regression(&log_inv_scales, &log_counts)
+
+    FractalDimensionResult {
+        dimension: reg.slope,
+        std_dev: sqrt_f64(reg.var_slope),
+        r_squared: reg.r_squared,
+        num_scales: scales.len() as u32,
+    }
+}
+
+fn count_boxes(voxels: &Vec<bool>, nx: u32, ny: u32, nz: u32, scale: u32) -> u64 {
+    var count: u64 = 0
+
+    let bx_max = (nx + scale - 1) / scale
+    let by_max = (ny + scale - 1) / scale
+    let bz_max = (nz + scale - 1) / scale
+
+    for bx in 0..bx_max {
+        for by in 0..by_max {
+            for bz in 0..bz_max {
+                var found = false
+
+                for dx in 0..scale {
+                    if found { break }
+                    for dy in 0..scale {
+                        if found { break }
+                        for dz in 0..scale {
+                            let x = bx * scale + dx
+                            let y = by * scale + dy
+                            let z = bz * scale + dz
+
+                            if x < nx && y < ny && z < nz {
+                                let idx = ((z as usize) * (ny as usize) + (y as usize)) * (nx as usize) + (x as usize)
+                                if idx < voxels.len() && voxels[idx] {
+                                    found = true
+                                    break
+                                }
+                            }
+                        }
+                    }
+                }
+
+                if found { count = count + 1 }
+            }
+        }
+    }
+
+    count
+}
+
+// ============================================================================
+// HIGUCHI DIMENSION
+// ============================================================================
+
+/// Compute Higuchi fractal dimension for 1D time series
+pub fn higuchi_dimension(series: &Vec<f64>, k_max: u32) -> FractalDimensionResult {
+    let n = series.len()
+
+    if n < (2 * k_max) as usize {
+        return FractalDimensionResult {
+            dimension: 0.0,
+            std_dev: 1.0,
+            r_squared: 0.0,
+            num_scales: 0,
+        }
+    }
+
+    var log_inv_k: Vec<f64> = vec![]
+    var log_lengths: Vec<f64> = vec![]
+
+    for k in 1..=k_max {
+        var l_k = 0.0
+
+        for m in 1..=k {
+            var l_m = 0.0
+            let limit = ((n - (m as usize)) as f64 / (k as f64)) as usize
+
+            for i in 1..limit {
+                let idx1 = (m as usize) + i * (k as usize)
+                let idx2 = (m as usize) + (i - 1) * (k as usize)
+                if idx1 < n && idx2 < n {
+                    l_m = l_m + abs_f64(series[idx1] - series[idx2])
+                }
+            }
+
+            let norm = ((n - 1) as f64) / ((limit as f64) * (k as f64) * (k as f64))
+            l_m = l_m * norm
+            l_k = l_k + l_m
+        }
+
+        l_k = l_k / (k as f64)
+
+        if l_k > 0.0 {
+            log_inv_k.push(ln_f64(1.0 / (k as f64)))
+            log_lengths.push(ln_f64(l_k))
+        }
+    }
+
+    let reg = linear_regression(&log_inv_k, &log_lengths)
+
+    FractalDimensionResult {
+        dimension: reg.slope,
+        std_dev: sqrt_f64(reg.var_slope),
+        r_squared: reg.r_squared,
+        num_scales: k_max,
+    }
+}
+
+// ============================================================================
+// MAIN
+// ============================================================================
+
+fn main() -> i32 {
+    print("Fractal Dimension module loaded\n")
+
+    // Test with a simple example
+    var test_series: Vec<f64> = vec![]
+    for i in 0..100 {
+        let x = (i as f64) / 10.0
+        test_series.push(x * x)
+    }
+
+    let result = higuchi_dimension(&test_series, 10)
+    print("Higuchi test: D = ")
+    print(result.dimension)
+    print(", R² = ")
+    print(result.r_squared)
+    print("\n")
+
+    0
+}

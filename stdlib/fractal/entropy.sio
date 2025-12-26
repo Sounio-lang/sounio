@@ -1,0 +1,507 @@
+//! stdlib/fractal/entropy.sio
+//!
+//! Entropy Measures with Uncertainty Propagation
+//!
+//! Provides Shannon, Rényi, sample, approximate, and permutation entropy.
+
+// ============================================================================
+// HELPER FUNCTIONS
+// ============================================================================
+
+fn abs_f64(x: f64) -> f64 {
+    if x < 0.0 { 0.0 - x } else { x }
+}
+
+fn sqrt_f64(x: f64) -> f64 {
+    if x <= 0.0 { return 0.0 }
+    var y = x
+    for _ in 0..10 { y = 0.5 * (y + x / y) }
+    y
+}
+
+fn ln_f64(x: f64) -> f64 {
+    if x <= 0.0 { return -1000000.0 }
+    let ln2 = 0.6931471805599453
+    var v = x
+    var k: i64 = 0
+    while v > 2.0 { v = v / 2.0; k = k + 1 }
+    while v < 1.0 { v = v * 2.0; k = k - 1 }
+    let y = v - 1.0
+    var result = 0.0
+    var power = y
+    for i in 1..=15 {
+        if i % 2 == 1 { result = result + power / (i as f64) }
+        else { result = result - power / (i as f64) }
+        power = power * y
+    }
+    result + (k as f64) * ln2
+}
+
+fn pow_f64(x: f64, y: f64) -> f64 {
+    if x <= 0.0 { return 0.0 }
+    exp_f64(y * ln_f64(x))
+}
+
+fn exp_f64(x: f64) -> f64 {
+    let ln2 = 0.6931471805599453
+    var v = x
+    if v > 700.0 { v = 700.0 }
+    if v < -700.0 { return 0.0 }
+    let k = (v / ln2) as i64
+    let r = v - (k as f64) * ln2
+    var result = 1.0
+    var term = 1.0
+    for i in 1..=15 {
+        term = term * r / (i as f64)
+        result = result + term
+    }
+    if k >= 0 { for _ in 0..k { result = result * 2.0 } }
+    else { for _ in 0..(-k) { result = result / 2.0 } }
+    result
+}
+
+fn min_f64(a: f64, b: f64) -> f64 { if a < b { a } else { b } }
+fn max_f64(a: f64, b: f64) -> f64 { if a > b { a } else { b } }
+
+// ============================================================================
+// RESULT TYPES
+// ============================================================================
+
+/// Result of entropy computation with uncertainty
+pub struct EntropyResult {
+    pub value: f64,
+    pub std_dev: f64,
+    pub sample_size: usize,
+}
+
+/// Result of histogram computation
+struct HistogramResult {
+    pub counts: Vec<u64>,
+    pub min_val: f64,
+    pub max_val: f64,
+}
+
+// ============================================================================
+// HISTOGRAM COMPUTATION
+// ============================================================================
+
+fn compute_histogram(data: &Vec<f64>, bins: u32) -> HistogramResult {
+    if data.len() == 0 {
+        return HistogramResult {
+            counts: vec![],
+            min_val: 0.0,
+            max_val: 0.0,
+        }
+    }
+
+    // Find data range
+    var min_val = data[0]
+    var max_val = data[0]
+    for i in 1..data.len() {
+        min_val = min_f64(min_val, data[i])
+        max_val = max_f64(max_val, data[i])
+    }
+
+    // Handle degenerate case
+    if max_val == min_val {
+        var counts: Vec<u64> = vec![]
+        counts.push(data.len() as u64)
+        return HistogramResult {
+            counts: counts,
+            min_val: min_val,
+            max_val: max_val,
+        }
+    }
+
+    // Initialize bins
+    var counts: Vec<u64> = vec![]
+    for _ in 0..bins {
+        counts.push(0)
+    }
+
+    // Fill histogram
+    let bin_width = (max_val - min_val) / (bins as f64)
+    for i in 0..data.len() {
+        var bin = ((data[i] - min_val) / bin_width) as usize
+        if bin >= bins as usize {
+            bin = (bins - 1) as usize
+        }
+        counts[bin] = counts[bin] + 1
+    }
+
+    HistogramResult {
+        counts: counts,
+        min_val: min_val,
+        max_val: max_val,
+    }
+}
+
+// ============================================================================
+// SHANNON ENTROPY
+// ============================================================================
+
+/// Compute Shannon entropy with Miller-Madow bias correction
+///
+/// H = -Σ pᵢ log(pᵢ)
+pub fn shannon_entropy(data: &Vec<f64>, bins: u32) -> EntropyResult {
+    let n = data.len()
+
+    if n == 0 {
+        return EntropyResult {
+            value: 0.0,
+            std_dev: 0.0,
+            sample_size: 0,
+        }
+    }
+
+    // Compute histogram
+    let hist = compute_histogram(data, bins)
+    let counts = hist.counts
+
+    // Compute probabilities and entropy
+    var entropy = 0.0
+    var non_zero_bins = 0
+
+    for i in 0..counts.len() {
+        if counts[i] > 0 {
+            let p = (counts[i] as f64) / (n as f64)
+            entropy = entropy - p * ln_f64(p)
+            non_zero_bins = non_zero_bins + 1
+        }
+    }
+
+    // Miller-Madow bias correction
+    let bias_correction = ((non_zero_bins - 1) as f64) / (2.0 * (n as f64))
+    let corrected_entropy = entropy + bias_correction
+
+    // Uncertainty estimation
+    var sum_p_log2 = 0.0
+    for i in 0..counts.len() {
+        if counts[i] > 0 {
+            let p = (counts[i] as f64) / (n as f64)
+            let log_p = ln_f64(p)
+            sum_p_log2 = sum_p_log2 + p * log_p * log_p
+        }
+    }
+
+    let var_term = sum_p_log2 - entropy * entropy
+    let sample_var = if var_term > 0.0 { var_term / (n as f64) } else { 0.0 }
+    let bin_var = 1.0 / ((bins * bins) as f64)
+    let total_var = sample_var + bin_var
+
+    EntropyResult {
+        value: corrected_entropy,
+        std_dev: sqrt_f64(total_var),
+        sample_size: n,
+    }
+}
+
+// ============================================================================
+// RÉNYI ENTROPY
+// ============================================================================
+
+/// Compute Rényi entropy of order q
+///
+/// H_q = (1/(1-q)) log(Σ pᵢ^q)
+pub fn renyi_entropy(data: &Vec<f64>, q: f64, bins: u32) -> EntropyResult {
+    let n = data.len()
+
+    if n == 0 {
+        return EntropyResult {
+            value: 0.0,
+            std_dev: 0.0,
+            sample_size: 0,
+        }
+    }
+
+    // Handle q = 1 case (Shannon entropy limit)
+    if abs_f64(q - 1.0) < 0.001 {
+        return shannon_entropy(data, bins)
+    }
+
+    // Compute histogram
+    let hist = compute_histogram(data, bins)
+    let counts = hist.counts
+
+    // Compute Σ pᵢ^q
+    var sum_p_q = 0.0
+
+    for i in 0..counts.len() {
+        if counts[i] > 0 {
+            let p = (counts[i] as f64) / (n as f64)
+            sum_p_q = sum_p_q + pow_f64(p, q)
+        }
+    }
+
+    // Handle edge cases
+    if sum_p_q <= 0.0 {
+        return EntropyResult {
+            value: 0.0,
+            std_dev: 1.0,
+            sample_size: n,
+        }
+    }
+
+    // Rényi entropy
+    let entropy = ln_f64(sum_p_q) / (1.0 - q)
+
+    // Uncertainty estimation (approximate)
+    let sample_var = 1.0 / (n as f64)
+    let q_factor = if q > 1.0 { q } else { 1.0 / (2.0 - q) }
+    let total_var = sample_var * q_factor
+
+    EntropyResult {
+        value: entropy,
+        std_dev: sqrt_f64(total_var),
+        sample_size: n,
+    }
+}
+
+// ============================================================================
+// SAMPLE ENTROPY
+// ============================================================================
+
+/// Compute Sample Entropy (SampEn) for time series
+///
+/// Measures regularity/predictability of a time series.
+pub fn sample_entropy(series: &Vec<f64>, m: u32, r: f64) -> EntropyResult {
+    let n = series.len()
+
+    if n < ((m + 2) as usize) {
+        return EntropyResult {
+            value: 0.0,
+            std_dev: 1.0,
+            sample_size: n,
+        }
+    }
+
+    // Count matches for templates of length m and m+1
+    var count_m: u64 = 0
+    var count_m1: u64 = 0
+
+    let n_templates = n - (m as usize)
+
+    // For each pair of templates
+    for i in 0..n_templates {
+        for j in (i + 1)..n_templates {
+            // Check if templates of length m match within tolerance r
+            var match_m = true
+            for k in 0..(m as usize) {
+                if abs_f64(series[i + k] - series[j + k]) > r {
+                    match_m = false
+                }
+            }
+
+            if match_m {
+                count_m = count_m + 1
+
+                // Check if templates of length m+1 also match
+                if i + (m as usize) < n && j + (m as usize) < n {
+                    if abs_f64(series[i + (m as usize)] - series[j + (m as usize)]) <= r {
+                        count_m1 = count_m1 + 1
+                    }
+                }
+            }
+        }
+    }
+
+    // Compute sample entropy
+    let sampen = if count_m > 0 && count_m1 > 0 {
+        0.0 - ln_f64((count_m1 as f64) / (count_m as f64))
+    } else if count_m > 0 {
+        ln_f64(count_m as f64)
+    } else {
+        0.0
+    }
+
+    // Uncertainty estimation
+    let var_term = if count_m > 0 {
+        1.0 / (count_m as f64) + 1.0 / ((count_m1 + 1) as f64)
+    } else {
+        1.0
+    }
+
+    EntropyResult {
+        value: sampen,
+        std_dev: sqrt_f64(var_term),
+        sample_size: n,
+    }
+}
+
+// ============================================================================
+// APPROXIMATE ENTROPY
+// ============================================================================
+
+/// Compute approximate entropy (ApEn)
+pub fn approximate_entropy(series: &Vec<f64>, m: u32, r: f64) -> EntropyResult {
+    let n = series.len()
+
+    if n < ((m + 1) as usize) {
+        return EntropyResult {
+            value: 0.0,
+            std_dev: 1.0,
+            sample_size: n,
+        }
+    }
+
+    // Compute φ(m) and φ(m+1)
+    let phi_m = compute_phi(series, m, r)
+    let phi_m1 = compute_phi(series, m + 1, r)
+
+    let apen = phi_m - phi_m1
+
+    let sample_var = 1.0 / (n as f64)
+
+    EntropyResult {
+        value: apen,
+        std_dev: sqrt_f64(sample_var),
+        sample_size: n,
+    }
+}
+
+/// Helper: compute φ for ApEn
+fn compute_phi(x: &Vec<f64>, m: u32, r: f64) -> f64 {
+    let n = x.len()
+    if n < (m as usize) { return 0.0 }
+
+    let n_templates = n - (m as usize) + 1
+    var sum_log_c = 0.0
+
+    for i in 0..n_templates {
+        var count = 0
+
+        for j in 0..n_templates {
+            var match_flag = true
+            for k in 0..(m as usize) {
+                if abs_f64(x[i + k] - x[j + k]) > r {
+                    match_flag = false
+                }
+            }
+            if match_flag {
+                count = count + 1
+            }
+        }
+
+        let c_i = (count as f64) / (n_templates as f64)
+        if c_i > 0.0 {
+            sum_log_c = sum_log_c + ln_f64(c_i)
+        }
+    }
+
+    sum_log_c / (n_templates as f64)
+}
+
+// ============================================================================
+// PERMUTATION ENTROPY
+// ============================================================================
+
+/// Compute permutation entropy
+pub fn permutation_entropy(series: &Vec<f64>, order: u32, delay: u32) -> EntropyResult {
+    let n = series.len()
+
+    let pattern_len = order as usize
+    let delay_val = delay as usize
+
+    if n < pattern_len * delay_val {
+        return EntropyResult {
+            value: 0.0,
+            std_dev: 1.0,
+            sample_size: n,
+        }
+    }
+
+    let n_patterns = n - (pattern_len - 1) * delay_val
+    var pattern_counts: Vec<u64> = vec![]
+
+    // Initialize for up to 24 permutations (order ≤ 4)
+    let max_perms = 24
+    for _ in 0..max_perms {
+        pattern_counts.push(0)
+    }
+
+    for i in 0..n_patterns {
+        // Extract pattern
+        var pattern: Vec<f64> = vec![]
+        for j in 0..pattern_len {
+            pattern.push(series[i + j * delay_val])
+        }
+
+        // Compute ordinal pattern index
+        let idx = ordinal_pattern_index(&pattern, order) % max_perms
+        pattern_counts[idx] = pattern_counts[idx] + 1
+    }
+
+    // Compute entropy
+    var entropy = 0.0
+    for i in 0..max_perms {
+        if pattern_counts[i] > 0 {
+            let p = (pattern_counts[i] as f64) / (n_patterns as f64)
+            entropy = entropy - p * ln_f64(p)
+        }
+    }
+
+    // Normalize by log(order!)
+    let factorial = factorial_u32(order)
+    let max_entropy = ln_f64(factorial as f64)
+    let normalized = if max_entropy > 0.0 { entropy / max_entropy } else { 0.0 }
+
+    let sample_var = 1.0 / (n_patterns as f64)
+
+    EntropyResult {
+        value: normalized,
+        std_dev: sqrt_f64(sample_var),
+        sample_size: n,
+    }
+}
+
+/// Helper: compute ordinal pattern index
+fn ordinal_pattern_index(pattern: &Vec<f64>, order: u32) -> usize {
+    var idx: usize = 0
+    for i in 0..pattern.len() {
+        for j in (i + 1)..pattern.len() {
+            if pattern[i] > pattern[j] {
+                idx = idx + 1
+            }
+        }
+        idx = idx * (order as usize)
+    }
+    idx
+}
+
+/// Helper: factorial
+fn factorial_u32(n: u32) -> u32 {
+    if n <= 1 { return 1 }
+    var result: u32 = 1
+    for i in 2..=n {
+        result = result * i
+    }
+    result
+}
+
+// ============================================================================
+// MAIN
+// ============================================================================
+
+fn main() -> i32 {
+    print("Entropy module loaded\n")
+
+    // Test with a simple example
+    var test_data: Vec<f64> = vec![]
+    for i in 0..100 {
+        test_data.push((i as f64) / 10.0)
+    }
+
+    let shannon = shannon_entropy(&test_data, 10)
+    print("Shannon entropy: ")
+    print(shannon.value)
+    print(" ± ")
+    print(shannon.std_dev)
+    print("\n")
+
+    let sampen = sample_entropy(&test_data, 2, 0.2)
+    print("Sample entropy: ")
+    print(sampen.value)
+    print("\n")
+
+    0
+}
