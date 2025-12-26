@@ -505,7 +505,14 @@ impl<'a> LoweringContext<'a> {
                 let arg_vals: Vec<_> = args.iter().filter_map(|a| self.lower_expr(a)).collect();
 
                 // Check if it's a direct function call
-                if let HirExprKind::Local(name) = &func.kind {
+                // Try Local first, then Global (builtins can appear as either)
+                let func_name = match &func.kind {
+                    HirExprKind::Local(name) => Some(name.as_str()),
+                    HirExprKind::Global(name) => Some(name.as_str()),
+                    _ => None,
+                };
+
+                if let Some(name) = func_name {
                     // Check user-defined functions first
                     if self.functions.contains_key(name) {
                         return Some(self.builder.build_call(name, arg_vals, ty));
@@ -514,7 +521,7 @@ impl<'a> LoweringContext<'a> {
                     // Check for builtins that should be lowered to direct calls
                     // These are handled specially by code generators
                     if matches!(
-                        name.as_str(),
+                        name,
                         "print" | "println" | "dbg" | "panic" | "assert" | "assert_eq"
                     ) {
                         return Some(self.builder.build_call(name, arg_vals, ty));

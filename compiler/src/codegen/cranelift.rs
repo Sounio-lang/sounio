@@ -43,6 +43,24 @@ extern "C" fn runtime_print_str(ptr: *const u8, len: usize) {
     }
 }
 
+/// Print a null-terminated C string
+#[cfg(feature = "jit")]
+extern "C" fn runtime_print_cstr(ptr: *const u8) {
+    if !ptr.is_null() {
+        let cstr = unsafe { std::ffi::CStr::from_ptr(ptr as *const std::ffi::c_char) };
+        if let Ok(s) = cstr.to_str() {
+            print!("{}", s);
+            let _ = std::io::stdout().flush();
+        }
+    }
+}
+
+// Global storage for string constants during JIT execution
+#[cfg(feature = "jit")]
+use std::sync::Mutex;
+#[cfg(feature = "jit")]
+static STRING_STORAGE: Mutex<Vec<std::ffi::CString>> = Mutex::new(Vec::new());
+
 /// Print a boolean value
 #[cfg(feature = "jit")]
 extern "C" fn runtime_print_bool(val: i8) {
@@ -277,6 +295,7 @@ impl JitCompiler {
         jit_builder.symbol("runtime_print_f64", runtime_print_f64 as *const u8);
         jit_builder.symbol("runtime_print_newline", runtime_print_newline as *const u8);
         jit_builder.symbol("runtime_print_str", runtime_print_str as *const u8);
+        jit_builder.symbol("runtime_print_cstr", runtime_print_cstr as *const u8);
         jit_builder.symbol("runtime_print_bool", runtime_print_bool as *const u8);
         jit_builder.symbol("runtime_debug_test", runtime_debug_test as *const u8);
 
@@ -378,6 +397,17 @@ impl JitCompiler {
         self.func_ids.insert("runtime_print_str".to_string(), id);
         self.func_sigs
             .insert("runtime_print_str".to_string(), sig_print_str);
+
+        // runtime_print_cstr(ptr) -> void  (null-terminated C string)
+        let mut sig_print_cstr = Signature::new(call_conv);
+        sig_print_cstr.params.push(AbiParam::new(types::I64)); // ptr
+        let id = self
+            .jit_module
+            .declare_function("runtime_print_cstr", Linkage::Import, &sig_print_cstr)
+            .map_err(|e| format!("Failed to declare runtime_print_cstr: {}", e))?;
+        self.func_ids.insert("runtime_print_cstr".to_string(), id);
+        self.func_sigs
+            .insert("runtime_print_cstr".to_string(), sig_print_cstr);
 
         // runtime_print_bool(i8) -> void
         let mut sig_print_bool = Signature::new(call_conv);
@@ -521,6 +551,8 @@ fn translate_function(
 ) -> Result<(), String> {
     let mut values: HashMap<ValueId, cranelift_codegen::ir::Value> = HashMap::new();
     let mut blocks: HashMap<BlockId, cranelift_codegen::ir::Block> = HashMap::new();
+    // Track which ValueIds are string constants (for print handling)
+    let mut string_values: std::collections::HashSet<ValueId> = std::collections::HashSet::new();
 
     // Create all blocks first
     for block in &func.blocks {
@@ -544,7 +576,7 @@ fn translate_function(
     // Translate each block (skip entry block switch since we're already there)
     let mut first = true;
     for block in &func.blocks {
-        translate_block(builder, block, &blocks, &mut values, func_refs, first)?;
+        translate_block(builder, block, &blocks, &mut values, &mut string_values, func_refs, first)?;
         first = false;
     }
 
@@ -560,6 +592,7 @@ fn translate_block(
     block: &HlirBlock,
     blocks: &HashMap<BlockId, cranelift_codegen::ir::Block>,
     values: &mut HashMap<ValueId, cranelift_codegen::ir::Value>,
+    string_values: &mut std::collections::HashSet<ValueId>,
     func_refs: &HashMap<String, cranelift_codegen::ir::FuncRef>,
     is_entry: bool,
 ) -> Result<(), String> {
@@ -572,7 +605,7 @@ fn translate_block(
 
     // Translate instructions
     for instr in &block.instructions {
-        let result = translate_instruction(builder, instr, values, func_refs)?;
+        let result = translate_instruction(builder, instr, values, string_values, func_refs)?;
         if let (Some(res_id), Some(val)) = (instr.result, result) {
             values.insert(res_id, val);
         }
@@ -589,12 +622,19 @@ fn translate_instruction(
     builder: &mut FunctionBuilder,
     instr: &crate::hlir::HlirInstr,
     values: &HashMap<ValueId, cranelift_codegen::ir::Value>,
+    string_values: &mut std::collections::HashSet<ValueId>,
     func_refs: &HashMap<String, cranelift_codegen::ir::FuncRef>,
 ) -> Result<Option<cranelift_codegen::ir::Value>, String> {
     let ty = hlir_to_cranelift_type(&instr.ty);
 
     match &instr.op {
         Op::Const(constant) => {
+            // Track string constants for proper print handling
+            if let HlirConstant::String(_) = constant {
+                if let Some(result_id) = instr.result {
+                    string_values.insert(result_id);
+                }
+            }
             let val = translate_constant(builder, constant, &instr.ty, func_refs)?;
             Ok(Some(val))
         }
@@ -625,34 +665,43 @@ fn translate_instruction(
 
             // Handle print/println specially by routing to runtime functions
             if name == "print" || name == "println" {
-                for arg_val in &arg_vals {
+                for (i, arg_val) in arg_vals.iter().enumerate() {
                     let arg_type = builder.func.dfg.value_type(*arg_val);
+                    let arg_id = args[i];
 
-                    // Choose runtime function based on argument type
-                    let runtime_func = if arg_type == types::F64 || arg_type == types::F32 {
-                        "runtime_print_f64"
-                    } else if arg_type == types::I8 {
-                        "runtime_print_bool"
+                    // Check if this argument is a string constant
+                    if string_values.contains(&arg_id) {
+                        // Use runtime_print_cstr for string constants
+                        if let Some(&func_ref) = func_refs.get("runtime_print_cstr") {
+                            builder.ins().call(func_ref, &[*arg_val]);
+                        }
                     } else {
-                        "runtime_print_i64"
-                    };
+                        // Choose runtime function based on argument type
+                        let runtime_func = if arg_type == types::F64 || arg_type == types::F32 {
+                            "runtime_print_f64"
+                        } else if arg_type == types::I8 {
+                            "runtime_print_bool"
+                        } else {
+                            "runtime_print_i64"
+                        };
 
-                    if let Some(&func_ref) = func_refs.get(runtime_func) {
-                        // Convert argument to expected type if needed
-                        let converted_arg = if runtime_func == "runtime_print_f64"
-                            && arg_type == types::F32
-                        {
-                            builder.ins().fpromote(types::F64, *arg_val)
-                        } else if runtime_func == "runtime_print_i64" && arg_type != types::I64 {
-                            if arg_type.is_int() && arg_type.bits() < 64 {
-                                builder.ins().sextend(types::I64, *arg_val)
+                        if let Some(&func_ref) = func_refs.get(runtime_func) {
+                            // Convert argument to expected type if needed
+                            let converted_arg = if runtime_func == "runtime_print_f64"
+                                && arg_type == types::F32
+                            {
+                                builder.ins().fpromote(types::F64, *arg_val)
+                            } else if runtime_func == "runtime_print_i64" && arg_type != types::I64 {
+                                if arg_type.is_int() && arg_type.bits() < 64 {
+                                    builder.ins().sextend(types::I64, *arg_val)
+                                } else {
+                                    *arg_val
+                                }
                             } else {
                                 *arg_val
-                            }
-                        } else {
-                            *arg_val
-                        };
-                        builder.ins().call(func_ref, &[converted_arg]);
+                            };
+                            builder.ins().call(func_ref, &[converted_arg]);
+                        }
                     }
                 }
 
@@ -891,9 +940,22 @@ fn translate_constant(
                 Ok(builder.ins().f64const(*f))
             }
         }
-        HlirConstant::String(_) => {
-            // Strings need special handling - for now return null ptr
-            Ok(builder.ins().iconst(types::I64, 0))
+        HlirConstant::String(s) => {
+            // Store the string in global storage so it survives during JIT execution
+            // Use CString for null-termination so runtime_print_cstr can use it
+            let cstring = std::ffi::CString::new(s.as_str())
+                .unwrap_or_else(|_| std::ffi::CString::new("").unwrap());
+
+            // Store in global storage to keep alive, then get pointer from stored CString
+            if let Ok(mut storage) = STRING_STORAGE.lock() {
+                storage.push(cstring);
+                // Get pointer from the stored CString (it's now at the end of the vec)
+                let stored_ptr = storage.last().unwrap().as_ptr() as i64;
+                Ok(builder.ins().iconst(types::I64, stored_ptr))
+            } else {
+                // Fallback to null if lock fails
+                Ok(builder.ins().iconst(types::I64, 0))
+            }
         }
         HlirConstant::Null(_) => Ok(builder.ins().iconst(types::I64, 0)),
         HlirConstant::Undef(_) => Ok(builder.ins().iconst(cl_ty, 0)),
