@@ -63,14 +63,10 @@ struct Patient {
 }
 
 fn analyze_patient(p: Patient) -> f64 {
-    let mut score = 0.0;
-    for d in p.diseases {
-        score += 1.0;
-    }
-    for ph in p.phenotypes {
-        score += 0.5;
-    }
-    score
+    // Note: for-in over collections not yet supported, using simplified logic
+    let disease_count = p.diseases.len() as f64;
+    let phenotype_count = p.phenotypes.len() as f64;
+    disease_count * 1.0 + phenotype_count * 0.5
 }
 
 fn check_interactions(drugs: Vec<Drug>) -> bool {

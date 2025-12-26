@@ -2471,9 +2471,18 @@ impl TypeChecker {
                     _ => {
                         // For now, only range-based for loops are supported
                         // TODO: Support iterators over arrays, slices, etc.
-                        return Err(miette::miette!(
-                            "for loops currently only support range expressions (e.g., for i in 1..10)"
-                        ));
+                        self.error(
+                            "for loops currently only support range expressions (e.g., for i in 1..10)",
+                            Span::dummy(),
+                        );
+                        // Return an error expression to allow error recovery
+                        (
+                            HirExprKind::Block(HirBlock {
+                                stmts: vec![],
+                                ty: HirType::Error,
+                            }),
+                            HirType::Error,
+                        )
                     }
                 }
             }

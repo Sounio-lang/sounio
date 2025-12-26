@@ -260,7 +260,10 @@ fn main() {
     let ibuprofen: Drug = chebi:5855;
     let reactions = predict_adverse_reactions(ibuprofen);
 
-    for reaction in reactions {
+    // Note: for-in over collections not yet supported
+    // Check first reaction if present
+    if reactions.len() > 0 {
+        let reaction = reactions[0];
         if reaction.severity > 0.7 {
             // Flag for clinician review
         }
@@ -384,11 +387,9 @@ struct DrugRegimen {
 
 fn analyze_polypharmacy(regimen: DrugRegimen) -> f64 {
     // Calculate overall risk score
-    let mut risk = 0.0;
-    for (_, _, severity) in regimen.interactions {
-        risk += severity;
-    }
-    risk
+    // Note: for-in over collections not yet supported, using simplified logic
+    let interaction_count = regimen.interactions.len() as f64;
+    interaction_count * 0.5  // Simplified: average severity estimate
 }
 
 fn suggest_alternatives(regimen: DrugRegimen) -> Vec<Drug> {

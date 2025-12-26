@@ -36,13 +36,13 @@ pub struct TestHarness {
 impl TestHarness {
     /// Create a new test harness
     pub fn new() -> Self {
-        // Look for compiler binary (dc / dc.exe on Windows)
+        // Look for compiler binary (souc / souc.exe on Windows)
         // Check release first, then fall back to debug
         let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
         #[cfg(windows)]
-        let binary_name = "dc.exe";
+        let binary_name = "souc.exe";
         #[cfg(not(windows))]
-        let binary_name = "dc";
+        let binary_name = "souc";
         let release_path = manifest_dir.join(format!("target/release/{}", binary_name));
         let debug_path = manifest_dir.join(format!("target/debug/{}", binary_name));
         let compiler_path = if release_path.exists() {
