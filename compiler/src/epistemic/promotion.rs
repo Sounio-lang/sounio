@@ -146,24 +146,28 @@ impl PromotionLattice {
 
     pub fn meet(&self, a: UncertaintyLevel, b: UncertaintyLevel) -> UncertaintyLevel {
         if a == b { return a; }
-        match (a.height(), b.height()) {
-            (ah, bh) if ah == bh => UncertaintyLevel::Point,
-            (ah, bh) if ah < bh => a,
-            _ => b,
-        }
+        // If a can promote to b, a is below b in the lattice
+        if a.can_promote_to(b) { return a; }
+        // If b can promote to a, b is below a in the lattice
+        if b.can_promote_to(a) { return b; }
+        // Neither can promote to the other - find common lower bound
+        // For our lattice, incomparable elements meet at Point
+        UncertaintyLevel::Point
     }
 
     pub fn join(&self, a: UncertaintyLevel, b: UncertaintyLevel) -> UncertaintyLevel {
         if a == b { return a; }
-        let (ah, bh) = (a.height(), b.height());
-        if ah > bh { return a; }
-        if bh > ah { return b; }
-        match a.height() {
-            0 => UncertaintyLevel::Interval,
-            1 => UncertaintyLevel::Affine,
-            2 => UncertaintyLevel::Distribution,
-            _ => UncertaintyLevel::Particles,
-        }
+        // If a can promote to b, b is above a in the lattice
+        if a.can_promote_to(b) { return b; }
+        // If b can promote to a, a is above b in the lattice
+        if b.can_promote_to(a) { return a; }
+        // Neither can promote to the other - find least upper bound
+        // For our branching lattice:
+        // - Interval and Fuzzy join at Distribution (via their respective branches)
+        // - Affine and DempsterShafer join at Distribution
+        // - Anything incomparable at height 1 joins at Distribution
+        // - Anything incomparable at height 2 joins at Distribution
+        UncertaintyLevel::Distribution
     }
 
     pub fn is_subtype(&self, sub: UncertaintyLevel, sup: UncertaintyLevel) -> bool {
