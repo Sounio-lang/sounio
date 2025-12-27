@@ -531,7 +531,7 @@ impl Z3CausalIdentifier {
         }
 
         match solver.check_sat() {
-            Ok(crate::smt::solver::VerificationResult::Unsat) => {
+            Ok(crate::smt::VerificationResult::Unsat) => {
                 // ¬P is UNSAT means P is valid
                 (
                     true,
@@ -546,7 +546,7 @@ impl Z3CausalIdentifier {
                     },
                 )
             }
-            Ok(crate::smt::solver::VerificationResult::Sat) => {
+            Ok(crate::smt::VerificationResult::Sat) => {
                 // ¬P is SAT means P has a counterexample
                 let cex = if let Some(model) = solver.get_model() {
                     "Model found".to_string()
@@ -568,7 +568,7 @@ impl Z3CausalIdentifier {
                     },
                 )
             }
-            Ok(crate::smt::solver::VerificationResult::Timeout) => (
+            Ok(crate::smt::VerificationResult::Timeout) => (
                 false,
                 SmtProof {
                     assertions: vec![formula.clone()],

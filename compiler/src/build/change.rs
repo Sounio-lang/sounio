@@ -272,7 +272,6 @@ pub enum ChangeDetectorError {
 mod tests {
     use super::*;
     use std::fs;
-    use std::io::Write;
     use tempfile::TempDir;
 
     #[test]
