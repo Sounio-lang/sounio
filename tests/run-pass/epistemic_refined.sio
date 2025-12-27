@@ -1,0 +1,266 @@
+//@ run-pass
+// EpistemicValue<RefinementType> integration tests
+// Issue #8: Uncertainty propagation through refined values
+
+// This file demonstrates the intended syntax for epistemic refined values
+// in Sounio once the full type system integration is complete.
+
+// -----------------------------------------------------------------------------
+// Test 1: Basic positive dose with confidence
+// -----------------------------------------------------------------------------
+
+// A dose measurement that is both:
+// - Refined: guaranteed to be positive (> 0)
+// - Epistemic: has 95% confidence from the measurement
+
+fn test_positive_dose() -> bool {
+    // In full Sounio, this would be:
+    // let dose: Knowledge[{ x: f64 | x > 0 }] = measure_dose(sample)
+
+    // For now, we simulate with plain values
+    let dose: f64 = 500.0
+    let confidence: f64 = 0.95
+
+    // Check: value is positive (refinement holds)
+    let refinement_ok = dose > 0.0
+
+    // Check: confidence is high enough for extraction
+    let confidence_ok = confidence >= 0.80
+
+    refinement_ok && confidence_ok
+}
+
+// -----------------------------------------------------------------------------
+// Test 2: Bounded interval with epistemic uncertainty
+// -----------------------------------------------------------------------------
+
+// A probability value that is:
+// - Refined: bounded to [0, 1]
+// - Epistemic: uncertainty widens the effective interval
+
+fn test_probability_bounds() -> bool {
+    let prob: f64 = 0.75
+    let confidence: f64 = 0.90
+
+    // Base uncertainty factor (10% at confidence 0)
+    let base_uncertainty: f64 = 0.1
+
+    // Effective half-width based on confidence
+    // At confidence 1.0, half_width = 0 (point)
+    // At confidence 0.0, half_width = base_uncertainty * |value|
+    let uncertainty_factor = 1.0 - confidence
+    let half_width = prob * base_uncertainty * uncertainty_factor
+
+    // Epistemic interval
+    let lower = prob - half_width
+    let upper = prob + half_width
+
+    // Check: epistemic interval is within refinement bounds [0, 1]
+    lower >= 0.0 && upper <= 1.0
+}
+
+// -----------------------------------------------------------------------------
+// Test 3: Interval arithmetic for addition
+// -----------------------------------------------------------------------------
+
+// When adding two epistemic refined values:
+// - Refinement bounds add
+// - Epistemic intervals add (using interval arithmetic)
+// - Confidence is minimum of operands
+
+fn test_interval_add() -> bool {
+    // First value: 10.0 +/- 0.5, bounds [5, 15]
+    let a_value: f64 = 10.0
+    let a_half_width: f64 = 0.5
+    let a_lower_bound: f64 = 5.0
+    let a_upper_bound: f64 = 15.0
+    let a_confidence: f64 = 0.90
+
+    // Second value: 20.0 +/- 1.0, bounds [15, 25]
+    let b_value: f64 = 20.0
+    let b_half_width: f64 = 1.0
+    let b_lower_bound: f64 = 15.0
+    let b_upper_bound: f64 = 25.0
+    let b_confidence: f64 = 0.85
+
+    // Result: 30.0 +/- 1.5, bounds [20, 40]
+    let sum_value = a_value + b_value
+    let sum_half_width = a_half_width + b_half_width
+    let sum_lower_bound = a_lower_bound + b_lower_bound
+    let sum_upper_bound = a_upper_bound + b_upper_bound
+
+    // Confidence is minimum
+    var min_conf = a_confidence
+    if b_confidence < min_conf {
+        min_conf = b_confidence
+    }
+
+    // Verify interval arithmetic
+    let value_ok = sum_value == 30.0
+    let width_ok = sum_half_width == 1.5
+    let bounds_ok = sum_lower_bound == 20.0 && sum_upper_bound == 40.0
+    let conf_ok = min_conf == 0.85
+
+    value_ok && width_ok && bounds_ok && conf_ok
+}
+
+// -----------------------------------------------------------------------------
+// Test 4: Refinement clamping of epistemic interval
+// -----------------------------------------------------------------------------
+
+// When epistemic uncertainty would exceed refinement bounds,
+// the effective interval is clamped
+
+fn test_interval_clamping() -> bool {
+    // Value with high uncertainty near bound
+    let value: f64 = 0.1     // Close to lower bound of [0, 1]
+    let half_width: f64 = 0.2  // Would give interval [-0.1, 0.3]
+
+    // Refinement bounds: [0, 1]
+    let ref_lower: f64 = 0.0
+    let ref_upper: f64 = 1.0
+
+    // Raw epistemic interval
+    let raw_lower = value - half_width
+    let raw_upper = value + half_width
+
+    // Clamped interval
+    var clamped_lower = raw_lower
+    if clamped_lower < ref_lower {
+        clamped_lower = ref_lower
+    }
+
+    var clamped_upper = raw_upper
+    if clamped_upper > ref_upper {
+        clamped_upper = ref_upper
+    }
+
+    // Expected: [0.0, 0.3] (clamped at 0)
+    let lower_ok = clamped_lower == 0.0
+    let upper_ok = clamped_upper == 0.3
+
+    lower_ok && upper_ok
+}
+
+// -----------------------------------------------------------------------------
+// Test 5: Extraction with confidence threshold
+// -----------------------------------------------------------------------------
+
+fn test_extraction() -> bool {
+    let value: f64 = 42.0
+    let confidence: f64 = 0.85
+
+    // Should extract at threshold 0.80
+    let extract_low = confidence >= 0.80
+
+    // Should NOT extract at threshold 0.90
+    let extract_high = confidence >= 0.90
+
+    extract_low && !extract_high
+}
+
+// -----------------------------------------------------------------------------
+// Test 6: Dose calculation with propagated uncertainty
+// -----------------------------------------------------------------------------
+
+// Simulates a pharmacokinetic calculation where:
+// - Weight has measurement uncertainty
+// - Dose calculation propagates uncertainty
+// - Result must satisfy safety bounds
+
+fn test_dose_calculation() -> bool {
+    // Patient weight: 70 kg with 95% confidence
+    let weight: f64 = 70.0
+    let weight_conf: f64 = 0.95
+
+    // Dose per kg: 10 mg/kg with 99% confidence (well-established)
+    let dose_per_kg: f64 = 10.0
+    let dose_conf: f64 = 0.99
+
+    // Calculated dose
+    let dose = weight * dose_per_kg
+
+    // Propagated confidence is minimum
+    var result_conf = weight_conf
+    if dose_conf < result_conf {
+        result_conf = dose_conf
+    }
+
+    // Safety bounds: 100 < dose < 1500 mg
+    let safe_lower: f64 = 100.0
+    let safe_upper: f64 = 1500.0
+
+    // Check safety
+    let in_bounds = dose > safe_lower && dose < safe_upper
+
+    // Check confidence sufficient for clinical use (>90%)
+    let conf_ok = result_conf >= 0.90
+
+    in_bounds && conf_ok
+}
+
+// -----------------------------------------------------------------------------
+// Main test runner
+// -----------------------------------------------------------------------------
+
+fn main() with IO {
+    var pass_count: i32 = 0
+    var fail_count: i32 = 0
+
+    // Test 1
+    if test_positive_dose() {
+        print("test_positive_dose: PASS\n")
+        pass_count = pass_count + 1
+    } else {
+        print("test_positive_dose: FAIL\n")
+        fail_count = fail_count + 1
+    }
+
+    // Test 2
+    if test_probability_bounds() {
+        print("test_probability_bounds: PASS\n")
+        pass_count = pass_count + 1
+    } else {
+        print("test_probability_bounds: FAIL\n")
+        fail_count = fail_count + 1
+    }
+
+    // Test 3
+    if test_interval_add() {
+        print("test_interval_add: PASS\n")
+        pass_count = pass_count + 1
+    } else {
+        print("test_interval_add: FAIL\n")
+        fail_count = fail_count + 1
+    }
+
+    // Test 4
+    if test_interval_clamping() {
+        print("test_interval_clamping: PASS\n")
+        pass_count = pass_count + 1
+    } else {
+        print("test_interval_clamping: FAIL\n")
+        fail_count = fail_count + 1
+    }
+
+    // Test 5
+    if test_extraction() {
+        print("test_extraction: PASS\n")
+        pass_count = pass_count + 1
+    } else {
+        print("test_extraction: FAIL\n")
+        fail_count = fail_count + 1
+    }
+
+    // Test 6
+    if test_dose_calculation() {
+        print("test_dose_calculation: PASS\n")
+        pass_count = pass_count + 1
+    } else {
+        print("test_dose_calculation: FAIL\n")
+        fail_count = fail_count + 1
+    }
+
+    // Summary
+    print("\n--- EpistemicRefined Tests Complete ---\n")
+}

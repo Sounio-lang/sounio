@@ -56,6 +56,9 @@ pub mod time_travel;
 pub mod kec;
 pub mod promotion;
 
+// Epistemic + Refinement Type integration
+pub mod refined_epistemic;
+
 pub use confidence::{Confidence, EpistemicStatus, Evidence, EvidenceKind, Revisability, Source};
 pub use heterogeneity::{
     HeterogeneityConfig, HeterogeneityResolver, ResolutionResult, ResolutionStrategy,
@@ -116,4 +119,11 @@ pub use kec::{
 // Uncertainty promotion lattice
 pub use promotion::{
     PromotedValue, Promoter, Promotable, PromotionLattice, UncertaintyLevel,
+};
+
+// Epistemic + Refinement Type integration (Issue #8)
+pub use refined_epistemic::{
+    EpistemicRefinedValue, EpistemicInterval, RefinementBounds,
+    EpistemicRefinedConfig, RefinedCreationError,
+    PositiveEpistemic, BoundedEpistemic, ProbabilityEpistemic,
 };
