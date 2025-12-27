@@ -1,0 +1,894 @@
+//! HTTP Client Module for Sounio
+//!
+//! Provides HTTP client functionality using FFI to libcurl.
+//! Supports GET, POST, PUT, DELETE methods with headers, query params, and JSON body.
+//!
+//! # Quick Start
+//!
+//! ```d
+//! import http::*
+//!
+//! fn main() with IO {
+//!     // Simple GET request
+//!     let response = get("https://api.example.com/data")?;
+//!     println("Status: {}", response.status);
+//!     println("Body: {}", response.body);
+//!
+//!     // POST with JSON body
+//!     let response = Client::new()
+//!         .header("Content-Type", "application/json")
+//!         .post("https://api.example.com/users", "{\"name\": \"Alice\"}")?;
+//! }
+//! ```
+
+module http
+
+// =============================================================================
+// Error Types
+// =============================================================================
+
+/// HTTP error types
+pub enum HttpError {
+    /// Failed to connect to server
+    ConnectionFailed { host: String, message: String },
+    /// Request timed out
+    Timeout { url: String, timeout_ms: u64 },
+    /// Invalid URL format
+    InvalidUrl { url: String, reason: String },
+    /// SSL/TLS error
+    SslError { message: String },
+    /// DNS resolution failed
+    DnsError { host: String },
+    /// Too many redirects
+    TooManyRedirects { url: String, count: u32 },
+    /// Response body too large
+    ResponseTooLarge { size: u64, max_size: u64 },
+    /// Failed to send request body
+    SendError { message: String },
+    /// Failed to receive response
+    ReceiveError { message: String },
+    /// Invalid response format
+    InvalidResponse { message: String },
+    /// Other HTTP error
+    Other { code: i32, message: String },
+}
+
+impl HttpError {
+    /// Get error message
+    pub fn message(self) -> String {
+        match self {
+            HttpError::ConnectionFailed { host, message } =>
+                "Connection failed to " ++ host ++ ": " ++ message,
+            HttpError::Timeout { url, timeout_ms } =>
+                "Request to " ++ url ++ " timed out after " ++ timeout_ms.to_string() ++ "ms",
+            HttpError::InvalidUrl { url, reason } =>
+                "Invalid URL '" ++ url ++ "': " ++ reason,
+            HttpError::SslError { message } =>
+                "SSL/TLS error: " ++ message,
+            HttpError::DnsError { host } =>
+                "DNS resolution failed for " ++ host,
+            HttpError::TooManyRedirects { url, count } =>
+                "Too many redirects (" ++ count.to_string() ++ ") for " ++ url,
+            HttpError::ResponseTooLarge { size, max_size } =>
+                "Response size " ++ size.to_string() ++ " exceeds max " ++ max_size.to_string(),
+            HttpError::SendError { message } =>
+                "Failed to send request: " ++ message,
+            HttpError::ReceiveError { message } =>
+                "Failed to receive response: " ++ message,
+            HttpError::InvalidResponse { message } =>
+                "Invalid response: " ++ message,
+            HttpError::Other { code, message } =>
+                "HTTP error " ++ code.to_string() ++ ": " ++ message,
+        }
+    }
+}
+
+impl ToString for HttpError {
+    fn to_string(self) -> String {
+        self.message()
+    }
+}
+
+// =============================================================================
+// HTTP Method Enum
+// =============================================================================
+
+/// HTTP request methods
+pub enum Method {
+    GET,
+    POST,
+    PUT,
+    DELETE,
+    PATCH,
+    HEAD,
+    OPTIONS,
+}
+
+impl Method {
+    /// Convert to string representation
+    pub fn as_str(self) -> &str {
+        match self {
+            Method::GET => "GET",
+            Method::POST => "POST",
+            Method::PUT => "PUT",
+            Method::DELETE => "DELETE",
+            Method::PATCH => "PATCH",
+            Method::HEAD => "HEAD",
+            Method::OPTIONS => "OPTIONS",
+        }
+    }
+}
+
+// =============================================================================
+// HTTP Header
+// =============================================================================
+
+/// HTTP header key-value pair
+pub struct Header {
+    pub name: String,
+    pub value: String,
+}
+
+impl Header {
+    /// Create a new header
+    pub fn new(name: String, value: String) -> Header {
+        Header { name: name, value: value }
+    }
+
+    /// Common Content-Type headers
+    pub fn content_type_json() -> Header {
+        Header::new("Content-Type".to_string(), "application/json".to_string())
+    }
+
+    pub fn content_type_form() -> Header {
+        Header::new("Content-Type".to_string(), "application/x-www-form-urlencoded".to_string())
+    }
+
+    pub fn content_type_text() -> Header {
+        Header::new("Content-Type".to_string(), "text/plain".to_string())
+    }
+
+    /// Authorization header
+    pub fn authorization(token: String) -> Header {
+        Header::new("Authorization".to_string(), token)
+    }
+
+    pub fn bearer(token: String) -> Header {
+        Header::new("Authorization".to_string(), "Bearer " ++ token)
+    }
+
+    /// Convert to "Name: Value" format
+    pub fn to_header_string(self) -> String {
+        self.name ++ ": " ++ self.value
+    }
+}
+
+// =============================================================================
+// Query Parameter
+// =============================================================================
+
+/// URL query parameter
+pub struct QueryParam {
+    pub key: String,
+    pub value: String,
+}
+
+impl QueryParam {
+    /// Create a new query parameter
+    pub fn new(key: String, value: String) -> QueryParam {
+        QueryParam { key: key, value: value }
+    }
+}
+
+// =============================================================================
+// HTTP Response
+// =============================================================================
+
+/// HTTP response
+pub struct Response {
+    /// HTTP status code
+    pub status: u16,
+    /// Status text (e.g., "OK", "Not Found")
+    pub status_text: String,
+    /// Response headers
+    pub headers: Vec<Header>,
+    /// Response body as string
+    pub body: String,
+    /// Response body as bytes
+    pub body_bytes: Vec<u8>,
+    /// Content-Type header value
+    pub content_type: Option<String>,
+    /// Content-Length header value
+    pub content_length: Option<u64>,
+}
+
+impl Response {
+    /// Check if response is successful (2xx status)
+    pub fn is_success(self: &Response) -> bool {
+        self.status >= 200 && self.status < 300
+    }
+
+    /// Check if response is a redirect (3xx status)
+    pub fn is_redirect(self: &Response) -> bool {
+        self.status >= 300 && self.status < 400
+    }
+
+    /// Check if response is client error (4xx status)
+    pub fn is_client_error(self: &Response) -> bool {
+        self.status >= 400 && self.status < 500
+    }
+
+    /// Check if response is server error (5xx status)
+    pub fn is_server_error(self: &Response) -> bool {
+        self.status >= 500 && self.status < 600
+    }
+
+    /// Get a header value by name (case-insensitive)
+    pub fn get_header(self: &Response, name: &str) -> Option<String> {
+        let lower_name = name.to_lowercase();
+        for header in self.headers.iter() {
+            if header.name.to_lowercase() == lower_name {
+                return Some(header.value.clone());
+            }
+        }
+        None
+    }
+
+    /// Parse body as JSON
+    pub fn json<T: FromJson>(self: &Response) -> Result<T, json::ParseError> {
+        json::from_str(&self.body)
+    }
+}
+
+// =============================================================================
+// HTTP Request Builder
+// =============================================================================
+
+/// HTTP request configuration
+pub struct Request {
+    method: Method,
+    url: String,
+    headers: Vec<Header>,
+    query_params: Vec<QueryParam>,
+    body: Option<String>,
+    body_bytes: Option<Vec<u8>>,
+    timeout_ms: u64,
+    follow_redirects: bool,
+    max_redirects: u32,
+    verify_ssl: bool,
+}
+
+impl Request {
+    /// Create a new GET request
+    pub fn get(url: String) -> Request {
+        Request {
+            method: Method::GET,
+            url: url,
+            headers: Vec::new(),
+            query_params: Vec::new(),
+            body: None,
+            body_bytes: None,
+            timeout_ms: 30000,
+            follow_redirects: true,
+            max_redirects: 10,
+            verify_ssl: true,
+        }
+    }
+
+    /// Create a new POST request
+    pub fn post(url: String) -> Request {
+        Request {
+            method: Method::POST,
+            url: url,
+            headers: Vec::new(),
+            query_params: Vec::new(),
+            body: None,
+            body_bytes: None,
+            timeout_ms: 30000,
+            follow_redirects: true,
+            max_redirects: 10,
+            verify_ssl: true,
+        }
+    }
+
+    /// Create a new PUT request
+    pub fn put(url: String) -> Request {
+        Request {
+            method: Method::PUT,
+            url: url,
+            headers: Vec::new(),
+            query_params: Vec::new(),
+            body: None,
+            body_bytes: None,
+            timeout_ms: 30000,
+            follow_redirects: true,
+            max_redirects: 10,
+            verify_ssl: true,
+        }
+    }
+
+    /// Create a new DELETE request
+    pub fn delete(url: String) -> Request {
+        Request {
+            method: Method::DELETE,
+            url: url,
+            headers: Vec::new(),
+            query_params: Vec::new(),
+            body: None,
+            body_bytes: None,
+            timeout_ms: 30000,
+            follow_redirects: true,
+            max_redirects: 10,
+            verify_ssl: true,
+        }
+    }
+
+    /// Add a header
+    pub fn header(self, name: String, value: String) -> Request {
+        var req = self;
+        req.headers.push(Header::new(name, value));
+        req
+    }
+
+    /// Add multiple headers
+    pub fn headers(self, hdrs: Vec<Header>) -> Request {
+        var req = self;
+        for h in hdrs {
+            req.headers.push(h);
+        }
+        req
+    }
+
+    /// Add a query parameter
+    pub fn query(self, key: String, value: String) -> Request {
+        var req = self;
+        req.query_params.push(QueryParam::new(key, value));
+        req
+    }
+
+    /// Set request body as string
+    pub fn body(self, body: String) -> Request {
+        var req = self;
+        req.body = Some(body);
+        req
+    }
+
+    /// Set request body as JSON
+    pub fn json<T: ToJson>(self, value: &T) -> Request {
+        var req = self;
+        req.body = Some(json::to_string(value));
+        req.headers.push(Header::content_type_json());
+        req
+    }
+
+    /// Set request body as bytes
+    pub fn body_bytes(self, data: Vec<u8>) -> Request {
+        var req = self;
+        req.body_bytes = Some(data);
+        req
+    }
+
+    /// Set timeout in milliseconds
+    pub fn timeout(self, ms: u64) -> Request {
+        var req = self;
+        req.timeout_ms = ms;
+        req
+    }
+
+    /// Set whether to follow redirects
+    pub fn follow_redirects(self, follow: bool) -> Request {
+        var req = self;
+        req.follow_redirects = follow;
+        req
+    }
+
+    /// Set maximum number of redirects
+    pub fn max_redirects(self, max: u32) -> Request {
+        var req = self;
+        req.max_redirects = max;
+        req
+    }
+
+    /// Set whether to verify SSL certificates
+    pub fn verify_ssl(self, verify: bool) -> Request {
+        var req = self;
+        req.verify_ssl = verify;
+        req
+    }
+
+    /// Build the full URL with query parameters
+    fn build_url(self: &Request) -> String {
+        if self.query_params.is_empty() {
+            return self.url.clone();
+        }
+
+        var url = self.url.clone();
+        var first = true;
+
+        // Check if URL already has query params
+        if url.contains("?") {
+            first = false;
+        } else {
+            url = url ++ "?";
+        }
+
+        for param in self.query_params.iter() {
+            if !first {
+                url = url ++ "&";
+            }
+            url = url ++ url_encode(&param.key) ++ "=" ++ url_encode(&param.value);
+            first = false;
+        }
+
+        url
+    }
+
+    /// Send the request and get response
+    pub fn send(self) -> Result<Response, HttpError> with IO {
+        // Build URL with query parameters
+        let full_url = self.build_url();
+
+        // Call FFI to perform HTTP request
+        extern "C" {
+            fn __sounio_http_request(
+                method: *const u8, method_len: i64,
+                url: *const u8, url_len: i64,
+                headers: *const u8, headers_len: i64,
+                body: *const u8, body_len: i64,
+                timeout_ms: u64,
+                follow_redirects: i32,
+                max_redirects: u32,
+                verify_ssl: i32,
+                out_status: *mut u16,
+                out_body: *mut *mut u8,
+                out_body_len: *mut i64,
+                out_headers: *mut *mut u8,
+                out_headers_len: *mut i64
+            ) -> i32;
+        }
+
+        // Serialize headers to "Name: Value\n" format
+        var headers_str = "";
+        for h in self.headers.iter() {
+            headers_str = headers_str ++ h.to_header_string() ++ "\n";
+        }
+
+        // Get body
+        let body_str = match self.body {
+            Some(b) => b,
+            None => "".to_string(),
+        };
+
+        let method_str = self.method.as_str();
+
+        var out_status: u16 = 0;
+        var out_body: *mut u8 = null_ptr();
+        var out_body_len: i64 = 0;
+        var out_headers: *mut u8 = null_ptr();
+        var out_headers_len: i64 = 0;
+
+        let result = unsafe {
+            __sounio_http_request(
+                method_str.as_ptr(), method_str.len() as i64,
+                full_url.as_ptr(), full_url.len() as i64,
+                headers_str.as_ptr(), headers_str.len() as i64,
+                body_str.as_ptr(), body_str.len() as i64,
+                self.timeout_ms,
+                if self.follow_redirects { 1 } else { 0 },
+                self.max_redirects,
+                if self.verify_ssl { 1 } else { 0 },
+                &mut out_status,
+                &mut out_body, &mut out_body_len,
+                &mut out_headers, &mut out_headers_len
+            )
+        };
+
+        match result {
+            0 => {
+                // Success - parse response
+                let body = unsafe {
+                    String::from_raw_parts(out_body, out_body_len as usize)
+                };
+                let headers_raw = unsafe {
+                    String::from_raw_parts(out_headers, out_headers_len as usize)
+                };
+
+                // Parse response headers
+                let parsed_headers = parse_headers(&headers_raw);
+
+                // Find Content-Type and Content-Length
+                var content_type: Option<String> = None;
+                var content_length: Option<u64> = None;
+
+                for h in parsed_headers.iter() {
+                    let lower = h.name.to_lowercase();
+                    if lower == "content-type" {
+                        content_type = Some(h.value.clone());
+                    } else if lower == "content-length" {
+                        content_length = h.value.parse::<u64>().ok();
+                    }
+                }
+
+                Ok(Response {
+                    status: out_status,
+                    status_text: status_text(out_status),
+                    headers: parsed_headers,
+                    body: body.clone(),
+                    body_bytes: body.as_bytes().to_vec(),
+                    content_type: content_type,
+                    content_length: content_length,
+                })
+            },
+            1 => Err(HttpError::ConnectionFailed {
+                host: extract_host(&full_url),
+                message: "Connection refused or failed".to_string(),
+            }),
+            2 => Err(HttpError::Timeout {
+                url: full_url,
+                timeout_ms: self.timeout_ms,
+            }),
+            3 => Err(HttpError::InvalidUrl {
+                url: full_url,
+                reason: "Malformed URL".to_string(),
+            }),
+            4 => Err(HttpError::SslError {
+                message: "SSL certificate verification failed".to_string(),
+            }),
+            5 => Err(HttpError::DnsError {
+                host: extract_host(&full_url),
+            }),
+            6 => Err(HttpError::TooManyRedirects {
+                url: full_url,
+                count: self.max_redirects,
+            }),
+            _ => Err(HttpError::Other {
+                code: result,
+                message: "Unknown HTTP error".to_string(),
+            }),
+        }
+    }
+}
+
+// =============================================================================
+// HTTP Client
+// =============================================================================
+
+/// HTTP client with shared configuration
+pub struct Client {
+    base_url: Option<String>,
+    default_headers: Vec<Header>,
+    timeout_ms: u64,
+    follow_redirects: bool,
+    max_redirects: u32,
+    verify_ssl: bool,
+}
+
+impl Client {
+    /// Create a new HTTP client with default settings
+    pub fn new() -> Client {
+        Client {
+            base_url: None,
+            default_headers: Vec::new(),
+            timeout_ms: 30000,
+            follow_redirects: true,
+            max_redirects: 10,
+            verify_ssl: true,
+        }
+    }
+
+    /// Set base URL for all requests
+    pub fn base_url(self, url: String) -> Client {
+        var client = self;
+        client.base_url = Some(url);
+        client
+    }
+
+    /// Add a default header for all requests
+    pub fn header(self, name: String, value: String) -> Client {
+        var client = self;
+        client.default_headers.push(Header::new(name, value));
+        client
+    }
+
+    /// Set default timeout
+    pub fn timeout(self, ms: u64) -> Client {
+        var client = self;
+        client.timeout_ms = ms;
+        client
+    }
+
+    /// Set whether to follow redirects by default
+    pub fn follow_redirects(self, follow: bool) -> Client {
+        var client = self;
+        client.follow_redirects = follow;
+        client
+    }
+
+    /// Resolve URL against base URL
+    fn resolve_url(self: &Client, url: &str) -> String {
+        match self.base_url {
+            Some(base) => {
+                if url.starts_with("http://") || url.starts_with("https://") {
+                    url.to_string()
+                } else if url.starts_with("/") {
+                    base.clone() ++ url
+                } else {
+                    base.clone() ++ "/" ++ url
+                }
+            },
+            None => url.to_string(),
+        }
+    }
+
+    /// Create a request with client defaults applied
+    fn build_request(self: &Client, method: Method, url: String) -> Request {
+        let full_url = self.resolve_url(&url);
+        var req = Request {
+            method: method,
+            url: full_url,
+            headers: self.default_headers.clone(),
+            query_params: Vec::new(),
+            body: None,
+            body_bytes: None,
+            timeout_ms: self.timeout_ms,
+            follow_redirects: self.follow_redirects,
+            max_redirects: self.max_redirects,
+            verify_ssl: self.verify_ssl,
+        };
+        req
+    }
+
+    /// Perform a GET request
+    pub fn get(self: &Client, url: &str) -> Result<Response, HttpError> with IO {
+        self.build_request(Method::GET, url.to_string()).send()
+    }
+
+    /// Perform a POST request with body
+    pub fn post(self: &Client, url: &str, body: &str) -> Result<Response, HttpError> with IO {
+        self.build_request(Method::POST, url.to_string())
+            .body(body.to_string())
+            .send()
+    }
+
+    /// Perform a POST request with JSON body
+    pub fn post_json<T: ToJson>(self: &Client, url: &str, data: &T) -> Result<Response, HttpError> with IO {
+        self.build_request(Method::POST, url.to_string())
+            .json(data)
+            .send()
+    }
+
+    /// Perform a PUT request with body
+    pub fn put(self: &Client, url: &str, body: &str) -> Result<Response, HttpError> with IO {
+        self.build_request(Method::PUT, url.to_string())
+            .body(body.to_string())
+            .send()
+    }
+
+    /// Perform a PUT request with JSON body
+    pub fn put_json<T: ToJson>(self: &Client, url: &str, data: &T) -> Result<Response, HttpError> with IO {
+        self.build_request(Method::PUT, url.to_string())
+            .json(data)
+            .send()
+    }
+
+    /// Perform a DELETE request
+    pub fn delete(self: &Client, url: &str) -> Result<Response, HttpError> with IO {
+        self.build_request(Method::DELETE, url.to_string()).send()
+    }
+
+    /// Perform a PATCH request with body
+    pub fn patch(self: &Client, url: &str, body: &str) -> Result<Response, HttpError> with IO {
+        self.build_request(Method::PATCH, url.to_string())
+            .body(body.to_string())
+            .send()
+    }
+}
+
+// =============================================================================
+// Convenience Functions
+// =============================================================================
+
+/// Simple GET request
+pub fn get(url: &str) -> Result<Response, HttpError> with IO {
+    Request::get(url.to_string()).send()
+}
+
+/// Simple POST request with body
+pub fn post(url: &str, body: &str) -> Result<Response, HttpError> with IO {
+    Request::post(url.to_string())
+        .body(body.to_string())
+        .send()
+}
+
+/// Simple POST request with JSON body
+pub fn post_json<T: ToJson>(url: &str, data: &T) -> Result<Response, HttpError> with IO {
+    Request::post(url.to_string())
+        .json(data)
+        .send()
+}
+
+/// Simple PUT request with body
+pub fn put(url: &str, body: &str) -> Result<Response, HttpError> with IO {
+    Request::put(url.to_string())
+        .body(body.to_string())
+        .send()
+}
+
+/// Simple DELETE request
+pub fn delete(url: &str) -> Result<Response, HttpError> with IO {
+    Request::delete(url.to_string()).send()
+}
+
+// =============================================================================
+// URL Utilities
+// =============================================================================
+
+/// URL-encode a string
+pub fn url_encode(s: &str) -> String {
+    var result = "";
+    for c in s.chars() {
+        if c.is_alphanumeric() || c == '-' || c == '_' || c == '.' || c == '~' {
+            result = result ++ c.to_string();
+        } else if c == ' ' {
+            result = result ++ "+";
+        } else {
+            // Encode as %XX
+            let bytes = c.to_string().as_bytes();
+            for b in bytes {
+                result = result ++ "%" ++ hex_byte(b);
+            }
+        }
+    }
+    result
+}
+
+/// URL-decode a string
+pub fn url_decode(s: &str) -> String {
+    var result = "";
+    var i: usize = 0;
+    let len = s.len();
+
+    while i < len {
+        let c = s.char_at(i);
+        if c == '+' {
+            result = result ++ " ";
+            i = i + 1;
+        } else if c == '%' && i + 2 < len {
+            // Decode %XX
+            let hex = s.slice(i + 1, i + 3);
+            match u8::from_str_radix(&hex, 16) {
+                Ok(b) => result = result ++ char::from(b).to_string(),
+                Err(_) => result = result ++ c.to_string(),
+            }
+            i = i + 3;
+        } else {
+            result = result ++ c.to_string();
+            i = i + 1;
+        }
+    }
+    result
+}
+
+// =============================================================================
+// Internal Helper Functions
+// =============================================================================
+
+/// Convert byte to hex string
+fn hex_byte(b: u8) -> String {
+    let hex_chars = "0123456789ABCDEF";
+    let high = hex_chars.char_at((b >> 4) as usize);
+    let low = hex_chars.char_at((b & 0x0F) as usize);
+    high.to_string() ++ low.to_string()
+}
+
+/// Extract host from URL
+fn extract_host(url: &str) -> String {
+    // Simple extraction - find host between :// and first /
+    let start = match url.find("://") {
+        Some(idx) => idx + 3,
+        None => 0,
+    };
+
+    let rest = url.slice(start, url.len());
+    let end = match rest.find("/") {
+        Some(idx) => idx,
+        None => rest.len(),
+    };
+
+    rest.slice(0, end).to_string()
+}
+
+/// Parse response headers from raw string
+fn parse_headers(raw: &str) -> Vec<Header> {
+    var headers: Vec<Header> = Vec::new();
+
+    for line in raw.lines() {
+        if let Some(colon_idx) = line.find(":") {
+            let name = line.slice(0, colon_idx).trim().to_string();
+            let value = line.slice(colon_idx + 1, line.len()).trim().to_string();
+            headers.push(Header::new(name, value));
+        }
+    }
+
+    headers
+}
+
+/// Get status text for HTTP status code
+fn status_text(status: u16) -> String {
+    match status {
+        100 => "Continue".to_string(),
+        101 => "Switching Protocols".to_string(),
+        200 => "OK".to_string(),
+        201 => "Created".to_string(),
+        202 => "Accepted".to_string(),
+        204 => "No Content".to_string(),
+        301 => "Moved Permanently".to_string(),
+        302 => "Found".to_string(),
+        304 => "Not Modified".to_string(),
+        307 => "Temporary Redirect".to_string(),
+        308 => "Permanent Redirect".to_string(),
+        400 => "Bad Request".to_string(),
+        401 => "Unauthorized".to_string(),
+        403 => "Forbidden".to_string(),
+        404 => "Not Found".to_string(),
+        405 => "Method Not Allowed".to_string(),
+        408 => "Request Timeout".to_string(),
+        409 => "Conflict".to_string(),
+        410 => "Gone".to_string(),
+        422 => "Unprocessable Entity".to_string(),
+        429 => "Too Many Requests".to_string(),
+        500 => "Internal Server Error".to_string(),
+        501 => "Not Implemented".to_string(),
+        502 => "Bad Gateway".to_string(),
+        503 => "Service Unavailable".to_string(),
+        504 => "Gateway Timeout".to_string(),
+        _ => "Unknown".to_string(),
+    }
+}
+
+// =============================================================================
+// Tests
+// =============================================================================
+
+fn main() -> i32 {
+    print("HTTP module loaded successfully\n");
+
+    // Test URL encoding
+    let encoded = url_encode("hello world");
+    if encoded == "hello+world" {
+        print("URL encode test: PASS\n");
+    } else {
+        print("URL encode test: FAIL\n");
+        return 1;
+    }
+
+    // Test URL decoding
+    let decoded = url_decode("hello+world");
+    if decoded == "hello world" {
+        print("URL decode test: PASS\n");
+    } else {
+        print("URL decode test: FAIL\n");
+        return 1;
+    }
+
+    // Test header creation
+    let header = Header::bearer("token123".to_string());
+    if header.name == "Authorization" && header.value == "Bearer token123" {
+        print("Header test: PASS\n");
+    } else {
+        print("Header test: FAIL\n");
+        return 1;
+    }
+
+    // Test host extraction
+    let host = extract_host("https://api.example.com/v1/users");
+    if host == "api.example.com" {
+        print("Host extract test: PASS\n");
+    } else {
+        print("Host extract test: FAIL\n");
+        return 1;
+    }
+
+    print("All HTTP tests PASSED\n");
+    0
+}

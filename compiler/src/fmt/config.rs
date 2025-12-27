@@ -272,7 +272,15 @@ impl FormatConfig {
         };
 
         loop {
-            // Check for d.toml [format] section
+            // Check for sounio.toml [format] section
+            let sounio_toml = dir.join("sounio.toml");
+            if sounio_toml.exists()
+                && let Ok(config) = Self::from_sounio_toml(&sounio_toml)
+            {
+                return Some(config);
+            }
+
+            // Check for d.toml [format] section (legacy)
             let d_toml = dir.join("d.toml");
             if d_toml.exists()
                 && let Ok(config) = Self::from_d_toml(&d_toml)
@@ -280,7 +288,23 @@ impl FormatConfig {
                 return Some(config);
             }
 
-            // Check for .dfmt.toml
+            // Check for .souniofmt.toml
+            let souniofmt = dir.join(".souniofmt.toml");
+            if souniofmt.exists()
+                && let Ok(config) = Self::from_file(&souniofmt)
+            {
+                return Some(config);
+            }
+
+            // Check for souniofmt.toml (without dot)
+            let souniofmt_nodot = dir.join("souniofmt.toml");
+            if souniofmt_nodot.exists()
+                && let Ok(config) = Self::from_file(&souniofmt_nodot)
+            {
+                return Some(config);
+            }
+
+            // Check for .dfmt.toml (legacy)
             let dfmt = dir.join(".dfmt.toml");
             if dfmt.exists()
                 && let Ok(config) = Self::from_file(&dfmt)
@@ -288,7 +312,7 @@ impl FormatConfig {
                 return Some(config);
             }
 
-            // Check for dfmt.toml (without dot)
+            // Check for dfmt.toml (without dot, legacy)
             let dfmt_nodot = dir.join("dfmt.toml");
             if dfmt_nodot.exists()
                 && let Ok(config) = Self::from_file(&dfmt_nodot)
@@ -296,7 +320,15 @@ impl FormatConfig {
                 return Some(config);
             }
 
-            // Check for .dfmt.json
+            // Check for .souniofmt.json
+            let souniofmt_json = dir.join(".souniofmt.json");
+            if souniofmt_json.exists()
+                && let Ok(config) = Self::from_file(&souniofmt_json)
+            {
+                return Some(config);
+            }
+
+            // Check for .dfmt.json (legacy)
             let dfmt_json = dir.join(".dfmt.json");
             if dfmt_json.exists()
                 && let Ok(config) = Self::from_file(&dfmt_json)
@@ -312,7 +344,25 @@ impl FormatConfig {
         None
     }
 
-    /// Load from d.toml [format] section
+    /// Load from sounio.toml [format] section
+    fn from_sounio_toml(path: &Path) -> Result<Self, ConfigError> {
+        let content = std::fs::read_to_string(path).map_err(|e| ConfigError::Io(e.to_string()))?;
+
+        let manifest: toml::Value =
+            toml::from_str(&content).map_err(|e| ConfigError::Parse(e.to_string()))?;
+
+        if let Some(format) = manifest.get("format") {
+            let config: FormatConfig = format
+                .clone()
+                .try_into()
+                .map_err(|e: toml::de::Error| ConfigError::Parse(e.to_string()))?;
+            Ok(config)
+        } else {
+            Ok(FormatConfig::default())
+        }
+    }
+
+    /// Load from d.toml [format] section (legacy)
     fn from_d_toml(path: &Path) -> Result<Self, ConfigError> {
         let content = std::fs::read_to_string(path).map_err(|e| ConfigError::Io(e.to_string()))?;
 

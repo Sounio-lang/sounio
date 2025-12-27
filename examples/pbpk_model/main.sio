@@ -1,0 +1,449 @@
+//! Two-Compartment Pharmacokinetic Model
+//!
+//! This example demonstrates a physiologically-based pharmacokinetic (PBPK) model
+//! using Sounio's units of measure system for dimensional analysis.
+//!
+//! The model simulates:
+//! - Drug absorption from the gut
+//! - Distribution between central and peripheral compartments
+//! - First-order elimination from central compartment
+//!
+//! Key Sounio features demonstrated:
+//! - Units of measure (mg, L, h)
+//! - Struct types for domain modeling
+//! - Numerical integration (RK4)
+//! - Pure functional programming patterns
+
+// =============================================================================
+// Unit Definitions
+// =============================================================================
+
+// Define pharmacokinetic units
+unit mg          // milligrams (mass)
+unit L           // liters (volume)
+unit h           // hours (time)
+unit mg_per_L = mg / L    // concentration
+unit L_per_h = L / h      // clearance
+unit per_h = 1 / h        // rate constant
+
+// =============================================================================
+// Drug and Patient Parameters
+// =============================================================================
+
+/// Drug physicochemical and PK properties
+struct DrugProperties {
+    /// Molecular weight (g/mol)
+    mw: f64,
+    /// Lipophilicity (log P)
+    log_p: f64,
+    /// Fraction unbound in plasma
+    fu: f64,
+    /// Bioavailability (0-1)
+    bioavailability: f64,
+}
+
+/// Two-compartment model parameters
+struct TwoCompartmentParams {
+    /// Absorption rate constant (first-order)
+    ka: f64@per_h,
+    /// Central compartment volume
+    vc: f64@L,
+    /// Peripheral compartment volume
+    vp: f64@L,
+    /// Clearance from central compartment
+    cl: f64@L_per_h,
+    /// Inter-compartmental clearance
+    q: f64@L_per_h,
+}
+
+/// Patient-specific parameters
+struct PatientParams {
+    /// Body weight
+    weight: f64,  // kg
+    /// Age
+    age: i32,     // years
+    /// Creatinine clearance (renal function)
+    clcr: f64,    // mL/min
+    /// Is patient a CYP2D6 poor metabolizer
+    is_pm: bool,
+}
+
+// =============================================================================
+// State Variables
+// =============================================================================
+
+/// State of the two-compartment model
+struct ModelState {
+    /// Drug amount in gut (absorption site)
+    a_gut: f64@mg,
+    /// Drug amount in central compartment
+    a_central: f64@mg,
+    /// Drug amount in peripheral compartment
+    a_peripheral: f64@mg,
+    /// Current time
+    time: f64@h,
+}
+
+impl ModelState {
+    /// Create initial state with dose in gut
+    pub fn initial(dose: f64@mg) -> ModelState {
+        ModelState {
+            a_gut: dose,
+            a_central: 0.0,
+            a_peripheral: 0.0,
+            time: 0.0,
+        }
+    }
+
+    /// Calculate central compartment concentration
+    pub fn concentration(self: &ModelState, vc: f64@L) -> f64@mg_per_L {
+        self.a_central / vc
+    }
+
+    /// Calculate peripheral compartment concentration
+    pub fn conc_peripheral(self: &ModelState, vp: f64@L) -> f64@mg_per_L {
+        self.a_peripheral / vp
+    }
+
+    /// Total drug amount in body
+    pub fn total_amount(self: &ModelState) -> f64@mg {
+        self.a_gut + self.a_central + self.a_peripheral
+    }
+}
+
+// =============================================================================
+// Differential Equations
+// =============================================================================
+
+/// Derivatives for the two-compartment model
+struct Derivatives {
+    d_gut: f64@mg,
+    d_central: f64@mg,
+    d_peripheral: f64@mg,
+}
+
+/// Calculate derivatives at current state
+fn calculate_derivatives(state: &ModelState, params: &TwoCompartmentParams) -> Derivatives {
+    // Rate constants derived from clearances and volumes
+    let k10 = params.cl / params.vc;   // Elimination rate constant
+    let k12 = params.q / params.vc;     // Central to peripheral rate
+    let k21 = params.q / params.vp;     // Peripheral to central rate
+
+    // Absorption from gut
+    let absorption = params.ka * state.a_gut;
+
+    // Transfer between compartments
+    let central_to_peripheral = k12 * state.a_central;
+    let peripheral_to_central = k21 * state.a_peripheral;
+
+    // Elimination from central
+    let elimination = k10 * state.a_central;
+
+    Derivatives {
+        d_gut: -absorption,
+        d_central: absorption - central_to_peripheral + peripheral_to_central - elimination,
+        d_peripheral: central_to_peripheral - peripheral_to_central,
+    }
+}
+
+// =============================================================================
+// Numerical Integration (RK4)
+// =============================================================================
+
+/// Fourth-order Runge-Kutta integration step
+fn rk4_step(state: &ModelState, params: &TwoCompartmentParams, dt: f64@h) -> ModelState {
+    // k1 = f(t, y)
+    let k1 = calculate_derivatives(state, params);
+
+    // k2 = f(t + dt/2, y + dt/2 * k1)
+    let state2 = ModelState {
+        a_gut: state.a_gut + 0.5 * dt * k1.d_gut,
+        a_central: state.a_central + 0.5 * dt * k1.d_central,
+        a_peripheral: state.a_peripheral + 0.5 * dt * k1.d_peripheral,
+        time: state.time + 0.5 * dt,
+    };
+    let k2 = calculate_derivatives(&state2, params);
+
+    // k3 = f(t + dt/2, y + dt/2 * k2)
+    let state3 = ModelState {
+        a_gut: state.a_gut + 0.5 * dt * k2.d_gut,
+        a_central: state.a_central + 0.5 * dt * k2.d_central,
+        a_peripheral: state.a_peripheral + 0.5 * dt * k2.d_peripheral,
+        time: state.time + 0.5 * dt,
+    };
+    let k3 = calculate_derivatives(&state3, params);
+
+    // k4 = f(t + dt, y + dt * k3)
+    let state4 = ModelState {
+        a_gut: state.a_gut + dt * k3.d_gut,
+        a_central: state.a_central + dt * k3.d_central,
+        a_peripheral: state.a_peripheral + dt * k3.d_peripheral,
+        time: state.time + dt,
+    };
+    let k4 = calculate_derivatives(&state4, params);
+
+    // y(t+dt) = y(t) + dt/6 * (k1 + 2*k2 + 2*k3 + k4)
+    ModelState {
+        a_gut: state.a_gut + dt / 6.0 * (k1.d_gut + 2.0 * k2.d_gut + 2.0 * k3.d_gut + k4.d_gut),
+        a_central: state.a_central + dt / 6.0 * (k1.d_central + 2.0 * k2.d_central + 2.0 * k3.d_central + k4.d_central),
+        a_peripheral: state.a_peripheral + dt / 6.0 * (k1.d_peripheral + 2.0 * k2.d_peripheral + 2.0 * k3.d_peripheral + k4.d_peripheral),
+        time: state.time + dt,
+    }
+}
+
+// =============================================================================
+// Simulation
+// =============================================================================
+
+/// Simulation result at a time point
+struct TimePoint {
+    time: f64@h,
+    concentration: f64@mg_per_L,
+    amount_gut: f64@mg,
+    amount_central: f64@mg,
+    amount_peripheral: f64@mg,
+}
+
+/// Run simulation and collect time points
+fn simulate(
+    dose: f64@mg,
+    params: &TwoCompartmentParams,
+    duration: f64@h,
+    dt: f64@h,
+) -> Vec<TimePoint> {
+    var state = ModelState::initial(dose);
+    var results: Vec<TimePoint> = Vec::new();
+
+    // Record initial state
+    results.push(TimePoint {
+        time: state.time,
+        concentration: state.concentration(params.vc),
+        amount_gut: state.a_gut,
+        amount_central: state.a_central,
+        amount_peripheral: state.a_peripheral,
+    });
+
+    // Integrate over time
+    while state.time < duration {
+        state = rk4_step(&state, params, dt);
+
+        results.push(TimePoint {
+            time: state.time,
+            concentration: state.concentration(params.vc),
+            amount_gut: state.a_gut,
+            amount_central: state.a_central,
+            amount_peripheral: state.a_peripheral,
+        });
+    }
+
+    results
+}
+
+// =============================================================================
+// PK Metrics
+// =============================================================================
+
+/// Pharmacokinetic metrics
+struct PKMetrics {
+    /// Maximum concentration
+    cmax: f64@mg_per_L,
+    /// Time of maximum concentration
+    tmax: f64@h,
+    /// Area under the curve (trapezoidal)
+    auc: f64,  // mg*h/L (compound unit)
+    /// Elimination half-life
+    t_half: f64@h,
+    /// Mean residence time
+    mrt: f64@h,
+}
+
+/// Calculate PK metrics from simulation results
+fn calculate_metrics(results: &Vec<TimePoint>, params: &TwoCompartmentParams) -> PKMetrics {
+    // Find Cmax and Tmax
+    var cmax: f64@mg_per_L = 0.0;
+    var tmax: f64@h = 0.0;
+
+    for point in results.iter() {
+        if point.concentration > cmax {
+            cmax = point.concentration;
+            tmax = point.time;
+        }
+    }
+
+    // Calculate AUC using trapezoidal rule
+    var auc: f64 = 0.0;
+    var i: usize = 1;
+    while i < results.len() {
+        let prev = &results[i - 1];
+        let curr = &results[i];
+        let dt = (curr.time - prev.time) as f64;
+        let avg_conc = ((prev.concentration + curr.concentration) / 2.0) as f64;
+        auc = auc + avg_conc * dt;
+        i = i + 1;
+    }
+
+    // Calculate terminal half-life from elimination rate constant
+    let k10 = params.cl / params.vc;
+    let t_half = 0.693 / k10;
+
+    // Mean residence time (simplified for two-compartment)
+    let mrt = auc / cmax * 1.0;  // Simplified approximation
+
+    PKMetrics {
+        cmax: cmax,
+        tmax: tmax,
+        auc: auc,
+        t_half: t_half,
+        mrt: mrt,
+    }
+}
+
+// =============================================================================
+// Parameter Scaling
+// =============================================================================
+
+/// Scale parameters for patient-specific factors
+fn scale_parameters(
+    base_params: &TwoCompartmentParams,
+    patient: &PatientParams,
+) -> TwoCompartmentParams {
+    // Allometric scaling (simplified)
+    let weight_factor = (patient.weight / 70.0).powf(0.75);
+
+    // Renal function adjustment
+    let renal_factor = patient.clcr / 120.0;
+
+    // Metabolizer status adjustment
+    let metabolic_factor = if patient.is_pm { 0.5 } else { 1.0 };
+
+    TwoCompartmentParams {
+        ka: base_params.ka,  // Usually not scaled
+        vc: base_params.vc * weight_factor,
+        vp: base_params.vp * weight_factor,
+        cl: base_params.cl * weight_factor * renal_factor * metabolic_factor,
+        q: base_params.q * weight_factor,
+    }
+}
+
+// =============================================================================
+// Main Entry Point
+// =============================================================================
+
+fn main() -> i32 {
+    print("=== Two-Compartment PBPK Model ===\n\n");
+
+    // Define drug properties (example: metformin-like drug)
+    let drug = DrugProperties {
+        mw: 129.16,
+        log_p: -1.43,
+        fu: 1.0,  // Essentially unbound
+        bioavailability: 0.55,
+    };
+
+    // Define base PK parameters
+    let base_params = TwoCompartmentParams {
+        ka: 2.5,    // /h - absorption rate constant
+        vc: 63.0,   // L - central volume
+        vp: 100.0,  // L - peripheral volume
+        cl: 510.0 / 60.0,  // L/h - clearance (converted from mL/min)
+        q: 3.5,     // L/h - intercompartmental clearance
+    };
+
+    // Define patient
+    let patient = PatientParams {
+        weight: 70.0,
+        age: 45,
+        clcr: 90.0,  // Mild renal impairment
+        is_pm: false,
+    };
+
+    // Scale parameters for this patient
+    let params = scale_parameters(&base_params, &patient);
+
+    // Simulation parameters
+    let dose: f64@mg = 500.0;
+    let adjusted_dose = dose * drug.bioavailability;
+    let duration: f64@h = 24.0;
+    let dt: f64@h = 0.1;
+
+    print("Drug: Metformin-like\n");
+    print("Dose: ");
+    print((dose as f64).to_string());
+    print(" mg (adjusted for bioavailability: ");
+    print((adjusted_dose as f64).to_string());
+    print(" mg)\n");
+    print("Simulation duration: ");
+    print((duration as f64).to_string());
+    print(" hours\n\n");
+
+    // Run simulation
+    print("Running simulation...\n");
+    let results = simulate(adjusted_dose, &params, duration, dt);
+    print("Simulation complete. ");
+    print(results.len().to_string());
+    print(" time points generated.\n\n");
+
+    // Calculate metrics
+    let metrics = calculate_metrics(&results, &params);
+
+    print("=== PK Metrics ===\n");
+    print("Cmax: ");
+    print((metrics.cmax as f64).to_string());
+    print(" mg/L\n");
+    print("Tmax: ");
+    print((metrics.tmax as f64).to_string());
+    print(" h\n");
+    print("AUC0-inf: ");
+    print(metrics.auc.to_string());
+    print(" mg*h/L\n");
+    print("t1/2: ");
+    print((metrics.t_half as f64).to_string());
+    print(" h\n\n");
+
+    // Print concentration-time profile at key time points
+    print("=== Concentration-Time Profile ===\n");
+    print("Time (h)\tConc (mg/L)\tGut (mg)\tCentral (mg)\tPeriph (mg)\n");
+
+    let key_times = [0.0, 0.5, 1.0, 2.0, 4.0, 6.0, 8.0, 12.0, 24.0];
+    for t in key_times {
+        // Find closest time point
+        for point in results.iter() {
+            let point_time = point.time as f64;
+            if (point_time - t).abs() < 0.05 {
+                print(point_time.to_string());
+                print("\t\t");
+                print((point.concentration as f64).to_string());
+                print("\t\t");
+                print((point.amount_gut as f64).to_string());
+                print("\t\t");
+                print((point.amount_central as f64).to_string());
+                print("\t\t");
+                print((point.amount_peripheral as f64).to_string());
+                print("\n");
+                break;
+            }
+        }
+    }
+
+    // Validate mass balance
+    print("\n=== Mass Balance Validation ===\n");
+    let initial_amount = adjusted_dose as f64;
+    let final_state = &results[results.len() - 1];
+    let remaining = (final_state.amount_gut + final_state.amount_central + final_state.amount_peripheral) as f64;
+    let eliminated = initial_amount - remaining;
+
+    print("Initial dose: ");
+    print(initial_amount.to_string());
+    print(" mg\n");
+    print("Remaining in body: ");
+    print(remaining.to_string());
+    print(" mg\n");
+    print("Eliminated: ");
+    print(eliminated.to_string());
+    print(" mg (");
+    print(((eliminated / initial_amount) * 100.0).to_string());
+    print("%)\n\n");
+
+    print("=== Simulation Complete ===\n");
+    0
+}

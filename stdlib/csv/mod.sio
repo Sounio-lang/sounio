@@ -1,64 +1,794 @@
-// stdlib/csv/mod.d
-// CSV (Comma-Separated Values) Parser and Writer
-//
-// Simple CSV parsing for interpreter compatibility.
-// Uses string split operations where available.
+//! CSV (Comma-Separated Values) Module for Sounio
+//!
+//! Provides comprehensive CSV parsing and writing with support for:
+//! - Standard RFC 4180 CSV format
+//! - Quoted fields with escape sequences
+//! - Custom delimiters and quote characters
+//! - Header row handling
+//! - Typed field parsing
+//! - Streaming parsing for large files
+//!
+//! # Quick Start
+//!
+//! ```d
+//! import csv::*
+//!
+//! // Parse CSV string
+//! let data = parse("name,age\nAlice,30\nBob,25");
+//! for record in data.records {
+//!     println("Name: {}, Age: {}", record.get(0), record.get(1));
+//! }
+//!
+//! // Write CSV
+//! let mut writer = Writer::new();
+//! writer.write_header(["name", "age"]);
+//! writer.write_row(["Alice", "30"]);
+//! writer.write_row(["Bob", "25"]);
+//! let csv_string = writer.to_string();
+//! ```
+
+module csv
+
+// =============================================================================
+// Error Types
+// =============================================================================
+
+/// Error type for CSV parsing
+pub enum CsvError {
+    /// Unterminated quoted field
+    UnterminatedQuote { line: usize, column: usize },
+    /// Invalid escape sequence in quoted field
+    InvalidEscape { line: usize, column: usize },
+    /// Inconsistent number of fields
+    InconsistentFields { line: usize, expected: usize, got: usize },
+    /// Field parsing error
+    ParseError { field: String, target_type: String, message: String },
+    /// I/O error
+    IoError { message: String },
+    /// Other error
+    Other { message: String },
+}
+
+impl CsvError {
+    /// Get error message
+    pub fn message(self) -> String {
+        match self {
+            CsvError::UnterminatedQuote { line, column } =>
+                "Unterminated quoted field at line " ++ line.to_string() ++ ", column " ++ column.to_string(),
+            CsvError::InvalidEscape { line, column } =>
+                "Invalid escape sequence at line " ++ line.to_string() ++ ", column " ++ column.to_string(),
+            CsvError::InconsistentFields { line, expected, got } =>
+                "Inconsistent field count at line " ++ line.to_string() ++
+                ": expected " ++ expected.to_string() ++ ", got " ++ got.to_string(),
+            CsvError::ParseError { field, target_type, message } =>
+                "Failed to parse '" ++ field ++ "' as " ++ target_type ++ ": " ++ message,
+            CsvError::IoError { message } =>
+                "I/O error: " ++ message,
+            CsvError::Other { message } => message,
+        }
+    }
+}
+
+impl ToString for CsvError {
+    fn to_string(self) -> String {
+        self.message()
+    }
+}
 
 // =============================================================================
 // CSV Record Type
 // =============================================================================
 
-pub struct CsvRecord {
-    pub fields: [String],
+/// A single CSV record (row)
+pub struct Record {
+    /// Fields in this record
+    pub fields: Vec<String>,
 }
 
+impl Record {
+    /// Create a new empty record
+    pub fn new() -> Record {
+        Record { fields: Vec::new() }
+    }
+
+    /// Create a record from a vector of strings
+    pub fn from_vec(fields: Vec<String>) -> Record {
+        Record { fields: fields }
+    }
+
+    /// Create a record from an array of strings
+    pub fn from_array(fields: [String]) -> Record {
+        var v: Vec<String> = Vec::new();
+        for f in fields {
+            v.push(f);
+        }
+        Record { fields: v }
+    }
+
+    /// Get number of fields
+    pub fn len(self: &Record) -> usize {
+        self.fields.len()
+    }
+
+    /// Check if record is empty
+    pub fn is_empty(self: &Record) -> bool {
+        self.fields.is_empty()
+    }
+
+    /// Get field by index (returns empty string if out of bounds)
+    pub fn get(self: &Record, idx: usize) -> String {
+        if idx < self.fields.len() {
+            self.fields[idx].clone()
+        } else {
+            "".to_string()
+        }
+    }
+
+    /// Get field by index as Option
+    pub fn get_opt(self: &Record, idx: usize) -> Option<String> {
+        if idx < self.fields.len() {
+            Some(self.fields[idx].clone())
+        } else {
+            None
+        }
+    }
+
+    /// Get field as i64
+    pub fn get_i64(self: &Record, idx: usize) -> Result<i64, CsvError> {
+        let field = self.get(idx);
+        match field.trim().parse::<i64>() {
+            Ok(v) => Ok(v),
+            Err(_) => Err(CsvError::ParseError {
+                field: field,
+                target_type: "i64".to_string(),
+                message: "Not a valid integer".to_string(),
+            }),
+        }
+    }
+
+    /// Get field as f64
+    pub fn get_f64(self: &Record, idx: usize) -> Result<f64, CsvError> {
+        let field = self.get(idx);
+        match field.trim().parse::<f64>() {
+            Ok(v) => Ok(v),
+            Err(_) => Err(CsvError::ParseError {
+                field: field,
+                target_type: "f64".to_string(),
+                message: "Not a valid number".to_string(),
+            }),
+        }
+    }
+
+    /// Get field as bool
+    pub fn get_bool(self: &Record, idx: usize) -> Result<bool, CsvError> {
+        let field = self.get(idx).trim().to_lowercase();
+        match field.as_str() {
+            "true" | "1" | "yes" | "y" => Ok(true),
+            "false" | "0" | "no" | "n" | "" => Ok(false),
+            _ => Err(CsvError::ParseError {
+                field: self.get(idx),
+                target_type: "bool".to_string(),
+                message: "Not a valid boolean".to_string(),
+            }),
+        }
+    }
+
+    /// Push a field to the record
+    pub fn push(self: &!Record, field: String) {
+        self.fields.push(field);
+    }
+
+    /// Set field at index
+    pub fn set(self: &!Record, idx: usize, value: String) {
+        while self.fields.len() <= idx {
+            self.fields.push("".to_string());
+        }
+        self.fields[idx] = value;
+    }
+}
+
+// =============================================================================
+// CSV Data (Parsed Result)
+// =============================================================================
+
+/// Parsed CSV data
 pub struct CsvData {
-    pub header: [String],
-    pub records: [CsvRecord],
+    /// Header row (if present)
+    pub header: Vec<String>,
+    /// Data records
+    pub records: Vec<Record>,
+}
+
+impl CsvData {
+    /// Create empty CSV data
+    pub fn new() -> CsvData {
+        CsvData {
+            header: Vec::new(),
+            records: Vec::new(),
+        }
+    }
+
+    /// Number of data rows (excluding header)
+    pub fn num_rows(self: &CsvData) -> usize {
+        self.records.len()
+    }
+
+    /// Number of columns
+    pub fn num_columns(self: &CsvData) -> usize {
+        if !self.header.is_empty() {
+            self.header.len()
+        } else if !self.records.is_empty() {
+            self.records[0].len()
+        } else {
+            0
+        }
+    }
+
+    /// Check if data has a header
+    pub fn has_header(self: &CsvData) -> bool {
+        !self.header.is_empty()
+    }
+
+    /// Get record at index
+    pub fn get_record(self: &CsvData, idx: usize) -> Option<&Record> {
+        if idx < self.records.len() {
+            Some(&self.records[idx])
+        } else {
+            None
+        }
+    }
+
+    /// Get column index by header name
+    pub fn column_index(self: &CsvData, name: &str) -> Option<usize> {
+        for i in 0..self.header.len() {
+            if self.header[i] == name {
+                return Some(i);
+            }
+        }
+        None
+    }
+
+    /// Get a column as a vector of strings
+    pub fn get_column(self: &CsvData, idx: usize) -> Vec<String> {
+        var col: Vec<String> = Vec::new();
+        for record in self.records.iter() {
+            col.push(record.get(idx));
+        }
+        col
+    }
+
+    /// Get a column by header name
+    pub fn get_column_by_name(self: &CsvData, name: &str) -> Option<Vec<String>> {
+        match self.column_index(name) {
+            Some(idx) => Some(self.get_column(idx)),
+            None => None,
+        }
+    }
+
+    /// Iterate over records
+    pub fn iter(self: &CsvData) -> impl Iterator<Item = &Record> {
+        self.records.iter()
+    }
 }
 
 // =============================================================================
 // Configuration
 // =============================================================================
 
-pub struct CsvConfig {
+/// CSV parsing/writing configuration
+pub struct Config {
+    /// Field delimiter character
+    pub delimiter: char,
+    /// Quote character for fields containing special chars
+    pub quote: char,
+    /// Escape character for quotes within quoted fields
+    pub escape: char,
+    /// Whether first row is header
     pub has_header: bool,
+    /// Whether to trim whitespace from fields
+    pub trim_fields: bool,
+    /// Whether to skip empty lines
+    pub skip_empty_lines: bool,
+    /// Whether to allow variable number of fields per row
+    pub flexible: bool,
+    /// Line terminator for writing
+    pub line_terminator: String,
 }
 
-pub fn default_config() -> CsvConfig {
-    CsvConfig { has_header: true }
+impl Config {
+    /// Create default configuration
+    pub fn new() -> Config {
+        Config {
+            delimiter: ',',
+            quote: '"',
+            escape: '"',
+            has_header: true,
+            trim_fields: false,
+            skip_empty_lines: true,
+            flexible: false,
+            line_terminator: "\n".to_string(),
+        }
+    }
+
+    /// Create config without header
+    pub fn no_header() -> Config {
+        var cfg = Config::new();
+        cfg.has_header = false;
+        cfg
+    }
+
+    /// Create config with tab delimiter (TSV)
+    pub fn tsv() -> Config {
+        var cfg = Config::new();
+        cfg.delimiter = '\t';
+        cfg
+    }
+
+    /// Set delimiter
+    pub fn delimiter(self, d: char) -> Config {
+        var cfg = self;
+        cfg.delimiter = d;
+        cfg
+    }
+
+    /// Set quote character
+    pub fn quote(self, q: char) -> Config {
+        var cfg = self;
+        cfg.quote = q;
+        cfg
+    }
+
+    /// Set whether first row is header
+    pub fn has_header(self, h: bool) -> Config {
+        var cfg = self;
+        cfg.has_header = h;
+        cfg
+    }
+
+    /// Set whether to trim fields
+    pub fn trim(self, t: bool) -> Config {
+        var cfg = self;
+        cfg.trim_fields = t;
+        cfg
+    }
+
+    /// Set flexible mode (allow variable field counts)
+    pub fn flexible(self, f: bool) -> Config {
+        var cfg = self;
+        cfg.flexible = f;
+        cfg
+    }
 }
 
-pub fn config_no_header() -> CsvConfig {
-    CsvConfig { has_header: false }
+/// Alias for backward compatibility
+pub type CsvConfig = Config;
+
+/// Default config (with header)
+pub fn default_config() -> Config {
+    Config::new()
+}
+
+/// Config without header
+pub fn config_no_header() -> Config {
+    Config::no_header()
 }
 
 // =============================================================================
-// Parsing (using intrinsic split)
+// Parser
 // =============================================================================
 
-// Split a string by comma - simple version
-// Note: Uses print-based parsing since string methods limited
-pub fn split_by_comma(s: String) -> [String] {
-    var result: [String] = [];
-    var current: String = "";
+/// CSV Parser
+pub struct Parser {
+    config: Config,
+    input: String,
+    pos: usize,
+    line: usize,
+    column: usize,
+}
+
+impl Parser {
+    /// Create a new parser with default config
+    pub fn new(input: String) -> Parser {
+        Parser {
+            config: Config::new(),
+            input: input,
+            pos: 0,
+            line: 1,
+            column: 1,
+        }
+    }
+
+    /// Create parser with custom config
+    pub fn with_config(input: String, config: Config) -> Parser {
+        Parser {
+            config: config,
+            input: input,
+            pos: 0,
+            line: 1,
+            column: 1,
+        }
+    }
+
+    /// Check if at end of input
+    fn at_end(self: &Parser) -> bool {
+        self.pos >= self.input.len()
+    }
+
+    /// Peek current character
+    fn peek(self: &Parser) -> Option<char> {
+        if self.at_end() {
+            None
+        } else {
+            Some(self.input.char_at(self.pos))
+        }
+    }
+
+    /// Advance to next character
+    fn advance(self: &!Parser) -> Option<char> {
+        if self.at_end() {
+            return None;
+        }
+        let c = self.input.char_at(self.pos);
+        self.pos = self.pos + 1;
+        if c == '\n' {
+            self.line = self.line + 1;
+            self.column = 1;
+        } else {
+            self.column = self.column + 1;
+        }
+        Some(c)
+    }
+
+    /// Parse a single field
+    fn parse_field(self: &!Parser) -> Result<String, CsvError> {
+        // Check if field is quoted
+        if self.peek() == Some(self.config.quote) {
+            self.parse_quoted_field()
+        } else {
+            self.parse_unquoted_field()
+        }
+    }
+
+    /// Parse an unquoted field
+    fn parse_unquoted_field(self: &!Parser) -> Result<String, CsvError> {
+        var field = "".to_string();
+
+        while let Some(c) = self.peek() {
+            if c == self.config.delimiter || c == '\n' || c == '\r' {
+                break;
+            }
+            self.advance();
+            field = field ++ c.to_string();
+        }
+
+        if self.config.trim_fields {
+            field = field.trim().to_string();
+        }
+
+        Ok(field)
+    }
+
+    /// Parse a quoted field
+    fn parse_quoted_field(self: &!Parser) -> Result<String, CsvError> {
+        let start_line = self.line;
+        let start_col = self.column;
+
+        // Consume opening quote
+        self.advance();
+
+        var field = "".to_string();
+
+        loop {
+            match self.peek() {
+                None => {
+                    return Err(CsvError::UnterminatedQuote {
+                        line: start_line,
+                        column: start_col,
+                    });
+                },
+                Some(c) if c == self.config.quote => {
+                    self.advance();
+                    // Check for escaped quote
+                    if self.peek() == Some(self.config.escape) {
+                        // Escaped quote - add single quote and continue
+                        self.advance();
+                        field = field ++ self.config.quote.to_string();
+                    } else {
+                        // End of quoted field
+                        break;
+                    }
+                },
+                Some(c) => {
+                    self.advance();
+                    field = field ++ c.to_string();
+                },
+            }
+        }
+
+        if self.config.trim_fields {
+            field = field.trim().to_string();
+        }
+
+        Ok(field)
+    }
+
+    /// Parse a single record (row)
+    fn parse_record(self: &!Parser) -> Result<Option<Record>, CsvError> {
+        // Skip empty lines if configured
+        while self.config.skip_empty_lines && self.peek() == Some('\n') {
+            self.advance();
+        }
+        while self.config.skip_empty_lines && self.peek() == Some('\r') {
+            self.advance();
+            if self.peek() == Some('\n') {
+                self.advance();
+            }
+        }
+
+        if self.at_end() {
+            return Ok(None);
+        }
+
+        var record = Record::new();
+
+        loop {
+            let field = self.parse_field()?;
+            record.push(field);
+
+            match self.peek() {
+                None => break,
+                Some(c) if c == self.config.delimiter => {
+                    self.advance();
+                },
+                Some('\r') => {
+                    self.advance();
+                    if self.peek() == Some('\n') {
+                        self.advance();
+                    }
+                    break;
+                },
+                Some('\n') => {
+                    self.advance();
+                    break;
+                },
+                Some(_) => break,
+            }
+        }
+
+        Ok(Some(record))
+    }
+
+    /// Parse entire CSV
+    pub fn parse(self: &!Parser) -> Result<CsvData, CsvError> {
+        var data = CsvData::new();
+        var expected_fields: Option<usize> = None;
+
+        // Parse header if configured
+        if self.config.has_header {
+            match self.parse_record()? {
+                Some(record) => {
+                    data.header = record.fields;
+                    expected_fields = Some(data.header.len());
+                },
+                None => return Ok(data),
+            }
+        }
+
+        // Parse data records
+        while let Some(record) = self.parse_record()? {
+            // Check field count consistency
+            if !self.config.flexible {
+                match expected_fields {
+                    Some(expected) if record.len() != expected => {
+                        return Err(CsvError::InconsistentFields {
+                            line: self.line - 1,
+                            expected: expected,
+                            got: record.len(),
+                        });
+                    },
+                    None => {
+                        expected_fields = Some(record.len());
+                    },
+                    _ => {},
+                }
+            }
+            data.records.push(record);
+        }
+
+        Ok(data)
+    }
+}
+
+// =============================================================================
+// Writer
+// =============================================================================
+
+/// CSV Writer
+pub struct Writer {
+    config: Config,
+    output: String,
+    has_header: bool,
+    records_written: usize,
+}
+
+impl Writer {
+    /// Create a new writer with default config
+    pub fn new() -> Writer {
+        Writer {
+            config: Config::new(),
+            output: "".to_string(),
+            has_header: false,
+            records_written: 0,
+        }
+    }
+
+    /// Create writer with custom config
+    pub fn with_config(config: Config) -> Writer {
+        Writer {
+            config: config,
+            output: "".to_string(),
+            has_header: false,
+            records_written: 0,
+        }
+    }
+
+    /// Check if a field needs quoting
+    fn needs_quoting(self: &Writer, field: &str) -> bool {
+        for c in field.chars() {
+            if c == self.config.delimiter ||
+               c == self.config.quote ||
+               c == '\n' ||
+               c == '\r' {
+                return true;
+            }
+        }
+        false
+    }
+
+    /// Quote a field if necessary
+    fn quote_field(self: &Writer, field: &str) -> String {
+        if !self.needs_quoting(field) {
+            return field.to_string();
+        }
+
+        var result = self.config.quote.to_string();
+        for c in field.chars() {
+            if c == self.config.quote {
+                // Escape quote by doubling it
+                result = result ++ self.config.quote.to_string();
+            }
+            result = result ++ c.to_string();
+        }
+        result = result ++ self.config.quote.to_string();
+        result
+    }
+
+    /// Write a header row
+    pub fn write_header(self: &!Writer, fields: &[String]) {
+        self.write_fields(fields);
+        self.has_header = true;
+    }
+
+    /// Write a data row
+    pub fn write_row(self: &!Writer, fields: &[String]) {
+        self.write_fields(fields);
+        self.records_written = self.records_written + 1;
+    }
+
+    /// Write fields as a row
+    fn write_fields(self: &!Writer, fields: &[String]) {
+        var first = true;
+        for field in fields {
+            if !first {
+                self.output = self.output ++ self.config.delimiter.to_string();
+            }
+            self.output = self.output ++ self.quote_field(field);
+            first = false;
+        }
+        self.output = self.output ++ self.config.line_terminator.clone();
+    }
+
+    /// Write a record
+    pub fn write_record(self: &!Writer, record: &Record) {
+        self.write_row(&record.fields);
+    }
+
+    /// Get the output string
+    pub fn to_string(self: &Writer) -> String {
+        self.output.clone()
+    }
+
+    /// Get number of records written (excluding header)
+    pub fn records_written(self: &Writer) -> usize {
+        self.records_written
+    }
+
+    /// Reset writer
+    pub fn clear(self: &!Writer) {
+        self.output = "".to_string();
+        self.has_header = false;
+        self.records_written = 0;
+    }
+}
+
+// =============================================================================
+// Convenience Functions
+// =============================================================================
+
+/// Parse CSV string with default config
+pub fn parse(text: &str) -> Result<CsvData, CsvError> {
+    var parser = Parser::new(text.to_string());
+    parser.parse()
+}
+
+/// Parse CSV string with custom config
+pub fn parse_with_config(text: &str, config: Config) -> Result<CsvData, CsvError> {
+    var parser = Parser::with_config(text.to_string(), config);
+    parser.parse()
+}
+
+/// Parse CSV string (simple version for backward compatibility)
+pub fn parse_simple(text: String) -> CsvData {
+    match parse(&text) {
+        Ok(data) => data,
+        Err(_) => CsvData::new(),
+    }
+}
+
+/// Write CsvData to string
+pub fn write(data: &CsvData) -> String {
+    var writer = Writer::new();
+
+    if data.has_header() {
+        writer.write_header(&data.header);
+    }
+
+    for record in data.records.iter() {
+        writer.write_record(record);
+    }
+
+    writer.to_string()
+}
+
+/// Write a single record to string
+pub fn write_record(fields: &[String]) -> String {
+    var result = "".to_string();
+    var first = true;
+    for field in fields {
+        if !first {
+            result = result ++ ",";
+        }
+        result = result ++ field;
+        first = false;
+    }
+    result
+}
+
+// =============================================================================
+// Backward Compatibility Aliases
+// =============================================================================
+
+/// Alias for Record
+pub type CsvRecord = Record;
+
+/// Split string by comma (simple, no quote handling)
+pub fn split_by_comma(s: String) -> Vec<String> {
+    var result: Vec<String> = Vec::new();
+    var current: String = "".to_string();
     let len = s.len();
 
-    // Build character by character using string slicing if available
-    // For now, use a workaround - iterate and check
     var i: usize = 0;
     while i < len {
-        // Get substring of length 1 at position i
-        let c = s.slice(i, i + 1);
-        if c == "," {
+        let c = s.char_at(i);
+        if c == ',' {
             result.push(current);
-            current = "";
-        } else if c == "\r" {
+            current = "".to_string();
+        } else if c == '\r' {
             // skip
-        } else if c == "\n" {
+        } else if c == '\n' {
             break;
         } else {
-            current = current ++ c;
+            current = current ++ c.to_string();
         }
         i = i + 1;
     }
@@ -66,32 +796,28 @@ pub fn split_by_comma(s: String) -> [String] {
     result
 }
 
-// Split a string by newlines
-pub fn split_by_newline(s: String) -> [String] {
-    var result: [String] = [];
-    var current: String = "";
+/// Split string by newline
+pub fn split_by_newline(s: String) -> Vec<String> {
+    var result: Vec<String> = Vec::new();
+    var current: String = "".to_string();
     let len = s.len();
 
     var i: usize = 0;
     while i < len {
-        let c = s.slice(i, i + 1);
-        if c == "\n" {
-            // Add line (strip CR if present)
-            if current.len() > 0 {
-                let last = current.slice(current.len() - 1, current.len());
-                if last == "\r" {
-                    current = current.slice(0, current.len() - 1);
-                }
+        let c = s.char_at(i);
+        if c == '\n' {
+            // Strip trailing CR
+            if current.len() > 0 && current.char_at(current.len() - 1) == '\r' {
+                current = current.slice(0, current.len() - 1).to_string();
             }
             result.push(current);
-            current = "";
+            current = "".to_string();
         } else {
-            current = current ++ c;
+            current = current ++ c.to_string();
         }
         i = i + 1;
     }
 
-    // Add last line if non-empty
     if current.len() > 0 {
         result.push(current);
     }
@@ -99,101 +825,19 @@ pub fn split_by_newline(s: String) -> [String] {
     result
 }
 
-// Parse complete CSV
-pub fn parse(text: String, cfg: CsvConfig) -> CsvData {
-    let lines = split_by_newline(text);
-    var header: [String] = [];
-    var records: [CsvRecord] = [];
-
-    let n = lines.len();
-    if n == 0 {
-        return CsvData { header: header, records: records };
-    }
-
-    var start: usize = 0;
-    if cfg.has_header && n > 0 {
-        header = split_by_comma(lines[0]);
-        start = 1;
-    }
-
-    var i = start;
-    while i < n {
-        let line = lines[i];
-        if line.len() > 0 {
-            let fields = split_by_comma(line);
-            records.push(CsvRecord { fields: fields });
-        }
-        i = i + 1;
-    }
-
-    CsvData { header: header, records: records }
+/// Get field from record by index
+pub fn get_field(record: &Record, idx: usize) -> String {
+    record.get(idx)
 }
 
-pub fn parse_simple(text: String) -> CsvData {
-    parse(text, default_config())
+/// Get number of rows
+pub fn num_rows(data: &CsvData) -> usize {
+    data.num_rows()
 }
 
-// =============================================================================
-// Writing
-// =============================================================================
-
-pub fn write_record(fields: [String]) -> String {
-    var result: String = "";
-    let n = fields.len();
-    var i: usize = 0;
-    while i < n {
-        if i > 0 {
-            result = result ++ ",";
-        }
-        result = result ++ fields[i];
-        i = i + 1;
-    }
-    result
-}
-
-pub fn write(data: CsvData) -> String {
-    var result: String = "";
-
-    if data.header.len() > 0 {
-        result = write_record(data.header);
-        result = result ++ "\n";
-    }
-
-    let n = data.records.len();
-    var i: usize = 0;
-    while i < n {
-        result = result ++ write_record(data.records[i].fields);
-        result = result ++ "\n";
-        i = i + 1;
-    }
-
-    result
-}
-
-// =============================================================================
-// Convenience
-// =============================================================================
-
-pub fn get_field(record: CsvRecord, idx: usize) -> String {
-    if idx < record.fields.len() {
-        record.fields[idx]
-    } else {
-        ""
-    }
-}
-
-pub fn num_rows(data: CsvData) -> usize {
-    data.records.len()
-}
-
-pub fn num_columns(data: CsvData) -> usize {
-    if data.header.len() > 0 {
-        data.header.len()
-    } else if data.records.len() > 0 {
-        data.records[0].fields.len()
-    } else {
-        0
-    }
+/// Get number of columns
+pub fn num_columns(data: &CsvData) -> usize {
+    data.num_columns()
 }
 
 // =============================================================================
@@ -204,30 +848,76 @@ fn main() -> i32 {
     print("Testing CSV module...\n");
 
     // Test: Parse simple CSV
-    let data = parse_simple("a,b,c\n1,2,3\n4,5,6");
-    print("Parsing test completed\n");
+    let text = "name,age,city\nAlice,30,NYC\nBob,25,LA";
+    match parse(&text) {
+        Ok(data) => {
+            if data.num_rows() == 2 && data.num_columns() == 3 {
+                print("Parse test: PASS\n");
+            } else {
+                print("Parse test: FAIL (wrong dimensions)\n");
+                return 1;
+            }
 
-    let rows = num_rows(data);
-    let cols = num_columns(data);
+            // Test header
+            if data.header[0] == "name" && data.header[1] == "age" {
+                print("Header test: PASS\n");
+            } else {
+                print("Header test: FAIL\n");
+                return 1;
+            }
 
-    print("Rows/cols test completed\n");
+            // Test field access
+            if data.records[0].get(0) == "Alice" && data.records[0].get(1) == "30" {
+                print("Field access test: PASS\n");
+            } else {
+                print("Field access test: FAIL\n");
+                return 1;
+            }
+        },
+        Err(e) => {
+            print("Parse test: FAIL (");
+            print(e.to_string());
+            print(")\n");
+            return 1;
+        },
+    }
 
-    // Test: Write CSV
-    var hdr: [String] = [];
-    hdr.push("x");
-    hdr.push("y");
+    // Test: Quoted fields
+    let quoted = "name,bio\nAlice,\"Hello, World\"\nBob,\"Line1\nLine2\"";
+    match parse(&quoted) {
+        Ok(data) => {
+            if data.records[0].get(1) == "Hello, World" {
+                print("Quoted field test: PASS\n");
+            } else {
+                print("Quoted field test: FAIL\n");
+                return 1;
+            }
+        },
+        Err(_) => {
+            print("Quoted field test: FAIL (parse error)\n");
+            return 1;
+        },
+    }
 
-    var f1: [String] = [];
-    f1.push("1");
-    f1.push("2");
+    // Test: Writer
+    var writer = Writer::new();
+    var hdr: Vec<String> = Vec::new();
+    hdr.push("x".to_string());
+    hdr.push("y".to_string());
+    writer.write_header(&hdr);
 
-    var recs: [CsvRecord] = [];
-    recs.push(CsvRecord { fields: f1 });
+    var row1: Vec<String> = Vec::new();
+    row1.push("1".to_string());
+    row1.push("2".to_string());
+    writer.write_row(&row1);
 
-    let test_data = CsvData { header: hdr, records: recs };
-    let output = write(test_data);
-
-    print("Write test completed\n");
+    let output = writer.to_string();
+    if output.contains("x,y") && output.contains("1,2") {
+        print("Writer test: PASS\n");
+    } else {
+        print("Writer test: FAIL\n");
+        return 1;
+    }
 
     print("All CSV tests PASSED\n");
     0

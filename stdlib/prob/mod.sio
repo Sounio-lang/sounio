@@ -1,0 +1,791 @@
+// prob/mod.sio - Probabilistic Programming Module for Sounio
+//
+// Provides primitives for probabilistic programming:
+// - sample(distribution): Draw random sample from distribution
+// - observe(distribution, value): Condition on observed data
+// - Various distributions: Normal, Uniform, Bernoulli, Beta, Poisson, Exponential
+// - Inference: rejection sampling, importance sampling
+//
+// References:
+// - "Probabilistic Programming" by van de Meent et al. (2018)
+// - "Church: a language for generative models" by Goodman et al. (2008)
+
+// ============================================================================
+// MATH HELPERS
+// ============================================================================
+
+fn abs_f64(x: f64) -> f64 {
+    if x < 0.0 { return 0.0 - x }
+    return x
+}
+
+fn sqrt_f64(x: f64) -> f64 {
+    if x <= 0.0 { return 0.0 }
+    let mut y = x
+    y = 0.5 * (y + x / y)
+    y = 0.5 * (y + x / y)
+    y = 0.5 * (y + x / y)
+    y = 0.5 * (y + x / y)
+    y = 0.5 * (y + x / y)
+    y = 0.5 * (y + x / y)
+    y = 0.5 * (y + x / y)
+    y = 0.5 * (y + x / y)
+    y = 0.5 * (y + x / y)
+    y = 0.5 * (y + x / y)
+    return y
+}
+
+fn exp_f64(x: f64) -> f64 {
+    if x > 20.0 { return exp_f64(x / 2.0) * exp_f64(x / 2.0) }
+    if x < 0.0 - 20.0 { return 1.0 / exp_f64(0.0 - x) }
+
+    let mut sum = 1.0
+    let mut term = 1.0
+    term = term * x / 1.0
+    sum = sum + term
+    term = term * x / 2.0
+    sum = sum + term
+    term = term * x / 3.0
+    sum = sum + term
+    term = term * x / 4.0
+    sum = sum + term
+    term = term * x / 5.0
+    sum = sum + term
+    term = term * x / 6.0
+    sum = sum + term
+    term = term * x / 7.0
+    sum = sum + term
+    term = term * x / 8.0
+    sum = sum + term
+    term = term * x / 9.0
+    sum = sum + term
+    term = term * x / 10.0
+    sum = sum + term
+    term = term * x / 11.0
+    sum = sum + term
+    term = term * x / 12.0
+    sum = sum + term
+    term = term * x / 13.0
+    sum = sum + term
+    term = term * x / 14.0
+    sum = sum + term
+    term = term * x / 15.0
+    sum = sum + term
+    return sum
+}
+
+fn ln_f64(x: f64) -> f64 {
+    if x <= 0.0 { return 0.0 - 1000000.0 }
+
+    let mut val = x
+    let mut k = 0.0
+    let e = 2.718281828459045
+
+    while val > e {
+        val = val / e
+        k = k + 1.0
+    }
+    while val < 1.0 / e {
+        val = val * e
+        k = k - 1.0
+    }
+
+    let u = (val - 1.0) / (val + 1.0)
+    let u2 = u * u
+    let mut sum = u
+    let mut term = u
+    term = term * u2
+    sum = sum + term / 3.0
+    term = term * u2
+    sum = sum + term / 5.0
+    term = term * u2
+    sum = sum + term / 7.0
+    term = term * u2
+    sum = sum + term / 9.0
+    term = term * u2
+    sum = sum + term / 11.0
+    term = term * u2
+    sum = sum + term / 13.0
+    term = term * u2
+    sum = sum + term / 15.0
+
+    return 2.0 * sum + k
+}
+
+fn pi() -> f64 {
+    return 3.141592653589793
+}
+
+fn cos_f64(x: f64) -> f64 {
+    let mut y = x
+    while y > pi() { y = y - 2.0 * pi() }
+    while y < 0.0 - pi() { y = y + 2.0 * pi() }
+
+    let x2 = y * y
+    let mut sum = 1.0
+    let mut term = 1.0
+    term = term * (0.0 - x2) / (1.0 * 2.0)
+    sum = sum + term
+    term = term * (0.0 - x2) / (3.0 * 4.0)
+    sum = sum + term
+    term = term * (0.0 - x2) / (5.0 * 6.0)
+    sum = sum + term
+    term = term * (0.0 - x2) / (7.0 * 8.0)
+    sum = sum + term
+    term = term * (0.0 - x2) / (9.0 * 10.0)
+    sum = sum + term
+    term = term * (0.0 - x2) / (11.0 * 12.0)
+    sum = sum + term
+    return sum
+}
+
+fn sin_f64(x: f64) -> f64 {
+    let mut y = x
+    while y > pi() { y = y - 2.0 * pi() }
+    while y < 0.0 - pi() { y = y + 2.0 * pi() }
+
+    let x2 = y * y
+    let mut sum = y
+    let mut term = y
+    term = term * (0.0 - x2) / (2.0 * 3.0)
+    sum = sum + term
+    term = term * (0.0 - x2) / (4.0 * 5.0)
+    sum = sum + term
+    term = term * (0.0 - x2) / (6.0 * 7.0)
+    sum = sum + term
+    term = term * (0.0 - x2) / (8.0 * 9.0)
+    sum = sum + term
+    term = term * (0.0 - x2) / (10.0 * 11.0)
+    sum = sum + term
+    return sum
+}
+
+fn floor_f64(x: f64) -> f64 {
+    let i = x as i64
+    let f = i as f64
+    if f > x { return f - 1.0 }
+    return f
+}
+
+// ============================================================================
+// RANDOM NUMBER GENERATOR
+// ============================================================================
+
+/// Random number generator state (LCG)
+struct RNG {
+    seed: i64
+}
+
+/// Create new RNG with seed
+fn rng_new(seed: i64) -> RNG {
+    return RNG { seed: seed }
+}
+
+/// Generate uniform random in [0, 1) and update RNG
+struct RNGResult {
+    rng: RNG,
+    value: f64
+}
+
+fn rng_uniform(rng: RNG) -> RNGResult {
+    let a: i64 = 1103515245
+    let c: i64 = 12345
+    let m: i64 = 2147483648
+
+    let new_seed = (a * rng.seed + c) % m
+    let u = (new_seed as f64) / (m as f64)
+    return RNGResult {
+        rng: RNG { seed: new_seed },
+        value: u
+    }
+}
+
+/// Generate uniform random in [a, b)
+fn rng_uniform_range(rng: RNG, a: f64, b: f64) -> RNGResult {
+    let r = rng_uniform(rng)
+    return RNGResult {
+        rng: r.rng,
+        value: a + (b - a) * r.value
+    }
+}
+
+/// Generate standard normal using Box-Muller transform
+fn rng_normal_std(rng: RNG) -> RNGResult {
+    let r1 = rng_uniform(rng)
+    let mut u1 = r1.value
+    if u1 < 0.0000000001 { u1 = 0.0000000001 }
+
+    let r2 = rng_uniform(r1.rng)
+    let u2 = r2.value
+
+    let z = sqrt_f64(0.0 - 2.0 * ln_f64(u1)) * cos_f64(2.0 * pi() * u2)
+    return RNGResult {
+        rng: r2.rng,
+        value: z
+    }
+}
+
+/// Generate normal with mean mu and std sigma
+fn rng_normal(rng: RNG, mu: f64, sigma: f64) -> RNGResult {
+    let r = rng_normal_std(rng)
+    return RNGResult {
+        rng: r.rng,
+        value: mu + sigma * r.value
+    }
+}
+
+/// Generate Bernoulli with probability p
+fn rng_bernoulli(rng: RNG, p: f64) -> RNGResult {
+    let r = rng_uniform(rng)
+    let val = if r.value < p { 1.0 } else { 0.0 }
+    return RNGResult {
+        rng: r.rng,
+        value: val
+    }
+}
+
+/// Generate exponential with rate lambda
+fn rng_exponential(rng: RNG, lambda: f64) -> RNGResult {
+    let r = rng_uniform(rng)
+    let mut u = r.value
+    if u < 0.0000000001 { u = 0.0000000001 }
+    let val = 0.0 - ln_f64(u) / lambda
+    return RNGResult {
+        rng: r.rng,
+        value: val
+    }
+}
+
+/// Generate Beta using rejection sampling
+fn rng_beta(rng: RNG, alpha: f64, b: f64) -> RNGResult {
+    // Use acceptance-rejection with uniform proposal for alpha, beta >= 1
+    // For other cases, use transformation method with gamma
+    let mut r = rng
+
+    // Simple case: alpha = beta = 1 is uniform
+    if abs_f64(alpha - 1.0) < 0.001 && abs_f64(b - 1.0) < 0.001 {
+        return rng_uniform(r)
+    }
+
+    // General case: rejection sampling
+    let mut accepted = false
+    let mut result = 0.0
+    let mut iter: i64 = 0
+    let max_iter: i64 = 1000
+
+    while !accepted && iter < max_iter {
+        // Propose from uniform
+        let r1 = rng_uniform(r)
+        r = r1.rng
+        let x = r1.value
+
+        // Accept with probability proportional to Beta PDF
+        // Beta(x; a, b) = x^(a-1) * (1-x)^(b-1) / B(a, b)
+        // We accept if u < f(x) / M where M is max of proposal
+        let r2 = rng_uniform(r)
+        r = r2.rng
+        let u = r2.value
+
+        // Compute unnormalized beta pdf (without B(a,b) constant)
+        let pdf_unnorm = exp_f64((alpha - 1.0) * ln_f64(x + 0.0001) + (b - 1.0) * ln_f64(1.0 - x + 0.0001))
+
+        // Mode of Beta is at (a-1)/(a+b-2) for a,b > 1
+        let mode = if alpha > 1.0 && b > 1.0 {
+            (alpha - 1.0) / (alpha + b - 2.0)
+        } else {
+            0.5
+        }
+        let mode_pdf = exp_f64((alpha - 1.0) * ln_f64(mode + 0.0001) + (b - 1.0) * ln_f64(1.0 - mode + 0.0001))
+
+        if u * mode_pdf < pdf_unnorm {
+            accepted = true
+            result = x
+        }
+        iter = iter + 1
+    }
+
+    return RNGResult { rng: r, value: result }
+}
+
+// ============================================================================
+// DISTRIBUTION TYPES
+// ============================================================================
+
+/// Normal distribution N(mu, sigma^2)
+struct Normal {
+    mu: f64,
+    sigma: f64
+}
+
+fn normal_new(mu: f64, sigma: f64) -> Normal {
+    return Normal { mu: mu, sigma: sigma }
+}
+
+fn normal_standard() -> Normal {
+    return Normal { mu: 0.0, sigma: 1.0 }
+}
+
+/// Uniform distribution U(a, b)
+struct Uniform {
+    a: f64,
+    b: f64
+}
+
+fn uniform_new(a: f64, b: f64) -> Uniform {
+    return Uniform { a: a, b: b }
+}
+
+/// Bernoulli distribution Bernoulli(p)
+struct Bernoulli {
+    p: f64
+}
+
+fn bernoulli_new(p: f64) -> Bernoulli {
+    return Bernoulli { p: p }
+}
+
+/// Beta distribution Beta(alpha, beta)
+struct Beta {
+    alpha: f64,
+    beta_param: f64
+}
+
+fn beta_new(alpha: f64, b: f64) -> Beta {
+    return Beta { alpha: alpha, beta_param: b }
+}
+
+/// Exponential distribution Exp(lambda)
+struct Exponential {
+    lambda: f64
+}
+
+fn exponential_new(lambda: f64) -> Exponential {
+    return Exponential { lambda: lambda }
+}
+
+/// Poisson distribution Poisson(lambda)
+struct Poisson {
+    lambda: f64
+}
+
+fn poisson_new(lambda: f64) -> Poisson {
+    return Poisson { lambda: lambda }
+}
+
+// ============================================================================
+// SAMPLE FUNCTIONS
+// ============================================================================
+
+/// Sample from Normal distribution
+fn sample_normal(rng: RNG, dist: Normal) -> RNGResult {
+    return rng_normal(rng, dist.mu, dist.sigma)
+}
+
+/// Sample from Uniform distribution
+fn sample_uniform(rng: RNG, dist: Uniform) -> RNGResult {
+    return rng_uniform_range(rng, dist.a, dist.b)
+}
+
+/// Sample from Bernoulli distribution
+fn sample_bernoulli(rng: RNG, dist: Bernoulli) -> RNGResult {
+    return rng_bernoulli(rng, dist.p)
+}
+
+/// Sample from Beta distribution
+fn sample_beta(rng: RNG, dist: Beta) -> RNGResult {
+    return rng_beta(rng, dist.alpha, dist.beta_param)
+}
+
+/// Sample from Exponential distribution
+fn sample_exponential(rng: RNG, dist: Exponential) -> RNGResult {
+    return rng_exponential(rng, dist.lambda)
+}
+
+/// Sample from Poisson distribution (using inverse transform)
+fn sample_poisson(rng: RNG, dist: Poisson) -> RNGResult {
+    let L = exp_f64(0.0 - dist.lambda)
+    let mut k: i64 = 0
+    let mut p = 1.0
+    let mut r = rng
+
+    let r1 = rng_uniform(r)
+    r = r1.rng
+    p = p * r1.value
+
+    while p > L {
+        k = k + 1
+        let r2 = rng_uniform(r)
+        r = r2.rng
+        p = p * r2.value
+    }
+
+    return RNGResult { rng: r, value: k as f64 }
+}
+
+// ============================================================================
+// LOG-PDF FUNCTIONS (for observe)
+// ============================================================================
+
+/// Log-PDF of Normal distribution
+fn logpdf_normal(dist: Normal, x: f64) -> f64 {
+    let diff = x - dist.mu
+    let log_norm = 0.0 - 0.5 * ln_f64(2.0 * pi()) - ln_f64(dist.sigma)
+    return log_norm - (diff * diff) / (2.0 * dist.sigma * dist.sigma)
+}
+
+/// Log-PDF of Uniform distribution
+fn logpdf_uniform(dist: Uniform, x: f64) -> f64 {
+    if x < dist.a || x > dist.b {
+        return 0.0 - 1000000.0  // -infinity
+    }
+    return 0.0 - ln_f64(dist.b - dist.a)
+}
+
+/// Log-PMF of Bernoulli distribution
+fn logpdf_bernoulli(dist: Bernoulli, x: f64) -> f64 {
+    if x > 0.5 {
+        return ln_f64(dist.p + 0.0000001)
+    } else {
+        return ln_f64(1.0 - dist.p + 0.0000001)
+    }
+}
+
+/// Log-PDF of Beta distribution
+fn logpdf_beta(dist: Beta, x: f64) -> f64 {
+    if x <= 0.0 || x >= 1.0 {
+        return 0.0 - 1000000.0
+    }
+    // log Beta(x; a, b) = (a-1)*log(x) + (b-1)*log(1-x) - log B(a,b)
+    // We omit the constant for now
+    return (dist.alpha - 1.0) * ln_f64(x) + (dist.beta_param - 1.0) * ln_f64(1.0 - x)
+}
+
+/// Log-PDF of Exponential distribution
+fn logpdf_exponential(dist: Exponential, x: f64) -> f64 {
+    if x < 0.0 {
+        return 0.0 - 1000000.0
+    }
+    return ln_f64(dist.lambda) - dist.lambda * x
+}
+
+/// Log-PMF of Poisson distribution
+fn logpdf_poisson(dist: Poisson, k: f64) -> f64 {
+    let ki = k as i64
+    if ki < 0 {
+        return 0.0 - 1000000.0
+    }
+    // log P(k) = k*log(lambda) - lambda - log(k!)
+    let log_lambda = ln_f64(dist.lambda)
+
+    // Compute log(k!) = sum of log(i) for i=1..k
+    let mut log_factorial = 0.0
+    let mut i: i64 = 1
+    while i <= ki {
+        log_factorial = log_factorial + ln_f64(i as f64)
+        i = i + 1
+    }
+
+    return (ki as f64) * log_lambda - dist.lambda - log_factorial
+}
+
+// ============================================================================
+// OBSERVE FUNCTIONS
+// ============================================================================
+
+/// Observe Normal data - returns log-probability
+fn observe_normal(dist: Normal, x: f64) -> f64 {
+    return logpdf_normal(dist, x)
+}
+
+/// Observe Uniform data
+fn observe_uniform(dist: Uniform, x: f64) -> f64 {
+    return logpdf_uniform(dist, x)
+}
+
+/// Observe Bernoulli data
+fn observe_bernoulli(dist: Bernoulli, x: f64) -> f64 {
+    return logpdf_bernoulli(dist, x)
+}
+
+/// Observe Beta data
+fn observe_beta(dist: Beta, x: f64) -> f64 {
+    return logpdf_beta(dist, x)
+}
+
+/// Observe Exponential data
+fn observe_exponential(dist: Exponential, x: f64) -> f64 {
+    return logpdf_exponential(dist, x)
+}
+
+/// Observe Poisson data
+fn observe_poisson(dist: Poisson, k: f64) -> f64 {
+    return logpdf_poisson(dist, k)
+}
+
+// ============================================================================
+// INFERENCE: REJECTION SAMPLING
+// ============================================================================
+
+/// Result from inference
+struct InferenceResult {
+    samples: f64,      // Single sample for now (could be extended)
+    log_weight: f64,   // Log weight for importance sampling
+    accepted: bool
+}
+
+/// Rejection sampling state
+struct RejectionState {
+    rng: RNG,
+    n_accepted: i64,
+    n_proposed: i64
+}
+
+fn rejection_state_new(seed: i64) -> RejectionState {
+    return RejectionState {
+        rng: rng_new(seed),
+        n_accepted: 0,
+        n_proposed: 0
+    }
+}
+
+/// Simple rejection sampling for Beta-Bernoulli model
+/// Prior: p ~ Beta(alpha, beta)
+/// Likelihood: x ~ Bernoulli(p)
+/// Posterior: p | x
+struct BetaBernoulliModel {
+    prior_alpha: f64,
+    prior_beta: f64,
+    observed_successes: i64,
+    observed_failures: i64
+}
+
+fn beta_bernoulli_new(alpha: f64, b: f64) -> BetaBernoulliModel {
+    return BetaBernoulliModel {
+        prior_alpha: alpha,
+        prior_beta: b,
+        observed_successes: 0,
+        observed_failures: 0
+    }
+}
+
+fn beta_bernoulli_observe(model: BetaBernoulliModel, x: i64) -> BetaBernoulliModel {
+    if x > 0 {
+        return BetaBernoulliModel {
+            prior_alpha: model.prior_alpha,
+            prior_beta: model.prior_beta,
+            observed_successes: model.observed_successes + 1,
+            observed_failures: model.observed_failures
+        }
+    } else {
+        return BetaBernoulliModel {
+            prior_alpha: model.prior_alpha,
+            prior_beta: model.prior_beta,
+            observed_successes: model.observed_successes,
+            observed_failures: model.observed_failures + 1
+        }
+    }
+}
+
+/// Sample from posterior of Beta-Bernoulli model (analytical conjugate)
+fn sample_beta_bernoulli_posterior(rng: RNG, model: BetaBernoulliModel) -> RNGResult {
+    let post_alpha = model.prior_alpha + (model.observed_successes as f64)
+    let post_beta = model.prior_beta + (model.observed_failures as f64)
+    return rng_beta(rng, post_alpha, post_beta)
+}
+
+// ============================================================================
+// INFERENCE: IMPORTANCE SAMPLING
+// ============================================================================
+
+/// Importance sampling for Normal mean inference
+/// Prior: mu ~ Normal(prior_mu, prior_sigma)
+/// Likelihood: x ~ Normal(mu, data_sigma)
+struct NormalMeanModel {
+    prior_mu: f64,
+    prior_sigma: f64,
+    data_sigma: f64,
+    n_obs: i64,
+    sum_x: f64
+}
+
+fn normal_mean_model_new(prior_mu: f64, prior_sigma: f64, data_sigma: f64) -> NormalMeanModel {
+    return NormalMeanModel {
+        prior_mu: prior_mu,
+        prior_sigma: prior_sigma,
+        data_sigma: data_sigma,
+        n_obs: 0,
+        sum_x: 0.0
+    }
+}
+
+fn normal_mean_observe(model: NormalMeanModel, x: f64) -> NormalMeanModel {
+    return NormalMeanModel {
+        prior_mu: model.prior_mu,
+        prior_sigma: model.prior_sigma,
+        data_sigma: model.data_sigma,
+        n_obs: model.n_obs + 1,
+        sum_x: model.sum_x + x
+    }
+}
+
+/// Analytical posterior for Normal-Normal model
+struct NormalPosterior {
+    mu: f64,
+    sigma: f64
+}
+
+fn normal_mean_posterior(model: NormalMeanModel) -> NormalPosterior {
+    let prior_prec = 1.0 / (model.prior_sigma * model.prior_sigma)
+    let lik_prec = (model.n_obs as f64) / (model.data_sigma * model.data_sigma)
+
+    let post_prec = prior_prec + lik_prec
+    let post_var = 1.0 / post_prec
+
+    let data_mean = if model.n_obs > 0 { model.sum_x / (model.n_obs as f64) } else { 0.0 }
+    let post_mean = post_var * (prior_prec * model.prior_mu + lik_prec * data_mean)
+
+    return NormalPosterior {
+        mu: post_mean,
+        sigma: sqrt_f64(post_var)
+    }
+}
+
+// ============================================================================
+// TESTS
+// ============================================================================
+
+fn main() -> i32 {
+    println("=== Sounio Probabilistic Programming Module ===")
+    println("")
+
+    // Test 1: Sample from Normal
+    println("Test 1: Sample from Normal(5.0, 2.0)")
+    let mut rng = rng_new(42)
+    let mut sum_normal = 0.0
+    let mut i: i64 = 0
+    let n_samples: i64 = 1000
+
+    while i < n_samples {
+        let r = sample_normal(rng, normal_new(5.0, 2.0))
+        rng = r.rng
+        sum_normal = sum_normal + r.value
+        i = i + 1
+    }
+    let mean_normal = sum_normal / (n_samples as f64)
+    println("  Sample mean (expect ~5.0): ")
+    println(mean_normal)
+    println("")
+
+    // Test 2: Sample from Uniform
+    println("Test 2: Sample from Uniform(0, 10)")
+    rng = rng_new(123)
+    let mut sum_uniform = 0.0
+    i = 0
+    while i < n_samples {
+        let r = sample_uniform(rng, uniform_new(0.0, 10.0))
+        rng = r.rng
+        sum_uniform = sum_uniform + r.value
+        i = i + 1
+    }
+    let mean_uniform = sum_uniform / (n_samples as f64)
+    println("  Sample mean (expect ~5.0): ")
+    println(mean_uniform)
+    println("")
+
+    // Test 3: Sample from Bernoulli
+    println("Test 3: Sample from Bernoulli(0.7)")
+    rng = rng_new(456)
+    let mut sum_bernoulli = 0.0
+    i = 0
+    while i < n_samples {
+        let r = sample_bernoulli(rng, bernoulli_new(0.7))
+        rng = r.rng
+        sum_bernoulli = sum_bernoulli + r.value
+        i = i + 1
+    }
+    let mean_bernoulli = sum_bernoulli / (n_samples as f64)
+    println("  Sample mean (expect ~0.7): ")
+    println(mean_bernoulli)
+    println("")
+
+    // Test 4: Beta-Bernoulli model
+    println("Test 4: Beta-Bernoulli posterior")
+    let mut model = beta_bernoulli_new(1.0, 1.0)  // Uniform prior
+    // Observe 7 successes, 3 failures
+    i = 0
+    while i < 7 {
+        model = beta_bernoulli_observe(model, 1)
+        i = i + 1
+    }
+    i = 0
+    while i < 3 {
+        model = beta_bernoulli_observe(model, 0)
+        i = i + 1
+    }
+
+    rng = rng_new(789)
+    let mut sum_posterior = 0.0
+    i = 0
+    while i < n_samples {
+        let r = sample_beta_bernoulli_posterior(rng, model)
+        rng = r.rng
+        sum_posterior = sum_posterior + r.value
+        i = i + 1
+    }
+    let mean_posterior = sum_posterior / (n_samples as f64)
+    println("  Posterior mean (expect ~0.73 = 8/11): ")
+    println(mean_posterior)
+    println("")
+
+    // Test 5: Normal-Normal model
+    println("Test 5: Normal-Normal posterior")
+    let mut nm_model = normal_mean_model_new(0.0, 10.0, 1.0)  // Weak prior
+    // Observe data: 4.5, 5.2, 4.8, 5.5, 4.9
+    nm_model = normal_mean_observe(nm_model, 4.5)
+    nm_model = normal_mean_observe(nm_model, 5.2)
+    nm_model = normal_mean_observe(nm_model, 4.8)
+    nm_model = normal_mean_observe(nm_model, 5.5)
+    nm_model = normal_mean_observe(nm_model, 4.9)
+
+    let nm_post = normal_mean_posterior(nm_model)
+    println("  Posterior mu (expect ~4.98): ")
+    println(nm_post.mu)
+    println("  Posterior sigma: ")
+    println(nm_post.sigma)
+    println("")
+
+    // Test 6: Observe functions
+    println("Test 6: Log-probability computation")
+    let lp_normal = observe_normal(normal_new(0.0, 1.0), 0.0)
+    println("  logP(0 | N(0,1)) = ")
+    println(lp_normal)
+    // Expected: -0.5 * log(2*pi) = -0.9189...
+
+    let lp_bernoulli = observe_bernoulli(bernoulli_new(0.5), 1.0)
+    println("  logP(1 | Bernoulli(0.5)) = ")
+    println(lp_bernoulli)
+    // Expected: log(0.5) = -0.693...
+    println("")
+
+    // Validation
+    let pass1 = abs_f64(mean_normal - 5.0) < 0.3
+    let pass2 = abs_f64(mean_uniform - 5.0) < 0.3
+    let pass3 = abs_f64(mean_bernoulli - 0.7) < 0.1
+    let pass4 = abs_f64(mean_posterior - 0.727) < 0.15
+    let pass5 = abs_f64(nm_post.mu - 4.98) < 0.1
+    let pass6 = abs_f64(lp_normal + 0.9189) < 0.01
+
+    if pass1 && pass2 && pass3 && pass4 && pass5 && pass6 {
+        println("ALL TESTS PASSED")
+        return 0
+    } else {
+        println("SOME TESTS FAILED")
+        if !pass1 { println("  Normal sampling failed") }
+        if !pass2 { println("  Uniform sampling failed") }
+        if !pass3 { println("  Bernoulli sampling failed") }
+        if !pass4 { println("  Beta-Bernoulli failed") }
+        if !pass5 { println("  Normal-Normal failed") }
+        if !pass6 { println("  Log-prob failed") }
+        return 1
+    }
+}

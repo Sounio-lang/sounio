@@ -1,0 +1,533 @@
+//! Data Processing Pipeline Example
+//!
+//! Demonstrates a typical ETL (Extract-Transform-Load) workflow using:
+//! - CSV parsing from input files
+//! - Data transformation and validation
+//! - JSON output generation
+//! - Async processing with channels
+//!
+//! Key Sounio features demonstrated:
+//! - Async/await concurrency
+//! - Channel-based message passing
+//! - Pattern matching for data transformation
+//! - Result types for error handling
+//! - Struct types for domain modeling
+
+import csv::*
+import json::*
+import async::*
+import io::*
+
+// =============================================================================
+// Data Types
+// =============================================================================
+
+/// Input record from CSV (raw strings)
+struct RawRecord {
+    id: String,
+    name: String,
+    email: String,
+    age: String,
+    country: String,
+    score: String,
+}
+
+/// Validated and transformed record
+struct ProcessedRecord {
+    id: u64,
+    name: String,
+    email: String,
+    age: u32,
+    country: String,
+    score: f64,
+    is_valid_email: bool,
+    age_group: String,
+    performance: String,
+}
+
+/// Statistics about the processing
+struct ProcessingStats {
+    total_records: usize,
+    valid_records: usize,
+    invalid_records: usize,
+    by_country: Map<String, usize>,
+    by_age_group: Map<String, usize>,
+    average_score: f64,
+}
+
+// =============================================================================
+// Validation and Transformation
+// =============================================================================
+
+/// Validate email format (simplified)
+fn is_valid_email(email: &str) -> bool {
+    email.contains("@") && email.contains(".")
+}
+
+/// Determine age group
+fn categorize_age(age: u32) -> String {
+    if age < 18 {
+        "minor".to_string()
+    } else if age < 30 {
+        "young_adult".to_string()
+    } else if age < 50 {
+        "adult".to_string()
+    } else if age < 65 {
+        "senior".to_string()
+    } else {
+        "elderly".to_string()
+    }
+}
+
+/// Categorize performance based on score
+fn categorize_performance(score: f64) -> String {
+    if score >= 90.0 {
+        "excellent".to_string()
+    } else if score >= 80.0 {
+        "good".to_string()
+    } else if score >= 70.0 {
+        "average".to_string()
+    } else if score >= 60.0 {
+        "below_average".to_string()
+    } else {
+        "poor".to_string()
+    }
+}
+
+/// Parse and validate a raw record
+fn process_record(raw: &RawRecord) -> Result<ProcessedRecord, String> {
+    // Parse ID
+    let id = match raw.id.parse::<u64>() {
+        Ok(v) => v,
+        Err(_) => return Err("Invalid ID: " ++ &raw.id),
+    };
+
+    // Parse age
+    let age = match raw.age.parse::<u32>() {
+        Ok(v) if v > 0 && v < 150 => v,
+        Ok(v) => return Err("Age out of range: " ++ v.to_string()),
+        Err(_) => return Err("Invalid age: " ++ &raw.age),
+    };
+
+    // Parse score
+    let score = match raw.score.parse::<f64>() {
+        Ok(v) if v >= 0.0 && v <= 100.0 => v,
+        Ok(v) => return Err("Score out of range: " ++ v.to_string()),
+        Err(_) => return Err("Invalid score: " ++ &raw.score),
+    };
+
+    // Validate name
+    if raw.name.trim().is_empty() {
+        return Err("Empty name".to_string());
+    }
+
+    // Create processed record
+    Ok(ProcessedRecord {
+        id: id,
+        name: raw.name.trim().to_string(),
+        email: raw.email.trim().to_lowercase(),
+        age: age,
+        country: raw.country.trim().to_uppercase(),
+        score: score,
+        is_valid_email: is_valid_email(&raw.email),
+        age_group: categorize_age(age),
+        performance: categorize_performance(score),
+    })
+}
+
+// =============================================================================
+// CSV Parsing
+// =============================================================================
+
+/// Parse CSV records from string
+fn parse_csv_records(csv_content: &str) -> Result<Vec<RawRecord>, csv::CsvError> {
+    let data = csv::parse(csv_content)?;
+
+    var records: Vec<RawRecord> = Vec::new();
+
+    for record in data.records.iter() {
+        if record.len() >= 6 {
+            records.push(RawRecord {
+                id: record.get(0),
+                name: record.get(1),
+                email: record.get(2),
+                age: record.get(3),
+                country: record.get(4),
+                score: record.get(5),
+            });
+        }
+    }
+
+    Ok(records)
+}
+
+// =============================================================================
+// JSON Serialization
+// =============================================================================
+
+/// Convert processed record to JSON value
+fn record_to_json(record: &ProcessedRecord) -> json::JsonValue {
+    var obj = json::JsonValue::object();
+    obj.set("id", json::JsonValue::number(record.id as f64));
+    obj.set("name", json::JsonValue::string(record.name.clone()));
+    obj.set("email", json::JsonValue::string(record.email.clone()));
+    obj.set("age", json::JsonValue::number(record.age as f64));
+    obj.set("country", json::JsonValue::string(record.country.clone()));
+    obj.set("score", json::JsonValue::number(record.score));
+    obj.set("is_valid_email", json::JsonValue::bool(record.is_valid_email));
+    obj.set("age_group", json::JsonValue::string(record.age_group.clone()));
+    obj.set("performance", json::JsonValue::string(record.performance.clone()));
+    obj
+}
+
+/// Convert all records to JSON array
+fn records_to_json(records: &Vec<ProcessedRecord>) -> json::JsonValue {
+    var arr: Vec<json::JsonValue> = Vec::new();
+    for record in records.iter() {
+        arr.push(record_to_json(record));
+    }
+    json::JsonValue::array_from(arr)
+}
+
+/// Convert stats to JSON
+fn stats_to_json(stats: &ProcessingStats) -> json::JsonValue {
+    var obj = json::JsonValue::object();
+    obj.set("total_records", json::JsonValue::number(stats.total_records as f64));
+    obj.set("valid_records", json::JsonValue::number(stats.valid_records as f64));
+    obj.set("invalid_records", json::JsonValue::number(stats.invalid_records as f64));
+    obj.set("average_score", json::JsonValue::number(stats.average_score));
+
+    // Country breakdown
+    var countries = json::JsonValue::object();
+    for (country, count) in stats.by_country.iter() {
+        countries.set(country, json::JsonValue::number(*count as f64));
+    }
+    obj.set("by_country", countries);
+
+    // Age group breakdown
+    var age_groups = json::JsonValue::object();
+    for (group, count) in stats.by_age_group.iter() {
+        age_groups.set(group, json::JsonValue::number(*count as f64));
+    }
+    obj.set("by_age_group", age_groups);
+
+    obj
+}
+
+// =============================================================================
+// Statistics Computation
+// =============================================================================
+
+/// Compute statistics from processed records
+fn compute_stats(records: &Vec<ProcessedRecord>) -> ProcessingStats {
+    var by_country: Map<String, usize> = Map::new();
+    var by_age_group: Map<String, usize> = Map::new();
+    var total_score: f64 = 0.0;
+
+    for record in records.iter() {
+        // Count by country
+        let country_count = by_country.get(&record.country).unwrap_or(&0);
+        by_country.insert(record.country.clone(), country_count + 1);
+
+        // Count by age group
+        let age_count = by_age_group.get(&record.age_group).unwrap_or(&0);
+        by_age_group.insert(record.age_group.clone(), age_count + 1);
+
+        // Sum scores
+        total_score = total_score + record.score;
+    }
+
+    let average = if records.len() > 0 {
+        total_score / (records.len() as f64)
+    } else {
+        0.0
+    };
+
+    ProcessingStats {
+        total_records: 0,  // Will be set by caller
+        valid_records: records.len(),
+        invalid_records: 0,  // Will be set by caller
+        by_country: by_country,
+        by_age_group: by_age_group,
+        average_score: average,
+    }
+}
+
+// =============================================================================
+// Async Pipeline with Channels
+// =============================================================================
+
+/// Message types for the processing pipeline
+enum PipelineMessage {
+    Record(RawRecord),
+    Done,
+}
+
+/// Result messages
+enum ResultMessage {
+    Processed(ProcessedRecord),
+    Error { id: String, message: String },
+    Complete,
+}
+
+/// Producer: reads CSV and sends records to channel
+async fn producer(
+    csv_content: String,
+    tx: mpsc::Sender<PipelineMessage>,
+) with Async {
+    match parse_csv_records(&csv_content) {
+        Ok(records) => {
+            for record in records {
+                tx.send(PipelineMessage::Record(record)).await.unwrap();
+            }
+        },
+        Err(e) => {
+            println("CSV parsing error: {}", e.to_string());
+        },
+    }
+
+    // Signal completion
+    tx.send(PipelineMessage::Done).await.unwrap();
+}
+
+/// Worker: processes records and sends results
+async fn worker(
+    rx: mpsc::Receiver<PipelineMessage>,
+    tx: mpsc::Sender<ResultMessage>,
+) with Async {
+    loop {
+        match rx.recv().await {
+            Some(PipelineMessage::Record(raw)) => {
+                match process_record(&raw) {
+                    Ok(processed) => {
+                        tx.send(ResultMessage::Processed(processed)).await.unwrap();
+                    },
+                    Err(msg) => {
+                        tx.send(ResultMessage::Error {
+                            id: raw.id.clone(),
+                            message: msg,
+                        }).await.unwrap();
+                    },
+                }
+            },
+            Some(PipelineMessage::Done) => {
+                tx.send(ResultMessage::Complete).await.unwrap();
+                break;
+            },
+            None => break,
+        }
+    }
+}
+
+/// Consumer: collects results
+async fn consumer(
+    rx: mpsc::Receiver<ResultMessage>,
+) -> (Vec<ProcessedRecord>, Vec<(String, String)>) with Async {
+    var processed: Vec<ProcessedRecord> = Vec::new();
+    var errors: Vec<(String, String)> = Vec::new();
+
+    loop {
+        match rx.recv().await {
+            Some(ResultMessage::Processed(record)) => {
+                processed.push(record);
+            },
+            Some(ResultMessage::Error { id, message }) => {
+                errors.push((id, message));
+            },
+            Some(ResultMessage::Complete) | None => break,
+        }
+    }
+
+    (processed, errors)
+}
+
+/// Run the async pipeline
+async fn run_async_pipeline(csv_content: String) -> (Vec<ProcessedRecord>, Vec<(String, String)>) with Async {
+    // Create channels
+    let (raw_tx, raw_rx) = mpsc::channel::<PipelineMessage>(100);
+    let (result_tx, result_rx) = mpsc::channel::<ResultMessage>(100);
+
+    // Spawn producer
+    let producer_handle = spawn async move {
+        producer(csv_content, raw_tx).await;
+    };
+
+    // Spawn worker
+    let worker_handle = spawn async move {
+        worker(raw_rx, result_tx).await;
+    };
+
+    // Run consumer on main task
+    let results = consumer(result_rx).await;
+
+    // Wait for producer and worker
+    producer_handle.await;
+    worker_handle.await;
+
+    results
+}
+
+// =============================================================================
+// Synchronous Pipeline (Alternative)
+// =============================================================================
+
+/// Run the synchronous pipeline
+fn run_sync_pipeline(csv_content: &str) -> Result<(Vec<ProcessedRecord>, Vec<(String, String)>), String> {
+    let raw_records = match parse_csv_records(csv_content) {
+        Ok(r) => r,
+        Err(e) => return Err("CSV parse error: " ++ e.to_string()),
+    };
+
+    var processed: Vec<ProcessedRecord> = Vec::new();
+    var errors: Vec<(String, String)> = Vec::new();
+
+    for raw in raw_records.iter() {
+        match process_record(raw) {
+            Ok(p) => processed.push(p),
+            Err(msg) => errors.push((raw.id.clone(), msg)),
+        }
+    }
+
+    Ok((processed, errors))
+}
+
+// =============================================================================
+// Main Entry Point
+// =============================================================================
+
+fn main() -> i32 {
+    print("=== Data Processing Pipeline ===\n\n");
+
+    // Sample CSV data (in real use, this would be read from a file)
+    let csv_content = "id,name,email,age,country,score
+1,Alice Johnson,alice@example.com,28,US,85.5
+2,Bob Smith,bob.smith@company.org,35,UK,92.0
+3,Charlie Brown,charlie@invalid,42,CA,78.3
+4,Diana Lee,diana.lee@tech.io,22,US,95.8
+5,Eve Wilson,eve@email.com,55,DE,88.2
+6,Frank Miller,invalid-email,31,FR,72.5
+7,Grace Chen,grace.chen@university.edu,19,CN,91.0
+8,Henry Davis,,45,US,65.0
+9,Ivy Thompson,ivy@startup.com,27,UK,83.7
+10,Jack Anderson,jack@enterprise.net,62,AU,79.4
+11,Kate Murphy,kate.murphy@gov.ie,38,IE,94.5
+12,Leo Garcia,leo@company.es,29,ES,81.2
+13,Maya Patel,maya.patel@corp.in,33,IN,89.8
+14,Noah Kim,noah@email.kr,24,KR,76.9
+15,Olivia Brown,olivia@invalid,41,US,67.3";
+
+    print("Input CSV:\n");
+    print(csv_content);
+    print("\n\n");
+
+    // Process using synchronous pipeline
+    print("Processing with synchronous pipeline...\n\n");
+
+    match run_sync_pipeline(csv_content) {
+        Ok((processed, errors)) => {
+            print("Processing complete!\n");
+            print("Valid records: ");
+            print(processed.len().to_string());
+            print("\n");
+            print("Invalid records: ");
+            print(errors.len().to_string());
+            print("\n\n");
+
+            // Print errors
+            if !errors.is_empty() {
+                print("=== Validation Errors ===\n");
+                for (id, msg) in errors.iter() {
+                    print("Record ");
+                    print(id);
+                    print(": ");
+                    print(msg);
+                    print("\n");
+                }
+                print("\n");
+            }
+
+            // Compute and print statistics
+            var stats = compute_stats(&processed);
+            stats.total_records = processed.len() + errors.len();
+            stats.invalid_records = errors.len();
+
+            print("=== Processing Statistics ===\n");
+            print("Total records: ");
+            print(stats.total_records.to_string());
+            print("\n");
+            print("Valid records: ");
+            print(stats.valid_records.to_string());
+            print("\n");
+            print("Invalid records: ");
+            print(stats.invalid_records.to_string());
+            print("\n");
+            print("Average score: ");
+            print(stats.average_score.to_string());
+            print("\n\n");
+
+            print("Records by country:\n");
+            for (country, count) in stats.by_country.iter() {
+                print("  ");
+                print(country);
+                print(": ");
+                print(count.to_string());
+                print("\n");
+            }
+            print("\n");
+
+            print("Records by age group:\n");
+            for (group, count) in stats.by_age_group.iter() {
+                print("  ");
+                print(group);
+                print(": ");
+                print(count.to_string());
+                print("\n");
+            }
+            print("\n");
+
+            // Generate JSON output
+            print("=== JSON Output ===\n");
+            let json_data = records_to_json(&processed);
+            let json_str = json::to_string_pretty(&json_data);
+            print(json_str);
+            print("\n\n");
+
+            print("=== Statistics JSON ===\n");
+            let stats_json = stats_to_json(&stats);
+            let stats_str = json::to_string_pretty(&stats_json);
+            print(stats_str);
+            print("\n");
+
+            0
+        },
+        Err(e) => {
+            print("Pipeline error: ");
+            print(e);
+            print("\n");
+            1
+        },
+    }
+}
+
+// =============================================================================
+// Async Main (Alternative Entry Point)
+// =============================================================================
+
+/// Alternative async main for demonstration
+async fn async_main() with Async, IO {
+    print("=== Async Data Processing Pipeline ===\n\n");
+
+    let csv_content = "id,name,email,age,country,score
+1,Alice,alice@test.com,30,US,85.0
+2,Bob,bob@test.com,25,UK,90.0
+3,Charlie,invalid,35,CA,75.0";
+
+    let (processed, errors) = run_async_pipeline(csv_content.to_string()).await;
+
+    print("Async processing complete!\n");
+    print("Valid: ");
+    print(processed.len().to_string());
+    print(", Invalid: ");
+    print(errors.len().to_string());
+    print("\n");
+}

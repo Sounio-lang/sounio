@@ -1,0 +1,647 @@
+// inference.sio - Inference Algorithms for Probabilistic Programming
+//
+// Implements inference methods for probabilistic programs:
+// - Rejection sampling
+// - Importance sampling
+// - Likelihood weighting
+// - Simple Metropolis-Hastings
+//
+// These methods allow conditioning on observations (observe statements)
+// and producing samples from posterior distributions.
+//
+// References:
+// - "Probabilistic Programming" by van de Meent et al. (2018)
+// - "Pattern Recognition and Machine Learning" by Bishop (2006)
+
+// ============================================================================
+// MATH HELPERS
+// ============================================================================
+
+fn abs_f64(x: f64) -> f64 {
+    if x < 0.0 { return 0.0 - x }
+    return x
+}
+
+fn sqrt_f64(x: f64) -> f64 {
+    if x <= 0.0 { return 0.0 }
+    let mut y = x
+    y = 0.5 * (y + x / y)
+    y = 0.5 * (y + x / y)
+    y = 0.5 * (y + x / y)
+    y = 0.5 * (y + x / y)
+    y = 0.5 * (y + x / y)
+    y = 0.5 * (y + x / y)
+    y = 0.5 * (y + x / y)
+    y = 0.5 * (y + x / y)
+    y = 0.5 * (y + x / y)
+    y = 0.5 * (y + x / y)
+    return y
+}
+
+fn exp_f64(x: f64) -> f64 {
+    if x > 20.0 { return exp_f64(x / 2.0) * exp_f64(x / 2.0) }
+    if x < 0.0 - 20.0 { return 1.0 / exp_f64(0.0 - x) }
+
+    let mut sum = 1.0
+    let mut term = 1.0
+    term = term * x / 1.0
+    sum = sum + term
+    term = term * x / 2.0
+    sum = sum + term
+    term = term * x / 3.0
+    sum = sum + term
+    term = term * x / 4.0
+    sum = sum + term
+    term = term * x / 5.0
+    sum = sum + term
+    term = term * x / 6.0
+    sum = sum + term
+    term = term * x / 7.0
+    sum = sum + term
+    term = term * x / 8.0
+    sum = sum + term
+    term = term * x / 9.0
+    sum = sum + term
+    term = term * x / 10.0
+    sum = sum + term
+    term = term * x / 11.0
+    sum = sum + term
+    term = term * x / 12.0
+    sum = sum + term
+    return sum
+}
+
+fn ln_f64(x: f64) -> f64 {
+    if x <= 0.0 { return 0.0 - 1000000.0 }
+    let mut val = x
+    let mut k = 0.0
+    let e = 2.718281828459045
+    while val > e { val = val / e; k = k + 1.0 }
+    while val < 1.0 / e { val = val * e; k = k - 1.0 }
+    let u = (val - 1.0) / (val + 1.0)
+    let u2 = u * u
+    let mut sum = u
+    let mut term = u
+    term = term * u2; sum = sum + term / 3.0
+    term = term * u2; sum = sum + term / 5.0
+    term = term * u2; sum = sum + term / 7.0
+    term = term * u2; sum = sum + term / 9.0
+    term = term * u2; sum = sum + term / 11.0
+    return 2.0 * sum + k
+}
+
+fn pi() -> f64 { 3.141592653589793 }
+
+fn cos_f64(x: f64) -> f64 {
+    let mut y = x
+    while y > pi() { y = y - 2.0 * pi() }
+    while y < 0.0 - pi() { y = y + 2.0 * pi() }
+    let x2 = y * y
+    let mut sum = 1.0
+    let mut term = 1.0
+    term = term * (0.0 - x2) / (1.0 * 2.0); sum = sum + term
+    term = term * (0.0 - x2) / (3.0 * 4.0); sum = sum + term
+    term = term * (0.0 - x2) / (5.0 * 6.0); sum = sum + term
+    term = term * (0.0 - x2) / (7.0 * 8.0); sum = sum + term
+    return sum
+}
+
+// ============================================================================
+// RANDOM NUMBER GENERATOR
+// ============================================================================
+
+struct RNG {
+    seed: i64
+}
+
+fn rng_new(seed: i64) -> RNG {
+    return RNG { seed: seed }
+}
+
+struct RNGResult {
+    rng: RNG,
+    value: f64
+}
+
+fn rng_uniform(rng: RNG) -> RNGResult {
+    let a: i64 = 1103515245
+    let c: i64 = 12345
+    let m: i64 = 2147483648
+    let new_seed = (a * rng.seed + c) % m
+    let u = (new_seed as f64) / (m as f64)
+    return RNGResult { rng: RNG { seed: new_seed }, value: u }
+}
+
+fn rng_normal_std(rng: RNG) -> RNGResult {
+    let r1 = rng_uniform(rng)
+    let mut u1 = r1.value
+    if u1 < 0.0000000001 { u1 = 0.0000000001 }
+    let r2 = rng_uniform(r1.rng)
+    let u2 = r2.value
+    let z = sqrt_f64(0.0 - 2.0 * ln_f64(u1)) * cos_f64(2.0 * pi() * u2)
+    return RNGResult { rng: r2.rng, value: z }
+}
+
+fn rng_normal(rng: RNG, mu: f64, sigma: f64) -> RNGResult {
+    let r = rng_normal_std(rng)
+    return RNGResult { rng: r.rng, value: mu + sigma * r.value }
+}
+
+// ============================================================================
+// WEIGHTED SAMPLE COLLECTION
+// ============================================================================
+
+/// A single weighted sample
+struct WeightedSample {
+    value: f64,
+    log_weight: f64
+}
+
+/// Collection of weighted samples (fixed size for Sounio)
+struct SampleCollection {
+    s0: WeightedSample, s1: WeightedSample, s2: WeightedSample, s3: WeightedSample,
+    s4: WeightedSample, s5: WeightedSample, s6: WeightedSample, s7: WeightedSample,
+    s8: WeightedSample, s9: WeightedSample, s10: WeightedSample, s11: WeightedSample,
+    s12: WeightedSample, s13: WeightedSample, s14: WeightedSample, s15: WeightedSample,
+    s16: WeightedSample, s17: WeightedSample, s18: WeightedSample, s19: WeightedSample,
+    count: i64
+}
+
+fn empty_sample() -> WeightedSample {
+    return WeightedSample { value: 0.0, log_weight: 0.0 - 1000000.0 }
+}
+
+fn new_sample_collection() -> SampleCollection {
+    return SampleCollection {
+        s0: empty_sample(), s1: empty_sample(), s2: empty_sample(), s3: empty_sample(),
+        s4: empty_sample(), s5: empty_sample(), s6: empty_sample(), s7: empty_sample(),
+        s8: empty_sample(), s9: empty_sample(), s10: empty_sample(), s11: empty_sample(),
+        s12: empty_sample(), s13: empty_sample(), s14: empty_sample(), s15: empty_sample(),
+        s16: empty_sample(), s17: empty_sample(), s18: empty_sample(), s19: empty_sample(),
+        count: 0
+    }
+}
+
+fn collection_get(c: SampleCollection, idx: i64) -> WeightedSample {
+    if idx == 0 { return c.s0 }
+    if idx == 1 { return c.s1 }
+    if idx == 2 { return c.s2 }
+    if idx == 3 { return c.s3 }
+    if idx == 4 { return c.s4 }
+    if idx == 5 { return c.s5 }
+    if idx == 6 { return c.s6 }
+    if idx == 7 { return c.s7 }
+    if idx == 8 { return c.s8 }
+    if idx == 9 { return c.s9 }
+    if idx == 10 { return c.s10 }
+    if idx == 11 { return c.s11 }
+    if idx == 12 { return c.s12 }
+    if idx == 13 { return c.s13 }
+    if idx == 14 { return c.s14 }
+    if idx == 15 { return c.s15 }
+    if idx == 16 { return c.s16 }
+    if idx == 17 { return c.s17 }
+    if idx == 18 { return c.s18 }
+    return c.s19
+}
+
+// ============================================================================
+// INFERENCE RESULTS
+// ============================================================================
+
+/// Summary statistics from inference
+struct InferenceSummary {
+    mean: f64,
+    std: f64,
+    ci_lower: f64,
+    ci_upper: f64,
+    ess: f64,  // Effective sample size
+    n_samples: i64
+}
+
+/// Compute weighted mean
+fn weighted_mean(samples: SampleCollection) -> f64 {
+    // Find max log weight for numerical stability
+    let mut max_lw = 0.0 - 1000000.0
+    let mut i: i64 = 0
+    while i < samples.count {
+        let s = collection_get(samples, i)
+        if s.log_weight > max_lw {
+            max_lw = s.log_weight
+        }
+        i = i + 1
+    }
+
+    // Compute normalized weights and weighted sum
+    let mut sum_w = 0.0
+    let mut sum_wx = 0.0
+    i = 0
+    while i < samples.count {
+        let s = collection_get(samples, i)
+        let w = exp_f64(s.log_weight - max_lw)
+        sum_w = sum_w + w
+        sum_wx = sum_wx + w * s.value
+        i = i + 1
+    }
+
+    if sum_w > 0.0 {
+        return sum_wx / sum_w
+    }
+    return 0.0
+}
+
+/// Compute weighted variance
+fn weighted_variance(samples: SampleCollection, mean: f64) -> f64 {
+    let mut max_lw = 0.0 - 1000000.0
+    let mut i: i64 = 0
+    while i < samples.count {
+        let s = collection_get(samples, i)
+        if s.log_weight > max_lw { max_lw = s.log_weight }
+        i = i + 1
+    }
+
+    let mut sum_w = 0.0
+    let mut sum_w2 = 0.0
+    let mut sum_wd2 = 0.0
+    i = 0
+    while i < samples.count {
+        let s = collection_get(samples, i)
+        let w = exp_f64(s.log_weight - max_lw)
+        let d = s.value - mean
+        sum_w = sum_w + w
+        sum_w2 = sum_w2 + w * w
+        sum_wd2 = sum_wd2 + w * d * d
+        i = i + 1
+    }
+
+    if sum_w > 0.0 {
+        // Bessel correction for weighted variance
+        let n_eff = sum_w * sum_w / sum_w2
+        return sum_wd2 / sum_w * n_eff / (n_eff - 1.0)
+    }
+    return 0.0
+}
+
+/// Compute effective sample size
+fn effective_sample_size(samples: SampleCollection) -> f64 {
+    let mut max_lw = 0.0 - 1000000.0
+    let mut i: i64 = 0
+    while i < samples.count {
+        let s = collection_get(samples, i)
+        if s.log_weight > max_lw { max_lw = s.log_weight }
+        i = i + 1
+    }
+
+    let mut sum_w = 0.0
+    let mut sum_w2 = 0.0
+    i = 0
+    while i < samples.count {
+        let s = collection_get(samples, i)
+        let w = exp_f64(s.log_weight - max_lw)
+        sum_w = sum_w + w
+        sum_w2 = sum_w2 + w * w
+        i = i + 1
+    }
+
+    if sum_w2 > 0.0 {
+        return sum_w * sum_w / sum_w2
+    }
+    return 0.0
+}
+
+// ============================================================================
+// REJECTION SAMPLING
+// ============================================================================
+
+/// Rejection sampling configuration
+struct RejectionConfig {
+    max_proposals: i64,
+    target_samples: i64
+}
+
+fn default_rejection_config() -> RejectionConfig {
+    return RejectionConfig {
+        max_proposals: 100000,
+        target_samples: 100
+    }
+}
+
+/// Rejection sampling result
+struct RejectionResult {
+    samples: SampleCollection,
+    acceptance_rate: f64,
+    n_accepted: i64,
+    n_proposed: i64
+}
+
+/// Rejection sampling for estimating P(X > threshold) where X ~ Normal(mu, sigma)
+fn rejection_sample_normal_above(mu: f64, sigma: f64, threshold: f64, config: RejectionConfig) -> RejectionResult {
+    let mut rng = rng_new(12345)
+    let mut result = new_sample_collection()
+    let mut n_accepted: i64 = 0
+    let mut n_proposed: i64 = 0
+
+    while n_accepted < config.target_samples && n_proposed < config.max_proposals {
+        // Propose from prior
+        let r = rng_normal(rng, mu, sigma)
+        rng = r.rng
+        n_proposed = n_proposed + 1
+
+        // Accept if above threshold
+        if r.value > threshold && n_accepted < 20 {
+            // Add to collection (limited by fixed size)
+            let sample = WeightedSample { value: r.value, log_weight: 0.0 }
+            result = add_sample(result, sample)
+            n_accepted = n_accepted + 1
+        }
+    }
+
+    let accept_rate = if n_proposed > 0 {
+        (n_accepted as f64) / (n_proposed as f64)
+    } else { 0.0 }
+
+    return RejectionResult {
+        samples: result,
+        acceptance_rate: accept_rate,
+        n_accepted: n_accepted,
+        n_proposed: n_proposed
+    }
+}
+
+fn add_sample(c: SampleCollection, s: WeightedSample) -> SampleCollection {
+    let idx = c.count
+    if idx >= 20 { return c }  // Collection full
+
+    // Create new collection with sample added at position idx
+    let mut result = c
+    result.count = idx + 1
+
+    if idx == 0 { result.s0 = s }
+    else if idx == 1 { result.s1 = s }
+    else if idx == 2 { result.s2 = s }
+    else if idx == 3 { result.s3 = s }
+    else if idx == 4 { result.s4 = s }
+    else if idx == 5 { result.s5 = s }
+    else if idx == 6 { result.s6 = s }
+    else if idx == 7 { result.s7 = s }
+    else if idx == 8 { result.s8 = s }
+    else if idx == 9 { result.s9 = s }
+    else if idx == 10 { result.s10 = s }
+    else if idx == 11 { result.s11 = s }
+    else if idx == 12 { result.s12 = s }
+    else if idx == 13 { result.s13 = s }
+    else if idx == 14 { result.s14 = s }
+    else if idx == 15 { result.s15 = s }
+    else if idx == 16 { result.s16 = s }
+    else if idx == 17 { result.s17 = s }
+    else if idx == 18 { result.s18 = s }
+    else { result.s19 = s }
+
+    return result
+}
+
+// ============================================================================
+// IMPORTANCE SAMPLING
+// ============================================================================
+
+/// Importance sampling configuration
+struct ImportanceConfig {
+    n_samples: i64
+}
+
+fn default_importance_config() -> ImportanceConfig {
+    return ImportanceConfig { n_samples: 100 }
+}
+
+/// Log-PDF of standard normal
+fn log_normal_pdf(x: f64, mu: f64, sigma: f64) -> f64 {
+    let diff = x - mu
+    return 0.0 - 0.5 * ln_f64(2.0 * pi()) - ln_f64(sigma) - (diff * diff) / (2.0 * sigma * sigma)
+}
+
+/// Importance sampling for Normal mean posterior
+/// Prior: mu ~ Normal(prior_mu, prior_sigma)
+/// Likelihood: observations x_i ~ Normal(mu, data_sigma)
+/// Proposal: Normal(data_mean, proposal_sigma)
+struct ImportanceResult {
+    samples: SampleCollection,
+    log_marginal: f64,  // Log marginal likelihood estimate
+    ess: f64
+}
+
+fn importance_sample_normal_mean(
+    prior_mu: f64, prior_sigma: f64,
+    data_mean: f64, data_sigma: f64, n_obs: i64,
+    proposal_mu: f64, proposal_sigma: f64,
+    config: ImportanceConfig
+) -> ImportanceResult {
+    let mut rng = rng_new(54321)
+    let mut samples = new_sample_collection()
+    let mut log_sum_w = 0.0 - 1000000.0
+
+    let mut i: i64 = 0
+    while i < config.n_samples && i < 20 {
+        // Sample from proposal
+        let r = rng_normal(rng, proposal_mu, proposal_sigma)
+        rng = r.rng
+        let mu_sample = r.value
+
+        // Compute log weight = log p(mu) + log p(data|mu) - log q(mu)
+        let log_prior = log_normal_pdf(mu_sample, prior_mu, prior_sigma)
+
+        // Likelihood: sum of log p(x_i | mu) = -n/2 * log(2*pi*sigma^2) - sum((x_i - mu)^2) / (2*sigma^2)
+        // With sufficient statistics: -n * (data_mean - mu)^2 / (2*data_sigma^2) + constant
+        let diff = data_mean - mu_sample
+        let log_lik = 0.0 - (n_obs as f64) * diff * diff / (2.0 * data_sigma * data_sigma)
+
+        let log_proposal = log_normal_pdf(mu_sample, proposal_mu, proposal_sigma)
+
+        let log_weight = log_prior + log_lik - log_proposal
+
+        let sample = WeightedSample { value: mu_sample, log_weight: log_weight }
+        samples = add_sample(samples, sample)
+
+        // Update log sum for marginal likelihood
+        if i == 0 {
+            log_sum_w = log_weight
+        } else {
+            // log(exp(a) + exp(b)) = a + log(1 + exp(b-a))
+            if log_weight > log_sum_w {
+                log_sum_w = log_weight + ln_f64(1.0 + exp_f64(log_sum_w - log_weight))
+            } else {
+                log_sum_w = log_sum_w + ln_f64(1.0 + exp_f64(log_weight - log_sum_w))
+            }
+        }
+
+        i = i + 1
+    }
+
+    let log_marginal = log_sum_w - ln_f64(samples.count as f64)
+    let ess = effective_sample_size(samples)
+
+    return ImportanceResult {
+        samples: samples,
+        log_marginal: log_marginal,
+        ess: ess
+    }
+}
+
+// ============================================================================
+// SIMPLE METROPOLIS-HASTINGS
+// ============================================================================
+
+/// MH configuration
+struct MHConfig {
+    n_samples: i64,
+    n_warmup: i64,
+    proposal_sigma: f64
+}
+
+fn default_mh_config() -> MHConfig {
+    return MHConfig {
+        n_samples: 100,
+        n_warmup: 50,
+        proposal_sigma: 1.0
+    }
+}
+
+/// MH result
+struct MHResult {
+    samples: SampleCollection,
+    acceptance_rate: f64
+}
+
+/// Metropolis-Hastings for Normal mean posterior
+fn mh_sample_normal_mean(
+    prior_mu: f64, prior_sigma: f64,
+    data_mean: f64, data_sigma: f64, n_obs: i64,
+    config: MHConfig
+) -> MHResult {
+    let mut rng = rng_new(98765)
+    let mut samples = new_sample_collection()
+
+    // Initialize at prior mean
+    let mut mu_current = prior_mu
+    let mut log_p_current = log_posterior_normal_mean(mu_current, prior_mu, prior_sigma, data_mean, data_sigma, n_obs)
+
+    let mut n_accepted: i64 = 0
+    let mut n_total: i64 = 0
+    let total_iter = config.n_warmup + config.n_samples
+
+    let mut iter: i64 = 0
+    while iter < total_iter {
+        // Propose
+        let r = rng_normal(rng, mu_current, config.proposal_sigma)
+        rng = r.rng
+        let mu_proposed = r.value
+
+        // Compute log posterior at proposal
+        let log_p_proposed = log_posterior_normal_mean(mu_proposed, prior_mu, prior_sigma, data_mean, data_sigma, n_obs)
+
+        // Accept/reject
+        let log_alpha = log_p_proposed - log_p_current
+        let r2 = rng_uniform(rng)
+        rng = r2.rng
+
+        if ln_f64(r2.value + 0.0000001) < log_alpha {
+            mu_current = mu_proposed
+            log_p_current = log_p_proposed
+            n_accepted = n_accepted + 1
+        }
+        n_total = n_total + 1
+
+        // Store sample after warmup
+        if iter >= config.n_warmup && samples.count < 20 {
+            let sample = WeightedSample { value: mu_current, log_weight: 0.0 }
+            samples = add_sample(samples, sample)
+        }
+
+        iter = iter + 1
+    }
+
+    let accept_rate = (n_accepted as f64) / (n_total as f64)
+
+    return MHResult {
+        samples: samples,
+        acceptance_rate: accept_rate
+    }
+}
+
+fn log_posterior_normal_mean(mu: f64, prior_mu: f64, prior_sigma: f64, data_mean: f64, data_sigma: f64, n_obs: i64) -> f64 {
+    let log_prior = log_normal_pdf(mu, prior_mu, prior_sigma)
+    let diff = data_mean - mu
+    let log_lik = 0.0 - (n_obs as f64) * diff * diff / (2.0 * data_sigma * data_sigma)
+    return log_prior + log_lik
+}
+
+// ============================================================================
+// TESTS
+// ============================================================================
+
+fn main() -> i32 {
+    println("=== Sounio Inference Algorithms ===")
+    println("")
+
+    // Test 1: Rejection sampling
+    println("Test 1: Rejection sampling P(X > 2) where X ~ N(0, 1)")
+    let config1 = RejectionConfig { max_proposals: 10000, target_samples: 20 }
+    let result1 = rejection_sample_normal_above(0.0, 1.0, 2.0, config1)
+    println("  Acceptance rate: ")
+    println(result1.acceptance_rate)
+    println("  Samples collected: ")
+    println(result1.n_accepted)
+    // True P(X > 2) for N(0,1) is about 0.0228
+    println("  Expected acceptance rate ~0.023")
+    println("")
+
+    // Test 2: Importance sampling
+    println("Test 2: Importance sampling for Normal mean posterior")
+    // Prior: mu ~ N(0, 10), Likelihood: data ~ N(mu, 1), data_mean = 5, n = 10
+    let config2 = default_importance_config()
+    let result2 = importance_sample_normal_mean(
+        0.0, 10.0,   // prior
+        5.0, 1.0, 10,  // data
+        5.0, 2.0,      // proposal centered at data mean
+        config2
+    )
+    let mean2 = weighted_mean(result2.samples)
+    println("  Posterior mean estimate: ")
+    println(mean2)
+    println("  ESS: ")
+    println(result2.ess)
+    // Analytical posterior mean ~ 4.95
+    println("  Expected posterior mean ~4.95")
+    println("")
+
+    // Test 3: Metropolis-Hastings
+    println("Test 3: Metropolis-Hastings for Normal mean posterior")
+    let config3 = MHConfig { n_samples: 20, n_warmup: 30, proposal_sigma: 0.5 }
+    let result3 = mh_sample_normal_mean(
+        0.0, 10.0,   // prior
+        5.0, 1.0, 10,  // data
+        config3
+    )
+    let mean3 = weighted_mean(result3.samples)
+    println("  Posterior mean estimate: ")
+    println(mean3)
+    println("  Acceptance rate: ")
+    println(result3.acceptance_rate)
+    println("  Expected posterior mean ~4.95")
+    println("")
+
+    // Validation
+    let pass1 = result1.acceptance_rate > 0.01 && result1.acceptance_rate < 0.1
+    let pass2 = abs_f64(mean2 - 4.95) < 1.0
+    let pass3 = abs_f64(mean3 - 4.95) < 1.5 && result3.acceptance_rate > 0.1
+
+    if pass1 && pass2 && pass3 {
+        println("ALL TESTS PASSED")
+        return 0
+    } else {
+        println("SOME TESTS FAILED")
+        if !pass1 { println("  Rejection sampling failed") }
+        if !pass2 { println("  Importance sampling failed") }
+        if !pass3 { println("  MH sampling failed") }
+        return 1
+    }
+}

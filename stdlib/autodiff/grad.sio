@@ -1,0 +1,690 @@
+// grad.sio - High-level Gradient and Jacobian API for Sounio
+//
+// Provides convenient functions for computing gradients and Jacobians:
+// - grad(f, x): Gradient of scalar function f at point x
+// - jacobian(f, x): Jacobian matrix of vector function f at point x
+// - hessian_diag(f, x): Diagonal of Hessian matrix
+//
+// Uses forward-mode AD (dual numbers) for efficiency with few inputs.
+// For many inputs -> one output, consider using tape.sio (reverse-mode).
+//
+// Reference: "Automatic Differentiation in Machine Learning: a Survey"
+//            Baydin et al., JMLR 2018
+
+// ============================================================================
+// MATH HELPERS
+// ============================================================================
+
+fn abs_f64(x: f64) -> f64 {
+    if x < 0.0 { return 0.0 - x }
+    return x
+}
+
+fn sqrt_f64(x: f64) -> f64 {
+    if x <= 0.0 { return 0.0 }
+    let mut y = x
+    y = 0.5 * (y + x / y)
+    y = 0.5 * (y + x / y)
+    y = 0.5 * (y + x / y)
+    y = 0.5 * (y + x / y)
+    y = 0.5 * (y + x / y)
+    y = 0.5 * (y + x / y)
+    y = 0.5 * (y + x / y)
+    y = 0.5 * (y + x / y)
+    y = 0.5 * (y + x / y)
+    y = 0.5 * (y + x / y)
+    return y
+}
+
+fn exp_f64(x: f64) -> f64 {
+    if x > 20.0 { return exp_f64(x / 2.0) * exp_f64(x / 2.0) }
+    if x < 0.0 - 20.0 { return 1.0 / exp_f64(0.0 - x) }
+
+    let mut sum = 1.0
+    let mut term = 1.0
+    term = term * x / 1.0
+    sum = sum + term
+    term = term * x / 2.0
+    sum = sum + term
+    term = term * x / 3.0
+    sum = sum + term
+    term = term * x / 4.0
+    sum = sum + term
+    term = term * x / 5.0
+    sum = sum + term
+    term = term * x / 6.0
+    sum = sum + term
+    term = term * x / 7.0
+    sum = sum + term
+    term = term * x / 8.0
+    sum = sum + term
+    term = term * x / 9.0
+    sum = sum + term
+    term = term * x / 10.0
+    sum = sum + term
+    term = term * x / 11.0
+    sum = sum + term
+    term = term * x / 12.0
+    sum = sum + term
+    term = term * x / 13.0
+    sum = sum + term
+    term = term * x / 14.0
+    sum = sum + term
+    term = term * x / 15.0
+    sum = sum + term
+    return sum
+}
+
+fn ln_f64(x: f64) -> f64 {
+    if x <= 0.0 { return 0.0 - 1000000.0 }
+
+    let mut val = x
+    let mut k = 0.0
+    let e = 2.718281828459045
+
+    while val > e {
+        val = val / e
+        k = k + 1.0
+    }
+    while val < 1.0 / e {
+        val = val * e
+        k = k - 1.0
+    }
+
+    let u = (val - 1.0) / (val + 1.0)
+    let u2 = u * u
+    let mut sum = u
+    let mut term = u
+    term = term * u2
+    sum = sum + term / 3.0
+    term = term * u2
+    sum = sum + term / 5.0
+    term = term * u2
+    sum = sum + term / 7.0
+    term = term * u2
+    sum = sum + term / 9.0
+    term = term * u2
+    sum = sum + term / 11.0
+    term = term * u2
+    sum = sum + term / 13.0
+    term = term * u2
+    sum = sum + term / 15.0
+
+    return 2.0 * sum + k
+}
+
+fn pow_f64(x: f64, n: f64) -> f64 {
+    if x <= 0.0 { return 0.0 }
+    return exp_f64(n * ln_f64(x))
+}
+
+fn sin_f64(x: f64) -> f64 {
+    let pi = 3.141592653589793
+    let mut y = x
+    while y > pi { y = y - 2.0 * pi }
+    while y < 0.0 - pi { y = y + 2.0 * pi }
+
+    let x2 = y * y
+    let mut sum = y
+    let mut term = y
+    term = term * (0.0 - x2) / (2.0 * 3.0)
+    sum = sum + term
+    term = term * (0.0 - x2) / (4.0 * 5.0)
+    sum = sum + term
+    term = term * (0.0 - x2) / (6.0 * 7.0)
+    sum = sum + term
+    term = term * (0.0 - x2) / (8.0 * 9.0)
+    sum = sum + term
+    term = term * (0.0 - x2) / (10.0 * 11.0)
+    sum = sum + term
+    term = term * (0.0 - x2) / (12.0 * 13.0)
+    sum = sum + term
+    return sum
+}
+
+fn cos_f64(x: f64) -> f64 {
+    let pi = 3.141592653589793
+    let mut y = x
+    while y > pi { y = y - 2.0 * pi }
+    while y < 0.0 - pi { y = y + 2.0 * pi }
+
+    let x2 = y * y
+    let mut sum = 1.0
+    let mut term = 1.0
+    term = term * (0.0 - x2) / (1.0 * 2.0)
+    sum = sum + term
+    term = term * (0.0 - x2) / (3.0 * 4.0)
+    sum = sum + term
+    term = term * (0.0 - x2) / (5.0 * 6.0)
+    sum = sum + term
+    term = term * (0.0 - x2) / (7.0 * 8.0)
+    sum = sum + term
+    term = term * (0.0 - x2) / (9.0 * 10.0)
+    sum = sum + term
+    term = term * (0.0 - x2) / (11.0 * 12.0)
+    sum = sum + term
+    return sum
+}
+
+fn tanh_f64(x: f64) -> f64 {
+    let e2x = exp_f64(2.0 * x)
+    return (e2x - 1.0) / (e2x + 1.0)
+}
+
+// ============================================================================
+// DUAL NUMBER TYPE (Forward-Mode AD)
+// ============================================================================
+
+/// Dual number: val + dot*epsilon where epsilon^2 = 0
+struct Dual {
+    val: f64,  // Primal (function value)
+    dot: f64   // Tangent (derivative)
+}
+
+/// Create a constant (derivative = 0)
+fn dual_const(val: f64) -> Dual {
+    return Dual { val: val, dot: 0.0 }
+}
+
+/// Create a variable (derivative = 1)
+fn dual_var(val: f64) -> Dual {
+    return Dual { val: val, dot: 1.0 }
+}
+
+/// Create with explicit derivative
+fn dual_new(val: f64, dot: f64) -> Dual {
+    return Dual { val: val, dot: dot }
+}
+
+// Arithmetic operations on dual numbers
+fn dual_add(a: Dual, b: Dual) -> Dual {
+    return Dual { val: a.val + b.val, dot: a.dot + b.dot }
+}
+
+fn dual_sub(a: Dual, b: Dual) -> Dual {
+    return Dual { val: a.val - b.val, dot: a.dot - b.dot }
+}
+
+fn dual_mul(a: Dual, b: Dual) -> Dual {
+    return Dual {
+        val: a.val * b.val,
+        dot: a.dot * b.val + a.val * b.dot
+    }
+}
+
+fn dual_div(a: Dual, b: Dual) -> Dual {
+    let g2 = b.val * b.val
+    return Dual {
+        val: a.val / b.val,
+        dot: (a.dot * b.val - a.val * b.dot) / g2
+    }
+}
+
+fn dual_neg(a: Dual) -> Dual {
+    return Dual { val: 0.0 - a.val, dot: 0.0 - a.dot }
+}
+
+fn dual_scale(a: Dual, s: f64) -> Dual {
+    return Dual { val: a.val * s, dot: a.dot * s }
+}
+
+// Mathematical functions on dual numbers
+fn dual_sqrt(a: Dual) -> Dual {
+    let v = sqrt_f64(a.val)
+    return Dual { val: v, dot: a.dot / (2.0 * v) }
+}
+
+fn dual_exp(a: Dual) -> Dual {
+    let e = exp_f64(a.val)
+    return Dual { val: e, dot: a.dot * e }
+}
+
+fn dual_ln(a: Dual) -> Dual {
+    return Dual { val: ln_f64(a.val), dot: a.dot / a.val }
+}
+
+fn dual_pow(a: Dual, n: f64) -> Dual {
+    let v = pow_f64(a.val, n)
+    return Dual { val: v, dot: a.dot * n * pow_f64(a.val, n - 1.0) }
+}
+
+fn dual_sin(a: Dual) -> Dual {
+    return Dual { val: sin_f64(a.val), dot: a.dot * cos_f64(a.val) }
+}
+
+fn dual_cos(a: Dual) -> Dual {
+    return Dual { val: cos_f64(a.val), dot: 0.0 - a.dot * sin_f64(a.val) }
+}
+
+fn dual_tanh(a: Dual) -> Dual {
+    let t = tanh_f64(a.val)
+    return Dual { val: t, dot: a.dot * (1.0 - t * t) }
+}
+
+fn dual_sigmoid(a: Dual) -> Dual {
+    let s = 1.0 / (1.0 + exp_f64(0.0 - a.val))
+    return Dual { val: s, dot: a.dot * s * (1.0 - s) }
+}
+
+fn dual_relu(a: Dual) -> Dual {
+    if a.val > 0.0 {
+        return Dual { val: a.val, dot: a.dot }
+    }
+    return Dual { val: 0.0, dot: 0.0 }
+}
+
+// ============================================================================
+// GRADIENT RESULT TYPES
+// ============================================================================
+
+/// Gradient result for 2D input
+struct Grad2 {
+    fx: f64,     // Function value
+    dx: f64,     // df/dx
+    dy: f64      // df/dy
+}
+
+/// Gradient result for 3D input
+struct Grad3 {
+    fx: f64,     // Function value
+    dx: f64,     // df/dx
+    dy: f64,     // df/dy
+    dz: f64      // df/dz
+}
+
+/// Gradient result for 4D input
+struct Grad4 {
+    fx: f64,
+    d1: f64,
+    d2: f64,
+    d3: f64,
+    d4: f64
+}
+
+// ============================================================================
+// JACOBIAN RESULT TYPES
+// ============================================================================
+
+/// Jacobian for f: R^2 -> R^2
+struct Jacobian2x2 {
+    // f1(x, y), f2(x, y)
+    df1_dx: f64,
+    df1_dy: f64,
+    df2_dx: f64,
+    df2_dy: f64
+}
+
+/// Jacobian for f: R^3 -> R^3
+struct Jacobian3x3 {
+    // Row 1: df1/d(x,y,z)
+    j11: f64, j12: f64, j13: f64,
+    // Row 2: df2/d(x,y,z)
+    j21: f64, j22: f64, j23: f64,
+    // Row 3: df3/d(x,y,z)
+    j31: f64, j32: f64, j33: f64
+}
+
+// ============================================================================
+// EXAMPLE FUNCTIONS FOR GRADIENT COMPUTATION
+// ============================================================================
+
+/// Example 1: Rosenbrock function f(x,y) = (1-x)^2 + 100*(y-x^2)^2
+fn rosenbrock_dual(x: Dual, y: Dual) -> Dual {
+    let one = dual_const(1.0)
+    let hundred = dual_const(100.0)
+    let term1 = dual_sub(one, x)
+    let term1_sq = dual_mul(term1, term1)
+    let x_sq = dual_mul(x, x)
+    let term2 = dual_sub(y, x_sq)
+    let term2_sq = dual_mul(term2, term2)
+    return dual_add(term1_sq, dual_mul(hundred, term2_sq))
+}
+
+/// Example 2: Sphere function f(x,y,z) = x^2 + y^2 + z^2
+fn sphere3_dual(x: Dual, y: Dual, z: Dual) -> Dual {
+    let x2 = dual_mul(x, x)
+    let y2 = dual_mul(y, y)
+    let z2 = dual_mul(z, z)
+    return dual_add(dual_add(x2, y2), z2)
+}
+
+/// Example 3: Neural network loss L = (sigmoid(w*x + b) - target)^2
+fn nn_loss_dual(w: Dual, x: Dual, b: Dual, target: f64) -> Dual {
+    let wx = dual_mul(w, x)
+    let wxb = dual_add(wx, b)
+    let pred = dual_sigmoid(wxb)
+    let t = dual_const(target)
+    let diff = dual_sub(pred, t)
+    return dual_mul(diff, diff)
+}
+
+// ============================================================================
+// GRADIENT FUNCTIONS
+// ============================================================================
+
+/// Compute gradient of Rosenbrock function at (x, y)
+fn grad_rosenbrock(x: f64, y: f64) -> Grad2 {
+    // Compute df/dx by setting x as variable
+    let fx_dx = rosenbrock_dual(dual_var(x), dual_const(y))
+
+    // Compute df/dy by setting y as variable
+    let fx_dy = rosenbrock_dual(dual_const(x), dual_var(y))
+
+    return Grad2 {
+        fx: fx_dx.val,
+        dx: fx_dx.dot,
+        dy: fx_dy.dot
+    }
+}
+
+/// Compute gradient of sphere function at (x, y, z)
+fn grad_sphere3(x: f64, y: f64, z: f64) -> Grad3 {
+    // Compute df/dx
+    let fx_dx = sphere3_dual(dual_var(x), dual_const(y), dual_const(z))
+
+    // Compute df/dy
+    let fx_dy = sphere3_dual(dual_const(x), dual_var(y), dual_const(z))
+
+    // Compute df/dz
+    let fx_dz = sphere3_dual(dual_const(x), dual_const(y), dual_var(z))
+
+    return Grad3 {
+        fx: fx_dx.val,
+        dx: fx_dx.dot,
+        dy: fx_dy.dot,
+        dz: fx_dz.dot
+    }
+}
+
+/// Compute gradient of NN loss w.r.t. (w, b) at fixed x
+fn grad_nn_loss(w: f64, x: f64, b: f64, target: f64) -> Grad2 {
+    // Compute dL/dw
+    let L_dw = nn_loss_dual(dual_var(w), dual_const(x), dual_const(b), target)
+
+    // Compute dL/db
+    let L_db = nn_loss_dual(dual_const(w), dual_const(x), dual_var(b), target)
+
+    return Grad2 {
+        fx: L_dw.val,
+        dx: L_dw.dot,  // dL/dw
+        dy: L_db.dot   // dL/db
+    }
+}
+
+// ============================================================================
+// JACOBIAN FUNCTIONS
+// ============================================================================
+
+/// Vector function f: R^2 -> R^2 for polar to Cartesian
+/// f1(r, theta) = r * cos(theta)
+/// f2(r, theta) = r * sin(theta)
+fn polar_to_cart_f1(r: Dual, theta: Dual) -> Dual {
+    return dual_mul(r, dual_cos(theta))
+}
+
+fn polar_to_cart_f2(r: Dual, theta: Dual) -> Dual {
+    return dual_mul(r, dual_sin(theta))
+}
+
+/// Compute Jacobian of polar to Cartesian transformation
+fn jacobian_polar_to_cart(r: f64, theta: f64) -> Jacobian2x2 {
+    // df1/dr
+    let f1_dr = polar_to_cart_f1(dual_var(r), dual_const(theta))
+    // df1/dtheta
+    let f1_dtheta = polar_to_cart_f1(dual_const(r), dual_var(theta))
+    // df2/dr
+    let f2_dr = polar_to_cart_f2(dual_var(r), dual_const(theta))
+    // df2/dtheta
+    let f2_dtheta = polar_to_cart_f2(dual_const(r), dual_var(theta))
+
+    return Jacobian2x2 {
+        df1_dx: f1_dr.dot,
+        df1_dy: f1_dtheta.dot,
+        df2_dx: f2_dr.dot,
+        df2_dy: f2_dtheta.dot
+    }
+}
+
+/// Rotation function f: R^3 -> R^3 (rotation around z-axis)
+fn rotate_z_f1(x: Dual, y: Dual, z: Dual, angle: f64) -> Dual {
+    let c = dual_const(cos_f64(angle))
+    let s = dual_const(sin_f64(angle))
+    return dual_sub(dual_mul(x, c), dual_mul(y, s))
+}
+
+fn rotate_z_f2(x: Dual, y: Dual, z: Dual, angle: f64) -> Dual {
+    let c = dual_const(cos_f64(angle))
+    let s = dual_const(sin_f64(angle))
+    return dual_add(dual_mul(x, s), dual_mul(y, c))
+}
+
+fn rotate_z_f3(x: Dual, y: Dual, z: Dual, angle: f64) -> Dual {
+    return z
+}
+
+/// Compute Jacobian of z-axis rotation
+fn jacobian_rotate_z(x: f64, y: f64, z: f64, angle: f64) -> Jacobian3x3 {
+    // Row 1: df1/d(x,y,z)
+    let f1_dx = rotate_z_f1(dual_var(x), dual_const(y), dual_const(z), angle)
+    let f1_dy = rotate_z_f1(dual_const(x), dual_var(y), dual_const(z), angle)
+    let f1_dz = rotate_z_f1(dual_const(x), dual_const(y), dual_var(z), angle)
+
+    // Row 2: df2/d(x,y,z)
+    let f2_dx = rotate_z_f2(dual_var(x), dual_const(y), dual_const(z), angle)
+    let f2_dy = rotate_z_f2(dual_const(x), dual_var(y), dual_const(z), angle)
+    let f2_dz = rotate_z_f2(dual_const(x), dual_const(y), dual_var(z), angle)
+
+    // Row 3: df3/d(x,y,z)
+    let f3_dx = rotate_z_f3(dual_var(x), dual_const(y), dual_const(z), angle)
+    let f3_dy = rotate_z_f3(dual_const(x), dual_var(y), dual_const(z), angle)
+    let f3_dz = rotate_z_f3(dual_const(x), dual_const(y), dual_var(z), angle)
+
+    return Jacobian3x3 {
+        j11: f1_dx.dot, j12: f1_dy.dot, j13: f1_dz.dot,
+        j21: f2_dx.dot, j22: f2_dy.dot, j23: f2_dz.dot,
+        j31: f3_dx.dot, j32: f3_dy.dot, j33: f3_dz.dot
+    }
+}
+
+// ============================================================================
+// HESSIAN DIAGONAL (Second derivatives)
+// ============================================================================
+
+/// Hessian diagonal for 2D function (d^2f/dx^2, d^2f/dy^2)
+struct HessianDiag2 {
+    d2x: f64,
+    d2y: f64
+}
+
+/// Compute Hessian diagonal using finite differences on gradient
+fn hessian_diag_rosenbrock(x: f64, y: f64) -> HessianDiag2 {
+    let h = 0.00001
+
+    // d^2f/dx^2 = (df/dx(x+h) - df/dx(x-h)) / (2h)
+    let g_plus_x = grad_rosenbrock(x + h, y)
+    let g_minus_x = grad_rosenbrock(x - h, y)
+    let d2x = (g_plus_x.dx - g_minus_x.dx) / (2.0 * h)
+
+    // d^2f/dy^2 = (df/dy(y+h) - df/dy(y-h)) / (2h)
+    let g_plus_y = grad_rosenbrock(x, y + h)
+    let g_minus_y = grad_rosenbrock(x, y - h)
+    let d2y = (g_plus_y.dy - g_minus_y.dy) / (2.0 * h)
+
+    return HessianDiag2 { d2x: d2x, d2y: d2y }
+}
+
+// ============================================================================
+// GRADIENT DESCENT EXAMPLE
+// ============================================================================
+
+/// Simple gradient descent step
+struct GDState {
+    x: f64,
+    y: f64,
+    fx: f64,
+    iter: i64
+}
+
+/// Gradient descent on Rosenbrock function
+fn gradient_descent_rosenbrock(x0: f64, y0: f64, lr: f64, max_iter: i64) -> GDState {
+    let mut x = x0
+    let mut y = y0
+    let mut i: i64 = 0
+
+    while i < max_iter {
+        let g = grad_rosenbrock(x, y)
+
+        // Check convergence
+        let grad_norm = sqrt_f64(g.dx * g.dx + g.dy * g.dy)
+        if grad_norm < 0.000001 {
+            return GDState { x: x, y: y, fx: g.fx, iter: i }
+        }
+
+        // Update
+        x = x - lr * g.dx
+        y = y - lr * g.dy
+        i = i + 1
+    }
+
+    let g_final = grad_rosenbrock(x, y)
+    return GDState { x: x, y: y, fx: g_final.fx, iter: max_iter }
+}
+
+// ============================================================================
+// TESTS
+// ============================================================================
+
+fn main() -> i32 {
+    println("=== Sounio Gradient and Jacobian API ===")
+    println("")
+
+    // Test 1: Gradient of Rosenbrock at (1, 1) - should be (0, 0) at minimum
+    println("Test 1: Gradient of Rosenbrock at minimum (1, 1)")
+    let g1 = grad_rosenbrock(1.0, 1.0)
+    println("  f(1,1) = ")
+    println(g1.fx)
+    println("  df/dx = ")
+    println(g1.dx)
+    println("  df/dy = ")
+    println(g1.dy)
+    println("  Expected: f=0, grad=(0,0)")
+    println("")
+
+    // Test 2: Gradient of Rosenbrock at (0, 0)
+    println("Test 2: Gradient of Rosenbrock at (0, 0)")
+    let g2 = grad_rosenbrock(0.0, 0.0)
+    println("  f(0,0) = ")
+    println(g2.fx)
+    println("  df/dx = ")
+    println(g2.dx)
+    println("  df/dy = ")
+    println(g2.dy)
+    // At (0,0): f = 1, df/dx = -2, df/dy = 0
+    println("  Expected: f=1, df/dx=-2, df/dy=0")
+    println("")
+
+    // Test 3: Gradient of sphere function
+    println("Test 3: Gradient of sphere at (1, 2, 3)")
+    let g3 = grad_sphere3(1.0, 2.0, 3.0)
+    println("  f(1,2,3) = ")
+    println(g3.fx)
+    println("  grad = (")
+    print(g3.dx)
+    print(", ")
+    print(g3.dy)
+    print(", ")
+    print(g3.dz)
+    println(")")
+    // f = 1 + 4 + 9 = 14, grad = (2, 4, 6)
+    println("  Expected: f=14, grad=(2,4,6)")
+    println("")
+
+    // Test 4: Jacobian of polar to Cartesian
+    println("Test 4: Jacobian of polar->Cartesian at (r=2, theta=pi/4)")
+    let pi = 3.141592653589793
+    let j4 = jacobian_polar_to_cart(2.0, pi / 4.0)
+    println("  J = ")
+    print("    [")
+    print(j4.df1_dx)
+    print(", ")
+    print(j4.df1_dy)
+    println("]")
+    print("    [")
+    print(j4.df2_dx)
+    print(", ")
+    print(j4.df2_dy)
+    println("]")
+    // Expected: [[cos(pi/4), -r*sin(pi/4)], [sin(pi/4), r*cos(pi/4)]]
+    //         = [[0.707, -1.414], [0.707, 1.414]]
+    println("")
+
+    // Test 5: Jacobian of rotation (should be rotation matrix)
+    println("Test 5: Jacobian of z-rotation at angle=pi/2")
+    let j5 = jacobian_rotate_z(1.0, 0.0, 0.0, pi / 2.0)
+    println("  J = ")
+    print("    [")
+    print(j5.j11)
+    print(", ")
+    print(j5.j12)
+    print(", ")
+    print(j5.j13)
+    println("]")
+    print("    [")
+    print(j5.j21)
+    print(", ")
+    print(j5.j22)
+    print(", ")
+    print(j5.j23)
+    println("]")
+    print("    [")
+    print(j5.j31)
+    print(", ")
+    print(j5.j32)
+    print(", ")
+    print(j5.j33)
+    println("]")
+    // Expected: [[0, -1, 0], [1, 0, 0], [0, 0, 1]]
+    println("")
+
+    // Test 6: Gradient descent on Rosenbrock
+    println("Test 6: Gradient descent on Rosenbrock from (-1, 1)")
+    let gd = gradient_descent_rosenbrock(0.0 - 1.0, 1.0, 0.001, 10000)
+    println("  Final x = ")
+    println(gd.x)
+    println("  Final y = ")
+    println(gd.y)
+    println("  Final f = ")
+    println(gd.fx)
+    println("  Iterations = ")
+    println(gd.iter)
+    println("")
+
+    // Validation
+    let err1 = abs_f64(g1.fx) + abs_f64(g1.dx) + abs_f64(g1.dy)
+    let err2_fx = abs_f64(g2.fx - 1.0)
+    let err2_dx = abs_f64(g2.dx + 2.0)  // Expected -2
+    let err2_dy = abs_f64(g2.dy)
+    let err3_fx = abs_f64(g3.fx - 14.0)
+    let err3_grad = abs_f64(g3.dx - 2.0) + abs_f64(g3.dy - 4.0) + abs_f64(g3.dz - 6.0)
+
+    let pass1 = err1 < 0.0001
+    let pass2 = err2_fx < 0.0001 && err2_dx < 0.0001 && err2_dy < 0.0001
+    let pass3 = err3_fx < 0.0001 && err3_grad < 0.0001
+    let pass4 = abs_f64(j4.df1_dx - cos_f64(pi/4.0)) < 0.001
+    let pass5 = abs_f64(j5.j11) < 0.001 && abs_f64(j5.j12 + 1.0) < 0.001
+    let pass6 = gd.fx < 0.1  // Should get close to minimum
+
+    if pass1 && pass2 && pass3 && pass4 && pass5 && pass6 {
+        println("ALL TESTS PASSED")
+        return 0
+    } else {
+        println("SOME TESTS FAILED")
+        if !pass1 { println("  Test 1 failed") }
+        if !pass2 { println("  Test 2 failed") }
+        if !pass3 { println("  Test 3 failed") }
+        if !pass4 { println("  Test 4 failed") }
+        if !pass5 { println("  Test 5 failed") }
+        if !pass6 { println("  Test 6 failed") }
+        return 1
+    }
+}

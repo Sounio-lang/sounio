@@ -3219,45 +3219,82 @@ fn doc_coverage() -> Result<()> {
 }
 
 fn info() -> Result<()> {
-    println!("Sounio Compiler");
+    println!("Sounio Compiler (souc)");
     println!("Version: {}", env!("CARGO_PKG_VERSION"));
+    println!("Commit: {}", option_env!("SOUNIO_GIT_HASH").unwrap_or("unknown"));
+    println!("Build date: {}", option_env!("SOUNIO_BUILD_DATE").unwrap_or("unknown"));
+
+    // Host information
     println!();
-    println!("Features:");
+    println!("Host:");
+    println!("  Target: {}", std::env::consts::ARCH);
+    println!("  OS: {}", std::env::consts::OS);
+    println!("  Family: {}", std::env::consts::FAMILY);
+
+    println!();
+    println!("Language Features:");
     println!("  - Algebraic effects with handlers");
-    println!("  - Linear and affine types");
-    println!("  - Units of measure");
-    println!("  - Refinement types");
-    println!("  - GPU-native computation");
+    println!("  - Linear and affine types (resource safety)");
+    println!("  - Units of measure (dimensional analysis)");
+    println!("  - Refinement types (SMT-backed verification)");
+    println!("  - Epistemic types (confidence, provenance, ontology)");
+    println!("  - GPU-native computation (CUDA/Metal)");
+
     println!();
-    println!("Backends:");
+    println!("Enabled Backends:");
     #[cfg(feature = "llvm")]
     {
-        println!("  - LLVM (enabled)");
-        println!("    Use 'dc build' for AOT compilation");
+        println!("  [+] LLVM - AOT compilation (souc build)");
     }
     #[cfg(not(feature = "llvm"))]
-    println!("  - LLVM (disabled) - rebuild with --features llvm");
+    println!("  [-] LLVM - rebuild with --features llvm");
+
     #[cfg(feature = "jit")]
     {
-        println!("  - Cranelift JIT (enabled)");
-        println!("    Use 'dc jit' for JIT execution");
+        println!("  [+] Cranelift JIT - fast compilation (souc jit)");
     }
     #[cfg(not(feature = "jit"))]
-    println!("  - Cranelift JIT (disabled) - rebuild with --features jit");
-    #[cfg(feature = "smt")]
-    println!("  - SMT Solver (enabled) - refinement type verification");
-    #[cfg(not(feature = "smt"))]
-    println!("  - SMT Solver (disabled) - rebuild with --features smt");
-    #[cfg(feature = "lsp")]
-    println!("  - LSP Server (enabled) - IDE integration");
-    #[cfg(not(feature = "lsp"))]
-    println!("  - LSP Server (disabled) - rebuild with --features lsp");
+    println!("  [-] Cranelift JIT - rebuild with --features jit");
+
     #[cfg(feature = "gpu")]
-    println!("  - GPU codegen (enabled)");
+    {
+        println!("  [+] GPU codegen - PTX/SPIR-V generation");
+    }
     #[cfg(not(feature = "gpu"))]
-    println!("  - GPU codegen (disabled) - rebuild with --features gpu");
+    println!("  [-] GPU codegen - rebuild with --features gpu");
+
+    println!();
+    println!("Enabled Features:");
+    #[cfg(feature = "smt")]
+    println!("  [+] SMT Solver (Z3) - refinement type verification");
+    #[cfg(not(feature = "smt"))]
+    println!("  [-] SMT Solver - rebuild with --features smt");
+
+    #[cfg(feature = "lsp")]
+    println!("  [+] LSP Server - IDE integration");
+    #[cfg(not(feature = "lsp"))]
+    println!("  [-] LSP Server - rebuild with --features lsp");
+
+    #[cfg(feature = "ontology")]
+    println!("  [+] Ontology - scientific term lookup");
+    #[cfg(not(feature = "ontology"))]
+    println!("  [-] Ontology - rebuild with --features ontology");
+
+    #[cfg(feature = "distributed")]
+    println!("  [+] Distributed builds - remote compilation");
+    #[cfg(not(feature = "distributed"))]
+    println!("  [-] Distributed builds - rebuild with --features distributed");
+
+    #[cfg(feature = "pkg")]
+    println!("  [+] Package manager - dependency management");
+    #[cfg(not(feature = "pkg"))]
+    println!("  [-] Package manager - rebuild with --features pkg");
+
     println!();
     println!("Build with all features: cargo build --features full");
+    println!();
+    println!("For more information: https://sounio-lang.org");
+    println!("Report bugs: https://github.com/sounio-lang/sounio/issues");
 
     Ok(())
 }

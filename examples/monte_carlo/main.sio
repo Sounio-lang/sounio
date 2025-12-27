@@ -1,0 +1,614 @@
+//! Monte Carlo Simulation Examples
+//!
+//! This example demonstrates Monte Carlo methods for:
+//! 1. Pi estimation using random point sampling
+//! 2. European option pricing with Black-Scholes comparison
+//! 3. Value at Risk (VaR) calculation
+//!
+//! Key Sounio features demonstrated:
+//! - Probabilistic programming with random number generation
+//! - Statistical computations (mean, std dev, quantiles)
+//! - Numerical methods (normal distribution approximation)
+//! - Parallel Monte Carlo with async
+
+import random::*
+import time::*
+
+// =============================================================================
+// Random Number Generation
+// =============================================================================
+
+/// Linear Congruential Generator (LCG) for reproducible random numbers
+struct RandomGenerator {
+    state: u64,
+}
+
+impl RandomGenerator {
+    /// Create new generator with seed
+    pub fn new(seed: u64) -> RandomGenerator {
+        RandomGenerator { state: seed }
+    }
+
+    /// Create generator seeded from current time
+    pub fn from_time() -> RandomGenerator with IO {
+        let now = time::Instant::now();
+        // Use a simple hash of the nanosecond timestamp
+        RandomGenerator { state: (now.nanos as u64) ^ 0x5DEECE66D }
+    }
+
+    /// Generate next random u64
+    pub fn next_u64(self: &!RandomGenerator) -> u64 {
+        // LCG parameters (same as java.util.Random)
+        let a: u64 = 0x5DEECE66D;
+        let c: u64 = 11;
+        self.state = self.state.wrapping_mul(a).wrapping_add(c);
+        self.state
+    }
+
+    /// Generate uniform random float in [0, 1)
+    pub fn next_f64(self: &!RandomGenerator) -> f64 {
+        let val = self.next_u64();
+        // Use upper 53 bits for double precision
+        (val >> 11) as f64 / (1u64 << 53) as f64
+    }
+
+    /// Generate uniform random float in [min, max)
+    pub fn uniform(self: &!RandomGenerator, min: f64, max: f64) -> f64 {
+        min + self.next_f64() * (max - min)
+    }
+
+    /// Generate standard normal using Box-Muller transform
+    pub fn normal(self: &!RandomGenerator) -> f64 {
+        let u1 = self.next_f64();
+        let u2 = self.next_f64();
+        // Avoid log(0)
+        let u1_safe = if u1 < 1e-10 { 1e-10 } else { u1 };
+        let z = (-2.0 * u1_safe.ln()).sqrt() * (2.0 * PI * u2).cos();
+        z
+    }
+
+    /// Generate normal with given mean and std dev
+    pub fn normal_params(self: &!RandomGenerator, mean: f64, std_dev: f64) -> f64 {
+        mean + std_dev * self.normal()
+    }
+}
+
+/// Mathematical constants
+const PI: f64 = 3.14159265358979323846;
+const E: f64 = 2.71828182845904523536;
+
+// =============================================================================
+// Part 1: Pi Estimation
+// =============================================================================
+
+/// Estimate pi using Monte Carlo integration
+///
+/// Method: Generate random points in a unit square and count
+/// how many fall inside the inscribed unit circle.
+///
+/// Ratio of points inside = Area of circle / Area of square = pi/4
+fn estimate_pi(num_samples: usize, seed: u64) -> (f64, f64) {
+    var rng = RandomGenerator::new(seed);
+    var inside: usize = 0;
+
+    for _ in 0..num_samples {
+        let x = rng.next_f64();
+        let y = rng.next_f64();
+
+        // Check if point is inside unit circle
+        if x * x + y * y <= 1.0 {
+            inside = inside + 1;
+        }
+    }
+
+    let ratio = (inside as f64) / (num_samples as f64);
+    let pi_estimate = 4.0 * ratio;
+
+    // Estimated error (based on binomial distribution)
+    let error = 4.0 * (ratio * (1.0 - ratio) / (num_samples as f64)).sqrt();
+
+    (pi_estimate, error)
+}
+
+/// Run Pi estimation with multiple trials for statistics
+fn run_pi_estimation(num_samples: usize, num_trials: usize, base_seed: u64) -> (f64, f64, f64) {
+    var estimates: Vec<f64> = Vec::new();
+
+    for trial in 0..num_trials {
+        let seed = base_seed + (trial as u64);
+        let (estimate, _) = estimate_pi(num_samples, seed);
+        estimates.push(estimate);
+    }
+
+    // Calculate mean
+    var sum: f64 = 0.0;
+    for e in estimates.iter() {
+        sum = sum + *e;
+    }
+    let mean = sum / (num_trials as f64);
+
+    // Calculate standard deviation
+    var var_sum: f64 = 0.0;
+    for e in estimates.iter() {
+        let diff = *e - mean;
+        var_sum = var_sum + diff * diff;
+    }
+    let std_dev = (var_sum / (num_trials as f64)).sqrt();
+
+    // Error from true pi
+    let error = (mean - PI).abs();
+
+    (mean, std_dev, error)
+}
+
+// =============================================================================
+// Part 2: Option Pricing
+// =============================================================================
+
+/// Option types
+enum OptionType {
+    Call,
+    Put,
+}
+
+/// Option parameters
+struct OptionParams {
+    /// Current stock price
+    spot: f64,
+    /// Strike price
+    strike: f64,
+    /// Risk-free rate (annualized)
+    rate: f64,
+    /// Volatility (annualized)
+    volatility: f64,
+    /// Time to expiration (years)
+    time: f64,
+    /// Option type
+    option_type: OptionType,
+}
+
+/// Standard normal CDF approximation (Abramowitz and Stegun)
+fn norm_cdf(x: f64) -> f64 {
+    let a1 = 0.254829592;
+    let a2 = -0.284496736;
+    let a3 = 1.421413741;
+    let a4 = -1.453152027;
+    let a5 = 1.061405429;
+    let p = 0.3275911;
+
+    let sign = if x < 0.0 { -1.0 } else { 1.0 };
+    let x_abs = x.abs();
+
+    let t = 1.0 / (1.0 + p * x_abs);
+    let t2 = t * t;
+    let t3 = t2 * t;
+    let t4 = t3 * t;
+    let t5 = t4 * t;
+
+    let y = 1.0 - (((((a5 * t5 + a4 * t4) + a3 * t3) + a2 * t2) + a1 * t))
+              * (-x_abs * x_abs / 2.0).exp();
+
+    0.5 * (1.0 + sign * y)
+}
+
+/// Black-Scholes analytical solution for European options
+fn black_scholes(params: &OptionParams) -> f64 {
+    let s = params.spot;
+    let k = params.strike;
+    let r = params.rate;
+    let sigma = params.volatility;
+    let t = params.time;
+
+    let d1 = ((s / k).ln() + (r + sigma * sigma / 2.0) * t) / (sigma * t.sqrt());
+    let d2 = d1 - sigma * t.sqrt();
+
+    match params.option_type {
+        OptionType::Call => {
+            s * norm_cdf(d1) - k * (-r * t).exp() * norm_cdf(d2)
+        },
+        OptionType::Put => {
+            k * (-r * t).exp() * norm_cdf(-d2) - s * norm_cdf(-d1)
+        },
+    }
+}
+
+/// Monte Carlo option pricing using geometric Brownian motion
+fn monte_carlo_option(params: &OptionParams, num_paths: usize, seed: u64) -> (f64, f64) {
+    var rng = RandomGenerator::new(seed);
+    var payoffs: Vec<f64> = Vec::new();
+
+    let s0 = params.spot;
+    let k = params.strike;
+    let r = params.rate;
+    let sigma = params.volatility;
+    let t = params.time;
+
+    // Drift-adjusted for risk-neutral pricing
+    let drift = (r - 0.5 * sigma * sigma) * t;
+    let diffusion = sigma * t.sqrt();
+
+    for _ in 0..num_paths {
+        // Generate terminal stock price
+        let z = rng.normal();
+        let st = s0 * (drift + diffusion * z).exp();
+
+        // Calculate payoff
+        let payoff = match params.option_type {
+            OptionType::Call => (st - k).max(0.0),
+            OptionType::Put => (k - st).max(0.0),
+        };
+
+        payoffs.push(payoff);
+    }
+
+    // Discount expected payoff
+    let sum: f64 = payoffs.iter().fold(0.0, |acc, x| acc + *x);
+    let mean_payoff = sum / (num_paths as f64);
+    let option_price = mean_payoff * (-r * t).exp();
+
+    // Calculate standard error
+    var var_sum: f64 = 0.0;
+    for p in payoffs.iter() {
+        let diff = *p - mean_payoff;
+        var_sum = var_sum + diff * diff;
+    }
+    let std_dev = (var_sum / (num_paths as f64)).sqrt();
+    let std_error = (std_dev / (num_paths as f64).sqrt()) * (-r * t).exp();
+
+    (option_price, std_error)
+}
+
+/// Monte Carlo with antithetic variates (variance reduction)
+fn monte_carlo_option_antithetic(params: &OptionParams, num_paths: usize, seed: u64) -> (f64, f64) {
+    var rng = RandomGenerator::new(seed);
+    var payoffs: Vec<f64> = Vec::new();
+
+    let s0 = params.spot;
+    let k = params.strike;
+    let r = params.rate;
+    let sigma = params.volatility;
+    let t = params.time;
+
+    let drift = (r - 0.5 * sigma * sigma) * t;
+    let diffusion = sigma * t.sqrt();
+
+    // Use pairs of antithetic variates
+    let num_pairs = num_paths / 2;
+    for _ in 0..num_pairs {
+        let z = rng.normal();
+
+        // Path 1: use z
+        let st1 = s0 * (drift + diffusion * z).exp();
+        // Path 2: use -z (antithetic)
+        let st2 = s0 * (drift + diffusion * (-z)).exp();
+
+        let payoff1 = match params.option_type {
+            OptionType::Call => (st1 - k).max(0.0),
+            OptionType::Put => (k - st1).max(0.0),
+        };
+
+        let payoff2 = match params.option_type {
+            OptionType::Call => (st2 - k).max(0.0),
+            OptionType::Put => (k - st2).max(0.0),
+        };
+
+        // Average of antithetic pair
+        payoffs.push((payoff1 + payoff2) / 2.0);
+    }
+
+    let sum: f64 = payoffs.iter().fold(0.0, |acc, x| acc + *x);
+    let mean_payoff = sum / (num_pairs as f64);
+    let option_price = mean_payoff * (-r * t).exp();
+
+    var var_sum: f64 = 0.0;
+    for p in payoffs.iter() {
+        let diff = *p - mean_payoff;
+        var_sum = var_sum + diff * diff;
+    }
+    let std_dev = (var_sum / (num_pairs as f64)).sqrt();
+    let std_error = (std_dev / (num_pairs as f64).sqrt()) * (-r * t).exp();
+
+    (option_price, std_error)
+}
+
+// =============================================================================
+// Part 3: Value at Risk (VaR)
+// =============================================================================
+
+/// Portfolio position
+struct Position {
+    /// Position size (number of units)
+    size: f64,
+    /// Current price
+    price: f64,
+    /// Daily volatility
+    volatility: f64,
+    /// Correlation with market
+    correlation: f64,
+}
+
+/// Calculate portfolio Value at Risk using Monte Carlo
+fn calculate_var(
+    positions: &Vec<Position>,
+    confidence_level: f64,
+    holding_period: f64,  // in days
+    num_simulations: usize,
+    seed: u64,
+) -> (f64, f64, f64) {
+    var rng = RandomGenerator::new(seed);
+    var portfolio_pnls: Vec<f64> = Vec::new();
+
+    // Calculate initial portfolio value
+    var initial_value: f64 = 0.0;
+    for pos in positions.iter() {
+        initial_value = initial_value + pos.size * pos.price;
+    }
+
+    // Simulate portfolio P&L
+    for _ in 0..num_simulations {
+        var pnl: f64 = 0.0;
+
+        // Generate correlated returns (simplified - using single factor model)
+        let market_shock = rng.normal();
+
+        for pos in positions.iter() {
+            // Factor model: return = correlation * market + sqrt(1-corr^2) * idiosyncratic
+            let idio_shock = rng.normal();
+            let return_shock = pos.correlation * market_shock +
+                              (1.0 - pos.correlation * pos.correlation).sqrt() * idio_shock;
+
+            // Scale by volatility and holding period
+            let asset_return = return_shock * pos.volatility * holding_period.sqrt();
+            let position_pnl = pos.size * pos.price * asset_return;
+            pnl = pnl + position_pnl;
+        }
+
+        portfolio_pnls.push(pnl);
+    }
+
+    // Sort P&Ls for quantile calculation
+    portfolio_pnls.sort();
+
+    // Calculate VaR at confidence level
+    let var_index = ((1.0 - confidence_level) * (num_simulations as f64)) as usize;
+    let var = -portfolio_pnls[var_index];
+
+    // Calculate Expected Shortfall (CVaR)
+    var tail_sum: f64 = 0.0;
+    for i in 0..var_index {
+        tail_sum = tail_sum + portfolio_pnls[i];
+    }
+    let es = if var_index > 0 {
+        -tail_sum / (var_index as f64)
+    } else {
+        var
+    };
+
+    // Calculate mean P&L
+    var sum: f64 = 0.0;
+    for pnl in portfolio_pnls.iter() {
+        sum = sum + *pnl;
+    }
+    let mean_pnl = sum / (num_simulations as f64);
+
+    (var, es, mean_pnl)
+}
+
+// =============================================================================
+// Main Entry Point
+// =============================================================================
+
+fn main() -> i32 {
+    print("=== Monte Carlo Simulations ===\n\n");
+
+    // =========================================================================
+    // Part 1: Pi Estimation
+    // =========================================================================
+    print("=== Part 1: Pi Estimation ===\n\n");
+
+    let pi_samples = 100000;
+    let pi_trials = 10;
+    let pi_seed: u64 = 12345;
+
+    print("Estimating Pi using ");
+    print(pi_samples.to_string());
+    print(" samples per trial, ");
+    print(pi_trials.to_string());
+    print(" trials\n\n");
+
+    let (mean, std_dev, error) = run_pi_estimation(pi_samples, pi_trials, pi_seed);
+
+    print("Results:\n");
+    print("  Estimated Pi: ");
+    print(mean.to_string());
+    print("\n");
+    print("  True Pi:      ");
+    print(PI.to_string());
+    print("\n");
+    print("  Std Dev:      ");
+    print(std_dev.to_string());
+    print("\n");
+    print("  Absolute Err: ");
+    print(error.to_string());
+    print("\n\n");
+
+    // Show convergence
+    print("Convergence study:\n");
+    let sample_sizes = [100, 1000, 10000, 100000, 1000000];
+    for n in sample_sizes {
+        let (est, _) = estimate_pi(n as usize, pi_seed);
+        let err = (est - PI).abs();
+        print("  N=");
+        print(n.to_string());
+        print(": Pi=");
+        print(est.to_string());
+        print(", Error=");
+        print(err.to_string());
+        print("\n");
+    }
+    print("\n");
+
+    // =========================================================================
+    // Part 2: Option Pricing
+    // =========================================================================
+    print("=== Part 2: European Option Pricing ===\n\n");
+
+    let option_params = OptionParams {
+        spot: 100.0,
+        strike: 100.0,
+        rate: 0.05,
+        volatility: 0.2,
+        time: 1.0,  // 1 year
+        option_type: OptionType::Call,
+    };
+
+    print("Option Parameters:\n");
+    print("  Spot:       $100\n");
+    print("  Strike:     $100\n");
+    print("  Rate:       5%\n");
+    print("  Volatility: 20%\n");
+    print("  Time:       1 year\n");
+    print("  Type:       Call\n\n");
+
+    // Black-Scholes analytical price
+    let bs_price = black_scholes(&option_params);
+    print("Black-Scholes Price: $");
+    print(bs_price.to_string());
+    print("\n\n");
+
+    // Monte Carlo pricing
+    print("Monte Carlo Pricing:\n");
+    let mc_samples = [1000, 10000, 100000];
+
+    for n in mc_samples {
+        let (price, error) = monte_carlo_option(&option_params, n as usize, 42);
+        let diff = (price - bs_price).abs();
+        print("  N=");
+        print(n.to_string());
+        print(": Price=$");
+        print(price.to_string());
+        print(" (+/- $");
+        print(error.to_string());
+        print("), Diff=$");
+        print(diff.to_string());
+        print("\n");
+    }
+    print("\n");
+
+    // Antithetic variates
+    print("With Antithetic Variates:\n");
+    for n in mc_samples {
+        let (price, error) = monte_carlo_option_antithetic(&option_params, n as usize, 42);
+        let diff = (price - bs_price).abs();
+        print("  N=");
+        print(n.to_string());
+        print(": Price=$");
+        print(price.to_string());
+        print(" (+/- $");
+        print(error.to_string());
+        print("), Diff=$");
+        print(diff.to_string());
+        print("\n");
+    }
+    print("\n");
+
+    // Put option
+    let put_params = OptionParams {
+        spot: 100.0,
+        strike: 100.0,
+        rate: 0.05,
+        volatility: 0.2,
+        time: 1.0,
+        option_type: OptionType::Put,
+    };
+
+    let bs_put = black_scholes(&put_params);
+    let (mc_put, mc_put_err) = monte_carlo_option(&put_params, 100000, 42);
+
+    print("Put Option (N=100000):\n");
+    print("  Black-Scholes: $");
+    print(bs_put.to_string());
+    print("\n");
+    print("  Monte Carlo:   $");
+    print(mc_put.to_string());
+    print(" (+/- $");
+    print(mc_put_err.to_string());
+    print(")\n\n");
+
+    // =========================================================================
+    // Part 3: Value at Risk
+    // =========================================================================
+    print("=== Part 3: Portfolio Value at Risk ===\n\n");
+
+    // Create sample portfolio
+    var positions: Vec<Position> = Vec::new();
+    positions.push(Position {
+        size: 100.0,
+        price: 150.0,      // Stock A
+        volatility: 0.02,  // 2% daily vol
+        correlation: 0.8,
+    });
+    positions.push(Position {
+        size: 200.0,
+        price: 50.0,       // Stock B
+        volatility: 0.015, // 1.5% daily vol
+        correlation: 0.6,
+    });
+    positions.push(Position {
+        size: 50.0,
+        price: 200.0,      // Stock C
+        volatility: 0.025, // 2.5% daily vol
+        correlation: 0.7,
+    });
+
+    // Calculate initial portfolio value
+    var portfolio_value: f64 = 0.0;
+    for pos in positions.iter() {
+        portfolio_value = portfolio_value + pos.size * pos.price;
+    }
+
+    print("Portfolio:\n");
+    print("  Stock A: 100 shares @ $150 = $15,000\n");
+    print("  Stock B: 200 shares @ $50  = $10,000\n");
+    print("  Stock C: 50 shares @ $200  = $10,000\n");
+    print("  Total Value: $");
+    print(portfolio_value.to_string());
+    print("\n\n");
+
+    let confidence = 0.95;
+    let holding = 1.0;  // 1 day
+    let var_sims = 100000;
+
+    let (var, es, mean_pnl) = calculate_var(&positions, confidence, holding, var_sims, 12345);
+
+    print("Risk Metrics (");
+    print((confidence * 100.0).to_string());
+    print("% confidence, 1-day holding):\n");
+    print("  Value at Risk (VaR): $");
+    print(var.to_string());
+    print("\n");
+    print("  Expected Shortfall:  $");
+    print(es.to_string());
+    print("\n");
+    print("  Mean P&L:           $");
+    print(mean_pnl.to_string());
+    print("\n");
+    print("  VaR as % of value:  ");
+    print(((var / portfolio_value) * 100.0).to_string());
+    print("%\n\n");
+
+    // Multi-day VaR (sqrt-t scaling)
+    print("Multi-day VaR (sqrt-t scaling):\n");
+    let days = [1, 5, 10, 21];
+    for d in days {
+        let scaled_var = var * (d as f64).sqrt();
+        print("  ");
+        print(d.to_string());
+        print("-day VaR: $");
+        print(scaled_var.to_string());
+        print("\n");
+    }
+
+    print("\n=== Monte Carlo Simulations Complete ===\n");
+    0
+}

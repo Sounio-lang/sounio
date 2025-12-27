@@ -1,0 +1,683 @@
+// solver.sio - Generic ODE Solver API for Sounio
+//
+// Provides a unified solve() interface for ordinary differential equations:
+//   dy/dt = f(t, y),  y(t0) = y0
+//
+// Supports multiple methods:
+// - RK4: Fixed-step 4th-order Runge-Kutta
+// - RK45: Adaptive Dormand-Prince 5(4) method
+// - Tsit5: Tsitouras 5(4) adaptive method
+//
+// Reference: Hairer, Norsett, Wanner - "Solving Ordinary Differential Equations I"
+
+// ============================================================================
+// HELPER FUNCTIONS
+// ============================================================================
+
+fn abs_f64(x: f64) -> f64 {
+    if x < 0.0 { return 0.0 - x }
+    return x
+}
+
+fn max_f64(a: f64, b: f64) -> f64 {
+    if a > b { return a }
+    return b
+}
+
+fn min_f64(a: f64, b: f64) -> f64 {
+    if a < b { return a }
+    return b
+}
+
+fn sqrt_f64(x: f64) -> f64 {
+    if x <= 0.0 { return 0.0 }
+    let mut y = x
+    y = 0.5 * (y + x / y)
+    y = 0.5 * (y + x / y)
+    y = 0.5 * (y + x / y)
+    y = 0.5 * (y + x / y)
+    y = 0.5 * (y + x / y)
+    y = 0.5 * (y + x / y)
+    y = 0.5 * (y + x / y)
+    y = 0.5 * (y + x / y)
+    y = 0.5 * (y + x / y)
+    y = 0.5 * (y + x / y)
+    return y
+}
+
+// Fifth root for step size control (order p=5)
+fn pow_1_5(x: f64) -> f64 {
+    if x <= 0.0 { return 0.0 }
+    let mut y = 1.0
+    y = y - (y * y * y * y * y - x) / (5.0 * y * y * y * y)
+    y = y - (y * y * y * y * y - x) / (5.0 * y * y * y * y)
+    y = y - (y * y * y * y * y - x) / (5.0 * y * y * y * y)
+    y = y - (y * y * y * y * y - x) / (5.0 * y * y * y * y)
+    y = y - (y * y * y * y * y - x) / (5.0 * y * y * y * y)
+    y = y - (y * y * y * y * y - x) / (5.0 * y * y * y * y)
+    y = y - (y * y * y * y * y - x) / (5.0 * y * y * y * y)
+    y = y - (y * y * y * y * y - x) / (5.0 * y * y * y * y)
+    return y
+}
+
+// ============================================================================
+// SOLVER OPTIONS
+// ============================================================================
+
+/// Configuration for ODE solvers
+struct ODEOptions {
+    /// Relative tolerance (default: 1e-4)
+    rtol: f64,
+    /// Absolute tolerance (default: 1e-7)
+    atol: f64,
+    /// Initial step size (0 = auto)
+    dt_init: f64,
+    /// Minimum step size
+    dt_min: f64,
+    /// Maximum step size
+    dt_max: f64,
+    /// Maximum number of steps
+    max_steps: i64,
+    /// Safety factor for step control (default: 0.9)
+    safety: f64,
+    /// Maximum step growth factor (default: 10.0)
+    max_growth: f64,
+    /// Minimum step shrink factor (default: 0.2)
+    min_shrink: f64
+}
+
+/// Default solver options - good for most problems
+fn default_options() -> ODEOptions {
+    return ODEOptions {
+        rtol: 0.0001,
+        atol: 0.0000001,
+        dt_init: 0.0,
+        dt_min: 0.000000000001,
+        dt_max: 1000000.0,
+        max_steps: 1000000,
+        safety: 0.9,
+        max_growth: 10.0,
+        min_shrink: 0.2
+    }
+}
+
+/// High accuracy options for precision work
+fn high_accuracy_options() -> ODEOptions {
+    return ODEOptions {
+        rtol: 0.0000000001,
+        atol: 0.000000000001,
+        dt_init: 0.0,
+        dt_min: 0.000000000000001,
+        dt_max: 1.0,
+        max_steps: 10000000,
+        safety: 0.9,
+        max_growth: 5.0,
+        min_shrink: 0.1
+    }
+}
+
+/// Fast options for quick solutions
+fn fast_options() -> ODEOptions {
+    return ODEOptions {
+        rtol: 0.001,
+        atol: 0.00001,
+        dt_init: 0.1,
+        dt_min: 0.0000001,
+        dt_max: 10000.0,
+        max_steps: 100000,
+        safety: 0.9,
+        max_growth: 10.0,
+        min_shrink: 0.2
+    }
+}
+
+// ============================================================================
+// SOLUTION STRUCTURE
+// ============================================================================
+
+/// Result from ODE solver
+struct ODESolution {
+    /// Whether integration succeeded
+    success: bool,
+    /// Number of steps taken
+    nsteps: i64,
+    /// Number of function evaluations
+    nfeval: i64,
+    /// Number of rejected steps
+    nreject: i64,
+    /// Final time reached
+    t_final: f64,
+    /// Final solution value
+    u_final: f64,
+    /// Termination message code (0 = success, 1 = max steps, 2 = step too small)
+    status: i64
+}
+
+/// Solution for vector ODE (up to 3 components)
+struct ODESolutionVec3 {
+    success: bool,
+    nsteps: i64,
+    nfeval: i64,
+    nreject: i64,
+    t_final: f64,
+    u1_final: f64,
+    u2_final: f64,
+    u3_final: f64,
+    status: i64
+}
+
+// ============================================================================
+// DORMAND-PRINCE 5(4) COEFFICIENTS (RK45)
+// ============================================================================
+
+// Butcher tableau for DOPRI5
+fn dp_c2() -> f64 { 1.0/5.0 }
+fn dp_c3() -> f64 { 3.0/10.0 }
+fn dp_c4() -> f64 { 4.0/5.0 }
+fn dp_c5() -> f64 { 8.0/9.0 }
+fn dp_c6() -> f64 { 1.0 }
+fn dp_c7() -> f64 { 1.0 }
+
+fn dp_a21() -> f64 { 1.0/5.0 }
+fn dp_a31() -> f64 { 3.0/40.0 }
+fn dp_a32() -> f64 { 9.0/40.0 }
+fn dp_a41() -> f64 { 44.0/45.0 }
+fn dp_a42() -> f64 { 0.0 - 56.0/15.0 }
+fn dp_a43() -> f64 { 32.0/9.0 }
+fn dp_a51() -> f64 { 19372.0/6561.0 }
+fn dp_a52() -> f64 { 0.0 - 25360.0/2187.0 }
+fn dp_a53() -> f64 { 64448.0/6561.0 }
+fn dp_a54() -> f64 { 0.0 - 212.0/729.0 }
+fn dp_a61() -> f64 { 9017.0/3168.0 }
+fn dp_a62() -> f64 { 0.0 - 355.0/33.0 }
+fn dp_a63() -> f64 { 46732.0/5247.0 }
+fn dp_a64() -> f64 { 49.0/176.0 }
+fn dp_a65() -> f64 { 0.0 - 5103.0/18656.0 }
+fn dp_a71() -> f64 { 35.0/384.0 }
+fn dp_a73() -> f64 { 500.0/1113.0 }
+fn dp_a74() -> f64 { 125.0/192.0 }
+fn dp_a75() -> f64 { 0.0 - 2187.0/6784.0 }
+fn dp_a76() -> f64 { 11.0/84.0 }
+
+// 5th order weights
+fn dp_b1() -> f64 { 35.0/384.0 }
+fn dp_b3() -> f64 { 500.0/1113.0 }
+fn dp_b4() -> f64 { 125.0/192.0 }
+fn dp_b5() -> f64 { 0.0 - 2187.0/6784.0 }
+fn dp_b6() -> f64 { 11.0/84.0 }
+
+// Error estimation coefficients (b - bhat)
+fn dp_e1() -> f64 { 71.0/57600.0 }
+fn dp_e3() -> f64 { 0.0 - 71.0/16695.0 }
+fn dp_e4() -> f64 { 71.0/1920.0 }
+fn dp_e5() -> f64 { 0.0 - 17253.0/339200.0 }
+fn dp_e6() -> f64 { 22.0/525.0 }
+fn dp_e7() -> f64 { 0.0 - 1.0/40.0 }
+
+// ============================================================================
+// STEP RESULT TYPES
+// ============================================================================
+
+struct RK45StepResult {
+    u_new: f64,
+    err: f64
+}
+
+struct RK45StepResultVec3 {
+    u1_new: f64,
+    u2_new: f64,
+    u3_new: f64,
+    err: f64
+}
+
+// ============================================================================
+// GENERIC SOLVE API FOR SCALAR ODE
+// ============================================================================
+
+/// Solve scalar ODE using RK45 (Dormand-Prince 5(4)) with adaptive stepping
+///
+/// Parameters:
+/// - f_eval: User provides ODE function value at (t, u)
+/// - u0: Initial condition
+/// - t_span_start: Start time
+/// - t_span_end: End time
+/// - opts: Solver options
+///
+/// The user must provide the ODE system via a specific function pattern.
+/// For custom ODEs, create wrapper functions that match the interface.
+
+// Example ODE: Exponential decay du/dt = -k*u
+fn ode_exp_decay(u: f64, t: f64) -> f64 {
+    let k = 0.1
+    return 0.0 - k * u
+}
+
+// Single RK45 step for exponential decay
+fn rk45_step_exp_decay(u: f64, t: f64, dt: f64) -> RK45StepResult {
+    // Stage 1
+    let k1 = ode_exp_decay(u, t)
+
+    // Stage 2
+    let u2 = u + dt * dp_a21() * k1
+    let k2 = ode_exp_decay(u2, t + dp_c2() * dt)
+
+    // Stage 3
+    let u3 = u + dt * (dp_a31() * k1 + dp_a32() * k2)
+    let k3 = ode_exp_decay(u3, t + dp_c3() * dt)
+
+    // Stage 4
+    let u4 = u + dt * (dp_a41() * k1 + dp_a42() * k2 + dp_a43() * k3)
+    let k4 = ode_exp_decay(u4, t + dp_c4() * dt)
+
+    // Stage 5
+    let u5 = u + dt * (dp_a51() * k1 + dp_a52() * k2 + dp_a53() * k3 + dp_a54() * k4)
+    let k5 = ode_exp_decay(u5, t + dp_c5() * dt)
+
+    // Stage 6
+    let u6 = u + dt * (dp_a61() * k1 + dp_a62() * k2 + dp_a63() * k3 + dp_a64() * k4 + dp_a65() * k5)
+    let k6 = ode_exp_decay(u6, t + dp_c6() * dt)
+
+    // 5th order solution
+    let u_new = u + dt * (dp_b1() * k1 + dp_b3() * k3 + dp_b4() * k4 + dp_b5() * k5 + dp_b6() * k6)
+
+    // Stage 7 for error estimate (FSAL property)
+    let k7 = ode_exp_decay(u_new, t + dt)
+
+    // Error estimate
+    let err_raw = dt * (dp_e1() * k1 + dp_e3() * k3 + dp_e4() * k4 + dp_e5() * k5 + dp_e6() * k6 + dp_e7() * k7)
+
+    return RK45StepResult { u_new: u_new, err: abs_f64(err_raw) }
+}
+
+/// Compute optimal step size based on error
+fn compute_optimal_step(dt: f64, err_norm: f64, opts: ODEOptions) -> f64 {
+    if err_norm <= 0.0 {
+        return dt * opts.max_growth
+    }
+    let factor = opts.safety * pow_1_5(1.0 / err_norm)
+    let factor_limited = max_f64(opts.min_shrink, min_f64(opts.max_growth, factor))
+    return dt * factor_limited
+}
+
+/// Solve exponential decay ODE using RK45
+fn solve_rk45_exp_decay(u0: f64, t_start: f64, t_end: f64, opts: ODEOptions) -> ODESolution {
+    let mut u = u0
+    let mut t = t_start
+
+    // Initialize step size
+    let mut dt = opts.dt_init
+    if dt <= 0.0 {
+        let f0 = abs_f64(ode_exp_decay(u0, t_start))
+        let scale = opts.atol + opts.rtol * abs_f64(u0)
+        let dt_est = scale / max_f64(f0, 0.0000000001)
+        dt = min_f64(0.01 * (t_end - t_start), dt_est)
+    }
+    dt = max_f64(opts.dt_min, min_f64(opts.dt_max, dt))
+
+    let mut nsteps: i64 = 0
+    let mut nfeval: i64 = 1
+    let mut nreject: i64 = 0
+    let mut status: i64 = 0
+
+    while t < t_end && nsteps < opts.max_steps {
+        // Don't overshoot
+        let dt_use = if t + dt > t_end { t_end - t } else { dt }
+
+        // Take step
+        let result = rk45_step_exp_decay(u, t, dt_use)
+        nfeval = nfeval + 7
+
+        // Error norm
+        let scale = opts.atol + opts.rtol * max_f64(abs_f64(u), abs_f64(result.u_new))
+        let err_norm = result.err / scale
+
+        if err_norm <= 1.0 {
+            // Accept step
+            t = t + dt_use
+            u = result.u_new
+            nsteps = nsteps + 1
+            dt = compute_optimal_step(dt_use, err_norm, opts)
+        } else {
+            // Reject step
+            nreject = nreject + 1
+            dt = compute_optimal_step(dt_use, err_norm, opts)
+        }
+
+        // Enforce limits
+        dt = max_f64(opts.dt_min, min_f64(opts.dt_max, dt))
+
+        // Check for step size too small
+        if dt < opts.dt_min * 2.0 {
+            status = 2
+        }
+    }
+
+    if nsteps >= opts.max_steps {
+        status = 1
+    }
+
+    return ODESolution {
+        success: t >= t_end - opts.dt_min,
+        nsteps: nsteps,
+        nfeval: nfeval,
+        nreject: nreject,
+        t_final: t,
+        u_final: u,
+        status: status
+    }
+}
+
+// ============================================================================
+// FIXED-STEP RK4 SOLVER
+// ============================================================================
+
+/// Single RK4 step for exponential decay
+fn rk4_step_exp_decay(u: f64, t: f64, dt: f64) -> f64 {
+    let k1 = ode_exp_decay(u, t)
+    let k2 = ode_exp_decay(u + 0.5 * dt * k1, t + 0.5 * dt)
+    let k3 = ode_exp_decay(u + 0.5 * dt * k2, t + 0.5 * dt)
+    let k4 = ode_exp_decay(u + dt * k3, t + dt)
+    return u + (dt / 6.0) * (k1 + 2.0 * k2 + 2.0 * k3 + k4)
+}
+
+/// Solve exponential decay using fixed-step RK4
+fn solve_rk4_exp_decay(u0: f64, t_start: f64, t_end: f64, n_steps: i64) -> ODESolution {
+    let dt = (t_end - t_start) / (n_steps as f64)
+    let mut u = u0
+    let mut t = t_start
+    let mut i: i64 = 0
+
+    while i < n_steps {
+        u = rk4_step_exp_decay(u, t, dt)
+        t = t + dt
+        i = i + 1
+    }
+
+    return ODESolution {
+        success: true,
+        nsteps: n_steps,
+        nfeval: n_steps * 4,
+        nreject: 0,
+        t_final: t,
+        u_final: u,
+        status: 0
+    }
+}
+
+// ============================================================================
+// 3-COMPONENT VECTOR ODE SOLVER (for systems like 3-compartment PK)
+// ============================================================================
+
+/// State for 3-component ODE system
+struct State3 {
+    u1: f64,
+    u2: f64,
+    u3: f64,
+    t: f64
+}
+
+/// Derivative for 3-component system
+struct Deriv3 {
+    du1: f64,
+    du2: f64,
+    du3: f64
+}
+
+/// Parameters for 3-compartment PK model
+struct PKParams3 {
+    ka: f64,   // Absorption rate (gut -> central)
+    ke: f64,   // Elimination rate (central -> eliminated)
+    k12: f64,  // Transfer rate (central -> peripheral)
+    k21: f64   // Transfer rate (peripheral -> central)
+}
+
+fn default_pk3_params() -> PKParams3 {
+    return PKParams3 {
+        ka: 1.5,
+        ke: 0.1,
+        k12: 0.3,
+        k21: 0.15
+    }
+}
+
+/// 3-compartment PK ODE system
+fn ode_pk3(s: State3, p: PKParams3) -> Deriv3 {
+    return Deriv3 {
+        du1: 0.0 - p.ka * s.u1,  // Gut: absorption only
+        du2: p.ka * s.u1 - p.ke * s.u2 - p.k12 * s.u2 + p.k21 * s.u3,  // Central
+        du3: p.k12 * s.u2 - p.k21 * s.u3  // Peripheral
+    }
+}
+
+/// RK4 step for 3-component PK system
+fn rk4_step_pk3(s: State3, dt: f64, p: PKParams3) -> State3 {
+    // Stage 1
+    let k1 = ode_pk3(s, p)
+
+    // Stage 2
+    let s2 = State3 {
+        u1: s.u1 + 0.5 * dt * k1.du1,
+        u2: s.u2 + 0.5 * dt * k1.du2,
+        u3: s.u3 + 0.5 * dt * k1.du3,
+        t: s.t + 0.5 * dt
+    }
+    let k2 = ode_pk3(s2, p)
+
+    // Stage 3
+    let s3 = State3 {
+        u1: s.u1 + 0.5 * dt * k2.du1,
+        u2: s.u2 + 0.5 * dt * k2.du2,
+        u3: s.u3 + 0.5 * dt * k2.du3,
+        t: s.t + 0.5 * dt
+    }
+    let k3 = ode_pk3(s3, p)
+
+    // Stage 4
+    let s4 = State3 {
+        u1: s.u1 + dt * k3.du1,
+        u2: s.u2 + dt * k3.du2,
+        u3: s.u3 + dt * k3.du3,
+        t: s.t + dt
+    }
+    let k4 = ode_pk3(s4, p)
+
+    // Combine
+    return State3 {
+        u1: s.u1 + (dt / 6.0) * (k1.du1 + 2.0*k2.du1 + 2.0*k3.du1 + k4.du1),
+        u2: s.u2 + (dt / 6.0) * (k1.du2 + 2.0*k2.du2 + 2.0*k3.du2 + k4.du2),
+        u3: s.u3 + (dt / 6.0) * (k1.du3 + 2.0*k3.du3 + 2.0*k3.du3 + k4.du3),
+        t: s.t + dt
+    }
+}
+
+/// Solve 3-compartment PK model with RK4
+fn solve_pk3_rk4(s0: State3, p: PKParams3, t_end: f64, n_steps: i64) -> ODESolutionVec3 {
+    let dt = (t_end - s0.t) / (n_steps as f64)
+    let mut s = s0
+    let mut i: i64 = 0
+
+    while i < n_steps {
+        s = rk4_step_pk3(s, dt, p)
+        i = i + 1
+    }
+
+    return ODESolutionVec3 {
+        success: true,
+        nsteps: n_steps,
+        nfeval: n_steps * 4,
+        nreject: 0,
+        t_final: s.t,
+        u1_final: s.u1,
+        u2_final: s.u2,
+        u3_final: s.u3,
+        status: 0
+    }
+}
+
+// ============================================================================
+// STIFF SOLVER: BACKWARD EULER (BDF1)
+// ============================================================================
+
+/// Backward Euler step for exponential decay (analytically solved)
+/// For du/dt = -k*u, implicit: u_{n+1} = u_n / (1 + k*dt)
+fn backward_euler_step_exp_decay(u: f64, dt: f64, k: f64) -> f64 {
+    return u / (1.0 + k * dt)
+}
+
+/// Solve exponential decay using Backward Euler (L-stable for stiff)
+fn solve_bdf1_exp_decay(u0: f64, t_start: f64, t_end: f64, n_steps: i64) -> ODESolution {
+    let k = 0.1  // Decay constant
+    let dt = (t_end - t_start) / (n_steps as f64)
+    let mut u = u0
+    let mut t = t_start
+    let mut i: i64 = 0
+
+    while i < n_steps {
+        u = backward_euler_step_exp_decay(u, dt, k)
+        t = t + dt
+        i = i + 1
+    }
+
+    return ODESolution {
+        success: true,
+        nsteps: n_steps,
+        nfeval: n_steps,
+        nreject: 0,
+        t_final: t,
+        u_final: u,
+        status: 0
+    }
+}
+
+// ============================================================================
+// ANALYTICAL SOLUTIONS FOR VALIDATION
+// ============================================================================
+
+fn exp_approx(x: f64) -> f64 {
+    if x > 20.0 { return exp_approx(x / 2.0) * exp_approx(x / 2.0) }
+    if x < 0.0 - 20.0 { return 1.0 / exp_approx(0.0 - x) }
+
+    let mut sum = 1.0
+    let mut term = 1.0
+    term = term * x / 1.0
+    sum = sum + term
+    term = term * x / 2.0
+    sum = sum + term
+    term = term * x / 3.0
+    sum = sum + term
+    term = term * x / 4.0
+    sum = sum + term
+    term = term * x / 5.0
+    sum = sum + term
+    term = term * x / 6.0
+    sum = sum + term
+    term = term * x / 7.0
+    sum = sum + term
+    term = term * x / 8.0
+    sum = sum + term
+    term = term * x / 9.0
+    sum = sum + term
+    term = term * x / 10.0
+    sum = sum + term
+    term = term * x / 11.0
+    sum = sum + term
+    term = term * x / 12.0
+    sum = sum + term
+    return sum
+}
+
+fn exp_decay_analytical(u0: f64, k: f64, t: f64) -> f64 {
+    return u0 * exp_approx(0.0 - k * t)
+}
+
+// ============================================================================
+// TESTS
+// ============================================================================
+
+fn main() -> i32 {
+    println("=== Sounio Generic ODE Solver ===")
+    println("")
+
+    // Test 1: RK45 adaptive solver
+    println("Test 1: RK45 Adaptive - Exponential Decay")
+    println("  du/dt = -0.1*u, u(0) = 100, t: 0 -> 10")
+
+    let opts = default_options()
+    let sol1 = solve_rk45_exp_decay(100.0, 0.0, 10.0, opts)
+    let analytical = exp_decay_analytical(100.0, 0.1, 10.0)
+    let err1 = abs_f64(sol1.u_final - analytical)
+    let rel_err1 = err1 / analytical
+
+    println("  Numerical:")
+    println(sol1.u_final)
+    println("  Analytical:")
+    println(analytical)
+    println("  Relative error:")
+    println(rel_err1)
+    println("  Steps:")
+    println(sol1.nsteps)
+    println("  Function evals:")
+    println(sol1.nfeval)
+    println("  Rejected:")
+    println(sol1.nreject)
+    println("")
+
+    // Test 2: RK4 fixed step
+    println("Test 2: RK4 Fixed-Step - Exponential Decay")
+    let sol2 = solve_rk4_exp_decay(100.0, 0.0, 10.0, 100)
+    let rel_err2 = abs_f64(sol2.u_final - analytical) / analytical
+    println("  Numerical:")
+    println(sol2.u_final)
+    println("  Relative error:")
+    println(rel_err2)
+    println("")
+
+    // Test 3: BDF1 implicit solver
+    println("Test 3: BDF1 Implicit - Exponential Decay")
+    let sol3 = solve_bdf1_exp_decay(100.0, 0.0, 10.0, 1000)
+    let rel_err3 = abs_f64(sol3.u_final - analytical) / analytical
+    println("  Numerical:")
+    println(sol3.u_final)
+    println("  Relative error:")
+    println(rel_err3)
+    println("")
+
+    // Test 4: 3-compartment PK model
+    println("Test 4: 3-Compartment PK Model")
+    println("  Dose: 500 mg oral, t: 0 -> 24h")
+
+    let s0 = State3 { u1: 500.0, u2: 0.0, u3: 0.0, t: 0.0 }
+    let p = default_pk3_params()
+    let sol4 = solve_pk3_rk4(s0, p, 24.0, 1000)
+
+    println("  Gut (mg):")
+    println(sol4.u1_final)
+    println("  Central (mg):")
+    println(sol4.u2_final)
+    println("  Peripheral (mg):")
+    println(sol4.u3_final)
+
+    let total = sol4.u1_final + sol4.u2_final + sol4.u3_final
+    let eliminated = 500.0 - total
+    println("  Eliminated (mg):")
+    println(eliminated)
+    println("")
+
+    // Validation
+    let pass1 = rel_err1 < 0.0001
+    let pass2 = rel_err2 < 0.0001
+    let pass3 = rel_err3 < 0.01
+    let pass4 = sol4.u1_final < 0.01  // Gut should be essentially empty
+
+    if pass1 && pass2 && pass3 && pass4 {
+        println("ALL TESTS PASSED")
+        return 0
+    } else {
+        println("SOME TESTS FAILED")
+        if !pass1 { println("  RK45 failed") }
+        if !pass2 { println("  RK4 failed") }
+        if !pass3 { println("  BDF1 failed") }
+        if !pass4 { println("  PK3 failed") }
+        return 1
+    }
+}

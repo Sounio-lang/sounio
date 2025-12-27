@@ -1,0 +1,1163 @@
+openapi: 3.1.0
+info:
+  title: Sounio Package Registry API
+  description: |
+    The Sounio Package Registry API provides endpoints for publishing, searching,
+    and downloading Sounio packages. This registry is the central repository for
+    the Sounio ecosystem.
+
+    ## Authentication
+
+    Most endpoints require authentication via API tokens. Include your token in
+    the `Authorization` header:
+
+    ```
+    Authorization: Bearer <your-api-token>
+    ```
+
+    ## Rate Limiting
+
+    - Anonymous: 100 requests/hour
+    - Authenticated: 1000 requests/hour
+    - Publishing: 60 requests/hour
+
+    ## Versioning
+
+    Packages follow semantic versioning (SemVer). Version requirements support:
+    - Exact: `1.2.3`
+    - Range: `>=1.0.0, <2.0.0`
+    - Caret: `^1.2.3` (compatible with 1.x.y)
+    - Tilde: `~1.2.3` (compatible with 1.2.x)
+
+  version: 1.0.0
+  contact:
+    name: Sounio Team
+    url: https://sounio-lang.org
+    email: registry@sounio-lang.org
+  license:
+    name: MIT
+    url: https://opensource.org/licenses/MIT
+
+servers:
+  - url: https://registry.sounio-lang.org/api/v1
+    description: Production registry
+  - url: https://staging-registry.sounio-lang.org/api/v1
+    description: Staging registry
+  - url: http://localhost:3000/api/v1
+    description: Local development
+
+tags:
+  - name: packages
+    description: Package operations
+  - name: versions
+    description: Package version operations
+  - name: search
+    description: Package search
+  - name: users
+    description: User management
+  - name: auth
+    description: Authentication
+  - name: stats
+    description: Registry statistics
+
+paths:
+  # ==========================================================================
+  # Package Operations
+  # ==========================================================================
+
+  /packages:
+    get:
+      summary: List all packages
+      description: Returns a paginated list of all packages in the registry.
+      tags:
+        - packages
+      parameters:
+        - name: page
+          in: query
+          schema:
+            type: integer
+            default: 1
+            minimum: 1
+        - name: per_page
+          in: query
+          schema:
+            type: integer
+            default: 20
+            minimum: 1
+            maximum: 100
+        - name: sort
+          in: query
+          schema:
+            type: string
+            enum: [name, downloads, updated, created]
+            default: downloads
+        - name: order
+          in: query
+          schema:
+            type: string
+            enum: [asc, desc]
+            default: desc
+      responses:
+        '200':
+          description: List of packages
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PackageList'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+
+    post:
+      summary: Create a new package
+      description: |
+        Registers a new package in the registry. The package name must be unique
+        and follow naming conventions.
+      tags:
+        - packages
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreatePackage'
+      responses:
+        '201':
+          description: Package created
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Package'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '409':
+          description: Package name already exists
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+
+  /packages/{name}:
+    get:
+      summary: Get package details
+      description: Returns detailed information about a specific package.
+      tags:
+        - packages
+      parameters:
+        - name: name
+          in: path
+          required: true
+          schema:
+            type: string
+          description: Package name
+      responses:
+        '200':
+          description: Package details
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Package'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+    patch:
+      summary: Update package metadata
+      description: Updates package metadata like description, repository, etc.
+      tags:
+        - packages
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: name
+          in: path
+          required: true
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/UpdatePackage'
+      responses:
+        '200':
+          description: Package updated
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Package'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+    delete:
+      summary: Delete a package (admin only)
+      description: |
+        Permanently deletes a package. This action is irreversible.
+        Only registry administrators can delete packages.
+      tags:
+        - packages
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: name
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        '204':
+          description: Package deleted
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+  # ==========================================================================
+  # Version Operations
+  # ==========================================================================
+
+  /packages/{name}/versions:
+    get:
+      summary: List package versions
+      description: Returns all versions of a package.
+      tags:
+        - versions
+      parameters:
+        - name: name
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: List of versions
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/Version'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+    post:
+      summary: Publish a new version
+      description: |
+        Publishes a new version of a package. The version number must be unique
+        and greater than all existing versions.
+      tags:
+        - versions
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: name
+          in: path
+          required: true
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              type: object
+              required:
+                - version
+                - tarball
+              properties:
+                version:
+                  type: string
+                  description: SemVer version string
+                tarball:
+                  type: string
+                  format: binary
+                  description: Package tarball (.tar.gz)
+                readme:
+                  type: string
+                  description: README content (markdown)
+                changelog:
+                  type: string
+                  description: CHANGELOG content (markdown)
+      responses:
+        '201':
+          description: Version published
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Version'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '409':
+          description: Version already exists
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+
+  /packages/{name}/versions/{version}:
+    get:
+      summary: Get version details
+      description: Returns detailed information about a specific version.
+      tags:
+        - versions
+      parameters:
+        - name: name
+          in: path
+          required: true
+          schema:
+            type: string
+        - name: version
+          in: path
+          required: true
+          schema:
+            type: string
+          description: Version string or "latest"
+      responses:
+        '200':
+          description: Version details
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Version'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+  /packages/{name}/versions/{version}/download:
+    get:
+      summary: Download package tarball
+      description: Downloads the package tarball for a specific version.
+      tags:
+        - versions
+      parameters:
+        - name: name
+          in: path
+          required: true
+          schema:
+            type: string
+        - name: version
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Package tarball
+          content:
+            application/gzip:
+              schema:
+                type: string
+                format: binary
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+  /packages/{name}/versions/{version}/yank:
+    post:
+      summary: Yank a version
+      description: |
+        Yanks a version, preventing new dependencies on it.
+        Existing dependencies continue to work.
+      tags:
+        - versions
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: name
+          in: path
+          required: true
+          schema:
+            type: string
+        - name: version
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Version yanked
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+  /packages/{name}/versions/{version}/unyank:
+    post:
+      summary: Unyank a version
+      description: Restores a yanked version.
+      tags:
+        - versions
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: name
+          in: path
+          required: true
+          schema:
+            type: string
+        - name: version
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Version unyanked
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+  # ==========================================================================
+  # Search
+  # ==========================================================================
+
+  /search:
+    get:
+      summary: Search packages
+      description: |
+        Search for packages by name, description, keywords, or author.
+        Supports full-text search with relevance ranking.
+      tags:
+        - search
+      parameters:
+        - name: q
+          in: query
+          required: true
+          schema:
+            type: string
+          description: Search query
+        - name: page
+          in: query
+          schema:
+            type: integer
+            default: 1
+        - name: per_page
+          in: query
+          schema:
+            type: integer
+            default: 20
+            maximum: 100
+        - name: category
+          in: query
+          schema:
+            type: string
+          description: Filter by category
+        - name: keywords
+          in: query
+          schema:
+            type: array
+            items:
+              type: string
+          description: Filter by keywords
+      responses:
+        '200':
+          description: Search results
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SearchResults'
+
+  # ==========================================================================
+  # Authentication
+  # ==========================================================================
+
+  /auth/login:
+    post:
+      summary: Login with credentials
+      description: Authenticates a user and returns an API token.
+      tags:
+        - auth
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required:
+                - email
+                - password
+              properties:
+                email:
+                  type: string
+                  format: email
+                password:
+                  type: string
+                  format: password
+      responses:
+        '200':
+          description: Login successful
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AuthResponse'
+        '401':
+          description: Invalid credentials
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+
+  /auth/register:
+    post:
+      summary: Register a new user
+      description: Creates a new user account.
+      tags:
+        - auth
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required:
+                - username
+                - email
+                - password
+              properties:
+                username:
+                  type: string
+                  minLength: 3
+                  maxLength: 39
+                  pattern: '^[a-zA-Z0-9_-]+$'
+                email:
+                  type: string
+                  format: email
+                password:
+                  type: string
+                  format: password
+                  minLength: 8
+      responses:
+        '201':
+          description: User created
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/User'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '409':
+          description: Username or email already exists
+
+  /auth/tokens:
+    get:
+      summary: List API tokens
+      description: Returns all API tokens for the authenticated user.
+      tags:
+        - auth
+      security:
+        - bearerAuth: []
+      responses:
+        '200':
+          description: List of tokens
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/ApiToken'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+
+    post:
+      summary: Create a new API token
+      description: Creates a new API token with specified permissions.
+      tags:
+        - auth
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required:
+                - name
+              properties:
+                name:
+                  type: string
+                  description: Token name for identification
+                scopes:
+                  type: array
+                  items:
+                    type: string
+                    enum: [read, publish, admin]
+                  default: [read, publish]
+                expires_at:
+                  type: string
+                  format: date-time
+                  description: Token expiration (null for no expiration)
+      responses:
+        '201':
+          description: Token created
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiTokenCreated'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+
+  /auth/tokens/{token_id}:
+    delete:
+      summary: Revoke an API token
+      description: Revokes an API token, making it unusable.
+      tags:
+        - auth
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: token_id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '204':
+          description: Token revoked
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+  # ==========================================================================
+  # Users
+  # ==========================================================================
+
+  /users/{username}:
+    get:
+      summary: Get user profile
+      description: Returns public profile information for a user.
+      tags:
+        - users
+      parameters:
+        - name: username
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: User profile
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/UserProfile'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+  /users/{username}/packages:
+    get:
+      summary: List user's packages
+      description: Returns all packages owned by a user.
+      tags:
+        - users
+      parameters:
+        - name: username
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: List of packages
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PackageList'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+  /me:
+    get:
+      summary: Get current user
+      description: Returns the authenticated user's information.
+      tags:
+        - users
+      security:
+        - bearerAuth: []
+      responses:
+        '200':
+          description: Current user
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/User'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+
+  # ==========================================================================
+  # Statistics
+  # ==========================================================================
+
+  /stats:
+    get:
+      summary: Get registry statistics
+      description: Returns overall registry statistics.
+      tags:
+        - stats
+      responses:
+        '200':
+          description: Registry statistics
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RegistryStats'
+
+  /packages/{name}/stats:
+    get:
+      summary: Get package download statistics
+      description: Returns download statistics for a package.
+      tags:
+        - stats
+      parameters:
+        - name: name
+          in: path
+          required: true
+          schema:
+            type: string
+        - name: period
+          in: query
+          schema:
+            type: string
+            enum: [day, week, month, year, all]
+            default: month
+      responses:
+        '200':
+          description: Package statistics
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PackageStats'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+
+  responses:
+    BadRequest:
+      description: Invalid request
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+
+    Unauthorized:
+      description: Authentication required
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+
+    Forbidden:
+      description: Permission denied
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+
+    NotFound:
+      description: Resource not found
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+
+  schemas:
+    Error:
+      type: object
+      required:
+        - error
+        - message
+      properties:
+        error:
+          type: string
+        message:
+          type: string
+        details:
+          type: object
+
+    Package:
+      type: object
+      required:
+        - name
+        - latest_version
+        - created_at
+        - updated_at
+      properties:
+        name:
+          type: string
+          pattern: '^[a-z][a-z0-9_-]*$'
+        description:
+          type: string
+        homepage:
+          type: string
+          format: uri
+        repository:
+          type: string
+          format: uri
+        documentation:
+          type: string
+          format: uri
+        license:
+          type: string
+        keywords:
+          type: array
+          items:
+            type: string
+        categories:
+          type: array
+          items:
+            type: string
+        latest_version:
+          type: string
+        versions:
+          type: array
+          items:
+            type: string
+        owners:
+          type: array
+          items:
+            type: string
+        downloads:
+          type: integer
+        created_at:
+          type: string
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
+
+    CreatePackage:
+      type: object
+      required:
+        - name
+      properties:
+        name:
+          type: string
+          pattern: '^[a-z][a-z0-9_-]*$'
+          minLength: 1
+          maxLength: 64
+        description:
+          type: string
+          maxLength: 500
+        homepage:
+          type: string
+          format: uri
+        repository:
+          type: string
+          format: uri
+        documentation:
+          type: string
+          format: uri
+        license:
+          type: string
+        keywords:
+          type: array
+          items:
+            type: string
+          maxItems: 10
+        categories:
+          type: array
+          items:
+            type: string
+          maxItems: 5
+
+    UpdatePackage:
+      type: object
+      properties:
+        description:
+          type: string
+          maxLength: 500
+        homepage:
+          type: string
+          format: uri
+        repository:
+          type: string
+          format: uri
+        documentation:
+          type: string
+          format: uri
+        keywords:
+          type: array
+          items:
+            type: string
+          maxItems: 10
+        categories:
+          type: array
+          items:
+            type: string
+          maxItems: 5
+
+    PackageList:
+      type: object
+      required:
+        - packages
+        - total
+        - page
+        - per_page
+      properties:
+        packages:
+          type: array
+          items:
+            $ref: '#/components/schemas/Package'
+        total:
+          type: integer
+        page:
+          type: integer
+        per_page:
+          type: integer
+        has_next:
+          type: boolean
+
+    Version:
+      type: object
+      required:
+        - version
+        - package_name
+        - published_at
+        - checksum
+      properties:
+        version:
+          type: string
+        package_name:
+          type: string
+        published_at:
+          type: string
+          format: date-time
+        published_by:
+          type: string
+        downloads:
+          type: integer
+        checksum:
+          type: string
+          description: SHA256 checksum of tarball
+        size:
+          type: integer
+          description: Tarball size in bytes
+        yanked:
+          type: boolean
+          default: false
+        rust_version:
+          type: string
+          description: Minimum Sounio compiler version
+        dependencies:
+          type: array
+          items:
+            $ref: '#/components/schemas/Dependency'
+        features:
+          type: object
+          additionalProperties:
+            type: array
+            items:
+              type: string
+
+    Dependency:
+      type: object
+      required:
+        - name
+        - version_req
+      properties:
+        name:
+          type: string
+        version_req:
+          type: string
+        features:
+          type: array
+          items:
+            type: string
+        optional:
+          type: boolean
+          default: false
+        kind:
+          type: string
+          enum: [normal, dev, build]
+          default: normal
+
+    SearchResults:
+      type: object
+      required:
+        - packages
+        - total
+      properties:
+        packages:
+          type: array
+          items:
+            $ref: '#/components/schemas/Package'
+        total:
+          type: integer
+        page:
+          type: integer
+        per_page:
+          type: integer
+
+    User:
+      type: object
+      required:
+        - id
+        - username
+        - email
+        - created_at
+      properties:
+        id:
+          type: string
+          format: uuid
+        username:
+          type: string
+        email:
+          type: string
+          format: email
+        avatar_url:
+          type: string
+          format: uri
+        created_at:
+          type: string
+          format: date-time
+
+    UserProfile:
+      type: object
+      required:
+        - username
+        - created_at
+      properties:
+        username:
+          type: string
+        avatar_url:
+          type: string
+          format: uri
+        bio:
+          type: string
+        location:
+          type: string
+        website:
+          type: string
+          format: uri
+        github:
+          type: string
+        package_count:
+          type: integer
+        created_at:
+          type: string
+          format: date-time
+
+    AuthResponse:
+      type: object
+      required:
+        - token
+        - user
+      properties:
+        token:
+          type: string
+        token_type:
+          type: string
+          default: Bearer
+        expires_in:
+          type: integer
+          description: Token lifetime in seconds
+        user:
+          $ref: '#/components/schemas/User'
+
+    ApiToken:
+      type: object
+      required:
+        - id
+        - name
+        - created_at
+      properties:
+        id:
+          type: string
+          format: uuid
+        name:
+          type: string
+        scopes:
+          type: array
+          items:
+            type: string
+        created_at:
+          type: string
+          format: date-time
+        expires_at:
+          type: string
+          format: date-time
+        last_used_at:
+          type: string
+          format: date-time
+
+    ApiTokenCreated:
+      type: object
+      required:
+        - id
+        - token
+      properties:
+        id:
+          type: string
+          format: uuid
+        token:
+          type: string
+          description: The actual token value (shown only once)
+        name:
+          type: string
+        scopes:
+          type: array
+          items:
+            type: string
+        expires_at:
+          type: string
+          format: date-time
+
+    RegistryStats:
+      type: object
+      properties:
+        total_packages:
+          type: integer
+        total_versions:
+          type: integer
+        total_downloads:
+          type: integer
+        total_users:
+          type: integer
+        packages_last_day:
+          type: integer
+        downloads_last_day:
+          type: integer
+
+    PackageStats:
+      type: object
+      properties:
+        total_downloads:
+          type: integer
+        downloads_by_version:
+          type: object
+          additionalProperties:
+            type: integer
+        downloads_over_time:
+          type: array
+          items:
+            type: object
+            properties:
+              date:
+                type: string
+                format: date
+              downloads:
+                type: integer
