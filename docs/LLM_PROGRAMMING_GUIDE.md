@@ -94,12 +94,21 @@ match value {
     _ => println("other"),
 }
 
-// For loops
-for i in 0..10 {
+// For-in loops (range iteration)
+for i in 0..10 {        // exclusive: 0, 1, ..., 9
     println(i)
 }
 
-for item in collection {
+for i in 0..=10 {       // inclusive: 0, 1, ..., 10
+    println(i)
+}
+
+// For-in loops (collection iteration)
+for item in array {     // iterate over array elements
+    process(item)
+}
+
+for item in vec {       // iterate over Vec elements
     process(item)
 }
 
@@ -1718,29 +1727,96 @@ fn use_connection() {
 }
 ```
 
-### Iteration Patterns
+### Iteration Patterns (For-In Loops)
+
+Sounio supports `for-in` loops for both range iteration and collection iteration.
+
+#### Range Iteration
 
 ```d
-// Range iteration
+// Exclusive range: 0, 1, 2, ..., n-1
 for i in 0..n {
-    // i from 0 to n-1
+    println(i)
 }
 
+// Inclusive range: 0, 1, 2, ..., n
 for i in 0..=n {
-    // i from 0 to n (inclusive)
+    println(i)
 }
 
-// Collection iteration
-for item in collection {
-    process(item)
+// Range with arbitrary start
+for i in 5..10 {
+    // i = 5, 6, 7, 8, 9
 }
 
-// Index-based when needed
+// Unbounded range (use with break)
+for i in 0.. {
+    if i >= limit {
+        break
+    }
+    process(i)
+}
+```
+
+#### Collection Iteration
+
+```d
+// Array iteration
+let arr = [10, 20, 30]
+for x in arr {
+    println(x)  // prints 10, 20, 30
+}
+
+// Vec iteration
+let vec: Vec<i32> = [1, 2, 3, 4]
+for x in vec {
+    println(x)
+}
+
+// Reference iteration (borrows the collection)
+for x in &arr {
+    println(x)
+}
+```
+
+#### Loop Control
+
+```d
+// Break exits the loop early
+for i in 0..100 {
+    if i >= 10 {
+        break
+    }
+}
+
+// Continue skips to next iteration
+for i in 0..10 {
+    if i % 2 == 0 {
+        continue  // skip even numbers
+    }
+    println(i)  // prints 1, 3, 5, 7, 9
+}
+```
+
+#### Index-Based Iteration
+
+```d
+// When you need the index
 for i in 0..len(arr) {
     arr[i] = arr[i] * 2
 }
 
-// Functional style
+// Nested loops
+for i in 0..rows {
+    for j in 0..cols {
+        matrix[i][j] = i * cols + j
+    }
+}
+```
+
+#### Functional Style
+
+```d
 let doubled = numbers.map(|x| x * 2)
 let sum = numbers.fold(0, |acc, x| acc + x)
 let filtered = numbers.filter(|x| x > 0)
