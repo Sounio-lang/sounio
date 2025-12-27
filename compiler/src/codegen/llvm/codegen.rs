@@ -1090,6 +1090,9 @@ impl<'ctx> LLVMCodegen<'ctx> {
     ///
     /// This function recursively extracts values from single-element struct wrappers
     /// until we get a non-struct value (int, float, etc.).
+    ///
+    /// For constant struct values, we use `get_field_at_index` directly.
+    /// For non-constant values, we use `build_extract_value` to emit IR.
     fn unwrap_refinement_struct(
         &mut self,
         val: BasicValueEnum<'ctx>,
@@ -1100,17 +1103,29 @@ impl<'ctx> LLVMCodegen<'ctx> {
         // Keep unwrapping single-element structs until we get a primitive
         loop {
             if let BasicValueEnum::StructValue(sv) = current {
-                // Try to extract the first field - this works for single-element
-                // refinement type wrappers. If it fails or the struct has no fields,
-                // we stop unwrapping.
+                // Check if it has exactly one field (refinement type wrapper)
+                if sv.count_fields() != 1 {
+                    break;
+                }
+
+                // For constant struct values, use get_field_at_index directly
+                // (build_extract_value only works for runtime values)
+                if sv.is_const() {
+                    if let Some(inner) = sv.get_field_at_index(0) {
+                        current = inner;
+                        continue;
+                    } else {
+                        break;
+                    }
+                }
+
+                // For non-constant values, use build_extract_value
                 match self.builder.build_extract_value(sv, 0, "unwrap_refinement") {
                     Ok(inner) => {
-                        // Successfully extracted, check if it's still a struct
                         current = inner;
                         continue;
                     }
                     Err(_) => {
-                        // Extraction failed (no fields or other error), stop
                         break;
                     }
                 }
