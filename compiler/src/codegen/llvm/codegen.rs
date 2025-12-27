@@ -1082,25 +1082,29 @@ impl<'ctx> LLVMCodegen<'ctx> {
         }
     }
 
-    /// Unwrap a refinement type struct if the value is a single-element struct
-    /// but the expected type is a primitive.
+    /// Unwrap a refinement type struct if the value is a single-element struct.
     ///
     /// Refinement types like `type OrbitRatio = { r: f64 | 0.25 <= r && r <= 1.0 }`
-    /// may be lowered to wrapper structs `{ f64 }` in some code paths, but the type
-    /// system correctly identifies them as `f64`. This function extracts the inner
-    /// value to make the LLVM representation match the type system.
+    /// may be lowered to wrapper structs `{ f64 }` in some code paths, but when
+    /// casting to a primitive, we need to extract the inner value.
+    ///
+    /// This function checks if the LLVM value is a single-element struct and
+    /// extracts the inner value if so. This is more robust than checking HLIR
+    /// types because the type system may show the alias name rather than the
+    /// underlying primitive type.
     fn unwrap_refinement_struct(
         &mut self,
         val: BasicValueEnum<'ctx>,
-        expected_ty: &HlirType,
+        _expected_ty: &HlirType,
     ) -> BasicValueEnum<'ctx> {
-        // Only unwrap if value is a struct and expected type is a primitive
+        // If the value is a struct, check if it's a single-element wrapper
         if let BasicValueEnum::StructValue(sv) = val {
-            let is_expected_primitive =
-                self.types.is_integer_type(expected_ty) || self.types.is_float_type(expected_ty);
+            let struct_ty = sv.get_type();
+            let field_count = struct_ty.count_fields();
 
-            if is_expected_primitive {
-                // Extract the first (and presumably only) element from the struct
+            // Single-element struct is likely a refinement type wrapper
+            if field_count == 1 {
+                // Extract the first (and only) element from the struct
                 if let Some(inner) = self
                     .builder
                     .build_extract_value(sv, 0, "unwrap_refinement")

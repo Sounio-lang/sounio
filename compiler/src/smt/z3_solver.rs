@@ -172,7 +172,7 @@ impl<'ctx> Z3Solver<'ctx> {
         let mut solver = Self::new(context);
         solver.timeout_ms = timeout_ms;
         solver.solver.set_params(&{
-            let params = z3::Params::new(context);
+            let mut params = z3::Params::new(context);
             params.set_u32("timeout", timeout_ms);
             params
         });
@@ -183,7 +183,7 @@ impl<'ctx> Z3Solver<'ctx> {
     pub fn set_timeout(&mut self, timeout_ms: u32) {
         self.timeout_ms = timeout_ms;
         self.solver.set_params(&{
-            let params = z3::Params::new(self.context);
+            let mut params = z3::Params::new(self.context);
             params.set_u32("timeout", timeout_ms);
             params
         });
