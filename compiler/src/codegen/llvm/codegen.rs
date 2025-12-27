@@ -357,9 +357,13 @@ impl<'ctx> LLVMCodegen<'ctx> {
                     .map(|v| v.into())
             }
 
-            Op::Cast { value, target, .. } => {
+            Op::Cast {
+                value,
+                source,
+                target,
+            } => {
                 let val = self.get_value(*value)?;
-                self.compile_cast(val, &instr.ty, target)
+                self.compile_cast(val, source, target)
             }
 
             Op::Phi { incoming } => {
@@ -946,6 +950,12 @@ impl<'ctx> LLVMCodegen<'ctx> {
         from_ty: &HlirType,
         to_ty: &HlirType,
     ) -> Option<BasicValueEnum<'ctx>> {
+        // Handle refinement type unwrapping: if the value is a single-element struct
+        // but the type system says it should be a primitive, extract the inner value.
+        // This handles cases like `{ r: f64 | constraint }` which may be represented
+        // as `{ f64 }` in LLVM IR but should be treated as `f64`.
+        let val = self.unwrap_refinement_struct(val, from_ty);
+
         let from_int = self.types.is_integer_type(from_ty);
         let from_float = self.types.is_float_type(from_ty);
         let to_int = self.types.is_integer_type(to_ty);
@@ -1070,6 +1080,37 @@ impl<'ctx> LLVMCodegen<'ctx> {
                 .ok()
                 .map(|v| v.into())
         }
+    }
+
+    /// Unwrap a refinement type struct if the value is a single-element struct
+    /// but the expected type is a primitive.
+    ///
+    /// Refinement types like `type OrbitRatio = { r: f64 | 0.25 <= r && r <= 1.0 }`
+    /// may be lowered to wrapper structs `{ f64 }` in some code paths, but the type
+    /// system correctly identifies them as `f64`. This function extracts the inner
+    /// value to make the LLVM representation match the type system.
+    fn unwrap_refinement_struct(
+        &mut self,
+        val: BasicValueEnum<'ctx>,
+        expected_ty: &HlirType,
+    ) -> BasicValueEnum<'ctx> {
+        // Only unwrap if value is a struct and expected type is a primitive
+        if let BasicValueEnum::StructValue(sv) = val {
+            let is_expected_primitive = self.types.is_integer_type(expected_ty)
+                || self.types.is_float_type(expected_ty);
+
+            if is_expected_primitive {
+                // Extract the first (and presumably only) element from the struct
+                if let Some(inner) = self
+                    .builder
+                    .build_extract_value(sv, 0, "unwrap_refinement")
+                    .ok()
+                {
+                    return inner;
+                }
+            }
+        }
+        val
     }
 
     /// Compile a terminator

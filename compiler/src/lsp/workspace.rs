@@ -318,15 +318,20 @@ impl Workspace {
             let (name, kind, span, doc) = match item {
                 Item::Function(f) => {
                     let doc = extract_doc_comment(source, f.span.start);
-                    (f.name.clone(), DefKind::Function, f.span.clone(), doc)
+                    let kind = if f.modifiers.is_kernel {
+                        DefKind::Kernel
+                    } else {
+                        DefKind::Function
+                    };
+                    (f.name.clone(), kind, f.span.clone(), doc)
                 }
                 Item::Struct(s) => {
                     let doc = extract_doc_comment(source, s.span.start);
                     (
                         s.name.clone(),
                         DefKind::Struct {
-                            is_linear: s.is_linear,
-                            is_affine: s.is_affine,
+                            is_linear: s.modifiers.linear,
+                            is_affine: s.modifiers.affine,
                         },
                         s.span.clone(),
                         doc,
@@ -337,8 +342,8 @@ impl Workspace {
                     (
                         e.name.clone(),
                         DefKind::Enum {
-                            is_linear: e.is_linear,
-                            is_affine: e.is_affine,
+                            is_linear: e.modifiers.linear,
+                            is_affine: e.modifiers.affine,
                         },
                         e.span.clone(),
                         doc,
@@ -356,13 +361,14 @@ impl Workspace {
                     let doc = extract_doc_comment(source, t.span.start);
                     (t.name.clone(), DefKind::Trait, t.span.clone(), doc)
                 }
-                Item::Const(c) => {
-                    let doc = extract_doc_comment(source, c.span.start);
-                    (c.name.clone(), DefKind::Const, c.span.clone(), doc)
-                }
-                Item::Kernel(k) => {
-                    let doc = extract_doc_comment(source, k.span.start);
-                    (k.name.clone(), DefKind::Kernel, k.span.clone(), doc)
+                Item::Global(g) if g.is_const => {
+                    let doc = extract_doc_comment(source, g.span.start);
+                    // Extract name from pattern
+                    let name = match &g.pattern {
+                        crate::ast::Pattern::Binding { name, .. } => name.clone(),
+                        _ => continue, // Skip non-simple patterns for now
+                    };
+                    (name, DefKind::Const, g.span.clone(), doc)
                 }
                 Item::Module(m) => {
                     let doc = extract_doc_comment(source, m.span.start);
