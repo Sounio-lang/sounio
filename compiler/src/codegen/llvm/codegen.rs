@@ -1096,8 +1096,8 @@ impl<'ctx> LLVMCodegen<'ctx> {
     ) -> BasicValueEnum<'ctx> {
         // Only unwrap if value is a struct and expected type is a primitive
         if let BasicValueEnum::StructValue(sv) = val {
-            let is_expected_primitive = self.types.is_integer_type(expected_ty)
-                || self.types.is_float_type(expected_ty);
+            let is_expected_primitive =
+                self.types.is_integer_type(expected_ty) || self.types.is_float_type(expected_ty);
 
             if is_expected_primitive {
                 // Extract the first (and presumably only) element from the struct
