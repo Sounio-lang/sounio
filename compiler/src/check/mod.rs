@@ -501,6 +501,20 @@ impl TypeChecker {
             }
         }
 
+        // Emit type aliases to HIR so they can be resolved during HLIR lowering
+        // This is essential for refinement types: `type OrbitRatio = { r: f64 | ... }`
+        // should be lowered to f64, not a struct named "OrbitRatio"
+        for (name, def) in &self.type_defs {
+            if let TypeDef::Alias(ty, span, _) = def {
+                let hir_ty = self.type_to_hir(ty);
+                items.push(HirItem::TypeAlias(HirTypeAlias {
+                    id: NodeId(0), // ID not used for type aliases
+                    name: name.clone(),
+                    ty: hir_ty,
+                }));
+            }
+        }
+
         self.env.pop_scope();
 
         // Solve type constraints
