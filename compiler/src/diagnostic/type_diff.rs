@@ -350,7 +350,9 @@ impl TypeDiff {
             (Some((exp_base, exp_pred)), None) => {
                 // Check if found type matches the base type
                 let found_clean = found.trim();
-                if exp_base == found_clean || Self::is_numeric_type(&exp_base) && Self::is_numeric_type(found_clean) {
+                if exp_base == found_clean
+                    || Self::is_numeric_type(&exp_base) && Self::is_numeric_type(found_clean)
+                {
                     Some(TypeDiff::RefinementMismatch {
                         base_type: exp_base,
                         expected_predicate: Some(exp_pred),
@@ -363,7 +365,9 @@ impl TypeDiff {
             // Expected is base type, found is refined
             (None, Some((found_base, found_pred))) => {
                 let exp_clean = expected.trim();
-                if found_base == exp_clean || Self::is_numeric_type(&found_base) && Self::is_numeric_type(exp_clean) {
+                if found_base == exp_clean
+                    || Self::is_numeric_type(&found_base) && Self::is_numeric_type(exp_clean)
+                {
                     Some(TypeDiff::RefinementMismatch {
                         base_type: found_base,
                         expected_predicate: None,
@@ -404,9 +408,22 @@ impl TypeDiff {
     fn is_numeric_type(ty: &str) -> bool {
         matches!(
             ty.trim(),
-            "f32" | "f64" | "i8" | "i16" | "i32" | "i64" | "i128"
-                | "u8" | "u16" | "u32" | "u64" | "u128"
-                | "int" | "float" | "F64" | "I64"
+            "f32"
+                | "f64"
+                | "i8"
+                | "i16"
+                | "i32"
+                | "i64"
+                | "i128"
+                | "u8"
+                | "u16"
+                | "u32"
+                | "u64"
+                | "u128"
+                | "int"
+                | "float"
+                | "F64"
+                | "I64"
         )
     }
 
@@ -790,7 +807,8 @@ impl TypeErrorBuilder {
                                 .to_string(),
                         );
                         diagnostic.help.push(
-                            "  let refined = refine_or(value, default)  // With fallback".to_string(),
+                            "  let refined = refine_or(value, default)  // With fallback"
+                                .to_string(),
                         );
                     }
                     // If extracting from refined type
@@ -799,18 +817,18 @@ impl TypeErrorBuilder {
                             "to extract `{}` from the refinement type, the value is already valid",
                             base_type
                         ));
-                        diagnostic.help.push(
-                            "  refinement types are subtypes of their base type".to_string(),
-                        );
+                        diagnostic
+                            .help
+                            .push("  refinement types are subtypes of their base type".to_string());
                     }
                     // If predicates differ
                     if expected_predicate.is_some() && found_predicate.is_some() {
-                        diagnostic.help.push(
-                            "the refinement predicates are incompatible".to_string(),
-                        );
-                        diagnostic.help.push(
-                            "consider using try_refine to validate at runtime".to_string(),
-                        );
+                        diagnostic
+                            .help
+                            .push("the refinement predicates are incompatible".to_string());
+                        diagnostic
+                            .help
+                            .push("consider using try_refine to validate at runtime".to_string());
                     }
                 }
                 _ => {}

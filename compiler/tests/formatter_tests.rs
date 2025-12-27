@@ -31,7 +31,10 @@ fn assert_idempotent(source: &str) {
     // Some constructs wrap literals in Int(), so we check the second pass
     // is stable, not that it matches the first
     let third = format(&second);
-    assert_eq!(second, third, "Formatting should be stable after second pass");
+    assert_eq!(
+        second, third,
+        "Formatting should be stable after second pass"
+    );
 }
 
 // =============================================================================

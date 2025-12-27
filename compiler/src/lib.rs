@@ -212,19 +212,17 @@ pub mod wasm {
     pub fn compile(source: &str) -> String {
         match compile_internal(source) {
             Ok(result) => result,
-            Err(e) => {
-                serde_json::json!({
-                    "success": false,
-                    "diagnostics": [{
-                        "severity": "error",
-                        "message": format!("{}", e),
-                        "line": null,
-                        "column": null
-                    }],
-                    "wasm": null
-                })
-                .to_string()
-            }
+            Err(e) => serde_json::json!({
+                "success": false,
+                "diagnostics": [{
+                    "severity": "error",
+                    "message": format!("{}", e),
+                    "line": null,
+                    "column": null
+                }],
+                "wasm": null
+            })
+            .to_string(),
         }
     }
 
@@ -313,20 +311,18 @@ pub mod wasm {
     pub fn run(source: &str) -> String {
         match run_internal(source) {
             Ok(result) => result,
-            Err(e) => {
-                serde_json::json!({
-                    "success": false,
-                    "output": "",
-                    "diagnostics": [{
-                        "severity": "error",
-                        "message": format!("{}", e),
-                        "line": null,
-                        "column": null
-                    }],
-                    "returnValue": null
-                })
-                .to_string()
-            }
+            Err(e) => serde_json::json!({
+                "success": false,
+                "output": "",
+                "diagnostics": [{
+                    "severity": "error",
+                    "message": format!("{}", e),
+                    "line": null,
+                    "column": null
+                }],
+                "returnValue": null
+            })
+            .to_string(),
         }
     }
 

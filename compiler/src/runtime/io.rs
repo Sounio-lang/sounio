@@ -247,11 +247,7 @@ pub extern "C" fn __sounio_get_argc() -> i32 {
 /// - 0 on success
 /// - 1 if index out of bounds
 #[unsafe(no_mangle)]
-pub extern "C" fn __sounio_get_argv(
-    index: i32,
-    out_ptr: *mut *mut u8,
-    out_len: *mut i64,
-) -> i32 {
+pub extern "C" fn __sounio_get_argv(index: i32, out_ptr: *mut *mut u8, out_len: *mut i64) -> i32 {
     if out_ptr.is_null() || out_len.is_null() {
         return 3;
     }
@@ -559,8 +555,7 @@ mod tests {
         let mut out_ptr: *mut u8 = ptr::null_mut();
         let mut out_len: i64 = 0;
 
-        let result =
-            __sounio_get_env(name.as_ptr(), name.len() as i64, &mut out_ptr, &mut out_len);
+        let result = __sounio_get_env(name.as_ptr(), name.len() as i64, &mut out_ptr, &mut out_len);
         assert_eq!(result, 0);
 
         let value =

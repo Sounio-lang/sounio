@@ -13,7 +13,7 @@ use crate::common::{IdGenerator, NodeId, Span};
 use crate::lexer::{Token, TokenKind};
 use miette::Result;
 
-use errors::{type_error_for_token, expr_error_for_token, pattern_error_for_token};
+use errors::{expr_error_for_token, pattern_error_for_token, type_error_for_token};
 
 /// Parse a token stream into an AST
 pub fn parse(tokens: &[Token], source: &str) -> Result<Ast> {
@@ -197,7 +197,8 @@ impl<'a> Parser<'a> {
             if kind == TokenKind::Ident && found == TokenKind::Mut {
                 return Err(errors::ParserError::RustMutReference {
                     span: errors::ParserError::from_span(span),
-                }.into());
+                }
+                .into());
             }
 
             // Provide context-specific error message
@@ -209,7 +210,8 @@ impl<'a> Parser<'a> {
                 expected: expected_str.to_string(),
                 found: found_str.to_string(),
                 context: format!("expected `{}`", expected_str),
-            }.into())
+            }
+            .into())
         }
     }
 
@@ -358,7 +360,8 @@ impl<'a> Parser<'a> {
                 Err(errors::ParserError::InvalidModuleLevelItem {
                     span: errors::ParserError::from_span(span),
                     help,
-                }.into())
+                }
+                .into())
             }
         }
     }

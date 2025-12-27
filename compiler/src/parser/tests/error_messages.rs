@@ -23,7 +23,9 @@ mod tests {
     fn parse_type_ok(input: &str) -> TypeExpr {
         let tokens = lex(input).expect("lexing should succeed");
         let mut parser = Parser::new(&tokens);
-        parser.parse_type().expect(&format!("Should parse: {}", input))
+        parser
+            .parse_type()
+            .expect(&format!("Should parse: {}", input))
     }
 
     // Helper to get an error message from parsing an expression

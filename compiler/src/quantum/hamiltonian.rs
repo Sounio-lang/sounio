@@ -27,7 +27,6 @@
 
 use std::collections::HashMap;
 
-
 /// Pauli operator types
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Pauli {

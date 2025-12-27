@@ -11,7 +11,10 @@ use tracing_subscriber::{EnvFilter, fmt, prelude::*};
 #[command(name = "souc")]
 #[command(author = "Demetrios Chiuratto Agourakis, Dionisio Chiuratto Agourakis")]
 #[command(version = env!("CARGO_PKG_VERSION"))]
-#[command(about = "The Sounio Programming Language Compiler", long_about = "Sounio — Epistemic Computing at the Horizon of Certainty\n\nA systems programming language where uncertainty is a first-class citizen.")]
+#[command(
+    about = "The Sounio Programming Language Compiler",
+    long_about = "Sounio — Epistemic Computing at the Horizon of Certainty\n\nA systems programming language where uncertainty is a first-class citizen."
+)]
 struct Cli {
     #[command(subcommand)]
     command: Commands,
@@ -2042,6 +2045,7 @@ fn build(
 ) -> Result<()> {
     #[cfg(feature = "llvm")]
     {
+        use inkwell::context::Context;
         use sounio::codegen::llvm::{
             codegen::{LLVMCodegen, OptLevel},
             linker::Linker,
@@ -2053,7 +2057,6 @@ fn build(
                 shared_lib_extension,
             },
         };
-        use inkwell::context::Context;
 
         tracing::info!("Building {:?} with LLVM", input);
 
@@ -3221,8 +3224,14 @@ fn doc_coverage() -> Result<()> {
 fn info() -> Result<()> {
     println!("Sounio Compiler (souc)");
     println!("Version: {}", env!("CARGO_PKG_VERSION"));
-    println!("Commit: {}", option_env!("SOUNIO_GIT_HASH").unwrap_or("unknown"));
-    println!("Build date: {}", option_env!("SOUNIO_BUILD_DATE").unwrap_or("unknown"));
+    println!(
+        "Commit: {}",
+        option_env!("SOUNIO_GIT_HASH").unwrap_or("unknown")
+    );
+    println!(
+        "Build date: {}",
+        option_env!("SOUNIO_BUILD_DATE").unwrap_or("unknown")
+    );
 
     // Host information
     println!();
@@ -4779,10 +4788,7 @@ fn target_add(file: &std::path::Path) -> Result<()> {
     println!("Successfully loaded target: {}", spec.triple);
     println!();
     println!("To use this target, specify: --target {}", file.display());
-    println!(
-        "Or copy the file to ~/.sounio/targets/{}.json",
-        spec.triple
-    );
+    println!("Or copy the file to ~/.sounio/targets/{}.json", spec.triple);
 
     Ok(())
 }

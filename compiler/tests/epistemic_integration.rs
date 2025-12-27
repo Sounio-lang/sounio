@@ -6,8 +6,8 @@
 //!
 //! Run with: cargo test --test epistemic_integration
 
+use sounio::epistemic::kec::{ComplexityMetrics, KECConfig, KECSelector, UncertaintyMetrics};
 use sounio::epistemic::promotion::{PromotionLattice, UncertaintyLevel};
-use sounio::epistemic::kec::{KECConfig, KECSelector, UncertaintyMetrics, ComplexityMetrics};
 
 // =============================================================================
 // Promotion Lattice Integration Tests
@@ -43,7 +43,9 @@ mod lattice_tests {
                         assert!(
                             lattice.is_subtype(a, c),
                             "Transitivity failed: {:?} ≤ {:?} ≤ {:?}",
-                            a, b, c
+                            a,
+                            b,
+                            c
                         );
                     }
                 }
@@ -56,16 +58,8 @@ mod lattice_tests {
             for &b in &levels {
                 let m = lattice.meet(a, b);
                 // m ≤ a and m ≤ b (meet is below both inputs)
-                assert!(
-                    lattice.is_subtype(m, a),
-                    "Meet {:?} should be ≤ {:?}",
-                    m, a
-                );
-                assert!(
-                    lattice.is_subtype(m, b),
-                    "Meet {:?} should be ≤ {:?}",
-                    m, b
-                );
+                assert!(lattice.is_subtype(m, a), "Meet {:?} should be ≤ {:?}", m, a);
+                assert!(lattice.is_subtype(m, b), "Meet {:?} should be ≤ {:?}", m, b);
             }
         }
 
@@ -74,16 +68,8 @@ mod lattice_tests {
             for &b in &levels {
                 let j = lattice.join(a, b);
                 // a ≤ j and b ≤ j
-                assert!(
-                    lattice.is_subtype(a, j),
-                    "Join: {:?} not ≤ {:?}",
-                    a, j
-                );
-                assert!(
-                    lattice.is_subtype(b, j),
-                    "Join: {:?} not ≤ {:?}",
-                    b, j
-                );
+                assert!(lattice.is_subtype(a, j), "Join: {:?} not ≤ {:?}", a, j);
+                assert!(lattice.is_subtype(b, j), "Join: {:?} not ≤ {:?}", b, j);
             }
         }
     }
@@ -155,7 +141,7 @@ mod kec_tests {
     fn test_kec_respects_cost_constraints() {
         // Tight cost constraint should favor simpler models
         let config = KECConfig {
-            max_complexity: 5.0,  // Very tight
+            max_complexity: 5.0, // Very tight
             ..Default::default()
         };
         let selector = KECSelector::new(config);
@@ -211,8 +197,10 @@ mod kec_tests {
 
         // Get recommendations from different presets
         let default_result = KECSelector::default_selector().select(&uncertainty, &complexity);
-        let realtime_result = KECSelector::new(KECConfig::realtime()).select(&uncertainty, &complexity);
-        let scientific_result = KECSelector::new(KECConfig::scientific()).select(&uncertainty, &complexity);
+        let realtime_result =
+            KECSelector::new(KECConfig::realtime()).select(&uncertainty, &complexity);
+        let scientific_result =
+            KECSelector::new(KECConfig::scientific()).select(&uncertainty, &complexity);
 
         // Realtime should prefer simpler models (or equal)
         assert!(
@@ -238,7 +226,7 @@ mod kec_tests {
             cv: 0.3,
             lower_bound: Some(5.0),
             upper_bound: Some(20.0),
-            skewness: 0.5,  // Slightly right-skewed (common in PK)
+            skewness: 0.5, // Slightly right-skewed (common in PK)
             kurtosis: 3.5,
             multimodal: false,
             mode_count: 1,
@@ -250,17 +238,21 @@ mod kec_tests {
         let complexity = ComplexityMetrics {
             operation_count: 15,
             graph_depth: 4,
-            variable_count: 6,  // CL, Vd, ka, F, Dose, t
+            variable_count: 6, // CL, Vd, ka, F, Dose, t
             flop_estimate: 500.0,
             memory_bytes: 4096,
             parallelizable: true,
-            nonlinearity: 0.7,  // exp() terms
+            nonlinearity: 0.7, // exp() terms
         };
 
         let result = selector.select(&uncertainty, &complexity);
 
         // Should have reasonable confidence
-        assert!(result.confidence >= 0.5, "Confidence too low: {}", result.confidence);
+        assert!(
+            result.confidence >= 0.5,
+            "Confidence too low: {}",
+            result.confidence
+        );
 
         // Check reasoning includes relevant factors
         let reasoning_text = result.reasoning.join(" ");
@@ -316,10 +308,15 @@ mod kec_tests {
         );
 
         // Check that warnings or reasoning exist for multimodal data
-        let has_multimodal_warning = result.warnings.iter()
+        let has_multimodal_warning = result
+            .warnings
+            .iter()
             .any(|w| w.to_lowercase().contains("multimodal"));
         let has_reasoning = !result.reasoning.is_empty();
-        assert!(has_multimodal_warning || has_reasoning, "Should have warnings or reasoning");
+        assert!(
+            has_multimodal_warning || has_reasoning,
+            "Should have warnings or reasoning"
+        );
     }
 
     /// Test complexity metrics cost estimation
@@ -425,8 +422,16 @@ mod regression_tests {
         ];
 
         for window in levels_by_height.windows(2) {
-            let lower_max_cost = window[0].iter().map(|l| l.cost_multiplier() as u64).max().unwrap();
-            let upper_min_cost = window[1].iter().map(|l| l.cost_multiplier() as u64).min().unwrap();
+            let lower_max_cost = window[0]
+                .iter()
+                .map(|l| l.cost_multiplier() as u64)
+                .max()
+                .unwrap();
+            let upper_min_cost = window[1]
+                .iter()
+                .map(|l| l.cost_multiplier() as u64)
+                .min()
+                .unwrap();
 
             assert!(
                 lower_max_cost <= upper_min_cost,
@@ -501,14 +506,24 @@ mod smc_tests {
 
         // Compute statistics
         let computed_mean: f64 = samples.iter().sum::<f64>() / n as f64;
-        let computed_var: f64 = samples.iter()
+        let computed_var: f64 = samples
+            .iter()
             .map(|x| (x - computed_mean).powi(2))
-            .sum::<f64>() / n as f64;
+            .sum::<f64>()
+            / n as f64;
 
         // Should be close to theoretical values
-        assert!((computed_mean - expected_mean).abs() < 0.1,
-            "Mean error: expected {}, got {}", expected_mean, computed_mean);
-        assert!((computed_var - expected_var).abs() < 1.0,
-            "Variance error: expected {}, got {}", expected_var, computed_var);
+        assert!(
+            (computed_mean - expected_mean).abs() < 0.1,
+            "Mean error: expected {}, got {}",
+            expected_mean,
+            computed_mean
+        );
+        assert!(
+            (computed_var - expected_var).abs() < 1.0,
+            "Variance error: expected {}, got {}",
+            expected_var,
+            computed_var
+        );
     }
 }

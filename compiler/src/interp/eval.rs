@@ -561,7 +561,10 @@ impl Interpreter {
                 Err(ControlFlow::Return(Value::Unit))
             }
 
-            HirExprKind::Cast { expr: inner, target } => {
+            HirExprKind::Cast {
+                expr: inner,
+                target,
+            } => {
                 let val = self.eval_expr(inner)?;
                 self.cast_value(val, target)
             }
@@ -772,7 +775,9 @@ impl Interpreter {
 
                 // If it's a Value::Future, block until completion and return result
                 match future_val {
-                    Value::Future { future: sounio_future } => {
+                    Value::Future {
+                        future: sounio_future,
+                    } => {
                         // Block on the future and get the result
                         let result = self.async_runtime.block_on_future(&sounio_future);
                         Ok(self.sounio_value_to_value(result))
@@ -835,19 +840,19 @@ impl Interpreter {
                     let future_val = self.eval_expr(future_expr)?;
                     // Await each future (in order for now - a real implementation would be concurrent)
                     match future_val {
-                        Value::Future { future: sounio_future } => {
+                        Value::Future {
+                            future: sounio_future,
+                        } => {
                             let result = self.async_runtime.block_on_future(&sounio_future);
                             results.push(self.sounio_value_to_value(result));
                         }
-                        Value::Task { handle } => {
-                            loop {
-                                if let Some(result) = handle.try_get() {
-                                    results.push(self.sounio_value_to_value(result));
-                                    break;
-                                }
-                                std::thread::yield_now();
+                        Value::Task { handle } => loop {
+                            if let Some(result) = handle.try_get() {
+                                results.push(self.sounio_value_to_value(result));
+                                break;
                             }
-                        }
+                            std::thread::yield_now();
+                        },
                         other => {
                             results.push(other);
                         }
@@ -864,12 +869,10 @@ impl Interpreter {
                     let future_val = self.eval_expr(&arm.future)?;
 
                     let result = match future_val {
-                        Value::Future { future: ref sounio_future } if sounio_future.is_completed() => {
-                            sounio_future.try_get()
-                        }
-                        Value::Task { ref handle } if handle.is_completed() => {
-                            handle.try_get()
-                        }
+                        Value::Future {
+                            future: ref sounio_future,
+                        } if sounio_future.is_completed() => sounio_future.try_get(),
+                        Value::Task { ref handle } if handle.is_completed() => handle.try_get(),
                         _ => continue, // Not ready, try next arm
                     };
 
@@ -926,11 +929,17 @@ impl Interpreter {
                 }
             }
             SounioValue::Array(arr) => {
-                let values: Vec<Value> = arr.into_iter().map(|v| self.sounio_value_to_value(v)).collect();
+                let values: Vec<Value> = arr
+                    .into_iter()
+                    .map(|v| self.sounio_value_to_value(v))
+                    .collect();
                 Value::Array(Rc::new(RefCell::new(values)))
             }
             SounioValue::Tuple(t) => {
-                let values: Vec<Value> = t.into_iter().map(|v| self.sounio_value_to_value(v)).collect();
+                let values: Vec<Value> = t
+                    .into_iter()
+                    .map(|v| self.sounio_value_to_value(v))
+                    .collect();
                 Value::Tuple(values)
             }
             SounioValue::Struct { name, fields } => {
@@ -948,8 +957,10 @@ impl Interpreter {
                 variant_name,
                 fields,
             } => {
-                let converted_fields: Vec<Value> =
-                    fields.into_iter().map(|v| self.sounio_value_to_value(v)).collect();
+                let converted_fields: Vec<Value> = fields
+                    .into_iter()
+                    .map(|v| self.sounio_value_to_value(v))
+                    .collect();
                 Value::Variant {
                     enum_name,
                     variant_name,
@@ -982,7 +993,8 @@ impl Interpreter {
                 SounioValue::Array(values)
             }
             Value::Tuple(t) => {
-                let values: Vec<SounioValue> = t.iter().map(|v| self.value_to_sounio_value(v)).collect();
+                let values: Vec<SounioValue> =
+                    t.iter().map(|v| self.value_to_sounio_value(v)).collect();
                 SounioValue::Tuple(values)
             }
             Value::Struct { name, fields } => {
@@ -1000,8 +1012,10 @@ impl Interpreter {
                 variant_name,
                 fields,
             } => {
-                let converted_fields: Vec<SounioValue> =
-                    fields.iter().map(|v| self.value_to_sounio_value(v)).collect();
+                let converted_fields: Vec<SounioValue> = fields
+                    .iter()
+                    .map(|v| self.value_to_sounio_value(v))
+                    .collect();
                 SounioValue::Variant {
                     enum_name: enum_name.clone(),
                     variant_name: variant_name.clone(),
@@ -1097,17 +1111,21 @@ impl Interpreter {
             (Value::Float(f), HirType::F64) => Ok(Value::Float(f)),
 
             // Bool conversions
-            (Value::Bool(b), HirType::I8 | HirType::I16 | HirType::I32 | HirType::I64 | HirType::Isize) => {
-                Ok(Value::Int(if b { 1 } else { 0 }))
-            }
-            (Value::Bool(b), HirType::U8 | HirType::U16 | HirType::U32 | HirType::U64 | HirType::Usize) => {
-                Ok(Value::Int(if b { 1 } else { 0 }))
-            }
+            (
+                Value::Bool(b),
+                HirType::I8 | HirType::I16 | HirType::I32 | HirType::I64 | HirType::Isize,
+            ) => Ok(Value::Int(if b { 1 } else { 0 })),
+            (
+                Value::Bool(b),
+                HirType::U8 | HirType::U16 | HirType::U32 | HirType::U64 | HirType::Usize,
+            ) => Ok(Value::Int(if b { 1 } else { 0 })),
 
             // Int/Float/Bool to String casts
             (Value::Int(n), HirType::String) => Ok(Value::String(n.to_string())),
             (Value::Float(f), HirType::String) => Ok(Value::String(format!("{}", f))),
-            (Value::Bool(b), HirType::String) => Ok(Value::String(if b { "true" } else { "false" }.to_string())),
+            (Value::Bool(b), HirType::String) => {
+                Ok(Value::String(if b { "true" } else { "false" }.to_string()))
+            }
 
             // Identity cast - value stays the same
             (v, _) => Ok(v),

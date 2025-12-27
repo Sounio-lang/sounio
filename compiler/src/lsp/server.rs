@@ -186,9 +186,12 @@ impl SounioLanguageServer {
 impl LanguageServer for SounioLanguageServer {
     async fn initialize(&self, params: InitializeParams) -> Result<InitializeResult> {
         // Extract root URI from params
-        let root_uri = params
-            .root_uri
-            .or_else(|| params.root_path.as_ref().and_then(|p| Url::from_file_path(p).ok()));
+        let root_uri = params.root_uri.or_else(|| {
+            params
+                .root_path
+                .as_ref()
+                .and_then(|p| Url::from_file_path(p).ok())
+        });
 
         // Initialize workspace with root URI
         self.initialize_workspace(root_uri).await;
@@ -204,7 +207,10 @@ impl LanguageServer for SounioLanguageServer {
 
     async fn initialized(&self, _params: InitializedParams) {
         self.client
-            .log_message(MessageType::INFO, "Sounio LSP initialized with workspace support")
+            .log_message(
+                MessageType::INFO,
+                "Sounio LSP initialized with workspace support",
+            )
             .await;
     }
 
@@ -276,7 +282,9 @@ impl LanguageServer for SounioLanguageServer {
         if let Some(doc) = self.documents.get(uri) {
             let analysis = self.analysis.read().await;
             // Use cross-file definition lookup
-            return Ok(analysis.goto_definition_cross_file(&doc, position, uri).await);
+            return Ok(analysis
+                .goto_definition_cross_file(&doc, position, uri)
+                .await);
         }
 
         Ok(None)
@@ -292,7 +300,9 @@ impl LanguageServer for SounioLanguageServer {
         if let Some(doc) = self.documents.get(uri) {
             let analysis = self.analysis.read().await;
             // Use cross-file references lookup
-            return Ok(analysis.find_references_cross_file(&doc, position, uri, include_declaration).await);
+            return Ok(analysis
+                .find_references_cross_file(&doc, position, uri, include_declaration)
+                .await);
         }
 
         Ok(None)

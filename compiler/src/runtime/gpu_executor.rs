@@ -80,8 +80,7 @@ use std::sync::Arc;
 
 #[cfg(feature = "cuda")]
 use cudarc::driver::{
-    CudaDevice, CudaFunction, CudaSlice, DevicePtr, LaunchAsync,
-    LaunchConfig as CudarcLaunchConfig,
+    CudaDevice, CudaFunction, CudaSlice, DevicePtr, LaunchAsync, LaunchConfig as CudarcLaunchConfig,
 };
 
 #[cfg(feature = "cuda")]
@@ -353,9 +352,12 @@ impl GpuExecutor {
             .map_err(|e| GpuExecutorError::PtxCompilation(format!("{}", e)))?;
 
         // Get the function handle
-        let function = self.device.get_func(module_name, func_name).ok_or_else(|| {
-            GpuExecutorError::PtxCompilation(format!("Function '{}' not found in module", name))
-        })?;
+        let function = self
+            .device
+            .get_func(module_name, func_name)
+            .ok_or_else(|| {
+                GpuExecutorError::PtxCompilation(format!("Function '{}' not found in module", name))
+            })?;
 
         // Cache the kernel
         self.kernel_cache.insert(
@@ -660,9 +662,10 @@ impl GpuExecutor {
         shared_mem: u32,
         params: &[KernelParam<'_>],
     ) -> Result<(), GpuExecutorError> {
-        let cached = self.kernel_cache.get(kernel_name).ok_or_else(|| {
-            GpuExecutorError::KernelNotFound(kernel_name.to_string())
-        })?;
+        let cached = self
+            .kernel_cache
+            .get(kernel_name)
+            .ok_or_else(|| GpuExecutorError::KernelNotFound(kernel_name.to_string()))?;
 
         let config = CudarcLaunchConfig {
             grid_dim: grid,
@@ -932,8 +935,13 @@ impl<'a> KernelLauncher<'a> {
         let grid = self.grid.unwrap_or((1, 1, 1));
         let block = self.block.unwrap_or((256, 1, 1));
 
-        self.executor
-            .execute_kernel(&self.kernel_name, grid, block, self.shared_mem, &self.params)
+        self.executor.execute_kernel(
+            &self.kernel_name,
+            grid,
+            block,
+            self.shared_mem,
+            &self.params,
+        )
     }
 }
 

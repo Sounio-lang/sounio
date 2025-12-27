@@ -943,18 +943,9 @@ mod tests {
             .insert("custom".to_string(), "value".to_string());
 
         let env = context.to_env();
-        assert_eq!(
-            env.get("SOUNIO_PROJECT_ROOT"),
-            Some(&"/test".to_string())
-        );
-        assert_eq!(
-            env.get("SOUNIO_HOOK_POINT"),
-            Some(&"pre-build".to_string())
-        );
-        assert_eq!(
-            env.get("SOUNIO_BUILD_SUCCESS"),
-            Some(&"true".to_string())
-        );
+        assert_eq!(env.get("SOUNIO_PROJECT_ROOT"), Some(&"/test".to_string()));
+        assert_eq!(env.get("SOUNIO_HOOK_POINT"), Some(&"pre-build".to_string()));
+        assert_eq!(env.get("SOUNIO_BUILD_SUCCESS"), Some(&"true".to_string()));
         assert_eq!(env.get("SOUNIO_CUSTOM"), Some(&"value".to_string()));
     }
 

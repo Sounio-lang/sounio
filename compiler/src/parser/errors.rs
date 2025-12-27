@@ -16,7 +16,9 @@ pub enum ParserError {
     #[error("Refinement type syntax not yet implemented")]
     #[diagnostic(
         code(P0010),
-        help("The syntax `{{ x: Type | constraint }}` is planned but not yet available.\nConsider using a regular type with runtime validation for now.")
+        help(
+            "The syntax `{{ x: Type | constraint }}` is planned but not yet available.\nConsider using a regular type with runtime validation for now."
+        )
     )]
     RefinementTypeNotImplemented {
         #[label("refinement type syntax attempted here")]
@@ -27,7 +29,9 @@ pub enum ParserError {
     #[error("Sounio uses `&!` for mutable references, not `&mut`")]
     #[diagnostic(
         code(P0011),
-        help("Replace `&mut T` with `&!T` for exclusive/mutable references.\nSounio uses `&T` for shared references and `&!T` for mutable references.")
+        help(
+            "Replace `&mut T` with `&!T` for exclusive/mutable references.\nSounio uses `&T` for shared references and `&!T` for mutable references."
+        )
     )]
     RustMutReference {
         #[label("use `&!` instead of `&mut`")]
@@ -74,7 +78,9 @@ pub enum ParserError {
     #[error("Tuple destructuring in closure parameters is not supported")]
     #[diagnostic(
         code(P0015),
-        help("Instead of `|(a, b)| expr`, use:\n  |pair| {{ let a = pair.0; let b = pair.1; expr }}")
+        help(
+            "Instead of `|(a, b)| expr`, use:\n  |pair| {{ let a = pair.0; let b = pair.1; expr }}"
+        )
     )]
     ClosureTupleDestructuring {
         #[label("closure with tuple destructuring")]
@@ -124,10 +130,7 @@ pub enum ParserError {
 
     /// Missing semicolon
     #[error("Expected `;` after statement")]
-    #[diagnostic(
-        code(P0004),
-        help("Add a semicolon `;` at the end of the statement")
-    )]
+    #[diagnostic(code(P0004), help("Add a semicolon `;` at the end of the statement"))]
     MissingSemicolon {
         #[label("expected `;` here")]
         span: SourceSpan,
@@ -217,8 +220,18 @@ impl<'a> ErrorContext<'a> {
         // Common Rust macros that users might try
         matches!(
             text,
-            "assert" | "println" | "print" | "vec" | "format" | "panic" |
-            "debug_assert" | "eprintln" | "eprint" | "dbg" | "todo" | "unimplemented"
+            "assert"
+                | "println"
+                | "print"
+                | "vec"
+                | "format"
+                | "panic"
+                | "debug_assert"
+                | "eprintln"
+                | "eprint"
+                | "dbg"
+                | "todo"
+                | "unimplemented"
         )
     }
 
@@ -226,8 +239,17 @@ impl<'a> ErrorContext<'a> {
     pub fn looks_like_rust_attribute(&self, attr_name: &str) -> bool {
         matches!(
             attr_name,
-            "derive" | "test" | "cfg" | "allow" | "warn" | "deny" |
-            "inline" | "repr" | "doc" | "must_use" | "deprecated"
+            "derive"
+                | "test"
+                | "cfg"
+                | "allow"
+                | "warn"
+                | "deny"
+                | "inline"
+                | "repr"
+                | "doc"
+                | "must_use"
+                | "deprecated"
         )
     }
 }
@@ -244,30 +266,30 @@ pub fn type_error_for_token(token: TokenKind, span: Span, lookahead: &[TokenKind
             } else {
                 ParserError::ExpectedType {
                     span: source_span,
-                    help: Some("Types cannot start with `{`. Did you mean to use a struct type?".to_string()),
+                    help: Some(
+                        "Types cannot start with `{`. Did you mean to use a struct type?"
+                            .to_string(),
+                    ),
                 }
             }
         }
 
         // &mut T - Rust mutable reference
-        TokenKind::Mut => {
-            ParserError::RustMutReference { span: source_span }
-        }
+        TokenKind::Mut => ParserError::RustMutReference { span: source_span },
 
         // Common mistakes
-        TokenKind::Semi => {
-            ParserError::ExpectedType {
-                span: source_span,
-                help: Some("A type annotation is required here. Remove the semicolon or add a type.".to_string()),
-            }
-        }
+        TokenKind::Semi => ParserError::ExpectedType {
+            span: source_span,
+            help: Some(
+                "A type annotation is required here. Remove the semicolon or add a type."
+                    .to_string(),
+            ),
+        },
 
-        TokenKind::Eq => {
-            ParserError::ExpectedType {
-                span: source_span,
-                help: Some("Missing type annotation before `=`. Use `: Type` syntax.".to_string()),
-            }
-        }
+        TokenKind::Eq => ParserError::ExpectedType {
+            span: source_span,
+            help: Some("Missing type annotation before `=`. Use `: Type` syntax.".to_string()),
+        },
 
         // Operators that can't start types
         TokenKind::Plus | TokenKind::Minus | TokenKind::Slash | TokenKind::Percent => {
@@ -281,19 +303,17 @@ pub fn type_error_for_token(token: TokenKind, span: Span, lookahead: &[TokenKind
         }
 
         // Default case
-        _ => {
-            ParserError::ExpectedType {
-                span: source_span,
-                help: Some(format!(
-                    "Expected a type name, but found `{}`. Valid types include:\n  \
+        _ => ParserError::ExpectedType {
+            span: source_span,
+            help: Some(format!(
+                "Expected a type name, but found `{}`. Valid types include:\n  \
                      - Primitive types: i32, f64, bool, string\n  \
                      - Generic types: Option<T>, Vec<T>\n  \
                      - Reference types: &T, &!T\n  \
                      - Array types: [T; N], [T]",
-                    token.as_str()
-                )),
-            }
-        }
+                token.as_str()
+            )),
+        },
     }
 }
 
@@ -302,12 +322,12 @@ pub fn expr_error_for_token(token: TokenKind, span: Span) -> ParserError {
     let source_span = ParserError::from_span(span);
 
     match token {
-        TokenKind::Semi => {
-            ParserError::ExpectedExpression {
-                span: source_span,
-                help: Some("An expression is required here. Did you forget to write a value?".to_string()),
-            }
-        }
+        TokenKind::Semi => ParserError::ExpectedExpression {
+            span: source_span,
+            help: Some(
+                "An expression is required here. Did you forget to write a value?".to_string(),
+            ),
+        },
 
         TokenKind::RBrace | TokenKind::RBracket | TokenKind::RParen => {
             ParserError::ExpectedExpression {
@@ -316,27 +336,27 @@ pub fn expr_error_for_token(token: TokenKind, span: Span) -> ParserError {
             }
         }
 
-        TokenKind::Comma => {
-            ParserError::ExpectedExpression {
-                span: source_span,
-                help: Some("Expression expected before `,`. Did you leave an extra comma?".to_string()),
-            }
-        }
+        TokenKind::Comma => ParserError::ExpectedExpression {
+            span: source_span,
+            help: Some("Expression expected before `,`. Did you leave an extra comma?".to_string()),
+        },
 
-        _ => {
-            ParserError::ExpectedExpression {
-                span: source_span,
-                help: Some(format!(
-                    "Expected an expression, but found `{}`.`",
-                    token.as_str()
-                )),
-            }
-        }
+        _ => ParserError::ExpectedExpression {
+            span: source_span,
+            help: Some(format!(
+                "Expected an expression, but found `{}`.`",
+                token.as_str()
+            )),
+        },
     }
 }
 
 /// Generate improved error message when expecting a pattern
-pub fn pattern_error_for_token(token: TokenKind, span: Span, lookahead: &[TokenKind]) -> ParserError {
+pub fn pattern_error_for_token(
+    token: TokenKind,
+    span: Span,
+    lookahead: &[TokenKind],
+) -> ParserError {
     let source_span = ParserError::from_span(span);
 
     match token {
@@ -352,15 +372,13 @@ pub fn pattern_error_for_token(token: TokenKind, span: Span, lookahead: &[TokenK
             }
         }
 
-        _ => {
-            ParserError::ExpectedPattern {
-                span: source_span,
-                help: Some(format!(
-                    "Expected a pattern (identifier, literal, or struct pattern), found `{}`.",
-                    token.as_str()
-                )),
-            }
-        }
+        _ => ParserError::ExpectedPattern {
+            span: source_span,
+            help: Some(format!(
+                "Expected a pattern (identifier, literal, or struct pattern), found `{}`.",
+                token.as_str()
+            )),
+        },
     }
 }
 
@@ -369,11 +387,18 @@ pub fn rust_macro_error(name: &str, span: Span) -> ParserError {
     let source_span = ParserError::from_span(span);
 
     let alternative = match name {
-        "println" | "print" => "Use the IO effect with print functions:\n  fn main() with IO { print(\"message\"); }".to_string(),
-        "assert" | "debug_assert" => "Use the assert function without `!`:\n  assert(condition, \"message\")".to_string(),
+        "println" | "print" => {
+            "Use the IO effect with print functions:\n  fn main() with IO { print(\"message\"); }"
+                .to_string()
+        }
+        "assert" | "debug_assert" => {
+            "Use the assert function without `!`:\n  assert(condition, \"message\")".to_string()
+        }
         "vec" => "Use array literals:\n  let arr = [1, 2, 3];".to_string(),
         "format" => "Use string interpolation or concatenation.".to_string(),
-        "panic" | "todo" | "unimplemented" => "Use the Panic effect:\n  fn foo() with Panic { panic(\"message\"); }".to_string(),
+        "panic" | "todo" | "unimplemented" => {
+            "Use the Panic effect:\n  fn foo() with Panic { panic(\"message\"); }".to_string()
+        }
         "dbg" => "Use debug printing with the IO effect.".to_string(),
         _ => "Sounio has its own syntax for common operations.".to_string(),
     };
@@ -420,7 +445,11 @@ mod tests {
     #[test]
     fn test_refinement_type_error() {
         let span = Span::new(10, 15);
-        let err = type_error_for_token(TokenKind::LBrace, span, &[TokenKind::Ident, TokenKind::Colon]);
+        let err = type_error_for_token(
+            TokenKind::LBrace,
+            span,
+            &[TokenKind::Ident, TokenKind::Colon],
+        );
 
         match err {
             ParserError::RefinementTypeNotImplemented { .. } => {}

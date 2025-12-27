@@ -57,10 +57,10 @@ impl<'ctx> DebugBuilder<'ctx> {
             filename,
             directory,
             "sounio", // producer
-            false,       // is_optimized
-            "",          // flags
-            0,           // runtime_version
-            "",          // split_name
+            false,    // is_optimized
+            "",       // flags
+            0,        // runtime_version
+            "",       // split_name
             DWARFEmissionKind::Full,
             0,     // dwo_id
             false, // split_debug_inlining

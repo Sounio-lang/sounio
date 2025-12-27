@@ -91,7 +91,11 @@ impl UncertaintyLevel {
     }
 
     pub fn promotable_targets(&self) -> Vec<Self> {
-        ALL_LEVELS.iter().filter(|l| self.can_promote_to(**l)).copied().collect()
+        ALL_LEVELS
+            .iter()
+            .filter(|l| self.can_promote_to(**l))
+            .copied()
+            .collect()
     }
 
     pub fn parse(s: &str) -> Option<Self> {
@@ -124,43 +128,67 @@ impl fmt::Display for UncertaintyLevel {
 
 impl PartialOrd for UncertaintyLevel {
     fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
-        if self == other { return Some(Ordering::Equal); }
+        if self == other {
+            return Some(Ordering::Equal);
+        }
         let (sh, oh) = (self.height(), other.height());
-        if sh < oh && self.can_promote_to(*other) { Some(Ordering::Less) }
-        else if oh < sh && other.can_promote_to(*self) { Some(Ordering::Greater) }
-        else { None }
+        if sh < oh && self.can_promote_to(*other) {
+            Some(Ordering::Less)
+        } else if oh < sh && other.can_promote_to(*self) {
+            Some(Ordering::Greater)
+        } else {
+            None
+        }
     }
 }
 
 pub const ALL_LEVELS: [UncertaintyLevel; 7] = [
-    UncertaintyLevel::Point, UncertaintyLevel::Interval, UncertaintyLevel::Fuzzy,
-    UncertaintyLevel::Affine, UncertaintyLevel::DempsterShafer,
-    UncertaintyLevel::Distribution, UncertaintyLevel::Particles,
+    UncertaintyLevel::Point,
+    UncertaintyLevel::Interval,
+    UncertaintyLevel::Fuzzy,
+    UncertaintyLevel::Affine,
+    UncertaintyLevel::DempsterShafer,
+    UncertaintyLevel::Distribution,
+    UncertaintyLevel::Particles,
 ];
 
 #[derive(Debug, Clone, Default)]
 pub struct PromotionLattice;
 
 impl PromotionLattice {
-    pub fn new() -> Self { Self }
+    pub fn new() -> Self {
+        Self
+    }
 
     pub fn meet(&self, a: UncertaintyLevel, b: UncertaintyLevel) -> UncertaintyLevel {
-        if a == b { return a; }
+        if a == b {
+            return a;
+        }
         // If a can promote to b, a is below b in the lattice
-        if a.can_promote_to(b) { return a; }
+        if a.can_promote_to(b) {
+            return a;
+        }
         // If b can promote to a, b is below a in the lattice
-        if b.can_promote_to(a) { return b; }
+        if b.can_promote_to(a) {
+            return b;
+        }
         // Neither can promote to the other - find common lower bound
         // For our lattice, incomparable elements meet at Point
         UncertaintyLevel::Point
     }
 
     pub fn join(&self, a: UncertaintyLevel, b: UncertaintyLevel) -> UncertaintyLevel {
-        if a == b { return a; }
+        if a == b {
+            return a;
+        }
         // If a can promote to b, b is above a in the lattice
-        if a.can_promote_to(b) { return b; }
+        if a.can_promote_to(b) {
+            return b;
+        }
         // If b can promote to a, a is above b in the lattice
-        if b.can_promote_to(a) { return a; }
+        if b.can_promote_to(a) {
+            return a;
+        }
         // Neither can promote to the other - find least upper bound
         // For our branching lattice:
         // - Interval and Fuzzy join at Distribution (via their respective branches)
@@ -175,11 +203,19 @@ impl PromotionLattice {
     }
 
     pub fn join_all(&self, levels: &[UncertaintyLevel]) -> UncertaintyLevel {
-        levels.iter().copied().reduce(|a, b| self.join(a, b)).unwrap_or(UncertaintyLevel::Point)
+        levels
+            .iter()
+            .copied()
+            .reduce(|a, b| self.join(a, b))
+            .unwrap_or(UncertaintyLevel::Point)
     }
 
     pub fn meet_all(&self, levels: &[UncertaintyLevel]) -> UncertaintyLevel {
-        levels.iter().copied().reduce(|a, b| self.meet(a, b)).unwrap_or(UncertaintyLevel::Particles)
+        levels
+            .iter()
+            .copied()
+            .reduce(|a, b| self.meet(a, b))
+            .unwrap_or(UncertaintyLevel::Particles)
     }
 
     pub fn ascii_diagram(&self) -> String {
@@ -189,7 +225,9 @@ impl PromotionLattice {
 
 pub trait Promotable: Sized {
     fn uncertainty_level(&self) -> UncertaintyLevel;
-    fn can_promote(&self, target: UncertaintyLevel) -> bool { self.uncertainty_level().can_promote_to(target) }
+    fn can_promote(&self, target: UncertaintyLevel) -> bool {
+        self.uncertainty_level().can_promote_to(target)
+    }
     fn promote_to(&self, target: UncertaintyLevel) -> Result<PromotedValue, PromotionError>;
     fn point_estimate(&self) -> f64;
     fn uncertainty_bounds(&self) -> (f64, f64);
@@ -197,13 +235,37 @@ pub trait Promotable: Sized {
 
 #[derive(Debug, Clone)]
 pub enum PromotedValue {
-    Point { value: f64, confidence: f64 },
-    Interval { lower: f64, upper: f64 },
-    Fuzzy { support_lower: f64, support_upper: f64, peak: f64, alpha_cut: f64 },
-    Affine { center: f64, noise_terms: Vec<(u32, f64)> },
-    DempsterShafer { focal_elements: Vec<(f64, f64, f64)> },
-    Distribution { samples: Vec<f64>, mean: f64, variance: f64 },
-    Particles { particles: Vec<f64>, weights: Vec<f64>, effective_sample_size: f64 },
+    Point {
+        value: f64,
+        confidence: f64,
+    },
+    Interval {
+        lower: f64,
+        upper: f64,
+    },
+    Fuzzy {
+        support_lower: f64,
+        support_upper: f64,
+        peak: f64,
+        alpha_cut: f64,
+    },
+    Affine {
+        center: f64,
+        noise_terms: Vec<(u32, f64)>,
+    },
+    DempsterShafer {
+        focal_elements: Vec<(f64, f64, f64)>,
+    },
+    Distribution {
+        samples: Vec<f64>,
+        mean: f64,
+        variance: f64,
+    },
+    Particles {
+        particles: Vec<f64>,
+        weights: Vec<f64>,
+        effective_sample_size: f64,
+    },
 }
 
 impl PromotedValue {
@@ -227,41 +289,91 @@ impl PromotedValue {
             Self::Affine { center, .. } => *center,
             Self::DempsterShafer { focal_elements } => {
                 let total: f64 = focal_elements.iter().map(|(_, _, m)| m).sum();
-                if total == 0.0 { 0.0 } else { focal_elements.iter().map(|(l, u, m)| (l + u) / 2.0 * m).sum::<f64>() / total }
+                if total == 0.0 {
+                    0.0
+                } else {
+                    focal_elements
+                        .iter()
+                        .map(|(l, u, m)| (l + u) / 2.0 * m)
+                        .sum::<f64>()
+                        / total
+                }
             }
             Self::Distribution { mean, .. } => *mean,
-            Self::Particles { particles, weights, .. } => {
+            Self::Particles {
+                particles, weights, ..
+            } => {
                 let total: f64 = weights.iter().sum();
-                if total == 0.0 { 0.0 } else { particles.iter().zip(weights).map(|(p, w)| p * w).sum::<f64>() / total }
+                if total == 0.0 {
+                    0.0
+                } else {
+                    particles
+                        .iter()
+                        .zip(weights)
+                        .map(|(p, w)| p * w)
+                        .sum::<f64>()
+                        / total
+                }
             }
         }
     }
 
     pub fn bounds(&self) -> (f64, f64) {
         match self {
-            Self::Point { value, confidence } => { let hw = value.abs() * (1.0 - confidence); (value - hw, value + hw) }
+            Self::Point { value, confidence } => {
+                let hw = value.abs() * (1.0 - confidence);
+                (value - hw, value + hw)
+            }
             Self::Interval { lower, upper } => (*lower, *upper),
-            Self::Fuzzy { support_lower, support_upper, .. } => (*support_lower, *support_upper),
-            Self::Affine { center, noise_terms } => { let t: f64 = noise_terms.iter().map(|(_, n)| n.abs()).sum(); (center - t, center + t) }
-            Self::DempsterShafer { focal_elements } => {
-                (focal_elements.iter().map(|(l,_,_)| *l).fold(f64::INFINITY, f64::min),
-                 focal_elements.iter().map(|(_,u,_)| *u).fold(f64::NEG_INFINITY, f64::max))
+            Self::Fuzzy {
+                support_lower,
+                support_upper,
+                ..
+            } => (*support_lower, *support_upper),
+            Self::Affine {
+                center,
+                noise_terms,
+            } => {
+                let t: f64 = noise_terms.iter().map(|(_, n)| n.abs()).sum();
+                (center - t, center + t)
             }
-            Self::Distribution { samples, .. } => {
-                (samples.iter().copied().fold(f64::INFINITY, f64::min), samples.iter().copied().fold(f64::NEG_INFINITY, f64::max))
-            }
-            Self::Particles { particles, .. } => {
-                (particles.iter().copied().fold(f64::INFINITY, f64::min), particles.iter().copied().fold(f64::NEG_INFINITY, f64::max))
-            }
+            Self::DempsterShafer { focal_elements } => (
+                focal_elements
+                    .iter()
+                    .map(|(l, _, _)| *l)
+                    .fold(f64::INFINITY, f64::min),
+                focal_elements
+                    .iter()
+                    .map(|(_, u, _)| *u)
+                    .fold(f64::NEG_INFINITY, f64::max),
+            ),
+            Self::Distribution { samples, .. } => (
+                samples.iter().copied().fold(f64::INFINITY, f64::min),
+                samples.iter().copied().fold(f64::NEG_INFINITY, f64::max),
+            ),
+            Self::Particles { particles, .. } => (
+                particles.iter().copied().fold(f64::INFINITY, f64::min),
+                particles.iter().copied().fold(f64::NEG_INFINITY, f64::max),
+            ),
         }
     }
 }
 
 #[derive(Debug, Clone)]
 pub enum PromotionError {
-    CannotDemote { from: UncertaintyLevel, to: UncertaintyLevel },
-    IncompatiblePath { from: UncertaintyLevel, to: UncertaintyLevel },
-    InsufficientInfo { from: UncertaintyLevel, to: UncertaintyLevel, reason: String },
+    CannotDemote {
+        from: UncertaintyLevel,
+        to: UncertaintyLevel,
+    },
+    IncompatiblePath {
+        from: UncertaintyLevel,
+        to: UncertaintyLevel,
+    },
+    InsufficientInfo {
+        from: UncertaintyLevel,
+        to: UncertaintyLevel,
+        reason: String,
+    },
 }
 
 impl fmt::Display for PromotionError {
@@ -269,7 +381,9 @@ impl fmt::Display for PromotionError {
         match self {
             Self::CannotDemote { from, to } => write!(f, "Cannot demote from {} to {}", from, to),
             Self::IncompatiblePath { from, to } => write!(f, "No path from {} to {}", from, to),
-            Self::InsufficientInfo { from, to, reason } => write!(f, "Cannot promote {} to {}: {}", from, to, reason),
+            Self::InsufficientInfo { from, to, reason } => {
+                write!(f, "Cannot promote {} to {}: {}", from, to, reason)
+            }
         }
     }
 }
@@ -284,55 +398,130 @@ pub struct Promoter {
 }
 
 impl Default for Promoter {
-    fn default() -> Self { Self { default_samples: 10000, default_particles: 1000, seed: None } }
+    fn default() -> Self {
+        Self {
+            default_samples: 10000,
+            default_particles: 1000,
+            seed: None,
+        }
+    }
 }
 
 impl Promoter {
-    pub fn new() -> Self { Self::default() }
-    pub fn with_samples(mut self, n: usize) -> Self { self.default_samples = n; self }
-    pub fn with_particles(mut self, n: usize) -> Self { self.default_particles = n; self }
+    pub fn new() -> Self {
+        Self::default()
+    }
+    pub fn with_samples(mut self, n: usize) -> Self {
+        self.default_samples = n;
+        self
+    }
+    pub fn with_particles(mut self, n: usize) -> Self {
+        self.default_particles = n;
+        self
+    }
 
-    pub fn promote_point(&self, value: f64, confidence: f64, target: UncertaintyLevel) -> Result<PromotedValue, PromotionError> {
+    pub fn promote_point(
+        &self,
+        value: f64,
+        confidence: f64,
+        target: UncertaintyLevel,
+    ) -> Result<PromotedValue, PromotionError> {
         let hw = value.abs() * (1.0 - confidence) + 1e-10;
         match target {
             UncertaintyLevel::Point => Ok(PromotedValue::Point { value, confidence }),
-            UncertaintyLevel::Interval => Ok(PromotedValue::Interval { lower: value - hw, upper: value + hw }),
-            UncertaintyLevel::Fuzzy => Ok(PromotedValue::Fuzzy { support_lower: value - hw * 1.5, support_upper: value + hw * 1.5, peak: value, alpha_cut: confidence }),
-            UncertaintyLevel::Affine => Ok(PromotedValue::Affine { center: value, noise_terms: vec![(0, hw)] }),
-            UncertaintyLevel::DempsterShafer => Ok(PromotedValue::DempsterShafer { focal_elements: vec![(value - hw, value + hw, confidence)] }),
+            UncertaintyLevel::Interval => Ok(PromotedValue::Interval {
+                lower: value - hw,
+                upper: value + hw,
+            }),
+            UncertaintyLevel::Fuzzy => Ok(PromotedValue::Fuzzy {
+                support_lower: value - hw * 1.5,
+                support_upper: value + hw * 1.5,
+                peak: value,
+                alpha_cut: confidence,
+            }),
+            UncertaintyLevel::Affine => Ok(PromotedValue::Affine {
+                center: value,
+                noise_terms: vec![(0, hw)],
+            }),
+            UncertaintyLevel::DempsterShafer => Ok(PromotedValue::DempsterShafer {
+                focal_elements: vec![(value - hw, value + hw, confidence)],
+            }),
             UncertaintyLevel::Distribution => {
                 let std = hw / 1.96;
                 let samples = self.generate_normal_samples(value, std);
-                Ok(PromotedValue::Distribution { samples, mean: value, variance: std * std })
+                Ok(PromotedValue::Distribution {
+                    samples,
+                    mean: value,
+                    variance: std * std,
+                })
             }
             UncertaintyLevel::Particles => {
                 let std = hw / 1.96;
                 let particles = self.generate_normal_samples_n(value, std, self.default_particles);
                 let weights = vec![1.0 / self.default_particles as f64; self.default_particles];
-                Ok(PromotedValue::Particles { particles, weights, effective_sample_size: self.default_particles as f64 })
+                Ok(PromotedValue::Particles {
+                    particles,
+                    weights,
+                    effective_sample_size: self.default_particles as f64,
+                })
             }
         }
     }
 
-    pub fn promote_interval(&self, lower: f64, upper: f64, target: UncertaintyLevel) -> Result<PromotedValue, PromotionError> {
-        if target == UncertaintyLevel::Point { return Err(PromotionError::CannotDemote { from: UncertaintyLevel::Interval, to: target }); }
+    pub fn promote_interval(
+        &self,
+        lower: f64,
+        upper: f64,
+        target: UncertaintyLevel,
+    ) -> Result<PromotedValue, PromotionError> {
+        if target == UncertaintyLevel::Point {
+            return Err(PromotionError::CannotDemote {
+                from: UncertaintyLevel::Interval,
+                to: target,
+            });
+        }
         let center = (lower + upper) / 2.0;
         let hw = (upper - lower) / 2.0;
         match target {
             UncertaintyLevel::Interval => Ok(PromotedValue::Interval { lower, upper }),
-            UncertaintyLevel::Fuzzy => Ok(PromotedValue::Fuzzy { support_lower: lower - hw * 0.1, support_upper: upper + hw * 0.1, peak: center, alpha_cut: 1.0 }),
-            UncertaintyLevel::Affine => Ok(PromotedValue::Affine { center, noise_terms: vec![(0, hw)] }),
-            UncertaintyLevel::DempsterShafer => Ok(PromotedValue::DempsterShafer { focal_elements: vec![(lower, upper, 1.0)] }),
+            UncertaintyLevel::Fuzzy => Ok(PromotedValue::Fuzzy {
+                support_lower: lower - hw * 0.1,
+                support_upper: upper + hw * 0.1,
+                peak: center,
+                alpha_cut: 1.0,
+            }),
+            UncertaintyLevel::Affine => Ok(PromotedValue::Affine {
+                center,
+                noise_terms: vec![(0, hw)],
+            }),
+            UncertaintyLevel::DempsterShafer => Ok(PromotedValue::DempsterShafer {
+                focal_elements: vec![(lower, upper, 1.0)],
+            }),
             UncertaintyLevel::Distribution => {
-                let samples: Vec<f64> = (0..self.default_samples).map(|i| lower + (upper - lower) * (i as f64 / self.default_samples as f64)).collect();
-                Ok(PromotedValue::Distribution { samples, mean: center, variance: (upper - lower).powi(2) / 12.0 })
+                let samples: Vec<f64> = (0..self.default_samples)
+                    .map(|i| lower + (upper - lower) * (i as f64 / self.default_samples as f64))
+                    .collect();
+                Ok(PromotedValue::Distribution {
+                    samples,
+                    mean: center,
+                    variance: (upper - lower).powi(2) / 12.0,
+                })
             }
             UncertaintyLevel::Particles => {
-                let particles: Vec<f64> = (0..self.default_particles).map(|i| lower + (upper - lower) * (i as f64 / self.default_particles as f64)).collect();
+                let particles: Vec<f64> = (0..self.default_particles)
+                    .map(|i| lower + (upper - lower) * (i as f64 / self.default_particles as f64))
+                    .collect();
                 let weights = vec![1.0 / self.default_particles as f64; self.default_particles];
-                Ok(PromotedValue::Particles { particles, weights, effective_sample_size: self.default_particles as f64 })
+                Ok(PromotedValue::Particles {
+                    particles,
+                    weights,
+                    effective_sample_size: self.default_particles as f64,
+                })
             }
-            _ => Err(PromotionError::CannotDemote { from: UncertaintyLevel::Interval, to: target }),
+            _ => Err(PromotionError::CannotDemote {
+                from: UncertaintyLevel::Interval,
+                to: target,
+            }),
         }
     }
 
@@ -341,15 +530,26 @@ impl Promoter {
     }
 
     fn generate_normal_samples_n(&self, mean: f64, std: f64, n: usize) -> Vec<f64> {
-        (0..n).map(|i| { let u = (i as f64 + 0.5) / n as f64; mean + Self::inv_norm(u) * std }).collect()
+        (0..n)
+            .map(|i| {
+                let u = (i as f64 + 0.5) / n as f64;
+                mean + Self::inv_norm(u) * std
+            })
+            .collect()
     }
 
     fn inv_norm(p: f64) -> f64 {
-        if p <= 0.0 { return f64::NEG_INFINITY; }
-        if p >= 1.0 { return f64::INFINITY; }
+        if p <= 0.0 {
+            return f64::NEG_INFINITY;
+        }
+        if p >= 1.0 {
+            return f64::INFINITY;
+        }
         let pa = if p > 0.5 { 1.0 - p } else { p };
         let t = (-2.0 * pa.ln()).sqrt();
-        let z = t - (2.515517 + 0.802853 * t + 0.010328 * t * t) / (1.0 + 1.432788 * t + 0.189269 * t * t + 0.001308 * t * t * t);
+        let z = t
+            - (2.515517 + 0.802853 * t + 0.010328 * t * t)
+                / (1.0 + 1.432788 * t + 0.189269 * t * t + 0.001308 * t * t * t);
         if p > 0.5 { -z } else { z }
     }
 }
@@ -370,15 +570,23 @@ mod tests {
     fn test_meet_join() {
         let l = PromotionLattice::new();
         // Interval and Fuzzy are on different branches - their meet is Point (greatest lower bound)
-        assert_eq!(l.meet(UncertaintyLevel::Interval, UncertaintyLevel::Fuzzy), UncertaintyLevel::Point);
+        assert_eq!(
+            l.meet(UncertaintyLevel::Interval, UncertaintyLevel::Fuzzy),
+            UncertaintyLevel::Point
+        );
         // Interval and Fuzzy are on different branches - their join is Distribution (least upper bound)
-        assert_eq!(l.join(UncertaintyLevel::Interval, UncertaintyLevel::Fuzzy), UncertaintyLevel::Distribution);
+        assert_eq!(
+            l.join(UncertaintyLevel::Interval, UncertaintyLevel::Fuzzy),
+            UncertaintyLevel::Distribution
+        );
     }
 
     #[test]
     fn test_promotion() {
         let p = Promoter::new().with_samples(100);
-        let r = p.promote_point(10.0, 0.95, UncertaintyLevel::Distribution).unwrap();
+        let r = p
+            .promote_point(10.0, 0.95, UncertaintyLevel::Distribution)
+            .unwrap();
         if let PromotedValue::Distribution { samples, mean, .. } = r {
             assert_eq!(samples.len(), 100);
             assert!((mean - 10.0).abs() < 0.01);

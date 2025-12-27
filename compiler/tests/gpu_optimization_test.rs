@@ -3,6 +3,7 @@
 //! Tests the full optimization pipeline including fusion, auto-tuning,
 //! and PTX code generation.
 
+use rustc_hash::FxHashMap;
 use sounio::codegen::gpu::{
     autotune::{AutoTuneConfig, AutoTuner, KernelAnalyzer, OccupancyCalculator},
     fusion::{FusionAnalysis, FusionConfig, FusionCostModel},
@@ -14,7 +15,6 @@ use sounio::codegen::gpu::{
     optimizer::{GpuOptimizer, OptimizerConfig},
     ptx::PtxCodegen,
 };
-use rustc_hash::FxHashMap;
 
 /// Helper to create a simple elementwise kernel
 fn make_elementwise_kernel(name: &str, num_ops: usize) -> GpuKernel {

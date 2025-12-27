@@ -1594,8 +1594,13 @@ impl DwarfOutput {
         self.debug_loclists = loclists;
 
         // Suppress warnings for unused constants in this implementation
-        let _ = (DW_LLE_BASE_ADDRESSX, DW_LLE_STARTX_ENDX, DW_LLE_STARTX_LENGTH,
-                 DW_LLE_START_END, DW_LLE_START_LENGTH);
+        let _ = (
+            DW_LLE_BASE_ADDRESSX,
+            DW_LLE_STARTX_ENDX,
+            DW_LLE_STARTX_LENGTH,
+            DW_LLE_START_END,
+            DW_LLE_START_LENGTH,
+        );
     }
 
     /// Encode a variable location as DWARF expression bytes
@@ -1695,7 +1700,10 @@ impl DwarfOutput {
                             expr.push(DW_OP_PIECE);
                             write_uleb128(&mut expr, *size);
                         }
-                        DWOp::BitPiece { size_bits, offset_bits } => {
+                        DWOp::BitPiece {
+                            size_bits,
+                            offset_bits,
+                        } => {
                             expr.push(DW_OP_BIT_PIECE);
                             write_uleb128(&mut expr, *size_bits);
                             write_uleb128(&mut expr, *offset_bits);
@@ -1714,7 +1722,13 @@ impl DwarfOutput {
         }
 
         // Suppress warnings for unused constants
-        let _ = (DW_OP_CONST4U, DW_OP_CONST4S, DW_OP_CONST8U, DW_OP_CONST8S, DW_OP_CONSTU);
+        let _ = (
+            DW_OP_CONST4U,
+            DW_OP_CONST4S,
+            DW_OP_CONST8U,
+            DW_OP_CONST8S,
+            DW_OP_CONSTU,
+        );
 
         expr
     }
@@ -1769,7 +1783,8 @@ impl DwarfOutput {
         // Write base address if non-zero
         if list.base_address != 0 {
             self.debug_loclists.push(DW_LLE_BASE_ADDRESS);
-            self.debug_loclists.extend_from_slice(&list.base_address.to_le_bytes());
+            self.debug_loclists
+                .extend_from_slice(&list.base_address.to_le_bytes());
         }
 
         // Write each location entry
@@ -1845,8 +1860,10 @@ mod tests {
 
     #[test]
     fn test_debug_info_builder() {
-        let mut builder =
-            DebugInfoBuilder::new(PathBuf::from("test.sio"), PathBuf::from("/home/user/project"));
+        let mut builder = DebugInfoBuilder::new(
+            PathBuf::from("test.sio"),
+            PathBuf::from("/home/user/project"),
+        );
 
         // Add basic types
         let int_type = builder.add_basic_type("int", 32, DWEncoding::SignedInt);
@@ -1856,7 +1873,8 @@ mod tests {
         let fn_type = builder.add_function_type(Some(int_type), vec![bool_type], false);
 
         // Begin a function
-        let _idx = builder.begin_subprogram("main", "_D4main", PathBuf::from("test.sio"), 1, fn_type);
+        let _idx =
+            builder.begin_subprogram("main", "_D4main", PathBuf::from("test.sio"), 1, fn_type);
 
         // Add a parameter
         builder.add_parameter("flag", bool_type, 0, VariableLocation::Register(0));

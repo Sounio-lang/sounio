@@ -343,10 +343,7 @@ pub mod async_client {
         }
 
         /// Add authentication header if token is set
-        fn auth_header(
-            &self,
-            request: reqwest::RequestBuilder,
-        ) -> reqwest::RequestBuilder {
+        fn auth_header(&self, request: reqwest::RequestBuilder) -> reqwest::RequestBuilder {
             if let Some(ref token) = self.token {
                 request.header("Authorization", format!("Bearer {}", token))
             } else {
@@ -355,10 +352,7 @@ pub mod async_client {
         }
 
         /// Fetch package metadata
-        pub async fn fetch_package(
-            &self,
-            name: &str,
-        ) -> Result<PackageMetadata, RegistryError> {
+        pub async fn fetch_package(&self, name: &str) -> Result<PackageMetadata, RegistryError> {
             let url = self.api_url(&format!("/packages/{}", name));
 
             let response = self
@@ -430,19 +424,13 @@ pub mod async_client {
         }
 
         /// Fetch available versions for a package
-        pub async fn fetch_versions(
-            &self,
-            name: &str,
-        ) -> Result<Vec<VersionInfo>, RegistryError> {
+        pub async fn fetch_versions(&self, name: &str) -> Result<Vec<VersionInfo>, RegistryError> {
             let metadata = self.fetch_package(name).await?;
             Ok(metadata.versions)
         }
 
         /// Get latest non-yanked version
-        pub async fn get_latest_version(
-            &self,
-            name: &str,
-        ) -> Result<Version, RegistryError> {
+        pub async fn get_latest_version(&self, name: &str) -> Result<Version, RegistryError> {
             let versions = self.fetch_versions(name).await?;
 
             versions
@@ -467,17 +455,12 @@ pub mod async_client {
             let version_info = versions
                 .iter()
                 .find(|v| &v.version == version)
-                .ok_or_else(|| {
-                    RegistryError::NotFound(format!("{}@{}", name, version))
-                })?;
+                .ok_or_else(|| RegistryError::NotFound(format!("{}@{}", name, version)))?;
 
             let expected_checksum = &version_info.checksum;
 
             // Download tarball
-            let url = self.api_url(&format!(
-                "/packages/{}/{}/download",
-                name, version
-            ));
+            let url = self.api_url(&format!("/packages/{}/{}/download", name, version));
 
             let response = self
                 .auth_header(self.client.get(&url))
@@ -510,13 +493,8 @@ pub mod async_client {
 
                     Ok(pkg_dir)
                 }
-                404 => Err(RegistryError::NotFound(format!(
-                    "{}@{}",
-                    name, version
-                ))),
-                401 | 403 => {
-                    Err(RegistryError::Auth("Unauthorized".to_string()))
-                }
+                404 => Err(RegistryError::NotFound(format!("{}@{}", name, version))),
+                401 | 403 => Err(RegistryError::Auth("Unauthorized".to_string())),
                 429 => Err(RegistryError::RateLimited),
                 status => Err(RegistryError::Server(format!(
                     "Unexpected status: {}",
@@ -574,17 +552,15 @@ pub mod async_client {
                         .await
                         .map_err(|e| RegistryError::Invalid(e.to_string()))?;
 
-                    api_response.data.ok_or_else(|| {
-                        RegistryError::Invalid("Empty response".to_string())
-                    })
+                    api_response
+                        .data
+                        .ok_or_else(|| RegistryError::Invalid("Empty response".to_string()))
                 }
                 409 => Err(RegistryError::AlreadyExists(format!(
                     "{}@{}",
                     manifest.package.name, manifest.package.version
                 ))),
-                401 | 403 => {
-                    Err(RegistryError::Auth("Unauthorized".to_string()))
-                }
+                401 | 403 => Err(RegistryError::Auth("Unauthorized".to_string())),
                 400 => {
                     let text = response.text().await.unwrap_or_default();
                     Err(RegistryError::Invalid(text))
@@ -604,15 +580,10 @@ pub mod async_client {
             version: &Version,
         ) -> Result<(), RegistryError> {
             if self.token.is_none() {
-                return Err(RegistryError::Auth(
-                    "Not logged in".to_string(),
-                ));
+                return Err(RegistryError::Auth("Not logged in".to_string()));
             }
 
-            let url = self.api_url(&format!(
-                "/packages/{}/{}/yank",
-                name, version
-            ));
+            let url = self.api_url(&format!("/packages/{}/{}/yank", name, version));
 
             let response = self
                 .auth_header(self.client.delete(&url))
@@ -622,13 +593,8 @@ pub mod async_client {
 
             match response.status().as_u16() {
                 200 | 204 => Ok(()),
-                404 => Err(RegistryError::NotFound(format!(
-                    "{}@{}",
-                    name, version
-                ))),
-                401 | 403 => {
-                    Err(RegistryError::Auth("Unauthorized".to_string()))
-                }
+                404 => Err(RegistryError::NotFound(format!("{}@{}", name, version))),
+                401 | 403 => Err(RegistryError::Auth("Unauthorized".to_string())),
                 status => Err(RegistryError::Server(format!(
                     "Unexpected status: {}",
                     status
@@ -643,15 +609,10 @@ pub mod async_client {
             version: &Version,
         ) -> Result<(), RegistryError> {
             if self.token.is_none() {
-                return Err(RegistryError::Auth(
-                    "Not logged in".to_string(),
-                ));
+                return Err(RegistryError::Auth("Not logged in".to_string()));
             }
 
-            let url = self.api_url(&format!(
-                "/packages/{}/{}/unyank",
-                name, version
-            ));
+            let url = self.api_url(&format!("/packages/{}/{}/unyank", name, version));
 
             let response = self
                 .auth_header(self.client.put(&url))
@@ -661,13 +622,8 @@ pub mod async_client {
 
             match response.status().as_u16() {
                 200 | 204 => Ok(()),
-                404 => Err(RegistryError::NotFound(format!(
-                    "{}@{}",
-                    name, version
-                ))),
-                401 | 403 => {
-                    Err(RegistryError::Auth("Unauthorized".to_string()))
-                }
+                404 => Err(RegistryError::NotFound(format!("{}@{}", name, version))),
+                401 | 403 => Err(RegistryError::Auth("Unauthorized".to_string())),
                 status => Err(RegistryError::Server(format!(
                     "Unexpected status: {}",
                     status
@@ -676,10 +632,7 @@ pub mod async_client {
         }
 
         /// Get package owners
-        pub async fn get_owners(
-            &self,
-            name: &str,
-        ) -> Result<Vec<String>, RegistryError> {
+        pub async fn get_owners(&self, name: &str) -> Result<Vec<String>, RegistryError> {
             let url = self.api_url(&format!("/packages/{}/owners", name));
 
             let response = self
@@ -708,15 +661,9 @@ pub mod async_client {
         }
 
         /// Add package owner
-        pub async fn add_owner(
-            &self,
-            name: &str,
-            owner: &str,
-        ) -> Result<(), RegistryError> {
+        pub async fn add_owner(&self, name: &str, owner: &str) -> Result<(), RegistryError> {
             if self.token.is_none() {
-                return Err(RegistryError::Auth(
-                    "Not logged in".to_string(),
-                ));
+                return Err(RegistryError::Auth("Not logged in".to_string()));
             }
 
             let url = self.api_url(&format!("/packages/{}/owners", name));
@@ -731,9 +678,7 @@ pub mod async_client {
             match response.status().as_u16() {
                 200 | 201 => Ok(()),
                 404 => Err(RegistryError::NotFound(name.to_string())),
-                401 | 403 => {
-                    Err(RegistryError::Auth("Unauthorized".to_string()))
-                }
+                401 | 403 => Err(RegistryError::Auth("Unauthorized".to_string())),
                 status => Err(RegistryError::Server(format!(
                     "Unexpected status: {}",
                     status
@@ -742,21 +687,12 @@ pub mod async_client {
         }
 
         /// Remove package owner
-        pub async fn remove_owner(
-            &self,
-            name: &str,
-            owner: &str,
-        ) -> Result<(), RegistryError> {
+        pub async fn remove_owner(&self, name: &str, owner: &str) -> Result<(), RegistryError> {
             if self.token.is_none() {
-                return Err(RegistryError::Auth(
-                    "Not logged in".to_string(),
-                ));
+                return Err(RegistryError::Auth("Not logged in".to_string()));
             }
 
-            let url = self.api_url(&format!(
-                "/packages/{}/owners/{}",
-                name, owner
-            ));
+            let url = self.api_url(&format!("/packages/{}/owners/{}", name, owner));
 
             let response = self
                 .auth_header(self.client.delete(&url))
@@ -767,9 +703,7 @@ pub mod async_client {
             match response.status().as_u16() {
                 200 | 204 => Ok(()),
                 404 => Err(RegistryError::NotFound(name.to_string())),
-                401 | 403 => {
-                    Err(RegistryError::Auth("Unauthorized".to_string()))
-                }
+                401 | 403 => Err(RegistryError::Auth("Unauthorized".to_string())),
                 status => Err(RegistryError::Server(format!(
                     "Unexpected status: {}",
                     status
@@ -792,10 +726,7 @@ pub mod async_client {
     }
 
     /// Extract gzipped tarball
-    fn extract_tarball(
-        data: &[u8],
-        dest: &std::path::Path,
-    ) -> Result<(), RegistryError> {
+    fn extract_tarball(data: &[u8], dest: &std::path::Path) -> Result<(), RegistryError> {
         use flate2::read::GzDecoder;
         use std::io::Read;
         use tar::Archive;
@@ -803,16 +734,16 @@ pub mod async_client {
         let decoder = GzDecoder::new(data);
         let mut archive = Archive::new(decoder);
 
-        for entry in archive.entries().map_err(|e| {
-            RegistryError::Invalid(format!("Invalid tarball: {}", e))
-        })? {
-            let mut entry = entry.map_err(|e| {
-                RegistryError::Invalid(format!("Invalid tarball entry: {}", e))
-            })?;
+        for entry in archive
+            .entries()
+            .map_err(|e| RegistryError::Invalid(format!("Invalid tarball: {}", e)))?
+        {
+            let mut entry = entry
+                .map_err(|e| RegistryError::Invalid(format!("Invalid tarball entry: {}", e)))?;
 
-            let path = entry.path().map_err(|e| {
-                RegistryError::Invalid(format!("Invalid path: {}", e))
-            })?;
+            let path = entry
+                .path()
+                .map_err(|e| RegistryError::Invalid(format!("Invalid path: {}", e)))?;
 
             // Skip entries that try to escape the destination
             let path_str = path.to_string_lossy();

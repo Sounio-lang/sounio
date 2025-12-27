@@ -45,7 +45,8 @@ fn arb_type_expr(depth: usize) -> BoxedStrategy<String> {
             1 => arb_type_expr(depth - 1).prop_map(|t| format!("&!{}", t)),
             1 => (arb_type_expr(depth - 1), 1..16usize)
                 .prop_map(|(t, n)| format!("[{}; {}]", t, n)),
-        ].boxed()
+        ]
+        .boxed()
     }
 }
 
@@ -61,10 +62,7 @@ fn arb_literal() -> impl Strategy<Value = String> {
 /// Strategy for generating expressions with bounded depth
 fn arb_expr(depth: usize) -> BoxedStrategy<String> {
     if depth == 0 {
-        prop_oneof![
-            arb_literal(),
-            arb_identifier(),
-        ].boxed()
+        prop_oneof![arb_literal(), arb_identifier(),].boxed()
     } else {
         prop_oneof![
             5 => arb_literal(),
@@ -72,7 +70,8 @@ fn arb_expr(depth: usize) -> BoxedStrategy<String> {
             2 => (arb_expr(depth - 1), arb_expr(depth - 1))
                 .prop_map(|(l, r)| format!("({} + {})", l, r)),
             1 => arb_expr(depth - 1).prop_map(|e| format!("({})", e)),
-        ].boxed()
+        ]
+        .boxed()
     }
 }
 
@@ -92,7 +91,8 @@ fn can_parse(source: &str) -> bool {
 fn lexer_doesnt_panic(source: &str) -> bool {
     std::panic::catch_unwind(|| {
         let _ = lexer::lex(source);
-    }).is_ok()
+    })
+    .is_ok()
 }
 
 /// Check that the parser doesn't panic
@@ -101,7 +101,8 @@ fn parser_doesnt_panic(source: &str) -> bool {
         if let Ok(tokens) = lexer::lex(source) {
             let _ = parser::parse(&tokens, source);
         }
-    }).is_ok()
+    })
+    .is_ok()
 }
 
 /// Check that the type checker doesn't panic
@@ -112,7 +113,8 @@ fn typecheck_doesnt_panic(source: &str) -> bool {
                 let _ = check::check(&ast);
             }
         }
-    }).is_ok()
+    })
+    .is_ok()
 }
 
 /// Check if a source string successfully type-checks
@@ -138,7 +140,8 @@ fn interpret_doesnt_panic(source: &str) -> bool {
                 }
             }
         }
-    }).is_ok()
+    })
+    .is_ok()
 }
 
 // ============================================================================

@@ -119,9 +119,7 @@ fn version_matches(req: &str, version: &str) -> bool {
                                 || (ver_minor == req_minor && ver_patch >= req_patch)))
                 }
                 '~' => ver_major == req_major && ver_minor == req_minor && ver_patch >= req_patch,
-                '=' => {
-                    ver_major == req_major && ver_minor == req_minor && ver_patch == req_patch
-                }
+                '=' => ver_major == req_major && ver_minor == req_minor && ver_patch == req_patch,
                 _ => false,
             }
         }

@@ -112,18 +112,15 @@ pub use time_travel::{
 
 // KEC auto-selection for optimal uncertainty model
 pub use kec::{
-    ComplexityMetrics, KECConfig, KECResult, KECSelector, UncertaintyMetrics,
-    auto_select_model, select_for_operation,
+    ComplexityMetrics, KECConfig, KECResult, KECSelector, UncertaintyMetrics, auto_select_model,
+    select_for_operation,
 };
 
 // Uncertainty promotion lattice
-pub use promotion::{
-    PromotedValue, Promoter, Promotable, PromotionLattice, UncertaintyLevel,
-};
+pub use promotion::{Promotable, PromotedValue, Promoter, PromotionLattice, UncertaintyLevel};
 
 // Epistemic + Refinement Type integration (Issue #8)
 pub use refined_epistemic::{
-    EpistemicRefinedValue, EpistemicInterval, RefinementBounds,
-    EpistemicRefinedConfig, RefinedCreationError,
-    PositiveEpistemic, BoundedEpistemic, ProbabilityEpistemic,
+    BoundedEpistemic, EpistemicInterval, EpistemicRefinedConfig, EpistemicRefinedValue,
+    PositiveEpistemic, ProbabilityEpistemic, RefinedCreationError, RefinementBounds,
 };

@@ -27,11 +27,7 @@ impl<T: Clone> MockFuture<T> {
     }
 
     fn poll(&self) -> Option<T> {
-        if self.ready {
-            self.value.clone()
-        } else {
-            None
-        }
+        if self.ready { self.value.clone() } else { None }
     }
 
     fn make_ready(&mut self, value: T) {

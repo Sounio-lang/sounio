@@ -6,7 +6,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
-use super::registry::{home_dir, RegistryError};
+use super::registry::{RegistryError, home_dir};
 
 /// Credentials store for registry authentication
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -375,7 +375,10 @@ pub fn validate_token(token: &str) -> Result<(), AuthError> {
     }
 
     // Check for valid base64 or hex characters
-    if !token.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_' || c == '=') {
+    if !token
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_' || c == '=')
+    {
         return Err(AuthError::InvalidToken(
             "Token contains invalid characters".to_string(),
         ));
@@ -413,7 +416,11 @@ mod tests {
 
         // Add a token
         store
-            .set_token("https://registry.example.com", "test-token".to_string(), None)
+            .set_token(
+                "https://registry.example.com",
+                "test-token".to_string(),
+                None,
+            )
             .unwrap();
 
         assert!(store.has_token("https://registry.example.com"));

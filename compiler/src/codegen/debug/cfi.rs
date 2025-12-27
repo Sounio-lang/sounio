@@ -241,12 +241,10 @@ impl CfiBuilder {
             code_alignment_factor: 4, // 4-byte instruction alignment
             data_alignment_factor: -8,
             return_address_register: aarch64::X30,
-            initial_instructions: vec![
-                CfaInstruction::DefCfa {
-                    register: aarch64::SP,
-                    offset: 0,
-                },
-            ],
+            initial_instructions: vec![CfaInstruction::DefCfa {
+                register: aarch64::SP,
+                offset: 0,
+            }],
         };
 
         CfiBuilder {
@@ -286,10 +284,7 @@ impl CfiBuilder {
     pub fn emit_cfi_prologue(&mut self, fde_index: usize, frame_size: u64) {
         // After push rbp: CFA is now RSP + 16, RBP saved at CFA - 16
         self.add_instruction(fde_index, CfaInstruction::AdvanceLoc { delta: 1 });
-        self.add_instruction(
-            fde_index,
-            CfaInstruction::DefCfaOffset { offset: 16 },
-        );
+        self.add_instruction(fde_index, CfaInstruction::DefCfaOffset { offset: 16 });
         self.add_instruction(
             fde_index,
             CfaInstruction::Offset {
@@ -310,7 +305,12 @@ impl CfiBuilder {
         // After sub rsp, N: no change to CFA rules (still RBP + 16)
         if frame_size > 0 {
             let advance = ((frame_size / 8) + 1) as u8;
-            self.add_instruction(fde_index, CfaInstruction::AdvanceLoc { delta: advance.min(63) });
+            self.add_instruction(
+                fde_index,
+                CfaInstruction::AdvanceLoc {
+                    delta: advance.min(63),
+                },
+            );
         }
     }
 
@@ -348,10 +348,7 @@ impl CfiBuilder {
                 },
             );
         } else {
-            self.add_instruction(
-                fde_index,
-                CfaInstruction::RestoreExtended { register },
-            );
+            self.add_instruction(fde_index, CfaInstruction::RestoreExtended { register });
         }
     }
 
@@ -509,8 +506,8 @@ mod opcodes {
 
     // High 2 bits encode the operation
     pub const DW_CFA_ADVANCE_LOC: u8 = 0x40; // 01xxxxxx
-    pub const DW_CFA_OFFSET: u8 = 0x80;      // 10xxxxxx
-    pub const DW_CFA_RESTORE: u8 = 0xC0;     // 11xxxxxx
+    pub const DW_CFA_OFFSET: u8 = 0x80; // 10xxxxxx
+    pub const DW_CFA_RESTORE: u8 = 0xC0; // 11xxxxxx
 }
 
 fn emit_cfa_instruction(buf: &mut Vec<u8>, instr: &CfaInstruction) {
@@ -622,7 +619,10 @@ fn emit_cfa_instruction(buf: &mut Vec<u8>, instr: &CfaInstruction) {
             write_uleb128(buf, expression.len() as u64);
             buf.extend_from_slice(expression);
         }
-        CfaInstruction::Expression { register, expression } => {
+        CfaInstruction::Expression {
+            register,
+            expression,
+        } => {
             buf.push(DW_CFA_EXPRESSION);
             write_uleb128(buf, *register);
             write_uleb128(buf, expression.len() as u64);
@@ -638,7 +638,10 @@ fn emit_cfa_instruction(buf: &mut Vec<u8>, instr: &CfaInstruction) {
             write_uleb128(buf, *register);
             write_sleb128(buf, *offset);
         }
-        CfaInstruction::ValExpression { register, expression } => {
+        CfaInstruction::ValExpression {
+            register,
+            expression,
+        } => {
             buf.push(DW_CFA_VAL_EXPRESSION);
             write_uleb128(buf, *register);
             write_uleb128(buf, expression.len() as u64);
@@ -722,10 +725,7 @@ mod tests {
         let fde_idx = builder.begin_fde(0x2000, 0x80);
 
         // AArch64 prologue: stp x29, x30, [sp, #-16]!
-        builder.add_instruction(
-            fde_idx,
-            CfaInstruction::DefCfaOffset { offset: 16 },
-        );
+        builder.add_instruction(fde_idx, CfaInstruction::DefCfaOffset { offset: 16 });
         builder.add_instruction(
             fde_idx,
             CfaInstruction::Offset {

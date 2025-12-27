@@ -576,7 +576,15 @@ fn translate_function(
     // Translate each block (skip entry block switch since we're already there)
     let mut first = true;
     for block in &func.blocks {
-        translate_block(builder, block, &blocks, &mut values, &mut string_values, func_refs, first)?;
+        translate_block(
+            builder,
+            block,
+            &blocks,
+            &mut values,
+            &mut string_values,
+            func_refs,
+            first,
+        )?;
         first = false;
     }
 
@@ -691,7 +699,8 @@ fn translate_instruction(
                                 && arg_type == types::F32
                             {
                                 builder.ins().fpromote(types::F64, *arg_val)
-                            } else if runtime_func == "runtime_print_i64" && arg_type != types::I64 {
+                            } else if runtime_func == "runtime_print_i64" && arg_type != types::I64
+                            {
                                 if arg_type.is_int() && arg_type.bits() < 64 {
                                     builder.ins().sextend(types::I64, *arg_val)
                                 } else {

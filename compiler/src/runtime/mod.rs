@@ -83,8 +83,8 @@ pub use uncertain::{Uncertain, UncertainOps};
 
 // Async runtime
 pub use async_runtime::{
-    AsyncContext, AsyncState, SounioFuture, SounioRuntime, SounioValue, TaskHandle,
-    TaskId, block_on, init_runtime, runtime, spawn,
+    AsyncContext, AsyncState, SounioFuture, SounioRuntime, SounioValue, TaskHandle, TaskId,
+    block_on, init_runtime, runtime, spawn,
 };
 
 // GPU Executor (cudarc-based kernel execution runtime)

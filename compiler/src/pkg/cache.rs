@@ -7,7 +7,7 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 use super::manifest::Version;
-use super::registry::{cache_dir, home_dir, RegistryError};
+use super::registry::{RegistryError, cache_dir, home_dir};
 
 #[cfg(feature = "pkg")]
 use flate2::read::GzDecoder;
@@ -230,7 +230,9 @@ impl PackageCache {
         };
 
         // Clean up empty package entries
-        self.index.packages.retain(|_, versions| !versions.is_empty());
+        self.index
+            .packages
+            .retain(|_, versions| !versions.is_empty());
 
         if removed {
             self.save_index()?;
@@ -262,12 +264,7 @@ impl PackageCache {
 
     /// Clear the entire cache
     pub fn clear(&mut self) -> Result<usize, RegistryError> {
-        let count = self
-            .index
-            .packages
-            .values()
-            .map(|v| v.len())
-            .sum();
+        let count = self.index.packages.values().map(|v| v.len()).sum();
 
         // Remove all package directories but keep the cache root
         for entry in std::fs::read_dir(&self.root)? {
@@ -358,7 +355,9 @@ impl PackageCache {
         }
 
         // Clean up empty entries
-        self.index.packages.retain(|_, versions| !versions.is_empty());
+        self.index
+            .packages
+            .retain(|_, versions| !versions.is_empty());
 
         if removed > 0 {
             self.index.last_cleanup = Some(chrono::Utc::now().to_rfc3339());
@@ -478,9 +477,12 @@ impl PackageCache {
 
 /// Create a tarball from a directory
 #[cfg(feature = "pkg")]
-pub fn create_tarball(source_dir: &Path, exclude_patterns: &[&str]) -> Result<Vec<u8>, RegistryError> {
-    use flate2::write::GzEncoder;
+pub fn create_tarball(
+    source_dir: &Path,
+    exclude_patterns: &[&str],
+) -> Result<Vec<u8>, RegistryError> {
     use flate2::Compression;
+    use flate2::write::GzEncoder;
     use std::io::Write;
     use tar::Builder;
 
@@ -534,9 +536,11 @@ fn add_directory_to_tar<W: std::io::Write>(
         if path.is_dir() {
             add_directory_to_tar(builder, base, &path, exclude_patterns)?;
         } else {
-            builder.append_path_with_name(&path, rel_path).map_err(|e| {
-                RegistryError::Invalid(format!("Failed to add file to tarball: {}", e))
-            })?;
+            builder
+                .append_path_with_name(&path, rel_path)
+                .map_err(|e| {
+                    RegistryError::Invalid(format!("Failed to add file to tarball: {}", e))
+                })?;
         }
     }
 
@@ -600,7 +604,13 @@ mod tests {
 
         // This will fail because data isn't a valid tarball, but for testing index logic:
         // We can at least test the index management
-        let result = cache.add("test-pkg", &version, checksum, "https://registry.example.com", data);
+        let result = cache.add(
+            "test-pkg",
+            &version,
+            checksum,
+            "https://registry.example.com",
+            data,
+        );
         // The extraction will fail, but let's test what we can
 
         // Test stats

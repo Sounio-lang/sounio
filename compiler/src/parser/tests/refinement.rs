@@ -243,7 +243,11 @@ mod tests {
     #[test]
     fn test_refinement_type_f32() {
         let result = parse_type("{ x: f32 | x > 0.0 }");
-        assert!(result.is_ok(), "Failed to parse f32 refinement: {:?}", result);
+        assert!(
+            result.is_ok(),
+            "Failed to parse f32 refinement: {:?}",
+            result
+        );
         if let Ok(TypeExpr::Refinement { base_type, .. }) = result {
             if let TypeExpr::Named { path, .. } = *base_type {
                 assert_eq!(path.segments, vec!["f32"]);

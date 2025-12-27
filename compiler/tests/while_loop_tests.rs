@@ -13,8 +13,7 @@ use sounio::interp::{Interpreter, Value};
 /// Helper to interpret source code and return the result
 fn interpret(source: &str) -> Result<Value, String> {
     let tokens = sounio::lexer::lex(source).map_err(|e| format!("Lex error: {}", e))?;
-    let ast =
-        sounio::parser::parse(&tokens, source).map_err(|e| format!("Parse error: {}", e))?;
+    let ast = sounio::parser::parse(&tokens, source).map_err(|e| format!("Parse error: {}", e))?;
     let hir = sounio::check::check(&ast).map_err(|e| format!("Type error: {}", e))?;
     let mut interpreter = Interpreter::new();
     interpreter

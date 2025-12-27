@@ -2336,10 +2336,8 @@ impl TypeChecker {
                                 ty: HirType::I32,
                             });
 
-                        let end_expr = end
-                            .as_ref()
-                            .map(|e| self.check_expr(e, None))
-                            .transpose()?;
+                        let end_expr =
+                            end.as_ref().map(|e| self.check_expr(e, None)).transpose()?;
 
                         // Determine element type from start expression
                         let elem_ty = start_expr.ty.clone();
@@ -2381,7 +2379,8 @@ impl TypeChecker {
                         self.env.push_scope();
 
                         // Define the loop variable in scope (immutable - it gets a new value each iteration)
-                        self.env.bind(loop_var.clone(), self.hir_type_to_type(&elem_ty), false);
+                        self.env
+                            .bind(loop_var.clone(), self.hir_type_to_type(&elem_ty), false);
 
                         // Check the body
                         let body_block = self.check_block(body, None)?;
@@ -2486,7 +2485,9 @@ impl TypeChecker {
                                 // Handle references to arrays/vecs
                                 match inner.as_ref() {
                                     HirType::Array { element, .. } => (**element).clone(),
-                                    HirType::Named { name, args } if name == "Vec" && !args.is_empty() => {
+                                    HirType::Named { name, args }
+                                        if name == "Vec" && !args.is_empty() =>
+                                    {
                                         args[0].clone()
                                     }
                                     _ => {
@@ -2563,7 +2564,8 @@ impl TypeChecker {
                         self.env.push_scope();
 
                         // Define the loop variable in scope
-                        self.env.bind(loop_var.clone(), self.hir_type_to_type(&elem_ty), false);
+                        self.env
+                            .bind(loop_var.clone(), self.hir_type_to_type(&elem_ty), false);
 
                         // Check the body
                         let body_block = self.check_block(body, None)?;

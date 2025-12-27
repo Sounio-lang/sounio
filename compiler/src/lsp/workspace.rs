@@ -428,11 +428,9 @@ impl Workspace {
         name: &str,
         module_path: &[String],
     ) -> Option<&ExportedSymbol> {
-        self.symbol_index.get(name).and_then(|symbols| {
-            symbols
-                .iter()
-                .find(|s| s.module_path == module_path)
-        })
+        self.symbol_index
+            .get(name)
+            .and_then(|symbols| symbols.iter().find(|s| s.module_path == module_path))
     }
 
     /// Get all exported symbols (for workspace/symbol request)

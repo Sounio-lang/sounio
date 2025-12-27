@@ -55,11 +55,8 @@ impl TestHarness {
         use std::sync::atomic::{AtomicU64, Ordering};
         static COUNTER: AtomicU64 = AtomicU64::new(0);
         let unique_id = COUNTER.fetch_add(1, Ordering::SeqCst);
-        let temp_dir = std::env::temp_dir().join(format!(
-            "sounio_test_{}_{}",
-            std::process::id(),
-            unique_id
-        ));
+        let temp_dir =
+            std::env::temp_dir().join(format!("sounio_test_{}_{}", std::process::id(), unique_id));
         fs::create_dir_all(&temp_dir).expect("Failed to create temp dir");
 
         Self {

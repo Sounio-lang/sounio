@@ -9,8 +9,8 @@
 pub mod async_transform;
 
 pub use async_transform::{
-    AsyncStateKind, AsyncStateMachine, AsyncStateNode, AsyncTransformer, AwaitExpr,
-    CapturedLocal, StateTransition, is_async_function, transform_async_functions,
+    AsyncStateKind, AsyncStateMachine, AsyncStateNode, AsyncTransformer, AwaitExpr, CapturedLocal,
+    StateTransition, is_async_function, transform_async_functions,
 };
 
 use crate::ast::Abi;

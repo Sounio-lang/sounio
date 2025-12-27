@@ -7,9 +7,7 @@
 //! - Interpreter execution speed
 //! - JIT compilation time (when available)
 
-use criterion::{
-    black_box, criterion_group, criterion_main, BenchmarkId, Criterion, Throughput,
-};
+use criterion::{BenchmarkId, Criterion, Throughput, black_box, criterion_group, criterion_main};
 use sounio::{check, interp::Interpreter, lexer, parser};
 
 // ============================================================================
@@ -128,13 +126,7 @@ fn generate_effects_program(n_effects: usize) -> String {
     let used_effects: Vec<&str> = effects.iter().take(n_effects).copied().collect();
 
     let functions: Vec<String> = (0..10)
-        .map(|i| {
-            format!(
-                "fn func_{}() with {} {{ }}",
-                i,
-                used_effects.join(", ")
-            )
-        })
+        .map(|i| format!("fn func_{}() with {} {{ }}", i, used_effects.join(", ")))
         .collect();
     functions.join("\n")
 }
@@ -205,7 +197,10 @@ fn bench_lexer(c: &mut Criterion) {
     });
 
     // Lines per second benchmark
-    let lines_test = (0..1000).map(|i| format!("let x{} = {};", i, i)).collect::<Vec<_>>().join("\n");
+    let lines_test = (0..1000)
+        .map(|i| format!("let x{} = {};", i, i))
+        .collect::<Vec<_>>()
+        .join("\n");
     let line_count = lines_test.lines().count();
     group.throughput(Throughput::Elements(line_count as u64));
     group.bench_with_input(
@@ -295,11 +290,9 @@ fn bench_typecheck(c: &mut Criterion) {
         let tokens = lexer::lex(&source).unwrap();
         let ast = parser::parse(&tokens, &source).unwrap();
         group.throughput(Throughput::Elements(n as u64));
-        group.bench_with_input(
-            BenchmarkId::new("simple_functions", n),
-            &ast,
-            |b, a| b.iter(|| check::check(black_box(a))),
-        );
+        group.bench_with_input(BenchmarkId::new("simple_functions", n), &ast, |b, a| {
+            b.iter(|| check::check(black_box(a)))
+        });
     }
 
     // Function call chains
@@ -321,11 +314,9 @@ fn bench_typecheck(c: &mut Criterion) {
         let source = generate_effects_program(n);
         if let Ok(tokens) = lexer::lex(&source) {
             if let Ok(ast) = parser::parse(&tokens, &source) {
-                group.bench_with_input(
-                    BenchmarkId::new("with_effects", n),
-                    &ast,
-                    |b, a| b.iter(|| check::check(black_box(a))),
-                );
+                group.bench_with_input(BenchmarkId::new("with_effects", n), &ast, |b, a| {
+                    b.iter(|| check::check(black_box(a)))
+                });
             }
         }
     }
@@ -334,11 +325,9 @@ fn bench_typecheck(c: &mut Criterion) {
     let pk_source = pk_model_program();
     if let Ok(tokens) = lexer::lex(&pk_source) {
         if let Ok(ast) = parser::parse(&tokens, &pk_source) {
-            group.bench_with_input(
-                BenchmarkId::new("pk_model", 1),
-                &ast,
-                |b, a| b.iter(|| check::check(black_box(a))),
-            );
+            group.bench_with_input(BenchmarkId::new("pk_model", 1), &ast, |b, a| {
+                b.iter(|| check::check(black_box(a)))
+            });
         }
     }
 
@@ -408,14 +397,12 @@ fn main() -> i32 {{
             if let Ok(ast) = parser::parse(&tokens, &loop_prog) {
                 if let Ok(hir) = check::check(&ast) {
                     group.throughput(Throughput::Elements(n as u64));
-                    group.bench_with_input(
-                        BenchmarkId::new("loop_iterations", n),
-                        &hir,
-                        |b, h| b.iter(|| {
+                    group.bench_with_input(BenchmarkId::new("loop_iterations", n), &hir, |b, h| {
+                        b.iter(|| {
                             let mut interp = Interpreter::new();
                             interp.interpret(black_box(h))
-                        }),
-                    );
+                        })
+                    });
                 }
             }
         }
@@ -462,37 +449,29 @@ fn bench_full_pipeline(c: &mut Criterion) {
     for n in [10, 50, 100] {
         let source = generate_simple_program(n);
         group.throughput(Throughput::Bytes(source.len() as u64));
-        group.bench_with_input(
-            BenchmarkId::new("lex_parse_check", n),
-            &source,
-            |b, s| {
-                b.iter(|| {
-                    let tokens = lexer::lex(black_box(s)).unwrap();
-                    let ast = parser::parse(&tokens, s).unwrap();
-                    check::check(&ast)
-                })
-            },
-        );
+        group.bench_with_input(BenchmarkId::new("lex_parse_check", n), &source, |b, s| {
+            b.iter(|| {
+                let tokens = lexer::lex(black_box(s)).unwrap();
+                let ast = parser::parse(&tokens, s).unwrap();
+                check::check(&ast)
+            })
+        });
     }
 
     // PK model full pipeline
     let pk_source = pk_model_program();
-    group.bench_with_input(
-        BenchmarkId::new("pk_model_full", 1),
-        &pk_source,
-        |b, s| {
-            b.iter(|| {
-                let tokens = lexer::lex(black_box(s)).unwrap();
-                let ast = parser::parse(&tokens, s).unwrap();
-                if let Ok(hir) = check::check(&ast) {
-                    let mut interp = Interpreter::new();
-                    interp.interpret(&hir)
-                } else {
-                    Err(miette::miette!("Failed to typecheck"))
-                }
-            })
-        },
-    );
+    group.bench_with_input(BenchmarkId::new("pk_model_full", 1), &pk_source, |b, s| {
+        b.iter(|| {
+            let tokens = lexer::lex(black_box(s)).unwrap();
+            let ast = parser::parse(&tokens, s).unwrap();
+            if let Ok(hir) = check::check(&ast) {
+                let mut interp = Interpreter::new();
+                interp.interpret(&hir)
+            } else {
+                Err(miette::miette!("Failed to typecheck"))
+            }
+        })
+    });
 
     group.finish();
 }
@@ -525,16 +504,12 @@ fn bench_memory(c: &mut Criterion) {
     // Token stream size
     for n in [100, 500, 1000] {
         let source = generate_simple_program(n);
-        group.bench_with_input(
-            BenchmarkId::new("token_stream", n),
-            &source,
-            |b, s| {
-                b.iter(|| {
-                    let tokens = lexer::lex(black_box(s)).unwrap();
-                    black_box(tokens.len())
-                })
-            },
-        );
+        group.bench_with_input(BenchmarkId::new("token_stream", n), &source, |b, s| {
+            b.iter(|| {
+                let tokens = lexer::lex(black_box(s)).unwrap();
+                black_box(tokens.len())
+            })
+        });
     }
 
     group.finish();

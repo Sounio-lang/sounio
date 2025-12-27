@@ -300,7 +300,10 @@ impl EpistemicInterval {
         // Handle case where clamping inverts the interval
         if lower >= upper {
             let center = (lower + upper) / 2.0;
-            Self { center, half_width: 0.0 }
+            Self {
+                center,
+                half_width: 0.0,
+            }
         } else {
             Self::from_bounds(lower, upper)
         }
@@ -425,13 +428,17 @@ impl<T: Clone> EpistemicRefinedValue<T> {
     /// Check if this value satisfies its refinement at the epistemic level
     pub fn is_refinement_satisfied(&self) -> bool {
         // Both the epistemic interval bounds must satisfy refinement
-        self.refinement_bounds.contains(self.epistemic_interval.lower())
-            && self.refinement_bounds.contains(self.epistemic_interval.upper())
+        self.refinement_bounds
+            .contains(self.epistemic_interval.lower())
+            && self
+                .refinement_bounds
+                .contains(self.epistemic_interval.upper())
     }
 
     /// Get the effective interval considering both refinement and epistemic bounds
     pub fn effective_interval(&self) -> EpistemicInterval {
-        self.epistemic_interval.clamp_to_bounds(&self.refinement_bounds)
+        self.epistemic_interval
+            .clamp_to_bounds(&self.refinement_bounds)
     }
 }
 
@@ -454,11 +461,9 @@ impl EpistemicRefinedValue<f64> {
         }
 
         let config = EpistemicRefinedConfig::default();
-        let epistemic_interval = EpistemicInterval::from_confidence(
-            value,
-            confidence,
-            config.base_uncertainty,
-        ).clamp_to_bounds(&refinement_bounds);
+        let epistemic_interval =
+            EpistemicInterval::from_confidence(value, confidence, config.base_uncertainty)
+                .clamp_to_bounds(&refinement_bounds);
 
         Ok(Self {
             nominal: value,
@@ -472,7 +477,10 @@ impl EpistemicRefinedValue<f64> {
     }
 
     /// Create a certain (confidence = 1.0) refined value
-    pub fn certain(value: f64, refinement_bounds: RefinementBounds) -> Result<Self, RefinedCreationError> {
+    pub fn certain(
+        value: f64,
+        refinement_bounds: RefinementBounds,
+    ) -> Result<Self, RefinedCreationError> {
         Self::new(value, 1.0, refinement_bounds, "")
     }
 
@@ -493,8 +501,9 @@ impl EpistemicRefinedValue<f64> {
             });
         }
 
-        let epistemic_interval = EpistemicInterval::from_center_width(value, measurement_uncertainty)
-            .clamp_to_bounds(&refinement_bounds);
+        let epistemic_interval =
+            EpistemicInterval::from_center_width(value, measurement_uncertainty)
+                .clamp_to_bounds(&refinement_bounds);
 
         Ok(Self {
             nominal: value,
@@ -545,11 +554,9 @@ impl EpistemicRefinedValue<f64> {
             .map_err(|_| RefinedCreationError::InvalidConfidence(new_confidence))?;
 
         let config = EpistemicRefinedConfig::default();
-        let epistemic_interval = EpistemicInterval::from_confidence(
-            new_value,
-            new_confidence,
-            config.base_uncertainty,
-        ).clamp_to_bounds(&new_bounds);
+        let epistemic_interval =
+            EpistemicInterval::from_confidence(new_value, new_confidence, config.base_uncertainty)
+                .clamp_to_bounds(&new_bounds);
 
         Ok(Self {
             nominal: new_value,
@@ -594,12 +601,11 @@ impl EpistemicRefinedValue<f64> {
             refinement_bounds: new_bounds,
             epistemic_interval: new_interval.clamp_to_bounds(&new_bounds),
             ontology: self.ontology.union(&other.ontology).cloned().collect(),
-            provenance: ProvenanceNode::derived(
-                "add",
-                vec![self.provenance, other.provenance],
+            provenance: ProvenanceNode::derived("add", vec![self.provenance, other.provenance]),
+            refinement_predicate: format!(
+                "({}) + ({})",
+                self.refinement_predicate, other.refinement_predicate
             ),
-            refinement_predicate: format!("({}) + ({})",
-                self.refinement_predicate, other.refinement_predicate),
         }
     }
 
@@ -616,8 +622,16 @@ impl EpistemicRefinedValue<f64> {
             self.refinement_bounds.effective_upper() * other.refinement_bounds.effective_upper(),
         ];
 
-        let min = corners.iter().cloned().filter(|x| x.is_finite()).fold(f64::INFINITY, f64::min);
-        let max = corners.iter().cloned().filter(|x| x.is_finite()).fold(f64::NEG_INFINITY, f64::max);
+        let min = corners
+            .iter()
+            .cloned()
+            .filter(|x| x.is_finite())
+            .fold(f64::INFINITY, f64::min);
+        let max = corners
+            .iter()
+            .cloned()
+            .filter(|x| x.is_finite())
+            .fold(f64::NEG_INFINITY, f64::max);
 
         let new_bounds = if min.is_finite() && max.is_finite() {
             RefinementBounds::closed(min, max)
@@ -633,12 +647,11 @@ impl EpistemicRefinedValue<f64> {
             refinement_bounds: new_bounds,
             epistemic_interval: new_interval.clamp_to_bounds(&new_bounds),
             ontology: self.ontology.union(&other.ontology).cloned().collect(),
-            provenance: ProvenanceNode::derived(
-                "mul",
-                vec![self.provenance, other.provenance],
+            provenance: ProvenanceNode::derived("mul", vec![self.provenance, other.provenance]),
+            refinement_predicate: format!(
+                "({}) * ({})",
+                self.refinement_predicate, other.refinement_predicate
             ),
-            refinement_predicate: format!("({}) * ({})",
-                self.refinement_predicate, other.refinement_predicate),
         }
     }
 
@@ -694,7 +707,11 @@ impl fmt::Display for RefinedCreationError {
                 write!(f, "Invalid confidence value: {} (must be in [0, 1])", c)
             }
             Self::IntervalExceedsBounds { interval, bounds } => {
-                write!(f, "Epistemic interval {} exceeds refinement bounds {}", interval, bounds)
+                write!(
+                    f,
+                    "Epistemic interval {} exceeds refinement bounds {}",
+                    interval, bounds
+                )
             }
         }
     }
@@ -732,7 +749,8 @@ impl EpistemicRefinedValue<f64> {
             value,
             ev.confidence().value(),
             config.base_uncertainty,
-        ).clamp_to_bounds(&bounds);
+        )
+        .clamp_to_bounds(&bounds);
 
         Ok(Self {
             nominal: value,
@@ -766,17 +784,18 @@ pub mod prelude {
     use super::*;
 
     /// Create a positive epistemic value (x > 0)
-    pub fn positive(value: f64, confidence: f64) -> Result<PositiveEpistemic, RefinedCreationError> {
-        EpistemicRefinedValue::new(
-            value,
-            confidence,
-            RefinementBounds::positive(),
-            "x > 0",
-        )
+    pub fn positive(
+        value: f64,
+        confidence: f64,
+    ) -> Result<PositiveEpistemic, RefinedCreationError> {
+        EpistemicRefinedValue::new(value, confidence, RefinementBounds::positive(), "x > 0")
     }
 
     /// Create a non-negative epistemic value (x >= 0)
-    pub fn non_negative(value: f64, confidence: f64) -> Result<PositiveEpistemic, RefinedCreationError> {
+    pub fn non_negative(
+        value: f64,
+        confidence: f64,
+    ) -> Result<PositiveEpistemic, RefinedCreationError> {
         EpistemicRefinedValue::new(
             value,
             confidence,
@@ -786,7 +805,10 @@ pub mod prelude {
     }
 
     /// Create a probability epistemic value (0 <= x <= 1)
-    pub fn probability(value: f64, confidence: f64) -> Result<ProbabilityEpistemic, RefinedCreationError> {
+    pub fn probability(
+        value: f64,
+        confidence: f64,
+    ) -> Result<ProbabilityEpistemic, RefinedCreationError> {
         EpistemicRefinedValue::new(
             value,
             confidence,
@@ -796,7 +818,12 @@ pub mod prelude {
     }
 
     /// Create a bounded epistemic value (lo <= x <= hi)
-    pub fn bounded(value: f64, confidence: f64, lo: f64, hi: f64) -> Result<BoundedEpistemic, RefinedCreationError> {
+    pub fn bounded(
+        value: f64,
+        confidence: f64,
+        lo: f64,
+        hi: f64,
+    ) -> Result<BoundedEpistemic, RefinedCreationError> {
         EpistemicRefinedValue::new(
             value,
             confidence,
@@ -806,7 +833,11 @@ pub mod prelude {
     }
 
     /// Create a dose value (0 < x <= max_dose)
-    pub fn dose(value: f64, confidence: f64, max_dose: f64) -> Result<BoundedEpistemic, RefinedCreationError> {
+    pub fn dose(
+        value: f64,
+        confidence: f64,
+        max_dose: f64,
+    ) -> Result<BoundedEpistemic, RefinedCreationError> {
         EpistemicRefinedValue::new(
             value,
             confidence,
@@ -818,8 +849,8 @@ pub mod prelude {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use super::prelude::*;
+    use super::*;
 
     #[test]
     fn test_positive_creation() {
@@ -910,10 +941,9 @@ mod tests {
     #[test]
     fn test_from_epistemic() {
         let ev = EpistemicValue::with_confidence(50.0, 0.85);
-        let refined = EpistemicRefinedValue::from_epistemic(
-            ev,
-            RefinementBounds::closed(0.0, 100.0),
-        ).unwrap();
+        let refined =
+            EpistemicRefinedValue::from_epistemic(ev, RefinementBounds::closed(0.0, 100.0))
+                .unwrap();
 
         assert!((refined.nominal - 50.0).abs() < f64::EPSILON);
         assert!((refined.confidence_value() - 0.85).abs() < 0.001);

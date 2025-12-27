@@ -266,7 +266,10 @@ impl AnalysisHost {
 
             // Merge and deduplicate
             for loc in workspace_refs {
-                if !locations.iter().any(|l| l.uri == loc.uri && l.range == loc.range) {
+                if !locations
+                    .iter()
+                    .any(|l| l.uri == loc.uri && l.range == loc.range)
+                {
                     locations.push(loc);
                 }
             }

@@ -11,8 +11,8 @@
 //!
 //! Requires: criterion = "0.5"
 
-use std::time::Instant;
 use std::f64::consts::PI;
+use std::time::Instant;
 
 // =============================================================================
 // Benchmark Configuration
@@ -66,7 +66,9 @@ mod point {
     fn pk_model(p: &[f64]) -> f64 {
         let (f, dose, ka, vd, cl, t) = (p[0], p[1], p[2], p[3], p[4], p[5]);
         let ke = cl / vd;
-        if (ka - ke).abs() < 1e-10 { return 0.0; }
+        if (ka - ke).abs() < 1e-10 {
+            return 0.0;
+        }
         let prefactor = f * dose * ka / (vd * (ka - ke));
         prefactor * ((-ke * t).exp() - (-ka * t).exp())
     }
@@ -84,7 +86,10 @@ mod interval {
 
     impl Interval {
         pub fn new(lo: f64, hi: f64) -> Self {
-            Self { lo: lo.min(hi), hi: lo.max(hi) }
+            Self {
+                lo: lo.min(hi),
+                hi: lo.max(hi),
+            }
         }
 
         pub fn from_point_uncertainty(value: f64, uncertainty: f64) -> Self {
@@ -205,7 +210,10 @@ mod affine {
 
     impl AffineForm {
         pub fn new(center: f64) -> Self {
-            Self { center, noise: Vec::new() }
+            Self {
+                center,
+                noise: Vec::new(),
+            }
         }
 
         pub fn from_interval(lo: f64, hi: f64) -> Self {
@@ -303,8 +311,10 @@ mod affine {
                 let inv_lo = 1.0 / hi;
                 let inv_hi = 1.0 / lo;
                 let results = [
-                    self_int.0 * inv_lo, self_int.0 * inv_hi,
-                    self_int.1 * inv_lo, self_int.1 * inv_hi,
+                    self_int.0 * inv_lo,
+                    self_int.0 * inv_hi,
+                    self_int.1 * inv_lo,
+                    self_int.1 * inv_hi,
                 ];
                 let res_lo = results.iter().copied().fold(f64::INFINITY, f64::min);
                 let res_hi = results.iter().copied().fold(f64::NEG_INFINITY, f64::max);
@@ -313,11 +323,14 @@ mod affine {
 
             let inv_center = 1.0 / other.center;
             // Clamp inverse radius to prevent explosion
-            let inv_radius = ((1.0/lo - 1.0/hi).abs() / 2.0).min(inv_center.abs() * 10.0);
+            let inv_radius = ((1.0 / lo - 1.0 / hi).abs() / 2.0).min(inv_center.abs() * 10.0);
 
             let inv = Self {
                 center: inv_center,
-                noise: vec![(NEXT_NOISE_ID.fetch_add(1, std::sync::atomic::Ordering::SeqCst), inv_radius)],
+                noise: vec![(
+                    NEXT_NOISE_ID.fetch_add(1, std::sync::atomic::Ordering::SeqCst),
+                    inv_radius,
+                )],
             };
 
             self.mul(&inv)
@@ -347,7 +360,9 @@ mod affine {
             }
 
             // First-order approximation with remainder
-            let mut noise: Vec<(u32, f64)> = self.noise.iter()
+            let mut noise: Vec<(u32, f64)> = self
+                .noise
+                .iter()
                 .map(|(id, c)| (*id, c * exp_center))
                 .collect();
 
@@ -388,10 +403,15 @@ mod affine {
                 let c = inputs[0].center;
                 let sin_c = c.sin();
                 let cos_c = c.cos();
-                let noise: Vec<(u32, f64)> = inputs[0].noise.iter()
+                let noise: Vec<(u32, f64)> = inputs[0]
+                    .noise
+                    .iter()
                     .map(|(id, coef)| (*id, cos_c * coef))
                     .collect();
-                AffineForm { center: sin_c, noise }
+                AffineForm {
+                    center: sin_c,
+                    noise,
+                }
             }
             TestFunction::PKModel => pk_model(inputs),
         }
@@ -434,7 +454,12 @@ mod affine {
             // Interval contains zero - use limit form
             // C(t) ≈ F*D*ka*t/V * exp(-ka*t) when ka = ke
             let exp_ka = ka_c.neg().mul(&t_c).exp();
-            let result = f_c.mul(&dose_c).mul(&ka_c).mul(&t_c).div(&vd_c).mul(&exp_ka);
+            let result = f_c
+                .mul(&dose_c)
+                .mul(&ka_c)
+                .mul(&t_c)
+                .div(&vd_c)
+                .mul(&exp_ka);
             if result.is_valid() {
                 return result;
             }
@@ -539,14 +564,21 @@ mod montecarlo {
             mean,
             std_dev,
             percentile_2_5: outputs.get(idx_2_5).copied().unwrap_or(mean),
-            percentile_97_5: outputs.get(idx_97_5.min(outputs.len()-1)).copied().unwrap_or(mean),
+            percentile_97_5: outputs
+                .get(idx_97_5.min(outputs.len() - 1))
+                .copied()
+                .unwrap_or(mean),
             samples: outputs,
         }
     }
 
     fn inverse_normal_cdf(p: f64) -> f64 {
-        if p <= 0.0 { return -6.0; }
-        if p >= 1.0 { return 6.0; }
+        if p <= 0.0 {
+            return -6.0;
+        }
+        if p >= 1.0 {
+            return 6.0;
+        }
 
         let p = if p > 0.5 { 1.0 - p } else { p };
         let t = (-2.0 * p.ln()).sqrt();
@@ -576,10 +608,14 @@ pub struct BenchmarkResult {
     pub std_time_us: f64,
     pub result_center: f64,
     pub result_width: f64,
-    pub relative_accuracy: f64,  // Compared to MC reference
+    pub relative_accuracy: f64, // Compared to MC reference
 }
 
-pub fn run_benchmark(func: TestFunction, input_means: &[f64], input_stds: &[f64]) -> Vec<BenchmarkResult> {
+pub fn run_benchmark(
+    func: TestFunction,
+    input_means: &[f64],
+    input_stds: &[f64],
+) -> Vec<BenchmarkResult> {
     let mut results = Vec::new();
 
     // Monte Carlo reference (ground truth)
@@ -608,7 +644,12 @@ pub fn run_benchmark(func: TestFunction, input_means: &[f64], input_stds: &[f64]
         point_times.push(start.elapsed().as_nanos() as f64);
     }
     let point_mean_time = point_times.iter().sum::<f64>() / point_times.len() as f64 / 1000.0;
-    let point_std_time = (point_times.iter().map(|t| (t/1000.0 - point_mean_time).powi(2)).sum::<f64>() / point_times.len() as f64).sqrt();
+    let point_std_time = (point_times
+        .iter()
+        .map(|t| (t / 1000.0 - point_mean_time).powi(2))
+        .sum::<f64>()
+        / point_times.len() as f64)
+        .sqrt();
 
     results.push(BenchmarkResult {
         method: "Point".into(),
@@ -619,11 +660,15 @@ pub fn run_benchmark(func: TestFunction, input_means: &[f64], input_stds: &[f64]
         result_width: 0.0,
         relative_accuracy: if mc_result.std_dev > 0.0 {
             1.0 - (point_result - mc_result.mean).abs() / mc_result.std_dev
-        } else { 1.0 },
+        } else {
+            1.0
+        },
     });
 
     // Interval
-    let intervals: Vec<interval::Interval> = input_means.iter().zip(input_stds.iter())
+    let intervals: Vec<interval::Interval> = input_means
+        .iter()
+        .zip(input_stds.iter())
         .map(|(&m, &s)| interval::Interval::from_point_uncertainty(m, s * 1.96))
         .collect();
 
@@ -634,10 +679,17 @@ pub fn run_benchmark(func: TestFunction, input_means: &[f64], input_stds: &[f64]
         interval_result = interval::propagate(func, &intervals);
         interval_times.push(start.elapsed().as_nanos() as f64);
     }
-    let interval_mean_time = interval_times.iter().sum::<f64>() / interval_times.len() as f64 / 1000.0;
-    let interval_std_time = (interval_times.iter().map(|t| (t/1000.0 - interval_mean_time).powi(2)).sum::<f64>() / interval_times.len() as f64).sqrt();
+    let interval_mean_time =
+        interval_times.iter().sum::<f64>() / interval_times.len() as f64 / 1000.0;
+    let interval_std_time = (interval_times
+        .iter()
+        .map(|t| (t / 1000.0 - interval_mean_time).powi(2))
+        .sum::<f64>()
+        / interval_times.len() as f64)
+        .sqrt();
 
-    let interval_covers_mc = interval_result.lo <= mc_result.percentile_2_5 && interval_result.hi >= mc_result.percentile_97_5;
+    let interval_covers_mc = interval_result.lo <= mc_result.percentile_2_5
+        && interval_result.hi >= mc_result.percentile_97_5;
 
     results.push(BenchmarkResult {
         method: "Interval".into(),
@@ -648,11 +700,15 @@ pub fn run_benchmark(func: TestFunction, input_means: &[f64], input_stds: &[f64]
         result_width: interval_result.width(),
         relative_accuracy: if interval_covers_mc {
             mc_width / interval_result.width().max(1e-10)
-        } else { 0.0 },
+        } else {
+            0.0
+        },
     });
 
     // Affine
-    let affines: Vec<affine::AffineForm> = input_means.iter().zip(input_stds.iter())
+    let affines: Vec<affine::AffineForm> = input_means
+        .iter()
+        .zip(input_stds.iter())
         .map(|(&m, &s)| affine::AffineForm::from_interval(m - s * 1.96, m + s * 1.96))
         .collect();
 
@@ -664,11 +720,17 @@ pub fn run_benchmark(func: TestFunction, input_means: &[f64], input_stds: &[f64]
         affine_times.push(start.elapsed().as_nanos() as f64);
     }
     let affine_mean_time = affine_times.iter().sum::<f64>() / affine_times.len() as f64 / 1000.0;
-    let affine_std_time = (affine_times.iter().map(|t| (t/1000.0 - affine_mean_time).powi(2)).sum::<f64>() / affine_times.len() as f64).sqrt();
+    let affine_std_time = (affine_times
+        .iter()
+        .map(|t| (t / 1000.0 - affine_mean_time).powi(2))
+        .sum::<f64>()
+        / affine_times.len() as f64)
+        .sqrt();
 
     let (aff_lo, aff_hi) = affine_result.to_interval();
     let affine_width = aff_hi - aff_lo;
-    let affine_covers_mc = aff_lo <= mc_result.percentile_2_5 && aff_hi >= mc_result.percentile_97_5;
+    let affine_covers_mc =
+        aff_lo <= mc_result.percentile_2_5 && aff_hi >= mc_result.percentile_97_5;
 
     results.push(BenchmarkResult {
         method: "Affine".into(),
@@ -679,7 +741,9 @@ pub fn run_benchmark(func: TestFunction, input_means: &[f64], input_stds: &[f64]
         result_width: affine_width,
         relative_accuracy: if affine_covers_mc {
             mc_width / affine_width.max(1e-10)
-        } else { 0.0 },
+        } else {
+            0.0
+        },
     });
 
     results
@@ -692,12 +756,15 @@ pub fn print_results(results: &[BenchmarkResult]) {
     println!("{:=<100}", "");
     println!();
 
-    println!("{:<15} {:<12} {:>12} {:>12} {:>15} {:>15} {:>12}",
-        "Method", "Function", "Time (μs)", "± Std", "Center", "Width (95%)", "Accuracy");
+    println!(
+        "{:<15} {:<12} {:>12} {:>12} {:>15} {:>15} {:>12}",
+        "Method", "Function", "Time (μs)", "± Std", "Center", "Width (95%)", "Accuracy"
+    );
     println!("{:-<100}", "");
 
     for r in results {
-        println!("{:<15} {:?} {:>12.3} {:>12.3} {:>15.6} {:>15.6} {:>11.1}%",
+        println!(
+            "{:<15} {:?} {:>12.3} {:>12.3} {:>15.6} {:>15.6} {:>11.1}%",
             r.method,
             r.function,
             r.mean_time_us,
@@ -717,47 +784,27 @@ pub fn run_all_benchmarks() {
 
     // Test 1: Linear function
     println!("\n▶ Test 1: Linear function f(x) = x + 5");
-    let results = run_benchmark(
-        TestFunction::Linear,
-        &[10.0],
-        &[1.0],
-    );
+    let results = run_benchmark(TestFunction::Linear, &[10.0], &[1.0]);
     print_results(&results);
 
     // Test 2: Bilinear function
     println!("\n▶ Test 2: Bilinear function f(x,y) = x * y");
-    let results = run_benchmark(
-        TestFunction::Bilinear,
-        &[10.0, 5.0],
-        &[1.0, 0.5],
-    );
+    let results = run_benchmark(TestFunction::Bilinear, &[10.0, 5.0], &[1.0, 0.5]);
     print_results(&results);
 
     // Test 3: Division
     println!("\n▶ Test 3: Division f(x,y) = x / y");
-    let results = run_benchmark(
-        TestFunction::Division,
-        &[10.0, 5.0],
-        &[1.0, 0.3],
-    );
+    let results = run_benchmark(TestFunction::Division, &[10.0, 5.0], &[1.0, 0.3]);
     print_results(&results);
 
     // Test 4: Exponential
     println!("\n▶ Test 4: Exponential f(x) = exp(-x)");
-    let results = run_benchmark(
-        TestFunction::Exponential,
-        &[1.0],
-        &[0.2],
-    );
+    let results = run_benchmark(TestFunction::Exponential, &[1.0], &[0.2]);
     print_results(&results);
 
     // Test 5: Sinusoidal
     println!("\n▶ Test 5: Sinusoidal f(x) = sin(x)");
-    let results = run_benchmark(
-        TestFunction::Sinusoidal,
-        &[1.0],
-        &[0.3],
-    );
+    let results = run_benchmark(TestFunction::Sinusoidal, &[1.0], &[0.3]);
     print_results(&results);
 
     // Test 6: PK Model (realistic)
@@ -796,11 +843,7 @@ mod tests {
 
     #[test]
     fn test_benchmark_runs() {
-        let results = run_benchmark(
-            TestFunction::Linear,
-            &[10.0],
-            &[1.0],
-        );
+        let results = run_benchmark(TestFunction::Linear, &[10.0], &[1.0]);
         assert_eq!(results.len(), 4);
         assert!(results[0].mean_time_us > 0.0);
     }

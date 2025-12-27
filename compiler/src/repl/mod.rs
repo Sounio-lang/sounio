@@ -279,7 +279,8 @@ pub fn render_repl_error(
                 // Add the caret line
                 let padding = " ".repeat(line_num_width);
                 let arrow_padding = " ".repeat(loc.column);
-                let carets = "^".repeat(loc.length.min(line.len().saturating_sub(loc.column)).max(1));
+                let carets =
+                    "^".repeat(loc.length.min(line.len().saturating_sub(loc.column)).max(1));
 
                 output.push_str(&format!(
                     "{}{}   | {}{}{}{}{}",
@@ -351,16 +352,24 @@ fn extract_location_from_error(source: &str, error_msg: &str) -> Option<ErrorLoc
     // Pattern 1: "at line X, column Y" or "line X column Y"
     if let Some(line_idx) = error_lower.find("line ") {
         let after_line = &error_msg[line_idx + 5..];
-        let line_num_end = after_line.find(|c: char| !c.is_ascii_digit()).unwrap_or(after_line.len());
+        let line_num_end = after_line
+            .find(|c: char| !c.is_ascii_digit())
+            .unwrap_or(after_line.len());
         if line_num_end > 0 {
             if let Ok(line) = after_line[..line_num_end].parse::<usize>() {
                 // Try to find column
                 let rest = &after_line[line_num_end..].to_lowercase();
                 let mut column = 0usize;
                 if let Some(col_idx) = rest.find("column ").or_else(|| rest.find("col ")) {
-                    let col_start = if rest.find("column ").is_some() { col_idx + 7 } else { col_idx + 4 };
+                    let col_start = if rest.find("column ").is_some() {
+                        col_idx + 7
+                    } else {
+                        col_idx + 4
+                    };
                     let after_col = &after_line[line_num_end..][col_start..];
-                    let col_end = after_col.find(|c: char| !c.is_ascii_digit()).unwrap_or(after_col.len());
+                    let col_end = after_col
+                        .find(|c: char| !c.is_ascii_digit())
+                        .unwrap_or(after_col.len());
                     if col_end > 0 {
                         column = after_col[..col_end].parse().unwrap_or(0);
                     }
@@ -379,7 +388,9 @@ fn extract_location_from_error(source: &str, error_msg: &str) -> Option<ErrorLoc
     for prefix in &["position ", "offset "] {
         if let Some(pos_idx) = error_lower.find(prefix) {
             let after_pos = &error_msg[pos_idx + prefix.len()..];
-            let num_end = after_pos.find(|c: char| !c.is_ascii_digit()).unwrap_or(after_pos.len());
+            let num_end = after_pos
+                .find(|c: char| !c.is_ascii_digit())
+                .unwrap_or(after_pos.len());
             if num_end > 0 {
                 if let Ok(offset) = after_pos[..num_end].parse::<usize>() {
                     return Some(ErrorLocation::from_offset(source, offset, 1));
@@ -744,12 +755,13 @@ impl EpistemicValue {
                 let confidence = (1.0 - std.abs().min(1.0)).max(0.1);
                 EpistemicStatus::empirical(confidence, Source::Derivation("computation".into()))
             }
-            Value::Distribution(_) => {
-                EpistemicStatus::empirical(0.7, Source::ModelPrediction {
+            Value::Distribution(_) => EpistemicStatus::empirical(
+                0.7,
+                Source::ModelPrediction {
                     model: "distribution".into(),
                     version: None,
-                })
-            }
+                },
+            ),
             _ => EpistemicStatus::axiomatic(),
         };
 
@@ -762,7 +774,12 @@ impl EpistemicValue {
     }
 
     /// Create with explicit epistemic status
-    pub fn with_status(value: Value, status: EpistemicStatus, expression: String, line: usize) -> Self {
+    pub fn with_status(
+        value: Value,
+        status: EpistemicStatus,
+        expression: String,
+        line: usize,
+    ) -> Self {
         Self {
             value,
             status,
@@ -812,10 +829,15 @@ impl EpistemicValue {
         let mut output = String::new();
         output.push_str(&format!(
             "{}Provenance for: {}{}\n",
-            colors::BOLD, self.expression, colors::RESET
+            colors::BOLD,
+            self.expression,
+            colors::RESET
         ));
         output.push_str(&format!("  Line: {}\n", self.line));
-        output.push_str(&format!("  Source: {}\n", format_source(&self.status.source)));
+        output.push_str(&format!(
+            "  Source: {}\n",
+            format_source(&self.status.source)
+        ));
         output.push_str(&format!(
             "  Revisability: {}\n",
             format_revisability(&self.status.revisability)
@@ -836,14 +858,20 @@ impl EpistemicValue {
 
         output.push_str(&format!(
             "{}Uncertainty for: {}{}\n",
-            colors::BOLD, self.expression, colors::RESET
+            colors::BOLD,
+            self.expression,
+            colors::RESET
         ));
 
         match &self.value {
             Value::Uncertain { mean, std } => {
                 output.push_str(&format!("  Mean: {:.6}\n", mean));
                 output.push_str(&format!("  Std Dev: {:.6}\n", std));
-                output.push_str(&format!("  95% CI: [{:.6}, {:.6}]\n", mean - 1.96 * std, mean + 1.96 * std));
+                output.push_str(&format!(
+                    "  95% CI: [{:.6}, {:.6}]\n",
+                    mean - 1.96 * std,
+                    mean + 1.96 * std
+                ));
             }
             _ => {
                 output.push_str("  Type: Deterministic\n");
@@ -851,11 +879,19 @@ impl EpistemicValue {
         }
 
         output.push_str(&format!("  Confidence: {:.1}%\n", conf.value() * 100.0));
-        output.push_str(&format!("  Bar: [{}] {}\n", confidence_bar(conf.value(), 20), confidence_badge(conf.value())));
+        output.push_str(&format!(
+            "  Bar: [{}] {}\n",
+            confidence_bar(conf.value(), 20),
+            confidence_badge(conf.value())
+        ));
 
         if let Some(lower) = conf.lower_bound() {
             if let Some(upper) = conf.upper_bound() {
-                output.push_str(&format!("  Confidence Interval: [{:.1}%, {:.1}%]\n", lower * 100.0, upper * 100.0));
+                output.push_str(&format!(
+                    "  Confidence Interval: [{:.1}%, {:.1}%]\n",
+                    lower * 100.0,
+                    upper * 100.0
+                ));
             }
         }
 
@@ -878,7 +914,11 @@ impl EpistemicValue {
 fn format_source(source: &Source) -> String {
     match source {
         Source::Axiom => format!("{}Axiom{} (by definition)", colors::GREEN, colors::RESET),
-        Source::Measurement { instrument, protocol, timestamp } => {
+        Source::Measurement {
+            instrument,
+            protocol,
+            timestamp,
+        } => {
             let mut s = format!("{}Measurement{}", colors::BLUE, colors::RESET);
             if let Some(inst) = instrument {
                 s.push_str(&format!(" via {}", inst));
@@ -892,7 +932,12 @@ fn format_source(source: &Source) -> String {
             s
         }
         Source::Derivation(name) => {
-            format!("{}Derivation{} from {}", colors::YELLOW, colors::RESET, name)
+            format!(
+                "{}Derivation{} from {}",
+                colors::YELLOW,
+                colors::RESET,
+                name
+            )
         }
         Source::External { uri, accessed } => {
             let mut s = format!("{}External{} {}", colors::MAGENTA, colors::RESET, uri);
@@ -904,7 +949,10 @@ fn format_source(source: &Source) -> String {
         Source::OntologyAssertion { ontology, term } => {
             format!(
                 "{}Ontology{} {}:{}",
-                colors::CYAN, colors::RESET, ontology, term
+                colors::CYAN,
+                colors::RESET,
+                ontology,
+                term
             )
         }
         Source::ModelPrediction { model, version } => {
@@ -938,7 +986,11 @@ fn format_source(source: &Source) -> String {
 fn format_revisability(rev: &Revisability) -> String {
     match rev {
         Revisability::NonRevisable => {
-            format!("{}Non-revisable{} (axiomatic)", colors::GREEN, colors::RESET)
+            format!(
+                "{}Non-revisable{} (axiomatic)",
+                colors::GREEN,
+                colors::RESET
+            )
         }
         Revisability::Revisable { conditions } => {
             format!(
@@ -949,12 +1001,7 @@ fn format_revisability(rev: &Revisability) -> String {
             )
         }
         Revisability::MustRevise { reason } => {
-            format!(
-                "{}Must Revise{}: {}",
-                colors::RED,
-                colors::RESET,
-                reason
-            )
+            format!("{}Must Revise{}: {}", colors::RED, colors::RESET, reason)
         }
     }
 }
@@ -1152,7 +1199,11 @@ impl Repl {
         );
     }
 
-    fn read_multiline(&self, rl: &mut Editor<ReplHelper, DefaultHistory>, first_line: &str) -> RlResult<String> {
+    fn read_multiline(
+        &self,
+        rl: &mut Editor<ReplHelper, DefaultHistory>,
+        first_line: &str,
+    ) -> RlResult<String> {
         let mut lines = vec![first_line.to_string()];
         let mut brace_count =
             first_line.matches('{').count() as i32 - first_line.matches('}').count() as i32;
@@ -1198,7 +1249,11 @@ impl Repl {
                 self.config.show_ast = !self.config.show_ast;
                 println!(
                     "Show AST: {}{}{}",
-                    if self.config.show_ast { colors::GREEN } else { colors::RED },
+                    if self.config.show_ast {
+                        colors::GREEN
+                    } else {
+                        colors::RED
+                    },
                     self.config.show_ast,
                     colors::RESET
                 );
@@ -1207,7 +1262,11 @@ impl Repl {
                 self.config.show_hir = !self.config.show_hir;
                 println!(
                     "Show HIR: {}{}{}",
-                    if self.config.show_hir { colors::GREEN } else { colors::RED },
+                    if self.config.show_hir {
+                        colors::GREEN
+                    } else {
+                        colors::RED
+                    },
                     self.config.show_hir,
                     colors::RESET
                 );
@@ -1216,7 +1275,11 @@ impl Repl {
                 self.config.show_types = !self.config.show_types;
                 println!(
                     "Show types: {}{}{}",
-                    if self.config.show_types { colors::GREEN } else { colors::RED },
+                    if self.config.show_types {
+                        colors::GREEN
+                    } else {
+                        colors::RED
+                    },
                     self.config.show_types,
                     colors::RESET
                 );
@@ -1225,7 +1288,11 @@ impl Repl {
                 self.config.use_jit = !self.config.use_jit;
                 println!(
                     "Use JIT: {}{}{}",
-                    if self.config.use_jit { colors::GREEN } else { colors::RED },
+                    if self.config.use_jit {
+                        colors::GREEN
+                    } else {
+                        colors::RED
+                    },
                     self.config.use_jit,
                     colors::RESET
                 );
@@ -1234,8 +1301,16 @@ impl Repl {
                 self.config.show_epistemic = !self.config.show_epistemic;
                 println!(
                     "Epistemic mode: {}{}{}",
-                    if self.config.show_epistemic { colors::GREEN } else { colors::RED },
-                    if self.config.show_epistemic { "ON" } else { "OFF" },
+                    if self.config.show_epistemic {
+                        colors::GREEN
+                    } else {
+                        colors::RED
+                    },
+                    if self.config.show_epistemic {
+                        "ON"
+                    } else {
+                        "OFF"
+                    },
                     colors::RESET
                 );
             }
@@ -1281,20 +1356,11 @@ impl Repl {
                 if parts.len() > 1 {
                     self.show_info(parts[1]);
                 } else {
-                    println!(
-                        "{}Usage:{} :info <variable>",
-                        colors::YELLOW,
-                        colors::RESET
-                    );
+                    println!("{}Usage:{} :info <variable>", colors::YELLOW, colors::RESET);
                 }
             }
             Some(cmd) => {
-                println!(
-                    "{}Unknown command:{} {}",
-                    colors::RED,
-                    colors::RESET,
-                    cmd
-                );
+                println!("{}Unknown command:{} {}", colors::RED, colors::RESET, cmd);
                 println!(
                     "Type {}:help{} for available commands.",
                     colors::BRIGHT_GREEN,
@@ -1317,29 +1383,104 @@ impl Repl {
         println!();
 
         println!("{}General:{}", colors::BOLD, colors::RESET);
-        println!("  {}:help{}, :h, :?       Show this help", colors::GREEN, colors::RESET);
-        println!("  {}:quit{}, :q, :exit   Exit the REPL", colors::GREEN, colors::RESET);
-        println!("  {}:clear{}             Clear all definitions", colors::GREEN, colors::RESET);
-        println!("  {}:env{}               Show current bindings", colors::GREEN, colors::RESET);
-        println!("  {}:funcs{}             Show defined functions", colors::GREEN, colors::RESET);
-        println!("  {}:load{} <file>       Load a Sounio source file", colors::GREEN, colors::RESET);
-        println!("  {}:save{} <file>       Save session to file", colors::GREEN, colors::RESET);
+        println!(
+            "  {}:help{}, :h, :?       Show this help",
+            colors::GREEN,
+            colors::RESET
+        );
+        println!(
+            "  {}:quit{}, :q, :exit   Exit the REPL",
+            colors::GREEN,
+            colors::RESET
+        );
+        println!(
+            "  {}:clear{}             Clear all definitions",
+            colors::GREEN,
+            colors::RESET
+        );
+        println!(
+            "  {}:env{}               Show current bindings",
+            colors::GREEN,
+            colors::RESET
+        );
+        println!(
+            "  {}:funcs{}             Show defined functions",
+            colors::GREEN,
+            colors::RESET
+        );
+        println!(
+            "  {}:load{} <file>       Load a Sounio source file",
+            colors::GREEN,
+            colors::RESET
+        );
+        println!(
+            "  {}:save{} <file>       Save session to file",
+            colors::GREEN,
+            colors::RESET
+        );
         println!();
 
         println!("{}Inspection:{}", colors::BOLD, colors::RESET);
-        println!("  {}:type{} <expr>       Show type of expression", colors::BLUE, colors::RESET);
-        println!("  {}:ast{}               Toggle AST display", colors::BLUE, colors::RESET);
-        println!("  {}:hir{}               Toggle HIR display", colors::BLUE, colors::RESET);
-        println!("  {}:types{}             Toggle type display", colors::BLUE, colors::RESET);
-        println!("  {}:jit{}               Toggle JIT compilation", colors::BLUE, colors::RESET);
+        println!(
+            "  {}:type{} <expr>       Show type of expression",
+            colors::BLUE,
+            colors::RESET
+        );
+        println!(
+            "  {}:ast{}               Toggle AST display",
+            colors::BLUE,
+            colors::RESET
+        );
+        println!(
+            "  {}:hir{}               Toggle HIR display",
+            colors::BLUE,
+            colors::RESET
+        );
+        println!(
+            "  {}:types{}             Toggle type display",
+            colors::BLUE,
+            colors::RESET
+        );
+        println!(
+            "  {}:jit{}               Toggle JIT compilation",
+            colors::BLUE,
+            colors::RESET
+        );
         println!();
 
-        println!("{}Epistemic ({}new{}{}):{}", colors::BOLD, colors::BRIGHT_GREEN, colors::RESET, colors::BOLD, colors::RESET);
-        println!("  {}:epistemic{}         Toggle epistemic display", colors::MAGENTA, colors::RESET);
-        println!("  {}:provenance{} [var]  Show provenance chain", colors::MAGENTA, colors::RESET);
-        println!("  {}:uncertainty{} [var] Show uncertainty details", colors::MAGENTA, colors::RESET);
-        println!("  {}:confidence{} [var]  Show confidence levels", colors::MAGENTA, colors::RESET);
-        println!("  {}:info{} <var>        Show full epistemic info", colors::MAGENTA, colors::RESET);
+        println!(
+            "{}Epistemic ({}new{}{}):{}",
+            colors::BOLD,
+            colors::BRIGHT_GREEN,
+            colors::RESET,
+            colors::BOLD,
+            colors::RESET
+        );
+        println!(
+            "  {}:epistemic{}         Toggle epistemic display",
+            colors::MAGENTA,
+            colors::RESET
+        );
+        println!(
+            "  {}:provenance{} [var]  Show provenance chain",
+            colors::MAGENTA,
+            colors::RESET
+        );
+        println!(
+            "  {}:uncertainty{} [var] Show uncertainty details",
+            colors::MAGENTA,
+            colors::RESET
+        );
+        println!(
+            "  {}:confidence{} [var]  Show confidence levels",
+            colors::MAGENTA,
+            colors::RESET
+        );
+        println!(
+            "  {}:info{} <var>        Show full epistemic info",
+            colors::MAGENTA,
+            colors::RESET
+        );
         println!();
 
         println!("{}Confidence Badges:{}", colors::BOLD, colors::RESET);
@@ -1348,10 +1489,26 @@ impl Repl {
         println!();
 
         println!("{}Examples:{}", colors::BOLD, colors::RESET);
-        println!("  {}1 + 2 * 3{}               Evaluate expression", colors::DIM, colors::RESET);
-        println!("  {}let x = 42{}              Bind a variable", colors::DIM, colors::RESET);
-        println!("  {}let u = uncertain(5.0, 0.3){}  Create uncertain value", colors::DIM, colors::RESET);
-        println!("  {}:confidence x{}           Show x's confidence", colors::DIM, colors::RESET);
+        println!(
+            "  {}1 + 2 * 3{}               Evaluate expression",
+            colors::DIM,
+            colors::RESET
+        );
+        println!(
+            "  {}let x = 42{}              Bind a variable",
+            colors::DIM,
+            colors::RESET
+        );
+        println!(
+            "  {}let u = uncertain(5.0, 0.3){}  Create uncertain value",
+            colors::DIM,
+            colors::RESET
+        );
+        println!(
+            "  {}:confidence x{}           Show x's confidence",
+            colors::DIM,
+            colors::RESET
+        );
     }
 
     fn print_environment(&self) {
@@ -1406,12 +1563,7 @@ impl Repl {
                 colors::RESET
             );
         } else {
-            println!(
-                "{}Unknown variable:{} {}",
-                colors::RED,
-                colors::RESET,
-                var
-            );
+            println!("{}Unknown variable:{} {}", colors::RED, colors::RESET, var);
         }
     }
 
@@ -1448,12 +1600,7 @@ impl Repl {
                 colors::RESET
             );
         } else {
-            println!(
-                "{}Unknown variable:{} {}",
-                colors::RED,
-                colors::RESET,
-                var
-            );
+            println!("{}Unknown variable:{} {}", colors::RED, colors::RESET, var);
         }
     }
 
@@ -1492,12 +1639,7 @@ impl Repl {
                 confidence_bar(1.0, 20)
             );
         } else {
-            println!(
-                "{}Unknown variable:{} {}",
-                colors::RED,
-                colors::RESET,
-                var
-            );
+            println!("{}Unknown variable:{} {}", colors::RED, colors::RESET, var);
         }
     }
 
@@ -1507,11 +1649,7 @@ impl Repl {
             return;
         }
 
-        println!(
-            "{}Confidence levels:{}",
-            colors::BOLD,
-            colors::RESET
-        );
+        println!("{}Confidence levels:{}", colors::BOLD, colors::RESET);
         for name in self.bindings.keys() {
             let (badge, conf) = if let Some(ev) = self.epistemic_bindings.get(name) {
                 let c = ev.status.confidence.value();
@@ -1540,11 +1678,36 @@ impl Repl {
                 colors::RESET
             );
             println!();
-            println!("  {}Value:{}        {}", colors::BOLD, colors::RESET, ev.format_display());
-            println!("  {}Expression:{}   {}", colors::BOLD, colors::RESET, ev.expression);
-            println!("  {}Line:{}         {}", colors::BOLD, colors::RESET, ev.line);
-            println!("  {}Source:{}       {}", colors::BOLD, colors::RESET, format_source(&ev.status.source));
-            println!("  {}Revisability:{} {}", colors::BOLD, colors::RESET, format_revisability(&ev.status.revisability));
+            println!(
+                "  {}Value:{}        {}",
+                colors::BOLD,
+                colors::RESET,
+                ev.format_display()
+            );
+            println!(
+                "  {}Expression:{}   {}",
+                colors::BOLD,
+                colors::RESET,
+                ev.expression
+            );
+            println!(
+                "  {}Line:{}         {}",
+                colors::BOLD,
+                colors::RESET,
+                ev.line
+            );
+            println!(
+                "  {}Source:{}       {}",
+                colors::BOLD,
+                colors::RESET,
+                format_source(&ev.status.source)
+            );
+            println!(
+                "  {}Revisability:{} {}",
+                colors::BOLD,
+                colors::RESET,
+                format_revisability(&ev.status.revisability)
+            );
             println!(
                 "  {}Confidence:{}   {} ({:.1}%)",
                 colors::BOLD,
@@ -1553,7 +1716,12 @@ impl Repl {
                 ev.status.confidence.value() * 100.0
             );
             if !ev.status.evidence.is_empty() {
-                println!("  {}Evidence:{}     {} items", colors::BOLD, colors::RESET, ev.status.evidence.len());
+                println!(
+                    "  {}Evidence:{}     {} items",
+                    colors::BOLD,
+                    colors::RESET,
+                    ev.status.evidence.len()
+                );
                 for e in &ev.status.evidence {
                     println!("    - {:?}", e);
                 }
@@ -1568,15 +1736,20 @@ impl Repl {
             );
             println!();
             println!("  {}Value:{}      {:?}", colors::BOLD, colors::RESET, value);
-            println!("  {}Source:{}     {}", colors::BOLD, colors::RESET, format_source(&Source::Axiom));
-            println!("  {}Confidence:{} {} (100.0%)", colors::BOLD, colors::RESET, confidence_bar(1.0, 20));
-        } else {
             println!(
-                "{}Unknown variable:{} {}",
-                colors::RED,
+                "  {}Source:{}     {}",
+                colors::BOLD,
                 colors::RESET,
-                var
+                format_source(&Source::Axiom)
             );
+            println!(
+                "  {}Confidence:{} {} (100.0%)",
+                colors::BOLD,
+                colors::RESET,
+                confidence_bar(1.0, 20)
+            );
+        } else {
+            println!("{}Unknown variable:{} {}", colors::RED, colors::RESET, var);
         }
     }
 
@@ -1601,12 +1774,7 @@ impl Repl {
                 colors::RESET,
                 path
             ),
-            Err(e) => eprintln!(
-                "{}Failed to save:{} {}",
-                colors::RED,
-                colors::RESET,
-                e
-            ),
+            Err(e) => eprintln!("{}Failed to save:{} {}", colors::RED, colors::RESET, e),
         }
     }
 
@@ -2053,14 +2221,8 @@ mod tests {
         let source = "fn main() -> i64 {\n    1 / 0\n}\n";
         let message = "division by zero";
 
-        let rendered = render_repl_error(
-            input,
-            source,
-            ReplErrorKind::Runtime,
-            message,
-            None,
-            None,
-        );
+        let rendered =
+            render_repl_error(input, source, ReplErrorKind::Runtime, message, None, None);
 
         // Check that the output contains expected parts
         assert!(rendered.contains("Runtime error"));
