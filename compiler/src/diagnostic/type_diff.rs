@@ -107,6 +107,11 @@ impl TypeDiff {
             return diff;
         }
 
+        // Try to detect refinement type mismatches
+        if let Some(diff) = Self::compute_refinement_diff(expected, found) {
+            return diff;
+        }
+
         // Fall back to simple difference
         TypeDiff::Different {
             expected: expected.to_string(),
@@ -315,6 +320,94 @@ impl TypeDiff {
             return (base, Some(unit));
         }
         (ty.to_string(), None)
+    }
+
+    /// Try to compute refinement type diff
+    ///
+    /// Detects patterns like:
+    /// - `{ x: f64 | x > 0 }` vs `f64`
+    /// - `OrbitRatio` (alias) vs `f64`
+    /// - `{ x: f64 | x > 0 }` vs `{ x: f64 | x >= 0 }`
+    fn compute_refinement_diff(expected: &str, found: &str) -> Option<TypeDiff> {
+        // Pattern 1: Refinement type syntax `{ var: type | predicate }`
+        let exp_refinement = Self::parse_refinement_type(expected);
+        let found_refinement = Self::parse_refinement_type(found);
+
+        match (exp_refinement, found_refinement) {
+            // Both are refinement types
+            (Some((exp_base, exp_pred)), Some((found_base, found_pred))) => {
+                if exp_base == found_base && exp_pred != found_pred {
+                    Some(TypeDiff::RefinementMismatch {
+                        base_type: exp_base,
+                        expected_predicate: Some(exp_pred),
+                        found_predicate: Some(found_pred),
+                    })
+                } else {
+                    None
+                }
+            }
+            // Expected is refined, found is base type
+            (Some((exp_base, exp_pred)), None) => {
+                // Check if found type matches the base type
+                let found_clean = found.trim();
+                if exp_base == found_clean || Self::is_numeric_type(&exp_base) && Self::is_numeric_type(found_clean) {
+                    Some(TypeDiff::RefinementMismatch {
+                        base_type: exp_base,
+                        expected_predicate: Some(exp_pred),
+                        found_predicate: None,
+                    })
+                } else {
+                    None
+                }
+            }
+            // Expected is base type, found is refined
+            (None, Some((found_base, found_pred))) => {
+                let exp_clean = expected.trim();
+                if found_base == exp_clean || Self::is_numeric_type(&found_base) && Self::is_numeric_type(exp_clean) {
+                    Some(TypeDiff::RefinementMismatch {
+                        base_type: found_base,
+                        expected_predicate: None,
+                        found_predicate: Some(found_pred),
+                    })
+                } else {
+                    None
+                }
+            }
+            // Neither is a refinement type
+            (None, None) => None,
+        }
+    }
+
+    /// Parse a refinement type `{ var: type | predicate }` into (base_type, predicate)
+    fn parse_refinement_type(ty: &str) -> Option<(String, String)> {
+        let ty = ty.trim();
+
+        // Check for refinement syntax: { var: type | predicate }
+        if ty.starts_with('{') && ty.ends_with('}') {
+            let inner = &ty[1..ty.len() - 1].trim();
+            if let Some(pipe_pos) = inner.find('|') {
+                let type_part = inner[..pipe_pos].trim();
+                let predicate = inner[pipe_pos + 1..].trim().to_string();
+
+                // Extract base type from "var: type"
+                if let Some(colon_pos) = type_part.find(':') {
+                    let base_type = type_part[colon_pos + 1..].trim().to_string();
+                    return Some((base_type, predicate));
+                }
+            }
+        }
+
+        None
+    }
+
+    /// Check if a type is a numeric type
+    fn is_numeric_type(ty: &str) -> bool {
+        matches!(
+            ty.trim(),
+            "f32" | "f64" | "i8" | "i16" | "i32" | "i64" | "i128"
+                | "u8" | "u16" | "u32" | "u64" | "u128"
+                | "int" | "float" | "F64" | "I64"
+        )
     }
 
     /// Check if this diff represents identical types
@@ -681,6 +774,45 @@ impl TypeErrorBuilder {
                         fnd, exp
                     ));
                 }
+                TypeDiff::RefinementMismatch {
+                    base_type,
+                    expected_predicate,
+                    found_predicate,
+                } => {
+                    // If converting from unrefined to refined
+                    if expected_predicate.is_some() && found_predicate.is_none() {
+                        diagnostic.help.push(format!(
+                            "to convert `{}` to the refinement type, use:",
+                            base_type
+                        ));
+                        diagnostic.help.push(
+                            "  let refined = try_refine::<RefinedType>(value)  // Returns Option"
+                                .to_string(),
+                        );
+                        diagnostic.help.push(
+                            "  let refined = refine_or(value, default)  // With fallback".to_string(),
+                        );
+                    }
+                    // If extracting from refined type
+                    if expected_predicate.is_none() && found_predicate.is_some() {
+                        diagnostic.help.push(format!(
+                            "to extract `{}` from the refinement type, the value is already valid",
+                            base_type
+                        ));
+                        diagnostic.help.push(
+                            "  refinement types are subtypes of their base type".to_string(),
+                        );
+                    }
+                    // If predicates differ
+                    if expected_predicate.is_some() && found_predicate.is_some() {
+                        diagnostic.help.push(
+                            "the refinement predicates are incompatible".to_string(),
+                        );
+                        diagnostic.help.push(
+                            "consider using try_refine to validate at runtime".to_string(),
+                        );
+                    }
+                }
                 _ => {}
             }
         }
@@ -949,5 +1081,61 @@ mod tests {
         let summary = diff.summary();
         assert!(summary.contains("expected `int`"));
         assert!(summary.contains("found `bool`"));
+    }
+
+    #[test]
+    fn test_refinement_type_parse() {
+        let result = TypeDiff::parse_refinement_type("{ x: f64 | x > 0 }");
+        assert!(result.is_some());
+        let (base, pred) = result.unwrap();
+        assert_eq!(base, "f64");
+        assert_eq!(pred, "x > 0");
+    }
+
+    #[test]
+    fn test_refinement_diff_refined_vs_base() {
+        let diff = TypeDiff::compute("{ x: f64 | x > 0 }", "f64");
+        match diff {
+            TypeDiff::RefinementMismatch {
+                base_type,
+                expected_predicate,
+                found_predicate,
+            } => {
+                assert_eq!(base_type, "f64");
+                assert_eq!(expected_predicate, Some("x > 0".to_string()));
+                assert!(found_predicate.is_none());
+            }
+            _ => panic!("Expected RefinementMismatch, got {:?}", diff),
+        }
+    }
+
+    #[test]
+    fn test_refinement_diff_different_predicates() {
+        let diff = TypeDiff::compute("{ x: f64 | x > 0 }", "{ x: f64 | x >= 0 }");
+        match diff {
+            TypeDiff::RefinementMismatch {
+                base_type,
+                expected_predicate,
+                found_predicate,
+            } => {
+                assert_eq!(base_type, "f64");
+                assert_eq!(expected_predicate, Some("x > 0".to_string()));
+                assert_eq!(found_predicate, Some("x >= 0".to_string()));
+            }
+            _ => panic!("Expected RefinementMismatch, got {:?}", diff),
+        }
+    }
+
+    #[test]
+    fn test_refinement_summary() {
+        let diff = TypeDiff::RefinementMismatch {
+            base_type: "f64".to_string(),
+            expected_predicate: Some("x > 0".to_string()),
+            found_predicate: None,
+        };
+        let summary = diff.summary();
+        assert!(summary.contains("refinement mismatch"));
+        assert!(summary.contains("f64"));
+        assert!(summary.contains("x > 0"));
     }
 }
