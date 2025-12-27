@@ -1088,33 +1088,39 @@ impl<'ctx> LLVMCodegen<'ctx> {
     /// may be lowered to wrapper structs `{ f64 }` in some code paths, but when
     /// casting to a primitive, we need to extract the inner value.
     ///
-    /// This function checks if the LLVM value is a single-element struct and
-    /// extracts the inner value if so. This is more robust than checking HLIR
-    /// types because the type system may show the alias name rather than the
-    /// underlying primitive type.
+    /// This function recursively extracts values from single-element struct wrappers
+    /// until we get a non-struct value (int, float, etc.).
     fn unwrap_refinement_struct(
         &mut self,
         val: BasicValueEnum<'ctx>,
         _expected_ty: &HlirType,
     ) -> BasicValueEnum<'ctx> {
-        // If the value is a struct, check if it's a single-element wrapper
-        if let BasicValueEnum::StructValue(sv) = val {
-            let struct_ty = sv.get_type();
-            let field_count = struct_ty.count_fields();
+        let mut current = val;
 
-            // Single-element struct is likely a refinement type wrapper
-            if field_count == 1 {
-                // Extract the first (and only) element from the struct
-                if let Some(inner) = self
-                    .builder
-                    .build_extract_value(sv, 0, "unwrap_refinement")
-                    .ok()
-                {
-                    return inner;
+        // Keep unwrapping single-element structs until we get a primitive
+        loop {
+            if let BasicValueEnum::StructValue(sv) = current {
+                // Try to extract the first field - this works for single-element
+                // refinement type wrappers. If it fails or the struct has no fields,
+                // we stop unwrapping.
+                match self.builder.build_extract_value(sv, 0, "unwrap_refinement") {
+                    Ok(inner) => {
+                        // Successfully extracted, check if it's still a struct
+                        current = inner;
+                        continue;
+                    }
+                    Err(_) => {
+                        // Extraction failed (no fields or other error), stop
+                        break;
+                    }
                 }
+            } else {
+                // Not a struct, we're done unwrapping
+                break;
             }
         }
-        val
+
+        current
     }
 
     /// Compile a terminator
