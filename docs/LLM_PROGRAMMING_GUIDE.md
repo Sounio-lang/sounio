@@ -316,11 +316,18 @@ where
 
 ### Refinement Types
 
-```d
-// Refinement type with predicate
+Refinement types encode constraints directly in the type system, verified at compile-time via SMT solving.
+
+```sio
+// Basic refinement type with predicate
 type Positive = { x: i32 | x > 0 }
 type NonEmpty<T> = { arr: [T] | len(arr) > 0 }
 type Percentage = { p: f64 | p >= 0.0 && p <= 100.0 }
+
+// Scientific domain refinements
+type OrbitRatio = { r: f64 | 0.25 <= r && r <= 1.0 }
+type Probability = { p: f64 | 0.0 <= p && p <= 1.0 }
+type Concentration = { c: f64 | c >= 0.0 }  // Non-negative
 
 // Function with refined parameter
 fn sqrt_safe(x: { n: f64 | n >= 0.0 }) -> f64 {
@@ -330,9 +337,115 @@ fn sqrt_safe(x: { n: f64 | n >= 0.0 }) -> f64 {
 // Invariants in structs
 struct BoundedCounter {
     value: i32,
-    
+
     invariant value >= 0 && value <= 100
 }
+```
+
+#### Best Practices for Refinement Types
+
+**1. Extracting Values**
+
+Refinement types coerce to their base type when needed:
+
+```sio
+type OrbitRatio = { r: f64 | 0.25 <= r && r <= 1.0 }
+
+fn compute_interval(ratio: OrbitRatio, margin: f64) -> (f64, f64) {
+    // ratio coerces to f64 in arithmetic
+    let lower = ratio - margin
+    let upper = ratio + margin
+    return (lower, upper)
+}
+```
+
+**2. Creating Refined Values**
+
+Use explicit type annotation - the compiler verifies the constraint:
+
+```sio
+// Literal values - verified at compile time
+let ratio: OrbitRatio = 0.75  // OK: 0.25 <= 0.75 <= 1.0
+let bad: OrbitRatio = 0.1     // COMPILE ERROR: violates constraint
+
+// From computed values - verified via SMT
+fn normalize(x: f64) -> Probability {
+    let clamped = clamp(x, 0.0, 1.0)
+    return clamped  // OK: clamp guarantees 0.0 <= result <= 1.0
+}
+```
+
+**3. Preserving Refinements Through Calculations**
+
+The type checker tracks constraints through operations:
+
+```sio
+type Positive = { x: f64 | x > 0.0 }
+
+fn scale(p: Positive, factor: Positive) -> Positive {
+    // Compiler proves: positive * positive = positive
+    return p * factor
+}
+
+fn half(p: Positive) -> Positive {
+    // Compiler proves: positive / 2 = positive
+    return p / 2.0
+}
+```
+
+**4. Fallible Conversions**
+
+When a value might not satisfy the constraint, use Option:
+
+```sio
+fn try_as_probability(x: f64) -> Option<Probability> {
+    if x >= 0.0 && x <= 1.0 {
+        return Some(x)
+    }
+    return None
+}
+
+// Usage
+let maybe_prob = try_as_probability(user_input)
+match maybe_prob {
+    Some(p) => use_probability(p),
+    None => handle_error(),
+}
+```
+
+**5. Domain-Specific Refinements**
+
+Create meaningful refinements for your domain:
+
+```sio
+// Pharmacokinetics
+type Volume = { v: f64 | v > 0.0 }            // L
+type Clearance = { cl: f64 | cl > 0.0 }       // L/h
+type HalfLife = { t: f64 | t > 0.0 }          // h
+
+// The type system ensures physical validity
+fn elimination_rate(cl: Clearance, v: Volume) -> { k: f64 | k > 0.0 } {
+    return cl / v  // Compiler proves: positive / positive = positive
+}
+```
+
+**6. Combining with Epistemic Types**
+
+Refinement types can be wrapped in EpistemicValue for uncertainty tracking:
+
+```sio
+use epistemic::{EpistemicValue, from_measurement}
+
+type OrbitRatio = { r: f64 | 0.25 <= r && r <= 1.0 }
+
+// Track uncertainty while preserving domain constraints
+let ratio: EpistemicValue<OrbitRatio> = from_measurement(
+    0.75,           // measured value (must satisfy OrbitRatio)
+    0.02,           // uncertainty (± 2%)
+    0.95            // 95% confidence
+)
+
+// Uncertainty bounds are automatically clamped to refinement bounds
 ```
 
 ---
