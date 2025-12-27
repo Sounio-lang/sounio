@@ -27,6 +27,9 @@ struct HirToHlir {
     effects: HashMap<String, Vec<(String, Vec<HlirType>, HlirType)>>,
     /// Map from handler names to their effect
     handlers: HashMap<String, String>,
+    /// Map from type alias names to their resolved HIR type
+    /// Used to properly lower refinement types and other aliases
+    type_aliases: HashMap<String, HirType>,
 }
 
 impl HirToHlir {
@@ -38,22 +41,78 @@ impl HirToHlir {
             structs: HashMap::new(),
             effects: HashMap::new(),
             handlers: HashMap::new(),
+            type_aliases: HashMap::new(),
+        }
+    }
+
+    /// Resolve an HIR type to HLIR, following type aliases
+    ///
+    /// This is crucial for refinement types: `type OrbitRatio = { r: f64 | ... }`
+    /// should lower to f64, not a struct named "OrbitRatio".
+    fn resolve_type(&self, ty: &HirType) -> HlirType {
+        match ty {
+            HirType::Named { name, args } => {
+                // First, check if this is a type alias
+                if let Some(aliased_ty) = self.type_aliases.get(name) {
+                    // Recursively resolve the aliased type
+                    return self.resolve_type(aliased_ty);
+                }
+                // Not an alias - it's a struct/enum, use default lowering
+                HlirType::Struct(name.clone())
+            }
+            // For all other types, delegate to the default conversion
+            // but recursively resolve any nested types
+            HirType::Ref { inner, mutable, .. } => {
+                HlirType::Ptr(Box::new(self.resolve_type(inner)))
+            }
+            HirType::RawPointer { inner, .. } => {
+                HlirType::Ptr(Box::new(self.resolve_type(inner)))
+            }
+            HirType::Array { element, size } => {
+                let elem = self.resolve_type(element);
+                HlirType::Array(Box::new(elem), size.unwrap_or(0))
+            }
+            HirType::Tuple(elems) if elems.is_empty() => HlirType::Void,
+            HirType::Tuple(elems) => {
+                HlirType::Tuple(elems.iter().map(|e| self.resolve_type(e)).collect())
+            }
+            HirType::Fn { params, return_type } => HlirType::Function {
+                params: params.iter().map(|p| self.resolve_type(p)).collect(),
+                return_type: Box::new(self.resolve_type(return_type)),
+            },
+            HirType::Knowledge { inner, .. } => self.resolve_type(inner),
+            HirType::Quantity { numeric, .. } => self.resolve_type(numeric),
+            HirType::Future { output } => {
+                HlirType::Ptr(Box::new(HlirType::Struct("Future".to_string())))
+            }
+            // Primitive types - use default conversion
+            _ => HlirType::from_hir(ty),
         }
     }
 
     fn lower_module(mut self, hir: &Hir) -> HlirModule {
+        // Pass 0: Collect all type aliases first
+        // This is essential for refinement types like `type OrbitRatio = { r: f64 | ... }`
+        // which should be lowered to their base type, not as structs
+        for item in &hir.items {
+            if let HirItem::TypeAlias(alias) = item {
+                self.type_aliases.insert(alias.name.clone(), alias.ty.clone());
+            }
+        }
+
         // First pass: collect function signatures, type definitions, and effects
+        // Now using resolve_type() to properly handle type aliases
         for item in &hir.items {
             match item {
                 HirItem::Function(f) => {
-                    let ret_ty = HlirType::from_hir(&f.ty.return_type);
+                    let ret_ty = self.resolve_type(&f.ty.return_type);
                     self.functions.insert(f.name.clone(), ret_ty);
                 }
                 HirItem::Struct(s) => {
                     let fields: Vec<_> = s
                         .fields
                         .iter()
-                        .map(|f| (f.name.clone(), HlirType::from_hir(&f.ty)))
+                        .map(|f| (f.name.clone(), self.resolve_type(&f.ty)))
                         .collect();
                     self.structs.insert(s.name.clone(), fields.clone());
                     self.module_builder.add_type_def(HlirTypeDef {
@@ -68,7 +127,7 @@ impl HirToHlir {
                         .map(|v| {
                             (
                                 v.name.clone(),
-                                v.fields.iter().map(HlirType::from_hir).collect(),
+                                v.fields.iter().map(|f| self.resolve_type(f)).collect(),
                             )
                         })
                         .collect();
@@ -85,8 +144,8 @@ impl HirToHlir {
                         .map(|op| {
                             (
                                 op.name.clone(),
-                                op.params.iter().map(HlirType::from_hir).collect(),
-                                HlirType::from_hir(&op.return_type),
+                                op.params.iter().map(|p| self.resolve_type(p)).collect(),
+                                self.resolve_type(&op.return_type),
                             )
                         })
                         .collect();
@@ -99,11 +158,14 @@ impl HirToHlir {
                     let global = HlirGlobal {
                         id: ValueId(0),
                         name: g.name.clone(),
-                        ty: HlirType::from_hir(&g.ty),
+                        ty: self.resolve_type(&g.ty),
                         init: None,
                         is_const: g.is_const,
                     };
                     self.module_builder.add_global(global);
+                }
+                HirItem::TypeAlias(_) => {
+                    // Already collected in pass 0
                 }
                 _ => {}
             }
@@ -113,7 +175,7 @@ impl HirToHlir {
         for extern_block in &hir.externs {
             for ext_fn in &extern_block.functions {
                 self.functions
-                    .insert(ext_fn.name.clone(), HlirType::from_hir(&ext_fn.return_type));
+                    .insert(ext_fn.name.clone(), self.resolve_type(&ext_fn.return_type));
             }
         }
 
@@ -138,7 +200,7 @@ impl HirToHlir {
 
     fn lower_extern_fn(&mut self, abi: crate::ast::Abi, f: &HirExternFn) -> HlirFunction {
         let func_id = self.module_builder.fresh_func_id();
-        let return_type = HlirType::from_hir(&f.return_type);
+        let return_type = self.resolve_type(&f.return_type);
 
         let mut func_builder = FunctionBuilder::new(func_id, &f.name, return_type);
         func_builder.set_abi(abi);
@@ -147,7 +209,7 @@ impl HirToHlir {
         func_builder.set_variadic(f.is_variadic);
 
         for param in &f.params {
-            func_builder.add_param(&param.name, HlirType::from_hir(&param.ty));
+            func_builder.add_param(&param.name, self.resolve_type(&param.ty));
         }
 
         // No blocks/body: declaration-only import.
@@ -156,7 +218,7 @@ impl HirToHlir {
 
     fn lower_function(&mut self, f: &HirFn) -> HlirFunction {
         let func_id = self.module_builder.fresh_func_id();
-        let return_type = HlirType::from_hir(&f.ty.return_type);
+        let return_type = self.resolve_type(&f.ty.return_type);
 
         let mut func_builder = FunctionBuilder::new(func_id, &f.name, return_type.clone());
 
@@ -166,7 +228,7 @@ impl HirToHlir {
 
         // Add parameters
         for param in &f.ty.params {
-            let ty = HlirType::from_hir(&param.ty);
+            let ty = self.resolve_type(&param.ty);
             func_builder.add_param(&param.name, ty);
         }
 
@@ -182,6 +244,7 @@ impl HirToHlir {
             &self.structs,
             &self.effects,
             &self.handlers,
+            &self.type_aliases,
         );
         let result = ctx.lower_block(&f.body);
 
@@ -206,6 +269,8 @@ struct LoweringContext<'a> {
     structs: &'a HashMap<String, Vec<(String, HlirType)>>,
     effects: &'a HashMap<String, Vec<(String, Vec<HlirType>, HlirType)>>,
     handlers: &'a HashMap<String, String>,
+    /// Type alias map for resolving refinement types
+    type_aliases: &'a HashMap<String, HirType>,
     /// Track if current block is terminated
     terminated: bool,
     /// Loop context for break/continue
@@ -237,6 +302,7 @@ impl<'a> LoweringContext<'a> {
         structs: &'a HashMap<String, Vec<(String, HlirType)>>,
         effects: &'a HashMap<String, Vec<(String, Vec<HlirType>, HlirType)>>,
         handlers: &'a HashMap<String, String>,
+        type_aliases: &'a HashMap<String, HirType>,
     ) -> Self {
         Self {
             builder,
@@ -245,6 +311,7 @@ impl<'a> LoweringContext<'a> {
             structs,
             effects,
             handlers,
+            type_aliases,
             terminated: false,
             loop_stack: Vec::new(),
             closure_env: None,
@@ -253,6 +320,46 @@ impl<'a> LoweringContext<'a> {
 
     fn is_terminated(&self) -> bool {
         self.terminated
+    }
+
+    /// Resolve an HIR type to HLIR, following type aliases
+    /// Critical for refinement types to lower to their base type
+    fn resolve_type(&self, ty: &HirType) -> HlirType {
+        match ty {
+            HirType::Named { name, .. } => {
+                // Check if this is a type alias
+                if let Some(aliased_ty) = self.type_aliases.get(name) {
+                    return self.resolve_type(aliased_ty);
+                }
+                // Not an alias - it's a struct/enum
+                HlirType::Struct(name.clone())
+            }
+            HirType::Ref { inner, .. } => {
+                HlirType::Ptr(Box::new(self.resolve_type(inner)))
+            }
+            HirType::RawPointer { inner, .. } => {
+                HlirType::Ptr(Box::new(self.resolve_type(inner)))
+            }
+            HirType::Array { element, size } => {
+                let elem = self.resolve_type(element);
+                HlirType::Array(Box::new(elem), size.unwrap_or(0))
+            }
+            HirType::Tuple(elems) if elems.is_empty() => HlirType::Void,
+            HirType::Tuple(elems) => {
+                HlirType::Tuple(elems.iter().map(|e| self.resolve_type(e)).collect())
+            }
+            HirType::Fn { params, return_type } => HlirType::Function {
+                params: params.iter().map(|p| self.resolve_type(p)).collect(),
+                return_type: Box::new(self.resolve_type(return_type)),
+            },
+            HirType::Knowledge { inner, .. } => self.resolve_type(inner),
+            HirType::Quantity { numeric, .. } => self.resolve_type(numeric),
+            HirType::Future { .. } => {
+                HlirType::Ptr(Box::new(HlirType::Struct("Future".to_string())))
+            }
+            // Primitive types - use default conversion
+            _ => HlirType::from_hir(ty),
+        }
     }
 
     fn lower_block(&mut self, block: &HirBlock) -> Option<ValueId> {
@@ -280,9 +387,9 @@ impl<'a> LoweringContext<'a> {
                 // Use the type from the initializer if the declared type is a type variable
                 let hlir_ty = if let Some(init) = value {
                     // Prefer the initializer's type (it's concrete after type checking)
-                    HlirType::from_hir(&init.ty)
+                    self.resolve_type(&init.ty)
                 } else {
-                    HlirType::from_hir(ty)
+                    self.resolve_type(ty)
                 };
 
                 if *is_mut {
@@ -334,13 +441,13 @@ impl<'a> LoweringContext<'a> {
             HirExprKind::Field { base, field } => {
                 // Aggregate values (structs/refs) are represented as pointers in HLIR/codegen,
                 // so for field stores we need the base *value* (a pointer), not the address of a slot.
-                let base_ptr = match HlirType::from_hir(&base.ty) {
+                let base_ptr = match self.resolve_type(&base.ty) {
                     HlirType::Ptr(_) | HlirType::Struct(_) => self.lower_expr(base),
                     _ => self.lower_lvalue(base),
                 };
                 if let Some(base_ptr) = base_ptr {
                     let field_idx = self.get_field_index(&base.ty, field);
-                    let field_ty = HlirType::from_hir(&target.ty);
+                    let field_ty = self.resolve_type(&target.ty);
                     let field_ptr = self.builder.build_field_ptr(base_ptr, field_idx, field_ty);
                     self.builder.build_store(field_ptr, value);
                 }
@@ -348,14 +455,14 @@ impl<'a> LoweringContext<'a> {
             HirExprKind::Index { base, index } => {
                 // For pointer bases, use lower_expr (get pointer value)
                 // Arrays are represented as pointers in codegen, so also use lower_expr.
-                let base_ptr = match HlirType::from_hir(&base.ty) {
+                let base_ptr = match self.resolve_type(&base.ty) {
                     HlirType::Ptr(_) | HlirType::Array(_, _) => self.lower_expr(base),
                     _ => self.lower_lvalue(base),
                 };
                 if let Some(base_ptr) = base_ptr
                     && let Some(idx) = self.lower_expr(index)
                 {
-                    let elem_ty = HlirType::from_hir(&target.ty);
+                    let elem_ty = self.resolve_type(&target.ty);
                     let elem_ptr = self.builder.build_elem_ptr(base_ptr, idx, elem_ty);
                     self.builder.build_store(elem_ptr, value);
                 }
@@ -373,21 +480,21 @@ impl<'a> LoweringContext<'a> {
                 expr: inner,
             } => self.lower_expr(inner),
             HirExprKind::Field { base, field } => {
-                let base_ptr = match HlirType::from_hir(&base.ty) {
+                let base_ptr = match self.resolve_type(&base.ty) {
                     HlirType::Ptr(_) | HlirType::Struct(_) => self.lower_expr(base)?,
                     _ => self.lower_lvalue(base)?,
                 };
                 let field_idx = self.get_field_index(&base.ty, field);
-                let field_ty = HlirType::from_hir(&expr.ty);
+                let field_ty = self.resolve_type(&expr.ty);
                 Some(self.builder.build_field_ptr(base_ptr, field_idx, field_ty))
             }
             HirExprKind::Index { base, index } => {
-                let base_ptr = match HlirType::from_hir(&base.ty) {
+                let base_ptr = match self.resolve_type(&base.ty) {
                     HlirType::Ptr(_) | HlirType::Array(_, _) => self.lower_expr(base)?,
                     _ => self.lower_lvalue(base)?,
                 };
                 let idx = self.lower_expr(index)?;
-                let elem_ty = HlirType::from_hir(&expr.ty);
+                let elem_ty = self.resolve_type(&expr.ty);
                 Some(self.builder.build_elem_ptr(base_ptr, idx, elem_ty))
             }
             _ => None,
@@ -436,7 +543,7 @@ impl<'a> LoweringContext<'a> {
             return None;
         }
 
-        let ty = HlirType::from_hir(&expr.ty);
+        let ty = self.resolve_type(&expr.ty);
 
         match &expr.kind {
             HirExprKind::Literal(lit) => Some(self.lower_literal(lit, &ty)),
@@ -475,7 +582,7 @@ impl<'a> LoweringContext<'a> {
             HirExprKind::Binary { op, left, right } => {
                 let left_val = self.lower_expr(left)?;
                 let right_val = self.lower_expr(right)?;
-                let left_ty = HlirType::from_hir(&left.ty);
+                let left_ty = self.resolve_type(&left.ty);
                 // For arithmetic ops, use operand type if result type is Void (unresolved type var)
                 let result_ty = if ty == HlirType::Void && !op.is_comparison() {
                     left_ty.clone()
@@ -497,7 +604,7 @@ impl<'a> LoweringContext<'a> {
                     return Some(self.builder.build_load(ptr, ty));
                 }
                 let operand = self.lower_expr(inner)?;
-                let inner_ty = HlirType::from_hir(&inner.ty);
+                let inner_ty = self.resolve_type(&inner.ty);
                 Some(self.lower_unary_op(*op, operand, &inner_ty))
             }
 
@@ -653,8 +760,8 @@ impl<'a> LoweringContext<'a> {
                 target,
             } => {
                 let val = self.lower_expr(inner)?;
-                let source_ty = HlirType::from_hir(&inner.ty);
-                let target_ty = HlirType::from_hir(target);
+                let source_ty = self.resolve_type(&inner.ty);
+                let target_ty = self.resolve_type(target);
                 Some(self.builder.build_cast(val, source_ty, target_ty))
             }
 
@@ -810,7 +917,7 @@ impl<'a> LoweringContext<'a> {
                 Some(self.builder.build_call(
                     "sounio_await".to_string(),
                     vec![future_val],
-                    HlirType::from_hir(&expr.ty),
+                    self.resolve_type(&expr.ty),
                 ))
             }
 
@@ -852,7 +959,7 @@ impl<'a> LoweringContext<'a> {
                 Some(self.builder.build_call(
                     "sounio_join".to_string(),
                     future_vals,
-                    HlirType::from_hir(&expr.ty),
+                    self.resolve_type(&expr.ty),
                 ))
             }
 
@@ -864,7 +971,7 @@ impl<'a> LoweringContext<'a> {
                     Some(self.builder.build_call(
                         "sounio_select".to_string(),
                         vec![future_val],
-                        HlirType::from_hir(&expr.ty),
+                        self.resolve_type(&expr.ty),
                     ))
                 } else {
                     Some(self.builder.build_unit())
@@ -1221,7 +1328,7 @@ impl<'a> LoweringContext<'a> {
         ty: &HlirType,
     ) -> Option<ValueId> {
         let scrut_val = self.lower_expr(scrutinee)?;
-        let scrut_ty = HlirType::from_hir(&scrutinee.ty);
+        let scrut_ty = self.resolve_type(&scrutinee.ty);
 
         // For simple integer matches with literals (and optional wildcard/binding), use switch
         if scrut_ty.is_integer()
