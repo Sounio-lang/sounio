@@ -65,9 +65,7 @@ impl HirToHlir {
             HirType::Ref { inner, mutable, .. } => {
                 HlirType::Ptr(Box::new(self.resolve_type(inner)))
             }
-            HirType::RawPointer { inner, .. } => {
-                HlirType::Ptr(Box::new(self.resolve_type(inner)))
-            }
+            HirType::RawPointer { inner, .. } => HlirType::Ptr(Box::new(self.resolve_type(inner))),
             HirType::Array { element, size } => {
                 let elem = self.resolve_type(element);
                 HlirType::Array(Box::new(elem), size.unwrap_or(0))
@@ -76,7 +74,10 @@ impl HirToHlir {
             HirType::Tuple(elems) => {
                 HlirType::Tuple(elems.iter().map(|e| self.resolve_type(e)).collect())
             }
-            HirType::Fn { params, return_type } => HlirType::Function {
+            HirType::Fn {
+                params,
+                return_type,
+            } => HlirType::Function {
                 params: params.iter().map(|p| self.resolve_type(p)).collect(),
                 return_type: Box::new(self.resolve_type(return_type)),
             },
@@ -96,7 +97,8 @@ impl HirToHlir {
         // which should be lowered to their base type, not as structs
         for item in &hir.items {
             if let HirItem::TypeAlias(alias) = item {
-                self.type_aliases.insert(alias.name.clone(), alias.ty.clone());
+                self.type_aliases
+                    .insert(alias.name.clone(), alias.ty.clone());
             }
         }
 
@@ -334,12 +336,8 @@ impl<'a> LoweringContext<'a> {
                 // Not an alias - it's a struct/enum
                 HlirType::Struct(name.clone())
             }
-            HirType::Ref { inner, .. } => {
-                HlirType::Ptr(Box::new(self.resolve_type(inner)))
-            }
-            HirType::RawPointer { inner, .. } => {
-                HlirType::Ptr(Box::new(self.resolve_type(inner)))
-            }
+            HirType::Ref { inner, .. } => HlirType::Ptr(Box::new(self.resolve_type(inner))),
+            HirType::RawPointer { inner, .. } => HlirType::Ptr(Box::new(self.resolve_type(inner))),
             HirType::Array { element, size } => {
                 let elem = self.resolve_type(element);
                 HlirType::Array(Box::new(elem), size.unwrap_or(0))
@@ -348,7 +346,10 @@ impl<'a> LoweringContext<'a> {
             HirType::Tuple(elems) => {
                 HlirType::Tuple(elems.iter().map(|e| self.resolve_type(e)).collect())
             }
-            HirType::Fn { params, return_type } => HlirType::Function {
+            HirType::Fn {
+                params,
+                return_type,
+            } => HlirType::Function {
                 params: params.iter().map(|p| self.resolve_type(p)).collect(),
                 return_type: Box::new(self.resolve_type(return_type)),
             },
