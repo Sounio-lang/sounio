@@ -8,6 +8,18 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 **Sounio** is a novel L0 systems + scientific programming language. This is NOT a dialect of Rust, Julia, or any existing language—Sounio has its own syntax, semantics, and design philosophy.
 
+## Working Principles (MANDATORY)
+
+1. **No AI attribution** — Never add "Co-Authored-By", "Generated with", or similar footers to commits
+2. **Sounio Native syntax** — Write `.sio` files in Sounio's native idioms (`&!` not `&mut`, `var` not `let mut`), never Rust-like patterns
+3. **Atomic commits** — One logical change per commit, focused and reviewable
+4. **Token efficiency** — Use parallel agents, concise operations, minimize redundant work
+5. **YOLO mode** — Execute routine operations without asking; move fast
+6. **Q1+ research first** — Deep literature review (SOTA, peer-reviewed, Q1+ journals) before major architectural decisions
+7. **No drift to mean** — Excellence only; reject mediocre or "good enough" solutions
+8. **Epistemic honesty** — Be rigorous, cite sources, acknowledge uncertainty, no hallucinated claims
+9. **Edge of novelty** — We are building something genuinely new; do not copy existing languages or settle for conventional approaches
+
 ## Build Commands
 
 ```bash
