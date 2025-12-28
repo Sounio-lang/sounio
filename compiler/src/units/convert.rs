@@ -397,8 +397,7 @@ pub fn parse_unit_expression(expr: &str) -> Result<(Dimension, f64), ConversionE
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::units::si::base::{Kelvin, Kilogram, Second};
-    use crate::units::si::derived::Celsius;
+    use crate::units::si::base::{Kilogram, Second};
     use crate::units::si::prefixes::{Gram, Hour, Milligram, Minute};
 
     #[test]

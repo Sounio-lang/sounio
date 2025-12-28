@@ -1469,10 +1469,8 @@ mod tests {
 
         let result = prove(state);
 
-        // Verify pruning stats are populated
-        // Even if no pruning occurred, branches should be evaluated
-        // (unless no rules matched)
-        assert!(result.pruning_stats.branches_evaluated >= 0);
+        // Verify pruning stats struct exists (branches_evaluated is a usize, always >= 0)
+        let _ = result.pruning_stats.branches_evaluated;
     }
 
     #[test]

@@ -109,7 +109,6 @@ pub fn serve(root: std::path::PathBuf, port: u16) -> Result<(), DevServerError> 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::path::PathBuf;
 
     #[test]
     fn test_module_exports() {
