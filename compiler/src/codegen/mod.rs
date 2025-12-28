@@ -13,12 +13,12 @@ pub mod gpu;
 pub mod simd;
 
 // The LLVM backend is in a subdirectory when the feature is enabled
-#[cfg(feature = "llvm")]
+#[cfg(feature = "llvm-base")]
 #[path = "llvm/mod.rs"]
 pub mod llvm;
 
 // Provide stub module when LLVM is not enabled
-#[cfg(not(feature = "llvm"))]
+#[cfg(not(feature = "llvm-base"))]
 pub mod llvm {
     //! LLVM backend stub (feature not enabled)
 

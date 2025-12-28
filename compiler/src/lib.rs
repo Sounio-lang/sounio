@@ -78,6 +78,7 @@ pub mod resolve;
 pub mod rl;
 pub mod runtime;
 pub mod semantic_diagnostics;
+pub mod sir;
 pub mod smt;
 pub mod sourcemap;
 pub mod target;
@@ -116,7 +117,7 @@ pub fn compile(source: &str) -> miette::Result<Vec<u8>> {
     }
 
     // Use LLVM backend for AOT compilation
-    #[cfg(feature = "llvm")]
+    #[cfg(feature = "llvm-base")]
     {
         use inkwell::context::Context;
         let context = Context::create();

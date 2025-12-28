@@ -2043,7 +2043,7 @@ fn build(
     verbose: bool,
     cdylib: bool,
 ) -> Result<()> {
-    #[cfg(feature = "llvm")]
+    #[cfg(feature = "llvm-base")]
     {
         use inkwell::context::Context;
         use sounio::codegen::llvm::{
@@ -2239,7 +2239,7 @@ fn build(
         Ok(())
     }
 
-    #[cfg(not(feature = "llvm"))]
+    #[cfg(not(feature = "llvm-base"))]
     {
         let _ = (
             input, output, opt_level, debug, emit_llvm, emit_asm, target, strip, verbose, cdylib,
@@ -3251,11 +3251,11 @@ fn info() -> Result<()> {
 
     println!();
     println!("Enabled Backends:");
-    #[cfg(feature = "llvm")]
+    #[cfg(feature = "llvm-base")]
     {
         println!("  [+] LLVM - AOT compilation (souc build)");
     }
-    #[cfg(not(feature = "llvm"))]
+    #[cfg(not(feature = "llvm-base"))]
     println!("  [-] LLVM - rebuild with --features llvm");
 
     #[cfg(feature = "jit")]

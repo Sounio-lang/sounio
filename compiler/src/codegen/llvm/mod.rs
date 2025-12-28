@@ -33,32 +33,32 @@
 //! - LLVM Language Reference: <https://llvm.org/docs/LangRef.html>
 //! - Inkwell Documentation: <https://thedan64.github.io/inkwell/>
 
-#[cfg(feature = "llvm")]
+#[cfg(feature = "llvm-base")]
 pub mod codegen;
-#[cfg(feature = "llvm")]
+#[cfg(feature = "llvm-base")]
 pub mod debug;
-#[cfg(feature = "llvm")]
+#[cfg(feature = "llvm-base")]
 pub mod gpu;
-#[cfg(feature = "llvm")]
+#[cfg(feature = "llvm-base")]
 pub mod linker;
-#[cfg(feature = "llvm")]
+#[cfg(feature = "llvm-base")]
 pub mod passes;
-#[cfg(feature = "llvm")]
+#[cfg(feature = "llvm-base")]
 pub mod target;
-#[cfg(feature = "llvm")]
+#[cfg(feature = "llvm-base")]
 pub mod types;
 
-#[cfg(feature = "llvm")]
+#[cfg(feature = "llvm-base")]
 pub use codegen::{LLVMCodegen, OptLevel};
-#[cfg(feature = "llvm")]
+#[cfg(feature = "llvm-base")]
 pub use gpu::LlvmGpuCodegen;
-#[cfg(feature = "llvm")]
+#[cfg(feature = "llvm-base")]
 pub use linker::{LinkError, Linker};
-#[cfg(feature = "llvm")]
+#[cfg(feature = "llvm-base")]
 pub use target::{GpuTargetConfig, TargetConfig};
 
 // Stub implementations when LLVM is not available
-#[cfg(not(feature = "llvm"))]
+#[cfg(not(feature = "llvm-base"))]
 pub mod stub {
     use crate::hlir::HlirModule;
     use std::path::Path;
@@ -93,5 +93,5 @@ pub mod stub {
     }
 }
 
-#[cfg(not(feature = "llvm"))]
+#[cfg(not(feature = "llvm-base"))]
 pub use stub::*;
