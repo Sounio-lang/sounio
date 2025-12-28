@@ -45,6 +45,7 @@
 //! }
 //! ```
 
+pub mod alloc_policy;
 pub mod blocks;
 pub mod builder;
 pub mod capabilities;
@@ -85,6 +86,13 @@ pub use gpu_attention::{
     occupancy_for_registers, optimal_register_target, combined_occupancy,
     divergence_probability, divergence_cost, active_threads_ratio,
     select_spill_victim, select_spill_batch,
+};
+
+// A/B allocation policy comparison
+pub use alloc_policy::{
+    AllocPolicy, AttentionConfig, ConfidenceClass, EpistemicMetadata,
+    AllocationMetrics, SpillEvent, SpillReason, MetricsCollector,
+    ABComparisonResult, AllocatorOptions, compute_attention_score,
 };
 
 // SKIR cost annotation system (declarative performance primitives)

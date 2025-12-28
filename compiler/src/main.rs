@@ -4,6 +4,7 @@
 
 use clap::{Parser, Subcommand};
 use miette::Result;
+use sounio::sir::AllocPolicy;
 use std::path::{Path, PathBuf};
 use tracing_subscriber::{EnvFilter, fmt, prelude::*};
 
@@ -86,6 +87,18 @@ enum Commands {
         /// Build as shared library (cdylib) instead of executable
         #[arg(long)]
         cdylib: bool,
+
+        /// Register allocation policy for code generation
+        #[arg(long, value_enum, default_value = "attention")]
+        alloc_policy: AllocPolicyCli,
+
+        /// Path to attention weight configuration file (JSON)
+        #[arg(long)]
+        attention_config: Option<PathBuf>,
+
+        /// Path to output allocation metrics (JSON)
+        #[arg(long)]
+        emit_alloc_metrics: Option<PathBuf>,
     },
 
     /// Type-check a Sounio source file without compiling
@@ -1516,6 +1529,28 @@ enum EmitType {
     Llvm,
 }
 
+/// Register allocation policy for code generation
+#[derive(Clone, Copy, PartialEq, Eq, clap::ValueEnum, Default)]
+enum AllocPolicyCli {
+    /// Classic register allocation (furthest next use)
+    Classic,
+    /// Epistemic-aware attention-based allocation (default)
+    #[default]
+    Attention,
+    /// Attention-based with BO-calibrated weights
+    AttentionCalibrated,
+}
+
+impl From<AllocPolicyCli> for AllocPolicy {
+    fn from(cli: AllocPolicyCli) -> Self {
+        match cli {
+            AllocPolicyCli::Classic => AllocPolicy::Classic,
+            AllocPolicyCli::Attention => AllocPolicy::Attention,
+            AllocPolicyCli::AttentionCalibrated => AllocPolicy::AttentionCalibrated,
+        }
+    }
+}
+
 fn main() -> Result<()> {
     // Initialize tracing
     tracing_subscriber::registry()
@@ -1548,6 +1583,9 @@ fn main() -> Result<()> {
             strip,
             verbose,
             cdylib,
+            alloc_policy,
+            attention_config,
+            emit_alloc_metrics,
         } => build(
             &input,
             output.as_deref(),
@@ -1559,6 +1597,9 @@ fn main() -> Result<()> {
             strip,
             verbose,
             cdylib,
+            alloc_policy.into(),
+            attention_config.as_deref(),
+            emit_alloc_metrics.as_deref(),
         ),
 
         Commands::Check {
@@ -2042,6 +2083,9 @@ fn build(
     strip: bool,
     verbose: bool,
     cdylib: bool,
+    _alloc_policy: AllocPolicy,
+    _attention_config: Option<&std::path::Path>,
+    _emit_alloc_metrics: Option<&std::path::Path>,
 ) -> Result<()> {
     #[cfg(feature = "llvm-base")]
     {
