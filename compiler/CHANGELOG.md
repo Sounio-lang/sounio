@@ -2,6 +2,44 @@
 
 All notable changes to the Sounio compiler will be documented in this file.
 
+## [0.95.0] - 2025-12-28
+
+### Added
+
+#### SPIR-V Binary Emission (634 lines)
+
+Complete SPIR-V binary encoding for GPU shader generation.
+
+- **Opcodes Module**: 50+ SPIR-V opcode constants for instruction encoding
+- **Instruction Encoding**: `SpirVInst::encode()` for all instruction variants
+- **Type Conversion**: `to_spirv()` implementations for:
+  - `ExecutionModeKind` - LocalSize, OriginUpperLeft, etc.
+  - `Decoration` - BuiltIn, Location, Binding, Block, etc.
+  - `FunctionControl` - inline, pure, const flags
+  - `MemoryOperands` - volatile, aligned, nontemporal
+- **Module Assembly**: `SpirVModule::assemble()` generates complete binary:
+  - Header: magic 0x07230203, version 1.5, generator SOUN
+  - All 12 SPIR-V sections in proper order
+- **File Output**: `SpirVModule::write_to_file()` for .spv files
+
+#### GPU Test Harness
+
+- **Dependencies**: wgpu 23, pollster 0.4, bytemuck 1.14
+- **test_spirv_assembly**: Validates SPIR-V generation
+  - Builds module with SpirVModuleBuilder
+  - Verifies magic number, version, generator
+  - Writes .spv file for external validation
+- **test_gpu_execution**: Compute shader test
+  - GPU detection (tested: NVIDIA RTX 4000 Ada)
+  - Full compute pipeline with storage buffers
+  - Graceful fallback for WSL2 environments
+
+### Test Results
+
+- SPIR-V binary: 28 words (112 bytes) generated correctly
+- GPU detected via Vulkan/D3D12 backend
+- All tests pass
+
 ## [0.94.0] - 2025-12-27
 
 ### Added
