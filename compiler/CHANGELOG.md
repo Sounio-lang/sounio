@@ -2,6 +2,50 @@
 
 All notable changes to the Sounio compiler will be documented in this file.
 
+## [0.96.0] - 2025-12-28
+
+### Added
+
+#### A/B Register Allocation Policy Comparison (1,333 lines)
+
+Infrastructure for comparing Classic vs Attention-based register allocation
+strategies with epistemic awareness.
+
+- **AllocPolicy enum**: Classic, Attention, AttentionCalibrated variants
+- **AttentionConfig**: 6 tunable weights for epistemic-aware scoring
+  - `w_use_density`: 1.7088 (traditional liveness)
+  - `w_crosses_call`: 0.4527 (call boundary penalty)
+  - `w_next_use_distance`: 0.8802 (near-future use priority)
+  - `w_confidence`: 0.9374 (prioritize high-confidence values)
+  - `w_uncertainty`: 0.2411 (de-prioritize uncertain values)
+  - `w_provenance`: 0.2013 (preserve data lineage)
+- **EpistemicMetadata**: Confidence, uncertainty, provenance tracking
+- **AllocationMetrics**: Quality measurement (epistemic quality, score separation)
+- **MetricsCollector**: Records spill events with reasons
+- **ABComparisonResult**: Side-by-side policy evaluation
+
+#### CLI Options for Allocation Policy
+
+```
+--alloc-policy <classic|attention|attention-calibrated>
+--attention-config <path>       # Custom weight JSON file
+--emit-alloc-metrics <path>     # Output metrics JSON
+```
+
+#### Bayesian Optimization Tooling
+
+- **tune_attention_weights.py**: BO script using botorch/gpytorch
+- **Random search fallback**: Works without torch dependencies
+- **Output formats**: JSON config + Rust code snippet
+
+### Performance
+
+Benchmark improvements with calibrated weights:
+- Propagation (1K): **38% faster**
+- Epistemic reduction: **9% faster**
+- Particle init (1K): **13% faster**
+- Attention scoring throughput: **11% higher**
+
 ## [0.95.0] - 2025-12-28
 
 ### Added
