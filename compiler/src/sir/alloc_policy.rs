@@ -112,6 +112,40 @@ impl AttentionConfig {
         }
     }
 
+    /// Scientific configuration prioritizing epistemic properties.
+    ///
+    /// For scientific computing where data provenance and confidence
+    /// are critical for reproducibility and correctness.
+    pub fn scientific() -> Self {
+        Self {
+            w_use_density: 0.8,
+            w_crosses_call: 0.4,
+            w_next_use_distance: 0.5,
+            w_confidence: 1.2,      // High priority for confidence
+            w_uncertainty: 0.5,
+            w_provenance: 0.6,      // Strong provenance preservation
+            high_confidence_threshold: 0.7,
+            low_confidence_threshold: 0.3,
+        }
+    }
+
+    /// Performance configuration prioritizing classical heuristics.
+    ///
+    /// For performance-critical code where raw speed matters more
+    /// than epistemic properties.
+    pub fn performance() -> Self {
+        Self {
+            w_use_density: 2.0,     // Strong preference for use density
+            w_crosses_call: 0.8,
+            w_next_use_distance: 1.0,
+            w_confidence: 0.3,      // Lower epistemic priority
+            w_uncertainty: 0.2,
+            w_provenance: 0.1,
+            high_confidence_threshold: 0.7,
+            low_confidence_threshold: 0.3,
+        }
+    }
+
     /// Load from JSON file.
     pub fn from_file(path: &str) -> Result<Self, Box<dyn std::error::Error>> {
         let content = std::fs::read_to_string(path)?;
@@ -300,6 +334,26 @@ impl AllocationMetrics {
         let mut file = File::create(path)?;
         file.write_all(self.to_json().as_bytes())?;
         Ok(())
+    }
+
+    /// Record a spill with given confidence and provenance.
+    /// Convenience method for testing.
+    pub fn record_spill(&mut self, confidence: f64, has_provenance: bool) {
+        self.total_spills += 1;
+
+        // Classify by confidence
+        if confidence >= 0.7 {
+            self.high_confidence_spills += 1;
+        } else if confidence <= 0.3 {
+            self.low_confidence_spills += 1;
+        } else {
+            self.medium_confidence_spills += 1;
+        }
+
+        // Track provenance
+        if has_provenance {
+            self.provenance_values_spilled += 1;
+        }
     }
 }
 
@@ -599,6 +653,221 @@ VERDICT: {}
 }
 
 // =============================================================================
+// Spill Candidate Selection
+// =============================================================================
+
+/// A candidate for spilling during register allocation.
+///
+/// This struct captures all the information needed to make a spill decision
+/// for a live interval, combining classical heuristics with epistemic metadata.
+#[derive(Debug, Clone)]
+pub struct SpillCandidate {
+    /// Index into the active interval list
+    pub index: usize,
+
+    /// Computed attention score (higher = more valuable, less likely to spill)
+    pub score: f64,
+
+    /// Epistemic metadata for this interval
+    pub epistemic: EpistemicMetadata,
+
+    /// Confidence classification
+    pub confidence_class: ConfidenceClass,
+
+    /// Use density (uses per instruction)
+    pub use_density: f64,
+
+    /// Whether this interval crosses a call
+    pub crosses_call: bool,
+
+    /// Distance to next use (in instructions)
+    pub next_use_distance: f64,
+}
+
+impl SpillCandidate {
+    /// Create a new spill candidate.
+    pub fn new(
+        index: usize,
+        use_density: f64,
+        crosses_call: bool,
+        next_use_distance: f64,
+        epistemic: EpistemicMetadata,
+        config: &AttentionConfig,
+    ) -> Self {
+        let confidence_class = epistemic.confidence_class(config);
+        let score = compute_attention_score(
+            use_density,
+            crosses_call,
+            next_use_distance,
+            &epistemic,
+            config,
+        );
+
+        Self {
+            index,
+            score,
+            epistemic,
+            confidence_class,
+            use_density,
+            crosses_call,
+            next_use_distance,
+        }
+    }
+}
+
+/// Select the best spill victim from a set of candidates.
+///
+/// This function implements the core spill selection logic for attention-based
+/// register allocation. It selects the candidate with the lowest attention score,
+/// meaning the least valuable interval to keep in a register.
+///
+/// # Arguments
+/// * `candidates` - Slice of spill candidates to choose from
+/// * `policy` - The allocation policy to use for selection
+///
+/// # Returns
+/// The index of the selected spill victim, or None if no candidates exist
+///
+/// # Selection Strategy
+///
+/// **Classic policy**: Uses only classical heuristics (use density, call crossing,
+/// next use distance) to select the spill victim.
+///
+/// **Attention policy**: Combines classical heuristics with epistemic metadata
+/// (confidence, uncertainty, provenance) using default weights.
+///
+/// **Calibrated policy**: Uses BO-optimized weights that have been empirically
+/// tuned for epistemic workloads.
+pub fn select_spill_victim(
+    candidates: &[SpillCandidate],
+    policy: AllocPolicy,
+) -> Option<usize> {
+    if candidates.is_empty() {
+        return None;
+    }
+
+    match policy {
+        AllocPolicy::Classic => {
+            // Classic: prefer spilling intervals with:
+            // 1. Low use density (fewer uses = less spill cost)
+            // 2. Not crossing calls (easier to reload)
+            // 3. Furthest next use (more time before reload needed)
+            candidates
+                .iter()
+                .min_by(|a, b| {
+                    // Lower use density is better for spilling
+                    let density_cmp = a.use_density.partial_cmp(&b.use_density)
+                        .unwrap_or(std::cmp::Ordering::Equal);
+                    if density_cmp != std::cmp::Ordering::Equal {
+                        return density_cmp;
+                    }
+
+                    // Prefer not crossing calls
+                    let call_cmp = a.crosses_call.cmp(&b.crosses_call);
+                    if call_cmp != std::cmp::Ordering::Equal {
+                        return call_cmp;
+                    }
+
+                    // Furthest next use is better (negate for min)
+                    b.next_use_distance.partial_cmp(&a.next_use_distance)
+                        .unwrap_or(std::cmp::Ordering::Equal)
+                })
+                .map(|c| c.index)
+        }
+
+        AllocPolicy::Attention | AllocPolicy::AttentionCalibrated => {
+            // Attention-based: select lowest attention score (least valuable)
+            candidates
+                .iter()
+                .min_by(|a, b| {
+                    a.score.partial_cmp(&b.score)
+                        .unwrap_or(std::cmp::Ordering::Equal)
+                })
+                .map(|c| c.index)
+        }
+    }
+}
+
+/// Select multiple spill victims to achieve a target register count.
+///
+/// This is useful when register pressure requires spilling multiple intervals
+/// at once. The function greedily selects the lowest-scoring candidates.
+///
+/// # Arguments
+/// * `candidates` - Mutable slice of spill candidates (will be sorted)
+/// * `policy` - The allocation policy to use
+/// * `count` - Number of victims to select
+///
+/// # Returns
+/// Vector of indices of selected spill victims
+pub fn select_spill_victims(
+    candidates: &mut [SpillCandidate],
+    policy: AllocPolicy,
+    count: usize,
+) -> Vec<usize> {
+    if candidates.is_empty() || count == 0 {
+        return Vec::new();
+    }
+
+    match policy {
+        AllocPolicy::Classic => {
+            // Sort by classic criteria (ascending = worse for keeping)
+            candidates.sort_by(|a, b| {
+                let density_cmp = a.use_density.partial_cmp(&b.use_density)
+                    .unwrap_or(std::cmp::Ordering::Equal);
+                if density_cmp != std::cmp::Ordering::Equal {
+                    return density_cmp;
+                }
+                a.crosses_call.cmp(&b.crosses_call)
+            });
+        }
+
+        AllocPolicy::Attention | AllocPolicy::AttentionCalibrated => {
+            // Sort by attention score (ascending = lower score = better to spill)
+            candidates.sort_by(|a, b| {
+                a.score.partial_cmp(&b.score)
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            });
+        }
+    }
+
+    candidates.iter()
+        .take(count)
+        .map(|c| c.index)
+        .collect()
+}
+
+/// Classify a confidence value into High/Medium/Low categories.
+///
+/// This is a standalone function version of `EpistemicMetadata::confidence_class()`.
+pub fn classify_confidence(confidence: f64, config: &AttentionConfig) -> ConfidenceClass {
+    if confidence >= config.high_confidence_threshold {
+        ConfidenceClass::High
+    } else if confidence <= config.low_confidence_threshold {
+        ConfidenceClass::Low
+    } else {
+        ConfidenceClass::Medium
+    }
+}
+
+/// Compute the attention score for a given set of interval characteristics.
+///
+/// This is the core scoring function that combines classical register allocation
+/// heuristics with epistemic metadata. Higher scores indicate more valuable
+/// intervals that should be kept in registers.
+///
+/// This is an alias for `compute_attention_score` with a more intuitive name.
+pub fn attention_score(
+    use_density: f64,
+    crosses_call: bool,
+    next_use_distance: f64,
+    epistemic: &EpistemicMetadata,
+    config: &AttentionConfig,
+) -> f64 {
+    compute_attention_score(use_density, crosses_call, next_use_distance, epistemic, config)
+}
+
+// =============================================================================
 // CLI Options
 // =============================================================================
 
@@ -726,5 +995,224 @@ mod tests {
         assert_eq!("attention".parse::<AllocPolicy>().unwrap(), AllocPolicy::Attention);
         assert_eq!("calibrated".parse::<AllocPolicy>().unwrap(), AllocPolicy::AttentionCalibrated);
         assert_eq!("bo".parse::<AllocPolicy>().unwrap(), AllocPolicy::AttentionCalibrated);
+    }
+
+    #[test]
+    fn test_spill_candidate_creation() {
+        let config = AttentionConfig::default();
+        let epistemic = EpistemicMetadata {
+            confidence: Some(0.8),
+            uncertainty: Some(0.2),
+            has_provenance: true,
+            provenance_depth: 2,
+            source_op: Some("mul".to_string()),
+        };
+
+        let candidate = SpillCandidate::new(
+            0,
+            0.5,      // use_density
+            false,    // crosses_call
+            10.0,     // next_use_distance
+            epistemic,
+            &config,
+        );
+
+        assert_eq!(candidate.index, 0);
+        assert!(candidate.score > 0.0);
+        assert_eq!(candidate.confidence_class, ConfidenceClass::High);
+        assert_eq!(candidate.use_density, 0.5);
+        assert!(!candidate.crosses_call);
+        assert_eq!(candidate.next_use_distance, 10.0);
+    }
+
+    #[test]
+    fn test_select_spill_victim_attention() {
+        let config = AttentionConfig::calibrated();
+
+        // High-value candidate (should NOT be spilled)
+        let high_value = SpillCandidate::new(
+            0,
+            0.8,   // high use density
+            true,  // crosses call
+            5.0,   // close next use
+            EpistemicMetadata {
+                confidence: Some(0.95),
+                uncertainty: Some(0.1),
+                has_provenance: true,
+                ..Default::default()
+            },
+            &config,
+        );
+
+        // Low-value candidate (should be spilled)
+        let low_value = SpillCandidate::new(
+            1,
+            0.1,    // low use density
+            false,  // no call crossing
+            100.0,  // far next use
+            EpistemicMetadata {
+                confidence: Some(0.2),
+                uncertainty: Some(0.8),
+                has_provenance: false,
+                ..Default::default()
+            },
+            &config,
+        );
+
+        let candidates = vec![high_value, low_value];
+
+        // Attention policy should select low-value (index 1)
+        let victim = select_spill_victim(&candidates, AllocPolicy::Attention);
+        assert_eq!(victim, Some(1), "Should select low-value candidate for spilling");
+
+        // Calibrated should also select low-value
+        let victim_cal = select_spill_victim(&candidates, AllocPolicy::AttentionCalibrated);
+        assert_eq!(victim_cal, Some(1), "Calibrated should also select low-value candidate");
+    }
+
+    #[test]
+    fn test_select_spill_victim_classic() {
+        let config = AttentionConfig::default();
+
+        // Low density, no call, far use (best for spilling in classic)
+        let best_spill = SpillCandidate::new(
+            0,
+            0.1,    // low density
+            false,  // no call
+            100.0,  // far use
+            EpistemicMetadata::default(),
+            &config,
+        );
+
+        // High density, crosses call, close use (worst for spilling)
+        let worst_spill = SpillCandidate::new(
+            1,
+            0.9,   // high density
+            true,  // crosses call
+            5.0,   // close use
+            EpistemicMetadata::default(),
+            &config,
+        );
+
+        let candidates = vec![best_spill, worst_spill];
+
+        // Classic should select best_spill (index 0) based on density
+        let victim = select_spill_victim(&candidates, AllocPolicy::Classic);
+        assert_eq!(victim, Some(0), "Classic should select based on use density");
+    }
+
+    #[test]
+    fn test_select_spill_victims_multiple() {
+        let config = AttentionConfig::calibrated();
+
+        let mut candidates: Vec<SpillCandidate> = (0..5).map(|i| {
+            SpillCandidate::new(
+                i,
+                0.1 * (i as f64 + 1.0),  // increasing density
+                false,
+                50.0,
+                EpistemicMetadata {
+                    confidence: Some(0.2 * (i as f64 + 1.0).min(1.0)),
+                    ..Default::default()
+                },
+                &config,
+            )
+        }).collect();
+
+        // Select 2 victims
+        let victims = select_spill_victims(&mut candidates, AllocPolicy::Attention, 2);
+        assert_eq!(victims.len(), 2);
+
+        // Should select the two lowest-scoring candidates
+        // With increasing confidence, candidates 0 and 1 should be lowest
+        assert!(victims.contains(&0) || victims.contains(&1));
+    }
+
+    #[test]
+    fn test_classify_confidence_standalone() {
+        let config = AttentionConfig::default();
+
+        assert_eq!(classify_confidence(0.9, &config), ConfidenceClass::High);
+        assert_eq!(classify_confidence(0.5, &config), ConfidenceClass::Medium);
+        assert_eq!(classify_confidence(0.1, &config), ConfidenceClass::Low);
+    }
+
+    #[test]
+    fn test_attention_score_alias() {
+        let config = AttentionConfig::default();
+        let epistemic = EpistemicMetadata {
+            confidence: Some(0.7),
+            uncertainty: Some(0.3),
+            has_provenance: true,
+            ..Default::default()
+        };
+
+        let score1 = attention_score(0.5, false, 20.0, &epistemic, &config);
+        let score2 = compute_attention_score(0.5, false, 20.0, &epistemic, &config);
+
+        assert!((score1 - score2).abs() < f64::EPSILON,
+            "attention_score and compute_attention_score should be identical");
+    }
+
+    #[test]
+    fn test_calibrated_weights_values() {
+        let calibrated = AttentionConfig::calibrated();
+
+        // Verify BO-optimized weights from 2025-12-28
+        assert!((calibrated.w_use_density - 1.7088).abs() < 0.0001);
+        assert!((calibrated.w_crosses_call - 0.4527).abs() < 0.0001);
+        assert!((calibrated.w_next_use_distance - 0.8802).abs() < 0.0001);
+        assert!((calibrated.w_confidence - 0.9374).abs() < 0.0001);
+        assert!((calibrated.w_uncertainty - 0.2411).abs() < 0.0001);
+        assert!((calibrated.w_provenance - 0.2013).abs() < 0.0001);
+    }
+
+    #[test]
+    fn test_select_spill_empty_candidates() {
+        let empty: Vec<SpillCandidate> = vec![];
+
+        assert_eq!(select_spill_victim(&empty, AllocPolicy::Classic), None);
+        assert_eq!(select_spill_victim(&empty, AllocPolicy::Attention), None);
+        assert_eq!(select_spill_victim(&empty, AllocPolicy::AttentionCalibrated), None);
+    }
+
+    #[test]
+    fn test_calibrated_prefers_high_confidence() {
+        let config = AttentionConfig::calibrated();
+
+        // Two candidates with same classical metrics but different confidence
+        let high_conf = SpillCandidate::new(
+            0,
+            0.5, false, 50.0,
+            EpistemicMetadata {
+                confidence: Some(0.95),
+                uncertainty: Some(0.05),
+                has_provenance: true,
+                ..Default::default()
+            },
+            &config,
+        );
+
+        let low_conf = SpillCandidate::new(
+            1,
+            0.5, false, 50.0,
+            EpistemicMetadata {
+                confidence: Some(0.2),
+                uncertainty: Some(0.8),
+                has_provenance: false,
+                ..Default::default()
+            },
+            &config,
+        );
+
+        // High confidence should have higher score
+        assert!(high_conf.score > low_conf.score,
+            "High confidence should have higher attention score. high={:.3}, low={:.3}",
+            high_conf.score, low_conf.score);
+
+        // Therefore low_conf should be selected for spilling
+        let candidates = vec![high_conf, low_conf];
+        let victim = select_spill_victim(&candidates, AllocPolicy::AttentionCalibrated);
+        assert_eq!(victim, Some(1), "Should spill low-confidence value");
     }
 }

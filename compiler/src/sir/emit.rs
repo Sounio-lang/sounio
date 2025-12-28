@@ -17,9 +17,13 @@
 //! 4. **Code Emission**: Encode instructions to bytes
 
 use super::alloc_policy::{
-    AllocPolicy, AttentionConfig, EpistemicMetadata, MetricsCollector,
+    AllocPolicy, EpistemicMetadata, MetricsCollector,
     SpillEvent, SpillReason, compute_attention_score,
 };
+
+// Re-export alloc_policy types for external use
+pub use super::alloc_policy::{AttentionConfig, AllocationMetrics};
+
 use super::blocks::{SirFunction, Terminator};
 use super::module::{Architecture, SirModule};
 use super::ops::*;

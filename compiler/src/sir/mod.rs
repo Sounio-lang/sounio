@@ -93,6 +93,8 @@ pub use alloc_policy::{
     AllocPolicy, AttentionConfig, ConfidenceClass, EpistemicMetadata,
     AllocationMetrics, SpillEvent, SpillReason, MetricsCollector,
     ABComparisonResult, AllocatorOptions, compute_attention_score,
+    SpillCandidate, select_spill_victim as cpu_select_spill_victim,
+    select_spill_victims, classify_confidence, attention_score,
 };
 
 // SKIR cost annotation system (declarative performance primitives)
