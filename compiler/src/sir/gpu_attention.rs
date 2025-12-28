@@ -36,7 +36,8 @@
 //! - CUDA Occupancy Calculator: https://developer.nvidia.com/cuda-occupancy-calculator
 //! - "Occupancy-Aware Register Allocation" (Coutinho et al., CGO 2016)
 
-use super::emit::{AttentionConfig, LiveInterval};
+use super::alloc_policy::AttentionConfig;
+use super::emit::LiveInterval;
 use std::cmp::Ordering;
 
 // Re-export for tests

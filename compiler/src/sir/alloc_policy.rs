@@ -333,7 +333,7 @@ pub enum SpillReason {
 // =============================================================================
 
 /// Collects allocation metrics during register allocation.
-#[derive(Default)]
+#[derive(Default, Debug)]
 pub struct MetricsCollector {
     pub enabled: bool,
     pub metrics: AllocationMetrics,
@@ -451,6 +451,19 @@ impl MetricsCollector {
         // Provenance preservation
         self.metrics.provenance_values_preserved = self.metrics.provenance_values_total
             .saturating_sub(self.metrics.provenance_values_spilled);
+    }
+
+    /// Reset the collector for a new function/allocation pass.
+    pub fn reset(&mut self) {
+        self.metrics = AllocationMetrics {
+            policy: self.metrics.policy.clone(),
+            ..Default::default()
+        };
+        self.spill_log.clear();
+        self.score_samples.clear();
+        self.kept_scores.clear();
+        self.spilled_scores.clear();
+        self.start_time = None;
     }
 }
 

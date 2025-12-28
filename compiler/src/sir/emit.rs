@@ -16,6 +16,10 @@
 //! 3. **Instruction Scheduling**: Reorder for pipeline efficiency
 //! 4. **Code Emission**: Encode instructions to bytes
 
+use super::alloc_policy::{
+    AllocPolicy, AttentionConfig, ConfidenceClass, EpistemicMetadata, MetricsCollector,
+    SpillEvent, SpillReason, compute_attention_score,
+};
 use super::blocks::{BasicBlock, SirFunction, Terminator};
 use super::module::{Architecture, SirModule, TargetTriple};
 use super::ops::*;
@@ -260,133 +264,10 @@ impl X86Reg {
 }
 
 // ============================================================================
-// ATTENTION-BASED REGISTER ALLOCATION CONFIGURATION
-// ============================================================================
-
-/// Configuration for the attention-based register allocator.
-///
-/// This unified configuration combines classical allocation heuristics with
-/// epistemic (confidence-aware) scoring. The attention score determines
-/// which values are most important to keep in registers.
-///
-/// Formula:
-/// attention_score = (w_use_density * use_density + w_crosses_call * crosses_call)  // classic
-///                 + (w_confidence * τ - w_uncertainty * σ + w_provenance * ρ)       // epistemic
-///
-/// Higher score = more important to keep in register
-/// Lower score = better candidate for spilling
-#[derive(Clone, Debug)]
-pub struct AttentionConfig {
-    // === Classic component ===
-    /// Weight for use density (uses per unit of lifetime)
-    pub w_use_density: f64,
-    /// Weight for values that cross function calls
-    pub w_crosses_call: f64,
-
-    // === Epistemic component ===
-    /// Weight for confidence τ ∈ [0,1]
-    pub w_confidence: f64,
-    /// Weight for uncertainty σ ∈ [0,1] (subtracted, so higher = worse)
-    pub w_uncertainty: f64,
-    /// Weight for provenance tracking ρ ∈ {0,1}
-    pub w_provenance: f64,
-}
-
-impl Default for AttentionConfig {
-    fn default() -> Self {
-        Self {
-            w_use_density: 1.0,
-            w_crosses_call: 0.5,
-            w_confidence: 0.5,
-            w_uncertainty: 0.3,
-            w_provenance: 0.2,
-        }
-    }
-}
-
-impl AttentionConfig {
-    /// Create a config optimized for scientific computing
-    /// (prioritizes confidence and provenance)
-    pub fn scientific() -> Self {
-        Self {
-            w_use_density: 0.8,
-            w_crosses_call: 0.4,
-            w_confidence: 0.7,
-            w_uncertainty: 0.5,
-            w_provenance: 0.4,
-        }
-    }
-
-    /// Create a config optimized for performance
-    /// (prioritizes classical heuristics)
-    pub fn performance() -> Self {
-        Self {
-            w_use_density: 1.5,
-            w_crosses_call: 0.8,
-            w_confidence: 0.2,
-            w_uncertainty: 0.1,
-            w_provenance: 0.1,
-        }
-    }
-}
-
-/// Metrics collected during register allocation for validation
-#[derive(Debug, Clone, Default)]
-pub struct AllocationMetrics {
-    /// Total number of spills performed
-    pub total_spills: usize,
-    /// Spills of high-confidence values (τ > 0.7)
-    pub high_confidence_spills: usize,
-    /// Spills of low-confidence values (τ < 0.3)
-    pub low_confidence_spills: usize,
-    /// Number of provenance-tracked values that stayed in registers
-    pub provenance_preserved: usize,
-    /// Number of provenance-tracked values that were spilled
-    pub provenance_spilled: usize,
-    /// Total values allocated
-    pub total_values: usize,
-}
-
-impl AllocationMetrics {
-    /// Calculate the epistemic quality score for the allocation.
-    ///
-    /// A good epistemic policy spills more low-confidence values
-    /// and preserves high-confidence values. Score > 1.0 is good.
-    pub fn epistemic_quality(&self) -> f64 {
-        if self.total_spills == 0 {
-            return 1.0;
-        }
-
-        let good_spills = self.low_confidence_spills as f64;
-        let bad_spills = self.high_confidence_spills as f64;
-
-        (good_spills + 1.0) / (bad_spills + 1.0)
-    }
-
-    /// Record a spill event with confidence information
-    pub fn record_spill(&mut self, confidence: f64, has_provenance: bool) {
-        self.total_spills += 1;
-
-        if confidence > 0.7 {
-            self.high_confidence_spills += 1;
-        } else if confidence < 0.3 {
-            self.low_confidence_spills += 1;
-        }
-
-        if has_provenance {
-            self.provenance_spilled += 1;
-        }
-    }
-
-    /// Record that a provenance value stayed in registers
-    pub fn record_provenance_preserved(&mut self) {
-        self.provenance_preserved += 1;
-    }
-}
-
-// ============================================================================
 // LIVE INTERVAL AND REGISTER ALLOCATION
 // ============================================================================
+//
+// Note: AttentionConfig and AllocationMetrics are now imported from alloc_policy module
 
 /// A live interval representing when a value is live in the program
 ///
@@ -610,11 +491,29 @@ pub struct RegisterAllocator {
     pub used_callee_saved: HashSet<X86Reg>,
     /// Instruction positions of call instructions (for crosses_call analysis)
     call_positions: Vec<usize>,
+
+    // === A/B POLICY COMPARISON FIELDS ===
+    /// Register allocation policy (Classic, Attention, AttentionCalibrated)
+    policy: AllocPolicy,
+    /// Attention weight configuration (only used when policy is Attention*)
+    attention_config: AttentionConfig,
+    /// Metrics collector for A/B comparison
+    pub metrics: MetricsCollector,
 }
 
 impl RegisterAllocator {
-    /// Create a new register allocator
+    /// Create a new register allocator with default Attention policy
     pub fn new() -> Self {
+        Self::with_policy(AllocPolicy::default(), AttentionConfig::default())
+    }
+
+    /// Create a register allocator with specified policy and config
+    pub fn with_policy(policy: AllocPolicy, config: AttentionConfig) -> Self {
+        let attention_config = match policy {
+            AllocPolicy::AttentionCalibrated => AttentionConfig::calibrated(),
+            _ => config,
+        };
+
         Self {
             intervals: Vec::new(),
             active: Vec::new(),
@@ -624,7 +523,20 @@ impl RegisterAllocator {
             value_to_interval: HashMap::new(),
             used_callee_saved: HashSet::new(),
             call_positions: Vec::new(),
+            policy,
+            attention_config,
+            metrics: MetricsCollector::new(policy, true),
         }
+    }
+
+    /// Get the current allocation policy
+    pub fn policy(&self) -> AllocPolicy {
+        self.policy
+    }
+
+    /// Get the attention configuration
+    pub fn attention_config(&self) -> &AttentionConfig {
+        &self.attention_config
     }
 
     /// Reset the allocator for a new function
@@ -637,6 +549,7 @@ impl RegisterAllocator {
         self.value_to_interval.clear();
         self.used_callee_saved.clear();
         self.call_positions.clear();
+        self.metrics.reset();
     }
 
     /// Main entry point: allocate registers for a function
@@ -1013,15 +926,15 @@ impl RegisterAllocator {
         self.free_xmm_regs.pop()
     }
 
-    /// Handle register spilling - EPISTEMIC-AWARE
+    /// Handle register spilling - POLICY-AWARE
     ///
-    /// This is the breakthrough: the first compiler in history that makes spill
-    /// decisions based on TRUST, not just lifetime.
+    /// Supports multiple allocation policies:
+    /// - **Classic**: Furthest next use heuristic (traditional)
+    /// - **Attention**: Epistemic-aware scoring with configurable weights
+    /// - **AttentionCalibrated**: Attention with BO-optimized weights
     ///
-    /// Strategy:
-    /// 1. Preferentially spill LOW-CONFIDENCE values (they represent uncertain data)
-    /// 2. Preferentially KEEP HIGH-CONFIDENCE values in registers (they're scientifically rigorous)
-    /// 3. Among equal confidence, fall back to classical "ends furthest" heuristic
+    /// The Attention policy is the breakthrough: the first compiler in history
+    /// that makes spill decisions based on TRUST, not just lifetime.
     ///
     /// The result: Code paths with strong epistemic backing execute faster
     /// (more register-resident). Dubious data is naturally penalized.
@@ -1029,52 +942,15 @@ impl RegisterAllocator {
     fn spill_at_interval(&mut self, current: usize) -> Result<(), EmitError> {
         if self.active.is_empty() {
             // No active intervals - must spill the current interval
+            self.record_spill_event(current, SpillReason::RegisterPressure);
             return self.spill_interval(current);
         }
 
-        // === EPISTEMIC-AWARE SPILL SELECTION ===
-        // Find the BEST interval to spill using a combined score:
-        // - Lower epistemic_weight → more likely to spill
-        // - Longer remaining lifetime → more likely to spill (classic heuristic)
-        // The formula weights epistemic trust heavily:
-        //   spill_score = (1.0 - epistemic_weight) * 0.6 + normalized_lifetime * 0.4
-
-        let current_weight = self.intervals[current].epistemic_weight;
-        let current_end = self.intervals[current].end;
-
-        // Find the best spill candidate among active intervals
-        let mut best_spill_idx: Option<usize> = None;
-        let mut best_spill_score = f64::MIN;
-
-        for &active_idx in &self.active {
-            let interval = &self.intervals[active_idx];
-            let weight = interval.epistemic_weight;
-            let remaining_life = (interval.end - interval.start) as f64;
-
-            // Combined score: lower confidence + longer life = better spill candidate
-            // Epistemic weight is MORE important than lifetime (0.7 vs 0.3)
-            let spill_score = (1.0 - weight) * 0.7 + (remaining_life / 1000.0).min(1.0) * 0.3;
-
-            if spill_score > best_spill_score {
-                best_spill_score = spill_score;
-                best_spill_idx = Some(active_idx);
+        let spill_candidate = match self.policy {
+            AllocPolicy::Classic => self.select_spill_classic(current),
+            AllocPolicy::Attention | AllocPolicy::AttentionCalibrated => {
+                self.select_spill_attention(current)
             }
-        }
-
-        // Compare with current interval's spill score
-        let current_life = (current_end - self.intervals[current].start) as f64;
-        let current_spill_score =
-            (1.0 - current_weight) * 0.7 + (current_life / 1000.0).min(1.0) * 0.3;
-
-        let spill_candidate = if let Some(candidate) = best_spill_idx {
-            // Spill the one with higher spill score (lower confidence, longer life)
-            if best_spill_score > current_spill_score {
-                candidate
-            } else {
-                current
-            }
-        } else {
-            current
         };
 
         if spill_candidate != current {
@@ -1085,6 +961,9 @@ impl RegisterAllocator {
 
             // Transfer register to current interval
             self.intervals[current].reg = Some(reg);
+
+            // Record the spill event
+            self.record_spill_event(spill_candidate, SpillReason::RegisterPressure);
 
             // Spill the candidate to stack
             self.spill_interval(spill_candidate)?;
@@ -1099,10 +978,136 @@ impl RegisterAllocator {
             }
         } else {
             // Spill current interval
+            self.record_spill_event(current, SpillReason::RegisterPressure);
             self.spill_interval(current)?;
         }
 
         Ok(())
+    }
+
+    /// Classic spill selection: furthest next use heuristic
+    fn select_spill_classic(&self, current: usize) -> usize {
+        let current_end = self.intervals[current].end;
+
+        // Find the interval with the furthest end point
+        let mut best_spill_idx = current;
+        let mut furthest_end = current_end;
+
+        for &active_idx in &self.active {
+            let interval = &self.intervals[active_idx];
+            if interval.end > furthest_end {
+                furthest_end = interval.end;
+                best_spill_idx = active_idx;
+            }
+        }
+
+        best_spill_idx
+    }
+
+    /// Attention-based spill selection: epistemic-aware scoring
+    fn select_spill_attention(&self, current: usize) -> usize {
+        let current_interval = &self.intervals[current];
+        let current_score = self.compute_interval_attention_score(current);
+
+        // Find the best spill candidate (LOWEST attention score = best to spill)
+        let mut best_spill_idx = current;
+        let mut lowest_score = current_score;
+
+        for &active_idx in &self.active {
+            let score = self.compute_interval_attention_score(active_idx);
+
+            // Lower score = better spill candidate
+            // (we want to keep high-scoring values in registers)
+            if score < lowest_score {
+                lowest_score = score;
+                best_spill_idx = active_idx;
+            }
+        }
+
+        best_spill_idx
+    }
+
+    /// Compute attention score for a live interval
+    fn compute_interval_attention_score(&self, idx: usize) -> f64 {
+        let interval = &self.intervals[idx];
+
+        // Compute use density (uses per instruction in live range)
+        let live_range = (interval.end - interval.start).max(1) as f64;
+        let use_density = interval.use_positions.len() as f64 / live_range;
+
+        // Compute next use distance (normalized)
+        let current_pos = interval.start; // Approximation
+        let next_use_distance = interval
+            .use_positions
+            .iter()
+            .filter(|&&pos| pos >= current_pos)
+            .min()
+            .map(|&pos| (pos - current_pos) as f64 / 100.0)
+            .unwrap_or(1.0);
+
+        // Build epistemic metadata
+        let epistemic = EpistemicMetadata {
+            confidence: Some(interval.max_confidence),
+            uncertainty: Some(interval.uncertainty),
+            has_provenance: interval.has_provenance,
+            provenance_depth: if interval.has_provenance { 1 } else { 0 },
+            source_op: None,
+        };
+
+        compute_attention_score(
+            use_density,
+            interval.crosses_call,
+            next_use_distance,
+            &epistemic,
+            &self.attention_config,
+        )
+    }
+
+    /// Record a spill event for metrics collection
+    fn record_spill_event(&mut self, idx: usize, reason: SpillReason) {
+        let interval = &self.intervals[idx];
+
+        // Build epistemic metadata for attention score computation
+        let epistemic = EpistemicMetadata {
+            confidence: Some(interval.max_confidence),
+            uncertainty: Some(interval.uncertainty),
+            has_provenance: interval.has_provenance,
+            provenance_depth: if interval.has_provenance { 1 } else { 0 },
+            source_op: None,
+        };
+
+        // Classify confidence level
+        let confidence_class = epistemic.confidence_class(&self.attention_config);
+
+        // Compute the attention score for this interval
+        let live_range = (interval.end - interval.start).max(1) as f64;
+        let use_density = interval.use_positions.len() as f64 / live_range;
+        let next_use_distance = interval
+            .use_positions
+            .first()
+            .map(|&pos| (pos.saturating_sub(interval.start)) as f64 / 100.0)
+            .unwrap_or(1.0);
+
+        let attention_score = compute_attention_score(
+            use_density,
+            interval.crosses_call,
+            next_use_distance,
+            &epistemic,
+            &self.attention_config,
+        );
+
+        let event = SpillEvent {
+            value: interval.value.index() as u32,
+            position: interval.start as u32,
+            attention_score,
+            confidence: Some(interval.max_confidence),
+            uncertainty: Some(interval.uncertainty),
+            has_provenance: interval.has_provenance,
+            confidence_class,
+            reason,
+        };
+
+        self.metrics.record_spill(event);
     }
 
     /// Assign a stack spill slot to an interval
