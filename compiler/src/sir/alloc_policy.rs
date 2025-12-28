@@ -95,15 +95,19 @@ impl Default for AttentionConfig {
 }
 
 impl AttentionConfig {
-    /// BO-calibrated configuration (placeholder - replace with actual θ*).
+    /// BO-calibrated configuration (optimized 2025-12-28).
+    ///
+    /// These weights were found via Bayesian Optimization on simulated
+    /// epistemic workloads. Key insight: high w_confidence (0.94) confirms
+    /// the strategy of prioritizing high-confidence values for register retention.
     pub fn calibrated() -> Self {
         Self {
-            w_use_density: 1.12,
-            w_crosses_call: 0.48,
-            w_next_use_distance: 0.25,
-            w_confidence: 0.42,
-            w_uncertainty: 0.28,
-            w_provenance: 0.15,
+            w_use_density: 1.7088,
+            w_crosses_call: 0.4527,
+            w_next_use_distance: 0.8802,
+            w_confidence: 0.9374,
+            w_uncertainty: 0.2411,
+            w_provenance: 0.2013,
             high_confidence_threshold: 0.7,
             low_confidence_threshold: 0.3,
         }
