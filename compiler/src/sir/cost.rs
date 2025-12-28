@@ -65,7 +65,7 @@
 use std::collections::HashMap;
 use std::fmt;
 
-use super::values::{FuncId, ValueId};
+use super::values::FuncId;
 
 // ============================================================================
 // Primitive 1: Tiling

@@ -7,8 +7,8 @@ use super::blocks::{BasicBlock, Instruction, SirFunction, Terminator};
 use super::metadata::{EpistemicMetadata, Metadata, MetadataStore};
 use super::module::SirModule;
 use super::ops::*;
-use super::types::{DistributionKind, ScalarType, SirType};
-use super::values::{BlockId, Constant, FuncId, Value, ValueId, ValueMetadata};
+use super::types::{DistributionKind, SirType};
+use super::values::{BlockId, Constant, FuncId, Value, ValueId};
 
 /// Builder for constructing SIR functions
 pub struct SirBuilder<'m> {

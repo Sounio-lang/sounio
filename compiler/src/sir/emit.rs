@@ -17,15 +17,15 @@
 //! 4. **Code Emission**: Encode instructions to bytes
 
 use super::alloc_policy::{
-    AllocPolicy, AttentionConfig, ConfidenceClass, EpistemicMetadata, MetricsCollector,
+    AllocPolicy, AttentionConfig, EpistemicMetadata, MetricsCollector,
     SpillEvent, SpillReason, compute_attention_score,
 };
-use super::blocks::{BasicBlock, SirFunction, Terminator};
-use super::module::{Architecture, SirModule, TargetTriple};
+use super::blocks::{SirFunction, Terminator};
+use super::module::{Architecture, SirModule};
 use super::ops::*;
 use super::types::SirType;
 use super::values::{Constant, ValueId};
-use std::collections::{BTreeSet, HashMap, HashSet};
+use std::collections::{HashMap, HashSet};
 
 /// Emitted code segment
 #[derive(Debug, Clone)]

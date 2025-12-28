@@ -5,7 +5,6 @@
 //!
 //! Usage: souc build --alloc-policy=attention --emit-metrics=metrics.json
 
-use std::collections::HashMap;
 use std::time::{Duration, Instant};
 use std::fs::File;
 use std::io::Write;

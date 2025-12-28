@@ -14,7 +14,7 @@
 //! - **Probability**: Distribution sampling (domain-specific)
 //! - **Scientific**: ODE steps, matrix ops (domain-specific)
 
-use super::types::{CallingConv, DistributionKind, ScalarType, SirType, VectorType};
+use super::types::{CallingConv, DistributionKind, SirType};
 use super::values::{BlockId, Constant, FuncId, ValueId};
 use std::fmt;
 
