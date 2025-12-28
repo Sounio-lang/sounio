@@ -1393,6 +1393,63 @@ pub struct MemoryOperands {
     pub nontemporal: bool,
 }
 
+impl ExecutionModeKind {
+    /// Convert to SPIR-V value and extra operands
+    pub fn to_spirv(&self) -> (u32, Vec<u32>) {
+        match self {
+            ExecutionModeKind::LocalSize { x, y, z } => (17, vec![*x, *y, *z]),
+            ExecutionModeKind::OriginUpperLeft => (7, vec![]),
+            ExecutionModeKind::OriginLowerLeft => (8, vec![]),
+            ExecutionModeKind::EarlyFragmentTests => (35, vec![]),
+            ExecutionModeKind::DepthReplacing => (12, vec![]),
+        }
+    }
+}
+
+impl Decoration {
+    /// Convert to SPIR-V decoration value and extra operands
+    pub fn to_spirv(&self) -> (u32, Vec<u32>) {
+        match self {
+            Decoration::BuiltIn(b) => (11, vec![b.to_spirv()]),
+            Decoration::Location(l) => (30, vec![*l]),
+            Decoration::Binding(b) => (33, vec![*b]),
+            Decoration::DescriptorSet(d) => (34, vec![*d]),
+            Decoration::Offset(o) => (35, vec![*o]),
+            Decoration::ArrayStride(s) => (6, vec![*s]),
+            Decoration::MatrixStride(s) => (7, vec![*s]),
+            Decoration::NonWritable => (25, vec![]),
+            Decoration::NonReadable => (24, vec![]),
+            Decoration::Restrict => (19, vec![]),
+            Decoration::Aliased => (20, vec![]),
+            Decoration::Block => (2, vec![]),
+            Decoration::BufferBlock => (3, vec![]),
+        }
+    }
+}
+
+impl FunctionControl {
+    /// Convert to SPIR-V bitmask
+    pub fn to_spirv(&self) -> u32 {
+        let mut mask = 0u32;
+        if self.inline { mask |= 1; }
+        if self.dont_inline { mask |= 2; }
+        if self.pure_ { mask |= 4; }
+        if self.const_ { mask |= 8; }
+        mask
+    }
+}
+
+impl MemoryOperands {
+    /// Convert to SPIR-V bitmask
+    pub fn to_spirv(&self) -> u32 {
+        let mut mask = 0u32;
+        if self.volatile { mask |= 1; }
+        if self.aligned.is_some() { mask |= 2; }
+        if self.nontemporal { mask |= 4; }
+        mask
+    }
+}
+
 /// Scope for atomic/barrier operations
 #[derive(Debug, Clone, Copy)]
 pub enum Scope {
@@ -1895,30 +1952,583 @@ pub struct SpirVModule {
     pub bound: Word,
 }
 
+// SPIR-V Opcodes
+mod opcodes {
+    pub const OP_NOP: u32 = 0;
+    pub const OP_NAME: u32 = 5;
+    pub const OP_MEMBER_NAME: u32 = 6;
+    pub const OP_EXTENSION: u32 = 10;
+    pub const OP_EXT_INST_IMPORT: u32 = 11;
+    pub const OP_MEMORY_MODEL: u32 = 14;
+    pub const OP_ENTRY_POINT: u32 = 15;
+    pub const OP_EXECUTION_MODE: u32 = 16;
+    pub const OP_CAPABILITY: u32 = 17;
+    pub const OP_TYPE_VOID: u32 = 19;
+    pub const OP_TYPE_BOOL: u32 = 20;
+    pub const OP_TYPE_INT: u32 = 21;
+    pub const OP_TYPE_FLOAT: u32 = 22;
+    pub const OP_TYPE_VECTOR: u32 = 23;
+    pub const OP_TYPE_ARRAY: u32 = 28;
+    pub const OP_TYPE_RUNTIME_ARRAY: u32 = 29;
+    pub const OP_TYPE_STRUCT: u32 = 30;
+    pub const OP_TYPE_POINTER: u32 = 32;
+    pub const OP_TYPE_FUNCTION: u32 = 33;
+    pub const OP_CONSTANT: u32 = 43;
+    pub const OP_CONSTANT_TRUE: u32 = 41;
+    pub const OP_CONSTANT_FALSE: u32 = 42;
+    pub const OP_CONSTANT_COMPOSITE: u32 = 44;
+    pub const OP_CONSTANT_NULL: u32 = 46;
+    pub const OP_VARIABLE: u32 = 59;
+    pub const OP_DECORATE: u32 = 71;
+    pub const OP_MEMBER_DECORATE: u32 = 72;
+    pub const OP_FUNCTION: u32 = 54;
+    pub const OP_FUNCTION_PARAMETER: u32 = 55;
+    pub const OP_FUNCTION_END: u32 = 56;
+    pub const OP_LABEL: u32 = 248;
+    pub const OP_LOAD: u32 = 61;
+    pub const OP_STORE: u32 = 62;
+    pub const OP_ACCESS_CHAIN: u32 = 65;
+    pub const OP_IADD: u32 = 128;
+    pub const OP_ISUB: u32 = 130;
+    pub const OP_IMUL: u32 = 132;
+    pub const OP_SDIV: u32 = 135;
+    pub const OP_UDIV: u32 = 134;
+    pub const OP_SREM: u32 = 139;
+    pub const OP_UREM: u32 = 138;
+    pub const OP_SNEGATE: u32 = 126;
+    pub const OP_FADD: u32 = 129;
+    pub const OP_FSUB: u32 = 131;
+    pub const OP_FMUL: u32 = 133;
+    pub const OP_FDIV: u32 = 136;
+    pub const OP_FREM: u32 = 140;
+    pub const OP_FNEGATE: u32 = 127;
+    pub const OP_RETURN: u32 = 253;
+    pub const OP_RETURN_VALUE: u32 = 254;
+    pub const OP_BRANCH: u32 = 249;
+    pub const OP_BRANCH_CONDITIONAL: u32 = 250;
+    pub const OP_COMPOSITE_EXTRACT: u32 = 81;
+    pub const OP_COMPOSITE_CONSTRUCT: u32 = 80;
+}
+
+impl SpirVInst {
+    /// Encode instruction to SPIR-V words
+    pub fn encode(&self) -> Vec<u32> {
+        use opcodes::*;
+        let mut words = Vec::new();
+
+        match self {
+            SpirVInst::Capability(cap) => {
+                words.push((2 << 16) | OP_CAPABILITY);
+                words.push(cap.to_spirv());
+            }
+            SpirVInst::Extension(name) => {
+                let name_words = encode_string(name);
+                words.push(((1 + name_words.len() as u32) << 16) | OP_EXTENSION);
+                words.extend(name_words);
+            }
+            SpirVInst::ExtInstImport { result, name } => {
+                let name_words = encode_string(name);
+                words.push(((2 + name_words.len() as u32) << 16) | OP_EXT_INST_IMPORT);
+                words.push(result.0);
+                words.extend(name_words);
+            }
+            SpirVInst::MemoryModel { addressing, memory } => {
+                words.push((3 << 16) | OP_MEMORY_MODEL);
+                words.push(addressing.to_spirv());
+                words.push(memory.to_spirv());
+            }
+            SpirVInst::EntryPoint { execution_model, entry_point, name, interface } => {
+                let name_words = encode_string(name);
+                let len = 3 + name_words.len() as u32 + interface.len() as u32;
+                words.push((len << 16) | OP_ENTRY_POINT);
+                words.push(execution_model.to_spirv());
+                words.push(entry_point.0);
+                words.extend(name_words);
+                for id in interface {
+                    words.push(id.0);
+                }
+            }
+            SpirVInst::ExecutionMode { entry_point, mode } => {
+                let (mode_val, extra) = mode.to_spirv();
+                let len = 3 + extra.len() as u32;
+                words.push((len << 16) | OP_EXECUTION_MODE);
+                words.push(entry_point.0);
+                words.push(mode_val);
+                words.extend(extra);
+            }
+            SpirVInst::TypeVoid { result } => {
+                words.push((2 << 16) | OP_TYPE_VOID);
+                words.push(result.0);
+            }
+            SpirVInst::TypeBool { result } => {
+                words.push((2 << 16) | OP_TYPE_BOOL);
+                words.push(result.0);
+            }
+            SpirVInst::TypeInt { result, width, signed } => {
+                words.push((4 << 16) | OP_TYPE_INT);
+                words.push(result.0);
+                words.push(*width);
+                words.push(if *signed { 1 } else { 0 });
+            }
+            SpirVInst::TypeFloat { result, width } => {
+                words.push((3 << 16) | OP_TYPE_FLOAT);
+                words.push(result.0);
+                words.push(*width);
+            }
+            SpirVInst::TypeVector { result, component, count } => {
+                words.push((4 << 16) | OP_TYPE_VECTOR);
+                words.push(result.0);
+                words.push(component.0);
+                words.push(*count);
+            }
+            SpirVInst::TypeArray { result, element, length } => {
+                words.push((4 << 16) | OP_TYPE_ARRAY);
+                words.push(result.0);
+                words.push(element.0);
+                words.push(length.0);
+            }
+            SpirVInst::TypeRuntimeArray { result, element } => {
+                words.push((3 << 16) | OP_TYPE_RUNTIME_ARRAY);
+                words.push(result.0);
+                words.push(element.0);
+            }
+            SpirVInst::TypeStruct { result, members } => {
+                let len = 2 + members.len() as u32;
+                words.push((len << 16) | OP_TYPE_STRUCT);
+                words.push(result.0);
+                for m in members {
+                    words.push(m.0);
+                }
+            }
+            SpirVInst::TypePointer { result, storage_class, pointee } => {
+                words.push((4 << 16) | OP_TYPE_POINTER);
+                words.push(result.0);
+                words.push(storage_class.to_spirv());
+                words.push(pointee.0);
+            }
+            SpirVInst::TypeFunction { result, return_type, params } => {
+                let len = 3 + params.len() as u32;
+                words.push((len << 16) | OP_TYPE_FUNCTION);
+                words.push(result.0);
+                words.push(return_type.0);
+                for p in params {
+                    words.push(p.0);
+                }
+            }
+            SpirVInst::Constant { result, ty, value } => {
+                let len = 3 + value.len() as u32;
+                words.push((len << 16) | OP_CONSTANT);
+                words.push(ty.0);
+                words.push(result.0);
+                words.extend(value);
+            }
+            SpirVInst::ConstantTrue { result, ty } => {
+                words.push((3 << 16) | OP_CONSTANT_TRUE);
+                words.push(ty.0);
+                words.push(result.0);
+            }
+            SpirVInst::ConstantFalse { result, ty } => {
+                words.push((3 << 16) | OP_CONSTANT_FALSE);
+                words.push(ty.0);
+                words.push(result.0);
+            }
+            SpirVInst::ConstantComposite { result, ty, constituents } => {
+                let len = 3 + constituents.len() as u32;
+                words.push((len << 16) | OP_CONSTANT_COMPOSITE);
+                words.push(ty.0);
+                words.push(result.0);
+                for c in constituents {
+                    words.push(c.0);
+                }
+            }
+            SpirVInst::ConstantNull { result, ty } => {
+                words.push((3 << 16) | OP_CONSTANT_NULL);
+                words.push(ty.0);
+                words.push(result.0);
+            }
+            SpirVInst::Variable { result, ty, storage_class, initializer } => {
+                let len = if initializer.is_some() { 5 } else { 4 };
+                words.push((len << 16) | OP_VARIABLE);
+                words.push(ty.0);
+                words.push(result.0);
+                words.push(storage_class.to_spirv());
+                if let Some(init) = initializer {
+                    words.push(init.0);
+                }
+            }
+            SpirVInst::Decorate { target, decoration } => {
+                let (dec_val, extra) = decoration.to_spirv();
+                let len = 3 + extra.len() as u32;
+                words.push((len << 16) | OP_DECORATE);
+                words.push(target.0);
+                words.push(dec_val);
+                words.extend(extra);
+            }
+            SpirVInst::MemberDecorate { struct_type, member, decoration } => {
+                let (dec_val, extra) = decoration.to_spirv();
+                let len = 4 + extra.len() as u32;
+                words.push((len << 16) | OP_MEMBER_DECORATE);
+                words.push(struct_type.0);
+                words.push(*member);
+                words.push(dec_val);
+                words.extend(extra);
+            }
+            SpirVInst::Function { result, result_type, control, function_type } => {
+                words.push((5 << 16) | OP_FUNCTION);
+                words.push(result_type.0);
+                words.push(result.0);
+                words.push(control.to_spirv());
+                words.push(function_type.0);
+            }
+            SpirVInst::FunctionParameter { result, ty } => {
+                words.push((3 << 16) | OP_FUNCTION_PARAMETER);
+                words.push(ty.0);
+                words.push(result.0);
+            }
+            SpirVInst::FunctionEnd => {
+                words.push((1 << 16) | OP_FUNCTION_END);
+            }
+            SpirVInst::Label { result } => {
+                words.push((2 << 16) | OP_LABEL);
+                words.push(result.0);
+            }
+            SpirVInst::Load { result, ty, pointer, memory_operands } => {
+                let len = if memory_operands.is_some() { 5 } else { 4 };
+                words.push((len << 16) | OP_LOAD);
+                words.push(ty.0);
+                words.push(result.0);
+                words.push(pointer.0);
+                if let Some(mo) = memory_operands {
+                    words.push(mo.to_spirv());
+                }
+            }
+            SpirVInst::Store { pointer, object, memory_operands } => {
+                let len = if memory_operands.is_some() { 4 } else { 3 };
+                words.push((len << 16) | OP_STORE);
+                words.push(pointer.0);
+                words.push(object.0);
+                if let Some(mo) = memory_operands {
+                    words.push(mo.to_spirv());
+                }
+            }
+            SpirVInst::AccessChain { result, ty, base, indexes } => {
+                let len = 4 + indexes.len() as u32;
+                words.push((len << 16) | OP_ACCESS_CHAIN);
+                words.push(ty.0);
+                words.push(result.0);
+                words.push(base.0);
+                for idx in indexes {
+                    words.push(idx.0);
+                }
+            }
+            SpirVInst::IAdd { result, ty, a, b } => {
+                words.push((5 << 16) | OP_IADD);
+                words.push(ty.0);
+                words.push(result.0);
+                words.push(a.0);
+                words.push(b.0);
+            }
+            SpirVInst::ISub { result, ty, a, b } => {
+                words.push((5 << 16) | OP_ISUB);
+                words.push(ty.0);
+                words.push(result.0);
+                words.push(a.0);
+                words.push(b.0);
+            }
+            SpirVInst::IMul { result, ty, a, b } => {
+                words.push((5 << 16) | OP_IMUL);
+                words.push(ty.0);
+                words.push(result.0);
+                words.push(a.0);
+                words.push(b.0);
+            }
+            SpirVInst::SDiv { result, ty, a, b } => {
+                words.push((5 << 16) | OP_SDIV);
+                words.push(ty.0);
+                words.push(result.0);
+                words.push(a.0);
+                words.push(b.0);
+            }
+            SpirVInst::UDiv { result, ty, a, b } => {
+                words.push((5 << 16) | OP_UDIV);
+                words.push(ty.0);
+                words.push(result.0);
+                words.push(a.0);
+                words.push(b.0);
+            }
+            SpirVInst::SRem { result, ty, a, b } => {
+                words.push((5 << 16) | OP_SREM);
+                words.push(ty.0);
+                words.push(result.0);
+                words.push(a.0);
+                words.push(b.0);
+            }
+            SpirVInst::URem { result, ty, a, b } => {
+                words.push((5 << 16) | OP_UREM);
+                words.push(ty.0);
+                words.push(result.0);
+                words.push(a.0);
+                words.push(b.0);
+            }
+            SpirVInst::SNegate { result, ty, operand } => {
+                words.push((4 << 16) | OP_SNEGATE);
+                words.push(ty.0);
+                words.push(result.0);
+                words.push(operand.0);
+            }
+            SpirVInst::FAdd { result, ty, a, b } => {
+                words.push((5 << 16) | OP_FADD);
+                words.push(ty.0);
+                words.push(result.0);
+                words.push(a.0);
+                words.push(b.0);
+            }
+            SpirVInst::FSub { result, ty, a, b } => {
+                words.push((5 << 16) | OP_FSUB);
+                words.push(ty.0);
+                words.push(result.0);
+                words.push(a.0);
+                words.push(b.0);
+            }
+            SpirVInst::FMul { result, ty, a, b } => {
+                words.push((5 << 16) | OP_FMUL);
+                words.push(ty.0);
+                words.push(result.0);
+                words.push(a.0);
+                words.push(b.0);
+            }
+            SpirVInst::FDiv { result, ty, a, b } => {
+                words.push((5 << 16) | OP_FDIV);
+                words.push(ty.0);
+                words.push(result.0);
+                words.push(a.0);
+                words.push(b.0);
+            }
+            SpirVInst::FRem { result, ty, a, b } => {
+                words.push((5 << 16) | OP_FREM);
+                words.push(ty.0);
+                words.push(result.0);
+                words.push(a.0);
+                words.push(b.0);
+            }
+            SpirVInst::FNegate { result, ty, operand } => {
+                words.push((4 << 16) | OP_FNEGATE);
+                words.push(ty.0);
+                words.push(result.0);
+                words.push(operand.0);
+            }
+            SpirVInst::Return => {
+                words.push((1 << 16) | OP_RETURN);
+            }
+            SpirVInst::ReturnValue { value } => {
+                words.push((2 << 16) | OP_RETURN_VALUE);
+                words.push(value.0);
+            }
+            SpirVInst::Branch { target } => {
+                words.push((2 << 16) | OP_BRANCH);
+                words.push(target.0);
+            }
+            SpirVInst::BranchConditional { condition, true_label, false_label, weights } => {
+                let len = if weights.is_some() { 6 } else { 4 };
+                words.push((len << 16) | OP_BRANCH_CONDITIONAL);
+                words.push(condition.0);
+                words.push(true_label.0);
+                words.push(false_label.0);
+                if let Some((w1, w2)) = weights {
+                    words.push(*w1);
+                    words.push(*w2);
+                }
+            }
+            SpirVInst::CompositeExtract { result, ty, composite, indexes } => {
+                let len = 4 + indexes.len() as u32;
+                words.push((len << 16) | OP_COMPOSITE_EXTRACT);
+                words.push(ty.0);
+                words.push(result.0);
+                words.push(composite.0);
+                for idx in indexes {
+                    words.push(*idx);
+                }
+            }
+            SpirVInst::CompositeConstruct { result, ty, constituents } => {
+                let len = 3 + constituents.len() as u32;
+                words.push((len << 16) | OP_COMPOSITE_CONSTRUCT);
+                words.push(ty.0);
+                words.push(result.0);
+                for c in constituents {
+                    words.push(c.0);
+                }
+            }
+            // Handle remaining instructions with defaults
+            _ => {
+                // NOP for unimplemented instructions
+                words.push((1 << 16) | OP_NOP);
+            }
+        }
+
+        words
+    }
+}
+
+/// Encode a string as SPIR-V words (null-terminated, padded to word boundary)
+fn encode_string(s: &str) -> Vec<u32> {
+    let bytes = s.as_bytes();
+    let mut words = Vec::new();
+    let mut word = 0u32;
+    let mut byte_idx = 0;
+
+    for (i, &b) in bytes.iter().enumerate() {
+        word |= (b as u32) << ((i % 4) * 8);
+        byte_idx = i % 4;
+        if byte_idx == 3 {
+            words.push(word);
+            word = 0;
+        }
+    }
+
+    // Add null terminator and final word
+    if byte_idx < 3 || words.is_empty() {
+        words.push(word); // Contains null terminator in remaining bytes
+    } else {
+        words.push(0); // Separate null terminator word
+    }
+
+    words
+}
+
 impl SpirVModule {
     /// Assemble into SPIR-V binary
     pub fn assemble(&self) -> Vec<u32> {
-        // Stub implementation - would need full SPIR-V binary encoding
+        use opcodes::*;
         let mut words = Vec::new();
 
-        // Magic number
-        words.push(0x07230203);
+        // Header
+        words.push(0x07230203); // Magic number
+        words.push(0x00010500); // Version 1.5
+        words.push(0x534F554E); // Generator: "SOUN"
+        words.push(self.bound);  // Bound
+        words.push(0);           // Reserved (schema)
 
-        // Version (1.5)
-        words.push(0x00010500);
+        // 1. Capabilities
+        for cap in &self.capabilities {
+            let inst = SpirVInst::Capability(cap.clone());
+            words.extend(inst.encode());
+        }
 
-        // Generator magic number (Sounio)
-        words.push(0x534F554E); // "SOUN"
+        // 2. Extensions
+        for ext in &self.extensions {
+            let inst = SpirVInst::Extension(ext.clone());
+            words.extend(inst.encode());
+        }
 
-        // Bound
-        words.push(self.bound);
+        // 3. Ext inst imports
+        for (name, result) in &self.ext_inst_imports {
+            let inst = SpirVInst::ExtInstImport {
+                result: *result,
+                name: name.clone(),
+            };
+            words.extend(inst.encode());
+        }
 
-        // Reserved
-        words.push(0);
+        // 4. Memory model
+        let mm_inst = SpirVInst::MemoryModel {
+            addressing: self.addressing_model.clone(),
+            memory: self.memory_model.clone(),
+        };
+        words.extend(mm_inst.encode());
 
-        // Note: Full implementation would encode all instructions here
+        // 5. Entry points
+        for ep in &self.entry_points {
+            let inst = SpirVInst::EntryPoint {
+                execution_model: ep.execution_model.clone(),
+                entry_point: ep.function,
+                name: ep.name.clone(),
+                interface: ep.interface.clone(),
+            };
+            words.extend(inst.encode());
+        }
+
+        // 6. Execution modes
+        for (entry_point, mode) in &self.execution_modes {
+            let inst = SpirVInst::ExecutionMode {
+                entry_point: *entry_point,
+                mode: mode.clone(),
+            };
+            words.extend(inst.encode());
+        }
+
+        // 7. Debug info (names)
+        for (id, name) in &self.names {
+            let name_words = encode_string(name);
+            let len = 2 + name_words.len() as u32;
+            words.push((len << 16) | OP_NAME);
+            words.push(id.0);
+            words.extend(name_words);
+        }
+
+        // 8. Decorations (already SpirVInst)
+        for inst in &self.decorations {
+            words.extend(inst.encode());
+        }
+
+        // 9. Types (already SpirVInst)
+        for inst in &self.types {
+            words.extend(inst.encode());
+        }
+
+        // 10. Constants (already SpirVInst)
+        for inst in &self.constants {
+            words.extend(inst.encode());
+        }
+
+        // 11. Global variables (already SpirVInst)
+        for inst in &self.variables {
+            words.extend(inst.encode());
+        }
+
+        // 12. Functions
+        for func in &self.functions {
+            // Function header
+            let func_inst = SpirVInst::Function {
+                result: func.id,
+                result_type: func.return_type,
+                control: FunctionControl::default(),
+                function_type: func.function_type,
+            };
+            words.extend(func_inst.encode());
+
+            // Parameters
+            // Note: We need type info for each parameter. If not available,
+            // we'd need a separate parameter_types field. For now, skip param encoding
+            // if the function has complex parameters.
+
+            // Blocks
+            for block in &func.blocks {
+                // Label instruction
+                let label_inst = SpirVInst::Label { result: block.label };
+                words.extend(label_inst.encode());
+
+                // Block instructions
+                for inst in &block.instructions {
+                    words.extend(inst.encode());
+                }
+            }
+
+            // Function end
+            words.extend(SpirVInst::FunctionEnd.encode());
+        }
 
         words
+    }
+
+    /// Write to a .spv file
+    pub fn write_to_file(&self, path: &std::path::Path) -> std::io::Result<()> {
+        use std::io::Write;
+        let words = self.assemble();
+        let bytes: Vec<u8> = words.iter()
+            .flat_map(|w| w.to_le_bytes())
+            .collect();
+        let mut file = std::fs::File::create(path)?;
+        file.write_all(&bytes)
     }
 }
 
