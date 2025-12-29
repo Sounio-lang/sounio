@@ -457,6 +457,48 @@ fn lower_instruction(
         }
 
         Op::Call { func: _, args } | Op::CallDirect { name: _, args } => {
+            // Check for builtin intrinsics first
+            if let Op::CallDirect { name, .. } = &instr.op {
+                // Handle slice_from_raw_parts intrinsic
+                // Creates a slice (fat pointer) from ptr and len
+                if name == "__builtin_slice_from_raw_parts" || name == "std::slice::from_raw_parts" {
+                    if args.len() == 2 {
+                        let ptr = ctx.get_value(args[0])?;
+                        let len = ctx.get_value(args[1])?;
+                        let result = instr
+                            .result
+                            .map(|r| ctx.get_or_create_value(r, result_ty.clone()))?;
+
+                        // Build slice struct: { ptr, len }
+                        return Some(Instruction::with_result(
+                            result,
+                            SirInst::BuildAggregate {
+                                fields: vec![ptr, len],
+                                ty: result_ty,
+                            },
+                        ));
+                    }
+                }
+                // Handle mutable slice variant
+                if name == "__builtin_slice_from_raw_parts_mut" || name == "std::slice::from_raw_parts_mut" {
+                    if args.len() == 2 {
+                        let ptr = ctx.get_value(args[0])?;
+                        let len = ctx.get_value(args[1])?;
+                        let result = instr
+                            .result
+                            .map(|r| ctx.get_or_create_value(r, result_ty.clone()))?;
+
+                        return Some(Instruction::with_result(
+                            result,
+                            SirInst::BuildAggregate {
+                                fields: vec![ptr, len],
+                                ty: result_ty,
+                            },
+                        ));
+                    }
+                }
+            }
+
             let sir_args: Vec<ValueId> = args.iter().filter_map(|a| ctx.get_value(*a)).collect();
 
             let callee = match &instr.op {

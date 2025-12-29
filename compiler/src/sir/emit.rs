@@ -2094,8 +2094,66 @@ impl X86_64Emitter {
                     self.emit_select(result, *cond, *then_val, *else_val)?;
                 }
             }
+            SirInst::BuildAggregate { fields, ty } => {
+                if let Some(result) = inst.result {
+                    self.emit_build_aggregate(result, fields, ty)?;
+                }
+            }
             _ => {
                 // Other instructions not yet implemented
+            }
+        }
+        Ok(())
+    }
+
+    /// Emit aggregate (struct/slice) construction
+    /// For slices: builds {ptr, len} fat pointer
+    fn emit_build_aggregate(
+        &mut self,
+        result: ValueId,
+        fields: &[ValueId],
+        _ty: &SirType,
+    ) -> Result<(), EmitError> {
+        // For 2-field aggregates like slices {ptr, len}, we can use register pairs
+        // System V ABI: return small structs in RAX:RDX
+        if fields.len() == 2 {
+            // Get field values into registers
+            let ptr_reg = self.get_value_reg(fields[0], X86Reg::RAX);
+            let len_reg = self.get_value_reg(fields[1], X86Reg::RDX);
+
+            // Move to RAX:RDX if not already there
+            if ptr_reg != X86Reg::RAX {
+                self.emit_mov_rr(X86Reg::RAX, ptr_reg);
+            }
+            if len_reg != X86Reg::RDX {
+                self.emit_mov_rr(X86Reg::RDX, len_reg);
+            }
+
+            // Record that result is in RAX (ptr) with RDX holding len
+            // For now, we treat the aggregate as residing in RAX
+            if let Some(dst) = self.register_allocator.get_reg(result) {
+                if dst != X86Reg::RAX {
+                    self.emit_mov_rr(dst, X86Reg::RAX);
+                }
+            }
+        } else {
+            // Larger aggregates: allocate stack space and store fields
+            // Calculate total size (assume 8 bytes per field for now)
+            let size = fields.len() * 8;
+
+            // Allocate stack space
+            self.emit_sub_rsp_imm(size as i32);
+
+            // Store each field
+            for (i, field) in fields.iter().enumerate() {
+                let field_reg = self.get_value_reg(*field, X86Reg::R10);
+                let offset = (i * 8) as i32;
+                self.emit_mov_mem_disp_r64(X86Reg::RSP, offset, field_reg);
+            }
+
+            // Result is pointer to stack allocation
+            if let Some(dst) = self.register_allocator.get_reg(result) {
+                self.emit_mov_rr(dst, X86Reg::RSP);
             }
         }
         Ok(())

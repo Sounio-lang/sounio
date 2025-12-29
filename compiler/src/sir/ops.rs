@@ -492,6 +492,15 @@ pub enum SirInst {
 
     /// Assume (optimization hint)
     Assume(ValueId),
+
+    /// Build an aggregate (struct/tuple) from field values
+    /// Used for slice_from_raw_parts and other struct construction
+    BuildAggregate {
+        /// Field values in order
+        fields: Vec<ValueId>,
+        /// The aggregate type being constructed
+        ty: SirType,
+    },
 }
 
 impl SirInst {
@@ -630,6 +639,7 @@ impl SirInst {
             },
             SirInst::DebugValue { value, .. } => vec![*value],
             SirInst::Assert { cond, .. } | SirInst::Assume(cond) => vec![*cond],
+            SirInst::BuildAggregate { fields, .. } => fields.clone(),
         }
     }
 }
@@ -669,6 +679,9 @@ impl fmt::Display for SirInst {
             SirInst::DebugValue { value, name } => write!(f, "debug.value {} = {}", name, value),
             SirInst::Assert { cond, message } => write!(f, "assert {}, \"{}\"", cond, message),
             SirInst::Assume(cond) => write!(f, "assume {}", cond),
+            SirInst::BuildAggregate { fields, ty } => {
+                write!(f, "build_aggregate {:?} {{ {:?} }}", ty, fields)
+            }
         }
     }
 }
