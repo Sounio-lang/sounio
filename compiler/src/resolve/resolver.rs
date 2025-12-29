@@ -67,10 +67,28 @@ pub struct Resolver {
 
 impl Resolver {
     pub fn new() -> Self {
-        Self {
+        let mut resolver = Self {
             symbols: SymbolTable::new(),
             errors: Vec::new(),
-        }
+        };
+        // Register compiler intrinsics/builtins
+        resolver.register_builtins();
+        resolver
+    }
+
+    /// Register compiler builtin functions
+    fn register_builtins(&mut self) {
+        // Slice construction intrinsic - used by FFI code
+        let def_id = self.symbols.fresh_def_id();
+        let _ = self.symbols.define("__builtin_slice_from_raw_parts".to_string(), def_id);
+        self.symbols.insert(Symbol {
+            def_id,
+            name: "__builtin_slice_from_raw_parts".to_string(),
+            kind: DefKind::Function,
+            node_id: NodeId(0),
+            span: Span::default(),
+            parent: None,
+        });
     }
 
     /// Resolve all names in the AST

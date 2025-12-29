@@ -3465,6 +3465,8 @@ impl TypeChecker {
                 | "as_mut"
                 | "size_of"
                 | "align_of"
+                // Slice construction intrinsic
+                | "__builtin_slice_from_raw_parts"
         )
     }
 
@@ -3886,6 +3888,26 @@ impl TypeChecker {
             "align_of" => HirType::Fn {
                 params: vec![],
                 return_type: Box::new(HirType::I64),
+            },
+
+            // ==================== SLICE CONSTRUCTION INTRINSIC ====================
+            // Create a slice from raw pointer and length: (ptr: *const T, len: usize) -> &[T]
+            // This is the FFI bridge for constructing slices from external memory
+            "__builtin_slice_from_raw_parts" => HirType::Fn {
+                params: vec![
+                    HirType::RawPointer {
+                        mutable: false,
+                        inner: Box::new(HirType::U8), // Generic, but u8 is common for FFI
+                    },
+                    HirType::Usize, // usize - length parameter
+                ],
+                return_type: Box::new(HirType::Ref {
+                    mutable: false,
+                    inner: Box::new(HirType::Array {
+                        element: Box::new(HirType::U8),
+                        size: None, // Slice, not fixed array
+                    }),
+                }),
             },
 
             _ => HirType::Error,

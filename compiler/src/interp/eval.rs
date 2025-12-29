@@ -1368,6 +1368,8 @@ impl Interpreter {
                 | "as_mut"
                 | "size_of"
                 | "align_of"
+                // Slice construction intrinsic
+                | "__builtin_slice_from_raw_parts"
         )
     }
 
@@ -1576,6 +1578,28 @@ impl Interpreter {
                 (Some(Value::Float(a)), Some(Value::Float(b))) => Ok(Value::Float(a.max(*b))),
                 _ => Ok(Value::Float(0.0)),
             },
+            // Slice construction intrinsic - for interpreter, just return the array
+            "__builtin_slice_from_raw_parts" => {
+                // In interpreter, ptr is simulated as an array/array-ref, len is the length
+                // We just return the array data directly since interpreter doesn't have real pointers
+                match args.first() {
+                    Some(Value::Array(arr)) => {
+                        // Return the array directly (simulating a slice)
+                        Ok(Value::Array(arr.clone()))
+                    }
+                    Some(Value::Ref(r)) => {
+                        // Return the referenced value
+                        Ok(r.borrow().clone())
+                    }
+                    _ => {
+                        // No valid args - return empty array
+                        use std::cell::RefCell;
+                        use std::rc::Rc;
+                        let arr = Rc::new(RefCell::new(Vec::<Value>::new()));
+                        Ok(Value::Array(arr))
+                    }
+                }
+            }
             _ => {
                 // Try to find function by name
                 if let Some(func) = self.functions.get(name).cloned() {
