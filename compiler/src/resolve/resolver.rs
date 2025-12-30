@@ -78,12 +78,24 @@ impl Resolver {
 
     /// Register compiler builtin functions
     fn register_builtins(&mut self) {
-        // Slice construction intrinsic - used by FFI code
+        // Slice construction intrinsic - used by FFI code (immutable)
         let def_id = self.symbols.fresh_def_id();
         let _ = self.symbols.define("__builtin_slice_from_raw_parts".to_string(), def_id);
         self.symbols.insert(Symbol {
             def_id,
             name: "__builtin_slice_from_raw_parts".to_string(),
+            kind: DefKind::Function,
+            node_id: NodeId(0),
+            span: Span::default(),
+            parent: None,
+        });
+
+        // Slice construction intrinsic - mutable variant
+        let def_id_mut = self.symbols.fresh_def_id();
+        let _ = self.symbols.define("__builtin_slice_from_raw_parts_mut".to_string(), def_id_mut);
+        self.symbols.insert(Symbol {
+            def_id: def_id_mut,
+            name: "__builtin_slice_from_raw_parts_mut".to_string(),
             kind: DefKind::Function,
             node_id: NodeId(0),
             span: Span::default(),

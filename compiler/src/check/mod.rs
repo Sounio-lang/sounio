@@ -3465,8 +3465,9 @@ impl TypeChecker {
                 | "as_mut"
                 | "size_of"
                 | "align_of"
-                // Slice construction intrinsic
+                // Slice construction intrinsics
                 | "__builtin_slice_from_raw_parts"
+                | "__builtin_slice_from_raw_parts_mut"
         )
     }
 
@@ -3890,7 +3891,7 @@ impl TypeChecker {
                 return_type: Box::new(HirType::I64),
             },
 
-            // ==================== SLICE CONSTRUCTION INTRINSIC ====================
+            // ==================== SLICE CONSTRUCTION INTRINSICS ====================
             // Create a slice from raw pointer and length: (ptr: *const T, len: usize) -> &[T]
             // This is the FFI bridge for constructing slices from external memory
             "__builtin_slice_from_raw_parts" => HirType::Fn {
@@ -3903,6 +3904,24 @@ impl TypeChecker {
                 ],
                 return_type: Box::new(HirType::Ref {
                     mutable: false,
+                    inner: Box::new(HirType::Array {
+                        element: Box::new(HirType::U8),
+                        size: None, // Slice, not fixed array
+                    }),
+                }),
+            },
+
+            // Mutable variant: (ptr: *mut T, len: usize) -> &![T]
+            "__builtin_slice_from_raw_parts_mut" => HirType::Fn {
+                params: vec![
+                    HirType::RawPointer {
+                        mutable: true,
+                        inner: Box::new(HirType::U8), // Generic, but u8 is common for FFI
+                    },
+                    HirType::Usize, // usize - length parameter
+                ],
+                return_type: Box::new(HirType::Ref {
+                    mutable: true, // &! for mutable reference
                     inner: Box::new(HirType::Array {
                         element: Box::new(HirType::U8),
                         size: None, // Slice, not fixed array
