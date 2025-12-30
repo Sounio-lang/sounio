@@ -10,6 +10,7 @@ use crate::hir::*;
 use crate::runtime::async_runtime::{SounioFuture, SounioRuntime, SounioValue};
 
 use super::builtins::BuiltinRegistry;
+use super::effect_dispatch::{EffectContext, EffectKind};
 use super::env::Environment;
 use super::value::{ControlFlow, Value};
 
@@ -29,6 +30,8 @@ pub struct Interpreter {
     output: Vec<String>,
     /// Async runtime for spawn/await
     async_runtime: SounioRuntime,
+    /// Effect handler context for Prob/Causal/etc effects
+    effect_ctx: EffectContext,
 }
 
 impl Interpreter {
@@ -42,7 +45,32 @@ impl Interpreter {
             builtins: BuiltinRegistry::new(),
             output: Vec::new(),
             async_runtime: SounioRuntime::new(),
+            effect_ctx: EffectContext::new(),
         }
+    }
+
+    /// Create a new interpreter with a specific random seed (for reproducibility)
+    pub fn with_seed(seed: u64) -> Self {
+        Interpreter {
+            env: Environment::new(),
+            functions: HashMap::new(),
+            structs: HashMap::new(),
+            enums: HashMap::new(),
+            builtins: BuiltinRegistry::new(),
+            output: Vec::new(),
+            async_runtime: SounioRuntime::new(),
+            effect_ctx: EffectContext::with_seed(seed),
+        }
+    }
+
+    /// Get mutable access to effect context
+    pub fn effect_ctx_mut(&mut self) -> &mut EffectContext {
+        &mut self.effect_ctx
+    }
+
+    /// Get read-only access to effect context
+    pub fn effect_ctx(&self) -> &EffectContext {
+        &self.effect_ctx
     }
 
     /// Get the async runtime
@@ -687,9 +715,44 @@ impl Interpreter {
                 }
             }
 
-            // Effect operations - not fully implemented
-            HirExprKind::Perform { .. } | HirExprKind::Handle { .. } | HirExprKind::Sample(_) => {
-                Ok(Value::Unit)
+            // ==================== EFFECT OPERATIONS ====================
+            HirExprKind::Perform { effect, op, args } => {
+                // Perform an effect operation by dispatching to the handler stack
+                let mut arg_values = Vec::with_capacity(args.len());
+                for arg in args {
+                    arg_values.push(self.eval_expr(arg)?);
+                }
+
+                // Dispatch to effect handler
+                match self.effect_ctx.dispatch_by_name(effect, op, arg_values) {
+                    Ok(result) => Ok(result),
+                    Err(e) => {
+                        // Convert effect error to control flow error
+                        // In production, this would generate proper diagnostics
+                        eprintln!("Effect error: {}", e);
+                        Ok(Value::Unit)
+                    }
+                }
+            }
+
+            HirExprKind::Handle { expr, handler } => {
+                // Handle wraps an expression with a named handler
+                // For now, we just evaluate the expression (handlers are pre-installed)
+                // Full implementation would push/pop handler by name
+                self.eval_expr(expr)
+            }
+
+            HirExprKind::Sample(dist_expr) => {
+                // Sample from a probability distribution (Prob effect)
+                let dist_val = self.eval_expr(dist_expr)?;
+
+                match self.effect_ctx.sample(dist_val) {
+                    Ok(result) => Ok(result),
+                    Err(e) => {
+                        eprintln!("Sample error: {}", e);
+                        Ok(Value::Float(0.0))
+                    }
+                }
             }
 
             // ==================== EPISTEMIC EXPRESSIONS ====================
@@ -707,10 +770,17 @@ impl Interpreter {
             }
 
             HirExprKind::Do { variable, value } => {
-                // Do intervention - in interpreter, just evaluate the value
-                // A full implementation would track causal graph modifications
+                // Do intervention - dispatch to Causal effect handler
                 let val = self.eval_expr(value)?;
-                Ok(val)
+                let var_val = Value::String(variable.clone());
+
+                match self.effect_ctx.do_intervention(var_val, val.clone()) {
+                    Ok(result) => Ok(result),
+                    Err(e) => {
+                        eprintln!("Do intervention error: {}", e);
+                        Ok(val)
+                    }
+                }
             }
 
             HirExprKind::Counterfactual {
@@ -718,12 +788,18 @@ impl Interpreter {
                 intervention,
                 outcome,
             } => {
-                // Counterfactual reasoning requires:
-                // 1. Abduction: infer latent variables from factual
-                // 2. Action: apply intervention
-                // 3. Prediction: compute outcome under modified model
-                // For now, just evaluate the outcome expression
-                self.eval_expr(outcome)
+                // Counterfactual reasoning via Causal effect
+                let factual_val = self.eval_expr(factual)?;
+                let intervention_val = self.eval_expr(intervention)?;
+                let outcome_val = self.eval_expr(outcome)?;
+
+                match self.effect_ctx.counterfactual(factual_val, intervention_val, outcome_val.clone()) {
+                    Ok(result) => Ok(result),
+                    Err(e) => {
+                        eprintln!("Counterfactual error: {}", e);
+                        Ok(outcome_val)
+                    }
+                }
             }
 
             HirExprKind::Query {
@@ -732,15 +808,42 @@ impl Interpreter {
                 interventions,
             } => {
                 // Probabilistic query - P(target | given, do(interventions))
-                // For interpreter, just evaluate the target
-                // A full implementation would compute the probability
-                self.eval_expr(target)
+                // Dispatch to Causal effect handler
+                let target_val = self.eval_expr(target)?;
+
+                // Build query arguments
+                let mut query_args = vec![target_val.clone()];
+                for g in given {
+                    query_args.push(self.eval_expr(g)?);
+                }
+
+                match self.effect_ctx.dispatch(EffectKind::Causal, "query", query_args) {
+                    Ok(result) => Ok(result),
+                    Err(e) => {
+                        eprintln!("Query error: {}", e);
+                        Ok(target_val)
+                    }
+                }
             }
 
             HirExprKind::Observe { variable, value } => {
-                // Observe for probabilistic programming
-                // Just evaluate the value for now
-                self.eval_expr(value)
+                // Observe for probabilistic programming - dispatch to Prob effect
+                let val = self.eval_expr(value)?;
+
+                // For probabilistic observe, we need a distribution
+                // Create a simple observation struct
+                let mut fields = HashMap::new();
+                fields.insert("variable".to_string(), Value::String(variable.clone()));
+                fields.insert("value".to_string(), val.clone());
+                let obs_struct = Value::Struct {
+                    name: "Observation".to_string(),
+                    fields,
+                };
+
+                // Record the observation in effect context
+                self.effect_ctx.state.observations.push((variable.clone(), val.clone()));
+
+                Ok(val)
             }
 
             HirExprKind::EpsilonOf(expr) => {
@@ -1368,8 +1471,9 @@ impl Interpreter {
                 | "as_mut"
                 | "size_of"
                 | "align_of"
-                // Slice construction intrinsic
+                // Slice construction intrinsics
                 | "__builtin_slice_from_raw_parts"
+                | "__builtin_slice_from_raw_parts_mut"
         )
     }
 
@@ -1578,10 +1682,10 @@ impl Interpreter {
                 (Some(Value::Float(a)), Some(Value::Float(b))) => Ok(Value::Float(a.max(*b))),
                 _ => Ok(Value::Float(0.0)),
             },
-            // Slice construction intrinsic - for interpreter, just return the array
-            "__builtin_slice_from_raw_parts" => {
-                // In interpreter, ptr is simulated as an array/array-ref, len is the length
-                // We just return the array data directly since interpreter doesn't have real pointers
+            // Slice construction intrinsics - for interpreter, just return the array
+            // In interpreter, ptr is simulated as an array/array-ref, len is the length
+            // We just return the array data directly since interpreter doesn't have real pointers
+            "__builtin_slice_from_raw_parts" | "__builtin_slice_from_raw_parts_mut" => {
                 match args.first() {
                     Some(Value::Array(arr)) => {
                         // Return the array directly (simulating a slice)
