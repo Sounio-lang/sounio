@@ -1343,6 +1343,25 @@ impl X86_64Emitter {
         self.emit_modrm(0b11, src.encoding(), dst.encoding());
     }
 
+    /// ADD reg, imm32
+    fn emit_add_ri32(&mut self, dst: X86Reg, imm: i32) {
+        if imm == 0 {
+            return;
+        }
+        self.emit_rex(true, false, false, dst.needs_rex());
+        if imm >= -128 && imm <= 127 {
+            // ADD r/m64, imm8
+            self.emit_byte(0x83);
+            self.emit_modrm(0b11, 0, dst.encoding());
+            self.emit_byte(imm as u8);
+        } else {
+            // ADD r/m64, imm32
+            self.emit_byte(0x81);
+            self.emit_modrm(0b11, 0, dst.encoding());
+            self.emit_u32(imm as u32);
+        }
+    }
+
     /// IMUL reg, reg
     fn emit_imul_rr(&mut self, dst: X86Reg, src: X86Reg) {
         self.emit_rex_w(dst, src);
@@ -1671,6 +1690,66 @@ impl X86_64Emitter {
         }
         self.emit_byte(0xFF); // CALL r/m64
         self.emit_modrm(0b11, 2, reg.encoding());
+    }
+
+    /// Call external function by name (adds PLT relocation)
+    fn emit_call_extern(&mut self, name: &str) {
+        let offset = self.code.len() + 1; // +1 for the E8 opcode
+        self.relocations.push(Relocation {
+            offset,
+            kind: RelocKind::PLT32,
+            symbol: name.to_string(),
+            addend: -4, // PC-relative adjustment
+        });
+        self.emit_call_rel32(0); // Placeholder, will be patched by linker
+    }
+
+    /// XORPD xmm, xmm - XOR packed doubles (for sign manipulation)
+    fn emit_xorpd(&mut self, dst: X86Reg, src: X86Reg) {
+        self.emit_byte(0x66); // Operand size prefix
+        if dst.needs_rex() || src.needs_rex() {
+            self.emit_rex(false, dst.needs_rex(), false, src.needs_rex());
+        }
+        self.emit_bytes(&[0x0F, 0x57]); // XORPD
+        self.emit_modrm(0b11, (dst as u8) & 0x7, (src as u8) & 0x7);
+    }
+
+    /// ANDPD xmm, xmm - AND packed doubles (for abs via sign bit masking)
+    fn emit_andpd(&mut self, dst: X86Reg, src: X86Reg) {
+        self.emit_byte(0x66);
+        if dst.needs_rex() || src.needs_rex() {
+            self.emit_rex(false, dst.needs_rex(), false, src.needs_rex());
+        }
+        self.emit_bytes(&[0x0F, 0x54]); // ANDPD
+        self.emit_modrm(0b11, (dst as u8) & 0x7, (src as u8) & 0x7);
+    }
+
+    /// ROUNDSD xmm, xmm, imm8 - Round scalar double (SSE4.1)
+    /// imm8: 0 = round to nearest, 1 = floor, 2 = ceil, 3 = truncate
+    fn emit_roundsd(&mut self, dst: X86Reg, src: X86Reg, mode: u8) {
+        self.emit_byte(0x66);
+        if dst.needs_rex() || src.needs_rex() {
+            self.emit_rex(false, dst.needs_rex(), false, src.needs_rex());
+        }
+        self.emit_bytes(&[0x0F, 0x3A, 0x0B]); // ROUNDSD
+        self.emit_modrm(0b11, (dst as u8) & 0x7, (src as u8) & 0x7);
+        self.emit_byte(mode);
+    }
+
+    /// MOVQ xmm, r64 - Move quadword from GPR to XMM
+    fn emit_movq_xmm_r64(&mut self, dst: X86Reg, src: X86Reg) {
+        self.emit_byte(0x66);
+        self.emit_rex(true, dst.needs_rex(), false, src.needs_rex());
+        self.emit_bytes(&[0x0F, 0x6E]); // MOVQ xmm, r/m64
+        self.emit_modrm(0b11, (dst as u8) & 0x7, src.encoding());
+    }
+
+    /// Load 64-bit constant into XMM via stack
+    fn emit_load_f64_const(&mut self, dst: X86Reg, bits: u64) {
+        // Move constant to RAX, then through stack to XMM
+        self.emit_mov_ri64(X86Reg::RAX, bits as i64);
+        self.emit_mov_mem_rbp_r64(-16, X86Reg::RAX);
+        self.emit_movsd_rbp_mem(dst, -16);
     }
 
     /// MOVSD [rbp + disp], xmm - store float to stack
@@ -2099,8 +2178,33 @@ impl X86_64Emitter {
                     self.emit_build_aggregate(result, fields, ty)?;
                 }
             }
+            SirInst::Cast { op, val, to_ty } => {
+                if let Some(result) = inst.result {
+                    self.emit_cast(result, *op, *val, to_ty)?;
+                }
+            }
+            SirInst::BinaryFloat { op, lhs, rhs } => {
+                if let Some(result) = inst.result {
+                    self.emit_binary_float(result, *op, *lhs, *rhs)?;
+                }
+            }
+            SirInst::Phi { ty, incoming } => {
+                // Phi nodes should be resolved by register allocation (coalescing)
+                // At codegen time, all incoming values should be in the same location
+                // No code emission needed if properly coalesced
+            }
+            SirInst::DebugValue { .. } => {
+                // Debug values are no-ops in release builds
+            }
+            SirInst::Assert { cond, message } => {
+                // In debug mode, emit assertion check
+                // For now, skip assertions in codegen
+            }
+            SirInst::Assume(_) => {
+                // Optimization hints - no code generation needed
+            }
             _ => {
-                // Other instructions not yet implemented
+                // Other instructions not yet implemented (Vector, Epistemic, Prob, Scientific)
             }
         }
         Ok(())
@@ -2326,8 +2430,26 @@ impl X86_64Emitter {
                 self.emit_divsd(dst_xmm, rhs_xmm);
             }
             ArithOp::FRem => {
-                // FRem requires a function call to fmod - for now, emit a placeholder
-                return Err(EmitError::UnsupportedInstruction("FRem".into()));
+                // FRem requires a function call to fmod
+                // System V AMD64: XMM0 = arg1, XMM1 = arg2, return in XMM0
+                let lhs_xmm = self.get_value_reg(lhs, X86Reg::XMM14);
+                let rhs_xmm = self.get_value_reg(rhs, X86Reg::XMM15);
+                let dst_xmm = self
+                    .register_allocator
+                    .get_reg(result)
+                    .unwrap_or(X86Reg::XMM0);
+
+                if lhs_xmm != X86Reg::XMM0 {
+                    self.emit_movsd_rr(X86Reg::XMM0, lhs_xmm);
+                }
+                if rhs_xmm != X86Reg::XMM1 {
+                    self.emit_movsd_rr(X86Reg::XMM1, rhs_xmm);
+                }
+                self.emit_call_extern("fmod");
+                // Result is in XMM0
+                if dst_xmm != X86Reg::XMM0 {
+                    self.emit_movsd_rr(dst_xmm, X86Reg::XMM0);
+                }
             }
         }
 
@@ -2349,33 +2471,97 @@ impl X86_64Emitter {
         lhs: ValueId,
         rhs: ValueId,
     ) -> Result<(), EmitError> {
-        let lhs_reg = self.get_value_reg(lhs, X86Reg::R10);
-        let rhs_reg = self.get_value_reg(rhs, X86Reg::R11);
         let dst_reg = self
             .register_allocator
             .get_reg(result)
             .unwrap_or(X86Reg::RAX);
 
-        // Integer comparison
-        self.emit_cmp_rr(lhs_reg, rhs_reg);
+        // Check if this is a float comparison
+        let is_float_cmp = matches!(
+            op,
+            CmpOp::FOEq | CmpOp::FONe | CmpOp::FOLt | CmpOp::FOLe | CmpOp::FOGt | CmpOp::FOGe
+        );
 
-        // Set result based on condition code
-        let cc = match op {
-            CmpOp::Eq => CondCode::E,
-            CmpOp::Ne => CondCode::NE,
-            CmpOp::SLt => CondCode::L,
-            CmpOp::SLe => CondCode::LE,
-            CmpOp::SGt => CondCode::G,
-            CmpOp::SGe => CondCode::GE,
-            CmpOp::ULt => CondCode::B,
-            CmpOp::ULe => CondCode::BE,
-            CmpOp::UGt => CondCode::A,
-            CmpOp::UGe => CondCode::AE,
-            _ => CondCode::E, // Floating point comparisons need different handling
-        };
+        if is_float_cmp {
+            // Float comparison using UCOMISD
+            let lhs_reg = self.get_value_reg(lhs, X86Reg::XMM14);
+            let rhs_reg = self.get_value_reg(rhs, X86Reg::XMM15);
+
+            // UCOMISD sets: ZF=1,PF=1,CF=1 if unordered (NaN)
+            //              ZF=0,PF=0,CF=0 if lhs > rhs
+            //              ZF=1,PF=0,CF=0 if lhs == rhs
+            //              ZF=0,PF=0,CF=1 if lhs < rhs
+            self.emit_ucomisd(lhs_reg, rhs_reg);
+
+            // For ordered comparisons, we need to handle NaN properly
+            // Using SETA/SETAE/SETB/SETBE which check CF and ZF
+            let cc = match op {
+                CmpOp::FOEq => {
+                    // Equal: ZF=1 and not unordered (PF=0)
+                    // SETE sets if ZF=1, then AND with SETNP
+                    self.emit_setcc(CondCode::E, dst_reg);
+                    self.emit_setcc(CondCode::NP, X86Reg::R11);
+                    self.emit_and_rr(dst_reg, X86Reg::R11);
+                    self.emit_movzx_byte(dst_reg, dst_reg);
+                    if self.register_allocator.is_spilled(result) {
+                        if let Some(slot) = self.register_allocator.get_spill_slot(result) {
+                            self.emit_spill(dst_reg, slot);
+                        }
+                    }
+                    return Ok(());
+                }
+                CmpOp::FONe => {
+                    // Not equal: ZF=0 OR unordered (PF=1)
+                    // SETNE sets if ZF=0, then OR with SETP
+                    self.emit_setcc(CondCode::NE, dst_reg);
+                    self.emit_setcc(CondCode::P, X86Reg::R11);
+                    self.emit_or_rr(dst_reg, X86Reg::R11);
+                    self.emit_movzx_byte(dst_reg, dst_reg);
+                    if self.register_allocator.is_spilled(result) {
+                        if let Some(slot) = self.register_allocator.get_spill_slot(result) {
+                            self.emit_spill(dst_reg, slot);
+                        }
+                    }
+                    return Ok(());
+                }
+                CmpOp::FOLt => CondCode::B,  // Below: CF=1 (and not unordered)
+                CmpOp::FOLe => CondCode::BE, // Below or Equal: CF=1 || ZF=1
+                CmpOp::FOGt => CondCode::A,  // Above: CF=0 && ZF=0
+                CmpOp::FOGe => CondCode::AE, // Above or Equal: CF=0
+                _ => unreachable!(),
+            };
+
+            // For FOLt/FOLe/FOGt/FOGe, need to also check for unordered (PF=1)
+            // and return false for unordered in ordered comparisons
+            self.emit_setcc(cc, dst_reg);
+            self.emit_setcc(CondCode::NP, X86Reg::R11); // Not parity = not unordered
+            self.emit_and_rr(dst_reg, X86Reg::R11);
+        } else {
+            // Integer comparison
+            let lhs_reg = self.get_value_reg(lhs, X86Reg::R10);
+            let rhs_reg = self.get_value_reg(rhs, X86Reg::R11);
+
+            self.emit_cmp_rr(lhs_reg, rhs_reg);
+
+            // Set result based on condition code
+            let cc = match op {
+                CmpOp::Eq => CondCode::E,
+                CmpOp::Ne => CondCode::NE,
+                CmpOp::SLt => CondCode::L,
+                CmpOp::SLe => CondCode::LE,
+                CmpOp::SGt => CondCode::G,
+                CmpOp::SGe => CondCode::GE,
+                CmpOp::ULt => CondCode::B,
+                CmpOp::ULe => CondCode::BE,
+                CmpOp::UGt => CondCode::A,
+                CmpOp::UGe => CondCode::AE,
+                _ => unreachable!("Float comparisons handled above"),
+            };
+
+            self.emit_setcc(cc, dst_reg);
+        }
 
         // SETcc sets the low byte, we need to zero-extend
-        self.emit_setcc(cc, dst_reg);
         self.emit_movzx_byte(dst_reg, dst_reg);
 
         if self.register_allocator.is_spilled(result) {
@@ -2450,12 +2636,300 @@ impl X86_64Emitter {
             .unwrap_or(X86Reg::XMM0);
 
         match op {
+            UnaryFloatOp::Neg => {
+                // Negate by XORing with sign bit mask (0x8000000000000000)
+                // Load sign bit mask into XMM14
+                self.emit_load_f64_const(X86Reg::XMM14, 0x8000_0000_0000_0000);
+                if dst != src {
+                    self.emit_movsd_rr(dst, src);
+                }
+                self.emit_xorpd(dst, X86Reg::XMM14);
+            }
+            UnaryFloatOp::Abs => {
+                // Absolute value by ANDing with mask that clears sign bit (0x7FFFFFFFFFFFFFFF)
+                self.emit_load_f64_const(X86Reg::XMM14, 0x7FFF_FFFF_FFFF_FFFF);
+                if dst != src {
+                    self.emit_movsd_rr(dst, src);
+                }
+                self.emit_andpd(dst, X86Reg::XMM14);
+            }
             UnaryFloatOp::Sqrt => {
                 self.emit_sqrtsd(dst, src);
             }
-            _ => {
-                // Other unary ops would need library calls
-                return Err(EmitError::UnsupportedInstruction(format!("{:?}", op)));
+            UnaryFloatOp::Floor => {
+                // ROUNDSD with mode 1 = floor (round toward -infinity)
+                self.emit_roundsd(dst, src, 0x01 | 0x08); // 0x08 = use MXCSR
+            }
+            UnaryFloatOp::Ceil => {
+                // ROUNDSD with mode 2 = ceil (round toward +infinity)
+                self.emit_roundsd(dst, src, 0x02 | 0x08);
+            }
+            UnaryFloatOp::Round => {
+                // ROUNDSD with mode 0 = round to nearest (banker's rounding)
+                self.emit_roundsd(dst, src, 0x00 | 0x08);
+            }
+            UnaryFloatOp::Trunc => {
+                // ROUNDSD with mode 3 = truncate (round toward zero)
+                self.emit_roundsd(dst, src, 0x03 | 0x08);
+            }
+            // Library calls for transcendental functions
+            UnaryFloatOp::Sin => {
+                self.emit_libm_call("sin", src, dst);
+            }
+            UnaryFloatOp::Cos => {
+                self.emit_libm_call("cos", src, dst);
+            }
+            UnaryFloatOp::Tan => {
+                self.emit_libm_call("tan", src, dst);
+            }
+            UnaryFloatOp::Exp => {
+                self.emit_libm_call("exp", src, dst);
+            }
+            UnaryFloatOp::Exp2 => {
+                self.emit_libm_call("exp2", src, dst);
+            }
+            UnaryFloatOp::Log => {
+                self.emit_libm_call("log", src, dst);
+            }
+            UnaryFloatOp::Log2 => {
+                self.emit_libm_call("log2", src, dst);
+            }
+            UnaryFloatOp::Log10 => {
+                self.emit_libm_call("log10", src, dst);
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Emit a call to a libm function (sin, cos, exp, log, etc.)
+    /// Follows System V AMD64 ABI: float arg in XMM0, return in XMM0
+    fn emit_libm_call(&mut self, name: &str, src: X86Reg, dst: X86Reg) {
+        // Move argument to XMM0 if not already there
+        if src != X86Reg::XMM0 {
+            self.emit_movsd_rr(X86Reg::XMM0, src);
+        }
+        // Call the libm function
+        self.emit_call_extern(name);
+        // Result is in XMM0, move to dst if different
+        if dst != X86Reg::XMM0 {
+            self.emit_movsd_rr(dst, X86Reg::XMM0);
+        }
+    }
+
+    /// Emit a binary float operation (pow, min, max, copysign, atan2)
+    fn emit_binary_float(
+        &mut self,
+        result: ValueId,
+        op: BinaryFloatOp,
+        lhs: ValueId,
+        rhs: ValueId,
+    ) -> Result<(), EmitError> {
+        let lhs_reg = self.get_value_reg(lhs, X86Reg::XMM14);
+        let rhs_reg = self.get_value_reg(rhs, X86Reg::XMM15);
+        let dst = self
+            .register_allocator
+            .get_reg(result)
+            .unwrap_or(X86Reg::XMM0);
+
+        match op {
+            BinaryFloatOp::Min => {
+                // MINSD dst, src - minimum of two doubles
+                if dst != lhs_reg {
+                    self.emit_movsd_rr(dst, lhs_reg);
+                }
+                // MINSD: F2 0F 5D /r
+                self.emit_byte(0xF2);
+                if dst.needs_rex() || rhs_reg.needs_rex() {
+                    self.emit_rex(false, dst.needs_rex(), false, rhs_reg.needs_rex());
+                }
+                self.emit_bytes(&[0x0F, 0x5D]);
+                self.emit_modrm(0b11, (dst as u8) & 0x7, (rhs_reg as u8) & 0x7);
+            }
+            BinaryFloatOp::Max => {
+                // MAXSD dst, src - maximum of two doubles
+                if dst != lhs_reg {
+                    self.emit_movsd_rr(dst, lhs_reg);
+                }
+                // MAXSD: F2 0F 5F /r
+                self.emit_byte(0xF2);
+                if dst.needs_rex() || rhs_reg.needs_rex() {
+                    self.emit_rex(false, dst.needs_rex(), false, rhs_reg.needs_rex());
+                }
+                self.emit_bytes(&[0x0F, 0x5F]);
+                self.emit_modrm(0b11, (dst as u8) & 0x7, (rhs_reg as u8) & 0x7);
+            }
+            BinaryFloatOp::Pow => {
+                // pow(x, y) - call libm
+                self.emit_libm_call_2arg("pow", lhs_reg, rhs_reg, dst);
+            }
+            BinaryFloatOp::Atan2 => {
+                // atan2(y, x) - call libm
+                self.emit_libm_call_2arg("atan2", lhs_reg, rhs_reg, dst);
+            }
+            BinaryFloatOp::CopySign => {
+                // copysign(x, y) - call libm (or implement with bit manipulation)
+                self.emit_libm_call_2arg("copysign", lhs_reg, rhs_reg, dst);
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Emit a call to a 2-argument libm function (pow, atan2, copysign)
+    fn emit_libm_call_2arg(&mut self, name: &str, arg1: X86Reg, arg2: X86Reg, dst: X86Reg) {
+        // System V ABI: first float arg in XMM0, second in XMM1
+        if arg1 != X86Reg::XMM0 {
+            self.emit_movsd_rr(X86Reg::XMM0, arg1);
+        }
+        if arg2 != X86Reg::XMM1 {
+            self.emit_movsd_rr(X86Reg::XMM1, arg2);
+        }
+        self.emit_call_extern(name);
+        if dst != X86Reg::XMM0 {
+            self.emit_movsd_rr(dst, X86Reg::XMM0);
+        }
+    }
+
+    /// Emit a cast/conversion operation
+    fn emit_cast(
+        &mut self,
+        result: ValueId,
+        op: CastOp,
+        val: ValueId,
+        _to_ty: &SirType,
+    ) -> Result<(), EmitError> {
+        let src = self.get_value_reg(val, X86Reg::R10);
+        let dst = self
+            .register_allocator
+            .get_reg(result)
+            .unwrap_or(X86Reg::RAX);
+
+        match op {
+            CastOp::Trunc => {
+                // Truncate to smaller type - just move (high bits will be ignored)
+                if dst != src {
+                    self.emit_mov_rr(dst, src);
+                }
+            }
+            CastOp::ZExt => {
+                // Zero extend - for 32->64, the mov already zero-extends
+                // For smaller sizes, use movzx
+                if dst != src {
+                    self.emit_mov_rr(dst, src);
+                }
+            }
+            CastOp::SExt => {
+                // Sign extend - MOVSXD for 32->64
+                // MOVSXD r64, r32: REX.W + 63 /r
+                self.emit_rex(true, dst.needs_rex(), false, src.needs_rex());
+                self.emit_byte(0x63);
+                self.emit_modrm(0b11, dst.encoding(), src.encoding());
+            }
+            CastOp::FPTrunc => {
+                // Double to single: CVTSD2SS
+                let src_xmm = self.get_value_reg(val, X86Reg::XMM15);
+                let dst_xmm = self
+                    .register_allocator
+                    .get_reg(result)
+                    .unwrap_or(X86Reg::XMM0);
+                // CVTSD2SS: F2 0F 5A /r
+                self.emit_byte(0xF2);
+                if dst_xmm.needs_rex() || src_xmm.needs_rex() {
+                    self.emit_rex(false, dst_xmm.needs_rex(), false, src_xmm.needs_rex());
+                }
+                self.emit_bytes(&[0x0F, 0x5A]);
+                self.emit_modrm(0b11, (dst_xmm as u8) & 0x7, (src_xmm as u8) & 0x7);
+            }
+            CastOp::FPExt => {
+                // Single to double: CVTSS2SD
+                let src_xmm = self.get_value_reg(val, X86Reg::XMM15);
+                let dst_xmm = self
+                    .register_allocator
+                    .get_reg(result)
+                    .unwrap_or(X86Reg::XMM0);
+                // CVTSS2SD: F3 0F 5A /r
+                self.emit_byte(0xF3);
+                if dst_xmm.needs_rex() || src_xmm.needs_rex() {
+                    self.emit_rex(false, dst_xmm.needs_rex(), false, src_xmm.needs_rex());
+                }
+                self.emit_bytes(&[0x0F, 0x5A]);
+                self.emit_modrm(0b11, (dst_xmm as u8) & 0x7, (src_xmm as u8) & 0x7);
+            }
+            CastOp::FPToSI => {
+                // Float to signed int: CVTTSD2SI (truncate toward zero)
+                let src_xmm = self.get_value_reg(val, X86Reg::XMM15);
+                // CVTTSD2SI r64, xmm: F2 REX.W 0F 2C /r
+                self.emit_byte(0xF2);
+                self.emit_rex(true, dst.needs_rex(), false, src_xmm.needs_rex());
+                self.emit_bytes(&[0x0F, 0x2C]);
+                self.emit_modrm(0b11, dst.encoding(), (src_xmm as u8) & 0x7);
+            }
+            CastOp::FPToUI => {
+                // Float to unsigned int - no direct instruction, use CVTTSD2SI
+                // For values that fit, this works; for full range, need more complex code
+                let src_xmm = self.get_value_reg(val, X86Reg::XMM15);
+                self.emit_byte(0xF2);
+                self.emit_rex(true, dst.needs_rex(), false, src_xmm.needs_rex());
+                self.emit_bytes(&[0x0F, 0x2C]);
+                self.emit_modrm(0b11, dst.encoding(), (src_xmm as u8) & 0x7);
+            }
+            CastOp::SIToFP => {
+                // Signed int to float: CVTSI2SD
+                let dst_xmm = self
+                    .register_allocator
+                    .get_reg(result)
+                    .unwrap_or(X86Reg::XMM0);
+                // CVTSI2SD xmm, r64: F2 REX.W 0F 2A /r
+                self.emit_byte(0xF2);
+                self.emit_rex(true, dst_xmm.needs_rex(), false, src.needs_rex());
+                self.emit_bytes(&[0x0F, 0x2A]);
+                self.emit_modrm(0b11, (dst_xmm as u8) & 0x7, src.encoding());
+            }
+            CastOp::UIToFP => {
+                // Unsigned int to float - for values that fit in signed range, use CVTSI2SD
+                let dst_xmm = self
+                    .register_allocator
+                    .get_reg(result)
+                    .unwrap_or(X86Reg::XMM0);
+                self.emit_byte(0xF2);
+                self.emit_rex(true, dst_xmm.needs_rex(), false, src.needs_rex());
+                self.emit_bytes(&[0x0F, 0x2A]);
+                self.emit_modrm(0b11, (dst_xmm as u8) & 0x7, src.encoding());
+            }
+            CastOp::PtrToInt => {
+                // Pointer to integer - just move
+                if dst != src {
+                    self.emit_mov_rr(dst, src);
+                }
+            }
+            CastOp::IntToPtr => {
+                // Integer to pointer - just move
+                if dst != src {
+                    self.emit_mov_rr(dst, src);
+                }
+            }
+            CastOp::BitCast => {
+                // Reinterpret bits - move between register classes if needed
+                let src_is_float = src.is_xmm();
+                let dst_is_float = dst.is_xmm();
+                if src_is_float && !dst_is_float {
+                    // XMM -> GPR: MOVQ r64, xmm
+                    self.emit_byte(0x66);
+                    self.emit_rex(true, src.needs_rex(), false, dst.needs_rex());
+                    self.emit_bytes(&[0x0F, 0x7E]); // MOVQ r/m64, xmm
+                    self.emit_modrm(0b11, (src as u8) & 0x7, dst.encoding());
+                } else if !src_is_float && dst_is_float {
+                    // GPR -> XMM: MOVQ xmm, r64
+                    self.emit_movq_xmm_r64(dst, src);
+                } else if dst != src {
+                    // Same register class
+                    if dst.is_xmm() {
+                        self.emit_movsd_rr(dst, src);
+                    } else {
+                        self.emit_mov_rr(dst, src);
+                    }
+                }
             }
         }
 
@@ -2543,7 +3017,132 @@ impl X86_64Emitter {
                     self.emit_mov_rr(dst_reg, X86Reg::RSP);
                 }
             }
-            _ => {}
+            MemoryOp::GetElementPtr { ptr, ty, indices } => {
+                // Compute address: base + sum(indices * element_sizes)
+                if let Some(result_id) = result {
+                    let base_reg = self.get_value_reg(*ptr, X86Reg::R10);
+                    let dst_reg = self
+                        .register_allocator
+                        .get_reg(result_id)
+                        .unwrap_or(X86Reg::RAX);
+
+                    // Start with base pointer
+                    self.emit_mov_rr(dst_reg, base_reg);
+
+                    let mut current_ty = ty.clone();
+                    for index in indices {
+                        let elem_size = match &current_ty {
+                            SirType::Array(arr_ty) => {
+                                let size = arr_ty.elem.size_bytes();
+                                current_ty = (*arr_ty.elem).clone();
+                                size
+                            }
+                            SirType::Struct(struct_ty) => {
+                                // For struct, index is field number - compute offset
+                                if let GepIndex::Const(idx) = index {
+                                    if let Some(field) = struct_ty.fields.get(*idx as usize) {
+                                        // Use pre-computed field offset
+                                        let offset = field.offset;
+                                        current_ty = field.ty.clone();
+                                        if offset > 0 {
+                                            self.emit_add_ri32(dst_reg, offset as i32);
+                                        }
+                                        continue;
+                                    }
+                                }
+                                8 // Default element size
+                            }
+                            SirType::Pointer(ptr_ty) => {
+                                let size = ptr_ty.pointee.size_bytes();
+                                current_ty = (*ptr_ty.pointee).clone();
+                                size
+                            }
+                            _ => 8, // Default to 8 bytes
+                        };
+
+                        match index {
+                            GepIndex::Const(c) => {
+                                let offset = (*c as usize) * elem_size;
+                                if offset != 0 {
+                                    self.emit_add_ri32(dst_reg, offset as i32);
+                                }
+                            }
+                            GepIndex::Value(v) => {
+                                // Dynamic index: dst += index * elem_size
+                                let idx_reg = self.get_value_reg(*v, X86Reg::R11);
+                                // Multiply index by element size
+                                if elem_size == 1 {
+                                    // Just add index
+                                    self.emit_add_rr(dst_reg, idx_reg);
+                                } else if elem_size.is_power_of_two() {
+                                    // Use shift: move index to scratch, shift, add
+                                    let shift = elem_size.trailing_zeros();
+                                    // Move shift amount to CL (RCX low byte)
+                                    self.emit_mov_ri64(X86Reg::RCX, shift as i64);
+                                    // Move index to R11 if not already there
+                                    if idx_reg != X86Reg::R11 {
+                                        self.emit_mov_rr(X86Reg::R11, idx_reg);
+                                    }
+                                    // SHL R11, CL
+                                    self.emit_shl_cl(X86Reg::R11);
+                                    self.emit_add_rr(dst_reg, X86Reg::R11);
+                                } else {
+                                    // Use IMUL
+                                    self.emit_mov_ri64(X86Reg::RAX, elem_size as i64);
+                                    self.emit_imul_rr(X86Reg::RAX, idx_reg);
+                                    self.emit_add_rr(dst_reg, X86Reg::RAX);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            MemoryOp::Memcpy {
+                dst, src, len, ..
+            } => {
+                // Call memcpy(dst, src, len)
+                // System V AMD64: RDI = dst, RSI = src, RDX = len
+                let dst_reg = self.get_value_reg(*dst, X86Reg::RDI);
+                let src_reg = self.get_value_reg(*src, X86Reg::RSI);
+                let len_reg = self.get_value_reg(*len, X86Reg::RDX);
+
+                // Move to ABI registers if not already there
+                if dst_reg != X86Reg::RDI {
+                    self.emit_mov_rr(X86Reg::RDI, dst_reg);
+                }
+                if src_reg != X86Reg::RSI {
+                    self.emit_mov_rr(X86Reg::RSI, src_reg);
+                }
+                if len_reg != X86Reg::RDX {
+                    self.emit_mov_rr(X86Reg::RDX, len_reg);
+                }
+
+                // Call memcpy
+                self.emit_call_extern("memcpy");
+            }
+            MemoryOp::Memset {
+                dst, val, len, ..
+            } => {
+                // Call memset(dst, val, len)
+                // System V AMD64: RDI = dst, RSI = val, RDX = len
+                let dst_reg = self.get_value_reg(*dst, X86Reg::RDI);
+                let val_reg = self.get_value_reg(*val, X86Reg::RSI);
+                let len_reg = self.get_value_reg(*len, X86Reg::RDX);
+
+                // Move to ABI registers if not already there
+                if dst_reg != X86Reg::RDI {
+                    self.emit_mov_rr(X86Reg::RDI, dst_reg);
+                }
+                if val_reg != X86Reg::RSI {
+                    self.emit_mov_rr(X86Reg::RSI, val_reg);
+                }
+                if len_reg != X86Reg::RDX {
+                    self.emit_mov_rr(X86Reg::RDX, len_reg);
+                }
+
+                // Call memset
+                self.emit_call_extern("memset");
+            }
         }
         Ok(())
     }
@@ -2648,8 +3247,89 @@ impl X86_64Emitter {
                 // UD2 instruction (undefined - will trap)
                 self.emit_bytes(&[0x0F, 0x0B]);
             }
-            _ => {
-                // Other terminators not yet implemented
+            Terminator::Switch {
+                val,
+                default,
+                cases,
+            } => {
+                // Emit series of compare-and-branch for each case
+                let val_reg = self.get_value_reg(*val, X86Reg::R10);
+
+                for (case_val, case_block) in cases {
+                    // CMP val, case_val
+                    self.emit_mov_ri64(X86Reg::R11, *case_val);
+                    self.emit_cmp_rr(val_reg, X86Reg::R11);
+
+                    // JE case_block
+                    if let Some(&target_offset) = self.labels.get(&case_block.0) {
+                        let rel = (target_offset as i32) - (self.offset() as i32) - 6;
+                        self.emit_jcc_rel32(CondCode::E as u8, rel);
+                    } else {
+                        self.forward_refs.push((self.offset() + 2, case_block.0));
+                        self.emit_jcc_rel32(CondCode::E as u8, 0);
+                    }
+                }
+
+                // JMP default
+                if let Some(&default_offset) = self.labels.get(&default.0) {
+                    let rel = (default_offset as i32) - (self.offset() as i32) - 5;
+                    self.emit_jmp_rel32(rel);
+                } else {
+                    self.forward_refs.push((self.offset() + 1, default.0));
+                    self.emit_jmp_rel32(0);
+                }
+            }
+            Terminator::TailCall { callee, args } => {
+                // For tail calls, we reuse the current stack frame
+                // Setup args first using System V AMD64 ABI
+                let arg_regs = [
+                    X86Reg::RDI,
+                    X86Reg::RSI,
+                    X86Reg::RDX,
+                    X86Reg::RCX,
+                    X86Reg::R8,
+                    X86Reg::R9,
+                ];
+
+                for (i, arg) in args.iter().enumerate() {
+                    if i < arg_regs.len() {
+                        let arg_reg = self.get_value_reg(*arg, arg_regs[i]);
+                        if arg_reg != arg_regs[i] {
+                            self.emit_mov_rr(arg_regs[i], arg_reg);
+                        }
+                    }
+                }
+
+                // Restore callee-saved registers and RBP before jump
+                self.emit_epilogue_with_restores(callee_saved);
+
+                // Jump (not call) to target
+                match callee {
+                    crate::sir::ops::Callee::Named(name) => {
+                        // JMP via PLT
+                        let offset = self.code.len() + 1;
+                        self.relocations.push(Relocation {
+                            offset,
+                            kind: RelocKind::PLT32,
+                            symbol: name.clone(),
+                            addend: -4,
+                        });
+                        self.emit_jmp_rel32(0);
+                    }
+                    crate::sir::ops::Callee::Indirect(ptr) => {
+                        // JMP *ptr
+                        let ptr_reg = self.get_value_reg(*ptr, X86Reg::R10);
+                        // JMP r/m64: FF /4
+                        self.emit_rex(true, false, false, ptr_reg.needs_rex());
+                        self.emit_byte(0xFF);
+                        self.emit_modrm(0b11, 4, ptr_reg.encoding());
+                    }
+                    crate::sir::ops::Callee::Direct(_func_id) => {
+                        // For direct calls, we'd need to look up the function address
+                        // For now, emit placeholder
+                        self.emit_jmp_rel32(0);
+                    }
+                }
             }
         }
         Ok(())
