@@ -540,6 +540,298 @@ impl HirType {
     pub fn is_float(&self) -> bool {
         matches!(self, HirType::F32 | HirType::F64)
     }
+
+    /// Check if this type is a tensor
+    pub fn is_tensor(&self) -> bool {
+        matches!(self, HirType::Tensor { .. })
+    }
+
+    /// Get tensor shape if this is a tensor type
+    pub fn tensor_shape(&self) -> Option<&[HirTensorDim]> {
+        match self {
+            HirType::Tensor { dims, .. } => Some(dims),
+            _ => None,
+        }
+    }
+
+    /// Get tensor element type if this is a tensor type
+    pub fn tensor_element(&self) -> Option<&HirType> {
+        match self {
+            HirType::Tensor { element, .. } => Some(element),
+            _ => None,
+        }
+    }
+
+    /// Format tensor type for display (concise form for inlay hints)
+    pub fn format_tensor_short(&self) -> Option<String> {
+        match self {
+            HirType::Tensor { element, dims } => {
+                let elem_str = element.format_short();
+                let dims_str = dims
+                    .iter()
+                    .map(|d| d.format_short())
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                Some(format!("Tensor[{}, ({})]", elem_str, dims_str))
+            }
+            _ => None,
+        }
+    }
+
+    /// Format type for short display (inlay hints)
+    pub fn format_short(&self) -> String {
+        match self {
+            HirType::Unit => "()".to_string(),
+            HirType::Bool => "bool".to_string(),
+            HirType::I8 => "i8".to_string(),
+            HirType::I16 => "i16".to_string(),
+            HirType::I32 => "i32".to_string(),
+            HirType::I64 => "i64".to_string(),
+            HirType::I128 => "i128".to_string(),
+            HirType::Isize => "isize".to_string(),
+            HirType::U8 => "u8".to_string(),
+            HirType::U16 => "u16".to_string(),
+            HirType::U32 => "u32".to_string(),
+            HirType::U64 => "u64".to_string(),
+            HirType::U128 => "u128".to_string(),
+            HirType::Usize => "usize".to_string(),
+            HirType::F32 => "f32".to_string(),
+            HirType::F64 => "f64".to_string(),
+            HirType::Char => "char".to_string(),
+            HirType::String => "string".to_string(),
+            HirType::Vec2 => "vec2".to_string(),
+            HirType::Vec3 => "vec3".to_string(),
+            HirType::Vec4 => "vec4".to_string(),
+            HirType::Mat2 => "mat2".to_string(),
+            HirType::Mat3 => "mat3".to_string(),
+            HirType::Mat4 => "mat4".to_string(),
+            HirType::Quat => "quat".to_string(),
+            HirType::Dual => "dual".to_string(),
+            HirType::Ref { mutable, inner } => {
+                if *mutable {
+                    format!("&!{}", inner.format_short())
+                } else {
+                    format!("&{}", inner.format_short())
+                }
+            }
+            HirType::RawPointer { mutable, inner } => {
+                if *mutable {
+                    format!("*!{}", inner.format_short())
+                } else {
+                    format!("*{}", inner.format_short())
+                }
+            }
+            HirType::Array { element, size } => {
+                if let Some(n) = size {
+                    format!("[{}; {}]", element.format_short(), n)
+                } else {
+                    format!("[{}]", element.format_short())
+                }
+            }
+            HirType::Tuple(types) => {
+                let inner: Vec<String> = types.iter().map(|t| t.format_short()).collect();
+                format!("({})", inner.join(", "))
+            }
+            HirType::Named { name, args } => {
+                if args.is_empty() {
+                    name.clone()
+                } else {
+                    let args_str: Vec<String> = args.iter().map(|t| t.format_short()).collect();
+                    format!("{}<{}>", name, args_str.join(", "))
+                }
+            }
+            HirType::Fn { params, return_type } => {
+                let params_str: Vec<String> = params.iter().map(|t| t.format_short()).collect();
+                format!("fn({}) -> {}", params_str.join(", "), return_type.format_short())
+            }
+            HirType::Var(id) => format!("T{}", id),
+            HirType::Never => "!".to_string(),
+            HirType::Error => "<error>".to_string(),
+            HirType::Knowledge { inner, epsilon_bound, .. } => {
+                let eps = epsilon_bound.map(|e| format!(", e >= {:.2}", e)).unwrap_or_default();
+                format!("Knowledge[{}{}]", inner.format_short(), eps)
+            }
+            HirType::Quantity { numeric, unit } => {
+                format!("{}@{}", numeric.format_short(), unit.format())
+            }
+            HirType::Tensor { element, dims } => {
+                let dims_str = dims
+                    .iter()
+                    .map(|d| d.format_short())
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                format!("Tensor[{}, ({})]", element.format_short(), dims_str)
+            }
+            HirType::Ontology { namespace, term } => {
+                format!("{}:{}", namespace, term)
+            }
+            HirType::Future { output } => {
+                format!("Future<{}>", output.format_short())
+            }
+        }
+    }
+
+    /// Format tensor type for detailed display (hover information)
+    pub fn format_tensor_hover(&self) -> Option<String> {
+        match self {
+            HirType::Tensor { element, dims } => {
+                let elem_str = element.format_short();
+                let dims_str = dims
+                    .iter()
+                    .map(|d| d.format_display())
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                let total = HirTensorDim::compute_total_elements(dims);
+                let total_str = total
+                    .map(|n| format!("{}", n))
+                    .unwrap_or_else(|| "dynamic".to_string());
+
+                Some(format!(
+                    "**Tensor**\n\n\
+                     - Element type: `{}`\n\
+                     - Shape: `[{}]`\n\
+                     - Rank: {}\n\
+                     - Total elements: {}",
+                    elem_str,
+                    dims_str,
+                    dims.len(),
+                    total_str
+                ))
+            }
+            _ => None,
+        }
+    }
+}
+
+impl HirTensorDim {
+    /// Format dimension for short display (inlay hints)
+    pub fn format_short(&self) -> String {
+        match self {
+            HirTensorDim::Named(name) => name.clone(),
+            HirTensorDim::Fixed(size) => size.to_string(),
+            HirTensorDim::Dynamic => "?".to_string(),
+        }
+    }
+
+    /// Format dimension for detailed display (hover)
+    pub fn format_display(&self) -> String {
+        match self {
+            HirTensorDim::Named(name) => format!("{} (named)", name),
+            HirTensorDim::Fixed(size) => size.to_string(),
+            HirTensorDim::Dynamic => "? (dynamic)".to_string(),
+        }
+    }
+
+    /// Check if dimension has a known fixed size
+    pub fn fixed_size(&self) -> Option<usize> {
+        match self {
+            HirTensorDim::Fixed(n) => Some(*n),
+            _ => None,
+        }
+    }
+
+    /// Compute total elements if all dimensions are fixed
+    pub fn compute_total_elements(dims: &[HirTensorDim]) -> Option<usize> {
+        let mut total = 1usize;
+        for dim in dims {
+            match dim.fixed_size() {
+                Some(n) => {
+                    total = total.checked_mul(n)?;
+                }
+                None => return None,
+            }
+        }
+        Some(total)
+    }
+
+    /// Check if two tensor shapes are compatible for operations
+    /// Returns compatibility info: (compatible, message)
+    pub fn shapes_compatible(a: &[HirTensorDim], b: &[HirTensorDim]) -> (bool, String) {
+        if a.len() != b.len() {
+            return (
+                false,
+                format!("Rank mismatch: {} vs {}", a.len(), b.len()),
+            );
+        }
+
+        for (i, (dim_a, dim_b)) in a.iter().zip(b.iter()).enumerate() {
+            match (dim_a, dim_b) {
+                (HirTensorDim::Fixed(n1), HirTensorDim::Fixed(n2)) if n1 != n2 => {
+                    return (
+                        false,
+                        format!("Dimension {} mismatch: {} vs {}", i, n1, n2),
+                    );
+                }
+                (HirTensorDim::Named(name1), HirTensorDim::Named(name2)) if name1 != name2 => {
+                    return (
+                        false,
+                        format!("Named dimension {} mismatch: {} vs {}", i, name1, name2),
+                    );
+                }
+                _ => {}
+            }
+        }
+
+        (true, "Shapes are compatible".to_string())
+    }
+
+    /// Check if shapes are compatible for matrix multiplication
+    /// Returns (compatible, message, result_shape)
+    pub fn matmul_compatible(
+        a: &[HirTensorDim],
+        b: &[HirTensorDim],
+    ) -> (bool, String, Option<Vec<HirTensorDim>>) {
+        // For matmul, we need at least 2D tensors
+        if a.len() < 2 || b.len() < 2 {
+            return (
+                false,
+                "Matrix multiplication requires at least 2D tensors".to_string(),
+                None,
+            );
+        }
+
+        // Check inner dimensions match (last dim of a == second-to-last of b)
+        let a_inner = &a[a.len() - 1];
+        let b_outer = &b[b.len() - 2];
+
+        let inner_match = match (a_inner, b_outer) {
+            (HirTensorDim::Fixed(n1), HirTensorDim::Fixed(n2)) => n1 == n2,
+            (HirTensorDim::Named(name1), HirTensorDim::Named(name2)) => name1 == name2,
+            (HirTensorDim::Dynamic, _) | (_, HirTensorDim::Dynamic) => true,
+            _ => false,
+        };
+
+        if !inner_match {
+            return (
+                false,
+                format!(
+                    "Inner dimensions don't match for matmul: {} vs {}",
+                    a_inner.format_short(),
+                    b_outer.format_short()
+                ),
+                None,
+            );
+        }
+
+        // Build result shape: batch dims + a's outer + b's outer
+        let mut result = Vec::new();
+
+        // Add batch dimensions (broadcasting would go here for full impl)
+        for dim in a.iter().take(a.len() - 2) {
+            result.push(dim.clone());
+        }
+
+        // Add a's row dimension
+        result.push(a[a.len() - 2].clone());
+        // Add b's column dimension
+        result.push(b[b.len() - 1].clone());
+
+        (
+            true,
+            "Shapes are compatible for matrix multiplication".to_string(),
+            Some(result),
+        )
+    }
 }
 
 // ==================== EXPRESSIONS ====================

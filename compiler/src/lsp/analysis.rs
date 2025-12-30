@@ -743,7 +743,7 @@ fn format_type(ty: &crate::ast::TypeExpr) -> String {
         }
         crate::ast::TypeExpr::Reference { mutable, inner } => {
             if *mutable {
-                format!("&mut {}", format_type(inner))
+                format!("&!{}", format_type(inner)) // D uses &! for mutable refs
             } else {
                 format!("&{}", format_type(inner))
             }
@@ -768,7 +768,132 @@ fn format_type(ty: &crate::ast::TypeExpr) -> String {
             format!("fn({}) -> {}", p.join(", "), format_type(return_type))
         }
         crate::ast::TypeExpr::Infer => "_".to_string(),
+        // Tensor types with shape information
+        crate::ast::TypeExpr::Tensor {
+            element_type,
+            shape,
+        } => {
+            let dims_str = shape
+                .iter()
+                .map(format_tensor_dim)
+                .collect::<Vec<_>>()
+                .join(", ");
+            format!("Tensor[{}, ({})]", format_type(element_type), dims_str)
+        }
+        // Tile types for GPU programming
+        crate::ast::TypeExpr::Tile {
+            element_type,
+            tile_m,
+            tile_n,
+            layout,
+        } => {
+            let layout_str = layout
+                .as_ref()
+                .map(|l| format!(", {}", l))
+                .unwrap_or_default();
+            format!(
+                "tile<{}, {}, {}{}>",
+                format_type(element_type),
+                tile_m,
+                tile_n,
+                layout_str
+            )
+        }
+        // Quantity types with units
+        crate::ast::TypeExpr::Quantity { numeric_type, unit } => {
+            let unit_str = unit
+                .base_units
+                .iter()
+                .map(|(u, e)| {
+                    if *e == 1 {
+                        u.clone()
+                    } else {
+                        format!("{}^{}", u, e)
+                    }
+                })
+                .collect::<Vec<_>>()
+                .join("*");
+            format!("{}@{}", format_type(numeric_type), unit_str)
+        }
+        // Ontology types
+        crate::ast::TypeExpr::Ontology { ontology, term } => {
+            if let Some(t) = term {
+                format!("{}:{}", ontology, t)
+            } else {
+                ontology.clone()
+            }
+        }
+        // Linear/affine type annotations
+        crate::ast::TypeExpr::Linear { inner, linearity } => {
+            let modifier = match linearity {
+                crate::ast::LinearityKind::Linear => "linear ",
+                crate::ast::LinearityKind::Affine => "affine ",
+                crate::ast::LinearityKind::Relevant => "relevant ",
+                crate::ast::LinearityKind::Unrestricted => "",
+            };
+            format!("{}{}", modifier, format_type(inner))
+        }
+        // Effected types
+        crate::ast::TypeExpr::Effected { inner, effects } => {
+            let effects_str = effects.effects.join(", ");
+            if effects_str.is_empty() {
+                format_type(inner)
+            } else {
+                format!("{} with {}", format_type(inner), effects_str)
+            }
+        }
+        // Refinement types
+        crate::ast::TypeExpr::Refinement {
+            var,
+            base_type,
+            predicate: _,
+        } => {
+            format!("{{ {}: {} | ... }}", var, format_type(base_type))
+        }
+        // Knowledge types (epistemic)
+        crate::ast::TypeExpr::Knowledge {
+            value_type,
+            epsilon,
+            validity: _,
+            provenance: _,
+        } => {
+            let eps_str = epsilon
+                .as_ref()
+                .map(|e| format!(", e {}", format_epsilon_bound(e)))
+                .unwrap_or_default();
+            format!("Knowledge[{}{}]", format_type(value_type), eps_str)
+        }
+        // Raw pointer types (for FFI)
+        crate::ast::TypeExpr::RawPointer { mutable, inner } => {
+            if *mutable {
+                format!("*!{}", format_type(inner))
+            } else {
+                format!("*{}", format_type(inner))
+            }
+        }
     }
+}
+
+/// Format a tensor dimension
+fn format_tensor_dim(dim: &crate::ast::TensorDim) -> String {
+    match dim {
+        crate::ast::TensorDim::Named(name) => name.clone(),
+        crate::ast::TensorDim::Fixed(size) => size.to_string(),
+        crate::ast::TensorDim::Dynamic => "?".to_string(),
+        crate::ast::TensorDim::Expr(_) => "_".to_string(),
+    }
+}
+
+/// Format an epsilon bound for epistemic types
+fn format_epsilon_bound(bound: &crate::ast::EpsilonBound) -> String {
+    let op = match bound.operator {
+        crate::ast::ComparisonOp::Lt => "<",
+        crate::ast::ComparisonOp::Le => "<=",
+        crate::ast::ComparisonOp::Eq => "=",
+        crate::ast::ComparisonOp::Ge => ">=",
+        crate::ast::ComparisonOp::Gt => ">",
+    };
+    format!("{} ...", op)
 }
 
 /// Get built-in function signature

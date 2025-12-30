@@ -1,9 +1,18 @@
 //! Hover information provider
 //!
 //! Provides type information and documentation on hover.
+//!
+//! # Tensor Shape Information
+//!
+//! For tensor types, hover provides detailed shape information:
+//! - Element type (f32, f64, etc.)
+//! - Shape dimensions (fixed, named, or dynamic)
+//! - Total element count (when computable)
+//! - Shape compatibility warnings for operations
 
 use tower_lsp::lsp_types::*;
 
+use crate::hir::{HirTensorDim, HirType};
 use crate::resolve::{DefKind, SymbolTable};
 
 /// Provider for hover information
@@ -127,6 +136,7 @@ impl HoverProvider {
             DefKind::Field => "Field",
             DefKind::Kernel => "GPU kernel function",
             DefKind::BuiltinType => "Built-in type",
+            DefKind::BuiltinFunction => "Built-in function",
         };
 
         content.push_str(&format!("\n*{}*\n", kind_desc));
@@ -183,6 +193,7 @@ impl HoverProvider {
             DefKind::Field => format!("{}: T", name),
             DefKind::Kernel => format!("kernel fn {}(...)", name),
             DefKind::BuiltinType => name.to_string(),
+            DefKind::BuiltinFunction => format!("fn {}(...)", name),
         }
     }
 
@@ -613,10 +624,666 @@ async fn main() with Async {
 
         Some(info.to_string())
     }
+
+    // ========================================================================
+    // Tensor Shape Hover Information
+    // ========================================================================
+
+    /// Get hover information for a tensor type
+    pub fn hover_for_tensor(&self, hir_type: &HirType, range: Range) -> Option<Hover> {
+        let content = self.format_tensor_hover(hir_type)?;
+        Some(Hover {
+            contents: HoverContents::Markup(MarkupContent {
+                kind: MarkupKind::Markdown,
+                value: content,
+            }),
+            range: Some(range),
+        })
+    }
+
+    /// Format detailed hover content for tensor types
+    pub fn format_tensor_hover(&self, ty: &HirType) -> Option<String> {
+        match ty {
+            HirType::Tensor { element, dims } => {
+                let elem_str = element.format_short();
+                let dims_short = dims
+                    .iter()
+                    .map(|d| d.format_short())
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                let dims_detailed = dims
+                    .iter()
+                    .enumerate()
+                    .map(|(i, d)| format!("  - dim[{}]: {}", i, d.format_display()))
+                    .collect::<Vec<_>>()
+                    .join("\n");
+
+                let total = HirTensorDim::compute_total_elements(dims);
+                let total_str = total
+                    .map(|n| format!("{}", n))
+                    .unwrap_or_else(|| "dynamic (computed at runtime)".to_string());
+
+                let memory_info = total.map(|n| {
+                    let elem_size = self.element_size_bytes(&element);
+                    let total_bytes = n * elem_size;
+                    self.format_memory_size(total_bytes)
+                });
+                let memory_str = memory_info
+                    .map(|s| format!("\n- Memory: ~{}", s))
+                    .unwrap_or_default();
+
+                Some(format!(
+                    "**Tensor**\n\n\
+                     ```d\n\
+                     Tensor[{}, ({})]\n\
+                     ```\n\n\
+                     **Properties**\n\
+                     - Element type: `{}`\n\
+                     - Shape: `[{}]`\n\
+                     - Rank: {}\n\
+                     - Total elements: {}{}\n\n\
+                     **Dimensions**\n\
+                     {}",
+                    elem_str,
+                    dims_short,
+                    elem_str,
+                    dims_short,
+                    dims.len(),
+                    total_str,
+                    memory_str,
+                    dims_detailed
+                ))
+            }
+            HirType::Mat2 | HirType::Mat3 | HirType::Mat4 => {
+                let dim = match ty {
+                    HirType::Mat2 => 2,
+                    HirType::Mat3 => 3,
+                    HirType::Mat4 => 4,
+                    _ => unreachable!(),
+                };
+                Some(format!(
+                    "**Matrix**\n\n\
+                     ```d\n\
+                     mat{}\n\
+                     ```\n\n\
+                     **Properties**\n\
+                     - Element type: `f32`\n\
+                     - Shape: `{}x{}` (column-major)\n\
+                     - Total elements: {}\n\
+                     - Memory: {} bytes\n\n\
+                     **Operations**\n\
+                     - `*` — Matrix multiplication\n\
+                     - `+`, `-` — Element-wise operations\n\
+                     - `.transpose()` — Transpose\n\
+                     - `.inverse()` — Inverse (if invertible)\n\
+                     - `.determinant()` — Determinant",
+                    dim,
+                    dim,
+                    dim,
+                    dim * dim,
+                    dim * dim * 4
+                ))
+            }
+            HirType::Vec2 | HirType::Vec3 | HirType::Vec4 => {
+                let dim = match ty {
+                    HirType::Vec2 => 2,
+                    HirType::Vec3 => 3,
+                    HirType::Vec4 => 4,
+                    _ => unreachable!(),
+                };
+                let components = match dim {
+                    2 => "x, y",
+                    3 => "x, y, z",
+                    4 => "x, y, z, w",
+                    _ => "",
+                };
+                Some(format!(
+                    "**Vector**\n\n\
+                     ```d\n\
+                     vec{}\n\
+                     ```\n\n\
+                     **Properties**\n\
+                     - Element type: `f32`\n\
+                     - Dimension: {}\n\
+                     - Components: `{}`\n\
+                     - Memory: {} bytes\n\n\
+                     **Operations**\n\
+                     - `.dot(other)` — Dot product\n\
+                     - `.cross(other)` — Cross product (vec3 only)\n\
+                     - `.length()` — Euclidean length\n\
+                     - `.normalize()` — Unit vector\n\
+                     - `+`, `-`, `*`, `/` — Component-wise operations",
+                    dim,
+                    dim,
+                    components,
+                    dim * 4
+                ))
+            }
+            HirType::Quat => Some(
+                "**Quaternion**\n\n\
+                 ```d\n\
+                 quat\n\
+                 ```\n\n\
+                 **Properties**\n\
+                 - Components: `x, y, z, w` (f32)\n\
+                 - Memory: 16 bytes\n\n\
+                 **Operations**\n\
+                 - `*` — Quaternion multiplication (rotation composition)\n\
+                 - `.normalize()` — Unit quaternion\n\
+                 - `.inverse()` — Inverse rotation\n\
+                 - `.to_matrix()` — Convert to rotation matrix\n\
+                 - `.slerp(other, t)` — Spherical interpolation"
+                    .to_string(),
+            ),
+            _ => None,
+        }
+    }
+
+    /// Get element size in bytes for a type
+    fn element_size_bytes(&self, ty: &HirType) -> usize {
+        match ty {
+            HirType::I8 | HirType::U8 | HirType::Bool => 1,
+            HirType::I16 | HirType::U16 => 2,
+            HirType::I32 | HirType::U32 | HirType::F32 => 4,
+            HirType::I64 | HirType::U64 | HirType::F64 => 8,
+            HirType::I128 | HirType::U128 => 16,
+            _ => 4, // Default to 4 bytes
+        }
+    }
+
+    /// Format memory size for display
+    fn format_memory_size(&self, bytes: usize) -> String {
+        if bytes < 1024 {
+            format!("{} bytes", bytes)
+        } else if bytes < 1024 * 1024 {
+            format!("{:.1} KB", bytes as f64 / 1024.0)
+        } else if bytes < 1024 * 1024 * 1024 {
+            format!("{:.1} MB", bytes as f64 / (1024.0 * 1024.0))
+        } else {
+            format!("{:.2} GB", bytes as f64 / (1024.0 * 1024.0 * 1024.0))
+        }
+    }
+
+    /// Get hover information for tensor operations
+    pub fn hover_for_tensor_operation(&self, op_name: &str, range: Range) -> Option<Hover> {
+        let content = self.tensor_operation_info(op_name)?;
+        Some(Hover {
+            contents: HoverContents::Markup(MarkupContent {
+                kind: MarkupKind::Markdown,
+                value: content,
+            }),
+            range: Some(range),
+        })
+    }
+
+    /// Get documentation for tensor operations
+    fn tensor_operation_info(&self, op: &str) -> Option<String> {
+        let info = match op {
+            "matmul" | "mm" => {
+                r#"**matmul** — Matrix multiplication
+
+```d
+fn matmul(a: Tensor[T, (M, K)], b: Tensor[T, (K, N)]) -> Tensor[T, (M, N)]
+```
+
+Computes matrix product `C = A @ B` where:
+- `A` has shape `(M, K)`
+- `B` has shape `(K, N)`
+- Result has shape `(M, N)`
+
+**Shape Rules**
+- Inner dimensions must match: `A.shape[-1] == B.shape[-2]`
+- Supports batched matmul when shapes have more than 2 dimensions
+
+**Performance**
+Uses optimized BLAS/cuBLAS when available."#
+            }
+            "bmm" => {
+                r#"**bmm** — Batched matrix multiplication
+
+```d
+fn bmm(a: Tensor[T, (B, M, K)], b: Tensor[T, (B, K, N)]) -> Tensor[T, (B, M, N)]
+```
+
+Performs batch-wise matrix multiplication where:
+- `B` is the batch dimension
+- Each batch computes `C[i] = A[i] @ B[i]`"#
+            }
+            "transpose" | "t" => {
+                r#"**transpose** — Swap tensor dimensions
+
+```d
+fn transpose(t: Tensor[T, (M, N)]) -> Tensor[T, (N, M)]
+fn transpose(t: Tensor[T, dims], dim0: int, dim1: int) -> Tensor[T, dims']
+```
+
+Swaps the specified dimensions. For 2D tensors, swaps rows and columns."#
+            }
+            "reshape" | "view" => {
+                r#"**reshape** — Change tensor shape
+
+```d
+fn reshape(t: Tensor[T, dims], new_shape: (int...)) -> Tensor[T, new_shape]
+```
+
+Changes the shape of a tensor without copying data (when possible).
+
+**Requirements**
+- Total elements must remain the same
+- One dimension can be `-1` to infer from others"#
+            }
+            "squeeze" => {
+                r#"**squeeze** — Remove size-1 dimensions
+
+```d
+fn squeeze(t: Tensor[T, dims]) -> Tensor[T, dims']
+fn squeeze(t: Tensor[T, dims], dim: int) -> Tensor[T, dims']
+```
+
+Removes all dimensions of size 1, or just the specified dimension."#
+            }
+            "unsqueeze" => {
+                r#"**unsqueeze** — Add size-1 dimension
+
+```d
+fn unsqueeze(t: Tensor[T, dims], dim: int) -> Tensor[T, dims']
+```
+
+Adds a dimension of size 1 at the specified position."#
+            }
+            "broadcast" | "expand" => {
+                r#"**broadcast** — Expand tensor to larger shape
+
+```d
+fn broadcast(t: Tensor[T, dims], target: (int...)) -> Tensor[T, target]
+```
+
+Expands tensor to match target shape using broadcasting rules.
+
+**Broadcasting Rules**
+- Dimensions are aligned from the right
+- Size-1 dimensions can be expanded
+- Missing dimensions are added as size-1"#
+            }
+            "sum" => {
+                r#"**SUM** — Reduction operation
+
+```d
+fn sum(t: Tensor[T, dims]) -> T
+fn sum(t: Tensor[T, dims], dim: int, keepdim: bool = false) -> Tensor[T, dims']
+```
+
+Reduces tensor along specified dimension(s).
+
+**Parameters**
+- `dim`: Dimension to reduce (optional, reduces all if not specified)
+- `keepdim`: If true, reduced dimension becomes size 1"#
+            }
+            "mean" => {
+                r#"**MEAN** — Reduction operation
+
+```d
+fn mean(t: Tensor[T, dims]) -> T
+fn mean(t: Tensor[T, dims], dim: int, keepdim: bool = false) -> Tensor[T, dims']
+```
+
+Reduces tensor along specified dimension(s).
+
+**Parameters**
+- `dim`: Dimension to reduce (optional, reduces all if not specified)
+- `keepdim`: If true, reduced dimension becomes size 1"#
+            }
+            "max" => {
+                r#"**MAX** — Reduction operation
+
+```d
+fn max(t: Tensor[T, dims]) -> T
+fn max(t: Tensor[T, dims], dim: int, keepdim: bool = false) -> Tensor[T, dims']
+```
+
+Reduces tensor along specified dimension(s).
+
+**Parameters**
+- `dim`: Dimension to reduce (optional, reduces all if not specified)
+- `keepdim`: If true, reduced dimension becomes size 1"#
+            }
+            "min" => {
+                r#"**MIN** — Reduction operation
+
+```d
+fn min(t: Tensor[T, dims]) -> T
+fn min(t: Tensor[T, dims], dim: int, keepdim: bool = false) -> Tensor[T, dims']
+```
+
+Reduces tensor along specified dimension(s).
+
+**Parameters**
+- `dim`: Dimension to reduce (optional, reduces all if not specified)
+- `keepdim`: If true, reduced dimension becomes size 1"#
+            }
+            "zeros" => {
+                r#"**zeros** — Create filled tensor
+
+```d
+fn zeros(shape: (int...)) -> Tensor[f32, shape]
+fn zeros<T>(shape: (int...), dtype: Type[T]) -> Tensor[T, shape]
+```
+
+Creates a tensor filled with 0s of the specified shape."#
+            }
+            "ones" => {
+                r#"**ones** — Create filled tensor
+
+```d
+fn ones(shape: (int...)) -> Tensor[f32, shape]
+fn ones<T>(shape: (int...), dtype: Type[T]) -> Tensor[T, shape]
+```
+
+Creates a tensor filled with 1s of the specified shape."#
+            }
+            "rand" => {
+                r#"**rand** — Create random tensor
+
+```d
+fn rand(shape: (int...)) -> Tensor[f32, shape]
+```
+
+Creates a tensor with random values from uniform [0, 1) distribution."#
+            }
+            "randn" => {
+                r#"**randn** — Create random tensor
+
+```d
+fn randn(shape: (int...)) -> Tensor[f32, shape]
+```
+
+Creates a tensor with random values from standard normal (mean=0, std=1) distribution."#
+            }
+            "flatten" => {
+                r#"**flatten** — Flatten tensor to 1D
+
+```d
+fn flatten(t: Tensor[T, dims]) -> Tensor[T, (N,)]
+fn flatten(t: Tensor[T, dims], start_dim: int, end_dim: int) -> Tensor[T, dims']
+```
+
+Flattens tensor into 1D or flattens a range of dimensions."#
+            }
+            _ => return None,
+        };
+
+        Some(info.to_string())
+    }
+
+    /// Get hover for tensor shape compatibility
+    pub fn hover_for_shape_check(
+        &self,
+        shape_a: &[HirTensorDim],
+        shape_b: &[HirTensorDim],
+        operation: &str,
+        range: Range,
+    ) -> Option<Hover> {
+        let (compatible, message) = HirTensorDim::shapes_compatible(shape_a, shape_b);
+
+        let shape_a_str = shape_a
+            .iter()
+            .map(|d| d.format_short())
+            .collect::<Vec<_>>()
+            .join(", ");
+        let shape_b_str = shape_b
+            .iter()
+            .map(|d| d.format_short())
+            .collect::<Vec<_>>()
+            .join(", ");
+
+        let status = if compatible {
+            "Compatible"
+        } else {
+            "Incompatible"
+        };
+        let icon = if compatible { "OK" } else { "Warning" };
+
+        let content = format!(
+            "**Shape Check: {}**\n\n\
+             **Operation**: `{}`\n\n\
+             | Operand | Shape |\n\
+             |---------|-------|\n\
+             | Left | `[{}]` |\n\
+             | Right | `[{}]` |\n\n\
+             **Status**: {} ({})",
+            icon, operation, shape_a_str, shape_b_str, status, message
+        );
+
+        Some(Hover {
+            contents: HoverContents::Markup(MarkupContent {
+                kind: MarkupKind::Markdown,
+                value: content,
+            }),
+            range: Some(range),
+        })
+    }
+
+    /// Get hover for matmul shape inference
+    pub fn hover_for_matmul(
+        &self,
+        shape_a: &[HirTensorDim],
+        shape_b: &[HirTensorDim],
+        range: Range,
+    ) -> Option<Hover> {
+        let (compatible, message, result_shape) =
+            HirTensorDim::matmul_compatible(shape_a, shape_b);
+
+        let shape_a_str = shape_a
+            .iter()
+            .map(|d| d.format_short())
+            .collect::<Vec<_>>()
+            .join(", ");
+        let shape_b_str = shape_b
+            .iter()
+            .map(|d| d.format_short())
+            .collect::<Vec<_>>()
+            .join(", ");
+
+        let result_str = result_shape
+            .as_ref()
+            .map(|s| {
+                s.iter()
+                    .map(|d| d.format_short())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            })
+            .unwrap_or_else(|| "N/A".to_string());
+
+        let status = if compatible { "OK" } else { "Error" };
+        let status_msg = if compatible { &message } else { &message };
+
+        let content = format!(
+            "**Matrix Multiplication**\n\n\
+             ```\n\
+             [{shape_a}] @ [{shape_b}] -> [{result}]\n\
+             ```\n\n\
+             | Shape | Value |\n\
+             |-------|-------|\n\
+             | A | `[{shape_a}]` |\n\
+             | B | `[{shape_b}]` |\n\
+             | Result | `[{result}]` |\n\n\
+             **Status**: {status}\n\
+             {status_msg}",
+            shape_a = shape_a_str,
+            shape_b = shape_b_str,
+            result = result_str,
+            status = status,
+            status_msg = status_msg
+        );
+
+        Some(Hover {
+            contents: HoverContents::Markup(MarkupContent {
+                kind: MarkupKind::Markdown,
+                value: content,
+            }),
+            range: Some(range),
+        })
+    }
 }
 
 impl Default for HoverProvider {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+// ============================================================================
+// Tests
+// ============================================================================
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_tensor_hover_fixed_dims() {
+        let provider = HoverProvider::new();
+        let tensor_type = HirType::Tensor {
+            element: Box::new(HirType::F32),
+            dims: vec![
+                HirTensorDim::Fixed(32),
+                HirTensorDim::Fixed(64),
+                HirTensorDim::Fixed(128),
+            ],
+        };
+
+        let content = provider.format_tensor_hover(&tensor_type);
+        assert!(content.is_some());
+
+        let content = content.unwrap();
+        assert!(content.contains("Tensor"));
+        assert!(content.contains("f32"));
+        assert!(content.contains("32"));
+        assert!(content.contains("64"));
+        assert!(content.contains("128"));
+        assert!(content.contains("Rank: 3"));
+    }
+
+    #[test]
+    fn test_tensor_hover_named_dims() {
+        let provider = HoverProvider::new();
+        let tensor_type = HirType::Tensor {
+            element: Box::new(HirType::F64),
+            dims: vec![
+                HirTensorDim::Named("batch".to_string()),
+                HirTensorDim::Named("features".to_string()),
+            ],
+        };
+
+        let content = provider.format_tensor_hover(&tensor_type);
+        assert!(content.is_some());
+
+        let content = content.unwrap();
+        assert!(content.contains("batch"));
+        assert!(content.contains("features"));
+        assert!(content.contains("dynamic"));
+    }
+
+    #[test]
+    fn test_matrix_hover() {
+        let provider = HoverProvider::new();
+        let content = provider.format_tensor_hover(&HirType::Mat4);
+        assert!(content.is_some());
+
+        let content = content.unwrap();
+        assert!(content.contains("Matrix"));
+        assert!(content.contains("4x4"));
+        assert!(content.contains("16"));
+        assert!(content.contains("transpose"));
+    }
+
+    #[test]
+    fn test_vector_hover() {
+        let provider = HoverProvider::new();
+        let content = provider.format_tensor_hover(&HirType::Vec3);
+        assert!(content.is_some());
+
+        let content = content.unwrap();
+        assert!(content.contains("Vector"));
+        assert!(content.contains("3"));
+        assert!(content.contains("x, y, z"));
+        assert!(content.contains("dot"));
+        assert!(content.contains("cross"));
+    }
+
+    #[test]
+    fn test_quaternion_hover() {
+        let provider = HoverProvider::new();
+        let content = provider.format_tensor_hover(&HirType::Quat);
+        assert!(content.is_some());
+
+        let content = content.unwrap();
+        assert!(content.contains("Quaternion"));
+        assert!(content.contains("slerp"));
+    }
+
+    #[test]
+    fn test_tensor_operation_info() {
+        let provider = HoverProvider::new();
+
+        let matmul_info = provider.tensor_operation_info("matmul");
+        assert!(matmul_info.is_some());
+        assert!(matmul_info.unwrap().contains("Matrix multiplication"));
+
+        let reshape_info = provider.tensor_operation_info("reshape");
+        assert!(reshape_info.is_some());
+        assert!(reshape_info.unwrap().contains("Change tensor shape"));
+    }
+
+    #[test]
+    fn test_format_memory_size() {
+        let provider = HoverProvider::new();
+
+        assert_eq!(provider.format_memory_size(512), "512 bytes");
+        assert_eq!(provider.format_memory_size(1024), "1.0 KB");
+        assert_eq!(provider.format_memory_size(1024 * 1024), "1.0 MB");
+        assert_eq!(provider.format_memory_size(1024 * 1024 * 1024), "1.00 GB");
+    }
+
+    #[test]
+    fn test_matmul_hover_compatible() {
+        let provider = HoverProvider::new();
+        let range = Range::default();
+
+        let shape_a = vec![HirTensorDim::Fixed(32), HirTensorDim::Fixed(64)];
+        let shape_b = vec![HirTensorDim::Fixed(64), HirTensorDim::Fixed(128)];
+
+        let hover = provider.hover_for_matmul(&shape_a, &shape_b, range);
+        assert!(hover.is_some());
+
+        if let HoverContents::Markup(content) = hover.unwrap().contents {
+            assert!(content.value.contains("32"));
+            assert!(content.value.contains("64"));
+            assert!(content.value.contains("128"));
+            assert!(content.value.contains("OK"));
+        }
+    }
+
+    #[test]
+    fn test_matmul_hover_incompatible() {
+        let provider = HoverProvider::new();
+        let range = Range::default();
+
+        let shape_a = vec![HirTensorDim::Fixed(32), HirTensorDim::Fixed(64)];
+        let shape_b = vec![HirTensorDim::Fixed(128), HirTensorDim::Fixed(256)]; // Wrong inner dim
+
+        let hover = provider.hover_for_matmul(&shape_a, &shape_b, range);
+        assert!(hover.is_some());
+
+        if let HoverContents::Markup(content) = hover.unwrap().contents {
+            assert!(content.value.contains("Error"));
+        }
+    }
+
+    #[test]
+    fn test_non_tensor_returns_none() {
+        let provider = HoverProvider::new();
+        let content = provider.format_tensor_hover(&HirType::I32);
+        assert!(content.is_none());
     }
 }
