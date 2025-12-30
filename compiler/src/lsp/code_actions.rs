@@ -18,7 +18,6 @@
 use tower_lsp::lsp_types::*;
 
 use crate::ast::{Ast, Item};
-use crate::common::Span;
 use crate::resolve::SymbolTable;
 
 // ============================================================================

@@ -556,6 +556,77 @@ impl SemanticTokensProvider {
                 SemanticTokenType::Comment,
                 SemanticTokenModifiers::DOCUMENTATION,
             )),
+
+            // Additional keywords added to lexer (Use, Var, Ontology, etc.)
+            TokenKind::Use
+            | TokenKind::Var
+            | TokenKind::Ontology
+            | TokenKind::From
+            | TokenKind::Align
+            | TokenKind::Distance
+            | TokenKind::Threshold
+            | TokenKind::Compat
+            | TokenKind::Tile
+            | TokenKind::Ode
+            | TokenKind::Pde
+            | TokenKind::Causal
+            | TokenKind::Nodes
+            | TokenKind::Edges
+            | TokenKind::Equations
+            | TokenKind::State
+            | TokenKind::Params
+            | TokenKind::Domain
+            | TokenKind::Boundary
+            | TokenKind::Initial
+            | TokenKind::Query
+            | TokenKind::Do
+            | TokenKind::Counterfactual => {
+                Some((SemanticTokenType::Keyword, SemanticTokenModifiers::NONE))
+            }
+
+            // Type keywords
+            TokenKind::Knowledge
+            | TokenKind::Quantity
+            | TokenKind::Tensor
+            | TokenKind::OntologyTerm => {
+                Some((SemanticTokenType::Type, SemanticTokenModifiers::NONE))
+            }
+
+            // Linear algebra primitives
+            TokenKind::Vec2
+            | TokenKind::Vec3
+            | TokenKind::Vec4
+            | TokenKind::Mat2
+            | TokenKind::Mat3
+            | TokenKind::Mat4
+            | TokenKind::Quat
+            | TokenKind::Dual => Some((SemanticTokenType::Type, SemanticTokenModifiers::NONE)),
+
+            // Automatic differentiation
+            TokenKind::Grad | TokenKind::Jacobian | TokenKind::Hessian => {
+                Some((SemanticTokenType::Keyword, SemanticTokenModifiers::NONE))
+            }
+
+            // Provenance/validity keywords
+            TokenKind::Valid
+            | TokenKind::ValidUntil
+            | TokenKind::ValidWhile
+            | TokenKind::Derived
+            | TokenKind::SourceProv
+            | TokenKind::Computed
+            | TokenKind::Literature
+            | TokenKind::Measured
+            | TokenKind::InputProv => {
+                Some((SemanticTokenType::Keyword, SemanticTokenModifiers::NONE))
+            }
+
+            // Concatenation operator
+            TokenKind::PlusPlus => {
+                Some((SemanticTokenType::Operator, SemanticTokenModifiers::NONE))
+            }
+
+            // Catch-all for any new tokens not yet classified
+            _ => None,
         }
     }
 
@@ -639,6 +710,28 @@ impl SemanticTokensProvider {
             Item::Import(_) | Item::Handler(_) | Item::Extern(_) => {}
             Item::MacroInvocation(_) => {
                 // Macro invocations are expanded before semantic token processing
+            }
+            // Handle newer AST item types
+            Item::Export(_) => {
+                // Export declaration - no special highlighting needed
+            }
+            Item::OntologyImport(_) => {
+                // Ontology import - no special highlighting needed
+            }
+            Item::AlignDecl(_) => {
+                // Alignment declaration - no special highlighting needed
+            }
+            Item::OdeDef(_) => {
+                // ODE definition - could add specialized highlighting
+            }
+            Item::PdeDef(_) => {
+                // PDE definition - could add specialized highlighting
+            }
+            Item::CausalModel(_) => {
+                // Causal model - could add specialized highlighting
+            }
+            Item::Module(_) => {
+                // Nested module - recursive analysis could be added
             }
         }
     }
@@ -783,6 +876,34 @@ impl SemanticTokensProvider {
                 self.analyze_type(return_type, builder);
             }
             TypeExpr::Unit | TypeExpr::SelfType | TypeExpr::Infer => {}
+            // Handle newer type expression variants
+            TypeExpr::RawPointer { inner, .. } => {
+                self.analyze_type(inner, builder);
+            }
+            TypeExpr::Knowledge { value_type, .. } => {
+                self.analyze_type(value_type, builder);
+            }
+            TypeExpr::Quantity { numeric_type, .. } => {
+                self.analyze_type(numeric_type, builder);
+            }
+            TypeExpr::Tensor { element_type, .. } => {
+                self.analyze_type(element_type, builder);
+            }
+            TypeExpr::Tile { element_type, .. } => {
+                self.analyze_type(element_type, builder);
+            }
+            TypeExpr::Ontology { .. } => {
+                // Ontology type reference - no recursive analysis needed
+            }
+            TypeExpr::Linear { inner, .. } => {
+                self.analyze_type(inner, builder);
+            }
+            TypeExpr::Effected { inner, .. } => {
+                self.analyze_type(inner, builder);
+            }
+            TypeExpr::Refinement { base_type, .. } => {
+                self.analyze_type(base_type, builder);
+            }
         }
         // Suppress unused warning
         let _ = builder;
@@ -940,6 +1061,75 @@ impl SemanticTokensProvider {
             }
             Expr::MacroInvocation(_) => {
                 // Macro invocations are expanded before semantic token processing
+            }
+            // Handle newer expression variants
+            Expr::Range { start, end, .. } => {
+                if let Some(s) = start {
+                    self.analyze_expr(s, symbols, builder);
+                }
+                if let Some(e) = end {
+                    self.analyze_expr(e, symbols, builder);
+                }
+            }
+            Expr::OntologyTerm { .. } => {
+                // Ontology term literal - no recursive analysis needed
+            }
+            Expr::Do { interventions, .. } => {
+                for (_, value) in interventions {
+                    self.analyze_expr(value, symbols, builder);
+                }
+            }
+            Expr::Counterfactual {
+                factual,
+                intervention,
+                outcome,
+                ..
+            } => {
+                self.analyze_expr(factual, symbols, builder);
+                self.analyze_expr(intervention, symbols, builder);
+                self.analyze_expr(outcome, symbols, builder);
+            }
+            Expr::KnowledgeExpr {
+                value,
+                epsilon,
+                validity,
+                provenance,
+                ..
+            } => {
+                self.analyze_expr(value, symbols, builder);
+                if let Some(e) = epsilon {
+                    self.analyze_expr(e, symbols, builder);
+                }
+                if let Some(v) = validity {
+                    self.analyze_expr(v, symbols, builder);
+                }
+                if let Some(p) = provenance {
+                    self.analyze_expr(p, symbols, builder);
+                }
+            }
+            Expr::Uncertain {
+                value, uncertainty, ..
+            } => {
+                self.analyze_expr(value, symbols, builder);
+                self.analyze_expr(uncertainty, symbols, builder);
+            }
+            Expr::GpuAnnotated { expr, .. } => {
+                self.analyze_expr(expr, symbols, builder);
+            }
+            Expr::Observe {
+                data, distribution, ..
+            } => {
+                self.analyze_expr(data, symbols, builder);
+                self.analyze_expr(distribution, symbols, builder);
+            }
+            Expr::Query { target, given, interventions, .. } => {
+                self.analyze_expr(target, symbols, builder);
+                for g in given {
+                    self.analyze_expr(g, symbols, builder);
+                }
+                for (_, value) in interventions {
+                    self.analyze_expr(value, symbols, builder);
+                }
             }
         }
     }

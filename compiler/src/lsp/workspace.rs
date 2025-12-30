@@ -10,11 +10,11 @@ use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use tower_lsp::lsp_types::*;
 
-use crate::ast::{Ast, Item, ModuleId};
+use crate::ast::{Ast, Item};
 use crate::common::Span;
 use crate::lexer;
 use crate::parser;
-use crate::resolve::{DefId, DefKind, Symbol, SymbolTable};
+use crate::resolve::{DefKind, SymbolTable};
 
 /// Represents a file in the workspace
 #[derive(Debug)]
@@ -194,8 +194,9 @@ impl Workspace {
     pub fn scan_workspace(&mut self) -> Vec<PathBuf> {
         let mut discovered = Vec::new();
 
-        if let Some(ref root) = self.root_path {
-            self.scan_directory(root, &mut discovered);
+        // Clone root_path to avoid borrow issues
+        if let Some(root) = self.root_path.clone() {
+            self.scan_directory(&root, &mut discovered);
         }
 
         discovered
@@ -292,19 +293,26 @@ impl Workspace {
                 !symbols.is_empty()
             });
 
-            // Parse and analyze
+            // Check if file exists and parse
+            if !self.files.contains_key(&path) {
+                return;
+            }
+
+            // Parse the file first (before any mutable borrows)
+            let parsed = lexer::lex(&source)
+                .ok()
+                .and_then(|tokens| parser::parse(&tokens, &source).ok());
+
+            // Update file metadata
             if let Some(file) = self.files.get_mut(&path) {
                 file.source = Some(source.clone());
                 file.modified = std::time::SystemTime::now();
+                file.ast = parsed.clone();
+            }
 
-                // Parse the file
-                if let Ok(tokens) = lexer::lex(&source) {
-                    if let Ok(ast) = parser::parse(&tokens, &source) {
-                        // Extract exports and build symbol index
-                        self.index_file_symbols(&path, &ast, &source);
-                        file.ast = Some(ast);
-                    }
-                }
+            // Index symbols separately (after the get_mut borrow is released)
+            if let Some(ast) = parsed {
+                self.index_file_symbols(&path, &ast, &source);
             }
         }
     }

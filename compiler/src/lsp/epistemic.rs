@@ -15,9 +15,7 @@
 
 use tower_lsp::lsp_types::*;
 
-use crate::diagnostic::epistemic::{
-    EpistemicDiagnostic, EpistemicIntegrityChecker, EpistemicSeverity,
-};
+use crate::diagnostic::epistemic::{EpistemicDiagnostic, EpistemicSeverity};
 use crate::epistemic::{Confidence, EpistemicStatus, Revisability, Source};
 
 /// Epistemic hover provider
@@ -119,7 +117,7 @@ impl EpistemicHoverProvider {
                 protocol,
                 timestamp,
             } => {
-                let mut parts = vec!["**Source:** Measurement"];
+                let parts = vec!["**Source:** Measurement"];
                 let mut details = Vec::new();
                 if let Some(inst) = instrument {
                     details.push(format!("instrument: {}", inst));
