@@ -15,7 +15,7 @@ This document captures the comprehensive audit findings and prioritized roadmap 
 | **Compiler Modules** | 70+ |
 | **Overall Maturity** | 94% |
 
-**Verdict:** Production-grade core. Blockers 1 & 2 RESOLVED ✅. Blocker 3 (Effect Handlers) IN PROGRESS 🟡 - interpreter dispatch complete, JIT Prob/Causal effects working, continuations pending.
+**Verdict:** Production-grade core. Blockers 1 & 2 RESOLVED ✅. Blocker 3 (Effect Handlers) NEAR COMPLETE 🟢 - all 5 core effects (Prob, Causal, IO, Mut, Alloc) have JIT runtime support, only continuation-based handlers pending.
 
 ---
 
@@ -98,15 +98,23 @@ This document captures the comprehensive audit findings and prioritized roadmap 
   - `runtime_mut_clear()` - Clear all state
   - `runtime_mut_exists(name)` - Check if name exists
   - `runtime_mut_delete(name)` - Delete value from state
-- ✅ `Op::PerformEffect` in Cranelift codegen now routes to runtime functions (Prob, Causal, IO, Mut)
+- ✅ `Op::PerformEffect` in Cranelift codegen now routes to runtime functions (Prob, Causal, IO, Mut, Alloc)
+- ✅ Cranelift JIT Alloc (memory allocation) effect runtime functions
+  - `runtime_alloc(size)` - Allocate memory and track size
+  - `runtime_alloc_array(count, elem_size)` - Allocate array
+  - `runtime_dealloc(ptr)` - Free memory and update tracking
+  - `runtime_realloc(ptr, new_size)` - Reallocate with data preservation
+  - `runtime_alloc_size_of(ptr)` - Query tracked allocation size
+  - `runtime_alloc_clear()` - Free all tracked allocations
+  - `runtime_alloc_total()` - Query total bytes allocated
+  - `runtime_alloc_count()` - Query number of active allocations
 
 **Remaining Work:**
 - Full continuation-based handler invocation (current: direct dispatch)
 - Handler frames for nested handlers
-- More effect operations (Alloc)
 - E2E tests for compiled effect-using programs
 
-**Fix Effort:** ~1 day remaining
+**Fix Effort:** ~0.5 days remaining (core effect operations complete)
 
 ---
 
