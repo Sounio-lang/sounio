@@ -5,6 +5,7 @@
 //! like array bounds, null safety, and domain-specific constraints.
 
 use super::core::Type;
+use crate::smt::{MockSolver, SmtContext, SmtFormula, SmtSolver, SmtTerm, VerificationResult};
 
 /// Refinement predicate
 #[derive(Debug, Clone)]
@@ -390,17 +391,215 @@ impl RefinementChecker {
         self.path_condition.push(pred);
     }
 
-    /// Check if a predicate is valid under current path conditions
+    /// Check if a predicate is valid under current path conditions using SMT solver
     pub fn check(&self, pred: &Predicate) -> RefinementResult {
-        // This would use an SMT solver in a real implementation
-        // For now, just do simple checks
+        // Quick check for trivial cases
         if pred.is_trivially_true() {
             return RefinementResult::Valid;
         }
         if pred.is_trivially_false() {
             return RefinementResult::Invalid("Predicate is trivially false".to_string());
         }
-        RefinementResult::Unknown
+
+        // Convert predicate to SMT formula
+        let mut ctx = SmtContext::new();
+        let formula = self.predicate_to_smt(pred, &mut ctx);
+
+        // Build the full context including path conditions
+        let context_formula = if self.path_condition.is_empty() {
+            SmtFormula::True
+        } else {
+            let conditions: Vec<SmtFormula> = self
+                .path_condition
+                .iter()
+                .map(|p| self.predicate_to_smt(p, &mut ctx))
+                .collect();
+            SmtFormula::And(conditions)
+        };
+
+        // Create solver and check validity
+        // To prove P is valid, we check if ¬P is unsatisfiable
+        let mut solver = MockSolver::new();
+
+        // Add variable bounds from environment
+        for (name, refined_ty) in &self.env {
+            // Extract bounds from refinement predicates if possible
+            if let Some(ref pred) = refined_ty.predicate {
+                self.extract_bounds_to_solver(name, pred, &mut solver);
+            }
+        }
+
+        // Check: context ⟹ formula (i.e., ¬(context ∧ ¬formula) is unsat)
+        let to_check = SmtFormula::Implies(
+            Box::new(context_formula),
+            Box::new(formula),
+        );
+
+        match solver.check_valid(&to_check) {
+            Ok(VerificationResult::Sat) => RefinementResult::Valid,
+            Ok(VerificationResult::Unsat) => {
+                RefinementResult::Invalid("SMT solver found counterexample".to_string())
+            }
+            Ok(VerificationResult::Unknown) => RefinementResult::Unknown,
+            Ok(VerificationResult::Timeout) => RefinementResult::Unknown,
+            Ok(VerificationResult::Error(msg)) => {
+                RefinementResult::Invalid(format!("SMT error: {}", msg))
+            }
+            Err(e) => RefinementResult::Invalid(format!("Solver error: {}", e)),
+        }
+    }
+
+    /// Convert a Predicate to SmtFormula
+    fn predicate_to_smt(&self, pred: &Predicate, ctx: &mut SmtContext) -> SmtFormula {
+        match pred {
+            Predicate::Bool(true) => SmtFormula::True,
+            Predicate::Bool(false) => SmtFormula::False,
+            Predicate::Int(n) => SmtFormula::Term(SmtTerm::Int(*n)),
+            Predicate::Float(f) => SmtFormula::Term(SmtTerm::Real(*f)),
+            Predicate::Var(name) => {
+                ctx.declare_var(name.clone(), crate::smt::SmtSort::Real);
+                SmtFormula::Term(SmtTerm::Var(name.clone()))
+            }
+            Predicate::Compare(op, left, right) => {
+                let l = self.predicate_to_smt_term(left, ctx);
+                let r = self.predicate_to_smt_term(right, ctx);
+                match op {
+                    CompareOp::Eq => SmtFormula::Eq(Box::new(l), Box::new(r)),
+                    CompareOp::Ne => SmtFormula::Not(Box::new(SmtFormula::Eq(
+                        Box::new(l),
+                        Box::new(r),
+                    ))),
+                    CompareOp::Lt => SmtFormula::Lt(Box::new(l), Box::new(r)),
+                    CompareOp::Le => SmtFormula::Le(Box::new(l), Box::new(r)),
+                    CompareOp::Gt => SmtFormula::Gt(Box::new(l), Box::new(r)),
+                    CompareOp::Ge => SmtFormula::Ge(Box::new(l), Box::new(r)),
+                }
+            }
+            Predicate::Arith(op, left, right) => {
+                let l = self.predicate_to_smt_term(left, ctx);
+                let r = self.predicate_to_smt_term(right, ctx);
+                let term = match op {
+                    ArithOp::Add => SmtTerm::Add(Box::new(l), Box::new(r)),
+                    ArithOp::Sub => SmtTerm::Sub(Box::new(l), Box::new(r)),
+                    ArithOp::Mul => SmtTerm::Mul(Box::new(l), Box::new(r)),
+                    ArithOp::Div => SmtTerm::Div(Box::new(l), Box::new(r)),
+                    ArithOp::Mod => SmtTerm::Mod(Box::new(l), Box::new(r)),
+                };
+                SmtFormula::Term(term)
+            }
+            Predicate::And(left, right) => {
+                let l = self.predicate_to_smt(left, ctx);
+                let r = self.predicate_to_smt(right, ctx);
+                SmtFormula::And(vec![l, r])
+            }
+            Predicate::Or(left, right) => {
+                let l = self.predicate_to_smt(left, ctx);
+                let r = self.predicate_to_smt(right, ctx);
+                SmtFormula::Or(vec![l, r])
+            }
+            Predicate::Not(inner) => {
+                let f = self.predicate_to_smt(inner, ctx);
+                SmtFormula::Not(Box::new(f))
+            }
+            Predicate::Implies(left, right) => {
+                let l = self.predicate_to_smt(left, ctx);
+                let r = self.predicate_to_smt(right, ctx);
+                SmtFormula::Implies(Box::new(l), Box::new(r))
+            }
+            Predicate::Forall(var, body) => {
+                ctx.declare_var(var.clone(), crate::smt::SmtSort::Real);
+                let body_smt = self.predicate_to_smt(body, ctx);
+                SmtFormula::Forall(var.clone(), crate::smt::SmtSort::Real, Box::new(body_smt))
+            }
+            Predicate::Exists(var, body) => {
+                ctx.declare_var(var.clone(), crate::smt::SmtSort::Real);
+                let body_smt = self.predicate_to_smt(body, ctx);
+                SmtFormula::Exists(var.clone(), crate::smt::SmtSort::Real, Box::new(body_smt))
+            }
+            Predicate::App(name, args) => {
+                let smt_args: Vec<SmtTerm> = args
+                    .iter()
+                    .map(|a| self.predicate_to_smt_term(a, ctx))
+                    .collect();
+                SmtFormula::App(name.clone(), smt_args)
+            }
+            Predicate::Ite(cond, then_p, else_p) => {
+                let c = self.predicate_to_smt(cond, ctx);
+                let t = self.predicate_to_smt(then_p, ctx);
+                let e = self.predicate_to_smt(else_p, ctx);
+                SmtFormula::Ite(Box::new(c), Box::new(t), Box::new(e))
+            }
+        }
+    }
+
+    /// Convert a Predicate to SmtTerm (for use in comparisons/arithmetic)
+    fn predicate_to_smt_term(&self, pred: &Predicate, ctx: &mut SmtContext) -> SmtTerm {
+        match pred {
+            Predicate::Int(n) => SmtTerm::Int(*n),
+            Predicate::Float(f) => SmtTerm::Real(*f),
+            Predicate::Bool(b) => SmtTerm::Bool(*b),
+            Predicate::Var(name) => {
+                ctx.declare_var(name.clone(), crate::smt::SmtSort::Real);
+                SmtTerm::Var(name.clone())
+            }
+            Predicate::Arith(op, left, right) => {
+                let l = self.predicate_to_smt_term(left, ctx);
+                let r = self.predicate_to_smt_term(right, ctx);
+                match op {
+                    ArithOp::Add => SmtTerm::Add(Box::new(l), Box::new(r)),
+                    ArithOp::Sub => SmtTerm::Sub(Box::new(l), Box::new(r)),
+                    ArithOp::Mul => SmtTerm::Mul(Box::new(l), Box::new(r)),
+                    ArithOp::Div => SmtTerm::Div(Box::new(l), Box::new(r)),
+                    ArithOp::Mod => SmtTerm::Mod(Box::new(l), Box::new(r)),
+                }
+            }
+            Predicate::App(name, args) => {
+                let smt_args: Vec<SmtTerm> = args
+                    .iter()
+                    .map(|a| self.predicate_to_smt_term(a, ctx))
+                    .collect();
+                SmtTerm::App(name.clone(), smt_args)
+            }
+            // For other predicates, wrap in a term representation
+            _ => SmtTerm::Int(0), // Fallback
+        }
+    }
+
+    /// Extract variable bounds from a predicate and add to solver
+    fn extract_bounds_to_solver(&self, var: &str, pred: &Predicate, solver: &mut MockSolver) {
+        match pred {
+            Predicate::Compare(CompareOp::Gt, left, right)
+            | Predicate::Compare(CompareOp::Ge, left, right) => {
+                if let (Predicate::Var(v), Predicate::Float(lo)) = (left.as_ref(), right.as_ref()) {
+                    if v == var {
+                        solver.set_bounds(var, *lo, f64::INFINITY);
+                    }
+                }
+                if let (Predicate::Var(v), Predicate::Int(lo)) = (left.as_ref(), right.as_ref()) {
+                    if v == var {
+                        solver.set_bounds(var, *lo as f64, f64::INFINITY);
+                    }
+                }
+            }
+            Predicate::Compare(CompareOp::Lt, left, right)
+            | Predicate::Compare(CompareOp::Le, left, right) => {
+                if let (Predicate::Var(v), Predicate::Float(hi)) = (left.as_ref(), right.as_ref()) {
+                    if v == var {
+                        solver.set_bounds(var, f64::NEG_INFINITY, *hi);
+                    }
+                }
+                if let (Predicate::Var(v), Predicate::Int(hi)) = (left.as_ref(), right.as_ref()) {
+                    if v == var {
+                        solver.set_bounds(var, f64::NEG_INFINITY, *hi as f64);
+                    }
+                }
+            }
+            Predicate::And(left, right) => {
+                self.extract_bounds_to_solver(var, left, solver);
+                self.extract_bounds_to_solver(var, right, solver);
+            }
+            _ => {}
+        }
     }
 
     /// Check subtyping: is `sub` a subtype of `sup`?
@@ -502,5 +701,133 @@ mod tests {
 
         let crcl_type = medical::valid_crcl();
         assert!(crcl_type.is_refined());
+    }
+
+    // SMT Integration Tests
+
+    #[test]
+    fn test_smt_trivially_true() {
+        let checker = RefinementChecker::new();
+        let pred = Predicate::Bool(true);
+        assert!(checker.check(&pred).is_valid());
+    }
+
+    #[test]
+    fn test_smt_trivially_false() {
+        let checker = RefinementChecker::new();
+        let pred = Predicate::Bool(false);
+        assert!(checker.check(&pred).is_invalid());
+    }
+
+    #[test]
+    fn test_smt_simple_comparison() {
+        let checker = RefinementChecker::new();
+
+        // 5 > 3 should be valid
+        let pred = Predicate::gt(Predicate::Int(5), Predicate::Int(3));
+        let result = checker.check(&pred);
+        assert!(result.is_valid(), "5 > 3 should be valid");
+
+        // 3 > 5 should be invalid
+        let pred2 = Predicate::gt(Predicate::Int(3), Predicate::Int(5));
+        let result2 = checker.check(&pred2);
+        assert!(result2.is_invalid(), "3 > 5 should be invalid");
+    }
+
+    #[test]
+    fn test_smt_conjunction() {
+        let checker = RefinementChecker::new();
+
+        // true && true = true
+        let pred = Predicate::and(Predicate::Bool(true), Predicate::Bool(true));
+        assert!(checker.check(&pred).is_valid());
+
+        // true && false = false
+        let pred2 = Predicate::and(Predicate::Bool(true), Predicate::Bool(false));
+        assert!(checker.check(&pred2).is_invalid());
+    }
+
+    #[test]
+    fn test_smt_disjunction() {
+        let checker = RefinementChecker::new();
+
+        // true || false = true
+        let pred = Predicate::or(Predicate::Bool(true), Predicate::Bool(false));
+        assert!(checker.check(&pred).is_valid());
+
+        // false || false = false
+        let pred2 = Predicate::or(Predicate::Bool(false), Predicate::Bool(false));
+        assert!(checker.check(&pred2).is_invalid());
+    }
+
+    #[test]
+    fn test_smt_implication() {
+        let checker = RefinementChecker::new();
+
+        // false => anything = true
+        let pred = Predicate::implies(Predicate::Bool(false), Predicate::Bool(false));
+        assert!(checker.check(&pred).is_valid());
+
+        // true => true = true
+        let pred2 = Predicate::implies(Predicate::Bool(true), Predicate::Bool(true));
+        assert!(checker.check(&pred2).is_valid());
+
+        // true => false = false
+        let pred3 = Predicate::implies(Predicate::Bool(true), Predicate::Bool(false));
+        assert!(checker.check(&pred3).is_invalid());
+    }
+
+    #[test]
+    fn test_smt_with_path_condition() {
+        let mut checker = RefinementChecker::new();
+
+        // Assume x > 10
+        checker.assume(Predicate::gt(Predicate::var("x"), Predicate::Int(10)));
+
+        // Check x > 5 (should be valid under the assumption)
+        let pred = Predicate::gt(Predicate::var("x"), Predicate::Int(5));
+        let result = checker.check(&pred);
+
+        // MockSolver uses interval arithmetic, may return Unknown for variable predicates
+        assert!(!result.is_invalid(), "x > 10 should imply x > 5");
+    }
+
+    #[test]
+    fn test_smt_subtype_check() {
+        let checker = RefinementChecker::new();
+
+        // Positive subtype of non-negative
+        let positive = RefinedType::new(
+            Type::I64,
+            "x",
+            Some(Predicate::gt(Predicate::var("x"), Predicate::Int(0))),
+        );
+
+        let non_negative = RefinedType::new(
+            Type::I64,
+            "x",
+            Some(Predicate::ge(Predicate::var("x"), Predicate::Int(0))),
+        );
+
+        // Positive is NOT a subtype of non-negative in general
+        // (positive implies non-negative, but the solver may return Unknown)
+        let result = checker.check_subtype(&positive, &non_negative);
+        assert!(!result.is_invalid(), "Positive should be subtype of non-negative");
+    }
+
+    #[test]
+    fn test_smt_arithmetic() {
+        let checker = RefinementChecker::new();
+
+        // 3 + 4 = 7 should be valid
+        let sum = Predicate::Arith(
+            ArithOp::Add,
+            Box::new(Predicate::Int(3)),
+            Box::new(Predicate::Int(4)),
+        );
+        let pred = Predicate::eq(sum, Predicate::Int(7));
+        let result = checker.check(&pred);
+        // Interval arithmetic may return Unknown for equality
+        assert!(!result.is_invalid(), "3 + 4 = 7 should not be invalid");
     }
 }

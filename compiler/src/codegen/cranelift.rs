@@ -74,6 +74,137 @@ extern "C" fn runtime_debug_test() -> i64 {
     99
 }
 
+// ==================== Effect Runtime Functions ====================
+// These implement algebraic effect operations for JIT-compiled code
+// Uses a simplified thread-safe state separate from the interpreter's EffectContext
+
+/// Simplified thread-safe effect state for JIT execution
+#[cfg(feature = "jit")]
+struct JitEffectState {
+    rng: crate::runtime::prob::Rng,
+    log_prob: f64,
+    interventions: Vec<(String, f64)>,
+    observations: Vec<(String, f64)>,
+}
+
+#[cfg(feature = "jit")]
+impl JitEffectState {
+    fn new() -> Self {
+        Self {
+            rng: crate::runtime::prob::Rng::new(42),
+            log_prob: 0.0,
+            interventions: Vec::new(),
+            observations: Vec::new(),
+        }
+    }
+
+    fn reset(&mut self) {
+        self.log_prob = 0.0;
+        self.interventions.clear();
+        self.observations.clear();
+    }
+}
+
+#[cfg(feature = "jit")]
+use std::sync::OnceLock;
+#[cfg(feature = "jit")]
+static JIT_EFFECT_STATE: OnceLock<Mutex<JitEffectState>> = OnceLock::new();
+
+#[cfg(feature = "jit")]
+fn get_jit_effect_state() -> &'static Mutex<JitEffectState> {
+    JIT_EFFECT_STATE.get_or_init(|| Mutex::new(JitEffectState::new()))
+}
+
+/// Sample from a probability distribution (Prob.sample)
+/// Takes mean and std, returns sampled f64 value from Normal(mean, std)
+#[cfg(feature = "jit")]
+extern "C" fn runtime_prob_sample(mean: f64, std: f64) -> f64 {
+    if let Ok(mut state) = get_jit_effect_state().lock() {
+        // Sample from Normal(mean, std) distribution
+        let sample = state.rng.next_normal() * std + mean;
+        sample
+    } else {
+        // Fallback: return mean if lock fails
+        mean
+    }
+}
+
+/// Sample from a uniform distribution
+#[cfg(feature = "jit")]
+extern "C" fn runtime_prob_sample_uniform(low: f64, high: f64) -> f64 {
+    if let Ok(mut state) = get_jit_effect_state().lock() {
+        low + (high - low) * state.rng.next_f64()
+    } else {
+        (low + high) / 2.0
+    }
+}
+
+/// Sample from a Bernoulli distribution (returns 0 or 1)
+#[cfg(feature = "jit")]
+extern "C" fn runtime_prob_sample_bernoulli(p: f64) -> i64 {
+    if let Ok(mut state) = get_jit_effect_state().lock() {
+        if state.rng.next_f64() < p { 1 } else { 0 }
+    } else {
+        if p >= 0.5 { 1 } else { 0 }
+    }
+}
+
+/// Observe/condition on a value (Prob.observe)
+/// Records observation for probabilistic inference
+#[cfg(feature = "jit")]
+extern "C" fn runtime_prob_observe(mean: f64, std: f64, observed: f64) -> f64 {
+    if let Ok(mut state) = get_jit_effect_state().lock() {
+        // Compute log probability of observation under Normal(mean, std)
+        let z = (observed - mean) / std;
+        let log_prob = -0.5 * z * z - std.ln() - 0.5 * std::f64::consts::TAU.ln();
+        state.log_prob += log_prob;
+        log_prob
+    } else {
+        0.0
+    }
+}
+
+/// Do intervention (Causal.do)
+/// Records intervention and returns the intervention value
+#[cfg(feature = "jit")]
+extern "C" fn runtime_causal_do(var_ptr: *const u8, value: f64) -> f64 {
+    if var_ptr.is_null() {
+        return value;
+    }
+
+    if let Ok(mut state) = get_jit_effect_state().lock() {
+        // Get variable name from C string
+        let var_name = unsafe {
+            std::ffi::CStr::from_ptr(var_ptr as *const std::ffi::c_char)
+                .to_str()
+                .unwrap_or("unknown")
+                .to_string()
+        };
+
+        // Record intervention
+        state.interventions.push((var_name, value));
+        value
+    } else {
+        value
+    }
+}
+
+/// Reset effect state (for new probabilistic execution)
+#[cfg(feature = "jit")]
+extern "C" fn runtime_effect_reset() {
+    if let Ok(mut state) = get_jit_effect_state().lock() {
+        state.reset();
+    }
+}
+
+/// Set random seed for reproducibility
+#[cfg(feature = "jit")]
+extern "C" fn runtime_effect_set_seed(seed: i64) {
+    if let Ok(mut state) = get_jit_effect_state().lock() {
+        state.rng = crate::runtime::prob::Rng::new(seed as u64);
+    }
+}
+
 #[cfg(feature = "jit")]
 use crate::hlir::{
     BinaryOp, BlockId, HlirBlock, HlirConstant, HlirFunction, HlirTerminator, HlirType, Op,
@@ -299,6 +430,15 @@ impl JitCompiler {
         jit_builder.symbol("runtime_print_bool", runtime_print_bool as *const u8);
         jit_builder.symbol("runtime_debug_test", runtime_debug_test as *const u8);
 
+        // Register effect runtime functions
+        jit_builder.symbol("runtime_prob_sample", runtime_prob_sample as *const u8);
+        jit_builder.symbol("runtime_prob_sample_uniform", runtime_prob_sample_uniform as *const u8);
+        jit_builder.symbol("runtime_prob_sample_bernoulli", runtime_prob_sample_bernoulli as *const u8);
+        jit_builder.symbol("runtime_prob_observe", runtime_prob_observe as *const u8);
+        jit_builder.symbol("runtime_causal_do", runtime_causal_do as *const u8);
+        jit_builder.symbol("runtime_effect_reset", runtime_effect_reset as *const u8);
+        jit_builder.symbol("runtime_effect_set_seed", runtime_effect_set_seed as *const u8);
+
         let jit_module = JITModule::new(jit_builder);
         let ctx = jit_module.make_context();
 
@@ -419,6 +559,99 @@ impl JitCompiler {
         self.func_ids.insert("runtime_print_bool".to_string(), id);
         self.func_sigs
             .insert("runtime_print_bool".to_string(), sig_print_bool);
+
+        // ==================== Effect Runtime Functions ====================
+
+        // runtime_prob_sample(mean: f64, std: f64) -> f64
+        let mut sig_prob_sample = Signature::new(call_conv);
+        sig_prob_sample.params.push(AbiParam::new(types::F64)); // mean
+        sig_prob_sample.params.push(AbiParam::new(types::F64)); // std
+        sig_prob_sample.returns.push(AbiParam::new(types::F64));
+        let id = self
+            .jit_module
+            .declare_function("runtime_prob_sample", Linkage::Import, &sig_prob_sample)
+            .map_err(|e| format!("Failed to declare runtime_prob_sample: {}", e))?;
+        self.func_ids.insert("runtime_prob_sample".to_string(), id);
+        self.func_sigs
+            .insert("runtime_prob_sample".to_string(), sig_prob_sample);
+
+        // runtime_prob_sample_uniform(low: f64, high: f64) -> f64
+        let mut sig_prob_uniform = Signature::new(call_conv);
+        sig_prob_uniform.params.push(AbiParam::new(types::F64)); // low
+        sig_prob_uniform.params.push(AbiParam::new(types::F64)); // high
+        sig_prob_uniform.returns.push(AbiParam::new(types::F64));
+        let id = self
+            .jit_module
+            .declare_function("runtime_prob_sample_uniform", Linkage::Import, &sig_prob_uniform)
+            .map_err(|e| format!("Failed to declare runtime_prob_sample_uniform: {}", e))?;
+        self.func_ids
+            .insert("runtime_prob_sample_uniform".to_string(), id);
+        self.func_sigs
+            .insert("runtime_prob_sample_uniform".to_string(), sig_prob_uniform);
+
+        // runtime_prob_sample_bernoulli(p: f64) -> i64
+        let mut sig_prob_bernoulli = Signature::new(call_conv);
+        sig_prob_bernoulli.params.push(AbiParam::new(types::F64)); // p
+        sig_prob_bernoulli.returns.push(AbiParam::new(types::I64));
+        let id = self
+            .jit_module
+            .declare_function("runtime_prob_sample_bernoulli", Linkage::Import, &sig_prob_bernoulli)
+            .map_err(|e| format!("Failed to declare runtime_prob_sample_bernoulli: {}", e))?;
+        self.func_ids
+            .insert("runtime_prob_sample_bernoulli".to_string(), id);
+        self.func_sigs
+            .insert("runtime_prob_sample_bernoulli".to_string(), sig_prob_bernoulli);
+
+        // runtime_prob_observe(mean: f64, std: f64, observed: f64) -> f64
+        let mut sig_prob_observe = Signature::new(call_conv);
+        sig_prob_observe.params.push(AbiParam::new(types::F64)); // mean
+        sig_prob_observe.params.push(AbiParam::new(types::F64)); // std
+        sig_prob_observe.params.push(AbiParam::new(types::F64)); // observed
+        sig_prob_observe.returns.push(AbiParam::new(types::F64));
+        let id = self
+            .jit_module
+            .declare_function("runtime_prob_observe", Linkage::Import, &sig_prob_observe)
+            .map_err(|e| format!("Failed to declare runtime_prob_observe: {}", e))?;
+        self.func_ids
+            .insert("runtime_prob_observe".to_string(), id);
+        self.func_sigs
+            .insert("runtime_prob_observe".to_string(), sig_prob_observe);
+
+        // runtime_causal_do(var_ptr: i64, value: f64) -> f64
+        let mut sig_causal_do = Signature::new(call_conv);
+        sig_causal_do.params.push(AbiParam::new(types::I64)); // var_ptr
+        sig_causal_do.params.push(AbiParam::new(types::F64)); // value
+        sig_causal_do.returns.push(AbiParam::new(types::F64));
+        let id = self
+            .jit_module
+            .declare_function("runtime_causal_do", Linkage::Import, &sig_causal_do)
+            .map_err(|e| format!("Failed to declare runtime_causal_do: {}", e))?;
+        self.func_ids.insert("runtime_causal_do".to_string(), id);
+        self.func_sigs
+            .insert("runtime_causal_do".to_string(), sig_causal_do);
+
+        // runtime_effect_reset() -> void
+        let sig_effect_reset = Signature::new(call_conv);
+        let id = self
+            .jit_module
+            .declare_function("runtime_effect_reset", Linkage::Import, &sig_effect_reset)
+            .map_err(|e| format!("Failed to declare runtime_effect_reset: {}", e))?;
+        self.func_ids
+            .insert("runtime_effect_reset".to_string(), id);
+        self.func_sigs
+            .insert("runtime_effect_reset".to_string(), sig_effect_reset);
+
+        // runtime_effect_set_seed(seed: i64) -> void
+        let mut sig_effect_seed = Signature::new(call_conv);
+        sig_effect_seed.params.push(AbiParam::new(types::I64)); // seed
+        let id = self
+            .jit_module
+            .declare_function("runtime_effect_set_seed", Linkage::Import, &sig_effect_seed)
+            .map_err(|e| format!("Failed to declare runtime_effect_set_seed: {}", e))?;
+        self.func_ids
+            .insert("runtime_effect_set_seed".to_string(), id);
+        self.func_sigs
+            .insert("runtime_effect_set_seed".to_string(), sig_effect_seed);
 
         Ok(())
     }
@@ -921,10 +1154,109 @@ fn translate_instruction(
             Ok(Some(base))
         }
 
-        Op::PerformEffect { .. } => {
-            // Effects not supported in JIT yet
-            let zero = builder.ins().iconst(ty, 0);
-            Ok(Some(zero))
+        Op::PerformEffect { effect, op, args } => {
+            // Dispatch effect operations to runtime functions
+            let arg_vals: Vec<_> = args
+                .iter()
+                .map(|a| get_value(values, *a))
+                .collect::<Result<_, _>>()?;
+
+            match (effect.as_str(), op.as_str()) {
+                // Prob.sample - sample from Normal distribution
+                ("Prob", "sample") => {
+                    if let Some(&func_ref) = func_refs.get("runtime_prob_sample") {
+                        // Default to Normal(0, 1) if no args provided
+                        let mean = if arg_vals.len() > 0 {
+                            arg_vals[0]
+                        } else {
+                            builder.ins().f64const(0.0)
+                        };
+                        let std = if arg_vals.len() > 1 {
+                            arg_vals[1]
+                        } else {
+                            builder.ins().f64const(1.0)
+                        };
+                        let call = builder.ins().call(func_ref, &[mean, std]);
+                        let results = builder.inst_results(call);
+                        if results.is_empty() {
+                            Ok(Some(builder.ins().f64const(0.0)))
+                        } else {
+                            Ok(Some(results[0]))
+                        }
+                    } else {
+                        Ok(Some(builder.ins().f64const(0.0)))
+                    }
+                }
+
+                // Prob.observe - condition on observation
+                ("Prob", "observe") => {
+                    if let Some(&func_ref) = func_refs.get("runtime_prob_observe") {
+                        let mean = if arg_vals.len() > 0 {
+                            arg_vals[0]
+                        } else {
+                            builder.ins().f64const(0.0)
+                        };
+                        let std = if arg_vals.len() > 1 {
+                            arg_vals[1]
+                        } else {
+                            builder.ins().f64const(1.0)
+                        };
+                        let observed = if arg_vals.len() > 2 {
+                            arg_vals[2]
+                        } else {
+                            builder.ins().f64const(0.0)
+                        };
+                        let call = builder.ins().call(func_ref, &[mean, std, observed]);
+                        let results = builder.inst_results(call);
+                        if results.is_empty() {
+                            Ok(Some(builder.ins().f64const(0.0)))
+                        } else {
+                            Ok(Some(results[0]))
+                        }
+                    } else {
+                        Ok(Some(builder.ins().f64const(0.0)))
+                    }
+                }
+
+                // Causal.do - intervention
+                ("Causal", "do") => {
+                    if let Some(&func_ref) = func_refs.get("runtime_causal_do") {
+                        let var_ptr = if arg_vals.len() > 0 {
+                            arg_vals[0]
+                        } else {
+                            builder.ins().iconst(types::I64, 0)
+                        };
+                        let value = if arg_vals.len() > 1 {
+                            arg_vals[1]
+                        } else {
+                            builder.ins().f64const(0.0)
+                        };
+                        let call = builder.ins().call(func_ref, &[var_ptr, value]);
+                        let results = builder.inst_results(call);
+                        if results.is_empty() {
+                            Ok(Some(builder.ins().f64const(0.0)))
+                        } else {
+                            Ok(Some(results[0]))
+                        }
+                    } else {
+                        // Just return the value
+                        if arg_vals.len() > 1 {
+                            Ok(Some(arg_vals[1]))
+                        } else {
+                            Ok(Some(builder.ins().f64const(0.0)))
+                        }
+                    }
+                }
+
+                // Default: return zero for unhandled effects
+                _ => {
+                    // Log warning for unhandled effect (in debug builds)
+                    #[cfg(debug_assertions)]
+                    eprintln!("Warning: Unhandled effect {}.{} in JIT", effect, op);
+                    let zero = builder.ins().iconst(ty, 0);
+                    Ok(Some(zero))
+                }
+            }
         }
     }
 }

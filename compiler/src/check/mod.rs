@@ -3071,9 +3071,274 @@ impl TypeChecker {
                 )
             }
 
-            // Simplified handling for other expressions
+            // Effect operation: perform Effect::op(args)
+            Expr::Perform {
+                id: _,
+                effect,
+                op,
+                args,
+            } => {
+                // Type-check the arguments
+                let checked_args: Vec<HirExpr> = args
+                    .iter()
+                    .map(|a| self.check_expr(a, None))
+                    .collect::<Result<_>>()?;
+
+                // Look up the effect operation's return type
+                let effect_name = effect
+                    .segments
+                    .last()
+                    .cloned()
+                    .unwrap_or_else(|| "Unknown".to_string());
+
+                // For effect operations, the return type depends on the specific effect/op
+                // For now, use Unit as the default - proper effect lookup requires effect definitions
+                let return_ty = HirType::Unit;
+
+                (
+                    HirExprKind::Perform {
+                        effect: effect_name,
+                        op: op.clone(),
+                        args: checked_args,
+                    },
+                    return_ty,
+                )
+            }
+
+            // Effect handler: handle expr with Handler
+            Expr::Handle {
+                id: _,
+                expr: inner,
+                handler,
+            } => {
+                // Type-check the inner expression
+                let inner_expr = self.check_expr(inner, None)?;
+                let inner_ty = inner_expr.ty.clone();
+
+                let handler_name = handler
+                    .segments
+                    .last()
+                    .cloned()
+                    .unwrap_or_else(|| "Unknown".to_string());
+
+                // The handler handles the effect, so the result type is the inner type
+                // (effect is removed from the effect row)
+                (
+                    HirExprKind::Handle {
+                        expr: Box::new(inner_expr),
+                        handler: handler_name,
+                    },
+                    inner_ty,
+                )
+            }
+
+            // Probabilistic sampling: sample distribution
+            Expr::Sample {
+                id: _,
+                distribution,
+            } => {
+                // Type-check the distribution expression
+                let dist_expr = self.check_expr(distribution, None)?;
+
+                // The result type depends on the distribution type
+                // For most distributions, this is f64
+                let sample_ty = match &dist_expr.ty {
+                    HirType::Named { name, args } if name == "Normal" || name == "Uniform" => {
+                        HirType::F64
+                    }
+                    HirType::Named { name, args } if name == "Bernoulli" => HirType::Bool,
+                    HirType::Named { name, args } if name == "Poisson" => HirType::I64,
+                    _ => HirType::F64, // Default to f64 for unknown distributions
+                };
+
+                (HirExprKind::Sample(Box::new(dist_expr)), sample_ty)
+            }
+
+            // Await expression: expr.await
+            Expr::Await { id: _, expr: inner } => {
+                // Type-check the future expression
+                let future_expr = self.check_expr(inner, None)?;
+
+                // Extract the inner type from Future<T>
+                let result_ty = match &future_expr.ty {
+                    HirType::Named { name, args } if name == "Future" => {
+                        args.first().cloned().unwrap_or(HirType::Unit)
+                    }
+                    _ => future_expr.ty.clone(), // If not a Future, return as-is
+                };
+
+                (
+                    HirExprKind::Await {
+                        future: Box::new(future_expr),
+                    },
+                    result_ty,
+                )
+            }
+
+            // Async block: async { ... }
+            Expr::AsyncBlock { id: _, block } => {
+                // Type-check the block
+                let checked_block = self.check_block(block, None)?;
+                let block_ty = checked_block.ty.clone();
+
+                // Wrap the block type in Future<T>
+                let future_ty = HirType::Named {
+                    name: "Future".to_string(),
+                    args: vec![block_ty],
+                };
+
+                (
+                    HirExprKind::AsyncBlock {
+                        body: checked_block,
+                    },
+                    future_ty,
+                )
+            }
+
+            // Async closure: async |params| body
+            Expr::AsyncClosure {
+                id: _,
+                params,
+                return_type,
+                body,
+            } => {
+                // Type-check the closure body
+                let body_expr = self.check_expr(body, None)?;
+                let body_ty = body_expr.ty.clone();
+
+                // Build parameter list
+                let mut hir_params: Vec<HirParam> = Vec::new();
+                for (name, ty_opt) in params {
+                    let param_ty = if let Some(t) = ty_opt {
+                        let lowered = self.lower_type_expr(t);
+                        self.type_to_hir(&lowered)
+                    } else {
+                        HirType::Unit
+                    };
+                    hir_params.push(HirParam {
+                        id: NodeId::dummy(),
+                        name: name.clone(),
+                        ty: param_ty,
+                        is_mut: false,
+                    });
+                }
+
+                // The closure returns a Future
+                let future_ty = HirType::Named {
+                    name: "Future".to_string(),
+                    args: vec![body_ty],
+                };
+
+                // Build the function type
+                let param_types: Vec<HirType> = hir_params.iter().map(|p| p.ty.clone()).collect();
+                let fn_ty = HirType::Fn {
+                    params: param_types,
+                    return_type: Box::new(future_ty),
+                };
+
+                (
+                    HirExprKind::Closure {
+                        params: hir_params,
+                        body: Box::new(body_expr),
+                    },
+                    fn_ty,
+                )
+            }
+
+            // Spawn expression: spawn { expr }
+            Expr::Spawn { id: _, expr: inner } => {
+                // Type-check the spawned expression
+                let inner_expr = self.check_expr(inner, None)?;
+                let inner_ty = inner_expr.ty.clone();
+
+                // Spawn returns a JoinHandle<T>
+                let handle_ty = HirType::Named {
+                    name: "JoinHandle".to_string(),
+                    args: vec![inner_ty],
+                };
+
+                (
+                    HirExprKind::Spawn {
+                        expr: Box::new(inner_expr),
+                    },
+                    handle_ty,
+                )
+            }
+
+            // Select expression: select { arms... }
+            Expr::Select { id: _, arms } => {
+                // Type-check each select arm
+                let mut checked_arms = Vec::new();
+                let mut result_types = Vec::new();
+
+                for arm in arms {
+                    let future_expr = self.check_expr(&arm.future, None)?;
+                    let pattern = self.lower_pattern(&arm.pattern);
+                    let guard = arm
+                        .guard
+                        .as_ref()
+                        .map(|g| self.check_expr(g, Some(&Type::Bool)))
+                        .transpose()?
+                        .map(Box::new);
+                    let body_expr = self.check_expr(&arm.body, None)?;
+
+                    result_types.push(body_expr.ty.clone());
+
+                    checked_arms.push(HirSelectArm {
+                        future: future_expr,
+                        pattern,
+                        guard,
+                        body: body_expr,
+                    });
+                }
+
+                // All arms should have compatible types
+                let result_ty = if result_types.is_empty() {
+                    HirType::Unit
+                } else {
+                    result_types[0].clone()
+                };
+
+                (HirExprKind::Select { arms: checked_arms }, result_ty)
+            }
+
+            // Join expression: join(future1, future2, ...)
+            Expr::Join { id: _, futures } => {
+                // Type-check all futures
+                let checked_futures: Vec<HirExpr> = futures
+                    .iter()
+                    .map(|f| self.check_expr(f, None))
+                    .collect::<Result<_>>()?;
+
+                // Extract the inner types from each Future<T>
+                let inner_types: Vec<HirType> = checked_futures
+                    .iter()
+                    .map(|f| match &f.ty {
+                        HirType::Named { name, args } if name == "Future" => {
+                            args.first().cloned().unwrap_or(HirType::Unit)
+                        }
+                        ty => ty.clone(),
+                    })
+                    .collect();
+
+                // Join returns a tuple of the results
+                let result_ty = if inner_types.len() == 1 {
+                    inner_types[0].clone()
+                } else {
+                    HirType::Tuple(inner_types)
+                };
+
+                (
+                    HirExprKind::Join {
+                        futures: checked_futures,
+                    },
+                    result_ty,
+                )
+            }
+
+            // Fallback for any remaining expressions
             _ => {
-                // For now, return a placeholder
+                // For truly unhandled expressions, return a placeholder
                 (HirExprKind::Literal(HirLiteral::Unit), HirType::Unit)
             }
         };
@@ -3090,7 +3355,16 @@ impl TypeChecker {
             | Expr::Tuple { id, .. }
             | Expr::Array { id, .. }
             | Expr::Cast { id, .. }
-            | Expr::OntologyTerm { id, .. } => *id,
+            | Expr::OntologyTerm { id, .. }
+            | Expr::Perform { id, .. }
+            | Expr::Handle { id, .. }
+            | Expr::Sample { id, .. }
+            | Expr::Await { id, .. }
+            | Expr::AsyncBlock { id, .. }
+            | Expr::AsyncClosure { id, .. }
+            | Expr::Spawn { id, .. }
+            | Expr::Select { id, .. }
+            | Expr::Join { id, .. } => *id,
             _ => NodeId::dummy(),
         };
 
