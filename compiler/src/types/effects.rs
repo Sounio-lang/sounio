@@ -160,7 +160,37 @@ impl EffectInference {
         );
 
         // Alloc effect (memory allocation)
-        self.definitions.push(EffectDef::new("Alloc"));
+        // Provides tracked memory allocation for safe memory management
+        self.definitions.push(
+            EffectDef::new("Alloc")
+                .with_op(EffectOperation::new(
+                    "alloc",
+                    vec![Type::I64], // size in bytes
+                    Type::I64,       // pointer
+                ))
+                .with_op(EffectOperation::new(
+                    "alloc_array",
+                    vec![Type::I64, Type::I64], // count, elem_size
+                    Type::I64,                  // pointer
+                ))
+                .with_op(EffectOperation::new(
+                    "dealloc",
+                    vec![Type::I64], // pointer
+                    Type::Unit,
+                ))
+                .with_op(EffectOperation::new(
+                    "realloc",
+                    vec![Type::I64, Type::I64], // pointer, new_size
+                    Type::I64,                  // new pointer
+                ))
+                .with_op(EffectOperation::new(
+                    "size_of",
+                    vec![Type::I64], // pointer
+                    Type::I64,       // size
+                ))
+                .with_op(EffectOperation::new("clear", vec![], Type::Unit))
+                .with_op(EffectOperation::new("total_allocated", vec![], Type::I64)),
+        );
 
         // Exception effect
         self.definitions

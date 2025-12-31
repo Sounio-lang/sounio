@@ -87,6 +87,10 @@ struct JitEffectState {
     observations: Vec<(String, f64)>,
     /// Named mutable state store for Mut effect
     mutable_state: std::collections::HashMap<String, f64>,
+    /// Tracked allocations for Alloc effect: ptr -> size
+    allocations: std::collections::HashMap<usize, usize>,
+    /// Total bytes currently allocated
+    total_allocated: usize,
 }
 
 #[cfg(feature = "jit")]
@@ -98,6 +102,8 @@ impl JitEffectState {
             interventions: Vec::new(),
             observations: Vec::new(),
             mutable_state: std::collections::HashMap::new(),
+            allocations: std::collections::HashMap::new(),
+            total_allocated: 0,
         }
     }
 
@@ -106,6 +112,8 @@ impl JitEffectState {
         self.interventions.clear();
         self.observations.clear();
         self.mutable_state.clear();
+        // Note: We don't clear allocations here to avoid memory leaks
+        // Use Alloc.clear() explicitly to free all allocations
     }
 }
 
@@ -492,6 +500,187 @@ extern "C" fn runtime_mut_delete(name_ptr: *const u8) -> f64 {
     }
 }
 
+// ==================== Alloc Effect Runtime Functions ====================
+// These implement tracked memory allocation for JIT-compiled code
+
+/// Allocate memory of given size (Alloc.alloc)
+/// Returns pointer to allocated memory, or 0 on failure
+#[cfg(feature = "jit")]
+extern "C" fn runtime_alloc(size: i64) -> i64 {
+    if size <= 0 {
+        return 0;
+    }
+
+    let size = size as usize;
+
+    // Use Vec<u8> for allocation to ensure proper alignment and tracking
+    let mut buffer: Vec<u8> = Vec::with_capacity(size);
+    buffer.resize(size, 0);
+
+    let ptr = buffer.as_ptr() as usize;
+
+    // Prevent deallocation - we'll track it manually
+    std::mem::forget(buffer);
+
+    // Track the allocation
+    if let Ok(mut state) = get_jit_effect_state().lock() {
+        state.allocations.insert(ptr, size);
+        state.total_allocated += size;
+    }
+
+    ptr as i64
+}
+
+/// Allocate array of count elements of elem_size bytes (Alloc.alloc_array)
+/// Returns pointer to allocated memory, or 0 on failure
+#[cfg(feature = "jit")]
+extern "C" fn runtime_alloc_array(count: i64, elem_size: i64) -> i64 {
+    if count <= 0 || elem_size <= 0 {
+        return 0;
+    }
+
+    let total_size = (count as usize).saturating_mul(elem_size as usize);
+    if total_size == 0 {
+        return 0;
+    }
+
+    runtime_alloc(total_size as i64)
+}
+
+/// Deallocate memory (Alloc.dealloc)
+/// Returns 1 on success, 0 if pointer was not tracked
+#[cfg(feature = "jit")]
+extern "C" fn runtime_dealloc(ptr: i64) -> i64 {
+    if ptr == 0 {
+        return 0;
+    }
+
+    let ptr = ptr as usize;
+
+    if let Ok(mut state) = get_jit_effect_state().lock() {
+        if let Some(size) = state.allocations.remove(&ptr) {
+            // Reconstruct the Vec to properly deallocate
+            unsafe {
+                let _ = Vec::from_raw_parts(ptr as *mut u8, size, size);
+            }
+            state.total_allocated = state.total_allocated.saturating_sub(size);
+            1
+        } else {
+            0 // Pointer not tracked
+        }
+    } else {
+        0
+    }
+}
+
+/// Reallocate memory to new size (Alloc.realloc)
+/// Returns new pointer, or 0 on failure
+#[cfg(feature = "jit")]
+extern "C" fn runtime_realloc(ptr: i64, new_size: i64) -> i64 {
+    if new_size <= 0 {
+        // Size 0 means dealloc
+        runtime_dealloc(ptr);
+        return 0;
+    }
+
+    if ptr == 0 {
+        // Null pointer means just alloc
+        return runtime_alloc(new_size);
+    }
+
+    let ptr_val = ptr as usize;
+    let new_size = new_size as usize;
+
+    if let Ok(mut state) = get_jit_effect_state().lock() {
+        if let Some(old_size) = state.allocations.remove(&ptr_val) {
+            // Create new allocation
+            let mut new_buffer: Vec<u8> = Vec::with_capacity(new_size);
+            new_buffer.resize(new_size, 0);
+
+            // Copy old data
+            let copy_size = old_size.min(new_size);
+            unsafe {
+                std::ptr::copy_nonoverlapping(
+                    ptr_val as *const u8,
+                    new_buffer.as_mut_ptr(),
+                    copy_size,
+                );
+            }
+
+            let new_ptr = new_buffer.as_ptr() as usize;
+            std::mem::forget(new_buffer);
+
+            // Free old memory
+            unsafe {
+                let _ = Vec::from_raw_parts(ptr_val as *mut u8, old_size, old_size);
+            }
+
+            // Update tracking
+            state.allocations.insert(new_ptr, new_size);
+            state.total_allocated = state.total_allocated.saturating_sub(old_size) + new_size;
+
+            new_ptr as i64
+        } else {
+            0 // Original pointer not tracked
+        }
+    } else {
+        0
+    }
+}
+
+/// Get size of allocation (Alloc.size_of)
+/// Returns size in bytes, or 0 if pointer not tracked
+#[cfg(feature = "jit")]
+extern "C" fn runtime_alloc_size_of(ptr: i64) -> i64 {
+    if ptr == 0 {
+        return 0;
+    }
+
+    let ptr = ptr as usize;
+
+    if let Ok(state) = get_jit_effect_state().lock() {
+        state.allocations.get(&ptr).copied().unwrap_or(0) as i64
+    } else {
+        0
+    }
+}
+
+/// Clear all allocations (Alloc.clear)
+/// Frees all tracked memory
+#[cfg(feature = "jit")]
+extern "C" fn runtime_alloc_clear() {
+    if let Ok(mut state) = get_jit_effect_state().lock() {
+        // Free all tracked allocations
+        for (&ptr, &size) in state.allocations.iter() {
+            unsafe {
+                let _ = Vec::from_raw_parts(ptr as *mut u8, size, size);
+            }
+        }
+        state.allocations.clear();
+        state.total_allocated = 0;
+    }
+}
+
+/// Get total bytes currently allocated (Alloc.total_allocated)
+#[cfg(feature = "jit")]
+extern "C" fn runtime_alloc_total() -> i64 {
+    if let Ok(state) = get_jit_effect_state().lock() {
+        state.total_allocated as i64
+    } else {
+        0
+    }
+}
+
+/// Get number of active allocations (Alloc.count)
+#[cfg(feature = "jit")]
+extern "C" fn runtime_alloc_count() -> i64 {
+    if let Ok(state) = get_jit_effect_state().lock() {
+        state.allocations.len() as i64
+    } else {
+        0
+    }
+}
+
 #[cfg(feature = "jit")]
 use crate::hlir::{
     BinaryOp, BlockId, HlirBlock, HlirConstant, HlirFunction, HlirTerminator, HlirType, Op,
@@ -740,6 +929,16 @@ impl JitCompiler {
         jit_builder.symbol("runtime_mut_clear", runtime_mut_clear as *const u8);
         jit_builder.symbol("runtime_mut_exists", runtime_mut_exists as *const u8);
         jit_builder.symbol("runtime_mut_delete", runtime_mut_delete as *const u8);
+
+        // Register Alloc effect runtime functions
+        jit_builder.symbol("runtime_alloc", runtime_alloc as *const u8);
+        jit_builder.symbol("runtime_alloc_array", runtime_alloc_array as *const u8);
+        jit_builder.symbol("runtime_dealloc", runtime_dealloc as *const u8);
+        jit_builder.symbol("runtime_realloc", runtime_realloc as *const u8);
+        jit_builder.symbol("runtime_alloc_size_of", runtime_alloc_size_of as *const u8);
+        jit_builder.symbol("runtime_alloc_clear", runtime_alloc_clear as *const u8);
+        jit_builder.symbol("runtime_alloc_total", runtime_alloc_total as *const u8);
+        jit_builder.symbol("runtime_alloc_count", runtime_alloc_count as *const u8);
 
         let jit_module = JITModule::new(jit_builder);
         let ctx = jit_module.make_context();
@@ -1099,6 +1298,106 @@ impl JitCompiler {
             .insert("runtime_mut_delete".to_string(), id);
         self.func_sigs
             .insert("runtime_mut_delete".to_string(), sig_mut_delete);
+
+        // ==================== Alloc Effect Runtime Functions ====================
+
+        // runtime_alloc(size: i64) -> i64
+        let mut sig_alloc = Signature::new(call_conv);
+        sig_alloc.params.push(AbiParam::new(types::I64)); // size
+        sig_alloc.returns.push(AbiParam::new(types::I64));
+        let id = self
+            .jit_module
+            .declare_function("runtime_alloc", Linkage::Import, &sig_alloc)
+            .map_err(|e| format!("Failed to declare runtime_alloc: {}", e))?;
+        self.func_ids.insert("runtime_alloc".to_string(), id);
+        self.func_sigs.insert("runtime_alloc".to_string(), sig_alloc);
+
+        // runtime_alloc_array(count: i64, elem_size: i64) -> i64
+        let mut sig_alloc_array = Signature::new(call_conv);
+        sig_alloc_array.params.push(AbiParam::new(types::I64)); // count
+        sig_alloc_array.params.push(AbiParam::new(types::I64)); // elem_size
+        sig_alloc_array.returns.push(AbiParam::new(types::I64));
+        let id = self
+            .jit_module
+            .declare_function("runtime_alloc_array", Linkage::Import, &sig_alloc_array)
+            .map_err(|e| format!("Failed to declare runtime_alloc_array: {}", e))?;
+        self.func_ids
+            .insert("runtime_alloc_array".to_string(), id);
+        self.func_sigs
+            .insert("runtime_alloc_array".to_string(), sig_alloc_array);
+
+        // runtime_dealloc(ptr: i64) -> i64
+        let mut sig_dealloc = Signature::new(call_conv);
+        sig_dealloc.params.push(AbiParam::new(types::I64)); // ptr
+        sig_dealloc.returns.push(AbiParam::new(types::I64));
+        let id = self
+            .jit_module
+            .declare_function("runtime_dealloc", Linkage::Import, &sig_dealloc)
+            .map_err(|e| format!("Failed to declare runtime_dealloc: {}", e))?;
+        self.func_ids.insert("runtime_dealloc".to_string(), id);
+        self.func_sigs
+            .insert("runtime_dealloc".to_string(), sig_dealloc);
+
+        // runtime_realloc(ptr: i64, new_size: i64) -> i64
+        let mut sig_realloc = Signature::new(call_conv);
+        sig_realloc.params.push(AbiParam::new(types::I64)); // ptr
+        sig_realloc.params.push(AbiParam::new(types::I64)); // new_size
+        sig_realloc.returns.push(AbiParam::new(types::I64));
+        let id = self
+            .jit_module
+            .declare_function("runtime_realloc", Linkage::Import, &sig_realloc)
+            .map_err(|e| format!("Failed to declare runtime_realloc: {}", e))?;
+        self.func_ids.insert("runtime_realloc".to_string(), id);
+        self.func_sigs
+            .insert("runtime_realloc".to_string(), sig_realloc);
+
+        // runtime_alloc_size_of(ptr: i64) -> i64
+        let mut sig_alloc_size_of = Signature::new(call_conv);
+        sig_alloc_size_of.params.push(AbiParam::new(types::I64)); // ptr
+        sig_alloc_size_of.returns.push(AbiParam::new(types::I64));
+        let id = self
+            .jit_module
+            .declare_function("runtime_alloc_size_of", Linkage::Import, &sig_alloc_size_of)
+            .map_err(|e| format!("Failed to declare runtime_alloc_size_of: {}", e))?;
+        self.func_ids
+            .insert("runtime_alloc_size_of".to_string(), id);
+        self.func_sigs
+            .insert("runtime_alloc_size_of".to_string(), sig_alloc_size_of);
+
+        // runtime_alloc_clear() -> void
+        let sig_alloc_clear = Signature::new(call_conv);
+        let id = self
+            .jit_module
+            .declare_function("runtime_alloc_clear", Linkage::Import, &sig_alloc_clear)
+            .map_err(|e| format!("Failed to declare runtime_alloc_clear: {}", e))?;
+        self.func_ids
+            .insert("runtime_alloc_clear".to_string(), id);
+        self.func_sigs
+            .insert("runtime_alloc_clear".to_string(), sig_alloc_clear);
+
+        // runtime_alloc_total() -> i64
+        let mut sig_alloc_total = Signature::new(call_conv);
+        sig_alloc_total.returns.push(AbiParam::new(types::I64));
+        let id = self
+            .jit_module
+            .declare_function("runtime_alloc_total", Linkage::Import, &sig_alloc_total)
+            .map_err(|e| format!("Failed to declare runtime_alloc_total: {}", e))?;
+        self.func_ids
+            .insert("runtime_alloc_total".to_string(), id);
+        self.func_sigs
+            .insert("runtime_alloc_total".to_string(), sig_alloc_total);
+
+        // runtime_alloc_count() -> i64
+        let mut sig_alloc_count = Signature::new(call_conv);
+        sig_alloc_count.returns.push(AbiParam::new(types::I64));
+        let id = self
+            .jit_module
+            .declare_function("runtime_alloc_count", Linkage::Import, &sig_alloc_count)
+            .map_err(|e| format!("Failed to declare runtime_alloc_count: {}", e))?;
+        self.func_ids
+            .insert("runtime_alloc_count".to_string(), id);
+        self.func_sigs
+            .insert("runtime_alloc_count".to_string(), sig_alloc_count);
 
         Ok(())
     }
@@ -1929,6 +2228,154 @@ fn translate_instruction(
                         }
                     } else {
                         Ok(Some(builder.ins().f64const(0.0)))
+                    }
+                }
+
+                // Alloc.alloc - allocate memory
+                ("Alloc", "alloc") => {
+                    if let Some(&func_ref) = func_refs.get("runtime_alloc") {
+                        let size = if !arg_vals.is_empty() {
+                            arg_vals[0]
+                        } else {
+                            builder.ins().iconst(types::I64, 0)
+                        };
+                        let call = builder.ins().call(func_ref, &[size]);
+                        let results = builder.inst_results(call);
+                        if results.is_empty() {
+                            Ok(Some(builder.ins().iconst(types::I64, 0)))
+                        } else {
+                            Ok(Some(results[0]))
+                        }
+                    } else {
+                        Ok(Some(builder.ins().iconst(types::I64, 0)))
+                    }
+                }
+
+                // Alloc.alloc_array - allocate array
+                ("Alloc", "alloc_array") => {
+                    if let Some(&func_ref) = func_refs.get("runtime_alloc_array") {
+                        let count = if !arg_vals.is_empty() {
+                            arg_vals[0]
+                        } else {
+                            builder.ins().iconst(types::I64, 0)
+                        };
+                        let elem_size = if arg_vals.len() > 1 {
+                            arg_vals[1]
+                        } else {
+                            builder.ins().iconst(types::I64, 1)
+                        };
+                        let call = builder.ins().call(func_ref, &[count, elem_size]);
+                        let results = builder.inst_results(call);
+                        if results.is_empty() {
+                            Ok(Some(builder.ins().iconst(types::I64, 0)))
+                        } else {
+                            Ok(Some(results[0]))
+                        }
+                    } else {
+                        Ok(Some(builder.ins().iconst(types::I64, 0)))
+                    }
+                }
+
+                // Alloc.dealloc - deallocate memory
+                ("Alloc", "dealloc") => {
+                    if let Some(&func_ref) = func_refs.get("runtime_dealloc") {
+                        let ptr = if !arg_vals.is_empty() {
+                            arg_vals[0]
+                        } else {
+                            builder.ins().iconst(types::I64, 0)
+                        };
+                        let call = builder.ins().call(func_ref, &[ptr]);
+                        let results = builder.inst_results(call);
+                        if results.is_empty() {
+                            Ok(Some(builder.ins().iconst(types::I64, 0)))
+                        } else {
+                            Ok(Some(results[0]))
+                        }
+                    } else {
+                        Ok(Some(builder.ins().iconst(types::I64, 0)))
+                    }
+                }
+
+                // Alloc.realloc - reallocate memory
+                ("Alloc", "realloc") => {
+                    if let Some(&func_ref) = func_refs.get("runtime_realloc") {
+                        let ptr = if !arg_vals.is_empty() {
+                            arg_vals[0]
+                        } else {
+                            builder.ins().iconst(types::I64, 0)
+                        };
+                        let new_size = if arg_vals.len() > 1 {
+                            arg_vals[1]
+                        } else {
+                            builder.ins().iconst(types::I64, 0)
+                        };
+                        let call = builder.ins().call(func_ref, &[ptr, new_size]);
+                        let results = builder.inst_results(call);
+                        if results.is_empty() {
+                            Ok(Some(builder.ins().iconst(types::I64, 0)))
+                        } else {
+                            Ok(Some(results[0]))
+                        }
+                    } else {
+                        Ok(Some(builder.ins().iconst(types::I64, 0)))
+                    }
+                }
+
+                // Alloc.size_of - get allocation size
+                ("Alloc", "size_of") => {
+                    if let Some(&func_ref) = func_refs.get("runtime_alloc_size_of") {
+                        let ptr = if !arg_vals.is_empty() {
+                            arg_vals[0]
+                        } else {
+                            builder.ins().iconst(types::I64, 0)
+                        };
+                        let call = builder.ins().call(func_ref, &[ptr]);
+                        let results = builder.inst_results(call);
+                        if results.is_empty() {
+                            Ok(Some(builder.ins().iconst(types::I64, 0)))
+                        } else {
+                            Ok(Some(results[0]))
+                        }
+                    } else {
+                        Ok(Some(builder.ins().iconst(types::I64, 0)))
+                    }
+                }
+
+                // Alloc.clear - clear all allocations
+                ("Alloc", "clear") => {
+                    if let Some(&func_ref) = func_refs.get("runtime_alloc_clear") {
+                        builder.ins().call(func_ref, &[]);
+                    }
+                    Ok(Some(builder.ins().iconst(types::I64, 0)))
+                }
+
+                // Alloc.total_allocated - get total allocated bytes
+                ("Alloc", "total_allocated") => {
+                    if let Some(&func_ref) = func_refs.get("runtime_alloc_total") {
+                        let call = builder.ins().call(func_ref, &[]);
+                        let results = builder.inst_results(call);
+                        if results.is_empty() {
+                            Ok(Some(builder.ins().iconst(types::I64, 0)))
+                        } else {
+                            Ok(Some(results[0]))
+                        }
+                    } else {
+                        Ok(Some(builder.ins().iconst(types::I64, 0)))
+                    }
+                }
+
+                // Alloc.count - get number of allocations
+                ("Alloc", "count") => {
+                    if let Some(&func_ref) = func_refs.get("runtime_alloc_count") {
+                        let call = builder.ins().call(func_ref, &[]);
+                        let results = builder.inst_results(call);
+                        if results.is_empty() {
+                            Ok(Some(builder.ins().iconst(types::I64, 0)))
+                        } else {
+                            Ok(Some(results[0]))
+                        }
+                    } else {
+                        Ok(Some(builder.ins().iconst(types::I64, 0)))
                     }
                 }
 

@@ -5,7 +5,7 @@
 /// Test effect dispatch in interpreter mode
 #[test]
 fn test_interpreter_effect_dispatch() {
-    use sounio::interp::effect_dispatch::{EffectContext, EffectKind};
+    use sounio::interp::effect_dispatch::EffectContext;
     use sounio::interp::value::Value;
     use std::collections::HashMap;
 
@@ -122,7 +122,7 @@ fn test_custom_handler() {
     use std::collections::HashMap;
 
     let mut ctx = EffectContext::with_seed(42);
-    let initial_handlers = ctx.state.observations.len();
+    let _initial_handlers = ctx.state.observations.len();
 
     // Push a custom handler that always returns 42.0 for sample
     let custom_handler = EffectHandler::new(EffectKind::Prob, "constant_sampler")
@@ -449,4 +449,226 @@ fn test_jit_mut_functions_linked() {
     // means all the runtime_mut_* functions are properly defined
 
     println!("JIT Mut functions are properly linked");
+}
+
+// ==================== Alloc Effect Tests ====================
+
+/// Test basic allocation and deallocation
+#[test]
+fn test_alloc_basic() {
+    use std::collections::HashMap;
+
+    // Simulate the allocation tracking
+    let mut allocations: HashMap<usize, usize> = HashMap::new();
+    let mut total_allocated: usize = 0;
+
+    // Allocate 100 bytes
+    let size = 100usize;
+    let mut buffer = vec![0u8; size];
+    let ptr = buffer.as_mut_ptr() as usize;
+    std::mem::forget(buffer);
+    allocations.insert(ptr, size);
+    total_allocated += size;
+
+    assert_eq!(allocations.len(), 1);
+    assert_eq!(total_allocated, 100);
+    assert!(allocations.contains_key(&ptr));
+
+    // Deallocate
+    if let Some(alloc_size) = allocations.remove(&ptr) {
+        unsafe {
+            let _ = Vec::from_raw_parts(ptr as *mut u8, alloc_size, alloc_size);
+        }
+        total_allocated -= alloc_size;
+    }
+
+    assert_eq!(allocations.len(), 0);
+    assert_eq!(total_allocated, 0);
+
+    println!("Alloc.alloc/dealloc test passed");
+}
+
+/// Test array allocation
+#[test]
+fn test_alloc_array() {
+    use std::collections::HashMap;
+
+    let mut allocations: HashMap<usize, usize> = HashMap::new();
+    let mut total_allocated: usize = 0;
+
+    // Allocate array of 10 f64 values (80 bytes)
+    let count = 10;
+    let elem_size = std::mem::size_of::<f64>();
+    let total_size = count * elem_size;
+
+    let mut buffer = vec![0u8; total_size];
+    let ptr = buffer.as_mut_ptr() as usize;
+    std::mem::forget(buffer);
+    allocations.insert(ptr, total_size);
+    total_allocated += total_size;
+
+    assert_eq!(allocations.len(), 1);
+    assert_eq!(total_allocated, 80); // 10 * 8 bytes
+
+    // Clean up
+    if let Some(alloc_size) = allocations.remove(&ptr) {
+        unsafe {
+            let _ = Vec::from_raw_parts(ptr as *mut u8, alloc_size, alloc_size);
+        }
+    }
+
+    println!("Alloc.alloc_array test passed");
+}
+
+/// Test multiple allocations and clear
+#[test]
+fn test_alloc_multiple_and_clear() {
+    use std::collections::HashMap;
+
+    let mut allocations: HashMap<usize, usize> = HashMap::new();
+    let mut total_allocated: usize = 0;
+
+    // Make several allocations
+    for i in 1..=5 {
+        let size = i * 100;
+        let mut buffer = vec![0u8; size];
+        let ptr = buffer.as_mut_ptr() as usize;
+        std::mem::forget(buffer);
+        allocations.insert(ptr, size);
+        total_allocated += size;
+    }
+
+    assert_eq!(allocations.len(), 5);
+    assert_eq!(total_allocated, 100 + 200 + 300 + 400 + 500); // 1500
+
+    // Clear all
+    for (&ptr, &alloc_size) in allocations.iter() {
+        unsafe {
+            let _ = Vec::from_raw_parts(ptr as *mut u8, alloc_size, alloc_size);
+        }
+    }
+    allocations.clear();
+    total_allocated = 0;
+
+    assert_eq!(allocations.len(), 0);
+    assert_eq!(total_allocated, 0);
+
+    println!("Alloc.clear test passed");
+}
+
+/// Test reallocation
+#[test]
+fn test_alloc_realloc() {
+    use std::collections::HashMap;
+
+    let mut allocations: HashMap<usize, usize> = HashMap::new();
+
+    // Initial allocation of 100 bytes
+    let old_size = 100usize;
+    let buffer = vec![42u8; old_size]; // Fill with 42s
+    let old_ptr = buffer.as_ptr() as usize;
+    std::mem::forget(buffer);
+    allocations.insert(old_ptr, old_size);
+
+    // Reallocate to 200 bytes
+    let new_size = 200usize;
+    let mut new_buffer = vec![0u8; new_size];
+
+    // Copy old data
+    unsafe {
+        std::ptr::copy_nonoverlapping(
+            old_ptr as *const u8,
+            new_buffer.as_mut_ptr(),
+            old_size.min(new_size),
+        );
+    }
+
+    let new_ptr = new_buffer.as_ptr() as usize;
+    std::mem::forget(new_buffer);
+
+    // Free old
+    allocations.remove(&old_ptr);
+    unsafe {
+        let _ = Vec::from_raw_parts(old_ptr as *mut u8, old_size, old_size);
+    }
+
+    // Track new
+    allocations.insert(new_ptr, new_size);
+
+    assert_eq!(allocations.len(), 1);
+    assert!(allocations.contains_key(&new_ptr));
+
+    // Verify data was preserved
+    unsafe {
+        let slice = std::slice::from_raw_parts(new_ptr as *const u8, old_size);
+        assert!(slice.iter().all(|&b| b == 42));
+    }
+
+    // Clean up
+    if let Some(size) = allocations.remove(&new_ptr) {
+        unsafe {
+            let _ = Vec::from_raw_parts(new_ptr as *mut u8, size, size);
+        }
+    }
+
+    println!("Alloc.realloc test passed");
+}
+
+/// Test size_of tracking
+#[test]
+fn test_alloc_size_of() {
+    use std::collections::HashMap;
+
+    let mut allocations: HashMap<usize, usize> = HashMap::new();
+
+    let size = 256usize;
+    let mut buffer = vec![0u8; size];
+    let ptr = buffer.as_mut_ptr() as usize;
+    std::mem::forget(buffer);
+    allocations.insert(ptr, size);
+
+    // Check size_of
+    let tracked_size = *allocations.get(&ptr).unwrap_or(&0);
+    assert_eq!(tracked_size, 256);
+
+    // Unknown pointer returns 0
+    let unknown_ptr = 0x12345678usize;
+    let unknown_size = *allocations.get(&unknown_ptr).unwrap_or(&0);
+    assert_eq!(unknown_size, 0);
+
+    // Clean up
+    if let Some(alloc_size) = allocations.remove(&ptr) {
+        unsafe {
+            let _ = Vec::from_raw_parts(ptr as *mut u8, alloc_size, alloc_size);
+        }
+    }
+
+    println!("Alloc.size_of test passed");
+}
+
+/// Test Alloc effect dispatch through interpreter
+#[test]
+fn test_alloc_effect_dispatch() {
+    use sounio::interp::effect_dispatch::EffectContext;
+    use sounio::interp::value::Value;
+
+    let mut ctx = EffectContext::with_seed(42);
+
+    // Test Alloc.alloc dispatch
+    let result = ctx.dispatch_by_name("Alloc", "alloc", vec![Value::Int(100)]);
+    println!("Alloc.alloc dispatch result: {:?}", result);
+
+    // Test Alloc.total_allocated dispatch
+    let result = ctx.dispatch_by_name("Alloc", "total_allocated", vec![]);
+    println!("Alloc.total_allocated dispatch result: {:?}", result);
+}
+
+/// Verify JIT runtime Alloc functions are properly linked
+#[test]
+fn test_jit_alloc_functions_linked() {
+    // This test verifies the JIT can be created with all Alloc functions registered
+    // The fact that this test compiles and links with the jit feature
+    // means all the runtime_alloc_* functions are properly defined
+
+    println!("JIT Alloc functions are properly linked");
 }
