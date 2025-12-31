@@ -205,6 +205,159 @@ extern "C" fn runtime_effect_set_seed(seed: i64) {
     }
 }
 
+// ==================== IO Effect Runtime Functions ====================
+// These implement IO effect operations for JIT-compiled code
+
+/// Read a line from stdin (IO.read_line)
+/// Returns pointer to heap-allocated string data
+/// Caller must track length separately (we return null-terminated for simplicity)
+#[cfg(feature = "jit")]
+extern "C" fn runtime_io_read_line() -> *const u8 {
+    use std::io::BufRead;
+
+    let mut line = String::new();
+    if let Ok(_) = std::io::stdin().lock().read_line(&mut line) {
+        // Trim trailing newline
+        if line.ends_with('\n') {
+            line.pop();
+            if line.ends_with('\r') {
+                line.pop();
+            }
+        }
+
+        // Store in global string storage to keep it alive
+        if let Ok(mut storage) = STRING_STORAGE.lock() {
+            let cstring = std::ffi::CString::new(line).unwrap_or_default();
+            let ptr = cstring.as_ptr() as *const u8;
+            storage.push(cstring);
+            ptr
+        } else {
+            std::ptr::null()
+        }
+    } else {
+        std::ptr::null()
+    }
+}
+
+/// Read entire file contents (IO.read_file)
+/// Takes path as null-terminated string, returns pointer to file contents
+#[cfg(feature = "jit")]
+extern "C" fn runtime_io_read_file(path_ptr: *const u8) -> *const u8 {
+    if path_ptr.is_null() {
+        return std::ptr::null();
+    }
+
+    let path = unsafe {
+        std::ffi::CStr::from_ptr(path_ptr as *const std::ffi::c_char)
+            .to_str()
+            .unwrap_or("")
+    };
+
+    if path.is_empty() {
+        return std::ptr::null();
+    }
+
+    match std::fs::read_to_string(path) {
+        Ok(contents) => {
+            if let Ok(mut storage) = STRING_STORAGE.lock() {
+                let cstring = std::ffi::CString::new(contents).unwrap_or_default();
+                let ptr = cstring.as_ptr() as *const u8;
+                storage.push(cstring);
+                ptr
+            } else {
+                std::ptr::null()
+            }
+        }
+        Err(_) => std::ptr::null(),
+    }
+}
+
+/// Write string to file (IO.write_file)
+/// Takes path and data as null-terminated strings
+/// Returns 1 on success, 0 on failure
+#[cfg(feature = "jit")]
+extern "C" fn runtime_io_write_file(path_ptr: *const u8, data_ptr: *const u8) -> i64 {
+    if path_ptr.is_null() || data_ptr.is_null() {
+        return 0;
+    }
+
+    let path = unsafe {
+        std::ffi::CStr::from_ptr(path_ptr as *const std::ffi::c_char)
+            .to_str()
+            .unwrap_or("")
+    };
+
+    let data = unsafe {
+        std::ffi::CStr::from_ptr(data_ptr as *const std::ffi::c_char)
+            .to_str()
+            .unwrap_or("")
+    };
+
+    if path.is_empty() {
+        return 0;
+    }
+
+    match std::fs::write(path, data) {
+        Ok(()) => 1,
+        Err(_) => 0,
+    }
+}
+
+/// Append string to file (IO.append_file)
+/// Takes path and data as null-terminated strings
+/// Returns 1 on success, 0 on failure
+#[cfg(feature = "jit")]
+extern "C" fn runtime_io_append_file(path_ptr: *const u8, data_ptr: *const u8) -> i64 {
+    use std::io::Write;
+
+    if path_ptr.is_null() || data_ptr.is_null() {
+        return 0;
+    }
+
+    let path = unsafe {
+        std::ffi::CStr::from_ptr(path_ptr as *const std::ffi::c_char)
+            .to_str()
+            .unwrap_or("")
+    };
+
+    let data = unsafe {
+        std::ffi::CStr::from_ptr(data_ptr as *const std::ffi::c_char)
+            .to_str()
+            .unwrap_or("")
+    };
+
+    if path.is_empty() {
+        return 0;
+    }
+
+    match std::fs::OpenOptions::new().append(true).create(true).open(path) {
+        Ok(mut file) => {
+            match file.write_all(data.as_bytes()) {
+                Ok(()) => 1,
+                Err(_) => 0,
+            }
+        }
+        Err(_) => 0,
+    }
+}
+
+/// Check if file exists (IO.file_exists)
+/// Returns 1 if exists, 0 otherwise
+#[cfg(feature = "jit")]
+extern "C" fn runtime_io_file_exists(path_ptr: *const u8) -> i64 {
+    if path_ptr.is_null() {
+        return 0;
+    }
+
+    let path = unsafe {
+        std::ffi::CStr::from_ptr(path_ptr as *const std::ffi::c_char)
+            .to_str()
+            .unwrap_or("")
+    };
+
+    if std::path::Path::new(path).exists() { 1 } else { 0 }
+}
+
 #[cfg(feature = "jit")]
 use crate::hlir::{
     BinaryOp, BlockId, HlirBlock, HlirConstant, HlirFunction, HlirTerminator, HlirType, Op,
@@ -439,6 +592,13 @@ impl JitCompiler {
         jit_builder.symbol("runtime_effect_reset", runtime_effect_reset as *const u8);
         jit_builder.symbol("runtime_effect_set_seed", runtime_effect_set_seed as *const u8);
 
+        // Register IO effect runtime functions
+        jit_builder.symbol("runtime_io_read_line", runtime_io_read_line as *const u8);
+        jit_builder.symbol("runtime_io_read_file", runtime_io_read_file as *const u8);
+        jit_builder.symbol("runtime_io_write_file", runtime_io_write_file as *const u8);
+        jit_builder.symbol("runtime_io_append_file", runtime_io_append_file as *const u8);
+        jit_builder.symbol("runtime_io_file_exists", runtime_io_file_exists as *const u8);
+
         let jit_module = JITModule::new(jit_builder);
         let ctx = jit_module.make_context();
 
@@ -652,6 +812,74 @@ impl JitCompiler {
             .insert("runtime_effect_set_seed".to_string(), id);
         self.func_sigs
             .insert("runtime_effect_set_seed".to_string(), sig_effect_seed);
+
+        // ==================== IO Effect Runtime Functions ====================
+
+        // runtime_io_read_line() -> i64 (ptr to string)
+        let mut sig_io_read_line = Signature::new(call_conv);
+        sig_io_read_line.returns.push(AbiParam::new(types::I64));
+        let id = self
+            .jit_module
+            .declare_function("runtime_io_read_line", Linkage::Import, &sig_io_read_line)
+            .map_err(|e| format!("Failed to declare runtime_io_read_line: {}", e))?;
+        self.func_ids
+            .insert("runtime_io_read_line".to_string(), id);
+        self.func_sigs
+            .insert("runtime_io_read_line".to_string(), sig_io_read_line);
+
+        // runtime_io_read_file(path_ptr: i64) -> i64 (ptr to string)
+        let mut sig_io_read_file = Signature::new(call_conv);
+        sig_io_read_file.params.push(AbiParam::new(types::I64)); // path_ptr
+        sig_io_read_file.returns.push(AbiParam::new(types::I64));
+        let id = self
+            .jit_module
+            .declare_function("runtime_io_read_file", Linkage::Import, &sig_io_read_file)
+            .map_err(|e| format!("Failed to declare runtime_io_read_file: {}", e))?;
+        self.func_ids
+            .insert("runtime_io_read_file".to_string(), id);
+        self.func_sigs
+            .insert("runtime_io_read_file".to_string(), sig_io_read_file);
+
+        // runtime_io_write_file(path_ptr: i64, data_ptr: i64) -> i64
+        let mut sig_io_write_file = Signature::new(call_conv);
+        sig_io_write_file.params.push(AbiParam::new(types::I64)); // path_ptr
+        sig_io_write_file.params.push(AbiParam::new(types::I64)); // data_ptr
+        sig_io_write_file.returns.push(AbiParam::new(types::I64));
+        let id = self
+            .jit_module
+            .declare_function("runtime_io_write_file", Linkage::Import, &sig_io_write_file)
+            .map_err(|e| format!("Failed to declare runtime_io_write_file: {}", e))?;
+        self.func_ids
+            .insert("runtime_io_write_file".to_string(), id);
+        self.func_sigs
+            .insert("runtime_io_write_file".to_string(), sig_io_write_file);
+
+        // runtime_io_append_file(path_ptr: i64, data_ptr: i64) -> i64
+        let mut sig_io_append_file = Signature::new(call_conv);
+        sig_io_append_file.params.push(AbiParam::new(types::I64)); // path_ptr
+        sig_io_append_file.params.push(AbiParam::new(types::I64)); // data_ptr
+        sig_io_append_file.returns.push(AbiParam::new(types::I64));
+        let id = self
+            .jit_module
+            .declare_function("runtime_io_append_file", Linkage::Import, &sig_io_append_file)
+            .map_err(|e| format!("Failed to declare runtime_io_append_file: {}", e))?;
+        self.func_ids
+            .insert("runtime_io_append_file".to_string(), id);
+        self.func_sigs
+            .insert("runtime_io_append_file".to_string(), sig_io_append_file);
+
+        // runtime_io_file_exists(path_ptr: i64) -> i64
+        let mut sig_io_file_exists = Signature::new(call_conv);
+        sig_io_file_exists.params.push(AbiParam::new(types::I64)); // path_ptr
+        sig_io_file_exists.returns.push(AbiParam::new(types::I64));
+        let id = self
+            .jit_module
+            .declare_function("runtime_io_file_exists", Linkage::Import, &sig_io_file_exists)
+            .map_err(|e| format!("Failed to declare runtime_io_file_exists: {}", e))?;
+        self.func_ids
+            .insert("runtime_io_file_exists".to_string(), id);
+        self.func_sigs
+            .insert("runtime_io_file_exists".to_string(), sig_io_file_exists);
 
         Ok(())
     }
@@ -1246,6 +1474,125 @@ fn translate_instruction(
                             Ok(Some(builder.ins().f64const(0.0)))
                         }
                     }
+                }
+
+                // IO.read_line - read a line from stdin
+                ("IO", "read_line") => {
+                    if let Some(&func_ref) = func_refs.get("runtime_io_read_line") {
+                        let call = builder.ins().call(func_ref, &[]);
+                        let results = builder.inst_results(call);
+                        if results.is_empty() {
+                            Ok(Some(builder.ins().iconst(types::I64, 0)))
+                        } else {
+                            Ok(Some(results[0]))
+                        }
+                    } else {
+                        Ok(Some(builder.ins().iconst(types::I64, 0)))
+                    }
+                }
+
+                // IO.read_file - read file contents
+                ("IO", "read_file") => {
+                    if let Some(&func_ref) = func_refs.get("runtime_io_read_file") {
+                        let path_ptr = if !arg_vals.is_empty() {
+                            arg_vals[0]
+                        } else {
+                            builder.ins().iconst(types::I64, 0)
+                        };
+                        let call = builder.ins().call(func_ref, &[path_ptr]);
+                        let results = builder.inst_results(call);
+                        if results.is_empty() {
+                            Ok(Some(builder.ins().iconst(types::I64, 0)))
+                        } else {
+                            Ok(Some(results[0]))
+                        }
+                    } else {
+                        Ok(Some(builder.ins().iconst(types::I64, 0)))
+                    }
+                }
+
+                // IO.write_file - write data to file
+                ("IO", "write_file") => {
+                    if let Some(&func_ref) = func_refs.get("runtime_io_write_file") {
+                        let path_ptr = if !arg_vals.is_empty() {
+                            arg_vals[0]
+                        } else {
+                            builder.ins().iconst(types::I64, 0)
+                        };
+                        let data_ptr = if arg_vals.len() > 1 {
+                            arg_vals[1]
+                        } else {
+                            builder.ins().iconst(types::I64, 0)
+                        };
+                        let call = builder.ins().call(func_ref, &[path_ptr, data_ptr]);
+                        let results = builder.inst_results(call);
+                        if results.is_empty() {
+                            Ok(Some(builder.ins().iconst(types::I64, 0)))
+                        } else {
+                            Ok(Some(results[0]))
+                        }
+                    } else {
+                        Ok(Some(builder.ins().iconst(types::I64, 0)))
+                    }
+                }
+
+                // IO.append_file - append data to file
+                ("IO", "append_file") => {
+                    if let Some(&func_ref) = func_refs.get("runtime_io_append_file") {
+                        let path_ptr = if !arg_vals.is_empty() {
+                            arg_vals[0]
+                        } else {
+                            builder.ins().iconst(types::I64, 0)
+                        };
+                        let data_ptr = if arg_vals.len() > 1 {
+                            arg_vals[1]
+                        } else {
+                            builder.ins().iconst(types::I64, 0)
+                        };
+                        let call = builder.ins().call(func_ref, &[path_ptr, data_ptr]);
+                        let results = builder.inst_results(call);
+                        if results.is_empty() {
+                            Ok(Some(builder.ins().iconst(types::I64, 0)))
+                        } else {
+                            Ok(Some(results[0]))
+                        }
+                    } else {
+                        Ok(Some(builder.ins().iconst(types::I64, 0)))
+                    }
+                }
+
+                // IO.file_exists - check if file exists
+                ("IO", "file_exists") => {
+                    if let Some(&func_ref) = func_refs.get("runtime_io_file_exists") {
+                        let path_ptr = if !arg_vals.is_empty() {
+                            arg_vals[0]
+                        } else {
+                            builder.ins().iconst(types::I64, 0)
+                        };
+                        let call = builder.ins().call(func_ref, &[path_ptr]);
+                        let results = builder.inst_results(call);
+                        if results.is_empty() {
+                            Ok(Some(builder.ins().iconst(types::I64, 0)))
+                        } else {
+                            Ok(Some(results[0]))
+                        }
+                    } else {
+                        Ok(Some(builder.ins().iconst(types::I64, 0)))
+                    }
+                }
+
+                // IO.print - print to stdout (already handled by print functions)
+                ("IO", "print") => {
+                    // Delegate to runtime_print_cstr for string printing
+                    if let Some(&func_ref) = func_refs.get("runtime_print_cstr") {
+                        let ptr = if !arg_vals.is_empty() {
+                            arg_vals[0]
+                        } else {
+                            builder.ins().iconst(types::I64, 0)
+                        };
+                        builder.ins().call(func_ref, &[ptr]);
+                    }
+                    Ok(Some(builder.ins().iconst(types::I64, 0)))
                 }
 
                 // Default: return zero for unhandled effects
