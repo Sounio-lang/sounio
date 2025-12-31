@@ -85,12 +85,18 @@ This document captures the comprehensive audit findings and prioritized roadmap 
   - `runtime_prob_observe(mean, std, observed)` - Log probability computation
   - `runtime_causal_do(var_ptr, value)` - Record intervention
   - `runtime_effect_reset()` and `runtime_effect_set_seed(seed)`
-- ✅ `Op::PerformEffect` in Cranelift codegen now routes to runtime functions
+- ✅ Cranelift JIT IO effect runtime functions
+  - `runtime_io_read_line()` - Read line from stdin
+  - `runtime_io_read_file(path)` - Read entire file contents
+  - `runtime_io_write_file(path, data)` - Write to file
+  - `runtime_io_append_file(path, data)` - Append to file
+  - `runtime_io_file_exists(path)` - Check if file exists
+- ✅ `Op::PerformEffect` in Cranelift codegen now routes to runtime functions (Prob, Causal, IO)
 
 **Remaining Work:**
 - Full continuation-based handler invocation (current: direct dispatch)
 - Handler frames for nested handlers
-- More effect operations (IO, Mut, Alloc)
+- More effect operations (Mut, Alloc)
 - E2E tests for compiled effect-using programs
 
 **Fix Effort:** ~1 day remaining
