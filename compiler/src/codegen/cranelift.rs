@@ -85,6 +85,8 @@ struct JitEffectState {
     log_prob: f64,
     interventions: Vec<(String, f64)>,
     observations: Vec<(String, f64)>,
+    /// Named mutable state store for Mut effect
+    mutable_state: std::collections::HashMap<String, f64>,
 }
 
 #[cfg(feature = "jit")]
@@ -95,6 +97,7 @@ impl JitEffectState {
             log_prob: 0.0,
             interventions: Vec::new(),
             observations: Vec::new(),
+            mutable_state: std::collections::HashMap::new(),
         }
     }
 
@@ -102,6 +105,7 @@ impl JitEffectState {
         self.log_prob = 0.0;
         self.interventions.clear();
         self.observations.clear();
+        self.mutable_state.clear();
     }
 }
 
@@ -358,6 +362,136 @@ extern "C" fn runtime_io_file_exists(path_ptr: *const u8) -> i64 {
     if std::path::Path::new(path).exists() { 1 } else { 0 }
 }
 
+// ==================== Mut Effect Runtime Functions ====================
+// These implement mutable state effect operations using a named state store
+
+/// Get a value from mutable state by name (Mut.get)
+/// Returns 0.0 if name doesn't exist
+#[cfg(feature = "jit")]
+extern "C" fn runtime_mut_get(name_ptr: *const u8) -> f64 {
+    if name_ptr.is_null() {
+        return 0.0;
+    }
+
+    let name = unsafe {
+        std::ffi::CStr::from_ptr(name_ptr as *const std::ffi::c_char)
+            .to_str()
+            .unwrap_or("")
+    };
+
+    if let Ok(state) = get_jit_effect_state().lock() {
+        *state.mutable_state.get(name).unwrap_or(&0.0)
+    } else {
+        0.0
+    }
+}
+
+/// Set a value in mutable state by name (Mut.set)
+/// Returns 1 on success, 0 on failure
+#[cfg(feature = "jit")]
+extern "C" fn runtime_mut_set(name_ptr: *const u8, value: f64) -> i64 {
+    if name_ptr.is_null() {
+        return 0;
+    }
+
+    let name = unsafe {
+        std::ffi::CStr::from_ptr(name_ptr as *const std::ffi::c_char)
+            .to_str()
+            .unwrap_or("")
+            .to_string()
+    };
+
+    if name.is_empty() {
+        return 0;
+    }
+
+    if let Ok(mut state) = get_jit_effect_state().lock() {
+        state.mutable_state.insert(name, value);
+        1
+    } else {
+        0
+    }
+}
+
+/// Modify a value in mutable state by adding delta (Mut.modify)
+/// Returns the new value after modification
+#[cfg(feature = "jit")]
+extern "C" fn runtime_mut_modify(name_ptr: *const u8, delta: f64) -> f64 {
+    if name_ptr.is_null() {
+        return delta;
+    }
+
+    let name = unsafe {
+        std::ffi::CStr::from_ptr(name_ptr as *const std::ffi::c_char)
+            .to_str()
+            .unwrap_or("")
+            .to_string()
+    };
+
+    if name.is_empty() {
+        return delta;
+    }
+
+    if let Ok(mut state) = get_jit_effect_state().lock() {
+        let current = *state.mutable_state.get(&name).unwrap_or(&0.0);
+        let new_value = current + delta;
+        state.mutable_state.insert(name, new_value);
+        new_value
+    } else {
+        delta
+    }
+}
+
+/// Clear all mutable state (Mut.clear)
+#[cfg(feature = "jit")]
+extern "C" fn runtime_mut_clear() {
+    if let Ok(mut state) = get_jit_effect_state().lock() {
+        state.mutable_state.clear();
+    }
+}
+
+/// Check if a name exists in mutable state (Mut.exists)
+/// Returns 1 if exists, 0 otherwise
+#[cfg(feature = "jit")]
+extern "C" fn runtime_mut_exists(name_ptr: *const u8) -> i64 {
+    if name_ptr.is_null() {
+        return 0;
+    }
+
+    let name = unsafe {
+        std::ffi::CStr::from_ptr(name_ptr as *const std::ffi::c_char)
+            .to_str()
+            .unwrap_or("")
+    };
+
+    if let Ok(state) = get_jit_effect_state().lock() {
+        if state.mutable_state.contains_key(name) { 1 } else { 0 }
+    } else {
+        0
+    }
+}
+
+/// Delete a value from mutable state (Mut.delete)
+/// Returns the deleted value or 0.0 if not found
+#[cfg(feature = "jit")]
+extern "C" fn runtime_mut_delete(name_ptr: *const u8) -> f64 {
+    if name_ptr.is_null() {
+        return 0.0;
+    }
+
+    let name = unsafe {
+        std::ffi::CStr::from_ptr(name_ptr as *const std::ffi::c_char)
+            .to_str()
+            .unwrap_or("")
+    };
+
+    if let Ok(mut state) = get_jit_effect_state().lock() {
+        state.mutable_state.remove(name).unwrap_or(0.0)
+    } else {
+        0.0
+    }
+}
+
 #[cfg(feature = "jit")]
 use crate::hlir::{
     BinaryOp, BlockId, HlirBlock, HlirConstant, HlirFunction, HlirTerminator, HlirType, Op,
@@ -598,6 +732,14 @@ impl JitCompiler {
         jit_builder.symbol("runtime_io_write_file", runtime_io_write_file as *const u8);
         jit_builder.symbol("runtime_io_append_file", runtime_io_append_file as *const u8);
         jit_builder.symbol("runtime_io_file_exists", runtime_io_file_exists as *const u8);
+
+        // Register Mut effect runtime functions
+        jit_builder.symbol("runtime_mut_get", runtime_mut_get as *const u8);
+        jit_builder.symbol("runtime_mut_set", runtime_mut_set as *const u8);
+        jit_builder.symbol("runtime_mut_modify", runtime_mut_modify as *const u8);
+        jit_builder.symbol("runtime_mut_clear", runtime_mut_clear as *const u8);
+        jit_builder.symbol("runtime_mut_exists", runtime_mut_exists as *const u8);
+        jit_builder.symbol("runtime_mut_delete", runtime_mut_delete as *const u8);
 
         let jit_module = JITModule::new(jit_builder);
         let ctx = jit_module.make_context();
@@ -880,6 +1022,83 @@ impl JitCompiler {
             .insert("runtime_io_file_exists".to_string(), id);
         self.func_sigs
             .insert("runtime_io_file_exists".to_string(), sig_io_file_exists);
+
+        // ==================== Mut Effect Runtime Functions ====================
+
+        // runtime_mut_get(name_ptr: i64) -> f64
+        let mut sig_mut_get = Signature::new(call_conv);
+        sig_mut_get.params.push(AbiParam::new(types::I64)); // name_ptr
+        sig_mut_get.returns.push(AbiParam::new(types::F64));
+        let id = self
+            .jit_module
+            .declare_function("runtime_mut_get", Linkage::Import, &sig_mut_get)
+            .map_err(|e| format!("Failed to declare runtime_mut_get: {}", e))?;
+        self.func_ids.insert("runtime_mut_get".to_string(), id);
+        self.func_sigs
+            .insert("runtime_mut_get".to_string(), sig_mut_get);
+
+        // runtime_mut_set(name_ptr: i64, value: f64) -> i64
+        let mut sig_mut_set = Signature::new(call_conv);
+        sig_mut_set.params.push(AbiParam::new(types::I64)); // name_ptr
+        sig_mut_set.params.push(AbiParam::new(types::F64)); // value
+        sig_mut_set.returns.push(AbiParam::new(types::I64));
+        let id = self
+            .jit_module
+            .declare_function("runtime_mut_set", Linkage::Import, &sig_mut_set)
+            .map_err(|e| format!("Failed to declare runtime_mut_set: {}", e))?;
+        self.func_ids.insert("runtime_mut_set".to_string(), id);
+        self.func_sigs
+            .insert("runtime_mut_set".to_string(), sig_mut_set);
+
+        // runtime_mut_modify(name_ptr: i64, delta: f64) -> f64
+        let mut sig_mut_modify = Signature::new(call_conv);
+        sig_mut_modify.params.push(AbiParam::new(types::I64)); // name_ptr
+        sig_mut_modify.params.push(AbiParam::new(types::F64)); // delta
+        sig_mut_modify.returns.push(AbiParam::new(types::F64));
+        let id = self
+            .jit_module
+            .declare_function("runtime_mut_modify", Linkage::Import, &sig_mut_modify)
+            .map_err(|e| format!("Failed to declare runtime_mut_modify: {}", e))?;
+        self.func_ids
+            .insert("runtime_mut_modify".to_string(), id);
+        self.func_sigs
+            .insert("runtime_mut_modify".to_string(), sig_mut_modify);
+
+        // runtime_mut_clear() -> void
+        let sig_mut_clear = Signature::new(call_conv);
+        let id = self
+            .jit_module
+            .declare_function("runtime_mut_clear", Linkage::Import, &sig_mut_clear)
+            .map_err(|e| format!("Failed to declare runtime_mut_clear: {}", e))?;
+        self.func_ids.insert("runtime_mut_clear".to_string(), id);
+        self.func_sigs
+            .insert("runtime_mut_clear".to_string(), sig_mut_clear);
+
+        // runtime_mut_exists(name_ptr: i64) -> i64
+        let mut sig_mut_exists = Signature::new(call_conv);
+        sig_mut_exists.params.push(AbiParam::new(types::I64)); // name_ptr
+        sig_mut_exists.returns.push(AbiParam::new(types::I64));
+        let id = self
+            .jit_module
+            .declare_function("runtime_mut_exists", Linkage::Import, &sig_mut_exists)
+            .map_err(|e| format!("Failed to declare runtime_mut_exists: {}", e))?;
+        self.func_ids
+            .insert("runtime_mut_exists".to_string(), id);
+        self.func_sigs
+            .insert("runtime_mut_exists".to_string(), sig_mut_exists);
+
+        // runtime_mut_delete(name_ptr: i64) -> f64
+        let mut sig_mut_delete = Signature::new(call_conv);
+        sig_mut_delete.params.push(AbiParam::new(types::I64)); // name_ptr
+        sig_mut_delete.returns.push(AbiParam::new(types::F64));
+        let id = self
+            .jit_module
+            .declare_function("runtime_mut_delete", Linkage::Import, &sig_mut_delete)
+            .map_err(|e| format!("Failed to declare runtime_mut_delete: {}", e))?;
+        self.func_ids
+            .insert("runtime_mut_delete".to_string(), id);
+        self.func_sigs
+            .insert("runtime_mut_delete".to_string(), sig_mut_delete);
 
         Ok(())
     }
@@ -1593,6 +1812,124 @@ fn translate_instruction(
                         builder.ins().call(func_ref, &[ptr]);
                     }
                     Ok(Some(builder.ins().iconst(types::I64, 0)))
+                }
+
+                // Mut.get - get value from mutable state
+                ("Mut", "get") => {
+                    if let Some(&func_ref) = func_refs.get("runtime_mut_get") {
+                        let name_ptr = if !arg_vals.is_empty() {
+                            arg_vals[0]
+                        } else {
+                            builder.ins().iconst(types::I64, 0)
+                        };
+                        let call = builder.ins().call(func_ref, &[name_ptr]);
+                        let results = builder.inst_results(call);
+                        if results.is_empty() {
+                            Ok(Some(builder.ins().f64const(0.0)))
+                        } else {
+                            Ok(Some(results[0]))
+                        }
+                    } else {
+                        Ok(Some(builder.ins().f64const(0.0)))
+                    }
+                }
+
+                // Mut.set - set value in mutable state
+                ("Mut", "set") => {
+                    if let Some(&func_ref) = func_refs.get("runtime_mut_set") {
+                        let name_ptr = if !arg_vals.is_empty() {
+                            arg_vals[0]
+                        } else {
+                            builder.ins().iconst(types::I64, 0)
+                        };
+                        let value = if arg_vals.len() > 1 {
+                            arg_vals[1]
+                        } else {
+                            builder.ins().f64const(0.0)
+                        };
+                        let call = builder.ins().call(func_ref, &[name_ptr, value]);
+                        let results = builder.inst_results(call);
+                        if results.is_empty() {
+                            Ok(Some(builder.ins().iconst(types::I64, 0)))
+                        } else {
+                            Ok(Some(results[0]))
+                        }
+                    } else {
+                        Ok(Some(builder.ins().iconst(types::I64, 0)))
+                    }
+                }
+
+                // Mut.modify - modify value in mutable state
+                ("Mut", "modify") => {
+                    if let Some(&func_ref) = func_refs.get("runtime_mut_modify") {
+                        let name_ptr = if !arg_vals.is_empty() {
+                            arg_vals[0]
+                        } else {
+                            builder.ins().iconst(types::I64, 0)
+                        };
+                        let delta = if arg_vals.len() > 1 {
+                            arg_vals[1]
+                        } else {
+                            builder.ins().f64const(0.0)
+                        };
+                        let call = builder.ins().call(func_ref, &[name_ptr, delta]);
+                        let results = builder.inst_results(call);
+                        if results.is_empty() {
+                            Ok(Some(builder.ins().f64const(0.0)))
+                        } else {
+                            Ok(Some(results[0]))
+                        }
+                    } else {
+                        Ok(Some(builder.ins().f64const(0.0)))
+                    }
+                }
+
+                // Mut.clear - clear all mutable state
+                ("Mut", "clear") => {
+                    if let Some(&func_ref) = func_refs.get("runtime_mut_clear") {
+                        builder.ins().call(func_ref, &[]);
+                    }
+                    Ok(Some(builder.ins().iconst(types::I64, 0)))
+                }
+
+                // Mut.exists - check if name exists in mutable state
+                ("Mut", "exists") => {
+                    if let Some(&func_ref) = func_refs.get("runtime_mut_exists") {
+                        let name_ptr = if !arg_vals.is_empty() {
+                            arg_vals[0]
+                        } else {
+                            builder.ins().iconst(types::I64, 0)
+                        };
+                        let call = builder.ins().call(func_ref, &[name_ptr]);
+                        let results = builder.inst_results(call);
+                        if results.is_empty() {
+                            Ok(Some(builder.ins().iconst(types::I64, 0)))
+                        } else {
+                            Ok(Some(results[0]))
+                        }
+                    } else {
+                        Ok(Some(builder.ins().iconst(types::I64, 0)))
+                    }
+                }
+
+                // Mut.delete - delete a value from mutable state
+                ("Mut", "delete") => {
+                    if let Some(&func_ref) = func_refs.get("runtime_mut_delete") {
+                        let name_ptr = if !arg_vals.is_empty() {
+                            arg_vals[0]
+                        } else {
+                            builder.ins().iconst(types::I64, 0)
+                        };
+                        let call = builder.ins().call(func_ref, &[name_ptr]);
+                        let results = builder.inst_results(call);
+                        if results.is_empty() {
+                            Ok(Some(builder.ins().f64const(0.0)))
+                        } else {
+                            Ok(Some(results[0]))
+                        }
+                    } else {
+                        Ok(Some(builder.ins().f64const(0.0)))
+                    }
                 }
 
                 // Default: return zero for unhandled effects

@@ -91,12 +91,19 @@ This document captures the comprehensive audit findings and prioritized roadmap 
   - `runtime_io_write_file(path, data)` - Write to file
   - `runtime_io_append_file(path, data)` - Append to file
   - `runtime_io_file_exists(path)` - Check if file exists
-- ✅ `Op::PerformEffect` in Cranelift codegen now routes to runtime functions (Prob, Causal, IO)
+- ✅ Cranelift JIT Mut (mutable state) effect runtime functions
+  - `runtime_mut_get(name)` - Get value from named state
+  - `runtime_mut_set(name, value)` - Set value in named state
+  - `runtime_mut_modify(name, delta)` - Add delta to value
+  - `runtime_mut_clear()` - Clear all state
+  - `runtime_mut_exists(name)` - Check if name exists
+  - `runtime_mut_delete(name)` - Delete value from state
+- ✅ `Op::PerformEffect` in Cranelift codegen now routes to runtime functions (Prob, Causal, IO, Mut)
 
 **Remaining Work:**
 - Full continuation-based handler invocation (current: direct dispatch)
 - Handler frames for nested handlers
-- More effect operations (Mut, Alloc)
+- More effect operations (Alloc)
 - E2E tests for compiled effect-using programs
 
 **Fix Effort:** ~1 day remaining

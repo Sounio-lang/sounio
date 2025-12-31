@@ -138,7 +138,26 @@ impl EffectInference {
         );
 
         // Mut effect (mutable state)
-        self.definitions.push(EffectDef::new("Mut"));
+        // Provides a named state store for mutable computations
+        self.definitions.push(
+            EffectDef::new("Mut")
+                .with_op(EffectOperation::new(
+                    "get",
+                    vec![Type::String], // state name
+                    Type::F64,
+                ))
+                .with_op(EffectOperation::new(
+                    "set",
+                    vec![Type::String, Type::F64], // name, value
+                    Type::Unit,
+                ))
+                .with_op(EffectOperation::new(
+                    "modify",
+                    vec![Type::String, Type::F64], // name, delta
+                    Type::F64,                     // returns new value
+                ))
+                .with_op(EffectOperation::new("clear", vec![], Type::Unit)),
+        );
 
         // Alloc effect (memory allocation)
         self.definitions.push(EffectDef::new("Alloc"));
