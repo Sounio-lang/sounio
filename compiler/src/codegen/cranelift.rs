@@ -78,7 +78,47 @@ extern "C" fn runtime_debug_test() -> i64 {
 // These implement algebraic effect operations for JIT-compiled code
 // Uses a simplified thread-safe state separate from the interpreter's EffectContext
 
-/// Simplified thread-safe effect state for JIT execution
+/// Handler function type for effect operations
+/// Takes (effect_name, op_name, args_ptr, args_len) and returns f64
+/// Returns NaN to indicate "not handled, use default"
+#[cfg(feature = "jit")]
+type HandlerFn = extern "C" fn(*const u8, *const u8, *const f64, usize) -> f64;
+
+/// A registered effect handler
+#[cfg(feature = "jit")]
+#[derive(Clone)]
+struct JitHandler {
+    /// Effect name this handler handles (e.g., "Prob", "IO")
+    effect: String,
+    /// Handler name for debugging
+    name: String,
+    /// Handler function pointer
+    handler_fn: Option<HandlerFn>,
+    /// Handler ID for predefined handlers
+    handler_id: u32,
+}
+
+#[cfg(feature = "jit")]
+impl JitHandler {
+    fn new(effect: &str, name: &str, handler_id: u32) -> Self {
+        Self {
+            effect: effect.to_string(),
+            name: name.to_string(),
+            handler_fn: None,
+            handler_id,
+        }
+    }
+
+    fn with_fn(effect: &str, name: &str, handler_fn: HandlerFn) -> Self {
+        Self {
+            effect: effect.to_string(),
+            name: name.to_string(),
+            handler_fn: Some(handler_fn),
+            handler_id: 0,
+        }
+    }
+}
+
 #[cfg(feature = "jit")]
 struct JitEffectState {
     rng: crate::runtime::prob::Rng,
@@ -91,6 +131,26 @@ struct JitEffectState {
     allocations: std::collections::HashMap<usize, usize>,
     /// Total bytes currently allocated
     total_allocated: usize,
+    /// Handler stack for continuation-based effect handling
+    handler_stack: Vec<JitHandler>,
+    /// Continuation state: stores resume data when an effect is performed
+    continuation_data: Option<ContinuationData>,
+}
+
+/// Continuation data for effect handling
+#[cfg(feature = "jit")]
+#[derive(Clone)]
+struct ContinuationData {
+    /// The effect that caused the suspension
+    effect: String,
+    /// The operation name
+    operation: String,
+    /// Arguments to the operation
+    args: Vec<f64>,
+    /// Whether the continuation has been resumed
+    resumed: bool,
+    /// Resume value (set by handler)
+    resume_value: f64,
 }
 
 #[cfg(feature = "jit")]
@@ -104,6 +164,8 @@ impl JitEffectState {
             mutable_state: std::collections::HashMap::new(),
             allocations: std::collections::HashMap::new(),
             total_allocated: 0,
+            handler_stack: Vec::new(),
+            continuation_data: None,
         }
     }
 
@@ -112,8 +174,76 @@ impl JitEffectState {
         self.interventions.clear();
         self.observations.clear();
         self.mutable_state.clear();
+        self.handler_stack.clear();
+        self.continuation_data = None;
         // Note: We don't clear allocations here to avoid memory leaks
         // Use Alloc.clear() explicitly to free all allocations
+    }
+
+    /// Push a handler onto the stack
+    fn push_handler(&mut self, handler: JitHandler) {
+        self.handler_stack.push(handler);
+    }
+
+    /// Pop a handler from the stack
+    fn pop_handler(&mut self) -> Option<JitHandler> {
+        self.handler_stack.pop()
+    }
+
+    /// Find a handler for the given effect
+    fn find_handler(&self, effect: &str) -> Option<&JitHandler> {
+        // Search from top of stack (most recent) to bottom
+        self.handler_stack.iter().rev().find(|h| h.effect == effect)
+    }
+
+    /// Dispatch an effect operation to the handler stack
+    /// Returns Some(value) if a handler handled the effect, None otherwise
+    fn dispatch_to_handler(&self, effect: &str, op: &str, args: &[f64]) -> Option<f64> {
+        if let Some(handler) = self.find_handler(effect) {
+            if let Some(handler_fn) = handler.handler_fn {
+                // Call the handler function
+                let effect_ptr = effect.as_ptr();
+                let op_ptr = op.as_ptr();
+                let args_ptr = args.as_ptr();
+                let result = handler_fn(effect_ptr, op_ptr, args_ptr, args.len());
+                // NaN means "not handled"
+                if !result.is_nan() {
+                    return Some(result);
+                }
+            } else {
+                // Use predefined handler based on handler_id
+                return self.dispatch_predefined_handler(handler.handler_id, effect, op, args);
+            }
+        }
+        None
+    }
+
+    /// Dispatch to a predefined handler by ID
+    fn dispatch_predefined_handler(&self, handler_id: u32, _effect: &str, op: &str, args: &[f64]) -> Option<f64> {
+        match handler_id {
+            // Handler ID 1: Constant sampler (always returns first arg or 0)
+            1 => {
+                if op == "sample" {
+                    Some(args.first().copied().unwrap_or(0.0))
+                } else {
+                    None
+                }
+            }
+            // Handler ID 2: Logging handler (logs and passes through)
+            2 => {
+                eprintln!("[Effect] {}({:?})", op, args);
+                None // Pass through to default
+            }
+            // Handler ID 3: Deterministic sampler (returns mean)
+            3 => {
+                if op == "sample" {
+                    Some(args.first().copied().unwrap_or(0.0))
+                } else {
+                    None
+                }
+            }
+            _ => None,
+        }
     }
 }
 
@@ -681,6 +811,232 @@ extern "C" fn runtime_alloc_count() -> i64 {
     }
 }
 
+// ==================== Handler Stack Runtime Functions ====================
+// These implement continuation-based effect handler infrastructure
+
+/// Push a handler onto the handler stack
+/// effect_ptr: C string pointer to effect name
+/// name_ptr: C string pointer to handler name
+/// handler_id: predefined handler ID (0 for custom)
+/// Returns: handler stack depth after push
+#[cfg(feature = "jit")]
+extern "C" fn runtime_handler_push(effect_ptr: *const u8, name_ptr: *const u8, handler_id: u32) -> i64 {
+    if let Ok(mut state) = get_jit_effect_state().lock() {
+        let effect = if effect_ptr.is_null() {
+            "unknown".to_string()
+        } else {
+            unsafe {
+                std::ffi::CStr::from_ptr(effect_ptr as *const std::ffi::c_char)
+                    .to_str()
+                    .unwrap_or("unknown")
+                    .to_string()
+            }
+        };
+
+        let name = if name_ptr.is_null() {
+            "anonymous".to_string()
+        } else {
+            unsafe {
+                std::ffi::CStr::from_ptr(name_ptr as *const std::ffi::c_char)
+                    .to_str()
+                    .unwrap_or("anonymous")
+                    .to_string()
+            }
+        };
+
+        let handler = JitHandler::new(&effect, &name, handler_id);
+        state.push_handler(handler);
+        state.handler_stack.len() as i64
+    } else {
+        -1
+    }
+}
+
+/// Pop a handler from the handler stack
+/// Returns: handler stack depth after pop, or -1 if stack was empty
+#[cfg(feature = "jit")]
+extern "C" fn runtime_handler_pop() -> i64 {
+    if let Ok(mut state) = get_jit_effect_state().lock() {
+        if state.pop_handler().is_some() {
+            state.handler_stack.len() as i64
+        } else {
+            -1
+        }
+    } else {
+        -1
+    }
+}
+
+/// Get current handler stack depth
+#[cfg(feature = "jit")]
+extern "C" fn runtime_handler_depth() -> i64 {
+    if let Ok(state) = get_jit_effect_state().lock() {
+        state.handler_stack.len() as i64
+    } else {
+        0
+    }
+}
+
+/// Check if a handler exists for the given effect
+/// Returns: 1 if handler exists, 0 otherwise
+#[cfg(feature = "jit")]
+extern "C" fn runtime_handler_has(effect_ptr: *const u8) -> i64 {
+    if effect_ptr.is_null() {
+        return 0;
+    }
+
+    if let Ok(state) = get_jit_effect_state().lock() {
+        let effect = unsafe {
+            std::ffi::CStr::from_ptr(effect_ptr as *const std::ffi::c_char)
+                .to_str()
+                .unwrap_or("")
+        };
+        if state.find_handler(effect).is_some() { 1 } else { 0 }
+    } else {
+        0
+    }
+}
+
+/// Dispatch effect to handler stack, returning handled value or NaN if not handled
+/// effect_ptr: C string pointer to effect name
+/// op_ptr: C string pointer to operation name
+/// args_ptr: pointer to array of f64 arguments
+/// args_len: number of arguments
+/// Returns: handled value, or NaN if no handler or handler declined
+#[cfg(feature = "jit")]
+extern "C" fn runtime_handler_dispatch(
+    effect_ptr: *const u8,
+    op_ptr: *const u8,
+    args_ptr: *const f64,
+    args_len: usize,
+) -> f64 {
+    if effect_ptr.is_null() || op_ptr.is_null() {
+        return f64::NAN;
+    }
+
+    if let Ok(state) = get_jit_effect_state().lock() {
+        let effect = unsafe {
+            std::ffi::CStr::from_ptr(effect_ptr as *const std::ffi::c_char)
+                .to_str()
+                .unwrap_or("")
+        };
+        let op = unsafe {
+            std::ffi::CStr::from_ptr(op_ptr as *const std::ffi::c_char)
+                .to_str()
+                .unwrap_or("")
+        };
+        let args: Vec<f64> = if args_ptr.is_null() || args_len == 0 {
+            Vec::new()
+        } else {
+            unsafe { std::slice::from_raw_parts(args_ptr, args_len).to_vec() }
+        };
+
+        if let Some(value) = state.dispatch_to_handler(effect, op, &args) {
+            value
+        } else {
+            f64::NAN
+        }
+    } else {
+        f64::NAN
+    }
+}
+
+/// Create a continuation object for the current effect operation
+/// Returns: continuation ID (for future resume), or 0 on error
+#[cfg(feature = "jit")]
+extern "C" fn runtime_continuation_create(
+    effect_ptr: *const u8,
+    op_ptr: *const u8,
+    args_ptr: *const f64,
+    args_len: usize,
+) -> i64 {
+    if effect_ptr.is_null() || op_ptr.is_null() {
+        return 0;
+    }
+
+    if let Ok(mut state) = get_jit_effect_state().lock() {
+        let effect = unsafe {
+            std::ffi::CStr::from_ptr(effect_ptr as *const std::ffi::c_char)
+                .to_str()
+                .unwrap_or("")
+                .to_string()
+        };
+        let operation = unsafe {
+            std::ffi::CStr::from_ptr(op_ptr as *const std::ffi::c_char)
+                .to_str()
+                .unwrap_or("")
+                .to_string()
+        };
+        let args: Vec<f64> = if args_ptr.is_null() || args_len == 0 {
+            Vec::new()
+        } else {
+            unsafe { std::slice::from_raw_parts(args_ptr, args_len).to_vec() }
+        };
+
+        state.continuation_data = Some(ContinuationData {
+            effect,
+            operation,
+            args,
+            resumed: false,
+            resume_value: 0.0,
+        });
+
+        1 // Success, continuation ID (we only support one at a time currently)
+    } else {
+        0
+    }
+}
+
+/// Resume the current continuation with a value
+/// continuation_id: ID from runtime_continuation_create
+/// value: value to resume with
+/// Returns: 1 on success, 0 on error
+#[cfg(feature = "jit")]
+extern "C" fn runtime_continuation_resume(continuation_id: i64, value: f64) -> i64 {
+    if continuation_id != 1 {
+        return 0;
+    }
+
+    if let Ok(mut state) = get_jit_effect_state().lock() {
+        if let Some(ref mut cont) = state.continuation_data {
+            cont.resumed = true;
+            cont.resume_value = value;
+            1
+        } else {
+            0
+        }
+    } else {
+        0
+    }
+}
+
+/// Get the resume value from the current continuation
+/// Returns: the resume value, or NaN if no continuation or not resumed
+#[cfg(feature = "jit")]
+extern "C" fn runtime_continuation_get_value() -> f64 {
+    if let Ok(state) = get_jit_effect_state().lock() {
+        if let Some(ref cont) = state.continuation_data {
+            if cont.resumed {
+                cont.resume_value
+            } else {
+                f64::NAN
+            }
+        } else {
+            f64::NAN
+        }
+    } else {
+        f64::NAN
+    }
+}
+
+/// Clear the current continuation
+#[cfg(feature = "jit")]
+extern "C" fn runtime_continuation_clear() {
+    if let Ok(mut state) = get_jit_effect_state().lock() {
+        state.continuation_data = None;
+    }
+}
+
 #[cfg(feature = "jit")]
 use crate::hlir::{
     BinaryOp, BlockId, HlirBlock, HlirConstant, HlirFunction, HlirTerminator, HlirType, Op,
@@ -939,6 +1295,17 @@ impl JitCompiler {
         jit_builder.symbol("runtime_alloc_clear", runtime_alloc_clear as *const u8);
         jit_builder.symbol("runtime_alloc_total", runtime_alloc_total as *const u8);
         jit_builder.symbol("runtime_alloc_count", runtime_alloc_count as *const u8);
+
+        // Register handler stack and continuation runtime functions
+        jit_builder.symbol("runtime_handler_push", runtime_handler_push as *const u8);
+        jit_builder.symbol("runtime_handler_pop", runtime_handler_pop as *const u8);
+        jit_builder.symbol("runtime_handler_depth", runtime_handler_depth as *const u8);
+        jit_builder.symbol("runtime_handler_has", runtime_handler_has as *const u8);
+        jit_builder.symbol("runtime_handler_dispatch", runtime_handler_dispatch as *const u8);
+        jit_builder.symbol("runtime_continuation_create", runtime_continuation_create as *const u8);
+        jit_builder.symbol("runtime_continuation_resume", runtime_continuation_resume as *const u8);
+        jit_builder.symbol("runtime_continuation_get_value", runtime_continuation_get_value as *const u8);
+        jit_builder.symbol("runtime_continuation_clear", runtime_continuation_clear as *const u8);
 
         let jit_module = JITModule::new(jit_builder);
         let ctx = jit_module.make_context();
@@ -1398,6 +1765,113 @@ impl JitCompiler {
             .insert("runtime_alloc_count".to_string(), id);
         self.func_sigs
             .insert("runtime_alloc_count".to_string(), sig_alloc_count);
+
+        // ==================== Handler Stack Functions ====================
+
+        // runtime_handler_push(effect_ptr, name_ptr, handler_id) -> i64
+        let mut sig_handler_push = Signature::new(call_conv);
+        sig_handler_push.params.push(AbiParam::new(types::I64)); // effect_ptr
+        sig_handler_push.params.push(AbiParam::new(types::I64)); // name_ptr
+        sig_handler_push.params.push(AbiParam::new(types::I32)); // handler_id
+        sig_handler_push.returns.push(AbiParam::new(types::I64));
+        let id = self
+            .jit_module
+            .declare_function("runtime_handler_push", Linkage::Import, &sig_handler_push)
+            .map_err(|e| format!("Failed to declare runtime_handler_push: {}", e))?;
+        self.func_ids.insert("runtime_handler_push".to_string(), id);
+        self.func_sigs.insert("runtime_handler_push".to_string(), sig_handler_push);
+
+        // runtime_handler_pop() -> i64
+        let mut sig_handler_pop = Signature::new(call_conv);
+        sig_handler_pop.returns.push(AbiParam::new(types::I64));
+        let id = self
+            .jit_module
+            .declare_function("runtime_handler_pop", Linkage::Import, &sig_handler_pop)
+            .map_err(|e| format!("Failed to declare runtime_handler_pop: {}", e))?;
+        self.func_ids.insert("runtime_handler_pop".to_string(), id);
+        self.func_sigs.insert("runtime_handler_pop".to_string(), sig_handler_pop);
+
+        // runtime_handler_depth() -> i64
+        let mut sig_handler_depth = Signature::new(call_conv);
+        sig_handler_depth.returns.push(AbiParam::new(types::I64));
+        let id = self
+            .jit_module
+            .declare_function("runtime_handler_depth", Linkage::Import, &sig_handler_depth)
+            .map_err(|e| format!("Failed to declare runtime_handler_depth: {}", e))?;
+        self.func_ids.insert("runtime_handler_depth".to_string(), id);
+        self.func_sigs.insert("runtime_handler_depth".to_string(), sig_handler_depth);
+
+        // runtime_handler_has(effect_ptr) -> i64
+        let mut sig_handler_has = Signature::new(call_conv);
+        sig_handler_has.params.push(AbiParam::new(types::I64));
+        sig_handler_has.returns.push(AbiParam::new(types::I64));
+        let id = self
+            .jit_module
+            .declare_function("runtime_handler_has", Linkage::Import, &sig_handler_has)
+            .map_err(|e| format!("Failed to declare runtime_handler_has: {}", e))?;
+        self.func_ids.insert("runtime_handler_has".to_string(), id);
+        self.func_sigs.insert("runtime_handler_has".to_string(), sig_handler_has);
+
+        // runtime_handler_dispatch(effect_ptr, op_ptr, args_ptr, args_len) -> f64
+        let mut sig_handler_dispatch = Signature::new(call_conv);
+        sig_handler_dispatch.params.push(AbiParam::new(types::I64)); // effect_ptr
+        sig_handler_dispatch.params.push(AbiParam::new(types::I64)); // op_ptr
+        sig_handler_dispatch.params.push(AbiParam::new(types::I64)); // args_ptr
+        sig_handler_dispatch.params.push(AbiParam::new(types::I64)); // args_len
+        sig_handler_dispatch.returns.push(AbiParam::new(types::F64));
+        let id = self
+            .jit_module
+            .declare_function("runtime_handler_dispatch", Linkage::Import, &sig_handler_dispatch)
+            .map_err(|e| format!("Failed to declare runtime_handler_dispatch: {}", e))?;
+        self.func_ids.insert("runtime_handler_dispatch".to_string(), id);
+        self.func_sigs.insert("runtime_handler_dispatch".to_string(), sig_handler_dispatch);
+
+        // ==================== Continuation Functions ====================
+
+        // runtime_continuation_create(effect_ptr, op_ptr, args_ptr, args_len) -> i64
+        let mut sig_cont_create = Signature::new(call_conv);
+        sig_cont_create.params.push(AbiParam::new(types::I64));
+        sig_cont_create.params.push(AbiParam::new(types::I64));
+        sig_cont_create.params.push(AbiParam::new(types::I64));
+        sig_cont_create.params.push(AbiParam::new(types::I64));
+        sig_cont_create.returns.push(AbiParam::new(types::I64));
+        let id = self
+            .jit_module
+            .declare_function("runtime_continuation_create", Linkage::Import, &sig_cont_create)
+            .map_err(|e| format!("Failed to declare runtime_continuation_create: {}", e))?;
+        self.func_ids.insert("runtime_continuation_create".to_string(), id);
+        self.func_sigs.insert("runtime_continuation_create".to_string(), sig_cont_create);
+
+        // runtime_continuation_resume(continuation_id, value) -> i64
+        let mut sig_cont_resume = Signature::new(call_conv);
+        sig_cont_resume.params.push(AbiParam::new(types::I64));
+        sig_cont_resume.params.push(AbiParam::new(types::F64));
+        sig_cont_resume.returns.push(AbiParam::new(types::I64));
+        let id = self
+            .jit_module
+            .declare_function("runtime_continuation_resume", Linkage::Import, &sig_cont_resume)
+            .map_err(|e| format!("Failed to declare runtime_continuation_resume: {}", e))?;
+        self.func_ids.insert("runtime_continuation_resume".to_string(), id);
+        self.func_sigs.insert("runtime_continuation_resume".to_string(), sig_cont_resume);
+
+        // runtime_continuation_get_value() -> f64
+        let mut sig_cont_get = Signature::new(call_conv);
+        sig_cont_get.returns.push(AbiParam::new(types::F64));
+        let id = self
+            .jit_module
+            .declare_function("runtime_continuation_get_value", Linkage::Import, &sig_cont_get)
+            .map_err(|e| format!("Failed to declare runtime_continuation_get_value: {}", e))?;
+        self.func_ids.insert("runtime_continuation_get_value".to_string(), id);
+        self.func_sigs.insert("runtime_continuation_get_value".to_string(), sig_cont_get);
+
+        // runtime_continuation_clear() -> void
+        let sig_cont_clear = Signature::new(call_conv);
+        let id = self
+            .jit_module
+            .declare_function("runtime_continuation_clear", Linkage::Import, &sig_cont_clear)
+            .map_err(|e| format!("Failed to declare runtime_continuation_clear: {}", e))?;
+        self.func_ids.insert("runtime_continuation_clear".to_string(), id);
+        self.func_sigs.insert("runtime_continuation_clear".to_string(), sig_cont_clear);
 
         Ok(())
     }
