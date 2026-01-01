@@ -424,23 +424,29 @@ extern "C" fn runtime_math_atan2(y: f64, x: f64) -> f64 {
 
 /// Jacobian computation for forward-mode autodiff
 /// func_ptr: function pointer fn(*mut Dual_array) -> *mut Dual_array
-/// x_ptr: pointer to input f64 array
-/// n: input dimension
+/// x_ptr: pointer to input f64 array with layout: [length: i64, data: f64...]
 /// m: output dimension
+/// n is read automatically from array header at x_ptr[0]
 /// Returns pointer to flattened result matrix (m rows × n cols, row-major)
 #[cfg(feature = "jit")]
 extern "C" fn runtime_jacobian(
     func_ptr: extern "C" fn(i64) -> i64,
-    x_ptr: *const f64,
-    n: i64,
+    x_ptr: *const i64,  // pointer to array with length header
     m: i64,
 ) -> i64 {
-    if x_ptr.is_null() || n <= 0 || m <= 0 {
+    if x_ptr.is_null() || m <= 0 {
         return 0;
     }
 
-    let n = n as usize;
+    // Read n from array header at offset 0
+    let n = unsafe { *x_ptr } as usize;
+    if n == 0 {
+        return 0;
+    }
     let m = m as usize;
+
+    // Data starts after the length header (offset 8 bytes = 1 i64)
+    let data_ptr = unsafe { x_ptr.add(1) } as *const f64;
 
     // Allocate result matrix (m × n)
     let result_size = m * n * std::mem::size_of::<f64>();
@@ -452,8 +458,8 @@ extern "C" fn runtime_jacobian(
         return 0;
     }
 
-    // Read input values
-    let x: Vec<f64> = unsafe { std::slice::from_raw_parts(x_ptr, n).to_vec() };
+    // Read input values from data (after length header)
+    let x: Vec<f64> = unsafe { std::slice::from_raw_parts(data_ptr, n).to_vec() };
 
     // For each input dimension j, compute column j of Jacobian
     for j in 0..n {
@@ -503,21 +509,26 @@ extern "C" fn runtime_jacobian(
 
 /// Hessian computation using finite differences on gradient
 /// func_ptr: function pointer fn(*mut Dual_array) -> Dual (scalar)
-/// x_ptr: pointer to input f64 array
-/// n: input dimension
+/// x_ptr: pointer to input f64 array with layout: [length: i64, data: f64...]
 /// Returns pointer to flattened result matrix (n × n, row-major)
 #[cfg(feature = "jit")]
 extern "C" fn runtime_hessian(
     func_ptr: extern "C" fn(i64) -> i64,
-    x_ptr: *const f64,
-    n: i64,
+    x_ptr: *const i64,  // pointer to array with length header
 ) -> i64 {
-    if x_ptr.is_null() || n <= 0 {
+    if x_ptr.is_null() {
         return 0;
     }
 
-    let n = n as usize;
+    // Read n from array header at offset 0
+    let n = unsafe { *x_ptr } as usize;
+    if n == 0 {
+        return 0;
+    }
     let eps = 1e-7_f64; // Finite difference step
+
+    // Data starts after the length header (offset 8 bytes = 1 i64)
+    let data_ptr = unsafe { x_ptr.add(1) } as *const f64;
 
     // Allocate result matrix (n × n)
     let result_size = n * n * std::mem::size_of::<f64>();
@@ -529,8 +540,8 @@ extern "C" fn runtime_hessian(
         return 0;
     }
 
-    // Read input values
-    let x: Vec<f64> = unsafe { std::slice::from_raw_parts(x_ptr, n).to_vec() };
+    // Read input values from data (after length header)
+    let x: Vec<f64> = unsafe { std::slice::from_raw_parts(data_ptr, n).to_vec() };
 
     // Helper to compute gradient at a point
     let compute_gradient = |point: &[f64]| -> Vec<f64> {
@@ -2049,12 +2060,12 @@ impl JitCompiler {
 
         // ==================== Autodiff Runtime Functions ====================
 
-        // runtime_jacobian(func_ptr: i64, x_ptr: i64, n: i64, m: i64) -> i64
+        // runtime_jacobian(func_ptr: i64, x_ptr: i64, m: i64) -> i64
+        // n is read from array header at x_ptr[0]
         let mut sig_jacobian = Signature::new(call_conv);
         sig_jacobian.params.push(AbiParam::new(types::I64)); // func_ptr
-        sig_jacobian.params.push(AbiParam::new(types::I64)); // x_ptr
-        sig_jacobian.params.push(AbiParam::new(types::I64)); // n
-        sig_jacobian.params.push(AbiParam::new(types::I64)); // m
+        sig_jacobian.params.push(AbiParam::new(types::I64)); // x_ptr (with length header)
+        sig_jacobian.params.push(AbiParam::new(types::I64)); // m (output dimension)
         sig_jacobian.returns.push(AbiParam::new(types::I64)); // result matrix ptr
         let id = self
             .jit_module
@@ -2063,11 +2074,11 @@ impl JitCompiler {
         self.func_ids.insert("runtime_jacobian".to_string(), id);
         self.func_sigs.insert("runtime_jacobian".to_string(), sig_jacobian);
 
-        // runtime_hessian(func_ptr: i64, x_ptr: i64, n: i64) -> i64
+        // runtime_hessian(func_ptr: i64, x_ptr: i64) -> i64
+        // n is read from array header at x_ptr[0]
         let mut sig_hessian = Signature::new(call_conv);
         sig_hessian.params.push(AbiParam::new(types::I64)); // func_ptr
-        sig_hessian.params.push(AbiParam::new(types::I64)); // x_ptr
-        sig_hessian.params.push(AbiParam::new(types::I64)); // n
+        sig_hessian.params.push(AbiParam::new(types::I64)); // x_ptr (with length header)
         sig_hessian.returns.push(AbiParam::new(types::I64)); // result matrix ptr
         let id = self
             .jit_module
@@ -3592,35 +3603,35 @@ fn translate_instruction(
                 return Ok(None);
             }
 
-            // jacobian(f, x, n, m) - compute Jacobian matrix
-            // f: fn([Dual]) -> [Dual], x: [f64], n: input dim, m: output dim
+            // jacobian(f, x, m) - compute Jacobian matrix
+            // f: fn([Dual]) -> [Dual], x: [f64] (with length header), m: output dim
+            // n is read automatically from array header at x[0]
             // Returns pointer to m×n matrix (row-major)
             if name == "jacobian" {
-                if arg_vals.len() >= 4 {
+                if arg_vals.len() >= 3 {
                     let func_ptr = arg_vals[0];
                     let x_ptr = arg_vals[1];
-                    let n = arg_vals[2];
-                    let m = arg_vals[3];
+                    let m = arg_vals[2];
 
                     let jacobian_func = func_refs.get("runtime_jacobian").ok_or("runtime_jacobian not found")?;
-                    let call = builder.ins().call(*jacobian_func, &[func_ptr, x_ptr, n, m]);
+                    let call = builder.ins().call(*jacobian_func, &[func_ptr, x_ptr, m]);
                     let result = builder.inst_results(call)[0];
                     return Ok(Some(result));
                 }
                 return Ok(None);
             }
 
-            // hessian(f, x, n) - compute Hessian matrix
-            // f: fn([Dual]) -> Dual, x: [f64], n: dimension
+            // hessian(f, x) - compute Hessian matrix
+            // f: fn([Dual]) -> Dual, x: [f64] (with length header)
+            // n is read automatically from array header at x[0]
             // Returns pointer to n×n matrix (row-major)
             if name == "hessian" {
-                if arg_vals.len() >= 3 {
+                if arg_vals.len() >= 2 {
                     let func_ptr = arg_vals[0];
                     let x_ptr = arg_vals[1];
-                    let n = arg_vals[2];
 
                     let hessian_func = func_refs.get("runtime_hessian").ok_or("runtime_hessian not found")?;
-                    let call = builder.ins().call(*hessian_func, &[func_ptr, x_ptr, n]);
+                    let call = builder.ins().call(*hessian_func, &[func_ptr, x_ptr]);
                     let result = builder.inst_results(call)[0];
                     return Ok(Some(result));
                 }

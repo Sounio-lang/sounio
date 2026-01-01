@@ -4086,31 +4086,29 @@ impl TypeChecker {
                 return_type: Box::new(HirType::F64),
             },
             // Compute Jacobian of vector function (returns matrix of partial derivatives)
-            // jacobian(f, x, n, m) where f: fn([Dual]) -> [Dual], x: [f64], n: i64, m: i64 -> [[f64]]
-            // n = input dimension, m = output dimension
+            // jacobian(f, x, m) where f: fn([Dual]) -> [Dual], x: [f64], m: i64 -> [[f64]]
+            // n = input dimension (read from array_len(x)), m = output dimension
             "jacobian" => HirType::Fn {
                 params: vec![
                     HirType::Fn {
                         params: vec![HirType::I64], // pointer to Dual array
                         return_type: Box::new(HirType::I64), // pointer to Dual array
                     },
-                    HirType::I64, // pointer to f64 array
-                    HirType::I64, // n: input dimension
+                    HirType::I64, // pointer to f64 array (with length header)
                     HirType::I64, // m: output dimension
                 ],
                 return_type: Box::new(HirType::I64), // pointer to result matrix
             },
             // Compute Hessian (second derivatives) of scalar function
-            // hessian(f, x, n) where f: fn([Dual]) -> Dual, x: [f64], n: i64 -> [[f64]]
-            // n = dimension (result is n×n matrix)
+            // hessian(f, x) where f: fn([Dual]) -> Dual, x: [f64] -> [[f64]]
+            // n = dimension (read from array_len(x), result is n×n matrix)
             "hessian" => HirType::Fn {
                 params: vec![
                     HirType::Fn {
                         params: vec![HirType::I64], // pointer to Dual array
                         return_type: Box::new(HirType::I64), // pointer to Dual
                     },
-                    HirType::I64, // pointer to f64 array
-                    HirType::I64, // n: dimension
+                    HirType::I64, // pointer to f64 array (with length header)
                 ],
                 return_type: Box::new(HirType::I64), // pointer to result matrix
             },
