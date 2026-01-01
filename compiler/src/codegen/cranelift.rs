@@ -422,6 +422,179 @@ extern "C" fn runtime_math_atan2(y: f64, x: f64) -> f64 {
     y.atan2(x)
 }
 
+/// Jacobian computation for forward-mode autodiff
+/// func_ptr: function pointer fn(*mut Dual_array) -> *mut Dual_array
+/// x_ptr: pointer to input f64 array
+/// n: input dimension
+/// m: output dimension
+/// Returns pointer to flattened result matrix (m rows × n cols, row-major)
+#[cfg(feature = "jit")]
+extern "C" fn runtime_jacobian(
+    func_ptr: extern "C" fn(i64) -> i64,
+    x_ptr: *const f64,
+    n: i64,
+    m: i64,
+) -> i64 {
+    if x_ptr.is_null() || n <= 0 || m <= 0 {
+        return 0;
+    }
+
+    let n = n as usize;
+    let m = m as usize;
+
+    // Allocate result matrix (m × n)
+    let result_size = m * n * std::mem::size_of::<f64>();
+    let result_ptr = unsafe {
+        std::alloc::alloc(std::alloc::Layout::from_size_align(result_size, 8).unwrap())
+    } as *mut f64;
+
+    if result_ptr.is_null() {
+        return 0;
+    }
+
+    // Read input values
+    let x: Vec<f64> = unsafe { std::slice::from_raw_parts(x_ptr, n).to_vec() };
+
+    // For each input dimension j, compute column j of Jacobian
+    for j in 0..n {
+        // Create dual input array with seed at position j
+        // Each dual is 16 bytes: [value: f64, derivative: f64]
+        let input_size = n * 16;
+        let input_ptr = unsafe {
+            std::alloc::alloc(std::alloc::Layout::from_size_align(input_size, 8).unwrap())
+        } as *mut f64;
+
+        if input_ptr.is_null() {
+            continue;
+        }
+
+        // Fill input: value = x[i], derivative = 1 if i==j else 0
+        for i in 0..n {
+            unsafe {
+                *input_ptr.add(i * 2) = x[i];           // value
+                *input_ptr.add(i * 2 + 1) = if i == j { 1.0 } else { 0.0 }; // derivative
+            }
+        }
+
+        // Call function
+        let output_ptr = func_ptr(input_ptr as i64) as *const f64;
+
+        // Extract derivatives from output (these form column j)
+        if !output_ptr.is_null() {
+            for i in 0..m {
+                let deriv = unsafe { *output_ptr.add(i * 2 + 1) }; // derivative at position i
+                unsafe {
+                    *result_ptr.add(i * n + j) = deriv; // J[i][j] in row-major
+                }
+            }
+        }
+
+        // Free input
+        unsafe {
+            std::alloc::dealloc(
+                input_ptr as *mut u8,
+                std::alloc::Layout::from_size_align(input_size, 8).unwrap(),
+            );
+        }
+    }
+
+    result_ptr as i64
+}
+
+/// Hessian computation using finite differences on gradient
+/// func_ptr: function pointer fn(*mut Dual_array) -> Dual (scalar)
+/// x_ptr: pointer to input f64 array
+/// n: input dimension
+/// Returns pointer to flattened result matrix (n × n, row-major)
+#[cfg(feature = "jit")]
+extern "C" fn runtime_hessian(
+    func_ptr: extern "C" fn(i64) -> i64,
+    x_ptr: *const f64,
+    n: i64,
+) -> i64 {
+    if x_ptr.is_null() || n <= 0 {
+        return 0;
+    }
+
+    let n = n as usize;
+    let eps = 1e-7_f64; // Finite difference step
+
+    // Allocate result matrix (n × n)
+    let result_size = n * n * std::mem::size_of::<f64>();
+    let result_ptr = unsafe {
+        std::alloc::alloc(std::alloc::Layout::from_size_align(result_size, 8).unwrap())
+    } as *mut f64;
+
+    if result_ptr.is_null() {
+        return 0;
+    }
+
+    // Read input values
+    let x: Vec<f64> = unsafe { std::slice::from_raw_parts(x_ptr, n).to_vec() };
+
+    // Helper to compute gradient at a point
+    let compute_gradient = |point: &[f64]| -> Vec<f64> {
+        let mut grad = vec![0.0; n];
+        for j in 0..n {
+            // Create dual input with seed at j
+            let input_size = n * 16;
+            let input_ptr = unsafe {
+                std::alloc::alloc(std::alloc::Layout::from_size_align(input_size, 8).unwrap())
+            } as *mut f64;
+
+            if input_ptr.is_null() {
+                continue;
+            }
+
+            for i in 0..n {
+                unsafe {
+                    *input_ptr.add(i * 2) = point[i];
+                    *input_ptr.add(i * 2 + 1) = if i == j { 1.0 } else { 0.0 };
+                }
+            }
+
+            // Call function - returns pointer to single Dual
+            let output_ptr = func_ptr(input_ptr as i64) as *const f64;
+            if !output_ptr.is_null() {
+                grad[j] = unsafe { *output_ptr.add(1) }; // derivative
+            }
+
+            unsafe {
+                std::alloc::dealloc(
+                    input_ptr as *mut u8,
+                    std::alloc::Layout::from_size_align(input_size, 8).unwrap(),
+                );
+            }
+        }
+        grad
+    };
+
+    // Compute Hessian using finite differences: H[i][j] ≈ (∂f/∂x_j(x+εe_i) - ∂f/∂x_j(x-εe_i)) / (2ε)
+    let grad_center = compute_gradient(&x);
+
+    for i in 0..n {
+        // x + eps * e_i
+        let mut x_plus = x.clone();
+        x_plus[i] += eps;
+        let grad_plus = compute_gradient(&x_plus);
+
+        // x - eps * e_i
+        let mut x_minus = x.clone();
+        x_minus[i] -= eps;
+        let grad_minus = compute_gradient(&x_minus);
+
+        for j in 0..n {
+            // Central difference
+            let h_ij = (grad_plus[j] - grad_minus[j]) / (2.0 * eps);
+            unsafe {
+                *result_ptr.add(i * n + j) = h_ij;
+            }
+        }
+    }
+
+    result_ptr as i64
+}
+
 /// Do intervention (Causal.do)
 /// Records intervention and returns the intervention value
 #[cfg(feature = "jit")]
@@ -1408,6 +1581,10 @@ impl JitCompiler {
         jit_builder.symbol("runtime_math_log10", runtime_math_log10 as *const u8);
         jit_builder.symbol("runtime_math_atan2", runtime_math_atan2 as *const u8);
 
+        // Register autodiff runtime functions (jacobian, hessian)
+        jit_builder.symbol("runtime_jacobian", runtime_jacobian as *const u8);
+        jit_builder.symbol("runtime_hessian", runtime_hessian as *const u8);
+
         // Register IO effect runtime functions
         jit_builder.symbol("runtime_io_read_line", runtime_io_read_line as *const u8);
         jit_builder.symbol("runtime_io_read_file", runtime_io_read_file as *const u8);
@@ -1869,6 +2046,35 @@ impl JitCompiler {
             .map_err(|e| format!("Failed to declare runtime_math_atan2: {}", e))?;
         self.func_ids.insert("runtime_math_atan2".to_string(), id);
         self.func_sigs.insert("runtime_math_atan2".to_string(), sig_math_atan2);
+
+        // ==================== Autodiff Runtime Functions ====================
+
+        // runtime_jacobian(func_ptr: i64, x_ptr: i64, n: i64, m: i64) -> i64
+        let mut sig_jacobian = Signature::new(call_conv);
+        sig_jacobian.params.push(AbiParam::new(types::I64)); // func_ptr
+        sig_jacobian.params.push(AbiParam::new(types::I64)); // x_ptr
+        sig_jacobian.params.push(AbiParam::new(types::I64)); // n
+        sig_jacobian.params.push(AbiParam::new(types::I64)); // m
+        sig_jacobian.returns.push(AbiParam::new(types::I64)); // result matrix ptr
+        let id = self
+            .jit_module
+            .declare_function("runtime_jacobian", Linkage::Import, &sig_jacobian)
+            .map_err(|e| format!("Failed to declare runtime_jacobian: {}", e))?;
+        self.func_ids.insert("runtime_jacobian".to_string(), id);
+        self.func_sigs.insert("runtime_jacobian".to_string(), sig_jacobian);
+
+        // runtime_hessian(func_ptr: i64, x_ptr: i64, n: i64) -> i64
+        let mut sig_hessian = Signature::new(call_conv);
+        sig_hessian.params.push(AbiParam::new(types::I64)); // func_ptr
+        sig_hessian.params.push(AbiParam::new(types::I64)); // x_ptr
+        sig_hessian.params.push(AbiParam::new(types::I64)); // n
+        sig_hessian.returns.push(AbiParam::new(types::I64)); // result matrix ptr
+        let id = self
+            .jit_module
+            .declare_function("runtime_hessian", Linkage::Import, &sig_hessian)
+            .map_err(|e| format!("Failed to declare runtime_hessian: {}", e))?;
+        self.func_ids.insert("runtime_hessian".to_string(), id);
+        self.func_sigs.insert("runtime_hessian".to_string(), sig_hessian);
 
         // ==================== IO Effect Runtime Functions ====================
 
@@ -3348,6 +3554,75 @@ fn translate_instruction(
                     builder.ins().store(cranelift_codegen::ir::MemFlags::new(), atan2_val, ptr, 0);
                     builder.ins().store(cranelift_codegen::ir::MemFlags::new(), result_der, ptr, 8);
                     return Ok(Some(ptr));
+                }
+                return Ok(None);
+            }
+
+            // grad(f, x) = f'(x) where f: fn(Dual) -> Dual, x: f64
+            // Implementation: create dual(x, 1.0), call f, extract derivative
+            if name == "grad" {
+                if arg_vals.len() >= 2 {
+                    let func_ptr = arg_vals[0];  // fn(Dual) -> Dual
+                    let x_val = arg_vals[1];     // f64 value
+
+                    // Create dual(x, 1.0) on stack
+                    let input_slot = builder.create_sized_stack_slot(
+                        cranelift_codegen::ir::StackSlotData::new(
+                            cranelift_codegen::ir::StackSlotKind::ExplicitSlot, 16, 8,
+                        ),
+                    );
+                    let input_ptr = builder.ins().stack_addr(types::I64, input_slot, 0);
+                    let one = builder.ins().f64const(1.0);
+                    builder.ins().store(cranelift_codegen::ir::MemFlags::new(), x_val, input_ptr, 0);
+                    builder.ins().store(cranelift_codegen::ir::MemFlags::new(), one, input_ptr, 8);
+
+                    // Call f(dual) - signature: fn(Dual*) -> Dual*
+                    let mut sig = Signature::new(cranelift_codegen::isa::CallConv::SystemV);
+                    sig.params.push(AbiParam::new(types::I64));  // Dual* input
+                    sig.returns.push(AbiParam::new(types::I64)); // Dual* output
+
+                    let sig_ref = builder.import_signature(sig);
+                    let call = builder.ins().call_indirect(sig_ref, func_ptr, &[input_ptr]);
+                    let result_ptr = builder.inst_results(call)[0];
+
+                    // Extract derivative (offset 8) from result
+                    let derivative = builder.ins().load(types::F64, cranelift_codegen::ir::MemFlags::new(), result_ptr, 8);
+                    return Ok(Some(derivative));
+                }
+                return Ok(None);
+            }
+
+            // jacobian(f, x, n, m) - compute Jacobian matrix
+            // f: fn([Dual]) -> [Dual], x: [f64], n: input dim, m: output dim
+            // Returns pointer to m×n matrix (row-major)
+            if name == "jacobian" {
+                if arg_vals.len() >= 4 {
+                    let func_ptr = arg_vals[0];
+                    let x_ptr = arg_vals[1];
+                    let n = arg_vals[2];
+                    let m = arg_vals[3];
+
+                    let jacobian_func = func_refs.get("runtime_jacobian").ok_or("runtime_jacobian not found")?;
+                    let call = builder.ins().call(*jacobian_func, &[func_ptr, x_ptr, n, m]);
+                    let result = builder.inst_results(call)[0];
+                    return Ok(Some(result));
+                }
+                return Ok(None);
+            }
+
+            // hessian(f, x, n) - compute Hessian matrix
+            // f: fn([Dual]) -> Dual, x: [f64], n: dimension
+            // Returns pointer to n×n matrix (row-major)
+            if name == "hessian" {
+                if arg_vals.len() >= 3 {
+                    let func_ptr = arg_vals[0];
+                    let x_ptr = arg_vals[1];
+                    let n = arg_vals[2];
+
+                    let hessian_func = func_refs.get("runtime_hessian").ok_or("runtime_hessian not found")?;
+                    let call = builder.ins().call(*hessian_func, &[func_ptr, x_ptr, n]);
+                    let result = builder.inst_results(call)[0];
+                    return Ok(Some(result));
                 }
                 return Ok(None);
             }

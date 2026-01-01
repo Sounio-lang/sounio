@@ -3609,7 +3609,10 @@ impl<'a> Parser<'a> {
             | TokenKind::Mat3
             | TokenKind::Mat4
             | TokenKind::Quat
-            | TokenKind::Dual => {
+            | TokenKind::Dual
+            | TokenKind::Grad
+            | TokenKind::Jacobian
+            | TokenKind::Hessian => {
                 let type_name = self.advance().text.clone();
                 self.expect(TokenKind::LParen)?;
                 let mut args = Vec::new();

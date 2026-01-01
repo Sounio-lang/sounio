@@ -4084,55 +4084,33 @@ impl TypeChecker {
                 return_type: Box::new(HirType::F64),
             },
             // Compute Jacobian of vector function (returns matrix of partial derivatives)
-            // jacobian(f, x) where f: fn(vec) -> vec, x: vec -> mat
+            // jacobian(f, x, n, m) where f: fn([Dual]) -> [Dual], x: [f64], n: i64, m: i64 -> [[f64]]
+            // n = input dimension, m = output dimension
             "jacobian" => HirType::Fn {
                 params: vec![
                     HirType::Fn {
-                        params: vec![HirType::Array {
-                            element: Box::new(HirType::Dual),
-                            size: None,
-                        }],
-                        return_type: Box::new(HirType::Array {
-                            element: Box::new(HirType::Dual),
-                            size: None,
-                        }),
+                        params: vec![HirType::I64], // pointer to Dual array
+                        return_type: Box::new(HirType::I64), // pointer to Dual array
                     },
-                    HirType::Array {
-                        element: Box::new(HirType::F64),
-                        size: None,
-                    },
+                    HirType::I64, // pointer to f64 array
+                    HirType::I64, // n: input dimension
+                    HirType::I64, // m: output dimension
                 ],
-                return_type: Box::new(HirType::Array {
-                    element: Box::new(HirType::Array {
-                        element: Box::new(HirType::F64),
-                        size: None,
-                    }),
-                    size: None,
-                }),
+                return_type: Box::new(HirType::I64), // pointer to result matrix
             },
             // Compute Hessian (second derivatives) of scalar function
-            // hessian(f, x) where f: fn(vec) -> scalar, x: vec -> mat
+            // hessian(f, x, n) where f: fn([Dual]) -> Dual, x: [f64], n: i64 -> [[f64]]
+            // n = dimension (result is n×n matrix)
             "hessian" => HirType::Fn {
                 params: vec![
                     HirType::Fn {
-                        params: vec![HirType::Array {
-                            element: Box::new(HirType::Dual),
-                            size: None,
-                        }],
-                        return_type: Box::new(HirType::Dual),
+                        params: vec![HirType::I64], // pointer to Dual array
+                        return_type: Box::new(HirType::I64), // pointer to Dual
                     },
-                    HirType::Array {
-                        element: Box::new(HirType::F64),
-                        size: None,
-                    },
+                    HirType::I64, // pointer to f64 array
+                    HirType::I64, // n: dimension
                 ],
-                return_type: Box::new(HirType::Array {
-                    element: Box::new(HirType::Array {
-                        element: Box::new(HirType::F64),
-                        size: None,
-                    }),
-                    size: None,
-                }),
+                return_type: Box::new(HirType::I64), // pointer to result matrix
             },
 
             // ==================== FFI / RAW POINTER OPERATIONS ====================
@@ -5040,6 +5018,7 @@ impl TypeChecker {
             (Type::Char, Type::Char) => true,
             (Type::Str, Type::Str) => true,
             (Type::String, Type::String) => true,
+            (Type::Dual, Type::Dual) => true,
             (
                 Type::Ref {
                     mutable: m1,

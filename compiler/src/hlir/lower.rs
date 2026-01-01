@@ -639,6 +639,7 @@ impl<'a> LoweringContext<'a> {
                             | "dual_asin" | "dual_acos" | "dual_sinh" | "dual_cosh"
                             | "dual_tanh" | "dual_asinh" | "dual_acosh" | "dual_atanh"
                             | "dual_log2" | "dual_log10" | "dual_atan2"
+                            | "grad" | "jacobian" | "hessian"
                     ) {
                         return Some(self.builder.build_call(name, arg_vals, ty));
                     }
