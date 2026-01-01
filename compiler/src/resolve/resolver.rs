@@ -78,29 +78,62 @@ impl Resolver {
 
     /// Register compiler builtin functions
     fn register_builtins(&mut self) {
-        // Slice construction intrinsic - used by FFI code (immutable)
-        let def_id = self.symbols.fresh_def_id();
-        let _ = self.symbols.define("__builtin_slice_from_raw_parts".to_string(), def_id);
-        self.symbols.insert(Symbol {
-            def_id,
-            name: "__builtin_slice_from_raw_parts".to_string(),
-            kind: DefKind::Function,
-            node_id: NodeId(0),
-            span: Span::default(),
-            parent: None,
-        });
+        let builtins = [
+            // Slice construction intrinsics
+            "__builtin_slice_from_raw_parts",
+            "__builtin_slice_from_raw_parts_mut",
+            // I/O builtins
+            "print", "println", "dbg", "panic", "assert", "assert_eq",
+            "read_line", "format", "to_string",
+            // Type introspection
+            "len", "type_of", "parse_int", "parse_float",
+            // Math builtins
+            "sqrt", "abs", "sin", "cos", "tan", "exp", "log", "pow",
+            "floor", "ceil", "round", "min", "max",
+            // Linear algebra
+            "vec2", "vec3", "vec4", "mat2", "mat3", "mat4", "quat",
+            "dot", "cross", "normalize", "length", "length_squared",
+            "quat_mul", "quat_conj", "quat_inv", "quat_normalize", "quat_identity",
+            "mat_mul", "transpose", "inverse", "determinant",
+            "lerp", "slerp",
+            "quat_to_euler", "euler_to_quat", "quat_to_mat3", "quat_to_mat4", "mat3_to_quat",
+            "hamilton_product", "quat_rotate_vec", "quat_score", "quat_embed_init",
+            "quat_normalize_embed", "quat_inner_product",
+            // Dual number operations (forward-mode autodiff)
+            "dual", "dual_value", "dual_deriv",
+            "dual_add", "dual_sub", "dual_mul", "dual_div",
+            "dual_sin", "dual_cos", "dual_exp", "dual_log", "dual_sqrt", "dual_pow",
+            "dual_tan", "dual_atan", "dual_abs",
+            "dual_asin", "dual_acos", "dual_sinh", "dual_cosh", "dual_tanh",
+            "dual_asinh", "dual_acosh", "dual_atanh",
+            "dual_log2", "dual_log10", "dual_atan2",
+            // Autodiff higher-order functions
+            "grad", "jacobian", "hessian",
+            // Array operations
+            "array_len", "array_ptr",
+            // Pointer operations
+            "ptr_load_f64", "ptr_store_f64",
+            // FFI / Raw pointer operations
+            "null_ptr", "null_mut", "is_null", "ptr_eq", "ptr_addr",
+            "ptr_from_addr", "ptr_from_addr_mut",
+            "ptr_offset", "ptr_add", "ptr_sub", "ptr_diff",
+            "as_const", "as_mut", "size_of", "align_of",
+            // Option/Result constructors
+            "Some", "None", "Ok", "Err",
+        ];
 
-        // Slice construction intrinsic - mutable variant
-        let def_id_mut = self.symbols.fresh_def_id();
-        let _ = self.symbols.define("__builtin_slice_from_raw_parts_mut".to_string(), def_id_mut);
-        self.symbols.insert(Symbol {
-            def_id: def_id_mut,
-            name: "__builtin_slice_from_raw_parts_mut".to_string(),
-            kind: DefKind::Function,
-            node_id: NodeId(0),
-            span: Span::default(),
-            parent: None,
-        });
+        for name in builtins {
+            let def_id = self.symbols.fresh_def_id();
+            let _ = self.symbols.define(name.to_string(), def_id);
+            self.symbols.insert(Symbol {
+                def_id,
+                name: name.to_string(),
+                kind: DefKind::Function,
+                node_id: NodeId(0),
+                span: Span::default(),
+                parent: None,
+            });
+        }
     }
 
     /// Resolve all names in the AST

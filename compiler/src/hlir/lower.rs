@@ -641,6 +641,7 @@ impl<'a> LoweringContext<'a> {
                             | "dual_log2" | "dual_log10" | "dual_atan2"
                             | "grad" | "jacobian" | "hessian"
                             | "array_len" | "array_ptr"
+                            | "ptr_load_f64" | "ptr_store_f64"
                     ) {
                         return Some(self.builder.build_call(name, arg_vals, ty));
                     }

@@ -3749,6 +3749,8 @@ impl TypeChecker {
                 | "hessian"
                 | "array_len"
                 | "array_ptr"
+                | "ptr_load_f64"
+                | "ptr_store_f64"
                 // FFI / Raw pointer operations
                 | "null_ptr"
                 | "null_mut"
@@ -3965,113 +3967,114 @@ impl TypeChecker {
                 params: vec![HirType::F64, HirType::F64],
                 return_type: Box::new(HirType::Dual),
             },
-            // Extract value component from dual number
+            // Extract value component from dual number (pointer to 16-byte struct)
             "dual_value" => HirType::Fn {
-                params: vec![HirType::Dual],
+                params: vec![HirType::I64],
                 return_type: Box::new(HirType::F64),
             },
-            // Extract derivative component from dual number
+            // Extract derivative component from dual number (pointer to 16-byte struct)
             "dual_deriv" => HirType::Fn {
-                params: vec![HirType::Dual],
+                params: vec![HirType::I64],
                 return_type: Box::new(HirType::F64),
             },
             // Dual number arithmetic (forward-mode autodiff)
+            // These operate on i64 pointers to 16-byte dual structs [value: f64, deriv: f64]
             "dual_add" => HirType::Fn {
-                params: vec![HirType::Dual, HirType::Dual],
-                return_type: Box::new(HirType::Dual),
+                params: vec![HirType::I64, HirType::I64],
+                return_type: Box::new(HirType::I64),
             },
             "dual_sub" => HirType::Fn {
-                params: vec![HirType::Dual, HirType::Dual],
-                return_type: Box::new(HirType::Dual),
+                params: vec![HirType::I64, HirType::I64],
+                return_type: Box::new(HirType::I64),
             },
             "dual_mul" => HirType::Fn {
-                params: vec![HirType::Dual, HirType::Dual],
-                return_type: Box::new(HirType::Dual),
+                params: vec![HirType::I64, HirType::I64],
+                return_type: Box::new(HirType::I64),
             },
             "dual_div" => HirType::Fn {
-                params: vec![HirType::Dual, HirType::Dual],
-                return_type: Box::new(HirType::Dual),
+                params: vec![HirType::I64, HirType::I64],
+                return_type: Box::new(HirType::I64),
             },
             // Dual transcendental functions (chain rule)
             "dual_sin" => HirType::Fn {
-                params: vec![HirType::Dual],
-                return_type: Box::new(HirType::Dual),
+                params: vec![HirType::I64],
+                return_type: Box::new(HirType::I64),
             },
             "dual_cos" => HirType::Fn {
-                params: vec![HirType::Dual],
-                return_type: Box::new(HirType::Dual),
+                params: vec![HirType::I64],
+                return_type: Box::new(HirType::I64),
             },
             "dual_exp" => HirType::Fn {
-                params: vec![HirType::Dual],
-                return_type: Box::new(HirType::Dual),
+                params: vec![HirType::I64],
+                return_type: Box::new(HirType::I64),
             },
             "dual_log" => HirType::Fn {
-                params: vec![HirType::Dual],
-                return_type: Box::new(HirType::Dual),
+                params: vec![HirType::I64],
+                return_type: Box::new(HirType::I64),
             },
             "dual_sqrt" => HirType::Fn {
-                params: vec![HirType::Dual],
-                return_type: Box::new(HirType::Dual),
+                params: vec![HirType::I64],
+                return_type: Box::new(HirType::I64),
             },
             "dual_pow" => HirType::Fn {
-                params: vec![HirType::Dual, HirType::F64],
-                return_type: Box::new(HirType::Dual),
+                params: vec![HirType::I64, HirType::F64],
+                return_type: Box::new(HirType::I64),
             },
             "dual_tan" => HirType::Fn {
-                params: vec![HirType::Dual],
-                return_type: Box::new(HirType::Dual),
+                params: vec![HirType::I64],
+                return_type: Box::new(HirType::I64),
             },
             "dual_atan" => HirType::Fn {
-                params: vec![HirType::Dual],
-                return_type: Box::new(HirType::Dual),
+                params: vec![HirType::I64],
+                return_type: Box::new(HirType::I64),
             },
             "dual_abs" => HirType::Fn {
-                params: vec![HirType::Dual],
-                return_type: Box::new(HirType::Dual),
+                params: vec![HirType::I64],
+                return_type: Box::new(HirType::I64),
             },
             "dual_asin" => HirType::Fn {
-                params: vec![HirType::Dual],
-                return_type: Box::new(HirType::Dual),
+                params: vec![HirType::I64],
+                return_type: Box::new(HirType::I64),
             },
             "dual_acos" => HirType::Fn {
-                params: vec![HirType::Dual],
-                return_type: Box::new(HirType::Dual),
+                params: vec![HirType::I64],
+                return_type: Box::new(HirType::I64),
             },
             "dual_sinh" => HirType::Fn {
-                params: vec![HirType::Dual],
-                return_type: Box::new(HirType::Dual),
+                params: vec![HirType::I64],
+                return_type: Box::new(HirType::I64),
             },
             "dual_cosh" => HirType::Fn {
-                params: vec![HirType::Dual],
-                return_type: Box::new(HirType::Dual),
+                params: vec![HirType::I64],
+                return_type: Box::new(HirType::I64),
             },
             "dual_tanh" => HirType::Fn {
-                params: vec![HirType::Dual],
-                return_type: Box::new(HirType::Dual),
+                params: vec![HirType::I64],
+                return_type: Box::new(HirType::I64),
             },
             "dual_asinh" => HirType::Fn {
-                params: vec![HirType::Dual],
-                return_type: Box::new(HirType::Dual),
+                params: vec![HirType::I64],
+                return_type: Box::new(HirType::I64),
             },
             "dual_acosh" => HirType::Fn {
-                params: vec![HirType::Dual],
-                return_type: Box::new(HirType::Dual),
+                params: vec![HirType::I64],
+                return_type: Box::new(HirType::I64),
             },
             "dual_atanh" => HirType::Fn {
-                params: vec![HirType::Dual],
-                return_type: Box::new(HirType::Dual),
+                params: vec![HirType::I64],
+                return_type: Box::new(HirType::I64),
             },
             "dual_log2" => HirType::Fn {
-                params: vec![HirType::Dual],
-                return_type: Box::new(HirType::Dual),
+                params: vec![HirType::I64],
+                return_type: Box::new(HirType::I64),
             },
             "dual_log10" => HirType::Fn {
-                params: vec![HirType::Dual],
-                return_type: Box::new(HirType::Dual),
+                params: vec![HirType::I64],
+                return_type: Box::new(HirType::I64),
             },
             "dual_atan2" => HirType::Fn {
-                params: vec![HirType::Dual, HirType::Dual],
-                return_type: Box::new(HirType::Dual),
+                params: vec![HirType::I64, HirType::I64],
+                return_type: Box::new(HirType::I64),
             },
             // Compute gradient of a function at a point
             // grad(f, x) where f: fn(f64) -> f64, x: f64 -> f64
@@ -4121,6 +4124,16 @@ impl TypeChecker {
             "array_ptr" => HirType::Fn {
                 params: vec![HirType::I64], // array pointer
                 return_type: Box::new(HirType::I64), // data pointer (offset 8)
+            },
+            // Load f64 from memory address
+            "ptr_load_f64" => HirType::Fn {
+                params: vec![HirType::I64], // memory address
+                return_type: Box::new(HirType::F64),
+            },
+            // Store f64 to memory address
+            "ptr_store_f64" => HirType::Fn {
+                params: vec![HirType::I64, HirType::F64], // address, value
+                return_type: Box::new(HirType::Unit),
             },
 
             // ==================== FFI / RAW POINTER OPERATIONS ====================

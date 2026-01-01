@@ -3662,6 +3662,27 @@ fn translate_instruction(
                 return Ok(None);
             }
 
+            // ptr_load_f64(addr) - load f64 from memory address
+            if name == "ptr_load_f64" {
+                if !arg_vals.is_empty() {
+                    let addr = arg_vals[0];
+                    let val = builder.ins().load(types::F64, MemFlags::new(), addr, 0);
+                    return Ok(Some(val));
+                }
+                return Ok(None);
+            }
+
+            // ptr_store_f64(addr, value) - store f64 to memory address
+            if name == "ptr_store_f64" {
+                if arg_vals.len() >= 2 {
+                    let addr = arg_vals[0];
+                    let val = arg_vals[1];
+                    builder.ins().store(MemFlags::new(), val, addr, 0);
+                    return Ok(None);
+                }
+                return Ok(None);
+            }
+
             if let Some(&func_ref) = func_refs.get(name) {
                 let call = builder.ins().call(func_ref, &arg_vals);
                 let results = builder.inst_results(call);
