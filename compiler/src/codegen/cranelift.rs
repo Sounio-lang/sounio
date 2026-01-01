@@ -84,6 +84,33 @@ extern "C" fn runtime_debug_test() -> i64 {
 #[cfg(feature = "jit")]
 type HandlerFn = extern "C" fn(*const u8, *const u8, *const f64, usize) -> f64;
 
+// ==================== Predefined Handler IDs ====================
+// Handler IDs are organized by effect type in ranges of 10
+
+// Prob effect handlers (10-19)
+#[cfg(feature = "jit")]
+const HANDLER_PROB_DETERMINISTIC: u32 = 10; // Returns distribution parameter
+#[cfg(feature = "jit")]
+const HANDLER_PROB_IMPORTANCE: u32 = 11; // Importance sampling
+#[cfg(feature = "jit")]
+const HANDLER_PROB_ENUMERATE: u32 = 12; // Enumeration for discrete
+
+// Causal effect handlers (20-29)
+#[cfg(feature = "jit")]
+const HANDLER_CAUSAL_SCM: u32 = 20; // Structural causal model
+#[cfg(feature = "jit")]
+const HANDLER_CAUSAL_BACKDOOR: u32 = 21; // Backdoor adjustment
+#[cfg(feature = "jit")]
+const HANDLER_CAUSAL_FRONTDOOR: u32 = 22; // Front-door formula
+
+// Grad effect handlers (30-39)
+#[cfg(feature = "jit")]
+const HANDLER_GRAD_FORWARD: u32 = 30; // Forward-mode autodiff
+#[cfg(feature = "jit")]
+const HANDLER_GRAD_REVERSE: u32 = 31; // Reverse-mode autodiff
+#[cfg(feature = "jit")]
+const HANDLER_GRAD_NUMERIC: u32 = 32; // Finite differences
+
 /// A registered effect handler
 #[cfg(feature = "jit")]
 #[derive(Clone)]
@@ -242,8 +269,205 @@ impl JitEffectState {
                     None
                 }
             }
+            // Prob effect handlers (10-19)
+            10..=19 => dispatch_prob_effect(handler_id, op, args),
+            // Causal effect handlers (20-29)
+            20..=29 => dispatch_causal_effect(handler_id, op, args),
+            // Grad effect handlers (30-39)
+            30..=39 => dispatch_grad_effect(handler_id, op, args),
             _ => None,
         }
+    }
+}
+
+// ==================== Prob Effect Dispatch ====================
+/// Dispatch Prob effect operations (sample, observe, factor)
+#[cfg(feature = "jit")]
+fn dispatch_prob_effect(handler_id: u32, op: &str, args: &[f64]) -> Option<f64> {
+    match handler_id {
+        // Deterministic sampler - returns distribution parameter
+        HANDLER_PROB_DETERMINISTIC => {
+            match op {
+                "sample" => Some(args.first().copied().unwrap_or(0.5)),
+                _ if op.starts_with("observe_") => Some(0.0), // No log-likelihood contribution
+                "factor" | "score" => Some(args.first().copied().unwrap_or(0.0)),
+                _ => None,
+            }
+        }
+        // Importance sampling handler
+        HANDLER_PROB_IMPORTANCE => {
+            match op {
+                "sample" => {
+                    // Return proposal value (first arg)
+                    Some(args.first().copied().unwrap_or(0.5))
+                }
+                _ if op.starts_with("observe_") => {
+                    // Compute log-likelihood: log(N(value; 0, 1)) = -0.5 * value^2
+                    let value = args.first().copied().unwrap_or(0.0);
+                    Some(-0.5 * value * value)
+                }
+                "factor" | "score" => Some(args.first().copied().unwrap_or(0.0)),
+                _ => None,
+            }
+        }
+        // Enumeration handler for discrete distributions
+        HANDLER_PROB_ENUMERATE => {
+            match op {
+                "sample" => {
+                    // Return first support point (first arg)
+                    Some(args.first().copied().unwrap_or(0.0))
+                }
+                _ if op.starts_with("observe_") => Some(0.0),
+                _ => None,
+            }
+        }
+        _ => None,
+    }
+}
+
+// ==================== Causal Effect Dispatch ====================
+/// Dispatch Causal effect operations (do, counterfactual, query, etc.)
+#[cfg(feature = "jit")]
+fn dispatch_causal_effect(handler_id: u32, op: &str, args: &[f64]) -> Option<f64> {
+    // Common causal operations regardless of handler
+    let result = match op {
+        // Do intervention: do(X = value) returns the intervention value
+        _ if op.starts_with("do_") => {
+            Some(args.first().copied().unwrap_or(0.0))
+        }
+        // Counterfactual: counterfactual(factual, intervention, outcome)
+        // Default: outcome + intervention - factual (linear approximation)
+        "counterfactual" => {
+            let factual = args.first().copied().unwrap_or(0.0);
+            let intervention = args.get(1).copied().unwrap_or(0.0);
+            let outcome = args.get(2).copied().unwrap_or(0.0);
+            Some(outcome + intervention - factual)
+        }
+        // Query: returns target value (placeholder for do-calculus)
+        "query" => Some(args.first().copied().unwrap_or(0.0)),
+        // Average treatment effect
+        "ate" => {
+            // ATE = E[Y(1)] - E[Y(0)]
+            let treated = args.first().copied().unwrap_or(0.0);
+            let control = args.get(1).copied().unwrap_or(0.0);
+            Some(treated - control)
+        }
+        // Conditional average treatment effect
+        "cate" => {
+            let treated = args.first().copied().unwrap_or(0.0);
+            let control = args.get(1).copied().unwrap_or(0.0);
+            Some(treated - control)
+        }
+        // Difference-in-differences: (post_treat - pre_treat) - (post_ctrl - pre_ctrl)
+        "did" => {
+            let post_treat = args.first().copied().unwrap_or(0.0);
+            let pre_treat = args.get(1).copied().unwrap_or(0.0);
+            let post_ctrl = args.get(2).copied().unwrap_or(0.0);
+            let pre_ctrl = args.get(3).copied().unwrap_or(0.0);
+            Some((post_treat - pre_treat) - (post_ctrl - pre_ctrl))
+        }
+        // Instrumental variable estimation
+        "iv" => {
+            // IV = Cov(Y, Z) / Cov(X, Z)
+            // Simplified: return ratio of first two args
+            let cov_yz = args.first().copied().unwrap_or(0.0);
+            let cov_xz = args.get(1).copied().unwrap_or(1.0);
+            if cov_xz.abs() > 1e-10 {
+                Some(cov_yz / cov_xz)
+            } else {
+                Some(0.0)
+            }
+        }
+        // Regression discontinuity design
+        "rdd" => {
+            // RDD: returns treatment effect at cutoff
+            Some(args.first().copied().unwrap_or(0.0))
+        }
+        _ => None,
+    };
+
+    // Handler-specific behavior (can override defaults)
+    match handler_id {
+        HANDLER_CAUSAL_SCM => result, // SCM uses default behavior
+        HANDLER_CAUSAL_BACKDOOR => {
+            // Backdoor adjustment - same as default for now
+            result
+        }
+        HANDLER_CAUSAL_FRONTDOOR => {
+            // Front-door formula - same as default for now
+            result
+        }
+        _ => result,
+    }
+}
+
+// ==================== Grad Effect Dispatch ====================
+/// Dispatch Grad effect operations (grad, jacobian, hessian, jvp, vjp)
+#[cfg(feature = "jit")]
+fn dispatch_grad_effect(handler_id: u32, op: &str, args: &[f64]) -> Option<f64> {
+    match handler_id {
+        // Forward-mode autodiff (dual numbers)
+        HANDLER_GRAD_FORWARD => {
+            match op {
+                "grad" | "jacobian" | "hessian" => {
+                    // Forward-mode is the default - let it pass through to builtins
+                    None
+                }
+                "jvp" => {
+                    // Jacobian-vector product: J * v
+                    // args: [f_ptr, x_ptr, v_ptr]
+                    // For now, return placeholder
+                    Some(args.first().copied().unwrap_or(0.0))
+                }
+                "vjp" => {
+                    // Vector-Jacobian product: v^T * J (reverse mode preferred)
+                    // Forward mode can still compute it, just less efficiently
+                    Some(args.first().copied().unwrap_or(0.0))
+                }
+                "forward" => Some(1.0), // Signal forward mode is active
+                "reverse" => Some(0.0), // Not using reverse mode
+                _ => None,
+            }
+        }
+        // Reverse-mode autodiff (backpropagation)
+        HANDLER_GRAD_REVERSE => {
+            match op {
+                "grad" | "jacobian" | "hessian" => {
+                    // Reverse mode - let it pass through (future: tape-based impl)
+                    None
+                }
+                "vjp" => {
+                    // VJP is efficient in reverse mode
+                    Some(args.first().copied().unwrap_or(0.0))
+                }
+                "jvp" => {
+                    // JVP can be computed but less efficiently
+                    Some(args.first().copied().unwrap_or(0.0))
+                }
+                "forward" => Some(0.0), // Not using forward mode
+                "reverse" => Some(1.0), // Signal reverse mode is active
+                _ => None,
+            }
+        }
+        // Numeric differentiation (finite differences)
+        HANDLER_GRAD_NUMERIC => {
+            match op {
+                "grad" => {
+                    // Numeric gradient via finite differences
+                    // args: [f_ptr, x, epsilon]
+                    // Placeholder - actual implementation would evaluate f(x+h) - f(x-h) / 2h
+                    Some(args.get(2).copied().unwrap_or(1e-7))
+                }
+                "jacobian" | "hessian" => {
+                    // Numeric approximation
+                    Some(0.0)
+                }
+                "forward" | "reverse" => Some(0.0), // Neither - using numeric
+                "numeric" => Some(1.0), // Signal numeric mode is active
+                _ => None,
+            }
+        }
+        _ => None,
     }
 }
 
