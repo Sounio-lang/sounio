@@ -3627,6 +3627,30 @@ fn translate_instruction(
                 return Ok(None);
             }
 
+            // array_len(arr) - get length of array from header
+            // Arrays have layout: [length: i64, data...]
+            if name == "array_len" {
+                if !arg_vals.is_empty() {
+                    let arr_ptr = arg_vals[0];
+                    // Length is stored at offset 0
+                    let len = builder.ins().load(types::I64, cranelift_codegen::ir::MemFlags::new(), arr_ptr, 0);
+                    return Ok(Some(len));
+                }
+                return Ok(None);
+            }
+
+            // array_ptr(arr) - get pointer to array data (skip length header)
+            // Returns pointer to first element (offset 8 from array start)
+            if name == "array_ptr" {
+                if !arg_vals.is_empty() {
+                    let arr_ptr = arg_vals[0];
+                    // Data starts at offset 8 (after length header)
+                    let data_ptr = builder.ins().iadd_imm(arr_ptr, 8);
+                    return Ok(Some(data_ptr));
+                }
+                return Ok(None);
+            }
+
             if let Some(&func_ref) = func_refs.get(name) {
                 let call = builder.ins().call(func_ref, &arg_vals);
                 let results = builder.inst_results(call);
@@ -3786,8 +3810,8 @@ fn translate_instruction(
             Ok(Some(base_val))
         }
 
-        Op::Tuple(vals) | Op::Array(vals) => {
-            // Allocate space and store values
+        Op::Tuple(vals) => {
+            // Tuples: no length header, just store values
             let size = (vals.len() * 8) as u32;
             let slot = builder.create_sized_stack_slot(cranelift_codegen::ir::StackSlotData::new(
                 cranelift_codegen::ir::StackSlotKind::ExplicitSlot,
@@ -3799,6 +3823,31 @@ fn translate_instruction(
             for (i, v) in vals.iter().enumerate() {
                 let val = get_value(values, *v)?;
                 let offset = (i * 8) as i32;
+                builder.ins().store(MemFlags::new(), val, base, offset);
+            }
+
+            Ok(Some(base))
+        }
+
+        Op::Array(vals) => {
+            // Arrays: include length header at offset 0, data starts at offset 8
+            // Layout: [length: i64, elem0, elem1, ...]
+            let size = (vals.len() * 8 + 8) as u32; // +8 for length header
+            let slot = builder.create_sized_stack_slot(cranelift_codegen::ir::StackSlotData::new(
+                cranelift_codegen::ir::StackSlotKind::ExplicitSlot,
+                size,
+                8, // align to 8 bytes
+            ));
+            let base = builder.ins().stack_addr(types::I64, slot, 0);
+
+            // Store length at offset 0
+            let len_val = builder.ins().iconst(types::I64, vals.len() as i64);
+            builder.ins().store(MemFlags::new(), len_val, base, 0);
+
+            // Store elements starting at offset 8
+            for (i, v) in vals.iter().enumerate() {
+                let val = get_value(values, *v)?;
+                let offset = (i * 8 + 8) as i32; // +8 to skip length header
                 builder.ins().store(MemFlags::new(), val, base, offset);
             }
 

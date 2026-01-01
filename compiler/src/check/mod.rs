@@ -3747,6 +3747,8 @@ impl TypeChecker {
                 | "grad"
                 | "jacobian"
                 | "hessian"
+                | "array_len"
+                | "array_ptr"
                 // FFI / Raw pointer operations
                 | "null_ptr"
                 | "null_mut"
@@ -4111,6 +4113,16 @@ impl TypeChecker {
                     HirType::I64, // n: dimension
                 ],
                 return_type: Box::new(HirType::I64), // pointer to result matrix
+            },
+            // Get length of array (stored in header at offset 0)
+            "array_len" => HirType::Fn {
+                params: vec![HirType::I64], // array pointer
+                return_type: Box::new(HirType::I64), // length
+            },
+            // Get pointer to array data (skipping length header)
+            "array_ptr" => HirType::Fn {
+                params: vec![HirType::I64], // array pointer
+                return_type: Box::new(HirType::I64), // data pointer (offset 8)
             },
 
             // ==================== FFI / RAW POINTER OPERATIONS ====================
