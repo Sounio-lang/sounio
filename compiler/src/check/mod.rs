@@ -3720,6 +3720,30 @@ impl TypeChecker {
                 | "dual"
                 | "dual_value"
                 | "dual_deriv"
+                | "dual_add"
+                | "dual_sub"
+                | "dual_mul"
+                | "dual_div"
+                | "dual_sin"
+                | "dual_cos"
+                | "dual_exp"
+                | "dual_log"
+                | "dual_sqrt"
+                | "dual_pow"
+                | "dual_tan"
+                | "dual_atan"
+                | "dual_abs"
+                | "dual_asin"
+                | "dual_acos"
+                | "dual_sinh"
+                | "dual_cosh"
+                | "dual_tanh"
+                | "dual_asinh"
+                | "dual_acosh"
+                | "dual_atanh"
+                | "dual_log2"
+                | "dual_log10"
+                | "dual_atan2"
                 | "grad"
                 | "jacobian"
                 | "hessian"
@@ -3948,6 +3972,104 @@ impl TypeChecker {
             "dual_deriv" => HirType::Fn {
                 params: vec![HirType::Dual],
                 return_type: Box::new(HirType::F64),
+            },
+            // Dual number arithmetic (forward-mode autodiff)
+            "dual_add" => HirType::Fn {
+                params: vec![HirType::Dual, HirType::Dual],
+                return_type: Box::new(HirType::Dual),
+            },
+            "dual_sub" => HirType::Fn {
+                params: vec![HirType::Dual, HirType::Dual],
+                return_type: Box::new(HirType::Dual),
+            },
+            "dual_mul" => HirType::Fn {
+                params: vec![HirType::Dual, HirType::Dual],
+                return_type: Box::new(HirType::Dual),
+            },
+            "dual_div" => HirType::Fn {
+                params: vec![HirType::Dual, HirType::Dual],
+                return_type: Box::new(HirType::Dual),
+            },
+            // Dual transcendental functions (chain rule)
+            "dual_sin" => HirType::Fn {
+                params: vec![HirType::Dual],
+                return_type: Box::new(HirType::Dual),
+            },
+            "dual_cos" => HirType::Fn {
+                params: vec![HirType::Dual],
+                return_type: Box::new(HirType::Dual),
+            },
+            "dual_exp" => HirType::Fn {
+                params: vec![HirType::Dual],
+                return_type: Box::new(HirType::Dual),
+            },
+            "dual_log" => HirType::Fn {
+                params: vec![HirType::Dual],
+                return_type: Box::new(HirType::Dual),
+            },
+            "dual_sqrt" => HirType::Fn {
+                params: vec![HirType::Dual],
+                return_type: Box::new(HirType::Dual),
+            },
+            "dual_pow" => HirType::Fn {
+                params: vec![HirType::Dual, HirType::F64],
+                return_type: Box::new(HirType::Dual),
+            },
+            "dual_tan" => HirType::Fn {
+                params: vec![HirType::Dual],
+                return_type: Box::new(HirType::Dual),
+            },
+            "dual_atan" => HirType::Fn {
+                params: vec![HirType::Dual],
+                return_type: Box::new(HirType::Dual),
+            },
+            "dual_abs" => HirType::Fn {
+                params: vec![HirType::Dual],
+                return_type: Box::new(HirType::Dual),
+            },
+            "dual_asin" => HirType::Fn {
+                params: vec![HirType::Dual],
+                return_type: Box::new(HirType::Dual),
+            },
+            "dual_acos" => HirType::Fn {
+                params: vec![HirType::Dual],
+                return_type: Box::new(HirType::Dual),
+            },
+            "dual_sinh" => HirType::Fn {
+                params: vec![HirType::Dual],
+                return_type: Box::new(HirType::Dual),
+            },
+            "dual_cosh" => HirType::Fn {
+                params: vec![HirType::Dual],
+                return_type: Box::new(HirType::Dual),
+            },
+            "dual_tanh" => HirType::Fn {
+                params: vec![HirType::Dual],
+                return_type: Box::new(HirType::Dual),
+            },
+            "dual_asinh" => HirType::Fn {
+                params: vec![HirType::Dual],
+                return_type: Box::new(HirType::Dual),
+            },
+            "dual_acosh" => HirType::Fn {
+                params: vec![HirType::Dual],
+                return_type: Box::new(HirType::Dual),
+            },
+            "dual_atanh" => HirType::Fn {
+                params: vec![HirType::Dual],
+                return_type: Box::new(HirType::Dual),
+            },
+            "dual_log2" => HirType::Fn {
+                params: vec![HirType::Dual],
+                return_type: Box::new(HirType::Dual),
+            },
+            "dual_log10" => HirType::Fn {
+                params: vec![HirType::Dual],
+                return_type: Box::new(HirType::Dual),
+            },
+            "dual_atan2" => HirType::Fn {
+                params: vec![HirType::Dual, HirType::Dual],
+                return_type: Box::new(HirType::Dual),
             },
             // Compute gradient of a function at a point
             // grad(f, x) where f: fn(f64) -> f64, x: f64 -> f64

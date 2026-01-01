@@ -306,6 +306,122 @@ extern "C" fn runtime_prob_observe(mean: f64, std: f64, observed: f64) -> f64 {
     }
 }
 
+// ==================== MATH RUNTIME FUNCTIONS ====================
+
+/// Compute sine of a value
+#[cfg(feature = "jit")]
+extern "C" fn runtime_math_sin(x: f64) -> f64 {
+    x.sin()
+}
+
+/// Compute cosine of a value
+#[cfg(feature = "jit")]
+extern "C" fn runtime_math_cos(x: f64) -> f64 {
+    x.cos()
+}
+
+/// Compute exponential (e^x) of a value
+#[cfg(feature = "jit")]
+extern "C" fn runtime_math_exp(x: f64) -> f64 {
+    x.exp()
+}
+
+/// Compute natural logarithm of a value
+#[cfg(feature = "jit")]
+extern "C" fn runtime_math_log(x: f64) -> f64 {
+    x.ln()
+}
+
+/// Compute square root of a value
+#[cfg(feature = "jit")]
+extern "C" fn runtime_math_sqrt(x: f64) -> f64 {
+    x.sqrt()
+}
+
+/// Compute tangent of a value
+#[cfg(feature = "jit")]
+extern "C" fn runtime_math_tan(x: f64) -> f64 {
+    x.tan()
+}
+
+/// Compute arctangent of a value
+#[cfg(feature = "jit")]
+extern "C" fn runtime_math_atan(x: f64) -> f64 {
+    x.atan()
+}
+
+/// Compute absolute value
+#[cfg(feature = "jit")]
+extern "C" fn runtime_math_fabs(x: f64) -> f64 {
+    x.abs()
+}
+
+/// Compute arcsine of a value
+#[cfg(feature = "jit")]
+extern "C" fn runtime_math_asin(x: f64) -> f64 {
+    x.asin()
+}
+
+/// Compute arccosine of a value
+#[cfg(feature = "jit")]
+extern "C" fn runtime_math_acos(x: f64) -> f64 {
+    x.acos()
+}
+
+/// Compute hyperbolic sine of a value
+#[cfg(feature = "jit")]
+extern "C" fn runtime_math_sinh(x: f64) -> f64 {
+    x.sinh()
+}
+
+/// Compute hyperbolic cosine of a value
+#[cfg(feature = "jit")]
+extern "C" fn runtime_math_cosh(x: f64) -> f64 {
+    x.cosh()
+}
+
+/// Compute hyperbolic tangent of a value
+#[cfg(feature = "jit")]
+extern "C" fn runtime_math_tanh(x: f64) -> f64 {
+    x.tanh()
+}
+
+/// Compute inverse hyperbolic sine of a value
+#[cfg(feature = "jit")]
+extern "C" fn runtime_math_asinh(x: f64) -> f64 {
+    x.asinh()
+}
+
+/// Compute inverse hyperbolic cosine of a value
+#[cfg(feature = "jit")]
+extern "C" fn runtime_math_acosh(x: f64) -> f64 {
+    x.acosh()
+}
+
+/// Compute inverse hyperbolic tangent of a value
+#[cfg(feature = "jit")]
+extern "C" fn runtime_math_atanh(x: f64) -> f64 {
+    x.atanh()
+}
+
+/// Compute log base 2 of a value
+#[cfg(feature = "jit")]
+extern "C" fn runtime_math_log2(x: f64) -> f64 {
+    x.log2()
+}
+
+/// Compute log base 10 of a value
+#[cfg(feature = "jit")]
+extern "C" fn runtime_math_log10(x: f64) -> f64 {
+    x.log10()
+}
+
+/// Compute two-argument arctangent
+#[cfg(feature = "jit")]
+extern "C" fn runtime_math_atan2(y: f64, x: f64) -> f64 {
+    y.atan2(x)
+}
+
 /// Do intervention (Causal.do)
 /// Records intervention and returns the intervention value
 #[cfg(feature = "jit")]
@@ -1271,6 +1387,27 @@ impl JitCompiler {
         jit_builder.symbol("runtime_effect_reset", runtime_effect_reset as *const u8);
         jit_builder.symbol("runtime_effect_set_seed", runtime_effect_set_seed as *const u8);
 
+        // Register math runtime functions
+        jit_builder.symbol("runtime_math_sin", runtime_math_sin as *const u8);
+        jit_builder.symbol("runtime_math_cos", runtime_math_cos as *const u8);
+        jit_builder.symbol("runtime_math_exp", runtime_math_exp as *const u8);
+        jit_builder.symbol("runtime_math_log", runtime_math_log as *const u8);
+        jit_builder.symbol("runtime_math_sqrt", runtime_math_sqrt as *const u8);
+        jit_builder.symbol("runtime_math_tan", runtime_math_tan as *const u8);
+        jit_builder.symbol("runtime_math_atan", runtime_math_atan as *const u8);
+        jit_builder.symbol("runtime_math_fabs", runtime_math_fabs as *const u8);
+        jit_builder.symbol("runtime_math_asin", runtime_math_asin as *const u8);
+        jit_builder.symbol("runtime_math_acos", runtime_math_acos as *const u8);
+        jit_builder.symbol("runtime_math_sinh", runtime_math_sinh as *const u8);
+        jit_builder.symbol("runtime_math_cosh", runtime_math_cosh as *const u8);
+        jit_builder.symbol("runtime_math_tanh", runtime_math_tanh as *const u8);
+        jit_builder.symbol("runtime_math_asinh", runtime_math_asinh as *const u8);
+        jit_builder.symbol("runtime_math_acosh", runtime_math_acosh as *const u8);
+        jit_builder.symbol("runtime_math_atanh", runtime_math_atanh as *const u8);
+        jit_builder.symbol("runtime_math_log2", runtime_math_log2 as *const u8);
+        jit_builder.symbol("runtime_math_log10", runtime_math_log10 as *const u8);
+        jit_builder.symbol("runtime_math_atan2", runtime_math_atan2 as *const u8);
+
         // Register IO effect runtime functions
         jit_builder.symbol("runtime_io_read_line", runtime_io_read_line as *const u8);
         jit_builder.symbol("runtime_io_read_file", runtime_io_read_file as *const u8);
@@ -1520,6 +1657,218 @@ impl JitCompiler {
             .insert("runtime_effect_set_seed".to_string(), id);
         self.func_sigs
             .insert("runtime_effect_set_seed".to_string(), sig_effect_seed);
+
+        // ==================== Math Runtime Functions ====================
+
+        // runtime_math_sin(x: f64) -> f64
+        let mut sig_math_sin = Signature::new(call_conv);
+        sig_math_sin.params.push(AbiParam::new(types::F64));
+        sig_math_sin.returns.push(AbiParam::new(types::F64));
+        let id = self
+            .jit_module
+            .declare_function("runtime_math_sin", Linkage::Import, &sig_math_sin)
+            .map_err(|e| format!("Failed to declare runtime_math_sin: {}", e))?;
+        self.func_ids.insert("runtime_math_sin".to_string(), id);
+        self.func_sigs.insert("runtime_math_sin".to_string(), sig_math_sin);
+
+        // runtime_math_cos(x: f64) -> f64
+        let mut sig_math_cos = Signature::new(call_conv);
+        sig_math_cos.params.push(AbiParam::new(types::F64));
+        sig_math_cos.returns.push(AbiParam::new(types::F64));
+        let id = self
+            .jit_module
+            .declare_function("runtime_math_cos", Linkage::Import, &sig_math_cos)
+            .map_err(|e| format!("Failed to declare runtime_math_cos: {}", e))?;
+        self.func_ids.insert("runtime_math_cos".to_string(), id);
+        self.func_sigs.insert("runtime_math_cos".to_string(), sig_math_cos);
+
+        // runtime_math_exp(x: f64) -> f64
+        let mut sig_math_exp = Signature::new(call_conv);
+        sig_math_exp.params.push(AbiParam::new(types::F64));
+        sig_math_exp.returns.push(AbiParam::new(types::F64));
+        let id = self
+            .jit_module
+            .declare_function("runtime_math_exp", Linkage::Import, &sig_math_exp)
+            .map_err(|e| format!("Failed to declare runtime_math_exp: {}", e))?;
+        self.func_ids.insert("runtime_math_exp".to_string(), id);
+        self.func_sigs.insert("runtime_math_exp".to_string(), sig_math_exp);
+
+        // runtime_math_log(x: f64) -> f64
+        let mut sig_math_log = Signature::new(call_conv);
+        sig_math_log.params.push(AbiParam::new(types::F64));
+        sig_math_log.returns.push(AbiParam::new(types::F64));
+        let id = self
+            .jit_module
+            .declare_function("runtime_math_log", Linkage::Import, &sig_math_log)
+            .map_err(|e| format!("Failed to declare runtime_math_log: {}", e))?;
+        self.func_ids.insert("runtime_math_log".to_string(), id);
+        self.func_sigs.insert("runtime_math_log".to_string(), sig_math_log);
+
+        // runtime_math_sqrt(x: f64) -> f64
+        let mut sig_math_sqrt = Signature::new(call_conv);
+        sig_math_sqrt.params.push(AbiParam::new(types::F64));
+        sig_math_sqrt.returns.push(AbiParam::new(types::F64));
+        let id = self
+            .jit_module
+            .declare_function("runtime_math_sqrt", Linkage::Import, &sig_math_sqrt)
+            .map_err(|e| format!("Failed to declare runtime_math_sqrt: {}", e))?;
+        self.func_ids.insert("runtime_math_sqrt".to_string(), id);
+        self.func_sigs.insert("runtime_math_sqrt".to_string(), sig_math_sqrt);
+
+        // runtime_math_tan(x: f64) -> f64
+        let mut sig_math_tan = Signature::new(call_conv);
+        sig_math_tan.params.push(AbiParam::new(types::F64));
+        sig_math_tan.returns.push(AbiParam::new(types::F64));
+        let id = self
+            .jit_module
+            .declare_function("runtime_math_tan", Linkage::Import, &sig_math_tan)
+            .map_err(|e| format!("Failed to declare runtime_math_tan: {}", e))?;
+        self.func_ids.insert("runtime_math_tan".to_string(), id);
+        self.func_sigs.insert("runtime_math_tan".to_string(), sig_math_tan);
+
+        // runtime_math_atan(x: f64) -> f64
+        let mut sig_math_atan = Signature::new(call_conv);
+        sig_math_atan.params.push(AbiParam::new(types::F64));
+        sig_math_atan.returns.push(AbiParam::new(types::F64));
+        let id = self
+            .jit_module
+            .declare_function("runtime_math_atan", Linkage::Import, &sig_math_atan)
+            .map_err(|e| format!("Failed to declare runtime_math_atan: {}", e))?;
+        self.func_ids.insert("runtime_math_atan".to_string(), id);
+        self.func_sigs.insert("runtime_math_atan".to_string(), sig_math_atan);
+
+        // runtime_math_fabs(x: f64) -> f64
+        let mut sig_math_fabs = Signature::new(call_conv);
+        sig_math_fabs.params.push(AbiParam::new(types::F64));
+        sig_math_fabs.returns.push(AbiParam::new(types::F64));
+        let id = self
+            .jit_module
+            .declare_function("runtime_math_fabs", Linkage::Import, &sig_math_fabs)
+            .map_err(|e| format!("Failed to declare runtime_math_fabs: {}", e))?;
+        self.func_ids.insert("runtime_math_fabs".to_string(), id);
+        self.func_sigs.insert("runtime_math_fabs".to_string(), sig_math_fabs);
+
+        // runtime_math_asin(x: f64) -> f64
+        let mut sig_math_asin = Signature::new(call_conv);
+        sig_math_asin.params.push(AbiParam::new(types::F64));
+        sig_math_asin.returns.push(AbiParam::new(types::F64));
+        let id = self
+            .jit_module
+            .declare_function("runtime_math_asin", Linkage::Import, &sig_math_asin)
+            .map_err(|e| format!("Failed to declare runtime_math_asin: {}", e))?;
+        self.func_ids.insert("runtime_math_asin".to_string(), id);
+        self.func_sigs.insert("runtime_math_asin".to_string(), sig_math_asin);
+
+        // runtime_math_acos(x: f64) -> f64
+        let mut sig_math_acos = Signature::new(call_conv);
+        sig_math_acos.params.push(AbiParam::new(types::F64));
+        sig_math_acos.returns.push(AbiParam::new(types::F64));
+        let id = self
+            .jit_module
+            .declare_function("runtime_math_acos", Linkage::Import, &sig_math_acos)
+            .map_err(|e| format!("Failed to declare runtime_math_acos: {}", e))?;
+        self.func_ids.insert("runtime_math_acos".to_string(), id);
+        self.func_sigs.insert("runtime_math_acos".to_string(), sig_math_acos);
+
+        // runtime_math_sinh(x: f64) -> f64
+        let mut sig_math_sinh = Signature::new(call_conv);
+        sig_math_sinh.params.push(AbiParam::new(types::F64));
+        sig_math_sinh.returns.push(AbiParam::new(types::F64));
+        let id = self
+            .jit_module
+            .declare_function("runtime_math_sinh", Linkage::Import, &sig_math_sinh)
+            .map_err(|e| format!("Failed to declare runtime_math_sinh: {}", e))?;
+        self.func_ids.insert("runtime_math_sinh".to_string(), id);
+        self.func_sigs.insert("runtime_math_sinh".to_string(), sig_math_sinh);
+
+        // runtime_math_cosh(x: f64) -> f64
+        let mut sig_math_cosh = Signature::new(call_conv);
+        sig_math_cosh.params.push(AbiParam::new(types::F64));
+        sig_math_cosh.returns.push(AbiParam::new(types::F64));
+        let id = self
+            .jit_module
+            .declare_function("runtime_math_cosh", Linkage::Import, &sig_math_cosh)
+            .map_err(|e| format!("Failed to declare runtime_math_cosh: {}", e))?;
+        self.func_ids.insert("runtime_math_cosh".to_string(), id);
+        self.func_sigs.insert("runtime_math_cosh".to_string(), sig_math_cosh);
+
+        // runtime_math_tanh(x: f64) -> f64
+        let mut sig_math_tanh = Signature::new(call_conv);
+        sig_math_tanh.params.push(AbiParam::new(types::F64));
+        sig_math_tanh.returns.push(AbiParam::new(types::F64));
+        let id = self
+            .jit_module
+            .declare_function("runtime_math_tanh", Linkage::Import, &sig_math_tanh)
+            .map_err(|e| format!("Failed to declare runtime_math_tanh: {}", e))?;
+        self.func_ids.insert("runtime_math_tanh".to_string(), id);
+        self.func_sigs.insert("runtime_math_tanh".to_string(), sig_math_tanh);
+
+        // runtime_math_asinh(x: f64) -> f64
+        let mut sig_math_asinh = Signature::new(call_conv);
+        sig_math_asinh.params.push(AbiParam::new(types::F64));
+        sig_math_asinh.returns.push(AbiParam::new(types::F64));
+        let id = self
+            .jit_module
+            .declare_function("runtime_math_asinh", Linkage::Import, &sig_math_asinh)
+            .map_err(|e| format!("Failed to declare runtime_math_asinh: {}", e))?;
+        self.func_ids.insert("runtime_math_asinh".to_string(), id);
+        self.func_sigs.insert("runtime_math_asinh".to_string(), sig_math_asinh);
+
+        // runtime_math_acosh(x: f64) -> f64
+        let mut sig_math_acosh = Signature::new(call_conv);
+        sig_math_acosh.params.push(AbiParam::new(types::F64));
+        sig_math_acosh.returns.push(AbiParam::new(types::F64));
+        let id = self
+            .jit_module
+            .declare_function("runtime_math_acosh", Linkage::Import, &sig_math_acosh)
+            .map_err(|e| format!("Failed to declare runtime_math_acosh: {}", e))?;
+        self.func_ids.insert("runtime_math_acosh".to_string(), id);
+        self.func_sigs.insert("runtime_math_acosh".to_string(), sig_math_acosh);
+
+        // runtime_math_atanh(x: f64) -> f64
+        let mut sig_math_atanh = Signature::new(call_conv);
+        sig_math_atanh.params.push(AbiParam::new(types::F64));
+        sig_math_atanh.returns.push(AbiParam::new(types::F64));
+        let id = self
+            .jit_module
+            .declare_function("runtime_math_atanh", Linkage::Import, &sig_math_atanh)
+            .map_err(|e| format!("Failed to declare runtime_math_atanh: {}", e))?;
+        self.func_ids.insert("runtime_math_atanh".to_string(), id);
+        self.func_sigs.insert("runtime_math_atanh".to_string(), sig_math_atanh);
+
+        // runtime_math_log2(x: f64) -> f64
+        let mut sig_math_log2 = Signature::new(call_conv);
+        sig_math_log2.params.push(AbiParam::new(types::F64));
+        sig_math_log2.returns.push(AbiParam::new(types::F64));
+        let id = self
+            .jit_module
+            .declare_function("runtime_math_log2", Linkage::Import, &sig_math_log2)
+            .map_err(|e| format!("Failed to declare runtime_math_log2: {}", e))?;
+        self.func_ids.insert("runtime_math_log2".to_string(), id);
+        self.func_sigs.insert("runtime_math_log2".to_string(), sig_math_log2);
+
+        // runtime_math_log10(x: f64) -> f64
+        let mut sig_math_log10 = Signature::new(call_conv);
+        sig_math_log10.params.push(AbiParam::new(types::F64));
+        sig_math_log10.returns.push(AbiParam::new(types::F64));
+        let id = self
+            .jit_module
+            .declare_function("runtime_math_log10", Linkage::Import, &sig_math_log10)
+            .map_err(|e| format!("Failed to declare runtime_math_log10: {}", e))?;
+        self.func_ids.insert("runtime_math_log10".to_string(), id);
+        self.func_sigs.insert("runtime_math_log10".to_string(), sig_math_log10);
+
+        // runtime_math_atan2(y: f64, x: f64) -> f64
+        let mut sig_math_atan2 = Signature::new(call_conv);
+        sig_math_atan2.params.push(AbiParam::new(types::F64));
+        sig_math_atan2.params.push(AbiParam::new(types::F64));
+        sig_math_atan2.returns.push(AbiParam::new(types::F64));
+        let id = self
+            .jit_module
+            .declare_function("runtime_math_atan2", Linkage::Import, &sig_math_atan2)
+            .map_err(|e| format!("Failed to declare runtime_math_atan2: {}", e))?;
+        self.func_ids.insert("runtime_math_atan2".to_string(), id);
+        self.func_sigs.insert("runtime_math_atan2".to_string(), sig_math_atan2);
 
         // ==================== IO Effect Runtime Functions ====================
 
@@ -1989,9 +2338,9 @@ fn hlir_to_cranelift_type(ty: &HlirType) -> types::Type {
         HlirType::Mat4 => types::I64,
         // quat: 4x f32 = 128 bits, same as vec4
         HlirType::Quat => types::F32X4,
-        // dual: 2x f64 = 128 bits (value, derivative)
-        // Use F64X2 for SIMD operations on dual numbers
-        HlirType::Dual => types::F64X2,
+        // dual: pointer to stack-allocated 16-byte struct (value: f64, derivative: f64)
+        // We use a pointer because SIMD F64X2 causes issues with Cranelift
+        HlirType::Dual => types::I64,
     }
 }
 
@@ -2174,6 +2523,832 @@ fn translate_instruction(
                     }
                 }
 
+                return Ok(None);
+            }
+
+            // Handle dual number builtins using stack allocation
+            // Dual numbers are stored as 16-byte structs: [value: f64, derivative: f64]
+            // dual(value, deriv) -> allocates stack slot, stores both, returns pointer
+            // dual_value(ptr) -> loads f64 from offset 0
+            // dual_deriv(ptr) -> loads f64 from offset 8
+            if name == "dual" {
+                if arg_vals.len() >= 2 {
+                    // Allocate 16-byte stack slot for dual number
+                    let slot = builder.create_sized_stack_slot(
+                        cranelift_codegen::ir::StackSlotData::new(
+                            cranelift_codegen::ir::StackSlotKind::ExplicitSlot,
+                            16, // 2 x f64 = 16 bytes
+                            8,  // 8-byte alignment for f64
+                        ),
+                    );
+
+                    // Get pointer to stack slot
+                    let ptr = builder.ins().stack_addr(types::I64, slot, 0);
+
+                    // Store value at offset 0
+                    builder.ins().store(
+                        cranelift_codegen::ir::MemFlags::new(),
+                        arg_vals[0],
+                        ptr,
+                        0,
+                    );
+
+                    // Store derivative at offset 8
+                    builder.ins().store(
+                        cranelift_codegen::ir::MemFlags::new(),
+                        arg_vals[1],
+                        ptr,
+                        8,
+                    );
+
+                    return Ok(Some(ptr));
+                }
+                return Ok(None);
+            }
+
+            if name == "dual_value" {
+                if !arg_vals.is_empty() {
+                    // Load value from offset 0 of dual pointer
+                    let value = builder.ins().load(
+                        types::F64,
+                        cranelift_codegen::ir::MemFlags::new(),
+                        arg_vals[0],
+                        0,
+                    );
+                    return Ok(Some(value));
+                }
+                return Ok(None);
+            }
+
+            if name == "dual_deriv" {
+                if !arg_vals.is_empty() {
+                    // Load derivative from offset 8 of dual pointer
+                    let deriv = builder.ins().load(
+                        types::F64,
+                        cranelift_codegen::ir::MemFlags::new(),
+                        arg_vals[0],
+                        8,
+                    );
+                    return Ok(Some(deriv));
+                }
+                let zero = builder.ins().f64const(0.0);
+                return Ok(Some(zero));
+            }
+
+            // dual_add(a, b) = (a.val + b.val, a.der + b.der)
+            if name == "dual_add" {
+                if arg_vals.len() >= 2 {
+                    let a_ptr = arg_vals[0];
+                    let b_ptr = arg_vals[1];
+
+                    // Load values and derivatives
+                    let a_val = builder.ins().load(types::F64, cranelift_codegen::ir::MemFlags::new(), a_ptr, 0);
+                    let a_der = builder.ins().load(types::F64, cranelift_codegen::ir::MemFlags::new(), a_ptr, 8);
+                    let b_val = builder.ins().load(types::F64, cranelift_codegen::ir::MemFlags::new(), b_ptr, 0);
+                    let b_der = builder.ins().load(types::F64, cranelift_codegen::ir::MemFlags::new(), b_ptr, 8);
+
+                    // Compute result
+                    let result_val = builder.ins().fadd(a_val, b_val);
+                    let result_der = builder.ins().fadd(a_der, b_der);
+
+                    // Allocate and store result
+                    let slot = builder.create_sized_stack_slot(
+                        cranelift_codegen::ir::StackSlotData::new(
+                            cranelift_codegen::ir::StackSlotKind::ExplicitSlot, 16, 8,
+                        ),
+                    );
+                    let ptr = builder.ins().stack_addr(types::I64, slot, 0);
+                    builder.ins().store(cranelift_codegen::ir::MemFlags::new(), result_val, ptr, 0);
+                    builder.ins().store(cranelift_codegen::ir::MemFlags::new(), result_der, ptr, 8);
+                    return Ok(Some(ptr));
+                }
+                return Ok(None);
+            }
+
+            // dual_sub(a, b) = (a.val - b.val, a.der - b.der)
+            if name == "dual_sub" {
+                if arg_vals.len() >= 2 {
+                    let a_ptr = arg_vals[0];
+                    let b_ptr = arg_vals[1];
+
+                    let a_val = builder.ins().load(types::F64, cranelift_codegen::ir::MemFlags::new(), a_ptr, 0);
+                    let a_der = builder.ins().load(types::F64, cranelift_codegen::ir::MemFlags::new(), a_ptr, 8);
+                    let b_val = builder.ins().load(types::F64, cranelift_codegen::ir::MemFlags::new(), b_ptr, 0);
+                    let b_der = builder.ins().load(types::F64, cranelift_codegen::ir::MemFlags::new(), b_ptr, 8);
+
+                    let result_val = builder.ins().fsub(a_val, b_val);
+                    let result_der = builder.ins().fsub(a_der, b_der);
+
+                    let slot = builder.create_sized_stack_slot(
+                        cranelift_codegen::ir::StackSlotData::new(
+                            cranelift_codegen::ir::StackSlotKind::ExplicitSlot, 16, 8,
+                        ),
+                    );
+                    let ptr = builder.ins().stack_addr(types::I64, slot, 0);
+                    builder.ins().store(cranelift_codegen::ir::MemFlags::new(), result_val, ptr, 0);
+                    builder.ins().store(cranelift_codegen::ir::MemFlags::new(), result_der, ptr, 8);
+                    return Ok(Some(ptr));
+                }
+                return Ok(None);
+            }
+
+            // dual_mul(a, b) = (a.val * b.val, a.der * b.val + a.val * b.der) [product rule]
+            if name == "dual_mul" {
+                if arg_vals.len() >= 2 {
+                    let a_ptr = arg_vals[0];
+                    let b_ptr = arg_vals[1];
+
+                    let a_val = builder.ins().load(types::F64, cranelift_codegen::ir::MemFlags::new(), a_ptr, 0);
+                    let a_der = builder.ins().load(types::F64, cranelift_codegen::ir::MemFlags::new(), a_ptr, 8);
+                    let b_val = builder.ins().load(types::F64, cranelift_codegen::ir::MemFlags::new(), b_ptr, 0);
+                    let b_der = builder.ins().load(types::F64, cranelift_codegen::ir::MemFlags::new(), b_ptr, 8);
+
+                    // Product rule: (a * b)' = a' * b + a * b'
+                    let result_val = builder.ins().fmul(a_val, b_val);
+                    let term1 = builder.ins().fmul(a_der, b_val);
+                    let term2 = builder.ins().fmul(a_val, b_der);
+                    let result_der = builder.ins().fadd(term1, term2);
+
+                    let slot = builder.create_sized_stack_slot(
+                        cranelift_codegen::ir::StackSlotData::new(
+                            cranelift_codegen::ir::StackSlotKind::ExplicitSlot, 16, 8,
+                        ),
+                    );
+                    let ptr = builder.ins().stack_addr(types::I64, slot, 0);
+                    builder.ins().store(cranelift_codegen::ir::MemFlags::new(), result_val, ptr, 0);
+                    builder.ins().store(cranelift_codegen::ir::MemFlags::new(), result_der, ptr, 8);
+                    return Ok(Some(ptr));
+                }
+                return Ok(None);
+            }
+
+            // dual_div(a, b) = (a.val / b.val, (a.der * b.val - a.val * b.der) / b.val^2) [quotient rule]
+            if name == "dual_div" {
+                if arg_vals.len() >= 2 {
+                    let a_ptr = arg_vals[0];
+                    let b_ptr = arg_vals[1];
+
+                    let a_val = builder.ins().load(types::F64, cranelift_codegen::ir::MemFlags::new(), a_ptr, 0);
+                    let a_der = builder.ins().load(types::F64, cranelift_codegen::ir::MemFlags::new(), a_ptr, 8);
+                    let b_val = builder.ins().load(types::F64, cranelift_codegen::ir::MemFlags::new(), b_ptr, 0);
+                    let b_der = builder.ins().load(types::F64, cranelift_codegen::ir::MemFlags::new(), b_ptr, 8);
+
+                    // Quotient rule: (a / b)' = (a' * b - a * b') / b^2
+                    let result_val = builder.ins().fdiv(a_val, b_val);
+                    let term1 = builder.ins().fmul(a_der, b_val);
+                    let term2 = builder.ins().fmul(a_val, b_der);
+                    let numerator = builder.ins().fsub(term1, term2);
+                    let b_squared = builder.ins().fmul(b_val, b_val);
+                    let result_der = builder.ins().fdiv(numerator, b_squared);
+
+                    let slot = builder.create_sized_stack_slot(
+                        cranelift_codegen::ir::StackSlotData::new(
+                            cranelift_codegen::ir::StackSlotKind::ExplicitSlot, 16, 8,
+                        ),
+                    );
+                    let ptr = builder.ins().stack_addr(types::I64, slot, 0);
+                    builder.ins().store(cranelift_codegen::ir::MemFlags::new(), result_val, ptr, 0);
+                    builder.ins().store(cranelift_codegen::ir::MemFlags::new(), result_der, ptr, 8);
+                    return Ok(Some(ptr));
+                }
+                return Ok(None);
+            }
+
+            // dual_sin(a) = (sin(a.val), cos(a.val) * a.der) [chain rule]
+            if name == "dual_sin" {
+                if !arg_vals.is_empty() {
+                    let a_ptr = arg_vals[0];
+                    let a_val = builder.ins().load(types::F64, cranelift_codegen::ir::MemFlags::new(), a_ptr, 0);
+                    let a_der = builder.ins().load(types::F64, cranelift_codegen::ir::MemFlags::new(), a_ptr, 8);
+
+                    // Call runtime_math_sin and runtime_math_cos
+                    let sin_func = func_refs.get("runtime_math_sin").ok_or("runtime_math_sin not found")?;
+                    let cos_func = func_refs.get("runtime_math_cos").ok_or("runtime_math_cos not found")?;
+
+                    let sin_call = builder.ins().call(*sin_func, &[a_val]);
+                    let sin_val = builder.inst_results(sin_call)[0];
+
+                    let cos_call = builder.ins().call(*cos_func, &[a_val]);
+                    let cos_val = builder.inst_results(cos_call)[0];
+
+                    // Derivative: cos(a.val) * a.der
+                    let result_der = builder.ins().fmul(cos_val, a_der);
+
+                    let slot = builder.create_sized_stack_slot(
+                        cranelift_codegen::ir::StackSlotData::new(
+                            cranelift_codegen::ir::StackSlotKind::ExplicitSlot, 16, 8,
+                        ),
+                    );
+                    let ptr = builder.ins().stack_addr(types::I64, slot, 0);
+                    builder.ins().store(cranelift_codegen::ir::MemFlags::new(), sin_val, ptr, 0);
+                    builder.ins().store(cranelift_codegen::ir::MemFlags::new(), result_der, ptr, 8);
+                    return Ok(Some(ptr));
+                }
+                return Ok(None);
+            }
+
+            // dual_cos(a) = (cos(a.val), -sin(a.val) * a.der) [chain rule]
+            if name == "dual_cos" {
+                if !arg_vals.is_empty() {
+                    let a_ptr = arg_vals[0];
+                    let a_val = builder.ins().load(types::F64, cranelift_codegen::ir::MemFlags::new(), a_ptr, 0);
+                    let a_der = builder.ins().load(types::F64, cranelift_codegen::ir::MemFlags::new(), a_ptr, 8);
+
+                    let sin_func = func_refs.get("runtime_math_sin").ok_or("runtime_math_sin not found")?;
+                    let cos_func = func_refs.get("runtime_math_cos").ok_or("runtime_math_cos not found")?;
+
+                    let cos_call = builder.ins().call(*cos_func, &[a_val]);
+                    let cos_val = builder.inst_results(cos_call)[0];
+
+                    let sin_call = builder.ins().call(*sin_func, &[a_val]);
+                    let sin_val = builder.inst_results(sin_call)[0];
+
+                    // Derivative: -sin(a.val) * a.der
+                    let neg_sin = builder.ins().fneg(sin_val);
+                    let result_der = builder.ins().fmul(neg_sin, a_der);
+
+                    let slot = builder.create_sized_stack_slot(
+                        cranelift_codegen::ir::StackSlotData::new(
+                            cranelift_codegen::ir::StackSlotKind::ExplicitSlot, 16, 8,
+                        ),
+                    );
+                    let ptr = builder.ins().stack_addr(types::I64, slot, 0);
+                    builder.ins().store(cranelift_codegen::ir::MemFlags::new(), cos_val, ptr, 0);
+                    builder.ins().store(cranelift_codegen::ir::MemFlags::new(), result_der, ptr, 8);
+                    return Ok(Some(ptr));
+                }
+                return Ok(None);
+            }
+
+            // dual_exp(a) = (exp(a.val), exp(a.val) * a.der) [chain rule]
+            if name == "dual_exp" {
+                if !arg_vals.is_empty() {
+                    let a_ptr = arg_vals[0];
+                    let a_val = builder.ins().load(types::F64, cranelift_codegen::ir::MemFlags::new(), a_ptr, 0);
+                    let a_der = builder.ins().load(types::F64, cranelift_codegen::ir::MemFlags::new(), a_ptr, 8);
+
+                    let exp_func = func_refs.get("runtime_math_exp").ok_or("runtime_math_exp not found")?;
+
+                    let exp_call = builder.ins().call(*exp_func, &[a_val]);
+                    let exp_val = builder.inst_results(exp_call)[0];
+
+                    // Derivative: exp(a.val) * a.der
+                    let result_der = builder.ins().fmul(exp_val, a_der);
+
+                    let slot = builder.create_sized_stack_slot(
+                        cranelift_codegen::ir::StackSlotData::new(
+                            cranelift_codegen::ir::StackSlotKind::ExplicitSlot, 16, 8,
+                        ),
+                    );
+                    let ptr = builder.ins().stack_addr(types::I64, slot, 0);
+                    builder.ins().store(cranelift_codegen::ir::MemFlags::new(), exp_val, ptr, 0);
+                    builder.ins().store(cranelift_codegen::ir::MemFlags::new(), result_der, ptr, 8);
+                    return Ok(Some(ptr));
+                }
+                return Ok(None);
+            }
+
+            // dual_log(a) = (log(a.val), a.der / a.val) [chain rule]
+            if name == "dual_log" {
+                if !arg_vals.is_empty() {
+                    let a_ptr = arg_vals[0];
+                    let a_val = builder.ins().load(types::F64, cranelift_codegen::ir::MemFlags::new(), a_ptr, 0);
+                    let a_der = builder.ins().load(types::F64, cranelift_codegen::ir::MemFlags::new(), a_ptr, 8);
+
+                    let log_func = func_refs.get("runtime_math_log").ok_or("runtime_math_log not found")?;
+
+                    let log_call = builder.ins().call(*log_func, &[a_val]);
+                    let log_val = builder.inst_results(log_call)[0];
+
+                    // Derivative: a.der / a.val
+                    let result_der = builder.ins().fdiv(a_der, a_val);
+
+                    let slot = builder.create_sized_stack_slot(
+                        cranelift_codegen::ir::StackSlotData::new(
+                            cranelift_codegen::ir::StackSlotKind::ExplicitSlot, 16, 8,
+                        ),
+                    );
+                    let ptr = builder.ins().stack_addr(types::I64, slot, 0);
+                    builder.ins().store(cranelift_codegen::ir::MemFlags::new(), log_val, ptr, 0);
+                    builder.ins().store(cranelift_codegen::ir::MemFlags::new(), result_der, ptr, 8);
+                    return Ok(Some(ptr));
+                }
+                return Ok(None);
+            }
+
+            // dual_sqrt(a) = (sqrt(a.val), a.der / (2 * sqrt(a.val))) [chain rule]
+            if name == "dual_sqrt" {
+                if !arg_vals.is_empty() {
+                    let a_ptr = arg_vals[0];
+                    let a_val = builder.ins().load(types::F64, cranelift_codegen::ir::MemFlags::new(), a_ptr, 0);
+                    let a_der = builder.ins().load(types::F64, cranelift_codegen::ir::MemFlags::new(), a_ptr, 8);
+
+                    let sqrt_func = func_refs.get("runtime_math_sqrt").ok_or("runtime_math_sqrt not found")?;
+
+                    let sqrt_call = builder.ins().call(*sqrt_func, &[a_val]);
+                    let sqrt_val = builder.inst_results(sqrt_call)[0];
+
+                    // Derivative: a.der / (2 * sqrt(a.val))
+                    let two = builder.ins().f64const(2.0);
+                    let denom = builder.ins().fmul(two, sqrt_val);
+                    let result_der = builder.ins().fdiv(a_der, denom);
+
+                    let slot = builder.create_sized_stack_slot(
+                        cranelift_codegen::ir::StackSlotData::new(
+                            cranelift_codegen::ir::StackSlotKind::ExplicitSlot, 16, 8,
+                        ),
+                    );
+                    let ptr = builder.ins().stack_addr(types::I64, slot, 0);
+                    builder.ins().store(cranelift_codegen::ir::MemFlags::new(), sqrt_val, ptr, 0);
+                    builder.ins().store(cranelift_codegen::ir::MemFlags::new(), result_der, ptr, 8);
+                    return Ok(Some(ptr));
+                }
+                return Ok(None);
+            }
+
+            // dual_pow(a, n) = (a.val^n, n * a.val^(n-1) * a.der) [power rule]
+            // where n is an f64 constant (not a dual)
+            if name == "dual_pow" {
+                if arg_vals.len() >= 2 {
+                    let a_ptr = arg_vals[0];
+                    let n = arg_vals[1]; // n is a plain f64
+
+                    let a_val = builder.ins().load(types::F64, cranelift_codegen::ir::MemFlags::new(), a_ptr, 0);
+                    let a_der = builder.ins().load(types::F64, cranelift_codegen::ir::MemFlags::new(), a_ptr, 8);
+
+                    let exp_func = func_refs.get("runtime_math_exp").ok_or("runtime_math_exp not found")?;
+                    let log_func = func_refs.get("runtime_math_log").ok_or("runtime_math_log not found")?;
+
+                    // a^n = exp(n * log(a))
+                    let log_call = builder.ins().call(*log_func, &[a_val]);
+                    let log_a = builder.inst_results(log_call)[0];
+                    let n_log_a = builder.ins().fmul(n, log_a);
+                    let exp_call = builder.ins().call(*exp_func, &[n_log_a]);
+                    let pow_val = builder.inst_results(exp_call)[0];
+
+                    // Derivative: n * a^(n-1) * a.der = n * (a^n / a) * a.der = n * a^n * a.der / a
+                    // Simpler: (n * a^n / a) * a.der
+                    let n_pow = builder.ins().fmul(n, pow_val);
+                    let n_pow_over_a = builder.ins().fdiv(n_pow, a_val);
+                    let result_der = builder.ins().fmul(n_pow_over_a, a_der);
+
+                    let slot = builder.create_sized_stack_slot(
+                        cranelift_codegen::ir::StackSlotData::new(
+                            cranelift_codegen::ir::StackSlotKind::ExplicitSlot, 16, 8,
+                        ),
+                    );
+                    let ptr = builder.ins().stack_addr(types::I64, slot, 0);
+                    builder.ins().store(cranelift_codegen::ir::MemFlags::new(), pow_val, ptr, 0);
+                    builder.ins().store(cranelift_codegen::ir::MemFlags::new(), result_der, ptr, 8);
+                    return Ok(Some(ptr));
+                }
+                return Ok(None);
+            }
+
+            // dual_tan(a) = (tan(a.val), a.der / cos²(a.val)) [chain rule: d/dx tan(x) = sec²(x)]
+            if name == "dual_tan" {
+                if !arg_vals.is_empty() {
+                    let a_ptr = arg_vals[0];
+                    let a_val = builder.ins().load(types::F64, cranelift_codegen::ir::MemFlags::new(), a_ptr, 0);
+                    let a_der = builder.ins().load(types::F64, cranelift_codegen::ir::MemFlags::new(), a_ptr, 8);
+
+                    let tan_func = func_refs.get("runtime_math_tan").ok_or("runtime_math_tan not found")?;
+                    let cos_func = func_refs.get("runtime_math_cos").ok_or("runtime_math_cos not found")?;
+
+                    let tan_call = builder.ins().call(*tan_func, &[a_val]);
+                    let tan_val = builder.inst_results(tan_call)[0];
+
+                    // Derivative: a.der / cos²(a.val) = a.der * sec²(a.val)
+                    let cos_call = builder.ins().call(*cos_func, &[a_val]);
+                    let cos_val = builder.inst_results(cos_call)[0];
+                    let cos_sq = builder.ins().fmul(cos_val, cos_val);
+                    let result_der = builder.ins().fdiv(a_der, cos_sq);
+
+                    let slot = builder.create_sized_stack_slot(
+                        cranelift_codegen::ir::StackSlotData::new(
+                            cranelift_codegen::ir::StackSlotKind::ExplicitSlot, 16, 8,
+                        ),
+                    );
+                    let ptr = builder.ins().stack_addr(types::I64, slot, 0);
+                    builder.ins().store(cranelift_codegen::ir::MemFlags::new(), tan_val, ptr, 0);
+                    builder.ins().store(cranelift_codegen::ir::MemFlags::new(), result_der, ptr, 8);
+                    return Ok(Some(ptr));
+                }
+                return Ok(None);
+            }
+
+            // dual_atan(a) = (atan(a.val), a.der / (1 + a.val²)) [chain rule: d/dx atan(x) = 1/(1+x²)]
+            if name == "dual_atan" {
+                if !arg_vals.is_empty() {
+                    let a_ptr = arg_vals[0];
+                    let a_val = builder.ins().load(types::F64, cranelift_codegen::ir::MemFlags::new(), a_ptr, 0);
+                    let a_der = builder.ins().load(types::F64, cranelift_codegen::ir::MemFlags::new(), a_ptr, 8);
+
+                    let atan_func = func_refs.get("runtime_math_atan").ok_or("runtime_math_atan not found")?;
+
+                    let atan_call = builder.ins().call(*atan_func, &[a_val]);
+                    let atan_val = builder.inst_results(atan_call)[0];
+
+                    // Derivative: a.der / (1 + a.val²)
+                    let one = builder.ins().f64const(1.0);
+                    let a_sq = builder.ins().fmul(a_val, a_val);
+                    let denom = builder.ins().fadd(one, a_sq);
+                    let result_der = builder.ins().fdiv(a_der, denom);
+
+                    let slot = builder.create_sized_stack_slot(
+                        cranelift_codegen::ir::StackSlotData::new(
+                            cranelift_codegen::ir::StackSlotKind::ExplicitSlot, 16, 8,
+                        ),
+                    );
+                    let ptr = builder.ins().stack_addr(types::I64, slot, 0);
+                    builder.ins().store(cranelift_codegen::ir::MemFlags::new(), atan_val, ptr, 0);
+                    builder.ins().store(cranelift_codegen::ir::MemFlags::new(), result_der, ptr, 8);
+                    return Ok(Some(ptr));
+                }
+                return Ok(None);
+            }
+
+            // dual_abs(a) = (|a.val|, sign(a.val) * a.der) where sign(x) = x/|x|
+            if name == "dual_abs" {
+                if !arg_vals.is_empty() {
+                    let a_ptr = arg_vals[0];
+                    let a_val = builder.ins().load(types::F64, cranelift_codegen::ir::MemFlags::new(), a_ptr, 0);
+                    let a_der = builder.ins().load(types::F64, cranelift_codegen::ir::MemFlags::new(), a_ptr, 8);
+
+                    let fabs_func = func_refs.get("runtime_math_fabs").ok_or("runtime_math_fabs not found")?;
+
+                    let fabs_call = builder.ins().call(*fabs_func, &[a_val]);
+                    let abs_val = builder.inst_results(fabs_call)[0];
+
+                    // Derivative: sign(a.val) * a.der = (a.val / |a.val|) * a.der
+                    let sign = builder.ins().fdiv(a_val, abs_val);
+                    let result_der = builder.ins().fmul(sign, a_der);
+
+                    let slot = builder.create_sized_stack_slot(
+                        cranelift_codegen::ir::StackSlotData::new(
+                            cranelift_codegen::ir::StackSlotKind::ExplicitSlot, 16, 8,
+                        ),
+                    );
+                    let ptr = builder.ins().stack_addr(types::I64, slot, 0);
+                    builder.ins().store(cranelift_codegen::ir::MemFlags::new(), abs_val, ptr, 0);
+                    builder.ins().store(cranelift_codegen::ir::MemFlags::new(), result_der, ptr, 8);
+                    return Ok(Some(ptr));
+                }
+                return Ok(None);
+            }
+
+            // dual_asin(a) = (asin(a.val), a.der / sqrt(1 - a.val²)) [chain rule: d/dx asin(x) = 1/sqrt(1-x²)]
+            if name == "dual_asin" {
+                if !arg_vals.is_empty() {
+                    let a_ptr = arg_vals[0];
+                    let a_val = builder.ins().load(types::F64, cranelift_codegen::ir::MemFlags::new(), a_ptr, 0);
+                    let a_der = builder.ins().load(types::F64, cranelift_codegen::ir::MemFlags::new(), a_ptr, 8);
+
+                    let asin_func = func_refs.get("runtime_math_asin").ok_or("runtime_math_asin not found")?;
+                    let sqrt_func = func_refs.get("runtime_math_sqrt").ok_or("runtime_math_sqrt not found")?;
+
+                    let asin_call = builder.ins().call(*asin_func, &[a_val]);
+                    let asin_val = builder.inst_results(asin_call)[0];
+
+                    // Derivative: a.der / sqrt(1 - a.val²)
+                    let one = builder.ins().f64const(1.0);
+                    let a_sq = builder.ins().fmul(a_val, a_val);
+                    let one_minus_asq = builder.ins().fsub(one, a_sq);
+                    let sqrt_call = builder.ins().call(*sqrt_func, &[one_minus_asq]);
+                    let sqrt_val = builder.inst_results(sqrt_call)[0];
+                    let result_der = builder.ins().fdiv(a_der, sqrt_val);
+
+                    let slot = builder.create_sized_stack_slot(
+                        cranelift_codegen::ir::StackSlotData::new(
+                            cranelift_codegen::ir::StackSlotKind::ExplicitSlot, 16, 8,
+                        ),
+                    );
+                    let ptr = builder.ins().stack_addr(types::I64, slot, 0);
+                    builder.ins().store(cranelift_codegen::ir::MemFlags::new(), asin_val, ptr, 0);
+                    builder.ins().store(cranelift_codegen::ir::MemFlags::new(), result_der, ptr, 8);
+                    return Ok(Some(ptr));
+                }
+                return Ok(None);
+            }
+
+            // dual_acos(a) = (acos(a.val), -a.der / sqrt(1 - a.val²)) [chain rule: d/dx acos(x) = -1/sqrt(1-x²)]
+            if name == "dual_acos" {
+                if !arg_vals.is_empty() {
+                    let a_ptr = arg_vals[0];
+                    let a_val = builder.ins().load(types::F64, cranelift_codegen::ir::MemFlags::new(), a_ptr, 0);
+                    let a_der = builder.ins().load(types::F64, cranelift_codegen::ir::MemFlags::new(), a_ptr, 8);
+
+                    let acos_func = func_refs.get("runtime_math_acos").ok_or("runtime_math_acos not found")?;
+                    let sqrt_func = func_refs.get("runtime_math_sqrt").ok_or("runtime_math_sqrt not found")?;
+
+                    let acos_call = builder.ins().call(*acos_func, &[a_val]);
+                    let acos_val = builder.inst_results(acos_call)[0];
+
+                    // Derivative: -a.der / sqrt(1 - a.val²)
+                    let one = builder.ins().f64const(1.0);
+                    let a_sq = builder.ins().fmul(a_val, a_val);
+                    let one_minus_asq = builder.ins().fsub(one, a_sq);
+                    let sqrt_call = builder.ins().call(*sqrt_func, &[one_minus_asq]);
+                    let sqrt_val = builder.inst_results(sqrt_call)[0];
+                    let neg_a_der = builder.ins().fneg(a_der);
+                    let result_der = builder.ins().fdiv(neg_a_der, sqrt_val);
+
+                    let slot = builder.create_sized_stack_slot(
+                        cranelift_codegen::ir::StackSlotData::new(
+                            cranelift_codegen::ir::StackSlotKind::ExplicitSlot, 16, 8,
+                        ),
+                    );
+                    let ptr = builder.ins().stack_addr(types::I64, slot, 0);
+                    builder.ins().store(cranelift_codegen::ir::MemFlags::new(), acos_val, ptr, 0);
+                    builder.ins().store(cranelift_codegen::ir::MemFlags::new(), result_der, ptr, 8);
+                    return Ok(Some(ptr));
+                }
+                return Ok(None);
+            }
+
+            // dual_sinh(a) = (sinh(a.val), cosh(a.val) * a.der) [chain rule: d/dx sinh(x) = cosh(x)]
+            if name == "dual_sinh" {
+                if !arg_vals.is_empty() {
+                    let a_ptr = arg_vals[0];
+                    let a_val = builder.ins().load(types::F64, cranelift_codegen::ir::MemFlags::new(), a_ptr, 0);
+                    let a_der = builder.ins().load(types::F64, cranelift_codegen::ir::MemFlags::new(), a_ptr, 8);
+
+                    let sinh_func = func_refs.get("runtime_math_sinh").ok_or("runtime_math_sinh not found")?;
+                    let cosh_func = func_refs.get("runtime_math_cosh").ok_or("runtime_math_cosh not found")?;
+
+                    let sinh_call = builder.ins().call(*sinh_func, &[a_val]);
+                    let sinh_val = builder.inst_results(sinh_call)[0];
+
+                    // Derivative: cosh(a.val) * a.der
+                    let cosh_call = builder.ins().call(*cosh_func, &[a_val]);
+                    let cosh_val = builder.inst_results(cosh_call)[0];
+                    let result_der = builder.ins().fmul(cosh_val, a_der);
+
+                    let slot = builder.create_sized_stack_slot(
+                        cranelift_codegen::ir::StackSlotData::new(
+                            cranelift_codegen::ir::StackSlotKind::ExplicitSlot, 16, 8,
+                        ),
+                    );
+                    let ptr = builder.ins().stack_addr(types::I64, slot, 0);
+                    builder.ins().store(cranelift_codegen::ir::MemFlags::new(), sinh_val, ptr, 0);
+                    builder.ins().store(cranelift_codegen::ir::MemFlags::new(), result_der, ptr, 8);
+                    return Ok(Some(ptr));
+                }
+                return Ok(None);
+            }
+
+            // dual_cosh(a) = (cosh(a.val), sinh(a.val) * a.der) [chain rule: d/dx cosh(x) = sinh(x)]
+            if name == "dual_cosh" {
+                if !arg_vals.is_empty() {
+                    let a_ptr = arg_vals[0];
+                    let a_val = builder.ins().load(types::F64, cranelift_codegen::ir::MemFlags::new(), a_ptr, 0);
+                    let a_der = builder.ins().load(types::F64, cranelift_codegen::ir::MemFlags::new(), a_ptr, 8);
+
+                    let sinh_func = func_refs.get("runtime_math_sinh").ok_or("runtime_math_sinh not found")?;
+                    let cosh_func = func_refs.get("runtime_math_cosh").ok_or("runtime_math_cosh not found")?;
+
+                    let cosh_call = builder.ins().call(*cosh_func, &[a_val]);
+                    let cosh_val = builder.inst_results(cosh_call)[0];
+
+                    // Derivative: sinh(a.val) * a.der
+                    let sinh_call = builder.ins().call(*sinh_func, &[a_val]);
+                    let sinh_val = builder.inst_results(sinh_call)[0];
+                    let result_der = builder.ins().fmul(sinh_val, a_der);
+
+                    let slot = builder.create_sized_stack_slot(
+                        cranelift_codegen::ir::StackSlotData::new(
+                            cranelift_codegen::ir::StackSlotKind::ExplicitSlot, 16, 8,
+                        ),
+                    );
+                    let ptr = builder.ins().stack_addr(types::I64, slot, 0);
+                    builder.ins().store(cranelift_codegen::ir::MemFlags::new(), cosh_val, ptr, 0);
+                    builder.ins().store(cranelift_codegen::ir::MemFlags::new(), result_der, ptr, 8);
+                    return Ok(Some(ptr));
+                }
+                return Ok(None);
+            }
+
+            // dual_tanh(a) = (tanh(a.val), (1 - tanh²(a.val)) * a.der) [chain rule: d/dx tanh(x) = sech²(x) = 1 - tanh²(x)]
+            if name == "dual_tanh" {
+                if !arg_vals.is_empty() {
+                    let a_ptr = arg_vals[0];
+                    let a_val = builder.ins().load(types::F64, cranelift_codegen::ir::MemFlags::new(), a_ptr, 0);
+                    let a_der = builder.ins().load(types::F64, cranelift_codegen::ir::MemFlags::new(), a_ptr, 8);
+
+                    let tanh_func = func_refs.get("runtime_math_tanh").ok_or("runtime_math_tanh not found")?;
+
+                    let tanh_call = builder.ins().call(*tanh_func, &[a_val]);
+                    let tanh_val = builder.inst_results(tanh_call)[0];
+
+                    let one = builder.ins().f64const(1.0);
+                    let tanh_sq = builder.ins().fmul(tanh_val, tanh_val);
+                    let sech_sq = builder.ins().fsub(one, tanh_sq);
+                    let result_der = builder.ins().fmul(sech_sq, a_der);
+
+                    let slot = builder.create_sized_stack_slot(
+                        cranelift_codegen::ir::StackSlotData::new(
+                            cranelift_codegen::ir::StackSlotKind::ExplicitSlot, 16, 8,
+                        ),
+                    );
+                    let ptr = builder.ins().stack_addr(types::I64, slot, 0);
+                    builder.ins().store(cranelift_codegen::ir::MemFlags::new(), tanh_val, ptr, 0);
+                    builder.ins().store(cranelift_codegen::ir::MemFlags::new(), result_der, ptr, 8);
+                    return Ok(Some(ptr));
+                }
+                return Ok(None);
+            }
+
+            // dual_asinh(a) = (asinh(a.val), a.der / sqrt(a.val² + 1))
+            if name == "dual_asinh" {
+                if !arg_vals.is_empty() {
+                    let a_ptr = arg_vals[0];
+                    let a_val = builder.ins().load(types::F64, cranelift_codegen::ir::MemFlags::new(), a_ptr, 0);
+                    let a_der = builder.ins().load(types::F64, cranelift_codegen::ir::MemFlags::new(), a_ptr, 8);
+
+                    let asinh_func = func_refs.get("runtime_math_asinh").ok_or("runtime_math_asinh not found")?;
+                    let sqrt_func = func_refs.get("runtime_math_sqrt").ok_or("runtime_math_sqrt not found")?;
+
+                    let asinh_call = builder.ins().call(*asinh_func, &[a_val]);
+                    let asinh_val = builder.inst_results(asinh_call)[0];
+
+                    let one = builder.ins().f64const(1.0);
+                    let a_sq = builder.ins().fmul(a_val, a_val);
+                    let a_sq_plus_one = builder.ins().fadd(a_sq, one);
+                    let sqrt_call = builder.ins().call(*sqrt_func, &[a_sq_plus_one]);
+                    let sqrt_val = builder.inst_results(sqrt_call)[0];
+                    let result_der = builder.ins().fdiv(a_der, sqrt_val);
+
+                    let slot = builder.create_sized_stack_slot(
+                        cranelift_codegen::ir::StackSlotData::new(
+                            cranelift_codegen::ir::StackSlotKind::ExplicitSlot, 16, 8,
+                        ),
+                    );
+                    let ptr = builder.ins().stack_addr(types::I64, slot, 0);
+                    builder.ins().store(cranelift_codegen::ir::MemFlags::new(), asinh_val, ptr, 0);
+                    builder.ins().store(cranelift_codegen::ir::MemFlags::new(), result_der, ptr, 8);
+                    return Ok(Some(ptr));
+                }
+                return Ok(None);
+            }
+
+            // dual_acosh(a) = (acosh(a.val), a.der / sqrt(a.val² - 1))
+            if name == "dual_acosh" {
+                if !arg_vals.is_empty() {
+                    let a_ptr = arg_vals[0];
+                    let a_val = builder.ins().load(types::F64, cranelift_codegen::ir::MemFlags::new(), a_ptr, 0);
+                    let a_der = builder.ins().load(types::F64, cranelift_codegen::ir::MemFlags::new(), a_ptr, 8);
+
+                    let acosh_func = func_refs.get("runtime_math_acosh").ok_or("runtime_math_acosh not found")?;
+                    let sqrt_func = func_refs.get("runtime_math_sqrt").ok_or("runtime_math_sqrt not found")?;
+
+                    let acosh_call = builder.ins().call(*acosh_func, &[a_val]);
+                    let acosh_val = builder.inst_results(acosh_call)[0];
+
+                    let one = builder.ins().f64const(1.0);
+                    let a_sq = builder.ins().fmul(a_val, a_val);
+                    let a_sq_minus_one = builder.ins().fsub(a_sq, one);
+                    let sqrt_call = builder.ins().call(*sqrt_func, &[a_sq_minus_one]);
+                    let sqrt_val = builder.inst_results(sqrt_call)[0];
+                    let result_der = builder.ins().fdiv(a_der, sqrt_val);
+
+                    let slot = builder.create_sized_stack_slot(
+                        cranelift_codegen::ir::StackSlotData::new(
+                            cranelift_codegen::ir::StackSlotKind::ExplicitSlot, 16, 8,
+                        ),
+                    );
+                    let ptr = builder.ins().stack_addr(types::I64, slot, 0);
+                    builder.ins().store(cranelift_codegen::ir::MemFlags::new(), acosh_val, ptr, 0);
+                    builder.ins().store(cranelift_codegen::ir::MemFlags::new(), result_der, ptr, 8);
+                    return Ok(Some(ptr));
+                }
+                return Ok(None);
+            }
+
+            // dual_atanh(a) = (atanh(a.val), a.der / (1 - a.val²))
+            if name == "dual_atanh" {
+                if !arg_vals.is_empty() {
+                    let a_ptr = arg_vals[0];
+                    let a_val = builder.ins().load(types::F64, cranelift_codegen::ir::MemFlags::new(), a_ptr, 0);
+                    let a_der = builder.ins().load(types::F64, cranelift_codegen::ir::MemFlags::new(), a_ptr, 8);
+
+                    let atanh_func = func_refs.get("runtime_math_atanh").ok_or("runtime_math_atanh not found")?;
+
+                    let atanh_call = builder.ins().call(*atanh_func, &[a_val]);
+                    let atanh_val = builder.inst_results(atanh_call)[0];
+
+                    let one = builder.ins().f64const(1.0);
+                    let a_sq = builder.ins().fmul(a_val, a_val);
+                    let one_minus_asq = builder.ins().fsub(one, a_sq);
+                    let result_der = builder.ins().fdiv(a_der, one_minus_asq);
+
+                    let slot = builder.create_sized_stack_slot(
+                        cranelift_codegen::ir::StackSlotData::new(
+                            cranelift_codegen::ir::StackSlotKind::ExplicitSlot, 16, 8,
+                        ),
+                    );
+                    let ptr = builder.ins().stack_addr(types::I64, slot, 0);
+                    builder.ins().store(cranelift_codegen::ir::MemFlags::new(), atanh_val, ptr, 0);
+                    builder.ins().store(cranelift_codegen::ir::MemFlags::new(), result_der, ptr, 8);
+                    return Ok(Some(ptr));
+                }
+                return Ok(None);
+            }
+
+            // dual_log2(a) = (log2(a.val), a.der / (a.val * ln(2)))
+            if name == "dual_log2" {
+                if !arg_vals.is_empty() {
+                    let a_ptr = arg_vals[0];
+                    let a_val = builder.ins().load(types::F64, cranelift_codegen::ir::MemFlags::new(), a_ptr, 0);
+                    let a_der = builder.ins().load(types::F64, cranelift_codegen::ir::MemFlags::new(), a_ptr, 8);
+
+                    let log2_func = func_refs.get("runtime_math_log2").ok_or("runtime_math_log2 not found")?;
+
+                    let log2_call = builder.ins().call(*log2_func, &[a_val]);
+                    let log2_val = builder.inst_results(log2_call)[0];
+
+                    // Derivative: a.der / (a.val * ln(2))
+                    let ln2 = builder.ins().f64const(std::f64::consts::LN_2);
+                    let denom = builder.ins().fmul(a_val, ln2);
+                    let result_der = builder.ins().fdiv(a_der, denom);
+
+                    let slot = builder.create_sized_stack_slot(
+                        cranelift_codegen::ir::StackSlotData::new(
+                            cranelift_codegen::ir::StackSlotKind::ExplicitSlot, 16, 8,
+                        ),
+                    );
+                    let ptr = builder.ins().stack_addr(types::I64, slot, 0);
+                    builder.ins().store(cranelift_codegen::ir::MemFlags::new(), log2_val, ptr, 0);
+                    builder.ins().store(cranelift_codegen::ir::MemFlags::new(), result_der, ptr, 8);
+                    return Ok(Some(ptr));
+                }
+                return Ok(None);
+            }
+
+            // dual_log10(a) = (log10(a.val), a.der / (a.val * ln(10)))
+            if name == "dual_log10" {
+                if !arg_vals.is_empty() {
+                    let a_ptr = arg_vals[0];
+                    let a_val = builder.ins().load(types::F64, cranelift_codegen::ir::MemFlags::new(), a_ptr, 0);
+                    let a_der = builder.ins().load(types::F64, cranelift_codegen::ir::MemFlags::new(), a_ptr, 8);
+
+                    let log10_func = func_refs.get("runtime_math_log10").ok_or("runtime_math_log10 not found")?;
+
+                    let log10_call = builder.ins().call(*log10_func, &[a_val]);
+                    let log10_val = builder.inst_results(log10_call)[0];
+
+                    // Derivative: a.der / (a.val * ln(10))
+                    let ln10 = builder.ins().f64const(std::f64::consts::LN_10);
+                    let denom = builder.ins().fmul(a_val, ln10);
+                    let result_der = builder.ins().fdiv(a_der, denom);
+
+                    let slot = builder.create_sized_stack_slot(
+                        cranelift_codegen::ir::StackSlotData::new(
+                            cranelift_codegen::ir::StackSlotKind::ExplicitSlot, 16, 8,
+                        ),
+                    );
+                    let ptr = builder.ins().stack_addr(types::I64, slot, 0);
+                    builder.ins().store(cranelift_codegen::ir::MemFlags::new(), log10_val, ptr, 0);
+                    builder.ins().store(cranelift_codegen::ir::MemFlags::new(), result_der, ptr, 8);
+                    return Ok(Some(ptr));
+                }
+                return Ok(None);
+            }
+
+            // dual_atan2(y, x) = (atan2(y.val, x.val), (x.val * y.der - y.val * x.der) / (x.val² + y.val²))
+            if name == "dual_atan2" {
+                if arg_vals.len() >= 2 {
+                    let y_ptr = arg_vals[0];
+                    let x_ptr = arg_vals[1];
+
+                    let y_val = builder.ins().load(types::F64, cranelift_codegen::ir::MemFlags::new(), y_ptr, 0);
+                    let y_der = builder.ins().load(types::F64, cranelift_codegen::ir::MemFlags::new(), y_ptr, 8);
+                    let x_val = builder.ins().load(types::F64, cranelift_codegen::ir::MemFlags::new(), x_ptr, 0);
+                    let x_der = builder.ins().load(types::F64, cranelift_codegen::ir::MemFlags::new(), x_ptr, 8);
+
+                    let atan2_func = func_refs.get("runtime_math_atan2").ok_or("runtime_math_atan2 not found")?;
+
+                    let atan2_call = builder.ins().call(*atan2_func, &[y_val, x_val]);
+                    let atan2_val = builder.inst_results(atan2_call)[0];
+
+                    // Derivative: (x.val * y.der - y.val * x.der) / (x.val² + y.val²)
+                    let x_sq = builder.ins().fmul(x_val, x_val);
+                    let y_sq = builder.ins().fmul(y_val, y_val);
+                    let denom = builder.ins().fadd(x_sq, y_sq);
+                    let term1 = builder.ins().fmul(x_val, y_der);
+                    let term2 = builder.ins().fmul(y_val, x_der);
+                    let numer = builder.ins().fsub(term1, term2);
+                    let result_der = builder.ins().fdiv(numer, denom);
+
+                    let slot = builder.create_sized_stack_slot(
+                        cranelift_codegen::ir::StackSlotData::new(
+                            cranelift_codegen::ir::StackSlotKind::ExplicitSlot, 16, 8,
+                        ),
+                    );
+                    let ptr = builder.ins().stack_addr(types::I64, slot, 0);
+                    builder.ins().store(cranelift_codegen::ir::MemFlags::new(), atan2_val, ptr, 0);
+                    builder.ins().store(cranelift_codegen::ir::MemFlags::new(), result_der, ptr, 8);
+                    return Ok(Some(ptr));
+                }
                 return Ok(None);
             }
 
@@ -2862,6 +4037,137 @@ fn translate_instruction(
                     Ok(Some(zero))
                 }
             }
+        }
+
+        Op::PushHandler {
+            effect,
+            handler_name,
+            handler_id,
+        } => {
+            // Push a handler onto the handler stack
+            if let Some(&func_ref) = func_refs.get("runtime_handler_push") {
+                // Store effect string in global storage for lifetime
+                let effect_cstr = std::ffi::CString::new(effect.as_str())
+                    .unwrap_or_else(|_| std::ffi::CString::new("").unwrap());
+                let name_cstr = std::ffi::CString::new(handler_name.as_str())
+                    .unwrap_or_else(|_| std::ffi::CString::new("").unwrap());
+
+                let effect_ptr = if let Ok(mut storage) = STRING_STORAGE.lock() {
+                    storage.push(effect_cstr);
+                    storage.last().unwrap().as_ptr() as i64
+                } else {
+                    0
+                };
+
+                let name_ptr = if let Ok(mut storage) = STRING_STORAGE.lock() {
+                    storage.push(name_cstr);
+                    storage.last().unwrap().as_ptr() as i64
+                } else {
+                    0
+                };
+
+                let effect_val = builder.ins().iconst(types::I64, effect_ptr);
+                let name_val = builder.ins().iconst(types::I64, name_ptr);
+                let handler_id_val = builder.ins().iconst(types::I32, *handler_id as i64);
+                builder.ins().call(func_ref, &[effect_val, name_val, handler_id_val]);
+            }
+            Ok(Some(builder.ins().iconst(types::I64, 0)))
+        }
+
+        Op::PopHandler => {
+            // Pop the topmost handler from the stack
+            if let Some(&func_ref) = func_refs.get("runtime_handler_pop") {
+                builder.ins().call(func_ref, &[]);
+            }
+            Ok(Some(builder.ins().iconst(types::I64, 0)))
+        }
+
+        Op::DispatchEffect { effect, op, args } => {
+            // Dispatch effect through handler stack - checks for handlers first
+            let arg_vals: Vec<_> = args
+                .iter()
+                .map(|a| get_value(values, *a))
+                .collect::<Result<_, _>>()?;
+
+            // Check if there's a handler for this effect using runtime_handler_dispatch
+            if let Some(&dispatch_ref) = func_refs.get("runtime_handler_dispatch") {
+                // Store effect and op strings in global storage
+                let effect_cstr = std::ffi::CString::new(effect.as_str())
+                    .unwrap_or_else(|_| std::ffi::CString::new("").unwrap());
+                let op_cstr = std::ffi::CString::new(op.as_str())
+                    .unwrap_or_else(|_| std::ffi::CString::new("").unwrap());
+
+                let effect_ptr = if let Ok(mut storage) = STRING_STORAGE.lock() {
+                    storage.push(effect_cstr);
+                    storage.last().unwrap().as_ptr() as i64
+                } else {
+                    0
+                };
+
+                let op_ptr = if let Ok(mut storage) = STRING_STORAGE.lock() {
+                    storage.push(op_cstr);
+                    storage.last().unwrap().as_ptr() as i64
+                } else {
+                    0
+                };
+
+                let effect_val = builder.ins().iconst(types::I64, effect_ptr);
+                let op_val = builder.ins().iconst(types::I64, op_ptr);
+
+                // Build args array on stack
+                if !arg_vals.is_empty() {
+                    let args_slot = builder.create_sized_stack_slot(
+                        cranelift_codegen::ir::StackSlotData::new(
+                            cranelift_codegen::ir::StackSlotKind::ExplicitSlot,
+                            (arg_vals.len() * 8) as u32,
+                            8,
+                        ),
+                    );
+                    let args_ptr = builder.ins().stack_addr(types::I64, args_slot, 0);
+
+                    // Store args as f64
+                    for (i, &val) in arg_vals.iter().enumerate() {
+                        let f64_val = if builder.func.dfg.value_type(val) == types::F64 {
+                            val
+                        } else if builder.func.dfg.value_type(val).is_int() {
+                            builder.ins().fcvt_from_sint(types::F64, val)
+                        } else {
+                            builder.ins().f64const(0.0)
+                        };
+                        builder.ins().store(
+                            MemFlags::new(),
+                            f64_val,
+                            args_ptr,
+                            (i * 8) as i32,
+                        );
+                    }
+
+                    let args_len = builder.ins().iconst(types::I64, arg_vals.len() as i64);
+                    let dispatch_call = builder.ins().call(
+                        dispatch_ref,
+                        &[effect_val, op_val, args_ptr, args_len],
+                    );
+                    let results = builder.inst_results(dispatch_call);
+                    if !results.is_empty() {
+                        return Ok(Some(results[0]));
+                    }
+                } else {
+                    // No args - create empty args pointer
+                    let null_ptr = builder.ins().iconst(types::I64, 0);
+                    let zero_len = builder.ins().iconst(types::I64, 0);
+                    let dispatch_call = builder.ins().call(
+                        dispatch_ref,
+                        &[effect_val, op_val, null_ptr, zero_len],
+                    );
+                    let results = builder.inst_results(dispatch_call);
+                    if !results.is_empty() {
+                        return Ok(Some(results[0]));
+                    }
+                }
+            }
+
+            // Fall back to default value if no handler dispatch available
+            Ok(Some(builder.ins().f64const(0.0)))
         }
     }
 }

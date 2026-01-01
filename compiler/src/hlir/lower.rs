@@ -631,6 +631,14 @@ impl<'a> LoweringContext<'a> {
                     if matches!(
                         name,
                         "print" | "println" | "dbg" | "panic" | "assert" | "assert_eq"
+                            | "dual" | "dual_value" | "dual_deriv"
+                            | "dual_add" | "dual_sub" | "dual_mul" | "dual_div"
+                            | "dual_sin" | "dual_cos" | "dual_exp" | "dual_log"
+                            | "dual_sqrt" | "dual_pow"
+                            | "dual_tan" | "dual_atan" | "dual_abs"
+                            | "dual_asin" | "dual_acos" | "dual_sinh" | "dual_cosh"
+                            | "dual_tanh" | "dual_asinh" | "dual_acosh" | "dual_atanh"
+                            | "dual_log2" | "dual_log10" | "dual_atan2"
                     ) {
                         return Some(self.builder.build_call(name, arg_vals, ty));
                     }
