@@ -36,8 +36,8 @@ pub use handler_capability::{
     HandlerResult, HandlerState, OperationSpec, SuspensionId,
 };
 pub use handlers::{
-    AllocHandler, AsyncHandler, DivHandler, EpistemicHandler, GpuHandler, IOHandler, MutHandler,
-    NetworkHandler, PanicHandler, ProbHandler,
+    AllocHandler, AsyncHandler, DivHandler, EpistemicHandler, ExnHandler, GpuHandler, IOHandler,
+    MutHandler, NetworkHandler, PanicHandler, ProbHandler, SensorHandler,
 };
 pub use inference::{EffectChecker, EffectError, EffectErrorKind};
 
