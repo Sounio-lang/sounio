@@ -21,6 +21,23 @@
 //! - `SensorHandler`: Handles sensor operations (read, calibrate, batch_read, etc.)
 //! - `ExnHandler`: Handles typed exception operations (throw, try_catch, rethrow, etc.)
 //!
+//! # Handler Registry
+//!
+//! Use `HandlerRegistry` to manage handlers centrally:
+//!
+//! ```ignore
+//! use sounio::effects::handlers::{HandlerRegistry, DefaultHandlerFactory};
+//!
+//! // Create with all default handlers
+//! let registry = HandlerRegistry::with_defaults();
+//!
+//! // Or build selectively
+//! let registry = HandlerRegistryBuilder::new()
+//!     .with_io()
+//!     .with_mut()
+//!     .build();
+//! ```
+//!
 //! # Example
 //!
 //! ```ignore
@@ -45,6 +62,7 @@ mod mut_handler;
 mod network_handler;
 mod panic_handler;
 mod prob_handler;
+mod registry;
 mod sensor_handler;
 
 pub use alloc_handler::AllocHandler;
@@ -58,4 +76,5 @@ pub use mut_handler::MutHandler;
 pub use network_handler::NetworkHandler;
 pub use panic_handler::PanicHandler;
 pub use prob_handler::ProbHandler;
+pub use registry::{DefaultHandlerFactory, HandlerFactory, HandlerRegistry, HandlerRegistryBuilder};
 pub use sensor_handler::SensorHandler;
