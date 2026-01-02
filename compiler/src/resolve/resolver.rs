@@ -1,5 +1,8 @@
 //! Name resolution pass
 
+// Miette's derive macros generate code that triggers unused_assignments warnings
+#![allow(unused_assignments)]
+
 use super::symbols::*;
 use crate::ast::{ModuleId, *};
 use crate::common::{NodeId, Span};

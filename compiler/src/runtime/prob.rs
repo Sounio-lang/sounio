@@ -538,7 +538,7 @@ impl ProbRuntime {
     {
         let dim = initial.len();
         let mut results = Vec::with_capacity(samples);
-        let mut accepted = 0usize;
+        let mut _accepted = 0usize; // TODO: compute acceptance rate like MH sampler
 
         let mut q = initial.to_vec();
 
@@ -591,7 +591,7 @@ impl ProbRuntime {
             // Accept/reject
             let log_alpha = h_init - h_prop;
             if log_alpha >= 0.0 || self.rng.next_f64().ln() < log_alpha {
-                accepted += 1;
+                _accepted += 1;
                 // q already updated
             } else {
                 q = q_init;

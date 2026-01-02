@@ -4,6 +4,9 @@
 //! This module detects common patterns that indicate users are trying to use
 //! unimplemented or unsupported syntax and provides helpful guidance.
 
+// Miette's derive macros generate code that triggers unused_assignments warnings
+#![allow(unused_assignments)]
+
 use crate::common::Span;
 use crate::lexer::TokenKind;
 use miette::{Diagnostic, SourceSpan};

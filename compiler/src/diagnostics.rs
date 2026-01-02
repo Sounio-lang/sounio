@@ -7,6 +7,10 @@
 //! - Parser recovery errors
 //! - Enhanced error context and related information
 
+// Miette's derive macros generate code that triggers unused_assignments warnings
+// because struct fields are assigned but read through format strings in attributes
+#![allow(unused_assignments)]
+
 use crate::common::Span;
 use miette::{Diagnostic, NamedSource, Severity, SourceSpan};
 use std::sync::Arc;

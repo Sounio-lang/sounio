@@ -21,6 +21,9 @@
 //! - `:env` - Show current bindings
 //! - `:funcs` - Show defined functions
 
+// Miette's derive macros generate code that triggers unused_assignments warnings
+#![allow(unused_assignments)]
+
 use crate::epistemic::{EpistemicStatus, Revisability, Source};
 use crate::hir;
 use crate::interp::{Interpreter, Value};

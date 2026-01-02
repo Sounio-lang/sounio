@@ -957,6 +957,7 @@ impl<H: NeuralSuggestionHandler> NeSyLoop<H> {
     }
 
     /// Run the full NeSy loop
+    #[allow(unused_assignments)] // neural_iterations is used for loop control
     pub fn solve(&mut self, mut state: ProofState) -> DeductionResult {
         let mut neural_iterations = 0;
 
