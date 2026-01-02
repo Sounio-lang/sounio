@@ -35,7 +35,10 @@ pub use handler_capability::{
     ContinuationId as HandlerContinuationId, EpistemicImpact, HandlerCapability, HandlerError,
     HandlerResult, HandlerState, OperationSpec, SuspensionId,
 };
-pub use handlers::{AllocHandler, AsyncHandler, IOHandler, MutHandler, PanicHandler, ProbHandler};
+pub use handlers::{
+    AllocHandler, AsyncHandler, DivHandler, GpuHandler, IOHandler, MutHandler, PanicHandler,
+    ProbHandler,
+};
 pub use inference::{EffectChecker, EffectError, EffectErrorKind};
 
 /// Runtime effect handler trait
