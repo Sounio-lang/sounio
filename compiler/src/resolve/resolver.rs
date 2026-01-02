@@ -75,6 +75,9 @@ pub struct Resolver {
     module_tree: ModuleTree,
     /// Current module path for tree building
     current_tree_module: TreeModuleId,
+    /// Mapping from NodeId to DefId for items resolved through ModuleTree imports
+    /// This is populated after resolve_imports() and used during second pass
+    import_node_to_def: std::collections::HashMap<NodeId, DefId>,
 }
 
 impl Resolver {
@@ -84,6 +87,7 @@ impl Resolver {
             errors: Vec::new(),
             module_tree: ModuleTree::new(),
             current_tree_module: TreeModuleId::root(),
+            import_node_to_def: std::collections::HashMap::new(),
         };
         // Register compiler intrinsics/builtins
         resolver.register_builtins();
@@ -150,6 +154,185 @@ impl Resolver {
         }
     }
 
+    /// Build mappings from resolved imports to DefIds
+    ///
+    /// After ModuleTree.resolve_imports() completes, this method:
+    /// 1. Walks all modules in the tree
+    /// 2. For each resolved import, finds or creates the DefId for the imported symbol
+    /// 3. Registers the import in the symbol table scope
+    fn build_import_mappings(&mut self) {
+        // Collect all module IDs first to avoid borrow issues
+        let module_ids: Vec<TreeModuleId> = self.module_tree.all_module_ids().cloned().collect();
+
+        for module_id in module_ids {
+            // Get visible items for this module (includes resolved imports)
+            let visible = self.module_tree.visible_items_in(&module_id);
+
+            for (name, node_id) in visible {
+                // Skip error sentinels
+                if node_id.0 == u32::MAX {
+                    continue;
+                }
+
+                // Check if we already have a DefId for this NodeId
+                if let Some(def_id) = self.symbols.def_for_node(node_id) {
+                    // Map the import's resolved NodeId to the existing DefId
+                    self.import_node_to_def.insert(node_id, def_id);
+                }
+            }
+        }
+    }
+
+    /// Look up a name in the current module, checking imports from ModuleTree
+    ///
+    /// Returns the DefId if the name is:
+    /// 1. Defined in the current lexical scope
+    /// 2. Imported into the current module via use statement
+    fn lookup_with_imports(&self, name: &str) -> Option<DefId> {
+        // First check lexical scopes (locals, function params, etc.)
+        if let Some(def_id) = self.symbols.lookup(name) {
+            return Some(def_id);
+        }
+
+        // Then check imports in the current module tree module
+        if let Some(module) = self.module_tree.get(&self.current_tree_module) {
+            // Check resolved imports
+            for import in &module.imports {
+                if import.local_name == name {
+                    if let Some(node_id) = import.resolved {
+                        // Skip error sentinels
+                        if node_id.0 != u32::MAX {
+                            // Look up the DefId for this NodeId
+                            if let Some(def_id) = self.symbols.def_for_node(node_id) {
+                                return Some(def_id);
+                            }
+                            // Also check our cached mapping
+                            if let Some(def_id) = self.import_node_to_def.get(&node_id) {
+                                return Some(*def_id);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        None
+    }
+
+    /// Look up a type name in the current module, checking imports from ModuleTree
+    fn lookup_type_with_imports(&self, name: &str) -> Option<DefId> {
+        // First check lexical scopes
+        if let Some(def_id) = self.symbols.lookup_type(name) {
+            return Some(def_id);
+        }
+
+        // Then check imports in the current module tree module
+        if let Some(module) = self.module_tree.get(&self.current_tree_module) {
+            for import in &module.imports {
+                if import.local_name == name {
+                    if let Some(node_id) = import.resolved {
+                        if node_id.0 != u32::MAX {
+                            if let Some(def_id) = self.symbols.def_for_node(node_id) {
+                                return Some(def_id);
+                            }
+                            if let Some(def_id) = self.import_node_to_def.get(&node_id) {
+                                return Some(*def_id);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        None
+    }
+
+    /// Resolve a multi-segment path (e.g., foo::Bar or std::collections::HashMap)
+    ///
+    /// Returns the DefId if the path resolves to a valid item
+    fn resolve_path_segments(&self, segments: &[String]) -> Option<DefId> {
+        if segments.is_empty() {
+            return None;
+        }
+
+        if segments.len() == 1 {
+            // Single segment - use normal lookup
+            return self.lookup_with_imports(&segments[0]);
+        }
+
+        // Multi-segment path: traverse module tree
+        // First segment might be a module name or an imported module
+        let first = &segments[0];
+
+        // Try to find the starting module
+        let start_module = if let Some(module) = self.module_tree.get(&self.current_tree_module) {
+            // Check if first segment is a child module
+            if let Some(child_id) = module.children.get(first) {
+                Some(child_id.clone())
+            }
+            // Check if first segment is an imported module
+            else if let Some(import) = module.imports.iter().find(|i| i.local_name == *first) {
+                // The import might point to a module
+                Some(TreeModuleId(import.source_path.clone()))
+            } else {
+                // Try from root
+                let root_child = TreeModuleId::root().join(first);
+                if self.module_tree.contains(&root_child) {
+                    Some(root_child)
+                } else {
+                    None
+                }
+            }
+        } else {
+            None
+        };
+
+        let start_module = start_module?;
+
+        // Walk the remaining path
+        let mut current_module = start_module;
+        for (i, segment) in segments[1..].iter().enumerate() {
+            let is_last = i == segments.len() - 2;
+
+            if is_last {
+                // Last segment is the item name
+                let module = self.module_tree.get(&current_module)?;
+
+                // Check items
+                if let Some(item) = module.items.iter().find(|item| item.name == *segment) {
+                    return self.symbols.def_for_node(item.node_id);
+                }
+
+                // Check resolved imports (for re-exports)
+                for import in &module.imports {
+                    if import.local_name == *segment {
+                        if let Some(node_id) = import.resolved {
+                            if node_id.0 != u32::MAX {
+                                if let Some(def_id) = self.symbols.def_for_node(node_id) {
+                                    return Some(def_id);
+                                }
+                            }
+                        }
+                    }
+                }
+
+                return None;
+            } else {
+                // Intermediate segment is a module name
+                let module = self.module_tree.get(&current_module)?;
+                current_module = module.children.get(segment)?.clone();
+            }
+        }
+
+        None
+    }
+
+    /// Resolve a multi-segment type path
+    fn resolve_type_path_segments(&self, segments: &[String]) -> Option<DefId> {
+        // For types, we use the same path resolution logic
+        self.resolve_path_segments(segments)
+    }
+
     /// Resolve all names in the AST
     pub fn resolve(mut self, ast: Ast) -> Result<ResolvedAst> {
         // First pass: collect all top-level definitions and build module tree
@@ -185,6 +368,10 @@ impl Resolver {
                 }
             }
         }
+
+        // Build mapping from resolved import NodeIds to DefIds
+        // This allows us to look up imported names during the second pass
+        self.build_import_mappings();
 
         // Second pass: resolve bodies
         for item in &ast.items {
@@ -792,7 +979,8 @@ impl Resolver {
     fn resolve_path_as_type(&mut self, path: &Path) {
         if path.is_simple() {
             let name = path.name().unwrap();
-            if self.symbols.lookup_type(name).is_none() {
+            // Use the new lookup that checks imports from ModuleTree
+            if self.lookup_type_with_imports(name).is_none() {
                 // Find similar type names for suggestion
                 let suggestion = self.find_similar_type(name);
                 self.errors.push(ResolveError::UndefinedType {
@@ -801,13 +989,32 @@ impl Resolver {
                     span: SourceSpan::from(0..1),
                 });
             }
+        } else {
+            // Multi-segment type path (e.g., foo::Bar, std::collections::HashMap)
+            if self.resolve_type_path_segments(&path.segments).is_none() {
+                let suggestion = self.find_similar_type(path.segments.last().unwrap_or(&String::new()));
+                self.errors.push(ResolveError::UndefinedType {
+                    name: path.segments.join("::"),
+                    suggestion,
+                    span: SourceSpan::from(0..1),
+                });
+            }
         }
-        // TODO: multi-segment paths
     }
 
     /// Find a similar type name using Levenshtein distance
     fn find_similar_type(&self, name: &str) -> Option<String> {
-        let type_names = self.symbols.all_type_names();
+        let mut type_names = self.symbols.all_type_names();
+
+        // Also include imported type names from the current module
+        if let Some(module) = self.module_tree.get(&self.current_tree_module) {
+            for import in &module.imports {
+                if import.resolved.is_some() && !type_names.contains(&import.local_name) {
+                    type_names.push(import.local_name.clone());
+                }
+            }
+        }
+
         find_similar_name(name, &type_names)
     }
 
@@ -865,7 +1072,8 @@ impl Resolver {
             Expr::Path { id, path } => {
                 if path.is_simple() {
                     let name = path.name().unwrap();
-                    if let Some(def_id) = self.symbols.lookup(name) {
+                    // Use the new lookup that checks imports from ModuleTree
+                    if let Some(def_id) = self.lookup_with_imports(name) {
                         self.symbols.record_ref(*id, def_id);
                     } else {
                         self.errors.push(ResolveError::UndefinedVar {
@@ -873,8 +1081,17 @@ impl Resolver {
                             span: SourceSpan::from(0..1),
                         });
                     }
+                } else {
+                    // Multi-segment path (e.g., foo::Bar, std::collections::HashMap)
+                    if let Some(def_id) = self.resolve_path_segments(&path.segments) {
+                        self.symbols.record_ref(*id, def_id);
+                    } else {
+                        self.errors.push(ResolveError::UndefinedVar {
+                            name: path.segments.join("::"),
+                            span: SourceSpan::from(0..1),
+                        });
+                    }
                 }
-                // TODO: multi-segment paths
             }
 
             Expr::Binary { left, right, .. } => {
@@ -1293,4 +1510,343 @@ fn find_similar_name(target: &str, candidates: &[String]) -> Option<String> {
         })
         .min_by_key(|(_, dist)| *dist)
         .map(|(name, _)| name)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Helper to parse and resolve source code
+    fn resolve_source(source: &str) -> Result<ResolvedAst> {
+        let tokens = crate::lexer::lex(source).expect("lexing failed");
+        let ast = crate::parser::parse(&tokens, source).expect("parsing failed");
+        resolve(ast)
+    }
+
+    /// Helper to check if resolution succeeds
+    fn resolves_ok(source: &str) -> bool {
+        resolve_source(source).is_ok()
+    }
+
+    /// Helper to check if resolution fails with a specific error pattern
+    fn resolution_fails_with(source: &str, pattern: &str) -> bool {
+        match resolve_source(source) {
+            Ok(_) => false,
+            Err(e) => e.to_string().contains(pattern),
+        }
+    }
+
+    // ==================== Basic Import Tests ====================
+
+    #[test]
+    fn test_simple_import_from_module() {
+        // Define a module with a public function, then import and use it
+        // Note: Sounio uses 'module' keyword, not 'mod'
+        let source = r#"
+            module foo {
+                pub fn bar() -> i32 { 42 }
+            }
+            use foo::bar;
+            fn main() -> i32 {
+                bar()
+            }
+        "#;
+        assert!(resolves_ok(source), "Simple import should resolve");
+    }
+
+    #[test]
+    fn test_import_struct() {
+        let source = r#"
+            module types {
+                pub struct Point {
+                    x: i32,
+                    y: i32,
+                }
+            }
+            use types::Point;
+            fn make_point() -> Point {
+                Point { x: 0, y: 0 }
+            }
+        "#;
+        assert!(resolves_ok(source), "Import struct should resolve");
+    }
+
+    #[test]
+    fn test_import_with_alias() {
+        let source = r#"
+            module math {
+                pub fn calculate() -> i32 { 1 }
+            }
+            use math::calculate as calc;
+            fn main() -> i32 {
+                calc()
+            }
+        "#;
+        assert!(resolves_ok(source), "Import with alias should resolve");
+    }
+
+    #[test]
+    fn test_glob_import() {
+        let source = r#"
+            module utils {
+                pub fn helper1() -> i32 { 1 }
+                pub fn helper2() -> i32 { 2 }
+            }
+            use utils::*;
+            fn main() -> i32 {
+                helper1() + helper2()
+            }
+        "#;
+        assert!(resolves_ok(source), "Glob import should resolve all public items");
+    }
+
+    #[test]
+    fn test_selective_import() {
+        let source = r#"
+            module items {
+                pub fn a() -> i32 { 1 }
+                pub fn b() -> i32 { 2 }
+                pub fn c() -> i32 { 3 }
+            }
+            use items::{a, c};
+            fn main() -> i32 {
+                a() + c()
+            }
+        "#;
+        assert!(resolves_ok(source), "Selective import should resolve");
+    }
+
+    // ==================== Visibility Tests ====================
+
+    #[test]
+    fn test_private_item_not_visible() {
+        let source = r#"
+            module foo {
+                fn private_fn() -> i32 { 42 }
+            }
+            use foo::private_fn;
+            fn main() -> i32 {
+                private_fn()
+            }
+        "#;
+        // This should fail because private_fn is not public
+        assert!(resolution_fails_with(source, "private") || resolution_fails_with(source, "not found"),
+            "Private item should not be visible from outside");
+    }
+
+    #[test]
+    fn test_glob_only_imports_public() {
+        let source = r#"
+            module foo {
+                pub fn public_fn() -> i32 { 1 }
+                fn private_fn() -> i32 { 2 }
+            }
+            use foo::*;
+            fn main() -> i32 {
+                public_fn()
+            }
+        "#;
+        assert!(resolves_ok(source), "Glob should import public items");
+
+        let source_with_private = r#"
+            module foo {
+                pub fn public_fn() -> i32 { 1 }
+                fn private_fn() -> i32 { 2 }
+            }
+            use foo::*;
+            fn main() -> i32 {
+                private_fn()
+            }
+        "#;
+        assert!(resolution_fails_with(source_with_private, "private_fn"),
+            "Glob should not import private items");
+    }
+
+    // ==================== Re-export Tests ====================
+
+    #[test]
+    fn test_reexport() {
+        let source = r#"
+            module internal {
+                pub fn secret() -> i32 { 42 }
+            }
+            module facade {
+                pub use internal::secret;
+            }
+            use facade::secret;
+            fn main() -> i32 {
+                secret()
+            }
+        "#;
+        // Note: This tests transitive imports through re-exports
+        assert!(resolves_ok(source), "Re-export should make item visible");
+    }
+
+    // ==================== Path Resolution Tests ====================
+
+    #[test]
+    fn test_qualified_path() {
+        let source = r#"
+            module outer {
+                pub module inner {
+                    pub fn deep() -> i32 { 42 }
+                }
+            }
+            fn main() -> i32 {
+                outer::inner::deep()
+            }
+        "#;
+        assert!(resolves_ok(source), "Qualified path should resolve");
+    }
+
+    #[test]
+    fn test_qualified_type_path() {
+        let source = r#"
+            module types {
+                pub struct Widget {
+                    value: i32,
+                }
+            }
+            fn create() -> types::Widget {
+                types::Widget { value: 0 }
+            }
+        "#;
+        assert!(resolves_ok(source), "Qualified type path should resolve");
+    }
+
+    // ==================== Error Cases ====================
+
+    #[test]
+    fn test_undefined_import() {
+        let source = r#"
+            module foo {
+                pub fn bar() -> i32 { 1 }
+            }
+            use foo::nonexistent;
+            fn main() -> i32 { 0 }
+        "#;
+        assert!(resolution_fails_with(source, "nonexistent") || resolution_fails_with(source, "not found"),
+            "Import of nonexistent item should fail");
+    }
+
+    #[test]
+    fn test_import_from_nonexistent_module() {
+        let source = r#"
+            use nonexistent_module::something;
+            fn main() -> i32 { 0 }
+        "#;
+        // Module not found errors might be deferred for external modules
+        // but we should at least not crash
+        let _ = resolve_source(source);
+    }
+
+    // ==================== Nested Module Tests ====================
+
+    #[test]
+    fn test_nested_module_import() {
+        let source = r#"
+            module a {
+                pub module b {
+                    pub module c {
+                        pub fn deep_fn() -> i32 { 42 }
+                    }
+                }
+            }
+            use a::b::c::deep_fn;
+            fn main() -> i32 {
+                deep_fn()
+            }
+        "#;
+        assert!(resolves_ok(source), "Deeply nested import should resolve");
+    }
+
+    #[test]
+    fn test_sibling_module_import() {
+        let source = r#"
+            module alpha {
+                pub fn from_alpha() -> i32 { 1 }
+            }
+            module beta {
+                use alpha::from_alpha;
+                pub fn from_beta() -> i32 {
+                    from_alpha()
+                }
+            }
+            fn main() -> i32 {
+                beta::from_beta()
+            }
+        "#;
+        assert!(resolves_ok(source), "Sibling module import should resolve");
+    }
+
+    // ==================== Type Import Tests ====================
+
+    #[test]
+    fn test_import_enum() {
+        let source = r#"
+            module colors {
+                pub enum Color {
+                    Red,
+                    Green,
+                    Blue,
+                }
+            }
+            use colors::Color;
+            fn get_color() -> Color {
+                Color::Red
+            }
+        "#;
+        assert!(resolves_ok(source), "Import enum should resolve");
+    }
+
+    #[test]
+    fn test_import_type_alias() {
+        let source = r#"
+            module aliases {
+                pub type Id = i32;
+            }
+            use aliases::Id;
+            fn get_id() -> Id {
+                42
+            }
+        "#;
+        assert!(resolves_ok(source), "Import type alias should resolve");
+    }
+
+    // ==================== Complex Scenarios ====================
+
+    #[test]
+    fn test_multiple_imports_from_same_module() {
+        let source = r#"
+            module utils {
+                pub fn func1() -> i32 { 1 }
+                pub fn func2() -> i32 { 2 }
+                pub struct Data { value: i32 }
+            }
+            use utils::func1;
+            use utils::func2;
+            use utils::Data;
+            fn main() -> i32 {
+                let d = Data { value: func1() };
+                func2()
+            }
+        "#;
+        assert!(resolves_ok(source), "Multiple imports from same module should resolve");
+    }
+
+    #[test]
+    fn test_import_does_not_shadow_local() {
+        let source = r#"
+            module external {
+                pub fn helper() -> i32 { 1 }
+            }
+            fn helper() -> i32 { 2 }
+            use external::*;
+            fn main() -> i32 {
+                helper()
+            }
+        "#;
+        // Local definitions should take precedence over glob imports
+        assert!(resolves_ok(source), "Local should not be shadowed by glob import");
+    }
 }

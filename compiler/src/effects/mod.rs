@@ -9,10 +9,17 @@
 //! resuming continuations, which is essential for implementing algebraic effect
 //! handlers. See the module documentation for details on the theoretical
 //! background and implementation approach.
+//!
+//! # Concrete Handlers
+//!
+//! The `handlers` submodule contains concrete implementations of effect handlers
+//! using the `HandlerCapability` trait. These enable both Track A (CPS-based)
+//! and Track B (epistemic) effect handling.
 
 pub mod continuation;
 pub mod epistemic_effects;
 pub mod handler_capability;
+pub mod handlers;
 pub mod inference;
 
 pub use crate::types::effects::*;
@@ -28,6 +35,7 @@ pub use handler_capability::{
     ContinuationId as HandlerContinuationId, EpistemicImpact, HandlerCapability, HandlerError,
     HandlerResult, HandlerState, OperationSpec, SuspensionId,
 };
+pub use handlers::{IOHandler, MutHandler};
 pub use inference::{EffectChecker, EffectError, EffectErrorKind};
 
 /// Runtime effect handler trait

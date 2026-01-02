@@ -464,7 +464,7 @@ impl Debug for Continuation {
 /// Implementations:
 /// - Track A: Foundational handlers with real continuation support
 /// - Track B: Epistemic handlers with confidence tracking
-pub trait HandlerCapability: Debug + Send + Sync {
+pub trait HandlerCapability: Debug {
     /// Name of the effect this handler handles
     fn effect_name(&self) -> &str;
 
