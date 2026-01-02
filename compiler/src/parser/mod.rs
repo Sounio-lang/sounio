@@ -2347,6 +2347,9 @@ impl<'a> Parser<'a> {
         self.expect(TokenKind::Eq)?;
         let value = self.parse_expr()?;
 
+        // Consume trailing semicolon (required for global declarations)
+        self.expect(TokenKind::Semi)?;
+
         let end = self.span();
 
         Ok(Item::Global(GlobalDef {

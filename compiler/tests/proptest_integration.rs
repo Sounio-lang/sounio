@@ -8,6 +8,38 @@ use proptest::prelude::*;
 use sounio::{check, interp, lexer, parser};
 
 // ============================================================================
+// Reserved Keywords
+// ============================================================================
+
+/// Reserved keywords that cannot be used as identifiers
+const RESERVED_KEYWORDS: &[&str] = &[
+    // Basic keywords
+    "as", "in", "if", "fn", "do", "or",
+    // Control flow
+    "for", "let", "var", "mut", "pub", "use", "mod", "ref",
+    // Types and declarations
+    "type", "enum", "impl", "self", "Self", "true", "false",
+    "struct", "trait", "where", "const", "match", "while", "loop",
+    "break", "return", "continue", "else", "move", "copy", "drop",
+    // Effects and advanced features
+    "with", "from", "async", "await", "spawn", "effect", "handler",
+    "handle", "perform", "resume", "linear", "affine", "kernel",
+    "tile", "device", "shared", "gpu", "sample", "observe", "infer",
+    "proof", "ode", "pde", "causal", "nodes", "edges", "state",
+    "params", "domain", "boundary", "initial", "dual", "grad",
+    "import", "export", "module", "ontology", "align", "distance",
+    "threshold", "compat", "extern", "equations", "query",
+    // Built-in types
+    "i8", "i16", "i32", "i64", "i128", "u8", "u16", "u32", "u64", "u128",
+    "f32", "f64", "bool", "char", "str",
+];
+
+/// Check if a string is a reserved keyword
+fn is_keyword(s: &str) -> bool {
+    RESERVED_KEYWORDS.contains(&s)
+}
+
+// ============================================================================
 // Arbitrary Generators (for future use with more complex tests)
 // ============================================================================
 
@@ -148,6 +180,18 @@ fn interpret_doesnt_panic(source: &str) -> bool {
 // Parser Tests
 // ============================================================================
 
+/// Strategy for generating valid lowercase identifiers (not keywords)
+fn valid_lowercase_ident() -> impl Strategy<Value = String> {
+    "[a-z][a-z0-9_]{0,10}"
+        .prop_filter("filter out keywords", |s| !is_keyword(s))
+}
+
+/// Strategy for generating valid uppercase identifiers (not keywords)
+fn valid_uppercase_ident() -> impl Strategy<Value = String> {
+    "[A-Z][a-zA-Z0-9_]{0,10}"
+        .prop_filter("filter out keywords", |s| !is_keyword(s))
+}
+
 proptest! {
     #![proptest_config(ProptestConfig::with_cases(500))]
 
@@ -163,7 +207,7 @@ proptest! {
 
     #[test]
     fn simple_let_parses(
-        name in "[a-z][a-z0-9_]{0,10}",
+        name in valid_lowercase_ident(),
         value in 0i32..1000,
     ) {
         let source = format!("let {} = {};", name, value);
@@ -172,18 +216,19 @@ proptest! {
 
     #[test]
     fn simple_function_parses(
-        name in "[a-z][a-z0-9_]{0,10}",
+        name in valid_lowercase_ident(),
         ret_val in 0i32..1000,
     ) {
-        let source = format!("fn {}() -> i32 {{ return {}; }}", name, ret_val);
+        // Sounio uses expression-based returns or `return` without semicolon
+        let source = format!("fn {}() -> i32 {{ {} }}", name, ret_val);
         prop_assert!(can_parse(&source), "Failed to parse: {}", source);
     }
 
     #[test]
     fn struct_parses(
-        name in "[A-Z][a-zA-Z0-9_]{0,10}",
-        field1 in "[a-z][a-z0-9_]{0,10}",
-        field2 in "[a-z][a-z0-9_]{0,10}",
+        name in valid_uppercase_ident(),
+        field1 in valid_lowercase_ident(),
+        field2 in valid_lowercase_ident(),
     ) {
         let source = format!("struct {} {{ {}: i32, {}: bool }}", name, field1, field2);
         prop_assert!(can_parse(&source), "Failed to parse: {}", source);
@@ -207,7 +252,7 @@ proptest! {
 
     #[test]
     fn typecheck_never_panics_on_valid_syntax(
-        name in "[a-z][a-z0-9_]{0,10}",
+        name in valid_lowercase_ident(),
         value in 0i32..1000,
     ) {
         let source = format!("fn {}() {{ let x = {}; }}", name, value);
@@ -215,14 +260,16 @@ proptest! {
     }
 
     #[test]
-    fn arithmetic_typechecks(a in 0i32..100, b in 1i32..100) {
-        let source = format!("fn test() -> i32 {{ return {} + {}; }}", a, b);
+    fn arithmetic_typechecks(a in 0i64..100, b in 1i64..100) {
+        // Sounio uses expression-based returns (last expression is the return value)
+        // Integer literals default to i64 in Sounio
+        let source = format!("fn test() -> i64 {{ {} + {} }}", a, b);
         prop_assert!(typecheck_doesnt_panic(&source));
         prop_assert!(typechecks_ok(&source), "Failed to typecheck: {}", source);
     }
 
     #[test]
-    fn empty_functions_typecheck(name in "[a-z][a-z0-9_]{0,10}") {
+    fn empty_functions_typecheck(name in valid_lowercase_ident()) {
         let source = format!("fn {}() {{ }}", name);
         prop_assert!(typecheck_doesnt_panic(&source));
         prop_assert!(typechecks_ok(&source), "Empty function should typecheck: {}", source);
@@ -230,7 +277,7 @@ proptest! {
 
     #[test]
     fn typecheck_is_deterministic(
-        name in "[a-z][a-z0-9_]{0,10}",
+        name in valid_lowercase_ident(),
         value in 0i32..1000,
     ) {
         let source = format!("fn {}() {{ let x = {}; }}", name, value);
@@ -255,13 +302,15 @@ proptest! {
 
     #[test]
     fn interpreter_never_panics(n in any::<i32>()) {
-        let source = format!("fn main() -> i32 {{ return {}; }}", n);
+        // Sounio uses expression-based returns
+        let source = format!("fn main() -> i32 {{ {} }}", n);
         prop_assert!(interpret_doesnt_panic(&source));
     }
 
     #[test]
     fn interpretation_is_deterministic(n in 0i32..1000) {
-        let source = format!("fn main() -> i32 {{ return {}; }}", n);
+        // Sounio uses expression-based returns
+        let source = format!("fn main() -> i32 {{ {} }}", n);
 
         // Interpret multiple times and check consistency
         let results: Vec<bool> = (0..3)
@@ -294,16 +343,20 @@ fn test_empty_input() {
 
 #[test]
 fn test_simple_typecheck() {
-    assert!(typechecks_ok("fn test() -> i32 { return 42; }"));
+    // Sounio uses expression-based returns (last expression is the return value)
+    // Integer literals default to i64 in Sounio
+    assert!(typechecks_ok("fn test() -> i64 { 42 }"));
 }
 
 #[test]
 fn test_type_mismatch_doesnt_panic() {
-    assert!(typecheck_doesnt_panic("fn test() -> bool { return 42; }"));
+    // Type mismatch: returns i32 but declared as bool
+    assert!(typecheck_doesnt_panic("fn test() -> bool { 42 }"));
 }
 
 #[test]
 fn test_simple_interpretation() {
-    let source = "fn main() -> i32 { return 42; }";
+    // Sounio uses expression-based returns
+    let source = "fn main() -> i32 { 42 }";
     assert!(interpret_doesnt_panic(source));
 }
