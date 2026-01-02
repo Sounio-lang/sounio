@@ -8,6 +8,7 @@
 //!
 //! # Available Handlers
 //!
+//! - `AllocHandler`: Handles memory allocation (alloc, dealloc, realloc, etc.)
 //! - `IOHandler`: Handles IO operations (print, read_file, write_file, etc.)
 //! - `MutHandler`: Handles mutable state operations (get, set, modify, with_state, etc.)
 //!
@@ -24,8 +25,10 @@
 //! assert_eq!(mut_handler.effect_name(), "Mut");
 //! ```
 
+mod alloc_handler;
 mod io_handler;
 mod mut_handler;
 
+pub use alloc_handler::AllocHandler;
 pub use io_handler::IOHandler;
 pub use mut_handler::MutHandler;
