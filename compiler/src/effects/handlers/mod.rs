@@ -13,6 +13,7 @@
 //! - `IOHandler`: Handles IO operations (print, read_file, write_file, etc.)
 //! - `MutHandler`: Handles mutable state operations (get, set, modify, with_state, etc.)
 //! - `PanicHandler`: Handles recoverable failures (panic, assert, unwrap, etc.)
+//! - `ProbHandler`: Handles probabilistic effects (sample, observe, condition, etc.)
 //!
 //! # Example
 //!
@@ -32,9 +33,11 @@ mod async_handler;
 mod io_handler;
 mod mut_handler;
 mod panic_handler;
+mod prob_handler;
 
 pub use alloc_handler::AllocHandler;
 pub use async_handler::AsyncHandler;
 pub use io_handler::IOHandler;
 pub use mut_handler::MutHandler;
 pub use panic_handler::PanicHandler;
+pub use prob_handler::ProbHandler;
