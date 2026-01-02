@@ -37,6 +37,7 @@ use crate::effects::handler_capability::{
     Continuation as CapabilityContinuation, HandlerCapability, HandlerResult as CapabilityResult,
     HandlerState as CapabilityHandlerState,
 };
+use crate::effects::handlers::{DefaultHandlerFactory, HandlerFactory, HandlerRegistry};
 use crate::effects::EpistemicImpactRegistry;
 use crate::runtime::causal;
 use crate::runtime::prob::{self, ProbContext, Rng};
@@ -97,6 +98,12 @@ pub enum EffectKind {
     Epistemic,
     /// Division effect (may fail)
     Div,
+    /// Panic/unrecoverable failure effect
+    Panic,
+    /// Network I/O effect
+    Network,
+    /// Sensor/measurement effect
+    Sensor,
 }
 
 impl EffectKind {
@@ -113,6 +120,9 @@ impl EffectKind {
             "GPU" => Some(EffectKind::GPU),
             "Epistemic" => Some(EffectKind::Epistemic),
             "Div" => Some(EffectKind::Div),
+            "Panic" => Some(EffectKind::Panic),
+            "Network" => Some(EffectKind::Network),
+            "Sensor" => Some(EffectKind::Sensor),
             _ => None,
         }
     }
@@ -130,6 +140,9 @@ impl EffectKind {
             EffectKind::GPU => "GPU",
             EffectKind::Epistemic => "Epistemic",
             EffectKind::Div => "Div",
+            EffectKind::Panic => "Panic",
+            EffectKind::Network => "Network",
+            EffectKind::Sensor => "Sensor",
         }
     }
 }
@@ -406,6 +419,45 @@ impl fmt::Debug for CapabilityAdapter {
     }
 }
 
+/// Wrapper to make Arc<dyn HandlerCapability> implement HandlerCapability
+#[derive(Debug)]
+struct CloneableHandlerWrapper(std::sync::Arc<dyn HandlerCapability + Send + Sync>);
+
+impl HandlerCapability for CloneableHandlerWrapper {
+    fn effect_name(&self) -> &str {
+        self.0.effect_name()
+    }
+
+    fn handler_name(&self) -> &str {
+        self.0.handler_name()
+    }
+
+    fn operations(&self) -> &[crate::effects::handler_capability::OperationSpec] {
+        self.0.operations()
+    }
+
+    fn handle(
+        &self,
+        operation: &str,
+        args: &[Value],
+        continuation: CapabilityContinuation,
+        state: &mut CapabilityHandlerState,
+    ) -> CapabilityResult {
+        self.0.handle(operation, args, continuation, state)
+    }
+
+    fn epistemic_impact(
+        &self,
+        operation: &str,
+    ) -> crate::effects::handler_capability::EpistemicImpact {
+        self.0.epistemic_impact(operation)
+    }
+
+    fn supports_multi_shot(&self) -> bool {
+        self.0.supports_multi_shot()
+    }
+}
+
 /// Effect handler context managing a stack of handlers
 pub struct EffectContext {
     /// Stack of active handlers (most recent on top)
@@ -414,6 +466,10 @@ pub struct EffectContext {
     pub state: HandlerState,
     /// Store for captured continuations
     pub continuation_store: ContinuationStore,
+    /// Registry of HandlerCapability-based handlers for fallback dispatch
+    registry: Option<HandlerRegistry>,
+    /// Capability handler state (separate from legacy HandlerState)
+    capability_state: CapabilityHandlerState,
 }
 
 impl EffectContext {
@@ -423,6 +479,8 @@ impl EffectContext {
             handler_stack: Vec::new(),
             state: HandlerState::new(),
             continuation_store: ContinuationStore::new(),
+            registry: None,
+            capability_state: CapabilityHandlerState::new(),
         };
 
         // Install default handlers for Prob and Causal effects
@@ -438,12 +496,76 @@ impl EffectContext {
             handler_stack: Vec::new(),
             state: HandlerState::with_seed(seed),
             continuation_store: ContinuationStore::new(),
+            registry: None,
+            capability_state: CapabilityHandlerState::new(),
         };
 
         ctx.push_handler(default_prob_handler());
         ctx.push_handler(default_causal_handler());
 
         ctx
+    }
+
+    /// Create a new effect context with a handler registry.
+    ///
+    /// The registry provides fallback handlers for effects not found in the
+    /// handler stack. This is useful for dispatching to HandlerCapability-based
+    /// handlers without converting them to EffectHandlers.
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// use sounio::effects::handlers::HandlerRegistry;
+    ///
+    /// let registry = HandlerRegistry::with_defaults();
+    /// let mut ctx = EffectContext::with_registry(registry);
+    ///
+    /// // Can now dispatch to any of the 12 registered effects
+    /// let result = ctx.dispatch_by_name("IO", "print", vec![Value::String("Hello".into())]);
+    /// ```
+    pub fn with_registry(registry: HandlerRegistry) -> Self {
+        let mut ctx = Self {
+            handler_stack: Vec::new(),
+            state: HandlerState::new(),
+            continuation_store: ContinuationStore::new(),
+            registry: Some(registry),
+            capability_state: CapabilityHandlerState::new(),
+        };
+
+        // Still install Prob and Causal for specialized handling
+        ctx.push_handler(default_prob_handler());
+        ctx.push_handler(default_causal_handler());
+
+        ctx
+    }
+
+    /// Create a new effect context with all default handlers from the registry.
+    ///
+    /// This is the recommended way to create an EffectContext that supports
+    /// all built-in effects (IO, Mut, Alloc, Panic, Prob, GPU, etc.).
+    pub fn with_all_handlers() -> Self {
+        Self::with_registry(HandlerRegistry::with_defaults())
+    }
+
+    /// Set the handler registry for fallback dispatch.
+    pub fn set_registry(&mut self, registry: HandlerRegistry) {
+        self.registry = Some(registry);
+    }
+
+    /// Get a reference to the handler registry, if set.
+    pub fn registry(&self) -> Option<&HandlerRegistry> {
+        self.registry.as_ref()
+    }
+
+    /// Install handlers from a registry into the handler stack.
+    ///
+    /// This converts HandlerCapability handlers to EffectHandlers and pushes
+    /// them onto the stack. Useful when you want stack-based handler shadowing.
+    pub fn install_from_registry(&mut self, registry: &HandlerRegistry) {
+        for handler in registry.handlers() {
+            let adapter = CapabilityAdapter::new(Box::new(CloneableHandlerWrapper(handler.clone())));
+            self.push_handler(adapter.to_effect_handler());
+        }
     }
 
     /// Push a handler onto the stack
@@ -469,14 +591,17 @@ impl EffectContext {
         None
     }
 
-    /// Dispatch an effect operation to the appropriate handler
+    /// Dispatch an effect operation to the appropriate handler.
+    ///
+    /// First searches the handler stack (most recent first), then falls back
+    /// to the registry if set.
     pub fn dispatch(
         &mut self,
         effect: EffectKind,
         operation: &str,
         args: Vec<Value>,
     ) -> Result<Value, EffectError> {
-        // Find the handler index first
+        // Try the handler stack first
         let handler_idx = self
             .handler_stack
             .iter()
@@ -488,40 +613,106 @@ impl EffectContext {
                 } else {
                     None
                 }
-            })
-            .ok_or_else(|| EffectError::UnhandledEffect {
-                effect: effect.to_string(),
-                operation: operation.to_string(),
-            })?;
+            });
 
-        // Get pointer to handler function to avoid holding borrow on handler_stack
-        // SAFETY: We know the index is valid and we don't modify handler_stack
-        // during the call
-        let handler_fn_ptr: *const dyn Fn(&[Value], &mut HandlerState) -> Result<Value, EffectError> = {
-            let handler = &self.handler_stack[handler_idx];
-            let case = handler.find_case(operation).unwrap();
-            &*case.handler_fn as *const _
-        };
+        if let Some(idx) = handler_idx {
+            // Get pointer to handler function to avoid holding borrow on handler_stack
+            // SAFETY: We know the index is valid and we don't modify handler_stack
+            // during the call
+            let handler_fn_ptr: *const dyn Fn(&[Value], &mut HandlerState) -> Result<Value, EffectError> = {
+                let handler = &self.handler_stack[idx];
+                let case = handler.find_case(operation).unwrap();
+                &*case.handler_fn as *const _
+            };
 
-        // Now call with mutable state - the handler_stack borrow is released
-        // SAFETY: handler_fn_ptr is valid for the duration of this call
-        unsafe { (*handler_fn_ptr)(&args, &mut self.state) }
+            // Now call with mutable state - the handler_stack borrow is released
+            // SAFETY: handler_fn_ptr is valid for the duration of this call
+            return unsafe { (*handler_fn_ptr)(&args, &mut self.state) };
+        }
+
+        // Fall back to registry if available
+        let effect_name = effect.as_str();
+        self.dispatch_via_registry(effect_name, operation, args)
     }
 
-    /// Dispatch using effect name as string
+    /// Dispatch using effect name as string.
+    ///
+    /// First searches the handler stack, then falls back to the registry.
     pub fn dispatch_by_name(
         &mut self,
         effect_name: &str,
         operation: &str,
         args: Vec<Value>,
     ) -> Result<Value, EffectError> {
-        let effect = EffectKind::from_str(effect_name).ok_or_else(|| {
-            EffectError::UnhandledEffect {
+        // First try the handler stack if we can parse the effect kind
+        if let Some(effect) = EffectKind::from_str(effect_name) {
+            // Try the handler stack first
+            let handler_idx = self
+                .handler_stack
+                .iter()
+                .enumerate()
+                .rev()
+                .find_map(|(idx, handler)| {
+                    if handler.effect == effect && handler.find_case(operation).is_some() {
+                        Some(idx)
+                    } else {
+                        None
+                    }
+                });
+
+            if let Some(idx) = handler_idx {
+                let handler_fn_ptr: *const dyn Fn(&[Value], &mut HandlerState) -> Result<Value, EffectError> = {
+                    let handler = &self.handler_stack[idx];
+                    let case = handler.find_case(operation).unwrap();
+                    &*case.handler_fn as *const _
+                };
+                return unsafe { (*handler_fn_ptr)(&args, &mut self.state) };
+            }
+        }
+
+        // Fall back to registry
+        self.dispatch_via_registry(effect_name, operation, args)
+    }
+
+    /// Dispatch an operation through the registry.
+    ///
+    /// This is called when no handler is found in the stack.
+    fn dispatch_via_registry(
+        &mut self,
+        effect_name: &str,
+        operation: &str,
+        args: Vec<Value>,
+    ) -> Result<Value, EffectError> {
+        let registry = self.registry.as_ref().ok_or_else(|| EffectError::UnhandledEffect {
+            effect: effect_name.to_string(),
+            operation: operation.to_string(),
+        })?;
+
+        let handler = registry.get(effect_name).ok_or_else(|| EffectError::UnhandledEffect {
+            effect: effect_name.to_string(),
+            operation: operation.to_string(),
+        })?;
+
+        // Create a continuation for the handler
+        let continuation = CapabilityContinuation::new();
+
+        // Call the handler
+        let result = handler.handle(operation, &args, continuation, &mut self.capability_state);
+
+        // Convert result
+        match result {
+            CapabilityResult::Return(v) | CapabilityResult::Resume(v) => Ok(v),
+            CapabilityResult::Abort(err) => Err(EffectError::HandlerError {
+                effect: err.effect,
+                operation: err.operation,
+                message: err.message,
+            }),
+            CapabilityResult::Suspend(_) => Err(EffectError::HandlerError {
                 effect: effect_name.to_string(),
                 operation: operation.to_string(),
-            }
-        })?;
-        self.dispatch(effect, operation, args)
+                message: "Suspension not yet supported in interpreter dispatch".to_string(),
+            }),
+        }
     }
 
     /// Convenience method for Prob.sample
@@ -1438,5 +1629,158 @@ mod tests {
 
         assert!(result.is_ok());
         assert_eq!(result.unwrap(), Value::Int(5));
+    }
+
+    // =========================================================================
+    // Handler Registry Integration Tests
+    // =========================================================================
+
+    #[test]
+    fn test_effect_context_with_registry() {
+        let ctx = EffectContext::with_registry(HandlerRegistry::with_defaults());
+        assert!(ctx.registry().is_some());
+        assert_eq!(ctx.registry().unwrap().len(), 12);
+    }
+
+    #[test]
+    fn test_effect_context_with_all_handlers() {
+        let ctx = EffectContext::with_all_handlers();
+        assert!(ctx.registry().is_some());
+    }
+
+    #[test]
+    fn test_dispatch_via_registry_io() {
+        let mut ctx = EffectContext::with_all_handlers();
+
+        // Dispatch IO.print through the registry
+        let result = ctx.dispatch_by_name("IO", "print", vec![Value::String("hello".into())]);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_dispatch_via_registry_div() {
+        let mut ctx = EffectContext::with_all_handlers();
+
+        // Dispatch Div.div through the registry
+        let result = ctx.dispatch_by_name("Div", "div", vec![Value::Float(10.0), Value::Float(2.0)]);
+        assert!(result.is_ok());
+        if let Ok(Value::Float(v)) = result {
+            assert!((v - 5.0).abs() < 0.001);
+        } else {
+            panic!("Expected Float result");
+        }
+    }
+
+    #[test]
+    fn test_dispatch_via_registry_mut() {
+        let mut ctx = EffectContext::with_all_handlers();
+
+        // Set a value
+        let set_result = ctx.dispatch_by_name(
+            "Mut",
+            "set",
+            vec![Value::String("x".into()), Value::Int(42)],
+        );
+        assert!(set_result.is_ok());
+
+        // Get the value back
+        let get_result = ctx.dispatch_by_name("Mut", "get", vec![Value::String("x".into())]);
+        assert!(get_result.is_ok());
+        assert_eq!(get_result.unwrap(), Value::Int(42));
+    }
+
+    #[test]
+    fn test_dispatch_via_registry_panic() {
+        let mut ctx = EffectContext::with_all_handlers();
+
+        // Dispatch Panic.assert (should succeed for true)
+        let result = ctx.dispatch_by_name("Panic", "assert", vec![Value::Bool(true)]);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_handler_stack_takes_precedence_over_registry() {
+        let mut ctx = EffectContext::with_all_handlers();
+
+        // Push a custom Prob handler that always returns 99.0
+        let custom_handler = EffectHandler::new(EffectKind::Prob, "custom_prob")
+            .with_case("sample", |_args, _state| Ok(Value::Float(99.0)));
+        ctx.push_handler(custom_handler);
+
+        // Create a distribution
+        let mut fields = HashMap::new();
+        fields.insert("mean".to_string(), Value::Float(0.0));
+        fields.insert("std".to_string(), Value::Float(1.0));
+        let dist = Value::Struct {
+            name: "Normal".to_string(),
+            fields,
+        };
+
+        // The custom handler should take precedence
+        let result = ctx.sample(dist);
+        assert!(matches!(result, Ok(Value::Float(v)) if (v - 99.0).abs() < 0.001));
+    }
+
+    #[test]
+    fn test_set_registry_after_creation() {
+        let mut ctx = EffectContext::new();
+        assert!(ctx.registry().is_none());
+
+        ctx.set_registry(HandlerRegistry::with_defaults());
+        assert!(ctx.registry().is_some());
+
+        // Now IO dispatch should work
+        let result = ctx.dispatch_by_name("IO", "print", vec![Value::String("test".into())]);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_dispatch_unhandled_without_registry() {
+        let mut ctx = EffectContext::new();
+
+        // Without a registry, unknown effects should fail
+        let result = ctx.dispatch_by_name("Network", "fetch", vec![Value::String("http://example.com".into())]);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_dispatch_with_registry_fallback() {
+        let mut ctx = EffectContext::with_all_handlers();
+
+        // Network effect is not in the handler stack, only in registry
+        let result = ctx.dispatch_by_name(
+            "Network",
+            "fetch",
+            vec![Value::String("http://example.com".into())],
+        );
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_effect_kind_new_variants() {
+        assert_eq!(EffectKind::from_str("Panic"), Some(EffectKind::Panic));
+        assert_eq!(EffectKind::from_str("Network"), Some(EffectKind::Network));
+        assert_eq!(EffectKind::from_str("Sensor"), Some(EffectKind::Sensor));
+
+        assert_eq!(EffectKind::Panic.as_str(), "Panic");
+        assert_eq!(EffectKind::Network.as_str(), "Network");
+        assert_eq!(EffectKind::Sensor.as_str(), "Sensor");
+    }
+
+    #[test]
+    fn test_dispatch_sensor_via_registry() {
+        let mut ctx = EffectContext::with_all_handlers();
+
+        let result = ctx.dispatch_by_name("Sensor", "is_available", vec![Value::String("temp_sensor".into())]);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_dispatch_gpu_via_registry() {
+        let mut ctx = EffectContext::with_all_handlers();
+
+        // Test GPU sync operation
+        let result = ctx.dispatch_by_name("GPU", "sync", vec![]);
+        assert!(result.is_ok());
     }
 }
