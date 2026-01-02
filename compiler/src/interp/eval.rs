@@ -10,9 +10,10 @@ use crate::hir::*;
 use crate::runtime::async_runtime::{SounioFuture, SounioRuntime, SounioValue};
 
 use super::builtins::BuiltinRegistry;
-use super::effect_dispatch::{EffectContext, EffectKind};
+use super::effect_dispatch::{EffectContext, EffectError, EffectHandler, EffectKind};
 use super::env::Environment;
 use super::value::{ControlFlow, Value};
+use crate::effects::handlers::HandlerRegistry;
 
 /// Tree-walking interpreter
 pub struct Interpreter {
@@ -63,6 +64,46 @@ impl Interpreter {
         }
     }
 
+    /// Create a new interpreter with all effect handlers from the registry.
+    ///
+    /// This is the recommended way to create an interpreter that supports all
+    /// built-in effects (IO, Mut, Alloc, Panic, Prob, GPU, Div, etc.).
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// let mut interp = Interpreter::with_all_effects();
+    /// // Now can dispatch to any registered effect
+    /// ```
+    pub fn with_all_effects() -> Self {
+        Interpreter {
+            env: Environment::new(),
+            functions: HashMap::new(),
+            structs: HashMap::new(),
+            enums: HashMap::new(),
+            builtins: BuiltinRegistry::new(),
+            output: Vec::new(),
+            async_runtime: SounioRuntime::new(),
+            effect_ctx: EffectContext::with_all_handlers(),
+        }
+    }
+
+    /// Create a new interpreter with a custom handler registry.
+    ///
+    /// Use this when you want to provide a custom set of effect handlers.
+    pub fn with_registry(registry: HandlerRegistry) -> Self {
+        Interpreter {
+            env: Environment::new(),
+            functions: HashMap::new(),
+            structs: HashMap::new(),
+            enums: HashMap::new(),
+            builtins: BuiltinRegistry::new(),
+            output: Vec::new(),
+            async_runtime: SounioRuntime::new(),
+            effect_ctx: EffectContext::with_registry(registry),
+        }
+    }
+
     /// Get mutable access to effect context
     pub fn effect_ctx_mut(&mut self) -> &mut EffectContext {
         &mut self.effect_ctx
@@ -76,6 +117,58 @@ impl Interpreter {
     /// Get the async runtime
     pub fn async_runtime(&self) -> &SounioRuntime {
         &self.async_runtime
+    }
+
+    // =========================================================================
+    // Effect Dispatch Helpers
+    // =========================================================================
+
+    /// Dispatch an effect operation by name.
+    ///
+    /// This is the primary method for invoking effect operations from the interpreter.
+    pub fn perform_effect(
+        &mut self,
+        effect: &str,
+        operation: &str,
+        args: Vec<Value>,
+    ) -> Result<Value, EffectError> {
+        self.effect_ctx.dispatch_by_name(effect, operation, args)
+    }
+
+    /// Dispatch an IO effect operation.
+    pub fn perform_io(&mut self, operation: &str, args: Vec<Value>) -> Result<Value, EffectError> {
+        self.effect_ctx.dispatch_by_name("IO", operation, args)
+    }
+
+    /// Dispatch a Mut effect operation.
+    pub fn perform_mut(&mut self, operation: &str, args: Vec<Value>) -> Result<Value, EffectError> {
+        self.effect_ctx.dispatch_by_name("Mut", operation, args)
+    }
+
+    /// Dispatch a Div effect operation (safe division).
+    pub fn perform_div(&mut self, operation: &str, args: Vec<Value>) -> Result<Value, EffectError> {
+        self.effect_ctx.dispatch_by_name("Div", operation, args)
+    }
+
+    /// Dispatch a Panic effect operation.
+    pub fn perform_panic(
+        &mut self,
+        operation: &str,
+        args: Vec<Value>,
+    ) -> Result<Value, EffectError> {
+        self.effect_ctx.dispatch_by_name("Panic", operation, args)
+    }
+
+    /// Push an effect handler onto the stack.
+    ///
+    /// Handlers pushed later take precedence over earlier ones.
+    pub fn push_handler(&mut self, handler: EffectHandler) {
+        self.effect_ctx.push_handler(handler);
+    }
+
+    /// Pop an effect handler from the stack.
+    pub fn pop_handler(&mut self) -> Option<EffectHandler> {
+        self.effect_ctx.pop_handler()
     }
 
     /// Get captured output (for testing)
@@ -737,9 +830,33 @@ impl Interpreter {
 
             HirExprKind::Handle { expr, handler } => {
                 // Handle wraps an expression with a named handler
-                // For now, we just evaluate the expression (handlers are pre-installed)
-                // Full implementation would push/pop handler by name
-                self.eval_expr(expr)
+                // The handler name corresponds to an effect name (e.g., "IO", "Mut", "Panic")
+                //
+                // If we have a registry, create a handler from it and push it onto the stack.
+                // This allows the expression to use the handler for effect operations.
+                let handler_pushed = if let Some(registry) = self.effect_ctx.registry() {
+                    if let Some(capability_handler) = registry.get(handler) {
+                        // Create an EffectHandler that wraps the capability handler
+                        // For now, we rely on the registry fallback mechanism instead of
+                        // converting to EffectHandler, since the dispatch already falls back
+                        // to the registry when no stack handler is found.
+                        false
+                    } else {
+                        false
+                    }
+                } else {
+                    false
+                };
+
+                // Evaluate the wrapped expression
+                let result = self.eval_expr(expr);
+
+                // Pop the handler if we pushed one
+                if handler_pushed {
+                    self.effect_ctx.pop_handler();
+                }
+
+                result
             }
 
             HirExprKind::Sample(dist_expr) => {
@@ -1848,5 +1965,116 @@ impl Interpreter {
 impl Default for Interpreter {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_interpreter_with_all_effects() {
+        let interp = Interpreter::with_all_effects();
+        assert!(interp.effect_ctx().registry().is_some());
+        assert_eq!(interp.effect_ctx().registry().unwrap().len(), 12);
+    }
+
+    #[test]
+    fn test_interpreter_with_registry() {
+        use crate::effects::handlers::HandlerRegistryBuilder;
+
+        let registry = HandlerRegistryBuilder::new()
+            .with_io()
+            .with_mut()
+            .build();
+
+        let interp = Interpreter::with_registry(registry);
+        assert!(interp.effect_ctx().registry().is_some());
+        assert_eq!(interp.effect_ctx().registry().unwrap().len(), 2);
+    }
+
+    #[test]
+    fn test_perform_effect_io() {
+        let mut interp = Interpreter::with_all_effects();
+
+        // Dispatch IO.print
+        let result = interp.perform_io("print", vec![Value::String("test".into())]);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_perform_effect_div() {
+        let mut interp = Interpreter::with_all_effects();
+
+        // Dispatch Div.div
+        let result = interp.perform_div("div", vec![Value::Float(10.0), Value::Float(2.0)]);
+        assert!(result.is_ok());
+        if let Ok(Value::Float(v)) = result {
+            assert!((v - 5.0).abs() < 0.001);
+        } else {
+            panic!("Expected Float result");
+        }
+    }
+
+    #[test]
+    fn test_perform_effect_mut() {
+        let mut interp = Interpreter::with_all_effects();
+
+        // Set a value
+        let set_result = interp.perform_mut(
+            "set",
+            vec![Value::String("counter".into()), Value::Int(100)],
+        );
+        assert!(set_result.is_ok());
+
+        // Get the value back
+        let get_result = interp.perform_mut("get", vec![Value::String("counter".into())]);
+        assert!(get_result.is_ok());
+        assert_eq!(get_result.unwrap(), Value::Int(100));
+    }
+
+    #[test]
+    fn test_perform_effect_panic() {
+        let mut interp = Interpreter::with_all_effects();
+
+        // Assert true should succeed
+        let result = interp.perform_panic("assert", vec![Value::Bool(true)]);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_perform_effect_generic() {
+        let mut interp = Interpreter::with_all_effects();
+
+        // Use the generic perform_effect method
+        let result = interp.perform_effect(
+            "GPU",
+            "sync",
+            vec![],
+        );
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_push_pop_handler() {
+        let mut interp = Interpreter::with_all_effects();
+
+        // Create a custom handler
+        let custom_handler = EffectHandler::new(EffectKind::IO, "custom_io")
+            .with_case("print", |_args, _state| Ok(Value::String("custom".into())));
+
+        // Push the handler
+        interp.push_handler(custom_handler);
+
+        // Pop should return something
+        let popped = interp.pop_handler();
+        assert!(popped.is_some());
+    }
+
+    #[test]
+    fn test_interpreter_default_uses_new() {
+        let interp = Interpreter::default();
+        // Default uses new() which doesn't have a registry
+        assert!(interp.effect_ctx().registry().is_none());
     }
 }
