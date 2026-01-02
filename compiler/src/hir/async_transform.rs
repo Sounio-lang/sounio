@@ -16,7 +16,7 @@
 //! ```
 //!
 //! Is transformed into a state machine:
-//! ```
+//! ```text
 //! State 0 (Start):
 //!     - Capture locals: url
 //!     - Call http_get(url)
