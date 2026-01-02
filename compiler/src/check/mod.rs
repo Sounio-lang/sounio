@@ -3590,8 +3590,29 @@ impl TypeChecker {
                 }
                 HirType::Bool
             }
-            // Logical operators
-            BinaryOp::And | BinaryOp::Or => HirType::Bool,
+            // Logical operators: require bool operands
+            BinaryOp::And | BinaryOp::Or => {
+                let op_name = if op == BinaryOp::And { "&&" } else { "||" };
+                if !matches!(left, HirType::Bool) {
+                    self.error(
+                        format!(
+                            "Logical '{}' requires bool operands, found `{:?}` on left",
+                            op_name, left
+                        ),
+                        Span::dummy(),
+                    );
+                }
+                if !matches!(right, HirType::Bool) {
+                    self.error(
+                        format!(
+                            "Logical '{}' requires bool operands, found `{:?}` on right",
+                            op_name, right
+                        ),
+                        Span::dummy(),
+                    );
+                }
+                HirType::Bool
+            }
             // Bitwise operators: no unit handling
             BinaryOp::BitAnd
             | BinaryOp::BitOr

@@ -3,6 +3,9 @@
 // Miette's derive macros generate code that triggers unused_assignments warnings
 #![allow(unused_assignments)]
 
+use super::module_tree::{
+    ImportEntry, ItemKind, ModuleId as TreeModuleId, ModuleItem, ModuleTree,
+};
 use super::symbols::*;
 use crate::ast::{ModuleId, *};
 use crate::common::{NodeId, Span};
@@ -49,11 +52,13 @@ pub enum ResolveError {
     },
 }
 
-/// Resolved AST (AST + symbol table)
+/// Resolved AST (AST + symbol table + module tree)
 #[derive(Debug)]
 pub struct ResolvedAst {
     pub ast: Ast,
     pub symbols: SymbolTable,
+    /// Module tree with visibility-aware item lookup
+    pub module_tree: ModuleTree,
 }
 
 /// Resolve names in an AST
@@ -66,6 +71,10 @@ pub fn resolve(ast: Ast) -> Result<ResolvedAst> {
 pub struct Resolver {
     symbols: SymbolTable,
     errors: Vec<ResolveError>,
+    /// Module tree being built
+    module_tree: ModuleTree,
+    /// Current module path for tree building
+    current_tree_module: TreeModuleId,
 }
 
 impl Resolver {
@@ -73,6 +82,8 @@ impl Resolver {
         let mut resolver = Self {
             symbols: SymbolTable::new(),
             errors: Vec::new(),
+            module_tree: ModuleTree::new(),
+            current_tree_module: TreeModuleId::root(),
         };
         // Register compiler intrinsics/builtins
         resolver.register_builtins();
@@ -141,9 +152,38 @@ impl Resolver {
 
     /// Resolve all names in the AST
     pub fn resolve(mut self, ast: Ast) -> Result<ResolvedAst> {
-        // First pass: collect all top-level definitions
+        // First pass: collect all top-level definitions and build module tree
         for item in &ast.items {
             self.collect_item(item);
+        }
+
+        // Resolve imports in the module tree (multi-pass algorithm)
+        // This handles forward references, transitive imports, and detects cycles
+        if let Err(import_errors) = self.module_tree.resolve_imports() {
+            // Convert import errors to resolution errors for reporting
+            // We don't fail here because some imports may be to external modules
+            // that will be loaded later. Instead, we log warnings.
+            for err in import_errors {
+                // Only report module-not-found as errors for now
+                // Unresolved imports to existing modules might be typos
+                match &err {
+                    super::module_tree::ImportError::NotVisible { name, path } => {
+                        // This is a definite error - the item exists but is private
+                        self.errors.push(ResolveError::UndefinedVar {
+                            name: format!("{}::{} (private)", path, name),
+                            span: miette::SourceSpan::from(0..1),
+                        });
+                    }
+                    super::module_tree::ImportError::Circular { path } => {
+                        self.errors.push(ResolveError::UndefinedVar {
+                            name: format!("circular import: {}", path),
+                            span: miette::SourceSpan::from(0..1),
+                        });
+                    }
+                    // Module not found and Unresolved are deferred - might be external
+                    _ => {}
+                }
+            }
         }
 
         // Second pass: resolve bodies
@@ -162,6 +202,7 @@ impl Resolver {
         Ok(ResolvedAst {
             ast,
             symbols: self.symbols,
+            module_tree: self.module_tree,
         })
     }
 
@@ -182,13 +223,38 @@ impl Resolver {
     }
 
     fn collect_module(&mut self, m: &ModuleDef) {
-        // Create a module ID from the name
+        // Create a module ID from the name (for symbols)
         let parent_path = self.symbols.current_module().path.clone();
         let mut module_path = parent_path;
         module_path.push(m.name.clone());
         let module_id = ModuleId::new(module_path);
 
-        // Enter the module
+        // Create tree module ID and enter the module in the tree
+        let tree_module_id = self.current_tree_module.join(&m.name);
+        let parent_tree_id = self.current_tree_module.clone();
+
+        // Create module in tree
+        {
+            let tree_module = self.module_tree.get_or_create(tree_module_id.clone());
+            tree_module.visibility = m.visibility;
+        }
+
+        // Register as child of parent in tree
+        if let Some(parent) = self.module_tree.get_mut(&parent_tree_id) {
+            parent.add_child(m.name.clone(), tree_module_id.clone());
+        }
+
+        // Add module as item in parent
+        if let Some(parent) = self.module_tree.get_mut(&parent_tree_id) {
+            parent.add_item(ModuleItem {
+                name: m.name.clone(),
+                kind: ItemKind::Module(tree_module_id.clone()),
+                visibility: m.visibility,
+                node_id: m.id,
+            });
+        }
+
+        // Enter the module in symbols
         self.symbols.enter_module(module_id.clone());
 
         // Define the module as a symbol
@@ -202,6 +268,10 @@ impl Resolver {
             parent: None,
         });
 
+        // Save current tree module and enter new one
+        let saved_tree_module = self.current_tree_module.clone();
+        self.current_tree_module = tree_module_id;
+
         // Recursively collect items if inline module
         if let Some(ref items) = m.items {
             for item in items {
@@ -210,6 +280,7 @@ impl Resolver {
         }
 
         // Exit module
+        self.current_tree_module = saved_tree_module;
         self.symbols.exit_module();
     }
 
@@ -224,6 +295,37 @@ impl Resolver {
             // Don't treat as error yet - module may be loaded later
             // TODO: Track unresolved imports and verify after all modules loaded
             let _ = e; // Silence warning for now
+        }
+
+        // Also record import in module tree
+        if let Some(module) = self.module_tree.get_mut(&self.current_tree_module) {
+            match &i.items {
+                Some(items) => {
+                    for item in items {
+                        let local_name = item.alias.clone().unwrap_or_else(|| item.name.clone());
+                        module.add_import(ImportEntry {
+                            local_name,
+                            source_path: path.clone(),
+                            original_name: item.name.clone(),
+                            is_glob: item.is_glob,
+                            is_reexport: i.is_reexport,
+                            resolved: None,
+                        });
+                    }
+                }
+                None => {
+                    // Import entire module
+                    let module_name = path.last().cloned().unwrap_or_default();
+                    module.add_import(ImportEntry {
+                        local_name: module_name.clone(),
+                        source_path: path.clone(),
+                        original_name: module_name,
+                        is_glob: false,
+                        is_reexport: i.is_reexport,
+                        resolved: None,
+                    });
+                }
+            }
         }
     }
 
@@ -246,6 +348,16 @@ impl Resolver {
             span: f.span,
             parent: None,
         });
+
+        // Add to module tree
+        if let Some(module) = self.module_tree.get_mut(&self.current_tree_module) {
+            module.add_item(ModuleItem {
+                name: f.name.clone(),
+                kind: ItemKind::Function,
+                visibility: f.visibility,
+                node_id: f.id,
+            });
+        }
     }
 
     fn define_struct(&mut self, s: &StructDef) {
@@ -270,6 +382,16 @@ impl Resolver {
             span: s.span,
             parent: None,
         });
+
+        // Add to module tree
+        if let Some(module) = self.module_tree.get_mut(&self.current_tree_module) {
+            module.add_item(ModuleItem {
+                name: s.name.clone(),
+                kind: ItemKind::Struct,
+                visibility: s.visibility,
+                node_id: s.id,
+            });
+        }
     }
 
     fn define_enum(&mut self, e: &EnumDef) {
@@ -303,6 +425,16 @@ impl Resolver {
                 parent: Some(def_id),
             });
         }
+
+        // Add to module tree
+        if let Some(module) = self.module_tree.get_mut(&self.current_tree_module) {
+            module.add_item(ModuleItem {
+                name: e.name.clone(),
+                kind: ItemKind::Enum,
+                visibility: e.visibility,
+                node_id: e.id,
+            });
+        }
     }
 
     fn define_type_alias(&mut self, t: &TypeAliasDef) {
@@ -318,6 +450,16 @@ impl Resolver {
             span: t.span,
             parent: None,
         });
+
+        // Add to module tree
+        if let Some(module) = self.module_tree.get_mut(&self.current_tree_module) {
+            module.add_item(ModuleItem {
+                name: t.name.clone(),
+                kind: ItemKind::TypeAlias,
+                visibility: t.visibility,
+                node_id: t.id,
+            });
+        }
     }
 
     fn define_effect(&mut self, e: &EffectDef) {
@@ -334,6 +476,16 @@ impl Resolver {
             span: e.span,
             parent: None,
         });
+
+        // Add to module tree
+        if let Some(module) = self.module_tree.get_mut(&self.current_tree_module) {
+            module.add_item(ModuleItem {
+                name: e.name.clone(),
+                kind: ItemKind::Effect,
+                visibility: e.visibility,
+                node_id: e.id,
+            });
+        }
     }
 
     fn define_trait(&mut self, t: &TraitDef) {
@@ -349,6 +501,16 @@ impl Resolver {
             span: t.span,
             parent: None,
         });
+
+        // Add to module tree
+        if let Some(module) = self.module_tree.get_mut(&self.current_tree_module) {
+            module.add_item(ModuleItem {
+                name: t.name.clone(),
+                kind: ItemKind::Trait,
+                visibility: t.visibility,
+                node_id: t.id,
+            });
+        }
     }
 
     fn define_global(&mut self, g: &GlobalDef) {
@@ -368,6 +530,16 @@ impl Resolver {
                 span: g.span,
                 parent: None,
             });
+
+            // Add to module tree
+            if let Some(module) = self.module_tree.get_mut(&self.current_tree_module) {
+                module.add_item(ModuleItem {
+                    name: name.clone(),
+                    kind: ItemKind::Const,
+                    visibility: g.visibility,
+                    node_id: g.id,
+                });
+            }
         }
     }
 
@@ -386,12 +558,17 @@ impl Resolver {
     }
 
     fn resolve_module(&mut self, m: &ModuleDef) {
-        // Enter the module
+        // Enter the module (symbols)
         let parent_path = self.symbols.current_module().path.clone();
         let mut module_path = parent_path;
         module_path.push(m.name.clone());
         let module_id = ModuleId::new(module_path);
         self.symbols.enter_module(module_id);
+
+        // Enter the module (tree)
+        let tree_module_id = self.current_tree_module.join(&m.name);
+        let saved_tree_module = self.current_tree_module.clone();
+        self.current_tree_module = tree_module_id;
 
         // Resolve items if inline module
         if let Some(ref items) = m.items {
@@ -401,6 +578,7 @@ impl Resolver {
         }
 
         // Exit module
+        self.current_tree_module = saved_tree_module;
         self.symbols.exit_module();
     }
 

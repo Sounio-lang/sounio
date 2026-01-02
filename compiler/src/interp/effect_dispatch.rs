@@ -30,6 +30,14 @@ use std::fmt;
 use thiserror::Error;
 
 use super::value::{Distribution, Value};
+use crate::effects::continuation::{
+    CapturedContinuation, ContinuationId, ContinuationStore, ResumePoint,
+};
+use crate::effects::handler_capability::{
+    Continuation as CapabilityContinuation, HandlerCapability, HandlerResult as CapabilityResult,
+    HandlerState as CapabilityHandlerState,
+};
+use crate::effects::EpistemicImpactRegistry;
 use crate::runtime::causal;
 use crate::runtime::prob::{self, ProbContext, Rng};
 
@@ -244,12 +252,168 @@ impl fmt::Debug for EffectHandler {
     }
 }
 
+// =============================================================================
+// HandlerCapability Adapter
+// =============================================================================
+
+/// Adapter to use HandlerCapability-based handlers with the existing EffectHandler system
+///
+/// This enables gradual migration from the old callback-based handlers to the new
+/// trait-based HandlerCapability system. The new system supports:
+/// - Continuations for proper algebraic effect semantics
+/// - Epistemic impact tracking (Track B)
+/// - Multi-shot continuations for effects like Amb
+///
+/// # Example
+///
+/// ```ignore
+/// use sounio::effects::handler_capability::HandlerCapability;
+///
+/// #[derive(Debug)]
+/// struct MyIOHandler;
+///
+/// impl HandlerCapability for MyIOHandler {
+///     fn effect_name(&self) -> &str { "IO" }
+///     fn handler_name(&self) -> &str { "MyIOHandler" }
+///     fn operations(&self) -> &[OperationSpec] { &[] }
+///     fn handle(&self, op: &str, args: &[Value], cont: Continuation, state: &mut HandlerState)
+///         -> HandlerResult {
+///         // Handle the operation
+///         HandlerResult::Resume(Value::Unit)
+///     }
+/// }
+///
+/// // Convert to EffectHandler for use with EffectContext
+/// let adapter = CapabilityAdapter::new(Box::new(MyIOHandler));
+/// let effect_handler = adapter.to_effect_handler();
+/// ctx.push_handler(effect_handler);
+/// ```
+pub struct CapabilityAdapter {
+    /// The underlying HandlerCapability implementation
+    handler: std::sync::Arc<dyn HandlerCapability>,
+    /// Epistemic impact registry for tracking confidence
+    impact_registry: EpistemicImpactRegistry,
+}
+
+impl CapabilityAdapter {
+    /// Create a new adapter from a HandlerCapability implementation
+    pub fn new(handler: Box<dyn HandlerCapability>) -> Self {
+        Self {
+            handler: std::sync::Arc::from(handler),
+            impact_registry: EpistemicImpactRegistry::new(),
+        }
+    }
+
+    /// Create adapter with custom impact registry
+    pub fn with_registry(
+        handler: Box<dyn HandlerCapability>,
+        registry: EpistemicImpactRegistry,
+    ) -> Self {
+        Self {
+            handler: std::sync::Arc::from(handler),
+            impact_registry: registry,
+        }
+    }
+
+    /// Get the effect name this adapter handles
+    pub fn effect_name(&self) -> &str {
+        self.handler.effect_name()
+    }
+
+    /// Convert to an EffectHandler for use with EffectContext
+    ///
+    /// This creates an EffectHandler that wraps the HandlerCapability,
+    /// translating between the two interfaces.
+    pub fn to_effect_handler(&self) -> EffectHandler {
+        let effect_kind = EffectKind::from_str(self.handler.effect_name())
+            .unwrap_or(EffectKind::IO); // Default to IO if unknown
+
+        let mut handler = EffectHandler::new(effect_kind, self.handler.handler_name());
+
+        // Create a handler case for each operation
+        for op_spec in self.handler.operations() {
+            let op_name = op_spec.name.clone();
+            let op_name_for_closure = op_name.clone();
+            let capability_handler = self.handler.clone();
+
+            handler = handler.with_case(&op_name, move |args: &[Value], _state: &mut HandlerState| {
+                let op_name = op_name_for_closure.clone();
+                // Create a placeholder continuation
+                let continuation = CapabilityContinuation::new();
+
+                // Create a capability handler state
+                let mut cap_state = CapabilityHandlerState::new();
+
+                // Call the capability handler
+                let result = capability_handler.handle(&op_name, args, continuation, &mut cap_state);
+
+                // Convert result back to our format
+                match result {
+                    CapabilityResult::Return(v) | CapabilityResult::Resume(v) => Ok(v),
+                    CapabilityResult::Abort(err) => Err(EffectError::HandlerError {
+                        effect: err.effect,
+                        operation: err.operation,
+                        message: err.message,
+                    }),
+                    CapabilityResult::Suspend(_) => Err(EffectError::HandlerError {
+                        effect: capability_handler.effect_name().to_string(),
+                        operation: op_name.clone(),
+                        message: "Suspension not yet supported in adapter".to_string(),
+                    }),
+                }
+            });
+        }
+
+        handler
+    }
+
+    /// Dispatch directly using the HandlerCapability interface
+    ///
+    /// This bypasses the EffectHandler conversion and calls the handler directly.
+    /// Use this when you want full access to the continuation and epistemic features.
+    pub fn dispatch_direct(
+        &self,
+        operation: &str,
+        args: &[Value],
+        continuation: CapabilityContinuation,
+    ) -> Result<Value, EffectError> {
+        let mut state = CapabilityHandlerState::new();
+
+        let result = self.handler.handle(operation, args, continuation, &mut state);
+
+        match result {
+            CapabilityResult::Return(v) | CapabilityResult::Resume(v) => Ok(v),
+            CapabilityResult::Abort(err) => Err(EffectError::HandlerError {
+                effect: err.effect,
+                operation: err.operation,
+                message: err.message,
+            }),
+            CapabilityResult::Suspend(_) => Err(EffectError::HandlerError {
+                effect: self.handler.effect_name().to_string(),
+                operation: operation.to_string(),
+                message: "Suspension not yet supported".to_string(),
+            }),
+        }
+    }
+}
+
+impl fmt::Debug for CapabilityAdapter {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("CapabilityAdapter")
+            .field("effect", &self.handler.effect_name())
+            .field("handler", &self.handler.handler_name())
+            .finish()
+    }
+}
+
 /// Effect handler context managing a stack of handlers
 pub struct EffectContext {
     /// Stack of active handlers (most recent on top)
     handler_stack: Vec<EffectHandler>,
     /// Shared state across handlers
     pub state: HandlerState,
+    /// Store for captured continuations
+    pub continuation_store: ContinuationStore,
 }
 
 impl EffectContext {
@@ -258,6 +422,7 @@ impl EffectContext {
         let mut ctx = Self {
             handler_stack: Vec::new(),
             state: HandlerState::new(),
+            continuation_store: ContinuationStore::new(),
         };
 
         // Install default handlers for Prob and Causal effects
@@ -272,6 +437,7 @@ impl EffectContext {
         let mut ctx = Self {
             handler_stack: Vec::new(),
             state: HandlerState::with_seed(seed),
+            continuation_store: ContinuationStore::new(),
         };
 
         ctx.push_handler(default_prob_handler());
@@ -386,6 +552,149 @@ impl EffectContext {
             vec![factual, intervention, query],
         )
     }
+
+    // =========================================================================
+    // Continuation Support
+    // =========================================================================
+
+    /// Capture a continuation at the current point
+    ///
+    /// This creates a stub continuation that can be used for testing.
+    /// Full implementation will capture the actual execution state.
+    ///
+    /// # Arguments
+    /// * `label` - Optional label for debugging
+    ///
+    /// # Returns
+    /// The ID of the captured continuation
+    pub fn capture_continuation(&mut self, label: Option<&str>) -> ContinuationId {
+        let mut cont = CapturedContinuation::new_one_shot(ResumePoint::Stub);
+        if let Some(l) = label {
+            cont = cont.with_label(l);
+        }
+        self.continuation_store.store(cont)
+    }
+
+    /// Capture a multi-shot continuation
+    ///
+    /// Multi-shot continuations can be resumed multiple times, which is
+    /// useful for effects like non-determinism or backtracking.
+    pub fn capture_multi_shot_continuation(&mut self, label: Option<&str>) -> ContinuationId {
+        let mut cont = CapturedContinuation::new_multi_shot(ResumePoint::Stub);
+        if let Some(l) = label {
+            cont = cont.with_label(l);
+        }
+        self.continuation_store.store(cont)
+    }
+
+    /// Resume a captured continuation with a value
+    ///
+    /// For one-shot continuations, this removes the continuation from the store.
+    /// For multi-shot continuations, the continuation remains available.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if:
+    /// - The continuation is not found
+    /// - The continuation is one-shot and has already been resumed
+    /// - Resume is not yet implemented for this continuation type
+    pub fn resume_continuation(
+        &mut self,
+        id: ContinuationId,
+        value: Value,
+    ) -> Result<Value, EffectError> {
+        self.continuation_store
+            .resume_and_remove(id, value)
+            .map_err(|e| EffectError::HandlerError {
+                effect: "continuation".to_string(),
+                operation: "resume".to_string(),
+                message: e.to_string(),
+            })
+    }
+
+    /// Perform an effect operation with continuation capture
+    ///
+    /// This is the core method for algebraic effects. It:
+    /// 1. Captures the current continuation
+    /// 2. Dispatches to the handler with the continuation
+    /// 3. Returns the result (or suspends for async handlers)
+    ///
+    /// NOTE: This is a foundation - full implementation will involve
+    /// actual continuation capture and handler invocation.
+    pub fn perform(
+        &mut self,
+        effect: EffectKind,
+        operation: &str,
+        args: Vec<Value>,
+    ) -> Result<PerformResult, EffectError> {
+        // Capture a continuation for this perform
+        let cont_id = self.capture_continuation(Some(&format!("{}::{}", effect, operation)));
+
+        // Dispatch to the handler
+        let result = self.dispatch(effect, operation, args)?;
+
+        // For now, we complete immediately
+        // Full implementation would allow the handler to suspend or resume
+        Ok(PerformResult::Completed {
+            value: result,
+            continuation_id: cont_id,
+        })
+    }
+
+    /// Check if a continuation exists
+    pub fn has_continuation(&self, id: ContinuationId) -> bool {
+        self.continuation_store.contains(id)
+    }
+
+    /// Get the number of active continuations
+    pub fn active_continuation_count(&self) -> usize {
+        self.continuation_store.len()
+    }
+
+    /// Clear all captured continuations
+    ///
+    /// This is useful for cleanup after an effect scope ends.
+    pub fn clear_continuations(&mut self) {
+        self.continuation_store.clear();
+    }
+}
+
+/// Result of performing an effect operation
+#[derive(Debug)]
+pub enum PerformResult {
+    /// The effect completed immediately with a value
+    Completed {
+        value: Value,
+        continuation_id: ContinuationId,
+    },
+    /// The effect is suspended, waiting to be resumed
+    /// (Not yet implemented - placeholder for async effects)
+    Suspended {
+        continuation_id: ContinuationId,
+    },
+}
+
+impl PerformResult {
+    /// Get the value if completed, None if suspended
+    pub fn value(&self) -> Option<&Value> {
+        match self {
+            PerformResult::Completed { value, .. } => Some(value),
+            PerformResult::Suspended { .. } => None,
+        }
+    }
+
+    /// Get the continuation ID
+    pub fn continuation_id(&self) -> ContinuationId {
+        match self {
+            PerformResult::Completed { continuation_id, .. } => *continuation_id,
+            PerformResult::Suspended { continuation_id } => *continuation_id,
+        }
+    }
+
+    /// Check if the effect completed
+    pub fn is_completed(&self) -> bool {
+        matches!(self, PerformResult::Completed { .. })
+    }
 }
 
 impl Default for EffectContext {
@@ -406,6 +715,7 @@ impl fmt::Debug for EffectContext {
                     .map(|h| format!("{}:{}", h.effect, h.name))
                     .collect::<Vec<_>>(),
             )
+            .field("active_continuations", &self.continuation_store.len())
             .finish()
     }
 }
@@ -889,5 +1199,244 @@ mod tests {
             assert!((alpha - 2.0).abs() < 0.001);
             assert!((beta - 5.0).abs() < 0.001);
         }
+    }
+
+    // =========================================================================
+    // Continuation Tests
+    // =========================================================================
+
+    #[test]
+    fn test_continuation_store_in_context() {
+        let ctx = EffectContext::new();
+        assert_eq!(ctx.active_continuation_count(), 0);
+    }
+
+    #[test]
+    fn test_capture_continuation() {
+        let mut ctx = EffectContext::new();
+
+        let id = ctx.capture_continuation(Some("test"));
+        assert!(ctx.has_continuation(id));
+        assert_eq!(ctx.active_continuation_count(), 1);
+
+        let id2 = ctx.capture_continuation(None);
+        assert!(ctx.has_continuation(id2));
+        assert_eq!(ctx.active_continuation_count(), 2);
+    }
+
+    #[test]
+    fn test_resume_continuation() {
+        let mut ctx = EffectContext::new();
+
+        let id = ctx.capture_continuation(Some("test_resume"));
+
+        // Resume with a value - using stub, it should just return the value
+        let result = ctx.resume_continuation(id, Value::Int(42));
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap(), Value::Int(42));
+
+        // One-shot continuation should be removed after resume
+        assert!(!ctx.has_continuation(id));
+    }
+
+    #[test]
+    fn test_resume_nonexistent_continuation() {
+        let mut ctx = EffectContext::new();
+
+        // Create an ID but don't store it
+        let fake_id = ContinuationId::new();
+
+        let result = ctx.resume_continuation(fake_id, Value::Unit);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_multi_shot_continuation() {
+        let mut ctx = EffectContext::new();
+
+        let id = ctx.capture_multi_shot_continuation(Some("multi_shot"));
+
+        // First resume
+        let result1 = ctx.resume_continuation(id, Value::Int(1));
+        assert!(result1.is_ok());
+
+        // Multi-shot should still be in the store
+        assert!(ctx.has_continuation(id));
+
+        // Second resume should also work
+        let result2 = ctx.resume_continuation(id, Value::Int(2));
+        assert!(result2.is_ok());
+    }
+
+    #[test]
+    fn test_clear_continuations() {
+        let mut ctx = EffectContext::new();
+
+        ctx.capture_continuation(None);
+        ctx.capture_continuation(None);
+        ctx.capture_continuation(None);
+
+        assert_eq!(ctx.active_continuation_count(), 3);
+
+        ctx.clear_continuations();
+
+        assert_eq!(ctx.active_continuation_count(), 0);
+    }
+
+    #[test]
+    fn test_perform_operation() {
+        let mut ctx = EffectContext::with_seed(42);
+
+        // Create a distribution for testing
+        let mut fields = HashMap::new();
+        fields.insert("mean".to_string(), Value::Float(0.0));
+        fields.insert("std".to_string(), Value::Float(1.0));
+        let dist = Value::Struct {
+            name: "Normal".to_string(),
+            fields,
+        };
+
+        // Perform a sample operation
+        let result = ctx.perform(EffectKind::Prob, "sample", vec![dist]);
+        assert!(result.is_ok());
+
+        let perform_result = result.unwrap();
+        assert!(perform_result.is_completed());
+        assert!(perform_result.value().is_some());
+
+        // The continuation should have been captured
+        // (though for stub, it gets removed immediately after resume)
+    }
+
+    #[test]
+    fn test_perform_result_accessors() {
+        let completed = PerformResult::Completed {
+            value: Value::Float(3.14),
+            continuation_id: ContinuationId::new(),
+        };
+
+        assert!(completed.is_completed());
+        assert!(completed.value().is_some());
+
+        let suspended = PerformResult::Suspended {
+            continuation_id: ContinuationId::new(),
+        };
+
+        assert!(!suspended.is_completed());
+        assert!(suspended.value().is_none());
+    }
+
+    #[test]
+    fn test_effect_context_debug_includes_continuations() {
+        let mut ctx = EffectContext::new();
+        ctx.capture_continuation(Some("debug_test"));
+
+        let debug_str = format!("{:?}", ctx);
+        assert!(debug_str.contains("active_continuations"));
+    }
+
+    // =========================================================================
+    // HandlerCapability Tests
+    // =========================================================================
+
+    #[test]
+    fn test_capability_adapter_creation() {
+        use crate::effects::handler_capability::{
+            Continuation, HandlerError, HandlerResult, HandlerState as CapHandlerState,
+            OperationSpec,
+        };
+
+        #[derive(Debug)]
+        struct TestCapHandler;
+
+        impl HandlerCapability for TestCapHandler {
+            fn effect_name(&self) -> &str {
+                "Test"
+            }
+            fn handler_name(&self) -> &str {
+                "TestCapHandler"
+            }
+            fn operations(&self) -> &[OperationSpec] {
+                &[]
+            }
+            fn handle(
+                &self,
+                operation: &str,
+                _args: &[Value],
+                _continuation: Continuation,
+                _state: &mut CapHandlerState,
+            ) -> HandlerResult {
+                match operation {
+                    "noop" => HandlerResult::Resume(Value::Unit),
+                    _ => HandlerResult::Abort(HandlerError::new("Test", operation, "Unknown")),
+                }
+            }
+        }
+
+        let adapter = CapabilityAdapter::new(Box::new(TestCapHandler));
+        assert_eq!(adapter.effect_name(), "Test");
+    }
+
+    #[test]
+    fn test_capability_adapter_direct_dispatch() {
+        use crate::effects::handler_capability::{
+            Continuation, HandlerError, HandlerResult, HandlerState as CapHandlerState,
+            OperationSpec,
+        };
+
+        #[derive(Debug)]
+        struct AddHandler;
+
+        impl HandlerCapability for AddHandler {
+            fn effect_name(&self) -> &str {
+                "Math"
+            }
+            fn handler_name(&self) -> &str {
+                "AddHandler"
+            }
+            fn operations(&self) -> &[OperationSpec] {
+                &[]
+            }
+            fn handle(
+                &self,
+                operation: &str,
+                args: &[Value],
+                _continuation: Continuation,
+                _state: &mut CapHandlerState,
+            ) -> HandlerResult {
+                match operation {
+                    "add" => {
+                        if args.len() >= 2 {
+                            match (&args[0], &args[1]) {
+                                (Value::Int(a), Value::Int(b)) => {
+                                    HandlerResult::Resume(Value::Int(a + b))
+                                }
+                                _ => HandlerResult::Abort(HandlerError::new(
+                                    "Math",
+                                    "add",
+                                    "Expected integers",
+                                )),
+                            }
+                        } else {
+                            HandlerResult::Abort(HandlerError::new(
+                                "Math",
+                                "add",
+                                "Expected 2 arguments",
+                            ))
+                        }
+                    }
+                    _ => HandlerResult::Abort(HandlerError::new("Math", operation, "Unknown")),
+                }
+            }
+        }
+
+        let adapter = CapabilityAdapter::new(Box::new(AddHandler));
+        let continuation = CapabilityContinuation::new();
+
+        let result =
+            adapter.dispatch_direct("add", &[Value::Int(2), Value::Int(3)], continuation);
+
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap(), Value::Int(5));
     }
 }

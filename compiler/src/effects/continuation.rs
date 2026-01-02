@@ -1,0 +1,638 @@
+//! Continuation infrastructure for effect handlers
+//!
+//! This module provides the foundational data structures for implementing
+//! continuation-passing style (CPS) transformation for algebraic effect handlers.
+//!
+//! # Theory Background
+//!
+//! Based on Plotkin & Pretnar (2009) "Handlers of Algebraic Effects" and
+//! Leijen (2017) "Type Directed Compilation of Row-typed Algebraic Effects" (Koka).
+//!
+//! When an effect operation is performed, the current continuation (the rest of
+//! the computation) must be captured and passed to the handler. The handler can
+//! then choose to:
+//! - Resume the continuation with a value (normal effect handling)
+//! - Discard the continuation (aborting the computation)
+//! - Resume multiple times (for non-determinism, backtracking)
+//! - Store the continuation for later use (delimited continuations)
+//!
+//! # One-shot vs Multi-shot Continuations
+//!
+//! - **One-shot**: Can only be resumed once (more efficient, covers most use cases)
+//! - **Multi-shot**: Can be resumed multiple times (needed for backtracking, amb)
+//!
+//! Most effect handlers only need one-shot continuations. Multi-shot continuations
+//! require copying the entire stack/state, which is expensive.
+
+use std::collections::HashMap;
+use std::fmt;
+use std::sync::atomic::{AtomicU64, Ordering};
+
+use crate::interp::Value;
+
+/// Global counter for generating unique continuation IDs
+static CONTINUATION_ID: AtomicU64 = AtomicU64::new(0);
+
+/// Unique continuation identifier
+///
+/// Each captured continuation gets a unique ID for tracking and debugging.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct ContinuationId(u64);
+
+impl ContinuationId {
+    /// Create a new unique continuation ID
+    pub fn new() -> Self {
+        Self(CONTINUATION_ID.fetch_add(1, Ordering::SeqCst))
+    }
+
+    /// Get the raw ID value (for debugging)
+    pub fn raw(&self) -> u64 {
+        self.0
+    }
+}
+
+impl Default for ContinuationId {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl fmt::Display for ContinuationId {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "cont_{}", self.0)
+    }
+}
+
+/// Where to resume execution when a continuation is invoked
+///
+/// This enum represents different execution contexts that can be resumed:
+/// - Interpreter: Resume in the tree-walking interpreter
+/// - JIT: Resume in JIT-compiled code with saved machine state
+/// - Stub: Placeholder for not-yet-implemented backends
+#[derive(Debug)]
+pub enum ResumePoint {
+    /// Resume in interpreter with a closure that takes the resume value
+    /// and returns the final computation result.
+    ///
+    /// NOTE: For one-shot continuations, this closure will be consumed.
+    /// For multi-shot, we would need a Clone-able representation.
+    Interpreter {
+        /// The continuation closure - currently a stub that just returns the value
+        /// Full implementation will capture the interpreter's evaluation context
+        #[allow(dead_code)]
+        description: String,
+    },
+
+    /// Resume in JIT-compiled code with saved machine state
+    ///
+    /// This captures the low-level execution state needed to resume
+    /// native code execution.
+    Jit {
+        /// Return address in the JIT-compiled code
+        return_address: usize,
+        /// Saved register values (architecture-dependent)
+        saved_registers: Vec<u64>,
+        /// Snapshot of the stack at capture point
+        stack_snapshot: Vec<u8>,
+    },
+
+    /// Placeholder for not-yet-implemented resume mechanisms
+    ///
+    /// Used during incremental development - simply returns the
+    /// resume value as the result.
+    Stub,
+}
+
+impl ResumePoint {
+    /// Create a new interpreter resume point
+    pub fn interpreter(description: impl Into<String>) -> Self {
+        ResumePoint::Interpreter {
+            description: description.into(),
+        }
+    }
+
+    /// Create a new JIT resume point
+    pub fn jit(return_address: usize, saved_registers: Vec<u64>, stack_snapshot: Vec<u8>) -> Self {
+        ResumePoint::Jit {
+            return_address,
+            saved_registers,
+            stack_snapshot,
+        }
+    }
+
+    /// Check if this is a stub resume point
+    pub fn is_stub(&self) -> bool {
+        matches!(self, ResumePoint::Stub)
+    }
+}
+
+/// Captured continuation representing a suspended computation
+///
+/// When an effect operation is performed, the continuation captures
+/// "the rest of the computation" so that the handler can resume it
+/// (possibly multiple times) with different values.
+#[derive(Debug)]
+pub struct CapturedContinuation {
+    /// Unique identifier for this continuation
+    pub id: ContinuationId,
+    /// Where to resume execution
+    pub resume_point: ResumePoint,
+    /// Whether this continuation can be called multiple times
+    pub is_multi_shot: bool,
+    /// Number of times this continuation has been resumed
+    pub resume_count: usize,
+    /// Optional label for debugging
+    pub label: Option<String>,
+}
+
+impl CapturedContinuation {
+    /// Create a new one-shot continuation
+    ///
+    /// One-shot continuations can only be resumed once. Attempting to
+    /// resume a second time will return an error. This is the most
+    /// common case and is more efficient than multi-shot.
+    pub fn new_one_shot(resume: ResumePoint) -> Self {
+        Self {
+            id: ContinuationId::new(),
+            resume_point: resume,
+            is_multi_shot: false,
+            resume_count: 0,
+            label: None,
+        }
+    }
+
+    /// Create a new multi-shot continuation
+    ///
+    /// Multi-shot continuations can be resumed multiple times,
+    /// which is needed for effects like non-determinism (amb) or
+    /// backtracking search.
+    pub fn new_multi_shot(resume: ResumePoint) -> Self {
+        Self {
+            id: ContinuationId::new(),
+            resume_point: resume,
+            is_multi_shot: true,
+            resume_count: 0,
+            label: None,
+        }
+    }
+
+    /// Create a stub continuation (for testing/development)
+    pub fn stub() -> Self {
+        Self::new_one_shot(ResumePoint::Stub)
+    }
+
+    /// Create a stub multi-shot continuation (for testing/development)
+    pub fn stub_multi_shot() -> Self {
+        Self::new_multi_shot(ResumePoint::Stub)
+    }
+
+    /// Add a label to this continuation (for debugging)
+    pub fn with_label(mut self, label: impl Into<String>) -> Self {
+        self.label = Some(label.into());
+        self
+    }
+
+    /// Check if this continuation has been resumed
+    pub fn has_been_resumed(&self) -> bool {
+        self.resume_count > 0
+    }
+
+    /// Check if this continuation can still be resumed
+    pub fn can_resume(&self) -> bool {
+        self.is_multi_shot || self.resume_count == 0
+    }
+
+    /// Resume the continuation with a value
+    ///
+    /// For one-shot continuations, this can only be called once.
+    /// For multi-shot continuations, this can be called multiple times.
+    ///
+    /// # Errors
+    ///
+    /// Returns `ContinuationError::AlreadyResumed` if this is a one-shot
+    /// continuation that has already been resumed.
+    ///
+    /// Returns `ContinuationError::NotImplemented` for resume points
+    /// that are not yet fully implemented.
+    pub fn resume(&mut self, value: Value) -> Result<Value, ContinuationError> {
+        // Check one-shot enforcement
+        if !self.is_multi_shot && self.resume_count > 0 {
+            return Err(ContinuationError::AlreadyResumed {
+                id: self.id,
+                label: self.label.clone(),
+            });
+        }
+
+        self.resume_count += 1;
+
+        match &self.resume_point {
+            ResumePoint::Interpreter { description } => {
+                // TODO: Implement actual interpreter resume
+                // This would involve restoring the interpreter's evaluation
+                // context and continuing from where we left off.
+                Err(ContinuationError::NotImplemented(format!(
+                    "interpreter resume: {}",
+                    description
+                )))
+            }
+            ResumePoint::Jit {
+                return_address,
+                saved_registers: _,
+                stack_snapshot: _,
+            } => {
+                // TODO: Implement JIT resume
+                // This would involve:
+                // 1. Restoring the stack from stack_snapshot
+                // 2. Restoring registers from saved_registers
+                // 3. Jumping to return_address with the value
+                Err(ContinuationError::NotImplemented(format!(
+                    "JIT resume at address 0x{:x}",
+                    return_address
+                )))
+            }
+            ResumePoint::Stub => {
+                // Stub implementation: just return the value directly
+                // This allows testing the continuation infrastructure
+                // before the full implementation is ready
+                Ok(value)
+            }
+        }
+    }
+}
+
+/// Errors that can occur when working with continuations
+#[derive(Debug, Clone)]
+pub enum ContinuationError {
+    /// Attempted to resume a one-shot continuation more than once
+    AlreadyResumed {
+        id: ContinuationId,
+        label: Option<String>,
+    },
+
+    /// The requested continuation was not found in the store
+    NotFound(ContinuationId),
+
+    /// Feature not yet implemented
+    NotImplemented(String),
+}
+
+impl fmt::Display for ContinuationError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            ContinuationError::AlreadyResumed { id, label } => {
+                if let Some(label) = label {
+                    write!(
+                        f,
+                        "continuation {} ({}) has already been resumed",
+                        id, label
+                    )
+                } else {
+                    write!(f, "continuation {} has already been resumed", id)
+                }
+            }
+            ContinuationError::NotFound(id) => {
+                write!(f, "continuation {} not found", id)
+            }
+            ContinuationError::NotImplemented(msg) => {
+                write!(f, "not implemented: {}", msg)
+            }
+        }
+    }
+}
+
+impl std::error::Error for ContinuationError {}
+
+/// Store for managing active continuations
+///
+/// The continuation store holds captured continuations that are waiting
+/// to be resumed. It provides operations for storing, retrieving, and
+/// removing continuations.
+#[derive(Debug, Default)]
+pub struct ContinuationStore {
+    /// Map from continuation ID to the continuation itself
+    continuations: HashMap<ContinuationId, CapturedContinuation>,
+}
+
+impl ContinuationStore {
+    /// Create a new empty continuation store
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Store a continuation and return its ID
+    ///
+    /// The continuation can later be retrieved using the returned ID.
+    pub fn store(&mut self, cont: CapturedContinuation) -> ContinuationId {
+        let id = cont.id;
+        self.continuations.insert(id, cont);
+        id
+    }
+
+    /// Get a reference to a continuation by ID
+    pub fn get(&self, id: ContinuationId) -> Option<&CapturedContinuation> {
+        self.continuations.get(&id)
+    }
+
+    /// Get a mutable reference to a continuation by ID
+    pub fn get_mut(&mut self, id: ContinuationId) -> Option<&mut CapturedContinuation> {
+        self.continuations.get_mut(&id)
+    }
+
+    /// Remove a continuation from the store
+    ///
+    /// Returns the continuation if it was found, None otherwise.
+    pub fn remove(&mut self, id: ContinuationId) -> Option<CapturedContinuation> {
+        self.continuations.remove(&id)
+    }
+
+    /// Check if a continuation exists in the store
+    pub fn contains(&self, id: ContinuationId) -> bool {
+        self.continuations.contains_key(&id)
+    }
+
+    /// Get the number of continuations in the store
+    pub fn len(&self) -> usize {
+        self.continuations.len()
+    }
+
+    /// Check if the store is empty
+    pub fn is_empty(&self) -> bool {
+        self.continuations.is_empty()
+    }
+
+    /// Clear all continuations from the store
+    pub fn clear(&mut self) {
+        self.continuations.clear();
+    }
+
+    /// Resume a continuation by ID and remove it from the store (one-shot pattern)
+    ///
+    /// This is a convenience method that combines get_mut, resume, and remove
+    /// for the common one-shot continuation pattern.
+    pub fn resume_and_remove(
+        &mut self,
+        id: ContinuationId,
+        value: Value,
+    ) -> Result<Value, ContinuationError> {
+        let cont = self
+            .continuations
+            .get_mut(&id)
+            .ok_or(ContinuationError::NotFound(id))?;
+
+        // For one-shot, we'll remove after resuming
+        let is_one_shot = !cont.is_multi_shot;
+        let result = cont.resume(value)?;
+
+        if is_one_shot {
+            self.continuations.remove(&id);
+        }
+
+        Ok(result)
+    }
+
+    /// Get an iterator over all continuation IDs
+    pub fn ids(&self) -> impl Iterator<Item = ContinuationId> + '_ {
+        self.continuations.keys().copied()
+    }
+}
+
+// =============================================================================
+// Tests
+// =============================================================================
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_continuation_id_uniqueness() {
+        let id1 = ContinuationId::new();
+        let id2 = ContinuationId::new();
+        let id3 = ContinuationId::new();
+
+        assert_ne!(id1, id2);
+        assert_ne!(id2, id3);
+        assert_ne!(id1, id3);
+    }
+
+    #[test]
+    fn test_continuation_id_display() {
+        let id = ContinuationId::new();
+        let display = format!("{}", id);
+        assert!(display.starts_with("cont_"));
+    }
+
+    #[test]
+    fn test_one_shot_continuation_single_resume() {
+        let mut cont = CapturedContinuation::new_one_shot(ResumePoint::Stub);
+
+        assert!(!cont.has_been_resumed());
+        assert!(cont.can_resume());
+
+        let result = cont.resume(Value::Int(42));
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap(), Value::Int(42));
+
+        assert!(cont.has_been_resumed());
+        assert!(!cont.can_resume());
+    }
+
+    #[test]
+    fn test_one_shot_continuation_double_resume_fails() {
+        let mut cont = CapturedContinuation::new_one_shot(ResumePoint::Stub);
+
+        // First resume succeeds
+        let result1 = cont.resume(Value::Int(1));
+        assert!(result1.is_ok());
+
+        // Second resume fails
+        let result2 = cont.resume(Value::Int(2));
+        assert!(matches!(
+            result2,
+            Err(ContinuationError::AlreadyResumed { .. })
+        ));
+    }
+
+    #[test]
+    fn test_multi_shot_continuation_multiple_resumes() {
+        let mut cont = CapturedContinuation::new_multi_shot(ResumePoint::Stub);
+
+        assert!(cont.can_resume());
+
+        // First resume
+        let result1 = cont.resume(Value::Int(1));
+        assert!(result1.is_ok());
+        assert_eq!(result1.unwrap(), Value::Int(1));
+
+        // Second resume - should also succeed for multi-shot
+        assert!(cont.can_resume());
+        let result2 = cont.resume(Value::Int(2));
+        assert!(result2.is_ok());
+        assert_eq!(result2.unwrap(), Value::Int(2));
+
+        // Third resume
+        let result3 = cont.resume(Value::Int(3));
+        assert!(result3.is_ok());
+
+        assert_eq!(cont.resume_count, 3);
+    }
+
+    #[test]
+    fn test_continuation_with_label() {
+        let cont = CapturedContinuation::stub().with_label("test_continuation");
+        assert_eq!(cont.label, Some("test_continuation".to_string()));
+    }
+
+    #[test]
+    fn test_continuation_store_basic_operations() {
+        let mut store = ContinuationStore::new();
+
+        assert!(store.is_empty());
+        assert_eq!(store.len(), 0);
+
+        // Store a continuation
+        let cont = CapturedContinuation::stub();
+        let id = store.store(cont);
+
+        assert!(!store.is_empty());
+        assert_eq!(store.len(), 1);
+        assert!(store.contains(id));
+
+        // Retrieve it
+        let retrieved = store.get(id);
+        assert!(retrieved.is_some());
+
+        // Remove it
+        let removed = store.remove(id);
+        assert!(removed.is_some());
+        assert!(store.is_empty());
+        assert!(!store.contains(id));
+    }
+
+    #[test]
+    fn test_continuation_store_not_found() {
+        let mut store = ContinuationStore::new();
+        let fake_id = ContinuationId::new();
+
+        let result = store.resume_and_remove(fake_id, Value::Unit);
+        assert!(matches!(result, Err(ContinuationError::NotFound(_))));
+    }
+
+    #[test]
+    fn test_continuation_store_resume_and_remove() {
+        let mut store = ContinuationStore::new();
+
+        // Store a one-shot continuation
+        let cont = CapturedContinuation::new_one_shot(ResumePoint::Stub);
+        let id = store.store(cont);
+
+        assert_eq!(store.len(), 1);
+
+        // Resume and remove
+        let result = store.resume_and_remove(id, Value::Float(3.14));
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap(), Value::Float(3.14));
+
+        // Should be removed after resume
+        assert!(store.is_empty());
+    }
+
+    #[test]
+    fn test_continuation_store_multi_shot_not_removed() {
+        let mut store = ContinuationStore::new();
+
+        // Store a multi-shot continuation
+        let cont = CapturedContinuation::new_multi_shot(ResumePoint::Stub);
+        let id = store.store(cont);
+
+        // Resume - should NOT be removed for multi-shot
+        let result = store.resume_and_remove(id, Value::Int(1));
+        assert!(result.is_ok());
+
+        // Should still be in store
+        assert!(!store.is_empty());
+        assert!(store.contains(id));
+    }
+
+    #[test]
+    fn test_continuation_store_clear() {
+        let mut store = ContinuationStore::new();
+
+        store.store(CapturedContinuation::stub());
+        store.store(CapturedContinuation::stub());
+        store.store(CapturedContinuation::stub());
+
+        assert_eq!(store.len(), 3);
+
+        store.clear();
+
+        assert!(store.is_empty());
+    }
+
+    #[test]
+    fn test_continuation_store_ids_iterator() {
+        let mut store = ContinuationStore::new();
+
+        let id1 = store.store(CapturedContinuation::stub());
+        let id2 = store.store(CapturedContinuation::stub());
+
+        let ids: Vec<_> = store.ids().collect();
+        assert_eq!(ids.len(), 2);
+        assert!(ids.contains(&id1));
+        assert!(ids.contains(&id2));
+    }
+
+    #[test]
+    fn test_resume_point_helpers() {
+        let stub = ResumePoint::Stub;
+        assert!(stub.is_stub());
+
+        let interp = ResumePoint::interpreter("test continuation");
+        assert!(!interp.is_stub());
+
+        let jit = ResumePoint::jit(0x1000, vec![1, 2, 3], vec![0u8; 64]);
+        assert!(!jit.is_stub());
+    }
+
+    #[test]
+    fn test_continuation_error_display() {
+        let id = ContinuationId::new();
+
+        let err1 = ContinuationError::AlreadyResumed { id, label: None };
+        let display1 = format!("{}", err1);
+        assert!(display1.contains("already been resumed"));
+
+        let err2 = ContinuationError::AlreadyResumed {
+            id,
+            label: Some("my_cont".to_string()),
+        };
+        let display2 = format!("{}", err2);
+        assert!(display2.contains("my_cont"));
+
+        let err3 = ContinuationError::NotFound(id);
+        let display3 = format!("{}", err3);
+        assert!(display3.contains("not found"));
+
+        let err4 = ContinuationError::NotImplemented("test feature".to_string());
+        let display4 = format!("{}", err4);
+        assert!(display4.contains("not implemented"));
+    }
+
+    #[test]
+    fn test_interpreter_resume_not_implemented() {
+        let mut cont =
+            CapturedContinuation::new_one_shot(ResumePoint::interpreter("test computation"));
+
+        let result = cont.resume(Value::Unit);
+        assert!(matches!(result, Err(ContinuationError::NotImplemented(_))));
+    }
+
+    #[test]
+    fn test_jit_resume_not_implemented() {
+        let mut cont =
+            CapturedContinuation::new_one_shot(ResumePoint::jit(0x1234, vec![], vec![]));
+
+        let result = cont.resume(Value::Unit);
+        assert!(matches!(result, Err(ContinuationError::NotImplemented(_))));
+    }
+}

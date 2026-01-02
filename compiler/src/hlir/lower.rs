@@ -581,6 +581,13 @@ impl<'a> LoweringContext<'a> {
             )),
 
             HirExprKind::Binary { op, left, right } => {
+                // Handle short-circuit operators specially - they must NOT eagerly evaluate both operands
+                match op {
+                    HirBinaryOp::And => return self.lower_and(left, right),
+                    HirBinaryOp::Or => return self.lower_or(left, right),
+                    _ => {} // Continue with normal binary lowering
+                }
+
                 let left_val = self.lower_expr(left)?;
                 let right_val = self.lower_expr(right)?;
                 let left_ty = self.resolve_type(&left.ty);
@@ -2017,6 +2024,92 @@ impl<'a> LoweringContext<'a> {
             self.builder
                 .build_call("__sample", vec![dist_val], ty.clone()),
         )
+    }
+
+    /// Lower `a && b` with short-circuit evaluation: if a { b } else { false }
+    ///
+    /// This generates control flow that only evaluates the right operand
+    /// if the left operand is true, implementing proper short-circuit semantics.
+    fn lower_and(&mut self, left: &HirExpr, right: &HirExpr) -> Option<ValueId> {
+        // Evaluate the left operand
+        let left_val = self.lower_expr(left)?;
+        let entry_block = self.builder.current_block().unwrap();
+
+        // Create blocks for short-circuit control flow
+        let rhs_block = self.builder.create_block("and.rhs");
+        let merge_block = self.builder.create_block("and.merge");
+
+        // If left is false, short-circuit to merge with false result
+        // If left is true, evaluate right operand
+        self.builder
+            .build_cond_branch(left_val, rhs_block, merge_block);
+
+        // RHS block: evaluate right operand (only reached if left was true)
+        self.builder.switch_to_block(rhs_block);
+        self.terminated = false;
+        let right_val = self.lower_expr(right)?;
+        let rhs_exit_block = self.builder.current_block().unwrap();
+        if !self.terminated {
+            self.builder.build_branch(merge_block);
+        }
+
+        // Merge block: phi to select result
+        self.builder.switch_to_block(merge_block);
+        self.terminated = false;
+
+        // Create the false constant for the short-circuit case
+        let false_val = self.builder.build_bool(false);
+
+        // Use phi to select the result:
+        // - If we came from entry_block (left was false), result is false
+        // - If we came from rhs_block (left was true), result is right_val
+        Some(self.builder.build_phi(
+            vec![(entry_block, false_val), (rhs_exit_block, right_val)],
+            HlirType::Bool,
+        ))
+    }
+
+    /// Lower `a || b` with short-circuit evaluation: if a { true } else { b }
+    ///
+    /// This generates control flow that only evaluates the right operand
+    /// if the left operand is false, implementing proper short-circuit semantics.
+    fn lower_or(&mut self, left: &HirExpr, right: &HirExpr) -> Option<ValueId> {
+        // Evaluate the left operand
+        let left_val = self.lower_expr(left)?;
+        let entry_block = self.builder.current_block().unwrap();
+
+        // Create blocks for short-circuit control flow
+        let rhs_block = self.builder.create_block("or.rhs");
+        let merge_block = self.builder.create_block("or.merge");
+
+        // If left is true, short-circuit to merge with true result
+        // If left is false, evaluate right operand
+        self.builder
+            .build_cond_branch(left_val, merge_block, rhs_block);
+
+        // RHS block: evaluate right operand (only reached if left was false)
+        self.builder.switch_to_block(rhs_block);
+        self.terminated = false;
+        let right_val = self.lower_expr(right)?;
+        let rhs_exit_block = self.builder.current_block().unwrap();
+        if !self.terminated {
+            self.builder.build_branch(merge_block);
+        }
+
+        // Merge block: phi to select result
+        self.builder.switch_to_block(merge_block);
+        self.terminated = false;
+
+        // Create the true constant for the short-circuit case
+        let true_val = self.builder.build_bool(true);
+
+        // Use phi to select the result:
+        // - If we came from entry_block (left was true), result is true
+        // - If we came from rhs_block (left was false), result is right_val
+        Some(self.builder.build_phi(
+            vec![(entry_block, true_val), (rhs_exit_block, right_val)],
+            HlirType::Bool,
+        ))
     }
 }
 

@@ -17,21 +17,19 @@ This document tracks current limitations in the Sounio language implementation. 
 - **Priority**: Medium
 
 ### Logical Operators
-- **Status**: Partial
-- **Issue**: `&&` (logical AND) operator not supported
-- **Workaround**: Use nested `if` statements
-```d
-// Instead of:
+- **Status**: Implemented (v0.66.0)
+- **Operators**: `&&` (logical AND) and `||` (logical OR)
+- **Features**:
+  - Short-circuit evaluation: right operand only evaluated when necessary
+  - Type checking: both operands must be `bool`
+```sio
+// Both operators now work correctly:
 if a > 0 && b > 0 { ... }
+if is_empty || is_null { ... }
 
-// Use:
-if a > 0 {
-    if b > 0 {
-        ...
-    }
-}
+// Short-circuit example: side_effect() only called if x is true
+if x && side_effect() { ... }
 ```
-- **Priority**: High
 
 ### Documentation Comments
 - **Status**: Not implemented
@@ -97,7 +95,7 @@ These limitations will be addressed in future releases:
 | Feature | Target Version | Notes |
 |---------|---------------|-------|
 | Module system | 0.70.0 | Basic `module`/`use` support |
-| `&&` / `\|\|` operators | 0.66.0 | Logical operators |
+| ~~`&&` / `\|\|` operators~~ | ~~0.66.0~~ | **Implemented** - Short-circuit logical operators |
 | `pub` visibility | 0.70.0 | With module system |
 | Scientific notation | 0.67.0 | `1e10`, `1.5e-3` |
 | Type aliases | 0.68.0 | `type Name = Type;` |
