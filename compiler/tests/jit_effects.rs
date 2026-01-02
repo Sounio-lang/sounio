@@ -834,23 +834,23 @@ fn test_continuation_concepts() {
     println!("Continuation concepts test passed");
 }
 
-/// Test that HLIR handler operations exist and can be constructed
+/// Test that HLIR effect operations exist and can be constructed
 #[test]
-fn test_hlir_handler_ops() {
+fn test_hlir_effect_ops() {
     use sounio::hlir::ir::{
         BlockId, HlirBlock, HlirFunction, HlirInstr, HlirModule, HlirType, Op, ValueId,
     };
 
-    // Create a simple HLIR module with handler ops
-    let mut module = HlirModule::new("handler_test");
+    // Create a simple HLIR module with effect ops
+    let mut module = HlirModule::new("effect_test");
 
-    // Create a function that uses handler ops
+    // Create a function that uses effect ops
     let mut func = HlirFunction {
         id: sounio::hlir::ir::FunctionId(0),
-        name: "test_handler".to_string(),
+        name: "test_effect".to_string(),
         link_name: None,
         params: vec![],
-        return_type: HlirType::I64,
+        return_type: HlirType::F64,
         effects: vec!["Prob".to_string()],
         blocks: vec![],
         is_kernel: false,
@@ -860,24 +860,13 @@ fn test_hlir_handler_ops() {
         is_exported: false,
     };
 
-    // Create entry block with handler ops
+    // Create entry block with effect ops
     let mut block = HlirBlock::new(BlockId::ENTRY, "entry");
 
-    // PushHandler instruction
+    // PerformEffect instruction for sampling
     block.instructions.push(HlirInstr {
         result: Some(ValueId(0)),
-        op: Op::PushHandler {
-            effect: "Prob".to_string(),
-            handler_name: "deterministic".to_string(),
-            handler_id: 3, // deterministic handler
-        },
-        ty: HlirType::I64,
-    });
-
-    // DispatchEffect instruction
-    block.instructions.push(HlirInstr {
-        result: Some(ValueId(1)),
-        op: Op::DispatchEffect {
+        op: Op::PerformEffect {
             effect: "Prob".to_string(),
             op: "sample".to_string(),
             args: vec![],
@@ -885,15 +874,8 @@ fn test_hlir_handler_ops() {
         ty: HlirType::F64,
     });
 
-    // PopHandler instruction
-    block.instructions.push(HlirInstr {
-        result: Some(ValueId(2)),
-        op: Op::PopHandler,
-        ty: HlirType::I64,
-    });
-
     // Set terminator
-    block.terminator = sounio::hlir::ir::HlirTerminator::Return(Some(ValueId(1)));
+    block.terminator = sounio::hlir::ir::HlirTerminator::Return(Some(ValueId(0)));
 
     func.blocks.push(block);
     module.functions.push(func);
@@ -901,35 +883,21 @@ fn test_hlir_handler_ops() {
     // Verify the module was constructed correctly
     assert_eq!(module.functions.len(), 1);
     let test_func = &module.functions[0];
-    assert_eq!(test_func.name, "test_handler");
+    assert_eq!(test_func.name, "test_effect");
     assert_eq!(test_func.blocks.len(), 1);
-    assert_eq!(test_func.blocks[0].instructions.len(), 3);
+    assert_eq!(test_func.blocks[0].instructions.len(), 1);
 
-    // Verify each op type
+    // Verify the PerformEffect op
     match &test_func.blocks[0].instructions[0].op {
-        Op::PushHandler { effect, handler_name, handler_id } => {
-            assert_eq!(effect, "Prob");
-            assert_eq!(handler_name, "deterministic");
-            assert_eq!(*handler_id, 3);
-        }
-        _ => panic!("Expected PushHandler op"),
-    }
-
-    match &test_func.blocks[0].instructions[1].op {
-        Op::DispatchEffect { effect, op, args } => {
+        Op::PerformEffect { effect, op, args } => {
             assert_eq!(effect, "Prob");
             assert_eq!(op, "sample");
             assert!(args.is_empty());
         }
-        _ => panic!("Expected DispatchEffect op"),
+        _ => panic!("Expected PerformEffect op"),
     }
 
-    match &test_func.blocks[0].instructions[2].op {
-        Op::PopHandler => {}
-        _ => panic!("Expected PopHandler op"),
-    }
-
-    println!("HLIR handler ops test passed");
+    println!("HLIR effect ops test passed");
 }
 
 // ==================== Prob/Causal/Grad Effect Dispatch Tests ====================

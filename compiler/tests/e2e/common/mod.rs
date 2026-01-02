@@ -653,8 +653,9 @@ pub struct SemanticDistance {
 /// Normalize output for comparison
 fn normalize_output(s: &str) -> String {
     // Regex to match temp directory paths like /tmp/sounio_test_12345/ or /tmp/sounio_test_12345_67/
+    // Also matches without leading slash (for wrapped lines in error messages)
     let temp_path_re =
-        regex::Regex::new(r"/tmp/sounio_test_\d+(_\d+)?/").expect("Invalid temp path regex");
+        regex::Regex::new(r"/?tmp/sounio_test_\d+(_\d+)?/").expect("Invalid temp path regex");
 
     s.lines()
         .map(|line| line.trim_end())
