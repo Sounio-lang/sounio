@@ -32,9 +32,9 @@ pub unsafe extern "C" fn sounio_tensor_matmul(
     let k = k as usize;
     let n = n as usize;
 
-    let a_slice = std::slice::from_raw_parts(a, m * k);
-    let b_slice = std::slice::from_raw_parts(b, k * n);
-    let c_slice = std::slice::from_raw_parts_mut(c, m * n);
+    let a_slice = unsafe { std::slice::from_raw_parts(a, m * k) };
+    let b_slice = unsafe { std::slice::from_raw_parts(b, k * n) };
+    let c_slice = unsafe { std::slice::from_raw_parts_mut(c, m * n) };
 
     // Initialize output to zero
     for i in 0..(m * n) {
@@ -112,8 +112,8 @@ pub unsafe extern "C" fn sounio_tensor_reshape(
     }
 
     let n = total_elements as usize;
-    let input_slice = std::slice::from_raw_parts(input, n);
-    let output_slice = std::slice::from_raw_parts_mut(output, n);
+    let input_slice = unsafe { std::slice::from_raw_parts(input, n) };
+    let output_slice = unsafe { std::slice::from_raw_parts_mut(output, n) };
 
     // Reshape is just copying data (assuming row-major for both)
     output_slice.copy_from_slice(input_slice);
@@ -141,8 +141,8 @@ pub unsafe extern "C" fn sounio_tensor_transpose(
     let m = m as usize;
     let n = n as usize;
 
-    let a_slice = std::slice::from_raw_parts(a, m * n);
-    let b_slice = std::slice::from_raw_parts_mut(b, m * n);
+    let a_slice = unsafe { std::slice::from_raw_parts(a, m * n) };
+    let b_slice = unsafe { std::slice::from_raw_parts_mut(b, m * n) };
 
     // Transpose: B[j,i] = A[i,j]
     for i in 0..m {
@@ -181,23 +181,29 @@ pub unsafe extern "C" fn sounio_tensor_add(
         // Process 2 doubles at a time using unaligned loads/stores
         for i in 0..simd_chunks {
             let idx = i * 2;
-            // Load 2 doubles from a and b
-            let a_vec = std::ptr::read_unaligned(a.add(idx) as *const [f64; 2]);
-            let b_vec = std::ptr::read_unaligned(b.add(idx) as *const [f64; 2]);
-            // Add element-wise
-            let result = [a_vec[0] + b_vec[0], a_vec[1] + b_vec[1]];
-            // Store result
-            std::ptr::write_unaligned(c.add(idx) as *mut [f64; 2], result);
+            unsafe {
+                // Load 2 doubles from a and b
+                let a_vec = std::ptr::read_unaligned(a.add(idx) as *const [f64; 2]);
+                let b_vec = std::ptr::read_unaligned(b.add(idx) as *const [f64; 2]);
+                // Add element-wise
+                let result = [a_vec[0] + b_vec[0], a_vec[1] + b_vec[1]];
+                // Store result
+                std::ptr::write_unaligned(c.add(idx) as *mut [f64; 2], result);
+            }
         }
         
         // Handle remainder (scalar)
         if remainder > 0 {
             let idx = simd_chunks * 2;
-            *c.add(idx) = *a.add(idx) + *b.add(idx);
+            unsafe {
+                *c.add(idx) = *a.add(idx) + *b.add(idx);
+            }
         }
     } else {
         // Scalar fallback for small arrays
-        *c = *a + *b;
+        unsafe {
+            *c = *a + *b;
+        }
     }
 }
 
@@ -230,23 +236,29 @@ pub unsafe extern "C" fn sounio_tensor_mul(
         // Process 2 doubles at a time using unaligned loads/stores
         for i in 0..simd_chunks {
             let idx = i * 2;
-            // Load 2 doubles from a and b
-            let a_vec = std::ptr::read_unaligned(a.add(idx) as *const [f64; 2]);
-            let b_vec = std::ptr::read_unaligned(b.add(idx) as *const [f64; 2]);
-            // Multiply element-wise
-            let result = [a_vec[0] * b_vec[0], a_vec[1] * b_vec[1]];
-            // Store result
-            std::ptr::write_unaligned(c.add(idx) as *mut [f64; 2], result);
+            unsafe {
+                // Load 2 doubles from a and b
+                let a_vec = std::ptr::read_unaligned(a.add(idx) as *const [f64; 2]);
+                let b_vec = std::ptr::read_unaligned(b.add(idx) as *const [f64; 2]);
+                // Multiply element-wise
+                let result = [a_vec[0] * b_vec[0], a_vec[1] * b_vec[1]];
+                // Store result
+                std::ptr::write_unaligned(c.add(idx) as *mut [f64; 2], result);
+            }
         }
         
         // Handle remainder (scalar)
         if remainder > 0 {
             let idx = simd_chunks * 2;
-            *c.add(idx) = *a.add(idx) * *b.add(idx);
+            unsafe {
+                *c.add(idx) = *a.add(idx) * *b.add(idx);
+            }
         }
     } else {
         // Scalar fallback for small arrays
-        *c = *a * *b;
+        unsafe {
+            *c = *a * *b;
+        }
     }
 }
 
@@ -282,22 +294,28 @@ pub unsafe extern "C" fn sounio_tensor_scale(
         // Process 2 doubles at a time using unaligned loads/stores
         for i in 0..simd_chunks {
             let idx = i * 2;
-            // Load 2 doubles from a
-            let a_vec = std::ptr::read_unaligned(a.add(idx) as *const [f64; 2]);
-            // Multiply by alpha
-            let result = [a_vec[0] * alpha_vec[0], a_vec[1] * alpha_vec[1]];
-            // Store result
-            std::ptr::write_unaligned(b.add(idx) as *mut [f64; 2], result);
+            unsafe {
+                // Load 2 doubles from a
+                let a_vec = std::ptr::read_unaligned(a.add(idx) as *const [f64; 2]);
+                // Multiply by alpha
+                let result = [a_vec[0] * alpha_vec[0], a_vec[1] * alpha_vec[1]];
+                // Store result
+                std::ptr::write_unaligned(b.add(idx) as *mut [f64; 2], result);
+            }
         }
         
         // Handle remainder (scalar)
         if remainder > 0 {
             let idx = simd_chunks * 2;
-            *b.add(idx) = *a.add(idx) * alpha;
+            unsafe {
+                *b.add(idx) = *a.add(idx) * alpha;
+            }
         }
     } else {
         // Scalar fallback for small arrays
-        *b = *a * alpha;
+        unsafe {
+            *b = *a * alpha;
+        }
     }
 }
 
@@ -325,9 +343,9 @@ pub unsafe extern "C" fn sounio_tensor_matvec(
     let m = m as usize;
     let n = n as usize;
 
-    let a_slice = std::slice::from_raw_parts(a, m * n);
-    let x_slice = std::slice::from_raw_parts(x, n);
-    let y_slice = std::slice::from_raw_parts_mut(y, m);
+    let a_slice = unsafe { std::slice::from_raw_parts(a, m * n) };
+    let x_slice = unsafe { std::slice::from_raw_parts(x, n) };
+    let y_slice = unsafe { std::slice::from_raw_parts_mut(y, m) };
 
     // y[i] = sum_j A[i,j] * x[j]
     for i in 0..m {

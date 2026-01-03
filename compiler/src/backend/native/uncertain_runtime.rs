@@ -197,7 +197,7 @@ pub unsafe extern "C" fn sounio_uncertain_combine(
     }
 
     let n = n as usize;
-    let meas_slice = std::slice::from_raw_parts(measurements, n);
+    let meas_slice = unsafe { std::slice::from_raw_parts(measurements, n) };
 
     unsafe {
         // Compute weighted average: x_combined = sum(w_i * x_i) / sum(w_i)
