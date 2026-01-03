@@ -411,6 +411,10 @@ pub enum OdeMethod {
     DoPri5,
     /// Cash-Karp 5(4)
     CashKarp,
+    /// BDF (Backward Differentiation Formula) for stiff systems
+    BDF,
+    /// LSODA (automatic stiff/non-stiff switching)
+    LSODA,
 }
 
 /// Automatic differentiation mode

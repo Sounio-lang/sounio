@@ -389,3 +389,92 @@ pub unsafe extern "C" fn sounio_ode_step(
         _ => f64::INFINITY,
     }
 }
+
+/// C-compatible function pointer type for ODE Jacobian
+/// Signature: void jacobian(double* state, double t, double* jacobian_matrix)
+/// Jacobian is stored row-major: jacobian[i*n + j] = ∂f_i/∂y_j
+pub type JacobianFn = unsafe extern "C" fn(*const f64, f64, *mut f64);
+
+/// Single BDF step for stiff ODEs
+/// 
+/// C signature:
+/// ```c
+/// double sounio_ode_bdf_step(
+///     double* state,      // RDI: state vector (modified in-place)
+///     int n,              // RSI: dimension
+///     double* t,          // RDX: pointer to current time (updated)
+///     double* dt,         // RCX: pointer to step size (updated)
+///     double rtol,        // XMM0: relative tolerance
+///     double atol,        // XMM1: absolute tolerance
+///     DerivativeFn f,     // R8: derivatives function pointer
+///     JacobianFn jac      // R9: jacobian function pointer (can be NULL for numerical)
+/// );
+/// ```
+/// Returns: error estimate (in XMM0)
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn sounio_ode_bdf_step(
+    state: *mut f64,
+    n: i32,
+    t: *mut f64,
+    dt: *mut f64,
+    rtol: f64,
+    atol: f64,
+    derivatives: DerivativeFn,
+    jacobian: JacobianFn,
+) -> f64 {
+    if state.is_null() || t.is_null() || dt.is_null() || n <= 0 {
+        return f64::INFINITY;
+    }
+
+    // TODO: Implement BDF step
+    // BDF requires:
+    // 1. History of previous steps (not available in single-step interface)
+    // 2. Newton iteration to solve implicit equation
+    // 3. Jacobian matrix for Newton iteration
+    // 
+    // For now, return error to indicate not yet implemented
+    // In production, would need to maintain history across calls
+    f64::INFINITY
+}
+
+/// Single LSODA step (automatic stiff/non-stiff switching)
+/// 
+/// C signature:
+/// ```c
+/// double sounio_ode_lsoda_step(
+///     double* state,
+///     int n,
+///     double* t,
+///     double* dt,
+///     double rtol,
+///     double atol,
+///     DerivativeFn f,
+///     JacobianFn jac
+/// );
+/// ```
+/// Returns: error estimate (in XMM0)
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn sounio_ode_lsoda_step(
+    state: *mut f64,
+    n: i32,
+    t: *mut f64,
+    dt: *mut f64,
+    rtol: f64,
+    atol: f64,
+    derivatives: DerivativeFn,
+    jacobian: JacobianFn,
+) -> f64 {
+    if state.is_null() || t.is_null() || dt.is_null() || n <= 0 {
+        return f64::INFINITY;
+    }
+
+    // TODO: Implement LSODA step
+    // LSODA automatically switches between Adams (non-stiff) and BDF (stiff) methods
+    // Requires:
+    // 1. Detection of stiffness
+    // 2. History management
+    // 3. Both explicit and implicit step methods
+    //
+    // For now, return error to indicate not yet implemented
+    f64::INFINITY
+}

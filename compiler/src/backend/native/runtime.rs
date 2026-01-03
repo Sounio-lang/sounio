@@ -1344,7 +1344,11 @@ pub const RUNTIME_SYMBOLS: &[&str] = &[
     "sounio_ode_cashkarp",
     "sounio_ode_dopri5_step",  // C function called by assembly wrapper
     "sounio_ode_cashkarp_step", // C function called by assembly wrapper
+    "sounio_ode_bdf_step",      // C function for BDF
+    "sounio_ode_lsoda_step",    // C function for LSODA
     "sounio_ode_step",
+    "sounio_ode_bdf",           // Assembly wrapper for BDF
+    "sounio_ode_lsoda",         // Assembly wrapper for LSODA
     // Autodiff functions
     "sounio_dual_add",
     "sounio_dual_sub",

@@ -3819,7 +3819,7 @@ impl X86_64Emitter {
                         }
                     }
                     
-                    OdeMethod::DoPri5 | OdeMethod::CashKarp => {
+                    OdeMethod::DoPri5 | OdeMethod::CashKarp | OdeMethod::BDF | OdeMethod::LSODA => {
                         // ============================================================
                         // COMPLEX ADAPTIVE ODE SOLVERS (DoPri5, CashKarp)
                         // ============================================================
