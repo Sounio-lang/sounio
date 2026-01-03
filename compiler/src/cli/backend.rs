@@ -706,8 +706,7 @@ fn compile_native(args: &BuildArgs) -> Result<(PathBuf, Option<NativeMetrics>), 
     use crate::check::check;
     use crate::hlir::lower as lower_hlir;
     use crate::sir::lower::lower_module;
-    use crate::sir::emit::CodeEmitter;
-
+    use crate::sir::emit::emit_code;
     let start = Instant::now();
 
     // Step 1: Load and parse AST
