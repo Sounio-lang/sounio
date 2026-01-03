@@ -4304,12 +4304,13 @@ impl X86_64Emitter {
                 self.emit_call_reg(ptr_reg);
             }
             Callee::Direct(func_id) => {
-                // Internal function call - add relocation to resolve at link time
+                // Internal function call - use PLT32 for PIC compatibility
+                // PLT32 works for both executables and shared libraries
                 if let Some(name) = self.func_names.get(func_id) {
                     let offset = self.offset() + 1; // +1 for the E8 opcode
                     self.relocations.push(Relocation {
                         offset,
-                        kind: RelocKind::PCRel32,
+                        kind: RelocKind::PLT32,
                         symbol: name.clone(),
                         addend: -4, // PC-relative adjustment
                     });
@@ -4679,12 +4680,12 @@ impl X86_64Emitter {
                         self.emit_modrm(0b11, 4, ptr_reg.encoding());
                     }
                     crate::sir::ops::Callee::Direct(func_id) => {
-                        // Direct tail call - add relocation for internal function
+                        // Direct tail call - use PLT32 for PIC compatibility
                         if let Some(name) = self.func_names.get(func_id) {
                             let offset = self.code.len() + 1;
                             self.relocations.push(Relocation {
                                 offset,
-                                kind: RelocKind::PCRel32,
+                                kind: RelocKind::PLT32,
                                 symbol: name.clone(),
                                 addend: -4,
                             });

@@ -61,9 +61,9 @@ fn test_uncertain_mul() {
     // Absolute error: 50.0 * 0.1414 ≈ 7.07
     // But our implementation uses: |a*b| * sqrt((u(a)/a)² + (u(b)/b)²)
     // = 50.0 * sqrt((0.1/10)² + (0.05/5)²) = 50.0 * sqrt(0.01 + 0.01) = 50.0 * sqrt(0.02)
-    let rel_unc_a = 0.1 / 10.0;
-    let rel_unc_b = 0.05 / 5.0;
-    let expected_uncertainty = 50.0 * (rel_unc_a * rel_unc_a + rel_unc_b * rel_unc_b).sqrt();
+    let rel_unc_a: f64 = 0.1 / 10.0;
+    let rel_unc_b: f64 = 0.05 / 5.0;
+    let expected_uncertainty: f64 = 50.0 * (rel_unc_a * rel_unc_a + rel_unc_b * rel_unc_b).sqrt();
     assert!((result.uncertainty - expected_uncertainty).abs() < 0.01, 
             "uncertainty: got {}, expected {}", result.uncertainty, expected_uncertainty);
 }
