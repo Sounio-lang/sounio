@@ -33,10 +33,12 @@
 
 pub mod analyze;
 pub mod ast;
+pub mod backend;
 pub mod bio;
 pub mod build;
 pub mod causal;
 pub mod check;
+pub mod cli;
 pub mod codegen;
 pub mod common;
 pub mod dependent;

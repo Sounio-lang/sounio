@@ -27,15 +27,25 @@
 use std::collections::HashMap;
 use std::fmt;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Arc;
 
 use crate::interp::Value;
 
-/// A boxed closure that can be called to resume a continuation.
+/// A boxed closure that can be called to resume a continuation (one-shot).
 ///
 /// The closure takes a resume value and returns the final computation result.
 /// Note: This does not require `Send` because interpreter `Value` uses `Rc<RefCell<...>>`
 /// which is not thread-safe. For cross-thread continuations, use JIT-based resumption.
-pub type ResumeFn = Box<dyn FnOnce(Value) -> Result<Value, ContinuationError> + 'static>;
+pub type OneShotResumeFn = Box<dyn FnOnce(Value) -> Result<Value, ContinuationError> + 'static>;
+
+/// Legacy alias for OneShotResumeFn
+pub type ResumeFn = OneShotResumeFn;
+
+/// A multi-shot resume function that can be called multiple times.
+///
+/// Uses `Arc` to allow cloning and `Fn` instead of `FnOnce` so the closure
+/// can be invoked repeatedly. Requires `Send + Sync` for thread safety.
+pub type MultiShotResumeFn = Arc<dyn Fn(Value) -> Result<Value, ContinuationError> + Send + Sync + 'static>;
 
 /// Global counter for generating unique continuation IDs
 static CONTINUATION_ID: AtomicU64 = AtomicU64::new(0);
@@ -73,22 +83,41 @@ impl fmt::Display for ContinuationId {
 /// Where to resume execution when a continuation is invoked
 ///
 /// This enum represents different execution contexts that can be resumed:
-/// - InterpreterClosure: Resume with a closure that captures the interpreter state
+/// - InterpreterClosure: Resume with a one-shot closure (FnOnce)
+/// - InterpreterMultiShot: Resume with a multi-shot closure (Fn, can be called multiple times)
 /// - Interpreter: Resume in the tree-walking interpreter (description-only, not executable)
 /// - JIT: Resume in JIT-compiled code with saved machine state
 /// - Stub: Placeholder for not-yet-implemented backends
 pub enum ResumePoint {
-    /// Resume in interpreter using a captured closure.
+    /// Resume in interpreter using a captured one-shot closure.
     ///
     /// The closure captures the interpreter's evaluation context and can be
     /// called with the resume value to continue execution from where the
     /// effect was performed.
     ///
-    /// NOTE: For one-shot continuations, this closure will be consumed (FnOnce).
-    /// Multi-shot continuations are not yet supported with closures.
+    /// NOTE: This closure is consumed on first call (FnOnce). For multi-shot
+    /// continuations, use `InterpreterMultiShot` instead.
     InterpreterClosure {
         /// The continuation closure that resumes execution
-        resume_fn: ResumeFn,
+        resume_fn: OneShotResumeFn,
+        /// Optional description for debugging
+        description: Option<String>,
+    },
+
+    /// Resume in interpreter using a multi-shot closure.
+    ///
+    /// Unlike `InterpreterClosure`, this variant uses `Arc<dyn Fn>` so the
+    /// closure can be called multiple times without being consumed. This is
+    /// essential for effects like:
+    /// - Non-determinism (Amb): explore multiple branches
+    /// - Backtracking search: retry with different values
+    /// - Probabilistic effects: multi-world inference (SMC, enumeration)
+    ///
+    /// The closure is cloned on each resume, allowing the same continuation
+    /// to be invoked multiple times with different values.
+    InterpreterMultiShot {
+        /// The continuation closure that resumes execution (can be called multiple times)
+        resume_fn: MultiShotResumeFn,
         /// Optional description for debugging
         description: Option<String>,
     },
@@ -151,6 +180,33 @@ impl ResumePoint {
         }
     }
 
+    /// Create a new interpreter resume point with a multi-shot closure.
+    ///
+    /// Unlike `interpreter_closure`, this creates a continuation that can be
+    /// resumed multiple times. The closure is wrapped in an `Arc` so it can
+    /// be cloned on each resume.
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// let resume_point = ResumePoint::interpreter_multi_shot(
+    ///     |value| {
+    ///         // This can be called multiple times
+    ///         Ok(Value::Int(value.as_int().unwrap() * 2))
+    ///     },
+    ///     Some("multi-shot doubling continuation"),
+    /// );
+    /// ```
+    pub fn interpreter_multi_shot<F>(resume_fn: F, description: Option<&str>) -> Self
+    where
+        F: Fn(Value) -> Result<Value, ContinuationError> + Send + Sync + 'static,
+    {
+        ResumePoint::InterpreterMultiShot {
+            resume_fn: Arc::new(resume_fn),
+            description: description.map(String::from),
+        }
+    }
+
     /// Create a new interpreter resume point (description only, not executable)
     pub fn interpreter(description: impl Into<String>) -> Self {
         ResumePoint::Interpreter {
@@ -176,8 +232,15 @@ impl ResumePoint {
     pub fn is_executable(&self) -> bool {
         matches!(
             self,
-            ResumePoint::InterpreterClosure { .. } | ResumePoint::Stub
+            ResumePoint::InterpreterClosure { .. }
+                | ResumePoint::InterpreterMultiShot { .. }
+                | ResumePoint::Stub
         )
+    }
+
+    /// Check if this is a multi-shot resume point
+    pub fn is_multi_shot(&self) -> bool {
+        matches!(self, ResumePoint::InterpreterMultiShot { .. })
     }
 }
 
@@ -187,7 +250,13 @@ impl fmt::Debug for ResumePoint {
             ResumePoint::InterpreterClosure { description, .. } => {
                 f.debug_struct("InterpreterClosure")
                     .field("description", description)
-                    .field("resume_fn", &"<closure>")
+                    .field("resume_fn", &"<one-shot closure>")
+                    .finish()
+            }
+            ResumePoint::InterpreterMultiShot { description, .. } => {
+                f.debug_struct("InterpreterMultiShot")
+                    .field("description", description)
+                    .field("resume_fn", &"<multi-shot closure>")
                     .finish()
             }
             ResumePoint::Interpreter { description } => {
@@ -309,15 +378,26 @@ impl CapturedContinuation {
 
         self.resume_count += 1;
 
-        // For InterpreterClosure, we need to take ownership of the closure
+        // Handle multi-shot continuations specially: clone the Arc and call without consuming
+        if let ResumePoint::InterpreterMultiShot { ref resume_fn, .. } = self.resume_point {
+            // Clone the Arc to allow multiple calls
+            let fn_clone = Arc::clone(resume_fn);
+            return fn_clone(value);
+        }
+
+        // For one-shot closures, we need to take ownership of the closure
         // (since it's FnOnce). We replace the resume_point with a Stub after
         // extracting the closure.
         let resume_point = std::mem::replace(&mut self.resume_point, ResumePoint::Stub);
 
         match resume_point {
             ResumePoint::InterpreterClosure { resume_fn, .. } => {
-                // Execute the resume closure with the provided value
+                // Execute the resume closure with the provided value (consumes the closure)
                 resume_fn(value)
+            }
+            ResumePoint::InterpreterMultiShot { .. } => {
+                // Already handled above, this branch should be unreachable
+                unreachable!("InterpreterMultiShot should be handled before mem::replace")
             }
             ResumePoint::Interpreter { description } => {
                 // Restore the resume point since we didn't consume it

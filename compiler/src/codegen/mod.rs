@@ -72,6 +72,8 @@ pub mod llvm {
 /// Backend selection
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Backend {
+    /// Native SIR backend (x86-64 direct emission, epistemic-aware)
+    Native,
     /// LLVM backend for optimized native code
     LLVM,
     /// Cranelift backend for fast JIT compilation
@@ -83,6 +85,7 @@ pub enum Backend {
 impl Backend {
     pub fn name(&self) -> &'static str {
         match self {
+            Backend::Native => "native",
             Backend::LLVM => "llvm",
             Backend::Cranelift => "cranelift",
             Backend::GPU => "gpu",

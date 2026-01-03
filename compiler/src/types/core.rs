@@ -6,6 +6,21 @@ use std::collections::HashSet;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct TypeVar(pub u32);
 
+/// Effect variable for effect polymorphism (row polymorphism)
+///
+/// Effect variables represent unknown effect rows in polymorphic functions.
+/// For example, in `fn map<T, U, E>(f: fn(T) -> U with E, xs: [T]) -> [U] with E`,
+/// `E` is an effect variable that gets instantiated at call sites.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct EffectVar(pub u32);
+
+impl EffectVar {
+    /// Create a new effect variable with the given id
+    pub fn new(id: u32) -> Self {
+        Self(id)
+    }
+}
+
 /// Core type representation
 #[derive(Debug, Clone, PartialEq)]
 pub enum Type {
@@ -463,10 +478,26 @@ impl Effect {
     }
 }
 
-/// Set of effects
+/// Set of effects with support for effect polymorphism
+///
+/// An EffectSet represents a row of effects that a function may perform.
+/// It contains:
+/// - `effects`: Known concrete effects like IO, Mut, Alloc
+/// - `effect_vars`: Effect variables for polymorphism (e.g., E in `fn map<E>`)
+///
+/// Effect variables enable row polymorphism where a function can be generic
+/// over the effects it performs, allowing code like:
+/// ```sio
+/// fn map<T, U, E>(f: fn(T) -> U with E, xs: [T]) -> [U] with E
+/// ```
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct EffectSet {
+    /// Concrete effects (IO, Mut, Alloc, etc.)
     pub effects: HashSet<String>,
+    /// Effect variables for row polymorphism
+    pub effect_vars: HashSet<EffectVar>,
+    /// Legacy: type variables used as effect variables (for backwards compatibility)
+    #[deprecated(note = "Use effect_vars instead")]
     pub vars: HashSet<TypeVar>,
 }
 
@@ -485,23 +516,106 @@ impl EffectSet {
         set
     }
 
+    /// Create an EffectSet with a single effect variable
+    pub fn with_var(var: EffectVar) -> Self {
+        let mut set = Self::new();
+        set.effect_vars.insert(var);
+        set
+    }
+
     pub fn add(&mut self, effect: Effect) {
         self.effects.insert(effect.name);
     }
 
+    /// Add an effect variable to this set
+    pub fn add_var(&mut self, var: EffectVar) {
+        self.effect_vars.insert(var);
+    }
+
     pub fn union(&self, other: &EffectSet) -> EffectSet {
+        #[allow(deprecated)]
         EffectSet {
             effects: self.effects.union(&other.effects).cloned().collect(),
+            effect_vars: self.effect_vars.union(&other.effect_vars).cloned().collect(),
             vars: self.vars.union(&other.vars).cloned().collect(),
         }
     }
 
     pub fn is_pure(&self) -> bool {
-        self.effects.is_empty() && self.vars.is_empty()
+        #[allow(deprecated)]
+        {
+            self.effects.is_empty() && self.effect_vars.is_empty() && self.vars.is_empty()
+        }
+    }
+
+    /// Check if this effect set has any unresolved effect variables
+    pub fn has_effect_vars(&self) -> bool {
+        !self.effect_vars.is_empty()
     }
 
     pub fn contains(&self, effect: &str) -> bool {
         self.effects.contains(effect)
+    }
+
+    /// Check if this effect set contains a specific effect variable
+    pub fn contains_var(&self, var: EffectVar) -> bool {
+        self.effect_vars.contains(&var)
+    }
+
+    /// Subtract handled effects from this effect set.
+    ///
+    /// Returns a new EffectSet with the specified effects removed.
+    /// This is used for effect masking when a handler handles certain effects,
+    /// allowing functions to be pure even if they use impure operations internally.
+    ///
+    /// # Example
+    /// ```ignore
+    /// let effects = EffectSet::from_effects(&["IO", "Mut", "Alloc"]);
+    /// let residual = effects.subtract(&["IO"]);
+    /// // residual contains only Mut and Alloc
+    /// ```
+    pub fn subtract(&self, handled: &[String]) -> EffectSet {
+        let mut result = self.clone();
+        for h in handled {
+            result.effects.remove(h);
+        }
+        result
+    }
+
+    /// Create an EffectSet from a slice of effect names.
+    pub fn from_effects(names: &[&str]) -> EffectSet {
+        let mut set = EffectSet::new();
+        for name in names {
+            set.effects.insert((*name).to_string());
+        }
+        set
+    }
+
+    /// Substitute effect variables according to a substitution map
+    ///
+    /// This is used during instantiation to replace effect variables with
+    /// their concrete effect sets.
+    pub fn substitute(&self, subst: &std::collections::HashMap<EffectVar, EffectSet>) -> EffectSet {
+        let mut result = EffectSet::new();
+        result.effects = self.effects.clone();
+
+        for var in &self.effect_vars {
+            if let Some(replacement) = subst.get(var) {
+                // Replace this variable with the concrete effects
+                result.effects.extend(replacement.effects.iter().cloned());
+                result.effect_vars.extend(replacement.effect_vars.iter().cloned());
+            } else {
+                // Variable not in substitution, keep it
+                result.effect_vars.insert(*var);
+            }
+        }
+
+        result
+    }
+
+    /// Get all effect variable ids in this set
+    pub fn effect_var_ids(&self) -> impl Iterator<Item = u32> + '_ {
+        self.effect_vars.iter().map(|v| v.0)
     }
 }
 

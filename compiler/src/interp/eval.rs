@@ -10,9 +10,12 @@ use crate::hir::*;
 use crate::runtime::async_runtime::{SounioFuture, SounioRuntime, SounioValue};
 
 use super::builtins::BuiltinRegistry;
-use super::effect_dispatch::{CapabilityAdapter, EffectContext, EffectError, EffectHandler, EffectKind};
+use super::effect_dispatch::{
+    CapabilityAdapter, DispatchResult, EffectContext, EffectError, EffectHandler, EffectKind,
+};
 use super::env::Environment;
-use super::value::{ControlFlow, Value};
+use super::value::{ControlFlow, SuspensionId, Value};
+use crate::effects::continuation::ContinuationId;
 use crate::effects::handlers::HandlerRegistry;
 
 /// Tree-walking interpreter
@@ -171,6 +174,58 @@ impl Interpreter {
         self.effect_ctx.pop_handler()
     }
 
+    /// Resume a suspended computation.
+    ///
+    /// When an effect handler returns `HandlerResult::Suspend`, the computation
+    /// is paused and a `ControlFlow::Suspend` is propagated up the call stack.
+    /// This method allows resuming that suspended computation with a value.
+    ///
+    /// # Arguments
+    /// * `suspension_id` - The ID of the suspension (from ControlFlow::Suspend)
+    /// * `continuation_id` - The continuation ID (from ControlFlow::Suspend)
+    /// * `value` - The value to resume with
+    ///
+    /// # Returns
+    /// The result of resuming the continuation
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// // When evaluation suspends:
+    /// match interp.eval_expr(&expr) {
+    ///     Err(ControlFlow::Suspend { suspension_id, continuation_id }) => {
+    ///         // Do something (e.g., wait for async completion)
+    ///         let resume_value = Value::Int(42);
+    ///         let result = interp.resume_suspension(suspension_id, continuation_id, resume_value)?;
+    ///     }
+    ///     // ...
+    /// }
+    /// ```
+    pub fn resume_suspension(
+        &mut self,
+        suspension_id: SuspensionId,
+        continuation_id: ContinuationId,
+        value: Value,
+    ) -> Result<Value, EffectError> {
+        self.effect_ctx
+            .resume_suspension(suspension_id, continuation_id, value)
+    }
+
+    /// Check if there are any active suspensions.
+    pub fn has_active_suspensions(&self) -> bool {
+        self.effect_ctx.active_continuation_count() > 0
+    }
+
+    /// Get the number of active suspensions.
+    pub fn active_suspension_count(&self) -> usize {
+        self.effect_ctx.active_continuation_count()
+    }
+
+    /// Clear all suspensions (useful for cleanup/reset).
+    pub fn clear_suspensions(&mut self) {
+        self.effect_ctx.clear_continuations();
+    }
+
     /// Get captured output (for testing)
     pub fn get_output(&self) -> &[String] {
         &self.output
@@ -242,6 +297,19 @@ impl Interpreter {
             Err(ControlFlow::Return(v)) => Ok(v),
             Err(ControlFlow::Break(_)) => Err(miette!("break outside loop")),
             Err(ControlFlow::Continue) => Err(miette!("continue outside loop")),
+            Err(ControlFlow::Suspend {
+                suspension_id,
+                continuation_id,
+            }) => {
+                // Suspension reached the top of a function call
+                // This should be handled by an enclosing handle expression
+                Err(miette!(
+                    "unhandled suspension {} (continuation {}) in function {}",
+                    suspension_id,
+                    continuation_id,
+                    func.name
+                ))
+            }
         }
     }
 
@@ -816,9 +884,22 @@ impl Interpreter {
                     arg_values.push(self.eval_expr(arg)?);
                 }
 
-                // Dispatch to effect handler
-                match self.effect_ctx.dispatch_by_name(effect, op, arg_values) {
-                    Ok(result) => Ok(result),
+                // Dispatch to effect handler with suspension support
+                match self
+                    .effect_ctx
+                    .dispatch_by_name_with_continuation(effect, op, arg_values)
+                {
+                    Ok(DispatchResult::Completed(result)) => Ok(result),
+                    Ok(DispatchResult::Suspended {
+                        suspension_id,
+                        continuation_id,
+                    }) => {
+                        // Handler suspended - propagate up the call stack
+                        Err(ControlFlow::Suspend {
+                            suspension_id,
+                            continuation_id,
+                        })
+                    }
                     Err(e) => {
                         // Convert effect error to control flow error
                         // In production, this would generate proper diagnostics
@@ -849,7 +930,7 @@ impl Interpreter {
                     false
                 };
 
-                // Evaluate the wrapped expression
+                // Evaluate the wrapped expression, catching suspensions
                 let result = self.eval_expr(expr);
 
                 // Pop the handler if we pushed one
@@ -857,7 +938,28 @@ impl Interpreter {
                     self.effect_ctx.pop_handler();
                 }
 
-                result
+                // Handle suspensions from the inner expression
+                match result {
+                    Err(ControlFlow::Suspend {
+                        suspension_id,
+                        continuation_id,
+                    }) => {
+                        // The inner expression suspended.
+                        // For now, we propagate the suspension up.
+                        // A full implementation would allow the handler to:
+                        // 1. Resume immediately with a value
+                        // 2. Store the suspension for later resumption
+                        // 3. Abort the computation
+                        //
+                        // The handler could inspect suspension_id to decide what to do.
+                        // For now, we just propagate it.
+                        Err(ControlFlow::Suspend {
+                            suspension_id,
+                            continuation_id,
+                        })
+                    }
+                    other => other,
+                }
             }
 
             HirExprKind::Sample(dist_expr) => {

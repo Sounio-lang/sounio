@@ -967,16 +967,33 @@ pub struct Generics {
 }
 
 /// Generic parameter
+///
+/// Supports type parameters, const parameters, and effect parameters for row polymorphism.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum GenericParam {
+    /// Type parameter: `T`, `T: Bound`, `T = Default`
     Type {
         name: String,
         bounds: Vec<Path>,
         default: Option<TypeExpr>,
     },
+    /// Const parameter: `const N: usize`
     Const {
         name: String,
         ty: TypeExpr,
+    },
+    /// Effect parameter for row polymorphism: `effect E`
+    ///
+    /// Effect parameters enable functions to be polymorphic over their effects:
+    /// ```sio
+    /// fn map<T, U, effect E>(f: fn(T) -> U with E, xs: [T]) -> [U] with E
+    /// ```
+    ///
+    /// The effect parameter `E` represents an unknown effect row that gets
+    /// instantiated at call sites based on the actual effects of the passed function.
+    Effect {
+        /// The name of the effect parameter (e.g., "E")
+        name: String,
     },
 }
 
@@ -1218,12 +1235,21 @@ pub enum LinearityKind {
     Relevant,
 }
 
-/// Effect row: {IO, GPU, Random, ...}
+/// Effect row: {IO, GPU, Random, ...} or E (effect variable)
+///
+/// Represents a row of effects in the type system. Supports:
+/// - Concrete effects: `{IO, Mut}`
+/// - Effect variables: `E` (from generic effect parameters)
+/// - Open rows: `{IO, ...E}` (concrete effects plus an effect variable)
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct EffectRow {
-    /// List of effects
+    /// List of concrete effects
     pub effects: Vec<String>,
+    /// Effect variable name if this row includes an effect parameter
+    /// For example, in `fn f<effect E>(...) with E`, this would be Some("E")
+    pub row_var: Option<String>,
     /// Whether this is an open row (can have more effects)
+    /// Deprecated: use row_var instead for effect polymorphism
     pub is_open: bool,
 }
 

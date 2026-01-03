@@ -56,6 +56,10 @@ enum Commands {
         #[arg(short, long, value_name = "FILE")]
         output: Option<PathBuf>,
 
+        /// Backend to use (native, llvm, cranelift, gpu)
+        #[arg(long, value_enum, default_value = "native")]
+        backend: sounio::cli::backend::Backend,
+
         /// Optimization level (0, 1, 2, 3, s, z)
         #[arg(short = 'O', default_value = "2")]
         opt_level: String,
@@ -99,6 +103,30 @@ enum Commands {
         /// Path to output allocation metrics (JSON)
         #[arg(long)]
         emit_alloc_metrics: Option<PathBuf>,
+
+        /// Thermal model for native backend (none, 7nm, 5nm, conservative)
+        #[arg(long, value_enum)]
+        thermal: Option<sounio::cli::backend::ThermalModel>,
+
+        /// Disable thermal modeling
+        #[arg(long)]
+        no_thermal: bool,
+
+        /// Allocation strategy for native backend (epistemic, linear, graph)
+        #[arg(long, value_enum)]
+        alloc: Option<sounio::cli::backend::AllocStrategy>,
+
+        /// Show timing information
+        #[arg(long)]
+        timing: bool,
+
+        /// Emit intermediate stages (comma-separated: ast,sir,asm)
+        #[arg(long)]
+        emit: Option<String>,
+
+        /// Target CPU features (comma-separated)
+        #[arg(long)]
+        target_cpu: Option<String>,
     },
 
     /// Type-check a Sounio source file without compiling
@@ -1575,6 +1603,7 @@ fn main() -> Result<()> {
         Commands::Build {
             input,
             output,
+            backend,
             opt_level,
             debug,
             emit_llvm,
@@ -1586,21 +1615,99 @@ fn main() -> Result<()> {
             alloc_policy,
             attention_config,
             emit_alloc_metrics,
-        } => build(
-            &input,
-            output.as_deref(),
-            &opt_level,
-            debug,
-            emit_llvm,
-            emit_asm,
-            target.as_deref(),
-            strip,
-            verbose,
-            cdylib,
-            alloc_policy.into(),
-            attention_config.as_deref(),
-            emit_alloc_metrics.as_deref(),
-        ),
+            thermal,
+            no_thermal,
+            alloc,
+            timing,
+            emit,
+            target_cpu,
+        } => {
+            // If native backend, use new CLI integration
+            if backend == sounio::cli::backend::Backend::Native {
+                // Build args from command line
+                let build_args = sounio::cli::backend::BuildArgs {
+                    input: vec![input],
+                    output,
+                    backend,
+                    format: None,
+                    native_opts: sounio::cli::backend::NativeBackendOptions {
+                        opt_level: opt_level.parse().unwrap_or_default(),
+                        enable_thermal: !no_thermal,
+                        thermal_model: thermal.unwrap_or_default(),
+                        alloc_strategy: alloc.unwrap_or_default(),
+                        debug_info: debug,
+                        cpu_features: target_cpu.map(|s| s.split(',').map(|x| x.trim().to_string()).collect()).unwrap_or_default(),
+                    },
+                    verbose,
+                    timing,
+                    emit: emit.map(|s| s.split(',').filter_map(|x| x.trim().parse().ok()).collect()).unwrap_or_default(),
+                };
+                
+                let output = sounio::cli::backend::compile(&build_args);
+                
+                // Print warnings
+                for warning in &output.warnings {
+                    eprintln!("Warning: {}", warning);
+                }
+                
+                // Print errors
+                for error in &output.errors {
+                    eprintln!("Error: {}", error);
+                }
+                
+                // Print timing if requested
+                if let Some(timing) = &output.timing {
+                    println!("\nTiming:");
+                    println!("  Total: {} ms", timing.total_ms);
+                }
+                
+                // Print metrics if available and verbose
+                if verbose {
+                    if let Some(metrics) = &output.metrics {
+                        if let Some(native) = &metrics.native {
+                            println!("\nNative backend metrics:");
+                            println!("  Intervals allocated: {}", native.intervals_allocated);
+                            println!("  Intervals spilled: {}", native.intervals_spilled);
+                            if native.intervals_allocated > 0 {
+                                println!("  Avg confidence (allocated): {:.3}", native.avg_confidence_allocated);
+                            }
+                            if native.intervals_spilled > 0 {
+                                println!("  Avg confidence (spilled): {:.3}", native.avg_confidence_spilled);
+                            }
+                            if native.thermal_degradation > 0.0 {
+                                println!("  Thermal degradation: {:.2}%", native.thermal_degradation * 100.0);
+                            }
+                        }
+                    }
+                }
+                
+                if output.success {
+                    if let Some(path) = &output.output_path {
+                        println!("Compiled: {}", path.display());
+                    }
+                    Ok(())
+                } else {
+                    Err(miette::miette!("Compilation failed"))
+                }
+            } else {
+                // Use existing build function for other backends
+                build(
+                    &input,
+                    output.as_deref(),
+                    &opt_level,
+                    debug,
+                    emit_llvm,
+                    emit_asm,
+                    target.as_deref(),
+                    strip,
+                    verbose,
+                    cdylib,
+                    alloc_policy.into(),
+                    attention_config.as_deref(),
+                    emit_alloc_metrics.as_deref(),
+                )
+            }
+        },
 
         Commands::Check {
             input,

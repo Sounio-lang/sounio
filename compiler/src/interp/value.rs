@@ -622,6 +622,28 @@ impl PartialEq for Value {
     }
 }
 
+/// Unique identifier for a suspended computation
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct SuspensionId(pub u64);
+
+impl SuspensionId {
+    /// Create a new suspension ID from a raw value
+    pub fn new(id: u64) -> Self {
+        Self(id)
+    }
+
+    /// Get the raw ID value
+    pub fn raw(&self) -> u64 {
+        self.0
+    }
+}
+
+impl std::fmt::Display for SuspensionId {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "suspension_{}", self.0)
+    }
+}
+
 /// Control flow signal (not an error, just flow control)
 #[derive(Debug, Clone)]
 pub enum ControlFlow {
@@ -631,4 +653,17 @@ pub enum ControlFlow {
     Break(Option<Value>),
     /// Continue to next iteration
     Continue,
+    /// Suspend execution, waiting for handler to resume
+    ///
+    /// This is used when an effect handler returns `HandlerResult::Suspend`.
+    /// The computation is suspended and the continuation is stored for later resumption.
+    ///
+    /// - `suspension_id`: Unique ID identifying this suspended computation
+    /// - `continuation_id`: ID of the captured continuation in the continuation store
+    Suspend {
+        /// Unique ID for this suspension (used by handler to resume)
+        suspension_id: SuspensionId,
+        /// ID of the continuation in the store
+        continuation_id: crate::effects::continuation::ContinuationId,
+    },
 }

@@ -2388,7 +2388,7 @@ impl<'a> Parser<'a> {
     }
 
     fn parse_generic_param(&mut self) -> Result<GenericParam> {
-        // Check for const generic
+        // Check for const generic: `const N: usize`
         if self.at(TokenKind::Const) {
             self.advance();
             let name = self.parse_ident()?;
@@ -2397,7 +2397,16 @@ impl<'a> Parser<'a> {
             return Ok(GenericParam::Const { name, ty });
         }
 
-        // Type parameter
+        // Check for effect parameter: `effect E`
+        // This enables row polymorphism for effects:
+        // fn map<T, U, effect E>(f: fn(T) -> U with E, xs: [T]) -> [U] with E
+        if self.at(TokenKind::Effect) {
+            self.advance();
+            let name = self.parse_ident()?;
+            return Ok(GenericParam::Effect { name });
+        }
+
+        // Type parameter: `T`, `T: Bound`, `T = Default`
         let name = self.parse_ident()?;
         let bounds = if self.at(TokenKind::Colon) {
             self.advance();

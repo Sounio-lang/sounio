@@ -64,6 +64,14 @@ pub struct TypeChecker {
     used_ontology_prefixes: std::collections::HashSet<String>,
     /// Warnings accumulated during checking
     warnings: Vec<String>,
+    /// Handler definitions: handler_name -> effect_name
+    /// Used for effect masking when evaluating `handle expr with Handler`
+    handler_effects: HashMap<String, String>,
+    /// Effects masked by handlers in the current expression context.
+    /// When checking a `handle expr with Handler` expression, the handled effect
+    /// is added to this set. This enables pure functions that use impure internals
+    /// as long as all effects are handled before returning.
+    masked_effects: types::EffectSet,
 }
 
 /// Type environment with scopes and module awareness
@@ -169,6 +177,8 @@ impl TypeChecker {
             ontology_prefixes: std::collections::HashSet::new(),
             used_ontology_prefixes: std::collections::HashSet::new(),
             warnings: Vec::new(),
+            handler_effects: HashMap::new(),
+            masked_effects: types::EffectSet::new(),
         }
     }
 
@@ -204,6 +214,39 @@ impl TypeChecker {
             span,
             code: code.to_string(),
         });
+    }
+
+    /// Look up which effect a handler handles by its name.
+    ///
+    /// Returns the effect name if the handler is registered, or None if unknown.
+    /// For built-in handlers (IO, Mut, Alloc, etc.), the handler name typically
+    /// matches the effect name with "Handler" suffix (e.g., "IOHandler" handles "IO").
+    fn lookup_handler_effect(&self, handler_name: &str) -> Option<String> {
+        // First check explicitly registered handlers
+        if let Some(effect) = self.handler_effects.get(handler_name) {
+            return Some(effect.clone());
+        }
+
+        // Check for built-in handler naming convention: XHandler -> X
+        if handler_name.ends_with("Handler") {
+            let effect_name = &handler_name[..handler_name.len() - 7];
+            // Verify this is a known effect
+            if self.effects.lookup_effect(effect_name).is_some() {
+                return Some(effect_name.to_string());
+            }
+        }
+
+        // Check for exact match with effect name (handler named same as effect)
+        if self.effects.lookup_effect(handler_name).is_some() {
+            return Some(handler_name.to_string());
+        }
+
+        None
+    }
+
+    /// Register a handler definition for effect lookup.
+    fn register_handler(&mut self, handler_name: String, effect_name: String) {
+        self.handler_effects.insert(handler_name, effect_name);
     }
 
     /// Expand type aliases recursively
@@ -1560,10 +1603,14 @@ impl TypeChecker {
             })
             .collect();
 
+        // Register this handler for effect lookup during Handle expression checking
+        let effect_name = h.effect.to_string();
+        self.register_handler(h.name.clone(), effect_name.clone());
+
         Ok(HirHandler {
             id: h.id,
             name: h.name.clone(),
-            effect: h.effect.to_string(),
+            effect: effect_name,
             cases,
         })
     }
@@ -3120,6 +3167,20 @@ impl TypeChecker {
                     .last()
                     .cloned()
                     .unwrap_or_else(|| "Unknown".to_string());
+
+                // Look up which effect this handler handles and record it as masked.
+                // This enables effect masking: a function can be pure even if it uses
+                // impure operations internally, as long as all effects are handled.
+                //
+                // Example:
+                //   fn pure_computation() -> i32 {
+                //       handle { perform IO.print("hello"); 42 } with IOHandler
+                //   }
+                // The IO effect is handled internally, so pure_computation is pure.
+                if let Some(handled_effect) = self.lookup_handler_effect(&handler_name) {
+                    // Record this effect as masked in the current context
+                    self.masked_effects.effects.insert(handled_effect.clone());
+                }
 
                 // The handler handles the effect, so the result type is the inner type
                 // (effect is removed from the effect row)

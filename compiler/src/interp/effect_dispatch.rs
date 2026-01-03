@@ -29,10 +29,24 @@ use std::fmt;
 
 use thiserror::Error;
 
-use super::value::{Distribution, Value};
+use super::value::{Distribution, SuspensionId, Value};
 use crate::effects::continuation::{
     CapturedContinuation, ContinuationError, ContinuationId, ContinuationStore, ResumePoint,
 };
+
+/// Result of dispatching an effect operation with suspension support
+#[derive(Debug)]
+pub enum DispatchResult {
+    /// The operation completed with a value
+    Completed(Value),
+    /// The operation suspended execution
+    Suspended {
+        /// The suspension ID from the handler
+        suspension_id: SuspensionId,
+        /// The continuation ID for resuming
+        continuation_id: ContinuationId,
+    },
+}
 use crate::effects::handler_capability::{
     Continuation as CapabilityContinuation, HandlerCapability, HandlerResult as CapabilityResult,
     HandlerState as CapabilityHandlerState,
@@ -694,6 +708,35 @@ impl EffectContext {
         operation: &str,
         args: Vec<Value>,
     ) -> Result<Value, EffectError> {
+        match self.dispatch_via_registry_with_suspension(effect_name, operation, args)? {
+            DispatchResult::Completed(v) => Ok(v),
+            DispatchResult::Suspended { suspension_id, .. } => Err(EffectError::HandlerError {
+                effect: effect_name.to_string(),
+                operation: operation.to_string(),
+                message: format!(
+                    "Suspension {} returned but not handled - use dispatch_with_continuation for suspension support",
+                    suspension_id
+                ),
+            }),
+        }
+    }
+
+    /// Dispatch an operation through the registry with suspension support.
+    ///
+    /// This method properly handles `HandlerResult::Suspend` by capturing the
+    /// continuation and returning a `DispatchResult::Suspended`.
+    ///
+    /// # Returns
+    ///
+    /// - `DispatchResult::Completed(value)` - The operation completed with a value
+    /// - `DispatchResult::Suspended { suspension_id, continuation_id }` - The operation
+    ///   suspended; use `resume_suspension` with the suspension_id to continue
+    fn dispatch_via_registry_with_suspension(
+        &mut self,
+        effect_name: &str,
+        operation: &str,
+        args: Vec<Value>,
+    ) -> Result<DispatchResult, EffectError> {
         let registry = self.registry.as_ref().ok_or_else(|| EffectError::UnhandledEffect {
             effect: effect_name.to_string(),
             operation: operation.to_string(),
@@ -710,20 +753,174 @@ impl EffectContext {
         // Call the handler
         let result = handler.handle(operation, &args, continuation, &mut self.capability_state);
 
-        // Convert result
+        // Convert result with suspension support
         match result {
-            CapabilityResult::Return(v) | CapabilityResult::Resume(v) => Ok(v),
+            CapabilityResult::Return(v) | CapabilityResult::Resume(v) => {
+                Ok(DispatchResult::Completed(v))
+            }
             CapabilityResult::Abort(err) => Err(EffectError::HandlerError {
                 effect: err.effect,
                 operation: err.operation,
                 message: err.message,
             }),
-            CapabilityResult::Suspend(_) => Err(EffectError::HandlerError {
-                effect: effect_name.to_string(),
-                operation: operation.to_string(),
-                message: "Suspension not yet supported in interpreter dispatch".to_string(),
-            }),
+            CapabilityResult::Suspend(handler_suspension_id) => {
+                // Convert the handler's SuspensionId to our SuspensionId
+                let suspension_id = SuspensionId::new(handler_suspension_id.0);
+
+                // Capture a continuation for later resumption
+                // The continuation will be resumed when resume_suspension is called
+                let cont_id = self.capture_continuation(Some(&format!(
+                    "{}::{}::suspended_{}",
+                    effect_name, operation, suspension_id
+                )));
+
+                Ok(DispatchResult::Suspended {
+                    suspension_id,
+                    continuation_id: cont_id,
+                })
+            }
         }
+    }
+
+    /// Dispatch an effect operation with full suspension support.
+    ///
+    /// Unlike `dispatch`, this method properly handles handler suspensions by:
+    /// 1. Capturing the current continuation before dispatching
+    /// 2. If the handler suspends, storing the continuation and returning a DispatchResult::Suspended
+    /// 3. If the handler completes, returning DispatchResult::Completed
+    ///
+    /// Use this method when you need to handle asynchronous or multi-shot effects.
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// match ctx.dispatch_with_continuation(EffectKind::Async, "await", vec![future_val])? {
+    ///     DispatchResult::Completed(value) => {
+    ///         // Handler completed immediately
+    ///         Ok(value)
+    ///     }
+    ///     DispatchResult::Suspended { suspension_id, continuation_id } => {
+    ///         // Handler suspended - store this info for later resumption
+    ///         Err(ControlFlow::Suspend { suspension_id, continuation_id })
+    ///     }
+    /// }
+    /// ```
+    pub fn dispatch_with_continuation(
+        &mut self,
+        effect: EffectKind,
+        operation: &str,
+        args: Vec<Value>,
+    ) -> Result<DispatchResult, EffectError> {
+        // Try the handler stack first
+        let handler_idx = self
+            .handler_stack
+            .iter()
+            .enumerate()
+            .rev()
+            .find_map(|(idx, handler)| {
+                if handler.effect == effect && handler.find_case(operation).is_some() {
+                    Some(idx)
+                } else {
+                    None
+                }
+            });
+
+        if let Some(idx) = handler_idx {
+            // Get pointer to handler function to avoid holding borrow on handler_stack
+            let handler_fn_ptr: *const dyn Fn(&[Value], &mut HandlerState) -> Result<Value, EffectError> = {
+                let handler = &self.handler_stack[idx];
+                let case = handler.find_case(operation).unwrap();
+                &*case.handler_fn as *const _
+            };
+
+            // Call the handler - stack handlers currently don't support suspension
+            let result = unsafe { (*handler_fn_ptr)(&args, &mut self.state) };
+            return result.map(DispatchResult::Completed);
+        }
+
+        // Fall back to registry with suspension support
+        let effect_name = effect.as_str();
+        self.dispatch_via_registry_with_suspension(effect_name, operation, args)
+    }
+
+    /// Dispatch by name with suspension support.
+    ///
+    /// See `dispatch_with_continuation` for details on suspension handling.
+    pub fn dispatch_by_name_with_continuation(
+        &mut self,
+        effect_name: &str,
+        operation: &str,
+        args: Vec<Value>,
+    ) -> Result<DispatchResult, EffectError> {
+        // First try the handler stack if we can parse the effect kind
+        if let Some(effect) = EffectKind::from_str(effect_name) {
+            let handler_idx = self
+                .handler_stack
+                .iter()
+                .enumerate()
+                .rev()
+                .find_map(|(idx, handler)| {
+                    if handler.effect == effect && handler.find_case(operation).is_some() {
+                        Some(idx)
+                    } else {
+                        None
+                    }
+                });
+
+            if let Some(idx) = handler_idx {
+                let handler_fn_ptr: *const dyn Fn(&[Value], &mut HandlerState) -> Result<Value, EffectError> = {
+                    let handler = &self.handler_stack[idx];
+                    let case = handler.find_case(operation).unwrap();
+                    &*case.handler_fn as *const _
+                };
+                let result = unsafe { (*handler_fn_ptr)(&args, &mut self.state) };
+                return result.map(DispatchResult::Completed);
+            }
+        }
+
+        // Fall back to registry with suspension support
+        self.dispatch_via_registry_with_suspension(effect_name, operation, args)
+    }
+
+    /// Resume a suspended computation.
+    ///
+    /// When a handler returns `HandlerResult::Suspend`, the computation is paused
+    /// and a suspension_id is returned. Call this method with that ID and a value
+    /// to resume the computation.
+    ///
+    /// # Arguments
+    /// * `suspension_id` - The ID returned from the suspended dispatch
+    /// * `continuation_id` - The continuation ID returned from the suspended dispatch
+    /// * `value` - The value to resume with
+    ///
+    /// # Returns
+    /// The result of resuming the continuation
+    pub fn resume_suspension(
+        &mut self,
+        suspension_id: SuspensionId,
+        continuation_id: ContinuationId,
+        value: Value,
+    ) -> Result<Value, EffectError> {
+        // Verify the continuation exists
+        if !self.continuation_store.contains(continuation_id) {
+            return Err(EffectError::HandlerError {
+                effect: "continuation".to_string(),
+                operation: "resume".to_string(),
+                message: format!(
+                    "Continuation {} for suspension {} not found",
+                    continuation_id, suspension_id
+                ),
+            });
+        }
+
+        // Resume the continuation with the provided value
+        self.continuation_store
+            .resume_and_remove(continuation_id, value)
+            .map_err(|e| EffectError::HandlerError {
+                effect: "continuation".to_string(),
+                operation: "resume".to_string(),
+                message: format!("Failed to resume suspension {}: {}", suspension_id, e),
+            })
     }
 
     /// Convenience method for Prob.sample
@@ -835,6 +1032,61 @@ impl EffectContext {
         if let Some(l) = label {
             cont = cont.with_label(l);
         }
+        self.continuation_store.store(cont)
+    }
+
+    /// Capture a multi-shot interpreter continuation with a reusable closure.
+    ///
+    /// Unlike `capture_interpreter_continuation`, this creates a continuation
+    /// that can be resumed multiple times. The closure is wrapped in an `Arc`
+    /// and uses `Fn` instead of `FnOnce`, allowing it to be invoked repeatedly.
+    ///
+    /// This is essential for effects like:
+    /// - **Prob (multi-world inference)**: Explore multiple probabilistic branches
+    /// - **Amb (non-determinism)**: Try different choices
+    /// - **Backtracking search**: Retry with different values
+    ///
+    /// # Arguments
+    /// * `effect` - The effect name (for debugging/tracking)
+    /// * `operation` - The operation name (for debugging/tracking)
+    /// * `resume_fn` - Closure that will be called when the continuation is resumed.
+    ///                 Must be `Fn` (not `FnOnce`) and `Send + Sync` for thread safety.
+    ///
+    /// # Returns
+    /// The ID of the captured continuation
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// // Create a multi-shot continuation for probabilistic sampling
+    /// let cont_id = ctx.capture_multi_shot_interpreter_continuation(
+    ///     "Prob",
+    ///     "sample",
+    ///     |value| {
+    ///         // This can be called multiple times with different sampled values
+    ///         Ok(compute_result(value))
+    ///     },
+    /// );
+    ///
+    /// // Resume multiple times to explore different branches
+    /// let result1 = ctx.resume_continuation(cont_id, Value::Float(0.3))?;
+    /// let result2 = ctx.resume_continuation(cont_id, Value::Float(0.7))?;
+    /// let result3 = ctx.resume_continuation(cont_id, Value::Float(0.9))?;
+    /// ```
+    pub fn capture_multi_shot_interpreter_continuation<F>(
+        &mut self,
+        effect: &str,
+        operation: &str,
+        resume_fn: F,
+    ) -> ContinuationId
+    where
+        F: Fn(Value) -> Result<Value, ContinuationError> + Send + Sync + 'static,
+    {
+        let label = format!("{}::{} (multi-shot)", effect, operation);
+        let resume_point = ResumePoint::interpreter_multi_shot(resume_fn, Some(&label));
+
+        let cont = CapturedContinuation::new_multi_shot(resume_point).with_label(&label);
+
         self.continuation_store.store(cont)
     }
 
