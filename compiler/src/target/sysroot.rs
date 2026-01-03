@@ -828,7 +828,7 @@ mod tests {
 
     #[test]
     fn test_sysroot_metadata_serialization() {
-        let temp = temp_dir();
+        let temp = temp_dir().join("metadata_serial");
         // Clean up any previous run first
         let _ = fs::remove_dir_all(&temp);
         fs::create_dir_all(&temp).unwrap();
@@ -852,7 +852,9 @@ mod tests {
 
     #[test]
     fn test_sysroot_builder() {
-        let temp = temp_dir();
+        let temp = temp_dir().join("builder");
+        let _ = fs::remove_dir_all(&temp);
+        fs::create_dir_all(&temp).ok();
         let target = TargetTriple::parse("x86_64-unknown-linux-gnu").unwrap();
 
         let sysroot = SysrootBuilder::new(target.clone(), temp.clone())
@@ -871,7 +873,9 @@ mod tests {
 
     #[test]
     fn test_sysroot_manager() {
-        let temp = temp_dir();
+        let temp = temp_dir().join("manager");
+        let _ = fs::remove_dir_all(&temp);
+        fs::create_dir_all(&temp).ok();
         let mut manager = SysrootManager::new(temp.clone());
 
         manager.add_search_path(PathBuf::from("/usr"));

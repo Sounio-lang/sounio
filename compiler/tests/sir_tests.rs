@@ -243,7 +243,7 @@ fn test_sir_x86_64_emit_basic() {
     module.create_function("empty", vec![], SirType::Void);
 
     // Should successfully emit code
-    let result = emit_code(&module);
+    let result = emit_code(&module, None);
     assert!(result.is_ok());
 
     let segment = result.unwrap();
