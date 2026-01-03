@@ -10,7 +10,7 @@ use crate::hir::*;
 use crate::runtime::async_runtime::{SounioFuture, SounioRuntime, SounioValue};
 
 use super::builtins::BuiltinRegistry;
-use super::effect_dispatch::{EffectContext, EffectError, EffectHandler, EffectKind};
+use super::effect_dispatch::{CapabilityAdapter, EffectContext, EffectError, EffectHandler, EffectKind};
 use super::env::Environment;
 use super::value::{ControlFlow, Value};
 use crate::effects::handlers::HandlerRegistry;
@@ -836,11 +836,12 @@ impl Interpreter {
                 // This allows the expression to use the handler for effect operations.
                 let handler_pushed = if let Some(registry) = self.effect_ctx.registry() {
                     if let Some(capability_handler) = registry.get(handler) {
-                        // Create an EffectHandler that wraps the capability handler
-                        // For now, we rely on the registry fallback mechanism instead of
-                        // converting to EffectHandler, since the dispatch already falls back
-                        // to the registry when no stack handler is found.
-                        false
+                        // Clone the Arc and create an adapter to convert to EffectHandler
+                        let cloned_handler = capability_handler.clone();
+                        let adapter = CapabilityAdapter::from_arc(cloned_handler);
+                        let effect_handler = adapter.to_effect_handler();
+                        self.effect_ctx.push_handler(effect_handler);
+                        true
                     } else {
                         false
                     }

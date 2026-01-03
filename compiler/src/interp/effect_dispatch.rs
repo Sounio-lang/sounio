@@ -31,7 +31,7 @@ use thiserror::Error;
 
 use super::value::{Distribution, Value};
 use crate::effects::continuation::{
-    CapturedContinuation, ContinuationId, ContinuationStore, ResumePoint,
+    CapturedContinuation, ContinuationError, ContinuationId, ContinuationStore, ResumePoint,
 };
 use crate::effects::handler_capability::{
     Continuation as CapabilityContinuation, HandlerCapability, HandlerResult as CapabilityResult,
@@ -303,14 +303,14 @@ impl fmt::Debug for EffectHandler {
 /// ```
 pub struct CapabilityAdapter {
     /// The underlying HandlerCapability implementation
-    handler: std::sync::Arc<dyn HandlerCapability>,
+    handler: std::sync::Arc<dyn HandlerCapability + Send + Sync>,
     /// Epistemic impact registry for tracking confidence
     impact_registry: EpistemicImpactRegistry,
 }
 
 impl CapabilityAdapter {
     /// Create a new adapter from a HandlerCapability implementation
-    pub fn new(handler: Box<dyn HandlerCapability>) -> Self {
+    pub fn new(handler: Box<dyn HandlerCapability + Send + Sync>) -> Self {
         Self {
             handler: std::sync::Arc::from(handler),
             impact_registry: EpistemicImpactRegistry::new(),
@@ -319,12 +319,23 @@ impl CapabilityAdapter {
 
     /// Create adapter with custom impact registry
     pub fn with_registry(
-        handler: Box<dyn HandlerCapability>,
+        handler: Box<dyn HandlerCapability + Send + Sync>,
         registry: EpistemicImpactRegistry,
     ) -> Self {
         Self {
             handler: std::sync::Arc::from(handler),
             impact_registry: registry,
+        }
+    }
+
+    /// Create a new adapter from an Arc<dyn HandlerCapability + Send + Sync>
+    ///
+    /// This is useful when the handler is already wrapped in an Arc,
+    /// such as when retrieved from a HandlerRegistry.
+    pub fn from_arc(handler: std::sync::Arc<dyn HandlerCapability + Send + Sync>) -> Self {
+        Self {
+            handler,
+            impact_registry: EpistemicImpactRegistry::new(),
         }
     }
 
@@ -748,10 +759,10 @@ impl EffectContext {
     // Continuation Support
     // =========================================================================
 
-    /// Capture a continuation at the current point
+    /// Capture a continuation at the current point (stub version)
     ///
     /// This creates a stub continuation that can be used for testing.
-    /// Full implementation will capture the actual execution state.
+    /// For real interpreter continuations, use `capture_interpreter_continuation`.
     ///
     /// # Arguments
     /// * `label` - Optional label for debugging
@@ -766,7 +777,56 @@ impl EffectContext {
         self.continuation_store.store(cont)
     }
 
-    /// Capture a multi-shot continuation
+    /// Capture an interpreter continuation with a resume closure.
+    ///
+    /// This creates a real continuation that can be resumed by calling
+    /// the provided closure with the resume value.
+    ///
+    /// # Arguments
+    /// * `effect` - The effect name (for debugging/tracking)
+    /// * `operation` - The operation name (for debugging/tracking)
+    /// * `is_multi_shot` - Whether this continuation can be resumed multiple times
+    /// * `resume_fn` - Closure that will be called when the continuation is resumed
+    ///
+    /// # Returns
+    /// The ID of the captured continuation
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// let cont_id = ctx.capture_interpreter_continuation(
+    ///     "Prob",
+    ///     "sample",
+    ///     false, // one-shot
+    ///     |value| {
+    ///         // Continue execution with the sampled value
+    ///         Ok(compute_result(value))
+    ///     },
+    /// );
+    /// ```
+    pub fn capture_interpreter_continuation<F>(
+        &mut self,
+        effect: &str,
+        operation: &str,
+        is_multi_shot: bool,
+        resume_fn: F,
+    ) -> ContinuationId
+    where
+        F: FnOnce(Value) -> Result<Value, ContinuationError> + 'static,
+    {
+        let label = format!("{}::{}", effect, operation);
+        let resume_point = ResumePoint::interpreter_closure(resume_fn, Some(&label));
+
+        let cont = if is_multi_shot {
+            CapturedContinuation::new_multi_shot(resume_point).with_label(&label)
+        } else {
+            CapturedContinuation::new_one_shot(resume_point).with_label(&label)
+        };
+
+        self.continuation_store.store(cont)
+    }
+
+    /// Capture a multi-shot continuation (stub version)
     ///
     /// Multi-shot continuations can be resumed multiple times, which is
     /// useful for effects like non-determinism or backtracking.
@@ -783,12 +843,15 @@ impl EffectContext {
     /// For one-shot continuations, this removes the continuation from the store.
     /// For multi-shot continuations, the continuation remains available.
     ///
+    /// When the continuation was captured with `capture_interpreter_continuation`,
+    /// this will execute the resume closure with the provided value.
+    ///
     /// # Errors
     ///
     /// Returns an error if:
     /// - The continuation is not found
     /// - The continuation is one-shot and has already been resumed
-    /// - Resume is not yet implemented for this continuation type
+    /// - The resume closure returns an error
     pub fn resume_continuation(
         &mut self,
         id: ContinuationId,
@@ -1782,5 +1845,160 @@ mod tests {
         // Test GPU sync operation
         let result = ctx.dispatch_by_name("GPU", "sync", vec![]);
         assert!(result.is_ok());
+    }
+
+    // =========================================================================
+    // Interpreter Continuation Tests
+    // =========================================================================
+
+    #[test]
+    fn test_capture_interpreter_continuation_basic() {
+        let mut ctx = EffectContext::new();
+
+        // Capture a continuation that doubles the input
+        let id = ctx.capture_interpreter_continuation(
+            "Test",
+            "double",
+            false, // one-shot
+            |value| {
+                match value {
+                    Value::Int(n) => Ok(Value::Int(n * 2)),
+                    _ => Ok(value),
+                }
+            },
+        );
+
+        assert!(ctx.has_continuation(id));
+        assert_eq!(ctx.active_continuation_count(), 1);
+
+        // Resume with a value
+        let result = ctx.resume_continuation(id, Value::Int(21));
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap(), Value::Int(42));
+
+        // Should be removed after resume (one-shot)
+        assert!(!ctx.has_continuation(id));
+    }
+
+    #[test]
+    fn test_capture_interpreter_continuation_with_closure_state() {
+        let mut ctx = EffectContext::new();
+
+        // Capture a continuation that adds a captured value
+        let captured_value = 100;
+        let id = ctx.capture_interpreter_continuation(
+            "Test",
+            "add_captured",
+            false,
+            move |value| {
+                match value {
+                    Value::Int(n) => Ok(Value::Int(n + captured_value)),
+                    _ => Ok(value),
+                }
+            },
+        );
+
+        let result = ctx.resume_continuation(id, Value::Int(42));
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap(), Value::Int(142));
+    }
+
+    #[test]
+    fn test_capture_interpreter_continuation_error() {
+        use crate::effects::continuation::ContinuationError;
+
+        let mut ctx = EffectContext::new();
+
+        // Capture a continuation that returns an error
+        let id = ctx.capture_interpreter_continuation(
+            "Test",
+            "fail",
+            false,
+            |_value| {
+                Err(ContinuationError::NotImplemented("test error".to_string()))
+            },
+        );
+
+        let result = ctx.resume_continuation(id, Value::Unit);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_capture_interpreter_continuation_one_shot_enforcement() {
+        let mut ctx = EffectContext::new();
+
+        // Capture a one-shot continuation
+        let id = ctx.capture_interpreter_continuation(
+            "Test",
+            "one_shot",
+            false,
+            |value| Ok(value),
+        );
+
+        // First resume should succeed
+        let result1 = ctx.resume_continuation(id, Value::Int(1));
+        assert!(result1.is_ok());
+
+        // Continuation should be removed, second resume should fail
+        assert!(!ctx.has_continuation(id));
+    }
+
+    #[test]
+    fn test_interpreter_continuation_label() {
+        let mut ctx = EffectContext::new();
+
+        let id = ctx.capture_interpreter_continuation(
+            "MyEffect",
+            "myOp",
+            false,
+            |value| Ok(value),
+        );
+
+        // The continuation should have a label with format "effect::operation"
+        let cont = ctx.continuation_store.get(id);
+        assert!(cont.is_some());
+        assert_eq!(cont.unwrap().label, Some("MyEffect::myOp".to_string()));
+    }
+
+    #[test]
+    fn test_interpreter_continuation_chaining() {
+        let mut ctx = EffectContext::new();
+
+        // Simulate a chain of effect operations
+        // First effect: multiply by 2
+        let id1 = ctx.capture_interpreter_continuation(
+            "Math",
+            "mul2",
+            false,
+            |value| {
+                match value {
+                    Value::Int(n) => Ok(Value::Int(n * 2)),
+                    _ => Ok(value),
+                }
+            },
+        );
+
+        // Second effect: add 10
+        let id2 = ctx.capture_interpreter_continuation(
+            "Math",
+            "add10",
+            false,
+            |value| {
+                match value {
+                    Value::Int(n) => Ok(Value::Int(n + 10)),
+                    _ => Ok(value),
+                }
+            },
+        );
+
+        // Resume second effect first (stack order)
+        let result2 = ctx.resume_continuation(id2, Value::Int(5));
+        assert!(result2.is_ok());
+        assert_eq!(result2.unwrap(), Value::Int(15)); // 5 + 10
+
+        // Resume first effect
+        let result1 = ctx.resume_continuation(id1, Value::Int(15));
+        assert!(result1.is_ok());
+        assert_eq!(result1.unwrap(), Value::Int(30)); // 15 * 2
     }
 }

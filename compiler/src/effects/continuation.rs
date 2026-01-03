@@ -30,6 +30,13 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use crate::interp::Value;
 
+/// A boxed closure that can be called to resume a continuation.
+///
+/// The closure takes a resume value and returns the final computation result.
+/// Note: This does not require `Send` because interpreter `Value` uses `Rc<RefCell<...>>`
+/// which is not thread-safe. For cross-thread continuations, use JIT-based resumption.
+pub type ResumeFn = Box<dyn FnOnce(Value) -> Result<Value, ContinuationError> + 'static>;
+
 /// Global counter for generating unique continuation IDs
 static CONTINUATION_ID: AtomicU64 = AtomicU64::new(0);
 
@@ -66,16 +73,30 @@ impl fmt::Display for ContinuationId {
 /// Where to resume execution when a continuation is invoked
 ///
 /// This enum represents different execution contexts that can be resumed:
-/// - Interpreter: Resume in the tree-walking interpreter
+/// - InterpreterClosure: Resume with a closure that captures the interpreter state
+/// - Interpreter: Resume in the tree-walking interpreter (description-only, not executable)
 /// - JIT: Resume in JIT-compiled code with saved machine state
 /// - Stub: Placeholder for not-yet-implemented backends
-#[derive(Debug)]
 pub enum ResumePoint {
-    /// Resume in interpreter with a closure that takes the resume value
-    /// and returns the final computation result.
+    /// Resume in interpreter using a captured closure.
     ///
-    /// NOTE: For one-shot continuations, this closure will be consumed.
-    /// For multi-shot, we would need a Clone-able representation.
+    /// The closure captures the interpreter's evaluation context and can be
+    /// called with the resume value to continue execution from where the
+    /// effect was performed.
+    ///
+    /// NOTE: For one-shot continuations, this closure will be consumed (FnOnce).
+    /// Multi-shot continuations are not yet supported with closures.
+    InterpreterClosure {
+        /// The continuation closure that resumes execution
+        resume_fn: ResumeFn,
+        /// Optional description for debugging
+        description: Option<String>,
+    },
+
+    /// Resume in interpreter with a description (not executable).
+    ///
+    /// This variant is used when we want to record a continuation point
+    /// but the actual resume logic is handled elsewhere.
     Interpreter {
         /// The continuation closure - currently a stub that just returns the value
         /// Full implementation will capture the interpreter's evaluation context
@@ -104,7 +125,33 @@ pub enum ResumePoint {
 }
 
 impl ResumePoint {
-    /// Create a new interpreter resume point
+    /// Create a new interpreter resume point with a closure.
+    ///
+    /// The closure captures the interpreter state and will be called
+    /// when the continuation is resumed.
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// let resume_point = ResumePoint::interpreter_closure(
+    ///     |value| {
+    ///         // Continue computation with the provided value
+    ///         Ok(Value::Int(value.as_int().unwrap() * 2))
+    ///     },
+    ///     Some("doubling continuation"),
+    /// );
+    /// ```
+    pub fn interpreter_closure<F>(resume_fn: F, description: Option<&str>) -> Self
+    where
+        F: FnOnce(Value) -> Result<Value, ContinuationError> + 'static,
+    {
+        ResumePoint::InterpreterClosure {
+            resume_fn: Box::new(resume_fn),
+            description: description.map(String::from),
+        }
+    }
+
+    /// Create a new interpreter resume point (description only, not executable)
     pub fn interpreter(description: impl Into<String>) -> Self {
         ResumePoint::Interpreter {
             description: description.into(),
@@ -123,6 +170,43 @@ impl ResumePoint {
     /// Check if this is a stub resume point
     pub fn is_stub(&self) -> bool {
         matches!(self, ResumePoint::Stub)
+    }
+
+    /// Check if this resume point is executable (can actually resume)
+    pub fn is_executable(&self) -> bool {
+        matches!(
+            self,
+            ResumePoint::InterpreterClosure { .. } | ResumePoint::Stub
+        )
+    }
+}
+
+impl fmt::Debug for ResumePoint {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            ResumePoint::InterpreterClosure { description, .. } => {
+                f.debug_struct("InterpreterClosure")
+                    .field("description", description)
+                    .field("resume_fn", &"<closure>")
+                    .finish()
+            }
+            ResumePoint::Interpreter { description } => {
+                f.debug_struct("Interpreter")
+                    .field("description", description)
+                    .finish()
+            }
+            ResumePoint::Jit {
+                return_address,
+                saved_registers,
+                stack_snapshot,
+            } => f
+                .debug_struct("Jit")
+                .field("return_address", &format_args!("0x{:x}", return_address))
+                .field("saved_registers", &saved_registers.len())
+                .field("stack_snapshot", &stack_snapshot.len())
+                .finish(),
+            ResumePoint::Stub => write!(f, "Stub"),
+        }
     }
 }
 
@@ -225,21 +309,38 @@ impl CapturedContinuation {
 
         self.resume_count += 1;
 
-        match &self.resume_point {
+        // For InterpreterClosure, we need to take ownership of the closure
+        // (since it's FnOnce). We replace the resume_point with a Stub after
+        // extracting the closure.
+        let resume_point = std::mem::replace(&mut self.resume_point, ResumePoint::Stub);
+
+        match resume_point {
+            ResumePoint::InterpreterClosure { resume_fn, .. } => {
+                // Execute the resume closure with the provided value
+                resume_fn(value)
+            }
             ResumePoint::Interpreter { description } => {
-                // TODO: Implement actual interpreter resume
-                // This would involve restoring the interpreter's evaluation
-                // context and continuing from where we left off.
+                // Restore the resume point since we didn't consume it
+                self.resume_point = ResumePoint::Interpreter {
+                    description: description.clone(),
+                };
+                // This variant is not executable - it's just a description
                 Err(ContinuationError::NotImplemented(format!(
-                    "interpreter resume: {}",
+                    "interpreter resume (description only): {}",
                     description
                 )))
             }
             ResumePoint::Jit {
                 return_address,
-                saved_registers: _,
-                stack_snapshot: _,
+                saved_registers,
+                stack_snapshot,
             } => {
+                // Restore the resume point since we didn't consume it
+                self.resume_point = ResumePoint::Jit {
+                    return_address,
+                    saved_registers: saved_registers.clone(),
+                    stack_snapshot: stack_snapshot.clone(),
+                };
                 // TODO: Implement JIT resume
                 // This would involve:
                 // 1. Restoring the stack from stack_snapshot
@@ -634,5 +735,149 @@ mod tests {
 
         let result = cont.resume(Value::Unit);
         assert!(matches!(result, Err(ContinuationError::NotImplemented(_))));
+    }
+
+    // =========================================================================
+    // InterpreterClosure Tests
+    // =========================================================================
+
+    #[test]
+    fn test_interpreter_closure_basic_resume() {
+        // Create a continuation that doubles the input integer
+        let resume_point = ResumePoint::interpreter_closure(
+            |value| {
+                if let Value::Int(n) = value {
+                    Ok(Value::Int(n * 2))
+                } else {
+                    Err(ContinuationError::NotImplemented("expected Int".into()))
+                }
+            },
+            Some("doubler"),
+        );
+
+        let mut cont = CapturedContinuation::new_one_shot(resume_point);
+
+        let result = cont.resume(Value::Int(21));
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap(), Value::Int(42));
+    }
+
+    #[test]
+    fn test_interpreter_closure_one_shot_consumed() {
+        // After one-shot resume, the closure should be consumed
+        let resume_point = ResumePoint::interpreter_closure(
+            |value| Ok(value),
+            Some("identity"),
+        );
+
+        let mut cont = CapturedContinuation::new_one_shot(resume_point);
+
+        // First resume succeeds
+        let result1 = cont.resume(Value::Int(1));
+        assert!(result1.is_ok());
+
+        // Second resume fails (one-shot)
+        let result2 = cont.resume(Value::Int(2));
+        assert!(matches!(
+            result2,
+            Err(ContinuationError::AlreadyResumed { .. })
+        ));
+    }
+
+    #[test]
+    fn test_interpreter_closure_captures_environment() {
+        // Test that closures can capture values from their environment
+        let multiplier = 10;
+        let resume_point = ResumePoint::interpreter_closure(
+            move |value| {
+                if let Value::Int(n) = value {
+                    Ok(Value::Int(n * multiplier))
+                } else {
+                    Err(ContinuationError::NotImplemented("expected Int".into()))
+                }
+            },
+            Some("multiplier"),
+        );
+
+        let mut cont = CapturedContinuation::new_one_shot(resume_point);
+
+        let result = cont.resume(Value::Int(5));
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap(), Value::Int(50));
+    }
+
+    #[test]
+    fn test_interpreter_closure_error_propagation() {
+        // Test that errors from the closure are properly propagated
+        let resume_point = ResumePoint::interpreter_closure(
+            |_value| {
+                Err(ContinuationError::NotImplemented("intentional error".into()))
+            },
+            Some("error generator"),
+        );
+
+        let mut cont = CapturedContinuation::new_one_shot(resume_point);
+
+        let result = cont.resume(Value::Unit);
+        assert!(matches!(result, Err(ContinuationError::NotImplemented(msg)) if msg.contains("intentional")));
+    }
+
+    #[test]
+    fn test_interpreter_closure_is_executable() {
+        let closure_point = ResumePoint::interpreter_closure(|v| Ok(v), None);
+        assert!(closure_point.is_executable());
+        assert!(!closure_point.is_stub());
+
+        let desc_only = ResumePoint::interpreter("description only");
+        assert!(!desc_only.is_executable());
+        assert!(!desc_only.is_stub());
+
+        let jit = ResumePoint::jit(0x1000, vec![], vec![]);
+        assert!(!jit.is_executable());
+
+        let stub = ResumePoint::Stub;
+        assert!(stub.is_executable());
+        assert!(stub.is_stub());
+    }
+
+    #[test]
+    fn test_interpreter_closure_debug_format() {
+        let resume_point = ResumePoint::interpreter_closure(
+            |v| Ok(v),
+            Some("test closure"),
+        );
+
+        let debug = format!("{:?}", resume_point);
+        assert!(debug.contains("InterpreterClosure"));
+        assert!(debug.contains("test closure"));
+        assert!(debug.contains("<closure>"));
+    }
+
+    #[test]
+    fn test_interpreter_closure_in_store() {
+        let mut store = ContinuationStore::new();
+
+        // Store a continuation with a closure
+        let resume_point = ResumePoint::interpreter_closure(
+            |value| {
+                if let Value::Int(n) = value {
+                    Ok(Value::String(format!("Result: {}", n)))
+                } else {
+                    Ok(Value::String("unknown".into()))
+                }
+            },
+            Some("formatter"),
+        );
+
+        let cont = CapturedContinuation::new_one_shot(resume_point);
+        let id = store.store(cont);
+
+        // Resume through the store
+        let result = store.resume_and_remove(id, Value::Int(42));
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap(), Value::String("Result: 42".into()));
+
+        // Should be removed (one-shot)
+        assert!(store.is_empty());
     }
 }

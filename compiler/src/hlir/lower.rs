@@ -1958,31 +1958,50 @@ impl<'a> LoweringContext<'a> {
         Some(result)
     }
 
+    /// Map effect name to predefined handler ID
+    /// Returns 0 for unknown/custom handlers
+    fn effect_to_handler_id(effect: &str) -> u32 {
+        match effect.to_uppercase().as_str() {
+            "IO" => 1,
+            "MUT" => 2,
+            "DIV" => 3,
+            "PROB" => 4,
+            "ALLOC" => 5,
+            "PANIC" => 6,
+            "ASYNC" => 7,
+            "GPU" => 8,
+            "GRAD" => 9,
+            "NETWORK" => 10,
+            "SENSOR" => 11,
+            "EXN" => 12,
+            "CAUSAL" => 13,
+            _ => 0, // Custom/unknown handler
+        }
+    }
+
     /// Lower effect handle expression
+    ///
+    /// Generates:
+    /// 1. PushHandler op to push the handler onto the stack
+    /// 2. The inner expression evaluation
+    /// 3. PopHandler op to restore the previous handler context
     fn lower_effect_handle(
         &mut self,
         expr: &HirExpr,
         handler: &str,
         ty: &HlirType,
     ) -> Option<ValueId> {
-        // Effect handlers require continuation support
-        // For now, we implement a simplified version:
-        // 1. Create a handler context
-        // 2. Execute the expression
-        // 3. The handler intercepts effect operations
+        // Look up the handler's effect from the handlers map
+        // If not found, use the handler name as the effect name
+        let effect = self.handlers.get(handler).cloned().unwrap_or_else(|| handler.to_string());
+        let handler_id = Self::effect_to_handler_id(&effect);
 
-        // Look up the handler's effect
-        let _effect = self.handlers.get(handler).cloned();
-
-        // For a simplified implementation, we just evaluate the expression
-        // A full implementation would:
-        // 1. Push the handler onto a handler stack
-        // 2. Execute the expression
-        // 3. When a perform is encountered, look up the handler
-        // 4. Execute the handler case with the continuation
+        // Emit PushHandler to establish the handler context
+        self.builder.build_push_handler(&effect, handler, handler_id);
 
         // Create blocks for the handler structure
         let handle_block = self.builder.create_block("handle.body");
+        let cleanup_block = self.builder.create_block("handle.cleanup");
         let resume_block = self.builder.create_block("handle.resume");
 
         self.builder.build_branch(handle_block);
@@ -1992,9 +2011,16 @@ impl<'a> LoweringContext<'a> {
         self.terminated = false;
         let result = self.lower_expr(expr);
 
+        // Always go through cleanup to pop the handler
         if !self.terminated {
-            self.builder.build_branch(resume_block);
+            self.builder.build_branch(cleanup_block);
         }
+
+        // Cleanup block: pop the handler and continue to resume
+        self.builder.switch_to_block(cleanup_block);
+        self.terminated = false;
+        self.builder.build_pop_handler();
+        self.builder.build_branch(resume_block);
 
         // Resume block collects the result
         self.builder.switch_to_block(resume_block);
