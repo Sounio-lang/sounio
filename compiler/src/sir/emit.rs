@@ -100,6 +100,8 @@ pub enum EmitError {
     TooManySpills,
     /// Invalid instruction encoding
     InvalidEncoding(String),
+    /// I/O error during code emission
+    IoError(String),
 }
 
 // ============================================================================
@@ -3447,6 +3449,65 @@ pub fn emit_code(module: &SirModule) -> Result<CodeSegment, EmitError> {
         }
         arch => Err(EmitError::UnsupportedTarget(format!("{:?}", arch))),
     }
+}
+
+/// Emit code for a SIR module and wrap it in ELF format
+pub fn emit_code_to_elf(module: &SirModule) -> Result<Vec<u8>, EmitError> {
+    let code_segment = emit_code(module)?;
+    code_segment_to_elf(&code_segment)
+}
+
+/// Convert a CodeSegment to ELF object file bytes
+pub fn code_segment_to_elf(segment: &CodeSegment) -> Result<Vec<u8>, EmitError> {
+    use crate::backend::native::elf::{ElfConfig, ElfWriter, RelocationType};
+    use std::collections::HashMap;
+
+    let mut elf = ElfWriter::new(ElfConfig::default());
+
+    // Add the text section with machine code
+    let text_section_idx = elf.add_text_section(&segment.code);
+
+    // Build symbol name -> index map
+    let mut symbol_indices: HashMap<String, usize> = HashMap::new();
+
+    // Add defined symbols
+    for sym in &segment.symbols {
+        let idx = elf.add_function(&sym.name, sym.offset as u64, 0, sym.global);
+        symbol_indices.insert(sym.name.clone(), idx);
+    }
+
+    // Collect symbols referenced by relocations that aren't defined
+    for reloc in &segment.relocations {
+        if !symbol_indices.contains_key(&reloc.symbol) {
+            let idx = elf.add_undefined_symbol(&reloc.symbol);
+            symbol_indices.insert(reloc.symbol.clone(), idx);
+        }
+    }
+
+    // Add relocations
+    for reloc in &segment.relocations {
+        let reloc_type = match reloc.kind {
+            RelocKind::Abs64 => RelocationType::Abs64,
+            RelocKind::PCRel32 => RelocationType::Pc32,
+            RelocKind::PLT32 => RelocationType::Plt32,
+            RelocKind::GOT32 => RelocationType::GotPcRel,
+        };
+
+        let symbol_idx = symbol_indices.get(&reloc.symbol)
+            .copied()
+            .unwrap_or(0);
+
+        elf.add_relocation(
+            text_section_idx,
+            reloc.offset as u64,
+            symbol_idx,
+            reloc_type,
+            reloc.addend,
+        );
+    }
+
+    // Generate ELF bytes
+    elf.finish().map_err(|e| EmitError::IoError(e.to_string()))
 }
 
 #[cfg(test)]

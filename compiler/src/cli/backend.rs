@@ -928,8 +928,11 @@ fn compile_native(args: &BuildArgs) -> Result<(PathBuf, Option<NativeMetrics>), 
 
     match format {
         OutputFormat::SharedLib | OutputFormat::Object => {
-            // Write ELF object file (simplified - in production, use proper ELF writer)
-            std::fs::write(&output_path, &code_segment.code)
+            // Convert CodeSegment to ELF format
+            use crate::sir::emit::code_segment_to_elf;
+            let elf_bytes = code_segment_to_elf(&code_segment)
+                .map_err(|e| format!("ELF generation error: {:?}", e))?;
+            std::fs::write(&output_path, &elf_bytes)
                 .map_err(|e| format!("Failed to write output: {}", e))?;
         }
         OutputFormat::Asm => {
