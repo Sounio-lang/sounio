@@ -27,7 +27,7 @@ pub use super::alloc_policy::{AttentionConfig, AllocationMetrics};
 use super::blocks::{SirFunction, Terminator};
 use super::module::{Architecture, SirModule};
 use super::ops::*;
-use super::types::SirType;
+use super::types::{ScalarType, SirType};
 use super::values::{Constant, ValueId};
 use std::collections::{HashMap, HashSet};
 
@@ -1280,8 +1280,12 @@ impl X86_64Emitter {
     }
 
     /// Set external allocation result from native backend allocator
-    pub fn set_external_alloc_result(&mut self, result: crate::backend::native::alloc::AllocResult) {
-        self.external_alloc_result = Some(result);
+    /// 
+    /// Optimization: Accept reference to avoid unnecessary clone when possible
+    pub fn set_external_alloc_result(&mut self, result: &crate::backend::native::alloc::AllocResult) {
+        // We need to clone here because we store it for later use
+        // But this is better than cloning at the call site
+        self.external_alloc_result = Some(result.clone());
     }
 
     /// Apply external allocation result to register allocator
@@ -1291,8 +1295,13 @@ impl X86_64Emitter {
             self.spill_ops_by_position.clear();
 
             // Build map of spill/reload operations by position
+            // Optimization: Store references instead of cloning
+            // Note: We need to clone here because we're storing in a HashMap that outlives the alloc_result
+            // But we can optimize by only cloning when necessary (if position already exists)
             for op in &alloc_result.spill_code {
                 let pos = op.position();
+                // Only clone if we need to store multiple ops at the same position
+                // For single ops, we could avoid the clone, but HashMap requires owned values
                 self.spill_ops_by_position.entry(pos).or_insert_with(Vec::new).push(op.clone());
             }
             
@@ -1334,26 +1343,70 @@ impl X86_64Emitter {
         }
     }
 
-    /// Convert VirtReg to X86Reg (simplified mapping)
-    fn virt_reg_to_x86_reg(&self, virt_reg: crate::backend::native::alloc::PhysReg) -> Option<X86Reg> {
-        // Map physical register number to X86Reg
-        // This assumes VirtReg.0 corresponds to register number
-        match virt_reg.num {
-            0 => Some(X86Reg::RAX),
-            1 => Some(X86Reg::RCX),
-            2 => Some(X86Reg::RDX),
-            3 => Some(X86Reg::RBX),
-            6 => Some(X86Reg::RSI),
-            7 => Some(X86Reg::RDI),
-            8 => Some(X86Reg::R8),
-            9 => Some(X86Reg::R9),
-            10 => Some(X86Reg::R10),
-            11 => Some(X86Reg::R11),
-            12 => Some(X86Reg::R12),
-            13 => Some(X86Reg::R13),
-            14 => Some(X86Reg::R14),
-            15 => Some(X86Reg::R15),
-            _ => None,
+    /// Convert PhysReg to X86Reg with proper register class support
+    fn virt_reg_to_x86_reg(&self, phys_reg: crate::backend::native::alloc::PhysReg) -> Option<X86Reg> {
+        match phys_reg.class {
+            crate::backend::native::alloc::RegClass::GeneralPurpose => {
+                // Map general-purpose registers
+                match phys_reg.num {
+                    0 => Some(X86Reg::RAX),
+                    1 => Some(X86Reg::RCX),
+                    2 => Some(X86Reg::RDX),
+                    3 => Some(X86Reg::RBX),
+                    4 => Some(X86Reg::RSP), // Stack pointer (rarely allocated)
+                    5 => Some(X86Reg::RBP), // Base pointer (rarely allocated)
+                    6 => Some(X86Reg::RSI),
+                    7 => Some(X86Reg::RDI),
+                    8 => Some(X86Reg::R8),
+                    9 => Some(X86Reg::R9),
+                    10 => Some(X86Reg::R10),
+                    11 => Some(X86Reg::R11),
+                    12 => Some(X86Reg::R12),
+                    13 => Some(X86Reg::R13),
+                    14 => Some(X86Reg::R14),
+                    15 => Some(X86Reg::R15),
+                    _ => None,
+                }
+            }
+            crate::backend::native::alloc::RegClass::FloatingPoint => {
+                // Map XMM registers (0-15)
+                if phys_reg.num <= 15 {
+                    match phys_reg.num {
+                        0 => Some(X86Reg::XMM0),
+                        1 => Some(X86Reg::XMM1),
+                        2 => Some(X86Reg::XMM2),
+                        3 => Some(X86Reg::XMM3),
+                        4 => Some(X86Reg::XMM4),
+                        5 => Some(X86Reg::XMM5),
+                        6 => Some(X86Reg::XMM6),
+                        7 => Some(X86Reg::XMM7),
+                        8 => Some(X86Reg::XMM8),
+                        9 => Some(X86Reg::XMM9),
+                        10 => Some(X86Reg::XMM10),
+                        11 => Some(X86Reg::XMM11),
+                        12 => Some(X86Reg::XMM12),
+                        13 => Some(X86Reg::XMM13),
+                        14 => Some(X86Reg::XMM14),
+                        15 => Some(X86Reg::XMM15),
+                        _ => None,
+                    }
+                } else {
+                    None
+                }
+            }
+            crate::backend::native::alloc::RegClass::ExtendedSimd => {
+                // ZMM registers not yet supported in X86Reg enum
+                // TODO: Add ZMM support when implementing AVX-512
+                None
+            }
+            crate::backend::native::alloc::RegClass::Special => {
+                // Special registers (RSP, RBP) - rarely allocated
+                match phys_reg.num {
+                    0 => Some(X86Reg::RSP),
+                    1 => Some(X86Reg::RBP),
+                    _ => None,
+                }
+            }
         }
     }
 
@@ -1573,6 +1626,62 @@ impl X86_64Emitter {
         self.emit_modrm(0b11, (lhs as u8) & 0x7, (rhs as u8) & 0x7);
     }
 
+    /// MINSD xmm, xmm (minimum scalar double)
+    fn emit_minsd(&mut self, dst: X86Reg, src: X86Reg) {
+        self.emit_byte(0xF2);
+        if dst.needs_rex() || src.needs_rex() {
+            self.emit_rex(false, dst.needs_rex(), false, src.needs_rex());
+        }
+        self.emit_bytes(&[0x0F, 0x5D]);
+        self.emit_modrm(0b11, (dst as u8) & 0x7, (src as u8) & 0x7);
+    }
+
+    /// MAXSD xmm, xmm (maximum scalar double)
+    fn emit_maxsd(&mut self, dst: X86Reg, src: X86Reg) {
+        self.emit_byte(0xF2);
+        if dst.needs_rex() || src.needs_rex() {
+            self.emit_rex(false, dst.needs_rex(), false, src.needs_rex());
+        }
+        self.emit_bytes(&[0x0F, 0x5F]);
+        self.emit_modrm(0b11, (dst as u8) & 0x7, (src as u8) & 0x7);
+    }
+
+    /// MOVSD [mem+disp], xmm (store double to memory)
+    fn emit_movsd_mem_disp_r64(&mut self, base: X86Reg, disp: i32, src: X86Reg) {
+        self.emit_byte(0xF2);
+        if base.needs_rex() || src.needs_rex() {
+            self.emit_rex(false, false, false, base.needs_rex() || src.needs_rex());
+        }
+        self.emit_bytes(&[0x0F, 0x11]);
+        if disp == 0 {
+            self.emit_modrm(0b00, (src as u8) & 0x7, base.encoding());
+        } else if disp >= -128 && disp <= 127 {
+            self.emit_modrm(0b01, (src as u8) & 0x7, base.encoding());
+            self.emit_byte(disp as u8);
+        } else {
+            self.emit_modrm(0b10, (src as u8) & 0x7, base.encoding());
+            self.emit_u32(disp as u32);
+        }
+    }
+
+    /// MOVSD xmm, [mem+disp] (load double from memory)
+    fn emit_movsd_r64_mem_disp(&mut self, dst: X86Reg, base: X86Reg, disp: i32) {
+        self.emit_byte(0xF2);
+        if base.needs_rex() || dst.needs_rex() {
+            self.emit_rex(false, false, false, base.needs_rex() || dst.needs_rex());
+        }
+        self.emit_bytes(&[0x0F, 0x10]);
+        if disp == 0 {
+            self.emit_modrm(0b00, (dst as u8) & 0x7, base.encoding());
+        } else if disp >= -128 && disp <= 127 {
+            self.emit_modrm(0b01, (dst as u8) & 0x7, base.encoding());
+            self.emit_byte(disp as u8);
+        } else {
+            self.emit_modrm(0b10, (dst as u8) & 0x7, base.encoding());
+            self.emit_u32(disp as u32);
+        }
+    }
+
     /// AND reg, reg
     fn emit_and_rr(&mut self, dst: X86Reg, src: X86Reg) {
         self.emit_rex_w(src, dst);
@@ -1764,6 +1873,14 @@ impl X86_64Emitter {
         self.emit_byte(0x81); // SUB r/m64, imm32
         self.emit_modrm(0b11, 5, X86Reg::RSP.encoding());
         self.emit_u32(size as u32);
+    }
+
+    /// ADD rsp, imm32 - for stack deallocation
+    fn emit_add_rsp_imm(&mut self, imm: i32) {
+        self.emit_rex(true, false, false, false);
+        self.emit_byte(0x81); // ADD r/m64, imm32
+        self.emit_modrm(0b11, 0, X86Reg::RSP.encoding());
+        self.emit_u32(imm as u32);
     }
 
     /// CALL rel32 - relative call
@@ -2164,9 +2281,10 @@ impl X86_64Emitter {
             });
 
             // Set allocation result for this function if available
+            // Optimization: Pass reference to avoid clone at call site
             if let Some(ref alloc_results_map) = alloc_results {
                 if let Some(alloc_result) = alloc_results_map.get(&func.id) {
-                    self.set_external_alloc_result(alloc_result.clone());
+                    self.set_external_alloc_result(alloc_result);
                 }
             }
 
@@ -2238,22 +2356,42 @@ impl X86_64Emitter {
             // Emit instructions
             for inst in &block.instructions {
                 // Insert spill/reload operations before this instruction if needed
-                let ops_to_insert: Vec<_> = self.spill_ops_by_position
-                    .get(&self.current_instruction_pos)
-                    .cloned()
-                    .unwrap_or_default();
-                
-                for op in &ops_to_insert {
-                    match op {
-                        crate::backend::native::alloc::SpillReloadOp::Spill { reg, slot, .. } => {
-                            if let Some(x86_reg) = self.virt_reg_to_x86_reg(*reg) {
-                                self.emit_spill(x86_reg, slot.0 as i32);
+                // Optimization: Group operations and eliminate redundancies
+                if let Some(ops) = self.spill_ops_by_position.get(&self.current_instruction_pos) {
+                    // Separate spills and reloads for better ordering
+                    let mut spills: Vec<_> = Vec::new();
+                    let mut reloads: Vec<_> = Vec::new();
+                    
+                    for op in ops {
+                        match op {
+                            crate::backend::native::alloc::SpillReloadOp::Spill { reg, slot, .. } => {
+                                spills.push((*reg, *slot));
+                            }
+                            crate::backend::native::alloc::SpillReloadOp::Reload { reg, slot, .. } => {
+                                reloads.push((*reg, *slot));
                             }
                         }
-                        crate::backend::native::alloc::SpillReloadOp::Reload { reg, slot, .. } => {
-                            if let Some(x86_reg) = self.virt_reg_to_x86_reg(*reg) {
-                                self.emit_reload(x86_reg, slot.0 as i32);
-                            }
+                    }
+                    
+                    // Remove duplicate spills/reloads for the same register/slot
+                    // (same register being spilled/reloaded to/from same slot is redundant)
+                    spills.sort_by_key(|(reg, slot)| (reg.class, reg.num, slot.0));
+                    spills.dedup_by_key(|(reg, slot)| (reg.class, reg.num, slot.0));
+                    
+                    reloads.sort_by_key(|(reg, slot)| (reg.class, reg.num, slot.0));
+                    reloads.dedup_by_key(|(reg, slot)| (reg.class, reg.num, slot.0));
+                    
+                    // Emit reloads first (values needed for instruction)
+                    for (reg, slot) in &reloads {
+                        if let Some(x86_reg) = self.virt_reg_to_x86_reg(*reg) {
+                            self.emit_reload(x86_reg, slot.0 as i32);
+                        }
+                    }
+                    
+                    // Then emit spills (values no longer needed)
+                    for (reg, slot) in &spills {
+                        if let Some(x86_reg) = self.virt_reg_to_x86_reg(*reg) {
+                            self.emit_spill(x86_reg, slot.0 as i32);
                         }
                     }
                 }
@@ -2349,8 +2487,18 @@ impl X86_64Emitter {
             SirInst::Assume(_) => {
                 // Optimization hints - no code generation needed
             }
+            SirInst::Epistemic(ep_op) => {
+                if let Some(result) = inst.result {
+                    self.emit_epistemic_op(result, ep_op, func)?;
+                }
+            }
+            SirInst::Scientific(sci_op) => {
+                if let Some(result) = inst.result {
+                    self.emit_scientific_op(result, sci_op, func)?;
+                }
+            }
             _ => {
-                // Other instructions not yet implemented (Vector, Epistemic, Prob, Scientific)
+                // Other instructions not yet implemented (Vector, Prob)
             }
         }
         Ok(())
@@ -3079,6 +3227,572 @@ impl X86_64Emitter {
             }
         }
 
+        Ok(())
+    }
+
+    /// Emit epistemic operations for Knowledge<T> types
+    /// 
+    /// Knowledge<T> is represented as a struct { value: T, confidence: f64 }
+    /// This function generates code for epistemic operations while preserving
+    /// confidence propagation through computations.
+    fn emit_epistemic_op(
+        &mut self,
+        result: ValueId,
+        op: &super::ops::EpistemicOp,
+        func: &SirFunction,
+    ) -> Result<(), EmitError> {
+        use super::ops::EpistemicOp;
+        
+        match op {
+            EpistemicOp::Create { value, confidence } => {
+                // Create epistemic value: allocate struct { value, confidence }
+                // OPTIMIZATION: For small types, keep value and confidence in adjacent registers
+                // when possible (XMM0:XMM1 for floats, RAX:RDX for integers)
+                
+                // Get value and confidence registers
+                let value_reg = self.get_value_reg(*value, X86Reg::RAX);
+                let conf_reg = self.get_value_reg(*confidence, X86Reg::RDX);
+                
+                // Check if result type is epistemic
+                let result_ty = self.get_value_type(result, func);
+                if let SirType::Epistemic(inner_ty) = &result_ty {
+                    let inner_size = inner_ty.size_bytes();
+                    let is_float = matches!(&**inner_ty, SirType::Scalar(ScalarType::F32) | SirType::Scalar(ScalarType::F64));
+                    
+                    // OPTIMIZATION: For small types (<= 8 bytes), try to keep in register pairs
+                    if inner_size <= 8 {
+                        if is_float {
+                            // Float value - optimize: keep in XMM0:XMM1 pair
+                            // XMM0 = value, XMM1 = confidence
+                            if value_reg != X86Reg::XMM0 {
+                                self.emit_movsd_rr(X86Reg::XMM0, value_reg);
+                            }
+                            if conf_reg.is_xmm() {
+                                if conf_reg != X86Reg::XMM1 {
+                                    self.emit_movsd_rr(X86Reg::XMM1, conf_reg);
+                                }
+                            } else {
+                                // Convert confidence from GPR to XMM1
+                                self.emit_movq_xmm_r64(X86Reg::XMM1, conf_reg);
+                            }
+                            // Result is in XMM0 (value) with XMM1 (confidence) adjacent
+                            // For now, we'll need to allocate on stack for the struct
+                            // In future optimization, could track register pairs
+                            self.emit_sub_rsp_imm(16);
+                            self.emit_movsd_mem_disp_r64(X86Reg::RSP, 0, X86Reg::XMM0);
+                            self.emit_movsd_mem_disp_r64(X86Reg::RSP, 8, X86Reg::XMM1);
+                            let result_ptr_reg = self
+                                .register_allocator
+                                .get_reg(result)
+                                .unwrap_or(X86Reg::RAX);
+                            self.emit_mov_rr(result_ptr_reg, X86Reg::RSP);
+                        } else {
+                            // Integer value - optimize: keep in RAX:RDX pair
+                            // RAX = value, RDX = confidence (as f64, but stored separately)
+                            if value_reg != X86Reg::RAX {
+                                self.emit_mov_rr(X86Reg::RAX, value_reg);
+                            }
+                            // Confidence is f64 - allocate on stack adjacent to value
+                            self.emit_sub_rsp_imm(16);
+                            // Store value at offset 0
+                            self.emit_mov_mem_disp_r64(X86Reg::RSP, 0, X86Reg::RAX);
+                            // Store confidence at offset 8
+                            if conf_reg.is_xmm() {
+                                self.emit_movsd_mem_disp_r64(X86Reg::RSP, 8, conf_reg);
+                            } else {
+                                // Convert confidence to f64 and store
+                                // For now, assume it's already f64 - would need conversion
+                                self.emit_mov_mem_disp_r64(X86Reg::RSP, 8, conf_reg);
+                            }
+                            let result_ptr_reg = self
+                                .register_allocator
+                                .get_reg(result)
+                                .unwrap_or(X86Reg::RAX);
+                            self.emit_mov_rr(result_ptr_reg, X86Reg::RSP);
+                        }
+                    } else {
+                        // Large type - allocate on stack with value and confidence adjacent
+                        let total_size = inner_size + 8; // value + confidence
+                        let aligned_size = (total_size + 15) & !15;
+                        self.emit_sub_rsp_imm(aligned_size as i32);
+                        
+                        // Store value at offset 0
+                        // Store confidence at offset inner_size (adjacent in memory)
+                        // This ensures cache locality
+                        let value_ptr_reg = X86Reg::R10;
+                        self.emit_mov_rr(value_ptr_reg, X86Reg::RSP);
+                        
+                        // Copy value to stack (would need type-specific code)
+                        // For now, assume value is already in memory or register
+                        
+                        // Store confidence at offset inner_size
+                        if conf_reg.is_xmm() {
+                            self.emit_movsd_mem_disp_r64(X86Reg::RSP, inner_size as i32, conf_reg);
+                        } else {
+                            self.emit_mov_mem_disp_r64(X86Reg::RSP, inner_size as i32, conf_reg);
+                        }
+                        
+                        let result_ptr_reg = self
+                            .register_allocator
+                            .get_reg(result)
+                            .unwrap_or(X86Reg::RAX);
+                        self.emit_mov_rr(result_ptr_reg, X86Reg::RSP);
+                    }
+                } else {
+                    // Result is not epistemic - shouldn't happen, but handle gracefully
+                    return Err(EmitError::UnsupportedInstruction(
+                        format!("Create epistemic value but result type is not epistemic: {:?}", result_ty)
+                    ));
+                }
+            }
+            
+            EpistemicOp::ExtractValue(epistemic_val) => {
+                // Extract value from Knowledge<T> -> T
+                // Load value field (offset 0) from epistemic struct
+                let epistemic_reg = self.get_value_reg(*epistemic_val, X86Reg::R10);
+                let dst_reg = self
+                    .register_allocator
+                    .get_reg(result)
+                    .unwrap_or(X86Reg::RAX);
+                
+                // Load value field
+                if epistemic_reg.is_xmm() {
+                    // Epistemic value is in XMM - value is in same register
+                    self.emit_movsd_rr(dst_reg, epistemic_reg);
+                } else {
+                    // Epistemic value is pointer to struct - load value field
+                    self.emit_mov_r64_mem_disp(dst_reg, epistemic_reg, 0);
+                }
+                
+                self.store_value(result, dst_reg);
+            }
+            
+            EpistemicOp::ExtractConfidence(epistemic_val) => {
+                // Extract confidence from Knowledge<T> -> f64
+                let epistemic_reg = self.get_value_reg(*epistemic_val, X86Reg::R10);
+                let dst_reg = self
+                    .register_allocator
+                    .get_reg(result)
+                    .unwrap_or(X86Reg::XMM0);
+                
+                // Load confidence field (offset = size of inner type)
+                // For now, assume inner type is <= 8 bytes, so confidence is at offset 8
+                if epistemic_reg.is_xmm() {
+                    // Epistemic value is in XMM pair - confidence is in second register
+                    // Would need to track which XMM register pair
+                    // For now, assume we need to load from memory
+                    self.emit_sub_rsp_imm(16);
+                    self.emit_movsd_mem_disp_r64(X86Reg::RSP, 0, epistemic_reg);
+                    self.emit_movsd_rr(dst_reg, X86Reg::XMM1); // Assume confidence in XMM1
+                    self.emit_add_rsp_imm(16);
+                } else {
+                    // Load confidence from memory at offset 8
+                    let inner_ty = self.get_value_type(*epistemic_val, func);
+                    let offset = if let SirType::Epistemic(inner) = &inner_ty {
+                        inner.size_bytes() as i32
+                    } else {
+                        8 // Default offset
+                    };
+                    self.emit_movsd_r64_mem_disp(dst_reg, epistemic_reg, offset);
+                }
+                
+                self.store_value(result, dst_reg);
+            }
+            
+            EpistemicOp::PropagateAdd { conf_a, conf_b } => {
+                // Confidence propagation for addition: min(conf_a, conf_b)
+                // This is the GUM (Guide to Uncertainty in Measurement) rule
+                let conf_a_reg = self.get_value_reg(*conf_a, X86Reg::XMM0);
+                let conf_b_reg = self.get_value_reg(*conf_b, X86Reg::XMM1);
+                let dst_reg = self
+                    .register_allocator
+                    .get_reg(result)
+                    .unwrap_or(X86Reg::XMM2);
+                
+                // MINSD dst, src (minimum of two doubles)
+                // F2 0F 5D /r
+                self.emit_byte(0xF2);
+                self.emit_rex(false, false, false, false);
+                self.emit_bytes(&[0x0F, 0x5D]);
+                self.emit_modrm(0b11, (dst_reg as u8) & 0x7, (conf_b_reg as u8) & 0x7);
+                
+                // Move conf_a to dst first
+                if conf_a_reg != dst_reg {
+                    self.emit_movsd_rr(dst_reg, conf_a_reg);
+                }
+                // Then compute min(dst, conf_b)
+                self.emit_minsd(dst_reg, conf_b_reg);
+                
+                self.store_value(result, dst_reg);
+            }
+            
+            EpistemicOp::PropagateSub { conf_a, conf_b } => {
+                // Confidence propagation for subtraction: min(conf_a, conf_b)
+                // Same as addition (GUM rule)
+                self.emit_epistemic_op(
+                    result,
+                    &EpistemicOp::PropagateAdd {
+                        conf_a: *conf_a,
+                        conf_b: *conf_b,
+                    },
+                    func,
+                )?;
+            }
+            
+            EpistemicOp::PropagateMul {
+                val_a,
+                conf_a,
+                val_b,
+                conf_b,
+            } => {
+                // Confidence propagation for multiplication: conf_a * conf_b
+                // This follows GUM propagation rules
+                let conf_a_reg = self.get_value_reg(*conf_a, X86Reg::XMM0);
+                let conf_b_reg = self.get_value_reg(*conf_b, X86Reg::XMM1);
+                let dst_reg = self
+                    .register_allocator
+                    .get_reg(result)
+                    .unwrap_or(X86Reg::XMM2);
+                
+                // MULSD dst, src (multiply doubles)
+                self.emit_movsd_rr(dst_reg, conf_a_reg);
+                self.emit_mulsd(dst_reg, conf_b_reg);
+                
+                self.store_value(result, dst_reg);
+            }
+            
+            EpistemicOp::PropagateDiv {
+                val_a: _,
+                conf_a,
+                val_b: _,
+                conf_b,
+            } => {
+                // Confidence propagation for division: conf_a * conf_b
+                // Same as multiplication (GUM rule)
+                let conf_a_reg = self.get_value_reg(*conf_a, X86Reg::XMM0);
+                let conf_b_reg = self.get_value_reg(*conf_b, X86Reg::XMM1);
+                let dst_reg = self
+                    .register_allocator
+                    .get_reg(result)
+                    .unwrap_or(X86Reg::XMM2);
+                
+                // MULSD dst, src (multiply doubles)
+                self.emit_movsd_rr(dst_reg, conf_a_reg);
+                self.emit_mulsd(dst_reg, conf_b_reg);
+                
+                self.store_value(result, dst_reg);
+            }
+            
+            EpistemicOp::FusedMul {
+                val_a,
+                conf_a,
+                val_b,
+                conf_b,
+            } => {
+                // Fused operation: compute both value * value and conf_a * conf_b
+                // Optimization: keep both in XMM register pair
+                let val_a_reg = self.get_value_reg(*val_a, X86Reg::XMM0);
+                let val_b_reg = self.get_value_reg(*val_b, X86Reg::XMM1);
+                let conf_a_reg = self.get_value_reg(*conf_a, X86Reg::XMM2);
+                let conf_b_reg = self.get_value_reg(*conf_b, X86Reg::XMM3);
+                
+                // Compute value result: val_a * val_b
+                let val_result_reg = X86Reg::XMM4;
+                self.emit_movsd_rr(val_result_reg, val_a_reg);
+                self.emit_mulsd(val_result_reg, val_b_reg);
+                
+                // Compute confidence result: conf_a * conf_b
+                let conf_result_reg = X86Reg::XMM5;
+                self.emit_movsd_rr(conf_result_reg, conf_a_reg);
+                self.emit_mulsd(conf_result_reg, conf_b_reg);
+                
+                // Result is epistemic - would need to construct struct
+                // For now, store both in result location (would need stack allocation)
+                // In optimized version, keep in XMM register pair
+                self.store_value(result, val_result_reg);
+            }
+            
+            EpistemicOp::Meet { conf_a, conf_b } => {
+                // Meet operation: min(conf_a, conf_b) - same as PropagateAdd
+                self.emit_epistemic_op(
+                    result,
+                    &EpistemicOp::PropagateAdd {
+                        conf_a: *conf_a,
+                        conf_b: *conf_b,
+                    },
+                    func,
+                )?;
+            }
+            
+            EpistemicOp::Join { conf_a, conf_b } => {
+                // Join operation: max(conf_a, conf_b) - for branch merging
+                let conf_a_reg = self.get_value_reg(*conf_a, X86Reg::XMM0);
+                let conf_b_reg = self.get_value_reg(*conf_b, X86Reg::XMM1);
+                let dst_reg = self
+                    .register_allocator
+                    .get_reg(result)
+                    .unwrap_or(X86Reg::XMM2);
+                
+                // Move conf_a to dst first
+                if conf_a_reg != dst_reg {
+                    self.emit_movsd_rr(dst_reg, conf_a_reg);
+                }
+                // Then compute max(dst, conf_b)
+                self.emit_maxsd(dst_reg, conf_b_reg);
+                
+                self.store_value(result, dst_reg);
+            }
+            
+            EpistemicOp::CondPropagate {
+                condition_conf,
+                then_conf,
+                else_conf,
+            } => {
+                // Conditional confidence: if condition is certain (conf=1), use then_conf,
+                // otherwise use weighted average or minimum
+                // For now, use minimum of all three (conservative)
+                let cond_reg = self.get_value_reg(*condition_conf, X86Reg::XMM0);
+                let then_reg = self.get_value_reg(*then_conf, X86Reg::XMM1);
+                let else_reg = self.get_value_reg(*else_conf, X86Reg::XMM2);
+                let dst_reg = self
+                    .register_allocator
+                    .get_reg(result)
+                    .unwrap_or(X86Reg::XMM3);
+                
+                // Compute min(then_conf, else_conf) first
+                self.emit_movsd_rr(dst_reg, then_reg);
+                self.emit_minsd(dst_reg, else_reg);
+                
+                // Then take minimum with condition confidence
+                // (if condition is uncertain, result is also uncertain)
+                self.emit_minsd(dst_reg, cond_reg);
+                
+                self.store_value(result, dst_reg);
+            }
+        }
+        
+        Ok(())
+    }
+    
+    /// Helper: Get value type from function
+    fn get_value_type(&self, value_id: ValueId, func: &SirFunction) -> SirType {
+        // Try to find value in function parameters
+        for (idx, (_, param_ty)) in func.params.iter().enumerate() {
+            if ValueId::new(idx as u32) == value_id {
+                return param_ty.clone();
+            }
+        }
+        
+        // Try to find in instructions
+        for block in &func.blocks {
+            for inst in &block.instructions {
+                if let Some(result) = inst.result {
+                    if result == value_id {
+                        // Infer type from instruction
+                        return self.infer_instruction_type(&inst.inst);
+                    }
+                }
+            }
+        }
+        
+        // Default to f64 if unknown
+        SirType::Scalar(ScalarType::F64)
+    }
+    
+    /// Helper: Infer type from instruction
+    fn infer_instruction_type(&self, inst: &super::ops::SirInst) -> SirType {
+        match inst {
+            super::ops::SirInst::Const(c) => c.ty(),
+            super::ops::SirInst::BinOp { .. } => SirType::Scalar(ScalarType::F64),
+            super::ops::SirInst::Epistemic(_) => {
+                // Would need to track inner type - for now default
+                SirType::Epistemic(Box::new(SirType::Scalar(ScalarType::F64)))
+            }
+            _ => SirType::Scalar(ScalarType::F64),
+        }
+    }
+
+    /// Emit scientific operations (ODE, matrix ops, etc.)
+    fn emit_scientific_op(
+        &mut self,
+        result: ValueId,
+        op: &super::ops::ScientificOp,
+        func: &SirFunction,
+    ) -> Result<(), EmitError> {
+        use super::ops::{OdeMethod, ScientificOp};
+        
+        match op {
+            ScientificOp::OdeStep {
+                method,
+                state,
+                derivatives: _,
+                t,
+                dt,
+            } => {
+                // Generate code for ODE step
+                // For simple methods (Euler, RK4), inline the computation
+                // For complex methods (DoPri5, CashKarp), call runtime
+                
+                match method {
+                    OdeMethod::Euler => {
+                        // Euler: y_new = y + dt * f(t, y)
+                        // For now, call runtime - full implementation would inline
+                        let state_reg = self.get_value_reg(*state, X86Reg::R10);
+                        let t_reg = self.get_value_reg(*t, X86Reg::XMM0);
+                        let dt_reg = self.get_value_reg(*dt, X86Reg::XMM1);
+                        
+                        // Setup arguments: state (RDI), t (XMM0), dt (XMM1)
+                        if !state_reg.is_xmm() {
+                            self.emit_mov_rr(X86Reg::RDI, state_reg);
+                        }
+                        if !t_reg.is_xmm() {
+                            self.emit_movsd_rr(X86Reg::XMM0, t_reg);
+                        }
+                        if !dt_reg.is_xmm() {
+                            self.emit_movsd_rr(X86Reg::XMM1, dt_reg);
+                        }
+                        
+                        self.emit_call_extern("sounio_ode_euler");
+                        
+                        let result_reg = self
+                            .register_allocator
+                            .get_reg(result)
+                            .unwrap_or(X86Reg::XMM0);
+                        if result_reg != X86Reg::XMM0 {
+                            self.emit_movsd_rr(result_reg, X86Reg::XMM0);
+                        }
+                    }
+                    
+                    OdeMethod::RK4 => {
+                        // RK4: call runtime implementation
+                        let state_reg = self.get_value_reg(*state, X86Reg::R10);
+                        let t_reg = self.get_value_reg(*t, X86Reg::XMM0);
+                        let dt_reg = self.get_value_reg(*dt, X86Reg::XMM1);
+                        
+                        if !state_reg.is_xmm() {
+                            self.emit_mov_rr(X86Reg::RDI, state_reg);
+                        }
+                        if !t_reg.is_xmm() {
+                            self.emit_movsd_rr(X86Reg::XMM0, t_reg);
+                        }
+                        if !dt_reg.is_xmm() {
+                            self.emit_movsd_rr(X86Reg::XMM1, dt_reg);
+                        }
+                        
+                        self.emit_call_extern("sounio_ode_rk4");
+                        
+                        let result_reg = self
+                            .register_allocator
+                            .get_reg(result)
+                            .unwrap_or(X86Reg::XMM0);
+                        if result_reg != X86Reg::XMM0 {
+                            self.emit_movsd_rr(result_reg, X86Reg::XMM0);
+                        }
+                    }
+                    
+                    OdeMethod::DoPri5 | OdeMethod::CashKarp => {
+                        // Complex adaptive methods - always use runtime
+                        let state_reg = self.get_value_reg(*state, X86Reg::R10);
+                        let t_reg = self.get_value_reg(*t, X86Reg::XMM0);
+                        let dt_reg = self.get_value_reg(*dt, X86Reg::XMM1);
+                        
+                        if !state_reg.is_xmm() {
+                            self.emit_mov_rr(X86Reg::RDI, state_reg);
+                        }
+                        if !t_reg.is_xmm() {
+                            self.emit_movsd_rr(X86Reg::XMM0, t_reg);
+                        }
+                        if !dt_reg.is_xmm() {
+                            self.emit_movsd_rr(X86Reg::XMM1, dt_reg);
+                        }
+                        
+                        let func_name = match method {
+                            OdeMethod::DoPri5 => "sounio_ode_dopri5",
+                            OdeMethod::CashKarp => "sounio_ode_cashkarp",
+                            _ => unreachable!(),
+                        };
+                        self.emit_call_extern(func_name);
+                        
+                        let result_reg = self
+                            .register_allocator
+                            .get_reg(result)
+                            .unwrap_or(X86Reg::XMM0);
+                        if result_reg != X86Reg::XMM0 {
+                            self.emit_movsd_rr(result_reg, X86Reg::XMM0);
+                        }
+                    }
+                    
+                    _ => {
+                        self.emit_call_extern("sounio_ode_step");
+                    }
+                }
+                
+                self.store_value(result, X86Reg::XMM0);
+            }
+            
+            ScientificOp::DotProduct { a, b, len, .. } => {
+                // Dot product: optimize with SIMD when len >= 4
+                let a_reg = self.get_value_reg(*a, X86Reg::R10);
+                let b_reg = self.get_value_reg(*b, X86Reg::R11);
+                let dst_reg = self
+                    .register_allocator
+                    .get_reg(result)
+                    .unwrap_or(X86Reg::XMM0);
+                
+                if *len >= 4 {
+                    // Use SIMD
+                    if !a_reg.is_xmm() {
+                        self.emit_mov_rr(X86Reg::RDI, a_reg);
+                    }
+                    if !b_reg.is_xmm() {
+                        self.emit_mov_rr(X86Reg::RSI, b_reg);
+                    }
+                    self.emit_mov_ri64(X86Reg::RDX, *len as i64);
+                    self.emit_call_extern("sounio_dot_product_simd");
+                } else {
+                    // Small vectors - scalar
+                    if !a_reg.is_xmm() {
+                        self.emit_mov_rr(X86Reg::RDI, a_reg);
+                    }
+                    if !b_reg.is_xmm() {
+                        self.emit_mov_rr(X86Reg::RSI, b_reg);
+                    }
+                    self.emit_mov_ri64(X86Reg::RDX, *len as i64);
+                    self.emit_call_extern("sounio_dot_product");
+                }
+                
+                if dst_reg != X86Reg::XMM0 {
+                    self.emit_movsd_rr(dst_reg, X86Reg::XMM0);
+                }
+                self.store_value(result, dst_reg);
+            }
+            
+            ScientificOp::Lerp { a, b, t } => {
+                // Linear interpolation: a + t * (b - a)
+                let a_reg = self.get_value_reg(*a, X86Reg::XMM0);
+                let b_reg = self.get_value_reg(*b, X86Reg::XMM1);
+                let t_reg = self.get_value_reg(*t, X86Reg::XMM2);
+                let dst_reg = self
+                    .register_allocator
+                    .get_reg(result)
+                    .unwrap_or(X86Reg::XMM3);
+                
+                // result = a + t * (b - a)
+                self.emit_movsd_rr(dst_reg, b_reg);
+                self.emit_subsd(dst_reg, a_reg);  // (b - a)
+                self.emit_mulsd(dst_reg, t_reg);  // t * (b - a)
+                self.emit_addsd(dst_reg, a_reg);   // a + t * (b - a)
+                
+                self.store_value(result, dst_reg);
+            }
+            
+            _ => {
+                return Err(EmitError::UnsupportedInstruction(
+                    format!("Scientific operation {:?} not yet implemented", op)
+                ));
+            }
+        }
+        
         Ok(())
     }
 

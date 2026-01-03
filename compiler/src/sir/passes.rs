@@ -126,11 +126,80 @@ impl SirPass for LoopAnalysis {
 }
 
 fn detect_loops(func: &mut SirFunction) {
-    // TODO: Implement proper loop detection
-    // For now, mark blocks based on back edges
+    // Detect natural loops using back edge analysis
+    // A back edge is an edge from a node to one of its dominators
+    
+    // Step 1: Compute dominators (simplified - full implementation would use Lengauer-Tarjan)
+    let mut dominators: Vec<HashSet<usize>> = vec![HashSet::new(); func.blocks.len()];
+    let entry = 0;
+    dominators[entry].insert(entry);
+    
+    // Iterative dataflow to compute dominators
+    let mut changed = true;
+    while changed {
+        changed = false;
+        for i in 0..func.blocks.len() {
+            if i == entry {
+                continue;
+            }
+            
+            let mut new_doms = HashSet::new();
+            new_doms.insert(i);
+            
+            // Intersection of dominators of all predecessors
+            let block = &func.blocks[i];
+            if let Some(term) = &block.terminator {
+                let preds = term.successors();
+                
+                if !preds.is_empty() {
+                    // Initialize with first predecessor's dominators
+                    if let Some(&first_pred) = preds.first() {
+                        new_doms = dominators[first_pred.0 as usize].clone();
+                    }
+                    
+                    // Intersect with all other predecessors
+                    for &pred in preds.iter().skip(1) {
+                        new_doms = new_doms.intersection(&dominators[pred.0 as usize]).cloned().collect();
+                    }
+                    
+                    new_doms.insert(i);
+                }
+            }
+            
+            if new_doms != dominators[i] {
+                dominators[i] = new_doms;
+                changed = true;
+            }
+        }
+    }
+    
+    // Step 2: Find back edges (edge from node to dominator)
+    let mut back_edges = Vec::new();
+    for (i, block) in func.blocks.iter().enumerate() {
+        if let Some(term) = &block.terminator {
+            let targets = term.successors();
+            
+            for target in targets {
+                // Check if target dominates source (back edge)
+                if dominators[i].contains(&(target.0 as usize)) {
+                    back_edges.push((i, target.0 as usize));
+                }
+            }
+        }
+    }
+    
+    // Step 3: Mark loop headers and compute loop depth
+    for (header_idx, _) in &back_edges {
+        func.blocks[*header_idx].is_loop_header = true;
+    }
+    
+    // Compute loop depth (simplified - full implementation would handle nested loops)
     for block in &mut func.blocks {
-        block.is_loop_header = false;
-        block.loop_depth = 0;
+        if block.is_loop_header {
+            block.loop_depth = 1;
+        } else {
+            block.loop_depth = 0;
+        }
     }
 }
 

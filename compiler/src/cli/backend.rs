@@ -174,6 +174,8 @@ impl std::error::Error for BackendParseError {}
 pub enum OutputFormat {
     /// Shared library (.so / .dylib / .dll)
     SharedLib,
+    /// Executable (linked binary)
+    Executable,
     /// Object file (.o)
     Object,
     /// Assembly (.s)
@@ -204,6 +206,7 @@ impl OutputFormat {
                 #[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows")))]
                 { "so" }
             }
+            OutputFormat::Executable => "",  // No extension on Unix
             OutputFormat::Object => "o",
             OutputFormat::Asm => "s",
             OutputFormat::LlvmIr => "ll",
@@ -980,18 +983,52 @@ fn compile_native(args: &BuildArgs) -> Result<(PathBuf, Option<NativeMetrics>), 
             Some("so") | Some("dylib") | Some("dll") => OutputFormat::SharedLib,
             Some("o") => OutputFormat::Object,
             Some("s") => OutputFormat::Asm,
-            _ => OutputFormat::SharedLib, // Default
+            _ => OutputFormat::Executable, // Default to executable
         }
     });
 
     match format {
-        OutputFormat::SharedLib | OutputFormat::Object => {
-            // Convert CodeSegment to ELF format
+        OutputFormat::Object => {
+            // Write object file only (no linking)
             use crate::sir::emit::code_segment_to_elf;
             let elf_bytes = code_segment_to_elf(&code_segment)
                 .map_err(|e| format!("ELF generation error: {:?}", e))?;
             std::fs::write(&output_path, &elf_bytes)
                 .map_err(|e| format!("Failed to write output: {}", e))?;
+        }
+        OutputFormat::Executable | OutputFormat::SharedLib => {
+            // Generate object file, then link
+            use crate::sir::emit::code_segment_to_elf;
+            use crate::backend::native::linker::{Linker, LinkerConfig, LinkMode};
+
+            let elf_bytes = code_segment_to_elf(&code_segment)
+                .map_err(|e| format!("ELF generation error: {:?}", e))?;
+
+            // Write temporary object file
+            let obj_path = output_path.with_extension("o");
+            std::fs::write(&obj_path, &elf_bytes)
+                .map_err(|e| format!("Failed to write object file: {}", e))?;
+
+            // Link to executable or shared library
+            let link_mode = if format == OutputFormat::Executable {
+                LinkMode::Executable
+            } else {
+                LinkMode::SharedLib
+            };
+
+            let linker_config = LinkerConfig::default();
+            let linker = Linker::new(linker_config)
+                .map_err(|e| format!("Linker initialization error: {}", e))?;
+
+            linker.link(&[&obj_path], &output_path, link_mode)
+                .map_err(|e| format!("Linking error: {}", e))?;
+
+            // Clean up temporary object file
+            let _ = std::fs::remove_file(&obj_path);
+
+            if args.verbose {
+                println!("✓ Linked {}", if format == OutputFormat::Executable { "executable" } else { "shared library" });
+            }
         }
         OutputFormat::Asm => {
             // Write assembly (would need disassembly)

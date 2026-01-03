@@ -530,6 +530,21 @@ impl ElfWriter {
             .position(|s| s.binding != SymbolBinding::Local)
             .unwrap_or(self.symbols.len());
 
+        // Add .note.GNU-stack section (indicates non-executable stack)
+        // This suppresses the ld warning about missing section
+        let gnu_stack_name_offset = self.add_section_string(".note.GNU-stack");
+        self.sections.push(Section {
+            name: ".note.GNU-stack".to_string(),
+            name_offset: gnu_stack_name_offset,
+            section_type: SHT_PROGBITS,
+            flags: 0,  // No flags = non-executable stack
+            data: Vec::new(),
+            link: 0,
+            info: 0,
+            addralign: 1,
+            entsize: 0,
+        });
+
         // Add string table section
         let strtab_name_offset = self.add_section_string(".strtab");
         let strtab_index = self.sections.len();
@@ -549,6 +564,9 @@ impl ElfWriter {
         let symtab_name_offset = self.add_section_string(".symtab");
         let symtab_index = self.sections.len();
         let symtab_data = self.build_symtab();
+        // sh_info is one greater than the index of the last local symbol
+        // Symbol table has null symbol at index 0, so add 1 to account for it
+        let sh_info = (first_global + 1) as u32;
         self.sections.push(Section {
             name: ".symtab".to_string(),
             name_offset: symtab_name_offset,
@@ -556,7 +574,7 @@ impl ElfWriter {
             flags: 0,
             data: symtab_data,
             link: strtab_index as u32,
-            info: first_global as u32,
+            info: sh_info,
             addralign: 8,
             entsize: ELF64_SYM_SIZE as u64,
         });
@@ -787,6 +805,8 @@ impl ElfWriter {
 pub struct EpistemicSectionData {
     /// Function epistemic metadata
     pub functions: Vec<FunctionEpistemic>,
+    /// Value-level epistemic metadata (per-value confidence, uncertainty, provenance)
+    pub values: Vec<ValueEpistemic>,
     /// Global confidence floor
     pub confidence_floor: f64,
     /// Thermal degradation applied
@@ -802,6 +822,28 @@ pub struct FunctionEpistemic {
     pub confidence: f64,
     pub delta: f64,
     pub spill_count: u32,
+    pub critical: bool,
+}
+
+/// Epistemic metadata for a value (Knowledge<T>)
+/// This provides complete epistemic tracking per value for analysis/debugging
+#[derive(Debug, Clone)]
+pub struct ValueEpistemic {
+    /// Value identifier (instruction index or value ID)
+    pub value_id: u32,
+    /// Function this value belongs to
+    pub function_name: String,
+    /// Confidence (ε) [0.0, 1.0]
+    pub confidence: f64,
+    /// Uncertainty (σ) [0.0, 1.0]
+    pub uncertainty: f64,
+    /// Provenance ID (tracks data lineage)
+    pub provenance_id: Option<u32>,
+    /// Number of times this value was spilled
+    pub spill_count: u32,
+    /// Whether this value has tracked provenance
+    pub has_provenance: bool,
+    /// Whether this value is critical (high confidence, should not be spilled)
     pub critical: bool,
 }
 
@@ -822,11 +864,14 @@ impl EpistemicSectionData {
         // Magic: "DMEP" (Demetrios EPistemic)
         data.extend_from_slice(b"DMEP");
 
-        // Version (2 bytes)
-        data.extend_from_slice(&1u16.to_le_bytes());
+        // Version (2 bytes) - increment to 2 for expanded metadata
+        data.extend_from_slice(&2u16.to_le_bytes());
 
         // Number of functions (2 bytes)
         data.extend_from_slice(&(self.functions.len() as u16).to_le_bytes());
+        
+        // Number of values (4 bytes)
+        data.extend_from_slice(&(self.values.len() as u32).to_le_bytes());
 
         // Confidence floor (8 bytes)
         data.extend_from_slice(&self.confidence_floor.to_le_bytes());
@@ -849,6 +894,39 @@ impl EpistemicSectionData {
             data.extend_from_slice(&func.spill_count.to_le_bytes());
             // Flags (1 byte)
             data.push(if func.critical { 1 } else { 0 });
+        }
+
+        // Value-level epistemic metadata
+        for value in &self.values {
+            // Value ID (4 bytes)
+            data.extend_from_slice(&value.value_id.to_le_bytes());
+            
+            // Function name length + name
+            let func_name_bytes = value.function_name.as_bytes();
+            data.extend_from_slice(&(func_name_bytes.len() as u16).to_le_bytes());
+            data.extend_from_slice(func_name_bytes);
+            
+            // Confidence (8 bytes)
+            data.extend_from_slice(&value.confidence.to_le_bytes());
+            // Uncertainty (8 bytes)
+            data.extend_from_slice(&value.uncertainty.to_le_bytes());
+            
+            // Provenance ID (4 bytes, or 0xFFFFFFFF if None)
+            let prov_id = value.provenance_id.unwrap_or(0xFFFFFFFF);
+            data.extend_from_slice(&prov_id.to_le_bytes());
+            
+            // Spill count (4 bytes)
+            data.extend_from_slice(&value.spill_count.to_le_bytes());
+            
+            // Flags (1 byte): bit 0 = has_provenance, bit 1 = critical
+            let mut flags = 0u8;
+            if value.has_provenance {
+                flags |= 0x01;
+            }
+            if value.critical {
+                flags |= 0x02;
+            }
+            data.push(flags);
         }
 
         // Allocation stats (optional)

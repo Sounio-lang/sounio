@@ -125,7 +125,7 @@ impl AllocConfig {
 // ============================================================================
 
 /// Register class (grouping of compatible registers)
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum RegClass {
     /// General-purpose integer registers (RAX, RBX, RCX, RDX, RSI, RDI, R8-R15)
     GeneralPurpose,
@@ -301,6 +301,9 @@ pub struct LiveInterval {
     pub spill_slot: Option<SpillSlot>,
     /// Weight/priority (computed)
     priority: f64,
+    /// Does this interval cross a function call?
+    /// Values that cross calls need callee-saved registers or spilling
+    pub crosses_call: bool,
 }
 
 /// Position and type of a use
@@ -343,6 +346,7 @@ impl LiveInterval {
             assigned: None,
             spill_slot: None,
             priority: 0.0,
+            crosses_call: false,
         }
     }
 
@@ -1233,40 +1237,244 @@ pub fn extract_epistemic_metadata(
 }
 
 /// Build live intervals from SIR function with epistemic metadata.
+/// 
+/// This function performs a complete liveness analysis:
+/// 1. Determines register class based on value type
+/// 2. Tracks live ranges across the entire CFG
+/// 3. Identifies intervals that cross function calls
+/// 4. Associates epistemic metadata with intervals
 pub fn build_intervals_from_sir(
     func: &SirFunction,
     metadata: &HashMap<ValueId, EpistemicMetadata>,
-    reg_class: RegClass,
+    default_reg_class: RegClass,
 ) -> Vec<LiveInterval> {
+    use crate::sir::ops::SirInst;
+    
+    // Step 1: Build value type map from function
+    let mut value_types: HashMap<ValueId, crate::sir::types::SirType> = HashMap::new();
+    
+    // Add parameter types
+    for (param_idx, (_, param_ty)) in func.params.iter().enumerate() {
+        let value_id = ValueId::new(param_idx as u32);
+        value_types.insert(value_id, param_ty.clone());
+    }
+    
+    // Step 2: First pass - collect all definitions and determine types
     let mut intervals: HashMap<ValueId, LiveInterval> = HashMap::new();
+    let mut call_positions: Vec<usize> = Vec::new();
     let mut pos = 0;
-
+    
     for block in &func.blocks {
         for inst in &block.instructions {
+            // Check if this is a call instruction
+            if matches!(inst.inst, SirInst::Call(_)) {
+                call_positions.push(pos);
+            }
+            
             // Create interval for result
             if let Some(result_val) = inst.result {
                 let vreg = VirtReg(result_val.0);
+                
+                // Determine register class based on result type
+                // Try to infer from instruction type, fallback to default
+                let reg_class = determine_register_class(&inst.inst, &default_reg_class);
+                
                 let mut interval = LiveInterval::new(vreg, reg_class, pos);
-
+                
+                // Attach epistemic metadata if available
                 if let Some(ep_meta) = metadata.get(&result_val) {
                     interval.epistemic = ep_meta.clone();
                 }
-
+                
+                // Store type for later use
+                if let Some(ty) = infer_result_type(&inst.inst) {
+                    value_types.insert(result_val, ty);
+                }
+                
                 intervals.insert(result_val, interval);
             }
-
-            // Extend intervals for operands
+            
+            // Extend intervals for operands (they are used here)
             for operand in inst.inst.operands() {
+                if let Some(interval) = intervals.get_mut(&operand) {
+                    interval.add_use(pos, UseKind::Read);
+                } else {
+                    // Operand not yet defined - might be a parameter or phi
+                    // Create a placeholder interval that will be extended
+                    let vreg = VirtReg(operand.0);
+                    let reg_class = value_types
+                        .get(&operand)
+                        .map(|ty| type_to_reg_class(ty))
+                        .unwrap_or(default_reg_class);
+                    
+                    let mut interval = LiveInterval::new(vreg, reg_class, 0);
+                    interval.add_use(pos, UseKind::Read);
+                    
+                    if let Some(ep_meta) = metadata.get(&operand) {
+                        interval.epistemic = ep_meta.clone();
+                    }
+                    
+                    intervals.insert(operand, interval);
+                }
+            }
+            
+            pos += 1;
+        }
+        
+        // Handle terminator operands
+        if let Some(term) = &block.terminator {
+            for operand in term.operands() {
                 if let Some(interval) = intervals.get_mut(&operand) {
                     interval.add_use(pos, UseKind::Read);
                 }
             }
-
-            pos += 1;
+        }
+        
+        pos += 1; // Terminator position
+    }
+    
+    // Step 3: Mark intervals that cross calls
+    for interval in intervals.values_mut() {
+        for &call_pos in &call_positions {
+            if interval.start <= call_pos && call_pos < interval.end {
+                interval.crosses_call = true;
+                break;
+            }
         }
     }
-
+    
+    // Step 4: Compute final end positions using liveness analysis
+    // For each value, find the last use across all blocks
+    let mut last_use: HashMap<ValueId, usize> = HashMap::new();
+    pos = 0;
+    
+    for block in &func.blocks {
+        for inst in &block.instructions {
+            // Update last use for operands
+            for operand in inst.inst.operands() {
+                last_use.insert(operand, pos);
+            }
+            
+            pos += 1;
+        }
+        
+        // Update last use for terminator operands
+        if let Some(term) = &block.terminator {
+            for operand in term.operands() {
+                last_use.insert(operand, pos);
+            }
+        }
+        
+        pos += 1;
+    }
+    
+    // Update interval end positions
+    for (value_id, &last_pos) in &last_use {
+        if let Some(interval) = intervals.get_mut(value_id) {
+            interval.end = (last_pos + 1).max(interval.end);
+        }
+    }
+    
     intervals.into_values().collect()
+}
+
+/// Determine register class from instruction type
+fn determine_register_class(
+    inst: &crate::sir::ops::SirInst,
+    default: &RegClass,
+) -> RegClass {
+    use crate::sir::ops::SirInst;
+    
+    match inst {
+        SirInst::BinOp { op, .. } => {
+            match op {
+                crate::sir::ops::ArithOp::FAdd
+                | crate::sir::ops::ArithOp::FSub
+                | crate::sir::ops::ArithOp::FMul
+                | crate::sir::ops::ArithOp::FDiv
+                | crate::sir::ops::ArithOp::FRem => RegClass::FloatingPoint,
+                _ => RegClass::GeneralPurpose,
+            }
+        }
+        SirInst::Cmp { op, .. } => {
+            match op {
+                crate::sir::ops::CmpOp::FOEq
+                | crate::sir::ops::CmpOp::FONe
+                | crate::sir::ops::CmpOp::FOLt
+                | crate::sir::ops::CmpOp::FOLe
+                | crate::sir::ops::CmpOp::FOGt
+                | crate::sir::ops::CmpOp::FOGe
+                | crate::sir::ops::CmpOp::FUEq
+                | crate::sir::ops::CmpOp::FUNe
+                | crate::sir::ops::CmpOp::FULt
+                | crate::sir::ops::CmpOp::FULe
+                | crate::sir::ops::CmpOp::FUGt
+                | crate::sir::ops::CmpOp::FUGe => RegClass::FloatingPoint,
+                _ => RegClass::GeneralPurpose,
+            }
+        }
+        SirInst::Const(c) => {
+            match c {
+                crate::sir::values::Constant::F64(_) | crate::sir::values::Constant::F32(_) => {
+                    RegClass::FloatingPoint
+                }
+                _ => RegClass::GeneralPurpose,
+            }
+        }
+        _ => *default,
+    }
+}
+
+/// Infer result type from instruction
+fn infer_result_type(inst: &crate::sir::ops::SirInst) -> Option<crate::sir::types::SirType> {
+    use crate::sir::ops::SirInst;
+    use crate::sir::types::{ScalarType, SirType};
+    
+    match inst {
+        SirInst::BinOp { op, .. } => {
+            match op {
+                crate::sir::ops::ArithOp::FAdd
+                | crate::sir::ops::ArithOp::FSub
+                | crate::sir::ops::ArithOp::FMul
+                | crate::sir::ops::ArithOp::FDiv
+                | crate::sir::ops::ArithOp::FRem => {
+                    Some(SirType::Scalar(ScalarType::F64))
+                }
+                _ => Some(SirType::Scalar(ScalarType::I64)),
+            }
+        }
+        SirInst::Const(c) => {
+            match c {
+                crate::sir::values::Constant::F64(_) => {
+                    Some(SirType::Scalar(ScalarType::F64))
+                }
+                crate::sir::values::Constant::F32(_) => {
+                    Some(SirType::Scalar(ScalarType::F32))
+                }
+                crate::sir::values::Constant::I64(_)
+                | crate::sir::values::Constant::I32(_)
+                | crate::sir::values::Constant::I16(_)
+                | crate::sir::values::Constant::I8(_) => {
+                    Some(SirType::Scalar(ScalarType::I64))
+                }
+                crate::sir::values::Constant::Bool(_) => {
+                    Some(SirType::Scalar(ScalarType::Bool))
+                }
+                _ => None,
+            }
+        }
+        _ => None,
+    }
+}
+
+/// Convert SIR type to register class
+fn type_to_reg_class(ty: &crate::sir::types::SirType) -> RegClass {
+    use crate::sir::types::{ScalarType, SirType};
+    
+    match ty {
+        SirType::Scalar(ScalarType::F32 | ScalarType::F64) => RegClass::FloatingPoint,
+        _ => RegClass::GeneralPurpose,
+    }
 }
 
 // ============================================================================

@@ -695,8 +695,9 @@ pub struct PipelineResult {
 /// Find system linker
 fn find_linker() -> Option<PathBuf> {
     // Try in order of preference
-    let candidates = ["mold", "ld.lld", "ld.gold", "ld"];
-    
+    // Note: mold crashes on our ELF output, so prefer ld/lld for now
+    let candidates = ["ld", "ld.lld", "ld.gold"];
+
     for candidate in candidates {
         if let Some(path) = which(candidate) {
             return Some(path);
