@@ -960,4 +960,234 @@ mod tests {
         // Should be removed (one-shot)
         assert!(store.is_empty());
     }
+
+    // =========================================================================
+    // InterpreterMultiShot Tests
+    // =========================================================================
+
+    #[test]
+    fn test_interpreter_multi_shot_basic_resume() {
+        // Create a multi-shot continuation that triples the input integer
+        let resume_point = ResumePoint::interpreter_multi_shot(
+            |value| {
+                if let Value::Int(n) = value {
+                    Ok(Value::Int(n * 3))
+                } else {
+                    Err(ContinuationError::NotImplemented("expected Int".into()))
+                }
+            },
+            Some("tripler"),
+        );
+
+        let mut cont = CapturedContinuation::new_multi_shot(resume_point);
+
+        // First resume
+        let result1 = cont.resume(Value::Int(7));
+        assert!(result1.is_ok());
+        assert_eq!(result1.unwrap(), Value::Int(21));
+
+        // Second resume - should also work for multi-shot
+        let result2 = cont.resume(Value::Int(14));
+        assert!(result2.is_ok());
+        assert_eq!(result2.unwrap(), Value::Int(42));
+
+        // Third resume
+        let result3 = cont.resume(Value::Int(100));
+        assert!(result3.is_ok());
+        assert_eq!(result3.unwrap(), Value::Int(300));
+
+        assert_eq!(cont.resume_count, 3);
+    }
+
+    #[test]
+    fn test_interpreter_multi_shot_resume_point_preserved() {
+        // Verify that multi-shot resume point is NOT replaced with Stub after resume
+        let resume_point = ResumePoint::interpreter_multi_shot(
+            |value| Ok(value),
+            Some("identity"),
+        );
+
+        let mut cont = CapturedContinuation::new_multi_shot(resume_point);
+
+        // Resume multiple times
+        for i in 0..5 {
+            let result = cont.resume(Value::Int(i));
+            assert!(result.is_ok());
+            assert_eq!(result.unwrap(), Value::Int(i));
+        }
+
+        // Resume point should still be InterpreterMultiShot (not Stub)
+        assert!(cont.resume_point.is_multi_shot());
+        assert!(!cont.resume_point.is_stub());
+    }
+
+    #[test]
+    fn test_interpreter_multi_shot_with_captured_state() {
+        use std::sync::atomic::{AtomicI64, Ordering};
+
+        // Test that closures can capture state and it's shared across resumes
+        let counter = Arc::new(AtomicI64::new(0));
+        let counter_clone = Arc::clone(&counter);
+
+        let resume_point = ResumePoint::interpreter_multi_shot(
+            move |value| {
+                if let Value::Int(n) = value {
+                    let old_count = counter_clone.fetch_add(1, Ordering::SeqCst);
+                    Ok(Value::Int(n + old_count))
+                } else {
+                    Ok(value)
+                }
+            },
+            Some("stateful"),
+        );
+
+        let mut cont = CapturedContinuation::new_multi_shot(resume_point);
+
+        // Each resume should see the updated counter
+        let result1 = cont.resume(Value::Int(100));
+        assert_eq!(result1.unwrap(), Value::Int(100)); // 100 + 0
+
+        let result2 = cont.resume(Value::Int(100));
+        assert_eq!(result2.unwrap(), Value::Int(101)); // 100 + 1
+
+        let result3 = cont.resume(Value::Int(100));
+        assert_eq!(result3.unwrap(), Value::Int(102)); // 100 + 2
+
+        assert_eq!(counter.load(Ordering::SeqCst), 3);
+    }
+
+    #[test]
+    fn test_interpreter_multi_shot_error_recovery() {
+        // Multi-shot continuations can recover from errors
+        let resume_point = ResumePoint::interpreter_multi_shot(
+            |value| {
+                match value {
+                    Value::Int(n) if n == 0 => {
+                        Err(ContinuationError::NotImplemented("divide by zero".into()))
+                    }
+                    Value::Int(n) => Ok(Value::Int(100 / n)),
+                    _ => Ok(value),
+                }
+            },
+            Some("divider"),
+        );
+
+        let mut cont = CapturedContinuation::new_multi_shot(resume_point);
+
+        // Success
+        let result1 = cont.resume(Value::Int(5));
+        assert!(result1.is_ok());
+        assert_eq!(result1.unwrap(), Value::Int(20)); // 100 / 5
+
+        // Error
+        let result2 = cont.resume(Value::Int(0));
+        assert!(result2.is_err());
+
+        // Resume point should still work after error
+        assert!(cont.can_resume());
+
+        // Success again
+        let result3 = cont.resume(Value::Int(4));
+        assert!(result3.is_ok());
+        assert_eq!(result3.unwrap(), Value::Int(25)); // 100 / 4
+    }
+
+    #[test]
+    fn test_interpreter_multi_shot_is_executable_and_multi_shot() {
+        let multi_shot_point = ResumePoint::interpreter_multi_shot(|v| Ok(v), Some("test"));
+        assert!(multi_shot_point.is_executable());
+        assert!(multi_shot_point.is_multi_shot());
+        assert!(!multi_shot_point.is_stub());
+
+        let one_shot_point = ResumePoint::interpreter_closure(|v| Ok(v), Some("test"));
+        assert!(one_shot_point.is_executable());
+        assert!(!one_shot_point.is_multi_shot());
+        assert!(!one_shot_point.is_stub());
+    }
+
+    #[test]
+    fn test_interpreter_multi_shot_debug_format() {
+        let resume_point = ResumePoint::interpreter_multi_shot(
+            |v| Ok(v),
+            Some("debug test multi-shot"),
+        );
+
+        let debug = format!("{:?}", resume_point);
+        assert!(debug.contains("InterpreterMultiShot"));
+        assert!(debug.contains("debug test multi-shot"));
+        assert!(debug.contains("multi-shot closure"));
+    }
+
+    #[test]
+    fn test_interpreter_multi_shot_in_store_not_removed() {
+        let mut store = ContinuationStore::new();
+
+        // Store a multi-shot continuation
+        let resume_point = ResumePoint::interpreter_multi_shot(
+            |value| {
+                if let Value::Int(n) = value {
+                    Ok(Value::Int(n * 2))
+                } else {
+                    Ok(value)
+                }
+            },
+            Some("doubler"),
+        );
+
+        let cont = CapturedContinuation::new_multi_shot(resume_point);
+        let id = store.store(cont);
+
+        // Resume multiple times through the store
+        let result1 = store.resume_and_remove(id, Value::Int(5));
+        assert!(result1.is_ok());
+        assert_eq!(result1.unwrap(), Value::Int(10));
+        assert!(!store.is_empty()); // Should NOT be removed
+
+        let result2 = store.resume_and_remove(id, Value::Int(10));
+        assert!(result2.is_ok());
+        assert_eq!(result2.unwrap(), Value::Int(20));
+        assert!(!store.is_empty()); // Should NOT be removed
+
+        let result3 = store.resume_and_remove(id, Value::Int(21));
+        assert!(result3.is_ok());
+        assert_eq!(result3.unwrap(), Value::Int(42));
+        assert!(!store.is_empty()); // Should NOT be removed
+    }
+
+    #[test]
+    fn test_interpreter_multi_shot_vs_one_shot_in_store() {
+        let mut store = ContinuationStore::new();
+
+        // One-shot continuation
+        let one_shot_point = ResumePoint::interpreter_closure(
+            |value| Ok(value),
+            Some("one-shot"),
+        );
+        let one_shot_cont = CapturedContinuation::new_one_shot(one_shot_point);
+        let one_shot_id = store.store(one_shot_cont);
+
+        // Multi-shot continuation
+        let multi_shot_point = ResumePoint::interpreter_multi_shot(
+            |value| Ok(value),
+            Some("multi-shot"),
+        );
+        let multi_shot_cont = CapturedContinuation::new_multi_shot(multi_shot_point);
+        let multi_shot_id = store.store(multi_shot_cont);
+
+        assert_eq!(store.len(), 2);
+
+        // Resume one-shot
+        let _ = store.resume_and_remove(one_shot_id, Value::Int(1));
+        assert_eq!(store.len(), 1); // One-shot removed
+        assert!(!store.contains(one_shot_id));
+
+        // Resume multi-shot multiple times
+        let _ = store.resume_and_remove(multi_shot_id, Value::Int(1));
+        assert_eq!(store.len(), 1); // Multi-shot still there
+        assert!(store.contains(multi_shot_id));
+
+        let _ = store.resume_and_remove(multi_shot_id, Value::Int(2));
+        assert_eq!(store.len(), 1); // Multi-shot still there
+        assert!(store.contains(multi_shot_id));
+    }
 }

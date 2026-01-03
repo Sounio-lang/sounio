@@ -177,12 +177,20 @@ pub struct HirGlobal {
 
 // ==================== EFFECTS ====================
 
-/// HIR effect
+/// HIR effect reference (in function signatures)
+///
+/// Can be either a concrete effect (like IO, Mut) or an effect variable
+/// for row polymorphism (like E in `fn map<effect E>(...) with E`).
 #[derive(Debug, Clone)]
 pub struct HirEffect {
     pub id: NodeId,
+    /// The name of the effect (or effect variable)
     pub name: String,
+    /// Effect operations (only populated for concrete effect definitions)
     pub operations: Vec<HirEffectOp>,
+    /// If Some, this is an effect variable with the given id
+    /// Used for row polymorphism to track unification
+    pub effect_var: Option<u32>,
 }
 
 /// HIR effect operation

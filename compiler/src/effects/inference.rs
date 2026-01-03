@@ -464,19 +464,15 @@ impl<'a> EffectChecker<'a> {
             // Irrefutable patterns
             Pattern::Binding { .. } => false,
             Pattern::Wildcard => false,
-            Pattern::Rest => false,
 
-            // Refutable patterns - these can fail and may panic
-            Pattern::Literal { .. } => true,
-            Pattern::Range { .. } => true,
+            // Literal patterns are refutable - can fail to match
+            Pattern::Literal(_) => true,
 
-            // Enum variant patterns are refutable if they don't cover all cases
-            // For now, conservatively mark as refutable
-            Pattern::Path { .. } => true,
-            Pattern::EnumVariant { .. } => true,
+            // Enum patterns are refutable - may not match the variant
+            Pattern::Enum { .. } => true,
 
             // Tuple patterns: refutable if any element is refutable
-            Pattern::Tuple { elements, .. } => {
+            Pattern::Tuple(elements) => {
                 elements.iter().any(|p| self.is_refutable_pattern(p))
             }
 
@@ -486,15 +482,9 @@ impl<'a> EffectChecker<'a> {
             }
 
             // Or patterns: refutable only if all alternatives are refutable
-            Pattern::Or { patterns, .. } => {
+            Pattern::Or(patterns) => {
                 patterns.iter().all(|p| self.is_refutable_pattern(p))
             }
-
-            // Slice patterns can fail if length doesn't match
-            Pattern::Slice { elements, .. } => true,
-
-            // Reference patterns depend on inner pattern
-            Pattern::Ref { pattern, .. } => self.is_refutable_pattern(pattern),
         }
     }
 
@@ -523,16 +513,44 @@ impl<'a> EffectChecker<'a> {
 
             Expr::Unary { expr, .. } => self.infer_expr(expr),
 
-            Expr::Call { callee, args, .. } => {
+            Expr::Call { id, callee, args, .. } => {
                 let mut effects = self.infer_expr(callee);
 
                 // Get callee's declared effects
                 let callee_effects = self.get_callee_effects(callee);
                 effects = effects.union(&callee_effects);
 
+                // Check for higher-order function patterns
+                let callee_name = self.get_callee_name(callee);
+
                 // Infer argument effects
-                for arg in args {
-                    effects = effects.union(&self.infer_expr(arg));
+                for (i, arg) in args.iter().enumerate() {
+                    let arg_effects = self.infer_expr(arg);
+                    effects = effects.union(&arg_effects);
+
+                    // Track closure argument effects for HOF patterns
+                    if let Expr::Closure { .. } = arg {
+                        if !arg_effects.is_pure() {
+                            // When a closure is passed to a HOF, the enclosing function
+                            // must declare the closure's effects
+                            for effect_name in &arg_effects.effects {
+                                if !self.effect_sources.contains_key(effect_name) {
+                                    self.effect_sources.insert(
+                                        effect_name.clone(),
+                                        self.expr_span_from_id(*id),
+                                    );
+                                }
+                            }
+                        }
+                    }
+                }
+
+                // Check if calling a function parameter (HOF invocation)
+                if let Some(name) = &callee_name {
+                    if let Some(param_effects) = self.hof_effects.get(name).cloned() {
+                        // Add the declared effects from the function parameter's type
+                        effects = effects.union(&param_effects);
+                    }
                 }
 
                 effects
@@ -924,18 +942,62 @@ impl<'a> EffectChecker<'a> {
         }
     }
 
-    fn get_callee_effects(&self, callee: &Expr) -> EffectSet {
-        if let Expr::Path { path, id } = callee
-            && path.is_simple()
-        {
-            // Look up the function by NodeId reference
-            if let Some(def_id) = self.symbols.ref_for_node(*id)
-                && let Some(effects) = self.fn_effects.get(&def_id)
-            {
-                return effects.clone();
+    /// Get the name of a callee expression (for function calls)
+    fn get_callee_name(&self, callee: &Expr) -> Option<String> {
+        match callee {
+            Expr::Path { path, .. } if path.is_simple() => {
+                Some(path.segments[0].clone())
             }
+            _ => None,
         }
-        EffectSet::new()
+    }
+
+    /// Get a span from a NodeId, falling back to the current function span
+    fn expr_span_from_id(&self, id: NodeId) -> Span {
+        // In the future, we could look up the actual span from the AST
+        // For now, use the current function span as a fallback
+        self.current_fn_span
+    }
+
+    /// Infer effects from a closure body.
+    ///
+    /// Note: The current AST Closure variant doesn't have declared effects,
+    /// so we simply infer from the body.
+    fn infer_closure_body_effects(&mut self, body: &Expr) -> EffectSet {
+        self.infer_expr(body)
+    }
+
+    fn get_callee_effects(&self, callee: &Expr) -> EffectSet {
+        match callee {
+            Expr::Path { path, id } if path.is_simple() => {
+                // Look up the function by NodeId reference
+                if let Some(def_id) = self.symbols.ref_for_node(*id) {
+                    if let Some(effects) = self.fn_effects.get(&def_id) {
+                        return effects.clone();
+                    }
+                }
+
+                // Check if it's a HOF parameter
+                let name = &path.segments[0];
+                if let Some(effects) = self.hof_effects.get(name) {
+                    return effects.clone();
+                }
+
+                // Check type info for function type with effects
+                if let Some(type_info) = self.type_info {
+                    if let Some(ty) = type_info.get_binding_type(name) {
+                        if let Type::Function { effects, .. } = ty {
+                            return effects.clone();
+                        }
+                    }
+                }
+
+                EffectSet::new()
+            }
+            // Note: Inline closure calls are rare but we handle the body inference
+            // through the argument effect tracking in Call handling
+            _ => EffectSet::new(),
+        }
     }
 
     fn get_method_effects(&self, receiver: &Expr, method_name: &str) -> EffectSet {
@@ -1128,15 +1190,68 @@ impl<'a> EffectChecker<'a> {
 impl std::fmt::Display for EffectError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match &self.kind {
-            EffectErrorKind::UndeclaredEffect { effect } => {
-                write!(f, "Effect `{}` not declared in function signature", effect)
+            EffectErrorKind::UndeclaredEffect { effect, source } => {
+                write!(f, "effect `{}` not declared in function signature", effect)?;
+                match source {
+                    EffectSource::DirectOperation(op) => {
+                        write!(f, " (from {} operation)", op)?;
+                    }
+                    EffectSource::MethodCall { receiver_type, method } => {
+                        write!(f, " (from {}.{}())", receiver_type, method)?;
+                    }
+                    EffectSource::FunctionCall(name) => {
+                        write!(f, " (from call to {})", name)?;
+                    }
+                    EffectSource::ClosureCall => {
+                        write!(f, " (from closure invocation)")?;
+                    }
+                    EffectSource::HigherOrderFunction { hof, closure_effect } => {
+                        write!(f, " (from {} with effectful closure having {})", hof, closure_effect)?;
+                    }
+                    EffectSource::PatternMatch => {
+                        write!(f, " (from refutable pattern)")?;
+                    }
+                    EffectSource::Unknown => {}
+                }
+                if let Some(fn_name) = &self.fn_name {
+                    write!(f, "\n  help: add `with {}` to function `{}`", effect, fn_name)?;
+                }
+                Ok(())
             }
             EffectErrorKind::UnhandledEffect { effect } => {
-                write!(f, "Unhandled effect `{}`", effect)
+                write!(f, "unhandled effect `{}`", effect)?;
+                write!(f, "\n  help: wrap in a handler or propagate with `with {}`", effect)
             }
             EffectErrorKind::EffectInPureContext { effect } => {
-                write!(f, "Cannot perform `{}` in pure context", effect)
+                write!(f, "cannot perform `{}` in pure context", effect)?;
+                write!(f, "\n  help: this context requires pure computations")
             }
+            EffectErrorKind::EffectfulClosureArg { effect, hof_name } => {
+                write!(f, "closure passed to `{}` has effect `{}`", hof_name, effect)?;
+                write!(f, "\n  help: the enclosing function must declare `with {}`", effect)
+            }
+            EffectErrorKind::RefutablePatternPanic { pattern_desc } => {
+                write!(f, "refutable pattern `{}` may panic", pattern_desc)?;
+                write!(f, "\n  help: add `with Panic` or use match/if-let for safe handling")
+            }
+        }
+    }
+}
+
+impl std::fmt::Display for EffectSource {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            EffectSource::DirectOperation(op) => write!(f, "{} operation", op),
+            EffectSource::MethodCall { receiver_type, method } => {
+                write!(f, "{}.{}()", receiver_type, method)
+            }
+            EffectSource::FunctionCall(name) => write!(f, "call to {}", name),
+            EffectSource::ClosureCall => write!(f, "closure invocation"),
+            EffectSource::HigherOrderFunction { hof, closure_effect } => {
+                write!(f, "{} with {} closure", hof, closure_effect)
+            }
+            EffectSource::PatternMatch => write!(f, "pattern match"),
+            EffectSource::Unknown => write!(f, "unknown"),
         }
     }
 }

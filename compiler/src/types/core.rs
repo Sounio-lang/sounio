@@ -678,4 +678,58 @@ mod tests {
         assert!(!effects.is_pure());
         assert!(effects.contains("IO"));
     }
+
+    #[test]
+    fn test_effect_set_subtract() {
+        // Create an effect set with multiple effects
+        let effects = EffectSet::from_effects(&["IO", "Mut", "Alloc"]);
+        assert!(effects.contains("IO"));
+        assert!(effects.contains("Mut"));
+        assert!(effects.contains("Alloc"));
+
+        // Subtract IO effect
+        let residual = effects.subtract(&["IO".to_string()]);
+        assert!(!residual.contains("IO"));
+        assert!(residual.contains("Mut"));
+        assert!(residual.contains("Alloc"));
+
+        // Subtract multiple effects
+        let residual2 = effects.subtract(&["IO".to_string(), "Mut".to_string()]);
+        assert!(!residual2.contains("IO"));
+        assert!(!residual2.contains("Mut"));
+        assert!(residual2.contains("Alloc"));
+
+        // Subtract all effects
+        let residual3 = effects.subtract(&[
+            "IO".to_string(),
+            "Mut".to_string(),
+            "Alloc".to_string(),
+        ]);
+        assert!(residual3.is_pure());
+    }
+
+    #[test]
+    fn test_effect_set_from_effects() {
+        let effects = EffectSet::from_effects(&["IO", "Mut"]);
+        assert!(effects.contains("IO"));
+        assert!(effects.contains("Mut"));
+        assert!(!effects.contains("Alloc"));
+        assert!(!effects.is_pure());
+    }
+
+    #[test]
+    fn test_effect_masking_pattern() {
+        // Test the pattern used in effect masking:
+        // A function uses IO and Mut, handles IO internally, residual is just Mut
+        let inferred_effects = EffectSet::from_effects(&["IO", "Mut"]);
+        let handled_effects = EffectSet::from_effects(&["IO"]);
+
+        // Compute residual effects
+        let handled_names: Vec<String> = handled_effects.effects.iter().cloned().collect();
+        let residual = inferred_effects.subtract(&handled_names);
+
+        // Only Mut should remain
+        assert!(!residual.contains("IO"));
+        assert!(residual.contains("Mut"));
+    }
 }

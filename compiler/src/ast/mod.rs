@@ -397,11 +397,32 @@ pub struct EffectOpDef {
 }
 
 /// Effect reference in function signature
+///
+/// Can be either:
+/// - A concrete effect: `IO`, `Mut`, `Alloc`
+/// - An effect variable: `E` (referencing a generic effect parameter)
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct EffectRef {
     pub id: NodeId,
     pub name: Path,
     pub args: Vec<TypeExpr>,
+}
+
+impl EffectRef {
+    /// Check if this is a simple identifier (potentially an effect variable)
+    /// vs a qualified path (definitely a concrete effect)
+    pub fn is_simple_ident(&self) -> bool {
+        self.name.segments.len() == 1 && self.args.is_empty()
+    }
+
+    /// Get the name as a simple string (for simple identifiers)
+    pub fn as_simple_name(&self) -> Option<&str> {
+        if self.is_simple_ident() {
+            Some(&self.name.segments[0])
+        } else {
+            None
+        }
+    }
 }
 
 /// Handler definition

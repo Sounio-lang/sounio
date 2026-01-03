@@ -519,6 +519,7 @@ mod tests {
                     id: NodeId::dummy(),
                     name: "Async".to_string(),
                     operations: Vec::new(),
+                    effect_var: None,
                 }],
             },
             body: HirBlock {

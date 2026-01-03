@@ -2253,4 +2253,508 @@ mod tests {
         assert!(result1.is_ok());
         assert_eq!(result1.unwrap(), Value::Int(30)); // 15 * 2
     }
+
+    // =========================================================================
+    // Multi-Shot Interpreter Continuation Tests
+    // =========================================================================
+
+    #[test]
+    fn test_multi_shot_interpreter_continuation_basic() {
+        let mut ctx = EffectContext::new();
+
+        // Capture a multi-shot continuation that doubles the input
+        let id = ctx.capture_multi_shot_interpreter_continuation(
+            "Test",
+            "double",
+            |value| {
+                match value {
+                    Value::Int(n) => Ok(Value::Int(n * 2)),
+                    _ => Ok(value),
+                }
+            },
+        );
+
+        assert!(ctx.has_continuation(id));
+        assert_eq!(ctx.active_continuation_count(), 1);
+
+        // First resume
+        let result1 = ctx.resume_continuation(id, Value::Int(10));
+        assert!(result1.is_ok());
+        assert_eq!(result1.unwrap(), Value::Int(20));
+
+        // Multi-shot should still be in the store
+        assert!(ctx.has_continuation(id));
+
+        // Second resume with different value
+        let result2 = ctx.resume_continuation(id, Value::Int(21));
+        assert!(result2.is_ok());
+        assert_eq!(result2.unwrap(), Value::Int(42));
+
+        // Third resume
+        let result3 = ctx.resume_continuation(id, Value::Int(50));
+        assert!(result3.is_ok());
+        assert_eq!(result3.unwrap(), Value::Int(100));
+
+        // Should still be available
+        assert!(ctx.has_continuation(id));
+    }
+
+    #[test]
+    fn test_multi_shot_interpreter_continuation_multiple_resumes_same_value() {
+        let mut ctx = EffectContext::new();
+
+        // Create a counter to track how many times the closure is called
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::sync::Arc;
+
+        let call_count = Arc::new(AtomicUsize::new(0));
+        let call_count_clone = Arc::clone(&call_count);
+
+        let id = ctx.capture_multi_shot_interpreter_continuation(
+            "Test",
+            "counter",
+            move |value| {
+                call_count_clone.fetch_add(1, Ordering::SeqCst);
+                match value {
+                    Value::Int(n) => Ok(Value::Int(n + 1)),
+                    _ => Ok(value),
+                }
+            },
+        );
+
+        // Resume 5 times
+        for i in 0..5 {
+            let result = ctx.resume_continuation(id, Value::Int(i));
+            assert!(result.is_ok());
+            assert_eq!(result.unwrap(), Value::Int(i + 1));
+        }
+
+        // Verify closure was called 5 times
+        assert_eq!(call_count.load(Ordering::SeqCst), 5);
+    }
+
+    #[test]
+    fn test_multi_shot_interpreter_continuation_with_captured_state() {
+        let mut ctx = EffectContext::new();
+
+        // Use Arc<AtomicI64> to share state across multi-shot resumes
+        use std::sync::atomic::{AtomicI64, Ordering};
+        use std::sync::Arc;
+
+        let accumulator = Arc::new(AtomicI64::new(0));
+        let acc_clone = Arc::clone(&accumulator);
+
+        let id = ctx.capture_multi_shot_interpreter_continuation(
+            "Prob",
+            "accumulate",
+            move |value| {
+                match value {
+                    Value::Int(n) => {
+                        // Add to accumulator and return new total
+                        let new_total = acc_clone.fetch_add(n as i64, Ordering::SeqCst) + n as i64;
+                        Ok(Value::Int(new_total as i64))
+                    }
+                    _ => Ok(Value::Int(0)),
+                }
+            },
+        );
+
+        // Accumulate values: 10, 20, 30
+        let result1 = ctx.resume_continuation(id, Value::Int(10));
+        assert_eq!(result1.unwrap(), Value::Int(10));
+
+        let result2 = ctx.resume_continuation(id, Value::Int(20));
+        assert_eq!(result2.unwrap(), Value::Int(30)); // 10 + 20
+
+        let result3 = ctx.resume_continuation(id, Value::Int(30));
+        assert_eq!(result3.unwrap(), Value::Int(60)); // 10 + 20 + 30
+
+        // Verify total in accumulator
+        assert_eq!(accumulator.load(Ordering::SeqCst), 60);
+    }
+
+    #[test]
+    fn test_multi_shot_interpreter_continuation_label() {
+        let mut ctx = EffectContext::new();
+
+        let id = ctx.capture_multi_shot_interpreter_continuation(
+            "Amb",
+            "choose",
+            |value| Ok(value),
+        );
+
+        let cont = ctx.continuation_store.get(id);
+        assert!(cont.is_some());
+        let label = cont.unwrap().label.as_ref().unwrap();
+        assert!(label.contains("Amb"));
+        assert!(label.contains("choose"));
+        assert!(label.contains("multi-shot"));
+    }
+
+    #[test]
+    fn test_multi_shot_vs_one_shot_behavior() {
+        let mut ctx = EffectContext::new();
+
+        // One-shot continuation
+        let one_shot_id = ctx.capture_interpreter_continuation(
+            "Test",
+            "one_shot",
+            false,
+            |value| Ok(value),
+        );
+
+        // Multi-shot continuation
+        let multi_shot_id = ctx.capture_multi_shot_interpreter_continuation(
+            "Test",
+            "multi_shot",
+            |value| Ok(value),
+        );
+
+        // Resume one-shot
+        let _ = ctx.resume_continuation(one_shot_id, Value::Int(1));
+        assert!(!ctx.has_continuation(one_shot_id)); // Removed after resume
+
+        // Resume multi-shot multiple times
+        let _ = ctx.resume_continuation(multi_shot_id, Value::Int(1));
+        assert!(ctx.has_continuation(multi_shot_id)); // Still available
+
+        let _ = ctx.resume_continuation(multi_shot_id, Value::Int(2));
+        assert!(ctx.has_continuation(multi_shot_id)); // Still available
+
+        let _ = ctx.resume_continuation(multi_shot_id, Value::Int(3));
+        assert!(ctx.has_continuation(multi_shot_id)); // Still available
+    }
+
+    #[test]
+    fn test_multi_shot_interpreter_continuation_error_propagation() {
+        let mut ctx = EffectContext::new();
+
+        let id = ctx.capture_multi_shot_interpreter_continuation(
+            "Test",
+            "conditional_error",
+            |value| {
+                match value {
+                    Value::Int(n) if n < 0 => {
+                        Err(ContinuationError::NotImplemented("negative value".to_string()))
+                    }
+                    Value::Int(n) => Ok(Value::Int(n * 2)),
+                    _ => Ok(value),
+                }
+            },
+        );
+
+        // Positive value should succeed
+        let result1 = ctx.resume_continuation(id, Value::Int(5));
+        assert!(result1.is_ok());
+        assert_eq!(result1.unwrap(), Value::Int(10));
+
+        // Negative value should fail
+        let result2 = ctx.resume_continuation(id, Value::Int(-1));
+        assert!(result2.is_err());
+
+        // Continuation should still be available after error
+        assert!(ctx.has_continuation(id));
+
+        // Can resume again after error
+        let result3 = ctx.resume_continuation(id, Value::Int(7));
+        assert!(result3.is_ok());
+        assert_eq!(result3.unwrap(), Value::Int(14));
+    }
+
+    #[test]
+    fn test_multi_shot_interpreter_continuation_for_probabilistic_sampling() {
+        // Simulates how a probabilistic handler might use multi-shot continuations
+        // to explore multiple sample values
+        let mut ctx = EffectContext::new();
+
+        // Continuation represents "rest of computation after sampling"
+        let id = ctx.capture_multi_shot_interpreter_continuation(
+            "Prob",
+            "sample",
+            |value| {
+                // Simulate a probabilistic program: if sample > 0.5, return true
+                match value {
+                    Value::Float(p) => {
+                        let result = if p > 0.5 { 1 } else { 0 };
+                        Ok(Value::Int(result))
+                    }
+                    _ => Ok(Value::Int(0)),
+                }
+            },
+        );
+
+        // Explore different sample values (like particle filter)
+        let samples = vec![0.2, 0.4, 0.6, 0.8];
+        let mut results = Vec::new();
+
+        for sample in samples {
+            let result = ctx.resume_continuation(id, Value::Float(sample));
+            assert!(result.is_ok());
+            results.push(result.unwrap());
+        }
+
+        // Check results: 0.2 and 0.4 -> 0, 0.6 and 0.8 -> 1
+        assert_eq!(results[0], Value::Int(0));
+        assert_eq!(results[1], Value::Int(0));
+        assert_eq!(results[2], Value::Int(1));
+        assert_eq!(results[3], Value::Int(1));
+
+        // Continuation should still be available
+        assert!(ctx.has_continuation(id));
+    }
+
+    #[test]
+    fn test_multi_shot_interpreter_continuation_for_backtracking() {
+        // Simulates backtracking search using multi-shot continuations
+        let mut ctx = EffectContext::new();
+
+        // Continuation represents a choice point
+        let id = ctx.capture_multi_shot_interpreter_continuation(
+            "Amb",
+            "choose",
+            |value| {
+                // Simple computation: square the chosen value
+                match value {
+                    Value::Int(n) => Ok(Value::Int(n * n)),
+                    _ => Ok(value),
+                }
+            },
+        );
+
+        // Try different choices
+        let choices = vec![1, 2, 3, 4, 5];
+        let mut results: Vec<i64> = Vec::new();
+
+        for choice in choices {
+            let result = ctx.resume_continuation(id, Value::Int(choice));
+            if let Ok(Value::Int(v)) = result {
+                results.push(v);
+            }
+        }
+
+        // Should get squares: 1, 4, 9, 16, 25
+        assert_eq!(results, vec![1, 4, 9, 16, 25]);
+    }
+
+    #[test]
+    fn test_multi_shot_interpreter_continuation_resume_point_properties() {
+        use crate::effects::continuation::ResumePoint;
+
+        // Create a multi-shot resume point
+        let resume_point = ResumePoint::interpreter_multi_shot(
+            |v| Ok(v),
+            Some("test"),
+        );
+
+        assert!(resume_point.is_executable());
+        assert!(resume_point.is_multi_shot());
+        assert!(!resume_point.is_stub());
+    }
+
+    #[test]
+    fn test_multi_shot_interpreter_continuation_debug_format() {
+        use crate::effects::continuation::ResumePoint;
+
+        let resume_point = ResumePoint::interpreter_multi_shot(
+            |v| Ok(v),
+            Some("debug test"),
+        );
+
+        let debug = format!("{:?}", resume_point);
+        assert!(debug.contains("InterpreterMultiShot"));
+        assert!(debug.contains("debug test"));
+        assert!(debug.contains("multi-shot closure"));
+    }
+
+    // =========================================================================
+    // Suspension Handling Tests
+    // =========================================================================
+
+    #[test]
+    fn test_dispatch_result_completed() {
+        let result = DispatchResult::Completed(Value::Int(42));
+        match result {
+            DispatchResult::Completed(v) => assert_eq!(v, Value::Int(42)),
+            _ => panic!("Expected Completed"),
+        }
+    }
+
+    #[test]
+    fn test_dispatch_result_suspended() {
+        use super::SuspensionId;
+
+        let suspension_id = SuspensionId::new(123);
+        let continuation_id = ContinuationId::new();
+
+        let result = DispatchResult::Suspended {
+            suspension_id,
+            continuation_id,
+        };
+
+        match result {
+            DispatchResult::Suspended { suspension_id: sid, continuation_id: cid } => {
+                assert_eq!(sid.raw(), 123);
+                assert_eq!(cid, continuation_id);
+            }
+            _ => panic!("Expected Suspended"),
+        }
+    }
+
+    #[test]
+    fn test_suspension_id_display() {
+        use super::SuspensionId;
+
+        let id = SuspensionId::new(42);
+        let display = format!("{}", id);
+        assert_eq!(display, "suspension_42");
+    }
+
+    #[test]
+    fn test_dispatch_with_continuation_completed() {
+        let mut ctx = EffectContext::with_all_handlers();
+
+        // IO.print should complete immediately
+        let result = ctx.dispatch_with_continuation(
+            EffectKind::IO,
+            "print",
+            vec![Value::String("test".into())],
+        );
+
+        assert!(result.is_ok());
+        match result.unwrap() {
+            DispatchResult::Completed(Value::Unit) => {}
+            _ => panic!("Expected Completed(Unit)"),
+        }
+    }
+
+    #[test]
+    fn test_dispatch_by_name_with_continuation_completed() {
+        let mut ctx = EffectContext::with_all_handlers();
+
+        // IO.print should complete immediately
+        let result = ctx.dispatch_by_name_with_continuation(
+            "IO",
+            "print",
+            vec![Value::String("test".into())],
+        );
+
+        assert!(result.is_ok());
+        match result.unwrap() {
+            DispatchResult::Completed(Value::Unit) => {}
+            _ => panic!("Expected Completed(Unit)"),
+        }
+    }
+
+    #[test]
+    fn test_resume_suspension_not_found() {
+        use super::SuspensionId;
+
+        let mut ctx = EffectContext::new();
+
+        let suspension_id = SuspensionId::new(999);
+        let continuation_id = ContinuationId::new();
+
+        let result = ctx.resume_suspension(suspension_id, continuation_id, Value::Int(42));
+
+        assert!(result.is_err());
+        match result {
+            Err(EffectError::HandlerError { message, .. }) => {
+                assert!(message.contains("not found"));
+            }
+            _ => panic!("Expected HandlerError with 'not found'"),
+        }
+    }
+
+    #[test]
+    fn test_resume_suspension_success() {
+        use super::SuspensionId;
+
+        let mut ctx = EffectContext::new();
+
+        // Capture a continuation first
+        let continuation_id = ctx.capture_continuation(Some("test_suspension"));
+        let suspension_id = SuspensionId::new(1);
+
+        // Resume should succeed (stub continuation returns value directly)
+        let result = ctx.resume_suspension(suspension_id, continuation_id, Value::Int(42));
+
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap(), Value::Int(42));
+    }
+
+    #[test]
+    fn test_resume_suspension_with_interpreter_closure() {
+        use super::SuspensionId;
+
+        let mut ctx = EffectContext::new();
+
+        // Capture an interpreter continuation that doubles the value
+        let continuation_id = ctx.capture_interpreter_continuation(
+            "Test",
+            "double",
+            false,
+            |value| {
+                match value {
+                    Value::Int(n) => Ok(Value::Int(n * 2)),
+                    _ => Ok(value),
+                }
+            },
+        );
+        let suspension_id = SuspensionId::new(42);
+
+        // Resume should execute the closure
+        let result = ctx.resume_suspension(suspension_id, continuation_id, Value::Int(21));
+
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap(), Value::Int(42)); // 21 * 2 = 42
+    }
+
+    #[test]
+    fn test_dispatch_via_registry_with_suspension_completed() {
+        let mut ctx = EffectContext::with_all_handlers();
+
+        // This should complete, not suspend
+        let result = ctx.dispatch_by_name_with_continuation(
+            "Prob",
+            "sample",
+            vec![Value::Struct {
+                name: "Uniform".to_string(),
+                fields: {
+                    let mut m = HashMap::new();
+                    m.insert("low".to_string(), Value::Float(0.0));
+                    m.insert("high".to_string(), Value::Float(1.0));
+                    m
+                },
+            }],
+        );
+
+        assert!(result.is_ok());
+        match result.unwrap() {
+            DispatchResult::Completed(Value::Float(_)) => {}
+            other => panic!("Expected Completed(Float), got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_handler_stack_with_continuation_completed() {
+        let mut ctx = EffectContext::new();
+
+        // Push a custom handler
+        let custom_handler = EffectHandler::new(EffectKind::IO, "custom_io")
+            .with_case("test_op", |_args, _state| Ok(Value::String("custom".into())));
+        ctx.push_handler(custom_handler);
+
+        // Dispatch should hit the stack handler and complete
+        let result = ctx.dispatch_with_continuation(
+            EffectKind::IO,
+            "test_op",
+            vec![],
+        );
+
+        assert!(result.is_ok());
+        match result.unwrap() {
+            DispatchResult::Completed(Value::String(s)) => assert_eq!(s, "custom"),
+            other => panic!("Expected Completed(String), got {:?}", other),
+        }
+    }
 }

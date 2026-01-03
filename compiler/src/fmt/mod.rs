@@ -639,6 +639,9 @@ impl Formatter {
                 Doc::Text(format!("const {}: ", name)),
                 self.type_to_doc(ty),
             ]),
+            crate::ast::GenericParam::Effect { name } => {
+                Doc::Text(format!("effect {}", name))
+            }
         }
     }
 

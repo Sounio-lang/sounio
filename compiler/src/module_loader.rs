@@ -581,6 +581,9 @@ fn rewrite_generics(generics: &mut Generics, prefixes: &[Vec<String>]) {
             GenericParam::Const { ty, .. } => {
                 rewrite_type_expr(ty, prefixes);
             }
+            GenericParam::Effect { .. } => {
+                // Effect parameters don't need rewriting
+            }
         }
     }
 }
@@ -1284,6 +1287,9 @@ fn annotate_generics(
                 }
             }
             GenericParam::Const { ty, .. } => annotate_type_expr(ty, prefixes, sm, im),
+            GenericParam::Effect { .. } => {
+                // Effect parameters don't need annotation
+            }
         }
     }
 }

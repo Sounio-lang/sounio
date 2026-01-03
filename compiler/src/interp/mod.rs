@@ -16,8 +16,10 @@ pub use autodiff::Tape;
 pub use builtins::BuiltinRegistry;
 pub use causal::{CausalDAG, CausalModel};
 pub use closure::{DCallable, InterpreterClosure, extract_closure};
-pub use effect_dispatch::{EffectContext, EffectError, EffectHandler, EffectKind, HandlerState};
+pub use effect_dispatch::{
+    DispatchResult, EffectContext, EffectError, EffectHandler, EffectKind, HandlerState,
+};
 pub use env::Environment;
 pub use eval::Interpreter;
 pub use symbolic::Expr as SymbolicExpr;
-pub use value::Value;
+pub use value::{ControlFlow, SuspensionId, Value};

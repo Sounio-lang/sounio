@@ -488,6 +488,10 @@ impl Interpreter {
                     Err(ControlFlow::Return(v)) => {
                         return Err(ControlFlow::Return(v));
                     }
+                    Err(cf @ ControlFlow::Suspend { .. }) => {
+                        // Propagate suspension up the call stack
+                        return Err(cf);
+                    }
                 }
             },
 
@@ -508,6 +512,10 @@ impl Interpreter {
                     }
                     Err(ControlFlow::Return(v)) => {
                         return Err(ControlFlow::Return(v));
+                    }
+                    Err(cf @ ControlFlow::Suspend { .. }) => {
+                        // Propagate suspension up the call stack
+                        return Err(cf);
                     }
                 }
             },

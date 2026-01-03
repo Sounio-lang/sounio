@@ -143,6 +143,14 @@ impl InterpreterClosure {
             Err(ControlFlow::Return(v)) => Ok(v),
             Err(ControlFlow::Break(_)) => Err(miette!("break outside loop")),
             Err(ControlFlow::Continue) => Err(miette!("continue outside loop")),
+            Err(ControlFlow::Suspend {
+                suspension_id,
+                continuation_id,
+            }) => Err(miette!(
+                "unhandled suspension {} (continuation {}) in closure",
+                suspension_id,
+                continuation_id
+            )),
         };
 
         interp.env_mut().pop_scope();

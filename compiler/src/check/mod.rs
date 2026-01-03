@@ -43,8 +43,13 @@ pub struct TypeChecker {
     units: UnitChecker,
     /// Fresh type variable counter
     next_type_var: u32,
+    /// Fresh effect variable counter (for row polymorphism)
+    next_effect_var: u32,
     /// Type constraints for unification
     constraints: Vec<TypeConstraint>,
+    /// Effect variable bindings: effect param name -> EffectVar id
+    /// Used during generic function checking to track effect parameters
+    effect_params: HashMap<String, types::EffectVar>,
     /// Errors accumulated during checking
     errors: Vec<TypeError>,
     /// Ontology alignments: (type1, type2) -> distance
@@ -167,7 +172,9 @@ impl TypeChecker {
             effects: EffectInference::new(),
             units: UnitChecker::new(),
             next_type_var: 0,
+            next_effect_var: 0,
             constraints: Vec::new(),
+            effect_params: HashMap::new(),
             errors: Vec::new(),
             alignments: HashMap::new(),
             fn_thresholds: HashMap::new(),
@@ -187,6 +194,30 @@ impl TypeChecker {
         let var = TypeVar(self.next_type_var);
         self.next_type_var += 1;
         Type::Var(var)
+    }
+
+    /// Generate a fresh effect variable for row polymorphism
+    fn fresh_effect_var(&mut self) -> types::EffectVar {
+        let var = types::EffectVar::new(self.next_effect_var);
+        self.next_effect_var += 1;
+        var
+    }
+
+    /// Register an effect parameter from a generic declaration
+    fn register_effect_param(&mut self, name: &str) -> types::EffectVar {
+        let var = self.fresh_effect_var();
+        self.effect_params.insert(name.to_string(), var);
+        var
+    }
+
+    /// Look up an effect parameter by name
+    fn lookup_effect_param(&self, name: &str) -> Option<types::EffectVar> {
+        self.effect_params.get(name).copied()
+    }
+
+    /// Clear effect parameters (called after checking a function)
+    fn clear_effect_params(&mut self) {
+        self.effect_params.clear();
     }
 
     /// Add a type constraint
@@ -247,6 +278,37 @@ impl TypeChecker {
     /// Register a handler definition for effect lookup.
     fn register_handler(&mut self, handler_name: String, effect_name: String) {
         self.handler_effects.insert(handler_name, effect_name);
+    }
+
+    /// Get the set of effects that have been masked in the current function context.
+    ///
+    /// This is useful for:
+    /// - Effect inference: determining which effects are actually visible to callers
+    /// - Diagnostics: warning about over-declared effects
+    /// - Testing: verifying that effect masking is working correctly
+    pub fn get_masked_effects(&self) -> &types::EffectSet {
+        &self.masked_effects
+    }
+
+    /// Compute residual effects after subtracting masked effects.
+    ///
+    /// Given a set of inferred effects and the effects that have been handled,
+    /// returns the effects that are still visible to the caller.
+    ///
+    /// # Example
+    /// ```ignore
+    /// // Function uses IO and Mut internally, but handles IO
+    /// let inferred = EffectSet::from_effects(&["IO", "Mut"]);
+    /// let masked = EffectSet::from_effects(&["IO"]);
+    /// let residual = compute_residual_effects(&inferred, &masked);
+    /// // residual contains only Mut
+    /// ```
+    pub fn compute_residual_effects(
+        inferred: &types::EffectSet,
+        masked: &types::EffectSet,
+    ) -> types::EffectSet {
+        let masked_names: Vec<String> = masked.effects.iter().cloned().collect();
+        inferred.subtract(&masked_names)
     }
 
     /// Expand type aliases recursively
@@ -1414,6 +1476,18 @@ impl TypeChecker {
         // Set current function for threshold lookup
         self.current_fn = Some(f.name.clone());
 
+        // Clear masked effects before checking function body.
+        // This tracks which effects are handled internally by the function.
+        self.masked_effects = types::EffectSet::new();
+
+        // Clear and register effect parameters from generics
+        self.clear_effect_params();
+        for param in &f.generics.params {
+            if let GenericParam::Effect { name } = param {
+                self.register_effect_param(name);
+            }
+        }
+
         self.env.push_scope();
 
         // Process parameters
@@ -1461,21 +1535,39 @@ impl TypeChecker {
                 crate::ast::Abi::C | crate::ast::Abi::CUnwind | crate::ast::Abi::System
             );
 
+        // Compute effective effects for the function signature.
+        // The effective effects are the declared effects minus any effects that are
+        // masked (handled internally). This enables pure functions to use impure
+        // operations internally as long as all effects are handled before returning.
+        //
+        // Example:
+        //   fn pure_from_state<S, A>(init: S, f: fn() -> A with Mut<S>) -> A {
+        //       handle { f() } with MutHandler
+        //   }
+        // This function is pure because Mut is handled internally.
+        let declared_effects: Vec<HirEffect> = f
+            .effects
+            .iter()
+            .map(|e| self.lower_effect_ref(e))
+            .collect();
+
+        // For now, we use the declared effects directly.
+        // The masked_effects tracking enables future improvements:
+        // - Warn if a function declares effects that are always handled internally
+        // - Allow inference of residual effects for functions without explicit signatures
+        // - Support effect polymorphism with masking
+        let effective_effects = declared_effects;
+
+        // Clean up effect parameters after checking the function
+        self.clear_effect_params();
+
         Ok(HirFn {
             id: f.id,
             name: f.name.clone(),
             ty: HirFnType {
                 params: params.clone(),
                 return_type: Box::new(self.type_to_hir(&return_type)),
-                effects: f
-                    .effects
-                    .iter()
-                    .map(|e| HirEffect {
-                        id: e.id,
-                        name: e.name.to_string(),
-                        operations: Vec::new(), // Operations are defined in effect declarations
-                    })
-                    .collect(),
+                effects: effective_effects,
             },
             body,
             abi,
@@ -1572,6 +1664,7 @@ impl TypeChecker {
             id: e.id,
             name: e.name.clone(),
             operations,
+            effect_var: None, // Effect definitions are always concrete
         })
     }
 
@@ -4613,6 +4706,33 @@ impl TypeChecker {
                 ..
             } if *i >= 0 => Some(*i as usize),
             _ => None, // Non-literal const expressions not yet supported
+        }
+    }
+
+    /// Lower an effect reference to HIR, handling effect variables
+    ///
+    /// If the effect reference is a simple identifier that matches an effect
+    /// parameter, it becomes an effect variable. Otherwise, it's a concrete effect.
+    fn lower_effect_ref(&self, effect_ref: &EffectRef) -> HirEffect {
+        // Check if this is a simple identifier that could be an effect variable
+        if let Some(name) = effect_ref.as_simple_name() {
+            if let Some(effect_var) = self.lookup_effect_param(name) {
+                // This is an effect variable
+                return HirEffect {
+                    id: effect_ref.id,
+                    name: name.to_string(),
+                    operations: Vec::new(),
+                    effect_var: Some(effect_var.0),
+                };
+            }
+        }
+
+        // This is a concrete effect
+        HirEffect {
+            id: effect_ref.id,
+            name: effect_ref.name.to_string(),
+            operations: Vec::new(),
+            effect_var: None,
         }
     }
 

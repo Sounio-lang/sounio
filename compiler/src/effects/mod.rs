@@ -40,7 +40,7 @@ pub use handlers::{
     GpuHandler, HandlerFactory, HandlerRegistry, HandlerRegistryBuilder, IOHandler, MutHandler,
     NetworkHandler, PanicHandler, ProbHandler, SensorHandler,
 };
-pub use inference::{EffectChecker, EffectError, EffectErrorKind};
+pub use inference::{EffectChecker, EffectError, EffectErrorKind, EffectSource, TypeInfo};
 
 /// Runtime effect handler trait
 pub trait Handler<E> {

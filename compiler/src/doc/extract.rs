@@ -294,6 +294,10 @@ impl DocExtractor {
                         sig.push_str(": ");
                         sig.push_str(&self.type_expr_to_string(ty));
                     }
+                    GenericParam::Effect { name } => {
+                        sig.push_str("effect ");
+                        sig.push_str(name);
+                    }
                 }
             }
             sig.push('>');
@@ -715,6 +719,11 @@ impl DocExtractor {
                         default: default.as_ref().map(|d| self.type_expr_to_info(d)),
                     }),
                     GenericParam::Const { .. } => None, // Handle const generics separately if needed
+                    GenericParam::Effect { name } => Some(TypeParamInfo {
+                        name: format!("effect {}", name),
+                        bounds: Vec::new(),
+                        default: None,
+                    }),
                 }
             })
             .collect()
