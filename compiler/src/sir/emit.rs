@@ -788,8 +788,6 @@ impl RegisterAllocator {
                 ScientificOp::CompartmentStep { .. } => (0.9, true),
                 // Lerp - linear interpolation, exact given inputs
                 ScientificOp::Lerp { .. } => (1.0, true),
-                // Autodiff - preserves input confidence, may degrade slightly
-                ScientificOp::Autodiff { .. } => (0.95, true),
                 // Autodiff - symbolic differentiation, high confidence
                 ScientificOp::Autodiff { .. } => (0.9, true),
             },
@@ -4078,6 +4076,76 @@ impl X86_64Emitter {
                 self.store_value(result, dst_reg);
             }
             
+            ScientificOp::MatVecMul {
+                matrix,
+                vector,
+                rows,
+                cols,
+            } => {
+                // Matrix-vector multiplication: y = A @ x
+                // Call sounio_tensor_matvec(A, x, y, M, N)
+                let matrix_reg = self.get_value_reg(*matrix, X86Reg::R10);
+                let vector_reg = self.get_value_reg(*vector, X86Reg::R11);
+                
+                // Setup arguments for sounio_tensor_matvec:
+                // RDI = A (matrix pointer)
+                // RSI = x (vector pointer)
+                // RDX = y (output vector pointer - need to allocate)
+                // RCX = M (rows)
+                // R8 = N (columns)
+                
+                // Move matrix pointer to RDI
+                if !matrix_reg.is_xmm() {
+                    self.emit_mov_rr(X86Reg::RDI, matrix_reg);
+                } else {
+                    return Err(EmitError::InvalidInput(
+                        "Matrix pointer must be in general-purpose register".into()
+                    ));
+                }
+                
+                // Move vector pointer to RSI
+                if !vector_reg.is_xmm() {
+                    self.emit_mov_rr(X86Reg::RSI, vector_reg);
+                } else {
+                    return Err(EmitError::InvalidInput(
+                        "Vector pointer must be in general-purpose register".into()
+                    ));
+                }
+                
+                // Allocate output vector on stack
+                // Size: rows * 8 bytes (f64)
+                let output_size = (*rows as usize) * 8;
+                self.emit_sub_rsp_imm(output_size as i32);
+                
+                // Pass output pointer (RSP) to RDX
+                self.emit_lea(X86Reg::RDX, X86Reg::RSP, 0);
+                
+                // Pass rows (M) to RCX
+                self.emit_mov_ri64(X86Reg::RCX, *rows as i64);
+                
+                // Pass columns (N) to R8
+                self.emit_mov_ri64(X86Reg::R8, *cols as i64);
+                
+                // Call tensor matvec function
+                self.emit_call_extern("sounio_tensor_matvec");
+                
+                // Result vector is at [RSP]
+                // For now, we'll leave it on the stack and return a pointer
+                // In production, would copy to heap or use result register
+                
+                // Store result pointer (RSP) in result register
+                let result_reg = self
+                    .register_allocator
+                    .get_reg(result)
+                    .unwrap_or(X86Reg::RAX);
+                if result_reg != X86Reg::RSP {
+                    self.emit_mov_rr(result_reg, X86Reg::RSP);
+                }
+                
+                // Note: Stack space will be cleaned up in epilogue
+                // For now, we assume the result is used immediately
+            }
+            
             ScientificOp::Autodiff {
                 mode,
                 function,
@@ -4202,113 +4270,7 @@ impl X86_64Emitter {
                 
                 self.store_value(result, dst_reg);
             }
-            
-            ScientificOp::Autodiff {
-                mode,
-                function,
-                input,
-                output: _,
-            } => {
-                // Automatic differentiation codegen
-                // Forward mode: uses dual numbers
-                // Reverse mode: uses tape-based backpropagation
-                
-                match mode {
-                    super::ops::AutodiffMode::Forward => {
-                        // Forward-mode autodiff using dual numbers
-                        // For now, call the runtime function
-                        // In production, would inline dual number operations when possible
-                        
-                        // Get input value register
-                        let input_reg = self.get_value_reg(*input, X86Reg::XMM0);
-                        
-                        // Allocate stack space for gradient result
-                        self.emit_sub_rsp_imm(8);
-                        
-                        // Setup arguments for sounio_autodiff_forward:
-                        // RDI = function pointer
-                        // XMM0 = input value
-                        // RSI = gradient pointer (on stack)
-                        
-                        // Get function pointer via relocation
-                        // Look up function name
-                        if let Some(func_name) = self.func_names.get(function) {
-                            // Create relocation to load function address
-                            let offset = self.code.len() + 2; // +2 for MOV opcode and ModR/M
-                            self.relocations.push(Relocation {
-                                offset,
-                                kind: RelocKind::PLT32,
-                                symbol: func_name.clone(),
-                                addend: -4,
-                            });
-                            
-                            // MOV RDI, [RIP+rel32] - will be patched by linker
-                            self.emit_rex(true, false, false, false); // REX.W
-                            self.emit_byte(0x8B); // MOV r64, r/m64
-                            self.emit_modrm(0b00, X86Reg::RDI.encoding(), 0b101); // [RIP+disp32]
-                            self.emit_u32(0); // Placeholder, will be patched
-                        } else {
-                            // Function doesn't have a name - set to NULL
-                            self.emit_mov_ri64(X86Reg::RDI, 0);
-                        }
-                        
-                        // Load input value into XMM0
-                        if input_reg.is_xmm() {
-                            if input_reg != X86Reg::XMM0 {
-                                self.emit_movsd_rr(X86Reg::XMM0, input_reg);
-                            }
-                        } else {
-                            // Input is in integer register - this shouldn't happen for f64
-                            return Err(EmitError::InvalidInput(
-                                "Autodiff input must be in XMM register (f64)".into()
-                            ));
-                        }
-                        
-                        // Pass gradient pointer (RSP)
-                        self.emit_lea(X86Reg::RSI, X86Reg::RSP, 0);
-                        
-                        // Call forward-mode autodiff
-                        self.emit_call_extern("sounio_autodiff_forward");
-                        
-                        // Function value is in XMM0 (return value)
-                        // Gradient is at [RSP]
-                        
-                        // Load gradient from stack if needed
-                        // For now, assume result is the function value
-                        // In production, would handle gradient separately
-                        
-                        // Clean up stack
-                        self.emit_add_rsp_imm(8);
-                        
-                        // Result (function value) is in XMM0
-                        let result_reg = self
-                            .register_allocator
-                            .get_reg(result)
-                            .unwrap_or(X86Reg::XMM0);
-                        if result_reg != X86Reg::XMM0 {
-                            self.emit_movsd_rr(result_reg, X86Reg::XMM0);
-                        }
-                    }
-                    
-                    super::ops::AutodiffMode::Reverse => {
-                        // Reverse-mode autodiff using tape
-                        // For now, call the runtime function
-                        // In production, would build tape during forward pass
-                        
-                        // TODO: Implement tape-based reverse mode
-                        // This requires:
-                        // 1. Building a computation tape during forward pass
-                        // 2. Storing tape pointer
-                        // 3. Calling sounio_autodiff_reverse with tape and output gradient
-                        
-                        // For now, return error - reverse mode needs more infrastructure
-                        return Err(EmitError::UnsupportedInstruction(
-                            "Reverse-mode autodiff not yet implemented in codegen".into()
-                        ));
-                    }
-                }
-            }
-            
+
             _ => {
                 return Err(EmitError::UnsupportedInstruction(
                     format!("Scientific operation {:?} not yet implemented", op)

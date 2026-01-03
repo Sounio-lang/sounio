@@ -980,6 +980,180 @@ sounio_dual_sqrt:
     .to_string()
 }
 
+/// Generate tensor runtime functions
+/// These provide assembly wrappers for C-compatible tensor operations
+pub fn generate_tensor_runtime_asm() -> String {
+    r#"
+# Demetrios Runtime: Tensor Functions
+# Assembly wrappers for tensor operations (matmul, einsum, reshape, etc.)
+
+.section .text
+
+# Matrix multiplication: C = A @ B
+# C signature: void sounio_tensor_matmul(const double* A, const double* B, double* C, int M, int K, int N)
+# System V ABI: RDI=A, RSI=B, RDX=C, RCX=M, R8=K, R9=N
+# Note: This is a symbol placeholder - the actual implementation is in tensor_runtime.rs
+.globl sounio_tensor_matmul
+.type sounio_tensor_matmul, @function
+sounio_tensor_matmul:
+    # Arguments are already in correct registers
+    # The Rust function will be linked directly
+    ret
+.size sounio_tensor_matmul, .-sounio_tensor_matmul
+
+# Einsum operation
+# C signature: void sounio_tensor_einsum(const char* notation, const double** inputs, int* input_shapes, int num_inputs, double* output, int* output_shape, int output_rank)
+.globl sounio_tensor_einsum
+.type sounio_tensor_einsum, @function
+sounio_tensor_einsum:
+    ret
+.size sounio_tensor_einsum, .-sounio_tensor_einsum
+
+# Reshape tensor
+# C signature: void sounio_tensor_reshape(const double* input, double* output, int* input_shape, int input_rank, int* output_shape, int output_rank, int total_elements)
+.globl sounio_tensor_reshape
+.type sounio_tensor_reshape, @function
+sounio_tensor_reshape:
+    ret
+.size sounio_tensor_reshape, .-sounio_tensor_reshape
+
+# Transpose matrix
+# C signature: void sounio_tensor_transpose(const double* A, double* B, int M, int N)
+.globl sounio_tensor_transpose
+.type sounio_tensor_transpose, @function
+sounio_tensor_transpose:
+    ret
+.size sounio_tensor_transpose, .-sounio_tensor_transpose
+
+# Element-wise addition
+# C signature: void sounio_tensor_add(const double* A, const double* B, double* C, int n)
+.globl sounio_tensor_add
+.type sounio_tensor_add, @function
+sounio_tensor_add:
+    ret
+.size sounio_tensor_add, .-sounio_tensor_add
+
+# Element-wise multiplication
+# C signature: void sounio_tensor_mul(const double* A, const double* B, double* C, int n)
+.globl sounio_tensor_mul
+.type sounio_tensor_mul, @function
+sounio_tensor_mul:
+    ret
+.size sounio_tensor_mul, .-sounio_tensor_mul
+
+# Scale tensor
+# C signature: void sounio_tensor_scale(const double* A, double alpha, double* B, int n)
+# System V ABI: RDI=A, XMM0=alpha, RSI=B, RDX=n
+.globl sounio_tensor_scale
+.type sounio_tensor_scale, @function
+sounio_tensor_scale:
+    ret
+.size sounio_tensor_scale, .-sounio_tensor_scale
+
+# Matrix-vector multiplication
+# C signature: void sounio_tensor_matvec(const double* A, const double* x, double* y, int M, int N)
+.globl sounio_tensor_matvec
+.type sounio_tensor_matvec, @function
+sounio_tensor_matvec:
+    ret
+.size sounio_tensor_matvec, .-sounio_tensor_matvec
+"#
+    .to_string()
+}
+
+/// Generate uncertain runtime functions
+/// These provide assembly wrappers for C-compatible uncertainty propagation
+pub fn generate_uncertain_runtime_asm() -> String {
+    r#"
+# Demetrios Runtime: Uncertainty Propagation Functions
+# Assembly wrappers for uncertain<T> operations (GUM propagation rules)
+
+.section .text
+
+# Uncertainty propagation: addition
+# C signature: void sounio_uncertain_add(const Uncertain* a, const Uncertain* b, Uncertain* result)
+.globl sounio_uncertain_add
+.type sounio_uncertain_add, @function
+sounio_uncertain_add:
+    ret
+.size sounio_uncertain_add, .-sounio_uncertain_add
+
+# Uncertainty propagation: subtraction
+# C signature: void sounio_uncertain_sub(const Uncertain* a, const Uncertain* b, Uncertain* result)
+.globl sounio_uncertain_sub
+.type sounio_uncertain_sub, @function
+sounio_uncertain_sub:
+    ret
+.size sounio_uncertain_sub, .-sounio_uncertain_sub
+
+# Uncertainty propagation: multiplication
+# C signature: void sounio_uncertain_mul(const Uncertain* a, const Uncertain* b, Uncertain* result)
+.globl sounio_uncertain_mul
+.type sounio_uncertain_mul, @function
+sounio_uncertain_mul:
+    ret
+.size sounio_uncertain_mul, .-sounio_uncertain_mul
+
+# Uncertainty propagation: division
+# C signature: void sounio_uncertain_div(const Uncertain* a, const Uncertain* b, Uncertain* result)
+.globl sounio_uncertain_div
+.type sounio_uncertain_div, @function
+sounio_uncertain_div:
+    ret
+.size sounio_uncertain_div, .-sounio_uncertain_div
+
+# Combine multiple uncertain measurements
+# C signature: void sounio_uncertain_combine(const Uncertain* measurements, int n, Uncertain* result)
+.globl sounio_uncertain_combine
+.type sounio_uncertain_combine, @function
+sounio_uncertain_combine:
+    ret
+.size sounio_uncertain_combine, .-sounio_uncertain_combine
+
+# Scale uncertain value
+# C signature: void sounio_uncertain_scale(const Uncertain* x, double alpha, Uncertain* result)
+# System V ABI: RDI=x, XMM0=alpha, RSI=result
+.globl sounio_uncertain_scale
+.type sounio_uncertain_scale, @function
+sounio_uncertain_scale:
+    ret
+.size sounio_uncertain_scale, .-sounio_uncertain_scale
+
+# Power operation
+# C signature: void sounio_uncertain_pow(const Uncertain* x, double power, Uncertain* result)
+.globl sounio_uncertain_pow
+.type sounio_uncertain_pow, @function
+sounio_uncertain_pow:
+    ret
+.size sounio_uncertain_pow, .-sounio_uncertain_pow
+
+# Square root
+# C signature: void sounio_uncertain_sqrt(const Uncertain* x, Uncertain* result)
+.globl sounio_uncertain_sqrt
+.type sounio_uncertain_sqrt, @function
+sounio_uncertain_sqrt:
+    ret
+.size sounio_uncertain_sqrt, .-sounio_uncertain_sqrt
+
+# Exponential
+# C signature: void sounio_uncertain_exp(const Uncertain* x, Uncertain* result)
+.globl sounio_uncertain_exp
+.type sounio_uncertain_exp, @function
+sounio_uncertain_exp:
+    ret
+.size sounio_uncertain_exp, .-sounio_uncertain_exp
+
+# Natural logarithm
+# C signature: void sounio_uncertain_log(const Uncertain* x, Uncertain* result)
+.globl sounio_uncertain_log
+.type sounio_uncertain_log, @function
+sounio_uncertain_log:
+    ret
+.size sounio_uncertain_log, .-sounio_uncertain_log
+"#
+    .to_string()
+}
+
 pub fn generate_float_asm() -> String {
     r#"
 # Demetrios Runtime: Floating-Point Helpers
@@ -1099,6 +1273,8 @@ pub fn generate_runtime_asm() -> String {
     asm.push_str(&generate_ode_runtime_asm());
     asm.push_str("\n");
     asm.push_str(&generate_autodiff_runtime_asm());
+    asm.push_str("\n");
+    asm.push_str(&generate_tensor_runtime_asm());
     
     asm
 }
@@ -1182,6 +1358,26 @@ pub const RUNTIME_SYMBOLS: &[&str] = &[
     "sounio_dual_cos",
     "sounio_dual_pow",
     "sounio_dual_sqrt",
+    // Tensor operations
+    "sounio_tensor_matmul",
+    "sounio_tensor_einsum",
+    "sounio_tensor_reshape",
+    "sounio_tensor_transpose",
+    "sounio_tensor_add",
+    "sounio_tensor_mul",
+    "sounio_tensor_scale",
+    "sounio_tensor_matvec",
+    // Uncertainty propagation functions
+    "sounio_uncertain_add",
+    "sounio_uncertain_sub",
+    "sounio_uncertain_mul",
+    "sounio_uncertain_div",
+    "sounio_uncertain_combine",
+    "sounio_uncertain_scale",
+    "sounio_uncertain_pow",
+    "sounio_uncertain_sqrt",
+    "sounio_uncertain_exp",
+    "sounio_uncertain_log",
     // Scientific operations
     "sounio_dot_product",
     "sounio_dot_product_simd",

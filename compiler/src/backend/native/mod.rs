@@ -87,6 +87,8 @@ pub mod runtime;
 pub mod aarch64;
 pub mod ode_runtime;
 pub mod autodiff_runtime;
+pub mod tensor_runtime;
+pub mod uncertain_runtime;
 
 // Re-export commonly used types
 pub mod prelude {
