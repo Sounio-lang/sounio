@@ -81,6 +81,9 @@
 pub mod metrics;
 pub mod thermal;
 pub mod alloc;
+pub mod elf;
+pub mod linker;
+pub mod runtime;
 
 // Re-export commonly used types
 pub mod prelude {
