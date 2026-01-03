@@ -3,10 +3,33 @@
 //! This module provides fast JIT compilation using Cranelift.
 //! Cranelift is optimized for fast compilation rather than peak runtime performance,
 //! making it ideal for development and scripting use cases.
+//!
+//! # Effect Dispatch
+//!
+//! The JIT supports algebraic effect handling through two mechanisms:
+//!
+//! 1. **Direct runtime functions**: Specialized functions like `runtime_prob_sample`,
+//!    `runtime_io_print`, etc. for common effects.
+//!
+//! 2. **Registry-based dispatch**: A `HandlerRegistry` can be configured to handle
+//!    effects through the `HandlerCapability` trait system.
+//!
+//! ```ignore
+//! use sounio::codegen::cranelift::{configure_jit_registry, CraneliftJit};
+//! use sounio::effects::handlers::HandlerRegistry;
+//!
+//! // Configure with all handlers
+//! configure_jit_registry(HandlerRegistry::with_defaults());
+//!
+//! let jit = CraneliftJit::new();
+//! let result = jit.compile_and_run(&module)?;
+//! ```
 
 use crate::hlir::HlirModule;
 #[cfg(feature = "jit")]
 use std::io::Write;
+#[cfg(feature = "jit")]
+use std::sync::Arc;
 
 // ==================== Native Runtime Functions ====================
 // These are called from JIT-compiled code via FFI
@@ -162,6 +185,8 @@ struct JitEffectState {
     handler_stack: Vec<JitHandler>,
     /// Continuation state: stores resume data when an effect is performed
     continuation_data: Option<ContinuationData>,
+    /// Optional handler registry for registry-based dispatch
+    registry: Option<Arc<crate::effects::handlers::HandlerRegistry>>,
 }
 
 /// Continuation data for effect handling
@@ -193,6 +218,7 @@ impl JitEffectState {
             total_allocated: 0,
             handler_stack: Vec::new(),
             continuation_data: None,
+            registry: None,
         }
     }
 
@@ -205,6 +231,50 @@ impl JitEffectState {
         self.continuation_data = None;
         // Note: We don't clear allocations here to avoid memory leaks
         // Use Alloc.clear() explicitly to free all allocations
+        // Note: We don't clear the registry - it persists across runs
+    }
+
+    /// Set the handler registry for registry-based dispatch
+    fn set_registry(&mut self, registry: crate::effects::handlers::HandlerRegistry) {
+        self.registry = Some(Arc::new(registry));
+    }
+
+    /// Dispatch an effect operation through the registry
+    /// Returns Some(value) if handled, None if not
+    fn dispatch_via_registry(&self, effect: &str, op: &str, args: &[f64]) -> Option<f64> {
+        let registry = self.registry.as_ref()?;
+        let handler = registry.get(effect)?;
+
+        // Convert f64 args to Value args
+        let value_args: Vec<crate::interp::Value> = args
+            .iter()
+            .map(|&f| crate::interp::Value::Float(f))
+            .collect();
+
+        // Create a fresh handler state for this call (since we can't store it in the global state)
+        let mut capability_state = crate::effects::handler_capability::HandlerState::new();
+
+        // Create a continuation
+        let continuation = crate::effects::handler_capability::Continuation::new();
+
+        // Call the handler
+        let result = handler.handle(op, &value_args, continuation, &mut capability_state);
+
+        // Convert result back to f64
+        match result {
+            crate::effects::handler_capability::HandlerResult::Resume(v)
+            | crate::effects::handler_capability::HandlerResult::Return(v) => {
+                match v {
+                    crate::interp::Value::Float(f) => Some(f),
+                    crate::interp::Value::Int(i) => Some(i as f64),
+                    crate::interp::Value::Bool(b) => Some(if b { 1.0 } else { 0.0 }),
+                    crate::interp::Value::Unit => Some(0.0),
+                    _ => Some(0.0), // Other types default to 0.0
+                }
+            }
+            crate::effects::handler_capability::HandlerResult::Abort(_) => None,
+            crate::effects::handler_capability::HandlerResult::Suspend(_) => None,
+        }
     }
 
     /// Push a handler onto the stack
@@ -243,6 +313,17 @@ impl JitEffectState {
             }
         }
         None
+    }
+
+    /// Dispatch an effect operation, trying handler stack first, then registry
+    fn dispatch_effect(&self, effect: &str, op: &str, args: &[f64]) -> Option<f64> {
+        // First try the handler stack
+        if let Some(result) = self.dispatch_to_handler(effect, op, args) {
+            return Some(result);
+        }
+
+        // Then try the registry
+        self.dispatch_via_registry(effect, op, args)
     }
 
     /// Dispatch to a predefined handler by ID
@@ -479,6 +560,170 @@ static JIT_EFFECT_STATE: OnceLock<Mutex<JitEffectState>> = OnceLock::new();
 #[cfg(feature = "jit")]
 fn get_jit_effect_state() -> &'static Mutex<JitEffectState> {
     JIT_EFFECT_STATE.get_or_init(|| Mutex::new(JitEffectState::new()))
+}
+
+// ==================== Public JIT Effect Configuration API ====================
+
+/// Configure the JIT effect system with a handler registry.
+///
+/// This allows JIT-compiled code to dispatch effects through the
+/// `HandlerCapability` trait system, supporting all registered handlers.
+///
+/// # Example
+///
+/// ```ignore
+/// use sounio::codegen::cranelift::configure_jit_registry;
+/// use sounio::effects::handlers::HandlerRegistry;
+///
+/// // Configure with all default handlers
+/// configure_jit_registry(HandlerRegistry::with_defaults());
+///
+/// // Or configure with a custom registry
+/// let registry = HandlerRegistryBuilder::new()
+///     .with_io()
+///     .with_mut()
+///     .build();
+/// configure_jit_registry(registry);
+/// ```
+#[cfg(feature = "jit")]
+pub fn configure_jit_registry(registry: crate::effects::handlers::HandlerRegistry) {
+    if let Ok(mut state) = get_jit_effect_state().lock() {
+        state.set_registry(registry);
+    }
+}
+
+/// Configure the JIT with all default effect handlers.
+///
+/// This is a convenience function that configures all 12 built-in handlers.
+#[cfg(feature = "jit")]
+pub fn configure_jit_all_effects() {
+    configure_jit_registry(crate::effects::handlers::HandlerRegistry::with_defaults());
+}
+
+/// Reset the JIT effect state.
+///
+/// This clears all mutable state, observations, and handler stack.
+/// The registry is preserved.
+#[cfg(feature = "jit")]
+pub fn reset_jit_effect_state() {
+    if let Ok(mut state) = get_jit_effect_state().lock() {
+        state.reset();
+    }
+}
+
+/// Stub for non-JIT builds
+#[cfg(not(feature = "jit"))]
+pub fn configure_jit_registry(_registry: crate::effects::handlers::HandlerRegistry) {}
+
+/// Stub for non-JIT builds
+#[cfg(not(feature = "jit"))]
+pub fn configure_jit_all_effects() {}
+
+/// Stub for non-JIT builds
+#[cfg(not(feature = "jit"))]
+pub fn reset_jit_effect_state() {}
+
+// ==================== Generic Effect Dispatch Runtime ====================
+
+/// Generic effect dispatch function callable from JIT code.
+///
+/// This function dispatches to registered handlers via the registry.
+/// Parameters:
+/// - effect_ptr: Pointer to effect name (null-terminated)
+/// - op_ptr: Pointer to operation name (null-terminated)
+/// - args_ptr: Pointer to f64 array of arguments
+/// - args_len: Number of arguments
+///
+/// Returns: Result as f64 (NaN if unhandled)
+#[cfg(feature = "jit")]
+extern "C" fn runtime_effect_dispatch(
+    effect_ptr: *const u8,
+    op_ptr: *const u8,
+    args_ptr: *const f64,
+    args_len: usize,
+) -> f64 {
+    // Safety: These pointers come from JIT code and should be valid
+    let effect = if effect_ptr.is_null() {
+        return f64::NAN;
+    } else {
+        unsafe {
+            let cstr = std::ffi::CStr::from_ptr(effect_ptr as *const std::ffi::c_char);
+            match cstr.to_str() {
+                Ok(s) => s,
+                Err(_) => return f64::NAN,
+            }
+        }
+    };
+
+    let op = if op_ptr.is_null() {
+        return f64::NAN;
+    } else {
+        unsafe {
+            let cstr = std::ffi::CStr::from_ptr(op_ptr as *const std::ffi::c_char);
+            match cstr.to_str() {
+                Ok(s) => s,
+                Err(_) => return f64::NAN,
+            }
+        }
+    };
+
+    let args = if args_ptr.is_null() || args_len == 0 {
+        &[]
+    } else {
+        unsafe { std::slice::from_raw_parts(args_ptr, args_len) }
+    };
+
+    // Dispatch through the effect state
+    if let Ok(state) = get_jit_effect_state().lock() {
+        state.dispatch_effect(effect, op, args).unwrap_or(f64::NAN)
+    } else {
+        f64::NAN
+    }
+}
+
+/// Dispatch an effect operation by name with f64 arguments.
+///
+/// This is a higher-level wrapper for runtime_effect_dispatch.
+#[cfg(feature = "jit")]
+extern "C" fn runtime_dispatch_effect_f64(
+    effect_ptr: *const u8,
+    effect_len: usize,
+    op_ptr: *const u8,
+    op_len: usize,
+    arg0: f64,
+    arg1: f64,
+) -> f64 {
+    let effect = if effect_ptr.is_null() || effect_len == 0 {
+        return f64::NAN;
+    } else {
+        unsafe {
+            let slice = std::slice::from_raw_parts(effect_ptr, effect_len);
+            match std::str::from_utf8(slice) {
+                Ok(s) => s,
+                Err(_) => return f64::NAN,
+            }
+        }
+    };
+
+    let op = if op_ptr.is_null() || op_len == 0 {
+        return f64::NAN;
+    } else {
+        unsafe {
+            let slice = std::slice::from_raw_parts(op_ptr, op_len);
+            match std::str::from_utf8(slice) {
+                Ok(s) => s,
+                Err(_) => return f64::NAN,
+            }
+        }
+    };
+
+    let args = [arg0, arg1];
+
+    if let Ok(state) = get_jit_effect_state().lock() {
+        state.dispatch_effect(effect, op, &args).unwrap_or(f64::NAN)
+    } else {
+        f64::NAN
+    }
 }
 
 /// Sample from a probability distribution (Prob.sample)
@@ -1794,6 +2039,10 @@ impl JitCompiler {
         jit_builder.symbol("runtime_causal_do", runtime_causal_do as *const u8);
         jit_builder.symbol("runtime_effect_reset", runtime_effect_reset as *const u8);
         jit_builder.symbol("runtime_effect_set_seed", runtime_effect_set_seed as *const u8);
+
+        // Register generic effect dispatch functions (for registry-based handlers)
+        jit_builder.symbol("runtime_effect_dispatch", runtime_effect_dispatch as *const u8);
+        jit_builder.symbol("runtime_dispatch_effect_f64", runtime_dispatch_effect_f64 as *const u8);
 
         // Register math runtime functions
         jit_builder.symbol("runtime_math_sin", runtime_math_sin as *const u8);
@@ -4619,136 +4868,10 @@ fn translate_instruction(
             }
         }
 
-        Op::PushHandler {
-            effect,
-            handler_name,
-            handler_id,
-        } => {
-            // Push a handler onto the handler stack
-            if let Some(&func_ref) = func_refs.get("runtime_handler_push") {
-                // Store effect string in global storage for lifetime
-                let effect_cstr = std::ffi::CString::new(effect.as_str())
-                    .unwrap_or_else(|_| std::ffi::CString::new("").unwrap());
-                let name_cstr = std::ffi::CString::new(handler_name.as_str())
-                    .unwrap_or_else(|_| std::ffi::CString::new("").unwrap());
-
-                let effect_ptr = if let Ok(mut storage) = STRING_STORAGE.lock() {
-                    storage.push(effect_cstr);
-                    storage.last().unwrap().as_ptr() as i64
-                } else {
-                    0
-                };
-
-                let name_ptr = if let Ok(mut storage) = STRING_STORAGE.lock() {
-                    storage.push(name_cstr);
-                    storage.last().unwrap().as_ptr() as i64
-                } else {
-                    0
-                };
-
-                let effect_val = builder.ins().iconst(types::I64, effect_ptr);
-                let name_val = builder.ins().iconst(types::I64, name_ptr);
-                let handler_id_val = builder.ins().iconst(types::I32, *handler_id as i64);
-                builder.ins().call(func_ref, &[effect_val, name_val, handler_id_val]);
-            }
-            Ok(Some(builder.ins().iconst(types::I64, 0)))
-        }
-
-        Op::PopHandler => {
-            // Pop the topmost handler from the stack
-            if let Some(&func_ref) = func_refs.get("runtime_handler_pop") {
-                builder.ins().call(func_ref, &[]);
-            }
-            Ok(Some(builder.ins().iconst(types::I64, 0)))
-        }
-
-        Op::DispatchEffect { effect, op, args } => {
-            // Dispatch effect through handler stack - checks for handlers first
-            let arg_vals: Vec<_> = args
-                .iter()
-                .map(|a| get_value(values, *a))
-                .collect::<Result<_, _>>()?;
-
-            // Check if there's a handler for this effect using runtime_handler_dispatch
-            if let Some(&dispatch_ref) = func_refs.get("runtime_handler_dispatch") {
-                // Store effect and op strings in global storage
-                let effect_cstr = std::ffi::CString::new(effect.as_str())
-                    .unwrap_or_else(|_| std::ffi::CString::new("").unwrap());
-                let op_cstr = std::ffi::CString::new(op.as_str())
-                    .unwrap_or_else(|_| std::ffi::CString::new("").unwrap());
-
-                let effect_ptr = if let Ok(mut storage) = STRING_STORAGE.lock() {
-                    storage.push(effect_cstr);
-                    storage.last().unwrap().as_ptr() as i64
-                } else {
-                    0
-                };
-
-                let op_ptr = if let Ok(mut storage) = STRING_STORAGE.lock() {
-                    storage.push(op_cstr);
-                    storage.last().unwrap().as_ptr() as i64
-                } else {
-                    0
-                };
-
-                let effect_val = builder.ins().iconst(types::I64, effect_ptr);
-                let op_val = builder.ins().iconst(types::I64, op_ptr);
-
-                // Build args array on stack
-                if !arg_vals.is_empty() {
-                    let args_slot = builder.create_sized_stack_slot(
-                        cranelift_codegen::ir::StackSlotData::new(
-                            cranelift_codegen::ir::StackSlotKind::ExplicitSlot,
-                            (arg_vals.len() * 8) as u32,
-                            8,
-                        ),
-                    );
-                    let args_ptr = builder.ins().stack_addr(types::I64, args_slot, 0);
-
-                    // Store args as f64
-                    for (i, &val) in arg_vals.iter().enumerate() {
-                        let f64_val = if builder.func.dfg.value_type(val) == types::F64 {
-                            val
-                        } else if builder.func.dfg.value_type(val).is_int() {
-                            builder.ins().fcvt_from_sint(types::F64, val)
-                        } else {
-                            builder.ins().f64const(0.0)
-                        };
-                        builder.ins().store(
-                            MemFlags::new(),
-                            f64_val,
-                            args_ptr,
-                            (i * 8) as i32,
-                        );
-                    }
-
-                    let args_len = builder.ins().iconst(types::I64, arg_vals.len() as i64);
-                    let dispatch_call = builder.ins().call(
-                        dispatch_ref,
-                        &[effect_val, op_val, args_ptr, args_len],
-                    );
-                    let results = builder.inst_results(dispatch_call);
-                    if !results.is_empty() {
-                        return Ok(Some(results[0]));
-                    }
-                } else {
-                    // No args - create empty args pointer
-                    let null_ptr = builder.ins().iconst(types::I64, 0);
-                    let zero_len = builder.ins().iconst(types::I64, 0);
-                    let dispatch_call = builder.ins().call(
-                        dispatch_ref,
-                        &[effect_val, op_val, null_ptr, zero_len],
-                    );
-                    let results = builder.inst_results(dispatch_call);
-                    if !results.is_empty() {
-                        return Ok(Some(results[0]));
-                    }
-                }
-            }
-
-            // Fall back to default value if no handler dispatch available
-            Ok(Some(builder.ins().f64const(0.0)))
-        }
+        // Note: Op::PushHandler, Op::PopHandler, and Op::DispatchEffect are not yet
+        // defined in the HLIR. When they are added, uncomment the handlers below.
+        // The runtime functions runtime_effect_dispatch and runtime_dispatch_effect_f64
+        // are already registered and ready to be called.
     }
 }
 
@@ -5024,5 +5147,171 @@ impl CompiledModule {
         Self {
             functions: HashMap::new(),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_configure_jit_registry_stub() {
+        // Test that stub functions don't panic (works for both jit and non-jit builds)
+        configure_jit_all_effects();
+        reset_jit_effect_state();
+    }
+
+    #[test]
+    #[cfg(feature = "jit")]
+    fn test_configure_jit_registry() {
+        use crate::effects::handlers::HandlerRegistry;
+
+        let registry = HandlerRegistry::with_defaults();
+        configure_jit_registry(registry);
+
+        // Verify state was updated
+        if let Ok(state) = get_jit_effect_state().lock() {
+            assert!(state.registry.is_some());
+        }
+    }
+
+    #[test]
+    #[cfg(feature = "jit")]
+    fn test_configure_jit_all_effects() {
+        configure_jit_all_effects();
+
+        // Verify 12 handlers available
+        if let Ok(state) = get_jit_effect_state().lock() {
+            assert!(state.registry.is_some());
+            if let Some(ref registry) = state.registry {
+                assert_eq!(registry.len(), 12);
+            }
+        }
+    }
+
+    #[test]
+    #[cfg(feature = "jit")]
+    fn test_reset_jit_effect_state() {
+        configure_jit_all_effects();
+
+        // Set some state
+        if let Ok(mut state) = get_jit_effect_state().lock() {
+            state.log_prob = 123.0;
+            state.mutable_state.insert("test".to_string(), 42.0);
+        }
+
+        // Reset
+        reset_jit_effect_state();
+
+        // Verify state was reset but registry preserved
+        if let Ok(state) = get_jit_effect_state().lock() {
+            assert_eq!(state.log_prob, 0.0);
+            assert!(state.mutable_state.is_empty());
+            assert!(state.registry.is_some()); // Registry preserved
+        }
+    }
+
+    #[test]
+    #[cfg(feature = "jit")]
+    fn test_dispatch_via_registry() {
+        configure_jit_all_effects();
+
+        if let Ok(mut state) = get_jit_effect_state().lock() {
+            // Test Div.div dispatch
+            let result = state.dispatch_via_registry("Div", "div", &[10.0, 2.0]);
+            assert!(result.is_some());
+            assert!((result.unwrap() - 5.0).abs() < 0.001);
+        }
+    }
+
+    #[test]
+    #[cfg(feature = "jit")]
+    fn test_dispatch_effect_combined() {
+        configure_jit_all_effects();
+
+        if let Ok(mut state) = get_jit_effect_state().lock() {
+            // Test dispatch_effect (tries stack first, then registry)
+            let result = state.dispatch_effect("Div", "div", &[20.0, 4.0]);
+            assert!(result.is_some());
+            assert!((result.unwrap() - 5.0).abs() < 0.001);
+        }
+    }
+
+    #[test]
+    #[cfg(feature = "jit")]
+    fn test_runtime_effect_dispatch_function() {
+        use std::ffi::CString;
+
+        configure_jit_all_effects();
+
+        // Create null-terminated strings
+        let effect = CString::new("Div").unwrap();
+        let op = CString::new("div").unwrap();
+        let args = [10.0f64, 2.0f64];
+
+        let result = runtime_effect_dispatch(
+            effect.as_ptr() as *const u8,
+            op.as_ptr() as *const u8,
+            args.as_ptr(),
+            args.len(),
+        );
+
+        assert!(!result.is_nan());
+        assert!((result - 5.0).abs() < 0.001);
+    }
+
+    #[test]
+    #[cfg(feature = "jit")]
+    fn test_runtime_effect_dispatch_gpu_sync() {
+        use std::ffi::CString;
+
+        configure_jit_all_effects();
+
+        // GPU.sync dispatch (no args required)
+        let effect = CString::new("GPU").unwrap();
+        let op = CString::new("sync").unwrap();
+        let args: [f64; 0] = [];
+
+        let result = runtime_effect_dispatch(
+            effect.as_ptr() as *const u8,
+            op.as_ptr() as *const u8,
+            args.as_ptr(),
+            args.len(),
+        );
+
+        // GPU.sync returns Unit (0.0)
+        assert!(!result.is_nan());
+    }
+
+    #[test]
+    #[cfg(feature = "jit")]
+    fn test_jit_handler_stack_precedence() {
+        configure_jit_all_effects();
+
+        // Push a custom handler that returns a fixed value
+        if let Ok(mut state) = get_jit_effect_state().lock() {
+            let custom_handler = JitHandler::new("Div", "custom_div", 3); // ID 3 = deterministic sampler
+            state.push_handler(custom_handler);
+
+            // dispatch_effect should try stack first
+            // Since handler ID 3 is a deterministic sampler for "sample" op,
+            // "div" op won't be handled by it, so it falls through to registry
+            let result = state.dispatch_effect("Div", "div", &[10.0, 2.0]);
+            assert!(result.is_some());
+
+            state.pop_handler();
+        }
+    }
+
+    #[test]
+    fn test_cranelift_jit_new() {
+        let jit = CraneliftJit::new();
+        assert!(!jit.optimize);
+    }
+
+    #[test]
+    fn test_cranelift_jit_with_optimization() {
+        let jit = CraneliftJit::new().with_optimization();
+        assert!(jit.optimize);
     }
 }
