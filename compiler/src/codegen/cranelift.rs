@@ -27,6 +27,8 @@
 
 use crate::hlir::HlirModule;
 #[cfg(feature = "jit")]
+use crate::runtime::handler_stack;
+#[cfg(feature = "jit")]
 use std::io::Write;
 #[cfg(feature = "jit")]
 use std::sync::Arc;
@@ -2104,6 +2106,159 @@ impl JitCompiler {
         jit_builder.symbol("runtime_continuation_resume", runtime_continuation_resume as *const u8);
         jit_builder.symbol("runtime_continuation_get_value", runtime_continuation_get_value as *const u8);
         jit_builder.symbol("runtime_continuation_clear", runtime_continuation_clear as *const u8);
+
+        // Register __sounio_* functions from runtime handler_stack module
+        // These are used by SIR lowering and other backends
+        jit_builder.symbol(
+            "__sounio_push_handler_io",
+            handler_stack::__sounio_push_handler_io as *const u8,
+        );
+        jit_builder.symbol(
+            "__sounio_push_handler_mut",
+            handler_stack::__sounio_push_handler_mut as *const u8,
+        );
+        jit_builder.symbol(
+            "__sounio_push_handler_div",
+            handler_stack::__sounio_push_handler_div as *const u8,
+        );
+        jit_builder.symbol(
+            "__sounio_push_handler_prob",
+            handler_stack::__sounio_push_handler_prob as *const u8,
+        );
+        jit_builder.symbol(
+            "__sounio_push_handler_alloc",
+            handler_stack::__sounio_push_handler_alloc as *const u8,
+        );
+        jit_builder.symbol(
+            "__sounio_push_handler_panic",
+            handler_stack::__sounio_push_handler_panic as *const u8,
+        );
+        jit_builder.symbol(
+            "__sounio_push_handler_async",
+            handler_stack::__sounio_push_handler_async as *const u8,
+        );
+        jit_builder.symbol(
+            "__sounio_push_handler_gpu",
+            handler_stack::__sounio_push_handler_gpu as *const u8,
+        );
+        jit_builder.symbol(
+            "__sounio_push_handler_grad",
+            handler_stack::__sounio_push_handler_grad as *const u8,
+        );
+        jit_builder.symbol(
+            "__sounio_push_handler_network",
+            handler_stack::__sounio_push_handler_network as *const u8,
+        );
+        jit_builder.symbol(
+            "__sounio_push_handler_sensor",
+            handler_stack::__sounio_push_handler_sensor as *const u8,
+        );
+        jit_builder.symbol(
+            "__sounio_push_handler_exn",
+            handler_stack::__sounio_push_handler_exn as *const u8,
+        );
+        jit_builder.symbol(
+            "__sounio_push_handler_causal",
+            handler_stack::__sounio_push_handler_causal as *const u8,
+        );
+        jit_builder.symbol(
+            "__sounio_pop_handler",
+            handler_stack::__sounio_pop_handler as *const u8,
+        );
+        jit_builder.symbol(
+            "__sounio_handler_depth",
+            handler_stack::__sounio_handler_depth as *const u8,
+        );
+
+        // Register dispatch functions
+        jit_builder.symbol(
+            "__sounio_dispatch_io_print",
+            handler_stack::__sounio_dispatch_io_print as *const u8,
+        );
+        jit_builder.symbol(
+            "__sounio_dispatch_io_println",
+            handler_stack::__sounio_dispatch_io_println as *const u8,
+        );
+        jit_builder.symbol(
+            "__sounio_dispatch_io_read",
+            handler_stack::__sounio_dispatch_io_read as *const u8,
+        );
+        jit_builder.symbol(
+            "__sounio_dispatch_mut_get",
+            handler_stack::__sounio_dispatch_mut_get as *const u8,
+        );
+        jit_builder.symbol(
+            "__sounio_dispatch_mut_set",
+            handler_stack::__sounio_dispatch_mut_set as *const u8,
+        );
+        jit_builder.symbol(
+            "__sounio_dispatch_mut_modify",
+            handler_stack::__sounio_dispatch_mut_modify as *const u8,
+        );
+        jit_builder.symbol(
+            "__sounio_dispatch_div_div",
+            handler_stack::__sounio_dispatch_div_div as *const u8,
+        );
+        jit_builder.symbol(
+            "__sounio_dispatch_prob_sample",
+            handler_stack::__sounio_dispatch_prob_sample as *const u8,
+        );
+        jit_builder.symbol(
+            "__sounio_dispatch_prob_observe",
+            handler_stack::__sounio_dispatch_prob_observe as *const u8,
+        );
+        jit_builder.symbol(
+            "__sounio_dispatch_alloc_alloc",
+            handler_stack::__sounio_dispatch_alloc_alloc as *const u8,
+        );
+        jit_builder.symbol(
+            "__sounio_dispatch_alloc_dealloc",
+            handler_stack::__sounio_dispatch_alloc_dealloc as *const u8,
+        );
+        jit_builder.symbol(
+            "__sounio_dispatch_panic_panic",
+            handler_stack::__sounio_dispatch_panic_panic as *const u8,
+        );
+        jit_builder.symbol(
+            "__sounio_dispatch_gpu_sync",
+            handler_stack::__sounio_dispatch_gpu_sync as *const u8,
+        );
+        jit_builder.symbol(
+            "__sounio_dispatch_gpu_launch",
+            handler_stack::__sounio_dispatch_gpu_launch as *const u8,
+        );
+        jit_builder.symbol(
+            "__sounio_dispatch_async_spawn",
+            handler_stack::__sounio_dispatch_async_spawn as *const u8,
+        );
+        jit_builder.symbol(
+            "__sounio_dispatch_async_yield",
+            handler_stack::__sounio_dispatch_async_yield as *const u8,
+        );
+        jit_builder.symbol(
+            "__sounio_dispatch_async_await",
+            handler_stack::__sounio_dispatch_async_await as *const u8,
+        );
+        jit_builder.symbol(
+            "__sounio_dispatch_grad_forward",
+            handler_stack::__sounio_dispatch_grad_forward as *const u8,
+        );
+        jit_builder.symbol(
+            "__sounio_dispatch_grad_reverse",
+            handler_stack::__sounio_dispatch_grad_reverse as *const u8,
+        );
+        jit_builder.symbol(
+            "__sounio_dispatch_causal_do",
+            handler_stack::__sounio_dispatch_causal_do as *const u8,
+        );
+        jit_builder.symbol(
+            "__sounio_dispatch_causal_observe",
+            handler_stack::__sounio_dispatch_causal_observe as *const u8,
+        );
+        jit_builder.symbol(
+            "__sounio_dispatch_generic",
+            handler_stack::__sounio_dispatch_generic as *const u8,
+        );
 
         let jit_module = JITModule::new(jit_builder);
         let ctx = jit_module.make_context();

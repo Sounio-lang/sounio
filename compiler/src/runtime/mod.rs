@@ -29,6 +29,7 @@ pub mod epistemic;
 pub mod gpu_epistemic;
 pub mod gpu_executor;
 pub mod gpu_scientific;
+pub mod handler_stack;
 pub mod io;
 pub mod ode;
 pub mod pde;
@@ -91,4 +92,9 @@ pub use async_runtime::{
 pub use gpu_executor::{
     DeviceInfo as GpuDeviceInfo, EpistemicBuffer, ExecutorBuffer, GpuExecutor, GpuExecutorError,
     KernelLauncher, KernelParam,
+};
+
+// Runtime handler stack for effect dispatch
+pub use handler_stack::{
+    RuntimeHandler, RuntimeHandlerStack, get_handler_stack, reset_handler_stack,
 };
