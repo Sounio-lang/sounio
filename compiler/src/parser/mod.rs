@@ -262,15 +262,29 @@ impl<'a> Parser<'a> {
             self.advance();
         }
 
-        // Optional module declaration
+        // Optional file-level module declaration (e.g., `module foo;` or `module foo::bar;`)
+        // This is different from inline module definitions (`module foo { ... }`)
+        // which are handled by parse_item.
+        // We only consume this if it's followed by a path and semicolon (or EOF/items),
+        // not if it's followed by `{` which indicates an inline module definition.
         let module_name = if self.at(TokenKind::Module) {
-            self.advance();
-            let name = self.parse_path()?;
-            // Accept optional semicolon after module declaration
-            if self.at(TokenKind::Semi) {
+            // Peek ahead to check if this is a file-level module declaration
+            // vs an inline module definition
+            let next = self.peek_n(1);
+            let after_name = self.peek_n(2);
+
+            // If pattern is: module <ident> { ... then it's an inline module, don't consume
+            if next == TokenKind::Ident && after_name == TokenKind::LBrace {
+                None
+            } else {
                 self.advance();
+                let name = self.parse_path()?;
+                // Accept optional semicolon after module declaration
+                if self.at(TokenKind::Semi) {
+                    self.advance();
+                }
+                Some(name)
             }
-            Some(name)
         } else {
             None
         };
@@ -1346,13 +1360,36 @@ impl<'a> Parser<'a> {
         self.expect(TokenKind::Semi)?;
         let end = self.span();
 
-        Ok(Item::Import(ImportDef {
-            id: self.next_id(),
-            path,
-            items: None,
-            is_reexport,
-            span: start.merge(end),
-        }))
+        // If path has multiple segments (e.g., `use foo::bar`), treat the last
+        // segment as the item being imported from the module formed by the rest.
+        // Single-segment paths (e.g., `use foo`) import the entire module.
+        if path.segments.len() > 1 {
+            let item_name = path.segments.last().cloned().unwrap_or_default();
+            let module_path = Path {
+                segments: path.segments[..path.segments.len() - 1].to_vec(),
+                source_module: path.source_module.clone(),
+                resolved_module: None,
+            };
+            Ok(Item::Import(ImportDef {
+                id: self.next_id(),
+                path: module_path,
+                items: Some(vec![ImportItem {
+                    name: item_name,
+                    alias: None,
+                    is_glob: false,
+                }]),
+                is_reexport,
+                span: start.merge(end),
+            }))
+        } else {
+            Ok(Item::Import(ImportDef {
+                id: self.next_id(),
+                path,
+                items: None,
+                is_reexport,
+                span: start.merge(end),
+            }))
+        }
     }
 
     /// Parse import items: `{ A, B as C, * }`

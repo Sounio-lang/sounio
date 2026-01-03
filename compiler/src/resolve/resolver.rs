@@ -260,9 +260,27 @@ impl Resolver {
             return self.lookup_with_imports(&segments[0]);
         }
 
-        // Multi-segment path: traverse module tree
-        // First segment might be a module name or an imported module
+        // Multi-segment path: could be a module path or type::variant
+        // First segment might be a module name, imported module, or an imported type
         let first = &segments[0];
+
+        // First, check if this is a Type::Variant pattern (e.g., Color::Red)
+        // by checking if first segment resolves to a type (enum)
+        if segments.len() == 2 {
+            if let Some(type_def_id) = self.lookup_type_with_imports(&segments[0]) {
+                // First segment is a type - check if it's an enum with this variant
+                if let Some(symbol) = self.symbols.get(type_def_id) {
+                    if matches!(symbol.kind, DefKind::Enum { .. }) {
+                        // Look up the variant in the enum
+                        let variant_name = &segments[1];
+                        // Try to find a symbol for this variant under the enum
+                        if let Some(variant_id) = self.symbols.lookup_variant(type_def_id, variant_name) {
+                            return Some(variant_id);
+                        }
+                    }
+                }
+            }
+        }
 
         // Try to find the starting module
         let start_module = if let Some(module) = self.module_tree.get(&self.current_tree_module) {
@@ -363,8 +381,18 @@ impl Resolver {
                             span: miette::SourceSpan::from(0..1),
                         });
                     }
-                    // Module not found and Unresolved are deferred - might be external
-                    _ => {}
+                    super::module_tree::ImportError::Unresolved { name, path } => {
+                        // Item not found in module - report as error
+                        self.errors.push(ResolveError::UndefinedVar {
+                            name: format!("{}::{} (not found)", path, name),
+                            span: miette::SourceSpan::from(0..1),
+                        });
+                    }
+                    super::module_tree::ImportError::ModuleNotFound { path } => {
+                        // For now, defer module-not-found errors since they might
+                        // be external modules loaded later
+                        let _ = path;
+                    }
                 }
             }
         }
@@ -444,6 +472,10 @@ impl Resolver {
         // Enter the module in symbols
         self.symbols.enter_module(module_id.clone());
 
+        // Push a new scope for the module so items defined in this module
+        // are isolated from the parent scope
+        self.symbols.push_scope(ScopeKind::Module, None);
+
         // Define the module as a symbol
         let def_id = self.symbols.fresh_def_id();
         self.symbols.insert(Symbol {
@@ -465,6 +497,9 @@ impl Resolver {
                 self.collect_item(item);
             }
         }
+
+        // Exit module scope
+        self.symbols.pop_scope();
 
         // Exit module
         self.current_tree_module = saved_tree_module;

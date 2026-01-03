@@ -73,6 +73,29 @@ mod tests {
     }
 
     #[test]
+    fn test_lex_module() {
+        let tokens = lex("module foo { }").unwrap();
+        assert_eq!(tokens[0].kind, TokenKind::Module);
+        assert_eq!(tokens[0].text, "module");
+        assert_eq!(tokens[1].kind, TokenKind::Ident);
+        assert_eq!(tokens[1].text, "foo");
+        assert_eq!(tokens[2].kind, TokenKind::LBrace);
+        assert_eq!(tokens[3].kind, TokenKind::RBrace);
+    }
+
+    #[test]
+    fn test_lex_full_module() {
+        let source = r#"module foo {
+            pub fn bar() -> i32 { 42 }
+        }"#;
+        let tokens = lex(source).unwrap();
+        // First token should be `module`
+        println!("Tokens: {:?}", tokens.iter().map(|t| (&t.kind, &t.text)).collect::<Vec<_>>());
+        assert_eq!(tokens[0].kind, TokenKind::Module, "First token should be 'module', got {:?}", tokens[0]);
+        assert_eq!(tokens[0].text, "module");
+    }
+
+    #[test]
     fn test_lex_operators() {
         let tokens = lex("+ - * / == != <= >= -> =>").unwrap();
         assert_eq!(tokens[0].kind, TokenKind::Plus);

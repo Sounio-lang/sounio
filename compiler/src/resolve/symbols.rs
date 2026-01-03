@@ -637,6 +637,25 @@ impl SymbolTable {
         self.node_to_def.get(&node_id).copied()
     }
 
+    /// Look up an enum variant by parent enum DefId and variant name
+    pub fn lookup_variant(&self, enum_def_id: DefId, variant_name: &str) -> Option<DefId> {
+        // Search for a symbol that is a Variant with the given parent
+        for (def_id, symbol) in &self.symbols {
+            if matches!(symbol.kind, DefKind::Variant) {
+                if symbol.parent == Some(enum_def_id) {
+                    // Check if the variant name matches
+                    // The symbol name is "EnumName::VariantName", so extract the variant part
+                    if let Some((_enum_part, var_part)) = symbol.name.rsplit_once("::") {
+                        if var_part == variant_name {
+                            return Some(*def_id);
+                        }
+                    }
+                }
+            }
+        }
+        None
+    }
+
     /// Get DefId for a reference node
     pub fn ref_for_node(&self, node_id: NodeId) -> Option<DefId> {
         self.node_to_ref.get(&node_id).copied()

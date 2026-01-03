@@ -552,7 +552,42 @@ impl Formatter {
 
     /// Format an import
     fn import_to_doc(&self, u: &crate::ast::ImportDef) -> Doc {
-        Doc::Text(format!("use {};", u.path.segments.join("::")))
+        let base_path = u.path.segments.join("::");
+
+        match &u.items {
+            None => {
+                // Import entire module: `use std;`
+                Doc::Text(format!("use {};", base_path))
+            }
+            Some(items) if items.len() == 1 && !items[0].is_glob && items[0].alias.is_none() => {
+                // Single item import: `use std::io;`
+                Doc::Text(format!("use {}::{};", base_path, items[0].name))
+            }
+            Some(items) if items.len() == 1 && items[0].is_glob => {
+                // Glob import: `use std::io::*;`
+                Doc::Text(format!("use {}::*;", base_path))
+            }
+            Some(items) => {
+                // Multiple items or alias: `use std::{io, fs};` or `use std::io as stdio;`
+                let item_strs: Vec<String> = items
+                    .iter()
+                    .map(|item| {
+                        if item.is_glob {
+                            "*".to_string()
+                        } else if let Some(alias) = &item.alias {
+                            format!("{} as {}", item.name, alias)
+                        } else {
+                            item.name.clone()
+                        }
+                    })
+                    .collect();
+                if items.len() == 1 {
+                    Doc::Text(format!("use {}::{};", base_path, item_strs[0]))
+                } else {
+                    Doc::Text(format!("use {}::{{{}}};", base_path, item_strs.join(", ")))
+                }
+            }
+        }
     }
 
     /// Format a global
