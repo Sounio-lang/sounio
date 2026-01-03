@@ -169,6 +169,10 @@ impl LoweringContext {
     fn reset_for_function(&mut self) {
         self.value_map.clear();
         self.block_map.clear();
+        self.value_types.clear();
+        // Reset IDs so each function has ValueIds starting from 0
+        self.next_value_id = 0;
+        self.next_block_id = 0;
         // Keep type_cache and func_map across functions
     }
 }

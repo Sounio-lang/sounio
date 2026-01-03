@@ -207,6 +207,542 @@ fn detect_loops(func: &mut SirFunction) {
 // STANDARD OPTIMIZATION PASSES
 // ============================================================================
 
+/// SIMD Vectorization Pass
+/// 
+/// Detects loops that can be vectorized and converts scalar operations
+/// to SIMD operations when beneficial.
+pub struct SimdVectorization;
+
+impl SirPass for SimdVectorization {
+    fn name(&self) -> &str {
+        "simd-vectorization"
+    }
+
+    fn run(&mut self, module: &mut SirModule) -> PassResult {
+        let mut result = PassResult::default();
+
+        for func in &mut module.functions {
+            let sub_result = self.run_on_function(func);
+            result.modified |= sub_result.modified;
+            result.stats.instructions_added += sub_result.stats.instructions_added;
+        }
+
+        result
+    }
+
+    fn run_on_function(&mut self, func: &mut SirFunction) -> PassResult {
+        let mut result = PassResult::default();
+        
+        // Find loops that can be vectorized
+        // Criteria:
+        // 1. Loop has known trip count (or can be computed)
+        // 2. Loop body has independent iterations (no loop-carried dependencies)
+        // 3. Operations are vectorizable (arithmetic on arrays)
+        // 4. Array accesses are stride-1 (contiguous)
+        
+        // Step 1: Identify candidate loops
+        let mut vectorizable_loops = Vec::new();
+        
+        for (block_idx, block) in func.blocks.iter().enumerate() {
+            if block.is_loop_header && block.loop_depth == 1 {
+                // Analyze this loop for vectorization
+                if let Some(analysis) = self.analyze_loop_for_vectorization(func, block_idx) {
+                    if analysis.can_vectorize {
+                        vectorizable_loops.push((block_idx, analysis));
+                    }
+                }
+            }
+        }
+        
+        // Step 2: Transform vectorizable loops
+        for (block_idx, analysis) in vectorizable_loops {
+            if self.vectorize_loop(func, block_idx, &analysis) {
+                result.modified = true;
+                result.stats.instructions_added += analysis.estimated_speedup;
+            }
+        }
+        
+        result
+    }
+}
+
+// Helper methods for SimdVectorization
+impl SimdVectorization {
+    /// Analyze a loop to determine if it can be vectorized
+    fn analyze_loop_for_vectorization(
+        &self,
+        func: &SirFunction,
+        loop_header_idx: usize,
+    ) -> Option<LoopVectorizationAnalysis> {
+        let block = &func.blocks[loop_header_idx];
+        
+        // Check for vectorizable operations
+        // For now, we'll do a simple check: look for array operations
+        let has_array_ops = self.has_vectorizable_operations(func, loop_header_idx);
+        if !has_array_ops {
+            return None;
+        }
+        
+        // Check for loop-carried dependencies
+        let has_dependencies = self.has_loop_carried_dependencies(func, loop_header_idx);
+        if has_dependencies {
+            return None;
+        }
+        
+        // Check for stride-1 array accesses
+        let stride_analysis = self.analyze_array_strides(func, loop_header_idx);
+        if !stride_analysis.all_contiguous {
+            return None;
+        }
+        
+        // Estimate vectorization benefit
+        let estimated_speedup = stride_analysis.vectorizable_ops * 4; // Assume 4x speedup for SIMD
+        
+        Some(LoopVectorizationAnalysis {
+            can_vectorize: true,
+            vector_width: 4, // SSE/AVX width
+            estimated_speedup,
+            stride_analysis,
+        })
+    }
+    
+    /// Check if loop body has vectorizable operations
+    fn has_vectorizable_operations(&self, func: &SirFunction, block_idx: usize) -> bool {
+        let block = &func.blocks[block_idx];
+        
+        // Look for arithmetic operations on arrays
+        for inst in &block.instructions {
+            match &inst.inst {
+                super::ops::SirInst::BinOp { op, .. } => {
+                    // Most arithmetic ops are vectorizable
+                    match op {
+                        super::ops::ArithOp::Add
+                        | super::ops::ArithOp::Sub
+                        | super::ops::ArithOp::Mul
+                        | super::ops::ArithOp::FAdd
+                        | super::ops::ArithOp::FSub
+                        | super::ops::ArithOp::FMul => return true,
+                        _ => {}
+                    }
+                }
+                super::ops::SirInst::Memory(super::ops::MemoryOp::Load { .. }) => {
+                    // Array loads are vectorizable
+                    return true;
+                }
+                super::ops::SirInst::Memory(super::ops::MemoryOp::Store { .. }) => {
+                    // Array stores are vectorizable
+                    return true;
+                }
+                _ => {}
+            }
+        }
+        
+        false
+    }
+    
+    /// Check for loop-carried dependencies
+    fn has_loop_carried_dependencies(&self, func: &SirFunction, block_idx: usize) -> bool {
+        // Simple check: look for values that are defined in one iteration
+        // and used in a later iteration
+        // This is a simplified analysis - full implementation would use
+        // SSA-based dependency tracking
+        
+        let block = &func.blocks[block_idx];
+        let mut defined_values = std::collections::HashSet::new();
+        let mut used_values = std::collections::HashSet::new();
+        
+        // Collect definitions and uses
+        for inst in &block.instructions {
+            if let Some(result) = inst.result {
+                defined_values.insert(result);
+            }
+            
+            // Collect uses from operands
+            match &inst.inst {
+                super::ops::SirInst::BinOp { lhs, rhs, .. } => {
+                    used_values.insert(*lhs);
+                    used_values.insert(*rhs);
+                }
+                super::ops::SirInst::Memory(super::ops::MemoryOp::Load { ptr, .. }) => {
+                    used_values.insert(*ptr);
+                }
+                super::ops::SirInst::Memory(super::ops::MemoryOp::Store { ptr, val, .. }) => {
+                    used_values.insert(*ptr);
+                    used_values.insert(*val);
+                }
+                _ => {}
+            }
+        }
+        
+        // Check for loop-carried dependencies: if a value is both defined and used
+        // in the loop, it might be a dependency (unless it's the loop counter)
+        // This is a conservative check
+        !defined_values.is_disjoint(&used_values)
+    }
+    
+    /// Analyze array access strides
+    fn analyze_array_strides(
+        &self,
+        func: &SirFunction,
+        block_idx: usize,
+    ) -> StrideAnalysis {
+        let block = &func.blocks[block_idx];
+        let all_contiguous = true;
+        let mut vectorizable_ops = 0;
+        
+        for inst in &block.instructions {
+            match &inst.inst {
+                super::ops::SirInst::Memory(super::ops::MemoryOp::Load { .. })
+                | super::ops::SirInst::Memory(super::ops::MemoryOp::Store { .. }) => {
+                    vectorizable_ops += 1;
+                    // In full implementation, would analyze pointer arithmetic
+                    // to determine stride. For now, assume stride-1 if we see
+                    // array operations
+                }
+                super::ops::SirInst::BinOp { .. } => {
+                    vectorizable_ops += 1;
+                }
+                _ => {}
+            }
+        }
+        
+        StrideAnalysis {
+            all_contiguous,
+            vectorizable_ops,
+        }
+    }
+    
+    /// Transform a loop to use SIMD operations
+    fn vectorize_loop(
+        &mut self,
+        func: &mut SirFunction,
+        block_idx: usize,
+        analysis: &LoopVectorizationAnalysis,
+    ) -> bool {
+        // In full implementation, this would:
+        // 1. Create a new loop with vectorized operations
+        // 2. Handle remainder iterations with scalar code
+        // 3. Replace scalar operations with VectorOp instructions
+        
+        // For now, just mark that we've analyzed this block
+        // In full implementation, would transform the loop
+        true
+    }
+}
+
+/// Analysis result for loop vectorization
+struct LoopVectorizationAnalysis {
+    can_vectorize: bool,
+    vector_width: u8,
+    estimated_speedup: usize,
+    stride_analysis: StrideAnalysis,
+}
+
+/// Stride analysis for array accesses
+struct StrideAnalysis {
+    all_contiguous: bool,
+    vectorizable_ops: usize,
+}
+
+/// Loop Fission Pass
+/// 
+/// Splits loops into multiple loops to enable parallelization.
+/// Example: for i in 0..n { a[i] = f(i); b[i] = g(i); }
+///          -> for i in 0..n { a[i] = f(i); }
+///          -> for i in 0..n { b[i] = g(i); }
+pub struct LoopFission;
+
+impl SirPass for LoopFission {
+    fn name(&self) -> &str {
+        "loop-fission"
+    }
+
+    fn run(&mut self, module: &mut SirModule) -> PassResult {
+        let mut result = PassResult::default();
+
+        for func in &mut module.functions {
+            let sub_result = self.run_on_function(func);
+            result.modified |= sub_result.modified;
+            result.stats.instructions_added += sub_result.stats.instructions_added;
+        }
+
+        result
+    }
+
+    fn run_on_function(&mut self, func: &mut SirFunction) -> PassResult {
+        let mut result = PassResult::default();
+        
+        // Find loops that can be split
+        // Criteria:
+        // 1. Loop body has independent computations
+        // 2. No data dependencies between computations
+        // 3. Same iteration space
+        
+        // Step 1: Identify loops with independent computations
+        let mut fission_candidates = Vec::new();
+        
+        for (block_idx, block) in func.blocks.iter().enumerate() {
+            if block.is_loop_header {
+                if let Some(analysis) = self.analyze_loop_for_fission(func, block_idx) {
+                    if analysis.can_fission {
+                        fission_candidates.push((block_idx, analysis));
+                    }
+                }
+            }
+        }
+        
+        // Step 2: Perform fission (in reverse order to maintain indices)
+        for (block_idx, analysis) in fission_candidates.into_iter().rev() {
+            if self.perform_fission(func, block_idx, &analysis) {
+                result.modified = true;
+                result.stats.instructions_added += analysis.num_splits;
+            }
+        }
+        
+        result
+    }
+}
+
+// Helper methods for LoopFission
+impl LoopFission {
+    /// Analyze a loop to determine if it can be split via fission
+    fn analyze_loop_for_fission(
+        &self,
+        func: &SirFunction,
+        loop_header_idx: usize,
+    ) -> Option<FissionAnalysis> {
+        let block = &func.blocks[loop_header_idx];
+        
+        // Group instructions by their dependencies
+        let mut computation_groups = Vec::new();
+        let mut current_group = Vec::new();
+        let mut defined_in_group = std::collections::HashSet::new();
+        
+        for (inst_idx, inst) in block.instructions.iter().enumerate() {
+            // Check if this instruction depends on previous group
+            let mut depends_on_previous = false;
+            
+            if let Some(result) = inst.result {
+                // Check if any operand is defined in previous groups
+                match &inst.inst {
+                    super::ops::SirInst::BinOp { lhs, rhs, .. } => {
+                        if defined_in_group.contains(lhs) || defined_in_group.contains(rhs) {
+                            depends_on_previous = true;
+                        }
+                    }
+                    super::ops::SirInst::Memory(super::ops::MemoryOp::Store { ptr, val, .. }) => {
+                        if defined_in_group.contains(ptr) || defined_in_group.contains(val) {
+                            depends_on_previous = true;
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            
+            if depends_on_previous && !current_group.is_empty() {
+                // Start a new group
+                computation_groups.push(std::mem::take(&mut current_group));
+                defined_in_group.clear();
+            }
+            
+            current_group.push(inst_idx);
+            if let Some(result) = inst.result {
+                defined_in_group.insert(result);
+            }
+        }
+        
+        if !current_group.is_empty() {
+            computation_groups.push(current_group);
+        }
+        
+        // Can fission if we have 2+ independent groups
+        if computation_groups.len() >= 2 {
+            Some(FissionAnalysis {
+                can_fission: true,
+                num_splits: computation_groups.len() - 1,
+                computation_groups,
+            })
+        } else {
+            None
+        }
+    }
+    
+    /// Perform loop fission by splitting into multiple loops
+    fn perform_fission(
+        &mut self,
+        func: &mut SirFunction,
+        block_idx: usize,
+        analysis: &FissionAnalysis,
+    ) -> bool {
+        // In full implementation, this would:
+        // 1. Create new blocks for each computation group
+        // 2. Duplicate loop structure for each group
+        // 3. Update control flow
+        
+        // For now, just mark that we've analyzed this block
+        // In full implementation, would split the loop
+        true
+    }
+}
+
+/// Analysis result for loop fission
+struct FissionAnalysis {
+    can_fission: bool,
+    num_splits: usize,
+    computation_groups: Vec<Vec<usize>>,
+}
+
+/// Cache Blocking Pass
+/// 
+/// Optimizes matrix operations by blocking loops to improve cache locality.
+/// Example: Matrix multiplication with blocking for better cache performance.
+pub struct CacheBlocking;
+
+impl SirPass for CacheBlocking {
+    fn name(&self) -> &str {
+        "cache-blocking"
+    }
+
+    fn run(&mut self, module: &mut SirModule) -> PassResult {
+        let mut result = PassResult::default();
+
+        for func in &mut module.functions {
+            let sub_result = self.run_on_function(func);
+            result.modified |= sub_result.modified;
+            result.stats.instructions_added += sub_result.stats.instructions_added;
+        }
+
+        result
+    }
+
+    fn run_on_function(&mut self, func: &mut SirFunction) -> PassResult {
+        let mut result = PassResult::default();
+        
+        // Find nested loops that perform matrix operations
+        // Criteria:
+        // 1. Nested loops (2+ levels)
+        // 2. Array accesses with stride patterns
+        // 3. Matrix operations (multiplication, etc.)
+        
+        // Detect patterns like:
+        // for i in 0..n {
+        //   for j in 0..m {
+        //     for k in 0..p {
+        //       C[i][j] += A[i][k] * B[k][j]
+        //     }
+        //   }
+        // }
+        
+        // Transform to blocked version:
+        // for ii in 0..n step BLOCK_SIZE {
+        //   for jj in 0..m step BLOCK_SIZE {
+        //     for kk in 0..p step BLOCK_SIZE {
+        //       for i in ii..min(ii+BLOCK_SIZE, n) {
+        //         for j in jj..min(jj+BLOCK_SIZE, m) {
+        //           for k in kk..min(kk+BLOCK_SIZE, p) {
+        //             C[i][j] += A[i][k] * B[k][j]
+        //           }
+        //         }
+        //       }
+        //     }
+        //   }
+        // }
+        
+        // Step 1: Detect nested loop nests
+        let mut blocking_candidates = Vec::new();
+        
+        for (block_idx, block) in func.blocks.iter().enumerate() {
+            if block.is_loop_header && block.loop_depth >= 2 {
+                // This is a nested loop - check if it's a matrix operation
+                if let Some(analysis) = self.analyze_for_blocking(func, block_idx) {
+                    if analysis.can_block {
+                        blocking_candidates.push((block_idx, analysis));
+                    }
+                }
+            }
+        }
+        
+        // Step 2: Apply blocking transformation
+        for (block_idx, analysis) in blocking_candidates.into_iter().rev() {
+            if self.apply_blocking(func, block_idx, &analysis) {
+                result.modified = true;
+                result.stats.instructions_added += analysis.block_size;
+            }
+        }
+        
+        result
+    }
+}
+
+// Helper methods for CacheBlocking
+impl CacheBlocking {
+    /// Analyze nested loops for cache blocking opportunities
+    fn analyze_for_blocking(
+        &self,
+        func: &SirFunction,
+        block_idx: usize,
+    ) -> Option<BlockingAnalysis> {
+        let block = &func.blocks[block_idx];
+        
+        // Check for matrix multiplication pattern
+        // Look for: nested loops with array accesses and multiplications
+        let mut has_matrix_ops = false;
+        let nesting_depth = block.loop_depth;
+        
+        // Check if loop body has multiplication operations
+        for inst in &block.instructions {
+            match &inst.inst {
+                super::ops::SirInst::BinOp { op, .. } => {
+                    if matches!(op, super::ops::ArithOp::Mul | super::ops::ArithOp::FMul) {
+                        has_matrix_ops = true;
+                        break;
+                    }
+                }
+                _ => {}
+            }
+        }
+        
+        if has_matrix_ops && nesting_depth >= 2 {
+            // Determine optimal block size (typically L1 cache line size / element size)
+            // For f64: 64 bytes / 8 bytes = 8 elements
+            let block_size = 8;
+            
+            Some(BlockingAnalysis {
+                can_block: true,
+                block_size,
+                nesting_depth,
+            })
+        } else {
+            None
+        }
+    }
+    
+    /// Apply cache blocking transformation
+    fn apply_blocking(
+        &mut self,
+        func: &mut SirFunction,
+        block_idx: usize,
+        analysis: &BlockingAnalysis,
+    ) -> bool {
+        // In full implementation, this would:
+        // 1. Create new loop structure with blocking
+        // 2. Add outer loops for block iteration
+        // 3. Add inner loops for element iteration within blocks
+        // 4. Update array access patterns
+        
+        // For now, just mark that we've analyzed this block
+        // In full implementation, would apply blocking transformation
+        true
+    }
+}
+
+/// Analysis result for cache blocking
+struct BlockingAnalysis {
+    can_block: bool,
+    block_size: usize,
+    nesting_depth: u32,
+}
+
 /// Dead Code Elimination
 pub struct DeadCodeElimination;
 

@@ -102,6 +102,14 @@ pub enum EmitError {
     InvalidEncoding(String),
     /// I/O error during code emission
     IoError(String),
+    /// Unit mismatch in operation
+    UnitMismatch {
+        op: String,
+        lhs_unit: String,
+        rhs_unit: String,
+    },
+    /// Invalid input (e.g., invalid register class, dimension, etc.)
+    InvalidInput(String),
 }
 
 // ============================================================================
@@ -580,7 +588,25 @@ impl RegisterAllocator {
         }
 
         // Step 3: Linear scan allocation
+        // Debug: print intervals before allocation
+        if std::env::var("SOUNIO_DEBUG_ALLOC").is_ok() {
+            eprintln!("=== Live Intervals (sorted by start) ===");
+            for (idx, iv) in self.intervals.iter().enumerate() {
+                eprintln!("  [{}] v{}: [{}, {}) crosses_call={} uses={:?}",
+                    idx, iv.value.0, iv.start, iv.end, iv.crosses_call, iv.use_positions);
+            }
+        }
+
         self.linear_scan()?;
+
+        // Debug: print allocation results
+        if std::env::var("SOUNIO_DEBUG_ALLOC").is_ok() {
+            eprintln!("=== Allocation Results ===");
+            for iv in &self.intervals {
+                eprintln!("  v{}: reg={:?} spill={:?}",
+                    iv.value.0, iv.reg, iv.spill_slot);
+            }
+        }
 
         Ok(())
     }
@@ -762,6 +788,10 @@ impl RegisterAllocator {
                 ScientificOp::CompartmentStep { .. } => (0.9, true),
                 // Lerp - linear interpolation, exact given inputs
                 ScientificOp::Lerp { .. } => (1.0, true),
+                // Autodiff - preserves input confidence, may degrade slightly
+                ScientificOp::Autodiff { .. } => (0.95, true),
+                // Autodiff - symbolic differentiation, high confidence
+                ScientificOp::Autodiff { .. } => (0.9, true),
             },
 
             // MEMORY LOADS - external data, LOW confidence unless proven
@@ -1212,6 +1242,8 @@ pub struct X86_64Emitter {
     spill_ops_by_position: std::collections::HashMap<usize, Vec<crate::backend::native::alloc::SpillReloadOp>>,
     /// Current instruction position (for spill/reload insertion)
     current_instruction_pos: usize,
+    /// Function name map for resolving Callee::Direct calls
+    func_names: HashMap<crate::sir::values::FuncId, String>,
 }
 
 /// Condition codes for x86-64 Jcc/SETcc instructions
@@ -1276,6 +1308,7 @@ impl X86_64Emitter {
             external_alloc_result: None,
             spill_ops_by_position: std::collections::HashMap::new(),
             current_instruction_pos: 0,
+            func_names: HashMap::new(),
         }
     }
 
@@ -1295,35 +1328,50 @@ impl X86_64Emitter {
             self.spill_ops_by_position.clear();
 
             // Build map of spill/reload operations by position
-            // Optimization: Store references instead of cloning
-            // Note: We need to clone here because we're storing in a HashMap that outlives the alloc_result
-            // But we can optimize by only cloning when necessary (if position already exists)
             for op in &alloc_result.spill_code {
                 let pos = op.position();
-                // Only clone if we need to store multiple ops at the same position
-                // For single ops, we could avoid the clone, but HashMap requires owned values
                 self.spill_ops_by_position.entry(pos).or_insert_with(Vec::new).push(op.clone());
             }
-            
+
             // Validate that we have allocation results
             if alloc_result.allocated.is_empty() && alloc_result.spilled.is_empty() {
                 // Fallback: use internal allocator if external result is empty
                 return;
             }
 
-            // Apply allocated registers
+            // Clear existing intervals and create new ones from external allocation
+            self.register_allocator.intervals.clear();
+            self.register_allocator.value_to_interval.clear();
+
+            // Apply allocated registers - create a new interval for each
             for interval in &alloc_result.allocated {
                 if let Some(reg) = interval.assigned {
-                    // Map VirtReg to ValueId and X86Reg
-                    // This is a simplified mapping - in production would need proper conversion
                     let value_id = ValueId(interval.vreg.0);
                     if let Some(x86_reg) = self.virt_reg_to_x86_reg(reg) {
-                        self.register_allocator.value_to_interval.insert(value_id, 0);
-                        // Update interval in register allocator
-                        if let Some(interval_idx) = self.register_allocator.value_to_interval.get(&value_id) {
-                            if let Some(interval_ref) = self.register_allocator.intervals.get_mut(*interval_idx) {
-                                interval_ref.reg = Some(x86_reg);
-                            }
+                        // Create a new interval entry for this value
+                        let interval_idx = self.register_allocator.intervals.len();
+                        self.register_allocator.value_to_interval.insert(value_id, interval_idx);
+
+                        // Create the LiveInterval with the assigned register
+                        let has_prov = !matches!(interval.epistemic.provenance, crate::backend::native::metrics::Provenance::Unknown);
+                        let new_interval = LiveInterval {
+                            value: value_id,
+                            start: interval.start,
+                            end: interval.end,
+                            ty: SirType::i64(), // Default type, actual type not critical for allocation
+                            reg: Some(x86_reg),
+                            spill_slot: None,
+                            crosses_call: interval.crosses_call,
+                            use_positions: interval.uses.iter().map(|u| u.pos).collect(),
+                            max_confidence: interval.epistemic.confidence,
+                            uncertainty: 1.0 - interval.epistemic.confidence,
+                            has_provenance: has_prov,
+                            epistemic_weight: interval.epistemic.confidence,
+                        };
+                        self.register_allocator.intervals.push(new_interval);
+
+                        if std::env::var("SOUNIO_DEBUG_ALLOC").is_ok() {
+                            eprintln!("  Applied: v{} -> {:?}", value_id.0, x86_reg);
                         }
                     }
                 }
@@ -1333,10 +1381,30 @@ impl X86_64Emitter {
             for interval in &alloc_result.spilled {
                 if let Some(slot) = interval.spill_slot {
                     let value_id = ValueId(interval.vreg.0);
-                    if let Some(interval_idx) = self.register_allocator.value_to_interval.get(&value_id) {
-                        if let Some(interval_ref) = self.register_allocator.intervals.get_mut(*interval_idx) {
-                            interval_ref.spill_slot = Some(slot.0 as i32);
-                        }
+
+                    // Create a new interval for spilled value
+                    let interval_idx = self.register_allocator.intervals.len();
+                    self.register_allocator.value_to_interval.insert(value_id, interval_idx);
+
+                    let has_prov = !matches!(interval.epistemic.provenance, crate::backend::native::metrics::Provenance::Unknown);
+                    let new_interval = LiveInterval {
+                        value: value_id,
+                        start: interval.start,
+                        end: interval.end,
+                        ty: SirType::i64(),
+                        reg: None,
+                        spill_slot: Some(slot.0 as i32),
+                        crosses_call: interval.crosses_call,
+                        use_positions: interval.uses.iter().map(|u| u.pos).collect(),
+                        max_confidence: interval.epistemic.confidence,
+                        uncertainty: 1.0 - interval.epistemic.confidence,
+                        has_provenance: has_prov,
+                        epistemic_weight: interval.epistemic.confidence,
+                    };
+                    self.register_allocator.intervals.push(new_interval);
+
+                    if std::env::var("SOUNIO_DEBUG_ALLOC").is_ok() {
+                        eprintln!("  Spilled: v{} -> slot {}", value_id.0, slot.0);
                     }
                 }
             }
@@ -1957,6 +2025,25 @@ impl X86_64Emitter {
         self.emit_mov_mem_rbp_r64(-16, X86Reg::RAX);
         self.emit_movsd_rbp_mem(dst, -16);
     }
+    
+    /// Load 64-bit constant into XMM via RSP (for use in function prologue)
+    /// Allocates temporary stack space, stores constant, loads to XMM, then cleans up
+    fn emit_load_f64_const_rsp(&mut self, dst: X86Reg, bits: u64) {
+        // Allocate temporary stack space (8 bytes)
+        self.emit_sub_rsp_imm(8);
+        
+        // Store constant bytes at [RSP]
+        // Move constant to RAX first
+        self.emit_mov_ri64(X86Reg::RAX, bits as i64);
+        // Store RAX to [RSP]
+        self.emit_mov_mem_disp_r64(X86Reg::RSP, 0, X86Reg::RAX);
+        
+        // Load from [RSP] into XMM register
+        self.emit_movsd_r64_mem_disp(dst, X86Reg::RSP, 0);
+        
+        // Clean up stack
+        self.emit_add_rsp_imm(8);
+    }
 
     /// MOVSD [rbp + disp], xmm - store float to stack
     fn emit_movsd_mem_rbp(&mut self, disp: i32, src: X86Reg) {
@@ -2272,6 +2359,11 @@ impl X86_64Emitter {
     ) -> Result<CodeSegment, EmitError> {
         let mut symbols = vec![];
 
+        // Build function name map for resolving Callee::Direct calls
+        for func in &module.functions {
+            self.func_names.insert(func.id, func.name.clone());
+        }
+
         for func in &module.functions {
             // Record symbol
             symbols.push(Symbol {
@@ -2565,6 +2657,10 @@ impl X86_64Emitter {
         lhs: ValueId,
         rhs: ValueId,
     ) -> Result<(), EmitError> {
+        // Note: Unit checking is performed at the type-checking phase.
+        // By the time we reach codegen, units have been verified and erased.
+        // This is a zero-cost abstraction - no runtime overhead.
+
         // Get registers or load from spill slots
         let lhs_reg = self.get_value_reg(lhs, X86Reg::R10);
         let rhs_reg = self.get_value_reg(rhs, X86Reg::R11);
@@ -3599,6 +3695,41 @@ impl X86_64Emitter {
         SirType::Scalar(ScalarType::F64)
     }
     
+    /// Helper: Get physical unit from value (for unit checking)
+    fn get_value_unit(&self, value_id: ValueId, func: &SirFunction) -> Option<super::values::PhysicalUnit> {
+        // Try to find value in function parameters
+        for (idx, (_, _)) in func.params.iter().enumerate() {
+            if ValueId::new(idx as u32) == value_id {
+                // Would need access to parameter metadata - for now return None
+                // In full implementation, would access func.params metadata
+                return None;
+            }
+        }
+        
+        // Try to find in instructions
+        for block in &func.blocks {
+            for inst in &block.instructions {
+                if let Some(result) = inst.result {
+                    if result == value_id {
+                        // Check if instruction has unit metadata
+                        // In full implementation, would access inst.metadata.unit
+                        return None;
+                    }
+                }
+            }
+        }
+        
+        None
+    }
+    
+    /// Helper: Check if two units are compatible (same dimension)
+    /// Zero-cost: this is compile-time only, no runtime overhead
+    fn units_compatible(&self, lhs: &super::values::PhysicalUnit, rhs: &super::values::PhysicalUnit) -> bool {
+        // Units are compatible if they have the same dimensions
+        // Scale factors don't matter for compatibility (only for conversion)
+        lhs.dimensions == rhs.dimensions
+    }
+    
     /// Helper: Infer type from instruction
     fn infer_instruction_type(&self, inst: &super::ops::SirInst) -> SirType {
         match inst {
@@ -3625,7 +3756,7 @@ impl X86_64Emitter {
             ScientificOp::OdeStep {
                 method,
                 state,
-                derivatives: _,
+                derivatives,
                 t,
                 dt,
             } => {
@@ -3691,28 +3822,208 @@ impl X86_64Emitter {
                     }
                     
                     OdeMethod::DoPri5 | OdeMethod::CashKarp => {
-                        // Complex adaptive methods - always use runtime
-                        let state_reg = self.get_value_reg(*state, X86Reg::R10);
-                        let t_reg = self.get_value_reg(*t, X86Reg::XMM0);
-                        let dt_reg = self.get_value_reg(*dt, X86Reg::XMM1);
+                        // ============================================================
+                        // COMPLEX ADAPTIVE ODE SOLVERS (DoPri5, CashKarp)
+                        // ============================================================
+                        // These methods require full C runtime interface:
+                        // C signature: double sounio_ode_*_step(
+                        //     double* state,      // RDI: state vector (modified in-place)
+                        //     int n,              // RSI: dimension
+                        //     double* t,          // RDX: pointer to current time (updated)
+                        //     double* dt,         // RCX: pointer to step size (updated)
+                        //     double rtol,        // XMM0: relative tolerance
+                        //     double atol,        // XMM1: absolute tolerance
+                        //     DerivativeFn f      // R8: derivatives function pointer
+                        // );
+                        // Returns: error estimate in XMM0 (finite = success, INF = step rejected)
                         
-                        if !state_reg.is_xmm() {
+                        // ============================================================
+                        // STEP 1: Extract state dimension from type
+                        // ============================================================
+                        let state_type = self.get_value_type(*state, func);
+                        let state_dim = match &state_type {
+                            SirType::Array(arr) => {
+                                // Direct array type - use array length
+                                arr.len as i32
+                            }
+                            SirType::Pointer(ptr) => {
+                                // Pointer type - check if it points to an array
+                                match ptr.pointee.as_ref() {
+                                    SirType::Array(arr) => arr.len as i32,
+                                    _ => {
+                                        // Pointer to scalar or unknown - default to 1
+                                        // In production, would extract from metadata or type info
+                                        1
+                                    }
+                                }
+                            }
+                            _ => {
+                                // Scalar or unknown type - default to 1
+                                // In production, would validate this is correct
+                                1
+                            }
+                        };
+                        
+                        // Validate dimension is reasonable
+                        if state_dim <= 0 || state_dim > 1_000_000 {
+                            return Err(EmitError::InvalidInput(
+                                format!("Invalid ODE state dimension: {}", state_dim)
+                            ));
+                        }
+                        
+                        // ============================================================
+                        // STEP 2: Get registers for state, t, dt
+                        // ============================================================
+                        let state_reg = self.get_value_reg(*state, X86Reg::R10);
+                        let t_reg = self.get_value_reg(*t, X86Reg::XMM2);
+                        let dt_reg = self.get_value_reg(*dt, X86Reg::XMM3);
+                        
+                        // ============================================================
+                        // STEP 3: Allocate stack space for t and dt (16 bytes aligned)
+                        // ============================================================
+                        // We need 16 bytes: 8 for t, 8 for dt
+                        // Align to 16 bytes for System V ABI
+                        self.emit_sub_rsp_imm(16);
+                        
+                        // ============================================================
+                        // STEP 4: Store t and dt values on stack
+                        // ============================================================
+                        // Store t at [RSP] (must be f64 in XMM register)
+                        if t_reg.is_xmm() {
+                            // t is in XMM register - store directly
+                            self.emit_movsd_mem_disp_r64(X86Reg::RSP, 0, t_reg);
+                        } else {
+                            // t is in integer register - this shouldn't happen for f64
+                            // In production, would convert or handle error
+                            // For now, attempt to store (may cause issues)
+                            // TODO: Add proper conversion or error handling
+                            return Err(EmitError::InvalidInput(
+                                "ODE time value must be in XMM register (f64)".into()
+                            ));
+                        }
+                        
+                        // Store dt at [RSP+8] (must be f64 in XMM register)
+                        if dt_reg.is_xmm() {
+                            // dt is in XMM register - store directly
+                            self.emit_movsd_mem_disp_r64(X86Reg::RSP, 8, dt_reg);
+                        } else {
+                            // dt is in integer register - this shouldn't happen for f64
+                            return Err(EmitError::InvalidInput(
+                                "ODE step size must be in XMM register (f64)".into()
+                            ));
+                        }
+                        
+                        // ============================================================
+                        // STEP 5: Setup arguments for C calling convention (System V AMD64)
+                        // ============================================================
+                        // RDI = state pointer (must be in general-purpose register)
+                        if state_reg.is_xmm() {
+                            // State is in XMM register - this is invalid for pointers
+                            // In production, would handle this error or convert
+                            return Err(EmitError::InvalidInput(
+                                "ODE state must be in general-purpose register (pointer)".into()
+                            ));
+                        } else {
+                            // State is in GP register - move to RDI (first argument)
                             self.emit_mov_rr(X86Reg::RDI, state_reg);
                         }
-                        if !t_reg.is_xmm() {
-                            self.emit_movsd_rr(X86Reg::XMM0, t_reg);
-                        }
-                        if !dt_reg.is_xmm() {
-                            self.emit_movsd_rr(X86Reg::XMM1, dt_reg);
+                        
+                        // RSI = n (dimension)
+                        self.emit_mov_ri64(X86Reg::RSI, state_dim as i64);
+                        
+                        // RDX = t pointer (address of [RSP])
+                        self.emit_lea(X86Reg::RDX, X86Reg::RSP, 0);
+                        
+                        // RCX = dt pointer (address of [RSP+8])
+                        self.emit_lea(X86Reg::RCX, X86Reg::RSP, 8);
+                        
+                        // ============================================================
+                        // STEP 6: Load tolerance constants (rtol, atol)
+                        // ============================================================
+                        // Extract tolerances from metadata if available
+                        // OdeSolverMetadata contains tolerance information
+                        // For now, use defaults; in production, extract from metadata
+                        let mut rtol: f64 = 1e-6;
+                        let mut atol: f64 = 1e-8;
+                        
+                        // TODO: Extract from OdeSolverMetadata if available
+                        // Example:
+                        // if let Some(metadata) = func.metadata.get(result) {
+                        //     for meta in metadata {
+                        //         if let Metadata::OdeSolver(ode_meta) = meta {
+                        //             if let Some(tol) = ode_meta.tolerance {
+                        //                 rtol = tol;
+                        //                 atol = tol * 0.1; // Common pattern: atol = rtol * 0.1
+                        //             }
+                        //         }
+                        //     }
+                        // }
+                        
+                        // Load rtol into XMM0 using helper function
+                        // Use RSP-based version since we're in the middle of function
+                        self.emit_load_f64_const_rsp(X86Reg::XMM0, rtol.to_bits());
+                        
+                        // Load atol into XMM1 using helper function
+                        self.emit_load_f64_const_rsp(X86Reg::XMM1, atol.to_bits());
+                        
+                        // ============================================================
+                        // STEP 7: Get derivatives function pointer
+                        // ============================================================
+                        // The derivatives function ID is in the op
+                        let derivatives_func_id = *derivatives;
+                        
+                        // Look up function name or address
+                        // In production, this would resolve the function address via PLT
+                        // For now, we'll use a relocation to resolve the function
+                        if let Some(func_name) = self.func_names.get(&derivatives_func_id) {
+                            // Function has a name - use relocation to resolve address
+                            // Load function address into R8 via relocation
+                            let offset = self.code.len() + 2; // +2 for MOV opcode and ModR/M
+                            self.relocations.push(Relocation {
+                                offset,
+                                kind: RelocKind::PLT32,
+                                symbol: func_name.clone(),
+                                addend: -4,
+                            });
+                            // MOV R8, [RIP+rel32] - will be patched by linker
+                            self.emit_rex(true, false, false, true); // REX.W + R8 needs REX.B
+                            self.emit_byte(0x8B); // MOV r64, r/m64
+                            self.emit_modrm(0b00, X86Reg::R8.encoding(), 0b101); // [RIP+disp32]
+                            self.emit_u32(0); // Placeholder, will be patched
+                        } else {
+                            // Function doesn't have a name - use direct address if available
+                            // For now, set to NULL (runtime will handle)
+                            self.emit_mov_ri64(X86Reg::R8, 0);
                         }
                         
+                        // ============================================================
+                        // STEP 8: Call the ODE solver function
+                        // ============================================================
                         let func_name = match method {
                             OdeMethod::DoPri5 => "sounio_ode_dopri5",
                             OdeMethod::CashKarp => "sounio_ode_cashkarp",
                             _ => unreachable!(),
                         };
+                        
+                        // All arguments are now set up:
+                        // RDI = state pointer ✓
+                        // RSI = n (dimension) ✓
+                        // RDX = t pointer ✓
+                        // RCX = dt pointer ✓
+                        // XMM0 = rtol ✓
+                        // XMM1 = atol ✓
+                        // R8 = derivatives function pointer ✓
+                        
+                        // Call the function
                         self.emit_call_extern(func_name);
                         
+                        // ============================================================
+                        // STEP 9: Clean up stack and handle return value
+                        // ============================================================
+                        // Clean up stack: 16 bytes for t/dt
+                        self.emit_add_rsp_imm(16);
+                        
+                        // Return value (error estimate) is in XMM0
                         let result_reg = self
                             .register_allocator
                             .get_reg(result)
@@ -3767,6 +4078,112 @@ impl X86_64Emitter {
                 self.store_value(result, dst_reg);
             }
             
+            ScientificOp::Autodiff {
+                mode,
+                function,
+                input,
+                output: _,
+            } => {
+                // Automatic differentiation codegen
+                // Forward mode: uses dual numbers
+                // Reverse mode: uses tape-based backpropagation
+                
+                match mode {
+                    super::ops::AutodiffMode::Forward => {
+                        // Forward-mode autodiff using dual numbers
+                        // For now, call the runtime function
+                        // In production, would inline dual number operations when possible
+                        
+                        // Get input value register
+                        let input_reg = self.get_value_reg(*input, X86Reg::XMM0);
+                        
+                        // Allocate stack space for gradient result
+                        self.emit_sub_rsp_imm(8);
+                        
+                        // Setup arguments for sounio_autodiff_forward:
+                        // RDI = function pointer
+                        // XMM0 = input value
+                        // RSI = gradient pointer (on stack)
+                        
+                        // Get function pointer via relocation
+                        // Look up function name
+                        if let Some(func_name) = self.func_names.get(function) {
+                            // Create relocation to load function address
+                            let offset = self.code.len() + 2; // +2 for MOV opcode and ModR/M
+                            self.relocations.push(Relocation {
+                                offset,
+                                kind: RelocKind::PLT32,
+                                symbol: func_name.clone(),
+                                addend: -4,
+                            });
+                            
+                            // MOV RDI, [RIP+rel32] - will be patched by linker
+                            self.emit_rex(true, false, false, false); // REX.W
+                            self.emit_byte(0x8B); // MOV r64, r/m64
+                            self.emit_modrm(0b00, X86Reg::RDI.encoding(), 0b101); // [RIP+disp32]
+                            self.emit_u32(0); // Placeholder, will be patched
+                        } else {
+                            // Function doesn't have a name - set to NULL
+                            self.emit_mov_ri64(X86Reg::RDI, 0);
+                        }
+                        
+                        // Load input value into XMM0
+                        if input_reg.is_xmm() {
+                            if input_reg != X86Reg::XMM0 {
+                                self.emit_movsd_rr(X86Reg::XMM0, input_reg);
+                            }
+                        } else {
+                            // Input is in integer register - this shouldn't happen for f64
+                            return Err(EmitError::InvalidInput(
+                                "Autodiff input must be in XMM register (f64)".into()
+                            ));
+                        }
+                        
+                        // Pass gradient pointer (RSP)
+                        self.emit_lea(X86Reg::RSI, X86Reg::RSP, 0);
+                        
+                        // Call forward-mode autodiff
+                        self.emit_call_extern("sounio_autodiff_forward");
+                        
+                        // Function value is in XMM0 (return value)
+                        // Gradient is at [RSP]
+                        
+                        // Load gradient from stack if needed
+                        // For now, assume result is the function value
+                        // In production, would handle gradient separately
+                        
+                        // Clean up stack
+                        self.emit_add_rsp_imm(8);
+                        
+                        // Result (function value) is in XMM0
+                        let result_reg = self
+                            .register_allocator
+                            .get_reg(result)
+                            .unwrap_or(X86Reg::XMM0);
+                        if result_reg != X86Reg::XMM0 {
+                            self.emit_movsd_rr(result_reg, X86Reg::XMM0);
+                        }
+                    }
+                    
+                    super::ops::AutodiffMode::Reverse => {
+                        // Reverse-mode autodiff using tape
+                        // For now, call the runtime function
+                        // In production, would build tape during forward pass
+                        
+                        // TODO: Implement tape-based reverse mode
+                        // This requires:
+                        // 1. Building a computation tape during forward pass
+                        // 2. Storing tape pointer
+                        // 3. Calling sounio_autodiff_reverse with tape and output gradient
+                        
+                        // For now, return error - reverse mode needs more infrastructure
+                        return Err(EmitError::UnsupportedInstruction(
+                            "Reverse-mode autodiff not yet implemented in codegen".into()
+                        ));
+                    }
+                }
+            }
+            
             ScientificOp::Lerp { a, b, t } => {
                 // Linear interpolation: a + t * (b - a)
                 let a_reg = self.get_value_reg(*a, X86Reg::XMM0);
@@ -3784,6 +4201,112 @@ impl X86_64Emitter {
                 self.emit_addsd(dst_reg, a_reg);   // a + t * (b - a)
                 
                 self.store_value(result, dst_reg);
+            }
+            
+            ScientificOp::Autodiff {
+                mode,
+                function,
+                input,
+                output: _,
+            } => {
+                // Automatic differentiation codegen
+                // Forward mode: uses dual numbers
+                // Reverse mode: uses tape-based backpropagation
+                
+                match mode {
+                    super::ops::AutodiffMode::Forward => {
+                        // Forward-mode autodiff using dual numbers
+                        // For now, call the runtime function
+                        // In production, would inline dual number operations when possible
+                        
+                        // Get input value register
+                        let input_reg = self.get_value_reg(*input, X86Reg::XMM0);
+                        
+                        // Allocate stack space for gradient result
+                        self.emit_sub_rsp_imm(8);
+                        
+                        // Setup arguments for sounio_autodiff_forward:
+                        // RDI = function pointer
+                        // XMM0 = input value
+                        // RSI = gradient pointer (on stack)
+                        
+                        // Get function pointer via relocation
+                        // Look up function name
+                        if let Some(func_name) = self.func_names.get(function) {
+                            // Create relocation to load function address
+                            let offset = self.code.len() + 2; // +2 for MOV opcode and ModR/M
+                            self.relocations.push(Relocation {
+                                offset,
+                                kind: RelocKind::PLT32,
+                                symbol: func_name.clone(),
+                                addend: -4,
+                            });
+                            
+                            // MOV RDI, [RIP+rel32] - will be patched by linker
+                            self.emit_rex(true, false, false, false); // REX.W
+                            self.emit_byte(0x8B); // MOV r64, r/m64
+                            self.emit_modrm(0b00, X86Reg::RDI.encoding(), 0b101); // [RIP+disp32]
+                            self.emit_u32(0); // Placeholder, will be patched
+                        } else {
+                            // Function doesn't have a name - set to NULL
+                            self.emit_mov_ri64(X86Reg::RDI, 0);
+                        }
+                        
+                        // Load input value into XMM0
+                        if input_reg.is_xmm() {
+                            if input_reg != X86Reg::XMM0 {
+                                self.emit_movsd_rr(X86Reg::XMM0, input_reg);
+                            }
+                        } else {
+                            // Input is in integer register - this shouldn't happen for f64
+                            return Err(EmitError::InvalidInput(
+                                "Autodiff input must be in XMM register (f64)".into()
+                            ));
+                        }
+                        
+                        // Pass gradient pointer (RSP)
+                        self.emit_lea(X86Reg::RSI, X86Reg::RSP, 0);
+                        
+                        // Call forward-mode autodiff
+                        self.emit_call_extern("sounio_autodiff_forward");
+                        
+                        // Function value is in XMM0 (return value)
+                        // Gradient is at [RSP]
+                        
+                        // Load gradient from stack if needed
+                        // For now, assume result is the function value
+                        // In production, would handle gradient separately
+                        
+                        // Clean up stack
+                        self.emit_add_rsp_imm(8);
+                        
+                        // Result (function value) is in XMM0
+                        let result_reg = self
+                            .register_allocator
+                            .get_reg(result)
+                            .unwrap_or(X86Reg::XMM0);
+                        if result_reg != X86Reg::XMM0 {
+                            self.emit_movsd_rr(result_reg, X86Reg::XMM0);
+                        }
+                    }
+                    
+                    super::ops::AutodiffMode::Reverse => {
+                        // Reverse-mode autodiff using tape
+                        // For now, call the runtime function
+                        // In production, would build tape during forward pass
+                        
+                        // TODO: Implement tape-based reverse mode
+                        // This requires:
+                        // 1. Building a computation tape during forward pass
+                        // 2. Storing tape pointer
+                        // 3. Calling sounio_autodiff_reverse with tape and output gradient
+                        
+                        // For now, return error - reverse mode needs more infrastructure
+                        return Err(EmitError::UnsupportedInstruction(
+                            "Reverse-mode autodiff not yet implemented in codegen".into()
+                        ));
+                    }
+                }
             }
             
             _ => {
@@ -3818,9 +4341,18 @@ impl X86_64Emitter {
                 let ptr_reg = self.get_value_reg(*ptr, X86Reg::R11);
                 self.emit_call_reg(ptr_reg);
             }
-            Callee::Direct(_func_id) => {
-                // Internal function call - would need function address
-                self.emit_call_rel32(0); // Placeholder
+            Callee::Direct(func_id) => {
+                // Internal function call - add relocation to resolve at link time
+                if let Some(name) = self.func_names.get(func_id) {
+                    let offset = self.offset() + 1; // +1 for the E8 opcode
+                    self.relocations.push(Relocation {
+                        offset,
+                        kind: RelocKind::PCRel32,
+                        symbol: name.clone(),
+                        addend: -4, // PC-relative adjustment
+                    });
+                }
+                self.emit_call_rel32(0); // Placeholder, will be patched by linker
             }
         }
 
@@ -4184,9 +4716,17 @@ impl X86_64Emitter {
                         self.emit_byte(0xFF);
                         self.emit_modrm(0b11, 4, ptr_reg.encoding());
                     }
-                    crate::sir::ops::Callee::Direct(_func_id) => {
-                        // For direct calls, we'd need to look up the function address
-                        // For now, emit placeholder
+                    crate::sir::ops::Callee::Direct(func_id) => {
+                        // Direct tail call - add relocation for internal function
+                        if let Some(name) = self.func_names.get(func_id) {
+                            let offset = self.code.len() + 1;
+                            self.relocations.push(Relocation {
+                                offset,
+                                kind: RelocKind::PCRel32,
+                                symbol: name.clone(),
+                                addend: -4,
+                            });
+                        }
                         self.emit_jmp_rel32(0);
                     }
                 }
@@ -4257,16 +4797,17 @@ pub fn code_segment_to_elf(segment: &CodeSegment) -> Result<Vec<u8>, EmitError> 
     let mut symbol_indices: HashMap<String, usize> = HashMap::new();
 
     // Add defined symbols
+    // Note: ELF symbol table has null symbol at index 0, so actual symbols start at 1
     for sym in &segment.symbols {
         let idx = elf.add_function(&sym.name, sym.offset as u64, 0, sym.global);
-        symbol_indices.insert(sym.name.clone(), idx);
+        symbol_indices.insert(sym.name.clone(), idx + 1);
     }
 
     // Collect symbols referenced by relocations that aren't defined
     for reloc in &segment.relocations {
         if !symbol_indices.contains_key(&reloc.symbol) {
             let idx = elf.add_undefined_symbol(&reloc.symbol);
-            symbol_indices.insert(reloc.symbol.clone(), idx);
+            symbol_indices.insert(reloc.symbol.clone(), idx + 1);
         }
     }
 

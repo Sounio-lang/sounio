@@ -209,6 +209,165 @@ where
     }
 }
 
+/// Cash-Karp RK45 solver (5th order, adaptive step)
+/// 
+/// Reference: Cash & Karp (1990), "A variable order Runge-Kutta method for initial value problems"
+pub fn solve_cashkarp<F>(f: F, y0: &[f64], t_span: (f64, f64), options: &SolverOptions) -> ODESolution
+where
+    F: Fn(f64, &[f64], &mut [f64]),
+{
+    let start_time = std::time::Instant::now();
+    let (t0, tf) = t_span;
+    let n = y0.len();
+
+    // Cash-Karp coefficients (Butcher tableau)
+    // Stage times
+    const C2: f64 = 1.0 / 5.0;
+    const C3: f64 = 3.0 / 10.0;
+    const C4: f64 = 3.0 / 5.0;
+    const C5: f64 = 1.0;
+    const C6: f64 = 7.0 / 8.0;
+
+    // Butcher tableau coefficients
+    const A21: f64 = 1.0 / 5.0;
+    const A31: f64 = 3.0 / 40.0;
+    const A32: f64 = 9.0 / 40.0;
+    const A41: f64 = 3.0 / 10.0;
+    const A42: f64 = -9.0 / 10.0;
+    const A43: f64 = 6.0 / 5.0;
+    const A51: f64 = -11.0 / 54.0;
+    const A52: f64 = 5.0 / 2.0;
+    const A53: f64 = -70.0 / 27.0;
+    const A54: f64 = 35.0 / 27.0;
+    const A61: f64 = 1631.0 / 55296.0;
+    const A62: f64 = 175.0 / 512.0;
+    const A63: f64 = 575.0 / 13824.0;
+    const A64: f64 = 44275.0 / 110592.0;
+    const A65: f64 = 253.0 / 4096.0;
+
+    // 5th order weights
+    const B1: f64 = 37.0 / 378.0;
+    const B3: f64 = 250.0 / 621.0;
+    const B4: f64 = 125.0 / 594.0;
+    const B6: f64 = 512.0 / 1771.0;
+
+    // 4th order weights (for error estimation)
+    const B1_4: f64 = 2825.0 / 27648.0;
+    const B3_4: f64 = 18575.0 / 48384.0;
+    const B4_4: f64 = 13525.0 / 55296.0;
+    const B5_4: f64 = 277.0 / 14336.0;
+    const B6_4: f64 = 1.0 / 4.0;
+
+    // Error coefficients (difference between 5th and 4th order)
+    const E1: f64 = B1 - B1_4;
+    const E3: f64 = B3 - B3_4;
+    const E4: f64 = B4 - B4_4;
+    const E5: f64 = -B5_4;  // B5 is 0 for 5th order
+    const E6: f64 = B6 - B6_4;
+
+    let mut solution = ODESolution::new();
+    let mut t = t0;
+    let mut y = y0.to_vec();
+
+    // Initial step size
+    let mut h = if options.initial_step > 0.0 {
+        options.initial_step
+    } else {
+        (tf - t0) / 100.0
+    }
+    .min(options.max_step);
+
+    // Temporary vectors
+    let mut k1 = vec![0.0; n];
+    let mut k2 = vec![0.0; n];
+    let mut k3 = vec![0.0; n];
+    let mut k4 = vec![0.0; n];
+    let mut k5 = vec![0.0; n];
+    let mut k6 = vec![0.0; n];
+    let mut y_temp = vec![0.0; n];
+    let mut y_new = vec![0.0; n];
+
+    solution.t.push(t);
+    solution.y.push(y.clone());
+
+    // k1 for first step
+    f(t, &y, &mut k1);
+    solution.stats.n_evals += 1;
+
+    while t < tf && solution.stats.n_steps < options.max_steps {
+        let step = h.min(tf - t);
+
+        // Stage 2
+        for i in 0..n {
+            y_temp[i] = y[i] + step * A21 * k1[i];
+        }
+        f(t + C2 * step, &y_temp, &mut k2);
+
+        // Stage 3
+        for i in 0..n {
+            y_temp[i] = y[i] + step * (A31 * k1[i] + A32 * k2[i]);
+        }
+        f(t + C3 * step, &y_temp, &mut k3);
+
+        // Stage 4
+        for i in 0..n {
+            y_temp[i] = y[i] + step * (A41 * k1[i] + A42 * k2[i] + A43 * k3[i]);
+        }
+        f(t + C4 * step, &y_temp, &mut k4);
+
+        // Stage 5
+        for i in 0..n {
+            y_temp[i] = y[i] + step * (A51 * k1[i] + A52 * k2[i] + A53 * k3[i] + A54 * k4[i]);
+        }
+        f(t + C5 * step, &y_temp, &mut k5);
+
+        // Stage 6
+        for i in 0..n {
+            y_temp[i] = y[i] + step * (A61 * k1[i] + A62 * k2[i] + A63 * k3[i] + A64 * k4[i] + A65 * k5[i]);
+        }
+        f(t + C6 * step, &y_temp, &mut k6);
+
+        // 5th order solution
+        for i in 0..n {
+            y_new[i] = y[i] + step * (B1 * k1[i] + B3 * k3[i] + B4 * k4[i] + B6 * k6[i]);
+        }
+
+        solution.stats.n_evals += 5;
+
+        // Error estimate (difference between 5th and 4th order)
+        let mut err = 0.0;
+        for i in 0..n {
+            let sc = options.abstol + options.reltol * y[i].abs().max(y_new[i].abs());
+            let ei = step * (E1 * k1[i] + E3 * k3[i] + E4 * k4[i] + E5 * k5[i] + E6 * k6[i]);
+            err += (ei / sc).powi(2);
+        }
+        err = (err / n as f64).sqrt();
+
+        if err <= 1.0 {
+            // Accept step
+            t += step;
+            y.clone_from(&y_new);
+            // Note: Cash-Karp doesn't have FSAL property, so we need to recompute k1
+            f(t, &y, &mut k1);
+            solution.stats.n_evals += 1;
+
+            solution.t.push(t);
+            solution.y.push(y.clone());
+            solution.stats.n_steps += 1;
+        } else {
+            solution.stats.n_rejected += 1;
+        }
+
+        // Step size control
+        let factor = if err > 0.0 { 0.9 * err.powf(-0.2) } else { 5.0 };
+        h = step * factor.clamp(0.2, 5.0);
+        h = h.clamp(options.min_step, options.max_step);
+    }
+
+    solution.stats.solve_time = start_time.elapsed().as_secs_f64();
+    solution
+}
+
 /// Forward Euler solver (1st order, fixed step)
 pub fn solve_euler<F>(f: F, y0: &[f64], t_span: (f64, f64), options: &SolverOptions) -> ODESolution
 where

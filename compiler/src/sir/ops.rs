@@ -389,6 +389,14 @@ pub enum ScientificOp {
         volumes: ValueId,
         dt: ValueId,
     },
+
+    /// Automatic differentiation operation
+    Autodiff {
+        mode: AutodiffMode,
+        function: FuncId,      // Function to differentiate
+        input: ValueId,        // Input value(s)
+        output: ValueId,       // Output: gradient(s)
+    },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -403,6 +411,15 @@ pub enum OdeMethod {
     DoPri5,
     /// Cash-Karp 5(4)
     CashKarp,
+}
+
+/// Automatic differentiation mode
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AutodiffMode {
+    /// Forward-mode (dual numbers) - efficient for functions with few inputs
+    Forward,
+    /// Reverse-mode (tape-based) - efficient for functions with many inputs (R^n -> R)
+    Reverse,
 }
 
 // ============================================================================
@@ -636,6 +653,12 @@ impl SirInst {
                 } => {
                     vec![*concentrations, *flows, *volumes, *dt]
                 }
+                ScientificOp::Autodiff {
+                    function: _,
+                    input,
+                    output: _,
+                    ..
+                } => vec![*input],
             },
             SirInst::DebugValue { value, .. } => vec![*value],
             SirInst::Assert { cond, .. } | SirInst::Assume(cond) => vec![*cond],

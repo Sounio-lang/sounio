@@ -479,12 +479,37 @@ impl RegisterPool {
 
     /// Try to allocate a register of the given class
     pub fn try_allocate(&mut self, class: RegClass, vreg: VirtReg) -> Option<PhysReg> {
+        self.try_allocate_with_preference(class, vreg, false)
+    }
+
+    /// Try to allocate a register, optionally preferring callee-saved registers
+    ///
+    /// For values that cross calls, prefer callee-saved registers (RBX, R12-R15)
+    /// to avoid needing to save/restore around the call.
+    pub fn try_allocate_with_preference(
+        &mut self,
+        class: RegClass,
+        vreg: VirtReg,
+        prefer_callee_saved: bool,
+    ) -> Option<PhysReg> {
         let pool = match class {
             RegClass::GeneralPurpose => &self.gp_available,
             RegClass::FloatingPoint | RegClass::ExtendedSimd => &self.fp_available,
             RegClass::Special => return None,
         };
 
+        // If we prefer callee-saved, try those first
+        if prefer_callee_saved {
+            for &reg in pool {
+                if reg.is_callee_saved() && !self.allocated.contains(&reg) {
+                    self.allocated.insert(reg);
+                    self.assignments.insert(reg, vreg);
+                    return Some(reg);
+                }
+            }
+        }
+
+        // Fall back to any available register (prefer caller-saved if not preferring callee-saved)
         for &reg in pool {
             if !self.allocated.contains(&reg) {
                 self.allocated.insert(reg);
@@ -783,6 +808,21 @@ impl EpistemicAllocator {
         self.stats.total_spill_ops = spilled.len();
         self.stats.finalize();
 
+        // Debug output for allocation results
+        if std::env::var("SOUNIO_DEBUG_ALLOC").is_ok() {
+            eprintln!("=== Allocation Results ===");
+            for interval in &allocated {
+                let reg_name = interval.assigned.map(|r| format!("{:?}", r)).unwrap_or_else(|| "None".to_string());
+                eprintln!("  vreg {} [{}, {}): assigned to {}",
+                    interval.vreg.0, interval.start, interval.end, reg_name);
+            }
+            for interval in &spilled {
+                let slot = interval.spill_slot.map(|s| format!("{:?}", s)).unwrap_or_else(|| "None".to_string());
+                eprintln!("  vreg {} [{}, {}): spilled to {}",
+                    interval.vreg.0, interval.start, interval.end, slot);
+            }
+        }
+
         AllocResult {
             allocated,
             spilled,
@@ -809,8 +849,15 @@ impl EpistemicAllocator {
     }
 
     /// Try to allocate a physical register for an interval
+    ///
+    /// If the interval crosses a call, prefer callee-saved registers to avoid
+    /// the value being clobbered.
     fn try_allocate_reg(&mut self, interval: &LiveInterval) -> Option<PhysReg> {
-        self.reg_pool.try_allocate(interval.reg_class, interval.vreg)
+        self.reg_pool.try_allocate_with_preference(
+            interval.reg_class,
+            interval.vreg,
+            interval.crosses_call,
+        )
     }
 
     /// Decide what to spill when no registers are available
@@ -1374,7 +1421,16 @@ pub fn build_intervals_from_sir(
             interval.end = (last_pos + 1).max(interval.end);
         }
     }
-    
+
+    // Debug output for interval building
+    if std::env::var("SOUNIO_DEBUG_ALLOC").is_ok() {
+        eprintln!("=== build_intervals_from_sir for '{}' ===", func.name);
+        for (value_id, interval) in &intervals {
+            eprintln!("  v{}: vreg={}, start={}, end={}, class={:?}",
+                value_id.0, interval.vreg.0, interval.start, interval.end, interval.reg_class);
+        }
+    }
+
     intervals.into_values().collect()
 }
 

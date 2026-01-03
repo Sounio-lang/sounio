@@ -70,6 +70,7 @@ const SHT_STRTAB: u32 = 3;
 const SHT_RELA: u32 = 4;
 const SHT_NOBITS: u32 = 8;
 const SHT_REL: u32 = 9;
+const SHT_DWARF: u32 = 0x70000001;  // DWARF debug sections
 
 // Section Flags
 const SHF_WRITE: u64 = 0x1;
@@ -253,6 +254,75 @@ impl RelocationType {
 }
 
 // ============================================================================
+// DWARF DEBUG INFO
+// ============================================================================
+
+/// DWARF debug information
+#[derive(Debug, Clone)]
+pub struct DwarfDebugInfo {
+    /// Compilation unit information
+    pub compilation_unit: String,
+    /// Source file paths
+    pub source_files: Vec<String>,
+    /// Line number information
+    pub line_info: Vec<DwarfLineInfo>,
+}
+
+impl DwarfDebugInfo {
+    pub fn new() -> Self {
+        Self {
+            compilation_unit: String::new(),
+            source_files: Vec::new(),
+            line_info: Vec::new(),
+        }
+    }
+
+    /// Generate .debug_info section
+    pub fn generate_debug_info(&self) -> Vec<u8> {
+        // TODO: Implement full DWARF .debug_info generation
+        // This would include:
+        // - Compilation Unit (CU) DIE
+        // - Subprogram DIEs for each function
+        // - Variable DIEs
+        // - Type information
+        Vec::new()
+    }
+
+    /// Generate .debug_abbrev section
+    pub fn generate_debug_abbrev(&self) -> Vec<u8> {
+        // TODO: Implement DWARF abbreviation tables
+        Vec::new()
+    }
+
+    /// Generate .debug_line section
+    pub fn generate_debug_line(&self) -> Vec<u8> {
+        // TODO: Implement DWARF line number program
+        Vec::new()
+    }
+
+    /// Generate .debug_str section
+    pub fn generate_debug_str(&self) -> Vec<u8> {
+        // TODO: Implement DWARF string table
+        Vec::new()
+    }
+}
+
+impl Default for DwarfDebugInfo {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+/// Line number information for DWARF
+#[derive(Debug, Clone)]
+pub struct DwarfLineInfo {
+    pub address: u64,
+    pub line: u32,
+    pub column: u32,
+    pub file_index: u32,
+}
+
+// ============================================================================
 // INTERNAL STRUCTURES
 // ============================================================================
 
@@ -308,13 +378,15 @@ pub struct ElfWriter {
     data_section_index: Option<usize>,
     bss_section_index: Option<usize>,
     rodata_section_index: Option<usize>,
+    /// DWARF debug info (if enabled)
+    dwarf_info: Option<DwarfDebugInfo>,
 }
 
 impl ElfWriter {
     /// Create a new ELF writer
     pub fn new(config: ElfConfig) -> Self {
         let mut writer = Self {
-            config,
+            config: config.clone(),
             sections: Vec::new(),
             symbols: Vec::new(),
             relocations: HashMap::new(),
@@ -324,6 +396,11 @@ impl ElfWriter {
             data_section_index: None,
             bss_section_index: None,
             rodata_section_index: None,
+            dwarf_info: if config.emit_debug {
+                Some(DwarfDebugInfo::new())
+            } else {
+                None
+            },
         };
 
         // Add null section (required as first section)
@@ -955,28 +1032,27 @@ pub fn code_segment_to_elf(segment: &crate::sir::emit::CodeSegment) -> Result<Ve
     // Add .text section with code
     let text_section_idx = elf.add_text_section(&segment.code);
     
-    // Add symbols
+    // Add symbols and build symbol index map for relocations
+    // Note: ELF has a null symbol at index 0, so defined symbols start at index 1
+    let mut symbol_indices = HashMap::new();
     for sym in &segment.symbols {
         let size = calculate_symbol_size(sym, &segment.symbols, segment.code.len());
-        elf.add_function(
+        let elf_idx = elf.add_function(
             &sym.name,
             sym.offset as u64,
             size,
             sym.global,
         );
-    }
-    
-    // Build symbol index map for relocations
-    let mut symbol_indices = HashMap::new();
-    for (idx, sym) in segment.symbols.iter().enumerate() {
-        symbol_indices.insert(sym.name.clone(), idx);
+        // add_function returns 0-based index, but ELF symtab has null at 0, so add 1
+        symbol_indices.insert(sym.name.clone(), elf_idx + 1);
     }
     
     // Add undefined symbols for relocations
     for reloc in &segment.relocations {
         if !symbol_indices.contains_key(&reloc.symbol) {
             let idx = elf.add_undefined_symbol(&reloc.symbol);
-            symbol_indices.insert(reloc.symbol.clone(), idx);
+            // add_undefined_symbol returns 0-based index, add 1 for null symbol
+            symbol_indices.insert(reloc.symbol.clone(), idx + 1);
         }
     }
     
@@ -986,7 +1062,7 @@ pub fn code_segment_to_elf(segment: &crate::sir::emit::CodeSegment) -> Result<Ve
             .copied()
             .ok_or_else(|| format!("Symbol not found for relocation: {}", reloc.symbol))?;
         let reloc_type = reloc_kind_to_type(&reloc.kind);
-        
+
         elf.add_relocation(
             text_section_idx,
             reloc.offset as u64,
