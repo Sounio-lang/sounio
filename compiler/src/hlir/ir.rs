@@ -372,6 +372,36 @@ pub enum Op {
         op: String,
         args: Vec<ValueId>,
     },
+    /// Push an effect handler onto the handler stack
+    ///
+    /// The handler will intercept effect operations for the named effect
+    /// until it is popped. Handlers are searched from top of stack (most recent)
+    /// to bottom.
+    PushHandler {
+        /// Effect name this handler handles (e.g., "IO", "Mut", "Prob")
+        effect: String,
+        /// Handler identifier/name for debugging
+        handler_name: String,
+        /// Handler ID for predefined handlers (0 = custom/registry)
+        handler_id: u32,
+    },
+    /// Pop an effect handler from the stack
+    ///
+    /// Removes the topmost handler. Should be paired with PushHandler.
+    PopHandler,
+    /// Dispatch an effect operation through the handler stack
+    ///
+    /// Unlike PerformEffect which uses the default handler, DispatchEffect
+    /// searches the handler stack for an appropriate handler. If no handler
+    /// is found, it falls back to the registry or returns a default value.
+    DispatchEffect {
+        /// Effect name (e.g., "IO", "Mut", "Div")
+        effect: String,
+        /// Operation name (e.g., "print", "get", "div")
+        op: String,
+        /// Arguments to the operation
+        args: Vec<ValueId>,
+    },
 }
 
 /// HLIR constant

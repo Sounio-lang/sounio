@@ -37,7 +37,7 @@ use crate::effects::handler_capability::{
     Continuation as CapabilityContinuation, HandlerCapability, HandlerResult as CapabilityResult,
     HandlerState as CapabilityHandlerState,
 };
-use crate::effects::handlers::{DefaultHandlerFactory, HandlerFactory, HandlerRegistry};
+use crate::effects::handlers::HandlerRegistry;
 use crate::effects::EpistemicImpactRegistry;
 use crate::runtime::causal;
 use crate::runtime::prob::{self, ProbContext, Rng};

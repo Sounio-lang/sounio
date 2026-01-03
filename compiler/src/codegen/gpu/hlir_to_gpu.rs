@@ -819,6 +819,40 @@ impl HlirToGpuLowering {
                     block.add_instruction(gpu_value, GpuOp::Call(effect_func, gpu_args));
                 }
             }
+
+            // Effect handler operations - these are CPU-side operations, emit runtime calls
+            Op::PushHandler { effect, .. } => {
+                // GPU kernels typically don't manipulate handler stacks directly
+                // Emit as a call to runtime for host-side handling
+                let handler_func = format!("__sounio_push_handler_{}", effect);
+                let gpu_value = self.alloc_value();
+                block.add_instruction(gpu_value, GpuOp::Call(handler_func, vec![]));
+            }
+
+            Op::PopHandler => {
+                // Emit call to pop handler on host side
+                let gpu_value = self.alloc_value();
+                block.add_instruction(
+                    gpu_value,
+                    GpuOp::Call("__sounio_pop_handler".to_string(), vec![]),
+                );
+            }
+
+            Op::DispatchEffect { effect, op, args } => {
+                // Dispatch through handler stack via runtime call
+                let gpu_args: Vec<ValueId> = args.iter().map(|a| self.get_value(*a)).collect();
+                let dispatch_func = format!("__sounio_dispatch_{}_{}", effect, op);
+
+                if let Some(result) = instr.result {
+                    let gpu_value = self.alloc_value();
+                    self.value_map.insert(result, gpu_value);
+                    self.value_types.insert(gpu_value, result_type.clone());
+                    block.add_instruction(gpu_value, GpuOp::Call(dispatch_func, gpu_args));
+                } else {
+                    let gpu_value = self.alloc_value();
+                    block.add_instruction(gpu_value, GpuOp::Call(dispatch_func, gpu_args));
+                }
+            }
         }
     }
 

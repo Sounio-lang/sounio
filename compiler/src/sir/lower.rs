@@ -789,6 +789,59 @@ fn lower_instruction(
                 Some(Instruction::void(SirInst::Call(call_info)))
             }
         }
+
+        Op::PushHandler {
+            effect,
+            handler_name,
+            handler_id,
+        } => {
+            // Lower to a runtime call that pushes a handler onto the effect stack
+            let call_name = format!("__sounio_push_handler_{}", effect.to_lowercase());
+            let call_info = CallInfo {
+                callee: Callee::Named(call_name),
+                args: vec![], // Handler ID is embedded in the call target
+                ret_ty: SirType::Void,
+                cc: CallingConv::C,
+                tail: false,
+                nounwind: false,
+            };
+            Some(Instruction::void(SirInst::Call(call_info)))
+        }
+
+        Op::PopHandler => {
+            // Lower to a runtime call that pops the topmost handler
+            let call_info = CallInfo {
+                callee: Callee::Named("__sounio_pop_handler".to_string()),
+                args: vec![],
+                ret_ty: SirType::Void,
+                cc: CallingConv::C,
+                tail: false,
+                nounwind: false,
+            };
+            Some(Instruction::void(SirInst::Call(call_info)))
+        }
+
+        Op::DispatchEffect { effect, op, args } => {
+            // Lower to a runtime call that dispatches through the handler stack
+            let sir_args: Vec<ValueId> = args.iter().filter_map(|a| ctx.get_value(*a)).collect();
+
+            let call_name = format!("__sounio_dispatch_{}_{}", effect.to_lowercase(), op);
+            let call_info = CallInfo {
+                callee: Callee::Named(call_name),
+                args: sir_args,
+                ret_ty: result_ty.clone(),
+                cc: CallingConv::C,
+                tail: false,
+                nounwind: false,
+            };
+
+            let result = instr.result.map(|r| ctx.get_or_create_value(r, result_ty));
+            if let Some(r) = result {
+                Some(Instruction::with_result(r, SirInst::Call(call_info)))
+            } else {
+                Some(Instruction::void(SirInst::Call(call_info)))
+            }
+        }
     }
 }
 

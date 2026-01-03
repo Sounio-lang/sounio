@@ -467,6 +467,87 @@ impl FunctionBuilder {
         )
     }
 
+    // ==================== Effect Builders ====================
+
+    /// Build a perform effect operation (uses default handler)
+    pub fn build_perform_effect(
+        &mut self,
+        effect: impl Into<String>,
+        op: impl Into<String>,
+        args: Vec<ValueId>,
+        ret_ty: HlirType,
+    ) -> ValueId {
+        self.emit(
+            Op::PerformEffect {
+                effect: effect.into(),
+                op: op.into(),
+                args,
+            },
+            ret_ty,
+        )
+    }
+
+    /// Build a push handler operation
+    ///
+    /// Pushes a handler onto the effect handler stack. The handler will
+    /// intercept operations for the named effect until it is popped.
+    ///
+    /// # Arguments
+    /// - `effect`: Effect name (e.g., "IO", "Mut", "Prob")
+    /// - `handler_name`: Handler identifier for debugging
+    /// - `handler_id`: Predefined handler ID (0 = use registry)
+    pub fn build_push_handler(
+        &mut self,
+        effect: impl Into<String>,
+        handler_name: impl Into<String>,
+        handler_id: u32,
+    ) -> ValueId {
+        self.emit(
+            Op::PushHandler {
+                effect: effect.into(),
+                handler_name: handler_name.into(),
+                handler_id,
+            },
+            HlirType::Void,
+        )
+    }
+
+    /// Build a pop handler operation
+    ///
+    /// Pops the topmost handler from the effect handler stack.
+    /// Should be paired with a corresponding push_handler.
+    pub fn build_pop_handler(&mut self) -> ValueId {
+        self.emit(Op::PopHandler, HlirType::Void)
+    }
+
+    /// Build a dispatch effect operation
+    ///
+    /// Dispatches an effect operation through the handler stack.
+    /// Unlike perform_effect, this searches for handlers in the stack
+    /// before falling back to the registry.
+    ///
+    /// # Arguments
+    /// - `effect`: Effect name (e.g., "IO", "Div", "GPU")
+    /// - `op`: Operation name (e.g., "print", "div", "sync")
+    /// - `args`: Arguments to the operation
+    /// - `ret_ty`: Return type of the operation
+    pub fn build_dispatch_effect(
+        &mut self,
+        effect: impl Into<String>,
+        op: impl Into<String>,
+        args: Vec<ValueId>,
+        ret_ty: HlirType,
+    ) -> ValueId {
+        self.emit(
+            Op::DispatchEffect {
+                effect: effect.into(),
+                op: op.into(),
+                args,
+            },
+            ret_ty,
+        )
+    }
+
     // ==================== Terminator Builders ====================
 
     /// Set the terminator for the current block

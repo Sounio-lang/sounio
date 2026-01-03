@@ -4868,10 +4868,136 @@ fn translate_instruction(
             }
         }
 
-        // Note: Op::PushHandler, Op::PopHandler, and Op::DispatchEffect are not yet
-        // defined in the HLIR. When they are added, uncomment the handlers below.
-        // The runtime functions runtime_effect_dispatch and runtime_dispatch_effect_f64
-        // are already registered and ready to be called.
+        Op::PushHandler {
+            effect,
+            handler_name,
+            handler_id,
+        } => {
+            // Push a handler onto the handler stack
+            if let Some(&func_ref) = func_refs.get("runtime_handler_push") {
+                // Store effect string in global storage for lifetime
+                let effect_cstr = std::ffi::CString::new(effect.as_str())
+                    .unwrap_or_else(|_| std::ffi::CString::new("").unwrap());
+                let name_cstr = std::ffi::CString::new(handler_name.as_str())
+                    .unwrap_or_else(|_| std::ffi::CString::new("").unwrap());
+
+                let effect_ptr = if let Ok(mut storage) = STRING_STORAGE.lock() {
+                    storage.push(effect_cstr);
+                    storage.last().unwrap().as_ptr() as i64
+                } else {
+                    0
+                };
+
+                let name_ptr = if let Ok(mut storage) = STRING_STORAGE.lock() {
+                    storage.push(name_cstr);
+                    storage.last().unwrap().as_ptr() as i64
+                } else {
+                    0
+                };
+
+                let effect_val = builder.ins().iconst(types::I64, effect_ptr);
+                let name_val = builder.ins().iconst(types::I64, name_ptr);
+                let handler_id_val = builder.ins().iconst(types::I32, *handler_id as i64);
+                builder.ins().call(func_ref, &[effect_val, name_val, handler_id_val]);
+            }
+            Ok(Some(builder.ins().iconst(types::I64, 0)))
+        }
+
+        Op::PopHandler => {
+            // Pop the topmost handler from the stack
+            if let Some(&func_ref) = func_refs.get("runtime_handler_pop") {
+                builder.ins().call(func_ref, &[]);
+            }
+            Ok(Some(builder.ins().iconst(types::I64, 0)))
+        }
+
+        Op::DispatchEffect { effect, op, args } => {
+            // Dispatch effect through handler stack, falling back to registry
+            let arg_vals: Vec<_> = args
+                .iter()
+                .map(|a| get_value(values, *a))
+                .collect::<Result<_, _>>()?;
+
+            // Use runtime_handler_dispatch which goes through the handler stack + registry
+            if let Some(&dispatch_ref) = func_refs.get("runtime_handler_dispatch") {
+                // Store effect and op strings in global storage
+                let effect_cstr = std::ffi::CString::new(effect.as_str())
+                    .unwrap_or_else(|_| std::ffi::CString::new("").unwrap());
+                let op_cstr = std::ffi::CString::new(op.as_str())
+                    .unwrap_or_else(|_| std::ffi::CString::new("").unwrap());
+
+                let effect_ptr = if let Ok(mut storage) = STRING_STORAGE.lock() {
+                    storage.push(effect_cstr);
+                    storage.last().unwrap().as_ptr() as i64
+                } else {
+                    0
+                };
+
+                let op_ptr = if let Ok(mut storage) = STRING_STORAGE.lock() {
+                    storage.push(op_cstr);
+                    storage.last().unwrap().as_ptr() as i64
+                } else {
+                    0
+                };
+
+                let effect_val = builder.ins().iconst(types::I64, effect_ptr);
+                let op_val = builder.ins().iconst(types::I64, op_ptr);
+
+                // Build args array on stack
+                if !arg_vals.is_empty() {
+                    let args_slot = builder.create_sized_stack_slot(
+                        cranelift_codegen::ir::StackSlotData::new(
+                            cranelift_codegen::ir::StackSlotKind::ExplicitSlot,
+                            (arg_vals.len() * 8) as u32,
+                            8,
+                        ),
+                    );
+                    let args_ptr = builder.ins().stack_addr(types::I64, args_slot, 0);
+
+                    // Store args as f64
+                    for (i, &val) in arg_vals.iter().enumerate() {
+                        let f64_val = if builder.func.dfg.value_type(val) == types::F64 {
+                            val
+                        } else if builder.func.dfg.value_type(val).is_int() {
+                            builder.ins().fcvt_from_sint(types::F64, val)
+                        } else {
+                            builder.ins().f64const(0.0)
+                        };
+                        builder.ins().store(
+                            MemFlags::new(),
+                            f64_val,
+                            args_ptr,
+                            (i * 8) as i32,
+                        );
+                    }
+
+                    let args_len = builder.ins().iconst(types::I64, arg_vals.len() as i64);
+                    let dispatch_call = builder.ins().call(
+                        dispatch_ref,
+                        &[effect_val, op_val, args_ptr, args_len],
+                    );
+                    let results = builder.inst_results(dispatch_call);
+                    if !results.is_empty() {
+                        return Ok(Some(results[0]));
+                    }
+                } else {
+                    // No args - create empty args pointer
+                    let null_ptr = builder.ins().iconst(types::I64, 0);
+                    let zero_len = builder.ins().iconst(types::I64, 0);
+                    let dispatch_call = builder.ins().call(
+                        dispatch_ref,
+                        &[effect_val, op_val, null_ptr, zero_len],
+                    );
+                    let results = builder.inst_results(dispatch_call);
+                    if !results.is_empty() {
+                        return Ok(Some(results[0]));
+                    }
+                }
+            }
+
+            // Fall back to default value if no handler dispatch available
+            Ok(Some(builder.ins().f64const(0.0)))
+        }
     }
 }
 
