@@ -415,21 +415,30 @@ impl CapturedContinuation {
                 saved_registers,
                 stack_snapshot,
             } => {
-                // Restore the resume point since we didn't consume it
+                // Create a JIT resume context from the saved state
+                let mut jit_ctx = super::jit_resume::JitResumeContext::new(
+                    return_address,
+                    saved_registers.clone(),
+                    stack_snapshot.clone(),
+                );
+
+                // Set multi-shot if this continuation is multi-shot
+                if self.is_multi_shot {
+                    jit_ctx.is_multi_shot = true;
+                }
+
+                // Attempt to resume using the JIT resume infrastructure
+                let result = super::jit_resume::resume_jit_continuation(&mut jit_ctx, value);
+
+                // Restore the resume point for potential re-use (multi-shot)
+                // or for debugging purposes
                 self.resume_point = ResumePoint::Jit {
                     return_address,
                     saved_registers: saved_registers.clone(),
                     stack_snapshot: stack_snapshot.clone(),
                 };
-                // TODO: Implement JIT resume
-                // This would involve:
-                // 1. Restoring the stack from stack_snapshot
-                // 2. Restoring registers from saved_registers
-                // 3. Jumping to return_address with the value
-                Err(ContinuationError::NotImplemented(format!(
-                    "JIT resume at address 0x{:x}",
-                    return_address
-                )))
+
+                result
             }
             ResumePoint::Stub => {
                 // Stub implementation: just return the value directly
@@ -809,12 +818,39 @@ mod tests {
     }
 
     #[test]
-    fn test_jit_resume_not_implemented() {
+    fn test_jit_resume_returns_value() {
+        // JIT resume now uses the cooperative model and returns the value
         let mut cont =
             CapturedContinuation::new_one_shot(ResumePoint::jit(0x1234, vec![], vec![]));
 
-        let result = cont.resume(Value::Unit);
-        assert!(matches!(result, Err(ContinuationError::NotImplemented(_))));
+        let result = cont.resume(Value::Float(42.0));
+        // The cooperative resume model returns the value as a Float
+        assert!(result.is_ok());
+        match result.unwrap() {
+            Value::Float(f) => assert!((f - 42.0).abs() < 0.001),
+            _ => panic!("Expected Float value from JIT resume"),
+        }
+    }
+
+    #[test]
+    fn test_jit_resume_multi_shot() {
+        // Test that multi-shot JIT continuations can be resumed multiple times
+        let mut cont =
+            CapturedContinuation::new_multi_shot(ResumePoint::jit(0x5678, vec![1, 2, 3], vec![4, 5, 6]));
+
+        // First resume
+        let result1 = cont.resume(Value::Float(1.0));
+        assert!(result1.is_ok());
+
+        // Second resume - should also work for multi-shot
+        let result2 = cont.resume(Value::Float(2.0));
+        assert!(result2.is_ok());
+
+        // Third resume
+        let result3 = cont.resume(Value::Float(3.0));
+        assert!(result3.is_ok());
+
+        assert_eq!(cont.resume_count, 3);
     }
 
     // =========================================================================

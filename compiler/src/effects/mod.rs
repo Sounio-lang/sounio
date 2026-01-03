@@ -21,6 +21,7 @@ pub mod epistemic_effects;
 pub mod handler_capability;
 pub mod handlers;
 pub mod inference;
+pub mod jit_resume;
 
 pub use crate::types::effects::*;
 pub use continuation::{
@@ -41,6 +42,11 @@ pub use handlers::{
     NetworkHandler, PanicHandler, ProbHandler, SensorHandler,
 };
 pub use inference::{EffectChecker, EffectError, EffectErrorKind, EffectSource, TypeInfo};
+pub use jit_resume::{
+    clear_jit_resume_state, f64_to_value, has_pending_jit_resume, resume_jit_continuation,
+    schedule_jit_resume, store_jit_context, take_pending_jit_resume, JitResumeContext,
+    JitResumeStore,
+};
 
 /// Runtime effect handler trait
 pub trait Handler<E> {
