@@ -218,3 +218,73 @@ fn test_matmul_zero() {
         assert!((result[i] - 0.0).abs() < 1e-10);
     }
 }
+
+/// Test SIMD-optimized element-wise addition
+#[test]
+fn test_tensor_add_simd() {
+    let a = vec![1.0, 2.0, 3.0, 4.0, 5.0];
+    let b = vec![10.0, 20.0, 30.0, 40.0, 50.0];
+    let mut c = vec![0.0; 5];
+
+    unsafe {
+        sounio_tensor_add(a.as_ptr(), b.as_ptr(), c.as_mut_ptr(), 5);
+    }
+
+    assert_eq!(c, vec![11.0, 22.0, 33.0, 44.0, 55.0]);
+}
+
+/// Test SIMD-optimized element-wise multiplication
+#[test]
+fn test_tensor_mul_simd() {
+    let a = vec![1.0, 2.0, 3.0, 4.0];
+    let b = vec![2.0, 3.0, 4.0, 5.0];
+    let mut c = vec![0.0; 4];
+
+    unsafe {
+        sounio_tensor_mul(a.as_ptr(), b.as_ptr(), c.as_mut_ptr(), 4);
+    }
+
+    assert_eq!(c, vec![2.0, 6.0, 12.0, 20.0]);
+}
+
+/// Test SIMD-optimized tensor scaling
+#[test]
+fn test_tensor_scale_simd() {
+    let a = vec![1.0, 2.0, 3.0, 4.0, 5.0];
+    let alpha = 2.5;
+    let mut b = vec![0.0; 5];
+
+    unsafe {
+        sounio_tensor_scale(a.as_ptr(), alpha, b.as_mut_ptr(), 5);
+    }
+
+    assert_eq!(b, vec![2.5, 5.0, 7.5, 10.0, 12.5]);
+}
+
+/// Test SIMD operations with odd-sized arrays (remainder handling)
+#[test]
+fn test_tensor_simd_odd_size() {
+    let a = vec![1.0, 2.0, 3.0];
+    let b = vec![10.0, 20.0, 30.0];
+    let mut c = vec![0.0; 3];
+
+    unsafe {
+        sounio_tensor_add(a.as_ptr(), b.as_ptr(), c.as_mut_ptr(), 3);
+    }
+
+    assert_eq!(c, vec![11.0, 22.0, 33.0]);
+}
+
+/// Test SIMD operations with single-element arrays (scalar fallback)
+#[test]
+fn test_tensor_simd_single_element() {
+    let a = vec![5.0];
+    let b = vec![10.0];
+    let mut c = vec![0.0];
+
+    unsafe {
+        sounio_tensor_add(a.as_ptr(), b.as_ptr(), c.as_mut_ptr(), 1);
+    }
+
+    assert_eq!(c, vec![15.0]);
+}

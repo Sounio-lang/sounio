@@ -1371,6 +1371,9 @@ pub const RUNTIME_SYMBOLS: &[&str] = &[
     "sounio_tensor_mul",
     "sounio_tensor_scale",
     "sounio_tensor_matvec",
+    "sounio_tensor_add_simd",
+    "sounio_tensor_mul_simd",
+    "sounio_tensor_scale_simd",
     // Uncertainty propagation functions
     "sounio_uncertain_add",
     "sounio_uncertain_sub",

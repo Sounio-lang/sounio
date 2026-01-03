@@ -172,12 +172,32 @@ pub unsafe extern "C" fn sounio_tensor_add(
     }
 
     let n = n as usize;
-    let a_slice = std::slice::from_raw_parts(a, n);
-    let b_slice = std::slice::from_raw_parts(b, n);
-    let c_slice = std::slice::from_raw_parts_mut(c, n);
-
-    for i in 0..n {
-        c_slice[i] = a_slice[i] + b_slice[i];
+    
+    // Use SIMD for large arrays (process 2 doubles at a time with XMM registers)
+    if n >= 2 {
+        let simd_chunks = n / 2;
+        let remainder = n % 2;
+        
+        // Process 2 doubles at a time using unaligned loads/stores
+        for i in 0..simd_chunks {
+            let idx = i * 2;
+            // Load 2 doubles from a and b
+            let a_vec = std::ptr::read_unaligned(a.add(idx) as *const [f64; 2]);
+            let b_vec = std::ptr::read_unaligned(b.add(idx) as *const [f64; 2]);
+            // Add element-wise
+            let result = [a_vec[0] + b_vec[0], a_vec[1] + b_vec[1]];
+            // Store result
+            std::ptr::write_unaligned(c.add(idx) as *mut [f64; 2], result);
+        }
+        
+        // Handle remainder (scalar)
+        if remainder > 0 {
+            let idx = simd_chunks * 2;
+            *c.add(idx) = *a.add(idx) + *b.add(idx);
+        }
+    } else {
+        // Scalar fallback for small arrays
+        *c = *a + *b;
     }
 }
 
@@ -201,12 +221,32 @@ pub unsafe extern "C" fn sounio_tensor_mul(
     }
 
     let n = n as usize;
-    let a_slice = std::slice::from_raw_parts(a, n);
-    let b_slice = std::slice::from_raw_parts(b, n);
-    let c_slice = std::slice::from_raw_parts_mut(c, n);
-
-    for i in 0..n {
-        c_slice[i] = a_slice[i] * b_slice[i];
+    
+    // Use SIMD for large arrays (process 2 doubles at a time with XMM registers)
+    if n >= 2 {
+        let simd_chunks = n / 2;
+        let remainder = n % 2;
+        
+        // Process 2 doubles at a time using unaligned loads/stores
+        for i in 0..simd_chunks {
+            let idx = i * 2;
+            // Load 2 doubles from a and b
+            let a_vec = std::ptr::read_unaligned(a.add(idx) as *const [f64; 2]);
+            let b_vec = std::ptr::read_unaligned(b.add(idx) as *const [f64; 2]);
+            // Multiply element-wise
+            let result = [a_vec[0] * b_vec[0], a_vec[1] * b_vec[1]];
+            // Store result
+            std::ptr::write_unaligned(c.add(idx) as *mut [f64; 2], result);
+        }
+        
+        // Handle remainder (scalar)
+        if remainder > 0 {
+            let idx = simd_chunks * 2;
+            *c.add(idx) = *a.add(idx) * *b.add(idx);
+        }
+    } else {
+        // Scalar fallback for small arrays
+        *c = *a * *b;
     }
 }
 
@@ -230,11 +270,34 @@ pub unsafe extern "C" fn sounio_tensor_scale(
     }
 
     let n = n as usize;
-    let a_slice = std::slice::from_raw_parts(a, n);
-    let b_slice = std::slice::from_raw_parts_mut(b, n);
-
-    for i in 0..n {
-        b_slice[i] = a_slice[i] * alpha;
+    
+    // Use SIMD for large arrays (process 2 doubles at a time with XMM registers)
+    if n >= 2 {
+        let simd_chunks = n / 2;
+        let remainder = n % 2;
+        
+        // Broadcast alpha to a 2-element array for SIMD
+        let alpha_vec = [alpha, alpha];
+        
+        // Process 2 doubles at a time using unaligned loads/stores
+        for i in 0..simd_chunks {
+            let idx = i * 2;
+            // Load 2 doubles from a
+            let a_vec = std::ptr::read_unaligned(a.add(idx) as *const [f64; 2]);
+            // Multiply by alpha
+            let result = [a_vec[0] * alpha_vec[0], a_vec[1] * alpha_vec[1]];
+            // Store result
+            std::ptr::write_unaligned(b.add(idx) as *mut [f64; 2], result);
+        }
+        
+        // Handle remainder (scalar)
+        if remainder > 0 {
+            let idx = simd_chunks * 2;
+            *b.add(idx) = *a.add(idx) * alpha;
+        }
+    } else {
+        // Scalar fallback for small arrays
+        *b = *a * alpha;
     }
 }
 
