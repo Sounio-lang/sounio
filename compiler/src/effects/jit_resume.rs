@@ -37,7 +37,6 @@
 //! memory, and processor registers. Incorrect use can cause crashes,
 //! memory corruption, or undefined behavior.
 
-use std::sync::Arc;
 use std::sync::Mutex;
 use std::collections::HashMap;
 

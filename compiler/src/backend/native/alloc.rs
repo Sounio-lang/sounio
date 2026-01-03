@@ -1156,25 +1156,141 @@ mod tests {
 }
 
 // ============================================================================
+// SIR INTEGRATION
+// ============================================================================
+
+use crate::sir::blocks::SirFunction;
+use crate::sir::metadata::{Metadata, MetadataStore};
+use crate::sir::module::SirModule;
+use crate::sir::values::ValueId;
+
+/// Extract epistemic metadata from SIR module for register allocation.
+///
+/// Converts SIR epistemic metadata into the allocator's internal format,
+/// enabling confidence-aware spilling decisions.
+pub fn extract_epistemic_metadata(
+    _sir_module: &SirModule,
+    func: &SirFunction,
+    metadata_store: &MetadataStore,
+) -> HashMap<ValueId, EpistemicMetadata> {
+    let mut result = HashMap::new();
+
+    // Extract metadata for all values used in this function
+    for block in &func.blocks {
+        // Extract from instructions
+        for inst in &block.instructions {
+            // Get metadata for instruction result (if any)
+            if let Some(result_val) = inst.result {
+                if let Some(metas) = metadata_store.get(result_val) {
+                    for meta in metas {
+                        if let Metadata::Epistemic(sir_ep_meta) = meta {
+                            // Convert SIR EpistemicMetadata to allocator EpistemicMetadata
+                            let confidence = sir_ep_meta.known_confidence.unwrap_or(0.5);
+                            let delta = 0.1; // Default uncertainty
+
+                            result.insert(
+                                result_val,
+                                EpistemicMetadata {
+                                    confidence,
+                                    delta,
+                                    provenance: super::metrics::Provenance::sir_backend(
+                                        "native-allocator",
+                                    ),
+                                    spill_count: 0,
+                                    critical: sir_ep_meta.certain,
+                                },
+                            );
+                        }
+                    }
+                }
+            }
+
+            // Get metadata for operands
+            for operand in inst.inst.operands() {
+                if let Some(metas) = metadata_store.get(operand) {
+                    for meta in metas {
+                        if let Metadata::Epistemic(sir_ep_meta) = meta {
+                            let confidence = sir_ep_meta.known_confidence.unwrap_or(0.5);
+                            let delta = 0.1;
+
+                            result.entry(operand).or_insert(EpistemicMetadata {
+                                confidence,
+                                delta,
+                                provenance: super::metrics::Provenance::sir_backend(
+                                    "native-allocator",
+                                ),
+                                spill_count: 0,
+                                critical: sir_ep_meta.certain,
+                            });
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    result
+}
+
+/// Build live intervals from SIR function with epistemic metadata.
+pub fn build_intervals_from_sir(
+    func: &SirFunction,
+    metadata: &HashMap<ValueId, EpistemicMetadata>,
+    reg_class: RegClass,
+) -> Vec<LiveInterval> {
+    let mut intervals: HashMap<ValueId, LiveInterval> = HashMap::new();
+    let mut pos = 0;
+
+    for block in &func.blocks {
+        for inst in &block.instructions {
+            // Create interval for result
+            if let Some(result_val) = inst.result {
+                let vreg = VirtReg(result_val.0);
+                let mut interval = LiveInterval::new(vreg, reg_class, pos);
+
+                if let Some(ep_meta) = metadata.get(&result_val) {
+                    interval.epistemic = ep_meta.clone();
+                }
+
+                intervals.insert(result_val, interval);
+            }
+
+            // Extend intervals for operands
+            for operand in inst.inst.operands() {
+                if let Some(interval) = intervals.get_mut(&operand) {
+                    interval.add_use(pos, UseKind::Read);
+                }
+            }
+
+            pos += 1;
+        }
+    }
+
+    intervals.into_values().collect()
+}
+
+// ============================================================================
 // MODULE EXPORTS
 // ============================================================================
 
 pub mod prelude {
     pub use super::{
-        EpistemicAllocator,
         AllocConfig,
         AllocResult,
         AllocStatistics,
+        EpistemicAllocator,
+        EpistemicMetadata,
         LiveInterval,
-        UsePosition,
-        UseKind,
-        VirtReg,
         PhysReg,
         RegClass,
-        SpillSlot,
-        SpillReloadOp,
-        EpistemicMetadata,
         RegisterPool,
+        SpillReloadOp,
+        SpillSlot,
         SpillSlotManager,
+        UseKind,
+        UsePosition,
+        VirtReg,
+        build_intervals_from_sir,
+        extract_epistemic_metadata,
     };
 }

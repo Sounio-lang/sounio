@@ -706,7 +706,7 @@ fn compile_native(args: &BuildArgs) -> Result<(PathBuf, Option<NativeMetrics>), 
     use crate::check::check;
     use crate::hlir::lower as lower_hlir;
     use crate::sir::lower::lower_module;
-    use crate::sir::emit::emit_code;
+    use crate::sir::emit::CodeEmitter;
 
     let start = Instant::now();
 
@@ -891,6 +891,10 @@ fn compile_native(args: &BuildArgs) -> Result<(PathBuf, Option<NativeMetrics>), 
     let code_segment = emit_code(&sir_module)
         .map_err(|e| format!("Code emission error: {:?}", e))?;
     let codegen_ms = codegen_start.elapsed().as_millis() as u64;
+    
+    // TODO: Apply AllocResult to emitter
+    // This requires storing AllocResult per function and passing to X86_64Emitter
+    // For now, the emitter uses its internal register allocator
 
     if args.verbose {
         println!("✓ Code generation in {}ms", codegen_ms);

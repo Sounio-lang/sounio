@@ -1204,6 +1204,8 @@ pub struct X86_64Emitter {
     forward_refs: Vec<(usize, u32)>, // (patch offset, block id)
     /// Register allocator for sophisticated allocation
     register_allocator: RegisterAllocator,
+    /// External allocation result (from native backend allocator)
+    external_alloc_result: Option<crate::backend::native::alloc::AllocResult>,
 }
 
 /// Condition codes for x86-64 Jcc/SETcc instructions
@@ -1265,6 +1267,75 @@ impl X86_64Emitter {
             labels: HashMap::new(),
             forward_refs: vec![],
             register_allocator: RegisterAllocator::new(),
+            external_alloc_result: None,
+        }
+    }
+
+    /// Set external allocation result from native backend allocator
+    pub fn set_external_alloc_result(&mut self, result: crate::backend::native::alloc::AllocResult) {
+        self.external_alloc_result = Some(result);
+    }
+
+    /// Apply external allocation result to register allocator
+    fn apply_external_alloc_result(&mut self, func: &SirFunction) {
+        if let Some(ref alloc_result) = self.external_alloc_result {
+            // Apply allocated registers
+            for interval in &alloc_result.allocated {
+                if let Some(reg) = interval.assigned {
+                    // Map VirtReg to ValueId and X86Reg
+                    // This is a simplified mapping - in production would need proper conversion
+                    let value_id = ValueId(interval.vreg.0);
+                    if let Some(x86_reg) = self.virt_reg_to_x86_reg(reg) {
+                        self.register_allocator.value_to_interval.insert(value_id, 0);
+                        // Update interval in register allocator
+                        if let Some(interval_idx) = self.register_allocator.value_to_interval.get(&value_id) {
+                            if let Some(interval_ref) = self.register_allocator.intervals.get_mut(*interval_idx) {
+                                interval_ref.reg = Some(x86_reg);
+                            }
+                        }
+                    }
+                }
+            }
+
+            // Apply spill slots
+            for interval in &alloc_result.spilled {
+                if let Some(slot) = interval.spill_slot {
+                    let value_id = ValueId(interval.vreg.0);
+                    if let Some(interval_idx) = self.register_allocator.value_to_interval.get(&value_id) {
+                        if let Some(interval_ref) = self.register_allocator.intervals.get_mut(*interval_idx) {
+                            interval_ref.spill_slot = Some(slot.0 as i32);
+                        }
+                    }
+                }
+            }
+
+            // Apply spill/reload operations
+            // These would be inserted at appropriate points during code emission
+            // For now, we track them for later insertion
+            // TODO: Insert spill_code operations during instruction emission
+        }
+    }
+
+    /// Convert VirtReg to X86Reg (simplified mapping)
+    fn virt_reg_to_x86_reg(&self, virt_reg: crate::backend::native::alloc::PhysReg) -> Option<X86Reg> {
+        // Map physical register number to X86Reg
+        // This assumes VirtReg.0 corresponds to register number
+        match virt_reg.num {
+            0 => Some(X86Reg::RAX),
+            1 => Some(X86Reg::RCX),
+            2 => Some(X86Reg::RDX),
+            3 => Some(X86Reg::RBX),
+            6 => Some(X86Reg::RSI),
+            7 => Some(X86Reg::RDI),
+            8 => Some(X86Reg::R8),
+            9 => Some(X86Reg::R9),
+            10 => Some(X86Reg::R10),
+            11 => Some(X86Reg::R11),
+            12 => Some(X86Reg::R12),
+            13 => Some(X86Reg::R13),
+            14 => Some(X86Reg::R14),
+            15 => Some(X86Reg::R15),
+            _ => None,
         }
     }
 
@@ -2071,8 +2142,15 @@ impl CodeEmitter for X86_64Emitter {
     fn emit_function(&mut self, func: &SirFunction) -> Result<Vec<u8>, EmitError> {
         let start = self.offset();
 
-        // Step 1: Run register allocation
-        self.register_allocator.allocate_registers(func)?;
+        // Step 1: Run register allocation (or apply external result)
+        if self.external_alloc_result.is_some() {
+            // Use external allocation result from native backend
+            self.register_allocator.compute_live_intervals(func)?;
+            self.apply_external_alloc_result(func);
+        } else {
+            // Use internal register allocator
+            self.register_allocator.allocate_registers(func)?;
+        }
 
         // Step 2: Calculate frame size from register allocation
         // Include space for spilled values and alignment
