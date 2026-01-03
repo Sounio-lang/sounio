@@ -732,4 +732,79 @@ mod tests {
         assert!(!residual.contains("IO"));
         assert!(residual.contains("Mut"));
     }
+
+    #[test]
+    fn test_effect_var() {
+        // Test EffectVar creation and equality
+        let v1 = EffectVar::new(0);
+        let v2 = EffectVar::new(1);
+        let v1_dup = EffectVar::new(0);
+
+        assert_eq!(v1, v1_dup);
+        assert_ne!(v1, v2);
+        assert_eq!(v1.0, 0);
+        assert_eq!(v2.0, 1);
+    }
+
+    #[test]
+    fn test_effect_set_with_effect_vars() {
+        // Test EffectSet with effect variables for row polymorphism
+        let mut effects = EffectSet::new();
+        let e_var = EffectVar::new(42);
+
+        // Add an effect variable
+        effects.add_var(e_var);
+        assert!(!effects.is_pure()); // Not pure - has an effect variable
+        assert!(effects.has_effect_vars());
+        assert!(effects.contains_var(e_var));
+
+        // Add a concrete effect
+        effects.add(Effect::io());
+        assert!(effects.contains("IO"));
+        assert!(effects.has_effect_vars());
+    }
+
+    #[test]
+    fn test_effect_set_substitution() {
+        // Test substituting effect variables with concrete effects
+        let e_var = EffectVar::new(0);
+        let mut effects = EffectSet::with_var(e_var);
+        effects.add(Effect::mut_effect()); // effects = {Mut, E}
+
+        // Create substitution: E -> {IO, Alloc}
+        let mut replacement = EffectSet::new();
+        replacement.add(Effect::io());
+        replacement.add(Effect::alloc());
+
+        let mut subst = std::collections::HashMap::new();
+        subst.insert(e_var, replacement);
+
+        let result = effects.substitute(&subst);
+        // Result should be {Mut, IO, Alloc} with no effect variables
+        assert!(result.contains("Mut"));
+        assert!(result.contains("IO"));
+        assert!(result.contains("Alloc"));
+        assert!(!result.has_effect_vars());
+    }
+
+    #[test]
+    fn test_effect_set_union_with_vars() {
+        let e1 = EffectVar::new(1);
+        let e2 = EffectVar::new(2);
+
+        let mut set1 = EffectSet::new();
+        set1.add(Effect::io());
+        set1.add_var(e1);
+
+        let mut set2 = EffectSet::new();
+        set2.add(Effect::mut_effect());
+        set2.add_var(e2);
+
+        let union = set1.union(&set2);
+        // Union should contain both effects and both effect variables
+        assert!(union.contains("IO"));
+        assert!(union.contains("Mut"));
+        assert!(union.contains_var(e1));
+        assert!(union.contains_var(e2));
+    }
 }

@@ -930,7 +930,7 @@ mod tests {
         let debug = format!("{:?}", resume_point);
         assert!(debug.contains("InterpreterClosure"));
         assert!(debug.contains("test closure"));
-        assert!(debug.contains("<closure>"));
+        assert!(debug.contains("<one-shot closure>"));
     }
 
     #[test]

@@ -33,6 +33,8 @@ pub enum DefKind {
     TypeAlias,
     /// Type parameter (generic)
     TypeParam,
+    /// Effect parameter (generic effect for row polymorphism)
+    EffectParam,
     /// Effect definition
     Effect,
     /// Effect operation

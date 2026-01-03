@@ -775,19 +775,39 @@ impl Resolver {
 
         // Resolve generic parameters
         for param in &f.generics.params {
-            if let GenericParam::Type { name, bounds, .. } = param {
-                let def_id = self.symbols.fresh_def_id();
-                let _ = self.symbols.define_type(name.clone(), def_id);
-                self.symbols.insert(Symbol {
-                    def_id,
-                    name: name.clone(),
-                    kind: DefKind::TypeParam,
-                    node_id: NodeId(0), // No node ID for generic params
-                    span: Span::default(),
-                    parent: fn_def_id,
-                });
-                for bound in bounds {
-                    self.resolve_path_as_type(bound);
+            match param {
+                GenericParam::Type { name, bounds, .. } => {
+                    let def_id = self.symbols.fresh_def_id();
+                    let _ = self.symbols.define_type(name.clone(), def_id);
+                    self.symbols.insert(Symbol {
+                        def_id,
+                        name: name.clone(),
+                        kind: DefKind::TypeParam,
+                        node_id: NodeId(0), // No node ID for generic params
+                        span: Span::default(),
+                        parent: fn_def_id,
+                    });
+                    for bound in bounds {
+                        self.resolve_path_as_type(bound);
+                    }
+                }
+                GenericParam::Effect { name } => {
+                    // Register effect parameter for row polymorphism
+                    // Effect parameters are registered in the type namespace since
+                    // effect references are resolved via resolve_path_as_type
+                    let def_id = self.symbols.fresh_def_id();
+                    let _ = self.symbols.define_type(name.clone(), def_id);
+                    self.symbols.insert(Symbol {
+                        def_id,
+                        name: name.clone(),
+                        kind: DefKind::EffectParam,
+                        node_id: NodeId(0),
+                        span: Span::default(),
+                        parent: fn_def_id,
+                    });
+                }
+                GenericParam::Const { .. } => {
+                    // Const generics are handled separately
                 }
             }
         }
