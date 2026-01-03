@@ -956,7 +956,7 @@ impl SpillReloadOp {
 }
 
 /// Result of register allocation
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct AllocResult {
     /// Intervals allocated to physical registers
     pub allocated: Vec<LiveInterval>,

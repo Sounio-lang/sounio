@@ -753,7 +753,7 @@ fn compile_native(args: &BuildArgs) -> Result<(PathBuf, Option<NativeMetrics>), 
 
     // Step 4: Lower to SIR (HLIR → SIR)
     let lower_sir_start = Instant::now();
-    let mut sir_module = lower_module(&hlir);
+    let (mut sir_module, lowering_ctx) = lower_module(&hlir);
     
     // Set target architecture
     sir_module.target = crate::sir::module::TargetTriple::native();
@@ -866,15 +866,56 @@ fn compile_native(args: &BuildArgs) -> Result<(PathBuf, Option<NativeMetrics>), 
 
     // Step 7: Run register allocation (if epistemic-aware)
     let alloc_start = Instant::now();
+    use std::collections::HashMap;
+    use crate::backend::native::alloc::{
+        EpistemicAllocator, AllocConfig, AllocResult,
+        extract_epistemic_metadata, build_intervals_from_sir, RegClass,
+    };
+    use crate::sir::values::FuncId;
+    
+    let mut alloc_results: HashMap<FuncId, AllocResult> = HashMap::new();
     let alloc_metrics = if args.native_opts.alloc_strategy == AllocStrategy::Epistemic {
-        // Use epistemic-aware allocator
-        // This would integrate with the actual SIR module
-        // For now, we'll use placeholder metrics
+        // Use epistemic-aware allocator for each function
+        for func in &sir_module.functions {
+            // Extract epistemic metadata from lowering context
+            let ep_metadata = extract_epistemic_metadata(&sir_module, func, &lowering_ctx.metadata);
+            
+            // Build live intervals with epistemic metadata
+            // For now, assume all values are general-purpose registers (can be improved)
+            let intervals = build_intervals_from_sir(func, &ep_metadata, RegClass::GeneralPurpose);
+            
+            // Run allocator with error handling
+            let mut allocator = EpistemicAllocator::with_config(AllocConfig::default());
+            let result = allocator.allocate(intervals);
+            
+            // Check if allocation was successful
+            if !result.is_successful() && args.verbose {
+                println!("⚠️  Warning: Allocation for function '{}' had {} critical spills",
+                    func.name, result.stats.critical_spills);
+            }
+            
+            alloc_results.insert(func.id, result);
+        }
+        
+        // Compute aggregate metrics
+        let mut total_allocated = 0;
+        let mut total_spilled = 0;
+        let mut total_confidence = 0.0;
+        let mut total_spill_slots = 0;
+        
+        for result in alloc_results.values() {
+            total_allocated += result.allocated.len();
+            total_spilled += result.spilled.len();
+            total_confidence += result.stats.avg_allocated_confidence;
+            total_spill_slots += result.total_spill_size;
+        }
+        
+        let func_count = alloc_results.len().max(1);
         Some(AllocMetrics {
-            intervals_allocated: 0,
-            intervals_spilled: 0,
-            avg_confidence: 0.0,
-            spill_slots: 0,
+            intervals_allocated: total_allocated,
+            intervals_spilled: total_spilled,
+            avg_confidence: total_confidence / func_count as f64,
+            spill_slots: total_spill_slots,
         })
     } else {
         None
@@ -883,17 +924,34 @@ fn compile_native(args: &BuildArgs) -> Result<(PathBuf, Option<NativeMetrics>), 
 
     if args.verbose {
         println!("✓ Register allocation in {}ms", alloc_ms);
+        if let Some(ref metrics) = alloc_metrics {
+            println!("  Allocated: {}, Spilled: {}, Avg confidence: {:.3}",
+                metrics.intervals_allocated,
+                metrics.intervals_spilled,
+                metrics.avg_confidence);
+            if metrics.spill_slots > 0 {
+                println!("  Spill slots: {} bytes", metrics.spill_slots);
+            }
+        }
+    }
+    
+    // Error handling: fallback to internal allocator if external fails
+    if args.native_opts.alloc_strategy == AllocStrategy::Epistemic && alloc_results.is_empty() {
+        if args.verbose {
+            println!("⚠️  Warning: Epistemic allocation produced no results, falling back to internal allocator");
+        }
     }
 
     // Step 8: Emit machine code
     let codegen_start = Instant::now();
-    let code_segment = emit_code(&sir_module)
+    let alloc_results_opt = if args.native_opts.alloc_strategy == AllocStrategy::Epistemic {
+        Some(alloc_results)
+    } else {
+        None
+    };
+    let code_segment = emit_code(&sir_module, alloc_results_opt)
         .map_err(|e| format!("Code emission error: {:?}", e))?;
     let codegen_ms = codegen_start.elapsed().as_millis() as u64;
-    
-    // TODO: Apply AllocResult to emitter
-    // This requires storing AllocResult per function and passing to X86_64Emitter
-    // For now, the emitter uses its internal register allocator
 
     if args.verbose {
         println!("✓ Code generation in {}ms", codegen_ms);

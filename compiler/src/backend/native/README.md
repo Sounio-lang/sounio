@@ -49,6 +49,23 @@ The register allocator considers epistemic metadata when making spilling decisio
 - Values with lower confidence (ε) are preferentially spilled
 - High-confidence values are preserved in registers
 - Provenance degradation is tracked through spill/reload cycles
+- Spill/reload operations are automatically inserted during code generation
+
+#### Integration Pipeline
+
+1. **Metadata Extraction**: Epistemic metadata is extracted from the SIR `MetadataStore` during lowering
+2. **Interval Building**: Live intervals are constructed with confidence information
+3. **Allocation**: `EpistemicAllocator` runs modified Linear Scan with confidence-based priority
+4. **Code Generation**: `AllocResult` is passed to the emitter, which applies register assignments and inserts spill/reload operations
+
+#### Configuration
+
+The allocator can be configured via `AllocConfig`:
+- `confidence_weight`: Weight for confidence in priority (default: 0.5)
+- `spill_confidence_factor`: Confidence degradation per spill (default: 0.95)
+- `min_confidence_threshold`: Below this, always spill first (default: 0.1)
+
+Use `AllocConfig::scientific()` for scientific computing (preserves confidence) or `AllocConfig::performance()` for performance (minimizes spills).
 
 ### Hardware Metrics
 
@@ -92,8 +109,33 @@ If generated ELF files are invalid:
 If allocation produces errors:
 
 1. Check that epistemic metadata is being extracted correctly
+   - Use `--verbose` to see allocation statistics
+   - Verify that values have epistemic annotations in source code
 2. Verify live interval computation
+   - Check that `build_intervals_from_sir` is receiving correct metadata
 3. Increase spill slot size if needed
+   - Modify `AllocConfig::max_spill_attempts` if allocation times out
+4. Fallback behavior: If epistemic allocation fails, the compiler falls back to internal allocator
+
+#### Debugging Allocation
+
+To debug allocation issues:
+
+```bash
+# Verbose output shows allocation metrics
+souc build --backend=native --verbose input.sio
+
+# Output includes:
+# - Number of intervals allocated vs spilled
+# - Average confidence of allocated/spilled values
+# - Critical spills (high-confidence values that had to be spilled)
+```
+
+#### Common Issues
+
+- **No metadata extracted**: Ensure source code has epistemic annotations (e.g., `Knowledge<T>` types)
+- **All intervals spilled**: May indicate too few registers or incorrect register class assignment
+- **Critical spills**: High-confidence values being spilled - consider increasing `confidence_weight`
 
 ## Examples
 

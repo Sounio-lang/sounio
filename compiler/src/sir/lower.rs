@@ -180,7 +180,8 @@ impl Default for LoweringContext {
 }
 
 /// Lower an HLIR module to SIR
-pub fn lower_module(hlir: &HlirModule) -> SirModule {
+/// Returns both the module and the lowering context (which contains metadata)
+pub fn lower_module(hlir: &HlirModule) -> (SirModule, LoweringContext) {
     let mut ctx = LoweringContext::new();
     let mut module = SirModule::new(&hlir.name);
 
@@ -215,7 +216,7 @@ pub fn lower_module(hlir: &HlirModule) -> SirModule {
         }
     }
 
-    module
+    (module, ctx)
 }
 
 /// Lower a type definition to SIR
@@ -1417,7 +1418,7 @@ mod tests {
     #[test]
     fn test_empty_module_lowering() {
         let hlir = HlirModule::new("test");
-        let sir = lower_module(&hlir);
+        let (sir, _ctx) = lower_module(&hlir);
         assert_eq!(sir.name, "test");
         assert!(sir.functions.is_empty());
     }

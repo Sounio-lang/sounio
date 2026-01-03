@@ -1208,6 +1208,10 @@ pub struct X86_64Emitter {
     register_allocator: RegisterAllocator,
     /// External allocation result (from native backend allocator)
     external_alloc_result: Option<crate::backend::native::alloc::AllocResult>,
+    /// Spill/reload operations indexed by instruction position
+    spill_ops_by_position: std::collections::HashMap<usize, Vec<crate::backend::native::alloc::SpillReloadOp>>,
+    /// Current instruction position (for spill/reload insertion)
+    current_instruction_pos: usize,
 }
 
 /// Condition codes for x86-64 Jcc/SETcc instructions
@@ -1270,6 +1274,8 @@ impl X86_64Emitter {
             forward_refs: vec![],
             register_allocator: RegisterAllocator::new(),
             external_alloc_result: None,
+            spill_ops_by_position: std::collections::HashMap::new(),
+            current_instruction_pos: 0,
         }
     }
 
@@ -1281,6 +1287,21 @@ impl X86_64Emitter {
     /// Apply external allocation result to register allocator
     fn apply_external_alloc_result(&mut self, func: &SirFunction) {
         if let Some(ref alloc_result) = self.external_alloc_result {
+            // Clear previous spill operations
+            self.spill_ops_by_position.clear();
+
+            // Build map of spill/reload operations by position
+            for op in &alloc_result.spill_code {
+                let pos = op.position();
+                self.spill_ops_by_position.entry(pos).or_insert_with(Vec::new).push(op.clone());
+            }
+            
+            // Validate that we have allocation results
+            if alloc_result.allocated.is_empty() && alloc_result.spilled.is_empty() {
+                // Fallback: use internal allocator if external result is empty
+                return;
+            }
+
             // Apply allocated registers
             for interval in &alloc_result.allocated {
                 if let Some(reg) = interval.assigned {
@@ -1310,11 +1331,6 @@ impl X86_64Emitter {
                     }
                 }
             }
-
-            // Apply spill/reload operations
-            // These would be inserted at appropriate points during code emission
-            // For now, we track them for later insertion
-            // TODO: Insert spill_code operations during instruction emission
         }
     }
 
@@ -2120,6 +2136,23 @@ impl Default for X86_64Emitter {
 
 impl CodeEmitter for X86_64Emitter {
     fn emit_module(&mut self, module: &SirModule) -> Result<CodeSegment, EmitError> {
+        self.emit_module_with_alloc_results(module, None)
+    }
+
+    fn emit_function(&mut self, func: &SirFunction) -> Result<Vec<u8>, EmitError> {
+        // Delegate to the implementation in impl X86_64Emitter block
+        // (The actual implementation is below, this just satisfies the trait)
+        X86_64Emitter::emit_function(self, func)
+    }
+}
+
+impl X86_64Emitter {
+    /// Emit module with optional allocation results
+    pub fn emit_module_with_alloc_results(
+        &mut self,
+        module: &SirModule,
+        alloc_results: Option<std::collections::HashMap<crate::sir::values::FuncId, crate::backend::native::alloc::AllocResult>>,
+    ) -> Result<CodeSegment, EmitError> {
         let mut symbols = vec![];
 
         for func in &module.functions {
@@ -2130,8 +2163,18 @@ impl CodeEmitter for X86_64Emitter {
                 global: true,
             });
 
+            // Set allocation result for this function if available
+            if let Some(ref alloc_results_map) = alloc_results {
+                if let Some(alloc_result) = alloc_results_map.get(&func.id) {
+                    self.set_external_alloc_result(alloc_result.clone());
+                }
+            }
+
             // Emit function
             self.emit_function(func)?;
+            
+            // Clear external alloc result after function
+            self.external_alloc_result = None;
         }
 
         Ok(CodeSegment {
@@ -2186,6 +2229,7 @@ impl CodeEmitter for X86_64Emitter {
         // Clear labels from previous functions
         self.labels.clear();
         self.forward_refs.clear();
+        self.current_instruction_pos = 0;
 
         for block in &func.blocks {
             // Record label for this block
@@ -2193,7 +2237,29 @@ impl CodeEmitter for X86_64Emitter {
 
             // Emit instructions
             for inst in &block.instructions {
+                // Insert spill/reload operations before this instruction if needed
+                let ops_to_insert: Vec<_> = self.spill_ops_by_position
+                    .get(&self.current_instruction_pos)
+                    .cloned()
+                    .unwrap_or_default();
+                
+                for op in &ops_to_insert {
+                    match op {
+                        crate::backend::native::alloc::SpillReloadOp::Spill { reg, slot, .. } => {
+                            if let Some(x86_reg) = self.virt_reg_to_x86_reg(*reg) {
+                                self.emit_spill(x86_reg, slot.0 as i32);
+                            }
+                        }
+                        crate::backend::native::alloc::SpillReloadOp::Reload { reg, slot, .. } => {
+                            if let Some(x86_reg) = self.virt_reg_to_x86_reg(*reg) {
+                                self.emit_reload(x86_reg, slot.0 as i32);
+                            }
+                        }
+                    }
+                }
+
                 self.emit_instruction(inst, func)?;
+                self.current_instruction_pos += 1;
             }
 
             // Emit terminator
@@ -3435,11 +3501,14 @@ impl X86_64Emitter {
 // ============================================================================
 
 /// Emit code for a SIR module
-pub fn emit_code(module: &SirModule) -> Result<CodeSegment, EmitError> {
+pub fn emit_code(
+    module: &SirModule,
+    alloc_results: Option<std::collections::HashMap<crate::sir::values::FuncId, crate::backend::native::alloc::AllocResult>>,
+) -> Result<CodeSegment, EmitError> {
     match module.target.arch {
         Architecture::X86_64 => {
             let mut emitter = X86_64Emitter::new();
-            emitter.emit_module(module)
+            emitter.emit_module_with_alloc_results(module, alloc_results)
         }
         Architecture::AArch64 => {
             // TODO: Implement AArch64 emitter
@@ -3452,8 +3521,11 @@ pub fn emit_code(module: &SirModule) -> Result<CodeSegment, EmitError> {
 }
 
 /// Emit code for a SIR module and wrap it in ELF format
-pub fn emit_code_to_elf(module: &SirModule) -> Result<Vec<u8>, EmitError> {
-    let code_segment = emit_code(module)?;
+pub fn emit_code_to_elf(
+    module: &SirModule,
+    alloc_results: Option<std::collections::HashMap<crate::sir::values::FuncId, crate::backend::native::alloc::AllocResult>>,
+) -> Result<Vec<u8>, EmitError> {
+    let code_segment = emit_code(module, alloc_results)?;
     code_segment_to_elf(&code_segment)
 }
 
@@ -3541,7 +3613,7 @@ mod tests {
 
         module.create_function("empty", vec![], super::super::types::SirType::Void);
 
-        let result = emit_code(&module);
+        let result = emit_code(&module, None);
         assert!(result.is_ok());
 
         let segment = result.unwrap();
