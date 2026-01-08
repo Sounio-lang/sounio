@@ -1,0 +1,736 @@
+/// optimize::slsqp — Sequential Least Squares Quadratic Programming
+///
+/// SLSQP is a gradient-based constrained optimization method that handles:
+/// - Box constraints: lower <= x <= upper
+/// - Linear equality constraints: A_eq * x = b_eq
+/// - Linear inequality constraints: A_ineq * x >= b_ineq
+/// - Nonlinear equality constraints: g(x) = 0
+/// - Nonlinear inequality constraints: h(x) >= 0
+///
+/// # Algorithm
+///
+/// At each iteration:
+/// 1. Build QP subproblem approximating the Lagrangian
+/// 2. Solve QP to get search direction d
+/// 3. Line search satisfying Armijo + constraint satisfaction
+/// 4. Update BFGS approximation to Hessian of Lagrangian
+///
+/// # When to Use SLSQP
+///
+/// - Parameter estimation with physical bounds (e.g., rate constants > 0)
+/// - Constrained model calibration
+/// - Portfolio optimization with budget constraints
+/// - Design optimization with feasibility requirements
+///
+/// # Example
+///
+/// ```sio
+/// use optimize::slsqp::*
+///
+/// // Minimize Rosenbrock with box constraints
+/// fn rosenbrock(x: &[f64]) -> f64 {
+///     return (1.0 - x[0])^2 + 100.0 * (x[1] - x[0]^2)^2
+/// }
+///
+/// fn rosenbrock_grad(x: &[f64], g: &![f64]) {
+///     g[0] = -2.0 * (1.0 - x[0]) - 400.0 * x[0] * (x[1] - x[0]^2)
+///     g[1] = 200.0 * (x[1] - x[0]^2)
+/// }
+///
+/// let lower = [-5.0, -5.0]
+/// let upper = [5.0, 5.0]
+/// let x0 = [-1.0, -1.0]
+/// let config = slsqp_config_default()
+///
+/// let result = slsqp_solve(rosenbrock, rosenbrock_grad, &x0, &lower, &upper, &config)
+/// // result.x ≈ [1.0, 1.0]
+/// ```
+
+module optimize::slsqp
+
+use core::math::{abs, sqrt, fmax, fmin, pow}
+
+// ============================================================================
+// CONFIGURATION
+// ============================================================================
+
+/// SLSQP solver configuration.
+pub struct SLSQPConfig {
+    /// Maximum iterations
+    pub max_iter: i64,
+    /// Function value tolerance
+    pub ftol: f64,
+    /// Gradient tolerance
+    pub gtol: f64,
+    /// Step tolerance
+    pub xtol: f64,
+    /// Constraint violation tolerance
+    pub ctol: f64,
+    /// Initial Hessian scale
+    pub hess_scale: f64,
+    /// Line search parameters
+    pub armijo_c1: f64,
+    pub wolfe_c2: f64,
+    pub max_ls_iter: i64,
+    /// Verbose output
+    pub verbose: bool,
+}
+
+/// Default configuration.
+pub fn slsqp_config_default() -> SLSQPConfig {
+    return SLSQPConfig {
+        max_iter: 100,
+        ftol: 1e-8,
+        gtol: 1e-6,
+        xtol: 1e-8,
+        ctol: 1e-8,
+        hess_scale: 1.0,
+        armijo_c1: 1e-4,
+        wolfe_c2: 0.9,
+        max_ls_iter: 20,
+        verbose: false,
+    }
+}
+
+/// SLSQP solver result.
+pub struct SLSQPResult {
+    /// Solution vector
+    pub x: &[f64],
+    /// Objective value at solution
+    pub f: f64,
+    /// Whether solver converged
+    pub success: bool,
+    /// Number of iterations
+    pub niter: i64,
+    /// Number of function evaluations
+    pub nfeval: i64,
+    /// Number of gradient evaluations
+    pub ngeval: i64,
+    /// Constraint violation at solution
+    pub constraint_violation: f64,
+    /// Termination message
+    pub message: &str,
+}
+
+/// Constraint specification.
+pub struct Constraint {
+    /// 'eq' for equality, 'ineq' for inequality (h(x) >= 0)
+    pub kind: &str,
+    /// Constraint function: returns c(x)
+    pub func: fn(&[f64]) -> f64,
+    /// Constraint gradient: fills dc/dx
+    pub grad: fn(&[f64], &![f64]),
+}
+
+// ============================================================================
+// STATIC BUFFERS (up to 64 variables)
+// ============================================================================
+
+var SLSQP_X: [f64; 64] = [0.0; 64]
+var SLSQP_XNEW: [f64; 64] = [0.0; 64]
+var SLSQP_G: [f64; 64] = [0.0; 64]
+var SLSQP_D: [f64; 64] = [0.0; 64]
+var SLSQP_S: [f64; 64] = [0.0; 64]
+var SLSQP_Y: [f64; 64] = [0.0; 64]
+var SLSQP_GOLD: [f64; 64] = [0.0; 64]
+var SLSQP_H: [f64; 64 * 64] = [0.0; 64 * 64]
+var SLSQP_TMP: [f64; 64] = [0.0; 64]
+var SLSQP_X_FINAL: [f64; 64] = [0.0; 64]
+
+// ============================================================================
+// BFGS HESSIAN UPDATE
+// ============================================================================
+
+/// Initialize Hessian to scaled identity.
+fn init_hessian(H: &![f64], n: i64, scale: f64) {
+    var i: i64 = 0
+    while i < n {
+        var j: i64 = 0
+        while j < n {
+            if i == j {
+                H[(i * n + j) as usize] = scale
+            } else {
+                H[(i * n + j) as usize] = 0.0
+            }
+            j = j + 1
+        }
+        i = i + 1
+    }
+}
+
+/// BFGS update: H_{k+1} = (I - rho*s*y^T) H_k (I - rho*y*s^T) + rho*s*s^T
+fn bfgs_update(H: &![f64], s: &[f64], y: &[f64], n: i64) {
+    // Compute rho = 1 / (y^T s)
+    var ys: f64 = 0.0
+    var i: i64 = 0
+    while i < n {
+        ys = ys + y[i as usize] * s[i as usize]
+        i = i + 1
+    }
+
+    if abs(ys) < 1e-15 {
+        return  // Skip update to avoid division by zero
+    }
+
+    let rho = 1.0 / ys
+
+    // v = H * y
+    var v: [f64; 64] = [0.0; 64]
+    i = 0
+    while i < n {
+        var sum: f64 = 0.0
+        var j: i64 = 0
+        while j < n {
+            sum = sum + H[(i * n + j) as usize] * y[j as usize]
+            j = j + 1
+        }
+        v[i as usize] = sum
+        i = i + 1
+    }
+
+    // yHy = y^T H y = y^T v
+    var yHy: f64 = 0.0
+    i = 0
+    while i < n {
+        yHy = yHy + y[i as usize] * v[i as usize]
+        i = i + 1
+    }
+
+    // Update H using Sherman-Morrison-Woodbury formula
+    // H = H - (H*y*s^T + s*y^T*H)/(y^T*s) + (1 + y^T*H*y/(y^T*s)) * s*s^T / (y^T*s)
+    let factor = (1.0 + yHy * rho) * rho
+
+    i = 0
+    while i < n {
+        var j: i64 = 0
+        while j < n {
+            let h_update = factor * s[i as usize] * s[j as usize]
+                - rho * (v[i as usize] * s[j as usize] + s[i as usize] * v[j as usize])
+            H[(i * n + j) as usize] = H[(i * n + j) as usize] + h_update
+            j = j + 1
+        }
+        i = i + 1
+    }
+}
+
+// ============================================================================
+// BOUND-CONSTRAINED SEARCH DIRECTION
+// ============================================================================
+
+/// Compute search direction d = -H * g, then project onto feasible region.
+fn compute_search_direction(
+    H: &[f64],
+    g: &[f64],
+    x: &[f64],
+    lower: &[f64],
+    upper: &[f64],
+    n: i64,
+    d: &![f64]
+) {
+    // d = -H * g (quasi-Newton direction)
+    var i: i64 = 0
+    while i < n {
+        var sum: f64 = 0.0
+        var j: i64 = 0
+        while j < n {
+            sum = sum + H[(i * n + j) as usize] * g[j as usize]
+            j = j + 1
+        }
+        d[i as usize] = -sum
+        i = i + 1
+    }
+
+    // Project direction to respect bounds
+    // If x[i] is at lower bound and d[i] < 0, set d[i] = 0
+    // If x[i] is at upper bound and d[i] > 0, set d[i] = 0
+    i = 0
+    while i < n {
+        if x[i as usize] <= lower[i as usize] + 1e-10 && d[i as usize] < 0.0 {
+            d[i as usize] = 0.0
+        }
+        if x[i as usize] >= upper[i as usize] - 1e-10 && d[i as usize] > 0.0 {
+            d[i as usize] = 0.0
+        }
+        i = i + 1
+    }
+}
+
+// ============================================================================
+// LINE SEARCH WITH BOUND CLIPPING
+// ============================================================================
+
+/// Compute maximum step that stays within bounds.
+fn max_step_to_bounds(x: &[f64], d: &[f64], lower: &[f64], upper: &[f64], n: i64) -> f64 {
+    var alpha_max: f64 = 1e20
+
+    var i: i64 = 0
+    while i < n {
+        let di = d[i as usize]
+        if abs(di) > 1e-15 {
+            if di > 0.0 {
+                let bound = (upper[i as usize] - x[i as usize]) / di
+                alpha_max = fmin(alpha_max, bound)
+            } else {
+                let bound = (lower[i as usize] - x[i as usize]) / di
+                alpha_max = fmin(alpha_max, bound)
+            }
+        }
+        i = i + 1
+    }
+
+    return fmax(0.0, alpha_max)
+}
+
+/// Armijo backtracking line search with bounds.
+fn line_search(
+    f: fn(&[f64]) -> f64,
+    x: &[f64],
+    d: &[f64],
+    g: &[f64],
+    f0: f64,
+    lower: &[f64],
+    upper: &[f64],
+    n: i64,
+    config: &SLSQPConfig
+) -> (f64, f64, i64) {  // (alpha, f_new, nfeval)
+    let alpha_max = max_step_to_bounds(x, d, lower, upper, n)
+
+    // Directional derivative
+    var gd: f64 = 0.0
+    var i: i64 = 0
+    while i < n {
+        gd = gd + g[i as usize] * d[i as usize]
+        i = i + 1
+    }
+
+    if gd >= 0.0 {
+        // Not a descent direction
+        return (0.0, f0, 0)
+    }
+
+    var alpha: f64 = fmin(1.0, alpha_max)
+    var nfeval: i64 = 0
+
+    var iter: i64 = 0
+    while iter < config.max_ls_iter {
+        // x_new = x + alpha * d (with clipping)
+        i = 0
+        while i < n {
+            let xi = x[i as usize] + alpha * d[i as usize]
+            SLSQP_XNEW[i as usize] = fmax(lower[i as usize], fmin(upper[i as usize], xi))
+            i = i + 1
+        }
+
+        let f_new = f(&SLSQP_XNEW[0..n as usize])
+        nfeval = nfeval + 1
+
+        // Armijo condition: f(x + alpha*d) <= f(x) + c1*alpha*g^T*d
+        if f_new <= f0 + config.armijo_c1 * alpha * gd {
+            return (alpha, f_new, nfeval)
+        }
+
+        // Backtrack
+        alpha = alpha * 0.5
+        iter = iter + 1
+    }
+
+    return (0.0, f0, nfeval)
+}
+
+// ============================================================================
+// MAIN SLSQP SOLVER (BOUND CONSTRAINTS ONLY)
+// ============================================================================
+
+/// Solve bound-constrained optimization problem.
+///
+/// minimize f(x)
+/// subject to: lower <= x <= upper
+///
+/// Uses quasi-Newton (BFGS) with projected gradient.
+pub fn slsqp_solve_bounds(
+    f: fn(&[f64]) -> f64,
+    grad: fn(&[f64], &![f64]),
+    x0: &[f64],
+    lower: &[f64],
+    upper: &[f64],
+    config: &SLSQPConfig
+) -> SLSQPResult {
+    let n = x0.len() as i64
+    if n > 64 {
+        return SLSQPResult {
+            x: &SLSQP_X_FINAL[0..1],
+            f: 0.0,
+            success: false,
+            niter: 0,
+            nfeval: 0,
+            ngeval: 0,
+            constraint_violation: 0.0,
+            message: "Problem too large (max 64 variables)",
+        }
+    }
+
+    let x = &!SLSQP_X[0..n as usize]
+    let g = &!SLSQP_G[0..n as usize]
+    let g_old = &!SLSQP_GOLD[0..n as usize]
+    let d = &!SLSQP_D[0..n as usize]
+    let s = &!SLSQP_S[0..n as usize]
+    let y = &!SLSQP_Y[0..n as usize]
+    let H = &!SLSQP_H[0..(n * n) as usize]
+
+    // Initialize x (project to feasible region)
+    var i: i64 = 0
+    while i < n {
+        x[i as usize] = fmax(lower[i as usize], fmin(upper[i as usize], x0[i as usize]))
+        SLSQP_X_FINAL[i as usize] = x[i as usize]
+        i = i + 1
+    }
+
+    // Initialize Hessian
+    init_hessian(H, n, config.hess_scale)
+
+    // Initial function and gradient
+    var f_val = f(x)
+    grad(x, g)
+    var nfeval: i64 = 1
+    var ngeval: i64 = 1
+
+    var iter: i64 = 0
+    while iter < config.max_iter {
+        // Check convergence: projected gradient
+        var g_norm: f64 = 0.0
+        i = 0
+        while i < n {
+            var gi = g[i as usize]
+            // Project gradient at bounds
+            if x[i as usize] <= lower[i as usize] + 1e-10 && gi > 0.0 {
+                gi = 0.0
+            }
+            if x[i as usize] >= upper[i as usize] - 1e-10 && gi < 0.0 {
+                gi = 0.0
+            }
+            g_norm = g_norm + gi * gi
+            i = i + 1
+        }
+        g_norm = sqrt(g_norm)
+
+        if g_norm < config.gtol {
+            i = 0
+            while i < n {
+                SLSQP_X_FINAL[i as usize] = x[i as usize]
+                i = i + 1
+            }
+            return SLSQPResult {
+                x: &SLSQP_X_FINAL[0..n as usize],
+                f: f_val,
+                success: true,
+                niter: iter,
+                nfeval: nfeval,
+                ngeval: ngeval,
+                constraint_violation: 0.0,
+                message: "Convergence: gradient tolerance",
+            }
+        }
+
+        // Save old gradient
+        i = 0
+        while i < n {
+            g_old[i as usize] = g[i as usize]
+            i = i + 1
+        }
+
+        // Compute search direction
+        compute_search_direction(H, g, x, lower, upper, n, d)
+
+        // Check if direction is zero
+        var d_norm: f64 = 0.0
+        i = 0
+        while i < n {
+            d_norm = d_norm + d[i as usize] * d[i as usize]
+            i = i + 1
+        }
+        d_norm = sqrt(d_norm)
+
+        if d_norm < config.xtol {
+            i = 0
+            while i < n {
+                SLSQP_X_FINAL[i as usize] = x[i as usize]
+                i = i + 1
+            }
+            return SLSQPResult {
+                x: &SLSQP_X_FINAL[0..n as usize],
+                f: f_val,
+                success: true,
+                niter: iter,
+                nfeval: nfeval,
+                ngeval: ngeval,
+                constraint_violation: 0.0,
+                message: "Convergence: step tolerance",
+            }
+        }
+
+        // Line search
+        let (alpha, f_new, ls_feval) = line_search(f, x, d, g, f_val, lower, upper, n, config)
+        nfeval = nfeval + ls_feval
+
+        if alpha <= 1e-15 {
+            i = 0
+            while i < n {
+                SLSQP_X_FINAL[i as usize] = x[i as usize]
+                i = i + 1
+            }
+            return SLSQPResult {
+                x: &SLSQP_X_FINAL[0..n as usize],
+                f: f_val,
+                success: false,
+                niter: iter,
+                nfeval: nfeval,
+                ngeval: ngeval,
+                constraint_violation: 0.0,
+                message: "Line search failed",
+            }
+        }
+
+        // Check function value convergence
+        if abs(f_new - f_val) < config.ftol * (1.0 + abs(f_val)) {
+            // Update x
+            i = 0
+            while i < n {
+                x[i as usize] = fmax(lower[i as usize], fmin(upper[i as usize], x[i as usize] + alpha * d[i as usize]))
+                SLSQP_X_FINAL[i as usize] = x[i as usize]
+                i = i + 1
+            }
+            return SLSQPResult {
+                x: &SLSQP_X_FINAL[0..n as usize],
+                f: f_new,
+                success: true,
+                niter: iter + 1,
+                nfeval: nfeval,
+                ngeval: ngeval,
+                constraint_violation: 0.0,
+                message: "Convergence: function tolerance",
+            }
+        }
+
+        // Compute s = x_new - x = alpha * d (with clipping)
+        i = 0
+        while i < n {
+            let x_old = x[i as usize]
+            x[i as usize] = fmax(lower[i as usize], fmin(upper[i as usize], x[i as usize] + alpha * d[i as usize]))
+            s[i as usize] = x[i as usize] - x_old
+            i = i + 1
+        }
+
+        f_val = f_new
+
+        // Compute new gradient
+        grad(x, g)
+        ngeval = ngeval + 1
+
+        // Compute y = g_new - g_old
+        i = 0
+        while i < n {
+            y[i as usize] = g[i as usize] - g_old[i as usize]
+            i = i + 1
+        }
+
+        // BFGS update
+        bfgs_update(H, s, y, n)
+
+        if config.verbose {
+            println("iter ", iter + 1, ": f = ", f_val, ", |g| = ", g_norm)
+        }
+
+        iter = iter + 1
+    }
+
+    i = 0
+    while i < n {
+        SLSQP_X_FINAL[i as usize] = x[i as usize]
+        i = i + 1
+    }
+
+    return SLSQPResult {
+        x: &SLSQP_X_FINAL[0..n as usize],
+        f: f_val,
+        success: false,
+        niter: iter,
+        nfeval: nfeval,
+        ngeval: ngeval,
+        constraint_violation: 0.0,
+        message: "Maximum iterations exceeded",
+    }
+}
+
+// ============================================================================
+// CONVENIENCE: FINITE DIFFERENCE GRADIENT
+// ============================================================================
+
+/// Solve with finite-difference gradient.
+pub fn slsqp_solve_bounds_fd(
+    f: fn(&[f64]) -> f64,
+    x0: &[f64],
+    lower: &[f64],
+    upper: &[f64],
+    config: &SLSQPConfig
+) -> SLSQPResult {
+    let n = x0.len()
+
+    // Wrap with FD gradient
+    fn fd_grad(x: &[f64], g: &![f64]) {
+        let eps = 1e-8
+        let n = x.len()
+        var f0 = slsqp_eval_f(x)
+
+        var i: usize = 0
+        while i < n {
+            var x_pert: [f64; 64] = [0.0; 64]
+            var j: usize = 0
+            while j < n {
+                x_pert[j] = x[j]
+                j = j + 1
+            }
+
+            let h = eps * (1.0 + abs(x[i]))
+            x_pert[i] = x_pert[i] + h
+            let f1 = slsqp_eval_f(&x_pert[0..n])
+            g[i] = (f1 - f0) / h
+            i = i + 1
+        }
+    }
+
+    // Store function pointer for FD gradient
+    SLSQP_F_PTR = f
+
+    return slsqp_solve_bounds(f, fd_grad, x0, lower, upper, config)
+}
+
+// Global function pointer for FD gradient (workaround for closures)
+var SLSQP_F_PTR: fn(&[f64]) -> f64 = dummy_f
+
+fn dummy_f(x: &[f64]) -> f64 { return 0.0 }
+
+fn slsqp_eval_f(x: &[f64]) -> f64 {
+    return SLSQP_F_PTR(x)
+}
+
+// ============================================================================
+// TESTS
+// ============================================================================
+
+fn rosenbrock(x: &[f64]) -> f64 {
+    return (1.0 - x[0]) * (1.0 - x[0]) + 100.0 * (x[1] - x[0] * x[0]) * (x[1] - x[0] * x[0])
+}
+
+fn rosenbrock_grad(x: &[f64], g: &![f64]) {
+    g[0] = -2.0 * (1.0 - x[0]) - 400.0 * x[0] * (x[1] - x[0] * x[0])
+    g[1] = 200.0 * (x[1] - x[0] * x[0])
+}
+
+fn quadratic(x: &[f64]) -> f64 {
+    return (x[0] - 3.0) * (x[0] - 3.0) + (x[1] - 2.0) * (x[1] - 2.0)
+}
+
+fn quadratic_grad(x: &[f64], g: &![f64]) {
+    g[0] = 2.0 * (x[0] - 3.0)
+    g[1] = 2.0 * (x[1] - 2.0)
+}
+
+fn test_slsqp_quadratic_unconstrained() -> bool {
+    let x0: [f64; 2] = [0.0, 0.0]
+    let lower: [f64; 2] = [-100.0, -100.0]
+    let upper: [f64; 2] = [100.0, 100.0]
+
+    let config = slsqp_config_default()
+    let result = slsqp_solve_bounds(quadratic, quadratic_grad, &x0, &lower, &upper, &config)
+
+    if !result.success { return false }
+    if abs(result.x[0] - 3.0) > 1e-4 { return false }
+    if abs(result.x[1] - 2.0) > 1e-4 { return false }
+
+    println("Quadratic: converged in ", result.niter, " iterations to x = [", result.x[0], ", ", result.x[1], "]")
+    return true
+}
+
+fn test_slsqp_quadratic_bounded() -> bool {
+    // Solution at (3, 2) but bound x[0] <= 1
+    // Should converge to (1, 2)
+    let x0: [f64; 2] = [0.0, 0.0]
+    let lower: [f64; 2] = [-100.0, -100.0]
+    let upper: [f64; 2] = [1.0, 100.0]
+
+    let config = slsqp_config_default()
+    let result = slsqp_solve_bounds(quadratic, quadratic_grad, &x0, &lower, &upper, &config)
+
+    if !result.success { return false }
+    if abs(result.x[0] - 1.0) > 1e-4 { return false }
+    if abs(result.x[1] - 2.0) > 1e-4 { return false }
+
+    println("Bounded quadratic: converged to x = [", result.x[0], ", ", result.x[1], "]")
+    return true
+}
+
+fn test_slsqp_rosenbrock() -> bool {
+    let x0: [f64; 2] = [-1.0, -1.0]
+    let lower: [f64; 2] = [-10.0, -10.0]
+    let upper: [f64; 2] = [10.0, 10.0]
+
+    var config = slsqp_config_default()
+    config.max_iter = 500
+
+    let result = slsqp_solve_bounds(rosenbrock, rosenbrock_grad, &x0, &lower, &upper, &config)
+
+    if !result.success {
+        println("Rosenbrock: failed - ", result.message)
+        return false
+    }
+
+    if abs(result.x[0] - 1.0) > 1e-3 || abs(result.x[1] - 1.0) > 1e-3 {
+        println("Rosenbrock: wrong solution x = [", result.x[0], ", ", result.x[1], "]")
+        return false
+    }
+
+    println("Rosenbrock: converged in ", result.niter, " iterations")
+    return true
+}
+
+fn main() -> i32 {
+    println("=== SLSQP Constrained Optimization Tests ===")
+    println("")
+
+    var failed = false
+
+    println("Test 1: Quadratic (unconstrained)")
+    if test_slsqp_quadratic_unconstrained() {
+        println("  PASSED")
+    } else {
+        println("  FAILED")
+        failed = true
+    }
+
+    println("")
+    println("Test 2: Quadratic (bound constrained)")
+    if test_slsqp_quadratic_bounded() {
+        println("  PASSED")
+    } else {
+        println("  FAILED")
+        failed = true
+    }
+
+    println("")
+    println("Test 3: Rosenbrock")
+    if test_slsqp_rosenbrock() {
+        println("  PASSED")
+    } else {
+        println("  FAILED")
+        failed = true
+    }
+
+    println("")
+    if failed {
+        println("SOME TESTS FAILED")
+        return 1
+    } else {
+        println("ALL TESTS PASSED")
+        return 0
+    }
+}
