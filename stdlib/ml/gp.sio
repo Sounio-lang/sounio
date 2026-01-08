@@ -19,6 +19,9 @@
 // - Active learning (query points with highest uncertainty)
 // - Spatial statistics and kriging
 
+// Import high-performance math library (10-100x faster than Taylor series)
+use core::math::{exp, log, sin, cos, sqrt, pow, PI};
+
 // ============================================================================
 // Helper Functions
 // ============================================================================
@@ -26,87 +29,6 @@
 fn abs_f64(x: f64) -> f64 {
     if x < 0.0 { return 0.0 - x }
     return x
-}
-
-fn sqrt_f64(x: f64) -> f64 {
-    if x <= 0.0 { return 0.0 }
-    var y = x
-    y = (y + x / y) / 2.0
-    y = (y + x / y) / 2.0
-    y = (y + x / y) / 2.0
-    y = (y + x / y) / 2.0
-    y = (y + x / y) / 2.0
-    y = (y + x / y) / 2.0
-    y = (y + x / y) / 2.0
-    y = (y + x / y) / 2.0
-    return y
-}
-
-fn exp_f64(x: f64) -> f64 {
-    if x > 20.0 { return exp_f64(x / 2.0) * exp_f64(x / 2.0) }
-    if x < 0.0 - 20.0 { return 1.0 / exp_f64(0.0 - x) }
-    var sum = 1.0
-    var term = 1.0
-    var i: i64 = 1
-    while i < 20 {
-        term = term * x / (i as f64)
-        sum = sum + term
-        i = i + 1
-    }
-    return sum
-}
-
-fn log_f64(x: f64) -> f64 {
-    if x <= 0.0 { return 0.0 - 1000000.0 }
-    var val = x
-    var k = 0.0
-    let e = 2.718281828459045
-    while val > e { val = val / e; k = k + 1.0 }
-    while val < 1.0 / e { val = val * e; k = k - 1.0 }
-    let u = (val - 1.0) / (val + 1.0)
-    let u2 = u * u
-    var sum = u
-    var term = u
-    term = term * u2; sum = sum + term / 3.0
-    term = term * u2; sum = sum + term / 5.0
-    term = term * u2; sum = sum + term / 7.0
-    term = term * u2; sum = sum + term / 9.0
-    term = term * u2; sum = sum + term / 11.0
-    return 2.0 * sum + k
-}
-
-fn sin_f64(x: f64) -> f64 {
-    let pi = 3.141592653589793
-    var y = x
-    while y > pi { y = y - 2.0 * pi }
-    while y < 0.0 - pi { y = y + 2.0 * pi }
-    let x2 = y * y
-    var sum = y
-    var term = y
-    term = term * (0.0 - x2) / 6.0; sum = sum + term
-    term = term * (0.0 - x2) / 20.0; sum = sum + term
-    term = term * (0.0 - x2) / 42.0; sum = sum + term
-    term = term * (0.0 - x2) / 72.0; sum = sum + term
-    return sum
-}
-
-fn cos_f64(x: f64) -> f64 {
-    let pi = 3.141592653589793
-    var y = x
-    while y > pi { y = y - 2.0 * pi }
-    while y < 0.0 - pi { y = y + 2.0 * pi }
-    let x2 = y * y
-    var sum = 1.0
-    var term = 1.0
-    term = term * (0.0 - x2) / 2.0; sum = sum + term
-    term = term * (0.0 - x2) / 12.0; sum = sum + term
-    term = term * (0.0 - x2) / 30.0; sum = sum + term
-    term = term * (0.0 - x2) / 56.0; sum = sum + term
-    return sum
-}
-
-fn pow_f64(base: f64, exp: f64) -> f64 {
-    return exp_f64(exp * log_f64(base))
 }
 
 // Kernel type identifiers
@@ -130,7 +52,7 @@ struct KernelParams {
 }
 
 // Radial Basis Function (RBF) / Squared Exponential kernel
-// k(x1, x2) = σ² exp_f64(-||x1 - x2||² / (2ℓ²))
+// k(x1, x2) = σ² exp(-||x1 - x2||² / (2ℓ²))
 // Infinitely differentiable, very smooth functions
 fn kernel_rbf(x1: [f64], x2: [f64], d: i64, length_scale: f64, variance: f64) -> f64 {
     var sum_sq = 0.0
@@ -142,11 +64,11 @@ fn kernel_rbf(x1: [f64], x2: [f64], d: i64, length_scale: f64, variance: f64) ->
     }
     let dist_sq = sum_sq
     let exponent = -0.5 * dist_sq / (length_scale * length_scale)
-    variance * exp_f64(exponent)
+    variance * exp(exponent)
 }
 
 // Matérn 3/2 kernel
-// k(x1, x2) = σ² (1 + √3 r / ℓ) exp_f64(-√3 r / ℓ)
+// k(x1, x2) = σ² (1 + √3 r / ℓ) exp(-√3 r / ℓ)
 // Once differentiable, less smooth than RBF
 fn kernel_matern32(x1: [f64], x2: [f64], d: i64, length_scale: f64, variance: f64) -> f64 {
     var sum_sq = 0.0
@@ -156,14 +78,14 @@ fn kernel_matern32(x1: [f64], x2: [f64], d: i64, length_scale: f64, variance: f6
         sum_sq = sum_sq + diff * diff
         i = i + 1
     }
-    let r = sqrt_f64(sum_sq)
+    let r = sqrt(sum_sq)
     let sqrt3 = 1.7320508075688772
     let scaled = sqrt3 * r / length_scale
-    variance * (1.0 + scaled) * exp_f64(-scaled)
+    variance * (1.0 + scaled) * exp(-scaled)
 }
 
 // Matérn 5/2 kernel
-// k(x1, x2) = σ² (1 + √5 r / ℓ + 5r² / (3ℓ²)) exp_f64(-√5 r / ℓ)
+// k(x1, x2) = σ² (1 + √5 r / ℓ + 5r² / (3ℓ²)) exp(-√5 r / ℓ)
 // Twice differentiable, smoother than Matérn 3/2
 fn kernel_matern52(x1: [f64], x2: [f64], d: i64, length_scale: f64, variance: f64) -> f64 {
     var sum_sq = 0.0
@@ -173,12 +95,12 @@ fn kernel_matern52(x1: [f64], x2: [f64], d: i64, length_scale: f64, variance: f6
         sum_sq = sum_sq + diff * diff
         i = i + 1
     }
-    let r = sqrt_f64(sum_sq)
+    let r = sqrt(sum_sq)
     let sqrt5 = 2.23606797749979
     let scaled = sqrt5 * r / length_scale
     let term1 = 1.0 + scaled
     let term2 = (5.0 * sum_sq) / (3.0 * length_scale * length_scale)
-    variance * (term1 + term2) * exp_f64(-scaled)
+    variance * (term1 + term2) * exp(-scaled)
 }
 
 // Linear kernel
@@ -195,7 +117,7 @@ fn kernel_linear(x1: [f64], x2: [f64], d: i64, variance: f64) -> f64 {
 }
 
 // Periodic kernel
-// k(x1, x2) = σ² exp_f64(-2 sin²(π ||x1 - x2|| / p) / ℓ²)
+// k(x1, x2) = σ² exp(-2 sin²(π ||x1 - x2|| / p) / ℓ²)
 // Captures periodic patterns with period p
 fn kernel_periodic(x1: [f64], x2: [f64], d: i64, length_scale: f64, period: f64, variance: f64) -> f64 {
     var sum_sq = 0.0
@@ -205,11 +127,11 @@ fn kernel_periodic(x1: [f64], x2: [f64], d: i64, length_scale: f64, period: f64,
         sum_sq = sum_sq + diff * diff
         i = i + 1
     }
-    let r = sqrt_f64(sum_sq)
+    let r = sqrt(sum_sq)
     let pi = 3.141592653589793
     let sin_term = sin_f64(pi * r / period)
     let exponent = -2.0 * sin_term * sin_term / (length_scale * length_scale)
-    variance * exp_f64(exponent)
+    variance * exp(exponent)
 }
 
 // Kernel sum for composite kernels
@@ -314,7 +236,7 @@ fn cholesky_decompose(A: [f64], n: i64) -> [f64] {
             }
 
             if i == j {
-                L[i * n + j] = sqrt_f64(A[i * n + i] - sum)
+                L[i * n + j] = sqrt(A[i * n + i] - sum)
             } else {
                 L[i * n + j] = (A[i * n + j] - sum) / L[j * n + j]
             }
@@ -516,7 +438,7 @@ fn gp_predict(model: GPModel, x_test: [f64]) -> GPPrediction {
     let variance = k_star_star - v_dot_v
 
     // 95% confidence interval (±1.96 σ)
-    let std_dev = sqrt_f64(variance)
+    let std_dev = sqrt(variance)
     let confidence_95_lo = mean - 1.96 * std_dev
     let confidence_95_hi = mean + 1.96 * std_dev
 
@@ -584,7 +506,7 @@ fn gp_sample(model: GPModel, X_test: [f64], n_test: i64, n_samples: i64, seed: i
                 j = j + 1
             }
             let pred = gp_predict(model, x_test)
-            let std_dev = sqrt_f64(pred.variance)
+            let std_dev = sqrt(pred.variance)
             samples[s * n_test + t] = pred.mean + std_dev * normal(0.0, 1.0)
             t = t + 1
         }
@@ -599,25 +521,25 @@ fn gp_sample(model: GPModel, X_test: [f64], n_test: i64, n_samples: i64, seed: i
 // ============================================================================
 
 // Compute log marginal likelihood
-// log p(y | X, θ) = -0.5 y^T (K + σ²I)^(-1) y - 0.5 log|K + σ²I| - n/2 log_f64(2π)
+// log p(y | X, θ) = -0.5 y^T (K + σ²I)^(-1) y - 0.5 log|K + σ²I| - n/2 log(2π)
 fn gp_log_marginal_likelihood(model: GPModel) -> f64 {
     let n = model.n_train
 
     // -0.5 y^T α
     let term1 = -0.5 * dot(model.y_train, model.alpha, n)
 
-    // -0.5 log|K + σ²I| = -sum(log_f64(diag(L)))
+    // -0.5 log|K + σ²I| = -sum(log(diag(L)))
     var log_det = 0.0
     var i = 0
     while i < n {
-        log_det = log_det + log_f64(model.L[i * n + i])
+        log_det = log_det + log(model.L[i * n + i])
         i = i + 1
     }
     let term2 = -log_det
 
-    // -n/2 log_f64(2π)
+    // -n/2 log(2π)
     let pi = 3.141592653589793
-    let term3 = -0.5 * n as f64 * log_f64(2.0 * pi)
+    let term3 = -0.5 * n as f64 * log(2.0 * pi)
 
     term1 + term2 + term3
 }
@@ -745,7 +667,7 @@ struct GPClassifier {
 
 // Sigmoid function
 fn sigmoid(x: f64) -> f64 {
-    1.0 / (1.0 + exp_f64(-x))
+    1.0 / (1.0 + exp(-x))
 }
 
 // Fit GP classifier
@@ -790,7 +712,7 @@ fn gp_classifier_predict(model: GPClassifier, x_test: [f64]) -> (f64, f64) {
     let f_var = 0.1  // Simplified
 
     let prob = sigmoid(f_mean)
-    let uncertainty = sqrt_f64(f_var)
+    let uncertainty = sqrt(f_var)
 
     (prob, uncertainty)
 }
@@ -825,7 +747,7 @@ fn erf(x: f64) -> f64 {
     let x_abs = abs_f64(x)
 
     let t = 1.0 / (1.0 + p * x_abs)
-    let y = 1.0 - (((((a5 * t + a4) * t) + a3) * t + a2) * t + a1) * t * exp_f64(-x_abs * x_abs)
+    let y = 1.0 - (((((a5 * t + a4) * t) + a3) * t + a2) * t + a1) * t * exp(-x_abs * x_abs)
 
     sign * y
 }
@@ -833,7 +755,7 @@ fn erf(x: f64) -> f64 {
 // Standard normal PDF
 fn normal_pdf(x: f64) -> f64 {
     let pi = 3.141592653589793
-    (1.0 / sqrt_f64(2.0 * pi)) * exp_f64(-0.5 * x * x)
+    (1.0 / sqrt(2.0 * pi)) * exp(-0.5 * x * x)
 }
 
 // Expected Improvement acquisition function
@@ -841,7 +763,7 @@ fn normal_pdf(x: f64) -> f64 {
 fn acquisition_ei(model: GPModel, x: [f64], best_y: f64) -> f64 {
     let pred = gp_predict(model, x)
     let mean = pred.mean
-    let std = sqrt_f64(pred.variance)
+    let std = sqrt(pred.variance)
 
     if std < 1e-10 {
         return 0.0
@@ -856,7 +778,7 @@ fn acquisition_ei(model: GPModel, x: [f64], best_y: f64) -> f64 {
 // UCB(x) = μ(x) + β σ(x)
 fn acquisition_ucb(model: GPModel, x: [f64], beta: f64) -> f64 {
     let pred = gp_predict(model, x)
-    pred.mean + beta * sqrt_f64(pred.variance)
+    pred.mean + beta * sqrt(pred.variance)
 }
 
 // Probability of Improvement acquisition function
@@ -864,7 +786,7 @@ fn acquisition_ucb(model: GPModel, x: [f64], beta: f64) -> f64 {
 fn acquisition_pi(model: GPModel, x: [f64], best_y: f64) -> f64 {
     let pred = gp_predict(model, x)
     let mean = pred.mean
-    let std = sqrt_f64(pred.variance)
+    let std = sqrt(pred.variance)
 
     if std < 1e-10 {
         return 0.0
@@ -904,7 +826,7 @@ fn bayesian_optimize_step(model: GPModel, bounds: [f64], best_y: f64,
             best_ei = ei
             best_x = x_candidate
             let pred = gp_predict(model, x_candidate)
-            best_uncertainty = sqrt_f64(pred.variance)
+            best_uncertainty = sqrt(pred.variance)
         }
 
         i = i + 1
