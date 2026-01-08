@@ -1,0 +1,788 @@
+/// ode::bdf — Backward Differentiation Formula Solvers for Stiff ODEs
+///
+/// BDF methods are implicit multistep methods specifically designed for stiff systems.
+/// They are L-stable (all orders) or A-stable (orders 1-2), making them ideal for
+/// problems with widely separated time scales.
+///
+/// # When to Use BDF
+///
+/// Use BDF when your system exhibits stiffness:
+/// - Eigenvalue spread > 1000 (λ_max / λ_min)
+/// - Explicit methods require impractically small steps
+/// - Chemical kinetics with fast equilibration
+/// - Circuit simulation with parasitic capacitances
+/// - PBPK with fast blood circulation
+///
+/// # Algorithm Overview
+///
+/// BDF-k approximates the derivative using k previous solution values:
+///
+/// ```
+/// BDF1: y_n - y_{n-1} = h * f(t_n, y_n)              (Backward Euler)
+/// BDF2: 3y_n - 4y_{n-1} + y_{n-2} = 2h * f(t_n, y_n)
+/// BDF3: 11y_n - 18y_{n-1} + 9y_{n-2} - 2y_{n-3} = 6h * f(t_n, y_n)
+/// ...
+/// ```
+///
+/// The implicit equation is solved using Newton iteration with approximate Jacobian.
+///
+/// # Usage
+///
+/// ```sio
+/// use ode::bdf::*
+///
+/// // Robertson chemical kinetics (classic stiff test problem)
+/// fn robertson_rhs(t: f64, y: &[f64], dydt: &![f64]) {
+///     dydt[0] = -0.04 * y[0] + 1e4 * y[1] * y[2]
+///     dydt[1] = 0.04 * y[0] - 1e4 * y[1] * y[2] - 3e7 * y[1] * y[1]
+///     dydt[2] = 3e7 * y[1] * y[1]
+/// }
+///
+/// let config = bdf_config_default()
+/// let y0 = [1.0, 0.0, 0.0]
+/// let result = bdf_solve(robertson_rhs, &y0, 0.0, 1e5, &config)
+/// ```
+
+module ode::bdf
+
+use core::math::{abs, sqrt, fmax, fmin, pow}
+
+// ============================================================================
+// BDF CONFIGURATION
+// ============================================================================
+
+/// BDF solver configuration.
+pub struct BDFConfig {
+    /// Maximum BDF order (1-5, default 5)
+    pub max_order: i64,
+    /// Relative tolerance
+    pub rtol: f64,
+    /// Absolute tolerance
+    pub atol: f64,
+    /// Initial step size (0 = auto)
+    pub h0: f64,
+    /// Minimum step size
+    pub h_min: f64,
+    /// Maximum step size
+    pub h_max: f64,
+    /// Maximum Newton iterations per step
+    pub max_newton_iter: i64,
+    /// Newton convergence tolerance
+    pub newton_tol: f64,
+    /// Maximum total steps
+    pub max_steps: i64,
+    /// Whether to use finite difference Jacobian (vs analytical)
+    pub use_fd_jacobian: bool,
+}
+
+/// Default BDF configuration.
+pub fn bdf_config_default() -> BDFConfig {
+    return BDFConfig {
+        max_order: 5,
+        rtol: 1e-6,
+        atol: 1e-9,
+        h0: 0.0,  // Auto
+        h_min: 1e-14,
+        h_max: 1e10,
+        max_newton_iter: 10,
+        newton_tol: 1e-10,
+        max_steps: 100000,
+        use_fd_jacobian: true,
+    }
+}
+
+/// BDF solver result.
+pub struct BDFResult {
+    /// Solution at final time
+    pub y_final: &[f64],
+    /// Final time reached
+    pub t_final: f64,
+    /// Whether solver succeeded
+    pub success: bool,
+    /// Number of steps taken
+    pub nsteps: i64,
+    /// Number of function evaluations
+    pub nfeval: i64,
+    /// Number of Jacobian evaluations
+    pub njeval: i64,
+    /// Number of rejected steps
+    pub nreject: i64,
+    /// Final BDF order used
+    pub final_order: i64,
+    /// Message
+    pub message: &str,
+}
+
+// ============================================================================
+// BDF COEFFICIENTS
+// ============================================================================
+
+/// BDF coefficients: alpha coefficients for the linear combination.
+/// For BDF-k: sum_{j=0}^{k} alpha[j] * y_{n-j} = h * beta * f(t_n, y_n)
+///
+/// alpha[0] is the coefficient for y_n (always 1 after normalization)
+struct BDFCoeffs {
+    /// alpha[j] for j=0..order (normalized so alpha[0]=1)
+    alpha: [f64; 6],
+    /// gamma (coefficient for h*f)
+    gamma: f64,
+    /// Error coefficient
+    error_const: f64,
+}
+
+/// Get BDF coefficients for given order.
+fn bdf_coefficients(order: i64) -> BDFCoeffs {
+    // BDF coefficients are derived from polynomial interpolation
+    // These are the standard coefficients from numerical analysis literature
+
+    if order == 1 {
+        // BDF1 (Backward Euler): y_n - y_{n-1} = h * f_n
+        return BDFCoeffs {
+            alpha: [1.0, -1.0, 0.0, 0.0, 0.0, 0.0],
+            gamma: 1.0,
+            error_const: 0.5,
+        }
+    }
+
+    if order == 2 {
+        // BDF2: (3/2)y_n - 2y_{n-1} + (1/2)y_{n-2} = h * f_n
+        return BDFCoeffs {
+            alpha: [1.0, -4.0/3.0, 1.0/3.0, 0.0, 0.0, 0.0],
+            gamma: 2.0/3.0,
+            error_const: 2.0/9.0,
+        }
+    }
+
+    if order == 3 {
+        // BDF3: (11/6)y_n - 3y_{n-1} + (3/2)y_{n-2} - (1/3)y_{n-3} = h * f_n
+        return BDFCoeffs {
+            alpha: [1.0, -18.0/11.0, 9.0/11.0, -2.0/11.0, 0.0, 0.0],
+            gamma: 6.0/11.0,
+            error_const: 3.0/22.0,
+        }
+    }
+
+    if order == 4 {
+        // BDF4
+        return BDFCoeffs {
+            alpha: [1.0, -48.0/25.0, 36.0/25.0, -16.0/25.0, 3.0/25.0, 0.0],
+            gamma: 12.0/25.0,
+            error_const: 12.0/125.0,
+        }
+    }
+
+    // BDF5 (default for order >= 5)
+    return BDFCoeffs {
+        alpha: [1.0, -300.0/137.0, 300.0/137.0, -200.0/137.0, 75.0/137.0, -12.0/137.0],
+        gamma: 60.0/137.0,
+        error_const: 10.0/137.0,
+    }
+}
+
+// ============================================================================
+// STATIC BUFFERS (for systems up to 128 dimensions)
+// ============================================================================
+
+var BDF_Y: [f64; 128] = [0.0; 128]
+var BDF_Y_NEW: [f64; 128] = [0.0; 128]
+var BDF_F: [f64; 128] = [0.0; 128]
+var BDF_DELTA: [f64; 128] = [0.0; 128]
+var BDF_RESIDUAL: [f64; 128] = [0.0; 128]
+var BDF_HISTORY: [f64; 128 * 6] = [0.0; 128 * 6]  // Up to 6 history values
+var BDF_JACOBIAN: [f64; 128 * 128] = [0.0; 128 * 128]
+var BDF_LU: [f64; 128 * 128] = [0.0; 128 * 128]
+var BDF_PIVOT: [i64; 128] = [0; 128]
+var BDF_WORK: [f64; 128] = [0.0; 128]
+var BDF_Y_FINAL: [f64; 128] = [0.0; 128]
+
+// ============================================================================
+// NEWTON ITERATION FOR IMPLICIT SOLVE
+// ============================================================================
+
+/// Compute finite difference Jacobian: J[i,j] = df_i/dy_j
+fn compute_fd_jacobian(
+    rhs: fn(f64, &[f64], &![f64]),
+    t: f64,
+    y: &[f64],
+    n: i64,
+    J: &![f64]
+) {
+    let eps = 1e-8
+    var f0 = &!BDF_WORK[0..n as usize]
+
+    // Base evaluation
+    rhs(t, y, f0)
+
+    // Perturb each component
+    var j: i64 = 0
+    while j < n {
+        var y_pert: [f64; 128] = [0.0; 128]
+        var fp: [f64; 128] = [0.0; 128]
+
+        var k: i64 = 0
+        while k < n {
+            y_pert[k as usize] = y[k as usize]
+            k = k + 1
+        }
+
+        let h_j = eps * (1.0 + abs(y[j as usize]))
+        y_pert[j as usize] = y_pert[j as usize] + h_j
+
+        rhs(t, &y_pert[0..n as usize], &!fp[0..n as usize])
+
+        // J[:, j] = (fp - f0) / h_j
+        var i: i64 = 0
+        while i < n {
+            J[(i * n + j) as usize] = (fp[i as usize] - f0[i as usize]) / h_j
+            i = i + 1
+        }
+
+        j = j + 1
+    }
+}
+
+/// Solve system (I - gamma*h*J) * delta = residual using LU decomposition.
+/// Returns false if matrix is singular.
+fn solve_newton_system(
+    J: &[f64],
+    gamma_h: f64,
+    n: i64,
+    residual: &[f64],
+    delta: &![f64]
+) -> bool {
+    // Build matrix: A = I - gamma*h*J
+    let A = &!BDF_LU[0..(n * n) as usize]
+    let pivot = &!BDF_PIVOT[0..n as usize]
+
+    var i: i64 = 0
+    while i < n {
+        var j: i64 = 0
+        while j < n {
+            let jac_val = J[(i * n + j) as usize]
+            if i == j {
+                A[(i * n + j) as usize] = 1.0 - gamma_h * jac_val
+            } else {
+                A[(i * n + j) as usize] = -gamma_h * jac_val
+            }
+            j = j + 1
+        }
+        i = i + 1
+    }
+
+    // LU factorization with partial pivoting
+    i = 0
+    while i < n {
+        // Find pivot
+        var max_val: f64 = 0.0
+        var max_idx: i64 = i
+        var k: i64 = i
+        while k < n {
+            let val = abs(A[(k * n + i) as usize])
+            if val > max_val {
+                max_val = val
+                max_idx = k
+            }
+            k = k + 1
+        }
+
+        if max_val < 1e-15 {
+            return false  // Singular
+        }
+
+        pivot[i as usize] = max_idx
+
+        // Swap rows
+        if max_idx != i {
+            var j: i64 = 0
+            while j < n {
+                let tmp = A[(i * n + j) as usize]
+                A[(i * n + j) as usize] = A[(max_idx * n + j) as usize]
+                A[(max_idx * n + j) as usize] = tmp
+                j = j + 1
+            }
+        }
+
+        // Elimination
+        k = i + 1
+        while k < n {
+            let factor = A[(k * n + i) as usize] / A[(i * n + i) as usize]
+            A[(k * n + i) as usize] = factor  // Store L below diagonal
+
+            var j: i64 = i + 1
+            while j < n {
+                A[(k * n + j) as usize] = A[(k * n + j) as usize] - factor * A[(i * n + j) as usize]
+                j = j + 1
+            }
+            k = k + 1
+        }
+
+        i = i + 1
+    }
+
+    // Forward substitution: L * z = P * residual
+    i = 0
+    while i < n {
+        delta[i as usize] = residual[i as usize]
+        i = i + 1
+    }
+
+    i = 0
+    while i < n {
+        let p = pivot[i as usize]
+        if p != i {
+            let tmp = delta[i as usize]
+            delta[i as usize] = delta[p as usize]
+            delta[p as usize] = tmp
+        }
+
+        var j: i64 = 0
+        while j < i {
+            delta[i as usize] = delta[i as usize] - A[(i * n + j) as usize] * delta[j as usize]
+            j = j + 1
+        }
+        i = i + 1
+    }
+
+    // Backward substitution: U * delta = z
+    i = n - 1
+    while i >= 0 {
+        var j: i64 = i + 1
+        while j < n {
+            delta[i as usize] = delta[i as usize] - A[(i * n + j) as usize] * delta[j as usize]
+            j = j + 1
+        }
+        delta[i as usize] = delta[i as usize] / A[(i * n + i) as usize]
+        i = i - 1
+    }
+
+    return true
+}
+
+/// Newton iteration to solve the BDF implicit equation.
+/// Returns (converged, y_new, iterations)
+fn newton_solve(
+    rhs: fn(f64, &[f64], &![f64]),
+    t_new: f64,
+    y_pred: &[f64],
+    history: &[f64],
+    coeffs: &BDFCoeffs,
+    h: f64,
+    n: i64,
+    config: &BDFConfig,
+    order: i64
+) -> (bool, i64) {
+    let gamma_h = coeffs.gamma * h
+    let y_new = &!BDF_Y_NEW[0..n as usize]
+    let f = &!BDF_F[0..n as usize]
+    let residual = &!BDF_RESIDUAL[0..n as usize]
+    let delta = &!BDF_DELTA[0..n as usize]
+    let J = &!BDF_JACOBIAN[0..(n * n) as usize]
+
+    // Start from predictor
+    var i: i64 = 0
+    while i < n {
+        y_new[i as usize] = y_pred[i as usize]
+        i = i + 1
+    }
+
+    // Compute Jacobian at predicted point
+    compute_fd_jacobian(rhs, t_new, y_new, n, J)
+
+    var iter: i64 = 0
+    while iter < config.max_newton_iter {
+        // Evaluate RHS
+        rhs(t_new, y_new, f)
+
+        // Compute residual: r = y_new - sum(alpha[j] * y_{n-j}) - gamma*h*f
+        i = 0
+        while i < n {
+            var sum: f64 = 0.0
+            var j: i64 = 1
+            while j <= order {
+                let hist_idx = ((j - 1) * n + i) as usize
+                sum = sum + coeffs.alpha[j as usize] * history[hist_idx]
+                j = j + 1
+            }
+            residual[i as usize] = y_new[i as usize] + sum - gamma_h * f[i as usize]
+            i = i + 1
+        }
+
+        // Check convergence
+        var res_norm: f64 = 0.0
+        i = 0
+        while i < n {
+            res_norm = res_norm + residual[i as usize] * residual[i as usize]
+            i = i + 1
+        }
+        res_norm = sqrt(res_norm)
+
+        if res_norm < config.newton_tol {
+            return (true, iter + 1)
+        }
+
+        // Solve linear system: (I - gamma*h*J) * delta = -residual
+        i = 0
+        while i < n {
+            residual[i as usize] = -residual[i as usize]
+            i = i + 1
+        }
+
+        if !solve_newton_system(J, gamma_h, n, residual, delta) {
+            return (false, iter + 1)
+        }
+
+        // Update: y_new = y_new + delta
+        i = 0
+        while i < n {
+            y_new[i as usize] = y_new[i as usize] + delta[i as usize]
+            i = i + 1
+        }
+
+        iter = iter + 1
+    }
+
+    return (false, iter)
+}
+
+// ============================================================================
+// ERROR ESTIMATION AND STEP SIZE CONTROL
+// ============================================================================
+
+/// Estimate local truncation error.
+fn estimate_error(
+    y_new: &[f64],
+    y_pred: &[f64],
+    n: i64,
+    error_const: f64,
+    config: &BDFConfig
+) -> f64 {
+    var err: f64 = 0.0
+
+    var i: i64 = 0
+    while i < n {
+        let y_scale = config.atol + config.rtol * fmax(abs(y_new[i as usize]), abs(y_pred[i as usize]))
+        let local_err = abs(y_new[i as usize] - y_pred[i as usize]) * error_const / y_scale
+        err = fmax(err, local_err)
+        i = i + 1
+    }
+
+    return err
+}
+
+/// Compute new step size based on error.
+fn compute_new_step(h: f64, err: f64, order: i64, config: &BDFConfig) -> f64 {
+    // PI controller for step size
+    let safety = 0.9
+    let grow_max = 2.0
+    let shrink_min = 0.1
+
+    if err < 1e-15 {
+        return fmin(h * grow_max, config.h_max)
+    }
+
+    let exponent = 1.0 / ((order + 1) as f64)
+    let factor = safety * pow(1.0 / err, exponent)
+    let factor_clamped = fmax(shrink_min, fmin(grow_max, factor))
+
+    return fmax(config.h_min, fmin(config.h_max, h * factor_clamped))
+}
+
+// ============================================================================
+// MAIN BDF SOLVER
+// ============================================================================
+
+/// Solve ODE system using BDF method.
+///
+/// # Arguments
+///
+/// - `rhs`: Function f(t, y, dydt) computing the right-hand side
+/// - `y0`: Initial condition
+/// - `t0`: Initial time
+/// - `t_end`: Final time
+/// - `config`: Solver configuration
+///
+/// # Returns
+///
+/// `BDFResult` with solution and diagnostics.
+pub fn bdf_solve(
+    rhs: fn(f64, &[f64], &![f64]),
+    y0: &[f64],
+    t0: f64,
+    t_end: f64,
+    config: &BDFConfig
+) -> BDFResult {
+    let n = y0.len() as i64
+    if n > 128 {
+        return BDFResult {
+            y_final: &BDF_Y_FINAL[0..1],
+            t_final: t0,
+            success: false,
+            nsteps: 0,
+            nfeval: 0,
+            njeval: 0,
+            nreject: 0,
+            final_order: 0,
+            message: "System too large (max 128 dimensions)",
+        }
+    }
+
+    let y = &!BDF_Y[0..n as usize]
+    let history = &!BDF_HISTORY[0..(n * 6) as usize]
+
+    // Initialize
+    var i: i64 = 0
+    while i < n {
+        y[i as usize] = y0[i as usize]
+        history[i as usize] = y0[i as usize]
+        BDF_Y_FINAL[i as usize] = y0[i as usize]
+        i = i + 1
+    }
+
+    var t = t0
+    var h = if config.h0 > 0.0 { config.h0 } else { (t_end - t0) / 100.0 }
+    h = fmin(h, config.h_max)
+    h = fmax(h, config.h_min)
+
+    var order: i64 = 1  // Start with BDF1
+    var nsteps: i64 = 0
+    var nfeval: i64 = 0
+    var njeval: i64 = 0
+    var nreject: i64 = 0
+    var history_len: i64 = 1
+
+    // Main integration loop
+    while t < t_end && nsteps < config.max_steps {
+        // Don't overshoot
+        if t + h > t_end {
+            h = t_end - t
+        }
+
+        let t_new = t + h
+        let coeffs = bdf_coefficients(order)
+
+        // Predictor: extrapolate from history (simple for now)
+        var y_pred: [f64; 128] = [0.0; 128]
+        i = 0
+        while i < n {
+            // Use current y as predictor (could improve with polynomial extrapolation)
+            y_pred[i as usize] = y[i as usize]
+            i = i + 1
+        }
+
+        // Newton iteration
+        let (converged, newton_iters) = newton_solve(
+            rhs, t_new, &y_pred[0..n as usize], history, &coeffs, h, n, config, order
+        )
+        nfeval = nfeval + newton_iters
+        njeval = njeval + 1
+
+        if !converged {
+            // Newton failed — reduce step size
+            h = h * 0.5
+            if h < config.h_min {
+                // Copy final state
+                i = 0
+                while i < n {
+                    BDF_Y_FINAL[i as usize] = y[i as usize]
+                    i = i + 1
+                }
+                return BDFResult {
+                    y_final: &BDF_Y_FINAL[0..n as usize],
+                    t_final: t,
+                    success: false,
+                    nsteps: nsteps,
+                    nfeval: nfeval,
+                    njeval: njeval,
+                    nreject: nreject,
+                    final_order: order,
+                    message: "Newton iteration failed to converge",
+                }
+            }
+            nreject = nreject + 1
+            continue
+        }
+
+        // Get converged solution from BDF_Y_NEW
+        let y_new = &BDF_Y_NEW[0..n as usize]
+
+        // Error estimation
+        let err = estimate_error(y_new, &y_pred[0..n as usize], n, coeffs.error_const, config)
+
+        if err > 1.0 {
+            // Step rejected
+            h = compute_new_step(h, err, order, config)
+            nreject = nreject + 1
+            continue
+        }
+
+        // Step accepted
+        nsteps = nsteps + 1
+        t = t_new
+
+        // Update history (shift and add new value)
+        // Shift history back
+        var j: i64 = fmin(history_len, 5)
+        while j > 0 {
+            i = 0
+            while i < n {
+                history[(j * n + i) as usize] = history[((j - 1) * n + i) as usize]
+                i = i + 1
+            }
+            j = j - 1
+        }
+
+        // Add new solution to history[0]
+        i = 0
+        while i < n {
+            history[i as usize] = y_new[i as usize]
+            y[i as usize] = y_new[i as usize]
+            i = i + 1
+        }
+
+        if history_len < 6 {
+            history_len = history_len + 1
+        }
+
+        // Order control: increase order if we have enough history
+        if history_len > order && order < config.max_order {
+            order = order + 1
+        }
+
+        // Step size control
+        h = compute_new_step(h, err, order, config)
+    }
+
+    // Copy final state
+    i = 0
+    while i < n {
+        BDF_Y_FINAL[i as usize] = y[i as usize]
+        i = i + 1
+    }
+
+    let success = t >= t_end - config.h_min
+
+    return BDFResult {
+        y_final: &BDF_Y_FINAL[0..n as usize],
+        t_final: t,
+        success: success,
+        nsteps: nsteps,
+        nfeval: nfeval,
+        njeval: njeval,
+        nreject: nreject,
+        final_order: order,
+        message: if success { "Success" } else { "Max steps exceeded" },
+    }
+}
+
+// ============================================================================
+// TEST PROBLEMS
+// ============================================================================
+
+/// Robertson chemical kinetics — classic stiff test problem.
+/// dy1/dt = -0.04*y1 + 1e4*y2*y3
+/// dy2/dt = 0.04*y1 - 1e4*y2*y3 - 3e7*y2^2
+/// dy3/dt = 3e7*y2^2
+fn robertson_rhs(t: f64, y: &[f64], dydt: &![f64]) {
+    dydt[0] = -0.04 * y[0] + 1e4 * y[1] * y[2]
+    dydt[1] = 0.04 * y[0] - 1e4 * y[1] * y[2] - 3e7 * y[1] * y[1]
+    dydt[2] = 3e7 * y[1] * y[1]
+}
+
+/// Simple exponential decay: dy/dt = -k*y
+fn exp_decay_rhs(t: f64, y: &[f64], dydt: &![f64]) {
+    let k = 0.1
+    dydt[0] = -k * y[0]
+}
+
+/// Van der Pol oscillator (stiff for large mu)
+/// dy1/dt = y2
+/// dy2/dt = mu*(1 - y1^2)*y2 - y1
+fn vanderpol_rhs(t: f64, y: &[f64], dydt: &![f64]) {
+    let mu = 1000.0  // Stiff for large mu
+    dydt[0] = y[1]
+    dydt[1] = mu * (1.0 - y[0] * y[0]) * y[1] - y[0]
+}
+
+// ============================================================================
+// TESTS
+// ============================================================================
+
+fn test_bdf_exp_decay() -> bool {
+    let y0: [f64; 1] = [100.0]
+    let config = bdf_config_default()
+
+    let result = bdf_solve(exp_decay_rhs, &y0, 0.0, 10.0, &config)
+
+    if !result.success { return false }
+
+    // Analytical: y(10) = 100 * exp(-0.1 * 10) = 100 * exp(-1) ≈ 36.788
+    let analytical = 100.0 * 0.36787944117144233  // exp(-1)
+    let rel_err = abs(result.y_final[0] - analytical) / analytical
+
+    if rel_err > 0.001 {
+        println("BDF exp decay: rel_err = ", rel_err, " (expected < 0.001)")
+        return false
+    }
+
+    println("BDF exp decay: converged in ", result.nsteps, " steps, rel_err = ", rel_err)
+    return true
+}
+
+fn test_bdf_robertson() -> bool {
+    let y0: [f64; 3] = [1.0, 0.0, 0.0]
+    var config = bdf_config_default()
+    config.max_steps = 50000
+    config.h_min = 1e-15
+
+    // Integrate to t=1 (not too far, for testing)
+    let result = bdf_solve(robertson_rhs, &y0, 0.0, 1.0, &config)
+
+    if !result.success {
+        println("BDF Robertson: failed - ", result.message)
+        return false
+    }
+
+    // Check mass conservation: y1 + y2 + y3 = 1
+    let mass = result.y_final[0] + result.y_final[1] + result.y_final[2]
+    if abs(mass - 1.0) > 1e-6 {
+        println("BDF Robertson: mass not conserved: ", mass)
+        return false
+    }
+
+    println("BDF Robertson: converged in ", result.nsteps, " steps")
+    println("  y = [", result.y_final[0], ", ", result.y_final[1], ", ", result.y_final[2], "]")
+    return true
+}
+
+fn main() -> i32 {
+    println("=== BDF Stiff ODE Solver Tests ===")
+    println("")
+
+    var failed = false
+
+    println("Test 1: Exponential decay")
+    if test_bdf_exp_decay() {
+        println("  PASSED")
+    } else {
+        println("  FAILED")
+        failed = true
+    }
+
+    println("")
+    println("Test 2: Robertson chemical kinetics (stiff)")
+    if test_bdf_robertson() {
+        println("  PASSED")
+    } else {
+        println("  FAILED")
+        failed = true
+    }
+
+    println("")
+    if failed {
+        println("SOME TESTS FAILED")
+        return 1
+    } else {
+        println("ALL TESTS PASSED")
+        return 0
+    }
+}

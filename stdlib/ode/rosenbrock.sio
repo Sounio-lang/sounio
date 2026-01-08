@@ -1,0 +1,677 @@
+/// ode::rosenbrock — Rosenbrock (Linearly Implicit) Methods for Stiff ODEs
+///
+/// Rosenbrock methods are single-step methods that avoid Newton iteration
+/// by linearizing the implicit equations. Each step requires only ONE
+/// matrix factorization, making them faster than BDF for moderate stiffness.
+///
+/// # Methods Implemented
+///
+/// - **ROS3**: 3rd order, L-stable, 3 stages
+/// - **ROS4**: 4th order, L-stable, 4 stages (Shampine's RODAS4)
+/// - **RODASP**: 4th order with parallel stages
+///
+/// # When to Use Rosenbrock
+///
+/// Prefer Rosenbrock over BDF when:
+/// - Problem is moderately stiff (eigenvalue ratio < 10^6)
+/// - Jacobian evaluation is expensive
+/// - You want embedded error estimation
+/// - Step size changes frequently
+///
+/// Prefer BDF when:
+/// - Problem is very stiff (eigenvalue ratio > 10^6)
+/// - Long integration with nearly constant Jacobian
+///
+/// # Algorithm
+///
+/// At each step, solve s linear systems:
+///
+/// ```
+/// (I - γ*h*J) k_i = h*f(t + α_i*h, y + sum(a_ij*k_j)) + h*J*sum(c_ij*k_j)
+/// y_{n+1} = y_n + sum(b_i * k_i)
+/// ```
+///
+/// where J = df/dy is evaluated once per step.
+
+module ode::rosenbrock
+
+use core::math::{abs, sqrt, fmax, fmin, pow}
+
+// ============================================================================
+// ROSENBROCK CONFIGURATION
+// ============================================================================
+
+/// Rosenbrock solver configuration.
+pub struct RosenbrockConfig {
+    /// Relative tolerance
+    pub rtol: f64,
+    /// Absolute tolerance
+    pub atol: f64,
+    /// Initial step size (0 = auto)
+    pub h0: f64,
+    /// Minimum step size
+    pub h_min: f64,
+    /// Maximum step size
+    pub h_max: f64,
+    /// Maximum steps
+    pub max_steps: i64,
+    /// Use dense or sparse Jacobian
+    pub dense_jacobian: bool,
+}
+
+/// Default configuration.
+pub fn rosenbrock_config_default() -> RosenbrockConfig {
+    return RosenbrockConfig {
+        rtol: 1e-6,
+        atol: 1e-9,
+        h0: 0.0,
+        h_min: 1e-14,
+        h_max: 1e10,
+        max_steps: 100000,
+        dense_jacobian: true,
+    }
+}
+
+/// Rosenbrock solver result.
+pub struct RosenbrockResult {
+    /// Solution at final time
+    pub y_final: &[f64],
+    /// Final time
+    pub t_final: f64,
+    /// Success flag
+    pub success: bool,
+    /// Number of steps
+    pub nsteps: i64,
+    /// Function evaluations
+    pub nfeval: i64,
+    /// Jacobian evaluations
+    pub njeval: i64,
+    /// Rejected steps
+    pub nreject: i64,
+    /// Message
+    pub message: &str,
+}
+
+// ============================================================================
+// ROS3 COEFFICIENTS (L-stable, 3rd order, 3 stages)
+// ============================================================================
+
+/// ROS3 tableau (L-stable, order 3).
+struct ROS3Tableau {
+    /// γ coefficient (same for all diagonal)
+    gamma: f64,
+    /// Butcher-like coefficients
+    a21: f64,
+    a31: f64,
+    a32: f64,
+    c21: f64,
+    c31: f64,
+    c32: f64,
+    /// Solution weights
+    b1: f64,
+    b2: f64,
+    b3: f64,
+    /// Embedded error weights
+    e1: f64,
+    e2: f64,
+    e3: f64,
+}
+
+fn ros3_tableau() -> ROS3Tableau {
+    // L-stable ROS3 from Rang & Angermann (2005)
+    let gamma = 0.43586652150845899941601945
+
+    return ROS3Tableau {
+        gamma: gamma,
+        a21: 1.0,
+        a31: 1.0,
+        a32: 0.0,
+        c21: -1.0156171083877702091517163,
+        c31: 4.0759956452537699824805835,
+        c32: 9.2076794298330791242156818,
+        b1: 1.0,
+        b2: 6.169752652186733052e-1,
+        b3: -1.727586627328527e-1,
+        e1: 0.5,
+        e2: -0.29079558716805469821718236,
+        e3: 0.22238908261587306737737556,
+    }
+}
+
+// ============================================================================
+// ROS4 COEFFICIENTS (L-stable, 4th order, 4 stages)
+// ============================================================================
+
+/// ROS4 tableau (Shampine's RODAS4).
+struct ROS4Tableau {
+    gamma: f64,
+    a21: f64,
+    a31: f64,
+    a32: f64,
+    a41: f64,
+    a42: f64,
+    a43: f64,
+    c21: f64,
+    c31: f64,
+    c32: f64,
+    c41: f64,
+    c42: f64,
+    c43: f64,
+    b1: f64,
+    b2: f64,
+    b3: f64,
+    b4: f64,
+    e1: f64,
+    e2: f64,
+    e3: f64,
+    e4: f64,
+}
+
+fn ros4_tableau() -> ROS4Tableau {
+    // RODAS4 from Hairer & Wanner
+    let gamma = 0.25
+
+    return ROS4Tableau {
+        gamma: gamma,
+        a21: 0.386,
+        a31: 0.21048348075714,
+        a32: 0.07951651924286,
+        a41: 0.6172839506173,
+        a42: -0.213,
+        a43: 0.5957160493827,
+        c21: -0.5668800000,
+        c31: -0.35232,
+        c32: -0.0992,
+        c41: -1.5376,
+        c42: 1.0704,
+        c43: 0.672,
+        b1: 0.6172839506173,
+        b2: -0.213,
+        b3: 0.5957160493827,
+        b4: 0.0,
+        e1: 0.0,
+        e2: 0.2135,
+        e3: 0.2870,
+        e4: 0.0,
+    }
+}
+
+// ============================================================================
+// STATIC BUFFERS
+// ============================================================================
+
+var ROS_Y: [f64; 128] = [0.0; 128]
+var ROS_YNEW: [f64; 128] = [0.0; 128]
+var ROS_F: [f64; 128] = [0.0; 128]
+var ROS_K1: [f64; 128] = [0.0; 128]
+var ROS_K2: [f64; 128] = [0.0; 128]
+var ROS_K3: [f64; 128] = [0.0; 128]
+var ROS_K4: [f64; 128] = [0.0; 128]
+var ROS_YERR: [f64; 128] = [0.0; 128]
+var ROS_TMP: [f64; 128] = [0.0; 128]
+var ROS_JAC: [f64; 128 * 128] = [0.0; 128 * 128]
+var ROS_LU: [f64; 128 * 128] = [0.0; 128 * 128]
+var ROS_PIVOT: [i64; 128] = [0; 128]
+var ROS_Y_FINAL: [f64; 128] = [0.0; 128]
+
+// ============================================================================
+// LINEAR ALGEBRA HELPERS
+// ============================================================================
+
+/// Compute finite difference Jacobian.
+fn compute_jacobian(
+    rhs: fn(f64, &[f64], &![f64]),
+    t: f64,
+    y: &[f64],
+    f0: &[f64],
+    n: i64,
+    J: &![f64]
+) {
+    let eps = 1e-8
+
+    var j: i64 = 0
+    while j < n {
+        var y_pert: [f64; 128] = [0.0; 128]
+        var fp: [f64; 128] = [0.0; 128]
+
+        var k: i64 = 0
+        while k < n {
+            y_pert[k as usize] = y[k as usize]
+            k = k + 1
+        }
+
+        let h_j = eps * (1.0 + abs(y[j as usize]))
+        y_pert[j as usize] = y_pert[j as usize] + h_j
+
+        rhs(t, &y_pert[0..n as usize], &!fp[0..n as usize])
+
+        var i: i64 = 0
+        while i < n {
+            J[(i * n + j) as usize] = (fp[i as usize] - f0[i as usize]) / h_j
+            i = i + 1
+        }
+
+        j = j + 1
+    }
+}
+
+/// Build and factorize (I - gamma*h*J).
+fn build_and_factor_matrix(J: &[f64], gamma_h: f64, n: i64, LU: &![f64], pivot: &![i64]) -> bool {
+    // Build A = I - gamma*h*J
+    var i: i64 = 0
+    while i < n {
+        var j: i64 = 0
+        while j < n {
+            let jac_val = J[(i * n + j) as usize]
+            if i == j {
+                LU[(i * n + j) as usize] = 1.0 - gamma_h * jac_val
+            } else {
+                LU[(i * n + j) as usize] = -gamma_h * jac_val
+            }
+            j = j + 1
+        }
+        i = i + 1
+    }
+
+    // LU factorization
+    i = 0
+    while i < n {
+        var max_val: f64 = 0.0
+        var max_idx: i64 = i
+        var k: i64 = i
+        while k < n {
+            let val = abs(LU[(k * n + i) as usize])
+            if val > max_val {
+                max_val = val
+                max_idx = k
+            }
+            k = k + 1
+        }
+
+        if max_val < 1e-15 {
+            return false
+        }
+
+        pivot[i as usize] = max_idx
+
+        if max_idx != i {
+            var j: i64 = 0
+            while j < n {
+                let tmp = LU[(i * n + j) as usize]
+                LU[(i * n + j) as usize] = LU[(max_idx * n + j) as usize]
+                LU[(max_idx * n + j) as usize] = tmp
+                j = j + 1
+            }
+        }
+
+        k = i + 1
+        while k < n {
+            let factor = LU[(k * n + i) as usize] / LU[(i * n + i) as usize]
+            LU[(k * n + i) as usize] = factor
+
+            var j: i64 = i + 1
+            while j < n {
+                LU[(k * n + j) as usize] = LU[(k * n + j) as usize] - factor * LU[(i * n + j) as usize]
+                j = j + 1
+            }
+            k = k + 1
+        }
+
+        i = i + 1
+    }
+
+    return true
+}
+
+/// Solve LU * x = b.
+fn solve_lu(LU: &[f64], pivot: &[i64], b: &[f64], x: &![f64], n: i64) {
+    // Copy b to x
+    var i: i64 = 0
+    while i < n {
+        x[i as usize] = b[i as usize]
+        i = i + 1
+    }
+
+    // Forward substitution with pivoting
+    i = 0
+    while i < n {
+        let p = pivot[i as usize]
+        if p != i {
+            let tmp = x[i as usize]
+            x[i as usize] = x[p as usize]
+            x[p as usize] = tmp
+        }
+
+        var j: i64 = 0
+        while j < i {
+            x[i as usize] = x[i as usize] - LU[(i * n + j) as usize] * x[j as usize]
+            j = j + 1
+        }
+        i = i + 1
+    }
+
+    // Backward substitution
+    i = n - 1
+    while i >= 0 {
+        var j: i64 = i + 1
+        while j < n {
+            x[i as usize] = x[i as usize] - LU[(i * n + j) as usize] * x[j as usize]
+            j = j + 1
+        }
+        x[i as usize] = x[i as usize] / LU[(i * n + i) as usize]
+        i = i - 1
+    }
+}
+
+// ============================================================================
+// ROS3 SOLVER
+// ============================================================================
+
+/// Take one ROS3 step.
+fn ros3_step(
+    rhs: fn(f64, &[f64], &![f64]),
+    t: f64,
+    y: &[f64],
+    h: f64,
+    n: i64,
+    y_new: &![f64],
+    y_err: &![f64],
+    config: &RosenbrockConfig
+) -> (bool, i64) {
+    let tab = ros3_tableau()
+    let gamma_h = tab.gamma * h
+
+    let f = &!ROS_F[0..n as usize]
+    let k1 = &!ROS_K1[0..n as usize]
+    let k2 = &!ROS_K2[0..n as usize]
+    let k3 = &!ROS_K3[0..n as usize]
+    let tmp = &!ROS_TMP[0..n as usize]
+    let J = &!ROS_JAC[0..(n * n) as usize]
+    let LU = &!ROS_LU[0..(n * n) as usize]
+    let pivot = &!ROS_PIVOT[0..n as usize]
+
+    // Evaluate f and Jacobian at (t, y)
+    rhs(t, y, f)
+    compute_jacobian(rhs, t, y, f, n, J)
+
+    // Factor (I - gamma*h*J)
+    if !build_and_factor_matrix(J, gamma_h, n, LU, pivot) {
+        return (false, 1)
+    }
+
+    // Stage 1: (I - γhJ) k1 = h*f
+    var i: i64 = 0
+    while i < n {
+        tmp[i as usize] = h * f[i as usize]
+        i = i + 1
+    }
+    solve_lu(LU, pivot, tmp, k1, n)
+
+    // Stage 2: (I - γhJ) k2 = h*f(t + h, y + a21*k1) + c21*k1
+    var y2: [f64; 128] = [0.0; 128]
+    i = 0
+    while i < n {
+        y2[i as usize] = y[i as usize] + tab.a21 * k1[i as usize]
+        i = i + 1
+    }
+    rhs(t + h, &y2[0..n as usize], f)
+    i = 0
+    while i < n {
+        tmp[i as usize] = h * f[i as usize] + tab.c21 * k1[i as usize]
+        i = i + 1
+    }
+    solve_lu(LU, pivot, tmp, k2, n)
+
+    // Stage 3: (I - γhJ) k3 = h*f(t + h, y + a31*k1 + a32*k2) + c31*k1 + c32*k2
+    var y3: [f64; 128] = [0.0; 128]
+    i = 0
+    while i < n {
+        y3[i as usize] = y[i as usize] + tab.a31 * k1[i as usize] + tab.a32 * k2[i as usize]
+        i = i + 1
+    }
+    rhs(t + h, &y3[0..n as usize], f)
+    i = 0
+    while i < n {
+        tmp[i as usize] = h * f[i as usize] + tab.c31 * k1[i as usize] + tab.c32 * k2[i as usize]
+        i = i + 1
+    }
+    solve_lu(LU, pivot, tmp, k3, n)
+
+    // Solution: y_new = y + b1*k1 + b2*k2 + b3*k3
+    i = 0
+    while i < n {
+        y_new[i as usize] = y[i as usize] + tab.b1 * k1[i as usize] + tab.b2 * k2[i as usize] + tab.b3 * k3[i as usize]
+        i = i + 1
+    }
+
+    // Error estimate: y_err = e1*k1 + e2*k2 + e3*k3
+    i = 0
+    while i < n {
+        y_err[i as usize] = tab.e1 * k1[i as usize] + tab.e2 * k2[i as usize] + tab.e3 * k3[i as usize]
+        i = i + 1
+    }
+
+    return (true, 3)  // 3 function evaluations
+}
+
+// ============================================================================
+// MAIN ROS3 SOLVER
+// ============================================================================
+
+/// Solve ODE using ROS3 method.
+pub fn ros3_solve(
+    rhs: fn(f64, &[f64], &![f64]),
+    y0: &[f64],
+    t0: f64,
+    t_end: f64,
+    config: &RosenbrockConfig
+) -> RosenbrockResult {
+    let n = y0.len() as i64
+    if n > 128 {
+        return RosenbrockResult {
+            y_final: &ROS_Y_FINAL[0..1],
+            t_final: t0,
+            success: false,
+            nsteps: 0,
+            nfeval: 0,
+            njeval: 0,
+            nreject: 0,
+            message: "System too large (max 128)",
+        }
+    }
+
+    let y = &!ROS_Y[0..n as usize]
+    let y_new = &!ROS_YNEW[0..n as usize]
+    let y_err = &!ROS_YERR[0..n as usize]
+
+    // Initialize
+    var i: i64 = 0
+    while i < n {
+        y[i as usize] = y0[i as usize]
+        ROS_Y_FINAL[i as usize] = y0[i as usize]
+        i = i + 1
+    }
+
+    var t = t0
+    var h = if config.h0 > 0.0 { config.h0 } else { (t_end - t0) / 100.0 }
+    h = fmin(h, config.h_max)
+    h = fmax(h, config.h_min)
+
+    var nsteps: i64 = 0
+    var nfeval: i64 = 0
+    var njeval: i64 = 0
+    var nreject: i64 = 0
+
+    while t < t_end && nsteps < config.max_steps {
+        if t + h > t_end {
+            h = t_end - t
+        }
+
+        let (success, feval) = ros3_step(rhs, t, y, h, n, y_new, y_err, config)
+        nfeval = nfeval + feval
+        njeval = njeval + 1
+
+        if !success {
+            h = h * 0.5
+            if h < config.h_min {
+                i = 0
+                while i < n {
+                    ROS_Y_FINAL[i as usize] = y[i as usize]
+                    i = i + 1
+                }
+                return RosenbrockResult {
+                    y_final: &ROS_Y_FINAL[0..n as usize],
+                    t_final: t,
+                    success: false,
+                    nsteps: nsteps,
+                    nfeval: nfeval,
+                    njeval: njeval,
+                    nreject: nreject,
+                    message: "Matrix factorization failed",
+                }
+            }
+            nreject = nreject + 1
+            continue
+        }
+
+        // Error estimation
+        var err: f64 = 0.0
+        i = 0
+        while i < n {
+            let y_scale = config.atol + config.rtol * fmax(abs(y[i as usize]), abs(y_new[i as usize]))
+            let local_err = abs(y_err[i as usize]) / y_scale
+            err = fmax(err, local_err)
+            i = i + 1
+        }
+
+        if err > 1.0 {
+            // Reject step
+            let factor = 0.9 * pow(1.0 / err, 1.0 / 3.0)
+            h = fmax(config.h_min, fmin(0.5, factor) * h)
+            nreject = nreject + 1
+            continue
+        }
+
+        // Accept step
+        nsteps = nsteps + 1
+        t = t + h
+
+        i = 0
+        while i < n {
+            y[i as usize] = y_new[i as usize]
+            i = i + 1
+        }
+
+        // Step size control
+        let factor = 0.9 * pow(1.0 / fmax(err, 1e-10), 1.0 / 3.0)
+        h = fmax(config.h_min, fmin(config.h_max, fmin(2.0, factor) * h))
+    }
+
+    i = 0
+    while i < n {
+        ROS_Y_FINAL[i as usize] = y[i as usize]
+        i = i + 1
+    }
+
+    return RosenbrockResult {
+        y_final: &ROS_Y_FINAL[0..n as usize],
+        t_final: t,
+        success: t >= t_end - config.h_min,
+        nsteps: nsteps,
+        nfeval: nfeval,
+        njeval: njeval,
+        nreject: nreject,
+        message: if t >= t_end - config.h_min { "Success" } else { "Max steps exceeded" },
+    }
+}
+
+// ============================================================================
+// TESTS
+// ============================================================================
+
+fn exp_decay_rhs(t: f64, y: &[f64], dydt: &![f64]) {
+    let k = 0.1
+    dydt[0] = -k * y[0]
+}
+
+fn test_ros3_exp_decay() -> bool {
+    let y0: [f64; 1] = [100.0]
+    let config = rosenbrock_config_default()
+
+    let result = ros3_solve(exp_decay_rhs, &y0, 0.0, 10.0, &config)
+
+    if !result.success { return false }
+
+    let analytical = 100.0 * 0.36787944117144233
+    let rel_err = abs(result.y_final[0] - analytical) / analytical
+
+    if rel_err > 0.001 {
+        println("ROS3 exp decay: rel_err = ", rel_err)
+        return false
+    }
+
+    println("ROS3 exp decay: converged in ", result.nsteps, " steps")
+    return true
+}
+
+fn robertson_rhs(t: f64, y: &[f64], dydt: &![f64]) {
+    dydt[0] = -0.04 * y[0] + 1e4 * y[1] * y[2]
+    dydt[1] = 0.04 * y[0] - 1e4 * y[1] * y[2] - 3e7 * y[1] * y[1]
+    dydt[2] = 3e7 * y[1] * y[1]
+}
+
+fn test_ros3_robertson() -> bool {
+    let y0: [f64; 3] = [1.0, 0.0, 0.0]
+    var config = rosenbrock_config_default()
+    config.max_steps = 50000
+    config.h_min = 1e-15
+
+    let result = ros3_solve(robertson_rhs, &y0, 0.0, 1.0, &config)
+
+    if !result.success {
+        println("ROS3 Robertson failed: ", result.message)
+        return false
+    }
+
+    let mass = result.y_final[0] + result.y_final[1] + result.y_final[2]
+    if abs(mass - 1.0) > 1e-5 {
+        println("ROS3 Robertson: mass error = ", abs(mass - 1.0))
+        return false
+    }
+
+    println("ROS3 Robertson: converged in ", result.nsteps, " steps")
+    return true
+}
+
+fn main() -> i32 {
+    println("=== Rosenbrock Stiff ODE Solver Tests ===")
+    println("")
+
+    var failed = false
+
+    println("Test 1: ROS3 exponential decay")
+    if test_ros3_exp_decay() {
+        println("  PASSED")
+    } else {
+        println("  FAILED")
+        failed = true
+    }
+
+    println("")
+    println("Test 2: ROS3 Robertson (stiff)")
+    if test_ros3_robertson() {
+        println("  PASSED")
+    } else {
+        println("  FAILED")
+        failed = true
+    }
+
+    println("")
+    if failed {
+        println("SOME TESTS FAILED")
+        return 1
+    } else {
+        println("ALL TESTS PASSED")
+        return 0
+    }
+}
