@@ -1,0 +1,296 @@
+/// linalg::sparse — Sparse Linear Algebra
+///
+/// Production-grade sparse matrix formats and iterative solvers for large-scale
+/// scientific computing. Designed for problems with 10K-1M+ unknowns.
+///
+/// # Overview
+///
+/// This module provides:
+///
+/// 1. **Sparse Matrix Formats**
+///    - CSR (Compressed Sparse Row): Optimal for SpMV and row operations
+///    - CSC (Compressed Sparse Column): Optimal for column operations and triangular solves
+///    - COO (Coordinate/Triplet): Easy construction, convert to CSR/CSC for operations
+///
+/// 2. **Iterative Solvers**
+///    - CG: Conjugate Gradient for symmetric positive definite systems
+///    - BiCGSTAB: For general non-symmetric systems (memory efficient)
+///    - GMRES: For general systems (guaranteed convergence)
+///
+/// 3. **Preconditioners**
+///    - Jacobi: Simple diagonal scaling
+///    - SSOR: Symmetric successive over-relaxation
+///    - ILU(0): Incomplete LU with no fill-in
+///
+/// # Quick Start
+///
+/// ```sio
+/// use linalg::sparse::*
+///
+/// // Build a 2D Laplacian (Poisson equation on 100x100 grid)
+/// let coo = coo_laplacian_2d(100)  // 10000 unknowns
+/// let A = coo_to_csr(&coo)
+///
+/// // Right-hand side
+/// let b = vec_ones(10000)
+///
+/// // Solve with preconditioned CG
+/// let M = jacobi_precond(&A)
+/// let config = solver_config_default()
+/// let result = pcg_solve_jacobi(&A, &b, &zeros(10000), &M, &config)
+///
+/// if result.converged {
+///     println("Solved in ", result.iterations, " iterations")
+/// }
+/// ```
+///
+/// # Format Selection Guide
+///
+/// | Operation                | Recommended Format |
+/// |--------------------------|-------------------|
+/// | Build matrix             | COO               |
+/// | Matrix-vector multiply   | CSR               |
+/// | Transpose multiply       | CSC               |
+/// | Row slicing              | CSR               |
+/// | Column slicing           | CSC               |
+/// | Forward triangular solve | CSC               |
+/// | Backward triangular solve| CSR               |
+///
+/// # Solver Selection Guide
+///
+/// | Matrix Property              | Recommended Solver |
+/// |-----------------------------|-------------------|
+/// | Symmetric positive definite  | CG or PCG         |
+/// | Symmetric indefinite         | MINRES (TODO)     |
+/// | General non-symmetric        | BiCGSTAB or GMRES |
+/// | Guaranteed convergence needed| GMRES             |
+/// | Memory constrained           | BiCGSTAB          |
+///
+/// # Performance Tips
+///
+/// 1. **Build with COO, compute with CSR/CSC**: COO allows O(1) insertion;
+///    convert once, then do all SpMV operations
+///
+/// 2. **Use preconditioners**: For ill-conditioned systems, Jacobi gives 2-5x
+///    speedup; ILU(0) can give 10-100x for structured problems
+///
+/// 3. **Choose right format**: CSR for y = A*x, CSC for y = A^T*x
+///
+/// 4. **Reuse matrix structure**: If solving many systems with same sparsity,
+///    keep the preconditioner
+
+module linalg::sparse
+
+// ============================================================================
+// RE-EXPORTS: Sparse Matrix Formats
+// ============================================================================
+
+/// Compressed Sparse Row format
+pub use csr::CSRMatrix
+pub use csr::csr_from_raw
+pub use csr::csr_empty
+pub use csr::csr_eye
+pub use csr::csr_diag
+pub use csr::csr_matvec
+pub use csr::csr_matvec_axpby
+pub use csr::csr_matvec_transpose
+pub use csr::csr_scale
+pub use csr::csr_frobenius_norm
+pub use csr::csr_infinity_norm
+pub use csr::csr_get_diagonal
+pub use csr::csr_row
+pub use csr::csr_dense_matmul
+pub use csr::csr_is_symmetric_structure
+pub use csr::csr_is_symmetric
+pub use csr::CSRRowView
+
+/// Compressed Sparse Column format
+pub use csc::CSCMatrix
+pub use csc::csc_from_raw
+pub use csc::csc_empty
+pub use csc::csc_eye
+pub use csc::csc_diag
+pub use csc::csc_matvec
+pub use csc::csc_matvec_transpose
+pub use csc::csc_lower_triangular_solve
+pub use csc::csc_upper_triangular_solve
+pub use csc::csc_frobenius_norm
+pub use csc::csc_one_norm
+pub use csc::csc_get_diagonal
+pub use csc::csc_col
+pub use csc::CSCColView
+
+/// Coordinate (Triplet) format for building
+pub use coo::COOMatrix
+pub use coo::coo_new
+pub use coo::coo_from_triplets
+pub use coo::coo_add
+pub use coo::coo_add_row
+pub use coo::coo_add_diag
+pub use coo::coo_add_block
+pub use coo::coo_to_csr
+pub use coo::coo_tridiag
+pub use coo::coo_laplacian_2d
+
+// ============================================================================
+// RE-EXPORTS: Iterative Solvers
+// ============================================================================
+
+pub use solvers::SolverResult
+pub use solvers::SolverConfig
+pub use solvers::solver_config_default
+pub use solvers::cg_solve
+pub use solvers::bicgstab_solve
+pub use solvers::gmres_solve
+
+// ============================================================================
+// RE-EXPORTS: Preconditioners
+// ============================================================================
+
+pub use precond::JacobiPrecond
+pub use precond::jacobi_precond
+pub use precond::jacobi_apply
+pub use precond::SSORPrecond
+pub use precond::ssor_precond
+pub use precond::ssor_apply
+pub use precond::ILU0Precond
+pub use precond::ilu0_precond
+pub use precond::ilu0_apply
+pub use precond::pcg_solve_jacobi
+
+// ============================================================================
+// CONVENIENCE FUNCTIONS
+// ============================================================================
+
+/// Create a vector of zeros.
+pub fn vec_zeros(n: i64) -> &![f64] {
+    var VEC_ZEROS: [f64; 16384] = [0.0; 16384]
+    return &!VEC_ZEROS[0..n as usize]
+}
+
+/// Create a vector of ones.
+pub fn vec_ones(n: i64) -> &![f64] {
+    var VEC_ONES: [f64; 16384] = [0.0; 16384]
+    var i: i64 = 0
+    while i < n {
+        VEC_ONES[i as usize] = 1.0
+        i = i + 1
+    }
+    return &!VEC_ONES[0..n as usize]
+}
+
+// ============================================================================
+// MODULE TESTS
+// ============================================================================
+
+fn test_poisson_2d() -> bool {
+    // Solve 2D Poisson equation on 10x10 grid (100 unknowns)
+    // This is the canonical sparse linear algebra test
+    let coo = coo_laplacian_2d(10)
+    let A = coo_to_csr(&coo)
+
+    // RHS: constant 1
+    var b: [f64; 100] = [0.0; 100]
+    var i: i64 = 0
+    while i < 100 {
+        b[i as usize] = 1.0
+        i = i + 1
+    }
+
+    // Initial guess: zero
+    var x0: [f64; 100] = [0.0; 100]
+
+    // Solve with CG
+    let config = solver_config_default()
+    let result = cg_solve(&A, &b, &x0, &config)
+
+    if !result.converged {
+        println("Poisson test: CG did not converge")
+        return false
+    }
+
+    // Verify residual
+    if result.residual_norm > 1e-8 {
+        println("Poisson test: residual too large: ", result.residual_norm)
+        return false
+    }
+
+    println("Poisson 2D (10x10): converged in ", result.iterations, " iterations")
+    return true
+}
+
+fn test_sparse_workflow() -> bool {
+    // Test the full workflow: build -> convert -> solve
+
+    // 1. Build tridiagonal matrix (1D Laplacian)
+    var sub: [f64; 9] = [0.0; 9]
+    var diag: [f64; 10] = [0.0; 10]
+    var sup: [f64; 9] = [0.0; 9]
+
+    var i: i64 = 0
+    while i < 9 {
+        sub[i as usize] = -1.0
+        sup[i as usize] = -1.0
+        i = i + 1
+    }
+    i = 0
+    while i < 10 {
+        diag[i as usize] = 2.0
+        i = i + 1
+    }
+
+    let coo = coo_tridiag(&sub, &diag, &sup)
+
+    // 2. Convert to CSR
+    let A = coo_to_csr(&coo)
+
+    // 3. Build preconditioner
+    let M = jacobi_precond(&A)
+
+    // 4. Solve
+    var b: [f64; 10] = [1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0]
+    var x0: [f64; 10] = [0.0; 10]
+
+    let config = solver_config_default()
+    let result = pcg_solve_jacobi(&A, &b, &x0, &M, &config)
+
+    if !result.converged {
+        return false
+    }
+
+    println("Tridiagonal (n=10): converged in ", result.iterations, " iterations")
+    return true
+}
+
+fn main() -> i32 {
+    println("=== Sparse Linear Algebra Module Tests ===")
+    println("")
+
+    var failed = false
+
+    println("Test 1: 2D Poisson equation")
+    if test_poisson_2d() {
+        println("  PASSED")
+    } else {
+        println("  FAILED")
+        failed = true
+    }
+
+    println("")
+    println("Test 2: Full sparse workflow")
+    if test_sparse_workflow() {
+        println("  PASSED")
+    } else {
+        println("  FAILED")
+        failed = true
+    }
+
+    println("")
+    if failed {
+        println("SOME TESTS FAILED")
+        return 1
+    } else {
+        println("ALL TESTS PASSED")
+        return 0
+    }
+}

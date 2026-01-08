@@ -1,0 +1,655 @@
+/// linalg::sparse::csc — Compressed Sparse Column (CSC) Matrix Format
+///
+/// CSC is the transpose of CSR, optimized for column-wise access.
+/// Efficient for: column slicing, A^T * x, triangular solves.
+///
+/// # Storage Format
+///
+/// For an m×n matrix with nnz non-zeros:
+/// - `values`: Array of nnz non-zero values (column-major order)
+/// - `row_indices`: Array of nnz row indices for each value
+/// - `col_ptrs`: Array of n+1 pointers; column j spans [col_ptrs[j], col_ptrs[j+1])
+///
+/// # When to Use CSC vs CSR
+///
+/// | Operation            | CSR       | CSC       |
+/// |----------------------|-----------|-----------|
+/// | y = A * x            | Optimal   | Slow      |
+/// | y = A^T * x          | Slow      | Optimal   |
+/// | Row slicing          | Optimal   | Slow      |
+/// | Column slicing       | Slow      | Optimal   |
+/// | Forward solve (L*x=b)| Slow      | Optimal   |
+/// | Backward solve (U*x=b)| Optimal  | Slow      |
+///
+/// # Performance
+///
+/// - A^T * x: O(nnz) — primary use case
+/// - Column access: O(1) pointer lookup + O(nnz_col) traversal
+/// - Row access: O(nnz) — inefficient, use CSR instead
+
+module linalg::sparse::csc
+
+use core::math::{abs, sqrt, fmax}
+
+// ============================================================================
+// CSC MATRIX TYPE
+// ============================================================================
+
+/// Compressed Sparse Column matrix.
+pub struct CSCMatrix {
+    /// Non-zero values in column-major order
+    values: &[f64],
+    /// Row index for each non-zero value
+    row_indices: &[i64],
+    /// Column pointers: column j spans [col_ptrs[j], col_ptrs[j+1])
+    col_ptrs: &[i64],
+    /// Number of rows
+    nrows: i64,
+    /// Number of columns
+    ncols: i64,
+}
+
+// ============================================================================
+// CONSTRUCTORS
+// ============================================================================
+
+/// Create a CSC matrix from raw arrays.
+pub fn csc_from_raw(
+    values: &[f64],
+    row_indices: &[i64],
+    col_ptrs: &[i64],
+    nrows: i64,
+    ncols: i64
+) -> CSCMatrix {
+    let nnz = values.len() as i64
+    if row_indices.len() as i64 != nnz {
+        panic("row_indices length must match values length")
+    }
+    if col_ptrs.len() as i64 != ncols + 1 {
+        panic("col_ptrs length must be ncols + 1")
+    }
+    if col_ptrs[ncols as usize] != nnz {
+        panic("col_ptrs[ncols] must equal nnz")
+    }
+
+    return CSCMatrix {
+        values: values,
+        row_indices: row_indices,
+        col_ptrs: col_ptrs,
+        nrows: nrows,
+        ncols: ncols,
+    }
+}
+
+/// Create an empty CSC matrix.
+pub fn csc_empty(nrows: i64, ncols: i64) -> CSCMatrix {
+    var col_ptrs: [i64; 1024] = [0; 1024]
+    return CSCMatrix {
+        values: &[],
+        row_indices: &[],
+        col_ptrs: &col_ptrs[0..(ncols + 1) as usize],
+        nrows: nrows,
+        ncols: ncols,
+    }
+}
+
+/// Create a CSC identity matrix.
+pub fn csc_eye(n: i64) -> CSCMatrix {
+    var values: [f64; 1024] = [0.0; 1024]
+    var row_indices: [i64; 1024] = [0; 1024]
+    var col_ptrs: [i64; 1025] = [0; 1025]
+
+    var i: i64 = 0
+    while i < n {
+        values[i as usize] = 1.0
+        row_indices[i as usize] = i
+        col_ptrs[i as usize] = i
+        i = i + 1
+    }
+    col_ptrs[n as usize] = n
+
+    return CSCMatrix {
+        values: &values[0..n as usize],
+        row_indices: &row_indices[0..n as usize],
+        col_ptrs: &col_ptrs[0..(n + 1) as usize],
+        nrows: n,
+        ncols: n,
+    }
+}
+
+/// Create a CSC diagonal matrix.
+pub fn csc_diag(diag: &[f64]) -> CSCMatrix {
+    let n = diag.len() as i64
+    var values: [f64; 1024] = [0.0; 1024]
+    var row_indices: [i64; 1024] = [0; 1024]
+    var col_ptrs: [i64; 1025] = [0; 1025]
+
+    var i: i64 = 0
+    while i < n {
+        values[i as usize] = diag[i as usize]
+        row_indices[i as usize] = i
+        col_ptrs[i as usize] = i
+        i = i + 1
+    }
+    col_ptrs[n as usize] = n
+
+    return CSCMatrix {
+        values: &values[0..n as usize],
+        row_indices: &row_indices[0..n as usize],
+        col_ptrs: &col_ptrs[0..(n + 1) as usize],
+        nrows: n,
+        ncols: n,
+    }
+}
+
+// ============================================================================
+// ACCESSORS
+// ============================================================================
+
+impl CSCMatrix {
+    /// Number of rows.
+    pub fn nrows(&self) -> i64 {
+        return self.nrows
+    }
+
+    /// Number of columns.
+    pub fn ncols(&self) -> i64 {
+        return self.ncols
+    }
+
+    /// Number of non-zero elements.
+    pub fn nnz(&self) -> i64 {
+        return self.values.len() as i64
+    }
+
+    /// Density: nnz / (nrows * ncols).
+    pub fn density(&self) -> f64 {
+        let total = self.nrows * self.ncols
+        if total == 0 {
+            return 0.0
+        }
+        return (self.nnz() as f64) / (total as f64)
+    }
+
+    /// Get element at (row, col). Returns 0.0 if not stored.
+    pub fn get(&self, row: i64, col: i64) -> f64 {
+        if row < 0 || row >= self.nrows || col < 0 || col >= self.ncols {
+            return 0.0
+        }
+
+        let start = self.col_ptrs[col as usize]
+        let end = self.col_ptrs[(col + 1) as usize]
+
+        var idx = start
+        while idx < end {
+            if self.row_indices[idx as usize] == row {
+                return self.values[idx as usize]
+            }
+            idx = idx + 1
+        }
+
+        return 0.0
+    }
+
+    /// Get number of non-zeros in a specific column.
+    pub fn col_nnz(&self, col: i64) -> i64 {
+        if col < 0 || col >= self.ncols {
+            return 0
+        }
+        return self.col_ptrs[(col + 1) as usize] - self.col_ptrs[col as usize]
+    }
+
+    /// Check if matrix is square.
+    pub fn is_square(&self) -> bool {
+        return self.nrows == self.ncols
+    }
+}
+
+// ============================================================================
+// SPARSE MATRIX-VECTOR OPERATIONS
+// ============================================================================
+
+/// Compute y = A^T * x using CSC format (equivalent to CSR's y = A * x).
+///
+/// This is efficient because CSC stores columns contiguously.
+pub fn csc_matvec_transpose(A: &CSCMatrix, x: &[f64], y: &![f64]) {
+    let m = A.nrows
+    let n = A.ncols
+
+    if x.len() as i64 != m {
+        panic("x length must match A.nrows")
+    }
+    if y.len() as i64 != n {
+        panic("y length must match A.ncols")
+    }
+
+    // y = A^T * x: y[j] = sum_i A[i,j] * x[i]
+    var col: i64 = 0
+    while col < n {
+        let col_start = A.col_ptrs[col as usize]
+        let col_end = A.col_ptrs[(col + 1) as usize]
+
+        var sum: f64 = 0.0
+        var idx = col_start
+        while idx < col_end {
+            let row = A.row_indices[idx as usize]
+            let val = A.values[idx as usize]
+            sum = sum + val * x[row as usize]
+            idx = idx + 1
+        }
+
+        y[col as usize] = sum
+        col = col + 1
+    }
+}
+
+/// Compute y = A * x using CSC format.
+///
+/// Less efficient than CSR but still O(nnz).
+pub fn csc_matvec(A: &CSCMatrix, x: &[f64], y: &![f64]) {
+    let m = A.nrows
+    let n = A.ncols
+
+    if x.len() as i64 != n {
+        panic("x length must match A.ncols")
+    }
+    if y.len() as i64 != m {
+        panic("y length must match A.nrows")
+    }
+
+    // Zero output
+    var i: i64 = 0
+    while i < m {
+        y[i as usize] = 0.0
+        i = i + 1
+    }
+
+    // y = A * x: y[i] += A[i,j] * x[j]
+    var col: i64 = 0
+    while col < n {
+        let col_start = A.col_ptrs[col as usize]
+        let col_end = A.col_ptrs[(col + 1) as usize]
+        let xj = x[col as usize]
+
+        var idx = col_start
+        while idx < col_end {
+            let row = A.row_indices[idx as usize]
+            let val = A.values[idx as usize]
+            y[row as usize] = y[row as usize] + val * xj
+            idx = idx + 1
+        }
+
+        col = col + 1
+    }
+}
+
+// ============================================================================
+// TRIANGULAR SOLVES (CSC is optimal for forward substitution)
+// ============================================================================
+
+/// Solve L * x = b where L is lower triangular (CSC format).
+///
+/// CSC is optimal for forward substitution because we access columns sequentially.
+/// Complexity: O(nnz)
+pub fn csc_lower_triangular_solve(L: &CSCMatrix, b: &[f64], x: &![f64]) {
+    let n = L.ncols
+
+    if !L.is_square() {
+        panic("L must be square")
+    }
+    if b.len() as i64 != n || x.len() as i64 != n {
+        panic("b and x must have length n")
+    }
+
+    // Copy b to x
+    var i: i64 = 0
+    while i < n {
+        x[i as usize] = b[i as usize]
+        i = i + 1
+    }
+
+    // Forward substitution
+    var col: i64 = 0
+    while col < n {
+        let col_start = L.col_ptrs[col as usize]
+        let col_end = L.col_ptrs[(col + 1) as usize]
+
+        // Find diagonal element
+        var diag: f64 = 0.0
+        var diag_found = false
+        var idx = col_start
+        while idx < col_end {
+            if L.row_indices[idx as usize] == col {
+                diag = L.values[idx as usize]
+                diag_found = true
+                break
+            }
+            idx = idx + 1
+        }
+
+        if !diag_found || abs(diag) < 1e-15 {
+            panic("Zero diagonal element in lower triangular matrix")
+        }
+
+        // x[col] = x[col] / L[col, col]
+        x[col as usize] = x[col as usize] / diag
+
+        // Update: x[row] -= L[row, col] * x[col] for row > col
+        idx = col_start
+        while idx < col_end {
+            let row = L.row_indices[idx as usize]
+            if row > col {
+                let val = L.values[idx as usize]
+                x[row as usize] = x[row as usize] - val * x[col as usize]
+            }
+            idx = idx + 1
+        }
+
+        col = col + 1
+    }
+}
+
+/// Solve U * x = b where U is upper triangular (CSC format).
+///
+/// Backward substitution from last column to first.
+pub fn csc_upper_triangular_solve(U: &CSCMatrix, b: &[f64], x: &![f64]) {
+    let n = U.ncols
+
+    if !U.is_square() {
+        panic("U must be square")
+    }
+    if b.len() as i64 != n || x.len() as i64 != n {
+        panic("b and x must have length n")
+    }
+
+    // Copy b to x
+    var i: i64 = 0
+    while i < n {
+        x[i as usize] = b[i as usize]
+        i = i + 1
+    }
+
+    // Backward substitution
+    var col: i64 = n - 1
+    while col >= 0 {
+        let col_start = U.col_ptrs[col as usize]
+        let col_end = U.col_ptrs[(col + 1) as usize]
+
+        // Find diagonal element
+        var diag: f64 = 0.0
+        var diag_found = false
+        var idx = col_start
+        while idx < col_end {
+            if U.row_indices[idx as usize] == col {
+                diag = U.values[idx as usize]
+                diag_found = true
+                break
+            }
+            idx = idx + 1
+        }
+
+        if !diag_found || abs(diag) < 1e-15 {
+            panic("Zero diagonal element in upper triangular matrix")
+        }
+
+        // x[col] = x[col] / U[col, col]
+        x[col as usize] = x[col as usize] / diag
+
+        // Update: x[row] -= U[row, col] * x[col] for row < col
+        idx = col_start
+        while idx < col_end {
+            let row = U.row_indices[idx as usize]
+            if row < col {
+                let val = U.values[idx as usize]
+                x[row as usize] = x[row as usize] - val * x[col as usize]
+            }
+            idx = idx + 1
+        }
+
+        col = col - 1
+    }
+}
+
+// ============================================================================
+// COLUMN ITERATION
+// ============================================================================
+
+/// Column view for efficient iteration over non-zeros in a single column.
+pub struct CSCColView {
+    values: &[f64],
+    row_indices: &[i64],
+    start: i64,
+    end: i64,
+}
+
+/// Get a view of a single column.
+pub fn csc_col(A: &CSCMatrix, col: i64) -> CSCColView {
+    if col < 0 || col >= A.ncols {
+        panic("column index out of bounds")
+    }
+
+    let start = A.col_ptrs[col as usize]
+    let end = A.col_ptrs[(col + 1) as usize]
+
+    return CSCColView {
+        values: &A.values[start as usize..end as usize],
+        row_indices: &A.row_indices[start as usize..end as usize],
+        start: 0,
+        end: end - start,
+    }
+}
+
+impl CSCColView {
+    pub fn len(&self) -> i64 {
+        return self.end
+    }
+
+    pub fn row(&self, idx: i64) -> i64 {
+        return self.row_indices[idx as usize]
+    }
+
+    pub fn val(&self, idx: i64) -> f64 {
+        return self.values[idx as usize]
+    }
+}
+
+// ============================================================================
+// NORMS
+// ============================================================================
+
+/// Compute Frobenius norm: ||A||_F = sqrt(sum(a_ij^2))
+pub fn csc_frobenius_norm(A: &CSCMatrix) -> f64 {
+    var sum: f64 = 0.0
+    let nnz = A.nnz()
+
+    var i: i64 = 0
+    while i < nnz {
+        let val = A.values[i as usize]
+        sum = sum + val * val
+        i = i + 1
+    }
+
+    return sqrt(sum)
+}
+
+/// Compute 1-norm: ||A||_1 = max_col sum(|a_ij|)
+/// CSC format is optimal for this.
+pub fn csc_one_norm(A: &CSCMatrix) -> f64 {
+    var max_col_sum: f64 = 0.0
+
+    var col: i64 = 0
+    while col < A.ncols {
+        let col_start = A.col_ptrs[col as usize]
+        let col_end = A.col_ptrs[(col + 1) as usize]
+
+        var col_sum: f64 = 0.0
+        var idx = col_start
+        while idx < col_end {
+            col_sum = col_sum + abs(A.values[idx as usize])
+            idx = idx + 1
+        }
+
+        max_col_sum = fmax(max_col_sum, col_sum)
+        col = col + 1
+    }
+
+    return max_col_sum
+}
+
+/// Extract diagonal as a dense vector.
+pub fn csc_get_diagonal(A: &CSCMatrix, diag: &![f64]) {
+    let n = if A.nrows < A.ncols { A.nrows } else { A.ncols }
+
+    if diag.len() as i64 < n {
+        panic("diag length must be at least min(nrows, ncols)")
+    }
+
+    var i: i64 = 0
+    while i < n {
+        diag[i as usize] = 0.0
+        i = i + 1
+    }
+
+    var col: i64 = 0
+    while col < n {
+        let col_start = A.col_ptrs[col as usize]
+        let col_end = A.col_ptrs[(col + 1) as usize]
+
+        var idx = col_start
+        while idx < col_end {
+            if A.row_indices[idx as usize] == col {
+                diag[col as usize] = A.values[idx as usize]
+                break
+            }
+            idx = idx + 1
+        }
+
+        col = col + 1
+    }
+}
+
+// ============================================================================
+// TESTS
+// ============================================================================
+
+fn test_csc_basic() -> bool {
+    // Matrix (same as CSR test):
+    // [ 1  0  2 ]
+    // [ 0  0  3 ]
+    // [ 4  5  6 ]
+    //
+    // CSC: column-major storage
+    // col 0: (0,1), (2,4)
+    // col 1: (2,5)
+    // col 2: (0,2), (1,3), (2,6)
+
+    let values: [f64; 6] = [1.0, 4.0, 5.0, 2.0, 3.0, 6.0]
+    let row_indices: [i64; 6] = [0, 2, 2, 0, 1, 2]
+    let col_ptrs: [i64; 4] = [0, 2, 3, 6]
+
+    let A = csc_from_raw(&values, &row_indices, &col_ptrs, 3, 3)
+
+    if A.nrows() != 3 { return false }
+    if A.ncols() != 3 { return false }
+    if A.nnz() != 6 { return false }
+
+    if abs(A.get(0, 0) - 1.0) > 1e-10 { return false }
+    if abs(A.get(0, 1) - 0.0) > 1e-10 { return false }
+    if abs(A.get(0, 2) - 2.0) > 1e-10 { return false }
+    if abs(A.get(1, 2) - 3.0) > 1e-10 { return false }
+    if abs(A.get(2, 0) - 4.0) > 1e-10 { return false }
+    if abs(A.get(2, 1) - 5.0) > 1e-10 { return false }
+    if abs(A.get(2, 2) - 6.0) > 1e-10 { return false }
+
+    return true
+}
+
+fn test_csc_matvec() -> bool {
+    // Same matrix and test as CSR
+    let values: [f64; 6] = [1.0, 4.0, 5.0, 2.0, 3.0, 6.0]
+    let row_indices: [i64; 6] = [0, 2, 2, 0, 1, 2]
+    let col_ptrs: [i64; 4] = [0, 2, 3, 6]
+
+    let A = csc_from_raw(&values, &row_indices, &col_ptrs, 3, 3)
+
+    let x: [f64; 3] = [1.0, 2.0, 3.0]
+    var y: [f64; 3] = [0.0, 0.0, 0.0]
+
+    csc_matvec(&A, &x, &!y)
+
+    // y = [7, 9, 32]
+    if abs(y[0] - 7.0) > 1e-10 { return false }
+    if abs(y[1] - 9.0) > 1e-10 { return false }
+    if abs(y[2] - 32.0) > 1e-10 { return false }
+
+    return true
+}
+
+fn test_csc_triangular_solve() -> bool {
+    // L = [[2, 0, 0], [1, 3, 0], [4, 5, 6]]
+    // b = [4, 10, 57]
+    // Solution: x = [2, 8/3, 1]? Let's verify:
+    // L*x: 2*2 = 4 ✓
+    //      1*2 + 3*(8/3) = 2 + 8 = 10 ✓
+    //      4*2 + 5*(8/3) + 6*1 = 8 + 40/3 + 6 = 14 + 40/3 = 82/3 ≠ 57
+
+    // Let's use simpler test: L = [[2, 0], [3, 4]], b = [2, 11]
+    // L*x = b => 2*x0 = 2 => x0 = 1
+    //           3*x0 + 4*x1 = 11 => 3 + 4*x1 = 11 => x1 = 2
+
+    let values: [f64; 3] = [2.0, 3.0, 4.0]
+    let row_indices: [i64; 3] = [0, 1, 1]
+    let col_ptrs: [i64; 3] = [0, 2, 3]
+
+    let L = csc_from_raw(&values, &row_indices, &col_ptrs, 2, 2)
+
+    let b: [f64; 2] = [2.0, 11.0]
+    var x: [f64; 2] = [0.0, 0.0]
+
+    csc_lower_triangular_solve(&L, &b, &!x)
+
+    if abs(x[0] - 1.0) > 1e-10 { return false }
+    if abs(x[1] - 2.0) > 1e-10 { return false }
+
+    return true
+}
+
+fn main() -> i32 {
+    println("=== CSC Sparse Matrix Tests ===")
+    println("")
+
+    var failed = false
+
+    println("Test 1: Basic CSC operations")
+    if test_csc_basic() {
+        println("  PASSED")
+    } else {
+        println("  FAILED")
+        failed = true
+    }
+
+    println("Test 2: CSC matrix-vector multiply")
+    if test_csc_matvec() {
+        println("  PASSED")
+    } else {
+        println("  FAILED")
+        failed = true
+    }
+
+    println("Test 3: CSC lower triangular solve")
+    if test_csc_triangular_solve() {
+        println("  PASSED")
+    } else {
+        println("  FAILED")
+        failed = true
+    }
+
+    println("")
+    if failed {
+        println("SOME TESTS FAILED")
+        return 1
+    } else {
+        println("ALL TESTS PASSED")
+        return 0
+    }
+}

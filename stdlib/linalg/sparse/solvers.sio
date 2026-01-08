@@ -1,0 +1,856 @@
+/// linalg::sparse::solvers — Iterative Solvers for Sparse Linear Systems
+///
+/// Production-grade Krylov subspace methods for solving Ax = b.
+///
+/// # Available Solvers
+///
+/// | Solver   | Matrix Type                     | Memory    | Typical Use                |
+/// |----------|--------------------------------|-----------|----------------------------|
+/// | CG       | Symmetric positive definite    | O(n)      | Laplacian, covariance      |
+/// | GMRES    | General non-singular           | O(n·k)    | Non-symmetric, stiff       |
+/// | BiCGSTAB | General non-singular           | O(n)      | Non-symmetric, general     |
+///
+/// # Solver Selection Guide
+///
+/// 1. **Is A symmetric positive definite?** → Use CG (fastest, most stable)
+/// 2. **Is A symmetric indefinite?** → Use MINRES (not implemented yet)
+/// 3. **Is A non-symmetric?** → Use BiCGSTAB or GMRES
+/// 4. **Need guaranteed convergence?** → Use GMRES (more memory)
+/// 5. **Memory constrained?** → Use BiCGSTAB or restarted GMRES
+///
+/// # Convergence Criteria
+///
+/// All solvers terminate when:
+/// - `||r||/||b|| < rtol` (relative tolerance), OR
+/// - `||r|| < atol` (absolute tolerance), OR
+/// - `iter >= max_iter` (maximum iterations)
+///
+/// where r = b - Ax is the residual.
+
+module linalg::sparse::solvers
+
+use core::math::{abs, sqrt, fmax, fmin}
+use linalg::sparse::csr::{CSRMatrix, csr_matvec}
+
+// ============================================================================
+// SOLVER RESULT TYPE
+// ============================================================================
+
+/// Result from an iterative solver.
+pub struct SolverResult {
+    /// Solution vector x
+    pub x: &[f64],
+    /// Number of iterations performed
+    pub iterations: i64,
+    /// Final relative residual ||r||/||b||
+    pub residual_norm: f64,
+    /// Whether the solver converged
+    pub converged: bool,
+    /// Convergence history (residual norms)
+    pub history: &[f64],
+}
+
+/// Solver configuration.
+pub struct SolverConfig {
+    /// Maximum iterations
+    pub max_iter: i64,
+    /// Relative tolerance
+    pub rtol: f64,
+    /// Absolute tolerance
+    pub atol: f64,
+    /// Print convergence info
+    pub verbose: bool,
+}
+
+/// Default solver configuration.
+pub fn solver_config_default() -> SolverConfig {
+    return SolverConfig {
+        max_iter: 1000,
+        rtol: 1e-10,
+        atol: 1e-14,
+        verbose: false,
+    }
+}
+
+// ============================================================================
+// HELPER FUNCTIONS
+// ============================================================================
+
+/// Compute dot product of two vectors.
+fn vec_dot(x: &[f64], y: &[f64]) -> f64 {
+    let n = x.len()
+    var sum: f64 = 0.0
+    var i: usize = 0
+    while i < n {
+        sum = sum + x[i] * y[i]
+        i = i + 1
+    }
+    return sum
+}
+
+/// Compute L2 norm of a vector.
+fn vec_norm(x: &[f64]) -> f64 {
+    return sqrt(vec_dot(x, x))
+}
+
+/// Copy vector: y = x
+fn vec_copy(x: &[f64], y: &![f64]) {
+    let n = x.len()
+    var i: usize = 0
+    while i < n {
+        y[i] = x[i]
+        i = i + 1
+    }
+}
+
+/// Scale vector: y = alpha * x
+fn vec_scale(x: &[f64], alpha: f64, y: &![f64]) {
+    let n = x.len()
+    var i: usize = 0
+    while i < n {
+        y[i] = alpha * x[i]
+        i = i + 1
+    }
+}
+
+/// AXPY: y = alpha * x + y
+fn vec_axpy(alpha: f64, x: &[f64], y: &![f64]) {
+    let n = x.len()
+    var i: usize = 0
+    while i < n {
+        y[i] = y[i] + alpha * x[i]
+        i = i + 1
+    }
+}
+
+/// Zero vector
+fn vec_zero(x: &![f64]) {
+    let n = x.len()
+    var i: usize = 0
+    while i < n {
+        x[i] = 0.0
+        i = i + 1
+    }
+}
+
+/// Compute residual: r = b - A*x
+fn compute_residual(A: &CSRMatrix, x: &[f64], b: &[f64], r: &![f64]) {
+    // r = A*x
+    csr_matvec(A, x, r)
+    // r = b - r
+    let n = b.len()
+    var i: usize = 0
+    while i < n {
+        r[i] = b[i] - r[i]
+        i = i + 1
+    }
+}
+
+// ============================================================================
+// CONJUGATE GRADIENT (CG)
+// ============================================================================
+
+// Static buffers for CG (up to 16384 unknowns)
+var CG_R: [f64; 16384] = [0.0; 16384]
+var CG_P: [f64; 16384] = [0.0; 16384]
+var CG_AP: [f64; 16384] = [0.0; 16384]
+var CG_X: [f64; 16384] = [0.0; 16384]
+var CG_HISTORY: [f64; 1024] = [0.0; 1024]
+
+/// Conjugate Gradient solver for symmetric positive definite systems.
+///
+/// Solves Ax = b where A is SPD.
+///
+/// # Algorithm
+///
+/// CG minimizes ||x - x*||_A over the Krylov subspace K_k(A, r_0).
+/// For SPD matrices, converges in at most n iterations (exact arithmetic).
+/// Practical convergence depends on condition number: ~sqrt(cond(A)) iterations.
+///
+/// # Arguments
+///
+/// - `A`: Sparse matrix in CSR format (must be SPD)
+/// - `b`: Right-hand side vector
+/// - `x0`: Initial guess (can be zero)
+/// - `config`: Solver configuration
+///
+/// # Returns
+///
+/// `SolverResult` containing solution, iteration count, and convergence info.
+///
+/// # Example
+///
+/// ```sio
+/// let A = csr_laplacian_2d(100)  // 10000x10000 SPD matrix
+/// let b = ones(10000)
+/// let x0 = zeros(10000)
+/// let config = solver_config_default()
+/// let result = cg_solve(&A, &b, &x0, &config)
+/// if result.converged {
+///     println("Converged in ", result.iterations, " iterations")
+/// }
+/// ```
+pub fn cg_solve(A: &CSRMatrix, b: &[f64], x0: &[f64], config: &SolverConfig) -> SolverResult {
+    let n = A.nrows() as usize
+    if n > 16384 {
+        panic("CG: Matrix too large (max 16384)")
+    }
+    if b.len() != n || x0.len() != n {
+        panic("CG: Dimension mismatch")
+    }
+
+    // Get mutable slices
+    let r = &!CG_R[0..n]
+    let p = &!CG_P[0..n]
+    let ap = &!CG_AP[0..n]
+    let x = &!CG_X[0..n]
+    let history = &!CG_HISTORY[0..config.max_iter as usize]
+
+    // Initialize: x = x0, r = b - A*x0, p = r
+    vec_copy(x0, x)
+    compute_residual(A, x, b, r)
+    vec_copy(r, p)
+
+    let b_norm = vec_norm(b)
+    if b_norm < 1e-15 {
+        // b = 0, x = 0 is the solution
+        vec_zero(x)
+        return SolverResult {
+            x: &CG_X[0..n],
+            iterations: 0,
+            residual_norm: 0.0,
+            converged: true,
+            history: &CG_HISTORY[0..1],
+        }
+    }
+
+    var r_norm = vec_norm(r)
+    var rr = r_norm * r_norm  // r^T r
+
+    history[0] = r_norm / b_norm
+
+    if r_norm / b_norm < config.rtol || r_norm < config.atol {
+        return SolverResult {
+            x: &CG_X[0..n],
+            iterations: 0,
+            residual_norm: r_norm / b_norm,
+            converged: true,
+            history: &CG_HISTORY[0..1],
+        }
+    }
+
+    var iter: i64 = 0
+    while iter < config.max_iter {
+        // ap = A * p
+        csr_matvec(A, p, ap)
+
+        // alpha = r^T r / (p^T A p)
+        let pAp = vec_dot(p, ap)
+        if abs(pAp) < 1e-30 {
+            // Breakdown: p is in null space of A
+            break
+        }
+        let alpha = rr / pAp
+
+        // x = x + alpha * p
+        vec_axpy(alpha, p, x)
+
+        // r = r - alpha * A*p
+        vec_axpy(-alpha, ap, r)
+
+        // Check convergence
+        let r_norm_new = vec_norm(r)
+        let rel_res = r_norm_new / b_norm
+
+        history[(iter + 1) as usize] = rel_res
+
+        if config.verbose {
+            println("CG iter ", iter + 1, ": rel_res = ", rel_res)
+        }
+
+        if rel_res < config.rtol || r_norm_new < config.atol {
+            return SolverResult {
+                x: &CG_X[0..n],
+                iterations: iter + 1,
+                residual_norm: rel_res,
+                converged: true,
+                history: &CG_HISTORY[0..(iter + 2) as usize],
+            }
+        }
+
+        // beta = r_new^T r_new / r_old^T r_old
+        let rr_new = r_norm_new * r_norm_new
+        let beta = rr_new / rr
+
+        // p = r + beta * p
+        var i: usize = 0
+        while i < n {
+            p[i] = r[i] + beta * p[i]
+            i = i + 1
+        }
+
+        rr = rr_new
+        r_norm = r_norm_new
+        iter = iter + 1
+    }
+
+    return SolverResult {
+        x: &CG_X[0..n],
+        iterations: iter,
+        residual_norm: r_norm / b_norm,
+        converged: false,
+        history: &CG_HISTORY[0..(iter + 1) as usize],
+    }
+}
+
+// ============================================================================
+// BICGSTAB (Bi-Conjugate Gradient Stabilized)
+// ============================================================================
+
+var BICG_R: [f64; 16384] = [0.0; 16384]
+var BICG_R0: [f64; 16384] = [0.0; 16384]
+var BICG_P: [f64; 16384] = [0.0; 16384]
+var BICG_V: [f64; 16384] = [0.0; 16384]
+var BICG_S: [f64; 16384] = [0.0; 16384]
+var BICG_T: [f64; 16384] = [0.0; 16384]
+var BICG_X: [f64; 16384] = [0.0; 16384]
+var BICG_HISTORY: [f64; 1024] = [0.0; 1024]
+
+/// BiCGSTAB solver for general non-singular systems.
+///
+/// Solves Ax = b where A is general (non-symmetric allowed).
+///
+/// # Algorithm
+///
+/// BiCGSTAB combines bi-conjugate gradient with GMRES-like stabilization.
+/// Memory: O(n) — only 7 vectors regardless of iterations.
+/// Convergence: typically 2x slower than CG for SPD, but handles non-symmetric.
+///
+/// # Arguments
+///
+/// - `A`: Sparse matrix in CSR format
+/// - `b`: Right-hand side vector
+/// - `x0`: Initial guess
+/// - `config`: Solver configuration
+///
+/// # Returns
+///
+/// `SolverResult` with solution and convergence info.
+pub fn bicgstab_solve(A: &CSRMatrix, b: &[f64], x0: &[f64], config: &SolverConfig) -> SolverResult {
+    let n = A.nrows() as usize
+    if n > 16384 {
+        panic("BiCGSTAB: Matrix too large (max 16384)")
+    }
+
+    let r = &!BICG_R[0..n]
+    let r0 = &!BICG_R0[0..n]
+    let p = &!BICG_P[0..n]
+    let v = &!BICG_V[0..n]
+    let s = &!BICG_S[0..n]
+    let t = &!BICG_T[0..n]
+    let x = &!BICG_X[0..n]
+    let history = &!BICG_HISTORY[0..config.max_iter as usize]
+
+    // Initialize
+    vec_copy(x0, x)
+    compute_residual(A, x, b, r)
+    vec_copy(r, r0)  // r0 is the "shadow" residual
+    vec_copy(r, p)
+
+    let b_norm = vec_norm(b)
+    if b_norm < 1e-15 {
+        vec_zero(x)
+        return SolverResult {
+            x: &BICG_X[0..n],
+            iterations: 0,
+            residual_norm: 0.0,
+            converged: true,
+            history: &BICG_HISTORY[0..1],
+        }
+    }
+
+    var rho = vec_dot(r0, r)
+    history[0] = vec_norm(r) / b_norm
+
+    var iter: i64 = 0
+    while iter < config.max_iter {
+        // v = A * p
+        csr_matvec(A, p, v)
+
+        // alpha = rho / (r0^T v)
+        let r0v = vec_dot(r0, v)
+        if abs(r0v) < 1e-30 {
+            // Breakdown
+            break
+        }
+        let alpha = rho / r0v
+
+        // s = r - alpha * v
+        var i: usize = 0
+        while i < n {
+            s[i] = r[i] - alpha * v[i]
+            i = i + 1
+        }
+
+        // Check if s is small enough
+        let s_norm = vec_norm(s)
+        if s_norm / b_norm < config.rtol {
+            // x = x + alpha * p
+            vec_axpy(alpha, p, x)
+            return SolverResult {
+                x: &BICG_X[0..n],
+                iterations: iter + 1,
+                residual_norm: s_norm / b_norm,
+                converged: true,
+                history: &BICG_HISTORY[0..(iter + 2) as usize],
+            }
+        }
+
+        // t = A * s
+        csr_matvec(A, s, t)
+
+        // omega = (t^T s) / (t^T t)
+        let tt = vec_dot(t, t)
+        if abs(tt) < 1e-30 {
+            break
+        }
+        let omega = vec_dot(t, s) / tt
+
+        // x = x + alpha * p + omega * s
+        vec_axpy(alpha, p, x)
+        vec_axpy(omega, s, x)
+
+        // r = s - omega * t
+        i = 0
+        while i < n {
+            r[i] = s[i] - omega * t[i]
+            i = i + 1
+        }
+
+        // Check convergence
+        let r_norm = vec_norm(r)
+        let rel_res = r_norm / b_norm
+        history[(iter + 1) as usize] = rel_res
+
+        if config.verbose {
+            println("BiCGSTAB iter ", iter + 1, ": rel_res = ", rel_res)
+        }
+
+        if rel_res < config.rtol || r_norm < config.atol {
+            return SolverResult {
+                x: &BICG_X[0..n],
+                iterations: iter + 1,
+                residual_norm: rel_res,
+                converged: true,
+                history: &BICG_HISTORY[0..(iter + 2) as usize],
+            }
+        }
+
+        // rho_new = r0^T r
+        let rho_new = vec_dot(r0, r)
+        if abs(rho_new) < 1e-30 || abs(omega) < 1e-30 {
+            break
+        }
+
+        // beta = (rho_new / rho) * (alpha / omega)
+        let beta = (rho_new / rho) * (alpha / omega)
+
+        // p = r + beta * (p - omega * v)
+        i = 0
+        while i < n {
+            p[i] = r[i] + beta * (p[i] - omega * v[i])
+            i = i + 1
+        }
+
+        rho = rho_new
+        iter = iter + 1
+    }
+
+    return SolverResult {
+        x: &BICG_X[0..n],
+        iterations: iter,
+        residual_norm: vec_norm(r) / b_norm,
+        converged: false,
+        history: &BICG_HISTORY[0..(iter + 1) as usize],
+    }
+}
+
+// ============================================================================
+// GMRES (Generalized Minimal Residual)
+// ============================================================================
+
+var GMRES_X: [f64; 16384] = [0.0; 16384]
+var GMRES_R: [f64; 16384] = [0.0; 16384]
+var GMRES_V: [f64; 16384 * 128] = [0.0; 16384 * 128]  // Krylov basis
+var GMRES_H: [f64; 128 * 129] = [0.0; 128 * 129]       // Hessenberg matrix
+var GMRES_CS: [f64; 128] = [0.0; 128]                   // Givens cosines
+var GMRES_SN: [f64; 128] = [0.0; 128]                   // Givens sines
+var GMRES_G: [f64; 129] = [0.0; 129]                    // Residual history
+var GMRES_Y: [f64; 128] = [0.0; 128]                    // Solution in Krylov basis
+var GMRES_HISTORY: [f64; 1024] = [0.0; 1024]
+
+/// GMRES solver with restarts for general non-singular systems.
+///
+/// Solves Ax = b where A is general non-singular.
+///
+/// # Algorithm
+///
+/// GMRES minimizes ||b - Ax|| over the Krylov subspace K_k(A, r_0).
+/// Guaranteed convergence for non-singular A.
+/// Memory grows as O(n·k) where k is restart parameter.
+///
+/// # Arguments
+///
+/// - `A`: Sparse matrix in CSR format
+/// - `b`: Right-hand side vector
+/// - `x0`: Initial guess
+/// - `config`: Solver configuration
+/// - `restart`: Restart after this many iterations (default: 30)
+///
+/// # Returns
+///
+/// `SolverResult` with solution and convergence info.
+pub fn gmres_solve(
+    A: &CSRMatrix,
+    b: &[f64],
+    x0: &[f64],
+    config: &SolverConfig,
+    restart: i64
+) -> SolverResult {
+    let n = A.nrows() as usize
+    let m = if restart > 128 { 128 } else { restart } as usize
+
+    if n > 16384 {
+        panic("GMRES: Matrix too large (max 16384)")
+    }
+
+    let x = &!GMRES_X[0..n]
+    let r = &!GMRES_R[0..n]
+    let history = &!GMRES_HISTORY[0..config.max_iter as usize]
+    let cs = &!GMRES_CS[0..m]
+    let sn = &!GMRES_SN[0..m]
+    let g = &!GMRES_G[0..m + 1]
+    let y = &!GMRES_Y[0..m]
+
+    vec_copy(x0, x)
+
+    let b_norm = vec_norm(b)
+    if b_norm < 1e-15 {
+        vec_zero(x)
+        return SolverResult {
+            x: &GMRES_X[0..n],
+            iterations: 0,
+            residual_norm: 0.0,
+            converged: true,
+            history: &GMRES_HISTORY[0..1],
+        }
+    }
+
+    var total_iter: i64 = 0
+    var outer_iter: i64 = 0
+    let max_outer = (config.max_iter + restart - 1) / restart
+
+    while outer_iter < max_outer {
+        // r = b - A*x
+        compute_residual(A, x, b, r)
+        let r_norm = vec_norm(r)
+
+        if total_iter == 0 {
+            history[0] = r_norm / b_norm
+        }
+
+        if r_norm / b_norm < config.rtol || r_norm < config.atol {
+            return SolverResult {
+                x: &GMRES_X[0..n],
+                iterations: total_iter,
+                residual_norm: r_norm / b_norm,
+                converged: true,
+                history: &GMRES_HISTORY[0..(total_iter + 1) as usize],
+            }
+        }
+
+        // v_0 = r / ||r||
+        var i: usize = 0
+        while i < n {
+            GMRES_V[i] = r[i] / r_norm
+            i = i + 1
+        }
+
+        // g = [||r||, 0, 0, ...]
+        g[0] = r_norm
+        var j: usize = 1
+        while j <= m {
+            g[j] = 0.0
+            j = j + 1
+        }
+
+        // Arnoldi iteration
+        var k: usize = 0
+        while k < m {
+            // v_k+1 = A * v_k
+            let vk = &GMRES_V[k * n..(k + 1) * n]
+            let vk1 = &!GMRES_V[(k + 1) * n..(k + 2) * n]
+
+            // vk1 = A * vk
+            var ii: usize = 0
+            while ii < n {
+                vk1[ii] = 0.0
+                ii = ii + 1
+            }
+            csr_matvec(A, vk, vk1)
+
+            // Modified Gram-Schmidt orthogonalization
+            var jj: usize = 0
+            while jj <= k {
+                let vj = &GMRES_V[jj * n..(jj + 1) * n]
+                let h_jk = vec_dot(vj, vk1)
+                GMRES_H[jj * (m + 1) + k] = h_jk
+
+                // vk1 = vk1 - h_jk * vj
+                var ii: usize = 0
+                while ii < n {
+                    vk1[ii] = vk1[ii] - h_jk * vj[ii]
+                    ii = ii + 1
+                }
+                jj = jj + 1
+            }
+
+            let h_k1k = vec_norm(vk1)
+            GMRES_H[(k + 1) * (m + 1) + k] = h_k1k
+
+            if abs(h_k1k) < 1e-14 {
+                // Lucky breakdown: x is exact solution
+                break
+            }
+
+            // Normalize
+            var ii: usize = 0
+            while ii < n {
+                vk1[ii] = vk1[ii] / h_k1k
+                ii = ii + 1
+            }
+
+            // Apply previous Givens rotations to new column
+            jj = 0
+            while jj < k {
+                let h_j = GMRES_H[jj * (m + 1) + k]
+                let h_j1 = GMRES_H[(jj + 1) * (m + 1) + k]
+                GMRES_H[jj * (m + 1) + k] = cs[jj] * h_j + sn[jj] * h_j1
+                GMRES_H[(jj + 1) * (m + 1) + k] = -sn[jj] * h_j + cs[jj] * h_j1
+                jj = jj + 1
+            }
+
+            // Compute new Givens rotation
+            let h_kk = GMRES_H[k * (m + 1) + k]
+            let h_k1k_new = GMRES_H[(k + 1) * (m + 1) + k]
+            let rho = sqrt(h_kk * h_kk + h_k1k_new * h_k1k_new)
+            cs[k] = h_kk / rho
+            sn[k] = h_k1k_new / rho
+
+            // Apply to H
+            GMRES_H[k * (m + 1) + k] = rho
+            GMRES_H[(k + 1) * (m + 1) + k] = 0.0
+
+            // Apply to g
+            let g_k = g[k]
+            let g_k1 = g[k + 1]
+            g[k] = cs[k] * g_k + sn[k] * g_k1
+            g[k + 1] = -sn[k] * g_k + cs[k] * g_k1
+
+            total_iter = total_iter + 1
+            let rel_res = abs(g[k + 1]) / b_norm
+            history[total_iter as usize] = rel_res
+
+            if config.verbose {
+                println("GMRES iter ", total_iter, ": rel_res = ", rel_res)
+            }
+
+            if rel_res < config.rtol || abs(g[k + 1]) < config.atol {
+                // Solve H*y = g by back substitution
+                var ii: i64 = k as i64
+                while ii >= 0 {
+                    var sum: f64 = g[ii as usize]
+                    var jj: usize = (ii + 1) as usize
+                    while jj <= k {
+                        sum = sum - GMRES_H[ii as usize * (m + 1) + jj] * y[jj]
+                        jj = jj + 1
+                    }
+                    y[ii as usize] = sum / GMRES_H[ii as usize * (m + 1) + ii as usize]
+                    ii = ii - 1
+                }
+
+                // x = x + V * y
+                ii = 0
+                while ii <= k as i64 {
+                    let vi = &GMRES_V[ii as usize * n..(ii as usize + 1) * n]
+                    var jj: usize = 0
+                    while jj < n {
+                        x[jj] = x[jj] + y[ii as usize] * vi[jj]
+                        jj = jj + 1
+                    }
+                    ii = ii + 1
+                }
+
+                return SolverResult {
+                    x: &GMRES_X[0..n],
+                    iterations: total_iter,
+                    residual_norm: rel_res,
+                    converged: true,
+                    history: &GMRES_HISTORY[0..(total_iter + 1) as usize],
+                }
+            }
+
+            k = k + 1
+        }
+
+        // Solve H*y = g
+        var ii: i64 = (m - 1) as i64
+        while ii >= 0 {
+            var sum: f64 = g[ii as usize]
+            var jj: usize = (ii + 1) as usize
+            while jj < m {
+                sum = sum - GMRES_H[ii as usize * (m + 1) + jj] * y[jj]
+                jj = jj + 1
+            }
+            y[ii as usize] = sum / GMRES_H[ii as usize * (m + 1) + ii as usize]
+            ii = ii - 1
+        }
+
+        // x = x + V * y
+        ii = 0
+        while ii < m as i64 {
+            let vi = &GMRES_V[ii as usize * n..(ii as usize + 1) * n]
+            var jj: usize = 0
+            while jj < n {
+                x[jj] = x[jj] + y[ii as usize] * vi[jj]
+                jj = jj + 1
+            }
+            ii = ii + 1
+        }
+
+        outer_iter = outer_iter + 1
+    }
+
+    // Final residual
+    compute_residual(A, x, b, r)
+    let final_res = vec_norm(r) / b_norm
+
+    return SolverResult {
+        x: &GMRES_X[0..n],
+        iterations: total_iter,
+        residual_norm: final_res,
+        converged: false,
+        history: &GMRES_HISTORY[0..(total_iter + 1) as usize],
+    }
+}
+
+// ============================================================================
+// TESTS
+// ============================================================================
+
+fn test_cg_diagonal() -> bool {
+    // A = diag(1, 2, 3), b = [1, 4, 9], x = [1, 2, 3]
+    let values: [f64; 3] = [1.0, 2.0, 3.0]
+    let col_indices: [i64; 3] = [0, 1, 2]
+    let row_ptrs: [i64; 4] = [0, 1, 2, 3]
+
+    use linalg::sparse::csr::csr_from_raw
+    let A = csr_from_raw(&values, &col_indices, &row_ptrs, 3, 3)
+
+    let b: [f64; 3] = [1.0, 4.0, 9.0]
+    let x0: [f64; 3] = [0.0, 0.0, 0.0]
+
+    let config = solver_config_default()
+    let result = cg_solve(&A, &b, &x0, &config)
+
+    if !result.converged { return false }
+    if abs(result.x[0] - 1.0) > 1e-8 { return false }
+    if abs(result.x[1] - 2.0) > 1e-8 { return false }
+    if abs(result.x[2] - 3.0) > 1e-8 { return false }
+
+    return true
+}
+
+fn test_bicgstab_nonsymmetric() -> bool {
+    // A = [[2, 1], [0, 3]], b = [5, 9], x = [1, 3]
+    let values: [f64; 3] = [2.0, 1.0, 3.0]
+    let col_indices: [i64; 3] = [0, 1, 1]
+    let row_ptrs: [i64; 3] = [0, 2, 3]
+
+    use linalg::sparse::csr::csr_from_raw
+    let A = csr_from_raw(&values, &col_indices, &row_ptrs, 2, 2)
+
+    let b: [f64; 2] = [5.0, 9.0]
+    let x0: [f64; 2] = [0.0, 0.0]
+
+    let config = solver_config_default()
+    let result = bicgstab_solve(&A, &b, &x0, &config)
+
+    if !result.converged { return false }
+    if abs(result.x[0] - 1.0) > 1e-8 { return false }
+    if abs(result.x[1] - 3.0) > 1e-8 { return false }
+
+    return true
+}
+
+fn test_gmres_general() -> bool {
+    // Same test as BiCGSTAB
+    let values: [f64; 3] = [2.0, 1.0, 3.0]
+    let col_indices: [i64; 3] = [0, 1, 1]
+    let row_ptrs: [i64; 3] = [0, 2, 3]
+
+    use linalg::sparse::csr::csr_from_raw
+    let A = csr_from_raw(&values, &col_indices, &row_ptrs, 2, 2)
+
+    let b: [f64; 2] = [5.0, 9.0]
+    let x0: [f64; 2] = [0.0, 0.0]
+
+    let config = solver_config_default()
+    let result = gmres_solve(&A, &b, &x0, &config, 30)
+
+    if !result.converged { return false }
+    if abs(result.x[0] - 1.0) > 1e-8 { return false }
+    if abs(result.x[1] - 3.0) > 1e-8 { return false }
+
+    return true
+}
+
+fn main() -> i32 {
+    println("=== Sparse Iterative Solvers Tests ===")
+    println("")
+
+    var failed = false
+
+    println("Test 1: CG on diagonal matrix")
+    if test_cg_diagonal() {
+        println("  PASSED")
+    } else {
+        println("  FAILED")
+        failed = true
+    }
+
+    println("Test 2: BiCGSTAB on non-symmetric matrix")
+    if test_bicgstab_nonsymmetric() {
+        println("  PASSED")
+    } else {
+        println("  FAILED")
+        failed = true
+    }
+
+    println("Test 3: GMRES on general matrix")
+    if test_gmres_general() {
+        println("  PASSED")
+    } else {
+        println("  FAILED")
+        failed = true
+    }
+
+    println("")
+    if failed {
+        println("SOME TESTS FAILED")
+        return 1
+    } else {
+        println("ALL TESTS PASSED")
+        return 0
+    }
+}

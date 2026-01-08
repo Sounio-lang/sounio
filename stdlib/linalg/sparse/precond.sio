@@ -1,0 +1,618 @@
+/// linalg::sparse::precond — Preconditioners for Iterative Solvers
+///
+/// Preconditioners accelerate convergence of Krylov methods by transforming
+/// the linear system Ax = b into M^{-1}Ax = M^{-1}b where M ≈ A.
+///
+/// # Available Preconditioners
+///
+/// | Preconditioner | Cost     | Memory | Quality | Best For                    |
+/// |----------------|----------|--------|---------|----------------------------|
+/// | Jacobi         | O(n)     | O(n)   | Low     | Diagonally dominant        |
+/// | ILU(0)         | O(nnz)   | O(nnz) | Medium  | General sparse             |
+/// | SSOR           | O(nnz)   | O(1)   | Medium  | SPD with good clustering   |
+///
+/// # Usage Pattern
+///
+/// ```sio
+/// // Build preconditioner
+/// let M = jacobi_precond(&A)
+///
+/// // Use with PCG
+/// let result = pcg_solve(&A, &b, &x0, &M, &config)
+/// ```
+
+module linalg::sparse::precond
+
+use core::math::{abs, sqrt}
+use linalg::sparse::csr::{CSRMatrix, csr_matvec, csr_get_diagonal}
+
+// ============================================================================
+// JACOBI (DIAGONAL) PRECONDITIONER
+// ============================================================================
+
+/// Jacobi preconditioner: M = diag(A)
+///
+/// Simplest preconditioner — just the diagonal of A.
+/// Effective when A is diagonally dominant.
+pub struct JacobiPrecond {
+    /// Inverse diagonal elements: 1/A[i,i]
+    inv_diag: &[f64],
+    /// Dimension
+    n: i64,
+}
+
+// Static buffer for Jacobi preconditioner
+var JACOBI_INV_DIAG: [f64; 16384] = [0.0; 16384]
+
+/// Build a Jacobi preconditioner from a CSR matrix.
+pub fn jacobi_precond(A: &CSRMatrix) -> JacobiPrecond {
+    let n = A.nrows()
+    if n > 16384 {
+        panic("Jacobi: Matrix too large")
+    }
+
+    let inv_diag = &!JACOBI_INV_DIAG[0..n as usize]
+
+    // Extract diagonal
+    csr_get_diagonal(A, inv_diag)
+
+    // Invert with safeguard for zeros
+    var i: i64 = 0
+    while i < n {
+        let d = inv_diag[i as usize]
+        if abs(d) < 1e-15 {
+            inv_diag[i as usize] = 1.0  // Fallback: identity
+        } else {
+            inv_diag[i as usize] = 1.0 / d
+        }
+        i = i + 1
+    }
+
+    return JacobiPrecond {
+        inv_diag: &JACOBI_INV_DIAG[0..n as usize],
+        n: n,
+    }
+}
+
+/// Apply Jacobi preconditioner: y = M^{-1} * x = D^{-1} * x
+pub fn jacobi_apply(M: &JacobiPrecond, x: &[f64], y: &![f64]) {
+    let n = M.n as usize
+    var i: usize = 0
+    while i < n {
+        y[i] = M.inv_diag[i] * x[i]
+        i = i + 1
+    }
+}
+
+// ============================================================================
+// SSOR (Symmetric Successive Over-Relaxation) PRECONDITIONER
+// ============================================================================
+
+/// SSOR preconditioner: M = (D + ωL) D^{-1} (D + ωU)
+///
+/// where L is strictly lower triangular, U is strictly upper triangular,
+/// D is diagonal, and ω is the relaxation parameter.
+pub struct SSORPrecond {
+    /// Reference to the matrix
+    A: &CSRMatrix,
+    /// Relaxation parameter (typically 1.0-1.9)
+    omega: f64,
+    /// Inverse diagonal for scaling
+    inv_diag: &[f64],
+}
+
+var SSOR_INV_DIAG: [f64; 16384] = [0.0; 16384]
+var SSOR_TMP: [f64; 16384] = [0.0; 16384]
+
+/// Build an SSOR preconditioner.
+///
+/// # Arguments
+/// - `A`: SPD matrix in CSR format
+/// - `omega`: Relaxation parameter (1.0 = Gauss-Seidel, 1.0-1.9 for SPD)
+pub fn ssor_precond(A: &CSRMatrix, omega: f64) -> SSORPrecond {
+    let n = A.nrows()
+    if n > 16384 {
+        panic("SSOR: Matrix too large")
+    }
+
+    let inv_diag = &!SSOR_INV_DIAG[0..n as usize]
+    csr_get_diagonal(A, inv_diag)
+
+    var i: i64 = 0
+    while i < n {
+        let d = inv_diag[i as usize]
+        if abs(d) < 1e-15 {
+            inv_diag[i as usize] = 1.0
+        } else {
+            inv_diag[i as usize] = 1.0 / d
+        }
+        i = i + 1
+    }
+
+    return SSORPrecond {
+        A: A,
+        omega: omega,
+        inv_diag: &SSOR_INV_DIAG[0..n as usize],
+    }
+}
+
+/// Apply SSOR preconditioner: y = M^{-1} * x
+///
+/// Computed as forward sweep followed by backward sweep.
+pub fn ssor_apply(M: &SSORPrecond, x: &[f64], y: &![f64]) {
+    let A = M.A
+    let n = A.nrows()
+    let omega = M.omega
+    let tmp = &!SSOR_TMP[0..n as usize]
+
+    // Forward sweep: (D + ωL) tmp = ω * x
+    var i: i64 = 0
+    while i < n {
+        let row_start = A.row_ptrs[i as usize]
+        let row_end = A.row_ptrs[(i + 1) as usize]
+
+        var sum: f64 = omega * x[i as usize]
+
+        // Subtract contributions from earlier rows (lower triangular part)
+        var idx = row_start
+        while idx < row_end {
+            let col = A.col_indices[idx as usize]
+            if col < i {
+                sum = sum - omega * A.values[idx as usize] * tmp[col as usize]
+            }
+            idx = idx + 1
+        }
+
+        tmp[i as usize] = sum * M.inv_diag[i as usize]
+        i = i + 1
+    }
+
+    // Scale by D
+    i = 0
+    while i < n {
+        tmp[i as usize] = tmp[i as usize] / M.inv_diag[i as usize]  // tmp = D * tmp
+        i = i + 1
+    }
+
+    // Backward sweep: (D + ωU) y = tmp
+    i = n - 1
+    while i >= 0 {
+        let row_start = A.row_ptrs[i as usize]
+        let row_end = A.row_ptrs[(i + 1) as usize]
+
+        var sum: f64 = tmp[i as usize]
+
+        // Subtract contributions from later rows (upper triangular part)
+        var idx = row_start
+        while idx < row_end {
+            let col = A.col_indices[idx as usize]
+            if col > i {
+                sum = sum - omega * A.values[idx as usize] * y[col as usize]
+            }
+            idx = idx + 1
+        }
+
+        y[i as usize] = sum * M.inv_diag[i as usize]
+        i = i - 1
+    }
+}
+
+// ============================================================================
+// ILU(0) (Incomplete LU with no fill-in)
+// ============================================================================
+
+/// ILU(0) preconditioner: A ≈ LU where L,U have same sparsity as A.
+///
+/// More effective than Jacobi but requires more setup and storage.
+pub struct ILU0Precond {
+    /// L and U stored together (values modified in-place concept)
+    /// L is strictly lower triangular + unit diagonal
+    /// U is upper triangular (including diagonal)
+    values: &[f64],
+    col_indices: &[i64],
+    row_ptrs: &[i64],
+    nrows: i64,
+}
+
+var ILU0_VALUES: [f64; 65536] = [0.0; 65536]
+var ILU0_TMP: [f64; 16384] = [0.0; 16384]
+
+/// Build ILU(0) preconditioner.
+///
+/// Computes incomplete LU factorization with no fill-in (same sparsity as A).
+pub fn ilu0_precond(A: &CSRMatrix) -> ILU0Precond {
+    let n = A.nrows()
+    let nnz = A.nnz()
+
+    if nnz > 65536 {
+        panic("ILU0: Matrix too large (nnz > 65536)")
+    }
+
+    // Copy matrix values
+    var i: i64 = 0
+    while i < nnz {
+        ILU0_VALUES[i as usize] = A.values[i as usize]
+        i = i + 1
+    }
+
+    // IKJ variant of ILU(0)
+    // For each row i
+    var row: i64 = 1
+    while row < n {
+        let row_start = A.row_ptrs[row as usize]
+        let row_end = A.row_ptrs[(row + 1) as usize]
+
+        // For each k < i where A[i,k] != 0
+        var idx_k = row_start
+        while idx_k < row_end {
+            let k = A.col_indices[idx_k as usize]
+            if k >= row {
+                break  // Only process lower triangular
+            }
+
+            // Find A[k,k] (diagonal of row k)
+            let k_row_start = A.row_ptrs[k as usize]
+            let k_row_end = A.row_ptrs[(k + 1) as usize]
+            var diag_k: f64 = 0.0
+            var found_diag = false
+
+            var idx_diag = k_row_start
+            while idx_diag < k_row_end {
+                if A.col_indices[idx_diag as usize] == k {
+                    diag_k = ILU0_VALUES[idx_diag as usize]
+                    found_diag = true
+                    break
+                }
+                idx_diag = idx_diag + 1
+            }
+
+            if !found_diag || abs(diag_k) < 1e-15 {
+                idx_k = idx_k + 1
+                continue
+            }
+
+            // A[i,k] = A[i,k] / A[k,k]
+            let lik = ILU0_VALUES[idx_k as usize] / diag_k
+            ILU0_VALUES[idx_k as usize] = lik
+
+            // For each j > k where A[k,j] != 0 and A[i,j] != 0
+            var idx_kj = k_row_start
+            while idx_kj < k_row_end {
+                let j = A.col_indices[idx_kj as usize]
+                if j <= k {
+                    idx_kj = idx_kj + 1
+                    continue
+                }
+
+                let ukj = ILU0_VALUES[idx_kj as usize]
+
+                // Find A[i,j]
+                var idx_ij = row_start
+                while idx_ij < row_end {
+                    if A.col_indices[idx_ij as usize] == j {
+                        // A[i,j] = A[i,j] - A[i,k] * A[k,j]
+                        ILU0_VALUES[idx_ij as usize] = ILU0_VALUES[idx_ij as usize] - lik * ukj
+                        break
+                    }
+                    idx_ij = idx_ij + 1
+                }
+
+                idx_kj = idx_kj + 1
+            }
+
+            idx_k = idx_k + 1
+        }
+
+        row = row + 1
+    }
+
+    return ILU0Precond {
+        values: &ILU0_VALUES[0..nnz as usize],
+        col_indices: A.col_indices,
+        row_ptrs: A.row_ptrs,
+        nrows: n,
+    }
+}
+
+/// Apply ILU(0) preconditioner: y = M^{-1} * x = U^{-1} L^{-1} x
+pub fn ilu0_apply(M: &ILU0Precond, x: &[f64], y: &![f64]) {
+    let n = M.nrows
+    let tmp = &!ILU0_TMP[0..n as usize]
+
+    // Forward solve: L * tmp = x
+    // L has unit diagonal, stored below diagonal
+    var i: i64 = 0
+    while i < n {
+        let row_start = M.row_ptrs[i as usize]
+        let row_end = M.row_ptrs[(i + 1) as usize]
+
+        var sum = x[i as usize]
+
+        var idx = row_start
+        while idx < row_end {
+            let col = M.col_indices[idx as usize]
+            if col < i {
+                sum = sum - M.values[idx as usize] * tmp[col as usize]
+            }
+            idx = idx + 1
+        }
+
+        tmp[i as usize] = sum  // Unit diagonal: no division
+        i = i + 1
+    }
+
+    // Backward solve: U * y = tmp
+    i = n - 1
+    while i >= 0 {
+        let row_start = M.row_ptrs[i as usize]
+        let row_end = M.row_ptrs[(i + 1) as usize]
+
+        var sum = tmp[i as usize]
+        var diag: f64 = 1.0
+
+        var idx = row_start
+        while idx < row_end {
+            let col = M.col_indices[idx as usize]
+            if col == i {
+                diag = M.values[idx as usize]
+            } else if col > i {
+                sum = sum - M.values[idx as usize] * y[col as usize]
+            }
+            idx = idx + 1
+        }
+
+        if abs(diag) < 1e-15 {
+            y[i as usize] = sum
+        } else {
+            y[i as usize] = sum / diag
+        }
+        i = i - 1
+    }
+}
+
+// ============================================================================
+// PRECONDITIONED CONJUGATE GRADIENT (PCG)
+// ============================================================================
+
+var PCG_R: [f64; 16384] = [0.0; 16384]
+var PCG_Z: [f64; 16384] = [0.0; 16384]
+var PCG_P: [f64; 16384] = [0.0; 16384]
+var PCG_AP: [f64; 16384] = [0.0; 16384]
+var PCG_X: [f64; 16384] = [0.0; 16384]
+var PCG_HISTORY: [f64; 1024] = [0.0; 1024]
+
+use linalg::sparse::solvers::{SolverConfig, SolverResult, solver_config_default}
+
+/// Preconditioned Conjugate Gradient.
+///
+/// Solves Ax = b with preconditioner M.
+pub fn pcg_solve_jacobi(
+    A: &CSRMatrix,
+    b: &[f64],
+    x0: &[f64],
+    M: &JacobiPrecond,
+    config: &SolverConfig
+) -> SolverResult {
+    let n = A.nrows() as usize
+
+    let r = &!PCG_R[0..n]
+    let z = &!PCG_Z[0..n]
+    let p = &!PCG_P[0..n]
+    let ap = &!PCG_AP[0..n]
+    let x = &!PCG_X[0..n]
+    let history = &!PCG_HISTORY[0..config.max_iter as usize]
+
+    // Initialize
+    var i: usize = 0
+    while i < n {
+        x[i] = x0[i]
+        i = i + 1
+    }
+
+    // r = b - A*x
+    csr_matvec(A, x, r)
+    i = 0
+    while i < n {
+        r[i] = b[i] - r[i]
+        i = i + 1
+    }
+
+    let b_norm = vec_norm(b)
+    if b_norm < 1e-15 {
+        i = 0
+        while i < n {
+            x[i] = 0.0
+            i = i + 1
+        }
+        return SolverResult {
+            x: &PCG_X[0..n],
+            iterations: 0,
+            residual_norm: 0.0,
+            converged: true,
+            history: &PCG_HISTORY[0..1],
+        }
+    }
+
+    // z = M^{-1} r
+    jacobi_apply(M, r, z)
+
+    // p = z
+    i = 0
+    while i < n {
+        p[i] = z[i]
+        i = i + 1
+    }
+
+    var rz = vec_dot(r, z)
+    history[0] = vec_norm(r) / b_norm
+
+    var iter: i64 = 0
+    while iter < config.max_iter {
+        // ap = A * p
+        csr_matvec(A, p, ap)
+
+        let pAp = vec_dot(p, ap)
+        if abs(pAp) < 1e-30 {
+            break
+        }
+        let alpha = rz / pAp
+
+        // x = x + alpha * p
+        // r = r - alpha * ap
+        i = 0
+        while i < n {
+            x[i] = x[i] + alpha * p[i]
+            r[i] = r[i] - alpha * ap[i]
+            i = i + 1
+        }
+
+        let r_norm = vec_norm(r)
+        let rel_res = r_norm / b_norm
+        history[(iter + 1) as usize] = rel_res
+
+        if rel_res < config.rtol || r_norm < config.atol {
+            return SolverResult {
+                x: &PCG_X[0..n],
+                iterations: iter + 1,
+                residual_norm: rel_res,
+                converged: true,
+                history: &PCG_HISTORY[0..(iter + 2) as usize],
+            }
+        }
+
+        // z = M^{-1} r
+        jacobi_apply(M, r, z)
+
+        let rz_new = vec_dot(r, z)
+        let beta = rz_new / rz
+
+        // p = z + beta * p
+        i = 0
+        while i < n {
+            p[i] = z[i] + beta * p[i]
+            i = i + 1
+        }
+
+        rz = rz_new
+        iter = iter + 1
+    }
+
+    return SolverResult {
+        x: &PCG_X[0..n],
+        iterations: iter,
+        residual_norm: vec_norm(r) / b_norm,
+        converged: false,
+        history: &PCG_HISTORY[0..(iter + 1) as usize],
+    }
+}
+
+// Helper for PCG
+fn vec_norm(x: &[f64]) -> f64 {
+    var sum: f64 = 0.0
+    let n = x.len()
+    var i: usize = 0
+    while i < n {
+        sum = sum + x[i] * x[i]
+        i = i + 1
+    }
+    return sqrt(sum)
+}
+
+fn vec_dot(x: &[f64], y: &[f64]) -> f64 {
+    var sum: f64 = 0.0
+    let n = x.len()
+    var i: usize = 0
+    while i < n {
+        sum = sum + x[i] * y[i]
+        i = i + 1
+    }
+    return sum
+}
+
+// ============================================================================
+// TESTS
+// ============================================================================
+
+fn test_jacobi_precond() -> bool {
+    // A = diag(2, 4, 6)
+    let values: [f64; 3] = [2.0, 4.0, 6.0]
+    let col_indices: [i64; 3] = [0, 1, 2]
+    let row_ptrs: [i64; 4] = [0, 1, 2, 3]
+
+    use linalg::sparse::csr::csr_from_raw
+    let A = csr_from_raw(&values, &col_indices, &row_ptrs, 3, 3)
+
+    let M = jacobi_precond(&A)
+
+    // Check inverse diagonal: [0.5, 0.25, 1/6]
+    if abs(M.inv_diag[0] - 0.5) > 1e-10 { return false }
+    if abs(M.inv_diag[1] - 0.25) > 1e-10 { return false }
+    if abs(M.inv_diag[2] - 1.0/6.0) > 1e-10 { return false }
+
+    // Test apply: y = M^{-1} * [2, 8, 12] = [1, 2, 2]
+    let x: [f64; 3] = [2.0, 8.0, 12.0]
+    var y: [f64; 3] = [0.0, 0.0, 0.0]
+    jacobi_apply(&M, &x, &!y)
+
+    if abs(y[0] - 1.0) > 1e-10 { return false }
+    if abs(y[1] - 2.0) > 1e-10 { return false }
+    if abs(y[2] - 2.0) > 1e-10 { return false }
+
+    return true
+}
+
+fn test_pcg_diagonal() -> bool {
+    // A = diag(1, 2, 3), b = [1, 4, 9], solution = [1, 2, 3]
+    let values: [f64; 3] = [1.0, 2.0, 3.0]
+    let col_indices: [i64; 3] = [0, 1, 2]
+    let row_ptrs: [i64; 4] = [0, 1, 2, 3]
+
+    use linalg::sparse::csr::csr_from_raw
+    let A = csr_from_raw(&values, &col_indices, &row_ptrs, 3, 3)
+    let M = jacobi_precond(&A)
+
+    let b: [f64; 3] = [1.0, 4.0, 9.0]
+    let x0: [f64; 3] = [0.0, 0.0, 0.0]
+
+    let config = solver_config_default()
+    let result = pcg_solve_jacobi(&A, &b, &x0, &M, &config)
+
+    if !result.converged { return false }
+    if abs(result.x[0] - 1.0) > 1e-8 { return false }
+    if abs(result.x[1] - 2.0) > 1e-8 { return false }
+    if abs(result.x[2] - 3.0) > 1e-8 { return false }
+
+    return true
+}
+
+fn main() -> i32 {
+    println("=== Preconditioner Tests ===")
+    println("")
+
+    var failed = false
+
+    println("Test 1: Jacobi preconditioner")
+    if test_jacobi_precond() {
+        println("  PASSED")
+    } else {
+        println("  FAILED")
+        failed = true
+    }
+
+    println("Test 2: PCG with Jacobi preconditioner")
+    if test_pcg_diagonal() {
+        println("  PASSED")
+    } else {
+        println("  FAILED")
+        failed = true
+    }
+
+    println("")
+    if failed {
+        println("SOME TESTS FAILED")
+        return 1
+    } else {
+        println("ALL TESTS PASSED")
+        return 0
+    }
+}

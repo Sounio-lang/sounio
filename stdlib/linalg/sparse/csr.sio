@@ -1,0 +1,730 @@
+/// linalg::sparse::csr — Compressed Sparse Row (CSR) Matrix Format
+///
+/// CSR is the standard format for sparse matrix-vector multiplication (SpMV).
+/// Efficient for row-wise access and row slicing.
+///
+/// # Storage Format
+///
+/// For an m×n matrix with nnz non-zeros:
+/// - `values`: Array of nnz non-zero values (row-major order)
+/// - `col_indices`: Array of nnz column indices for each value
+/// - `row_ptrs`: Array of m+1 pointers; row i spans [row_ptrs[i], row_ptrs[i+1])
+///
+/// # Example
+///
+/// Matrix:
+/// ```
+/// [ 1  0  2 ]
+/// [ 0  0  3 ]
+/// [ 4  5  6 ]
+/// ```
+///
+/// CSR representation:
+/// - values = [1, 2, 3, 4, 5, 6]
+/// - col_indices = [0, 2, 2, 0, 1, 2]
+/// - row_ptrs = [0, 2, 3, 6]
+///
+/// # Performance
+///
+/// - SpMV (y = A*x): O(nnz) — primary use case
+/// - Row access: O(1) pointer lookup + O(nnz_row) traversal
+/// - Column access: O(nnz) — inefficient, use CSC instead
+/// - Element lookup: O(nnz_row) binary search within row
+
+module linalg::sparse::csr
+
+use core::math::{abs, sqrt, fmax}
+
+// ============================================================================
+// CSR MATRIX TYPE
+// ============================================================================
+
+/// Compressed Sparse Row matrix.
+///
+/// Stores a sparse matrix in CSR format for efficient row access and SpMV.
+pub struct CSRMatrix {
+    /// Non-zero values in row-major order
+    values: &[f64],
+    /// Column index for each non-zero value
+    col_indices: &[i64],
+    /// Row pointers: row i spans [row_ptrs[i], row_ptrs[i+1])
+    row_ptrs: &[i64],
+    /// Number of rows
+    nrows: i64,
+    /// Number of columns
+    ncols: i64,
+}
+
+// ============================================================================
+// CONSTRUCTORS
+// ============================================================================
+
+/// Create a CSR matrix from raw arrays.
+///
+/// # Arguments
+/// - `values`: Non-zero values (length = nnz)
+/// - `col_indices`: Column indices (length = nnz)
+/// - `row_ptrs`: Row pointers (length = nrows + 1)
+/// - `nrows`: Number of rows
+/// - `ncols`: Number of columns
+///
+/// # Panics
+/// Panics if arrays have inconsistent lengths.
+pub fn csr_from_raw(
+    values: &[f64],
+    col_indices: &[i64],
+    row_ptrs: &[i64],
+    nrows: i64,
+    ncols: i64
+) -> CSRMatrix {
+    // Validate dimensions
+    let nnz = values.len() as i64
+    if col_indices.len() as i64 != nnz {
+        panic("col_indices length must match values length")
+    }
+    if row_ptrs.len() as i64 != nrows + 1 {
+        panic("row_ptrs length must be nrows + 1")
+    }
+    if row_ptrs[nrows as usize] != nnz {
+        panic("row_ptrs[nrows] must equal nnz")
+    }
+
+    return CSRMatrix {
+        values: values,
+        col_indices: col_indices,
+        row_ptrs: row_ptrs,
+        nrows: nrows,
+        ncols: ncols,
+    }
+}
+
+/// Create an empty CSR matrix with given dimensions.
+pub fn csr_empty(nrows: i64, ncols: i64) -> CSRMatrix {
+    var row_ptrs: [i64; 1024] = [0; 1024]  // Static allocation for now
+    return CSRMatrix {
+        values: &[],
+        col_indices: &[],
+        row_ptrs: &row_ptrs[0..(nrows + 1) as usize],
+        nrows: nrows,
+        ncols: ncols,
+    }
+}
+
+/// Create a CSR identity matrix.
+pub fn csr_eye(n: i64) -> CSRMatrix {
+    var values: [f64; 1024] = [0.0; 1024]
+    var col_indices: [i64; 1024] = [0; 1024]
+    var row_ptrs: [i64; 1025] = [0; 1025]
+
+    var i: i64 = 0
+    while i < n {
+        values[i as usize] = 1.0
+        col_indices[i as usize] = i
+        row_ptrs[i as usize] = i
+        i = i + 1
+    }
+    row_ptrs[n as usize] = n
+
+    return CSRMatrix {
+        values: &values[0..n as usize],
+        col_indices: &col_indices[0..n as usize],
+        row_ptrs: &row_ptrs[0..(n + 1) as usize],
+        nrows: n,
+        ncols: n,
+    }
+}
+
+/// Create a CSR diagonal matrix from a vector.
+pub fn csr_diag(diag: &[f64]) -> CSRMatrix {
+    let n = diag.len() as i64
+    var values: [f64; 1024] = [0.0; 1024]
+    var col_indices: [i64; 1024] = [0; 1024]
+    var row_ptrs: [i64; 1025] = [0; 1025]
+
+    var i: i64 = 0
+    while i < n {
+        values[i as usize] = diag[i as usize]
+        col_indices[i as usize] = i
+        row_ptrs[i as usize] = i
+        i = i + 1
+    }
+    row_ptrs[n as usize] = n
+
+    return CSRMatrix {
+        values: &values[0..n as usize],
+        col_indices: &col_indices[0..n as usize],
+        row_ptrs: &row_ptrs[0..(n + 1) as usize],
+        nrows: n,
+        ncols: n,
+    }
+}
+
+// ============================================================================
+// ACCESSORS
+// ============================================================================
+
+impl CSRMatrix {
+    /// Number of rows.
+    pub fn nrows(&self) -> i64 {
+        return self.nrows
+    }
+
+    /// Number of columns.
+    pub fn ncols(&self) -> i64 {
+        return self.ncols
+    }
+
+    /// Number of non-zero elements.
+    pub fn nnz(&self) -> i64 {
+        return self.values.len() as i64
+    }
+
+    /// Density: nnz / (nrows * ncols).
+    pub fn density(&self) -> f64 {
+        let total = self.nrows * self.ncols
+        if total == 0 {
+            return 0.0
+        }
+        return (self.nnz() as f64) / (total as f64)
+    }
+
+    /// Get element at (row, col). Returns 0.0 if not stored.
+    /// Note: O(nnz_row) per lookup — use iterators for bulk access.
+    pub fn get(&self, row: i64, col: i64) -> f64 {
+        if row < 0 || row >= self.nrows || col < 0 || col >= self.ncols {
+            return 0.0
+        }
+
+        let start = self.row_ptrs[row as usize]
+        let end = self.row_ptrs[(row + 1) as usize]
+
+        // Linear search within row (could use binary search for sorted cols)
+        var idx = start
+        while idx < end {
+            if self.col_indices[idx as usize] == col {
+                return self.values[idx as usize]
+            }
+            idx = idx + 1
+        }
+
+        return 0.0
+    }
+
+    /// Get number of non-zeros in a specific row.
+    pub fn row_nnz(&self, row: i64) -> i64 {
+        if row < 0 || row >= self.nrows {
+            return 0
+        }
+        return self.row_ptrs[(row + 1) as usize] - self.row_ptrs[row as usize]
+    }
+
+    /// Check if matrix is square.
+    pub fn is_square(&self) -> bool {
+        return self.nrows == self.ncols
+    }
+}
+
+// ============================================================================
+// SPARSE MATRIX-VECTOR MULTIPLICATION (SpMV)
+// ============================================================================
+
+/// Compute y = A * x (sparse matrix-vector multiply).
+///
+/// This is the fundamental operation for sparse linear algebra.
+/// Complexity: O(nnz)
+///
+/// # Arguments
+/// - `A`: Sparse matrix in CSR format
+/// - `x`: Dense input vector (length = A.ncols)
+/// - `y`: Dense output vector (length = A.nrows) — will be overwritten
+pub fn csr_matvec(A: &CSRMatrix, x: &[f64], y: &![f64]) {
+    let m = A.nrows
+    let n = A.ncols
+
+    if x.len() as i64 != n {
+        panic("x length must match A.ncols")
+    }
+    if y.len() as i64 != m {
+        panic("y length must match A.nrows")
+    }
+
+    var row: i64 = 0
+    while row < m {
+        let row_start = A.row_ptrs[row as usize]
+        let row_end = A.row_ptrs[(row + 1) as usize]
+
+        var sum: f64 = 0.0
+        var idx = row_start
+        while idx < row_end {
+            let col = A.col_indices[idx as usize]
+            let val = A.values[idx as usize]
+            sum = sum + val * x[col as usize]
+            idx = idx + 1
+        }
+
+        y[row as usize] = sum
+        row = row + 1
+    }
+}
+
+/// Compute y = alpha * A * x + beta * y (general SpMV).
+///
+/// Standard BLAS-style interface for SpMV.
+pub fn csr_matvec_axpby(A: &CSRMatrix, x: &[f64], y: &![f64], alpha: f64, beta: f64) {
+    let m = A.nrows
+    let n = A.ncols
+
+    if x.len() as i64 != n {
+        panic("x length must match A.ncols")
+    }
+    if y.len() as i64 != m {
+        panic("y length must match A.nrows")
+    }
+
+    var row: i64 = 0
+    while row < m {
+        let row_start = A.row_ptrs[row as usize]
+        let row_end = A.row_ptrs[(row + 1) as usize]
+
+        var sum: f64 = 0.0
+        var idx = row_start
+        while idx < row_end {
+            let col = A.col_indices[idx as usize]
+            let val = A.values[idx as usize]
+            sum = sum + val * x[col as usize]
+            idx = idx + 1
+        }
+
+        y[row as usize] = beta * y[row as usize] + alpha * sum
+        row = row + 1
+    }
+}
+
+/// Compute y = A^T * x (transpose SpMV).
+///
+/// Note: Less efficient than SpMV for CSR — consider using CSC format.
+pub fn csr_matvec_transpose(A: &CSRMatrix, x: &[f64], y: &![f64]) {
+    let m = A.nrows
+    let n = A.ncols
+
+    if x.len() as i64 != m {
+        panic("x length must match A.nrows for transpose")
+    }
+    if y.len() as i64 != n {
+        panic("y length must match A.ncols for transpose")
+    }
+
+    // Zero output
+    var j: i64 = 0
+    while j < n {
+        y[j as usize] = 0.0
+        j = j + 1
+    }
+
+    // Accumulate: y[col] += val * x[row]
+    var row: i64 = 0
+    while row < m {
+        let row_start = A.row_ptrs[row as usize]
+        let row_end = A.row_ptrs[(row + 1) as usize]
+        let xi = x[row as usize]
+
+        var idx = row_start
+        while idx < row_end {
+            let col = A.col_indices[idx as usize]
+            let val = A.values[idx as usize]
+            y[col as usize] = y[col as usize] + val * xi
+            idx = idx + 1
+        }
+
+        row = row + 1
+    }
+}
+
+// ============================================================================
+// SPARSE MATRIX ARITHMETIC
+// ============================================================================
+
+/// Scale matrix: B = alpha * A
+pub fn csr_scale(A: &CSRMatrix, alpha: f64) -> CSRMatrix {
+    let nnz = A.nnz()
+    var new_values: [f64; 65536] = [0.0; 65536]
+
+    var i: i64 = 0
+    while i < nnz {
+        new_values[i as usize] = alpha * A.values[i as usize]
+        i = i + 1
+    }
+
+    return CSRMatrix {
+        values: &new_values[0..nnz as usize],
+        col_indices: A.col_indices,
+        row_ptrs: A.row_ptrs,
+        nrows: A.nrows,
+        ncols: A.ncols,
+    }
+}
+
+/// Compute Frobenius norm: ||A||_F = sqrt(sum(a_ij^2))
+pub fn csr_frobenius_norm(A: &CSRMatrix) -> f64 {
+    var sum: f64 = 0.0
+    let nnz = A.nnz()
+
+    var i: i64 = 0
+    while i < nnz {
+        let val = A.values[i as usize]
+        sum = sum + val * val
+        i = i + 1
+    }
+
+    return sqrt(sum)
+}
+
+/// Compute infinity norm: ||A||_inf = max_row sum(|a_ij|)
+pub fn csr_infinity_norm(A: &CSRMatrix) -> f64 {
+    var max_row_sum: f64 = 0.0
+
+    var row: i64 = 0
+    while row < A.nrows {
+        let row_start = A.row_ptrs[row as usize]
+        let row_end = A.row_ptrs[(row + 1) as usize]
+
+        var row_sum: f64 = 0.0
+        var idx = row_start
+        while idx < row_end {
+            row_sum = row_sum + abs(A.values[idx as usize])
+            idx = idx + 1
+        }
+
+        max_row_sum = fmax(max_row_sum, row_sum)
+        row = row + 1
+    }
+
+    return max_row_sum
+}
+
+/// Extract diagonal as a dense vector.
+pub fn csr_get_diagonal(A: &CSRMatrix, diag: &![f64]) {
+    let n = if A.nrows < A.ncols { A.nrows } else { A.ncols }
+
+    if diag.len() as i64 < n {
+        panic("diag length must be at least min(nrows, ncols)")
+    }
+
+    // Zero output first
+    var i: i64 = 0
+    while i < n {
+        diag[i as usize] = 0.0
+        i = i + 1
+    }
+
+    // Find diagonal elements
+    var row: i64 = 0
+    while row < n {
+        let row_start = A.row_ptrs[row as usize]
+        let row_end = A.row_ptrs[(row + 1) as usize]
+
+        var idx = row_start
+        while idx < row_end {
+            if A.col_indices[idx as usize] == row {
+                diag[row as usize] = A.values[idx as usize]
+                break
+            }
+            idx = idx + 1
+        }
+
+        row = row + 1
+    }
+}
+
+// ============================================================================
+// ROW ITERATION
+// ============================================================================
+
+/// Row view for efficient iteration over non-zeros in a single row.
+pub struct CSRRowView {
+    values: &[f64],
+    col_indices: &[i64],
+    start: i64,
+    end: i64,
+}
+
+/// Get a view of a single row.
+pub fn csr_row(A: &CSRMatrix, row: i64) -> CSRRowView {
+    if row < 0 || row >= A.nrows {
+        panic("row index out of bounds")
+    }
+
+    let start = A.row_ptrs[row as usize]
+    let end = A.row_ptrs[(row + 1) as usize]
+
+    return CSRRowView {
+        values: &A.values[start as usize..end as usize],
+        col_indices: &A.col_indices[start as usize..end as usize],
+        start: 0,
+        end: end - start,
+    }
+}
+
+impl CSRRowView {
+    /// Number of non-zeros in this row.
+    pub fn len(&self) -> i64 {
+        return self.end
+    }
+
+    /// Get column index at position idx within row.
+    pub fn col(&self, idx: i64) -> i64 {
+        return self.col_indices[idx as usize]
+    }
+
+    /// Get value at position idx within row.
+    pub fn val(&self, idx: i64) -> f64 {
+        return self.values[idx as usize]
+    }
+}
+
+// ============================================================================
+// SPARSE MATRIX-MATRIX OPERATIONS
+// ============================================================================
+
+/// Compute C = A * B where A is sparse (CSR) and B is dense.
+///
+/// Result is a dense matrix.
+pub fn csr_dense_matmul(A: &CSRMatrix, B: &[f64], B_cols: i64, C: &![f64]) {
+    let m = A.nrows
+    let n = A.ncols
+    let p = B_cols
+
+    if B.len() as i64 != n * p {
+        panic("B dimensions don't match A.ncols")
+    }
+    if C.len() as i64 != m * p {
+        panic("C dimensions don't match output size")
+    }
+
+    // Zero output
+    var i: i64 = 0
+    while i < m * p {
+        C[i as usize] = 0.0
+        i = i + 1
+    }
+
+    // SpMM: C[i,j] = sum_k A[i,k] * B[k,j]
+    var row: i64 = 0
+    while row < m {
+        let row_start = A.row_ptrs[row as usize]
+        let row_end = A.row_ptrs[(row + 1) as usize]
+
+        var idx = row_start
+        while idx < row_end {
+            let k = A.col_indices[idx as usize]
+            let a_val = A.values[idx as usize]
+
+            // Add a_val * B[k, :] to C[row, :]
+            var j: i64 = 0
+            while j < p {
+                let c_idx = row * p + j
+                let b_idx = k * p + j
+                C[c_idx as usize] = C[c_idx as usize] + a_val * B[b_idx as usize]
+                j = j + 1
+            }
+
+            idx = idx + 1
+        }
+
+        row = row + 1
+    }
+}
+
+// ============================================================================
+// SYMMETRY AND STRUCTURE
+// ============================================================================
+
+/// Check if matrix is structurally symmetric (same sparsity pattern).
+pub fn csr_is_symmetric_structure(A: &CSRMatrix) -> bool {
+    if !A.is_square() {
+        return false
+    }
+
+    // For each (i,j) check if (j,i) exists
+    var row: i64 = 0
+    while row < A.nrows {
+        let row_start = A.row_ptrs[row as usize]
+        let row_end = A.row_ptrs[(row + 1) as usize]
+
+        var idx = row_start
+        while idx < row_end {
+            let col = A.col_indices[idx as usize]
+
+            // Check if (col, row) exists
+            let col_row_start = A.row_ptrs[col as usize]
+            let col_row_end = A.row_ptrs[(col + 1) as usize]
+
+            var found = false
+            var jdx = col_row_start
+            while jdx < col_row_end {
+                if A.col_indices[jdx as usize] == row {
+                    found = true
+                    break
+                }
+                jdx = jdx + 1
+            }
+
+            if !found {
+                return false
+            }
+
+            idx = idx + 1
+        }
+
+        row = row + 1
+    }
+
+    return true
+}
+
+/// Check if matrix is numerically symmetric (A[i,j] == A[j,i]).
+pub fn csr_is_symmetric(A: &CSRMatrix, tol: f64) -> bool {
+    if !A.is_square() {
+        return false
+    }
+
+    var row: i64 = 0
+    while row < A.nrows {
+        let row_start = A.row_ptrs[row as usize]
+        let row_end = A.row_ptrs[(row + 1) as usize]
+
+        var idx = row_start
+        while idx < row_end {
+            let col = A.col_indices[idx as usize]
+            let val = A.values[idx as usize]
+
+            // Get A[col, row]
+            let transpose_val = A.get(col, row)
+
+            if abs(val - transpose_val) > tol {
+                return false
+            }
+
+            idx = idx + 1
+        }
+
+        row = row + 1
+    }
+
+    return true
+}
+
+// ============================================================================
+// TESTS
+// ============================================================================
+
+fn test_csr_basic() -> bool {
+    // Test matrix:
+    // [ 1  0  2 ]
+    // [ 0  0  3 ]
+    // [ 4  5  6 ]
+    let values: [f64; 6] = [1.0, 2.0, 3.0, 4.0, 5.0, 6.0]
+    let col_indices: [i64; 6] = [0, 2, 2, 0, 1, 2]
+    let row_ptrs: [i64; 4] = [0, 2, 3, 6]
+
+    let A = csr_from_raw(&values, &col_indices, &row_ptrs, 3, 3)
+
+    // Check dimensions
+    if A.nrows() != 3 { return false }
+    if A.ncols() != 3 { return false }
+    if A.nnz() != 6 { return false }
+
+    // Check element access
+    if abs(A.get(0, 0) - 1.0) > 1e-10 { return false }
+    if abs(A.get(0, 1) - 0.0) > 1e-10 { return false }
+    if abs(A.get(0, 2) - 2.0) > 1e-10 { return false }
+    if abs(A.get(1, 2) - 3.0) > 1e-10 { return false }
+    if abs(A.get(2, 0) - 4.0) > 1e-10 { return false }
+    if abs(A.get(2, 1) - 5.0) > 1e-10 { return false }
+    if abs(A.get(2, 2) - 6.0) > 1e-10 { return false }
+
+    return true
+}
+
+fn test_csr_matvec() -> bool {
+    // A = [[1, 0, 2], [0, 0, 3], [4, 5, 6]]
+    // x = [1, 2, 3]
+    // y = A*x = [1*1 + 2*3, 3*3, 4*1 + 5*2 + 6*3] = [7, 9, 32]
+
+    let values: [f64; 6] = [1.0, 2.0, 3.0, 4.0, 5.0, 6.0]
+    let col_indices: [i64; 6] = [0, 2, 2, 0, 1, 2]
+    let row_ptrs: [i64; 4] = [0, 2, 3, 6]
+
+    let A = csr_from_raw(&values, &col_indices, &row_ptrs, 3, 3)
+
+    let x: [f64; 3] = [1.0, 2.0, 3.0]
+    var y: [f64; 3] = [0.0, 0.0, 0.0]
+
+    csr_matvec(&A, &x, &!y)
+
+    if abs(y[0] - 7.0) > 1e-10 { return false }
+    if abs(y[1] - 9.0) > 1e-10 { return false }
+    if abs(y[2] - 32.0) > 1e-10 { return false }
+
+    return true
+}
+
+fn test_csr_norms() -> bool {
+    // A = [[1, 2], [3, 4]]
+    // Frobenius norm = sqrt(1 + 4 + 9 + 16) = sqrt(30) ≈ 5.477
+    // Infinity norm = max(1+2, 3+4) = 7
+
+    let values: [f64; 4] = [1.0, 2.0, 3.0, 4.0]
+    let col_indices: [i64; 4] = [0, 1, 0, 1]
+    let row_ptrs: [i64; 3] = [0, 2, 4]
+
+    let A = csr_from_raw(&values, &col_indices, &row_ptrs, 2, 2)
+
+    let frob = csr_frobenius_norm(&A)
+    if abs(frob - sqrt(30.0)) > 1e-10 { return false }
+
+    let inf = csr_infinity_norm(&A)
+    if abs(inf - 7.0) > 1e-10 { return false }
+
+    return true
+}
+
+fn main() -> i32 {
+    println("=== CSR Sparse Matrix Tests ===")
+    println("")
+
+    var failed = false
+
+    println("Test 1: Basic CSR operations")
+    if test_csr_basic() {
+        println("  PASSED")
+    } else {
+        println("  FAILED")
+        failed = true
+    }
+
+    println("Test 2: CSR matrix-vector multiply")
+    if test_csr_matvec() {
+        println("  PASSED")
+    } else {
+        println("  FAILED")
+        failed = true
+    }
+
+    println("Test 3: CSR norms")
+    if test_csr_norms() {
+        println("  PASSED")
+    } else {
+        println("  FAILED")
+        failed = true
+    }
+
+    println("")
+    if failed {
+        println("SOME TESTS FAILED")
+        return 1
+    } else {
+        println("ALL TESTS PASSED")
+        return 0
+    }
+}
