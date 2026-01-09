@@ -4828,6 +4828,8 @@ mod tests {
     #[test]
     fn test_simple_function_emission() {
         let mut module = SirModule::new("test");
+        // Force X86_64 target since AArch64 emitter is not yet implemented
+        module.target.arch = Architecture::X86_64;
 
         module.create_function("empty", vec![], super::super::types::SirType::Void);
 
