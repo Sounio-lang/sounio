@@ -183,9 +183,13 @@ impl MmapStore {
 
             let mut vector_bytes = vec![0u8; embedding_size];
             if file.read_exact(&mut vector_bytes).is_ok() {
+                // Use chunks_exact to ensure each chunk is exactly 4 bytes
                 let vector: Vec<f32> = vector_bytes
-                    .chunks(4)
-                    .map(|chunk| f32::from_le_bytes(chunk.try_into().unwrap()))
+                    .chunks_exact(4)
+                    .map(|chunk| {
+                        // Safe: chunks_exact guarantees 4-byte chunks
+                        f32::from_le_bytes(chunk.try_into().expect("chunk is exactly 4 bytes"))
+                    })
                     .collect();
 
                 let iri = IRI::new(&iri_str);
@@ -320,12 +324,33 @@ impl Header {
             return Err(EmbeddingError::InvalidFormat("Header too short".into()));
         }
 
+        // Safe: we verified bytes.len() >= HEADER_SIZE (28) above
         Ok(Self {
-            magic: u32::from_le_bytes(bytes[0..4].try_into().unwrap()),
-            version: u32::from_le_bytes(bytes[4..8].try_into().unwrap()),
-            dimensions: u32::from_le_bytes(bytes[8..12].try_into().unwrap()),
-            count: u64::from_le_bytes(bytes[12..20].try_into().unwrap()),
-            index_offset: u64::from_le_bytes(bytes[20..28].try_into().unwrap()),
+            magic: u32::from_le_bytes(
+                bytes[0..4]
+                    .try_into()
+                    .expect("slice is exactly 4 bytes"),
+            ),
+            version: u32::from_le_bytes(
+                bytes[4..8]
+                    .try_into()
+                    .expect("slice is exactly 4 bytes"),
+            ),
+            dimensions: u32::from_le_bytes(
+                bytes[8..12]
+                    .try_into()
+                    .expect("slice is exactly 4 bytes"),
+            ),
+            count: u64::from_le_bytes(
+                bytes[12..20]
+                    .try_into()
+                    .expect("slice is exactly 8 bytes"),
+            ),
+            index_offset: u64::from_le_bytes(
+                bytes[20..28]
+                    .try_into()
+                    .expect("slice is exactly 8 bytes"),
+            ),
         })
     }
 }

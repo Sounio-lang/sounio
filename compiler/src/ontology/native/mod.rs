@@ -168,7 +168,10 @@ impl NativeOntologyRegistry {
             let ont = NativeOntology::load(&path)?;
             self.ontologies.insert(id.to_string(), ont);
         }
-        Ok(self.ontologies.get(id).unwrap())
+        // Safe: we just inserted if not present, so get() will always succeed
+        self.ontologies
+            .get(id)
+            .ok_or_else(|| OntologyError::OntologyNotAvailable(id.to_string()))
     }
 
     /// Check if an ontology is loaded

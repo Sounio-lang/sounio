@@ -94,9 +94,10 @@ impl CacheMetadata {
         target: &str,
         entry_type: CacheEntryType,
     ) -> Self {
+        // Use unwrap_or for edge case of system time before UNIX_EPOCH
         let now = SystemTime::now()
             .duration_since(SystemTime::UNIX_EPOCH)
-            .unwrap()
+            .unwrap_or(std::time::Duration::ZERO)
             .as_secs();
 
         CacheMetadata {
@@ -225,7 +226,10 @@ impl CacheClient {
         // Check local first
         if let Some(ref local) = self.local_cache {
             if let Some(data) = local.get(key)? {
-                self.stats.lock().unwrap().hits += 1;
+                // Use unwrap_or_else to recover from poisoned mutex - stats are not critical
+                if let Ok(mut stats) = self.stats.lock() {
+                    stats.hits += 1;
+                }
                 return Ok(Some(data));
             }
         }
@@ -249,7 +253,10 @@ impl CacheClient {
         let response = request.send().await.map_err(CacheError::Http)?;
 
         if response.status() == reqwest::StatusCode::NOT_FOUND {
-            self.stats.lock().unwrap().misses += 1;
+            // Stats update is best-effort - don't panic if mutex is poisoned
+            if let Ok(mut stats) = self.stats.lock() {
+                stats.misses += 1;
+            }
             return Ok(None);
         }
 
@@ -265,9 +272,11 @@ impl CacheClient {
             let _ = local.store(key, &data);
         }
 
-        let mut stats = self.stats.lock().unwrap();
-        stats.hits += 1;
-        stats.bytes_downloaded += data.len() as u64;
+        // Stats update is best-effort - don't panic if mutex is poisoned
+        if let Ok(mut stats) = self.stats.lock() {
+            stats.hits += 1;
+            stats.bytes_downloaded += data.len() as u64;
+        }
 
         Ok(Some(data))
     }
@@ -342,13 +351,18 @@ impl CacheClient {
         let response = request.send().await.map_err(CacheError::Http)?;
 
         if !response.status().is_success() {
-            self.stats.lock().unwrap().store_failures += 1;
+            // Stats update is best-effort - don't panic if mutex is poisoned
+            if let Ok(mut stats) = self.stats.lock() {
+                stats.store_failures += 1;
+            }
             return Err(CacheError::Server(response.status().to_string()));
         }
 
-        let mut stats = self.stats.lock().unwrap();
-        stats.stores += 1;
-        stats.bytes_uploaded += body.len() as u64;
+        // Stats update is best-effort - don't panic if mutex is poisoned
+        if let Ok(mut stats) = self.stats.lock() {
+            stats.stores += 1;
+            stats.bytes_uploaded += body.len() as u64;
+        }
 
         Ok(())
     }
@@ -418,13 +432,25 @@ impl CacheClient {
     }
 
     /// Get cache statistics
+    ///
+    /// Returns current statistics. If the stats mutex is poisoned (very rare),
+    /// returns default empty statistics.
     pub fn stats(&self) -> CacheStats {
-        self.stats.lock().unwrap().clone()
+        self.stats
+            .lock()
+            .map(|s| s.clone())
+            .unwrap_or_default()
     }
 
     /// Get hit rate
+    ///
+    /// Returns the cache hit rate (0.0 to 1.0). Returns 0.0 if no requests
+    /// have been made or if statistics are unavailable.
     pub fn hit_rate(&self) -> f64 {
-        let stats = self.stats.lock().unwrap();
+        let stats = match self.stats.lock() {
+            Ok(s) => s,
+            Err(_) => return 0.0, // Poisoned mutex - return safe default
+        };
         let total = stats.hits + stats.misses;
         if total == 0 {
             0.0
@@ -471,17 +497,26 @@ impl LocalCache {
 
     /// Check if entry exists
     pub fn contains(&self, key: &str) -> bool {
-        self.index.lock().unwrap().contains_key(key)
+        self.index
+            .lock()
+            .map(|idx| idx.contains_key(key))
+            .unwrap_or(false) // Poisoned mutex - assume not present
     }
 
     /// Get entry
     pub fn get(&self, key: &str) -> Result<Option<Vec<u8>>, CacheError> {
-        let mut index = self.index.lock().unwrap();
+        let mut index = self.index.lock().map_err(|_| {
+            CacheError::Io(std::io::Error::new(
+                std::io::ErrorKind::Other,
+                "Local cache index mutex poisoned",
+            ))
+        })?;
 
         if let Some(entry) = index.get_mut(key) {
+            // Use unwrap_or for edge case of system time before UNIX_EPOCH
             entry.accessed_at = SystemTime::now()
                 .duration_since(SystemTime::UNIX_EPOCH)
-                .unwrap()
+                .unwrap_or(std::time::Duration::ZERO)
                 .as_secs();
 
             let data = std::fs::read(&entry.path).map_err(CacheError::Io)?;
@@ -510,15 +545,21 @@ impl LocalCache {
         std::fs::write(&path, data).map_err(CacheError::Io)?;
 
         // Update index
-        let mut index = self.index.lock().unwrap();
+        let mut index = self.index.lock().map_err(|_| {
+            CacheError::Io(std::io::Error::new(
+                std::io::ErrorKind::Other,
+                "Local cache index mutex poisoned",
+            ))
+        })?;
         index.insert(
             key.to_string(),
             LocalCacheEntry {
                 path,
                 size: data.len(),
+                // Use unwrap_or for edge case of system time before UNIX_EPOCH
                 accessed_at: SystemTime::now()
                     .duration_since(SystemTime::UNIX_EPOCH)
-                    .unwrap()
+                    .unwrap_or(std::time::Duration::ZERO)
                     .as_secs(),
             },
         );
@@ -530,7 +571,12 @@ impl LocalCache {
 
     /// Delete entry
     pub fn delete(&self, key: &str) -> Result<bool, CacheError> {
-        let mut index = self.index.lock().unwrap();
+        let mut index = self.index.lock().map_err(|_| {
+            CacheError::Io(std::io::Error::new(
+                std::io::ErrorKind::Other,
+                "Local cache index mutex poisoned",
+            ))
+        })?;
 
         if let Some(entry) = index.remove(key) {
             let _ = std::fs::remove_file(&entry.path);
@@ -543,7 +589,12 @@ impl LocalCache {
 
     /// Evict entries to free space (LRU)
     fn evict(&self, needed: usize) -> Result<(), CacheError> {
-        let mut index = self.index.lock().unwrap();
+        let mut index = self.index.lock().map_err(|_| {
+            CacheError::Io(std::io::Error::new(
+                std::io::ErrorKind::Other,
+                "Local cache index mutex poisoned",
+            ))
+        })?;
 
         // Sort by access time
         let mut entries: Vec<_> = index
@@ -575,7 +626,7 @@ impl LocalCache {
 
     /// Get entry count
     pub fn len(&self) -> usize {
-        self.index.lock().unwrap().len()
+        self.index.lock().map(|idx| idx.len()).unwrap_or(0)
     }
 
     /// Check if empty
@@ -689,11 +740,11 @@ impl CacheServer {
                     .bytes_out
                     .fetch_add(data.len() as u64, Ordering::Relaxed);
 
-                // Update access time
+                // Update access time - use unwrap_or for edge case of system time before UNIX_EPOCH
                 if let Some(meta) = server.index.write().await.get_mut(&key) {
                     meta.accessed_at = SystemTime::now()
                         .duration_since(SystemTime::UNIX_EPOCH)
-                        .unwrap()
+                        .unwrap_or(std::time::Duration::ZERO)
                         .as_secs();
                     meta.access_count += 1;
                 }

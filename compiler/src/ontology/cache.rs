@@ -429,11 +429,10 @@ impl OntologyCache {
 
     /// Evict expired entries from all caches
     pub fn evict_expired(&mut self) {
-        if self.config.ttl.is_none() {
+        // Return early if no TTL is configured
+        let Some(ttl) = self.config.ttl else {
             return;
-        }
-
-        let ttl = self.config.ttl.unwrap();
+        };
 
         // Helper to collect expired keys
         fn collect_expired(cache: &LruCache<String, CachedTerm>, ttl: Duration) -> Vec<String> {

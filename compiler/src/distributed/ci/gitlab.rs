@@ -386,8 +386,17 @@ impl PipelineGenerator {
     }
 
     /// Generate to YAML string
+    ///
+    /// Panics only if YAML serialization fails, which would indicate a bug
+    /// in the Pipeline structure (all fields should be serializable).
     pub fn to_yaml(&self, pipeline: &Pipeline) -> String {
-        serde_yaml::to_string(pipeline).unwrap()
+        serde_yaml::to_string(pipeline)
+            .expect("Pipeline YAML serialization failed - this is a bug")
+    }
+
+    /// Try to generate YAML with error handling
+    pub fn try_to_yaml(&self, pipeline: &Pipeline) -> Result<String, serde_yaml::Error> {
+        serde_yaml::to_string(pipeline)
     }
 
     /// Write pipeline to file

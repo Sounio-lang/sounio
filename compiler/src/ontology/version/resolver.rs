@@ -433,13 +433,18 @@ impl VersionResolver {
         matching.sort_by(|a, b| a.compare(b).unwrap_or(std::cmp::Ordering::Equal));
 
         // Return latest or earliest depending on preference
+        // Safe: matching is guaranteed non-empty due to the check above
         let best = if self.prefer_latest {
             matching.last()
         } else {
             matching.first()
-        };
+        }
+        .ok_or_else(|| ResolutionError::NoSatisfyingVersion {
+            ontology: ontology.to_string(),
+            constraint: constraint.to_string(),
+        })?;
 
-        Ok((*best.unwrap()).clone())
+        Ok((*best).clone())
     }
 
     /// Resolve multiple constraints (one per ontology)
@@ -483,11 +488,19 @@ impl VersionResolver {
             // Sort and select
             matching.sort_by(|a, b| a.compare(b).unwrap_or(std::cmp::Ordering::Equal));
 
+            // Safe: matching is guaranteed non-empty due to the check above
             let selected = if self.prefer_latest {
-                matching.last().unwrap()
+                matching.last()
             } else {
-                matching.first().unwrap()
-            };
+                matching.first()
+            }
+            .ok_or_else(|| ResolutionError::NoSatisfyingVersion {
+                ontology: ontology.clone(),
+                constraint: onto_constraints
+                    .first()
+                    .map(|c| c.to_string())
+                    .unwrap_or_default(),
+            })?;
 
             // Warn if not exact match
             if let Some(min) = onto_constraints.iter().find_map(|c| c.minimum())

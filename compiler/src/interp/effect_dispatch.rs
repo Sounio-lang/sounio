@@ -646,7 +646,10 @@ impl EffectContext {
             // during the call
             let handler_fn_ptr: *const dyn Fn(&[Value], &mut HandlerState) -> Result<Value, EffectError> = {
                 let handler = &self.handler_stack[idx];
-                let case = handler.find_case(operation).unwrap();
+                // SAFETY: find_case must succeed since we checked is_some() above when finding handler_idx
+                let case = handler.find_case(operation).expect(
+                    "internal error: handler case disappeared after find_map check"
+                );
                 &*case.handler_fn as *const _
             };
 
@@ -688,7 +691,10 @@ impl EffectContext {
             if let Some(idx) = handler_idx {
                 let handler_fn_ptr: *const dyn Fn(&[Value], &mut HandlerState) -> Result<Value, EffectError> = {
                     let handler = &self.handler_stack[idx];
-                    let case = handler.find_case(operation).unwrap();
+                    // SAFETY: find_case must succeed since we checked is_some() above when finding handler_idx
+                    let case = handler.find_case(operation).expect(
+                        "internal error: handler case disappeared after find_map check"
+                    );
                     &*case.handler_fn as *const _
                 };
                 return unsafe { (*handler_fn_ptr)(&args, &mut self.state) };
@@ -829,7 +835,10 @@ impl EffectContext {
             // Get pointer to handler function to avoid holding borrow on handler_stack
             let handler_fn_ptr: *const dyn Fn(&[Value], &mut HandlerState) -> Result<Value, EffectError> = {
                 let handler = &self.handler_stack[idx];
-                let case = handler.find_case(operation).unwrap();
+                // SAFETY: find_case must succeed since we checked is_some() above when finding handler_idx
+                let case = handler.find_case(operation).expect(
+                    "internal error: handler case disappeared after find_map check"
+                );
                 &*case.handler_fn as *const _
             };
 
@@ -870,7 +879,10 @@ impl EffectContext {
             if let Some(idx) = handler_idx {
                 let handler_fn_ptr: *const dyn Fn(&[Value], &mut HandlerState) -> Result<Value, EffectError> = {
                     let handler = &self.handler_stack[idx];
-                    let case = handler.find_case(operation).unwrap();
+                    // SAFETY: find_case must succeed since we checked is_some() above when finding handler_idx
+                    let case = handler.find_case(operation).expect(
+                        "internal error: handler case disappeared after find_map check"
+                    );
                     &*case.handler_fn as *const _
                 };
                 let result = unsafe { (*handler_fn_ptr)(&args, &mut self.state) };

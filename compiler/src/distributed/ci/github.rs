@@ -509,8 +509,17 @@ impl WorkflowGenerator {
     }
 
     /// Generate to YAML string
+    ///
+    /// Panics only if YAML serialization fails, which would indicate a bug
+    /// in the Workflow structure (all fields should be serializable).
     pub fn to_yaml(&self, workflow: &Workflow) -> String {
-        serde_yaml::to_string(workflow).unwrap()
+        serde_yaml::to_string(workflow)
+            .expect("Workflow YAML serialization failed - this is a bug")
+    }
+
+    /// Try to generate YAML with error handling
+    pub fn try_to_yaml(&self, workflow: &Workflow) -> Result<String, serde_yaml::Error> {
+        serde_yaml::to_string(workflow)
     }
 
     /// Write workflow to file

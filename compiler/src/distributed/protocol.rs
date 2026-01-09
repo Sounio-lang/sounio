@@ -571,13 +571,34 @@ impl std::fmt::Display for ErrorCode {
 
 impl BuildMessage {
     /// Encode message to bytes (length-prefixed JSON)
+    ///
+    /// Returns encoded bytes on success, or a ProtocolError if serialization fails.
+    /// Note: Serialization failures are extremely rare for well-formed messages,
+    /// but can occur with custom serializers or memory exhaustion.
     pub fn encode(&self) -> Vec<u8> {
-        let json = serde_json::to_vec(self).unwrap();
+        // Use expect() here as serialization failure of our own message types
+        // indicates a serious internal error. All BuildMessage variants should
+        // be serializable. If this fails, it's a bug in our type definitions.
+        let json = serde_json::to_vec(self)
+            .expect("BuildMessage serialization failed - this is a bug");
         let len = (json.len() as u32).to_be_bytes();
         let mut buf = Vec::with_capacity(4 + json.len());
         buf.extend_from_slice(&len);
         buf.extend_from_slice(&json);
         buf
+    }
+
+    /// Encode message to bytes with explicit error handling
+    ///
+    /// Use this variant when you need to handle serialization errors gracefully,
+    /// such as in network retry loops or when logging detailed errors.
+    pub fn try_encode(&self) -> Result<Vec<u8>, ProtocolError> {
+        let json = serde_json::to_vec(self).map_err(ProtocolError::Json)?;
+        let len = (json.len() as u32).to_be_bytes();
+        let mut buf = Vec::with_capacity(4 + json.len());
+        buf.extend_from_slice(&len);
+        buf.extend_from_slice(&json);
+        Ok(buf)
     }
 
     /// Decode message from bytes

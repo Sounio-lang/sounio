@@ -528,8 +528,21 @@ impl BuildProvenance {
     }
 
     /// Serialize to JSON
+    ///
+    /// Returns the provenance as a pretty-printed JSON string.
+    /// Panics only if serialization fails, which would indicate a bug
+    /// in the BuildProvenance structure (all fields should be serializable).
     pub fn to_json(&self) -> String {
-        serde_json::to_string_pretty(self).unwrap()
+        serde_json::to_string_pretty(self)
+            .expect("BuildProvenance serialization failed - this is a bug")
+    }
+
+    /// Try to serialize to JSON with error handling
+    ///
+    /// Returns an error if serialization fails, which is useful for
+    /// contexts where panicking is not acceptable.
+    pub fn try_to_json(&self) -> Result<String, serde_json::Error> {
+        serde_json::to_string_pretty(self)
     }
 
     /// Write to file
@@ -557,8 +570,9 @@ fn format_rfc3339(time: SystemTime) -> String {
     let secs = duration.as_secs();
 
     // Simple ISO 8601 format
+    // Use from_timestamp which returns Option, with fallback to UNIX epoch (1970-01-01T00:00:00Z)
     let datetime = chrono::DateTime::from_timestamp(secs as i64, 0)
-        .unwrap_or_else(|| chrono::DateTime::from_timestamp(0, 0).unwrap());
+        .unwrap_or(chrono::DateTime::UNIX_EPOCH);
     datetime.format("%Y-%m-%dT%H:%M:%SZ").to_string()
 }
 

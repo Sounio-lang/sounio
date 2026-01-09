@@ -237,8 +237,14 @@ impl CausalModel {
         outcome: &str,
         confounders: &[String],
     ) -> Result<f64> {
-        let treatment_data = self.data.get(treatment).unwrap();
-        let outcome_data = self.data.get(outcome).unwrap();
+        let treatment_data = self
+            .data
+            .get(treatment)
+            .ok_or_else(|| miette::miette!("No data for treatment variable: {}", treatment))?;
+        let outcome_data = self
+            .data
+            .get(outcome)
+            .ok_or_else(|| miette::miette!("No data for outcome variable: {}", outcome))?;
         let n = treatment_data.len();
 
         // For simplicity, we use a single confounder (the first one)

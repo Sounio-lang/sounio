@@ -210,15 +210,24 @@ impl StringInterner {
     pub fn intern(&self, s: &str) -> InternedString {
         // Check if already interned
         {
-            let lookup = self.lookup.read().unwrap();
+            let lookup = self
+                .lookup
+                .read()
+                .expect("StringInterner lookup lock poisoned");
             if let Some(&handle) = lookup.get(s) {
                 return handle;
             }
         }
 
         // Need to intern - acquire write locks
-        let mut strings = self.strings.write().unwrap();
-        let mut lookup = self.lookup.write().unwrap();
+        let mut strings = self
+            .strings
+            .write()
+            .expect("StringInterner strings lock poisoned");
+        let mut lookup = self
+            .lookup
+            .write()
+            .expect("StringInterner lookup lock poisoned");
 
         // Double-check after acquiring write lock
         if let Some(&handle) = lookup.get(s) {
@@ -230,7 +239,10 @@ impl StringInterner {
             .fetch_add(original_len, Ordering::Relaxed);
 
         let (prefix_id, stored_string) = if self.compression_enabled {
-            let mut prefix_table = self.prefix_table.write().unwrap();
+            let mut prefix_table = self
+                .prefix_table
+                .write()
+                .expect("StringInterner prefix_table lock poisoned");
             if let Some((id, prefix_len)) = prefix_table.find_prefix(s) {
                 let suffix = &s[prefix_len..];
                 prefix_table.record_usage(id, suffix.len());
@@ -257,13 +269,19 @@ impl StringInterner {
 
     /// Resolve an interned string handle to the original string
     pub fn resolve(&self, handle: InternedString) -> Option<String> {
-        let strings = self.strings.read().unwrap();
+        let strings = self
+            .strings
+            .read()
+            .expect("StringInterner strings lock poisoned");
         let suffix = strings.get(handle.index as usize)?;
 
         if handle.prefix_id == 0 {
             Some(suffix.clone())
         } else {
-            let prefix_table = self.prefix_table.read().unwrap();
+            let prefix_table = self
+                .prefix_table
+                .read()
+                .expect("StringInterner prefix_table lock poisoned");
             let prefix = prefix_table.get_prefix(handle.prefix_id)?;
             Some(format!("{}{}", prefix, suffix))
         }
@@ -271,7 +289,10 @@ impl StringInterner {
 
     /// Get the number of interned strings
     pub fn len(&self) -> usize {
-        self.strings.read().unwrap().len()
+        self.strings
+            .read()
+            .expect("StringInterner strings lock poisoned")
+            .len()
     }
 
     /// Check if interner is empty
@@ -299,14 +320,17 @@ impl StringInterner {
 
     /// Register a new prefix for compression
     pub fn register_prefix(&self, prefix: &str) -> u16 {
-        self.prefix_table.write().unwrap().register_prefix(prefix)
+        self.prefix_table
+            .write()
+            .expect("StringInterner prefix_table lock poisoned")
+            .register_prefix(prefix)
     }
 
     /// Get prefix table statistics
     pub fn prefix_stats(&self) -> Vec<(String, usize, usize)> {
         self.prefix_table
             .read()
-            .unwrap()
+            .expect("StringInterner prefix_table lock poisoned")
             .stats()
             .into_iter()
             .map(|(p, c, b)| (p.to_string(), c, b))
@@ -315,7 +339,10 @@ impl StringInterner {
 
     /// Analyze strings and suggest new prefixes
     pub fn suggest_prefixes(&self, min_frequency: usize) -> Vec<(String, usize)> {
-        let lookup = self.lookup.read().unwrap();
+        let lookup = self
+            .lookup
+            .read()
+            .expect("StringInterner lookup lock poisoned");
         let mut prefix_counts: HashMap<String, usize> = HashMap::new();
 
         // Count potential prefixes (up to last / or #)

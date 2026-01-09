@@ -48,7 +48,8 @@ pub struct ServerConfig {
 impl Default for ServerConfig {
     fn default() -> Self {
         ServerConfig {
-            address: "0.0.0.0:9876".parse().unwrap(),
+            // Safe: compile-time constant, guaranteed to be valid socket address
+            address: "0.0.0.0:9876".parse().expect("valid default address"),
             max_connections: 100,
             max_queue_size: 1000,
             job_timeout: Duration::from_secs(3600),

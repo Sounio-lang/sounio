@@ -504,15 +504,21 @@ impl BuildClient {
     }
 
     /// Send heartbeat
+    ///
+    /// Sends a ping message to the server to check connectivity.
+    /// Returns the round-trip time measurement.
     pub async fn ping(&self) -> Result<Duration, ClientError> {
         let conn = self.connection.lock().await;
         let sender = conn.as_ref().ok_or(ClientError::Disconnected)?.tx.clone();
         drop(conn);
 
         let start = Instant::now();
+        // Use unwrap_or(0) for the extremely rare case where system time is before UNIX_EPOCH
+        // (e.g., misconfigured system clock). The timestamp is only used for debugging/logging,
+        // so a fallback of 0 is acceptable and won't affect protocol correctness.
         let timestamp = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
+            .unwrap_or(std::time::Duration::ZERO)
             .as_millis() as u64;
 
         sender

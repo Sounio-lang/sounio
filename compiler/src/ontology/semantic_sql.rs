@@ -572,7 +572,10 @@ impl SemanticSqlManager {
             self.stores.insert(ontology_id.to_string(), store);
         }
 
-        Ok(self.stores.get(ontology_id).unwrap())
+        // Safe: we just inserted if not present, so get() will always succeed
+        self.stores
+            .get(ontology_id)
+            .ok_or_else(|| OntologyError::OntologyNotAvailable(ontology_id.to_string()))
     }
 
     /// List available ontologies

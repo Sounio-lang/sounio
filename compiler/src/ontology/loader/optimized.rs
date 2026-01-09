@@ -128,8 +128,14 @@ impl IRIInterner {
         }
 
         // Intern new string
-        let mut strings = self.strings.write().unwrap();
-        let mut indices = self.indices.write().unwrap();
+        let mut strings = self
+            .strings
+            .write()
+            .expect("IRIInterner strings lock poisoned");
+        let mut indices = self
+            .indices
+            .write()
+            .expect("IRIInterner indices lock poisoned");
 
         // Double-check after acquiring write lock
         if let Some(&idx) = indices.get(s) {

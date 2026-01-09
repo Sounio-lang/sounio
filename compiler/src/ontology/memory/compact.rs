@@ -365,7 +365,10 @@ impl StringPool {
         }
 
         // Slow path: insert new string
-        let mut strings = self.strings.write().unwrap();
+        let mut strings = self
+            .strings
+            .write()
+            .expect("StringPool write lock poisoned");
         if let Some(interned) = strings.get(s) {
             return Arc::clone(interned);
         }

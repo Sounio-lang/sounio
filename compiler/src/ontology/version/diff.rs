@@ -235,7 +235,10 @@ impl OntologyDiff {
 
         // Find added terms
         for id in new_ids.difference(&old_ids) {
-            let term = new.get_term(id).unwrap();
+            // Defensive: skip if term not found (should not happen with correct snapshots)
+            let Some(term) = new.get_term(id) else {
+                continue;
+            };
             changes.push(OntologyChange {
                 term_id: id.to_string(),
                 kind: ChangeKind::Added,
@@ -252,7 +255,10 @@ impl OntologyDiff {
 
         // Find removed terms
         for id in old_ids.difference(&new_ids) {
-            let term = old.get_term(id).unwrap();
+            // Defensive: skip if term not found (should not happen with correct snapshots)
+            let Some(term) = old.get_term(id) else {
+                continue;
+            };
             changes.push(OntologyChange {
                 term_id: id.to_string(),
                 kind: ChangeKind::Removed,
@@ -270,8 +276,10 @@ impl OntologyDiff {
 
         // Find modified terms
         for id in old_ids.intersection(&new_ids) {
-            let old_term = old.get_term(id).unwrap();
-            let new_term = new.get_term(id).unwrap();
+            // Defensive: skip if either term not found (should not happen with correct snapshots)
+            let (Some(old_term), Some(new_term)) = (old.get_term(id), new.get_term(id)) else {
+                continue;
+            };
 
             let (details, is_breaking) = Self::diff_terms(old_term, new_term);
 
