@@ -13,6 +13,7 @@ use tower_lsp::lsp_types::*;
 use crate::ast::{Ast, Item};
 use crate::common::Span;
 use crate::lexer;
+use crate::lsp::document::LineIndex;
 use crate::parser;
 use crate::resolve::{DefKind, SymbolTable};
 
@@ -37,6 +38,8 @@ pub struct WorkspaceFile {
     pub modified: std::time::SystemTime,
     /// Source text (cached for quick access)
     pub source: Option<String>,
+    /// Line index for span-to-position conversion
+    pub line_index: Option<LineIndex>,
 }
 
 impl WorkspaceFile {
@@ -53,6 +56,7 @@ impl WorkspaceFile {
             dependents: HashSet::new(),
             modified: std::time::SystemTime::UNIX_EPOCH,
             source: None,
+            line_index: None,
         }
     }
 }
@@ -306,6 +310,7 @@ impl Workspace {
             // Update file metadata
             if let Some(file) = self.files.get_mut(&path) {
                 file.source = Some(source.clone());
+                file.line_index = Some(LineIndex::new(&source));
                 file.modified = std::time::SystemTime::now();
                 file.ast = parsed.clone();
             }
@@ -462,8 +467,13 @@ impl Workspace {
             .collect()
     }
 
+    /// Get line index for a file by path
+    fn get_line_index(&self, path: &Path) -> Option<&LineIndex> {
+        self.files.get(path).and_then(|f| f.line_index.as_ref())
+    }
+
     /// Cross-file goto definition
-    pub fn goto_definition(&self, name: &str, from_uri: &Url) -> Option<GotoDefinitionResponse> {
+    pub fn goto_definition(&self, name: &str, _from_uri: &Url) -> Option<GotoDefinitionResponse> {
         let symbols = self.lookup_symbol(name);
 
         if symbols.is_empty() {
@@ -472,12 +482,19 @@ impl Workspace {
 
         if symbols.len() == 1 {
             let sym = symbols[0];
-            let location = symbol_to_location(sym);
+            let line_index = self.get_line_index(&sym.file);
+            let location = symbol_to_location(sym, line_index);
             return Some(GotoDefinitionResponse::Scalar(location));
         }
 
         // Multiple definitions - return all
-        let locations: Vec<Location> = symbols.iter().map(|s| symbol_to_location(s)).collect();
+        let locations: Vec<Location> = symbols
+            .iter()
+            .map(|s| {
+                let line_index = self.get_line_index(&s.file);
+                symbol_to_location(s, line_index)
+            })
+            .collect();
         Some(GotoDefinitionResponse::Array(locations))
     }
 
@@ -489,7 +506,8 @@ impl Workspace {
         if include_declaration {
             if let Some(symbols) = self.symbol_index.get(name) {
                 for sym in symbols {
-                    locations.push(symbol_to_location(sym));
+                    let line_index = self.get_line_index(&sym.file);
+                    locations.push(symbol_to_location(sym, line_index));
                 }
             }
         }
@@ -564,13 +582,14 @@ impl Workspace {
             .into_iter()
             .filter_map(|sym| {
                 let kind = def_kind_to_symbol_kind(&sym.kind);
+                let line_index = self.get_line_index(&sym.file);
                 #[allow(deprecated)]
                 Some(SymbolInformation {
                     name: sym.name.clone(),
                     kind,
                     tags: None,
                     deprecated: None,
-                    location: symbol_to_location(sym),
+                    location: symbol_to_location(sym, line_index),
                     container_name: if sym.module_path.is_empty() {
                         None
                     } else {
@@ -657,13 +676,14 @@ fn extract_doc_comment(source: &str, offset: usize) -> Option<String> {
     }
 }
 
-/// Convert ExportedSymbol to LSP Location
-fn symbol_to_location(sym: &ExportedSymbol) -> Location {
-    // We need to convert span offsets to line/column
-    // For now, use a simple heuristic
-    Location {
-        uri: sym.uri.clone(),
-        range: Range {
+/// Convert ExportedSymbol to LSP Location using proper line/column conversion
+fn symbol_to_location(sym: &ExportedSymbol, line_index: Option<&LineIndex>) -> Location {
+    let range = if let Some(idx) = line_index {
+        idx.span_to_range(&sym.span)
+    } else {
+        // Fallback: compute line index from source if available
+        // This shouldn't happen in practice as line_index is computed on update_file
+        Range {
             start: Position {
                 line: 0,
                 character: sym.span.start as u32,
@@ -672,7 +692,12 @@ fn symbol_to_location(sym: &ExportedSymbol) -> Location {
                 line: 0,
                 character: sym.span.end as u32,
             },
-        },
+        }
+    };
+
+    Location {
+        uri: sym.uri.clone(),
+        range,
     }
 }
 

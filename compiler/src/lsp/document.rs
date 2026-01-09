@@ -5,6 +5,90 @@
 use ropey::Rope;
 use tower_lsp::lsp_types::*;
 
+use crate::common::Span;
+
+/// A line index for efficient byte offset to line/column conversion.
+///
+/// This is a lightweight structure that can be created from source text
+/// and used for span-to-range conversions without needing the full rope.
+#[derive(Debug, Clone)]
+pub struct LineIndex {
+    /// Byte offset of each line start (line 0 starts at offset 0)
+    line_starts: Vec<usize>,
+    /// Total length in bytes
+    len: usize,
+}
+
+impl LineIndex {
+    /// Create a new line index from source text
+    pub fn new(source: &str) -> Self {
+        let mut line_starts = vec![0];
+        for (i, c) in source.char_indices() {
+            if c == '\n' {
+                line_starts.push(i + 1);
+            }
+        }
+        Self {
+            line_starts,
+            len: source.len(),
+        }
+    }
+
+    /// Convert a byte offset to an LSP Position
+    pub fn offset_to_position(&self, offset: usize) -> Position {
+        let offset = offset.min(self.len);
+
+        // Binary search to find the line
+        let line = match self.line_starts.binary_search(&offset) {
+            Ok(line) => line,
+            Err(line) => line.saturating_sub(1),
+        };
+
+        let line_start = self.line_starts.get(line).copied().unwrap_or(0);
+        let character = offset.saturating_sub(line_start);
+
+        Position {
+            line: line as u32,
+            character: character as u32,
+        }
+    }
+
+    /// Convert an LSP Position to a byte offset
+    pub fn position_to_offset(&self, pos: Position) -> Option<usize> {
+        let line = pos.line as usize;
+        if line >= self.line_starts.len() {
+            return None;
+        }
+
+        let line_start = self.line_starts[line];
+        let offset = line_start + pos.character as usize;
+
+        if offset <= self.len {
+            Some(offset)
+        } else {
+            None
+        }
+    }
+
+    /// Convert a Span to an LSP Range
+    pub fn span_to_range(&self, span: &Span) -> Range {
+        Range {
+            start: self.offset_to_position(span.start),
+            end: self.offset_to_position(span.end),
+        }
+    }
+
+    /// Get the number of lines
+    pub fn line_count(&self) -> usize {
+        self.line_starts.len()
+    }
+
+    /// Get the byte offset of a line start
+    pub fn line_start(&self, line: usize) -> Option<usize> {
+        self.line_starts.get(line).copied()
+    }
+}
+
 /// A managed document with efficient text operations
 #[derive(Debug, Clone)]
 pub struct Document {
@@ -303,5 +387,87 @@ mod tests {
         let pos = doc.offset_to_position(7); // Start of "line 2"
         assert_eq!(pos.line, 1);
         assert_eq!(pos.character, 0);
+    }
+
+    #[test]
+    fn test_line_index_basic() {
+        let source = "hello\nworld\nfoo";
+        let idx = LineIndex::new(source);
+
+        assert_eq!(idx.line_count(), 3);
+        assert_eq!(idx.line_start(0), Some(0));
+        assert_eq!(idx.line_start(1), Some(6)); // After "hello\n"
+        assert_eq!(idx.line_start(2), Some(12)); // After "world\n"
+    }
+
+    #[test]
+    fn test_line_index_offset_to_position() {
+        let source = "hello\nworld\nfoo";
+        let idx = LineIndex::new(source);
+
+        // Start of file
+        assert_eq!(idx.offset_to_position(0), Position { line: 0, character: 0 });
+
+        // Middle of first line
+        assert_eq!(idx.offset_to_position(2), Position { line: 0, character: 2 });
+
+        // Start of second line
+        assert_eq!(idx.offset_to_position(6), Position { line: 1, character: 0 });
+
+        // Middle of second line
+        assert_eq!(idx.offset_to_position(8), Position { line: 1, character: 2 });
+
+        // Start of third line
+        assert_eq!(idx.offset_to_position(12), Position { line: 2, character: 0 });
+
+        // End of file
+        assert_eq!(idx.offset_to_position(15), Position { line: 2, character: 3 });
+    }
+
+    #[test]
+    fn test_line_index_position_to_offset() {
+        let source = "hello\nworld\nfoo";
+        let idx = LineIndex::new(source);
+
+        assert_eq!(idx.position_to_offset(Position { line: 0, character: 0 }), Some(0));
+        assert_eq!(idx.position_to_offset(Position { line: 1, character: 0 }), Some(6));
+        assert_eq!(idx.position_to_offset(Position { line: 2, character: 3 }), Some(15));
+
+        // Out of bounds
+        assert_eq!(idx.position_to_offset(Position { line: 10, character: 0 }), None);
+    }
+
+    #[test]
+    fn test_line_index_span_to_range() {
+        use crate::common::Span;
+
+        let source = "hello\nworld\nfoo";
+        let idx = LineIndex::new(source);
+
+        // Span within first line
+        let span = Span { start: 0, end: 5 };
+        let range = idx.span_to_range(&span);
+        assert_eq!(range.start, Position { line: 0, character: 0 });
+        assert_eq!(range.end, Position { line: 0, character: 5 });
+
+        // Span crossing lines
+        let span = Span { start: 3, end: 9 };
+        let range = idx.span_to_range(&span);
+        assert_eq!(range.start, Position { line: 0, character: 3 });
+        assert_eq!(range.end, Position { line: 1, character: 3 });
+    }
+
+    #[test]
+    fn test_line_index_empty_source() {
+        let idx = LineIndex::new("");
+        assert_eq!(idx.line_count(), 1);
+        assert_eq!(idx.offset_to_position(0), Position { line: 0, character: 0 });
+    }
+
+    #[test]
+    fn test_line_index_single_line() {
+        let idx = LineIndex::new("hello");
+        assert_eq!(idx.line_count(), 1);
+        assert_eq!(idx.offset_to_position(3), Position { line: 0, character: 3 });
     }
 }

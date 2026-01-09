@@ -46,5 +46,6 @@ pub mod semantic_tokens;
 pub mod server;
 pub mod workspace;
 
+pub use document::LineIndex;
 pub use server::SounioLanguageServer;
 pub use workspace::Workspace;
