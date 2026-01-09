@@ -42,6 +42,9 @@ pub struct SpirvCodegen {
 
     /// Target environment
     target_env: SpirvTarget,
+
+    /// GLSL.std.450 extended instruction set ID
+    glsl_ext_inst: Word,
 }
 
 /// SPIR-V target environment
@@ -69,6 +72,9 @@ impl SpirvCodegen {
         builder.capability(spirv::Capability::Int64);
         builder.capability(spirv::Capability::Float64);
 
+        // Import GLSL.std.450 extended instruction set for math functions
+        let glsl_ext_inst = builder.ext_inst_import("GLSL.std.450");
+
         // Memory model
         builder.memory_model(spirv::AddressingModel::Logical, spirv::MemoryModel::GLSL450);
 
@@ -82,6 +88,7 @@ impl SpirvCodegen {
             blocks: HashMap::new(),
             execution_model,
             target_env: SpirvTarget::default(),
+            glsl_ext_inst,
         }
     }
 
@@ -798,6 +805,173 @@ impl SpirvCodegen {
                 let fv = self.values[f.0 as usize];
                 let ty = self.types["i32"];
                 self.builder.select(ty, None, c, tv, fv).unwrap()
+            }
+
+            // === Absolute value operations (GLSL.std.450) ===
+            GpuOp::AbsI32(val) => {
+                let v = self.values[val.0 as usize];
+                let ty = self.types["i32"];
+                // GLSL.std.450 SAbs (opcode 5)
+                self.builder
+                    .ext_inst(ty, None, self.glsl_ext_inst, 5, vec![Operand::IdRef(v)])
+                    .unwrap()
+            }
+
+            GpuOp::AbsI64(val) => {
+                let v = self.values[val.0 as usize];
+                let ty = self.types["i64"];
+                // GLSL.std.450 SAbs (opcode 5)
+                self.builder
+                    .ext_inst(ty, None, self.glsl_ext_inst, 5, vec![Operand::IdRef(v)])
+                    .unwrap()
+            }
+
+            GpuOp::AbsF32(val) => {
+                let v = self.values[val.0 as usize];
+                let ty = self.types["f32"];
+                // GLSL.std.450 FAbs (opcode 4)
+                self.builder
+                    .ext_inst(ty, None, self.glsl_ext_inst, 4, vec![Operand::IdRef(v)])
+                    .unwrap()
+            }
+
+            GpuOp::AbsF64(val) => {
+                let v = self.values[val.0 as usize];
+                let ty = self.types["f64"];
+                // GLSL.std.450 FAbs (opcode 4)
+                self.builder
+                    .ext_inst(ty, None, self.glsl_ext_inst, 4, vec![Operand::IdRef(v)])
+                    .unwrap()
+            }
+
+            // === Min operations (GLSL.std.450) ===
+            GpuOp::MinI32(lhs, rhs) => {
+                let l = self.values[lhs.0 as usize];
+                let r = self.values[rhs.0 as usize];
+                let ty = self.types["i32"];
+                // GLSL.std.450 SMin (opcode 39)
+                self.builder
+                    .ext_inst(
+                        ty,
+                        None,
+                        self.glsl_ext_inst,
+                        39,
+                        vec![Operand::IdRef(l), Operand::IdRef(r)],
+                    )
+                    .unwrap()
+            }
+
+            GpuOp::MinU32(lhs, rhs) => {
+                let l = self.values[lhs.0 as usize];
+                let r = self.values[rhs.0 as usize];
+                let ty = self.types["u32"];
+                // GLSL.std.450 UMin (opcode 38)
+                self.builder
+                    .ext_inst(
+                        ty,
+                        None,
+                        self.glsl_ext_inst,
+                        38,
+                        vec![Operand::IdRef(l), Operand::IdRef(r)],
+                    )
+                    .unwrap()
+            }
+
+            GpuOp::MinF32(lhs, rhs) => {
+                let l = self.values[lhs.0 as usize];
+                let r = self.values[rhs.0 as usize];
+                let ty = self.types["f32"];
+                // GLSL.std.450 FMin (opcode 37)
+                self.builder
+                    .ext_inst(
+                        ty,
+                        None,
+                        self.glsl_ext_inst,
+                        37,
+                        vec![Operand::IdRef(l), Operand::IdRef(r)],
+                    )
+                    .unwrap()
+            }
+
+            GpuOp::MinF64(lhs, rhs) => {
+                let l = self.values[lhs.0 as usize];
+                let r = self.values[rhs.0 as usize];
+                let ty = self.types["f64"];
+                // GLSL.std.450 FMin (opcode 37)
+                self.builder
+                    .ext_inst(
+                        ty,
+                        None,
+                        self.glsl_ext_inst,
+                        37,
+                        vec![Operand::IdRef(l), Operand::IdRef(r)],
+                    )
+                    .unwrap()
+            }
+
+            // === Max operations (GLSL.std.450) ===
+            GpuOp::MaxI32(lhs, rhs) => {
+                let l = self.values[lhs.0 as usize];
+                let r = self.values[rhs.0 as usize];
+                let ty = self.types["i32"];
+                // GLSL.std.450 SMax (opcode 42)
+                self.builder
+                    .ext_inst(
+                        ty,
+                        None,
+                        self.glsl_ext_inst,
+                        42,
+                        vec![Operand::IdRef(l), Operand::IdRef(r)],
+                    )
+                    .unwrap()
+            }
+
+            GpuOp::MaxU32(lhs, rhs) => {
+                let l = self.values[lhs.0 as usize];
+                let r = self.values[rhs.0 as usize];
+                let ty = self.types["u32"];
+                // GLSL.std.450 UMax (opcode 41)
+                self.builder
+                    .ext_inst(
+                        ty,
+                        None,
+                        self.glsl_ext_inst,
+                        41,
+                        vec![Operand::IdRef(l), Operand::IdRef(r)],
+                    )
+                    .unwrap()
+            }
+
+            GpuOp::MaxF32(lhs, rhs) => {
+                let l = self.values[lhs.0 as usize];
+                let r = self.values[rhs.0 as usize];
+                let ty = self.types["f32"];
+                // GLSL.std.450 FMax (opcode 40)
+                self.builder
+                    .ext_inst(
+                        ty,
+                        None,
+                        self.glsl_ext_inst,
+                        40,
+                        vec![Operand::IdRef(l), Operand::IdRef(r)],
+                    )
+                    .unwrap()
+            }
+
+            GpuOp::MaxF64(lhs, rhs) => {
+                let l = self.values[lhs.0 as usize];
+                let r = self.values[rhs.0 as usize];
+                let ty = self.types["f64"];
+                // GLSL.std.450 FMax (opcode 40)
+                self.builder
+                    .ext_inst(
+                        ty,
+                        None,
+                        self.glsl_ext_inst,
+                        40,
+                        vec![Operand::IdRef(l), Operand::IdRef(r)],
+                    )
+                    .unwrap()
             }
 
             _ => {

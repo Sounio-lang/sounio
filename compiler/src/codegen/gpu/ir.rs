@@ -816,6 +816,22 @@ pub enum GpuOp {
     FastSqrt(ValueId),
     FastRsqrt(ValueId), // 1/sqrt(x)
 
+    // === Absolute value ===
+    AbsI32(ValueId),  // Signed integer absolute value
+    AbsI64(ValueId),  // Signed integer absolute value (64-bit)
+    AbsF32(ValueId),  // Float absolute value
+    AbsF64(ValueId),  // Double absolute value
+
+    // === Min/Max operations ===
+    MinI32(ValueId, ValueId),  // Signed integer minimum
+    MaxI32(ValueId, ValueId),  // Signed integer maximum
+    MinU32(ValueId, ValueId),  // Unsigned integer minimum
+    MaxU32(ValueId, ValueId),  // Unsigned integer maximum
+    MinF32(ValueId, ValueId),  // Float minimum
+    MaxF32(ValueId, ValueId),  // Float maximum
+    MinF64(ValueId, ValueId),  // Double minimum
+    MaxF64(ValueId, ValueId),  // Double maximum
+
     // === Comparisons ===
     Eq(ValueId, ValueId),
     Ne(ValueId, ValueId),

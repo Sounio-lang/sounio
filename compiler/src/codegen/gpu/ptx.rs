@@ -546,6 +546,112 @@ impl PtxCodegen {
                 writeln!(self.output, "{}rsqrt.approx.f32 {}, {};", indent, reg, v).unwrap();
             }
 
+            // Absolute value operations
+            GpuOp::AbsI32(val) => {
+                let v = self.get_register(*val);
+                let reg = self.alloc_register(&GpuType::I32);
+                self.registers.push(reg.clone());
+                self.value_types.push(GpuType::I32);
+                writeln!(self.output, "{}abs.s32 {}, {};", indent, reg, v).unwrap();
+            }
+
+            GpuOp::AbsI64(val) => {
+                let v = self.get_register(*val);
+                let reg = self.alloc_register(&GpuType::I64);
+                self.registers.push(reg.clone());
+                self.value_types.push(GpuType::I64);
+                writeln!(self.output, "{}abs.s64 {}, {};", indent, reg, v).unwrap();
+            }
+
+            GpuOp::AbsF32(val) => {
+                let v = self.get_register(*val);
+                let reg = self.alloc_register(&GpuType::F32);
+                self.registers.push(reg.clone());
+                self.value_types.push(GpuType::F32);
+                writeln!(self.output, "{}abs.f32 {}, {};", indent, reg, v).unwrap();
+            }
+
+            GpuOp::AbsF64(val) => {
+                let v = self.get_register(*val);
+                let reg = self.alloc_register(&GpuType::F64);
+                self.registers.push(reg.clone());
+                self.value_types.push(GpuType::F64);
+                writeln!(self.output, "{}abs.f64 {}, {};", indent, reg, v).unwrap();
+            }
+
+            // Min/Max operations
+            GpuOp::MinI32(lhs, rhs) => {
+                let l = self.get_register(*lhs);
+                let r = self.get_register(*rhs);
+                let reg = self.alloc_register(&GpuType::I32);
+                self.registers.push(reg.clone());
+                self.value_types.push(GpuType::I32);
+                writeln!(self.output, "{}min.s32 {}, {}, {};", indent, reg, l, r).unwrap();
+            }
+
+            GpuOp::MaxI32(lhs, rhs) => {
+                let l = self.get_register(*lhs);
+                let r = self.get_register(*rhs);
+                let reg = self.alloc_register(&GpuType::I32);
+                self.registers.push(reg.clone());
+                self.value_types.push(GpuType::I32);
+                writeln!(self.output, "{}max.s32 {}, {}, {};", indent, reg, l, r).unwrap();
+            }
+
+            GpuOp::MinU32(lhs, rhs) => {
+                let l = self.get_register(*lhs);
+                let r = self.get_register(*rhs);
+                let reg = self.alloc_register(&GpuType::U32);
+                self.registers.push(reg.clone());
+                self.value_types.push(GpuType::U32);
+                writeln!(self.output, "{}min.u32 {}, {}, {};", indent, reg, l, r).unwrap();
+            }
+
+            GpuOp::MaxU32(lhs, rhs) => {
+                let l = self.get_register(*lhs);
+                let r = self.get_register(*rhs);
+                let reg = self.alloc_register(&GpuType::U32);
+                self.registers.push(reg.clone());
+                self.value_types.push(GpuType::U32);
+                writeln!(self.output, "{}max.u32 {}, {}, {};", indent, reg, l, r).unwrap();
+            }
+
+            GpuOp::MinF32(lhs, rhs) => {
+                let l = self.get_register(*lhs);
+                let r = self.get_register(*rhs);
+                let reg = self.alloc_register(&GpuType::F32);
+                self.registers.push(reg.clone());
+                self.value_types.push(GpuType::F32);
+                writeln!(self.output, "{}min.f32 {}, {}, {};", indent, reg, l, r).unwrap();
+            }
+
+            GpuOp::MaxF32(lhs, rhs) => {
+                let l = self.get_register(*lhs);
+                let r = self.get_register(*rhs);
+                let reg = self.alloc_register(&GpuType::F32);
+                self.registers.push(reg.clone());
+                self.value_types.push(GpuType::F32);
+                writeln!(self.output, "{}max.f32 {}, {}, {};", indent, reg, l, r).unwrap();
+            }
+
+            GpuOp::MinF64(lhs, rhs) => {
+                let l = self.get_register(*lhs);
+                let r = self.get_register(*rhs);
+                let reg = self.alloc_register(&GpuType::F64);
+                self.registers.push(reg.clone());
+                self.value_types.push(GpuType::F64);
+                writeln!(self.output, "{}min.f64 {}, {}, {};", indent, reg, l, r).unwrap();
+            }
+
+            GpuOp::MaxF64(lhs, rhs) => {
+                let l = self.get_register(*lhs);
+                let r = self.get_register(*rhs);
+                let reg = self.alloc_register(&GpuType::F64);
+                self.registers.push(reg.clone());
+                self.value_types.push(GpuType::F64);
+                writeln!(self.output, "{}max.f64 {}, {}, {};", indent, reg, l, r).unwrap();
+            }
+
             // Integer Comparisons
             GpuOp::Lt(lhs, rhs) => {
                 let l = self.get_register(*lhs);
