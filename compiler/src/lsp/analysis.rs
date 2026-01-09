@@ -1,8 +1,10 @@
 //! Semantic analysis for LSP features
 //!
 //! Manages parsing, name resolution, and type checking with caching.
+//! Uses incremental compilation to avoid re-parsing unchanged files.
 
 use std::collections::HashMap;
+use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::sync::RwLock;
 use tower_lsp::lsp_types::*;
@@ -12,6 +14,7 @@ use super::definition::DefinitionProvider;
 use super::diagnostics::DiagnosticsProvider;
 use super::document::Document;
 use super::hover::HoverProvider;
+use super::incremental::{CacheStats, IncrementalAnalyzer};
 use super::references::ReferencesProvider;
 use super::semantic_tokens::SemanticTokensProvider;
 use super::workspace::Workspace;
@@ -51,8 +54,11 @@ impl Default for AnalysisResult {
 
 /// Analysis host manages incremental analysis and caching
 pub struct AnalysisHost {
-    /// Cached results per file
+    /// Cached results per file (legacy cache, kept for compatibility)
     cache: HashMap<Url, AnalysisResult>,
+
+    /// Incremental analyzer with dependency-aware caching
+    incremental: IncrementalAnalyzer,
 
     /// Completion provider
     completion: CompletionProvider,
@@ -81,6 +87,7 @@ impl AnalysisHost {
     pub fn new() -> Self {
         Self {
             cache: HashMap::new(),
+            incremental: IncrementalAnalyzer::new(),
             completion: CompletionProvider::new(),
             hover: HoverProvider::new(),
             definition: DefinitionProvider::new(),
@@ -95,6 +102,7 @@ impl AnalysisHost {
     pub fn with_workspace(workspace: Arc<RwLock<Workspace>>) -> Self {
         Self {
             cache: HashMap::new(),
+            incremental: IncrementalAnalyzer::new(),
             completion: CompletionProvider::new(),
             hover: HoverProvider::new(),
             definition: DefinitionProvider::new(),
@@ -115,49 +123,93 @@ impl AnalysisHost {
         self.workspace.as_ref()
     }
 
+    /// Get incremental analyzer reference
+    pub fn incremental(&self) -> &IncrementalAnalyzer {
+        &self.incremental
+    }
+
+    /// Get mutable incremental analyzer reference
+    pub fn incremental_mut(&mut self) -> &mut IncrementalAnalyzer {
+        &mut self.incremental
+    }
+
+    /// Get cache statistics
+    pub fn cache_stats(&self) -> &CacheStats {
+        self.incremental.stats()
+    }
+
+    /// Register a file path for incremental analysis
+    pub fn register_file(&mut self, uri: &Url, path: PathBuf) {
+        self.incremental.register_path(uri, path);
+    }
+
+    /// Invalidate a file and its dependents
+    pub fn invalidate_file(&mut self, uri: &Url) {
+        self.incremental.invalidate(uri);
+    }
+
+    /// Get files affected by a change
+    pub fn get_affected_files(&self, uri: &Url) -> Vec<Url> {
+        self.incremental.get_affected_files(uri)
+    }
+
     /// Analyze a document and return diagnostics
+    ///
+    /// This method uses incremental compilation to avoid re-parsing
+    /// unchanged files. It:
+    /// 1. Computes content hash and checks cache validity
+    /// 2. Returns cached result if valid
+    /// 3. Otherwise parses and analyzes the file
+    /// 4. Updates both incremental cache and legacy cache
     pub fn analyze(&mut self, source: &str, uri: &Url) -> Vec<Diagnostic> {
-        let mut diagnostics = Vec::new();
-        let mut ast = None;
-        let mut symbols = None;
+        // Use incremental analyzer for caching
+        let result = self.incremental.get_or_analyze(uri, source, 0);
 
-        // Phase 1: Lexing
-        match lexer::lex(source) {
-            Ok(tokens) => {
-                // Phase 2: Parsing
-                match parser::parse(&tokens, source) {
-                    Ok(parsed_ast) => {
-                        ast = Some(parsed_ast.clone());
-
-                        // Phase 3: Name resolution
-                        let sym_table = SymbolTable::new();
-                        // Note: Full resolution would involve more work
-                        // For now, just create a basic symbol table
-                        symbols = Some(sym_table);
-                    }
-                    Err(err) => {
-                        diagnostics
-                            .push(self.diagnostics_provider.miette_to_diagnostic(&err, source));
-                    }
-                }
-            }
-            Err(err) => {
-                diagnostics.push(self.diagnostics_provider.miette_to_diagnostic(&err, source));
-            }
-        }
-
-        // Cache the result
+        // Also update legacy cache for compatibility with other methods
         self.cache.insert(
             uri.clone(),
             AnalysisResult {
-                ast,
-                symbols,
-                diagnostics: diagnostics.clone(),
-                version: 0,
+                ast: result.ast.clone(),
+                symbols: result.symbols.clone(),
+                diagnostics: result.diagnostics.clone(),
+                version: result.version,
             },
         );
 
-        diagnostics
+        result.diagnostics
+    }
+
+    /// Analyze a document with version tracking
+    ///
+    /// Same as `analyze` but allows specifying a document version
+    /// for better cache management.
+    pub fn analyze_versioned(
+        &mut self,
+        source: &str,
+        uri: &Url,
+        version: i32,
+    ) -> Vec<Diagnostic> {
+        // Use incremental analyzer for caching
+        let result = self.incremental.get_or_analyze(uri, source, version);
+
+        // Also update legacy cache for compatibility with other methods
+        self.cache.insert(
+            uri.clone(),
+            AnalysisResult {
+                ast: result.ast.clone(),
+                symbols: result.symbols.clone(),
+                diagnostics: result.diagnostics.clone(),
+                version: result.version,
+            },
+        );
+
+        result.diagnostics
+    }
+
+    /// Check if analysis cache is valid for a file
+    pub fn is_cache_valid(&self, uri: &Url, source: &str) -> bool {
+        let content_hash = IncrementalAnalyzer::hash_content(source);
+        self.incremental.is_cached_valid(uri, content_hash)
     }
 
     /// Get hover information at a position
@@ -223,7 +275,7 @@ impl AnalysisHost {
         None
     }
 
-    /// Find all references
+    /// Find all references using AST-based analysis
     pub fn find_references(
         &self,
         doc: &Document,
@@ -233,6 +285,16 @@ impl AnalysisHost {
         let (word, _) = doc.word_at(pos)?;
 
         if let Some(result) = self.cache.get(uri) {
+            // Prefer AST-based reference finding when available
+            if let (Some(ast), Some(symbols)) = (&result.ast, &result.symbols) {
+                let source = doc.text();
+                let line_index = super::document::LineIndex::new(&source);
+                return Some(
+                    self.references
+                        .find_references_in_ast(&word, ast, symbols, uri, &line_index),
+                );
+            }
+            // Fall back to definition-only lookup
             if let Some(ref symbols) = result.symbols {
                 return Some(self.references.find_references(&word, symbols, uri));
             }
@@ -251,10 +313,19 @@ impl AnalysisHost {
     ) -> Option<Vec<Location>> {
         let (word, _) = doc.word_at(pos)?;
 
-        // Get local references first
+        // Get local references first using AST-based analysis
         let mut locations = Vec::new();
         if let Some(result) = self.cache.get(uri) {
-            if let Some(ref symbols) = result.symbols {
+            // Prefer AST-based reference finding when available
+            if let (Some(ast), Some(symbols)) = (&result.ast, &result.symbols) {
+                let source = doc.text();
+                let line_index = super::document::LineIndex::new(&source);
+                locations.extend(
+                    self.references
+                        .find_references_in_ast(&word, ast, symbols, uri, &line_index),
+                );
+            } else if let Some(ref symbols) = result.symbols {
+                // Fall back to definition-only lookup
                 locations.extend(self.references.find_references(&word, symbols, uri));
             }
         }

@@ -40,12 +40,16 @@ pub mod diagnostics;
 pub mod document;
 pub mod epistemic;
 pub mod hover;
+pub mod incremental;
 pub mod inlay_hints;
+pub mod progress;
 pub mod references;
 pub mod semantic_tokens;
 pub mod server;
 pub mod workspace;
 
 pub use document::LineIndex;
+pub use incremental::{CacheEntry, CacheStats, IncrementalAnalyzer, IncrementalAnalyzerBuilder};
+pub use progress::{CancellableResult, CancellableTask, CancellationManager, CancellationToken, ProgressReporter};
 pub use server::SounioLanguageServer;
 pub use workspace::Workspace;
