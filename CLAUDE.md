@@ -214,6 +214,92 @@ cargo test -- --nocapture  # show output
 - Propagate uncertainty automatically through computations
 - Use appropriate effect annotations (`with IO`, `with Prob`, etc.)
 
+## Versioning Policy
+
+**Semantic Versioning (SemVer):** `MAJOR.MINOR.PATCH`
+
+**Current version:** 0.97.0 (pre-1.0 development)
+
+### Pre-1.0 Rules (current phase)
+- `0.MINOR.PATCH` — MINOR bumps may include breaking changes
+- PATCH bumps are for bug fixes and non-breaking additions
+- API stability is not guaranteed between MINOR versions
+- Target: 1.0.0 when language semantics, type system, and core stdlib are stable
+
+### Post-1.0 Rules
+- **MAJOR** — Breaking changes to language syntax, semantics, or public compiler APIs
+- **MINOR** — New features, stdlib additions, non-breaking enhancements
+- **PATCH** — Bug fixes, performance improvements, documentation
+
+### Version Bump Triggers
+| Change Type | Pre-1.0 | Post-1.0 |
+|-------------|---------|----------|
+| Breaking syntax/semantics | MINOR | MAJOR |
+| New language feature | MINOR | MINOR |
+| New stdlib module | PATCH | MINOR |
+| Bug fix | PATCH | PATCH |
+| Performance improvement | PATCH | PATCH |
+| Documentation only | PATCH | PATCH |
+
+## Tag and Release Policy
+
+### Tag Format
+```
+v{MAJOR}.{MINOR}.{PATCH}[-{prerelease}]
+
+Examples:
+  v0.97.0        # Stable release
+  v0.98.0-alpha  # Alpha pre-release
+  v0.98.0-beta.1 # Beta with iteration
+  v0.98.0-rc.1   # Release candidate
+  v1.0.0         # First stable release
+```
+
+### Release Process
+
+**1. Pre-release checklist:**
+```bash
+# All tests must pass
+cd compiler && cargo test --all-features
+cargo clippy --all-features
+cargo fmt --check
+
+# Verify version in Cargo.toml matches intended release
+grep '^version' Cargo.toml
+```
+
+**2. Version bump (edit Cargo.toml):**
+```bash
+# Update version in compiler/Cargo.toml
+# Commit with format: [release] Bump version to X.Y.Z
+```
+
+**3. Create annotated tag:**
+```bash
+git tag -a vX.Y.Z -m "Release vX.Y.Z
+
+Highlights:
+- Feature 1
+- Feature 2
+- Bug fixes"
+```
+
+**4. Push release:**
+```bash
+git push origin main
+git push origin vX.Y.Z
+```
+
+### Release Cadence
+- **Alpha/Beta:** As needed during active development
+- **Stable:** When significant features land or critical bugs are fixed
+- **No fixed schedule** — quality over frequency
+
+### Breaking Change Policy
+- Document all breaking changes in release notes
+- Provide migration guidance for syntax/API changes
+- For post-1.0: deprecate first, remove in next MAJOR
+
 ## Commit Format
 
 ```
@@ -221,11 +307,32 @@ cargo test -- --nocapture  # show output
 
 Components: lexer, parser, ast, check, types, typeck, effects, hir, hlir,
            codegen, cli, docs, stdlib, tests, ontology, epistemic, lsp,
-           medlang, fmri, causal, gpu, sir, units, refinement, pkg
+           medlang, fmri, causal, gpu, sir, units, refinement, pkg, release
 
 Examples:
   [parser] Add support for Knowledge<T> generic syntax
   [stdlib] Implement bootstrap_correlation in connectivity module
   [docs] Update README with MedLang integration examples
   [epistemic] Fix uncertainty propagation in division
+  [release] Bump version to 0.98.0
+```
+
+### Commit Types by Impact
+- **feat:** New feature (triggers MINOR bump consideration)
+- **fix:** Bug fix (triggers PATCH bump)
+- **perf:** Performance improvement (PATCH)
+- **refactor:** Code restructuring, no behavior change (no bump needed)
+- **docs:** Documentation only (PATCH if released)
+- **test:** Test additions/fixes (no bump needed)
+- **chore:** Build/tooling changes (no bump needed)
+
+### Breaking Change Commits
+When a commit introduces breaking changes, append `!` or note in body:
+```
+[parser]! Remove deprecated `unsafe` block syntax
+
+BREAKING: The `unsafe { }` syntax has been removed.
+Use `trust { }` instead.
+
+Migration: Replace all `unsafe` keywords with `trust`.
 ```
