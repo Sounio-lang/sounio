@@ -1,0 +1,159 @@
+//! Memory Management Module
+//!
+//! This module provides memory management primitives for Sounio, including:
+//! - Smart pointers (Box, Rc, Arc)
+//! - Interior mutability (Cell, RefCell)
+//! - Custom allocators (Arena, Pool)
+//! - Memory layout utilities
+//!
+//! # Core Smart Pointers
+//!
+//! ## Box<T> - Unique Ownership
+//!
+//! ```sio
+//! let b = Box::new(42)
+//! println(*b)  // Prints: 42
+//! ```
+//!
+//! ## Rc<T> - Reference Counting (Single-Threaded)
+//!
+//! ```sio
+//! let a = Rc::new(5)
+//! let b = a.clone()  // Share ownership
+//! println(*a)  // Both a and b point to same data
+//! ```
+//!
+//! ## Arc<T> - Atomic Reference Counting (Thread-Safe)
+//!
+//! ```sio
+//! let data = Arc::new(vec![1, 2, 3])
+//! spawn(move || {
+//!     println(data[0])  // Safe to use across threads
+//! })
+//! ```
+//!
+//! # Custom Allocators
+//!
+//! For performance-critical applications, custom allocators provide
+//! optimized allocation patterns:
+//!
+//! ## Arena Allocator
+//!
+//! Fast sequential allocation with bulk deallocation:
+//!
+//! ```sio
+//! let arena = Arena::new(1024 * 1024)  // 1MB arena
+//!
+//! // Fast O(1) allocations
+//! let ptr1 = arena.alloc_bytes(64, 8)?
+//! let ptr2 = arena.alloc_bytes(128, 8)?
+//!
+//! // All memory freed when arena drops
+//! ```
+//!
+//! ## Pool Allocator
+//!
+//! O(1) allocation/deallocation for fixed-size objects:
+//!
+//! ```sio
+//! // Pool for 10000 64-byte objects
+//! let pool = Pool::new(64, 8, 10000)
+//!
+//! let obj1 = pool.alloc()?
+//! let obj2 = pool.alloc()?
+//!
+//! pool.dealloc(obj1)  // O(1) deallocation, slot reused
+//! ```
+//!
+//! # Allocator Trait
+//!
+//! All custom allocators implement the `Allocator` trait:
+//!
+//! ```sio
+//! pub trait Allocator {
+//!     fn allocate(&self, layout: Layout) -> Result<NonNull<u8>, AllocError> with Alloc
+//!     unsafe fn deallocate(&self, ptr: NonNull<u8>, layout: Layout) with Alloc
+//! }
+//! ```
+//!
+//! # Linear Types for Safety
+//!
+//! The Arena type is a `linear struct`, ensuring it must be explicitly
+//! dropped. This prevents memory leaks from forgotten allocators.
+//!
+//! # Effect Tracking
+//!
+//! All allocation operations require the `Alloc` effect:
+//!
+//! ```sio
+//! fn allocate_data() with Alloc {
+//!     let arena = Arena::new(4096)
+//!     // ...
+//! }
+//! ```
+//!
+//! # References
+//!
+//! - Rust Allocator API RFC 1398
+//! - jemalloc architecture
+//! - Arena allocator patterns
+
+pub mod box;
+pub mod rc;
+pub mod arc;
+pub mod cell;
+pub mod layout;
+pub mod allocator;
+pub mod arena;
+pub mod pool;
+
+// Re-export core types
+pub use box::Box;
+pub use rc::Rc;
+pub use arc::Arc;
+pub use cell::{Cell, RefCell};
+
+// Re-export allocator types
+pub use layout::{Layout, LayoutError};
+pub use allocator::{
+    Allocator,
+    AllocError,
+    NonNull,
+    Global,
+    GLOBAL,
+    alloc_one,
+    dealloc_one,
+    alloc_array,
+    dealloc_array,
+    realloc,
+};
+pub use arena::{Arena, GrowingArena, ArenaStats, with_arena};
+pub use pool::{Pool, ConcurrentPool, GrowingPool, PoolStats};
+
+// ============================================================================
+// Module Tests
+// ============================================================================
+
+fn main() -> i32 {
+    // Test Layout
+    let layout = Layout::from_size_align(16, 8)
+    match layout {
+        Ok(l) => {
+            if l.size() != 16 { return 1 }
+            if l.align() != 8 { return 2 }
+        },
+        Err(_) => { return 3 }
+    }
+
+    // Test NonNull
+    let ptr = 0x1000 as *mut u8
+    match NonNull::new(ptr) {
+        Some(nn) => {
+            if nn.as_ptr() != ptr { return 4 }
+        },
+        None => { return 5 }
+    }
+
+    // All tests passed
+    0
+}

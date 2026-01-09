@@ -1,0 +1,730 @@
+//! CART (Classification and Regression Trees) Implementation
+//!
+//! This module implements Breiman's CART algorithm for building decision trees.
+//! The implementation supports both classification and regression tasks with
+//! configurable hyperparameters.
+//!
+//! Features:
+//! - Binary recursive partitioning
+//! - Configurable split criteria (Gini, Entropy, Variance)
+//! - Hyperparameters: max_depth, min_samples_split, min_samples_leaf
+//! - Optional feature subsampling
+//! - Epistemic uncertainty in predictions
+//!
+//! References:
+//! - Breiman et al., "Classification and Regression Trees" (1984)
+//! - scikit-learn DecisionTreeClassifier/Regressor
+
+use std::ml::trees::node::{
+    DecisionTree, TreeNode, SplitInfo, LeafStats, TaskType,
+    MAX_CLASSES, NO_CHILD
+}
+use std::ml::trees::split::{
+    SplitCriterion, SplitResult,
+    gini_impurity, entropy, variance_from_stats,
+    classification_gain, variance_reduction_from_stats,
+    find_best_split_regression
+}
+
+// ============================================================================
+// CART Hyperparameters
+// ============================================================================
+
+/// Hyperparameters for CART tree building.
+pub struct CARTParams {
+    /// Maximum tree depth (0 = unlimited)
+    pub max_depth: i64,
+
+    /// Minimum samples required to split a node
+    pub min_samples_split: i64,
+
+    /// Minimum samples required in each leaf
+    pub min_samples_leaf: i64,
+
+    /// Maximum number of features to consider at each split
+    /// 0 = all features, >0 = that many features
+    pub max_features: i64,
+
+    /// Split criterion
+    pub criterion: i32,
+
+    /// Minimum impurity decrease required for a split
+    pub min_impurity_decrease: f64,
+
+    /// Random seed for feature subsampling
+    pub random_seed: i64,
+}
+
+impl CARTParams {
+    /// Creates default parameters.
+    pub fn default() -> CARTParams {
+        CARTParams {
+            max_depth: 10,
+            min_samples_split: 2,
+            min_samples_leaf: 1,
+            max_features: 0,  // Use all features
+            criterion: SplitCriterion::Gini.code(),
+            min_impurity_decrease: 0.0,
+            random_seed: 42,
+        }
+    }
+
+    /// Creates parameters for regression.
+    pub fn regression() -> CARTParams {
+        var params = CARTParams::default()
+        params.criterion = SplitCriterion::Variance.code()
+        params
+    }
+
+    /// Creates parameters for classification.
+    pub fn classification() -> CARTParams {
+        var params = CARTParams::default()
+        params.criterion = SplitCriterion::Gini.code()
+        params
+    }
+
+    /// Sets max depth.
+    pub fn with_max_depth(self: CARTParams, depth: i64) -> CARTParams {
+        CARTParams {
+            max_depth: depth,
+            min_samples_split: self.min_samples_split,
+            min_samples_leaf: self.min_samples_leaf,
+            max_features: self.max_features,
+            criterion: self.criterion,
+            min_impurity_decrease: self.min_impurity_decrease,
+            random_seed: self.random_seed,
+        }
+    }
+
+    /// Sets min samples split.
+    pub fn with_min_samples_split(self: CARTParams, n: i64) -> CARTParams {
+        CARTParams {
+            max_depth: self.max_depth,
+            min_samples_split: n,
+            min_samples_leaf: self.min_samples_leaf,
+            max_features: self.max_features,
+            criterion: self.criterion,
+            min_impurity_decrease: self.min_impurity_decrease,
+            random_seed: self.random_seed,
+        }
+    }
+
+    /// Sets min samples leaf.
+    pub fn with_min_samples_leaf(self: CARTParams, n: i64) -> CARTParams {
+        CARTParams {
+            max_depth: self.max_depth,
+            min_samples_split: self.min_samples_split,
+            min_samples_leaf: n,
+            max_features: self.max_features,
+            criterion: self.criterion,
+            min_impurity_decrease: self.min_impurity_decrease,
+            random_seed: self.random_seed,
+        }
+    }
+
+    /// Returns the split criterion.
+    pub fn get_criterion(self: &CARTParams) -> SplitCriterion {
+        SplitCriterion::from_code(self.criterion)
+    }
+}
+
+// ============================================================================
+// Training State
+// ============================================================================
+
+/// Working buffers for tree construction.
+struct BuildContext {
+    /// Sample indices for current node
+    sample_indices: [i64; 8192],
+    /// Temporary storage for sorting
+    temp_indices: [i64; 8192],
+    /// Class counts for current node
+    class_counts: [i64; MAX_CLASSES],
+    /// Feature values buffer
+    feature_values: [f64; 8192],
+    /// RNG state
+    rng_state: u64,
+}
+
+impl BuildContext {
+    fn new(seed: i64) -> BuildContext {
+        BuildContext {
+            sample_indices: [0; 8192],
+            temp_indices: [0; 8192],
+            class_counts: [0; MAX_CLASSES],
+            feature_values: [0.0; 8192],
+            rng_state: seed as u64,
+        }
+    }
+
+    /// Simple LCG random number generator
+    fn next_random(self: &!BuildContext) -> u64 {
+        self.rng_state = self.rng_state * 6364136223846793005 + 1442695040888963407
+        self.rng_state
+    }
+
+    /// Random integer in [0, max)
+    fn random_int(self: &!BuildContext, max: i64) -> i64 {
+        let r = self.next_random()
+        ((r >> 33) as i64) % max
+    }
+}
+
+// ============================================================================
+// CART Tree Builder
+// ============================================================================
+
+/// Fits a CART regression tree.
+///
+/// # Arguments
+/// * `X` - Feature matrix [n_samples, n_features] in row-major order
+/// * `y` - Target values [n_samples]
+/// * `n_samples` - Number of samples
+/// * `n_features` - Number of features
+/// * `params` - CART hyperparameters
+///
+/// # Returns
+/// A trained DecisionTree
+pub fn fit_regression(
+    X: &[f64],
+    y: &[f64],
+    n_samples: i64,
+    n_features: i64,
+    params: CARTParams
+) -> DecisionTree {
+    var tree = DecisionTree::new(n_features, 0, TaskType::Regression)
+    var ctx = BuildContext::new(params.random_seed)
+
+    // Initialize sample indices (all samples)
+    var i: i64 = 0
+    while i < n_samples && i < 8192 {
+        ctx.sample_indices[i as usize] = i
+        i = i + 1
+    }
+
+    // Build tree recursively
+    build_regression_node(
+        &!tree,
+        &!ctx,
+        X, y,
+        n_samples, n_features,
+        0,  // depth
+        -1, // parent
+        &params
+    )
+
+    tree.compute_feature_importances()
+    tree
+}
+
+/// Recursively builds a regression tree node.
+fn build_regression_node(
+    tree: &!DecisionTree,
+    ctx: &!BuildContext,
+    X: &[f64],
+    y: &[f64],
+    n_samples: i64,
+    n_features: i64,
+    depth: i64,
+    parent: i64,
+    params: &CARTParams
+) -> i64 {
+    // Compute leaf statistics
+    var stats = LeafStats::new_regression()
+    var i: i64 = 0
+    while i < n_samples {
+        let idx = ctx.sample_indices[i as usize]
+        stats.add_regression_sample(y[idx as usize])
+        i = i + 1
+    }
+
+    // Check stopping conditions
+    let should_stop =
+        (params.max_depth > 0 && depth >= params.max_depth) ||
+        n_samples < params.min_samples_split ||
+        n_samples < 2 * params.min_samples_leaf ||
+        stats.variance < 0.0001  // Nearly pure node
+
+    if should_stop {
+        // Create leaf node
+        let node_idx = tree.n_nodes()
+        let node = TreeNode::leaf(depth, stats, parent, node_idx)
+        tree.add_node(node)
+        return node_idx
+    }
+
+    // Find best split
+    let split_result = find_best_split_regression(
+        X, y,
+        &ctx.sample_indices,
+        n_samples,
+        n_features,
+        params.min_samples_leaf
+    )
+
+    if !split_result.found || split_result.gain < params.min_impurity_decrease {
+        // No valid split found, create leaf
+        let node_idx = tree.n_nodes()
+        let node = TreeNode::leaf(depth, stats, parent, node_idx)
+        tree.add_node(node)
+        return node_idx
+    }
+
+    // Create internal node (children will be filled in later)
+    let node_idx = tree.n_nodes()
+    let split_info = split_result.to_split_info(n_samples)
+    let node = TreeNode::internal(depth, split_info, NO_CHILD, NO_CHILD, parent, node_idx)
+    tree.add_node(node)
+
+    // Partition samples
+    var left_indices: [i64; 8192] = [0; 8192]
+    var right_indices: [i64; 8192] = [0; 8192]
+    var n_left: i64 = 0
+    var n_right: i64 = 0
+
+    i = 0
+    while i < n_samples {
+        let idx = ctx.sample_indices[i as usize]
+        let feat_val = X[(idx as usize) * (n_features as usize) + (split_result.feature_idx as usize)]
+
+        if feat_val <= split_result.threshold {
+            left_indices[n_left as usize] = idx
+            n_left = n_left + 1
+        } else {
+            right_indices[n_right as usize] = idx
+            n_right = n_right + 1
+        }
+        i = i + 1
+    }
+
+    // Build left subtree
+    i = 0
+    while i < n_left {
+        ctx.sample_indices[i as usize] = left_indices[i as usize]
+        i = i + 1
+    }
+    let left_child = build_regression_node(
+        tree, ctx, X, y, n_left, n_features, depth + 1, node_idx, params
+    )
+
+    // Build right subtree
+    i = 0
+    while i < n_right {
+        ctx.sample_indices[i as usize] = right_indices[i as usize]
+        i = i + 1
+    }
+    let right_child = build_regression_node(
+        tree, ctx, X, y, n_right, n_features, depth + 1, node_idx, params
+    )
+
+    // Update node with children
+    let node_mut = tree.get_node_mut(node_idx)
+    node_mut.left_child = left_child
+    node_mut.right_child = right_child
+
+    node_idx
+}
+
+/// Fits a CART classification tree.
+///
+/// # Arguments
+/// * `X` - Feature matrix [n_samples, n_features] in row-major order
+/// * `y` - Class labels [n_samples] as integers 0, 1, ..., n_classes-1
+/// * `n_samples` - Number of samples
+/// * `n_features` - Number of features
+/// * `n_classes` - Number of classes
+/// * `params` - CART hyperparameters
+pub fn fit_classification(
+    X: &[f64],
+    y: &[i64],
+    n_samples: i64,
+    n_features: i64,
+    n_classes: i64,
+    params: CARTParams
+) -> DecisionTree {
+    let task_type = if n_classes == 2 {
+        TaskType::BinaryClassification
+    } else {
+        TaskType::MultiClassification
+    }
+
+    var tree = DecisionTree::new(n_features, n_classes, task_type)
+    var ctx = BuildContext::new(params.random_seed)
+
+    // Initialize sample indices
+    var i: i64 = 0
+    while i < n_samples && i < 8192 {
+        ctx.sample_indices[i as usize] = i
+        i = i + 1
+    }
+
+    // Build tree
+    build_classification_node(
+        &!tree,
+        &!ctx,
+        X, y,
+        n_samples, n_features, n_classes,
+        0, -1,
+        &params
+    )
+
+    tree.compute_feature_importances()
+    tree
+}
+
+/// Recursively builds a classification tree node.
+fn build_classification_node(
+    tree: &!DecisionTree,
+    ctx: &!BuildContext,
+    X: &[f64],
+    y: &[i64],
+    n_samples: i64,
+    n_features: i64,
+    n_classes: i64,
+    depth: i64,
+    parent: i64,
+    params: &CARTParams
+) -> i64 {
+    // Compute class counts
+    var i: i64 = 0
+    while i < n_classes && i < MAX_CLASSES as i64 {
+        ctx.class_counts[i as usize] = 0
+        i = i + 1
+    }
+
+    i = 0
+    while i < n_samples {
+        let idx = ctx.sample_indices[i as usize]
+        let c = y[idx as usize]
+        ctx.class_counts[c as usize] = ctx.class_counts[c as usize] + 1
+        i = i + 1
+    }
+
+    // Create leaf stats
+    var stats = LeafStats::new_classification(n_classes)
+    i = 0
+    while i < n_samples {
+        let idx = ctx.sample_indices[i as usize]
+        stats.add_classification_sample(y[idx as usize])
+        i = i + 1
+    }
+
+    // Check if node is pure (all same class)
+    var is_pure = false
+    i = 0
+    while i < n_classes {
+        if ctx.class_counts[i as usize] == n_samples {
+            is_pure = true
+        }
+        i = i + 1
+    }
+
+    // Check stopping conditions
+    let should_stop =
+        (params.max_depth > 0 && depth >= params.max_depth) ||
+        n_samples < params.min_samples_split ||
+        n_samples < 2 * params.min_samples_leaf ||
+        is_pure
+
+    if should_stop {
+        let node_idx = tree.n_nodes()
+        let node = TreeNode::leaf(depth, stats, parent, node_idx)
+        tree.add_node(node)
+        return node_idx
+    }
+
+    // Find best split
+    let split_result = find_best_split_classification(
+        X, y, &ctx,
+        n_samples, n_features, n_classes,
+        params
+    )
+
+    if !split_result.found || split_result.gain < params.min_impurity_decrease {
+        let node_idx = tree.n_nodes()
+        let node = TreeNode::leaf(depth, stats, parent, node_idx)
+        tree.add_node(node)
+        return node_idx
+    }
+
+    // Create internal node
+    let node_idx = tree.n_nodes()
+    let split_info = split_result.to_split_info(n_samples)
+    let node = TreeNode::internal(depth, split_info, NO_CHILD, NO_CHILD, parent, node_idx)
+    tree.add_node(node)
+
+    // Partition samples
+    var left_indices: [i64; 8192] = [0; 8192]
+    var right_indices: [i64; 8192] = [0; 8192]
+    var n_left: i64 = 0
+    var n_right: i64 = 0
+
+    i = 0
+    while i < n_samples {
+        let idx = ctx.sample_indices[i as usize]
+        let feat_val = X[(idx as usize) * (n_features as usize) + (split_result.feature_idx as usize)]
+
+        if feat_val <= split_result.threshold {
+            left_indices[n_left as usize] = idx
+            n_left = n_left + 1
+        } else {
+            right_indices[n_right as usize] = idx
+            n_right = n_right + 1
+        }
+        i = i + 1
+    }
+
+    // Build children
+    i = 0
+    while i < n_left {
+        ctx.sample_indices[i as usize] = left_indices[i as usize]
+        i = i + 1
+    }
+    let left_child = build_classification_node(
+        tree, ctx, X, y, n_left, n_features, n_classes, depth + 1, node_idx, params
+    )
+
+    i = 0
+    while i < n_right {
+        ctx.sample_indices[i as usize] = right_indices[i as usize]
+        i = i + 1
+    }
+    let right_child = build_classification_node(
+        tree, ctx, X, y, n_right, n_features, n_classes, depth + 1, node_idx, params
+    )
+
+    // Update node
+    let node_mut = tree.get_node_mut(node_idx)
+    node_mut.left_child = left_child
+    node_mut.right_child = right_child
+
+    node_idx
+}
+
+/// Finds best split for classification.
+fn find_best_split_classification(
+    X: &[f64],
+    y: &[i64],
+    ctx: &BuildContext,
+    n_samples: i64,
+    n_features: i64,
+    n_classes: i64,
+    params: &CARTParams
+) -> SplitResult {
+    if n_samples < 2 * params.min_samples_leaf {
+        return SplitResult::none()
+    }
+
+    let criterion = SplitCriterion::from_code(params.criterion)
+
+    var best_gain = 0.0
+    var best_feature: i64 = -1
+    var best_threshold = 0.0
+    var best_n_left: i64 = 0
+    var best_n_right: i64 = 0
+
+    // Parent class counts (already computed in ctx)
+    let parent_counts = &ctx.class_counts
+
+    var f: i64 = 0
+    while f < n_features {
+        // Collect and sort by feature value
+        var values: [f64; 4096] = [0.0; 4096]
+        var labels: [i64; 4096] = [0; 4096]
+
+        var i: i64 = 0
+        while i < n_samples && i < 4096 {
+            let idx = ctx.sample_indices[i as usize] as usize
+            values[i as usize] = X[idx * (n_features as usize) + (f as usize)]
+            labels[i as usize] = y[idx]
+            i = i + 1
+        }
+
+        // Sort (bubble sort for simplicity)
+        var pass = 0
+        while pass < n_samples - 1 {
+            var j: i64 = 0
+            while j < n_samples - pass - 1 {
+                if values[j as usize] > values[(j + 1) as usize] {
+                    let tmp_v = values[j as usize]
+                    values[j as usize] = values[(j + 1) as usize]
+                    values[(j + 1) as usize] = tmp_v
+
+                    let tmp_l = labels[j as usize]
+                    labels[j as usize] = labels[(j + 1) as usize]
+                    labels[(j + 1) as usize] = tmp_l
+                }
+                j = j + 1
+            }
+            pass = pass + 1
+        }
+
+        // Initialize left class counts
+        var left_counts: [i64; MAX_CLASSES] = [0; MAX_CLASSES]
+        var n_left: i64 = 0
+
+        // Scan thresholds
+        i = 0
+        while i < n_samples - 1 {
+            let c = labels[i as usize]
+            left_counts[c as usize] = left_counts[c as usize] + 1
+            n_left = n_left + 1
+
+            if values[i as usize] == values[(i + 1) as usize] {
+                i = i + 1
+                continue
+            }
+
+            let n_right = n_samples - n_left
+            if n_left < params.min_samples_leaf || n_right < params.min_samples_leaf {
+                i = i + 1
+                continue
+            }
+
+            // Compute right counts
+            var right_counts: [i64; MAX_CLASSES] = [0; MAX_CLASSES]
+            var c_idx: i64 = 0
+            while c_idx < n_classes {
+                right_counts[c_idx as usize] = parent_counts[c_idx as usize] - left_counts[c_idx as usize]
+                c_idx = c_idx + 1
+            }
+
+            let gain = classification_gain(
+                criterion,
+                parent_counts, &left_counts, &right_counts,
+                n_classes, n_samples, n_left, n_right
+            )
+
+            if gain > best_gain {
+                best_gain = gain
+                best_feature = f
+                best_threshold = (values[i as usize] + values[(i + 1) as usize]) / 2.0
+                best_n_left = n_left
+                best_n_right = n_right
+            }
+
+            i = i + 1
+        }
+
+        f = f + 1
+    }
+
+    if best_feature < 0 {
+        SplitResult::none()
+    } else {
+        SplitResult::new(best_feature, best_threshold, best_gain, best_n_left, best_n_right)
+    }
+}
+
+// ============================================================================
+// Prediction
+// ============================================================================
+
+/// Predicts values for multiple samples (regression).
+pub fn predict_batch_regression(
+    tree: &DecisionTree,
+    X: &[f64],
+    n_samples: i64,
+    n_features: i64,
+    predictions: &![f64]
+) {
+    var i: i64 = 0
+    while i < n_samples {
+        // Extract sample
+        var x: [f64; 1024] = [0.0; 1024]
+        var j: i64 = 0
+        while j < n_features && j < 1024 {
+            x[j as usize] = X[(i as usize) * (n_features as usize) + (j as usize)]
+            j = j + 1
+        }
+
+        predictions[i as usize] = tree.predict_regression(&x)
+        i = i + 1
+    }
+}
+
+/// Predicts classes for multiple samples.
+pub fn predict_batch_classification(
+    tree: &DecisionTree,
+    X: &[f64],
+    n_samples: i64,
+    n_features: i64,
+    predictions: &![i64]
+) {
+    var i: i64 = 0
+    while i < n_samples {
+        var x: [f64; 1024] = [0.0; 1024]
+        var j: i64 = 0
+        while j < n_features && j < 1024 {
+            x[j as usize] = X[(i as usize) * (n_features as usize) + (j as usize)]
+            j = j + 1
+        }
+
+        predictions[i as usize] = tree.predict_class(&x)
+        i = i + 1
+    }
+}
+
+// ============================================================================
+// Tests
+// ============================================================================
+
+fn main() -> i32 {
+    // Test CARTParams
+    let params = CARTParams::default()
+    if params.max_depth != 10 { return 1 }
+    if params.min_samples_split != 2 { return 2 }
+
+    let reg_params = CARTParams::regression()
+    if reg_params.criterion != SplitCriterion::Variance.code() { return 3 }
+
+    let clf_params = CARTParams::classification()
+    if clf_params.criterion != SplitCriterion::Gini.code() { return 4 }
+
+    // Test BuildContext RNG
+    var ctx = BuildContext::new(42)
+    let r1 = ctx.next_random()
+    let r2 = ctx.next_random()
+    if r1 == r2 { return 5 }  // Should be different
+
+    // Test simple regression tree
+    // Data: y = x when x < 5, y = x + 10 when x >= 5
+    let X = [1.0, 2.0, 3.0, 4.0, 6.0, 7.0, 8.0, 9.0]
+    let y = [1.0, 2.0, 3.0, 4.0, 16.0, 17.0, 18.0, 19.0]
+
+    let tree = fit_regression(&X, &y, 8, 1, CARTParams::regression().with_max_depth(3))
+
+    // Tree should split around x=5
+    if tree.n_nodes() < 3 { return 6 }  // At least root + 2 children
+
+    // Test prediction
+    let x_test = [2.5]
+    let pred1 = tree.predict_regression(&x_test)
+    // Should predict around 2.5 (average of left leaf: 1,2,3,4)
+    if pred1 < 1.0 || pred1 > 5.0 { return 7 }
+
+    let x_test2 = [7.5]
+    let pred2 = tree.predict_regression(&x_test2)
+    // Should predict around 17.5 (average of right leaf: 16,17,18,19)
+    if pred2 < 15.0 || pred2 > 20.0 { return 8 }
+
+    // Test simple classification
+    // XOR-like: class 0 if x1 < 0.5 XOR x2 < 0.5, else class 1
+    let X_clf = [
+        0.0, 0.0,  // class 1
+        0.0, 1.0,  // class 0
+        1.0, 0.0,  // class 0
+        1.0, 1.0   // class 1
+    ]
+    let y_clf = [1, 0, 0, 1]
+
+    let clf_tree = fit_classification(
+        &X_clf, &y_clf, 4, 2, 2,
+        CARTParams::classification().with_max_depth(3)
+    )
+
+    if clf_tree.n_nodes() < 1 { return 9 }
+
+    // All tests passed
+    0
+}

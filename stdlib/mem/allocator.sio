@@ -1,0 +1,495 @@
+//! Core Allocator Traits for Sounio
+//!
+//! This module defines the Allocator trait that all custom allocators must implement,
+//! along with the GlobalAlloc interface for the system allocator.
+//!
+//! Key design principles:
+//! - All allocation operations require `with Alloc` effect annotation
+//! - Layout-based API ensures type-safe allocation with proper alignment
+//! - NonNull wrapper guarantees allocated pointers are never null
+//! - Pluggable allocators via the Allocator trait
+//!
+//! References:
+//! - Rust Allocator API RFC 1398
+//! - jemalloc architecture patterns
+//! - mimalloc design principles
+
+use std::mem::layout::{Layout, LayoutError}
+use std::core::result::Result
+
+// ============================================================================
+// Allocation Error
+// ============================================================================
+
+/// Errors that can occur during memory allocation.
+pub enum AllocError {
+    /// The allocator ran out of memory
+    OutOfMemory,
+    /// The requested layout was invalid
+    InvalidLayout(LayoutError),
+    /// The allocation request exceeded allocator limits
+    CapacityExceeded,
+    /// Allocator-specific error with message
+    Custom(string),
+}
+
+impl AllocError {
+    /// Returns a human-readable description of the error.
+    pub fn message(self: &AllocError) -> string {
+        match self {
+            AllocError::OutOfMemory => "allocation failed: out of memory",
+            AllocError::InvalidLayout(e) => e.message(),
+            AllocError::CapacityExceeded => "allocation failed: capacity exceeded",
+            AllocError::Custom(msg) => msg.clone(),
+        }
+    }
+
+    /// Returns true if this is an out-of-memory error.
+    pub fn is_oom(self: &AllocError) -> bool {
+        match self {
+            AllocError::OutOfMemory => true,
+            _ => false,
+        }
+    }
+}
+
+// ============================================================================
+// NonNull Pointer Wrapper
+// ============================================================================
+
+/// A non-null pointer to allocated memory.
+///
+/// NonNull provides compile-time guarantee that the pointer is never null,
+/// enabling null pointer optimization in Option types.
+///
+/// # Safety
+///
+/// The contained pointer must be:
+/// - Non-null
+/// - Properly aligned for the pointed-to type
+/// - Valid for reads/writes (if the memory is allocated)
+pub struct NonNull<T> {
+    ptr: *mut T,
+}
+
+impl<T> NonNull<T> {
+    /// Creates a NonNull from a raw pointer, returning None if null.
+    ///
+    /// # Examples
+    ///
+    /// ```sio
+    /// let ptr = alloc::alloc::<i32>(1)
+    /// match NonNull::new(ptr) {
+    ///     Some(nn) => println("allocated successfully"),
+    ///     None => println("allocation returned null"),
+    /// }
+    /// ```
+    pub fn new(ptr: *mut T) -> Option<NonNull<T>> {
+        if ptr as usize == 0 {
+            return None
+        }
+        Some(NonNull { ptr })
+    }
+
+    /// Creates a NonNull without checking for null.
+    ///
+    /// # Safety
+    ///
+    /// The caller must ensure `ptr` is non-null.
+    pub unsafe fn new_unchecked(ptr: *mut T) -> NonNull<T> {
+        NonNull { ptr }
+    }
+
+    /// Returns the contained raw pointer.
+    pub fn as_ptr(self: &NonNull<T>) -> *mut T {
+        self.ptr
+    }
+
+    /// Returns the pointer as a const pointer.
+    pub fn as_const_ptr(self: &NonNull<T>) -> *const T {
+        self.ptr as *const T
+    }
+
+    /// Casts to a NonNull of a different type.
+    ///
+    /// This is useful for allocator APIs that work with raw bytes.
+    pub fn cast<U>(self: NonNull<T>) -> NonNull<U> {
+        NonNull { ptr: self.ptr as *mut U }
+    }
+
+    /// Creates a dangling but well-aligned pointer.
+    ///
+    /// Useful for zero-sized allocations where a valid pointer is needed
+    /// but no memory is actually allocated.
+    pub fn dangling(align: usize) -> NonNull<T> {
+        NonNull { ptr: align as *mut T }
+    }
+}
+
+impl<T> Clone for NonNull<T> {
+    fn clone(self: &NonNull<T>) -> NonNull<T> {
+        NonNull { ptr: self.ptr }
+    }
+}
+
+// ============================================================================
+// Allocator Trait
+// ============================================================================
+
+/// The core allocator trait for custom memory allocators.
+///
+/// All custom allocators implement this trait to provide allocation services.
+/// The trait is designed for:
+/// - Type safety via Layout
+/// - Effect tracking via `with Alloc`
+/// - Fallibility via Result return types
+///
+/// # Safety
+///
+/// Implementors must ensure:
+/// - Allocated memory is valid for reads and writes of `layout.size()` bytes
+/// - Returned pointers are aligned to `layout.align()`
+/// - Memory is not double-freed
+/// - `deallocate` receives the same Layout used to `allocate`
+///
+/// # Examples
+///
+/// ```sio
+/// // Using the global allocator
+/// let ptr = Global.allocate(Layout::from_size_align(16, 8)?)?
+/// // ... use the memory ...
+/// unsafe { Global.deallocate(ptr, Layout::from_size_align(16, 8)?) }
+/// ```
+pub trait Allocator {
+    /// Attempts to allocate a block of memory.
+    ///
+    /// Returns a NonNull pointer to the allocated memory on success,
+    /// or an AllocError if allocation fails.
+    ///
+    /// # Requirements
+    ///
+    /// - The returned memory must be at least `layout.size()` bytes
+    /// - The returned pointer must be aligned to `layout.align()`
+    /// - The memory contents are uninitialized
+    fn allocate(self: &Self, layout: Layout) -> Result<NonNull<u8>, AllocError> with Alloc
+
+    /// Deallocates a block of memory.
+    ///
+    /// # Safety
+    ///
+    /// - `ptr` must have been allocated by this allocator
+    /// - `layout` must be the same Layout used to allocate `ptr`
+    /// - The memory must not be used after deallocation
+    unsafe fn deallocate(self: &Self, ptr: NonNull<u8>, layout: Layout) with Alloc
+
+    /// Allocates zeroed memory.
+    ///
+    /// Returns memory initialized to all zeros. Default implementation
+    /// allocates then writes zeros.
+    fn allocate_zeroed(self: &Self, layout: Layout) -> Result<NonNull<u8>, AllocError> with Alloc {
+        let ptr = self.allocate(layout)?
+
+        // Zero the memory
+        var i: usize = 0
+        while i < layout.size() {
+            unsafe {
+                let byte_ptr = (ptr.as_ptr() as usize + i) as *mut u8
+                *byte_ptr = 0
+            }
+            i = i + 1
+        }
+
+        Ok(ptr)
+    }
+
+    /// Grows an allocation in place or by reallocating.
+    ///
+    /// Attempts to extend the allocation. If in-place growth is not possible,
+    /// allocates new memory, copies the data, and deallocates the old memory.
+    ///
+    /// # Safety
+    ///
+    /// - `ptr` must have been allocated by this allocator with `old_layout`
+    /// - `new_layout.size() >= old_layout.size()`
+    unsafe fn grow(
+        self: &Self,
+        ptr: NonNull<u8>,
+        old_layout: Layout,
+        new_layout: Layout
+    ) -> Result<NonNull<u8>, AllocError> with Alloc {
+        // Default: allocate new, copy, deallocate old
+        let new_ptr = self.allocate(new_layout)?
+
+        // Copy old data
+        var i: usize = 0
+        while i < old_layout.size() {
+            unsafe {
+                let src = (ptr.as_ptr() as usize + i) as *const u8
+                let dst = (new_ptr.as_ptr() as usize + i) as *mut u8
+                *dst = *src
+            }
+            i = i + 1
+        }
+
+        // Deallocate old
+        unsafe {
+            self.deallocate(ptr, old_layout)
+        }
+
+        Ok(new_ptr)
+    }
+
+    /// Shrinks an allocation in place or by reallocating.
+    ///
+    /// # Safety
+    ///
+    /// - `ptr` must have been allocated by this allocator with `old_layout`
+    /// - `new_layout.size() <= old_layout.size()`
+    unsafe fn shrink(
+        self: &Self,
+        ptr: NonNull<u8>,
+        old_layout: Layout,
+        new_layout: Layout
+    ) -> Result<NonNull<u8>, AllocError> with Alloc {
+        // Default: allocate new, copy, deallocate old
+        let new_ptr = self.allocate(new_layout)?
+
+        // Copy (only the new size)
+        var i: usize = 0
+        while i < new_layout.size() {
+            unsafe {
+                let src = (ptr.as_ptr() as usize + i) as *const u8
+                let dst = (new_ptr.as_ptr() as usize + i) as *mut u8
+                *dst = *src
+            }
+            i = i + 1
+        }
+
+        // Deallocate old
+        unsafe {
+            self.deallocate(ptr, old_layout)
+        }
+
+        Ok(new_ptr)
+    }
+}
+
+// ============================================================================
+// Global Allocator
+// ============================================================================
+
+/// The global system allocator.
+///
+/// Global wraps the system allocator (typically libc malloc/free) and
+/// implements the Allocator trait. This is the default allocator used
+/// by Box, Vec, and other heap-allocating types.
+///
+/// # Examples
+///
+/// ```sio
+/// use std::mem::allocator::{Global, Allocator}
+/// use std::mem::layout::Layout
+///
+/// fn allocate_buffer() with Alloc {
+///     let layout = Layout::from_size_align(1024, 8)?
+///     let ptr = Global.allocate(layout)?
+///
+///     // Use the buffer...
+///
+///     unsafe { Global.deallocate(ptr, layout) }
+/// }
+/// ```
+pub struct Global {}
+
+/// The global allocator instance.
+pub const GLOBAL: Global = Global {}
+
+impl Allocator for Global {
+    fn allocate(self: &Global, layout: Layout) -> Result<NonNull<u8>, AllocError> with Alloc {
+        if layout.size() == 0 {
+            // Return aligned dangling pointer for zero-sized allocations
+            return Ok(NonNull::dangling(layout.align()))
+        }
+
+        // Call system allocator
+        let ptr = alloc::alloc_bytes(layout.size(), layout.align())
+
+        match NonNull::new(ptr) {
+            Some(nn) => Ok(nn),
+            None => Err(AllocError::OutOfMemory),
+        }
+    }
+
+    unsafe fn deallocate(self: &Global, ptr: NonNull<u8>, layout: Layout) with Alloc {
+        if layout.size() == 0 {
+            // Don't deallocate ZST dangling pointers
+            return
+        }
+
+        alloc::dealloc_bytes(ptr.as_ptr(), layout.size(), layout.align())
+    }
+}
+
+// ============================================================================
+// Convenience Functions
+// ============================================================================
+
+/// Allocates memory for a single value using the global allocator.
+///
+/// This is a convenience wrapper around Global.allocate().
+///
+/// # Examples
+///
+/// ```sio
+/// let ptr = alloc_one::<i64>()?
+/// unsafe {
+///     *ptr.as_ptr() = 42
+///     dealloc_one(ptr)
+/// }
+/// ```
+pub fn alloc_one(size: usize, align: usize) -> Result<NonNull<u8>, AllocError> with Alloc {
+    let layout = Layout::from_size_align(size, align)
+    match layout {
+        Ok(l) => GLOBAL.allocate(l),
+        Err(e) => Err(AllocError::InvalidLayout(e)),
+    }
+}
+
+/// Deallocates memory for a single value.
+pub unsafe fn dealloc_one(ptr: NonNull<u8>, size: usize, align: usize) with Alloc {
+    match Layout::from_size_align(size, align) {
+        Ok(layout) => {
+            unsafe { GLOBAL.deallocate(ptr, layout) }
+        },
+        Err(_) => {
+            // Invalid layout, can't deallocate properly
+            // This is a programming error
+        }
+    }
+}
+
+/// Allocates memory for an array of n elements.
+pub fn alloc_array(elem_size: usize, elem_align: usize, n: usize) -> Result<NonNull<u8>, AllocError> with Alloc {
+    let layout = Layout::array_of(elem_size, elem_align, n)
+    match layout {
+        Ok(l) => GLOBAL.allocate(l),
+        Err(e) => Err(AllocError::InvalidLayout(e)),
+    }
+}
+
+/// Deallocates memory for an array.
+pub unsafe fn dealloc_array(ptr: NonNull<u8>, elem_size: usize, elem_align: usize, n: usize) with Alloc {
+    match Layout::array_of(elem_size, elem_align, n) {
+        Ok(layout) => {
+            unsafe { GLOBAL.deallocate(ptr, layout) }
+        },
+        Err(_) => {
+            // Invalid layout
+        }
+    }
+}
+
+/// Reallocates memory, growing or shrinking as needed.
+pub unsafe fn realloc(
+    ptr: NonNull<u8>,
+    old_size: usize,
+    old_align: usize,
+    new_size: usize
+) -> Result<NonNull<u8>, AllocError> with Alloc {
+    let old_layout = Layout::from_size_align(old_size, old_align)
+    let new_layout = Layout::from_size_align(new_size, old_align)
+
+    match (old_layout, new_layout) {
+        (Ok(old), Ok(new)) => {
+            if new_size > old_size {
+                unsafe { GLOBAL.grow(ptr, old, new) }
+            } else {
+                unsafe { GLOBAL.shrink(ptr, old, new) }
+            }
+        },
+        (Err(e), _) => Err(AllocError::InvalidLayout(e)),
+        (_, Err(e)) => Err(AllocError::InvalidLayout(e)),
+    }
+}
+
+// ============================================================================
+// AllocatorRef - Borrowed Allocator Reference
+// ============================================================================
+
+/// A reference to an allocator that can be passed around.
+///
+/// This enables allocator-parameterized data structures without
+/// requiring ownership of the allocator.
+pub struct AllocatorRef<'a, A: Allocator> {
+    alloc: &'a A,
+}
+
+impl<'a, A: Allocator> AllocatorRef<'a, A> {
+    /// Creates a new allocator reference.
+    pub fn new(alloc: &'a A) -> AllocatorRef<'a, A> {
+        AllocatorRef { alloc }
+    }
+
+    /// Returns the underlying allocator reference.
+    pub fn get(self: &AllocatorRef<'a, A>) -> &'a A {
+        self.alloc
+    }
+}
+
+impl<'a, A: Allocator> Allocator for AllocatorRef<'a, A> {
+    fn allocate(self: &Self, layout: Layout) -> Result<NonNull<u8>, AllocError> with Alloc {
+        self.alloc.allocate(layout)
+    }
+
+    unsafe fn deallocate(self: &Self, ptr: NonNull<u8>, layout: Layout) with Alloc {
+        unsafe { self.alloc.deallocate(ptr, layout) }
+    }
+}
+
+// ============================================================================
+// Tests
+// ============================================================================
+
+fn main() -> i32 {
+    // Test NonNull creation
+    let raw_ptr = 0x1000 as *mut u8
+    match NonNull::new(raw_ptr) {
+        Some(nn) => {
+            if nn.as_ptr() != raw_ptr { return 1 }
+        },
+        None => { return 2 }
+    }
+
+    // Test null detection
+    let null_ptr = 0 as *mut u8
+    match NonNull::new(null_ptr) {
+        Some(_) => { return 3 },  // Should be None
+        None => {}  // Expected
+    }
+
+    // Test NonNull cast
+    let ptr_u8 = NonNull { ptr: 0x2000 as *mut u8 }
+    let ptr_i32: NonNull<i32> = ptr_u8.cast()
+    if ptr_i32.as_ptr() as usize != 0x2000 { return 4 }
+
+    // Test dangling pointer
+    let dangling: NonNull<f64> = NonNull::dangling(8)
+    if dangling.as_ptr() as usize != 8 { return 5 }
+
+    // Test Global allocator (basic - can't actually allocate in test without runtime)
+    let g = Global {}
+    // Would need actual allocation support to test further
+
+    // Test layout creation for allocation
+    let layout = Layout::from_size_align(32, 8)
+    match layout {
+        Ok(l) => {
+            if l.size() != 32 { return 6 }
+            if l.align() != 8 { return 7 }
+        },
+        Err(_) => { return 8 }
+    }
+
+    // All tests passed
+    0
+}

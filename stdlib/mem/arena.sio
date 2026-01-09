@@ -1,0 +1,573 @@
+//! Arena (Bump) Allocator for Sounio
+//!
+//! An arena allocator provides fast O(1) allocation from a contiguous memory region.
+//! Individual allocations cannot be freed; instead, the entire arena is freed at once.
+//!
+//! Key properties:
+//! - O(1) allocation (just bump a pointer)
+//! - No individual deallocation (memory reclaimed when arena drops)
+//! - Cache-friendly sequential allocation
+//! - Linear type ensures explicit cleanup (no memory leaks)
+//!
+//! Ideal use cases:
+//! - Batch processing pipelines
+//! - Parsing and AST construction
+//! - Scientific simulations with fixed-size data
+//! - Request handling in servers
+//!
+//! References:
+//! - Arena allocators: https://medium.com/@sgn00/high-performance-memory-management-arena-allocators-c685c81ee338
+//! - bumpalo (Rust): https://docs.rs/bumpalo
+
+use std::mem::layout::{Layout, LayoutError}
+use std::mem::allocator::{Allocator, AllocError, NonNull}
+use std::mem::cell::Cell
+
+// ============================================================================
+// Arena Allocator
+// ============================================================================
+
+/// A linear arena allocator for batch allocation patterns.
+///
+/// Arena allocates memory from a contiguous region using a simple bump pointer.
+/// Individual allocations cannot be freed - the entire arena is freed when dropped.
+///
+/// # Linear Type
+///
+/// Arena is a `linear struct`, meaning it MUST be explicitly consumed or dropped.
+/// This prevents memory leaks from forgotten arenas. The compiler will error
+/// if an Arena goes out of scope without being properly handled.
+///
+/// # Memory Safety
+///
+/// - All allocations are properly aligned
+/// - Memory is valid until the arena is dropped
+/// - No use-after-free possible (arena owns all allocations)
+///
+/// # Examples
+///
+/// ```sio
+/// fn process_batch(data: &[u8]) with Alloc {
+///     // Create arena with 1MB capacity
+///     let arena = Arena::new(1024 * 1024)
+///
+///     // Allocate many objects cheaply
+///     var i = 0
+///     while i < 1000 {
+///         let ptr = arena.alloc_bytes(64, 8)?
+///         // Initialize and use ptr...
+///         i = i + 1
+///     }
+///
+///     // Arena drops here, freeing all memory
+/// }
+/// ```
+pub linear struct Arena {
+    /// Base pointer of the allocated region
+    base: *mut u8,
+    /// Current allocation offset (bump pointer)
+    offset: Cell<usize>,
+    /// Total capacity in bytes
+    capacity: usize,
+    /// High water mark for statistics
+    peak: Cell<usize>,
+}
+
+/// Statistics about arena usage.
+pub struct ArenaStats {
+    /// Current bytes allocated
+    pub allocated: usize,
+    /// Peak bytes allocated (high water mark)
+    pub peak: usize,
+    /// Total capacity
+    pub capacity: usize,
+    /// Remaining capacity
+    pub remaining: usize,
+    /// Utilization as percentage (0.0 - 1.0)
+    pub utilization: f64,
+}
+
+impl Arena {
+    /// Creates a new arena with the specified capacity.
+    ///
+    /// # Arguments
+    ///
+    /// * `capacity` - Total bytes to allocate for the arena
+    ///
+    /// # Effects
+    ///
+    /// Requires `Alloc` effect for the initial allocation.
+    ///
+    /// # Examples
+    ///
+    /// ```sio
+    /// let arena = Arena::new(64 * 1024)  // 64KB arena
+    /// ```
+    pub fn new(capacity: usize) -> Arena with Alloc {
+        let base = alloc::alloc_bytes(capacity, 16)  // 16-byte aligned
+        Arena {
+            base,
+            offset: Cell::new(0),
+            capacity,
+            peak: Cell::new(0),
+        }
+    }
+
+    /// Creates an arena sized for `n` elements of a given size and alignment.
+    ///
+    /// # Examples
+    ///
+    /// ```sio
+    /// // Arena for 1000 f64 values
+    /// let arena = Arena::with_capacity_for(8, 8, 1000)
+    /// ```
+    pub fn with_capacity_for(elem_size: usize, elem_align: usize, n: usize) -> Arena with Alloc {
+        // Calculate padded size for proper alignment
+        let padded = (elem_size + elem_align - 1) & !(elem_align - 1)
+        let capacity = padded * n
+        Arena::new(capacity)
+    }
+
+    /// Returns the remaining capacity in bytes.
+    pub fn remaining(self: &Arena) -> usize {
+        self.capacity - self.offset.get()
+    }
+
+    /// Returns the amount of memory currently allocated.
+    pub fn allocated(self: &Arena) -> usize {
+        self.offset.get()
+    }
+
+    /// Returns the peak allocation (high water mark).
+    pub fn peak_allocated(self: &Arena) -> usize {
+        self.peak.get()
+    }
+
+    /// Returns the total capacity.
+    pub fn capacity(self: &Arena) -> usize {
+        self.capacity
+    }
+
+    /// Returns detailed statistics about arena usage.
+    pub fn stats(self: &Arena) -> ArenaStats {
+        let allocated = self.offset.get()
+        let utilization = if self.capacity > 0 {
+            (allocated as f64) / (self.capacity as f64)
+        } else {
+            0.0
+        }
+
+        ArenaStats {
+            allocated,
+            peak: self.peak.get(),
+            capacity: self.capacity,
+            remaining: self.capacity - allocated,
+            utilization,
+        }
+    }
+
+    /// Resets the arena, allowing memory reuse without deallocation.
+    ///
+    /// # Warning
+    ///
+    /// This does NOT call destructors on allocated objects.
+    /// Only use with types that don't need cleanup (primitives, POD types).
+    ///
+    /// # Examples
+    ///
+    /// ```sio
+    /// let arena = Arena::new(1024)
+    /// // ... allocate some objects ...
+    /// arena.reset()  // All memory available again
+    /// // ... allocate more objects ...
+    /// ```
+    pub fn reset(self: &Arena) {
+        self.offset.set(0)
+    }
+
+    /// Allocates raw memory from the arena.
+    ///
+    /// Returns a pointer to `size` bytes with the specified alignment,
+    /// or None if the arena doesn't have enough capacity.
+    fn alloc_raw(self: &Arena, size: usize, align: usize) -> Option<NonNull<u8>> {
+        let current = self.offset.get()
+
+        // Align the current offset
+        let aligned = (current + align - 1) & !(align - 1)
+        let new_offset = aligned + size
+
+        if new_offset > self.capacity {
+            return None
+        }
+
+        self.offset.set(new_offset)
+
+        // Update peak if necessary
+        if new_offset > self.peak.get() {
+            self.peak.set(new_offset)
+        }
+
+        unsafe {
+            let ptr = (self.base as usize + aligned) as *mut u8
+            NonNull::new(ptr)
+        }
+    }
+
+    /// Allocates memory for a value of the given size and alignment.
+    ///
+    /// # Examples
+    ///
+    /// ```sio
+    /// let ptr = arena.alloc_bytes(8, 8)?  // 8 bytes, 8-byte aligned
+    /// ```
+    pub fn alloc_bytes(self: &Arena, size: usize, align: usize) -> Result<NonNull<u8>, AllocError> {
+        match self.alloc_raw(size, align) {
+            Some(ptr) => Ok(ptr),
+            None => Err(AllocError::OutOfMemory),
+        }
+    }
+
+    /// Allocates and zeroes memory.
+    pub fn alloc_zeroed(self: &Arena, size: usize, align: usize) -> Result<NonNull<u8>, AllocError> {
+        let ptr = self.alloc_bytes(size, align)?
+
+        // Zero the memory
+        var i: usize = 0
+        while i < size {
+            unsafe {
+                let byte_ptr = (ptr.as_ptr() as usize + i) as *mut u8
+                *byte_ptr = 0
+            }
+            i = i + 1
+        }
+
+        Ok(ptr)
+    }
+
+    /// Allocates an array of n elements.
+    ///
+    /// # Examples
+    ///
+    /// ```sio
+    /// // Allocate array of 100 f64
+    /// let arr = arena.alloc_array(8, 8, 100)?
+    /// ```
+    pub fn alloc_array(self: &Arena, elem_size: usize, elem_align: usize, n: usize) -> Result<NonNull<u8>, AllocError> {
+        let padded = (elem_size + elem_align - 1) & !(elem_align - 1)
+        let total_size = padded * n
+        self.alloc_bytes(total_size, elem_align)
+    }
+
+    /// Checks if the arena can accommodate an allocation.
+    pub fn can_allocate(self: &Arena, size: usize, align: usize) -> bool {
+        let current = self.offset.get()
+        let aligned = (current + align - 1) & !(align - 1)
+        aligned + size <= self.capacity
+    }
+}
+
+impl Allocator for Arena {
+    fn allocate(self: &Arena, layout: Layout) -> Result<NonNull<u8>, AllocError> with Alloc {
+        self.alloc_bytes(layout.size(), layout.align())
+    }
+
+    unsafe fn deallocate(self: &Arena, _ptr: NonNull<u8>, _layout: Layout) with Alloc {
+        // Arena doesn't support individual deallocation
+        // Memory is freed when the arena is dropped
+    }
+}
+
+impl Drop for Arena {
+    fn drop(self: &!Arena) with Alloc {
+        unsafe {
+            alloc::dealloc_bytes(self.base, self.capacity, 16)
+        }
+    }
+}
+
+// ============================================================================
+// Growing Arena
+// ============================================================================
+
+/// Chunk of memory in a growing arena.
+struct ArenaChunk {
+    base: *mut u8,
+    offset: Cell<usize>,
+    capacity: usize,
+}
+
+impl ArenaChunk {
+    fn new(capacity: usize) -> ArenaChunk with Alloc {
+        let base = alloc::alloc_bytes(capacity, 16)
+        ArenaChunk {
+            base,
+            offset: Cell::new(0),
+            capacity,
+        }
+    }
+
+    fn remaining(self: &ArenaChunk) -> usize {
+        self.capacity - self.offset.get()
+    }
+
+    fn alloc_raw(self: &ArenaChunk, size: usize, align: usize) -> Option<NonNull<u8>> {
+        let current = self.offset.get()
+        let aligned = (current + align - 1) & !(align - 1)
+        let new_offset = aligned + size
+
+        if new_offset > self.capacity {
+            return None
+        }
+
+        self.offset.set(new_offset)
+
+        unsafe {
+            let ptr = (self.base as usize + aligned) as *mut u8
+            NonNull::new(ptr)
+        }
+    }
+
+    fn reset(self: &ArenaChunk) {
+        self.offset.set(0)
+    }
+}
+
+/// A growing arena that allocates additional chunks as needed.
+///
+/// Unlike the basic Arena, GrowingArena can handle arbitrarily large
+/// allocations by allocating new chunks when needed.
+///
+/// # Examples
+///
+/// ```sio
+/// let arena = GrowingArena::new(64 * 1024)  // 64KB initial chunk
+///
+/// // Can allocate more than initial capacity
+/// var i = 0
+/// while i < 100000 {
+///     let ptr = arena.alloc_bytes(64, 8)?
+///     i = i + 1
+/// }
+/// // Arena grows as needed
+/// ```
+pub linear struct GrowingArena {
+    /// List of allocated chunks
+    chunks: Vec<ArenaChunk>,
+    /// Index of current chunk
+    current: Cell<usize>,
+    /// Default chunk size
+    chunk_size: usize,
+    /// Total bytes allocated across all chunks
+    total_allocated: Cell<usize>,
+}
+
+impl GrowingArena {
+    /// Creates a growing arena with the specified initial chunk size.
+    pub fn new(chunk_size: usize) -> GrowingArena with Alloc {
+        var chunks = Vec::new()
+        chunks.push(ArenaChunk::new(chunk_size))
+
+        GrowingArena {
+            chunks,
+            current: Cell::new(0),
+            chunk_size,
+            total_allocated: Cell::new(0),
+        }
+    }
+
+    /// Creates a growing arena with default 64KB chunk size.
+    pub fn default() -> GrowingArena with Alloc {
+        GrowingArena::new(64 * 1024)
+    }
+
+    /// Returns total capacity across all chunks.
+    pub fn total_capacity(self: &GrowingArena) -> usize {
+        var total: usize = 0
+        var i: usize = 0
+        while i < self.chunks.len() {
+            total = total + self.chunks[i].capacity
+            i = i + 1
+        }
+        total
+    }
+
+    /// Returns total bytes allocated.
+    pub fn allocated(self: &GrowingArena) -> usize {
+        self.total_allocated.get()
+    }
+
+    /// Returns the number of chunks.
+    pub fn chunk_count(self: &GrowingArena) -> usize {
+        self.chunks.len()
+    }
+
+    /// Resets all chunks for reuse.
+    pub fn reset(self: &!GrowingArena) {
+        var i: usize = 0
+        while i < self.chunks.len() {
+            self.chunks[i].reset()
+            i = i + 1
+        }
+        self.current.set(0)
+        self.total_allocated.set(0)
+    }
+
+    /// Allocates raw memory, creating new chunks as needed.
+    fn alloc_raw(self: &!GrowingArena, size: usize, align: usize) -> Option<NonNull<u8>> with Alloc {
+        // Try current chunk
+        let cur_idx = self.current.get()
+        match self.chunks[cur_idx].alloc_raw(size, align) {
+            Some(ptr) => {
+                self.total_allocated.set(self.total_allocated.get() + size)
+                return Some(ptr)
+            },
+            None => {}
+        }
+
+        // Try subsequent chunks
+        var i = cur_idx + 1
+        while i < self.chunks.len() {
+            match self.chunks[i].alloc_raw(size, align) {
+                Some(ptr) => {
+                    self.current.set(i)
+                    self.total_allocated.set(self.total_allocated.get() + size)
+                    return Some(ptr)
+                },
+                None => {}
+            }
+            i = i + 1
+        }
+
+        // Need a new chunk
+        let new_size = if size > self.chunk_size {
+            size * 2  // For large allocations
+        } else {
+            self.chunk_size
+        }
+
+        self.chunks.push(ArenaChunk::new(new_size))
+        self.current.set(self.chunks.len() - 1)
+
+        match self.chunks[self.chunks.len() - 1].alloc_raw(size, align) {
+            Some(ptr) => {
+                self.total_allocated.set(self.total_allocated.get() + size)
+                Some(ptr)
+            },
+            None => None
+        }
+    }
+
+    /// Allocates memory.
+    pub fn alloc_bytes(self: &!GrowingArena, size: usize, align: usize) -> Result<NonNull<u8>, AllocError> with Alloc {
+        match self.alloc_raw(size, align) {
+            Some(ptr) => Ok(ptr),
+            None => Err(AllocError::OutOfMemory),
+        }
+    }
+
+    /// Allocates and zeroes memory.
+    pub fn alloc_zeroed(self: &!GrowingArena, size: usize, align: usize) -> Result<NonNull<u8>, AllocError> with Alloc {
+        let ptr = self.alloc_bytes(size, align)?
+
+        var i: usize = 0
+        while i < size {
+            unsafe {
+                let byte_ptr = (ptr.as_ptr() as usize + i) as *mut u8
+                *byte_ptr = 0
+            }
+            i = i + 1
+        }
+
+        Ok(ptr)
+    }
+
+    /// Allocates an array.
+    pub fn alloc_array(self: &!GrowingArena, elem_size: usize, elem_align: usize, n: usize) -> Result<NonNull<u8>, AllocError> with Alloc {
+        let padded = (elem_size + elem_align - 1) & !(elem_align - 1)
+        let total = padded * n
+        self.alloc_bytes(total, elem_align)
+    }
+}
+
+impl Drop for GrowingArena {
+    fn drop(self: &!GrowingArena) with Alloc {
+        var i: usize = 0
+        while i < self.chunks.len() {
+            unsafe {
+                alloc::dealloc_bytes(self.chunks[i].base, self.chunks[i].capacity, 16)
+            }
+            i = i + 1
+        }
+    }
+}
+
+// ============================================================================
+// Scoped Arena Helper
+// ============================================================================
+
+/// Execute a closure with a temporary arena.
+///
+/// The arena is automatically freed when the closure completes.
+///
+/// # Examples
+///
+/// ```sio
+/// let result = with_arena(1024, |arena| {
+///     let ptr = arena.alloc_bytes(64, 8)?
+///     // Use ptr...
+///     compute_result(ptr)
+/// })?
+/// // Arena freed here
+/// ```
+pub fn with_arena<R>(capacity: usize, f: fn(&Arena) -> R) -> R with Alloc {
+    let arena = Arena::new(capacity)
+    let result = f(&arena)
+    // arena drops here
+    result
+}
+
+// ============================================================================
+// Tests
+// ============================================================================
+
+fn main() -> i32 {
+    // Note: These tests require runtime allocation support
+    // In a real test environment, they would verify actual allocations
+
+    // Test Layout calculations used by arena
+    let size: usize = 5
+    let align: usize = 4
+    let aligned = (size + align - 1) & !(align - 1)
+    if aligned != 8 { return 1 }
+
+    // Test alignment calculation
+    let offset: usize = 13
+    let aligned_offset = (offset + 8 - 1) & !(8 - 1)
+    if aligned_offset != 16 { return 2 }
+
+    // Test capacity calculation
+    let elem_size: usize = 8
+    let elem_align: usize = 8
+    let n: usize = 100
+    let padded = (elem_size + elem_align - 1) & !(elem_align - 1)
+    let total = padded * n
+    if total != 800 { return 3 }
+
+    // Test can_allocate logic (simulated)
+    let capacity: usize = 1024
+    let current: usize = 100
+    let req_size: usize = 64
+    let req_align: usize = 8
+    let req_aligned = (current + req_align - 1) & !(req_align - 1)
+    let fits = req_aligned + req_size <= capacity
+    if !fits { return 4 }
+
+    // Test doesn't fit
+    let big_current: usize = 1000
+    let big_aligned = (big_current + req_align - 1) & !(req_align - 1)
+    let big_fits = big_aligned + req_size <= capacity
+    if big_fits { return 5 }  // Should NOT fit
+
+    // All tests passed
+    0
+}

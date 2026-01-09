@@ -1,0 +1,730 @@
+//! Tree Node Data Structures for Decision Trees
+//!
+//! This module defines the core data structures for tree-based machine learning:
+//! - TreeNode: Individual node in a decision tree
+//! - SplitInfo: Information about how a node splits data
+//! - LeafStats: Statistics for leaf nodes (predictions, uncertainty)
+//! - DecisionTree: Complete tree structure
+//!
+//! All structures support epistemic uncertainty quantification, tracking both
+//! aleatoric (data noise) and epistemic (model) uncertainty.
+//!
+//! References:
+//! - Breiman et al., "Classification and Regression Trees" (1984)
+//! - Conformal Deep Forest (2025): Conformal dual uncertainty metrics
+
+// ============================================================================
+// Constants
+// ============================================================================
+
+/// Maximum number of classes supported for classification
+const MAX_CLASSES: usize = 64
+
+/// Maximum depth of trees
+const MAX_DEPTH: usize = 32
+
+/// Maximum number of features for oblique splits
+const MAX_OBLIQUE_FEATURES: usize = 16
+
+/// Sentinel value for missing child
+const NO_CHILD: i64 = -1
+
+// ============================================================================
+// Task Type
+// ============================================================================
+
+/// The type of prediction task.
+pub enum TaskType {
+    /// Regression: predict continuous values
+    Regression,
+    /// Binary classification: predict 0 or 1
+    BinaryClassification,
+    /// Multi-class classification: predict one of K classes
+    MultiClassification,
+}
+
+impl TaskType {
+    /// Returns integer code for task type.
+    pub fn code(self: &TaskType) -> i32 {
+        match self {
+            TaskType::Regression => 0,
+            TaskType::BinaryClassification => 1,
+            TaskType::MultiClassification => 2,
+        }
+    }
+
+    /// Creates TaskType from code.
+    pub fn from_code(code: i32) -> TaskType {
+        match code {
+            0 => TaskType::Regression,
+            1 => TaskType::BinaryClassification,
+            _ => TaskType::MultiClassification,
+        }
+    }
+}
+
+// ============================================================================
+// Split Information
+// ============================================================================
+
+/// Type of split used at an internal node.
+pub enum SplitType {
+    /// Standard axis-aligned split: x[feature] <= threshold
+    AxisAligned,
+    /// Oblique split: w·x <= threshold (linear combination)
+    Oblique,
+    /// Categorical split: x[feature] in {values}
+    Categorical,
+}
+
+impl SplitType {
+    pub fn code(self: &SplitType) -> i32 {
+        match self {
+            SplitType::AxisAligned => 0,
+            SplitType::Oblique => 1,
+            SplitType::Categorical => 2,
+        }
+    }
+
+    pub fn from_code(code: i32) -> SplitType {
+        match code {
+            0 => SplitType::AxisAligned,
+            1 => SplitType::Oblique,
+            _ => SplitType::Categorical,
+        }
+    }
+}
+
+/// Information about how a node splits the data.
+///
+/// Supports multiple split types:
+/// - Axis-aligned: x[feature_idx] <= threshold
+/// - Oblique: sum(weights[i] * x[feature_indices[i]]) <= threshold
+/// - Categorical: x[feature_idx] in category_mask
+pub struct SplitInfo {
+    /// Type of split
+    split_type: i32,
+
+    /// Feature index for axis-aligned/categorical splits
+    feature_idx: i64,
+
+    /// Split threshold (continuous features)
+    threshold: f64,
+
+    /// Feature weights for oblique splits
+    weights: [f64; MAX_OBLIQUE_FEATURES],
+
+    /// Feature indices for oblique splits
+    feature_indices: [i64; MAX_OBLIQUE_FEATURES],
+
+    /// Number of features in oblique split
+    n_oblique_features: i64,
+
+    /// Category mask for categorical splits (bit vector)
+    category_mask: u64,
+
+    /// Impurity decrease from this split
+    impurity_decrease: f64,
+
+    /// Number of samples at this split
+    n_samples: i64,
+}
+
+impl SplitInfo {
+    /// Creates a new axis-aligned split.
+    pub fn axis_aligned(feature_idx: i64, threshold: f64, impurity_decrease: f64, n_samples: i64) -> SplitInfo {
+        SplitInfo {
+            split_type: SplitType::AxisAligned.code(),
+            feature_idx,
+            threshold,
+            weights: [0.0; MAX_OBLIQUE_FEATURES],
+            feature_indices: [0; MAX_OBLIQUE_FEATURES],
+            n_oblique_features: 0,
+            category_mask: 0,
+            impurity_decrease,
+            n_samples,
+        }
+    }
+
+    /// Creates an empty split (for leaf nodes).
+    pub fn empty() -> SplitInfo {
+        SplitInfo {
+            split_type: 0,
+            feature_idx: -1,
+            threshold: 0.0,
+            weights: [0.0; MAX_OBLIQUE_FEATURES],
+            feature_indices: [0; MAX_OBLIQUE_FEATURES],
+            n_oblique_features: 0,
+            category_mask: 0,
+            impurity_decrease: 0.0,
+            n_samples: 0,
+        }
+    }
+
+    /// Evaluates the split condition for a sample.
+    ///
+    /// Returns true if sample goes to left child, false for right.
+    pub fn evaluate(self: &SplitInfo, x: &[f64]) -> bool {
+        let st = SplitType::from_code(self.split_type)
+        match st {
+            SplitType::AxisAligned => {
+                x[self.feature_idx as usize] <= self.threshold
+            },
+            SplitType::Oblique => {
+                var sum = 0.0
+                var i: i64 = 0
+                while i < self.n_oblique_features {
+                    let idx = self.feature_indices[i as usize] as usize
+                    sum = sum + self.weights[i as usize] * x[idx]
+                    i = i + 1
+                }
+                sum <= self.threshold
+            },
+            SplitType::Categorical => {
+                let cat = x[self.feature_idx as usize] as u64
+                (self.category_mask & (1 << cat)) != 0
+            },
+        }
+    }
+
+    /// Returns the split type.
+    pub fn get_split_type(self: &SplitInfo) -> SplitType {
+        SplitType::from_code(self.split_type)
+    }
+
+    /// Returns the feature index (for axis-aligned splits).
+    pub fn get_feature_idx(self: &SplitInfo) -> i64 {
+        self.feature_idx
+    }
+
+    /// Returns the threshold.
+    pub fn get_threshold(self: &SplitInfo) -> f64 {
+        self.threshold
+    }
+
+    /// Returns the impurity decrease.
+    pub fn get_impurity_decrease(self: &SplitInfo) -> f64 {
+        self.impurity_decrease
+    }
+}
+
+// ============================================================================
+// Leaf Statistics
+// ============================================================================
+
+/// Statistics for a leaf node.
+///
+/// Contains prediction values and uncertainty estimates.
+/// For regression: mean and variance
+/// For classification: class probabilities and counts
+pub struct LeafStats {
+    /// Number of training samples that reached this leaf
+    n_samples: i64,
+
+    // Regression statistics
+    /// Mean of target values (prediction for regression)
+    mean: f64,
+
+    /// Variance of target values (aleatoric uncertainty)
+    variance: f64,
+
+    /// Sum of targets (for incremental updates)
+    sum: f64,
+
+    /// Sum of squared targets
+    sum_sq: f64,
+
+    // Classification statistics
+    /// Class counts
+    class_counts: [i64; MAX_CLASSES],
+
+    /// Class probabilities
+    class_probs: [f64; MAX_CLASSES],
+
+    /// Number of classes
+    n_classes: i64,
+
+    /// Predicted class (argmax of probs)
+    predicted_class: i64,
+
+    // Epistemic metadata
+    /// Epistemic confidence (higher with more samples)
+    confidence: f64,
+
+    /// Out-of-bag error estimate (for random forests)
+    oob_error: f64,
+
+    /// Provenance ID for tracking data lineage
+    provenance_id: i64,
+}
+
+impl LeafStats {
+    /// Creates empty leaf statistics for regression.
+    pub fn new_regression() -> LeafStats {
+        LeafStats {
+            n_samples: 0,
+            mean: 0.0,
+            variance: 0.0,
+            sum: 0.0,
+            sum_sq: 0.0,
+            class_counts: [0; MAX_CLASSES],
+            class_probs: [0.0; MAX_CLASSES],
+            n_classes: 0,
+            predicted_class: -1,
+            confidence: 0.0,
+            oob_error: 0.0,
+            provenance_id: 0,
+        }
+    }
+
+    /// Creates empty leaf statistics for classification.
+    pub fn new_classification(n_classes: i64) -> LeafStats {
+        LeafStats {
+            n_samples: 0,
+            mean: 0.0,
+            variance: 0.0,
+            sum: 0.0,
+            sum_sq: 0.0,
+            class_counts: [0; MAX_CLASSES],
+            class_probs: [0.0; MAX_CLASSES],
+            n_classes,
+            predicted_class: -1,
+            confidence: 0.0,
+            oob_error: 0.0,
+            provenance_id: 0,
+        }
+    }
+
+    /// Adds a sample to regression statistics.
+    pub fn add_regression_sample(self: &!LeafStats, y: f64) {
+        self.n_samples = self.n_samples + 1
+        self.sum = self.sum + y
+        self.sum_sq = self.sum_sq + y * y
+
+        // Update mean and variance (Welford's algorithm would be better)
+        let n = self.n_samples as f64
+        self.mean = self.sum / n
+        if self.n_samples > 1 {
+            self.variance = (self.sum_sq - self.sum * self.sum / n) / (n - 1.0)
+        }
+
+        // Update confidence based on sample count
+        self.confidence = 1.0 - 1.0 / (1.0 + n)
+    }
+
+    /// Adds a sample to classification statistics.
+    pub fn add_classification_sample(self: &!LeafStats, class: i64) {
+        self.n_samples = self.n_samples + 1
+        self.class_counts[class as usize] = self.class_counts[class as usize] + 1
+
+        // Update probabilities
+        let n = self.n_samples as f64
+        var i: i64 = 0
+        while i < self.n_classes {
+            self.class_probs[i as usize] = (self.class_counts[i as usize] as f64) / n
+            i = i + 1
+        }
+
+        // Find predicted class (argmax)
+        var max_count: i64 = 0
+        var max_class: i64 = 0
+        i = 0
+        while i < self.n_classes {
+            if self.class_counts[i as usize] > max_count {
+                max_count = self.class_counts[i as usize]
+                max_class = i
+            }
+            i = i + 1
+        }
+        self.predicted_class = max_class
+
+        // Update confidence
+        self.confidence = 1.0 - 1.0 / (1.0 + n)
+    }
+
+    /// Returns the prediction for regression.
+    pub fn predict_regression(self: &LeafStats) -> f64 {
+        self.mean
+    }
+
+    /// Returns the predicted class for classification.
+    pub fn predict_class(self: &LeafStats) -> i64 {
+        self.predicted_class
+    }
+
+    /// Returns class probability for the given class.
+    pub fn class_probability(self: &LeafStats, class: i64) -> f64 {
+        self.class_probs[class as usize]
+    }
+
+    /// Returns the aleatoric uncertainty (variance for regression, Gini for classification).
+    pub fn aleatoric_uncertainty(self: &LeafStats, task: TaskType) -> f64 {
+        match task {
+            TaskType::Regression => self.variance,
+            _ => {
+                // Gini impurity: 1 - sum(p_i^2)
+                var sum_sq = 0.0
+                var i: i64 = 0
+                while i < self.n_classes {
+                    let p = self.class_probs[i as usize]
+                    sum_sq = sum_sq + p * p
+                    i = i + 1
+                }
+                1.0 - sum_sq
+            }
+        }
+    }
+
+    /// Returns the epistemic confidence.
+    pub fn get_confidence(self: &LeafStats) -> f64 {
+        self.confidence
+    }
+
+    /// Returns the sample count.
+    pub fn get_n_samples(self: &LeafStats) -> i64 {
+        self.n_samples
+    }
+}
+
+// ============================================================================
+// Tree Node
+// ============================================================================
+
+/// A single node in a decision tree.
+///
+/// Nodes are stored in a flat array for cache efficiency.
+/// Children are referenced by index rather than pointers.
+pub struct TreeNode {
+    /// True if this is a leaf node
+    is_leaf: bool,
+
+    /// Depth of this node (root = 0)
+    depth: i64,
+
+    /// Split information (for internal nodes)
+    split: SplitInfo,
+
+    /// Index of left child (-1 if none/leaf)
+    left_child: i64,
+
+    /// Index of right child (-1 if none/leaf)
+    right_child: i64,
+
+    /// Leaf statistics (for leaf nodes)
+    leaf_stats: LeafStats,
+
+    /// Parent index (-1 for root)
+    parent: i64,
+
+    /// Node index in the tree array
+    node_idx: i64,
+}
+
+impl TreeNode {
+    /// Creates a new internal node.
+    pub fn internal(
+        depth: i64,
+        split: SplitInfo,
+        left_child: i64,
+        right_child: i64,
+        parent: i64,
+        node_idx: i64
+    ) -> TreeNode {
+        TreeNode {
+            is_leaf: false,
+            depth,
+            split,
+            left_child,
+            right_child,
+            leaf_stats: LeafStats::new_regression(),
+            parent,
+            node_idx,
+        }
+    }
+
+    /// Creates a new leaf node.
+    pub fn leaf(depth: i64, stats: LeafStats, parent: i64, node_idx: i64) -> TreeNode {
+        TreeNode {
+            is_leaf: true,
+            depth,
+            split: SplitInfo::empty(),
+            left_child: NO_CHILD,
+            right_child: NO_CHILD,
+            leaf_stats: stats,
+            parent,
+            node_idx,
+        }
+    }
+
+    /// Returns true if this is a leaf node.
+    pub fn is_leaf(self: &TreeNode) -> bool {
+        self.is_leaf
+    }
+
+    /// Returns the depth.
+    pub fn depth(self: &TreeNode) -> i64 {
+        self.depth
+    }
+
+    /// Returns the split info.
+    pub fn split(self: &TreeNode) -> &SplitInfo {
+        &self.split
+    }
+
+    /// Returns the left child index.
+    pub fn left(self: &TreeNode) -> i64 {
+        self.left_child
+    }
+
+    /// Returns the right child index.
+    pub fn right(self: &TreeNode) -> i64 {
+        self.right_child
+    }
+
+    /// Returns the leaf statistics.
+    pub fn stats(self: &TreeNode) -> &LeafStats {
+        &self.leaf_stats
+    }
+
+    /// Returns mutable leaf statistics.
+    pub fn stats_mut(self: &!TreeNode) -> &!LeafStats {
+        &!self.leaf_stats
+    }
+}
+
+// ============================================================================
+// Decision Tree
+// ============================================================================
+
+/// Maximum number of nodes in a tree.
+const MAX_NODES: usize = 131071  // 2^17 - 1 (max for depth 16)
+
+/// A complete decision tree.
+///
+/// The tree is stored as a flat array of nodes for cache efficiency.
+/// This allows O(1) node access and cache-friendly traversal.
+pub struct DecisionTree {
+    /// Flat array of nodes
+    nodes: [TreeNode; MAX_NODES],
+
+    /// Number of nodes in the tree
+    n_nodes: i64,
+
+    /// Number of features
+    n_features: i64,
+
+    /// Number of classes (0 for regression)
+    n_classes: i64,
+
+    /// Maximum depth reached
+    max_depth: i64,
+
+    /// Task type
+    task_type: i32,
+
+    /// Feature importances (Gini/variance decrease)
+    feature_importances: [f64; 1024],
+
+    /// Training set size
+    n_train_samples: i64,
+}
+
+impl DecisionTree {
+    /// Creates an empty decision tree.
+    pub fn new(n_features: i64, n_classes: i64, task_type: TaskType) -> DecisionTree {
+        // Initialize with dummy nodes
+        var nodes: [TreeNode; MAX_NODES] = undefined
+        var i: usize = 0
+        while i < MAX_NODES {
+            nodes[i] = TreeNode::leaf(0, LeafStats::new_regression(), -1, i as i64)
+            i = i + 1
+        }
+
+        DecisionTree {
+            nodes,
+            n_nodes: 0,
+            n_features,
+            n_classes,
+            max_depth: 0,
+            task_type: task_type.code(),
+            feature_importances: [0.0; 1024],
+            n_train_samples: 0,
+        }
+    }
+
+    /// Adds a node to the tree.
+    pub fn add_node(self: &!DecisionTree, node: TreeNode) -> i64 {
+        let idx = self.n_nodes
+        self.nodes[idx as usize] = node
+        self.n_nodes = self.n_nodes + 1
+
+        if node.depth > self.max_depth {
+            self.max_depth = node.depth
+        }
+
+        idx
+    }
+
+    /// Returns a reference to a node.
+    pub fn get_node(self: &DecisionTree, idx: i64) -> &TreeNode {
+        &self.nodes[idx as usize]
+    }
+
+    /// Returns a mutable reference to a node.
+    pub fn get_node_mut(self: &!DecisionTree, idx: i64) -> &!TreeNode {
+        &!self.nodes[idx as usize]
+    }
+
+    /// Returns the root node index (always 0).
+    pub fn root(self: &DecisionTree) -> i64 {
+        0
+    }
+
+    /// Returns the number of nodes.
+    pub fn n_nodes(self: &DecisionTree) -> i64 {
+        self.n_nodes
+    }
+
+    /// Returns the number of leaf nodes.
+    pub fn n_leaves(self: &DecisionTree) -> i64 {
+        var count: i64 = 0
+        var i: i64 = 0
+        while i < self.n_nodes {
+            if self.nodes[i as usize].is_leaf {
+                count = count + 1
+            }
+            i = i + 1
+        }
+        count
+    }
+
+    /// Returns the maximum depth.
+    pub fn depth(self: &DecisionTree) -> i64 {
+        self.max_depth
+    }
+
+    /// Returns the task type.
+    pub fn task_type(self: &DecisionTree) -> TaskType {
+        TaskType::from_code(self.task_type)
+    }
+
+    /// Traverses tree to find the leaf for a sample.
+    pub fn find_leaf(self: &DecisionTree, x: &[f64]) -> i64 {
+        var node_idx: i64 = 0
+
+        while !self.nodes[node_idx as usize].is_leaf {
+            let node = &self.nodes[node_idx as usize]
+            if node.split.evaluate(x) {
+                node_idx = node.left_child
+            } else {
+                node_idx = node.right_child
+            }
+        }
+
+        node_idx
+    }
+
+    /// Predicts the value for a regression sample.
+    pub fn predict_regression(self: &DecisionTree, x: &[f64]) -> f64 {
+        let leaf_idx = self.find_leaf(x)
+        self.nodes[leaf_idx as usize].leaf_stats.predict_regression()
+    }
+
+    /// Predicts the class for a classification sample.
+    pub fn predict_class(self: &DecisionTree, x: &[f64]) -> i64 {
+        let leaf_idx = self.find_leaf(x)
+        self.nodes[leaf_idx as usize].leaf_stats.predict_class()
+    }
+
+    /// Updates feature importances based on splits.
+    pub fn compute_feature_importances(self: &!DecisionTree) {
+        // Reset importances
+        var j: usize = 0
+        while j < 1024 {
+            self.feature_importances[j] = 0.0
+            j = j + 1
+        }
+
+        // Accumulate importance from each split
+        var i: i64 = 0
+        while i < self.n_nodes {
+            let node = &self.nodes[i as usize]
+            if !node.is_leaf {
+                let feat = node.split.feature_idx as usize
+                if feat < 1024 {
+                    self.feature_importances[feat] = self.feature_importances[feat]
+                        + node.split.impurity_decrease * (node.split.n_samples as f64)
+                }
+            }
+            i = i + 1
+        }
+
+        // Normalize
+        var total = 0.0
+        j = 0
+        while j < self.n_features as usize {
+            total = total + self.feature_importances[j]
+            j = j + 1
+        }
+
+        if total > 0.0 {
+            j = 0
+            while j < self.n_features as usize {
+                self.feature_importances[j] = self.feature_importances[j] / total
+                j = j + 1
+            }
+        }
+    }
+
+    /// Returns the importance of a feature.
+    pub fn feature_importance(self: &DecisionTree, feature_idx: i64) -> f64 {
+        self.feature_importances[feature_idx as usize]
+    }
+}
+
+// ============================================================================
+// Tests
+// ============================================================================
+
+fn main() -> i32 {
+    // Test SplitInfo
+    let split = SplitInfo::axis_aligned(0, 5.0, 0.25, 100)
+    if split.feature_idx != 0 { return 1 }
+    if split.threshold != 5.0 { return 2 }
+
+    // Test split evaluation
+    let x1 = [3.0, 7.0]
+    let x2 = [7.0, 3.0]
+    if !split.evaluate(&x1) { return 3 }  // 3 <= 5, should go left
+    if split.evaluate(&x2) { return 4 }   // 7 > 5, should go right
+
+    // Test LeafStats for regression
+    var leaf = LeafStats::new_regression()
+    leaf.add_regression_sample(1.0)
+    leaf.add_regression_sample(2.0)
+    leaf.add_regression_sample(3.0)
+    if leaf.n_samples != 3 { return 5 }
+    // Mean should be 2.0
+    let mean_diff = leaf.mean - 2.0
+    if mean_diff < -0.001 || mean_diff > 0.001 { return 6 }
+
+    // Test LeafStats for classification
+    var clf_leaf = LeafStats::new_classification(3)
+    clf_leaf.add_classification_sample(0)
+    clf_leaf.add_classification_sample(0)
+    clf_leaf.add_classification_sample(1)
+    if clf_leaf.predicted_class != 0 { return 7 }  // Class 0 has most samples
+
+    // Test TreeNode
+    let node = TreeNode::leaf(2, leaf, 0, 1)
+    if !node.is_leaf { return 8 }
+    if node.depth != 2 { return 9 }
+
+    // Test DecisionTree creation
+    let tree = DecisionTree::new(4, 3, TaskType::MultiClassification)
+    if tree.n_nodes != 0 { return 10 }
+    if tree.n_features != 4 { return 11 }
+
+    // All tests passed
+    0
+}

@@ -1,0 +1,629 @@
+//! Pool (Slab) Allocator for Sounio
+//!
+//! A pool allocator provides O(1) allocation and deallocation for fixed-size objects.
+//! It pre-allocates a contiguous block of memory divided into slots of equal size,
+//! maintaining a free list for efficient reuse.
+//!
+//! Key properties:
+//! - O(1) allocation and deallocation
+//! - Cache-friendly contiguous storage
+//! - No fragmentation (all slots same size)
+//! - Optional thread-safety with ConcurrentPool
+//!
+//! Ideal use cases:
+//! - Game entity/object management
+//! - Network connection handles
+//! - Particle systems
+//! - Any scenario with many same-sized allocations
+//!
+//! References:
+//! - Slab allocator pattern (Jeff Bonwick, 1994)
+//! - Qt Pool Allocator: https://www.qt.io/blog/a-fast-and-thread-safe-pool-allocator-for-qt-part-1
+
+use std::mem::layout::{Layout, LayoutError}
+use std::mem::allocator::{Allocator, AllocError, NonNull}
+use std::mem::cell::Cell
+use std::sync::atomic::{AtomicIsize, AtomicUsize, Ordering}
+
+// ============================================================================
+// Pool Statistics
+// ============================================================================
+
+/// Statistics about pool usage.
+pub struct PoolStats {
+    /// Number of currently allocated objects
+    pub allocated: usize,
+    /// Number of free slots
+    pub free: usize,
+    /// Total capacity
+    pub capacity: usize,
+    /// Utilization as percentage (0.0 - 1.0)
+    pub utilization: f64,
+}
+
+// ============================================================================
+// Pool Allocator (Single-Threaded)
+// ============================================================================
+
+/// A fixed-size object pool allocator.
+///
+/// Pool pre-allocates slots for objects of a fixed size, providing O(1)
+/// allocation and deallocation via a free list.
+///
+/// # Memory Layout
+///
+/// ```text
+/// +--------+--------+--------+--------+--------+
+/// | Slot 0 | Slot 1 | Slot 2 | Slot 3 | Slot 4 |
+/// +--------+--------+--------+--------+--------+
+///     ^                   ^
+///     |                   |
+///   free_head -----> next_free_idx (stored in unused slots)
+/// ```
+///
+/// When a slot is free, it stores the index of the next free slot.
+/// When allocated, the entire slot is available for user data.
+///
+/// # Examples
+///
+/// ```sio
+/// struct Particle {
+///     x: f64, y: f64, z: f64,
+///     vx: f64, vy: f64, vz: f64,
+/// }
+///
+/// fn simulate() with Alloc {
+///     // Pool for 10000 particles (48 bytes each)
+///     let pool = Pool::new(48, 8, 10000)
+///
+///     // Fast allocation
+///     let p1 = pool.alloc()?
+///     let p2 = pool.alloc()?
+///
+///     // Fast deallocation (reuses slots)
+///     pool.dealloc(p1)
+///
+///     // p1's slot is now available
+///     let p3 = pool.alloc()?  // May reuse p1's slot
+/// }
+/// ```
+pub struct Pool {
+    /// Memory block containing all slots
+    block: *mut u8,
+    /// Size of each slot (padded for alignment and free list)
+    slot_size: usize,
+    /// Number of slots
+    capacity: usize,
+    /// Free list head (-1 if empty)
+    free_head: Cell<isize>,
+    /// Number of allocated slots
+    allocated: Cell<usize>,
+    /// Element alignment
+    elem_align: usize,
+}
+
+impl Pool {
+    /// Creates a new pool with capacity for `n` objects of the given size.
+    ///
+    /// # Arguments
+    ///
+    /// * `elem_size` - Size of each element in bytes
+    /// * `elem_align` - Alignment requirement for each element
+    /// * `capacity` - Number of slots to pre-allocate
+    ///
+    /// # Examples
+    ///
+    /// ```sio
+    /// // Pool for 1000 64-byte objects with 8-byte alignment
+    /// let pool = Pool::new(64, 8, 1000)
+    /// ```
+    pub fn new(elem_size: usize, elem_align: usize, capacity: usize) -> Pool with Alloc {
+        // Slot must be large enough for element AND free list index
+        let min_slot_size = if elem_size > 8 { elem_size } else { 8 }
+        let slot_size = (min_slot_size + elem_align - 1) & !(elem_align - 1)
+
+        let total_size = slot_size * capacity
+        let block = alloc::alloc_bytes(total_size, elem_align)
+
+        // Initialize free list: each slot points to the next
+        var i: usize = 0
+        while i < capacity - 1 {
+            unsafe {
+                let slot = (block as usize + i * slot_size) as *mut isize
+                *slot = (i + 1) as isize
+            }
+            i = i + 1
+        }
+        // Last slot points to nothing (-1)
+        unsafe {
+            let last = (block as usize + (capacity - 1) * slot_size) as *mut isize
+            *last = -1
+        }
+
+        Pool {
+            block,
+            slot_size,
+            capacity,
+            free_head: Cell::new(0),
+            allocated: Cell::new(0),
+            elem_align,
+        }
+    }
+
+    /// Allocates an object from the pool.
+    ///
+    /// Returns a pointer to the allocated slot, or an error if the pool is full.
+    ///
+    /// # Performance
+    ///
+    /// O(1) - just pops from free list.
+    pub fn alloc(self: &Pool) -> Result<NonNull<u8>, AllocError> {
+        let head = self.free_head.get()
+
+        if head < 0 {
+            return Err(AllocError::OutOfMemory)
+        }
+
+        unsafe {
+            let slot = (self.block as usize + (head as usize) * self.slot_size) as *mut u8
+            let next = *(slot as *const isize)
+
+            self.free_head.set(next)
+            self.allocated.set(self.allocated.get() + 1)
+
+            match NonNull::new(slot) {
+                Some(ptr) => Ok(ptr),
+                None => Err(AllocError::OutOfMemory),
+            }
+        }
+    }
+
+    /// Returns an object to the pool.
+    ///
+    /// # Safety
+    ///
+    /// The pointer must have been allocated from this pool.
+    ///
+    /// # Performance
+    ///
+    /// O(1) - just pushes to free list.
+    pub unsafe fn dealloc(self: &Pool, ptr: NonNull<u8>) {
+        let slot = ptr.as_ptr()
+        let index = ((slot as usize) - (self.block as usize)) / self.slot_size
+
+        // Add to free list head
+        unsafe {
+            *(slot as *mut isize) = self.free_head.get()
+        }
+        self.free_head.set(index as isize)
+        self.allocated.set(self.allocated.get() - 1)
+    }
+
+    /// Returns the number of allocated objects.
+    pub fn allocated_count(self: &Pool) -> usize {
+        self.allocated.get()
+    }
+
+    /// Returns the number of free slots.
+    pub fn free_count(self: &Pool) -> usize {
+        self.capacity - self.allocated.get()
+    }
+
+    /// Returns true if the pool has no free slots.
+    pub fn is_full(self: &Pool) -> bool {
+        self.free_head.get() < 0
+    }
+
+    /// Returns true if no objects are allocated.
+    pub fn is_empty(self: &Pool) -> bool {
+        self.allocated.get() == 0
+    }
+
+    /// Returns total capacity.
+    pub fn capacity(self: &Pool) -> usize {
+        self.capacity
+    }
+
+    /// Returns detailed statistics.
+    pub fn stats(self: &Pool) -> PoolStats {
+        let allocated = self.allocated.get()
+        let utilization = if self.capacity > 0 {
+            (allocated as f64) / (self.capacity as f64)
+        } else {
+            0.0
+        }
+
+        PoolStats {
+            allocated,
+            free: self.capacity - allocated,
+            capacity: self.capacity,
+            utilization,
+        }
+    }
+
+    /// Checks if a pointer was allocated from this pool.
+    pub fn contains(self: &Pool, ptr: *const u8) -> bool {
+        let ptr_addr = ptr as usize
+        let block_addr = self.block as usize
+        let end_addr = block_addr + self.slot_size * self.capacity
+
+        ptr_addr >= block_addr && ptr_addr < end_addr
+    }
+
+    /// Resets the pool, marking all slots as free.
+    ///
+    /// # Warning
+    ///
+    /// This does NOT call destructors. Only use when you know all
+    /// allocated objects have been properly cleaned up.
+    pub fn reset(self: &Pool) {
+        // Reinitialize free list
+        var i: usize = 0
+        while i < self.capacity - 1 {
+            unsafe {
+                let slot = (self.block as usize + i * self.slot_size) as *mut isize
+                *slot = (i + 1) as isize
+            }
+            i = i + 1
+        }
+        unsafe {
+            let last = (self.block as usize + (self.capacity - 1) * self.slot_size) as *mut isize
+            *last = -1
+        }
+
+        self.free_head.set(0)
+        self.allocated.set(0)
+    }
+}
+
+impl Drop for Pool {
+    fn drop(self: &!Pool) with Alloc {
+        let total_size = self.slot_size * self.capacity
+        unsafe {
+            alloc::dealloc_bytes(self.block, total_size, self.elem_align)
+        }
+    }
+}
+
+// ============================================================================
+// Concurrent Pool (Thread-Safe)
+// ============================================================================
+
+/// A thread-safe object pool using lock-free operations.
+///
+/// ConcurrentPool uses atomic compare-and-swap operations for the free list,
+/// allowing multiple threads to allocate and deallocate simultaneously
+/// without locking.
+///
+/// # Performance
+///
+/// - O(1) allocation and deallocation
+/// - Lock-free (uses CAS loops)
+/// - May retry on contention
+///
+/// # Thread Safety
+///
+/// Safe to share across threads. Multiple threads can allocate and
+/// deallocate concurrently.
+///
+/// # Examples
+///
+/// ```sio
+/// let pool = ConcurrentPool::new(64, 8, 10000)
+///
+/// // Safe to use from multiple threads
+/// spawn(|| {
+///     let obj = pool.alloc()?
+///     // Use obj...
+///     pool.dealloc(obj)
+/// })
+/// ```
+pub struct ConcurrentPool {
+    /// Memory block
+    block: *mut u8,
+    /// Slot size
+    slot_size: usize,
+    /// Capacity
+    capacity: usize,
+    /// Atomic free list head
+    free_head: AtomicIsize,
+    /// Atomic allocation count
+    allocated: AtomicUsize,
+    /// Element alignment
+    elem_align: usize,
+}
+
+// Mark as thread-safe
+unsafe impl Send for ConcurrentPool {}
+unsafe impl Sync for ConcurrentPool {}
+
+impl ConcurrentPool {
+    /// Creates a new concurrent pool.
+    pub fn new(elem_size: usize, elem_align: usize, capacity: usize) -> ConcurrentPool with Alloc {
+        let min_slot_size = if elem_size > 8 { elem_size } else { 8 }
+        let slot_size = (min_slot_size + elem_align - 1) & !(elem_align - 1)
+
+        let total_size = slot_size * capacity
+        let block = alloc::alloc_bytes(total_size, elem_align)
+
+        // Initialize free list
+        var i: usize = 0
+        while i < capacity - 1 {
+            unsafe {
+                let slot = (block as usize + i * slot_size) as *mut isize
+                *slot = (i + 1) as isize
+            }
+            i = i + 1
+        }
+        unsafe {
+            let last = (block as usize + (capacity - 1) * slot_size) as *mut isize
+            *last = -1
+        }
+
+        ConcurrentPool {
+            block,
+            slot_size,
+            capacity,
+            free_head: AtomicIsize::new(0),
+            allocated: AtomicUsize::new(0),
+            elem_align,
+        }
+    }
+
+    /// Allocates using lock-free CAS.
+    pub fn alloc(self: &ConcurrentPool) -> Result<NonNull<u8>, AllocError> {
+        loop {
+            let head = self.free_head.load(Ordering::Acquire)
+
+            if head < 0 {
+                return Err(AllocError::OutOfMemory)
+            }
+
+            unsafe {
+                let slot = (self.block as usize + (head as usize) * self.slot_size) as *mut u8
+                let next = *(slot as *const isize)
+
+                // CAS: if head hasn't changed, update to next
+                match self.free_head.compare_exchange_weak(
+                    head, next,
+                    Ordering::Release,
+                    Ordering::Relaxed
+                ) {
+                    Ok(_) => {
+                        self.allocated.fetch_add(1, Ordering::Relaxed)
+                        return match NonNull::new(slot) {
+                            Some(ptr) => Ok(ptr),
+                            None => Err(AllocError::OutOfMemory),
+                        }
+                    },
+                    Err(_) => {
+                        // CAS failed, retry
+                    }
+                }
+            }
+        }
+    }
+
+    /// Deallocates using lock-free push.
+    pub unsafe fn dealloc(self: &ConcurrentPool, ptr: NonNull<u8>) {
+        let slot = ptr.as_ptr()
+        let index = ((slot as usize) - (self.block as usize)) / self.slot_size
+
+        loop {
+            let head = self.free_head.load(Ordering::Relaxed)
+
+            unsafe {
+                *(slot as *mut isize) = head
+            }
+
+            match self.free_head.compare_exchange_weak(
+                head, index as isize,
+                Ordering::Release,
+                Ordering::Relaxed
+            ) {
+                Ok(_) => {
+                    self.allocated.fetch_sub(1, Ordering::Relaxed)
+                    return
+                },
+                Err(_) => {
+                    // CAS failed, retry
+                }
+            }
+        }
+    }
+
+    /// Returns current allocation count (approximate in concurrent context).
+    pub fn allocated_count(self: &ConcurrentPool) -> usize {
+        self.allocated.load(Ordering::Relaxed)
+    }
+
+    /// Returns free count (approximate).
+    pub fn free_count(self: &ConcurrentPool) -> usize {
+        self.capacity - self.allocated.load(Ordering::Relaxed)
+    }
+
+    /// Returns true if pool appears full.
+    pub fn is_full(self: &ConcurrentPool) -> bool {
+        self.free_head.load(Ordering::Relaxed) < 0
+    }
+
+    /// Returns capacity.
+    pub fn capacity(self: &ConcurrentPool) -> usize {
+        self.capacity
+    }
+}
+
+impl Drop for ConcurrentPool {
+    fn drop(self: &!ConcurrentPool) with Alloc {
+        let total_size = self.slot_size * self.capacity
+        unsafe {
+            alloc::dealloc_bytes(self.block, total_size, self.elem_align)
+        }
+    }
+}
+
+// ============================================================================
+// Growing Pool
+// ============================================================================
+
+/// A pool that grows by adding new blocks when full.
+///
+/// Unlike fixed Pool, GrowingPool can accommodate unlimited allocations
+/// by adding new blocks as needed.
+pub struct GrowingPool {
+    /// List of allocated blocks
+    blocks: Vec<PoolBlock>,
+    /// Element size
+    elem_size: usize,
+    /// Element alignment
+    elem_align: usize,
+    /// Slots per block
+    block_capacity: usize,
+    /// Current block index
+    current: Cell<usize>,
+    /// Total allocated count
+    total_allocated: Cell<usize>,
+}
+
+struct PoolBlock {
+    pool: Pool,
+}
+
+impl GrowingPool {
+    /// Creates a growing pool with specified block capacity.
+    pub fn new(elem_size: usize, elem_align: usize, block_capacity: usize) -> GrowingPool with Alloc {
+        var blocks = Vec::new()
+        blocks.push(PoolBlock {
+            pool: Pool::new(elem_size, elem_align, block_capacity)
+        })
+
+        GrowingPool {
+            blocks,
+            elem_size,
+            elem_align,
+            block_capacity,
+            current: Cell::new(0),
+            total_allocated: Cell::new(0),
+        }
+    }
+
+    /// Allocates an object, growing if needed.
+    pub fn alloc(self: &!GrowingPool) -> Result<NonNull<u8>, AllocError> with Alloc {
+        // Try current block
+        let cur = self.current.get()
+        match self.blocks[cur].pool.alloc() {
+            Ok(ptr) => {
+                self.total_allocated.set(self.total_allocated.get() + 1)
+                return Ok(ptr)
+            },
+            Err(_) => {}
+        }
+
+        // Try other blocks
+        var i: usize = 0
+        while i < self.blocks.len() {
+            if i != cur {
+                match self.blocks[i].pool.alloc() {
+                    Ok(ptr) => {
+                        self.current.set(i)
+                        self.total_allocated.set(self.total_allocated.get() + 1)
+                        return Ok(ptr)
+                    },
+                    Err(_) => {}
+                }
+            }
+            i = i + 1
+        }
+
+        // Add new block
+        self.blocks.push(PoolBlock {
+            pool: Pool::new(self.elem_size, self.elem_align, self.block_capacity)
+        })
+        self.current.set(self.blocks.len() - 1)
+
+        match self.blocks[self.blocks.len() - 1].pool.alloc() {
+            Ok(ptr) => {
+                self.total_allocated.set(self.total_allocated.get() + 1)
+                Ok(ptr)
+            },
+            Err(e) => Err(e)
+        }
+    }
+
+    /// Deallocates an object.
+    ///
+    /// # Safety
+    ///
+    /// Pointer must have been allocated from this pool.
+    pub unsafe fn dealloc(self: &GrowingPool, ptr: NonNull<u8>) {
+        // Find which block owns this pointer
+        var i: usize = 0
+        while i < self.blocks.len() {
+            if self.blocks[i].pool.contains(ptr.as_ptr()) {
+                unsafe {
+                    self.blocks[i].pool.dealloc(ptr)
+                }
+                self.total_allocated.set(self.total_allocated.get() - 1)
+                return
+            }
+            i = i + 1
+        }
+        // Pointer not from this pool - undefined behavior
+    }
+
+    /// Returns total allocated count.
+    pub fn allocated_count(self: &GrowingPool) -> usize {
+        self.total_allocated.get()
+    }
+
+    /// Returns total capacity across all blocks.
+    pub fn total_capacity(self: &GrowingPool) -> usize {
+        self.blocks.len() * self.block_capacity
+    }
+
+    /// Returns number of blocks.
+    pub fn block_count(self: &GrowingPool) -> usize {
+        self.blocks.len()
+    }
+}
+
+// ============================================================================
+// Tests
+// ============================================================================
+
+fn main() -> i32 {
+    // Test slot size calculation
+    let elem_size: usize = 5
+    let elem_align: usize = 8
+    let min_slot = if elem_size > 8 { elem_size } else { 8 }
+    let slot_size = (min_slot + elem_align - 1) & !(elem_align - 1)
+    if slot_size != 8 { return 1 }
+
+    // Test larger element
+    let big_elem: usize = 64
+    let big_min = if big_elem > 8 { big_elem } else { 8 }
+    let big_slot = (big_min + 8 - 1) & !(8 - 1)
+    if big_slot != 64 { return 2 }
+
+    // Test index calculation
+    let block_addr: usize = 0x1000
+    let slot_sz: usize = 64
+    let ptr_addr: usize = 0x1080  // Second slot
+    let index = (ptr_addr - block_addr) / slot_sz
+    if index != 2 { return 3 }
+
+    // Test contains logic
+    let pool_start: usize = 0x2000
+    let pool_end: usize = pool_start + 64 * 100  // 100 slots of 64 bytes
+    let test_ptr: usize = 0x2100
+    let in_range = test_ptr >= pool_start && test_ptr < pool_end
+    if !in_range { return 4 }
+
+    // Test out of range
+    let out_ptr: usize = 0x5000
+    let out_range = out_ptr >= pool_start && out_ptr < pool_end
+    if out_range { return 5 }  // Should be false
+
+    // All tests passed
+    0
+}

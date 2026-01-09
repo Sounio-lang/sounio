@@ -1,0 +1,458 @@
+//! Epistemic Integration for Tree-Based Models
+//!
+//! This module integrates tree-based ML models with Sounio's epistemic computing
+//! framework, providing Knowledge<T> types with full uncertainty quantification.
+//!
+//! Features:
+//! - Conversion of tree predictions to Knowledge<f64>
+//! - Aleatoric vs epistemic uncertainty decomposition
+//! - Conformal prediction intervals with coverage guarantees
+//! - Provenance tracking for predictions
+//!
+//! References:
+//! - Sounio Epistemic Computing Guide
+//! - Conformal Prediction for Trees (2024-2025 SOTA literature)
+//! - GUM (Guide to Uncertainty in Measurement) compliance
+
+use std::ml::trees::node::{DecisionTree, TaskType}
+use std::ml::trees::forest::{RandomForest, ForestPrediction, predict_with_uncertainty}
+
+// ============================================================================
+// Epistemic Types (local definitions to avoid circular deps)
+// ============================================================================
+
+/// Confidence based on Beta distribution.
+pub struct BetaConfidence {
+    /// Effective success rate
+    alpha: f64,
+    /// Effective failure rate
+    beta: f64,
+    /// Point estimate of confidence
+    point_estimate: f64,
+}
+
+impl BetaConfidence {
+    /// Creates confidence from success rate and sample size.
+    pub fn from_rate(rate: f64, n: f64) -> BetaConfidence {
+        let alpha = rate * n + 1.0
+        let beta = (1.0 - rate) * n + 1.0
+        BetaConfidence {
+            alpha,
+            beta,
+            point_estimate: rate,
+        }
+    }
+
+    /// Creates high confidence (many observations).
+    pub fn high() -> BetaConfidence {
+        BetaConfidence::from_rate(0.95, 100.0)
+    }
+
+    /// Creates medium confidence.
+    pub fn medium() -> BetaConfidence {
+        BetaConfidence::from_rate(0.75, 20.0)
+    }
+
+    /// Creates low confidence (few observations).
+    pub fn low() -> BetaConfidence {
+        BetaConfidence::from_rate(0.5, 5.0)
+    }
+
+    /// Returns the point estimate.
+    pub fn value(self: &BetaConfidence) -> f64 {
+        self.point_estimate
+    }
+
+    /// Returns lower bound of 95% credible interval.
+    pub fn lower_bound(self: &BetaConfidence) -> f64 {
+        // Approximation using normal approximation to beta
+        let mean = self.alpha / (self.alpha + self.beta)
+        let var = (self.alpha * self.beta) /
+                  ((self.alpha + self.beta) * (self.alpha + self.beta) * (self.alpha + self.beta + 1.0))
+        let std = sqrt_f64(var)
+        mean - 1.96 * std
+    }
+}
+
+/// Source of a prediction.
+pub enum PredictionSource {
+    /// Single decision tree
+    SingleTree,
+    /// Random forest ensemble
+    RandomForest { n_trees: i64 },
+    /// Gradient boosted trees
+    GradientBoosting { n_trees: i64 },
+    /// Conformal-calibrated prediction
+    Conformal { coverage: f64 },
+}
+
+impl PredictionSource {
+    pub fn description(self: &PredictionSource) -> string {
+        match self {
+            PredictionSource::SingleTree => "decision_tree",
+            PredictionSource::RandomForest { n_trees } => "random_forest",
+            PredictionSource::GradientBoosting { n_trees } => "gradient_boosting",
+            PredictionSource::Conformal { coverage } => "conformal_prediction",
+        }
+    }
+}
+
+// ============================================================================
+// Tree Prediction with Epistemic Metadata
+// ============================================================================
+
+/// A tree prediction with full epistemic metadata.
+///
+/// This is Sounio's native prediction type for tree models, carrying
+/// uncertainty, confidence, and provenance information.
+pub struct TreeKnowledge {
+    /// Point prediction
+    pub value: f64,
+
+    /// Standard uncertainty (combined aleatoric + epistemic)
+    pub std_uncertainty: f64,
+
+    /// Aleatoric uncertainty (irreducible data noise)
+    pub aleatoric: f64,
+
+    /// Epistemic uncertainty (reducible model uncertainty)
+    pub epistemic: f64,
+
+    /// Confidence (0-1, based on sample support)
+    pub confidence: BetaConfidence,
+
+    /// Prediction interval lower bound
+    pub interval_lo: f64,
+
+    /// Prediction interval upper bound
+    pub interval_hi: f64,
+
+    /// Coverage probability for the interval
+    pub coverage: f64,
+
+    /// Source of prediction
+    pub source: i32,  // Encoded PredictionSource
+
+    /// Number of training samples supporting this prediction
+    pub n_support: i64,
+}
+
+impl TreeKnowledge {
+    /// Creates TreeKnowledge from a forest prediction.
+    pub fn from_forest_prediction(pred: ForestPrediction) -> TreeKnowledge {
+        let std_unc = sqrt_f64(pred.total_variance)
+        let conf = BetaConfidence::from_rate(pred.confidence, pred.n_trees as f64)
+        let (lo, hi) = pred.prediction_interval(0.95)
+
+        TreeKnowledge {
+            value: pred.value,
+            std_uncertainty: std_unc,
+            aleatoric: sqrt_f64(pred.aleatoric_uncertainty),
+            epistemic: sqrt_f64(pred.epistemic_uncertainty),
+            confidence: conf,
+            interval_lo: lo,
+            interval_hi: hi,
+            coverage: 0.95,
+            source: 1,  // RandomForest
+            n_support: pred.n_trees,
+        }
+    }
+
+    /// Creates TreeKnowledge from a single tree prediction.
+    pub fn from_tree(value: f64, variance: f64, n_samples: i64) -> TreeKnowledge {
+        let std_unc = sqrt_f64(variance)
+        let conf = BetaConfidence::from_rate(
+            1.0 - 1.0 / (1.0 + (n_samples as f64)),
+            n_samples as f64
+        )
+
+        TreeKnowledge {
+            value,
+            std_uncertainty: std_unc,
+            aleatoric: std_unc,
+            epistemic: 0.0,  // Single tree has no epistemic uncertainty decomposition
+            confidence: conf,
+            interval_lo: value - 1.96 * std_unc,
+            interval_hi: value + 1.96 * std_unc,
+            coverage: 0.95,
+            source: 0,  // SingleTree
+            n_support: n_samples,
+        }
+    }
+
+    /// Returns expanded uncertainty at k standard deviations.
+    pub fn expanded_uncertainty(self: &TreeKnowledge, k: f64) -> f64 {
+        self.std_uncertainty * k
+    }
+
+    /// Returns true if the confidence meets threshold.
+    pub fn is_confident(self: &TreeKnowledge, threshold: f64) -> bool {
+        self.confidence.value() >= threshold
+    }
+
+    /// Returns the relative uncertainty (coefficient of variation).
+    pub fn relative_uncertainty(self: &TreeKnowledge) -> f64 {
+        if self.value == 0.0 {
+            if self.std_uncertainty == 0.0 { 0.0 } else { 1.0 }
+        } else {
+            let abs_val = if self.value < 0.0 { -self.value } else { self.value }
+            self.std_uncertainty / abs_val
+        }
+    }
+
+    /// Checks if a value is within the prediction interval.
+    pub fn contains(self: &TreeKnowledge, x: f64) -> bool {
+        x >= self.interval_lo && x <= self.interval_hi
+    }
+}
+
+fn sqrt_f64(x: f64) -> f64 {
+    if x <= 0.0 { return 0.0 }
+    var guess = x / 2.0
+    if guess == 0.0 { guess = 1.0 }
+    var i = 0
+    while i < 20 {
+        guess = (guess + x / guess) / 2.0
+        i = i + 1
+    }
+    guess
+}
+
+// ============================================================================
+// Conformal Prediction
+// ============================================================================
+
+/// Conformal prediction calibration data.
+///
+/// Stores residuals from calibration set for computing valid prediction intervals.
+pub struct ConformalCalibrator {
+    /// Sorted residuals from calibration set
+    residuals: [f64; 4096],
+    /// Number of calibration samples
+    n_calibration: i64,
+    /// Target coverage (e.g., 0.95)
+    coverage: f64,
+    /// Computed quantile for intervals
+    quantile: f64,
+}
+
+impl ConformalCalibrator {
+    /// Creates an empty calibrator.
+    pub fn new(coverage: f64) -> ConformalCalibrator {
+        ConformalCalibrator {
+            residuals: [0.0; 4096],
+            n_calibration: 0,
+            coverage,
+            quantile: 0.0,
+        }
+    }
+
+    /// Calibrates using a forest and calibration data.
+    pub fn calibrate(
+        forest: &RandomForest,
+        X_cal: &[f64],
+        y_cal: &[f64],
+        n_cal: i64,
+        n_features: i64,
+        coverage: f64
+    ) -> ConformalCalibrator {
+        var cal = ConformalCalibrator::new(coverage)
+
+        // Compute residuals
+        var i: i64 = 0
+        while i < n_cal && i < 4096 {
+            var x: [f64; 1024] = [0.0; 1024]
+            var f: i64 = 0
+            while f < n_features && f < 1024 {
+                x[f as usize] = X_cal[(i as usize) * (n_features as usize) + (f as usize)]
+                f = f + 1
+            }
+
+            let pred = predict_with_uncertainty(forest, &x)
+            let residual = y_cal[i as usize] - pred.value
+            let abs_residual = if residual < 0.0 { -residual } else { residual }
+            cal.residuals[i as usize] = abs_residual
+
+            i = i + 1
+        }
+        cal.n_calibration = i
+
+        // Sort residuals (bubble sort for simplicity)
+        var pass = 0
+        while pass < cal.n_calibration - 1 {
+            var j: i64 = 0
+            while j < cal.n_calibration - pass - 1 {
+                if cal.residuals[j as usize] > cal.residuals[(j + 1) as usize] {
+                    let tmp = cal.residuals[j as usize]
+                    cal.residuals[j as usize] = cal.residuals[(j + 1) as usize]
+                    cal.residuals[(j + 1) as usize] = tmp
+                }
+                j = j + 1
+            }
+            pass = pass + 1
+        }
+
+        // Compute quantile for coverage guarantee
+        let q_idx = ((cal.n_calibration + 1) as f64 * coverage) as i64
+        let idx = if q_idx >= cal.n_calibration { cal.n_calibration - 1 } else { q_idx }
+        cal.quantile = cal.residuals[idx as usize]
+
+        cal
+    }
+
+    /// Returns conformal prediction interval.
+    pub fn interval(self: &ConformalCalibrator, prediction: f64) -> (f64, f64) {
+        (prediction - self.quantile, prediction + self.quantile)
+    }
+
+    /// Returns the quantile used for intervals.
+    pub fn get_quantile(self: &ConformalCalibrator) -> f64 {
+        self.quantile
+    }
+}
+
+/// Prediction with conformal calibration.
+pub fn predict_conformal(
+    forest: &RandomForest,
+    calibrator: &ConformalCalibrator,
+    x: &[f64]
+) -> TreeKnowledge {
+    let pred = predict_with_uncertainty(forest, x)
+    var knowledge = TreeKnowledge::from_forest_prediction(pred)
+
+    // Override interval with conformal interval
+    let (lo, hi) = calibrator.interval(pred.value)
+    knowledge.interval_lo = lo
+    knowledge.interval_hi = hi
+    knowledge.coverage = calibrator.coverage
+    knowledge.source = 3  // Conformal
+
+    knowledge
+}
+
+// ============================================================================
+// Convenience Functions
+// ============================================================================
+
+/// Predicts with epistemic uncertainty using a forest.
+pub fn predict_epistemic(forest: &RandomForest, x: &[f64]) -> TreeKnowledge {
+    let pred = predict_with_uncertainty(forest, x)
+    TreeKnowledge::from_forest_prediction(pred)
+}
+
+/// Predicts with epistemic uncertainty using a single tree.
+pub fn predict_tree_epistemic(tree: &DecisionTree, x: &[f64]) -> TreeKnowledge {
+    let leaf_idx = tree.find_leaf(x)
+    let leaf = tree.get_node(leaf_idx)
+    let stats = leaf.stats()
+
+    TreeKnowledge::from_tree(
+        stats.predict_regression(),
+        stats.variance,
+        stats.n_samples
+    )
+}
+
+// ============================================================================
+// Uncertainty Propagation
+// ============================================================================
+
+/// Propagates uncertainty through a linear transformation y = ax + b.
+pub fn propagate_linear(knowledge: &TreeKnowledge, a: f64, b: f64) -> TreeKnowledge {
+    let abs_a = if a < 0.0 { -a } else { a }
+
+    TreeKnowledge {
+        value: a * knowledge.value + b,
+        std_uncertainty: abs_a * knowledge.std_uncertainty,
+        aleatoric: abs_a * knowledge.aleatoric,
+        epistemic: abs_a * knowledge.epistemic,
+        confidence: knowledge.confidence,
+        interval_lo: a * knowledge.interval_lo + b,
+        interval_hi: a * knowledge.interval_hi + b,
+        coverage: knowledge.coverage,
+        source: knowledge.source,
+        n_support: knowledge.n_support,
+    }
+}
+
+/// Combines two independent predictions.
+pub fn combine_independent(k1: &TreeKnowledge, k2: &TreeKnowledge) -> TreeKnowledge {
+    let combined_var = k1.std_uncertainty * k1.std_uncertainty +
+                       k2.std_uncertainty * k2.std_uncertainty
+    let combined_std = sqrt_f64(combined_var)
+
+    let combined_aleatoric = sqrt_f64(
+        k1.aleatoric * k1.aleatoric + k2.aleatoric * k2.aleatoric
+    )
+    let combined_epistemic = sqrt_f64(
+        k1.epistemic * k1.epistemic + k2.epistemic * k2.epistemic
+    )
+
+    // Combined confidence (conservative)
+    let min_conf = if k1.confidence.value() < k2.confidence.value() {
+        k1.confidence.value()
+    } else {
+        k2.confidence.value()
+    }
+
+    TreeKnowledge {
+        value: k1.value + k2.value,
+        std_uncertainty: combined_std,
+        aleatoric: combined_aleatoric,
+        epistemic: combined_epistemic,
+        confidence: BetaConfidence::from_rate(min_conf, k1.n_support as f64 + k2.n_support as f64),
+        interval_lo: k1.interval_lo + k2.interval_lo,
+        interval_hi: k1.interval_hi + k2.interval_hi,
+        coverage: if k1.coverage < k2.coverage { k1.coverage } else { k2.coverage },
+        source: k1.source,
+        n_support: k1.n_support + k2.n_support,
+    }
+}
+
+// ============================================================================
+// Tests
+// ============================================================================
+
+fn main() -> i32 {
+    // Test BetaConfidence
+    let conf = BetaConfidence::from_rate(0.8, 50.0)
+    if conf.value() < 0.79 || conf.value() > 0.81 { return 1 }
+
+    let high = BetaConfidence::high()
+    if high.value() < 0.9 { return 2 }
+
+    // Test sqrt_f64
+    let s = sqrt_f64(9.0)
+    if s < 2.9 || s > 3.1 { return 3 }
+
+    // Test TreeKnowledge creation
+    let tk = TreeKnowledge::from_tree(10.0, 4.0, 100)
+    // std = sqrt(4) = 2
+    if tk.std_uncertainty < 1.9 || tk.std_uncertainty > 2.1 { return 4 }
+    // interval should be roughly 10 +/- 3.92
+    if tk.interval_lo > 7.0 { return 5 }
+    if tk.interval_hi < 13.0 { return 6 }
+
+    // Test contains
+    if !tk.contains(10.0) { return 7 }
+    if tk.contains(20.0) { return 8 }
+
+    // Test relative uncertainty
+    let rel = tk.relative_uncertainty()
+    // 2.0 / 10.0 = 0.2
+    if rel < 0.19 || rel > 0.21 { return 9 }
+
+    // Test propagate_linear
+    let tk2 = propagate_linear(&tk, 2.0, 5.0)
+    // value = 2*10 + 5 = 25
+    if tk2.value < 24.9 || tk2.value > 25.1 { return 10 }
+    // std = 2 * 2 = 4
+    if tk2.std_uncertainty < 3.9 || tk2.std_uncertainty > 4.1 { return 11 }
+
+    // Test ConformalCalibrator creation
+    let cal = ConformalCalibrator::new(0.95)
+    if cal.coverage < 0.94 || cal.coverage > 0.96 { return 12 }
+
+    // All tests passed
+    0
+}

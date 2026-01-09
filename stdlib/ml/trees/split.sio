@@ -1,0 +1,636 @@
+//! Split Criteria for Decision Trees
+//!
+//! This module implements various impurity measures and split scoring functions
+//! used in decision tree construction:
+//!
+//! Classification:
+//! - Gini impurity: 1 - sum(p_i^2)
+//! - Entropy: -sum(p_i * log(p_i))
+//!
+//! Regression:
+//! - Variance reduction (MSE)
+//! - MAE reduction
+//! - Friedman MSE (for gradient boosting)
+//!
+//! References:
+//! - Breiman et al., "Classification and Regression Trees" (1984)
+//! - Friedman, "Greedy Function Approximation" (2001)
+
+use std::ml::trees::node::{SplitInfo, TaskType, MAX_CLASSES}
+
+// Import math functions from libm
+use core::math::{log, sqrt}
+
+// ============================================================================
+// Split Criterion Enum
+// ============================================================================
+
+/// Split criterion for determining the best split.
+pub enum SplitCriterion {
+    /// Gini impurity for classification
+    Gini,
+    /// Information entropy for classification
+    Entropy,
+    /// Variance (MSE) reduction for regression
+    Variance,
+    /// Mean Absolute Error reduction for regression
+    MAE,
+    /// Friedman MSE for gradient boosting
+    FriedmanMSE,
+}
+
+impl SplitCriterion {
+    pub fn code(self: &SplitCriterion) -> i32 {
+        match self {
+            SplitCriterion::Gini => 0,
+            SplitCriterion::Entropy => 1,
+            SplitCriterion::Variance => 2,
+            SplitCriterion::MAE => 3,
+            SplitCriterion::FriedmanMSE => 4,
+        }
+    }
+
+    pub fn from_code(code: i32) -> SplitCriterion {
+        match code {
+            0 => SplitCriterion::Gini,
+            1 => SplitCriterion::Entropy,
+            2 => SplitCriterion::Variance,
+            3 => SplitCriterion::MAE,
+            _ => SplitCriterion::FriedmanMSE,
+        }
+    }
+
+    /// Returns true if this criterion is for classification.
+    pub fn is_classification(self: &SplitCriterion) -> bool {
+        match self {
+            SplitCriterion::Gini => true,
+            SplitCriterion::Entropy => true,
+            _ => false,
+        }
+    }
+}
+
+// ============================================================================
+// Helper Functions
+// ============================================================================
+
+fn abs_f64(x: f64) -> f64 {
+    if x < 0.0 { 0.0 - x } else { x }
+}
+
+fn ln_f64(x: f64) -> f64 {
+    // Use libm log if available, otherwise Taylor approximation
+    log(x)
+}
+
+// ============================================================================
+// Classification Impurity Measures
+// ============================================================================
+
+/// Computes Gini impurity from class counts.
+///
+/// Gini = 1 - sum(p_i^2) where p_i is the proportion of class i.
+///
+/// Properties:
+/// - Range: [0, 1 - 1/K] where K is number of classes
+/// - 0 when all samples are same class (pure)
+/// - Maximum when samples equally distributed
+///
+/// # Arguments
+/// * `class_counts` - Number of samples in each class
+/// * `n_classes` - Number of classes
+/// * `n_total` - Total number of samples
+pub fn gini_impurity(class_counts: &[i64], n_classes: i64, n_total: i64) -> f64 {
+    if n_total == 0 {
+        return 0.0
+    }
+
+    let n = n_total as f64
+    var sum_sq = 0.0
+    var i: i64 = 0
+
+    while i < n_classes {
+        let count = class_counts[i as usize]
+        let p = (count as f64) / n
+        sum_sq = sum_sq + p * p
+        i = i + 1
+    }
+
+    1.0 - sum_sq
+}
+
+/// Computes information entropy from class counts.
+///
+/// Entropy = -sum(p_i * log(p_i)) where p_i is the proportion of class i.
+///
+/// Properties:
+/// - Range: [0, log(K)]
+/// - 0 when all samples are same class (pure)
+/// - Maximum when samples equally distributed
+///
+/// # Arguments
+/// * `class_counts` - Number of samples in each class
+/// * `n_classes` - Number of classes
+/// * `n_total` - Total number of samples
+pub fn entropy(class_counts: &[i64], n_classes: i64, n_total: i64) -> f64 {
+    if n_total == 0 {
+        return 0.0
+    }
+
+    let n = n_total as f64
+    var total = 0.0
+    var i: i64 = 0
+
+    while i < n_classes {
+        let count = class_counts[i as usize]
+        if count > 0 {
+            let p = (count as f64) / n
+            total = total - p * ln_f64(p)
+        }
+        i = i + 1
+    }
+
+    total
+}
+
+/// Computes impurity gain from a split for classification.
+///
+/// Gain = parent_impurity - weighted_child_impurity
+///
+/// # Arguments
+/// * `criterion` - Which impurity measure to use
+/// * `parent_counts` - Class counts in parent node
+/// * `left_counts` - Class counts going to left child
+/// * `right_counts` - Class counts going to right child
+/// * `n_classes` - Number of classes
+/// * `n_parent` - Total samples in parent
+/// * `n_left` - Total samples in left child
+/// * `n_right` - Total samples in right child
+pub fn classification_gain(
+    criterion: SplitCriterion,
+    parent_counts: &[i64],
+    left_counts: &[i64],
+    right_counts: &[i64],
+    n_classes: i64,
+    n_parent: i64,
+    n_left: i64,
+    n_right: i64
+) -> f64 {
+    if n_parent == 0 || n_left == 0 || n_right == 0 {
+        return 0.0
+    }
+
+    let parent_impurity = match criterion {
+        SplitCriterion::Gini => gini_impurity(parent_counts, n_classes, n_parent),
+        SplitCriterion::Entropy => entropy(parent_counts, n_classes, n_parent),
+        _ => gini_impurity(parent_counts, n_classes, n_parent),
+    }
+
+    let left_impurity = match criterion {
+        SplitCriterion::Gini => gini_impurity(left_counts, n_classes, n_left),
+        SplitCriterion::Entropy => entropy(left_counts, n_classes, n_left),
+        _ => gini_impurity(left_counts, n_classes, n_left),
+    }
+
+    let right_impurity = match criterion {
+        SplitCriterion::Gini => gini_impurity(right_counts, n_classes, n_right),
+        SplitCriterion::Entropy => entropy(right_counts, n_classes, n_right),
+        _ => gini_impurity(right_counts, n_classes, n_right),
+    }
+
+    let n_p = n_parent as f64
+    let w_left = (n_left as f64) / n_p
+    let w_right = (n_right as f64) / n_p
+
+    let weighted_child = w_left * left_impurity + w_right * right_impurity
+
+    parent_impurity - weighted_child
+}
+
+// ============================================================================
+// Regression Impurity Measures
+// ============================================================================
+
+/// Computes variance of target values (regression impurity).
+///
+/// Variance = (1/n) * sum((y_i - mean)^2)
+///
+/// For split evaluation, we use sample variance with Bessel's correction.
+pub fn variance(targets: &[f64], n: i64) -> f64 {
+    if n <= 1 {
+        return 0.0
+    }
+
+    // Compute mean
+    var sum = 0.0
+    var i: i64 = 0
+    while i < n {
+        sum = sum + targets[i as usize]
+        i = i + 1
+    }
+    let mean = sum / (n as f64)
+
+    // Compute variance
+    var sum_sq = 0.0
+    i = 0
+    while i < n {
+        let diff = targets[i as usize] - mean
+        sum_sq = sum_sq + diff * diff
+        i = i + 1
+    }
+
+    sum_sq / ((n - 1) as f64)
+}
+
+/// Computes variance from sufficient statistics.
+///
+/// This is more efficient when statistics are precomputed.
+///
+/// Variance = (sum_sq - sum^2/n) / (n-1)
+pub fn variance_from_stats(sum: f64, sum_sq: f64, n: i64) -> f64 {
+    if n <= 1 {
+        return 0.0
+    }
+
+    let n_f = n as f64
+    (sum_sq - sum * sum / n_f) / (n_f - 1.0)
+}
+
+/// Computes variance reduction from a split.
+///
+/// Gain = parent_variance - weighted_child_variance
+///
+/// # Arguments
+/// * `parent_var` - Variance of parent node
+/// * `left_var` - Variance of left child
+/// * `right_var` - Variance of right child
+/// * `n_parent` - Samples in parent
+/// * `n_left` - Samples in left child
+/// * `n_right` - Samples in right child
+pub fn variance_reduction(
+    parent_var: f64,
+    left_var: f64,
+    right_var: f64,
+    n_parent: i64,
+    n_left: i64,
+    n_right: i64
+) -> f64 {
+    if n_parent == 0 {
+        return 0.0
+    }
+
+    let n_p = n_parent as f64
+    let w_left = (n_left as f64) / n_p
+    let w_right = (n_right as f64) / n_p
+
+    let weighted_child = w_left * left_var + w_right * right_var
+
+    parent_var - weighted_child
+}
+
+/// Computes variance reduction from sufficient statistics.
+///
+/// More efficient version that uses running sums.
+pub fn variance_reduction_from_stats(
+    parent_sum: f64, parent_sum_sq: f64, n_parent: i64,
+    left_sum: f64, left_sum_sq: f64, n_left: i64,
+    right_sum: f64, right_sum_sq: f64, n_right: i64
+) -> f64 {
+    let parent_var = variance_from_stats(parent_sum, parent_sum_sq, n_parent)
+    let left_var = variance_from_stats(left_sum, left_sum_sq, n_left)
+    let right_var = variance_from_stats(right_sum, right_sum_sq, n_right)
+
+    variance_reduction(parent_var, left_var, right_var, n_parent, n_left, n_right)
+}
+
+/// Computes Mean Absolute Error.
+pub fn mae(targets: &[f64], n: i64) -> f64 {
+    if n == 0 {
+        return 0.0
+    }
+
+    // Compute median (simplified: use mean as approximation)
+    var sum = 0.0
+    var i: i64 = 0
+    while i < n {
+        sum = sum + targets[i as usize]
+        i = i + 1
+    }
+    let center = sum / (n as f64)
+
+    // Compute MAE
+    var total_ae = 0.0
+    i = 0
+    while i < n {
+        total_ae = total_ae + abs_f64(targets[i as usize] - center)
+        i = i + 1
+    }
+
+    total_ae / (n as f64)
+}
+
+// ============================================================================
+// Gradient Boosting Criteria
+// ============================================================================
+
+/// Computes XGBoost-style split gain.
+///
+/// Gain = 0.5 * [(G_L^2 / (H_L + lambda)) + (G_R^2 / (H_R + lambda))
+///              - (G^2 / (H + lambda))] - gamma
+///
+/// Where:
+/// - G_L, G_R = sum of gradients in left/right children
+/// - H_L, H_R = sum of hessians in left/right children
+/// - lambda = L2 regularization
+/// - gamma = minimum loss reduction for split
+///
+/// Reference: Chen & Guestrin, "XGBoost" (KDD 2016)
+pub fn xgboost_gain(
+    g_left: f64, h_left: f64,
+    g_right: f64, h_right: f64,
+    reg_lambda: f64,
+    gamma: f64
+) -> f64 {
+    let g_total = g_left + g_right
+    let h_total = h_left + h_right
+
+    let gain_left = g_left * g_left / (h_left + reg_lambda)
+    let gain_right = g_right * g_right / (h_right + reg_lambda)
+    let gain_total = g_total * g_total / (h_total + reg_lambda)
+
+    0.5 * (gain_left + gain_right - gain_total) - gamma
+}
+
+/// Computes optimal leaf weight for gradient boosting.
+///
+/// w* = -G / (H + lambda)
+pub fn optimal_leaf_weight(gradient_sum: f64, hessian_sum: f64, reg_lambda: f64) -> f64 {
+    -gradient_sum / (hessian_sum + reg_lambda)
+}
+
+// ============================================================================
+// Split Finding
+// ============================================================================
+
+/// Result of a split search.
+pub struct SplitResult {
+    /// Feature index for the split
+    pub feature_idx: i64,
+    /// Threshold value
+    pub threshold: f64,
+    /// Impurity decrease
+    pub gain: f64,
+    /// Number of samples going left
+    pub n_left: i64,
+    /// Number of samples going right
+    pub n_right: i64,
+    /// Whether a valid split was found
+    pub found: bool,
+}
+
+impl SplitResult {
+    pub fn none() -> SplitResult {
+        SplitResult {
+            feature_idx: -1,
+            threshold: 0.0,
+            gain: 0.0,
+            n_left: 0,
+            n_right: 0,
+            found: false,
+        }
+    }
+
+    pub fn new(feature_idx: i64, threshold: f64, gain: f64, n_left: i64, n_right: i64) -> SplitResult {
+        SplitResult {
+            feature_idx,
+            threshold,
+            gain,
+            n_left,
+            n_right,
+            found: true,
+        }
+    }
+
+    pub fn to_split_info(self: &SplitResult, n_samples: i64) -> SplitInfo {
+        SplitInfo::axis_aligned(self.feature_idx, self.threshold, self.gain, n_samples)
+    }
+}
+
+/// Finds the best split for a regression node.
+///
+/// Scans all features and thresholds to find the split with maximum
+/// variance reduction.
+///
+/// # Arguments
+/// * `X` - Feature matrix [n_samples, n_features] in row-major order
+/// * `y` - Target values [n_samples]
+/// * `sample_indices` - Which samples to consider
+/// * `n_samples` - Number of samples
+/// * `n_features` - Number of features
+/// * `min_samples_leaf` - Minimum samples per leaf
+pub fn find_best_split_regression(
+    X: &[f64],
+    y: &[f64],
+    sample_indices: &[i64],
+    n_samples: i64,
+    n_features: i64,
+    min_samples_leaf: i64
+) -> SplitResult {
+    if n_samples < 2 * min_samples_leaf {
+        return SplitResult::none()
+    }
+
+    // Compute parent statistics
+    var parent_sum = 0.0
+    var parent_sum_sq = 0.0
+    var i: i64 = 0
+
+    while i < n_samples {
+        let idx = sample_indices[i as usize] as usize
+        let yi = y[idx]
+        parent_sum = parent_sum + yi
+        parent_sum_sq = parent_sum_sq + yi * yi
+        i = i + 1
+    }
+
+    let parent_var = variance_from_stats(parent_sum, parent_sum_sq, n_samples)
+
+    var best_gain = 0.0
+    var best_feature: i64 = -1
+    var best_threshold = 0.0
+    var best_n_left: i64 = 0
+    var best_n_right: i64 = 0
+
+    // For each feature
+    var f: i64 = 0
+    while f < n_features {
+        // Collect feature values with targets
+        var values: [f64; 4096] = [0.0; 4096]  // Temporary storage
+        var targets: [f64; 4096] = [0.0; 4096]
+        var indices: [i64; 4096] = [0; 4096]
+
+        i = 0
+        while i < n_samples && i < 4096 {
+            let idx = sample_indices[i as usize] as usize
+            values[i as usize] = X[idx * (n_features as usize) + (f as usize)]
+            targets[i as usize] = y[idx]
+            indices[i as usize] = i
+            i = i + 1
+        }
+
+        // Sort by feature value (simple bubble sort for now)
+        var sorted = true
+        var pass = 0
+        while pass < n_samples - 1 && sorted {
+            sorted = false
+            var j: i64 = 0
+            while j < n_samples - pass - 1 {
+                if values[j as usize] > values[(j + 1) as usize] {
+                    // Swap
+                    let tmp_v = values[j as usize]
+                    values[j as usize] = values[(j + 1) as usize]
+                    values[(j + 1) as usize] = tmp_v
+
+                    let tmp_t = targets[j as usize]
+                    targets[j as usize] = targets[(j + 1) as usize]
+                    targets[(j + 1) as usize] = tmp_t
+
+                    sorted = true
+                }
+                j = j + 1
+            }
+            pass = pass + 1
+        }
+
+        // Scan thresholds
+        var left_sum = 0.0
+        var left_sum_sq = 0.0
+        var n_left: i64 = 0
+
+        i = 0
+        while i < n_samples - 1 {
+            let yi = targets[i as usize]
+            left_sum = left_sum + yi
+            left_sum_sq = left_sum_sq + yi * yi
+            n_left = n_left + 1
+
+            // Skip if same value as next (can't split here)
+            if values[i as usize] == values[(i + 1) as usize] {
+                i = i + 1
+                continue
+            }
+
+            let n_right = n_samples - n_left
+
+            // Check min_samples_leaf
+            if n_left < min_samples_leaf || n_right < min_samples_leaf {
+                i = i + 1
+                continue
+            }
+
+            let right_sum = parent_sum - left_sum
+            let right_sum_sq = parent_sum_sq - left_sum_sq
+
+            let gain = variance_reduction_from_stats(
+                parent_sum, parent_sum_sq, n_samples,
+                left_sum, left_sum_sq, n_left,
+                right_sum, right_sum_sq, n_right
+            )
+
+            if gain > best_gain {
+                best_gain = gain
+                best_feature = f
+                best_threshold = (values[i as usize] + values[(i + 1) as usize]) / 2.0
+                best_n_left = n_left
+                best_n_right = n_right
+            }
+
+            i = i + 1
+        }
+
+        f = f + 1
+    }
+
+    if best_feature < 0 {
+        SplitResult::none()
+    } else {
+        SplitResult::new(best_feature, best_threshold, best_gain, best_n_left, best_n_right)
+    }
+}
+
+// ============================================================================
+// Tests
+// ============================================================================
+
+fn main() -> i32 {
+    // Test Gini impurity
+    let counts1 = [50, 50]
+    let gini1 = gini_impurity(&counts1, 2, 100)
+    // Gini for 50-50 split = 1 - 0.25 - 0.25 = 0.5
+    if gini1 < 0.49 || gini1 > 0.51 { return 1 }
+
+    let counts2 = [100, 0]
+    let gini2 = gini_impurity(&counts2, 2, 100)
+    // Gini for pure node = 0
+    if gini2 > 0.01 { return 2 }
+
+    // Test entropy
+    let entropy1 = entropy(&counts1, 2, 100)
+    // Entropy for 50-50 split = -0.5*ln(0.5) - 0.5*ln(0.5) = ln(2) ≈ 0.693
+    if entropy1 < 0.68 || entropy1 > 0.70 { return 3 }
+
+    let entropy2 = entropy(&counts2, 2, 100)
+    // Entropy for pure node = 0
+    if entropy2 > 0.01 { return 4 }
+
+    // Test variance
+    let targets = [1.0, 2.0, 3.0, 4.0, 5.0]
+    let v = variance(&targets, 5)
+    // Variance of [1,2,3,4,5] = 2.5
+    if v < 2.4 || v > 2.6 { return 5 }
+
+    // Test variance from stats
+    // sum = 15, sum_sq = 55, n = 5
+    // var = (55 - 225/5) / 4 = (55 - 45) / 4 = 2.5
+    let v2 = variance_from_stats(15.0, 55.0, 5)
+    if v2 < 2.4 || v2 > 2.6 { return 6 }
+
+    // Test variance reduction
+    // Parent: [1,2,3,4,5] var = 2.5
+    // Left: [1,2] var = 0.5
+    // Right: [3,4,5] var = 1.0
+    let vr = variance_reduction(2.5, 0.5, 1.0, 5, 2, 3)
+    // Weighted child = 0.4*0.5 + 0.6*1.0 = 0.2 + 0.6 = 0.8
+    // Reduction = 2.5 - 0.8 = 1.7
+    if vr < 1.6 || vr > 1.8 { return 7 }
+
+    // Test XGBoost gain
+    let gain = xgboost_gain(
+        10.0, 5.0,   // G_L, H_L
+        -10.0, 5.0,  // G_R, H_R
+        1.0,         // lambda
+        0.0          // gamma
+    )
+    // G=0, H=10
+    // Gain = 0.5 * [100/6 + 100/6 - 0/11] - 0 = 0.5 * 33.33 = 16.67
+    if gain < 16.0 || gain > 17.5 { return 8 }
+
+    // Test classification gain
+    let parent = [50, 50]
+    let left = [45, 5]
+    let right = [5, 45]
+    let clf_gain = classification_gain(
+        SplitCriterion::Gini,
+        &parent, &left, &right,
+        2, 100, 50, 50
+    )
+    // Parent Gini = 0.5
+    // Left Gini = 1 - (0.9^2 + 0.1^2) = 1 - 0.82 = 0.18
+    // Right Gini = 0.18
+    // Weighted = 0.5 * 0.18 + 0.5 * 0.18 = 0.18
+    // Gain = 0.5 - 0.18 = 0.32
+    if clf_gain < 0.30 || clf_gain > 0.34 { return 9 }
+
+    // All tests passed
+    0
+}

@@ -1,0 +1,443 @@
+//! Memory Layout Type for Sounio
+//!
+//! Layout describes the memory requirements for a type or allocation,
+//! including size and alignment. This enables type-safe allocation APIs
+//! and prevents common memory errors like misaligned access.
+//!
+//! Key properties:
+//! - Size: Total bytes required for the allocation
+//! - Alignment: Memory address constraint (must be power of 2)
+//! - Padding: Automatic calculation for struct field alignment
+//!
+//! References:
+//! - Rust Allocator RFC 1398: https://rust-lang.github.io/rfcs/1398-kinds-of-allocators.html
+//! - C11 aligned_alloc semantics
+
+// ============================================================================
+// Layout Type
+// ============================================================================
+
+/// Describes the memory layout requirements for an allocation.
+///
+/// Layout encapsulates size and alignment constraints, enabling safe
+/// custom allocators that guarantee proper memory alignment.
+///
+/// # Invariants
+///
+/// - `align` must be a power of two
+/// - `size` must not overflow when rounded up to alignment
+/// - `size` can be zero (for zero-sized types)
+///
+/// # Examples
+///
+/// ```sio
+/// // Layout for a single i64
+/// let layout = Layout::from_size_align(8, 8).unwrap()
+///
+/// // Layout for an array of 100 f64 values
+/// let arr_layout = Layout::array_of(8, 8, 100).unwrap()
+/// ```
+pub struct Layout {
+    /// Size in bytes
+    size: usize,
+    /// Alignment in bytes (must be power of 2)
+    align: usize,
+}
+
+/// Errors that can occur during layout operations.
+pub enum LayoutError {
+    /// Size would overflow usize
+    SizeOverflow,
+    /// Alignment is not a power of two
+    InvalidAlignment,
+    /// Size is too large when combined with alignment
+    LayoutOverflow,
+}
+
+impl LayoutError {
+    /// Returns a human-readable description of the error.
+    pub fn message(self: &LayoutError) -> string {
+        match self {
+            LayoutError::SizeOverflow => "size overflow: allocation too large",
+            LayoutError::InvalidAlignment => "invalid alignment: must be power of two",
+            LayoutError::LayoutOverflow => "layout overflow: size incompatible with alignment",
+        }
+    }
+}
+
+// ============================================================================
+// Layout Constructors
+// ============================================================================
+
+impl Layout {
+    /// Creates a new Layout from explicit size and alignment.
+    ///
+    /// # Errors
+    ///
+    /// Returns `LayoutError::InvalidAlignment` if align is not a power of two.
+    /// Returns `LayoutError::SizeOverflow` if size is too large.
+    ///
+    /// # Examples
+    ///
+    /// ```sio
+    /// let layout = Layout::from_size_align(16, 8)?
+    /// assert(layout.size() == 16)
+    /// assert(layout.align() == 8)
+    /// ```
+    pub fn from_size_align(size: usize, align: usize) -> Result<Layout, LayoutError> {
+        // Alignment must be power of two
+        if align == 0 || (align & (align - 1)) != 0 {
+            return Err(LayoutError::InvalidAlignment)
+        }
+
+        // Size must not be larger than isize::MAX for pointer arithmetic safety
+        let max_size = 9223372036854775807 as usize  // isize::MAX
+        if size > max_size {
+            return Err(LayoutError::SizeOverflow)
+        }
+
+        Ok(Layout { size, align })
+    }
+
+    /// Creates a Layout without validation.
+    ///
+    /// # Safety
+    ///
+    /// The caller must ensure:
+    /// - `align` is a power of two
+    /// - `size` does not overflow when rounded to alignment
+    pub unsafe fn from_size_align_unchecked(size: usize, align: usize) -> Layout {
+        Layout { size, align }
+    }
+
+    /// Creates a layout for a single value of the given size and alignment.
+    ///
+    /// This is the primitive constructor - other constructors build on this.
+    pub fn new(size: usize, align: usize) -> Result<Layout, LayoutError> {
+        Layout::from_size_align(size, align)
+    }
+
+    /// Creates a layout for an array of `n` elements with given element layout.
+    ///
+    /// # Errors
+    ///
+    /// Returns `LayoutError::SizeOverflow` if total size overflows.
+    ///
+    /// # Examples
+    ///
+    /// ```sio
+    /// // Array of 1000 f64 values (8 bytes each, 8-byte aligned)
+    /// let layout = Layout::array_of(8, 8, 1000)?
+    /// assert(layout.size() == 8000)
+    /// ```
+    pub fn array_of(elem_size: usize, elem_align: usize, n: usize) -> Result<Layout, LayoutError> {
+        // Validate element layout
+        if elem_align == 0 || (elem_align & (elem_align - 1)) != 0 {
+            return Err(LayoutError::InvalidAlignment)
+        }
+
+        // Calculate padded element size (for proper array stride)
+        let padded_size = (elem_size + elem_align - 1) & !(elem_align - 1)
+
+        // Check for overflow in multiplication
+        let max_size = 9223372036854775807 as usize
+        if n > 0 && padded_size > max_size / n {
+            return Err(LayoutError::SizeOverflow)
+        }
+
+        let total_size = padded_size * n
+
+        Ok(Layout { size: total_size, align: elem_align })
+    }
+
+    /// Creates a zero-sized layout with the given alignment.
+    ///
+    /// Zero-sized types (ZSTs) still need proper alignment for pointer validity.
+    pub fn zero_sized(align: usize) -> Result<Layout, LayoutError> {
+        Layout::from_size_align(0, align)
+    }
+}
+
+// ============================================================================
+// Layout Accessors
+// ============================================================================
+
+impl Layout {
+    /// Returns the size of this layout in bytes.
+    pub fn size(self: &Layout) -> usize {
+        self.size
+    }
+
+    /// Returns the alignment of this layout in bytes.
+    pub fn align(self: &Layout) -> usize {
+        self.align
+    }
+
+    /// Returns true if this is a zero-sized layout.
+    pub fn is_zero_sized(self: &Layout) -> bool {
+        self.size == 0
+    }
+}
+
+// ============================================================================
+// Layout Operations
+// ============================================================================
+
+impl Layout {
+    /// Returns this layout with size padded to alignment.
+    ///
+    /// This is useful for calculating array strides and struct field offsets.
+    ///
+    /// # Examples
+    ///
+    /// ```sio
+    /// let layout = Layout::from_size_align(5, 4)?
+    /// let padded = layout.pad_to_align()
+    /// assert(padded.size() == 8)  // 5 rounded up to next multiple of 4
+    /// ```
+    pub fn pad_to_align(self: &Layout) -> Layout {
+        let padded_size = (self.size + self.align - 1) & !(self.align - 1)
+        Layout { size: padded_size, align: self.align }
+    }
+
+    /// Extends this layout with another, returning combined layout and offset.
+    ///
+    /// The offset indicates where the second layout begins within the combined layout.
+    /// Useful for building struct layouts.
+    ///
+    /// # Examples
+    ///
+    /// ```sio
+    /// let a = Layout::from_size_align(4, 4)?   // i32
+    /// let b = Layout::from_size_align(8, 8)?   // f64
+    /// let (combined, offset) = a.extend(b)?
+    /// assert(offset == 8)  // f64 starts at offset 8 due to alignment
+    /// ```
+    pub fn extend(self: &Layout, next: Layout) -> Result<(Layout, usize), LayoutError> {
+        let padded = self.pad_to_align()
+
+        // Align the offset for the next field
+        let offset = (padded.size + next.align - 1) & !(next.align - 1)
+
+        // Check for overflow
+        let max_size = 9223372036854775807 as usize
+        if offset > max_size - next.size {
+            return Err(LayoutError::SizeOverflow)
+        }
+
+        let new_size = offset + next.size
+        let new_align = if self.align > next.align { self.align } else { next.align }
+
+        Ok((Layout { size: new_size, align: new_align }, offset))
+    }
+
+    /// Repeats this layout `n` times, returning (total_layout, stride).
+    ///
+    /// The stride is the distance between consecutive elements.
+    ///
+    /// # Examples
+    ///
+    /// ```sio
+    /// let elem = Layout::from_size_align(5, 4)?
+    /// let (arr, stride) = elem.repeat(10)?
+    /// assert(stride == 8)   // Each element takes 8 bytes (5 padded to 4)
+    /// assert(arr.size() == 80)
+    /// ```
+    pub fn repeat(self: &Layout, n: usize) -> Result<(Layout, usize), LayoutError> {
+        let padded = self.pad_to_align()
+        let stride = padded.size
+
+        // Check for overflow
+        let max_size = 9223372036854775807 as usize
+        if n > 0 && stride > max_size / n {
+            return Err(LayoutError::SizeOverflow)
+        }
+
+        let total_size = stride * n
+
+        Ok((Layout { size: total_size, align: self.align }, stride))
+    }
+
+    /// Aligns a pointer up to this layout's alignment.
+    ///
+    /// Returns the smallest address >= ptr that satisfies alignment.
+    pub fn align_ptr(self: &Layout, ptr: usize) -> usize {
+        (ptr + self.align - 1) & !(self.align - 1)
+    }
+
+    /// Returns the padding needed after `size` bytes to reach alignment.
+    pub fn padding_needed_for(self: &Layout, size: usize) -> usize {
+        let aligned = (size + self.align - 1) & !(self.align - 1)
+        aligned - size
+    }
+}
+
+// ============================================================================
+// Common Layouts
+// ============================================================================
+
+/// Returns a layout for a single byte (size=1, align=1).
+pub fn layout_u8() -> Layout {
+    Layout { size: 1, align: 1 }
+}
+
+/// Returns a layout for a 16-bit integer (size=2, align=2).
+pub fn layout_u16() -> Layout {
+    Layout { size: 2, align: 2 }
+}
+
+/// Returns a layout for a 32-bit integer (size=4, align=4).
+pub fn layout_u32() -> Layout {
+    Layout { size: 4, align: 4 }
+}
+
+/// Returns a layout for a 64-bit integer (size=8, align=8).
+pub fn layout_u64() -> Layout {
+    Layout { size: 8, align: 8 }
+}
+
+/// Returns a layout for an i32 (size=4, align=4).
+pub fn layout_i32() -> Layout {
+    Layout { size: 4, align: 4 }
+}
+
+/// Returns a layout for an i64 (size=8, align=8).
+pub fn layout_i64() -> Layout {
+    Layout { size: 8, align: 8 }
+}
+
+/// Returns a layout for an f32 (size=4, align=4).
+pub fn layout_f32() -> Layout {
+    Layout { size: 4, align: 4 }
+}
+
+/// Returns a layout for an f64 (size=8, align=8).
+pub fn layout_f64() -> Layout {
+    Layout { size: 8, align: 8 }
+}
+
+/// Returns a layout for a pointer (size=8, align=8 on 64-bit).
+pub fn layout_ptr() -> Layout {
+    Layout { size: 8, align: 8 }
+}
+
+/// Returns a layout for a usize (size=8, align=8 on 64-bit).
+pub fn layout_usize() -> Layout {
+    Layout { size: 8, align: 8 }
+}
+
+// ============================================================================
+// Trait Implementations
+// ============================================================================
+
+impl Clone for Layout {
+    fn clone(self: &Layout) -> Layout {
+        Layout { size: self.size, align: self.align }
+    }
+}
+
+impl Eq for Layout {
+    fn eq(self: &Layout, other: &Layout) -> bool {
+        self.size == other.size && self.align == other.align
+    }
+}
+
+impl Debug for Layout {
+    fn fmt(self: &Layout, f: &!Formatter) -> Result<(), FmtError> {
+        f.write_str("Layout { size: ")?
+        f.write_usize(self.size)?
+        f.write_str(", align: ")?
+        f.write_usize(self.align)?
+        f.write_str(" }")
+    }
+}
+
+// ============================================================================
+// Tests
+// ============================================================================
+
+fn main() -> i32 {
+    // Test basic construction
+    let layout = Layout::from_size_align(16, 8)
+    match layout {
+        Ok(l) => {
+            if l.size() != 16 { return 1 }
+            if l.align() != 8 { return 2 }
+        },
+        Err(_) => { return 3 }
+    }
+
+    // Test invalid alignment (not power of 2)
+    let bad = Layout::from_size_align(16, 7)
+    match bad {
+        Ok(_) => { return 4 },  // Should have failed
+        Err(LayoutError::InvalidAlignment) => {},  // Expected
+        Err(_) => { return 5 }
+    }
+
+    // Test padding
+    let unpadded = Layout::from_size_align(5, 4)
+    match unpadded {
+        Ok(l) => {
+            let padded = l.pad_to_align()
+            if padded.size() != 8 { return 6 }  // 5 -> 8
+        },
+        Err(_) => { return 7 }
+    }
+
+    // Test array layout
+    let arr = Layout::array_of(8, 8, 100)
+    match arr {
+        Ok(l) => {
+            if l.size() != 800 { return 8 }
+            if l.align() != 8 { return 9 }
+        },
+        Err(_) => { return 10 }
+    }
+
+    // Test extend
+    let a = Layout::from_size_align(4, 4)
+    let b = Layout::from_size_align(8, 8)
+    match (a, b) {
+        (Ok(la), Ok(lb)) => {
+            match la.extend(lb) {
+                Ok((combined, offset)) => {
+                    if offset != 8 { return 11 }  // Aligned to 8
+                    if combined.size() != 16 { return 12 }
+                    if combined.align() != 8 { return 13 }
+                },
+                Err(_) => { return 14 }
+            }
+        },
+        _ => { return 15 }
+    }
+
+    // Test repeat
+    let elem = Layout::from_size_align(5, 4)
+    match elem {
+        Ok(e) => {
+            match e.repeat(10) {
+                Ok((arr_layout, stride)) => {
+                    if stride != 8 { return 16 }  // 5 padded to 8
+                    if arr_layout.size() != 80 { return 17 }
+                },
+                Err(_) => { return 18 }
+            }
+        },
+        Err(_) => { return 19 }
+    }
+
+    // Test zero-sized layout
+    let zst = Layout::zero_sized(8)
+    match zst {
+        Ok(l) => {
+            if l.size() != 0 { return 20 }
+            if l.align() != 8 { return 21 }
+            if !l.is_zero_sized() { return 22 }
+        },
+        Err(_) => { return 23 }
+    }
+
+    // All tests passed
+    0
+}
