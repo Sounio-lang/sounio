@@ -721,6 +721,7 @@ fn def_kind_to_symbol_kind(kind: &DefKind) -> SymbolKind {
         DefKind::Kernel => SymbolKind::FUNCTION,
         DefKind::BuiltinType => SymbolKind::CLASS,
         DefKind::BuiltinFunction => SymbolKind::FUNCTION,
+        DefKind::EffectParam => SymbolKind::TYPE_PARAMETER,
     }
 }
 

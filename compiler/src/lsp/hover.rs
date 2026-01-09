@@ -137,6 +137,7 @@ impl HoverProvider {
             DefKind::Kernel => "GPU kernel function",
             DefKind::BuiltinType => "Built-in type",
             DefKind::BuiltinFunction => "Built-in function",
+            DefKind::EffectParam => "Effect parameter",
         };
 
         content.push_str(&format!("\n*{}*\n", kind_desc));
@@ -194,6 +195,7 @@ impl HoverProvider {
             DefKind::Kernel => format!("kernel fn {}(...)", name),
             DefKind::BuiltinType => name.to_string(),
             DefKind::BuiltinFunction => format!("fn {}(...)", name),
+            DefKind::EffectParam => format!("effect {}", name),
         }
     }
 
