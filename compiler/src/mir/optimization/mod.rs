@@ -5,6 +5,7 @@
 
 pub mod pass_manager;
 pub mod constant_propagation;
+pub mod dead_code_elimination;
 
 // Re-export commonly used optimization types
 pub use pass_manager::{

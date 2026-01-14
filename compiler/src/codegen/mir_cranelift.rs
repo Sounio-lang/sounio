@@ -6,14 +6,27 @@
 //! # Architecture
 //!
 //! ```text
-//! HLIR -> MIR -> Cranelift -> Native Code
+//! HLIR -> MIR -> [MIR Optimizer] -> Cranelift -> Native Code
 //! ```
+//!
+//! # Key Type Mappings
+//!
+//! | MIR Type | Cranelift Type |
+//! |----------|----------------|
+//! | I32      | types::I32     |
+//! | I64      | types::I64     |
+//! | F32      | types::F32     |
+//! | F64      | types::F64     |
+//! | Bool     | types::I8      |
+//! | Ptr(_)   | types::I64     |
+//! | Unit     | types::I64     |
 
 use crate::hlir::HlirModule;
 use crate::mir::{
     BlockId, MirBinaryOp, MirBlock, MirCompareOp, MirConstant, MirFunction, MirInstruction,
     MirModule, MirTerminator, MirType, MirUnaryOp, ValueId,
 };
+use crate::mir::optimization::{PassManager, OptimizationLevel, create_default_pass_manager};
 
 #[cfg(feature = "jit")]
 use cranelift_codegen::ir::condcodes::{FloatCC, IntCC};
@@ -41,8 +54,22 @@ pub fn compile_mir(mir_module: &MirModule) -> Result<Vec<u8>, String> {
     Ok(vec![])
 }
 
+/// Compile MIR module with optimization
+#[cfg(feature = "jit")]
+pub fn compile_mir_optimized(mir_module: &MirModule, opt_level: OptimizationLevel) -> Result<CompiledModule, String> {
+    let jit = MirAwareCraneliftJit::new()
+        .with_optimization()
+        .with_mir_optimization(opt_level);
+    jit.compile_mir(mir_module)
+}
+
 #[cfg(not(feature = "jit"))]
 pub fn compile_mir(_mir_module: &MirModule) -> Result<Vec<u8>, String> {
+    Err("JIT backend not enabled. Compile with --features jit".to_string())
+}
+
+#[cfg(not(feature = "jit"))]
+pub fn compile_mir_optimized(_mir_module: &MirModule, _opt_level: OptimizationLevel) -> Result<(), String> {
     Err("JIT backend not enabled. Compile with --features jit".to_string())
 }
 
@@ -73,14 +100,19 @@ fn lower_hlir_to_mir(hlir_module: &HlirModule) -> Result<MirModule, String> {
 #[cfg(feature = "jit")]
 /// Extended CraneliftJIT that supports MIR compilation
 pub struct MirAwareCraneliftJit {
-    /// Whether to enable optimization
+    /// Whether to enable Cranelift optimization
     optimize: bool,
+    /// MIR optimization level
+    mir_opt_level: Option<OptimizationLevel>,
 }
 
 #[cfg(feature = "jit")]
 impl MirAwareCraneliftJit {
     pub fn new() -> Self {
-        Self { optimize: false }
+        Self {
+            optimize: false,
+            mir_opt_level: None,
+        }
     }
 
     pub fn with_optimization(mut self) -> Self {
@@ -88,15 +120,37 @@ impl MirAwareCraneliftJit {
         self
     }
 
+    /// Enable MIR-level optimization passes
+    pub fn with_mir_optimization(mut self, level: OptimizationLevel) -> Self {
+        self.mir_opt_level = Some(level);
+        self
+    }
+
     /// Compile MIR module and return a handle to the compiled code
     pub fn compile_mir(&self, mir_module: &MirModule) -> Result<CompiledModule, String> {
+        // Run MIR optimization passes if enabled
+        let optimized_module = if let Some(opt_level) = self.mir_opt_level {
+            let mut module_clone = mir_module.clone();
+            let mut pass_manager = create_default_pass_manager(opt_level);
+            let _modified = pass_manager.run_module_passes(&mut module_clone)?;
+            module_clone
+        } else {
+            mir_module.clone()
+        };
+
         let mut compiler = MirCraneliftCompiler::new(self.optimize)?;
-        compiler.compile_mir_module(mir_module)?;
+        compiler.compile_mir_module(&optimized_module)?;
         compiler.finalize()
     }
 
     /// Compile HLIR module via MIR
     pub fn compile_hlir_via_mir(&self, hlir_module: &HlirModule) -> Result<CompiledModule, String> {
+        let mir_module = lower_hlir_to_mir(hlir_module)?;
+        self.compile_mir(&mir_module)
+    }
+
+    /// Compile HLIR with both MIR and Cranelift optimization
+    pub fn compile_hlir_optimized(&self, hlir_module: &HlirModule) -> Result<CompiledModule, String> {
         let mir_module = lower_hlir_to_mir(hlir_module)?;
         self.compile_mir(&mir_module)
     }
@@ -125,6 +179,10 @@ pub struct MirCraneliftCompiler {
     func_sigs: HashMap<String, Signature>,
     /// Set of exported (user-defined) function names
     exported_funcs: std::collections::HashSet<String>,
+    /// Map from global variable names to their data IDs
+    global_data_ids: HashMap<String, cranelift_module::DataId>,
+    /// Map from global variable names to their types
+    global_types: HashMap<String, MirType>,
 }
 
 #[cfg(feature = "jit")]
@@ -168,6 +226,8 @@ impl MirCraneliftCompiler {
             func_ids: HashMap::new(),
             func_sigs: HashMap::new(),
             exported_funcs: std::collections::HashSet::new(),
+            global_data_ids: HashMap::new(),
+            global_types: HashMap::new(),
         })
     }
 

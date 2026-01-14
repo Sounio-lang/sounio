@@ -12,7 +12,6 @@ pub mod analysis;
 pub mod optimization;
 pub mod instructions;
 pub mod lower;
-pub mod optimization;
 
 // Re-export main types
 pub use builder::{FunctionBuilder, ModuleBuilder};

@@ -10,7 +10,7 @@ use std::fmt;
 pub struct ValueId(pub usize);
 
 /// Basic block identifier
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub struct BlockId(pub usize);
 
 /// Function identifier
@@ -235,8 +235,8 @@ pub enum MirConstant {
     Int(i64),
     /// Unsigned integer constant
     UInt(u64),
-    /// Float constant
-    Float(f64),
+    /// Float constant (stored as string for hashing)
+    Float(String),
     /// String constant (pointer to string data)
     String(String),
     /// Null pointer
