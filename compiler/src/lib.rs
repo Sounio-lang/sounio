@@ -55,6 +55,7 @@ pub mod hir;
 pub mod hlir;
 pub mod interop;
 pub mod interp;
+pub mod mir;
 pub mod layout;
 pub mod lexer;
 pub mod linear;
@@ -97,6 +98,7 @@ pub use diagnostics::{CompileError, Reporter, SourceFile};
 // Re-exports for convenience
 pub use ast::Ast;
 pub use hir::Hir;
+pub use mir::MirModule;
 pub use hlir::HlirModule;
 pub use types::Type;
 
@@ -109,6 +111,15 @@ pub fn compile(source: &str) -> miette::Result<Vec<u8>> {
     let ast = parser::parse(&tokens, source)?;
     let hir = check::check(&ast)?;
     let hlir = hlir::lower(&hir);
+
+    // New MIR-based pipeline
+    #[cfg(feature = "mir")]
+    {
+        use crate::codegen::mir_cranelift::compile_hlir_via_mir;
+        let code = compile_hlir_via_mir(&hlir)
+            .map_err(|e| miette::miette!("MIR->Cranelift codegen failed: {}", e))?;
+        return Ok(code);
+    }
 
     // Use Cranelift backend for JIT compilation
     #[cfg(feature = "jit")]
@@ -143,6 +154,15 @@ pub fn compile_to_gpu(source: &str, sm_version: (u32, u32)) -> miette::Result<St
     let hir = check::check(&ast)?;
     let hlir = hlir::lower(&hir);
 
+    // New MIR-based pipeline
+    #[cfg(feature = "mir")]
+    {
+        use crate::codegen::mir_cranelift::compile_hlir_via_mir;
+        let code = compile_hlir_via_mir(&hlir)
+            .map_err(|e| miette::miette!("MIR->Cranelift codegen failed: {}", e))?;
+        return Ok(code);
+    }
+
     // Lower to GPU IR and generate PTX
     let ptx = codegen::gpu::compile_to_ptx(&hlir, sm_version);
     Ok(ptx)
@@ -157,6 +177,15 @@ pub fn compile_to_gpu_epistemic(source: &str, sm_version: (u32, u32)) -> miette:
     let ast = parser::parse(&tokens, source)?;
     let hir = check::check(&ast)?;
     let hlir = hlir::lower(&hir);
+
+    // New MIR-based pipeline
+    #[cfg(feature = "mir")]
+    {
+        use crate::codegen::mir_cranelift::compile_hlir_via_mir;
+        let code = compile_hlir_via_mir(&hlir)
+            .map_err(|e| miette::miette!("MIR->Cranelift codegen failed: {}", e))?;
+        return Ok(code);
+    }
 
     // Lower to GPU IR with epistemic tracking enabled
     let ptx = codegen::gpu::compile_to_ptx_epistemic(&hlir, sm_version, true);

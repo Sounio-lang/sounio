@@ -1,0 +1,1211 @@
+// compiler::lexer — Self-hosted Sounio Lexer
+//
+// This is the lexer for the self-hosted Sounio compiler.
+// It tokenizes Sounio source code into a stream of tokens.
+//
+// Equivalent to compiler/src/lexer/mod.rs in the Rust implementation,
+// but written in native Sounio without the Logos library.
+
+// ============================================================================
+// TOKEN KIND CONSTANTS (from tokens.sio)
+// ============================================================================
+
+fn TK_EOF() -> i32 { 0 }
+fn TK_ERROR() -> i32 { 1 }
+fn TK_IDENT() -> i32 { 200 }
+fn TK_INT_LIT() -> i32 { 201 }
+fn TK_HEX_LIT() -> i32 { 202 }
+fn TK_BIN_LIT() -> i32 { 203 }
+fn TK_OCT_LIT() -> i32 { 204 }
+fn TK_FLOAT_LIT() -> i32 { 205 }
+fn TK_STRING_LIT() -> i32 { 206 }
+fn TK_CHAR_LIT() -> i32 { 207 }
+fn TK_INT_UNIT_LIT() -> i32 { 208 }
+fn TK_FLOAT_UNIT_LIT() -> i32 { 209 }
+
+// Operators
+fn TK_PLUS() -> i32 { 220 }
+fn TK_MINUS() -> i32 { 221 }
+fn TK_STAR() -> i32 { 222 }
+fn TK_SLASH() -> i32 { 223 }
+fn TK_PERCENT() -> i32 { 224 }
+fn TK_CARET() -> i32 { 225 }
+fn TK_AMP() -> i32 { 226 }
+fn TK_PIPE() -> i32 { 227 }
+fn TK_TILDE() -> i32 { 228 }
+fn TK_BANG() -> i32 { 229 }
+fn TK_EQ() -> i32 { 230 }
+fn TK_LT() -> i32 { 231 }
+fn TK_GT() -> i32 { 232 }
+fn TK_EQ_EQ() -> i32 { 240 }
+fn TK_NE() -> i32 { 241 }
+fn TK_LE() -> i32 { 242 }
+fn TK_GE() -> i32 { 243 }
+fn TK_AMP_AMP() -> i32 { 244 }
+fn TK_PIPE_PIPE() -> i32 { 245 }
+fn TK_SHL() -> i32 { 246 }
+fn TK_SHR() -> i32 { 247 }
+fn TK_PLUS_PLUS() -> i32 { 248 }
+fn TK_PLUS_EQ() -> i32 { 249 }
+fn TK_MINUS_EQ() -> i32 { 250 }
+fn TK_STAR_EQ() -> i32 { 251 }
+fn TK_SLASH_EQ() -> i32 { 252 }
+fn TK_PERCENT_EQ() -> i32 { 253 }
+fn TK_AMP_EQ() -> i32 { 254 }
+fn TK_PIPE_EQ() -> i32 { 255 }
+fn TK_CARET_EQ() -> i32 { 256 }
+fn TK_SHL_EQ() -> i32 { 257 }
+fn TK_SHR_EQ() -> i32 { 258 }
+fn TK_PLUS_MINUS() -> i32 { 259 }
+fn TK_ARROW() -> i32 { 270 }
+fn TK_FAT_ARROW() -> i32 { 271 }
+fn TK_LEFT_ARROW() -> i32 { 272 }
+
+// Delimiters
+fn TK_LPAREN() -> i32 { 280 }
+fn TK_RPAREN() -> i32 { 281 }
+fn TK_LBRACKET() -> i32 { 282 }
+fn TK_RBRACKET() -> i32 { 283 }
+fn TK_LBRACE() -> i32 { 284 }
+fn TK_RBRACE() -> i32 { 285 }
+
+// Punctuation
+fn TK_COMMA() -> i32 { 290 }
+fn TK_SEMI() -> i32 { 291 }
+fn TK_COLON() -> i32 { 292 }
+fn TK_COLON_COLON() -> i32 { 293 }
+fn TK_DOT() -> i32 { 294 }
+fn TK_DOT_DOT() -> i32 { 295 }
+fn TK_DOT_DOT_DOT() -> i32 { 296 }
+fn TK_DOT_DOT_EQ() -> i32 { 297 }
+fn TK_AT() -> i32 { 298 }
+fn TK_HASH() -> i32 { 299 }
+fn TK_DOLLAR() -> i32 { 300 }
+fn TK_QUESTION() -> i32 { 301 }
+fn TK_UNDERSCORE() -> i32 { 302 }
+
+// Doc comments
+fn TK_DOC_COMMENT_OUTER() -> i32 { 310 }
+fn TK_DOC_COMMENT_INNER() -> i32 { 311 }
+fn TK_DOC_BLOCK_OUTER() -> i32 { 312 }
+fn TK_DOC_BLOCK_INNER() -> i32 { 313 }
+
+// ============================================================================
+// SPAN AND TOKEN STRUCTURES
+// ============================================================================
+
+struct Span {
+    start: i64,
+    end: i64,
+}
+
+fn span_new(start: i64, end: i64) -> Span {
+    Span { start: start, end: end }
+}
+
+struct Token {
+    kind: i32,
+    span: Span,
+    text: [i8; 256],
+    text_len: i64,
+}
+
+fn token_new() -> Token {
+    Token {
+        kind: TK_EOF(),
+        span: span_new(0, 0),
+        text: [0; 256],
+        text_len: 0,
+    }
+}
+
+fn token_simple(kind: i32, start: i64, end: i64) -> Token {
+    Token {
+        kind: kind,
+        span: span_new(start, end),
+        text: [0; 256],
+        text_len: 0,
+    }
+}
+
+// ============================================================================
+// LEXER STATE
+// ============================================================================
+
+struct Lexer {
+    source: [i8; 1048576],
+    source_len: i64,
+    pos: i64,
+    line: i64,
+    column: i64,
+    current: i8,
+}
+
+fn lexer_new() -> Lexer {
+    Lexer {
+        source: [0; 1048576],
+        source_len: 0,
+        pos: 0,
+        line: 1,
+        column: 1,
+        current: 0,
+    }
+}
+
+fn lexer_init(source: [i8; 1048576], len: i64) -> Lexer {
+    var lex = lexer_new();
+    lex.source = source;
+    lex.source_len = len;
+    if len > 0 {
+        lex.current = source[0];
+    }
+    lex
+}
+
+fn lexer_at_end(lex: Lexer) -> bool {
+    lex.pos >= lex.source_len
+}
+
+fn lexer_peek(lex: Lexer) -> i8 {
+    if lex.pos + 1 < lex.source_len {
+        lex.source[(lex.pos + 1) as usize]
+    } else {
+        0
+    }
+}
+
+fn lexer_peek_n(lex: Lexer, n: i64) -> i8 {
+    if lex.pos + n < lex.source_len {
+        lex.source[(lex.pos + n) as usize]
+    } else {
+        0
+    }
+}
+
+fn lexer_advance(lex: Lexer) -> Lexer {
+    var new_lex = lex;
+    if new_lex.pos < new_lex.source_len {
+        if new_lex.current == 10 {
+            new_lex.line = new_lex.line + 1;
+            new_lex.column = 1;
+        } else {
+            new_lex.column = new_lex.column + 1;
+        }
+        new_lex.pos = new_lex.pos + 1;
+        if new_lex.pos < new_lex.source_len {
+            new_lex.current = new_lex.source[new_lex.pos as usize];
+        } else {
+            new_lex.current = 0;
+        }
+    }
+    new_lex
+}
+
+fn lexer_advance_n(lex: Lexer, n: i64) -> Lexer {
+    var l = lex;
+    var i: i64 = 0;
+    while i < n {
+        l = lexer_advance(l);
+        i = i + 1;
+    }
+    l
+}
+
+// ============================================================================
+// CHARACTER CLASSIFICATION
+// ============================================================================
+
+fn is_whitespace(c: i8) -> bool {
+    c == 32 || c == 9 || c == 13 || c == 10
+}
+
+fn is_digit(c: i8) -> bool {
+    c >= 48 && c <= 57
+}
+
+fn is_hex_digit(c: i8) -> bool {
+    is_digit(c) || (c >= 97 && c <= 102) || (c >= 65 && c <= 70)
+}
+
+fn is_bin_digit(c: i8) -> bool {
+    c == 48 || c == 49
+}
+
+fn is_oct_digit(c: i8) -> bool {
+    c >= 48 && c <= 55
+}
+
+fn is_alpha(c: i8) -> bool {
+    (c >= 65 && c <= 90) || (c >= 97 && c <= 122)
+}
+
+fn is_ident_start(c: i8) -> bool {
+    is_alpha(c) || c == 95
+}
+
+fn is_ident_continue(c: i8) -> bool {
+    is_alpha(c) || is_digit(c) || c == 95
+}
+
+// ============================================================================
+// SCAN RESULT
+// ============================================================================
+
+struct ScanResult {
+    lexer: Lexer,
+    token: Token,
+}
+
+fn scan_result_new(lex: Lexer, tok: Token) -> ScanResult {
+    ScanResult { lexer: lex, token: tok }
+}
+
+// ============================================================================
+// WHITESPACE AND COMMENT HANDLING
+// ============================================================================
+
+fn skip_whitespace(lex: Lexer) -> Lexer {
+    var l = lex;
+    while !lexer_at_end(l) && is_whitespace(l.current) {
+        l = lexer_advance(l);
+    }
+    l
+}
+
+fn skip_line_comment(lex: Lexer) -> Lexer {
+    var l = lex;
+    while !lexer_at_end(l) && l.current != 10 {
+        l = lexer_advance(l);
+    }
+    l
+}
+
+fn skip_block_comment(lex: Lexer) -> Lexer {
+    var l = lexer_advance_n(lex, 2);
+    var depth: i64 = 1;
+    while !lexer_at_end(l) && depth > 0 {
+        if l.current == 42 && lexer_peek(l) == 47 {
+            l = lexer_advance_n(l, 2);
+            depth = depth - 1;
+        } else if l.current == 47 && lexer_peek(l) == 42 {
+            l = lexer_advance_n(l, 2);
+            depth = depth + 1;
+        } else {
+            l = lexer_advance(l);
+        }
+    }
+    l
+}
+
+// ============================================================================
+// KEYWORD LOOKUP (simplified - full version in keywords.sio)
+// ============================================================================
+
+fn lookup_keyword(text: [i8; 256], len: i64) -> i32 {
+    // 2-char keywords
+    if len == 2 {
+        if text[0] == 102 && text[1] == 110 { return 14 }  // fn
+        if text[0] == 105 && text[1] == 102 { return 24 }  // if
+        if text[0] == 105 && text[1] == 110 { return 33 }  // in
+        if text[0] == 97 && text[1] == 115 { return 34 }   // as
+    }
+    // 3-char keywords
+    if len == 3 {
+        if text[0] == 108 && text[1] == 101 && text[2] == 116 { return 15 }  // let
+        if text[0] == 118 && text[1] == 97 && text[2] == 114 { return 16 }   // var
+        if text[0] == 102 && text[1] == 111 && text[2] == 114 { return 27 }  // for
+        if text[0] == 109 && text[1] == 117 && text[2] == 116 { return 17 }  // mut
+        if text[0] == 117 && text[1] == 115 && text[2] == 101 { return 12 }  // use
+        if text[0] == 112 && text[1] == 117 && text[2] == 98 { return 36 }   // pub
+    }
+    // 4-char keywords
+    if len == 4 {
+        if text[0] == 101 && text[1] == 108 && text[2] == 115 && text[3] == 101 { return 25 }  // else
+        if text[0] == 108 && text[1] == 111 && text[2] == 111 && text[3] == 112 { return 29 }  // loop
+        if text[0] == 116 && text[1] == 114 && text[2] == 117 && text[3] == 101 { return 39 }  // true
+        if text[0] == 101 && text[1] == 110 && text[2] == 117 && text[3] == 109 { return 21 }  // enum
+        if text[0] == 105 && text[1] == 109 && text[2] == 112 && text[3] == 108 { return 23 }  // impl
+        if text[0] == 116 && text[1] == 121 && text[2] == 112 && text[3] == 101 { return 19 }  // type
+        if text[0] == 83 && text[1] == 101 && text[2] == 108 && text[3] == 102 { return 38 }   // Self
+        if text[0] == 115 && text[1] == 101 && text[2] == 108 && text[3] == 102 { return 37 }  // self
+        if text[0] == 119 && text[1] == 105 && text[2] == 116 && text[3] == 104 { return 53 }  // with
+    }
+    // 5-char keywords
+    if len == 5 {
+        if text[0] == 119 && text[1] == 104 && text[2] == 105 && text[3] == 108 && text[4] == 101 { return 28 }  // while
+        if text[0] == 98 && text[1] == 114 && text[2] == 101 && text[3] == 97 && text[4] == 107 { return 30 }   // break
+        if text[0] == 102 && text[1] == 97 && text[2] == 108 && text[3] == 115 && text[4] == 101 { return 40 }  // false
+        if text[0] == 116 && text[1] == 114 && text[2] == 97 && text[3] == 105 && text[4] == 116 { return 22 }  // trait
+        if text[0] == 99 && text[1] == 111 && text[2] == 110 && text[3] == 115 && text[4] == 116 { return 18 }  // const
+        if text[0] == 109 && text[1] == 97 && text[2] == 116 && text[3] == 99 && text[4] == 104 { return 26 }   // match
+        if text[0] == 119 && text[1] == 104 && text[2] == 101 && text[3] == 114 && text[4] == 101 { return 35 } // where
+    }
+    // 6-char keywords
+    if len == 6 {
+        if text[0] == 114 && text[1] == 101 && text[2] == 116 && text[3] == 117 && text[4] == 114 && text[5] == 110 { return 32 }  // return
+        if text[0] == 115 && text[1] == 116 && text[2] == 114 && text[3] == 117 && text[4] == 99 && text[5] == 116 { return 20 }   // struct
+        if text[0] == 105 && text[1] == 109 && text[2] == 112 && text[3] == 111 && text[4] == 114 && text[5] == 116 { return 11 }  // import
+        if text[0] == 109 && text[1] == 111 && text[2] == 100 && text[3] == 117 && text[4] == 108 && text[5] == 101 { return 10 }  // module
+        if text[0] == 101 && text[1] == 120 && text[2] == 112 && text[3] == 111 && text[4] == 114 && text[5] == 116 { return 13 }  // export
+        if text[0] == 107 && text[1] == 101 && text[2] == 114 && text[3] == 110 && text[4] == 101 && text[5] == 108 { return 70 }  // kernel
+        if text[0] == 117 && text[1] == 110 && text[2] == 115 && text[3] == 97 && text[4] == 102 && text[5] == 101 { return 41 }   // unsafe
+        if text[0] == 101 && text[1] == 120 && text[2] == 116 && text[3] == 101 && text[4] == 114 && text[5] == 110 { return 42 }  // extern
+        if text[0] == 115 && text[1] == 116 && text[2] == 97 && text[3] == 116 && text[4] == 105 && text[5] == 99 { return 43 }    // static
+    }
+    // 8-char keywords
+    if len == 8 {
+        if text[0] == 99 && text[1] == 111 && text[2] == 110 && text[3] == 116 &&
+           text[4] == 105 && text[5] == 110 && text[6] == 117 && text[7] == 101 { return 31 }  // continue
+    }
+    TK_IDENT()
+}
+
+// ============================================================================
+// SCANNING FUNCTIONS
+// ============================================================================
+
+/// Scan an identifier or keyword
+fn scan_identifier(lex: Lexer) -> ScanResult {
+    let start = lex.pos;
+    var l = lex;
+    var tok = token_new();
+    var text_len: i64 = 0;
+
+    while !lexer_at_end(l) && is_ident_continue(l.current) && text_len < 255 {
+        tok.text[text_len as usize] = l.current;
+        text_len = text_len + 1;
+        l = lexer_advance(l);
+    }
+
+    tok.text_len = text_len;
+    tok.span = span_new(start, l.pos);
+
+    // Check if it's a keyword
+    tok.kind = lookup_keyword(tok.text, text_len);
+
+    // Check for underscore-only identifier (special token)
+    if text_len == 1 && tok.text[0] == 95 {
+        tok.kind = TK_UNDERSCORE();
+    }
+
+    scan_result_new(l, tok)
+}
+
+/// Scan a number literal (int, float, hex, bin, oct, with optional unit)
+fn scan_number(lex: Lexer) -> ScanResult {
+    let start = lex.pos;
+    var l = lex;
+    var tok = token_new();
+    var text_len: i64 = 0;
+    var is_float = false;
+    var is_hex = false;
+    var is_bin = false;
+    var is_oct = false;
+
+    // Check for hex/bin/oct prefix
+    if l.current == 48 {  // '0'
+        let next = lexer_peek(l);
+        if next == 120 || next == 88 {  // 'x' or 'X'
+            is_hex = true;
+            tok.text[0] = l.current;
+            l = lexer_advance(l);
+            tok.text[1] = l.current;
+            l = lexer_advance(l);
+            text_len = 2;
+            while !lexer_at_end(l) && (is_hex_digit(l.current) || l.current == 95) && text_len < 255 {
+                if l.current != 95 {
+                    tok.text[text_len as usize] = l.current;
+                    text_len = text_len + 1;
+                }
+                l = lexer_advance(l);
+            }
+            tok.text_len = text_len;
+            tok.span = span_new(start, l.pos);
+            tok.kind = TK_HEX_LIT();
+            return scan_result_new(l, tok)
+        }
+        if next == 98 || next == 66 {  // 'b' or 'B'
+            is_bin = true;
+            tok.text[0] = l.current;
+            l = lexer_advance(l);
+            tok.text[1] = l.current;
+            l = lexer_advance(l);
+            text_len = 2;
+            while !lexer_at_end(l) && (is_bin_digit(l.current) || l.current == 95) && text_len < 255 {
+                if l.current != 95 {
+                    tok.text[text_len as usize] = l.current;
+                    text_len = text_len + 1;
+                }
+                l = lexer_advance(l);
+            }
+            tok.text_len = text_len;
+            tok.span = span_new(start, l.pos);
+            tok.kind = TK_BIN_LIT();
+            return scan_result_new(l, tok)
+        }
+        if next == 111 || next == 79 {  // 'o' or 'O'
+            is_oct = true;
+            tok.text[0] = l.current;
+            l = lexer_advance(l);
+            tok.text[1] = l.current;
+            l = lexer_advance(l);
+            text_len = 2;
+            while !lexer_at_end(l) && (is_oct_digit(l.current) || l.current == 95) && text_len < 255 {
+                if l.current != 95 {
+                    tok.text[text_len as usize] = l.current;
+                    text_len = text_len + 1;
+                }
+                l = lexer_advance(l);
+            }
+            tok.text_len = text_len;
+            tok.span = span_new(start, l.pos);
+            tok.kind = TK_OCT_LIT();
+            return scan_result_new(l, tok)
+        }
+    }
+
+    // Decimal integer part
+    while !lexer_at_end(l) && (is_digit(l.current) || l.current == 95) && text_len < 255 {
+        if l.current != 95 {
+            tok.text[text_len as usize] = l.current;
+            text_len = text_len + 1;
+        }
+        l = lexer_advance(l);
+    }
+
+    // Check for decimal point
+    if l.current == 46 && is_digit(lexer_peek(l)) {
+        is_float = true;
+        tok.text[text_len as usize] = 46;
+        text_len = text_len + 1;
+        l = lexer_advance(l);
+
+        // Fractional part
+        while !lexer_at_end(l) && (is_digit(l.current) || l.current == 95) && text_len < 255 {
+            if l.current != 95 {
+                tok.text[text_len as usize] = l.current;
+                text_len = text_len + 1;
+            }
+            l = lexer_advance(l);
+        }
+    }
+
+    // Check for exponent
+    if l.current == 101 || l.current == 69 {  // 'e' or 'E'
+        is_float = true;
+        tok.text[text_len as usize] = l.current;
+        text_len = text_len + 1;
+        l = lexer_advance(l);
+
+        // Optional sign
+        if l.current == 43 || l.current == 45 {
+            tok.text[text_len as usize] = l.current;
+            text_len = text_len + 1;
+            l = lexer_advance(l);
+        }
+
+        // Exponent digits
+        while !lexer_at_end(l) && is_digit(l.current) && text_len < 255 {
+            tok.text[text_len as usize] = l.current;
+            text_len = text_len + 1;
+            l = lexer_advance(l);
+        }
+    }
+
+    // Check for unit suffix (e.g., 500_mg)
+    if l.current == 95 && is_alpha(lexer_peek(l)) {
+        l = lexer_advance(l);  // skip underscore
+        while !lexer_at_end(l) && (is_ident_continue(l.current) || l.current == 47) && text_len < 255 {
+            tok.text[text_len as usize] = l.current;
+            text_len = text_len + 1;
+            l = lexer_advance(l);
+        }
+        tok.text_len = text_len;
+        tok.span = span_new(start, l.pos);
+        if is_float {
+            tok.kind = TK_FLOAT_UNIT_LIT();
+        } else {
+            tok.kind = TK_INT_UNIT_LIT();
+        }
+        return scan_result_new(l, tok)
+    }
+
+    tok.text_len = text_len;
+    tok.span = span_new(start, l.pos);
+    if is_float {
+        tok.kind = TK_FLOAT_LIT();
+    } else {
+        tok.kind = TK_INT_LIT();
+    }
+    scan_result_new(l, tok)
+}
+
+/// Scan a string literal
+fn scan_string(lex: Lexer) -> ScanResult {
+    let start = lex.pos;
+    let quote = lex.current;
+    var l = lexer_advance(lex);  // skip opening quote
+    var tok = token_new();
+    var text_len: i64 = 0;
+
+    while !lexer_at_end(l) && l.current != quote && text_len < 255 {
+        if l.current == 92 {  // backslash - escape sequence
+            l = lexer_advance(l);
+            if !lexer_at_end(l) {
+                let escaped = l.current;
+                if escaped == 110 {  // \n
+                    tok.text[text_len as usize] = 10;
+                } else if escaped == 116 {  // \t
+                    tok.text[text_len as usize] = 9;
+                } else if escaped == 114 {  // \r
+                    tok.text[text_len as usize] = 13;
+                } else if escaped == 92 {  // \\
+                    tok.text[text_len as usize] = 92;
+                } else if escaped == 34 {  // \"
+                    tok.text[text_len as usize] = 34;
+                } else if escaped == 39 {  // \'
+                    tok.text[text_len as usize] = 39;
+                } else if escaped == 48 {  // \0
+                    tok.text[text_len as usize] = 0;
+                } else {
+                    tok.text[text_len as usize] = escaped;
+                }
+                text_len = text_len + 1;
+                l = lexer_advance(l);
+            }
+        } else {
+            tok.text[text_len as usize] = l.current;
+            text_len = text_len + 1;
+            l = lexer_advance(l);
+        }
+    }
+
+    if l.current == quote {
+        l = lexer_advance(l);  // skip closing quote
+    }
+
+    tok.text_len = text_len;
+    tok.span = span_new(start, l.pos);
+    tok.kind = TK_STRING_LIT();
+    scan_result_new(l, tok)
+}
+
+/// Scan a character literal
+fn scan_char(lex: Lexer) -> ScanResult {
+    let start = lex.pos;
+    var l = lexer_advance(lex);  // skip opening quote
+    var tok = token_new();
+
+    if l.current == 92 {  // backslash
+        l = lexer_advance(l);
+        if !lexer_at_end(l) {
+            let escaped = l.current;
+            if escaped == 110 { tok.text[0] = 10; }
+            else if escaped == 116 { tok.text[0] = 9; }
+            else if escaped == 114 { tok.text[0] = 13; }
+            else if escaped == 92 { tok.text[0] = 92; }
+            else if escaped == 39 { tok.text[0] = 39; }
+            else if escaped == 48 { tok.text[0] = 0; }
+            else { tok.text[0] = escaped; }
+            l = lexer_advance(l);
+        }
+    } else {
+        tok.text[0] = l.current;
+        l = lexer_advance(l);
+    }
+
+    tok.text_len = 1;
+
+    if l.current == 39 {  // closing quote
+        l = lexer_advance(l);
+    }
+
+    tok.span = span_new(start, l.pos);
+    tok.kind = TK_CHAR_LIT();
+    scan_result_new(l, tok)
+}
+
+/// Scan a doc comment (/// or //!)
+fn scan_doc_comment(lex: Lexer, is_inner: bool) -> ScanResult {
+    let start = lex.pos;
+    var l = lexer_advance_n(lex, 3);  // skip /// or //!
+    var tok = token_new();
+    var text_len: i64 = 0;
+
+    while !lexer_at_end(l) && l.current != 10 && text_len < 255 {
+        tok.text[text_len as usize] = l.current;
+        text_len = text_len + 1;
+        l = lexer_advance(l);
+    }
+
+    tok.text_len = text_len;
+    tok.span = span_new(start, l.pos);
+    if is_inner {
+        tok.kind = TK_DOC_COMMENT_INNER();
+    } else {
+        tok.kind = TK_DOC_COMMENT_OUTER();
+    }
+    scan_result_new(l, tok)
+}
+
+/// Scan a block doc comment (/** or /*!)
+fn scan_doc_block(lex: Lexer, is_inner: bool) -> ScanResult {
+    let start = lex.pos;
+    var l = lexer_advance_n(lex, 3);  // skip /** or /*!
+    var tok = token_new();
+    var text_len: i64 = 0;
+
+    while !lexer_at_end(l) && text_len < 255 {
+        if l.current == 42 && lexer_peek(l) == 47 {  // */
+            l = lexer_advance_n(l, 2);
+            break
+        }
+        tok.text[text_len as usize] = l.current;
+        text_len = text_len + 1;
+        l = lexer_advance(l);
+    }
+
+    tok.text_len = text_len;
+    tok.span = span_new(start, l.pos);
+    if is_inner {
+        tok.kind = TK_DOC_BLOCK_INNER();
+    } else {
+        tok.kind = TK_DOC_BLOCK_OUTER();
+    }
+    scan_result_new(l, tok)
+}
+
+// ============================================================================
+// MAIN TOKENIZATION
+// ============================================================================
+
+/// Get the next token from the lexer
+fn next_token(lex: Lexer) -> ScanResult {
+    var l = skip_whitespace(lex);
+
+    if lexer_at_end(l) {
+        let tok = token_simple(TK_EOF(), l.pos, l.pos);
+        return scan_result_new(l, tok)
+    }
+
+    let c = l.current;
+    let start = l.pos;
+
+    // Single-character tokens
+    if c == 40 {  // (
+        return scan_result_new(lexer_advance(l), token_simple(TK_LPAREN(), start, start + 1))
+    }
+    if c == 41 {  // )
+        return scan_result_new(lexer_advance(l), token_simple(TK_RPAREN(), start, start + 1))
+    }
+    if c == 91 {  // [
+        return scan_result_new(lexer_advance(l), token_simple(TK_LBRACKET(), start, start + 1))
+    }
+    if c == 93 {  // ]
+        return scan_result_new(lexer_advance(l), token_simple(TK_RBRACKET(), start, start + 1))
+    }
+    if c == 123 {  // {
+        return scan_result_new(lexer_advance(l), token_simple(TK_LBRACE(), start, start + 1))
+    }
+    if c == 125 {  // }
+        return scan_result_new(lexer_advance(l), token_simple(TK_RBRACE(), start, start + 1))
+    }
+    if c == 44 {  // ,
+        return scan_result_new(lexer_advance(l), token_simple(TK_COMMA(), start, start + 1))
+    }
+    if c == 59 {  // ;
+        return scan_result_new(lexer_advance(l), token_simple(TK_SEMI(), start, start + 1))
+    }
+    if c == 64 {  // @
+        return scan_result_new(lexer_advance(l), token_simple(TK_AT(), start, start + 1))
+    }
+    if c == 35 {  // #
+        return scan_result_new(lexer_advance(l), token_simple(TK_HASH(), start, start + 1))
+    }
+    if c == 36 {  // $
+        return scan_result_new(lexer_advance(l), token_simple(TK_DOLLAR(), start, start + 1))
+    }
+    if c == 63 {  // ?
+        return scan_result_new(lexer_advance(l), token_simple(TK_QUESTION(), start, start + 1))
+    }
+    if c == 126 {  // ~
+        return scan_result_new(lexer_advance(l), token_simple(TK_TILDE(), start, start + 1))
+    }
+
+    // Colon and ::
+    if c == 58 {  // :
+        if lexer_peek(l) == 58 {
+            return scan_result_new(lexer_advance_n(l, 2), token_simple(TK_COLON_COLON(), start, start + 2))
+        }
+        return scan_result_new(lexer_advance(l), token_simple(TK_COLON(), start, start + 1))
+    }
+
+    // Dot, .., ..., ..=
+    if c == 46 {  // .
+        let p1 = lexer_peek(l);
+        if p1 == 46 {
+            let p2 = lexer_peek_n(l, 2);
+            if p2 == 46 {
+                return scan_result_new(lexer_advance_n(l, 3), token_simple(TK_DOT_DOT_DOT(), start, start + 3))
+            }
+            if p2 == 61 {
+                return scan_result_new(lexer_advance_n(l, 3), token_simple(TK_DOT_DOT_EQ(), start, start + 3))
+            }
+            return scan_result_new(lexer_advance_n(l, 2), token_simple(TK_DOT_DOT(), start, start + 2))
+        }
+        return scan_result_new(lexer_advance(l), token_simple(TK_DOT(), start, start + 1))
+    }
+
+    // Plus, ++, +=, +-
+    if c == 43 {  // +
+        let p = lexer_peek(l);
+        if p == 43 {
+            return scan_result_new(lexer_advance_n(l, 2), token_simple(TK_PLUS_PLUS(), start, start + 2))
+        }
+        if p == 61 {
+            return scan_result_new(lexer_advance_n(l, 2), token_simple(TK_PLUS_EQ(), start, start + 2))
+        }
+        if p == 45 {
+            return scan_result_new(lexer_advance_n(l, 2), token_simple(TK_PLUS_MINUS(), start, start + 2))
+        }
+        return scan_result_new(lexer_advance(l), token_simple(TK_PLUS(), start, start + 1))
+    }
+
+    // Minus, ->, -=
+    if c == 45 {  // -
+        let p = lexer_peek(l);
+        if p == 62 {  // >
+            return scan_result_new(lexer_advance_n(l, 2), token_simple(TK_ARROW(), start, start + 2))
+        }
+        if p == 61 {
+            return scan_result_new(lexer_advance_n(l, 2), token_simple(TK_MINUS_EQ(), start, start + 2))
+        }
+        return scan_result_new(lexer_advance(l), token_simple(TK_MINUS(), start, start + 1))
+    }
+
+    // Star, *=
+    if c == 42 {  // *
+        if lexer_peek(l) == 61 {
+            return scan_result_new(lexer_advance_n(l, 2), token_simple(TK_STAR_EQ(), start, start + 2))
+        }
+        return scan_result_new(lexer_advance(l), token_simple(TK_STAR(), start, start + 1))
+    }
+
+    // Slash, /=, comments
+    if c == 47 {  // /
+        let p = lexer_peek(l);
+        if p == 47 {  // //
+            let p2 = lexer_peek_n(l, 2);
+            if p2 == 47 {  // ///
+                return scan_doc_comment(l, false)
+            }
+            if p2 == 33 {  // //!
+                return scan_doc_comment(l, true)
+            }
+            // Regular line comment - skip and get next token
+            l = skip_line_comment(lexer_advance_n(l, 2));
+            return next_token(l)
+        }
+        if p == 42 {  // /*
+            let p2 = lexer_peek_n(l, 2);
+            if p2 == 42 {  // /**
+                return scan_doc_block(l, false)
+            }
+            if p2 == 33 {  // /*!
+                return scan_doc_block(l, true)
+            }
+            // Regular block comment - skip and get next token
+            l = skip_block_comment(l);
+            return next_token(l)
+        }
+        if p == 61 {
+            return scan_result_new(lexer_advance_n(l, 2), token_simple(TK_SLASH_EQ(), start, start + 2))
+        }
+        return scan_result_new(lexer_advance(l), token_simple(TK_SLASH(), start, start + 1))
+    }
+
+    // Percent, %=
+    if c == 37 {  // %
+        if lexer_peek(l) == 61 {
+            return scan_result_new(lexer_advance_n(l, 2), token_simple(TK_PERCENT_EQ(), start, start + 2))
+        }
+        return scan_result_new(lexer_advance(l), token_simple(TK_PERCENT(), start, start + 1))
+    }
+
+    // Caret, ^=
+    if c == 94 {  // ^
+        if lexer_peek(l) == 61 {
+            return scan_result_new(lexer_advance_n(l, 2), token_simple(TK_CARET_EQ(), start, start + 2))
+        }
+        return scan_result_new(lexer_advance(l), token_simple(TK_CARET(), start, start + 1))
+    }
+
+    // Ampersand, &&, &=
+    if c == 38 {  // &
+        let p = lexer_peek(l);
+        if p == 38 {
+            return scan_result_new(lexer_advance_n(l, 2), token_simple(TK_AMP_AMP(), start, start + 2))
+        }
+        if p == 61 {
+            return scan_result_new(lexer_advance_n(l, 2), token_simple(TK_AMP_EQ(), start, start + 2))
+        }
+        return scan_result_new(lexer_advance(l), token_simple(TK_AMP(), start, start + 1))
+    }
+
+    // Pipe, ||, |=
+    if c == 124 {  // |
+        let p = lexer_peek(l);
+        if p == 124 {
+            return scan_result_new(lexer_advance_n(l, 2), token_simple(TK_PIPE_PIPE(), start, start + 2))
+        }
+        if p == 61 {
+            return scan_result_new(lexer_advance_n(l, 2), token_simple(TK_PIPE_EQ(), start, start + 2))
+        }
+        return scan_result_new(lexer_advance(l), token_simple(TK_PIPE(), start, start + 1))
+    }
+
+    // Bang, !=
+    if c == 33 {  // !
+        if lexer_peek(l) == 61 {
+            return scan_result_new(lexer_advance_n(l, 2), token_simple(TK_NE(), start, start + 2))
+        }
+        return scan_result_new(lexer_advance(l), token_simple(TK_BANG(), start, start + 1))
+    }
+
+    // Equals, ==, =>
+    if c == 61 {  // =
+        let p = lexer_peek(l);
+        if p == 61 {
+            return scan_result_new(lexer_advance_n(l, 2), token_simple(TK_EQ_EQ(), start, start + 2))
+        }
+        if p == 62 {
+            return scan_result_new(lexer_advance_n(l, 2), token_simple(TK_FAT_ARROW(), start, start + 2))
+        }
+        return scan_result_new(lexer_advance(l), token_simple(TK_EQ(), start, start + 1))
+    }
+
+    // Less than, <=, <<, <<=, <-
+    if c == 60 {  // <
+        let p = lexer_peek(l);
+        if p == 61 {
+            return scan_result_new(lexer_advance_n(l, 2), token_simple(TK_LE(), start, start + 2))
+        }
+        if p == 60 {
+            if lexer_peek_n(l, 2) == 61 {
+                return scan_result_new(lexer_advance_n(l, 3), token_simple(TK_SHL_EQ(), start, start + 3))
+            }
+            return scan_result_new(lexer_advance_n(l, 2), token_simple(TK_SHL(), start, start + 2))
+        }
+        if p == 45 {
+            return scan_result_new(lexer_advance_n(l, 2), token_simple(TK_LEFT_ARROW(), start, start + 2))
+        }
+        return scan_result_new(lexer_advance(l), token_simple(TK_LT(), start, start + 1))
+    }
+
+    // Greater than, >=, >>, >>=
+    if c == 62 {  // >
+        let p = lexer_peek(l);
+        if p == 61 {
+            return scan_result_new(lexer_advance_n(l, 2), token_simple(TK_GE(), start, start + 2))
+        }
+        if p == 62 {
+            if lexer_peek_n(l, 2) == 61 {
+                return scan_result_new(lexer_advance_n(l, 3), token_simple(TK_SHR_EQ(), start, start + 3))
+            }
+            return scan_result_new(lexer_advance_n(l, 2), token_simple(TK_SHR(), start, start + 2))
+        }
+        return scan_result_new(lexer_advance(l), token_simple(TK_GT(), start, start + 1))
+    }
+
+    // String literal
+    if c == 34 {  // "
+        return scan_string(l)
+    }
+
+    // Character literal
+    if c == 39 {  // '
+        return scan_char(l)
+    }
+
+    // Number literal
+    if is_digit(c) {
+        return scan_number(l)
+    }
+
+    // Identifier or keyword
+    if is_ident_start(c) {
+        return scan_identifier(l)
+    }
+
+    // Unknown character - error token
+    let tok = token_simple(TK_ERROR(), start, start + 1);
+    scan_result_new(lexer_advance(l), tok)
+}
+
+// ============================================================================
+// TOKEN STREAM
+// ============================================================================
+
+/// Token stream for parser consumption
+struct TokenStream {
+    tokens: [Token; 16384],
+    n_tokens: i64,
+    pos: i64,
+}
+
+fn token_stream_new() -> TokenStream {
+    TokenStream {
+        tokens: [token_new(); 16384],
+        n_tokens: 0,
+        pos: 0,
+    }
+}
+
+/// Tokenize source code into a token stream
+fn tokenize(source: [i8; 1048576], source_len: i64) -> TokenStream {
+    var stream = token_stream_new();
+    var lex = lexer_init(source, source_len);
+
+    while stream.n_tokens < 16384 {
+        let result = next_token(lex);
+        lex = result.lexer;
+        let tok = result.token;
+
+        stream.tokens[stream.n_tokens as usize] = tok;
+        stream.n_tokens = stream.n_tokens + 1;
+
+        if tok.kind == TK_EOF() || tok.kind == TK_ERROR() {
+            break
+        }
+    }
+
+    stream
+}
+
+/// Get current token from stream
+fn stream_current(stream: TokenStream) -> Token {
+    if stream.pos < stream.n_tokens {
+        stream.tokens[stream.pos as usize]
+    } else {
+        token_simple(TK_EOF(), 0, 0)
+    }
+}
+
+/// Advance stream position
+fn stream_advance(stream: TokenStream) -> TokenStream {
+    var s = stream;
+    if s.pos < s.n_tokens {
+        s.pos = s.pos + 1;
+    }
+    s
+}
+
+/// Check if current token matches kind
+fn stream_check(stream: TokenStream, kind: i32) -> bool {
+    stream.pos < stream.n_tokens && stream.tokens[stream.pos as usize].kind == kind
+}
+
+/// Peek at token n positions ahead
+fn stream_peek(stream: TokenStream, n: i64) -> Token {
+    let idx = stream.pos + n;
+    if idx < stream.n_tokens {
+        stream.tokens[idx as usize]
+    } else {
+        token_simple(TK_EOF(), 0, 0)
+    }
+}
+
+// ============================================================================
+// TESTS
+// ============================================================================
+
+fn test_lexer_simple() -> bool {
+    var source: [i8; 1048576] = [0; 1048576];
+    // "fn main() { }"
+    source[0] = 102; source[1] = 110;  // fn
+    source[2] = 32;   // space
+    source[3] = 109; source[4] = 97; source[5] = 105; source[6] = 110;  // main
+    source[7] = 40;   // (
+    source[8] = 41;   // )
+    source[9] = 32;   // space
+    source[10] = 123; // {
+    source[11] = 32;  // space
+    source[12] = 125; // }
+
+    let stream = tokenize(source, 13);
+
+    // Should have: fn, main, (, ), {, }, EOF
+    if stream.n_tokens != 7 { return false }
+    if stream.tokens[0].kind != 14 { return false }  // TK_FN
+    if stream.tokens[1].kind != TK_IDENT() { return false }
+    if stream.tokens[2].kind != TK_LPAREN() { return false }
+    if stream.tokens[3].kind != TK_RPAREN() { return false }
+    if stream.tokens[4].kind != TK_LBRACE() { return false }
+    if stream.tokens[5].kind != TK_RBRACE() { return false }
+    if stream.tokens[6].kind != TK_EOF() { return false }
+
+    true
+}
+
+fn test_lexer_numbers() -> bool {
+    var source: [i8; 1048576] = [0; 1048576];
+    // "42 3.14 0xFF 0b101"
+    source[0] = 52; source[1] = 50;  // 42
+    source[2] = 32;  // space
+    source[3] = 51; source[4] = 46; source[5] = 49; source[6] = 52;  // 3.14
+    source[7] = 32;  // space
+    source[8] = 48; source[9] = 120; source[10] = 70; source[11] = 70;  // 0xFF
+    source[12] = 32;  // space
+    source[13] = 48; source[14] = 98; source[15] = 49; source[16] = 48; source[17] = 49;  // 0b101
+
+    let stream = tokenize(source, 18);
+
+    if stream.n_tokens < 5 { return false }
+    if stream.tokens[0].kind != TK_INT_LIT() { return false }
+    if stream.tokens[1].kind != TK_FLOAT_LIT() { return false }
+    if stream.tokens[2].kind != TK_HEX_LIT() { return false }
+    if stream.tokens[3].kind != TK_BIN_LIT() { return false }
+
+    true
+}
+
+fn test_lexer_operators() -> bool {
+    var source: [i8; 1048576] = [0; 1048576];
+    // "+ - * / == != <= >= && || -> =>"
+    source[0] = 43;   // +
+    source[1] = 32;   // space
+    source[2] = 45;   // -
+    source[3] = 32;   // space
+    source[4] = 42;   // *
+    source[5] = 32;   // space
+    source[6] = 47;   // /
+    source[7] = 32;   // space
+    source[8] = 61; source[9] = 61;   // ==
+    source[10] = 32;  // space
+    source[11] = 33; source[12] = 61; // !=
+    source[13] = 32;  // space
+    source[14] = 60; source[15] = 61; // <=
+    source[16] = 32;  // space
+    source[17] = 62; source[18] = 61; // >=
+    source[19] = 32;  // space
+    source[20] = 38; source[21] = 38; // &&
+    source[22] = 32;  // space
+    source[23] = 124; source[24] = 124; // ||
+    source[25] = 32;  // space
+    source[26] = 45; source[27] = 62; // ->
+    source[28] = 32;  // space
+    source[29] = 61; source[30] = 62; // =>
+
+    let stream = tokenize(source, 31);
+
+    if stream.n_tokens < 13 { return false }
+    if stream.tokens[0].kind != TK_PLUS() { return false }
+    if stream.tokens[1].kind != TK_MINUS() { return false }
+    if stream.tokens[2].kind != TK_STAR() { return false }
+    if stream.tokens[3].kind != TK_SLASH() { return false }
+    if stream.tokens[4].kind != TK_EQ_EQ() { return false }
+    if stream.tokens[5].kind != TK_NE() { return false }
+    if stream.tokens[6].kind != TK_LE() { return false }
+    if stream.tokens[7].kind != TK_GE() { return false }
+    if stream.tokens[8].kind != TK_AMP_AMP() { return false }
+    if stream.tokens[9].kind != TK_PIPE_PIPE() { return false }
+    if stream.tokens[10].kind != TK_ARROW() { return false }
+    if stream.tokens[11].kind != TK_FAT_ARROW() { return false }
+
+    true
+}
+
+fn test_lexer_keywords() -> bool {
+    var source: [i8; 1048576] = [0; 1048576];
+    // "let var if else while for return struct"
+    // l e t   v a r   i f   e l s e   w h i l e   f o r   r e t u r n   s t r u c t
+    source[0] = 108; source[1] = 101; source[2] = 116;  // let
+    source[3] = 32;
+    source[4] = 118; source[5] = 97; source[6] = 114;   // var
+    source[7] = 32;
+    source[8] = 105; source[9] = 102;  // if
+    source[10] = 32;
+    source[11] = 101; source[12] = 108; source[13] = 115; source[14] = 101;  // else
+    source[15] = 32;
+    source[16] = 119; source[17] = 104; source[18] = 105; source[19] = 108; source[20] = 101;  // while
+    source[21] = 32;
+    source[22] = 102; source[23] = 111; source[24] = 114;  // for
+    source[25] = 32;
+    source[26] = 114; source[27] = 101; source[28] = 116; source[29] = 117; source[30] = 114; source[31] = 110;  // return
+    source[32] = 32;
+    source[33] = 115; source[34] = 116; source[35] = 114; source[36] = 117; source[37] = 99; source[38] = 116;  // struct
+
+    let stream = tokenize(source, 39);
+
+    if stream.n_tokens < 9 { return false }
+    if stream.tokens[0].kind != 15 { return false }  // TK_LET
+    if stream.tokens[1].kind != 16 { return false }  // TK_VAR
+    if stream.tokens[2].kind != 24 { return false }  // TK_IF
+    if stream.tokens[3].kind != 25 { return false }  // TK_ELSE
+    if stream.tokens[4].kind != 28 { return false }  // TK_WHILE
+    if stream.tokens[5].kind != 27 { return false }  // TK_FOR
+    if stream.tokens[6].kind != 32 { return false }  // TK_RETURN
+    if stream.tokens[7].kind != 20 { return false }  // TK_STRUCT
+
+    true
+}
+
+fn test_lexer_comments() -> bool {
+    var source: [i8; 1048576] = [0; 1048576];
+    // "x // comment\ny"
+    source[0] = 120;  // x
+    source[1] = 32;   // space
+    source[2] = 47; source[3] = 47;  // //
+    source[4] = 32;   // space
+    source[5] = 99; source[6] = 111; source[7] = 109; source[8] = 109; source[9] = 101; source[10] = 110; source[11] = 116;  // comment
+    source[12] = 10;  // newline
+    source[13] = 121; // y
+
+    let stream = tokenize(source, 14);
+
+    // Should have: x, y, EOF (comment skipped)
+    if stream.n_tokens != 3 { return false }
+    if stream.tokens[0].kind != TK_IDENT() { return false }
+    if stream.tokens[1].kind != TK_IDENT() { return false }
+    if stream.tokens[2].kind != TK_EOF() { return false }
+
+    true
+}
+
+fn main() -> i32 {
+    print("Testing self-hosted Sounio lexer...\n");
+
+    if !test_lexer_simple() {
+        print("FAIL: test_lexer_simple\n");
+        return 1
+    }
+    print("PASS: test_lexer_simple\n");
+
+    if !test_lexer_numbers() {
+        print("FAIL: test_lexer_numbers\n");
+        return 2
+    }
+    print("PASS: test_lexer_numbers\n");
+
+    if !test_lexer_operators() {
+        print("FAIL: test_lexer_operators\n");
+        return 3
+    }
+    print("PASS: test_lexer_operators\n");
+
+    if !test_lexer_keywords() {
+        print("FAIL: test_lexer_keywords\n");
+        return 4
+    }
+    print("PASS: test_lexer_keywords\n");
+
+    if !test_lexer_comments() {
+        print("FAIL: test_lexer_comments\n");
+        return 5
+    }
+    print("PASS: test_lexer_comments\n");
+
+    print("\nAll self-hosted lexer tests PASSED!\n");
+    0
+}
+

@@ -1,0 +1,221 @@
+// compiler::lexer::scanner — Character scanning and lexer state
+//
+// This module provides the core scanning functionality for the Sounio lexer.
+// It handles character-by-character traversal of source code.
+
+// ============================================================================
+// LEXER STATE
+// ============================================================================
+
+/// Lexer state for scanning source code
+struct Lexer {
+    // Source code as byte array (max 1MB)
+    source: [i8; 1048576],
+    source_len: i64,
+    // Current position in source
+    pos: i64,
+    // Line and column tracking for error messages
+    line: i64,
+    column: i64,
+    // Current character (0 if at end)
+    current: i8,
+}
+
+fn lexer_new() -> Lexer {
+    Lexer {
+        source: [0; 1048576],
+        source_len: 0,
+        pos: 0,
+        line: 1,
+        column: 1,
+        current: 0,
+    }
+}
+
+/// Initialize lexer with source code
+fn lexer_init(source: [i8; 1048576], len: i64) -> Lexer {
+    var lex = lexer_new();
+    lex.source = source;
+    lex.source_len = len;
+    if len > 0 {
+        lex.current = source[0];
+    }
+    lex
+}
+
+/// Check if lexer is at end of source
+fn lexer_at_end(lex: Lexer) -> bool {
+    lex.pos >= lex.source_len
+}
+
+/// Peek at next character without advancing
+fn lexer_peek(lex: Lexer) -> i8 {
+    if lex.pos + 1 < lex.source_len {
+        lex.source[(lex.pos + 1) as usize]
+    } else {
+        0
+    }
+}
+
+/// Peek at character n positions ahead
+fn lexer_peek_n(lex: Lexer, n: i64) -> i8 {
+    if lex.pos + n < lex.source_len {
+        lex.source[(lex.pos + n) as usize]
+    } else {
+        0
+    }
+}
+
+/// Advance lexer by one character, returning new state
+fn lexer_advance(lex: Lexer) -> Lexer {
+    var new_lex = lex;
+    if new_lex.pos < new_lex.source_len {
+        // Track newlines for line/column
+        if new_lex.current == 10 {  // '\n'
+            new_lex.line = new_lex.line + 1;
+            new_lex.column = 1;
+        } else {
+            new_lex.column = new_lex.column + 1;
+        }
+        new_lex.pos = new_lex.pos + 1;
+        if new_lex.pos < new_lex.source_len {
+            new_lex.current = new_lex.source[new_lex.pos as usize];
+        } else {
+            new_lex.current = 0;
+        }
+    }
+    new_lex
+}
+
+/// Advance lexer by n characters
+fn lexer_advance_n(lex: Lexer, n: i64) -> Lexer {
+    var l = lex;
+    var i: i64 = 0;
+    while i < n {
+        l = lexer_advance(l);
+        i = i + 1;
+    }
+    l
+}
+
+// ============================================================================
+// CHARACTER CLASSIFICATION
+// ============================================================================
+
+/// Check if character is whitespace (space, tab, CR, LF)
+fn is_whitespace(c: i8) -> bool {
+    c == 32 || c == 9 || c == 13 || c == 10
+}
+
+/// Check if character is a digit (0-9)
+fn is_digit(c: i8) -> bool {
+    c >= 48 && c <= 57
+}
+
+/// Check if character is a hex digit (0-9, a-f, A-F)
+fn is_hex_digit(c: i8) -> bool {
+    is_digit(c) || (c >= 97 && c <= 102) || (c >= 65 && c <= 70)
+}
+
+/// Check if character is a binary digit (0-1)
+fn is_bin_digit(c: i8) -> bool {
+    c == 48 || c == 49
+}
+
+/// Check if character is an octal digit (0-7)
+fn is_oct_digit(c: i8) -> bool {
+    c >= 48 && c <= 55
+}
+
+/// Check if character is alphabetic (a-z, A-Z)
+fn is_alpha(c: i8) -> bool {
+    (c >= 65 && c <= 90) || (c >= 97 && c <= 122)
+}
+
+/// Check if character can start an identifier (a-z, A-Z, _)
+fn is_ident_start(c: i8) -> bool {
+    is_alpha(c) || c == 95
+}
+
+/// Check if character can continue an identifier (a-z, A-Z, 0-9, _)
+fn is_ident_continue(c: i8) -> bool {
+    is_alpha(c) || is_digit(c) || c == 95
+}
+
+// ============================================================================
+// WHITESPACE AND COMMENT HANDLING
+// ============================================================================
+
+/// Skip whitespace characters (but not newlines for line tracking)
+fn skip_whitespace(lex: Lexer) -> Lexer {
+    var l = lex;
+    while !lexer_at_end(l) && is_whitespace(l.current) {
+        l = lexer_advance(l);
+    }
+    l
+}
+
+/// Skip a line comment (// ...)
+fn skip_line_comment(lex: Lexer) -> Lexer {
+    var l = lex;
+    while !lexer_at_end(l) && l.current != 10 {  // until newline
+        l = lexer_advance(l);
+    }
+    l
+}
+
+/// Skip a block comment (/* ... */)
+/// Returns the lexer positioned after the closing */
+fn skip_block_comment(lex: Lexer) -> Lexer {
+    var l = lexer_advance_n(lex, 2);  // skip /*
+    var depth: i64 = 1;
+    while !lexer_at_end(l) && depth > 0 {
+        if l.current == 42 && lexer_peek(l) == 47 {  // */
+            l = lexer_advance_n(l, 2);
+            depth = depth - 1;
+        } else if l.current == 47 && lexer_peek(l) == 42 {  // /* (nested)
+            l = lexer_advance_n(l, 2);
+            depth = depth + 1;
+        } else {
+            l = lexer_advance(l);
+        }
+    }
+    l
+}
+
+// ============================================================================
+// SCAN RESULT - Tuple replacement for returning lexer + token
+// ============================================================================
+
+struct ScanResult {
+    lexer: Lexer,
+    kind: i32,
+    start: i64,
+    end: i64,
+    // For identifiers/strings, store the text
+    text: [i8; 256],
+    text_len: i64,
+}
+
+fn scan_result_new(lex: Lexer, kind: i32, start: i64, end: i64) -> ScanResult {
+    ScanResult {
+        lexer: lex,
+        kind: kind,
+        start: start,
+        end: end,
+        text: [0; 256],
+        text_len: 0,
+    }
+}
+
+fn scan_result_with_text(lex: Lexer, kind: i32, start: i64, end: i64, text: [i8; 256], text_len: i64) -> ScanResult {
+    ScanResult {
+        lexer: lex,
+        kind: kind,
+        start: start,
+        end: end,
+        text: text,
+        text_len: text_len,
+    }
+}
+

@@ -1904,6 +1904,15 @@ unsafe impl Send for CompiledModule {}
 unsafe impl Sync for CompiledModule {}
 
 impl CompiledModule {
+    /// Create a new compiled module from a JIT module and function pointers
+    #[cfg(feature = "jit")]
+    pub fn new(jit_module: JITModule, functions: HashMap<String, *const u8>) -> Self {
+        Self {
+            jit_module,
+            functions,
+        }
+    }
+
     /// Get a function pointer by name
     pub fn get_function(&self, name: &str) -> Option<*const u8> {
         self.functions.get(name).copied()

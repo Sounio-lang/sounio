@@ -68,7 +68,7 @@ cargo run --bin sounio-ontology-build
 
 ## Compiler Architecture
 
-**Pipeline:** Source → Lexer (Logos) → Parser → AST → Type Checker → HIR → HLIR (SSA) → Codegen
+**Pipeline:** Source → Lexer (Logos) → Parser → AST → Type Checker → HIR → SIR → HLIR (SSA) → Codegen
 
 Key modules in `compiler/src/`:
 - `lexer/`, `parser/`, `ast/` — Frontend
@@ -80,13 +80,16 @@ Key modules in `compiler/src/`:
 - `epistemic/` — Confidence and provenance tracking (Knowledge<T>)
 - `ontology/` — Scientific ontology integration (15M+ terms)
 - `hir/` — Typed high-level IR
+- `sir/` — Scientific IR for domain-specific optimizations (ODEs, tensors, autodiff)
 - `hlir/` — SSA-based low-level IR
-- `sir/` — Scientific IR for domain-specific optimizations
+- `backend/` — Native code generation (ELF/Mach-O binary output)
 - `codegen/` — LLVM, Cranelift JIT, GPU (PTX/SPIR-V) backends
 - `interp/` — Interpreter
 - `lsp/` — Language Server Protocol
 - `pkg/` — Package manager
 - `repl/` — Interactive REPL
+
+**See also:** [compiler/docs/KNOWN_LIMITATIONS.md](compiler/docs/KNOWN_LIMITATIONS.md) for current language limitations
 
 ## Sounio Language Syntax (NOT Rust)
 
@@ -135,10 +138,18 @@ let measurement: Knowledge<mg> = measure(500.0, uncertainty: 2.5)
 - `#[test]`, `#[derive()]` - no attribute macros
 - `let (a, b) = tuple` - no tuple destructuring
 - `|(x, y)| expr` - no tuple destructuring in closures
+- `pub` - visibility modifiers not yet implemented
+- Forward references - functions must be defined before use (helpers go at top)
 
 ## Test Organization
 
 - `compiler/tests/` — Integration tests (Rust)
+  - `integration_semantic_types.rs` — Core type system tests
+  - `integration_ontology_e2e.rs` — Scientific ontology integration
+  - `epistemic_integration.rs` — Knowledge<T> and uncertainty
+  - `jit_effects.rs` — Effect system with JIT
+  - `gpu_*.rs` — GPU codegen and execution tests
+  - `native_*.rs` — Native backend tests
 - `tests/ui/` — Error message verification
 - `tests/run-pass/` — Should compile and run
 - `tests/compile-fail/` — Should fail to compile
@@ -148,6 +159,7 @@ Test annotations in Sounio files:
 //@ run-pass
 //@ compile-fail
 //@ error-pattern: <text>
+//@ ignore             — skip this test
 ```
 
 ## Coding Standards
@@ -163,6 +175,6 @@ Test annotations in Sounio files:
 [component] Brief description
 
 Components: lexer, parser, ast, check, types, effects, hir, hlir,
-           codegen, cli, docs, stdlib, tests, ontology, epistemic,
+           codegen, backend, cli, docs, stdlib, tests, ontology, epistemic,
            lsp, pkg, sir, units, refinement
 ```

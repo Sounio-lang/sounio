@@ -86,6 +86,19 @@ pub enum UncertaintyModel {
     /// Most expressive but computationally expensive.
     /// Best for probabilistic modeling.
     Bayesian(BayesianConfig),
+
+    /// Bootstrap resampling-based uncertainty
+    ///
+    /// Uses resampling to estimate the sampling distribution of a statistic.
+    /// Provides non-parametric confidence intervals.
+    /// Best for empirical uncertainty from limited samples.
+    Bootstrap(BootstrapConfig),
+
+    /// K-fold cross-validation uncertainty
+    ///
+    /// Represents model performance uncertainty across different data splits.
+    /// Best for quantifying model generalization uncertainty.
+    CrossValidation(CrossValidationConfig),
 }
 
 impl Default for UncertaintyModel {
@@ -104,6 +117,8 @@ impl UncertaintyModel {
             UncertaintyModel::Fuzzy(_) => "Fuzzy",
             UncertaintyModel::DempsterShafer(_) => "DempsterShafer",
             UncertaintyModel::Bayesian(_) => "Bayesian",
+            UncertaintyModel::Bootstrap(_) => "Bootstrap",
+            UncertaintyModel::CrossValidation(_) => "CrossValidation",
         }
     }
 
@@ -114,12 +129,21 @@ impl UncertaintyModel {
             UncertaintyModel::Interval(_)
                 | UncertaintyModel::Affine(_)
                 | UncertaintyModel::DempsterShafer(_)
+                | UncertaintyModel::Bootstrap(_)  // Bootstrap provides percentile bounds
         )
     }
 
     /// Check if this model supports distribution tracking
     pub fn supports_distributions(&self) -> bool {
-        matches!(self, UncertaintyModel::Bayesian(_))
+        matches!(self, UncertaintyModel::Bayesian(_) | UncertaintyModel::Bootstrap(_))
+    }
+
+    /// Check if this model is sample-based
+    pub fn is_sample_based(&self) -> bool {
+        matches!(
+            self,
+            UncertaintyModel::Bootstrap(_) | UncertaintyModel::CrossValidation(_)
+        )
     }
 
     /// Get the default confidence degradation factor for operations
@@ -131,6 +155,8 @@ impl UncertaintyModel {
             UncertaintyModel::Fuzzy(c) => c.default_degradation,
             UncertaintyModel::DempsterShafer(_) => 1.0,
             UncertaintyModel::Bayesian(_) => 1.0,
+            UncertaintyModel::Bootstrap(_) => 1.0, // SE propagation
+            UncertaintyModel::CrossValidation(_) => 1.0, // SE propagation
         }
     }
 }
@@ -412,6 +438,93 @@ pub enum InferenceMethod {
 }
 
 // =============================================================================
+// Bootstrap Resampling Configuration
+// =============================================================================
+
+/// Configuration for bootstrap resampling uncertainty
+///
+/// Bootstrap uncertainty is computed by resampling the original data
+/// and computing the statistic of interest on each resample.
+#[derive(Debug, Clone, PartialEq)]
+pub struct BootstrapConfig {
+    /// Number of bootstrap resamples
+    pub n_samples: usize,
+
+    /// Significance level for confidence intervals (e.g., 0.05 for 95% CI)
+    pub alpha: f64,
+
+    /// Bootstrap confidence interval method
+    pub method: BootstrapMethod,
+
+    /// Whether to compute and correct for bias
+    pub bias_corrected: bool,
+}
+
+impl Default for BootstrapConfig {
+    fn default() -> Self {
+        Self {
+            n_samples: 1000,
+            alpha: 0.05,
+            method: BootstrapMethod::Percentile,
+            bias_corrected: false,
+        }
+    }
+}
+
+/// Method for computing bootstrap confidence intervals
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BootstrapMethod {
+    /// Percentile method: use percentiles of bootstrap distribution
+    Percentile,
+    /// BCa: Bias-Corrected and Accelerated
+    BCa,
+    /// Basic/reverse percentile method
+    Basic,
+    /// Normal approximation using bootstrap SE
+    Normal,
+    /// Studentized bootstrap (requires variance estimates)
+    Studentized,
+}
+
+// =============================================================================
+// Cross-Validation Configuration
+// =============================================================================
+
+/// Configuration for k-fold cross-validation uncertainty
+///
+/// Cross-validation uncertainty represents model performance variability
+/// across different train/test splits.
+#[derive(Debug, Clone, PartialEq)]
+pub struct CrossValidationConfig {
+    /// Number of folds (k)
+    pub k: usize,
+
+    /// Whether to use stratified sampling (preserve class proportions)
+    pub stratified: bool,
+
+    /// Whether to shuffle data before splitting
+    pub shuffle: bool,
+
+    /// Random seed for reproducibility (if shuffling)
+    pub seed: Option<u64>,
+
+    /// Number of times to repeat k-fold (for repeated CV)
+    pub n_repeats: usize,
+}
+
+impl Default for CrossValidationConfig {
+    fn default() -> Self {
+        Self {
+            k: 5,
+            stratified: true,
+            shuffle: true,
+            seed: None,
+            n_repeats: 1,
+        }
+    }
+}
+
+// =============================================================================
 // Uncertainty Value Types
 // =============================================================================
 
@@ -449,6 +562,34 @@ pub enum UncertainValue {
         mean: f64,
         variance: f64,
     },
+
+    /// Bootstrap resampling uncertainty
+    Bootstrap {
+        /// Original point estimate
+        estimate: f64,
+        /// Lower percentile bound
+        percentile_lower: f64,
+        /// Upper percentile bound
+        percentile_upper: f64,
+        /// Bootstrap standard error
+        bootstrap_se: f64,
+        /// Bias estimate
+        bias: f64,
+        /// Number of bootstrap samples
+        n_samples: u32,
+    },
+
+    /// Cross-validation uncertainty
+    CrossValidation {
+        /// Mean across folds
+        mean: f64,
+        /// Standard error of the mean
+        std_error: f64,
+        /// Standard deviation across folds
+        std_dev: f64,
+        /// Number of folds
+        k: u32,
+    },
 }
 
 impl UncertainValue {
@@ -464,6 +605,8 @@ impl UncertainValue {
                 plausibility,
             } => (belief + plausibility) / 2.0,
             UncertainValue::Distribution { mean, .. } => *mean,
+            UncertainValue::Bootstrap { estimate, .. } => *estimate,
+            UncertainValue::CrossValidation { mean, .. } => *mean,
         }
     }
 
@@ -507,6 +650,28 @@ impl UncertainValue {
             UncertainValue::Distribution { variance, .. } => {
                 // Lower variance = higher certainty
                 1.0 / (1.0 + variance.sqrt())
+            }
+            UncertainValue::Bootstrap {
+                percentile_lower,
+                percentile_upper,
+                bootstrap_se,
+                ..
+            } => {
+                // Narrower CI = higher certainty
+                // Also consider SE relative to estimate
+                let ci_width = percentile_upper - percentile_lower;
+                if ci_width <= 0.0 {
+                    1.0
+                } else {
+                    // Combine CI width and SE for certainty measure
+                    1.0 / (1.0 + bootstrap_se.abs())
+                }
+            }
+            UncertainValue::CrossValidation { std_error, k, .. } => {
+                // Lower SE = higher certainty
+                // More folds also increases certainty
+                let k_factor = (*k as f64).sqrt() / 10.0; // Normalize k contribution
+                (1.0 / (1.0 + std_error.abs())).min(1.0) + k_factor.min(0.1)
             }
         }
     }
