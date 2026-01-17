@@ -1,0 +1,710 @@
+// compiler::parser::expr_parse — Expression Parsing
+//
+// This module implements expression parsing for the self-hosted Sounio parser.
+// Uses Pratt parsing (operator precedence parsing) for efficient expression handling.
+
+// FFI for print
+extern "C" {
+    fn print(s: &str) -> ();
+}
+
+// ============================================================================
+// OPERATOR PRECEDENCE LEVELS
+// ============================================================================
+
+// Precedence from lowest to highest
+fn PREC_NONE() -> i32 { 0 }
+fn PREC_ASSIGNMENT() -> i32 { 1 }    // =, +=, -=, etc.
+fn PREC_OR() -> i32 { 2 }            // ||
+fn PREC_AND() -> i32 { 3 }           // &&
+fn PREC_EQUALITY() -> i32 { 4 }      // ==, !=
+fn PREC_COMPARISON() -> i32 { 5 }    // <, >, <=, >=
+fn PREC_BITWISE_OR() -> i32 { 6 }    // |
+fn PREC_BITWISE_XOR() -> i32 { 7 }   // ^
+fn PREC_BITWISE_AND() -> i32 { 8 }   // &
+fn PREC_SHIFT() -> i32 { 9 }         // <<, >>
+fn PREC_RANGE() -> i32 { 10 }        // .., ..=
+fn PREC_TERM() -> i32 { 11 }         // +, -
+fn PREC_FACTOR() -> i32 { 12 }       // *, /, %
+fn PREC_UNARY() -> i32 { 13 }        // !, -, &, &!, *
+fn PREC_CALL() -> i32 { 14 }         // (), [], .
+fn PREC_PRIMARY() -> i32 { 15 }      // literals, identifiers
+
+// ============================================================================
+// TOKEN KIND CONSTANTS
+// ============================================================================
+
+fn TK_EOF() -> i32 { 0 }
+fn TK_IDENT() -> i32 { 200 }
+fn TK_INT_LIT() -> i32 { 201 }
+fn TK_FLOAT_LIT() -> i32 { 205 }
+fn TK_STRING_LIT() -> i32 { 206 }
+fn TK_CHAR_LIT() -> i32 { 207 }
+fn TK_TRUE() -> i32 { 39 }
+fn TK_FALSE() -> i32 { 40 }
+
+fn TK_PLUS() -> i32 { 220 }
+fn TK_MINUS() -> i32 { 221 }
+fn TK_STAR() -> i32 { 222 }
+fn TK_SLASH() -> i32 { 223 }
+fn TK_PERCENT() -> i32 { 224 }
+fn TK_AMP() -> i32 { 226 }
+fn TK_PIPE() -> i32 { 227 }
+fn TK_CARET() -> i32 { 225 }
+fn TK_BANG() -> i32 { 229 }
+fn TK_EQ_EQ() -> i32 { 240 }
+fn TK_NE() -> i32 { 241 }
+fn TK_LT() -> i32 { 231 }
+fn TK_GT() -> i32 { 232 }
+fn TK_LE() -> i32 { 242 }
+fn TK_GE() -> i32 { 243 }
+fn TK_AMP_AMP() -> i32 { 244 }
+fn TK_PIPE_PIPE() -> i32 { 245 }
+fn TK_SHL() -> i32 { 246 }
+fn TK_SHR() -> i32 { 247 }
+fn TK_DOT() -> i32 { 294 }
+fn TK_DOT_DOT() -> i32 { 296 }
+fn TK_DOT_DOT_EQ() -> i32 { 297 }
+fn TK_LPAREN() -> i32 { 280 }
+fn TK_RPAREN() -> i32 { 281 }
+fn TK_LBRACKET() -> i32 { 282 }
+fn TK_RBRACKET() -> i32 { 283 }
+fn TK_LBRACE() -> i32 { 284 }
+fn TK_RBRACE() -> i32 { 285 }
+fn TK_COMMA() -> i32 { 290 }
+fn TK_IF() -> i32 { 24 }
+fn TK_ELSE() -> i32 { 25 }
+fn TK_MATCH() -> i32 { 26 }
+fn TK_LOOP() -> i32 { 29 }
+fn TK_WHILE() -> i32 { 28 }
+fn TK_FOR() -> i32 { 27 }
+fn TK_RETURN() -> i32 { 32 }
+fn TK_BREAK() -> i32 { 30 }
+fn TK_CONTINUE() -> i32 { 31 }
+
+// ============================================================================
+// GET OPERATOR PRECEDENCE
+// ============================================================================
+
+/// Get the precedence of a binary operator token
+fn get_precedence(token_kind: i32) -> i32 {
+    if token_kind == TK_PIPE_PIPE() { return PREC_OR() }
+    if token_kind == TK_AMP_AMP() { return PREC_AND() }
+    if token_kind == TK_EQ_EQ() || token_kind == TK_NE() { return PREC_EQUALITY() }
+    if token_kind == TK_LT() || token_kind == TK_GT() ||
+       token_kind == TK_LE() || token_kind == TK_GE() { return PREC_COMPARISON() }
+    if token_kind == TK_PIPE() { return PREC_BITWISE_OR() }
+    if token_kind == TK_CARET() { return PREC_BITWISE_XOR() }
+    if token_kind == TK_AMP() { return PREC_BITWISE_AND() }
+    if token_kind == TK_SHL() || token_kind == TK_SHR() { return PREC_SHIFT() }
+    if token_kind == TK_DOT_DOT() || token_kind == TK_DOT_DOT_EQ() { return PREC_RANGE() }
+    if token_kind == TK_PLUS() || token_kind == TK_MINUS() { return PREC_TERM() }
+    if token_kind == TK_STAR() || token_kind == TK_SLASH() ||
+       token_kind == TK_PERCENT() { return PREC_FACTOR() }
+    PREC_NONE()
+}
+
+// ============================================================================
+// BINARY OPERATOR MAPPING
+// ============================================================================
+
+fn BINOP_ADD() -> i32 { 0 }
+fn BINOP_SUB() -> i32 { 1 }
+fn BINOP_MUL() -> i32 { 2 }
+fn BINOP_DIV() -> i32 { 3 }
+fn BINOP_REM() -> i32 { 4 }
+fn BINOP_AND() -> i32 { 5 }
+fn BINOP_OR() -> i32 { 6 }
+fn BINOP_BIT_AND() -> i32 { 7 }
+fn BINOP_BIT_OR() -> i32 { 8 }
+fn BINOP_BIT_XOR() -> i32 { 9 }
+fn BINOP_SHL() -> i32 { 10 }
+fn BINOP_SHR() -> i32 { 11 }
+fn BINOP_EQ() -> i32 { 12 }
+fn BINOP_NE() -> i32 { 13 }
+fn BINOP_LT() -> i32 { 14 }
+fn BINOP_LE() -> i32 { 15 }
+fn BINOP_GT() -> i32 { 16 }
+fn BINOP_GE() -> i32 { 17 }
+
+/// Map token kind to binary operator
+fn token_to_binop(token_kind: i32) -> i32 {
+    if token_kind == TK_PLUS() { return BINOP_ADD() }
+    if token_kind == TK_MINUS() { return BINOP_SUB() }
+    if token_kind == TK_STAR() { return BINOP_MUL() }
+    if token_kind == TK_SLASH() { return BINOP_DIV() }
+    if token_kind == TK_PERCENT() { return BINOP_REM() }
+    if token_kind == TK_AMP_AMP() { return BINOP_AND() }
+    if token_kind == TK_PIPE_PIPE() { return BINOP_OR() }
+    if token_kind == TK_AMP() { return BINOP_BIT_AND() }
+    if token_kind == TK_PIPE() { return BINOP_BIT_OR() }
+    if token_kind == TK_CARET() { return BINOP_BIT_XOR() }
+    if token_kind == TK_SHL() { return BINOP_SHL() }
+    if token_kind == TK_SHR() { return BINOP_SHR() }
+    if token_kind == TK_EQ_EQ() { return BINOP_EQ() }
+    if token_kind == TK_NE() { return BINOP_NE() }
+    if token_kind == TK_LT() { return BINOP_LT() }
+    if token_kind == TK_LE() { return BINOP_LE() }
+    if token_kind == TK_GT() { return BINOP_GT() }
+    if token_kind == TK_GE() { return BINOP_GE() }
+    -1  // Invalid operator
+}
+
+// ============================================================================
+// UNARY OPERATORS
+// ============================================================================
+
+fn UNOP_NEG() -> i32 { 0 }      // -x
+fn UNOP_NOT() -> i32 { 1 }      // !x
+fn UNOP_REF() -> i32 { 2 }      // &x
+fn UNOP_REF_MUT() -> i32 { 3 }  // &!x (Sounio exclusive reference)
+fn UNOP_DEREF() -> i32 { 4 }    // *x
+
+// ============================================================================
+// EXPRESSION KIND CONSTANTS
+// ============================================================================
+
+fn EXPR_LITERAL() -> i32 { 0 }
+fn EXPR_PATH() -> i32 { 1 }
+fn EXPR_BINARY() -> i32 { 2 }
+fn EXPR_UNARY() -> i32 { 3 }
+fn EXPR_CALL() -> i32 { 4 }
+fn EXPR_METHOD_CALL() -> i32 { 5 }
+fn EXPR_FIELD() -> i32 { 6 }
+fn EXPR_INDEX() -> i32 { 7 }
+fn EXPR_CAST() -> i32 { 8 }
+fn EXPR_BLOCK() -> i32 { 9 }
+fn EXPR_IF() -> i32 { 10 }
+fn EXPR_MATCH() -> i32 { 11 }
+fn EXPR_LOOP() -> i32 { 12 }
+fn EXPR_WHILE() -> i32 { 13 }
+fn EXPR_FOR() -> i32 { 14 }
+fn EXPR_RETURN() -> i32 { 15 }
+fn EXPR_BREAK() -> i32 { 16 }
+fn EXPR_CONTINUE() -> i32 { 17 }
+fn EXPR_CLOSURE() -> i32 { 18 }
+fn EXPR_TUPLE() -> i32 { 19 }
+fn EXPR_ARRAY() -> i32 { 20 }
+fn EXPR_STRUCT_LIT() -> i32 { 21 }
+fn EXPR_RANGE() -> i32 { 22 }
+fn EXPR_TRY() -> i32 { 23 }
+fn EXPR_AWAIT() -> i32 { 24 }
+
+// ============================================================================
+// LITERAL KIND CONSTANTS
+// ============================================================================
+
+fn LIT_INT() -> i32 { 0 }
+fn LIT_FLOAT() -> i32 { 1 }
+fn LIT_STRING() -> i32 { 2 }
+fn LIT_CHAR() -> i32 { 3 }
+fn LIT_BOOL() -> i32 { 4 }
+fn LIT_UNIT() -> i32 { 5 }
+fn LIT_INT_UNIT() -> i32 { 6 }    // 500_mg (Sounio-specific)
+fn LIT_FLOAT_UNIT() -> i32 { 7 }  // 10.5_mL (Sounio-specific)
+
+// ============================================================================
+// EXPRESSION NODE (using indices for recursive structures)
+// ============================================================================
+
+struct Span {
+    start: i64,
+    end: i64,
+}
+
+struct NodeId {
+    value: i64,
+}
+
+struct PathSegment {
+    name: [i8; 64],
+    name_len: i64,
+}
+
+struct Path {
+    segments: [PathSegment; 8],
+    n_segments: i64,
+}
+
+struct LiteralValue {
+    kind: i32,
+    int_val: i64,
+    float_val: f64,
+    bool_val: bool,
+    text: [i8; 256],
+    text_len: i64,
+    unit: [i8; 32],
+    unit_len: i64,
+}
+
+fn literal_value_new() -> LiteralValue {
+    LiteralValue {
+        kind: LIT_UNIT(),
+        int_val: 0,
+        float_val: 0.0,
+        bool_val: false,
+        text: [0; 256],
+        text_len: 0,
+        unit: [0; 32],
+        unit_len: 0,
+    }
+}
+
+/// Expression node
+struct Expr {
+    id: NodeId,
+    kind: i32,
+    span: Span,
+
+    // For literals
+    literal: LiteralValue,
+
+    // For path expressions
+    path: Path,
+
+    // For binary expressions (indices into expression pool)
+    binop: i32,
+    left_idx: i64,
+    right_idx: i64,
+
+    // For unary expressions
+    unop: i32,
+    operand_idx: i64,
+
+    // For call expressions
+    callee_idx: i64,
+    arg_indices: [i64; 32],
+    n_args: i64,
+
+    // For field access
+    base_idx: i64,
+    field_name: [i8; 64],
+    field_name_len: i64,
+
+    // For index expressions
+    index_idx: i64,
+
+    // For if expressions
+    condition_idx: i64,
+    then_block_idx: i64,
+    else_expr_idx: i64,
+    has_else: bool,
+}
+
+fn expr_new() -> Expr {
+    var seg = PathSegment { name: [0; 64], name_len: 0 };
+    Expr {
+        id: NodeId { value: 0 },
+        kind: EXPR_LITERAL(),
+        span: Span { start: 0, end: 0 },
+        literal: literal_value_new(),
+        path: Path { segments: [seg; 8], n_segments: 0 },
+        binop: 0,
+        left_idx: -1,
+        right_idx: -1,
+        unop: 0,
+        operand_idx: -1,
+        callee_idx: -1,
+        arg_indices: [0; 32],
+        n_args: 0,
+        base_idx: -1,
+        field_name: [0; 64],
+        field_name_len: 0,
+        index_idx: -1,
+        condition_idx: -1,
+        then_block_idx: -1,
+        else_expr_idx: -1,
+        has_else: false,
+    }
+}
+
+// ============================================================================
+// EXPRESSION POOL (arena-like storage)
+// ============================================================================
+
+struct ExprPool {
+    exprs: [Expr; 4096],
+    n_exprs: i64,
+}
+
+fn expr_pool_new() -> ExprPool {
+    ExprPool {
+        exprs: [expr_new(); 4096],
+        n_exprs: 0,
+    }
+}
+
+fn expr_pool_alloc(pool: ExprPool) -> (ExprPool, i64) {
+    var new_pool = pool;
+    let idx = new_pool.n_exprs;
+    if idx < 4096 {
+        new_pool.n_exprs = idx + 1;
+    }
+    (new_pool, idx)
+}
+
+// ============================================================================
+// TOKEN AND PARSER STATE (simplified)
+// ============================================================================
+
+struct Token {
+    kind: i32,
+    span: Span,
+    text: [i8; 256],
+    text_len: i64,
+}
+
+struct TokenStream {
+    tokens: [Token; 16384],
+    n_tokens: i64,
+}
+
+struct Parser {
+    tokens: TokenStream,
+    pos: i64,
+    expr_pool: ExprPool,
+    next_id: i64,
+}
+
+fn parser_peek(p: Parser) -> i32 {
+    if p.pos < p.tokens.n_tokens {
+        p.tokens.tokens[p.pos as usize].kind
+    } else {
+        TK_EOF()
+    }
+}
+
+fn parser_at(p: Parser, kind: i32) -> bool {
+    parser_peek(p) == kind
+}
+
+fn parser_advance(p: Parser) -> Parser {
+    var new_p = p;
+    if new_p.pos < new_p.tokens.n_tokens {
+        new_p.pos = new_p.pos + 1;
+    }
+    new_p
+}
+
+// ============================================================================
+// EXPRESSION PARSING RESULT
+// ============================================================================
+
+struct ParseExprResult {
+    parser: Parser,
+    expr_idx: i64,
+    success: bool,
+}
+
+fn parse_expr_ok(p: Parser, idx: i64) -> ParseExprResult {
+    ParseExprResult {
+        parser: p,
+        expr_idx: idx,
+        success: true,
+    }
+}
+
+fn parse_expr_err(p: Parser) -> ParseExprResult {
+    ParseExprResult {
+        parser: p,
+        expr_idx: -1,
+        success: false,
+    }
+}
+
+// ============================================================================
+// PRIMARY EXPRESSION PARSING
+// ============================================================================
+
+/// Parse a primary expression (literal, path, parenthesized, etc.)
+fn parse_primary(p: Parser) -> ParseExprResult {
+    var parser = p;
+    let curr = parser_peek(parser);
+
+    // Integer literal
+    if curr == TK_INT_LIT() {
+        let tok = parser.tokens.tokens[parser.pos as usize];
+        parser = parser_advance(parser);
+
+        // Allocate expression
+        let alloc = expr_pool_alloc(parser.expr_pool);
+        parser.expr_pool = alloc.0;
+        let idx = alloc.1;
+
+        var expr = expr_new();
+        expr.kind = EXPR_LITERAL();
+        expr.literal.kind = LIT_INT();
+        expr.span = tok.span;
+        parser.expr_pool.exprs[idx as usize] = expr;
+
+        return parse_expr_ok(parser, idx)
+    }
+
+    // Float literal
+    if curr == TK_FLOAT_LIT() {
+        let tok = parser.tokens.tokens[parser.pos as usize];
+        parser = parser_advance(parser);
+
+        let alloc = expr_pool_alloc(parser.expr_pool);
+        parser.expr_pool = alloc.0;
+        let idx = alloc.1;
+
+        var expr = expr_new();
+        expr.kind = EXPR_LITERAL();
+        expr.literal.kind = LIT_FLOAT();
+        expr.span = tok.span;
+        parser.expr_pool.exprs[idx as usize] = expr;
+
+        return parse_expr_ok(parser, idx)
+    }
+
+    // String literal
+    if curr == TK_STRING_LIT() {
+        let tok = parser.tokens.tokens[parser.pos as usize];
+        parser = parser_advance(parser);
+
+        let alloc = expr_pool_alloc(parser.expr_pool);
+        parser.expr_pool = alloc.0;
+        let idx = alloc.1;
+
+        var expr = expr_new();
+        expr.kind = EXPR_LITERAL();
+        expr.literal.kind = LIT_STRING();
+        // Copy text
+        var i: i64 = 0;
+        while i < tok.text_len && i < 256 {
+            expr.literal.text[i as usize] = tok.text[i as usize];
+            i = i + 1;
+        }
+        expr.literal.text_len = tok.text_len;
+        expr.span = tok.span;
+        parser.expr_pool.exprs[idx as usize] = expr;
+
+        return parse_expr_ok(parser, idx)
+    }
+
+    // Boolean literals
+    if curr == TK_TRUE() {
+        parser = parser_advance(parser);
+        let alloc = expr_pool_alloc(parser.expr_pool);
+        parser.expr_pool = alloc.0;
+        let idx = alloc.1;
+
+        var expr = expr_new();
+        expr.kind = EXPR_LITERAL();
+        expr.literal.kind = LIT_BOOL();
+        expr.literal.bool_val = true;
+        parser.expr_pool.exprs[idx as usize] = expr;
+
+        return parse_expr_ok(parser, idx)
+    }
+
+    if curr == TK_FALSE() {
+        parser = parser_advance(parser);
+        let alloc = expr_pool_alloc(parser.expr_pool);
+        parser.expr_pool = alloc.0;
+        let idx = alloc.1;
+
+        var expr = expr_new();
+        expr.kind = EXPR_LITERAL();
+        expr.literal.kind = LIT_BOOL();
+        expr.literal.bool_val = false;
+        parser.expr_pool.exprs[idx as usize] = expr;
+
+        return parse_expr_ok(parser, idx)
+    }
+
+    // Identifier / Path
+    if curr == TK_IDENT() {
+        let tok = parser.tokens.tokens[parser.pos as usize];
+        parser = parser_advance(parser);
+
+        let alloc = expr_pool_alloc(parser.expr_pool);
+        parser.expr_pool = alloc.0;
+        let idx = alloc.1;
+
+        var expr = expr_new();
+        expr.kind = EXPR_PATH();
+        // Copy name to first path segment
+        var i: i64 = 0;
+        while i < tok.text_len && i < 64 {
+            expr.path.segments[0].name[i as usize] = tok.text[i as usize];
+            i = i + 1;
+        }
+        expr.path.segments[0].name_len = tok.text_len;
+        expr.path.n_segments = 1;
+        expr.span = tok.span;
+        parser.expr_pool.exprs[idx as usize] = expr;
+
+        return parse_expr_ok(parser, idx)
+    }
+
+    // Parenthesized expression
+    if curr == TK_LPAREN() {
+        parser = parser_advance(parser);  // consume (
+
+        // Check for unit literal ()
+        if parser_at(parser, TK_RPAREN()) {
+            parser = parser_advance(parser);
+            let alloc = expr_pool_alloc(parser.expr_pool);
+            parser.expr_pool = alloc.0;
+            let idx = alloc.1;
+
+            var expr = expr_new();
+            expr.kind = EXPR_LITERAL();
+            expr.literal.kind = LIT_UNIT();
+            parser.expr_pool.exprs[idx as usize] = expr;
+
+            return parse_expr_ok(parser, idx)
+        }
+
+        // Parse inner expression
+        let inner = parse_expr(parser);
+        if !inner.success {
+            return inner
+        }
+        parser = inner.parser;
+
+        // Expect )
+        if !parser_at(parser, TK_RPAREN()) {
+            return parse_expr_err(parser)
+        }
+        parser = parser_advance(parser);
+
+        return parse_expr_ok(parser, inner.expr_idx)
+    }
+
+    // If expression
+    if curr == TK_IF() {
+        return parse_if_expr(parser)
+    }
+
+    // Match expression
+    if curr == TK_MATCH() {
+        return parse_match_expr(parser)
+    }
+
+    // Loop expressions
+    if curr == TK_LOOP() {
+        return parse_loop_expr(parser)
+    }
+
+    if curr == TK_WHILE() {
+        return parse_while_expr(parser)
+    }
+
+    if curr == TK_FOR() {
+        return parse_for_expr(parser)
+    }
+
+    // Return expression
+    if curr == TK_RETURN() {
+        return parse_return_expr(parser)
+    }
+
+    // Break expression
+    if curr == TK_BREAK() {
+        parser = parser_advance(parser);
+        let alloc = expr_pool_alloc(parser.expr_pool);
+        parser.expr_pool = alloc.0;
+        let idx = alloc.1;
+
+        var expr = expr_new();
+        expr.kind = EXPR_BREAK();
+        parser.expr_pool.exprs[idx as usize] = expr;
+
+        return parse_expr_ok(parser, idx)
+    }
+
+    // Continue expression
+    if curr == TK_CONTINUE() {
+        parser = parser_advance(parser);
+        let alloc = expr_pool_alloc(parser.expr_pool);
+        parser.expr_pool = alloc.0;
+        let idx = alloc.1;
+
+        var expr = expr_new();
+        expr.kind = EXPR_CONTINUE();
+        parser.expr_pool.exprs[idx as usize] = expr;
+
+        return parse_expr_ok(parser, idx)
+    }
+
+    // Block expression
+    if curr == TK_LBRACE() {
+        return parse_block_expr(parser)
+    }
+
+    // Array literal
+    if curr == TK_LBRACKET() {
+        return parse_array_expr(parser)
+    }
+
+    // Unknown primary
+    parse_expr_err(parser)
+}
+
+// ============================================================================
+// FORWARD DECLARATIONS FOR CONTROL FLOW EXPRESSIONS
+// ============================================================================
+
+fn parse_if_expr(p: Parser) -> ParseExprResult {
+    // Placeholder - would parse if condition { } else { }
+    parse_expr_err(p)
+}
+
+fn parse_match_expr(p: Parser) -> ParseExprResult {
+    // Placeholder - would parse match expr { arms }
+    parse_expr_err(p)
+}
+
+fn parse_loop_expr(p: Parser) -> ParseExprResult {
+    // Placeholder - would parse loop { }
+    parse_expr_err(p)
+}
+
+fn parse_while_expr(p: Parser) -> ParseExprResult {
+    // Placeholder - would parse while condition { }
+    parse_expr_err(p)
+}
+
+fn parse_for_expr(p: Parser) -> ParseExprResult {
+    // Placeholder - would parse for pattern in iter { }
+    parse_expr_err(p)
+}
+
+fn parse_return_expr(p: Parser) -> ParseExprResult {
+    var parser = p;
+    parser = parser_advance(parser);  // consume 'return'
+
+    let alloc = expr_pool_alloc(parser.expr_pool);
+    parser.expr_pool = alloc.0;
+    let idx = alloc.1;
+
+    var expr = expr_new();
+    expr.kind = EXPR_RETURN();
+
+    // Check for value expression
+    let curr = parser_peek(parser);
+    if curr != TK_SEMI() && curr != TK_RBRACE() && curr != TK_EOF() {
+        let value = parse_expr(parser);
+        if value.success {
+            parser = value.parser;
+            expr.operand_idx = value.expr_idx;
+        }
+    }
+
+    parser.expr_pool.exprs[idx as usize] = expr;
+    parse_expr_ok(parser, idx)
+}
+
+fn parse_block_expr(p: Parser) -> ParseExprResult {
+    // Placeholder - would parse { stmts; expr }
+    parse_expr_err(p)
+}
+
+fn parse_array_expr(p: Parser) -> ParseExprResult {
+    // Placeholder - would parse [elem1, elem2, ...]
+    parse_expr_err(p)
+}
+
