@@ -922,6 +922,46 @@ impl Interpreter {
                             Err(ControlFlow::Return(Value::Unit))
                         }
                     }
+                    // Value::Ref: unwrap the reference and dispatch method to inner value
+                    (Value::Ref(r), method_name) => {
+                        let inner = r.borrow().clone();
+                        match (inner, method_name) {
+                            (Value::Array(arr), "len") => Ok(Value::Int(arr.borrow().len() as i64)),
+                            (Value::Array(arr), "push") => {
+                                if let Some(val) = arg_values.get(1) {
+                                    arr.borrow_mut().push(val.clone());
+                                }
+                                Ok(Value::Unit)
+                            }
+                            (Value::Array(arr), "pop") => Ok(arr.borrow_mut().pop().unwrap_or(Value::None)),
+                            (Value::String(s), "len") => Ok(Value::Int(s.len() as i64)),
+                            (Value::String(s), "slice") => {
+                                let start = match arg_values.get(1) {
+                                    Some(Value::Int(i)) => (*i).max(0) as usize,
+                                    _ => 0,
+                                };
+                                let end = match arg_values.get(2) {
+                                    Some(Value::Int(i)) => (*i).max(0) as usize,
+                                    _ => s.len(),
+                                };
+                                let chars: Vec<char> = s.chars().collect();
+                                let start = start.min(chars.len());
+                                let end = end.min(chars.len()).max(start);
+                                let result: String = chars[start..end].iter().collect();
+                                Ok(Value::String(result))
+                            }
+                            // For struct method calls on references, look up as function
+                            (Value::Struct { .. }, _) => {
+                                if let Some(func) = self.functions.get(method_name).cloned() {
+                                    self.call_function(&func, arg_values)
+                                        .map_err(|_| ControlFlow::Return(Value::Unit))
+                                } else {
+                                    Err(ControlFlow::Return(Value::Unit))
+                                }
+                            }
+                            _ => Err(ControlFlow::Return(Value::Unit)),
+                        }
+                    }
                     _ => {
                         // Try to find a function with method name
                         if let Some(func) = self.functions.get(method).cloned() {
