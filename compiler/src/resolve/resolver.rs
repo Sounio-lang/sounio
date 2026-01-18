@@ -1113,6 +1113,15 @@ impl Resolver {
             TypeExpr::Refinement { base_type, .. } => {
                 self.resolve_type_expr(base_type);
             }
+            TypeExpr::Forall { vars, inner } => {
+                // For forall types, resolve the bounds and the inner type
+                for v in vars {
+                    for bound in &v.bounds {
+                        self.resolve_path_as_type(bound);
+                    }
+                }
+                self.resolve_type_expr(inner);
+            }
         }
     }
 

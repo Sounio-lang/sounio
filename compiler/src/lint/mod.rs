@@ -78,6 +78,9 @@ pub enum LintCategory {
 
     /// Naming conventions
     Naming,
+
+    /// Epistemic type issues (Knowledge<T>, confidence, provenance)
+    Epistemic,
 }
 
 impl std::fmt::Display for LintCategory {
@@ -93,6 +96,7 @@ impl std::fmt::Display for LintCategory {
             LintCategory::Effects => write!(f, "effects"),
             LintCategory::Safety => write!(f, "safety"),
             LintCategory::Naming => write!(f, "naming"),
+            LintCategory::Epistemic => write!(f, "epistemic"),
         }
     }
 }
@@ -559,7 +563,7 @@ impl Linter {
 
         // Style
         self.register(Box::new(NamingConvention));
-        self.register(Box::new(MissingDocumentation));
+        self.register(Box::new(RedundantSemicolon));
 
         // Complexity
         self.register(Box::new(TooManyArguments));
@@ -568,12 +572,21 @@ impl Linter {
         self.register(Box::new(CyclomaticComplexity));
 
         // Performance
-        self.register(Box::new(UnnecessaryClone));
+        self.register(Box::new(ExpensiveCloneInLoop));
+        self.register(Box::new(UnnecessaryAllocation));
         self.register(Box::new(LargeStackValue));
 
         // Effects
-        self.register(Box::new(UnusedEffect));
+        self.register(Box::new(UnnecessaryEffect));
         self.register(Box::new(MissingEffectAnnotation));
+
+        // Linear types
+        self.register(Box::new(UnusedLinearValue));
+        self.register(Box::new(LinearValueCopied));
+
+        // Epistemic types
+        self.register(Box::new(LowConfidencePropagation));
+        self.register(Box::new(UntraceableProvenance));
 
         // Safety
         self.register(Box::new(UnsafeBlock));

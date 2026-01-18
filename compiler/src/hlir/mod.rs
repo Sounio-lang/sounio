@@ -6,15 +6,26 @@
 //! - Basic blocks with explicit control flow
 //! - Explicit memory operations
 //! - Type-safe operations
+//!
+//! # Submodules
+//!
+//! - `builder`: HLIR construction utilities
+//! - `ir`: Core IR type definitions
+//! - `lower`: Lowering from HIR to HLIR
+//! - `polyhedral`: Polyhedral analysis and optimization (loop transformations)
 
 pub mod builder;
 pub mod ir;
 pub mod lower;
+pub mod polyhedral;
 
 // Re-export main types
 pub use builder::{FunctionBuilder, ModuleBuilder};
 pub use ir::*;
 pub use lower::lower;
+
+// Re-export polyhedral types for convenient access
+pub use polyhedral::{optimize_function as polyhedral_optimize, PolyError, PolyResult};
 
 #[cfg(test)]
 mod tests {

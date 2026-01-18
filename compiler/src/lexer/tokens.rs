@@ -245,6 +245,10 @@ pub enum TokenKind {
     #[token("static")]
     Static,
 
+    // Higher-rank polymorphism keywords
+    #[token("forall")]
+    Forall,
+
     // Boolean literals
     #[token("true")]
     True,
@@ -645,6 +649,7 @@ impl TokenKind {
             TokenKind::Unsafe => "unsafe",
             TokenKind::Extern => "extern",
             TokenKind::Static => "static",
+            TokenKind::Forall => "forall",
             TokenKind::True => "true",
             TokenKind::False => "false",
             TokenKind::IntLit => "<int>",

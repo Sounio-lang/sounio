@@ -273,11 +273,48 @@ pub struct EnumDef {
 }
 
 /// Enum variant definition
+///
+/// Supports both regular ADT variants and GADT variants with explicit return types.
+///
+/// Regular ADT syntax:
+/// ```sio
+/// enum Option<T> {
+///     None,           // Unit variant
+///     Some(T)         // Tuple variant
+/// }
+/// ```
+///
+/// GADT syntax (constructor with explicit return type):
+/// ```sio
+/// enum Vec<T, N: Nat> {
+///     Nil: Vec<T, Zero>,                    // Constructor returns specific type
+///     Cons(T, Vec<T, M>): Vec<T, Succ<M>>   // Return type differs from declaration
+/// }
+/// ```
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct VariantDef {
     pub id: NodeId,
     pub name: String,
     pub data: VariantData,
+    /// GADT explicit return type (if different from the enum's declared type).
+    /// When present, this variant is a GADT constructor whose return type
+    /// can have different type arguments than the enum declaration.
+    ///
+    /// For example, in `Nil: Vec<T, Zero>`, the return type is `Vec<T, Zero>`
+    /// which differs from the declared `Vec<T, N>`.
+    pub gadt_return_type: Option<GadtReturnType>,
+}
+
+/// GADT return type specification for a variant constructor
+///
+/// This represents the explicit return type in a GADT constructor:
+/// `Nil: Vec<T, Zero>` would have return_type = `Vec<T, Zero>` and type_indices = [Zero]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GadtReturnType {
+    /// The full return type of the constructor (e.g., `Vec<T, Zero>`)
+    pub return_type: TypeExpr,
+    /// The span of the return type for error reporting
+    pub span: Span,
 }
 
 /// Variant data representation
@@ -1139,6 +1176,30 @@ pub enum TypeExpr {
         /// The predicate expression constraining the value
         predicate: Box<Expr>,
     },
+
+    // ==================== HIGHER-RANK POLYMORPHISM ====================
+    /// Universal quantification: forall T. T -> T
+    /// Enables higher-rank polymorphism (RankN types)
+    ///
+    /// Examples:
+    /// - Rank-1: `forall T. T -> T` (regular polymorphism)
+    /// - Rank-2: `(forall T. T -> T) -> i32` (polymorphic function as argument)
+    /// - Nested: `forall A. forall B. A -> B -> (A, B)`
+    Forall {
+        /// Quantified type variables
+        vars: Vec<TypeVarDecl>,
+        /// The inner type that may reference the quantified variables
+        inner: Box<TypeExpr>,
+    },
+}
+
+/// Type variable declaration in forall quantifier
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TypeVarDecl {
+    /// Variable name (e.g., "T", "A", "Item")
+    pub name: String,
+    /// Optional bounds on the type variable (e.g., "T: Clone + Eq")
+    pub bounds: Vec<Path>,
 }
 
 // ==================== EPISTEMIC TYPE COMPONENTS ====================

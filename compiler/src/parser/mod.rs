@@ -869,6 +869,17 @@ impl<'a> Parser<'a> {
         }))
     }
 
+    /// Parse an enum variant with support for GADT syntax.
+    ///
+    /// Regular ADT variants:
+    /// - `None` (unit)
+    /// - `Some(T)` (tuple)
+    /// - `Point { x: i32, y: i32 }` (struct)
+    ///
+    /// GADT variants (with explicit return type):
+    /// - `Nil: Vec<T, Zero>` (unit GADT)
+    /// - `Cons(T, Vec<T, M>): Vec<T, Succ<M>>` (tuple GADT)
+    /// - `Node { value: T, left: Tree<T>, right: Tree<T> }: Tree<T>` (struct GADT)
     fn parse_variant(&mut self) -> Result<VariantDef> {
         let name = self.parse_ident()?;
         let data = if self.at(TokenKind::LParen) {
@@ -899,10 +910,31 @@ impl<'a> Parser<'a> {
             VariantData::Unit
         };
 
+        // Parse GADT return type if present: `Name(args): ReturnType`
+        // The colon indicates this is a GADT constructor with an explicit return type
+        let gadt_return_type = if self.at(TokenKind::Colon) {
+            let colon_span = self.span();
+            self.advance();
+            let return_type_start = self.span();
+            let return_type = self.parse_type()?;
+            let return_type_end = self
+                .tokens
+                .get(self.pos.saturating_sub(1))
+                .map(|t| t.span)
+                .unwrap_or(return_type_start);
+            Some(GadtReturnType {
+                return_type,
+                span: return_type_start.merge(return_type_end),
+            })
+        } else {
+            None
+        };
+
         Ok(VariantDef {
             id: self.next_id(),
             name,
             data,
+            gadt_return_type,
         })
     }
 
@@ -2801,12 +2833,83 @@ impl<'a> Parser<'a> {
             // Refinement type: { x: T | predicate }
             TokenKind::LBrace => self.parse_refinement_type(),
 
+            // Higher-rank polymorphism: forall T. T -> T
+            TokenKind::Forall => self.parse_forall_type(),
+
             _ => {
                 // Generate context-aware error message
                 let lookahead = [self.peek_n(0), self.peek_n(1), self.peek_n(2)];
                 Err(type_error_for_token(self.peek(), self.span(), &lookahead).into())
             }
         }
+    }
+
+    // ==================== HIGHER-RANK POLYMORPHISM TYPE PARSING ====================
+
+    /// Parse a forall (universally quantified) type: forall T. T -> T
+    ///
+    /// Syntax variants:
+    /// - `forall T. T -> T` - single variable
+    /// - `forall A B. A -> B` - multiple variables (space-separated)
+    /// - `forall A, B. A -> B` - multiple variables (comma-separated)
+    /// - `forall T: Bound. T -> T` - variable with bounds
+    /// - `forall A. forall B. A -> B -> (A, B)` - nested forall (rank-N)
+    fn parse_forall_type(&mut self) -> Result<TypeExpr> {
+        self.expect(TokenKind::Forall)?;
+
+        // Parse type variable declarations
+        let mut vars = Vec::new();
+
+        loop {
+            // Expect identifier (type variable name)
+            if !self.at(TokenKind::Ident) {
+                break;
+            }
+
+            let name = self.parse_ident()?;
+            let mut bounds = Vec::new();
+
+            // Optional bounds: T: Bound1 + Bound2
+            if self.at(TokenKind::Colon) {
+                self.advance();
+                // Parse bounds separated by +
+                loop {
+                    if self.at(TokenKind::Ident) {
+                        bounds.push(self.parse_path()?);
+                    } else {
+                        break;
+                    }
+                    if self.at(TokenKind::Plus) {
+                        self.advance();
+                    } else {
+                        break;
+                    }
+                }
+            }
+
+            vars.push(TypeVarDecl { name, bounds });
+
+            // Allow comma or space separation for multiple variables
+            if self.at(TokenKind::Comma) {
+                self.advance();
+            } else if self.at(TokenKind::Dot) {
+                // End of variable list
+                break;
+            }
+            // If next token is an identifier, continue parsing vars (space-separated)
+            // Otherwise, break
+            if !self.at(TokenKind::Ident) {
+                break;
+            }
+        }
+
+        // Expect the dot separator before the inner type
+        self.expect(TokenKind::Dot)?;
+
+        // Parse the inner type (could be another forall for nested quantification)
+        let inner = Box::new(self.parse_type()?);
+
+        Ok(TypeExpr::Forall { vars, inner })
     }
 
     // ==================== SOUNIO EPISTEMIC TYPE PARSING ====================

@@ -129,6 +129,12 @@ pub struct HirVariant {
     pub id: NodeId,
     pub name: String,
     pub fields: Vec<HirType>,
+    /// GADT return type (if this variant has an explicit return type different from the enum's type)
+    /// For example, in `enum Vec<T, N> { Nil: Vec<T, Zero> }`, Nil has gadt_return_type = Some(Vec<T, Zero>)
+    pub gadt_return_type: Option<HirType>,
+    /// Type indices for GADT pattern matching refinement
+    /// Maps type parameter names to their specialized types in this variant
+    pub type_indices: Vec<(String, HirType)>,
 }
 
 /// HIR trait

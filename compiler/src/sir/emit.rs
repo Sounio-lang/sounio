@@ -3998,9 +3998,11 @@ impl X86_64Emitter {
                         // STEP 8: Call the ODE solver function
                         // ============================================================
                         let func_name = match method {
-                            OdeMethod::DoPri5 => "sounio_ode_dopri5",
-                            OdeMethod::CashKarp => "sounio_ode_cashkarp",
-                            _ => unreachable!(),
+                            OdeMethod::DoPri5 => "sounio_ode_dopri5_step",
+                            OdeMethod::CashKarp => "sounio_ode_cashkarp_step",
+                            OdeMethod::BDF => "sounio_ode_bdf_step",
+                            OdeMethod::LSODA => "sounio_ode_lsoda_step",
+                            _ => "sounio_ode_step", // Fallback for Euler, Midpoint, RK4
                         };
                         
                         // All arguments are now set up:
@@ -4011,7 +4013,15 @@ impl X86_64Emitter {
                         // XMM0 = rtol ✓
                         // XMM1 = atol ✓
                         // R8 = derivatives function pointer ✓
-                        
+
+                        // For BDF and LSODA, we need R9 = Jacobian function pointer
+                        // Currently set to NULL (0) for numerical Jacobian
+                        if matches!(method, OdeMethod::BDF | OdeMethod::LSODA) {
+                            // R9 = NULL (use numerical Jacobian)
+                            // TODO: Support user-provided Jacobian functions
+                            self.emit_mov_ri64(X86Reg::R9, 0);
+                        }
+
                         // Call the function
                         self.emit_call_extern(func_name);
                         

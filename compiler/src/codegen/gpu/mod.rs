@@ -28,6 +28,7 @@
 //! ```
 
 pub mod async_pipeline;
+pub mod autodiff;
 pub mod autotune;
 pub mod bio;
 pub mod calibration;
@@ -258,4 +259,11 @@ pub use sparse::{
 pub use uplift_trees::{
     CustomerSegment, NodeType, SplitCriterion, UpliftHistBin, UpliftTreeGpu, UpliftTreeGpuConfig,
     UpliftTreeGpuRuntime, UpliftTreeNode, UpliftTreePtxEmitter, compile_uplift_tree_ptx,
+};
+
+// GPU Automatic Differentiation (Reverse-Mode / Backpropagation)
+pub use autodiff::{
+    AutoDiff, AutoDiffTransform, BackwardCodegen, BackwardKernel, BackwardRule, DiffConfig,
+    DiffContext, DiffError, DiffPrimitive, GpuTape, GpuTapeConfig, KernelAnalysis, ParamInfo,
+    PrimitiveRegistry, TapeEntry, TapeOp,
 };

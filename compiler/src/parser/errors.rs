@@ -173,6 +173,51 @@ pub enum ParserError {
         #[help]
         help: Option<String>,
     },
+
+    /// GADT return type must be the same enum type
+    #[error("GADT return type must be the same enum type")]
+    #[diagnostic(
+        code(P0030),
+        help(
+            "GADT constructors must return the same enum type they are defined in.\n\
+             For example, in `enum Vec<T, N>`, a variant can return `Vec<T, Zero>` but not `Option<T>`."
+        )
+    )]
+    GadtReturnTypeMismatch {
+        #[label("GADT return type must match the enum")]
+        span: SourceSpan,
+        enum_name: String,
+        return_type_name: String,
+    },
+
+    /// Invalid GADT return type syntax
+    #[error("Invalid GADT return type")]
+    #[diagnostic(
+        code(P0031),
+        help(
+            "GADT return types must be valid type expressions.\n\
+             Syntax: `VariantName(args): EnumType<TypeArgs>`\n\
+             Example: `Cons(T, Vec<T, M>): Vec<T, Succ<M>>`"
+        )
+    )]
+    InvalidGadtReturnType {
+        #[label("expected a type expression")]
+        span: SourceSpan,
+    },
+
+    /// GADT variant missing return type after colon
+    #[error("Expected type after `:` in GADT variant")]
+    #[diagnostic(
+        code(P0032),
+        help(
+            "After `:` in a GADT variant, you must provide a return type.\n\
+             Example: `Nil: Vec<T, Zero>` or `Cons(T, Vec<T, M>): Vec<T, Succ<M>>`"
+        )
+    )]
+    GadtMissingReturnType {
+        #[label("expected return type after `:`")]
+        span: SourceSpan,
+    },
 }
 
 impl ParserError {
@@ -441,6 +486,33 @@ pub fn feature_not_implemented(feature: &str, span: Span, workaround: Option<&st
     }
 }
 
+/// Generate error for invalid GADT return type
+pub fn gadt_return_type_mismatch(
+    span: Span,
+    enum_name: &str,
+    return_type_name: &str,
+) -> ParserError {
+    ParserError::GadtReturnTypeMismatch {
+        span: ParserError::from_span(span),
+        enum_name: enum_name.to_string(),
+        return_type_name: return_type_name.to_string(),
+    }
+}
+
+/// Generate error for missing GADT return type after colon
+pub fn gadt_missing_return_type(span: Span) -> ParserError {
+    ParserError::GadtMissingReturnType {
+        span: ParserError::from_span(span),
+    }
+}
+
+/// Generate error for invalid GADT return type syntax
+pub fn invalid_gadt_return_type(span: Span) -> ParserError {
+    ParserError::InvalidGadtReturnType {
+        span: ParserError::from_span(span),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -481,6 +553,35 @@ mod tests {
                 assert!(alternative.contains("IO effect"));
             }
             _ => panic!("Expected RustMacroNotSupported error"),
+        }
+    }
+
+    #[test]
+    fn test_gadt_return_type_mismatch_error() {
+        let span = Span::new(0, 10);
+        let err = gadt_return_type_mismatch(span, "Vec", "Option");
+
+        match err {
+            ParserError::GadtReturnTypeMismatch {
+                enum_name,
+                return_type_name,
+                ..
+            } => {
+                assert_eq!(enum_name, "Vec");
+                assert_eq!(return_type_name, "Option");
+            }
+            _ => panic!("Expected GadtReturnTypeMismatch error"),
+        }
+    }
+
+    #[test]
+    fn test_gadt_missing_return_type_error() {
+        let span = Span::new(5, 8);
+        let err = gadt_missing_return_type(span);
+
+        match err {
+            ParserError::GadtMissingReturnType { .. } => {}
+            _ => panic!("Expected GadtMissingReturnType error"),
         }
     }
 }

@@ -13,6 +13,7 @@
 pub mod compatibility;
 pub mod diagnostics;
 pub mod epistemic;
+pub mod rankn;
 
 #[cfg(test)]
 mod extern_tests;
@@ -1660,6 +1661,17 @@ impl TypeChecker {
     }
 
     fn check_enum(&mut self, e: &EnumDef) -> Result<HirEnum> {
+        // Collect enum's type parameters for GADT index extraction
+        let enum_type_params: Vec<String> = e.generics.params.iter()
+            .filter_map(|p| {
+                if let GenericParam::Type { name, .. } = p {
+                    Some(name.clone())
+                } else {
+                    None
+                }
+            })
+            .collect();
+
         let variants: Vec<_> = e
             .variants
             .iter()
@@ -1677,10 +1689,30 @@ impl TypeChecker {
                         lowered.iter().map(|t| self.type_to_hir(t)).collect()
                     }
                 };
+
+                // Handle GADT return type
+                let (gadt_return_type, type_indices) = if let Some(gadt) = &v.gadt_return_type {
+                    let lowered = self.lower_type_expr(&gadt.return_type);
+                    let hir_type = self.type_to_hir(&lowered);
+
+                    // Extract type indices from GADT return type
+                    // e.g., Vec<T, Zero> gives us [("N", Zero)]
+                    let indices = self.extract_gadt_type_indices(
+                        &gadt.return_type,
+                        &enum_type_params,
+                    );
+
+                    (Some(hir_type), indices)
+                } else {
+                    (None, Vec::new())
+                };
+
                 HirVariant {
                     id: v.id,
                     name: v.name.clone(),
                     fields,
+                    gadt_return_type,
+                    type_indices,
                 }
             })
             .collect();
@@ -1692,6 +1724,45 @@ impl TypeChecker {
             is_linear: e.modifiers.linear,
             is_affine: e.modifiers.affine,
         })
+    }
+
+    /// Extract GADT type indices from a return type expression
+    /// Given `Vec<T, Zero>` and enum params `[T, N]`, returns `[("N", Zero)]`
+    fn extract_gadt_type_indices(
+        &mut self,
+        return_type: &TypeExpr,
+        enum_params: &[String],
+    ) -> Vec<(String, HirType)> {
+        let mut indices = Vec::new();
+
+        if let TypeExpr::Named { args, .. } = return_type {
+            // Match each type argument to its corresponding parameter
+            for (i, arg) in args.iter().enumerate() {
+                if i < enum_params.len() {
+                    let param_name = &enum_params[i];
+
+                    // Check if this argument differs from just using the parameter
+                    // (i.e., it's a specialized index like Zero instead of N)
+                    if !self.is_same_type_param(arg, param_name) {
+                        let lowered = self.lower_type_expr(arg);
+                        let hir_type = self.type_to_hir(&lowered);
+                        indices.push((param_name.clone(), hir_type));
+                    }
+                }
+            }
+        }
+
+        indices
+    }
+
+    /// Check if a type expression is just a reference to a type parameter
+    fn is_same_type_param(&self, ty: &TypeExpr, param_name: &str) -> bool {
+        match ty {
+            TypeExpr::Named { path, args, .. } => {
+                args.is_empty() && path.segments.len() == 1 && path.segments[0] == param_name
+            }
+            _ => false,
+        }
     }
 
     fn check_effect_def(&mut self, e: &EffectDef) -> Result<HirEffect> {
@@ -4954,6 +5025,138 @@ impl TypeChecker {
                 // The predicate will be verified separately by the refinement checker
                 self.lower_type_expr(base_type)
             }
+
+            // Higher-rank polymorphism: forall T. T -> T
+            TypeExpr::Forall { vars, inner } => {
+                // Create fresh type variables for each quantified variable
+                // and build a mapping from names to type vars
+                let mut type_var_map: std::collections::HashMap<String, TypeVar> =
+                    std::collections::HashMap::new();
+
+                let mut type_vars: Vec<TypeVar> = Vec::new();
+                for v in vars {
+                    let tv = TypeVar(self.next_type_var);
+                    self.next_type_var += 1;
+                    type_var_map.insert(v.name.clone(), tv);
+                    type_vars.push(tv);
+                }
+
+                // Lower the inner type, substituting type variable names with Type::Var
+                let inner_type = self.lower_type_expr_with_type_vars(inner, &type_var_map);
+
+                Type::Forall {
+                    vars: type_vars,
+                    inner: Box::new(inner_type),
+                }
+            }
+        }
+    }
+
+    /// Lower a type expression with a mapping of type variable names to TypeVars
+    /// This is used when lowering forall types to correctly resolve type variable references
+    fn lower_type_expr_with_type_vars(
+        &mut self,
+        ty: &TypeExpr,
+        type_vars: &std::collections::HashMap<String, TypeVar>,
+    ) -> Type {
+        match ty {
+            TypeExpr::Named { path, args, unit } => {
+                // Check if this is a type variable reference
+                if path.segments.len() == 1 && args.is_empty() && unit.is_none() {
+                    let name = &path.segments[0];
+                    if let Some(&tv) = type_vars.get(name) {
+                        return Type::Var(tv);
+                    }
+                }
+                // Otherwise, delegate to the standard lowering
+                // but recursively handle nested type vars
+                let base_type = if path.segments.len() == 1 {
+                    let name = &path.segments[0];
+                    match name.as_str() {
+                        "bool" => Type::Bool,
+                        "i8" => Type::I8,
+                        "i16" => Type::I16,
+                        "i32" => Type::I32,
+                        "i64" => Type::I64,
+                        "i128" => Type::I128,
+                        "isize" => Type::Isize,
+                        "u8" => Type::U8,
+                        "u16" => Type::U16,
+                        "u32" => Type::U32,
+                        "u64" => Type::U64,
+                        "u128" => Type::U128,
+                        "usize" => Type::Usize,
+                        "f32" => Type::F32,
+                        "f64" => Type::F64,
+                        "char" => Type::Char,
+                        "str" => Type::Str,
+                        "String" => Type::String,
+                        "vec2" => Type::Vec2,
+                        "vec3" => Type::Vec3,
+                        "vec4" => Type::Vec4,
+                        "mat2" => Type::Mat2,
+                        "mat3" => Type::Mat3,
+                        "mat4" => Type::Mat4,
+                        "quat" => Type::Quat,
+                        "dual" => Type::Dual,
+                        _ => Type::Named {
+                            name: name.clone(),
+                            args: args.iter().map(|a| self.lower_type_expr_with_type_vars(a, type_vars)).collect(),
+                        },
+                    }
+                } else {
+                    Type::Named {
+                        name: path.to_string(),
+                        args: args.iter().map(|a| self.lower_type_expr_with_type_vars(a, type_vars)).collect(),
+                    }
+                };
+                if let Some(unit_str) = unit {
+                    Type::Quantity {
+                        numeric: Box::new(base_type),
+                        unit: unit_str.clone(),
+                    }
+                } else {
+                    base_type
+                }
+            }
+            TypeExpr::Function { params, return_type, .. } => Type::Function {
+                params: params.iter().map(|p| self.lower_type_expr_with_type_vars(p, type_vars)).collect(),
+                return_type: Box::new(self.lower_type_expr_with_type_vars(return_type, type_vars)),
+                effects: types::EffectSet::new(),
+            },
+            TypeExpr::Reference { mutable, inner } => Type::Ref {
+                mutable: *mutable,
+                lifetime: None,
+                inner: Box::new(self.lower_type_expr_with_type_vars(inner, type_vars)),
+            },
+            TypeExpr::Array { element, size } => Type::Array {
+                element: Box::new(self.lower_type_expr_with_type_vars(element, type_vars)),
+                size: size.as_ref().and_then(|s| self.eval_const_usize(s)),
+            },
+            TypeExpr::Tuple(elems) => {
+                Type::Tuple(elems.iter().map(|e| self.lower_type_expr_with_type_vars(e, type_vars)).collect())
+            }
+            // Nested forall
+            TypeExpr::Forall { vars: inner_vars, inner } => {
+                // Extend the type var map with the inner variables
+                let mut extended_map = type_vars.clone();
+                let mut new_type_vars: Vec<TypeVar> = Vec::new();
+                for v in inner_vars {
+                    let tv = TypeVar(self.next_type_var);
+                    self.next_type_var += 1;
+                    extended_map.insert(v.name.clone(), tv);
+                    new_type_vars.push(tv);
+                }
+
+                let inner_type = self.lower_type_expr_with_type_vars(inner, &extended_map);
+
+                Type::Forall {
+                    vars: new_type_vars,
+                    inner: Box::new(inner_type),
+                }
+            }
+            // For other types, delegate to the standard lowering
+            _ => self.lower_type_expr(ty),
         }
     }
 

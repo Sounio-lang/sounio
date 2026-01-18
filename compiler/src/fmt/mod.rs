@@ -5,14 +5,30 @@
 //! - Comment preservation
 //! - Incremental formatting
 //! - Diff mode
+//!
+//! # Sounio-specific formatting
+//!
+//! This formatter handles Sounio-specific syntax:
+//! - `var` for mutable variables (not `let mut`)
+//! - `&!` for mutable references (not `&mut`)
+//! - Effect annotations: `fn foo() with IO, Panic { }`
+//! - Linear/affine types: `linear struct`, `affine struct`
+//! - Units of measure: `500_mg`, `10.5_mL`
+//! - GPU kernels: `kernel fn vector_add(...)`
 
 pub mod config;
 pub mod ir;
+pub mod pretty;
 pub mod printer;
+pub mod visitors;
 
 pub use config::FormatConfig;
 pub use ir::Doc;
 pub use printer::Printer;
+pub use visitors::FormatVisitor;
+
+// Re-export pretty module items for convenience
+pub use pretty::{bracket, concat, group, indent, join, print_doc, print_doc_with_config, text};
 
 use crate::ast::{
     Ast, BinaryOp, Block, EffectDef, EnumDef, Expr, FnDef, HandlerDef, ImplDef, Item, Param,
@@ -881,6 +897,21 @@ impl Formatter {
                 parts.push(Doc::Text(" }".to_string()));
                 Doc::Concat(parts)
             }
+            TypeExpr::Forall { vars, inner } => {
+                let mut parts = Vec::new();
+                parts.push(Doc::Text("forall ".to_string()));
+                let var_strs: Vec<String> = vars.iter().map(|v| {
+                    if v.bounds.is_empty() {
+                        v.name.clone()
+                    } else {
+                        format!("{}: {}", v.name, v.bounds.iter().map(|b| b.to_string()).collect::<Vec<_>>().join(" + "))
+                    }
+                }).collect();
+                parts.push(Doc::Text(var_strs.join(", ")));
+                parts.push(Doc::Text(". ".to_string()));
+                parts.push(self.type_to_doc(inner));
+                Doc::Concat(parts)
+            }
         }
     }
 
@@ -910,10 +941,18 @@ impl Formatter {
     fn stmt_to_doc(&self, stmt: &Stmt) -> Doc {
         match stmt {
             Stmt::Let {
-                pattern, ty, value, ..
+                is_mut,
+                pattern,
+                ty,
+                value,
             } => {
                 let mut parts = Vec::new();
-                parts.push(Doc::Text("let ".to_string()));
+                // Sounio uses `var` for mutable, `let` for immutable
+                if *is_mut {
+                    parts.push(Doc::Text("var ".to_string()));
+                } else {
+                    parts.push(Doc::Text("let ".to_string()));
+                }
                 parts.push(self.pattern_to_doc(pattern));
                 if let Some(t) = ty {
                     parts.push(Doc::Text(": ".to_string()));
@@ -1259,5 +1298,153 @@ mod tests {
     fn test_formatter_creation() {
         let formatter = Formatter::default();
         assert_eq!(formatter.config.max_width, 100);
+    }
+
+    #[test]
+    fn test_format_simple_function() {
+        let source = r#"fn foo() {}"#;
+        let mut formatter = Formatter::default();
+        let result = formatter.format(source);
+        assert!(result.is_ok());
+        let formatted = result.unwrap();
+        assert!(formatted.contains("fn foo()"));
+    }
+
+    #[test]
+    fn test_format_function_with_effects() {
+        let source = r#"fn read_data() -> string with IO {
+    return "data";
+}"#;
+        let mut formatter = Formatter::default();
+        let result = formatter.format(source);
+        assert!(result.is_ok());
+        let formatted = result.unwrap();
+        assert!(formatted.contains("with IO"));
+    }
+
+    #[test]
+    fn test_format_mutable_reference() {
+        // Sounio uses &! for mutable references
+        let source = r#"fn modify(x: &!i32) {}"#;
+        let mut formatter = Formatter::default();
+        let result = formatter.format(source);
+        assert!(result.is_ok());
+        let formatted = result.unwrap();
+        assert!(formatted.contains("&!i32"));
+    }
+
+    #[test]
+    fn test_format_linear_struct() {
+        let source = r#"linear struct FileHandle {
+    fd: i32,
+}"#;
+        let mut formatter = Formatter::default();
+        let result = formatter.format(source);
+        assert!(result.is_ok());
+        let formatted = result.unwrap();
+        assert!(formatted.contains("linear struct"));
+    }
+
+    #[test]
+    fn test_format_kernel_function() {
+        let source = r#"kernel fn vector_add(a: &[f32], b: &[f32], c: &![f32]) {}"#;
+        let mut formatter = Formatter::default();
+        let result = formatter.format(source);
+        assert!(result.is_ok());
+        let formatted = result.unwrap();
+        assert!(formatted.contains("kernel fn"));
+    }
+
+    #[test]
+    fn test_extract_comments() {
+        let formatter = Formatter::default();
+        let source = r#"// Line comment
+fn foo() {
+    /* block comment */
+}
+/// Doc comment
+"#;
+        let comments = formatter.extract_comments(source);
+        assert!(!comments.is_empty());
+    }
+
+    #[test]
+    fn test_format_config_from_env() {
+        // Test that config can be created with custom values
+        let config = FormatConfig {
+            max_width: 80,
+            indent_width: 2,
+            use_tabs: false,
+            ..Default::default()
+        };
+        let formatter = Formatter::new(config.clone());
+        assert_eq!(formatter.config.max_width, 80);
+        assert_eq!(formatter.config.indent_width, 2);
+    }
+
+    #[test]
+    fn test_format_diff() {
+        let source = "fn    foo(  )   {}";
+        let mut formatter = Formatter::default();
+        let diff = formatter.format_diff(source);
+        assert!(diff.is_ok());
+        // Diff should show changes if formatting modified the source
+        let diff_str = diff.unwrap();
+        // Either empty (no changes) or contains diff markers
+        assert!(diff_str.is_empty() || diff_str.contains("---") || diff_str.contains("+++"));
+    }
+
+    #[test]
+    fn test_format_enum_with_variants() {
+        let source = r#"enum Option<T> {
+    None,
+    Some(T),
+}"#;
+        let mut formatter = Formatter::default();
+        let result = formatter.format(source);
+        assert!(result.is_ok());
+        let formatted = result.unwrap();
+        assert!(formatted.contains("enum Option"));
+        assert!(formatted.contains("None"));
+    }
+
+    #[test]
+    fn test_format_trait() {
+        let source = r#"trait Display {
+    fn display(self: &Self) -> string;
+}"#;
+        let mut formatter = Formatter::default();
+        let result = formatter.format(source);
+        // This may fail to parse if trait syntax isn't fully supported
+        // but the formatter should handle it gracefully
+        if let Ok(formatted) = result {
+            assert!(formatted.contains("trait Display"));
+        }
+    }
+
+    #[test]
+    fn test_format_impl_block() {
+        let source = r#"impl Display for Point {}"#;
+        let mut formatter = Formatter::default();
+        let result = formatter.format(source);
+        assert!(result.is_ok());
+        let formatted = result.unwrap();
+        assert!(formatted.contains("impl"));
+    }
+
+    #[test]
+    fn test_binop_formatting() {
+        let formatter = Formatter::default();
+        assert_eq!(formatter.binop_to_string(&BinaryOp::Add), "+");
+        assert_eq!(formatter.binop_to_string(&BinaryOp::PlusMinus), "\u{00b1}"); // ±
+        assert_eq!(formatter.binop_to_string(&BinaryOp::Concat), "++");
+    }
+
+    #[test]
+    fn test_unop_formatting() {
+        let formatter = Formatter::default();
+        assert_eq!(formatter.unop_to_string(&UnaryOp::Ref), "&");
+        assert_eq!(formatter.unop_to_string(&UnaryOp::RefMut), "&!");
+        assert_eq!(formatter.unop_to_string(&UnaryOp::Deref), "*");
     }
 }

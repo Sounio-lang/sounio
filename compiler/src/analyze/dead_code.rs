@@ -930,6 +930,10 @@ impl DeadCodeAnalyzer {
             TypeExpr::Refinement { base_type, .. } => {
                 self.collect_type_references(base_type);
             }
+            TypeExpr::Forall { vars, inner } => {
+                // Collect references from the inner type
+                self.collect_type_references(inner);
+            }
         }
     }
 

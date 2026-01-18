@@ -986,6 +986,16 @@ impl DocExtractor {
                     self.expr_to_string(predicate)
                 )
             }
+            TypeExpr::Forall { vars, inner } => {
+                let var_names: Vec<String> = vars.iter().map(|v| {
+                    if v.bounds.is_empty() {
+                        v.name.clone()
+                    } else {
+                        format!("{}: {}", v.name, v.bounds.iter().map(|b| b.to_string()).collect::<Vec<_>>().join(" + "))
+                    }
+                }).collect();
+                format!("forall {}. {}", var_names.join(", "), self.type_expr_to_string(inner))
+            }
         }
     }
 
