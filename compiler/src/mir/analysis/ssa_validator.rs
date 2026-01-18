@@ -281,10 +281,13 @@ impl SSAValidator {
                                 intersection = Some(pred_dom.clone());
                                 first = false;
                             }
-                        } else if let (Some(pred_dom), Some(ref mut inter)) =
-                            (dominators.get(&pred), intersection.as_mut())
-                        {
-                            *inter = inter.intersection(pred_dom).cloned().collect();
+                        } else if let Some(pred_dom) = dominators.get(&pred) {
+                            intersection = match intersection {
+                                None => Some(pred_dom.clone()),
+                                Some(current) => {
+                                    Some(current.intersection(pred_dom).cloned().collect())
+                                }
+                            };
                         }
                     }
 

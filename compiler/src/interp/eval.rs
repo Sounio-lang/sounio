@@ -644,6 +644,56 @@ impl Interpreter {
                 let base_val = self.eval_expr(base)?;
                 let idx_val = self.eval_expr(index)?;
 
+                // Check if this is a Range-based slice operation
+                if let Value::Struct { name, fields } = &idx_val {
+                    if name == "Range" {
+                        // Extract range bounds
+                        let start = fields.get("start")
+                            .and_then(|v| v.as_int())
+                            .unwrap_or(0) as usize;
+                        let end_val = fields.get("end")
+                            .and_then(|v| v.as_int())
+                            .unwrap_or(i64::MAX);
+                        let inclusive = fields.get("inclusive")
+                            .and_then(|v| if let Value::Bool(b) = v { Some(*b) } else { None })
+                            .unwrap_or(false);
+
+                        return match base_val {
+                            Value::Array(arr) => {
+                                let arr = arr.borrow();
+                                let len = arr.len();
+                                // Handle end bound (clamp to length, handle i64::MAX for open ranges)
+                                let end = if end_val >= len as i64 || end_val == i64::MAX {
+                                    len
+                                } else if inclusive {
+                                    (end_val as usize).saturating_add(1).min(len)
+                                } else {
+                                    (end_val as usize).min(len)
+                                };
+                                let start = start.min(len);
+                                let slice: Vec<Value> = arr[start..end].to_vec();
+                                Ok(Value::Array(Rc::new(RefCell::new(slice))))
+                            }
+                            Value::String(s) => {
+                                let chars: Vec<char> = s.chars().collect();
+                                let len = chars.len();
+                                let end = if end_val >= len as i64 || end_val == i64::MAX {
+                                    len
+                                } else if inclusive {
+                                    (end_val as usize).saturating_add(1).min(len)
+                                } else {
+                                    (end_val as usize).min(len)
+                                };
+                                let start = start.min(len);
+                                let slice: String = chars[start..end].iter().collect();
+                                Ok(Value::String(slice))
+                            }
+                            _ => Err(ControlFlow::Return(Value::Unit)),
+                        };
+                    }
+                }
+
+                // Regular integer index
                 let idx = idx_val.as_int().ok_or(ControlFlow::Return(Value::Unit))? as usize;
 
                 match base_val {

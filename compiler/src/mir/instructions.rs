@@ -316,6 +316,77 @@ pub enum MirInstruction {
     },
 }
 
+impl MirInstruction {
+    /// Get the result value ID of this instruction, if any
+    pub fn result(&self) -> Option<ValueId> {
+        match self {
+            MirInstruction::Load { result, .. } => Some(*result),
+            MirInstruction::GetElementPtr { result, .. } => Some(*result),
+            MirInstruction::LoadGlobal { result, .. } => Some(*result),
+            MirInstruction::Alloca { result, .. } => Some(*result),
+            MirInstruction::Cast { result, .. } => Some(*result),
+            MirInstruction::ZExt { result, .. } => Some(*result),
+            MirInstruction::SExt { result, .. } => Some(*result),
+            MirInstruction::Trunc { result, .. } => Some(*result),
+            MirInstruction::FPToSI { result, .. } => Some(*result),
+            MirInstruction::SIToFP { result, .. } => Some(*result),
+            MirInstruction::PtrCast { result, .. } => Some(*result),
+            MirInstruction::Binary { result, .. } => Some(*result),
+            MirInstruction::Unary { result, .. } => Some(*result),
+            MirInstruction::Compare { result, .. } => Some(*result),
+            MirInstruction::Call { result, .. } => *result,
+            MirInstruction::CallIndirect { result, .. } => *result,
+            MirInstruction::Phi { result, .. } => Some(*result),
+            MirInstruction::Select { result, .. } => Some(*result),
+            MirInstruction::Const { result, .. } => Some(*result),
+            MirInstruction::FPToUI { result, .. } => Some(*result),
+            MirInstruction::UIToFP { result, .. } => Some(*result),
+            // Instructions without results
+            MirInstruction::Store { .. } => None,
+            MirInstruction::StoreGlobal { .. } => None,
+        }
+    }
+
+    /// Get all values used by this instruction
+    pub fn used_values(&self) -> Vec<ValueId> {
+        match self {
+            MirInstruction::Load { address, .. } => vec![*address],
+            MirInstruction::Store { address, value } => vec![*address, *value],
+            MirInstruction::GetElementPtr { base, indices, .. } => {
+                let mut values = vec![*base];
+                values.extend(indices.iter().copied());
+                values
+            }
+            MirInstruction::LoadGlobal { .. } => vec![],
+            MirInstruction::StoreGlobal { value, .. } => vec![*value],
+            MirInstruction::Alloca { .. } => vec![],
+            MirInstruction::Cast { source, .. } => vec![*source],
+            MirInstruction::ZExt { source, .. } => vec![*source],
+            MirInstruction::SExt { source, .. } => vec![*source],
+            MirInstruction::Trunc { source, .. } => vec![*source],
+            MirInstruction::FPToSI { source, .. } => vec![*source],
+            MirInstruction::SIToFP { source, .. } => vec![*source],
+            MirInstruction::PtrCast { source, .. } => vec![*source],
+            MirInstruction::Binary { left, right, .. } => vec![*left, *right],
+            MirInstruction::Unary { operand, .. } => vec![*operand],
+            MirInstruction::Compare { left, right, .. } => vec![*left, *right],
+            MirInstruction::Call { args, .. } => args.clone(),
+            MirInstruction::CallIndirect { func_ptr, args, .. } => {
+                let mut values = vec![*func_ptr];
+                values.extend(args.iter().copied());
+                values
+            }
+            MirInstruction::Phi { incoming, .. } => incoming.iter().map(|(_, v)| *v).collect(),
+            MirInstruction::Select { condition, true_value, false_value, .. } => {
+                vec![*condition, *true_value, *false_value]
+            }
+            MirInstruction::Const { .. } => vec![],
+            MirInstruction::FPToUI { source, .. } => vec![*source],
+            MirInstruction::UIToFP { source, .. } => vec![*source],
+        }
+    }
+}
+
 /// Binary operations
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum MirBinaryOp {

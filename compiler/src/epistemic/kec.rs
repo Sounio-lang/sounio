@@ -329,6 +329,8 @@ impl ComplexityMetrics {
             UncertaintyLevel::DempsterShafer => 20.0,
             UncertaintyLevel::Distribution => 50.0,
             UncertaintyLevel::Particles => particles as f64,
+            UncertaintyLevel::Bootstrap => 100.0 * particles as f64, // resampling cost
+            UncertaintyLevel::CrossValidation => 50.0 * particles as f64, // k-fold cost
         }
     }
 
@@ -570,6 +572,18 @@ impl KECSelector {
                 } else {
                     0.7 // Overkill for simple cases
                 }
+            }
+            UncertaintyLevel::Bootstrap => {
+                // Good for estimating sampling distributions
+                if uncertainty.cv > 0.1 {
+                    0.85
+                } else {
+                    0.6 // Less useful for low-variance cases
+                }
+            }
+            UncertaintyLevel::CrossValidation => {
+                // Good for model uncertainty estimation
+                0.8 // Generally useful for model validation
             }
         }
     }

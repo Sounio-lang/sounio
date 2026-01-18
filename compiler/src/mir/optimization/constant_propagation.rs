@@ -528,30 +528,39 @@ impl SCCPAnalysis {
                 None => LatticeValue::Bottom,
             }
         }
-        // Handle floating point operations
-        else if let (MirConstant::Float(l), MirConstant::Float(r)) = (left, right) {
+        // Handle floating point operations (Float stores f64 as String for hashing)
+        else if let (MirConstant::Float(l_str), MirConstant::Float(r_str)) = (left, right) {
+            let l: f64 = match l_str.parse() {
+                Ok(v) => v,
+                Err(_) => return LatticeValue::Bottom,
+            };
+            let r: f64 = match r_str.parse() {
+                Ok(v) => v,
+                Err(_) => return LatticeValue::Bottom,
+            };
+
             let result = match op {
-                MirBinaryOp::Add => *l + *r,
-                MirBinaryOp::Sub => *l - *r,
-                MirBinaryOp::Mul => *l * *r,
+                MirBinaryOp::Add => l + r,
+                MirBinaryOp::Sub => l - r,
+                MirBinaryOp::Mul => l * r,
                 MirBinaryOp::Div => {
-                    if *r == 0.0 {
+                    if r == 0.0 {
                         return LatticeValue::Bottom;
                     }
-                    *l / *r
+                    l / r
                 }
                 MirBinaryOp::Rem => {
-                    if *r == 0.0 {
+                    if r == 0.0 {
                         return LatticeValue::Bottom;
                     }
-                    *l % *r
+                    l % r
                 }
                 // Bitwise ops don't apply to floats
                 _ => return LatticeValue::Bottom,
             };
 
             if result.is_finite() {
-                LatticeValue::Constant(MirConstant::Float(result))
+                LatticeValue::Constant(MirConstant::Float(result.to_string()))
             } else {
                 LatticeValue::Bottom
             }
@@ -591,16 +600,24 @@ impl SCCPAnalysis {
                             None => LatticeValue::Bottom,
                         }
                     }
-                    MirConstant::Float(v) => {
-                        LatticeValue::Constant(MirConstant::Float(-v))
+                    MirConstant::Float(v_str) => {
+                        if let Ok(v) = v_str.parse::<f64>() {
+                            LatticeValue::Constant(MirConstant::Float((-v).to_string()))
+                        } else {
+                            LatticeValue::Bottom
+                        }
                     }
                     _ => LatticeValue::Bottom,
                 }
             }
             MirUnaryOp::FNeg => {
                 match operand {
-                    MirConstant::Float(v) => {
-                        LatticeValue::Constant(MirConstant::Float(-v))
+                    MirConstant::Float(v_str) => {
+                        if let Ok(v) = v_str.parse::<f64>() {
+                            LatticeValue::Constant(MirConstant::Float((-v).to_string()))
+                        } else {
+                            LatticeValue::Bottom
+                        }
                     }
                     _ => LatticeValue::Bottom,
                 }
@@ -919,12 +936,12 @@ mod tests {
     #[test]
     fn test_constant_folding_float() {
         let analysis = SCCPAnalysis::new();
-        let left = LatticeValue::Constant(MirConstant::Float(3.0));
-        let right = LatticeValue::Constant(MirConstant::Float(4.0));
+        let left = LatticeValue::Constant(MirConstant::Float("3.0".to_string()));
+        let right = LatticeValue::Constant(MirConstant::Float("4.0".to_string()));
 
         let result = analysis.evaluate_binary(MirBinaryOp::Mul, &left, &right, &MirType::F64);
 
-        assert_eq!(result, LatticeValue::Constant(MirConstant::Float(12.0)));
+        assert_eq!(result, LatticeValue::Constant(MirConstant::Float("12".to_string())));
     }
 
     #[test]

@@ -280,7 +280,7 @@ impl FunctionBuilder {
     /// Build an f64 constant
     pub fn build_f64(&mut self, value: f64) -> ValueId {
         let result = self.fresh_value();
-        self.build_const(result, MirConstant::Float(value), MirType::F64);
+        self.build_const(result, MirConstant::Float(value.to_string()), MirType::F64);
         result
     }
 

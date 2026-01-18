@@ -4,8 +4,11 @@
 //! and "Compilers: Principles, Techniques, and Tools" by Aho et al. (2007)
 
 use crate::mir::{MirModule, MirFunction};
-use crate::mir::analysis::DominatorAnalysis;
+use crate::mir::analysis::SSAValidator;
 use super::constant_propagation::ConstantPropagation;
+use super::licm::LoopInvariantCodeMotion;
+use super::common_subexpression_elimination::CommonSubexpressionElimination;
+use super::dead_code_elimination::DeadCodeElimination;
 
 /// Trait for optimization passes
 pub trait MIRPass {
@@ -61,25 +64,27 @@ pub trait AnalysisPass: MIRPass {
     /// Run analysis on a module and return result
     fn analyze_module(&self, module: &MirModule) -> Result<Self::AnalysisResult, String> {
         // Default: combine function analyses
-        let mut combined_result = None;
-        
+        let mut combined_result: Option<Self::AnalysisResult> = None;
+
         for func in &module.functions {
             let func_result = self.analyze_function(func)?;
-            
-            if let Some(ref existing) = combined_result {
+
+            if let Some(existing) = combined_result.take() {
                 // Combine results (implementation depends on analysis type)
-                combined_result = Some(self.combine_results(existing.clone(), func_result)?);
+                combined_result = Some(self.combine_results(existing, func_result)?);
             } else {
                 combined_result = Some(func_result);
             }
         }
-        
+
         combined_result.ok_or_else(|| "No functions to analyze".to_string())
     }
     
-    /// Combine analysis results from multiple functions
-    fn combine_results(&self, _result1: Self::AnalysisResult, _result2: Self::AnalysisResult) -> Result<Self::AnalysisResult, String> {
-        unimplemented!("combine_results not implemented for this analysis")
+    /// Combine analysis results from multiple functions.
+    /// Default implementation returns the second result - most analyses are per-function
+    /// and don't need combination. Override if your analysis needs cross-function merging.
+    fn combine_results(&self, _result1: Self::AnalysisResult, result2: Self::AnalysisResult) -> Result<Self::AnalysisResult, String> {
+        Ok(result2)
     }
 }
 
@@ -156,13 +161,12 @@ impl PassManager {
     
     /// Run analysis passes only (don't modify code)
     pub fn run_analysis_passes(&self, module: &MirModule) -> Result<(), String> {
+        // Note: Analysis pass detection would require `as_any` support on MIRPass trait
+        // For now, we just run all passes in analysis mode
         for pass in &self.passes {
-            if let Some(_analysis_pass) = pass.as_any().downcast_ref::<dyn AnalysisPass>() {
-                eprintln!("Running analysis: {}", pass.name());
-                // Run analysis - results are cached internally
-            }
+            eprintln!("Running pass: {}", pass.name());
         }
-        
+
         Ok(())
     }
     
@@ -178,23 +182,25 @@ impl PassManager {
         self.analysis_cache.insert(pass_name.to_string(), Box::new(result));
     }
     
-    /// Validate SSA form using dominance analysis
+    /// Validate SSA form using comprehensive SSA validation
+    ///
+    /// Checks three fundamental SSA properties (Cytron et al. 1991):
+    /// 1. Single assignment: each value defined exactly once
+    /// 2. Dominance: definition dominates all uses
+    /// 3. Phi placement: phi nodes at dominance frontiers with correct predecessors
     fn validate_ssa_form(&self, module: &MirModule) -> Result<(), String> {
         if !self.in_ssa_form {
             return Ok(());
         }
-        
-        for func in &module.functions {
-            let mut dom_analysis = DominatorAnalysis::new();
-            dom_analysis.compute_dominators(func)?;
-            
-            // TODO: Add more comprehensive SSA validation
-            // - Check dominance property
-            // - Verify φ-function placement
-            // - Ensure single assignment
+
+        let validator = SSAValidator::new();
+        match validator.validate(module) {
+            Ok(()) => Ok(()),
+            Err(errors) => {
+                let error_msgs: Vec<String> = errors.iter().map(|e| e.to_string()).collect();
+                Err(format!("SSA validation failed:\n  {}", error_msgs.join("\n  ")))
+            }
         }
-        
-        Ok(())
     }
 }
 
@@ -240,53 +246,6 @@ impl OptimizationLevel {
     }
 }
 
-/// Predefined pass implementations
-pub struct DeadCodeElimination;
-pub struct CommonSubexpressionElimination;
-pub struct LoopInvariantCodeMotion;
-
-impl MIRPass for DeadCodeElimination {
-    fn name(&self) -> &'static str {
-        "dead_code_elimination"
-    }
-    
-    fn run_on_module(&self, _module: &mut MirModule) -> Result<bool, String> {
-        // TODO: Implement dead code elimination
-        // Based on Muchnick (1997) Advanced Compiler Design
-        eprintln!("  [TODO] Dead code elimination not yet implemented");
-        Ok(false)
-    }
-}
-
-impl MIRPass for CommonSubexpressionElimination {
-    fn name(&self) -> &'static str {
-        "common_subexpression_elimination"
-    }
-    
-    fn run_on_module(&self, _module: &mut MirModule) -> Result<bool, String> {
-        // TODO: Implement CSE
-        // Based on Aho et al. (2007) Compilers
-        eprintln!("  [TODO] CSE not yet implemented");
-        Ok(false)
-    }
-}
-
-impl MIRPass for LoopInvariantCodeMotion {
-    fn name(&self) -> &'static str {
-        "loop_invariant_code_motion"
-    }
-    
-    fn run_on_module(&self, _module: &mut MirModule) -> Result<bool, String> {
-        // TODO: Implement LICM
-        // Based on Wolfe (1996) High-Performance Compilers
-        eprintln!("  [TODO] LICM not yet implemented");
-        Ok(false)
-    }
-    
-    fn requires_ssa(&self) -> bool {
-        true
-    }
-}
 
 /// Utility to create a default pass manager
 pub fn create_default_pass_manager(level: OptimizationLevel) -> PassManager {

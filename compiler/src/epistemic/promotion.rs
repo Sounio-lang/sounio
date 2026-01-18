@@ -556,6 +556,27 @@ impl Promoter {
                     effective_sample_size: self.default_particles as f64,
                 })
             }
+            UncertaintyLevel::Bootstrap => {
+                // Generate bootstrap-style uncertainty from point estimate
+                let std = hw / 1.96;
+                let bootstrap_se = std / (self.default_particles as f64).sqrt();
+                Ok(PromotedValue::Bootstrap {
+                    estimate: value,
+                    percentile_lower: value - hw,
+                    percentile_upper: value + hw,
+                    bootstrap_se,
+                    bias: 0.0,
+                    n_samples: self.default_particles as u32,
+                })
+            }
+            UncertaintyLevel::CrossValidation => {
+                // Cannot directly promote to cross-validation (requires model)
+                Err(PromotionError::InsufficientInfo {
+                    from: UncertaintyLevel::Point,
+                    to: target,
+                    reason: "Cross-validation requires model fitting".to_string(),
+                })
+            }
         }
     }
 

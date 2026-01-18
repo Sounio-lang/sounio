@@ -44,6 +44,14 @@ pub enum MirType {
         params: Vec<MirType>,
         return_type: Box<MirType>,
     },
+    /// Named struct type - references a type definition by name
+    /// Field layout is resolved from the type definition table
+    Struct {
+        name: std::string::String,
+        /// Optional inline field definitions for simple structs
+        /// that don't need a separate type definition lookup
+        fields: Vec<(std::string::String, MirType)>,
+    },
     /// Void type (for functions that don't return)
     Void,
     /// Error type (for type checking failures)
@@ -101,6 +109,14 @@ impl MirType {
             MirType::Ptr(_) => Some(8), // Pointer size on 64-bit
             MirType::Array(elem_ty, size) => elem_ty.size_bytes().map(|s| s * size),
             MirType::Tuple(types) => types.iter().filter_map(|t| t.size_bytes()).sum::<usize>().into(),
+            MirType::Struct { fields, .. } => {
+                // Compute struct size as sum of field sizes (simplified - ignores alignment)
+                if fields.is_empty() {
+                    None // Need type definition lookup for named structs without inline fields
+                } else {
+                    Some(fields.iter().filter_map(|(_, t)| t.size_bytes()).sum())
+                }
+            }
             MirType::Function { .. } | MirType::String | MirType::Void | MirType::Error => None,
         }
     }
@@ -129,7 +145,7 @@ impl MirType {
             HirType::Char => MirType::Char,
             HirType::String => MirType::String,
             
-            HirType::Ptr { inner, .. } => {
+            HirType::Ref { inner, .. } => {
                 MirType::Ptr(Box::new(MirType::from_hir(inner)))
             }
             HirType::RawPointer { inner, .. } => {
@@ -154,22 +170,59 @@ impl MirType {
             // Epistemic types lower to their inner type
             HirType::Knowledge { inner, .. } => MirType::from_hir(inner),
             HirType::Quantity { numeric, .. } => MirType::from_hir(numeric),
-            
-            // HIR-specific types
-            HirType::Named { name, args } => {
-                // For now, treat named types as pointers to structs
-                // TODO: implement proper struct handling
-                MirType::Ptr(Box::new(MirType::Void))
+
+            // Named types (structs, enums, type aliases)
+            HirType::Named { name, .. } => {
+                // Create a struct reference by name
+                // Field resolution happens during codegen when type definitions are available
+                MirType::Struct {
+                    name: name.clone(),
+                    fields: Vec::new(), // Fields resolved from type definition table
+                }
             }
-            
-            HirType::Ref { inner, .. } => {
-                MirType::Ptr(Box::new(MirType::from_hir(inner)))
-            }
-            
+
             HirType::Future { output } => {
                 MirType::Ptr(Box::new(MirType::from_hir(output)))
             }
-            
+
+            // Linear algebra types - lower to arrays of floats
+            HirType::Vec2 => MirType::Array(Box::new(MirType::F32), 2),
+            HirType::Vec3 => MirType::Array(Box::new(MirType::F32), 4), // Padded for SIMD
+            HirType::Vec4 => MirType::Array(Box::new(MirType::F32), 4),
+            HirType::Mat2 => MirType::Array(Box::new(MirType::F32), 4),
+            HirType::Mat3 => MirType::Array(Box::new(MirType::F32), 9),
+            HirType::Mat4 => MirType::Array(Box::new(MirType::F32), 16),
+            HirType::Quat => MirType::Array(Box::new(MirType::F32), 4),
+
+            // Automatic differentiation
+            HirType::Dual => MirType::Tuple(vec![MirType::F64, MirType::F64]),
+
+            // Tensor types - lower to struct representation
+            HirType::Tensor { element, dims } => {
+                // Tensor<T, N> => struct with data pointer and shape
+                let elem_ty = MirType::from_hir(element);
+                let ndims = dims.len();
+                MirType::Struct {
+                    name: format!("Tensor<{}, {}>", elem_ty, ndims),
+                    fields: vec![
+                        ("data".to_string(), MirType::Ptr(Box::new(elem_ty))),
+                        ("shape".to_string(), MirType::Array(Box::new(MirType::Usize), ndims)),
+                        ("strides".to_string(), MirType::Array(Box::new(MirType::Usize), ndims)),
+                    ],
+                }
+            }
+
+            // Ontology types - lower to struct representation
+            HirType::Ontology { namespace, term } => {
+                MirType::Struct {
+                    name: format!("Ontology<{}:{}>", namespace, term),
+                    fields: Vec::new(), // Opaque - fields resolved at runtime
+                }
+            }
+
+            // Type variable (should be resolved by now)
+            HirType::Var(_) => MirType::Error,
+
             HirType::Never | HirType::Error => MirType::Error,
         }
     }
@@ -217,6 +270,20 @@ impl fmt::Display for MirType {
                     write!(f, "{}", ty)?;
                 }
                 write!(f, ") -> {}", return_type)
+            }
+            MirType::Struct { name, fields } => {
+                if fields.is_empty() {
+                    write!(f, "struct {}", name)
+                } else {
+                    write!(f, "struct {} {{ ", name)?;
+                    for (i, (field_name, ty)) in fields.iter().enumerate() {
+                        if i > 0 {
+                            write!(f, ", ")?;
+                        }
+                        write!(f, "{}: {}", field_name, ty)?;
+                    }
+                    write!(f, " }}")
+                }
             }
             MirType::Void => write!(f, "!"),
             MirType::Error => write!(f, "error"),
@@ -318,7 +385,7 @@ mod tests {
         let int_const = MirConstant::Int(42);
         assert_eq!(int_const.ty(), MirType::I64);
         
-        let float_const = MirConstant::Float(3.14);
+        let float_const = MirConstant::Float("3.14".to_string());
         assert_eq!(float_const.ty(), MirType::F64);
     }
 

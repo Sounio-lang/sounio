@@ -8,12 +8,14 @@
 //! 2. Dead Basic Block Elimination (DBBE)
 
 use std::collections::{HashMap, HashSet, VecDeque};
+use std::sync::LazyLock;
 use crate::mir::{
-    MirModule, MirFunction, MirBlock, MirInstruction, MirTerminator,
+    MirModule, MirFunction, MirInstruction,
     ValueId, BlockId
 };
-use crate::mir::instructions::MirConstant;
 use super::pass_manager::MIRPass;
+
+static EMPTY_VALUE_SET: LazyLock<HashSet<ValueId>> = LazyLock::new(HashSet::new);
 
 /// Dead Code Elimination pass
 pub struct DeadCodeElimination;
@@ -77,6 +79,16 @@ impl LivenessAnalysis {
                 }
             }
 
+            // Also capture uses in the terminator (return, conditional branch, etc.)
+            for used_value in get_terminator_uses(&block.terminator) {
+                use_set.insert(used_value);
+                // Use usize::MAX as instruction index to indicate terminator use
+                self.use_map
+                    .entry(used_value)
+                    .or_insert_with(Vec::new)
+                    .push((block.id, usize::MAX));
+            }
+
             self.use_set.insert(block.id, use_set);
             self.def_set.insert(block.id, def_set);
         }
@@ -102,10 +114,11 @@ impl LivenessAnalysis {
 
             for block in &func.blocks {
                 let block_id = block.id;
-                
+
                 // live_out[block] = union of live_in[successors]
                 let mut new_live_out = HashSet::new();
-                for &successor in &block.succs {
+                let successors = get_block_successors(&block.terminator);
+                for successor in successors {
                     if let Some(live_in_succ) = self.live_in.get(&successor) {
                         new_live_out.extend(live_in_succ.iter().copied());
                     }
@@ -148,37 +161,34 @@ impl LivenessAnalysis {
 
     /// Get all live values at block entry
     pub fn get_live_in(&self, block: BlockId) -> &HashSet<ValueId> {
-        self.live_in.get(&block).unwrap_or(&HashSet::new())
+        self.live_in.get(&block).unwrap_or(&EMPTY_VALUE_SET)
     }
 
     /// Get all live values at block exit
     pub fn get_live_out(&self, block: BlockId) -> &HashSet<ValueId> {
-        self.live_out.get(&block).unwrap_or(&HashSet::new())
+        self.live_out.get(&block).unwrap_or(&EMPTY_VALUE_SET)
     }
 }
 
 /// Find dead code in a function
-fn find_dead_code(func: &MirFunction, analysis: &LivenessAnalysis) -> (Vec<usize>, HashSet<BlockId>) {
+fn find_dead_code(func: &MirFunction, analysis: &LivenessAnalysis) -> (Vec<(usize, usize)>, HashSet<BlockId>) {
     let mut dead_instructions = Vec::new();
     let mut dead_blocks = HashSet::new();
 
-    // Check for dead instructions
+    // Check for dead instructions and unreachable blocks
     for (block_idx, block) in func.blocks.iter().enumerate() {
-        // Entry block is always alive
-        if block.id == func.entry_block {
-            continue;
+        // Check if block is unreachable (entry block is always reachable)
+        if block.id != func.entry_block {
+            let is_reachable = func.blocks.iter()
+                .any(|b| get_block_successors(&b.terminator).contains(&block.id));
+
+            if !is_reachable {
+                dead_blocks.insert(block.id);
+                continue;
+            }
         }
 
-        // Check if block is unreachable
-        let is_reachable = func.blocks.iter()
-            .any(|b| b.succs.contains(&block.id));
-
-        if !is_reachable {
-            dead_blocks.insert(block.id);
-            continue;
-        }
-
-        // Check each instruction
+        // Check each instruction for dead assignments (including entry block)
         for (instr_idx, instr) in block.instructions.iter().enumerate() {
             if let Some(result) = instr.result() {
                 // Check if result is live
@@ -300,7 +310,7 @@ fn eliminate_unreachable_blocks(func: &mut MirFunction) -> Option<bool> {
 
     while let Some(current) = worklist.pop_front() {
         if let Some(block) = func.blocks.iter().find(|b| b.id == current) {
-            for &successor in &block.succs {
+            for successor in get_block_successors(&block.terminator) {
                 if !reachable.contains(&successor) {
                     reachable.insert(successor);
                     worklist.push_back(successor);
@@ -363,11 +373,43 @@ fn get_instruction_uses(instr: &MirInstruction) -> Vec<ValueId> {
     }
 }
 
+/// Get the successor block IDs from a terminator
+fn get_block_successors(terminator: &crate::mir::MirTerminator) -> Vec<BlockId> {
+    use crate::mir::MirTerminator;
+    match terminator {
+        MirTerminator::Branch { target } => vec![*target],
+        MirTerminator::CondBranch { true_target, false_target, .. } => {
+            vec![*true_target, *false_target]
+        }
+        MirTerminator::Switch { default_target, cases, .. } => {
+            let mut succs = vec![*default_target];
+            succs.extend(cases.iter().map(|(_, t)| *t));
+            succs
+        }
+        MirTerminator::Return { .. }
+        | MirTerminator::Unreachable
+        | MirTerminator::CallNoReturn { .. } => vec![],
+    }
+}
+
+/// Get all values used by a terminator
+fn get_terminator_uses(terminator: &crate::mir::MirTerminator) -> Vec<ValueId> {
+    use crate::mir::MirTerminator;
+    match terminator {
+        MirTerminator::Branch { .. } => vec![],
+        MirTerminator::CondBranch { condition, .. } => vec![*condition],
+        MirTerminator::Switch { value, .. } => vec![*value],
+        MirTerminator::Return { value } => value.iter().copied().collect(),
+        MirTerminator::Unreachable => vec![],
+        MirTerminator::CallNoReturn { args, .. } => args.clone(),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::mir::builder::{FunctionBuilder, ModuleBuilder};
-    use crate::mir::{FuncId, MirType};
+    use crate::mir::{FuncId, MirType, MirConstant};
 
     #[test]
     fn test_dead_assignment_elimination() {
@@ -402,7 +444,8 @@ mod tests {
         assert!(modified, "function should be modified by DCE");
 
         // Should have removed the y = 20 assignment
-        assert_eq!(func.blocks[0].instructions.len(), 3); // x=10, z=x+x, return
+        // Remaining: x=10, z=x+x (return is a terminator, not instruction)
+        assert_eq!(func.blocks[0].instructions.len(), 2);
     }
 
     #[test]

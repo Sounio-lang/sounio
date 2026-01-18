@@ -2,16 +2,18 @@
 //!
 //! This module transforms HLIR (High-Level IR) into MIR (Mid-level IR).
 
-use crate::hlir::{HlirModule, HlirFunction, HlirBlock, HlirInstr, HlirTerminator, HlirConstant, HlirType, BlockId, ValueId, Op, BinaryOp, UnaryOp};
-use crate::mir::builder::MirFunctionBuilder;
+use crate::hlir::{
+    HlirModule, HlirFunction, HlirInstr, HlirTerminator, HlirConstant, HlirType,
+    BlockId as HlirBlockId, ValueId as HlirValueId, Op, BinaryOp, UnaryOp,
+};
+use crate::mir::builder::{FunctionBuilder, ModuleBuilder};
 use crate::mir::types::*;
-use crate::mir::instructions::*;
-use crate::mir::MirModule;
+use crate::mir::{MirModule, MirFunction, MirBinaryOp, MirUnaryOp, MirCompareOp, FuncId, BlockId, ValueId};
 use std::collections::HashMap;
 
 /// Lower HLIR to MIR
 pub fn lower(hlir: &HlirModule) -> MirModule {
-    let lowering = HlirToMir::new();
+    let mut lowering = HlirToMir::new();
     lowering.lower_module(hlir)
 }
 
@@ -19,21 +21,21 @@ pub fn lower(hlir: &HlirModule) -> MirModule {
 struct HlirToMir {
     /// Map from HLIR function names to MIR types
     functions: HashMap<String, MirType>,
-    /// Map from value IDs to their types
-    value_types: HashMap<ValueId, MirType>,
+    /// Current function ID counter
+    next_func_id: usize,
 }
 
 impl HlirToMir {
     fn new() -> Self {
         Self {
             functions: HashMap::new(),
-            value_types: HashMap::new(),
+            next_func_id: 0,
         }
     }
 
     fn lower_module(&mut self, hlir: &HlirModule) -> MirModule {
-        let mut module_builder = crate::mir::builder::ModuleBuilder::new();
-        
+        let mut module_builder = ModuleBuilder::new(&hlir.name);
+
         // First pass: collect function signatures
         for func in &hlir.functions {
             let sig = self.hlir_sig_to_mir(func);
@@ -49,7 +51,7 @@ impl HlirToMir {
         module_builder.build()
     }
 
-    fn hir_sig_to_mir(&self, func: &HlirFunction) -> MirType {
+    fn hlir_sig_to_mir(&self, func: &HlirFunction) -> MirType {
         let params: Vec<MirType> = func
             .params
             .iter()
@@ -63,289 +65,439 @@ impl HlirToMir {
     }
 
     fn lower_function(&mut self, func: &HlirFunction) -> MirFunction {
-        let mut func_builder = MirFunctionBuilder::new(&func.name);
-        
+        let func_id = FuncId(self.next_func_id);
+        self.next_func_id += 1;
+
+        let return_type = self.hlir_type_to_mir(&func.return_type);
+        let mut builder = FunctionBuilder::new(func_id, func.name.clone(), return_type);
+
+        // Lowering context for this function
+        let mut ctx = FunctionLoweringContext::new();
+
         // Add parameters
         for param in &func.params {
             let mir_type = self.hlir_type_to_mir(&param.ty);
-            func_builder.add_parameter(mir_type);
+            builder.add_param(param.name.clone(), mir_type);
         }
-        
-        // Create blocks
-        let mut block_mapping = HashMap::new();
-        for block in &func.blocks {
-            let mir_block = func_builder.create_block();
-            block_mapping.insert(block.id, mir_block);
+
+        // Create blocks (entry block already exists)
+        for (i, block) in func.blocks.iter().enumerate() {
+            if i == 0 {
+                // Entry block already created by FunctionBuilder
+                ctx.block_map.insert(block.id, BlockId(0));
+            } else {
+                let mir_block = builder.create_block(&format!("bb{}", block.id.0));
+                ctx.block_map.insert(block.id, mir_block);
+            }
         }
-        
+
         // Lower each block
         for block in &func.blocks {
-            let mir_block = block_mapping.get(&block.id)
+            let mir_block_id = ctx.block_map.get(&block.id)
+                .copied()
                 .expect("Block should be mapped");
-            func_builder.set_current_block(*mir_block);
-            
-            // Lower parameters
-            for (param_value, param_type) in &block.params {
-                let mir_type = self.hlir_type_to_mir(param_type);
-                // Store parameter type info
-                self.value_types.insert(*param_value, mir_type);
-            }
-            
+            builder.switch_to_block(mir_block_id);
+
             // Lower instructions
             for instr in &block.instructions {
-                self.lower_instruction(instr, &mut func_builder, &block_mapping);
+                self.lower_instruction(instr, &mut builder, &mut ctx);
             }
-            
+
             // Lower terminator
-            self.lower_terminator(&block.terminator, &mut func_builder, &block_mapping);
+            self.lower_terminator(&block.terminator, &mut builder, &ctx);
         }
 
-        func_builder.build()
+        builder.build()
     }
 
-    fn lower_instruction(&mut self, instr: &HlirInstr, func_builder: &mut MirFunctionBuilder, block_mapping: &HashMap<BlockId, BlockId>) {
+    fn lower_instruction(
+        &self,
+        instr: &HlirInstr,
+        builder: &mut FunctionBuilder,
+        ctx: &mut FunctionLoweringContext,
+    ) {
         match &instr.op {
             Op::Const(value) => {
                 let mir_const = self.hlir_constant_to_mir(value);
                 let mir_type = self.hlir_type_to_mir(&instr.ty);
                 if let Some(result) = instr.result {
-                    let result_value = func_builder.const_(mir_const, mir_type);
-                    func_builder.set_value_in_current_block(result, result_value);
-                    self.value_types.insert(result, mir_type);
+                    let result_id = builder.fresh_value();
+                    builder.build_const(result_id, mir_const, mir_type);
+                    ctx.value_map.insert(result, result_id);
                 }
             }
-            
+
+            Op::Copy(source) => {
+                // Copy is essentially a no-op in SSA form - just map to the same value
+                if let Some(result) = instr.result {
+                    let source_value = ctx.get_value(*source);
+                    ctx.value_map.insert(result, source_value);
+                }
+            }
+
             Op::Binary { op, left, right } => {
                 let result_type = self.hlir_type_to_mir(&instr.ty);
                 if let Some(result) = instr.result {
-                    let left_value = func_builder.get_value(*left);
-                    let right_value = func_builder.get_value(*right);
-                    
-                    let result_value = match op {
-                        BinaryOp::Add | BinaryOp::FAdd => func_builder.add(left_value, right_value, result_type),
-                        BinaryOp::Sub | BinaryOp::FSub => func_builder.sub(left_value, right_value, result_type),
-                        BinaryOp::Mul | BinaryOp::FMul => func_builder.mul(left_value, right_value, result_type),
-                        BinaryOp::SDiv | BinaryOp::UDiv | BinaryOp::FDiv => func_builder.div(left_value, right_value, result_type),
-                        BinaryOp::SRem | BinaryOp::URem => func_builder.rem(left_value, right_value, result_type),
-                        BinaryOp::And => func_builder.and(left_value, right_value),
-                        BinaryOp::Or => func_builder.or(left_value, right_value),
-                        BinaryOp::Xor => func_builder.xor(left_value, right_value),
-                        BinaryOp::Shl => func_builder.shl(left_value, right_value),
-                        BinaryOp::AShr | BinaryOp::LShr => func_builder.shr(left_value, right_value),
-                        BinaryOp::Eq => func_builder.icmp_eq(left_value, right_value),
-                        BinaryOp::Ne => func_builder.icmp_ne(left_value, right_value),
-                        BinaryOp::SLt | BinaryOp::FOLt => func_builder.icmp_lt(left_value, right_value),
-                        BinaryOp::SLe | BinaryOp::FOLe => func_builder.icmp_le(left_value, right_value),
-                        BinaryOp::SGt | BinaryOp::FOGt => func_builder.icmp_gt(left_value, right_value),
-                        BinaryOp::SGe | BinaryOp::FOGe => func_builder.icmp_ge(left_value, right_value),
-                        BinaryOp::ULt => func_builder.icmp_ult(left_value, right_value),
-                        BinaryOp::ULe => func_builder.icmp_ule(left_value, right_value),
-                        BinaryOp::UGt => func_builder.icmp_ugt(left_value, right_value),
-                        BinaryOp::UGe => func_builder.icmp_uge(left_value, right_value),
-                        BinaryOp::FOEq => func_builder.icmp_eq(left_value, right_value),
-                        BinaryOp::FONe => func_builder.icmp_ne(left_value, right_value),
-                        _ => {
-                            eprintln!("Warning: Unsupported binary operation: {:?}", op);
-                            func_builder.undef(result_type)
+                    let left_value = ctx.get_value(*left);
+                    let right_value = ctx.get_value(*right);
+                    let result_id = builder.fresh_value();
+
+                    match op {
+                        BinaryOp::Add | BinaryOp::FAdd => {
+                            builder.build_add(result_id, left_value, right_value, result_type);
                         }
-                    };
-                    
-                    func_builder.set_value_in_current_block(result, result_value);
-                    self.value_types.insert(result, result_type);
+                        BinaryOp::Sub | BinaryOp::FSub => {
+                            builder.build_sub(result_id, left_value, right_value, result_type);
+                        }
+                        BinaryOp::Mul | BinaryOp::FMul => {
+                            builder.build_mul(result_id, left_value, right_value, result_type);
+                        }
+                        BinaryOp::SDiv | BinaryOp::UDiv | BinaryOp::FDiv => {
+                            builder.build_div(result_id, left_value, right_value, result_type);
+                        }
+                        BinaryOp::SRem | BinaryOp::URem | BinaryOp::FRem => {
+                            builder.build_rem(result_id, left_value, right_value, result_type);
+                        }
+                        BinaryOp::And => {
+                            builder.build_binary(result_id, MirBinaryOp::And, left_value, right_value, result_type);
+                        }
+                        BinaryOp::Or => {
+                            builder.build_binary(result_id, MirBinaryOp::Or, left_value, right_value, result_type);
+                        }
+                        BinaryOp::Xor => {
+                            builder.build_binary(result_id, MirBinaryOp::Xor, left_value, right_value, result_type);
+                        }
+                        BinaryOp::Shl => {
+                            builder.build_binary(result_id, MirBinaryOp::Shl, left_value, right_value, result_type);
+                        }
+                        BinaryOp::AShr => {
+                            builder.build_binary(result_id, MirBinaryOp::AShr, left_value, right_value, result_type);
+                        }
+                        BinaryOp::LShr => {
+                            builder.build_binary(result_id, MirBinaryOp::LShr, left_value, right_value, result_type);
+                        }
+                        BinaryOp::Eq | BinaryOp::FOEq => {
+                            builder.build_compare(result_id, MirCompareOp::Eq, left_value, right_value, MirType::Bool);
+                        }
+                        BinaryOp::Ne | BinaryOp::FONe => {
+                            builder.build_compare(result_id, MirCompareOp::Ne, left_value, right_value, MirType::Bool);
+                        }
+                        BinaryOp::SLt | BinaryOp::ULt | BinaryOp::FOLt => {
+                            builder.build_compare(result_id, MirCompareOp::Lt, left_value, right_value, MirType::Bool);
+                        }
+                        BinaryOp::SLe | BinaryOp::ULe | BinaryOp::FOLe => {
+                            builder.build_compare(result_id, MirCompareOp::Le, left_value, right_value, MirType::Bool);
+                        }
+                        BinaryOp::SGt | BinaryOp::UGt | BinaryOp::FOGt => {
+                            builder.build_compare(result_id, MirCompareOp::Gt, left_value, right_value, MirType::Bool);
+                        }
+                        BinaryOp::SGe | BinaryOp::UGe | BinaryOp::FOGe => {
+                            builder.build_compare(result_id, MirCompareOp::Ge, left_value, right_value, MirType::Bool);
+                        }
+                        BinaryOp::Concat => {
+                            // Array/slice concatenation - lower to a runtime call
+                            builder.build_call(Some(result_id), "__concat".to_string(), vec![left_value, right_value], result_type);
+                        }
+                    }
+
+                    ctx.value_map.insert(result, result_id);
                 }
             }
-            
+
             Op::Unary { op, operand } => {
                 let result_type = self.hlir_type_to_mir(&instr.ty);
                 if let Some(result) = instr.result {
-                    let operand_value = func_builder.get_value(*operand);
-                    
-                    let result_value = match op {
-                        UnaryOp::Neg => func_builder.neg(operand_value),
-                        UnaryOp::FNeg => func_builder.fneg(operand_value),
-                        UnaryOp::Not => func_builder.not(operand_value),
-                    };
-                    
-                    func_builder.set_value_in_current_block(result, result_value);
-                    self.value_types.insert(result, result_type);
+                    let operand_value = ctx.get_value(*operand);
+                    let result_id = builder.fresh_value();
+
+                    match op {
+                        UnaryOp::Neg => {
+                            builder.build_neg(result_id, operand_value, result_type);
+                        }
+                        UnaryOp::FNeg => {
+                            builder.build_fneg(result_id, operand_value, result_type);
+                        }
+                        UnaryOp::Not => {
+                            builder.build_unary(result_id, MirUnaryOp::Not, operand_value, MirType::Bool);
+                        }
+                    }
+
+                    ctx.value_map.insert(result, result_id);
                 }
             }
-            
+
             Op::Load { ptr } => {
                 let result_type = self.hlir_type_to_mir(&instr.ty);
                 if let Some(result) = instr.result {
-                    let ptr_value = func_builder.get_value(*ptr);
-                    let result_value = func_builder.load(result_type, ptr_value);
-                    func_builder.set_value_in_current_block(result, result_value);
-                    self.value_types.insert(result, result_type);
+                    let ptr_value = ctx.get_value(*ptr);
+                    let result_id = builder.fresh_value();
+                    builder.build_load(result_id, ptr_value, result_type);
+                    ctx.value_map.insert(result, result_id);
                 }
             }
-            
+
             Op::Store { ptr, value } => {
-                let ptr_value = func_builder.get_value(*ptr);
-                let value_value = func_builder.get_value(*value);
-                func_builder.store(&instr.ty, ptr_value, value_value);
+                let ptr_value = ctx.get_value(*ptr);
+                let value_value = ctx.get_value(*value);
+                builder.build_store(ptr_value, value_value);
             }
-            
+
+            Op::Call { func, args } => {
+                let result_type = self.hlir_type_to_mir(&instr.ty);
+                let func_value = ctx.get_value(*func);
+                let arg_values: Vec<ValueId> = args.iter().map(|&arg| ctx.get_value(arg)).collect();
+
+                if let Some(result) = instr.result {
+                    let result_id = builder.fresh_value();
+                    builder.build_call_indirect(Some(result_id), func_value, arg_values, result_type);
+                    ctx.value_map.insert(result, result_id);
+                } else {
+                    builder.build_call_indirect(None, func_value, arg_values, result_type);
+                }
+            }
+
             Op::CallDirect { name, args } => {
                 let result_type = self.hlir_type_to_mir(&instr.ty);
+                let arg_values: Vec<ValueId> = args.iter().map(|&arg| ctx.get_value(arg)).collect();
+
                 if let Some(result) = instr.result {
-                    let arg_values: Vec<_> = args.iter().map(|&arg| func_builder.get_value(arg)).collect();
-                    let result_value = func_builder.call(name.clone(), &arg_values, result_type);
-                    func_builder.set_value_in_current_block(result, result_value);
-                    self.value_types.insert(result, result_type);
+                    let result_id = builder.fresh_value();
+                    builder.build_call(Some(result_id), name.clone(), arg_values, result_type);
+                    ctx.value_map.insert(result, result_id);
+                } else {
+                    builder.build_call(None, name.clone(), arg_values, result_type);
                 }
             }
-            
+
             Op::Alloca { ty } => {
-                let result_type = self.hlir_type_to_mir(ty);
+                let alloc_type = self.hlir_type_to_mir(ty);
                 if let Some(result) = instr.result {
-                    let result_value = func_builder.alloca(result_type);
-                    func_builder.set_value_in_current_block(result, result_value);
-                    self.value_types.insert(result, MirType::Ptr(Box::new(result_type)));
+                    let result_id = builder.fresh_value();
+                    builder.build_alloca(result_id, alloc_type);
+                    ctx.value_map.insert(result, result_id);
                 }
             }
-            
+
+            Op::GetFieldPtr { base, field } => {
+                let result_type = self.hlir_type_to_mir(&instr.ty);
+                if let Some(result) = instr.result {
+                    let base_value = ctx.get_value(*base);
+                    // Create a constant index for the field
+                    let index_id = builder.fresh_value();
+                    builder.build_const(index_id, MirConstant::Int(*field as i64), MirType::I64);
+                    let result_id = builder.fresh_value();
+                    builder.build_gep(result_id, base_value, vec![index_id], result_type);
+                    ctx.value_map.insert(result, result_id);
+                }
+            }
+
             Op::GetElementPtr { base, index } => {
                 let result_type = self.hlir_type_to_mir(&instr.ty);
                 if let Some(result) = instr.result {
-                    let base_value = func_builder.get_value(*base);
-                    let index_value = func_builder.get_value(*index);
-                    let result_value = func_builder.gep(base_value, &[index_value], result_type);
-                    func_builder.set_value_in_current_block(result, result_value);
-                    self.value_types.insert(result, result_type);
+                    let base_value = ctx.get_value(*base);
+                    let index_value = ctx.get_value(*index);
+                    let result_id = builder.fresh_value();
+                    builder.build_gep(result_id, base_value, vec![index_value], result_type);
+                    ctx.value_map.insert(result, result_id);
                 }
             }
-            
+
             Op::Cast { value, source, target } => {
-                let result_type = self.hlir_type_to_mir(target);
+                let source_type = self.hlir_type_to_mir(source);
+                let target_type = self.hlir_type_to_mir(target);
                 if let Some(result) = instr.result {
-                    let value_value = func_builder.get_value(*value);
-                    let source_type = self.hlir_type_to_mir(source);
-                    let result_value = func_builder.cast(value_value, source_type, result_type);
-                    func_builder.set_value_in_current_block(result, result_value);
-                    self.value_types.insert(result, result_type);
+                    let value_value = ctx.get_value(*value);
+                    let result_id = builder.fresh_value();
+                    builder.build_cast(result_id, value_value, source_type, target_type);
+                    ctx.value_map.insert(result, result_id);
                 }
             }
-            
+
             Op::Phi { incoming } => {
                 let result_type = self.hlir_type_to_mir(&instr.ty);
                 if let Some(result) = instr.result {
-                    let mir_incoming: Vec<_> = incoming
+                    let mir_incoming: Vec<(BlockId, ValueId)> = incoming
                         .iter()
                         .map(|(block, value)| {
-                            let mir_block = block_mapping.get(block)
+                            let mir_block = ctx.block_map.get(block)
+                                .copied()
                                 .expect("Block should be mapped");
-                            let mir_value = func_builder.get_value(*value);
-                            (*mir_block, mir_value)
+                            let mir_value = ctx.get_value(*value);
+                            (mir_block, mir_value)
                         })
                         .collect();
-                    
-                    let result_value = func_builder.phi(mir_incoming, result_type);
-                    func_builder.set_value_in_current_block(result, result_value);
-                    self.value_types.insert(result, result_type);
+
+                    let result_id = builder.fresh_value();
+                    builder.build_phi(result_id, mir_incoming, result_type);
+                    ctx.value_map.insert(result, result_id);
                 }
             }
-            
+
+            // Handle other operations as needed
+            Op::ExtractValue { base, index } => {
+                let result_type = self.hlir_type_to_mir(&instr.ty);
+                if let Some(result) = instr.result {
+                    let base_value = ctx.get_value(*base);
+                    // Lower to GEP + Load
+                    let index_id = builder.fresh_value();
+                    builder.build_const(index_id, MirConstant::Int(*index as i64), MirType::I64);
+                    let ptr_id = builder.fresh_value();
+                    builder.build_gep(ptr_id, base_value, vec![index_id], MirType::Ptr(Box::new(result_type.clone())));
+                    let result_id = builder.fresh_value();
+                    builder.build_load(result_id, ptr_id, result_type);
+                    ctx.value_map.insert(result, result_id);
+                }
+            }
+
             _ => {
+                // For unhandled operations, emit a warning and create a placeholder
                 eprintln!("Warning: Unhandled HLIR instruction: {:?}", instr.op);
+                if let Some(result) = instr.result {
+                    let result_type = self.hlir_type_to_mir(&instr.ty);
+                    let result_id = builder.fresh_value();
+                    builder.build_const(result_id, MirConstant::Int(0), result_type);
+                    ctx.value_map.insert(result, result_id);
+                }
             }
         }
     }
 
-    fn lower_terminator(&mut self, terminator: &HlirTerminator, func_builder: &mut MirFunctionBuilder, block_mapping: &HashMap<BlockId, BlockId>) {
+    fn lower_terminator(
+        &self,
+        terminator: &HlirTerminator,
+        builder: &mut FunctionBuilder,
+        ctx: &FunctionLoweringContext,
+    ) {
         match terminator {
             HlirTerminator::Return(value) => {
                 if let Some(value) = value {
-                    let value_value = func_builder.get_value(*value);
-                    func_builder.return_(Some(value_value));
+                    let value_id = ctx.get_value(*value);
+                    builder.build_return(Some(value_id));
                 } else {
-                    func_builder.return_(None);
+                    builder.build_return(None);
                 }
             }
-            
+
             HlirTerminator::Branch(target) => {
-                let target_block = block_mapping.get(target)
+                let target_block = ctx.block_map.get(target)
+                    .copied()
                     .expect("Target block should be mapped");
-                func_builder.branch(*target_block);
+                builder.build_branch(target_block);
             }
-            
+
             HlirTerminator::CondBranch { condition, then_block, else_block } => {
-                let condition_value = func_builder.get_value(*condition);
-                let then_block_mir = block_mapping.get(then_block)
+                let condition_value = ctx.get_value(*condition);
+                let then_block_mir = ctx.block_map.get(then_block)
+                    .copied()
                     .expect("Then block should be mapped");
-                let else_block_mir = block_mapping.get(else_block)
+                let else_block_mir = ctx.block_map.get(else_block)
+                    .copied()
                     .expect("Else block should be mapped");
-                func_builder.conditional_branch(condition_value, *then_block_mir, *else_block_mir);
+                builder.build_cond_branch(condition_value, then_block_mir, else_block_mir);
             }
-            
+
             HlirTerminator::Switch { value, default, cases } => {
-                let value_value = func_builder.get_value(*value);
-                let default_block = block_mapping.get(default)
+                let value_id = ctx.get_value(*value);
+                let default_block = ctx.block_map.get(default)
+                    .copied()
                     .expect("Default block should be mapped");
-                let case_blocks: Vec<_> = cases
+                let case_blocks: Vec<(i64, BlockId)> = cases
                     .iter()
                     .map(|(const_val, block)| {
-                        let mir_block = block_mapping.get(block)
+                        let mir_block = ctx.block_map.get(block)
+                            .copied()
                             .expect("Case block should be mapped");
-                        (*const_val, *mir_block)
+                        (*const_val, mir_block)
                     })
                     .collect();
-                func_builder.switch(value_value, *default_block, &case_blocks);
+                builder.build_switch(value_id, default_block, case_blocks);
             }
-            
+
             HlirTerminator::Unreachable => {
-                func_builder.unreachable();
+                builder.build_unreachable();
             }
         }
     }
 
-    fn hir_type_to_mir(&self, ty: &HlirType) -> MirType {
+    fn hlir_type_to_mir(&self, ty: &HlirType) -> MirType {
         match ty {
             HlirType::Void => MirType::Void,
-            HlirType::Bool => MirType::I1,
+            HlirType::Bool => MirType::Bool,
             HlirType::I8 => MirType::I8,
             HlirType::I16 => MirType::I16,
             HlirType::I32 => MirType::I32,
             HlirType::I64 => MirType::I64,
             HlirType::I128 => MirType::I128,
-            HlirType::U8 => MirType::I8,
-            HlirType::U16 => MirType::I16,
-            HlirType::U32 => MirType::I32,
-            HlirType::U64 => MirType::I64,
-            HlirType::U128 => MirType::I128,
+            HlirType::U8 => MirType::U8,
+            HlirType::U16 => MirType::U16,
+            HlirType::U32 => MirType::U32,
+            HlirType::U64 => MirType::U64,
+            HlirType::U128 => MirType::U128,
             HlirType::F32 => MirType::F32,
             HlirType::F64 => MirType::F64,
             HlirType::Ptr(inner) => MirType::Ptr(Box::new(self.hlir_type_to_mir(inner))),
-            HlirType::Array(elem, size) => MirType::Array {
-                size: *size,
-                elem: Box::new(self.hlir_type_to_mir(elem)),
+            HlirType::Array(elem, size) => MirType::Array(Box::new(self.hlir_type_to_mir(elem)), *size),
+            HlirType::Struct(_name) => {
+                // Structs are lowered to pointers to opaque data
+                MirType::Ptr(Box::new(MirType::Void))
             },
-            HlirType::Struct(name) => MirType::Struct {
-                fields: vec![], // Simplified - would need struct definition info
-            },
-            HlirType::Tuple(elems) => MirType::Tuple {
-                elems: elems.iter().map(|e| self.hlir_type_to_mir(e)).collect(),
-            },
+            HlirType::Tuple(elems) => MirType::Tuple(elems.iter().map(|e| self.hlir_type_to_mir(e)).collect()),
             HlirType::Function { params, return_type } => MirType::Function {
                 params: params.iter().map(|p| self.hlir_type_to_mir(p)).collect(),
                 return_type: Box::new(self.hlir_type_to_mir(return_type)),
             },
-            _ => MirType::Void, // For unimplemented types
+            // Linear algebra types - lower to arrays of floats
+            HlirType::Vec2 => MirType::Array(Box::new(MirType::F32), 2),
+            HlirType::Vec3 => MirType::Array(Box::new(MirType::F32), 4), // Padded
+            HlirType::Vec4 => MirType::Array(Box::new(MirType::F32), 4),
+            HlirType::Mat2 => MirType::Array(Box::new(MirType::F32), 4),
+            HlirType::Mat3 => MirType::Array(Box::new(MirType::F32), 9),
+            HlirType::Mat4 => MirType::Array(Box::new(MirType::F32), 16),
+            HlirType::Quat => MirType::Array(Box::new(MirType::F32), 4),
+            HlirType::Dual => MirType::Tuple(vec![MirType::F64, MirType::F64]),
         }
     }
 
-    fn hir_constant_to_mir(&self, constant: &HlirConstant) -> MirConstant {
+    fn hlir_constant_to_mir(&self, constant: &HlirConstant) -> MirConstant {
         match constant {
             HlirConstant::Unit => MirConstant::Unit,
             HlirConstant::Bool(b) => MirConstant::Bool(*b),
             HlirConstant::Int(i, _) => MirConstant::Int(*i),
-            HlirConstant::Float(f, _) => MirConstant::Float(*f),
+            HlirConstant::Float(f, _) => MirConstant::Float(f.to_string()),
             HlirConstant::String(s) => MirConstant::String(s.clone()),
+            HlirConstant::Array(_) => MirConstant::Int(0), // TODO: array constants
+            HlirConstant::Struct(_) => MirConstant::Int(0), // TODO: struct constants
+            HlirConstant::Null(_) => MirConstant::Null,
+            HlirConstant::Undef(_) => MirConstant::Int(0), // Lower undef to zero
             HlirConstant::FunctionRef(name) => MirConstant::FunctionRef(name.clone()),
             HlirConstant::GlobalRef(name) => MirConstant::GlobalRef(name.clone()),
-            _ => MirConstant::Int(0, 0), // For unimplemented constants
         }
+    }
+}
+
+/// Per-function lowering context
+struct FunctionLoweringContext {
+    /// Map from HLIR block IDs to MIR block IDs
+    block_map: HashMap<HlirBlockId, BlockId>,
+    /// Map from HLIR value IDs to MIR value IDs
+    value_map: HashMap<HlirValueId, ValueId>,
+}
+
+impl FunctionLoweringContext {
+    fn new() -> Self {
+        Self {
+            block_map: HashMap::new(),
+            value_map: HashMap::new(),
+        }
+    }
+
+    fn get_value(&self, hlir_value: HlirValueId) -> ValueId {
+        self.value_map.get(&hlir_value)
+            .copied()
+            .unwrap_or_else(|| {
+                eprintln!("Warning: HLIR value {:?} not found in map, using placeholder", hlir_value);
+                ValueId(0)
+            })
     }
 }
 
@@ -356,15 +508,10 @@ mod tests {
     #[test]
     fn test_hlir_to_mir_basic() {
         // This is a simplified test - in practice we'd need to create proper HLIR
-        let hlir_module = HlirModule {
-            name: "test".to_string(),
-            functions: vec![],
-            globals: vec![],
-            types: vec![],
-        };
+        let hlir_module = HlirModule::new("test");
 
         let mir_module = lower(&hlir_module);
-        
+
         assert_eq!(mir_module.name, "test");
         assert!(mir_module.functions.is_empty());
     }

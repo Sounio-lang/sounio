@@ -1053,6 +1053,32 @@ impl fmt::Display for UncertainValue {
                     support_lower, support_upper, peak
                 )
             }
+            UncertainValue::Bootstrap {
+                estimate,
+                percentile_lower,
+                percentile_upper,
+                bootstrap_se,
+                n_samples,
+                ..
+            } => {
+                write!(
+                    f,
+                    "Bootstrap(est={:.4}, CI=[{:.4}, {:.4}], SE={:.4}, n={})",
+                    estimate, percentile_lower, percentile_upper, bootstrap_se, n_samples
+                )
+            }
+            UncertainValue::CrossValidation {
+                mean,
+                std_dev,
+                k,
+                ..
+            } => {
+                write!(
+                    f,
+                    "CV(score={:.4}±{:.4}, k={})",
+                    mean, std_dev, k
+                )
+            }
         }
     }
 }
