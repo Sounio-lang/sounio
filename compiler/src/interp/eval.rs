@@ -900,6 +900,27 @@ impl Interpreter {
                         Ok(Value::Unit)
                     }
                     (Value::Array(arr), "pop") => Ok(arr.borrow_mut().pop().unwrap_or(Value::None)),
+                    (Value::Array(arr), "reverse") => {
+                        let reversed: Vec<Value> = arr.borrow().iter().rev().cloned().collect();
+                        Ok(Value::Array(Rc::new(RefCell::new(reversed))))
+                    }
+                    (Value::Array(arr), "map") => {
+                        // arr.map(fn) - apply function to each element
+                        if let Some(Value::Function { func, captures }) = arg_values.get(1) {
+                            let arr_ref = arr.borrow();
+                            let mut results = Vec::with_capacity(arr_ref.len());
+                            for elem in arr_ref.iter() {
+                                let call_args = vec![elem.clone()];
+                                match self.call_function(func, call_args) {
+                                    Ok(result) => results.push(result),
+                                    Err(_) => results.push(Value::Unit),
+                                }
+                            }
+                            Ok(Value::Array(Rc::new(RefCell::new(results))))
+                        } else {
+                            Err(ControlFlow::Return(Value::Unit))
+                        }
+                    }
                     // ArrayRef: reference to array element - delegate to the inner array
                     (Value::ArrayRef { array, index }, method_name) => {
                         let arr = array.borrow();
@@ -940,6 +961,26 @@ impl Interpreter {
                                 Ok(Value::Unit)
                             }
                             (Value::Array(arr), "pop") => Ok(arr.borrow_mut().pop().unwrap_or(Value::None)),
+                            (Value::Array(arr), "reverse") => {
+                                let reversed: Vec<Value> = arr.borrow().iter().rev().cloned().collect();
+                                Ok(Value::Array(Rc::new(RefCell::new(reversed))))
+                            }
+                            (Value::Array(arr), "map") => {
+                                if let Some(Value::Function { func, captures: _ }) = arg_values.get(1) {
+                                    let arr_ref = arr.borrow();
+                                    let mut results = Vec::with_capacity(arr_ref.len());
+                                    for elem in arr_ref.iter() {
+                                        let call_args = vec![elem.clone()];
+                                        match self.call_function(func, call_args) {
+                                            Ok(result) => results.push(result),
+                                            Err(_) => results.push(Value::Unit),
+                                        }
+                                    }
+                                    Ok(Value::Array(Rc::new(RefCell::new(results))))
+                                } else {
+                                    Err(ControlFlow::Return(Value::Unit))
+                                }
+                            }
                             (Value::String(s), "len") => Ok(Value::Int(s.len() as i64)),
                             (Value::String(s), "slice") => {
                                 let start = match arg_values.get(1) {
