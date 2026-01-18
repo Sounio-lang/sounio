@@ -1,0 +1,811 @@
+// compiler::check::checker — Type Checker
+//
+// Main type checking logic for the self-hosted Sounio type checker.
+// Implements bidirectional type checking for expressions and statements.
+
+extern "C" {
+    fn print(s: &str) -> ();
+}
+
+// ============================================================================
+// TYPE KIND CONSTANTS
+// ============================================================================
+
+fn TYPE_UNKNOWN() -> i32 { 0 }
+fn TYPE_NEVER() -> i32 { 1 }
+fn TYPE_UNIT() -> i32 { 2 }
+fn TYPE_BOOL() -> i32 { 3 }
+fn TYPE_I8() -> i32 { 4 }
+fn TYPE_I16() -> i32 { 5 }
+fn TYPE_I32() -> i32 { 6 }
+fn TYPE_I64() -> i32 { 7 }
+fn TYPE_U8() -> i32 { 8 }
+fn TYPE_U16() -> i32 { 9 }
+fn TYPE_U32() -> i32 { 10 }
+fn TYPE_U64() -> i32 { 11 }
+fn TYPE_F32() -> i32 { 12 }
+fn TYPE_F64() -> i32 { 13 }
+fn TYPE_STRING() -> i32 { 16 }
+fn TYPE_REF() -> i32 { 18 }
+fn TYPE_REF_MUT() -> i32 { 19 }
+fn TYPE_ARRAY() -> i32 { 20 }
+fn TYPE_VAR() -> i32 { 26 }
+
+// ============================================================================
+// EXPRESSION KIND CONSTANTS
+// ============================================================================
+
+fn EXPR_LITERAL() -> i32 { 0 }
+fn EXPR_PATH() -> i32 { 1 }
+fn EXPR_BINARY() -> i32 { 2 }
+fn EXPR_UNARY() -> i32 { 3 }
+fn EXPR_CALL() -> i32 { 4 }
+fn EXPR_IF() -> i32 { 10 }
+
+// ============================================================================
+// BINARY OPERATORS
+// ============================================================================
+
+fn BINOP_ADD() -> i32 { 0 }
+fn BINOP_SUB() -> i32 { 1 }
+fn BINOP_MUL() -> i32 { 2 }
+fn BINOP_DIV() -> i32 { 3 }
+fn BINOP_REM() -> i32 { 4 }
+fn BINOP_AND() -> i32 { 5 }    // &&
+fn BINOP_OR() -> i32 { 6 }     // ||
+fn BINOP_EQ() -> i32 { 12 }
+fn BINOP_NE() -> i32 { 13 }
+fn BINOP_LT() -> i32 { 14 }
+fn BINOP_LE() -> i32 { 15 }
+fn BINOP_GT() -> i32 { 16 }
+fn BINOP_GE() -> i32 { 17 }
+
+// ============================================================================
+// UNARY OPERATORS
+// ============================================================================
+
+fn UNOP_NEG() -> i32 { 0 }      // -x
+fn UNOP_NOT() -> i32 { 1 }      // !x
+fn UNOP_REF() -> i32 { 2 }      // &x
+fn UNOP_REF_MUT() -> i32 { 3 }  // &!x
+fn UNOP_DEREF() -> i32 { 4 }    // *x
+
+// ============================================================================
+// LITERAL KINDS
+// ============================================================================
+
+fn LIT_INT() -> i32 { 0 }
+fn LIT_FLOAT() -> i32 { 1 }
+fn LIT_BOOL() -> i32 { 4 }
+fn LIT_UNIT() -> i32 { 5 }
+
+// ============================================================================
+// TYPE REPRESENTATION (simplified)
+// ============================================================================
+
+struct Type {
+    kind: i32,
+    inner_idx: i64,
+    array_size: i64,
+}
+
+fn type_new() -> Type {
+    Type { kind: TYPE_UNKNOWN(), inner_idx: -1, array_size: 0 }
+}
+
+fn type_unit() -> Type {
+    Type { kind: TYPE_UNIT(), inner_idx: -1, array_size: 0 }
+}
+
+fn type_bool() -> Type {
+    Type { kind: TYPE_BOOL(), inner_idx: -1, array_size: 0 }
+}
+
+fn type_i32() -> Type {
+    Type { kind: TYPE_I32(), inner_idx: -1, array_size: 0 }
+}
+
+fn type_i64() -> Type {
+    Type { kind: TYPE_I64(), inner_idx: -1, array_size: 0 }
+}
+
+fn type_f64() -> Type {
+    Type { kind: TYPE_F64(), inner_idx: -1, array_size: 0 }
+}
+
+fn type_never() -> Type {
+    Type { kind: TYPE_NEVER(), inner_idx: -1, array_size: 0 }
+}
+
+fn types_equal(a: Type, b: Type) -> bool {
+    a.kind == b.kind && a.inner_idx == b.inner_idx && a.array_size == b.array_size
+}
+
+// ============================================================================
+// EXPRESSION REPRESENTATION (simplified)
+// ============================================================================
+
+struct Expr {
+    kind: i32,
+    // For literals
+    lit_kind: i32,
+    lit_int: i64,
+    lit_float: f64,
+    lit_bool: bool,
+    // For binary expressions
+    binop: i32,
+    left_idx: i64,
+    right_idx: i64,
+    // For unary expressions
+    unop: i32,
+    operand_idx: i64,
+    // For path expressions (variable names)
+    name: [i8; 32],
+    name_len: i64,
+    // Inferred type
+    inferred_type: Type,
+}
+
+fn expr_new() -> Expr {
+    Expr {
+        kind: EXPR_LITERAL(),
+        lit_kind: LIT_UNIT(),
+        lit_int: 0,
+        lit_float: 0.0,
+        lit_bool: false,
+        binop: 0,
+        left_idx: -1,
+        right_idx: -1,
+        unop: 0,
+        operand_idx: -1,
+        name: [0; 32],
+        name_len: 0,
+        inferred_type: type_new(),
+    }
+}
+
+fn expr_int(val: i64) -> Expr {
+    var e = expr_new();
+    e.kind = EXPR_LITERAL();
+    e.lit_kind = LIT_INT();
+    e.lit_int = val;
+    e
+}
+
+fn expr_float(val: f64) -> Expr {
+    var e = expr_new();
+    e.kind = EXPR_LITERAL();
+    e.lit_kind = LIT_FLOAT();
+    e.lit_float = val;
+    e
+}
+
+fn expr_bool(val: bool) -> Expr {
+    var e = expr_new();
+    e.kind = EXPR_LITERAL();
+    e.lit_kind = LIT_BOOL();
+    e.lit_bool = val;
+    e
+}
+
+fn expr_binary(op: i32, left: i64, right: i64) -> Expr {
+    var e = expr_new();
+    e.kind = EXPR_BINARY();
+    e.binop = op;
+    e.left_idx = left;
+    e.right_idx = right;
+    e
+}
+
+fn expr_unary(op: i32, operand: i64) -> Expr {
+    var e = expr_new();
+    e.kind = EXPR_UNARY();
+    e.unop = op;
+    e.operand_idx = operand;
+    e
+}
+
+fn expr_path(name: [i8; 32], len: i64) -> Expr {
+    var e = expr_new();
+    e.kind = EXPR_PATH();
+    e.name = name;
+    e.name_len = len;
+    e
+}
+
+// ============================================================================
+// EXPRESSION POOL
+// ============================================================================
+
+struct ExprPool {
+    exprs: [Expr; 128],
+    count: i64,
+}
+
+fn expr_pool_new() -> ExprPool {
+    ExprPool {
+        exprs: [expr_new(); 128],
+        count: 0,
+    }
+}
+
+fn expr_pool_add(pool: ExprPool, e: Expr) -> ExprPool {
+    var p = pool;
+    if p.count < 128 {
+        p.exprs[p.count as usize] = e;
+        p.count = p.count + 1;
+    }
+    p
+}
+
+fn expr_pool_get(pool: ExprPool, idx: i64) -> Expr {
+    if idx >= 0 && idx < pool.count {
+        pool.exprs[idx as usize]
+    } else {
+        expr_new()
+    }
+}
+
+fn expr_pool_last_idx(pool: ExprPool) -> i64 {
+    pool.count - 1
+}
+
+// ============================================================================
+// BINDING (simplified environment)
+// ============================================================================
+
+struct Binding {
+    name: [i8; 32],
+    name_len: i64,
+    ty: Type,
+    is_mutable: bool,
+}
+
+fn binding_new() -> Binding {
+    Binding {
+        name: [0; 32],
+        name_len: 0,
+        ty: type_new(),
+        is_mutable: false,
+    }
+}
+
+struct Env {
+    bindings: [Binding; 64],
+    count: i64,
+}
+
+fn env_new() -> Env {
+    Env {
+        bindings: [binding_new(); 64],
+        count: 0,
+    }
+}
+
+fn env_add(env: Env, name: [i8; 32], len: i64, ty: Type, is_mut: bool) -> Env {
+    var e = env;
+    if e.count < 64 {
+        var b = binding_new();
+        b.name = name;
+        b.name_len = len;
+        b.ty = ty;
+        b.is_mutable = is_mut;
+        e.bindings[e.count as usize] = b;
+        e.count = e.count + 1;
+    }
+    e
+}
+
+fn names_eq(a: [i8; 32], a_len: i64, b: [i8; 32], b_len: i64) -> bool {
+    if a_len != b_len {
+        return false
+    }
+    var i: i64 = 0;
+    while i < a_len {
+        if a[i as usize] != b[i as usize] {
+            return false
+        }
+        i = i + 1;
+    }
+    true
+}
+
+fn env_lookup(env: Env, name: [i8; 32], len: i64) -> Type {
+    var i = env.count - 1;
+    while i >= 0 {
+        let b = env.bindings[i as usize];
+        if names_eq(b.name, b.name_len, name, len) {
+            return b.ty
+        }
+        i = i - 1;
+    }
+    type_new()  // Unknown
+}
+
+// ============================================================================
+// TYPE CHECKER
+// ============================================================================
+
+struct CheckResult {
+    ty: Type,
+    ok: bool,
+    error_msg: [i8; 128],
+    error_len: i64,
+}
+
+fn check_ok(ty: Type) -> CheckResult {
+    CheckResult {
+        ty: ty,
+        ok: true,
+        error_msg: [0; 128],
+        error_len: 0,
+    }
+}
+
+fn check_err() -> CheckResult {
+    CheckResult {
+        ty: type_new(),
+        ok: false,
+        error_msg: [0; 128],
+        error_len: 0,
+    }
+}
+
+/// Check if a type is numeric
+fn is_numeric(t: Type) -> bool {
+    t.kind == TYPE_I8() || t.kind == TYPE_I16() ||
+    t.kind == TYPE_I32() || t.kind == TYPE_I64() ||
+    t.kind == TYPE_U8() || t.kind == TYPE_U16() ||
+    t.kind == TYPE_U32() || t.kind == TYPE_U64() ||
+    t.kind == TYPE_F32() || t.kind == TYPE_F64()
+}
+
+/// Check a literal expression
+fn check_literal(e: Expr) -> CheckResult {
+    if e.lit_kind == LIT_INT() {
+        // Integer literals default to i64
+        return check_ok(type_i64())
+    }
+    if e.lit_kind == LIT_FLOAT() {
+        // Float literals default to f64
+        return check_ok(type_f64())
+    }
+    if e.lit_kind == LIT_BOOL() {
+        return check_ok(type_bool())
+    }
+    if e.lit_kind == LIT_UNIT() {
+        return check_ok(type_unit())
+    }
+    check_err()
+}
+
+/// Check a binary expression
+fn check_binary(pool: ExprPool, e: Expr, env: Env) -> CheckResult {
+    // Get left and right operand types
+    let left_expr = expr_pool_get(pool, e.left_idx);
+    let right_expr = expr_pool_get(pool, e.right_idx);
+
+    let left_result = check_expr(pool, left_expr, env);
+    if !left_result.ok {
+        return left_result
+    }
+
+    let right_result = check_expr(pool, right_expr, env);
+    if !right_result.ok {
+        return right_result
+    }
+
+    let left_ty = left_result.ty;
+    let right_ty = right_result.ty;
+
+    // Arithmetic operators: +, -, *, /, %
+    if e.binop == BINOP_ADD() || e.binop == BINOP_SUB() ||
+       e.binop == BINOP_MUL() || e.binop == BINOP_DIV() ||
+       e.binop == BINOP_REM() {
+        if !is_numeric(left_ty) || !is_numeric(right_ty) {
+            return check_err()
+        }
+        if !types_equal(left_ty, right_ty) {
+            return check_err()
+        }
+        return check_ok(left_ty)
+    }
+
+    // Comparison operators: ==, !=, <, <=, >, >=
+    if e.binop == BINOP_EQ() || e.binop == BINOP_NE() ||
+       e.binop == BINOP_LT() || e.binop == BINOP_LE() ||
+       e.binop == BINOP_GT() || e.binop == BINOP_GE() {
+        if !types_equal(left_ty, right_ty) {
+            return check_err()
+        }
+        return check_ok(type_bool())
+    }
+
+    // Logical operators: &&, ||
+    if e.binop == BINOP_AND() || e.binop == BINOP_OR() {
+        if left_ty.kind != TYPE_BOOL() || right_ty.kind != TYPE_BOOL() {
+            return check_err()
+        }
+        return check_ok(type_bool())
+    }
+
+    check_err()
+}
+
+/// Check a unary expression
+fn check_unary(pool: ExprPool, e: Expr, env: Env) -> CheckResult {
+    let operand_expr = expr_pool_get(pool, e.operand_idx);
+    let operand_result = check_expr(pool, operand_expr, env);
+
+    if !operand_result.ok {
+        return operand_result
+    }
+
+    let operand_ty = operand_result.ty;
+
+    // Negation: -x (requires numeric)
+    if e.unop == UNOP_NEG() {
+        if !is_numeric(operand_ty) {
+            return check_err()
+        }
+        return check_ok(operand_ty)
+    }
+
+    // Logical not: !x (requires bool)
+    if e.unop == UNOP_NOT() {
+        if operand_ty.kind != TYPE_BOOL() {
+            return check_err()
+        }
+        return check_ok(type_bool())
+    }
+
+    check_err()
+}
+
+/// Check a path expression (variable reference)
+fn check_path(e: Expr, env: Env) -> CheckResult {
+    let ty = env_lookup(env, e.name, e.name_len);
+    if ty.kind == TYPE_UNKNOWN() {
+        return check_err()
+    }
+    check_ok(ty)
+}
+
+/// Type check an expression
+fn check_expr(pool: ExprPool, e: Expr, env: Env) -> CheckResult {
+    if e.kind == EXPR_LITERAL() {
+        return check_literal(e)
+    }
+
+    if e.kind == EXPR_BINARY() {
+        return check_binary(pool, e, env)
+    }
+
+    if e.kind == EXPR_UNARY() {
+        return check_unary(pool, e, env)
+    }
+
+    if e.kind == EXPR_PATH() {
+        return check_path(e, env)
+    }
+
+    check_err()
+}
+
+// ============================================================================
+// HELPER FUNCTIONS
+// ============================================================================
+
+fn make_name(c0: i8, c1: i8, c2: i8, len: i64) -> [i8; 32] {
+    var name: [i8; 32] = [0; 32];
+    name[0] = c0;
+    name[1] = c1;
+    name[2] = c2;
+    name
+}
+
+// ============================================================================
+// TESTS
+// ============================================================================
+
+fn test_check_literals() -> bool {
+    var pool = expr_pool_new();
+    let env = env_new();
+
+    // Check integer literal
+    let int_expr = expr_int(42);
+    pool = expr_pool_add(pool, int_expr);
+
+    let int_result = check_expr(pool, int_expr, env);
+    if !int_result.ok {
+        print("  Integer literal check failed\n");
+        return false
+    }
+    if int_result.ty.kind != TYPE_I64() {
+        print("  Integer literal should be i64\n");
+        return false
+    }
+
+    // Check float literal
+    let float_expr = expr_float(3.14);
+    pool = expr_pool_add(pool, float_expr);
+
+    let float_result = check_expr(pool, float_expr, env);
+    if !float_result.ok {
+        print("  Float literal check failed\n");
+        return false
+    }
+    if float_result.ty.kind != TYPE_F64() {
+        print("  Float literal should be f64\n");
+        return false
+    }
+
+    // Check bool literal
+    let bool_expr = expr_bool(true);
+    pool = expr_pool_add(pool, bool_expr);
+
+    let bool_result = check_expr(pool, bool_expr, env);
+    if !bool_result.ok {
+        print("  Bool literal check failed\n");
+        return false
+    }
+    if bool_result.ty.kind != TYPE_BOOL() {
+        print("  Bool literal should be bool\n");
+        return false
+    }
+
+    true
+}
+
+fn test_check_arithmetic() -> bool {
+    var pool = expr_pool_new();
+    let env = env_new();
+
+    // Add two i64 literals: 1 + 2
+    pool = expr_pool_add(pool, expr_int(1));
+    let left_idx = expr_pool_last_idx(pool);
+
+    pool = expr_pool_add(pool, expr_int(2));
+    let right_idx = expr_pool_last_idx(pool);
+
+    let add_expr = expr_binary(BINOP_ADD(), left_idx, right_idx);
+    pool = expr_pool_add(pool, add_expr);
+
+    let result = check_expr(pool, add_expr, env);
+    if !result.ok {
+        print("  Addition check failed\n");
+        return false
+    }
+    if result.ty.kind != TYPE_I64() {
+        print("  Addition result should be i64\n");
+        return false
+    }
+
+    true
+}
+
+fn test_check_comparison() -> bool {
+    var pool = expr_pool_new();
+    let env = env_new();
+
+    // Compare two i64 literals: 1 < 2
+    pool = expr_pool_add(pool, expr_int(1));
+    let left_idx = expr_pool_last_idx(pool);
+
+    pool = expr_pool_add(pool, expr_int(2));
+    let right_idx = expr_pool_last_idx(pool);
+
+    let lt_expr = expr_binary(BINOP_LT(), left_idx, right_idx);
+    pool = expr_pool_add(pool, lt_expr);
+
+    let result = check_expr(pool, lt_expr, env);
+    if !result.ok {
+        print("  Comparison check failed\n");
+        return false
+    }
+    if result.ty.kind != TYPE_BOOL() {
+        print("  Comparison result should be bool\n");
+        return false
+    }
+
+    true
+}
+
+fn test_check_logical() -> bool {
+    var pool = expr_pool_new();
+    let env = env_new();
+
+    // Logical and: true && false
+    pool = expr_pool_add(pool, expr_bool(true));
+    let left_idx = expr_pool_last_idx(pool);
+
+    pool = expr_pool_add(pool, expr_bool(false));
+    let right_idx = expr_pool_last_idx(pool);
+
+    let and_expr = expr_binary(BINOP_AND(), left_idx, right_idx);
+    pool = expr_pool_add(pool, and_expr);
+
+    let result = check_expr(pool, and_expr, env);
+    if !result.ok {
+        print("  Logical AND check failed\n");
+        return false
+    }
+    if result.ty.kind != TYPE_BOOL() {
+        print("  Logical AND result should be bool\n");
+        return false
+    }
+
+    true
+}
+
+fn test_check_unary() -> bool {
+    var pool = expr_pool_new();
+    let env = env_new();
+
+    // Negation: -42
+    pool = expr_pool_add(pool, expr_int(42));
+    let operand_idx = expr_pool_last_idx(pool);
+
+    let neg_expr = expr_unary(UNOP_NEG(), operand_idx);
+    pool = expr_pool_add(pool, neg_expr);
+
+    let result = check_expr(pool, neg_expr, env);
+    if !result.ok {
+        print("  Negation check failed\n");
+        return false
+    }
+    if result.ty.kind != TYPE_I64() {
+        print("  Negation result should be i64\n");
+        return false
+    }
+
+    // Logical not: !true
+    pool = expr_pool_add(pool, expr_bool(true));
+    let bool_idx = expr_pool_last_idx(pool);
+
+    let not_expr = expr_unary(UNOP_NOT(), bool_idx);
+    pool = expr_pool_add(pool, not_expr);
+
+    let not_result = check_expr(pool, not_expr, env);
+    if !not_result.ok {
+        print("  Logical NOT check failed\n");
+        return false
+    }
+    if not_result.ty.kind != TYPE_BOOL() {
+        print("  Logical NOT result should be bool\n");
+        return false
+    }
+
+    true
+}
+
+fn test_check_variables() -> bool {
+    var pool = expr_pool_new();
+    var env = env_new();
+
+    // Add variable 'x' with type i64
+    let x_name = make_name(120, 0, 0, 1);  // 'x'
+    env = env_add(env, x_name, 1, type_i64(), false);
+
+    // Reference x
+    let x_expr = expr_path(x_name, 1);
+    pool = expr_pool_add(pool, x_expr);
+
+    let result = check_expr(pool, x_expr, env);
+    if !result.ok {
+        print("  Variable lookup failed\n");
+        return false
+    }
+    if result.ty.kind != TYPE_I64() {
+        print("  Variable x should be i64\n");
+        return false
+    }
+
+    // Reference undefined variable 'y'
+    let y_name = make_name(121, 0, 0, 1);  // 'y'
+    let y_expr = expr_path(y_name, 1);
+    pool = expr_pool_add(pool, y_expr);
+
+    let y_result = check_expr(pool, y_expr, env);
+    if y_result.ok {
+        print("  Undefined variable should fail\n");
+        return false
+    }
+
+    true
+}
+
+fn test_type_mismatch() -> bool {
+    var pool = expr_pool_new();
+    let env = env_new();
+
+    // Try to add i64 + bool (should fail)
+    pool = expr_pool_add(pool, expr_int(1));
+    let int_idx = expr_pool_last_idx(pool);
+
+    pool = expr_pool_add(pool, expr_bool(true));
+    let bool_idx = expr_pool_last_idx(pool);
+
+    let add_expr = expr_binary(BINOP_ADD(), int_idx, bool_idx);
+    pool = expr_pool_add(pool, add_expr);
+
+    let result = check_expr(pool, add_expr, env);
+    if result.ok {
+        print("  Adding int + bool should fail\n");
+        return false
+    }
+
+    true
+}
+
+fn main() -> i32 {
+    print("Testing type checker...\n\n");
+
+    var passed: i64 = 0;
+    var failed: i64 = 0;
+
+    if test_check_literals() {
+        print("PASS: test_check_literals\n");
+        passed = passed + 1;
+    } else {
+        print("FAIL: test_check_literals\n");
+        failed = failed + 1;
+    }
+
+    if test_check_arithmetic() {
+        print("PASS: test_check_arithmetic\n");
+        passed = passed + 1;
+    } else {
+        print("FAIL: test_check_arithmetic\n");
+        failed = failed + 1;
+    }
+
+    if test_check_comparison() {
+        print("PASS: test_check_comparison\n");
+        passed = passed + 1;
+    } else {
+        print("FAIL: test_check_comparison\n");
+        failed = failed + 1;
+    }
+
+    if test_check_logical() {
+        print("PASS: test_check_logical\n");
+        passed = passed + 1;
+    } else {
+        print("FAIL: test_check_logical\n");
+        failed = failed + 1;
+    }
+
+    if test_check_unary() {
+        print("PASS: test_check_unary\n");
+        passed = passed + 1;
+    } else {
+        print("FAIL: test_check_unary\n");
+        failed = failed + 1;
+    }
+
+    if test_check_variables() {
+        print("PASS: test_check_variables\n");
+        passed = passed + 1;
+    } else {
+        print("FAIL: test_check_variables\n");
+        failed = failed + 1;
+    }
+
+    if test_type_mismatch() {
+        print("PASS: test_type_mismatch\n");
+        passed = passed + 1;
+    } else {
+        print("FAIL: test_type_mismatch\n");
+        failed = failed + 1;
+    }
+
+    print("\n");
+    if failed == 0 {
+        print("All type checker tests passed!\n");
+        0
+    } else {
+        print("Some tests failed.\n");
+        1
+    }
+}

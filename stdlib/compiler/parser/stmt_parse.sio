@@ -1,0 +1,1044 @@
+// compiler::parser::stmt_parse — Statement Parsing
+//
+// This module implements statement parsing for the self-hosted Sounio parser.
+// Handles let/var declarations, expression statements, and assignments.
+
+extern "C" {
+    fn print(s: &str) -> ();
+}
+
+// ============================================================================
+// TOKEN KIND CONSTANTS
+// ============================================================================
+
+fn TK_EOF() -> i32 { 0 }
+fn TK_IDENT() -> i32 { 200 }
+fn TK_INT_LIT() -> i32 { 201 }
+fn TK_FLOAT_LIT() -> i32 { 205 }
+fn TK_TRUE() -> i32 { 39 }
+fn TK_FALSE() -> i32 { 40 }
+
+fn TK_LET() -> i32 { 15 }
+fn TK_VAR() -> i32 { 16 }
+fn TK_RETURN() -> i32 { 32 }
+fn TK_BREAK() -> i32 { 30 }
+fn TK_CONTINUE() -> i32 { 31 }
+fn TK_IF() -> i32 { 24 }
+fn TK_ELSE() -> i32 { 25 }
+fn TK_WHILE() -> i32 { 28 }
+fn TK_FOR() -> i32 { 27 }
+fn TK_LOOP() -> i32 { 29 }
+fn TK_LPAREN() -> i32 { 282 }
+fn TK_RPAREN() -> i32 { 283 }
+
+fn TK_EQ() -> i32 { 230 }
+fn TK_COLON() -> i32 { 292 }
+fn TK_SEMI() -> i32 { 291 }
+fn TK_LBRACE() -> i32 { 284 }
+fn TK_RBRACE() -> i32 { 285 }
+fn TK_PLUS() -> i32 { 220 }
+fn TK_MINUS() -> i32 { 221 }
+fn TK_STAR() -> i32 { 222 }
+
+// ============================================================================
+// STATEMENT KIND CONSTANTS
+// ============================================================================
+
+fn STMT_LET() -> i32 { 0 }
+fn STMT_VAR() -> i32 { 1 }
+fn STMT_EXPR() -> i32 { 2 }
+fn STMT_RETURN() -> i32 { 3 }
+fn STMT_BREAK() -> i32 { 4 }
+fn STMT_CONTINUE() -> i32 { 5 }
+fn STMT_IF() -> i32 { 6 }
+fn STMT_WHILE() -> i32 { 7 }
+fn STMT_FOR() -> i32 { 8 }
+fn STMT_LOOP() -> i32 { 9 }
+fn STMT_EMPTY() -> i32 { 10 }
+
+// ============================================================================
+// SIMPLE STRUCTURES
+// ============================================================================
+
+struct Token {
+    kind: i32,
+    val: i64,
+    name: [i8; 32],
+    name_len: i64,
+}
+
+fn token_new() -> Token {
+    Token { kind: TK_EOF(), val: 0, name: [0; 32], name_len: 0 }
+}
+
+fn make_token(k: i32) -> Token {
+    Token { kind: k, val: 0, name: [0; 32], name_len: 0 }
+}
+
+fn make_int_token(v: i64) -> Token {
+    Token { kind: TK_INT_LIT(), val: v, name: [0; 32], name_len: 0 }
+}
+
+fn make_ident_token(c0: i8, c1: i8, c2: i8, len: i64) -> Token {
+    var t = token_new();
+    t.kind = TK_IDENT();
+    t.name[0] = c0;
+    t.name[1] = c1;
+    t.name[2] = c2;
+    t.name_len = len;
+    t
+}
+
+struct State {
+    tokens: [Token; 64],
+    n: i64,
+    pos: i64,
+}
+
+fn state_new() -> State {
+    State {
+        tokens: [token_new(); 64],
+        n: 0,
+        pos: 0,
+    }
+}
+
+fn peek(s: State) -> i32 {
+    if s.pos < s.n {
+        s.tokens[s.pos as usize].kind
+    } else {
+        TK_EOF()
+    }
+}
+
+fn at(s: State, k: i32) -> bool {
+    peek(s) == k
+}
+
+fn advance(s: State) -> State {
+    var new_s = s;
+    if new_s.pos < new_s.n {
+        new_s.pos = new_s.pos + 1;
+    }
+    new_s
+}
+
+fn current(s: State) -> Token {
+    if s.pos < s.n {
+        s.tokens[s.pos as usize]
+    } else {
+        token_new()
+    }
+}
+
+// ============================================================================
+// STATEMENT STRUCTURE
+// ============================================================================
+
+struct Stmt {
+    kind: i32,
+    // For let/var: variable name
+    var_name: [i8; 32],
+    var_name_len: i64,
+    is_mutable: bool,
+    has_type: bool,
+    has_init: bool,
+    init_val: i64,  // Simplified: just store int value for now
+    // For return
+    has_return_val: bool,
+    return_val: i64,
+    // For if/while/loop - number of statements in body
+    body_count: i64,
+    // For if - has else branch
+    has_else: bool,
+    else_count: i64,
+}
+
+fn stmt_new() -> Stmt {
+    Stmt {
+        kind: STMT_EMPTY(),
+        var_name: [0; 32],
+        var_name_len: 0,
+        is_mutable: false,
+        has_type: false,
+        has_init: false,
+        init_val: 0,
+        has_return_val: false,
+        return_val: 0,
+        body_count: 0,
+        has_else: false,
+        else_count: 0,
+    }
+}
+
+fn stmt_let(name: [i8; 32], len: i64, init: i64) -> Stmt {
+    var s = stmt_new();
+    s.kind = STMT_LET();
+    s.var_name = name;
+    s.var_name_len = len;
+    s.is_mutable = false;
+    s.has_init = true;
+    s.init_val = init;
+    s
+}
+
+fn stmt_var(name: [i8; 32], len: i64, init: i64) -> Stmt {
+    var s = stmt_new();
+    s.kind = STMT_VAR();
+    s.var_name = name;
+    s.var_name_len = len;
+    s.is_mutable = true;
+    s.has_init = true;
+    s.init_val = init;
+    s
+}
+
+fn stmt_return(val: i64) -> Stmt {
+    var s = stmt_new();
+    s.kind = STMT_RETURN();
+    s.has_return_val = true;
+    s.return_val = val;
+    s
+}
+
+fn stmt_return_void() -> Stmt {
+    var s = stmt_new();
+    s.kind = STMT_RETURN();
+    s.has_return_val = false;
+    s
+}
+
+fn stmt_break() -> Stmt {
+    var s = stmt_new();
+    s.kind = STMT_BREAK();
+    s
+}
+
+fn stmt_continue() -> Stmt {
+    var s = stmt_new();
+    s.kind = STMT_CONTINUE();
+    s
+}
+
+fn stmt_expr() -> Stmt {
+    var s = stmt_new();
+    s.kind = STMT_EXPR();
+    s
+}
+
+fn stmt_if(body_count: i64, has_else: bool, else_count: i64) -> Stmt {
+    var s = stmt_new();
+    s.kind = STMT_IF();
+    s.body_count = body_count;
+    s.has_else = has_else;
+    s.else_count = else_count;
+    s
+}
+
+fn stmt_while(body_count: i64) -> Stmt {
+    var s = stmt_new();
+    s.kind = STMT_WHILE();
+    s.body_count = body_count;
+    s
+}
+
+fn stmt_loop(body_count: i64) -> Stmt {
+    var s = stmt_new();
+    s.kind = STMT_LOOP();
+    s.body_count = body_count;
+    s
+}
+
+// ============================================================================
+// PARSE RESULT
+// ============================================================================
+
+struct ParseResult {
+    state: State,
+    stmt: Stmt,
+    ok: bool,
+}
+
+fn parse_ok(s: State, st: Stmt) -> ParseResult {
+    ParseResult { state: s, stmt: st, ok: true }
+}
+
+fn parse_err(s: State) -> ParseResult {
+    ParseResult { state: s, stmt: stmt_new(), ok: false }
+}
+
+// ============================================================================
+// STATEMENT PARSING
+// ============================================================================
+
+/// Parse let statement: let x = expr;
+fn parse_let(s: State) -> ParseResult {
+    var st = s;
+
+    // Consume 'let'
+    if !at(st, TK_LET()) {
+        return parse_err(st)
+    }
+    st = advance(st);
+
+    // Expect identifier
+    if !at(st, TK_IDENT()) {
+        return parse_err(st)
+    }
+    let name_tok = current(st);
+    st = advance(st);
+
+    // Optional type annotation: : Type
+    if at(st, TK_COLON()) {
+        st = advance(st);
+        // Skip type for now (just expect identifier)
+        if at(st, TK_IDENT()) {
+            st = advance(st);
+        }
+    }
+
+    // Expect =
+    if !at(st, TK_EQ()) {
+        return parse_err(st)
+    }
+    st = advance(st);
+
+    // Parse init expression (simplified: just int literal)
+    if !at(st, TK_INT_LIT()) {
+        return parse_err(st)
+    }
+    let init_tok = current(st);
+    st = advance(st);
+
+    // Optional semicolon
+    if at(st, TK_SEMI()) {
+        st = advance(st);
+    }
+
+    parse_ok(st, stmt_let(name_tok.name, name_tok.name_len, init_tok.val))
+}
+
+/// Parse var statement: var x = expr;
+fn parse_var(s: State) -> ParseResult {
+    var st = s;
+
+    // Consume 'var'
+    if !at(st, TK_VAR()) {
+        return parse_err(st)
+    }
+    st = advance(st);
+
+    // Expect identifier
+    if !at(st, TK_IDENT()) {
+        return parse_err(st)
+    }
+    let name_tok = current(st);
+    st = advance(st);
+
+    // Optional type annotation
+    if at(st, TK_COLON()) {
+        st = advance(st);
+        if at(st, TK_IDENT()) {
+            st = advance(st);
+        }
+    }
+
+    // Expect =
+    if !at(st, TK_EQ()) {
+        return parse_err(st)
+    }
+    st = advance(st);
+
+    // Parse init expression (simplified: just int literal)
+    if !at(st, TK_INT_LIT()) {
+        return parse_err(st)
+    }
+    let init_tok = current(st);
+    st = advance(st);
+
+    // Optional semicolon
+    if at(st, TK_SEMI()) {
+        st = advance(st);
+    }
+
+    parse_ok(st, stmt_var(name_tok.name, name_tok.name_len, init_tok.val))
+}
+
+/// Parse return statement: return expr;
+fn parse_return(s: State) -> ParseResult {
+    var st = s;
+
+    // Consume 'return'
+    if !at(st, TK_RETURN()) {
+        return parse_err(st)
+    }
+    st = advance(st);
+
+    // Check for value or just semicolon
+    if at(st, TK_SEMI()) {
+        st = advance(st);
+        return parse_ok(st, stmt_return_void())
+    }
+
+    // Check for } (return at end of block without semicolon)
+    if at(st, TK_RBRACE()) {
+        return parse_ok(st, stmt_return_void())
+    }
+
+    // Parse return value (simplified: int literal or identifier)
+    if at(st, TK_INT_LIT()) {
+        let val_tok = current(st);
+        st = advance(st);
+
+        if at(st, TK_SEMI()) {
+            st = advance(st);
+        }
+
+        return parse_ok(st, stmt_return(val_tok.val))
+    }
+
+    // Handle identifier as return value (treat as returning variable)
+    if at(st, TK_IDENT()) {
+        // For now, skip the identifier - we'd need proper expression parsing
+        // to actually capture the variable name
+        st = advance(st);
+
+        if at(st, TK_SEMI()) {
+            st = advance(st);
+        }
+
+        // Mark as having a return value (even though we can't store the name)
+        var ret_stmt = stmt_new();
+        ret_stmt.kind = STMT_RETURN();
+        ret_stmt.has_return_val = true;
+        ret_stmt.return_val = -1;  // Sentinel for "expression, not literal"
+        return parse_ok(st, ret_stmt)
+    }
+
+    // Return without value
+    parse_ok(st, stmt_return_void())
+}
+
+/// Parse break statement
+fn parse_break(s: State) -> ParseResult {
+    var st = s;
+
+    if !at(st, TK_BREAK()) {
+        return parse_err(st)
+    }
+    st = advance(st);
+
+    if at(st, TK_SEMI()) {
+        st = advance(st);
+    }
+
+    parse_ok(st, stmt_break())
+}
+
+/// Parse continue statement
+fn parse_continue(s: State) -> ParseResult {
+    var st = s;
+
+    if !at(st, TK_CONTINUE()) {
+        return parse_err(st)
+    }
+    st = advance(st);
+
+    if at(st, TK_SEMI()) {
+        st = advance(st);
+    }
+
+    parse_ok(st, stmt_continue())
+}
+
+/// Skip a block and count statements (simplified - just counts braces and semicolons)
+fn skip_block(s: State) -> State {
+    var st = s;
+
+    if !at(st, TK_LBRACE()) {
+        return st
+    }
+    st = advance(st);  // consume {
+
+    var depth: i64 = 1;
+    while depth > 0 && !at(st, TK_EOF()) {
+        if at(st, TK_LBRACE()) {
+            depth = depth + 1;
+        }
+        if at(st, TK_RBRACE()) {
+            depth = depth - 1;
+        }
+        st = advance(st);
+    }
+
+    st
+}
+
+/// Skip a condition expression (simplified - handles identifier/literal and basic ops)
+fn skip_condition(s: State) -> State {
+    var st = s;
+
+    // Simple condition: just identifier, literal, or small expression
+    // Skip tokens until we hit {
+    while !at(st, TK_LBRACE()) && !at(st, TK_EOF()) {
+        st = advance(st);
+    }
+
+    st
+}
+
+/// Parse any statement
+fn parse_stmt(s: State) -> ParseResult {
+    var st = s;
+    let curr = peek(st);
+
+    if curr == TK_LET() {
+        return parse_let(st)
+    }
+
+    if curr == TK_VAR() {
+        return parse_var(st)
+    }
+
+    if curr == TK_RETURN() {
+        return parse_return(st)
+    }
+
+    if curr == TK_BREAK() {
+        return parse_break(st)
+    }
+
+    if curr == TK_CONTINUE() {
+        return parse_continue(st)
+    }
+
+    // If statement: if condition { body } [else { body }]
+    if curr == TK_IF() {
+        st = advance(st);  // consume 'if'
+        st = skip_condition(st);
+
+        // Parse body block
+        let body_start = st.pos;
+        st = skip_block(st);
+        let body_count = st.pos - body_start - 2;  // Approximate statement count
+
+        var has_else = false;
+        var else_count: i64 = 0;
+
+        // Check for else
+        if at(st, TK_ELSE()) {
+            st = advance(st);
+            has_else = true;
+
+            // else if or else { }
+            if at(st, TK_IF()) {
+                // Treat else if as nested - for now just skip
+                let else_result = parse_stmt(st);
+                if else_result.ok {
+                    st = else_result.state;
+                    else_count = 1;
+                }
+            } else {
+                let else_start = st.pos;
+                st = skip_block(st);
+                else_count = st.pos - else_start - 2;
+            }
+        }
+
+        return parse_ok(st, stmt_if(body_count, has_else, else_count))
+    }
+
+    // While statement: while condition { body }
+    if curr == TK_WHILE() {
+        st = advance(st);  // consume 'while'
+        st = skip_condition(st);
+
+        let body_start = st.pos;
+        st = skip_block(st);
+        let body_count = st.pos - body_start - 2;
+
+        return parse_ok(st, stmt_while(body_count))
+    }
+
+    // Loop statement: loop { body }
+    if curr == TK_LOOP() {
+        st = advance(st);  // consume 'loop'
+
+        let body_start = st.pos;
+        st = skip_block(st);
+        let body_count = st.pos - body_start - 2;
+
+        return parse_ok(st, stmt_loop(body_count))
+    }
+
+    // Empty statement
+    if curr == TK_SEMI() {
+        st = advance(st);
+        return parse_ok(st, stmt_new())
+    }
+
+    // Default: expression statement (simplified)
+    if curr == TK_IDENT() || curr == TK_INT_LIT() {
+        // Skip expression
+        st = advance(st);
+        if at(st, TK_SEMI()) {
+            st = advance(st);
+        }
+        return parse_ok(st, stmt_expr())
+    }
+
+    parse_err(st)
+}
+
+// ============================================================================
+// BLOCK PARSING
+// ============================================================================
+
+struct Block {
+    stmts: [Stmt; 64],
+    n_stmts: i64,
+}
+
+fn block_new() -> Block {
+    Block {
+        stmts: [stmt_new(); 64],
+        n_stmts: 0,
+    }
+}
+
+struct ParseBlockResult {
+    state: State,
+    block: Block,
+    ok: bool,
+}
+
+fn parse_block_ok(s: State, b: Block) -> ParseBlockResult {
+    ParseBlockResult { state: s, block: b, ok: true }
+}
+
+fn parse_block_err(s: State) -> ParseBlockResult {
+    ParseBlockResult { state: s, block: block_new(), ok: false }
+}
+
+/// Parse a block: { stmts }
+fn parse_block(s: State) -> ParseBlockResult {
+    var st = s;
+
+    // Expect {
+    if !at(st, TK_LBRACE()) {
+        return parse_block_err(st)
+    }
+    st = advance(st);
+
+    var blk = block_new();
+
+    // Parse statements until }
+    while !at(st, TK_RBRACE()) && !at(st, TK_EOF()) {
+        let stmt_result = parse_stmt(st);
+        if !stmt_result.ok {
+            return parse_block_err(st)
+        }
+        st = stmt_result.state;
+
+        if blk.n_stmts < 64 {
+            blk.stmts[blk.n_stmts as usize] = stmt_result.stmt;
+            blk.n_stmts = blk.n_stmts + 1;
+        }
+    }
+
+    // Expect }
+    if !at(st, TK_RBRACE()) {
+        return parse_block_err(st)
+    }
+    st = advance(st);
+
+    parse_block_ok(st, blk)
+}
+
+// ============================================================================
+// TESTS
+// ============================================================================
+
+/// Test: "let x = 42;"
+fn test_parse_let() -> bool {
+    var st = state_new();
+    // let
+    st.tokens[0] = make_token(TK_LET());
+    // x (identifier)
+    st.tokens[1] = make_ident_token(120, 0, 0, 1);  // 'x' = 120
+    // =
+    st.tokens[2] = make_token(TK_EQ());
+    // 42
+    st.tokens[3] = make_int_token(42);
+    // ;
+    st.tokens[4] = make_token(TK_SEMI());
+    st.n = 5;
+
+    let result = parse_let(st);
+
+    if !result.ok {
+        print("  Failed to parse let\n");
+        return false
+    }
+
+    if result.stmt.kind != STMT_LET() {
+        print("  Expected STMT_LET\n");
+        return false
+    }
+
+    if result.stmt.is_mutable {
+        print("  let should not be mutable\n");
+        return false
+    }
+
+    if result.stmt.init_val != 42 {
+        print("  Expected init_val = 42\n");
+        return false
+    }
+
+    true
+}
+
+/// Test: "var y = 10;"
+fn test_parse_var() -> bool {
+    var st = state_new();
+    st.tokens[0] = make_token(TK_VAR());
+    st.tokens[1] = make_ident_token(121, 0, 0, 1);  // 'y' = 121
+    st.tokens[2] = make_token(TK_EQ());
+    st.tokens[3] = make_int_token(10);
+    st.tokens[4] = make_token(TK_SEMI());
+    st.n = 5;
+
+    let result = parse_var(st);
+
+    if !result.ok {
+        print("  Failed to parse var\n");
+        return false
+    }
+
+    if result.stmt.kind != STMT_VAR() {
+        print("  Expected STMT_VAR\n");
+        return false
+    }
+
+    if !result.stmt.is_mutable {
+        print("  var should be mutable\n");
+        return false
+    }
+
+    if result.stmt.init_val != 10 {
+        print("  Expected init_val = 10\n");
+        return false
+    }
+
+    true
+}
+
+/// Test: "return 0;"
+fn test_parse_return() -> bool {
+    var st = state_new();
+    st.tokens[0] = make_token(TK_RETURN());
+    st.tokens[1] = make_int_token(0);
+    st.tokens[2] = make_token(TK_SEMI());
+    st.n = 3;
+
+    let result = parse_return(st);
+
+    if !result.ok {
+        print("  Failed to parse return\n");
+        return false
+    }
+
+    if result.stmt.kind != STMT_RETURN() {
+        print("  Expected STMT_RETURN\n");
+        return false
+    }
+
+    if !result.stmt.has_return_val {
+        print("  Expected has_return_val\n");
+        return false
+    }
+
+    if result.stmt.return_val != 0 {
+        print("  Expected return_val = 0\n");
+        return false
+    }
+
+    true
+}
+
+/// Test: "{ let x = 1; return x; }"
+fn test_parse_block() -> bool {
+    var st = state_new();
+    // {
+    st.tokens[0] = make_token(TK_LBRACE());
+    // let
+    st.tokens[1] = make_token(TK_LET());
+    // x
+    st.tokens[2] = make_ident_token(120, 0, 0, 1);
+    // =
+    st.tokens[3] = make_token(TK_EQ());
+    // 1
+    st.tokens[4] = make_int_token(1);
+    // ;
+    st.tokens[5] = make_token(TK_SEMI());
+    // return
+    st.tokens[6] = make_token(TK_RETURN());
+    // (some identifier for x)
+    st.tokens[7] = make_ident_token(120, 0, 0, 1);
+    // ;
+    st.tokens[8] = make_token(TK_SEMI());
+    // }
+    st.tokens[9] = make_token(TK_RBRACE());
+    st.n = 10;
+
+    let result = parse_block(st);
+
+    if !result.ok {
+        print("  Failed to parse block\n");
+        return false
+    }
+
+    if result.block.n_stmts != 2 {
+        print("  Expected 2 statements in block\n");
+        return false
+    }
+
+    if result.block.stmts[0].kind != STMT_LET() {
+        print("  First stmt should be LET\n");
+        return false
+    }
+
+    // Second is expression statement (return parsed as expr since we simplified)
+    // Actually parse_stmt handles return specially
+    if result.block.stmts[1].kind != STMT_RETURN() {
+        print("  Second stmt should be RETURN\n");
+        return false
+    }
+
+    true
+}
+
+/// Test: "if x { return 1; }"
+fn test_parse_if() -> bool {
+    var st = state_new();
+    // if
+    st.tokens[0] = make_token(TK_IF());
+    // x (condition)
+    st.tokens[1] = make_ident_token(120, 0, 0, 1);
+    // {
+    st.tokens[2] = make_token(TK_LBRACE());
+    // return
+    st.tokens[3] = make_token(TK_RETURN());
+    // 1
+    st.tokens[4] = make_int_token(1);
+    // ;
+    st.tokens[5] = make_token(TK_SEMI());
+    // }
+    st.tokens[6] = make_token(TK_RBRACE());
+    st.n = 7;
+
+    let result = parse_stmt(st);
+
+    if !result.ok {
+        print("  Failed to parse if\n");
+        return false
+    }
+
+    if result.stmt.kind != STMT_IF() {
+        print("  Expected STMT_IF\n");
+        return false
+    }
+
+    if result.stmt.has_else {
+        print("  Should not have else\n");
+        return false
+    }
+
+    true
+}
+
+/// Test: "if x { 1 } else { 2 }"
+fn test_parse_if_else() -> bool {
+    var st = state_new();
+    // if
+    st.tokens[0] = make_token(TK_IF());
+    // x
+    st.tokens[1] = make_ident_token(120, 0, 0, 1);
+    // {
+    st.tokens[2] = make_token(TK_LBRACE());
+    // 1
+    st.tokens[3] = make_int_token(1);
+    // }
+    st.tokens[4] = make_token(TK_RBRACE());
+    // else
+    st.tokens[5] = make_token(TK_ELSE());
+    // {
+    st.tokens[6] = make_token(TK_LBRACE());
+    // 2
+    st.tokens[7] = make_int_token(2);
+    // }
+    st.tokens[8] = make_token(TK_RBRACE());
+    st.n = 9;
+
+    let result = parse_stmt(st);
+
+    if !result.ok {
+        print("  Failed to parse if-else\n");
+        return false
+    }
+
+    if result.stmt.kind != STMT_IF() {
+        print("  Expected STMT_IF\n");
+        return false
+    }
+
+    if !result.stmt.has_else {
+        print("  Should have else\n");
+        return false
+    }
+
+    true
+}
+
+/// Test: "while x { break; }"
+fn test_parse_while() -> bool {
+    var st = state_new();
+    // while
+    st.tokens[0] = make_token(TK_WHILE());
+    // x
+    st.tokens[1] = make_ident_token(120, 0, 0, 1);
+    // {
+    st.tokens[2] = make_token(TK_LBRACE());
+    // break
+    st.tokens[3] = make_token(TK_BREAK());
+    // ;
+    st.tokens[4] = make_token(TK_SEMI());
+    // }
+    st.tokens[5] = make_token(TK_RBRACE());
+    st.n = 6;
+
+    let result = parse_stmt(st);
+
+    if !result.ok {
+        print("  Failed to parse while\n");
+        return false
+    }
+
+    if result.stmt.kind != STMT_WHILE() {
+        print("  Expected STMT_WHILE\n");
+        return false
+    }
+
+    true
+}
+
+/// Test: "loop { continue; }"
+fn test_parse_loop() -> bool {
+    var st = state_new();
+    // loop
+    st.tokens[0] = make_token(TK_LOOP());
+    // {
+    st.tokens[1] = make_token(TK_LBRACE());
+    // continue
+    st.tokens[2] = make_token(TK_CONTINUE());
+    // ;
+    st.tokens[3] = make_token(TK_SEMI());
+    // }
+    st.tokens[4] = make_token(TK_RBRACE());
+    st.n = 5;
+
+    let result = parse_stmt(st);
+
+    if !result.ok {
+        print("  Failed to parse loop\n");
+        return false
+    }
+
+    if result.stmt.kind != STMT_LOOP() {
+        print("  Expected STMT_LOOP\n");
+        return false
+    }
+
+    true
+}
+
+fn main() -> i32 {
+    print("Testing statement parser...\n\n");
+
+    var passed: i64 = 0;
+    var failed: i64 = 0;
+
+    if test_parse_let() {
+        print("PASS: test_parse_let\n");
+        passed = passed + 1;
+    } else {
+        print("FAIL: test_parse_let\n");
+        failed = failed + 1;
+    }
+
+    if test_parse_var() {
+        print("PASS: test_parse_var\n");
+        passed = passed + 1;
+    } else {
+        print("FAIL: test_parse_var\n");
+        failed = failed + 1;
+    }
+
+    if test_parse_return() {
+        print("PASS: test_parse_return\n");
+        passed = passed + 1;
+    } else {
+        print("FAIL: test_parse_return\n");
+        failed = failed + 1;
+    }
+
+    if test_parse_block() {
+        print("PASS: test_parse_block\n");
+        passed = passed + 1;
+    } else {
+        print("FAIL: test_parse_block\n");
+        failed = failed + 1;
+    }
+
+    if test_parse_if() {
+        print("PASS: test_parse_if\n");
+        passed = passed + 1;
+    } else {
+        print("FAIL: test_parse_if\n");
+        failed = failed + 1;
+    }
+
+    if test_parse_if_else() {
+        print("PASS: test_parse_if_else\n");
+        passed = passed + 1;
+    } else {
+        print("FAIL: test_parse_if_else\n");
+        failed = failed + 1;
+    }
+
+    if test_parse_while() {
+        print("PASS: test_parse_while\n");
+        passed = passed + 1;
+    } else {
+        print("FAIL: test_parse_while\n");
+        failed = failed + 1;
+    }
+
+    if test_parse_loop() {
+        print("PASS: test_parse_loop\n");
+        passed = passed + 1;
+    } else {
+        print("FAIL: test_parse_loop\n");
+        failed = failed + 1;
+    }
+
+    print("\n");
+    if failed == 0 {
+        print("All statement parser tests passed!\n");
+        0
+    } else {
+        print("Some tests failed.\n");
+        1
+    }
+}
