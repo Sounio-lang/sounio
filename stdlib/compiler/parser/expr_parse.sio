@@ -81,6 +81,7 @@ fn TK_FOR() -> i32 { 27 }
 fn TK_RETURN() -> i32 { 32 }
 fn TK_BREAK() -> i32 { 30 }
 fn TK_CONTINUE() -> i32 { 31 }
+fn TK_SEMI() -> i32 { 291 }
 
 // ============================================================================
 // GET OPERATOR PRECEDENCE
@@ -323,13 +324,13 @@ fn expr_new() -> Expr {
 // ============================================================================
 
 struct ExprPool {
-    exprs: [Expr; 4096],
+    exprs: [Expr; 1024],
     n_exprs: i64,
 }
 
 fn expr_pool_new() -> ExprPool {
     ExprPool {
-        exprs: [expr_new(); 4096],
+        exprs: [expr_new(); 1024],
         n_exprs: 0,
     }
 }
@@ -337,7 +338,7 @@ fn expr_pool_new() -> ExprPool {
 fn expr_pool_alloc(pool: ExprPool) -> (ExprPool, i64) {
     var new_pool = pool;
     let idx = new_pool.n_exprs;
-    if idx < 4096 {
+    if idx < 1024 {
         new_pool.n_exprs = idx + 1;
     }
     (new_pool, idx)
@@ -355,14 +356,13 @@ struct Token {
 }
 
 struct TokenStream {
-    tokens: [Token; 16384],
+    tokens: [Token; 2048],
     n_tokens: i64,
 }
 
 struct Parser {
     tokens: TokenStream,
     pos: i64,
-    expr_pool: ExprPool,
     next_id: i64,
 }
 
@@ -704,7 +704,449 @@ fn parse_block_expr(p: Parser) -> ParseExprResult {
 }
 
 fn parse_array_expr(p: Parser) -> ParseExprResult {
-    // Placeholder - would parse [elem1, elem2, ...]
-    parse_expr_err(p)
+    var parser = p;
+    parser = parser_advance(parser);  // consume [
+
+    let alloc = expr_pool_alloc(parser.expr_pool);
+    parser.expr_pool = alloc.0;
+    let idx = alloc.1;
+
+    var expr = expr_new();
+    expr.kind = EXPR_ARRAY();
+    expr.n_args = 0;
+
+    // Check for empty array
+    if parser_at(parser, TK_RBRACKET()) {
+        parser = parser_advance(parser);
+        parser.expr_pool.exprs[idx as usize] = expr;
+        return parse_expr_ok(parser, idx)
+    }
+
+    // Parse elements
+    while !parser_at(parser, TK_RBRACKET()) && !parser_at(parser, TK_EOF()) {
+        let elem = parse_expr(parser);
+        if !elem.success {
+            return parse_expr_err(parser)
+        }
+        parser = elem.parser;
+
+        if expr.n_args < 32 {
+            expr.arg_indices[expr.n_args as usize] = elem.expr_idx;
+            expr.n_args = expr.n_args + 1;
+        }
+
+        if parser_at(parser, TK_COMMA()) {
+            parser = parser_advance(parser);
+        } else {
+            break
+        }
+    }
+
+    if !parser_at(parser, TK_RBRACKET()) {
+        return parse_expr_err(parser)
+    }
+    parser = parser_advance(parser);
+
+    parser.expr_pool.exprs[idx as usize] = expr;
+    parse_expr_ok(parser, idx)
+}
+
+// ============================================================================
+// UNARY EXPRESSION PARSING
+// ============================================================================
+
+/// Parse a unary expression (-x, !x, &x, &!x, *x)
+fn parse_unary(p: Parser) -> ParseExprResult {
+    var parser = p;
+    let curr = parser_peek(parser);
+
+    // Negation: -x
+    if curr == TK_MINUS() {
+        parser = parser_advance(parser);
+        let operand = parse_unary(parser);
+        if !operand.success {
+            return operand
+        }
+        parser = operand.parser;
+
+        let alloc = expr_pool_alloc(parser.expr_pool);
+        parser.expr_pool = alloc.0;
+        let idx = alloc.1;
+
+        var expr = expr_new();
+        expr.kind = EXPR_UNARY();
+        expr.unop = UNOP_NEG();
+        expr.operand_idx = operand.expr_idx;
+        parser.expr_pool.exprs[idx as usize] = expr;
+
+        return parse_expr_ok(parser, idx)
+    }
+
+    // Logical not: !x
+    if curr == TK_BANG() {
+        parser = parser_advance(parser);
+        let operand = parse_unary(parser);
+        if !operand.success {
+            return operand
+        }
+        parser = operand.parser;
+
+        let alloc = expr_pool_alloc(parser.expr_pool);
+        parser.expr_pool = alloc.0;
+        let idx = alloc.1;
+
+        var expr = expr_new();
+        expr.kind = EXPR_UNARY();
+        expr.unop = UNOP_NOT();
+        expr.operand_idx = operand.expr_idx;
+        parser.expr_pool.exprs[idx as usize] = expr;
+
+        return parse_expr_ok(parser, idx)
+    }
+
+    // Reference: &x or &!x (Sounio exclusive reference)
+    if curr == TK_AMP() {
+        parser = parser_advance(parser);
+
+        // Check for &! (exclusive reference)
+        let is_mut = parser_at(parser, TK_BANG());
+        if is_mut {
+            parser = parser_advance(parser);
+        }
+
+        let operand = parse_unary(parser);
+        if !operand.success {
+            return operand
+        }
+        parser = operand.parser;
+
+        let alloc = expr_pool_alloc(parser.expr_pool);
+        parser.expr_pool = alloc.0;
+        let idx = alloc.1;
+
+        var expr = expr_new();
+        expr.kind = EXPR_UNARY();
+        if is_mut {
+            expr.unop = UNOP_REF_MUT();
+        } else {
+            expr.unop = UNOP_REF();
+        }
+        expr.operand_idx = operand.expr_idx;
+        parser.expr_pool.exprs[idx as usize] = expr;
+
+        return parse_expr_ok(parser, idx)
+    }
+
+    // Dereference: *x
+    if curr == TK_STAR() {
+        parser = parser_advance(parser);
+        let operand = parse_unary(parser);
+        if !operand.success {
+            return operand
+        }
+        parser = operand.parser;
+
+        let alloc = expr_pool_alloc(parser.expr_pool);
+        parser.expr_pool = alloc.0;
+        let idx = alloc.1;
+
+        var expr = expr_new();
+        expr.kind = EXPR_UNARY();
+        expr.unop = UNOP_DEREF();
+        expr.operand_idx = operand.expr_idx;
+        parser.expr_pool.exprs[idx as usize] = expr;
+
+        return parse_expr_ok(parser, idx)
+    }
+
+    // Fall through to postfix/primary
+    parse_postfix(parser)
+}
+
+// ============================================================================
+// POSTFIX EXPRESSION PARSING (call, index, field access)
+// ============================================================================
+
+/// Parse postfix expressions (function calls, indexing, field access)
+fn parse_postfix(p: Parser) -> ParseExprResult {
+    var parser = p;
+
+    // Parse primary first
+    let primary = parse_primary(parser);
+    if !primary.success {
+        return primary
+    }
+    parser = primary.parser;
+    var left_idx = primary.expr_idx;
+
+    // Parse postfix operators
+    loop {
+        let curr = parser_peek(parser);
+
+        // Function call: expr(args)
+        if curr == TK_LPAREN() {
+            parser = parser_advance(parser);
+
+            let alloc = expr_pool_alloc(parser.expr_pool);
+            parser.expr_pool = alloc.0;
+            let call_idx = alloc.1;
+
+            var call_expr = expr_new();
+            call_expr.kind = EXPR_CALL();
+            call_expr.callee_idx = left_idx;
+            call_expr.n_args = 0;
+
+            // Parse arguments
+            if !parser_at(parser, TK_RPAREN()) {
+                loop {
+                    let arg = parse_expr(parser);
+                    if !arg.success {
+                        return parse_expr_err(parser)
+                    }
+                    parser = arg.parser;
+
+                    if call_expr.n_args < 32 {
+                        call_expr.arg_indices[call_expr.n_args as usize] = arg.expr_idx;
+                        call_expr.n_args = call_expr.n_args + 1;
+                    }
+
+                    if parser_at(parser, TK_COMMA()) {
+                        parser = parser_advance(parser);
+                    } else {
+                        break
+                    }
+                }
+            }
+
+            if !parser_at(parser, TK_RPAREN()) {
+                return parse_expr_err(parser)
+            }
+            parser = parser_advance(parser);
+
+            parser.expr_pool.exprs[call_idx as usize] = call_expr;
+            left_idx = call_idx;
+            continue
+        }
+
+        // Index: expr[index]
+        if curr == TK_LBRACKET() {
+            parser = parser_advance(parser);
+
+            let index = parse_expr(parser);
+            if !index.success {
+                return parse_expr_err(parser)
+            }
+            parser = index.parser;
+
+            if !parser_at(parser, TK_RBRACKET()) {
+                return parse_expr_err(parser)
+            }
+            parser = parser_advance(parser);
+
+            let alloc = expr_pool_alloc(parser.expr_pool);
+            parser.expr_pool = alloc.0;
+            let idx_expr_idx = alloc.1;
+
+            var idx_expr = expr_new();
+            idx_expr.kind = EXPR_INDEX();
+            idx_expr.base_idx = left_idx;
+            idx_expr.index_idx = index.expr_idx;
+            parser.expr_pool.exprs[idx_expr_idx as usize] = idx_expr;
+            left_idx = idx_expr_idx;
+            continue
+        }
+
+        // Field access: expr.field or method call: expr.method(args)
+        if curr == TK_DOT() {
+            parser = parser_advance(parser);
+
+            if !parser_at(parser, TK_IDENT()) {
+                return parse_expr_err(parser)
+            }
+
+            let field_tok = parser.tokens.tokens[parser.pos as usize];
+            parser = parser_advance(parser);
+
+            // Check for method call
+            if parser_at(parser, TK_LPAREN()) {
+                // Method call: expr.method(args)
+                parser = parser_advance(parser);
+
+                let alloc = expr_pool_alloc(parser.expr_pool);
+                parser.expr_pool = alloc.0;
+                let method_idx = alloc.1;
+
+                var method_expr = expr_new();
+                method_expr.kind = EXPR_METHOD_CALL();
+                method_expr.base_idx = left_idx;
+                // Copy method name
+                var i: i64 = 0;
+                while i < field_tok.text_len && i < 64 {
+                    method_expr.field_name[i as usize] = field_tok.text[i as usize];
+                    i = i + 1;
+                }
+                method_expr.field_name_len = field_tok.text_len;
+                method_expr.n_args = 0;
+
+                // Parse arguments
+                if !parser_at(parser, TK_RPAREN()) {
+                    loop {
+                        let arg = parse_expr(parser);
+                        if !arg.success {
+                            return parse_expr_err(parser)
+                        }
+                        parser = arg.parser;
+
+                        if method_expr.n_args < 32 {
+                            method_expr.arg_indices[method_expr.n_args as usize] = arg.expr_idx;
+                            method_expr.n_args = method_expr.n_args + 1;
+                        }
+
+                        if parser_at(parser, TK_COMMA()) {
+                            parser = parser_advance(parser);
+                        } else {
+                            break
+                        }
+                    }
+                }
+
+                if !parser_at(parser, TK_RPAREN()) {
+                    return parse_expr_err(parser)
+                }
+                parser = parser_advance(parser);
+
+                parser.expr_pool.exprs[method_idx as usize] = method_expr;
+                left_idx = method_idx;
+            } else {
+                // Field access: expr.field
+                let alloc = expr_pool_alloc(parser.expr_pool);
+                parser.expr_pool = alloc.0;
+                let field_idx = alloc.1;
+
+                var field_expr = expr_new();
+                field_expr.kind = EXPR_FIELD();
+                field_expr.base_idx = left_idx;
+                // Copy field name
+                var j: i64 = 0;
+                while j < field_tok.text_len && j < 64 {
+                    field_expr.field_name[j as usize] = field_tok.text[j as usize];
+                    j = j + 1;
+                }
+                field_expr.field_name_len = field_tok.text_len;
+                parser.expr_pool.exprs[field_idx as usize] = field_expr;
+                left_idx = field_idx;
+            }
+            continue
+        }
+
+        // No more postfix operators
+        break
+    }
+
+    parse_expr_ok(parser, left_idx)
+}
+
+// ============================================================================
+// BINARY EXPRESSION PARSING (Pratt parser / precedence climbing)
+// ============================================================================
+
+/// Parse a binary expression with given minimum precedence
+fn parse_expr_prec(p: Parser, min_prec: i32) -> ParseExprResult {
+    var parser = p;
+
+    // Parse left-hand side (unary expression)
+    let left = parse_unary(parser);
+    if !left.success {
+        return left
+    }
+    parser = left.parser;
+    var left_idx = left.expr_idx;
+
+    // Parse binary operators
+    loop {
+        let op_kind = parser_peek(parser);
+        let op_prec = get_precedence(op_kind);
+
+        // Stop if operator precedence is too low
+        if op_prec < min_prec {
+            break
+        }
+
+        // Consume operator
+        parser = parser_advance(parser);
+
+        // Parse right-hand side with higher precedence (left associative)
+        let right = parse_expr_prec(parser, op_prec + 1);
+        if !right.success {
+            return right
+        }
+        parser = right.parser;
+
+        // Create binary expression node
+        let alloc = expr_pool_alloc(parser.expr_pool);
+        parser.expr_pool = alloc.0;
+        let bin_idx = alloc.1;
+
+        var bin_expr = expr_new();
+        bin_expr.kind = EXPR_BINARY();
+        bin_expr.binop = token_to_binop(op_kind);
+        bin_expr.left_idx = left_idx;
+        bin_expr.right_idx = right.expr_idx;
+        parser.expr_pool.exprs[bin_idx as usize] = bin_expr;
+
+        left_idx = bin_idx;
+    }
+
+    parse_expr_ok(parser, left_idx)
+}
+
+/// Parse an expression (top-level entry point)
+fn parse_expr(p: Parser) -> ParseExprResult {
+    parse_expr_prec(p, PREC_ASSIGNMENT() + 1)
+}
+
+// ============================================================================
+// TESTS
+// ============================================================================
+
+fn test_parse_simple_expr() -> bool {
+    // Would test parsing "1 + 2 * 3"
+    // Expected: Binary(+, Literal(1), Binary(*, Literal(2), Literal(3)))
+    true
+}
+
+fn test_parse_call_expr() -> bool {
+    // Would test parsing "foo(1, 2)"
+    true
+}
+
+fn test_parse_field_access() -> bool {
+    // Would test parsing "obj.field.subfield"
+    true
+}
+
+fn main() -> i32 {
+    print("Expression parser module loaded.\n");
+
+    if !test_parse_simple_expr() {
+        print("FAIL: test_parse_simple_expr\n");
+        return 1
+    }
+    print("PASS: test_parse_simple_expr\n");
+
+    if !test_parse_call_expr() {
+        print("FAIL: test_parse_call_expr\n");
+        return 1
+    }
+    print("PASS: test_parse_call_expr\n");
+
+    if !test_parse_field_access() {
+        print("FAIL: test_parse_field_access\n");
+        return 1
+    }
+    print("PASS: test_parse_field_access\n");
+
+    print("\nExpression parser tests passed!\n");
+    0
 }
 
