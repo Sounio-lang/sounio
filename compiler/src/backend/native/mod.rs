@@ -185,16 +185,77 @@ impl NativeBackend {
     }
 
     /// Compile a SIR module to native code
-    /// 
+    ///
     /// Returns compiled bytes and compilation metadata
-    pub fn compile(&mut self, _module: &SirModule) -> Result<CompileResult, CompileError> {
-        // TODO: Implement full compilation pipeline
-        // 1. Lower SIR to machine IR
-        // 2. Register allocation with epistemic awareness
-        // 3. Emit x86-64 machine code
-        // 4. Link into .so
-        
-        Err(CompileError::NotImplemented("Full compilation pipeline".into()))
+    pub fn compile(&mut self, module: &crate::sir::module::SirModule) -> Result<CompileResult, CompileError> {
+        use crate::sir::emit::{CodeEmitter, X86_64Emitter};
+
+        // Step 1: Create x86-64 emitter
+        let mut emitter = X86_64Emitter::new();
+
+        // Step 2: Emit code for the module
+        let code_segment = emitter
+            .emit_module(module)
+            .map_err(|e| CompileError::EmissionFailed(format!("{:?}", e)))?;
+
+        // Step 3: Analyze blocks for metrics if thermal tracking enabled
+        let mut total_cycles = 0u64;
+        let mut total_energy = 0.0f64;
+
+        // For now, we don't have block-level metrics from the SirModule
+        // The metrics analysis can be added when SirModule exposes its blocks
+
+        // Step 4: Build result
+        let symbols: Vec<Symbol> = code_segment
+            .symbols
+            .iter()
+            .map(|s| Symbol {
+                name: s.name.clone(),
+                offset: s.offset,
+                size: 0, // Size not tracked in emit.rs Symbol
+            })
+            .collect();
+
+        // Calculate thermal degradation if tracking enabled
+        let final_confidence = if self.config.enable_thermal_tracking {
+            let result = thermal::apply_degradation_full(
+                1.0,
+                0.0,
+                &self.config.thermal_model,
+                total_cycles,
+                self.thermal_state.current_temp_k,
+            );
+            result.epsilon  // epsilon is the epistemic confidence
+        } else {
+            1.0
+        };
+
+        Ok(CompileResult {
+            code: code_segment.code,
+            symbols,
+            metrics: CompileMetrics {
+                total_cycles,
+                total_energy_pj: total_energy,
+                final_confidence,
+                thermal_degradation: 1.0 - final_confidence,
+            },
+        })
+    }
+
+    /// Compile a SIR module to an ELF object file
+    pub fn compile_to_object(&mut self, module: &crate::sir::module::SirModule) -> Result<Vec<u8>, CompileError> {
+        use crate::sir::emit::{CodeEmitter, X86_64Emitter};
+
+        let mut emitter = X86_64Emitter::new();
+        let code_segment = emitter
+            .emit_module(module)
+            .map_err(|e| CompileError::EmissionFailed(format!("{:?}", e)))?;
+
+        // Use ELF conversion helper
+        let elf_bytes = elf::code_segment_to_elf(&code_segment)
+            .map_err(|e| CompileError::EmissionFailed(format!("ELF emission failed: {}", e)))?;
+
+        Ok(elf_bytes)
     }
 
     /// Analyze a SIR block for metrics without compilation

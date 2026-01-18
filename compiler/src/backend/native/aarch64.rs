@@ -24,7 +24,10 @@
 //! - SP: Stack pointer (must be 16-byte aligned)
 
 use crate::sir::module::SirModule;
-use crate::sir::blocks::SirFunction;
+use crate::sir::blocks::{SirFunction, Terminator};
+use crate::sir::ops::{ArithOp, CmpOp, SirInst};
+use crate::sir::values::{Constant, ValueId};
+use std::collections::HashMap;
 
 // ============================================================================
 // REGISTERS
@@ -86,6 +89,32 @@ impl AArch64Reg {
         )
     }
 
+    /// Create a register from a number (0-15 map to X0-X15)
+    pub fn from_num(n: u8) -> Self {
+        match n {
+            0 => AArch64Reg::X0, 1 => AArch64Reg::X1, 2 => AArch64Reg::X2, 3 => AArch64Reg::X3,
+            4 => AArch64Reg::X4, 5 => AArch64Reg::X5, 6 => AArch64Reg::X6, 7 => AArch64Reg::X7,
+            8 => AArch64Reg::X8, 9 => AArch64Reg::X9, 10 => AArch64Reg::X10, 11 => AArch64Reg::X11,
+            12 => AArch64Reg::X12, 13 => AArch64Reg::X13, 14 => AArch64Reg::X14, 15 => AArch64Reg::X15,
+            _ => AArch64Reg::X9, // Default to X9 for out-of-range
+        }
+    }
+
+    /// Convert to corresponding FP register (X0 -> V0, etc.)
+    pub fn to_fp(self) -> Self {
+        match self {
+            AArch64Reg::X0 => AArch64Reg::V0, AArch64Reg::X1 => AArch64Reg::V1,
+            AArch64Reg::X2 => AArch64Reg::V2, AArch64Reg::X3 => AArch64Reg::V3,
+            AArch64Reg::X4 => AArch64Reg::V4, AArch64Reg::X5 => AArch64Reg::V5,
+            AArch64Reg::X6 => AArch64Reg::V6, AArch64Reg::X7 => AArch64Reg::V7,
+            AArch64Reg::X8 => AArch64Reg::V8, AArch64Reg::X9 => AArch64Reg::V9,
+            AArch64Reg::X10 => AArch64Reg::V10, AArch64Reg::X11 => AArch64Reg::V11,
+            AArch64Reg::X12 => AArch64Reg::V12, AArch64Reg::X13 => AArch64Reg::V13,
+            AArch64Reg::X14 => AArch64Reg::V14, AArch64Reg::X15 => AArch64Reg::V15,
+            _ => self, // Already FP or other register
+        }
+    }
+
     /// Is this a caller-saved (volatile) register?
     pub fn is_caller_saved(self) -> bool {
         matches!(
@@ -128,6 +157,30 @@ pub enum Condition {
 /// Aliases for condition codes
 pub const HS: Condition = Condition::CS;  // Unsigned higher or same
 pub const LO: Condition = Condition::CC;  // Unsigned lower
+
+impl Condition {
+    /// Invert a condition (for CSET which uses inverted condition)
+    pub fn invert(self) -> Self {
+        match self {
+            Condition::EQ => Condition::NE,
+            Condition::NE => Condition::EQ,
+            Condition::CS => Condition::CC,
+            Condition::CC => Condition::CS,
+            Condition::MI => Condition::PL,
+            Condition::PL => Condition::MI,
+            Condition::VS => Condition::VC,
+            Condition::VC => Condition::VS,
+            Condition::HI => Condition::LS,
+            Condition::LS => Condition::HI,
+            Condition::GE => Condition::LT,
+            Condition::LT => Condition::GE,
+            Condition::GT => Condition::LE,
+            Condition::LE => Condition::GT,
+            Condition::AL => Condition::NV,
+            Condition::NV => Condition::AL,
+        }
+    }
+}
 
 // ============================================================================
 // SHIFT TYPES
@@ -584,6 +637,15 @@ impl AArch64Emitter {
         self.emit((0b01010100 << 24) | (cond as u32));  // Placeholder
     }
 
+    /// BL to label (unresolved, will be patched) - for function calls
+    pub fn bl_label(&mut self, label: &str) {
+        let offset = self.offset();
+        // Store with marker for BL (use a different internal flag or marker)
+        // For now, we'll emit BL with 0 offset as placeholder
+        self.unresolved.push((offset, format!("bl:{}", label), false));
+        self.emit(0b100101 << 26);  // BL placeholder
+    }
+
     /// BL: branch with link (call)
     pub fn bl(&mut self, offset: i32) {
         debug_assert!(offset % 4 == 0, "branch offset must be 4-byte aligned");
@@ -817,22 +879,328 @@ impl AArch64Emitter {
     // ========================================================================
 
     /// Emit a SIR module to AArch64 machine code
-    pub fn emit_module(&mut self, _module: &SirModule) -> Result<Vec<u8>, String> {
-        // TODO: Implement full SIR module compilation
-        // For now, this is a placeholder
+    pub fn emit_module(&mut self, module: &SirModule) -> Result<Vec<u8>, String> {
+        for func in &module.functions {
+            self.emit_function(func)?;
+        }
         Ok(self.code.clone())
     }
 
     /// Emit a function to AArch64 machine code
-    pub fn emit_function(&mut self, _func: &SirFunction) -> Result<Vec<u8>, String> {
-        // TODO: Implement SIR function emission
-        // This will require:
-        // 1. Register allocation
-        // 2. Instruction selection from SIR ops
-        // 3. Stack layout calculation
-        // 4. Prologue/epilogue generation
+    pub fn emit_function(&mut self, func: &SirFunction) -> Result<Vec<u8>, String> {
+        // Simple register allocation: use X9-X15 for temporaries
+        let mut value_regs: HashMap<ValueId, AArch64Reg> = HashMap::new();
+        let mut next_temp_reg = 9u8;
+
+        // Function label
+        self.label(&func.name);
+
+        // Calculate frame size (16 bytes for FP/LR + spill slots)
+        let frame_size = 16 + func.blocks.len() as u32 * 8;
+        let aligned_frame = (frame_size + 15) & !15;
+        self.emit_prologue(aligned_frame);
+
+        // Emit basic blocks
+        for (block_idx, block) in func.blocks.iter().enumerate() {
+            // Use block name if available, otherwise generate one
+            let default_label = format!(".bb{}", block_idx);
+            let block_label = block.name.as_deref().unwrap_or(&default_label);
+            self.label(block_label);
+
+            // Emit instructions
+            for instr in &block.instructions {
+                // Only allocate register if instruction produces a result
+                if let Some(result_id) = instr.result {
+                    let result_reg = if next_temp_reg <= 15 {
+                        let reg = AArch64Reg::from_num(next_temp_reg);
+                        value_regs.insert(result_id, reg);
+                        next_temp_reg += 1;
+                        if next_temp_reg > 15 {
+                            next_temp_reg = 9; // Wrap around
+                        }
+                        reg
+                    } else {
+                        AArch64Reg::X9
+                    };
+
+                    self.emit_sir_instruction(result_reg, &instr.inst, &value_regs)?;
+                } else {
+                    // Side-effect only instruction, use X9 as scratch
+                    self.emit_sir_instruction(AArch64Reg::X9, &instr.inst, &value_regs)?;
+                }
+            }
+
+            // Emit terminator
+            if let Some(term) = &block.terminator {
+                match term {
+                    Terminator::Return(Some(val)) => {
+                        // Move result to X0
+                        if let Some(&reg) = value_regs.get(val) {
+                            if reg != AArch64Reg::X0 {
+                                self.mov(AArch64Reg::X0, reg);
+                            }
+                        }
+                        self.emit_epilogue();
+                    }
+                    Terminator::Return(None) => {
+                        self.emit_epilogue();
+                    }
+                    Terminator::Br(target) => {
+                        // TODO: resolve BlockId to label
+                        let label = format!(".bb{}", target.0);
+                        self.b_label(&label);
+                    }
+                    Terminator::CondBr { cond, then_block, else_block } => {
+                        // cond should be in a register from previous CMP
+                        let then_label = format!(".bb{}", then_block.0);
+                        let else_label = format!(".bb{}", else_block.0);
+                        self.b_cond_label(Condition::NE, &then_label);
+                        self.b_label(&else_label);
+                    }
+                    Terminator::Unreachable => {
+                        // Emit BRK for trap
+                        self.emit(0xD4200000); // BRK #0
+                    }
+                    Terminator::Switch { .. } | Terminator::TailCall { .. } => {
+                        return Err("Complex terminators not yet implemented for AArch64".into());
+                    }
+                }
+            }
+        }
 
         Ok(self.code.clone())
+    }
+
+    /// Emit a single SIR instruction
+    fn emit_sir_instruction(
+        &mut self,
+        dst: AArch64Reg,
+        inst: &SirInst,
+        value_regs: &HashMap<ValueId, AArch64Reg>,
+    ) -> Result<(), String> {
+        match inst {
+            SirInst::BinOp { op, lhs, rhs } => {
+                let lhs_reg = value_regs.get(lhs).copied().unwrap_or(AArch64Reg::X9);
+                let rhs_reg = value_regs.get(rhs).copied().unwrap_or(AArch64Reg::X10);
+                self.emit_binop(dst, *op, lhs_reg, rhs_reg);
+            }
+            SirInst::Cmp { op, lhs, rhs } => {
+                let lhs_reg = value_regs.get(lhs).copied().unwrap_or(AArch64Reg::X9);
+                let rhs_reg = value_regs.get(rhs).copied().unwrap_or(AArch64Reg::X10);
+                self.emit_cmp(dst, *op, lhs_reg, rhs_reg);
+            }
+            SirInst::Const(constant) => {
+                self.emit_const(dst, constant);
+            }
+            SirInst::Cast { val, .. } => {
+                // For now, just move the value (proper casts need more work)
+                if let Some(&src) = value_regs.get(val) {
+                    if dst != src {
+                        self.mov(dst, src);
+                    }
+                }
+            }
+            SirInst::Call(info) => {
+                use crate::sir::ops::Callee;
+                // Move arguments to X0-X7
+                for (i, arg) in info.args.iter().enumerate().take(8) {
+                    if let Some(&src) = value_regs.get(arg) {
+                        let arg_reg = AArch64Reg::from_num(i as u8);
+                        if src != arg_reg {
+                            self.mov(arg_reg, src);
+                        }
+                    }
+                }
+                // Get call target label
+                let target_label = match &info.callee {
+                    Callee::Direct(func_id) => format!("func_{}", func_id.0),
+                    Callee::Named(name) => name.clone(),
+                    Callee::Indirect(_) => "indirect_call".to_string(), // TODO: implement indirect
+                };
+                // BL for call (will need relocation in real implementation)
+                self.bl_label(&target_label);
+                // Result is in X0
+                if dst != AArch64Reg::X0 {
+                    self.mov(dst, AArch64Reg::X0);
+                }
+            }
+            _ => {
+                // Other instructions not yet implemented
+            }
+        }
+        Ok(())
+    }
+
+    /// Emit a binary arithmetic operation
+    fn emit_binop(&mut self, dst: AArch64Reg, op: ArithOp, lhs: AArch64Reg, rhs: AArch64Reg) {
+        match op {
+            ArithOp::Add => self.add_reg(dst, lhs, rhs, true),
+            ArithOp::Sub => self.sub_reg(dst, lhs, rhs, true),
+            ArithOp::Mul => self.mul(dst, lhs, rhs, true),
+            ArithOp::SDiv => self.sdiv(dst, lhs, rhs, true),
+            ArithOp::UDiv => self.udiv(dst, lhs, rhs, true),
+            ArithOp::And => self.and_reg(dst, lhs, rhs, true),
+            ArithOp::Or => self.orr_reg(dst, lhs, rhs, true),
+            ArithOp::Xor => self.eor_reg(dst, lhs, rhs, true),
+            ArithOp::Shl => {
+                // LSL Rd, Rn, Rm (variable shift)
+                let inst = 0x9AC02000
+                    | ((rhs.encoding() as u32) << 16)
+                    | ((lhs.encoding() as u32) << 5)
+                    | (dst.encoding() as u32);
+                self.emit(inst);
+            }
+            ArithOp::LShr => {
+                // LSR Rd, Rn, Rm (variable shift)
+                let inst = 0x9AC02400
+                    | ((rhs.encoding() as u32) << 16)
+                    | ((lhs.encoding() as u32) << 5)
+                    | (dst.encoding() as u32);
+                self.emit(inst);
+            }
+            ArithOp::AShr => {
+                // ASR Rd, Rn, Rm (variable shift)
+                let inst = 0x9AC02800
+                    | ((rhs.encoding() as u32) << 16)
+                    | ((lhs.encoding() as u32) << 5)
+                    | (dst.encoding() as u32);
+                self.emit(inst);
+            }
+            ArithOp::SRem | ArithOp::URem => {
+                // AArch64 doesn't have remainder instruction
+                // Use SDIV/UDIV then MSUB: result = lhs - (lhs/rhs)*rhs
+                let is_signed = matches!(op, ArithOp::SRem);
+                let temp = AArch64Reg::X11; // Use X11 as temp
+                if is_signed {
+                    self.sdiv(temp, lhs, rhs, true);
+                } else {
+                    self.udiv(temp, lhs, rhs, true);
+                }
+                self.msub(dst, temp, rhs, lhs);
+            }
+            ArithOp::FAdd => self.fadd(dst.to_fp(), lhs.to_fp(), rhs.to_fp(), true),
+            ArithOp::FSub => self.fsub(dst.to_fp(), lhs.to_fp(), rhs.to_fp(), true),
+            ArithOp::FMul => self.fmul(dst.to_fp(), lhs.to_fp(), rhs.to_fp(), true),
+            ArithOp::FDiv => self.fdiv(dst.to_fp(), lhs.to_fp(), rhs.to_fp(), true),
+            ArithOp::FRem => {
+                // FRem needs libm call - emit placeholder
+                self.nop();
+            }
+        }
+    }
+
+    /// Emit a comparison operation
+    fn emit_cmp(&mut self, dst: AArch64Reg, op: CmpOp, lhs: AArch64Reg, rhs: AArch64Reg) {
+        // CMP Xn, Xm (SUBS XZR, Xn, Xm)
+        self.cmp_reg(lhs, rhs, true);
+
+        // Set dst based on condition
+        let cond = match op {
+            CmpOp::Eq => Condition::EQ,
+            CmpOp::Ne => Condition::NE,
+            CmpOp::SLt => Condition::LT,
+            CmpOp::SLe => Condition::LE,
+            CmpOp::SGt => Condition::GT,
+            CmpOp::SGe => Condition::GE,
+            CmpOp::ULt => Condition::CC,  // Unsigned lower (carry clear)
+            CmpOp::ULe => Condition::LS,
+            CmpOp::UGt => Condition::HI,
+            CmpOp::UGe => Condition::CS,  // Unsigned higher or same (carry set)
+            _ => Condition::EQ, // Default for floating point (needs more work)
+        };
+
+        // CSET Rd, cond (CSINC Rd, XZR, XZR, invert(cond))
+        let inv_cond = cond.invert();
+        let inst = 0x9A9F0000
+            | ((inv_cond as u32) << 12)
+            | (dst.encoding() as u32);
+        self.emit(inst);
+    }
+
+    /// Emit a constant load
+    fn emit_const(&mut self, dst: AArch64Reg, constant: &Constant) {
+        match constant {
+            Constant::I8(v) => self.mov_imm64(dst, *v as u64),
+            Constant::I16(v) => self.mov_imm64(dst, *v as u64),
+            Constant::I32(v) => self.mov_imm64(dst, *v as u64),
+            Constant::I64(v) => self.mov_imm64(dst, *v as u64),
+            Constant::F32(v) => {
+                // Load float constant via integer register then FMOV
+                let bits = v.to_bits() as u64;
+                self.mov_imm64(dst, bits);
+                // FMOV Sd, Wd (move from general to FP register)
+                let inst = 0x1E270000 | (dst.encoding() as u32);
+                self.emit(inst);
+            }
+            Constant::F64(v) => {
+                // Load float constant via integer register then FMOV
+                let bits = v.to_bits();
+                self.mov_imm64(dst, bits);
+                // FMOV Dd, Xd (move from general to FP register)
+                let inst = 0x9E670000 | (dst.encoding() as u32);
+                self.emit(inst);
+            }
+            Constant::Bool(b) => {
+                self.mov_imm64(dst, if *b { 1 } else { 0 });
+            }
+            Constant::NullPtr => {
+                self.mov_imm64(dst, 0);
+            }
+            _ => {
+                // Other constants not yet implemented
+                self.mov_imm64(dst, 0);
+            }
+        }
+    }
+
+    /// MSUB Rd, Rn, Rm, Ra: Rd = Ra - Rn*Rm
+    fn msub(&mut self, rd: AArch64Reg, rn: AArch64Reg, rm: AArch64Reg, ra: AArch64Reg) {
+        let inst = 0x9B008000
+            | ((rm.encoding() as u32) << 16)
+            | ((ra.encoding() as u32) << 10)
+            | ((rn.encoding() as u32) << 5)
+            | (rd.encoding() as u32);
+        self.emit(inst);
+    }
+
+    /// NOP instruction
+    fn nop(&mut self) {
+        self.emit(0xD503201F);
+    }
+
+    /// MOV Rd, Rm (alias for ORR Rd, XZR, Rm)
+    fn mov(&mut self, rd: AArch64Reg, rm: AArch64Reg) {
+        self.orr_reg(rd, AArch64Reg::XZR, rm, true);
+    }
+
+    /// ADD helper (64-bit)
+    fn add(&mut self, rd: AArch64Reg, rn: AArch64Reg, rm: AArch64Reg, sf: bool) {
+        self.add_reg(rd, rn, rm, sf);
+    }
+
+    /// SUB helper (64-bit)
+    fn sub(&mut self, rd: AArch64Reg, rn: AArch64Reg, rm: AArch64Reg, sf: bool) {
+        self.sub_reg(rd, rn, rm, sf);
+    }
+
+    /// MUL helper (64-bit)
+    fn mul_wrap(&mut self, rd: AArch64Reg, rn: AArch64Reg, rm: AArch64Reg) {
+        self.mul(rd, rn, rm, true);
+    }
+
+    /// AND helper (64-bit)
+    fn and(&mut self, rd: AArch64Reg, rn: AArch64Reg, rm: AArch64Reg) {
+        self.and_reg(rd, rn, rm, true);
+    }
+
+    /// ORR helper (64-bit)
+    fn orr(&mut self, rd: AArch64Reg, rn: AArch64Reg, rm: AArch64Reg) {
+        self.orr_reg(rd, rn, rm, true);
+    }
+
+    /// EOR helper (64-bit)
+    fn eor(&mut self, rd: AArch64Reg, rn: AArch64Reg, rm: AArch64Reg) {
+        self.eor_reg(rd, rn, rm, true);
     }
 }
 

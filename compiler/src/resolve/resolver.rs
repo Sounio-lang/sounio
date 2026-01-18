@@ -59,6 +59,15 @@ pub enum ResolveError {
         #[label("{reason}")]
         span: SourceSpan,
     },
+
+    #[error("Cannot access private item `{name}` in module `{module_path}`")]
+    #[diagnostic(help("consider making the item public with `pub`"))]
+    PrivateItem {
+        name: String,
+        module_path: String,
+        #[label("this item is private")]
+        span: SourceSpan,
+    },
 }
 
 /// Resolved AST (AST + symbol table + module tree)
@@ -269,8 +278,9 @@ impl Resolver {
 
     /// Resolve a multi-segment path (e.g., foo::Bar or std::collections::HashMap)
     ///
-    /// Returns the DefId if the path resolves to a valid item
-    fn resolve_path_segments(&self, segments: &[String]) -> Option<DefId> {
+    /// Returns the DefId if the path resolves to a valid item.
+    /// Records a PrivateItem error if the item exists but is not visible.
+    fn resolve_path_segments(&mut self, segments: &[String]) -> Option<DefId> {
         if segments.is_empty() {
             return None;
         }
@@ -335,13 +345,24 @@ impl Resolver {
             if is_last {
                 // Last segment is the item name
                 let module = self.module_tree.get(&current_module)?;
+                let module_path = current_module.to_string();
+                let from_module = self.current_tree_module.clone();
 
-                // Check items
+                // Check items with visibility enforcement
                 if let Some(item) = module.items.iter().find(|item| item.name == *segment) {
+                    // Check visibility - private items not accessible from outside
+                    if !module.is_visible(item, &from_module) {
+                        self.errors.push(ResolveError::PrivateItem {
+                            name: segment.clone(),
+                            module_path,
+                            span: SourceSpan::from(0..1),
+                        });
+                        return None;
+                    }
                     return self.symbols.def_for_node(item.node_id);
                 }
 
-                // Check resolved imports (for re-exports)
+                // Check resolved imports (for re-exports) - re-exports are public by definition
                 for import in &module.imports {
                     if import.local_name == *segment {
                         if let Some(node_id) = import.resolved {
@@ -366,7 +387,7 @@ impl Resolver {
     }
 
     /// Resolve a multi-segment type path
-    fn resolve_type_path_segments(&self, segments: &[String]) -> Option<DefId> {
+    fn resolve_type_path_segments(&mut self, segments: &[String]) -> Option<DefId> {
         // For types, we use the same path resolution logic
         self.resolve_path_segments(segments)
     }
@@ -1779,6 +1800,33 @@ mod tests {
         "#;
         assert!(resolution_fails_with(source_with_private, "private_fn"),
             "Glob should not import private items");
+    }
+
+    #[test]
+    fn test_qualified_path_private_item() {
+        let source = r#"
+            module foo {
+                fn private_fn() -> i32 { 42 }
+                pub fn public_fn() -> i32 { 1 }
+            }
+            fn main() -> i32 {
+                foo::private_fn()
+            }
+        "#;
+        assert!(resolution_fails_with(source, "private") || resolution_fails_with(source, "PrivateItem"),
+            "Qualified path to private item should fail");
+
+        // But public items should work
+        let source_public = r#"
+            module foo {
+                fn private_fn() -> i32 { 42 }
+                pub fn public_fn() -> i32 { 1 }
+            }
+            fn main() -> i32 {
+                foo::public_fn()
+            }
+        "#;
+        assert!(resolves_ok(source_public), "Qualified path to public item should work");
     }
 
     // ==================== Re-export Tests ====================
