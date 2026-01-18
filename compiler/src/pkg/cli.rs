@@ -671,14 +671,15 @@ pub fn cmd_add(
                     }
                 }
 
-                match registry.get_latest_version(name).await {
+                let result: Result<String> = match registry.get_latest_version(name).await {
                     Ok(v) => Ok(format!("^{}", v)),
                     Err(e) => {
                         eprintln!("warning: could not query registry: {}", e);
                         eprintln!("         using wildcard version");
                         Ok("*".to_string())
                     }
-                }
+                };
+                result
             })?;
             version
         }
@@ -996,7 +997,7 @@ pub fn cmd_publish(dry_run: bool, allow_dirty: bool, _registry: Option<String>) 
                 manifest.package.name, manifest.package.version
             );
 
-            match registry.publish_package(&manifest, tarball).await {
+            let result: Result<()> = match registry.publish_package(&manifest, tarball).await {
                 Ok(response) => {
                     println!(
                         "   Published {} v{} (checksum: {})",
@@ -1007,7 +1008,8 @@ pub fn cmd_publish(dry_run: bool, allow_dirty: bool, _registry: Option<String>) 
                     Ok(())
                 }
                 Err(e) => Err(format!("Failed to publish: {}", e).into()),
-            }
+            };
+            result
         })?;
     }
 

@@ -403,14 +403,89 @@ impl BuildExecutor {
     fn compile_file(
         &self,
         source: &Path,
-        _unit: &CompileUnit,
-        _warnings: &mut Vec<String>,
+        unit: &CompileUnit,
+        warnings: &mut Vec<String>,
     ) -> Result<(), BuildError> {
         // Read source
-        let _content = std::fs::read_to_string(source).map_err(BuildError::Io)?;
+        let content = std::fs::read_to_string(source).map_err(BuildError::Io)?;
 
-        // Would compile using crate::compile() or similar
-        // For now, this is a stub that creates an empty output
+        // Run the compiler pipeline
+        let tokens = match crate::lexer::lex(&content) {
+            Ok(t) => t,
+            Err(e) => {
+                return Err(BuildError::Compile {
+                    package: source.display().to_string(),
+                    message: format!("Lexer error: {}", e),
+                    location: None,
+                });
+            }
+        };
+
+        let ast = match crate::parser::parse(&tokens, &content) {
+            Ok(a) => a,
+            Err(e) => {
+                return Err(BuildError::Compile {
+                    package: source.display().to_string(),
+                    message: format!("Parser error: {}", e),
+                    location: None,
+                });
+            }
+        };
+
+        let hir = match crate::check::check(&ast) {
+            Ok(h) => h,
+            Err(e) => {
+                return Err(BuildError::Compile {
+                    package: source.display().to_string(),
+                    message: format!("Type error: {}", e),
+                    location: None,
+                });
+            }
+        };
+
+        // Lower to HLIR
+        let hlir = crate::hlir::lower(&hir);
+
+        // Compile to machine code using available backend
+        #[cfg(feature = "jit")]
+        {
+            match crate::codegen::cranelift::compile(&hlir) {
+                Ok(code) => {
+                    // Write object code to output file
+                    let output_path: PathBuf = if unit.output.as_os_str().is_empty() {
+                        self.context
+                            .target_dir
+                            .join(self.context.profile.name())
+                            .join(source.file_stem().unwrap_or_default())
+                            .with_extension("o")
+                    } else {
+                        unit.output.clone()
+                    };
+
+                    if let Some(parent) = output_path.parent() {
+                        std::fs::create_dir_all(parent).map_err(BuildError::Io)?;
+                    }
+
+                    std::fs::write(&output_path, code).map_err(BuildError::Io)?;
+
+                    if self.context.verbose {
+                        println!("    Compiled {} -> {}", source.display(), output_path.display());
+                    }
+                }
+                Err(e) => {
+                    warnings.push(format!("Codegen warning for {}: {}", source.display(), e));
+                }
+            }
+        }
+
+        #[cfg(not(feature = "jit"))]
+        {
+            // Without JIT, we can still verify the code compiles
+            let _ = &hlir; // Suppress unused variable warning
+            if self.context.verbose {
+                println!("    Checked {} (no codegen backend)", source.display());
+            }
+        }
 
         Ok(())
     }

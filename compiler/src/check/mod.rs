@@ -2402,16 +2402,45 @@ impl TypeChecker {
                 let base_expr = self.check_expr(base, None)?;
                 let index_expr = self.check_expr(index, Some(&Type::I64))?;
 
-                // Extract element type from indexable types
-                let elem_ty = match &base_expr.ty {
-                    HirType::Array { element, .. } => *element.clone(),
-                    HirType::String => HirType::Char,
+                // Check if index is a Range type (for slicing)
+                let is_range = matches!(
+                    &index_expr.ty,
+                    HirType::Named { name, .. } if name == "Range" || name == "RangeInclusive"
+                );
+
+                // Extract result type from indexable types
+                let result_ty = match &base_expr.ty {
+                    HirType::Array { element, size } => {
+                        if is_range {
+                            // Slicing returns an array of the same element type
+                            HirType::Array { element: element.clone(), size: None }
+                        } else {
+                            *element.clone()
+                        }
+                    }
+                    HirType::String => {
+                        if is_range {
+                            HirType::String // String slice returns String
+                        } else {
+                            HirType::Char
+                        }
+                    }
                     // Raw pointers are indexable - return inner type
                     HirType::RawPointer { inner, .. } => *inner.clone(),
                     // References to arrays
                     HirType::Ref { inner, .. } => {
-                        if let HirType::Array { element, .. } = inner.as_ref() {
-                            *element.clone()
+                        if let HirType::Array { element, size } = inner.as_ref() {
+                            if is_range {
+                                HirType::Array { element: element.clone(), size: None }
+                            } else {
+                                *element.clone()
+                            }
+                        } else if let HirType::String = inner.as_ref() {
+                            if is_range {
+                                HirType::String
+                            } else {
+                                HirType::Char
+                            }
                         } else {
                             HirType::Error
                         }
@@ -2424,7 +2453,7 @@ impl TypeChecker {
                         base: Box::new(base_expr),
                         index: Box::new(index_expr),
                     },
-                    elem_ty,
+                    result_ty,
                 )
             }
 
