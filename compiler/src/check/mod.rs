@@ -120,7 +120,9 @@ enum TypeDef {
         /// The module this type was defined in
         source_module: Option<ModuleId>,
     },
-    Alias(Type, Span, Option<ModuleId>),
+    /// Type alias with generic parameters
+    /// (underlying_type, span, source_module, generic_param_names)
+    Alias(Type, Span, Option<ModuleId>, Vec<String>),
 }
 
 /// Type constraint for unification
@@ -316,9 +318,15 @@ impl TypeChecker {
         match ty {
             Type::Named { name, args } => {
                 // Check if this is a type alias
-                if let Some(TypeDef::Alias(alias_ty, _, _)) = self.type_defs.get(name) {
-                    // Recursively expand the alias
-                    self.expand_type_alias(alias_ty)
+                if let Some(TypeDef::Alias(alias_ty, _, _, generic_params)) = self.type_defs.get(name) {
+                    // Substitute type arguments for generic parameters
+                    let substituted = if !generic_params.is_empty() && !args.is_empty() {
+                        self.substitute_type_params(alias_ty, generic_params, args)
+                    } else {
+                        alias_ty.clone()
+                    };
+                    // Recursively expand the substituted alias
+                    self.expand_type_alias(&substituted)
                 } else {
                     // Not an alias, but expand args recursively
                     Type::Named {
@@ -353,6 +361,50 @@ impl TypeChecker {
                 effects: effects.clone(),
             },
             // Primitive types don't need expansion
+            _ => ty.clone(),
+        }
+    }
+
+    /// Substitute type parameters with concrete type arguments
+    fn substitute_type_params(&self, ty: &Type, params: &[String], args: &[Type]) -> Type {
+        match ty {
+            Type::Named { name, args: inner_args } => {
+                // Check if this is a type parameter that should be substituted
+                if inner_args.is_empty() {
+                    if let Some(pos) = params.iter().position(|p| p == name) {
+                        if pos < args.len() {
+                            return args[pos].clone();
+                        }
+                    }
+                }
+                // Otherwise recursively substitute in nested type arguments
+                Type::Named {
+                    name: name.clone(),
+                    args: inner_args.iter().map(|a| self.substitute_type_params(a, params, args)).collect(),
+                }
+            }
+            Type::Array { element, size } => Type::Array {
+                element: Box::new(self.substitute_type_params(element, params, args)),
+                size: *size,
+            },
+            Type::Tuple(elems) => {
+                Type::Tuple(elems.iter().map(|e| self.substitute_type_params(e, params, args)).collect())
+            }
+            Type::Ref { mutable, lifetime, inner } => Type::Ref {
+                mutable: *mutable,
+                lifetime: lifetime.clone(),
+                inner: Box::new(self.substitute_type_params(inner, params, args)),
+            },
+            Type::Function { params: fn_params, return_type, effects } => Type::Function {
+                params: fn_params.iter().map(|p| self.substitute_type_params(p, params, args)).collect(),
+                return_type: Box::new(self.substitute_type_params(return_type, params, args)),
+                effects: effects.clone(),
+            },
+            Type::RawPointer { mutable, inner } => Type::RawPointer {
+                mutable: *mutable,
+                inner: Box::new(self.substitute_type_params(inner, params, args)),
+            },
+            // Primitive types don't need substitution
             _ => ty.clone(),
         }
     }
@@ -610,7 +662,7 @@ impl TypeChecker {
         // This is essential for refinement types: `type OrbitRatio = { r: f64 | ... }`
         // should be lowered to f64, not a struct named "OrbitRatio"
         for (name, def) in &self.type_defs {
-            if let TypeDef::Alias(ty, span, _) = def {
+            if let TypeDef::Alias(ty, span, _, _) = def {
                 let hir_ty = self.type_to_hir(ty);
                 items.push(HirItem::TypeAlias(HirTypeAlias {
                     id: NodeId(0), // ID not used for type aliases
@@ -910,8 +962,15 @@ impl TypeChecker {
             }
             Item::TypeAlias(t) => {
                 let ty = self.lower_type_expr(&t.ty);
+                // Extract generic parameter names from the AST
+                let generic_params: Vec<String> = t.generics.params.iter().filter_map(|p| {
+                    match p {
+                        crate::ast::GenericParam::Type { name, .. } => Some(name.clone()),
+                        _ => None, // Skip const and effect params for now
+                    }
+                }).collect();
                 self.type_defs
-                    .insert(t.name.clone(), TypeDef::Alias(ty, t.span, None)); // TODO: extract module context
+                    .insert(t.name.clone(), TypeDef::Alias(ty, t.span, None, generic_params));
             }
             Item::Module(m) => {
                 // Recursively collect type definitions from nested modules
@@ -1043,7 +1102,7 @@ impl TypeChecker {
     fn check_undefined_ontology_prefixes(&mut self) {
         for (name, def) in &self.type_defs.clone() {
             match def {
-                TypeDef::Alias(ty, span, _) => {
+                TypeDef::Alias(ty, span, _, _) => {
                     self.check_type_for_undefined_ontology(ty, name, *span);
                 }
                 TypeDef::Struct { fields, .. } => {
@@ -1121,7 +1180,7 @@ impl TypeChecker {
 
         // For each type alias, check if following the chain leads back to itself
         for (name, def) in &self.type_defs.clone() {
-            if let TypeDef::Alias(ty, _, _) = def {
+            if let TypeDef::Alias(ty, _, _, _) = def {
                 let mut visited = HashSet::new();
                 visited.insert(name.clone());
 
@@ -1146,7 +1205,7 @@ impl TypeChecker {
                 if visited.contains(name) {
                     return true;
                 }
-                if let Some(TypeDef::Alias(inner, _, _)) = self.type_defs.get(name) {
+                if let Some(TypeDef::Alias(inner, _, _, _)) = self.type_defs.get(name) {
                     visited.insert(name.clone());
                     self.type_creates_cycle(inner, visited)
                 } else {
@@ -1212,7 +1271,7 @@ impl TypeChecker {
                                 .iter()
                                 .any(|(_, field_ty)| self.type_has_infinite_size(field_ty, visited))
                         }
-                        TypeDef::Alias(inner, _, _) => {
+                        TypeDef::Alias(inner, _, _, _) => {
                             visited.insert(name.clone());
                             self.type_has_infinite_size(inner, visited)
                         }
@@ -1327,7 +1386,7 @@ impl TypeChecker {
                 },
             ) => {
                 // Look up if these are type aliases to ontology types
-                if let (Some(TypeDef::Alias(exp_ty, _, _)), Some(TypeDef::Alias(found_ty, _, _))) =
+                if let (Some(TypeDef::Alias(exp_ty, _, _, _)), Some(TypeDef::Alias(found_ty, _, _, _))) =
                     (self.type_defs.get(exp_name), self.type_defs.get(found_name))
                 {
                     if let (
@@ -1382,6 +1441,7 @@ impl TypeChecker {
                     },
                     _,
                     _,
+                    _,
                 )) = self.type_defs.get(name)
                 {
                     match self.check_ontology_compatibility(
@@ -1406,6 +1466,7 @@ impl TypeChecker {
                         namespace: found_ns,
                         term: found_term,
                     },
+                    _,
                     _,
                     _,
                 )) = self.type_defs.get(name)
@@ -5331,7 +5392,7 @@ impl TypeChecker {
             }
             // Named type (alias) compared with Ontology type - resolve alias
             (Type::Named { name, .. }, Type::Ontology { namespace, term }) => {
-                if let Some(TypeDef::Alias(alias_ty, _, _)) = self.type_defs.get(name) {
+                if let Some(TypeDef::Alias(alias_ty, _, _, _)) = self.type_defs.get(name) {
                     if let Type::Ontology {
                         namespace: alias_ns,
                         term: alias_term,
@@ -5354,7 +5415,7 @@ impl TypeChecker {
             }
             // Ontology type compared with Named type (alias) - resolve alias
             (Type::Ontology { namespace, term }, Type::Named { name, .. }) => {
-                if let Some(TypeDef::Alias(alias_ty, _, _)) = self.type_defs.get(name) {
+                if let Some(TypeDef::Alias(alias_ty, _, _, _)) = self.type_defs.get(name) {
                     if let Type::Ontology {
                         namespace: alias_ns,
                         term: alias_term,

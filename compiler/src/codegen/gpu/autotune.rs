@@ -398,7 +398,16 @@ impl KernelAnalyzer {
             | GpuOp::FastExp(..)
             | GpuOp::FastLog(..)
             | GpuOp::FastSqrt(..)
-            | GpuOp::FastRsqrt(..) => mix.sfu_ops += 1,
+            | GpuOp::FastRsqrt(..)
+            | GpuOp::AbsF32(..)
+            | GpuOp::AbsF64(..)
+            | GpuOp::AbsI32(..)
+            | GpuOp::MinF32(..)
+            | GpuOp::MinI32(..)
+            | GpuOp::MinU32(..)
+            | GpuOp::MaxF32(..)
+            | GpuOp::MaxI32(..)
+            | GpuOp::MaxU32(..) => mix.sfu_ops += 1,
             GpuOp::Load(..) | GpuOp::Store(..) => mix.memory_ops += 1,
             GpuOp::AtomicAdd(..)
             | GpuOp::AtomicSub(..)

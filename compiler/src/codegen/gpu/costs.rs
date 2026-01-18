@@ -657,6 +657,14 @@ impl CostDatabase {
             GpuOp::FastSqrt(_) => InstructionClass::Fp32Sqrt,
             GpuOp::FastRsqrt(_) => InstructionClass::Fp32Rsqrt,
 
+            // Abs/Min/Max operations (fast - single cycle)
+            GpuOp::AbsF32(_) | GpuOp::AbsF64(_) => InstructionClass::Fp32Add,
+            GpuOp::AbsI32(_) => InstructionClass::IntAdd,
+            GpuOp::MinF32(_, _) | GpuOp::MaxF32(_, _) => InstructionClass::Fp32Add,
+            GpuOp::MinI32(_, _) | GpuOp::MaxI32(_, _) | GpuOp::MinU32(_, _) | GpuOp::MaxU32(_, _) => {
+                InstructionClass::IntAdd
+            }
+
             // Comparisons
             GpuOp::Eq(_, _)
             | GpuOp::Ne(_, _)

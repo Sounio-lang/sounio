@@ -50,6 +50,15 @@ pub enum ResolveError {
         #[label("this is a value, not a type")]
         span: SourceSpan,
     },
+
+    #[error("Unresolved import: {path}")]
+    #[diagnostic(help("make sure the module exists and is accessible"))]
+    UnresolvedImport {
+        path: String,
+        reason: String,
+        #[label("{reason}")]
+        span: SourceSpan,
+    },
 }
 
 /// Resolved AST (AST + symbol table + module tree)
@@ -67,6 +76,14 @@ pub fn resolve(ast: Ast) -> Result<ResolvedAst> {
     resolver.resolve(ast)
 }
 
+/// Pending unresolved import for later verification
+#[derive(Debug, Clone)]
+struct PendingImport {
+    path: Vec<String>,
+    reason: String,
+    span: Span,
+}
+
 /// Name resolver
 pub struct Resolver {
     symbols: SymbolTable,
@@ -78,6 +95,8 @@ pub struct Resolver {
     /// Mapping from NodeId to DefId for items resolved through ModuleTree imports
     /// This is populated after resolve_imports() and used during second pass
     import_node_to_def: std::collections::HashMap<NodeId, DefId>,
+    /// Imports that failed to resolve initially - verified after all modules loaded
+    unresolved_imports: Vec<PendingImport>,
 }
 
 impl Resolver {
@@ -88,6 +107,7 @@ impl Resolver {
             module_tree: ModuleTree::new(),
             current_tree_module: TreeModuleId::root(),
             import_node_to_def: std::collections::HashMap::new(),
+            unresolved_imports: Vec::new(),
         };
         // Register compiler intrinsics/builtins
         resolver.register_builtins();
@@ -351,6 +371,44 @@ impl Resolver {
         self.resolve_path_segments(segments)
     }
 
+    /// Verify unresolved imports after all modules have been loaded
+    ///
+    /// Some imports fail initially because they reference modules that haven't
+    /// been loaded yet. This method re-checks those imports and reports errors
+    /// for any that still cannot be resolved.
+    fn verify_unresolved_imports(&mut self) {
+        // Take ownership of unresolved imports to avoid borrow issues
+        let pending = std::mem::take(&mut self.unresolved_imports);
+
+        for import in pending {
+            // Try to resolve again - module may have been loaded
+            let result = self.symbols.process_import(
+                &import.path,
+                None, // Already processed items
+                false,
+            );
+
+            if result.is_err() {
+                // Still unresolved - check if module exists in module_tree
+                let module_id = TreeModuleId(import.path.clone());
+
+                // Skip stdlib imports as they may be external
+                if import.path.first().map(|s| s.as_str()) == Some("std") {
+                    continue;
+                }
+
+                // Only report error if module doesn't exist at all
+                if !self.module_tree.contains(&module_id) {
+                    self.errors.push(ResolveError::UnresolvedImport {
+                        path: import.path.join("::"),
+                        reason: import.reason,
+                        span: self.span_to_source(import.span),
+                    });
+                }
+            }
+        }
+    }
+
     /// Resolve all names in the AST
     pub fn resolve(mut self, ast: Ast) -> Result<ResolvedAst> {
         // First pass: collect all top-level definitions and build module tree
@@ -405,6 +463,9 @@ impl Resolver {
         for item in &ast.items {
             self.resolve_item(item);
         }
+
+        // Verify unresolved imports - retry resolution now that all modules are loaded
+        self.verify_unresolved_imports();
 
         if !self.errors.is_empty() {
             let messages: Vec<_> = self.errors.iter().map(|e| e.to_string()).collect();
@@ -513,10 +574,13 @@ impl Resolver {
             .symbols
             .process_import(&path, i.items.as_deref(), i.is_reexport)
         {
-            // Imports to unknown modules are common during initial parsing
-            // Don't treat as error yet - module may be loaded later
-            // TODO: Track unresolved imports and verify after all modules loaded
-            let _ = e; // Silence warning for now
+            // Track unresolved imports for verification after all modules loaded
+            // This handles cases where imports reference modules loaded later
+            self.unresolved_imports.push(PendingImport {
+                path: path.clone(),
+                reason: e,
+                span: i.span,
+            });
         }
 
         // Also record import in module tree

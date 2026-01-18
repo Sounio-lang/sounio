@@ -586,6 +586,54 @@ impl MetalCodegen {
                 self.emit(&format!("float {} = rsqrt({});", result_name, a_name));
             }
 
+            // Abs operations
+            GpuOp::AbsF32(a) => {
+                let a_name = self.get_var_name(*a);
+                self.emit(&format!("float {} = abs({});", result_name, a_name));
+            }
+            GpuOp::AbsF64(a) => {
+                let a_name = self.get_var_name(*a);
+                self.emit(&format!("double {} = abs({});", result_name, a_name));
+            }
+            GpuOp::AbsI32(a) => {
+                let a_name = self.get_var_name(*a);
+                self.emit(&format!("int {} = abs({});", result_name, a_name));
+            }
+
+            // Min operations
+            GpuOp::MinF32(a, b) => {
+                let a_name = self.get_var_name(*a);
+                let b_name = self.get_var_name(*b);
+                self.emit(&format!("float {} = min({}, {});", result_name, a_name, b_name));
+            }
+            GpuOp::MinI32(a, b) => {
+                let a_name = self.get_var_name(*a);
+                let b_name = self.get_var_name(*b);
+                self.emit(&format!("int {} = min({}, {});", result_name, a_name, b_name));
+            }
+            GpuOp::MinU32(a, b) => {
+                let a_name = self.get_var_name(*a);
+                let b_name = self.get_var_name(*b);
+                self.emit(&format!("uint {} = min({}, {});", result_name, a_name, b_name));
+            }
+
+            // Max operations
+            GpuOp::MaxF32(a, b) => {
+                let a_name = self.get_var_name(*a);
+                let b_name = self.get_var_name(*b);
+                self.emit(&format!("float {} = max({}, {});", result_name, a_name, b_name));
+            }
+            GpuOp::MaxI32(a, b) => {
+                let a_name = self.get_var_name(*a);
+                let b_name = self.get_var_name(*b);
+                self.emit(&format!("int {} = max({}, {});", result_name, a_name, b_name));
+            }
+            GpuOp::MaxU32(a, b) => {
+                let a_name = self.get_var_name(*a);
+                let b_name = self.get_var_name(*b);
+                self.emit(&format!("uint {} = max({}, {});", result_name, a_name, b_name));
+            }
+
             // Comparisons
             GpuOp::Eq(a, b) => {
                 let a_name = self.get_var_name(*a);

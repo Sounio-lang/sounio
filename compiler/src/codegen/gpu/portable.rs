@@ -326,21 +326,21 @@ impl PortableGpuOp {
 
             // Math functions
             PortableGpuOp::SqrtF32(a) | PortableGpuOp::SqrtF64(a) => GpuOp::FastSqrt(*a),
-            PortableGpuOp::AbsF32(_) | PortableGpuOp::AbsF64(_) | PortableGpuOp::AbsI32(_) => {
-                // Abs needs to be implemented via select
-                todo!("Abs requires lowering")
-            }
-            PortableGpuOp::MinF32(a, b)
-            | PortableGpuOp::MinI32(a, b)
-            | PortableGpuOp::MinU32(a, b) => {
-                // Min needs select-based lowering for portability
-                todo!("Min requires lowering")
-            }
-            PortableGpuOp::MaxF32(a, b)
-            | PortableGpuOp::MaxI32(a, b)
-            | PortableGpuOp::MaxU32(a, b) => {
-                todo!("Max requires lowering")
-            }
+
+            // Absolute value operations
+            PortableGpuOp::AbsF32(a) => GpuOp::AbsF32(*a),
+            PortableGpuOp::AbsF64(a) => GpuOp::AbsF64(*a),
+            PortableGpuOp::AbsI32(a) => GpuOp::AbsI32(*a),
+
+            // Minimum operations
+            PortableGpuOp::MinF32(a, b) => GpuOp::MinF32(*a, *b),
+            PortableGpuOp::MinI32(a, b) => GpuOp::MinI32(*a, *b),
+            PortableGpuOp::MinU32(a, b) => GpuOp::MinU32(*a, *b),
+
+            // Maximum operations
+            PortableGpuOp::MaxF32(a, b) => GpuOp::MaxF32(*a, *b),
+            PortableGpuOp::MaxI32(a, b) => GpuOp::MaxI32(*a, *b),
+            PortableGpuOp::MaxU32(a, b) => GpuOp::MaxU32(*a, *b),
 
             // Comparisons
             PortableGpuOp::EqI32(a, b) => GpuOp::Eq(*a, *b),
