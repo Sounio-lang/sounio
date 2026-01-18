@@ -22,8 +22,8 @@
 //! | Unit     | types::I64     |
 
 use crate::hlir::HlirModule;
-use crate::mir::MirModule;
-use crate::mir::optimization::OptimizationLevel;
+use crate::mir::{MirModule, MirType, MirTerminator, MirFunction, MirConstant, ValueId, MirBlock, BlockId, MirInstruction, MirBinaryOp, MirUnaryOp, MirCompareOp};
+use crate::mir::optimization::{OptimizationLevel, create_default_pass_manager};
 
 #[cfg(feature = "jit")]
 use cranelift_codegen::ir::condcodes::{FloatCC, IntCC};
@@ -247,6 +247,7 @@ impl MirCraneliftCompiler {
             MirType::Tuple(_) => types::I64, // Pointer to tuple
             MirType::Function { .. } => types::I64, // Function pointer
             MirType::Void => types::I64, // Use I64 for void
+            MirType::Struct { .. } => types::I64, // Structs are treated as pointers
             MirType::Error => types::I64, // Fallback
         }
     }
@@ -365,7 +366,8 @@ impl MirCraneliftCompiler {
                 bytes[..len].copy_from_slice(&n_bytes[..len]);
             }
             MirConstant::Float(f) => {
-                let f_bytes = f.to_le_bytes();
+                let parsed: f64 = f.parse().unwrap_or(0.0);
+                let f_bytes = parsed.to_le_bytes();
                 let len = bytes.len().min(8);
                 bytes[..len].copy_from_slice(&f_bytes[..len]);
             }
@@ -567,6 +569,7 @@ impl<'a, 'b> FunctionTranslator<'a, 'b> {
             MirType::Tuple(_) => types::I64,
             MirType::Function { .. } => types::I64,
             MirType::Void => types::I64,
+            MirType::Struct { .. } => types::I64, // Structs are treated as pointers
             MirType::Error => types::I64,
         }
     }
@@ -947,10 +950,11 @@ impl<'a, 'b> FunctionTranslator<'a, 'b> {
             MirConstant::UInt(n) => Ok(self.builder.ins().iconst(cl_type, *n as i64)),
 
             MirConstant::Float(f) => {
+                let parsed: f64 = f.parse().unwrap_or(0.0);
                 if cl_type == types::F32 {
-                    Ok(self.builder.ins().f32const(*f as f32))
+                    Ok(self.builder.ins().f32const(parsed as f32))
                 } else {
-                    Ok(self.builder.ins().f64const(*f))
+                    Ok(self.builder.ins().f64const(parsed))
                 }
             }
 
@@ -1284,7 +1288,7 @@ impl<'a, 'b> FunctionTranslator<'a, 'b> {
             }
 
             MirTerminator::Unreachable => {
-                self.builder.ins().trap(cranelift_codegen::ir::TrapCode::UnreachableCodeReached);
+                self.builder.ins().trap(cranelift_codegen::ir::TrapCode::user(0).unwrap());
             }
 
             MirTerminator::CallNoReturn { func_name, args } => {
@@ -1295,7 +1299,7 @@ impl<'a, 'b> FunctionTranslator<'a, 'b> {
                 if let Some(&func_ref) = self.func_refs.get(func_name) {
                     self.builder.ins().call(func_ref, &arg_vals);
                 }
-                self.builder.ins().trap(cranelift_codegen::ir::TrapCode::UnreachableCodeReached);
+                self.builder.ins().trap(cranelift_codegen::ir::TrapCode::user(0).unwrap());
             }
         }
 

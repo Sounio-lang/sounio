@@ -287,7 +287,7 @@ pub fn resume_jit_continuation(
     #[cfg(feature = "jit")]
     {
         // Set the resume value in the JIT effect state
-        extern "C" {
+        unsafe extern "C" {
             fn runtime_continuation_resume(continuation_id: i64, value: f64) -> i64;
         }
 

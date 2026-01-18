@@ -644,6 +644,12 @@ impl Interpreter {
                 let base_val = self.eval_expr(base)?;
                 let idx_val = self.eval_expr(index)?;
 
+                // Unwrap Value::Ref to get the inner value for indexing
+                let base_val = match base_val {
+                    Value::Ref(r) => r.borrow().clone(),
+                    other => other,
+                };
+
                 // Check if this is a Range-based slice operation
                 if let Value::Struct { name, fields } = &idx_val {
                     if name == "Range" {
