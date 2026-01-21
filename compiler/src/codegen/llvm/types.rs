@@ -6,8 +6,8 @@
 use inkwell::AddressSpace;
 use inkwell::context::Context;
 use inkwell::types::{
-    AnyType, AnyTypeEnum, BasicMetadataTypeEnum, BasicType, BasicTypeEnum, FloatType, FunctionType,
-    IntType, PointerType, StructType, VoidType,
+    BasicMetadataTypeEnum, BasicType, BasicTypeEnum, FloatType, FunctionType, IntType, PointerType,
+    StructType, VoidType,
 };
 
 use crate::hlir::HlirType;

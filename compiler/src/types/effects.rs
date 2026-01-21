@@ -3,7 +3,7 @@
 //! D has full algebraic effects with handlers, inspired by Koka/Eff.
 //! Effects allow modular handling of side effects like IO, state, exceptions, etc.
 
-use super::core::{Effect, EffectSet, Type, TypeVar};
+use super::core::{Effect, EffectSet, EffectVar, Type, TypeVar};
 
 /// Effect definition
 #[derive(Debug, Clone)]
@@ -95,7 +95,7 @@ pub enum HandlerBody {
 /// Effect inference context
 pub struct EffectInference {
     /// Effect variables
-    vars: Vec<TypeVar>,
+    vars: Vec<EffectVar>,
     /// Constraints: effect1 ⊆ effect2
     constraints: Vec<(EffectSet, EffectSet)>,
     /// Known effect definitions
@@ -330,8 +330,8 @@ impl EffectInference {
     }
 
     /// Create fresh effect variable
-    pub fn fresh_var(&mut self) -> TypeVar {
-        let v = TypeVar(self.vars.len() as u32);
+    pub fn fresh_var(&mut self) -> EffectVar {
+        let v = EffectVar::new(self.vars.len() as u32);
         self.vars.push(v);
         v
     }
@@ -353,9 +353,9 @@ impl EffectInference {
     }
 
     /// Solve constraints and return solutions
-    pub fn solve(&self) -> Result<Vec<(TypeVar, EffectSet)>, String> {
+    pub fn solve(&self) -> Result<Vec<(EffectVar, EffectSet)>, String> {
         // Simple constraint solving: iterate until fixed point
-        let mut solutions: std::collections::HashMap<TypeVar, EffectSet> =
+        let mut solutions: std::collections::HashMap<EffectVar, EffectSet> =
             std::collections::HashMap::new();
 
         // Initialize all variables to empty
@@ -379,7 +379,7 @@ impl EffectInference {
 
                 // e1 ⊆ e2 means all effects in e1 must be in e2
                 // For each var in e2, add all effects from s1
-                for var in &e2.vars {
+                for var in &e2.effect_vars {
                     if let Some(current) = solutions.get_mut(var) {
                         let old_size = current.effects.len();
                         current.effects.extend(s1.effects.iter().cloned());
@@ -401,12 +401,12 @@ impl EffectInference {
     fn resolve_effect_set(
         &self,
         set: &EffectSet,
-        solutions: &std::collections::HashMap<TypeVar, EffectSet>,
+        solutions: &std::collections::HashMap<EffectVar, EffectSet>,
     ) -> EffectSet {
         let mut result = EffectSet::new();
         result.effects = set.effects.clone();
 
-        for var in &set.vars {
+        for var in &set.effect_vars {
             if let Some(resolved) = solutions.get(var) {
                 result.effects.extend(resolved.effects.iter().cloned());
             }
@@ -448,10 +448,10 @@ mod tests {
 
         let mut e1 = EffectSet::new();
         e1.add(Effect::io());
-        e1.vars.insert(v1);
+        e1.add_var(v1);
 
         let mut e2 = EffectSet::new();
-        e2.vars.insert(v2);
+        e2.add_var(v2);
 
         ctx.add_constraint(e1, e2);
 

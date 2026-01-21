@@ -481,8 +481,6 @@ mod tests {
 
     #[test]
     fn test_sin_cos() {
-        use std::f64::consts::PI;
-
         let a = Uncertain::new(0.0, 0.01);
         let sin_a = a.sin();
         let cos_a = a.cos();

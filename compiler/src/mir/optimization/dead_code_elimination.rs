@@ -408,7 +408,7 @@ fn get_terminator_uses(terminator: &crate::mir::MirTerminator) -> Vec<ValueId> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::mir::builder::{FunctionBuilder, ModuleBuilder};
+    use crate::mir::builder::FunctionBuilder;
     use crate::mir::{FuncId, MirType, MirConstant};
 
     #[test]

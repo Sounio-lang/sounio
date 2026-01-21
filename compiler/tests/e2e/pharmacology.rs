@@ -333,7 +333,7 @@ struct PKParameters {
     bioavailability: f64, // 0.0 to 1.0
 }
 
-fn plasma_concentration(pk: PKParameters, dose: f64, time: f64) -> f64 {
+fn plasma_concentration(pk: PKParameters, dose: f64, time: f64) -> f64 with Panic {
     // One-compartment model
     let k_el = pk.clearance / pk.volume_dist;
     let c0 = (dose * pk.bioavailability) / pk.volume_dist;
@@ -345,7 +345,7 @@ fn time_to_peak(pk: PKParameters) -> f64 {
     0.5  // hours
 }
 
-fn main() {
+fn main() with Panic {
     let aspirin_pk = PKParameters {
         drug: chebi:15365,
         half_life: 3.5,

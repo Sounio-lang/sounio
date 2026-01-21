@@ -280,12 +280,14 @@ impl SymbolTable {
             "i8",
             "i16",
             "i32",
+            "int",
             "i64",
             "i128",
             "isize",
             "u8",
             "u16",
             "u32",
+            "uint",
             "u64",
             "u128",
             "usize",
@@ -293,6 +295,7 @@ impl SymbolTable {
             "f64",
             "bool",
             "char",
+            "string",
             "String",
             "str",
             // Collection types
@@ -571,7 +574,17 @@ impl SymbolTable {
     /// Define a value name in current scope
     pub fn define(&mut self, name: String, def_id: DefId) -> Result<(), String> {
         if let Some(scope) = self.scopes.last_mut() {
-            if scope.names.contains_key(&name) {
+            if let Some(existing) = scope.names.get(&name).copied() {
+                // Allow user code to shadow built-in functions (e.g., custom `sqrt`, `max`)
+                // without turning it into a hard resolution error.
+                if self
+                    .symbols
+                    .get(&existing)
+                    .is_some_and(|sym| matches!(sym.kind, DefKind::BuiltinFunction))
+                {
+                    scope.names.insert(name, def_id);
+                    return Ok(());
+                }
                 return Err(format!("Duplicate definition: {}", name));
             }
             scope.names.insert(name, def_id);

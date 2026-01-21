@@ -6,6 +6,8 @@
 **Status**: Draft (Bootstrap Phase)  
 **Last Updated**: 2024
 
+> Note: This spec is aspirational in places. For the compiler’s current behavior and supported syntax, see `compiler/docs/KNOWN_LIMITATIONS.md`, `docs/MV_CORE_CHECKLIST.md`, and the runnable fixtures under `tests/`.
+
 ---
 
 ## Abstract

@@ -31,6 +31,7 @@ fn assert_result_int(source: &str, expected: i64) {
 }
 
 /// Helper to check the result is a float (within tolerance)
+#[allow(dead_code)]
 fn assert_result_float(source: &str, expected: f64, tolerance: f64) {
     match interpret(source) {
         Ok(Value::Float(f)) => {

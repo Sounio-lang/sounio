@@ -5,6 +5,7 @@
 
 pub mod memory;
 pub mod intrinsics;
+pub mod handler_stack;
 
 pub use memory::{Allocator, Arena, RcBox, SystemAllocator};
 pub use intrinsics::Knowledge;

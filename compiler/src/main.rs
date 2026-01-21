@@ -185,6 +185,10 @@ enum Commands {
         #[arg(short = 'O', long)]
         optimize: bool,
 
+        /// Use MIR-based lowering before JIT compilation
+        #[arg(long)]
+        mir: bool,
+
         /// Arguments to pass to the program
         #[arg(trailing_var_arg = true)]
         args: Vec<String>,
@@ -1689,6 +1693,13 @@ fn main() -> Result<()> {
                 } else {
                     Err(miette::miette!("Compilation failed"))
                 }
+            } else if backend == sounio::cli::backend::Backend::Gpu {
+                if emit_llvm || emit_asm || cdylib {
+                    return Err(miette::miette!(
+                        "GPU backend only supports PTX emission (no --emit-llvm/--emit-asm/--cdylib)"
+                    ));
+                }
+                build_gpu(&input, output.as_deref(), target.as_deref(), verbose)
             } else {
                 // Use existing build function for other backends
                 build(
@@ -1733,8 +1744,9 @@ fn main() -> Result<()> {
         Commands::Jit {
             input,
             optimize,
+            mir,
             args,
-        } => jit_run(&input, optimize, &args),
+        } => jit_run(&input, optimize, mir, &args),
 
         Commands::Repl { jit } => repl(jit),
 
@@ -2177,6 +2189,99 @@ fn main() -> Result<()> {
     }
 }
 
+/// Build a Sounio source file to PTX using the GPU backend
+fn build_gpu(
+    input: &std::path::Path,
+    output: Option<&std::path::Path>,
+    target: Option<&str>,
+    verbose: bool,
+) -> Result<()> {
+    #[cfg(feature = "gpu")]
+    {
+        let parse_sm = |raw: &str| -> Option<(u32, u32)> {
+            let mut value = raw.trim();
+            if let Some(rest) = value.strip_prefix("sm_") {
+                value = rest;
+            } else if let Some(rest) = value.strip_prefix("sm") {
+                value = rest;
+            }
+            if let Some((major_str, minor_str)) = value.split_once('.') {
+                let major = major_str.trim().parse::<u32>().ok()?;
+                let minor = minor_str.trim().parse::<u32>().ok()?;
+                return Some((major, minor));
+            }
+            let digits: String = value.chars().filter(|c| c.is_ascii_digit()).collect();
+            match digits.len() {
+                2 => {
+                    let major = digits[0..1].parse::<u32>().ok()?;
+                    let minor = digits[1..2].parse::<u32>().ok()?;
+                    Some((major, minor))
+                }
+                3 => {
+                    let major = digits[0..2].parse::<u32>().ok()?;
+                    let minor = digits[2..3].parse::<u32>().ok()?;
+                    Some((major, minor))
+                }
+                _ => None,
+            }
+        };
+
+        let sm_version = std::env::var("SOUNIO_GPU_SM")
+            .ok()
+            .and_then(|v| parse_sm(&v))
+            .or_else(|| target.and_then(|t| parse_sm(t)))
+            .unwrap_or((7, 5));
+
+        if verbose {
+            eprintln!("Using GPU target sm_{}{}", sm_version.0, sm_version.1);
+        }
+
+        let ast = sounio::module_loader::load_program_ast(input)?;
+        let kernel_names: std::collections::HashSet<String> = ast
+            .items
+            .iter()
+            .filter_map(|item| match item {
+                sounio::ast::Item::Function(func) if func.modifiers.is_kernel => {
+                    Some(func.name.clone())
+                }
+                _ => None,
+            })
+            .collect();
+
+        if kernel_names.is_empty() {
+            return Err(miette::miette!("GPU build requires at least one `kernel fn`"));
+        }
+
+        let hir = sounio::check::check(&ast)?;
+        let mut hlir = sounio::hlir::lower(&hir);
+        for func in &mut hlir.functions {
+            if kernel_names.contains(&func.name) {
+                func.is_kernel = true;
+            }
+        }
+
+        let ptx = sounio::codegen::gpu::compile_to_ptx(&hlir, sm_version);
+        let out_path = output.map(|p| p.to_path_buf()).unwrap_or_else(|| {
+            let mut p = input.to_path_buf();
+            p.set_extension("ptx");
+            p
+        });
+
+        std::fs::write(&out_path, ptx)
+            .map_err(|e| miette::miette!("Failed to write PTX: {}", e))?;
+        println!("Wrote PTX to {}", out_path.display());
+        Ok(())
+    }
+
+    #[cfg(not(feature = "gpu"))]
+    {
+        let _ = (input, output, target, verbose);
+        Err(miette::miette!(
+            "GPU backend not enabled. Rebuild with: cargo build --features gpu"
+        ))
+    }
+}
+
 /// Build a Sounio source file to native executable using LLVM
 #[allow(clippy::too_many_arguments)]
 fn build(
@@ -2196,6 +2301,27 @@ fn build(
 ) -> Result<()> {
     #[cfg(feature = "llvm-base")]
     {
+        fn find_runtime_lib_dir() -> Option<std::path::PathBuf> {
+            let manifest_dir = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+            let runtime_root = manifest_dir.join("..").join("runtime");
+            let target_dir = runtime_root.join("target");
+            let lib_names = [
+                "libsounio_runtime.a",
+                "libsounio_runtime.so",
+                "libsounio_runtime.dylib",
+                "sounio_runtime.lib",
+            ];
+
+            for profile in ["release", "debug"] {
+                let dir = target_dir.join(profile);
+                if lib_names.iter().any(|name| dir.join(name).exists()) {
+                    return Some(dir);
+                }
+            }
+
+            None
+        }
+
         use inkwell::context::Context;
         use sounio::codegen::llvm::{
             codegen::{LLVMCodegen, OptLevel},
@@ -2350,6 +2476,17 @@ fn build(
             });
 
             let linker = Linker::new().strip(strip).verbose(verbose);
+            let runtime_dir = find_runtime_lib_dir();
+
+            if runtime_dir.is_none() && verbose {
+                eprintln!("Warning: runtime library not found; linking without effect runtime");
+            }
+
+            let linker = if let Some(dir) = runtime_dir.as_deref() {
+                linker.lib_path(dir).lib("sounio_runtime")
+            } else {
+                linker
+            };
 
             linker
                 .link_shared(&[obj_path.clone()], &lib_path)
@@ -2374,11 +2511,20 @@ fn build(
                 p
             });
 
-            let linker = Linker::new().strip(strip).verbose(verbose);
+        let linker = Linker::new().strip(strip).verbose(verbose);
+        let runtime_dir = find_runtime_lib_dir();
 
-            linker
-                .link_with_stdlib(&[obj_path.clone()], &exe_path)
-                .map_err(|e| miette::miette!("Linking failed: {}", e))?;
+        if runtime_dir.is_none() && verbose {
+            eprintln!("Warning: runtime library not found; linking without effect runtime");
+        }
+
+        let link_result = if let Some(dir) = runtime_dir.as_deref() {
+            linker.link_with_runtime(&[obj_path.clone()], &exe_path, Some(dir))
+        } else {
+            linker.link_with_stdlib(&[obj_path.clone()], &exe_path)
+        };
+
+        link_result.map_err(|e| miette::miette!("Linking failed: {}", e))?;
 
             // Clean up object file
             if std::fs::remove_file(&obj_path).is_err() && verbose {
@@ -2486,6 +2632,11 @@ fn check(
     let source_file =
         sounio::SourceFile::new(input.to_string_lossy().to_string(), source_content.clone());
 
+    // Precompute line/column mapping for diagnostics.
+    let line_starts: Vec<usize> = std::iter::once(0)
+        .chain(source_content.match_indices('\n').map(|(i, _)| i + 1))
+        .collect();
+
     // 1-2. Load modules and parse (uses ModuleLoader to handle imports)
     let ast = sounio::module_loader::load_program_ast(input)?;
 
@@ -2544,11 +2695,6 @@ fn check(
     }
 
     if !check_result.errors.is_empty() {
-        // Calculate line/column from byte offset
-        let line_starts: Vec<usize> = std::iter::once(0)
-            .chain(source_content.match_indices('\n').map(|(i, _)| i + 1))
-            .collect();
-
         for err in &check_result.errors {
             let (line, column) = {
                 let offset = err.span.start;
@@ -2622,10 +2768,52 @@ fn check(
             }
             println!();
         }
-        // Effect errors are warnings for now, not fatal
         for e in &errors {
-            eprintln!("Warning: {}", e);
+            let (line, column) = {
+                let offset = e.span.start;
+                let line_idx = line_starts
+                    .partition_point(|&start| start <= offset)
+                    .saturating_sub(1);
+                let line = line_idx + 1;
+                let col = offset - line_starts.get(line_idx).copied().unwrap_or(0) + 1;
+                (line as u32, col as u32)
+            };
+
+            let message = e.to_string();
+            if use_json {
+                let diag = serde_json::json!({
+                    "level": "error",
+                    "message": message,
+                    "code": "effect",
+                    "location": {
+                        "file": input.to_string_lossy(),
+                        "line": line,
+                        "column": column
+                    },
+                    "notes": [],
+                    "suggestions": [],
+                    "related": []
+                });
+                eprintln!("{}", diag);
+            } else {
+                eprintln!("error: {}", message);
+                eprintln!("  --> {}:{}:{}", input.to_string_lossy(), line, column);
+
+                let line_idx = line as usize - 1;
+                let lines: Vec<&str> = source_content.lines().collect();
+                if line_idx < lines.len() {
+                    let source_line = lines[line_idx];
+                    eprintln!("   |");
+                    eprintln!("{:3} | {}", line, source_line);
+                    let padding = " ".repeat(column as usize);
+                    eprintln!("   | {}^", padding);
+                }
+                eprintln!();
+            }
         }
+
+        let messages: Vec<_> = errors.iter().map(|e| e.to_string()).collect();
+        return Err(miette::miette!("Effect errors:\n{}", messages.join("\n")));
     } else if show_effects {
         println!("=== Effects ===");
         println!("  All effects properly declared");
@@ -2673,7 +2861,7 @@ fn run(input: &std::path::Path, args: &[String]) -> Result<()> {
     }
 }
 
-fn jit_run(input: &std::path::Path, optimize: bool, _args: &[String]) -> Result<()> {
+fn jit_run(input: &std::path::Path, optimize: bool, use_mir: bool, _args: &[String]) -> Result<()> {
     #[cfg(feature = "jit")]
     {
         tracing::info!("JIT compiling {:?} (optimize={})", input, optimize);
@@ -2682,6 +2870,35 @@ fn jit_run(input: &std::path::Path, optimize: bool, _args: &[String]) -> Result<
         let ast = sounio::module_loader::load_program_ast(input)?;
         let hir = sounio::check::check(&ast)?;
         let hlir = sounio::hlir::lower(&hir);
+        let main_returns_value = hlir
+            .find_function("main")
+            .map(|func| !matches!(func.return_type, sounio::hlir::HlirType::Void))
+            .unwrap_or(true);
+
+        if use_mir {
+            let jit = if optimize {
+                sounio::codegen::mir_cranelift::MirAwareCraneliftJit::new()
+                    .with_optimization()
+                    .with_mir_optimization(sounio::mir::optimization::OptimizationLevel::O2)
+            } else {
+                sounio::codegen::mir_cranelift::MirAwareCraneliftJit::new()
+            };
+
+            let compiled = jit
+                .compile_hlir_via_mir(&hlir)
+                .map_err(|e| miette::miette!("JIT error: {}", e))?;
+
+            if main_returns_value {
+                let result = unsafe { compiled.call_i64("main") }
+                    .map_err(|e| miette::miette!("JIT error: {}", e))?;
+                println!("{}", result);
+            } else {
+                unsafe { compiled.call_void("main") }
+                    .map_err(|e| miette::miette!("JIT error: {}", e))?;
+            }
+
+            return Ok(());
+        }
 
         let jit = if optimize {
             sounio::codegen::cranelift::CraneliftJit::new().with_optimization()
@@ -2689,18 +2906,24 @@ fn jit_run(input: &std::path::Path, optimize: bool, _args: &[String]) -> Result<
             sounio::codegen::cranelift::CraneliftJit::new()
         };
 
-        match jit.compile_and_run(&hlir) {
-            Ok(result) => {
-                println!("{}", result);
-                Ok(())
-            }
-            Err(e) => Err(miette::miette!("JIT error: {}", e)),
+        let compiled = jit
+            .compile(&hlir)
+            .map_err(|e| miette::miette!("JIT error: {}", e))?;
+
+        if main_returns_value {
+            let result =
+                unsafe { compiled.call_i64("main") }.map_err(|e| miette::miette!("JIT error: {}", e))?;
+            println!("{}", result);
+        } else {
+            unsafe { compiled.call_void("main") }
+                .map_err(|e| miette::miette!("JIT error: {}", e))?;
         }
+        Ok(())
     }
 
     #[cfg(not(feature = "jit"))]
     {
-        let _ = (input, optimize); // Suppress unused warnings
+        let _ = (input, optimize, use_mir); // Suppress unused warnings
         Err(miette::miette!(
             "JIT backend not enabled. Recompile with --features jit"
         ))

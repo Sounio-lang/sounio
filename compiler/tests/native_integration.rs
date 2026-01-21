@@ -22,7 +22,6 @@ fn get_fixture_path(name: &str) -> PathBuf {
 fn compile_with_backend(
     input: &PathBuf,
     output: &PathBuf,
-    format: &str,
 ) -> Result<(), String> {
     let mut cmd = Command::new(env!("CARGO_BIN_EXE_souc"));
     cmd.arg("build");
@@ -53,7 +52,7 @@ fn test_elf_generation_from_code_segment() {
     let input = get_fixture_path("test_minimal.sio");
     let output = temp_dir.path().join("test.o");
 
-    compile_with_backend(&input, &output, "o").expect("Failed to compile");
+    compile_with_backend(&input, &output).expect("Failed to compile");
 
     // Verify ELF structure
     let bytes = fs::read(&output).unwrap();
@@ -70,7 +69,7 @@ fn test_shared_library_linking() {
     let input = get_fixture_path("test_minimal.sio");
     let output = temp_dir.path().join("test.so");
 
-    compile_with_backend(&input, &output, "so").expect("Failed to compile to shared library");
+    compile_with_backend(&input, &output).expect("Failed to compile to shared library");
 
     assert!(output.exists(), "Shared library should be created");
     
@@ -85,7 +84,7 @@ fn test_executable_linking() {
     let input = get_fixture_path("test_minimal.sio");
     let output = temp_dir.path().join("test");
 
-    compile_with_backend(&input, &output, "").expect("Failed to compile to executable");
+    compile_with_backend(&input, &output).expect("Failed to compile to executable");
 
     assert!(output.exists(), "Executable should be created");
     
@@ -105,7 +104,7 @@ fn test_executable_runs() {
     let input = get_fixture_path("test_minimal.sio");
     let output = temp_dir.path().join("test");
 
-    compile_with_backend(&input, &output, "").expect("Failed to compile");
+    compile_with_backend(&input, &output).expect("Failed to compile");
 
     // Try to run (if runtime is working)
     let result = Command::new(&output).output();

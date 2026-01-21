@@ -21,8 +21,6 @@ pub use instructions::*;
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::hir::{HirType, HirLiteral};
-    use crate::common::NodeId;
 
     #[test]
     fn test_mir_type_conversion() {

@@ -2,9 +2,8 @@
 //!
 //! This module provides optimization pass management for LLVM code generation.
 
-use inkwell::OptimizationLevel;
 use inkwell::module::Module;
-use inkwell::passes::{PassBuilderOptions, PassManager};
+use inkwell::passes::PassBuilderOptions;
 use inkwell::targets::TargetMachine;
 
 use super::codegen::OptLevel;

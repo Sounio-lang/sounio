@@ -233,7 +233,7 @@ impl Linker {
         // Add runtime library path
         if let Some(rt_path) = runtime_path {
             linker.lib_paths.push(rt_path.to_path_buf());
-            linker.libs.push("sounio_rt".to_string());
+            linker.libs.push("sounio_runtime".to_string());
         }
 
         // Add standard libraries

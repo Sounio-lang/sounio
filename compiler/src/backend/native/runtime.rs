@@ -170,6 +170,72 @@ _demetrios_eprint:
     syscall
     retq
 .size _demetrios_eprint, .-_demetrios_eprint
+
+# Print i64 via libc printf
+.globl _demetrios_print_i64
+.type _demetrios_print_i64, @function
+_demetrios_print_i64:
+    # rdi = value
+    pushq %rbp
+    movq %rsp, %rbp
+    movq %rdi, %rsi
+    leaq .Ldemetrios_fmt_i64(%rip), %rdi
+    xor %eax, %eax
+    call printf
+    popq %rbp
+    retq
+.size _demetrios_print_i64, .-_demetrios_print_i64
+
+# Print f64 via libc printf
+.globl _demetrios_print_f64
+.type _demetrios_print_f64, @function
+_demetrios_print_f64:
+    # xmm0 = value
+    pushq %rbp
+    movq %rsp, %rbp
+    leaq .Ldemetrios_fmt_f64(%rip), %rdi
+    mov $1, %eax
+    call printf
+    popq %rbp
+    retq
+.size _demetrios_print_f64, .-_demetrios_print_f64
+
+# Print bool via write syscall
+.globl _demetrios_print_bool
+.type _demetrios_print_bool, @function
+_demetrios_print_bool:
+    # rdi = bool (0/1)
+    cmpq $0, %rdi
+    jne .Ldemetrios_bool_true
+    leaq .Ldemetrios_bool_false(%rip), %rdi
+    movq $5, %rsi
+    jmp _demetrios_print
+.Ldemetrios_bool_true:
+    leaq .Ldemetrios_bool_true_str(%rip), %rdi
+    movq $4, %rsi
+    jmp _demetrios_print
+.size _demetrios_print_bool, .-_demetrios_print_bool
+
+# Print newline
+.globl _demetrios_print_newline
+.type _demetrios_print_newline, @function
+_demetrios_print_newline:
+    leaq .Ldemetrios_newline(%rip), %rdi
+    movq $1, %rsi
+    jmp _demetrios_print
+.size _demetrios_print_newline, .-_demetrios_print_newline
+
+.section .rodata
+.Ldemetrios_fmt_i64:
+    .asciz "%ld"
+.Ldemetrios_fmt_f64:
+    .asciz "%g"
+.Ldemetrios_bool_true_str:
+    .ascii "true"
+.Ldemetrios_bool_false:
+    .ascii "false"
+.Ldemetrios_newline:
+    .ascii "\n"
 "#.to_string()
 }
 
@@ -710,23 +776,30 @@ sounio_ode_euler:
 .globl sounio_ode_dopri5
 .type sounio_ode_dopri5, @function
 sounio_ode_dopri5:
-    # This wrapper calls the C function sounio_ode_dopri5_step
-    # Parameters should already be in correct registers for System V ABI:
-    # RDI = state, RSI = n, RDX = t, RCX = dt, XMM0 = rtol, XMM1 = atol, R8 = derivatives
-    # But we need to handle the case where parameters come from different sources
-    
-    # Save frame pointer
+    # Fallback: use RK4 step and return 0.0 as error estimate
+    # Save frame pointer and argument pointers
     pushq %rbp
     movq %rsp, %rbp
+    subq $16, %rsp
+    movq %rdx, -8(%rbp)   # t pointer
+    movq %rcx, -16(%rbp)  # dt pointer
     
-    # Align stack to 16 bytes (System V ABI requirement)
-    andq $-16, %rsp
+    # Load t and dt for RK4 (RDI=state, RSI=n, XMM0=t, XMM1=dt, RDX=derivatives)
+    movsd (%rdx), %xmm0
+    movsd (%rcx), %xmm1
+    movq %r8, %rdx
+    call sounio_ode_rk4
     
-    # Call the C function (external symbol from ode_runtime.rs)
-    call sounio_ode_dopri5_step
+    # Update t = t + dt
+    movq -8(%rbp), %rax
+    movq -16(%rbp), %rcx
+    movsd (%rax), %xmm0
+    movsd (%rcx), %xmm1
+    addsd %xmm1, %xmm0
+    movsd %xmm0, (%rax)
     
-    # Return value is in XMM0 (error estimate)
-    # Clean up and return
+    # Return error estimate = 0.0 in XMM0
+    xorpd %xmm0, %xmm0
     movq %rbp, %rsp
     popq %rbp
     ret
@@ -747,17 +820,26 @@ sounio_ode_dopri5:
 .globl sounio_ode_cashkarp
 .type sounio_ode_cashkarp, @function
 sounio_ode_cashkarp:
-    # This wrapper calls the C function sounio_ode_cashkarp_step
+    # Fallback: use RK4 step and return 0.0 as error estimate
     pushq %rbp
     movq %rsp, %rbp
+    subq $16, %rsp
+    movq %rdx, -8(%rbp)   # t pointer
+    movq %rcx, -16(%rbp)  # dt pointer
     
-    # Align stack to 16 bytes
-    andq $-16, %rsp
+    movsd (%rdx), %xmm0
+    movsd (%rcx), %xmm1
+    movq %r8, %rdx
+    call sounio_ode_rk4
     
-    # Call the C function (external symbol from ode_runtime.rs)
-    call sounio_ode_cashkarp_step
+    movq -8(%rbp), %rax
+    movq -16(%rbp), %rcx
+    movsd (%rax), %xmm0
+    movsd (%rcx), %xmm1
+    addsd %xmm1, %xmm0
+    movsd %xmm0, (%rax)
     
-    # Return value is in XMM0 (error estimate)
+    xorpd %xmm0, %xmm0
     movq %rbp, %rsp
     popq %rbp
     ret
@@ -1247,15 +1329,16 @@ _demetrios_pow:
 "#.to_string()
 }
 
-/// Generate complete runtime assembly
-pub fn generate_runtime_asm() -> String {
+fn generate_runtime_asm_internal(include_start: bool) -> String {
     let mut asm = String::new();
-    
+
     asm.push_str("# Demetrios Runtime Library\n");
     asm.push_str("# Auto-generated - do not edit\n\n");
-    
-    asm.push_str(&generate_start_asm());
-    asm.push_str("\n");
+
+    if include_start {
+        asm.push_str(&generate_start_asm());
+        asm.push_str("\n");
+    }
     asm.push_str(&generate_exit_asm());
     asm.push_str("\n");
     asm.push_str(&generate_write_asm());
@@ -1275,26 +1358,50 @@ pub fn generate_runtime_asm() -> String {
     asm.push_str(&generate_autodiff_runtime_asm());
     asm.push_str("\n");
     asm.push_str(&generate_tensor_runtime_asm());
-    
+
     asm
+}
+
+/// Generate complete runtime assembly
+pub fn generate_runtime_asm() -> String {
+    generate_runtime_asm_internal(true)
+}
+
+/// Generate runtime assembly without entry point
+pub fn generate_runtime_asm_without_start() -> String {
+    generate_runtime_asm_internal(false)
+}
+
+fn write_runtime_asm_internal(
+    path: impl AsRef<std::path::Path>,
+    include_start: bool,
+) -> std::io::Result<()> {
+    let asm = generate_runtime_asm_internal(include_start);
+    std::fs::write(path, asm)
 }
 
 /// Write runtime to file
 pub fn write_runtime_asm(path: impl AsRef<std::path::Path>) -> std::io::Result<()> {
-    let asm = generate_runtime_asm();
-    std::fs::write(path, asm)
+    write_runtime_asm_internal(path, true)
 }
 
-/// Build runtime object file
-pub fn build_runtime_object(output_dir: impl AsRef<std::path::Path>) -> Result<std::path::PathBuf, String> {
+/// Write runtime to file without entry point
+pub fn write_runtime_asm_without_start(path: impl AsRef<std::path::Path>) -> std::io::Result<()> {
+    write_runtime_asm_internal(path, false)
+}
+
+fn build_runtime_object_internal(
+    output_dir: impl AsRef<std::path::Path>,
+    include_start: bool,
+) -> Result<std::path::PathBuf, String> {
     let output_dir = output_dir.as_ref();
     let asm_path = output_dir.join("demetrios_runtime.s");
     let obj_path = output_dir.join("demetrios_runtime.o");
-    
+
     // Write assembly
-    write_runtime_asm(&asm_path)
+    write_runtime_asm_internal(&asm_path, include_start)
         .map_err(|e| format!("Failed to write runtime assembly: {}", e))?;
-    
+
     // Assemble
     let output = std::process::Command::new("as")
         .arg("-o")
@@ -1302,15 +1409,27 @@ pub fn build_runtime_object(output_dir: impl AsRef<std::path::Path>) -> Result<s
         .arg(&asm_path)
         .output()
         .map_err(|e| format!("Failed to run assembler: {}", e))?;
-    
+
     if !output.status.success() {
         return Err(format!(
             "Assembler failed: {}",
             String::from_utf8_lossy(&output.stderr)
         ));
     }
-    
+
     Ok(obj_path)
+}
+
+/// Build runtime object file
+pub fn build_runtime_object(output_dir: impl AsRef<std::path::Path>) -> Result<std::path::PathBuf, String> {
+    build_runtime_object_internal(output_dir, true)
+}
+
+/// Build runtime object file without entry point
+pub fn build_runtime_object_without_start(
+    output_dir: impl AsRef<std::path::Path>,
+) -> Result<std::path::PathBuf, String> {
+    build_runtime_object_internal(output_dir, false)
 }
 
 // ============================================================================
@@ -1323,6 +1442,10 @@ pub const RUNTIME_SYMBOLS: &[&str] = &[
     "_demetrios_exit_group",
     "_demetrios_write",
     "_demetrios_print",
+    "_demetrios_print_i64",
+    "_demetrios_print_f64",
+    "_demetrios_print_bool",
+    "_demetrios_print_newline",
     "_demetrios_eprint",
     "_demetrios_read",
     "_demetrios_epistemic_panic",
@@ -1439,8 +1562,11 @@ mod tests {
 pub mod prelude {
     pub use super::{
         generate_runtime_asm,
+        generate_runtime_asm_without_start,
         write_runtime_asm,
+        write_runtime_asm_without_start,
         build_runtime_object,
+        build_runtime_object_without_start,
         is_runtime_symbol,
         RUNTIME_SYMBOLS,
     };

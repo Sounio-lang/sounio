@@ -384,7 +384,7 @@ impl From<GraphError> for CausalError {
 mod tests {
     use super::*;
     use crate::causal::graph::{CausalNode, EdgeType};
-    use crate::epistemic::composition::{EpistemicValue, SourceInfo};
+    use crate::epistemic::composition::EpistemicValue;
 
     fn create_test_knowledge() -> TemporalKnowledge<f64> {
         let core = EpistemicValue::with_confidence(0.75, 0.90);

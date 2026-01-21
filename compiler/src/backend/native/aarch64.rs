@@ -560,7 +560,7 @@ impl AArch64Emitter {
 
         // Check if we can use MOVN (all ones except one chunk)
         let inverted = !imm;
-        let mut chunks_inverted = [
+        let chunks_inverted = [
             (inverted & 0xFFFF) as u16,
             ((inverted >> 16) & 0xFFFF) as u16,
             ((inverted >> 32) & 0xFFFF) as u16,

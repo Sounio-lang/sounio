@@ -4,7 +4,7 @@
 //! in the native backend runtime.
 
 use sounio::backend::native::ode_runtime::{
-    sounio_ode_cashkarp_step, sounio_ode_dopri5_step, DerivativeFn,
+    sounio_ode_cashkarp_step, sounio_ode_dopri5_step,
 };
 
 // ============================================================================
@@ -18,8 +18,8 @@ unsafe extern "C" fn exp_decay_derivatives(
     _t: f64,
     dydt: *mut f64,
 ) {
-    let state_slice = std::slice::from_raw_parts(_state, 1);
-    let dydt_slice = std::slice::from_raw_parts_mut(dydt, 1);
+    let state_slice = unsafe { std::slice::from_raw_parts(_state, 1) };
+    let dydt_slice = unsafe { std::slice::from_raw_parts_mut(dydt, 1) };
     let k = 1.0;
     dydt_slice[0] = -k * state_slice[0];
 }
@@ -32,8 +32,8 @@ unsafe extern "C" fn lotka_volterra_derivatives(
     _t: f64,
     dydt: *mut f64,
 ) {
-    let state_slice = std::slice::from_raw_parts(state, 2);
-    let dydt_slice = std::slice::from_raw_parts_mut(dydt, 2);
+    let state_slice = unsafe { std::slice::from_raw_parts(state, 2) };
+    let dydt_slice = unsafe { std::slice::from_raw_parts_mut(dydt, 2) };
     
     let alpha = 1.1;
     let beta = 0.4;

@@ -301,7 +301,7 @@ for reason in &result.reasoning {
 
 ---
 
-## 3. Sequential Monte Carlo (`smc.d`)
+## 3. Sequential Monte Carlo (`smc.sio`)
 
 ### Purpose
 
@@ -424,7 +424,7 @@ let (lower, upper) = filter.cloud().credible_interval(|x| x, 0.05)
 
 ---
 
-## 4. Adaptive SMC (`adaptive_smc.d`)
+## 4. Adaptive SMC (`adaptive_smc.sio`)
 
 ### Purpose
 

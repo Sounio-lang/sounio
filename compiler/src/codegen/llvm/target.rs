@@ -3,7 +3,6 @@
 //! This module handles target triple configuration, target machine creation,
 //! and object file generation.
 
-use inkwell::OptimizationLevel;
 use inkwell::module::Module;
 use inkwell::targets::{
     CodeModel, FileType, InitializationConfig, RelocMode, Target, TargetMachine, TargetTriple,

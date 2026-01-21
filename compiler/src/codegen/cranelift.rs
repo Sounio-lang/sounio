@@ -1763,6 +1763,7 @@ extern "C" fn runtime_continuation_create(
 /// value: value to resume with
 /// Returns: 1 on success, 0 on error
 #[cfg(feature = "jit")]
+#[unsafe(no_mangle)]
 extern "C" fn runtime_continuation_resume(continuation_id: i64, value: f64) -> i64 {
     if continuation_id != 1 {
         return 0;
@@ -1929,6 +1930,20 @@ impl CompiledModule {
 
         let func: extern "C" fn() -> i64 = unsafe { std::mem::transmute(ptr) };
         Ok(func())
+    }
+
+    /// Call a function with no arguments returning void.
+    ///
+    /// # Safety
+    /// The caller must ensure the function signature matches.
+    pub unsafe fn call_void(&self, name: &str) -> Result<(), String> {
+        let ptr = self
+            .get_function(name)
+            .ok_or_else(|| format!("Function not found: {}", name))?;
+
+        let func: extern "C" fn() = unsafe { std::mem::transmute(ptr) };
+        func();
+        Ok(())
     }
 
     /// Call a function with one i64 argument returning i64
@@ -5506,7 +5521,7 @@ mod tests {
     fn test_dispatch_via_registry() {
         configure_jit_all_effects();
 
-        if let Ok(mut state) = get_jit_effect_state().lock() {
+        if let Ok(state) = get_jit_effect_state().lock() {
             // Test Div.div dispatch
             let result = state.dispatch_via_registry("Div", "div", &[10.0, 2.0]);
             assert!(result.is_some());
@@ -5519,7 +5534,7 @@ mod tests {
     fn test_dispatch_effect_combined() {
         configure_jit_all_effects();
 
-        if let Ok(mut state) = get_jit_effect_state().lock() {
+        if let Ok(state) = get_jit_effect_state().lock() {
             // Test dispatch_effect (tries stack first, then registry)
             let result = state.dispatch_effect("Div", "div", &[20.0, 4.0]);
             assert!(result.is_some());

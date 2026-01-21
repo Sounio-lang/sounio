@@ -1088,7 +1088,7 @@ impl Resolver {
                     self.resolve_effect_ref(eff);
                 }
             }
-            TypeExpr::Unit | TypeExpr::SelfType | TypeExpr::Infer => {}
+            TypeExpr::Unit | TypeExpr::Never | TypeExpr::SelfType | TypeExpr::Infer => {}
 
             // Epistemic types
             TypeExpr::Knowledge { value_type, .. } => {

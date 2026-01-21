@@ -1309,9 +1309,16 @@ pub fn build_intervals_from_sir(
     // Step 2: First pass - collect all definitions and determine types
     let mut intervals: HashMap<ValueId, LiveInterval> = HashMap::new();
     let mut call_positions: Vec<usize> = Vec::new();
+    let mut alloca_values: HashSet<ValueId> = HashSet::new();
+    let mut block_indices: HashMap<crate::sir::values::BlockId, usize> = HashMap::new();
+    let mut has_backedge = false;
     let mut pos = 0;
     
-    for block in &func.blocks {
+    for (block_idx, block) in func.blocks.iter().enumerate() {
+        block_indices.insert(block.id, block_idx);
+    }
+
+    for (block_idx, block) in func.blocks.iter().enumerate() {
         for inst in &block.instructions {
             // Check if this is a call instruction
             if matches!(inst.inst, SirInst::Call(_)) {
@@ -1338,6 +1345,10 @@ pub fn build_intervals_from_sir(
                     value_types.insert(result_val, ty);
                 }
                 
+                if matches!(inst.inst, SirInst::Memory(crate::sir::ops::MemoryOp::Alloca { .. })) {
+                    alloca_values.insert(result_val);
+                }
+
                 intervals.insert(result_val, interval);
             }
             
@@ -1375,17 +1386,42 @@ pub fn build_intervals_from_sir(
                     interval.add_use(pos, UseKind::Read);
                 }
             }
+            for succ in term.successors() {
+                if let Some(&succ_idx) = block_indices.get(&succ) {
+                    if succ_idx <= block_idx {
+                        has_backedge = true;
+                    }
+                }
+            }
         }
         
         pos += 1; // Terminator position
     }
     
+    if has_backedge {
+        for interval in intervals.values_mut() {
+            interval.end = interval.end.max(pos);
+        }
+    }
+
     // Step 3: Mark intervals that cross calls
     for interval in intervals.values_mut() {
         for &call_pos in &call_positions {
             if interval.start <= call_pos && call_pos < interval.end {
                 interval.crosses_call = true;
                 break;
+            }
+        }
+    }
+
+    // Conservatively mark stack allocas as crossing calls to avoid clobbering.
+    if !alloca_values.is_empty() {
+        for value_id in alloca_values {
+            if let Some(interval) = intervals.get_mut(&value_id) {
+                interval.crosses_call = true;
+                if has_backedge {
+                    interval.end = interval.end.max(pos);
+                }
             }
         }
     }
@@ -1499,6 +1535,7 @@ fn infer_result_type(inst: &crate::sir::ops::SirInst) -> Option<crate::sir::type
                 _ => Some(SirType::Scalar(ScalarType::I64)),
             }
         }
+        SirInst::BuildAggregate { ty, .. } => Some(ty.clone()),
         SirInst::Const(c) => {
             match c {
                 crate::sir::values::Constant::F64(_) => {

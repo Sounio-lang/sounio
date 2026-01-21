@@ -342,7 +342,7 @@ fn test_implicit_vs_explicit_coercion() {
 
     // Verify the subtype relationship works
     let drug_type = SemanticType::from_iri(iri("Drug"), "Drug".to_string());
-    let allows_implicit = checker.allows_implicit_coercion(&aspirin_type, &drug_type);
+    let _allows_implicit = checker.allows_implicit_coercion(&aspirin_type, &drug_type);
 
     // Whether this is implicit or explicit depends on the configured thresholds
     // The important thing is that it's compatible at all

@@ -60,7 +60,7 @@ fn test_rx_gate_with_parameter_variance() {
     let beta = EpistemicAmplitude::zero();
 
     // RX with perfect parameter
-    let (alpha_perfect, beta_perfect) = EpistemicAmplitude::rx(alpha, beta, PI / 2.0, 0.0);
+    let (alpha_perfect, _beta_perfect) = EpistemicAmplitude::rx(alpha, beta, PI / 2.0, 0.0);
     assert!(alpha_perfect.total_variance() < 1e-10);
 
     // RX with noisy parameter
@@ -214,7 +214,7 @@ fn test_chemical_accuracy_threshold() {
     // Total variance = 0.0001 + 0.0001 + 0.0001 = 0.0003
     // σ = √0.0003 ≈ 0.0173 which is > 0.0016, so NOT chemically accurate
     // Need much smaller variances
-    let accurate = MolecularVQEResult::new(-1.136, 0.00001, 0.00001, 0.00001);
+    let _accurate = MolecularVQEResult::new(-1.136, 0.00001, 0.00001, 0.00001);
     // σ = √0.00003 ≈ 0.0055, still too large!
     // For chemical accuracy: σ² < 0.0016² ≈ 0.00000256
     let very_accurate = MolecularVQEResult::new(-1.136, 0.0000001, 0.0000001, 0.0000001);

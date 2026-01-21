@@ -905,7 +905,7 @@ impl DeadCodeAnalyzer {
             TypeExpr::RawPointer { inner, .. } => {
                 self.collect_type_references(inner);
             }
-            TypeExpr::Unit | TypeExpr::SelfType | TypeExpr::Infer => {}
+            TypeExpr::Unit | TypeExpr::Never | TypeExpr::SelfType | TypeExpr::Infer => {}
 
             // Epistemic types
             TypeExpr::Knowledge { value_type, .. } => {

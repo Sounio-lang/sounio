@@ -409,8 +409,18 @@ impl HlirToGpuLowering {
         }
 
         // Lower blocks
+        let entry_id = func.blocks.first().map(|b| b.id);
         for hlir_block in &func.blocks {
-            let gpu_block = self.lower_block(hlir_block);
+            let mut gpu_block = self.lower_block(hlir_block);
+            if Some(hlir_block.id) == entry_id {
+                let mut param_loads = Vec::new();
+                for (idx, value_id) in self.param_values.iter().enumerate() {
+                    param_loads.push((*value_id, GpuOp::Param(idx as u32)));
+                }
+                if !param_loads.is_empty() {
+                    gpu_block.instructions.splice(0..0, param_loads);
+                }
+            }
             kernel.add_block(gpu_block);
         }
 
@@ -456,8 +466,18 @@ impl HlirToGpuLowering {
         }
 
         // Lower blocks
+        let entry_id = func.blocks.first().map(|b| b.id);
         for hlir_block in &func.blocks {
-            let gpu_block = self.lower_block(hlir_block);
+            let mut gpu_block = self.lower_block(hlir_block);
+            if Some(hlir_block.id) == entry_id {
+                let mut param_loads = Vec::new();
+                for (idx, value_id) in self.param_values.iter().enumerate() {
+                    param_loads.push((*value_id, GpuOp::Param(idx as u32)));
+                }
+                if !param_loads.is_empty() {
+                    gpu_block.instructions.splice(0..0, param_loads);
+                }
+            }
             device_func.add_block(gpu_block);
         }
 

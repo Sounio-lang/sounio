@@ -738,14 +738,14 @@ fn lower_instruction(
                 .result
                 .map(|r| ctx.get_or_create_value(r, result_ty.clone()))?;
 
-            // Allocate array on stack
+            let sir_values: Vec<ValueId> = values.iter().filter_map(|v| ctx.get_value(*v)).collect();
+
             Some(Instruction::with_result(
                 result,
-                SirInst::Memory(MemoryOp::Alloca {
+                SirInst::BuildAggregate {
+                    fields: sir_values,
                     ty: result_ty,
-                    count: None,
-                    align: None,
-                }),
+                },
             ))
         }
 

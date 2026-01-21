@@ -1,0 +1,515 @@
+// stdlib/compiler/linear/modality.sio
+// Linear and Affine Type Checking for Resource Safety
+// Implements modality tracking, usage checking, session types, pattern matching,
+// drop semantics, and RAII for Sounio compiler.
+
+// ========================================
+// Modality Definitions
+// ========================================
+
+fn MODALITY_UNRESTRICTED() -> i32 {
+    0  // Can be used 0 or ∞ times (standard types)
+}
+
+fn MODALITY_RELEVANT() -> i32 {
+    1  // Must be used ≥ 1 times (cannot be dropped unused)
+}
+
+fn MODALITY_AFFINE() -> i32 {
+    2  // Can be used ≤ 1 times (optional use, implicit drop OK)
+}
+
+fn MODALITY_LINEAR() -> i32 {
+    3  // Must be used exactly 1 time (consume or transfer)
+}
+
+// LinearType structure: annotates base types with modality
+struct LinearType {
+    modality: i32,     // One of the MODALITY_* constants
+    base_type: i64,    // Index into type table (e.g., i32=0, FileHandle=42)
+}
+
+// Annotation parsing helpers (simplified for compiler integration)
+// These would be called during parsing of source annotations like `let x: i32 ~ ! = ...`
+fn parse_modality(annot: [i8; 32]) -> i32 with Panic {
+    // Pseudo-parsing: check for '~' (affine/linear) and '!' (relevant/linear)
+    var has_tilde = false;
+    var has_bang = false;
+    var i: i64 = 0;
+    while i < 32 {
+        if annot[i as usize] == ('~' as i8) {
+            has_tilde = true;
+        } else if annot[i as usize] == ('!' as i8) {
+            has_bang = true;
+        }
+        i = i + 1;
+    }
+    if has_tilde && has_bang {
+        MODALITY_LINEAR()
+    } else if has_tilde {
+        MODALITY_AFFINE()
+    } else if has_bang {
+        MODALITY_RELEVANT()
+    } else {
+        MODALITY_UNRESTRICTED()
+    }
+}
+
+fn annotate_type(base: i64, modality: i32) -> LinearType with Panic {
+    LinearType {
+        modality: modality,
+        base_type: base
+    }
+}
+
+// ========================================
+// Usage Tracking
+// ========================================
+
+// UsageContext: tracks variable usage during type checking
+struct UsageContext {
+    used_vars: [i64; 64],      // Bitset-like array of used variable indices
+    n_used: i64,               // Number of used vars (≤64)
+    partial_uses: [PartialUse; 64],  // For pattern matching incompleteness
+    n_partial: i64,            // Number of partial uses
+    // Additional tracking for borrows and scopes
+    active_borrows: [i64; 32], // Borrowed var indices
+    n_borrows: i64,
+}
+
+// PartialUse: for incomplete pattern matches in linear types
+struct PartialUse {
+    var_idx: i64,              // Variable index being matched
+    pattern_mask: i64,         // Bitmask of covered constructors (e.g., 0b101 for Some/None)
+    remaining_mask: i64,       // Bitmask of uncovered constructors
+}
+
+// Simplified Pattern representation (bitmask for enum-like types)
+struct Pattern {
+    mask: i64,                 // Bits represent covered variants
+    binds_vars: [i64; 8],      // Bound variables in this pattern
+    n_binds: i64,
+}
+
+// Mark a variable as used in the context
+fn mark_used(ctx: &!UsageContext, var_idx: i64) -> bool with Panic {
+    // Check if already marked (for linear/affine restrictions)
+    var i: i64 = 0;
+    while i < ctx.n_used {
+        if ctx.used_vars[i as usize] == var_idx {
+            return false;  // Already used - violation for linear/affine
+        }
+        i = i + 1;
+    }
+    // Add to used list if capacity allows
+    if ctx.n_used < 64 {
+        ctx.used_vars[ctx.n_used as usize] = var_idx;
+        ctx.n_used = ctx.n_used + 1;
+        return true;
+    }
+    // Overflow - panic in real compiler
+    false
+}
+
+// Check linearity/affinity at scope end or drop point
+fn check_linearity(ctx: UsageContext, lt: LinearType, var_idx: i64) -> bool with Panic {
+    var used_count: i64 = 0;
+    var i: i64 = 0;
+    while i < ctx.n_used {
+        if ctx.used_vars[i as usize] == var_idx {
+            used_count = used_count + 1;
+        }
+        i = i + 1;
+    }
+
+    var modality = lt.modality;
+
+    // Unrestricted: always OK
+    if modality == MODALITY_UNRESTRICTED() {
+        return true;
+    }
+
+    // Relevant: must be used at least once
+    if modality == MODALITY_RELEVANT() {
+        return used_count >= 1;
+    }
+
+    // Affine: used at most once (already enforced by mark_used)
+    if modality == MODALITY_AFFINE() {
+        return used_count <= 1;
+    }
+
+    // Linear: exactly once
+    if modality == MODALITY_LINEAR() {
+        return used_count == 1;
+    }
+
+    // Unknown modality - error
+    false
+}
+
+// Reset usage for a new scope (e.g., in blocks)
+fn reset_scope(ctx: &!UsageContext) -> UsageContext with Panic {
+    UsageContext {
+        used_vars: [0i64; 64],
+        n_used: 0,
+        partial_uses: [PartialUse { var_idx: 0, pattern_mask: 0, remaining_mask: 0 }; 64],
+        n_partial: 0,
+        active_borrows: [0i64; 32],
+        n_borrows: 0,
+    }
+}
+
+// Merge usages from branches (e.g., if/else for affine types)
+fn merge_usages(left: UsageContext, right: UsageContext, lt: LinearType) -> UsageContext with Panic {
+    // For linear: both branches must use exactly once
+    // For affine: union of uses, but ≤1 total
+    // Simplified: take union for unrestricted/affine
+    var merged = reset_scope(&left);
+    var i: i64 = 0;
+    while i < left.n_used {
+        mark_used(&!merged, left.used_vars[i as usize]);
+        i = i + 1;
+    }
+    i = 0;
+    while i < right.n_used {
+        mark_used(&!merged, right.used_vars[i as usize]);
+        i = i + 1;
+    }
+    // Check post-merge
+    if !check_linearity(merged, lt, 0) {  // var_idx=0 placeholder
+        // In real impl, propagate error
+    }
+    merged
+}
+
+// ========================================
+// Resource Types (Session Types)
+// ========================================
+
+// Channel: basic linear communication primitive
+struct Channel {
+    direction: i32,    // 0 = send-only, 1 = recv-only, 2 = bidirectional (unrestricted)
+    payload_type: i64, // Type index for messages
+    session: i64,      // Index into SessionType table
+}
+
+// SessionType: linear state machine for resources (e.g., file handles, channels)
+struct SessionType {
+    states: [State; 16],  // Max 16 states per session
+    n_states: i64,
+    initial: i64,         // Starting state index
+    is_dual: bool,        // For bidirectional sessions
+}
+
+// State in the session protocol
+struct State {
+    name: [i8; 32],       // Debug name, e.g., "Closed"
+    transitions: [Transition; 8],  // Max 8 outgoing actions
+    n_trans: i64,
+    is_terminal: bool,    // End state (e.g., closed file)
+}
+
+// Transition: action that consumes/produces the resource
+struct Transition {
+    action: i32,          // 0=send, 1=recv, 2=internal (e.g., close), 3=error
+    label: [i8; 16],      // Action name, e.g., "read"
+    payload_type: i64,    // Type of data sent/received
+    next_state: i64,      // Destination state index
+    consumes_linear: bool,// Does this transition consume the resource linearly?
+}
+
+// Create a session type for a file handle
+// States: 0=Closed, 1=Open, 2=Error
+// Transitions: open(Closed->Open), read(Open->Open), close(Open->Closed), error(*->Error)
+fn file_handle_session() -> SessionType with Panic {
+    var st = SessionType {
+        states: [State { name: [0i8; 32], transitions: [Transition { action: 0, label: [0i8; 16], payload_type: 0, next_state: 0, consumes_linear: false }; 8], n_trans: 0, is_terminal: false }; 16],
+        n_states: 3,
+        initial: 0,
+        is_dual: false,
+    };
+
+    // State 0: Closed
+    var buf: [i8; 32] = [0i8; 32];
+    var i: i64 = 0;
+    while i < 6 {  // "Closed"
+        buf[i as usize] = "Closed"[i as usize] as i8;
+        i = i + 1;
+    }
+    st.states[0].name = buf;
+    st.states[0].n_trans = 1;
+    st.states[0].transitions[0] = Transition {
+        action: 0,  // send (open request)
+        label: [0i8; 16],  // "open"
+        i = 0;
+        while i < 4 {
+            st.states[0].transitions[0].label[i as usize] = "open"[i as usize] as i8;
+            i = i + 1;
+        }
+        payload_type: 42,  // string path type index
+        next_state: 1,     // to Open
+        consumes_linear: false,
+    };
+
+    // State 1: Open
+    i = 0;
+    while i < 4 {  // "Open"
+        buf[i as usize] = "Open"[i as usize] as i8;
+        i = i + 1;
+    }
+    st.states[1].name = buf;
+    st.states[1].n_trans = 3;
+    // Transition 0: read
+    st.states[1].transitions[0] = Transition {
+        action: 1,  // recv (read data)
+        i = 0;
+        while i < 4 {
+            st.states[1].transitions[0].label[i as usize] = "read"[i as usize] as i8;
+            i = i + 1;
+        }
+        payload_type: 43,  // data type
+        next_state: 1,     // stay Open
+        consumes_linear: true,  // consumes for linear read
+    };
+    // Transition 1: write (similar)
+    st.states[1].transitions[1] = Transition {
+        action: 0,
+        label: [0i8; 16],  // "write"
+        payload_type: 43,
+        next_state: 1,
+        consumes_linear: true,
+    };
+    // Transition 2: close
+    st.states[1].transitions[2] = Transition {
+        action: 2,  // internal
+        i = 0;
+        while i < 5 {
+            st.states[1].transitions[2].label[i as usize] = "close"[i as usize] as i8;
+            i = i + 1;
+        }
+        payload_type: 0,   // no payload
+        next_state: 0,     // back to Closed
+        consumes_linear: true,  // final consumption
+    };
+
+    // State 2: Error (terminal)
+    i = 0;
+    while i < 5 {
+        buf[i as usize] = "Error"[i as usize] as i8;
+        i = i + 1;
+    }
+    st.states[2].name = buf;
+    st.states[2].is_terminal = true;
+    st.states[2].n_trans = 0;
+
+    // Add error transitions from other states if needed
+    st.states[0].transitions[0].consumes_linear = true;  // open consumes path resource
+
+    st
+}
+
+// Validate session progress (check if action is allowed in current state)
+fn validate_session_progress(session: &!SessionType, current_state: i64, action: i32, payload: i64) -> i64 with Panic {
+    // Return next_state or -1 on error
+    if current_state >= session.n_states {
+        return -1;
+    }
+    var state = &session.states[current_state as usize];
+    var i: i64 = 0;
+    while i < state.n_trans {
+        var trans = &state.transitions[i as usize];
+        if trans.action == action && trans.payload_type == payload {
+            return trans.next_state;
+        }
+        i = i + 1;
+    }
+    -1  // Invalid transition
+}
+
+// Dual session for channels (complementary send/recv)
+fn dual_session(original: SessionType) -> SessionType with Panic {
+    // Flip send/recv actions, reverse states if needed
+    var dual = original;
+    dual.is_dual = true;
+    var i: i64 = 0;
+    while i < original.n_states {
+        var j: i64 = 0;
+        while j < dual.states[i as usize].n_trans {
+            if dual.states[i as usize].transitions[j as usize].action == 0 {
+                dual.states[i as usize].transitions[j as usize].action = 1;  // send -> recv
+            } else if dual.states[i as usize].transitions[j as usize].action == 1 {
+                dual.states[i as usize].transitions[j as usize].action = 0;  // recv -> send
+            }
+            j = j + 1;
+        }
+        i = i + 1;
+    }
+    dual
+}
+
+// ========================================
+// Pattern Matching with Linear Types
+// ========================================
+
+// Pattern struct as above
+
+// Check if a pattern match consumes a linear resource properly
+fn check_linear_pattern_match(ctx: &!UsageContext, scrutinee_idx: i64, patterns: [Pattern; 8], n_patterns: i64, total_variants: i64) -> bool with Panic {
+    // For linear types: all patterns must cover the scrutinee, and union must exhaust all variants
+    var covered_mask: i64 = 0;
+    var i: i64 = 0;
+    while i < n_patterns {
+        var pat = patterns[i as usize];
+        // Check if this pattern binds/uses the scrutinee
+        var uses_scrutinee = false;
+        var j: i64 = 0;
+        while j < pat.n_binds {
+            if pat.binds_vars[j as usize] == scrutinee_idx {
+                uses_scrutinee = true;
+                mark_used(ctx, scrutinee_idx);
+                break;
+            }
+            j = j + 1;
+        }
+        if !uses_scrutinee {
+            return false;  // Pattern doesn't consume linear resource
+        }
+        // Accumulate coverage
+        covered_mask = covered_mask | pat.mask;
+        i = i + 1;
+    }
+    // Exhaustiveness: covered_mask must include all possible variants (bitmask full)
+    covered_mask == (1i64 << total_variants) - 1
+}
+
+// Record partial use for nested matches
+fn record_partial_use(ctx: &!UsageContext, var_idx: i64, pat_mask: i64, remaining: i64) -> bool with Panic {
+    if ctx.n_partial < 64 {
+        ctx.partial_uses[ctx.n_partial as usize] = PartialUse {
+            var_idx: var_idx,
+            pattern_mask: pat_mask,
+            remaining_mask: remaining,
+        };
+        ctx.n_partial = ctx.n_partial + 1;
+        true
+    } else {
+        false
+    }
+}
+
+// Resolve partial uses at end of match block
+fn resolve_partials(ctx: &!UsageContext) -> bool with Panic {
+    var i: i64 = 0;
+    while i < ctx.n_partial {
+        var pu = ctx.partial_uses[i as usize];
+        if pu.remaining_mask != 0 {
+            return false;  // Incomplete coverage
+        }
+        // For linear, ensure used
+        mark_used(ctx, pu.var_idx);
+        i = i + 1;
+    }
+    true
+}
+
+// Borrow safety checks for linear/affine types
+// borrow_kind: 0=shared (&T), 1=exclusive (&!T), 2=move (linear consume)
+fn check_borrow_safety(ctx: &!UsageContext, var_idx: i64, borrow_kind: i32, lt: LinearType) -> bool with Panic {
+    // First, check if var is already used/borrowed
+    if !mark_used(ctx, var_idx) {
+        return false;  // Already used - cannot borrow
+    }
+
+    // For linear types: exclusive borrow or move only
+    if lt.modality == MODALITY_LINEAR() {
+        if borrow_kind == 0 {  // shared not allowed on linear
+            return false;
+        }
+        // Record borrow
+        if ctx.n_borrows < 32 {
+            ctx.active_borrows[ctx.n_borrows as usize] = var_idx;
+            ctx.n_borrows = ctx.n_borrows + 1;
+        }
+        return true;
+    }
+
+    // Affine: allow shared or exclusive, but track conflicts
+    var i: i64 = 0;
+    while i < ctx.n_borrows {
+        if ctx.active_borrows[i as usize] == var_idx {
+            // Existing borrow: check compatibility
+            // Assume prior borrow kind tracked elsewhere; simplify
+            if borrow_kind == 1 && i > 0 {  // Exclusive after any borrow
+                return false;
+            }
+        }
+        i = i + 1;
+    }
+
+    // Record new borrow
+    if ctx.n_borrows < 32 {
+        ctx.active_borrows[ctx.n_borrows as usize] = var_idx;
+        ctx.n_borrows = ctx.n_borrows + 1;
+    }
+    true
+}
+
+// End borrow (e.g., at end of scope)
+fn end_borrow(ctx: &!UsageContext, var_idx: i64) -> bool with Panic {
+    var i: i64 = 0;
+    var found = false;
+    while i < ctx.n_borrows {
+        if ctx.active_borrows[i as usize] == var_idx {
+            // Shift array to remove
+            var j: i64 = i;
+            while j < ctx.n_borrows - 1 {
+                ctx.active_borrows[j as usize] = ctx.active_borrows[(j + 1) as usize];
+                j = j + 1;
+            }
+            ctx.n_borrows = ctx.n_borrows - 1;
+            found = true;
+            break;
+        }
+        i = i + 1;
+    }
+    found
+}
+
+// ========================================
+// Drop & RAII
+// ========================================
+
+// Drop a linear/affine resource
+fn drop_resource(ctx: &!UsageContext, lt: LinearType, var_idx: i64) -> bool with Panic {
+    // Check modality before drop
+    var can_drop = true;
+    if lt.modality == MODALITY_RELEVANT() {
+        can_drop = mark_used(ctx, var_idx);  // Must have been used
+    } else if lt.modality == MODALITY_LINEAR() {
+        can_drop = check_linearity(*ctx, lt, var_idx);  // Exactly once
+    } else if lt.modality == MODALITY_AFFINE() {
+        // OK even if unused, but if used, ≤1
+        can_drop = true;
+    }
+    // Unrestricted always OK
+
+    if can_drop {
+        // For session types, ensure terminal state
+        // Placeholder: assume checked elsewhere
+        end_borrow(ctx, var_idx);  // Release any borrows
+    }
+    can_drop
+}
+
+// ResourceGuard: RAII for automatic cleanup
+struct ResourceGuard {
+    resource_idx: i64,         // Var index
+    cleanup_fn: i64,           // Index of cleanup function (e.g., close_file=100)
+    lt: LinearType,            // For drop checks
+}
+
+// Create guard (called at resource acquisition, e.g., open)
+fn create_guard(var_idx: i64, cleanup: i64, lt: LinearType) -> ResourceGuard with Panic {
+    ResourceGuard {
+        resource

@@ -1,0 +1,527 @@
+// stdlib/compiler/check/pattern.sio
+// Pattern matching type checking and exhaustiveness analysis for Sounio compiler.
+// Implements type checking for patterns and exhaustiveness checking for match arms.
+// Based on HIR patterns (see compiler/src/hir/pattern.rs for reference).
+
+
+// Assuming these are defined in other modules:
+// - TypeContext: contains type database, scopes, etc.
+// - Pattern: HIR pattern structure with kind (i64 tag), data fields.
+// - TypeIdx: i64 representing type indices.
+// - Binding: struct { name: String, type_idx: i64, mutable: bool }
+// - Literal: enum for int, bool, string literals.
+// - Constructor: struct representing type constructors (for enums/structs/primitives).
+// - Variant: struct { name: String, fields: [TypeIdx; 32], n_fields: i64 }
+
+// Pattern kinds (tags for dispatch).
+const PATTERN_WILDCARD: i64 = 0;
+const PATTERN_LITERAL: i64 = 1;
+const PATTERN_VARIABLE: i64 = 2;
+const PATTERN_STRUCT: i64 = 3;
+const PATTERN_ENUM_VARIANT: i64 = 4;
+const PATTERN_ARRAY: i64 = 5;
+const PATTERN_OR: i64 = 6;
+
+// Constructor kinds for coverage analysis.
+const CONSTRUCTOR_ENUM_VARIANT: i64 = 0;
+const CONSTRUCTOR_STRUCT_FIELDS: i64 = 1;
+const CONSTRUCTOR_BOOL_TRUE: i64 = 2;
+const CONSTRUCTOR_BOOL_FALSE: i64 = 3;
+const CONSTRUCTOR_INT_LITERAL: i64 = 4;  // Special for primitives.
+const CONSTRUCTOR_WILDCARD_FALLBACK: i64 = 5;  // For infinite types like int.
+
+// Helper to get constructors for a type (simplified; in real impl, query type DB).
+fn get_constructors(ctx: TypeContext, type_idx: i64) -> [Constructor; 32] with Panic {
+    var result: [Constructor; 32] = [Constructor { kind: 0, name: Stringnew(), fields: [0i64; 32], n_fields: 0, value: None<Literal> }; 32];
+    var n_cons: i64 = 0;
+
+    if ctx.is_enum_type(type_idx) {
+        // Get all variants.
+        var variants = ctx.get_enum_variants(type_idx);
+        for i in 0..variants.n_variants {
+            result[n_cons] = Constructor {
+                kind: CONSTRUCTOR_ENUM_VARIANT,
+                name: variants.names[i],
+                fields: variants.field_types[i],
+                n_fields: variants.n_fields[i],
+                value: None,
+            };
+            n_cons += 1;
+        }
+    } else if ctx.is_struct_type(type_idx) {
+        // Single constructor for struct.
+        var fields = ctx.get_struct_fields(type_idx);
+        result[0] = Constructor {
+            kind: CONSTRUCTOR_STRUCT_FIELDS,
+            name: Stringfrom("Struct"),
+            fields: fields.types,
+            n_fields: fields.n_fields,
+            value: None,
+        };
+        n_cons = 1;
+    } else if ctx.is_bool_type(type_idx) {
+        // Bool has two constructors.
+        result[0] = Constructor {
+            kind: CONSTRUCTOR_BOOL_TRUE,
+            name: Stringfrom("true"),
+            fields: [0i64; 32],
+            n_fields: 0,
+            value: Some(LiteralBool(true)),
+        };
+        result[1] = Constructor {
+            kind: CONSTRUCTOR_BOOL_FALSE,
+            name: Stringfrom("false"),
+            fields: [0i64; 32],
+            n_fields: 0,
+            value: Some(LiteralBool(false)),
+        };
+        n_cons = 2;
+    } else if ctx.is_int_type(type_idx) || ctx.is_primitive_numeric(type_idx) {
+        // Infinite domain; use wildcard fallback.
+        // For exhaustiveness, we treat as needing wildcard or full literal coverage (impractical).
+        result[0] = Constructor {
+            kind: CONSTRUCTOR_WILDCARD_FALLBACK,
+            name: Stringfrom("AnyInt"),
+            fields: [0i64; 32],
+            n_fields: 0,
+            value: None,
+        };
+        n_cons = 1;
+    } else if ctx.is_array_type(type_idx) {
+        var elem_type = ctx.get_array_elem_type(type_idx);
+        var length = ctx.get_array_length(type_idx);  // Assuming fixed length.
+        // Constructor is the array with length slots.
+        // For simplicity, treat as single constructor with length fields of elem_type.
+        var fields: [i64; 32] = [elem_type; 32];
+        result[0] = Constructor {
+            kind: CONSTRUCTOR_STRUCT_FIELDS,  // Treat array as struct-like for coverage.
+            name: Stringfrom("Array"),
+            fields: fields,
+            n_fields: length,
+            value: None,
+        };
+        n_cons = 1;
+    } else {
+        // Unit or other: single empty constructor.
+        result[0] = Constructor {
+            kind: CONSTRUCTOR_STRUCT_FIELDS,
+            name: Stringfrom("Unit"),
+            fields: [0i64; 32],
+            n_fields: 0,
+            value: None,
+        };
+        n_cons = 1;
+    }
+
+    // Truncate to n_cons.
+    var cons: [Constructor; 32] = [Constructor { kind: 0, .. }; 32];  // Dummy init.
+    for i in 0..n_cons {
+        cons[i] = result[i];
+    }
+    return cons;  // Assume function returns with n_cons implicit or adjust struct.
+}
+
+// Note: For simplicity, get_constructors returns array, caller uses up to n_cons from ctx or separate.
+
+// Binding struct (assumed).
+struct Binding {
+    name: String,
+    type_idx: i64,
+    mutable: bool,  // For var/let.
+}
+
+// PatternCheckResult as spec.
+struct PatternCheckResult {
+    type_idx: i64,
+    bindings: [Binding; 64],
+    n_bindings: i64,
+    has_error: bool,
+}
+
+// MatchCheckResult as spec.
+struct MatchCheckResult {
+    all_covered: bool,
+    uncovered_patterns: [Pattern; 16],  // Actually, uncovered constructors represented as patterns.
+    n_uncovered: i64,
+}
+
+// Constructor struct.
+struct Constructor {
+    kind: i64,
+    name: String,
+    fields: [i64; 32],  // Expected field types.
+    n_fields: i64,
+    value: Option<Literal>,  // For literal constructors like bool.
+}
+
+// Implement check_pattern.
+fn check_pattern(ctx: TypeContext, pat: Pattern, expected_type: i64) -> PatternCheckResult with Panic {
+    var result: PatternCheckResult = PatternCheckResult {
+        type_idx: 0,
+        bindings: [Binding { name: Stringnew(), type_idx: 0, mutable: false }; 64],
+        n_bindings: 0,
+        has_error: false,
+    };
+
+    match pat.kind {
+        PATTERN_WILDCARD => {
+            // Matches anything, type is expected_type, no bindings.
+            result.type_idx = expected_type;
+            result.has_error = false;
+        },
+        PATTERN_LITERAL => {
+            var lit_type = ctx.get_literal_type(pat.literal);
+            if !ctx.types_equal(lit_type, expected_type) {
+                result.has_error = true;
+                // Error: literal type mismatch.
+                ctx.report_error("Literal pattern type mismatch");
+            }
+            result.type_idx = lit_type;
+        },
+        PATTERN_VARIABLE => {
+            // Binds variable to scrutinee type.
+            var binding = Binding {
+                name: pat.var_name.clone(),
+                type_idx: expected_type,
+                mutable: false,  // Assume let-bound unless specified.
+            };
+            result.bindings[0] = binding;
+            result.n_bindings = 1;
+            result.type_idx = expected_type;
+            // Add to scope in ctx if needed (assume ctx handles scoping).
+            ctx.add_binding(pat.var_name, expected_type);
+        },
+        PATTERN_STRUCT => {
+            if !ctx.is_struct_type(expected_type) {
+                result.has_error = true;
+                ctx.report_error("Struct pattern on non-struct type");
+                return result;
+            }
+            var struct_type = expected_type;
+            var struct_fields = ctx.get_struct_fields(struct_type);
+            if pat.n_fields != struct_fields.n_fields {
+                result.has_error = true;
+                ctx.report_error("Struct field count mismatch");
+                return result;
+            }
+            var sub_bindings: [Binding; 64] = [Binding { .. }; 64];
+            var n_sub: i64 = 0;
+            for i in 0..pat.n_fields {
+                var field_name = pat.field_names[i];
+                var field_idx = ctx.get_struct_field_index(struct_type, field_name);
+                if field_idx < 0 {
+                    result.has_error = true;
+                    ctx.report_error("Unknown struct field");
+                    return result;
+                }
+                var field_type = struct_fields.types[field_idx];
+                var sub_res = check_pattern(ctx.clone(), pat.fields[i], field_type);  // Recursive.
+                if sub_res.has_error {
+                    result.has_error = true;
+                    return result;
+                }
+                // Collect bindings.
+                for j in 0..sub_res.n_bindings {
+                    sub_bindings[n_sub + j] = sub_res.bindings[j];
+                }
+                n_sub += sub_res.n_bindings;
+            }
+            // Copy bindings.
+            for i in 0..n_sub {
+                result.bindings[i] = sub_bindings[i];
+            }
+            result.n_bindings = n_sub;
+            result.type_idx = struct_type;
+        },
+        PATTERN_ENUM_VARIANT => {
+            if !ctx.is_enum_type(expected_type) {
+                result.has_error = true;
+                ctx.report_error("Enum variant pattern on non-enum type");
+                return result;
+            }
+            var variant_name = pat.variant_name;
+            var variant_idx = ctx.get_enum_variant_index(expected_type, variant_name);
+            if variant_idx < 0 {
+                result.has_error = true;
+                ctx.report_error("Unknown enum variant");
+                return result;
+            }
+            var variant_fields = ctx.get_enum_variant_fields(expected_type, variant_idx);
+            if pat.n_payload != variant_fields.n_fields {
+                result.has_error = true;
+                ctx.report_error("Variant payload mismatch");
+                return result;
+            }
+            var sub_bindings: [Binding; 64] = [Binding { .. }; 64];
+            var n_sub: i64 = 0;
+            for i in 0..pat.n_payload {
+                var payload_type = variant_fields.types[i];
+                var sub_res = check_pattern(ctx.clone(), pat.payload[i], payload_type);
+                if sub_res.has_error {
+                    result.has_error = true;
+                    return result;
+                }
+                for j in 0..sub_res.n_bindings {
+                    sub_bindings[n_sub + j] = sub_res.bindings[j];
+                }
+                n_sub += sub_res.n_bindings;
+            }
+            result.n_bindings = n_sub;
+            result.type_idx = expected_type;
+            // Refinement: if payload binds, refine types (GADT-like, simplified).
+            // Assume ctx handles refinement.
+        },
+        PATTERN_ARRAY => {
+            if !ctx.is_array_type(expected_type) {
+                result.has_error = true;
+                ctx.report_error("Array pattern on non-array type");
+                return result;
+            }
+            var array_length = ctx.get_array_length(expected_type);
+            var elem_type = ctx.get_array_elem_type(expected_type);
+            if pat.length != array_length {
+                result.has_error = true;
+                ctx.report_error("Array length mismatch");
+                return result;
+            }
+            var sub_bindings: [Binding; 64] = [Binding { .. }; 64];
+            var n_sub: i64 = 0;
+            for i in 0..pat.length {
+                var sub_res = check_pattern(ctx.clone(), pat.elements[i], elem_type);
+                if sub_res.has_error {
+                    result.has_error = true;
+                    return result;
+                }
+                for j in 0..sub_res.n_bindings {
+                    sub_bindings[n_sub + j] = sub_res.bindings[j];
+                }
+                n_sub += sub_res.n_bindings;
+            }
+            result.n_bindings = n_sub;
+            result.type_idx = expected_type;
+        },
+        PATTERN_OR => {
+            // Check both sides against expected_type, union bindings.
+            var left_res = check_pattern(ctx.clone(), *pat.left, expected_type);
+            var right_res = check_pattern(ctx.clone(), *pat.right, expected_type);
+            if left_res.has_error || right_res.has_error {
+                result.has_error = true;
+                return result;
+            }
+            if !ctx.types_equal(left_res.type_idx, right_res.type_idx) {
+                result.has_error = true;
+                ctx.report_error("Or patterns have different types");
+                return result;
+            }
+            // Union bindings (assume no conflicts; ctx checks scope).
+            var all_bindings: [Binding; 64] = [Binding { .. }; 64];
+            var n_all: i64 = 0;
+            // Add left.
+            for i in 0..left_res.n_bindings {
+                all_bindings[n_all] = left_res.bindings[i];
+                n_all += 1;
+            }
+            // Add right, skipping duplicates.
+            for i in 0..right_res.n_bindings {
+                var dup = false;
+                for j in 0..n_all {
+                    if all_bindings[j].name == right_res.bindings[i].name {
+                        dup = true;
+                        break;
+                    }
+                }
+                if !dup {
+                    all_bindings[n_all] = right_res.bindings[i];
+                    n_all += 1;
+                }
+            }
+            for i in 0..n_all {
+                result.bindings[i] = all_bindings[i];
+            }
+            result.n_bindings = n_all;
+            result.type_idx = left_res.type_idx;
+        },
+        _ => {
+            result.has_error = true;
+            ctx.report_error("Unknown pattern kind");
+        }
+    }
+
+    return result;
+}
+
+// Helper: infer_pattern_type (top-level type inference for pattern).
+fn infer_pattern_type(ctx: TypeContext, pat: Pattern) -> i64 with Panic {
+    // Simplified: recurse based on kind.
+    match pat.kind {
+        PATTERN_WILDCARD => {
+            // Wildcard infers to unknown or error; assume caller provides expected.
+            return ctx.get_unknown_type();
+        },
+        PATTERN_LITERAL => {
+            return ctx.get_literal_type(pat.literal);
+        },
+        PATTERN_VARIABLE => {
+            // Variables don't infer type alone; need context.
+            return ctx.get_unknown_type();
+        },
+        PATTERN_STRUCT => {
+            // Infer from struct name.
+            var struct_name = pat.struct_name;
+            return ctx.lookup_struct_type(struct_name);
+        },
+        PATTERN_ENUM_VARIANT => {
+            var enum_name = pat.enum_name;
+            var enum_type = ctx.lookup_enum_type(enum_name);
+            // Verify variant belongs to enum.
+            if ctx.has_variant(enum_type, pat.variant_name) {
+                return enum_type;
+            } else {
+                ctx.report_error("Invalid variant for enum");
+                return ctx.get_error_type();
+            }
+        },
+        PATTERN_ARRAY => {
+            // Infer element type from first non-wildcard, or unknown.
+            var elem_type: i64 = ctx.get_unknown_type();
+            for i in 0..pat.length {
+                if pat.elements[i].kind != PATTERN_WILDCARD {
+                    elem_type = infer_pattern_type(ctx.clone(), pat.elements[i]);
+                    break;
+                }
+            }
+            return ctx.get_array_type(elem_type, pat.length);
+        },
+        PATTERN_OR => {
+            var left_type = infer_pattern_type(ctx.clone(), *pat.left);
+            var right_type = infer_pattern_type(ctx.clone(), *pat.right);
+            if ctx.types_equal(left_type, right_type) {
+                return left_type;
+            } else {
+                ctx.report_error("Or patterns incompatible types");
+                return ctx.get_error_type();
+            }
+        },
+        _ => {
+            return ctx.get_unknown_type();
+        }
+    }
+}
+
+// Helper: pattern_binds_variables.
+fn pattern_binds_variables(pat: Pattern) -> [Binding; 16] with Panic {
+    var binds: [Binding; 16] = [Binding { name: Stringnew(), type_idx: 0, mutable: false }; 16];
+    var n_binds: i64 = 0;
+    // Recursive collection similar to check_pattern, but collect without types.
+    // Omitted for brevity; similar to binding collection in check_pattern.
+    // Assume returns bindings array with n_binds set in caller.
+    return binds;
+}
+
+// Helper: are_patterns_disjoint (for overlap checking in or-patterns, simplified).
+fn are_patterns_disjoint(pat1: Pattern, pat2: Pattern) -> bool with Panic {
+    // Basic check: if both literals and different values.
+    if pat1.kind == PATTERN_LITERAL && pat2.kind == PATTERN_LITERAL {
+        return pat1.literal != pat2.literal;
+    }
+    // Wildcard overlaps everything.
+    if pat1.kind == PATTERN_WILDCARD || pat2.kind == PATTERN_WILDCARD {
+        return false;
+    }
+    // Struct/enum: recurse on fields if same name.
+    if (pat1.kind == PATTERN_STRUCT && pat2.kind == PATTERN_STRUCT) ||
+       (pat1.kind == PATTERN_ENUM_VARIANT && pat2.kind == PATTERN_ENUM_VARIANT) {
+        if pat1.name != pat2.name {
+            return true;
+        }
+        // Recurse on fields for disjointness (simplified: assume disjoint if any field disjoint).
+        for i in 0..pat1.n_fields {
+            if !are_patterns_disjoint(pat1.fields[i], pat2.fields[i]) {
+                return false;
+            }
+        }
+        return true;
+    }
+    // Default: assume not disjoint (conservative).
+    return false;
+}
+
+// Core exhaustiveness checking.
+fn check_exhaustiveness(ctx: TypeContext, patterns: [Pattern; 64], n_patterns: i64, scrutinee_type: i64) -> MatchCheckResult with Panic {
+    var result: MatchCheckResult = MatchCheckResult {
+        all_covered: false,
+        uncovered_patterns: [Pattern { kind: 0, .. }; 16],  // Dummy patterns for uncovered constructors.
+        n_uncovered: 0,
+    };
+
+    // Step 1: Get all constructors of scrutinee_type.
+    var constructors = get_constructors(ctx.clone(), scrutinee_type);
+    var n_cons = ctx.get_n_constructors(scrutinee_type);  // Assume helper.
+
+    // Step 2: For each pattern, compute coverage using specialization.
+    // Use a set of remaining constructors to cover.
+    var remaining: [i64; 32] = [0i64; 32];  // Indices of remaining constructors.
+    for i in 0..n_cons {
+        remaining[i] = i;
+    }
+    var n_remaining: i64 = n_cons;
+
+    for p in 0..n_patterns {
+        var current_pat = patterns[p];
+        // Normalize or-patterns: treat as multiple patterns.
+        if current_pat.kind == PATTERN_OR {
+            // Recurse or flatten (simplified: check left and right separately).
+            var left_covered = specialize_pattern(ctx.clone(), *current_pat.left, constructors, n_cons);
+            var right_covered = specialize_pattern(ctx.clone(), *current_pat.right, constructors, n_cons);
+            // Union coverage.
+            // Omitted detailed set ops; assume update remaining.
+        } else {
+            specialize_pattern(ctx.clone(), current_pat, constructors, n_cons);
+        }
+        // Update remaining based on what this pattern covers.
+        // For each remaining cons, if pattern matches it, remove.
+        var new_remaining: [i64; 32] = [0i64; 32];
+        var n_new: i64 = 0;
+        for i in 0..n_remaining {
+            var cons_idx = remaining[i];
+            if !does_pattern_cover_constructor(ctx, current_pat, constructors[cons_idx]) {
+                new_remaining[n_new] = cons_idx;
+                n_new += 1;
+            }
+        }
+        n_remaining = n_new;
+        remaining = new_remaining;  // Copy.
+    }
+
+    // Step 3: If n_remaining == 0, exhaustive.
+    result.all_covered = (n_remaining == 0);
+
+    // Step 4: Generate uncovered patterns (e.g., missing variants as literal patterns).
+    if !result.all_covered {
+        for i in 0..n_remaining {
+            var cons_idx = remaining[i];
+            var unc_pat = generate_uncovered_pattern(constructors[cons_idx]);
+            result.uncovered_patterns[i] = unc_pat;
+        }
+        result.n_uncovered = n_remaining;
+    }
+
+    // Special case for infinite types (int): if any pattern is wildcard, covered.
+    if ctx.is_int_type(scrutinee_type) {
+        var has_wildcard = false;
+        for p in 0..n_patterns {
+            if patterns[p].kind == PATTERN_WILDCARD {
+                has_wildcard = true;
+                break;
+            }
+        }
+        if has_wildcard {
+            result.all_covered = true;
+            result.n_uncovered = 0;
+        }
+    }
+
+    // For bool, check true/false coverage.
+    // Already handled by constructors.
+
+   

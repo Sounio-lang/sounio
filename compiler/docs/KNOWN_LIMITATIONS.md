@@ -55,7 +55,7 @@ if x && side_effect() { ... }
 - **Status**: Not implemented
 - **Issue**: Custom unit type definitions not supported
 - **Workaround**: Use structs with fields to represent units
-```d
+```sio
 // Instead of:
 unit kg;
 

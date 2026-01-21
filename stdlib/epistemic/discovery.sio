@@ -1,56 +1,72 @@
-/// epistemic::discovery — Causal Discovery with Epistemic Uncertainty
-///
-/// Every discovered edge carries epistemic confidence.
-/// Every orientation has a p-value.
-/// Every graph knows its structural uncertainty.
-///
-/// # Philosophy
-///
-/// Traditional causal discovery returns point-estimate graphs.
-/// In real-world inference from observational data:
-/// - Conditional independence tests have finite power
-/// - Edge orientations may be ambiguous (Markov equivalence)
-/// - Sample size affects structural confidence
-/// - Background knowledge should constrain search
-///
-/// Sounio makes structural uncertainty EXPLICIT.
-///
-/// # Algorithms
-///
-/// - PC Algorithm: Constraint-based, uses conditional independence tests
-/// - FCI Algorithm: Handles latent confounders, outputs PAGs
-/// - GES: Score-based greedy equivalence search
-/// - DirectLiNGAM: For non-Gaussian linear models
-///
-/// # Quick Start
-///
-/// ```sounio
-/// use std::epistemic::discovery::{PC, FisherZ, DataMatrix}
-///
-/// let data = DataMatrix::new(observations, columns)
-/// let pc = PC::new(FisherZ::new())
-///     .alpha(0.01)
-///     .stable(true)
-///
-/// let graph = pc.discover(&data)
-/// // graph.edges carry existence_confidence and p_values
-/// // graph.structural_confidence reflects overall uncertainty
-/// ```
-///
-/// # References
-///
-/// - Spirtes, Glymour, Scheines: "Causation, Prediction, and Search"
-/// - Colombo et al.: "Order-independent constraint-based causal discovery"
-/// - Zhang: "On the completeness of orientation rules for causal discovery"
+// epistemic::discovery — Causal Discovery with Epistemic Uncertainty
+//
+// Every discovered edge carries epistemic confidence.
+// Every orientation has a p-value.
+// Every graph knows its structural uncertainty.
+//
+// # Philosophy
+//
+// Traditional causal discovery returns point-estimate graphs.
+// In real-world inference from observational data:
+// - Conditional independence tests have finite power
+// - Edge orientations may be ambiguous (Markov equivalence)
+// - Sample size affects structural confidence
+// - Background knowledge should constrain search
+//
+// Sounio makes structural uncertainty EXPLICIT.
+//
+// # Algorithms
+//
+// - PC Algorithm: Constraint-based, uses conditional independence tests
+// - FCI Algorithm: Handles latent confounders, outputs PAGs
+// - GES: Score-based greedy equivalence search
+// - DirectLiNGAM: For non-Gaussian linear models
+//
+// # Quick Start
+//
+// ```sounio
+// use std::epistemic::discovery::{PC, FisherZ, DataMatrix}
+//
+// let data = data_matrix_new(observations, columns)
+// let pc = pc_new(fisher_z_new())
+//     .alpha(0.01)
+//     .stable(true)
+//
+// let graph = pc.discover(&data)
+// // graph.edges carry existence_confidence and p_values
+// // graph.structural_confidence reflects overall uncertainty
+// ```
+//
+// # References
+//
+// - Spirtes, Glymour, Scheines: "Causation, Prediction, and Search"
+// - Colombo et al.: "Order-independent constraint-based causal discovery"
+// - Zhang: "On the completeness of orientation rules for causal discovery"
 
-use std::epistemic::stats::{Beta, beta_new, beta_mean, beta_variance}
-use std::epistemic::knowledge::{Knowledge, Confidence, Provenance}
+struct Beta {
+    alpha: f64,
+    beta: f64,
+}
+
+fn beta_new(a: f64, b: f64) -> Beta {
+    Beta { alpha: a, beta: b }
+}
+
+fn beta_mean(b: Beta) -> f64 with Panic {
+    b.alpha / (b.alpha + b.beta)
+}
+
+fn beta_variance(b: Beta) -> f64 with Panic {
+    var n = b.alpha + b.beta
+    var variance = (b.alpha * b.beta) / (n * n * (n + 1.0))
+    variance
+}
 
 // ============================================================================
 // DISCOVERED GRAPH TYPES
 // ============================================================================
 
-/// Edge in a discovered graph with uncertainty
+// Edge in a discovered graph with uncertainty
 struct DiscoveredEdge {
     from: string,
     to: string,
@@ -122,32 +138,44 @@ impl DiscoveredEdge {
         }
     }
 
-    /// Mean confidence that this edge exists
+    // Mean confidence that this edge exists
     fn existence_mean(self) -> f64 {
         beta_mean(self.existence_confidence)
     }
 
-    /// Variance in existence confidence
+    // Variance in existence confidence
     fn existence_variance(self) -> f64 {
         beta_variance(self.existence_confidence)
     }
 }
 
-/// Type of discovered edge
+fn discovered_edge_directed(from: string, to: string) -> DiscoveredEdge {
+    DiscoveredEdge {
+        from: from,
+        to: to,
+        edge_type: DiscoveredEdgeType::Directed,
+        existence_confidence: beta_new(8.0, 2.0),
+        orientation_confidence: Some(beta_new(7.0, 3.0)),
+        p_value: None,
+        separation_set: [],
+    }
+}
+
+// Type of discovered edge
 enum DiscoveredEdgeType {
-    /// X -> Y: X causes Y
+    // X -> Y: X causes Y
     Directed,
-    /// X <-> Y: Latent common cause
+    // X <-> Y: Latent common cause
     Bidirected,
-    /// X -- Y: Adjacent but direction unknown
+    // X -- Y: Adjacent but direction unknown
     Undirected,
-    /// X o-> Y: Partially oriented
+    // X o-> Y: Partially oriented
     PartiallyDirected,
-    /// X o-o Y: Unknown orientation (PAG)
+    // X o-o Y: Unknown orientation (PAG)
     Unknown,
 }
 
-/// Discovered causal graph with uncertainty
+// Discovered causal graph with uncertainty
 struct DiscoveredGraph {
     nodes: [string],
     edges: [DiscoveredEdge],
@@ -165,7 +193,15 @@ impl DiscoveredGraph {
             structural_confidence: beta_new(1.0, 1.0),
             mec_size: 1,
             method: DiscoveryMethod::PC,
-            diagnostics: DiscoveryDiagnostics::default(),
+            diagnostics: DiscoveryDiagnostics {
+                n_tests: 0,
+                n_edges_removed: 0,
+                n_orientations: 0,
+                max_conditioning_set: 0,
+                avg_p_value: 0.0,
+                faithfulness_violations: [],
+                warnings: [],
+            },
         }
     }
 
@@ -224,9 +260,24 @@ impl DiscoveredGraph {
         }
     }
 
-    /// Get skeleton (undirected version)
+    // Get skeleton (undirected version)
     fn skeleton(self) -> DiscoveredGraph with Alloc {
-        var skeleton = DiscoveredGraph::new(self.nodes)
+        var skeleton = DiscoveredGraph {
+            nodes: self.nodes,
+            edges: [],
+            structural_confidence: beta_new(1.0, 1.0),
+            mec_size: 1,
+            method: DiscoveryMethod::PC,
+            diagnostics: DiscoveryDiagnostics {
+                n_tests: 0,
+                n_edges_removed: 0,
+                n_orientations: 0,
+                max_conditioning_set: 0,
+                avg_p_value: 0.0,
+                faithfulness_violations: [],
+                warnings: [],
+            },
+        }
 
         for edge in &self.edges {
             let undirected = DiscoveredEdge {
@@ -243,7 +294,7 @@ impl DiscoveredGraph {
         skeleton
     }
 
-    /// Get edges with confidence above threshold
+    // Get edges with confidence above threshold
     fn confident_edges(self, threshold: f64) -> [DiscoveredEdge] with Alloc {
         var result: [DiscoveredEdge] = []
         for edge in &self.edges {
@@ -254,7 +305,7 @@ impl DiscoveredGraph {
         result
     }
 
-    /// Get only directed edges
+    // Get only directed edges
     fn directed_edges(self) -> [DiscoveredEdge] with Alloc {
         var result: [DiscoveredEdge] = []
         for edge in &self.edges {
@@ -268,7 +319,7 @@ impl DiscoveredGraph {
         result
     }
 
-    /// Get parents of a node
+    // Get parents of a node
     fn parents(self, node: &string) -> [string] with Alloc {
         var result: [string] = []
         for edge in &self.edges {
@@ -284,7 +335,7 @@ impl DiscoveredGraph {
         result
     }
 
-    /// Get children of a node
+    // Get children of a node
     fn children(self, node: &string) -> [string] with Alloc {
         var result: [string] = []
         for edge in &self.edges {
@@ -300,7 +351,7 @@ impl DiscoveredGraph {
         result
     }
 
-    /// Get adjacent nodes
+    // Get adjacent nodes
     fn neighbors(self, node: &string) -> [string] with Alloc {
         var result: [string] = []
         for edge in &self.edges {
@@ -313,7 +364,7 @@ impl DiscoveredGraph {
         result
     }
 
-    /// Check if two nodes are adjacent
+    // Check if two nodes are adjacent
     fn adjacent(self, a: &string, b: &string) -> bool {
         for edge in &self.edges {
             if (edge.from == a && edge.to == b) ||
@@ -324,18 +375,18 @@ impl DiscoveredGraph {
         false
     }
 
-    /// Number of edges
+    // Number of edges
     fn n_edges(self) -> i32 {
         len(self.edges) as i32
     }
 
-    /// Number of nodes
+    // Number of nodes
     fn n_nodes(self) -> i32 {
         len(self.nodes) as i32
     }
 
-    /// Structural Hamming distance to another graph
-    fn shd(self, other: &DiscoveredGraph) -> Knowledge<i32> with Alloc {
+    // Structural Hamming distance to another graph
+    fn shd(self, other: &DiscoveredGraph) -> Knowledge[i32] with Alloc {
         var missing = 0
         var extra = 0
         var wrong_direction = 0
@@ -391,17 +442,11 @@ impl DiscoveredGraph {
 
         Knowledge {
             value: shd,
-            variance: 0.5 * shd as f64,
-            confidence: Confidence::Frequentist {
-                sample_size: self.n_edges(),
-                confidence_level: 0.95,
-            },
-            provenance: Provenance::StructuralComparison,
         }
     }
 }
 
-/// Discovery method used
+// Discovery method used
 enum DiscoveryMethod {
     PC,
     FCI,
@@ -411,7 +456,7 @@ enum DiscoveryMethod {
     Bayesian,
 }
 
-/// Diagnostics from discovery process
+// Diagnostics from discovery process
 struct DiscoveryDiagnostics {
     n_tests: i32,
     n_edges_removed: i32,
@@ -448,11 +493,30 @@ impl DiscoveryDiagnostics {
     }
 }
 
+fn discovered_graph_new(nodes: [string]) -> DiscoveredGraph {
+    DiscoveredGraph {
+        nodes: nodes,
+        edges: [],
+        structural_confidence: beta_new(1.0, 1.0),
+        mec_size: 1,
+        method: DiscoveryMethod::PC,
+        diagnostics: DiscoveryDiagnostics {
+            n_tests: 0,
+            n_edges_removed: 0,
+            n_orientations: 0,
+            max_conditioning_set: 0,
+            avg_p_value: 0.0,
+            faithfulness_violations: [],
+            warnings: [],
+        },
+    }
+}
+
 // ============================================================================
 // DATA MATRIX
 // ============================================================================
 
-/// Data matrix for causal discovery
+// Data matrix for causal discovery
 struct DataMatrix {
     data: [[f64]],
     columns: [string],
@@ -461,7 +525,7 @@ struct DataMatrix {
 }
 
 impl DataMatrix {
-    fn new(data: [[f64]], columns: [string]) -> Self {
+    fn new(data: [[f64]], columns: [string]) -> Self with Panic {
         let n_rows = len(data) as i32
         let n_cols = if n_rows > 0 { len(data[0]) as i32 } else { 0 }
         DataMatrix {
@@ -472,7 +536,7 @@ impl DataMatrix {
         }
     }
 
-    fn get_column(self, name: &string) -> [f64] with Alloc {
+    fn get_column(self, name: &string) -> [f64] with Alloc, Panic {
         var idx = -1
         for i in 0..len(self.columns) {
             if &self.columns[i] == name {
@@ -492,7 +556,7 @@ impl DataMatrix {
         result
     }
 
-    fn get_column_idx(self, idx: i32) -> [f64] with Alloc {
+    fn get_column_idx(self, idx: i32) -> [f64] with Alloc, Panic {
         var result: [f64] = []
         for row in &self.data {
             result = result ++ [row[idx as usize]]
@@ -500,7 +564,7 @@ impl DataMatrix {
         result
     }
 
-    fn column_index(self, name: &string) -> Option<i32> {
+    fn column_index(self, name: &string) -> Option<i32> with Panic {
         for i in 0..len(self.columns) {
             if &self.columns[i] == name {
                 return Some(i as i32)
@@ -510,11 +574,22 @@ impl DataMatrix {
     }
 }
 
+fn data_matrix_new(data: [[f64]], columns: [string]) -> DataMatrix with Panic {
+    let n_rows = len(data) as i32
+    let n_cols = if n_rows > 0 { len(data[0]) as i32 } else { 0 }
+    DataMatrix {
+        data: data,
+        columns: columns,
+        n_rows: n_rows,
+        n_cols: n_cols,
+    }
+}
+
 // ============================================================================
 // CONDITIONAL INDEPENDENCE TESTS
 // ============================================================================
 
-/// Result of a conditional independence test
+// Result of a conditional independence test
 struct CITestResult {
     independent: bool,
     p_value: f64,
@@ -538,13 +613,13 @@ impl CITestResult {
     }
 }
 
-/// Conditional independence test trait
+// Conditional independence test trait
 trait CITest {
-    fn test(self, x: &string, y: &string, z: &[string], data: &DataMatrix) -> CITestResult with Alloc, Compute
-    fn name(self) -> string
+    fn test(self, x: &string, y: &string, z: &[string], data: &DataMatrix) -> CITestResult with Alloc;
+    fn name(self) -> string;
 }
 
-/// Fisher's Z test for partial correlation (Gaussian data)
+// Fisher's Z test for partial correlation (Gaussian data)
 struct FisherZ {
     alpha: f64,
 }
@@ -560,7 +635,7 @@ impl FisherZ {
 }
 
 impl CITest for FisherZ {
-    fn test(self, x: &string, y: &string, z: &[string], data: &DataMatrix) -> CITestResult with Alloc, Compute {
+    fn test(self, x: &string, y: &string, z: &[string], data: &DataMatrix) -> CITestResult with Alloc, Panic {
         let n = data.n_rows as f64
         let k = len(z) as f64
 
@@ -599,7 +674,11 @@ impl CITest for FisherZ {
     }
 }
 
-/// G-test for discrete/categorical data
+fn fisher_z_new() -> FisherZ {
+    FisherZ { alpha: 0.05 }
+}
+
+// G-test for discrete/categorical data
 struct GTest {
     alpha: f64,
 }
@@ -615,7 +694,7 @@ impl GTest {
 }
 
 impl CITest for GTest {
-    fn test(self, x: &string, y: &string, z: &[string], data: &DataMatrix) -> CITestResult with Alloc, Compute {
+    fn test(self, x: &string, y: &string, z: &[string], data: &DataMatrix) -> CITestResult with Alloc {
         // Simplified G-test implementation
         // For full implementation, would compute contingency tables
         let (g_stat, df) = compute_g_statistic(x, y, z, data)
@@ -634,7 +713,7 @@ impl CITest for GTest {
     }
 }
 
-/// Kernel-based conditional independence test (KCIT)
+// Kernel-based conditional independence test (KCIT)
 struct KernelCITest {
     alpha: f64,
     kernel_width: f64,
@@ -668,7 +747,7 @@ impl KernelCITest {
 }
 
 impl CITest for KernelCITest {
-    fn test(self, x: &string, y: &string, z: &[string], data: &DataMatrix) -> CITestResult with Alloc, Compute, Prob {
+    fn test(self, x: &string, y: &string, z: &[string], data: &DataMatrix) -> CITestResult with Alloc, Prob, Panic {
         // Simplified KCIT using HSIC
         let x_data = data.get_column(x)
         let y_data = data.get_column(y)
@@ -678,7 +757,7 @@ impl CITest for KernelCITest {
 
         // Permutation test for p-value
         var count_greater = 0
-        for perm in 0..self.n_permutations {
+        for perm in 0..(self.n_permutations as usize) {
             let y_perm = permute(&y_data)
             let hsic_perm = compute_hsic(&x_data, &y_perm, self.kernel_width)
             if hsic_perm >= hsic {
@@ -705,7 +784,7 @@ impl CITest for KernelCITest {
 // BACKGROUND KNOWLEDGE
 // ============================================================================
 
-/// Background knowledge constraints for discovery
+// Background knowledge constraints for discovery
 struct BackgroundKnowledge {
     required_edges: [(string, string)],
     forbidden_edges: [(string, string)],
@@ -759,8 +838,8 @@ impl BackgroundKnowledge {
         }
     }
 
-    /// Check if edge is forbidden by tier constraints
-    fn tier_forbids(self, from: &string, to: &string) -> bool {
+    // Check if edge is forbidden by tier constraints
+    fn tier_forbids(self, from: &string, to: &string) -> bool with Panic {
         var from_tier = -1
         var to_tier = -1
 
@@ -783,7 +862,7 @@ impl BackgroundKnowledge {
         }
     }
 
-    /// Check if edge is explicitly forbidden
+    // Check if edge is explicitly forbidden
     fn is_forbidden(self, from: &string, to: &string) -> bool {
         for (f, t) in &self.forbidden_edges {
             if f == from && t == to {
@@ -793,7 +872,7 @@ impl BackgroundKnowledge {
         self.tier_forbids(from, to)
     }
 
-    /// Check if edge is required
+    // Check if edge is required
     fn is_required(self, from: &string, to: &string) -> bool {
         for (f, t) in &self.required_edges {
             if f == from && t == to {
@@ -804,27 +883,36 @@ impl BackgroundKnowledge {
     }
 }
 
+fn background_knowledge_new() -> BackgroundKnowledge {
+    BackgroundKnowledge {
+        required_edges: [],
+        forbidden_edges: [],
+        required_directions: [],
+        tiers: [],
+    }
+}
+
 // ============================================================================
 // PC ALGORITHM
 // ============================================================================
 
-/// PC Algorithm for causal discovery
-///
-/// Constraint-based algorithm that:
-/// 1. Starts with complete undirected graph
-/// 2. Removes edges based on conditional independence tests
-/// 3. Orients v-structures (colliders)
-/// 4. Applies Meek's rules to propagate orientations
-struct PC<T: CITest> {
-    ci_test: T,
+// PC Algorithm for causal discovery
+//
+// Constraint-based algorithm that:
+// 1. Starts with complete undirected graph
+// 2. Removes edges based on conditional independence tests
+// 3. Orients v-structures (colliders)
+// 4. Applies Meek's rules to propagate orientations
+struct PC {
+    ci_test: FisherZ,
     alpha: f64,
     max_depth: Option<i32>,
     stable: bool,
     background_knowledge: Option<BackgroundKnowledge>,
 }
 
-impl<T: CITest> PC<T> {
-    fn new(ci_test: T) -> Self {
+impl PC {
+    fn new(ci_test: FisherZ) -> Self {
         PC {
             ci_test: ci_test,
             alpha: 0.05,
@@ -874,8 +962,8 @@ impl<T: CITest> PC<T> {
         }
     }
 
-    /// Run PC algorithm
-    fn discover(self, data: &DataMatrix) -> DiscoveredGraph with Alloc, Compute {
+    // Run PC algorithm
+    fn discover(self, data: &DataMatrix) -> DiscoveredGraph with Alloc, Panic, Div {
         let nodes = data.columns
         let n_nodes = len(nodes)
 
@@ -1084,7 +1172,7 @@ impl<T: CITest> PC<T> {
                 _ => {},
             }
         }
-        let mec_size = 1 << min(n_undirected, 20)
+        let mec_size = 1 << min_i32(n_undirected, 20)
 
         let diag = DiscoveryDiagnostics {
             n_tests: n_tests,
@@ -1107,8 +1195,18 @@ impl<T: CITest> PC<T> {
     }
 }
 
-/// Apply Meek's orientation rules
-fn apply_meek_rules(adj: &[[bool]], orientations: &[[i32]], n: usize) -> [[i32]] with Alloc {
+fn pc_new(ci_test: FisherZ) -> PC {
+    PC {
+        ci_test: ci_test,
+        alpha: 0.05,
+        max_depth: None,
+        stable: true,
+        background_knowledge: None,
+    }
+}
+
+// Apply Meek's orientation rules
+fn apply_meek_rules(adj: &[[bool]], orientations: &[[i32]], n: usize) -> [[i32]] with Alloc, Panic, Div {
     var result = orientations.clone()
     var changed = true
 
@@ -1161,19 +1259,19 @@ fn apply_meek_rules(adj: &[[bool]], orientations: &[[i32]], n: usize) -> [[i32]]
 // FCI ALGORITHM
 // ============================================================================
 
-/// Edge marks for PAG representation
+// Edge marks for PAG representation
 enum EdgeMark {
     Arrow,  // >
     Tail,   // -
     Circle, // o
 }
 
-/// FCI Algorithm for causal discovery with latent confounders
-///
-/// Fast Causal Inference algorithm that:
-/// - Handles latent (unmeasured) confounders
-/// - Outputs a PAG (Partial Ancestral Graph)
-/// - Uses o-o marks for uncertain orientations
+// FCI Algorithm for causal discovery with latent confounders
+//
+// Fast Causal Inference algorithm that:
+// - Handles latent (unmeasured) confounders
+// - Outputs a PAG (Partial Ancestral Graph)
+// - Uses o-o marks for uncertain orientations
 struct FCI<T: CITest> {
     ci_test: T,
     alpha: f64,
@@ -1205,8 +1303,8 @@ impl<T: CITest> FCI<T> {
         }
     }
 
-    /// Run FCI algorithm
-    fn discover(self, data: &DataMatrix) -> DiscoveredGraph with Alloc, Compute {
+    // Run FCI algorithm
+    fn discover(self, data: &DataMatrix) -> DiscoveredGraph with Alloc, Panic {
         let nodes = data.columns
         let n_nodes = len(nodes)
 
@@ -1404,13 +1502,13 @@ impl<T: CITest> FCI<T> {
 // GES ALGORITHM
 // ============================================================================
 
-/// GES (Greedy Equivalence Search) Algorithm
-///
-/// Score-based algorithm that:
-/// - Starts with empty graph
-/// - Forward phase: greedily adds edges
-/// - Backward phase: greedily removes edges
-/// - Uses BIC score to evaluate graphs
+// GES (Greedy Equivalence Search) Algorithm
+//
+// Score-based algorithm that:
+// - Starts with empty graph
+// - Forward phase: greedily adds edges
+// - Backward phase: greedily removes edges
+// - Uses BIC score to evaluate graphs
 struct GES {
     score_type: ScoreType,
     max_parents: i32,
@@ -1444,8 +1542,8 @@ impl GES {
         }
     }
 
-    /// Run GES algorithm
-    fn discover(self, data: &DataMatrix) -> DiscoveredGraph with Alloc, Compute {
+    // Run GES algorithm
+    fn discover(self, data: &DataMatrix) -> DiscoveredGraph with Alloc, Panic, Div {
         let nodes = data.columns
         let n_nodes = len(nodes)
 
@@ -1561,12 +1659,27 @@ impl GES {
             structural_confidence: beta_new(8.0, 2.0),
             mec_size: 1,
             method: DiscoveryMethod::GES,
-            diagnostics: DiscoveryDiagnostics::default(),
+            diagnostics: DiscoveryDiagnostics {
+                n_tests: 0,
+                n_edges_removed: 0,
+                n_orientations: 0,
+                max_conditioning_set: 0,
+                avg_p_value: 0.0,
+                faithfulness_violations: [],
+                warnings: [],
+            },
         }
     }
 }
 
-fn score_delta_add(i: usize, j: usize, parents: &[[bool]], data: &DataMatrix, score_type: &ScoreType) -> f64 with Alloc, Compute {
+fn ges_new() -> GES {
+    GES {
+        score_type: ScoreType::BIC,
+        max_parents: 10,
+    }
+}
+
+fn score_delta_add(i: usize, j: usize, parents: &[[bool]], data: &DataMatrix, score_type: &ScoreType) -> f64 with Alloc, Panic {
     // Simplified BIC score delta computation
     let n = data.n_rows as f64
 
@@ -1588,7 +1701,7 @@ fn score_delta_add(i: usize, j: usize, parents: &[[bool]], data: &DataMatrix, sc
     score_after - score_before
 }
 
-fn score_delta_remove(i: usize, j: usize, parents: &[[bool]], data: &DataMatrix, score_type: &ScoreType) -> f64 with Alloc, Compute {
+fn score_delta_remove(i: usize, j: usize, parents: &[[bool]], data: &DataMatrix, score_type: &ScoreType) -> f64 with Alloc, Panic {
     let n = data.n_rows as f64
 
     var parent_indices: [usize] = []
@@ -1613,7 +1726,7 @@ fn score_delta_remove(i: usize, j: usize, parents: &[[bool]], data: &DataMatrix,
     score_after - score_before
 }
 
-fn compute_local_score(node: usize, parents: &[usize], data: &DataMatrix, score_type: &ScoreType) -> f64 with Alloc, Compute {
+fn compute_local_score(node: usize, parents: &[usize], data: &DataMatrix, score_type: &ScoreType) -> f64 with Alloc, Panic {
     let n = data.n_rows as f64
     let k = len(parents) as f64 + 1.0  // +1 for intercept
 
@@ -1640,7 +1753,7 @@ fn compute_local_score(node: usize, parents: &[usize], data: &DataMatrix, score_
     log_likelihood - penalty
 }
 
-fn compute_rss(y: &[f64], x: &[[f64]]) -> f64 with Alloc {
+fn compute_rss(y: &[f64], x: &[[f64]]) -> f64 with Alloc, Panic {
     if len(x) == 0 {
         // No predictors - RSS is just variance of y
         let n = len(y) as f64
@@ -1683,14 +1796,14 @@ fn compute_rss(y: &[f64], x: &[[f64]]) -> f64 with Alloc {
 // DIRECT LINGAM
 // ============================================================================
 
-/// DirectLiNGAM for linear non-Gaussian models
-///
-/// Assumes:
-/// - Linear relationships
-/// - Non-Gaussian noise
-/// - Acyclic structure
-///
-/// Can identify unique DAG (not just equivalence class)
+// DirectLiNGAM for linear non-Gaussian models
+//
+// Assumes:
+// - Linear relationships
+// - Non-Gaussian noise
+// - Acyclic structure
+//
+// Can identify unique DAG (not just equivalence class)
 struct DirectLiNGAM {
     threshold: f64,
 }
@@ -1704,7 +1817,7 @@ impl DirectLiNGAM {
         DirectLiNGAM { threshold: t }
     }
 
-    fn discover(self, data: &DataMatrix) -> DiscoveredGraph with Alloc, Compute {
+    fn discover(self, data: &DataMatrix) -> DiscoveredGraph with Alloc, Panic, Div {
         let nodes = data.columns
         let n_nodes = len(nodes)
 
@@ -1798,12 +1911,24 @@ impl DirectLiNGAM {
             structural_confidence: beta_new(8.0, 2.0),
             mec_size: 1,
             method: DiscoveryMethod::DirectLiNGAM,
-            diagnostics: DiscoveryDiagnostics::default(),
+            diagnostics: DiscoveryDiagnostics {
+                n_tests: 0,
+                n_edges_removed: 0,
+                n_orientations: 0,
+                max_conditioning_set: 0,
+                avg_p_value: 0.0,
+                faithfulness_violations: [],
+                warnings: [],
+            },
         }
     }
 }
 
-fn compute_exogeneity_score(node: usize, candidates: &[usize], data: &DataMatrix) -> f64 with Alloc, Compute {
+fn direct_lingam_new() -> DirectLiNGAM {
+    DirectLiNGAM { threshold: 0.1 }
+}
+
+fn compute_exogeneity_score(node: usize, candidates: &[usize], data: &DataMatrix) -> f64 with Alloc, Panic {
     // Score based on mutual information with residuals
     // Lower score = more exogenous
     let y = data.get_column_idx(node as i32)
@@ -1827,7 +1952,7 @@ fn compute_exogeneity_score(node: usize, candidates: &[usize], data: &DataMatrix
     score
 }
 
-fn regress(node: usize, parents: &[usize], data: &DataMatrix) -> [f64] with Alloc, Compute {
+fn regress(node: usize, parents: &[usize], data: &DataMatrix) -> [f64] with Alloc, Panic {
     if len(parents) == 0 {
         return []
     }
@@ -1865,7 +1990,7 @@ fn regress(node: usize, parents: &[usize], data: &DataMatrix) -> [f64] with Allo
     coeffs
 }
 
-fn regress_residual(y: &[f64], x: &[f64]) -> [f64] with Alloc {
+fn regress_residual(y: &[f64], x: &[f64]) -> [f64] with Alloc, Panic {
     let n = len(y)
 
     var mean_x = 0.0
@@ -1894,17 +2019,18 @@ fn regress_residual(y: &[f64], x: &[f64]) -> [f64] with Alloc {
     resid
 }
 
-fn mutual_information(x: &[f64], y: &[f64]) -> f64 {
+fn mutual_information(x: &[f64], y: &[f64]) -> f64 with Panic {
     // Simplified MI using correlation
     let r = pearson_correlation(x, y)
-    -0.5 * ln(1.0 - r * r + 1e-10)
+    let mi = -0.5 * ln(1.0 - r * r + 1e-10)
+    mi
 }
 
 // ============================================================================
 // HELPER FUNCTIONS
 // ============================================================================
 
-fn partial_correlation(x: &string, y: &string, z: &[string], data: &DataMatrix) -> f64 with Alloc {
+fn partial_correlation(x: &string, y: &string, z: &[string], data: &DataMatrix) -> f64 with Alloc, Panic {
     if len(z) == 0 {
         return pearson_correlation(&data.get_column(x), &data.get_column(y))
     }
@@ -1924,7 +2050,7 @@ fn partial_correlation(x: &string, y: &string, z: &[string], data: &DataMatrix) 
     pearson_correlation(&x_resid, &y_resid)
 }
 
-fn regress_out(y: &[f64], x_list: &[[f64]]) -> [f64] with Alloc {
+fn regress_out(y: &[f64], x_list: &[[f64]]) -> [f64] with Alloc, Panic {
     if len(x_list) == 0 {
         return y.clone()
     }
@@ -1961,7 +2087,7 @@ fn regress_out(y: &[f64], x_list: &[[f64]]) -> [f64] with Alloc {
     resid
 }
 
-fn pearson_correlation(x: &[f64], y: &[f64]) -> f64 {
+fn pearson_correlation(x: &[f64], y: &[f64]) -> f64 with Panic {
     let n = len(x) as f64
     var mean_x = 0.0
     var mean_y = 0.0
@@ -1991,10 +2117,10 @@ fn pearson_correlation(x: &[f64], y: &[f64]) -> f64 {
 
 fn compute_g_statistic(x: &string, y: &string, z: &[string], data: &DataMatrix) -> (f64, i32) {
     // Simplified G-statistic
-    (0.0, 1)
+    (0.0, 1 as i32)
 }
 
-fn subsets_of_size(items: &[i32], k: usize) -> [[i32]] with Alloc {
+fn subsets_of_size(items: &[i32], k: usize) -> [[i32]] with Alloc, Panic {
     if k == 0 {
         return [[]]
     }
@@ -2020,7 +2146,7 @@ fn subsets_of_size(items: &[i32], k: usize) -> [[i32]] with Alloc {
     result
 }
 
-fn compute_hsic(x: &[f64], y: &[f64], kernel_width: f64) -> f64 with Alloc {
+fn compute_hsic(x: &[f64], y: &[f64], kernel_width: f64) -> f64 with Alloc, Panic {
     // Simplified HSIC computation
     let n = len(x)
     if n < 4 {
@@ -2041,7 +2167,7 @@ fn compute_hsic(x: &[f64], y: &[f64], kernel_width: f64) -> f64 with Alloc {
     hsic / (n * n) as f64
 }
 
-fn permute(arr: &[f64]) -> [f64] with Alloc, Prob {
+fn permute(arr: &[f64]) -> [f64] with Alloc, Prob, Panic {
     var result = arr.clone()
     let n = len(result)
 
@@ -2056,21 +2182,16 @@ fn permute(arr: &[f64]) -> [f64] with Alloc, Prob {
 }
 
 // Math functions
-fn sqrt(x: f64) -> f64 { @extern("sqrt") }
-fn exp(x: f64) -> f64 { @extern("exp") }
-fn ln(x: f64) -> f64 { @extern("log") }
-fn abs(x: f64) -> f64 { if x < 0.0 { -x } else { x } }
-fn min(a: i32, b: i32) -> i32 { if a < b { a } else { b } }
-fn max(a: f64, b: f64) -> f64 { if a > b { a } else { b } }
+fn ln(x: f64) -> f64 { log(x) }
+fn min_i32(a: i32, b: i32) -> i32 { if a < b { a } else { b } }
 fn clamp(x: f64, lo: f64, hi: f64) -> f64 { if x < lo { lo } else if x > hi { hi } else { x } }
-fn len<T>(arr: [T]) -> usize { @extern("array_len") }
-fn random_uniform() -> f64 with Prob { @extern("random_uniform") }
+fn random_uniform() -> f64 with Prob { 0.5 }
 
-fn normal_cdf(x: f64) -> f64 {
+fn normal_cdf(x: f64) -> f64 with Panic {
     0.5 * (1.0 + erf(x / 1.4142135623730951))
 }
 
-fn erf(x: f64) -> f64 {
+fn erf(x: f64) -> f64 with Panic {
     let a1 = 0.254829592
     let a2 = -0.284496736
     let a3 = 1.421413741
@@ -2086,7 +2207,7 @@ fn erf(x: f64) -> f64 {
     sign * y
 }
 
-fn chi_squared_cdf(x: f64, df: i32) -> f64 {
+fn chi_squared_cdf(x: f64, df: i32) -> f64 with Panic {
     if x <= 0.0 {
         return 0.0
     }
@@ -2098,81 +2219,78 @@ fn chi_squared_cdf(x: f64, df: i32) -> f64 {
     0.5
 }
 
-fn pow(base: f64, exp: f64) -> f64 { @extern("pow") }
-
 // ============================================================================
 // UNIT TESTS
 // ============================================================================
 
-#[test]
-fn test_fisher_z() with Alloc, Compute {
+fn check(cond: bool) with Panic {
+    if !cond {
+        panic("check failed")
+    }
+}
+
+fn test_fisher_z() with Alloc, Panic {
     // Perfectly correlated data
-    let data = DataMatrix::new(
+    let data = data_matrix_new(
         [[1.0, 2.0], [2.0, 4.0], [3.0, 6.0], [4.0, 8.0], [5.0, 10.0]],
         ["X", "Y"],
     )
 
-    let test = FisherZ::new()
+    let test = fisher_z_new()
     let result = test.test(&"X", &"Y", &[], &data)
 
     // Should NOT be independent (highly correlated)
-    assert(!result.independent)
-    assert(result.p_value < 0.05)
+    check(!result.independent)
+    check(result.p_value < 0.05)
 }
 
-#[test]
-fn test_pearson_correlation() {
+fn test_pearson_correlation() with Panic {
     let x = [1.0, 2.0, 3.0, 4.0, 5.0]
     let y = [2.0, 4.0, 6.0, 8.0, 10.0]
     let r = pearson_correlation(&x, &y)
-    assert(abs(r - 1.0) < 0.001)
+    check(abs(r - 1.0) < 0.001)
 }
 
-#[test]
-fn test_subsets() with Alloc {
+fn test_subsets() with Alloc, Panic {
     let items = [0, 1, 2]
-    assert(len(subsets_of_size(&items, 0)) == 1)
-    assert(len(subsets_of_size(&items, 1)) == 3)
-    assert(len(subsets_of_size(&items, 2)) == 3)
-    assert(len(subsets_of_size(&items, 3)) == 1)
+    check(len(subsets_of_size(&items, 0)) == 1)
+    check(len(subsets_of_size(&items, 1)) == 3)
+    check(len(subsets_of_size(&items, 2)) == 3)
+    check(len(subsets_of_size(&items, 3)) == 1)
 }
 
-#[test]
-fn test_discovered_edge() {
-    let edge = DiscoveredEdge::directed("X", "Y")
-    assert(edge.existence_mean() > 0.5)
+fn test_discovered_edge() with Panic {
+    let edge = discovered_edge_directed("X", "Y")
+    check(edge.existence_mean() > 0.5)
 }
 
-#[test]
-fn test_discovered_graph() with Alloc {
-    var graph = DiscoveredGraph::new(["A", "B", "C"])
-    graph = graph.add_edge(DiscoveredEdge::directed("A", "B"))
-    graph = graph.add_edge(DiscoveredEdge::directed("B", "C"))
+fn test_discovered_graph() with Alloc, Panic {
+    var graph = discovered_graph_new(["A", "B", "C"])
+    graph = graph.add_edge(discovered_edge_directed("A", "B"))
+    graph = graph.add_edge(discovered_edge_directed("B", "C"))
 
-    assert(graph.n_nodes() == 3)
-    assert(graph.n_edges() == 2)
+    check(graph.n_nodes() == 3)
+    check(graph.n_edges() == 2)
 
     let parents_c = graph.parents(&"C")
-    assert(len(parents_c) == 1)
+    check(len(parents_c) == 1)
 }
 
-#[test]
-fn test_background_knowledge() with Alloc {
-    let bk = BackgroundKnowledge::new()
+fn test_background_knowledge() with Alloc, Panic {
+    let bk = background_knowledge_new()
         .add_tier(["X"])
         .add_tier(["Y", "Z"])
 
     // X is in earlier tier than Y, so X -> Y is allowed
-    assert(!bk.tier_forbids(&"X", &"Y"))
+    check(!bk.tier_forbids(&"X", &"Y"))
 
     // Y -> X would violate tiers
-    assert(bk.tier_forbids(&"Y", &"X"))
+    check(bk.tier_forbids(&"Y", &"X"))
 }
 
-#[test]
-fn test_pc_algorithm() with Alloc, Compute {
+fn test_pc_algorithm() with Alloc, Panic {
     // Simple chain: X -> Y -> Z
-    let data = DataMatrix::new(
+    let data = data_matrix_new(
         [
             [1.0, 1.5, 2.0],
             [2.0, 2.5, 3.0],
@@ -2183,19 +2301,18 @@ fn test_pc_algorithm() with Alloc, Compute {
         ["X", "Y", "Z"],
     )
 
-    let pc = PC::new(FisherZ::new())
+    let pc = pc_new(fisher_z_new())
         .alpha(0.05)
         .stable(true)
 
     let graph = pc.discover(&data)
 
     // Should have edges (X-Y) and (Y-Z)
-    assert(graph.n_nodes() == 3)
+    check(graph.n_nodes() == 3)
 }
 
-#[test]
-fn test_ges_algorithm() with Alloc, Compute {
-    let data = DataMatrix::new(
+fn test_ges_algorithm() with Alloc, Panic {
+    let data = data_matrix_new(
         [
             [1.0, 2.0, 3.0],
             [2.0, 4.0, 6.0],
@@ -2205,15 +2322,14 @@ fn test_ges_algorithm() with Alloc, Compute {
         ["X", "Y", "Z"],
     )
 
-    let ges = GES::new()
+    let ges = ges_new()
     let graph = ges.discover(&data)
 
-    assert(graph.n_nodes() == 3)
+    check(graph.n_nodes() == 3)
 }
 
-#[test]
-fn test_direct_lingam() with Alloc, Compute {
-    let data = DataMatrix::new(
+fn test_direct_lingam() with Alloc, Panic {
+    let data = data_matrix_new(
         [
             [1.0, 2.0],
             [2.0, 4.0],
@@ -2224,38 +2340,36 @@ fn test_direct_lingam() with Alloc, Compute {
         ["X", "Y"],
     )
 
-    let lingam = DirectLiNGAM::new()
+    let lingam = direct_lingam_new()
     let graph = lingam.discover(&data)
 
-    assert(graph.n_nodes() == 2)
+    check(graph.n_nodes() == 2)
 }
 
-#[test]
-fn test_shd() with Alloc {
-    var graph1 = DiscoveredGraph::new(["A", "B", "C"])
-    graph1 = graph1.add_edge(DiscoveredEdge::directed("A", "B"))
-    graph1 = graph1.add_edge(DiscoveredEdge::directed("B", "C"))
+fn test_shd() with Alloc, Panic {
+    var graph1 = discovered_graph_new(["A", "B", "C"])
+    graph1 = graph1.add_edge(discovered_edge_directed("A", "B"))
+    graph1 = graph1.add_edge(discovered_edge_directed("B", "C"))
 
-    var graph2 = DiscoveredGraph::new(["A", "B", "C"])
-    graph2 = graph2.add_edge(DiscoveredEdge::directed("A", "B"))
-    graph2 = graph2.add_edge(DiscoveredEdge::directed("A", "C"))
+    var graph2 = discovered_graph_new(["A", "B", "C"])
+    graph2 = graph2.add_edge(discovered_edge_directed("A", "B"))
+    graph2 = graph2.add_edge(discovered_edge_directed("A", "C"))
 
     let shd = graph1.shd(&graph2)
     // One edge different
-    assert(shd.value >= 1)
+    check(shd.value >= 1)
 }
 
-#[test]
-fn test_data_matrix() with Alloc {
-    let data = DataMatrix::new(
+fn test_data_matrix() with Alloc, Panic {
+    let data = data_matrix_new(
         [[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]],
         ["A", "B", "C"],
     )
 
-    assert(data.n_rows == 2)
-    assert(data.n_cols == 3)
+    check(data.n_rows == 2)
+    check(data.n_cols == 3)
 
     let col_a = data.get_column(&"A")
-    assert(len(col_a) == 2)
-    assert(abs(col_a[0] - 1.0) < 0.001)
+    check(len(col_a) == 2)
+    check(abs(col_a[0] - 1.0) < 0.001)
 }

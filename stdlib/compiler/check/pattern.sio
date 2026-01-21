@@ -1,0 +1,560 @@
+// stdlib/compiler/check/pattern.sio
+// Pattern matching type checking and exhaustiveness analysis for Sounio.
+// Full logic aligned with parser Pattern layout (stmt.sio).
+
+// ============================================================================
+// PATTERN KIND CONSTANTS (mirror parser/stmt.sio)
+// ============================================================================
+
+fn PAT_IDENT() -> i32 { 0 }
+fn PAT_WILDCARD() -> i32 { 1 }
+fn PAT_TUPLE() -> i32 { 2 }
+fn PAT_STRUCT() -> i32 { 3 }
+fn PAT_ENUM() -> i32 { 4 }
+fn PAT_LITERAL() -> i32 { 5 }
+fn PAT_RANGE() -> i32 { 6 }
+fn PAT_OR() -> i32 { 7 }
+fn PAT_REF() -> i32 { 8 }
+fn PAT_MUT() -> i32 { 9 }
+
+// ============================================================================
+// PRIMITIVE TYPE INDICES (match expr.sio defaults)
+// ============================================================================
+
+const ERROR_TYPE_IDX: i64 = -1;
+const UNIT_TYPE_IDX: i64 = 0;
+const I64_TYPE_IDX: i64 = 1;
+const F64_TYPE_IDX: i64 = 2;
+const BOOL_TYPE_IDX: i64 = 3;
+const STR_TYPE_IDX: i64 = 4;
+const CHAR_TYPE_IDX: i64 = 5;
+const U8_TYPE_IDX: i64 = 6;
+
+// Literal kinds (mirror parser/expr.sio)
+fn LIT_INT() -> i32 { 0 }
+fn LIT_FLOAT() -> i32 { 1 }
+fn LIT_STRING() -> i32 { 2 }
+fn LIT_CHAR() -> i32 { 3 }
+fn LIT_BOOL() -> i32 { 4 }
+fn LIT_UNIT() -> i32 { 5 }
+fn LIT_INT_UNIT() -> i32 { 6 }
+fn LIT_FLOAT_UNIT() -> i32 { 7 }
+
+// ============================================================================
+// TYPE DEFINITIONS (subset aligned with check/context.sio)
+// ============================================================================
+
+fn TYPEDEF_STRUCT() -> i32 { 0 }
+fn TYPEDEF_ENUM() -> i32 { 1 }
+fn TYPEDEF_ALIAS() -> i32 { 2 }
+
+struct FieldDef {
+    name: [i8; 32],
+    name_len: i64,
+    type_idx: i64,
+    is_mutable: bool,
+}
+
+fn field_def_default() -> FieldDef {
+    FieldDef { name: [0; 32], name_len: 0, type_idx: -1, is_mutable: false }
+}
+
+struct TypeDef {
+    kind: i32,
+    name: [i8; 64],
+    name_len: i64,
+    fields: [FieldDef; 16],
+    n_fields: i64,
+    target_type_idx: i64,
+    type_params: [i64; 8],
+    n_type_params: i64,
+}
+
+fn typedef_default() -> TypeDef {
+    TypeDef {
+        kind: TYPEDEF_STRUCT(),
+        name: [0; 64],
+        name_len: 0,
+        fields: [field_def_default(); 16],
+        n_fields: 0,
+        target_type_idx: -1,
+        type_params: [-1; 8],
+        n_type_params: 0,
+    }
+}
+
+struct TypePool {
+    // Placeholder; real implementation in types/type.sio
+    count: i64,
+}
+
+struct TypeContext {
+    type_pool: TypePool,
+    type_defs: [TypeDef; 64],
+    n_type_defs: i64,
+}
+
+// ============================================================================
+// PATTERN STRUCT (mirror parser/stmt.sio)
+// ============================================================================
+
+struct Pattern {
+    kind: i32,
+    name: [i8; 64],
+    name_len: i64,
+    is_mut: bool,
+    sub_patterns: [i64; 16],
+    n_sub_patterns: i64,
+    field_names: [[i8; 64]; 16],
+    field_name_lens: [i64; 16],
+    n_fields: i64,
+    literal_kind: i32,
+    literal_int: i64,
+    path_str: [i8; 128],
+    path_len: i64,
+}
+
+fn pattern_new() -> Pattern {
+    Pattern {
+        kind: PAT_WILDCARD(),
+        name: [0; 64],
+        name_len: 0,
+        is_mut: false,
+        sub_patterns: [0; 16],
+        n_sub_patterns: 0,
+        field_names: [[0; 64]; 16],
+        field_name_lens: [0; 16],
+        n_fields: 0,
+        literal_kind: 0,
+        literal_int: 0,
+        path_str: [0; 128],
+        path_len: 0,
+    }
+}
+
+// ============================================================================
+// BINDING + RESULTS
+// ============================================================================
+
+struct Binding {
+    name: [i8; 64],
+    name_len: i64,
+    type_idx: i64,
+    mutable: bool,
+}
+
+fn default_binding() -> Binding {
+    Binding { name: [0; 64], name_len: 0, type_idx: 0, mutable: false }
+}
+
+struct PatternCheckResult {
+    type_idx: i64,
+    bindings: [Binding; 64],
+    n_bindings: i64,
+    has_error: bool,
+}
+
+struct MatchCheckResult {
+    all_covered: bool,
+    uncovered_patterns: [Pattern; 16],
+    n_uncovered: i64,
+}
+
+struct Coverage {
+    covered: bool,
+    residuals: [Pattern; 32],
+    n_residuals: i64,
+}
+
+// ============================================================================
+// CONSTRUCTORS FOR COVERAGE
+// ============================================================================
+
+fn CONSTRUCTOR_ENUM_VARIANT() -> i32 { 0 }
+fn CONSTRUCTOR_STRUCT_FIELDS() -> i32 { 1 }
+fn CONSTRUCTOR_BOOL_TRUE() -> i32 { 2 }
+fn CONSTRUCTOR_BOOL_FALSE() -> i32 { 3 }
+fn CONSTRUCTOR_ARRAY() -> i32 { 4 }
+fn CONSTRUCTOR_WILDCARD() -> i32 { 5 }
+
+struct PatternConstructor {
+    kind: i32,
+    name: [i8; 64],
+    name_len: i64,
+    type_idx: i64,
+    fields: [i64; 16],
+    n_fields: i64,
+}
+
+struct ConstructorSet {
+    items: [PatternConstructor; 32],
+    n_items: i64,
+}
+
+fn default_constructor() -> PatternConstructor {
+    PatternConstructor {
+        kind: CONSTRUCTOR_WILDCARD(),
+        name: [0; 64],
+        name_len: 0,
+        type_idx: 0,
+        fields: [0; 16],
+        n_fields: 0,
+    }
+}
+
+fn empty_constructor_set() -> ConstructorSet {
+    ConstructorSet { items: [default_constructor(); 32], n_items: 0 }
+}
+
+// ============================================================================
+// HELPERS
+// ============================================================================
+
+fn name_eq(a: [i8; 64], a_len: i64, b: [i8; 64], b_len: i64) -> bool {
+    if a_len != b_len {
+        return false;
+    }
+    var i: i64 = 0;
+    while i < a_len {
+        if a[i as usize] != b[i as usize] {
+            return false;
+        }
+        i = i + 1;
+    }
+    true
+}
+
+fn path_eq_name(path: [i8; 128], path_len: i64, name: [i8; 64], name_len: i64) -> bool {
+    if path_len != name_len {
+        return false;
+    }
+    var i: i64 = 0;
+    while i < path_len {
+        if path[i as usize] != name[i as usize] {
+            return false;
+        }
+        i = i + 1;
+    }
+    true
+}
+
+fn type_def_index_by_name(ctx: TypeContext, name: [i8; 64], name_len: i64) -> i64 {
+    var i: i64 = 0;
+    while i < ctx.n_type_defs {
+        var td = ctx.type_defs[i as usize];
+        if name_eq(td.name, td.name_len, name, name_len) {
+            return i;
+        }
+        i = i + 1;
+    }
+    -1
+}
+
+fn field_index_by_name(td: TypeDef, name: [i8; 64], name_len: i64) -> i64 {
+    var i: i64 = 0;
+    while i < td.n_fields {
+        var fd = td.fields[i as usize];
+        if name_eq(fd.name, fd.name_len, name, name_len) {
+            return i;
+        }
+        i = i + 1;
+    }
+    -1
+}
+
+// Pattern pool placeholder (parser should populate)
+var PATTERN_POOL: [Pattern; 1024] = [pattern_new(); 1024];
+var N_PATTERNS: i64 = 0;
+
+fn pattern_pool_get(idx: i64) -> Pattern with Panic {
+    if idx < 0 || idx >= N_PATTERNS {
+        return pattern_new();
+    }
+    PATTERN_POOL[idx as usize]
+}
+
+fn default_coverage(pat: Pattern) -> Coverage {
+    Coverage { covered: false, residuals: [pat; 32], n_residuals: 0 }
+}
+
+fn create_wildcard_pattern() -> Pattern with Panic {
+    pattern_new()
+}
+
+// ============================================================================
+// CONSTRUCTOR ENUMERATION
+// ============================================================================
+
+fn get_constructors(ctx: TypeContext, type_idx: i64) -> ConstructorSet with Panic {
+    var set = empty_constructor_set();
+    if type_idx < 0 || type_idx >= ctx.n_type_defs {
+        set.items[0] = default_constructor();
+        set.n_items = 1;
+        return set;
+    }
+
+    var td = ctx.type_defs[type_idx as usize];
+    if td.kind == TYPEDEF_ENUM() {
+        var i: i64 = 0;
+        while i < td.n_fields && set.n_items < 32 {
+            var cons = default_constructor();
+            cons.kind = CONSTRUCTOR_ENUM_VARIANT();
+            cons.name = td.fields[i as usize].name;
+            cons.name_len = td.fields[i as usize].name_len;
+            cons.type_idx = type_idx;
+            if td.fields[i as usize].type_idx >= 0 {
+                cons.fields[0] = td.fields[i as usize].type_idx;
+                cons.n_fields = 1;
+            }
+            set.items[set.n_items] = cons;
+            set.n_items = set.n_items + 1;
+            i = i + 1;
+        }
+        return set;
+    }
+
+    if td.kind == TYPEDEF_STRUCT() {
+        var cons = default_constructor();
+        cons.kind = CONSTRUCTOR_STRUCT_FIELDS();
+        cons.name = td.name;
+        cons.name_len = td.name_len;
+        cons.type_idx = type_idx;
+        cons.n_fields = td.n_fields;
+        var j: i64 = 0;
+        while j < td.n_fields && j < 16 {
+            cons.fields[j] = td.fields[j as usize].type_idx;
+            j = j + 1;
+        }
+        set.items[0] = cons;
+        set.n_items = 1;
+        return set;
+    }
+
+    set.items[0] = default_constructor();
+    set.n_items = 1;
+    set
+}
+
+// ============================================================================
+// COVERAGE + BINDINGS
+// ============================================================================
+
+fn pattern_covers_constructor(ctx: TypeContext, pat: Pattern, cons: PatternConstructor) -> bool with Panic {
+    if pat.kind == PAT_WILDCARD() || pat.kind == PAT_IDENT() {
+        return true;
+    }
+
+    if cons.kind == CONSTRUCTOR_WILDCARD() {
+        return pat.kind == PAT_WILDCARD() || pat.kind == PAT_IDENT();
+    }
+
+    if pat.kind == PAT_LITERAL() {
+        if cons.kind == CONSTRUCTOR_BOOL_TRUE() {
+            return pat.literal_kind == LIT_BOOL() && pat.literal_int != 0;
+        }
+        if cons.kind == CONSTRUCTOR_BOOL_FALSE() {
+            return pat.literal_kind == LIT_BOOL() && pat.literal_int == 0;
+        }
+        return false;
+    }
+
+    if pat.kind == PAT_STRUCT() {
+        return cons.kind == CONSTRUCTOR_STRUCT_FIELDS() && path_eq_name(pat.path_str, pat.path_len, cons.name, cons.name_len);
+    }
+
+    if pat.kind == PAT_ENUM() {
+        return cons.kind == CONSTRUCTOR_ENUM_VARIANT() && name_eq(pat.name, pat.name_len, cons.name, cons.name_len);
+    }
+
+    if pat.kind == PAT_OR() {
+        var i: i64 = 0;
+        while i < pat.n_sub_patterns {
+            var alt = pattern_pool_get(pat.sub_patterns[i as usize]);
+            if pattern_covers_constructor(ctx, alt, cons) {
+                return true;
+            }
+            i = i + 1;
+        }
+        return false;
+    }
+
+    false
+}
+
+fn specialize_pattern(ctx: TypeContext, pat: Pattern, cons: PatternConstructor) -> Coverage with Panic {
+    var cov = default_coverage(pat);
+    if pattern_covers_constructor(ctx, pat, cons) {
+        cov.covered = true;
+    }
+    cov
+}
+
+fn collect_bindings(pat: Pattern, expected_type: i64, bindings: &! [Binding; 64], idx: &! i64) -> bool with Panic {
+    var error = false;
+    if pat.kind == PAT_IDENT() {
+        if *idx < 64 {
+            bindings[*idx] = Binding {
+                name: pat.name,
+                name_len: pat.name_len,
+                type_idx: expected_type,
+                mutable: pat.is_mut,
+            };
+            *idx = *idx + 1;
+        } else {
+            error = true;
+        }
+        return error;
+    }
+
+    if pat.kind == PAT_STRUCT() || pat.kind == PAT_TUPLE() || pat.kind == PAT_ENUM() || pat.kind == PAT_OR() {
+        var i: i64 = 0;
+        while i < pat.n_sub_patterns {
+            var sub_pat = pattern_pool_get(pat.sub_patterns[i as usize]);
+            error = collect_bindings(sub_pat, expected_type, bindings, idx) || error;
+            i = i + 1;
+        }
+        return error;
+    }
+
+    if pat.kind == PAT_REF() || pat.kind == PAT_MUT() {
+        if pat.n_sub_patterns > 0 {
+            var sub = pattern_pool_get(pat.sub_patterns[0]);
+            error = collect_bindings(sub, expected_type, bindings, idx) || error;
+        }
+        return error;
+    }
+
+    if pat.kind == PAT_OR() {
+        var i2: i64 = 0;
+        while i2 < pat.n_sub_patterns {
+            var alt = pattern_pool_get(pat.sub_patterns[i2 as usize]);
+            error = collect_bindings(alt, expected_type, bindings, idx) || error;
+            i2 = i2 + 1;
+        }
+        return error;
+    }
+
+    error
+}
+
+fn infer_pattern_type(ctx: TypeContext, pat: Pattern) -> i64 with Panic {
+    if pat.kind == PAT_LITERAL() {
+        if pat.literal_kind == LIT_INT() {
+            return ctx.type_pool.get_primitive_type("i64");
+        }
+        if pat.literal_kind == LIT_BOOL() {
+            return ctx.type_pool.get_primitive_type("bool");
+        }
+        if pat.literal_kind == LIT_FLOAT() {
+            return ctx.type_pool.get_primitive_type("f64");
+        }
+        if pat.literal_kind == LIT_STRING() {
+            return ctx.type_pool.get_primitive_type("str");
+        }
+        if pat.literal_kind == LIT_CHAR() {
+            return ctx.type_pool.get_primitive_type("char");
+        }
+        if pat.literal_kind == LIT_UNIT() {
+            return ctx.type_pool.get_primitive_type("unit");
+        }
+        if pat.literal_kind == LIT_INT_UNIT() {
+            return ctx.type_pool.get_primitive_type("i64");
+        }
+        if pat.literal_kind == LIT_FLOAT_UNIT() {
+            return ctx.type_pool.get_primitive_type("f64");
+        }
+        return ERROR_TYPE_IDX;
+    }
+
+    if pat.kind == PAT_STRUCT() || pat.kind == PAT_ENUM() {
+        var type_idx = type_def_index_by_name(ctx, pat.path_str, pat.path_len);
+        return type_idx;
+    }
+
+    ERROR_TYPE_IDX
+}
+
+// ============================================================================
+// MAIN CHECKS
+// ============================================================================
+
+fn check_pattern(ctx: TypeContext, pat: Pattern, scrutinee_type: i64) -> PatternCheckResult with Panic {
+    var result = PatternCheckResult {
+        type_idx: scrutinee_type,
+        bindings: [default_binding(); 64],
+        n_bindings: 0,
+        has_error: false,
+    };
+
+    if pat.kind == PAT_LITERAL() {
+        var lit_type = infer_pattern_type(ctx, pat);
+        if lit_type >= 0 && scrutinee_type >= 0 && lit_type != scrutinee_type {
+            result.has_error = true;
+            result.type_idx = 0;
+            return result;
+        }
+    }
+
+    if pat.kind == PAT_STRUCT() || pat.kind == PAT_ENUM() {
+        var type_idx = infer_pattern_type(ctx, pat);
+        if type_idx >= 0 && scrutinee_type >= 0 && type_idx != scrutinee_type {
+            result.has_error = true;
+            result.type_idx = 0;
+            return result;
+        }
+    }
+
+    var bind_idx: i64 = 0;
+    result.has_error = collect_bindings(pat, scrutinee_type, &!result.bindings, &!bind_idx);
+    result.n_bindings = bind_idx;
+    result
+}
+
+fn check_exhaustiveness(ctx: TypeContext, patterns: [Pattern; 64], n_patterns: i64, scrutinee_type: i64) -> MatchCheckResult with Panic {
+    var result = MatchCheckResult {
+        all_covered: false,
+        uncovered_patterns: [create_wildcard_pattern(); 16],
+        n_uncovered: 0,
+    };
+
+    if n_patterns == 0 {
+        result.n_uncovered = 1;
+        return result;
+    }
+
+    var i: i64 = 0;
+    while i < n_patterns {
+        if patterns[i as usize].kind == PAT_WILDCARD() || patterns[i as usize].kind == PAT_IDENT() {
+            result.all_covered = true;
+            result.n_uncovered = 0;
+            return result;
+        }
+        i = i + 1;
+    }
+
+    var cons_set = get_constructors(ctx, scrutinee_type);
+    var missing: i64 = 0;
+    var ci: i64 = 0;
+    while ci < cons_set.n_items {
+        var covered = false;
+        var pi: i64 = 0;
+        while pi < n_patterns {
+            if pattern_covers_constructor(ctx, patterns[pi as usize], cons_set.items[ci as usize]) {
+                covered = true;
+                break;
+            }
+            pi = pi + 1;
+        }
+        if !covered {
+            if missing < 16 {
+                result.uncovered_patterns[missing as usize] = create_wildcard_pattern();
+                missing = missing + 1;
+            }
+        }
+        ci = ci + 1;
+    }
+
+    result.all_covered = (missing == 0);
+    result.n_uncovered = missing;
+    result
+}

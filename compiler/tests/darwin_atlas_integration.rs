@@ -131,7 +131,7 @@ fn test_darwin_atlas_multi_file() {
     // Try to compile multiple files together
     let operators = get_darwin_atlas_path("operators.sio");
     let quaternion = get_darwin_atlas_path("quaternion.sio");
-    let output = temp_dir.path().join("darwin_atlas.so");
+    let _output = temp_dir.path().join("darwin_atlas.so");
 
     if !operators.exists() || !quaternion.exists() {
         eprintln!("Darwin Atlas files not found, skipping test");

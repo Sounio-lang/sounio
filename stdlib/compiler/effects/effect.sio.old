@@ -1,0 +1,496 @@
+// Module: stdlib/compiler/effects/effect.sio
+// Implementation of the Sounio effect type system for tracking side effects.
+// Supports 8 algebraic effects via bitmask-based EffectSets and row-polymorphic EffectVars.
+
+// Effect kind constants (bit positions 0-7)
+fn EFFECT_IO() -> i32 { 0 }
+fn EFFECT_MUT() -> i32 { 1 }
+fn EFFECT_ALLOC() -> i32 { 2 }
+fn EFFECT_PANIC() -> i32 { 3 }
+fn EFFECT_ASYNC() -> i32 { 4 }
+fn EFFECT_GPU() -> i32 { 5 }
+fn EFFECT_PROB() -> i32 { 6 }
+fn EFFECT_DIV() -> i32 { 7 }
+
+// Effect set (bitmask of effects)
+struct EffectSet {
+    mask: i64,  // Bit i set means effect i present
+}
+
+// Effect variable (for row polymorphism)
+struct EffectVar {
+    id: i64,           // Unique ID
+    lower_bound: i64,  // Minimum effects (bitmask)
+    upper_bound: i64,  // Maximum effects (bitmask)
+}
+
+// Helper to get effect name by kind (for debugging/stringification)
+fn get_effect_name(kind: i32) -> &str with Panic {
+    match kind {
+        0 => "IO",
+        1 => "Mut",
+        2 => "Alloc",
+        3 => "Panic",
+        4 => "Async",
+        5 => "GPU",
+        6 => "Prob",
+        7 => "Div",
+        _ => panic("Invalid effect kind")
+    }
+}
+
+// Create effect set with single effect
+fn effect_singleton(kind: i32) -> EffectSet with Panic {
+    // Panic if kind out of valid range (0-7) to prevent invalid bitmasks
+    if kind < 0 || kind > 7 {
+        panic("Effect kind out of range")
+    }
+    EffectSet { mask: (1i64 << (kind as i64)) }
+}
+
+// Union of two effect sets (bitwise OR)
+fn effect_union(e1: EffectSet, e2: EffectSet) -> EffectSet {
+    EffectSet { mask: e1.mask | e2.mask }
+}
+
+// Intersection of two effect sets (bitwise AND)
+fn effect_intersect(e1: EffectSet, e2: EffectSet) -> EffectSet {
+    EffectSet { mask: e1.mask & e2.mask }
+}
+
+// Check if a specific effect is present in the set
+fn effect_contains(e: EffectSet, kind: i32) -> bool with Panic {
+    // Panic if kind out of range
+    if kind < 0 || kind > 7 {
+        panic("Effect kind out of range")
+    }
+    let bit = 1i64 << (kind as i64);
+    (e.mask & bit) != 0
+}
+
+// Empty effect set (pure function, no effects)
+fn effect_pure() -> EffectSet {
+    EffectSet { mask: 0i64 }
+}
+
+// Total effect set (all possible effects)
+fn effect_total() -> EffectSet {
+    EffectSet { mask: -1i64 }  // All 64 bits set (covers 0-7)
+}
+
+// Check if two effect sets are equal (bitmasks match)
+fn effect_eq(e1: EffectSet, e2: EffectSet) -> bool {
+    e1.mask == e2.mask
+}
+
+// Check if one effect set is a subset of another (all bits of e1 are set in e2)
+fn effect_subset(e1: EffectSet, e2: EffectSet) -> bool {
+    (e1.mask & e2.mask) == e1.mask
+}
+
+// Subtract effects: e1 minus those in e2 (bits in e1 but not in e2)
+fn effect_subtract(e1: EffectSet, e2: EffectSet) -> EffectSet {
+    EffectSet { mask: e1.mask & !e2.mask }
+}
+
+// Count the number of effects in the set (popcount)
+fn effect_count(e: EffectSet) -> i32 with Panic {
+    var count: i32 = 0;
+    for i in 0i32..8i32 {
+        if effect_contains(e, i) {
+            count += 1;
+        }
+    }
+    count
+}
+
+// String representation of an effect set (comma-separated names)
+fn effect_to_string(e: EffectSet) -> string {
+    var result = stringnew();
+    var first = true;
+    for i in 0i32..8i32 {
+        if effect_contains(e, i) with Panic {
+            if !first {
+                result = result + ", ";
+            }
+            result = result + get_effect_name(i) with Panic;
+            first = false;
+        }
+    }
+    if result.is_empty() {
+        result = "Pure";
+    }
+    result
+}
+
+// Create a fresh effect variable (unconstrained, polymorphic)
+fn effect_var_fresh(id: i64) -> EffectVar {
+    EffectVar {
+        id: id,
+        lower_bound: 0i64,   // No minimum effects
+        upper_bound: -1i64   // All effects allowed
+    }
+}
+
+// Instantiate an effect variable with given bounds (row polymorphism constraint)
+fn effect_var_constrain(ev: EffectVar, lower: EffectSet, upper: EffectSet) -> EffectVar {
+    // Union lower bound with new lower, intersect upper bound with new upper
+    // Ensures the variable respects both old and new constraints
+    let new_lower = ev.lower_bound | lower.mask;
+    let new_upper = ev.upper_bound & upper.mask;
+    // Check for inconsistency: if new_lower has bits not in new_upper, invalid
+    if (new_lower & !new_upper) != 0 {
+        panic("Inconsistent effect variable bounds")
+    }
+    EffectVar {
+        id: ev.id,
+        lower_bound: new_lower,
+        upper_bound: new_upper
+    }
+}
+
+// Get the effective set for an effect variable (intersection of bounds)
+fn effect_var_to_set(ev: EffectVar) -> EffectSet {
+    // For instantiation, the actual effects are those required (lower_bound)
+    // But upper limits what's allowed. For inference, use lower as minimum.
+    EffectSet { mask: ev.lower_bound }
+}
+
+// Check if an effect variable is pure (no required effects)
+fn effect_var_is_pure(ev: EffectVar) -> bool {
+    ev.lower_bound == 0
+}
+
+// Check if an effect variable allows a specific effect
+fn effect_var_allows(ev: EffectVar, kind: i32) -> bool with Panic {
+    let bit = 1i64 << (kind as i64);
+    (ev.upper_bound & bit) != 0
+}
+
+// Check if an effect variable requires a specific effect
+fn effect_var_requires(ev: EffectVar, kind: i32) -> bool with Panic {
+    let bit = 1i64 << (kind as i64);
+    (ev.lower_bound & bit) != 0
+}
+
+// Unify two effect variables (for effect polymorphism resolution)
+fn effect_var_unify(ev1: EffectVar, ev2: EffectVar) -> EffectVar with Panic {
+    if ev1.id != ev2.id {
+        panic("Cannot unify effect variables with different IDs")
+    }
+    // Unify by taking max lower and min upper
+    let unified_lower = ev1.lower_bound | ev2.lower_bound;
+    let unified_upper = ev1.upper_bound & ev2.upper_bound;
+    if (unified_lower & !unified_upper) != 0 {
+        panic("Unifiable effect variables lead to inconsistency")
+    }
+    EffectVar {
+        id: ev1.id,
+        lower_bound: unified_lower,
+        upper_bound: unified_upper
+    }
+}
+
+// Substitute an effect set into an effect variable (instantiation)
+fn effect_var_instantiate(ev: EffectVar, subst: EffectSet) -> EffectVar with Panic {
+    // Check if subst satisfies the bounds
+    if !effect_subset(EffectSet { mask: ev.lower_bound }, subst) {
+        panic("Substitution does not satisfy lower bound")
+    }
+    if !effect_subset(subst, EffectSet { mask: ev.upper_bound }) {
+        panic("Substitution exceeds upper bound")
+    }
+    // For now, return a fixed var with the substitution as both bounds (monomorphic)
+    EffectVar {
+        id: ev.id,
+        lower_bound: subst.mask,
+        upper_bound: subst.mask
+    }
+}
+
+// Effect set from explicit list of kinds (varargs-like, but using array for simplicity)
+fn effect_from_kinds(kinds: [i32; n]) -> EffectSet with Panic where n <= 8 {
+    var result = effect_pure();
+    for i in 0..n {
+        let k = kinds[i] with Panic;  // Indexing panics on bounds
+        if k < 0 || k > 7 {
+            panic("Invalid effect kind in list")
+        }
+        result = effect_union(result, effect_singleton(k));
+    }
+    result
+}
+
+// Effect set for common combinations
+fn effect_io() -> EffectSet {
+    effect_singleton(EFFECT_IO())
+}
+
+fn effect_mut() -> EffectSet {
+    effect_singleton(EFFECT_MUT())
+}
+
+fn effect_alloc() -> EffectSet {
+    effect_singleton(EFFECT_ALLOC())
+}
+
+fn effect_panic() -> EffectSet {
+    effect_singleton(EFFECT_PANIC())
+}
+
+fn effect_async() -> EffectSet {
+    effect_singleton(EFFECT_ASYNC())
+}
+
+fn effect_gpu() -> EffectSet {
+    effect_singleton(EFFECT_GPU())
+}
+
+fn effect_prob() -> EffectSet {
+    effect_singleton(EFFECT_PROB())
+}
+
+fn effect_div() -> EffectSet {
+    effect_singleton(EFFECT_DIV())
+}
+
+// Combined effects for convenience
+fn effect_io_mut() -> EffectSet {
+    effect_union(effect_io(), effect_mut())
+}
+
+fn effect_alloc_panic() -> EffectSet {
+    effect_union(effect_alloc(), effect_panic())
+}
+
+// Check if effect set is total (all effects possible)
+fn effect_is_total(e: EffectSet) -> bool {
+    e.mask == -1i64
+}
+
+// Check if effect set is empty (pure)
+fn effect_is_pure(e: EffectSet) -> bool {
+    e.mask == 0i64
+}
+
+// Debug print for effect set (using to_string)
+fn effect_debug(e: EffectSet) {
+    println(effect_to_string(e));
+}
+
+// Debug print for effect var
+fn effect_var_debug(ev: EffectVar) {
+    let lower_str = effect_to_string(EffectSet { mask: ev.lower_bound });
+    let upper_str = effect_to_string(EffectSet { mask: ev.upper_bound });
+    println(format!("EffectVar(id={}, lower={}, upper={})", ev.id, lower_str, upper_str));
+}
+
+// Example usage and testing helpers (for integration testing)
+// Note: These are not part of the core API but demonstrate inference-like behavior
+
+// Simulate effect inference for a function call
+fn infer_call_effects callee_effects: EffectSet, caller_effects: EffectVar) -> EffectVar {
+    // Propagate callee effects into caller (union with lower bound)
+    let propagated = effect_union(EffectSet { mask: caller_effects.lower_bound }, callee_effects);
+    effect_var_constrain(caller_effects, propagated, effect_total())
+}
+
+// Check if inferred effects match declared (for type checking)
+fn check_effects_match(inferred: EffectSet, declared: EffectSet) -> bool with Panic {
+    effect_subset(inferred, declared)  // Inferred should not exceed declared
+}
+
+// Simulate row polymorphism in higher-order functions
+fn polymorphic_map(f: fn(T) -> U with e, xs: [T; n]) -> [U; n] with e where T, U types {
+    // Effects 'e' are polymorphic, propagated from f
+    var result: [U; n];
+    for i in 0..n {
+        result[i] = f(xs[i]) with Panic;  // Call with effect propagation
+    }
+    result
+}
+
+// Additional utilities for effect system integration
+
+// Compute the required effects for a sequence of operations (union all)
+fn effect_sequence(effects: [EffectSet; n]) -> EffectSet with Panic where n <= 64 {
+    var total = effect_pure();
+    for i in 0..n {
+        let es = effects[i] with Panic;
+        total = effect_union(total, es);
+    }
+    total
+}
+
+// Filter effects to only allow a subset (for effect masking in contexts)
+fn effect_restrict(e: EffectSet, allowed: EffectSet) -> EffectSet with Panic {
+    if !effect_subset(e, allowed) {
+        panic("Effects exceed allowed set")
+    }
+    e
+}
+
+// Generate a unique ID for effect variables (simple counter, for demo)
+var global_effect_id_counter: i64 = 0;
+
+fn next_effect_var_id() -> i64 {
+    let id = global_effect_id_counter;
+    global_effect_id_counter += 1;
+    id
+}
+
+// Batch create effect variables
+fn create_effect_vars(count: i32) -> [EffectVar; n] with Panic where n = count as usize {
+    var vars: [EffectVar; n];
+    for i in 0..count {
+        vars[i] = effect_var_fresh(next_effect_var_id()) with Panic;
+    }
+    vars
+}
+
+// Effect variable with explicit bounds
+fn effect_var_bounded(id: i64, min_effects: EffectSet, max_effects: EffectSet) -> EffectVar with Panic {
+    if !effect_subset(min_effects, EffectSet { mask: max_effects.mask }) {
+        panic("Bounded effect var: min exceeds max")
+    }
+    EffectVar {
+        id: id,
+        lower_bound: min_effects.mask,
+        upper_bound: max_effects.mask
+    }
+}
+
+// Serialize effect set to a bitmask integer (for storage/transmission)
+fn effect_to_mask(e: EffectSet) -> i64 {
+    e.mask
+}
+
+// Deserialize effect set from bitmask
+fn effect_from_mask(m: i64) -> EffectSet {
+    EffectSet { mask: m }
+}
+
+// Similar for EffectVar (serialize bounds)
+fn effect_var_to_tuple(ev: EffectVar) -> (i64, i64, i64) {
+    (ev.id, ev.lower_bound, ev.upper_bound)
+}
+
+fn effect_var_from_tuple(id: i64, lower: i64, upper: i64) -> EffectVar with Panic {
+    if (lower & !upper) != 0 {
+        panic("Invalid EffectVar tuple: lower exceeds upper")
+    }
+    EffectVar { id, lower_bound: lower, upper_bound: upper }
+}
+
+// Hash for EffectSet (for use in hash tables, if needed in type checker)
+fn effect_hash(e: EffectSet) -> u64 {
+    // Simple hash of the mask (assuming u64 cast)
+    e.mask as u64
+}
+
+// Hash for EffectVar
+fn effect_var_hash(ev: EffectVar) -> u64 {
+    // Combine id and bounds hashes
+    let id_hash = ev.id as u64;
+    let lower_hash = ev.lower_bound as u64;
+    let upper_hash = ev.upper_bound as u64;
+    id_hash ^ lower_hash ^ upper_hash  // Simple XOR
+}
+
+// Compare EffectSets for ordering (by mask value, for sorting effect lists)
+fn effect_cmp(e1: EffectSet, e2: EffectSet) -> i32 {
+    if e1.mask < e2.mask {
+        -1
+    } else if e1.mask > e2.mask {
+        1
+    } else {
+        0
+    }
+}
+
+// Clone implementations (if Sounio requires explicit for structs)
+fn effect_set_clone(es: EffectSet) -> EffectSet {
+    es  // Bitmask is Copy, but for consistency
+}
+
+fn effect_var_clone(ev: EffectVar) -> EffectVar {
+    ev
+}
+
+// Default values
+fn default_effect_set() -> EffectSet {
+    effect_pure()
+}
+
+fn default_effect_var() -> EffectVar {
+    effect_var_fresh(0)
+}
+
+// Validation: Ensure mask only uses bits 0-7 (higher bits ignored or panicked)
+fn validate_effect_mask(mask: i64) -> i64 with Panic {
+    let high_bits = mask >> 8;
+    if high_bits != 0 {
+        panic("Effect mask uses invalid high bits")
+    }
+    mask & 0xFF  // Mask to 8 bits
+}
+
+// Apply validation to a set
+fn effect_validate(e: EffectSet) -> EffectSet with Panic {
+    EffectSet { mask: validate_effect_mask(e.mask) }
+}
+
+// Extended stringification with details
+fn effect_to_detailed_string(e: EffectSet) -> string {
+    let basic = effect_to_string(e);
+    format!("EffectSet({} bits set: {})", effect_count(e) with Panic, basic)
+}
+
+fn effect_var_to_detailed_string(ev: EffectVar) -> string {
+    let lower_s = effect_to_string(EffectSet { mask: ev.lower_bound });
+    let upper_s = effect_to_string(EffectSet { mask: ev.upper_bound });
+    format!("EffectVar(id={}, requires: {}, allows: {})", ev.id, lower_s, upper_s)
+}
+
+// Unit tests (embedded for stdlib verification)
+// These would be run in the compiler's test suite
+
+fn test_effect_basics() {
+    let io = effect_singleton(EFFECT_IO());
+    assert(effect_contains(io, EFFECT_IO()));
+    assert(!effect_contains(io, EFFECT_MUT()));
+    let pure = effect_pure();
+    assert(effect_is_pure(pure));
+    let total = effect_total();
+    assert(effect_is_total(total));
+    let unioned = effect_union(io, effect_mut());
+    assert(effect_count(unioned) == 2);
+    println(effect_to_string(unioned));  // Should print "IO, Mut"
+}
+
+fn test_effect_var_basics() {
+    let ev = effect_var_fresh(1);
+    assert(effect_var_is_pure(ev));
+    let constrained = effect_var_constrain(ev, effect_io(), effect_total());
+    assert(effect_var_requires(constrained, EFFECT_IO()));
+    assert(effect_var_allows(constrained, EFFECT_MUT()));
+    let inst = effect_var_instantiate(constrained, effect_io_mut());
+    assert(effect_eq(effect_var_to_set(inst), effect_io_mut()));
+}
+
+fn test_unify() {
+    let ev1 = effect_var_bounded(1, effect_pure(), effect_total());
+    let ev2 = effect_var_constrain(ev1, effect_io(), effect_total());
+    let unified = effect_var_unify(ev1, ev2) with Panic;
+    assert(effect_var_requires(unified, EFFECT_IO()));
+}
+
+// Run tests (in a test context)
+fn run_effect_tests() {
+    test_effect_basics();
+    test_effect_var_basics();
+    test_unify();
+    println("All effect system tests passed.");
+}
+
+// Export for use in type checker (assuming module exports all fns/structs)

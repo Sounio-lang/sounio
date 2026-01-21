@@ -29,7 +29,7 @@ Comprehensive analysis of all 49 stdlib modules with implementation status, LOC,
 | **connectivity** | Brain connectivity metrics (fMRI networks) | Minimal Stub (7 lines) |
 | **core** | Option<T>, Result<T, E> | Fully Implemented |
 | **csv** | CSV parsing and serialization | Minimal |
-| **darwin** | Darwin computing platform directory | Empty/Stub |
+| **darwin** | Darwin Atlas kernels (sequence symmetries) | Implemented |
 | **darwin_pbpk** | PBPK simulation engines (Rodgers-Rowland, TSit5) | Heavily Implemented |
 | **data** | DataFrames, Series, I/O operations | Partially Implemented |
 | **epistemic** | Epistemic core (Knowledge, Confidence, Provenance) | Heavily Implemented (30+ files) |
@@ -443,6 +443,20 @@ struct VQE {
 - Shot noise uncertainty
 - Expressibility bounds
 - Example: H2 molecule Hamiltonian
+
+---
+
+### darwin/ (Darwin Atlas Kernels)
+
+```
+Status: Implemented (atlas.sio)
+```
+
+**Scope:**
+- Sequence operators: shift, reverse, complement, reverse_complement, hamming_distance
+- Exact symmetry: orbit_size, orbit_ratio, palindrome, rc-fixed, rotational_period
+- Approx metric: dmin, dmin_normalized, nearest_transform
+- Quaternion lift: dicyclic elements, double cover verification
 
 ---
 

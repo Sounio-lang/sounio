@@ -9,6 +9,12 @@ pub mod dead_code_elimination;
 pub mod common_subexpression_elimination;
 pub mod licm;
 
+#[cfg(feature = "glm")]
+pub mod glm_integration;
+
+#[cfg(feature = "glm")]
+pub mod ml_guided_optimization;
+
 // Re-export commonly used optimization types
 pub use pass_manager::{
     MIRPass, AnalysisPass, PassManager, OptimizationLevel,
@@ -22,3 +28,6 @@ pub use common_subexpression_elimination::{
     CommonSubexpressionElimination, Expression, AvailableExpressions
 };
 pub use licm::{LoopInvariantCodeMotion, LoopInfo};
+
+#[cfg(feature = "glm")]
+pub use ml_guided_optimization::MLGuidedOptimization;

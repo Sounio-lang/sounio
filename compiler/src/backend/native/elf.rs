@@ -596,11 +596,37 @@ impl ElfWriter {
 
     /// Finalize and generate the ELF file bytes
     pub fn finish(mut self) -> io::Result<Vec<u8>> {
-        // Sort symbols: locals first, then globals
-        self.symbols.sort_by_key(|s| match s.binding {
-            SymbolBinding::Local => 0,
-            _ => 1,
+        // Sort symbols: locals first, then globals. Remap relocations to keep indices valid.
+        let mut order: Vec<usize> = (0..self.symbols.len()).collect();
+        order.sort_by_key(|&idx| {
+            let binding = match self.symbols[idx].binding {
+                SymbolBinding::Local => 0usize,
+                _ => 1usize,
+            };
+            (binding, idx)
         });
+
+        if !order.is_empty() {
+            let mut remap = vec![0usize; self.symbols.len()];
+            let mut new_symbols = Vec::with_capacity(self.symbols.len());
+            for (new_idx, &old_idx) in order.iter().enumerate() {
+                remap[old_idx] = new_idx;
+                new_symbols.push(self.symbols[old_idx].clone());
+            }
+            self.symbols = new_symbols;
+
+            for relocs in self.relocations.values_mut() {
+                for reloc in relocs.iter_mut() {
+                    if reloc.symbol_index == 0 {
+                        continue;
+                    }
+                    let old_idx = (reloc.symbol_index - 1) as usize;
+                    if old_idx < remap.len() {
+                        reloc.symbol_index = (remap[old_idx] + 1) as u32;
+                    }
+                }
+            }
+        }
 
         // Find first global symbol index
         let first_global = self.symbols.iter()
@@ -1161,7 +1187,7 @@ mod tests {
 
     #[test]
     fn test_code_segment_conversion() {
-        use crate::sir::emit::{CodeSegment, Symbol, Relocation, RelocKind};
+        use crate::sir::emit::{CodeSegment, Symbol};
         
         let segment = CodeSegment {
             code: vec![0xc3],  // ret

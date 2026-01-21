@@ -448,6 +448,8 @@ impl CommonSubexpressionElimination {
     fn optimize_function(&self, func: &mut MirFunction) -> bool {
         // Run available expressions analysis
         let analysis = AvailableExpressions::analyze(func);
+        let dominators = compute_block_dominators(func, &analysis.predecessors);
+        let value_def_blocks = compute_value_definition_blocks(func);
 
         let mut modified = false;
         let mut replacements: HashMap<ValueId, ValueId> = HashMap::new();
@@ -466,10 +468,20 @@ impl CommonSubexpressionElimination {
             // Map from expression to the value that computes it (within this block)
             let mut local_expr_to_value: HashMap<Expression, ValueId> = HashMap::new();
 
-            // Populate local map with globally available expressions
+            // Populate local map with globally available expressions whose values
+            // are defined in a strict dominator of this block.
             for expr in &available_at_point {
                 if let Some(value) = analysis.expr_to_value.get(expr) {
-                    local_expr_to_value.insert(expr.clone(), *value);
+                    let def_block = value_def_blocks.get(value).copied();
+                    let dominates_block_entry = def_block.is_some_and(|def_block| {
+                        def_block != block_id
+                            && dominators
+                                .get(&block_id)
+                                .is_some_and(|dom_set| dom_set.contains(&def_block))
+                    });
+                    if dominates_block_entry {
+                        local_expr_to_value.insert(expr.clone(), *value);
+                    }
                 }
             }
 
@@ -509,6 +521,85 @@ impl CommonSubexpressionElimination {
 
         modified
     }
+}
+
+/// Compute classic block dominance sets for a function.
+///
+/// Dominators are needed to ensure we only CSE using values defined in blocks
+/// that dominate the current block. This keeps the pass SSA-safe at CFG merges
+/// without introducing new phi nodes.
+fn compute_block_dominators(
+    func: &MirFunction,
+    predecessors: &HashMap<BlockId, Vec<BlockId>>,
+) -> HashMap<BlockId, HashSet<BlockId>> {
+    let blocks: Vec<BlockId> = func.blocks.iter().map(|b| b.id).collect();
+    let all_blocks: HashSet<BlockId> = blocks.iter().copied().collect();
+
+    let mut dominators: HashMap<BlockId, HashSet<BlockId>> = HashMap::new();
+    for block_id in &blocks {
+        if *block_id == func.entry_block {
+            dominators.insert(*block_id, HashSet::from([*block_id]));
+        } else {
+            dominators.insert(*block_id, all_blocks.clone());
+        }
+    }
+
+    let mut changed = true;
+    let mut iterations = 0;
+    const MAX_ITERATIONS: usize = 1000;
+
+    while changed && iterations < MAX_ITERATIONS {
+        changed = false;
+        iterations += 1;
+
+        for block_id in &blocks {
+            if *block_id == func.entry_block {
+                continue;
+            }
+
+            let preds = predecessors.get(block_id).cloned().unwrap_or_default();
+
+            let mut new_dom = if preds.is_empty() {
+                // Unreachable block: treat as dominated only by itself.
+                HashSet::new()
+            } else {
+                let mut intersection: Option<HashSet<BlockId>> = None;
+                for pred in &preds {
+                    if let Some(pred_dom) = dominators.get(pred) {
+                        intersection = Some(match intersection {
+                            None => pred_dom.clone(),
+                            Some(current) => current.intersection(pred_dom).copied().collect(),
+                        });
+                    }
+                }
+                intersection.unwrap_or_default()
+            };
+
+            new_dom.insert(*block_id);
+
+            if dominators.get(block_id) != Some(&new_dom) {
+                dominators.insert(*block_id, new_dom);
+                changed = true;
+            }
+        }
+    }
+
+    dominators
+}
+
+/// Map each SSA value to the block that defines it.
+fn compute_value_definition_blocks(func: &MirFunction) -> HashMap<ValueId, BlockId> {
+    let mut def_blocks: HashMap<ValueId, BlockId> = HashMap::new();
+
+    for block in &func.blocks {
+        for instr in &block.instructions {
+            if let Some(result) = get_instruction_result(instr) {
+                def_blocks.insert(result, block.id);
+            }
+        }
+    }
+
+    def_blocks
 }
 
 impl Default for CommonSubexpressionElimination {
@@ -700,6 +791,7 @@ fn apply_replacements(func: &mut MirFunction, replacements: &HashMap<ValueId, Va
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::mir::analysis::SSAValidator;
     use crate::mir::builder::FunctionBuilder;
     use crate::mir::FuncId;
     use crate::mir::types::MirConstant;
@@ -847,6 +939,74 @@ mod tests {
         }).count();
 
         assert_eq!(add_count, 1, "Should have only one add instruction after CSE");
+    }
+
+    #[test]
+    fn test_cse_preserves_ssa_at_control_flow_merge() {
+        // Diamond CFG:
+        // entry -> then -> merge
+        // entry -> else -> merge
+        //
+        // Both branches compute the same expression (a + b). The merge block also
+        // computes (a + b) twice. CSE must NOT replace the merge computation with
+        // a branch-local value (would violate SSA dominance), but SHOULD still
+        // eliminate the redundant second computation within the merge block.
+
+        let mut builder = FunctionBuilder::new(FuncId(0), "test".to_string(), MirType::I32);
+
+        let then_block = builder.create_block("then");
+        let else_block = builder.create_block("else");
+        let merge_block = builder.create_block("merge");
+
+        let a = builder.build_i32(10);
+        let b = builder.build_i32(20);
+        let cond = builder.build_bool(true);
+        builder.build_cond_branch(cond, then_block, else_block);
+
+        builder.switch_to_block(then_block);
+        let t = builder.fresh_value();
+        builder.build_add(t, a, b, MirType::I32);
+        builder.build_branch(merge_block);
+
+        builder.switch_to_block(else_block);
+        let e = builder.fresh_value();
+        builder.build_add(e, a, b, MirType::I32);
+        builder.build_branch(merge_block);
+
+        builder.switch_to_block(merge_block);
+        let m1 = builder.fresh_value();
+        builder.build_add(m1, a, b, MirType::I32);
+        let m2 = builder.fresh_value();
+        builder.build_add(m2, a, b, MirType::I32);
+        builder.build_return(Some(m2));
+
+        let mut func = builder.build();
+
+        let pass = CommonSubexpressionElimination::new();
+        let modified = pass.run_on_function(&mut func).expect("pass should succeed");
+        assert!(modified, "CSE should remove the redundant merge computation");
+
+        let ssa_errors = SSAValidator::new().validate_function(&func);
+        assert!(
+            ssa_errors.is_empty(),
+            "CSE must preserve SSA dominance:\n{}",
+            ssa_errors
+                .into_iter()
+                .map(|e| e.to_string())
+                .collect::<Vec<_>>()
+                .join("\n")
+        );
+
+        let merge = func.get_block(merge_block).expect("merge block should exist");
+        let merge_add_count = merge
+            .instructions
+            .iter()
+            .filter(|i| matches!(i, MirInstruction::Binary { op: MirBinaryOp::Add, .. }))
+            .count();
+        assert_eq!(
+            merge_add_count, 1,
+            "merge block should have only one add after CSE"
+        );
     }
 
     #[test]

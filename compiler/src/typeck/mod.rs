@@ -40,8 +40,6 @@ pub fn create_semantic_type_checker(
 
 #[cfg(test)]
 mod integration_tests {
-    use super::*;
-
     #[test]
     fn test_module_creation() {
         // Basic smoke test - more comprehensive tests in submodules

@@ -428,7 +428,7 @@ fn test_verbose_compilation() {
     }
 
     // Check that verbose output contains allocation info
-    let stdout = String::from_utf8_lossy(&output_result.stdout);
+    let _stdout = String::from_utf8_lossy(&output_result.stdout);
     // Verbose mode should show some compilation information
     // (exact content depends on implementation)
     assert!(

@@ -814,7 +814,7 @@ pub fn check_combination_integrity(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::epistemic::{Confidence, Evidence};
+    use crate::epistemic::Confidence;
 
     #[test]
     fn test_low_confidence_warning() {

@@ -1,224 +1,25 @@
 name: CI
 
 on:
-  push:
-    branches: ["main"]
   pull_request:
-    branches: ["main"]
-
-env:
-  CARGO_TERM_COLOR: always
-  RUST_BACKTRACE: 1
+  push:
+    branches:
+      - main
+      - master
 
 jobs:
-  test:
-    name: Test Suite
-    runs-on: ubuntu-latest
+  fast-gate:
+    runs-on: ubuntu-24.04
+    env:
+      LLVM_SYS_150_PREFIX: /usr/lib/llvm-15
     steps:
       - uses: actions/checkout@v4
-
-      - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
-        with:
-          components: rustfmt, clippy
-
-      - name: Cache cargo registry
-        uses: actions/cache@v4
-        with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-            compiler/target
-          key: ${{ runner.os }}-cargo-${{ hashFiles('compiler/Cargo.lock') }}
-          restore-keys: |
-            ${{ runner.os }}-cargo-
-
-      - name: Build
-        working-directory: compiler
-        run: cargo build --verbose
-
-      - name: Run tests
-        working-directory: compiler
-        run: cargo test --verbose
-
-      - name: Run tests (with JIT)
-        working-directory: compiler
-        run: cargo test --verbose --features jit
-
-  clippy:
-    name: Clippy
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
-        with:
-          components: clippy
-
-      - name: Cache cargo registry
-        uses: actions/cache@v4
-        with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-            compiler/target
-          key: ${{ runner.os }}-cargo-clippy-${{ hashFiles('compiler/Cargo.lock') }}
-          restore-keys: |
-            ${{ runner.os }}-cargo-clippy-
-
-      - name: Run Clippy
-        working-directory: compiler
-        # Note: --all-features excluded because GPU feature requires CUDA toolkit
-        run: cargo clippy --all-targets --features "jit,lsp,smt" -- -D warnings
-
-  fmt:
-    name: Rustfmt
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
-        with:
-          components: rustfmt
-
-      - name: Check formatting
-        working-directory: compiler
-        run: cargo fmt --all -- --check
-
-  build-release:
-    name: Build Release
-    runs-on: ${{ matrix.os }}
-    strategy:
-      matrix:
-        include:
-          - os: ubuntu-latest
-            target: x86_64-unknown-linux-gnu
-            artifact: souc
-            cross: false
-          - os: ubuntu-latest
-            target: aarch64-unknown-linux-gnu
-            artifact: souc
-            cross: true
-          - os: macos-latest
-            target: x86_64-apple-darwin
-            artifact: souc
-            cross: false
-          - os: macos-latest
-            target: aarch64-apple-darwin
-            artifact: souc
-            cross: false
-          - os: windows-latest
-            target: x86_64-pc-windows-msvc
-            artifact: souc.exe
-            cross: false
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
-        with:
-          targets: ${{ matrix.target }}
-
-      - name: Cache cargo registry
-        uses: actions/cache@v4
-        with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-            compiler/target
-          key: ${{ runner.os }}-${{ matrix.target }}-cargo-release-${{ hashFiles('compiler/Cargo.lock') }}
-          restore-keys: |
-            ${{ runner.os }}-${{ matrix.target }}-cargo-release-
-
-      - name: Install cross-compilation tools (Linux ARM64)
-        if: matrix.cross
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Install LLVM 15
         run: |
-          sudo apt-get update
-          sudo apt-get install -y gcc-aarch64-linux-gnu
-
-      - name: Build release (native)
-        if: ${{ !matrix.cross }}
-        working-directory: compiler
-        run: cargo build --release --target ${{ matrix.target }}
-
-      - name: Build release (cross)
-        if: matrix.cross
-        working-directory: compiler
-        env:
-          CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER: aarch64-linux-gnu-gcc
-        run: cargo build --release --target ${{ matrix.target }}
-
-      - name: Upload artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: souc-${{ matrix.target }}
-          path: compiler/target/${{ matrix.target }}/release/${{ matrix.artifact }}
-
-  coverage:
-    name: Code Coverage
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
-
-      - uses: taiki-e/install-action@cargo-tarpaulin
-
-      - name: Generate coverage
-        working-directory: compiler
-        run: cargo tarpaulin --out xml --skip-clean
-
-      - uses: codecov/codecov-action@v4
-        with:
-          files: compiler/cobertura.xml
-          fail_ci_if_error: false
-
-  security:
-    name: Security Audit
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-
-      - uses: taiki-e/install-action@cargo-audit
-
-      - name: Audit dependencies
-        working-directory: compiler
-        run: cargo audit
-
-  release:
-    name: Create Release
-    needs: [test, clippy, fmt, build-release]
-    if: startsWith(github.ref, 'refs/tags/v')
-    runs-on: ubuntu-latest
-    permissions:
-      contents: write
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Download all artifacts
-        uses: actions/download-artifact@v4
-        with:
-          path: artifacts
-
-      - name: Create release archives
-        run: |
-          cd artifacts
-          for dir in */; do
-            target="${dir%/}"
-            if [[ "$target" == *"windows"* ]]; then
-              zip -j "${target}.zip" "${target}/"*
-            else
-              tar -czvf "${target}.tar.gz" -C "${target}" .
-            fi
-          done
-
-      - name: Create GitHub Release
-        uses: softprops/action-gh-release@v1
-        with:
-          files: |
-            artifacts/*.tar.gz
-            artifacts/*.zip
-          generate_release_notes: true
+          curl -fsSL https://apt.llvm.org/llvm.sh -o /tmp/llvm.sh
+          sudo bash /tmp/llvm.sh 15 -n=noble
+      - name: Run fast gate
+        run: scripts/fast_gate.sh
+      - name: GPU backend test
+        run: cd compiler && cargo test --features gpu --test backend_e2e

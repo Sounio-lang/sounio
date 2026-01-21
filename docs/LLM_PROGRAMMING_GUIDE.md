@@ -2,6 +2,17 @@
 
 This comprehensive guide enables LLMs to correctly generate Sounio code. Sounio is a novel L0 systems + scientific programming language - it is NOT a dialect of Rust, Julia, Python, or any other language.
 
+## Implementation Status (Read First)
+
+This document mixes **implemented** and **aspirational** language features.
+
+For what the compiler accepts today, treat these as canonical:
+- `docs/MV_CORE_CHECKLIST.md` (the “smallest real” end-to-end core)
+- `compiler/docs/KNOWN_LIMITATIONS.md` (what is not implemented yet)
+- `tests/run-pass/` (compilable syntax patterns)
+
+If you are generating `.sio` code for this repo, prefer the MV core subset unless you are explicitly working on a missing feature.
+
 ## Table of Contents
 
 1. [Core Syntax](#core-syntax)
@@ -223,8 +234,8 @@ let process = |data: &[f64]| -> f64 {
 ### Modules and Imports
 
 ```d
-// Module declaration
-module mymodule
+// Module declaration (file-level, optional):
+// module mymodule
 
 // Import (both syntaxes work)
 import std::io
@@ -289,7 +300,7 @@ fn consume(conn: Connection) {
 }
 
 // Copy vs Move
-#[derive(Copy)]  // Implicitly copyable
+// Copy types are implicit for primitives; no derive attribute syntax.
 struct Point { x: f64, y: f64 }
 ```
 
@@ -1602,7 +1613,7 @@ let result = match might_fail() {
 }
 
 // WRONG: derive macros (limited)
-#[derive(Debug, Clone)]       // May not work
+// derive(Debug, Clone)        // NOT supported
 
 // WRONG: async/await in all contexts
 async fn foo() { }            // Only with Async effect
@@ -1631,8 +1642,8 @@ let a = tuple.0
 let b = tuple.1
 
 // NO: Test attributes
-#[test]                       // NOT supported
-#[cfg(test)]                  // NOT supported
+// test                        // NOT supported
+// cfg(test)                   // NOT supported
 
 // NO: u2 or other non-standard integer sizes
 let x: u2 = 3                 // ERROR - u2 doesn't exist

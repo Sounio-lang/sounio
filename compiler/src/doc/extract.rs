@@ -791,6 +791,7 @@ impl DocExtractor {
     fn type_expr_to_string(&self, ty: &TypeExpr) -> String {
         match ty {
             TypeExpr::Unit => "unit".to_string(),
+            TypeExpr::Never => "!".to_string(),
             TypeExpr::SelfType => "Self".to_string(),
             TypeExpr::Named { path, args, unit } => {
                 let mut s = path.to_string();

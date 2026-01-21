@@ -738,7 +738,7 @@ fn redirect_terminator(term: &mut MirTerminator, from: BlockId, to: BlockId) {
 mod tests {
     use super::*;
     use crate::mir::builder::{FunctionBuilder, ModuleBuilder};
-    use crate::mir::{FuncId, MirBinaryOp, MirType, MirConstant};
+    use crate::mir::{FuncId, MirConstant, MirType};
 
     #[test]
     fn test_loop_detection_simple() {

@@ -28,6 +28,7 @@ use super::blocks::{SirFunction, Terminator};
 use super::module::{Architecture, SirModule};
 use super::ops::*;
 use super::types::{ScalarType, SirType};
+use super::values::BlockId;
 use super::values::{Constant, ValueId};
 use std::collections::{HashMap, HashSet};
 
@@ -76,6 +77,18 @@ pub struct Symbol {
     pub offset: usize,
     /// Is externally visible?
     pub global: bool,
+}
+
+#[derive(Debug, Clone)]
+struct RoDataEntry {
+    func_name: String,
+    data_name: String,
+}
+
+#[derive(Clone)]
+struct PhiMove {
+    dst: ValueId,
+    src: ValueId,
 }
 
 /// Code emitter trait
@@ -621,6 +634,15 @@ impl RegisterAllocator {
         let mut inst_idx: usize = 0;
         let mut value_defs: HashMap<ValueId, (usize, SirType)> = HashMap::new();
         let mut value_uses: HashMap<ValueId, Vec<usize>> = HashMap::new();
+        let mut alloca_values: HashSet<ValueId> = HashSet::new();
+        let mut block_indices: HashMap<BlockId, usize> = HashMap::new();
+        let mut block_ranges: HashMap<BlockId, (usize, usize)> = HashMap::new();
+        let mut backedge_targets: HashSet<BlockId> = HashSet::new();
+        let mut has_backedge = false;
+
+        for (block_idx, block) in func.blocks.iter().enumerate() {
+            block_indices.insert(block.id, block_idx);
+        }
 
         // Handle function parameters - they are live from instruction 0
         // System V AMD64 ABI: integers in RDI, RSI, RDX, RCX, R8, R9
@@ -632,7 +654,8 @@ impl RegisterAllocator {
         }
 
         // Process each basic block
-        for block in &func.blocks {
+        for (block_idx, block) in func.blocks.iter().enumerate() {
+            let block_start = inst_idx;
             // Block parameters (from phi elimination) are defined at block entry
             for param in &block.params {
                 value_defs.insert(param.id, (inst_idx, param.ty.clone()));
@@ -644,6 +667,9 @@ impl RegisterAllocator {
                 if let Some(result) = inst.result {
                     let ty = self.infer_instruction_type(&inst.inst, func);
                     value_defs.insert(result, (inst_idx, ty));
+                    if matches!(inst.inst, SirInst::Memory(MemoryOp::Alloca { .. })) {
+                        alloca_values.insert(result);
+                    }
                 }
 
                 // Record uses of operand values
@@ -664,9 +690,19 @@ impl RegisterAllocator {
                 for operand in term.operands() {
                     value_uses.entry(operand).or_default().push(inst_idx);
                 }
+                for succ in term.successors() {
+                    if let Some(&succ_idx) = block_indices.get(&succ) {
+                        if succ_idx <= block_idx {
+                            has_backedge = true;
+                            backedge_targets.insert(succ);
+                        }
+                    }
+                }
                 inst_idx += 1;
             }
+            block_ranges.insert(block.id, (block_start, inst_idx));
         }
+        let function_end = inst_idx;
 
         // Build live intervals from definitions and uses
         for (value_id, (def_pos, ty)) in value_defs {
@@ -693,6 +729,42 @@ impl RegisterAllocator {
             self.intervals.push(interval);
         }
 
+        if !backedge_targets.is_empty() {
+            let mut header_ranges: Vec<(usize, usize)> = Vec::new();
+            for header in &backedge_targets {
+                if let Some(&(start, end)) = block_ranges.get(header) {
+                    header_ranges.push((start, end));
+                }
+            }
+
+            for interval in &mut self.intervals {
+                if let Some(uses) = value_uses.get(&interval.value) {
+                    let used_in_header = uses.iter().any(|&pos| {
+                        header_ranges
+                            .iter()
+                            .any(|(start, end)| pos >= *start && pos < *end)
+                    });
+                    if used_in_header {
+                        interval.end = interval.end.max(function_end);
+                    }
+                }
+            }
+        }
+
+        // Conservatively keep alloca pointers in callee-saved regs or spills.
+        if !alloca_values.is_empty() {
+            for value_id in alloca_values {
+                if let Some(&idx) = self.value_to_interval.get(&value_id) {
+                    if let Some(interval) = self.intervals.get_mut(idx) {
+                        interval.crosses_call = true;
+                        if has_backedge {
+                            interval.end = interval.end.max(function_end);
+                        }
+                    }
+                }
+            }
+        }
+
         Ok(())
     }
 
@@ -714,6 +786,7 @@ impl RegisterAllocator {
             SirInst::Memory(MemoryOp::GetElementPtr { ty, .. }) => SirType::ptr(ty.clone()),
             SirInst::Call(info) => info.ret_ty.clone(),
             SirInst::Phi { ty, .. } => ty.clone(),
+            SirInst::BuildAggregate { ty, .. } => ty.clone(),
             SirInst::Select { .. } => SirType::i64(), // Would need context for precise type
             _ => SirType::i64(),                      // Default fallback
         }
@@ -1222,6 +1295,14 @@ impl Default for RegisterAllocator {
 pub struct X86_64Emitter {
     /// Current code buffer
     code: Vec<u8>,
+    /// Read-only data appended after code
+    rodata: Vec<u8>,
+    /// Symbols for read-only data (offsets are relative to rodata start)
+    rodata_symbols: Vec<Symbol>,
+    /// Counter for unique rodata symbol names
+    rodata_counter: usize,
+    /// Read-only data entries that need stub functions
+    rodata_entries: Vec<RoDataEntry>,
     /// Relocations
     relocations: Vec<Relocation>,
     /// Value to register mapping (legacy, use register_allocator instead)
@@ -1242,6 +1323,10 @@ pub struct X86_64Emitter {
     current_instruction_pos: usize,
     /// Function name map for resolving Callee::Direct calls
     func_names: HashMap<crate::sir::values::FuncId, String>,
+    /// Phi moves keyed by (pred, succ)
+    phi_moves: HashMap<(BlockId, BlockId), Vec<PhiMove>>,
+    /// Current block being emitted
+    current_block: Option<BlockId>,
 }
 
 /// Condition codes for x86-64 Jcc/SETcc instructions
@@ -1297,6 +1382,10 @@ impl X86_64Emitter {
     pub fn new() -> Self {
         Self {
             code: Vec::with_capacity(4096),
+            rodata: Vec::new(),
+            rodata_symbols: Vec::new(),
+            rodata_counter: 0,
+            rodata_entries: Vec::new(),
             relocations: vec![],
             reg_alloc: HashMap::new(),
             frame_size: 0,
@@ -1307,6 +1396,8 @@ impl X86_64Emitter {
             spill_ops_by_position: std::collections::HashMap::new(),
             current_instruction_pos: 0,
             func_names: HashMap::new(),
+            phi_moves: HashMap::new(),
+            current_block: None,
         }
     }
 
@@ -1340,6 +1431,8 @@ impl X86_64Emitter {
             // Clear existing intervals and create new ones from external allocation
             self.register_allocator.intervals.clear();
             self.register_allocator.value_to_interval.clear();
+            self.register_allocator.used_callee_saved.clear();
+            self.register_allocator.stack_size = alloc_result.total_spill_size as i32;
 
             // Apply allocated registers - create a new interval for each
             for interval in &alloc_result.allocated {
@@ -1367,6 +1460,9 @@ impl X86_64Emitter {
                             epistemic_weight: interval.epistemic.confidence,
                         };
                         self.register_allocator.intervals.push(new_interval);
+                        if x86_reg.is_callee_saved() {
+                            self.register_allocator.used_callee_saved.insert(x86_reg);
+                        }
 
                         if std::env::var("SOUNIO_DEBUG_ALLOC").is_ok() {
                             eprintln!("  Applied: v{} -> {:?}", value_id.0, x86_reg);
@@ -1385,13 +1481,14 @@ impl X86_64Emitter {
                     self.register_allocator.value_to_interval.insert(value_id, interval_idx);
 
                     let has_prov = !matches!(interval.epistemic.provenance, crate::backend::native::metrics::Provenance::Unknown);
+                    let spill_offset = -((slot.0 as i32 + 1) * 8);
                     let new_interval = LiveInterval {
                         value: value_id,
                         start: interval.start,
                         end: interval.end,
                         ty: SirType::i64(),
                         reg: None,
-                        spill_slot: Some(slot.0 as i32),
+                        spill_slot: Some(spill_offset),
                         crosses_call: interval.crosses_call,
                         use_positions: interval.uses.iter().map(|u| u.pos).collect(),
                         max_confidence: interval.epistemic.confidence,
@@ -1632,6 +1729,17 @@ impl X86_64Emitter {
         self.emit_modrm(0b11, (dst as u8) & 0x7, (src as u8) & 0x7);
     }
 
+    /// CVTSS2SD xmm, xmm
+    fn emit_cvtss2sd(&mut self, dst: X86Reg, src: X86Reg) {
+        // F3 0F 5A /r — CVTSS2SD xmm1, xmm2
+        self.emit_byte(0xF3);
+        if dst.needs_rex() || src.needs_rex() {
+            self.emit_rex(false, dst.needs_rex(), false, src.needs_rex());
+        }
+        self.emit_bytes(&[0x0F, 0x5A]);
+        self.emit_modrm(0b11, (dst as u8) & 0x7, (src as u8) & 0x7);
+    }
+
     /// ADDSD xmm, xmm
     fn emit_addsd(&mut self, dst: X86Reg, src: X86Reg) {
         self.emit_byte(0xF2);
@@ -1866,13 +1974,30 @@ impl X86_64Emitter {
     fn emit_mov_mem_disp_r64(&mut self, base: X86Reg, disp: i32, src: X86Reg) {
         self.emit_rex(true, src.needs_rex(), false, base.needs_rex());
         self.emit_byte(0x89); // MOV r/m64, r64
-        if disp == 0 && base.encoding() != X86Reg::RBP.encoding() {
-            self.emit_modrm(0b00, src.encoding(), base.encoding());
+        let base_enc = base.encoding();
+        let needs_sib = base_enc == X86Reg::RSP.encoding();
+        if disp == 0 && base_enc != X86Reg::RBP.encoding() {
+            if needs_sib {
+                self.emit_modrm(0b00, src.encoding(), 0b100);
+                self.emit_byte((0b00 << 6) | (0b100 << 3) | base_enc);
+            } else {
+                self.emit_modrm(0b00, src.encoding(), base_enc);
+            }
         } else if disp >= -128 && disp <= 127 {
-            self.emit_modrm(0b01, src.encoding(), base.encoding());
+            if needs_sib {
+                self.emit_modrm(0b01, src.encoding(), 0b100);
+                self.emit_byte((0b00 << 6) | (0b100 << 3) | base_enc);
+            } else {
+                self.emit_modrm(0b01, src.encoding(), base_enc);
+            }
             self.emit_byte(disp as u8);
         } else {
-            self.emit_modrm(0b10, src.encoding(), base.encoding());
+            if needs_sib {
+                self.emit_modrm(0b10, src.encoding(), 0b100);
+                self.emit_byte((0b00 << 6) | (0b100 << 3) | base_enc);
+            } else {
+                self.emit_modrm(0b10, src.encoding(), base_enc);
+            }
             self.emit_u32(disp as u32);
         }
     }
@@ -1881,13 +2006,30 @@ impl X86_64Emitter {
     fn emit_mov_r64_mem_disp(&mut self, dst: X86Reg, base: X86Reg, disp: i32) {
         self.emit_rex(true, dst.needs_rex(), false, base.needs_rex());
         self.emit_byte(0x8B); // MOV r64, r/m64
-        if disp == 0 && base.encoding() != X86Reg::RBP.encoding() {
-            self.emit_modrm(0b00, dst.encoding(), base.encoding());
+        let base_enc = base.encoding();
+        let needs_sib = base_enc == X86Reg::RSP.encoding();
+        if disp == 0 && base_enc != X86Reg::RBP.encoding() {
+            if needs_sib {
+                self.emit_modrm(0b00, dst.encoding(), 0b100);
+                self.emit_byte((0b00 << 6) | (0b100 << 3) | base_enc);
+            } else {
+                self.emit_modrm(0b00, dst.encoding(), base_enc);
+            }
         } else if disp >= -128 && disp <= 127 {
-            self.emit_modrm(0b01, dst.encoding(), base.encoding());
+            if needs_sib {
+                self.emit_modrm(0b01, dst.encoding(), 0b100);
+                self.emit_byte((0b00 << 6) | (0b100 << 3) | base_enc);
+            } else {
+                self.emit_modrm(0b01, dst.encoding(), base_enc);
+            }
             self.emit_byte(disp as u8);
         } else {
-            self.emit_modrm(0b10, dst.encoding(), base.encoding());
+            if needs_sib {
+                self.emit_modrm(0b10, dst.encoding(), 0b100);
+                self.emit_byte((0b00 << 6) | (0b100 << 3) | base_enc);
+            } else {
+                self.emit_modrm(0b10, dst.encoding(), base_enc);
+            }
             self.emit_u32(disp as u32);
         }
     }
@@ -1896,11 +2038,23 @@ impl X86_64Emitter {
     fn emit_lea(&mut self, dst: X86Reg, base: X86Reg, disp: i32) {
         self.emit_rex(true, dst.needs_rex(), false, base.needs_rex());
         self.emit_byte(0x8D); // LEA r64, m
+        let base_enc = base.encoding();
+        let needs_sib = base_enc == X86Reg::RSP.encoding();
         if disp >= -128 && disp <= 127 {
-            self.emit_modrm(0b01, dst.encoding(), base.encoding());
+            if needs_sib {
+                self.emit_modrm(0b01, dst.encoding(), 0b100);
+                self.emit_byte((0b00 << 6) | (0b100 << 3) | base_enc);
+            } else {
+                self.emit_modrm(0b01, dst.encoding(), base_enc);
+            }
             self.emit_byte(disp as u8);
         } else {
-            self.emit_modrm(0b10, dst.encoding(), base.encoding());
+            if needs_sib {
+                self.emit_modrm(0b10, dst.encoding(), 0b100);
+                self.emit_byte((0b00 << 6) | (0b100 << 3) | base_enc);
+            } else {
+                self.emit_modrm(0b10, dst.encoding(), base_enc);
+            }
             self.emit_u32(disp as u32);
         }
     }
@@ -1976,6 +2130,96 @@ impl X86_64Emitter {
         self.emit_call_rel32(0); // Placeholder, will be patched by linker
     }
 
+    /// LEA reg, [RIP + disp32] with relocation to a symbol
+    fn emit_lea_rip_relative(&mut self, dst: X86Reg, symbol: &str) {
+        self.emit_rex(true, dst.needs_rex(), false, false);
+        self.emit_byte(0x8D); // LEA r64, m
+        self.emit_modrm(0b00, dst.encoding(), 0b101); // RIP-relative
+        let offset = self.code.len();
+        self.emit_u32(0);
+        self.relocations.push(Relocation {
+            offset,
+            kind: RelocKind::PCRel32,
+            symbol: symbol.to_string(),
+            addend: -4,
+        });
+    }
+
+    /// Intern read-only data and return a symbol name
+    fn intern_rodata(&mut self, bytes: &[u8], align: usize) -> String {
+        let align = align.max(1);
+        let padding = (align - (self.rodata.len() % align)) % align;
+        if padding > 0 {
+            self.rodata.extend(std::iter::repeat(0).take(padding));
+        }
+        let offset = self.rodata.len();
+        self.rodata.extend_from_slice(bytes);
+        let func_name = format!("__sounio_rodata_{}", self.rodata_counter);
+        let data_name = format!("{}_data", func_name);
+        self.rodata_counter += 1;
+        self.rodata_symbols.push(Symbol {
+            name: data_name.clone(),
+            offset,
+            global: false,
+        });
+        self.rodata_entries.push(RoDataEntry {
+            func_name,
+            data_name: data_name.clone(),
+        });
+        data_name
+    }
+
+    fn append_constant_bytes(constant: &Constant, out: &mut Vec<u8>) -> bool {
+        match constant {
+            Constant::Bool(v) => {
+                out.push(if *v { 1 } else { 0 });
+                true
+            }
+            Constant::I8(v) => {
+                out.push(*v as u8);
+                true
+            }
+            Constant::I16(v) => {
+                out.extend_from_slice(&v.to_le_bytes());
+                true
+            }
+            Constant::I32(v) => {
+                out.extend_from_slice(&v.to_le_bytes());
+                true
+            }
+            Constant::I64(v) => {
+                out.extend_from_slice(&v.to_le_bytes());
+                true
+            }
+            Constant::F32(v) => {
+                out.extend_from_slice(&v.to_bits().to_le_bytes());
+                true
+            }
+            Constant::F64(v) => {
+                out.extend_from_slice(&v.to_bits().to_le_bytes());
+                true
+            }
+            Constant::NullPtr => {
+                out.extend_from_slice(&0u64.to_le_bytes());
+                true
+            }
+            Constant::Undef(ty) | Constant::ZeroInit(ty) => {
+                out.extend(std::iter::repeat(0).take(ty.size_bytes()));
+                true
+            }
+            Constant::Aggregate(elems) => {
+                for elem in elems {
+                    if !Self::append_constant_bytes(elem, out) {
+                        return false;
+                    }
+                }
+                true
+            }
+            Constant::Epistemic { value, .. } => Self::append_constant_bytes(value, out),
+            Constant::Distribution { .. } => false,
+        }
+    }
+
     /// XORPD xmm, xmm - XOR packed doubles (for sign manipulation)
     fn emit_xorpd(&mut self, dst: X86Reg, src: X86Reg) {
         self.emit_byte(0x66); // Operand size prefix
@@ -2014,6 +2258,14 @@ impl X86_64Emitter {
         self.emit_rex(true, dst.needs_rex(), false, src.needs_rex());
         self.emit_bytes(&[0x0F, 0x6E]); // MOVQ xmm, r/m64
         self.emit_modrm(0b11, (dst as u8) & 0x7, src.encoding());
+    }
+
+    /// MOVQ r64, xmm - Move quadword from XMM to GPR
+    fn emit_movq_r64_xmm(&mut self, dst: X86Reg, src: X86Reg) {
+        self.emit_byte(0x66);
+        self.emit_rex(true, dst.needs_rex(), false, src.needs_rex());
+        self.emit_bytes(&[0x0F, 0x7E]); // MOVQ r/m64, xmm
+        self.emit_modrm(0b11, src.encoding(), dst.encoding());
     }
 
     /// Load 64-bit constant into XMM via stack
@@ -2385,11 +2637,128 @@ impl X86_64Emitter {
             self.external_alloc_result = None;
         }
 
+        self.emit_rodata_stubs(&mut symbols);
+
+        let mut code = std::mem::take(&mut self.code);
+        let mut symbols_out = symbols;
+
+        let rodata = std::mem::take(&mut self.rodata);
+        let rodata_symbols = std::mem::take(&mut self.rodata_symbols);
+        if !rodata.is_empty() {
+            let align = 8usize;
+            let padding = (align - (code.len() % align)) % align;
+            if padding > 0 {
+                code.extend(std::iter::repeat(0).take(padding));
+            }
+            let rodata_base = code.len();
+            for sym in rodata_symbols {
+                symbols_out.push(Symbol {
+                    name: sym.name,
+                    offset: rodata_base + sym.offset,
+                    global: sym.global,
+                });
+            }
+            code.extend_from_slice(&rodata);
+        }
+
+        self.rodata_counter = 0;
+
         Ok(CodeSegment {
-            code: std::mem::take(&mut self.code),
+            code,
             relocations: std::mem::take(&mut self.relocations),
-            symbols,
+            symbols: symbols_out,
         })
+    }
+
+    fn emit_rodata_stubs(&mut self, symbols: &mut Vec<Symbol>) {
+        let entries = std::mem::take(&mut self.rodata_entries);
+        for entry in entries {
+            symbols.push(Symbol {
+                name: entry.func_name.clone(),
+                offset: self.offset(),
+                global: false,
+            });
+            self.emit_lea_rip_relative(X86Reg::RAX, &entry.data_name);
+            self.emit_byte(0xC3); // ret
+        }
+    }
+
+    fn build_phi_moves(&mut self, func: &SirFunction) {
+        self.phi_moves.clear();
+        for block in &func.blocks {
+            for inst in &block.instructions {
+                if let SirInst::Phi { incoming, .. } = &inst.inst {
+                    let Some(dst) = inst.result else {
+                        continue;
+                    };
+                    for (pred, src) in incoming {
+                        self.phi_moves
+                            .entry((*pred, block.id))
+                            .or_default()
+                            .push(PhiMove { dst, src: *src });
+                    }
+                }
+            }
+        }
+    }
+
+    fn emit_phi_moves_for_edge(
+        &mut self,
+        pred: BlockId,
+        succ: BlockId,
+        func: &SirFunction,
+    ) -> Result<(), EmitError> {
+        let moves = match self.phi_moves.get(&(pred, succ)) {
+            Some(moves) => moves.clone(),
+            None => return Ok(()),
+        };
+
+        for mv in moves {
+            self.emit_phi_move(mv.dst, mv.src, func)?;
+        }
+        Ok(())
+    }
+
+    fn emit_phi_move(
+        &mut self,
+        dst: ValueId,
+        src: ValueId,
+        func: &SirFunction,
+    ) -> Result<(), EmitError> {
+        if let Some(dst_reg) = self.register_allocator.get_reg(dst) {
+            let src_reg = self.get_value_reg(src, dst_reg);
+            if dst_reg.is_xmm() && src_reg.is_xmm() {
+                if dst_reg != src_reg {
+                    self.emit_movsd_rr(dst_reg, src_reg);
+                }
+            } else if !dst_reg.is_xmm() && !src_reg.is_xmm() {
+                if dst_reg != src_reg {
+                    self.emit_mov_rr(dst_reg, src_reg);
+                }
+            } else if dst_reg.is_xmm() && !src_reg.is_xmm() {
+                self.emit_movq_xmm_r64(dst_reg, src_reg);
+            } else if !dst_reg.is_xmm() && src_reg.is_xmm() {
+                self.emit_movq_r64_xmm(dst_reg, src_reg);
+            }
+            return Ok(());
+        }
+
+        if let Some(slot) = self.register_allocator.get_spill_slot(dst) {
+            let is_float = self.get_value_type(src, func).is_float();
+            let scratch = if is_float { X86Reg::XMM15 } else { X86Reg::R11 };
+            let src_reg = self.get_value_reg(src, scratch);
+            self.emit_spill(src_reg, slot);
+        }
+
+        Ok(())
+    }
+
+    fn patch_rel32(&mut self, patch_offset: usize, rel: i32) {
+        let bytes = rel.to_le_bytes();
+        self.code[patch_offset] = bytes[0];
+        self.code[patch_offset + 1] = bytes[1];
+        self.code[patch_offset + 2] = bytes[2];
+        self.code[patch_offset + 3] = bytes[3];
     }
 
     fn emit_function(&mut self, func: &SirFunction) -> Result<Vec<u8>, EmitError> {
@@ -2420,12 +2789,17 @@ impl X86_64Emitter {
         //   [local variables]    <- any additional stack allocation
         //
         // RSP must be 16-byte aligned before CALL instructions
-        self.frame_size = if spill_space > 0 {
+        let mut frame_size = if spill_space > 0 {
             // Round up to 16-byte alignment
             (spill_space + 15) & !15
         } else {
             0
         };
+        // Account for callee-saved pushes so RSP stays 16-byte aligned before calls.
+        if (callee_saved_space % 16) != 0 {
+            frame_size += 8;
+        }
+        self.frame_size = frame_size;
 
         // Step 3: Emit prologue with callee-saved register saves
         self.emit_prologue_with_saves(self.frame_size, &callee_saved);
@@ -2438,8 +2812,10 @@ impl X86_64Emitter {
         self.labels.clear();
         self.forward_refs.clear();
         self.current_instruction_pos = 0;
+        self.build_phi_moves(func);
 
         for block in &func.blocks {
+            self.current_block = Some(block.id);
             // Record label for this block
             self.labels.insert(block.id.0, self.offset());
 
@@ -2492,9 +2868,12 @@ impl X86_64Emitter {
 
             // Emit terminator
             if let Some(term) = &block.terminator {
-                self.emit_terminator(term, &callee_saved)?;
+                self.emit_terminator(term, func, &callee_saved)?;
             }
         }
+
+        self.current_block = None;
+        self.phi_moves.clear();
 
         // Step 6: Patch forward references
         self.patch_forward_refs();
@@ -2533,7 +2912,7 @@ impl X86_64Emitter {
                 }
             }
             SirInst::Call(info) => {
-                self.emit_call(inst.result, info)?;
+                self.emit_call(inst.result, info, func)?;
             }
             SirInst::Memory(mem_op) => {
                 self.emit_memory_op(inst.result, mem_op)?;
@@ -2973,6 +3352,12 @@ impl X86_64Emitter {
             .unwrap_or(X86Reg::RAX);
 
         match constant {
+            super::values::Constant::I8(val) => {
+                self.emit_mov_ri64(dst_reg, *val as i64);
+            }
+            super::values::Constant::I16(val) => {
+                self.emit_mov_ri64(dst_reg, *val as i64);
+            }
             super::values::Constant::I64(val) => {
                 self.emit_mov_ri64(dst_reg, *val);
             }
@@ -2981,6 +3366,9 @@ impl X86_64Emitter {
             }
             super::values::Constant::Bool(val) => {
                 self.emit_mov_ri64(dst_reg, if *val { 1 } else { 0 });
+            }
+            super::values::Constant::NullPtr => {
+                self.emit_mov_ri64(dst_reg, 0);
             }
             super::values::Constant::F64(val) => {
                 // For floats, we'd need to load from a constant pool
@@ -2995,6 +3383,27 @@ impl X86_64Emitter {
                 // Simplified: just store to stack and reload
                 self.emit_mov_mem_rbp_r64(-8, X86Reg::RAX);
                 self.emit_movsd_rbp_mem(dst_xmm, -8);
+            }
+            super::values::Constant::F32(val) => {
+                let dst_xmm = self
+                    .register_allocator
+                    .get_reg(result)
+                    .unwrap_or(X86Reg::XMM0);
+                let bits = val.to_bits() as i64;
+                self.emit_mov_ri64(X86Reg::RAX, bits);
+                self.emit_movq_xmm_r64(dst_xmm, X86Reg::RAX);
+            }
+            super::values::Constant::Undef(_) | super::values::Constant::ZeroInit(_) => {
+                self.emit_mov_ri64(dst_reg, 0);
+            }
+            super::values::Constant::Aggregate(_) => {
+                let mut bytes = Vec::new();
+                if Self::append_constant_bytes(constant, &mut bytes) {
+                    let symbol = self.intern_rodata(&bytes, 8);
+                    self.emit_lea_rip_relative(dst_reg, &symbol);
+                } else {
+                    self.emit_mov_ri64(dst_reg, 0);
+                }
             }
             _ => {
                 // Other constant types not yet implemented
@@ -3731,13 +4140,35 @@ impl X86_64Emitter {
     /// Helper: Infer type from instruction
     fn infer_instruction_type(&self, inst: &super::ops::SirInst) -> SirType {
         match inst {
+            super::ops::SirInst::BinOp { op, .. } => match op {
+                super::ops::ArithOp::FAdd
+                | super::ops::ArithOp::FSub
+                | super::ops::ArithOp::FMul
+                | super::ops::ArithOp::FDiv
+                | super::ops::ArithOp::FRem => SirType::f64(),
+                _ => SirType::i64(),
+            },
+            super::ops::SirInst::Cmp { .. } => SirType::bool(),
+            super::ops::SirInst::Cast { to_ty, .. } => to_ty.clone(),
+            super::ops::SirInst::UnaryFloat { .. } | super::ops::SirInst::BinaryFloat { .. } => {
+                SirType::f64()
+            }
             super::ops::SirInst::Const(c) => c.ty(),
-            super::ops::SirInst::BinOp { .. } => SirType::Scalar(ScalarType::F64),
+            super::ops::SirInst::Memory(super::ops::MemoryOp::Load { ty, .. }) => ty.clone(),
+            super::ops::SirInst::Memory(super::ops::MemoryOp::Alloca { ty, .. }) => {
+                SirType::ptr(ty.clone())
+            }
+            super::ops::SirInst::Memory(super::ops::MemoryOp::GetElementPtr { ty, .. }) => {
+                SirType::ptr(ty.clone())
+            }
+            super::ops::SirInst::Call(info) => info.ret_ty.clone(),
+            super::ops::SirInst::BuildAggregate { ty, .. } => ty.clone(),
+            super::ops::SirInst::Phi { ty, .. } => ty.clone(),
+            super::ops::SirInst::Select { .. } => SirType::i64(),
             super::ops::SirInst::Epistemic(_) => {
-                // Would need to track inner type - for now default
                 SirType::Epistemic(Box::new(SirType::Scalar(ScalarType::F64)))
             }
-            _ => SirType::Scalar(ScalarType::F64),
+            _ => SirType::i64(),
         }
     }
 
@@ -3941,8 +4372,8 @@ impl X86_64Emitter {
                         // Extract tolerances from metadata if available
                         // OdeSolverMetadata contains tolerance information
                         // For now, use defaults; in production, extract from metadata
-                        let mut rtol: f64 = 1e-6;
-                        let mut atol: f64 = 1e-8;
+                        let rtol: f64 = 1e-6;
+                        let atol: f64 = 1e-8;
                         
                         // TODO: Extract from OdeSolverMetadata if available
                         // Example:
@@ -4292,7 +4723,21 @@ impl X86_64Emitter {
     }
 
     /// Emit a function call
-    fn emit_call(&mut self, result: Option<ValueId>, info: &CallInfo) -> Result<(), EmitError> {
+    fn emit_call(
+        &mut self,
+        result: Option<ValueId>,
+        info: &CallInfo,
+        func: &SirFunction,
+    ) -> Result<(), EmitError> {
+        if let Callee::Named(name) = &info.callee {
+            if name == "print" || name == "println" {
+                return self.emit_builtin_print(name, info, func);
+            }
+            if name == "len" || name == "array_len" {
+                return self.emit_builtin_len(result, info, func);
+            }
+        }
+
         // Set up arguments according to calling convention
         self.setup_call_args(&info.args);
 
@@ -4336,6 +4781,128 @@ impl X86_64Emitter {
             let ret_reg = if is_float { X86Reg::XMM0 } else { X86Reg::RAX };
             self.store_value(result_id, ret_reg);
         }
+
+        Ok(())
+    }
+
+    fn emit_builtin_print(
+        &mut self,
+        name: &str,
+        info: &CallInfo,
+        func: &SirFunction,
+    ) -> Result<(), EmitError> {
+        let arg = match info.args.first() {
+            Some(arg) => *arg,
+            None => {
+                if name == "println" {
+                    self.emit_call_extern("_demetrios_print_newline");
+                }
+                return Ok(());
+            }
+        };
+
+        let arg_ty = self.get_value_type(arg, func);
+        match arg_ty {
+            SirType::Scalar(ScalarType::F32) => {
+                let src = self.get_value_reg(arg, X86Reg::XMM0);
+                if src != X86Reg::XMM0 {
+                    self.emit_cvtss2sd(X86Reg::XMM0, src);
+                } else {
+                    self.emit_cvtss2sd(X86Reg::XMM0, X86Reg::XMM0);
+                }
+                self.emit_call_extern("_demetrios_print_f64");
+            }
+            SirType::Scalar(ScalarType::F64) => {
+                let src = self.get_value_reg(arg, X86Reg::XMM0);
+                if src != X86Reg::XMM0 {
+                    self.emit_movsd_rr(X86Reg::XMM0, src);
+                }
+                self.emit_call_extern("_demetrios_print_f64");
+            }
+            SirType::Scalar(ScalarType::Bool) => {
+                let src = self.get_value_reg(arg, X86Reg::RDI);
+                if src != X86Reg::RDI {
+                    self.emit_mov_rr(X86Reg::RDI, src);
+                }
+                self.emit_call_extern("_demetrios_print_bool");
+            }
+            SirType::Array(arr) => {
+                if matches!(arr.elem.as_ref(), SirType::Scalar(ScalarType::I8)) {
+                    let src = self.get_value_reg(arg, X86Reg::RDI);
+                    if src != X86Reg::RDI {
+                        self.emit_mov_rr(X86Reg::RDI, src);
+                    }
+                    self.emit_mov_ri64(X86Reg::RSI, arr.len as i64);
+                    self.emit_call_extern("_demetrios_print");
+                } else {
+                    let src = self.get_value_reg(arg, X86Reg::RDI);
+                    if src != X86Reg::RDI {
+                        self.emit_mov_rr(X86Reg::RDI, src);
+                    }
+                    self.emit_call_extern("_demetrios_print_i64");
+                }
+            }
+            SirType::Pointer(ptr) => {
+                if let SirType::Array(arr) = ptr.pointee.as_ref() {
+                    let src = self.get_value_reg(arg, X86Reg::RDI);
+                    if src != X86Reg::RDI {
+                        self.emit_mov_rr(X86Reg::RDI, src);
+                    }
+                    self.emit_mov_ri64(X86Reg::RSI, arr.len as i64);
+                    self.emit_call_extern("_demetrios_print");
+                } else {
+                    let src = self.get_value_reg(arg, X86Reg::RDI);
+                    if src != X86Reg::RDI {
+                        self.emit_mov_rr(X86Reg::RDI, src);
+                    }
+                    self.emit_call_extern("_demetrios_print_i64");
+                }
+            }
+            _ => {
+                let src = self.get_value_reg(arg, X86Reg::RDI);
+                if src != X86Reg::RDI {
+                    self.emit_mov_rr(X86Reg::RDI, src);
+                }
+                self.emit_call_extern("_demetrios_print_i64");
+            }
+        }
+
+        if name == "println" {
+            self.emit_call_extern("_demetrios_print_newline");
+        }
+
+        Ok(())
+    }
+
+    fn emit_builtin_len(
+        &mut self,
+        result: Option<ValueId>,
+        info: &CallInfo,
+        func: &SirFunction,
+    ) -> Result<(), EmitError> {
+        let Some(result_id) = result else {
+            return Ok(());
+        };
+        let Some(arg) = info.args.first() else {
+            return Ok(());
+        };
+
+        let arg_ty = self.get_value_type(*arg, func);
+        let len = match arg_ty {
+            SirType::Array(arr) => arr.len as i64,
+            SirType::Pointer(ptr) => match ptr.pointee.as_ref() {
+                SirType::Array(arr) => arr.len as i64,
+                _ => 0,
+            },
+            _ => 0,
+        };
+
+        let dst = self
+            .register_allocator
+            .get_reg(result_id)
+            .unwrap_or(X86Reg::RAX);
+        self.emit_mov_ri64(dst, len);
+        self.store_value(result_id, dst);
 
         Ok(())
     }
@@ -4434,25 +5001,23 @@ impl X86_64Emitter {
                             }
                             GepIndex::Value(v) => {
                                 // Dynamic index: dst += index * elem_size
-                                let idx_reg = self.get_value_reg(*v, X86Reg::R11);
-                                // Multiply index by element size
+                                let mut idx_reg = self.get_value_reg(*v, X86Reg::R11);
                                 if elem_size == 1 {
                                     // Just add index
                                     self.emit_add_rr(dst_reg, idx_reg);
-                                } else if elem_size.is_power_of_two() {
-                                    // Use shift: move index to scratch, shift, add
-                                    let shift = elem_size.trailing_zeros();
-                                    // Move shift amount to CL (RCX low byte)
-                                    self.emit_mov_ri64(X86Reg::RCX, shift as i64);
-                                    // Move index to R11 if not already there
-                                    if idx_reg != X86Reg::R11 {
-                                        self.emit_mov_rr(X86Reg::R11, idx_reg);
+                                } else if matches!(elem_size, 2 | 4 | 8) {
+                                    if idx_reg == dst_reg {
+                                        let scratch = if dst_reg == X86Reg::R11 {
+                                            X86Reg::R10
+                                        } else {
+                                            X86Reg::R11
+                                        };
+                                        self.emit_mov_rr(scratch, idx_reg);
+                                        idx_reg = scratch;
                                     }
-                                    // SHL R11, CL
-                                    self.emit_shl_cl(X86Reg::R11);
-                                    self.emit_add_rr(dst_reg, X86Reg::R11);
+                                    self.emit_lea_sib(dst_reg, dst_reg, idx_reg, elem_size as u8, 0);
                                 } else {
-                                    // Use IMUL
+                                    // Use IMUL for non-power-of-two sizes
                                     self.emit_mov_ri64(X86Reg::RAX, elem_size as i64);
                                     self.emit_imul_rr(X86Reg::RAX, idx_reg);
                                     self.emit_add_rr(dst_reg, X86Reg::RAX);
@@ -4546,10 +5111,14 @@ impl X86_64Emitter {
     fn emit_terminator(
         &mut self,
         term: &Terminator,
+        func: &SirFunction,
         callee_saved: &[X86Reg],
     ) -> Result<(), EmitError> {
         match term {
             Terminator::Return(None) => {
+                if matches!(func.ret_ty, SirType::Void) {
+                    self.emit_xor_rr_32(X86Reg::RAX, X86Reg::RAX);
+                }
                 self.emit_epilogue_with_restores(callee_saved);
             }
             Terminator::Return(Some(val)) => {
@@ -4568,6 +5137,9 @@ impl X86_64Emitter {
                 self.emit_epilogue_with_restores(callee_saved);
             }
             Terminator::Br(target) => {
+                if let Some(curr_block) = self.current_block {
+                    self.emit_phi_moves_for_edge(curr_block, *target, func)?;
+                }
                 // Unconditional branch
                 if let Some(&target_offset) = self.labels.get(&target.0) {
                     let rel = (target_offset as i32) - (self.offset() as i32) - 5;
@@ -4590,21 +5162,39 @@ impl X86_64Emitter {
                 self.emit_byte(0x85);
                 self.emit_modrm(0b11, cond_reg.encoding(), cond_reg.encoding());
 
-                // JNZ then_block
-                if let Some(&then_offset) = self.labels.get(&then_block.0) {
-                    let rel = (then_offset as i32) - (self.offset() as i32) - 6;
-                    self.emit_jcc_rel32(CondCode::NE as u8, rel);
-                } else {
-                    self.forward_refs.push((self.offset() + 2, then_block.0));
-                    self.emit_jcc_rel32(CondCode::NE as u8, 0);
-                }
+                let curr_block = match self.current_block {
+                    Some(id) => id,
+                    None => {
+                        return Ok(());
+                    }
+                };
 
-                // JMP else_block (fallthrough or explicit jump)
+                // JNZ then_path (patched after else path is emitted)
+                let jcc_disp_offset = self.offset() + 2;
+                self.emit_jcc_rel32(CondCode::NE as u8, 0);
+
+                // Else path: phi moves then jump to else block
+                self.emit_phi_moves_for_edge(curr_block, *else_block, func)?;
                 if let Some(&else_offset) = self.labels.get(&else_block.0) {
                     let rel = (else_offset as i32) - (self.offset() as i32) - 5;
                     self.emit_jmp_rel32(rel);
                 } else {
                     self.forward_refs.push((self.offset() + 1, else_block.0));
+                    self.emit_jmp_rel32(0);
+                }
+
+                // Then path label is here
+                let then_offset = self.offset();
+                let rel = (then_offset as i32) - (jcc_disp_offset as i32) - 4;
+                self.patch_rel32(jcc_disp_offset, rel);
+
+                // Then path: phi moves then jump to then block
+                self.emit_phi_moves_for_edge(curr_block, *then_block, func)?;
+                if let Some(&then_block_offset) = self.labels.get(&then_block.0) {
+                    let rel = (then_block_offset as i32) - (self.offset() as i32) - 5;
+                    self.emit_jmp_rel32(rel);
+                } else {
+                    self.forward_refs.push((self.offset() + 1, then_block.0));
                     self.emit_jmp_rel32(0);
                 }
             }

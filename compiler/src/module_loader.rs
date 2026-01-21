@@ -959,7 +959,11 @@ fn rewrite_type_expr(ty: &mut TypeExpr, prefixes: &[Vec<String>]) {
         TypeExpr::Forall { inner, .. } => {
             rewrite_type_expr(inner, prefixes);
         }
-        TypeExpr::SelfType | TypeExpr::Infer | TypeExpr::Unit | TypeExpr::Ontology { .. } => {}
+        TypeExpr::SelfType
+        | TypeExpr::Infer
+        | TypeExpr::Unit
+        | TypeExpr::Never
+        | TypeExpr::Ontology { .. } => {}
     }
 }
 
@@ -1695,7 +1699,11 @@ fn annotate_type_expr(
         TypeExpr::Forall { inner, .. } => {
             annotate_type_expr(inner, prefixes, sm, im);
         }
-        TypeExpr::SelfType | TypeExpr::Infer | TypeExpr::Unit | TypeExpr::Ontology { .. } => {}
+        TypeExpr::SelfType
+        | TypeExpr::Infer
+        | TypeExpr::Unit
+        | TypeExpr::Never
+        | TypeExpr::Ontology { .. } => {}
     }
 }
 

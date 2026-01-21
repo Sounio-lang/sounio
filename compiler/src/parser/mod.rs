@@ -330,7 +330,9 @@ impl<'a> Parser<'a> {
 
         match self.peek() {
             TokenKind::Fn | TokenKind::Kernel => self.parse_fn(visibility, modifiers, attributes),
-            TokenKind::Let | TokenKind::Const => self.parse_global(visibility, modifiers),
+            TokenKind::Let | TokenKind::Const | TokenKind::Var => {
+                self.parse_global(visibility, modifiers)
+            }
             TokenKind::Struct => self.parse_struct(visibility, modifiers),
             TokenKind::Enum => self.parse_enum(visibility, modifiers),
             TokenKind::Trait => self.parse_trait(visibility, modifiers),
@@ -1327,7 +1329,10 @@ impl<'a> Parser<'a> {
             if next == TokenKind::LBrace {
                 self.advance(); // consume ::
                 let items = self.parse_import_items()?;
-                self.expect(TokenKind::Semi)?;
+                // Accept optional semicolon after import statement
+                if self.at(TokenKind::Semi) {
+                    self.advance();
+                }
                 let end = self.span();
                 return Ok(Item::Import(ImportDef {
                     id: self.next_id(),
@@ -1340,7 +1345,10 @@ impl<'a> Parser<'a> {
                 // Glob import: `use path::*`
                 self.advance(); // consume ::
                 self.advance(); // consume *
-                self.expect(TokenKind::Semi)?;
+                // Accept optional semicolon after import statement
+                if self.at(TokenKind::Semi) {
+                    self.advance();
+                }
                 let end = self.span();
                 return Ok(Item::Import(ImportDef {
                     id: self.next_id(),
@@ -1360,7 +1368,10 @@ impl<'a> Parser<'a> {
         if self.at(TokenKind::As) {
             self.advance();
             let alias = self.parse_ident()?;
-            self.expect(TokenKind::Semi)?;
+            // Accept optional semicolon after import statement
+            if self.at(TokenKind::Semi) {
+                self.advance();
+            }
             let end = self.span();
 
             // The last segment of the path is the item being renamed
@@ -1389,7 +1400,10 @@ impl<'a> Parser<'a> {
         }
 
         // Simple `import path;` syntax
-        self.expect(TokenKind::Semi)?;
+        // Accept optional semicolon after import statement
+        if self.at(TokenKind::Semi) {
+            self.advance();
+        }
         let end = self.span();
 
         // If path has multiple segments (e.g., `use foo::bar`), treat the last
@@ -1469,7 +1483,10 @@ impl<'a> Parser<'a> {
         let items = self.parse_import_items()?;
         self.expect(TokenKind::From)?;
         let path = self.parse_path()?;
-        self.expect(TokenKind::Semi)?;
+        // Accept optional semicolon after import statement
+        if self.at(TokenKind::Semi) {
+            self.advance();
+        }
         let end = self.span();
 
         Ok(Item::Import(ImportDef {
@@ -2395,10 +2412,14 @@ impl<'a> Parser<'a> {
 
     fn parse_global(&mut self, visibility: Visibility, modifiers: Modifiers) -> Result<Item> {
         let start = self.span();
-        let is_const = self.at(TokenKind::Const);
-        self.advance(); // let or const
+        let start_kind = self.peek();
+        let is_const = start_kind == TokenKind::Const;
+        let is_var = start_kind == TokenKind::Var;
+        self.advance(); // let, const, or var
 
-        let is_mut = if self.at(TokenKind::Mut) && !is_const {
+        let is_mut = if is_var {
+            true
+        } else if self.at(TokenKind::Mut) && !is_const {
             self.advance();
             true
         } else {
@@ -2416,8 +2437,10 @@ impl<'a> Parser<'a> {
         self.expect(TokenKind::Eq)?;
         let value = self.parse_expr()?;
 
-        // Consume trailing semicolon (required for global declarations)
-        self.expect(TokenKind::Semi)?;
+        // Accept optional trailing semicolon for global declarations (examples commonly omit it)
+        if self.at(TokenKind::Semi) {
+            self.advance();
+        }
 
         let end = self.span();
 
@@ -2572,6 +2595,18 @@ impl<'a> Parser<'a> {
 
     fn parse_type_primary(&mut self) -> Result<TypeExpr> {
         match self.peek() {
+            // Never type
+            TokenKind::Bang => {
+                self.advance();
+                Ok(TypeExpr::Never)
+            }
+
+            // Self type (in traits and impls)
+            TokenKind::SelfUpper => {
+                self.advance();
+                Ok(TypeExpr::SelfType)
+            }
+
             // Raw pointer types: *const T or *mut T (for FFI)
             TokenKind::Star => {
                 self.advance();
@@ -2917,6 +2952,23 @@ impl<'a> Parser<'a> {
     /// Parse Knowledge[T, ε < 0.05, Valid(duration), Derived]
     fn parse_knowledge_type(&mut self) -> Result<TypeExpr> {
         self.expect(TokenKind::Knowledge)?;
+        // Support legacy `Knowledge<T>` syntax as a shorthand for `Knowledge[T]`.
+        if self.at(TokenKind::Lt) {
+            let args = self.parse_type_args()?;
+            if args.len() != 1 {
+                return Err(miette::miette!(
+                    "Knowledge<T> requires exactly one type argument, got {}",
+                    args.len()
+                ));
+            }
+            return Ok(TypeExpr::Knowledge {
+                value_type: Box::new(args.into_iter().next().unwrap()),
+                epsilon: None,
+                validity: None,
+                provenance: None,
+            });
+        }
+
         self.expect(TokenKind::LBracket)?;
 
         // Parse the value type
@@ -3380,12 +3432,21 @@ impl<'a> Parser<'a> {
                 let next_min = if assoc == Assoc::Left { prec + 1 } else { prec };
                 let right = self.parse_expr_with_precedence(next_min)?;
 
-                left = Expr::Binary {
-                    id: self.next_id(),
-                    op,
-                    left: Box::new(left),
-                    right: Box::new(right),
-                };
+                // Special-case: `x +- σ` lowers to an epistemic uncertainty node.
+                if op == BinaryOp::PlusMinus {
+                    left = Expr::Uncertain {
+                        id: self.next_id(),
+                        value: Box::new(left),
+                        uncertainty: Box::new(right),
+                    };
+                } else {
+                    left = Expr::Binary {
+                        id: self.next_id(),
+                        op,
+                        left: Box::new(left),
+                        right: Box::new(right),
+                    };
+                }
             } else {
                 break;
             }
@@ -4948,6 +5009,7 @@ impl<'a> Parser<'a> {
                 | TokenKind::Initial
                 | TokenKind::Params
                 | TokenKind::Var // Can be used as identifier (e.g., "var" field name)
+                | TokenKind::Gpu // Can be used as identifier (e.g., "gpu.thread_id.x")
                 // Ontology keywords
                 | TokenKind::Align
                 | TokenKind::Ontology

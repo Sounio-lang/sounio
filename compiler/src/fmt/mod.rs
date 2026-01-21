@@ -711,6 +711,7 @@ impl Formatter {
     fn type_to_doc(&self, ty: &TypeExpr) -> Doc {
         match ty {
             TypeExpr::Unit => Doc::Text("()".to_string()),
+            TypeExpr::Never => Doc::Text("!".to_string()),
             TypeExpr::SelfType => Doc::Text("Self".to_string()),
             TypeExpr::Named { path, args, unit } => {
                 let mut parts = Vec::new();

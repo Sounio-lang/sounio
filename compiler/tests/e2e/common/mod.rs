@@ -6,6 +6,8 @@
 // - Golden file comparison utilities
 // - Macros for common test patterns
 
+#![allow(dead_code)]
+
 use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};

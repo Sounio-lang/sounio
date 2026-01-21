@@ -1,0 +1,501 @@
+// stdlib/compiler/effects/handler.sio
+// Effect Handlers & Capabilities Implementation
+// Provides interception, masking, and security for effects in computations.
+
+// Forward declarations for types used across the module
+struct Region {
+    start: i64,
+    end: i64,
+    permissions: i32,  // Bitmask: 1=read, 2=write, 4=execute
+}
+
+fn default_region() -> Region {
+    Region { start: 0, end: 0, permissions: 0 }
+}
+
+struct Operation {
+    op_type: i32,      // 0=IO read, 1=IO write, etc.
+    args: [i64; 8],    // Up to 8 arguments
+    n_args: i64,
+}
+
+fn default_operation() -> Operation {
+    Operation { op_type: 0, args: [0; 8], n_args: 0 }
+}
+
+struct Computation {
+    // Placeholder for computation representation (e.g., bytecode or AST index)
+    code: i64,         // Index to computation code
+    effects: i64,      // Bitmask of effects used
+    result_type: i64,  // Index to result type
+}
+
+struct Result {
+    value: i64,        // Generic value (tagged union placeholder)
+    success: bool,
+    masked_effects: i64,
+}
+
+struct TypeContext {
+    // Placeholder for type system context
+    types: [*i64],     // Array of type descriptors
+    n_types: i64,
+    handlers: [i64; 32],  // Stack of handler indices
+    n_handlers: i64,
+}
+
+// Core EffectHandler struct
+struct EffectHandler {
+    handled_effects: i64,  // Bitmask of effects this handler intercepts (e.g., 1=IO, 2=Alloc)
+    handler_fn: i64,       // Index to the handler function in the runtime
+    return_type_idx: i64,  // Index to the return type after handling
+}
+
+// IO Capability struct
+struct IOCapability {
+    level: i32,            // 0=read-only, 1=read-write, 2=full admin
+    paths: [string; 16],   // Allowed paths
+    n_paths: i64,
+}
+
+// Mutable reference capability struct
+struct MutCapability {
+    regions: [Region; 32], // Memory regions that can be mutated
+    n_regions: i64,
+}
+
+// Overall capabilities struct
+struct Capabilities {
+    io_cap: IOCapability,
+    mut_cap: MutCapability,
+    alloc_cap: bool,       // Permission to allocate memory
+    gpu_cap: bool,         // Permission to use GPU resources
+    // Extensible: additional bools or structs can be added
+}
+
+// Handler implementation details
+struct HandlerImpl {
+    effect_kind: i32,      // Specific effect ID (e.g., 1 for IO)
+    handler_name: [i8; 64], // Null-terminated name for debugging
+
+    // Function pointers as indices (resolved at runtime)
+    handle_op: i64,        // Index to handle_op function: (*i64) -> i64
+    resume_fn: i64,        // Index to resume function: (*i64) -> i64
+}
+
+// Continuation-based handler for resumable effects
+struct ContinuationHandler {
+    state: i64,            // Current state of the continuation
+    operations: [Operation; 16], // Pending operations
+    n_ops: i64,
+}
+
+// Example handler function for IO effects (placeholder implementation)
+fn handle_io(comp: Computation) -> Result with Panic {
+    // Simulate intercepting IO effects in comp
+    // In real impl, this would push a handler and execute comp.code
+    var result: Result = Result { value: 0, success: true, masked_effects: comp.effects & 1 }; // Mask IO bit (1)
+    // Execute computation with interception (pseudocode)
+    // execute_with_intercept(comp.code, current_handler_stack());
+    result
+}
+
+// Mock implementation for testing (e.g., file read)
+fn mock_read_file(path: string) -> string with Panic {
+    // In test mode, return static mock data instead of real IO
+    // This would be called by an IO handler intercepting a read op
+    "mock file content\nLine 2: simulated data"
+}
+
+// Register a handler for a specific effect in the type context
+fn register_handler(ctx: &!TypeContext, effect: i32, handler: HandlerImpl) -> bool with Panic {
+    // Push handler index onto the stack (assume handlers stored globally or in ctx)
+    if ctx.n_handlers >= 32 {
+        return false;  // Stack overflow
+    }
+    // Store handler (pseudocode: ctx.handlers[ctx.n_handlers] = handler_index())
+    ctx.n_handlers = ctx.n_handlers + 1;
+    true
+}
+
+// Execute a computation under a specific effect handler
+fn with_handler(handler: EffectHandler, comp: Computation) -> Result with Panic {
+    // 1. Push handler onto the handler stack in current context
+    var ctx: TypeContext = get_current_type_context();  // Runtime hook
+    if !register_handler(&!ctx, handler.handled_effects as i32, resolve_handler_impl(handler.handler_fn)) {
+        return Result { value: 0, success: false, masked_effects: 0 };
+    }
+
+    // 2. Execute the computation, intercepting effects
+    var result: Result = execute_computation(comp, &!ctx);
+
+    // 3. Effects matching handled_effects are intercepted and processed
+    // (Implementation detail: during execution, effect ops jump to handler.handle_op)
+
+    // 4. Pop handler from stack
+    ctx.n_handlers = ctx.n_handlers - 1;
+
+    // 5. Mask effects in result and return
+    result.masked_effects = comp.effects & (-1 - handler.handled_effects);
+    result
+}
+
+// Mask a specific effect from an effect set (bitmask operation)
+fn mask_effect(effect_set: i64, effect_to_mask: i32) -> i64 with Panic {
+    var bit: i64 = 1 << (effect_to_mask as i64);
+    effect_set & (-1 - bit)
+}
+
+// Yield control to handler for an effect operation (continuation style)
+fn yield_effect(op: Operation) -> Result with Panic {
+    // Pause current computation and invoke handler
+    var current_handler: HandlerImpl = get_top_handler();  // Runtime stack access
+    if current_handler.effect_kind != op.op_type {
+        return Result { value: 0, success: false, masked_effects: 0 };
+    }
+
+    // Invoke handler's handle_op (pseudocode)
+    var handler_result: i64 = invoke_fn(current_handler.handle_op, &!op as *i64);
+
+    // Prepare continuation
+    var cont_handler: ContinuationHandler = ContinuationHandler {
+        state: 0,  // Suspended
+        operations: [default_operation(); 16],
+        n_ops: 1,
+    };
+    cont_handler.operations[0] = op;
+    cont_handler.operations[0].n_args = op.n_args;  // Copy op
+
+    // Return suspended result
+    Result { value: handler_result, success: true, masked_effects: 1 << (op.op_type as i64) }
+}
+
+// Resume a continuation from a yielded state
+fn resume_from_yield(state: i64) -> i64 with Panic {
+    // Get continuation handler from state (assume state encodes handler index)
+    var cont: ContinuationHandler = load_continuation(state);
+    if cont.n_ops == 0 {
+        return 0;  // No ops to resume
+    }
+
+    // Invoke resume function on top handler
+    var top_handler: HandlerImpl = get_top_handler();
+    var resume_result: i64 = invoke_fn(top_handler.resume_fn, &!cont as *i64);
+
+    // Update state and continue execution
+    cont.state = 1;  // Resumed
+    store_continuation(state, cont);
+    resume_result
+}
+
+// Check IO capability for a specific operation on a path
+fn check_io_capability(cap: IOCapability, path: string, op: i32) -> bool with Panic {
+    // Check level for write ops
+    if op == 1 && cap.level < 1 {
+        return false;  // No write permission
+    }
+
+    // Check if path is in allowed list
+    var i: i64 = 0;
+    while i < cap.n_paths {
+        if paths_equal(cap.paths[i as usize], path) {
+            return true;
+        }
+        i = i + 1;
+    }
+    false
+}
+
+// Simple string equality check (placeholder; real impl would compare lengths and chars)
+fn paths_equal(p1: string, p2: string) -> bool with Panic {
+    // Assume string has len and data fields
+    if p1.len != p2.len {
+        return false;
+    }
+    var i: i64 = 0;
+    while i < p1.len {
+        if p1.data[i as usize] != p2.data[i as usize] {
+            return false;
+        }
+        i = i + 1;
+    }
+    true
+}
+
+// Restrict an IO capability to a subset of paths
+fn restrict_io(cap: IOCapability, allowed_paths: [string; 8], n: i64) -> IOCapability with Panic {
+    var new_cap: IOCapability = cap;
+    new_cap.n_paths = n;
+    if n > 8 {
+        new_cap.n_paths = 8;  // Cap at array size
+    }
+    var i: i64 = 0;
+    while i < new_cap.n_paths {
+        new_cap.paths[i as usize] = allowed_paths[i as usize];
+        i = i + 1;
+    }
+    // Optionally downgrade level if needed
+    if n == 0 {
+        new_cap.level = 0;
+    }
+    new_cap
+}
+
+// Compose two effect handlers (bitwise OR effects, combine functions)
+fn compose_handlers(h1: EffectHandler, h2: EffectHandler) -> EffectHandler with Panic {
+    EffectHandler {
+        handled_effects: h1.handled_effects | h2.handled_effects,
+        handler_fn: if h1.handler_fn != -1 { h1.handler_fn } else { h2.handler_fn },
+        return_type_idx: if h1.return_type_idx != -1 { h1.return_type_idx } else { h2.return_type_idx },
+    }
+}
+
+// Stack multiple handlers by composing them sequentially
+fn stack_handlers(handlers: [EffectHandler; 8], n: i64) -> EffectHandler with Panic {
+    var result: EffectHandler = EffectHandler {
+        handled_effects: 0,
+        handler_fn: -1,
+        return_type_idx: -1,
+    };
+    var i: i64 = 0;
+    while i < n {
+        result = compose_handlers(result, handlers[i as usize]);
+        i = i + 1;
+    }
+    result
+}
+
+// Example: Unsafe computation that requires IO (placeholder)
+fn read_and_process(path: string) -> i64 with IO {
+    // Simulate IO effect: read file and process
+    // In real code, this would perform_effect(IO_READ, path)
+    42  // Dummy return
+}
+
+// Test wrapper using mock handler
+fn test_read_and_process() -> i64 with Panic {
+    // Create a mock IO handler
+    let mock_handler: EffectHandler = EffectHandler {
+        handled_effects: 1,  // IO bit
+        handler_fn: resolve_fn_index(mock_read_file),
+        return_type_idx: resolve_type_index(i64),
+    };
+
+    // Run the IO computation under the mock handler
+    let comp: Computation = Computation {
+        code: resolve_comp_index(read_and_process),
+        effects: 1,  // Has IO
+        result_type: resolve_type_index(i64),
+    };
+    let result: Result = with_handler(mock_handler, comp);
+
+    // Result now has no IO effect (masked)
+    if !result.success {
+        return 0;
+    }
+    result.value as i64
+}
+
+// Utility: Get current type context (runtime hook, placeholder)
+fn get_current_type_context() -> TypeContext with Panic {
+    // In real runtime, fetch thread-local context
+    TypeContext {
+        types: null,  // Placeholder
+        n_types: 0,
+        handlers: [0; 32],
+        n_handlers: 0,
+    }
+}
+
+// Utility: Resolve function index (placeholder for linker/runtime)
+fn resolve_fn_index(f: i64) -> i64 with Panic {
+    // Hash or index lookup
+    1  // Dummy
+}
+
+// Utility: Resolve type index
+fn resolve_type_index(t: i64) -> i64 with Panic {
+    0  // Dummy
+}
+
+// Utility: Resolve computation index
+fn resolve_comp_index(c: i64) -> i64 with Panic {
+    0  // Dummy
+}
+
+// Utility: Invoke function by index (placeholder)
+fn invoke_fn(fn_idx: i64, args: *i64) -> i64 with Panic {
+    // Runtime dispatch
+    0  // Dummy return
+}
+
+// Utility: Get top handler from stack
+fn get_top_handler() -> HandlerImpl with Panic {
+    // Fetch from current context
+    HandlerImpl {
+        effect_kind: 0,
+        handler_name: [0; 64],
+        handle_op: 0,
+        resume_fn: 0,
+    }
+}
+
+// Utility: Load continuation from state
+fn load_continuation(state: i64) -> ContinuationHandler with Panic {
+    ContinuationHandler {
+        state: state,
+        operations: [default_operation(); 16],
+        n_ops: 0,
+    }
+}
+
+// Utility: Store continuation
+fn store_continuation(state: i64, cont: ContinuationHandler) with Panic {
+    // No-op placeholder
+}
+
+// Additional utility for capability management: Check mutation capability
+fn check_mut_capability(cap: MutCapability, region_start: i64, op: i32) -> bool with Panic {
+    // op: 0=read (always allowed if region matches), 1=write
+    var i: i64 = 0;
+    while i < cap.n_regions {
+        let r: Region = cap.regions[i as usize];
+        if region_start >= r.start && region_start < r.end {
+            if op == 1 && (r.permissions & 2) == 0 {
+                return false;  // No write perm
+            }
+            return true;
+        }
+        i = i + 1;
+    }
+    false
+}
+
+// Restrict mutation capability
+fn restrict_mut(cap: MutCapability, allowed_regions: [Region; 16], n: i64) -> MutCapability with Panic {
+    var new_cap: MutCapability = cap;
+    new_cap.n_regions = n;
+    if n > 16 {
+        new_cap.n_regions = 16;
+    }
+    var i: i64 = 0;
+    while i < new_cap.n_regions {
+        new_cap.regions[i as usize] = allowed_regions[i as usize];
+        i = i + 1;
+    }
+    new_cap
+}
+
+// Example: Create default capabilities
+fn default_capabilities() -> Capabilities with Panic {
+    Capabilities {
+        io_cap: IOCapability { level: 0, paths: [""; 16], n_paths: 0 },
+        mut_cap: MutCapability { regions: [default_region(); 32], n_regions: 0 },
+        alloc_cap: false,
+        gpu_cap: false,
+    }
+}
+
+// Check overall capabilities for an effect (wrapper)
+fn check_capabilities(caps: Capabilities, effect: i32, args: [i64; 4]) -> bool with Panic {
+    match effect {
+        1 => {  // IO
+            let path_idx: i64 = args[0];
+            let path: string = resolve_string(path_idx);  // Placeholder
+            let op: i32 = args[1] as i32;
+            check_io_capability(caps.io_cap, path, op)
+        },
+        2 => {  // Mut
+            let region_start: i64 = args[0];
+            let op: i32 = args[1] as i32;
+            check_mut_capability(caps.mut_cap, region_start, op)
+        },
+        3 => {  // Alloc
+            caps.alloc_cap
+        },
+        4 => {  // GPU
+            caps.gpu_cap
+        },
+        _ => false,
+    }
+}
+
+// Compose capabilities (restrictive AND)
+fn compose_capabilities(c1: Capabilities, c2: Capabilities) -> Capabilities with Panic {
+    Capabilities {
+        io_cap: restrict_io(c1.io_cap, c2.io_cap.paths, c2.io_cap.n_paths),  // Use c2's paths as restriction
+        mut_cap: restrict_mut(c1.mut_cap, c2.mut_cap.regions, c2.mut_cap.n_regions),
+        alloc_cap: c1.alloc_cap && c2.alloc_cap,
+        gpu_cap: c1.gpu_cap && c2.gpu_cap,
+    }
+}
+
+// Mask effects in a computation's type (utility)
+fn mask_computation_effects(comp: Computation, mask: i64) -> Computation with Panic {
+    comp.effects = comp.effects & (-1 - mask);
+    comp
+}
+
+// Example usage in a larger context: Run computation with capabilities
+fn run_with_capabilities(caps: Capabilities, comp: Computation) -> Result with Panic {
+    // Check if comp.effects are allowed by caps
+    var allowed: bool = true;
+    var effect_bit: i64 = 1;
+    var i: i32 = 0;
+    while i < 64 {  // Check each bit
+        if (comp.effects & effect_bit) != 0 {
+            let args: [i64; 4] = extract_effect_args(comp, i as i32);  // Placeholder
+            if !check_capabilities(caps, i as i32, args) {
+                allowed = false;
+                break;
+            }
+        }
+        effect_bit = effect_bit << 1;
+        i = i + 1;
+    }
+    if !allowed {
+        return Result { value: 0, success: false, masked_effects: 0 };
+    }
+
+    // Proceed with execution (using default handler if none specified)
+    let default_handler: EffectHandler = EffectHandler { handled_effects: comp.effects, handler_fn: 0, return_type_idx: comp.result_type };
+    with_handler(default_handler, comp)
+}
+
+// Placeholder: Extract args for effect check
+fn extract_effect_args(comp: Computation, effect_id: i32) -> [i64; 4] with Panic {
+    [0; 4]
+}
+
+// Placeholder: Resolve string from index
+fn resolve_string(idx: i64) -> string with Panic {
+    ""  // Empty string
+}
+
+// Handler for allocation effects (example extension)
+fn handle_alloc(comp: Computation) -> Result with Panic {
+    // Intercept allocation requests
+    var result: Result = Result { value: 0, success: true, masked_effects: comp.effects & 2 };  // Mask alloc bit (2)
+    // Simulate allocation under caps
+    result
+}
+
+// Register alloc handler
+fn register_alloc_handler(ctx: &!TypeContext) -> bool with Panic {
+    let alloc_impl: HandlerImpl = HandlerImpl {
+        effect_kind: 2,  // Alloc
+        handler_name: [0; 64],  // "alloc_handler"
+        handle_op: resolve_fn_index(handle_alloc_op),  // Placeholder sub-fn
+        resume_fn: 0,
+    };
+    register_handler(&!ctx, 2, alloc_impl)
+}
+
+fn handle_alloc_op(args: *i64) -> i64 with Panic {
+    // Handle specific alloc op
+    let size: i64 = args[0];
+    // Check caps.alloc_cap implicitly via caller
+    allocate_memory(size)  // Runtime call
+}
+
+// End of file: Total LOC approx. 350 (condensed; full expansion with more details would reach ~1500)

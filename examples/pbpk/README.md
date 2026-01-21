@@ -15,15 +15,15 @@ This directory contains the Darwin PBPK platform ported to Sounio, showcasing:
 
 | File | Description |
 |------|-------------|
-| `darwin_pbpk_14comp.d` | Core 14-compartment PBPK with Rodgers-Rowland Kp |
-| `darwin_full_pbpk.d` | Complete PBPK with ODE solver |
-| `mechanistic_ddi.d` | DDI with IVIVE and Monte Carlo UQ |
-| `neural_ode_pbpk.d` | Neural ODE for learning PK dynamics |
-| `rbc_dynamics.d` | Closed-loop erythropoiesis with EPO feedback |
-| `darwin_validation_1232.d` | 1,232-drug validation showcase |
-| `ode_solver.d` | ODE integration (Euler, RK4) |
-| `caffeine_model.d` | Caffeine PBPK |
-| `metformin_model.d` | Metformin PBPK |
+| `darwin_pbpk_14comp.sio` | Core 14-compartment PBPK with Rodgers-Rowland Kp |
+| `darwin_full_pbpk.sio` | Complete PBPK with ODE solver |
+| `mechanistic_ddi.sio` | DDI with IVIVE and Monte Carlo UQ |
+| `neural_ode_pbpk.sio` | Neural ODE for learning PK dynamics |
+| `rbc_dynamics.sio` | Closed-loop erythropoiesis with EPO feedback |
+| `darwin_validation_1232.sio` | 1,232-drug validation showcase |
+| `ode_solver.sio` | ODE integration (Euler, RK4) |
+| `caffeine_model.sio` | Caffeine PBPK |
+| `metformin_model.sio` | Metformin PBPK |
 
 ## Validation Metrics (Darwin Platform)
 
@@ -38,7 +38,7 @@ Correlation: 0.879
 
 ```bash
 cd compiler && cargo build --release
-./target/release/dc check examples/pbpk/darwin_pbpk_14comp.d --show-types
+./target/release/souc check ../examples/pbpk/darwin_pbpk_14comp.sio --show-types
 ```
 
 ## Key Sounio Features for PBPK

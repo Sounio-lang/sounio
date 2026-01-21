@@ -404,7 +404,6 @@ fn format_value(value: &Value) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::io::Read;
     use tempfile::NamedTempFile;
 
     #[test]

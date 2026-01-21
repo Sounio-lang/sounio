@@ -407,7 +407,6 @@ impl From<AuthError> for RegistryError {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::fs;
     use tempfile::TempDir;
 
     #[test]

@@ -1069,6 +1069,8 @@ pub struct WherePredicate {
 pub enum TypeExpr {
     /// Unit type ()
     Unit,
+    /// Never type (!)
+    Never,
     /// Self type (in traits and impls)
     SelfType,
     /// Named type: Path<Args>

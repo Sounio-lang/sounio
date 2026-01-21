@@ -9,7 +9,6 @@
 
 use sounio::backend::native::ode_runtime::{
     sounio_ode_bdf_reset, sounio_ode_bdf_step, sounio_ode_lsoda_reset, sounio_ode_lsoda_step,
-    DerivativeFn, JacobianFn,
 };
 
 // ============================================================================
@@ -19,13 +18,17 @@ use sounio::backend::native::ode_runtime::{
 /// Fast exponential decay: dy/dt = -1000*y
 /// Exact solution: y(t) = y0 * exp(-1000*t)
 unsafe extern "C" fn fast_decay_derivatives(state: *mut f64, _t: f64, dydt: *mut f64) {
-    let y = *state;
-    *dydt = -1000.0 * y;
+    let y = unsafe { *state };
+    unsafe {
+        *dydt = -1000.0 * y;
+    }
 }
 
 /// Jacobian for fast decay: J = -1000
-unsafe extern "C" fn fast_decay_jacobian(state: *const f64, _t: f64, jacobian: *mut f64) {
-    *jacobian = -1000.0;
+unsafe extern "C" fn fast_decay_jacobian(_state: *const f64, _t: f64, jacobian: *mut f64) {
+    unsafe {
+        *jacobian = -1000.0;
+    }
 }
 
 #[test]
@@ -143,8 +146,8 @@ fn test_lsoda_exponential_decay() {
 /// dx/dt = y
 /// dy/dt = mu * (1 - x²) * y - x
 unsafe extern "C" fn vanderpol_derivatives(state: *mut f64, _t: f64, dydt: *mut f64) {
-    let state_slice = std::slice::from_raw_parts(state, 2);
-    let dydt_slice = std::slice::from_raw_parts_mut(dydt, 2);
+    let state_slice = unsafe { std::slice::from_raw_parts(state, 2) };
+    let dydt_slice = unsafe { std::slice::from_raw_parts_mut(dydt, 2) };
 
     let mu = 100.0; // Moderately stiff (1000 is very challenging)
     let x = state_slice[0];
@@ -156,8 +159,8 @@ unsafe extern "C" fn vanderpol_derivatives(state: *mut f64, _t: f64, dydt: *mut 
 
 /// Jacobian for Van der Pol oscillator
 unsafe extern "C" fn vanderpol_jacobian(state: *const f64, _t: f64, jacobian: *mut f64) {
-    let state_slice = std::slice::from_raw_parts(state, 2);
-    let jac_slice = std::slice::from_raw_parts_mut(jacobian, 4); // 2x2 matrix, row-major
+    let state_slice = unsafe { std::slice::from_raw_parts(state, 2) };
+    let jac_slice = unsafe { std::slice::from_raw_parts_mut(jacobian, 4) }; // 2x2 matrix, row-major
 
     let mu = 100.0;
     let x = state_slice[0];
@@ -235,8 +238,8 @@ fn test_bdf_vanderpol() {
 /// dy3/dt = 3e7*y2²
 /// Conservation: y1 + y2 + y3 = 1
 unsafe extern "C" fn robertson_derivatives(state: *mut f64, _t: f64, dydt: *mut f64) {
-    let y = std::slice::from_raw_parts(state, 3);
-    let f = std::slice::from_raw_parts_mut(dydt, 3);
+    let y = unsafe { std::slice::from_raw_parts(state, 3) };
+    let f = unsafe { std::slice::from_raw_parts_mut(dydt, 3) };
 
     f[0] = -0.04 * y[0] + 1e4 * y[1] * y[2];
     f[1] = 0.04 * y[0] - 1e4 * y[1] * y[2] - 3e7 * y[1] * y[1];
@@ -245,8 +248,8 @@ unsafe extern "C" fn robertson_derivatives(state: *mut f64, _t: f64, dydt: *mut 
 
 /// Jacobian for Robertson problem
 unsafe extern "C" fn robertson_jacobian(state: *const f64, _t: f64, jacobian: *mut f64) {
-    let y = std::slice::from_raw_parts(state, 3);
-    let j = std::slice::from_raw_parts_mut(jacobian, 9); // 3x3 matrix, row-major
+    let y = unsafe { std::slice::from_raw_parts(state, 3) };
+    let j = unsafe { std::slice::from_raw_parts_mut(jacobian, 9) }; // 3x3 matrix, row-major
 
     // Row 0: ∂f1/∂y
     j[0] = -0.04;
@@ -387,6 +390,7 @@ fn test_bdf_zero_dimension() {
 // ============================================================================
 
 /// Null Jacobian function pointer type for testing numerical differentiation
+#[allow(dead_code)]
 unsafe extern "C" fn null_jacobian(_state: *const f64, _t: f64, _jacobian: *mut f64) {
     // This function should never be called when we pass NULL
     panic!("null_jacobian should not be called");
@@ -455,7 +459,6 @@ fn test_bdf_adaptive_step() {
         sounio_ode_bdf_reset(state.as_mut_ptr());
     }
 
-    let initial_dt = dt;
     let mut steps = 0;
     let max_steps = 200;
 

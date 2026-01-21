@@ -1,0 +1,567 @@
+// File: stdlib/compiler/check/context.sio
+// Type checking context/state for Sounio compiler.
+// This module manages the overall type checking environment, including
+// type definitions, constraints, errors, and integration with scopes.
+
+extern "C" {
+    fn print(s: &str) -> ();
+}
+
+// ============================================================================
+// STUB TYPES (to be imported from types.sio, scope.sio)
+// ============================================================================
+
+/// Placeholder for TypePool (see types/type.sio)
+struct TypePool {
+    count: i64,
+}
+
+fn type_pool_new() -> TypePool {
+    TypePool { count: 0 }
+}
+
+/// Placeholder for Scope (see scope.sio)
+struct Scope {
+    kind: i32,
+    parent: i64,
+}
+
+fn scope_new(kind: i32) -> Scope {
+    Scope { kind: kind, parent: -1 }
+}
+
+// ============================================================================
+// ERROR KINDS
+// ============================================================================
+
+fn ERR_NONE() -> i32 {
+    0
+}
+
+fn ERR_TYPE_MISMATCH() -> i32 {
+    1
+}
+
+fn ERR_UNDEFINED_VAR() -> i32 {
+    2
+}
+
+fn ERR_UNDEFINED_TYPE() -> i32 {
+    3
+}
+
+fn ERR_UNDEFINED_FN() -> i32 {
+    4
+}
+
+fn ERR_ARITY_MISMATCH() -> i32 {
+    5
+}
+
+fn ERR_NOT_CALLABLE() -> i32 {
+    6
+}
+
+fn ERR_NOT_INDEXABLE() -> i32 {
+    7
+}
+
+fn ERR_INVALID_BINOP() -> i32 {
+    8
+}
+
+fn ERR_INVALID_UNOP() -> i32 {
+    9
+}
+
+fn ERR_EFFECT_NOT_DECLARED() -> i32 {
+    10
+}
+
+fn ERR_LINEAR_USE() -> i32 {
+    11
+}
+
+fn ERR_UNIT_MISMATCH() -> i32 {
+    12
+}
+
+// ============================================================================
+// TYPE ERROR
+// ============================================================================
+
+struct TypeError {
+    kind: i32,
+    span_start: i64,
+    span_end: i64,
+    expected_type_idx: i64,
+    actual_type_idx: i64,
+    message: [i8; 128],
+    message_len: i64,
+}
+
+/// Creates a new TypeError with default (zeroed) values.
+fn type_error_new() -> TypeError {
+    // TODO: Initialize all fields to zero/default values
+    TypeError {
+        kind: ERR_NONE(),
+        span_start: 0,
+        span_end: 0,
+        expected_type_idx: -1,
+        actual_type_idx: -1,
+        message: [0; 128],
+        message_len: 0,
+    }
+}
+
+/// Creates a TypeError for type mismatch.
+fn type_error_mismatch(expected: i64, actual: i64, span_start: i64, span_end: i64) -> TypeError {
+    // TODO: Set message to a string like "Type mismatch: expected X, got Y"
+    var err = type_error_new();
+    err.kind = ERR_TYPE_MISMATCH();
+    err.span_start = span_start;
+    err.span_end = span_end;
+    err.expected_type_idx = expected;
+    err.actual_type_idx = actual;
+    // TODO: Copy string into message buffer
+    err.message_len = 0;  // Placeholder
+    err
+}
+
+/// Creates a TypeError for undefined variable.
+fn type_error_undefined_var(name: &str, span_start: i64, span_end: i64) -> TypeError {
+    // TODO: Set message to "Undefined variable: <name>"
+    var err = type_error_new();
+    err.kind = ERR_UNDEFINED_VAR();
+    err.span_start = span_start;
+    err.span_end = span_end;
+    // TODO: Copy name into message buffer
+    err.message_len = 0;  // Placeholder
+    err
+}
+
+// ============================================================================
+// TYPE CONSTRAINT (for inference)
+// ============================================================================
+
+fn CONSTRAINT_EQ() -> i32 {
+    0  // T1 = T2
+}
+
+fn CONSTRAINT_SUBTYPE() -> i32 {
+    1  // T1 <: T2
+}
+
+struct TypeConstraint {
+    kind: i32,
+    left_idx: i64,
+    right_idx: i64,
+    span_start: i64,
+    span_end: i64,
+}
+
+/// Default TypeConstraint for array initialization
+fn constraint_default() -> TypeConstraint {
+    TypeConstraint {
+        kind: CONSTRAINT_EQ(),
+        left_idx: -1,
+        right_idx: -1,
+        span_start: 0,
+        span_end: 0,
+    }
+}
+
+/// Creates an equality constraint.
+fn constraint_eq(left: i64, right: i64, span_start: i64, span_end: i64) -> TypeConstraint {
+    // TODO: Validate indices if needed
+    TypeConstraint {
+        kind: CONSTRAINT_EQ(),
+        left_idx: left,
+        right_idx: right,
+        span_start: span_start,
+        span_end: span_end,
+    }
+}
+
+// ============================================================================
+// TYPE DEFINITION
+// ============================================================================
+
+fn TYPEDEF_STRUCT() -> i32 {
+    0
+}
+
+fn TYPEDEF_ENUM() -> i32 {
+    1
+}
+
+fn TYPEDEF_ALIAS() -> i32 {
+    2
+}
+
+struct FieldDef {
+    name: [i8; 32],
+    name_len: i64,
+    type_idx: i64,
+    is_mutable: bool,
+}
+
+fn field_def_new() -> FieldDef {
+    FieldDef {
+        name: [0; 32],
+        name_len: 0,
+        type_idx: -1,
+        is_mutable: false,
+    }
+}
+
+struct TypeDef {
+    kind: i32,
+    name: [i8; 64],
+    name_len: i64,
+    // For structs: fields
+    fields: [FieldDef; 16],
+    n_fields: i64,
+    // For enums: variants (stored as field names) - reuse fields for simplicity
+    // For alias: target type
+    target_type_idx: i64,
+    // Type parameters
+    type_params: [i64; 8],
+    n_type_params: i64,
+}
+
+/// Default TypeDef for array initialization
+fn typedef_default() -> TypeDef {
+    TypeDef {
+        kind: TYPEDEF_STRUCT(),
+        name: [0; 64],
+        name_len: 0,
+        fields: [field_def_new(); 16],
+        n_fields: 0,
+        target_type_idx: -1,
+        type_params: [-1; 8],
+        n_type_params: 0,
+    }
+}
+
+/// Creates a new struct TypeDef.
+fn typedef_struct(name: &str) -> TypeDef {
+    // TODO: Copy name into buffer
+    var td = typedef_default();
+    td.kind = TYPEDEF_STRUCT();
+    // TODO: Set name and name_len
+    td
+}
+
+/// Adds a field to a TypeDef (mutates and returns new copy).
+fn typedef_add_field(td: TypeDef, name: &str, type_idx: i64) -> TypeDef with Panic {
+    // TODO: Validate n_fields < 16, copy name into fields[n_fields].name
+    var new_td = td;
+    if new_td.n_fields < 16 {
+        let idx = new_td.n_fields;
+        // TODO: Copy name
+        new_td.fields[idx as usize].name_len = 0;  // Placeholder
+        new_td.fields[idx as usize].type_idx = type_idx;
+        new_td.n_fields = new_td.n_fields + 1;
+    }
+    new_td
+}
+
+/// Creates a new enum TypeDef.
+fn typedef_enum(name: &str) -> TypeDef {
+    // Similar to typedef_struct, but kind = TYPEDEF_ENUM
+    // TODO: Copy name, variants will use fields array for variant names
+    var td = TypeDef {
+        kind: TYPEDEF_ENUM(),
+        name: [0; 64],
+        name_len: 0,
+        fields: [field_def_new(); 16],
+        n_fields: 0,  // For variants
+        target_type_idx: -1,
+        type_params: [-1; 8],
+        n_type_params: 0,
+    };
+    // TODO: Set name and name_len
+    td
+}
+
+/// Creates an alias TypeDef.
+fn typedef_alias(name: &str, target: i64) -> TypeDef {
+    // TODO: Copy name
+    TypeDef {
+        kind: TYPEDEF_ALIAS(),
+        name: [0; 64],
+        name_len: 0,
+        fields: [field_def_new(); 16],
+        n_fields: 0,
+        target_type_idx: target,
+        type_params: [-1; 8],
+        n_type_params: 0,
+    }
+}
+
+// ============================================================================
+// FUNCTION SIGNATURE
+// ============================================================================
+
+/// Helper for nested array initialization
+fn empty_name_32() -> [i8; 32] {
+    [0; 32]
+}
+
+struct FnSig {
+    name: [i8; 64],
+    name_len: i64,
+    param_names: [[i8; 32]; 16],
+    param_name_lens: [i64; 16],
+    param_types: [i64; 16],
+    n_params: i64,
+    return_type_idx: i64,
+    effect_set: i64,  // Bitmask of effects
+    type_params: [i64; 8],
+    n_type_params: i64,
+}
+
+/// Default FnSig for array initialization
+fn fn_sig_default() -> FnSig {
+    FnSig {
+        name: [0; 64],
+        name_len: 0,
+        param_names: [empty_name_32(); 16],
+        param_name_lens: [0; 16],
+        param_types: [-1; 16],
+        n_params: 0,
+        return_type_idx: -1,
+        effect_set: 0,
+        type_params: [-1; 8],
+        n_type_params: 0,
+    }
+}
+
+/// Creates a new FnSig.
+fn fn_sig_new(name: &str) -> FnSig {
+    // TODO: Copy name into buffer
+    fn_sig_default()
+}
+
+/// Adds a parameter to FnSig.
+fn fn_sig_add_param(sig: FnSig, name: &str, type_idx: i64) -> FnSig with Panic {
+    // TODO: Validate n_params < 16, copy name into param_names[n_params]
+    var new_sig = sig;
+    if new_sig.n_params < 16 {
+        let idx = new_sig.n_params;
+        // TODO: Copy name
+        new_sig.param_name_lens[idx as usize] = 0;  // Placeholder
+        new_sig.param_types[idx as usize] = type_idx;
+        new_sig.n_params = new_sig.n_params + 1;
+    }
+    new_sig
+}
+
+/// Sets the return type of FnSig.
+fn fn_sig_set_return(sig: FnSig, type_idx: i64) -> FnSig {
+    var new_sig = sig;
+    new_sig.return_type_idx = type_idx;
+    new_sig
+}
+
+/// Adds an effect to the bitmask.
+fn fn_sig_add_effect(sig: FnSig, effect: i32) -> FnSig {
+    var new_sig = sig;
+    let shift = effect as i64;
+    let mask = 1 << shift;
+    new_sig.effect_set = new_sig.effect_set | mask;
+    new_sig
+}
+
+// ============================================================================
+// TYPE CHECKING CONTEXT
+// ============================================================================
+
+// TODO: Define TypePool struct (from types module, placeholder here)
+// struct TypePool { ... }  // Assume imported or defined elsewhere
+
+// TODO: Define Scope and Binding (imported from scope.sio and binding.sio)
+// struct Scope { ... }
+// struct Binding { ... }
+
+struct TypeContext {
+    // Type pool (placeholder)
+    type_pool: TypePool,  // TODO: Define or import TypePool
+
+    // Scopes (see scope.sio)
+    scopes: [Scope; 32],
+    n_scopes: i64,
+
+    // Type definitions
+    type_defs: [TypeDef; 64],
+    n_type_defs: i64,
+
+    // Function signatures
+    fn_sigs: [FnSig; 64],
+    n_fn_sigs: i64,
+
+    // Constraints for inference
+    constraints: [TypeConstraint; 256],
+    n_constraints: i64,
+
+    // Errors
+    errors: [TypeError; 64],
+    n_errors: i64,
+
+    // Counters
+    next_type_var: i64,
+    next_effect_var: i64,
+
+    // Current function being checked
+    current_fn_idx: i64,
+    current_return_type: i64,
+
+    // Effect tracking
+    declared_effects: i64,  // Bitmask
+    inferred_effects: i64,  // Bitmask
+    masked_effects: i64,    // Handled effects
+}
+
+/// Default Scope for array initialization
+fn scope_default() -> Scope {
+    Scope { kind: 0, parent: -1 }
+}
+
+/// Creates a new TypeContext.
+fn context_new() -> TypeContext {
+    // TODO: Initialize type_pool, zero all arrays, set counters to 0/1
+    TypeContext {
+        type_pool: type_pool_new(),
+        scopes: [scope_default(); 32],
+        n_scopes: 1,
+        type_defs: [typedef_default(); 64],
+        n_type_defs: 0,
+        fn_sigs: [fn_sig_default(); 64],
+        n_fn_sigs: 0,
+        constraints: [constraint_default(); 256],
+        n_constraints: 0,
+        errors: [type_error_new(); 64],
+        n_errors: 0,
+        next_type_var: 0,
+        next_effect_var: 0,
+        current_fn_idx: -1,
+        current_return_type: -1,
+        declared_effects: 0,
+        inferred_effects: 0,
+        masked_effects: 0,
+    }
+}
+
+/// Pushes a new scope onto the stack.
+fn context_push_scope(ctx: TypeContext) -> TypeContext with Panic {
+    var new_ctx = ctx;
+    if new_ctx.n_scopes < 32 {
+        // TODO: Create new Scope, e.g., scope_new(SCOPE_BLOCK())
+        new_ctx.scopes[new_ctx.n_scopes as usize] = scope_new(0);
+        new_ctx.n_scopes = new_ctx.n_scopes + 1;
+    }
+    new_ctx
+}
+
+/// Pops the top scope from the stack.
+fn context_pop_scope(ctx: TypeContext) -> TypeContext {
+    var new_ctx = ctx;
+    if new_ctx.n_scopes > 0 {
+        new_ctx.n_scopes = new_ctx.n_scopes - 1;
+        // TODO: Optionally clean up bindings if needed
+    }
+    new_ctx
+}
+
+/// Adds an error to the context.
+fn context_add_error(ctx: TypeContext, err: TypeError) -> TypeContext with Panic {
+    var new_ctx = ctx;
+    if new_ctx.n_errors < 64 {
+        let idx = new_ctx.n_errors;
+        new_ctx.errors[idx as usize] = err;
+        new_ctx.n_errors = new_ctx.n_errors + 1;
+    }
+    new_ctx
+}
+
+/// Adds a constraint to the context.
+fn context_add_constraint(ctx: TypeContext, c: TypeConstraint) -> TypeContext with Panic {
+    var new_ctx = ctx;
+    if new_ctx.n_constraints < 256 {
+        let idx = new_ctx.n_constraints;
+        new_ctx.constraints[idx as usize] = c;
+        new_ctx.n_constraints = new_ctx.n_constraints + 1;
+    }
+    new_ctx
+}
+
+/// Generates a fresh type variable index.
+fn context_fresh_type_var(ctx: &!TypeContext) -> i64 {
+    // TODO: Use type_pool to allocate fresh var, increment counter
+    let tv_idx = ctx.next_type_var;
+    // Simulate increment (immutable ref, so return new ctx? Wait, adjust sig if needed)
+    // For now, placeholder
+    tv_idx
+}
+
+/// Adds a type definition to the context.
+fn context_add_type_def(ctx: TypeContext, td: TypeDef) -> TypeContext with Panic {
+    var new_ctx = ctx;
+    if new_ctx.n_type_defs < 64 {
+        let idx = new_ctx.n_type_defs;
+        new_ctx.type_defs[idx as usize] = td;
+        new_ctx.n_type_defs = new_ctx.n_type_defs + 1;
+    }
+    new_ctx
+}
+
+/// Adds a function signature to the context.
+fn context_add_fn_sig(ctx: TypeContext, sig: FnSig) -> TypeContext with Panic {
+    var new_ctx = ctx;
+    if new_ctx.n_fn_sigs < 64 {
+        let idx = new_ctx.n_fn_sigs;
+        new_ctx.fn_sigs[idx as usize] = sig;
+        new_ctx.n_fn_sigs = new_ctx.n_fn_sigs + 1;
+    }
+    new_ctx
+}
+
+/// Looks up a type definition by name, returns index or -1.
+fn context_lookup_type_def(ctx: TypeContext, name: &str) -> i64 with Div {
+    // TODO: Linear search through type_defs[0..n_type_defs]
+    var i: i64 = 0;
+    while i < ctx.n_type_defs {
+        // TODO: Compare name with type_defs[i].name (using name_len)
+        // if match { return i; }
+        i = i + 1;
+    }
+    let result: i64 = -1;
+    result
+}
+
+/// Looks up a function signature by name, returns index or -1.
+fn context_lookup_fn_sig(ctx: TypeContext, name: &str) -> i64 with Div {
+    // TODO: Similar linear search through fn_sigs
+    var i: i64 = 0;
+    while i < ctx.n_fn_sigs {
+        // TODO: Compare name with fn_sigs[i].name
+        i = i + 1;
+    }
+    let result: i64 = -1;
+    result
+}
+
+// ============================================================================
+// TESTS
+// ============================================================================
+
+fn test_context_creation() -> bool {
+    // TODO: Create context, assert n_scopes == 1, n_errors == 0, etc.
+    true  // Placeholder
+}
+
+fn test_scope_push_pop() -> bool {
+    // TODO: Push/pop scopes, assert n_scopes changes correctly
+    true
+}

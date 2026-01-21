@@ -1,0 +1,372 @@
+//! Strength Reduction Pass
+//!
+//! Replaces expensive operations with cheaper equivalents
+//! Example: x * 2 → x << 1, x / 2 → x >> 1
+
+/// Value identifier
+struct ValueId(usize);
+
+/// MIR Instruction (simplified for strength reduction)
+enum MirInstruction {
+    Binary {
+        result: ValueId,
+        op: BinaryOp,
+        left: ValueId,
+        right: ValueId,
+    },
+    Const {
+        result: ValueId,
+        value: i64,
+    },
+}
+
+/// Binary operations
+enum BinaryOp {
+    Add, Sub, Mul, Div, Rem,
+    And, Or, Xor,
+    Shl, LShr, AShr,
+}
+
+/// Function
+struct Function {
+    blocks: Vec<BasicBlock>,
+}
+
+/// Basic block
+struct BasicBlock {
+    id: usize,
+    instructions: Vec<MirInstruction>,
+}
+
+/// Check if value is power of two
+fn is_power_of_two(n: i64) -> bool {
+    n > 0 && (n & (n - 1)) == 0
+}
+
+/// Get log2 of power of two
+fn log2_power_of_two(n: i64) -> i32 {
+    let mut result = 0;
+    let mut n = n;
+    
+    while n > 1 {
+        n = n >> 1;
+        result = result + 1;
+    }
+    
+    result
+}
+
+/// Get constant value from instruction
+fn get_const_value(instr: MirInstruction) -> Option<i64> {
+    match instr {
+        MirInstruction::Const { value, .. } => Some(value),
+        _ => None,
+    }
+}
+
+/// Apply strength reduction to binary operation
+fn reduce_strength(
+    op: BinaryOp,
+    left: MirInstruction,
+    right: MirInstruction
+) -> Option<MirInstruction> {
+    // Only reduce if right operand is constant
+    let right_const = get_const_value(right)?;
+    
+    match op {
+        // Multiplication by power of two → left shift
+        BinaryOp::Mul => {
+            if is_power_of_two(right_const) && right_const > 1 {
+                let shift = log2_power_of_two(right_const);
+                return Some(MirInstruction::Binary {
+                    result: ValueId(0), // Placeholder
+                    op: BinaryOp::Shl,
+                    left: match left {
+                        MirInstruction::Binary { result, .. } => result,
+                        MirInstruction::Const { result, .. } => result,
+                    },
+                    right: ValueId(shift as usize), // Shift amount as constant
+                })
+            }
+        }
+        
+        // Unsigned division by power of two → right shift
+        BinaryOp::Div => {
+            if is_power_of_two(right_const) && right_const > 1 {
+                let shift = log2_power_of_two(right_const);
+                return Some(MirInstruction::Binary {
+                    result: ValueId(0),
+                    op: BinaryOp::LShr,
+                    left: match left {
+                        MirInstruction::Binary { result, .. } => result,
+                        MirInstruction::Const { result, .. } => result,
+                    },
+                    right: ValueId(shift as usize),
+                })
+            }
+        }
+        
+        // Modulo by power of two → bitwise AND
+        BinaryOp::Rem => {
+            if is_power_of_two(right_const) && right_const > 1 {
+                let mask = right_const - 1;
+                return Some(MirInstruction::Const {
+                    result: ValueId(0),
+                    value: mask,
+                })
+            }
+        }
+        
+        _ => {}
+    }
+    
+    None
+}
+
+/// Apply strength reduction to a block
+fn reduce_block_strength(block: BasicBlock) -> BasicBlock {
+    let mut new_block = block.clone();
+    let mut modified = false;
+    
+    for i in 0..new_block.instructions.len() {
+        if i + 1 >= new_block.instructions.len() {
+            break
+        }
+        
+        let instr = new_block.instructions[i].clone();
+        let next_instr = new_block.instructions[i + 1].clone();
+        
+        if let MirInstruction::Binary { op, left, right, result } = instr {
+            if let MirInstruction::Const { result: right_result, .. } = next_instr {
+                if let Some(reduced) = reduce_strength(op, left.clone(), MirInstruction::Const {
+                    result: *right_result,
+                    value: 0, // Placeholder, will be set
+                }) {
+                    // Create constant for shift amount or mask
+                    match reduced {
+                        MirInstruction::Const { value, result } => {
+                            new_block.instructions[i + 1] = MirInstruction::Const {
+                                result,
+                                value,
+                            };
+                        }
+                        _ => {
+                            new_block.instructions[i + 1] = reduced;
+                        }
+                    }
+                    modified = true;
+                }
+            }
+        }
+    }
+    
+    if modified {
+        println("Block ")
+        print(block.id)
+        println(": Applied strength reduction")
+    }
+    
+    new_block
+}
+
+/// Strength reduction pass on a function
+fn strength_reduction(func: Function) -> Function {
+    println("Running Strength Reduction Pass")
+    println("=================================")
+    println()
+    
+    let mut new_func = func.clone();
+    
+    for block in new_func.blocks.iter_mut() {
+        *block = reduce_block_strength(block.clone())
+    }
+    
+    new_func
+}
+
+/// Test function
+fn test_strength_reduction() -> i32 {
+    println("Testing Strength Reduction")
+    println("===========================")
+    println()
+    
+    // Test 1: Multiplication by power of two
+    println("Test 1: x * 2 → x << 1")
+    let func1 = Function {
+        blocks: vec![
+            BasicBlock {
+                id: 0,
+                instructions: vec![
+                    MirInstruction::Const {
+                        result: ValueId(0),
+                        value: 10,
+                    },
+                    MirInstruction::Const {
+                        result: ValueId(1),
+                        value: 2,
+                    },
+                    MirInstruction::Binary {
+                        result: ValueId(2),
+                        op: BinaryOp::Mul,
+                        left: ValueId(0),
+                        right: ValueId(1),
+                    },
+                ],
+            },
+        ],
+    };
+    
+    let optimized1 = strength_reduction(func1);
+    println("After optimization:")
+    for instr in optimized1.blocks[0].instructions {
+        match instr {
+            MirInstruction::Binary { op, .. } => {
+                match op {
+                    BinaryOp::Shl => println("  → Replaced with left shift"),
+                    _ => println("  → No change"),
+                }
+            }
+            _ => {}
+        }
+    }
+    println()
+    
+    // Test 2: Division by power of two
+    println("Test 2: x / 8 → x >> 3")
+    let func2 = Function {
+        blocks: vec![
+            BasicBlock {
+                id: 0,
+                instructions: vec![
+                    MirInstruction::Const {
+                        result: ValueId(0),
+                        value: 100,
+                    },
+                    MirInstruction::Const {
+                        result: ValueId(1),
+                        value: 8,
+                    },
+                    MirInstruction::Binary {
+                        result: ValueId(2),
+                        op: BinaryOp::Div,
+                        left: ValueId(0),
+                        right: ValueId(1),
+                    },
+                ],
+            },
+        ],
+    };
+    
+    let optimized2 = strength_reduction(func2);
+    println("After optimization:")
+    for instr in optimized2.blocks[0].instructions {
+        match instr {
+            MirInstruction::Binary { op, .. } => {
+                match op {
+                    BinaryOp::LShr => println("  → Replaced with right shift"),
+                    _ => println("  → No change"),
+                }
+            }
+            _ => {}
+        }
+    }
+    println()
+    
+    // Test 3: Modulo by power of two
+    println("Test 3: x % 16 → x & 15")
+    let func3 = Function {
+        blocks: vec![
+            BasicBlock {
+                id: 0,
+                instructions: vec![
+                    MirInstruction::Const {
+                        result: ValueId(0),
+                        value: 255,
+                    },
+                    MirInstruction::Const {
+                        result: ValueId(1),
+                        value: 16,
+                    },
+                    MirInstruction::Binary {
+                        result: ValueId(2),
+                        op: BinaryOp::Rem,
+                        left: ValueId(0),
+                        right: ValueId(1),
+                    },
+                ],
+            },
+        ],
+    };
+    
+    let optimized3 = strength_reduction(func3);
+    println("After optimization:")
+    for instr in optimized3.blocks[0].instructions {
+        match instr {
+            MirInstruction::Const { value, .. } => {
+                if value == 15 {
+                    println("  → Replaced with bitwise AND (mask: 15)")
+                } else {
+                    println("  → No change")
+                }
+            }
+            _ => {}
+        }
+    }
+    println()
+    
+    // Test 4: No reduction (not power of two)
+    println("Test 4: x * 3 (no reduction possible)")
+    let func4 = Function {
+        blocks: vec![
+            BasicBlock {
+                id: 0,
+                instructions: vec![
+                    MirInstruction::Const {
+                        result: ValueId(0),
+                        value: 10,
+                    },
+                    MirInstruction::Const {
+                        result: ValueId(1),
+                        value: 3,
+                    },
+                    MirInstruction::Binary {
+                        result: ValueId(2),
+                        op: BinaryOp::Mul,
+                        left: ValueId(0),
+                        right: ValueId(1),
+                    },
+                ],
+            },
+        ],
+    };
+    
+    let optimized4 = strength_reduction(func4);
+    println("After optimization:")
+    for instr in optimized4.blocks[0].instructions {
+        match instr {
+            MirInstruction::Binary { op, .. } => {
+                match op {
+                    BinaryOp::Mul => println("  → Kept as multiplication (3 not power of two)"),
+                    _ => println("  → No change"),
+                }
+            }
+            _ => {}
+        }
+    }
+    println()
+    
+    println("All strength reduction tests complete!")
+    
+    0
+}
+
+/// Main entry point
+fn main() -> i32 {
+    println("Sounio Strength Reduction Optimizer")
+    println("====================================")
+    println()
+    
+    test_strength_reduction()
+    
+    0
+}

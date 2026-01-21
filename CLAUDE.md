@@ -178,3 +178,15 @@ Components: lexer, parser, ast, check, types, effects, hir, hlir,
            codegen, backend, cli, docs, stdlib, tests, ontology, epistemic,
            lsp, pkg, sir, units, refinement
 ```
+
+## LLM Offload
+
+Use `llm-offload` for bulk generation to save Anthropic tokens:
+- `llm-offload -t expand -p local` - Expand outline (free, local Mistral)
+- `llm-offload -t paraphrase -p grok` - Rewrite text (Grok)
+- `llm-offload -t scaffold -p local` - Code boilerplate
+- `llm-offload -t variations -p minimax` - Generate alternatives
+- `llm-offload --list-templates` - See all templates
+
+**Workflow**: Claude designs → llm-offload expands → Claude critiques
+

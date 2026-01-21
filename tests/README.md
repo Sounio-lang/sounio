@@ -16,21 +16,22 @@ Tests that should fail to compile. These verify that the compiler correctly reje
 ## Running Tests
 
 ```bash
-# Run all language tests
+# Run the Rust compiler test suite (includes the language suite)
 cd compiler && cargo test
 
-# Run specific test category
-cargo test ui::
-cargo test run_pass::
-cargo test compile_fail::
+# Run only the `.sio` language fixtures under `tests/`
+cd compiler && cargo test --test language_suite
+
+# Fast preflight (drift scan + key tests)
+./scripts/fast_gate.sh
 ```
 
 ## Writing Tests
 
 ### UI Test Format
 
-```d
-// tests/ui/error_name.d
+```sio
+// tests/ui/error_name.sio
 //@ error-pattern: expected error message
 
 fn main() {
@@ -40,8 +41,8 @@ fn main() {
 
 ### Run-Pass Test Format
 
-```d
-// tests/run-pass/feature_name.d
+```sio
+// tests/run-pass/feature_name.sio
 //@ run-pass
 
 fn main() {
@@ -52,8 +53,8 @@ fn main() {
 
 ### Compile-Fail Test Format
 
-```d
-// tests/compile-fail/invalid_syntax.d
+```sio
+// tests/compile-fail/invalid_syntax.sio
 //@ compile-fail
 //@ error-pattern: type mismatch
 
@@ -69,3 +70,6 @@ fn main() {
 - `//@ error-pattern: <text>` - Expected error message substring
 - `//@ ignore` - Skip this test
 - `//@ ignore-platform: <platform>` - Skip on specific platform
+- `//@ check-only` - For `run-pass` tests, only run `souc check` (skip `souc run`)
+- `//@ timeout-ms: <n>` - Override timeout for `check` and `run` (milliseconds)
+- `//@ run-timeout-ms: <n>` - Override timeout for `run` only (milliseconds)

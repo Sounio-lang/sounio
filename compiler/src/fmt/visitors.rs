@@ -1032,6 +1032,7 @@ impl<'a> FormatVisitor<'a> {
     pub fn visit_type(&self, ty: &TypeExpr) -> Doc {
         match ty {
             TypeExpr::Unit => Doc::text("()"),
+            TypeExpr::Never => Doc::text("!"),
             TypeExpr::SelfType => Doc::text("Self"),
             TypeExpr::Named { path, args, unit } => {
                 let mut parts = Vec::new();

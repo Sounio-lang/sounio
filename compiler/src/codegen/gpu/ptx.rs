@@ -10,6 +10,50 @@ use std::fmt::Write;
 
 use super::ir::*;
 
+struct ValueBank<T: Clone> {
+    values: Vec<T>,
+    current: Option<usize>,
+    default: T,
+}
+
+impl<T: Clone> ValueBank<T> {
+    fn new(default: T) -> Self {
+        Self {
+            values: Vec::new(),
+            current: None,
+            default,
+        }
+    }
+
+    fn set_current(&mut self, id: ValueId) {
+        self.current = Some(id.0 as usize);
+    }
+
+    fn clear_current(&mut self) {
+        self.current = None;
+    }
+
+    fn push(&mut self, value: T) {
+        if let Some(idx) = self.current {
+            if self.values.len() <= idx {
+                self.values.resize(idx + 1, self.default.clone());
+            }
+            self.values[idx] = value;
+        } else {
+            self.values.push(value);
+        }
+    }
+
+    fn get(&self, id: ValueId) -> Option<&T> {
+        self.values.get(id.0 as usize)
+    }
+
+    fn clear(&mut self) {
+        self.values.clear();
+        self.current = None;
+    }
+}
+
 /// PTX code generator
 pub struct PtxCodegen {
     /// Output buffer
@@ -25,13 +69,13 @@ pub struct PtxCodegen {
     indent: usize,
 
     /// Value to register mapping
-    registers: Vec<String>,
+    registers: ValueBank<String>,
 
     /// Next register number per type
     reg_counters: RegCounters,
 
     /// Type tracking for values
-    value_types: Vec<GpuType>,
+    value_types: ValueBank<GpuType>,
 }
 
 #[derive(Default)]
@@ -53,9 +97,9 @@ impl PtxCodegen {
             sm_version,
             ptx_version,
             indent: 0,
-            registers: Vec::new(),
+            registers: ValueBank::new(String::new()),
             reg_counters: RegCounters::default(),
-            value_types: Vec::new(),
+            value_types: ValueBank::new(GpuType::I64),
         }
     }
 
@@ -241,8 +285,11 @@ impl PtxCodegen {
         self.emit_terminator(&block.terminator);
     }
 
-    fn emit_instruction(&mut self, _value_id: ValueId, op: &GpuOp) {
+    fn emit_instruction(&mut self, value_id: ValueId, op: &GpuOp) {
         let indent = "\t".repeat(self.indent);
+
+        self.registers.set_current(value_id);
+        self.value_types.set_current(value_id);
 
         match op {
             // Constants
@@ -4437,6 +4484,9 @@ impl PtxCodegen {
                 writeln!(self.output, "{}mov.u32 {}, 0; // placeholder", indent, reg).unwrap();
             }
         }
+
+        self.registers.clear_current();
+        self.value_types.clear_current();
     }
 
     fn emit_terminator(&mut self, term: &GpuTerminator) {
@@ -4583,14 +4633,11 @@ impl PtxCodegen {
     }
 
     fn get_register(&self, id: ValueId) -> String {
-        self.registers[id.0 as usize].clone()
+        self.registers.get(id).cloned().unwrap_or_default()
     }
 
     fn get_value_type(&self, id: ValueId) -> GpuType {
-        self.value_types
-            .get(id.0 as usize)
-            .cloned()
-            .unwrap_or(GpuType::I64)
+        self.value_types.get(id).cloned().unwrap_or(GpuType::I64)
     }
 
     fn gpu_type_to_ptx(&self, ty: &GpuType) -> &'static str {

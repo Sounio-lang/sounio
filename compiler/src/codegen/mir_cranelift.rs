@@ -22,8 +22,16 @@
 //! | Unit     | types::I64     |
 
 use crate::hlir::HlirModule;
-use crate::mir::{MirModule, MirType, MirTerminator, MirFunction, MirConstant, ValueId, MirBlock, BlockId, MirInstruction, MirBinaryOp, MirUnaryOp, MirCompareOp};
-use crate::mir::optimization::{OptimizationLevel, create_default_pass_manager};
+use crate::mir::MirModule;
+use crate::mir::optimization::OptimizationLevel;
+
+#[cfg(feature = "jit")]
+use crate::mir::{
+    MirBinaryOp, MirBlock, MirCompareOp, MirConstant, MirFunction, MirInstruction, MirTerminator,
+    MirType, MirUnaryOp, ValueId, BlockId,
+};
+#[cfg(feature = "jit")]
+use crate::mir::optimization::create_default_pass_manager;
 
 #[cfg(feature = "jit")]
 use cranelift_codegen::ir::condcodes::{FloatCC, IntCC};
@@ -40,7 +48,57 @@ use cranelift_jit::{JITBuilder, JITModule};
 #[cfg(feature = "jit")]
 use cranelift_module::{FuncId, Linkage, Module};
 #[cfg(feature = "jit")]
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
+#[cfg(feature = "jit")]
+use std::io::Write;
+#[cfg(feature = "jit")]
+use std::sync::Mutex;
+
+// ==================== Native Runtime Functions ====================
+// These are called from JIT-compiled code via FFI
+
+/// Print an i64 value
+#[cfg(feature = "jit")]
+extern "C" fn runtime_print_i64(val: i64) {
+    print!("{}", val);
+    let _ = std::io::stdout().flush();
+}
+
+/// Print an f64 value
+#[cfg(feature = "jit")]
+extern "C" fn runtime_print_f64(val: f64) {
+    print!("{}", val);
+    let _ = std::io::stdout().flush();
+}
+
+/// Print a newline
+#[cfg(feature = "jit")]
+extern "C" fn runtime_print_newline() {
+    println!();
+}
+
+/// Print a null-terminated C string
+#[cfg(feature = "jit")]
+extern "C" fn runtime_print_cstr(ptr: *const u8) {
+    if !ptr.is_null() {
+        let cstr = unsafe { std::ffi::CStr::from_ptr(ptr as *const std::ffi::c_char) };
+        if let Ok(s) = cstr.to_str() {
+            print!("{}", s);
+            let _ = std::io::stdout().flush();
+        }
+    }
+}
+
+/// Print a boolean value
+#[cfg(feature = "jit")]
+extern "C" fn runtime_print_bool(val: i8) {
+    print!("{}", if val != 0 { "true" } else { "false" });
+    let _ = std::io::stdout().flush();
+}
+
+// Global storage for string constants during JIT execution
+#[cfg(feature = "jit")]
+static STRING_STORAGE: Mutex<Vec<std::ffi::CString>> = Mutex::new(Vec::new());
 
 /// Compile MIR module to native code via Cranelift JIT
 #[cfg(feature = "jit")]
@@ -211,7 +269,12 @@ impl MirCraneliftCompiler {
             .finish(settings::Flags::new(flag_builder))
             .map_err(|e| format!("Failed to create ISA: {}", e))?;
 
-        let jit_builder = JITBuilder::with_isa(isa, cranelift_module::default_libcall_names());
+        let mut jit_builder = JITBuilder::with_isa(isa, cranelift_module::default_libcall_names());
+        jit_builder.symbol("runtime_print_i64", runtime_print_i64 as *const u8);
+        jit_builder.symbol("runtime_print_f64", runtime_print_f64 as *const u8);
+        jit_builder.symbol("runtime_print_newline", runtime_print_newline as *const u8);
+        jit_builder.symbol("runtime_print_cstr", runtime_print_cstr as *const u8);
+        jit_builder.symbol("runtime_print_bool", runtime_print_bool as *const u8);
 
         let jit_module = JITModule::new(jit_builder);
         let ctx = jit_module.make_context();
@@ -226,6 +289,58 @@ impl MirCraneliftCompiler {
             global_data_ids: HashMap::new(),
             global_types: HashMap::new(),
         })
+    }
+
+    fn declare_runtime_functions(&mut self) -> Result<(), String> {
+        let call_conv = self.jit_module.isa().default_call_conv();
+
+        let mut sig_print_i64 = Signature::new(call_conv);
+        sig_print_i64.params.push(AbiParam::new(types::I64));
+        let id = self
+            .jit_module
+            .declare_function("runtime_print_i64", Linkage::Import, &sig_print_i64)
+            .map_err(|e| format!("Failed to declare runtime_print_i64: {}", e))?;
+        self.func_ids.insert("runtime_print_i64".to_string(), id);
+        self.func_sigs.insert("runtime_print_i64".to_string(), sig_print_i64);
+
+        let mut sig_print_f64 = Signature::new(call_conv);
+        sig_print_f64.params.push(AbiParam::new(types::F64));
+        let id = self
+            .jit_module
+            .declare_function("runtime_print_f64", Linkage::Import, &sig_print_f64)
+            .map_err(|e| format!("Failed to declare runtime_print_f64: {}", e))?;
+        self.func_ids.insert("runtime_print_f64".to_string(), id);
+        self.func_sigs.insert("runtime_print_f64".to_string(), sig_print_f64);
+
+        let sig_print_newline = Signature::new(call_conv);
+        let id = self
+            .jit_module
+            .declare_function("runtime_print_newline", Linkage::Import, &sig_print_newline)
+            .map_err(|e| format!("Failed to declare runtime_print_newline: {}", e))?;
+        self.func_ids
+            .insert("runtime_print_newline".to_string(), id);
+        self.func_sigs
+            .insert("runtime_print_newline".to_string(), sig_print_newline);
+
+        let mut sig_print_cstr = Signature::new(call_conv);
+        sig_print_cstr.params.push(AbiParam::new(types::I64));
+        let id = self
+            .jit_module
+            .declare_function("runtime_print_cstr", Linkage::Import, &sig_print_cstr)
+            .map_err(|e| format!("Failed to declare runtime_print_cstr: {}", e))?;
+        self.func_ids.insert("runtime_print_cstr".to_string(), id);
+        self.func_sigs.insert("runtime_print_cstr".to_string(), sig_print_cstr);
+
+        let mut sig_print_bool = Signature::new(call_conv);
+        sig_print_bool.params.push(AbiParam::new(types::I8));
+        let id = self
+            .jit_module
+            .declare_function("runtime_print_bool", Linkage::Import, &sig_print_bool)
+            .map_err(|e| format!("Failed to declare runtime_print_bool: {}", e))?;
+        self.func_ids.insert("runtime_print_bool".to_string(), id);
+        self.func_sigs.insert("runtime_print_bool".to_string(), sig_print_bool);
+
+        Ok(())
     }
 
     /// Translate a MIR type to a Cranelift type
@@ -274,6 +389,8 @@ impl MirCraneliftCompiler {
 
     /// Compile a MIR module
     pub fn compile_mir_module(&mut self, mir_module: &MirModule) -> Result<(), String> {
+        self.declare_runtime_functions()?;
+
         // First pass: declare all global variables
         for global in &mir_module.globals {
             self.declare_global(global)?;
@@ -460,6 +577,10 @@ struct FunctionTranslator<'a, 'b> {
     blocks: HashMap<BlockId, cranelift_codegen::ir::Block>,
     /// Map from MIR BlockId to its phi node block parameters
     block_params: HashMap<BlockId, Vec<(ValueId, MirType)>>,
+    /// Map from (target_block, source_block) to ordered phi argument ValueIds
+    phi_incoming: HashMap<(BlockId, BlockId), Vec<ValueId>>,
+    /// Track which ValueIds are string constants (for print handling)
+    string_values: HashSet<ValueId>,
     /// Map from ValueId to Variable for SSA construction
     variables: HashMap<ValueId, Variable>,
     /// Next variable index
@@ -482,6 +603,8 @@ impl<'a, 'b> FunctionTranslator<'a, 'b> {
             values: HashMap::new(),
             blocks: HashMap::new(),
             block_params: HashMap::new(),
+            phi_incoming: HashMap::new(),
+            string_values: HashSet::new(),
             variables: HashMap::new(),
             next_var: 0,
         }
@@ -505,6 +628,8 @@ impl<'a, 'b> FunctionTranslator<'a, 'b> {
                 self.block_params.insert(block.id, phi_params);
             }
         }
+
+        self.build_phi_incoming(func)?;
 
         // Second pass: Add block parameters for phi nodes (except entry block)
         for block in &func.blocks {
@@ -550,6 +675,90 @@ impl<'a, 'b> FunctionTranslator<'a, 'b> {
         Ok(())
     }
 
+    fn build_phi_incoming(&mut self, func: &MirFunction) -> Result<(), String> {
+        self.phi_incoming.clear();
+
+        for block in &func.blocks {
+            let params = match self.block_params.get(&block.id) {
+                Some(params) => params,
+                None => continue,
+            };
+
+            let mut positions = HashMap::new();
+            for (idx, (value_id, _)) in params.iter().enumerate() {
+                positions.insert(*value_id, idx);
+            }
+
+            let mut incoming_by_pred: HashMap<BlockId, Vec<Option<ValueId>>> = HashMap::new();
+            for instr in &block.instructions {
+                let MirInstruction::Phi { result, incoming, .. } = instr else {
+                    break;
+                };
+
+                let idx = *positions.get(result).ok_or_else(|| {
+                    format!("Phi result {:?} missing from block params in {:?}", result, block.id)
+                })?;
+
+                for (pred, value_id) in incoming {
+                    let entry = incoming_by_pred
+                        .entry(*pred)
+                        .or_insert_with(|| vec![None; params.len()]);
+                    entry[idx] = Some(*value_id);
+                }
+            }
+
+            for (pred, values) in incoming_by_pred {
+                if values.iter().any(|v| v.is_none()) {
+                    return Err(format!(
+                        "Phi in block {:?} missing incoming value from {:?}",
+                        block.id, pred
+                    ));
+                }
+                let resolved: Vec<ValueId> =
+                    values.into_iter().map(|v| v.unwrap()).collect();
+                self.phi_incoming.insert((block.id, pred), resolved);
+            }
+        }
+
+        Ok(())
+    }
+
+    fn phi_args_for_target(
+        &self,
+        target: BlockId,
+        source: BlockId,
+    ) -> Result<Vec<cranelift_codegen::ir::Value>, String> {
+        let params = match self.block_params.get(&target) {
+            Some(params) if !params.is_empty() => params,
+            _ => return Ok(Vec::new()),
+        };
+
+        let incoming = self
+            .phi_incoming
+            .get(&(target, source))
+            .ok_or_else(|| {
+                format!(
+                    "Missing phi incoming values for target {:?} from {:?}",
+                    target, source
+                )
+            })?;
+
+        if incoming.len() != params.len() {
+            return Err(format!(
+                "Phi argument length mismatch for target {:?}: expected {}, got {}",
+                target,
+                params.len(),
+                incoming.len()
+            ));
+        }
+
+        let mut args = Vec::with_capacity(incoming.len());
+        for value_id in incoming {
+            args.push(self.get_value(*value_id)?);
+        }
+        Ok(args)
+    }
+
     /// Translate a MIR type to a Cranelift type
     fn translate_type(&self, ty: &MirType) -> types::Type {
         match ty {
@@ -589,7 +798,7 @@ impl<'a, 'b> FunctionTranslator<'a, 'b> {
         }
 
         // Translate terminator
-        self.translate_terminator(&block.terminator)?;
+        self.translate_terminator(&block.terminator, block.id)?;
 
         Ok(())
     }
@@ -610,10 +819,35 @@ impl<'a, 'b> FunctionTranslator<'a, 'b> {
             .ok_or_else(|| format!("Block {:?} not found", id))
     }
 
+    fn cast_index_to_i64(
+        &mut self,
+        value: cranelift_codegen::ir::Value,
+    ) -> cranelift_codegen::ir::Value {
+        let ty = self.builder.func.dfg.value_type(value);
+        if ty == types::I64 {
+            return value;
+        }
+        if ty.is_int() {
+            if ty.bits() < 64 {
+                return self.builder.ins().sextend(types::I64, value);
+            }
+            if ty.bits() > 64 {
+                return self.builder.ins().ireduce(types::I64, value);
+            }
+        }
+        if ty.is_float() {
+            return self.builder.ins().fcvt_to_sint(types::I64, value);
+        }
+        value
+    }
+
     /// Translate a single MIR instruction
     fn translate_instruction(&mut self, instr: &MirInstruction) -> Result<(), String> {
         match instr {
             MirInstruction::Const { result, value, ty } => {
+                if matches!(value, MirConstant::String(_)) {
+                    self.string_values.insert(*result);
+                }
                 let cl_type = self.translate_type(ty);
                 let val = self.translate_constant(value, cl_type)?;
                 self.values.insert(*result, val);
@@ -678,12 +912,19 @@ impl<'a, 'b> FunctionTranslator<'a, 'b> {
                 // GEP: compute address = base + sum(indices * element_size)
                 let mut addr = self.get_value(*base)?;
                 let elem_size = ty.size_bytes().unwrap_or(8) as i64;
+                let scale = if elem_size == 1 {
+                    None
+                } else {
+                    Some(self.builder.ins().iconst(types::I64, elem_size))
+                };
 
                 for idx_id in indices {
                     let idx = self.get_value(*idx_id)?;
-                    // Scale index by element size
-                    let scale = self.builder.ins().iconst(types::I64, elem_size);
-                    let offset = self.builder.ins().imul(idx, scale);
+                    let idx = self.cast_index_to_i64(idx);
+                    let offset = match scale {
+                        Some(scale) => self.builder.ins().imul(idx, scale),
+                        None => idx,
+                    };
                     addr = self.builder.ins().iadd(addr, offset);
                 }
 
@@ -848,11 +1089,73 @@ impl<'a, 'b> FunctionTranslator<'a, 'b> {
                 result,
                 func_name,
                 args,
-                ty: _,
+                ty,
             } => {
                 let arg_vals: Result<Vec<_>, _> =
                     args.iter().map(|a| self.get_value(*a)).collect();
                 let arg_vals = arg_vals?;
+
+                if func_name == "print" || func_name == "println" {
+                    for (i, arg_val) in arg_vals.iter().enumerate() {
+                        let arg_id = args[i];
+                        if self.string_values.contains(&arg_id) {
+                            if let Some(&func_ref) = self.func_refs.get("runtime_print_cstr") {
+                                self.builder.ins().call(func_ref, &[*arg_val]);
+                            }
+                            continue;
+                        }
+
+                        let arg_type = self.builder.func.dfg.value_type(*arg_val);
+                        let runtime_func = if arg_type == types::F64 || arg_type == types::F32 {
+                            "runtime_print_f64"
+                        } else if arg_type == types::I8 {
+                            "runtime_print_bool"
+                        } else {
+                            "runtime_print_i64"
+                        };
+
+                        if let Some(&func_ref) = self.func_refs.get(runtime_func) {
+                            let converted_arg = if runtime_func == "runtime_print_f64"
+                                && arg_type == types::F32
+                            {
+                                self.builder.ins().fpromote(types::F64, *arg_val)
+                            } else if runtime_func == "runtime_print_i64" && arg_type != types::I64
+                            {
+                                if arg_type.is_int() && arg_type.bits() < 64 {
+                                    self.builder.ins().sextend(types::I64, *arg_val)
+                                } else if arg_type.is_int() && arg_type.bits() > 64 {
+                                    self.builder.ins().ireduce(types::I64, *arg_val)
+                                } else {
+                                    *arg_val
+                                }
+                            } else {
+                                *arg_val
+                            };
+                            self.builder.ins().call(func_ref, &[converted_arg]);
+                        }
+                    }
+
+                    if func_name == "println" {
+                        if let Some(&func_ref) = self.func_refs.get("runtime_print_newline") {
+                            self.builder.ins().call(func_ref, &[]);
+                        }
+                    }
+
+                    if let Some(res_id) = result {
+                        let cl_type = self.translate_type(ty);
+                        let zero = if cl_type.is_float() {
+                            if cl_type == types::F32 {
+                                self.builder.ins().f32const(0.0)
+                            } else {
+                                self.builder.ins().f64const(0.0)
+                            }
+                        } else {
+                            self.builder.ins().iconst(cl_type, 0)
+                        };
+                        self.values.insert(*res_id, zero);
+                    }
+                    return Ok(());
+                }
 
                 if let Some(&func_ref) = self.func_refs.get(func_name) {
                     let call = self.builder.ins().call(func_ref, &arg_vals);
@@ -958,10 +1261,17 @@ impl<'a, 'b> FunctionTranslator<'a, 'b> {
                 }
             }
 
-            MirConstant::String(_) => {
-                // String constants are stored as pointers
-                // For now, return a null pointer; proper string handling requires data sections
-                Ok(self.builder.ins().iconst(types::I64, 0))
+            MirConstant::String(s) => {
+                let cstring = std::ffi::CString::new(s.as_str())
+                    .unwrap_or_else(|_| std::ffi::CString::new("").unwrap());
+
+                if let Ok(mut storage) = STRING_STORAGE.lock() {
+                    storage.push(cstring);
+                    let stored_ptr = storage.last().unwrap().as_ptr() as i64;
+                    Ok(self.builder.ins().iconst(types::I64, stored_ptr))
+                } else {
+                    Ok(self.builder.ins().iconst(types::I64, 0))
+                }
             }
 
             MirConstant::Null => Ok(self.builder.ins().iconst(types::I64, 0)),
@@ -1229,15 +1539,16 @@ impl<'a, 'b> FunctionTranslator<'a, 'b> {
     }
 
     /// Translate a block terminator
-    fn translate_terminator(&mut self, terminator: &MirTerminator) -> Result<(), String> {
+    fn translate_terminator(
+        &mut self,
+        terminator: &MirTerminator,
+        source_block: BlockId,
+    ) -> Result<(), String> {
         match terminator {
             MirTerminator::Branch { target } => {
                 let target_block = self.get_block(*target)?;
-                // Note: For proper phi node handling, we would need to pass block arguments here.
-                // This requires knowing which source block we're in and matching with phi incoming edges.
-                // For now, we pass empty args - the phi handling in translate_function sets up
-                // block parameters, but proper argument passing requires additional infrastructure.
-                self.builder.ins().jump(target_block, &[]);
+                let args = self.phi_args_for_target(*target, source_block)?;
+                self.builder.ins().jump(target_block, &args);
             }
 
             MirTerminator::CondBranch {
@@ -1248,8 +1559,11 @@ impl<'a, 'b> FunctionTranslator<'a, 'b> {
                 let cond = self.get_value(*condition)?;
                 let true_block = self.get_block(*true_target)?;
                 let false_block = self.get_block(*false_target)?;
-                // Note: Similar to Branch, proper phi handling would require passing block args
-                self.builder.ins().brif(cond, true_block, &[], false_block, &[]);
+                let true_args = self.phi_args_for_target(*true_target, source_block)?;
+                let false_args = self.phi_args_for_target(*false_target, source_block)?;
+                self.builder
+                    .ins()
+                    .brif(cond, true_block, &true_args, false_block, &false_args);
             }
 
             MirTerminator::Switch {
@@ -1269,13 +1583,17 @@ impl<'a, 'b> FunctionTranslator<'a, 'b> {
 
                     // Create a continuation block for the next case check
                     let next_block = self.builder.create_block();
-                    self.builder.ins().brif(cmp, target_block, &[], next_block, &[]);
+                    let case_args = self.phi_args_for_target(*target, source_block)?;
+                    self.builder
+                        .ins()
+                        .brif(cmp, target_block, &case_args, next_block, &[]);
                     self.builder.switch_to_block(next_block);
                     self.builder.seal_block(next_block);
                 }
 
                 // Fall through to default
-                self.builder.ins().jump(default_block, &[]);
+                let default_args = self.phi_args_for_target(*default_target, source_block)?;
+                self.builder.ins().jump(default_block, &default_args);
             }
 
             MirTerminator::Return { value } => {
@@ -1338,8 +1656,10 @@ pub fn get_optimization_passes_for_level(level: OptimizationLevel) -> Vec<&'stat
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::mir::builder::{FunctionBuilder as MirFunctionBuilder, ModuleBuilder};
-    use crate::mir::types::{MirType, MirConstant};
+    use crate::mir::builder::ModuleBuilder;
+    use crate::mir::types::MirType;
+    #[cfg(feature = "jit")]
+    use crate::mir::MirConstant;
 
     #[test]
     fn test_translate_type() {
@@ -1407,6 +1727,47 @@ mod tests {
         unsafe {
             let result = compiled.call_i64("main");
             assert_eq!(result.unwrap(), 42, "main() should return 42");
+        }
+    }
+
+    #[cfg(feature = "jit")]
+    #[test]
+    fn test_mir_cranelift_print_smoke() {
+        let mut module_builder = ModuleBuilder::new("test_print");
+
+        let mut func_builder =
+            module_builder.create_function("main".to_string(), MirType::I64);
+        let str_id = func_builder.fresh_value();
+        func_builder.build_const(
+            str_id,
+            MirConstant::String("hello".to_string()),
+            MirType::String,
+        );
+        func_builder.build_call(
+            None,
+            "print".to_string(),
+            vec![str_id],
+            MirType::Unit,
+        );
+        let num_id = func_builder.build_i64(7);
+        func_builder.build_call(
+            None,
+            "println".to_string(),
+            vec![num_id],
+            MirType::Unit,
+        );
+        let ret_id = func_builder.build_i64(0);
+        func_builder.build_return(Some(ret_id));
+        module_builder.add_function(func_builder.build());
+
+        let module = module_builder.build();
+        let jit = MirAwareCraneliftJit::new();
+        let compiled = jit.compile_mir(&module).expect("Compilation should succeed");
+
+        unsafe {
+            compiled
+                .call_i64("main")
+                .expect("Execution should succeed");
         }
     }
 

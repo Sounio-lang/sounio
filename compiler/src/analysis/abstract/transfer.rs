@@ -16,7 +16,7 @@
 use super::domain::AbstractDomain;
 use super::intervals::Interval;
 use super::product::NumericDomain;
-use crate::hlir::{BinaryOp, HlirConstant, HlirInstr, HlirType, Op, UnaryOp, ValueId};
+use crate::hlir::{BinaryOp, HlirConstant, HlirInstr, Op, UnaryOp, ValueId};
 use std::collections::HashMap;
 
 /// Abstract state for a program point
@@ -649,6 +649,7 @@ impl ConditionRefinement {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::hlir::HlirType;
 
     #[test]
     fn test_abstract_state_basic() {

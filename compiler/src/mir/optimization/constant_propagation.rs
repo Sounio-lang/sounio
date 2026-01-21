@@ -884,7 +884,7 @@ fn replace_with_constant(analysis: &SCCPAnalysis, instr: &MirInstruction) -> Opt
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::mir::builder::{FunctionBuilder, ModuleBuilder};
+    use crate::mir::builder::FunctionBuilder;
     use crate::mir::{FuncId, MirType};
 
     #[test]

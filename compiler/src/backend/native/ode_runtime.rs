@@ -8,6 +8,7 @@
 //! assembly runtime, providing adaptive step size control and error
 //! estimation for complex ODE methods.
 
+#![allow(unsafe_op_in_unsafe_fn)]
 
 /// C-compatible function pointer type for ODE derivatives
 /// Signature: void derivatives(double* state, double t, double* dydt)
@@ -625,7 +626,7 @@ pub unsafe extern "C" fn sounio_ode_bdf_step(
 
     let n = n as usize;
     let current_t = *t;
-    let mut h = *dt;
+    let h = *dt;
     let state_key = state as usize;
 
     // Get or create BDF state
@@ -1319,7 +1320,7 @@ unsafe fn detect_stiffness_lsoda(
     let mut f0 = vec![0.0; n];
     let mut f1 = vec![0.0; n];
     let mut y_pert = vec![0.0; n];
-    let mut v = vec![1.0 / (n as f64).sqrt(); n];
+    let v = vec![1.0 / (n as f64).sqrt(); n];
 
     std::ptr::copy_nonoverlapping(state, y_pert.as_mut_ptr(), n);
     derivatives(y_pert.as_mut_ptr(), t, f0.as_mut_ptr());

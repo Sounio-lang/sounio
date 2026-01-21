@@ -204,7 +204,5 @@ pub fn extract_closure(
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-
     // Tests will be added when builtins are integrated
 }

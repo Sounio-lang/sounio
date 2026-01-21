@@ -1,0 +1,407 @@
+//! Constant Folding Pass
+//!
+//! Evaluates constant expressions at compile time
+//! This is the first optimization pass written entirely in Sounio
+
+/// Expression type for constant folding
+enum Expr {
+    /// Constant value
+    Const(i64),
+    /// Binary operation
+    Binary {
+        op: BinaryOp,
+        left: Box<Expr>,
+        right: Box<Expr>,
+        ty: Type
+    },
+    /// Unary operation
+    Unary {
+        op: UnaryOp,
+        operand: Box<Expr>,
+        ty: Type
+    },
+    /// Variable reference
+    Var(ValueId, Type),
+}
+
+/// Binary operations
+enum BinaryOp {
+    Add, Sub, Mul, Div, Rem,
+    And, Or, Xor,
+    Shl, LShr, AShr,
+}
+
+/// Unary operations
+enum UnaryOp {
+    Neg, Not, BitNot,
+}
+
+/// Types
+enum Type {
+    I8, I16, I32, I64,
+    U8, U16, U32, U64,
+    F32, F64,
+    Bool,
+}
+
+/// Value identifier
+struct ValueId(usize);
+
+/// Check if an expression is a constant
+fn is_constant(expr: Expr) -> bool {
+    match expr {
+        Expr::Const(_) => true,
+        _ => false
+    }
+}
+
+/// Get constant value from expression
+fn get_const_value(expr: Expr) -> i64 {
+    match expr {
+        Expr::Const(n) => n,
+        _ => panic!("Not a constant: {:?}", expr)
+    }
+}
+
+/// Fold a binary operation with constant operands
+fn fold_binary(op: BinaryOp, left: Expr, right: Expr) -> Option<Expr> {
+    if !is_constant(left) || !is_constant(right) {
+        return None
+    }
+
+    let a = get_const_value(left)
+    let b = get_const_value(right)
+
+    let result = match op {
+        BinaryOp::Add => a + b,
+        BinaryOp::Sub => a - b,
+        BinaryOp::Mul => a * b,
+        BinaryOp::Div => {
+            if b == 0 {
+                return None // Division by zero
+            }
+            a / b
+        }
+        BinaryOp::Rem => {
+            if b == 0 {
+                return None // Modulo by zero
+            }
+            a % b
+        }
+        BinaryOp::And => a & b,
+        BinaryOp::Or => a | b,
+        BinaryOp::Xor => a ^ b,
+        BinaryOp::Shl => a << b,
+        BinaryOp::LShr => {
+            let shift = b as u32;
+            (a as u64) >> shift as i64
+        }
+        BinaryOp::AShr => a >> (b as u32),
+    };
+
+    Some(Expr::Const(result))
+}
+
+/// Fold a unary operation with constant operand
+fn fold_unary(op: UnaryOp, operand: Expr) -> Option<Expr> {
+    if !is_constant(operand) {
+        return None
+    }
+
+    let val = get_const_value(operand);
+    let result = match op {
+        UnaryOp::Neg => -val,
+        UnaryOp::Not => if val == 0 { 1 } else { 0 },
+        UnaryOp::BitNot => !val,
+    };
+
+    Some(Expr::Const(result))
+}
+
+/// Recursively fold an expression
+fn fold_expr(expr: Expr) -> Expr {
+    match expr {
+        Expr::Binary { op, left, right, ty } => {
+            let new_left = fold_expr(*left)
+            let new_right = fold_expr(*right)
+            
+            match fold_binary(op, new_left, new_right) {
+                Some(folded) => folded,
+                None => Expr::Binary {
+                    op,
+                    left: Box::new(new_left),
+                    right: Box::new(new_right),
+                    ty
+                }
+            }
+        }
+        
+        Expr::Unary { op, operand, ty } => {
+            let new_operand = fold_expr(*operand)
+            
+            match fold_unary(op, new_operand) {
+                Some(folded) => folded,
+                None => Expr::Unary {
+                    op,
+                    operand: Box::new(new_operand),
+                    ty
+                }
+            }
+        }
+        
+        _ => expr
+    }
+}
+
+/// MIR Instruction (simplified for constant folding)
+enum MirInstruction {
+    Binary {
+        result: ValueId,
+        op: BinaryOp,
+        left: ValueId,
+        right: ValueId,
+        ty: Type
+    },
+    Unary {
+        result: ValueId,
+        op: UnaryOp,
+        operand: ValueId,
+        ty: Type
+    },
+    Const {
+        result: ValueId,
+        value: i64,
+        ty: Type
+    },
+}
+
+/// Get result value from instruction
+fn instr_result(instr: MirInstruction) -> Option<ValueId> {
+    match instr {
+        MirInstruction::Binary { result, .. } => Some(result),
+        MirInstruction::Unary { result, .. } => Some(result),
+        MirInstruction::Const { result, .. } => Some(result),
+    }
+}
+
+/// Apply constant folding to an instruction
+fn fold_instruction(
+    instr: MirInstruction,
+    value_map: HashMap<ValueId, Expr>
+) -> Option<MirInstruction> {
+    match instr {
+        MirInstruction::Binary { result, op, left, right, ty } => {
+            let left_expr = value_map.get(&left)
+            let right_expr = value_map.get(&right)
+            
+            match (left_expr, right_expr) {
+                (Some(l), Some(r)) => {
+                    match fold_binary(op, l.clone(), r.clone()) {
+                        Some(Expr::Const(val)) => {
+                            Some(MirInstruction::Const {
+                                result,
+                                value: val,
+                                ty
+                            })
+                        }
+                        _ => None
+                    }
+                }
+                _ => None
+            }
+        }
+        
+        MirInstruction::Unary { result, op, operand, ty } => {
+            let operand_expr = value_map.get(&operand)
+            
+            match operand_expr {
+                Some(e) => {
+                    match fold_unary(op, e.clone()) {
+                        Some(Expr::Const(val)) => {
+                            Some(MirInstruction::Const {
+                                result,
+                                value: val,
+                                ty
+                            })
+                        }
+                        _ => None
+                    }
+                }
+                _ => None
+            }
+        }
+        
+        _ => None
+    }
+}
+
+/// Constant folding pass on a basic block
+fn fold_block(
+    block: Vec<MirInstruction>,
+    value_map: HashMap<ValueId, Expr>
+) -> (Vec<MirInstruction>, HashMap<ValueId, Expr>) {
+    let mut new_block = Vec::new()
+    let mut new_map = value_map.clone()
+    let mut modified = false
+    
+    for instr in block {
+        if let Some(result) = instr_result(instr) {
+            // Try to fold this instruction
+            match fold_instruction(instr, new_map.clone()) {
+                Some(folded) => {
+                    // Update value map with folded constant
+                    if let MirInstruction::Const { value, ty, .. } = folded {
+                        new_map.insert(result, Expr::Const(value));
+                    }
+                    new_block.push(folded);
+                    modified = true;
+                }
+                None => {
+                    // Keep original instruction
+                    new_block.push(instr);
+                }
+            }
+        } else {
+            // Instructions without results (stores, etc.)
+            new_block.push(instr);
+        }
+    }
+    
+    if modified {
+        // If we made changes, run again to catch cascading folds
+        fold_block(new_block, new_map)
+    } else {
+        (new_block, new_map)
+    }
+}
+
+/// Main constant folding function
+fn constant_folding(instructions: Vec<MirInstruction>) -> Vec<MirInstruction> {
+    let initial_map: HashMap<ValueId, Expr> = HashMap::new()
+    let (folded, _) = fold_block(instructions, initial_map)
+    folded
+}
+
+/// Test function
+fn test_constant_folding() -> i32 {
+    println("Testing Constant Folding")
+    println("========================")
+    
+    // Test 1: Simple addition
+    let test1 = vec![
+        MirInstruction::Const {
+            result: ValueId(0),
+            value: 10,
+            ty: Type::I32
+        },
+        MirInstruction::Const {
+            result: ValueId(1),
+            value: 20,
+            ty: Type::I32
+        },
+        MirInstruction::Binary {
+            result: ValueId(2),
+            op: BinaryOp::Add,
+            left: ValueId(0),
+            right: ValueId(1),
+            ty: Type::I32
+        }
+    ];
+    
+    let result1 = constant_folding(test1);
+    print("Test 1 (10 + 20): ")
+    if result1.len() == 1 {
+        if let MirInstruction::Const { value, .. } = result1[0] {
+            print(value)
+            println()
+        }
+    }
+    
+    // Test 2: Cascading folds
+    let test2 = vec![
+        MirInstruction::Const {
+            result: ValueId(0),
+            value: 5,
+            ty: Type::I32
+        },
+        MirInstruction::Const {
+            result: ValueId(1),
+            value: 3,
+            ty: Type::I32
+        },
+        MirInstruction::Binary {
+            result: ValueId(2),
+            op: BinaryOp::Mul,
+            left: ValueId(0),
+            right: ValueId(1),
+            ty: Type::I32
+        },
+        MirInstruction::Const {
+            result: ValueId(3),
+            value: 2,
+            ty: Type::I32
+        },
+        MirInstruction::Binary {
+            result: ValueId(4),
+            op: BinaryOp::Add,
+            left: ValueId(2),
+            right: ValueId(3),
+            ty: Type::I32
+        }
+    ];
+    
+    let result2 = constant_folding(test2);
+    print("Test 2 (5 * 3 + 2): ")
+    if result2.len() == 1 {
+        if let MirInstruction::Const { value, .. } = result2[0] {
+            print(value)
+            println()
+        }
+    }
+    
+    // Test 3: Strength reduction opportunities
+    let test3 = vec![
+        MirInstruction::Const {
+            result: ValueId(0),
+            value: 100,
+            ty: Type::I32
+        },
+        MirInstruction::Const {
+            result: ValueId(1),
+            value: 2,
+            ty: Type::I32
+        },
+        MirInstruction::Binary {
+            result: ValueId(2),
+            op: BinaryOp::Mul,
+            left: ValueId(0),
+            right: ValueId(1),
+            ty: Type::I32
+        }
+    ];
+    
+    let result3 = constant_folding(test3);
+    print("Test 3 (100 * 2): ")
+    if result3.len() == 1 {
+        if let MirInstruction::Const { value, .. } = result3[0] {
+            print(value)
+            println()
+        }
+    }
+    
+    println()
+    println("Constant folding tests complete!")
+    
+    0
+}
+
+/// Main entry point
+fn main() -> i32 {
+    println("Sounio Constant Folding Optimizer")
+    println("==================================")
+    println()
+    
+    test_constant_folding()
+    
+    0
+}

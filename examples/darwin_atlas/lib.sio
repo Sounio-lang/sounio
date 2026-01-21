@@ -1,15 +1,520 @@
-/// Darwin Atlas Kernels - Library Root
-///
-/// High-performance implementations of genomic symmetry operators
-/// with epistemic computing support.
+// Darwin Atlas Kernels - Pipeline Demo (single-file, module-free)
+// Operators, symmetry, approximate metric, and quaternion lift.
 
-module darwin_kernels
+let BASE_A: u8 = 0
+let BASE_C: u8 = 1
+let BASE_G: u8 = 2
+let BASE_T: u8 = 3
 
-// Re-export public API
-pub use operators::{shift, reverse, complement, reverse_complement};
-pub use exact_symmetry::{orbit_size, orbit_ratio, is_palindrome, is_rc_fixed};
-pub use approx_metric::{dmin, dmin_normalized};
-pub use quaternion::{dicyclic_element, verify_double_cover, project_to_dihedral};
-pub use ffi::*;
+let PI: f64 = 3.14159265358979323846
 
-// Module declarations (auto-discovered from file structure)
+fn abs_f64(x: f64) -> f64  with Div, Panic {
+    if x < 0.0 { return -x }
+    return x
+}
+
+fn normalize_angle(x: f64) -> f64  with Div, Panic {
+    var angle = x
+    while angle > PI {
+        angle = angle - 2.0 * PI
+    }
+    while angle < -PI {
+        angle = angle + 2.0 * PI
+    }
+    return angle
+}
+
+fn sin_approx(x: f64) -> f64  with Div, Panic {
+    let angle = normalize_angle(x)
+    let x2 = angle * angle
+    let x3 = angle * x2
+    let x5 = x3 * x2
+    let x7 = x5 * x2
+    return angle - x3 / 6.0 + x5 / 120.0 - x7 / 5040.0
+}
+
+fn cos_approx(x: f64) -> f64  with Div, Panic {
+    let angle = normalize_angle(x)
+    let x2 = angle * angle
+    let x4 = x2 * x2
+    let x6 = x4 * x2
+    return 1.0 - x2 / 2.0 + x4 / 24.0 - x6 / 720.0
+}
+
+fn atan(x: f64) -> f64  with Div, Panic {
+    let ax = abs_f64(x)
+    if ax <= 1.0 {
+        let x2 = x * x
+        return x * (1.0 - x2 * (1.0 / 3.0 - x2 * (1.0 / 5.0 - x2 * (1.0 / 7.0))))
+    }
+    let sign = if x > 0.0 { 1.0 } else { -1.0 }
+    let inv = 1.0 / x
+    let inv2 = inv * inv
+    return sign * (PI / 2.0 - inv * (1.0 - inv2 * (1.0 / 3.0 - inv2 * (1.0 / 5.0))))
+}
+
+fn atan2(y: f64, x: f64) -> f64  with Div, Panic {
+    if x > 0.0 {
+        return atan(y / x)
+    }
+    if x < 0.0 && y >= 0.0 {
+        return atan(y / x) + PI
+    }
+    if x < 0.0 && y < 0.0 {
+        return atan(y / x) - PI
+    }
+    if x == 0.0 && y > 0.0 {
+        return PI / 2.0
+    }
+    if x == 0.0 && y < 0.0 {
+        return -PI / 2.0
+    }
+    return 0.0
+}
+
+fn sequence_shift(seq: [u8], k: usize) -> [u8]  with Div, Panic {
+    let n = seq.len()
+    if n == 0 { return [] }
+
+    let k_mod = k % n
+    var result: [u8] = []
+    var i: usize = 0
+    while i < n {
+        let idx = (i + k_mod) % n
+        result.push(seq[idx])
+        i = i + 1
+    }
+    return result
+}
+
+fn sequence_reverse(seq: [u8]) -> [u8]  with Div, Panic {
+    let n = seq.len()
+    if n == 0 { return [] }
+
+    var result: [u8] = []
+    var i: usize = 0
+    while i < n {
+        result.push(seq[n - 1 - i])
+        i = i + 1
+    }
+    return result
+}
+
+fn complement_base(b: u8) -> u8  with Div, Panic {
+    return b ^ 3
+}
+
+fn sequence_complement(seq: [u8]) -> [u8]  with Div, Panic {
+    let n = seq.len()
+    if n == 0 { return [] }
+
+    var result: [u8] = []
+    var i: usize = 0
+    while i < n {
+        result.push(complement_base(seq[i]))
+        i = i + 1
+    }
+    return result
+}
+
+fn sequence_reverse_complement(seq: [u8]) -> [u8]  with Div, Panic {
+    let rev = sequence_reverse(seq)
+    return sequence_complement(rev)
+}
+
+fn sequences_equal(a: [u8], b: [u8]) -> bool  with Div, Panic {
+    let len_a = a.len()
+    let len_b = b.len()
+    if len_a != len_b { return false }
+
+    var i: usize = 0
+    while i < len_a {
+        if a[i] != b[i] { return false }
+        i = i + 1
+    }
+    return true
+}
+
+fn hamming_distance(a: [u8], b: [u8]) -> usize  with Div, Panic {
+    let len_a = a.len()
+    let len_b = b.len()
+    if len_a != len_b { return 0 }
+
+    var count: usize = 0
+    var i: usize = 0
+    while i < len_a {
+        if a[i] != b[i] {
+            count = count + 1
+        }
+        i = i + 1
+    }
+    return count
+}
+
+fn cyclic_period(seq: [u8]) -> usize  with Div, Panic {
+    let n = seq.len()
+    if n == 0 { return 1 }
+
+    var k: usize = 1
+    while k <= n {
+        if n % k == 0 {
+            let shifted = sequence_shift(seq, k)
+            if sequences_equal(seq, shifted) {
+                return k
+            }
+        }
+        k = k + 1
+    }
+    return n
+}
+
+fn rotational_symmetries(seq: [u8]) -> usize  with Div, Panic {
+    let n = seq.len()
+    if n == 0 { return 1 }
+    return n / cyclic_period(seq)
+}
+
+fn has_reflective_symmetry(seq: [u8]) -> bool  with Div, Panic {
+    let n = seq.len()
+    if n == 0 { return true }
+
+    let rev = sequence_reverse(seq)
+    var k: usize = 0
+    while k < n {
+        let shifted_rev = sequence_shift(rev, k)
+        if sequences_equal(seq, shifted_rev) {
+            return true
+        }
+        k = k + 1
+    }
+    return false
+}
+
+fn orbit_size(seq: [u8]) -> usize  with Div, Panic {
+    let n = seq.len()
+    if n == 0 { return 1 }
+
+    let group_order = 2 * n
+    let rot_sym = rotational_symmetries(seq)
+    let ref_factor: usize = if has_reflective_symmetry(seq) { 2 } else { 1 }
+    let stabilizer_size = rot_sym * ref_factor
+    return group_order / stabilizer_size
+}
+
+fn orbit_ratio(seq: [u8]) -> f64  with Div, Panic {
+    let n = seq.len()
+    if n == 0 { return 1.0 }
+    return (orbit_size(seq) as f64) / ((2 * n) as f64)
+}
+
+fn is_palindrome(seq: [u8]) -> bool  with Div, Panic {
+    let rev = sequence_reverse(seq)
+    return sequences_equal(seq, rev)
+}
+
+fn is_rc_fixed(seq: [u8]) -> bool  with Div, Panic {
+    let rc = sequence_reverse_complement(seq)
+    return sequences_equal(seq, rc)
+}
+
+fn rotational_period(seq: [u8]) -> usize  with Div, Panic {
+    let n = seq.len()
+    if n == 0 { return 1 }
+
+    var k: usize = 1
+    while k <= n {
+        if n % k == 0 {
+            let shifted = sequence_shift(seq, k)
+            if sequences_equal(seq, shifted) {
+                return k
+            }
+        }
+        k = k + 1
+    }
+    return n
+}
+
+struct SymmetryStats {
+    length: usize,
+    orbit_size: usize,
+    orbit_ratio: f64,
+    is_palindrome: bool,
+    is_rc_fixed: bool,
+    rotational_period: usize,
+}
+
+fn compute_symmetry_stats(seq: [u8]) -> SymmetryStats  with Div, Panic {
+    SymmetryStats {
+        length: seq.len(),
+        orbit_size: orbit_size(seq),
+        orbit_ratio: orbit_ratio(seq),
+        is_palindrome: is_palindrome(seq),
+        is_rc_fixed: is_rc_fixed(seq),
+        rotational_period: rotational_period(seq),
+    }
+}
+
+fn TRANSFORM_SHIFT() -> i32  with Div, Panic { 0 }
+fn TRANSFORM_REVERSE_SHIFT() -> i32  with Div, Panic { 1 }
+fn TRANSFORM_RC_SHIFT() -> i32  with Div, Panic { 2 }
+
+struct NearestTransform {
+    kind: i32,
+    k: usize,
+}
+
+fn dmin(seq: [u8], include_rc: bool) -> usize  with Div, Panic {
+    let n = seq.len()
+    if n == 0 { return 0 }
+
+    var min_dist = n
+
+    var k: usize = 1
+    while k < n {
+        let shifted = sequence_shift(seq, k)
+        let d = hamming_distance(seq, shifted)
+        if d < min_dist { min_dist = d }
+        k = k + 1
+    }
+
+    let rev = sequence_reverse(seq)
+    k = 0
+    while k < n {
+        let shifted_rev = sequence_shift(rev, k)
+        let d = hamming_distance(seq, shifted_rev)
+        if d < min_dist { min_dist = d }
+        k = k + 1
+    }
+
+    if include_rc {
+        let rc = sequence_reverse_complement(seq)
+        k = 0
+        while k < n {
+            let shifted_rc = sequence_shift(rc, k)
+            let d = hamming_distance(seq, shifted_rc)
+            if d < min_dist { min_dist = d }
+            k = k + 1
+        }
+    }
+
+    return min_dist
+}
+
+fn dmin_normalized(seq: [u8], include_rc: bool) -> f64  with Div, Panic {
+    let n = seq.len()
+    if n == 0 { return 0.0 }
+    return (dmin(seq, include_rc) as f64) / (n as f64)
+}
+
+fn nearest_transform(seq: [u8], include_rc: bool) -> (usize, NearestTransform)  with Div, Panic {
+    let n = seq.len()
+    if n == 0 {
+        return (0, NearestTransform { kind: TRANSFORM_SHIFT(), k: 0 })
+    }
+
+    var min_dist = n
+    var nearest_kind = TRANSFORM_SHIFT()
+    var nearest_k: usize = 1
+
+    var k: usize = 1
+    while k < n {
+        let d = hamming_distance(seq, sequence_shift(seq, k))
+        if d < min_dist {
+            min_dist = d
+            nearest_kind = TRANSFORM_SHIFT()
+            nearest_k = k
+        }
+        k = k + 1
+    }
+
+    let rev = sequence_reverse(seq)
+    k = 0
+    while k < n {
+        let d = hamming_distance(seq, sequence_shift(rev, k))
+        if d < min_dist {
+            min_dist = d
+            nearest_kind = TRANSFORM_REVERSE_SHIFT()
+            nearest_k = k
+        }
+        k = k + 1
+    }
+
+    if include_rc {
+        let rc = sequence_reverse_complement(seq)
+        k = 0
+        while k < n {
+            let d = hamming_distance(seq, sequence_shift(rc, k))
+            if d < min_dist {
+                min_dist = d
+                nearest_kind = TRANSFORM_RC_SHIFT()
+                nearest_k = k
+            }
+            k = k + 1
+        }
+    }
+
+    return (min_dist, NearestTransform { kind: nearest_kind, k: nearest_k })
+}
+
+struct Quaternion {
+    w: f64,
+    x: f64,
+    y: f64,
+    z: f64,
+}
+
+fn quaternion_new(w: f64, x: f64, y: f64, z: f64) -> Quaternion  with Div, Panic {
+    Quaternion { w: w, x: x, y: y, z: z }
+}
+
+fn quaternion_identity() -> Quaternion  with Div, Panic {
+    quaternion_new(1.0, 0.0, 0.0, 0.0)
+}
+
+fn quaternion_neg_identity() -> Quaternion  with Div, Panic {
+    quaternion_new(-1.0, 0.0, 0.0, 0.0)
+}
+
+fn quaternion_mul(a: &Quaternion, b: &Quaternion) -> Quaternion  with Div, Panic {
+    quaternion_new(
+        a.w * b.w - a.x * b.x - a.y * b.y - a.z * b.z,
+        a.w * b.x + a.x * b.w + a.y * b.z - a.z * b.y,
+        a.w * b.y - a.x * b.z + a.y * b.w + a.z * b.x,
+        a.w * b.z + a.x * b.y - a.y * b.x + a.z * b.w
+    )
+}
+
+fn quaternion_neg(q: &Quaternion) -> Quaternion  with Div, Panic {
+    quaternion_new(-q.w, -q.x, -q.y, -q.z)
+}
+
+fn quaternion_approx_eq(a: &Quaternion, b: &Quaternion, tol: f64) -> bool  with Div, Panic {
+    abs_f64(a.w - b.w) < tol
+        && abs_f64(a.x - b.x) < tol
+        && abs_f64(a.y - b.y) < tol
+        && abs_f64(a.z - b.z) < tol
+}
+
+struct DicyclicGroup {
+    n: usize,
+}
+
+fn dicyclic_group_new(n: usize) -> DicyclicGroup  with Div, Panic {
+    DicyclicGroup { n: n }
+}
+
+fn dicyclic_order(g: &DicyclicGroup) -> usize  with Div, Panic {
+    return 4 * g.n
+}
+
+struct DicyclicElement {
+    q: Quaternion,
+}
+
+fn dicyclic_element(g: &DicyclicGroup, k: usize, is_reflection: bool) -> DicyclicElement  with Div, Panic {
+    let n = g.n
+    let theta = PI * (k as f64) / (n as f64)
+    let a_k = quaternion_new(cos_approx(theta), sin_approx(theta), 0.0, 0.0)
+
+    if is_reflection {
+        let b = quaternion_new(0.0, 0.0, 1.0, 0.0)
+        return DicyclicElement { q: quaternion_mul(&a_k, &b) }
+    }
+    return DicyclicElement { q: a_k }
+}
+
+fn project_to_dihedral(elem: &DicyclicElement, g: &DicyclicGroup) -> (usize, bool)  with Div, Panic {
+    let q = &elem.q
+    let n = g.n
+    let is_reflection = abs_f64(q.y) > 0.0000000001 || abs_f64(q.z) > 0.0000000001
+
+    let angle = atan2(q.x, q.w)
+    let k_float = angle * (n as f64) / PI
+    let k_raw: i64 = if k_float >= 0.0 { (k_float + 0.5) as i64 } else { (k_float - 0.5) as i64 }
+    let n_i64 = n as i64
+    let k_mod = ((k_raw % n_i64) + n_i64) % n_i64
+    let k = k_mod as usize
+
+    return (k, is_reflection)
+}
+
+fn verify_double_cover(g: &DicyclicGroup) -> bool  with Div, Panic {
+    let n = g.n
+
+    var k: usize = 0
+    while k < 2 * n {
+        var is_ref_idx: usize = 0
+        while is_ref_idx < 2 {
+            let is_ref = is_ref_idx == 1
+            let elem = dicyclic_element(g, k, is_ref)
+            let neg_elem = DicyclicElement { q: quaternion_neg(&elem.q) }
+
+            let proj1 = project_to_dihedral(&elem, g)
+            let proj2 = project_to_dihedral(&neg_elem, g)
+
+            if proj1.0 != proj2.0 || proj1.1 != proj2.1 {
+                return false
+            }
+            is_ref_idx = is_ref_idx + 1
+        }
+        k = k + 1
+    }
+    return true
+}
+
+struct AtlasMetrics {
+    length: usize,
+    orbit_size: usize,
+    orbit_ratio: f64,
+    dmin: usize,
+    dmin_normalized: f64,
+    is_palindrome: bool,
+    is_rc_fixed: bool,
+    rotational_period: usize,
+    double_cover_ok: bool,
+}
+
+fn run_atlas_metrics(seq: [u8], include_rc: bool, dicyclic_n: usize) -> AtlasMetrics  with Div, Panic {
+    let stats = compute_symmetry_stats(seq)
+    let dmin_value = dmin(seq, include_rc)
+    let dmin_norm = if stats.length == 0 { 0.0 } else { (dmin_value as f64) / (stats.length as f64) }
+
+    let g = dicyclic_group_new(dicyclic_n)
+    let double_cover_ok = verify_double_cover(&g)
+
+    AtlasMetrics {
+        length: stats.length,
+        orbit_size: stats.orbit_size,
+        orbit_ratio: stats.orbit_ratio,
+        dmin: dmin_value,
+        dmin_normalized: dmin_norm,
+        is_palindrome: stats.is_palindrome,
+        is_rc_fixed: stats.is_rc_fixed,
+        rotational_period: stats.rotational_period,
+        double_cover_ok: double_cover_ok,
+    }
+}
+
+fn pipeline_ok(metrics: AtlasMetrics) -> bool  with Div, Panic {
+    if metrics.length == 0 { return false }
+    if metrics.orbit_size < 1 { return false }
+    if metrics.orbit_ratio < 0.0 || metrics.orbit_ratio > 1.0 { return false }
+    if metrics.dmin > metrics.length { return false }
+    if metrics.dmin_normalized < 0.0 || metrics.dmin_normalized > 1.0 { return false }
+    if !metrics.double_cover_ok { return false }
+    return true
+}
+
+fn sample_sequence() -> [u8]  with Div, Panic {
+    [BASE_A, BASE_C, BASE_G, BASE_T, BASE_A, BASE_C, BASE_G, BASE_T]
+}
+
+fn main() with IO, Div, Panic {
+    let seq = sample_sequence()
+    let metrics = run_atlas_metrics(seq, true, 4)
+    if pipeline_ok(metrics) {
+        print("darwin_atlas pipeline: PASS\n")
+    } else {
+        print("darwin_atlas pipeline: FAIL\n")
+    }
+}

@@ -2,7 +2,7 @@
 
 #[cfg(test)]
 mod tests {
-    use crate::ast::{Expr, Item, MacroInvocation, Stmt};
+    use crate::ast::{Expr, Item, Stmt};
     use crate::lexer::lex;
     use crate::parser::Parser;
 

@@ -159,7 +159,7 @@ fn test_kernel_cost_estimate() {
     let target = GpuTarget::Cuda {
         compute_capability: (8, 0),
     };
-    let module = GpuModule::new("test_module", target);
+    let _module = GpuModule::new("test_module", target);
     let mut kernel = GpuKernel::new("test_kernel");
 
     let mut block = GpuBlock::new(BlockId(0), "entry");
@@ -631,7 +631,7 @@ fn test_full_profiling_workflow() {
     // Check for optimization hints
     let hints = profiler.recommend_optimizations(&profile.kernels[0]);
     // Should have some recommendations
-    assert!(hints.len() >= 0, "Should generate optimization hints");
+    assert!(!hints.is_empty(), "Should generate optimization hints");
 
     // Verify scores are reasonable
     let score = &profile.kernels[0].score;

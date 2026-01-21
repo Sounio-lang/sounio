@@ -1020,7 +1020,21 @@ fn compile_native(args: &BuildArgs) -> Result<(PathBuf, Option<NativeMetrics>), 
             let linker = Linker::new(linker_config)
                 .map_err(|e| format!("Linker initialization error: {}", e))?;
 
-            linker.link(&[&obj_path], &output_path, link_mode)
+            let mut link_inputs: Vec<std::path::PathBuf> = vec![obj_path.clone()];
+            if format == OutputFormat::Executable {
+                let output_dir = output_path
+                    .parent()
+                    .unwrap_or_else(|| std::path::Path::new("."));
+                let runtime_obj =
+                    crate::backend::native::runtime::build_runtime_object_without_start(output_dir)
+                        .map_err(|e| format!("Runtime build error: {}", e))?;
+                link_inputs.push(runtime_obj);
+            }
+
+            let input_refs: Vec<&std::path::Path> =
+                link_inputs.iter().map(|p| p.as_path()).collect();
+
+            linker.link(&input_refs, &output_path, link_mode)
                 .map_err(|e| format!("Linking error: {}", e))?;
 
             // Clean up temporary object file

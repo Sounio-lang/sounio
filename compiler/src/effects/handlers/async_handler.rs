@@ -625,8 +625,6 @@ impl HandlerCapability for AsyncHandler {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::hir::HirFn;
-    use std::collections::HashMap;
 
     fn new_state() -> HandlerState {
         HandlerState::new()

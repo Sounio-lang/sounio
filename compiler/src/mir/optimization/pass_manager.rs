@@ -10,6 +10,9 @@ use super::licm::LoopInvariantCodeMotion;
 use super::common_subexpression_elimination::CommonSubexpressionElimination;
 use super::dead_code_elimination::DeadCodeElimination;
 
+#[cfg(feature = "glm")]
+use super::ml_guided_optimization::MLGuidedOptimization;
+
 /// Trait for optimization passes
 pub trait MIRPass {
     /// Name of the pass for debugging and reporting
@@ -246,7 +249,6 @@ impl OptimizationLevel {
     }
 }
 
-
 /// Utility to create a default pass manager
 pub fn create_default_pass_manager(level: OptimizationLevel) -> PassManager {
     let mut manager = PassManager::new(level);
@@ -266,6 +268,14 @@ pub fn create_default_pass_manager(level: OptimizationLevel) -> PassManager {
     
     if level.should_enable_pass(&LoopInvariantCodeMotion) {
         manager.add_pass(LoopInvariantCodeMotion);
+    }
+    
+    #[cfg(feature = "glm")]
+    {
+        // Add ML-guided optimization for O2 and O3
+        if matches!(level, OptimizationLevel::O2 | OptimizationLevel::O3) {
+            manager.add_pass(MLGuidedOptimization::new());
+        }
     }
     
     manager

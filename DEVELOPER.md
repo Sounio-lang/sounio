@@ -28,11 +28,11 @@ cargo clippy
 cargo fmt
 
 # Check a Sounio file
-cargo run -- check examples/hello.d
-cargo run -- check examples/hello.d --show-ast --show-types
+cargo run -- check examples/hello.sio
+cargo run -- check examples/hello.sio --show-ast --show-types
 
 # Run with JIT (requires --features jit)
-cargo run --features jit -- run examples/hello.d
+cargo run --features jit -- run examples/hello.sio
 
 # Run benchmarks
 cargo bench --bench layout_bench
@@ -103,7 +103,7 @@ sounio/
 
 ## Language Syntax Quick Reference
 
-```d
+```sio
 // Variables
 let x = 5              // immutable
 var y = 10             // mutable
@@ -122,7 +122,7 @@ linear struct FileHandle { fd: i32 }
 affine struct Buffer { ptr: *u8 }
 
 // GPU kernels
-kernel fn vector_add(a: &[f32], b: &[f32], c: &!mut [f32]) {
+kernel fn vector_add(a: &[f32], b: &[f32], c: &![f32]) {
     let i = gpu.thread_id.x
     c[i] = a[i] + b[i]
 }

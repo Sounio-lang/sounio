@@ -199,8 +199,8 @@ impl NativeBackend {
             .map_err(|e| CompileError::EmissionFailed(format!("{:?}", e)))?;
 
         // Step 3: Analyze blocks for metrics if thermal tracking enabled
-        let mut total_cycles = 0u64;
-        let mut total_energy = 0.0f64;
+        let total_cycles = 0u64;
+        let total_energy = 0.0f64;
 
         // For now, we don't have block-level metrics from the SirModule
         // The metrics analysis can be added when SirModule exposes its blocks

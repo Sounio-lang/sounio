@@ -429,6 +429,8 @@ impl TypeChecker {
             Type::Named { name, args } => {
                 if args.is_empty() {
                     name.clone()
+                } else if name == "Knowledge" && args.len() == 1 {
+                    format!("Knowledge[{}]", self.type_display_name(&args[0]))
                 } else {
                     format!(
                         "{}<{}>",
@@ -517,6 +519,7 @@ impl TypeChecker {
             Expr::Do { id, .. } => *id,
             Expr::Counterfactual { id, .. } => *id,
             Expr::KnowledgeExpr { id, .. } => *id,
+            Expr::Uncertain { id, .. } => *id,
             _ => NodeId(0),
         }
     }
@@ -1941,6 +1944,37 @@ impl TypeChecker {
                             );
                         }
 
+                        // Epistemic confidence bound check (MV core): do not allow claiming
+                        // `Knowledge[..., epsilon >= x]` unless the expression provides at least x.
+                        if has_annotation {
+                            if let Some(type_expr) = ty.as_ref() {
+                                if let Some(required) =
+                                    self.extract_knowledge_confidence_lower_bound(type_expr)
+                                {
+                                    if let HirType::Knowledge { epsilon_bound, .. } = &v_expr.ty {
+                                        let actual = epsilon_bound.unwrap_or(0.0);
+                                        if actual + f64::EPSILON < required {
+                                            self.error(
+                                                format!(
+                                                    "Type mismatch: expected `Knowledge[...]` with epsilon >= {}, found epsilon >= {}",
+                                                    required, actual
+                                                ),
+                                                value_span,
+                                            );
+                                        }
+                                    } else {
+                                        self.error(
+                                            format!(
+                                                "Type mismatch: expected `Knowledge[...]` with epsilon >= {}, found `{:?}`",
+                                                required, v_expr.ty
+                                            ),
+                                            value_span,
+                                        );
+                                    }
+                                }
+                            }
+                        }
+
                         // Also check semantic/ontology type compatibility with threshold
                         let declared_hir = self.type_to_hir(&expanded_ty);
                         self.check_type_compatibility_with_threshold(
@@ -2103,7 +2137,9 @@ impl TypeChecker {
 
                 // Now 'current' is the leftmost non-binary expression
                 // Check it first
-                let mut result = self.check_expr(current, None)?;
+                // Use the expected type (if any) to guide literal typing in expressions like `1 + 2`
+                // when the whole expression is contextually typed (e.g., `let x: i32 = 1 + 2`).
+                let mut result = self.check_expr(current, expected)?;
 
                 // Process the chain in reverse (innermost to outermost)
                 for (chain_op, chain_right) in chain.into_iter().rev() {
@@ -2155,6 +2191,123 @@ impl TypeChecker {
                         .iter()
                         .map(|a| self.check_expr(a, None))
                         .collect::<Result<_>>()?;
+
+                    // Knowledge explicit extraction: `k.unwrap("reason")`
+                    if field == "unwrap" {
+                        if let HirType::Knowledge { inner, .. } = &receiver_ty {
+                            let span = self
+                                .ast
+                                .as_ref()
+                                .map(|ast| self.expr_span(expr, ast.as_ref()))
+                                .unwrap_or_else(Span::dummy);
+
+                            if arg_exprs.len() != 1 {
+                                self.error(
+                                    "Knowledge.unwrap requires exactly one argument: a reason string"
+                                        .to_string(),
+                                    span,
+                                );
+                                return Ok(HirExpr {
+                                    id: *id,
+                                    kind: HirExprKind::Unwrap(Box::new(receiver_expr)),
+                                    ty: HirType::Error,
+                                });
+                            }
+
+                            if arg_exprs[0].ty != HirType::String {
+                                self.error(
+                                    "Knowledge.unwrap(reason): reason must be a `string`"
+                                        .to_string(),
+                                    span,
+                                );
+                                return Ok(HirExpr {
+                                    id: *id,
+                                    kind: HirExprKind::Unwrap(Box::new(receiver_expr)),
+                                    ty: HirType::Error,
+                                });
+                            }
+
+                            return Ok(HirExpr {
+                                id: *id,
+                                kind: HirExprKind::Unwrap(Box::new(receiver_expr)),
+                                ty: (*inner.clone()),
+                            });
+                        }
+                    }
+
+                    // Knowledge introspection / extraction helpers (A):
+                    // - `k.value()` (explicit unwrap, no reason string)
+                    // - `k.confidence()` / `k.epsilon()`
+                    // - `k.provenance()` / `k.validity()`
+                    if let HirType::Knowledge { inner, .. } = &receiver_ty {
+                        let span = self
+                            .ast
+                            .as_ref()
+                            .map(|ast| self.expr_span(expr, ast.as_ref()))
+                            .unwrap_or_else(Span::dummy);
+
+                        match field.as_str() {
+                            "value" => {
+                                if !arg_exprs.is_empty() {
+                                    self.error(
+                                        "Knowledge.value() takes no arguments".to_string(),
+                                        span,
+                                    );
+                                    return Ok(HirExpr {
+                                        id: *id,
+                                        kind: HirExprKind::Unwrap(Box::new(receiver_expr)),
+                                        ty: HirType::Error,
+                                    });
+                                }
+                                return Ok(HirExpr {
+                                    id: *id,
+                                    kind: HirExprKind::Unwrap(Box::new(receiver_expr)),
+                                    ty: (*inner.clone()),
+                                });
+                            }
+                            "confidence" | "epsilon" => {
+                                if !arg_exprs.is_empty() {
+                                    self.error(
+                                        "Knowledge.confidence()/epsilon() takes no arguments"
+                                            .to_string(),
+                                        span,
+                                    );
+                                }
+                                return Ok(HirExpr {
+                                    id: *id,
+                                    kind: HirExprKind::EpsilonOf(Box::new(receiver_expr)),
+                                    ty: HirType::F64,
+                                });
+                            }
+                            "provenance" => {
+                                if !arg_exprs.is_empty() {
+                                    self.error(
+                                        "Knowledge.provenance() takes no arguments".to_string(),
+                                        span,
+                                    );
+                                }
+                                return Ok(HirExpr {
+                                    id: *id,
+                                    kind: HirExprKind::ProvenanceOf(Box::new(receiver_expr)),
+                                    ty: HirType::Unit,
+                                });
+                            }
+                            "validity" => {
+                                if !arg_exprs.is_empty() {
+                                    self.error(
+                                        "Knowledge.validity() takes no arguments".to_string(),
+                                        span,
+                                    );
+                                }
+                                return Ok(HirExpr {
+                                    id: *id,
+                                    kind: HirExprKind::ValidityOf(Box::new(receiver_expr)),
+                                    ty: HirType::Unit,
+                                });
+                            }
+                            _ => {}
+                        }
+                    }
 
                     let result_ty = self.get_method_return_type(&receiver_ty, field, &arg_exprs);
 
@@ -2718,9 +2871,6 @@ impl TypeChecker {
                             layout_hint: None,
                         });
 
-                        // Add original body statements
-                        loop_stmts.extend(body_block.stmts);
-
                         // counter = counter + 1
                         loop_stmts.push(HirStmt::Assign {
                             target: HirExpr {
@@ -2746,6 +2896,9 @@ impl TypeChecker {
                                 ty: elem_ty.clone(),
                             },
                         });
+
+                        // Add original body statements (after increment so `continue` can't skip it)
+                        loop_stmts.extend(body_block.stmts);
 
                         let while_body = HirBlock {
                             stmts: loop_stmts,
@@ -2914,9 +3067,6 @@ impl TypeChecker {
                             layout_hint: None,
                         });
 
-                        // Add original body statements
-                        loop_stmts.extend(body_block.stmts);
-
                         // __idx = __idx + 1
                         loop_stmts.push(HirStmt::Assign {
                             target: HirExpr {
@@ -2942,6 +3092,9 @@ impl TypeChecker {
                                 ty: HirType::Usize,
                             },
                         });
+
+                        // Add original body statements (after increment so `continue` can't skip it)
+                        loop_stmts.extend(body_block.stmts);
 
                         let while_body = HirBlock {
                             stmts: loop_stmts,
@@ -3266,7 +3419,7 @@ impl TypeChecker {
 
             // Handle method calls (e.g., vec.is_empty(), vec.len(), etc.)
             Expr::MethodCall {
-                id: _,
+                id,
                 receiver,
                 method,
                 args,
@@ -3281,6 +3434,116 @@ impl TypeChecker {
                     .iter()
                     .map(|a| self.check_expr(a, None))
                     .collect::<Result<_>>()?;
+
+                // Knowledge explicit extraction: `k.unwrap("reason")`
+                if method == "unwrap" {
+                    if let HirType::Knowledge { inner, .. } = &receiver_ty {
+                        let span = self
+                            .ast
+                            .as_ref()
+                            .map(|ast| self.expr_span(expr, ast.as_ref()))
+                            .unwrap_or_else(Span::dummy);
+
+                        if arg_exprs.len() != 1 {
+                            self.error(
+                                "Knowledge.unwrap requires exactly one argument: a reason string"
+                                    .to_string(),
+                                span,
+                            );
+                            return Ok(HirExpr {
+                                id: *id,
+                                kind: HirExprKind::Unwrap(Box::new(receiver_expr)),
+                                ty: HirType::Error,
+                            });
+                        }
+
+                        if arg_exprs[0].ty != HirType::String {
+                            self.error(
+                                "Knowledge.unwrap(reason): reason must be a `string`".to_string(),
+                                span,
+                            );
+                            return Ok(HirExpr {
+                                id: *id,
+                                kind: HirExprKind::Unwrap(Box::new(receiver_expr)),
+                                ty: HirType::Error,
+                            });
+                        }
+
+                        return Ok(HirExpr {
+                            id: *id,
+                            kind: HirExprKind::Unwrap(Box::new(receiver_expr)),
+                            ty: (*inner.clone()),
+                        });
+                    }
+                }
+
+                // Knowledge introspection / extraction helpers (A)
+                if let HirType::Knowledge { inner, .. } = &receiver_ty {
+                    let span = self
+                        .ast
+                        .as_ref()
+                        .map(|ast| self.expr_span(expr, ast.as_ref()))
+                        .unwrap_or_else(Span::dummy);
+
+                    match method.as_str() {
+                        "value" => {
+                            if !arg_exprs.is_empty() {
+                                self.error("Knowledge.value() takes no arguments".to_string(), span);
+                                return Ok(HirExpr {
+                                    id: *id,
+                                    kind: HirExprKind::Unwrap(Box::new(receiver_expr)),
+                                    ty: HirType::Error,
+                                });
+                            }
+                            return Ok(HirExpr {
+                                id: *id,
+                                kind: HirExprKind::Unwrap(Box::new(receiver_expr)),
+                                ty: (*inner.clone()),
+                            });
+                        }
+                        "confidence" | "epsilon" => {
+                            if !arg_exprs.is_empty() {
+                                self.error(
+                                    "Knowledge.confidence()/epsilon() takes no arguments"
+                                        .to_string(),
+                                    span,
+                                );
+                            }
+                            return Ok(HirExpr {
+                                id: *id,
+                                kind: HirExprKind::EpsilonOf(Box::new(receiver_expr)),
+                                ty: HirType::F64,
+                            });
+                        }
+                        "provenance" => {
+                            if !arg_exprs.is_empty() {
+                                self.error(
+                                    "Knowledge.provenance() takes no arguments".to_string(),
+                                    span,
+                                );
+                            }
+                            return Ok(HirExpr {
+                                id: *id,
+                                kind: HirExprKind::ProvenanceOf(Box::new(receiver_expr)),
+                                ty: HirType::Unit,
+                            });
+                        }
+                        "validity" => {
+                            if !arg_exprs.is_empty() {
+                                self.error(
+                                    "Knowledge.validity() takes no arguments".to_string(),
+                                    span,
+                                );
+                            }
+                            return Ok(HirExpr {
+                                id: *id,
+                                kind: HirExprKind::ValidityOf(Box::new(receiver_expr)),
+                                ty: HirType::Unit,
+                            });
+                        }
+                        _ => {}
+                    }
+                }
 
                 // Determine return type based on method name and receiver type
                 let result_ty = self.get_method_return_type(&receiver_ty, method, &arg_exprs);
@@ -3679,7 +3942,9 @@ impl TypeChecker {
             | Expr::AsyncClosure { id, .. }
             | Expr::Spawn { id, .. }
             | Expr::Select { id, .. }
-            | Expr::Join { id, .. } => *id,
+            | Expr::Join { id, .. }
+            | Expr::KnowledgeExpr { id, .. }
+            | Expr::Uncertain { id, .. } => *id,
             _ => NodeId::dummy(),
         };
 
@@ -3751,11 +4016,38 @@ impl TypeChecker {
 
     /// Check unit compatibility for binary operations and compute result type
     fn check_binary_units(&mut self, op: BinaryOp, left: &HirType, right: &HirType) -> HirType {
-        // Extract units from quantity types
-        let (left_numeric, left_unit) = self.extract_quantity(left);
-        let (right_numeric, right_unit) = self.extract_quantity(right);
+        let (left_inner, left_conf, left_is_knowledge) = match left {
+            HirType::Knowledge {
+                inner,
+                epsilon_bound,
+                ..
+            } => ((**inner).clone(), *epsilon_bound, true),
+            _ => (left.clone(), None, false),
+        };
+        let (right_inner, right_conf, right_is_knowledge) = match right {
+            HirType::Knowledge {
+                inner,
+                epsilon_bound,
+                ..
+            } => ((**inner).clone(), *epsilon_bound, true),
+            _ => (right.clone(), None, false),
+        };
 
-        match op {
+        let wrap_knowledge = matches!(
+            op,
+            BinaryOp::Add
+                | BinaryOp::Sub
+                | BinaryOp::Mul
+                | BinaryOp::Div
+                | BinaryOp::Rem
+                | BinaryOp::PlusMinus
+        ) && (left_is_knowledge || right_is_knowledge);
+
+        // Extract units from quantity types
+        let (left_numeric, left_unit) = self.extract_quantity(&left_inner);
+        let (right_numeric, right_unit) = self.extract_quantity(&right_inner);
+
+        let result_inner = match op {
             BinaryOp::Add | BinaryOp::Sub | BinaryOp::PlusMinus => {
                 // Addition/subtraction requires compatible units
                 match (&left_unit, &right_unit) {
@@ -3966,6 +4258,53 @@ impl TypeChecker {
                     _ => left.clone(),
                 }
             }
+        };
+
+        if wrap_knowledge {
+            let left_bound = if left_is_knowledge {
+                left_conf.unwrap_or(0.0)
+            } else {
+                1.0
+            };
+            let right_bound = if right_is_knowledge {
+                right_conf.unwrap_or(0.0)
+            } else {
+                1.0
+            };
+
+            return HirType::Knowledge {
+                inner: Box::new(result_inner),
+                epsilon_bound: Some(left_bound.min(right_bound)),
+                provenance: None,
+            };
+        }
+
+        result_inner
+    }
+
+    fn extract_knowledge_confidence_lower_bound(&self, ty: &TypeExpr) -> Option<f64> {
+        let TypeExpr::Knowledge { epsilon, .. } = ty else {
+            return None;
+        };
+
+        let eps = epsilon.as_ref()?;
+        match eps.operator {
+            ComparisonOp::Ge | ComparisonOp::Gt | ComparisonOp::Eq => self.const_f64(&eps.value),
+            ComparisonOp::Lt | ComparisonOp::Le => None,
+        }
+    }
+
+    fn const_f64(&self, expr: &Expr) -> Option<f64> {
+        match expr {
+            Expr::Literal {
+                value: Literal::Float(f),
+                ..
+            } => Some(*f),
+            Expr::Literal {
+                value: Literal::Int(i),
+                ..
+            } => Some(*i as f64),
+            _ => None,
         }
     }
 
@@ -4900,6 +5239,7 @@ impl TypeChecker {
     fn lower_type_expr(&mut self, ty: &TypeExpr) -> Type {
         match ty {
             TypeExpr::Unit => Type::Unit,
+            TypeExpr::Never => Type::Never,
             TypeExpr::Named { path, args, unit } => {
                 let base_type = if path.segments.len() == 1 {
                     let name = &path.segments[0];
@@ -4908,12 +5248,14 @@ impl TypeChecker {
                         "i8" => Type::I8,
                         "i16" => Type::I16,
                         "i32" => Type::I32,
+                        "int" => Type::I32,
                         "i64" => Type::I64,
                         "i128" => Type::I128,
                         "isize" => Type::Isize,
                         "u8" => Type::U8,
                         "u16" => Type::U16,
                         "u32" => Type::U32,
+                        "uint" => Type::U32,
                         "u64" => Type::U64,
                         "u128" => Type::U128,
                         "usize" => Type::Usize,
@@ -4921,7 +5263,7 @@ impl TypeChecker {
                         "f64" => Type::F64,
                         "char" => Type::Char,
                         "str" => Type::Str,
-                        "String" => Type::String,
+                        "string" | "String" => Type::String,
                         // Linear algebra primitives
                         "vec2" => Type::Vec2,
                         "vec3" => Type::Vec3,
@@ -4980,11 +5322,10 @@ impl TypeChecker {
             TypeExpr::Infer => Type::Unknown,
             TypeExpr::SelfType => Type::SelfType,
 
-            // Epistemic types - map to Unknown for now, will be properly implemented later
-            TypeExpr::Knowledge { value_type, .. } => {
-                // For now, treat Knowledge[T] as just T for type checking purposes
-                self.lower_type_expr(value_type)
-            }
+            TypeExpr::Knowledge { value_type, .. } => Type::Named {
+                name: "Knowledge".to_string(),
+                args: vec![self.lower_type_expr(value_type)],
+            },
             TypeExpr::Quantity { numeric_type, .. } => {
                 // For now, treat Quantity[T, unit] as just T
                 self.lower_type_expr(numeric_type)
@@ -5077,12 +5418,14 @@ impl TypeChecker {
                         "i8" => Type::I8,
                         "i16" => Type::I16,
                         "i32" => Type::I32,
+                        "int" => Type::I32,
                         "i64" => Type::I64,
                         "i128" => Type::I128,
                         "isize" => Type::Isize,
                         "u8" => Type::U8,
                         "u16" => Type::U16,
                         "u32" => Type::U32,
+                        "uint" => Type::U32,
                         "u64" => Type::U64,
                         "u128" => Type::U128,
                         "usize" => Type::Usize,
@@ -5090,7 +5433,7 @@ impl TypeChecker {
                         "f64" => Type::F64,
                         "char" => Type::Char,
                         "str" => Type::Str,
-                        "String" => Type::String,
+                        "string" | "String" => Type::String,
                         "vec2" => Type::Vec2,
                         "vec3" => Type::Vec3,
                         "vec4" => Type::Vec4,
@@ -5203,10 +5546,20 @@ impl TypeChecker {
                 params: params.iter().map(|p| self.type_to_hir(p)).collect(),
                 return_type: Box::new(self.type_to_hir(return_type)),
             },
-            Type::Named { name, args } => HirType::Named {
-                name: name.clone(),
-                args: args.iter().map(|a| self.type_to_hir(a)).collect(),
-            },
+            Type::Named { name, args } => {
+                if name == "Knowledge" && args.len() == 1 {
+                    HirType::Knowledge {
+                        inner: Box::new(self.type_to_hir(&args[0])),
+                        epsilon_bound: None,
+                        provenance: None,
+                    }
+                } else {
+                    HirType::Named {
+                        name: name.clone(),
+                        args: args.iter().map(|a| self.type_to_hir(a)).collect(),
+                    }
+                }
+            }
             Type::Quantity { numeric, unit } => HirType::Quantity {
                 numeric: Box::new(self.type_to_hir(numeric)),
                 unit: self.parse_unit_string(unit),
@@ -5217,7 +5570,8 @@ impl TypeChecker {
                 namespace: namespace.clone(),
                 term: term.clone(),
             },
-            Type::Never | Type::Unknown | Type::Error | Type::SelfType => HirType::Error,
+            Type::Never => HirType::Never,
+            Type::Unknown | Type::Error | Type::SelfType => HirType::Error,
             // Linear algebra primitives
             Type::Vec2 => HirType::Vec2,
             Type::Vec3 => HirType::Vec3,
@@ -5283,8 +5637,10 @@ impl TypeChecker {
             HirType::Never => Type::Never,
             HirType::Error => Type::Error,
 
-            // Epistemic types - map back to their inner types for now
-            HirType::Knowledge { inner, .. } => self.hir_type_to_type(inner),
+            HirType::Knowledge { inner, .. } => Type::Named {
+                name: "Knowledge".to_string(),
+                args: vec![self.hir_type_to_type(inner)],
+            },
             HirType::Quantity { numeric, unit } => Type::Quantity {
                 numeric: Box::new(self.hir_type_to_type(numeric)),
                 unit: unit.format(),
@@ -5537,6 +5893,7 @@ impl TypeChecker {
             (Type::Str, Type::Str) => true,
             (Type::String, Type::String) => true,
             (Type::Dual, Type::Dual) => true,
+            (Type::Dual, Type::I64) | (Type::I64, Type::Dual) => true,
             (
                 Type::Ref {
                     mutable: m1,

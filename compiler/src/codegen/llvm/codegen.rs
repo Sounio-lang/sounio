@@ -8,9 +8,7 @@ use inkwell::basic_block::BasicBlock;
 use inkwell::builder::Builder;
 use inkwell::context::Context;
 use inkwell::module::{Linkage, Module};
-use inkwell::values::{
-    BasicMetadataValueEnum, BasicValue, BasicValueEnum, FunctionValue, PointerValue,
-};
+use inkwell::values::{BasicMetadataValueEnum, BasicValueEnum, FunctionValue, PointerValue};
 use inkwell::{FloatPredicate, IntPredicate};
 
 use std::collections::HashMap;
@@ -168,7 +166,11 @@ impl<'ctx> LLVMCodegen<'ctx> {
             _ => None, // Default (internal) linkage
         };
 
-        let symbol_name = func.link_name.as_deref().unwrap_or(&func.name);
+        let symbol_name = if func.name == "main" && func.link_name.is_none() {
+            "__sounio_main"
+        } else {
+            func.link_name.as_deref().unwrap_or(&func.name)
+        };
         let fn_val = self.module.add_function(symbol_name, fn_type, linkage);
 
         // Set calling convention for C ABI
@@ -492,11 +494,284 @@ impl<'ctx> LLVMCodegen<'ctx> {
                 Some(struct_val.into())
             }
 
-            Op::PerformEffect { .. } => {
-                // Effects are handled at runtime, not in LLVM IR
-                // Could generate calls to effect runtime here
-                None
+            Op::PerformEffect { effect, op, args } => {
+                self.compile_effect_dispatch(effect, op, args, &instr.ty)
             }
+
+            Op::DispatchEffect { effect, op, args } => {
+                self.compile_effect_dispatch(effect, op, args, &instr.ty)
+            }
+
+            Op::PushHandler {
+                effect,
+                handler_id,
+                ..
+            } => {
+                self.compile_push_handler(effect, *handler_id);
+                self.default_value_for_type(&instr.ty)
+            }
+
+            Op::PopHandler => {
+                self.compile_pop_handler();
+                self.default_value_for_type(&instr.ty)
+            }
+        }
+    }
+
+    fn default_value_for_type(&mut self, ty: &HlirType) -> Option<BasicValueEnum<'ctx>> {
+        let llvm_ty = self.types.convert(ty);
+        let value = match llvm_ty {
+            inkwell::types::BasicTypeEnum::IntType(t) => t.const_zero().into(),
+            inkwell::types::BasicTypeEnum::FloatType(t) => t.const_zero().into(),
+            inkwell::types::BasicTypeEnum::PointerType(t) => t.const_null().into(),
+            inkwell::types::BasicTypeEnum::ArrayType(t) => t.const_zero().into(),
+            inkwell::types::BasicTypeEnum::StructType(t) => {
+                if t.is_opaque() {
+                    return None;
+                }
+                t.const_zero().into()
+            }
+            inkwell::types::BasicTypeEnum::VectorType(t) => t.const_zero().into(),
+        };
+        Some(value)
+    }
+
+    fn compile_effect_dispatch(
+        &mut self,
+        effect: &str,
+        op: &str,
+        args: &[ValueId],
+        ty: &HlirType,
+    ) -> Option<BasicValueEnum<'ctx>> {
+        let effect_ptr = self.get_or_create_cstr_ptr(effect)?;
+        let op_ptr = self.get_or_create_cstr_ptr(op)?;
+
+        let f64_ty = self.context.f64_type();
+        let i64_ty = self.context.i64_type();
+        let ptr_ty = self.context.ptr_type(AddressSpace::default());
+
+        let mut arg_vals = Vec::new();
+        for arg_id in args {
+            let val = self.get_value(*arg_id)?;
+            let arg_ty = self.value_types.get(arg_id);
+            let converted = self.value_to_f64(val, arg_ty)?;
+            arg_vals.push(converted);
+        }
+
+        let (args_ptr, args_len) = if arg_vals.is_empty() {
+            (ptr_ty.const_null(), i64_ty.const_zero())
+        } else {
+            let array_ty = f64_ty.array_type(arg_vals.len() as u32);
+            let alloca = self.builder.build_alloca(array_ty, "effect_args").ok()?;
+            let zero = self.context.i32_type().const_zero();
+
+            for (idx, arg_val) in arg_vals.iter().enumerate() {
+                let i = self.context.i32_type().const_int(idx as u64, false);
+                let elem_ptr = unsafe {
+                    self.builder
+                        .build_gep(array_ty, alloca, &[zero, i], "effect_arg_ptr")
+                        .ok()?
+                };
+                self.builder.build_store(elem_ptr, *arg_val).ok()?;
+            }
+
+            let base_ptr = unsafe {
+                self.builder
+                    .build_gep(array_ty, alloca, &[zero, zero], "effect_args_ptr")
+                    .ok()?
+            };
+
+            (base_ptr, i64_ty.const_int(arg_vals.len() as u64, false))
+        };
+
+        let dispatch_fn = self.runtime_dispatch_generic();
+        let call = self
+            .builder
+            .build_call(
+                dispatch_fn,
+                &[
+                    effect_ptr.into(),
+                    op_ptr.into(),
+                    args_ptr.into(),
+                    args_len.into(),
+                ],
+                "dispatch_effect",
+            )
+            .ok()?;
+
+        let result = call.try_as_basic_value().left()?;
+        let float_val = result.into_float_value();
+        self.convert_f64_to_type(float_val, ty)
+    }
+
+    fn compile_push_handler(&mut self, effect: &str, handler_id: u32) {
+        if handler_id == 0 {
+            return;
+        }
+
+        if let Some(func) = self.runtime_push_handler(effect) {
+            let _ = self.builder.build_call(func, &[], "push_handler");
+        }
+    }
+
+    fn compile_pop_handler(&mut self) {
+        let func = self.runtime_pop_handler();
+        let _ = self.builder.build_call(func, &[], "pop_handler");
+    }
+
+    fn runtime_dispatch_generic(&mut self) -> FunctionValue<'ctx> {
+        if let Some(func) = self.module.get_function("__sounio_dispatch_generic") {
+            return func;
+        }
+
+        let ptr_ty = self.context.ptr_type(AddressSpace::default());
+        let i64_ty = self.context.i64_type();
+        let f64_ty = self.context.f64_type();
+        let fn_type = f64_ty.fn_type(
+            &[
+                ptr_ty.into(),
+                ptr_ty.into(),
+                ptr_ty.into(),
+                i64_ty.into(),
+            ],
+            false,
+        );
+
+        self.module
+            .add_function("__sounio_dispatch_generic", fn_type, Some(Linkage::External))
+    }
+
+    fn runtime_push_handler(&mut self, effect: &str) -> Option<FunctionValue<'ctx>> {
+        let effect_lower = effect.to_lowercase();
+        let name = match effect_lower.as_str() {
+            "io" | "mut" | "div" | "prob" | "alloc" | "panic" | "async" | "gpu" | "grad"
+            | "network" | "sensor" | "exn" | "causal" => {
+                format!("__sounio_push_handler_{}", effect_lower)
+            }
+            _ => return None,
+        };
+
+        if let Some(func) = self.module.get_function(&name) {
+            return Some(func);
+        }
+
+        let fn_type = self.context.void_type().fn_type(&[], false);
+        Some(self.module.add_function(&name, fn_type, Some(Linkage::External)))
+    }
+
+    fn runtime_pop_handler(&mut self) -> FunctionValue<'ctx> {
+        if let Some(func) = self.module.get_function("__sounio_pop_handler") {
+            return func;
+        }
+
+        let fn_type = self.context.void_type().fn_type(&[], false);
+        self.module
+            .add_function("__sounio_pop_handler", fn_type, Some(Linkage::External))
+    }
+
+    fn get_or_create_cstr_ptr(&mut self, value: &str) -> Option<PointerValue<'ctx>> {
+        if let Some(ptr) = self.strings.get(value) {
+            return Some(*ptr);
+        }
+
+        let global = self.builder.build_global_string_ptr(value, "str").ok()?;
+        let ptr = global.as_pointer_value();
+        self.strings.insert(value.to_string(), ptr);
+        Some(ptr)
+    }
+
+    fn value_to_f64(
+        &mut self,
+        value: BasicValueEnum<'ctx>,
+        ty: Option<&HlirType>,
+    ) -> Option<inkwell::values::FloatValue<'ctx>> {
+        let f64_ty = self.context.f64_type();
+
+        match value {
+            BasicValueEnum::FloatValue(fv) => {
+                if fv.get_type() == f64_ty {
+                    Some(fv)
+                } else {
+                    self.builder.build_float_ext(fv, f64_ty, "fpext").ok()
+                }
+            }
+            BasicValueEnum::IntValue(iv) => {
+                let signed = ty.map(|t| self.types.is_signed(t)).unwrap_or(true);
+                if signed {
+                    self.builder
+                        .build_signed_int_to_float(iv, f64_ty, "sitofp")
+                        .ok()
+                } else {
+                    self.builder
+                        .build_unsigned_int_to_float(iv, f64_ty, "uitofp")
+                        .ok()
+                }
+            }
+            BasicValueEnum::PointerValue(pv) => {
+                let i64_ty = self.context.i64_type();
+                let as_int = self
+                    .builder
+                    .build_ptr_to_int(pv, i64_ty, "ptr_to_int")
+                    .ok()?;
+                self.builder
+                    .build_unsigned_int_to_float(as_int, f64_ty, "ptr_to_f64")
+                    .ok()
+            }
+            _ => Some(f64_ty.const_zero()),
+        }
+    }
+
+    fn convert_f64_to_type(
+        &mut self,
+        value: inkwell::values::FloatValue<'ctx>,
+        ty: &HlirType,
+    ) -> Option<BasicValueEnum<'ctx>> {
+        match ty {
+            HlirType::Void => self.default_value_for_type(ty),
+            HlirType::F64 => Some(value.into()),
+            HlirType::F32 => self
+                .builder
+                .build_float_trunc(value, self.context.f32_type(), "fptrunc")
+                .ok()
+                .map(|v| v.into()),
+            HlirType::Bool
+            | HlirType::I8
+            | HlirType::I16
+            | HlirType::I32
+            | HlirType::I64
+            | HlirType::I128 => {
+                let bits = self.types.int_bit_width(ty).unwrap_or(64);
+                let int_ty = self.types.int_type_for_bits(bits);
+                self.builder
+                    .build_float_to_signed_int(value, int_ty, "fptosi")
+                    .ok()
+                    .map(|v| v.into())
+            }
+            HlirType::U8
+            | HlirType::U16
+            | HlirType::U32
+            | HlirType::U64
+            | HlirType::U128 => {
+                let bits = self.types.int_bit_width(ty).unwrap_or(64);
+                let int_ty = self.types.int_type_for_bits(bits);
+                self.builder
+                    .build_float_to_unsigned_int(value, int_ty, "fptoui")
+                    .ok()
+                    .map(|v| v.into())
+            }
+            HlirType::Ptr(_) => {
+                let i64_ty = self.context.i64_type();
+                let ptr_ty = self.context.ptr_type(AddressSpace::default());
+                let int_val = self
+                    .builder
+                    .build_float_to_unsigned_int(value, i64_ty, "fptoui")
+                    .ok()?;
+                self.builder
+                    .build_int_to_ptr(int_val, ptr_ty, "inttoptr")
+                    .ok()
+                    .map(|v| v.into())
+            }
+            _ => self.default_value_for_type(ty),
         }
     }
 
@@ -1217,14 +1492,14 @@ impl<'ctx> LLVMCodegen<'ctx> {
 
     /// Create a C main wrapper that calls the D main function
     fn create_main_wrapper(&mut self) {
-        // Check if _start or main already exists
-        if self.module.get_function("_main_wrapper").is_some() {
+        // Check if a main wrapper already exists
+        if self.module.get_function("main").is_some() {
             return;
         }
 
         let i32_ty = self.context.i32_type();
         let main_type = i32_ty.fn_type(&[], false);
-        let main_fn = self.module.add_function("_main_wrapper", main_type, None);
+        let main_fn = self.module.add_function("main", main_type, None);
 
         let entry = self.context.append_basic_block(main_fn, "entry");
         self.builder.position_at_end(entry);

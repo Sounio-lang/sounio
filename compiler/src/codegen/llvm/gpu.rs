@@ -31,11 +31,10 @@ use inkwell::AddressSpace;
 use inkwell::basic_block::BasicBlock;
 use inkwell::builder::Builder;
 use inkwell::context::Context;
-use inkwell::intrinsics::Intrinsic;
 use inkwell::module::{Linkage, Module};
 use inkwell::types::{BasicMetadataTypeEnum, BasicType, BasicTypeEnum, FloatType, IntType};
 use inkwell::values::{
-    BasicMetadataValueEnum, BasicValue, BasicValueEnum, FunctionValue, IntValue, PointerValue,
+    BasicValueEnum, FunctionValue, IntValue, PointerValue,
 };
 use inkwell::{FloatPredicate, IntPredicate};
 
@@ -45,8 +44,8 @@ use super::codegen::OptLevel;
 use super::target::GpuTargetConfig;
 
 use crate::codegen::gpu::ir::{
-    BlockId, GpuBlock, GpuConstValue, GpuKernel, GpuModule, GpuOp, GpuParam, GpuTarget,
-    GpuTerminator, GpuType, MemorySpace, SharedMemDecl, ValueId, WarpReduceOp, WarpVoteOp,
+    BlockId, GpuBlock, GpuConstValue, GpuKernel, GpuModule, GpuOp, GpuTarget, GpuTerminator,
+    GpuType, MemorySpace, SharedMemDecl, ValueId,
 };
 
 /// LLVM-based GPU code generator

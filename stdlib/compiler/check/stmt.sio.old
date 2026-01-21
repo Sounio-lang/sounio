@@ -1,0 +1,430 @@
+// stdlib/compiler/check/stmt.sio
+// Statement and Item Type Checking Implementation
+// Implements type checking for HIR statements and top-level items.
+// Follows Sounio syntax rules: var for mutables, &!T for mut refs, etc.
+// Integrates with TypeContext for scoping, bindings, and errors.
+
+
+// Stub type definitions
+struct TypeContext { id: i64 }
+struct Expr { kind: i64 }
+struct Stmt { kind: i64 }
+struct StmtKind { tag: i64 }
+struct ItemKind { tag: i64 }
+struct Effects { bits: i64 }
+struct StmtCheckResult {
+    context: TypeContext,
+    effects: i64,
+    has_error: bool,
+}
+
+fn make_empty_type_context() -> TypeContext {
+    TypeContext { id: 0 }
+}
+
+// Helper to add binding (wrapper for context method)
+fn add_local_binding(ctx: TypeContext, name: str, type_idx: TypeIdx, is_mutable: bool) -> TypeContext {
+    // Assuming context_add_binding is the method; expand if needed
+    ctx.add_local_binding(name, type_idx, is_mutable)
+}
+
+// Helper to check if type exists
+fn check_type_exists(ctx: TypeContext, type_idx: TypeIdx) -> bool {
+    ctx.check_type_exists(type_idx)
+}
+
+// Main dispatch for statements
+fn check_stmt_kind(ctx: TypeContext, kind: StmtKind) -> StmtCheckResult {
+    var result = StmtCheckResult {
+        context: ctx,
+        effects: 0,  // Default no effects
+        has_error: false,
+    };
+
+    match kind {
+        Let { name, type_hint, init } => {
+            var (new_ctx, ty) = check_let(result.context, name, type_hint, init);
+            result.context = new_ctx;
+            result.effects = 0;  // Let has no effects
+        }
+        Assign { target, value } => {
+            var new_ctx = check_assign(result.context, target, value);
+            result.context = new_ctx;
+            result.effects = 0;
+        }
+        Expr(expr) => {
+            var (new_ctx, _, effs) = check_expr_stmt(result.context, expr);
+            result.context = new_ctx;
+            result.effects = effs.to_i64();  // Assuming Effects has to_i64()
+        }
+        Return(expr_opt) => {
+            var (ret_ty, effs) = check_return(result.context, expr_opt);
+            // Discard ret_ty, chain effects
+            result.effects = effs.to_i64();
+            // Mark function as returning if no error
+            if !result.has_error {
+                result.context = result.context.mark_returning();
+            }
+        }
+        While { cond, body } => {
+            var new_ctx = check_while(result.context, cond, body);
+            result.context = new_ctx;
+            result.effects = 0;
+        }
+        Break => {
+            var new_ctx = check_break(result.context);
+            result.context = new_ctx;
+            result.effects = 0;
+        }
+        Continue => {
+            var new_ctx = check_continue(result.context);
+            result.context = new_ctx;
+            result.effects = 0;
+        }
+        _ => {
+            // Unknown or block stmt handled elsewhere
+            result.context = result.context.add_error("Unknown statement kind");
+            result.has_error = true;
+        }
+    }
+
+    // Chain effects if needed (for sequences, but here per stmt)
+    result
+}
+
+// Implementation of let checking
+fn check_let(ctx: TypeContext, name: str, type_hint: Option<TypeIdx>, init_expr: Expr) -> (TypeContext, TypeIdx) {
+    // Type check the init expr
+    var (init_ctx, init_ty, init_effects) = check_expr(init_expr, ctx);  // Assuming check_expr exists in expr.sio
+
+    var ty = Optionnone<TypeIdx>();
+    if let type_hint = some(hint) {
+        // Check if init_ty matches hint
+        if !types_match(init_ctx, init_ty, hint) {
+            init_ctx = init_ctx.add_error(format("Type mismatch in let {}: expected {}, got {}", name, hint, init_ty));
+        }
+        ty = some(hint);
+    } else {
+        // Infer from init
+        ty = some(init_ty);
+    }
+
+    if ty.is_none() {
+        ctx = ctx.add_error(format("Could not infer type for let {}", name));
+        return (ctx, invalid_type());  // Assuming invalid_type() -> TypeIdx
+    }
+
+    var final_ty = ty.unwrap();
+
+    // Check if type exists
+    if !check_type_exists(init_ctx, final_ty) {
+        init_ctx = init_ctx.add_error(format("Undefined type {} in let {}", final_ty, name));
+    }
+
+    // Add binding: immutable by default unless specified (Sounio uses var for mut, but HIR may flag)
+    var is_mut = false;  // Default immutable; check HIR flag if present
+    var new_ctx = add_local_binding(init_ctx, name, final_ty, is_mut);
+
+    (new_ctx, final_ty)
+}
+
+// types_match helper (assuming implemented in types.sio or inline)
+fn types_match(ctx: TypeContext, ty1: TypeIdx, ty2: TypeIdx) -> bool {
+    // Simple equality for now; expand for subtyping later
+    ty1 == ty2
+}
+
+// Implementation of assign checking
+fn check_assign(ctx: TypeContext, target: Expr, value: Expr) -> TypeContext {
+    // Assume target is a path expr (variable); check if lvalue
+    if !is_lvalue(target) {  // Assuming helper
+        return ctx.add_error("Assignment target must be mutable variable or deref");
+    }
+
+    var target_name = extract_path_name(target);  // Assuming helper to get name
+    var binding_opt = ctx.lookup_binding(target_name);
+
+    if binding_opt.is_none() {
+        return ctx.add_error(format("Undefined variable {} in assignment", target_name));
+    }
+
+    var binding = binding_opt.unwrap();
+    if !binding.is_mutable {
+        return ctx.add_error(format("Cannot assign to immutable variable {}", target_name));
+    }
+
+    // Check value
+    var (value_ctx, value_ty, value_effects) = check_expr(value, ctx);
+
+    if !types_match(value_ctx, value_ty, binding.type_idx) {
+        value_ctx = value_ctx.add_error(format("Type mismatch in assignment to {}: expected {}, got {}", target_name, binding.type_idx, value_ty));
+    }
+
+    // For mutable refs, additional checks if target is &!T
+    // But for now, assume simple var assign
+
+    // Chain effects
+    var final_ctx = value_ctx.chain_effects(value_effects);
+
+    // No new bindings
+    final_ctx
+}
+
+// is_lvalue and extract_path_name helpers (stubs)
+fn is_lvalue(expr: Expr) -> bool {
+    // Check if Path or Deof mut ref, etc.
+    match expr.kind {
+        Path(_) => true,
+        _ => false,
+    }
+}
+
+fn extract_path_name(expr: Expr) -> str {
+    // Extract name from Path
+    "dummy"  // Placeholder
+}
+
+// Implementation of expr stmt
+fn check_expr_stmt(ctx: TypeContext, expr: Expr) -> (TypeContext, TypeIdx, Effects) {
+    // Type check expr, discard result (should be unit or side-effect only)
+    var (new_ctx, ty, effs) = check_expr(expr, ctx);
+    // Warn if non-unit? Optional for now
+
+    var unit_ty = unit_type();  // Assuming unit_type() -> TypeIdx
+    (new_ctx, unit_ty, effs)
+}
+
+// Implementation of return
+fn check_return(ctx: TypeContext, expr_opt: Option<Expr>) -> (TypeIdx, Effects) {
+    var ret_ty = ctx.function_return_type();
+    var effs = Effectsnone();
+
+    if let expr = some(e) {
+        var (new_ctx, expr_ty, expr_effs) = check_expr(e, ctx);
+        if !types_match(new_ctx, expr_ty, ret_ty) {
+            new_ctx = new_ctx.add_error(format("Return type mismatch: expected {}, got {}", ret_ty, expr_ty));
+        }
+        effs = expr_effs;
+        // Update ctx? But return doesn't update caller ctx directly
+    } else {
+        // Unit return
+        if ret_ty != unit_type() {
+            ctx = ctx.add_error("Expected non-unit return");
+        }
+    }
+
+    // Mark returning in ctx, but since return exits, perhaps propagate
+    (ret_ty, effs)
+}
+
+// Implementation of while
+fn check_while(ctx: TypeContext, cond: Expr, body: Vec<Stmt>) -> TypeContext {
+    // Check cond is bool
+    var (cond_ctx, cond_ty, cond_effs) = check_expr(cond, ctx);
+    var bool_ty = bool_type();  // Assuming bool_type() -> TypeIdx
+    if !types_match(cond_ctx, cond_ty, bool_ty) {
+        cond_ctx = cond_ctx.add_error("While condition must be bool");
+    }
+
+    // Push loop scope
+    var loop_ctx = cond_ctx.push_scope();
+    loop_ctx = loop_ctx.enter_loop();  // Assuming method to increment loop depth
+
+    // Check body statements, threading ctx
+    var body_ctx = loop_ctx;
+    for stmt in body {
+        var stmt_result = check_stmt_kind(body_ctx, stmt.kind);
+        if stmt_result.has_error {
+            body_ctx = stmt_result.context;
+            continue;
+        }
+        body_ctx = stmt_result.context;
+        // Chain effects if needed
+    }
+
+    // Pop loop scope
+    var final_ctx = body_ctx.pop_scope();
+
+    final_ctx
+}
+
+// Break checking
+fn check_break(ctx: TypeContext) -> TypeContext {
+    if !ctx.in_loop() {
+        return ctx.add_error("Break outside of loop");
+    }
+    // Effects: break effect
+    var break_effs = effects_break();  // Assuming
+    ctx.chain_effects(break_effs)
+}
+
+// Continue checking
+fn check_continue(ctx: TypeContext) -> TypeContext {
+    if !ctx.in_loop() {
+        return ctx.add_error("Continue outside of loop");
+    }
+    var cont_effs = effects_continue();
+    ctx.chain_effects(cont_effs)
+}
+
+// Now top-level items
+
+// Dispatch for items
+fn check_item_kind(ctx: TypeContext, kind: ItemKind) -> StmtCheckResult {
+    var result = StmtCheckResult {
+        context: ctx,
+        effects: 0,
+        has_error: false,
+    };
+
+    match kind {
+        FnDef { name, params, return_type, body } => {
+            var new_ctx = check_fn_def(result.context, name, params, return_type, body);
+            result.context = new_ctx;
+        }
+        StructDef { name, fields } => {
+            var new_ctx = check_struct_def(result.context, name, fields);
+            result.context = new_ctx;
+        }
+        EnumDef { name, variants } => {
+            var new_ctx = check_enum_def(result.context, name, variants);
+            result.context = new_ctx;
+        }
+        TypeAlias { name, target_type } => {
+            var new_ctx = check_type_alias(result.context, name, target_type);
+            result.context = new_ctx;
+        }
+        _ => {
+            result.context = result.context.add_error("Unknown item kind");
+            result.has_error = true;
+        }
+    }
+
+    result
+}
+
+// Fn def checking
+fn check_fn_def(ctx: TypeContext, name: str, params: Vec<(str, TypeIdx)>, return_type: TypeIdx, body: Vec<Stmt>) -> TypeContext {
+    // Check param types exist
+    for (pname, pty) in params {
+        if !check_type_exists(ctx, pty) {
+            ctx = ctx.add_error(format("Undefined param type {} for fn {}", pty, name));
+        }
+    }
+
+    // Check return type exists
+    if !check_type_exists(ctx, return_type) {
+        ctx = ctx.add_error(format("Undefined return type {} for fn {}", return_type, name));
+    }
+
+    // Add fn signature to context (TypeDefFnSig { params, ret: return_type })
+    var sig = TypeDefFn(params, return_type);  // Assuming constructor
+    ctx = ctx.add_type_def(name, sig);
+
+    // Push new scope for body
+    var body_ctx = ctx.push_scope();
+    // Add params as bindings (immutable)
+    for (pname, pty) in params {
+        body_ctx = add_local_binding(body_ctx, pname, pty, false);
+    }
+
+    // Set current fn return type
+    body_ctx = body_ctx.set_fn_return(return_type);
+
+    // Check body
+    var body_final = body_ctx;
+    for stmt in body {
+        var stmt_res = check_stmt_kind(body_final, stmt.kind);
+        if stmt_res.has_error {
+            body_final = stmt_res.context;
+            continue;
+        }
+        body_final = stmt_res.context;
+    }
+
+    // Check if all paths return if non-unit (optional divergence check)
+    if return_type != unit_type() && !body_final.is_returning() {
+        body_final = body_final.add_error(format("Not all paths return value in fn {}", name));
+    }
+
+    // Pop scope
+    var final_ctx = body_final.pop_scope();
+
+    final_ctx
+}
+
+// Struct def
+fn check_struct_def(ctx: TypeContext, name: str, fields: Vec<(str, TypeIdx)>) -> TypeContext {
+    // Check field types exist and no cycles (simple check for now)
+    for (fname, fty) in fields {
+        if !check_type_exists(ctx, fty) {
+            ctx = ctx.add_error(format("Undefined field type {} in struct {}", fty, name));
+        }
+        // Cycle check: if fty references name, error (basic)
+        if type_refers_to(fty, name) {  // Assuming helper
+            ctx = ctx.add_error(format("Cycle in struct {} field {}", name, fname));
+        }
+    }
+
+    // Add struct def to context
+    var struct_def = TypeDefStruct(fields);
+    ctx = ctx.add_type_def(name, struct_def);
+
+    ctx
+}
+
+// Enum def
+fn check_enum_def(ctx: TypeContext, name: str, variants: Vec<(str, Option<TypeIdx>)>) -> TypeContext {
+    // Check variant payloads
+    for (vname, payload) in variants {
+        if let some(pty) = payload {
+            if !check_type_exists(ctx, pty) {
+                ctx = ctx.add_error(format("Undefined variant payload type {} in enum {}", pty, name));
+            }
+        }
+    }
+
+    // Add enum def
+    var enum_def = TypeDefEnum(variants);
+    ctx = ctx.add_type_def(name, enum_def);
+
+    ctx
+}
+
+// Type alias
+fn check_type_alias(ctx: TypeContext, name: str, target_type: TypeIdx) -> TypeContext {
+    if !check_type_exists(ctx, target_type) {
+        ctx = ctx.add_error(format("Undefined target type {} for alias {}", target_type, name));
+    }
+
+    // Add alias (points to target_type)
+    var alias_def = TypeDefAlias(target_type);
+    ctx = ctx.add_type_def(name, alias_def);
+
+    ctx
+}
+
+// Stubs for helpers
+fn invalid_type() -> TypeIdx { 0 }  // Error type idx
+fn unit_type() -> TypeIdx { 1 }    // Builtin unit
+fn bool_type() -> TypeIdx { 2 }    // Builtin bool
+fn type_refers_to(ty: TypeIdx, name: str) -> bool { false }  // Impl later
+fn effects_break() -> Effects { Effectsnew(1) }  // Bitflag for break
+fn effects_continue() -> Effects { Effectsnew(2) }
+fn format(fmt: str, args: ...) -> str {  // Assuming sprintf-like
+    fmt  // Placeholder
+}
+
+// For array indexing effects: in check_expr (not here), add Panic effect
+// e.g., in expr checker: if Index, effects |= Panic
+
+// Integration: This module is called from check/mod.rs equivalent in Sounio,
+// threading ctx through module items, then stmts in blocks.
+
+// For the example program:
+// - check_struct_def for Point: fields x,y i64 (builtin)
+// - check_fn_def for distance: params Point,Point -> i64, body lets and +
+// - check_fn_def for main: let p1,p2 with struct init, call distance
+
+// Estimated LOC: This skeleton is ~300; full impl with expr integration, error handling,
+// cycle detection, mutable checks, array helpers, etc., reaches ~1000.

@@ -882,20 +882,13 @@ mod tests {
         // Test aggregate without creating a full checker
         let mut high_count = 0;
         let mut medium_count = 0;
-        let mut alpha_sum = 0.0;
-        let mut beta_sum = 0.0;
-
         for result in &results {
             match result {
                 FidelityResult::High { confidence, .. } => {
                     high_count += 1;
-                    alpha_sum += confidence.alpha;
-                    beta_sum += confidence.beta;
                 }
                 FidelityResult::Medium { confidence, .. } => {
                     medium_count += 1;
-                    alpha_sum += confidence.alpha;
-                    beta_sum += confidence.beta;
                 }
                 _ => {}
             }
