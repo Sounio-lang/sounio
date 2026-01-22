@@ -20,6 +20,19 @@ static EMPTY_VALUE_SET: LazyLock<HashSet<ValueId>> = LazyLock::new(HashSet::new)
 /// Dead Code Elimination pass
 pub struct DeadCodeElimination;
 
+impl DeadCodeElimination {
+    /// Create a new dead code elimination pass
+    pub fn new() -> Self {
+        Self
+    }
+}
+
+impl Default for DeadCodeElimination {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 /// Liveness analysis data
 struct LivenessAnalysis {
     /// Live_in[block] = set of values live at entry to block

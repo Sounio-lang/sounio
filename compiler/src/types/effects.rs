@@ -214,6 +214,7 @@ impl EffectInference {
                         params: vec![],
                         return_type: Box::new(Type::Var(TypeVar(0))),
                         effects: EffectSet::new(),
+                        abi: None,
                     }],
                     Type::Named {
                         name: "Future".to_string(),
@@ -327,6 +328,51 @@ impl EffectInference {
                 vec![Type::F64, Type::F64],
                 Type::F64,
             )));
+
+        // FFI effect - foreign function interface operations
+        //
+        // The FFI effect tracks operations that interact with foreign code:
+        // - Calling extern "C" functions
+        // - Dereferencing raw pointers
+        // - Memory operations on foreign data
+        //
+        // This provides safety guarantees by ensuring FFI operations are:
+        // - Explicitly marked in function signatures (with FFI)
+        // - Tracked through the type system
+        // - Can be handled at module boundaries
+        self.definitions.push(
+            EffectDef::new("FFI")
+                // Call an external function
+                .with_op(EffectOperation::new(
+                    "call_extern",
+                    vec![Type::String], // function name
+                    Type::Var(TypeVar(0)),
+                ))
+                // Read from a raw pointer
+                .with_op(EffectOperation::new(
+                    "ptr_read",
+                    vec![Type::I64], // pointer
+                    Type::Var(TypeVar(0)),
+                ))
+                // Write to a raw pointer
+                .with_op(EffectOperation::new(
+                    "ptr_write",
+                    vec![Type::I64, Type::Var(TypeVar(0))], // pointer, value
+                    Type::Unit,
+                ))
+                // Get pointer address
+                .with_op(EffectOperation::new(
+                    "addr_of",
+                    vec![Type::Var(TypeVar(0))], // reference
+                    Type::I64,                   // pointer
+                ))
+                // Offset a pointer
+                .with_op(EffectOperation::new(
+                    "ptr_offset",
+                    vec![Type::I64, Type::I64], // pointer, offset
+                    Type::I64,                  // new pointer
+                )),
+        );
     }
 
     /// Create fresh effect variable

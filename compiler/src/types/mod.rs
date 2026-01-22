@@ -9,6 +9,7 @@
 //! - Epistemic types (Knowledge[T, ε, Φ, τ])
 //! - Quantitative Type Theory (multiplicities for erasure)
 
+pub mod c_layout;
 pub mod core;
 pub mod effects;
 pub mod epistemic;
@@ -22,6 +23,7 @@ pub mod unit_infer;
 pub mod units;
 
 pub use self::core::*;
+pub use c_layout::{CLayoutEngine, FieldLayout, StructLayout, TargetPlatform};
 pub use effects::*;
 pub use ownership::*;
 

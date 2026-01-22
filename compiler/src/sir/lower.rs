@@ -1186,6 +1186,12 @@ fn lower_constant(ctx: &LoweringContext, constant: &HlirConstant) -> Constant {
             let bytes: Vec<Constant> = s.bytes().map(|b| Constant::I8(b as i8)).collect();
             Constant::Aggregate(bytes)
         }
+        HlirConstant::CString(s) => {
+            // C strings become arrays of bytes with null terminator
+            let mut bytes: Vec<Constant> = s.bytes().map(|b| Constant::I8(b as i8)).collect();
+            bytes.push(Constant::I8(0)); // Null terminator
+            Constant::Aggregate(bytes)
+        }
         HlirConstant::Array(elems) => {
             let sir_elems: Vec<Constant> = elems.iter().map(|e| lower_constant(ctx, e)).collect();
             Constant::Aggregate(sir_elems)
@@ -1308,6 +1314,33 @@ pub fn lower_type(hlir_ty: &HlirType) -> SirType {
                 (Some("w".to_string()), SirType::f32()),
             ];
             SirType::Struct(StructType::new(fields).named("Quat"))
+        }
+        // f64 vector types
+        HlirType::Vec2d => {
+            let fields = vec![
+                (Some("x".to_string()), SirType::f64()),
+                (Some("y".to_string()), SirType::f64()),
+            ];
+            SirType::Struct(StructType::new(fields).named("Vec2d"))
+        }
+        HlirType::Vec3d => {
+            // Padded to 4 doubles for SIMD
+            let fields = vec![
+                (Some("x".to_string()), SirType::f64()),
+                (Some("y".to_string()), SirType::f64()),
+                (Some("z".to_string()), SirType::f64()),
+                (Some("_pad".to_string()), SirType::f64()),
+            ];
+            SirType::Struct(StructType::new(fields).named("Vec3d"))
+        }
+        HlirType::Vec4d => {
+            let fields = vec![
+                (Some("x".to_string()), SirType::f64()),
+                (Some("y".to_string()), SirType::f64()),
+                (Some("z".to_string()), SirType::f64()),
+                (Some("w".to_string()), SirType::f64()),
+            ];
+            SirType::Struct(StructType::new(fields).named("Vec4d"))
         }
         HlirType::Dual => {
             // Dual number for automatic differentiation

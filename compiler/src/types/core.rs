@@ -14,6 +14,76 @@ pub struct TypeVar(pub u32);
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct EffectVar(pub u32);
 
+/// Tensor shape representation for the type system
+///
+/// Shapes can be:
+/// - Static: known at compile time (e.g., `[3, 4]`)
+/// - Dynamic: determined at runtime (e.g., `[?, ?]`)
+/// - Symbolic: named dimensions for shape polymorphism (e.g., `[N, M]`)
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub enum TensorShape {
+    /// Static shape with known dimensions
+    Static(Vec<usize>),
+    /// Dynamic shape with known rank but unknown dimensions
+    Dynamic(usize),
+    /// Symbolic shape with named dimensions (for generics)
+    Symbolic(Vec<String>),
+}
+
+impl TensorShape {
+    /// Number of dimensions (rank)
+    pub fn ndim(&self) -> usize {
+        match self {
+            TensorShape::Static(dims) => dims.len(),
+            TensorShape::Dynamic(n) => *n,
+            TensorShape::Symbolic(names) => names.len(),
+        }
+    }
+
+    /// Check if shape is a scalar (0-dimensional)
+    pub fn is_scalar(&self) -> bool {
+        self.ndim() == 0
+    }
+
+    /// Check if shape is fully static
+    pub fn is_static(&self) -> bool {
+        matches!(self, TensorShape::Static(_))
+    }
+
+    /// Get static dimensions if available
+    pub fn static_dims(&self) -> Option<&[usize]> {
+        match self {
+            TensorShape::Static(dims) => Some(dims),
+            _ => None,
+        }
+    }
+
+    /// Total number of elements (if static)
+    pub fn numel(&self) -> Option<usize> {
+        self.static_dims().map(|d| d.iter().product())
+    }
+
+    /// Check if two shapes are compatible for broadcasting
+    pub fn broadcast_compatible(&self, other: &TensorShape) -> bool {
+        match (self, other) {
+            (TensorShape::Static(d1), TensorShape::Static(d2)) => {
+                let max_len = d1.len().max(d2.len());
+                for i in 0..max_len {
+                    let dim1 = d1.get(d1.len().saturating_sub(i + 1)).copied().unwrap_or(1);
+                    let dim2 = d2.get(d2.len().saturating_sub(i + 1)).copied().unwrap_or(1);
+                    if dim1 != dim2 && dim1 != 1 && dim2 != 1 {
+                        return false;
+                    }
+                }
+                true
+            }
+            (TensorShape::Dynamic(_), _) | (_, TensorShape::Dynamic(_)) => true,
+            (TensorShape::Symbolic(s1), TensorShape::Symbolic(s2)) => s1 == s2,
+            _ => false,
+        }
+    }
+}
+
 impl EffectVar {
     /// Create a new effect variable with the given id
     pub fn new(id: u32) -> Self {
@@ -64,11 +134,13 @@ pub enum Type {
     },
     /// Tuple: (T1, T2, ...)
     Tuple(Vec<Type>),
-    /// Function type: fn(A, B) -> C
+    /// Function type: fn(A, B) -> C or extern "C" fn(A, B) -> C
     Function {
         params: Vec<Type>,
         return_type: Box<Type>,
         effects: EffectSet,
+        /// Optional ABI for function pointers (None = Sounio ABI, Some("C") = C ABI, etc.)
+        abi: Option<String>,
     },
     /// Named type (struct, enum, type alias)
     Named {
@@ -114,6 +186,20 @@ pub enum Type {
     Mat4,
     /// Quaternion: quat (4x f32: x, y, z, w)
     Quat,
+
+    // Tensor types
+    /// Generic tensor type: Tensor<T, Shape>
+    /// Shape can be static, dynamic, or symbolic
+    Tensor {
+        element: Box<Type>,
+        shape: TensorShape,
+    },
+    /// Double-precision 2D vector: vec2d (2x f64)
+    Vec2d,
+    /// Double-precision 3D vector: vec3d (3x f64)
+    Vec3d,
+    /// Double-precision 4D vector: vec4d (4x f64)
+    Vec4d,
 
     // Automatic differentiation types
     /// Dual number for forward-mode autodiff: dual (value: f64, derivative: f64)
@@ -218,7 +304,33 @@ impl Type {
 
     /// Check if this type is a vector type
     pub fn is_vector(&self) -> bool {
-        matches!(self, Type::Vec2 | Type::Vec3 | Type::Vec4)
+        matches!(self, Type::Vec2 | Type::Vec3 | Type::Vec4 | Type::Vec2d | Type::Vec3d | Type::Vec4d)
+    }
+
+    /// Check if this type is a tensor type
+    pub fn is_tensor(&self) -> bool {
+        matches!(self, Type::Tensor { .. })
+    }
+
+    /// Check if this type is f64-based vector
+    pub fn is_f64_vector(&self) -> bool {
+        matches!(self, Type::Vec2d | Type::Vec3d | Type::Vec4d)
+    }
+
+    /// Get tensor shape if this is a tensor type
+    pub fn tensor_shape(&self) -> Option<&TensorShape> {
+        match self {
+            Type::Tensor { shape, .. } => Some(shape),
+            _ => None,
+        }
+    }
+
+    /// Get tensor element type if this is a tensor type
+    pub fn tensor_element(&self) -> Option<&Type> {
+        match self {
+            Type::Tensor { element, .. } => Some(element.as_ref()),
+            _ => None,
+        }
     }
 
     /// Check if this type is a matrix type
@@ -335,10 +447,12 @@ impl Type {
                 params,
                 return_type,
                 effects,
+                abi,
             } => Type::Function {
                 params: params.iter().map(|p| p.substitute(subst)).collect(),
                 return_type: Box::new(return_type.substitute(subst)),
                 effects: effects.clone(),
+                abi: abi.clone(),
             },
             Type::Named { name, args } => Type::Named {
                 name: name.clone(),
@@ -473,6 +587,27 @@ impl Effect {
     pub fn async_effect() -> Self {
         Self {
             name: "Async".to_string(),
+            args: Vec::new(),
+        }
+    }
+
+    /// FFI effect - foreign function interface operations
+    ///
+    /// The FFI effect tracks operations that interact with foreign code:
+    /// - Calling extern "C" functions
+    /// - Dereferencing raw pointers
+    /// - Memory operations on foreign data
+    ///
+    /// Functions that perform FFI operations must declare this effect:
+    /// ```sounio
+    /// fn call_libc() with FFI {
+    ///     extern "C" { fn puts(s: *const i8) -> i32 }
+    ///     puts(c"hello")
+    /// }
+    /// ```
+    pub fn ffi() -> Self {
+        Self {
+            name: "FFI".to_string(),
             args: Vec::new(),
         }
     }
@@ -663,6 +798,7 @@ mod tests {
             params: vec![Type::Var(v1)],
             return_type: Box::new(Type::Var(v2)),
             effects: EffectSet::new(),
+            abi: None,
         };
         let vars = ty.free_vars();
         assert!(vars.contains(&v1));

@@ -194,6 +194,11 @@ impl MirType {
             HirType::Mat4 => MirType::Array(Box::new(MirType::F32), 16),
             HirType::Quat => MirType::Array(Box::new(MirType::F32), 4),
 
+            // f64 vector types
+            HirType::Vec2d => MirType::Array(Box::new(MirType::F64), 2),
+            HirType::Vec3d => MirType::Array(Box::new(MirType::F64), 4), // Padded for SIMD
+            HirType::Vec4d => MirType::Array(Box::new(MirType::F64), 4),
+
             // Automatic differentiation
             HirType::Dual => MirType::Tuple(vec![MirType::F64, MirType::F64]),
 

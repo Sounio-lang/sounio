@@ -6,17 +6,27 @@
 //! - Machine-independent optimizations
 //! - Bridge to backend code generators
 
-pub mod builder;
-pub mod types;
 pub mod analysis;
-pub mod optimization;
+pub mod builder;
 pub mod instructions;
 pub mod lower;
+pub mod optimization;
+pub mod types;
+
+pub mod benchmark; // Add benchmarking support
 
 // Re-export main types
 pub use builder::{FunctionBuilder, ModuleBuilder};
-pub use types::*;
 pub use instructions::*;
+pub use types::*;
+
+// Integration exports for new advanced components
+pub use optimization::AdvancedEpistemicOptimization;
+pub use optimization::CompleteFunctionInlining;
+pub use optimization::MLGuidedOptimizer;
+pub use optimization::PerformanceTunedOptimizer;
+pub use optimization::PipelineResult;
+pub use optimization::ValidatedOptimizationPipeline;
 
 #[cfg(test)]
 mod tests {
@@ -36,9 +46,12 @@ mod tests {
             value: MirConstant::Int(42),
             ty: MirType::I32,
         };
-        
+
         match const_instr {
-            MirInstruction::Const { value: MirConstant::Int(n), .. } => {
+            MirInstruction::Const {
+                value: MirConstant::Int(n),
+                ..
+            } => {
                 assert_eq!(n, 42);
             }
             _ => panic!("Expected Const instruction"),

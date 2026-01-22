@@ -21,6 +21,19 @@ use super::pass_manager::MIRPass;
 /// Constant Propagation optimization pass using SCCP algorithm
 pub struct ConstantPropagation;
 
+impl ConstantPropagation {
+    /// Create a new constant propagation pass
+    pub fn new() -> Self {
+        Self
+    }
+}
+
+impl Default for ConstantPropagation {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 /// Lattice value for SCCP
 ///
 /// The lattice has three levels:

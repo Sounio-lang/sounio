@@ -986,13 +986,14 @@ mod tests {
         let modified = pass.run_on_function(&mut func).expect("pass should succeed");
         assert!(modified, "CSE should remove the redundant merge computation");
 
-        let ssa_errors = SSAValidator::new().validate_function(&func);
+        let ssa_result = SSAValidator::new().validate_function(&func);
         assert!(
-            ssa_errors.is_empty(),
+            ssa_result.is_valid,
             "CSE must preserve SSA dominance:\n{}",
-            ssa_errors
-                .into_iter()
-                .map(|e| e.to_string())
+            ssa_result
+                .errors
+                .iter()
+                .map(|e| e.message.clone())
                 .collect::<Vec<_>>()
                 .join("\n")
         );

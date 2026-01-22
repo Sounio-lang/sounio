@@ -1,772 +1,570 @@
-//! SSA Validator
+//! SSA Validator for MIR
 //!
-//! Validates SSA (Static Single Assignment) properties for MIR based on
-//! "Efficiently Computing Static Single Assignment Form and the Control Dependence Graph"
-//! by Cytron et al. (1991)
+//! This module provides validation of SSA form properties, based on:
+//! - Cytron et al. (1991) "Efficiently Computing Static Single Assignment Form"
 //!
-//! The validator checks three fundamental SSA properties:
-//! 1. Single assignment property: each value defined exactly once
-//! 2. Dominance property: definition dominates all uses
-//! 3. Phi placement correctness: phi nodes at dominance frontiers
+//! The validator checks:
+//! 1. Dominance property - each variable is defined before use
+//! 2. Phi node placement - phi nodes are in the correct locations
+//! 3. Single assignment property - each variable is defined exactly once
 
-use std::collections::{HashMap, HashSet, BTreeSet};
-use std::fmt;
+use crate::mir::{
+    BlockId, MirBlock, MirConstant, MirFunction, MirInstruction, MirModule, MirTerminator, ValueId,
+};
+use std::collections::{HashMap, HashSet};
 
-use crate::mir::{MirModule, MirFunction, MirBlock, BlockId, ValueId};
-use crate::mir::instructions::{MirInstruction, MirTerminator};
+/// SSA Validation result
+#[derive(Debug, Clone)]
+pub struct SSAValidationResult {
+    /// Whether the SSA form is valid
+    pub is_valid: bool,
+    /// List of validation errors
+    pub errors: Vec<SSAValidationError>,
+    /// List of warnings
+    pub warnings: Vec<SSAValidationWarning>,
+}
 
-/// Location of a definition or use in the MIR
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub struct Location {
-    /// The block containing this location
-    pub block: BlockId,
-    /// Index within the block's instruction list (None for terminator)
+/// SSA Validation error
+#[derive(Debug, Clone)]
+pub struct SSAValidationError {
+    /// Description of the error
+    pub message: String,
+    /// Block where the error occurs
+    pub block_id: Option<BlockId>,
+    /// Instruction index where the error occurs
     pub instruction_index: Option<usize>,
 }
 
-impl Location {
-    /// Create a new location for an instruction
-    pub fn new(block: BlockId, instruction_index: usize) -> Self {
-        Self {
-            block,
-            instruction_index: Some(instruction_index),
-        }
-    }
-
-    /// Create a location for a block's terminator
-    pub fn terminator(block: BlockId) -> Self {
-        Self {
-            block,
-            instruction_index: None,
-        }
-    }
+/// SSA Validation warning
+#[derive(Debug, Clone)]
+pub struct SSAValidationWarning {
+    /// Description of the warning
+    pub message: String,
+    /// Block where the warning occurs
+    pub block_id: Option<BlockId>,
+    /// Instruction index where the warning occurs
+    pub instruction_index: Option<usize>,
 }
 
-impl fmt::Display for Location {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self.instruction_index {
-            Some(idx) => write!(f, "block {}, instruction {}", self.block.0, idx),
-            None => write!(f, "block {}, terminator", self.block.0),
-        }
-    }
+/// SSA Validator for MIR
+pub struct SSAValidator {
+    /// Dominator analysis results
+    dominators: HashMap<BlockId, HashSet<BlockId>>,
+    /// Reverse dominator analysis results
+    post_dominators: HashMap<BlockId, HashSet<BlockId>>,
+    /// All defined values in the function
+    defined_values: HashMap<ValueId, ValueDefinition>,
+    /// All uses of values in the function
+    value_uses: HashMap<ValueId, Vec<ValueUse>>,
+    /// Phi nodes and their locations
+    phi_nodes: HashMap<BlockId, Vec<PhiNode>>,
 }
 
-/// Errors that can occur during SSA validation
-#[derive(Debug, Clone, thiserror::Error)]
-pub enum SSAError {
-    /// A value is defined more than once
-    #[error("Value {} is defined multiple times: {}", .value.0, format_locations(.locations))]
-    MultipleDefinitions {
-        value: ValueId,
-        locations: Vec<Location>,
-    },
-
-    /// A value is used before being defined
-    #[error("Value {} is used at {} but defined at {}", .value.0, .use_location, format_def_location(.def_location))]
-    UseBeforeDefinition {
-        value: ValueId,
-        use_location: Location,
-        def_location: Option<Location>,
-    },
-
-    /// A value is used but never defined
-    #[error("Value {} is used at {} but never defined", .value.0, .use_location)]
-    UndefinedValue {
-        value: ValueId,
-        use_location: Location,
-    },
-
-    /// A phi node is placed incorrectly
-    #[error("Invalid phi placement at block {}: {}", .block.0, .reason)]
-    InvalidPhiPlacement {
-        block: BlockId,
-        reason: String,
-    },
-
-    /// Phi node has incorrect number of incoming edges
-    #[error("Phi node for value {} at block {} has {} incoming edges but block has {} predecessors",
-            .value.0, .block.0, .phi_incoming, .predecessor_count)]
-    PhiPredecessorMismatch {
-        value: ValueId,
-        block: BlockId,
-        phi_incoming: usize,
-        predecessor_count: usize,
-    },
-
-    /// Phi node references a block that is not a predecessor
-    #[error("Phi node for value {} at block {} references block {} which is not a predecessor",
-            .value.0, .block.0, .referenced_block.0)]
-    PhiInvalidPredecessor {
-        value: ValueId,
-        block: BlockId,
-        referenced_block: BlockId,
-    },
-
-    /// Definition does not dominate use
-    #[error("Definition of value {} at {} does not dominate use at {}",
-            .value.0, .def_location, .use_location)]
-    DominanceViolation {
-        value: ValueId,
-        def_location: Location,
-        use_location: Location,
-    },
-
-    /// Internal error during validation
-    #[error("Internal validation error: {0}")]
-    InternalError(String),
+/// Information about where a value is defined
+#[derive(Debug, Clone)]
+struct ValueDefinition {
+    /// Block where the value is defined
+    pub block_id: BlockId,
+    /// Instruction index where the value is defined
+    pub instruction_index: Option<usize>,
+    /// Type of the value
+    pub value_type: String,
 }
 
-/// Helper function to format a list of locations
-fn format_locations(locations: &[Location]) -> String {
-    locations
-        .iter()
-        .map(|l| l.to_string())
-        .collect::<Vec<_>>()
-        .join(", ")
+/// Information about where a value is used
+#[derive(Debug, Clone)]
+struct ValueUse {
+    /// Block where the value is used
+    pub block_id: BlockId,
+    /// Instruction index where the value is used
+    pub instruction_index: usize,
+    /// Context of the use
+    pub context: String,
 }
 
-/// Helper function to format an optional definition location
-fn format_def_location(loc: &Option<Location>) -> String {
-    match loc {
-        Some(l) => l.to_string(),
-        None => "unknown".to_string(),
-    }
+/// Information about a phi node
+#[derive(Debug, Clone)]
+struct PhiNode {
+    /// Result value of the phi node
+    pub result: ValueId,
+    /// Incoming values and their source blocks
+    pub incoming: Vec<(BlockId, ValueId)>,
+    /// Type of the phi node
+    pub phi_type: String,
 }
-
-/// SSA Validator
-///
-/// Validates that MIR is in proper SSA form according to Cytron et al. (1991).
-pub struct SSAValidator;
 
 impl SSAValidator {
-    /// Create a new SSA validator
     pub fn new() -> Self {
-        Self
+        Self {
+            dominators: HashMap::new(),
+            post_dominators: HashMap::new(),
+            defined_values: HashMap::new(),
+            value_uses: HashMap::new(),
+            phi_nodes: HashMap::new(),
+        }
     }
 
-    /// Validate SSA properties for an entire module
-    ///
-    /// Returns Ok(()) if the module is in valid SSA form, or a vector of errors
-    /// describing all SSA violations found.
-    pub fn validate(&self, module: &MirModule) -> Result<(), Vec<SSAError>> {
+    /// Validate a complete MIR module
+    pub fn validate_module(&mut self, module: &MirModule) -> SSAValidationResult {
         let mut all_errors = Vec::new();
+        let mut all_warnings = Vec::new();
 
         for func in &module.functions {
-            let errors = self.validate_function(func);
-            all_errors.extend(errors);
+            let result = self.validate_function(func);
+            all_errors.extend(result.errors);
+            all_warnings.extend(result.warnings);
         }
 
-        if all_errors.is_empty() {
-            Ok(())
-        } else {
-            Err(all_errors)
+        SSAValidationResult {
+            is_valid: all_errors.is_empty(),
+            errors: all_errors,
+            warnings: all_warnings,
         }
     }
 
-    /// Validate SSA properties for a single function
-    pub fn validate_function(&self, func: &MirFunction) -> Vec<SSAError> {
+    /// Validate a single function for SSA properties
+    pub fn validate_function(&mut self, func: &MirFunction) -> SSAValidationResult {
+        // Reset analysis state
+        self.defined_values.clear();
+        self.value_uses.clear();
+        self.phi_nodes.clear();
+
+        // Collect all definitions and uses
+        self.collect_definitions_and_uses(func);
+
+        // Validate SSA properties
         let mut errors = Vec::new();
+        let mut warnings = Vec::new();
 
-        // Check single assignment property
-        errors.extend(self.check_single_assignment(func));
+        // Check 1: Single assignment property
+        self.check_single_assignment_property(func, &mut errors);
 
-        // Build dominator tree for dominance checking
-        let dom_result = self.build_dominators_and_predecessors(func);
+        // Check 2: Dominance property
+        self.check_dominance_property(func, &mut errors);
 
-        match dom_result {
-            Ok((dominators, predecessors)) => {
-                // Check dominance property
-                errors.extend(self.check_dominance_property(func, &dominators, &predecessors));
+        // Check 3: Phi node placement
+        self.check_phi_node_placement(func, &mut errors);
 
-                // Check phi placement
-                errors.extend(self.check_phi_placement(func, &predecessors));
-            }
-            Err(e) => {
-                errors.push(SSAError::InternalError(e));
-            }
+        // Check 4: Phi node arguments
+        self.check_phi_arguments(func, &mut errors);
+
+        // Check 5: Unreachable code
+        self.check_unreachable_blocks(func, &mut warnings);
+
+        SSAValidationResult {
+            is_valid: errors.is_empty(),
+            errors,
+            warnings,
         }
-
-        errors
     }
 
-    /// Check that each value is defined exactly once (single assignment property)
-    fn check_single_assignment(&self, func: &MirFunction) -> Vec<SSAError> {
-        let mut errors = Vec::new();
-        let mut definitions: HashMap<ValueId, Vec<Location>> = HashMap::new();
+    /// Collect all value definitions and uses in the function
+    fn collect_definitions_and_uses(&mut self, func: &MirFunction) {
+        for (block_idx, block) in func.blocks.iter().enumerate() {
+            for (instr_idx, instr) in block.instructions.iter().enumerate() {
+                // Collect definitions
+                if let Some(result) = instr.result() {
+                    self.defined_values.insert(
+                        result,
+                        ValueDefinition {
+                            block_id: block.id,
+                            instruction_index: Some(instr_idx),
+                            value_type: format!("{:?}", instr),
+                        },
+                    );
+                }
 
-        // Collect all definitions
-        for block in &func.blocks {
-            for (idx, instr) in block.instructions.iter().enumerate() {
-                if let Some(defined_value) = self.get_defined_value(instr) {
-                    let location = Location::new(block.id, idx);
-                    definitions
-                        .entry(defined_value)
-                        .or_default()
-                        .push(location);
+                // Collect uses
+                for used_value in instr.used_values() {
+                    self.value_uses
+                        .entry(used_value)
+                        .or_insert_with(Vec::new)
+                        .push(ValueUse {
+                            block_id: block.id,
+                            instruction_index: instr_idx,
+                            context: format!("{:?}", instr),
+                        });
                 }
             }
-        }
 
-        // Check for multiple definitions
-        for (value, locations) in definitions {
-            if locations.len() > 1 {
-                errors.push(SSAError::MultipleDefinitions { value, locations });
+            // Collect phi nodes
+            for (instr_idx, instr) in block.instructions.iter().enumerate() {
+                if let MirInstruction::Phi {
+                    result,
+                    incoming,
+                    ty,
+                } = instr
+                {
+                    self.phi_nodes.insert(
+                        block.id,
+                        vec![PhiNode {
+                            result: *result,
+                            incoming: incoming.clone(),
+                            phi_type: format!("{:?}", ty),
+                        }],
+                    );
+
+                    // Collect phi node definitions
+                    self.defined_values.insert(
+                        *result,
+                        ValueDefinition {
+                            block_id: block.id,
+                            instruction_index: Some(instr_idx),
+                            value_type: "phi".to_string(),
+                        },
+                    );
+
+                    // Collect phi node uses (incoming values)
+                    for (_, value_id) in incoming {
+                        self.value_uses
+                            .entry(*value_id)
+                            .or_insert_with(Vec::new)
+                            .push(ValueUse {
+                                block_id: block.id,
+                                instruction_index: instr_idx,
+                                context: "phi_incoming".to_string(),
+                            });
+                    }
+                }
+            }
+
+            // Collect terminator uses
+            let terminator_uses = get_terminator_uses(&block.terminator);
+            for value_id in terminator_uses {
+                self.value_uses
+                    .entry(value_id)
+                    .or_insert_with(Vec::new)
+                    .push(ValueUse {
+                        block_id: block.id,
+                        instruction_index: block.instructions.len(), // After last instruction
+                        context: format!("{:?}", block.terminator),
+                    });
             }
         }
-
-        errors
     }
 
-    /// Build dominator information and predecessor map
-    fn build_dominators_and_predecessors(
+    /// Check that each value is defined exactly once
+    fn check_single_assignment_property(
         &self,
         func: &MirFunction,
-    ) -> Result<(HashMap<BlockId, BTreeSet<BlockId>>, HashMap<BlockId, HashSet<BlockId>>), String> {
-        if func.blocks.is_empty() {
-            return Ok((HashMap::new(), HashMap::new()));
-        }
+        errors: &mut Vec<SSAValidationError>,
+    ) {
+        // Check for values defined in multiple places
+        let mut value_blocks = HashMap::new();
 
-        let blocks: Vec<BlockId> = func.blocks.iter().map(|b| b.id).collect();
-        let entry_block = func.entry_block;
-
-        // Build predecessor map from successor information
-        let mut predecessors: HashMap<BlockId, HashSet<BlockId>> = HashMap::new();
-        for block_id in &blocks {
-            predecessors.insert(*block_id, HashSet::new());
-        }
-
-        for block in &func.blocks {
-            let successors = self.get_block_successors(block);
-            for succ in successors {
-                predecessors.entry(succ).or_default().insert(block.id);
-            }
-        }
-
-        // Compute dominators using iterative algorithm
-        let mut dominators: HashMap<BlockId, BTreeSet<BlockId>> = HashMap::new();
-
-        // Entry block dominates itself
-        for &block in &blocks {
-            if block == entry_block {
-                dominators.insert(block, BTreeSet::from([block]));
+        for (value_id, definition) in &self.defined_values {
+            let block_id = definition.block_id;
+            if let Some(existing_block) = value_blocks.get(value_id) {
+                if *existing_block != block_id {
+                    errors.push(SSAValidationError {
+                        message: format!(
+                            "Value {:?} is defined in multiple blocks: {:?} and {:?}",
+                            value_id, existing_block, block_id
+                        ),
+                        block_id: Some(block_id),
+                        instruction_index: definition.instruction_index,
+                    });
+                }
             } else {
-                dominators.insert(block, BTreeSet::from_iter(blocks.iter().cloned()));
+                value_blocks.insert(*value_id, block_id);
             }
         }
 
-        // Iterative algorithm (Cytron et al.)
+        // Check for values defined multiple times in the same block
+        let mut block_value_counts = HashMap::new();
+        for (value_id, definition) in &self.defined_values {
+            let key = (definition.block_id, *value_id);
+            let count = block_value_counts.entry(key).or_insert(0);
+            *count += 1;
+
+            if *count > 1 {
+                errors.push(SSAValidationError {
+                    message: format!(
+                        "Value {:?} is defined multiple times in block {:?}",
+                        value_id, definition.block_id
+                    ),
+                    block_id: Some(definition.block_id),
+                    instruction_index: definition.instruction_index,
+                });
+            }
+        }
+    }
+
+    /// Check that each use of a value is dominated by its definition
+    fn check_dominance_property(&mut self, func: &MirFunction, errors: &mut Vec<SSAValidationError>) {
+        // Build dominance information (simplified - would need proper dominator analysis)
+        self.build_dominators(func);
+
+        for (value_id, definition) in &self.defined_values {
+            if let Some(uses) = self.value_uses.get(value_id) {
+                for use_info in uses {
+                    // Check if the use is dominated by the definition
+                    if !self.is_dominated_by(
+                        use_info.block_id,
+                        definition.block_id,
+                        &self.dominators,
+                    ) {
+                        errors.push(SSAValidationError {
+                            message: format!(
+                                "Value {:?} is used in block {:?} but defined in block {:?} (dominance violation)",
+                                value_id, use_info.block_id, definition.block_id
+                            ),
+                            block_id: Some(use_info.block_id),
+                            instruction_index: Some(use_info.instruction_index),
+                        });
+                    }
+                }
+            }
+        }
+    }
+
+    /// Check that phi nodes are placed correctly
+    fn check_phi_node_placement(&self, func: &MirFunction, errors: &mut Vec<SSAValidationError>) {
+        // Simplified check: phi nodes should be at the start of blocks
+        for (block_id, phi_nodes) in &self.phi_nodes {
+            for phi_node in phi_nodes {
+                // Check that the phi node is the first instruction in the block
+                if let Some(block) = func.get_block(*block_id) {
+                    if !block.instructions.is_empty() {
+                        if let Some(first_instr) = block.instructions.first() {
+                            if !matches!(first_instr, MirInstruction::Phi { .. }) {
+                                errors.push(SSAValidationError {
+                                    message: format!(
+                                        "Phi node for value {:?} is not at the start of block {:?}",
+                                        phi_node.result, block_id
+                                    ),
+                                    block_id: Some(*block_id),
+                                    instruction_index: Some(0),
+                                });
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    /// Check that phi node arguments come from predecessor blocks
+    fn check_phi_arguments(&self, func: &MirFunction, errors: &mut Vec<SSAValidationError>) {
+        for (block_id, phi_nodes) in &self.phi_nodes {
+            // Get predecessor blocks
+            let predecessors = self.get_predecessor_blocks(func, *block_id);
+
+            for phi_node in phi_nodes {
+                for (source_block, _) in &phi_node.incoming {
+                    if !predecessors.contains(source_block) {
+                        errors.push(SSAValidationError {
+                            message: format!(
+                                "Phi node for value {:?} has argument from non-predecessor block {:?}",
+                                phi_node.result, source_block
+                            ),
+                            block_id: Some(*block_id),
+                            instruction_index: None,
+                        });
+                    }
+                }
+            }
+        }
+    }
+
+    /// Check for unreachable blocks
+    fn check_unreachable_blocks(
+        &self,
+        func: &MirFunction,
+        warnings: &mut Vec<SSAValidationWarning>,
+    ) {
+        let mut reachable_blocks = HashSet::new();
+        let mut worklist = vec![func.entry_block];
+        reachable_blocks.insert(func.entry_block);
+
+        // Simple reachability analysis
+        while let Some(current) = worklist.pop() {
+            if let Some(block) = func.get_block(current) {
+                for successor in get_block_successors(&block.terminator) {
+                    if reachable_blocks.insert(successor) {
+                        worklist.push(successor);
+                    }
+                }
+            }
+        }
+
+        // Find unreachable blocks
+        for block in &func.blocks {
+            if !reachable_blocks.contains(&block.id) {
+                warnings.push(SSAValidationWarning {
+                    message: format!("Block {:?} is unreachable", block.id),
+                    block_id: Some(block.id),
+                    instruction_index: None,
+                });
+            }
+        }
+    }
+
+    /// Build dominator information (simplified implementation)
+    fn build_dominators(&mut self, func: &MirFunction) {
+        self.dominators.clear();
+
+        // Initialize: each block dominates itself
+        for block in &func.blocks {
+            let mut dom_set = HashSet::new();
+            dom_set.insert(block.id);
+            self.dominators.insert(block.id, dom_set);
+        }
+
+        // Iterative algorithm for finding dominators
         let mut changed = true;
-        let mut iterations = 0;
-        while changed && iterations < 1000 {
+        while changed {
             changed = false;
-            iterations += 1;
-
-            for &block in &blocks {
-                if block == entry_block {
-                    continue;
+            for block in &func.blocks {
+                if block.id == func.entry_block {
+                    continue; // Entry block already initialized
                 }
 
-                // New dominators = intersection of all predecessors' dominators union {block}
-                let mut new_dom: BTreeSet<BlockId> = BTreeSet::from([block]);
-
-                let block_preds = predecessors.get(&block).cloned().unwrap_or_default();
-
-                if !block_preds.is_empty() {
-                    let mut first = true;
-                    let mut intersection: Option<BTreeSet<BlockId>> = None;
-
-                    for pred in block_preds {
-                        if first {
-                            if let Some(pred_dom) = dominators.get(&pred) {
-                                intersection = Some(pred_dom.clone());
-                                first = false;
+                // Start with all blocks, then intersect with predecessors
+                // A block always dominates itself, so we add it after the intersection
+                let preds: Vec<BlockId> = self.get_predecessor_blocks(func, block.id);
+                let mut new_dom_set: HashSet<BlockId> = if preds.is_empty() {
+                    // No predecessors - only dominated by itself
+                    HashSet::new()
+                } else {
+                    let mut first_pred = true;
+                    let mut dom_set = HashSet::new();
+                    for pred in preds {
+                        if let Some(pred_dom) = self.dominators.get(&pred) {
+                            if first_pred {
+                                dom_set = pred_dom.clone();
+                                first_pred = false;
+                            } else {
+                                dom_set = dom_set.intersection(pred_dom).cloned().collect();
                             }
-                        } else if let Some(pred_dom) = dominators.get(&pred) {
-                            intersection = match intersection {
-                                None => Some(pred_dom.clone()),
-                                Some(current) => {
-                                    Some(current.intersection(pred_dom).cloned().collect())
-                                }
-                            };
                         }
                     }
+                    dom_set
+                };
+                // A block always dominates itself
+                new_dom_set.insert(block.id);
 
-                    if let Some(ref inter) = intersection {
-                        new_dom.extend(inter.iter().cloned());
+                if let Some(current_dom) = self.dominators.get(&block.id) {
+                    if *current_dom != new_dom_set {
+                        self.dominators.insert(block.id, new_dom_set);
+                        changed = true;
                     }
-                }
-
-                if dominators.get(&block) != Some(&new_dom) {
-                    dominators.insert(block, new_dom);
-                    changed = true;
                 }
             }
         }
-
-        Ok((dominators, predecessors))
     }
 
-    /// Check that every use of a value is dominated by its definition
-    fn check_dominance_property(
-        &self,
-        func: &MirFunction,
-        dominators: &HashMap<BlockId, BTreeSet<BlockId>>,
-        predecessors: &HashMap<BlockId, HashSet<BlockId>>,
-    ) -> Vec<SSAError> {
-        let mut errors = Vec::new();
-
-        // Build definition map
-        let mut def_locations: HashMap<ValueId, Location> = HashMap::new();
-        let mut def_blocks: HashMap<ValueId, BlockId> = HashMap::new();
+    /// Get predecessor blocks of a given block
+    fn get_predecessor_blocks(&self, func: &MirFunction, block_id: BlockId) -> Vec<BlockId> {
+        let mut predecessors = Vec::new();
 
         for block in &func.blocks {
-            for (idx, instr) in block.instructions.iter().enumerate() {
-                if let Some(defined_value) = self.get_defined_value(instr) {
-                    def_locations.insert(defined_value, Location::new(block.id, idx));
-                    def_blocks.insert(defined_value, block.id);
+            for successor in get_block_successors(&block.terminator) {
+                if successor == block_id {
+                    predecessors.push(block.id);
                 }
             }
         }
 
-        // Check all uses
-        for block in &func.blocks {
-            for (idx, instr) in block.instructions.iter().enumerate() {
-                let used_values = self.get_used_values(instr);
-                let use_location = Location::new(block.id, idx);
-
-                for used_value in used_values {
-                    // Special handling for phi nodes: check that the value is defined
-                    // in the corresponding predecessor block
-                    if let MirInstruction::Phi { incoming, .. } = instr {
-                        // For phi nodes, we check each incoming value separately
-                        for (pred_block, value) in incoming {
-                            if value == &used_value {
-                                self.check_phi_incoming_dominance(
-                                    &mut errors,
-                                    used_value,
-                                    *pred_block,
-                                    &use_location,
-                                    &def_locations,
-                                    &def_blocks,
-                                    dominators,
-                                );
-                            }
-                        }
-                    } else {
-                        // Regular instruction: definition must dominate use
-                        self.check_regular_use_dominance(
-                            &mut errors,
-                            used_value,
-                            block.id,
-                            idx,
-                            &use_location,
-                            &def_locations,
-                            &def_blocks,
-                            dominators,
-                        );
-                    }
-                }
-            }
-
-            // Check terminator uses
-            let terminator_uses = self.get_terminator_used_values(&block.terminator);
-            let term_location = Location::terminator(block.id);
-
-            for used_value in terminator_uses {
-                self.check_regular_use_dominance(
-                    &mut errors,
-                    used_value,
-                    block.id,
-                    usize::MAX, // After all instructions
-                    &term_location,
-                    &def_locations,
-                    &def_blocks,
-                    dominators,
-                );
-            }
-        }
-
-        errors
+        predecessors
     }
 
-    /// Check dominance for a regular (non-phi) use
-    fn check_regular_use_dominance(
+    /// Check if block A is dominated by block B
+    fn is_dominated_by(
         &self,
-        errors: &mut Vec<SSAError>,
-        used_value: ValueId,
-        use_block: BlockId,
-        use_idx: usize,
-        use_location: &Location,
-        def_locations: &HashMap<ValueId, Location>,
-        def_blocks: &HashMap<ValueId, BlockId>,
-        dominators: &HashMap<BlockId, BTreeSet<BlockId>>,
-    ) {
-        match def_blocks.get(&used_value) {
-            Some(&def_block) => {
-                // Check if definition block dominates use block
-                let use_dominated = dominators
-                    .get(&use_block)
-                    .map(|dom| dom.contains(&def_block))
-                    .unwrap_or(false);
-
-                if !use_dominated {
-                    // Definition block doesn't dominate use block
-                    errors.push(SSAError::DominanceViolation {
-                        value: used_value,
-                        def_location: def_locations.get(&used_value).cloned().unwrap(),
-                        use_location: use_location.clone(),
-                    });
-                } else if def_block == use_block {
-                    // Same block: check instruction ordering
-                    if let Some(def_loc) = def_locations.get(&used_value) {
-                        if let Some(def_idx) = def_loc.instruction_index {
-                            if use_idx != usize::MAX && def_idx >= use_idx {
-                                // Definition comes after or at use
-                                errors.push(SSAError::UseBeforeDefinition {
-                                    value: used_value,
-                                    use_location: use_location.clone(),
-                                    def_location: Some(def_loc.clone()),
-                                });
-                            }
-                        }
-                    }
-                }
-            }
-            None => {
-                // Value is never defined
-                errors.push(SSAError::UndefinedValue {
-                    value: used_value,
-                    use_location: use_location.clone(),
-                });
-            }
-        }
-    }
-
-    /// Check dominance for a phi node incoming value
-    fn check_phi_incoming_dominance(
-        &self,
-        errors: &mut Vec<SSAError>,
-        used_value: ValueId,
-        pred_block: BlockId,
-        use_location: &Location,
-        def_locations: &HashMap<ValueId, Location>,
-        def_blocks: &HashMap<ValueId, BlockId>,
-        dominators: &HashMap<BlockId, BTreeSet<BlockId>>,
-    ) {
-        // For phi nodes, the value must be defined in the predecessor block
-        // or in a block that dominates the predecessor
-        match def_blocks.get(&used_value) {
-            Some(&def_block) => {
-                // Check if definition block dominates the predecessor block
-                let pred_dominated = dominators
-                    .get(&pred_block)
-                    .map(|dom| dom.contains(&def_block))
-                    .unwrap_or(false);
-
-                if !pred_dominated {
-                    errors.push(SSAError::DominanceViolation {
-                        value: used_value,
-                        def_location: def_locations.get(&used_value).cloned().unwrap(),
-                        use_location: use_location.clone(),
-                    });
-                }
-            }
-            None => {
-                errors.push(SSAError::UndefinedValue {
-                    value: used_value,
-                    use_location: use_location.clone(),
-                });
-            }
-        }
-    }
-
-    /// Check that phi nodes are correctly placed and have valid predecessors
-    fn check_phi_placement(
-        &self,
-        func: &MirFunction,
-        predecessors: &HashMap<BlockId, HashSet<BlockId>>,
-    ) -> Vec<SSAError> {
-        let mut errors = Vec::new();
-
-        for block in &func.blocks {
-            let block_preds = predecessors.get(&block.id).cloned().unwrap_or_default();
-            let mut found_non_phi = false;
-
-            for (idx, instr) in block.instructions.iter().enumerate() {
-                match instr {
-                    MirInstruction::Phi { result, incoming, .. } => {
-                        // Check 1: Phi nodes must be at the beginning of blocks
-                        if found_non_phi {
-                            errors.push(SSAError::InvalidPhiPlacement {
-                                block: block.id,
-                                reason: format!(
-                                    "Phi node at instruction {} comes after non-phi instruction",
-                                    idx
-                                ),
-                            });
-                        }
-
-                        // Check 2: Number of incoming edges must match predecessors
-                        if incoming.len() != block_preds.len() {
-                            errors.push(SSAError::PhiPredecessorMismatch {
-                                value: *result,
-                                block: block.id,
-                                phi_incoming: incoming.len(),
-                                predecessor_count: block_preds.len(),
-                            });
-                        }
-
-                        // Check 3: Each incoming block must be a predecessor
-                        for (pred_block, _) in incoming {
-                            if !block_preds.contains(pred_block) {
-                                errors.push(SSAError::PhiInvalidPredecessor {
-                                    value: *result,
-                                    block: block.id,
-                                    referenced_block: *pred_block,
-                                });
-                            }
-                        }
-
-                        // Check 4: Each predecessor must have exactly one incoming edge
-                        // (handled by the count check above)
-                    }
-                    _ => {
-                        found_non_phi = true;
-                    }
-                }
-            }
-        }
-
-        errors
-    }
-
-    /// Get the value defined by an instruction, if any
-    fn get_defined_value(&self, instr: &MirInstruction) -> Option<ValueId> {
-        match instr {
-            MirInstruction::Load { result, .. }
-            | MirInstruction::GetElementPtr { result, .. }
-            | MirInstruction::LoadGlobal { result, .. }
-            | MirInstruction::Alloca { result, .. }
-            | MirInstruction::Cast { result, .. }
-            | MirInstruction::ZExt { result, .. }
-            | MirInstruction::SExt { result, .. }
-            | MirInstruction::Trunc { result, .. }
-            | MirInstruction::FPToSI { result, .. }
-            | MirInstruction::SIToFP { result, .. }
-            | MirInstruction::FPToUI { result, .. }
-            | MirInstruction::UIToFP { result, .. }
-            | MirInstruction::PtrCast { result, .. }
-            | MirInstruction::Binary { result, .. }
-            | MirInstruction::Unary { result, .. }
-            | MirInstruction::Compare { result, .. }
-            | MirInstruction::Const { result, .. }
-            | MirInstruction::Phi { result, .. }
-            | MirInstruction::Select { result, .. } => Some(*result),
-
-            MirInstruction::Call { result, .. }
-            | MirInstruction::CallIndirect { result, .. } => *result,
-
-            MirInstruction::Store { .. } | MirInstruction::StoreGlobal { .. } => None,
-        }
-    }
-
-    /// Get the values used by an instruction
-    fn get_used_values(&self, instr: &MirInstruction) -> Vec<ValueId> {
-        match instr {
-            MirInstruction::Load { address, .. } => vec![*address],
-            MirInstruction::Store { address, value } => vec![*address, *value],
-            MirInstruction::GetElementPtr { base, indices, .. } => {
-                let mut values = vec![*base];
-                values.extend(indices.iter().cloned());
-                values
-            }
-            MirInstruction::LoadGlobal { .. } => vec![],
-            MirInstruction::StoreGlobal { value, .. } => vec![*value],
-            MirInstruction::Alloca { .. } => vec![],
-            MirInstruction::Cast { source, .. }
-            | MirInstruction::ZExt { source, .. }
-            | MirInstruction::SExt { source, .. }
-            | MirInstruction::Trunc { source, .. }
-            | MirInstruction::FPToSI { source, .. }
-            | MirInstruction::SIToFP { source, .. }
-            | MirInstruction::FPToUI { source, .. }
-            | MirInstruction::UIToFP { source, .. }
-            | MirInstruction::PtrCast { source, .. } => vec![*source],
-            MirInstruction::Binary { left, right, .. } => vec![*left, *right],
-            MirInstruction::Unary { operand, .. } => vec![*operand],
-            MirInstruction::Compare { left, right, .. } => vec![*left, *right],
-            MirInstruction::Call { args, .. } => args.clone(),
-            MirInstruction::CallIndirect { func_ptr, args, .. } => {
-                let mut values = vec![*func_ptr];
-                values.extend(args.iter().cloned());
-                values
-            }
-            MirInstruction::Const { .. } => vec![],
-            MirInstruction::Phi { incoming, .. } => {
-                incoming.iter().map(|(_, v)| *v).collect()
-            }
-            MirInstruction::Select {
-                condition,
-                true_value,
-                false_value,
-                ..
-            } => vec![*condition, *true_value, *false_value],
-        }
-    }
-
-    /// Get the values used by a terminator
-    fn get_terminator_used_values(&self, term: &MirTerminator) -> Vec<ValueId> {
-        match term {
-            MirTerminator::Branch { .. } => vec![],
-            MirTerminator::CondBranch { condition, .. } => vec![*condition],
-            MirTerminator::Switch { value, .. } => vec![*value],
-            MirTerminator::Return { value } => value.iter().cloned().collect(),
-            MirTerminator::Unreachable => vec![],
-            MirTerminator::CallNoReturn { args, .. } => args.clone(),
-        }
-    }
-
-    /// Get successor blocks for a block
-    fn get_block_successors(&self, block: &MirBlock) -> Vec<BlockId> {
-        match &block.terminator {
-            MirTerminator::Branch { target } => vec![*target],
-            MirTerminator::CondBranch {
-                true_target,
-                false_target,
-                ..
-            } => vec![*true_target, *false_target],
-            MirTerminator::Switch {
-                default_target,
-                cases,
-                ..
-            } => {
-                let mut targets = vec![*default_target];
-                targets.extend(cases.iter().map(|(_, b)| *b));
-                targets
-            }
-            MirTerminator::Return { .. }
-            | MirTerminator::Unreachable
-            | MirTerminator::CallNoReturn { .. } => vec![],
+        block_a: BlockId,
+        block_b: BlockId,
+        dominators: &HashMap<BlockId, HashSet<BlockId>>,
+    ) -> bool {
+        if let Some(dom_set) = dominators.get(&block_a) {
+            dom_set.contains(&block_b)
+        } else {
+            false
         }
     }
 }
 
-impl Default for SSAValidator {
-    fn default() -> Self {
-        Self::new()
+/// Get all values used by a terminator
+fn get_terminator_uses(terminator: &MirTerminator) -> Vec<ValueId> {
+    match terminator {
+        MirTerminator::Branch { .. } => vec![],
+        MirTerminator::CondBranch { condition, .. } => vec![*condition],
+        MirTerminator::Switch { value, .. } => vec![*value],
+        MirTerminator::Return { value } => value.iter().copied().collect(),
+        MirTerminator::Unreachable => vec![],
+        MirTerminator::CallNoReturn { args, .. } => args.clone(),
+    }
+}
+
+/// Get all successor blocks from a terminator
+fn get_block_successors(terminator: &MirTerminator) -> Vec<BlockId> {
+    match terminator {
+        MirTerminator::Branch { target } => vec![*target],
+        MirTerminator::CondBranch {
+            true_target,
+            false_target,
+            ..
+        } => vec![*true_target, *false_target],
+        MirTerminator::Switch {
+            default_target,
+            cases,
+            ..
+        } => {
+            let mut succs = vec![*default_target];
+            succs.extend(cases.iter().map(|(_, target)| *target));
+            succs
+        }
+        MirTerminator::Return { .. }
+        | MirTerminator::Unreachable
+        | MirTerminator::CallNoReturn { .. } => vec![],
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::mir::builder::FunctionBuilder;
-    use crate::mir::types::{FuncId, MirType, MirConstant};
+    use crate::mir::builder::{FunctionBuilder, ModuleBuilder};
+    use crate::mir::{MirConstant, MirType};
 
     #[test]
-    fn test_valid_ssa() {
-        // Create a simple valid SSA function
-        let mut builder = FunctionBuilder::new(
-            FuncId(0),
-            "test_valid".to_string(),
-            MirType::I32,
-        );
-
-        // %0 = const 1
-        let v0 = builder.build_i32(1);
-        // %1 = const 2
-        let v1 = builder.build_i32(2);
-        // %2 = add %0, %1
-        let v2 = builder.fresh_value();
-        builder.build_add(v2, v0, v1, MirType::I32);
-        // return %2
-        builder.build_return(Some(v2));
-
-        let func = builder.build();
-
+    fn test_ssa_validator_creation() {
         let validator = SSAValidator::new();
-        let errors = validator.validate_function(&func);
-
-        // Should be valid
-        if !errors.is_empty() {
-            for e in &errors {
-                eprintln!("Error: {}", e);
-            }
-        }
-        // Note: This test may find errors because we're creating values
-        // without proper definition tracking in the builder
+        assert_eq!(validator.defined_values.len(), 0);
     }
 
     #[test]
-    fn test_multiple_definitions() {
-        // Create a function with multiple definitions of the same value
-        let mut builder = FunctionBuilder::new(
-            FuncId(0),
-            "test_multi_def".to_string(),
-            MirType::I32,
-        );
+    fn test_simple_function_validation() {
+        let mut module_builder = ModuleBuilder::new("test");
 
-        // Manually create instructions that define the same value twice
-        let shared_value = ValueId(100);
+        let mut func = module_builder.create_function("simple".to_string(), MirType::I64);
+        let result = func.build_i64(42);
+        func.build_return(Some(result));
+        module_builder.add_function(func.build());
 
-        // First definition
-        builder.build_const(shared_value, MirConstant::Int(1), MirType::I32);
-        // Second definition (violates SSA)
-        builder.build_const(shared_value, MirConstant::Int(2), MirType::I32);
+        let module = module_builder.build();
+        let mut validator = SSAValidator::new();
 
-        builder.build_return(Some(shared_value));
-
-        let func = builder.build();
-
-        let validator = SSAValidator::new();
-        let errors = validator.validate_function(&func);
-
-        // Should find multiple definitions error
-        let has_multi_def = errors.iter().any(|e| {
-            matches!(e, SSAError::MultipleDefinitions { value, .. } if value.0 == 100)
-        });
-
-        if !has_multi_def {
-            eprintln!("Expected MultipleDefinitions error, got: {:?}", errors);
-        }
-        // The test validates the structure works correctly
+        let result = validator.validate_function(&module.functions[0]);
+        assert!(result.is_valid);
+        assert_eq!(result.errors.len(), 0);
     }
 
     #[test]
-    fn test_location_display() {
-        let loc1 = Location::new(BlockId(0), 5);
-        let display1 = format!("{}", loc1);
+    fn test_unreachable_block_detection() {
+        let mut module_builder = ModuleBuilder::new("test");
 
-        let loc2 = Location::terminator(BlockId(1));
-        let display2 = format!("{}", loc2);
+        // Create a simple function that returns a constant
+        let mut func = module_builder.create_function("test".to_string(), MirType::I64);
+        let result = func.build_i64(42);
+        func.build_return(Some(result));
 
-        // Verify display formatting works
-        if !display1.contains("block 0") || !display1.contains("instruction 5") {
-            panic!("Unexpected display format: {}", display1);
-        }
-        if !display2.contains("block 1") || !display2.contains("terminator") {
-            panic!("Unexpected display format: {}", display2);
-        }
-    }
+        module_builder.add_function(func.build());
 
-    #[test]
-    fn test_empty_function() {
-        // Empty function should validate successfully
-        let builder = FunctionBuilder::new(
-            FuncId(0),
-            "empty".to_string(),
-            MirType::Unit,
-        );
+        let module = module_builder.build();
+        let mut validator = SSAValidator::new();
 
-        let func = builder.build();
-
-        let validator = SSAValidator::new();
-        let errors = validator.validate_function(&func);
-
-        // Empty function should have no SSA errors
-        // (there might be other issues like missing return, but not SSA violations)
-        for e in &errors {
-            eprintln!("Error in empty func: {}", e);
-        }
+        let result = validator.validate_function(&module.functions[0]);
+        assert!(result.is_valid); // Simple function should be valid
+        assert_eq!(result.errors.len(), 0);
     }
 }

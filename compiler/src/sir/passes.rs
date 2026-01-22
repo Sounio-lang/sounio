@@ -419,14 +419,144 @@ impl SimdVectorization {
         block_idx: usize,
         analysis: &LoopVectorizationAnalysis,
     ) -> bool {
-        // In full implementation, this would:
-        // 1. Create a new loop with vectorized operations
-        // 2. Handle remainder iterations with scalar code
-        // 3. Replace scalar operations with VectorOp instructions
-        
-        // For now, just mark that we've analyzed this block
-        // In full implementation, would transform the loop
+        use super::types::VectorType;
+
+        let vector_width = analysis.vector_width;
+
+        // Track value mappings from scalar to vector
+        let mut scalar_to_vector: HashMap<ValueId, ValueId> = HashMap::new();
+        let mut next_id = self.compute_max_value_id(func) + 1;
+
+        // Collect instructions to transform
+        let mut new_instructions = Vec::new();
+
+        for inst in &func.blocks[block_idx].instructions {
+            match &inst.inst {
+                // Vectorize loads: scalar load -> vector load
+                SirInst::Memory(MemoryOp::Load { ptr, ty, volatile, align }) => {
+                    if let super::types::SirType::Scalar(scalar_ty) = ty {
+                        let vec_ty = super::types::SirType::Vector(VectorType::new(*scalar_ty, vector_width));
+                        let vec_result = ValueId(next_id);
+                        next_id += 1;
+
+                        // Create vector load instruction
+                        new_instructions.push(Instruction::new(
+                            Some(vec_result),
+                            SirInst::Memory(MemoryOp::Load {
+                                ptr: *ptr,
+                                ty: vec_ty,
+                                volatile: *volatile,
+                                align: *align,
+                            }),
+                        ));
+
+                        if let Some(result) = inst.result {
+                            scalar_to_vector.insert(result, vec_result);
+                        }
+                        continue;
+                    }
+                }
+
+                // Vectorize stores: scalar store -> vector store
+                SirInst::Memory(MemoryOp::Store { ptr, val, volatile, align }) => {
+                    // Use vectorized value if available
+                    let vec_val = scalar_to_vector.get(val).copied().unwrap_or(*val);
+                    new_instructions.push(Instruction::new(
+                        None,
+                        SirInst::Memory(MemoryOp::Store {
+                            ptr: *ptr,
+                            val: vec_val,
+                            volatile: *volatile,
+                            align: *align,
+                        }),
+                    ));
+                    continue;
+                }
+
+                // Vectorize arithmetic: scalar binop -> vector binop
+                SirInst::BinOp { op, lhs, rhs } => {
+                    let vec_lhs = scalar_to_vector.get(lhs).copied().unwrap_or(*lhs);
+                    let vec_rhs = scalar_to_vector.get(rhs).copied().unwrap_or(*rhs);
+                    let vec_result = ValueId(next_id);
+                    next_id += 1;
+
+                    // Check for FMA pattern: a * b + c
+                    if matches!(op, ArithOp::FAdd | ArithOp::Add) {
+                        // Look for multiply feeding into this add
+                        if let Some(fma_inst) = self.try_create_fma(vec_lhs, vec_rhs) {
+                            new_instructions.push(Instruction::new(Some(vec_result), fma_inst));
+                            if let Some(result) = inst.result {
+                                scalar_to_vector.insert(result, vec_result);
+                            }
+                            continue;
+                        }
+                    }
+
+                    // Regular vector binary operation
+                    new_instructions.push(Instruction::new(
+                        Some(vec_result),
+                        SirInst::BinOp {
+                            op: *op,
+                            lhs: vec_lhs,
+                            rhs: vec_rhs,
+                        },
+                    ));
+
+                    if let Some(result) = inst.result {
+                        scalar_to_vector.insert(result, vec_result);
+                    }
+                    continue;
+                }
+
+                _ => {}
+            }
+
+            // Keep non-vectorizable instructions as-is
+            new_instructions.push(inst.clone());
+        }
+
+        // Replace block instructions with vectorized versions
+        func.blocks[block_idx].instructions = new_instructions;
+
         true
+    }
+
+    /// Compute the maximum ValueId in use in a function
+    fn compute_max_value_id(&self, func: &SirFunction) -> u32 {
+        let mut max_id = 0u32;
+        for block in &func.blocks {
+            for inst in &block.instructions {
+                if let Some(result) = inst.result {
+                    max_id = max_id.max(result.0);
+                }
+            }
+        }
+        max_id
+    }
+
+    /// Try to create an FMA instruction from a + (b * c) or (a * b) + c pattern
+    fn try_create_fma(&self, _lhs: ValueId, _rhs: ValueId) -> Option<SirInst> {
+        // FMA detection would require tracking which values came from multiplies
+        // For now, return None to fall back to separate mul+add
+        // Full implementation would analyze def-use chains
+        None
+    }
+
+    /// Select optimal vector width based on target architecture and element type
+    #[allow(dead_code)]
+    fn select_vector_width(elem_ty: &super::types::ScalarType) -> u8 {
+        use super::types::ScalarType;
+
+        // Default to 256-bit vectors (AVX2)
+        match elem_ty {
+            ScalarType::F64 => 4,  // 4x f64 = 256 bits
+            ScalarType::F32 => 8,  // 8x f32 = 256 bits
+            ScalarType::I64 => 4,  // 4x i64 = 256 bits
+            ScalarType::I32 => 8,  // 8x i32 = 256 bits
+            ScalarType::I16 => 16, // 16x i16 = 256 bits
+            ScalarType::I8 => 32,  // 32x i8 = 256 bits
+            ScalarType::Bool => 32, // packed bools
+        }
     }
 }
 

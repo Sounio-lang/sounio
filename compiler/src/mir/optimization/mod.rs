@@ -1,36 +1,155 @@
-//! MIR Optimization Framework
+//! MIR Optimization Module
 //!
-//! This module provides optimization passes for MIR,
-//! implementing proven algorithms from academic literature.
+//! This module provides optimization passes for MIR code.
 
-pub mod pass_manager;
+pub mod common_subexpression_elimination;
 pub mod constant_propagation;
 pub mod dead_code_elimination;
-pub mod common_subexpression_elimination;
-pub mod licm;
+pub mod function_inlining;
+pub mod pass_manager;
+pub mod strength_reduction;
 
-#[cfg(feature = "glm")]
-pub mod glm_integration;
-
-#[cfg(feature = "glm")]
+// Advanced optimization modules
+pub mod advanced_epistemic_optimization;
+pub mod function_inlining_complete;
 pub mod ml_guided_optimization;
-
-#[cfg(feature = "glm")]
-pub mod advanced_glm_optimization;
+pub mod performance_tuning;
+pub mod pipeline_with_validation;
 
 // Re-export commonly used optimization types
-pub use pass_manager::{
-    MIRPass, AnalysisPass, PassManager, OptimizationLevel,
-    create_default_pass_manager
-};
+pub use common_subexpression_elimination::CommonSubexpressionElimination;
+pub use constant_propagation::ConstantPropagation;
 pub use dead_code_elimination::DeadCodeElimination;
+pub use function_inlining::FunctionInlining;
+pub use pass_manager::{AnalysisPass, MIRPass};
+pub use strength_reduction::StrengthReduction;
 
-// Re-export optimization passes
-pub use constant_propagation::{ConstantPropagation, LatticeValue};
-pub use common_subexpression_elimination::{
-    CommonSubexpressionElimination, Expression, AvailableExpressions
-};
-pub use licm::{LoopInvariantCodeMotion, LoopInfo};
+// Advanced exports
+pub use advanced_epistemic_optimization::AdvancedEpistemicOptimization;
+pub use function_inlining_complete::CompleteFunctionInlining;
+pub use ml_guided_optimization::{MLGuidedOptimizer, MLOptimizationResult, TargetArchitecture};
+pub use performance_tuning::{PerformanceResult, PerformanceTunedOptimizer};
+pub use pipeline_with_validation::{PipelineResult, ValidatedOptimizationPipeline};
 
-#[cfg(feature = "glm")]
-pub use ml_guided_optimization::MLGuidedOptimization;
+/// Create a default optimization pipeline with validation
+pub fn create_validated_optimization_pipeline() -> ValidatedOptimizationPipeline {
+    ValidatedOptimizationPipeline::new()
+}
+
+/// Create an advanced ML-guided optimization pipeline
+pub fn create_ml_optimization_pipeline(
+    target_arch: TargetArchitecture,
+) -> MLGuidedOptimizer {
+    MLGuidedOptimizer::new(target_arch)
+}
+
+/// Create a performance-tuned optimizer
+pub fn create_performance_optimizer(
+    target_arch: performance_tuning::TargetArchitecture,
+) -> PerformanceTunedOptimizer {
+    PerformanceTunedOptimizer::new(target_arch)
+}
+
+/// Create a complete function inliner
+pub fn create_complete_inliner() -> CompleteFunctionInlining {
+    CompleteFunctionInlining::new()
+}
+
+/// Create an advanced epistemic optimizer
+pub fn create_epistemic_optimizer() -> AdvancedEpistemicOptimization {
+    AdvancedEpistemicOptimization::new()
+}
+
+/// Create a default optimization level
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OptimizationLevel {
+    O0,
+    O1,
+    O2,
+    O3,
+}
+
+/// Pass manager for running optimization passes
+pub struct PassManager {
+    level: OptimizationLevel,
+}
+
+impl PassManager {
+    pub fn new() -> Self {
+        Self {
+            level: OptimizationLevel::O2,
+        }
+    }
+
+    pub fn new_with_level(level: OptimizationLevel) -> Self {
+        Self { level }
+    }
+
+    pub fn run_function_passes(
+        &mut self,
+        func: &mut crate::mir::MirFunction,
+    ) -> Result<PassResult, String> {
+        let mut total_modified = false;
+
+        // Apply constant propagation for all levels
+        let mut cp = ConstantPropagation::new();
+        if cp.run_on_function(func)? {
+            total_modified = true;
+        }
+
+        // Apply other optimizations based on level
+        match self.level {
+            OptimizationLevel::O1 | OptimizationLevel::O2 | OptimizationLevel::O3 => {
+                let mut dce = DeadCodeElimination::new();
+                if dce.run_on_function(func)? {
+                    total_modified = true;
+                }
+            }
+            _ => {}
+        }
+
+        match self.level {
+            OptimizationLevel::O2 | OptimizationLevel::O3 => {
+                let mut cse = CommonSubexpressionElimination::new();
+                if cse.run_on_function(func)? {
+                    total_modified = true;
+                }
+            }
+            _ => {}
+        }
+
+        if self.level == OptimizationLevel::O3 {
+            let mut sr = StrengthReduction::new();
+            if sr.run_on_function(func)? {
+                total_modified = true;
+            }
+
+            let mut fi = FunctionInlining::new();
+            if fi.run_on_function(func)? {
+                total_modified = true;
+            }
+        }
+
+        Ok(PassResult {
+            modified: total_modified,
+            passes_applied: vec![],
+            instructions_reduced: 0,
+        })
+    }
+}
+
+/// Result from running optimization passes
+#[derive(Debug, Clone)]
+pub struct PassResult {
+    pub modified: bool,
+    pub passes_applied: Vec<PassInfo>,
+    pub instructions_reduced: usize,
+}
+
+/// Information about a pass that was applied
+#[derive(Debug, Clone)]
+pub struct PassInfo {
+    pub name: String,
+    pub time_ms: f64,
+    pub modified: bool,
+}

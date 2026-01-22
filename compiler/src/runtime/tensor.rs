@@ -493,64 +493,139 @@ impl Tensor<f64> {
         None
     }
 
-    /// Element-wise addition
+    /// Element-wise addition with broadcasting support
     pub fn add(&self, other: &Self) -> Option<Self> {
-        if self.shape != other.shape {
-            // TODO: Broadcasting
-            return None;
+        // Fast path: shapes match exactly
+        if self.shape == other.shape {
+            let data: Vec<f64> = self
+                .data
+                .iter()
+                .zip(other.data.iter())
+                .map(|(a, b)| a + b)
+                .collect();
+
+            return Some(Self {
+                data,
+                shape: self.shape.clone(),
+                strides: self.strides.clone(),
+            });
         }
 
-        let data: Vec<f64> = self
-            .data
-            .iter()
-            .zip(other.data.iter())
-            .map(|(a, b)| a + b)
-            .collect();
+        // Broadcasting path
+        let bs = BroadcastShape::new(&self.shape, &other.shape).ok()?;
+        let mut data = vec![0.0; bs.numel()];
+        let strides = compute_strides(&bs.output);
+
+        for (out_idx, in1_idx, in2_idx) in bs.iter() {
+            data[out_idx] = self.data[in1_idx] + other.data[in2_idx];
+        }
 
         Some(Self {
             data,
-            shape: self.shape.clone(),
-            strides: self.strides.clone(),
+            shape: bs.output,
+            strides,
         })
     }
 
-    /// Element-wise subtraction
+    /// Element-wise subtraction with broadcasting support
     pub fn sub(&self, other: &Self) -> Option<Self> {
-        if self.shape != other.shape {
-            return None;
+        // Fast path: shapes match exactly
+        if self.shape == other.shape {
+            let data: Vec<f64> = self
+                .data
+                .iter()
+                .zip(other.data.iter())
+                .map(|(a, b)| a - b)
+                .collect();
+
+            return Some(Self {
+                data,
+                shape: self.shape.clone(),
+                strides: self.strides.clone(),
+            });
         }
 
-        let data: Vec<f64> = self
-            .data
-            .iter()
-            .zip(other.data.iter())
-            .map(|(a, b)| a - b)
-            .collect();
+        // Broadcasting path
+        let bs = BroadcastShape::new(&self.shape, &other.shape).ok()?;
+        let mut data = vec![0.0; bs.numel()];
+        let strides = compute_strides(&bs.output);
+
+        for (out_idx, in1_idx, in2_idx) in bs.iter() {
+            data[out_idx] = self.data[in1_idx] - other.data[in2_idx];
+        }
 
         Some(Self {
             data,
-            shape: self.shape.clone(),
-            strides: self.strides.clone(),
+            shape: bs.output,
+            strides,
         })
     }
 
-    /// Element-wise multiplication (Hadamard product)
+    /// Element-wise multiplication (Hadamard product) with broadcasting support
     pub fn hadamard(&self, other: &Self) -> Option<Self> {
-        if self.shape != other.shape {
-            return None;
+        // Fast path: shapes match exactly
+        if self.shape == other.shape {
+            let data: Vec<f64> = self
+                .data
+                .iter()
+                .zip(other.data.iter())
+                .map(|(a, b)| a * b)
+                .collect();
+
+            return Some(Self {
+                data,
+                shape: self.shape.clone(),
+                strides: self.strides.clone(),
+            });
         }
 
-        let data: Vec<f64> = self
-            .data
-            .iter()
-            .zip(other.data.iter())
-            .map(|(a, b)| a * b)
-            .collect();
+        // Broadcasting path
+        let bs = BroadcastShape::new(&self.shape, &other.shape).ok()?;
+        let mut data = vec![0.0; bs.numel()];
+        let strides = compute_strides(&bs.output);
+
+        for (out_idx, in1_idx, in2_idx) in bs.iter() {
+            data[out_idx] = self.data[in1_idx] * other.data[in2_idx];
+        }
 
         Some(Self {
             data,
-            shape: self.shape.clone(),
-            strides: self.strides.clone(),
+            shape: bs.output,
+            strides,
+        })
+    }
+
+    /// Element-wise division with broadcasting support
+    pub fn div(&self, other: &Self) -> Option<Self> {
+        // Fast path: shapes match exactly
+        if self.shape == other.shape {
+            let data: Vec<f64> = self
+                .data
+                .iter()
+                .zip(other.data.iter())
+                .map(|(a, b)| a / b)
+                .collect();
+
+            return Some(Self {
+                data,
+                shape: self.shape.clone(),
+                strides: self.strides.clone(),
+            });
+        }
+
+        // Broadcasting path
+        let bs = BroadcastShape::new(&self.shape, &other.shape).ok()?;
+        let mut data = vec![0.0; bs.numel()];
+        let strides = compute_strides(&bs.output);
+
+        for (out_idx, in1_idx, in2_idx) in bs.iter() {
+            data[out_idx] = self.data[in1_idx] / other.data[in2_idx];
+        }
+
+        Some(Self {
+            data,
+            shape: bs.output,
+            strides,
         })
     }
 
@@ -653,6 +728,153 @@ fn flat_to_indices(flat: usize, shape: &[usize]) -> Vec<usize> {
         remaining /= shape[i];
     }
     indices
+}
+
+/// Broadcasting result for efficient element-wise operations
+#[derive(Debug, Clone)]
+pub struct BroadcastShape {
+    /// Output shape after broadcasting
+    pub output: Shape,
+    /// Aligned shapes (prepended with 1s)
+    pub aligned1: Vec<usize>,
+    pub aligned2: Vec<usize>,
+    /// Strides for output
+    pub output_strides: Vec<usize>,
+}
+
+impl BroadcastShape {
+    /// Create a broadcast shape from two input shapes
+    pub fn new(shape1: &Shape, shape2: &Shape) -> Result<Self, BroadcastError> {
+        let output = shape1.broadcast_with(shape2).ok_or_else(|| BroadcastError {
+            shape1: shape1.clone(),
+            shape2: shape2.clone(),
+            message: "Shapes are not broadcast-compatible".to_string(),
+        })?;
+
+        let max_rank = output.rank();
+        let dims1: Vec<usize> = shape1.dims.iter().filter_map(|d| d.value()).collect();
+        let dims2: Vec<usize> = shape2.dims.iter().filter_map(|d| d.value()).collect();
+
+        // Align shapes by prepending 1s
+        let mut aligned1 = vec![1usize; max_rank.saturating_sub(dims1.len())];
+        aligned1.extend_from_slice(&dims1);
+
+        let mut aligned2 = vec![1usize; max_rank.saturating_sub(dims2.len())];
+        aligned2.extend_from_slice(&dims2);
+
+        let output_strides = compute_strides(&output);
+
+        Ok(Self {
+            output,
+            aligned1,
+            aligned2,
+            output_strides,
+        })
+    }
+
+    /// Total number of elements in output
+    pub fn numel(&self) -> usize {
+        self.output.numel().unwrap_or(0)
+    }
+
+    /// Create an iterator for broadcasted element-wise operations
+    pub fn iter(&self) -> BroadcastIter {
+        BroadcastIter::new(self)
+    }
+}
+
+/// Error when shapes cannot be broadcast
+#[derive(Debug, Clone)]
+pub struct BroadcastError {
+    pub shape1: Shape,
+    pub shape2: Shape,
+    pub message: String,
+}
+
+impl std::fmt::Display for BroadcastError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "Cannot broadcast {} and {}: {}",
+            self.shape1, self.shape2, self.message
+        )
+    }
+}
+
+impl std::error::Error for BroadcastError {}
+
+/// Iterator over broadcast indices
+pub struct BroadcastIter<'a> {
+    bs: &'a BroadcastShape,
+    current: usize,
+    strides1: Vec<usize>,
+    strides2: Vec<usize>,
+}
+
+impl<'a> BroadcastIter<'a> {
+    fn new(bs: &'a BroadcastShape) -> Self {
+        // Compute strides for input shapes
+        let strides1 = compute_broadcast_strides(&bs.aligned1);
+        let strides2 = compute_broadcast_strides(&bs.aligned2);
+        Self {
+            bs,
+            current: 0,
+            strides1,
+            strides2,
+        }
+    }
+
+    fn flat_to_multi(&self, flat: usize) -> Vec<usize> {
+        let nd = self.bs.output.rank();
+        let mut multi = vec![0; nd];
+        let mut temp = flat;
+        for i in 0..nd {
+            if self.bs.output_strides[i] > 0 {
+                multi[i] = temp / self.bs.output_strides[i];
+                temp %= self.bs.output_strides[i];
+            }
+        }
+        multi
+    }
+
+    fn compute_input_flat(&self, multi: &[usize], aligned: &[usize], strides: &[usize]) -> usize {
+        let mut flat = 0;
+        for i in 0..multi.len() {
+            let idx = if aligned[i] == 1 { 0 } else { multi[i] };
+            flat += idx * strides[i];
+        }
+        flat
+    }
+}
+
+impl<'a> Iterator for BroadcastIter<'a> {
+    type Item = (usize, usize, usize); // (output_flat, input1_flat, input2_flat)
+
+    fn next(&mut self) -> Option<Self::Item> {
+        if self.current >= self.bs.numel() {
+            return None;
+        }
+
+        let out = self.current;
+        let multi = self.flat_to_multi(out);
+        let in1 = self.compute_input_flat(&multi, &self.bs.aligned1, &self.strides1);
+        let in2 = self.compute_input_flat(&multi, &self.bs.aligned2, &self.strides2);
+        self.current += 1;
+        Some((out, in1, in2))
+    }
+}
+
+/// Compute strides for broadcast iteration
+fn compute_broadcast_strides(dims: &[usize]) -> Vec<usize> {
+    let nd = dims.len();
+    if nd == 0 {
+        return vec![];
+    }
+    let mut strides = vec![1; nd];
+    for i in (0..nd.saturating_sub(1)).rev() {
+        strides[i] = strides[i + 1] * dims[i + 1];
+    }
+    strides
 }
 
 /// Shape verification result for type checking
@@ -881,5 +1103,52 @@ mod tests {
 
         assert!(verify_matmul(&a, &b).is_ok());
         assert!(verify_matmul(&a, &c).is_err());
+    }
+
+    #[test]
+    fn test_broadcast_iter() {
+        let shape1 = Shape::new(&[2, 1]);
+        let shape2 = Shape::new(&[1, 3]);
+
+        let bs = BroadcastShape::new(&shape1, &shape2).unwrap();
+        assert_eq!(bs.output, Shape::new(&[2, 3]));
+        assert_eq!(bs.numel(), 6);
+
+        // Verify iterator produces correct number of elements
+        assert_eq!(bs.iter().count(), 6);
+    }
+
+    #[test]
+    fn test_broadcast_add() {
+        // [2, 1] + [1, 3] -> [2, 3]
+        let a = Tensor::from_slice(&Shape::new(&[2, 1]), &[1.0, 2.0]).unwrap();
+        let b = Tensor::from_slice(&Shape::new(&[1, 3]), &[10.0, 20.0, 30.0]).unwrap();
+
+        let c = a.add(&b).unwrap();
+        assert_eq!(c.shape(), &Shape::new(&[2, 3]));
+        // Row 0: 1 + [10, 20, 30] = [11, 21, 31]
+        // Row 1: 2 + [10, 20, 30] = [12, 22, 32]
+        assert_eq!(c.data(), &[11.0, 21.0, 31.0, 12.0, 22.0, 32.0]);
+    }
+
+    #[test]
+    fn test_broadcast_mul() {
+        // [3] * [3, 1] -> [3, 3] (column broadcast)
+        let a = Tensor::from_slice(&Shape::vector(3), &[1.0, 2.0, 3.0]).unwrap();
+        let b = Tensor::from_slice(&Shape::new(&[3, 1]), &[10.0, 20.0, 30.0]).unwrap();
+
+        let c = a.hadamard(&b).unwrap();
+        assert_eq!(c.shape(), &Shape::new(&[3, 3]));
+    }
+
+    #[test]
+    fn test_broadcast_scalar() {
+        // Scalar broadcast: [2, 2] + [] -> [2, 2]
+        let a = Tensor::from_slice(&Shape::matrix(2, 2), &[1.0, 2.0, 3.0, 4.0]).unwrap();
+        let scalar = Tensor::from_slice(&Shape::scalar(), &[10.0]).unwrap();
+
+        let c = a.add(&scalar).unwrap();
+        assert_eq!(c.shape(), &Shape::matrix(2, 2));
+        assert_eq!(c.data(), &[11.0, 12.0, 13.0, 14.0]);
     }
 }

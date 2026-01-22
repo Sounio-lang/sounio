@@ -273,6 +273,14 @@ pub enum HirType {
     /// Quaternion (4x f32: x, y, z, w)
     Quat,
 
+    // Double-precision vector types
+    /// 2D vector (2x f64)
+    Vec2d,
+    /// 3D vector (3x f64)
+    Vec3d,
+    /// 4D vector (4x f64)
+    Vec4d,
+
     // Automatic differentiation types
     /// Dual number for forward-mode autodiff (value: f64, derivative: f64)
     Dual,
@@ -621,6 +629,9 @@ impl HirType {
             HirType::Mat4 => "mat4".to_string(),
             HirType::Quat => "quat".to_string(),
             HirType::Dual => "dual".to_string(),
+            HirType::Vec2d => "vec2d".to_string(),
+            HirType::Vec3d => "vec3d".to_string(),
+            HirType::Vec4d => "vec4d".to_string(),
             HirType::Ref { mutable, inner } => {
                 if *mutable {
                     format!("&!{}", inner.format_short())
@@ -1059,6 +1070,9 @@ pub enum HirLiteral {
     Float(f64),
     Char(char),
     String(String),
+    /// C string literal: null-terminated string for FFI
+    /// The stored string does NOT include the null terminator - codegen adds it.
+    CString(String),
 }
 
 /// HIR binary operator

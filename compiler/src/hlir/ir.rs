@@ -156,6 +156,10 @@ pub enum HlirType {
     Mat3, // 3x3 f32 (9 floats, may be padded)
     Mat4, // 4x4 f32 (16 floats)
     Quat, // 4x f32 (x, y, z, w)
+    // f64 vector types
+    Vec2d, // 2x f64 (16 bytes)
+    Vec3d, // 3x f64 (24 bytes)
+    Vec4d, // 4x f64 (32 bytes)
     // Automatic differentiation
     Dual, // Dual number: (value: f64, derivative: f64) = 128 bits
 }
@@ -218,6 +222,10 @@ impl HlirType {
             HirType::Mat3 => HlirType::Mat3,
             HirType::Mat4 => HlirType::Mat4,
             HirType::Quat => HlirType::Quat,
+            // f64 vector types
+            HirType::Vec2d => HlirType::Vec2d,
+            HirType::Vec3d => HlirType::Vec3d,
+            HirType::Vec4d => HlirType::Vec4d,
             // Automatic differentiation
             HirType::Dual => HlirType::Dual,
             // Async types - Future is lowered to a pointer to a task structure
@@ -277,6 +285,9 @@ impl HlirType {
             HlirType::Mat3 => 288, // 9 x 32-bit floats
             HlirType::Mat4 => 512, // 16 x 32-bit floats
             HlirType::Quat => 128, // 4 x 32-bit floats (x, y, z, w)
+            HlirType::Vec2d => 128, // 2 x 64-bit floats
+            HlirType::Vec3d => 256, // 3 x 64-bit floats, padded for SIMD
+            HlirType::Vec4d => 256, // 4 x 64-bit floats
             HlirType::Dual => 128, // 2 x 64-bit floats (value, derivative)
         }
     }
@@ -412,6 +423,9 @@ pub enum HlirConstant {
     Int(i64, HlirType),
     Float(f64, HlirType),
     String(String),
+    /// C string literal: null-terminated string for FFI
+    /// The stored string does NOT include the null terminator - codegen adds it.
+    CString(String),
     Array(Vec<HlirConstant>),
     Struct(Vec<HlirConstant>),
     Null(HlirType),

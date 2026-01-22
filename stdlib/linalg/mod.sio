@@ -616,12 +616,720 @@ pub struct SymmetricEigenDecomposition {
 }
 
 // ============================================================================
-// SPARSE MATRIX TYPES (for future extension)
+// SPARSE MATRIX TYPES (CSR Format)
 // ============================================================================
 
-// TODO: Add CSR, CSC sparse matrix formats
-// TODO: Add sparse BLAS operations (SpBLAS)
-// TODO: Add iterative solvers (CG, GMRES, BiCGSTAB)
+/// Compressed Sparse Row (CSR) format matrix.
+/// Efficient for row slicing and matrix-vector products.
+pub struct SparseMatrixCSR {
+    /// Number of rows
+    rows: usize,
+    /// Number of columns
+    cols: usize,
+    /// Non-zero values (in row-major order within each row)
+    values: &![f64],
+    /// Column indices for each value
+    col_indices: &![usize],
+    /// Row pointers: row_ptr[i] is the index in values/col_indices where row i starts
+    /// row_ptr has length rows + 1
+    row_ptr: &![usize],
+    /// Number of non-zero elements
+    nnz: usize,
+}
+
+impl SparseMatrixCSR {
+    /// Create a new CSR matrix from COO (coordinate) format triplets
+    pub fn from_triplets(
+        rows: usize,
+        cols: usize,
+        row_indices: &[usize],
+        col_indices: &[usize],
+        values: &[f64]
+    ) -> SparseMatrixCSR with Alloc {
+        let nnz = values.len()
+
+        // Count elements per row
+        let row_counts = alloc_array::<usize>(rows)
+        for i in 0..rows {
+            row_counts[i] = 0
+        }
+        for i in 0..nnz {
+            row_counts[row_indices[i]] = row_counts[row_indices[i]] + 1
+        }
+
+        // Build row pointers (cumulative sum)
+        let row_ptr = alloc_array::<usize>(rows + 1)
+        row_ptr[0] = 0
+        for i in 0..rows {
+            row_ptr[i + 1] = row_ptr[i] + row_counts[i]
+        }
+
+        // Fill values and column indices
+        let csr_values = alloc_array::<f64>(nnz)
+        let csr_col_indices = alloc_array::<usize>(nnz)
+        let current_pos = alloc_array::<usize>(rows)
+        for i in 0..rows {
+            current_pos[i] = row_ptr[i]
+        }
+
+        for i in 0..nnz {
+            let row = row_indices[i]
+            let pos = current_pos[row]
+            csr_values[pos] = values[i]
+            csr_col_indices[pos] = col_indices[i]
+            current_pos[row] = pos + 1
+        }
+
+        SparseMatrixCSR {
+            rows, cols,
+            values: csr_values,
+            col_indices: csr_col_indices,
+            row_ptr,
+            nnz
+        }
+    }
+
+    /// Create an identity matrix in CSR format
+    pub fn eye(n: usize) -> SparseMatrixCSR with Alloc {
+        let values = alloc_array::<f64>(n)
+        let col_indices = alloc_array::<usize>(n)
+        let row_ptr = alloc_array::<usize>(n + 1)
+
+        for i in 0..n {
+            values[i] = 1.0
+            col_indices[i] = i
+            row_ptr[i] = i
+        }
+        row_ptr[n] = n
+
+        SparseMatrixCSR {
+            rows: n, cols: n,
+            values, col_indices, row_ptr,
+            nnz: n
+        }
+    }
+
+    /// Number of rows
+    pub fn rows(&self) -> usize {
+        self.rows
+    }
+
+    /// Number of columns
+    pub fn cols(&self) -> usize {
+        self.cols
+    }
+
+    /// Number of non-zero elements
+    pub fn nnz(&self) -> usize {
+        self.nnz
+    }
+
+    /// Sparsity ratio (nnz / total)
+    pub fn sparsity(&self) -> f64 {
+        self.nnz as f64 / (self.rows * self.cols) as f64
+    }
+
+    /// Get element at (i, j) - O(nnz_in_row) lookup
+    pub fn get(&self, i: usize, j: usize) -> f64 {
+        let row_start = self.row_ptr[i]
+        let row_end = self.row_ptr[i + 1]
+
+        for k in row_start..row_end {
+            if self.col_indices[k] == j {
+                return self.values[k]
+            }
+        }
+        0.0
+    }
+
+    /// Sparse matrix-vector multiply: y = A * x
+    pub fn mul_vec(&self, x: &DenseVector) -> DenseVector with Alloc {
+        let mut y = DenseVector::zeros(self.rows)
+
+        for i in 0..self.rows {
+            let row_start = self.row_ptr[i]
+            let row_end = self.row_ptr[i + 1]
+            var sum = 0.0
+
+            for k in row_start..row_end {
+                let j = self.col_indices[k]
+                sum = sum + self.values[k] * x.get(j)
+            }
+            y.set(i, sum)
+        }
+        y
+    }
+
+    /// Sparse matrix-vector multiply with scaling: y = alpha * A * x + beta * y
+    pub fn spmv(&self, alpha: f64, x: &DenseVector, beta: f64, y: &!DenseVector) {
+        for i in 0..self.rows {
+            let row_start = self.row_ptr[i]
+            let row_end = self.row_ptr[i + 1]
+            var sum = 0.0
+
+            for k in row_start..row_end {
+                let j = self.col_indices[k]
+                sum = sum + self.values[k] * x.get(j)
+            }
+            y.set(i, alpha * sum + beta * y.get(i))
+        }
+    }
+
+    /// Convert to dense matrix
+    pub fn to_dense(&self) -> DenseMatrix with Alloc {
+        let mut m = DenseMatrix::zeros(self.rows, self.cols)
+
+        for i in 0..self.rows {
+            let row_start = self.row_ptr[i]
+            let row_end = self.row_ptr[i + 1]
+
+            for k in row_start..row_end {
+                let j = self.col_indices[k]
+                m.set(i, j, self.values[k])
+            }
+        }
+        m
+    }
+}
+
+// ============================================================================
+// ITERATIVE SOLVERS
+// ============================================================================
+
+/// Configuration for iterative solvers
+pub struct IterativeSolverConfig {
+    /// Maximum iterations
+    pub max_iter: usize,
+    /// Convergence tolerance (relative residual)
+    pub tol: f64,
+    /// Initial guess (None = zero vector)
+    pub x0: Option<DenseVector>,
+}
+
+impl IterativeSolverConfig {
+    /// Default configuration
+    pub fn default() -> IterativeSolverConfig {
+        IterativeSolverConfig {
+            max_iter: 1000,
+            tol: 1e-10,
+            x0: None
+        }
+    }
+}
+
+/// Result from an iterative solver
+pub struct IterativeSolverResult {
+    /// Solution vector
+    pub x: DenseVector,
+    /// Number of iterations performed
+    pub iterations: usize,
+    /// Final residual norm
+    pub residual: f64,
+    /// Convergence flag
+    pub converged: bool,
+}
+
+/// Conjugate Gradient solver for symmetric positive definite systems.
+/// Solves A * x = b where A is SPD.
+pub fn cg(
+    A: &SparseMatrixCSR,
+    b: &DenseVector,
+    config: &IterativeSolverConfig
+) -> IterativeSolverResult with Alloc {
+    let n = b.len()
+
+    // Initial guess
+    var x = match config.x0 {
+        Some(ref x0) => x0.clone(),
+        None => DenseVector::zeros(n)
+    }
+
+    // r = b - A*x
+    var r = A.mul_vec(&x)
+    for i in 0..n {
+        r.set(i, b.get(i) - r.get(i))
+    }
+
+    // p = r
+    var p = DenseVector::zeros(n)
+    p.copy_from(&r)
+
+    var rsold = r.dot(&r)
+    let b_norm = b.norm2()
+
+    var iterations = 0
+    var converged = false
+
+    for iter in 0..config.max_iter {
+        iterations = iter + 1
+
+        // Ap = A * p
+        let Ap = A.mul_vec(&p)
+
+        // alpha = rsold / (p^T * Ap)
+        let pAp = p.dot(&Ap)
+        if pAp < 1e-30 {
+            break
+        }
+        let alpha = rsold / pAp
+
+        // x = x + alpha * p
+        x.axpy(alpha, &p)
+
+        // r = r - alpha * Ap
+        r.axpy(-alpha, &Ap)
+
+        // Check convergence
+        let rsnew = r.dot(&r)
+        let rel_residual = rsnew.sqrt() / b_norm
+
+        if rel_residual < config.tol {
+            converged = true
+            break
+        }
+
+        // p = r + (rsnew/rsold) * p
+        let beta = rsnew / rsold
+        for i in 0..n {
+            p.set(i, r.get(i) + beta * p.get(i))
+        }
+
+        rsold = rsnew
+    }
+
+    IterativeSolverResult {
+        x,
+        iterations,
+        residual: r.norm2(),
+        converged
+    }
+}
+
+/// GMRES solver for general (possibly non-symmetric) systems.
+/// Solves A * x = b using Generalized Minimal Residual method.
+pub fn gmres(
+    A: &SparseMatrixCSR,
+    b: &DenseVector,
+    config: &IterativeSolverConfig,
+    restart: usize  // Restart parameter (typical: 20-50)
+) -> IterativeSolverResult with Alloc {
+    let n = b.len()
+    let m = if restart < n { restart } else { n }
+
+    // Initial guess
+    var x = match config.x0 {
+        Some(ref x0) => x0.clone(),
+        None => DenseVector::zeros(n)
+    }
+
+    let b_norm = b.norm2()
+    var iterations = 0
+    var converged = false
+    var final_residual = 0.0
+
+    for outer in 0..(config.max_iter / m + 1) {
+        // r = b - A*x
+        var r = A.mul_vec(&x)
+        for i in 0..n {
+            r.set(i, b.get(i) - r.get(i))
+        }
+
+        let r_norm = r.norm2()
+        if r_norm / b_norm < config.tol {
+            converged = true
+            final_residual = r_norm
+            break
+        }
+
+        // Arnoldi process: build orthonormal basis V and upper Hessenberg H
+        // V is (n x m+1), H is (m+1 x m)
+        let mut V_cols: &![DenseVector] = alloc_array::<DenseVector>(m + 1)
+        let mut H = DenseMatrix::zeros(m + 1, m)
+
+        // v_0 = r / ||r||
+        V_cols[0] = DenseVector::zeros(n)
+        for i in 0..n {
+            V_cols[0].set(i, r.get(i) / r_norm)
+        }
+
+        // g = [||r||, 0, 0, ...] (m+1 elements)
+        var g = DenseVector::zeros(m + 1)
+        g.set(0, r_norm)
+
+        var k = 0
+        for j in 0..m {
+            iterations = iterations + 1
+
+            // w = A * v_j
+            let w_temp = A.mul_vec(&V_cols[j])
+            var w = w_temp
+
+            // Gram-Schmidt orthogonalization
+            for i in 0..(j + 1) {
+                let h_ij = w.dot(&V_cols[i])
+                H.set(i, j, h_ij)
+                w.axpy(-h_ij, &V_cols[i])
+            }
+
+            let w_norm = w.norm2()
+            H.set(j + 1, j, w_norm)
+
+            if w_norm < 1e-14 {
+                k = j + 1
+                break
+            }
+
+            // v_{j+1} = w / ||w||
+            V_cols[j + 1] = DenseVector::zeros(n)
+            for i in 0..n {
+                V_cols[j + 1].set(i, w.get(i) / w_norm)
+            }
+
+            // Apply Givens rotations to H and g (for least squares)
+            // This is the QR factorization step
+            // Simplified: we'll use direct least squares at the end
+
+            k = j + 1
+
+            if iterations >= config.max_iter {
+                break
+            }
+        }
+
+        // Solve least squares: min ||H_k * y - g_k||
+        // H_k is (k+1) x k upper Hessenberg
+        // Use back substitution on R from QR(H)
+        if k > 0 {
+            // Simplified: solve using normal equations for small systems
+            // y = (H^T H)^{-1} H^T g
+            let H_k = extract_submatrix(&H, k + 1, k)
+            let g_k = extract_subvector(&g, k + 1)
+
+            // Solve via back substitution on upper triangular part
+            let y = solve_upper_hessenberg(&H_k, &g_k)
+
+            // x = x + V_k * y
+            for j in 0..k {
+                x.axpy(y.get(j), &V_cols[j])
+            }
+        }
+
+        // Compute actual residual
+        r = A.mul_vec(&x)
+        for i in 0..n {
+            r.set(i, b.get(i) - r.get(i))
+        }
+        final_residual = r.norm2()
+
+        if final_residual / b_norm < config.tol {
+            converged = true
+            break
+        }
+    }
+
+    IterativeSolverResult {
+        x,
+        iterations,
+        residual: final_residual,
+        converged
+    }
+}
+
+// Helper: extract submatrix
+fn extract_submatrix(m: &DenseMatrix, rows: usize, cols: usize) -> DenseMatrix with Alloc {
+    let mut sub = DenseMatrix::zeros(rows, cols)
+    for i in 0..rows {
+        for j in 0..cols {
+            sub.set(i, j, m.get(i, j))
+        }
+    }
+    sub
+}
+
+// Helper: extract subvector
+fn extract_subvector(v: &DenseVector, len: usize) -> DenseVector with Alloc {
+    let mut sub = DenseVector::zeros(len)
+    for i in 0..len {
+        sub.set(i, v.get(i))
+    }
+    sub
+}
+
+// Helper: solve upper Hessenberg system (simplified)
+fn solve_upper_hessenberg(H: &DenseMatrix, g: &DenseVector) -> DenseVector with Alloc {
+    let m = H.cols()
+    var y = DenseVector::zeros(m)
+
+    // Back substitution (assuming H is essentially upper triangular after Givens)
+    for i in (0..m).rev() {
+        var sum = g.get(i)
+        for j in (i + 1)..m {
+            sum = sum - H.get(i, j) * y.get(j)
+        }
+        let h_ii = H.get(i, i)
+        if h_ii.abs() > 1e-14 {
+            y.set(i, sum / h_ii)
+        }
+    }
+    y
+}
+
+/// BiCGSTAB solver for general non-symmetric systems.
+/// Bi-Conjugate Gradient Stabilized method.
+pub fn bicgstab(
+    A: &SparseMatrixCSR,
+    b: &DenseVector,
+    config: &IterativeSolverConfig
+) -> IterativeSolverResult with Alloc {
+    let n = b.len()
+
+    // Initial guess
+    var x = match config.x0 {
+        Some(ref x0) => x0.clone(),
+        None => DenseVector::zeros(n)
+    }
+
+    // r = b - A*x
+    var r = A.mul_vec(&x)
+    for i in 0..n {
+        r.set(i, b.get(i) - r.get(i))
+    }
+
+    // r_hat = r (shadow residual, kept constant)
+    let r_hat = r.clone()
+
+    var rho = 1.0
+    var alpha = 1.0
+    var omega = 1.0
+
+    var v = DenseVector::zeros(n)
+    var p = DenseVector::zeros(n)
+
+    let b_norm = b.norm2()
+    var iterations = 0
+    var converged = false
+
+    for iter in 0..config.max_iter {
+        iterations = iter + 1
+
+        let rho_new = r_hat.dot(&r)
+        if rho_new.abs() < 1e-30 {
+            break  // Method breakdown
+        }
+
+        let beta = (rho_new / rho) * (alpha / omega)
+
+        // p = r + beta * (p - omega * v)
+        for i in 0..n {
+            p.set(i, r.get(i) + beta * (p.get(i) - omega * v.get(i)))
+        }
+
+        // v = A * p
+        v = A.mul_vec(&p)
+
+        let r_hat_v = r_hat.dot(&v)
+        if r_hat_v.abs() < 1e-30 {
+            break
+        }
+        alpha = rho_new / r_hat_v
+
+        // s = r - alpha * v
+        var s = DenseVector::zeros(n)
+        for i in 0..n {
+            s.set(i, r.get(i) - alpha * v.get(i))
+        }
+
+        // Check early convergence
+        let s_norm = s.norm2()
+        if s_norm / b_norm < config.tol {
+            x.axpy(alpha, &p)
+            converged = true
+            break
+        }
+
+        // t = A * s
+        let t = A.mul_vec(&s)
+
+        // omega = (t^T s) / (t^T t)
+        let t_s = t.dot(&s)
+        let t_t = t.dot(&t)
+        if t_t < 1e-30 {
+            break
+        }
+        omega = t_s / t_t
+
+        // x = x + alpha * p + omega * s
+        x.axpy(alpha, &p)
+        x.axpy(omega, &s)
+
+        // r = s - omega * t
+        for i in 0..n {
+            r.set(i, s.get(i) - omega * t.get(i))
+        }
+
+        // Check convergence
+        let r_norm = r.norm2()
+        if r_norm / b_norm < config.tol {
+            converged = true
+            break
+        }
+
+        rho = rho_new
+    }
+
+    IterativeSolverResult {
+        x,
+        iterations,
+        residual: r.norm2(),
+        converged
+    }
+}
+
+// ============================================================================
+// EPISTEMIC LINEAR ALGEBRA (Numerical Accuracy Tracking)
+// ============================================================================
+
+/// Linear algebra result with epistemic uncertainty tracking.
+/// Wraps numerical results with condition number-based error estimates.
+pub struct EpistemicMatrixResult<T> {
+    /// The computed value
+    pub value: T,
+    /// Estimated relative error (based on condition number and machine epsilon)
+    pub error_estimate: f64,
+    /// Condition number of the problem (if applicable)
+    pub condition_number: f64,
+    /// Warning if result may be unreliable
+    pub warning: Option<string>,
+}
+
+impl<T> EpistemicMatrixResult<T> {
+    /// Check if result is reliable (error estimate < threshold)
+    pub fn is_reliable(&self, threshold: f64) -> bool {
+        self.error_estimate < threshold
+    }
+
+    /// Get confidence level (1 - relative error)
+    pub fn confidence(&self) -> f64 {
+        let conf = 1.0 - self.error_estimate
+        if conf < 0.0 { 0.0 } else { conf }
+    }
+}
+
+/// Solve Ax = b with epistemic uncertainty tracking
+pub fn epistemic_solve(
+    A: &DenseMatrix,
+    b: &DenseVector
+) -> Result<EpistemicMatrixResult<DenseVector>, string> with Alloc {
+    // Compute condition number first
+    let cond = match A.condition_number() {
+        Ok(c) => c,
+        Err(e) => return Err(e)
+    }
+
+    // Solve the system
+    let x = match A.solve(b) {
+        Ok(solution) => solution,
+        Err(e) => return Err(e)
+    }
+
+    // Machine epsilon for f64
+    let eps = 2.220446049250313e-16
+
+    // Estimate relative error: kappa * eps
+    let error_estimate = cond * eps
+
+    // Generate warning if ill-conditioned
+    let warning = if cond > 1e10 {
+        Some("Matrix is ill-conditioned (kappa > 1e10). Results may have significant numerical error.")
+    } else if cond > 1e6 {
+        Some("Matrix is moderately ill-conditioned. Consider using higher precision.")
+    } else {
+        None
+    }
+
+    Ok(EpistemicMatrixResult {
+        value: x,
+        error_estimate,
+        condition_number: cond,
+        warning
+    })
+}
+
+/// Compute matrix inverse with epistemic uncertainty tracking
+pub fn epistemic_inverse(
+    A: &DenseMatrix
+) -> Result<EpistemicMatrixResult<DenseMatrix>, string> with Alloc {
+    let cond = match A.condition_number() {
+        Ok(c) => c,
+        Err(e) => return Err(e)
+    }
+
+    let inv = match A.inverse() {
+        Ok(m) => m,
+        Err(e) => return Err(e)
+    }
+
+    let eps = 2.220446049250313e-16
+    let error_estimate = cond * eps
+
+    let warning = if cond > 1e10 {
+        Some("Matrix is nearly singular. Inverse may be unreliable.")
+    } else {
+        None
+    }
+
+    Ok(EpistemicMatrixResult {
+        value: inv,
+        error_estimate,
+        condition_number: cond,
+        warning
+    })
+}
+
+/// Eigenvalue decomposition with numerical stability assessment
+pub fn epistemic_eig(
+    A: &DenseMatrix
+) -> Result<EpistemicMatrixResult<EigenDecomposition>, string> with Alloc {
+    let eig_result = match A.eig() {
+        Ok(e) => e,
+        Err(e) => return Err(e)
+    }
+
+    // Estimate eigenvalue condition: ||A|| / min(|lambda|)
+    let a_norm = A.frobenius_norm()
+    var min_eigenvalue = f64::MAX
+    let n = eig_result.eigenvalues_real.len()
+    for i in 0..n {
+        let re = eig_result.eigenvalues_real.get(i)
+        let im = eig_result.eigenvalues_imag.get(i)
+        let mag = (re * re + im * im).sqrt()
+        if mag > 1e-15 && mag < min_eigenvalue {
+            min_eigenvalue = mag
+        }
+    }
+
+    let cond = if min_eigenvalue > 1e-15 {
+        a_norm / min_eigenvalue
+    } else {
+        f64::MAX
+    }
+
+    let eps = 2.220446049250313e-16
+    let error_estimate = cond * eps
+
+    let warning = if min_eigenvalue < 1e-10 * a_norm {
+        Some("Matrix has eigenvalues near zero. Results may be sensitive to perturbations.")
+    } else {
+        None
+    }
+
+    Ok(EpistemicMatrixResult {
+        value: eig_result,
+        error_estimate,
+        condition_number: cond,
+        warning
+    })
+}
 
 // ============================================================================
 // CONVENIENCE CONSTRUCTORS

@@ -22,7 +22,7 @@ use crate::ast::*;
 use crate::common::{NodeId, Span};
 use crate::hir::*;
 use crate::macro_system::token_tree::{Delimiter, TokenTree};
-use crate::types::{self, Type, TypeVar, effects::EffectInference, units::UnitChecker};
+use crate::types::{self, Type, TypeVar, TensorShape, effects::EffectInference, units::UnitChecker};
 use miette::Result;
 use std::collections::HashMap;
 
@@ -356,10 +356,12 @@ impl TypeChecker {
                 params,
                 return_type,
                 effects,
+                abi,
             } => Type::Function {
                 params: params.iter().map(|p| self.expand_type_alias(p)).collect(),
                 return_type: Box::new(self.expand_type_alias(return_type)),
                 effects: effects.clone(),
+                abi: abi.clone(),
             },
             // Primitive types don't need expansion
             _ => ty.clone(),
@@ -396,10 +398,11 @@ impl TypeChecker {
                 lifetime: lifetime.clone(),
                 inner: Box::new(self.substitute_type_params(inner, params, args)),
             },
-            Type::Function { params: fn_params, return_type, effects } => Type::Function {
+            Type::Function { params: fn_params, return_type, effects, abi } => Type::Function {
                 params: fn_params.iter().map(|p| self.substitute_type_params(p, params, args)).collect(),
                 return_type: Box::new(self.substitute_type_params(return_type, params, args)),
                 effects: effects.clone(),
+                abi: abi.clone(),
             },
             Type::RawPointer { mutable, inner } => Type::RawPointer {
                 mutable: *mutable,
@@ -572,6 +575,7 @@ impl TypeChecker {
                     params,
                     return_type: Box::new(return_type),
                     effects: types::EffectSet::new(),
+                    abi: None,
                 };
                 self.env.bind(f.name.clone(), fn_type, false);
             }
@@ -593,6 +597,7 @@ impl TypeChecker {
                             params,
                             return_type: Box::new(return_type),
                             effects: types::EffectSet::new(),
+                            abi: Some("C".to_string()), // extern fns use C ABI
                         };
 
                         // Bind using the D-visible name; codegen/linking uses `link_name` later.
@@ -628,6 +633,7 @@ impl TypeChecker {
                                 params,
                                 return_type: Box::new(return_type),
                                 effects: types::EffectSet::new(),
+                                abi: None,
                             };
                             // Register as TypeName::method_name
                             let qualified_name = format!("{}::{}", type_name, f.name);
@@ -1007,6 +1013,7 @@ impl TypeChecker {
                         params,
                         return_type: Box::new(return_type),
                         effects: types::EffectSet::new(),
+                        abi: None,
                     };
                     // Register with module-qualified name
                     let qualified_name = format!("{}::{}", m.name, f.name);
@@ -1592,13 +1599,16 @@ impl TypeChecker {
         // Determine ABI: use explicit ABI if specified, otherwise Rust
         let abi = f.modifiers.abi.clone().unwrap_or(crate::ast::Abi::Rust);
 
-        // Function is exported if it's public AND has C ABI (for FFI)
-        // or if it's just public (for D-to-D linking)
-        let is_exported = matches!(f.visibility, crate::ast::Visibility::Public)
-            || matches!(
-                abi,
-                crate::ast::Abi::C | crate::ast::Abi::CUnwind | crate::ast::Abi::System
-            );
+        // Check for #[export] attribute - explicit FFI export marker
+        let has_export_attr = f.attributes.iter().any(|attr| attr.name == "export");
+
+        // Function is exported if:
+        // 1. It has #[export] attribute (explicit FFI export), OR
+        // 2. It's public (for module-level visibility)
+        // Note: Having a C ABI alone does not imply export - internal functions
+        // may use C calling convention without being externally visible.
+        let is_exported = has_export_attr
+            || matches!(f.visibility, crate::ast::Visibility::Public);
 
         // Compute effective effects for the function signature.
         // The effective effects are the declared effects minus any effects that are
@@ -3990,6 +4000,14 @@ impl TypeChecker {
             }
             Literal::Char(c) => (HirLiteral::Char(*c), HirType::Char),
             Literal::String(s) => (HirLiteral::String(s.clone()), HirType::String),
+            // C string literal: null-terminated, type is *const i8 (raw pointer to byte)
+            Literal::CString(s) => (
+                HirLiteral::CString(s.clone()),
+                HirType::RawPointer {
+                    mutable: false,
+                    inner: Box::new(HirType::I8),
+                },
+            ),
             // Unit literals: create Quantity type with unit information
             Literal::IntUnit(i, unit) => {
                 let hir_unit = self.parse_unit_string(unit);
@@ -5313,11 +5331,13 @@ impl TypeChecker {
             TypeExpr::Function {
                 params,
                 return_type,
+                abi,
                 ..
             } => Type::Function {
                 params: params.iter().map(|p| self.lower_type_expr(p)).collect(),
                 return_type: Box::new(self.lower_type_expr(return_type)),
                 effects: types::EffectSet::new(),
+                abi: abi.as_ref().map(|a| a.to_string()),
             },
             TypeExpr::Infer => Type::Unknown,
             TypeExpr::SelfType => Type::SelfType,
@@ -5462,10 +5482,11 @@ impl TypeChecker {
                     base_type
                 }
             }
-            TypeExpr::Function { params, return_type, .. } => Type::Function {
+            TypeExpr::Function { params, return_type, abi, .. } => Type::Function {
                 params: params.iter().map(|p| self.lower_type_expr_with_type_vars(p, type_vars)).collect(),
                 return_type: Box::new(self.lower_type_expr_with_type_vars(return_type, type_vars)),
                 effects: types::EffectSet::new(),
+                abi: abi.as_ref().map(|a| a.to_string()),
             },
             TypeExpr::Reference { mutable, inner } => Type::Ref {
                 mutable: *mutable,
@@ -5582,6 +5603,58 @@ impl TypeChecker {
             Type::Quat => HirType::Quat,
             // Automatic differentiation
             Type::Dual => HirType::Dual,
+
+            // Tensor type
+            Type::Tensor { element, shape } => {
+                let hir_dims = self.tensor_shape_to_hir_dims(shape);
+                HirType::Tensor {
+                    element: Box::new(self.type_to_hir(element)),
+                    dims: hir_dims,
+                }
+            }
+
+            // f64 vector types
+            Type::Vec2d => HirType::Vec2d,
+            Type::Vec3d => HirType::Vec3d,
+            Type::Vec4d => HirType::Vec4d,
+        }
+    }
+
+    fn tensor_shape_to_hir_dims(&self, shape: &TensorShape) -> Vec<HirTensorDim> {
+        match shape {
+            TensorShape::Static(dims) => dims.iter().map(|&d| HirTensorDim::Fixed(d)).collect(),
+            TensorShape::Dynamic(ndim) => vec![HirTensorDim::Dynamic; *ndim],
+            TensorShape::Symbolic(names) => {
+                names.iter().map(|n| HirTensorDim::Named(n.clone())).collect()
+            }
+        }
+    }
+
+    fn hir_dims_to_tensor_shape(&self, dims: &[HirTensorDim]) -> TensorShape {
+        // Check if all dimensions are fixed
+        let all_fixed = dims.iter().all(|d| matches!(d, HirTensorDim::Fixed(_)));
+        let all_named = dims.iter().all(|d| matches!(d, HirTensorDim::Named(_)));
+
+        if all_fixed {
+            TensorShape::Static(
+                dims.iter()
+                    .filter_map(|d| match d {
+                        HirTensorDim::Fixed(n) => Some(*n),
+                        _ => None,
+                    })
+                    .collect(),
+            )
+        } else if all_named {
+            TensorShape::Symbolic(
+                dims.iter()
+                    .filter_map(|d| match d {
+                        HirTensorDim::Named(n) => Some(n.clone()),
+                        _ => None,
+                    })
+                    .collect(),
+            )
+        } else {
+            TensorShape::Dynamic(dims.len())
         }
     }
 
@@ -5632,6 +5705,7 @@ impl TypeChecker {
                 params: params.iter().map(|p| self.hir_type_to_type(p)).collect(),
                 return_type: Box::new(self.hir_type_to_type(return_type)),
                 effects: types::EffectSet::new(),
+                abi: None,
             },
             HirType::Var(v) => Type::Var(TypeVar(*v)),
             HirType::Never => Type::Never,
@@ -5645,9 +5719,9 @@ impl TypeChecker {
                 numeric: Box::new(self.hir_type_to_type(numeric)),
                 unit: unit.format(),
             },
-            HirType::Tensor { element, .. } => Type::Array {
+            HirType::Tensor { element, dims } => Type::Tensor {
                 element: Box::new(self.hir_type_to_type(element)),
-                size: None,
+                shape: self.hir_dims_to_tensor_shape(dims),
             },
             HirType::Ontology { namespace, term } => Type::Ontology {
                 namespace: namespace.clone(),
@@ -5661,6 +5735,10 @@ impl TypeChecker {
             HirType::Mat3 => Type::Mat3,
             HirType::Mat4 => Type::Mat4,
             HirType::Quat => Type::Quat,
+            // f64 vector types
+            HirType::Vec2d => Type::Vec2d,
+            HirType::Vec3d => Type::Vec3d,
+            HirType::Vec4d => Type::Vec4d,
             // Automatic differentiation
             HirType::Dual => Type::Dual,
             // Async types

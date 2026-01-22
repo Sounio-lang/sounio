@@ -640,6 +640,10 @@ impl HlirToMir {
             HlirType::Mat3 => MirType::Array(Box::new(MirType::F32), 9),
             HlirType::Mat4 => MirType::Array(Box::new(MirType::F32), 16),
             HlirType::Quat => MirType::Array(Box::new(MirType::F32), 4),
+            // f64 vector types
+            HlirType::Vec2d => MirType::Array(Box::new(MirType::F64), 2),
+            HlirType::Vec3d => MirType::Array(Box::new(MirType::F64), 4), // Padded
+            HlirType::Vec4d => MirType::Array(Box::new(MirType::F64), 4),
             HlirType::Dual => MirType::Tuple(vec![MirType::F64, MirType::F64]),
         }
     }
@@ -651,6 +655,8 @@ impl HlirToMir {
             HlirConstant::Int(i, _) => MirConstant::Int(*i),
             HlirConstant::Float(f, _) => MirConstant::Float(f.to_string()),
             HlirConstant::String(s) => MirConstant::String(s.clone()),
+            // C string: at MIR level, treat similarly to String but codegen will add null terminator
+            HlirConstant::CString(s) => MirConstant::String(format!("{}\0", s)),
             HlirConstant::Array(_) => MirConstant::Int(0), // TODO: array constants
             HlirConstant::Struct(_) => MirConstant::Int(0), // TODO: struct constants
             HlirConstant::Null(_) => MirConstant::Null,

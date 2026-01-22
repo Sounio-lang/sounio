@@ -1015,6 +1015,9 @@ impl<'a> LoweringContext<'a> {
             HirLiteral::String(s) => self
                 .builder
                 .build_const(HlirConstant::String(s.clone()), ty.clone()),
+            HirLiteral::CString(s) => self
+                .builder
+                .build_const(HlirConstant::CString(s.clone()), ty.clone()),
         }
     }
 

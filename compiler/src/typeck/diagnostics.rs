@@ -487,6 +487,10 @@ fn format_type(ty: &HirType) -> String {
         HirType::Mat3 => "mat3".to_string(),
         HirType::Mat4 => "mat4".to_string(),
         HirType::Quat => "quat".to_string(),
+        // f64 vector types
+        HirType::Vec2d => "vec2d".to_string(),
+        HirType::Vec3d => "vec3d".to_string(),
+        HirType::Vec4d => "vec4d".to_string(),
         // Automatic differentiation
         HirType::Dual => "dual".to_string(),
         // Async types

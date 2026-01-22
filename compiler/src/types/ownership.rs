@@ -100,6 +100,12 @@ pub fn ownership_of(ty: &Type) -> Ownership {
 
         // Dual numbers are Copy (two f64 values, stack-allocated)
         Type::Dual => Ownership::Copy,
+
+        // Tensors are Affine (heap allocated, dynamic size)
+        Type::Tensor { .. } => Ownership::Affine,
+
+        // f64 vector types are Copy (fixed-size, stack-allocated)
+        Type::Vec2d | Type::Vec3d | Type::Vec4d => Ownership::Copy,
     }
 }
 
