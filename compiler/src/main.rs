@@ -998,6 +998,13 @@ enum SysrootCommands {
         target: String,
     },
 
+    /// Show stdlib search paths and configuration
+    StdlibPaths {
+        /// Show detailed information including environment variables
+        #[arg(short, long)]
+        verbose: bool,
+    },
+
     /// Install sysroot for a target
     Install {
         /// Target triple
@@ -1640,31 +1647,35 @@ fn main() -> Result<()> {
                         thermal_model: thermal.unwrap_or_default(),
                         alloc_strategy: alloc.unwrap_or_default(),
                         debug_info: debug,
-                        cpu_features: target_cpu.map(|s| s.split(',').map(|x| x.trim().to_string()).collect()).unwrap_or_default(),
+                        cpu_features: target_cpu
+                            .map(|s| s.split(',').map(|x| x.trim().to_string()).collect())
+                            .unwrap_or_default(),
                     },
                     verbose,
                     timing,
-                    emit: emit.map(|s| s.split(',').filter_map(|x| x.trim().parse().ok()).collect()).unwrap_or_default(),
+                    emit: emit
+                        .map(|s| s.split(',').filter_map(|x| x.trim().parse().ok()).collect())
+                        .unwrap_or_default(),
                 };
-                
+
                 let output = sounio::cli::backend::compile(&build_args);
-                
+
                 // Print warnings
                 for warning in &output.warnings {
                     eprintln!("Warning: {}", warning);
                 }
-                
+
                 // Print errors
                 for error in &output.errors {
                     eprintln!("Error: {}", error);
                 }
-                
+
                 // Print timing if requested
                 if let Some(timing) = &output.timing {
                     println!("\nTiming:");
                     println!("  Total: {} ms", timing.total_ms);
                 }
-                
+
                 // Print metrics if available and verbose
                 if verbose {
                     if let Some(metrics) = &output.metrics {
@@ -1673,18 +1684,27 @@ fn main() -> Result<()> {
                             println!("  Intervals allocated: {}", native.intervals_allocated);
                             println!("  Intervals spilled: {}", native.intervals_spilled);
                             if native.intervals_allocated > 0 {
-                                println!("  Avg confidence (allocated): {:.3}", native.avg_confidence_allocated);
+                                println!(
+                                    "  Avg confidence (allocated): {:.3}",
+                                    native.avg_confidence_allocated
+                                );
                             }
                             if native.intervals_spilled > 0 {
-                                println!("  Avg confidence (spilled): {:.3}", native.avg_confidence_spilled);
+                                println!(
+                                    "  Avg confidence (spilled): {:.3}",
+                                    native.avg_confidence_spilled
+                                );
                             }
                             if native.thermal_degradation > 0.0 {
-                                println!("  Thermal degradation: {:.2}%", native.thermal_degradation * 100.0);
+                                println!(
+                                    "  Thermal degradation: {:.2}%",
+                                    native.thermal_degradation * 100.0
+                                );
                             }
                         }
                     }
                 }
-                
+
                 if output.success {
                     if let Some(path) = &output.output_path {
                         println!("Compiled: {}", path.display());
@@ -1718,7 +1738,7 @@ fn main() -> Result<()> {
                     emit_alloc_metrics.as_deref(),
                 )
             }
-        },
+        }
 
         Commands::Check {
             input,
@@ -1980,6 +2000,7 @@ fn main() -> Result<()> {
             SysrootCommands::Install { target, force } => sysroot_install(&target, force),
             SysrootCommands::Remove { target } => sysroot_remove(&target),
             SysrootCommands::Clean { dry_run } => sysroot_clean(dry_run),
+            SysrootCommands::StdlibPaths { verbose } => sysroot_stdlib_paths(verbose),
         },
 
         Commands::Ontology { command } => match command {
@@ -2249,7 +2270,9 @@ fn build_gpu(
             .collect();
 
         if kernel_names.is_empty() {
-            return Err(miette::miette!("GPU build requires at least one `kernel fn`"));
+            return Err(miette::miette!(
+                "GPU build requires at least one `kernel fn`"
+            ));
         }
 
         let hir = sounio::check::check(&ast)?;
@@ -2511,20 +2534,20 @@ fn build(
                 p
             });
 
-        let linker = Linker::new().strip(strip).verbose(verbose);
-        let runtime_dir = find_runtime_lib_dir();
+            let linker = Linker::new().strip(strip).verbose(verbose);
+            let runtime_dir = find_runtime_lib_dir();
 
-        if runtime_dir.is_none() && verbose {
-            eprintln!("Warning: runtime library not found; linking without effect runtime");
-        }
+            if runtime_dir.is_none() && verbose {
+                eprintln!("Warning: runtime library not found; linking without effect runtime");
+            }
 
-        let link_result = if let Some(dir) = runtime_dir.as_deref() {
-            linker.link_with_runtime(&[obj_path.clone()], &exe_path, Some(dir))
-        } else {
-            linker.link_with_stdlib(&[obj_path.clone()], &exe_path)
-        };
+            let link_result = if let Some(dir) = runtime_dir.as_deref() {
+                linker.link_with_runtime(&[obj_path.clone()], &exe_path, Some(dir))
+            } else {
+                linker.link_with_stdlib(&[obj_path.clone()], &exe_path)
+            };
 
-        link_result.map_err(|e| miette::miette!("Linking failed: {}", e))?;
+            link_result.map_err(|e| miette::miette!("Linking failed: {}", e))?;
 
             // Clean up object file
             if std::fs::remove_file(&obj_path).is_err() && verbose {
@@ -2911,8 +2934,8 @@ fn jit_run(input: &std::path::Path, optimize: bool, use_mir: bool, _args: &[Stri
             .map_err(|e| miette::miette!("JIT error: {}", e))?;
 
         if main_returns_value {
-            let result =
-                unsafe { compiled.call_i64("main") }.map_err(|e| miette::miette!("JIT error: {}", e))?;
+            let result = unsafe { compiled.call_i64("main") }
+                .map_err(|e| miette::miette!("JIT error: {}", e))?;
             println!("{}", result);
         } else {
             unsafe { compiled.call_void("main") }
@@ -5494,6 +5517,46 @@ fn sysroot_clean(dry_run: bool) -> Result<()> {
         } else {
             println!("Removed {} stale sysroot(s)", removed);
         }
+    }
+
+    Ok(())
+}
+
+/// Show stdlib search paths and diagnostic information
+/// This helps users debug module resolution issues
+fn sysroot_stdlib_paths(_verbose: bool) -> Result<()> {
+    use sounio::module_loader::get_stdlib_search_paths;
+
+    println!("Sounio stdlib search paths:");
+    println!();
+
+    let search_paths = get_stdlib_search_paths();
+
+    for (i, path) in search_paths.iter().enumerate() {
+        let status = if path.exists() {
+            "✓ EXISTS"
+        } else {
+            "✗ MISSING"
+        };
+        println!("  [{:2}] {} - {}", i + 1, path.display(), status);
+    }
+
+    println!();
+    println!("Total search locations: {}", search_paths.len());
+    println!();
+
+    // Check for active stdlib path from environment
+    if let Ok(env_path) = std::env::var("SOUNIO_STDLIB_PATH") {
+        println!("SOUNIO_STDLIB_PATH: {}", env_path);
+        let path = std::path::PathBuf::from(&env_path);
+        if !path.exists() {
+            eprintln!("WARNING: SOUNIO_STDLIB_PATH does not exist!");
+        }
+    } else {
+        println!("SOUNIO_STDLIB_PATH: <not set>");
+        println!();
+        println!("Set SOUNIO_STDLIB_PATH to override default stdlib location:");
+        println!("  export SOUNIO_STDLIB_PATH=/path/to/stdlib");
     }
 
     Ok(())

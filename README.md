@@ -169,6 +169,42 @@ print("ATE: ", effect.value, " ± ", effect.uncertainty)
 
 ## Quick Start
 
+**Troubleshooting Module Resolution Issues:**
+
+The `souc sysroot stdlib-paths` command diagnoses stdlib resolution problems:
+
+```bash
+souc sysroot stdlib-paths      # Show all search paths with existence status
+souc sysroot stdlib-paths -v   # Include compiler location and environment vars
+```
+
+**Common Issues:**
+
+- **"Import not found" errors** when stdlib exists: Run `souc sysroot stdlib-paths` to check which path is being used
+- **Program works in project root but not elsewhere**: The compiler finds stdlib via relative path from binary location
+
+**Fixes:**
+
+1. **Set environment variable** (preferred):
+   ```bash
+   export SOUNIO_STDLIB_PATH=/absolute/path/to/stdlib
+   ```
+
+2. **Install Sounio system-wide**:
+   ```bash
+   cargo install --path /usr/local
+   ```
+
+3. **Build from source** (includes stdlib):
+   ```bash
+   cd /path/to/sounio
+   cargo build --release
+   ```
+
+---
+
+## Quick Start
+
 ```bash
 # Clone the repository
 git clone https://github.com/sounio-lang/sounio.git
