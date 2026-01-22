@@ -15,6 +15,9 @@ pub mod glm_integration;
 #[cfg(feature = "glm")]
 pub mod ml_guided_optimization;
 
+#[cfg(feature = "glm")]
+pub mod advanced_glm_optimization;
+
 // Re-export commonly used optimization types
 pub use pass_manager::{
     MIRPass, AnalysisPass, PassManager, OptimizationLevel,
