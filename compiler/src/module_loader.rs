@@ -216,11 +216,47 @@ fn module_prefixes(import_paths: &[Vec<String>], module_path: &StdPath) -> Vec<V
     prefixes
 }
 
+/// Result of import path resolution with detailed source information
+#[derive(Debug, Clone)]
+pub enum ImportResolution {
+    /// Import found in standard library
+    Stdlib(PathBuf),
+    /// Import found in project/local scope
+    Local(PathBuf),
+    /// Import found via qualified path (e.g., std::math)
+    Qualified(PathBuf, String), // (path, qualified_prefix)
+}
+
+/// Determines the scope and source of an import based on its path structure
+fn determine_import_scope(import_path: &[String]) -> ImportScope {
+    if import_path.is_empty() {
+        return ImportScope::Invalid("empty import path".to_string());
+    }
+
+    match import_path[0].as_str() {
+        "std" => ImportScope::StdlibQualified,
+        _ => ImportScope::DirectOrLocal,
+    }
+}
+
+/// Different scopes for import resolution
+#[derive(Debug, Clone)]
+enum ImportScope {
+    /// Direct imports like `import linalg;` - search stdlib first
+    DirectOrLocal,
+    /// Qualified imports like `import std::math;` - search stdlib with prefix
+    StdlibQualified,
+    /// Invalid import path
+    Invalid(String),
+}
+
+/// Comprehensive import path resolver with clean architecture
 fn resolve_import_path(
     current_path: &StdPath,
     import_path: &[String],
     stdlib_dir: &StdPath,
 ) -> Result<PathBuf> {
+    // Validate input
     if import_path.is_empty() {
         return Err(miette::miette!(
             "Empty import path in {}",
@@ -228,31 +264,85 @@ fn resolve_import_path(
         ));
     }
 
-    let (base_dir, segments) = if import_path[0] == "std" {
-        (stdlib_dir.to_path_buf(), &import_path[1..])
-    } else {
-        (
-            current_path
-                .parent()
-                .unwrap_or_else(|| StdPath::new("."))
-                .to_path_buf(),
-            import_path,
-        )
-    };
+    // Determine search strategy based on import structure
+    let scope = determine_import_scope(import_path);
 
-    if segments.is_empty() {
+    match scope {
+        ImportScope::DirectOrLocal => {
+            resolve_direct_or_local_import(current_path, import_path, stdlib_dir)
+        }
+        ImportScope::StdlibQualified => {
+            resolve_stdlib_qualified_import(current_path, import_path, stdlib_dir)
+        }
+        ImportScope::Invalid(msg) => Err(miette::miette!(
+            "Invalid import path: {} in {}",
+            msg,
+            current_path.display()
+        )),
+    }
+}
+
+/// Resolves direct imports (e.g., `import linalg;`) and local imports
+fn resolve_direct_or_local_import(
+    current_path: &StdPath,
+    import_path: &[String],
+    stdlib_dir: &StdPath,
+) -> Result<PathBuf> {
+    // First attempt: search in stdlib for single-segment imports
+    if import_path.len() == 1 {
+        let stdlib_candidate = stdlib_dir.join(format!("{}.sio", import_path[0]));
+        if stdlib_candidate.exists() {
+            return Ok(stdlib_candidate);
+        }
+
+        // Also try as module directory
+        let stdlib_module = stdlib_dir.join(&import_path[0]).join("mod.sio");
+        if stdlib_module.exists() {
+            return Ok(stdlib_module);
+        }
+    }
+
+    // Second attempt: search in local project scope
+    let local_dir = current_path
+        .parent()
+        .unwrap_or_else(|| StdPath::new("."))
+        .to_path_buf();
+
+    resolve_in_directory(&local_dir, import_path, "local")
+}
+
+/// Resolves qualified stdlib imports (e.g., `import std::math;`)
+fn resolve_stdlib_qualified_import(
+    current_path: &StdPath,
+    import_path: &[String],
+    stdlib_dir: &StdPath,
+) -> Result<PathBuf> {
+    if import_path.len() == 1 {
         return Err(miette::miette!(
             "Invalid import path `std` in {}",
             current_path.display()
         ));
     }
 
+    let qualified_segments = &import_path[1..]; // Remove 'std' prefix
+    resolve_in_directory(stdlib_dir, qualified_segments, "stdlib")
+}
+
+/// Core resolution logic for a specific directory
+fn resolve_in_directory(
+    base_dir: &StdPath,
+    segments: &[String],
+    source_type: &str,
+) -> Result<PathBuf> {
     let mut candidates = Vec::new();
     let path_joined = segments.join("/");
+
+    // Primary candidates: direct file matches
     candidates.push(base_dir.join(format!("{}.sio", path_joined)));
     candidates.push(base_dir.join(&path_joined).join("mod.sio"));
     candidates.push(base_dir.join(&path_joined).join("lib.sio"));
 
+    // Case-insensitive fallback for the last segment
     if let Some(last) = segments.last() {
         let mut lowered = segments.to_vec();
         lowered[segments.len() - 1] = last.to_lowercase();
@@ -262,16 +352,23 @@ fn resolve_import_path(
         candidates.push(base_dir.join(&lowered_joined).join("lib.sio"));
     }
 
+    // Build search locations string before consuming candidates
+    let search_locations: Vec<String> =
+        candidates.iter().map(|p| p.display().to_string()).collect();
+
+    // Try each candidate
     for candidate in candidates {
         if candidate.exists() {
             return Ok(candidate);
         }
     }
 
+    // If no candidates found, provide helpful error message
     Err(miette::miette!(
-        "Import not found: `{}` (from {})",
-        import_path.join("::"),
-        current_path.display()
+        "Import `{}` not found in {} (searched: {})",
+        segments.join("::"),
+        source_type,
+        search_locations.join(", ")
     ))
 }
 
@@ -904,6 +1001,7 @@ fn rewrite_type_expr(ty: &mut TypeExpr, prefixes: &[Vec<String>]) {
             }
         }
         TypeExpr::Function {
+            abi: _,
             params,
             return_type,
             effects,
@@ -958,6 +1056,12 @@ fn rewrite_type_expr(ty: &mut TypeExpr, prefixes: &[Vec<String>]) {
         }
         TypeExpr::Forall { inner, .. } => {
             rewrite_type_expr(inner, prefixes);
+        }
+        TypeExpr::ScientificArray { element_type, .. } => {
+            rewrite_type_expr(element_type, prefixes);
+        }
+        TypeExpr::ScientificMatrix { element_type, .. } => {
+            rewrite_type_expr(element_type, prefixes);
         }
         TypeExpr::SelfType
         | TypeExpr::Infer
@@ -1642,6 +1746,7 @@ fn annotate_type_expr(
             }
         }
         TypeExpr::Function {
+            abi: _,
             params,
             return_type,
             effects,
@@ -1698,6 +1803,27 @@ fn annotate_type_expr(
         }
         TypeExpr::Forall { inner, .. } => {
             annotate_type_expr(inner, prefixes, sm, im);
+        }
+        TypeExpr::ScientificArray {
+            element_type, dim, ..
+        } => {
+            annotate_type_expr(element_type, prefixes, sm, im);
+            if let TensorDim::Expr(e) = dim {
+                annotate_expr(e, prefixes, sm, im);
+            }
+        }
+        TypeExpr::ScientificMatrix {
+            element_type,
+            rows,
+            cols,
+        } => {
+            annotate_type_expr(element_type, prefixes, sm, im);
+            if let TensorDim::Expr(e) = rows {
+                annotate_expr(e, prefixes, sm, im);
+            }
+            if let TensorDim::Expr(e) = cols {
+                annotate_expr(e, prefixes, sm, im);
+            }
         }
         TypeExpr::SelfType
         | TypeExpr::Infer
