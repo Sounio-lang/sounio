@@ -215,7 +215,7 @@ mod sparse_quat_fusion_tests {
 
         // All quaternion components should be processed
         assert_eq!(output.len(), input.len());
-        assert!(output.iter().all(|x| x >= 0.0 || *x < 1e-10)); // ReLU output
+        assert!(output.iter().all(|&x| x >= 0.0 || x < 1e-10)); // ReLU output
     }
 
     #[test]

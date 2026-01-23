@@ -240,7 +240,7 @@ mod learnable_scale_tests {
     fn test_log_scale_stability() {
         let harness = Phase2TestHarness::new();
 
-        for scale in &[0.001, 0.01, 0.1, 1.0] {
+        for &scale in &[0.001f32, 0.01f32, 0.1f32, 1.0f32] {
             let log_scale = scale.ln();
             assert!(log_scale.is_finite());
 
