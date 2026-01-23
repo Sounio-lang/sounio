@@ -14,12 +14,169 @@ pub struct TypeVar(pub u32);
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct EffectVar(pub u32);
 
+/// Dimension size representation for parametric scientific types
+///
+/// Used for Array<T, N>, Matrix<T, M, N>, and Tensor shapes.
+/// Supports compile-time constants, symbolic names, and dynamic sizes.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub enum DimSize {
+    /// Compile-time constant dimension (e.g., 3, 128)
+    Const(usize),
+    /// Symbolic dimension variable (e.g., N, M, K)
+    /// Used for const generics and shape polymorphism
+    Symbolic(String),
+    /// Type variable representing an unknown dimension
+    Var(DimVar),
+    /// Dynamic dimension determined at runtime
+    Dynamic,
+    /// Binary operation on dimensions (for inferred shapes)
+    BinOp {
+        op: DimOp,
+        left: Box<DimSize>,
+        right: Box<DimSize>,
+    },
+}
+
+/// Dimension variable for dimension inference
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct DimVar(pub u32);
+
+impl DimVar {
+    /// Create a new dimension variable with the given id
+    pub fn new(id: u32) -> Self {
+        Self(id)
+    }
+}
+
+/// Binary operations on dimensions
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum DimOp {
+    /// Addition: N + M
+    Add,
+    /// Subtraction: N - M (e.g., for slicing)
+    Sub,
+    /// Multiplication: N * M (e.g., for flattening)
+    Mul,
+    /// Division: N / M (e.g., for reshaping)
+    Div,
+    /// Maximum: max(N, M) (e.g., for broadcasting)
+    Max,
+    /// Minimum: min(N, M)
+    Min,
+}
+
+impl DimSize {
+    /// Check if this is a compile-time constant
+    pub fn is_const(&self) -> bool {
+        matches!(self, DimSize::Const(_))
+    }
+
+    /// Check if this is a symbolic dimension
+    pub fn is_symbolic(&self) -> bool {
+        matches!(self, DimSize::Symbolic(_))
+    }
+
+    /// Check if this is dynamic (runtime-determined)
+    pub fn is_dynamic(&self) -> bool {
+        matches!(self, DimSize::Dynamic)
+    }
+
+    /// Get the constant value if this is a constant dimension
+    pub fn as_const(&self) -> Option<usize> {
+        match self {
+            DimSize::Const(n) => Some(*n),
+            _ => None,
+        }
+    }
+
+    /// Get the symbolic name if this is a symbolic dimension
+    pub fn as_symbolic(&self) -> Option<&str> {
+        match self {
+            DimSize::Symbolic(name) => Some(name),
+            _ => None,
+        }
+    }
+
+    /// Try to evaluate to a constant value (recursively for BinOp)
+    pub fn try_eval(&self) -> Option<usize> {
+        match self {
+            DimSize::Const(n) => Some(*n),
+            DimSize::BinOp { op, left, right } => {
+                let l = left.try_eval()?;
+                let r = right.try_eval()?;
+                match op {
+                    DimOp::Add => l.checked_add(r),
+                    DimOp::Sub => l.checked_sub(r),
+                    DimOp::Mul => l.checked_mul(r),
+                    DimOp::Div => {
+                        if r == 0 {
+                            None
+                        } else {
+                            Some(l / r)
+                        }
+                    }
+                    DimOp::Max => Some(l.max(r)),
+                    DimOp::Min => Some(l.min(r)),
+                }
+            }
+            _ => None,
+        }
+    }
+
+    /// Collect all free dimension variables in this dimension
+    pub fn free_dim_vars(&self) -> HashSet<DimVar> {
+        let mut vars = HashSet::new();
+        self.collect_dim_vars(&mut vars);
+        vars
+    }
+
+    fn collect_dim_vars(&self, vars: &mut HashSet<DimVar>) {
+        match self {
+            DimSize::Var(v) => {
+                vars.insert(*v);
+            }
+            DimSize::BinOp { left, right, .. } => {
+                left.collect_dim_vars(vars);
+                right.collect_dim_vars(vars);
+            }
+            _ => {}
+        }
+    }
+}
+
+impl std::fmt::Display for DimSize {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            DimSize::Const(n) => write!(f, "{}", n),
+            DimSize::Symbolic(name) => write!(f, "{}", name),
+            DimSize::Var(v) => write!(f, "?D{}", v.0),
+            DimSize::Dynamic => write!(f, "?"),
+            DimSize::BinOp { op, left, right } => {
+                let op_str = match op {
+                    DimOp::Add => "+",
+                    DimOp::Sub => "-",
+                    DimOp::Mul => "*",
+                    DimOp::Div => "/",
+                    DimOp::Max => "max",
+                    DimOp::Min => "min",
+                };
+                if matches!(op, DimOp::Max | DimOp::Min) {
+                    write!(f, "{}({}, {})", op_str, left, right)
+                } else {
+                    write!(f, "({} {} {})", left, op_str, right)
+                }
+            }
+        }
+    }
+}
+
 /// Tensor shape representation for the type system
 ///
 /// Shapes can be:
 /// - Static: known at compile time (e.g., `[3, 4]`)
 /// - Dynamic: determined at runtime (e.g., `[?, ?]`)
 /// - Symbolic: named dimensions for shape polymorphism (e.g., `[N, M]`)
+/// - Parametric: uses DimSize for full dimension expression support
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum TensorShape {
     /// Static shape with known dimensions
@@ -28,6 +185,8 @@ pub enum TensorShape {
     Dynamic(usize),
     /// Symbolic shape with named dimensions (for generics)
     Symbolic(Vec<String>),
+    /// Parametric shape using DimSize (new, more general form)
+    Parametric(Vec<DimSize>),
 }
 
 impl TensorShape {
@@ -37,6 +196,7 @@ impl TensorShape {
             TensorShape::Static(dims) => dims.len(),
             TensorShape::Dynamic(n) => *n,
             TensorShape::Symbolic(names) => names.len(),
+            TensorShape::Parametric(dims) => dims.len(),
         }
     }
 
@@ -47,7 +207,11 @@ impl TensorShape {
 
     /// Check if shape is fully static
     pub fn is_static(&self) -> bool {
-        matches!(self, TensorShape::Static(_))
+        match self {
+            TensorShape::Static(_) => true,
+            TensorShape::Parametric(dims) => dims.iter().all(|d| d.is_const()),
+            _ => false,
+        }
     }
 
     /// Get static dimensions if available
@@ -58,29 +222,93 @@ impl TensorShape {
         }
     }
 
+    /// Try to evaluate all dimensions to static values
+    pub fn try_static_dims(&self) -> Option<Vec<usize>> {
+        match self {
+            TensorShape::Static(dims) => Some(dims.clone()),
+            TensorShape::Parametric(dims) => dims.iter().map(|d| d.try_eval()).collect(),
+            _ => None,
+        }
+    }
+
+    /// Get parametric dimensions if available
+    pub fn parametric_dims(&self) -> Option<&[DimSize]> {
+        match self {
+            TensorShape::Parametric(dims) => Some(dims),
+            _ => None,
+        }
+    }
+
+    /// Convert to parametric form (normalizes all shape representations)
+    pub fn to_parametric(&self) -> Vec<DimSize> {
+        match self {
+            TensorShape::Static(dims) => dims.iter().map(|&n| DimSize::Const(n)).collect(),
+            TensorShape::Dynamic(n) => vec![DimSize::Dynamic; *n],
+            TensorShape::Symbolic(names) => {
+                names.iter().map(|n| DimSize::Symbolic(n.clone())).collect()
+            }
+            TensorShape::Parametric(dims) => dims.clone(),
+        }
+    }
+
+    /// Create a parametric shape from DimSize values
+    pub fn from_dims(dims: Vec<DimSize>) -> Self {
+        // Check if all are constant - use Static form for efficiency
+        if dims.iter().all(|d| d.is_const()) {
+            TensorShape::Static(dims.iter().filter_map(|d| d.as_const()).collect())
+        } else {
+            TensorShape::Parametric(dims)
+        }
+    }
+
     /// Total number of elements (if static)
     pub fn numel(&self) -> Option<usize> {
-        self.static_dims().map(|d| d.iter().product())
+        self.try_static_dims().map(|d| d.iter().product())
     }
 
     /// Check if two shapes are compatible for broadcasting
     pub fn broadcast_compatible(&self, other: &TensorShape) -> bool {
-        match (self, other) {
-            (TensorShape::Static(d1), TensorShape::Static(d2)) => {
-                let max_len = d1.len().max(d2.len());
-                for i in 0..max_len {
-                    let dim1 = d1.get(d1.len().saturating_sub(i + 1)).copied().unwrap_or(1);
-                    let dim2 = d2.get(d2.len().saturating_sub(i + 1)).copied().unwrap_or(1);
-                    if dim1 != dim2 && dim1 != 1 && dim2 != 1 {
+        // Convert both to parametric form for uniform handling
+        let d1 = self.to_parametric();
+        let d2 = other.to_parametric();
+
+        let max_len = d1.len().max(d2.len());
+        for i in 0..max_len {
+            let dim1 = d1.get(d1.len().saturating_sub(i + 1));
+            let dim2 = d2.get(d2.len().saturating_sub(i + 1));
+
+            match (dim1, dim2) {
+                (Some(DimSize::Const(n1)), Some(DimSize::Const(n2))) => {
+                    if *n1 != *n2 && *n1 != 1 && *n2 != 1 {
                         return false;
                     }
                 }
-                true
+                (Some(DimSize::Symbolic(s1)), Some(DimSize::Symbolic(s2))) => {
+                    // Symbolic dims must match exactly for broadcasting
+                    if s1 != s2 {
+                        return false;
+                    }
+                }
+                (Some(DimSize::Dynamic), _) | (_, Some(DimSize::Dynamic)) => {
+                    // Dynamic is always compatible (checked at runtime)
+                }
+                (None, _) | (_, None) => {
+                    // Missing dimension is implicitly 1, always compatible
+                }
+                _ => {
+                    // Mixed symbolic/const - conservatively allow if const is 1
+                    if let Some(DimSize::Const(1)) = dim1 {
+                        continue;
+                    }
+                    if let Some(DimSize::Const(1)) = dim2 {
+                        continue;
+                    }
+                    // Otherwise, compatibility unknown at compile time
+                    // Return true and let runtime check
+                }
             }
-            (TensorShape::Dynamic(_), _) | (_, TensorShape::Dynamic(_)) => true,
-            (TensorShape::Symbolic(s1), TensorShape::Symbolic(s2)) => s1 == s2,
-            _ => false,
         }
+        true
     }
 }
 
@@ -128,9 +356,27 @@ pub enum Type {
         inner: Box<Type>,
     },
     /// Array: [T; N] or slice [T]
+    /// Also supports Array<T, N> with const generic dimension
     Array {
         element: Box<Type>,
+        /// Size can be None (slice), Some static usize, or use dim for parametric
         size: Option<usize>,
+    },
+    /// Scientific Array: Array<T, N> with const generic dimension
+    /// Supports symbolic dimensions for shape polymorphism
+    ScientificArray {
+        element: Box<Type>,
+        /// Parametric dimension (const, symbolic, or inferred)
+        dim: DimSize,
+    },
+    /// Scientific Matrix: Matrix<T, M, N> with const generic dimensions
+    /// Row-major storage, supports symbolic dimensions
+    Matrix {
+        element: Box<Type>,
+        /// Number of rows (M)
+        rows: DimSize,
+        /// Number of columns (N)
+        cols: DimSize,
     },
     /// Tuple: (T1, T2, ...)
     Tuple(Vec<Type>),
@@ -186,6 +432,36 @@ pub enum Type {
     Mat4,
     /// Quaternion: quat (4x f32: x, y, z, w)
     Quat,
+
+    // ==================== OCTONION TYPES (8D Hypercomplex) ====================
+    /// Octonion: oct (8x f32: basis 1, i, j, k, l, il, jl, kl)
+    /// Octonions form a division algebra over R with 8 dimensions
+    /// Used for exceptional Lie groups, string theory, and 8x parameter efficiency in ML
+    Octonion,
+
+    // ==================== QUATERNIONIC NEURAL NETWORK TYPES ====================
+    /// Quaternionic Linear Layer weights: Quat[input_features, output_features]
+    /// Each weight is a quaternion (4x f32), giving 4x parameter efficiency
+    QuatLinear {
+        input_features: usize,
+        output_features: usize,
+    },
+    /// Quaternionic 2D Convolution kernel: Quat[channels_in, channels_out, kH, kW]
+    QuatConv2d {
+        in_channels: usize,
+        out_channels: usize,
+        kernel_h: usize,
+        kernel_w: usize,
+    },
+    /// Quaternionic recurrent cell state
+    QuatRnnState {
+        hidden_size: usize,
+    },
+    /// Quaternionic Gate (for LSTM/GRU gates)
+    QuatGate {
+        input_size: usize,
+        hidden_size: usize,
+    },
 
     // Tensor types
     /// Generic tensor type: Tensor<T, Shape>
@@ -304,7 +580,10 @@ impl Type {
 
     /// Check if this type is a vector type
     pub fn is_vector(&self) -> bool {
-        matches!(self, Type::Vec2 | Type::Vec3 | Type::Vec4 | Type::Vec2d | Type::Vec3d | Type::Vec4d)
+        matches!(
+            self,
+            Type::Vec2 | Type::Vec3 | Type::Vec4 | Type::Vec2d | Type::Vec3d | Type::Vec4d
+        )
     }
 
     /// Check if this type is a tensor type
@@ -333,9 +612,52 @@ impl Type {
         }
     }
 
-    /// Check if this type is a matrix type
+    /// Check if this type is a matrix type (fixed or parametric)
     pub fn is_matrix(&self) -> bool {
-        matches!(self, Type::Mat2 | Type::Mat3 | Type::Mat4)
+        matches!(
+            self,
+            Type::Mat2 | Type::Mat3 | Type::Mat4 | Type::Matrix { .. }
+        )
+    }
+
+    /// Check if this type is a scientific array (Array<T, N>)
+    pub fn is_scientific_array(&self) -> bool {
+        matches!(self, Type::ScientificArray { .. })
+    }
+
+    /// Check if this type is a scientific matrix (Matrix<T, M, N>)
+    pub fn is_scientific_matrix(&self) -> bool {
+        matches!(self, Type::Matrix { .. })
+    }
+
+    /// Get the element type of an array or matrix type
+    pub fn array_element(&self) -> Option<&Type> {
+        match self {
+            Type::Array { element, .. } => Some(element.as_ref()),
+            Type::ScientificArray { element, .. } => Some(element.as_ref()),
+            Type::Matrix { element, .. } => Some(element.as_ref()),
+            _ => None,
+        }
+    }
+
+    /// Get the dimension of a scientific array if available
+    pub fn scientific_array_dim(&self) -> Option<&DimSize> {
+        match self {
+            Type::ScientificArray { dim, .. } => Some(dim),
+            _ => None,
+        }
+    }
+
+    /// Get the dimensions of a matrix type
+    pub fn matrix_dims(&self) -> Option<(&DimSize, &DimSize)> {
+        match self {
+            Type::Matrix { rows, cols, .. } => Some((rows, cols)),
+            // Fixed matrices have known dimensions
+            Type::Mat2 => None, // Could return (Const(2), Const(2)) but different type
+            Type::Mat3 => None,
+            Type::Mat4 => None,
+            _ => None,
+        }
     }
 
     /// Check if this type is a quaternion
@@ -391,7 +713,12 @@ impl Type {
                 vars.insert(*v);
             }
             Type::Ref { inner, .. } => inner.collect_free_vars(vars),
+            Type::RawPointer { inner, .. } => inner.collect_free_vars(vars),
             Type::Array { element, .. } => element.collect_free_vars(vars),
+            Type::ScientificArray { element, .. } => element.collect_free_vars(vars),
+            Type::Matrix { element, .. } => element.collect_free_vars(vars),
+            Type::Tensor { element, .. } => element.collect_free_vars(vars),
+            Type::Quantity { numeric, .. } => numeric.collect_free_vars(vars),
             Type::Tuple(elems) => {
                 for elem in elems {
                     elem.collect_free_vars(vars);
@@ -438,9 +765,34 @@ impl Type {
                 lifetime: lifetime.clone(),
                 inner: Box::new(inner.substitute(subst)),
             },
+            Type::RawPointer { mutable, inner } => Type::RawPointer {
+                mutable: *mutable,
+                inner: Box::new(inner.substitute(subst)),
+            },
             Type::Array { element, size } => Type::Array {
                 element: Box::new(element.substitute(subst)),
                 size: *size,
+            },
+            Type::ScientificArray { element, dim } => Type::ScientificArray {
+                element: Box::new(element.substitute(subst)),
+                dim: dim.clone(),
+            },
+            Type::Matrix {
+                element,
+                rows,
+                cols,
+            } => Type::Matrix {
+                element: Box::new(element.substitute(subst)),
+                rows: rows.clone(),
+                cols: cols.clone(),
+            },
+            Type::Tensor { element, shape } => Type::Tensor {
+                element: Box::new(element.substitute(subst)),
+                shape: shape.clone(),
+            },
+            Type::Quantity { numeric, unit } => Type::Quantity {
+                numeric: Box::new(numeric.substitute(subst)),
+                unit: unit.clone(),
             },
             Type::Tuple(elems) => Type::Tuple(elems.iter().map(|e| e.substitute(subst)).collect()),
             Type::Function {
@@ -671,7 +1023,11 @@ impl EffectSet {
         #[allow(deprecated)]
         EffectSet {
             effects: self.effects.union(&other.effects).cloned().collect(),
-            effect_vars: self.effect_vars.union(&other.effect_vars).cloned().collect(),
+            effect_vars: self
+                .effect_vars
+                .union(&other.effect_vars)
+                .cloned()
+                .collect(),
             vars: self.vars.union(&other.vars).cloned().collect(),
         }
     }
@@ -738,7 +1094,9 @@ impl EffectSet {
             if let Some(replacement) = subst.get(var) {
                 // Replace this variable with the concrete effects
                 result.effects.extend(replacement.effects.iter().cloned());
-                result.effect_vars.extend(replacement.effect_vars.iter().cloned());
+                result
+                    .effect_vars
+                    .extend(replacement.effect_vars.iter().cloned());
             } else {
                 // Variable not in substitution, keep it
                 result.effect_vars.insert(*var);
@@ -836,11 +1194,8 @@ mod tests {
         assert!(residual2.contains("Alloc"));
 
         // Subtract all effects
-        let residual3 = effects.subtract(&[
-            "IO".to_string(),
-            "Mut".to_string(),
-            "Alloc".to_string(),
-        ]);
+        let residual3 =
+            effects.subtract(&["IO".to_string(), "Mut".to_string(), "Alloc".to_string()]);
         assert!(residual3.is_pure());
     }
 

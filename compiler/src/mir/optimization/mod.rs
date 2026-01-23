@@ -16,6 +16,11 @@ pub mod ml_guided_optimization;
 pub mod performance_tuning;
 pub mod pipeline_with_validation;
 
+// Workstream 4: New optimization passes
+pub mod alias_analysis;
+pub mod licm;
+pub mod sroa;
+
 // Re-export commonly used optimization types
 pub use common_subexpression_elimination::CommonSubexpressionElimination;
 pub use constant_propagation::ConstantPropagation;
@@ -30,6 +35,11 @@ pub use function_inlining_complete::CompleteFunctionInlining;
 pub use ml_guided_optimization::{MLGuidedOptimizer, MLOptimizationResult, TargetArchitecture};
 pub use performance_tuning::{PerformanceResult, PerformanceTunedOptimizer};
 pub use pipeline_with_validation::{PipelineResult, ValidatedOptimizationPipeline};
+
+// Workstream 4 exports: LICM, Alias Analysis, SROA
+pub use alias_analysis::{AliasAnalysis, AliasAnalysisResult, AliasQuery, AliasResult};
+pub use licm::LoopInvariantCodeMotion;
+pub use sroa::Sroa;
 
 /// Create a default optimization pipeline with validation
 pub fn create_validated_optimization_pipeline() -> ValidatedOptimizationPipeline {
@@ -114,6 +124,20 @@ impl PassManager {
                 if cse.run_on_function(func)? {
                     total_modified = true;
                 }
+
+                // SROA: Scalar Replacement of Aggregates
+                // Runs at O2+ to reduce memory traffic for aggregate types
+                let mut sroa = Sroa::new();
+                if sroa.run_on_function(func)? {
+                    total_modified = true;
+                }
+
+                // LICM: Loop Invariant Code Motion
+                // Runs at O2+ to hoist loop-invariant computations
+                let licm = LoopInvariantCodeMotion;
+                if licm.run_on_function(func)? {
+                    total_modified = true;
+                }
             }
             _ => {}
         }
@@ -152,4 +176,21 @@ pub struct PassInfo {
     pub name: String,
     pub time_ms: f64,
     pub modified: bool,
+}
+
+// Workstream 4: Factory functions for new optimization passes
+
+/// Create a Loop Invariant Code Motion (LICM) pass
+pub fn create_licm_pass() -> LoopInvariantCodeMotion {
+    LoopInvariantCodeMotion
+}
+
+/// Create a Scalar Replacement of Aggregates (SROA) pass
+pub fn create_sroa_pass() -> Sroa {
+    Sroa::new()
+}
+
+/// Create an Alias Analysis pass
+pub fn create_alias_analysis() -> AliasAnalysis {
+    AliasAnalysis::new()
 }

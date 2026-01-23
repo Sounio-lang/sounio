@@ -31,7 +31,7 @@ use crate::mir::{
     MirType, MirUnaryOp, ValueId, BlockId,
 };
 #[cfg(feature = "jit")]
-use crate::mir::optimization::create_default_pass_manager;
+use crate::mir::optimization::PassManager;
 
 #[cfg(feature = "jit")]
 use cranelift_codegen::ir::condcodes::{FloatCC, IntCC};
@@ -186,8 +186,11 @@ impl MirAwareCraneliftJit {
         // Run MIR optimization passes if enabled
         let optimized_module = if let Some(opt_level) = self.mir_opt_level {
             let mut module_clone = mir_module.clone();
-            let mut pass_manager = create_default_pass_manager(opt_level);
-            let _modified = pass_manager.run_module_passes(&mut module_clone)?;
+            let mut pass_manager = PassManager::new_with_level(opt_level);
+            // Run optimization passes on each function
+            for func in &mut module_clone.functions {
+                let _ = pass_manager.run_function_passes(func)?;
+            }
             module_clone
         } else {
             mir_module.clone()

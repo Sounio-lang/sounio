@@ -156,6 +156,13 @@ pub enum HlirType {
     Mat3, // 3x3 f32 (9 floats, may be padded)
     Mat4, // 4x4 f32 (16 floats)
     Quat, // 4x f32 (x, y, z, w)
+    // Octonion type (8x f32)
+    Octonion, // 8x f32 (a, b, c, d, e, f, g, h)
+    // Quaternionic Neural Network types
+    QuatLinear,   // Quaternionic linear layer (struct with weights)
+    QuatConv2d,   // Quaternionic 2D convolution (struct with kernel)
+    QuatRnnState, // Quaternionic RNN state
+    QuatGate,     // Quaternionic gate
     // f64 vector types
     Vec2d, // 2x f64 (16 bytes)
     Vec3d, // 3x f64 (24 bytes)
@@ -222,6 +229,13 @@ impl HlirType {
             HirType::Mat3 => HlirType::Mat3,
             HirType::Mat4 => HlirType::Mat4,
             HirType::Quat => HlirType::Quat,
+            // Octonion type (8D hypercomplex)
+            HirType::Octonion => HlirType::Octonion,
+            // Quaternionic Neural Network types
+            HirType::QuatLinear { .. } => HlirType::QuatLinear,
+            HirType::QuatConv2d { .. } => HlirType::QuatConv2d,
+            HirType::QuatRnnState { .. } => HlirType::QuatRnnState,
+            HirType::QuatGate { .. } => HlirType::QuatGate,
             // f64 vector types
             HirType::Vec2d => HlirType::Vec2d,
             HirType::Vec3d => HlirType::Vec3d,
@@ -232,6 +246,19 @@ impl HlirType {
             HirType::Future { output } => {
                 // Future<T> is represented as a pointer to a task struct
                 HlirType::Ptr(Box::new(HlirType::Struct("Future".to_string())))
+            }
+            // Scientific array and matrix types
+            HirType::ScientificArray { element, dim } => {
+                // Scientific array is lowered to a struct with data pointer and dimension
+                HlirType::Struct("ScientificArray".to_string())
+            }
+            HirType::Matrix {
+                element,
+                rows,
+                cols,
+            } => {
+                // Matrix is lowered to a struct with data pointer and dimensions
+                HlirType::Struct("Matrix".to_string())
             }
         }
     }
@@ -285,10 +312,17 @@ impl HlirType {
             HlirType::Mat3 => 288, // 9 x 32-bit floats
             HlirType::Mat4 => 512, // 16 x 32-bit floats
             HlirType::Quat => 128, // 4 x 32-bit floats (x, y, z, w)
+            // Octonion: 8 x 32-bit floats = 256 bits
+            HlirType::Octonion => 256,
+            // Quaternionic Neural Network types
+            HlirType::QuatLinear => 128, // Pointer-sized estimate
+            HlirType::QuatConv2d => 128,
+            HlirType::QuatRnnState => 128,
+            HlirType::QuatGate => 128,
             HlirType::Vec2d => 128, // 2 x 64-bit floats
             HlirType::Vec3d => 256, // 3 x 64-bit floats, padded for SIMD
             HlirType::Vec4d => 256, // 4 x 64-bit floats
-            HlirType::Dual => 128, // 2 x 64-bit floats (value, derivative)
+            HlirType::Dual => 128,  // 2 x 64-bit floats (value, derivative)
         }
     }
 }

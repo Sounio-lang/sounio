@@ -1741,9 +1741,83 @@ impl MetalCodegen {
             | GpuOp::Gf4Add(_, _)
             | GpuOp::Gf4Mul(_, _)
             | GpuOp::TransmissionCompose(_, _)
-            | GpuOp::TransmissionDistort(_, _, _, _, _) => {
+            | GpuOp::TransmissionDistort(_, _, _, _, _)
+            // Quaternionic Neural Network operations
+            | GpuOp::QuatRelu(_)
+            | GpuOp::QuatSigmoid(_)
+            | GpuOp::QuatTanh(_)
+            | GpuOp::QuatLeakyRelu(_, _)
+            | GpuOp::QuatBnFwd { .. }
+            | GpuOp::QuatBnBwd { .. }
+            | GpuOp::QuatLinearFwd { .. }
+            | GpuOp::QuatLinearBwd { .. }
+            | GpuOp::QuatConv2dFwd { .. }
+            | GpuOp::QuatConv2dBwd { .. } => {
+                // TODO: Implement quaternionic convolution backward pass
+                self.emit(&format!("// TODO: QuatConv2dBwd not yet implemented"));
+            }
+
+            // Octonion operations (8D hypercomplex) - IMPLEMENTATION
+
+            // OctonionNormSq: Compute |o|² = sum of component squares
+            // Math: |o|² = a² + b² + c² + d² + e² + f² + g² + h²
+            // Uses Metal SIMD operations for efficiency
+            GpuOp::OctonionNormSq(o) => {
+                let o_name = self.get_var_name(*o);
+                self.emit(&format!("// OctonionNormSq: |o|² = Σ|aᵢ|²"));
+                self.emit(&format!("float8 oct_vec = *(device float8*)(&{});", o_name));
+                self.emit(&format!("float4 oct_lo = oct_vec.lo;  // components 0-3"));
+                self.emit(&format!("float4 oct_hi = oct_vec.hi;  // components 4-7"));
+                self.emit(&format!("float {} = dot(oct_lo, oct_lo) + dot(oct_hi, oct_hi);", result_name));
+            }
+
+            // OctonionNormalize: Normalize octonion to unit length
+            // Math: o_norm = o / |o| = o * rsqrt(|o|²)
+            // Uses Metal's rsqrt for efficiency
+            GpuOp::OctonionNormalize(o) => {
+                let o_name = self.get_var_name(*o);
+                self.emit(&format!("// OctonionNormalize: o / |o|"));
+                self.emit(&format!("float8 oct_unnorm = *(device float8*)(&{});", o_name));
+                self.emit(&format!("float oct_norm_sq = dot(oct_unnorm.lo, oct_unnorm.lo) + dot(oct_unnorm.hi, oct_unnorm.hi);"));
+                self.emit(&format!("float oct_inv_norm = rsqrt(oct_norm_sq);"));
+                self.emit(&format!("float8 {} = oct_unnorm * oct_inv_norm;", result_name));
+            }
+
+            // OctonionReLU: Per-component ReLU activation
+            // Math: relu(o) = max(0, o) applied component-wise
+            // Uses Metal's built-in max() for vector types
+            GpuOp::OctonionRelu(o) => {
+                let o_name = self.get_var_name(*o);
+                self.emit(&format!("// OctonionRelu: max(0, o[i]) per component"));
+                self.emit(&format!("float8 oct_input = *(device float8*)(&{});", o_name));
+                self.emit(&format!("float8 {} = max(oct_input, 0.0f);", result_name));
+            }
+
+            // OctonionConj: Octonion conjugate
+            // Math: conj(a + bi + ...) = a - bi - ... (keep real, negate imaginary)
+            // Implementation: Negate components 1-7, keep component 0
+            GpuOp::OctonionConj(o) => {
+                let o_name = self.get_var_name(*o);
+                self.emit(&format!("// OctonionConj: negate imaginary parts"));
+                self.emit(&format!("float8 oct_orig = *(device float8*)(&{});", o_name));
+                self.emit(&format!("float8 {} = float8(oct_orig.s0, -oct_orig.s1, -oct_orig.s2, -oct_orig.s3, -oct_orig.s4, -oct_orig.s5, -oct_orig.s6, -oct_orig.s7);", result_name));
+            }
+
+            // Octonion operations (8D hypercomplex) - STUBS (TODO: implement remaining)
+            | GpuOp::OctonionMul(_, _)
+            | GpuOp::OctonionInv(_)
+            | GpuOp::OctonionReal(_)
+            | GpuOp::OctonionImag(_)
+            | GpuOp::OctonionDot(_, _)
+            | GpuOp::OctonionExp(_)
+            | GpuOp::OctonionLog(_)
+            | GpuOp::OctonionPow(_, _)
+            | GpuOp::OctonionSigmoid(_)
+            | GpuOp::OctonionTanh(_)
+            | GpuOp::OctonionToQuats(_)
+            | GpuOp::OctonionFromQuats(_, _) => {
                 self.emit(&format!(
-                    "// Bio op -> {} (implement via device function)",
+                    "// Bio/QNN/Octonion op -> {} (implement via device function)",
                     result_name
                 ));
             }
@@ -2108,7 +2182,7 @@ impl MetalCodegen {
 
 /// Compile HLIR to MSL
 pub fn compile_to_msl(hlir: &crate::hlir::HlirModule, gpu_family: MetalGpuFamily) -> String {
-    use super::hlir_to_gpu::{LoweringConfig, lower_with_config};
+    use super::hlir_to_gpu::{lower_with_config, LoweringConfig};
 
     let config = LoweringConfig {
         target: GpuTarget::Metal { gpu_family },
@@ -2133,7 +2207,7 @@ pub fn compile_to_msl_epistemic(
     gpu_family: MetalGpuFamily,
     epistemic: bool,
 ) -> String {
-    use super::hlir_to_gpu::{LoweringConfig, lower_with_config};
+    use super::hlir_to_gpu::{lower_with_config, LoweringConfig};
 
     let config = LoweringConfig {
         target: GpuTarget::Metal { gpu_family },

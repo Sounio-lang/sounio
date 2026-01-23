@@ -25,10 +25,21 @@ pub enum MirType {
     /// Boolean type
     Bool,
     /// Integer types
-    I8, I16, I32, I64, I128, Isize,
-    U8, U16, U32, U64, U128, Usize,
+    I8,
+    I16,
+    I32,
+    I64,
+    I128,
+    Isize,
+    U8,
+    U16,
+    U32,
+    U64,
+    U128,
+    Usize,
     /// Floating point types
-    F32, F64,
+    F32,
+    F64,
     /// Character type
     Char,
     /// String type (pointer to null-terminated string)
@@ -66,16 +77,33 @@ impl MirType {
 
     /// Check if this is an integer type
     pub fn is_integer(&self) -> bool {
-        matches!(self, 
-            MirType::I8 | MirType::I16 | MirType::I32 | MirType::I64 | MirType::I128 | MirType::Isize |
-            MirType::U8 | MirType::U16 | MirType::U32 | MirType::U64 | MirType::U128 | MirType::Usize
+        matches!(
+            self,
+            MirType::I8
+                | MirType::I16
+                | MirType::I32
+                | MirType::I64
+                | MirType::I128
+                | MirType::Isize
+                | MirType::U8
+                | MirType::U16
+                | MirType::U32
+                | MirType::U64
+                | MirType::U128
+                | MirType::Usize
         )
     }
 
     /// Check if this is a signed integer type
     pub fn is_signed(&self) -> bool {
-        matches!(self,
-            MirType::I8 | MirType::I16 | MirType::I32 | MirType::I64 | MirType::I128 | MirType::Isize
+        matches!(
+            self,
+            MirType::I8
+                | MirType::I16
+                | MirType::I32
+                | MirType::I64
+                | MirType::I128
+                | MirType::Isize
         )
     }
 
@@ -105,10 +133,14 @@ impl MirType {
             MirType::I32 | MirType::U32 | MirType::F32 => Some(4),
             MirType::I64 | MirType::U64 | MirType::F64 | MirType::Isize | MirType::Usize => Some(8),
             MirType::I128 | MirType::U128 => Some(16),
-            MirType::Char => Some(4), // Unicode code point
+            MirType::Char => Some(4),   // Unicode code point
             MirType::Ptr(_) => Some(8), // Pointer size on 64-bit
             MirType::Array(elem_ty, size) => elem_ty.size_bytes().map(|s| s * size),
-            MirType::Tuple(types) => types.iter().filter_map(|t| t.size_bytes()).sum::<usize>().into(),
+            MirType::Tuple(types) => types
+                .iter()
+                .filter_map(|t| t.size_bytes())
+                .sum::<usize>()
+                .into(),
             MirType::Struct { fields, .. } => {
                 // Compute struct size as sum of field sizes (simplified - ignores alignment)
                 if fields.is_empty() {
@@ -124,7 +156,7 @@ impl MirType {
     /// Convert from HIR type to MIR type
     pub fn from_hir(hir_ty: &crate::hir::HirType) -> Self {
         use crate::hir::HirType;
-        
+
         match hir_ty {
             HirType::Unit => MirType::Unit,
             HirType::Bool => MirType::Bool,
@@ -144,29 +176,22 @@ impl MirType {
             HirType::F64 => MirType::F64,
             HirType::Char => MirType::Char,
             HirType::String => MirType::String,
-            
-            HirType::Ref { inner, .. } => {
-                MirType::Ptr(Box::new(MirType::from_hir(inner)))
-            }
-            HirType::RawPointer { inner, .. } => {
-                MirType::Ptr(Box::new(MirType::from_hir(inner)))
-            }
+
+            HirType::Ref { inner, .. } => MirType::Ptr(Box::new(MirType::from_hir(inner))),
+            HirType::RawPointer { inner, .. } => MirType::Ptr(Box::new(MirType::from_hir(inner))),
             HirType::Array { element, size } => {
-                MirType::Array(
-                    Box::new(MirType::from_hir(element)),
-                    size.unwrap_or(0)
-                )
+                MirType::Array(Box::new(MirType::from_hir(element)), size.unwrap_or(0))
             }
-            HirType::Tuple(types) => {
-                MirType::Tuple(types.iter().map(MirType::from_hir).collect())
-            }
-            HirType::Fn { params, return_type, .. } => {
-                MirType::Function {
-                    params: params.iter().map(MirType::from_hir).collect(),
-                    return_type: Box::new(MirType::from_hir(return_type)),
-                }
-            }
-            
+            HirType::Tuple(types) => MirType::Tuple(types.iter().map(MirType::from_hir).collect()),
+            HirType::Fn {
+                params,
+                return_type,
+                ..
+            } => MirType::Function {
+                params: params.iter().map(MirType::from_hir).collect(),
+                return_type: Box::new(MirType::from_hir(return_type)),
+            },
+
             // Epistemic types lower to their inner type
             HirType::Knowledge { inner, .. } => MirType::from_hir(inner),
             HirType::Quantity { numeric, .. } => MirType::from_hir(numeric),
@@ -181,9 +206,7 @@ impl MirType {
                 }
             }
 
-            HirType::Future { output } => {
-                MirType::Ptr(Box::new(MirType::from_hir(output)))
-            }
+            HirType::Future { output } => MirType::Ptr(Box::new(MirType::from_hir(output))),
 
             // Linear algebra types - lower to arrays of floats
             HirType::Vec2 => MirType::Array(Box::new(MirType::F32), 2),
@@ -199,6 +222,14 @@ impl MirType {
             HirType::Vec3d => MirType::Array(Box::new(MirType::F64), 4), // Padded for SIMD
             HirType::Vec4d => MirType::Array(Box::new(MirType::F64), 4),
 
+            // Octonion: 8 x f32
+            HirType::Octonion => MirType::Array(Box::new(MirType::F32), 8),
+            // Quaternionic Neural Network types - treat as arrays for now
+            HirType::QuatLinear { .. } => MirType::Array(Box::new(MirType::F32), 0),
+            HirType::QuatConv2d { .. } => MirType::Array(Box::new(MirType::F32), 0),
+            HirType::QuatRnnState { .. } => MirType::Array(Box::new(MirType::F32), 0),
+            HirType::QuatGate { .. } => MirType::Array(Box::new(MirType::F32), 0),
+
             // Automatic differentiation
             HirType::Dual => MirType::Tuple(vec![MirType::F64, MirType::F64]),
 
@@ -211,8 +242,14 @@ impl MirType {
                     name: format!("Tensor<{}, {}>", elem_ty, ndims),
                     fields: vec![
                         ("data".to_string(), MirType::Ptr(Box::new(elem_ty))),
-                        ("shape".to_string(), MirType::Array(Box::new(MirType::Usize), ndims)),
-                        ("strides".to_string(), MirType::Array(Box::new(MirType::Usize), ndims)),
+                        (
+                            "shape".to_string(),
+                            MirType::Array(Box::new(MirType::Usize), ndims),
+                        ),
+                        (
+                            "strides".to_string(),
+                            MirType::Array(Box::new(MirType::Usize), ndims),
+                        ),
                     ],
                 }
             }
@@ -222,6 +259,47 @@ impl MirType {
                 MirType::Struct {
                     name: format!("Ontology<{}:{}>", namespace, term),
                     fields: Vec::new(), // Opaque - fields resolved at runtime
+                }
+            }
+
+            // Scientific array types - lower to struct representation
+            HirType::ScientificArray { element, dim } => {
+                let elem_ty = MirType::from_hir(element);
+                let size = match dim {
+                    crate::hir::HirTensorDim::Fixed(n) => *n,
+                    _ => 0, // Dynamic size
+                };
+                MirType::Struct {
+                    name: format!("Array<{}, {}>", elem_ty, size),
+                    fields: vec![
+                        ("data".to_string(), MirType::Ptr(Box::new(elem_ty))),
+                        ("len".to_string(), MirType::Usize),
+                    ],
+                }
+            }
+
+            // Matrix types - lower to struct representation
+            HirType::Matrix {
+                element,
+                rows,
+                cols,
+            } => {
+                let elem_ty = MirType::from_hir(element);
+                let r = match rows {
+                    crate::hir::HirTensorDim::Fixed(n) => *n,
+                    _ => 0,
+                };
+                let c = match cols {
+                    crate::hir::HirTensorDim::Fixed(n) => *n,
+                    _ => 0,
+                };
+                MirType::Struct {
+                    name: format!("Matrix<{}, {}, {}>", elem_ty, r, c),
+                    fields: vec![
+                        ("data".to_string(), MirType::Ptr(Box::new(elem_ty))),
+                        ("rows".to_string(), MirType::Usize),
+                        ("cols".to_string(), MirType::Usize),
+                    ],
                 }
             }
 
@@ -266,7 +344,10 @@ impl fmt::Display for MirType {
                 }
                 write!(f, ")")
             }
-            MirType::Function { params, return_type } => {
+            MirType::Function {
+                params,
+                return_type,
+            } => {
                 write!(f, "fn(")?;
                 for (i, ty) in params.iter().enumerate() {
                     if i > 0 {
@@ -366,13 +447,13 @@ mod tests {
     #[test]
     fn test_type_conversions() {
         use crate::hir::HirType;
-        
+
         // Test basic type conversion
         let hir_unit = HirType::Unit;
         let mir_unit = MirType::from_hir(&hir_unit);
         assert_eq!(mir_unit, MirType::Unit);
         assert!(mir_unit.is_unit());
-        
+
         let hir_i32 = HirType::I32;
         let mir_i32 = MirType::from_hir(&hir_i32);
         assert_eq!(mir_i32, MirType::I32);
@@ -383,13 +464,13 @@ mod tests {
     fn test_constant_types() {
         let unit_const = MirConstant::Unit;
         assert_eq!(unit_const.ty(), MirType::Unit);
-        
+
         let bool_const = MirConstant::Bool(true);
         assert_eq!(bool_const.ty(), MirType::Bool);
-        
+
         let int_const = MirConstant::Int(42);
         assert_eq!(int_const.ty(), MirType::I64);
-        
+
         let float_const = MirConstant::Float("3.14".to_string());
         assert_eq!(float_const.ty(), MirType::F64);
     }

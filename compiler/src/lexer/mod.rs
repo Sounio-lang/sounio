@@ -121,6 +121,15 @@ mod tests {
     }
 
     #[test]
+    fn test_lex_c_string_literal() {
+        let tokens = lex(r#"c"hello" c"test\nwith\tescape""#).unwrap();
+        assert_eq!(tokens[0].kind, TokenKind::CStringLit);
+        assert_eq!(tokens[0].text, r#"c"hello""#);
+        assert_eq!(tokens[1].kind, TokenKind::CStringLit);
+        assert_eq!(tokens[1].text, r#"c"test\nwith\tescape""#);
+    }
+
+    #[test]
     fn test_lex_units() {
         let tokens = lex("500.0<mg> 10.0<mL>").unwrap();
         assert_eq!(tokens[0].kind, TokenKind::FloatLit);

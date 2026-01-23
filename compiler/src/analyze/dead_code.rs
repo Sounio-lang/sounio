@@ -934,6 +934,12 @@ impl DeadCodeAnalyzer {
                 // Collect references from the inner type
                 self.collect_type_references(inner);
             }
+            TypeExpr::ScientificArray { element_type, .. } => {
+                self.collect_type_references(element_type);
+            }
+            TypeExpr::ScientificMatrix { element_type, .. } => {
+                self.collect_type_references(element_type);
+            }
         }
     }
 

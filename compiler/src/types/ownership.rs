@@ -97,6 +97,14 @@ pub fn ownership_of(ty: &Type) -> Ownership {
         Type::Vec2 | Type::Vec3 | Type::Vec4 => Ownership::Copy,
         Type::Mat2 | Type::Mat3 | Type::Mat4 => Ownership::Copy,
         Type::Quat => Ownership::Copy,
+        // Octonion (8D hypercomplex) is Copy (8 f32, stack-allocated)
+        Type::Octonion => Ownership::Copy,
+
+        // Quaternionic Neural Network types - Copy (fixed-size layer descriptions)
+        Type::QuatLinear { .. } => Ownership::Copy,
+        Type::QuatConv2d { .. } => Ownership::Copy,
+        Type::QuatRnnState { .. } => Ownership::Copy,
+        Type::QuatGate { .. } => Ownership::Copy,
 
         // Dual numbers are Copy (two f64 values, stack-allocated)
         Type::Dual => Ownership::Copy,
@@ -106,6 +114,19 @@ pub fn ownership_of(ty: &Type) -> Ownership {
 
         // f64 vector types are Copy (fixed-size, stack-allocated)
         Type::Vec2d | Type::Vec3d | Type::Vec4d => Ownership::Copy,
+
+        // Scientific arrays are Affine (like regular arrays but with dimension tracking)
+        Type::ScientificArray { element, .. } => {
+            let elem_own = ownership_of(element);
+            if elem_own == Ownership::Linear {
+                Ownership::Linear
+            } else {
+                elem_own
+            }
+        }
+
+        // Matrices are Affine (heap allocated for large sizes)
+        Type::Matrix { .. } => Ownership::Affine,
     }
 }
 

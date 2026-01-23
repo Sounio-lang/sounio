@@ -1090,8 +1090,13 @@ pub enum TypeExpr {
     },
     /// Tuple type: (T1, T2, ...)
     Tuple(Vec<TypeExpr>),
-    /// Function type: Fn(A) -> B
+    /// Function type: fn(A) -> B or extern "C" fn(A) -> B
+    /// When abi is None, this is a Sounio function type (fn(...) -> ...)
+    /// When abi is Some, this is a function pointer type with the specified ABI
+    /// (e.g., extern "C" fn(...) -> ...)
     Function {
+        /// ABI for function pointers (None for Sounio functions)
+        abi: Option<Abi>,
         params: Vec<TypeExpr>,
         return_type: Box<TypeExpr>,
         effects: Vec<EffectRef>,
@@ -1129,6 +1134,26 @@ pub enum TypeExpr {
         element_type: Box<TypeExpr>,
         /// Shape dimensions (can be expressions or named dimensions)
         shape: Vec<TensorDim>,
+    },
+
+    /// Scientific array type: Array<T, N> with const generic dimension
+    /// Enables shape polymorphism: fn sum<N>(arr: Array<f64, N>) -> f64
+    ScientificArray {
+        /// Element type (e.g., f64, i32)
+        element_type: Box<TypeExpr>,
+        /// Dimension (const, symbolic, or dynamic)
+        dim: TensorDim,
+    },
+
+    /// Scientific matrix type: Matrix<T, M, N> with const generic dimensions
+    /// Enables compile-time shape checking: fn matmul<M, K, N>(A: Matrix<f64, M, K>, B: Matrix<f64, K, N>) -> Matrix<f64, M, N>
+    ScientificMatrix {
+        /// Element type (e.g., f64, f32)
+        element_type: Box<TypeExpr>,
+        /// Number of rows (M)
+        rows: TensorDim,
+        /// Number of columns (N)
+        cols: TensorDim,
     },
 
     /// Tile type for GPU tile programming: tile<f16, 16, 16>
@@ -1620,6 +1645,10 @@ pub enum Literal {
     Float(f64),
     Char(char),
     String(String),
+    /// C string literal: null-terminated string for FFI (e.g., c"hello")
+    /// The stored string does NOT include the null terminator - that's added during codegen.
+    /// The type of a C string literal is `*const i8` (raw pointer to byte).
+    CString(String),
     /// Integer with unit of measure (e.g., 500_mg)
     IntUnit(i64, String),
     /// Float with unit of measure (e.g., 10.5_mL)

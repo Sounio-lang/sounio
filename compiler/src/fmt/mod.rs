@@ -770,11 +770,16 @@ impl Formatter {
                 Doc::Concat(parts)
             }
             TypeExpr::Function {
+                abi,
                 params,
                 return_type,
                 effects,
             } => {
                 let mut parts = Vec::new();
+                // Add ABI prefix for extern function pointers
+                if let Some(a) = abi {
+                    parts.push(Doc::Text(format!("extern \"{}\" ", a)));
+                }
                 parts.push(Doc::Text("fn(".to_string()));
                 let ps: Vec<Doc> = params.iter().map(|p| self.type_to_doc(p)).collect();
                 parts.push(Doc::join(ps, Doc::Text(", ".to_string())));
@@ -913,6 +918,37 @@ impl Formatter {
                 parts.push(self.type_to_doc(inner));
                 Doc::Concat(parts)
             }
+            TypeExpr::ScientificArray { element_type, dim } => {
+                let mut parts = Vec::new();
+                parts.push(Doc::Text("Array<".to_string()));
+                parts.push(self.type_to_doc(element_type));
+                parts.push(Doc::Text(", ".to_string()));
+                parts.push(Doc::Text(self.format_tensor_dim(dim)));
+                parts.push(Doc::Text(">".to_string()));
+                Doc::Concat(parts)
+            }
+            TypeExpr::ScientificMatrix { element_type, rows, cols } => {
+                let mut parts = Vec::new();
+                parts.push(Doc::Text("Matrix<".to_string()));
+                parts.push(self.type_to_doc(element_type));
+                parts.push(Doc::Text(", ".to_string()));
+                parts.push(Doc::Text(self.format_tensor_dim(rows)));
+                parts.push(Doc::Text(", ".to_string()));
+                parts.push(Doc::Text(self.format_tensor_dim(cols)));
+                parts.push(Doc::Text(">".to_string()));
+                Doc::Concat(parts)
+            }
+        }
+    }
+
+    /// Format a tensor dimension
+    fn format_tensor_dim(&self, dim: &crate::ast::TensorDim) -> String {
+        use crate::ast::TensorDim;
+        match dim {
+            TensorDim::Named(name) => name.clone(),
+            TensorDim::Fixed(size) => size.to_string(),
+            TensorDim::Dynamic => "_".to_string(),
+            TensorDim::Expr(expr) => format!("{:?}", expr),
         }
     }
 

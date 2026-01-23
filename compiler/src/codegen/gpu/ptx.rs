@@ -3532,6 +3532,645 @@ impl PtxCodegen {
             }
 
             // ================================================================
+            // Quaternionic Neural Network Operations (arXiv:1804.10592)
+            // ================================================================
+
+            // Quaternion ReLU: max(0, q[i]) for each component
+            GpuOp::QuatRelu(q) => {
+                let _rq = self.get_register(*q);
+                let reg = self.alloc_register(&GpuType::Vec4(Box::new(GpuType::F32)));
+                self.registers.push(reg.clone());
+                self.value_types.push(GpuType::Vec4(Box::new(GpuType::F32)));
+                writeln!(
+                    self.output,
+                    "{}// QuatRelu: max(0, q[i]) per component",
+                    indent
+                )
+                .unwrap();
+                writeln!(self.output, "{}call.uni __quat_relu, ({});", indent, reg).unwrap();
+            }
+
+            // Quaternion Sigmoid: 1/(1 + exp(-q[i])) per component
+            GpuOp::QuatSigmoid(q) => {
+                let _rq = self.get_register(*q);
+                let reg = self.alloc_register(&GpuType::Vec4(Box::new(GpuType::F32)));
+                self.registers.push(reg.clone());
+                self.value_types.push(GpuType::Vec4(Box::new(GpuType::F32)));
+                writeln!(
+                    self.output,
+                    "{}// QuatSigmoid: 1/(1+exp(-q[i])) per component",
+                    indent
+                )
+                .unwrap();
+                writeln!(self.output, "{}call.uni __quat_sigmoid, ({});", indent, reg).unwrap();
+            }
+
+            // Quaternion Tanh: tanh(q[i]) per component
+            GpuOp::QuatTanh(q) => {
+                let _rq = self.get_register(*q);
+                let reg = self.alloc_register(&GpuType::Vec4(Box::new(GpuType::F32)));
+                self.registers.push(reg.clone());
+                self.value_types.push(GpuType::Vec4(Box::new(GpuType::F32)));
+                writeln!(
+                    self.output,
+                    "{}// QuatTanh: tanh(q[i]) per component",
+                    indent
+                )
+                .unwrap();
+                writeln!(self.output, "{}call.uni __quat_tanh, ({});", indent, reg).unwrap();
+            }
+
+            // Quaternion Leaky ReLU: max(α*q[i], q[i])
+            GpuOp::QuatLeakyRelu(q, alpha) => {
+                let _rq = self.get_register(*q);
+                let reg = self.alloc_register(&GpuType::Vec4(Box::new(GpuType::F32)));
+                self.registers.push(reg.clone());
+                self.value_types.push(GpuType::Vec4(Box::new(GpuType::F32)));
+                writeln!(
+                    self.output,
+                    "{}// QuatLeakyRelu: max({}*q[i], q[i])",
+                    indent, alpha
+                )
+                .unwrap();
+                writeln!(
+                    self.output,
+                    "{}call.uni __quat_leaky_relu, ({});",
+                    indent, reg
+                )
+                .unwrap();
+            }
+
+            // Quaternion batch normalization forward pass
+            GpuOp::QuatBnFwd {
+                x,
+                gamma,
+                beta,
+                mean,
+                var,
+                epsilon,
+            } => {
+                let _rx = self.get_register(*x);
+                let _rg = self.get_register(*gamma);
+                let _rb = self.get_register(*beta);
+                let _rm = self.get_register(*mean);
+                let _rv = self.get_register(*var);
+                let reg = self.alloc_register(&GpuType::Vec4(Box::new(GpuType::F32)));
+                self.registers.push(reg.clone());
+                self.value_types.push(GpuType::Vec4(Box::new(GpuType::F32)));
+                writeln!(
+                    self.output,
+                    "{}// QuatBnFwd: normalize per component, epsilon={}",
+                    indent, epsilon
+                )
+                .unwrap();
+                writeln!(self.output, "{}call.uni __quat_bn_fwd, ({});", indent, reg).unwrap();
+            }
+
+            // Quaternion batch normalization backward pass
+            GpuOp::QuatBnBwd {
+                x,
+                dy,
+                gamma,
+                mean,
+                var,
+                epsilon,
+            } => {
+                let _rx = self.get_register(*x);
+                let _rdy = self.get_register(*dy);
+                let _rg = self.get_register(*gamma);
+                let _rm = self.get_register(*mean);
+                let _rv = self.get_register(*var);
+                let reg = self.alloc_register(&GpuType::Vec4(Box::new(GpuType::F32)));
+                self.registers.push(reg.clone());
+                self.value_types.push(GpuType::Vec4(Box::new(GpuType::F32)));
+                writeln!(
+                    self.output,
+                    "{}// QuatBnBwd: backprop gradients, epsilon={}",
+                    indent, epsilon
+                )
+                .unwrap();
+                writeln!(self.output, "{}call.uni __quat_bn_bwd, ({});", indent, reg).unwrap();
+            }
+
+            // Quaternionic linear layer forward: y = W ⊗ x + b
+            GpuOp::QuatLinearFwd {
+                w,
+                x,
+                b,
+                out,
+                in_features,
+                out_features,
+            } => {
+                let _rw = self.get_register(*w);
+                let _rx = self.get_register(*x);
+                let _rb = self.get_register(*b);
+                let _rout = self.get_register(*out);
+                writeln!(
+                    self.output,
+                    "{}// QuatLinearFwd: [{} ⊗ {} + {}]",
+                    indent, in_features, out_features, out_features
+                )
+                .unwrap();
+                writeln!(
+                    self.output,
+                    "{}call.uni __quat_linear_fwd, ({});",
+                    indent, _rout
+                )
+                .unwrap();
+            }
+
+            // Quaternionic linear layer backward
+            GpuOp::QuatLinearBwd {
+                w,
+                x,
+                dy,
+                dW,
+                dx,
+                in_features,
+                out_features,
+            } => {
+                let _rw = self.get_register(*w);
+                let _rx = self.get_register(*x);
+                let _rdy = self.get_register(*dy);
+                let _rdW = self.get_register(*dW);
+                let _rdx = self.get_register(*dx);
+                writeln!(
+                    self.output,
+                    "{}// QuatLinearBwd: gradients for [{} ⊗ {}]",
+                    indent, in_features, out_features
+                )
+                .unwrap();
+                writeln!(
+                    self.output,
+                    "{}call.uni __quat_linear_bwd, ({});",
+                    indent, _rdW
+                )
+                .unwrap();
+            }
+
+            // Quaternionic 2D convolution forward
+            GpuOp::QuatConv2dFwd {
+                input,
+                kernel,
+                output,
+                batch,
+                in_ch,
+                out_ch,
+                height,
+                width,
+                kH,
+                kW,
+            } => {
+                let _rin = self.get_register(*input);
+                let _rk = self.get_register(*kernel);
+                let _rout = self.get_register(*output);
+                writeln!(
+                    self.output,
+                    "{}// QuatConv2dFwd: quat conv [{}x{}x{}] ⊗ [{}x{}] -> out_ch={}",
+                    indent, batch, in_ch, height, kH, kW, out_ch
+                )
+                .unwrap();
+                writeln!(
+                    self.output,
+                    "{}call.uni __quat_conv2d_fwd, ({});",
+                    indent, _rout
+                )
+                .unwrap();
+            }
+
+            // Quaternionic 2D convolution backward
+            GpuOp::QuatConv2dBwd {
+                input,
+                kernel,
+                d_output,
+                d_kernel,
+                d_input,
+                batch,
+                in_ch,
+                out_ch,
+                height,
+                width,
+                kH,
+                kW,
+            } => {
+                let _rin = self.get_register(*input);
+                let _rk = self.get_register(*kernel);
+                let _rdout = self.get_register(*d_output);
+                let _rdk = self.get_register(*d_kernel);
+                let _rdin = self.get_register(*d_input);
+                writeln!(self.output, "{}// QuatConv2dBwd: gradients", indent).unwrap();
+                writeln!(
+                    self.output,
+                    "{}call.uni __quat_conv2d_bwd, ({});",
+                    indent, _rdk
+                )
+                .unwrap();
+            }
+
+            // ================================================================
+            // Octonion Operations (8D Hypercomplex) - arXiv:1601.01507
+            // ================================================================
+
+            // Octonion multiplication via Cayley-Dickson construction
+            GpuOp::OctonionMul(o1, o2) => {
+                let _ro1 = self.get_register(*o1);
+                let _ro2 = self.get_register(*o2);
+                let reg = self.alloc_register(&GpuType::Array(Box::new(GpuType::F32), 8));
+                self.registers.push(reg.clone());
+                self.value_types
+                    .push(GpuType::Array(Box::new(GpuType::F32), 8));
+                writeln!(self.output, "{}// OctonionMul: 8D multiplication", indent).unwrap();
+                writeln!(self.output, "{}call.uni __octonion_mul, ({});", indent, reg).unwrap();
+            }
+
+            // Octonion conjugate
+            // Octonion conjugate
+            // Math: conj(a + bi + cj + dk + el + fil + gjl + hkl) = a - bi - cj - dk - el - fil - gjl - hkl
+            // Implementation: Keep real part, negate 7 imaginary parts
+            GpuOp::OctonionConj(o) => {
+                let ro = self.get_register(*o);
+                let reg = self.alloc_register(&GpuType::Array(Box::new(GpuType::F32), 8));
+                self.registers.push(reg.clone());
+                self.value_types
+                    .push(GpuType::Array(Box::new(GpuType::F32), 8));
+
+                writeln!(self.output, "{}// OctonionConj: negate imaginary parts (inline implementation)", indent).unwrap();
+                writeln!(self.output, "{}  .reg .f32 %conj_in<8>;  // input components", indent).unwrap();
+                writeln!(self.output, "{}  .reg .f32 %conj_out<8>; // output components", indent).unwrap();
+
+                // Load all 8 components
+                for i in 0..8 {
+                    writeln!(
+                        self.output,
+                        "{}  ld.global.f32 %conj_in{}, [{} + {}];",
+                        indent, i, ro, i * 4
+                    ).unwrap();
+                }
+
+                // Keep real part (component 0) as is
+                writeln!(self.output, "{}  // Keep real part", indent).unwrap();
+                writeln!(self.output, "{}  mov.f32 %conj_out0, %conj_in0;", indent).unwrap();
+
+                // Negate imaginary parts (components 1-7)
+                writeln!(self.output, "{}  // Negate imaginary parts (7 components)", indent).unwrap();
+                for i in 1..8 {
+                    writeln!(
+                        self.output,
+                        "{}  neg.f32 %conj_out{}, %conj_in{};",
+                        indent, i, i
+                    ).unwrap();
+                }
+
+                // Store results
+                for i in 0..8 {
+                    writeln!(
+                        self.output,
+                        "{}  st.global.f32 [{} + {}], %conj_out{};",
+                        indent, reg, i * 4, i
+                    ).unwrap();
+                }
+            }
+
+            // Octonion norm squared
+            // Math: |o|² = a² + b² + c² + d² + e² + f² + g² + h²
+            // Implementation: Load 8 f32 components, square each, sum with tree reduction
+            GpuOp::OctonionNormSq(o) => {
+                let ro = self.get_register(*o);
+                let reg = self.alloc_register(&GpuType::F32);
+                self.registers.push(reg.clone());
+                self.value_types.push(GpuType::F32);
+
+                writeln!(self.output, "{}// OctonionNormSq: |o|² = Σ|aᵢ|² (inline implementation)", indent).unwrap();
+                writeln!(self.output, "{}  .reg .f32 %oct_f<8>;  // 8 octonion components", indent).unwrap();
+                writeln!(self.output, "{}  .reg .f32 %oct_sq<8>; // squared components", indent).unwrap();
+                writeln!(self.output, "{}  .reg .f32 %oct_sum<4>; // intermediate sums", indent).unwrap();
+
+                // Load 8 components from memory (assuming base pointer in ro, components are 4 bytes apart)
+                for i in 0..8 {
+                    writeln!(
+                        self.output,
+                        "{}  ld.global.f32 %oct_f{}, [{} + {}];",
+                        indent, i, ro, i * 4
+                    ).unwrap();
+                }
+
+                // Compute squares
+                for i in 0..8 {
+                    writeln!(
+                        self.output,
+                        "{}  mul.f32 %oct_sq{}, %oct_f{}, %oct_f{};",
+                        indent, i, i, i
+                    ).unwrap();
+                }
+
+                // Tree reduction for numerical stability
+                writeln!(self.output, "{}  // Tree reduction (sum pairs)", indent).unwrap();
+                writeln!(self.output, "{}  add.f32 %oct_sum0, %oct_sq0, %oct_sq1;", indent).unwrap();
+                writeln!(self.output, "{}  add.f32 %oct_sum1, %oct_sq2, %oct_sq3;", indent).unwrap();
+                writeln!(self.output, "{}  add.f32 %oct_sum2, %oct_sq4, %oct_sq5;", indent).unwrap();
+                writeln!(self.output, "{}  add.f32 %oct_sum3, %oct_sq6, %oct_sq7;", indent).unwrap();
+                writeln!(self.output, "{}  add.f32 %oct_sum0, %oct_sum0, %oct_sum1;", indent).unwrap();
+                writeln!(self.output, "{}  add.f32 %oct_sum2, %oct_sum2, %oct_sum3;", indent).unwrap();
+                writeln!(self.output, "{}  add.f32 {}, %oct_sum0, %oct_sum2;", indent, reg).unwrap();
+            }
+
+            // Octonion normalize
+            // Octonion normalize to unit octonion
+            // Math: o_norm = o / |o| = o / sqrt(|o|²)
+            // Implementation: Compute norm squared, rsqrt, multiply all components
+            GpuOp::OctonionNormalize(o) => {
+                let ro = self.get_register(*o);
+                let reg = self.alloc_register(&GpuType::Array(Box::new(GpuType::F32), 8));
+                self.registers.push(reg.clone());
+                self.value_types
+                    .push(GpuType::Array(Box::new(GpuType::F32), 8));
+
+                writeln!(self.output, "{}// OctonionNormalize: o / |o| (inline implementation)", indent).unwrap();
+                writeln!(self.output, "{}  .reg .f32 %norm_f<8>;   // 8 octonion components", indent).unwrap();
+                writeln!(self.output, "{}  .reg .f32 %norm_sq<8>;  // squared components", indent).unwrap();
+                writeln!(self.output, "{}  .reg .f32 %norm_sum<4>; // intermediate sums", indent).unwrap();
+                writeln!(self.output, "{}  .reg .f32 %norm_normsq; // |o|²", indent).unwrap();
+                writeln!(self.output, "{}  .reg .f32 %norm_inv;    // 1/|o|", indent).unwrap();
+                writeln!(self.output, "{}  .reg .f32 %norm_out<8>; // normalized components", indent).unwrap();
+
+                // Load 8 components
+                for i in 0..8 {
+                    writeln!(
+                        self.output,
+                        "{}  ld.global.f32 %norm_f{}, [{} + {}];",
+                        indent, i, ro, i * 4
+                    ).unwrap();
+                }
+
+                // Compute squares
+                for i in 0..8 {
+                    writeln!(
+                        self.output,
+                        "{}  mul.f32 %norm_sq{}, %norm_f{}, %norm_f{};",
+                        indent, i, i, i
+                    ).unwrap();
+                }
+
+                // Tree reduction to get norm squared
+                writeln!(self.output, "{}  // Compute |o|²", indent).unwrap();
+                writeln!(self.output, "{}  add.f32 %norm_sum0, %norm_sq0, %norm_sq1;", indent).unwrap();
+                writeln!(self.output, "{}  add.f32 %norm_sum1, %norm_sq2, %norm_sq3;", indent).unwrap();
+                writeln!(self.output, "{}  add.f32 %norm_sum2, %norm_sq4, %norm_sq5;", indent).unwrap();
+                writeln!(self.output, "{}  add.f32 %norm_sum3, %norm_sq6, %norm_sq7;", indent).unwrap();
+                writeln!(self.output, "{}  add.f32 %norm_sum0, %norm_sum0, %norm_sum1;", indent).unwrap();
+                writeln!(self.output, "{}  add.f32 %norm_sum2, %norm_sum2, %norm_sum3;", indent).unwrap();
+                writeln!(self.output, "{}  add.f32 %norm_normsq, %norm_sum0, %norm_sum2;", indent).unwrap();
+
+                // Compute 1/|o| using fast reciprocal square root
+                writeln!(self.output, "{}  // Compute 1/|o| = rsqrt(|o|²)", indent).unwrap();
+                writeln!(self.output, "{}  rsqrt.approx.f32 %norm_inv, %norm_normsq;", indent).unwrap();
+
+                // Multiply all components by 1/|o|
+                writeln!(self.output, "{}  // Normalize all components", indent).unwrap();
+                for i in 0..8 {
+                    writeln!(
+                        self.output,
+                        "{}  mul.f32 %norm_out{}, %norm_f{}, %norm_inv;",
+                        indent, i, i
+                    ).unwrap();
+                }
+
+                // Store normalized components (assuming reg points to output array)
+                for i in 0..8 {
+                    writeln!(
+                        self.output,
+                        "{}  st.global.f32 [{} + {}], %norm_out{};",
+                        indent, reg, i * 4, i
+                    ).unwrap();
+                }
+            }
+
+            // Octonion inverse
+            GpuOp::OctonionInv(o) => {
+                let _ro = self.get_register(*o);
+                let reg = self.alloc_register(&GpuType::Array(Box::new(GpuType::F32), 8));
+                self.registers.push(reg.clone());
+                self.value_types
+                    .push(GpuType::Array(Box::new(GpuType::F32), 8));
+                writeln!(self.output, "{}// OctonionInv: o⁻¹ = o* / |o|²", indent).unwrap();
+                writeln!(self.output, "{}call.uni __octonion_inv, ({});", indent, reg).unwrap();
+            }
+
+            // Octonion real part
+            GpuOp::OctonionReal(o) => {
+                let _ro = self.get_register(*o);
+                let reg = self.alloc_register(&GpuType::F32);
+                self.registers.push(reg.clone());
+                self.value_types.push(GpuType::F32);
+                writeln!(
+                    self.output,
+                    "{}// OctonionReal: extract scalar part",
+                    indent
+                )
+                .unwrap();
+                writeln!(
+                    self.output,
+                    "{}call.uni __octonion_real, ({});",
+                    indent, reg
+                )
+                .unwrap();
+            }
+
+            // Octonion imaginary part (7D)
+            GpuOp::OctonionImag(o) => {
+                let _ro = self.get_register(*o);
+                let reg = self.alloc_register(&GpuType::Array(Box::new(GpuType::F32), 7));
+                self.registers.push(reg.clone());
+                self.value_types
+                    .push(GpuType::Array(Box::new(GpuType::F32), 7));
+                writeln!(
+                    self.output,
+                    "{}// OctonionImag: extract 7D imaginary vector",
+                    indent
+                )
+                .unwrap();
+                writeln!(
+                    self.output,
+                    "{}call.uni __octonion_imag, ({});",
+                    indent, reg
+                )
+                .unwrap();
+            }
+
+            // Octonion dot product
+            GpuOp::OctonionDot(o1, o2) => {
+                let _ro1 = self.get_register(*o1);
+                let _ro2 = self.get_register(*o2);
+                let reg = self.alloc_register(&GpuType::F32);
+                self.registers.push(reg.clone());
+                self.value_types.push(GpuType::F32);
+                writeln!(
+                    self.output,
+                    "{}// OctonionDot: Euclidean inner product",
+                    indent
+                )
+                .unwrap();
+                writeln!(self.output, "{}call.uni __octonion_dot, ({});", indent, reg).unwrap();
+            }
+
+            // Octonion exponentiation
+            GpuOp::OctonionExp(o) => {
+                let _ro = self.get_register(*o);
+                let reg = self.alloc_register(&GpuType::Array(Box::new(GpuType::F32), 8));
+                self.registers.push(reg.clone());
+                self.value_types
+                    .push(GpuType::Array(Box::new(GpuType::F32), 8));
+                writeln!(
+                    self.output,
+                    "{}// OctonionExp: power series expansion",
+                    indent
+                )
+                .unwrap();
+                writeln!(self.output, "{}call.uni __octonion_exp, ({});", indent, reg).unwrap();
+            }
+
+            // Octonion logarithm
+            GpuOp::OctonionLog(o) => {
+                let _ro = self.get_register(*o);
+                let reg = self.alloc_register(&GpuType::Array(Box::new(GpuType::F32), 8));
+                self.registers.push(reg.clone());
+                self.value_types
+                    .push(GpuType::Array(Box::new(GpuType::F32), 8));
+                writeln!(self.output, "{}// OctonionLog: ln(o) for o ≠ 0", indent).unwrap();
+                writeln!(self.output, "{}call.uni __octonion_log, ({});", indent, reg).unwrap();
+            }
+
+            // Octonion power
+            GpuOp::OctonionPow(o, exp) => {
+                let _ro = self.get_register(*o);
+                let _rexp = self.get_register(*exp);
+                let reg = self.alloc_register(&GpuType::Array(Box::new(GpuType::F32), 8));
+                self.registers.push(reg.clone());
+                self.value_types
+                    .push(GpuType::Array(Box::new(GpuType::F32), 8));
+                writeln!(self.output, "{}// OctonionPow: o^exp", indent).unwrap();
+                writeln!(self.output, "{}call.uni __octonion_pow, ({});", indent, reg).unwrap();
+            }
+
+            // Octonion ReLU (per-component)
+            // OctonionReLU: Per-component ReLU activation
+            // Math: relu(o) = (max(0,a), max(0,b), ..., max(0,h))
+            // Implementation: Load 8 components, apply max(0, x) to each, store
+            GpuOp::OctonionRelu(o) => {
+                let ro = self.get_register(*o);
+                let reg = self.alloc_register(&GpuType::Array(Box::new(GpuType::F32), 8));
+                self.registers.push(reg.clone());
+                self.value_types
+                    .push(GpuType::Array(Box::new(GpuType::F32), 8));
+
+                writeln!(self.output, "{}// OctonionRelu: max(0, o[i]) per component (inline implementation)", indent).unwrap();
+                writeln!(self.output, "{}  .reg .f32 %relu_in<8>;  // input components", indent).unwrap();
+                writeln!(self.output, "{}  .reg .f32 %relu_out<8>; // output components", indent).unwrap();
+                writeln!(self.output, "{}  .reg .f32 %relu_zero;   // constant zero", indent).unwrap();
+
+                // Initialize zero constant
+                writeln!(self.output, "{}  mov.f32 %relu_zero, 0.0;", indent).unwrap();
+
+                // Load 8 components
+                for i in 0..8 {
+                    writeln!(
+                        self.output,
+                        "{}  ld.global.f32 %relu_in{}, [{} + {}];",
+                        indent, i, ro, i * 4
+                    ).unwrap();
+                }
+
+                // Apply max(0, x) to each component
+                for i in 0..8 {
+                    writeln!(
+                        self.output,
+                        "{}  max.f32 %relu_out{}, %relu_in{}, %relu_zero;",
+                        indent, i, i
+                    ).unwrap();
+                }
+
+                // Store results
+                for i in 0..8 {
+                    writeln!(
+                        self.output,
+                        "{}  st.global.f32 [{} + {}], %relu_out{};",
+                        indent, reg, i * 4, i
+                    ).unwrap();
+                }
+            }
+
+            // Octonion sigmoid
+            GpuOp::OctonionSigmoid(o) => {
+                let _ro = self.get_register(*o);
+                let reg = self.alloc_register(&GpuType::Array(Box::new(GpuType::F32), 8));
+                self.registers.push(reg.clone());
+                self.value_types
+                    .push(GpuType::Array(Box::new(GpuType::F32), 8));
+                writeln!(
+                    self.output,
+                    "{}// OctonionSigmoid: 1/(1+exp(-o[i]))",
+                    indent
+                )
+                .unwrap();
+                writeln!(
+                    self.output,
+                    "{}call.uni __octonion_sigmoid, ({});",
+                    indent, reg
+                )
+                .unwrap();
+            }
+
+            // Octonion tanh
+            GpuOp::OctonionTanh(o) => {
+                let _ro = self.get_register(*o);
+                let reg = self.alloc_register(&GpuType::Array(Box::new(GpuType::F32), 8));
+                self.registers.push(reg.clone());
+                self.value_types
+                    .push(GpuType::Array(Box::new(GpuType::F32), 8));
+                writeln!(self.output, "{}// OctonionTanh: tanh(o[i])", indent).unwrap();
+                writeln!(
+                    self.output,
+                    "{}call.uni __octonion_tanh, ({});",
+                    indent, reg
+                )
+                .unwrap();
+            }
+
+            // Octonion split to two quaternions
+            GpuOp::OctonionToQuats(o) => {
+                let _ro = self.get_register(*o);
+                // Return as array of 8 f32 (two quaternions concatenated)
+                let reg = self.alloc_register(&GpuType::Array(Box::new(GpuType::F32), 8));
+                self.registers.push(reg.clone());
+                self.value_types
+                    .push(GpuType::Array(Box::new(GpuType::F32), 8));
+                writeln!(self.output, "{}// OctonionToQuats: o = q0 + q1*l", indent).unwrap();
+                writeln!(
+                    self.output,
+                    "{}call.uni __octonion_to_quats, ({});",
+                    indent, reg
+                )
+                .unwrap();
+            }
+
+            // Construct octonion from two quaternions
+            GpuOp::OctonionFromQuats(q0, q1) => {
+                let _rq0 = self.get_register(*q0);
+                let _rq1 = self.get_register(*q1);
+                let reg = self.alloc_register(&GpuType::Array(Box::new(GpuType::F32), 8));
+                self.registers.push(reg.clone());
+                self.value_types
+                    .push(GpuType::Array(Box::new(GpuType::F32), 8));
+                writeln!(self.output, "{}// OctonionFromQuats: o = q0 + q1*l", indent).unwrap();
+                writeln!(
+                    self.output,
+                    "{}call.uni __octonion_from_quats, ({});",
+                    indent, reg
+                )
+                .unwrap();
+            }
+
+            // ================================================================
             // Cooperative Groups (CUDA 9.0+ / PTX 6.0+)
             // ================================================================
 

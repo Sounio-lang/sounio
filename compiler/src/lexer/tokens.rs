@@ -269,6 +269,9 @@ pub enum TokenKind {
     FloatLit,
     #[regex(r#""([^"\\]|\\.)*""#)]
     StringLit,
+    // C string literal: null-terminated string for FFI (e.g., c"hello")
+    #[regex(r#"c"([^"\\]|\\.)*""#, priority = 2)]
+    CStringLit,
     #[regex(r#"'([^'\\]|\\.)'"#)]
     CharLit,
 
@@ -550,6 +553,7 @@ impl TokenKind {
                 | TokenKind::OctLit
                 | TokenKind::FloatLit
                 | TokenKind::StringLit
+                | TokenKind::CStringLit
                 | TokenKind::CharLit
                 | TokenKind::IntUnitLit
                 | TokenKind::FloatUnitLit
@@ -658,6 +662,7 @@ impl TokenKind {
             TokenKind::OctLit => "<oct>",
             TokenKind::FloatLit => "<float>",
             TokenKind::StringLit => "<string>",
+            TokenKind::CStringLit => "<c_string>",
             TokenKind::CharLit => "<char>",
             TokenKind::IntUnitLit => "<int_unit>",
             TokenKind::FloatUnitLit => "<float_unit>",

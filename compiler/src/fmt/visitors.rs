@@ -1086,11 +1086,16 @@ impl<'a> FormatVisitor<'a> {
                 ])
             }
             TypeExpr::Function {
+                abi,
                 params,
                 return_type,
                 effects,
             } => {
                 let mut parts = Vec::new();
+                // Add ABI prefix for extern function pointers
+                if let Some(a) = abi {
+                    parts.push(Doc::text(format!("extern \"{}\" ", a)));
+                }
                 parts.push(Doc::text("fn("));
 
                 let ps: Vec<Doc> = params.iter().map(|p| self.visit_type(p)).collect();
@@ -1207,6 +1212,26 @@ impl<'a> FormatVisitor<'a> {
                     self.visit_type(inner),
                 ])
             }
+            TypeExpr::ScientificArray { element_type, dim } => {
+                Doc::concat(vec![
+                    Doc::text("Array<"),
+                    self.visit_type(element_type),
+                    Doc::text(", "),
+                    Doc::text(self.format_tensor_dim(dim)),
+                    Doc::text(">"),
+                ])
+            }
+            TypeExpr::ScientificMatrix { element_type, rows, cols } => {
+                Doc::concat(vec![
+                    Doc::text("Matrix<"),
+                    self.visit_type(element_type),
+                    Doc::text(", "),
+                    Doc::text(self.format_tensor_dim(rows)),
+                    Doc::text(", "),
+                    Doc::text(self.format_tensor_dim(cols)),
+                    Doc::text(">"),
+                ])
+            }
         }
     }
 
@@ -1227,6 +1252,20 @@ impl<'a> FormatVisitor<'a> {
             })
             .collect::<Vec<_>>()
             .join("*")
+    }
+
+    /// Format a tensor dimension
+    fn format_tensor_dim(&self, dim: &crate::ast::TensorDim) -> String {
+        use crate::ast::TensorDim;
+        match dim {
+            TensorDim::Named(name) => name.clone(),
+            TensorDim::Fixed(size) => size.to_string(),
+            TensorDim::Dynamic => "_".to_string(),
+            TensorDim::Expr(expr) => {
+                // For expressions, format them - this is a simplification
+                format!("{:?}", expr)
+            }
+        }
     }
 
     // ==================== BLOCKS ====================
@@ -1843,6 +1882,7 @@ impl<'a> FormatVisitor<'a> {
             }
             Literal::Char(c) => Doc::text(format!("'{}'", c.escape_default())),
             Literal::String(s) => Doc::text(format!("\"{}\"", s.escape_default())),
+            Literal::CString(s) => Doc::text(format!("c\"{}\"", s.escape_default())),
             Literal::IntUnit(i, u) => Doc::text(format!("{}_{}", i, u)),
             Literal::FloatUnit(f, u) => Doc::text(format!("{}_{}", f, u)),
         }

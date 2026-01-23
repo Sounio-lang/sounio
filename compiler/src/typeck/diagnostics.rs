@@ -487,6 +487,13 @@ fn format_type(ty: &HirType) -> String {
         HirType::Mat3 => "mat3".to_string(),
         HirType::Mat4 => "mat4".to_string(),
         HirType::Quat => "quat".to_string(),
+        // Octonion type
+        HirType::Octonion => "octonion".to_string(),
+        // Quaternionic Neural Network types
+        HirType::QuatLinear { .. } => "QuatLinear".to_string(),
+        HirType::QuatConv2d { .. } => "QuatConv2d".to_string(),
+        HirType::QuatRnnState { .. } => "QuatRnnState".to_string(),
+        HirType::QuatGate { .. } => "QuatGate".to_string(),
         // f64 vector types
         HirType::Vec2d => "vec2d".to_string(),
         HirType::Vec3d => "vec3d".to_string(),
@@ -495,6 +502,28 @@ fn format_type(ty: &HirType) -> String {
         HirType::Dual => "dual".to_string(),
         // Async types
         HirType::Future { output } => format!("Future<{}>", format_type(output)),
+        // Scientific array and matrix types
+        HirType::ScientificArray { element, dim } => {
+            let dim_str = match dim {
+                crate::hir::HirTensorDim::Named(n) => n.clone(),
+                crate::hir::HirTensorDim::Fixed(s) => s.to_string(),
+                crate::hir::HirTensorDim::Dynamic => "?".to_string(),
+            };
+            format!("Array<{}, {}>", format_type(element), dim_str)
+        }
+        HirType::Matrix { element, rows, cols } => {
+            let rows_str = match rows {
+                crate::hir::HirTensorDim::Named(n) => n.clone(),
+                crate::hir::HirTensorDim::Fixed(s) => s.to_string(),
+                crate::hir::HirTensorDim::Dynamic => "?".to_string(),
+            };
+            let cols_str = match cols {
+                crate::hir::HirTensorDim::Named(n) => n.clone(),
+                crate::hir::HirTensorDim::Fixed(s) => s.to_string(),
+                crate::hir::HirTensorDim::Dynamic => "?".to_string(),
+            };
+            format!("Matrix<{}, {}, {}>", format_type(element), rows_str, cols_str)
+        }
     }
 }
 

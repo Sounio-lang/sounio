@@ -3,12 +3,14 @@
 //! This module transforms HLIR (High-Level IR) into MIR (Mid-level IR).
 
 use crate::hlir::{
-    HlirModule, HlirFunction, HlirInstr, HlirTerminator, HlirConstant, HlirType,
-    BlockId as HlirBlockId, ValueId as HlirValueId, Op, BinaryOp, UnaryOp, HlirTypeDefKind,
+    BinaryOp, BlockId as HlirBlockId, HlirConstant, HlirFunction, HlirInstr, HlirModule,
+    HlirTerminator, HlirType, HlirTypeDefKind, Op, UnaryOp, ValueId as HlirValueId,
 };
 use crate::mir::builder::{FunctionBuilder, ModuleBuilder};
 use crate::mir::types::*;
-use crate::mir::{MirModule, MirFunction, MirBinaryOp, MirUnaryOp, MirCompareOp, FuncId, BlockId, ValueId};
+use crate::mir::{
+    BlockId, FuncId, MirBinaryOp, MirCompareOp, MirFunction, MirModule, MirUnaryOp, ValueId,
+};
 use std::collections::HashMap;
 
 /// Lower HLIR to MIR
@@ -132,7 +134,9 @@ impl HlirToMir {
 
         // Lower each block
         for block in &func.blocks {
-            let mir_block_id = ctx.block_map.get(&block.id)
+            let mir_block_id = ctx
+                .block_map
+                .get(&block.id)
                 .copied()
                 .expect("Block should be mapped");
             builder.switch_to_block(mir_block_id);
@@ -202,44 +206,121 @@ impl HlirToMir {
                             builder.build_rem(result_id, left_value, right_value, result_type);
                         }
                         BinaryOp::And => {
-                            builder.build_binary(result_id, MirBinaryOp::And, left_value, right_value, result_type);
+                            builder.build_binary(
+                                result_id,
+                                MirBinaryOp::And,
+                                left_value,
+                                right_value,
+                                result_type,
+                            );
                         }
                         BinaryOp::Or => {
-                            builder.build_binary(result_id, MirBinaryOp::Or, left_value, right_value, result_type);
+                            builder.build_binary(
+                                result_id,
+                                MirBinaryOp::Or,
+                                left_value,
+                                right_value,
+                                result_type,
+                            );
                         }
                         BinaryOp::Xor => {
-                            builder.build_binary(result_id, MirBinaryOp::Xor, left_value, right_value, result_type);
+                            builder.build_binary(
+                                result_id,
+                                MirBinaryOp::Xor,
+                                left_value,
+                                right_value,
+                                result_type,
+                            );
                         }
                         BinaryOp::Shl => {
-                            builder.build_binary(result_id, MirBinaryOp::Shl, left_value, right_value, result_type);
+                            builder.build_binary(
+                                result_id,
+                                MirBinaryOp::Shl,
+                                left_value,
+                                right_value,
+                                result_type,
+                            );
                         }
                         BinaryOp::AShr => {
-                            builder.build_binary(result_id, MirBinaryOp::AShr, left_value, right_value, result_type);
+                            builder.build_binary(
+                                result_id,
+                                MirBinaryOp::AShr,
+                                left_value,
+                                right_value,
+                                result_type,
+                            );
                         }
                         BinaryOp::LShr => {
-                            builder.build_binary(result_id, MirBinaryOp::LShr, left_value, right_value, result_type);
+                            builder.build_binary(
+                                result_id,
+                                MirBinaryOp::LShr,
+                                left_value,
+                                right_value,
+                                result_type,
+                            );
                         }
                         BinaryOp::Eq | BinaryOp::FOEq => {
-                            builder.build_compare(result_id, MirCompareOp::Eq, left_value, right_value, MirType::Bool);
+                            builder.build_compare(
+                                result_id,
+                                MirCompareOp::Eq,
+                                left_value,
+                                right_value,
+                                MirType::Bool,
+                            );
                         }
                         BinaryOp::Ne | BinaryOp::FONe => {
-                            builder.build_compare(result_id, MirCompareOp::Ne, left_value, right_value, MirType::Bool);
+                            builder.build_compare(
+                                result_id,
+                                MirCompareOp::Ne,
+                                left_value,
+                                right_value,
+                                MirType::Bool,
+                            );
                         }
                         BinaryOp::SLt | BinaryOp::ULt | BinaryOp::FOLt => {
-                            builder.build_compare(result_id, MirCompareOp::Lt, left_value, right_value, MirType::Bool);
+                            builder.build_compare(
+                                result_id,
+                                MirCompareOp::Lt,
+                                left_value,
+                                right_value,
+                                MirType::Bool,
+                            );
                         }
                         BinaryOp::SLe | BinaryOp::ULe | BinaryOp::FOLe => {
-                            builder.build_compare(result_id, MirCompareOp::Le, left_value, right_value, MirType::Bool);
+                            builder.build_compare(
+                                result_id,
+                                MirCompareOp::Le,
+                                left_value,
+                                right_value,
+                                MirType::Bool,
+                            );
                         }
                         BinaryOp::SGt | BinaryOp::UGt | BinaryOp::FOGt => {
-                            builder.build_compare(result_id, MirCompareOp::Gt, left_value, right_value, MirType::Bool);
+                            builder.build_compare(
+                                result_id,
+                                MirCompareOp::Gt,
+                                left_value,
+                                right_value,
+                                MirType::Bool,
+                            );
                         }
                         BinaryOp::SGe | BinaryOp::UGe | BinaryOp::FOGe => {
-                            builder.build_compare(result_id, MirCompareOp::Ge, left_value, right_value, MirType::Bool);
+                            builder.build_compare(
+                                result_id,
+                                MirCompareOp::Ge,
+                                left_value,
+                                right_value,
+                                MirType::Bool,
+                            );
                         }
                         BinaryOp::Concat => {
                             // Array/slice concatenation - lower to a runtime call
-                            builder.build_call(Some(result_id), "__concat".to_string(), vec![left_value, right_value], result_type);
+                            builder.build_call(
+                                Some(result_id),
+                                "__concat".to_string(),
+                                vec![left_value, right_value],
+                                result_type,
+                            );
                         }
                     }
 
@@ -261,7 +342,12 @@ impl HlirToMir {
                             builder.build_fneg(result_id, operand_value, result_type);
                         }
                         UnaryOp::Not => {
-                            builder.build_unary(result_id, MirUnaryOp::Not, operand_value, MirType::Bool);
+                            builder.build_unary(
+                                result_id,
+                                MirUnaryOp::Not,
+                                operand_value,
+                                MirType::Bool,
+                            );
                         }
                     }
 
@@ -292,7 +378,12 @@ impl HlirToMir {
 
                 if let Some(result) = instr.result {
                     let result_id = builder.fresh_value();
-                    builder.build_call_indirect(Some(result_id), func_value, arg_values, result_type);
+                    builder.build_call_indirect(
+                        Some(result_id),
+                        func_value,
+                        arg_values,
+                        result_type,
+                    );
                     ctx.set_value(result, result_id, instr.ty.clone());
                 } else {
                     builder.build_call_indirect(None, func_value, arg_values, result_type);
@@ -330,13 +421,21 @@ impl HlirToMir {
                         self.aggregate_offset_for_index(base_ty, *field)
                     {
                         let index_id = builder.fresh_value();
-                        builder.build_const(index_id, MirConstant::Int(offset as i64), MirType::I64);
+                        builder.build_const(
+                            index_id,
+                            MirConstant::Int(offset as i64),
+                            MirType::I64,
+                        );
                         let result_id = builder.fresh_value();
                         builder.build_gep(result_id, base_value, vec![index_id], MirType::U8);
                         ctx.set_value(result, result_id, instr.ty.clone());
                     } else {
                         let index_id = builder.fresh_value();
-                        builder.build_const(index_id, MirConstant::Int(*field as i64), MirType::I64);
+                        builder.build_const(
+                            index_id,
+                            MirConstant::Int(*field as i64),
+                            MirType::I64,
+                        );
                         let result_id = builder.fresh_value();
                         builder.build_gep(result_id, base_value, vec![index_id], result_type);
                         ctx.set_value(result, result_id, instr.ty.clone());
@@ -358,7 +457,11 @@ impl HlirToMir {
                 }
             }
 
-            Op::Cast { value, source, target } => {
+            Op::Cast {
+                value,
+                source,
+                target,
+            } => {
                 let source_type = self.hlir_type_to_mir(source);
                 let target_type = self.hlir_type_to_mir(target);
                 if let Some(result) = instr.result {
@@ -375,7 +478,9 @@ impl HlirToMir {
                     let mir_incoming: Vec<(BlockId, ValueId)> = incoming
                         .iter()
                         .map(|(block, value)| {
-                            let mir_block = ctx.block_map.get(block)
+                            let mir_block = ctx
+                                .block_map
+                                .get(block)
                                 .copied()
                                 .expect("Block should be mapped");
                             let mir_value = ctx.get_value(*value);
@@ -399,7 +504,11 @@ impl HlirToMir {
                         self.aggregate_offset_for_index(base_ty, *index)
                     {
                         let index_id = builder.fresh_value();
-                        builder.build_const(index_id, MirConstant::Int(offset as i64), MirType::I64);
+                        builder.build_const(
+                            index_id,
+                            MirConstant::Int(offset as i64),
+                            MirType::I64,
+                        );
                         let ptr_id = builder.fresh_value();
                         builder.build_gep(ptr_id, base_value, vec![index_id], MirType::U8);
                         let result_id = builder.fresh_value();
@@ -407,7 +516,11 @@ impl HlirToMir {
                         ctx.set_value(result, result_id, instr.ty.clone());
                     } else {
                         let index_id = builder.fresh_value();
-                        builder.build_const(index_id, MirConstant::Int(*index as i64), MirType::I64);
+                        builder.build_const(
+                            index_id,
+                            MirConstant::Int(*index as i64),
+                            MirType::I64,
+                        );
                         let ptr_id = builder.fresh_value();
                         builder.build_gep(
                             ptr_id,
@@ -431,7 +544,11 @@ impl HlirToMir {
                         self.aggregate_offset_for_index(base_ty, *index)
                     {
                         let index_id = builder.fresh_value();
-                        builder.build_const(index_id, MirConstant::Int(offset as i64), MirType::I64);
+                        builder.build_const(
+                            index_id,
+                            MirConstant::Int(offset as i64),
+                            MirType::I64,
+                        );
                         let ptr_id = builder.fresh_value();
                         builder.build_gep(ptr_id, base_value, vec![index_id], MirType::U8);
                         builder.build_store(ptr_id, value_value);
@@ -477,10 +594,7 @@ impl HlirToMir {
                     let result_id = builder.fresh_value();
                     builder.build_alloca(result_id, agg_type);
                     if let HlirType::Array(elem_ty, _) = &instr.ty {
-                        let elem_size = self
-                            .hlir_type_to_mir(elem_ty)
-                            .size_bytes()
-                            .unwrap_or(8);
+                        let elem_size = self.hlir_type_to_mir(elem_ty).size_bytes().unwrap_or(8);
                         for (idx, value_id) in values.iter().enumerate() {
                             let offset = idx * elem_size;
                             let value_val = ctx.get_value(*value_id);
@@ -554,32 +668,50 @@ impl HlirToMir {
             }
 
             HlirTerminator::Branch(target) => {
-                let target_block = ctx.block_map.get(target)
+                let target_block = ctx
+                    .block_map
+                    .get(target)
                     .copied()
                     .expect("Target block should be mapped");
                 builder.build_branch(target_block);
             }
 
-            HlirTerminator::CondBranch { condition, then_block, else_block } => {
+            HlirTerminator::CondBranch {
+                condition,
+                then_block,
+                else_block,
+            } => {
                 let condition_value = ctx.get_value(*condition);
-                let then_block_mir = ctx.block_map.get(then_block)
+                let then_block_mir = ctx
+                    .block_map
+                    .get(then_block)
                     .copied()
                     .expect("Then block should be mapped");
-                let else_block_mir = ctx.block_map.get(else_block)
+                let else_block_mir = ctx
+                    .block_map
+                    .get(else_block)
                     .copied()
                     .expect("Else block should be mapped");
                 builder.build_cond_branch(condition_value, then_block_mir, else_block_mir);
             }
 
-            HlirTerminator::Switch { value, default, cases } => {
+            HlirTerminator::Switch {
+                value,
+                default,
+                cases,
+            } => {
                 let value_id = ctx.get_value(*value);
-                let default_block = ctx.block_map.get(default)
+                let default_block = ctx
+                    .block_map
+                    .get(default)
                     .copied()
                     .expect("Default block should be mapped");
                 let case_blocks: Vec<(i64, BlockId)> = cases
                     .iter()
                     .map(|(const_val, block)| {
-                        let mir_block = ctx.block_map.get(block)
+                        let mir_block = ctx
+                            .block_map
+                            .get(block)
                             .copied()
                             .expect("Case block should be mapped");
                         (*const_val, mir_block)
@@ -611,7 +743,9 @@ impl HlirToMir {
             HlirType::F32 => MirType::F32,
             HlirType::F64 => MirType::F64,
             HlirType::Ptr(inner) => MirType::Ptr(Box::new(self.hlir_type_to_mir(inner))),
-            HlirType::Array(elem, size) => MirType::Array(Box::new(self.hlir_type_to_mir(elem)), *size),
+            HlirType::Array(elem, size) => {
+                MirType::Array(Box::new(self.hlir_type_to_mir(elem)), *size)
+            }
             HlirType::Struct(name) => {
                 if let Some(fields) = self.struct_defs.get(name) {
                     let mir_fields = fields
@@ -626,9 +760,14 @@ impl HlirToMir {
                     // Structs are lowered to pointers to opaque data if layout is unknown
                     MirType::Ptr(Box::new(MirType::Void))
                 }
-            },
-            HlirType::Tuple(elems) => MirType::Tuple(elems.iter().map(|e| self.hlir_type_to_mir(e)).collect()),
-            HlirType::Function { params, return_type } => MirType::Function {
+            }
+            HlirType::Tuple(elems) => {
+                MirType::Tuple(elems.iter().map(|e| self.hlir_type_to_mir(e)).collect())
+            }
+            HlirType::Function {
+                params,
+                return_type,
+            } => MirType::Function {
                 params: params.iter().map(|p| self.hlir_type_to_mir(p)).collect(),
                 return_type: Box::new(self.hlir_type_to_mir(return_type)),
             },
@@ -640,6 +779,13 @@ impl HlirToMir {
             HlirType::Mat3 => MirType::Array(Box::new(MirType::F32), 9),
             HlirType::Mat4 => MirType::Array(Box::new(MirType::F32), 16),
             HlirType::Quat => MirType::Array(Box::new(MirType::F32), 4),
+            // Octonion: 8 x f32
+            HlirType::Octonion => MirType::Array(Box::new(MirType::F32), 8),
+            // Quaternionic Neural Network types
+            HlirType::QuatLinear => MirType::Array(Box::new(MirType::F32), 0),
+            HlirType::QuatConv2d => MirType::Array(Box::new(MirType::F32), 0),
+            HlirType::QuatRnnState => MirType::Array(Box::new(MirType::F32), 0),
+            HlirType::QuatGate => MirType::Array(Box::new(MirType::F32), 0),
             // f64 vector types
             HlirType::Vec2d => MirType::Array(Box::new(MirType::F64), 2),
             HlirType::Vec3d => MirType::Array(Box::new(MirType::F64), 4), // Padded
@@ -715,11 +861,7 @@ impl HlirToMir {
         }
     }
 
-    fn struct_field_offset(
-        &self,
-        struct_name: &str,
-        field_name: &str,
-    ) -> Option<(usize, MirType)> {
+    fn struct_field_offset(&self, struct_name: &str, field_name: &str) -> Option<(usize, MirType)> {
         let fields = self.struct_defs.get(struct_name)?;
         let mut offset = 0usize;
         for (name, field_ty) in fields {
@@ -753,12 +895,13 @@ impl FunctionLoweringContext {
     }
 
     fn get_value(&self, hlir_value: HlirValueId) -> ValueId {
-        self.value_map.get(&hlir_value)
-            .copied()
-            .unwrap_or_else(|| {
-                eprintln!("Warning: HLIR value {:?} not found in map, using placeholder", hlir_value);
-                ValueId(0)
-            })
+        self.value_map.get(&hlir_value).copied().unwrap_or_else(|| {
+            eprintln!(
+                "Warning: HLIR value {:?} not found in map, using placeholder",
+                hlir_value
+            );
+            ValueId(0)
+        })
     }
 
     fn set_value(&mut self, hlir_value: HlirValueId, mir_value: ValueId, ty: HlirType) {

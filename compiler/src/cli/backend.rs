@@ -1147,15 +1147,170 @@ fn compile_llvm(args: &BuildArgs) -> Result<(PathBuf, Option<NativeMetrics>), St
 }
 
 /// Compile using Cranelift backend
+///
+/// This compiles Sounio source through Cranelift to produce an object file,
+/// then links it with the runtime to create an executable.
 fn compile_cranelift(args: &BuildArgs) -> Result<(PathBuf, Option<NativeMetrics>), String> {
     #[cfg(feature = "jit")]
     {
-        // TODO: Implement Cranelift backend call
+        use std::time::Instant;
+        use crate::codegen::cranelift::CraneliftAot;
+        use crate::module_loader::load_program_ast;
+        use crate::check::check;
+        use crate::hlir::lower as lower_hlir;
+        use crate::backend::native::linker::{Linker, LinkerConfig, LinkMode};
+
+        let start = Instant::now();
+
+        // Step 1: Load and parse AST
+        let parse_start = Instant::now();
+        let input_path = &args.input[0];
+        let ast = load_program_ast(input_path)
+            .map_err(|e| format!("Parse error: {}", e))?;
+        let parse_ms = parse_start.elapsed().as_millis() as u64;
+
+        if args.verbose {
+            println!("Cranelift: Parsed in {}ms", parse_ms);
+        }
+
+        // Emit AST if requested
+        if args.emit.contains(&EmitStage::Ast) {
+            println!("=== AST ===");
+            println!("{:#?}", ast);
+        }
+
+        // Step 2: Type check (AST -> HIR)
+        let typecheck_start = Instant::now();
+        let hir = check(&ast)
+            .map_err(|e| format!("Type check error: {}", e))?;
+        let typecheck_ms = typecheck_start.elapsed().as_millis() as u64;
+
+        if args.verbose {
+            println!("Cranelift: Type checked in {}ms", typecheck_ms);
+        }
+
+        // Emit HIR if requested
+        if args.emit.contains(&EmitStage::Hir) {
+            println!("=== HIR ===");
+            println!("{:#?}", hir);
+        }
+
+        // Step 3: Lower to HLIR (HIR -> HLIR)
+        let lower_hlir_start = Instant::now();
+        let hlir = lower_hlir(&hir);
+        let lower_hlir_ms = lower_hlir_start.elapsed().as_millis() as u64;
+
+        if args.verbose {
+            println!("Cranelift: Lowered to HLIR in {}ms", lower_hlir_ms);
+        }
+
+        // Step 4: Compile through Cranelift AOT
+        let codegen_start = Instant::now();
+        let aot_compiler = if args.native_opts.opt_level != OptLevel::None {
+            CraneliftAot::new().with_optimization()
+        } else {
+            CraneliftAot::new()
+        };
+
+        let obj_bytes = aot_compiler.compile_to_object(&hlir)
+            .map_err(|e| format!("Cranelift codegen error: {}", e))?;
+        let codegen_ms = codegen_start.elapsed().as_millis() as u64;
+
+        if args.verbose {
+            println!("Cranelift: Code generation in {}ms", codegen_ms);
+            println!("  Generated {} bytes of object code", obj_bytes.len());
+        }
+
+        // Step 5: Determine output path and format
         let output_path = args.output.clone()
-            .unwrap_or_else(|| PathBuf::from("a.out"));
+            .unwrap_or_else(|| {
+                let mut p = args.input[0].clone();
+                p.set_extension("");  // Default to executable (no extension)
+                p
+            });
+
+        let format = args.format.unwrap_or_else(|| {
+            match output_path.extension().and_then(|e| e.to_str()) {
+                Some("so") | Some("dylib") | Some("dll") => OutputFormat::SharedLib,
+                Some("o") => OutputFormat::Object,
+                _ => OutputFormat::Executable,
+            }
+        });
+
+        // Step 6: Write output based on format
+        match format {
+            OutputFormat::Object => {
+                // Write object file only (no linking)
+                std::fs::write(&output_path, &obj_bytes)
+                    .map_err(|e| format!("Failed to write object file: {}", e))?;
+
+                if args.verbose {
+                    println!("Cranelift: Wrote object file to {}", output_path.display());
+                }
+            }
+            OutputFormat::Executable | OutputFormat::SharedLib => {
+                // Write temporary object file, then link
+                let obj_path = output_path.with_extension("o");
+                std::fs::write(&obj_path, &obj_bytes)
+                    .map_err(|e| format!("Failed to write object file: {}", e))?;
+
+                // Link to executable or shared library
+                let link_mode = if format == OutputFormat::Executable {
+                    LinkMode::Executable
+                } else {
+                    LinkMode::SharedLib
+                };
+
+                let linker_config = LinkerConfig::default();
+                let linker = Linker::new(linker_config)
+                    .map_err(|e| format!("Linker initialization error: {}", e))?;
+
+                let mut link_inputs: Vec<std::path::PathBuf> = vec![obj_path.clone()];
+
+                // For executables, add runtime support
+                if format == OutputFormat::Executable {
+                    let output_dir = output_path
+                        .parent()
+                        .unwrap_or_else(|| std::path::Path::new("."));
+                    let runtime_obj =
+                        crate::backend::native::runtime::build_runtime_object_without_start(output_dir)
+                            .map_err(|e| format!("Runtime build error: {}", e))?;
+                    link_inputs.push(runtime_obj);
+                }
+
+                let input_refs: Vec<&std::path::Path> =
+                    link_inputs.iter().map(|p| p.as_path()).collect();
+
+                linker.link(&input_refs, &output_path, link_mode)
+                    .map_err(|e| format!("Linking error: {}", e))?;
+
+                // Clean up temporary object file
+                let _ = std::fs::remove_file(&obj_path);
+
+                if args.verbose {
+                    let output_type = if format == OutputFormat::Executable {
+                        "executable"
+                    } else {
+                        "shared library"
+                    };
+                    println!("Cranelift: Linked {} to {}", output_type, output_path.display());
+                }
+            }
+            OutputFormat::Asm => {
+                return Err("Cranelift: Assembly output not yet implemented".into());
+            }
+            _ => {
+                return Err(format!("Cranelift: Unsupported output format: {:?}", format));
+            }
+        }
+
+        if args.verbose {
+            println!("Cranelift: Total compilation time: {}ms", start.elapsed().as_millis());
+        }
+
         Ok((output_path, None))
     }
-    
+
     #[cfg(not(feature = "jit"))]
     {
         Err("Cranelift backend not compiled. Add --features jit.".into())

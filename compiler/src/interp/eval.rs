@@ -1508,6 +1508,15 @@ impl Interpreter {
             HirLiteral::Float(f) => Value::Float(*f),
             HirLiteral::Char(c) => Value::String(c.to_string()),
             HirLiteral::String(s) => Value::String(Self::process_escape_sequences(s)),
+            // C string literal: for interpreter, treat as a pointer to a null-terminated string
+            // In a real FFI context this would be a raw pointer; here we use RawPointer with
+            // the string content stored in a global
+            HirLiteral::CString(s) => {
+                // For interpreter purposes, we represent C strings as strings with null terminator
+                let mut with_null = Self::process_escape_sequences(s);
+                with_null.push('\0');
+                Value::String(with_null)
+            }
         }
     }
 

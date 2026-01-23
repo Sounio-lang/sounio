@@ -11,6 +11,7 @@
 
 pub mod c_layout;
 pub mod core;
+pub mod dimension_solver;
 pub mod effects;
 pub mod epistemic;
 pub mod erasure;
@@ -24,6 +25,7 @@ pub mod units;
 
 pub use self::core::*;
 pub use c_layout::{CLayoutEngine, FieldLayout, StructLayout, TargetPlatform};
+pub use dimension_solver::{DimConstraint, DimResult, DimensionError, DimensionSolver};
 pub use effects::*;
 pub use ownership::*;
 

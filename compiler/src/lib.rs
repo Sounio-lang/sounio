@@ -88,6 +88,7 @@ pub mod sourcemap;
 pub mod target;
 pub mod temporal;
 pub mod test;
+pub mod tools;
 pub mod typeck;
 pub mod types;
 pub mod units;
@@ -102,6 +103,7 @@ pub use hir::Hir;
 pub use mir::MirModule;
 pub use hlir::HlirModule;
 pub use types::Type;
+pub use tools::pybindgen::{generate_python_bindings, PythonBindingGenerator};
 
 /// Compiler version
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");

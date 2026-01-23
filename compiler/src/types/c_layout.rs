@@ -199,6 +199,8 @@ impl CLayoutEngine {
             HlirType::Mat3 => 36, // 3x3 x f32
             HlirType::Mat4 => 64, // 4x4 x f32
             HlirType::Quat => 16, // 4 x f32
+            // Octonion: 8 x f32 = 32 bytes
+            HlirType::Octonion => 32,
 
             // f64 vector types
             HlirType::Vec2d => 16, // 2 x f64
@@ -207,6 +209,12 @@ impl CLayoutEngine {
 
             // Dual numbers (autodiff)
             HlirType::Dual => 16, // 2 x f64
+
+            // Quaternionic Neural Network types - treat as structs
+            HlirType::QuatLinear { .. } => 16,
+            HlirType::QuatConv2d { .. } => 16,
+            HlirType::QuatRnnState { .. } => 16,
+            HlirType::QuatGate { .. } => 16,
         }
     }
 
@@ -228,11 +236,7 @@ impl CLayoutEngine {
             HlirType::Array(elem, _) => self.align_of(elem),
 
             // Tuple alignment is max of element alignments
-            HlirType::Tuple(elems) => elems
-                .iter()
-                .map(|e| self.align_of(e))
-                .max()
-                .unwrap_or(1),
+            HlirType::Tuple(elems) => elems.iter().map(|e| self.align_of(e)).max().unwrap_or(1),
 
             HlirType::Struct(name) => {
                 if let Some(layout) = self.struct_cache.get(name) {
@@ -253,12 +257,21 @@ impl CLayoutEngine {
             HlirType::Mat4 => 16,
             HlirType::Quat => 16,
 
+            // Octonion: 8 x f32 = 32 bytes, aligned to 32 for SIMD
+            HlirType::Octonion => 32,
+
             // f64 vector types
             HlirType::Vec2d => 16, // Aligned to 16 for SIMD
             HlirType::Vec3d => 32, // Aligned to 32 for SIMD
             HlirType::Vec4d => 32,
 
             HlirType::Dual => 8, // Aligned to f64
+
+            // Quaternionic Neural Network types
+            HlirType::QuatLinear { .. } => 16,
+            HlirType::QuatConv2d { .. } => 16,
+            HlirType::QuatRnnState { .. } => 16,
+            HlirType::QuatGate { .. } => 16,
         }
     }
 
@@ -377,6 +390,8 @@ impl CLayoutEngine {
             Type::Mat3 => 36,
             Type::Mat4 => 64,
             Type::Quat => 16,
+            // Octonion: 8 x f32 = 32 bytes
+            Type::Octonion => 32,
             Type::Dual => 16,
             _ => self.platform.pointer_size(), // Conservative default
         }
@@ -405,6 +420,8 @@ impl CLayoutEngine {
             Type::Named { .. } => self.platform.pointer_size(),
             Type::Vec2 => 8,
             Type::Vec3 | Type::Vec4 | Type::Mat2 | Type::Mat3 | Type::Mat4 | Type::Quat => 16,
+            // Octonion aligned to 32 for 8-wide SIMD
+            Type::Octonion => 32,
             Type::Dual => 8,
             _ => self.platform.pointer_size(),
         }
@@ -443,9 +460,11 @@ impl CLayoutEngine {
             HlirType::Struct(name) => self.struct_cache.contains_key(name),
 
             // Function pointers are compatible
-            HlirType::Function { params, return_type } => {
-                params.iter().all(|p| self.is_c_compatible(p))
-                    && self.is_c_compatible(return_type)
+            HlirType::Function {
+                params,
+                return_type,
+            } => {
+                params.iter().all(|p| self.is_c_compatible(p)) && self.is_c_compatible(return_type)
             }
 
             // SIMD types need special handling
@@ -453,6 +472,13 @@ impl CLayoutEngine {
             HlirType::Vec2d | HlirType::Vec3d | HlirType::Vec4d => false,
             HlirType::Mat2 | HlirType::Mat3 | HlirType::Mat4 => false,
             HlirType::Quat => false,
+            // Octonion needs special handling (8 floats)
+            HlirType::Octonion => false,
+            // Quaternionic Neural Network types
+            HlirType::QuatLinear { .. } => false,
+            HlirType::QuatConv2d { .. } => false,
+            HlirType::QuatRnnState { .. } => false,
+            HlirType::QuatGate { .. } => false,
             HlirType::Dual => false,
         }
     }
@@ -515,6 +541,13 @@ impl CLayoutEngine {
             HlirType::Mat3 => "float[9]".to_string(),
             HlirType::Mat4 => "float[16]".to_string(),
             HlirType::Quat => "float[4]".to_string(),
+            // Octonion: 8 floats
+            HlirType::Octonion => "float[8]".to_string(),
+            // Quaternionic Neural Network types
+            HlirType::QuatLinear { .. } => "struct { float* weights; float* bias; }".to_string(),
+            HlirType::QuatConv2d { .. } => "struct { float* kernel; int* dims; }".to_string(),
+            HlirType::QuatRnnState { .. } => "float[hidden_size][4]".to_string(),
+            HlirType::QuatGate { .. } => "struct { float* w_i; float* w_h; float* b; }".to_string(),
             HlirType::Dual => "struct { double value; double derivative; }".to_string(),
         }
     }
@@ -621,8 +654,8 @@ mod tests {
         );
 
         assert_eq!(layout.fields[0].offset, 0); // a
-        // inner should be aligned to 4 (its alignment from cache)
-        // but since Inner wasn't registered with proper size, this test shows the limitation
+                                                // inner should be aligned to 4 (its alignment from cache)
+                                                // but since Inner wasn't registered with proper size, this test shows the limitation
     }
 
     #[test]

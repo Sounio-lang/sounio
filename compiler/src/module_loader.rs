@@ -169,30 +169,134 @@ impl ModuleLoader {
 }
 
 fn find_stdlib_path() -> PathBuf {
-    if let Ok(path) = std::env::var("SOUNIO_STDLIB") {
-        return PathBuf::from(path);
-    }
+    // Priority order for stdlib discovery:
+    // 1. SOUNIO_STDLIB_PATH env var (most specific)
+    // 2. SOUNIO_STDLIB env var (legacy)
+    // 3. Relative to compiler binary: <exe_dir>/../stdlib/
+    // 4. User home: ~/.sounio/stdlib/
+    // 5. System paths: /usr/local/lib/sounio/stdlib, /usr/share/sounio/stdlib
 
-    if let Ok(exe) = std::env::current_exe()
-        && let Some(parent) = exe.parent()
-    {
-        let stdlib = parent.join("stdlib");
-        if stdlib.exists() {
-            return stdlib;
+    // 1. Check SOUNIO_STDLIB_PATH (new standard)
+    if let Ok(path) = std::env::var("SOUNIO_STDLIB_PATH") {
+        let pathbuf = PathBuf::from(path);
+        if pathbuf.exists() {
+            return pathbuf;
         }
     }
 
+    // 2. Check SOUNIO_STDLIB (legacy, but still supported)
+    if let Ok(path) = std::env::var("SOUNIO_STDLIB") {
+        let pathbuf = PathBuf::from(path);
+        if pathbuf.exists() {
+            return pathbuf;
+        }
+    }
+
+    // 3. Check relative to compiler binary
+    if let Ok(exe) = std::env::current_exe() {
+        if let Some(parent) = exe.parent() {
+            let stdlib_candidates = [
+                parent.join("stdlib"),
+                parent.join("../stdlib"),
+                parent.join("lib").join("sounio").join("stdlib"),
+            ];
+
+            for candidate in &stdlib_candidates {
+                if candidate.exists() {
+                    return candidate.to_path_buf();
+                }
+            }
+        }
+    }
+
+    // 4. Check user home directory
+    if let Some(home_dir) = dirs::home_dir() {
+        let user_stdlib = home_dir.join(".sounio").join("stdlib");
+        if user_stdlib.exists() {
+            return user_stdlib;
+        }
+    }
+
+    // 5. Check system-wide installation paths
+    let system_paths = [
+        "/usr/local/lib/sounio/stdlib",
+        "/usr/lib/sounio/stdlib",
+        "/usr/share/sounio/stdlib",
+        "/opt/sounio/lib/stdlib",
+    ];
+
+    for path in &system_paths {
+        let pathbuf = PathBuf::from(path);
+        if pathbuf.exists() {
+            return pathbuf;
+        }
+    }
+
+    // 6. Final fallback - return the most common default even if it doesn't exist
+    // This ensures the error messages can show where we looked
     PathBuf::from("/usr/share/sounio/stdlib")
 }
 
+/// Returns all the locations where the compiler searches for stdlib modules.
+/// This is useful for diagnostics and the 'souc sysroot show' command.
+pub fn get_stdlib_search_paths() -> Vec<PathBuf> {
+    let mut paths = Vec::new();
+
+    // Environment variables (if set)
+    if let Ok(path) = std::env::var("SOUNIO_STDLIB_PATH") {
+        paths.push(PathBuf::from(path));
+    }
+    if let Ok(path) = std::env::var("SOUNIO_STDLIB") {
+        paths.push(PathBuf::from(path));
+    }
+
+    // Relative to compiler binary
+    if let Ok(exe) = std::env::current_exe() {
+        if let Some(parent) = exe.parent() {
+            let stdlib_candidates = [
+                parent.join("stdlib"),
+                parent.join("../stdlib"),
+                parent.join("lib").join("sounio").join("stdlib"),
+            ];
+
+            for candidate in &stdlib_candidates {
+                paths.push(candidate.clone());
+            }
+        }
+    }
+
+    // User home directory
+    if let Some(home_dir) = dirs::home_dir() {
+        paths.push(home_dir.join(".sounio").join("stdlib"));
+    }
+
+    // System-wide installation paths
+    let system_paths = [
+        "/usr/local/lib/sounio/stdlib",
+        "/usr/lib/sounio/stdlib",
+        "/usr/share/sounio/stdlib",
+        "/opt/sounio/lib/stdlib",
+    ];
+
+    for path in &system_paths {
+        paths.push(PathBuf::from(path));
+    }
+
+    paths
+}
+
 fn collect_import_paths(ast: &Ast) -> Vec<Vec<String>> {
-    ast.items
+    let paths: Vec<Vec<String>> = ast.items
         .iter()
         .filter_map(|item| match item {
-            Item::Import(import_def) => Some(import_def.path.segments.clone()),
+            Item::Import(import_def) => {
+                eprintln!("DEBUG: Import path segments: {:?}", import_def.path.segments);
+                Some(import_def.path.segments.clone())
+            }
             _ => None,
         })
-        .collect()
+        .collect();
+    paths
 }
 
 fn module_prefixes(import_paths: &[Vec<String>], module_path: &StdPath) -> Vec<Vec<String>> {
@@ -364,11 +468,38 @@ fn resolve_in_directory(
     }
 
     // If no candidates found, provide helpful error message
+    let import_name = segments.join("::");
+
+    // Get stdlib search paths for better diagnostics
+    let stdlib_paths = get_stdlib_search_paths();
+    let stdlib_paths_str: Vec<String> = stdlib_paths
+        .iter()
+        .map(|p| {
+            if p.exists() {
+                format!("{} (exists)", p.display())
+            } else {
+                format!("{} (missing)", p.display())
+            }
+        })
+        .collect();
+
     Err(miette::miette!(
-        "Import `{}` not found in {} (searched: {})",
-        segments.join("::"),
+        "Import `{}` not found in {}.\n\n\
+         Searched in {}:\n  {}\n\n\
+         Stdlib search paths:\n  {}\n\n\
+         To fix this:\n\
+         1. Set SOUNIO_STDLIB_PATH environment variable to your stdlib location\n\
+         2. Install Sounio system-wide with: cargo install --path compiler\n\
+         3. Build from source: cd compiler && cargo build --release",
+        import_name,
         source_type,
-        search_locations.join(", ")
+        if source_type == "stdlib" {
+            "stdlib directory"
+        } else {
+            "local directory"
+        },
+        search_locations.join("\n  "),
+        stdlib_paths_str.join("\n  ")
     ))
 }
 

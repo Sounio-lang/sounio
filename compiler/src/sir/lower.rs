@@ -466,7 +466,8 @@ fn lower_instruction(
             if let Op::CallDirect { name, .. } = &instr.op {
                 // Handle slice_from_raw_parts intrinsic
                 // Creates a slice (fat pointer) from ptr and len
-                if name == "__builtin_slice_from_raw_parts" || name == "std::slice::from_raw_parts" {
+                if name == "__builtin_slice_from_raw_parts" || name == "std::slice::from_raw_parts"
+                {
                     if args.len() == 2 {
                         let ptr = ctx.get_value(args[0])?;
                         let len = ctx.get_value(args[1])?;
@@ -485,7 +486,9 @@ fn lower_instruction(
                     }
                 }
                 // Handle mutable slice variant
-                if name == "__builtin_slice_from_raw_parts_mut" || name == "std::slice::from_raw_parts_mut" {
+                if name == "__builtin_slice_from_raw_parts_mut"
+                    || name == "std::slice::from_raw_parts_mut"
+                {
                     if args.len() == 2 {
                         let ptr = ctx.get_value(args[0])?;
                         let len = ctx.get_value(args[1])?;
@@ -738,7 +741,8 @@ fn lower_instruction(
                 .result
                 .map(|r| ctx.get_or_create_value(r, result_ty.clone()))?;
 
-            let sir_values: Vec<ValueId> = values.iter().filter_map(|v| ctx.get_value(*v)).collect();
+            let sir_values: Vec<ValueId> =
+                values.iter().filter_map(|v| ctx.get_value(*v)).collect();
 
             Some(Instruction::with_result(
                 result,
@@ -1342,6 +1346,18 @@ pub fn lower_type(hlir_ty: &HlirType) -> SirType {
             ];
             SirType::Struct(StructType::new(fields).named("Vec4d"))
         }
+        // Octonion: 8 x f32 struct
+        HlirType::Octonion => {
+            let fields: Vec<(Option<String>, SirType)> = (0..8)
+                .map(|i| (Some(format!("c{}", i)), SirType::f32()))
+                .collect();
+            SirType::Struct(StructType::new(fields).named("Octonion"))
+        }
+        // Quaternionic Neural Network types
+        HlirType::QuatLinear => SirType::Struct(StructType::new(vec![]).named("QuatLinear")),
+        HlirType::QuatConv2d => SirType::Struct(StructType::new(vec![]).named("QuatConv2d")),
+        HlirType::QuatRnnState => SirType::Struct(StructType::new(vec![]).named("QuatRnnState")),
+        HlirType::QuatGate => SirType::Struct(StructType::new(vec![]).named("QuatGate")),
         HlirType::Dual => {
             // Dual number for automatic differentiation
             let fields = vec![

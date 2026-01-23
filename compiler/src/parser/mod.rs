@@ -355,7 +355,7 @@ impl<'a> Parser<'a> {
 
                 // Check for common mistakes at module level
                 let help = match found {
-                    TokenKind::IntLit | TokenKind::FloatLit | TokenKind::StringLit => {
+                    TokenKind::IntLit | TokenKind::FloatLit | TokenKind::StringLit | TokenKind::CStringLit => {
                         Some("Literal values cannot appear at the module level. Did you mean to put this inside a function?".to_string())
                     }
                     TokenKind::If | TokenKind::While | TokenKind::For | TokenKind::Loop => {
@@ -1399,43 +1399,23 @@ impl<'a> Parser<'a> {
             }));
         }
 
-        // Simple `import path;` syntax
+        // Simple `import path;` or `use path;` syntax
         // Accept optional semicolon after import statement
         if self.at(TokenKind::Semi) {
             self.advance();
         }
         let end = self.span();
 
-        // If path has multiple segments (e.g., `use foo::bar`), treat the last
-        // segment as the item being imported from the module formed by the rest.
-        // Single-segment paths (e.g., `use foo`) import the entire module.
-        if path.segments.len() > 1 {
-            let item_name = path.segments.last().cloned().unwrap_or_default();
-            let module_path = Path {
-                segments: path.segments[..path.segments.len() - 1].to_vec(),
-                source_module: path.source_module.clone(),
-                resolved_module: None,
-            };
-            Ok(Item::Import(ImportDef {
-                id: self.next_id(),
-                path: module_path,
-                items: Some(vec![ImportItem {
-                    name: item_name,
-                    alias: None,
-                    is_glob: false,
-                }]),
-                is_reexport,
-                span: start.merge(end),
-            }))
-        } else {
-            Ok(Item::Import(ImportDef {
-                id: self.next_id(),
-                path,
-                items: None,
-                is_reexport,
-                span: start.merge(end),
-            }))
-        }
+        // Import the entire module at the given path.
+        // For `use std::qnn`, this imports the module at std/qnn/mod.sio
+        // For `use foo`, this imports the module at foo.sio or foo/mod.sio
+        Ok(Item::Import(ImportDef {
+            id: self.next_id(),
+            path,
+            items: None,
+            is_reexport,
+            span: start.merge(end),
+        }))
     }
 
     /// Parse import items: `{ A, B as C, * }`
@@ -2542,6 +2522,45 @@ impl<'a> Parser<'a> {
         Ok(args)
     }
 
+    /// Parse function type parameters: (T1, T2) -> R with effects
+    /// Used for both `fn(A) -> B` and `extern "C" fn(A) -> B` type syntax
+    fn parse_fn_type_params(&mut self, abi: Option<Abi>) -> Result<TypeExpr> {
+        // Expect opening paren
+        self.expect(TokenKind::LParen)?;
+
+        // Parse parameter types
+        let mut params = Vec::new();
+        while !self.at(TokenKind::RParen) {
+            params.push(self.parse_type()?);
+            if !self.at(TokenKind::RParen) {
+                self.expect(TokenKind::Comma)?;
+            }
+        }
+        self.expect(TokenKind::RParen)?;
+
+        // Parse optional return type
+        let return_type = if self.at(TokenKind::Arrow) {
+            self.advance();
+            Box::new(self.parse_type()?)
+        } else {
+            Box::new(TypeExpr::Unit)
+        };
+
+        // Parse optional effects (only for Sounio function types, not extern)
+        let effects = if abi.is_none() {
+            self.parse_effect_clause()?
+        } else {
+            Vec::new()
+        };
+
+        Ok(TypeExpr::Function {
+            abi,
+            params,
+            return_type,
+            effects,
+        })
+    }
+
     fn parse_where_clause(&mut self) -> Result<Vec<WherePredicate>> {
         if !self.at(TokenKind::Where) {
             return Ok(Vec::new());
@@ -2584,6 +2603,7 @@ impl<'a> Parser<'a> {
             self.advance();
             let ret = self.parse_type_with_precedence(1)?;
             left = TypeExpr::Function {
+                abi: None, // This is a Sounio function type, not an extern function pointer
                 params: vec![left],
                 return_type: Box::new(ret),
                 effects: Vec::new(),
@@ -2625,6 +2645,28 @@ impl<'a> Parser<'a> {
                     mutable: is_mut,
                     inner: Box::new(inner),
                 })
+            }
+
+            // Function pointer type with optional ABI: fn(A, B) -> C or extern "C" fn(A, B) -> C
+            TokenKind::Extern => {
+                self.advance();
+                // Parse ABI string
+                let abi = if self.at(TokenKind::StringLit) {
+                    let abi_str = self.advance().text.clone();
+                    // Remove quotes from "C" -> C
+                    let abi_name = &abi_str[1..abi_str.len() - 1];
+                    Some(crate::ast::Abi::from_str(abi_name))
+                } else {
+                    Some(crate::ast::Abi::C) // Default to C ABI
+                };
+                self.expect(TokenKind::Fn)?;
+                self.parse_fn_type_params(abi)
+            }
+
+            // Sounio function type: fn(A, B) -> C with effects
+            TokenKind::Fn => {
+                self.advance();
+                self.parse_fn_type_params(None)
             }
 
             // Reference types: &T (shared) or &!T (mutable/exclusive)
@@ -2724,6 +2766,19 @@ impl<'a> Parser<'a> {
                 // Use parse_type_path to support both :: and . as separators
                 // This enables Darwin Atlas compatibility (e.g., &operators.Sequence)
                 let path = self.parse_type_path()?;
+
+                // Check for scientific types: Array<T, N> and Matrix<T, M, N>
+                // These are parsed specially to enable const generic dimensions
+                if path.segments.len() == 1 {
+                    let name = &path.segments[0];
+                    if name == "Array" && self.at(TokenKind::Lt) {
+                        return self.parse_scientific_array_type();
+                    }
+                    if name == "Matrix" && self.at(TokenKind::Lt) {
+                        return self.parse_scientific_matrix_type();
+                    }
+                }
+
                 let args = if self.at(TokenKind::Lt) {
                     self.parse_type_args()?
                 } else {
@@ -3233,6 +3288,88 @@ impl<'a> Parser<'a> {
             element_type,
             shape,
         })
+    }
+
+    /// Parse scientific array type: Array<T, N>
+    ///
+    /// Syntax: Array<element_type, dimension>
+    /// Where dimension can be:
+    /// - Integer literal: Array<f64, 10>
+    /// - Symbolic name: Array<f64, N>
+    /// - Underscore (dynamic): Array<f64, _>
+    fn parse_scientific_array_type(&mut self) -> Result<TypeExpr> {
+        self.expect(TokenKind::Lt)?;
+
+        // Parse element type
+        let element_type = Box::new(self.parse_type()?);
+        self.expect(TokenKind::Comma)?;
+
+        // Parse dimension
+        let dim = self.parse_tensor_dim()?;
+
+        self.expect(TokenKind::Gt)?;
+
+        Ok(TypeExpr::ScientificArray { element_type, dim })
+    }
+
+    /// Parse scientific matrix type: Matrix<T, M, N>
+    ///
+    /// Syntax: Matrix<element_type, rows, cols>
+    /// Where rows/cols can be:
+    /// - Integer literal: Matrix<f64, 3, 4>
+    /// - Symbolic name: Matrix<f64, M, N>
+    /// - Underscore (dynamic): Matrix<f64, _, _>
+    fn parse_scientific_matrix_type(&mut self) -> Result<TypeExpr> {
+        self.expect(TokenKind::Lt)?;
+
+        // Parse element type
+        let element_type = Box::new(self.parse_type()?);
+        self.expect(TokenKind::Comma)?;
+
+        // Parse rows
+        let rows = self.parse_tensor_dim()?;
+        self.expect(TokenKind::Comma)?;
+
+        // Parse columns
+        let cols = self.parse_tensor_dim()?;
+
+        self.expect(TokenKind::Gt)?;
+
+        Ok(TypeExpr::ScientificMatrix {
+            element_type,
+            rows,
+            cols,
+        })
+    }
+
+    /// Parse a single tensor dimension
+    ///
+    /// Accepts:
+    /// - Integer literal: 10, 256
+    /// - Identifier (symbolic): N, M, BatchSize
+    /// - Underscore (dynamic): _
+    fn parse_tensor_dim(&mut self) -> Result<TensorDim> {
+        match self.peek() {
+            TokenKind::IntLit => {
+                let size: usize = self
+                    .advance()
+                    .text
+                    .parse()
+                    .map_err(|_| miette::miette!("Invalid dimension size"))?;
+                Ok(TensorDim::Fixed(size))
+            }
+            TokenKind::Ident => {
+                let name = self.advance().text.clone();
+                Ok(TensorDim::Named(name))
+            }
+            TokenKind::Underscore => {
+                self.advance();
+                Ok(TensorDim::Dynamic)
+            }
+            _ => Err(miette::miette!(
+                "Expected dimension (integer, identifier, or _)"
+            )),
+        }
     }
 
     /// Parse tile type: tile<f16, 16, 16> or tile<bf16, 32, 32, "col_major">
@@ -3788,6 +3925,19 @@ impl<'a> Parser<'a> {
                 Ok(Expr::Literal {
                     id,
                     value: Literal::String(value),
+                })
+            }
+            TokenKind::CStringLit => {
+                // C string literal: c"content" -> null-terminated string, type: *const i8
+                let span = self.current().span;
+                let text = self.advance().text.clone();
+                // Remove c" prefix (2 chars) and trailing " (1 char)
+                let value = text[2..text.len() - 1].to_string();
+                let id = self.next_id();
+                self.record_span(id, span);
+                Ok(Expr::Literal {
+                    id,
+                    value: Literal::CString(value),
                 })
             }
             TokenKind::CharLit => {

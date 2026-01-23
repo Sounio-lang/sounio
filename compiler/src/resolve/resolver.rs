@@ -1079,6 +1079,7 @@ impl Resolver {
                 params,
                 return_type,
                 effects,
+                ..
             } => {
                 for p in params {
                     self.resolve_type_expr(p);
@@ -1121,6 +1122,13 @@ impl Resolver {
                     }
                 }
                 self.resolve_type_expr(inner);
+            }
+            // Scientific array and matrix types
+            TypeExpr::ScientificArray { element_type, .. } => {
+                self.resolve_type_expr(element_type);
+            }
+            TypeExpr::ScientificMatrix { element_type, .. } => {
+                self.resolve_type_expr(element_type);
             }
         }
     }

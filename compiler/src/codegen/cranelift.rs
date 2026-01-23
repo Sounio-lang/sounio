@@ -2011,6 +2011,296 @@ impl JitSettings {
     }
 }
 
+// ==================== AOT Compiler (Object File Emission) ====================
+
+/// Cranelift AOT compiler for producing object files
+///
+/// Unlike CraneliftJit which uses JITModule for in-memory execution,
+/// CraneliftAot uses ObjectModule to emit relocatable object files
+/// that can be linked into executables.
+#[cfg(feature = "jit")]
+pub struct CraneliftAot {
+    /// Whether to enable optimization
+    optimize: bool,
+}
+
+#[cfg(feature = "jit")]
+impl CraneliftAot {
+    /// Create a new AOT compiler
+    pub fn new() -> Self {
+        Self { optimize: false }
+    }
+
+    /// Enable optimizations
+    pub fn with_optimization(mut self) -> Self {
+        self.optimize = true;
+        self
+    }
+
+    /// Compile HLIR module to object file bytes
+    pub fn compile_to_object(&self, module: &HlirModule) -> Result<Vec<u8>, String> {
+        use cranelift_object::{ObjectBuilder, ObjectModule};
+        use target_lexicon::Triple;
+
+        // Create ISA for native target
+        let mut flag_builder = settings::builder();
+        flag_builder.set("use_colocated_libcalls", "false").map_err(|e| e.to_string())?;
+        flag_builder.set("is_pic", "true").map_err(|e| e.to_string())?;  // PIC for shared libs/executables
+
+        if self.optimize {
+            flag_builder.set("opt_level", "speed").map_err(|e| e.to_string())?;
+        } else {
+            flag_builder.set("opt_level", "none").map_err(|e| e.to_string())?;
+        }
+
+        let isa_builder = cranelift_native::builder()
+            .map_err(|e| format!("Failed to create ISA builder: {}", e))?;
+
+        let isa = isa_builder
+            .finish(settings::Flags::new(flag_builder))
+            .map_err(|e| format!("Failed to create ISA: {}", e))?;
+
+        // Create ObjectModule
+        let triple = Triple::host();
+        let obj_builder = ObjectBuilder::new(
+            isa.clone(),
+            "sounio_module",
+            cranelift_module::default_libcall_names(),
+        ).map_err(|e| format!("Failed to create object builder: {}", e))?;
+
+        let mut obj_module = ObjectModule::new(obj_builder);
+
+        // Create compiler context
+        let mut aot_compiler = AotCompiler::new(obj_module, isa, self.optimize)?;
+        aot_compiler.compile_module(module)?;
+        aot_compiler.finalize()
+    }
+}
+
+#[cfg(feature = "jit")]
+impl Default for CraneliftAot {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+/// AOT compiler using ObjectModule
+#[cfg(feature = "jit")]
+struct AotCompiler {
+    obj_module: cranelift_object::ObjectModule,
+    ctx: Context,
+    func_ctx: FunctionBuilderContext,
+    /// Map from HLIR function names to Cranelift function IDs
+    func_ids: HashMap<String, FuncId>,
+    /// Map from function names to their signatures (for calling)
+    func_sigs: HashMap<String, Signature>,
+    /// Set of exported (user-defined) function names
+    exported_funcs: std::collections::HashSet<String>,
+    /// Map from variadic function names to their fixed parameter count
+    variadic_funcs: HashMap<String, usize>,
+    /// ISA for code generation
+    isa: std::sync::Arc<dyn cranelift_codegen::isa::TargetIsa>,
+}
+
+#[cfg(feature = "jit")]
+impl AotCompiler {
+    fn new(
+        obj_module: cranelift_object::ObjectModule,
+        isa: std::sync::Arc<dyn cranelift_codegen::isa::TargetIsa>,
+        _optimize: bool,
+    ) -> Result<Self, String> {
+        let ctx = obj_module.make_context();
+
+        Ok(Self {
+            obj_module,
+            ctx,
+            func_ctx: FunctionBuilderContext::new(),
+            func_ids: HashMap::new(),
+            func_sigs: HashMap::new(),
+            exported_funcs: std::collections::HashSet::new(),
+            variadic_funcs: HashMap::new(),
+            isa,
+        })
+    }
+
+    fn compile_module(&mut self, module: &HlirModule) -> Result<(), String> {
+        // Declare runtime functions first
+        self.declare_runtime_functions()?;
+
+        // First pass: declare all user functions
+        for func in &module.functions {
+            let is_import = func.blocks.is_empty();
+            let sig = self.create_signature(func);
+            let symbol_name = func.link_name.as_deref().unwrap_or(&func.name);
+
+            let linkage = if is_import {
+                Linkage::Import
+            } else if func.is_exported || func.name == "main" {
+                Linkage::Export
+            } else {
+                Linkage::Local
+            };
+
+            let func_id = self
+                .obj_module
+                .declare_function(symbol_name, linkage, &sig)
+                .map_err(|e| format!("Failed to declare function {}: {}", func.name, e))?;
+            self.func_ids.insert(func.name.clone(), func_id);
+            self.func_sigs.insert(func.name.clone(), sig);
+            if !is_import {
+                self.exported_funcs.insert(func.name.clone());
+            }
+            if func.is_variadic {
+                self.variadic_funcs.insert(func.name.clone(), func.params.len());
+            }
+        }
+
+        // Second pass: compile all functions
+        for func in &module.functions {
+            if func.blocks.is_empty() {
+                continue;
+            }
+            self.compile_function(func)?;
+        }
+
+        Ok(())
+    }
+
+    fn create_signature(&self, func: &crate::hlir::HlirFunction) -> Signature {
+        let call_conv = self.isa.default_call_conv();
+        let mut sig = Signature::new(call_conv);
+
+        for param in &func.params {
+            sig.params.push(AbiParam::new(hlir_to_cranelift_type(&param.ty)));
+        }
+
+        if func.return_type != crate::hlir::HlirType::Void {
+            sig.returns.push(AbiParam::new(hlir_to_cranelift_type(&func.return_type)));
+        }
+
+        sig
+    }
+
+    fn declare_runtime_functions(&mut self) -> Result<(), String> {
+        let call_conv = self.isa.default_call_conv();
+
+        // runtime_print_i64(i64) -> void
+        let mut sig_print_i64 = Signature::new(call_conv);
+        sig_print_i64.params.push(AbiParam::new(types::I64));
+        let id = self
+            .obj_module
+            .declare_function("runtime_print_i64", Linkage::Import, &sig_print_i64)
+            .map_err(|e| format!("Failed to declare runtime_print_i64: {}", e))?;
+        self.func_ids.insert("runtime_print_i64".to_string(), id);
+        self.func_sigs.insert("runtime_print_i64".to_string(), sig_print_i64);
+
+        // runtime_print_f64(f64) -> void
+        let mut sig_print_f64 = Signature::new(call_conv);
+        sig_print_f64.params.push(AbiParam::new(types::F64));
+        let id = self
+            .obj_module
+            .declare_function("runtime_print_f64", Linkage::Import, &sig_print_f64)
+            .map_err(|e| format!("Failed to declare runtime_print_f64: {}", e))?;
+        self.func_ids.insert("runtime_print_f64".to_string(), id);
+        self.func_sigs.insert("runtime_print_f64".to_string(), sig_print_f64);
+
+        // runtime_print_newline() -> void
+        let sig_print_newline = Signature::new(call_conv);
+        let id = self
+            .obj_module
+            .declare_function("runtime_print_newline", Linkage::Import, &sig_print_newline)
+            .map_err(|e| format!("Failed to declare runtime_print_newline: {}", e))?;
+        self.func_ids.insert("runtime_print_newline".to_string(), id);
+        self.func_sigs.insert("runtime_print_newline".to_string(), sig_print_newline);
+
+        // runtime_print_str(ptr, len) -> void
+        let mut sig_print_str = Signature::new(call_conv);
+        sig_print_str.params.push(AbiParam::new(types::I64));
+        sig_print_str.params.push(AbiParam::new(types::I64));
+        let id = self
+            .obj_module
+            .declare_function("runtime_print_str", Linkage::Import, &sig_print_str)
+            .map_err(|e| format!("Failed to declare runtime_print_str: {}", e))?;
+        self.func_ids.insert("runtime_print_str".to_string(), id);
+        self.func_sigs.insert("runtime_print_str".to_string(), sig_print_str);
+
+        // runtime_print_cstr(ptr) -> void
+        let mut sig_print_cstr = Signature::new(call_conv);
+        sig_print_cstr.params.push(AbiParam::new(types::I64));
+        let id = self
+            .obj_module
+            .declare_function("runtime_print_cstr", Linkage::Import, &sig_print_cstr)
+            .map_err(|e| format!("Failed to declare runtime_print_cstr: {}", e))?;
+        self.func_ids.insert("runtime_print_cstr".to_string(), id);
+        self.func_sigs.insert("runtime_print_cstr".to_string(), sig_print_cstr);
+
+        // runtime_print_bool(i8) -> void
+        let mut sig_print_bool = Signature::new(call_conv);
+        sig_print_bool.params.push(AbiParam::new(types::I8));
+        let id = self
+            .obj_module
+            .declare_function("runtime_print_bool", Linkage::Import, &sig_print_bool)
+            .map_err(|e| format!("Failed to declare runtime_print_bool: {}", e))?;
+        self.func_ids.insert("runtime_print_bool".to_string(), id);
+        self.func_sigs.insert("runtime_print_bool".to_string(), sig_print_bool);
+
+        Ok(())
+    }
+
+    fn compile_function(&mut self, func: &crate::hlir::HlirFunction) -> Result<(), String> {
+        // Set up function signature
+        let sig = self.func_sigs.get(&func.name)
+            .ok_or_else(|| format!("Signature not found for {}", func.name))?
+            .clone();
+        self.ctx.func.signature = sig;
+
+        // Set function name for debugging
+        self.ctx.func.name = UserFuncName::user(0, self.func_ids[&func.name].as_u32());
+
+        // Build function body
+        {
+            let mut builder = FunctionBuilder::new(&mut self.ctx.func, &mut self.func_ctx);
+
+            // Get function references for calls
+            let mut func_refs = HashMap::new();
+            for (name, &id) in &self.func_ids {
+                let sig = self.func_sigs.get(name).cloned().unwrap();
+                let sig_ref = builder.import_signature(sig);
+                let func_ref = self.obj_module.declare_func_in_func(id, builder.func);
+                func_refs.insert(name.clone(), func_ref);
+            }
+
+            // Translate the function body
+            translate_function(
+                &mut builder,
+                func,
+                &func_refs,
+                &self.variadic_funcs,
+                &self.func_sigs,
+            )?;
+
+            builder.finalize();
+        }
+
+        // Define the function
+        let func_id = self.func_ids[&func.name];
+        self.obj_module
+            .define_function(func_id, &mut self.ctx)
+            .map_err(|e| format!("Failed to define function {}: {}", func.name, e))?;
+
+        // Clear context for next function
+        self.obj_module.clear_context(&mut self.ctx);
+
+        Ok(())
+    }
+
+    fn finalize(self) -> Result<Vec<u8>, String> {
+        let product = self.obj_module.finish();
+        product.emit()
+            .map_err(|e| format!("Failed to emit object file: {}", e))
+    }
+}
+
 // ==================== JIT Compiler Implementation ====================
 
 #[cfg(feature = "jit")]
@@ -2024,6 +2314,9 @@ struct JitCompiler {
     func_sigs: HashMap<String, Signature>,
     /// Set of exported (user-defined) function names
     exported_funcs: std::collections::HashSet<String>,
+    /// Map from variadic function names to their fixed parameter count
+    /// Used for proper variadic call handling in FFI
+    variadic_funcs: HashMap<String, usize>,
 }
 
 #[cfg(feature = "jit")]
@@ -2294,6 +2587,7 @@ impl JitCompiler {
             func_ids: HashMap::new(),
             func_sigs: HashMap::new(),
             exported_funcs: std::collections::HashSet::new(),
+            variadic_funcs: HashMap::new(),
         })
     }
 
@@ -2307,10 +2601,16 @@ impl JitCompiler {
             let is_import = func.blocks.is_empty();
             let sig = self.create_signature(func);
             let symbol_name = func.link_name.as_deref().unwrap_or(&func.name);
+            // For JIT, we export all defined functions (they need to be callable).
+            // For AOT/shared library builds, we'd respect func.is_exported.
+            // In JIT mode, even non-exported functions are accessible by name lookup.
             let linkage = if is_import {
                 Linkage::Import
-            } else {
+            } else if func.is_exported || func.name == "main" {
                 Linkage::Export
+            } else {
+                // Local linkage - function is defined but not exported
+                Linkage::Local
             };
             let func_id = self
                 .jit_module
@@ -2320,6 +2620,10 @@ impl JitCompiler {
             self.func_sigs.insert(func.name.clone(), sig);
             if !is_import {
                 self.exported_funcs.insert(func.name.clone());
+            }
+            // Track variadic functions for proper call handling
+            if func.is_variadic {
+                self.variadic_funcs.insert(func.name.clone(), func.params.len());
             }
         }
 
@@ -3137,7 +3441,7 @@ impl JitCompiler {
                 }
             }
 
-            translate_function(&mut builder, func, &local_func_refs)?;
+            translate_function(&mut builder, func, &local_func_refs, &self.variadic_funcs, &self.func_sigs)?;
             builder.finalize();
         }
 
@@ -3219,6 +3523,8 @@ fn translate_function(
     builder: &mut FunctionBuilder,
     func: &HlirFunction,
     func_refs: &HashMap<String, cranelift_codegen::ir::FuncRef>,
+    variadic_funcs: &HashMap<String, usize>,
+    func_sigs: &HashMap<String, Signature>,
 ) -> Result<(), String> {
     let mut values: HashMap<ValueId, cranelift_codegen::ir::Value> = HashMap::new();
     let mut blocks: HashMap<BlockId, cranelift_codegen::ir::Block> = HashMap::new();
@@ -3254,6 +3560,8 @@ fn translate_function(
             &mut values,
             &mut string_values,
             func_refs,
+            variadic_funcs,
+            func_sigs,
             first,
         )?;
         first = false;
@@ -3273,6 +3581,8 @@ fn translate_block(
     values: &mut HashMap<ValueId, cranelift_codegen::ir::Value>,
     string_values: &mut std::collections::HashSet<ValueId>,
     func_refs: &HashMap<String, cranelift_codegen::ir::FuncRef>,
+    variadic_funcs: &HashMap<String, usize>,
+    func_sigs: &HashMap<String, Signature>,
     is_entry: bool,
 ) -> Result<(), String> {
     let cl_block = blocks[&block.id];
@@ -3284,7 +3594,7 @@ fn translate_block(
 
     // Translate instructions
     for instr in &block.instructions {
-        let result = translate_instruction(builder, instr, values, string_values, func_refs)?;
+        let result = translate_instruction(builder, instr, values, string_values, func_refs, variadic_funcs, func_sigs)?;
         if let (Some(res_id), Some(val)) = (instr.result, result) {
             values.insert(res_id, val);
         }
@@ -3303,6 +3613,8 @@ fn translate_instruction(
     values: &HashMap<ValueId, cranelift_codegen::ir::Value>,
     string_values: &mut std::collections::HashSet<ValueId>,
     func_refs: &HashMap<String, cranelift_codegen::ir::FuncRef>,
+    variadic_funcs: &HashMap<String, usize>,
+    func_sigs: &HashMap<String, Signature>,
 ) -> Result<Option<cranelift_codegen::ir::Value>, String> {
     let ty = hlir_to_cranelift_type(&instr.ty);
 
@@ -4336,6 +4648,56 @@ fn translate_instruction(
             }
 
             if let Some(&func_ref) = func_refs.get(name) {
+                // Check if this is a variadic function call
+                if let Some(&fixed_param_count) = variadic_funcs.get(name) {
+                    // Variadic function - need to create a new signature with extra args
+                    if arg_vals.len() > fixed_param_count {
+                        // Get the base signature
+                        if let Some(base_sig) = func_sigs.get(name) {
+                            // Create a new signature with extra variadic arguments
+                            let mut variadic_sig = base_sig.clone();
+
+                            // Add parameters for variadic arguments
+                            for i in fixed_param_count..arg_vals.len() {
+                                let arg_type = builder.func.dfg.value_type(arg_vals[i]);
+                                // For C variadic calls, float types should be promoted to double
+                                // and types smaller than int should be promoted to int
+                                let promoted_type = if arg_type == types::F32 {
+                                    types::F64
+                                } else if arg_type == types::I8 || arg_type == types::I16 {
+                                    types::I32
+                                } else {
+                                    arg_type
+                                };
+                                variadic_sig.params.push(AbiParam::new(promoted_type));
+                            }
+
+                            // Promote arguments if needed
+                            let mut promoted_args = arg_vals.clone();
+                            for i in fixed_param_count..promoted_args.len() {
+                                let arg_type = builder.func.dfg.value_type(promoted_args[i]);
+                                if arg_type == types::F32 {
+                                    promoted_args[i] = builder.ins().fpromote(types::F64, promoted_args[i]);
+                                } else if arg_type == types::I8 || arg_type == types::I16 {
+                                    promoted_args[i] = builder.ins().sextend(types::I32, promoted_args[i]);
+                                }
+                            }
+
+                            // Import the signature and make an indirect call
+                            let sig_ref = builder.import_signature(variadic_sig);
+                            let func_addr = builder.ins().func_addr(types::I64, func_ref);
+                            let call = builder.ins().call_indirect(sig_ref, func_addr, &promoted_args);
+                            let results = builder.inst_results(call);
+                            return if results.is_empty() {
+                                Ok(None)
+                            } else {
+                                Ok(Some(results[0]))
+                            };
+                        }
+                    }
+                }
+
+                // Normal (non-variadic) function call
                 let call = builder.ins().call(func_ref, &arg_vals);
                 let results = builder.inst_results(call);
                 if results.is_empty() {
@@ -5214,6 +5576,20 @@ fn translate_constant(
                 Ok(builder.ins().iconst(types::I64, stored_ptr))
             } else {
                 // Fallback to null if lock fails
+                Ok(builder.ins().iconst(types::I64, 0))
+            }
+        }
+        HlirConstant::CString(s) => {
+            // C string literal - already null-terminated, store for FFI use
+            let cstring = std::ffi::CString::new(s.as_str())
+                .unwrap_or_else(|_| std::ffi::CString::new("").unwrap());
+
+            // Store in global storage to keep alive
+            if let Ok(mut storage) = STRING_STORAGE.lock() {
+                storage.push(cstring);
+                let stored_ptr = storage.last().unwrap().as_ptr() as i64;
+                Ok(builder.ins().iconst(types::I64, stored_ptr))
+            } else {
                 Ok(builder.ins().iconst(types::I64, 0))
             }
         }

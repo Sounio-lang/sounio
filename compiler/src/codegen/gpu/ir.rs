@@ -1372,6 +1372,146 @@ pub enum GpuOp {
     /// slerp(q1, q2, t) for t ∈ [0, 1]
     QuatSlerp(ValueId, ValueId, ValueId),
 
+    // ==================== OCTONION OPERATIONS (8D Hypercomplex) ====================
+    // Octonions: o = a + bi + cj + dk + el + fil + gjl + hkl
+    // Non-associative but alternative (power-associative, flexible)
+    // Reference: arXiv:1601.01507 - Octonion-valued neural networks
+    /// Octonion multiplication via Cayley-Dickson construction
+    OctonionMul(ValueId, ValueId),
+
+    /// Octonion conjugate
+    OctonionConj(ValueId),
+
+    /// Octonion norm squared
+    OctonionNormSq(ValueId),
+
+    /// Octonion normalize
+    OctonionNormalize(ValueId),
+
+    /// Octonion inverse
+    OctonionInv(ValueId),
+
+    /// Octonion real part
+    OctonionReal(ValueId),
+
+    /// Octonion imaginary part (7D)
+    OctonionImag(ValueId),
+
+    /// Octonion dot product
+    OctonionDot(ValueId, ValueId),
+
+    /// Octonion exponentiation
+    OctonionExp(ValueId),
+
+    /// Octonion logarithm
+    OctonionLog(ValueId),
+
+    /// Octonion power
+    OctonionPow(ValueId, ValueId),
+
+    /// Octonion ReLU
+    OctonionRelu(ValueId),
+
+    /// Octonion sigmoid
+    OctonionSigmoid(ValueId),
+
+    /// Octonion tanh
+    OctonionTanh(ValueId),
+
+    /// Octonion split to two quaternions
+    OctonionToQuats(ValueId),
+
+    /// Construct octonion from two quaternions
+    OctonionFromQuats(ValueId, ValueId),
+
+    // ==================== QUATERNIONIC NEURAL NETWORK OPERATIONS ====================
+    // arXiv:1804.10592 - Quaternion Convolutional Neural Networks
+    // arXiv:1903.08478 - Quaternion Recurrent Neural Networks
+    /// Quaternion ReLU: max(0, q[i]) for each component
+    QuatRelu(ValueId),
+
+    /// Quaternion Sigmoid: 1/(1 + exp(-q[i])) per component
+    QuatSigmoid(ValueId),
+
+    /// Quaternion Tanh: tanh(q[i]) per component
+    QuatTanh(ValueId),
+
+    /// Quaternion Leaky ReLU: max(α*q[i], q[i]) per component
+    QuatLeakyRelu(ValueId, f32),
+
+    /// Quaternion batch normalization forward pass
+    /// Normalizes each component independently
+    QuatBnFwd {
+        x: ValueId,
+        gamma: ValueId,
+        beta: ValueId,
+        mean: ValueId,
+        var: ValueId,
+        epsilon: f32,
+    },
+
+    /// Quaternion batch normalization backward pass
+    QuatBnBwd {
+        x: ValueId,
+        dy: ValueId,
+        gamma: ValueId,
+        mean: ValueId,
+        var: ValueId,
+        epsilon: f32,
+    },
+
+    /// Quaternion linear layer forward: y = W ⊗ x + b
+    /// W is [out_features, in_features] quats, x is [in_features] quats
+    QuatLinearFwd {
+        w: ValueId,
+        x: ValueId,
+        b: ValueId,
+        out: ValueId,
+        in_features: u32,
+        out_features: u32,
+    },
+
+    /// Quaternion linear layer backward
+    QuatLinearBwd {
+        w: ValueId,
+        x: ValueId,
+        dy: ValueId,
+        dW: ValueId,
+        dx: ValueId,
+        in_features: u32,
+        out_features: u32,
+    },
+
+    /// Quaternion 2D convolution forward
+    QuatConv2dFwd {
+        input: ValueId,
+        kernel: ValueId,
+        output: ValueId,
+        batch: u32,
+        in_ch: u32,
+        out_ch: u32,
+        height: u32,
+        width: u32,
+        kH: u32,
+        kW: u32,
+    },
+
+    /// Quaternion 2D convolution backward
+    QuatConv2dBwd {
+        input: ValueId,
+        kernel: ValueId,
+        d_output: ValueId,
+        d_kernel: ValueId,
+        d_input: ValueId,
+        batch: u32,
+        in_ch: u32,
+        out_ch: u32,
+        height: u32,
+        width: u32,
+        kH: u32,
+        kW: u32,
+    },
+
     /// DNA base complement (A↔T, C↔G)
     DnaComplement(ValueId),
 

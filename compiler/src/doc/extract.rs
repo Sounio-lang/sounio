@@ -849,18 +849,24 @@ impl DocExtractor {
                 )
             }
             TypeExpr::Function {
+                abi,
                 params,
                 return_type,
                 effects,
             } => {
-                let mut s = format!(
+                let mut s = String::new();
+                // Add ABI prefix for extern function pointers
+                if let Some(abi) = abi {
+                    s.push_str(&format!("extern \"{}\" ", abi));
+                }
+                s.push_str(&format!(
                     "fn({})",
                     params
                         .iter()
                         .map(|p| self.type_expr_to_string(p))
                         .collect::<Vec<_>>()
                         .join(", ")
-                );
+                ));
                 s.push_str(" -> ");
                 s.push_str(&self.type_expr_to_string(return_type));
                 if !effects.is_empty() {
@@ -997,6 +1003,25 @@ impl DocExtractor {
                 }).collect();
                 format!("forall {}. {}", var_names.join(", "), self.type_expr_to_string(inner))
             }
+            TypeExpr::ScientificArray { element_type, dim } => {
+                let dim_str = self.tensor_dim_to_string(dim);
+                format!("Array<{}, {}>", self.type_expr_to_string(element_type), dim_str)
+            }
+            TypeExpr::ScientificMatrix { element_type, rows, cols } => {
+                let rows_str = self.tensor_dim_to_string(rows);
+                let cols_str = self.tensor_dim_to_string(cols);
+                format!("Matrix<{}, {}, {}>", self.type_expr_to_string(element_type), rows_str, cols_str)
+            }
+        }
+    }
+
+    /// Convert tensor dimension to string
+    fn tensor_dim_to_string(&self, dim: &ast::TensorDim) -> String {
+        match dim {
+            ast::TensorDim::Named(name) => name.clone(),
+            ast::TensorDim::Fixed(n) => n.to_string(),
+            ast::TensorDim::Dynamic => "_".to_string(),
+            ast::TensorDim::Expr(expr) => self.expr_to_string(expr),
         }
     }
 
@@ -1065,6 +1090,7 @@ impl DocExtractor {
             ast::Literal::Float(f) => f.to_string(),
             ast::Literal::Char(c) => format!("'{}'", c),
             ast::Literal::String(s) => format!("\"{}\"", s),
+            ast::Literal::CString(s) => format!("c\"{}\"", s),
             ast::Literal::IntUnit(i, u) => format!("{}_{}", i, u),
             ast::Literal::FloatUnit(f, u) => format!("{}_{}", f, u),
         }

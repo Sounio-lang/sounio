@@ -9,8 +9,8 @@
 pub mod async_transform;
 
 pub use async_transform::{
-    AsyncStateKind, AsyncStateMachine, AsyncStateNode, AsyncTransformer, AwaitExpr, CapturedLocal,
-    StateTransition, is_async_function, transform_async_functions,
+    is_async_function, transform_async_functions, AsyncStateKind, AsyncStateMachine,
+    AsyncStateNode, AsyncTransformer, AwaitExpr, CapturedLocal, StateTransition,
 };
 
 use crate::ast::Abi;
@@ -273,6 +273,33 @@ pub enum HirType {
     /// Quaternion (4x f32: x, y, z, w)
     Quat,
 
+    // ==================== OCTONION TYPES (8D Hypercomplex) ====================
+    /// Octonion (8x f32: a, b, c, d, e, f, g, h for 1, i, j, k, l, il, jl, kl)
+    Octonion,
+
+    // ==================== QUATERNIONIC NEURAL NETWORK TYPES ====================
+    /// Quaternionic Linear Layer
+    QuatLinear {
+        input_features: usize,
+        output_features: usize,
+    },
+    /// Quaternionic 2D Convolution
+    QuatConv2d {
+        in_channels: usize,
+        out_channels: usize,
+        kernel_h: usize,
+        kernel_w: usize,
+    },
+    /// Quaternionic RNN state
+    QuatRnnState {
+        hidden_size: usize,
+    },
+    /// Quaternionic Gate
+    QuatGate {
+        input_size: usize,
+        hidden_size: usize,
+    },
+
     // Double-precision vector types
     /// 2D vector (2x f64)
     Vec2d,
@@ -335,6 +362,17 @@ pub enum HirType {
     Tensor {
         element: Box<HirType>,
         dims: Vec<HirTensorDim>,
+    },
+    /// Scientific array with const generic dimension: Array<T, N>
+    ScientificArray {
+        element: Box<HirType>,
+        dim: HirTensorDim,
+    },
+    /// Scientific matrix with const generic dimensions: Matrix<T, M, N>
+    Matrix {
+        element: Box<HirType>,
+        rows: HirTensorDim,
+        cols: HirTensorDim,
     },
     /// Ontology term: OntologyTerm[SNOMED:12345]
     Ontology {
@@ -628,6 +666,33 @@ impl HirType {
             HirType::Mat3 => "mat3".to_string(),
             HirType::Mat4 => "mat4".to_string(),
             HirType::Quat => "quat".to_string(),
+            HirType::Octonion => "oct".to_string(),
+            HirType::QuatLinear {
+                input_features,
+                output_features,
+            } => {
+                format!("QuatLinear[{}→{}]", input_features, output_features)
+            }
+            HirType::QuatConv2d {
+                in_channels,
+                out_channels,
+                kernel_h,
+                kernel_w,
+            } => {
+                format!(
+                    "QuatConv2d[{}→{}, {}×{}]",
+                    in_channels, out_channels, kernel_h, kernel_w
+                )
+            }
+            HirType::QuatRnnState { hidden_size } => {
+                format!("QuatRnnState[{}]", hidden_size)
+            }
+            HirType::QuatGate {
+                input_size,
+                hidden_size,
+            } => {
+                format!("QuatGate[{}→{}]", input_size, hidden_size)
+            }
             HirType::Dual => "dual".to_string(),
             HirType::Vec2d => "vec2d".to_string(),
             HirType::Vec3d => "vec3d".to_string(),
@@ -665,15 +730,28 @@ impl HirType {
                     format!("{}<{}>", name, args_str.join(", "))
                 }
             }
-            HirType::Fn { params, return_type } => {
+            HirType::Fn {
+                params,
+                return_type,
+            } => {
                 let params_str: Vec<String> = params.iter().map(|t| t.format_short()).collect();
-                format!("fn({}) -> {}", params_str.join(", "), return_type.format_short())
+                format!(
+                    "fn({}) -> {}",
+                    params_str.join(", "),
+                    return_type.format_short()
+                )
             }
             HirType::Var(id) => format!("T{}", id),
             HirType::Never => "!".to_string(),
             HirType::Error => "<error>".to_string(),
-            HirType::Knowledge { inner, epsilon_bound, .. } => {
-                let eps = epsilon_bound.map(|e| format!(", e >= {:.2}", e)).unwrap_or_default();
+            HirType::Knowledge {
+                inner,
+                epsilon_bound,
+                ..
+            } => {
+                let eps = epsilon_bound
+                    .map(|e| format!(", e >= {:.2}", e))
+                    .unwrap_or_default();
                 format!("Knowledge[{}{}]", inner.format_short(), eps)
             }
             HirType::Quantity { numeric, unit } => {
@@ -692,6 +770,21 @@ impl HirType {
             }
             HirType::Future { output } => {
                 format!("Future<{}>", output.format_short())
+            }
+            HirType::ScientificArray { element, dim } => {
+                format!("Array<{}, {}>", element.format_short(), dim.format_short())
+            }
+            HirType::Matrix {
+                element,
+                rows,
+                cols,
+            } => {
+                format!(
+                    "Matrix<{}, {}, {}>",
+                    element.format_short(),
+                    rows.format_short(),
+                    cols.format_short()
+                )
             }
         }
     }
@@ -773,19 +866,13 @@ impl HirTensorDim {
     /// Returns compatibility info: (compatible, message)
     pub fn shapes_compatible(a: &[HirTensorDim], b: &[HirTensorDim]) -> (bool, String) {
         if a.len() != b.len() {
-            return (
-                false,
-                format!("Rank mismatch: {} vs {}", a.len(), b.len()),
-            );
+            return (false, format!("Rank mismatch: {} vs {}", a.len(), b.len()));
         }
 
         for (i, (dim_a, dim_b)) in a.iter().zip(b.iter()).enumerate() {
             match (dim_a, dim_b) {
                 (HirTensorDim::Fixed(n1), HirTensorDim::Fixed(n2)) if n1 != n2 => {
-                    return (
-                        false,
-                        format!("Dimension {} mismatch: {} vs {}", i, n1, n2),
-                    );
+                    return (false, format!("Dimension {} mismatch: {} vs {}", i, n1, n2));
                 }
                 (HirTensorDim::Named(name1), HirTensorDim::Named(name2)) if name1 != name2 => {
                     return (

@@ -951,6 +951,13 @@ impl HlirToGpuLowering {
             HlirType::Mat4 => GpuType::Array(Box::new(GpuType::Vec4(Box::new(GpuType::F32))), 4),
             // Quaternion as vec4 (x, y, z, w)
             HlirType::Quat => GpuType::Vec4(Box::new(GpuType::F32)),
+            // Octonion as array of 8 f32 (a, b, c, d, e, f, g, h)
+            HlirType::Octonion => GpuType::Array(Box::new(GpuType::F32), 8),
+            // Quaternionic Neural Network types - lowered to quaternion arrays
+            HlirType::QuatLinear => GpuType::Array(Box::new(GpuType::Vec4(Box::new(GpuType::F32))), 0),
+            HlirType::QuatConv2d => GpuType::Array(Box::new(GpuType::Vec4(Box::new(GpuType::F32))), 0),
+            HlirType::QuatRnnState => GpuType::Array(Box::new(GpuType::Vec4(Box::new(GpuType::F32))), 0),
+            HlirType::QuatGate => GpuType::Array(Box::new(GpuType::Vec4(Box::new(GpuType::F32))), 0),
             // f64 vector types
             HlirType::Vec2d => GpuType::Vec2(Box::new(GpuType::F64)),
             HlirType::Vec3d => GpuType::Vec3(Box::new(GpuType::F64)),

@@ -22,7 +22,7 @@ use crate::ast::*;
 use crate::common::{NodeId, Span};
 use crate::hir::*;
 use crate::macro_system::token_tree::{Delimiter, TokenTree};
-use crate::types::{self, Type, TypeVar, TensorShape, effects::EffectInference, units::UnitChecker};
+use crate::types::{self, Type, TypeVar, TensorShape, DimSize, effects::EffectInference, units::UnitChecker};
 use miette::Result;
 use std::collections::HashMap;
 
@@ -4463,6 +4463,26 @@ impl TypeChecker {
                 // Slice construction intrinsics
                 | "__builtin_slice_from_raw_parts"
                 | "__builtin_slice_from_raw_parts_mut"
+                // QNN (Quaternionic Neural Network) Intrinsics
+                | "quat_linear_fwd"
+                | "quat_linear_bwd"
+                | "quat_conv2d_fwd"
+                | "quat_conv2d_bwd"
+                | "quat_relu"
+                | "quat_sigmoid"
+                | "quat_tanh"
+                | "quat_leaky_relu"
+                | "quat_avg_pool2d"
+                | "quat_max_pool2d"
+                | "quat_init_xavier"
+                | "quat_init_he"
+                | "quat_init_unit"
+                | "quat_bn_create"
+                | "quat_bn_fwd"
+                | "quat_bn_bwd"
+                | "quat_lstm_cell"
+                | "quat_gru_cell"
+                | "quat_attention"
         )
     }
 
@@ -4652,6 +4672,315 @@ impl TypeChecker {
             "quat_inner_product" => HirType::Fn {
                 params: vec![HirType::Quat, HirType::Quat],
                 return_type: Box::new(HirType::F32),
+            },
+
+            // ==================== OCTONION OPERATIONS (8D Hypercomplex) ====================
+            // Octonions form a division algebra over R with 8 dimensions
+            // Multiplication is non-associative but alternative (associator is alternating)
+            // References: arXiv:1601.01507 (Octonion-valued neural networks)
+            //
+            // Octonion basis: {1, i, j, k, l, il, jl, kl} with multiplication from Fano plane
+            // o = a + bi + cj + dk + el + fil + gjl + hkl
+
+            // Create octonion from 8 real components
+            "oct" => HirType::Fn {
+                params: vec![
+                    HirType::F32, HirType::F32, HirType::F32, HirType::F32,
+                    HirType::F32, HirType::F32, HirType::F32, HirType::F32,
+                ],
+                return_type: Box::new(HirType::Octonion),
+            },
+
+            // Octonion multiplication (Cayley-Dickson construction)
+            // o1 * o2 = (a1a2 - v1·v2) + (a1v2 + a2v1 + v1×v2)
+            // where v1, v2 are 7D imaginary parts, × is 7D cross product
+            "oct_mul" => HirType::Fn {
+                params: vec![HirType::Octonion, HirType::Octonion],
+                return_type: Box::new(HirType::Octonion),
+            },
+
+            // Octonion conjugate: o* = a - bi - cj - dk - el - fil - gjl - hkl
+            "oct_conj" => HirType::Fn {
+                params: vec![HirType::Octonion],
+                return_type: Box::new(HirType::Octonion),
+            },
+
+            // Octonion norm: |o| = sqrt(a² + b² + c² + d² + e² + f² + g² + h²)
+            "oct_norm" => HirType::Fn {
+                params: vec![HirType::Octonion],
+                return_type: Box::new(HirType::F32),
+            },
+
+            // Octonion inverse: o⁻¹ = o* / |o|²
+            "oct_inv" => HirType::Fn {
+                params: vec![HirType::Octonion],
+                return_type: Box::new(HirType::Octonion),
+            },
+
+            // Octonion normalize: o / |o|
+            "oct_normalize" => HirType::Fn {
+                params: vec![HirType::Octonion],
+                return_type: Box::new(HirType::Octonion),
+            },
+
+            // Octonion identity: 1 + 0i + 0j + 0k + 0l + 0il + 0jl + 0kl
+            "oct_identity" => HirType::Fn {
+                params: vec![],
+                return_type: Box::new(HirType::Octonion),
+            },
+
+            // Octonion real part (scalar component)
+            "oct_real" => HirType::Fn {
+                params: vec![HirType::Octonion],
+                return_type: Box::new(HirType::F32),
+            },
+
+            // Octonion imaginary part (7D vector)
+            "oct_imag" => HirType::Fn {
+                params: vec![HirType::Octonion],
+                return_type: Box::new(HirType::Array { element: Box::new(HirType::F32), size: Some(7) }),
+            },
+
+            // Octonion dot product (Euclidean inner product on R⁸)
+            "oct_dot" => HirType::Fn {
+                params: vec![HirType::Octonion, HirType::Octonion],
+                return_type: Box::new(HirType::F32),
+            },
+
+            // Octonion exponentiation (using power series)
+            "oct_exp" => HirType::Fn {
+                params: vec![HirType::Octonion],
+                return_type: Box::new(HirType::Octonion),
+            },
+
+            // Octonion logarithm
+            "oct_log" => HirType::Fn {
+                params: vec![HirType::Octonion],
+                return_type: Box::new(HirType::Octonion),
+            },
+
+            // Octonion power: o^n
+            "oct_pow" => HirType::Fn {
+                params: vec![HirType::Octonion, HirType::F32],
+                return_type: Box::new(HirType::Octonion),
+            },
+
+            // Octonion ReLU activation (per-component)
+            "oct_relu" => HirType::Fn {
+                params: vec![HirType::Octonion],
+                return_type: Box::new(HirType::Octonion),
+            },
+
+            // Octonion sigmoid (per-component)
+            "oct_sigmoid" => HirType::Fn {
+                params: vec![HirType::Octonion],
+                return_type: Box::new(HirType::Octonion),
+            },
+
+            // Octonion tanh (per-component)
+            "oct_tanh" => HirType::Fn {
+                params: vec![HirType::Octonion],
+                return_type: Box::new(HirType::Octonion),
+            },
+
+            // Octonion split into quaternion components: o = q0 + q1*l
+            // Useful for Octonion->Quaternion reduction
+            "oct_to_quats" => HirType::Fn {
+                params: vec![HirType::Octonion],
+                return_type: Box::new(HirType::Tuple(vec![HirType::Quat, HirType::Quat])),
+            },
+
+            // Construct octonion from two quaternions: o = q0 + q1*l
+            "oct_from_quats" => HirType::Fn {
+                params: vec![HirType::Quat, HirType::Quat],
+                return_type: Box::new(HirType::Octonion),
+            },
+
+            // ==================== QUATERNIONIC NEURAL NETWORKS (QNN) ====================
+            // Quaternionic Neural Network Primitives - arXiv:1804.10592, 1903.08478
+
+            // QNN Layer Creation
+            // Create quaternionic linear layer: quat_linear(input_size, output_size) -> QuatLinear
+            "quat_linear_create" => HirType::Fn {
+                params: vec![HirType::I32, HirType::I32],
+                return_type: Box::new(HirType::QuatLinear {
+                    input_features: 0,
+                    output_features: 0,
+                }),
+            },
+            // Create quaternionic 2D convolution: quat_conv2d_create(in_ch, out_ch, kH, kW) -> QuatConv2d
+            "quat_conv2d_create" => HirType::Fn {
+                params: vec![HirType::I32, HirType::I32, HirType::I32, HirType::I32],
+                return_type: Box::new(HirType::QuatConv2d {
+                    in_channels: 0,
+                    out_channels: 0,
+                    kernel_h: 0,
+                    kernel_w: 0,
+                }),
+            },
+
+            // QNN Forward Pass - Hamilton Product-based
+            // Quaternionic linear layer: y = W ⊗ x + b where ⊗ is Hamilton product
+            // Input: [batch, input_features] of Quat, Weights: [input_features, output_features] of Quat
+            "quat_linear_fwd" => HirType::Fn {
+                params: vec![
+                    HirType::QuatLinear { input_features: 0, output_features: 0 },
+                    HirType::Array { element: Box::new(HirType::Quat), size: None },
+                ],
+                return_type: Box::new(HirType::Array { element: Box::new(HirType::Quat), size: None }),
+            },
+            // Quaternionic linear layer backward (gradients w.r.t weights, input, bias)
+            "quat_linear_bwd" => HirType::Fn {
+                params: vec![
+                    HirType::QuatLinear { input_features: 0, output_features: 0 },
+                    HirType::Array { element: Box::new(HirType::Quat), size: None },
+                    HirType::Array { element: Box::new(HirType::Quat), size: None },
+                ],
+                return_type: Box::new(HirType::Tuple(vec![
+                    HirType::Array { element: Box::new(HirType::Quat), size: None }, // dW
+                    HirType::Array { element: Box::new(HirType::Quat), size: None }, // dx
+                    HirType::Array { element: Box::new(HirType::Quat), size: None }, // db
+                ])),
+            },
+
+            // QNN 2D Convolution
+            // Input: [batch, in_ch, H, W] of Quat, Kernel: [out_ch, in_ch, kH, kW] of Quat
+            "quat_conv2d_fwd" => HirType::Fn {
+                params: vec![
+                    HirType::QuatConv2d { in_channels: 0, out_channels: 0, kernel_h: 0, kernel_w: 0 },
+                    HirType::Array { element: Box::new(HirType::Quat), size: None },
+                    HirType::I32, // batch
+                    HirType::I32, // height
+                    HirType::I32, // width
+                ],
+                return_type: Box::new(HirType::Array { element: Box::new(HirType::Quat), size: None }),
+            },
+            "quat_conv2d_bwd" => HirType::Fn {
+                params: vec![
+                    HirType::QuatConv2d { in_channels: 0, out_channels: 0, kernel_h: 0, kernel_w: 0 },
+                    HirType::Array { element: Box::new(HirType::Quat), size: None },
+                    HirType::Array { element: Box::new(HirType::Quat), size: None },
+                    HirType::I32,
+                    HirType::I32,
+                    HirType::I32,
+                ],
+                return_type: Box::new(HirType::Tuple(vec![
+                    HirType::Array { element: Box::new(HirType::Quat), size: None }, // dKernel
+                    HirType::Array { element: Box::new(HirType::Quat), size: None }, // dx
+                ])),
+            },
+
+            // QNN Activation Functions - Real-valued output activations
+            // Split quaternion into 4 real streams, apply activation, recombine
+            "quat_relu" => HirType::Fn {
+                params: vec![HirType::Array { element: Box::new(HirType::Quat), size: None }],
+                return_type: Box::new(HirType::Array { element: Box::new(HirType::Quat), size: None }),
+            },
+            "quat_sigmoid" => HirType::Fn {
+                params: vec![HirType::Array { element: Box::new(HirType::Quat), size: None }],
+                return_type: Box::new(HirType::Array { element: Box::new(HirType::Quat), size: None }),
+            },
+            "quat_tanh" => HirType::Fn {
+                params: vec![HirType::Array { element: Box::new(HirType::Quat), size: None }],
+                return_type: Box::new(HirType::Array { element: Box::new(HirType::Quat), size: None }),
+            },
+            "quat_leaky_relu" => HirType::Fn {
+                params: vec![HirType::Array { element: Box::new(HirType::Quat), size: None }, HirType::F32],
+                return_type: Box::new(HirType::Array { element: Box::new(HirType::Quat), size: None }),
+            },
+
+            // QNN Pooling - Applied per-component then recombine
+            "quat_avg_pool2d" => HirType::Fn {
+                params: vec![
+                    HirType::Array { element: Box::new(HirType::Quat), size: None },
+                    HirType::I32, HirType::I32, // kernel size
+                    HirType::I32, HirType::I32, // stride
+                ],
+                return_type: Box::new(HirType::Array { element: Box::new(HirType::Quat), size: None }),
+            },
+            "quat_max_pool2d" => HirType::Fn {
+                params: vec![
+                    HirType::Array { element: Box::new(HirType::Quat), size: None },
+                    HirType::I32, HirType::I32,
+                    HirType::I32, HirType::I32,
+                ],
+                return_type: Box::new(HirType::Array { element: Box::new(HirType::Quat), size: None }),
+            },
+
+            // QNN Weight Initialization - Quaternion-aware schemes
+            // Initialize weights with proper quaternion structure
+            "quat_init_xavier" => HirType::Fn {
+                params: vec![HirType::I32, HirType::I32, HirType::I64],
+                return_type: Box::new(HirType::Array { element: Box::new(HirType::Quat), size: None }),
+            },
+            "quat_init_he" => HirType::Fn {
+                params: vec![HirType::I32, HirType::I32, HirType::I64],
+                return_type: Box::new(HirType::Array { element: Box::new(HirType::Quat), size: None }),
+            },
+            "quat_init_unit" => HirType::Fn {
+                params: vec![HirType::I32, HirType::I32, HirType::I64],
+                return_type: Box::new(HirType::Array { element: Box::new(HirType::Quat), size: None }),
+            },
+
+            // QNN Batch Normalization
+            "quat_bn_create" => HirType::Fn {
+                params: vec![HirType::I32],
+                return_type: Box::new(HirType::Named { name: "QuatBN".to_string(), args: vec![] }),
+            },
+            "quat_bn_fwd" => HirType::Fn {
+                params: vec![
+                    HirType::Named { name: "QuatBN".to_string(), args: vec![] },
+                    HirType::Array { element: Box::new(HirType::Quat), size: None },
+                ],
+                return_type: Box::new(HirType::Array { element: Box::new(HirType::Quat), size: None }),
+            },
+            "quat_bn_bwd" => HirType::Fn {
+                params: vec![
+                    HirType::Named { name: "QuatBN".to_string(), args: vec![] },
+                    HirType::Array { element: Box::new(HirType::Quat), size: None },
+                    HirType::Array { element: Box::new(HirType::Quat), size: None },
+                ],
+                return_type: Box::new(HirType::Tuple(vec![
+                    HirType::Array { element: Box::new(HirType::Quat), size: None },
+                    HirType::Array { element: Box::new(HirType::Quat), size: None },
+                ])),
+            },
+
+            // QNN Gated Recurrent Units - Quaternion LSTM/GRU cells
+            "quat_lstm_cell" => HirType::Fn {
+                params: vec![
+                    HirType::QuatGate { input_size: 0, hidden_size: 0 },
+                    HirType::Array { element: Box::new(HirType::Quat), size: None }, // input
+                    HirType::QuatRnnState { hidden_size: 0 },
+                ],
+                return_type: Box::new(HirType::Tuple(vec![
+                    HirType::QuatRnnState { hidden_size: 0 },
+                    HirType::Array { element: Box::new(HirType::Quat), size: None },
+                ])),
+            },
+            "quat_gru_cell" => HirType::Fn {
+                params: vec![
+                    HirType::QuatGate { input_size: 0, hidden_size: 0 },
+                    HirType::Array { element: Box::new(HirType::Quat), size: None },
+                    HirType::QuatRnnState { hidden_size: 0 },
+                ],
+                return_type: Box::new(HirType::Tuple(vec![
+                    HirType::QuatRnnState { hidden_size: 0 },
+                    HirType::Array { element: Box::new(HirType::Quat), size: None },
+                ])),
+            },
+
+            // QNN Attention - Quaternion-valued attention mechanisms
+            "quat_attention" => HirType::Fn {
+                params: vec![
+                    HirType::Array { element: Box::new(HirType::Quat), size: None }, // query
+                    HirType::Array { element: Box::new(HirType::Quat), size: None }, // key
+                    HirType::Array { element: Box::new(HirType::Quat), size: None }, // value
+                ],
+                return_type: Box::new(HirType::Tuple(vec![
+                    HirType::Array { element: Box::new(HirType::Quat), size: None },
+                    HirType::Array { element: Box::new(HirType::F32), size: None },
+                ])),
             },
 
             // ==================== AUTOMATIC DIFFERENTIATION ====================
@@ -5410,6 +5739,25 @@ impl TypeChecker {
                     inner: Box::new(inner_type),
                 }
             }
+
+            // Scientific array types: Array<T, N>
+            TypeExpr::ScientificArray { element_type, dim } => {
+                let elem_type = self.lower_type_expr(element_type);
+                Type::ScientificArray {
+                    element: Box::new(elem_type),
+                    dim: self.tensor_dim_to_dim_size(dim),
+                }
+            }
+
+            // Scientific matrix types: Matrix<T, M, N>
+            TypeExpr::ScientificMatrix { element_type, rows, cols } => {
+                let elem_type = self.lower_type_expr(element_type);
+                Type::Matrix {
+                    element: Box::new(elem_type),
+                    rows: self.tensor_dim_to_dim_size(rows),
+                    cols: self.tensor_dim_to_dim_size(cols),
+                }
+            }
         }
     }
 
@@ -5601,6 +5949,21 @@ impl TypeChecker {
             Type::Mat3 => HirType::Mat3,
             Type::Mat4 => HirType::Mat4,
             Type::Quat => HirType::Quat,
+            // Octonion type (8D hypercomplex)
+            Type::Octonion => HirType::Octonion,
+            // Quaternionic Neural Network types
+            Type::QuatLinear { input_features, output_features } => {
+                HirType::QuatLinear { input_features: *input_features, output_features: *output_features }
+            }
+            Type::QuatConv2d { in_channels, out_channels, kernel_h, kernel_w } => {
+                HirType::QuatConv2d { in_channels: *in_channels, out_channels: *out_channels, kernel_h: *kernel_h, kernel_w: *kernel_w }
+            }
+            Type::QuatRnnState { hidden_size } => {
+                HirType::QuatRnnState { hidden_size: *hidden_size }
+            }
+            Type::QuatGate { input_size, hidden_size } => {
+                HirType::QuatGate { input_size: *input_size, hidden_size: *hidden_size }
+            }
             // Automatic differentiation
             Type::Dual => HirType::Dual,
 
@@ -5617,6 +5980,23 @@ impl TypeChecker {
             Type::Vec2d => HirType::Vec2d,
             Type::Vec3d => HirType::Vec3d,
             Type::Vec4d => HirType::Vec4d,
+
+            // Scientific array types
+            Type::ScientificArray { element, dim } => {
+                // Convert to tensor with the dimension as shape
+                HirType::Tensor {
+                    element: Box::new(self.type_to_hir(element)),
+                    dims: vec![self.dim_size_to_hir_dim(dim)],
+                }
+            }
+
+            // Matrix types
+            Type::Matrix { element, rows, cols } => {
+                HirType::Tensor {
+                    element: Box::new(self.type_to_hir(element)),
+                    dims: vec![self.dim_size_to_hir_dim(rows), self.dim_size_to_hir_dim(cols)],
+                }
+            }
         }
     }
 
@@ -5626,6 +6006,9 @@ impl TypeChecker {
             TensorShape::Dynamic(ndim) => vec![HirTensorDim::Dynamic; *ndim],
             TensorShape::Symbolic(names) => {
                 names.iter().map(|n| HirTensorDim::Named(n.clone())).collect()
+            }
+            TensorShape::Parametric(params) => {
+                params.iter().map(|p| HirTensorDim::Named(p.to_string())).collect()
             }
         }
     }
@@ -5655,6 +6038,37 @@ impl TypeChecker {
             )
         } else {
             TensorShape::Dynamic(dims.len())
+        }
+    }
+
+    /// Convert an AST TensorDim to a Type DimSize
+    fn tensor_dim_to_dim_size(&self, dim: &crate::ast::TensorDim) -> DimSize {
+        use crate::ast::TensorDim;
+        match dim {
+            TensorDim::Named(name) => DimSize::Symbolic(name.clone()),
+            TensorDim::Fixed(n) => DimSize::Const(*n),
+            TensorDim::Dynamic => DimSize::Dynamic,
+            TensorDim::Expr(_) => DimSize::Dynamic, // Expression dimensions treated as dynamic for now
+        }
+    }
+
+    /// Convert a Type DimSize to an HIR TensorDim
+    fn dim_size_to_hir_dim(&self, dim: &DimSize) -> HirTensorDim {
+        match dim {
+            DimSize::Const(n) => HirTensorDim::Fixed(*n),
+            DimSize::Symbolic(name) => HirTensorDim::Named(name.clone()),
+            DimSize::Var(_) => HirTensorDim::Dynamic,
+            DimSize::Dynamic => HirTensorDim::Dynamic,
+            DimSize::BinOp { .. } => HirTensorDim::Dynamic, // Computed dimensions are dynamic
+        }
+    }
+
+    /// Convert an HIR TensorDim to a Type DimSize
+    fn hir_tensor_dim_to_dim_size(&self, dim: &HirTensorDim) -> DimSize {
+        match dim {
+            HirTensorDim::Fixed(n) => DimSize::Const(*n),
+            HirTensorDim::Named(name) => DimSize::Symbolic(name.clone()),
+            HirTensorDim::Dynamic => DimSize::Dynamic,
         }
     }
 
@@ -5735,6 +6149,21 @@ impl TypeChecker {
             HirType::Mat3 => Type::Mat3,
             HirType::Mat4 => Type::Mat4,
             HirType::Quat => Type::Quat,
+            // Octonion type (8D hypercomplex)
+            HirType::Octonion => Type::Octonion,
+            // Quaternionic Neural Network types
+            HirType::QuatLinear { input_features, output_features } => {
+                Type::QuatLinear { input_features: *input_features, output_features: *output_features }
+            }
+            HirType::QuatConv2d { in_channels, out_channels, kernel_h, kernel_w } => {
+                Type::QuatConv2d { in_channels: *in_channels, out_channels: *out_channels, kernel_h: *kernel_h, kernel_w: *kernel_w }
+            }
+            HirType::QuatRnnState { hidden_size } => {
+                Type::QuatRnnState { hidden_size: *hidden_size }
+            }
+            HirType::QuatGate { input_size, hidden_size } => {
+                Type::QuatGate { input_size: *input_size, hidden_size: *hidden_size }
+            }
             // f64 vector types
             HirType::Vec2d => Type::Vec2d,
             HirType::Vec3d => Type::Vec3d,
@@ -5745,6 +6174,16 @@ impl TypeChecker {
             HirType::Future { output } => Type::Named {
                 name: "Future".to_string(),
                 args: vec![self.hir_type_to_type(output)],
+            },
+            // Scientific array and matrix types
+            HirType::ScientificArray { element, dim } => Type::ScientificArray {
+                element: Box::new(self.hir_type_to_type(element)),
+                dim: self.hir_tensor_dim_to_dim_size(dim),
+            },
+            HirType::Matrix { element, rows, cols } => Type::Matrix {
+                element: Box::new(self.hir_type_to_type(element)),
+                rows: self.hir_tensor_dim_to_dim_size(rows),
+                cols: self.hir_tensor_dim_to_dim_size(cols),
             },
         }
     }

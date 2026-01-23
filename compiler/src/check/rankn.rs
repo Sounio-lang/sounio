@@ -249,11 +249,13 @@ impl RankNChecker {
                 params: params1,
                 return_type: ret1,
                 effects: effects1,
+                abi: _,
             },
             Type::Function {
                 params: params2,
                 return_type: ret2,
                 effects: effects2,
+                abi: _,
             },
         ) = (ty1, ty2)
         {
@@ -473,10 +475,11 @@ impl RankNChecker {
                 size: *size,
             },
             Type::Tuple(types) => Type::Tuple(types.iter().map(|t| self.apply_subst(t)).collect()),
-            Type::Function { params, return_type, effects } => Type::Function {
+            Type::Function { params, return_type, effects, abi } => Type::Function {
                 params: params.iter().map(|p| self.apply_subst(p)).collect(),
                 return_type: Box::new(self.apply_subst(return_type)),
                 effects: effects.clone(),
+                abi: abi.clone(),
             },
             Type::Named { name, args } => Type::Named {
                 name: name.clone(),
@@ -641,6 +644,7 @@ mod tests {
                 params: vec![Type::Var(t)],
                 return_type: Box::new(Type::Var(t)),
                 effects: EffectSet::new(),
+                abi: None,
             }),
         }
     }
@@ -659,12 +663,14 @@ mod tests {
                             params: vec![Type::Var(t)],
                             return_type: Box::new(Type::Var(t)),
                             effects: EffectSet::new(),
+                            abi: None,
                         }),
                     },
                     Type::Var(a),
                 ],
                 return_type: Box::new(Type::Var(a)),
                 effects: EffectSet::new(),
+                abi: None,
             }),
         }
     }
@@ -696,6 +702,7 @@ mod tests {
             params: vec![Type::I32],
             return_type: Box::new(Type::I32),
             effects: EffectSet::new(),
+            abi: None,
         };
         assert_eq!(checker.compute_rank(&rank0), 0);
 
@@ -708,6 +715,7 @@ mod tests {
             params: vec![make_id_type()],
             return_type: Box::new(Type::I32),
             effects: EffectSet::new(),
+            abi: None,
         };
         assert_eq!(checker.compute_rank(&rank2), 1); // Forall in negative position = rank 1
     }
@@ -722,6 +730,7 @@ mod tests {
             params: vec![Type::I32],
             return_type: Box::new(Type::I32),
             effects: EffectSet::new(),
+            abi: None,
         };
 
         let result = checker.subsumes(&id_type, &concrete);
@@ -738,6 +747,7 @@ mod tests {
             params: vec![Type::I32],
             return_type: Box::new(Type::I32),
             effects: EffectSet::new(),
+            abi: None,
         };
 
         let result = checker.subsumes(&concrete, &id_type);
@@ -790,6 +800,7 @@ mod tests {
             params: vec![Type::Var(var)],
             return_type: Box::new(Type::Var(var)),
             effects: EffectSet::new(),
+            abi: None,
         };
 
         let env_vars = HashSet::new();
