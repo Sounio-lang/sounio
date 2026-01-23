@@ -25,6 +25,11 @@ If you are generating `.sio` code for this repo, prefer the MV core subset unles
 8. [Epistemic Types](#epistemic-types)
 9. [FFI (Foreign Function Interface)](#ffi-foreign-function-interface)
 10. [Standard Library](#standard-library)
+    - [I/O Module](#io-module-stdio)
+    - [JSON Module](#json-module-stdjson)
+    - [String Module](#string-module-stdstr)
+    - [Collections](#collections)
+    - [Octonion Neural Networks](#octonion-neural-networks-stdonn)
 11. [Package Manager](#package-manager)
 12. [What is NOT Supported](#what-is-not-supported)
 13. [Idiomatic Patterns](#idiomatic-patterns)
@@ -1427,6 +1432,362 @@ deque.push_back(1);
 deque.push_front(0);
 let front = deque.pop_front();
 ```
+
+### Octonion Neural Networks (`std.onn`)
+
+**Sounio is the first language with a complete Octonion Neural Network (ONN) framework.** Octonions are 8-dimensional hypercomplex numbers that enable neural networks with **8x parameter compression** while preserving expressiveness through non-associative algebra.
+
+#### Core Concepts
+
+**Octonion Type:**
+```sio
+struct Octonion {
+    w: f32,  // scalar (real) part
+    x: f32,  // i component
+    y: f32,  // j component
+    z: f32,  // k component
+    t: f32,  // l component
+    u: f32,  // il component
+    v: f32,  // jl component
+    s: f32,  // kl component
+}
+```
+
+**Use ONN when:**
+- Building rotation-heavy networks (3D, robotics, computer vision)
+- Memory/parameter budget is critical (mobile, edge devices)
+- You need group-theoretic structure (SO(3) preservation)
+- Model compression is more important than raw speed
+
+#### Basic Operations
+
+```sio
+use std::onn
+
+fn main() {
+    // Create octonions
+    let o1 = Octonion { w: 1.0, x: 0.0, y: 0.0, z: 0.0, t: 0.0, u: 0.0, v: 0.0, s: 0.0 }
+
+    // Core operations (via GPU intrinsics)
+    let conj = oct_conj(o1)           // Conjugate
+    let norm_sq = oct_norm_sq(o1)     // Squared norm
+    let normalized = oct_normalize(o1) // Unit normalization
+    let inv = oct_inv(o1)             // Multiplicative inverse
+
+    // Composition (Cayley-Dickson, 120 FLOPs)
+    let o2 = Octonion { w: 0.5, x: 0.5, y: 0.5, z: 0.5, t: 0.5, u: 0.5, v: 0.5, s: 0.5 }
+    let product = oct_mul(o1, o2)
+
+    // Dot product (inner product of 8D vectors)
+    let dot = oct_dot(o1, o2)
+}
+```
+
+#### Linear Layers
+
+```sio
+use std::onn::{Octonion, OctLinearLayer}
+use std::onn::linear::{oct_linear_forward, oct_xavier_init}
+
+fn main() {
+    // Create layer (8D → 16D semantic, = 8 octonions → 2 octonions)
+    let layer = OctLinearLayer { input_features: 8, output_features: 2 }
+
+    // Xavier initialization
+    let weights = oct_xavier_init(8, 2, seed: 42)  // 16 octonion parameters
+    let bias = oct_zero_init(2)                     // 2 octonions
+
+    // Forward pass
+    let input: [Octonion] = [o1, o2, o3, o4, o5, o6, o7, o8]
+    let output = oct_linear_forward(layer, weights, input, bias)  // [Octonion; 2]
+}
+```
+
+#### Convolutional Layers
+
+```sio
+use std::onn::conv::{oct_conv2d_forward, oct_conv2d_backward, oct_conv_xavier_init}
+
+fn main() {
+    // 3×3 Conv2d: 3 octonion channels → 16 octonion channels
+    let layer = OctConv2dLayer {
+        in_channels: 3,
+        out_channels: 16,
+        kernel_h: 3,
+        kernel_w: 3,
+        stride: 1,
+        padding: 1,
+    }
+
+    // Initialize kernels with Xavier
+    let kernels = oct_conv_xavier_init(3, 16, 3, 3, seed: 42)
+    let bias = oct_zero_init(16)
+
+    // Forward pass
+    let output = oct_conv2d_forward(layer, kernels, input, bias)
+
+    // Backward pass (returns grad_input, grad_kernel, grad_bias)
+    let (grad_input, grad_kernel, grad_bias) = oct_conv2d_backward(
+        layer, kernels, input, grad_output
+    )
+}
+```
+
+#### Activations
+
+```sio
+use std::onn::activation::{oct_relu, oct_gelu, oct_sigmoid, oct_tanh}
+use std::onn::g2_activation::{oct_gelu_g2, oct_leaky_relu_g2}
+
+fn forward_pass(x: [Octonion]) -> [Octonion] {
+    // Component-wise activations (apply to each of 8 components)
+    let after_relu = oct_relu(x)
+    let after_gelu = oct_gelu(x)       // GELU: x * sigmoid(1.702 * x)
+    let after_sigmoid = oct_sigmoid(x)
+
+    // G2-equivariant activations (preserve rotation structure)
+    // Only apply to norm, preserves direction
+    let g2_gelu = oct_gelu_g2(x)
+    let g2_leaky = oct_leaky_relu_g2(x, alpha: 0.1)
+
+    after_gelu
+}
+```
+
+#### Loss Functions
+
+```sio
+use std::onn::loss::{oct_mse_loss, oct_mae_loss, oct_cross_entropy_loss}
+
+fn compute_loss(predictions: [Octonion], targets: [Octonion]) -> f32 {
+    // MSE loss: (1/n) * sum |pred - target|^2
+    let mse = oct_mse_loss(predictions, targets)
+
+    // MAE loss: (1/n) * sum ||pred - target||
+    let mae = oct_mae_loss(predictions, targets)
+
+    // Cross-entropy (for classification with octonion logits)
+    let ce = oct_cross_entropy_loss(predictions, targets, num_classes: 10)
+
+    mse
+}
+```
+
+#### Optimizers
+
+```sio
+use std::onn::optimizer::{
+    SgdOptimizer, AdamOptimizer, RmspropOptimizer,
+    create_sgd_optimizer, create_adam_optimizer, create_rmsprop_optimizer,
+    sgd_step, adam_step, rmsprop_step
+}
+
+fn train_step(parameters: &![Octonion], gradients: &[Octonion]) {
+    // SGD with momentum
+    var sgd_opt = create_sgd_optimizer(
+        num_params: 16,
+        learning_rate: 0.01,
+        momentum: 0.9,
+        weight_decay: 0.0001
+    )
+    sgd_step(sgd_opt, parameters, gradients)
+
+    // Adam optimizer
+    var adam_opt = create_adam_optimizer(
+        num_params: 16,
+        learning_rate: 0.001,
+        beta1: 0.9,
+        beta2: 0.999,
+        epsilon: 1e-8,
+        weight_decay: 0.0
+    )
+    adam_step(adam_opt, parameters, gradients)
+
+    // RMSprop
+    var rmsprop_opt = create_rmsprop_optimizer(
+        num_params: 16,
+        learning_rate: 0.01,
+        alpha: 0.99,
+        epsilon: 1e-8,
+        weight_decay: 0.0
+    )
+    rmsprop_step(rmsprop_opt, parameters, gradients)
+}
+```
+
+#### Normalization Layers
+
+```sio
+use std::onn::normalization::{
+    oct_bn_fwd, oct_bn_bwd,
+    oct_layer_norm_fwd, oct_layer_norm_bwd,
+    oct_group_norm_fwd, oct_group_norm_bwd,
+    oct_instance_norm_fwd, oct_instance_norm_bwd
+}
+
+fn normalization_forward(x: [Octonion], gamma: [Octonion], beta: [Octonion]) {
+    // Batch normalization (forward pass)
+    let (normalized, mean, rstd) = oct_bn_fwd(x, batch_size: 32, num_features: 16)
+
+    // Batch normalization backward
+    let (grad_x, grad_gamma, grad_beta) = oct_bn_bwd(
+        x, mean, rstd, grad_output, batch_size: 32, num_features: 16
+    )
+
+    // Layer normalization
+    let ln_out = oct_layer_norm_fwd(x, gamma, beta, normalized_shape: 16, epsilon: 1e-5)
+
+    // Group normalization (8 octonions × 4 groups)
+    let gn_out = oct_group_norm_fwd(x, gamma, beta, num_groups: 4, epsilon: 1e-5)
+
+    // Instance normalization (useful for style transfer)
+    let in_out = oct_instance_norm_fwd(x, gamma, beta, epsilon: 1e-5)
+}
+```
+
+#### Multi-Head Attention
+
+```sio
+use std::onn::attention::{OctAttention, create_attention, oct_attention_forward}
+
+fn attention_layer() {
+    let attn = create_attention(
+        dim: 64,          // 8 octonions (8 components each = 64 F32 dims)
+        num_heads: 4,
+        dropout_p: 0.1,
+        seed: 42
+    )
+
+    // Input: batch of 8 octonion sequences
+    let query: [Octonion] = [...]
+    let key: [Octonion] = [...]
+    let value: [Octonion] = [...]
+
+    // Causal mask for autoregressive models
+    let mask: [f32] = [...]  // 0 for masked positions, 1 for valid
+
+    let output = oct_attention_forward(
+        attention_state, attn,
+        query, key, value,
+        mask
+    )
+}
+```
+
+#### Training Loop
+
+```sio
+use std::onn::training::{
+    TrainingState, LrScheduler, DataLoader,
+    create_training_state, create_lr_scheduler, create_dataloader,
+    update_training_metrics, reset_epoch_metrics, get_learning_rate, step_scheduler
+}
+
+fn training_loop() {
+    let mut state = create_training_state()
+    let mut scheduler = create_lr_scheduler(
+        initial_lr: 0.001,
+        schedule_type: 1,  // 0=const, 1=linear decay, 2=exp, 3=cosine
+        total_steps: 1000,
+        decay_rate: 0.1
+    )
+
+    for epoch in 0..100 {
+        reset_epoch_metrics(state)
+
+        let loader = create_dataloader(num_samples: 10000, batch_size: 32, shuffle: true)
+
+        for batch in 0..get_num_batches(loader) {
+            let indices = get_batch_indices(loader)
+
+            // Get current learning rate
+            let lr = get_learning_rate(scheduler)
+
+            // Forward pass
+            let predictions = forward(batch_data)
+            let loss = compute_loss(predictions, batch_labels)
+
+            // Backward pass
+            let gradients = backward(loss)
+
+            // Optimizer step
+            adam_step(optimizer, parameters, gradients)
+
+            // Update metrics
+            update_training_metrics(state, loss)
+            step_scheduler(scheduler)
+        }
+
+        let epoch_loss = get_epoch_loss(state)
+        print("Epoch " ++ epoch ++ ": " ++ epoch_loss)
+    }
+}
+```
+
+#### GPU Acceleration
+
+All ONN operations compile to GPU kernels:
+
+```sio
+// Compile with GPU support
+// cargo build --features gpu
+
+fn gpu_accelerated_training() {
+    // Automatic GPU dispatch via compiler intrinsics
+    // Oct_mul, Oct_linear_fwd, Oct_conv2d_fwd all run on GPU (PTX/Metal)
+
+    let output = oct_linear_forward(layer, weights, input, bias)
+    // Generates efficient PTX (NVIDIA) or Metal (Apple) code
+
+    // Backward pass also GPU-accelerated
+    let (grad_input, grad_weights, grad_bias) = oct_linear_backward(
+        layer, weights, input, grad_output
+    )
+}
+```
+
+#### Important Notes
+
+1. **Non-Associativity**: Octonion multiplication is not associative: `(a*b)*c ≠ a*(b*c)`. All operations preserve left-to-right evaluation order.
+
+2. **Moufang Identities**: While not fully associative, octonions satisfy Moufang identities: `a*(b*(a*c)) = (a*b*a)*c`. This ensures algebraic stability.
+
+3. **Component-wise vs G2-equivariant**:
+   - Component-wise: Apply activation to each of 8 components independently
+   - G2-equivariant: Apply to norm only, preserve direction (rotation-aware)
+
+4. **Parameter Counting**: A single octonion has semantic expressiveness of ~8 float32 parameters through 8D structure.
+
+5. **Expected Performance**:
+   - CPU: 2.5-3.5x slower than float32 (Cayley-Dickson overhead)
+   - GPU: Parity to 1.2x faster (with fused kernels)
+   - Model size: 8-10x smaller (8 components per parameter)
+
+#### Example: 3D Rotation Prediction Network
+
+```sio
+use std::onn
+
+fn rotation_network(input_poses: [Octonion]) -> [Octonion] {
+    // Input: batch of 3D rotations as octonions
+
+    // Layer 1: 8 octonions → 16 octonions
+    let w1 = oct_xavier_init(8, 16, seed: 1)
+    let b1 = oct_zero_init(16)
+    let h1 = oct_linear_forward(layer1, w1, input_poses, b1)
+    let h1_act = oct_gelu_g2(h1)  // G2-equivariant (preserves rotations)
+
+    // Layer 2: 16 octonions → 4 octonions (output = rotation)
+    let w2 = oct_xavier_init(16, 4, seed: 2)
+    let b2 = oct_zero_init(4)
+    let output = oct_linear_forward(layer2, w2, h1_act, b2)
+    let output_norm = oct_normalize(output)  // Ensure unit rotation
+
+    output_norm
+}
+```
+
+For comprehensive benchmarks and performance analysis, see [docs/ONN_BENCHMARK_ANALYSIS.md](ONN_BENCHMARK_ANALYSIS.md).
 
 ---
 
