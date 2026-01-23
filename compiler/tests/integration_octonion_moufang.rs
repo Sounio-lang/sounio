@@ -7,188 +7,202 @@
 //! - Graves (1843): "On algebraic triplets" - First definition of octonions
 //! - Cayley (1845): Cayley-Dickson construction
 //! - Baez (2002): "The Octonions" (Bull. Amer. Math. Soc. 39.2)
-//!
-//! Key Properties Tested:
-//! 1. **Norm Multiplicativity**: |x * y| = |x| * |y|
-//! 2. **Alternative Property**: (x * x) * y = x * (x * y)
-//! 3. **Flexibility (Moufang)**: (x * y) * x = x * (y * x)
-//! 4. **Power Associativity**: (x * x) * x = x * (x * x)
-//! 5. **Jacobi Identity**: [x, [y, z]] + [y, [z, x]] + [z, [x, y]] = 0
-//! 6. **Conjugate Anticommutativity**: conj(x * y) = conj(y) * conj(x)
-//! 7. **Cayley-Dickson Structure**: o = q0 + q1 * l (q0, q1 quaternions)
-//! 8. **Inversion**: Every non-zero octonion x has x^(-1) = conj(x) / |x|²
 
 #[cfg(test)]
 mod octonion_moufang_validation {
-    // Placeholder for structural test framework
-    // Full implementation validates 20 algebraic properties
+    /// Simple octonion struct for validation
+    #[derive(Debug, Clone, Copy)]
+    struct Octonion {
+        a: f64, b: f64, c: f64, d: f64,
+        e: f64, f: f64, g: f64, h: f64,
+    }
+
+    impl Octonion {
+        fn new(a: f64, b: f64, c: f64, d: f64, e: f64, f: f64, g: f64, h: f64) -> Self {
+            Octonion { a, b, c, d, e, f, g, h }
+        }
+
+        fn norm_sq(&self) -> f64 {
+            self.a*self.a + self.b*self.b + self.c*self.c + self.d*self.d +
+            self.e*self.e + self.f*self.f + self.g*self.g + self.h*self.h
+        }
+
+        fn norm(&self) -> f64 { self.norm_sq().sqrt() }
+
+        fn conj(&self) -> Self {
+            Octonion::new(self.a, -self.b, -self.c, -self.d, -self.e, -self.f, -self.g, -self.h)
+        }
+
+        fn mul(&self, other: &Self) -> Self {
+            let (a0, a1, a2, a3, a4, a5, a6, a7) = (self.a, self.b, self.c, self.d, self.e, self.f, self.g, self.h);
+            let (b0, b1, b2, b3, b4, b5, b6, b7) = (other.a, other.b, other.c, other.d, other.e, other.f, other.g, other.h);
+
+            let c0 = a0*b0 - a1*b1 - a2*b2 - a3*b3 - a4*b4 - a5*b5 - a6*b6 - a7*b7;
+            let c1 = a0*b1 + a1*b0 + a2*b3 - a3*b2 + a4*b5 - a5*b4 - a6*b7 + a7*b6;
+            let c2 = a0*b2 - a1*b3 + a2*b0 + a3*b1 + a4*b6 + a5*b7 - a6*b4 - a7*b5;
+            let c3 = a0*b3 + a1*b2 - a2*b1 + a3*b0 + a4*b7 - a5*b6 + a6*b5 - a7*b4;
+            let c4 = a0*b4 - a1*b5 - a2*b6 - a3*b7 + a4*b0 + a5*b1 + a6*b2 + a7*b3;
+            let c5 = a0*b5 + a1*b4 - a2*b7 + a3*b6 - a4*b1 + a5*b0 - a6*b3 + a7*b2;
+            let c6 = a0*b6 + a1*b7 + a2*b4 - a3*b5 - a4*b2 + a5*b3 + a6*b0 - a7*b1;
+            let c7 = a0*b7 - a1*b6 + a2*b5 + a3*b4 - a4*b3 - a5*b2 + a6*b1 + a7*b0;
+
+            Octonion::new(c0, c1, c2, c3, c4, c5, c6, c7)
+        }
+
+        fn distance(&self, other: &Self) -> f64 {
+            let d = Octonion::new(
+                self.a - other.a, self.b - other.b, self.c - other.c, self.d - other.d,
+                self.e - other.e, self.f - other.f, self.g - other.g, self.h - other.h,
+            );
+            d.norm()
+        }
+    }
+
+    // Deterministic pseudo-random octonion generator for reproducible tests
+    fn random_octonion(seed: u64) -> Octonion {
+        let mut x = seed;
+        let mut next = || {
+            x = x.wrapping_mul(6364136223846793005).wrapping_add(1);
+            ((x >> 33) as f64 / (1u64 << 31) as f64) - 1.0
+        };
+        Octonion::new(next(), next(), next(), next(), next(), next(), next(), next())
+    }
+
+    // ========================================================================
+    // MOUFANG IDENTITIES - The defining properties of octonion algebras
+    // ========================================================================
 
     #[test]
-    fn test_moufang_structure_documented() {
-        // This test documents the mathematical properties that octonion
-        // implementations must satisfy. The 20 core properties are:
-        //
-        // MULTIPLICATIVE STRUCTURE (7 tests):
-        // 1. Norm Multiplicativity: |x * y| = |x| * |y|
-        // 2. Alternative Law: (x * x) * y = x * (x * y)
-        // 3. Flexibility: (x * y) * x = x * (y * x)
-        // 4. Power Associativity: x^n is well-defined
-        // 5. Conjugate Anticommutativity: conj(x * y) = conj(y) * conj(x)
-        // 6. Norm Identity: |x * y|² = |x|² * |y|²
-        // 7. Inversion: x^(-1) = conj(x) / |x|² for x ≠ 0
-        //
-        // NON-ASSOCIATIVITY (1 test):
-        // 8. (x * y) * z ≠ x * (y * z) in general (demonstrable counterexample)
-        //
-        // LIE ALGEBRA STRUCTURE (1 test):
-        // 9. Jacobi Identity for commutator: [x,[y,z]] + [y,[z,x]] + [z,[x,y]] = 0
-        //
-        // ALGEBRAIC FOUNDATION (3 tests):
-        // 10. Basis Linear Independence: {1, i, j, k, l, il, jl, kl}
-        // 11. Composition Rule (Pfister): |x * y|² = |x|² * |y|²
-        // 12. Cayley-Dickson Rules: i² = j² = k² = ijk = -1, l² = -1, l·i = il, etc.
-        //
-        // EXCEPTIONAL STRUCTURE (2 tests):
-        // 13. G2 Automorphism Group: Aut(O) is 14-dimensional Lie group
-        // 14. Exceptional Lie Algebra: g₂ acts as derivations on octonions
-        //
-        // TRANSCENDENTAL FUNCTIONS (3 tests):
-        // 15. Exponential: exp(o) = exp(a) * (cos|v| + sinc|v| * v)
-        // 16. Logarithm: log(o) = log|o| + atan2(|v|,a)/|v| * v
-        // 17. Power: o^p = exp(p * log(o)) for real p, o ≠ 0
-        //
-        // MATHEMATICAL PROPERTIES (2 tests):
-        // 18. Non-associativity Bounds: |(x*y)*z - x*(y*z)| ≤ K|x||y||z|
-        // 19. Frobenius Norm (Neural Networks): ||W||_F² = Σᵢⱼ |Wᵢⱼ|²
-        //
-        // PERFORMANCE CHARACTERISTICS (1 test):
-        // 20. Multiplication Cost: 64 multiplications + 56 additions = 120 FLOPs
-        //     (vs 27 FLOPs for complex, 35 FLOPs for quaternions)
+    fn test_moufang_first_identity() {
+        // First Moufang identity: (x*y)*(z*x) = x*((y*z)*x)
+        let mut max_error: f64 = 0.0;
+        for seed in 0..50 {
+            let x = random_octonion(seed * 3);
+            let y = random_octonion(seed * 3 + 1);
+            let z = random_octonion(seed * 3 + 2);
 
-        assert!(true, "Moufang structure properties documented");
+            let lhs = x.mul(&y).mul(&z.mul(&x));
+            let rhs = x.mul(&y.mul(&z).mul(&x));
+            let error = lhs.distance(&rhs);
+            max_error = max_error.max(error);
+        }
+        assert!(max_error < 1e-10, "First Moufang identity failed, max error: {}", max_error);
     }
 
     #[test]
-    fn test_octonion_algebra_properties() {
-        // Octonions are the largest normed division algebra:
-        // - R (reals): 1 dimension, commutative & associative
-        // - C (complex): 2 dimensions, commutative & associative
-        // - H (quaternions): 4 dimensions, associative but not commutative
-        // - O (octonions): 8 dimensions, neither associative nor commutative
-        //
-        // Key difference: Octonions are NON-ASSOCIATIVE
-        // This fundamentally changes their algebra and applications
+    fn test_moufang_second_identity() {
+        // Second Moufang identity: z*(x*(y*x)) = ((z*x)*y)*x
+        let mut max_error: f64 = 0.0;
+        for seed in 0..50 {
+            let x = random_octonion(seed * 3 + 100);
+            let y = random_octonion(seed * 3 + 101);
+            let z = random_octonion(seed * 3 + 102);
 
-        assert!(true, "Octonion algebra properties confirmed");
+            let lhs = z.mul(&x.mul(&y.mul(&x)));
+            let rhs = z.mul(&x).mul(&y).mul(&x);
+            let error = lhs.distance(&rhs);
+            max_error = max_error.max(error);
+        }
+        assert!(max_error < 1e-10, "Second Moufang identity failed, max error: {}", max_error);
     }
 
     #[test]
-    fn test_exceptional_group_g2_structure() {
-        // The automorphism group of octonions is G2:
-        // - G2 is a 14-dimensional exceptional simple Lie group
-        // - Aut(O) = G2 (unique up to isomorphism)
-        // - G2 contains SU(3) as a subgroup
-        // - G2 is a subgroup of Spin(7)
-        //
-        // This exceptional structure appears in:
-        // - String theory (compactifications)
-        // - Particle physics (Standard Model structure)
-        // - M-theory (11-dimensional supergravity)
+    fn test_moufang_third_identity_flexibility() {
+        // Third Moufang (Flexibility): (x*y)*x = x*(y*x)
+        let mut max_error: f64 = 0.0;
+        for seed in 0..50 {
+            let x = random_octonion(seed * 2 + 200);
+            let y = random_octonion(seed * 2 + 201);
 
-        assert!(true, "G2 exceptional structure confirmed");
+            let lhs = x.mul(&y).mul(&x);
+            let rhs = x.mul(&y.mul(&x));
+            let error = lhs.distance(&rhs);
+            max_error = max_error.max(error);
+        }
+        assert!(max_error < 1e-10, "Flexibility identity failed, max error: {}", max_error);
     }
 
-    #[test]
-    fn test_octonion_neural_network_efficiency() {
-        // Parameter efficiency comparison (per neuron):
-        // - Real: 8 weights × 8 inputs = 64 real numbers = 256 bytes
-        // - Complex: 8 weights → 16 real numbers = 64 bytes
-        // - Quaternion: 8 weights → 32 real numbers = 128 bytes
-        // - Octonion: 8 weights → 64 real numbers = 256 bytes
-        //
-        // But: Each octonion weight encodes 8 real parameters in ONE type
-        // Total network parameters: Same as real, but structured as octonions
-        // Benefit: 8x learnable rotations in 8D space (G2 symmetries)
+    // ========================================================================
+    // NORM MULTIPLICATIVITY - Fundamental property of division algebras
+    // ========================================================================
 
-        assert!(true, "Neural network efficiency confirmed");
+    #[test]
+    fn test_norm_multiplicativity() {
+        // Property: |x * y| = |x| * |y|
+        let mut max_error: f64 = 0.0;
+        for seed in 0..100 {
+            let x = random_octonion(seed * 2 + 300);
+            let y = random_octonion(seed * 2 + 301);
+
+            let norm_product = x.mul(&y).norm();
+            let product_norms = x.norm() * y.norm();
+            let error = (norm_product - product_norms).abs() / product_norms.max(1e-10);
+            max_error = max_error.max(error);
+        }
+        assert!(max_error < 1e-10, "Norm multiplicativity failed, max error: {}", max_error);
     }
 
-    #[test]
-    fn test_cayley_dickson_hierarchy() {
-        // The Cayley-Dickson construction builds algebras iteratively:
-        //
-        // C(R, i) where i² = -1
-        // → Complex numbers (2D)
-        //
-        // C(C, j) where j² = -1, j·i = -i·j
-        // → Quaternions (4D)
-        //
-        // C(H, l) where l² = -1, l·basis = -basis·l
-        // → Octonions (8D)
-        //
-        // C(O, m) where m² = -1
-        // → Sedenions (16D) - LOSE ALTERNATIVITY
-        //
-        // This hierarchy shows why octonions are maximal:
-        // They are the largest normed division algebra
+    // ========================================================================
+    // ALTERNATIVE PROPERTY - Weaker than associativity
+    // ========================================================================
 
-        assert!(true, "Cayley-Dickson hierarchy confirmed");
+    #[test]
+    fn test_alternative_property() {
+        // Left alternative: (x*x)*y = x*(x*y)
+        // Right alternative: (x*y)*y = x*(y*y)
+        let mut max_error: f64 = 0.0;
+        for seed in 0..50 {
+            let x = random_octonion(seed * 2 + 400);
+            let y = random_octonion(seed * 2 + 401);
+
+            // Left alternative
+            let lhs1 = x.mul(&x).mul(&y);
+            let rhs1 = x.mul(&x.mul(&y));
+            max_error = max_error.max(lhs1.distance(&rhs1));
+
+            // Right alternative
+            let lhs2 = x.mul(&y).mul(&y);
+            let rhs2 = x.mul(&y.mul(&y));
+            max_error = max_error.max(lhs2.distance(&rhs2));
+        }
+        assert!(max_error < 1e-10, "Alternative property failed, max error: {}", max_error);
     }
 
-    #[test]
-    fn test_mathematical_significance() {
-        // Historical significance:
-        // - 1843: Graves discovers octonions (letter to Hamilton)
-        // - 1845: Cayley publishes independent discovery
-        // - 1898: Hurwitz proves only R, C, H, O admit division algebra structure
-        // - 1945: Zorn proves sedenions are NOT alternative
-        // - 1960s: Connection to exceptional groups discovered
-        // - 2000s: Applications in deep learning explored
-        //
-        // Exceptional algebras: Only 4 division algebras exist
-        // This is one of the deepest facts in algebra
+    // ========================================================================
+    // NON-ASSOCIATIVITY - What makes octonions unique
+    // ========================================================================
 
-        assert!(true, "Mathematical significance confirmed");
+    #[test]
+    fn test_non_associativity_demonstrated() {
+        // Octonions are NOT associative: (x*y)*z ≠ x*(y*z) in general
+        // Use basis elements i, j, l to demonstrate
+        let i = Octonion::new(0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0);
+        let j = Octonion::new(0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0);
+        let l = Octonion::new(0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0);
+
+        let left = i.mul(&j).mul(&l);   // (i*j)*l
+        let right = i.mul(&j.mul(&l));  // i*(j*l)
+
+        let diff = left.distance(&right);
+        assert!(diff > 1.9, "Non-associativity should be demonstrated: diff = {} (expected ~2.0)", diff);
     }
 
-    #[test]
-    fn test_physics_applications() {
-        // String theory: Octonions appear naturally in:
-        // - E8 × E8 heterotic string theory
-        // - M-theory compactifications on G₂ manifolds
-        // - Spinors in 8D spacetime
-        //
-        // Particle physics:
-        // - Standard Model internal symmetry groups can be embedded in O
-        // - SU(3) × SU(2) × U(1) ⊂ G₂
-        //
-        // Quantum mechanics:
-        // - Octonionic Hilbert spaces (theoretical)
-        // - Exceptional Jordan algebras
+    // ========================================================================
+    // CONJUGATE PROPERTIES
+    // ========================================================================
 
-        assert!(true, "Physics applications confirmed");
+    #[test]
+    fn test_conjugate_anti_automorphism() {
+        // conj(x*y) = conj(y)*conj(x) (reverses order)
+        let mut max_error: f64 = 0.0;
+        for seed in 0..50 {
+            let x = random_octonion(seed * 2 + 500);
+            let y = random_octonion(seed * 2 + 501);
+
+            let lhs = x.mul(&y).conj();
+            let rhs = y.conj().mul(&x.conj());
+            max_error = max_error.max(lhs.distance(&rhs));
+        }
+        assert!(max_error < 1e-10, "Conjugate anti-automorphism failed, max error: {}", max_error);
     }
 }
-
-// Summary of Moufang Identities Validation:
-//
-// These tests establish that octonions satisfy:
-// ✓ Norm multiplicativity (|x*y| = |x|*|y|)
-// ✓ Alternative property ((x*x)*y = x*(x*y))
-// ✓ Flexibility (Moufang identity)
-// ✓ Power associativity (x^n is well-defined)
-// ✓ Jacobi identity for commutator
-// ✓ Non-associativity in general case
-// ✓ Cayley-Dickson structure (Quaternion pair representation)
-// ✓ Exceptional G₂ automorphisms
-// ✓ Composition rule (Pfister's theorem)
-// ✓ Full invertibility of non-zero elements
-//
-// These properties guarantee:
-// 1. Octonions form a normed division algebra
-// 2. Every non-zero element is invertible
-// 3. Multiplication is norm-preserving
-// 4. G₂ symmetry enables exceptional representations
-// 5. 8D parameter efficiency in neural networks
-// 6. Well-defined transcendental functions
-// 7. Stability in numerical computation
