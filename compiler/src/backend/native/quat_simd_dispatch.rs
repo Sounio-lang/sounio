@@ -120,7 +120,6 @@ pub extern "C" fn sounio_quat_mul_dispatch(q1: *const f32, q2: *const f32, out: 
 /// Dispatch batch quaternion multiplication to appropriate backend
 ///
 /// Processes `n` quaternion pairs: result[i] = q1s[i] ⊗ q2s[i]
-#[inline]
 #[unsafe(no_mangle)]
 pub extern "C" fn sounio_quat_batch_mul_dispatch(
     q1s: *const f32,
@@ -157,7 +156,6 @@ pub extern "C" fn sounio_quat_batch_mul_dispatch(
 ///
 /// Computes: output[b,o] = sum_i input[b,i] ⊗ weights[o,i] + bias[o]
 /// With quaternion multiplication (Hamilton product)
-#[inline]
 #[unsafe(no_mangle)]
 pub extern "C" fn sounio_quat_linear_fwd_dispatch(
     input: *const f32,
