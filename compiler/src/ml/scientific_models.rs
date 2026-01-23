@@ -13,7 +13,7 @@ use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
 /// Scientific AI model types
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum ScientificModelType {
     /// BioMedLM/Galactica - Scientific literature and biomedical text
     BioMedLM,
@@ -524,7 +524,7 @@ impl ScientificModelManager {
         let (code, language, confidence, explanation) = match model_type {
             ScientificModelType::BioMedLM => self.generate_biomedical_code(request),
             ScientificModelType::Polymath => self.generate_mathematical_code(request),
-            ScientificModelType::SantaCoder => self.generate_scientific_computing_code(request),
+            ScientificModelType::SantaCoder => self.generate_scientific_computing_code(&request.code_type),
         };
 
         let inference_time = start_time.elapsed();
@@ -533,9 +533,9 @@ impl ScientificModelManager {
         if let Some(model) = self.models.get_mut(&model_type) {
             model.performance_metrics.total_predictions += 1;
             model.performance_metrics.avg_inference_time = Duration::from_nanos(
-                (model.performance_metrics.avg_inference_time.as_nanos()
+                ((model.performance_metrics.avg_inference_time.as_nanos()
                     + inference_time.as_nanos())
-                    / 2,
+                    / 2) as u64,
             );
             model.performance_metrics.last_used = Instant::now();
         }
@@ -645,8 +645,8 @@ model OneCompartmentPK {
         &self,
         request: &ScientificCodeRequest,
     ) -> (String, CodeLanguage, f64, String) {
-        match request.reasoning_type {
-            crate::ml::scientific_models::ReasoningType::MathematicalDerivation => {
+        match &request.code_type {
+            ScientificCodeType::MathematicalDerivation => {
                 let code = r#"
 import stdlib.mathematical_proof::*;
 
@@ -866,7 +866,7 @@ struct OptimizationResult {
             }
             _ => {
                 let code = format!(
-                    "// Scientific computing for: {:?}\n// Generated with SantaCoder/InCoder\nfn compute_{}(input: &[f64]) -> Knowledge<f64> {{\n    // Scientific algorithm implementation\n    let result = scientific_computation(input);\n    Knowledge::new(result, uncertainty: 0.1, confidence: 0.9)\n}}",
+                    "// Scientific computing for: {:?}\n// Generated with SantaCoder/InCoder\nfn compute_scientific(input: &[f64]) -> Knowledge<f64> {{\n    // Scientific algorithm implementation\n    let result = scientific_computation(input);\n    Knowledge::new(result, uncertainty: 0.1, confidence: 0.9)\n}}",
                     request
                 );
                 (
