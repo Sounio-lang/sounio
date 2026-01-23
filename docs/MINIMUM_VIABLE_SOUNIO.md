@@ -20,7 +20,7 @@ Read this first. It supersedes aspiration in the other docs.
 
 ❌ **Module system** (`use` statements don't work)
 ❌ **Forward references** (functions must be defined before use)
-❌ **Tuple destructuring** (`let (x, y) = tuple` not supported)
+✅ **Tuple destructuring** (`let (x, y) = tuple` now supported)
 ❌ **Visibility modifiers** (`pub` keyword ignored)
 
 ---
@@ -165,28 +165,30 @@ fn main() {
 
 **Problem**: Can't unpack tuples with `let (x, y) = ...` syntax.
 
-❌ **This doesn't work**:
+✅ **This now works**:
 ```sio
 let pair = (1, 2.0)
-let (a, b) = pair    // ❌ Error: tuple destructuring not supported
+let (a, b) = pair    // ✅ Tuple destructuring supported!
 ```
 
-❌ **This doesn't work either**:
+✅ **Nested tuples also work**:
 ```sio
 fn get_coords() -> (f64, f64) { (3.0, 4.0) }
-let (x, y) = get_coords()    // ❌ Doesn't work
+let (x, y) = get_coords()    // ✅ Works
+
+// Nested destructuring
+let ((a, b), (c, d)) = ((1, 2), (3, 4))
+
+// With wildcards
+let (first, _) = (42, "ignored")
 ```
 
-✅ **Workaround**: Use tuple field access:
+📝 **Note**: You can still use tuple field access if you prefer:
+
 ```sio
 let pair = (1, 2.0)
 let a = pair.0    // Access first element
 let b = pair.1    // Access second element
-
-fn get_coords() -> (f64, f64) { (3.0, 4.0) }
-let result = get_coords()
-let x = result.0
-let y = result.1
 ```
 
 ### 4. Visibility Modifiers (Not Implemented)
@@ -390,13 +392,30 @@ fn small_function() { ... }    // Will ignore this
 
 **When fixed**: Phase 2 of the plan (3-5 days estimated)
 
-### "Why doesn't tuple destructuring work?"
+### "How do I use tuple destructuring?"
 
-**Answer**: Parser and type checker don't support the syntax yet.
+**Answer**: Tuple destructuring in `let` statements now works!
 
-**Workaround**: Use `.0`, `.1` tuple field access instead of `let (x, y) = ...`.
+```sio
+// Basic destructuring
+let (x, y) = (1, 2)
 
-**When fixed**: Phase 2 of the plan (3-5 days estimated)
+// Nested tuples
+let ((a, b), (c, d)) = ((1, 2), (3, 4))
+
+// With wildcards
+let (first, _) = (42, "ignored")
+```
+
+**Alternative**: If you prefer, you can still use tuple field access:
+
+```sio
+let pair = (1, 2)
+let x = pair.0
+let y = pair.1
+```
+
+**Note**: Tuple destructuring in `match` patterns is not yet supported.
 
 ---
 
@@ -490,11 +509,13 @@ fn main() with IO {
 - Issue #16 verified resolved
 - Documentation updated (this file)
 
-**Phase 2 Starting** (Weeks 2-3)
-- Forward references (two-pass name resolution)
-- Tuple destructuring
+**Phase 2 In Progress** (Weeks 2-3)
+
+- ✅ Tuple destructuring (completed)
+- Forward references (two-pass name resolution — in progress)
 
 **Phase 3** (Weeks 4-7)
+
 - Module system (`use` statements)
 - Visibility modifiers (`pub`)
 
