@@ -9,9 +9,7 @@
 //! eliminating call overhead and enabling further optimizations.
 
 use super::pass_manager::MIRPass;
-use crate::mir::{
-    BlockId, FuncId, MirBlock, MirFunction, MirInstruction, MirModule, MirTerminator, ValueId,
-};
+use crate::mir::{BlockId, MirFunction, MirInstruction, MirModule, ValueId};
 use std::collections::{HashMap, HashSet};
 
 /// Information about a function call that can be inlined

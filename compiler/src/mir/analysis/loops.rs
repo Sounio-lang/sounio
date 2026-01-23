@@ -10,8 +10,8 @@
 //! - Strength reduction
 //! - Loop fusion
 
-use crate::mir::{BlockId, MirBlock, MirFunction, MirModule};
-use std::collections::{HashMap, HashSet, VecDeque};
+use crate::mir::{BlockId, MirFunction};
+use std::collections::{HashMap, HashSet};
 
 /// Loop analysis information for a function
 #[derive(Debug, Clone)]

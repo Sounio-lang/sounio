@@ -9,9 +9,7 @@
 //! - Steensgaard (1996) "Points-to Analysis in Almost Linear Time"
 //! - Muchnick (1997) "Advanced Compiler Design and Implementation", Chapter 10
 
-use crate::mir::{
-    BlockId, MirFunction, MirInstruction, MirModule, MirTerminator, MirType, ValueId,
-};
+use crate::mir::{MirFunction, MirInstruction, MirModule, MirType, ValueId};
 use std::collections::{HashMap, HashSet, VecDeque};
 
 /// Result of alias query

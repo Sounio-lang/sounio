@@ -7,7 +7,7 @@
 //! - Performance prediction models
 
 use super::pass_manager::MIRPass;
-use crate::mir::{BlockId, MirFunction, MirModule, ValueId};
+use crate::mir::{BlockId, MirFunction, MirModule};
 use std::collections::{HashMap, HashSet};
 use std::time::{Duration, Instant};
 

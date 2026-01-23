@@ -5,11 +5,8 @@
 //! uncertainty monotonicity enforcement, and impossibility detection.
 
 use super::pass_manager::MIRPass;
-use crate::mir::{
-    BlockId, MirBinaryOp, MirBlock, MirConstant, MirFunction, MirInstruction, MirModule,
-    MirTerminator, MirType, ValueId,
-};
-use std::collections::{HashMap, HashSet};
+use crate::mir::{BlockId, MirBinaryOp, MirFunction, MirInstruction, MirModule, MirType, ValueId};
+use std::collections::HashMap;
 
 /// Advanced epistemic optimization with full propagation and impossibility analysis
 pub struct AdvancedEpistemicOptimization {

@@ -5,7 +5,7 @@
 
 use super::pass_manager::MIRPass;
 use crate::mir::analysis::ssa_validator::SSAValidator;
-use crate::mir::{MirFunction, MirModule};
+use crate::mir::MirModule;
 use std::collections::HashMap;
 
 /// Optimization pipeline with integrated SSA validation

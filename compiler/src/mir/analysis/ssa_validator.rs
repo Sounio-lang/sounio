@@ -8,9 +8,7 @@
 //! 2. Phi node placement - phi nodes are in the correct locations
 //! 3. Single assignment property - each variable is defined exactly once
 
-use crate::mir::{
-    BlockId, MirBlock, MirConstant, MirFunction, MirInstruction, MirModule, MirTerminator, ValueId,
-};
+use crate::mir::{BlockId, MirFunction, MirInstruction, MirModule, MirTerminator, ValueId};
 use std::collections::{HashMap, HashSet};
 
 /// SSA Validation result

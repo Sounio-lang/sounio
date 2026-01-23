@@ -8,11 +8,8 @@
 //! particularly within loops where the pattern is regular.
 
 use super::pass_manager::MIRPass;
-use crate::mir::{
-    BlockId, MirBinaryOp, MirBlock, MirConstant, MirFunction, MirInstruction, MirModule,
-    MirTerminator, MirType, ValueId,
-};
-use std::collections::{HashMap, HashSet};
+use crate::mir::{BlockId, MirFunction, MirInstruction, MirModule, MirType, ValueId};
+use std::collections::HashMap;
 
 /// Strength Reduction optimization pass
 /// Replaces expensive operations with cheaper equivalents, particularly in loops
