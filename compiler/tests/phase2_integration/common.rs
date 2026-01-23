@@ -261,7 +261,7 @@ impl Phase2TestHarness {
     /// Simulate sparse GEMM with 2:4 pattern
     pub fn sparse_gemm(&self, input: &[f32], mask: &[bool]) -> Vec<f32> {
         input.iter().zip(mask.iter())
-            .map(|(x, &keep)| if keep { x } else { 0.0 })
+            .map(|(&x, &keep)| if keep { x } else { 0.0 })
             .collect()
     }
 
