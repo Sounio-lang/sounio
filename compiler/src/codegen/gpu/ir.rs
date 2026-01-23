@@ -1424,6 +1424,56 @@ pub enum GpuOp {
     /// Construct octonion from two quaternions
     OctonionFromQuats(ValueId, ValueId),
 
+    // ==================== OCTONION NEURAL NETWORK OPERATIONS ====================
+    // Reference: arXiv:1903.08478 - Deep Octonion Networks
+    // Note: Non-associativity requires careful handling in backprop
+
+    /// Octonion linear layer forward: y = W ⊗ x + b
+    /// W is [out_features, in_features] octonions, x is [in_features] octonions
+    /// Uses Cayley-Dickson multiplication for weight-input products
+    OctonionLinearFwd {
+        w: ValueId,       // weights: out_features × in_features octonions (8 f32 per oct)
+        x: ValueId,       // input: in_features octonions
+        b: ValueId,       // bias: out_features octonions (optional, can be null)
+        out: ValueId,     // output: out_features octonions
+        in_features: u32,
+        out_features: u32,
+    },
+
+    /// Octonion linear layer backward pass
+    /// Computes gradients for weights (dW) and input (dx)
+    /// Note: Due to non-associativity, gradient computation uses local linearization
+    OctonionLinearBwd {
+        w: ValueId,       // weights
+        x: ValueId,       // input
+        dy: ValueId,      // output gradient
+        dW: ValueId,      // weight gradient output
+        dx: ValueId,      // input gradient output
+        in_features: u32,
+        out_features: u32,
+    },
+
+    /// Octonion batch normalization forward pass
+    /// Normalizes each of 8 components independently
+    OctonionBnFwd {
+        x: ValueId,       // input octonions
+        gamma: ValueId,   // scale per component (8 f32)
+        beta: ValueId,    // shift per component (8 f32)
+        mean: ValueId,    // running mean per component (8 f32)
+        var: ValueId,     // running variance per component (8 f32)
+        epsilon: f32,     // numerical stability constant
+    },
+
+    /// Octonion batch normalization backward pass
+    OctonionBnBwd {
+        x: ValueId,
+        dy: ValueId,
+        gamma: ValueId,
+        mean: ValueId,
+        var: ValueId,
+        epsilon: f32,
+    },
+
     // ==================== QUATERNIONIC NEURAL NETWORK OPERATIONS ====================
     // arXiv:1804.10592 - Quaternion Convolutional Neural Networks
     // arXiv:1903.08478 - Quaternion Recurrent Neural Networks

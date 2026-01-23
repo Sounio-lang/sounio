@@ -4589,6 +4589,134 @@ impl PtxCodegen {
             }
 
             // ================================================================
+            // Octonion Neural Network Operations
+            // Reference: arXiv:1903.08478 - Deep Octonion Networks
+            // ================================================================
+
+            // OctonionLinearFwd: y[j] = sum_i(W[j,i] ⊗ x[i]) + b[j]
+            // Uses Cayley-Dickson multiplication for each weight-input product
+            GpuOp::OctonionLinearFwd { w, x, b, out, in_features, out_features } => {
+                let rw = self.get_register(*w);
+                let rx = self.get_register(*x);
+                let rb = self.get_register(*b);
+                let rout = self.get_register(*out);
+
+                writeln!(self.output, "{}// OctonionLinearFwd: y = W ⊗ x + b", indent).unwrap();
+                writeln!(self.output, "{}// in_features={}, out_features={}", indent, in_features, out_features).unwrap();
+                writeln!(self.output, "{}// Each octonion is 8 f32 = 32 bytes", indent).unwrap();
+
+                // This is a complex operation that would typically be implemented as a device function
+                // For inline implementation, we'd need nested loops which PTX doesn't support directly
+                // Use a simplified stub that would call a device function
+                writeln!(self.output, "{}// OctonionLinearFwd requires loop constructs", indent).unwrap();
+                writeln!(self.output, "{}// Implementation via device function:", indent).unwrap();
+                writeln!(self.output, "{}call.uni __octonion_linear_fwd, ({}, {}, {}, {}, {}, {});",
+                         indent, rw, rx, rb, rout, in_features, out_features).unwrap();
+            }
+
+            // OctonionLinearBwd: Compute gradients for weights and input
+            // dW[j,i] = dy[j] ⊗ conj(x[i]) (outer product with octonion conj)
+            // dx[i] = sum_j(conj(W[j,i]) ⊗ dy[j])
+            GpuOp::OctonionLinearBwd { w, x, dy, dW, dx, in_features, out_features } => {
+                let rw = self.get_register(*w);
+                let rx = self.get_register(*x);
+                let rdy = self.get_register(*dy);
+                let rdW = self.get_register(*dW);
+                let rdx = self.get_register(*dx);
+
+                writeln!(self.output, "{}// OctonionLinearBwd: compute dW and dx", indent).unwrap();
+                writeln!(self.output, "{}// in_features={}, out_features={}", indent, in_features, out_features).unwrap();
+                writeln!(self.output, "{}// Non-associativity: use local linearization for gradients", indent).unwrap();
+                writeln!(self.output, "{}call.uni __octonion_linear_bwd, ({}, {}, {}, {}, {}, {}, {});",
+                         indent, rw, rx, rdy, rdW, rdx, in_features, out_features).unwrap();
+            }
+
+            // OctonionBnFwd: Batch normalization forward (per-component)
+            GpuOp::OctonionBnFwd { x, gamma, beta, mean, var, epsilon } => {
+                let rx = self.get_register(*x);
+                let rgamma = self.get_register(*gamma);
+                let rbeta = self.get_register(*beta);
+                let rmean = self.get_register(*mean);
+                let rvar = self.get_register(*var);
+                let reg = self.alloc_register(&GpuType::Array(Box::new(GpuType::F32), 8));
+                self.registers.push(reg.clone());
+                self.value_types.push(GpuType::Array(Box::new(GpuType::F32), 8));
+
+                writeln!(self.output, "{}// OctonionBnFwd: normalize each of 8 components", indent).unwrap();
+                writeln!(self.output, "{}  .reg .f32 %bn_x<8>;     // input", indent).unwrap();
+                writeln!(self.output, "{}  .reg .f32 %bn_gamma<8>; // scale", indent).unwrap();
+                writeln!(self.output, "{}  .reg .f32 %bn_beta<8>;  // shift", indent).unwrap();
+                writeln!(self.output, "{}  .reg .f32 %bn_mean<8>;  // mean", indent).unwrap();
+                writeln!(self.output, "{}  .reg .f32 %bn_var<8>;   // variance", indent).unwrap();
+                writeln!(self.output, "{}  .reg .f32 %bn_out<8>;   // output", indent).unwrap();
+                writeln!(self.output, "{}  .reg .f32 %bn_norm, %bn_std, %bn_tmp;", indent).unwrap();
+
+                // Load all parameters
+                for i in 0..8 {
+                    writeln!(self.output, "{}  ld.global.f32 %bn_x{}, [{} + {}];", indent, i, rx, i * 4).unwrap();
+                    writeln!(self.output, "{}  ld.global.f32 %bn_gamma{}, [{} + {}];", indent, i, rgamma, i * 4).unwrap();
+                    writeln!(self.output, "{}  ld.global.f32 %bn_beta{}, [{} + {}];", indent, i, rbeta, i * 4).unwrap();
+                    writeln!(self.output, "{}  ld.global.f32 %bn_mean{}, [{} + {}];", indent, i, rmean, i * 4).unwrap();
+                    writeln!(self.output, "{}  ld.global.f32 %bn_var{}, [{} + {}];", indent, i, rvar, i * 4).unwrap();
+                }
+
+                // For each component: out = gamma * (x - mean) / sqrt(var + eps) + beta
+                for i in 0..8 {
+                    writeln!(self.output, "{}  // Component {}", indent, i).unwrap();
+                    writeln!(self.output, "{}  sub.f32 %bn_norm, %bn_x{}, %bn_mean{};", indent, i, i).unwrap();
+                    writeln!(self.output, "{}  add.f32 %bn_tmp, %bn_var{}, {};", indent, i, epsilon).unwrap();
+                    writeln!(self.output, "{}  rsqrt.approx.f32 %bn_std, %bn_tmp;", indent).unwrap();
+                    writeln!(self.output, "{}  mul.f32 %bn_norm, %bn_norm, %bn_std;", indent).unwrap();
+                    writeln!(self.output, "{}  fma.rn.f32 %bn_out{}, %bn_gamma{}, %bn_norm, %bn_beta{};", indent, i, i, i).unwrap();
+                }
+
+                // Store results
+                for i in 0..8 {
+                    writeln!(self.output, "{}  st.global.f32 [{} + {}], %bn_out{};", indent, reg, i * 4, i).unwrap();
+                }
+            }
+
+            // OctonionBnBwd: Batch normalization backward
+            GpuOp::OctonionBnBwd { x, dy, gamma, mean, var, epsilon } => {
+                let rx = self.get_register(*x);
+                let rdy = self.get_register(*dy);
+                let rgamma = self.get_register(*gamma);
+                let rmean = self.get_register(*mean);
+                let rvar = self.get_register(*var);
+                let reg = self.alloc_register(&GpuType::Array(Box::new(GpuType::F32), 8));
+                self.registers.push(reg.clone());
+                self.value_types.push(GpuType::Array(Box::new(GpuType::F32), 8));
+
+                writeln!(self.output, "{}// OctonionBnBwd: batch norm backward pass", indent).unwrap();
+                writeln!(self.output, "{}// Simplified: dx = dy * gamma / sqrt(var + eps)", indent).unwrap();
+                writeln!(self.output, "{}  .reg .f32 %bnb_dy<8>, %bnb_gamma<8>, %bnb_var<8>;", indent).unwrap();
+                writeln!(self.output, "{}  .reg .f32 %bnb_out<8>, %bnb_std, %bnb_tmp;", indent).unwrap();
+
+                // Load parameters
+                for i in 0..8 {
+                    writeln!(self.output, "{}  ld.global.f32 %bnb_dy{}, [{} + {}];", indent, i, rdy, i * 4).unwrap();
+                    writeln!(self.output, "{}  ld.global.f32 %bnb_gamma{}, [{} + {}];", indent, i, rgamma, i * 4).unwrap();
+                    writeln!(self.output, "{}  ld.global.f32 %bnb_var{}, [{} + {}];", indent, i, rvar, i * 4).unwrap();
+                }
+
+                // Simplified backward: dx = dy * gamma * rsqrt(var + eps)
+                for i in 0..8 {
+                    writeln!(self.output, "{}  add.f32 %bnb_tmp, %bnb_var{}, {};", indent, i, epsilon).unwrap();
+                    writeln!(self.output, "{}  rsqrt.approx.f32 %bnb_std, %bnb_tmp;", indent).unwrap();
+                    writeln!(self.output, "{}  mul.f32 %bnb_tmp, %bnb_gamma{}, %bnb_std;", indent, i).unwrap();
+                    writeln!(self.output, "{}  mul.f32 %bnb_out{}, %bnb_dy{}, %bnb_tmp;", indent, i, i).unwrap();
+                }
+
+                // Store results
+                for i in 0..8 {
+                    writeln!(self.output, "{}  st.global.f32 [{} + {}], %bnb_out{};", indent, reg, i * 4, i).unwrap();
+                }
+
+                // Suppress unused warnings
+                let _ = (rx, rmean);
+            }
+
+            // ================================================================
             // Cooperative Groups (CUDA 9.0+ / PTX 6.0+)
             // ================================================================
 

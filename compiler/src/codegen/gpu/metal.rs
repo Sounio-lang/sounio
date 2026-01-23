@@ -2025,6 +2025,69 @@ impl MetalCodegen {
                 self.emit(&format!("float8 {} = float8(oct_pow_ea * oct_pow_cos, oct_pow_exp_scale * oct_pow_scaled.s1, oct_pow_exp_scale * oct_pow_scaled.s2, oct_pow_exp_scale * oct_pow_scaled.s3, oct_pow_exp_scale * oct_pow_scaled.s4, oct_pow_exp_scale * oct_pow_scaled.s5, oct_pow_exp_scale * oct_pow_scaled.s6, oct_pow_exp_scale * oct_pow_scaled.s7);", result_name));
             }
 
+            // ================================================================
+            // Octonion Neural Network Operations
+            // ================================================================
+
+            // OctonionLinearFwd: y = W ⊗ x + b
+            // Uses Cayley-Dickson multiplication for weight-input products
+            GpuOp::OctonionLinearFwd { w, x, b, out, in_features, out_features } => {
+                let w_name = self.get_var_name(*w);
+                let x_name = self.get_var_name(*x);
+                let b_name = self.get_var_name(*b);
+                let out_name = self.get_var_name(*out);
+                self.emit(&format!("// OctonionLinearFwd: y = W ⊗ x + b"));
+                self.emit(&format!("// in_features={}, out_features={}", in_features, out_features));
+                // This requires loops - emit stub for device function
+                self.emit(&format!("// Complex operation - requires device function"));
+                self.emit(&format!("octonion_linear_fwd((device float8*){}, (device float8*){}, (device float8*){}, (device float8*){}, {}, {});",
+                         w_name, x_name, b_name, out_name, in_features, out_features));
+            }
+
+            // OctonionLinearBwd: Compute gradients
+            GpuOp::OctonionLinearBwd { w, x, dy, dW, dx, in_features, out_features } => {
+                let w_name = self.get_var_name(*w);
+                let x_name = self.get_var_name(*x);
+                let dy_name = self.get_var_name(*dy);
+                let dW_name = self.get_var_name(*dW);
+                let dx_name = self.get_var_name(*dx);
+                self.emit(&format!("// OctonionLinearBwd: compute dW and dx"));
+                self.emit(&format!("// in_features={}, out_features={}", in_features, out_features));
+                self.emit(&format!("octonion_linear_bwd((device float8*){}, (device float8*){}, (device float8*){}, (device float8*){}, (device float8*){}, {}, {});",
+                         w_name, x_name, dy_name, dW_name, dx_name, in_features, out_features));
+            }
+
+            // OctonionBnFwd: Batch normalization forward (per-component)
+            GpuOp::OctonionBnFwd { x, gamma, beta, mean, var, epsilon } => {
+                let x_name = self.get_var_name(*x);
+                let gamma_name = self.get_var_name(*gamma);
+                let beta_name = self.get_var_name(*beta);
+                let mean_name = self.get_var_name(*mean);
+                let var_name = self.get_var_name(*var);
+                self.emit(&format!("// OctonionBnFwd: normalize each of 8 components"));
+                self.emit(&format!("float8 oct_bn_x = *(device float8*)(&{});", x_name));
+                self.emit(&format!("float8 oct_bn_gamma = *(device float8*)(&{});", gamma_name));
+                self.emit(&format!("float8 oct_bn_beta = *(device float8*)(&{});", beta_name));
+                self.emit(&format!("float8 oct_bn_mean = *(device float8*)(&{});", mean_name));
+                self.emit(&format!("float8 oct_bn_var = *(device float8*)(&{});", var_name));
+                // Normalize: y = gamma * (x - mean) / sqrt(var + eps) + beta
+                self.emit(&format!("float8 oct_bn_norm = (oct_bn_x - oct_bn_mean) * rsqrt(oct_bn_var + {}f);", epsilon));
+                self.emit(&format!("float8 {} = oct_bn_gamma * oct_bn_norm + oct_bn_beta;", result_name));
+            }
+
+            // OctonionBnBwd: Batch normalization backward
+            GpuOp::OctonionBnBwd { x: _, dy, gamma, mean: _, var, epsilon } => {
+                let dy_name = self.get_var_name(*dy);
+                let gamma_name = self.get_var_name(*gamma);
+                let var_name = self.get_var_name(*var);
+                self.emit(&format!("// OctonionBnBwd: simplified backward pass"));
+                self.emit(&format!("float8 oct_bnb_dy = *(device float8*)(&{});", dy_name));
+                self.emit(&format!("float8 oct_bnb_gamma = *(device float8*)(&{});", gamma_name));
+                self.emit(&format!("float8 oct_bnb_var = *(device float8*)(&{});", var_name));
+                // Simplified: dx = dy * gamma * rsqrt(var + eps)
+                self.emit(&format!("float8 {} = oct_bnb_dy * oct_bnb_gamma * rsqrt(oct_bnb_var + {}f);", result_name, epsilon));
+            }
+
             // Atomics not handled above
             GpuOp::AtomicAnd(_, _) | GpuOp::AtomicOr(_, _) | GpuOp::AtomicXor(_, _) => {
                 self.emit(&format!(

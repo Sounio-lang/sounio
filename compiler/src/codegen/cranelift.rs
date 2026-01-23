@@ -3514,6 +3514,17 @@ fn hlir_to_cranelift_type(ty: &HlirType) -> types::Type {
         // dual: pointer to stack-allocated 16-byte struct (value: f64, derivative: f64)
         // We use a pointer because SIMD F64X2 causes issues with Cranelift
         HlirType::Dual => types::I64,
+        // Octonion: 8x f32 = 256 bits, represent as pointer to data
+        HlirType::Octonion => types::I64,
+        // Quaternionic neural network types - represent as pointers to structs
+        HlirType::QuatLinear => types::I64,
+        HlirType::QuatConv2d => types::I64,
+        HlirType::QuatRnnState => types::I64,
+        HlirType::QuatGate => types::I64,
+        // f64 vector types - represent as pointers
+        HlirType::Vec2d => types::I64,
+        HlirType::Vec3d => types::I64,
+        HlirType::Vec4d => types::I64,
     }
 }
 
