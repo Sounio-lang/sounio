@@ -152,9 +152,9 @@ mod loss_scaling_tests {
     fn test_loss_scale_bounds() {
         let harness = Phase2TestHarness::new();
         let max_scale = (1u32 << 24) as f32; // 16M max
-        let min_scale = 1.0;
+        let min_scale = 1.0f32;
 
-        let mut scale = 32768.0;
+        let mut scale = 32768.0f32;
         // Should not exceed max
         scale = (scale * 2.0).min(max_scale);
         assert!(scale <= max_scale);
@@ -275,11 +275,11 @@ mod end_to_end_tests {
     #[test]
     fn test_mixed_precision_training_loop() {
         let harness = Phase2TestHarness::new();
-        let mut loss_history = Vec::new();
+        let mut loss_history: Vec<f32> = Vec::new();
 
         for _ in 0..10 {
-            let mut gen = QuaternionGenerator::new(42);
-            let batch = gen.generate_batch(16);
+            let mut r#gen = QuaternionGenerator::new(42);
+            let batch = r#gen.generate_batch(16);
             let values: Vec<f32> = batch.iter()
                 .flat_map(|q| vec![q.w, q.x, q.y, q.z])
                 .collect();
