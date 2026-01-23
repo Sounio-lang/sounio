@@ -378,6 +378,60 @@ This work fills a critical gap in the hypercomplex neural network literature, en
 - NVIDIA PTX ISA Guide v8.x
 - Apple Metal Shading Language Specification v3.1
 
+## Appendix A: Reproducibility
+
+All results in this paper can be reproduced using the open-source Sounio compiler.
+
+### System Requirements
+
+- Rust 1.75+ (for compiler build)
+- Linux x86-64 or macOS ARM64
+- 8GB RAM minimum
+
+### Quick Start
+
+```bash
+# Clone repository
+git clone https://github.com/Sounio-lang/sounio
+cd sounio/compiler
+
+# Run mathematical validation tests (38 tests)
+cargo test --test integration_octonion_moufang
+cargo test --test integration_octonion_numerical
+
+# Run performance benchmarks
+cargo bench --bench octonion_benchmark
+
+# Execute example program
+cargo run --features jit --bin souc -- run ../examples/octonion_example.sio
+```
+
+### Expected Output
+
+**Tests:**
+```
+test result: ok. 7 passed; 0 failed   (Moufang identities)
+test result: ok. 31 passed; 0 failed  (numerical validation)
+```
+
+**Benchmarks (approximate, varies by hardware):**
+```
+octonion_mul_basic      time: [10-12 ns]
+octonion_matmul/16x16   time: [55-65 µs]
+```
+
+### Artifact Locations
+
+| Artifact | Path |
+|----------|------|
+| PTX codegen | `compiler/src/codegen/gpu/ptx.rs` |
+| Metal codegen | `compiler/src/codegen/gpu/metal.rs` |
+| Octonion stdlib | `stdlib/math/octonion.sio` |
+| NN layers | `stdlib/nn/octonion.sio` |
+| G2 activations | `stdlib/nn/g2_equivariant.sio` |
+| Moufang tests | `compiler/tests/integration_octonion_moufang.rs` |
+| Benchmarks | `compiler/benches/octonion_bench.rs` |
+
 ---
 
 **Implementation Status**: Phase 2 Complete (January 2026)
