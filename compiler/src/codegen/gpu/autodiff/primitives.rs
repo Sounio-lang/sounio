@@ -63,6 +63,11 @@ pub enum DiffPrimitive {
 
     // Fused operations
     Fma,
+
+    // Quantization operations (straight-through estimator)
+    FakeQuantize,
+    FakeQuantizePerChannel,
+    FakeQuantizeQuat,
 }
 
 impl DiffPrimitive {
@@ -95,6 +100,9 @@ impl DiffPrimitive {
             DiffPrimitive::Transpose => TapeOp::Transpose,
             DiffPrimitive::BatchMatMul => TapeOp::BatchMatMul,
             DiffPrimitive::Fma => TapeOp::Fma,
+            DiffPrimitive::FakeQuantize => TapeOp::FakeQuantize,
+            DiffPrimitive::FakeQuantizePerChannel => TapeOp::FakeQuantizePerChannel,
+            DiffPrimitive::FakeQuantizeQuat => TapeOp::FakeQuantizeQuat,
         }
     }
 }
@@ -240,6 +248,11 @@ impl PrimitiveRegistry {
 
         // Fused operations
         self.register_fma();
+
+        // Quantization operations (straight-through estimator)
+        self.register_fake_quantize();
+        self.register_fake_quantize_per_channel();
+        self.register_fake_quantize_quat();
     }
 
     // === Arithmetic Operations ===
@@ -727,6 +740,52 @@ impl PrimitiveRegistry {
         );
     }
 
+    // === Quantization Operations (Straight-Through Estimator) ===
+    //
+    // QAT uses the straight-through estimator: during forward pass, values are
+    // fake-quantized (quantize then dequantize), but during backward pass,
+    // gradients pass through unchanged as if quantization didn't happen.
+    // This allows gradients to flow and weights to update during QAT.
+
+    /// FakeQuantize: z = dequant(quant(x)) => dx = dz (straight-through)
+    fn register_fake_quantize(&mut self) {
+        self.rules.insert(
+            DiffPrimitive::FakeQuantize,
+            BackwardRule {
+                op: DiffPrimitive::FakeQuantize,
+                num_inputs: 1,
+                description: "dx = dz (straight-through estimator)",
+                backward_ops: vec![BackwardOp::PassThrough { input_idx: 0 }],
+            },
+        );
+    }
+
+    /// FakeQuantizePerChannel: same as FakeQuantize but per-channel
+    fn register_fake_quantize_per_channel(&mut self) {
+        self.rules.insert(
+            DiffPrimitive::FakeQuantizePerChannel,
+            BackwardRule {
+                op: DiffPrimitive::FakeQuantizePerChannel,
+                num_inputs: 1,
+                description: "dx = dz (straight-through estimator, per-channel)",
+                backward_ops: vec![BackwardOp::PassThrough { input_idx: 0 }],
+            },
+        );
+    }
+
+    /// FakeQuantizeQuat: quaternion-aware fake quantization with STE
+    fn register_fake_quantize_quat(&mut self) {
+        self.rules.insert(
+            DiffPrimitive::FakeQuantizeQuat,
+            BackwardRule {
+                op: DiffPrimitive::FakeQuantizeQuat,
+                num_inputs: 1,
+                description: "dx = dz (straight-through estimator, quaternion-aware)",
+                backward_ops: vec![BackwardOp::PassThrough { input_idx: 0 }],
+            },
+        );
+    }
+
     /// Get the backward rule for a primitive
     pub fn get_rule(&self, op: DiffPrimitive) -> Option<&BackwardRule> {
         self.rules.get(&op)
@@ -758,6 +817,9 @@ impl PrimitiveRegistry {
             GpuOp::WarpReduce(super::super::ir::WarpReduceOp::Min, _) => Some(DiffPrimitive::Min),
             GpuOp::TileMma { .. } => Some(DiffPrimitive::MatMul),
             GpuOp::TileTranspose(_) => Some(DiffPrimitive::Transpose),
+            GpuOp::FakeQuantize { .. } => Some(DiffPrimitive::FakeQuantize),
+            GpuOp::FakeQuantizePerChannel { .. } => Some(DiffPrimitive::FakeQuantizePerChannel),
+            GpuOp::FakeQuantizeQuat { .. } => Some(DiffPrimitive::FakeQuantizeQuat),
             _ => None,
         }
     }

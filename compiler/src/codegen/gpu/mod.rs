@@ -163,8 +163,8 @@ pub use fusion::{
     ArchConstraints, CostWeights, DependencyType, FusionAnalysis, FusionCandidate,
     FusionCandidateId, FusionConfig, FusionCostModel, FusionError, FusionGroup, FusionGroupId,
     FusionPlan, FusionStats, FusionTransformer, FusionType, KernelDependencyGraph, KernelId,
-    LaunchConfig as FusionLaunchConfig, ResourceEstimate, SharedMemLayout,
-    analyze_and_fuse_kernels,
+    LaunchConfig as FusionLaunchConfig, OpCategory, ResourceEstimate, SemanticFusionPattern,
+    SharedMemLayout, analyze_and_fuse_kernels,
 };
 
 // Auto-tuning for kernel launch configuration (Phase 4)

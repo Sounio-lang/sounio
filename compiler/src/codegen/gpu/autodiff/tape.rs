@@ -129,6 +129,14 @@ pub enum TapeOp {
     /// Fused add-multiply: z = (a + b) * c
     AddMul,
 
+    // Quantization operations (QAT with straight-through estimator)
+    /// Fake quantization: output = dequant(quant(x)) - gradient passes through
+    FakeQuantize,
+    /// Per-channel fake quantization
+    FakeQuantizePerChannel,
+    /// Quaternion-aware fake quantization
+    FakeQuantizeQuat,
+
     // Special operations
     /// Constant (no gradient)
     Const,
@@ -153,7 +161,9 @@ impl TapeOp {
             TapeOp::Exp | TapeOp::Log | TapeOp::Sqrt | TapeOp::Rsqrt |
             TapeOp::Abs | TapeOp::Relu | TapeOp::Sigmoid | TapeOp::Tanh |
             TapeOp::Gelu | TapeOp::Transpose | TapeOp::Sum | TapeOp::Mean |
-            TapeOp::Max | TapeOp::Min | TapeOp::Softmax => 1,
+            TapeOp::Max | TapeOp::Min | TapeOp::Softmax |
+            TapeOp::FakeQuantize | TapeOp::FakeQuantizePerChannel |
+            TapeOp::FakeQuantizeQuat => 1,
 
             TapeOp::Add | TapeOp::Sub | TapeOp::Mul | TapeOp::Div |
             TapeOp::Pow | TapeOp::MatMul | TapeOp::BatchMatMul => 2,
@@ -199,6 +209,9 @@ impl TapeOp {
             TapeOp::Copy => "copy",
             TapeOp::Fma => "fma",
             TapeOp::AddMul => "add_mul",
+            TapeOp::FakeQuantize => "fake_quantize",
+            TapeOp::FakeQuantizePerChannel => "fake_quantize_per_channel",
+            TapeOp::FakeQuantizeQuat => "fake_quantize_quat",
             TapeOp::Const => "const",
             TapeOp::Input => "input",
             TapeOp::Output => "output",

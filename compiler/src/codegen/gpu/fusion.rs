@@ -110,6 +110,158 @@ impl fmt::Display for FusionType {
 }
 
 // ============================================================================
+// Semantic Fusion Patterns (Neural Network Layer Fusion)
+// ============================================================================
+
+/// Semantic neural network fusion patterns
+///
+/// These patterns represent common neural network layer sequences that benefit
+/// from fusion to eliminate intermediate memory traffic.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SemanticFusionPattern {
+    /// Linear -> BatchNorm -> ReLU (full pattern, ~10% speedup)
+    LinearBnRelu,
+
+    /// Quaternion Linear -> BatchNorm -> ReLU
+    QuatLinearBnRelu,
+
+    /// Octonion Linear -> BatchNorm -> ReLU
+    OctLinearBnRelu,
+
+    /// Linear -> BatchNorm (partial pattern)
+    LinearBn,
+
+    /// Quaternion Linear -> BatchNorm
+    QuatLinearBn,
+
+    /// Linear -> ReLU (partial pattern)
+    LinearRelu,
+
+    /// Quaternion Linear -> ReLU
+    QuatLinearRelu,
+
+    /// BatchNorm -> ReLU (partial pattern)
+    BnRelu,
+
+    /// Quaternion BatchNorm -> ReLU
+    QuatBnRelu,
+}
+
+impl fmt::Display for SemanticFusionPattern {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            SemanticFusionPattern::LinearBnRelu => write!(f, "Linear+BN+ReLU"),
+            SemanticFusionPattern::QuatLinearBnRelu => write!(f, "QuatLinear+BN+ReLU"),
+            SemanticFusionPattern::OctLinearBnRelu => write!(f, "OctLinear+BN+ReLU"),
+            SemanticFusionPattern::LinearBn => write!(f, "Linear+BN"),
+            SemanticFusionPattern::QuatLinearBn => write!(f, "QuatLinear+BN"),
+            SemanticFusionPattern::LinearRelu => write!(f, "Linear+ReLU"),
+            SemanticFusionPattern::QuatLinearRelu => write!(f, "QuatLinear+ReLU"),
+            SemanticFusionPattern::BnRelu => write!(f, "BN+ReLU"),
+            SemanticFusionPattern::QuatBnRelu => write!(f, "QuatBN+ReLU"),
+        }
+    }
+}
+
+/// Operation category for semantic pattern detection
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OpCategory {
+    /// Real-valued linear operations (GEMM, matmul)
+    Linear,
+    /// Quaternion linear: QuatLinearFwd
+    QuatLinear,
+    /// Octonion linear
+    OctLinear,
+    /// Batch normalization forward
+    BatchNorm,
+    /// Quaternion batch norm: QuatBnFwd
+    QuatBatchNorm,
+    /// Octonion batch norm
+    OctBatchNorm,
+    /// ReLU activation
+    ReLU,
+    /// Quaternion ReLU
+    QuatReLU,
+    /// Octonion ReLU
+    OctReLU,
+    /// Other operations
+    Other,
+}
+
+impl OpCategory {
+    /// Classify a GpuOp into a semantic category
+    pub fn classify(op: &GpuOp) -> Self {
+        match op {
+            // Real-valued linear (tensor core operations)
+            GpuOp::Int8MatMul { .. } => OpCategory::Linear,
+
+            // Quaternion operations
+            GpuOp::QuatLinearFwd { .. } | GpuOp::QuatLinearBwd { .. } => OpCategory::QuatLinear,
+            GpuOp::QuatBnFwd { .. } | GpuOp::QuatBnBwd { .. } => OpCategory::QuatBatchNorm,
+            GpuOp::QuatRelu(_) | GpuOp::QuatLeakyRelu(_, _) => OpCategory::QuatReLU,
+
+            // Octonion operations
+            GpuOp::OctonionRelu(_) => OpCategory::OctReLU,
+
+            _ => OpCategory::Other,
+        }
+    }
+}
+
+impl SemanticFusionPattern {
+    /// Try to detect a semantic pattern from a sequence of operation categories
+    pub fn detect(categories: &[OpCategory]) -> Option<Self> {
+        match categories {
+            // Full patterns (3 ops)
+            [OpCategory::Linear, OpCategory::BatchNorm, OpCategory::ReLU] => {
+                Some(SemanticFusionPattern::LinearBnRelu)
+            }
+            [OpCategory::QuatLinear, OpCategory::QuatBatchNorm, OpCategory::QuatReLU] => {
+                Some(SemanticFusionPattern::QuatLinearBnRelu)
+            }
+            [OpCategory::OctLinear, OpCategory::OctBatchNorm, OpCategory::OctReLU] => {
+                Some(SemanticFusionPattern::OctLinearBnRelu)
+            }
+
+            // Partial patterns (2 ops)
+            [OpCategory::Linear, OpCategory::BatchNorm] => Some(SemanticFusionPattern::LinearBn),
+            [OpCategory::QuatLinear, OpCategory::QuatBatchNorm] => {
+                Some(SemanticFusionPattern::QuatLinearBn)
+            }
+            [OpCategory::Linear, OpCategory::ReLU] => Some(SemanticFusionPattern::LinearRelu),
+            [OpCategory::QuatLinear, OpCategory::QuatReLU] => {
+                Some(SemanticFusionPattern::QuatLinearRelu)
+            }
+            [OpCategory::BatchNorm, OpCategory::ReLU] => Some(SemanticFusionPattern::BnRelu),
+            [OpCategory::QuatBatchNorm, OpCategory::QuatReLU] => {
+                Some(SemanticFusionPattern::QuatBnRelu)
+            }
+
+            _ => None,
+        }
+    }
+
+    /// Get the benefit multiplier for this pattern
+    ///
+    /// Higher values boost the fusion benefit score for known-good patterns.
+    pub fn benefit_multiplier(&self) -> f64 {
+        match self {
+            // Full Linear+BN+ReLU gets highest boost (eliminates 2 intermediate buffers)
+            SemanticFusionPattern::LinearBnRelu
+            | SemanticFusionPattern::QuatLinearBnRelu
+            | SemanticFusionPattern::OctLinearBnRelu => 1.5,
+
+            // Partial patterns get moderate boost
+            SemanticFusionPattern::LinearBn | SemanticFusionPattern::QuatLinearBn => 1.3,
+
+            SemanticFusionPattern::LinearRelu | SemanticFusionPattern::QuatLinearRelu => 1.2,
+
+            SemanticFusionPattern::BnRelu | SemanticFusionPattern::QuatBnRelu => 1.2,
+        }
+    }
+}
+
+// ============================================================================
 // Resource Estimation
 // ============================================================================
 
@@ -319,6 +471,9 @@ pub struct FusionCandidate {
 
     /// Reason if invalid
     pub invalid_reason: Option<String>,
+
+    /// Detected semantic fusion pattern (e.g., Linear+BN+ReLU)
+    pub semantic_pattern: Option<SemanticFusionPattern>,
 }
 
 impl FusionCandidate {
@@ -333,6 +488,7 @@ impl FusionCandidate {
             producer_consumer_edges: Vec::new(),
             valid: true,
             invalid_reason: None,
+            semantic_pattern: None,
         }
     }
 

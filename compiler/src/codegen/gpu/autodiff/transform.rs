@@ -360,6 +360,9 @@ impl AutoDiffTransform {
             Some(DiffPrimitive::Mean) => 22u64,
             Some(DiffPrimitive::Max) => 23u64,
             Some(DiffPrimitive::Min) => 24u64,
+            Some(DiffPrimitive::FakeQuantize) => 25u64,
+            Some(DiffPrimitive::FakeQuantizePerChannel) => 26u64,
+            Some(DiffPrimitive::FakeQuantizeQuat) => 27u64,
             None => return Ok(ops), // Non-differentiable, skip
         };
 
