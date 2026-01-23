@@ -1,0 +1,180 @@
+//! End-to-End MNIST QNN Training Demo
+//!
+//! Demonstrates a complete Quaternion Neural Network training pipeline
+//! combining all 4 optimizations:
+//!
+//! 1. **INT8 Quantization** - 4x model size reduction with <2% accuracy drop
+//! 2. **SIMD Acceleration** - AVX2/AVX-512/NEON batch Hamilton products
+//! 3. **Memory Layout** - Optimized quaternion storage for cache efficiency
+//! 4. **Fused Kernels** - Linear+ReLU fusion for reduced memory traffic
+//!
+//! ## Running This Demo
+//!
+//! 1. Download MNIST dataset from http://yann.lecun.com/exdb/mnist/
+//! 2. Extract files to ./data/mnist/
+//! 3. Run: `souc run examples/qnn_mnist_train.sio`
+//!
+//! Expected output: >95% test accuracy in ~20 epochs
+
+//@ run-pass
+
+use std::io
+use qnn::mnist::*
+
+fn main() with IO {
+    println("====================================================================")
+    println("MNIST Quaternion Neural Network Training Demo")
+    println("====================================================================")
+    println("")
+    println("Quaternion Neural Networks (QNNs) achieve 4x parameter efficiency")
+    println("by encoding 4 values per quaternion using Hamilton product algebra.")
+    println("")
+
+    // ========================================================================
+    // 1. Load MNIST Dataset
+    // ========================================================================
+    println("Step 1: Loading MNIST Dataset")
+    println("--------------------------------------------------------------------")
+
+    let data_dir = "./data/mnist"
+    println("  Loading training set from: " ++ data_dir)
+    let train_data = mnist_load_train(data_dir)
+    println("  Training samples: " ++ (train_data.num_samples as string))
+
+    println("  Loading test set...")
+    let test_data = mnist_load_test(data_dir)
+    println("  Test samples: " ++ (test_data.num_samples as string))
+    println("")
+
+    // ========================================================================
+    // 2. Configure Model
+    // ========================================================================
+    println("Step 2: Configuring QNN Model")
+    println("--------------------------------------------------------------------")
+
+    let model_config = default_config()
+    let param_count = count_parameters(&model_config)
+
+    println("  Architecture: 196 → 64 → 32 → 10 quaternions")
+    println("  Total parameters: " ++ (param_count as string) ++ " quaternions")
+    println("  FP32 model size: ~" ++ ((param_count * 16 / 1024) as string) ++ " KB")
+    println("  INT8 model size: ~" ++ ((param_count * 4 / 1024) as string) ++ " KB")
+    println("")
+
+    println("  Equivalent real-valued network would need ~" ++
+            ((param_count * 4) as string) ++ " parameters")
+    println("  QNN achieves 4x parameter efficiency!")
+    println("")
+
+    // ========================================================================
+    // 3. Configure Training
+    // ========================================================================
+    println("Step 3: Configuring Training")
+    println("--------------------------------------------------------------------")
+
+    let train_config = TrainingConfig {
+        epochs: 20,
+        batch_size: 64,
+        learning_rate: 0.001,
+        beta1: 0.9,
+        beta2: 0.999,
+        epsilon: 1e-8,
+        weight_decay: 1e-5,
+        grad_clip_norm: 1.0,
+        log_interval: 100,
+    }
+
+    println("  Epochs: " ++ (train_config.epochs as string))
+    println("  Batch size: " ++ (train_config.batch_size as string))
+    println("  Learning rate: " ++ (train_config.learning_rate as string))
+    println("  Optimizer: Adam (beta1=" ++ (train_config.beta1 as string) ++
+            ", beta2=" ++ (train_config.beta2 as string) ++ ")")
+    println("  Gradient clipping: " ++ (train_config.grad_clip_norm as string))
+    println("")
+
+    // ========================================================================
+    // 4. Train Model
+    // ========================================================================
+    println("Step 4: Training QNN Model")
+    println("--------------------------------------------------------------------")
+    println("")
+
+    let seed: i32 = 42
+    let state = train(&train_data, &test_data, &train_config, &model_config, seed)
+
+    println("")
+
+    // ========================================================================
+    // 5. Evaluate FP32 Model
+    // ========================================================================
+    println("Step 5: Final FP32 Evaluation")
+    println("--------------------------------------------------------------------")
+
+    let fp32_accuracy = compute_accuracy(&state.model, &test_data, &model_config)
+    println("  FP32 Test Accuracy: " ++ ((fp32_accuracy * 100.0) as string) ++ "%")
+    println("")
+
+    // Print detailed metrics
+    print_evaluation_report(&state.model, &test_data, &model_config)
+    println("")
+
+    // ========================================================================
+    // 6. INT8 Quantization
+    // ========================================================================
+    println("Step 6: INT8 Post-Training Quantization")
+    println("--------------------------------------------------------------------")
+
+    println("  Quantizing model weights to INT8...")
+    let quantized_model = quantize_model(&state.model)
+
+    // Measure quantization error
+    let l1_snr = quantization_snr(&state.model.layer1_weights)
+    let l2_snr = quantization_snr(&state.model.layer2_weights)
+    let l3_snr = quantization_snr(&state.model.layer3_weights)
+
+    println("  Quantization SNR:")
+    println("    Layer 1: " ++ (l1_snr as string) ++ " dB")
+    println("    Layer 2: " ++ (l2_snr as string) ++ " dB")
+    println("    Layer 3: " ++ (l3_snr as string) ++ " dB")
+    println("")
+
+    // Evaluate INT8 accuracy
+    let int8_accuracy = evaluate_accuracy_int8(&quantized_model, &test_data, &model_config)
+    println("  INT8 Test Accuracy: " ++ ((int8_accuracy * 100.0) as string) ++ "%")
+
+    let accuracy_drop = (fp32_accuracy - int8_accuracy) * 100.0
+    println("  Accuracy Drop: " ++ (accuracy_drop as string) ++ "%")
+    println("")
+
+    // ========================================================================
+    // 7. Summary
+    // ========================================================================
+    println("====================================================================")
+    println("Training Complete - Summary")
+    println("====================================================================")
+    println("")
+    println("Model Performance:")
+    println("  Best Training Accuracy: " ++ ((state.best_accuracy * 100.0) as string) ++ "%")
+    println("  FP32 Test Accuracy:     " ++ ((fp32_accuracy * 100.0) as string) ++ "%")
+    println("  INT8 Test Accuracy:     " ++ ((int8_accuracy * 100.0) as string) ++ "%")
+    println("")
+    println("Memory Efficiency:")
+    println("  FP32 Model Size: ~" ++ ((param_count * 16 / 1024) as string) ++ " KB")
+    println("  INT8 Model Size: ~" ++ ((param_count * 4 / 1024) as string) ++ " KB")
+    println("  Memory Reduction: 4x")
+    println("")
+    println("Optimizations Applied:")
+    println("  [x] INT8 Quantization - 4x model compression")
+    println("  [x] SIMD Dispatch - AVX2/AVX-512/NEON acceleration")
+    println("  [x] Memory Layout - Cache-optimized quaternion storage")
+    println("  [x] Fused Kernels - Linear+ReLU fusion")
+    println("")
+    println("====================================================================")
+
+    // Verify accuracy target
+    if fp32_accuracy >= 0.95 {
+        println("SUCCESS: Achieved >95% accuracy target!")
+    } else {
+        println("NOTE: Accuracy below 95% target - consider more epochs or tuning")
+    }
+}
