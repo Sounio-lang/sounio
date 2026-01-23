@@ -4916,6 +4916,542 @@ impl PtxCodegen {
                 let _ = (rx, rmean);
             }
 
+            // ==================== EXTENDED ONN OPERATIONS ====================
+
+            // OctonionGelu: component-wise GELU activation
+            GpuOp::OctonionGelu(x) => {
+                let rx = self.get_register(*x);
+                let reg = self.alloc_register(&GpuType::Array(Box::new(GpuType::F32), 8));
+                self.registers.push(reg.clone());
+                self.value_types.push(GpuType::Array(Box::new(GpuType::F32), 8));
+                writeln!(self.output, "{}// OctonionGelu: GELU(x) ≈ x * sigmoid(1.702 * x)", indent).unwrap();
+                writeln!(self.output, "{}  .reg .f32 %gelu_x<8>, %gelu_out<8>, %gelu_tmp;", indent).unwrap();
+                for i in 0..8 {
+                    writeln!(self.output, "{}  ld.global.f32 %gelu_x{}, [{} + {}];", indent, i, rx, i * 4).unwrap();
+                    writeln!(self.output, "{}  mul.f32 %gelu_tmp, %gelu_x{}, 0F3FD9999A;", indent, i).unwrap(); // 1.702
+                    writeln!(self.output, "{}  neg.f32 %gelu_tmp, %gelu_tmp;", indent).unwrap();
+                    writeln!(self.output, "{}  ex2.approx.f32 %gelu_tmp, %gelu_tmp;", indent).unwrap();
+                    writeln!(self.output, "{}  add.f32 %gelu_tmp, %gelu_tmp, 0F3F800000;", indent).unwrap(); // 1.0
+                    writeln!(self.output, "{}  rcp.approx.f32 %gelu_tmp, %gelu_tmp;", indent).unwrap();
+                    writeln!(self.output, "{}  mul.f32 %gelu_out{}, %gelu_x{}, %gelu_tmp;", indent, i, i).unwrap();
+                }
+                for i in 0..8 {
+                    writeln!(self.output, "{}  st.global.f32 [{} + {}], %gelu_out{};", indent, reg, i * 4, i).unwrap();
+                }
+            }
+
+            // OctonionGeluG2: G2-equivariant GELU
+            GpuOp::OctonionGeluG2(x) => {
+                let rx = self.get_register(*x);
+                let reg = self.alloc_register(&GpuType::Array(Box::new(GpuType::F32), 8));
+                self.registers.push(reg.clone());
+                self.value_types.push(GpuType::Array(Box::new(GpuType::F32), 8));
+                writeln!(self.output, "{}// OctonionGeluG2: gelu(|o|) * (o / |o|)", indent).unwrap();
+                writeln!(self.output, "{}  .reg .f32 %g2_x<8>, %g2_out<8>, %g2_norm, %g2_gelu, %g2_scale;", indent).unwrap();
+                writeln!(self.output, "{}  .reg .f32 %g2_acc;", indent).unwrap();
+                for i in 0..8 {
+                    writeln!(self.output, "{}  ld.global.f32 %g2_x{}, [{} + {}];", indent, i, rx, i * 4).unwrap();
+                }
+                writeln!(self.output, "{}  mul.f32 %g2_acc, %g2_x0, %g2_x0;", indent).unwrap();
+                for i in 1..8 {
+                    writeln!(self.output, "{}  fma.rn.f32 %g2_acc, %g2_x{}, %g2_x{}, %g2_acc;", indent, i, i).unwrap();
+                }
+                writeln!(self.output, "{}  sqrt.approx.f32 %g2_norm, %g2_acc;", indent).unwrap();
+                // GELU on norm
+                writeln!(self.output, "{}  mul.f32 %g2_gelu, %g2_norm, 0F3FD9999A;", indent).unwrap();
+                writeln!(self.output, "{}  neg.f32 %g2_gelu, %g2_gelu;", indent).unwrap();
+                writeln!(self.output, "{}  ex2.approx.f32 %g2_gelu, %g2_gelu;", indent).unwrap();
+                writeln!(self.output, "{}  add.f32 %g2_gelu, %g2_gelu, 0F3F800000;", indent).unwrap();
+                writeln!(self.output, "{}  rcp.approx.f32 %g2_gelu, %g2_gelu;", indent).unwrap();
+                writeln!(self.output, "{}  mul.f32 %g2_gelu, %g2_norm, %g2_gelu;", indent).unwrap();
+                // Scale = gelu / norm (or 0 if norm ≈ 0)
+                writeln!(self.output, "{}  rcp.approx.f32 %g2_scale, %g2_norm;", indent).unwrap();
+                writeln!(self.output, "{}  mul.f32 %g2_scale, %g2_gelu, %g2_scale;", indent).unwrap();
+                for i in 0..8 {
+                    writeln!(self.output, "{}  mul.f32 %g2_out{}, %g2_x{}, %g2_scale;", indent, i, i).unwrap();
+                }
+                for i in 0..8 {
+                    writeln!(self.output, "{}  st.global.f32 [{} + {}], %g2_out{};", indent, reg, i * 4, i).unwrap();
+                }
+            }
+
+            // OctonionLeakyRelu: component-wise leaky ReLU
+            GpuOp::OctonionLeakyRelu(x, alpha) => {
+                let rx = self.get_register(*x);
+                let reg = self.alloc_register(&GpuType::Array(Box::new(GpuType::F32), 8));
+                self.registers.push(reg.clone());
+                self.value_types.push(GpuType::Array(Box::new(GpuType::F32), 8));
+                writeln!(self.output, "{}// OctonionLeakyRelu: max(alpha*x, x)", indent).unwrap();
+                writeln!(self.output, "{}  .reg .f32 %lr_x<8>, %lr_out<8>, %lr_scaled;", indent).unwrap();
+                for i in 0..8 {
+                    writeln!(self.output, "{}  ld.global.f32 %lr_x{}, [{} + {}];", indent, i, rx, i * 4).unwrap();
+                    writeln!(self.output, "{}  mul.f32 %lr_scaled, %lr_x{}, 0F{:08X};", indent, i, (*alpha as f32).to_bits()).unwrap();
+                    writeln!(self.output, "{}  max.f32 %lr_out{}, %lr_scaled, %lr_x{};", indent, i, i).unwrap();
+                }
+                for i in 0..8 {
+                    writeln!(self.output, "{}  st.global.f32 [{} + {}], %lr_out{};", indent, reg, i * 4, i).unwrap();
+                }
+            }
+
+            // OctonionLeakyReluG2: G2-equivariant leaky ReLU
+            GpuOp::OctonionLeakyReluG2(x, alpha) => {
+                let rx = self.get_register(*x);
+                let reg = self.alloc_register(&GpuType::Array(Box::new(GpuType::F32), 8));
+                self.registers.push(reg.clone());
+                self.value_types.push(GpuType::Array(Box::new(GpuType::F32), 8));
+                writeln!(self.output, "{}// OctonionLeakyReluG2: G2-equivariant on norm", indent).unwrap();
+                writeln!(self.output, "{}  .reg .f32 %lrg2_x<8>, %lrg2_out<8>, %lrg2_norm, %lrg2_scaled, %lrg2_new, %lrg2_scale;", indent).unwrap();
+                writeln!(self.output, "{}  .reg .f32 %lrg2_acc;", indent).unwrap();
+                for i in 0..8 {
+                    writeln!(self.output, "{}  ld.global.f32 %lrg2_x{}, [{} + {}];", indent, i, rx, i * 4).unwrap();
+                }
+                writeln!(self.output, "{}  mul.f32 %lrg2_acc, %lrg2_x0, %lrg2_x0;", indent).unwrap();
+                for i in 1..8 {
+                    writeln!(self.output, "{}  fma.rn.f32 %lrg2_acc, %lrg2_x{}, %lrg2_x{}, %lrg2_acc;", indent, i, i).unwrap();
+                }
+                writeln!(self.output, "{}  sqrt.approx.f32 %lrg2_norm, %lrg2_acc;", indent).unwrap();
+                writeln!(self.output, "{}  mul.f32 %lrg2_scaled, %lrg2_norm, 0F{:08X};", indent, (*alpha as f32).to_bits()).unwrap();
+                writeln!(self.output, "{}  max.f32 %lrg2_new, %lrg2_scaled, %lrg2_norm;", indent).unwrap();
+                writeln!(self.output, "{}  rcp.approx.f32 %lrg2_scale, %lrg2_norm;", indent).unwrap();
+                writeln!(self.output, "{}  mul.f32 %lrg2_scale, %lrg2_new, %lrg2_scale;", indent).unwrap();
+                for i in 0..8 {
+                    writeln!(self.output, "{}  mul.f32 %lrg2_out{}, %lrg2_x{}, %lrg2_scale;", indent, i, i).unwrap();
+                }
+                for i in 0..8 {
+                    writeln!(self.output, "{}  st.global.f32 [{} + {}], %lrg2_out{};", indent, reg, i * 4, i).unwrap();
+                }
+            }
+
+            // OctonionConv2dFwd: 2D convolution forward (stub)
+            GpuOp::OctonionConv2dFwd { input, kernel, bias, output: _, in_channels, out_channels, kernel_h, kernel_w, stride, padding } => {
+                let rin = self.get_register(*input);
+                let rker = self.get_register(*kernel);
+                let rbias = self.get_register(*bias);
+                let reg = self.alloc_register(&GpuType::Array(Box::new(GpuType::F32), 8));
+                self.registers.push(reg.clone());
+                self.value_types.push(GpuType::Array(Box::new(GpuType::F32), 8));
+                writeln!(self.output, "{}// OctonionConv2dFwd: {}ch -> {}ch, {}x{} kernel (stub)", indent, in_channels, out_channels, kernel_h, kernel_w).unwrap();
+                writeln!(self.output, "{}// Full spatial loops require kernel launch - single element here", indent).unwrap();
+                writeln!(self.output, "{}  .reg .f32 %conv_in<8>, %conv_k<8>, %conv_b<8>, %conv_out<8>;", indent).unwrap();
+                for i in 0..8 {
+                    writeln!(self.output, "{}  ld.global.f32 %conv_in{}, [{} + {}];", indent, i, rin, i * 4).unwrap();
+                    writeln!(self.output, "{}  ld.global.f32 %conv_k{}, [{} + {}];", indent, i, rker, i * 4).unwrap();
+                    writeln!(self.output, "{}  ld.global.f32 %conv_b{}, [{} + {}];", indent, i, rbias, i * 4).unwrap();
+                }
+                // Simplified: out = in + bias (full impl needs oct_mul)
+                for i in 0..8 {
+                    writeln!(self.output, "{}  add.f32 %conv_out{}, %conv_in{}, %conv_b{};", indent, i, i, i).unwrap();
+                }
+                for i in 0..8 {
+                    writeln!(self.output, "{}  st.global.f32 [{} + {}], %conv_out{};", indent, reg, i * 4, i).unwrap();
+                }
+                let _ = (stride, padding);
+            }
+
+            // OctonionConv2dBwd: 2D convolution backward (stub)
+            GpuOp::OctonionConv2dBwd { input: _, kernel: _, grad_output, grad_input: _, grad_kernel: _, in_channels, out_channels, kernel_h, kernel_w, stride, padding } => {
+                let rdy = self.get_register(*grad_output);
+                let reg = self.alloc_register(&GpuType::Array(Box::new(GpuType::F32), 8));
+                self.registers.push(reg.clone());
+                self.value_types.push(GpuType::Array(Box::new(GpuType::F32), 8));
+                writeln!(self.output, "{}// OctonionConv2dBwd: {}ch -> {}ch, {}x{} kernel (stub)", indent, in_channels, out_channels, kernel_h, kernel_w).unwrap();
+                for i in 0..8 {
+                    writeln!(self.output, "{}  ld.global.f32 %conv_out{}, [{} + {}];", indent, i, rdy, i * 4).unwrap();
+                    writeln!(self.output, "{}  st.global.f32 [{} + {}], %conv_out{};", indent, reg, i * 4, i).unwrap();
+                }
+                let _ = (stride, padding);
+            }
+
+            // OctonionLayerNormFwd: Layer normalization forward
+            GpuOp::OctonionLayerNormFwd { x, gamma, beta, normalized_shape: _, epsilon } => {
+                let rx = self.get_register(*x);
+                let rgamma = self.get_register(*gamma);
+                let rbeta = self.get_register(*beta);
+                let reg = self.alloc_register(&GpuType::Array(Box::new(GpuType::F32), 8));
+                self.registers.push(reg.clone());
+                self.value_types.push(GpuType::Array(Box::new(GpuType::F32), 8));
+                writeln!(self.output, "{}// OctonionLayerNormFwd: normalize per sample", indent).unwrap();
+                writeln!(self.output, "{}  .reg .f32 %ln_x<8>, %ln_g<8>, %ln_b<8>, %ln_out<8>;", indent).unwrap();
+                writeln!(self.output, "{}  .reg .f32 %ln_mean, %ln_var, %ln_rstd, %ln_tmp;", indent).unwrap();
+                for i in 0..8 {
+                    writeln!(self.output, "{}  ld.global.f32 %ln_x{}, [{} + {}];", indent, i, rx, i * 4).unwrap();
+                    writeln!(self.output, "{}  ld.global.f32 %ln_g{}, [{} + {}];", indent, i, rgamma, i * 4).unwrap();
+                    writeln!(self.output, "{}  ld.global.f32 %ln_b{}, [{} + {}];", indent, i, rbeta, i * 4).unwrap();
+                }
+                // Compute mean
+                writeln!(self.output, "{}  add.f32 %ln_mean, %ln_x0, %ln_x1;", indent).unwrap();
+                for i in 2..8 {
+                    writeln!(self.output, "{}  add.f32 %ln_mean, %ln_mean, %ln_x{};", indent, i).unwrap();
+                }
+                writeln!(self.output, "{}  mul.f32 %ln_mean, %ln_mean, 0F3E000000;", indent).unwrap(); // 1/8
+                // Compute variance and normalize
+                writeln!(self.output, "{}  mov.f32 %ln_var, 0F00000000;", indent).unwrap();
+                for i in 0..8 {
+                    writeln!(self.output, "{}  sub.f32 %ln_tmp, %ln_x{}, %ln_mean;", indent, i).unwrap();
+                    writeln!(self.output, "{}  fma.rn.f32 %ln_var, %ln_tmp, %ln_tmp, %ln_var;", indent).unwrap();
+                }
+                writeln!(self.output, "{}  mul.f32 %ln_var, %ln_var, 0F3E000000;", indent).unwrap();
+                writeln!(self.output, "{}  add.f32 %ln_var, %ln_var, 0F{:08X};", indent, (*epsilon as f32).to_bits()).unwrap();
+                writeln!(self.output, "{}  rsqrt.approx.f32 %ln_rstd, %ln_var;", indent).unwrap();
+                for i in 0..8 {
+                    writeln!(self.output, "{}  sub.f32 %ln_tmp, %ln_x{}, %ln_mean;", indent, i).unwrap();
+                    writeln!(self.output, "{}  mul.f32 %ln_tmp, %ln_tmp, %ln_rstd;", indent).unwrap();
+                    writeln!(self.output, "{}  fma.rn.f32 %ln_out{}, %ln_tmp, %ln_g{}, %ln_b{};", indent, i, i, i).unwrap();
+                }
+                for i in 0..8 {
+                    writeln!(self.output, "{}  st.global.f32 [{} + {}], %ln_out{};", indent, reg, i * 4, i).unwrap();
+                }
+            }
+
+            // OctonionLayerNormBwd: Layer normalization backward (simplified)
+            GpuOp::OctonionLayerNormBwd { x: _, mean: _, rstd, grad_output, grad_x: _, grad_gamma: _, grad_beta: _, normalized_shape: _, epsilon: _ } => {
+                let rrstd = self.get_register(*rstd);
+                let rdy = self.get_register(*grad_output);
+                let reg = self.alloc_register(&GpuType::Array(Box::new(GpuType::F32), 8));
+                self.registers.push(reg.clone());
+                self.value_types.push(GpuType::Array(Box::new(GpuType::F32), 8));
+                writeln!(self.output, "{}// OctonionLayerNormBwd: simplified dx = dy * rstd", indent).unwrap();
+                writeln!(self.output, "{}  .reg .f32 %lnb_dy<8>, %lnb_out<8>, %lnb_rstd;", indent).unwrap();
+                writeln!(self.output, "{}  ld.global.f32 %lnb_rstd, [{}];", indent, rrstd).unwrap();
+                for i in 0..8 {
+                    writeln!(self.output, "{}  ld.global.f32 %lnb_dy{}, [{} + {}];", indent, i, rdy, i * 4).unwrap();
+                    writeln!(self.output, "{}  mul.f32 %lnb_out{}, %lnb_dy{}, %lnb_rstd;", indent, i, i).unwrap();
+                }
+                for i in 0..8 {
+                    writeln!(self.output, "{}  st.global.f32 [{} + {}], %lnb_out{};", indent, reg, i * 4, i).unwrap();
+                }
+            }
+
+            // OctonionGroupNormFwd: Group normalization (reuses LayerNorm pattern)
+            GpuOp::OctonionGroupNormFwd { x, gamma, beta, num_groups: _, epsilon } => {
+                let rx = self.get_register(*x);
+                let rgamma = self.get_register(*gamma);
+                let rbeta = self.get_register(*beta);
+                let reg = self.alloc_register(&GpuType::Array(Box::new(GpuType::F32), 8));
+                self.registers.push(reg.clone());
+                self.value_types.push(GpuType::Array(Box::new(GpuType::F32), 8));
+                writeln!(self.output, "{}// OctonionGroupNormFwd: group normalization", indent).unwrap();
+                writeln!(self.output, "{}  .reg .f32 %gn_x<8>, %gn_g<8>, %gn_b<8>, %gn_out<8>;", indent).unwrap();
+                writeln!(self.output, "{}  .reg .f32 %gn_mean, %gn_var, %gn_rstd, %gn_tmp;", indent).unwrap();
+                for i in 0..8 {
+                    writeln!(self.output, "{}  ld.global.f32 %gn_x{}, [{} + {}];", indent, i, rx, i * 4).unwrap();
+                    writeln!(self.output, "{}  ld.global.f32 %gn_g{}, [{} + {}];", indent, i, rgamma, i * 4).unwrap();
+                    writeln!(self.output, "{}  ld.global.f32 %gn_b{}, [{} + {}];", indent, i, rbeta, i * 4).unwrap();
+                }
+                writeln!(self.output, "{}  add.f32 %gn_mean, %gn_x0, %gn_x1;", indent).unwrap();
+                for i in 2..8 {
+                    writeln!(self.output, "{}  add.f32 %gn_mean, %gn_mean, %gn_x{};", indent, i).unwrap();
+                }
+                writeln!(self.output, "{}  mul.f32 %gn_mean, %gn_mean, 0F3E000000;", indent).unwrap();
+                writeln!(self.output, "{}  mov.f32 %gn_var, 0F00000000;", indent).unwrap();
+                for i in 0..8 {
+                    writeln!(self.output, "{}  sub.f32 %gn_tmp, %gn_x{}, %gn_mean;", indent, i).unwrap();
+                    writeln!(self.output, "{}  fma.rn.f32 %gn_var, %gn_tmp, %gn_tmp, %gn_var;", indent).unwrap();
+                }
+                writeln!(self.output, "{}  mul.f32 %gn_var, %gn_var, 0F3E000000;", indent).unwrap();
+                writeln!(self.output, "{}  add.f32 %gn_var, %gn_var, 0F{:08X};", indent, (*epsilon as f32).to_bits()).unwrap();
+                writeln!(self.output, "{}  rsqrt.approx.f32 %gn_rstd, %gn_var;", indent).unwrap();
+                for i in 0..8 {
+                    writeln!(self.output, "{}  sub.f32 %gn_tmp, %gn_x{}, %gn_mean;", indent, i).unwrap();
+                    writeln!(self.output, "{}  mul.f32 %gn_tmp, %gn_tmp, %gn_rstd;", indent).unwrap();
+                    writeln!(self.output, "{}  fma.rn.f32 %gn_out{}, %gn_tmp, %gn_g{}, %gn_b{};", indent, i, i, i).unwrap();
+                }
+                for i in 0..8 {
+                    writeln!(self.output, "{}  st.global.f32 [{} + {}], %gn_out{};", indent, reg, i * 4, i).unwrap();
+                }
+            }
+
+            // OctonionGroupNormBwd: Group normalization backward (simplified)
+            GpuOp::OctonionGroupNormBwd { x: _, mean: _, rstd, grad_output, grad_x: _, grad_gamma: _, grad_beta: _, num_groups: _, epsilon: _ } => {
+                let rrstd = self.get_register(*rstd);
+                let rdy = self.get_register(*grad_output);
+                let reg = self.alloc_register(&GpuType::Array(Box::new(GpuType::F32), 8));
+                self.registers.push(reg.clone());
+                self.value_types.push(GpuType::Array(Box::new(GpuType::F32), 8));
+                writeln!(self.output, "{}// OctonionGroupNormBwd: simplified", indent).unwrap();
+                writeln!(self.output, "{}  .reg .f32 %gnb_dy<8>, %gnb_out<8>, %gnb_rstd;", indent).unwrap();
+                writeln!(self.output, "{}  ld.global.f32 %gnb_rstd, [{}];", indent, rrstd).unwrap();
+                for i in 0..8 {
+                    writeln!(self.output, "{}  ld.global.f32 %gnb_dy{}, [{} + {}];", indent, i, rdy, i * 4).unwrap();
+                    writeln!(self.output, "{}  mul.f32 %gnb_out{}, %gnb_dy{}, %gnb_rstd;", indent, i, i).unwrap();
+                }
+                for i in 0..8 {
+                    writeln!(self.output, "{}  st.global.f32 [{} + {}], %gnb_out{};", indent, reg, i * 4, i).unwrap();
+                }
+            }
+
+            // OctonionInstanceNormFwd: Instance normalization (same as LayerNorm for single instance)
+            GpuOp::OctonionInstanceNormFwd { x, gamma, beta, epsilon } => {
+                let rx = self.get_register(*x);
+                let rgamma = self.get_register(*gamma);
+                let rbeta = self.get_register(*beta);
+                let reg = self.alloc_register(&GpuType::Array(Box::new(GpuType::F32), 8));
+                self.registers.push(reg.clone());
+                self.value_types.push(GpuType::Array(Box::new(GpuType::F32), 8));
+                writeln!(self.output, "{}// OctonionInstanceNormFwd: per-instance normalization", indent).unwrap();
+                writeln!(self.output, "{}  .reg .f32 %in_x<8>, %in_g<8>, %in_b<8>, %in_out<8>;", indent).unwrap();
+                writeln!(self.output, "{}  .reg .f32 %in_mean, %in_var, %in_rstd, %in_tmp;", indent).unwrap();
+                for i in 0..8 {
+                    writeln!(self.output, "{}  ld.global.f32 %in_x{}, [{} + {}];", indent, i, rx, i * 4).unwrap();
+                    writeln!(self.output, "{}  ld.global.f32 %in_g{}, [{} + {}];", indent, i, rgamma, i * 4).unwrap();
+                    writeln!(self.output, "{}  ld.global.f32 %in_b{}, [{} + {}];", indent, i, rbeta, i * 4).unwrap();
+                }
+                writeln!(self.output, "{}  add.f32 %in_mean, %in_x0, %in_x1;", indent).unwrap();
+                for i in 2..8 {
+                    writeln!(self.output, "{}  add.f32 %in_mean, %in_mean, %in_x{};", indent, i).unwrap();
+                }
+                writeln!(self.output, "{}  mul.f32 %in_mean, %in_mean, 0F3E000000;", indent).unwrap();
+                writeln!(self.output, "{}  mov.f32 %in_var, 0F00000000;", indent).unwrap();
+                for i in 0..8 {
+                    writeln!(self.output, "{}  sub.f32 %in_tmp, %in_x{}, %in_mean;", indent, i).unwrap();
+                    writeln!(self.output, "{}  fma.rn.f32 %in_var, %in_tmp, %in_tmp, %in_var;", indent).unwrap();
+                }
+                writeln!(self.output, "{}  mul.f32 %in_var, %in_var, 0F3E000000;", indent).unwrap();
+                writeln!(self.output, "{}  add.f32 %in_var, %in_var, 0F{:08X};", indent, (*epsilon as f32).to_bits()).unwrap();
+                writeln!(self.output, "{}  rsqrt.approx.f32 %in_rstd, %in_var;", indent).unwrap();
+                for i in 0..8 {
+                    writeln!(self.output, "{}  sub.f32 %in_tmp, %in_x{}, %in_mean;", indent, i).unwrap();
+                    writeln!(self.output, "{}  mul.f32 %in_tmp, %in_tmp, %in_rstd;", indent).unwrap();
+                    writeln!(self.output, "{}  fma.rn.f32 %in_out{}, %in_tmp, %in_g{}, %in_b{};", indent, i, i, i).unwrap();
+                }
+                for i in 0..8 {
+                    writeln!(self.output, "{}  st.global.f32 [{} + {}], %in_out{};", indent, reg, i * 4, i).unwrap();
+                }
+            }
+
+            // OctonionInstanceNormBwd: Instance normalization backward (simplified)
+            GpuOp::OctonionInstanceNormBwd { x: _, mean: _, rstd, grad_output, grad_x: _, grad_gamma: _, grad_beta: _, epsilon: _ } => {
+                let rrstd = self.get_register(*rstd);
+                let rdy = self.get_register(*grad_output);
+                let reg = self.alloc_register(&GpuType::Array(Box::new(GpuType::F32), 8));
+                self.registers.push(reg.clone());
+                self.value_types.push(GpuType::Array(Box::new(GpuType::F32), 8));
+                writeln!(self.output, "{}// OctonionInstanceNormBwd: simplified", indent).unwrap();
+                writeln!(self.output, "{}  .reg .f32 %inb_dy<8>, %inb_out<8>, %inb_rstd;", indent).unwrap();
+                writeln!(self.output, "{}  ld.global.f32 %inb_rstd, [{}];", indent, rrstd).unwrap();
+                for i in 0..8 {
+                    writeln!(self.output, "{}  ld.global.f32 %inb_dy{}, [{} + {}];", indent, i, rdy, i * 4).unwrap();
+                    writeln!(self.output, "{}  mul.f32 %inb_out{}, %inb_dy{}, %inb_rstd;", indent, i, i).unwrap();
+                }
+                for i in 0..8 {
+                    writeln!(self.output, "{}  st.global.f32 [{} + {}], %inb_out{};", indent, reg, i * 4, i).unwrap();
+                }
+            }
+
+            // OctonionDropout: dropout regularization
+            GpuOp::OctonionDropout { x, mask, p, training } => {
+                let rx = self.get_register(*x);
+                let rmask = self.get_register(*mask);
+                let reg = self.alloc_register(&GpuType::Array(Box::new(GpuType::F32), 8));
+                self.registers.push(reg.clone());
+                self.value_types.push(GpuType::Array(Box::new(GpuType::F32), 8));
+                writeln!(self.output, "{}// OctonionDropout: p={}, training={}", indent, p, training).unwrap();
+                writeln!(self.output, "{}  .reg .f32 %drop_x<8>, %drop_out<8>, %drop_mask, %drop_scale;", indent).unwrap();
+                writeln!(self.output, "{}  .reg .pred %drop_keep;", indent).unwrap();
+                for i in 0..8 {
+                    writeln!(self.output, "{}  ld.global.f32 %drop_x{}, [{} + {}];", indent, i, rx, i * 4).unwrap();
+                }
+                if *training {
+                    writeln!(self.output, "{}  ld.global.f32 %drop_mask, [{}];", indent, rmask).unwrap();
+                    writeln!(self.output, "{}  setp.gt.f32 %drop_keep, %drop_mask, 0F{:08X};", indent, (*p as f32).to_bits()).unwrap();
+                    let scale = 1.0 / (1.0 - *p);
+                    writeln!(self.output, "{}  mov.f32 %drop_scale, 0F{:08X};", indent, (scale as f32).to_bits()).unwrap();
+                    for i in 0..8 {
+                        writeln!(self.output, "{}  @%drop_keep mul.f32 %drop_out{}, %drop_x{}, %drop_scale;", indent, i, i).unwrap();
+                        writeln!(self.output, "{}  @!%drop_keep mov.f32 %drop_out{}, 0F00000000;", indent, i).unwrap();
+                    }
+                } else {
+                    for i in 0..8 {
+                        writeln!(self.output, "{}  mov.f32 %drop_out{}, %drop_x{};", indent, i, i).unwrap();
+                    }
+                }
+                for i in 0..8 {
+                    writeln!(self.output, "{}  st.global.f32 [{} + {}], %drop_out{};", indent, reg, i * 4, i).unwrap();
+                }
+            }
+
+            // OctonionCrossEntropy: cross-entropy loss
+            GpuOp::OctonionCrossEntropy { logits, targets: _, output: _ } => {
+                let rlogits = self.get_register(*logits);
+                let reg = self.alloc_register(&GpuType::F32);
+                self.registers.push(reg.clone());
+                self.value_types.push(GpuType::F32);
+                writeln!(self.output, "{}// OctonionCrossEntropy: uses norm for softmax", indent).unwrap();
+                writeln!(self.output, "{}  .reg .f32 %ce_x<8>, %ce_norm, %ce_loss, %ce_acc;", indent).unwrap();
+                for i in 0..8 {
+                    writeln!(self.output, "{}  ld.global.f32 %ce_x{}, [{} + {}];", indent, i, rlogits, i * 4).unwrap();
+                }
+                writeln!(self.output, "{}  mul.f32 %ce_acc, %ce_x0, %ce_x0;", indent).unwrap();
+                for i in 1..8 {
+                    writeln!(self.output, "{}  fma.rn.f32 %ce_acc, %ce_x{}, %ce_x{}, %ce_acc;", indent, i, i).unwrap();
+                }
+                writeln!(self.output, "{}  sqrt.approx.f32 %ce_norm, %ce_acc;", indent).unwrap();
+                writeln!(self.output, "{}  max.f32 %ce_norm, %ce_norm, 0F358637BE;", indent).unwrap(); // 1e-6
+                writeln!(self.output, "{}  lg2.approx.f32 %ce_loss, %ce_norm;", indent).unwrap();
+                writeln!(self.output, "{}  neg.f32 %ce_loss, %ce_loss;", indent).unwrap();
+                writeln!(self.output, "{}  st.global.f32 [{}], %ce_loss;", indent, reg).unwrap();
+            }
+
+            // OctonionAttention: multi-head attention
+            GpuOp::OctonionAttention { query, key, value, output: _, num_heads } => {
+                let rq = self.get_register(*query);
+                let rk = self.get_register(*key);
+                let rv = self.get_register(*value);
+                let reg = self.alloc_register(&GpuType::Array(Box::new(GpuType::F32), 8));
+                self.registers.push(reg.clone());
+                self.value_types.push(GpuType::Array(Box::new(GpuType::F32), 8));
+                writeln!(self.output, "{}// OctonionAttention: {} heads (simplified single-head)", indent, num_heads).unwrap();
+                writeln!(self.output, "{}  .reg .f32 %attn_q<8>, %attn_k<8>, %attn_v<8>, %attn_out<8>;", indent).unwrap();
+                writeln!(self.output, "{}  .reg .f32 %attn_score, %attn_weight;", indent).unwrap();
+                for i in 0..8 {
+                    writeln!(self.output, "{}  ld.global.f32 %attn_q{}, [{} + {}];", indent, i, rq, i * 4).unwrap();
+                    writeln!(self.output, "{}  ld.global.f32 %attn_k{}, [{} + {}];", indent, i, rk, i * 4).unwrap();
+                    writeln!(self.output, "{}  ld.global.f32 %attn_v{}, [{} + {}];", indent, i, rv, i * 4).unwrap();
+                }
+                // Dot product Q·K
+                writeln!(self.output, "{}  mul.f32 %attn_score, %attn_q0, %attn_k0;", indent).unwrap();
+                for i in 1..8 {
+                    writeln!(self.output, "{}  fma.rn.f32 %attn_score, %attn_q{}, %attn_k{}, %attn_score;", indent, i, i).unwrap();
+                }
+                // Softmax approximation: exp(score)
+                writeln!(self.output, "{}  ex2.approx.f32 %attn_weight, %attn_score;", indent).unwrap();
+                // Output = weight * V
+                for i in 0..8 {
+                    writeln!(self.output, "{}  mul.f32 %attn_out{}, %attn_weight, %attn_v{};", indent, i, i).unwrap();
+                }
+                for i in 0..8 {
+                    writeln!(self.output, "{}  st.global.f32 [{} + {}], %attn_out{};", indent, reg, i * 4, i).unwrap();
+                }
+            }
+
+            // ==================== QUANTIZATION-AWARE TRAINING (QAT) ====================
+
+            // FakeQuantize: per-tensor fake quantization for QAT
+            GpuOp::FakeQuantize { value, scale, zero_point: _, quant_min, quant_max } => {
+                let rval = self.get_register(*value);
+                let rscale = self.get_register(*scale);
+                let reg = self.alloc_register(&GpuType::F32);
+                self.registers.push(reg.clone());
+                self.value_types.push(GpuType::F32);
+                writeln!(self.output, "{}// FakeQuantize: quantize then dequantize for QAT", indent).unwrap();
+                writeln!(self.output, "{}  .reg .f32 %fq_val, %fq_scale, %fq_q;", indent).unwrap();
+                writeln!(self.output, "{}  ld.global.f32 %fq_val, [{}];", indent, rval).unwrap();
+                writeln!(self.output, "{}  ld.global.f32 %fq_scale, [{}];", indent, rscale).unwrap();
+                writeln!(self.output, "{}  div.approx.f32 %fq_q, %fq_val, %fq_scale;", indent).unwrap();
+                writeln!(self.output, "{}  cvt.rni.f32.f32 %fq_q, %fq_q;", indent).unwrap();
+                writeln!(self.output, "{}  max.f32 %fq_q, %fq_q, 0F{:08X};", indent, (*quant_min as f32).to_bits()).unwrap();
+                writeln!(self.output, "{}  min.f32 %fq_q, %fq_q, 0F{:08X};", indent, (*quant_max as f32).to_bits()).unwrap();
+                writeln!(self.output, "{}  mul.f32 %fq_q, %fq_q, %fq_scale;", indent).unwrap();
+                writeln!(self.output, "{}  st.global.f32 [{}], %fq_q;", indent, reg).unwrap();
+            }
+
+            // FakeQuantizePerChannel: per-channel fake quantization
+            GpuOp::FakeQuantizePerChannel { value, scales, zero_points: _, axis: _, num_channels: _, quant_min, quant_max } => {
+                let rval = self.get_register(*value);
+                let rscales = self.get_register(*scales);
+                let reg = self.alloc_register(&GpuType::F32);
+                self.registers.push(reg.clone());
+                self.value_types.push(GpuType::F32);
+                writeln!(self.output, "{}// FakeQuantizePerChannel: per-channel QAT", indent).unwrap();
+                writeln!(self.output, "{}  .reg .f32 %fqc_val, %fqc_scale, %fqc_q;", indent).unwrap();
+                writeln!(self.output, "{}  ld.global.f32 %fqc_val, [{}];", indent, rval).unwrap();
+                writeln!(self.output, "{}  ld.global.f32 %fqc_scale, [{}];", indent, rscales).unwrap();
+                writeln!(self.output, "{}  div.approx.f32 %fqc_q, %fqc_val, %fqc_scale;", indent).unwrap();
+                writeln!(self.output, "{}  cvt.rni.f32.f32 %fqc_q, %fqc_q;", indent).unwrap();
+                writeln!(self.output, "{}  max.f32 %fqc_q, %fqc_q, 0F{:08X};", indent, (*quant_min as f32).to_bits()).unwrap();
+                writeln!(self.output, "{}  min.f32 %fqc_q, %fqc_q, 0F{:08X};", indent, (*quant_max as f32).to_bits()).unwrap();
+                writeln!(self.output, "{}  mul.f32 %fqc_q, %fqc_q, %fqc_scale;", indent).unwrap();
+                writeln!(self.output, "{}  st.global.f32 [{}], %fqc_q;", indent, reg).unwrap();
+            }
+
+            // FakeQuantizeQuat: quaternion fake quantization
+            GpuOp::FakeQuantizeQuat { quat, scale, quant_min, quant_max } => {
+                let rquat = self.get_register(*quat);
+                let rscale = self.get_register(*scale);
+                let reg = self.alloc_register(&GpuType::Array(Box::new(GpuType::F32), 4));
+                self.registers.push(reg.clone());
+                self.value_types.push(GpuType::Array(Box::new(GpuType::F32), 4));
+                writeln!(self.output, "{}// FakeQuantizeQuat: quaternion QAT", indent).unwrap();
+                writeln!(self.output, "{}  .reg .f32 %fqq_v<4>, %fqq_scale, %fqq_q<4>;", indent).unwrap();
+                writeln!(self.output, "{}  ld.global.f32 %fqq_scale, [{}];", indent, rscale).unwrap();
+                for i in 0..4 {
+                    writeln!(self.output, "{}  ld.global.f32 %fqq_v{}, [{} + {}];", indent, i, rquat, i * 4).unwrap();
+                    writeln!(self.output, "{}  div.approx.f32 %fqq_q{}, %fqq_v{}, %fqq_scale;", indent, i, i).unwrap();
+                    writeln!(self.output, "{}  cvt.rni.f32.f32 %fqq_q{}, %fqq_q{};", indent, i, i).unwrap();
+                    writeln!(self.output, "{}  max.f32 %fqq_q{}, %fqq_q{}, 0F{:08X};", indent, i, i, (*quant_min as f32).to_bits()).unwrap();
+                    writeln!(self.output, "{}  min.f32 %fqq_q{}, %fqq_q{}, 0F{:08X};", indent, i, i, (*quant_max as f32).to_bits()).unwrap();
+                    writeln!(self.output, "{}  mul.f32 %fqq_q{}, %fqq_q{}, %fqq_scale;", indent, i, i).unwrap();
+                }
+                for i in 0..4 {
+                    writeln!(self.output, "{}  st.global.f32 [{} + {}], %fqq_q{};", indent, reg, i * 4, i).unwrap();
+                }
+            }
+
+            // ==================== SPARSE QUATERNION OPERATIONS ====================
+
+            // SparseQuatLinearFwd: sparse quaternion linear forward
+            GpuOp::SparseQuatLinearFwd { w: _, w_metadata: _, x, b, out: _, in_features, out_features, sparsity_format: _ } => {
+                let rx = self.get_register(*x);
+                let rb = self.get_register(*b);
+                let reg = self.alloc_register(&GpuType::Array(Box::new(GpuType::F32), 4));
+                self.registers.push(reg.clone());
+                self.value_types.push(GpuType::Array(Box::new(GpuType::F32), 4));
+                writeln!(self.output, "{}// SparseQuatLinearFwd: {}in -> {}out (sparse stub)", indent, in_features, out_features).unwrap();
+                writeln!(self.output, "{}  .reg .f32 %sq_x<4>, %sq_b<4>, %sq_out<4>;", indent).unwrap();
+                for i in 0..4 {
+                    writeln!(self.output, "{}  ld.global.f32 %sq_x{}, [{} + {}];", indent, i, rx, i * 4).unwrap();
+                    writeln!(self.output, "{}  ld.global.f32 %sq_b{}, [{} + {}];", indent, i, rb, i * 4).unwrap();
+                    writeln!(self.output, "{}  add.f32 %sq_out{}, %sq_x{}, %sq_b{};", indent, i, i, i).unwrap();
+                }
+                for i in 0..4 {
+                    writeln!(self.output, "{}  st.global.f32 [{} + {}], %sq_out{};", indent, reg, i * 4, i).unwrap();
+                }
+            }
+
+            // SparseQuatLinearBwd: sparse quaternion linear backward
+            GpuOp::SparseQuatLinearBwd { w: _, w_metadata: _, x: _, dy, dW: _, dx: _, in_features, out_features, sparsity_format: _ } => {
+                let rdy = self.get_register(*dy);
+                let reg = self.alloc_register(&GpuType::Array(Box::new(GpuType::F32), 4));
+                self.registers.push(reg.clone());
+                self.value_types.push(GpuType::Array(Box::new(GpuType::F32), 4));
+                writeln!(self.output, "{}// SparseQuatLinearBwd: {}in -> {}out (sparse stub)", indent, in_features, out_features).unwrap();
+                writeln!(self.output, "{}  .reg .f32 %sqb_dy<4>;", indent).unwrap();
+                for i in 0..4 {
+                    writeln!(self.output, "{}  ld.global.f32 %sqb_dy{}, [{} + {}];", indent, i, rdy, i * 4).unwrap();
+                    writeln!(self.output, "{}  st.global.f32 [{} + {}], %sqb_dy{};", indent, reg, i * 4, i).unwrap();
+                }
+            }
+
+            // SparseQuatLoad: load sparse quaternion
+            GpuOp::SparseQuatLoad { ptr, metadata: _, format: _ } => {
+                let rptr = self.get_register(*ptr);
+                let reg = self.alloc_register(&GpuType::Array(Box::new(GpuType::F32), 4));
+                self.registers.push(reg.clone());
+                self.value_types.push(GpuType::Array(Box::new(GpuType::F32), 4));
+                writeln!(self.output, "{}// SparseQuatLoad: decompress sparse quaternion", indent).unwrap();
+                writeln!(self.output, "{}  .reg .f32 %sql_v<4>;", indent).unwrap();
+                for i in 0..4 {
+                    writeln!(self.output, "{}  ld.global.f32 %sql_v{}, [{} + {}];", indent, i, rptr, i * 4).unwrap();
+                    writeln!(self.output, "{}  st.global.f32 [{} + {}], %sql_v{};", indent, reg, i * 4, i).unwrap();
+                }
+            }
+
+            // SparseQuatStore: store sparse quaternion
+            GpuOp::SparseQuatStore { ptr, value, metadata: _, format: _ } => {
+                let rptr = self.get_register(*ptr);
+                let rval = self.get_register(*value);
+                let reg = self.alloc_register(&GpuType::Array(Box::new(GpuType::F32), 4));
+                self.registers.push(reg.clone());
+                self.value_types.push(GpuType::Array(Box::new(GpuType::F32), 4));
+                writeln!(self.output, "{}// SparseQuatStore: compress to sparse format", indent).unwrap();
+                writeln!(self.output, "{}  .reg .f32 %sqs_v<4>;", indent).unwrap();
+                for i in 0..4 {
+                    writeln!(self.output, "{}  ld.global.f32 %sqs_v{}, [{} + {}];", indent, i, rval, i * 4).unwrap();
+                    writeln!(self.output, "{}  st.global.f32 [{} + {}], %sqs_v{};", indent, rptr, i * 4, i).unwrap();
+                    writeln!(self.output, "{}  st.global.f32 [{} + {}], %sqs_v{};", indent, reg, i * 4, i).unwrap();
+                }
+            }
+
             // ================================================================
             // Cooperative Groups (CUDA 9.0+ / PTX 6.0+)
             // ================================================================

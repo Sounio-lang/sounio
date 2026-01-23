@@ -47,6 +47,7 @@ pub mod intrinsics;
 pub mod ir;
 pub mod metal;
 pub mod metal_runtime;
+pub mod mixed_precision;
 pub mod multi_gpu;
 pub mod numerical;
 pub mod optimizer;
@@ -55,6 +56,7 @@ pub mod portable;
 pub mod profiler;
 pub mod ptq;
 pub mod ptx;
+pub mod qat;
 pub mod qnn_tensor_core;
 pub mod qnn_kernels;
 pub mod quat_kernels_backward;
@@ -64,6 +66,8 @@ pub mod roofline;
 pub mod runtime;
 pub mod sourcemap;
 pub mod sparse;
+pub mod sparse_quat;
+pub mod system_profiler;
 #[cfg(feature = "gpu")]
 pub mod spirv;
 pub mod tensor_epistemic;
@@ -76,7 +80,7 @@ pub use ir::{
     BlockId, CoopReduceOp, CooperativeGroupId, CooperativeScope, CudaArch, CudaFeatures, Fp8Format,
     GpuBlock, GpuConstValue, GpuConstant, GpuFunction, GpuKernel, GpuModule, GpuOp, GpuParam,
     GpuTarget, GpuTerminator, GpuType, MemorySpace, MetalGpuFamily, PartitionType, QuantizeMode,
-    SharedMemDecl, TileLayout, TmaReduceOp, ValueId, WarpReduceOp, WarpVoteOp,
+    SharedMemDecl, SparseQuatFormat, TileLayout, TmaReduceOp, ValueId, WarpReduceOp, WarpVoteOp,
 };
 pub use ptx::PtxCodegen;
 pub use runtime::{
@@ -242,6 +246,10 @@ pub use profiler::{
 };
 pub use roofline::{
     Boundedness, OptimizationHint, RooflineAnalysis, RooflineModel, RooflinePlot, RooflinePoint,
+};
+pub use system_profiler::{
+    DispatchMetrics, KernelMetrics, LinuxPerfProfiler, NvidiaNCUProfiler, ProfilerError,
+    ProfilerManager, ProfilerResult, SystemProfiler,
 };
 
 // Numerical Stability & Error Propagation (Phase 13)

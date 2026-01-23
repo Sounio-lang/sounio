@@ -529,6 +529,31 @@ impl GpuType {
     pub fn is_integer(&self) -> bool {
         self.is_signed() || self.is_unsigned()
     }
+
+    /// Check if this is a low-precision float type (FP16/BF16/FP8/F4)
+    /// Used for mixed-precision training to identify conversion boundaries
+    pub fn is_low_precision_float(&self) -> bool {
+        matches!(
+            self,
+            GpuType::F16 | GpuType::BF16 | GpuType::F8E4M3 | GpuType::F8E5M2 | GpuType::F4
+        )
+    }
+
+    /// Get corresponding high-precision type (for mixed-precision backward pass)
+    /// Low-precision floats map to F32, others remain unchanged
+    pub fn to_high_precision(&self) -> GpuType {
+        match self {
+            GpuType::F16 | GpuType::BF16 | GpuType::F8E4M3 | GpuType::F8E5M2 | GpuType::F4 => {
+                GpuType::F32
+            }
+            _ => self.clone(),
+        }
+    }
+
+    /// Check if this is a quaternion-compatible type (Vec4 of floats)
+    pub fn is_quaternion(&self) -> bool {
+        matches!(self, GpuType::Vec4(inner) if inner.is_float())
+    }
 }
 
 impl fmt::Display for GpuType {
@@ -637,6 +662,43 @@ impl fmt::Display for Fp8Format {
         match self {
             Fp8Format::E4M3 => write!(f, "e4m3"),
             Fp8Format::E5M2 => write!(f, "e5m2"),
+        }
+    }
+}
+
+/// Sparse quaternion storage format
+/// All formats prune at quaternion granularity (4 components together)
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum SparseQuatFormat {
+    /// Dense quaternion storage (no sparsity)
+    Dense,
+    /// CSR format adapted for quaternions
+    QuatCSR,
+    /// Block-sparse with quaternion-aligned blocks
+    QuatBCSR {
+        block_m: u32,
+        block_n: u32,
+    },
+    /// 2:4 Structured sparsity (2 non-zero per 4 quaternions)
+    /// Compatible with Ampere+ Tensor Cores
+    QuatStructured2x4,
+    /// General N:M structured sparsity for quaternions
+    QuatStructuredNxM {
+        n: u32,
+        m: u32,
+    },
+}
+
+impl fmt::Display for SparseQuatFormat {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            SparseQuatFormat::Dense => write!(f, "dense"),
+            SparseQuatFormat::QuatCSR => write!(f, "quat_csr"),
+            SparseQuatFormat::QuatBCSR { block_m, block_n } => {
+                write!(f, "quat_bcsr_{}x{}", block_m, block_n)
+            }
+            SparseQuatFormat::QuatStructured2x4 => write!(f, "quat_2x4"),
+            SparseQuatFormat::QuatStructuredNxM { n, m } => write!(f, "quat_{}x{}", n, m),
         }
     }
 }
@@ -1494,6 +1556,141 @@ pub enum GpuOp {
         epsilon: f32,
     },
 
+    // ==================== OCTONION CONV/NORM/ACTIVATION EXTENSIONS ====================
+    // Extended ONN operations for complete neural network support
+
+    /// Octonion 2D convolution forward pass
+    /// Input: [batch, in_ch, H, W] octonions, Kernel: [out_ch, in_ch, kH, kW] octonions
+    OctonionConv2dFwd {
+        input: ValueId,
+        kernel: ValueId,
+        bias: ValueId,
+        output: ValueId,
+        in_channels: u32,
+        out_channels: u32,
+        kernel_h: u32,
+        kernel_w: u32,
+        stride: u32,
+        padding: u32,
+    },
+
+    /// Octonion 2D convolution backward pass
+    OctonionConv2dBwd {
+        input: ValueId,
+        kernel: ValueId,
+        grad_output: ValueId,
+        grad_input: ValueId,
+        grad_kernel: ValueId,
+        in_channels: u32,
+        out_channels: u32,
+        kernel_h: u32,
+        kernel_w: u32,
+        stride: u32,
+        padding: u32,
+    },
+
+    /// Octonion Layer Normalization forward pass
+    /// Normalizes across feature dimension for each sample
+    OctonionLayerNormFwd {
+        x: ValueId,
+        gamma: ValueId,
+        beta: ValueId,
+        normalized_shape: u32,
+        epsilon: f32,
+    },
+
+    /// Octonion Layer Normalization backward pass
+    OctonionLayerNormBwd {
+        x: ValueId,
+        mean: ValueId,
+        rstd: ValueId,
+        grad_output: ValueId,
+        grad_x: ValueId,
+        grad_gamma: ValueId,
+        grad_beta: ValueId,
+        normalized_shape: u32,
+        epsilon: f32,
+    },
+
+    /// Octonion GELU activation (component-wise)
+    /// GELU(x) ≈ x * sigmoid(1.702 * x)
+    OctonionGelu(ValueId),
+
+    /// G2-equivariant Octonion GELU (operates on norm, preserves direction)
+    OctonionGeluG2(ValueId),
+
+    /// Octonion Leaky ReLU (component-wise)
+    OctonionLeakyRelu(ValueId, f32),
+
+    /// G2-equivariant Octonion Leaky ReLU
+    OctonionLeakyReluG2(ValueId, f32),
+
+    /// Octonion Group Normalization forward pass
+    OctonionGroupNormFwd {
+        x: ValueId,
+        gamma: ValueId,
+        beta: ValueId,
+        num_groups: u32,
+        epsilon: f32,
+    },
+
+    /// Octonion Group Normalization backward pass
+    OctonionGroupNormBwd {
+        x: ValueId,
+        mean: ValueId,
+        rstd: ValueId,
+        grad_output: ValueId,
+        grad_x: ValueId,
+        grad_gamma: ValueId,
+        grad_beta: ValueId,
+        num_groups: u32,
+        epsilon: f32,
+    },
+
+    /// Octonion Instance Normalization forward pass
+    OctonionInstanceNormFwd {
+        x: ValueId,
+        gamma: ValueId,
+        beta: ValueId,
+        epsilon: f32,
+    },
+
+    /// Octonion Instance Normalization backward pass
+    OctonionInstanceNormBwd {
+        x: ValueId,
+        mean: ValueId,
+        rstd: ValueId,
+        grad_output: ValueId,
+        grad_x: ValueId,
+        grad_gamma: ValueId,
+        grad_beta: ValueId,
+        epsilon: f32,
+    },
+
+    /// Octonion Dropout (drops entire octonions to preserve algebraic structure)
+    OctonionDropout {
+        x: ValueId,
+        mask: ValueId,
+        p: f32,
+        training: bool,
+    },
+
+    /// Octonion Cross-Entropy loss (uses norm for probability conversion)
+    OctonionCrossEntropy {
+        logits: ValueId,
+        targets: ValueId,
+        output: ValueId,
+    },
+
+    /// Octonion multi-head attention
+    OctonionAttention {
+        query: ValueId,
+        key: ValueId,
+        value: ValueId,
+        output: ValueId,
+        num_heads: u32,
+    },
+
     // ==================== QUATERNIONIC NEURAL NETWORK OPERATIONS ====================
     // arXiv:1804.10592 - Quaternion Convolutional Neural Networks
     // arXiv:1903.08478 - Quaternion Recurrent Neural Networks
@@ -1689,6 +1886,85 @@ pub enum GpuOp {
 
     /// Record performance monitoring event
     PmEvent(u32), // event id
+
+    // ==================== QUANTIZATION-AWARE TRAINING (QAT) ====================
+    // Fake quantization for QAT: quantize then immediately dequantize
+    // Forward: output = dequant(quant(input, scale, zp))
+    // Backward: uses straight-through estimator (dx = dz)
+
+    /// Fake quantization per-tensor
+    /// Simulates INT8/INT4 quantization during training
+    FakeQuantize {
+        value: ValueId,
+        scale: ValueId,
+        zero_point: ValueId,
+        quant_min: i32,
+        quant_max: i32,
+    },
+
+    /// Fake quantization per-channel (for weights)
+    FakeQuantizePerChannel {
+        value: ValueId,
+        scales: ValueId,
+        zero_points: ValueId,
+        axis: u32,
+        num_channels: u32,
+        quant_min: i32,
+        quant_max: i32,
+    },
+
+    /// Fake quantization for quaternions
+    /// Uses single scale per quaternion (all 4 components share scale)
+    FakeQuantizeQuat {
+        quat: ValueId,
+        scale: ValueId,
+        quant_min: i32,
+        quant_max: i32,
+    },
+
+    // ==================== SPARSE QUATERNION OPERATIONS ====================
+    // Quaternion-aware sparsity: prune at quaternion granularity (4 components together)
+    // Supports 2:4 structured sparsity for Ampere+ Tensor Cores
+
+    /// Sparse quaternion linear forward with structured sparsity
+    SparseQuatLinearFwd {
+        w: ValueId,           // Compressed sparse weights
+        w_metadata: ValueId,  // 2:4 sparsity metadata
+        x: ValueId,           // Dense input
+        b: ValueId,           // Bias
+        out: ValueId,
+        in_features: u32,
+        out_features: u32,
+        sparsity_format: SparseQuatFormat,
+    },
+
+    /// Sparse quaternion linear backward
+    SparseQuatLinearBwd {
+        w: ValueId,
+        w_metadata: ValueId,
+        x: ValueId,
+        dy: ValueId,
+        dW: ValueId,
+        dx: ValueId,
+        in_features: u32,
+        out_features: u32,
+        sparsity_format: SparseQuatFormat,
+    },
+
+    /// Load sparse quaternion with decompression
+    SparseQuatLoad {
+        ptr: ValueId,
+        metadata: ValueId,
+        format: SparseQuatFormat,
+    },
+
+    /// Store quaternion with compression to sparse format
+    SparseQuatStore {
+        ptr: ValueId,
+        value: ValueId,
+        metadata: ValueId,
+        format: SparseQuatFormat,
+    },
 }
 
 /// Warp vote operations

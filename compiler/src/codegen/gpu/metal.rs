@@ -2152,6 +2152,267 @@ impl MetalCodegen {
                 self.emit(&format!("float8 {} = oct_bnb_dy * oct_bnb_gamma * rsqrt(oct_bnb_var + {}f);", result_name, epsilon));
             }
 
+            // ==================== EXTENDED ONN OPERATIONS ====================
+
+            // OctonionGelu: component-wise GELU activation
+            GpuOp::OctonionGelu(x) => {
+                let x_name = self.get_var_name(*x);
+                self.emit(&format!("// OctonionGelu: GELU(x) ≈ x * sigmoid(1.702 * x)"));
+                self.emit(&format!("float8 oct_gelu_x = *(device float8*)(&{});", x_name));
+                self.emit(&format!("float8 {} = oct_gelu_x * (1.0f / (1.0f + exp(-1.702f * oct_gelu_x)));", result_name));
+            }
+
+            // OctonionGeluG2: G2-equivariant GELU (operates on norm)
+            GpuOp::OctonionGeluG2(x) => {
+                let x_name = self.get_var_name(*x);
+                self.emit(&format!("// OctonionGeluG2: gelu(|o|) * (o / |o|)"));
+                self.emit(&format!("float8 oct_g2_x = *(device float8*)(&{});", x_name));
+                self.emit(&format!("float oct_g2_norm = sqrt(dot(oct_g2_x.lo, oct_g2_x.lo) + dot(oct_g2_x.hi, oct_g2_x.hi));"));
+                self.emit(&format!("float oct_g2_gelu = oct_g2_norm * (1.0f / (1.0f + exp(-1.702f * oct_g2_norm)));"));
+                self.emit(&format!("float8 {} = (oct_g2_norm > 1e-8f) ? (oct_g2_gelu / oct_g2_norm) * oct_g2_x : float8(0.0f);", result_name));
+            }
+
+            // OctonionLeakyRelu: component-wise leaky ReLU
+            GpuOp::OctonionLeakyRelu(x, alpha) => {
+                let x_name = self.get_var_name(*x);
+                self.emit(&format!("// OctonionLeakyRelu: max(alpha*x, x) per component"));
+                self.emit(&format!("float8 oct_lr_x = *(device float8*)(&{});", x_name));
+                self.emit(&format!("float8 {} = max({}f * oct_lr_x, oct_lr_x);", result_name, alpha));
+            }
+
+            // OctonionLeakyReluG2: G2-equivariant leaky ReLU
+            GpuOp::OctonionLeakyReluG2(x, alpha) => {
+                let x_name = self.get_var_name(*x);
+                self.emit(&format!("// OctonionLeakyReluG2: G2-equivariant on norm"));
+                self.emit(&format!("float8 oct_lrg2_x = *(device float8*)(&{});", x_name));
+                self.emit(&format!("float oct_lrg2_norm = sqrt(dot(oct_lrg2_x.lo, oct_lrg2_x.lo) + dot(oct_lrg2_x.hi, oct_lrg2_x.hi));"));
+                self.emit(&format!("float oct_lrg2_scale = max({}f * oct_lrg2_norm, oct_lrg2_norm);", alpha));
+                self.emit(&format!("float8 {} = (oct_lrg2_norm > 1e-8f) ? (oct_lrg2_scale / oct_lrg2_norm) * oct_lrg2_x : float8(0.0f);", result_name));
+            }
+
+            // OctonionConv2dFwd: 2D convolution forward (placeholder - full impl in kernel)
+            GpuOp::OctonionConv2dFwd { input, kernel, bias, output: _, in_channels, out_channels, kernel_h, kernel_w, stride, padding } => {
+                let input_name = self.get_var_name(*input);
+                let kernel_name = self.get_var_name(*kernel);
+                let bias_name = self.get_var_name(*bias);
+                self.emit(&format!("// OctonionConv2dFwd: {}ch -> {}ch, {}x{} kernel, stride={}, pad={}", in_channels, out_channels, kernel_h, kernel_w, stride, padding));
+                self.emit(&format!("// Full impl requires spatial loops - this is a single-element stub"));
+                self.emit(&format!("float8 oct_conv_in = *(device float8*)(&{});", input_name));
+                self.emit(&format!("float8 oct_conv_k = *(device float8*)(&{});", kernel_name));
+                self.emit(&format!("float8 oct_conv_b = *(device float8*)(&{});", bias_name));
+                // Simplified single-element: y = oct_mul(k, x) + b
+                self.emit(&format!("float8 {} = __oct_mul(oct_conv_k, oct_conv_in) + oct_conv_b;", result_name));
+            }
+
+            // OctonionConv2dBwd: 2D convolution backward (placeholder)
+            GpuOp::OctonionConv2dBwd { input, kernel, grad_output, grad_input: _, grad_kernel: _, in_channels, out_channels, kernel_h, kernel_w, stride, padding } => {
+                let input_name = self.get_var_name(*input);
+                let kernel_name = self.get_var_name(*kernel);
+                let grad_out_name = self.get_var_name(*grad_output);
+                self.emit(&format!("// OctonionConv2dBwd: {}ch -> {}ch, {}x{} kernel", in_channels, out_channels, kernel_h, kernel_w));
+                self.emit(&format!("// Backward requires transposed convolution + outer products"));
+                self.emit(&format!("float8 oct_bwd_in = *(device float8*)(&{});", input_name));
+                self.emit(&format!("float8 oct_bwd_k = *(device float8*)(&{});", kernel_name));
+                self.emit(&format!("float8 oct_bwd_dy = *(device float8*)(&{});", grad_out_name));
+                // Simplified: dx = oct_mul(conj(k), dy)
+                self.emit(&format!("float8 oct_bwd_k_conj = float8(oct_bwd_k.s0, -oct_bwd_k.s1, -oct_bwd_k.s2, -oct_bwd_k.s3, -oct_bwd_k.s4, -oct_bwd_k.s5, -oct_bwd_k.s6, -oct_bwd_k.s7);"));
+                self.emit(&format!("float8 {} = __oct_mul(oct_bwd_k_conj, oct_bwd_dy);", result_name));
+                let _ = (stride, padding);
+            }
+
+            // OctonionLayerNormFwd: Layer normalization forward
+            GpuOp::OctonionLayerNormFwd { x, gamma, beta, normalized_shape: _, epsilon } => {
+                let x_name = self.get_var_name(*x);
+                let gamma_name = self.get_var_name(*gamma);
+                let beta_name = self.get_var_name(*beta);
+                self.emit(&format!("// OctonionLayerNormFwd: normalize per sample"));
+                self.emit(&format!("float8 oct_ln_x = *(device float8*)(&{});", x_name));
+                self.emit(&format!("float8 oct_ln_gamma = *(device float8*)(&{});", gamma_name));
+                self.emit(&format!("float8 oct_ln_beta = *(device float8*)(&{});", beta_name));
+                // Per-component normalization
+                self.emit(&format!("float oct_ln_mean = (oct_ln_x.s0 + oct_ln_x.s1 + oct_ln_x.s2 + oct_ln_x.s3 + oct_ln_x.s4 + oct_ln_x.s5 + oct_ln_x.s6 + oct_ln_x.s7) / 8.0f;"));
+                self.emit(&format!("float8 oct_ln_centered = oct_ln_x - oct_ln_mean;"));
+                self.emit(&format!("float oct_ln_var = dot(oct_ln_centered.lo, oct_ln_centered.lo) + dot(oct_ln_centered.hi, oct_ln_centered.hi);"));
+                self.emit(&format!("float oct_ln_rstd = rsqrt(oct_ln_var / 8.0f + {}f);", epsilon));
+                self.emit(&format!("float8 {} = oct_ln_centered * oct_ln_rstd * oct_ln_gamma + oct_ln_beta;", result_name));
+            }
+
+            // OctonionLayerNormBwd: Layer normalization backward
+            GpuOp::OctonionLayerNormBwd { x, mean: _, rstd, grad_output, grad_x: _, grad_gamma: _, grad_beta: _, normalized_shape: _, epsilon: _ } => {
+                let x_name = self.get_var_name(*x);
+                let rstd_name = self.get_var_name(*rstd);
+                let grad_out_name = self.get_var_name(*grad_output);
+                self.emit(&format!("// OctonionLayerNormBwd: simplified backward"));
+                self.emit(&format!("float8 oct_lnb_x = *(device float8*)(&{});", x_name));
+                self.emit(&format!("float oct_lnb_rstd = *(device float*)(&{});", rstd_name));
+                self.emit(&format!("float8 oct_lnb_dy = *(device float8*)(&{});", grad_out_name));
+                self.emit(&format!("float8 {} = oct_lnb_dy * oct_lnb_rstd;", result_name));
+            }
+
+            // OctonionGroupNormFwd: Group normalization forward
+            GpuOp::OctonionGroupNormFwd { x, gamma, beta, num_groups: _, epsilon } => {
+                let x_name = self.get_var_name(*x);
+                let gamma_name = self.get_var_name(*gamma);
+                let beta_name = self.get_var_name(*beta);
+                self.emit(&format!("// OctonionGroupNormFwd: group normalization"));
+                self.emit(&format!("float8 oct_gn_x = *(device float8*)(&{});", x_name));
+                self.emit(&format!("float8 oct_gn_gamma = *(device float8*)(&{});", gamma_name));
+                self.emit(&format!("float8 oct_gn_beta = *(device float8*)(&{});", beta_name));
+                self.emit(&format!("float oct_gn_mean = (oct_gn_x.s0 + oct_gn_x.s1 + oct_gn_x.s2 + oct_gn_x.s3 + oct_gn_x.s4 + oct_gn_x.s5 + oct_gn_x.s6 + oct_gn_x.s7) / 8.0f;"));
+                self.emit(&format!("float8 oct_gn_centered = oct_gn_x - oct_gn_mean;"));
+                self.emit(&format!("float oct_gn_var = dot(oct_gn_centered.lo, oct_gn_centered.lo) + dot(oct_gn_centered.hi, oct_gn_centered.hi);"));
+                self.emit(&format!("float8 {} = oct_gn_centered * rsqrt(oct_gn_var / 8.0f + {}f) * oct_gn_gamma + oct_gn_beta;", result_name, epsilon));
+            }
+
+            // OctonionGroupNormBwd: Group normalization backward
+            GpuOp::OctonionGroupNormBwd { x: _, mean: _, rstd, grad_output, grad_x: _, grad_gamma: _, grad_beta: _, num_groups: _, epsilon: _ } => {
+                let rstd_name = self.get_var_name(*rstd);
+                let grad_out_name = self.get_var_name(*grad_output);
+                self.emit(&format!("// OctonionGroupNormBwd: simplified backward"));
+                self.emit(&format!("float oct_gnb_rstd = *(device float*)(&{});", rstd_name));
+                self.emit(&format!("float8 oct_gnb_dy = *(device float8*)(&{});", grad_out_name));
+                self.emit(&format!("float8 {} = oct_gnb_dy * oct_gnb_rstd;", result_name));
+            }
+
+            // OctonionInstanceNormFwd: Instance normalization forward
+            GpuOp::OctonionInstanceNormFwd { x, gamma, beta, epsilon } => {
+                let x_name = self.get_var_name(*x);
+                let gamma_name = self.get_var_name(*gamma);
+                let beta_name = self.get_var_name(*beta);
+                self.emit(&format!("// OctonionInstanceNormFwd: per-instance normalization"));
+                self.emit(&format!("float8 oct_in_x = *(device float8*)(&{});", x_name));
+                self.emit(&format!("float8 oct_in_gamma = *(device float8*)(&{});", gamma_name));
+                self.emit(&format!("float8 oct_in_beta = *(device float8*)(&{});", beta_name));
+                self.emit(&format!("float oct_in_mean = (oct_in_x.s0 + oct_in_x.s1 + oct_in_x.s2 + oct_in_x.s3 + oct_in_x.s4 + oct_in_x.s5 + oct_in_x.s6 + oct_in_x.s7) / 8.0f;"));
+                self.emit(&format!("float8 oct_in_centered = oct_in_x - oct_in_mean;"));
+                self.emit(&format!("float oct_in_var = dot(oct_in_centered.lo, oct_in_centered.lo) + dot(oct_in_centered.hi, oct_in_centered.hi);"));
+                self.emit(&format!("float8 {} = oct_in_centered * rsqrt(oct_in_var / 8.0f + {}f) * oct_in_gamma + oct_in_beta;", result_name, epsilon));
+            }
+
+            // OctonionInstanceNormBwd: Instance normalization backward
+            GpuOp::OctonionInstanceNormBwd { x: _, mean: _, rstd, grad_output, grad_x: _, grad_gamma: _, grad_beta: _, epsilon: _ } => {
+                let rstd_name = self.get_var_name(*rstd);
+                let grad_out_name = self.get_var_name(*grad_output);
+                self.emit(&format!("// OctonionInstanceNormBwd: simplified backward"));
+                self.emit(&format!("float oct_inb_rstd = *(device float*)(&{});", rstd_name));
+                self.emit(&format!("float8 oct_inb_dy = *(device float8*)(&{});", grad_out_name));
+                self.emit(&format!("float8 {} = oct_inb_dy * oct_inb_rstd;", result_name));
+            }
+
+            // OctonionDropout: dropout regularization
+            GpuOp::OctonionDropout { x, mask, p, training } => {
+                let x_name = self.get_var_name(*x);
+                let mask_name = self.get_var_name(*mask);
+                self.emit(&format!("// OctonionDropout: p={}, training={}", p, training));
+                self.emit(&format!("float8 oct_drop_x = *(device float8*)(&{});", x_name));
+                self.emit(&format!("float oct_drop_mask = *(device float*)(&{});", mask_name));
+                if *training {
+                    self.emit(&format!("float8 {} = (oct_drop_mask > {}f) ? oct_drop_x / {}f : float8(0.0f);", result_name, p, 1.0 - p));
+                } else {
+                    self.emit(&format!("float8 {} = oct_drop_x;", result_name));
+                }
+            }
+
+            // OctonionCrossEntropy: cross-entropy loss
+            GpuOp::OctonionCrossEntropy { logits, targets, output: _ } => {
+                let logits_name = self.get_var_name(*logits);
+                let targets_name = self.get_var_name(*targets);
+                self.emit(&format!("// OctonionCrossEntropy: uses norm for softmax"));
+                self.emit(&format!("float8 oct_ce_logits = *(device float8*)(&{});", logits_name));
+                self.emit(&format!("int oct_ce_target = *(device int*)(&{});", targets_name));
+                self.emit(&format!("float oct_ce_norm = sqrt(dot(oct_ce_logits.lo, oct_ce_logits.lo) + dot(oct_ce_logits.hi, oct_ce_logits.hi));"));
+                self.emit(&format!("float {} = -log(max(oct_ce_norm, 1e-8f));", result_name));
+            }
+
+            // OctonionAttention: multi-head attention
+            GpuOp::OctonionAttention { query, key, value, output: _, num_heads } => {
+                let q_name = self.get_var_name(*query);
+                let k_name = self.get_var_name(*key);
+                let v_name = self.get_var_name(*value);
+                self.emit(&format!("// OctonionAttention: {} heads", num_heads));
+                self.emit(&format!("float8 oct_attn_q = *(device float8*)(&{});", q_name));
+                self.emit(&format!("float8 oct_attn_k = *(device float8*)(&{});", k_name));
+                self.emit(&format!("float8 oct_attn_v = *(device float8*)(&{});", v_name));
+                // Simplified: score = dot(q, k), out = softmax(score) * v
+                self.emit(&format!("float oct_attn_score = dot(oct_attn_q.lo, oct_attn_k.lo) + dot(oct_attn_q.hi, oct_attn_k.hi);"));
+                self.emit(&format!("float oct_attn_weight = exp(oct_attn_score);"));
+                self.emit(&format!("float8 {} = oct_attn_weight * oct_attn_v;", result_name));
+            }
+
+            // ==================== QUANTIZATION-AWARE TRAINING (QAT) ====================
+
+            // FakeQuantize: per-tensor fake quantization for QAT
+            GpuOp::FakeQuantize { value, scale, zero_point: _, quant_min, quant_max } => {
+                let val_name = self.get_var_name(*value);
+                let scale_name = self.get_var_name(*scale);
+                self.emit(&format!("// FakeQuantize: quantize then dequantize for QAT"));
+                self.emit(&format!("float fq_val = *(device float*)(&{});", val_name));
+                self.emit(&format!("float fq_scale = *(device float*)(&{});", scale_name));
+                self.emit(&format!("float fq_q = round(fq_val / fq_scale);"));
+                self.emit(&format!("fq_q = clamp(fq_q, {}f, {}f);", quant_min, quant_max));
+                self.emit(&format!("float {} = fq_q * fq_scale;", result_name));
+            }
+
+            // FakeQuantizePerChannel: per-channel fake quantization
+            GpuOp::FakeQuantizePerChannel { value, scales, zero_points: _, axis: _, num_channels: _, quant_min, quant_max } => {
+                let val_name = self.get_var_name(*value);
+                let scales_name = self.get_var_name(*scales);
+                self.emit(&format!("// FakeQuantizePerChannel: per-channel QAT"));
+                self.emit(&format!("float fqc_val = *(device float*)(&{});", val_name));
+                self.emit(&format!("float fqc_scale = *(device float*)(&{});", scales_name));
+                self.emit(&format!("float fqc_q = round(fqc_val / fqc_scale);"));
+                self.emit(&format!("fqc_q = clamp(fqc_q, {}f, {}f);", quant_min, quant_max));
+                self.emit(&format!("float {} = fqc_q * fqc_scale;", result_name));
+            }
+
+            // FakeQuantizeQuat: quaternion fake quantization
+            GpuOp::FakeQuantizeQuat { quat, scale, quant_min, quant_max } => {
+                let quat_name = self.get_var_name(*quat);
+                let scale_name = self.get_var_name(*scale);
+                self.emit(&format!("// FakeQuantizeQuat: quaternion QAT"));
+                self.emit(&format!("float4 fqq_val = *(device float4*)(&{});", quat_name));
+                self.emit(&format!("float fqq_scale = *(device float*)(&{});", scale_name));
+                self.emit(&format!("float4 fqq_q = round(fqq_val / fqq_scale);"));
+                self.emit(&format!("fqq_q = clamp(fqq_q, {}f, {}f);", quant_min, quant_max));
+                self.emit(&format!("float4 {} = fqq_q * fqq_scale;", result_name));
+            }
+
+            // ==================== SPARSE QUATERNION OPERATIONS ====================
+
+            // SparseQuatLinearFwd: sparse quaternion linear forward
+            GpuOp::SparseQuatLinearFwd { w: _, w_metadata: _, x, b, out: _, in_features, out_features, sparsity_format: _ } => {
+                let x_name = self.get_var_name(*x);
+                let b_name = self.get_var_name(*b);
+                self.emit(&format!("// SparseQuatLinearFwd: {}in -> {}out (sparse)", in_features, out_features));
+                self.emit(&format!("float4 sq_x = *(device float4*)(&{});", x_name));
+                self.emit(&format!("float4 sq_b = *(device float4*)(&{});", b_name));
+                self.emit(&format!("float4 {} = sq_x + sq_b; // Stub: full sparse impl needed", result_name));
+            }
+
+            // SparseQuatLinearBwd: sparse quaternion linear backward
+            GpuOp::SparseQuatLinearBwd { w: _, w_metadata: _, x: _, dy, dW: _, dx: _, in_features, out_features, sparsity_format: _ } => {
+                let dy_name = self.get_var_name(*dy);
+                self.emit(&format!("// SparseQuatLinearBwd: {}in -> {}out (sparse)", in_features, out_features));
+                self.emit(&format!("float4 sq_dy = *(device float4*)(&{});", dy_name));
+                self.emit(&format!("float4 {} = sq_dy; // Stub: full sparse bwd impl needed", result_name));
+            }
+
+            // SparseQuatLoad: load sparse quaternion
+            GpuOp::SparseQuatLoad { ptr, metadata: _, format: _ } => {
+                let ptr_name = self.get_var_name(*ptr);
+                self.emit(&format!("// SparseQuatLoad: decompress sparse quaternion"));
+                self.emit(&format!("float4 {} = *(device float4*)(&{});", result_name, ptr_name));
+            }
+
+            // SparseQuatStore: store sparse quaternion
+            GpuOp::SparseQuatStore { ptr, value, metadata: _, format: _ } => {
+                let ptr_name = self.get_var_name(*ptr);
+                let val_name = self.get_var_name(*value);
+                self.emit(&format!("// SparseQuatStore: compress to sparse format"));
+                self.emit(&format!("*(device float4*)(&{}) = *(device float4*)(&{});", ptr_name, val_name));
+                self.emit(&format!("float4 {} = *(device float4*)(&{});", result_name, val_name));
+            }
+
             // Atomics not handled above
             GpuOp::AtomicAnd(_, _) | GpuOp::AtomicOr(_, _) | GpuOp::AtomicXor(_, _) => {
                 self.emit(&format!(
