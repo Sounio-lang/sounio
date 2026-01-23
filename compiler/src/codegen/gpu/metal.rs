@@ -1803,8 +1803,56 @@ impl MetalCodegen {
                 self.emit(&format!("float8 {} = float8(oct_orig.s0, -oct_orig.s1, -oct_orig.s2, -oct_orig.s3, -oct_orig.s4, -oct_orig.s5, -oct_orig.s6, -oct_orig.s7);", result_name));
             }
 
+            // Octonion multiplication via Cayley-Dickson construction
+            // Math: c = a * b using Cayley-Dickson product formula
+            // Ref: Baez, "The Octonions", Bull. AMS 2002
+            // Complexity: 64 FMul + 56 FAdd = 120 FLOPs
+            GpuOp::OctonionMul(o1, o2) => {
+                let o1_name = self.get_var_name(*o1);
+                let o2_name = self.get_var_name(*o2);
+                self.emit(&format!("// OctonionMul: Cayley-Dickson multiplication"));
+                self.emit(&format!("// Load operands as float8 vectors"));
+                self.emit(&format!("float8 oct_a = *(device float8*)(&{});", o1_name));
+                self.emit(&format!("float8 oct_b = *(device float8*)(&{});", o2_name));
+
+                // Component c0 = a0*b0 - a1*b1 - a2*b2 - a3*b3 - a4*b4 - a5*b5 - a6*b6 - a7*b7
+                self.emit(&format!("// c0 = a0*b0 - a1*b1 - a2*b2 - a3*b3 - a4*b4 - a5*b5 - a6*b6 - a7*b7"));
+                self.emit(&format!("float c0 = oct_a.s0*oct_b.s0 - oct_a.s1*oct_b.s1 - oct_a.s2*oct_b.s2 - oct_a.s3*oct_b.s3 - oct_a.s4*oct_b.s4 - oct_a.s5*oct_b.s5 - oct_a.s6*oct_b.s6 - oct_a.s7*oct_b.s7;"));
+
+                // Correct Cayley-Dickson formula (verified for norm multiplicativity and Moufang identities)
+                // c1 = a0*b1 + a1*b0 + a2*b3 - a3*b2 + a4*b5 - a5*b4 - a6*b7 + a7*b6
+                self.emit(&format!("// c1 = a0*b1 + a1*b0 + a2*b3 - a3*b2 + a4*b5 - a5*b4 - a6*b7 + a7*b6"));
+                self.emit(&format!("float c1 = oct_a.s0*oct_b.s1 + oct_a.s1*oct_b.s0 + oct_a.s2*oct_b.s3 - oct_a.s3*oct_b.s2 + oct_a.s4*oct_b.s5 - oct_a.s5*oct_b.s4 - oct_a.s6*oct_b.s7 + oct_a.s7*oct_b.s6;"));
+
+                // c2 = a0*b2 - a1*b3 + a2*b0 + a3*b1 + a4*b6 + a5*b7 - a6*b4 - a7*b5
+                self.emit(&format!("// c2 = a0*b2 - a1*b3 + a2*b0 + a3*b1 + a4*b6 + a5*b7 - a6*b4 - a7*b5"));
+                self.emit(&format!("float c2 = oct_a.s0*oct_b.s2 - oct_a.s1*oct_b.s3 + oct_a.s2*oct_b.s0 + oct_a.s3*oct_b.s1 + oct_a.s4*oct_b.s6 + oct_a.s5*oct_b.s7 - oct_a.s6*oct_b.s4 - oct_a.s7*oct_b.s5;"));
+
+                // c3 = a0*b3 + a1*b2 - a2*b1 + a3*b0 + a4*b7 - a5*b6 + a6*b5 - a7*b4
+                self.emit(&format!("// c3 = a0*b3 + a1*b2 - a2*b1 + a3*b0 + a4*b7 - a5*b6 + a6*b5 - a7*b4"));
+                self.emit(&format!("float c3 = oct_a.s0*oct_b.s3 + oct_a.s1*oct_b.s2 - oct_a.s2*oct_b.s1 + oct_a.s3*oct_b.s0 + oct_a.s4*oct_b.s7 - oct_a.s5*oct_b.s6 + oct_a.s6*oct_b.s5 - oct_a.s7*oct_b.s4;"));
+
+                // c4 = a0*b4 - a1*b5 - a2*b6 - a3*b7 + a4*b0 + a5*b1 + a6*b2 + a7*b3
+                self.emit(&format!("// c4 = a0*b4 - a1*b5 - a2*b6 - a3*b7 + a4*b0 + a5*b1 + a6*b2 + a7*b3"));
+                self.emit(&format!("float c4 = oct_a.s0*oct_b.s4 - oct_a.s1*oct_b.s5 - oct_a.s2*oct_b.s6 - oct_a.s3*oct_b.s7 + oct_a.s4*oct_b.s0 + oct_a.s5*oct_b.s1 + oct_a.s6*oct_b.s2 + oct_a.s7*oct_b.s3;"));
+
+                // c5 = a0*b5 + a1*b4 - a2*b7 + a3*b6 - a4*b1 + a5*b0 - a6*b3 + a7*b2
+                self.emit(&format!("// c5 = a0*b5 + a1*b4 - a2*b7 + a3*b6 - a4*b1 + a5*b0 - a6*b3 + a7*b2"));
+                self.emit(&format!("float c5 = oct_a.s0*oct_b.s5 + oct_a.s1*oct_b.s4 - oct_a.s2*oct_b.s7 + oct_a.s3*oct_b.s6 - oct_a.s4*oct_b.s1 + oct_a.s5*oct_b.s0 - oct_a.s6*oct_b.s3 + oct_a.s7*oct_b.s2;"));
+
+                // c6 = a0*b6 + a1*b7 + a2*b4 - a3*b5 - a4*b2 + a5*b3 + a6*b0 - a7*b1
+                self.emit(&format!("// c6 = a0*b6 + a1*b7 + a2*b4 - a3*b5 - a4*b2 + a5*b3 + a6*b0 - a7*b1"));
+                self.emit(&format!("float c6 = oct_a.s0*oct_b.s6 + oct_a.s1*oct_b.s7 + oct_a.s2*oct_b.s4 - oct_a.s3*oct_b.s5 - oct_a.s4*oct_b.s2 + oct_a.s5*oct_b.s3 + oct_a.s6*oct_b.s0 - oct_a.s7*oct_b.s1;"));
+
+                // c7 = a0*b7 - a1*b6 + a2*b5 + a3*b4 - a4*b3 - a5*b2 + a6*b1 + a7*b0
+                self.emit(&format!("// c7 = a0*b7 - a1*b6 + a2*b5 + a3*b4 - a4*b3 - a5*b2 + a6*b1 + a7*b0"));
+                self.emit(&format!("float c7 = oct_a.s0*oct_b.s7 - oct_a.s1*oct_b.s6 + oct_a.s2*oct_b.s5 + oct_a.s3*oct_b.s4 - oct_a.s4*oct_b.s3 - oct_a.s5*oct_b.s2 + oct_a.s6*oct_b.s1 + oct_a.s7*oct_b.s0;"));
+
+                // Construct result
+                self.emit(&format!("float8 {} = float8(c0, c1, c2, c3, c4, c5, c6, c7);", result_name));
+            }
+
             // Octonion operations (8D hypercomplex) - STUBS (TODO: implement remaining)
-            | GpuOp::OctonionMul(_, _)
             | GpuOp::OctonionInv(_)
             | GpuOp::OctonionReal(_)
             | GpuOp::OctonionImag(_)

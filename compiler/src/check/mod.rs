@@ -2054,6 +2054,8 @@ impl TypeChecker {
             Expr::Path { id, path } => {
                 if path.segments.len() == 1 {
                     let name = &path.segments[0];
+                    if name.starts_with("quat_init") || name.starts_with("quat_relu") {
+                    }
                     if let Some(binding) = self.env.lookup(name) {
                         let ty = binding.ty.clone();
                         (HirExprKind::Local(name.clone()), self.type_to_hir(&ty))
@@ -4336,7 +4338,7 @@ impl TypeChecker {
 
     /// Check if a name is a builtin function
     fn is_builtin_function(&self, name: &str) -> bool {
-        matches!(
+        let result = matches!(
             name,
             "print"
                 | "println"
@@ -4483,7 +4485,10 @@ impl TypeChecker {
                 | "quat_lstm_cell"
                 | "quat_gru_cell"
                 | "quat_attention"
-        )
+        );
+        if name.starts_with("quat_init") || name.starts_with("quat_relu") || name.starts_with("quat_sigmoid") {
+        }
+        result
     }
 
     /// Get the type of a builtin function

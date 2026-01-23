@@ -167,6 +167,15 @@ impl Resolver {
             "as_const", "as_mut", "size_of", "align_of",
             // Option/Result constructors
             "Some", "None", "Ok", "Err",
+            // QNN (Quaternionic Neural Network) Intrinsics
+            "quat_linear_fwd", "quat_linear_bwd",
+            "quat_conv2d_fwd", "quat_conv2d_bwd",
+            "quat_relu", "quat_sigmoid", "quat_tanh", "quat_leaky_relu",
+            "quat_avg_pool2d", "quat_max_pool2d",
+            "quat_init_xavier", "quat_init_he", "quat_init_unit",
+            "quat_bn_create", "quat_bn_fwd", "quat_bn_bwd",
+            "quat_lstm_cell", "quat_gru_cell",
+            "quat_attention",
         ];
 
         for name in builtins {

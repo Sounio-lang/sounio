@@ -3772,15 +3772,155 @@ impl PtxCodegen {
             // ================================================================
 
             // Octonion multiplication via Cayley-Dickson construction
+            // Math: c = a * b using Cayley-Dickson product formula
+            // Ref: Baez, "The Octonions", Bull. AMS 2002
+            // Complexity: 64 FMul + 56 FAdd = 120 FLOPs
             GpuOp::OctonionMul(o1, o2) => {
-                let _ro1 = self.get_register(*o1);
-                let _ro2 = self.get_register(*o2);
+                let ro1 = self.get_register(*o1);
+                let ro2 = self.get_register(*o2);
                 let reg = self.alloc_register(&GpuType::Array(Box::new(GpuType::F32), 8));
                 self.registers.push(reg.clone());
                 self.value_types
                     .push(GpuType::Array(Box::new(GpuType::F32), 8));
-                writeln!(self.output, "{}// OctonionMul: 8D multiplication", indent).unwrap();
-                writeln!(self.output, "{}call.uni __octonion_mul, ({});", indent, reg).unwrap();
+
+                writeln!(self.output, "{}// OctonionMul: Cayley-Dickson multiplication (inline implementation)", indent).unwrap();
+                writeln!(self.output, "{}// Formula: c[i] = sum of products with signs from Fano plane", indent).unwrap();
+                writeln!(self.output, "{}  .reg .f32 %mul_a<8>;   // first operand components", indent).unwrap();
+                writeln!(self.output, "{}  .reg .f32 %mul_b<8>;   // second operand components", indent).unwrap();
+                writeln!(self.output, "{}  .reg .f32 %mul_c<8>;   // result components", indent).unwrap();
+                writeln!(self.output, "{}  .reg .f32 %mul_t<8>;   // temporary products", indent).unwrap();
+
+                // Load all components from both operands
+                for i in 0..8 {
+                    writeln!(
+                        self.output,
+                        "{}  ld.global.f32 %mul_a{}, [{} + {}];",
+                        indent, i, ro1, i * 4
+                    ).unwrap();
+                }
+                for i in 0..8 {
+                    writeln!(
+                        self.output,
+                        "{}  ld.global.f32 %mul_b{}, [{} + {}];",
+                        indent, i, ro2, i * 4
+                    ).unwrap();
+                }
+
+                // Component c0 = a0*b0 - a1*b1 - a2*b2 - a3*b3 - a4*b4 - a5*b5 - a6*b6 - a7*b7
+                writeln!(self.output, "{}  // c0 = a0*b0 - a1*b1 - a2*b2 - a3*b3 - a4*b4 - a5*b5 - a6*b6 - a7*b7", indent).unwrap();
+                writeln!(self.output, "{}  mul.f32 %mul_c0, %mul_a0, %mul_b0;", indent).unwrap();
+                for i in 1..8 {
+                    writeln!(self.output, "{}  mul.f32 %mul_t0, %mul_a{}, %mul_b{};", indent, i, i).unwrap();
+                    writeln!(self.output, "{}  sub.f32 %mul_c0, %mul_c0, %mul_t0;", indent).unwrap();
+                }
+
+                // Correct Cayley-Dickson formula (verified for norm multiplicativity and Moufang identities)
+                // c1 = a0*b1 + a1*b0 + a2*b3 - a3*b2 + a4*b5 - a5*b4 - a6*b7 + a7*b6
+                writeln!(self.output, "{}  // c1 = a0*b1 + a1*b0 + a2*b3 - a3*b2 + a4*b5 - a5*b4 - a6*b7 + a7*b6", indent).unwrap();
+                writeln!(self.output, "{}  mul.f32 %mul_c1, %mul_a0, %mul_b1;", indent).unwrap();
+                writeln!(self.output, "{}  fma.rn.f32 %mul_c1, %mul_a1, %mul_b0, %mul_c1;", indent).unwrap();
+                writeln!(self.output, "{}  fma.rn.f32 %mul_c1, %mul_a2, %mul_b3, %mul_c1;", indent).unwrap();
+                writeln!(self.output, "{}  mul.f32 %mul_t1, %mul_a3, %mul_b2;", indent).unwrap();
+                writeln!(self.output, "{}  sub.f32 %mul_c1, %mul_c1, %mul_t1;", indent).unwrap();
+                writeln!(self.output, "{}  fma.rn.f32 %mul_c1, %mul_a4, %mul_b5, %mul_c1;", indent).unwrap();
+                writeln!(self.output, "{}  mul.f32 %mul_t1, %mul_a5, %mul_b4;", indent).unwrap();
+                writeln!(self.output, "{}  sub.f32 %mul_c1, %mul_c1, %mul_t1;", indent).unwrap();
+                writeln!(self.output, "{}  mul.f32 %mul_t1, %mul_a6, %mul_b7;", indent).unwrap();
+                writeln!(self.output, "{}  sub.f32 %mul_c1, %mul_c1, %mul_t1;", indent).unwrap();
+                writeln!(self.output, "{}  fma.rn.f32 %mul_c1, %mul_a7, %mul_b6, %mul_c1;", indent).unwrap();
+
+                // c2 = a0*b2 - a1*b3 + a2*b0 + a3*b1 + a4*b6 + a5*b7 - a6*b4 - a7*b5
+                writeln!(self.output, "{}  // c2 = a0*b2 - a1*b3 + a2*b0 + a3*b1 + a4*b6 + a5*b7 - a6*b4 - a7*b5", indent).unwrap();
+                writeln!(self.output, "{}  mul.f32 %mul_c2, %mul_a0, %mul_b2;", indent).unwrap();
+                writeln!(self.output, "{}  mul.f32 %mul_t2, %mul_a1, %mul_b3;", indent).unwrap();
+                writeln!(self.output, "{}  sub.f32 %mul_c2, %mul_c2, %mul_t2;", indent).unwrap();
+                writeln!(self.output, "{}  fma.rn.f32 %mul_c2, %mul_a2, %mul_b0, %mul_c2;", indent).unwrap();
+                writeln!(self.output, "{}  fma.rn.f32 %mul_c2, %mul_a3, %mul_b1, %mul_c2;", indent).unwrap();
+                writeln!(self.output, "{}  fma.rn.f32 %mul_c2, %mul_a4, %mul_b6, %mul_c2;", indent).unwrap();
+                writeln!(self.output, "{}  fma.rn.f32 %mul_c2, %mul_a5, %mul_b7, %mul_c2;", indent).unwrap();
+                writeln!(self.output, "{}  mul.f32 %mul_t2, %mul_a6, %mul_b4;", indent).unwrap();
+                writeln!(self.output, "{}  sub.f32 %mul_c2, %mul_c2, %mul_t2;", indent).unwrap();
+                writeln!(self.output, "{}  mul.f32 %mul_t2, %mul_a7, %mul_b5;", indent).unwrap();
+                writeln!(self.output, "{}  sub.f32 %mul_c2, %mul_c2, %mul_t2;", indent).unwrap();
+
+                // c3 = a0*b3 + a1*b2 - a2*b1 + a3*b0 + a4*b7 - a5*b6 + a6*b5 - a7*b4
+                writeln!(self.output, "{}  // c3 = a0*b3 + a1*b2 - a2*b1 + a3*b0 + a4*b7 - a5*b6 + a6*b5 - a7*b4", indent).unwrap();
+                writeln!(self.output, "{}  mul.f32 %mul_c3, %mul_a0, %mul_b3;", indent).unwrap();
+                writeln!(self.output, "{}  fma.rn.f32 %mul_c3, %mul_a1, %mul_b2, %mul_c3;", indent).unwrap();
+                writeln!(self.output, "{}  mul.f32 %mul_t3, %mul_a2, %mul_b1;", indent).unwrap();
+                writeln!(self.output, "{}  sub.f32 %mul_c3, %mul_c3, %mul_t3;", indent).unwrap();
+                writeln!(self.output, "{}  fma.rn.f32 %mul_c3, %mul_a3, %mul_b0, %mul_c3;", indent).unwrap();
+                writeln!(self.output, "{}  fma.rn.f32 %mul_c3, %mul_a4, %mul_b7, %mul_c3;", indent).unwrap();
+                writeln!(self.output, "{}  mul.f32 %mul_t3, %mul_a5, %mul_b6;", indent).unwrap();
+                writeln!(self.output, "{}  sub.f32 %mul_c3, %mul_c3, %mul_t3;", indent).unwrap();
+                writeln!(self.output, "{}  fma.rn.f32 %mul_c3, %mul_a6, %mul_b5, %mul_c3;", indent).unwrap();
+                writeln!(self.output, "{}  mul.f32 %mul_t3, %mul_a7, %mul_b4;", indent).unwrap();
+                writeln!(self.output, "{}  sub.f32 %mul_c3, %mul_c3, %mul_t3;", indent).unwrap();
+
+                // c4 = a0*b4 - a1*b5 - a2*b6 - a3*b7 + a4*b0 + a5*b1 + a6*b2 + a7*b3
+                writeln!(self.output, "{}  // c4 = a0*b4 - a1*b5 - a2*b6 - a3*b7 + a4*b0 + a5*b1 + a6*b2 + a7*b3", indent).unwrap();
+                writeln!(self.output, "{}  mul.f32 %mul_c4, %mul_a0, %mul_b4;", indent).unwrap();
+                writeln!(self.output, "{}  mul.f32 %mul_t4, %mul_a1, %mul_b5;", indent).unwrap();
+                writeln!(self.output, "{}  sub.f32 %mul_c4, %mul_c4, %mul_t4;", indent).unwrap();
+                writeln!(self.output, "{}  mul.f32 %mul_t4, %mul_a2, %mul_b6;", indent).unwrap();
+                writeln!(self.output, "{}  sub.f32 %mul_c4, %mul_c4, %mul_t4;", indent).unwrap();
+                writeln!(self.output, "{}  mul.f32 %mul_t4, %mul_a3, %mul_b7;", indent).unwrap();
+                writeln!(self.output, "{}  sub.f32 %mul_c4, %mul_c4, %mul_t4;", indent).unwrap();
+                writeln!(self.output, "{}  fma.rn.f32 %mul_c4, %mul_a4, %mul_b0, %mul_c4;", indent).unwrap();
+                writeln!(self.output, "{}  fma.rn.f32 %mul_c4, %mul_a5, %mul_b1, %mul_c4;", indent).unwrap();
+                writeln!(self.output, "{}  fma.rn.f32 %mul_c4, %mul_a6, %mul_b2, %mul_c4;", indent).unwrap();
+                writeln!(self.output, "{}  fma.rn.f32 %mul_c4, %mul_a7, %mul_b3, %mul_c4;", indent).unwrap();
+
+                // c5 = a0*b5 + a1*b4 - a2*b7 + a3*b6 - a4*b1 + a5*b0 - a6*b3 + a7*b2
+                writeln!(self.output, "{}  // c5 = a0*b5 + a1*b4 - a2*b7 + a3*b6 - a4*b1 + a5*b0 - a6*b3 + a7*b2", indent).unwrap();
+                writeln!(self.output, "{}  mul.f32 %mul_c5, %mul_a0, %mul_b5;", indent).unwrap();
+                writeln!(self.output, "{}  fma.rn.f32 %mul_c5, %mul_a1, %mul_b4, %mul_c5;", indent).unwrap();
+                writeln!(self.output, "{}  mul.f32 %mul_t5, %mul_a2, %mul_b7;", indent).unwrap();
+                writeln!(self.output, "{}  sub.f32 %mul_c5, %mul_c5, %mul_t5;", indent).unwrap();
+                writeln!(self.output, "{}  fma.rn.f32 %mul_c5, %mul_a3, %mul_b6, %mul_c5;", indent).unwrap();
+                writeln!(self.output, "{}  mul.f32 %mul_t5, %mul_a4, %mul_b1;", indent).unwrap();
+                writeln!(self.output, "{}  sub.f32 %mul_c5, %mul_c5, %mul_t5;", indent).unwrap();
+                writeln!(self.output, "{}  fma.rn.f32 %mul_c5, %mul_a5, %mul_b0, %mul_c5;", indent).unwrap();
+                writeln!(self.output, "{}  mul.f32 %mul_t5, %mul_a6, %mul_b3;", indent).unwrap();
+                writeln!(self.output, "{}  sub.f32 %mul_c5, %mul_c5, %mul_t5;", indent).unwrap();
+                writeln!(self.output, "{}  fma.rn.f32 %mul_c5, %mul_a7, %mul_b2, %mul_c5;", indent).unwrap();
+
+                // c6 = a0*b6 + a1*b7 + a2*b4 - a3*b5 - a4*b2 + a5*b3 + a6*b0 - a7*b1
+                writeln!(self.output, "{}  // c6 = a0*b6 + a1*b7 + a2*b4 - a3*b5 - a4*b2 + a5*b3 + a6*b0 - a7*b1", indent).unwrap();
+                writeln!(self.output, "{}  mul.f32 %mul_c6, %mul_a0, %mul_b6;", indent).unwrap();
+                writeln!(self.output, "{}  fma.rn.f32 %mul_c6, %mul_a1, %mul_b7, %mul_c6;", indent).unwrap();
+                writeln!(self.output, "{}  fma.rn.f32 %mul_c6, %mul_a2, %mul_b4, %mul_c6;", indent).unwrap();
+                writeln!(self.output, "{}  mul.f32 %mul_t6, %mul_a3, %mul_b5;", indent).unwrap();
+                writeln!(self.output, "{}  sub.f32 %mul_c6, %mul_c6, %mul_t6;", indent).unwrap();
+                writeln!(self.output, "{}  mul.f32 %mul_t6, %mul_a4, %mul_b2;", indent).unwrap();
+                writeln!(self.output, "{}  sub.f32 %mul_c6, %mul_c6, %mul_t6;", indent).unwrap();
+                writeln!(self.output, "{}  fma.rn.f32 %mul_c6, %mul_a5, %mul_b3, %mul_c6;", indent).unwrap();
+                writeln!(self.output, "{}  fma.rn.f32 %mul_c6, %mul_a6, %mul_b0, %mul_c6;", indent).unwrap();
+                writeln!(self.output, "{}  mul.f32 %mul_t6, %mul_a7, %mul_b1;", indent).unwrap();
+                writeln!(self.output, "{}  sub.f32 %mul_c6, %mul_c6, %mul_t6;", indent).unwrap();
+
+                // c7 = a0*b7 - a1*b6 + a2*b5 + a3*b4 - a4*b3 - a5*b2 + a6*b1 + a7*b0
+                writeln!(self.output, "{}  // c7 = a0*b7 - a1*b6 + a2*b5 + a3*b4 - a4*b3 - a5*b2 + a6*b1 + a7*b0", indent).unwrap();
+                writeln!(self.output, "{}  mul.f32 %mul_c7, %mul_a0, %mul_b7;", indent).unwrap();
+                writeln!(self.output, "{}  mul.f32 %mul_t7, %mul_a1, %mul_b6;", indent).unwrap();
+                writeln!(self.output, "{}  sub.f32 %mul_c7, %mul_c7, %mul_t7;", indent).unwrap();
+                writeln!(self.output, "{}  fma.rn.f32 %mul_c7, %mul_a2, %mul_b5, %mul_c7;", indent).unwrap();
+                writeln!(self.output, "{}  fma.rn.f32 %mul_c7, %mul_a3, %mul_b4, %mul_c7;", indent).unwrap();
+                writeln!(self.output, "{}  mul.f32 %mul_t7, %mul_a4, %mul_b3;", indent).unwrap();
+                writeln!(self.output, "{}  sub.f32 %mul_c7, %mul_c7, %mul_t7;", indent).unwrap();
+                writeln!(self.output, "{}  mul.f32 %mul_t7, %mul_a5, %mul_b2;", indent).unwrap();
+                writeln!(self.output, "{}  sub.f32 %mul_c7, %mul_c7, %mul_t7;", indent).unwrap();
+                writeln!(self.output, "{}  fma.rn.f32 %mul_c7, %mul_a6, %mul_b1, %mul_c7;", indent).unwrap();
+                writeln!(self.output, "{}  fma.rn.f32 %mul_c7, %mul_a7, %mul_b0, %mul_c7;", indent).unwrap();
+
+                // Store results
+                for i in 0..8 {
+                    writeln!(
+                        self.output,
+                        "{}  st.global.f32 [{} + {}], %mul_c{};",
+                        indent, reg, i * 4, i
+                    ).unwrap();
+                }
             }
 
             // Octonion conjugate

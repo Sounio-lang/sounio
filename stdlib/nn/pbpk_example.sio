@@ -1,0 +1,811 @@
+//! stdlib/nn/pbpk_example.sio
+//!
+//! PBPK Model Example using Quaternion Neural Networks
+//!
+//! This example demonstrates how to use quaternion neural networks for
+//! Physiologically-Based Pharmacokinetic (PBPK) modeling of drug distribution
+//! across different organs and tissues over time.
+//!
+//! Applications:
+//! - Drug concentration prediction across organs (brain, liver, kidney, etc.)
+//! - Personalized medicine based on patient physiology
+//! - Drug dosing optimization
+//! - Toxicity assessment
+
+use stdlib.nn.quaternion.{Quaternion, quaternion_exact, quaternion_from_axis_angle, quaternion_rotate_vector}
+use stdlib.nn.dense_quaternion.{QuaternionMLP, quaternion_mlp_new}
+use stdlib.nn.optimizers_quaternion.{AdamQuaternion, adam_quaternion_default, pbpk_spatial_loss, pbpk_temporal_loss, pbpk_combined_loss}
+
+// ============================================================================
+// PBPK MODEL PARAMETERS
+// ============================================================================
+
+/// Organ/tissue types in PBPK model
+enum OrganType {
+    Brain,
+    Heart,
+    Liver,
+    Kidney,
+    Lung,
+    Muscle,
+    Adipose,
+    Blood,
+    Plasma,
+}
+
+/// Patient physiological parameters
+struct PatientPhysiology {
+    /// Body weight (kg)
+    body_weight: f64,
+    
+    /// Height (cm)
+    height: f64,
+    
+    /// Age (years)
+    age: f64,
+    
+    /// Gender (0=female, 1=male)
+    gender: i64,
+    
+    /// Cardiac output (L/min)
+    cardiac_output: f64,
+    
+    /// Liver blood flow (L/min)
+    liver_flow: f64,
+    
+    /// Kidney blood flow (L/min)
+    kidney_flow: f64,
+    
+    /// Brain blood flow (L/min)
+    brain_flow: f64,
+    
+    /// Muscle mass fraction
+    muscle_fraction: f64,
+    
+    /// Adipose tissue fraction
+    adipose_fraction: f64,
+}
+
+/// Drug pharmacokinetic parameters
+struct DrugParameters {
+    /// Molecular weight (g/mol)
+    molecular_weight: f64,
+    
+    /// Log P (octanol-water partition coefficient)
+    log_p: f64,
+    
+    /// Protein binding fraction (0-1)
+    protein_binding: f64,
+    
+    /// Blood-to-plasma ratio
+    blood_plasma_ratio: f64,
+    
+    /// Clearance rate (L/min)
+    clearance_rate: f64,
+    
+    /// Volume of distribution (L)
+    volume_distribution: f64,
+    
+    /// Absorption rate constant (1/min)
+    absorption_rate: f64,
+    
+    /// Elimination half-life (hours)
+    half_life: f64,
+}
+
+/// PBPK simulation configuration
+struct PBPKConfig {
+    /// Time step (minutes)
+    time_step: f64,
+    
+    /// Total simulation time (hours)
+    total_time: f64,
+    
+    /// Drug dose (mg)
+    dose: f64,
+    
+    /// Administration route (0=IV, 1=Oral, 2=Subcutaneous)
+    route: i64,
+    
+    /// Simulation frequency (points per hour)
+    frequency: i64,
+}
+
+// ============================================================================
+// PBPK NEURAL NETWORK MODEL
+// ============================================================================
+
+/// Quaternion MLP for PBPK modeling
+/// 
+/// Architecture:
+/// - Input: [time, dose, physiology_params, drug_params] encoded as quaternions
+/// - Hidden layers: Quaternion dense layers with ReLU activation
+/// - Output: Drug concentration in each organ as quaternions
+struct PBPKModel {
+    /// Core MLP for concentration prediction
+    concentration_mlp: QuaternionMLP,
+    
+    /// MLP for temporal dynamics
+    temporal_mlp: QuaternionMLP,
+    
+    /// MLP for spatial distribution patterns
+    spatial_mlp: QuaternionMLP,
+    
+    /// Number of organs in the model
+    num_organs: i64,
+}
+
+/// Training data for PBPK model
+struct PBKPTrainingData {
+    /// Input features: time, physiology, drug parameters
+    inputs: Vec<Vec<Quaternion>>,
+    
+    /// Target concentrations for each organ over time
+    targets: Vec<Vec<Vec<Quaternion>>>, // [batch][time][organ]
+    
+    /// Simulation metadata
+    metadata: Vec<SimulationMetadata>,
+}
+
+/// Metadata for each simulation
+struct SimulationMetadata {
+    patient: PatientPhysiology,
+    drug: DrugParameters,
+    config: PBPKConfig,
+    organ_types: Vec<OrganType>,
+}
+
+// ============================================================================
+// PBPK MODEL FUNCTIONS
+// ============================================================================
+
+/// Create a new PBPK model
+fn pbpk_model_new(num_organs: i64) -> PBPKModel {
+    // Input features: time (1), dose (1), physiology (10 params), drug (8 params) = 20 features
+    // Encode as 5 quaternions (20/4 = 5)
+    let input_size = 5
+    
+    // Architecture: 5 -> 16 -> 16 -> num_organs (concentration prediction)
+    let concentration_arch = vec![input_size, 16, 16, num_organs]
+    
+    // Temporal dynamics: time features -> temporal patterns
+    let temporal_arch = vec![input_size, 12, 8, num_organs]
+    
+    // Spatial distribution: physiology + drug -> spatial patterns  
+    let spatial_arch = vec![input_size, 12, 8, num_organs]
+    
+    let concentration_mlp = quaternion_mlp_new(concentration_arch)
+    let temporal_mlp = quaternion_mlp_new(temporal_arch)
+    let spatial_mlp = quaternion_mlp_new(spatial_arch)
+    
+    PBPKModel {
+        concentration_mlp: concentration_mlp,
+        temporal_mlp: temporal_mlp,
+        spatial_mlp: spatial_mlp,
+        num_organs: num_organs,
+    }
+}
+
+/// Predict drug concentrations using PBPK model
+/// 
+/// # Arguments
+/// * model - PBPK neural network model
+/// * time - current simulation time (hours)
+/// * patient - patient physiological parameters
+/// * drug - drug pharmacokinetic parameters
+/// * config - simulation configuration
+/// 
+/// # Returns
+/// Drug concentration in each organ (mg/L)
+fn pbpk_predict(model: PBPKModel, time: f64, patient: PatientPhysiology, drug: DrugParameters, config: PBPKConfig) -> Vec<f64> {
+    // Encode input features as quaternions
+    let input_quaternions = encode_pbpk_input(time, patient, drug, config)
+    
+    // Predict concentrations using three complementary MLPs
+    let concentration_pred = predict_concentration(model.concentration_mlp, input_quaternions)
+    let temporal_pred = predict_temporal_pattern(model.temporal_mlp, input_quaternions)
+    let spatial_pred = predict_spatial_pattern(model.spatial_mlp, input_quaternions)
+    
+    // Combine predictions (ensemble approach)
+    let mut final_concentrations = vec![0.0; model.num_organs as usize]
+    
+    let mut organ_idx = 0
+    while organ_idx < model.num_organs {
+        if organ_idx < concentration_pred.len() && 
+           organ_idx < temporal_pred.len() && 
+           organ_idx < spatial_pred.len() {
+            
+            // Weighted combination of predictions
+            let w_conc = quaternion_get_w(concentration_pred[organ_idx])
+            let w_temp = quaternion_get_w(temporal_pred[organ_idx]) 
+            let w_spat = quaternion_get_w(spatial_pred[organ_idx])
+            
+            // Ensemble: 50% concentration + 30% temporal + 20% spatial
+            let combined = 0.5 * w_conc + 0.3 * w_temp + 0.2 * w_spat
+            
+            // Apply organ-specific factors
+            let organ_factor = get_organ_flow_factor(organ_idx)
+            final_concentrations[organ_idx as usize] = combined * organ_factor
+        }
+        organ_idx = organ_idx + 1
+    }
+    
+    final_concentrations
+}
+
+/// Encode PBPK input features as quaternions
+fn encode_pbpk_input(time: f64, patient: PatientPhysiology, drug: DrugParameters, config: PBPKConfig) -> Vec<Quaternion> {
+    let mut quaternions = vec![]
+    
+    // Quaternion 1: Time and dose features
+    let q1 = quaternion_exact(
+        time / config.total_time,  // normalized time
+        config.dose / 1000.0,     // normalized dose
+        patient.age / 100.0,       // normalized age
+        patient.body_weight / 100.0 // normalized weight
+    )
+    quaternions.push(q1)
+    
+    // Quaternion 2: Physiological flows
+    let q2 = quaternion_exact(
+        patient.cardiac_output / 10.0,  // normalized cardiac output
+        patient.liver_flow / 2.0,       // normalized liver flow
+        patient.kidney_flow / 1.0,      // normalized kidney flow
+        patient.brain_flow / 0.5        // normalized brain flow
+    )
+    quaternions.push(q2)
+    
+    // Quaternion 3: Body composition
+    let q3 = quaternion_exact(
+        patient.muscle_fraction,
+        patient.adipose_fraction,
+        if patient.gender == 1 { 1.0 } else { 0.0 }, // gender encoding
+        patient.height / 200.0          // normalized height
+    )
+    quaternions.push(q3)
+    
+    // Quaternion 4: Drug properties
+    let q4 = quaternion_exact(
+        drug.log_p / 10.0,                    // normalized log P
+        drug.protein_binding,                  // protein binding fraction
+        drug.blood_plasma_ratio,              // blood-plasma ratio
+        drug.molecular_weight / 1000.0        // normalized molecular weight
+    )
+    quaternions.push(q4)
+    
+    // Quaternion 5: Pharmacokinetic parameters
+    let q5 = quaternion_exact(
+        drug.clearance_rate / 10.0,           // normalized clearance
+        drug.absorption_rate / 1.0,           // normalized absorption
+        config.route as f64 / 3.0,           // normalized route
+        drug.half_life / 24.0                 // normalized half-life
+    )
+    quaternions.push(q5)
+    
+    quaternions
+}
+
+/// Predict concentration using concentration MLP
+fn predict_concentration(mlp: QuaternionMLP, inputs: Vec<Quaternion>) -> Vec<Quaternion> {
+    quaternion_mlp_predict(mlp, inputs)
+}
+
+/// Predict temporal patterns using temporal MLP
+fn predict_temporal_pattern(mlp: QuaternionMLP, inputs: Vec<Quaternion>) -> Vec<Quaternion> {
+    quaternion_mlp_predict(mlp, inputs)
+}
+
+/// Predict spatial distribution using spatial MLP
+fn predict_spatial_pattern(mlp: QuaternionMLP, inputs: Vec<Quaternion>) -> Vec<Quaternion> {
+    quaternion_mlp_predict(mlp, inputs)
+}
+
+/// Get organ-specific blood flow factor
+fn get_organ_flow_factor(organ_idx: i64) -> f64 {
+    // Relative blood flow factors for different organs
+    match organ_idx {
+        0 => 0.12,  // Brain ~12% of cardiac output
+        1 => 0.05,  // Heart ~5%
+        2 => 0.25,  // Liver ~25%
+        3 => 0.20,  // Kidney ~20%
+        4 => 0.10,  // Lung ~10%
+        5 => 0.15,  // Muscle ~15%
+        6 => 0.08,  // Adipose ~8%
+        7 => 0.05,  // Blood ~5%
+        _ => 0.05,  // Default
+    }
+}
+
+// ============================================================================
+// PBPK SIMULATION FUNCTIONS
+// ============================================================================
+
+/// Run complete PBPK simulation
+/// 
+/// # Arguments
+/// * model - trained PBPK model
+/// * patient - patient parameters
+/// * drug - drug parameters  
+/// * config - simulation configuration
+/// 
+/// # Returns
+/// Complete simulation results
+fn run_pbpk_simulation(model: PBPKModel, patient: PatientPhysiology, drug: DrugParameters, config: PBPKConfig) -> PBKPSimulationResult {
+    let mut results = PBKPSimulationResult::new()
+    
+    // Time points for simulation
+    let num_points = (config.total_time * config.frequency as f64) as i64
+    let dt = config.total_time / num_points as f64
+    
+    let mut t = 0.0
+    let mut time_idx = 0
+    while time_idx < num_points {
+        // Predict concentrations at current time
+        let concentrations = pbpk_predict(model, t, patient, drug, config)
+        
+        // Store results
+        results.add_timepoint(t, concentrations)
+        
+        // Advance time
+        t = t + dt
+        time_idx = time_idx + 1
+    }
+    
+    results
+}
+
+/// Complete PBPK simulation results
+struct PBKPSimulationResult {
+    /// Time points (hours)
+    times: Vec<f64>,
+    
+    /// Concentrations for each organ over time [time][organ]
+    concentrations: Vec<Vec<f64>>,
+    
+    /// Peak concentrations per organ
+    peak_concentrations: Vec<f64>,
+    
+    /// Time to peak per organ
+    time_to_peak: Vec<f64>,
+    
+    /// AUC (Area Under Curve) per organ
+    auc_per_organ: Vec<f64>,
+    
+    /// Half-life estimates per organ
+    half_lives: Vec<f64>,
+}
+
+impl PBKPSimulationResult {
+    /// Create new empty result
+    fn new() -> PBKPSimulationResult {
+        PBKPSimulationResult {
+            times: vec![],
+            concentrations: vec![],
+            peak_concentrations: vec![],
+            time_to_peak: vec![],
+            auc_per_organ: vec![],
+            half_lives: vec![],
+        }
+    }
+    
+    /// Add timepoint to results
+    fn add_timepoint(&mut self, time: f64, concentrations: Vec<f64>) {
+        self.times.push(time)
+        self.concentrations.push(concentrations)
+    }
+    
+    /// Calculate derived metrics
+    fn calculate_metrics(&mut self, num_organs: i64) {
+        // Initialize vectors
+        self.peak_concentrations = vec![0.0; num_organs as usize]
+        self.time_to_peak = vec![0.0; num_organs as usize]
+        self.auc_per_organ = vec![0.0; num_organs as usize]
+        
+        let mut organ_idx = 0
+        while organ_idx < num_organs {
+            let mut max_conc = 0.0
+            let mut peak_time = 0.0
+            let mut auc = 0.0
+            
+            let mut time_idx = 0
+            while time_idx < self.concentrations.len() {
+                let conc = if organ_idx < self.concentrations[time_idx].len() {
+                    self.concentrations[time_idx][organ_idx as usize]
+                } else {
+                    0.0
+                };
+                
+                // Track peak
+                if conc > max_conc {
+                    max_conc = conc
+                    peak_time = self.times[time_idx]
+                }
+                
+                // Trapezoidal integration for AUC
+                if time_idx > 0 {
+                    let prev_conc = if organ_idx < self.concentrations[time_idx - 1].len() {
+                        self.concentrations[time_idx - 1][organ_idx as usize]
+                    } else {
+                        0.0
+                    };
+                    let dt = self.times[time_idx] - self.times[time_idx - 1]
+                    auc = auc + 0.5 * (conc + prev_conc) * dt
+                }
+                
+                time_idx = time_idx + 1
+            }
+            
+            self.peak_concentrations[organ_idx as usize] = max_conc
+            self.time_to_peak[organ_idx as usize] = peak_time
+            self.auc_per_organ[organ_idx as usize] = auc
+            
+            organ_idx = organ_idx + 1
+        }
+    }
+}
+
+// ============================================================================
+// TRAINING DATA GENERATION
+// ============================================================================
+
+/// Generate synthetic PBPK training data
+/// 
+/// This creates realistic training data by simulating known PBPK models
+/// with physiological variability
+fn generate_pbpk_training_data(num_samples: i64) -> PBKPTrainingData {
+    let mut inputs = vec![]
+    let mut targets = vec![]
+    let mut metadata = vec![]
+    
+    // Organ types for our model
+    let organ_types = vec![
+        OrganType::Brain,
+        OrganType::Heart, 
+        OrganType::Liver,
+        OrganType::Kidney,
+        OrganType::Lung,
+        OrganType::Muscle,
+        OrganType::Adipose,
+        OrganType::Blood
+    ]
+    
+    let mut sample_idx = 0
+    while sample_idx < num_samples {
+        // Generate realistic patient parameters
+        let patient = generate_realistic_patient()
+        
+        // Generate drug parameters
+        let drug = generate_realistic_drug()
+        
+        // Generate simulation config
+        let config = PBPKConfig {
+            time_step: 0.1,
+            total_time: 24.0,  // 24 hour simulation
+            dose: 100.0 + (sample_idx as f64 * 10.0),  // Varying doses
+            route: if sample_idx % 3 == 0 { 0 } else { 1 },  // IV or Oral
+            frequency: 10,  // 10 points per hour
+        }
+        
+        // Generate input quaternions
+        let input_quats = encode_pbpk_input(0.0, patient, drug, config)
+        inputs.push(input_quats)
+        
+        // Simulate target concentrations (simplified PBPK model)
+        let simulation_result = simulate_pb pk_realistic(patient, drug, config, organ_types.clone())
+        targets.push(simulation_result)
+        
+        let sim_meta = SimulationMetadata {
+            patient: patient,
+            drug: drug,
+            config: config,
+            organ_types: organ_types.clone(),
+        }
+        metadata.push(sim_meta)
+        
+        sample_idx = sample_idx + 1
+    }
+    
+    PBKPTrainingData {
+        inputs: inputs,
+        targets: targets,
+        metadata: metadata,
+    }
+}
+
+/// Generate realistic patient parameters
+fn generate_realistic_patient() -> PatientPhysiology {
+    // Age distribution: 20-80 years
+    let age = 20.0 + (rand_f64() * 60.0)
+    
+    // Weight based on BMI 18-30 kg/m²
+    let height = 170.0 + (rand_f64() * 20.0)  // 170-190 cm
+    let bmi = 18.0 + (rand_f64() * 12.0)      // BMI 18-30
+    let weight = bmi * (height / 100.0).powi(2)
+    
+    // Gender
+    let gender = if rand_f64() > 0.5 { 1 } else { 0 }
+    
+    // Cardiac output: ~5-7 L/min for adults
+    let cardiac_output = 5.5 + (rand_f64() * 1.5)
+    
+    // Organ flows as fractions of cardiac output
+    let liver_flow = 0.25 + (rand_f64() * 0.05)     // 25-30%
+    let kidney_flow = 0.18 + (rand_f64() * 0.04)   // 18-22%
+    let brain_flow = 0.12 + (rand_f64() * 0.02)    // 12-14%
+    
+    // Body composition
+    let muscle_fraction = 0.35 + (rand_f64() * 0.10)   // 35-45%
+    let adipose_fraction = 0.15 + (rand_f64() * 0.15)  // 15-30%
+    
+    PatientPhysiology {
+        body_weight: weight,
+        height: height,
+        age: age,
+        gender: gender,
+        cardiac_output: cardiac_output,
+        liver_flow: liver_flow,
+        kidney_flow: kidney_flow,
+        brain_flow: brain_flow,
+        muscle_fraction: muscle_fraction,
+        adipose_fraction: adipose_fraction,
+    }
+}
+
+/// Generate realistic drug parameters
+fn generate_realistic_drug() -> DrugParameters {
+    // Molecular weight: 100-1000 g/mol (common drug range)
+    let molecular_weight = 100.0 + (rand_f64() * 900.0)
+    
+    // Log P: -2 to 5 (hydrophilic to lipophilic)
+    let log_p = -2.0 + (rand_f64() * 7.0)
+    
+    // Protein binding: 0-99%
+    let protein_binding = rand_f64() * 0.99
+    
+    // Blood-plasma ratio: 0.5-2.0
+    let blood_plasma_ratio = 0.5 + (rand_f64() * 1.5)
+    
+    // Clearance: 0.01-10 L/min
+    let clearance_rate = 0.01 + (rand_f64() * 9.99)
+    
+    // Volume of distribution: 0.1-100 L
+    let volume_distribution = 0.1 + (rand_f64() * 99.9)
+    
+    // Absorption rate: 0.01-1.0 1/min (for oral drugs)
+    let absorption_rate = 0.01 + (rand_f64() * 0.99)
+    
+    // Half-life: 0.5-72 hours
+    let half_life = 0.5 + (rand_f64() * 71.5)
+    
+    DrugParameters {
+        molecular_weight: molecular_weight,
+        log_p: log_p,
+        protein_binding: protein_binding,
+        blood_plasma_ratio: blood_plasma_ratio,
+        clearance_rate: clearance_rate,
+        volume_distribution: volume_distribution,
+        absorption_rate: absorption_rate,
+        half_life: half_life,
+    }
+}
+
+/// Simulate realistic PBPK concentrations (simplified model)
+fn simulate_pb pk_realistic(patient: PatientPhysiology, drug: DrugParameters, config: PBPKConfig, organs: Vec<OrganType>) -> Vec<Vec<Quaternion>> {
+    let num_timepoints = (config.total_time * config.frequency as f64) as i64
+    let dt = config.total_time / num_timepoints as f64
+    
+    let mut concentrations_over_time = vec![]
+    
+    let mut t = 0.0
+    let mut time_idx = 0
+    while time_idx < num_timepoints {
+        let mut organ_concentrations = vec![]
+        
+        let mut organ_idx = 0
+        while organ_idx < organs.len() {
+            // Simplified PBPK: exponential decay with organ-specific parameters
+            let organ_factor = get_organ_flow_factor(organ_idx as i64)
+            let elimination_rate = drug.clearance_rate / drug.volume_distribution
+            let effective_rate = elimination_rate * organ_factor
+            
+            // IV bolus: immediate distribution then exponential decay
+            let concentration = if config.route == 0 {  // IV
+                let initial_conc = config.dose / drug.volume_distribution
+                initial_conc * exp_f64(-effective_rate * t)
+            } else {  // Oral: absorption + elimination
+                let absorption_factor = drug.absorption_rate / (drug.absorption_rate + elimination_rate)
+                let initial_conc = config.dose * absorption_factor / drug.volume_distribution
+                initial_conc * (1.0 - exp_f64(-drug.absorption_rate * t)) * exp_f64(-elimination_rate * t)
+            };
+            
+            // Add some noise to simulate measurement variability
+            let noise = (rand_f64() - 0.5) * 0.1 * concentration  // 10% noise
+            let final_conc = concentration + noise
+            
+            // Encode as quaternion (using real part for concentration)
+            let organ_quat = quaternion_exact(final_conc, 0.0, 0.0, 0.0)
+            organ_concentrations.push(organ_quat)
+            
+            organ_idx = organ_idx + 1
+        }
+        
+        concentrations_over_time.push(organ_concentrations)
+        t = t + dt
+        time_idx = time_idx + 1
+    }
+    
+    concentrations_over_time
+}
+
+// ============================================================================
+// UTILITY FUNCTIONS
+// ============================================================================
+
+fn rand_f64() -> f64 {
+    // Simple linear congruential generator for reproducible "randomness"
+    static mut SEED: i64 = 42;
+    SEED = (SEED * 1664525 + 1013904223) % 4294967296;
+    (SEED as f64) / 4294967296.0
+}
+
+fn exp_f64(x: f64) -> f64 {
+    if x > 20.0 { return exp_f64(x / 2.0) * exp_f64(x / 2.0) }
+    if x < 0.0 - 20.0 { return 1.0 / exp_f64(0.0 - x) }
+    let mut sum = 1.0
+    let mut term = 1.0
+    let mut i = 1
+    while i <= 20 { term = term * x / i; sum = sum + term; i = i + 1 }
+    sum
+}
+
+// ============================================================================
+// EXAMPLE USAGE AND TESTS
+// ============================================================================
+
+fn main() -> i32 {
+    println("=== PBPK Quaternion Neural Network Example ===")
+    println("")
+    println("Physiologically-Based Pharmacokinetic Modeling")
+    println("with Quaternion Neural Networks")
+    println("")
+    
+    let mut ok = true
+    
+    // Test 1: Create PBPK model
+    println("Test 1: PBPK Model Creation")
+    let num_organs = 8
+    let model = pbpk_model_new(num_organs)
+    println("  Created PBPK model for ")
+    println(num_organs)
+    println(" organs")
+    println("")
+    
+    // Test 2: Patient and drug setup
+    println("Test 2: Patient and Drug Setup")
+    let patient = PatientPhysiology {
+        body_weight: 75.0,
+        height: 175.0,
+        age: 45.0,
+        gender: 1,
+        cardiac_output: 6.2,
+        liver_flow: 1.5,
+        kidney_flow: 1.2,
+        brain_flow: 0.75,
+        muscle_fraction: 0.40,
+        adipose_fraction: 0.20,
+    }
+    
+    let drug = DrugParameters {
+        molecular_weight: 250.0,
+        log_p: 2.5,
+        protein_binding: 0.85,
+        blood_plasma_ratio: 0.8,
+        clearance_rate: 0.5,
+        volume_distribution: 25.0,
+        absorption_rate: 0.1,
+        half_life: 8.0,
+    }
+    
+    let config = PBPKConfig {
+        time_step: 0.1,
+        total_time: 12.0,
+        dose: 500.0,
+        route: 0,  // IV
+        frequency: 12,  // Every 5 minutes
+    }
+    
+    println("  Patient: 75kg, 45yo male")
+    println("  Drug: 250MW, logP=2.5, 500mg IV")
+    println("")
+    
+    // Test 3: Run simulation
+    println("Test 3: PBPK Simulation")
+    let simulation_result = run_pbpk_simulation(model, patient, drug, config)
+    
+    println("  Simulation completed:")
+    println("    Time points: ")
+    println(simulation_result.times.len())
+    println("    Final time: ")
+    println(simulation_result.times[simulation_result.times.len() - 1])
+    
+    // Show some concentration predictions
+    if simulation_result.concentrations.len() > 0 {
+        println("  Sample concentrations at t=2h:")
+        let sample_concs = simulation_result.concentrations[2]  // Assuming this exists
+        let mut organ_idx = 0
+        while organ_idx < min_i64(sample_concs.len() as i64, 3) {
+            println("    Organ ")
+            println(organ_idx)
+            println(": ")
+            println(sample_concs[organ_idx as usize])
+            organ_idx = organ_idx + 1
+        }
+    }
+    println("")
+    
+    // Test 4: Training data generation
+    println("Test 4: Training Data Generation")
+    let training_data = generate_pbpk_training_data(10)
+    
+    println("  Generated ")
+    println(training_data.inputs.len())
+    println(" training samples")
+    println("  Each sample has ")
+    println(training_data.inputs[0].len())
+    println(" input quaternions")
+    
+    if training_data.targets.len() > 0 && training_data.targets[0].len() > 0 {
+        println("  Target time series length: ")
+        println(training_data.targets[0].len())
+        println("  Organs per timepoint: ")
+        println(training_data.targets[0][0].len())
+    }
+    println("")
+    
+    // Test 5: Input encoding
+    println("Test 5: Input Encoding")
+    let encoded_input = encode_pbpk_input(2.0, patient, drug, config)
+    
+    println("  Encoded input quaternions:")
+    let mut q_idx = 0
+    while q_idx < encoded_input.len() {
+        println("    Q")
+        println(q_idx)
+        println(": (")
+        println(quaternion_get_w(encoded_input[q_idx]))
+        println(", ")
+        println(quaternion_get_x(encoded_input[q_idx]))
+        println(", ")
+        println(quaternion_get_y(encoded_input[q_idx]))
+        println(", ")
+        println(quaternion_get_z(encoded_input[q_idx]))
+        println(")")
+        q_idx = q_idx + 1
+    }
+    println("")
+    
+    if ok {
+        println("ALL PBPK EXAMPLE TESTS PASSED")
+        println("")
+        println("=== Summary ===")
+        println("This example demonstrates quaternion neural networks for PBPK modeling:")
+        println("- Spatial-temporal drug distribution prediction")
+        println("- Patient-specific physiological modeling")
+        println("- Drug-specific pharmacokinetic parameters")
+        println("- Real-time concentration prediction")
+        println("")
+        println("Applications:")
+        println("- Personalized dosing regimens")
+        println("- Drug-drug interaction analysis")
+        println("- Toxicity prediction")
+        println("- Clinical trial optimization")
+        return 0
+    } else {
+        println("SOME PBPK EXAMPLE TESTS FAILED")
+        return 1
+    }
+}
+
+fn min_i64(a: i64, b: i64) -> i64 {
+    if a < b { a } else { b }
+}

@@ -1,0 +1,132 @@
+//! stdlib/qnn/optimizer.sio - Optimizers for Quaternion Parameters
+//!
+//! Adam and SGD optimizers adapted for quaternion-valued parameters.
+//! Each quaternion component (w,x,y,z) is updated independently.
+
+/// Adam optimizer for quaternion parameters
+struct QuatAdamOptimizer {
+    learning_rate: f32,
+    beta1: f32,       // First moment decay (default 0.9)
+    beta2: f32,       // Second moment decay (default 0.999)
+    epsilon: f32,     // Numerical stability (default 1e-8)
+    timestep: i32,    // Current timestep for bias correction
+}
+
+/// SGD with momentum for quaternion parameters
+struct QuatSGDOptimizer {
+    learning_rate: f32,
+    momentum: f32,
+    weight_decay: f32,
+}
+
+/// Create a new Adam optimizer for quaternions
+fn quat_adam_new(learning_rate: f32) -> QuatAdamOptimizer {
+    QuatAdamOptimizer {
+        learning_rate,
+        beta1: 0.9,
+        beta2: 0.999,
+        epsilon: 1e-8,
+        timestep: 0,
+    }
+}
+
+/// Create a new SGD optimizer for quaternions
+fn quat_sgd_new(learning_rate: f32, momentum: f32, weight_decay: f32) -> QuatSGDOptimizer {
+    QuatSGDOptimizer {
+        learning_rate,
+        momentum,
+        weight_decay,
+    }
+}
+
+/// Perform one Adam optimization step on quaternion parameters
+/// Updates each quaternion component independently
+fn quat_adam_step(
+    params: &![Quat],
+    grads: &[Quat],
+    optimizer: &!QuatAdamOptimizer,
+    first_moment: &![Quat],
+    second_moment: &![Quat]
+) {
+    optimizer.timestep = optimizer.timestep + 1
+    let timestep_f32 = optimizer.timestep as f32
+
+    // Bias correction factors
+    let beta1_t = 1.0 - optimizer.beta1.powf(timestep_f32)
+    let beta2_t = 1.0 - optimizer.beta2.powf(timestep_f32)
+
+    let n = params.len() as i32
+    let i: i32 = 0
+    while i < n {
+        // Update first moment (mean) for each component
+        first_moment[i].w = optimizer.beta1 * first_moment[i].w + (1.0 - optimizer.beta1) * grads[i].w
+        first_moment[i].x = optimizer.beta1 * first_moment[i].x + (1.0 - optimizer.beta1) * grads[i].x
+        first_moment[i].y = optimizer.beta1 * first_moment[i].y + (1.0 - optimizer.beta1) * grads[i].y
+        first_moment[i].z = optimizer.beta1 * first_moment[i].z + (1.0 - optimizer.beta1) * grads[i].z
+
+        // Update second moment (variance) for each component
+        second_moment[i].w = optimizer.beta2 * second_moment[i].w + (1.0 - optimizer.beta2) * grads[i].w * grads[i].w
+        second_moment[i].x = optimizer.beta2 * second_moment[i].x + (1.0 - optimizer.beta2) * grads[i].x * grads[i].x
+        second_moment[i].y = optimizer.beta2 * second_moment[i].y + (1.0 - optimizer.beta2) * grads[i].y * grads[i].y
+        second_moment[i].z = optimizer.beta2 * second_moment[i].z + (1.0 - optimizer.beta2) * grads[i].z * grads[i].z
+
+        // Bias-corrected moments and parameter update
+        let m_hat_w = first_moment[i].w / beta1_t
+        let v_hat_w = second_moment[i].w / beta2_t
+        params[i].w = params[i].w - optimizer.learning_rate * m_hat_w / (v_hat_w.sqrt() + optimizer.epsilon)
+
+        let m_hat_x = first_moment[i].x / beta1_t
+        let v_hat_x = second_moment[i].x / beta2_t
+        params[i].x = params[i].x - optimizer.learning_rate * m_hat_x / (v_hat_x.sqrt() + optimizer.epsilon)
+
+        let m_hat_y = first_moment[i].y / beta1_t
+        let v_hat_y = second_moment[i].y / beta2_t
+        params[i].y = params[i].y - optimizer.learning_rate * m_hat_y / (v_hat_y.sqrt() + optimizer.epsilon)
+
+        let m_hat_z = first_moment[i].z / beta1_t
+        let v_hat_z = second_moment[i].z / beta2_t
+        params[i].z = params[i].z - optimizer.learning_rate * m_hat_z / (v_hat_z.sqrt() + optimizer.epsilon)
+
+        i = i + 1
+    }
+}
+
+/// Perform one SGD with momentum step on quaternion parameters
+fn quat_sgd_step(
+    params: &![Quat],
+    grads: &[Quat],
+    optimizer: &QuatSGDOptimizer,
+    velocity: &![Quat]
+) {
+    let n = params.len() as i32
+    let i: i32 = 0
+    while i < n {
+        // Update velocity for each component
+        velocity[i].w = optimizer.momentum * velocity[i].w - optimizer.learning_rate * (grads[i].w + optimizer.weight_decay * params[i].w)
+        velocity[i].x = optimizer.momentum * velocity[i].x - optimizer.learning_rate * (grads[i].x + optimizer.weight_decay * params[i].x)
+        velocity[i].y = optimizer.momentum * velocity[i].y - optimizer.learning_rate * (grads[i].y + optimizer.weight_decay * params[i].y)
+        velocity[i].z = optimizer.momentum * velocity[i].z - optimizer.learning_rate * (grads[i].z + optimizer.weight_decay * params[i].z)
+
+        // Apply velocity to parameters
+        params[i].w = params[i].w + velocity[i].w
+        params[i].x = params[i].x + velocity[i].x
+        params[i].y = params[i].y + velocity[i].y
+        params[i].z = params[i].z + velocity[i].z
+
+        i = i + 1
+    }
+}
+
+/// Cosine annealing learning rate schedule for QNN training
+/// Adjusts learning rate from initial_lr down to min_lr over total_steps
+/// Formula: lr = min_lr + 0.5 * (initial_lr - min_lr) * (1 + cos(π * step / total_steps))
+fn quat_learning_rate_schedule(initial_lr: f32, step: i32, total_steps: i32, min_lr: f32) -> f32 {
+    if step >= total_steps {
+        min_lr
+    } else {
+        let pi: f32 = 3.14159265359
+        let progress = (step as f32) / (total_steps as f32)
+        let cosine_factor = 0.5 * (1.0 + (pi * progress).cos())
+        min_lr + (initial_lr - min_lr) * cosine_factor
+    }
+}

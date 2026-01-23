@@ -1,0 +1,333 @@
+//! Complete Quaternionic Neural Network Demo
+//!
+//! Demonstrates the full QNN training pipeline using all stdlib/qnn modules.
+//! This example shows:
+//!   - Quaternion data encoding
+//!   - Multi-layer QNN architecture (Linear, Conv, LSTM, Attention)
+//!   - Loss computation and optimization
+//!   - Complete training loop
+
+use std::qnn
+
+fn main() {
+    // ==========================================
+    // 1. Data Preparation
+    // ==========================================
+
+    let batch_size: i32 = 32
+    let seq_len: i32 = 10
+    let input_dim: i32 = 16
+    let hidden_dim: i32 = 32
+    let output_dim: i32 = 8
+
+    // Initialize quaternion input data
+    // In practice, encode 3D spatial data (RGB+alpha, 3D coords+time, etc.)
+    var input_data: [Quat]
+    let i: i32 = 0
+    while i < batch_size * input_dim {
+        input_data[i] = quat(0.1, 0.2, 0.3, 0.4)
+        i = i + 1
+    }
+
+    var target_data: [Quat]
+    let j: i32 = 0
+    while j < batch_size * output_dim {
+        target_data[j] = quat(0.5, 0.5, 0.5, 0.5)
+        j = j + 1
+    }
+
+    // ==========================================
+    // 2. Model Architecture
+    // ==========================================
+
+    // Layer 1: QuatLinear (input projection)
+    let linear1 = qnn::quat_linear_new(input_dim, hidden_dim)
+    let linear1_weights = qnn::quat_xavier_init(input_dim, hidden_dim, seed: 42)
+    let linear1_bias = qnn::quat_xavier_init(1, hidden_dim, seed: 43)
+
+    // Layer 2: QuatConv2d (spatial feature extraction)
+    // Reshape to [batch, channels, height, width] for convolution
+    let conv_layer = qnn::quat_conv2d_new(
+        in_channels: 4,
+        out_channels: 8,
+        kernel_h: 3,
+        kernel_w: 3,
+        stride: 1,
+        padding: 1
+    )
+    let conv_weights = qnn::quat_xavier_init(4 * 8 * 3 * 3, 1, seed: 44)
+    let conv_bias = qnn::quat_xavier_init(1, 8, seed: 45)
+
+    // Layer 3: QuatLSTM (temporal dynamics)
+    let lstm_layer = qnn::quat_lstm_new(hidden_dim, hidden_dim)
+    let lstm_gate: QuatGate
+    let lstm_init_state = qnn::quat_xavier_init(1, hidden_dim, seed: 46)
+
+    // Layer 4: QuatAttention (sequence modeling)
+    let attention_layer = qnn::quat_attention_new(
+        num_heads: 4,
+        head_dim: 8,
+        embed_dim: hidden_dim
+    )
+
+    // Layer 5: QuatLinear (output projection)
+    let linear2 = qnn::quat_linear_new(hidden_dim, output_dim)
+    let linear2_weights = qnn::quat_xavier_init(hidden_dim, output_dim, seed: 47)
+    let linear2_bias = qnn::quat_xavier_init(1, output_dim, seed: 48)
+
+    // ==========================================
+    // 3. Optimizer Setup
+    // ==========================================
+
+    let optimizer = qnn::quat_adam_new(learning_rate: 0.001)
+
+    // Adam state for linear1
+    var linear1_m: [Quat]  // First moment
+    var linear1_v: [Quat]  // Second moment
+    let k: i32 = 0
+    while k < input_dim * hidden_dim {
+        linear1_m[k] = quat(0.0, 0.0, 0.0, 0.0)
+        linear1_v[k] = quat(0.0, 0.0, 0.0, 0.0)
+        k = k + 1
+    }
+
+    // Adam state for linear2
+    var linear2_m: [Quat]
+    var linear2_v: [Quat]
+    let m: i32 = 0
+    while m < hidden_dim * output_dim {
+        linear2_m[m] = quat(0.0, 0.0, 0.0, 0.0)
+        linear2_v[m] = quat(0.0, 0.0, 0.0, 0.0)
+        m = m + 1
+    }
+
+    // ==========================================
+    // 4. Training Loop
+    // ==========================================
+
+    let num_epochs: i32 = 100
+    let epoch: i32 = 0
+
+    while epoch < num_epochs {
+        // ==========================================
+        // Forward Pass
+        // ==========================================
+
+        // Linear layer 1
+        let hidden1 = qnn::quat_linear_forward(
+            &linear1,
+            &linear1_weights,
+            &input_data,
+            &linear1_bias
+        )
+
+        // Activation
+        var activated1: [Quat]
+        qnn::quat_relu_batch(&hidden1, &!activated1)
+
+        // Convolutional layer (optional, requires spatial reshape)
+        // For sequence data, we skip conv and go straight to LSTM
+
+        // LSTM layer (process sequence)
+        var lstm_input_seq: [[Quat]]
+        let t: i32 = 0
+        while t < seq_len {
+            lstm_input_seq[t] = activated1
+            t = t + 1
+        }
+
+        let lstm_output_seq = qnn::quat_lstm_forward(
+            &lstm_layer,
+            &lstm_gate,
+            &lstm_input_seq,
+            &lstm_init_state
+        )
+
+        // Attention layer
+        let last_hidden = lstm_output_seq[seq_len - 1]
+        let (attended, attn_weights) = qnn::quat_attention_forward(
+            &attention_layer,
+            &last_hidden,
+            &last_hidden,
+            &last_hidden
+        )
+
+        // Linear layer 2 (output)
+        let output = qnn::quat_linear_forward(
+            &linear2,
+            &linear2_weights,
+            &attended,
+            &linear2_bias
+        )
+
+        // ==========================================
+        // Loss Computation
+        // ==========================================
+
+        let loss = qnn::quat_mse_loss(&output, &target_data)
+
+        // Alternative losses:
+        // let loss = qnn::quat_mae_loss(&output, &target_data)
+        // let loss = qnn::quat_cosine_similarity_loss(&output, &target_data)
+
+        // ==========================================
+        // Backward Pass (Gradient Computation)
+        // ==========================================
+
+        // In a real implementation, gradients would be computed via autodiff
+        // For this demo, we simulate gradients
+        var linear1_grad: [Quat]
+        var linear2_grad: [Quat]
+
+        let g: i32 = 0
+        while g < input_dim * hidden_dim {
+            linear1_grad[g] = quat(0.01, 0.01, 0.01, 0.01)
+            g = g + 1
+        }
+
+        let h: i32 = 0
+        while h < hidden_dim * output_dim {
+            linear2_grad[h] = quat(0.01, 0.01, 0.01, 0.01)
+            h = h + 1
+        }
+
+        // ==========================================
+        // Optimizer Step
+        // ==========================================
+
+        // Update linear1 weights
+        qnn::quat_adam_step(
+            &!linear1_weights,
+            &linear1_grad,
+            &!optimizer,
+            &!linear1_m,
+            &!linear1_v
+        )
+
+        // Update linear2 weights
+        qnn::quat_adam_step(
+            &!linear2_weights,
+            &linear2_grad,
+            &!optimizer,
+            &!linear2_m,
+            &!linear2_v
+        )
+
+        // Learning rate scheduling
+        let initial_lr: f32 = 0.001
+        let min_lr: f32 = 0.0001
+        let new_lr = qnn::quat_learning_rate_schedule(
+            initial_lr,
+            epoch,
+            num_epochs,
+            min_lr
+        )
+        optimizer.learning_rate = new_lr
+
+        // ==========================================
+        // Logging
+        // ==========================================
+
+        // Print loss every 10 epochs
+        // Note: Sounio doesn't have println! yet, this is pseudocode
+        // In practice, return loss and print from runtime
+
+        epoch = epoch + 1
+    }
+
+    // ==========================================
+    // 5. Model Evaluation
+    // ==========================================
+
+    // Final forward pass for evaluation
+    let final_hidden1 = qnn::quat_linear_forward(
+        &linear1,
+        &linear1_weights,
+        &input_data,
+        &linear1_bias
+    )
+
+    var final_activated: [Quat]
+    qnn::quat_relu_batch(&final_hidden1, &!final_activated)
+
+    let final_output = qnn::quat_linear_forward(
+        &linear2,
+        &linear2_weights,
+        &final_activated,
+        &linear2_bias
+    )
+
+    let final_loss = qnn::quat_mse_loss(&final_output, &target_data)
+
+    // ==========================================
+    // 6. Quaternion Operations Demo
+    // ==========================================
+
+    // Hamilton product example
+    let q1 = quat(1.0, 0.0, 0.0, 0.0)
+    let q2 = quat(0.0, 1.0, 0.0, 0.0)
+    let product = qnn::hamilton_product(q1, q2)
+
+    // Quaternion conjugate
+    let conj = qnn::quat_conjugate(product)
+
+    // Quaternion norm
+    let norm = qnn::quat_norm(product)
+
+    // Quaternion normalization
+    let normalized = qnn::quat_normalize(product)
+
+    // ==========================================
+    // 7. Advanced Features
+    // ==========================================
+
+    // QuatGRU example (alternative to LSTM)
+    let gru_layer = qnn::quat_gru_new(hidden_dim, hidden_dim)
+    let gru_gate: QuatGate
+    let gru_init_state = qnn::quat_xavier_init(1, hidden_dim, seed: 50)
+
+    let gru_output_seq = qnn::quat_gru_forward(
+        &gru_layer,
+        &gru_gate,
+        &lstm_input_seq,
+        &gru_init_state
+    )
+
+    // Scaled dot-product attention
+    let scale: f32 = 1.0 / (8.0.sqrt())
+    let attention_output = qnn::quat_scaled_dot_product_attention(
+        &last_hidden,
+        &last_hidden,
+        &last_hidden,
+        scale
+    )
+
+    // SGD optimizer (alternative to Adam)
+    let sgd_optimizer = qnn::quat_sgd_new(
+        learning_rate: 0.01,
+        momentum: 0.9,
+        weight_decay: 0.0001
+    )
+
+    var sgd_velocity: [Quat]
+    let v: i32 = 0
+    while v < input_dim * hidden_dim {
+        sgd_velocity[v] = quat(0.0, 0.0, 0.0, 0.0)
+        v = v + 1
+    }
+
+    // SGD step example
+    qnn::quat_sgd_step(
+        &!linear1_weights,
+        &linear1_grad,
+        &sgd_optimizer,
+        &!sgd_velocity
+    )
+
+    // Batch normalization (when intrinsic is available)
+    // let bn_output = qnn::quat_bn_forward(&hidden1, &bn_params)
+
+    // Leaky ReLU activation
+    var leaky_relu_out: [Quat]
+    qnn::quat_leaky_relu_batch(&hidden1, &!leaky_relu_out, alpha: 0.01)
+}
