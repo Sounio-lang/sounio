@@ -1,0 +1,336 @@
+//! stdlib/qnn/mnist/training.sio - Training Loop for QNN MNIST
+//!
+//! Provides training infrastructure with Adam optimizer,
+//! learning rate scheduling, and gradient clipping.
+
+use qnn::mnist::model::*
+use qnn::mnist::data_loader::*
+
+// Training configuration
+struct TrainingConfig {
+    epochs: i32,
+    batch_size: i32,
+    learning_rate: f32,
+    beta1: f32,           // Adam momentum (default 0.9)
+    beta2: f32,           // Adam RMSprop (default 0.999)
+    epsilon: f32,         // Adam stability (default 1e-8)
+    weight_decay: f32,    // L2 regularization
+    grad_clip_norm: f32,  // Max gradient norm (0 = no clip)
+    log_interval: i32,    // Steps between logging
+}
+
+// Adam optimizer state for quaternion parameters
+struct AdamState {
+    // First moment (mean)
+    m1_l1w: [Quat], m1_l1b: [Quat],
+    m1_l2w: [Quat], m1_l2b: [Quat],
+    m1_l3w: [Quat], m1_l3b: [Quat],
+    // Second moment (variance)
+    m2_l1w: [Quat], m2_l1b: [Quat],
+    m2_l2w: [Quat], m2_l2b: [Quat],
+    m2_l3w: [Quat], m2_l3b: [Quat],
+    // Timestep for bias correction
+    timestep: i32,
+}
+
+// Training state
+struct TrainingState {
+    model: QnnMnistModel,
+    adam: AdamState,
+    config: QnnMnistConfig,
+    train_config: TrainingConfig,
+    epoch: i32,
+    step: i32,
+    best_accuracy: f32,
+}
+
+// ============================================================================
+// Helper Functions
+// ============================================================================
+
+// Create array of zero quaternions
+fn zeros_quat_array(size: i32) -> [Quat] {
+    var result: [Quat]
+    var i: i32 = 0
+    while i < size {
+        result = result ++ [quat_zero()]
+        i = i + 1
+    }
+    result
+}
+
+// ============================================================================
+// Optimizer Functions
+// ============================================================================
+
+// Initialize Adam state with zeros
+fn adam_init(model: &QnnMnistModel, config: &QnnMnistConfig) -> AdamState {
+    let l1_size = config.input_dim * config.hidden1
+    let l2_size = config.hidden1 * config.hidden2
+    let l3_size = config.hidden2 * config.output_dim
+
+    AdamState {
+        m1_l1w: zeros_quat_array(l1_size),
+        m1_l1b: zeros_quat_array(config.hidden1),
+        m1_l2w: zeros_quat_array(l2_size),
+        m1_l2b: zeros_quat_array(config.hidden2),
+        m1_l3w: zeros_quat_array(l3_size),
+        m1_l3b: zeros_quat_array(config.output_dim),
+        m2_l1w: zeros_quat_array(l1_size),
+        m2_l1b: zeros_quat_array(config.hidden1),
+        m2_l2w: zeros_quat_array(l2_size),
+        m2_l2b: zeros_quat_array(config.hidden2),
+        m2_l3w: zeros_quat_array(l3_size),
+        m2_l3b: zeros_quat_array(config.output_dim),
+        timestep: 0,
+    }
+}
+
+// Adam update for a single quaternion array
+fn adam_update_array(
+    params: &![Quat],
+    grads: &[Quat],
+    m1: &![Quat],
+    m2: &![Quat],
+    num_params: i32,
+    lr: f32,
+    beta1: f32,
+    beta2: f32,
+    epsilon: f32,
+    weight_decay: f32,
+    beta1_t: f32,
+    beta2_t: f32
+) {
+    var i: i32 = 0
+    while i < num_params {
+        // Update first moment
+        m1[i].w = beta1 * m1[i].w + (1.0 - beta1) * grads[i].w
+        m1[i].x = beta1 * m1[i].x + (1.0 - beta1) * grads[i].x
+        m1[i].y = beta1 * m1[i].y + (1.0 - beta1) * grads[i].y
+        m1[i].z = beta1 * m1[i].z + (1.0 - beta1) * grads[i].z
+
+        // Update second moment
+        m2[i].w = beta2 * m2[i].w + (1.0 - beta2) * grads[i].w * grads[i].w
+        m2[i].x = beta2 * m2[i].x + (1.0 - beta2) * grads[i].x * grads[i].x
+        m2[i].y = beta2 * m2[i].y + (1.0 - beta2) * grads[i].y * grads[i].y
+        m2[i].z = beta2 * m2[i].z + (1.0 - beta2) * grads[i].z * grads[i].z
+
+        // Bias correction
+        let m1_hat_w = m1[i].w / beta1_t
+        let m1_hat_x = m1[i].x / beta1_t
+        let m1_hat_y = m1[i].y / beta1_t
+        let m1_hat_z = m1[i].z / beta1_t
+
+        let m2_hat_w = m2[i].w / beta2_t
+        let m2_hat_x = m2[i].x / beta2_t
+        let m2_hat_y = m2[i].y / beta2_t
+        let m2_hat_z = m2[i].z / beta2_t
+
+        // Parameter update with weight decay
+        params[i].w = params[i].w - lr * (m1_hat_w / (sqrt_f32(m2_hat_w) + epsilon) + weight_decay * params[i].w)
+        params[i].x = params[i].x - lr * (m1_hat_x / (sqrt_f32(m2_hat_x) + epsilon) + weight_decay * params[i].x)
+        params[i].y = params[i].y - lr * (m1_hat_y / (sqrt_f32(m2_hat_y) + epsilon) + weight_decay * params[i].y)
+        params[i].z = params[i].z - lr * (m1_hat_z / (sqrt_f32(m2_hat_z) + epsilon) + weight_decay * params[i].z)
+
+        i = i + 1
+    }
+}
+
+// Perform one Adam optimization step
+fn adam_step(
+    model: &!QnnMnistModel,
+    grads: &QnnGradients,
+    adam: &!AdamState,
+    config: &QnnMnistConfig,
+    train_config: &TrainingConfig
+) {
+    adam.timestep = adam.timestep + 1
+    let t = adam.timestep as f32
+
+    // Bias correction terms
+    let beta1_t = 1.0 - pow_f32(train_config.beta1, t)
+    let beta2_t = 1.0 - pow_f32(train_config.beta2, t)
+
+    let l1_size = config.input_dim * config.hidden1
+    let l2_size = config.hidden1 * config.hidden2
+    let l3_size = config.hidden2 * config.output_dim
+
+    // Update each layer
+    adam_update_array(&!model.layer1_weights, &grads.layer1_weights,
+                      &!adam.m1_l1w, &!adam.m2_l1w, l1_size,
+                      train_config.learning_rate, train_config.beta1, train_config.beta2,
+                      train_config.epsilon, train_config.weight_decay, beta1_t, beta2_t)
+    adam_update_array(&!model.layer1_bias, &grads.layer1_bias,
+                      &!adam.m1_l1b, &!adam.m2_l1b, config.hidden1,
+                      train_config.learning_rate, train_config.beta1, train_config.beta2,
+                      train_config.epsilon, train_config.weight_decay, beta1_t, beta2_t)
+
+    adam_update_array(&!model.layer2_weights, &grads.layer2_weights,
+                      &!adam.m1_l2w, &!adam.m2_l2w, l2_size,
+                      train_config.learning_rate, train_config.beta1, train_config.beta2,
+                      train_config.epsilon, train_config.weight_decay, beta1_t, beta2_t)
+    adam_update_array(&!model.layer2_bias, &grads.layer2_bias,
+                      &!adam.m1_l2b, &!adam.m2_l2b, config.hidden2,
+                      train_config.learning_rate, train_config.beta1, train_config.beta2,
+                      train_config.epsilon, train_config.weight_decay, beta1_t, beta2_t)
+
+    adam_update_array(&!model.layer3_weights, &grads.layer3_weights,
+                      &!adam.m1_l3w, &!adam.m2_l3w, l3_size,
+                      train_config.learning_rate, train_config.beta1, train_config.beta2,
+                      train_config.epsilon, train_config.weight_decay, beta1_t, beta2_t)
+    adam_update_array(&!model.layer3_bias, &grads.layer3_bias,
+                      &!adam.m1_l3b, &!adam.m2_l3b, config.output_dim,
+                      train_config.learning_rate, train_config.beta1, train_config.beta2,
+                      train_config.epsilon, train_config.weight_decay, beta1_t, beta2_t)
+}
+
+// ============================================================================
+// Training Loop
+// ============================================================================
+
+// Train for one epoch
+fn train_epoch(
+    state: &!TrainingState,
+    dataset: &MnistDataset,
+    indices: &[i32]
+) -> f32 {
+    var total_loss: f32 = 0.0
+    var batches: i32 = 0
+    var pos: i32 = 0
+
+    while pos < dataset.num_samples {
+        // Calculate batch size
+        let remaining = dataset.num_samples - pos
+        let batch_size = if state.train_config.batch_size < remaining {
+            state.train_config.batch_size
+        } else {
+            remaining
+        }
+
+        // Create batch
+        let batch = create_batch(dataset, indices, pos, batch_size)
+
+        // Forward pass
+        var batch_loss: f32 = 0.0
+        var b: i32 = 0
+        while b < batch.batch_size {
+            let activations = qnn_mnist_forward(&state.model, &batch.inputs[b], &state.config)
+            let loss = cross_entropy_loss(&activations.probs, batch.labels[b])
+            batch_loss = batch_loss + loss
+            b = b + 1
+        }
+        batch_loss = batch_loss / (batch.batch_size as f32)
+
+        // Backward pass and optimization
+        b = 0
+        while b < batch.batch_size {
+            let activations = qnn_mnist_forward(&state.model, &batch.inputs[b], &state.config)
+            let grads = qnn_mnist_backward(&state.model, &activations, batch.labels[b], &state.config)
+            adam_step(&!state.model, &grads, &!state.adam, &state.config, &state.train_config)
+            b = b + 1
+        }
+
+        total_loss = total_loss + batch_loss
+        batches = batches + 1
+        state.step = state.step + 1
+        pos = pos + batch_size
+    }
+
+    total_loss / (batches as f32)
+}
+
+// Full training loop
+fn train(
+    train_data: &MnistDataset,
+    test_data: &MnistDataset,
+    train_config: &TrainingConfig,
+    model_config: &QnnMnistConfig,
+    seed: i32
+) -> TrainingState with IO {
+    // Initialize model
+    let model = qnn_mnist_init(model_config, seed)
+
+    // Initialize optimizer and training state
+    let adam = adam_init(&model, model_config)
+    var state = TrainingState {
+        model: model,
+        adam: adam,
+        config: QnnMnistConfig {
+            input_dim: model_config.input_dim,
+            hidden1: model_config.hidden1,
+            hidden2: model_config.hidden2,
+            output_dim: model_config.output_dim,
+        },
+        train_config: TrainingConfig {
+            epochs: train_config.epochs,
+            batch_size: train_config.batch_size,
+            learning_rate: train_config.learning_rate,
+            beta1: train_config.beta1,
+            beta2: train_config.beta2,
+            epsilon: train_config.epsilon,
+            weight_decay: train_config.weight_decay,
+            grad_clip_norm: train_config.grad_clip_norm,
+            log_interval: train_config.log_interval,
+        },
+        epoch: 0,
+        step: 0,
+        best_accuracy: 0.0,
+    }
+
+    // Training loop
+    while state.epoch < train_config.epochs {
+        // Shuffle indices
+        let indices = shuffle_indices(train_data.num_samples, seed + state.epoch)
+
+        // Train epoch
+        let avg_loss = train_epoch(&!state, train_data, &indices)
+
+        // Evaluate on test set
+        let test_acc = compute_accuracy(&state.model, test_data, &state.config)
+
+        // Track best accuracy
+        if test_acc > state.best_accuracy {
+            state.best_accuracy = test_acc
+        }
+
+        // Log progress (every 5 epochs)
+        let epoch_div = state.epoch / 5
+        let epoch_rem = state.epoch - (epoch_div * 5)
+        if epoch_rem == 0 {
+            println("Epoch " ++ (state.epoch as string) ++
+                   ": loss=" ++ (avg_loss as string) ++
+                   ", test_acc=" ++ ((test_acc * 100.0) as string) ++ "%")
+        }
+
+        state.epoch = state.epoch + 1
+    }
+
+    state
+}
+
+// ============================================================================
+// Default Configuration
+// ============================================================================
+
+fn default_config() -> QnnMnistConfig {
+    QnnMnistConfig {
+        input_dim: 196,
+        hidden1: 64,
+        hidden2: 32,
+        output_dim: 10,
+    }
+}
+
+fn default_training_config() -> TrainingConfig {
+    TrainingConfig {
+        epochs: 20,
+        batch_size: 64,
+        learning_rate: 0.001,
+        beta1: 0.9,
+        beta2: 0.999,
+        epsilon: 1e-8,
+        weight_decay: 1e-5,
+        grad_clip_norm: 1.0,
+        log_interval: 100,
+    }
+}

@@ -1,0 +1,548 @@
+//! stdlib/qnn/mnist/model.sio - QNN MNIST Model Architecture
+//!
+//! 3-layer Quaternion Neural Network for MNIST digit classification.
+//! Architecture: 196 quaternions → 64 → 32 → 10 → softmax
+//!
+//! Uses Hamilton product for quaternion weight-input multiplication,
+//! achieving 4x parameter efficiency vs real-valued networks.
+
+// Quaternion type
+struct Quat {
+    w: f32,
+    x: f32,
+    y: f32,
+    z: f32,
+}
+
+// Model configuration
+struct QnnMnistConfig {
+    input_dim: i32,   // 196 (784 pixels / 4)
+    hidden1: i32,     // 64
+    hidden2: i32,     // 32
+    output_dim: i32,  // 10
+}
+
+// Model weights
+struct QnnMnistModel {
+    // Layer 1: input_dim → hidden1
+    layer1_weights: [Quat],  // [input_dim * hidden1]
+    layer1_bias: [Quat],     // [hidden1]
+    // Layer 2: hidden1 → hidden2
+    layer2_weights: [Quat],  // [hidden1 * hidden2]
+    layer2_bias: [Quat],     // [hidden2]
+    // Layer 3: hidden2 → output_dim
+    layer3_weights: [Quat],  // [hidden2 * output_dim]
+    layer3_bias: [Quat],     // [output_dim]
+}
+
+// Cached activations for backpropagation
+struct QnnActivations {
+    input: [Quat],         // [input_dim] original input
+    hidden1_pre: [Quat],   // [hidden1] before ReLU
+    hidden1_post: [Quat],  // [hidden1] after ReLU
+    hidden2_pre: [Quat],   // [hidden2] before ReLU
+    hidden2_post: [Quat],  // [hidden2] after ReLU
+    output: [Quat],        // [output_dim] output quaternions
+    logits: [f32],         // [output_dim] real logits from magnitude
+    probs: [f32],          // [output_dim] softmax probabilities
+}
+
+// Gradients for all model parameters
+struct QnnGradients {
+    layer1_weights: [Quat],
+    layer1_bias: [Quat],
+    layer2_weights: [Quat],
+    layer2_bias: [Quat],
+    layer3_weights: [Quat],
+    layer3_bias: [Quat],
+}
+
+// Return type for linear backward pass (avoids tuple destructuring)
+struct LinearBackwardResult {
+    grad_input: [Quat],
+    grad_weights: [Quat],
+    grad_bias: [Quat],
+}
+
+// ============================================================================
+// Quaternion Operations
+// ============================================================================
+
+// Hamilton product: q1 ⊗ q2
+fn quat_mul(a: Quat, b: Quat) -> Quat {
+    Quat {
+        w: a.w * b.w - a.x * b.x - a.y * b.y - a.z * b.z,
+        x: a.w * b.x + a.x * b.w + a.y * b.z - a.z * b.y,
+        y: a.w * b.y - a.x * b.z + a.y * b.w + a.z * b.x,
+        z: a.w * b.z + a.x * b.y - a.y * b.x + a.z * b.w,
+    }
+}
+
+// Component-wise addition
+fn quat_add(a: Quat, b: Quat) -> Quat {
+    Quat { w: a.w + b.w, x: a.x + b.x, y: a.y + b.y, z: a.z + b.z }
+}
+
+// Component-wise subtraction
+fn quat_sub(a: Quat, b: Quat) -> Quat {
+    Quat { w: a.w - b.w, x: a.x - b.x, y: a.y - b.y, z: a.z - b.z }
+}
+
+// Scalar multiplication
+fn quat_scale(q: Quat, s: f32) -> Quat {
+    Quat { w: q.w * s, x: q.x * s, y: q.y * s, z: q.z * s }
+}
+
+// Component-wise ReLU
+fn quat_relu(q: Quat) -> Quat {
+    Quat {
+        w: if q.w > 0.0 { q.w } else { 0.0 },
+        x: if q.x > 0.0 { q.x } else { 0.0 },
+        y: if q.y > 0.0 { q.y } else { 0.0 },
+        z: if q.z > 0.0 { q.z } else { 0.0 },
+    }
+}
+
+// ReLU derivative (for backprop)
+fn quat_relu_grad(pre_relu: Quat) -> Quat {
+    Quat {
+        w: if pre_relu.w > 0.0 { 1.0 } else { 0.0 },
+        x: if pre_relu.x > 0.0 { 1.0 } else { 0.0 },
+        y: if pre_relu.y > 0.0 { 1.0 } else { 0.0 },
+        z: if pre_relu.z > 0.0 { 1.0 } else { 0.0 },
+    }
+}
+
+// Component-wise multiply (for gradient masking)
+fn quat_hadamard(a: Quat, b: Quat) -> Quat {
+    Quat { w: a.w * b.w, x: a.x * b.x, y: a.y * b.y, z: a.z * b.z }
+}
+
+// Quaternion conjugate
+fn quat_conj(q: Quat) -> Quat {
+    Quat { w: q.w, x: -q.x, y: -q.y, z: -q.z }
+}
+
+// Squared magnitude
+fn quat_magnitude_sq(q: Quat) -> f32 {
+    q.w * q.w + q.x * q.x + q.y * q.y + q.z * q.z
+}
+
+// Zero quaternion
+fn quat_zero() -> Quat {
+    Quat { w: 0.0, x: 0.0, y: 0.0, z: 0.0 }
+}
+
+// ============================================================================
+// Activation Functions
+// ============================================================================
+
+// Stable softmax for 10 classes
+fn softmax(logits: &[f32]) -> [f32] {
+    // Find max for numerical stability
+    var max_val: f32 = logits[0]
+    var i: i32 = 1
+    while i < 10 {
+        if logits[i] > max_val {
+            max_val = logits[i]
+        }
+        i = i + 1
+    }
+
+    // Compute exp(logits - max) and sum
+    var sum: f32 = 0.0
+    var exps: [f32]
+    i = 0
+    while i < 10 {
+        let exp_val = exp_f32(logits[i] - max_val)
+        exps = exps ++ [exp_val]
+        sum = sum + exp_val
+        i = i + 1
+    }
+
+    // Normalize
+    var probs: [f32]
+    i = 0
+    while i < 10 {
+        probs = probs ++ [exps[i] / sum]
+        i = i + 1
+    }
+    probs
+}
+
+// Cross-entropy loss: -log(prob[target])
+fn cross_entropy_loss(probs: &[f32], target: i32) -> f32 {
+    let eps: f32 = 1e-7
+    let prob = probs[target]
+    let clamped = if prob < eps { eps } else { prob }
+    -log_f32(clamped)
+}
+
+// Gradient of cross-entropy + softmax w.r.t. logits
+// Result: probs - one_hot(target)
+fn cross_entropy_softmax_grad(probs: &[f32], target: i32) -> [f32] {
+    var grad_vals: [f32]
+    var i: i32 = 0
+    while i < 10 {
+        let one_hot = if i == target { 1.0 } else { 0.0 }
+        grad_vals = grad_vals ++ [probs[i] - one_hot]
+        i = i + 1
+    }
+    grad_vals
+}
+
+// ============================================================================
+// Model Initialization
+// ============================================================================
+
+// Simple LCG random number generator (without modulo operator)
+fn lcg_next(state: &!i64) -> f32 {
+    let mult: i64 = 1103515245
+    let incr: i64 = 12345
+    let modulus: i64 = 2147483648
+    let temp = (*state * mult) + incr
+    var result = temp
+    while result >= modulus {
+        result = result - modulus
+    }
+    *state = result
+    let normalized = (result as f32) / (modulus as f32)
+    normalized
+}
+
+// Generate random quaternion with Xavier scaling
+fn random_quat_xavier(state: &!i64, fan_in: i32, fan_out: i32) -> Quat {
+    // Xavier scaling: sqrt(2 / (fan_in + fan_out))
+    let scale = sqrt_f32(2.0 / ((fan_in + fan_out) as f32))
+    // Generate uniform [-1, 1] then scale
+    let w = (lcg_next(state) * 2.0 - 1.0) * scale
+    let x = (lcg_next(state) * 2.0 - 1.0) * scale
+    let y = (lcg_next(state) * 2.0 - 1.0) * scale
+    let z = (lcg_next(state) * 2.0 - 1.0) * scale
+    Quat { w: w, x: x, y: y, z: z }
+}
+
+// Initialize model weights
+fn qnn_mnist_init(config: &QnnMnistConfig, seed: i32) -> QnnMnistModel {
+    var state: i64 = seed as i64
+
+    // Layer 1 weights: input_dim → hidden1
+    var layer1_weights: [Quat]
+    var i: i32 = 0
+    while i < config.input_dim * config.hidden1 {
+        layer1_weights = layer1_weights ++ [random_quat_xavier(&!state, config.input_dim, config.hidden1)]
+        i = i + 1
+    }
+    var layer1_bias: [Quat]
+    i = 0
+    while i < config.hidden1 {
+        layer1_bias = layer1_bias ++ [quat_zero()]
+        i = i + 1
+    }
+
+    // Layer 2 weights: hidden1 → hidden2
+    var layer2_weights: [Quat]
+    i = 0
+    while i < config.hidden1 * config.hidden2 {
+        layer2_weights = layer2_weights ++ [random_quat_xavier(&!state, config.hidden1, config.hidden2)]
+        i = i + 1
+    }
+    var layer2_bias: [Quat]
+    i = 0
+    while i < config.hidden2 {
+        layer2_bias = layer2_bias ++ [quat_zero()]
+        i = i + 1
+    }
+
+    // Layer 3 weights: hidden2 → output_dim
+    var layer3_weights: [Quat]
+    i = 0
+    while i < config.hidden2 * config.output_dim {
+        layer3_weights = layer3_weights ++ [random_quat_xavier(&!state, config.hidden2, config.output_dim)]
+        i = i + 1
+    }
+    var layer3_bias: [Quat]
+    i = 0
+    while i < config.output_dim {
+        layer3_bias = layer3_bias ++ [quat_zero()]
+        i = i + 1
+    }
+
+    QnnMnistModel {
+        layer1_weights: layer1_weights,
+        layer1_bias: layer1_bias,
+        layer2_weights: layer2_weights,
+        layer2_bias: layer2_bias,
+        layer3_weights: layer3_weights,
+        layer3_bias: layer3_bias,
+    }
+}
+
+// ============================================================================
+// Forward Pass
+// ============================================================================
+
+// Quaternion linear layer forward: output[j] = sum_i(input[i] ⊗ weights[i,j]) + bias[j]
+fn quat_linear_forward(
+    input: &[Quat],
+    weights: &[Quat],
+    bias: &[Quat],
+    in_dim: i32,
+    out_dim: i32
+) -> [Quat] {
+    var output: [Quat]
+    var j: i32 = 0
+    while j < out_dim {
+        var sum = bias[j]
+        var i: i32 = 0
+        while i < in_dim {
+            let w_idx = i * out_dim + j
+            let prod = quat_mul(input[i], weights[w_idx])
+            sum = quat_add(sum, prod)
+            i = i + 1
+        }
+        output = output ++ [sum]
+        j = j + 1
+    }
+    output
+}
+
+// Convert quaternion outputs to real logits via magnitude squared
+fn quat_to_logits(quats: &[Quat]) -> [f32] {
+    var logits: [f32]
+    var i: i32 = 0
+    while i < 10 {
+        logits = logits ++ [quat_magnitude_sq(quats[i])]
+        i = i + 1
+    }
+    logits
+}
+
+// Full forward pass
+fn qnn_mnist_forward(
+    model: &QnnMnistModel,
+    input: &[Quat],
+    config: &QnnMnistConfig
+) -> QnnActivations {
+    // Layer 1: input → hidden1
+    let h1_pre = quat_linear_forward(input, &model.layer1_weights, &model.layer1_bias,
+                                      config.input_dim, config.hidden1)
+    var h1_post: [Quat]
+    var i: i32 = 0
+    while i < config.hidden1 {
+        h1_post = h1_post ++ [quat_relu(h1_pre[i])]
+        i = i + 1
+    }
+
+    // Layer 2: hidden1 → hidden2
+    let h2_pre = quat_linear_forward(&h1_post, &model.layer2_weights, &model.layer2_bias,
+                                      config.hidden1, config.hidden2)
+    var h2_post: [Quat]
+    i = 0
+    while i < config.hidden2 {
+        h2_post = h2_post ++ [quat_relu(h2_pre[i])]
+        i = i + 1
+    }
+
+    // Layer 3: hidden2 → output (no activation)
+    let out = quat_linear_forward(&h2_post, &model.layer3_weights, &model.layer3_bias,
+                                   config.hidden2, config.output_dim)
+
+    // Convert to logits and probabilities
+    let logits = quat_to_logits(&out)
+    let probs = softmax(&logits)
+
+    // Copy input array
+    var input_copy: [Quat]
+    i = 0
+    while i < config.input_dim {
+        input_copy = input_copy ++ [input[i]]
+        i = i + 1
+    }
+
+    QnnActivations {
+        input: input_copy,
+        hidden1_pre: h1_pre,
+        hidden1_post: h1_post,
+        hidden2_pre: h2_pre,
+        hidden2_post: h2_post,
+        output: out,
+        logits: logits,
+        probs: probs,
+    }
+}
+
+// ============================================================================
+// Backward Pass
+// ============================================================================
+
+// Gradient of magnitude squared w.r.t. quaternion: d(||q||^2)/dq = 2*q
+fn magnitude_sq_grad(q: Quat, grad_logit: f32) -> Quat {
+    Quat {
+        w: 2.0 * q.w * grad_logit,
+        x: 2.0 * q.x * grad_logit,
+        y: 2.0 * q.y * grad_logit,
+        z: 2.0 * q.z * grad_logit,
+    }
+}
+
+// Backward through quaternion linear layer
+// Returns: LinearBackwardResult with grad_input, grad_weights, grad_bias
+fn quat_linear_backward(
+    input: &[Quat],
+    weights: &[Quat],
+    grad_output: &[Quat],
+    in_dim: i32,
+    out_dim: i32
+) -> LinearBackwardResult {
+    // Gradient w.r.t. bias = grad_output (copy elements)
+    var grad_bias: [Quat]
+    var idx: i32 = 0
+    while idx < out_dim {
+        grad_bias = grad_bias ++ [grad_output[idx]]
+        idx = idx + 1
+    }
+
+    // Gradient w.r.t. weights
+    var grad_weights: [Quat]
+    var i: i32 = 0
+    while i < in_dim {
+        var j: i32 = 0
+        while j < out_dim {
+            // grad_W[i,j] = input[i] ⊗ grad_output[j] (simplified, actually conjugate form)
+            let gw = quat_mul(quat_conj(input[i]), grad_output[j])
+            grad_weights = grad_weights ++ [gw]
+            j = j + 1
+        }
+        i = i + 1
+    }
+
+    // Gradient w.r.t. input
+    var grad_input: [Quat]
+    i = 0
+    while i < in_dim {
+        var sum = quat_zero()
+        var j: i32 = 0
+        while j < out_dim {
+            let w_idx = i * out_dim + j
+            // grad_input[i] = sum_j(grad_output[j] ⊗ conj(weights[i,j]))
+            let gi = quat_mul(grad_output[j], quat_conj(weights[w_idx]))
+            sum = quat_add(sum, gi)
+            j = j + 1
+        }
+        grad_input = grad_input ++ [sum]
+        i = i + 1
+    }
+
+    LinearBackwardResult {
+        grad_input: grad_input,
+        grad_weights: grad_weights,
+        grad_bias: grad_bias,
+    }
+}
+
+// Full backward pass
+fn qnn_mnist_backward(
+    model: &QnnMnistModel,
+    activations: &QnnActivations,
+    target: i32,
+    config: &QnnMnistConfig
+) -> QnnGradients {
+    // Gradient from cross-entropy + softmax w.r.t. logits
+    let grad_logits = cross_entropy_softmax_grad(&activations.probs, target)
+
+    // Gradient w.r.t. output quaternions (through magnitude squared)
+    var grad_out: [Quat]
+    var i: i32 = 0
+    while i < config.output_dim {
+        grad_out = grad_out ++ [magnitude_sq_grad(activations.output[i], grad_logits[i])]
+        i = i + 1
+    }
+
+    // Backward through layer 3
+    let l3_result = quat_linear_backward(
+        &activations.hidden2_post, &model.layer3_weights, &grad_out,
+        config.hidden2, config.output_dim)
+    let grad_h2_post = l3_result.grad_input
+    let grad_l3_w = l3_result.grad_weights
+    let grad_l3_b = l3_result.grad_bias
+
+    // Backward through ReLU 2
+    var grad_h2_pre: [Quat]
+    i = 0
+    while i < config.hidden2 {
+        let relu_mask = quat_relu_grad(activations.hidden2_pre[i])
+        grad_h2_pre = grad_h2_pre ++ [quat_hadamard(grad_h2_post[i], relu_mask)]
+        i = i + 1
+    }
+
+    // Backward through layer 2
+    let l2_result = quat_linear_backward(
+        &activations.hidden1_post, &model.layer2_weights, &grad_h2_pre,
+        config.hidden1, config.hidden2)
+    let grad_h1_post = l2_result.grad_input
+    let grad_l2_w = l2_result.grad_weights
+    let grad_l2_b = l2_result.grad_bias
+
+    // Backward through ReLU 1
+    var grad_h1_pre: [Quat]
+    i = 0
+    while i < config.hidden1 {
+        let relu_mask = quat_relu_grad(activations.hidden1_pre[i])
+        grad_h1_pre = grad_h1_pre ++ [quat_hadamard(grad_h1_post[i], relu_mask)]
+        i = i + 1
+    }
+
+    // Backward through layer 1
+    let l1_result = quat_linear_backward(
+        &activations.input, &model.layer1_weights, &grad_h1_pre,
+        config.input_dim, config.hidden1)
+    let grad_l1_w = l1_result.grad_weights
+    let grad_l1_b = l1_result.grad_bias
+
+    QnnGradients {
+        layer1_weights: grad_l1_w,
+        layer1_bias: grad_l1_b,
+        layer2_weights: grad_l2_w,
+        layer2_bias: grad_l2_b,
+        layer3_weights: grad_l3_w,
+        layer3_bias: grad_l3_b,
+    }
+}
+
+// ============================================================================
+// Utility Functions
+// ============================================================================
+
+// Get predicted class from activations
+fn predict_class(activations: &QnnActivations) -> i32 {
+    var max_prob: f32 = activations.probs[0]
+    var best_class: i32 = 0
+    var i: i32 = 1
+    while i < 10 {
+        if activations.probs[i] > max_prob {
+            max_prob = activations.probs[i]
+            best_class = i
+        }
+        i = i + 1
+    }
+    best_class
+}
+
+// Default configuration
+fn default_config() -> QnnMnistConfig {
+    QnnMnistConfig {
+        input_dim: 196,
+        hidden1: 64,
+        hidden2: 32,
+        output_dim: 10,
+    }
+}
+
+// Count total parameters
+fn count_parameters(config: &QnnMnistConfig) -> i32 {
+    let l1 = config.input_dim * config.hidden1 + config.hidden1
+    let l2 = config.hidden1 * config.hidden2 + config.hidden2
+    let l3 = config.hidden2 * config.output_dim + config.output_dim
+    l1 + l2 + l3
+}
