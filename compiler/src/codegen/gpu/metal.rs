@@ -1954,6 +1954,70 @@ impl MetalCodegen {
                 self.emit(&format!("float8 {} = float8(oct_from_q0, oct_from_q1);", result_name));
             }
 
+            // ================================================================
+            // G2-Equivariant Octonion Operations
+            // Reference: Baez, "The Octonions", Bull. AMS 2002
+            // G2 is the automorphism group of octonions (14-dimensional exceptional Lie group)
+            // ================================================================
+
+            // OctonionRotate: G2 rotation σ_u(v) = u × v × conj(u)
+            // Math: For unit octonion u, this rotates v while preserving |v|
+            // Complexity: 2 × 120 FLOPs = 240 FLOPs (two octonion multiplications)
+            GpuOp::OctonionRotate(u, v) => {
+                let u_name = self.get_var_name(*u);
+                let v_name = self.get_var_name(*v);
+                self.emit(&format!("// OctonionRotate: σ_u(v) = u × v × conj(u) - G2 rotation"));
+                self.emit(&format!("float8 rot_u = *(device float8*)(&{});", u_name));
+                self.emit(&format!("float8 rot_v = *(device float8*)(&{});", v_name));
+                self.emit(&format!("float8 rot_uc = float8(rot_u.s0, -rot_u.s1, -rot_u.s2, -rot_u.s3, -rot_u.s4, -rot_u.s5, -rot_u.s6, -rot_u.s7);  // conj(u)"));
+
+                // Step 1: Compute tmp = u × v using Cayley-Dickson
+                self.emit(&format!("// Step 1: tmp = u × v"));
+                self.emit(&format!("float tmp0 = rot_u.s0*rot_v.s0 - rot_u.s1*rot_v.s1 - rot_u.s2*rot_v.s2 - rot_u.s3*rot_v.s3 - rot_u.s4*rot_v.s4 - rot_u.s5*rot_v.s5 - rot_u.s6*rot_v.s6 - rot_u.s7*rot_v.s7;"));
+                self.emit(&format!("float tmp1 = rot_u.s0*rot_v.s1 + rot_u.s1*rot_v.s0 + rot_u.s2*rot_v.s3 - rot_u.s3*rot_v.s2 + rot_u.s4*rot_v.s5 - rot_u.s5*rot_v.s4 - rot_u.s6*rot_v.s7 + rot_u.s7*rot_v.s6;"));
+                self.emit(&format!("float tmp2 = rot_u.s0*rot_v.s2 - rot_u.s1*rot_v.s3 + rot_u.s2*rot_v.s0 + rot_u.s3*rot_v.s1 + rot_u.s4*rot_v.s6 + rot_u.s5*rot_v.s7 - rot_u.s6*rot_v.s4 - rot_u.s7*rot_v.s5;"));
+                self.emit(&format!("float tmp3 = rot_u.s0*rot_v.s3 + rot_u.s1*rot_v.s2 - rot_u.s2*rot_v.s1 + rot_u.s3*rot_v.s0 + rot_u.s4*rot_v.s7 - rot_u.s5*rot_v.s6 + rot_u.s6*rot_v.s5 - rot_u.s7*rot_v.s4;"));
+                self.emit(&format!("float tmp4 = rot_u.s0*rot_v.s4 - rot_u.s1*rot_v.s5 - rot_u.s2*rot_v.s6 - rot_u.s3*rot_v.s7 + rot_u.s4*rot_v.s0 + rot_u.s5*rot_v.s1 + rot_u.s6*rot_v.s2 + rot_u.s7*rot_v.s3;"));
+                self.emit(&format!("float tmp5 = rot_u.s0*rot_v.s5 + rot_u.s1*rot_v.s4 - rot_u.s2*rot_v.s7 + rot_u.s3*rot_v.s6 - rot_u.s4*rot_v.s1 + rot_u.s5*rot_v.s0 - rot_u.s6*rot_v.s3 + rot_u.s7*rot_v.s2;"));
+                self.emit(&format!("float tmp6 = rot_u.s0*rot_v.s6 + rot_u.s1*rot_v.s7 + rot_u.s2*rot_v.s4 - rot_u.s3*rot_v.s5 - rot_u.s4*rot_v.s2 + rot_u.s5*rot_v.s3 + rot_u.s6*rot_v.s0 - rot_u.s7*rot_v.s1;"));
+                self.emit(&format!("float tmp7 = rot_u.s0*rot_v.s7 - rot_u.s1*rot_v.s6 + rot_u.s2*rot_v.s5 + rot_u.s3*rot_v.s4 - rot_u.s4*rot_v.s3 - rot_u.s5*rot_v.s2 + rot_u.s6*rot_v.s1 + rot_u.s7*rot_v.s0;"));
+
+                // Step 2: Compute result = tmp × conj(u)
+                self.emit(&format!("// Step 2: result = tmp × conj(u)"));
+                self.emit(&format!("float r0 = tmp0*rot_uc.s0 - tmp1*rot_uc.s1 - tmp2*rot_uc.s2 - tmp3*rot_uc.s3 - tmp4*rot_uc.s4 - tmp5*rot_uc.s5 - tmp6*rot_uc.s6 - tmp7*rot_uc.s7;"));
+                self.emit(&format!("float r1 = tmp0*rot_uc.s1 + tmp1*rot_uc.s0 + tmp2*rot_uc.s3 - tmp3*rot_uc.s2 + tmp4*rot_uc.s5 - tmp5*rot_uc.s4 - tmp6*rot_uc.s7 + tmp7*rot_uc.s6;"));
+                self.emit(&format!("float r2 = tmp0*rot_uc.s2 - tmp1*rot_uc.s3 + tmp2*rot_uc.s0 + tmp3*rot_uc.s1 + tmp4*rot_uc.s6 + tmp5*rot_uc.s7 - tmp6*rot_uc.s4 - tmp7*rot_uc.s5;"));
+                self.emit(&format!("float r3 = tmp0*rot_uc.s3 + tmp1*rot_uc.s2 - tmp2*rot_uc.s1 + tmp3*rot_uc.s0 + tmp4*rot_uc.s7 - tmp5*rot_uc.s6 + tmp6*rot_uc.s5 - tmp7*rot_uc.s4;"));
+                self.emit(&format!("float r4 = tmp0*rot_uc.s4 - tmp1*rot_uc.s5 - tmp2*rot_uc.s6 - tmp3*rot_uc.s7 + tmp4*rot_uc.s0 + tmp5*rot_uc.s1 + tmp6*rot_uc.s2 + tmp7*rot_uc.s3;"));
+                self.emit(&format!("float r5 = tmp0*rot_uc.s5 + tmp1*rot_uc.s4 - tmp2*rot_uc.s7 + tmp3*rot_uc.s6 - tmp4*rot_uc.s1 + tmp5*rot_uc.s0 - tmp6*rot_uc.s3 + tmp7*rot_uc.s2;"));
+                self.emit(&format!("float r6 = tmp0*rot_uc.s6 + tmp1*rot_uc.s7 + tmp2*rot_uc.s4 - tmp3*rot_uc.s5 - tmp4*rot_uc.s2 + tmp5*rot_uc.s3 + tmp6*rot_uc.s0 - tmp7*rot_uc.s1;"));
+                self.emit(&format!("float r7 = tmp0*rot_uc.s7 - tmp1*rot_uc.s6 + tmp2*rot_uc.s5 + tmp3*rot_uc.s4 - tmp4*rot_uc.s3 - tmp5*rot_uc.s2 + tmp6*rot_uc.s1 + tmp7*rot_uc.s0;"));
+                self.emit(&format!("float8 {} = float8(r0, r1, r2, r3, r4, r5, r6, r7);", result_name));
+            }
+
+            // OctonionImagNorm: Imaginary part norm ||Im(o)||
+            // Math: sqrt(b² + c² + d² + e² + f² + g² + h²)
+            // G2-invariant quantity used for G2-equivariant activations
+            GpuOp::OctonionImagNorm(o) => {
+                let o_name = self.get_var_name(*o);
+                self.emit(&format!("// OctonionImagNorm: ||Im(o)|| = sqrt(b² + c² + ... + h²)"));
+                self.emit(&format!("float8 imn_o = *(device float8*)(&{});", o_name));
+                // Use dot product for efficiency: pack imaginary parts into float4 vectors
+                self.emit(&format!("float4 imn_lo = float4(imn_o.s1, imn_o.s2, imn_o.s3, 0.0f);  // b,c,d,0"));
+                self.emit(&format!("float4 imn_hi = float4(imn_o.s4, imn_o.s5, imn_o.s6, imn_o.s7);  // e,f,g,h"));
+                self.emit(&format!("float {} = sqrt(dot(imn_lo, imn_lo) + dot(imn_hi, imn_hi));", result_name));
+            }
+
+            // OctonionImagProject: Project onto imaginary subspace (0, b, c, d, e, f, g, h)
+            // Math: Zero the real part, keep imaginary parts
+            // Preserves the 7D imaginary vector
+            GpuOp::OctonionImagProject(o) => {
+                let o_name = self.get_var_name(*o);
+                self.emit(&format!("// OctonionImagProject: (0, b, c, d, e, f, g, h)"));
+                self.emit(&format!("float8 imp_o = *(device float8*)(&{});", o_name));
+                self.emit(&format!("float8 {} = float8(0.0f, imp_o.s1, imp_o.s2, imp_o.s3, imp_o.s4, imp_o.s5, imp_o.s6, imp_o.s7);", result_name));
+            }
+
             // OctonionExp: Octonion exponential function
             // Math: exp(o) = exp(a) * (cos(|v|) + sin(|v|)/|v| * v)
             // where a = Re(o), v = Im(o)

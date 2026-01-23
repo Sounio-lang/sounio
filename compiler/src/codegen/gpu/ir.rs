@@ -1424,6 +1424,26 @@ pub enum GpuOp {
     /// Construct octonion from two quaternions
     OctonionFromQuats(ValueId, ValueId),
 
+    // ==================== G2-EQUIVARIANT OCTONION OPERATIONS ====================
+    // Reference: Baez, "The Octonions", Bull. AMS 2002
+    // G2 is the automorphism group of octonions (14-dimensional exceptional Lie group)
+
+    /// G2 rotation: σ_u(v) = u × v × conj(u)
+    /// u is unit octonion defining the rotation
+    /// v is the octonion to rotate
+    /// Result is rotated octonion (same norm as v)
+    OctonionRotate(ValueId, ValueId),
+
+    /// Imaginary part norm: ||Im(o)||
+    /// Returns f32: sqrt(b² + c² + d² + e² + f² + g² + h²)
+    /// G2-invariant quantity (used for G2-equivariant activations)
+    OctonionImagNorm(ValueId),
+
+    /// Project onto imaginary subspace
+    /// Returns octonion with real part zeroed: (0, b, c, d, e, f, g, h)
+    /// Preserves the 7D imaginary vector
+    OctonionImagProject(ValueId),
+
     // ==================== OCTONION NEURAL NETWORK OPERATIONS ====================
     // Reference: arXiv:1903.08478 - Deep Octonion Networks
     // Note: Non-associativity requires careful handling in backprop

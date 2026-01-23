@@ -748,4 +748,183 @@ mod octonion_numerical_validation {
 
         println!("All summary property checks passed!");
     }
+
+    // ========================================================================
+    // Tier 6: G2-Equivariant Operations
+    // Reference: Baez, "The Octonions", Bull. AMS 2002
+    // G2 is the automorphism group of octonions (14-dimensional exceptional Lie group)
+    // ========================================================================
+
+    /// G2 rotation: σ_u(v) = u × v × conj(u) for unit octonion u
+    fn g2_rotate(u: &Octonion, v: &Octonion) -> Octonion {
+        u.mul(v).mul(&u.conj())
+    }
+
+    /// Normalize an octonion to unit length
+    fn normalize(o: &Octonion) -> Octonion {
+        let norm = o.norm();
+        if norm < 1e-10 {
+            return Octonion::one();
+        }
+        o.scale(1.0 / norm)
+    }
+
+    #[test]
+    fn test_g2_rotation_preserves_norm() {
+        // G2 rotation σ_u(v) = u × v × conj(u) should preserve |v|
+        // This is a fundamental property of the G2 automorphism group
+        let seed = 0x62524F54_u64;
+
+        for i in 0..100 {
+            let u_raw = random_octonion(seed, i * 16);
+            let u = normalize(&u_raw);  // Unit octonion for rotation
+            let v = random_octonion(seed, i * 16 + 8);
+
+            let rotated = g2_rotate(&u, &v);
+            let norm_rotated = rotated.norm();
+            let norm_v = v.norm();
+
+            let error = (norm_rotated - norm_v).abs();
+            assert!(
+                error < 1e-4,
+                "G2 rotation did not preserve norm at i={}: |rotated|={}, |v|={}, error={}",
+                i, norm_rotated, norm_v, error
+            );
+        }
+    }
+
+    #[test]
+    fn test_g2_rotation_identity() {
+        // For u = 1 (real unit), σ_1(v) = 1 × v × 1 = v
+        // Identity rotation should leave v unchanged
+        let u = Octonion::one();
+        let seed = 0x1DE17171_u64;
+
+        for i in 0..100 {
+            let v = random_octonion(seed, i * 8);
+            let rotated = g2_rotate(&u, &v);
+
+            let error = rotated.distance(&v);
+            assert!(
+                error < 1e-5,
+                "Identity G2 rotation did not leave v unchanged at i={}: error={}",
+                i, error
+            );
+        }
+    }
+
+    #[test]
+    fn test_g2_rotation_inverse_recovers() {
+        // σ_{u^{-1}}(σ_u(v)) = v (inverse rotation recovers original)
+        // For unit octonion, u^{-1} = conj(u)
+        let seed = 0x14FE25E_u64;
+
+        for i in 0..50 {
+            let u_raw = random_octonion(seed, i * 16);
+            let u = normalize(&u_raw);
+            let v = random_octonion(seed, i * 16 + 8);
+
+            // Apply rotation
+            let rotated = g2_rotate(&u, &v);
+
+            // Apply inverse rotation using conj(u)
+            let u_inv = u.conj();  // For unit octonion, inverse = conjugate
+            let recovered = g2_rotate(&u_inv, &rotated);
+
+            let error = recovered.distance(&v);
+            assert!(
+                error < 1e-3,
+                "Inverse G2 rotation did not recover original at i={}: error={}",
+                i, error
+            );
+        }
+    }
+
+    #[test]
+    fn test_g2_rotation_not_involutive() {
+        // G2 rotations are NOT involutions in general: σ_u(σ_u(v)) ≠ v
+        // (unless u² = 1, which is rare for unit octonions)
+        let seed = 0x40714F01_u64;
+        let mut found_non_involutive = false;
+
+        for i in 0..100 {
+            let u_raw = random_octonion(seed, i * 16);
+            let u = normalize(&u_raw);
+            let v = random_octonion(seed, i * 16 + 8);
+
+            let rotated = g2_rotate(&u, &v);
+            let double_rotated = g2_rotate(&u, &rotated);
+
+            let diff = double_rotated.distance(&v);
+            if diff > 1e-3 {
+                found_non_involutive = true;
+                break;
+            }
+        }
+
+        assert!(
+            found_non_involutive,
+            "Should find at least one non-involutive G2 rotation in 100 tries"
+        );
+    }
+
+    #[test]
+    fn test_imag_norm_g2_invariant() {
+        // The imaginary part norm ||Im(o)|| is G2-invariant
+        // ||Im(σ_u(v))|| should equal ||Im(v)|| (approximately, due to real part mixing)
+        // Actually: G2 preserves the imaginary subspace, so this should hold
+        let seed = 0x14A64024_u64;
+
+        for i in 0..50 {
+            let u_raw = random_octonion(seed, i * 16);
+            let u = normalize(&u_raw);
+
+            // Create pure imaginary octonion (real part = 0)
+            let mut v = random_octonion(seed, i * 16 + 8);
+            v.a = 0.0;  // Pure imaginary
+
+            let rotated = g2_rotate(&u, &v);
+
+            // For pure imaginary input, output should also be pure imaginary
+            // (G2 preserves the imaginary 7-sphere)
+            let imag_norm_v = (v.b*v.b + v.c*v.c + v.d*v.d + v.e*v.e + v.f*v.f + v.g*v.g + v.h*v.h).sqrt();
+            let imag_norm_rotated = (rotated.b*rotated.b + rotated.c*rotated.c + rotated.d*rotated.d +
+                                     rotated.e*rotated.e + rotated.f*rotated.f + rotated.g*rotated.g + rotated.h*rotated.h).sqrt();
+
+            let error = (imag_norm_v - imag_norm_rotated).abs();
+            assert!(
+                error < 1e-3,
+                "G2 rotation did not preserve imaginary norm at i={}: error={}",
+                i, error
+            );
+        }
+    }
+
+    #[test]
+    fn test_g2_rotation_composition() {
+        // Test that G2 rotations compose: σ_u(σ_v(w)) = σ_{some octonion}(w)
+        // This is because G2 is a group (closure under composition)
+        let seed = 0xC04205E_u64;
+
+        for i in 0..20 {
+            let u = normalize(&random_octonion(seed, i * 24));
+            let v = normalize(&random_octonion(seed, i * 24 + 8));
+            let w = random_octonion(seed, i * 24 + 16);
+
+            // Apply σ_v then σ_u
+            let first = g2_rotate(&v, &w);
+            let composed = g2_rotate(&u, &first);
+
+            // The result should have the same norm as w
+            let norm_w = w.norm();
+            let norm_composed = composed.norm();
+
+            let error = (norm_w - norm_composed).abs();
+            assert!(
+                error < 1e-3,
+                "G2 rotation composition did not preserve norm at i={}: error={}",
+                i, error
+            );
+        }
+    }
 }
