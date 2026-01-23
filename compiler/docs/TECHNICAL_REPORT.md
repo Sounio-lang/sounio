@@ -186,7 +186,7 @@ The `with GPU` effect ensures GPU operations are explicitly tracked in function 
 
 ### 4.1 Numerical Tests
 
-The validation suite (`integration_octonion_numerical.rs`) includes 25 tests:
+The validation suite includes 38 tests across two test files:
 
 **Tier 1: Algebraic Properties (10 tests)**
 - Norm multiplicativity (100 random pairs)
@@ -212,19 +212,37 @@ The validation suite (`integration_octonion_numerical.rs`) includes 25 tests:
 
 ### 4.2 Test Results
 
-All 25 numerical validation tests pass:
+All 38 tests pass (7 Moufang identity tests + 31 numerical validation tests):
 
 ```
-test octonion_numerical_validation::test_norm_multiplicativity_random ... ok
-test octonion_numerical_validation::test_alternative_property_left ... ok
-test octonion_numerical_validation::test_alternative_property_right ... ok
-test octonion_numerical_validation::test_flexibility_identity ... ok
-test octonion_numerical_validation::test_moufang_first ... ok
-test octonion_numerical_validation::test_moufang_second ... ok
-test octonion_numerical_validation::test_moufang_third ... ok
-...
-test result: ok. 25 passed; 0 failed
+# Moufang identity tests (integration_octonion_moufang.rs)
+test octonion_moufang_validation::test_moufang_first_identity ... ok
+test octonion_moufang_validation::test_moufang_second_identity ... ok
+test octonion_moufang_validation::test_moufang_third_identity_flexibility ... ok
+test octonion_moufang_validation::test_norm_multiplicativity ... ok
+test octonion_moufang_validation::test_alternative_property ... ok
+test octonion_moufang_validation::test_non_associativity_demonstrated ... ok
+test octonion_moufang_validation::test_conjugate_anti_automorphism ... ok
+test result: ok. 7 passed; 0 failed
+
+# Numerical validation tests (integration_octonion_numerical.rs)
+test result: ok. 31 passed; 0 failed
 ```
+
+### 4.3 Performance Benchmarks
+
+CPU baseline performance (single-threaded, Intel/AMD x86-64):
+
+| Operation | Time | Throughput |
+|-----------|------|------------|
+| Single octonion mul | 10.73 ns | 11.2 GFLOPS |
+| 4×4 octonion matmul | 975 ns | 7.9 GFLOPS |
+| 8×8 octonion matmul | 7.45 µs | 8.2 GFLOPS |
+| 16×16 octonion matmul | 59 µs | 8.3 GFLOPS |
+| 32×32 octonion matmul | 471 µs | 8.4 GFLOPS |
+| 1024 dot product | 13.1 µs | 9.4 GFLOPS |
+
+*Throughput calculated as FLOPs/time where octonion multiplication = 120 FLOPs.*
 
 ### 4.3 GPU Codegen Validation
 
