@@ -70,8 +70,8 @@ mod global_magnitude_tests {
     #[test]
     fn test_global_magnitude_pruning_keeps_largest() {
         let harness = Phase2TestHarness::new();
-        let mut gen = QuaternionGenerator::new(42);
-        let quats = gen.generate_batch(20);
+        let mut r#gen = QuaternionGenerator::new(42);
+        let quats = r#gen.generate_batch(20);
 
         // Compute norms
         let norms: Vec<f32> = quats.iter().map(|q| q.norm()).collect();
@@ -169,10 +169,10 @@ mod sparse_linear_tests {
     #[test]
     fn test_sparse_quat_linear_batch() {
         let harness = Phase2TestHarness::new();
-        let mut gen = QuaternionGenerator::new(42);
+        let mut r#gen = QuaternionGenerator::new(42);
 
         for _ in 0..5 {
-            let batch = gen.generate_batch(8);
+            let batch = r#gen.generate_batch(8);
             let values: Vec<f32> = batch.iter()
                 .flat_map(|q| vec![q.w, q.x, q.y, q.z])
                 .collect();
@@ -334,8 +334,8 @@ mod tensor_core_tests {
     #[test]
     fn test_sparse_quat_tensor_core_compute() {
         let harness = Phase2TestHarness::new();
-        let mut gen = QuaternionGenerator::new(42);
-        let quats = gen.generate_batch(16);
+        let mut r#gen = QuaternionGenerator::new(42);
+        let quats = r#gen.generate_batch(16);
 
         let values: Vec<f32> = quats.iter()
             .flat_map(|q| vec![q.w, q.x, q.y, q.z])
@@ -356,8 +356,8 @@ mod end_to_end_sparse_tests {
     #[test]
     fn test_sparse_quat_forward_backward() {
         let harness = Phase2TestHarness::new();
-        let mut gen = QuaternionGenerator::new(42);
-        let batch = gen.generate_batch(8);
+        let mut r#gen = QuaternionGenerator::new(42);
+        let batch = r#gen.generate_batch(8);
 
         let values: Vec<f32> = batch.iter()
             .flat_map(|q| vec![q.w, q.x, q.y, q.z])
@@ -396,8 +396,8 @@ mod end_to_end_sparse_tests {
     #[test]
     fn test_sparse_quat_accuracy_loss() {
         let harness = Phase2TestHarness::new();
-        let mut gen = QuaternionGenerator::new(42);
-        let quats = gen.generate_batch(10);
+        let mut r#gen = QuaternionGenerator::new(42);
+        let quats = r#gen.generate_batch(10);
 
         let dense_values: Vec<f32> = quats.iter()
             .flat_map(|q| vec![q.w, q.x, q.y, q.z])
@@ -435,8 +435,8 @@ mod end_to_end_sparse_tests {
     #[test]
     fn test_sparse_quat_with_mixed_precision() {
         let harness = Phase2TestHarness::new();
-        let mut gen = QuaternionGenerator::new(42);
-        let quats = gen.generate_batch(8);
+        let mut r#gen = QuaternionGenerator::new(42);
+        let quats = r#gen.generate_batch(8);
 
         let values: Vec<f32> = quats.iter()
             .flat_map(|q| vec![q.w, q.x, q.y, q.z])

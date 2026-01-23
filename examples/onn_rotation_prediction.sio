@@ -87,7 +87,7 @@ fn oct_norm_sq(o: Octonion) -> f32 {
 }
 
 // Euclidean norm
-fn oct_norm(o: Octonion) -> f32 {
+fn oct_norm(o: Octonion) -> f32 with Panic {
     var x = oct_norm_sq(o)
     if x <= 0.0 { return 0.0 }
     var guess = x / 2.0
@@ -156,34 +156,35 @@ fn oct_leaky_relu(o: Octonion, alpha: f32) -> Octonion {
     )
 }
 
-// Component-wise sigmoid approximation: 1 / (1 + exp(-x)) ≈ 0.5 + 0.125*x
-fn oct_sigmoid_fast(o: Octonion) -> Octonion {
-    let w = 0.5 + 0.125 * o.w
-    let x = 0.5 + 0.125 * o.x
-    let y = 0.5 + 0.125 * o.y
-    let z = 0.5 + 0.125 * o.z
-    let t = 0.5 + 0.125 * o.t
-    let u = 0.5 + 0.125 * o.u
-    let v = 0.5 + 0.125 * o.v
-    let s = 0.5 + 0.125 * o.s
+// Clamp helper: restrict value to [0, 1] range
+fn clamp_01(val: f32) -> f32 {
+    if val < 0.0 { 0.0 } else { if val > 1.0 { 1.0 } else { val } }
+}
+
+// Component-wise linear approximation to sigmoid: 0.5 + 0.125*x
+// Clipped to [0, 1] range for stability
+fn oct_sigmoid_approx(o: Octonion) -> Octonion {
+    let w = clamp_01(0.5 + 0.125 * o.w)
+    let x = clamp_01(0.5 + 0.125 * o.x)
+    let y = clamp_01(0.5 + 0.125 * o.y)
+    let z = clamp_01(0.5 + 0.125 * o.z)
+    let t = clamp_01(0.5 + 0.125 * o.t)
+    let u = clamp_01(0.5 + 0.125 * o.u)
+    let v = clamp_01(0.5 + 0.125 * o.v)
+    let s = clamp_01(0.5 + 0.125 * o.s)
 
     make_octonion(w, x, y, z, t, u, v, s)
 }
 
-// Tanh activation (component-wise)
-fn oct_tanh(o: Octonion) -> Octonion {
-    make_octonion(
-        o.w.tanh(), o.x.tanh(), o.y.tanh(), o.z.tanh(),
-        o.t.tanh(), o.u.tanh(), o.v.tanh(), o.s.tanh()
-    )
-}
-
-// Simplified GELU: approximately 0.5*x*(1 + tanh(sqrt(2/pi)*(x + 0.044715*x^3)))
-// For speed, use approximation: x * sigmoid(1.702*x)
-fn oct_gelu_fast(o: Octonion) -> Octonion {
+// GELU approximation: x * sigmoid(1.702*x)
+fn oct_gelu_approx(o: Octonion) -> Octonion {
     let scaled = oct_scale(o, 1.702)
-    let sigmoid_part = oct_sigmoid_fast(scaled)
-    oct_mul(o, sigmoid_part)
+    let sigmoid_part = oct_sigmoid_approx(scaled)
+    // Component-wise multiplication with activation
+    make_octonion(
+        o.w * sigmoid_part.w, o.x * sigmoid_part.x, o.y * sigmoid_part.y, o.z * sigmoid_part.z,
+        o.t * sigmoid_part.t, o.u * sigmoid_part.u, o.v * sigmoid_part.v, o.s * sigmoid_part.s
+    )
 }
 
 // ============================================================================
@@ -196,19 +197,14 @@ fn oct_linear_forward(weight: Octonion, bias: Octonion, input: Octonion) -> Octo
     oct_add(weighted, bias)
 }
 
-// Batch of linear operations for multiple inputs
-// Takes array of inputs and single weight/bias
-fn oct_linear_batch(
+// Process a batch of predictions (simplified for single forward pass)
+// For full batch processing, would need dynamic array support
+fn process_batch_prediction(
     weight: Octonion,
     bias: Octonion,
-    inputs: [Octonion]
-) -> [Octonion] {
-    var outputs: [Octonion] = []
-    for i in 0..inputs.len() {
-        let out = oct_linear_forward(weight, bias, inputs[i])
-        outputs.push(out)
-    }
-    outputs
+    input: Octonion
+) -> Octonion {
+    oct_linear_forward(weight, bias, input)
 }
 
 // ============================================================================
@@ -221,17 +217,11 @@ fn oct_mse_loss(pred: Octonion, target: Octonion) -> f32 {
     oct_dot(diff, diff)
 }
 
-// MSE loss for batch of predictions
-fn oct_batch_mse_loss(predictions: [Octonion], targets: [Octonion]) -> f32 {
-    if predictions.len() == 0 { return 0.0 }
-
-    var total_loss = 0.0
-    for i in 0..predictions.len() {
-        let loss_i = oct_mse_loss(predictions[i], targets[i])
-        total_loss = total_loss + loss_i
-    }
-
-    total_loss / (predictions.len() as f32)
+// MSE loss for pair of predictions (simplified for single step)
+fn oct_pair_mse_loss(pred1: Octonion, target1: Octonion, pred2: Octonion, target2: Octonion) -> f32 with Panic {
+    let loss1 = oct_mse_loss(pred1, target1)
+    let loss2 = oct_mse_loss(pred2, target2)
+    (loss1 + loss2) / 2.0
 }
 
 // ============================================================================
@@ -327,7 +317,7 @@ fn training_step(
 // ============================================================================
 
 // Validate network on a single example
-fn validate_single(net: &RotationNetwork, input: Octonion, expected: Octonion) -> i32 {
+fn validate_single(net: &RotationNetwork, input: Octonion, expected: Octonion) -> i32 with Panic {
     let prediction = network_forward(net, input)
     let error = oct_sub(prediction, expected)
     let error_norm = oct_norm(error)
@@ -337,7 +327,7 @@ fn validate_single(net: &RotationNetwork, input: Octonion, expected: Octonion) -
 }
 
 // Test parameter efficiency
-fn check_parameter_efficiency() -> i32 {
+fn check_parameter_efficiency() -> i32 with Panic {
     // Network structure:
     // - Input: 2 octonions = 16 floats
     // - Hidden: 4 octonions = 32 floats
@@ -362,7 +352,7 @@ fn check_parameter_efficiency() -> i32 {
 // MAIN ENTRY POINT
 // ============================================================================
 
-fn main() -> i32 {
+fn main() -> i32 with Panic {
     // Test 1: Parameter efficiency
     let test1 = check_parameter_efficiency()
 
@@ -393,8 +383,8 @@ fn main() -> i32 {
     // Test 5: Activation functions preserve finite values
     let act_input = make_octonion(2.0, -1.0, 1.5, -0.5, 0.5, -1.0, 1.0, -0.5)
     let after_relu = oct_relu(act_input)
-    let after_gelu = oct_gelu_fast(act_input)
-    let after_tanh = oct_tanh(act_input)
+    let after_leaky = oct_leaky_relu(act_input, 0.01)
+    let after_sigmoid = oct_sigmoid_approx(act_input)
     let test4 = 0  // If we get here, activations work
 
     // Test 6: Conjugate operation (reflects through real axis)

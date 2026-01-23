@@ -74,8 +74,8 @@ mod mixed_precision_sparse_tests {
     #[test]
     fn test_mixed_precision_with_sparse_quat() {
         let harness = Phase2TestHarness::new();
-        let mut gen = QuaternionGenerator::new(42);
-        let batch = gen.generate_batch(8);
+        let mut r#gen = QuaternionGenerator::new(42);
+        let batch = r#gen.generate_batch(8);
 
         let values: Vec<f32> = batch.iter()
             .flat_map(|q| vec![q.w, q.x, q.y, q.z])

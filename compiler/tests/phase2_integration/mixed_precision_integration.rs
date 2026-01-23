@@ -35,8 +35,8 @@ mod fp16_forward_tests {
     #[test]
     fn test_fp16_forward_numerical_stability() {
         let harness = Phase2TestHarness::new();
-        let mut gen = QuaternionGenerator::new(42);
-        let batch: Vec<f32> = gen.generate_batch(100)
+        let mut r#gen = QuaternionGenerator::new(42);
+        let batch: Vec<f32> = r#gen.generate_batch(100)
             .iter()
             .map(|q| q.norm())
             .collect();
@@ -179,8 +179,8 @@ mod quat_mixed_precision_tests {
     #[test]
     fn test_quat_fp16_forward() {
         let harness = Phase2TestHarness::new();
-        let mut gen = QuaternionGenerator::new(42);
-        let quats = gen.generate_batch(10);
+        let mut r#gen = QuaternionGenerator::new(42);
+        let quats = r#gen.generate_batch(10);
 
         let float_values: Vec<f32> = quats.iter()
             .flat_map(|q| vec![q.w, q.x, q.y, q.z])
@@ -193,8 +193,8 @@ mod quat_mixed_precision_tests {
     #[test]
     fn test_quat_gradient_scaling() {
         let harness = Phase2TestHarness::new();
-        let mut gen = QuaternionGenerator::new(42);
-        let quats = gen.generate_batch(5);
+        let mut r#gen = QuaternionGenerator::new(42);
+        let quats = r#gen.generate_batch(5);
 
         let gradients: Vec<f32> = quats.iter()
             .flat_map(|q| vec![q.w, q.x, q.y, q.z])
@@ -211,8 +211,8 @@ mod quat_mixed_precision_tests {
     #[test]
     fn test_quat_loss_scaling_precision() {
         let harness = Phase2TestHarness::new();
-        let mut gen = QuaternionGenerator::new(42);
-        let q = gen.next();
+        let mut r#gen = QuaternionGenerator::new(42);
+        let q = r#gen.next();
 
         let components = vec![q.w, q.x, q.y, q.z];
         let scaled = harness.backward(&components);
@@ -226,8 +226,8 @@ mod quat_mixed_precision_tests {
     #[test]
     fn test_quat_batch_precision_flow() {
         let harness = Phase2TestHarness::new();
-        let mut gen = QuaternionGenerator::new(123);
-        let batch = gen.generate_batch(8);
+        let mut r#gen = QuaternionGenerator::new(123);
+        let batch = r#gen.generate_batch(8);
 
         let float_batch: Vec<f32> = batch.iter()
             .flat_map(|q| vec![q.w, q.x, q.y, q.z])
@@ -248,8 +248,8 @@ mod end_to_end_tests {
     #[test]
     fn test_end_to_end_mixed_precision_epoch() {
         let harness = Phase2TestHarness::new();
-        let mut gen = QuaternionGenerator::new(42);
-        let batch = gen.generate_batch(32);
+        let mut r#gen = QuaternionGenerator::new(42);
+        let batch = r#gen.generate_batch(32);
 
         let float_batch: Vec<f32> = batch.iter()
             .flat_map(|q| vec![q.w, q.x, q.y, q.z])
@@ -312,10 +312,10 @@ mod end_to_end_tests {
     #[test]
     fn test_fused_mixed_precision_batch() {
         let harness = Phase2TestHarness::new();
-        let mut gen = QuaternionGenerator::new(42);
+        let mut r#gen = QuaternionGenerator::new(42);
 
         for _ in 0..5 {
-            let batch = gen.generate_batch(8);
+            let batch = r#gen.generate_batch(8);
             let values: Vec<f32> = batch.iter()
                 .flat_map(|q| vec![q.w, q.x, q.y, q.z])
                 .collect();

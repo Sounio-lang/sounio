@@ -392,27 +392,48 @@ fn resolve_direct_or_local_import(
     import_path: &[String],
     stdlib_dir: &StdPath,
 ) -> Result<PathBuf> {
-    // First attempt: search in stdlib for single-segment imports
-    if import_path.len() == 1 {
-        let stdlib_candidate = stdlib_dir.join(format!("{}.sio", import_path[0]));
-        if stdlib_candidate.exists() {
-            return Ok(stdlib_candidate);
-        }
-
-        // Also try as module directory
-        let stdlib_module = stdlib_dir.join(&import_path[0]).join("mod.sio");
-        if stdlib_module.exists() {
-            return Ok(stdlib_module);
-        }
-    }
-
-    // Second attempt: search in local project scope
+    // First attempt: search in local project scope
     let local_dir = current_path
         .parent()
         .unwrap_or_else(|| StdPath::new("."))
         .to_path_buf();
 
+    // Try local directory first
+    if let Ok(result) = resolve_in_directory_silent(&local_dir, import_path) {
+        return Ok(result);
+    }
+
+    // Second attempt: search in stdlib as fallback
+    // This allows qualified imports like `qnn::mnist::data_loader` to resolve from stdlib
+    if let Ok(result) = resolve_in_directory_silent(stdlib_dir, import_path) {
+        return Ok(result);
+    }
+
+    // If both fail, report error from local search for better diagnostics
     resolve_in_directory(&local_dir, import_path, "local")
+}
+
+/// Silent version of resolve_in_directory that returns None if not found
+fn resolve_in_directory_silent(
+    base_dir: &StdPath,
+    segments: &[String],
+) -> Result<PathBuf, ()> {
+    let path_joined = segments.join("/");
+
+    // Check candidates without error reporting
+    let candidates = vec![
+        base_dir.join(format!("{}.sio", path_joined)),
+        base_dir.join(&path_joined).join("mod.sio"),
+        base_dir.join(&path_joined).join("lib.sio"),
+    ];
+
+    for candidate in candidates {
+        if candidate.exists() {
+            return Ok(candidate);
+        }
+    }
+
+    Err(())
 }
 
 /// Resolves qualified stdlib imports (e.g., `import std::math;`)

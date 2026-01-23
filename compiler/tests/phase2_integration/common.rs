@@ -299,8 +299,8 @@ mod tests {
 
     #[test]
     fn test_quat_generator() {
-        let mut gen = QuaternionGenerator::new(123);
-        let q = gen.next();
+        let mut r#gen = QuaternionGenerator::new(123);
+        let q = r#gen.next();
         assert!((q.norm() - 1.0).abs() < 0.001);
     }
 

@@ -400,8 +400,8 @@ mod quat_layer_tests {
     #[test]
     fn test_quat_qat_forward() {
         let harness = Phase2TestHarness::new();
-        let mut gen = QuaternionGenerator::new(42);
-        let q = gen.next();
+        let mut r#gen = QuaternionGenerator::new(42);
+        let q = r#gen.next();
 
         let input = q.as_array().to_vec();
         let scale = 1.0 / 127.0;
@@ -415,10 +415,10 @@ mod quat_layer_tests {
     #[test]
     fn test_quat_qat_batch() {
         let harness = Phase2TestHarness::new();
-        let mut gen = QuaternionGenerator::new(42);
+        let mut r#gen = QuaternionGenerator::new(42);
 
         for _ in 0..10 {
-            let q = gen.next();
+            let q = r#gen.next();
             let input = q.as_array().to_vec();
             let scale = 1.0 / 127.0;
 
@@ -431,8 +431,8 @@ mod quat_layer_tests {
     #[test]
     fn test_quat_per_channel_quantization() {
         let harness = Phase2TestHarness::new();
-        let mut gen = QuaternionGenerator::new(42);
-        let q = gen.next();
+        let mut r#gen = QuaternionGenerator::new(42);
+        let q = r#gen.next();
 
         let mut output = vec![0.0; 4];
 
@@ -449,9 +449,9 @@ mod quat_layer_tests {
     #[test]
     fn test_quat_multiplication_preserves_structure() {
         let harness = Phase2TestHarness::new();
-        let mut gen = QuaternionGenerator::new(42);
-        let q1 = gen.next();
-        let q2 = gen.next();
+        let mut r#gen = QuaternionGenerator::new(42);
+        let q1 = r#gen.next();
+        let q2 = r#gen.next();
 
         let prod = q1.mul(&q2);
         let prod_array = prod.as_array();
@@ -487,11 +487,11 @@ mod end_to_end_qat_tests {
     #[test]
     fn test_full_qat_training_loop() {
         let harness = Phase2TestHarness::new();
-        let mut gen = QuaternionGenerator::new(42);
+        let mut r#gen = QuaternionGenerator::new(42);
 
         for epoch in 0..5 {
             for _ in 0..10 {
-                let batch = gen.generate_batch(8);
+                let batch = r#gen.generate_batch(8);
                 let values: Vec<f32> = batch.iter()
                     .flat_map(|q| vec![q.w, q.x, q.y, q.z])
                     .collect();
@@ -509,13 +509,13 @@ mod end_to_end_qat_tests {
     #[test]
     fn test_qat_accuracy_within_target() {
         let harness = Phase2TestHarness::new();
-        let mut gen = QuaternionGenerator::new(42);
+        let mut r#gen = QuaternionGenerator::new(42);
 
         let mut total_error = 0.0;
         let num_batches = 100;
 
         for _ in 0..num_batches {
-            let batch = gen.generate_batch(8);
+            let batch = r#gen.generate_batch(8);
             let original: Vec<f32> = batch.iter()
                 .flat_map(|q| vec![q.w, q.x, q.y, q.z])
                 .collect();

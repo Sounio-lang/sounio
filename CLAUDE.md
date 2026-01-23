@@ -2,7 +2,9 @@
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
-**For comprehensive Sounio syntax and programming patterns, see [docs/LLM_PROGRAMMING_GUIDE.md](docs/LLM_PROGRAMMING_GUIDE.md)**
+**START HERE**: [docs/MINIMUM_VIABLE_SOUNIO.md](docs/MINIMUM_VIABLE_SOUNIO.md) — What actually works today
+
+**For comprehensive syntax reference (mix of implemented + aspirational)**, see [docs/LLM_PROGRAMMING_GUIDE.md](docs/LLM_PROGRAMMING_GUIDE.md)
 
 ## Project Identity
 
@@ -91,15 +93,17 @@ This shows all search locations the compiler checks and which ones exist.
 - Run `souc sysroot stdlib-paths` to verify the path
 - Check that stdlib modules have proper entry points (`mod.sio` or `lib.sio`)
 
-**Multiple stdlib imports cause "duplicate main()" errors:**
-- This indicates Issue #16 (stdlib main() removal) is in progress
-- See `issues/#16` for workarounds and timeline
+**Module system not yet implemented:**
+- `use` statements don't work (planned for v0.70.0)
+- Workaround: Use single-file programs
+- See [docs/MINIMUM_VIABLE_SOUNIO.md](docs/MINIMUM_VIABLE_SOUNIO.md) for details
 
 ## Compiler Architecture
 
 **Pipeline:** Source → Lexer (Logos) → Parser → AST → Type Checker → HIR → SIR → HLIR (SSA) → Codegen
 
 Key modules in `compiler/src/`:
+
 - `lexer/`, `parser/`, `ast/` — Frontend
 - `check/`, `types/`, `typeck/` — Bidirectional type inference
 - `effects/` — Algebraic effect system (IO, Mut, Alloc, Panic, Async, GPU, Prob, Div)

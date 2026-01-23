@@ -188,8 +188,8 @@ mod sparse_quat_fusion_tests {
     #[test]
     fn test_fusion_with_sparse_quat_input() {
         let harness = Phase2TestHarness::new();
-        let mut gen = QuaternionGenerator::new(42);
-        let quats = gen.generate_batch(16);
+        let mut r#gen = QuaternionGenerator::new(42);
+        let quats = r#gen.generate_batch(16);
 
         let values: Vec<f32> = quats.iter()
             .flat_map(|q| vec![q.w, q.x, q.y, q.z])
@@ -221,8 +221,8 @@ mod sparse_quat_fusion_tests {
     #[test]
     fn test_fusion_preserves_quat_structure() {
         let harness = Phase2TestHarness::new();
-        let mut gen = QuaternionGenerator::new(42);
-        let q = gen.next();
+        let mut r#gen = QuaternionGenerator::new(42);
+        let q = r#gen.next();
 
         let input = q.as_array().to_vec();
         let output = harness.fused_layer(&input);
