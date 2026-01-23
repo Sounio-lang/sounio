@@ -66,6 +66,35 @@ cargo run --features lsp --bin sounio-lsp
 cargo run --bin sounio-ontology-build
 ```
 
+## Environment Configuration
+
+### Stdlib Path Setup
+
+When working outside the repo root, always set the stdlib path:
+
+```bash
+export SOUNIO_STDLIB_PATH=/home/demetrios/sounio-1/stdlib
+```
+
+Verify stdlib resolution:
+
+```bash
+souc sysroot stdlib-paths
+```
+
+This shows all search locations the compiler checks and which ones exist.
+
+### Common Issues
+
+**"Import not found" when running programs outside repo:**
+- Ensure `SOUNIO_STDLIB_PATH` is set to the stdlib directory
+- Run `souc sysroot stdlib-paths` to verify the path
+- Check that stdlib modules have proper entry points (`mod.sio` or `lib.sio`)
+
+**Multiple stdlib imports cause "duplicate main()" errors:**
+- This indicates Issue #16 (stdlib main() removal) is in progress
+- See `issues/#16` for workarounds and timeline
+
 ## Compiler Architecture
 
 **Pipeline:** Source → Lexer (Logos) → Parser → AST → Type Checker → HIR → SIR → HLIR (SSA) → Codegen

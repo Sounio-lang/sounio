@@ -236,6 +236,46 @@ fn main() -> i32 {
 }
 ```
 
+### Environment Configuration
+
+#### Stdlib Path Configuration
+
+Sounio needs to locate the standard library (`stdlib/`) to resolve module imports. The compiler searches in this priority order:
+
+1. **`SOUNIO_STDLIB_PATH`** environment variable (highest priority)
+2. **`SOUNIO_STDLIB`** environment variable (legacy, but still supported)
+3. Relative to compiler binary: `<exe_dir>/../stdlib/`
+4. User home directory: `~/.sounio/stdlib/`
+5. System paths: `/usr/local/lib/sounio/stdlib`, `/usr/share/sounio/stdlib`, etc.
+
+#### Running Programs from Any Directory
+
+To run Sounio programs that use stdlib modules from outside the repository:
+
+```bash
+# Option 1: Set environment variable (recommended for development)
+export SOUNIO_STDLIB_PATH=/path/to/sounio/stdlib
+souc run /path/to/your/program.sio
+
+# Option 2: System-wide installation
+cd compiler && cargo install --path .
+# Stdlib will be found relative to installed binary
+
+# Option 3: Copy to user home directory
+mkdir -p ~/.sounio
+cp -r stdlib ~/.sounio/
+```
+
+#### Diagnostic Commands
+
+Check where the compiler is looking for stdlib:
+
+```bash
+souc sysroot stdlib-paths
+```
+
+This displays all search locations and which ones exist, helping you verify correct configuration.
+
 ---
 
 ## Design Principles
