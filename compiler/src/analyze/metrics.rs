@@ -224,7 +224,7 @@ fn count_stmt_lines(stmt: &Stmt) -> usize {
         Stmt::Assign { target, value, .. } => {
             count_expr_lines(target) + count_expr_lines(value) + 1
         }
-        Stmt::Empty | Stmt::MacroInvocation(_) => 1,
+        Stmt::Empty | Stmt::MacroInvocation(_) | Stmt::LocalExtern(_) => 1,
     }
 }
 
@@ -275,7 +275,7 @@ fn count_decision_points_stmt(stmt: &Stmt) -> usize {
         Stmt::Assign { target, value, .. } => {
             count_decision_points_expr(target) + count_decision_points_expr(value)
         }
-        Stmt::Empty | Stmt::MacroInvocation(_) => 0,
+        Stmt::Empty | Stmt::MacroInvocation(_) | Stmt::LocalExtern(_) => 0,
     }
 }
 
@@ -362,7 +362,7 @@ fn cognitive_complexity_stmt(stmt: &Stmt, nesting: usize) -> usize {
         Stmt::Assign { target, value, .. } => {
             cognitive_complexity_expr(target, nesting) + cognitive_complexity_expr(value, nesting)
         }
-        Stmt::Empty | Stmt::MacroInvocation(_) => 0,
+        Stmt::Empty | Stmt::MacroInvocation(_) | Stmt::LocalExtern(_) => 0,
     }
 }
 
@@ -426,7 +426,7 @@ fn nesting_depth_stmt(stmt: &Stmt, current: usize) -> usize {
         Stmt::Assign { target, value, .. } => {
             nesting_depth_expr(target, current).max(nesting_depth_expr(value, current))
         }
-        Stmt::Let { .. } | Stmt::Empty | Stmt::MacroInvocation(_) => current,
+        Stmt::Let { .. } | Stmt::Empty | Stmt::MacroInvocation(_) | Stmt::LocalExtern(_) => current,
     }
 }
 
@@ -495,7 +495,7 @@ fn count_elements_stmt(stmt: &Stmt, counts: &mut ElementCounts) {
             count_elements_expr(target, counts);
             count_elements_expr(value, counts);
         }
-        Stmt::Empty | Stmt::MacroInvocation(_) => {}
+        Stmt::Empty | Stmt::MacroInvocation(_) | Stmt::LocalExtern(_) => {}
     }
 }
 

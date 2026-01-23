@@ -4273,6 +4273,23 @@ impl<'a> Parser<'a> {
                 }
             }
 
+            // Unsafe block: unsafe { ... }
+            TokenKind::Unsafe => {
+                self.advance();
+                if self.at(TokenKind::LBrace) {
+                    let block = self.parse_block()?;
+                    Ok(Expr::UnsafeBlock {
+                        id: self.next_id(),
+                        block,
+                    })
+                } else {
+                    Err(miette::miette!(
+                        "Expected '{{' after 'unsafe', found {:?}",
+                        self.peek()
+                    ))
+                }
+            }
+
             // Spawn: spawn { ... } or spawn expr
             TokenKind::Spawn => {
                 self.advance();
@@ -4886,6 +4903,8 @@ impl<'a> Parser<'a> {
                 self.advance();
                 Ok(Stmt::Empty)
             }
+            // Local extern block inside function body
+            TokenKind::Extern => self.parse_local_extern_stmt(),
             _ => {
                 let expr = self.parse_expr()?;
 
@@ -4913,6 +4932,51 @@ impl<'a> Parser<'a> {
                 Ok(Stmt::Expr { expr, has_semi })
             }
         }
+    }
+
+    /// Parse a local extern block inside a function body.
+    /// Only allows `extern "ABI" { ... }` form, not `extern fn`.
+    fn parse_local_extern_stmt(&mut self) -> Result<Stmt> {
+        let start = self.span();
+        self.expect(TokenKind::Extern)?;
+
+        let abi = if self.at(TokenKind::StringLit) {
+            let s = self.advance().text.clone();
+            // Remove quotes
+            let abi_str = &s[1..s.len() - 1];
+            Abi::from_str(abi_str)
+        } else {
+            Abi::C
+        };
+
+        // Inside function bodies, only allow extern blocks, not extern fn
+        if self.at(TokenKind::Fn) || self.at(TokenKind::Kernel) {
+            return Err(miette::miette!(
+                labels = vec![miette::LabeledSpan::at(
+                    start.start..self.span().end,
+                    "extern fn not allowed here"
+                )],
+                help = "Use `extern \"C\" {{ fn name(...); }}` block syntax for local FFI declarations",
+                "extern functions inside function bodies must use block syntax"
+            ));
+        }
+
+        // Parse extern { } block
+        self.expect(TokenKind::LBrace)?;
+        let mut items = Vec::new();
+        while !self.at(TokenKind::RBrace) && !self.at(TokenKind::Eof) {
+            items.push(self.parse_extern_item()?);
+        }
+        self.expect(TokenKind::RBrace)?;
+
+        let end = self.span();
+
+        Ok(Stmt::LocalExtern(ExternBlock {
+            id: self.next_id(),
+            abi,
+            items,
+            span: start.merge(end),
+        }))
     }
 
     fn assignment_op(&self) -> Option<AssignOp> {
@@ -5008,6 +5072,23 @@ impl<'a> Parser<'a> {
             TokenKind::Underscore => {
                 self.advance();
                 Ok(Pattern::Wildcard)
+            }
+            TokenKind::Minus => {
+                // Handle negative number literals in patterns
+                self.advance();
+                match self.peek() {
+                    TokenKind::IntLit => {
+                        let text = self.advance().text.clone();
+                        let value: i64 = text.replace('_', "").parse().unwrap_or(0);
+                        Ok(Pattern::Literal(Literal::Int(-value)))
+                    }
+                    TokenKind::FloatLit => {
+                        let text = self.advance().text.clone();
+                        let value: f64 = text.replace('_', "").parse().unwrap_or(0.0);
+                        Ok(Pattern::Literal(Literal::Float(-value)))
+                    }
+                    _ => Err(miette::miette!("Expected a number after '-' in pattern"))
+                }
             }
             TokenKind::IntLit => {
                 let text = self.advance().text.clone();

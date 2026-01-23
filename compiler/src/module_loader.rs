@@ -902,7 +902,7 @@ fn rewrite_stmt(stmt: &mut Stmt, prefixes: &[Vec<String>]) {
             rewrite_expr(target, prefixes);
             rewrite_expr(value, prefixes);
         }
-        Stmt::MacroInvocation(_) | Stmt::Empty => {}
+        Stmt::MacroInvocation(_) | Stmt::Empty | Stmt::LocalExtern(_) => {}
     }
 }
 
@@ -1040,6 +1040,7 @@ fn rewrite_expr(expr: &mut Expr, prefixes: &[Vec<String>]) {
         }
         Expr::Sample { distribution, .. } => rewrite_expr(distribution, prefixes),
         Expr::AsyncBlock { block, .. } => rewrite_block(block, prefixes),
+        Expr::UnsafeBlock { block, .. } => rewrite_block(block, prefixes),
         Expr::Select { arms, .. } => {
             for arm in arms {
                 rewrite_expr(&mut arm.future, prefixes);
@@ -1642,7 +1643,7 @@ fn annotate_stmt(stmt: &mut Stmt, prefixes: &[Vec<String>], sm: &ModuleId, im: &
             annotate_expr(target, prefixes, sm, im);
             annotate_expr(value, prefixes, sm, im);
         }
-        Stmt::MacroInvocation(_) | Stmt::Empty => {}
+        Stmt::MacroInvocation(_) | Stmt::Empty | Stmt::LocalExtern(_) => {}
     }
 }
 
@@ -1780,6 +1781,7 @@ fn annotate_expr(expr: &mut Expr, prefixes: &[Vec<String>], sm: &ModuleId, im: &
         }
         Expr::Sample { distribution, .. } => annotate_expr(distribution, prefixes, sm, im),
         Expr::AsyncBlock { block, .. } => annotate_block(block, prefixes, sm, im),
+        Expr::UnsafeBlock { block, .. } => annotate_block(block, prefixes, sm, im),
         Expr::Select { arms, .. } => {
             for a in arms {
                 annotate_expr(&mut a.future, prefixes, sm, im);

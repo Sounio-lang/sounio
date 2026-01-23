@@ -1029,7 +1029,7 @@ impl Linter {
                 self.lint_expr(target, ctx);
                 self.lint_expr(value, ctx);
             }
-            Stmt::Empty | Stmt::MacroInvocation(_) => {}
+            Stmt::Empty | Stmt::MacroInvocation(_) | Stmt::LocalExtern(_) => {}
         }
     }
 

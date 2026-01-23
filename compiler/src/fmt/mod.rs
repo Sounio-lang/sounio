@@ -1017,6 +1017,19 @@ impl Formatter {
             ]),
             Stmt::Empty => Doc::Text("".to_string()),
             Stmt::MacroInvocation(m) => Doc::Text(format!("{}!(...);", m.name)),
+            Stmt::LocalExtern(ext) => {
+                // Format local extern block
+                let abi_str = match &ext.abi {
+                    crate::ast::Abi::C => "\"C\"",
+                    crate::ast::Abi::System => "\"system\"",
+                    crate::ast::Abi::Rust => "\"Rust\"",
+                    crate::ast::Abi::PlatformIntrinsic => "\"platform-intrinsic\"",
+                    _ => "\"C\"", // default to C for unknown ABIs
+                };
+                Doc::Concat(vec![
+                    Doc::Text(format!("extern {} {{ ... }}", abi_str)),
+                ])
+            }
         }
     }
 

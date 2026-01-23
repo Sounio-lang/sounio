@@ -1995,9 +1995,8 @@ impl TypeChecker {
                         );
                     }
 
-                    if let Pattern::Binding { name, .. } = pattern {
-                        self.env.bind(name.clone(), binding_ty.clone(), *is_mut);
-                    }
+                    // Bind all variables in the pattern (supports tuple destructuring)
+                    self.bind_pattern_to_type(pattern, &binding_ty, *is_mut);
 
                     stmts.push(HirStmt::Let {
                         name: self.pattern_name(pattern),
@@ -2028,7 +2027,7 @@ impl TypeChecker {
                         value: value_expr,
                     });
                 }
-                Stmt::Empty | Stmt::MacroInvocation(_) => {}
+                Stmt::Empty | Stmt::MacroInvocation(_) | Stmt::LocalExtern(_) => {}
             }
         }
 
@@ -6193,10 +6192,52 @@ impl TypeChecker {
         }
     }
 
+    /// Recursively bind all variables in a pattern to their respective types
+    /// Enables tuple destructuring: let (x, y) = tuple binds both x and y
+    fn bind_pattern_to_type(&mut self, pattern: &Pattern, ty: &Type, is_mut: bool) {
+        match pattern {
+            Pattern::Binding { name, .. } => {
+                self.env.bind(name.clone(), ty.clone(), is_mut);
+            }
+            Pattern::Tuple(patterns) => {
+                if let Type::Tuple(elem_types) = ty {
+                    // Verify tuple arity matches pattern
+                    if patterns.len() != elem_types.len() {
+                        self.error(
+                            format!(
+                                "Tuple pattern has {} elements but type has {}",
+                                patterns.len(),
+                                elem_types.len()
+                            ),
+                            Span::dummy(),
+                        );
+                        return;
+                    }
+                    // Recursively bind each element
+                    for (pat, elem_ty) in patterns.iter().zip(elem_types.iter()) {
+                        self.bind_pattern_to_type(pat, elem_ty, is_mut);
+                    }
+                } else {
+                    self.error(
+                        format!("Expected tuple type for tuple pattern, found {:?}", ty),
+                        Span::dummy(),
+                    );
+                }
+            }
+            Pattern::Wildcard | Pattern::Literal(_) => {
+                // No bindings to create
+            }
+            _ => {
+                // Other patterns not yet supported in let statements
+            }
+        }
+    }
+
     fn pattern_name(&self, pattern: &Pattern) -> String {
         match pattern {
             Pattern::Binding { name, .. } => name.clone(),
             Pattern::Wildcard => "_".to_string(),
+            Pattern::Tuple(_) => "_tuple_destructure".to_string(),
             _ => "_".to_string(),
         }
     }

@@ -728,6 +728,9 @@ impl DeadCodeAnalyzer {
             Expr::AsyncBlock { block, .. } => {
                 self.collect_block_references(block);
             }
+            Expr::UnsafeBlock { block, .. } => {
+                self.collect_block_references(block);
+            }
             Expr::AsyncClosure { params, body, .. } => {
                 self.push_scope();
                 for (name, _ty) in params {
@@ -863,7 +866,7 @@ impl DeadCodeAnalyzer {
                 self.collect_expr_references(target);
                 self.collect_expr_references(value);
             }
-            Stmt::Empty | Stmt::MacroInvocation(_) => {}
+            Stmt::Empty | Stmt::MacroInvocation(_) | Stmt::LocalExtern(_) => {}
         }
     }
 
@@ -1035,7 +1038,7 @@ impl DeadCodeAnalyzer {
                 self.find_unreachable_in_expr(target);
                 self.find_unreachable_in_expr(value);
             }
-            Stmt::Empty | Stmt::MacroInvocation(_) => {}
+            Stmt::Empty | Stmt::MacroInvocation(_) | Stmt::LocalExtern(_) => {}
         }
     }
 

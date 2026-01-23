@@ -454,7 +454,7 @@ impl<'a> EffectChecker<'a> {
                 // Assignment implies Mut effect if target is mutable
                 effects
             }
-            Stmt::Empty | Stmt::MacroInvocation(_) => EffectSet::new(),
+            Stmt::Empty | Stmt::MacroInvocation(_) | Stmt::LocalExtern(_) => EffectSet::new(),
         }
     }
 
@@ -772,6 +772,11 @@ impl<'a> EffectChecker<'a> {
                     args: Vec::new(),
                 });
                 effects
+            }
+
+            Expr::UnsafeBlock { block, .. } => {
+                // Unsafe blocks can have any effects - we just infer from the block
+                self.infer_block(block)
             }
 
             Expr::AsyncClosure { body, .. } => {
@@ -1157,6 +1162,7 @@ impl<'a> EffectChecker<'a> {
             Expr::Sample { id, .. } => *id,
             Expr::Await { id, .. } => *id,
             Expr::AsyncBlock { id, .. } => *id,
+            Expr::UnsafeBlock { id, .. } => *id,
             Expr::AsyncClosure { id, .. } => *id,
             Expr::Spawn { id, .. } => *id,
             Expr::Select { id, .. } => *id,

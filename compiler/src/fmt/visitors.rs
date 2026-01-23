@@ -1339,6 +1339,17 @@ impl<'a> FormatVisitor<'a> {
             }
             Stmt::Empty => Doc::Empty,
             Stmt::MacroInvocation(m) => Doc::text(format!("{}!(...);", m.name)),
+            Stmt::LocalExtern(ext) => {
+                // Format local extern block
+                let abi_str = match &ext.abi {
+                    crate::ast::Abi::C => "\"C\"",
+                    crate::ast::Abi::System => "\"system\"",
+                    crate::ast::Abi::Rust => "\"Rust\"",
+                    crate::ast::Abi::PlatformIntrinsic => "\"platform-intrinsic\"",
+                    _ => "\"C\"", // default to C for unknown ABIs
+                };
+                Doc::text(format!("extern {} {{ ... }}", abi_str))
+            }
         }
     }
 
@@ -1668,6 +1679,9 @@ impl<'a> FormatVisitor<'a> {
             }
             Expr::AsyncBlock { block, .. } => {
                 Doc::concat(vec![Doc::text("async "), self.visit_block(block)])
+            }
+            Expr::UnsafeBlock { block, .. } => {
+                Doc::concat(vec![Doc::text("unsafe "), self.visit_block(block)])
             }
             Expr::AsyncClosure { params, return_type, body, .. } => {
                 let mut parts = Vec::new();

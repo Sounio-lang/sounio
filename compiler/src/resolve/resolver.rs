@@ -1227,7 +1227,7 @@ impl Resolver {
                 self.resolve_expr(target);
                 self.resolve_expr(value);
             }
-            Stmt::Empty | Stmt::MacroInvocation(_) => {}
+            Stmt::Empty | Stmt::MacroInvocation(_) | Stmt::LocalExtern(_) => {}
         }
     }
 
@@ -1431,6 +1431,10 @@ impl Resolver {
             }
 
             Expr::AsyncBlock { block, .. } => {
+                self.resolve_block(block);
+            }
+
+            Expr::UnsafeBlock { block, .. } => {
                 self.resolve_block(block);
             }
 

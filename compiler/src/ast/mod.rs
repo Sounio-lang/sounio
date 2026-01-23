@@ -1508,6 +1508,8 @@ pub enum Expr {
     Await { id: NodeId, expr: Box<Expr> },
     /// Async block: async { ... }
     AsyncBlock { id: NodeId, block: Block },
+    /// Unsafe block: unsafe { ... }
+    UnsafeBlock { id: NodeId, block: Block },
     /// Async closure: async |x| { ... }
     AsyncClosure {
         id: NodeId,
@@ -1743,6 +1745,8 @@ pub enum Stmt {
     Empty,
     /// Macro invocation
     MacroInvocation(MacroInvocation),
+    /// Local extern block (FFI declarations inside function body)
+    LocalExtern(ExternBlock),
 }
 
 /// Assignment operators

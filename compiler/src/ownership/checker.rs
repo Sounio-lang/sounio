@@ -166,7 +166,7 @@ impl<'a> OwnershipChecker<'a> {
                 // Target is being written to, not consumed
             }
 
-            Stmt::Empty | Stmt::MacroInvocation(_) => {}
+            Stmt::Empty | Stmt::MacroInvocation(_) | Stmt::LocalExtern(_) => {}
         }
     }
 
@@ -431,6 +431,10 @@ impl<'a> OwnershipChecker<'a> {
             }
 
             Expr::AsyncBlock { block, .. } => {
+                self.check_block(block);
+            }
+
+            Expr::UnsafeBlock { block, .. } => {
                 self.check_block(block);
             }
 
@@ -994,7 +998,7 @@ impl<'a> OwnershipChecker<'a> {
                 self.find_free_variables(target, bound_vars, captures);
                 self.find_free_variables(value, bound_vars, captures);
             }
-            Stmt::Empty | Stmt::MacroInvocation(_) => {}
+            Stmt::Empty | Stmt::MacroInvocation(_) | Stmt::LocalExtern(_) => {}
         }
     }
 }
@@ -1038,6 +1042,7 @@ fn get_expr_id(expr: &Expr) -> NodeId {
         Expr::Sample { id, .. } => *id,
         Expr::Await { id, .. } => *id,
         Expr::AsyncBlock { id, .. } => *id,
+        Expr::UnsafeBlock { id, .. } => *id,
         Expr::AsyncClosure { id, .. } => *id,
         Expr::Spawn { id, .. } => *id,
         Expr::Select { id, .. } => *id,
