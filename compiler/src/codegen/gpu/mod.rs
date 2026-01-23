@@ -68,6 +68,7 @@ pub mod sourcemap;
 pub mod sparse;
 pub mod sparse_quat;
 pub mod system_profiler;
+pub mod example_profiles;
 #[cfg(feature = "gpu")]
 pub mod spirv;
 pub mod tensor_epistemic;
