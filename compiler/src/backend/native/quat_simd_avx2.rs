@@ -8,7 +8,7 @@
 use std::arch::x86_64::*;
 
 /// Scalar fallback for single quaternion multiplication
-unsafe fn scalar_quat_mul(q1: *const f32, q2: *const f32, out: *mut f32) {
+unsafe fn scalar_quat_mul(q1: *const f32, q2: *const f32, out: *mut f32) { unsafe {
     let w1 = *q1.add(0);
     let x1 = *q1.add(1);
     let y1 = *q1.add(2);
@@ -23,12 +23,12 @@ unsafe fn scalar_quat_mul(q1: *const f32, q2: *const f32, out: *mut f32) {
     *out.add(1) = w1 * x2 + x1 * w2 + y1 * z2 - z1 * y2;
     *out.add(2) = w1 * y2 - x1 * z2 + y1 * w2 + z1 * x2;
     *out.add(3) = w1 * z2 + x1 * y2 - y1 * x2 + z1 * w2;
-}
+}}
 
 /// Single quaternion multiplication using AVX2
 /// Load both quats into __m128, broadcast components, and compute Hamilton product
 #[target_feature(enable = "avx2")]
-pub unsafe extern "C" fn sounio_quat_mul_avx2(q1: *const f32, q2: *const f32, out: *mut f32) {
+pub unsafe extern "C" fn sounio_quat_mul_avx2(q1: *const f32, q2: *const f32, out: *mut f32) { unsafe {
     if q1.is_null() || q2.is_null() || out.is_null() {
         return;
     }
@@ -72,7 +72,7 @@ pub unsafe extern "C" fn sounio_quat_mul_avx2(q1: *const f32, q2: *const f32, ou
     *out.add(1) = _mm_cvtss_f32(x);
     *out.add(2) = _mm_cvtss_f32(y);
     *out.add(3) = _mm_cvtss_f32(z);
-}
+}}
 
 /// Batch quaternion multiplication for n quaternion pairs
 /// Processes 2 quats per __m256 iteration, with scalar fallback for remainder
@@ -82,7 +82,7 @@ pub unsafe extern "C" fn sounio_quat_batch_mul_avx2(
     q2s: *const f32,
     outs: *mut f32,
     n: i32,
-) {
+) { unsafe {
     if q1s.is_null() || q2s.is_null() || outs.is_null() || n <= 0 {
         return;
     }
@@ -147,7 +147,7 @@ pub unsafe extern "C" fn sounio_quat_batch_mul_avx2(
             outs.add(i * 4),
         );
     }
-}
+}}
 
 /// Linear layer forward pass with quaternion multiplication and bias addition
 /// output[b,o] = sum_i input[b,i] ⊗ weights[o,i] + bias[o]
@@ -160,7 +160,7 @@ pub unsafe extern "C" fn sounio_quat_linear_fwd_avx2(
     input_dim: i32,
     output_dim: i32,
     batch_size: i32,
-) {
+) { unsafe {
     if input.is_null() || weights.is_null() || output.is_null()
         || input_dim <= 0 || output_dim <= 0 || batch_size <= 0
     {
@@ -218,7 +218,7 @@ pub unsafe extern "C" fn sounio_quat_linear_fwd_avx2(
             *output.add(out_idx + 3) = acc[3] + if has_bias { *bias.add(bias_idx + 3) } else { 0.0 };
         }
     }
-}
+}}
 
 #[cfg(test)]
 mod tests {

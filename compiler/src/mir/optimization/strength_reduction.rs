@@ -76,7 +76,7 @@ impl MIRPass for StrengthReduction {
     }
 
     fn run_on_function(&self, func: &mut MirFunction) -> Result<bool, String> {
-        let mut modified = false;
+        let modified = false;
 
         // Apply strength reduction transformations
         for block in &mut func.blocks {

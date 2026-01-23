@@ -8,7 +8,7 @@
 use std::arch::x86_64::*;
 
 /// Scalar fallback for single quaternion multiplication
-unsafe fn scalar_quat_mul(q1: *const f32, q2: *const f32, out: *mut f32) {
+unsafe fn scalar_quat_mul(q1: *const f32, q2: *const f32, out: *mut f32) { unsafe {
     let w1 = *q1.add(0);
     let x1 = *q1.add(1);
     let y1 = *q1.add(2);
@@ -23,19 +23,19 @@ unsafe fn scalar_quat_mul(q1: *const f32, q2: *const f32, out: *mut f32) {
     *out.add(1) = w1 * x2 + x1 * w2 + y1 * z2 - z1 * y2;
     *out.add(2) = w1 * y2 - x1 * z2 + y1 * w2 + z1 * x2;
     *out.add(3) = w1 * z2 + x1 * y2 - y1 * x2 + z1 * w2;
-}
+}}
 
 /// Single quaternion multiplication using AVX-512
 /// For simplicity, use scalar implementation (can optimize with __m512 later)
 #[target_feature(enable = "avx512f,avx512dq")]
-pub unsafe extern "C" fn sounio_quat_mul_avx512(q1: *const f32, q2: *const f32, out: *mut f32) {
+pub unsafe extern "C" fn sounio_quat_mul_avx512(q1: *const f32, q2: *const f32, out: *mut f32) { unsafe {
     if q1.is_null() || q2.is_null() || out.is_null() {
         return;
     }
 
     // Single quaternion can be optimized, but for now use scalar path
     scalar_quat_mul(q1, q2, out);
-}
+}}
 
 /// Batch quaternion multiplication for n quaternion pairs using AVX-512
 /// Processes up to 4 quaternions per __m512 iteration
@@ -45,7 +45,7 @@ pub unsafe extern "C" fn sounio_quat_batch_mul_avx512(
     q2s: *const f32,
     outs: *mut f32,
     n: i32,
-) {
+) { unsafe {
     if q1s.is_null() || q2s.is_null() || outs.is_null() || n <= 0 {
         return;
     }
@@ -64,7 +64,7 @@ pub unsafe extern "C" fn sounio_quat_batch_mul_avx512(
 
         // For each of 4 quaternions, compute Hamilton product
         // Using index-based extraction and shuffle operations
-        let mut results = [0.0f32; 16];
+        let results = [0.0f32; 16];
 
         for j in 0..4 {
             let idx = j * 4;
@@ -92,7 +92,7 @@ pub unsafe extern "C" fn sounio_quat_batch_mul_avx512(
         );
         i += 1;
     }
-}
+}}
 
 /// Linear layer forward pass with quaternion multiplication and bias addition
 /// output[b,o] = sum_i input[b,i] ⊗ weights[o,i] + bias[o]
@@ -105,7 +105,7 @@ pub unsafe extern "C" fn sounio_quat_linear_fwd_avx512(
     input_dim: i32,
     output_dim: i32,
     batch_size: i32,
-) {
+) { unsafe {
     if input.is_null() || weights.is_null() || output.is_null()
         || input_dim <= 0 || output_dim <= 0 || batch_size <= 0
     {
@@ -161,7 +161,7 @@ pub unsafe extern "C" fn sounio_quat_linear_fwd_avx512(
             *output.add(out_idx + 3) = acc[3] + if has_bias { *bias.add(bias_idx + 3) } else { 0.0 };
         }
     }
-}
+}}
 
 #[cfg(test)]
 mod tests {

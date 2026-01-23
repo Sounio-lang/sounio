@@ -102,7 +102,7 @@ impl PassManager {
         let mut total_modified = false;
 
         // Apply constant propagation for all levels
-        let mut cp = ConstantPropagation::new();
+        let cp = ConstantPropagation::new();
         if cp.run_on_function(func)? {
             total_modified = true;
         }
@@ -110,7 +110,7 @@ impl PassManager {
         // Apply other optimizations based on level
         match self.level {
             OptimizationLevel::O1 | OptimizationLevel::O2 | OptimizationLevel::O3 => {
-                let mut dce = DeadCodeElimination::new();
+                let dce = DeadCodeElimination::new();
                 if dce.run_on_function(func)? {
                     total_modified = true;
                 }
@@ -120,14 +120,14 @@ impl PassManager {
 
         match self.level {
             OptimizationLevel::O2 | OptimizationLevel::O3 => {
-                let mut cse = CommonSubexpressionElimination::new();
+                let cse = CommonSubexpressionElimination::new();
                 if cse.run_on_function(func)? {
                     total_modified = true;
                 }
 
                 // SROA: Scalar Replacement of Aggregates
                 // Runs at O2+ to reduce memory traffic for aggregate types
-                let mut sroa = Sroa::new();
+                let sroa = Sroa::new();
                 if sroa.run_on_function(func)? {
                     total_modified = true;
                 }
@@ -143,12 +143,12 @@ impl PassManager {
         }
 
         if self.level == OptimizationLevel::O3 {
-            let mut sr = StrengthReduction::new();
+            let sr = StrengthReduction::new();
             if sr.run_on_function(func)? {
                 total_modified = true;
             }
 
-            let mut fi = FunctionInlining::new();
+            let fi = FunctionInlining::new();
             if fi.run_on_function(func)? {
                 total_modified = true;
             }

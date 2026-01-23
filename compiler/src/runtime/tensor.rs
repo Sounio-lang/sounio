@@ -778,7 +778,7 @@ impl BroadcastShape {
     }
 
     /// Create an iterator for broadcasted element-wise operations
-    pub fn iter(&self) -> BroadcastIter {
+    pub fn iter(&self) -> BroadcastIter<'_> {
         BroadcastIter::new(self)
     }
 }

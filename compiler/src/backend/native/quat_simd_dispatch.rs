@@ -206,7 +206,7 @@ pub extern "C" fn sounio_quat_linear_fwd_dispatch(
 /// Scalar quaternion multiplication reference
 /// q_out = q1 ⊗ q2 = [w, x, y, z] (Hamilton product)
 #[inline]
-unsafe extern "C" fn sounio_quat_mul_scalar(q1: *const f32, q2: *const f32, out: *mut f32) {
+unsafe extern "C" fn sounio_quat_mul_scalar(q1: *const f32, q2: *const f32, out: *mut f32) { unsafe {
     if q1.is_null() || q2.is_null() || out.is_null() {
         return;
     }
@@ -230,7 +230,7 @@ unsafe extern "C" fn sounio_quat_mul_scalar(q1: *const f32, q2: *const f32, out:
     *out.add(1) = x;
     *out.add(2) = y;
     *out.add(3) = z;
-}
+}}
 
 /// Scalar batch quaternion multiplication
 #[inline]
@@ -239,14 +239,14 @@ unsafe extern "C" fn sounio_quat_batch_mul_scalar(
     q2s: *const f32,
     outs: *mut f32,
     n: i32,
-) {
+) { unsafe {
     for i in 0..n {
         let q1 = q1s.add((i * 4) as usize);
         let q2 = q2s.add((i * 4) as usize);
         let out = outs.add((i * 4) as usize);
         sounio_quat_mul_scalar(q1, q2, out);
     }
-}
+}}
 
 /// Scalar linear layer forward pass
 #[inline]
@@ -258,7 +258,7 @@ unsafe extern "C" fn sounio_quat_linear_fwd_scalar(
     input_dim: i32,
     output_dim: i32,
     batch_size: i32,
-) {
+) { unsafe {
     for b in 0..batch_size {
         for o in 0..output_dim {
             let mut accum = [0.0f32; 4];
@@ -307,7 +307,7 @@ unsafe extern "C" fn sounio_quat_linear_fwd_scalar(
             *output.add(out_idx + 3) = accum[3] + *bias.add(bias_idx + 3);
         }
     }
-}
+}}
 
 // ============================================================================
 // SIMD Implementation Stubs (to be generated)

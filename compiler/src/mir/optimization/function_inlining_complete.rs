@@ -424,7 +424,7 @@ impl CompleteFunctionInlining {
         // Insert inlined blocks
         // For simplicity, append to the end of the function
         // In a full implementation, we'd need proper control flow integration
-        for mut block in inlined_blocks {
+        for block in inlined_blocks {
             caller.blocks.push(block);
         }
 
