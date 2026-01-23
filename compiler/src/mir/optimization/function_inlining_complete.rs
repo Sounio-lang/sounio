@@ -5,7 +5,7 @@
 
 use super::pass_manager::MIRPass;
 use crate::mir::{
-    BlockId, MirBlock, MirFunction, MirInstruction, MirModule, MirTerminator, ValueId,
+    BlockId, FuncId, MirBlock, MirFunction, MirInstruction, MirModule, MirTerminator, ValueId,
 };
 use std::collections::{HashMap, HashSet};
 
