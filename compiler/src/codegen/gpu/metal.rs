@@ -1852,22 +1852,177 @@ impl MetalCodegen {
                 self.emit(&format!("float8 {} = float8(c0, c1, c2, c3, c4, c5, c6, c7);", result_name));
             }
 
-            // Octonion operations (8D hypercomplex) - STUBS (TODO: implement remaining)
-            | GpuOp::OctonionInv(_)
-            | GpuOp::OctonionReal(_)
-            | GpuOp::OctonionImag(_)
-            | GpuOp::OctonionDot(_, _)
-            | GpuOp::OctonionExp(_)
-            | GpuOp::OctonionLog(_)
-            | GpuOp::OctonionPow(_, _)
-            | GpuOp::OctonionSigmoid(_)
-            | GpuOp::OctonionTanh(_)
-            | GpuOp::OctonionToQuats(_)
-            | GpuOp::OctonionFromQuats(_, _) => {
-                self.emit(&format!(
-                    "// Bio/QNN/Octonion op -> {} (implement via device function)",
-                    result_name
-                ));
+            // OctonionInv: Multiplicative inverse
+            // Math: o⁻¹ = conj(o) / |o|²
+            // For normed division algebra, inv(o) = conj(o) / norm_sq(o)
+            GpuOp::OctonionInv(o) => {
+                let o_name = self.get_var_name(*o);
+                self.emit(&format!("// OctonionInv: o⁻¹ = conj(o) / |o|²"));
+                self.emit(&format!("float8 oct_inv_in = *(device float8*)(&{});", o_name));
+                self.emit(&format!("float oct_inv_normsq = dot(oct_inv_in.lo, oct_inv_in.lo) + dot(oct_inv_in.hi, oct_inv_in.hi);"));
+                self.emit(&format!("float oct_inv_rcp = 1.0f / oct_inv_normsq;"));
+                // Compute conjugate: keep real part, negate imaginary parts
+                self.emit(&format!("float8 oct_inv_conj = float8(oct_inv_in.s0, -oct_inv_in.s1, -oct_inv_in.s2, -oct_inv_in.s3, -oct_inv_in.s4, -oct_inv_in.s5, -oct_inv_in.s6, -oct_inv_in.s7);"));
+                self.emit(&format!("float8 {} = oct_inv_conj * oct_inv_rcp;", result_name));
+            }
+
+            // OctonionReal: Extract real (scalar) part
+            // Math: Re(a + bi + cj + dk + el + fil + gjl + hkl) = a
+            GpuOp::OctonionReal(o) => {
+                let o_name = self.get_var_name(*o);
+                self.emit(&format!("// OctonionReal: extract scalar component (index 0)"));
+                self.emit(&format!("float {} = ((device float*)(&{}))[0];", result_name, o_name));
+            }
+
+            // OctonionImag: Extract 7D imaginary vector
+            // Math: Im(o) = (b, c, d, e, f, g, h) ∈ R⁷
+            GpuOp::OctonionImag(o) => {
+                let o_name = self.get_var_name(*o);
+                self.emit(&format!("// OctonionImag: extract 7D imaginary vector (components 1-7)"));
+                self.emit(&format!("device float* oct_imag_ptr = (device float*)(&{});", o_name));
+                // Create a float7 (or array) with components 1-7
+                // Metal doesn't have float7, so we use individual components or store to array
+                self.emit(&format!("float oct_imag_arr[7];"));
+                for i in 0..7 {
+                    self.emit(&format!("oct_imag_arr[{}] = oct_imag_ptr[{}];", i, i + 1));
+                }
+                // Result is the array pointer
+                self.emit(&format!("device float* {} = oct_imag_arr;", result_name));
+            }
+
+            // OctonionDot: Euclidean inner product
+            // Math: <o1, o2> = a1*a2 + b1*b2 + c1*c2 + d1*d2 + e1*e2 + f1*f2 + g1*g2 + h1*h2
+            GpuOp::OctonionDot(o1, o2) => {
+                let o1_name = self.get_var_name(*o1);
+                let o2_name = self.get_var_name(*o2);
+                self.emit(&format!("// OctonionDot: Euclidean inner product <o1, o2>"));
+                self.emit(&format!("float8 oct_dot_a = *(device float8*)(&{});", o1_name));
+                self.emit(&format!("float8 oct_dot_b = *(device float8*)(&{});", o2_name));
+                // Use dot(lo, lo) + dot(hi, hi) pattern but with element-wise multiply first
+                self.emit(&format!("float {} = dot(oct_dot_a.lo, oct_dot_b.lo) + dot(oct_dot_a.hi, oct_dot_b.hi);", result_name));
+            }
+
+            // OctonionSigmoid: Per-component sigmoid activation
+            // Math: sigmoid(o[i]) = 1 / (1 + exp(-o[i]))
+            // Uses Metal's built-in exp() for vector types
+            GpuOp::OctonionSigmoid(o) => {
+                let o_name = self.get_var_name(*o);
+                self.emit(&format!("// OctonionSigmoid: 1/(1+exp(-o[i])) per component"));
+                self.emit(&format!("float8 oct_sig_in = *(device float8*)(&{});", o_name));
+                // Apply sigmoid component-wise: 1 / (1 + exp(-x))
+                self.emit(&format!("float4 oct_sig_lo = 1.0f / (1.0f + exp(-oct_sig_in.lo));"));
+                self.emit(&format!("float4 oct_sig_hi = 1.0f / (1.0f + exp(-oct_sig_in.hi));"));
+                self.emit(&format!("float8 {} = float8(oct_sig_lo, oct_sig_hi);", result_name));
+            }
+
+            // OctonionTanh: Per-component tanh activation
+            // Math: tanh(o[i]) = (exp(2x) - 1) / (exp(2x) + 1)
+            // Uses Metal's built-in tanh() for vector types
+            GpuOp::OctonionTanh(o) => {
+                let o_name = self.get_var_name(*o);
+                self.emit(&format!("// OctonionTanh: tanh(o[i]) per component"));
+                self.emit(&format!("float8 oct_tanh_in = *(device float8*)(&{});", o_name));
+                // Metal has built-in tanh for float4
+                self.emit(&format!("float4 oct_tanh_lo = tanh(oct_tanh_in.lo);"));
+                self.emit(&format!("float4 oct_tanh_hi = tanh(oct_tanh_in.hi);"));
+                self.emit(&format!("float8 {} = float8(oct_tanh_lo, oct_tanh_hi);", result_name));
+            }
+
+            // OctonionToQuats: Split octonion into two quaternions (Cayley-Dickson decomposition)
+            // Math: o = q0 + q1*l where q0 = (a, b, c, d), q1 = (e, f, g, h)
+            // Output: struct with two float4 quaternions
+            GpuOp::OctonionToQuats(o) => {
+                let o_name = self.get_var_name(*o);
+                self.emit(&format!("// OctonionToQuats: Cayley-Dickson decomposition"));
+                self.emit(&format!("float8 oct_split = *(device float8*)(&{});", o_name));
+                // Split into two quaternions using .lo and .hi
+                self.emit(&format!("float4 oct_q0 = oct_split.lo;  // first quaternion"));
+                self.emit(&format!("float4 oct_q1 = oct_split.hi;  // second quaternion"));
+                // Return as float8 (two quaternions concatenated)
+                self.emit(&format!("float8 {} = float8(oct_q0, oct_q1);", result_name));
+            }
+
+            // OctonionFromQuats: Construct octonion from two quaternions
+            // Math: o = q0 + q1*l
+            GpuOp::OctonionFromQuats(q0, q1) => {
+                let q0_name = self.get_var_name(*q0);
+                let q1_name = self.get_var_name(*q1);
+                self.emit(&format!("// OctonionFromQuats: Cayley-Dickson construction"));
+                self.emit(&format!("float4 oct_from_q0 = *(device float4*)(&{});", q0_name));
+                self.emit(&format!("float4 oct_from_q1 = *(device float4*)(&{});", q1_name));
+                // Combine into single octonion
+                self.emit(&format!("float8 {} = float8(oct_from_q0, oct_from_q1);", result_name));
+            }
+
+            // OctonionExp: Octonion exponential function
+            // Math: exp(o) = exp(a) * (cos(|v|) + sin(|v|)/|v| * v)
+            // where a = Re(o), v = Im(o)
+            GpuOp::OctonionExp(o) => {
+                let o_name = self.get_var_name(*o);
+                self.emit(&format!("// OctonionExp: exp(o) = exp(a)*(cos|v| + sinc|v| * v)"));
+                self.emit(&format!("float8 oct_exp_in = *(device float8*)(&{});", o_name));
+                self.emit(&format!("float oct_exp_a = oct_exp_in.s0;  // real part"));
+                // Compute |v|² = sum of squares of imaginary components
+                self.emit(&format!("float oct_exp_vnorm_sq = oct_exp_in.s1*oct_exp_in.s1 + oct_exp_in.s2*oct_exp_in.s2 + oct_exp_in.s3*oct_exp_in.s3 + oct_exp_in.s4*oct_exp_in.s4 + oct_exp_in.s5*oct_exp_in.s5 + oct_exp_in.s6*oct_exp_in.s6 + oct_exp_in.s7*oct_exp_in.s7;"));
+                self.emit(&format!("float oct_exp_vnorm = sqrt(oct_exp_vnorm_sq);"));
+                self.emit(&format!("float oct_exp_ea = exp(oct_exp_a);"));
+                self.emit(&format!("float oct_exp_cos = cos(oct_exp_vnorm);"));
+                self.emit(&format!("float oct_exp_sin = sin(oct_exp_vnorm);"));
+                // sinc(x) = sin(x)/x, with sinc(0) = 1
+                self.emit(&format!("float oct_exp_sinc = (oct_exp_vnorm > 0.00001f) ? (oct_exp_sin / oct_exp_vnorm) : 1.0f;"));
+                self.emit(&format!("float oct_exp_scale = oct_exp_ea * oct_exp_sinc;"));
+                // Result: (exp(a)*cos|v|, exp(a)*sinc|v|*v)
+                self.emit(&format!("float8 {} = float8(oct_exp_ea * oct_exp_cos, oct_exp_scale * oct_exp_in.s1, oct_exp_scale * oct_exp_in.s2, oct_exp_scale * oct_exp_in.s3, oct_exp_scale * oct_exp_in.s4, oct_exp_scale * oct_exp_in.s5, oct_exp_scale * oct_exp_in.s6, oct_exp_scale * oct_exp_in.s7);", result_name));
+            }
+
+            // OctonionLog: Octonion logarithm
+            // Math: log(o) = log(|o|) + atan2(|v|, a) * v/|v|
+            GpuOp::OctonionLog(o) => {
+                let o_name = self.get_var_name(*o);
+                self.emit(&format!("// OctonionLog: log(o) = log|o| + atan2(|v|,a) * v/|v|"));
+                self.emit(&format!("float8 oct_log_in = *(device float8*)(&{});", o_name));
+                self.emit(&format!("float oct_log_a = oct_log_in.s0;  // real part"));
+                self.emit(&format!("float oct_log_vnorm_sq = oct_log_in.s1*oct_log_in.s1 + oct_log_in.s2*oct_log_in.s2 + oct_log_in.s3*oct_log_in.s3 + oct_log_in.s4*oct_log_in.s4 + oct_log_in.s5*oct_log_in.s5 + oct_log_in.s6*oct_log_in.s6 + oct_log_in.s7*oct_log_in.s7;"));
+                self.emit(&format!("float oct_log_vnorm = sqrt(oct_log_vnorm_sq);"));
+                self.emit(&format!("float oct_log_onorm = sqrt(oct_log_a*oct_log_a + oct_log_vnorm_sq);"));
+                self.emit(&format!("float oct_log_log_onorm = log(oct_log_onorm);"));
+                self.emit(&format!("float oct_log_theta = atan2(oct_log_vnorm, oct_log_a);"));
+                self.emit(&format!("float oct_log_scale = (oct_log_vnorm > 0.00001f) ? (oct_log_theta / oct_log_vnorm) : 0.0f;"));
+                self.emit(&format!("float8 {} = float8(oct_log_log_onorm, oct_log_scale * oct_log_in.s1, oct_log_scale * oct_log_in.s2, oct_log_scale * oct_log_in.s3, oct_log_scale * oct_log_in.s4, oct_log_scale * oct_log_in.s5, oct_log_scale * oct_log_in.s6, oct_log_scale * oct_log_in.s7);", result_name));
+            }
+
+            // OctonionPow: Octonion power
+            // Math: o^p = exp(p * log(o))
+            GpuOp::OctonionPow(o, exp) => {
+                let o_name = self.get_var_name(*o);
+                let exp_name = self.get_var_name(*exp);
+                self.emit(&format!("// OctonionPow: o^p = exp(p * log(o))"));
+                self.emit(&format!("float8 oct_pow_in = *(device float8*)(&{});", o_name));
+                self.emit(&format!("float oct_pow_p = *(device float*)(&{});", exp_name));
+
+                // Step 1: Compute log(o)
+                self.emit(&format!("float oct_pow_a = oct_pow_in.s0;"));
+                self.emit(&format!("float oct_pow_vnorm_sq = oct_pow_in.s1*oct_pow_in.s1 + oct_pow_in.s2*oct_pow_in.s2 + oct_pow_in.s3*oct_pow_in.s3 + oct_pow_in.s4*oct_pow_in.s4 + oct_pow_in.s5*oct_pow_in.s5 + oct_pow_in.s6*oct_pow_in.s6 + oct_pow_in.s7*oct_pow_in.s7;"));
+                self.emit(&format!("float oct_pow_vnorm = sqrt(oct_pow_vnorm_sq);"));
+                self.emit(&format!("float oct_pow_onorm = sqrt(oct_pow_a*oct_pow_a + oct_pow_vnorm_sq);"));
+                self.emit(&format!("float oct_pow_log_onorm = log(oct_pow_onorm);"));
+                self.emit(&format!("float oct_pow_theta = atan2(oct_pow_vnorm, oct_pow_a);"));
+                self.emit(&format!("float oct_pow_log_scale = (oct_pow_vnorm > 0.00001f) ? (oct_pow_theta / oct_pow_vnorm) : 0.0f;"));
+                self.emit(&format!("float8 oct_pow_log = float8(oct_pow_log_onorm, oct_pow_log_scale * oct_pow_in.s1, oct_pow_log_scale * oct_pow_in.s2, oct_pow_log_scale * oct_pow_in.s3, oct_pow_log_scale * oct_pow_in.s4, oct_pow_log_scale * oct_pow_in.s5, oct_pow_log_scale * oct_pow_in.s6, oct_pow_log_scale * oct_pow_in.s7);"));
+
+                // Step 2: Scale by p
+                self.emit(&format!("float8 oct_pow_scaled = oct_pow_log * oct_pow_p;"));
+
+                // Step 3: Compute exp(p * log(o))
+                self.emit(&format!("float oct_pow_sa = oct_pow_scaled.s0;"));
+                self.emit(&format!("float oct_pow_svnorm_sq = oct_pow_scaled.s1*oct_pow_scaled.s1 + oct_pow_scaled.s2*oct_pow_scaled.s2 + oct_pow_scaled.s3*oct_pow_scaled.s3 + oct_pow_scaled.s4*oct_pow_scaled.s4 + oct_pow_scaled.s5*oct_pow_scaled.s5 + oct_pow_scaled.s6*oct_pow_scaled.s6 + oct_pow_scaled.s7*oct_pow_scaled.s7;"));
+                self.emit(&format!("float oct_pow_svnorm = sqrt(oct_pow_svnorm_sq);"));
+                self.emit(&format!("float oct_pow_ea = exp(oct_pow_sa);"));
+                self.emit(&format!("float oct_pow_cos = cos(oct_pow_svnorm);"));
+                self.emit(&format!("float oct_pow_sin = sin(oct_pow_svnorm);"));
+                self.emit(&format!("float oct_pow_sinc = (oct_pow_svnorm > 0.00001f) ? (oct_pow_sin / oct_pow_svnorm) : 1.0f;"));
+                self.emit(&format!("float oct_pow_exp_scale = oct_pow_ea * oct_pow_sinc;"));
+                self.emit(&format!("float8 {} = float8(oct_pow_ea * oct_pow_cos, oct_pow_exp_scale * oct_pow_scaled.s1, oct_pow_exp_scale * oct_pow_scaled.s2, oct_pow_exp_scale * oct_pow_scaled.s3, oct_pow_exp_scale * oct_pow_scaled.s4, oct_pow_exp_scale * oct_pow_scaled.s5, oct_pow_exp_scale * oct_pow_scaled.s6, oct_pow_exp_scale * oct_pow_scaled.s7);", result_name));
             }
 
             // Atomics not handled above

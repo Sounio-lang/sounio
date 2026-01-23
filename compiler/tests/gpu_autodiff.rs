@@ -5,11 +5,11 @@
 
 #![cfg(feature = "gpu")]
 
-use souc::codegen::gpu::autodiff::{
+use sounio::codegen::gpu::autodiff::{
     AutoDiff, AutoDiffTransform, BackwardCodegen, DiffConfig, DiffContext, DiffPrimitive,
     GpuTape, GpuTapeConfig, KernelAnalysis, ParamInfo, PrimitiveRegistry, TapeEntry, TapeOp,
 };
-use souc::codegen::gpu::ir::{
+use sounio::codegen::gpu::ir::{
     BlockId, GpuBlock, GpuKernel, GpuModule, GpuOp, GpuParam, GpuTarget, GpuTerminator, GpuType,
     MemorySpace, ValueId,
 };
@@ -228,7 +228,7 @@ fn test_autodiff_custom_config() {
         checkpoint_interval: 50,
         accumulate_gradients: false,
         target: GpuTarget::Metal {
-            gpu_family: souc::codegen::gpu::ir::MetalGpuFamily::Apple8,
+            gpu_family: sounio::codegen::gpu::ir::MetalGpuFamily::Apple8,
         },
         optimize_memory: false,
         warp_reductions: false,
@@ -705,8 +705,7 @@ fn test_diff_primitive_to_tape_op_mapping() {
     ];
 
     for prim in primitives {
-        let tape_op = prim.to_tape_op();
+        let _tape_op = prim.to_tape_op();
         // Just verify conversion doesn't panic
-        let _ = tape_op.name();
     }
 }

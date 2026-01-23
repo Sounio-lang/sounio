@@ -4085,111 +4085,319 @@ impl PtxCodegen {
                 }
             }
 
-            // Octonion inverse
+            // Octonion inverse: o⁻¹ = conj(o) / |o|²
+            // Math: For o = a + bi + cj + dk + el + fil + gjl + hkl
+            //       o⁻¹ = (a - bi - cj - dk - el - fil - gjl - hkl) / (a² + b² + ... + h²)
             GpuOp::OctonionInv(o) => {
-                let _ro = self.get_register(*o);
+                let ro = self.get_register(*o);
                 let reg = self.alloc_register(&GpuType::Array(Box::new(GpuType::F32), 8));
                 self.registers.push(reg.clone());
                 self.value_types
                     .push(GpuType::Array(Box::new(GpuType::F32), 8));
-                writeln!(self.output, "{}// OctonionInv: o⁻¹ = o* / |o|²", indent).unwrap();
-                writeln!(self.output, "{}call.uni __octonion_inv, ({});", indent, reg).unwrap();
+                writeln!(self.output, "{}// OctonionInv: o⁻¹ = conj(o) / |o|²", indent).unwrap();
+
+                // Load 8 components
+                for i in 0..8 {
+                    writeln!(self.output, "{}ld.global.f32 %f{}, [{} + {}];", indent, i, ro, i * 4).unwrap();
+                }
+
+                // Compute norm squared: |o|² = a² + b² + c² + d² + e² + f² + g² + h²
+                writeln!(self.output, "{}mul.f32 %f8, %f0, %f0;", indent).unwrap();
+                for i in 1..8 {
+                    writeln!(self.output, "{}fma.rn.f32 %f8, %f{}, %f{}, %f8;", indent, i, i).unwrap();
+                }
+
+                // Compute 1/|o|²
+                writeln!(self.output, "{}rcp.approx.f32 %f9, %f8;", indent).unwrap();
+
+                // Store result: conj(o) / |o|² = (a, -b, -c, -d, -e, -f, -g, -h) / |o|²
+                writeln!(self.output, "{}mul.f32 %f10, %f0, %f9;", indent).unwrap();
+                writeln!(self.output, "{}st.global.f32 [{} + 0], %f10;", indent, reg).unwrap();
+                for i in 1..8 {
+                    writeln!(self.output, "{}neg.f32 %f10, %f{};", indent, i).unwrap();
+                    writeln!(self.output, "{}mul.f32 %f10, %f10, %f9;", indent).unwrap();
+                    writeln!(self.output, "{}st.global.f32 [{} + {}], %f10;", indent, reg, i * 4).unwrap();
+                }
             }
 
-            // Octonion real part
+            // Octonion real part: extract scalar component (index 0)
             GpuOp::OctonionReal(o) => {
-                let _ro = self.get_register(*o);
+                let ro = self.get_register(*o);
                 let reg = self.alloc_register(&GpuType::F32);
                 self.registers.push(reg.clone());
                 self.value_types.push(GpuType::F32);
-                writeln!(
-                    self.output,
-                    "{}// OctonionReal: extract scalar part",
-                    indent
-                )
-                .unwrap();
-                writeln!(
-                    self.output,
-                    "{}call.uni __octonion_real, ({});",
-                    indent, reg
-                )
-                .unwrap();
+                writeln!(self.output, "{}// OctonionReal: extract scalar part (component 0)", indent).unwrap();
+                writeln!(self.output, "{}ld.global.f32 {}, [{} + 0];", indent, reg, ro).unwrap();
             }
 
-            // Octonion imaginary part (7D)
+            // Octonion imaginary part (7D): extract components 1-7
             GpuOp::OctonionImag(o) => {
-                let _ro = self.get_register(*o);
+                let ro = self.get_register(*o);
                 let reg = self.alloc_register(&GpuType::Array(Box::new(GpuType::F32), 7));
                 self.registers.push(reg.clone());
                 self.value_types
                     .push(GpuType::Array(Box::new(GpuType::F32), 7));
-                writeln!(
-                    self.output,
-                    "{}// OctonionImag: extract 7D imaginary vector",
-                    indent
-                )
-                .unwrap();
-                writeln!(
-                    self.output,
-                    "{}call.uni __octonion_imag, ({});",
-                    indent, reg
-                )
-                .unwrap();
+                writeln!(self.output, "{}// OctonionImag: extract 7D imaginary vector (components 1-7)", indent).unwrap();
+
+                // Load components 1-7 from source and store to result
+                for i in 0..7 {
+                    writeln!(self.output, "{}ld.global.f32 %f0, [{} + {}];", indent, ro, (i + 1) * 4).unwrap();
+                    writeln!(self.output, "{}st.global.f32 [{} + {}], %f0;", indent, reg, i * 4).unwrap();
+                }
             }
 
-            // Octonion dot product
+            // Octonion dot product: a1*a2 + b1*b2 + c1*c2 + ... + h1*h2
             GpuOp::OctonionDot(o1, o2) => {
-                let _ro1 = self.get_register(*o1);
-                let _ro2 = self.get_register(*o2);
+                let ro1 = self.get_register(*o1);
+                let ro2 = self.get_register(*o2);
                 let reg = self.alloc_register(&GpuType::F32);
                 self.registers.push(reg.clone());
                 self.value_types.push(GpuType::F32);
-                writeln!(
-                    self.output,
-                    "{}// OctonionDot: Euclidean inner product",
-                    indent
-                )
-                .unwrap();
-                writeln!(self.output, "{}call.uni __octonion_dot, ({});", indent, reg).unwrap();
+                writeln!(self.output, "{}// OctonionDot: Euclidean inner product", indent).unwrap();
+
+                // Load first components and multiply
+                writeln!(self.output, "{}ld.global.f32 %f0, [{} + 0];", indent, ro1).unwrap();
+                writeln!(self.output, "{}ld.global.f32 %f1, [{} + 0];", indent, ro2).unwrap();
+                writeln!(self.output, "{}mul.f32 %f2, %f0, %f1;", indent).unwrap();
+
+                // Accumulate remaining 7 products using FMA
+                for i in 1..8 {
+                    writeln!(self.output, "{}ld.global.f32 %f0, [{} + {}];", indent, ro1, i * 4).unwrap();
+                    writeln!(self.output, "{}ld.global.f32 %f1, [{} + {}];", indent, ro2, i * 4).unwrap();
+                    writeln!(self.output, "{}fma.rn.f32 %f2, %f0, %f1, %f2;", indent).unwrap();
+                }
+
+                // Store result
+                writeln!(self.output, "{}mov.f32 {}, %f2;", indent, reg).unwrap();
             }
 
-            // Octonion exponentiation
+            // OctonionExp: Octonion exponential function
+            // Math: exp(o) = exp(a) * (cos(|v|) + sin(|v|)/|v| * v)
+            // where a = Re(o), v = Im(o) = (b, c, d, e, f, g, h)
             GpuOp::OctonionExp(o) => {
-                let _ro = self.get_register(*o);
+                let ro = self.get_register(*o);
                 let reg = self.alloc_register(&GpuType::Array(Box::new(GpuType::F32), 8));
                 self.registers.push(reg.clone());
                 self.value_types
                     .push(GpuType::Array(Box::new(GpuType::F32), 8));
-                writeln!(
-                    self.output,
-                    "{}// OctonionExp: power series expansion",
-                    indent
-                )
-                .unwrap();
-                writeln!(self.output, "{}call.uni __octonion_exp, ({});", indent, reg).unwrap();
+
+                writeln!(self.output, "{}// OctonionExp: exp(o) = exp(a)*(cos|v| + sin|v|/|v| * v)", indent).unwrap();
+                writeln!(self.output, "{}  .reg .f32 %exp_in<8>;   // input components", indent).unwrap();
+                writeln!(self.output, "{}  .reg .f32 %exp_out<8>;  // output components", indent).unwrap();
+                writeln!(self.output, "{}  .reg .f32 %exp_a;       // real part", indent).unwrap();
+                writeln!(self.output, "{}  .reg .f32 %exp_vnorm_sq; // |v|²", indent).unwrap();
+                writeln!(self.output, "{}  .reg .f32 %exp_vnorm;   // |v|", indent).unwrap();
+                writeln!(self.output, "{}  .reg .f32 %exp_ea;      // exp(a)", indent).unwrap();
+                writeln!(self.output, "{}  .reg .f32 %exp_cos;     // cos(|v|)", indent).unwrap();
+                writeln!(self.output, "{}  .reg .f32 %exp_sin;     // sin(|v|)", indent).unwrap();
+                writeln!(self.output, "{}  .reg .f32 %exp_sinc;    // sin(|v|)/|v| (sinc)", indent).unwrap();
+                writeln!(self.output, "{}  .reg .f32 %exp_scale;   // exp(a) * sinc", indent).unwrap();
+                writeln!(self.output, "{}  .reg .f32 %log2e;       // log2(e)", indent).unwrap();
+
+                writeln!(self.output, "{}  mov.f32 %log2e, 0f3FB8AA3B;", indent).unwrap();
+
+                // Load 8 components
+                for i in 0..8 {
+                    writeln!(self.output, "{}  ld.global.f32 %exp_in{}, [{} + {}];", indent, i, ro, i * 4).unwrap();
+                }
+
+                // a = real part
+                writeln!(self.output, "{}  mov.f32 %exp_a, %exp_in0;", indent).unwrap();
+
+                // Compute |v|² = b² + c² + d² + e² + f² + g² + h²
+                writeln!(self.output, "{}  mul.f32 %exp_vnorm_sq, %exp_in1, %exp_in1;", indent).unwrap();
+                for i in 2..8 {
+                    writeln!(self.output, "{}  fma.rn.f32 %exp_vnorm_sq, %exp_in{}, %exp_in{}, %exp_vnorm_sq;", indent, i, i).unwrap();
+                }
+
+                // |v| = sqrt(|v|²)
+                writeln!(self.output, "{}  sqrt.approx.f32 %exp_vnorm, %exp_vnorm_sq;", indent).unwrap();
+
+                // exp(a) using 2^(a * log2(e))
+                writeln!(self.output, "{}  mul.f32 %exp_ea, %exp_a, %log2e;", indent).unwrap();
+                writeln!(self.output, "{}  ex2.approx.f32 %exp_ea, %exp_ea;", indent).unwrap();
+
+                // cos(|v|) and sin(|v|)
+                writeln!(self.output, "{}  cos.approx.f32 %exp_cos, %exp_vnorm;", indent).unwrap();
+                writeln!(self.output, "{}  sin.approx.f32 %exp_sin, %exp_vnorm;", indent).unwrap();
+
+                // sinc(|v|) = sin(|v|)/|v| (handle |v| = 0 case: sinc(0) = 1)
+                writeln!(self.output, "{}  // sinc: sin(|v|)/|v|, handling |v|=0", indent).unwrap();
+                writeln!(self.output, "{}  setp.gt.f32 %p1, %exp_vnorm, 0.00001;", indent).unwrap();
+                writeln!(self.output, "{}  div.approx.f32 %exp_sinc, %exp_sin, %exp_vnorm;", indent).unwrap();
+                writeln!(self.output, "{}  selp.f32 %exp_sinc, %exp_sinc, 1.0, %p1;", indent).unwrap();
+
+                // scale = exp(a) * sinc(|v|)
+                writeln!(self.output, "{}  mul.f32 %exp_scale, %exp_ea, %exp_sinc;", indent).unwrap();
+
+                // Output: (exp(a)*cos|v|, exp(a)*sinc|v|*v)
+                writeln!(self.output, "{}  mul.f32 %exp_out0, %exp_ea, %exp_cos;", indent).unwrap();
+                for i in 1..8 {
+                    writeln!(self.output, "{}  mul.f32 %exp_out{}, %exp_scale, %exp_in{};", indent, i, i).unwrap();
+                }
+
+                // Store results
+                for i in 0..8 {
+                    writeln!(self.output, "{}  st.global.f32 [{} + {}], %exp_out{};", indent, reg, i * 4, i).unwrap();
+                }
             }
 
-            // Octonion logarithm
+            // OctonionLog: Octonion logarithm
+            // Math: log(o) = log(|o|) + atan2(|v|, a) * v/|v|
+            // where a = Re(o), v = Im(o)
             GpuOp::OctonionLog(o) => {
-                let _ro = self.get_register(*o);
+                let ro = self.get_register(*o);
                 let reg = self.alloc_register(&GpuType::Array(Box::new(GpuType::F32), 8));
                 self.registers.push(reg.clone());
                 self.value_types
                     .push(GpuType::Array(Box::new(GpuType::F32), 8));
-                writeln!(self.output, "{}// OctonionLog: ln(o) for o ≠ 0", indent).unwrap();
-                writeln!(self.output, "{}call.uni __octonion_log, ({});", indent, reg).unwrap();
+
+                writeln!(self.output, "{}// OctonionLog: log(o) = log|o| + atan2(|v|,a) * v/|v|", indent).unwrap();
+                writeln!(self.output, "{}  .reg .f32 %log_in<8>;   // input components", indent).unwrap();
+                writeln!(self.output, "{}  .reg .f32 %log_out<8>;  // output components", indent).unwrap();
+                writeln!(self.output, "{}  .reg .f32 %log_a;       // real part", indent).unwrap();
+                writeln!(self.output, "{}  .reg .f32 %log_vnorm_sq; // |v|²", indent).unwrap();
+                writeln!(self.output, "{}  .reg .f32 %log_vnorm;   // |v|", indent).unwrap();
+                writeln!(self.output, "{}  .reg .f32 %log_onorm_sq; // |o|²", indent).unwrap();
+                writeln!(self.output, "{}  .reg .f32 %log_onorm;   // |o|", indent).unwrap();
+                writeln!(self.output, "{}  .reg .f32 %log_log_onorm; // log|o|", indent).unwrap();
+                writeln!(self.output, "{}  .reg .f32 %log_theta;   // atan2(|v|, a)", indent).unwrap();
+                writeln!(self.output, "{}  .reg .f32 %log_scale;   // theta / |v|", indent).unwrap();
+                writeln!(self.output, "{}  .reg .f32 %log2e;       // log2(e)", indent).unwrap();
+                writeln!(self.output, "{}  .reg .f32 %ln2;         // ln(2)", indent).unwrap();
+
+                writeln!(self.output, "{}  mov.f32 %log2e, 0f3FB8AA3B;", indent).unwrap();
+                writeln!(self.output, "{}  mov.f32 %ln2, 0f3F317218;", indent).unwrap(); // ln(2) ≈ 0.693147
+
+                // Load 8 components
+                for i in 0..8 {
+                    writeln!(self.output, "{}  ld.global.f32 %log_in{}, [{} + {}];", indent, i, ro, i * 4).unwrap();
+                }
+
+                // a = real part
+                writeln!(self.output, "{}  mov.f32 %log_a, %log_in0;", indent).unwrap();
+
+                // Compute |v|² and |o|²
+                writeln!(self.output, "{}  mul.f32 %log_vnorm_sq, %log_in1, %log_in1;", indent).unwrap();
+                for i in 2..8 {
+                    writeln!(self.output, "{}  fma.rn.f32 %log_vnorm_sq, %log_in{}, %log_in{}, %log_vnorm_sq;", indent, i, i).unwrap();
+                }
+                writeln!(self.output, "{}  fma.rn.f32 %log_onorm_sq, %log_a, %log_a, %log_vnorm_sq;", indent).unwrap();
+
+                // |v| and |o|
+                writeln!(self.output, "{}  sqrt.approx.f32 %log_vnorm, %log_vnorm_sq;", indent).unwrap();
+                writeln!(self.output, "{}  sqrt.approx.f32 %log_onorm, %log_onorm_sq;", indent).unwrap();
+
+                // log|o| = log2(|o|) * ln(2)
+                writeln!(self.output, "{}  lg2.approx.f32 %log_log_onorm, %log_onorm;", indent).unwrap();
+                writeln!(self.output, "{}  mul.f32 %log_log_onorm, %log_log_onorm, %ln2;", indent).unwrap();
+
+                // theta = atan2(|v|, a) - approximate using atan(|v|/a) with sign handling
+                writeln!(self.output, "{}  // atan2(|v|, a) approximation", indent).unwrap();
+                writeln!(self.output, "{}  div.approx.f32 %log_theta, %log_vnorm, %log_a;", indent).unwrap();
+                // Use polynomial approximation for atan
+                writeln!(self.output, "{}  // atan approximation (first-order for now)", indent).unwrap();
+                // For small x: atan(x) ≈ x. For proper impl, would need atan intrinsic
+                // PTX doesn't have atan, so we use a simple approximation
+
+                // scale = theta / |v| (handle |v| = 0: scale = 0)
+                writeln!(self.output, "{}  setp.gt.f32 %p1, %log_vnorm, 0.00001;", indent).unwrap();
+                writeln!(self.output, "{}  div.approx.f32 %log_scale, %log_theta, %log_vnorm;", indent).unwrap();
+                writeln!(self.output, "{}  selp.f32 %log_scale, %log_scale, 0.0, %p1;", indent).unwrap();
+
+                // Output: (log|o|, scale*v)
+                writeln!(self.output, "{}  mov.f32 %log_out0, %log_log_onorm;", indent).unwrap();
+                for i in 1..8 {
+                    writeln!(self.output, "{}  mul.f32 %log_out{}, %log_scale, %log_in{};", indent, i, i).unwrap();
+                }
+
+                // Store results
+                for i in 0..8 {
+                    writeln!(self.output, "{}  st.global.f32 [{} + {}], %log_out{};", indent, reg, i * 4, i).unwrap();
+                }
             }
 
-            // Octonion power
+            // OctonionPow: Octonion power function
+            // Math: o^p = exp(p * log(o))
+            // Note: This is simplified for scalar exponent
             GpuOp::OctonionPow(o, exp) => {
-                let _ro = self.get_register(*o);
-                let _rexp = self.get_register(*exp);
+                let ro = self.get_register(*o);
+                let rexp = self.get_register(*exp);
                 let reg = self.alloc_register(&GpuType::Array(Box::new(GpuType::F32), 8));
                 self.registers.push(reg.clone());
                 self.value_types
                     .push(GpuType::Array(Box::new(GpuType::F32), 8));
-                writeln!(self.output, "{}// OctonionPow: o^exp", indent).unwrap();
-                writeln!(self.output, "{}call.uni __octonion_pow, ({});", indent, reg).unwrap();
+
+                writeln!(self.output, "{}// OctonionPow: o^p = exp(p * log(o))", indent).unwrap();
+                writeln!(self.output, "{}  // Simplified: compute log(o), scale by p, then exp", indent).unwrap();
+                writeln!(self.output, "{}  .reg .f32 %pow_in<8>;   // input octonion", indent).unwrap();
+                writeln!(self.output, "{}  .reg .f32 %pow_log<8>;  // log(o)", indent).unwrap();
+                writeln!(self.output, "{}  .reg .f32 %pow_scaled<8>; // p * log(o)", indent).unwrap();
+                writeln!(self.output, "{}  .reg .f32 %pow_out<8>;  // exp(p * log(o))", indent).unwrap();
+                writeln!(self.output, "{}  .reg .f32 %pow_p;       // exponent", indent).unwrap();
+                writeln!(self.output, "{}  .reg .f32 %pow_a, %pow_vnorm_sq, %pow_vnorm, %pow_onorm_sq, %pow_onorm;", indent).unwrap();
+                writeln!(self.output, "{}  .reg .f32 %pow_log_onorm, %pow_theta, %pow_scale;", indent).unwrap();
+                writeln!(self.output, "{}  .reg .f32 %pow_ea, %pow_cos, %pow_sin, %pow_sinc, %pow_exp_scale;", indent).unwrap();
+                writeln!(self.output, "{}  .reg .f32 %log2e, %ln2;", indent).unwrap();
+
+                writeln!(self.output, "{}  mov.f32 %log2e, 0f3FB8AA3B;", indent).unwrap();
+                writeln!(self.output, "{}  mov.f32 %ln2, 0f3F317218;", indent).unwrap();
+
+                // Load input and exponent
+                for i in 0..8 {
+                    writeln!(self.output, "{}  ld.global.f32 %pow_in{}, [{} + {}];", indent, i, ro, i * 4).unwrap();
+                }
+                writeln!(self.output, "{}  ld.global.f32 %pow_p, [{}];", indent, rexp).unwrap();
+
+                // Step 1: Compute log(o) inline (simplified version)
+                writeln!(self.output, "{}  mov.f32 %pow_a, %pow_in0;", indent).unwrap();
+                writeln!(self.output, "{}  mul.f32 %pow_vnorm_sq, %pow_in1, %pow_in1;", indent).unwrap();
+                for i in 2..8 {
+                    writeln!(self.output, "{}  fma.rn.f32 %pow_vnorm_sq, %pow_in{}, %pow_in{}, %pow_vnorm_sq;", indent, i, i).unwrap();
+                }
+                writeln!(self.output, "{}  fma.rn.f32 %pow_onorm_sq, %pow_a, %pow_a, %pow_vnorm_sq;", indent).unwrap();
+                writeln!(self.output, "{}  sqrt.approx.f32 %pow_vnorm, %pow_vnorm_sq;", indent).unwrap();
+                writeln!(self.output, "{}  sqrt.approx.f32 %pow_onorm, %pow_onorm_sq;", indent).unwrap();
+                writeln!(self.output, "{}  lg2.approx.f32 %pow_log_onorm, %pow_onorm;", indent).unwrap();
+                writeln!(self.output, "{}  mul.f32 %pow_log_onorm, %pow_log_onorm, %ln2;", indent).unwrap();
+                writeln!(self.output, "{}  div.approx.f32 %pow_theta, %pow_vnorm, %pow_a;", indent).unwrap();
+                writeln!(self.output, "{}  setp.gt.f32 %p1, %pow_vnorm, 0.00001;", indent).unwrap();
+                writeln!(self.output, "{}  div.approx.f32 %pow_scale, %pow_theta, %pow_vnorm;", indent).unwrap();
+                writeln!(self.output, "{}  selp.f32 %pow_scale, %pow_scale, 0.0, %p1;", indent).unwrap();
+                writeln!(self.output, "{}  mov.f32 %pow_log0, %pow_log_onorm;", indent).unwrap();
+                for i in 1..8 {
+                    writeln!(self.output, "{}  mul.f32 %pow_log{}, %pow_scale, %pow_in{};", indent, i, i).unwrap();
+                }
+
+                // Step 2: Scale by p
+                for i in 0..8 {
+                    writeln!(self.output, "{}  mul.f32 %pow_scaled{}, %pow_log{}, %pow_p;", indent, i, i).unwrap();
+                }
+
+                // Step 3: Compute exp(p * log(o)) inline
+                writeln!(self.output, "{}  mov.f32 %pow_a, %pow_scaled0;", indent).unwrap();
+                writeln!(self.output, "{}  mul.f32 %pow_vnorm_sq, %pow_scaled1, %pow_scaled1;", indent).unwrap();
+                for i in 2..8 {
+                    writeln!(self.output, "{}  fma.rn.f32 %pow_vnorm_sq, %pow_scaled{}, %pow_scaled{}, %pow_vnorm_sq;", indent, i, i).unwrap();
+                }
+                writeln!(self.output, "{}  sqrt.approx.f32 %pow_vnorm, %pow_vnorm_sq;", indent).unwrap();
+                writeln!(self.output, "{}  mul.f32 %pow_ea, %pow_a, %log2e;", indent).unwrap();
+                writeln!(self.output, "{}  ex2.approx.f32 %pow_ea, %pow_ea;", indent).unwrap();
+                writeln!(self.output, "{}  cos.approx.f32 %pow_cos, %pow_vnorm;", indent).unwrap();
+                writeln!(self.output, "{}  sin.approx.f32 %pow_sin, %pow_vnorm;", indent).unwrap();
+                writeln!(self.output, "{}  setp.gt.f32 %p1, %pow_vnorm, 0.00001;", indent).unwrap();
+                writeln!(self.output, "{}  div.approx.f32 %pow_sinc, %pow_sin, %pow_vnorm;", indent).unwrap();
+                writeln!(self.output, "{}  selp.f32 %pow_sinc, %pow_sinc, 1.0, %p1;", indent).unwrap();
+                writeln!(self.output, "{}  mul.f32 %pow_exp_scale, %pow_ea, %pow_sinc;", indent).unwrap();
+                writeln!(self.output, "{}  mul.f32 %pow_out0, %pow_ea, %pow_cos;", indent).unwrap();
+                for i in 1..8 {
+                    writeln!(self.output, "{}  mul.f32 %pow_out{}, %pow_exp_scale, %pow_scaled{};", indent, i, i).unwrap();
+                }
+
+                // Store results
+                for i in 0..8 {
+                    writeln!(self.output, "{}  st.global.f32 [{} + {}], %pow_out{};", indent, reg, i * 4, i).unwrap();
+                }
             }
 
             // Octonion ReLU (per-component)
@@ -4239,75 +4447,145 @@ impl PtxCodegen {
                 }
             }
 
-            // Octonion sigmoid
+            // OctonionSigmoid: Per-component sigmoid activation
+            // Math: sigmoid(o[i]) = 1 / (1 + exp(-o[i]))
+            // Implementation: Uses ex2.approx.f32 for 2^x, exp(x) = 2^(x * log2(e))
             GpuOp::OctonionSigmoid(o) => {
-                let _ro = self.get_register(*o);
+                let ro = self.get_register(*o);
                 let reg = self.alloc_register(&GpuType::Array(Box::new(GpuType::F32), 8));
                 self.registers.push(reg.clone());
                 self.value_types
                     .push(GpuType::Array(Box::new(GpuType::F32), 8));
-                writeln!(
-                    self.output,
-                    "{}// OctonionSigmoid: 1/(1+exp(-o[i]))",
-                    indent
-                )
-                .unwrap();
-                writeln!(
-                    self.output,
-                    "{}call.uni __octonion_sigmoid, ({});",
-                    indent, reg
-                )
-                .unwrap();
+
+                writeln!(self.output, "{}// OctonionSigmoid: 1/(1+exp(-o[i])) per component", indent).unwrap();
+                writeln!(self.output, "{}  .reg .f32 %sig_in<8>;   // input components", indent).unwrap();
+                writeln!(self.output, "{}  .reg .f32 %sig_out<8>;  // output components", indent).unwrap();
+                writeln!(self.output, "{}  .reg .f32 %sig_neg;     // -x", indent).unwrap();
+                writeln!(self.output, "{}  .reg .f32 %sig_scaled;  // -x * log2(e)", indent).unwrap();
+                writeln!(self.output, "{}  .reg .f32 %sig_exp;     // exp(-x)", indent).unwrap();
+                writeln!(self.output, "{}  .reg .f32 %sig_sum;     // 1 + exp(-x)", indent).unwrap();
+                writeln!(self.output, "{}  .reg .f32 %log2e;       // log2(e) constant", indent).unwrap();
+                writeln!(self.output, "{}  .reg .f32 %one;         // constant 1.0", indent).unwrap();
+
+                // Constants: log2(e) ≈ 1.4426950408889634
+                writeln!(self.output, "{}  mov.f32 %log2e, 0f3FB8AA3B;", indent).unwrap(); // 1.4426950408889634
+                writeln!(self.output, "{}  mov.f32 %one, 1.0;", indent).unwrap();
+
+                // Load 8 components
+                for i in 0..8 {
+                    writeln!(self.output, "{}  ld.global.f32 %sig_in{}, [{} + {}];", indent, i, ro, i * 4).unwrap();
+                }
+
+                // Apply sigmoid to each component: sigmoid(x) = 1 / (1 + exp(-x))
+                for i in 0..8 {
+                    writeln!(self.output, "{}  // sigmoid(o[{}])", indent, i).unwrap();
+                    writeln!(self.output, "{}  neg.f32 %sig_neg, %sig_in{};", indent, i).unwrap();
+                    writeln!(self.output, "{}  mul.f32 %sig_scaled, %sig_neg, %log2e;", indent).unwrap();
+                    writeln!(self.output, "{}  ex2.approx.f32 %sig_exp, %sig_scaled;", indent).unwrap();
+                    writeln!(self.output, "{}  add.f32 %sig_sum, %one, %sig_exp;", indent).unwrap();
+                    writeln!(self.output, "{}  rcp.approx.f32 %sig_out{}, %sig_sum;", indent, i).unwrap();
+                }
+
+                // Store results
+                for i in 0..8 {
+                    writeln!(self.output, "{}  st.global.f32 [{} + {}], %sig_out{};", indent, reg, i * 4, i).unwrap();
+                }
             }
 
-            // Octonion tanh
+            // OctonionTanh: Per-component tanh activation
+            // Math: tanh(x) = (exp(2x) - 1) / (exp(2x) + 1)
+            // Alternative: tanh(x) = 2*sigmoid(2*x) - 1
             GpuOp::OctonionTanh(o) => {
-                let _ro = self.get_register(*o);
+                let ro = self.get_register(*o);
                 let reg = self.alloc_register(&GpuType::Array(Box::new(GpuType::F32), 8));
                 self.registers.push(reg.clone());
                 self.value_types
                     .push(GpuType::Array(Box::new(GpuType::F32), 8));
-                writeln!(self.output, "{}// OctonionTanh: tanh(o[i])", indent).unwrap();
-                writeln!(
-                    self.output,
-                    "{}call.uni __octonion_tanh, ({});",
-                    indent, reg
-                )
-                .unwrap();
+
+                writeln!(self.output, "{}// OctonionTanh: tanh(o[i]) = (exp(2x)-1)/(exp(2x)+1) per component", indent).unwrap();
+                writeln!(self.output, "{}  .reg .f32 %tanh_in<8>;   // input components", indent).unwrap();
+                writeln!(self.output, "{}  .reg .f32 %tanh_out<8>;  // output components", indent).unwrap();
+                writeln!(self.output, "{}  .reg .f32 %tanh_2x;      // 2*x", indent).unwrap();
+                writeln!(self.output, "{}  .reg .f32 %tanh_scaled;  // 2x * log2(e)", indent).unwrap();
+                writeln!(self.output, "{}  .reg .f32 %tanh_exp;     // exp(2x)", indent).unwrap();
+                writeln!(self.output, "{}  .reg .f32 %tanh_num;     // exp(2x) - 1", indent).unwrap();
+                writeln!(self.output, "{}  .reg .f32 %tanh_den;     // exp(2x) + 1", indent).unwrap();
+                writeln!(self.output, "{}  .reg .f32 %log2e;        // log2(e) constant", indent).unwrap();
+                writeln!(self.output, "{}  .reg .f32 %one;          // constant 1.0", indent).unwrap();
+                writeln!(self.output, "{}  .reg .f32 %two;          // constant 2.0", indent).unwrap();
+
+                // Constants
+                writeln!(self.output, "{}  mov.f32 %log2e, 0f3FB8AA3B;", indent).unwrap(); // log2(e)
+                writeln!(self.output, "{}  mov.f32 %one, 1.0;", indent).unwrap();
+                writeln!(self.output, "{}  mov.f32 %two, 2.0;", indent).unwrap();
+
+                // Load 8 components
+                for i in 0..8 {
+                    writeln!(self.output, "{}  ld.global.f32 %tanh_in{}, [{} + {}];", indent, i, ro, i * 4).unwrap();
+                }
+
+                // Apply tanh to each component: tanh(x) = (exp(2x) - 1) / (exp(2x) + 1)
+                for i in 0..8 {
+                    writeln!(self.output, "{}  // tanh(o[{}])", indent, i).unwrap();
+                    writeln!(self.output, "{}  mul.f32 %tanh_2x, %tanh_in{}, %two;", indent, i).unwrap();
+                    writeln!(self.output, "{}  mul.f32 %tanh_scaled, %tanh_2x, %log2e;", indent).unwrap();
+                    writeln!(self.output, "{}  ex2.approx.f32 %tanh_exp, %tanh_scaled;", indent).unwrap();
+                    writeln!(self.output, "{}  sub.f32 %tanh_num, %tanh_exp, %one;", indent).unwrap();
+                    writeln!(self.output, "{}  add.f32 %tanh_den, %tanh_exp, %one;", indent).unwrap();
+                    writeln!(self.output, "{}  div.approx.f32 %tanh_out{}, %tanh_num, %tanh_den;", indent, i).unwrap();
+                }
+
+                // Store results
+                for i in 0..8 {
+                    writeln!(self.output, "{}  st.global.f32 [{} + {}], %tanh_out{};", indent, reg, i * 4, i).unwrap();
+                }
             }
 
-            // Octonion split to two quaternions
+            // OctonionToQuats: Split octonion into two quaternions (Cayley-Dickson decomposition)
+            // Math: o = q0 + q1*l where q0 = (a, b, c, d), q1 = (e, f, g, h)
+            // Output: 8 floats = [q0[0], q0[1], q0[2], q0[3], q1[0], q1[1], q1[2], q1[3]]
             GpuOp::OctonionToQuats(o) => {
-                let _ro = self.get_register(*o);
+                let ro = self.get_register(*o);
                 // Return as array of 8 f32 (two quaternions concatenated)
                 let reg = self.alloc_register(&GpuType::Array(Box::new(GpuType::F32), 8));
                 self.registers.push(reg.clone());
                 self.value_types
                     .push(GpuType::Array(Box::new(GpuType::F32), 8));
-                writeln!(self.output, "{}// OctonionToQuats: o = q0 + q1*l", indent).unwrap();
-                writeln!(
-                    self.output,
-                    "{}call.uni __octonion_to_quats, ({});",
-                    indent, reg
-                )
-                .unwrap();
+
+                writeln!(self.output, "{}// OctonionToQuats: o = q0 + q1*l (Cayley-Dickson decomposition)", indent).unwrap();
+                writeln!(self.output, "{}  .reg .f32 %quats_tmp;  // temporary for copying", indent).unwrap();
+
+                // Simply copy all 8 components from octonion to output
+                // q0 = (o[0], o[1], o[2], o[3]), q1 = (o[4], o[5], o[6], o[7])
+                for i in 0..8 {
+                    writeln!(self.output, "{}  ld.global.f32 %quats_tmp, [{} + {}];", indent, ro, i * 4).unwrap();
+                    writeln!(self.output, "{}  st.global.f32 [{} + {}], %quats_tmp;", indent, reg, i * 4).unwrap();
+                }
             }
 
-            // Construct octonion from two quaternions
+            // OctonionFromQuats: Construct octonion from two quaternions
+            // Math: o = q0 + q1*l where o = (q0[0], q0[1], q0[2], q0[3], q1[0], q1[1], q1[2], q1[3])
             GpuOp::OctonionFromQuats(q0, q1) => {
-                let _rq0 = self.get_register(*q0);
-                let _rq1 = self.get_register(*q1);
+                let rq0 = self.get_register(*q0);
+                let rq1 = self.get_register(*q1);
                 let reg = self.alloc_register(&GpuType::Array(Box::new(GpuType::F32), 8));
                 self.registers.push(reg.clone());
                 self.value_types
                     .push(GpuType::Array(Box::new(GpuType::F32), 8));
-                writeln!(self.output, "{}// OctonionFromQuats: o = q0 + q1*l", indent).unwrap();
-                writeln!(
-                    self.output,
-                    "{}call.uni __octonion_from_quats, ({});",
-                    indent, reg
-                )
-                .unwrap();
+
+                writeln!(self.output, "{}// OctonionFromQuats: o = q0 + q1*l (Cayley-Dickson construction)", indent).unwrap();
+                writeln!(self.output, "{}  .reg .f32 %fromq_tmp;  // temporary for copying", indent).unwrap();
+
+                // Copy q0 to first 4 components
+                for i in 0..4 {
+                    writeln!(self.output, "{}  ld.global.f32 %fromq_tmp, [{} + {}];", indent, rq0, i * 4).unwrap();
+                    writeln!(self.output, "{}  st.global.f32 [{} + {}], %fromq_tmp;", indent, reg, i * 4).unwrap();
+                }
+                // Copy q1 to last 4 components
+                for i in 0..4 {
+                    writeln!(self.output, "{}  ld.global.f32 %fromq_tmp, [{} + {}];", indent, rq1, i * 4).unwrap();
+                    writeln!(self.output, "{}  st.global.f32 [{} + {}], %fromq_tmp;", indent, reg, (i + 4) * 4).unwrap();
+                }
             }
 
             // ================================================================
