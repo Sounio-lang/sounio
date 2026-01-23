@@ -1,0 +1,317 @@
+//! stdlib/onn/optimizer.sio - Octonion Neural Network Optimizers
+//!
+//! Gradient-based optimization algorithms for octonion neural networks.
+//! Supports: SGD with momentum, Adam (adaptive moments), RMSprop.
+//!
+//! All optimizers work component-wise on octonion parameters.
+//! Each octonion component (w, x, y, z, t, u, v, s) is treated independently.
+
+use std::onn::{Octonion}
+
+// SGD with momentum optimizer state
+struct SgdOptimizer {
+    learning_rate: f32,
+    momentum: f32,
+    weight_decay: f32,
+    velocity: [Octonion],       // Momentum buffer: same shape as parameters
+}
+
+// Create SGD optimizer
+fn create_sgd_optimizer(
+    num_params: i32,
+    learning_rate: f32,
+    momentum: f32,
+    weight_decay: f32
+) -> SgdOptimizer {
+    var velocity: [Octonion] = []
+    let zero = Octonion { w: 0.0, x: 0.0, y: 0.0, z: 0.0, t: 0.0, u: 0.0, v: 0.0, s: 0.0 }
+    for i in 0..num_params {
+        velocity_append(zero)
+    }
+
+    SgdOptimizer {
+        learning_rate: learning_rate,
+        momentum: momentum,
+        weight_decay: weight_decay,
+        velocity: velocity,
+    }
+}
+
+// SGD step: v = momentum * v - lr * (grad + weight_decay * param)
+//           param = param + v
+fn sgd_step(
+    optimizer: &!SgdOptimizer,
+    parameters: &![Octonion],
+    gradients: &[Octonion]
+) {
+    let n = parameters.len()
+
+    for i in 0..n {
+        let grad = gradients[i]
+        let param = parameters[i]
+
+        // L2 regularization
+        let grad_with_wd = Octonion {
+            w: grad.w + optimizer.weight_decay * param.w,
+            x: grad.x + optimizer.weight_decay * param.x,
+            y: grad.y + optimizer.weight_decay * param.y,
+            z: grad.z + optimizer.weight_decay * param.z,
+            t: grad.t + optimizer.weight_decay * param.t,
+            u: grad.u + optimizer.weight_decay * param.u,
+            v: grad.v + optimizer.weight_decay * param.v,
+            s: grad.s + optimizer.weight_decay * param.s
+        }
+
+        // Update velocity
+        let momentum = optimizer.momentum
+        let lr = optimizer.learning_rate
+        optimizer.velocity[i] = Octonion {
+            w: momentum * optimizer.velocity[i].w - lr * grad_with_wd.w,
+            x: momentum * optimizer.velocity[i].x - lr * grad_with_wd.x,
+            y: momentum * optimizer.velocity[i].y - lr * grad_with_wd.y,
+            z: momentum * optimizer.velocity[i].z - lr * grad_with_wd.z,
+            t: momentum * optimizer.velocity[i].t - lr * grad_with_wd.t,
+            u: momentum * optimizer.velocity[i].u - lr * grad_with_wd.u,
+            v: momentum * optimizer.velocity[i].v - lr * grad_with_wd.v,
+            s: momentum * optimizer.velocity[i].s - lr * grad_with_wd.s
+        }
+
+        // Update parameter
+        parameters[i] = Octonion {
+            w: param.w + optimizer.velocity[i].w,
+            x: param.x + optimizer.velocity[i].x,
+            y: param.y + optimizer.velocity[i].y,
+            z: param.z + optimizer.velocity[i].z,
+            t: param.t + optimizer.velocity[i].t,
+            u: param.u + optimizer.velocity[i].u,
+            v: param.v + optimizer.velocity[i].v,
+            s: param.s + optimizer.velocity[i].s
+        }
+    }
+}
+
+// Adam optimizer state
+struct AdamOptimizer {
+    learning_rate: f32,
+    beta1: f32,                  // Exponential decay for first moment (momentum)
+    beta2: f32,                  // Exponential decay for second moment (RMSprop)
+    epsilon: f32,                // Numerical stability
+    weight_decay: f32,
+    m: [Octonion],               // First moment (mean) buffer
+    v: [Octonion],               // Second moment (variance) buffer
+    timestep: i32,
+}
+
+// Create Adam optimizer
+fn create_adam_optimizer(
+    num_params: i32,
+    learning_rate: f32,
+    beta1: f32,
+    beta2: f32,
+    epsilon: f32,
+    weight_decay: f32
+) -> AdamOptimizer {
+    var m: [Octonion] = []
+    var v: [Octonion] = []
+    let zero = Octonion { w: 0.0, x: 0.0, y: 0.0, z: 0.0, t: 0.0, u: 0.0, v: 0.0, s: 0.0 }
+
+    for i in 0..num_params {
+        m_append(zero)
+        v_append(zero)
+    }
+
+    AdamOptimizer {
+        learning_rate: learning_rate,
+        beta1: beta1,
+        beta2: beta2,
+        epsilon: epsilon,
+        weight_decay: weight_decay,
+        m: m,
+        v: v,
+        timestep: 0,
+    }
+}
+
+// Adam step
+// m = beta1 * m + (1 - beta1) * grad
+// v = beta2 * v + (1 - beta2) * grad^2
+// m_hat = m / (1 - beta1^t)
+// v_hat = v / (1 - beta2^t)
+// param = param - lr * m_hat / (sqrt(v_hat) + eps)
+fn adam_step(
+    optimizer: &!AdamOptimizer,
+    parameters: &![Octonion],
+    gradients: &[Octonion]
+) {
+    let n = parameters.len()
+    optimizer.timestep = optimizer.timestep + 1
+    let t = optimizer.timestep as f32
+
+    let beta1 = optimizer.beta1
+    let beta2 = optimizer.beta2
+    let lr = optimizer.learning_rate
+    let eps = optimizer.epsilon
+    let wd = optimizer.weight_decay
+
+    // Bias correction
+    let bias_correction1 = 1.0 - pow(beta1, t)
+    let bias_correction2 = 1.0 - pow(beta2, t)
+    let corrected_lr = lr * sqrt(bias_correction2) / bias_correction1
+
+    for i in 0..n {
+        let grad = gradients[i]
+        let param = parameters[i]
+
+        // L2 regularization
+        let grad_with_wd = Octonion {
+            w: grad.w + wd * param.w,
+            x: grad.x + wd * param.x,
+            y: grad.y + wd * param.y,
+            z: grad.z + wd * param.z,
+            t: grad.t + wd * param.t,
+            u: grad.u + wd * param.u,
+            v: grad.v + wd * param.v,
+            s: grad.s + wd * param.s
+        }
+
+        // Update biased first moment estimate
+        optimizer.m[i] = Octonion {
+            w: beta1 * optimizer.m[i].w + (1.0 - beta1) * grad_with_wd.w,
+            x: beta1 * optimizer.m[i].x + (1.0 - beta1) * grad_with_wd.x,
+            y: beta1 * optimizer.m[i].y + (1.0 - beta1) * grad_with_wd.y,
+            z: beta1 * optimizer.m[i].z + (1.0 - beta1) * grad_with_wd.z,
+            t: beta1 * optimizer.m[i].t + (1.0 - beta1) * grad_with_wd.t,
+            u: beta1 * optimizer.m[i].u + (1.0 - beta1) * grad_with_wd.u,
+            v: beta1 * optimizer.m[i].v + (1.0 - beta1) * grad_with_wd.v,
+            s: beta1 * optimizer.m[i].s + (1.0 - beta1) * grad_with_wd.s
+        }
+
+        // Update biased second raw moment estimate
+        optimizer.v[i] = Octonion {
+            w: beta2 * optimizer.v[i].w + (1.0 - beta2) * grad_with_wd.w * grad_with_wd.w,
+            x: beta2 * optimizer.v[i].x + (1.0 - beta2) * grad_with_wd.x * grad_with_wd.x,
+            y: beta2 * optimizer.v[i].y + (1.0 - beta2) * grad_with_wd.y * grad_with_wd.y,
+            z: beta2 * optimizer.v[i].z + (1.0 - beta2) * grad_with_wd.z * grad_with_wd.z,
+            t: beta2 * optimizer.v[i].t + (1.0 - beta2) * grad_with_wd.t * grad_with_wd.t,
+            u: beta2 * optimizer.v[i].u + (1.0 - beta2) * grad_with_wd.u * grad_with_wd.u,
+            v: beta2 * optimizer.v[i].v + (1.0 - beta2) * grad_with_wd.v * grad_with_wd.v,
+            s: beta2 * optimizer.v[i].s + (1.0 - beta2) * grad_with_wd.s * grad_with_wd.s
+        }
+
+        // Update parameters
+        parameters[i] = Octonion {
+            w: param.w - corrected_lr * optimizer.m[i].w / (sqrt(optimizer.v[i].w) + eps),
+            x: param.x - corrected_lr * optimizer.m[i].x / (sqrt(optimizer.v[i].x) + eps),
+            y: param.y - corrected_lr * optimizer.m[i].y / (sqrt(optimizer.v[i].y) + eps),
+            z: param.z - corrected_lr * optimizer.m[i].z / (sqrt(optimizer.v[i].z) + eps),
+            t: param.t - corrected_lr * optimizer.m[i].t / (sqrt(optimizer.v[i].t) + eps),
+            u: param.u - corrected_lr * optimizer.m[i].u / (sqrt(optimizer.v[i].u) + eps),
+            v: param.v - corrected_lr * optimizer.m[i].v / (sqrt(optimizer.v[i].v) + eps),
+            s: param.s - corrected_lr * optimizer.m[i].s / (sqrt(optimizer.v[i].s) + eps)
+        }
+    }
+}
+
+// RMSprop optimizer state
+struct RmspropOptimizer {
+    learning_rate: f32,
+    alpha: f32,                  // Decay rate for second moment
+    epsilon: f32,
+    weight_decay: f32,
+    v: [Octonion],               // Mean square buffer
+}
+
+// Create RMSprop optimizer
+fn create_rmsprop_optimizer(
+    num_params: i32,
+    learning_rate: f32,
+    alpha: f32,
+    epsilon: f32,
+    weight_decay: f32
+) -> RmspropOptimizer {
+    var v: [Octonion] = []
+    let zero = Octonion { w: 0.0, x: 0.0, y: 0.0, z: 0.0, t: 0.0, u: 0.0, v: 0.0, s: 0.0 }
+
+    for i in 0..num_params {
+        v_append(zero)
+    }
+
+    RmspropOptimizer {
+        learning_rate: learning_rate,
+        alpha: alpha,
+        epsilon: epsilon,
+        weight_decay: weight_decay,
+        v: v,
+    }
+}
+
+// RMSprop step
+// v = alpha * v + (1 - alpha) * grad^2
+// param = param - lr * grad / (sqrt(v) + eps)
+fn rmsprop_step(
+    optimizer: &!RmspropOptimizer,
+    parameters: &![Octonion],
+    gradients: &[Octonion]
+) {
+    let n = parameters.len()
+
+    for i in 0..n {
+        let grad = gradients[i]
+        let param = parameters[i]
+
+        // L2 regularization
+        let grad_with_wd = Octonion {
+            w: grad.w + optimizer.weight_decay * param.w,
+            x: grad.x + optimizer.weight_decay * param.x,
+            y: grad.y + optimizer.weight_decay * param.y,
+            z: grad.z + optimizer.weight_decay * param.z,
+            t: grad.t + optimizer.weight_decay * param.t,
+            u: grad.u + optimizer.weight_decay * param.u,
+            v: grad.v + optimizer.weight_decay * param.v,
+            s: grad.s + optimizer.weight_decay * param.s
+        }
+
+        // Update second moment
+        optimizer.v[i] = Octonion {
+            w: optimizer.alpha * optimizer.v[i].w + (1.0 - optimizer.alpha) * grad_with_wd.w * grad_with_wd.w,
+            x: optimizer.alpha * optimizer.v[i].x + (1.0 - optimizer.alpha) * grad_with_wd.x * grad_with_wd.x,
+            y: optimizer.alpha * optimizer.v[i].y + (1.0 - optimizer.alpha) * grad_with_wd.y * grad_with_wd.y,
+            z: optimizer.alpha * optimizer.v[i].z + (1.0 - optimizer.alpha) * grad_with_wd.z * grad_with_wd.z,
+            t: optimizer.alpha * optimizer.v[i].t + (1.0 - optimizer.alpha) * grad_with_wd.t * grad_with_wd.t,
+            u: optimizer.alpha * optimizer.v[i].u + (1.0 - optimizer.alpha) * grad_with_wd.u * grad_with_wd.u,
+            v: optimizer.alpha * optimizer.v[i].v + (1.0 - optimizer.alpha) * grad_with_wd.v * grad_with_wd.v,
+            s: optimizer.alpha * optimizer.v[i].s + (1.0 - optimizer.alpha) * grad_with_wd.s * grad_with_wd.s
+        }
+
+        // Update parameters
+        parameters[i] = Octonion {
+            w: param.w - optimizer.learning_rate * grad_with_wd.w / (sqrt(optimizer.v[i].w) + optimizer.epsilon),
+            x: param.x - optimizer.learning_rate * grad_with_wd.x / (sqrt(optimizer.v[i].x) + optimizer.epsilon),
+            y: param.y - optimizer.learning_rate * grad_with_wd.y / (sqrt(optimizer.v[i].y) + optimizer.epsilon),
+            z: param.z - optimizer.learning_rate * grad_with_wd.z / (sqrt(optimizer.v[i].z) + optimizer.epsilon),
+            t: param.t - optimizer.learning_rate * grad_with_wd.t / (sqrt(optimizer.v[i].t) + optimizer.epsilon),
+            u: param.u - optimizer.learning_rate * grad_with_wd.u / (sqrt(optimizer.v[i].u) + optimizer.epsilon),
+            v: param.v - optimizer.learning_rate * grad_with_wd.v / (sqrt(optimizer.v[i].v) + optimizer.epsilon),
+            s: param.s - optimizer.learning_rate * grad_with_wd.s / (sqrt(optimizer.v[i].s) + optimizer.epsilon)
+        }
+    }
+}
+
+// Helper: sqrt(x)
+fn sqrt(x: f32) -> f32 {
+    if x <= 0.0 { return 0.0 }
+    var guess = x / 2.0
+    for i in 0..10 {
+        guess = (guess + x / guess) / 2.0
+    }
+    guess
+}
+
+// Helper: pow(base, exponent)
+fn pow(base: f32, exp: f32) -> f32 {
+    var result = 1.0
+    for i in 0..(exp as i32) {
+        result = result * base
+    }
+    result
+}
