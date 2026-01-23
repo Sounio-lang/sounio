@@ -55,6 +55,8 @@ pub mod portable;
 pub mod profiler;
 pub mod ptq;
 pub mod ptx;
+pub mod qnn_tensor_core;
+pub mod qnn_kernels;
 pub mod quantize;
 pub mod roofline;
 pub mod runtime;

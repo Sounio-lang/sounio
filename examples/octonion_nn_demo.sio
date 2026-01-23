@@ -1,0 +1,231 @@
+//! Octonion Neural Network Demonstration
+//!
+//! This example demonstrates an octonion-based multilayer perceptron (MLP)
+//! with 8x parameter efficiency compared to real-valued networks.
+//!
+//! Key concepts:
+//! - Octonion dense layers use Cayley-Dickson multiplication
+//! - 8 real values encoded in single octonion weight
+//! - Non-associative algebra requires careful evaluation order
+//!
+//! References:
+//! - "Deep Octonion Networks" (arXiv:1903.08478)
+//! - Baez, "The Octonions" (Bull. AMS 2002)
+
+// ============================================================================
+// OCTONION TYPE AND OPERATIONS
+// (Self-contained for standalone execution)
+// ============================================================================
+
+struct Octonion {
+    a: f32,  // real part
+    b: f32,  // i coefficient
+    c: f32,  // j coefficient
+    d: f32,  // k coefficient
+    e: f32,  // l coefficient
+    f: f32,  // il coefficient
+    g: f32,  // jl coefficient
+    h: f32,  // kl coefficient
+}
+
+fn oct(a: f32, b: f32, c: f32, d: f32, e: f32, f: f32, g: f32, h: f32) -> Octonion {
+    Octonion { a: a, b: b, c: c, d: d, e: e, f: f, g: g, h: h }
+}
+
+fn oct_zero() -> Octonion {
+    oct(0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0)
+}
+
+fn oct_add(a: Octonion, b: Octonion) -> Octonion {
+    Octonion {
+        a: a.a + b.a, b: a.b + b.b, c: a.c + b.c, d: a.d + b.d,
+        e: a.e + b.e, f: a.f + b.f, g: a.g + b.g, h: a.h + b.h,
+    }
+}
+
+fn oct_scale(o: Octonion, s: f32) -> Octonion {
+    Octonion {
+        a: o.a * s, b: o.b * s, c: o.c * s, d: o.d * s,
+        e: o.e * s, f: o.f * s, g: o.g * s, h: o.h * s,
+    }
+}
+
+fn oct_norm_sq(o: Octonion) -> f32 {
+    o.a * o.a + o.b * o.b + o.c * o.c + o.d * o.d +
+    o.e * o.e + o.f * o.f + o.g * o.g + o.h * o.h
+}
+
+fn oct_norm(o: Octonion) -> f32 {
+    oct_norm_sq(o).sqrt()
+}
+
+// Cayley-Dickson multiplication: 64 muls + 56 adds = 120 FLOPs
+fn oct_mul(a: Octonion, b: Octonion) -> Octonion {
+    let c0 = a.a*b.a - a.b*b.b - a.c*b.c - a.d*b.d - a.e*b.e - a.f*b.f - a.g*b.g - a.h*b.h
+    let c1 = a.a*b.b + a.b*b.a + a.c*b.d - a.d*b.c + a.e*b.f - a.f*b.e - a.g*b.h + a.h*b.g
+    let c2 = a.a*b.c - a.b*b.d + a.c*b.a + a.d*b.b + a.e*b.g + a.f*b.h - a.g*b.e - a.h*b.f
+    let c3 = a.a*b.d + a.b*b.c - a.c*b.b + a.d*b.a + a.e*b.h - a.f*b.g + a.g*b.f - a.h*b.e
+    let c4 = a.a*b.e - a.b*b.f - a.c*b.g - a.d*b.h + a.e*b.a + a.f*b.b + a.g*b.c + a.h*b.d
+    let c5 = a.a*b.f + a.b*b.e - a.c*b.h + a.d*b.g - a.e*b.b + a.f*b.a - a.g*b.d + a.h*b.c
+    let c6 = a.a*b.g + a.b*b.h + a.c*b.e - a.d*b.f - a.e*b.c + a.f*b.d + a.g*b.a - a.h*b.b
+    let c7 = a.a*b.h - a.b*b.g + a.c*b.f + a.d*b.e - a.e*b.d - a.f*b.c + a.g*b.b + a.h*b.a
+    Octonion { a: c0, b: c1, c: c2, d: c3, e: c4, f: c5, g: c6, h: c7 }
+}
+
+// ReLU activation (component-wise)
+fn oct_relu(o: Octonion) -> Octonion {
+    Octonion {
+        a: if o.a > 0.0 { o.a } else { 0.0 },
+        b: if o.b > 0.0 { o.b } else { 0.0 },
+        c: if o.c > 0.0 { o.c } else { 0.0 },
+        d: if o.d > 0.0 { o.d } else { 0.0 },
+        e: if o.e > 0.0 { o.e } else { 0.0 },
+        f: if o.f > 0.0 { o.f } else { 0.0 },
+        g: if o.g > 0.0 { o.g } else { 0.0 },
+        h: if o.h > 0.0 { o.h } else { 0.0 },
+    }
+}
+
+// Tanh activation (component-wise)
+fn oct_tanh(o: Octonion) -> Octonion {
+    Octonion {
+        a: o.a.tanh(), b: o.b.tanh(), c: o.c.tanh(), d: o.d.tanh(),
+        e: o.e.tanh(), f: o.f.tanh(), g: o.g.tanh(), h: o.h.tanh(),
+    }
+}
+
+// ============================================================================
+// NEURAL NETWORK LAYER
+// ============================================================================
+
+// Forward pass for a single octonion neuron: y = w * x + b
+fn neuron_forward(weight: Octonion, bias: Octonion, input: Octonion) -> Octonion {
+    oct_add(oct_mul(weight, input), bias)
+}
+
+// Two-layer MLP forward pass
+fn mlp2_forward(
+    w1: Octonion, b1: Octonion,  // hidden layer
+    w2: Octonion, b2: Octonion,  // output layer
+    input: Octonion
+) -> Octonion {
+    // Layer 1: hidden layer with ReLU
+    let h1 = neuron_forward(w1, b1, input)
+    let h1_act = oct_relu(h1)
+
+    // Layer 2: output layer (no activation)
+    let out = neuron_forward(w2, b2, h1_act)
+    out
+}
+
+// ============================================================================
+// DEMONSTRATION
+// ============================================================================
+
+// Demonstrates norm multiplicativity: |a * b| = |a| * |b|
+fn demo_norm_multiplicativity() -> i32 {
+    let o1 = oct(1.0, 0.5, 0.3, 0.2, 0.1, 0.15, 0.25, 0.05)
+    let o2 = oct(0.5, 0.6, 0.4, 0.3, 0.2, 0.1, 0.1, 0.1)
+
+    let product = oct_mul(o1, o2)
+    let norm_product = oct_norm(product)
+    let product_norms = oct_norm(o1) * oct_norm(o2)
+
+    // Difference should be ~0 (floating point tolerance)
+    let diff = norm_product - product_norms
+    let abs_diff = if diff < 0.0 { -diff } else { diff }
+
+    // Return 0 if norm multiplicativity holds (diff < 0.001)
+    if abs_diff < 0.001 { 0 } else { 1 }
+}
+
+// Demonstrates non-associativity: (a*b)*c != a*(b*c)
+fn demo_non_associativity() -> i32 {
+    // Use basis elements: i, j, l
+    let i_unit = oct(0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0)
+    let j_unit = oct(0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0)
+    let l_unit = oct(0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0)
+
+    // (i * j) * l
+    let ij = oct_mul(i_unit, j_unit)
+    let left = oct_mul(ij, l_unit)
+
+    // i * (j * l)
+    let jl = oct_mul(j_unit, l_unit)
+    let right = oct_mul(i_unit, jl)
+
+    // Compute difference
+    let diff = oct_add(left, oct_scale(right, -1.0))
+    let diff_norm = oct_norm(diff)
+
+    // Return 0 if non-associativity demonstrated (diff > 0.1)
+    if diff_norm > 0.1 { 0 } else { 1 }
+}
+
+// Demonstrates forward pass through 2-layer MLP
+fn demo_mlp_forward() -> i32 {
+    // Initialize weights and biases
+    let w1 = oct(0.5, 0.1, -0.2, 0.3, -0.1, 0.2, -0.3, 0.1)
+    let b1 = oct(0.1, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0)
+    let w2 = oct(0.3, -0.1, 0.2, -0.2, 0.1, -0.1, 0.1, -0.1)
+    let b2 = oct(0.05, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0)
+
+    // Input octonion
+    let input = oct(1.0, 0.5, -0.3, 0.2, -0.1, 0.4, -0.2, 0.1)
+
+    // Forward pass
+    let output = mlp2_forward(w1, b1, w2, b2, input)
+
+    // Verify output is finite
+    let output_norm = oct_norm(output)
+    if output_norm < 100.0 { 0 } else { 1 }
+}
+
+// Demonstrates activation chain
+fn demo_activation_chain() -> i32 {
+    let o = oct(1.0, -0.5, 0.8, -0.3, 0.6, -0.2, 0.4, -0.1)
+
+    // Apply ReLU: negative components should become 0
+    let after_relu = oct_relu(o)
+
+    // Apply tanh: values should be in [-1, 1]
+    let after_tanh = oct_tanh(after_relu)
+
+    // Verify ReLU worked (original b was -0.5, should be 0 now)
+    // and tanh bounds (all values should be < 1.0)
+    let relu_check: i32 = if after_relu.b < 0.001 { 0 } else { 1 }
+    let tanh_check: i32 = if oct_norm(after_tanh) < 3.0 { 0 } else { 1 }
+
+    relu_check + tanh_check
+}
+
+// Parameter efficiency comparison
+fn demo_parameter_efficiency() -> i32 {
+    // Real network: 64 inputs -> 64 outputs = 64*64 + 64 = 4160 floats
+    // Octonion network: 8 oct input -> 8 oct output = 8*8 + 8 = 72 octonions
+    // Each octonion = 8 floats, so 72*8 = 576 total floats
+    // Ratio: 4160 / 576 = 7.2x fewer parameters
+    //
+    // This demonstrates the 8x parameter efficiency claim
+
+    // Compute using f32 to avoid integer type issues
+    let real_params = 4160.0  // 64*64 + 64
+    let oct_params = 576.0    // (8*8 + 8) * 8
+
+    // Ratio should be > 7: check real_params > 7 * oct_params (avoids division)
+    let threshold = 7.0 * oct_params  // 4032
+    if real_params > threshold { 0 } else { 1 }
+}
+
+// Main entry point
+fn main() -> i32 {
+    // Run all demonstrations
+    let r1 = demo_norm_multiplicativity()
+    let r2 = demo_non_associativity()
+    let r3 = demo_mlp_forward()
+    let r4 = demo_activation_chain()
+    let r5 = demo_parameter_efficiency()
+
+    // Return 0 if all demos pass
+    r1 + r2 + r3 + r4 + r5
+}

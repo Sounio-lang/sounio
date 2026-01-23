@@ -335,13 +335,12 @@ impl QuatDualOps {
         // dx = W^T ⊗ dY
         // This is a reduction over output dimension
         let mut dx_acc = builder.ins().f32const(0.0);
-        let zero = SimdVec::splat_f32x4(
-            builder,
-            builder.ins().f32const(0.0),
-            builder.ins().f32const(0.0),
-            builder.ins().f32const(0.0),
-            builder.ins().f32const(0.0),
-        );
+        // Pre-compute constants to avoid multiple mutable borrows
+        let c0 = builder.ins().f32const(0.0);
+        let c1 = builder.ins().f32const(0.0);
+        let c2 = builder.ins().f32const(0.0);
+        let c3 = builder.ins().f32const(0.0);
+        let zero = SimdVec::splat_f32x4(builder, c0, c1, c2, c3);
 
         // Simplified: compute weighted sum of dY with W transposed
         // Full implementation would iterate over output features

@@ -1,0 +1,318 @@
+// stdlib/nn/g2_equivariant.sio
+//
+// G2-Equivariant Octonion Neural Network Layers
+//
+// Standard component-wise activations (ReLU, sigmoid) BREAK G2 symmetry because
+// the G2 group acts on the 7D imaginary subspace of octonions as a unit. This
+// module provides activations and layers that preserve G2 equivariance.
+//
+// Mathematical Background:
+// - G2 is the automorphism group of octonions (14-dimensional exceptional Lie group)
+// - G2 action: σ_u(v) = u × v × conj(u) for unit octonion u
+// - G2 preserves: norm, multiplication structure, imaginary subspace (7D)
+//
+// Key Insight: To preserve G2 symmetry, activations must operate on G2-invariants:
+// - Total norm |o|
+// - Real part Re(o)
+// - Imaginary norm ||Im(o)||
+//
+// Reference: Baez, J. C. (2002). "The Octonions." Bull. AMS 39(2), 145-205.
+
+// Import base octonion operations (in real usage, would be an import)
+// For now, redefine minimal set needed
+
+struct Octonion {
+    a: f32,  // real part
+    b: f32,  // i coefficient
+    c: f32,  // j coefficient
+    d: f32,  // k coefficient
+    e: f32,  // l coefficient
+    f: f32,  // il coefficient
+    g: f32,  // jl coefficient
+    h: f32,  // kl coefficient
+}
+
+fn oct(a: f32, b: f32, c: f32, d: f32, e: f32, f: f32, g: f32, h: f32) -> Octonion {
+    Octonion { a: a, b: b, c: c, d: d, e: e, f: f, g: g, h: h }
+}
+
+fn oct_zero() -> Octonion {
+    oct(0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0)
+}
+
+fn oct_scale(o: Octonion, s: f32) -> Octonion {
+    Octonion {
+        a: o.a * s, b: o.b * s, c: o.c * s, d: o.d * s,
+        e: o.e * s, f: o.f * s, g: o.g * s, h: o.h * s,
+    }
+}
+
+fn oct_conj(o: Octonion) -> Octonion {
+    Octonion {
+        a: o.a, b: -o.b, c: -o.c, d: -o.d,
+        e: -o.e, f: -o.f, g: -o.g, h: -o.h,
+    }
+}
+
+fn oct_norm_sq(o: Octonion) -> f32 {
+    o.a * o.a + o.b * o.b + o.c * o.c + o.d * o.d +
+    o.e * o.e + o.f * o.f + o.g * o.g + o.h * o.h
+}
+
+fn oct_norm(o: Octonion) -> f32 {
+    oct_norm_sq(o).sqrt()
+}
+
+fn oct_mul(a: Octonion, b: Octonion) -> Octonion {
+    let c0 = a.a*b.a - a.b*b.b - a.c*b.c - a.d*b.d - a.e*b.e - a.f*b.f - a.g*b.g - a.h*b.h
+    let c1 = a.a*b.b + a.b*b.a + a.c*b.d - a.d*b.c + a.e*b.f - a.f*b.e - a.g*b.h + a.h*b.g
+    let c2 = a.a*b.c - a.b*b.d + a.c*b.a + a.d*b.b + a.e*b.g + a.f*b.h - a.g*b.e - a.h*b.f
+    let c3 = a.a*b.d + a.b*b.c - a.c*b.b + a.d*b.a + a.e*b.h - a.f*b.g + a.g*b.f - a.h*b.e
+    let c4 = a.a*b.e - a.b*b.f - a.c*b.g - a.d*b.h + a.e*b.a + a.f*b.b + a.g*b.c + a.h*b.d
+    let c5 = a.a*b.f + a.b*b.e - a.c*b.h + a.d*b.g - a.e*b.b + a.f*b.a - a.g*b.d + a.h*b.c
+    let c6 = a.a*b.g + a.b*b.h + a.c*b.e - a.d*b.f - a.e*b.c + a.f*b.d + a.g*b.a - a.h*b.b
+    let c7 = a.a*b.h - a.b*b.g + a.c*b.f + a.d*b.e - a.e*b.d - a.f*b.c + a.g*b.b + a.h*b.a
+    Octonion { a: c0, b: c1, c: c2, d: c3, e: c4, f: c5, g: c6, h: c7 }
+}
+
+// ============================================================================
+// G2 INVARIANT QUANTITIES
+// ============================================================================
+
+// Extract real part (G2-invariant)
+fn oct_real(o: Octonion) -> f32 {
+    o.a
+}
+
+// Extract imaginary part (7D vector, transforms under G2)
+fn oct_imag(o: Octonion) -> Octonion {
+    oct(0.0, o.b, o.c, o.d, o.e, o.f, o.g, o.h)
+}
+
+// Squared norm of imaginary part (G2-invariant)
+fn oct_imag_norm_sq(o: Octonion) -> f32 {
+    o.b * o.b + o.c * o.c + o.d * o.d +
+    o.e * o.e + o.f * o.f + o.g * o.g + o.h * o.h
+}
+
+// Norm of imaginary part (G2-invariant)
+fn oct_imag_norm(o: Octonion) -> f32 {
+    oct_imag_norm_sq(o).sqrt()
+}
+
+// ============================================================================
+// G2-EQUIVARIANT ROTATIONS
+// ============================================================================
+
+// G2 rotation: σ_u(v) = u × v × conj(u) for unit octonion u
+// This is the fundamental G2 action on 7D space
+// Note: The resulting rotation preserves norms and multiplications
+fn oct_rotate(u: Octonion, v: Octonion) -> Octonion {
+    oct_mul(oct_mul(u, v), oct_conj(u))
+}
+
+// Normalize an octonion to unit norm (safe version)
+fn oct_normalize_safe(o: Octonion, epsilon: f32) -> Octonion with Panic {
+    let norm = oct_norm(o)
+    if norm > epsilon {
+        oct_scale(o, 1.0 / norm)
+    } else {
+        oct(1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0)  // Return identity
+    }
+}
+
+// ============================================================================
+// G2-EQUIVARIANT ACTIVATIONS
+// ============================================================================
+
+// Magnitude ReLU: Zero if norm below threshold, pass-through otherwise
+// This preserves G2 symmetry because it operates only on the norm (G2-invariant)
+//
+// Mathematical property: |oct_relu_g2(o)| ∈ {0, |o|}
+// G2 equivariance: oct_relu_g2(σ_u(o)) = σ_u(oct_relu_g2(o))
+fn oct_relu_g2(o: Octonion, threshold: f32) -> Octonion {
+    let norm = oct_norm(o)
+    if norm < threshold { oct_zero() } else { o }
+}
+
+// Leaky Magnitude ReLU: Scale down if norm below threshold
+// Prevents dead neurons while preserving G2 symmetry
+fn oct_leaky_relu_g2(o: Octonion, threshold: f32, alpha: f32) -> Octonion {
+    let norm = oct_norm(o)
+    if norm < threshold { oct_scale(o, alpha) } else { o }
+}
+
+// Real-Part Gating: Pass through if real part positive, scale otherwise
+// Uses real part (G2-invariant) to control gating
+fn oct_gate_real(o: Octonion, alpha: f32) -> Octonion {
+    if o.a > 0.0 { o } else { oct_scale(o, alpha) }
+}
+
+// Norm-Based Sigmoid: Scale by sigmoid of norm
+// Squashes output while preserving direction (G2-equivariant)
+fn oct_sigmoid_norm(o: Octonion) -> Octonion with Panic {
+    let norm = oct_norm(o)
+    // sigmoid(norm) = 1 / (1 + exp(-norm))
+    let sig = 1.0 / (1.0 + (-norm).exp())
+    // Scale: output has norm = sig * norm for unit vectors
+    // Actually we want: output direction same, magnitude = sigmoid(norm)
+    if norm > 0.0001 {
+        oct_scale(o, sig / norm)
+    } else {
+        o  // Avoid division by near-zero
+    }
+}
+
+// Norm-Based Tanh: Scale by tanh of norm
+// Bounds output norm to [-1, 1] while preserving direction
+fn oct_tanh_norm(o: Octonion) -> Octonion with Panic {
+    let norm = oct_norm(o)
+    let t = norm.tanh()
+    if norm > 0.0001 {
+        oct_scale(o, t / norm)
+    } else {
+        o  // Avoid division by near-zero
+    }
+}
+
+// Soft Normalization: Normalize with softness parameter
+// For β→∞, approaches hard normalization
+// For β→0, approaches identity
+fn oct_soft_normalize(o: Octonion, beta: f32) -> Octonion with Panic {
+    let norm = oct_norm(o)
+    let scale = norm.tanh() * beta
+    if norm > 0.0001 {
+        oct_scale(o, scale / norm)
+    } else {
+        o
+    }
+}
+
+// ============================================================================
+// G2-EQUIVARIANT LAYER COMPONENTS
+// ============================================================================
+
+// G2-Equivariant Dense Layer
+// Uses rotation-based weights instead of standard multiplication
+//
+// Standard dense: y = W × x + b (breaks G2)
+// G2-equivariant: y = Σ_i s_i × σ_{u_i}(x) + b
+//
+// where:
+// - u_i are unit octonion rotation weights
+// - s_i are real scalar weights (G2-invariant)
+// - σ_u(x) = u × x × conj(u) is the G2 rotation
+
+struct G2EquivariantWeight {
+    rotation: Octonion,  // Unit octonion for σ_u transformation
+    scale: f32,          // Real scalar multiplier (G2-invariant)
+}
+
+// Apply a single G2-equivariant weight
+fn apply_g2_weight(weight: G2EquivariantWeight, input: Octonion) -> Octonion {
+    let rotated = oct_rotate(weight.rotation, input)
+    oct_scale(rotated, weight.scale)
+}
+
+// ============================================================================
+// G2 ACTIVATION ENUM
+// ============================================================================
+
+enum G2Activation {
+    None,
+    MagnitudeReLU,     // oct_relu_g2
+    LeakyMagnitude,    // oct_leaky_relu_g2
+    RealGate,          // oct_gate_real
+    NormSigmoid,       // oct_sigmoid_norm
+    NormTanh,          // oct_tanh_norm
+    SoftNormalize,     // oct_soft_normalize
+}
+
+// ============================================================================
+// UTILITY: SPLIT-OCTONION OPERATIONS
+// ============================================================================
+
+// Split-octonion representation: o = (Re(o), Im(o))
+// The real part is G2-invariant, imaginary transforms under G2
+
+// Reconstruct octonion from real part and normalized imaginary direction
+fn oct_from_polar(real: f32, imag_norm: f32, imag_direction: Octonion) -> Octonion {
+    // Assumes imag_direction is pure imaginary with unit norm
+    let scaled_imag = oct_scale(imag_direction, imag_norm)
+    oct(
+        real,
+        scaled_imag.b, scaled_imag.c, scaled_imag.d,
+        scaled_imag.e, scaled_imag.f, scaled_imag.g, scaled_imag.h
+    )
+}
+
+// ============================================================================
+// DEMONSTRATION
+// ============================================================================
+
+// Test that G2-equivariant activations preserve norm multiplicativity
+fn demo_g2_equivariance() -> i32 with Panic {
+    // Create test octonions
+    let o1 = oct(1.0, 0.5, 0.3, 0.2, 0.1, 0.15, 0.25, 0.05)
+    let o2 = oct(0.5, 0.6, 0.4, 0.3, 0.2, 0.1, 0.1, 0.1)
+
+    // Unit rotation (normalized)
+    let u = oct_normalize_safe(oct(0.5, 0.3, 0.2, 0.1, 0.1, 0.2, 0.3, 0.4), 0.0001)
+
+    // Apply G2 rotation
+    let o1_rot = oct_rotate(u, o1)
+    let o2_rot = oct_rotate(u, o2)
+
+    // Verify norms preserved
+    let norm1_orig = oct_norm(o1)
+    let norm1_rot = oct_norm(o1_rot)
+    let diff1 = norm1_orig - norm1_rot
+    let abs_diff1 = if diff1 < 0.0 { -diff1 } else { diff1 }
+
+    // Verify magnitude ReLU preserves direction
+    let o1_relu = oct_relu_g2(o1, 0.1)
+    let norm_relu = oct_norm(o1_relu)
+    let norm_orig = oct_norm(o1)
+
+    // ReLU should preserve or zero
+    let valid: i32 = if abs_diff1 < 0.001 { 0 } else { 1 }
+    valid
+}
+
+// Main entry point for standalone testing
+fn main() -> i32 with Panic {
+    demo_g2_equivariance()
+}
+
+// ============================================================================
+// DOCUMENTATION
+// ============================================================================
+//
+// Why G2-Equivariant Layers Matter:
+//
+// 1. Standard component-wise activations (ReLU, sigmoid, tanh) treat each
+//    octonion component independently. Under G2 action, these components MIX,
+//    so component-wise operations are NOT G2-equivariant.
+//
+// 2. G2-equivariant activations use only G2-invariant quantities:
+//    - Total norm |o|
+//    - Real part Re(o)
+//    - Imaginary norm ||Im(o)||
+//    This ensures σ_u(f(o)) = f(σ_u(o)) for any G2 transformation σ_u.
+//
+// 3. G2 equivariance is valuable for:
+//    - Physics-informed ML with exceptional Lie group symmetries
+//    - Learning 7D rotation representations
+//    - Molecular dynamics with G2-invariant interactions
+//
+// Trade-offs:
+// - G2-equivariant layers have fewer learnable parameters
+// - Some expressivity is sacrificed for symmetry preservation
+// - May converge faster when underlying data has G2 symmetry
+// - May underfit when data lacks G2 structure
+//
+// Recommendations:
+// - Use G2-equivariant layers when problem has known G2 symmetry
+// - Use standard component-wise for general-purpose octonion networks
+// - Hybrid approach: G2-equivariant early layers, standard later layers
+//

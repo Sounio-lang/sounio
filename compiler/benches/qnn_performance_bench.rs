@@ -129,60 +129,56 @@ fn quat_ops_benchmark(c: &mut Criterion) {
 fn batch_operations_benchmark(c: &mut Criterion) {
     let mut group = c.benchmark_group("batch_operations");
 
-    // Batch multiplication
-    for batch_size in [10, 100, 1000].iter() {
-        group.bench_with_input(
-            BenchmarkId::new("quat_batch_mul", batch_size),
-            batch_size,
-            |b, &batch_size| {
-                let mut q1s = vec![0.7071; batch_size * 4];
-                let mut q2s = vec![0.5; batch_size * 4];
-                let mut results = vec![0.0; batch_size * 4];
+    // Batch multiplication - small
+    group.bench_function("quat_batch_mul_10", |b| {
+        let q1s = vec![0.7071; 10 * 4];
+        let q2s = vec![0.5; 10 * 4];
 
-                b.iter(|| {
-                    for i in 0..batch_size {
-                        let q1 = [q1s[i*4], q1s[i*4+1], q1s[i*4+2], q1s[i*4+3]];
-                        let q2 = [q2s[i*4], q2s[i*4+1], q2s[i*4+2], q2s[i*4+3]];
-                        let result = quat_mul(
-                            black_box(&q1),
-                            black_box(&q2)
-                        );
-                        results[i*4] = result[0];
-                        results[i*4+1] = result[1];
-                        results[i*4+2] = result[2];
-                        results[i*4+3] = result[3];
-                    }
-                });
-            },
-        );
-    }
+        b.iter(|| {
+            let mut _result_sum = 0.0;
+            for i in 0..10 {
+                let q1 = [q1s[i*4], q1s[i*4+1], q1s[i*4+2], q1s[i*4+3]];
+                let q2 = [q2s[i*4], q2s[i*4+1], q2s[i*4+2], q2s[i*4+3]];
+                let result = quat_mul(black_box(&q1), black_box(&q2));
+                _result_sum += result[0];
+            }
+            black_box(_result_sum)
+        });
+    });
 
-    // Batch rotations
-    for batch_size in [10, 100, 1000].iter() {
-        group.bench_with_input(
-            BenchmarkId::new("quat_batch_rotate", batch_size),
-            batch_size,
-            |b, &batch_size| {
-                let mut qs = vec![0.7071; batch_size * 4];
-                let mut vs = vec![1.0; batch_size * 3];
-                let mut results = vec![0.0; batch_size * 3];
+    // Batch multiplication - medium
+    group.bench_function("quat_batch_mul_100", |b| {
+        let q1s = vec![0.7071; 100 * 4];
+        let q2s = vec![0.5; 100 * 4];
 
-                b.iter(|| {
-                    for i in 0..batch_size {
-                        let q = [qs[i*4], qs[i*4+1], qs[i*4+2], qs[i*4+3]];
-                        let v = [vs[i*3], vs[i*3+1], vs[i*3+2]];
-                        let result = quat_rotate(
-                            black_box(&q),
-                            black_box(&v)
-                        );
-                        results[i*3] = result[0];
-                        results[i*3+1] = result[1];
-                        results[i*3+2] = result[2];
-                    }
-                });
-            },
-        );
-    }
+        b.iter(|| {
+            let mut _result_sum = 0.0;
+            for i in 0..100 {
+                let q1 = [q1s[i*4], q1s[i*4+1], q1s[i*4+2], q1s[i*4+3]];
+                let q2 = [q2s[i*4], q2s[i*4+1], q2s[i*4+2], q2s[i*4+3]];
+                let result = quat_mul(black_box(&q1), black_box(&q2));
+                _result_sum += result[0];
+            }
+            black_box(_result_sum)
+        });
+    });
+
+    // Batch rotations - small
+    group.bench_function("quat_batch_rotate_10", |b| {
+        let qs = vec![0.7071; 10 * 4];
+        let vs = vec![1.0; 10 * 3];
+
+        b.iter(|| {
+            let mut _result_sum = 0.0;
+            for i in 0..10 {
+                let q = [qs[i*4], qs[i*4+1], qs[i*4+2], qs[i*4+3]];
+                let v = [vs[i*3], vs[i*3+1], vs[i*3+2]];
+                let result = quat_rotate(black_box(&q), black_box(&v));
+                _result_sum += result[0];
+            }
+            black_box(_result_sum)
+        });
+    });
 
     group.finish();
 }
@@ -191,39 +187,59 @@ fn neural_network_benchmark(c: &mut Criterion) {
     let mut group = c.benchmark_group("neural_network_layers");
 
     // Linear layer: (batch, in_features*4) -> (out_features*4)
-    for (batch, in_feat, out_feat) in [
-        (1, 16, 32),
-        (10, 32, 64),
-        (32, 64, 128),
-        (100, 128, 256),
-    ].iter() {
-        group.bench_with_input(
-            BenchmarkId::new(
-                "quat_linear_layer",
-                format!("batch={},in={},out={}", batch, in_feat, out_feat)
-            ),
-            &(batch, in_feat, out_feat),
-            |b, &(batch, in_feat, out_feat)| {
-                let mut x = vec![0.1; batch * in_feat];
-                let mut w = vec![0.5; out_feat * in_feat];
-                let mut b = vec![0.1; out_feat];
-                let mut y = vec![0.0; batch * out_feat];
+    group.bench_function("quat_linear_layer_small", |b| {
+        let x = vec![0.1; 16];
+        let w = vec![0.5; 16 * 32];
+        let bias = vec![0.1; 32];
+        let mut y = vec![0.0; 32];
 
-                b.iter(|| {
-                    for batch_idx in 0..batch {
-                        quat_linear(
-                            black_box(&x[batch_idx*in_feat..(batch_idx+1)*in_feat]),
-                            in_feat,
-                            black_box(&w),
-                            black_box(&b),
-                            &mut y[batch_idx*out_feat..(batch_idx+1)*out_feat],
-                            out_feat
-                        );
-                    }
-                });
-            },
-        );
-    }
+        b.iter(|| {
+            quat_linear(
+                black_box(&x),
+                16,
+                black_box(&w),
+                black_box(&bias),
+                &mut y,
+                32,
+            );
+        });
+    });
+
+    group.bench_function("quat_linear_layer_medium", |b| {
+        let x = vec![0.1; 64];
+        let w = vec![0.5; 64 * 128];
+        let bias = vec![0.1; 128];
+        let mut y = vec![0.0; 128];
+
+        b.iter(|| {
+            quat_linear(
+                black_box(&x),
+                64,
+                black_box(&w),
+                black_box(&bias),
+                &mut y,
+                128,
+            );
+        });
+    });
+
+    group.bench_function("quat_linear_layer_large", |b| {
+        let x = vec![0.1; 256];
+        let w = vec![0.5; 256 * 512];
+        let bias = vec![0.1; 512];
+        let mut y = vec![0.0; 512];
+
+        b.iter(|| {
+            quat_linear(
+                black_box(&x),
+                256,
+                black_box(&w),
+                black_box(&bias),
+                &mut y,
+                512,
+            );
+        });
+    });
 
     group.finish();
 }

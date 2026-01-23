@@ -90,6 +90,13 @@ pub mod autodiff_runtime;
 pub mod tensor_runtime;
 pub mod uncertain_runtime;
 pub mod quat_runtime;
+pub mod quat_simd_dispatch;
+#[cfg(target_arch = "x86_64")]
+pub mod quat_simd_avx2;
+#[cfg(target_arch = "x86_64")]
+pub mod quat_simd_avx512;
+#[cfg(target_arch = "aarch64")]
+pub mod quat_simd_neon;
 
 // Re-export commonly used types
 pub mod prelude {

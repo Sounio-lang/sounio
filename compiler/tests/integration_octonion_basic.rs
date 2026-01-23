@@ -5,20 +5,9 @@
 
 #![cfg(feature = "gpu")]
 
-use sounio::codegen::gpu::ir::{GpuOp, GpuType};
-use sounio::codegen::gpu::ptx::PtxCodegen;
-use sounio::codegen::gpu::metal::MetalCodegen;
-
-// ============================================================================
-// Test Helpers
-// ============================================================================
-
-/// Compile a simple Sounio program with octonions
-fn compile_octonion_program(source: &str) -> Result<String, String> {
-    // For now, just check that the source parses
-    // Full compilation would require the entire compiler pipeline
-    Ok(source.to_string())
-}
+// Note: GpuOp, GpuType, PtxCodegen, MetalCodegen are available for advanced
+// tests that construct full GPU IR. Current tests use include_str! to validate
+// that codegen source files contain expected operation handlers.
 
 // ============================================================================
 // GPU IR Tests
@@ -53,74 +42,166 @@ fn test_gpu_ops_enum_complete() {
 }
 
 // ============================================================================
-// PTX Codegen Tests
+// PTX Codegen Validation Tests
 // ============================================================================
 
+/// Verify PTX codegen source file contains OctonionMul implementation
 #[test]
-fn test_ptx_octonion_norm_sq_codegen() {
-    // Test that OctonionNormSq generates valid PTX code
-    // The implementation should:
-    // 1. Load 8 f32 components from memory
-    // 2. Square each component (8 mul.f32 instructions)
-    // 3. Sum using tree reduction for numerical stability
-    // 4. Return single f32 result
+fn test_ptx_octonion_mul_codegen_exists() {
+    // Verify the PTX codegen source implements OctonionMul inline
+    let ptx_source = include_str!("../src/codegen/gpu/ptx.rs");
 
-    // This would require setting up PtxCodegen with a full IR context
-    // For now, we just verify the concept
-    assert!(true, "PTX OctonionNormSq codegen structure validated");
+    // Check for Cayley-Dickson multiplication implementation markers
+    assert!(
+        ptx_source.contains("OctonionMul"),
+        "PTX codegen should handle OctonionMul operation"
+    );
+    assert!(
+        ptx_source.contains("Cayley-Dickson"),
+        "PTX codegen should implement Cayley-Dickson multiplication"
+    );
+    assert!(
+        ptx_source.contains("fma.rn.f32") || ptx_source.contains("mul.f32"),
+        "PTX codegen should emit FMA or MUL instructions for octonion multiply"
+    );
 }
 
+/// Verify PTX codegen source file contains OctonionNormSq implementation
 #[test]
-fn test_ptx_octonion_normalize_codegen() {
-    // Test that OctonionNormalize generates valid PTX code
-    // Should use rsqrt.approx.f32 for performance
-    assert!(true, "PTX OctonionNormalize codegen structure validated");
+fn test_ptx_octonion_norm_sq_codegen_exists() {
+    let ptx_source = include_str!("../src/codegen/gpu/ptx.rs");
+
+    assert!(
+        ptx_source.contains("OctonionNormSq"),
+        "PTX codegen should handle OctonionNormSq operation"
+    );
+    assert!(
+        ptx_source.contains("oct_sq") || ptx_source.contains("squared"),
+        "PTX codegen should compute squared components for norm"
+    );
 }
 
+/// Verify PTX codegen implements activation functions
 #[test]
-fn test_ptx_octonion_relu_codegen() {
-    // Test that OctonionReLU generates valid PTX code
-    // Should use max.f32 for each component
-    assert!(true, "PTX OctonionReLU codegen structure validated");
+fn test_ptx_octonion_activations_codegen_exists() {
+    let ptx_source = include_str!("../src/codegen/gpu/ptx.rs");
+
+    // ReLU should use max instruction
+    assert!(
+        ptx_source.contains("OctonionRelu"),
+        "PTX codegen should handle OctonionRelu operation"
+    );
+
+    // Sigmoid should use exponential
+    assert!(
+        ptx_source.contains("OctonionSigmoid"),
+        "PTX codegen should handle OctonionSigmoid operation"
+    );
+
+    // Tanh activation
+    assert!(
+        ptx_source.contains("OctonionTanh"),
+        "PTX codegen should handle OctonionTanh operation"
+    );
 }
 
+/// Verify PTX codegen handles conjugate and inverse
 #[test]
-fn test_ptx_octonion_conj_codegen() {
-    // Test that OctonionConj generates valid PTX code
-    // Should keep component 0, negate components 1-7
-    assert!(true, "PTX OctonionConj codegen structure validated");
+fn test_ptx_octonion_conj_inv_codegen_exists() {
+    let ptx_source = include_str!("../src/codegen/gpu/ptx.rs");
+
+    assert!(
+        ptx_source.contains("OctonionConj"),
+        "PTX codegen should handle OctonionConj operation"
+    );
+    assert!(
+        ptx_source.contains("OctonionInv"),
+        "PTX codegen should handle OctonionInv operation"
+    );
 }
 
 // ============================================================================
-// Metal Codegen Tests
+// Metal Codegen Validation Tests
 // ============================================================================
 
+/// Verify Metal codegen source file contains octonion operations
 #[test]
-fn test_metal_octonion_norm_sq_codegen() {
-    // Test that OctonionNormSq generates valid Metal code
-    // Should use float8 SIMD operations and dot()
-    assert!(true, "Metal OctonionNormSq codegen structure validated");
+fn test_metal_octonion_operations_codegen_exists() {
+    let metal_source = include_str!("../src/codegen/gpu/metal.rs");
+
+    // Check for octonion operation handlers
+    assert!(
+        metal_source.contains("OctonionMul"),
+        "Metal codegen should handle OctonionMul operation"
+    );
+    assert!(
+        metal_source.contains("OctonionNormSq"),
+        "Metal codegen should handle OctonionNormSq operation"
+    );
 }
 
+/// Verify Metal codegen implements activation functions
 #[test]
-fn test_metal_octonion_normalize_codegen() {
-    // Test that OctonionNormalize generates valid Metal code
-    // Should use rsqrt() with SIMD operations
-    assert!(true, "Metal OctonionNormalize codegen structure validated");
+fn test_metal_octonion_activations_codegen_exists() {
+    let metal_source = include_str!("../src/codegen/gpu/metal.rs");
+
+    assert!(
+        metal_source.contains("OctonionRelu"),
+        "Metal codegen should handle OctonionRelu operation"
+    );
+    assert!(
+        metal_source.contains("OctonionSigmoid"),
+        "Metal codegen should handle OctonionSigmoid operation"
+    );
 }
 
+/// Verify Metal codegen implements conjugate and inverse
 #[test]
-fn test_metal_octonion_relu_codegen() {
-    // Test that OctonionReLU generates valid Metal code
-    // Should use vector max(oct_input, 0.0f)
-    assert!(true, "Metal OctonionReLU codegen structure validated");
+fn test_metal_octonion_conj_inv_codegen_exists() {
+    let metal_source = include_str!("../src/codegen/gpu/metal.rs");
+
+    assert!(
+        metal_source.contains("OctonionConj"),
+        "Metal codegen should handle OctonionConj operation"
+    );
+    assert!(
+        metal_source.contains("OctonionInv"),
+        "Metal codegen should handle OctonionInv operation"
+    );
 }
 
+// ============================================================================
+// GPU IR Enum Validation Tests
+// ============================================================================
+
+/// Verify GPU IR defines all octonion operations
 #[test]
-fn test_metal_octonion_conj_codegen() {
-    // Test that OctonionConj generates valid Metal code
-    // Should construct new float8 with negated imaginary components
-    assert!(true, "Metal OctonionConj codegen structure validated");
+fn test_gpu_ir_octonion_ops_defined() {
+    let ir_source = include_str!("../src/codegen/gpu/ir.rs");
+
+    // Core operations
+    let required_ops = [
+        "OctonionMul",
+        "OctonionNormSq",
+        "OctonionNorm",
+        "OctonionConj",
+        "OctonionInv",
+        "OctonionRelu",
+        "OctonionSigmoid",
+        "OctonionTanh",
+        "OctonionExp",
+        "OctonionLog",
+        "OctonionDot",
+        "OctonionReal",
+        "OctonionImag",
+    ];
+
+    for op in &required_ops {
+        assert!(
+            ir_source.contains(op),
+            "GPU IR should define {} operation", op
+        );
+    }
 }
 
 // ============================================================================
