@@ -246,7 +246,7 @@ mod csr_format_tests {
 
     #[test]
     fn test_csr_row_wise_pattern() {
-        let matrix = vec![
+        let _matrix = vec![
             1.0, 2.0, 0.0, 0.0,
             0.0, 3.0, 4.0, 0.0,
             5.0, 0.0, 6.0, 7.0,

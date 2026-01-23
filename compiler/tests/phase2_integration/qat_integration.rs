@@ -333,10 +333,10 @@ mod per_channel_tests {
 
     #[test]
     fn test_per_channel_reduces_quantization_error() {
-        let harness = Phase2TestHarness::new();
+        let _harness = Phase2TestHarness::new();
 
         // Per-channel should be more accurate than per-tensor
-        let weights = vec![0.1, 1.0, 0.05, 10.0]; // Wide range
+        let _weights = vec![0.1, 1.0, 0.05, 10.0]; // Wide range
 
         let _per_tensor_scale = 10.0 / 127.0;
         let _per_channel_scales = vec![0.1 / 127.0, 1.0 / 127.0, 0.05 / 127.0, 10.0 / 127.0];
@@ -538,7 +538,7 @@ mod end_to_end_qat_tests {
     #[test]
     fn test_qat_model_export_ptq_conversion() {
         // After QAT training, export quantization params for PTQ deployment
-        let _weight_scale = 1.0 / 127.0;
+        let weight_scale = 1.0 / 127.0;
         let _weight_zp = 0i32;
         let _input_scale = 1.0 / 127.0;
         let _input_zp = 0i32;

@@ -26,8 +26,8 @@ mod qat_fusion_tests {
         let quantized = harness.qat_forward(&fused, scale);
 
         assert_eq!(quantized.len(), input.len());
-        for val in &quantized {
-            assert!(val >= 0.0 || *val < 1e-10); // ReLU output
+        for &val in &quantized {
+            assert!(val >= 0.0 || val < 1e-10); // ReLU output
         }
     }
 
@@ -134,8 +134,8 @@ mod full_pipeline_tests {
     #[test]
     fn test_fusion_sparse_quat_qat_combined() {
         let harness = Phase2TestHarness::new();
-        let mut gen = QuaternionGenerator::new(42);
-        let batch = gen.generate_batch(4);
+        let mut r#gen = QuaternionGenerator::new(42);
+        let batch = r#gen.generate_batch(4);
 
         let values: Vec<f32> = batch.iter()
             .flat_map(|q| vec![q.w, q.x, q.y, q.z])
@@ -167,13 +167,13 @@ mod full_pipeline_tests {
         let harness = Phase2TestHarness::new();
 
         // Initialize
-        let mut loss_history = Vec::new();
+        let mut loss_history: Vec<f32> = Vec::new();
 
         for epoch in 0..3 {
-            let mut gen = QuaternionGenerator::new(42 + epoch as u32);
+            let mut r#gen = QuaternionGenerator::new(42 + epoch as u32);
 
             for batch_idx in 0..5 {
-                let batch = gen.generate_batch(8);
+                let batch = r#gen.generate_batch(8);
                 let mut values: Vec<f32> = batch.iter()
                     .flat_map(|q| vec![q.w, q.x, q.y, q.z])
                     .collect();
@@ -202,7 +202,7 @@ mod full_pipeline_tests {
 
         // All batches processed successfully
         assert_eq!(loss_history.len(), 15);
-        assert!(loss_history.iter().all(|x| x.is_finite()));
+        assert!(loss_history.iter().all(|&x| x.is_finite()));
     }
 
     #[test]
@@ -210,8 +210,8 @@ mod full_pipeline_tests {
         let harness = Phase2TestHarness::new();
 
         for batch_size in &[1, 4, 16, 32] {
-            let mut gen = QuaternionGenerator::new(42);
-            let batch = gen.generate_batch(*batch_size);
+            let mut r#gen = QuaternionGenerator::new(42);
+            let batch = r#gen.generate_batch(*batch_size);
 
             let mut values: Vec<f32> = batch.iter()
                 .flat_map(|q| vec![q.w, q.x, q.y, q.z])
@@ -419,10 +419,10 @@ mod performance_characterization_tests {
         // Fusion: 0% (combines in-place)
         // QAT: +1-2% for scale/zp tracking
 
-        let total_params = 1_000_000.0;
+        let total_params = 1_000_000.0f32;
 
         let fp32_size = total_params * 4.0; // 4 bytes
-        let fp16_with_loss_scaling = (total_params * 2.0) + (3 * 4.0); // FP16 weights + loss scale storage
+        let fp16_with_loss_scaling = (total_params * 2.0) + (3.0 * 4.0); // FP16 weights + loss scale storage
 
         let savings = fp32_size - fp16_with_loss_scaling;
         assert!(savings > 0.0);
