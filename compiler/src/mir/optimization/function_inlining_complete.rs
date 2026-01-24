@@ -5,7 +5,7 @@
 
 use super::pass_manager::MIRPass;
 use crate::mir::{
-    BlockId, FuncId, MirBlock, MirFunction, MirInstruction, MirModule, MirTerminator, ValueId,
+    BlockId, MirBlock, MirFunction, MirInstruction, MirModule, MirTerminator, ValueId,
 };
 use std::collections::{HashMap, HashSet};
 
@@ -172,72 +172,105 @@ impl CompleteFunctionInlining {
     /// Remap a single instruction
     fn remap_instruction(&self, instr: &mut MirInstruction) -> Result<(), String> {
         match instr {
-            // Instructions with result values
-            MirInstruction::Const { result, .. }
-            | MirInstruction::Load { result, .. }
-            | MirInstruction::GetElementPtr { result, .. }
-            | MirInstruction::LoadGlobal { result, .. }
-            | MirInstruction::Alloca { result, .. }
-            | MirInstruction::Cast { result, .. }
-            | MirInstruction::ZExt { result, .. }
-            | MirInstruction::SExt { result, .. }
-            | MirInstruction::Trunc { result, .. }
-            | MirInstruction::FPToSI { result, .. }
-            | MirInstruction::SIToFP { result, .. }
-            | MirInstruction::FPToUI { result, .. }
-            | MirInstruction::UIToFP { result, .. }
-            | MirInstruction::PtrCast { result, .. }
-            | MirInstruction::Binary { result, .. }
-            | MirInstruction::Unary { result, .. }
-            | MirInstruction::Compare { result, .. }
-            | MirInstruction::Phi { result, .. }
-            | MirInstruction::Select { result, .. } => {
-                // Remap result value
+            // Const: only result
+            MirInstruction::Const { result, .. } => {
                 if let Some(new_result) = self.value_mapping.get(result) {
                     *result = *new_result;
                 }
             }
 
-            // Instructions with address operand
-            MirInstruction::Load { address, .. }
-            | MirInstruction::Store { address, .. } => {
+            // Load: result and address
+            MirInstruction::Load {
+                result, address, ..
+            } => {
+                if let Some(new_result) = self.value_mapping.get(result) {
+                    *result = *new_result;
+                }
                 if let Some(new_address) = self.remap_single_value(*address) {
                     *address = new_address;
                 }
             }
 
-            // Instructions with base operand
-            MirInstruction::GetElementPtr { base, .. } => {
+            // Store: address and value
+            MirInstruction::Store { address, value, .. } => {
+                if let Some(new_address) = self.remap_single_value(*address) {
+                    *address = new_address;
+                }
+                if let Some(new_value) = self.remap_single_value(*value) {
+                    *value = new_value;
+                }
+            }
+
+            // GetElementPtr: result and base
+            MirInstruction::GetElementPtr { result, base, .. } => {
+                if let Some(new_result) = self.value_mapping.get(result) {
+                    *result = *new_result;
+                }
                 if let Some(new_base) = self.remap_single_value(*base) {
                     *base = new_base;
                 }
             }
 
-            // Instructions with source operand
-            MirInstruction::Cast { source, .. }
-            | MirInstruction::ZExt { source, .. }
-            | MirInstruction::SExt { source, .. }
-            | MirInstruction::Trunc { source, .. }
-            | MirInstruction::FPToSI { source, .. }
-            | MirInstruction::SIToFP { source, .. }
-            | MirInstruction::FPToUI { source, .. }
-            | MirInstruction::UIToFP { source, .. }
-            | MirInstruction::PtrCast { source, .. } => {
+            // LoadGlobal: only result
+            MirInstruction::LoadGlobal { result, .. } => {
+                if let Some(new_result) = self.value_mapping.get(result) {
+                    *result = *new_result;
+                }
+            }
+
+            // Alloca: only result
+            MirInstruction::Alloca { result, .. } => {
+                if let Some(new_result) = self.value_mapping.get(result) {
+                    *result = *new_result;
+                }
+            }
+
+            // Cast variants: result and source
+            MirInstruction::Cast {
+                result, source, ..
+            }
+            | MirInstruction::ZExt {
+                result, source, ..
+            }
+            | MirInstruction::SExt {
+                result, source, ..
+            }
+            | MirInstruction::Trunc {
+                result, source, ..
+            }
+            | MirInstruction::FPToSI {
+                result, source, ..
+            }
+            | MirInstruction::SIToFP {
+                result, source, ..
+            }
+            | MirInstruction::FPToUI {
+                result, source, ..
+            }
+            | MirInstruction::UIToFP {
+                result, source, ..
+            }
+            | MirInstruction::PtrCast {
+                result, source, ..
+            } => {
+                if let Some(new_result) = self.value_mapping.get(result) {
+                    *result = *new_result;
+                }
                 if let Some(new_source) = self.remap_single_value(*source) {
                     *source = new_source;
                 }
             }
 
-            // Unary instruction with operand
-            MirInstruction::Unary { operand, .. } => {
-                if let Some(new_operand) = self.remap_single_value(*operand) {
-                    *operand = new_operand;
+            // Binary: result, left, right
+            MirInstruction::Binary {
+                result,
+                left,
+                right,
+                ..
+            } => {
+                if let Some(new_result) = self.value_mapping.get(result) {
+                    *result = *new_result;
                 }
-            }
-
-            MirInstruction::Binary { left, right, .. }
-            | MirInstruction::Compare { left, right, .. } => {
-                // Remap binary operands
                 if let Some(new_left) = self.remap_single_value(*left) {
                     *left = new_left;
                 }
@@ -246,15 +279,86 @@ impl CompleteFunctionInlining {
                 }
             }
 
-            // StoreGlobal with value operand
+            // Unary: result and operand
+            MirInstruction::Unary {
+                result, operand, ..
+            } => {
+                if let Some(new_result) = self.value_mapping.get(result) {
+                    *result = *new_result;
+                }
+                if let Some(new_operand) = self.remap_single_value(*operand) {
+                    *operand = new_operand;
+                }
+            }
+
+            // Compare: result, left, right
+            MirInstruction::Compare {
+                result,
+                left,
+                right,
+                ..
+            } => {
+                if let Some(new_result) = self.value_mapping.get(result) {
+                    *result = *new_result;
+                }
+                if let Some(new_left) = self.remap_single_value(*left) {
+                    *left = new_left;
+                }
+                if let Some(new_right) = self.remap_single_value(*right) {
+                    *right = new_right;
+                }
+            }
+
+            // Phi: result and incoming values
+            MirInstruction::Phi {
+                result, incoming, ..
+            } => {
+                if let Some(new_result) = self.value_mapping.get(result) {
+                    *result = *new_result;
+                }
+                for (_block, value) in incoming {
+                    if let Some(new_value) = self.remap_single_value(*value) {
+                        *value = new_value;
+                    }
+                }
+            }
+
+            // Select: result, condition, true_value, false_value
+            MirInstruction::Select {
+                result,
+                condition,
+                true_value,
+                false_value,
+                ..
+            } => {
+                if let Some(new_result) = self.value_mapping.get(result) {
+                    *result = *new_result;
+                }
+                if let Some(new_cond) = self.remap_single_value(*condition) {
+                    *condition = new_cond;
+                }
+                if let Some(new_true) = self.remap_single_value(*true_value) {
+                    *true_value = new_true;
+                }
+                if let Some(new_false) = self.remap_single_value(*false_value) {
+                    *false_value = new_false;
+                }
+            }
+
+            // StoreGlobal: value operand
             MirInstruction::StoreGlobal { value, .. } => {
                 if let Some(new_value) = self.remap_single_value(*value) {
                     *value = new_value;
                 }
             }
 
-            // Call with args
-            MirInstruction::Call { args, .. } => {
+            // Call: result and args
+            MirInstruction::Call { result, args, .. } => {
+                if let Some(res) = result {
+                    if let Some(new_result) = self.value_mapping.get(res) {
+                        *res = *new_result;
+                    }
+                }
                 for arg in args {
                     if let Some(new_arg) = self.remap_single_value(*arg) {
                         *arg = new_arg;
@@ -262,8 +366,18 @@ impl CompleteFunctionInlining {
                 }
             }
 
-            // CallIndirect with func_ptr and args
-            MirInstruction::CallIndirect { func_ptr, args, .. } => {
+            // CallIndirect: result, func_ptr, and args
+            MirInstruction::CallIndirect {
+                result,
+                func_ptr,
+                args,
+                ..
+            } => {
+                if let Some(res) = result {
+                    if let Some(new_result) = self.value_mapping.get(res) {
+                        *res = *new_result;
+                    }
+                }
                 if let Some(new_func_ptr) = self.remap_single_value(*func_ptr) {
                     *func_ptr = new_func_ptr;
                 }
@@ -273,8 +387,6 @@ impl CompleteFunctionInlining {
                     }
                 }
             }
-
-            _ => {}
         }
 
         Ok(())
@@ -545,8 +657,8 @@ impl Default for CompleteFunctionInlining {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::mir::builder::{FunctionBuilder, ModuleBuilder};
-    use crate::mir::{MirConstant, MirType};
+    use crate::mir::builder::FunctionBuilder;
+    use crate::mir::{FuncId, MirType};
 
     #[test]
     fn test_value_mapping() {
