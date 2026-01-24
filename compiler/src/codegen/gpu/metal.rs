@@ -2700,22 +2700,154 @@ impl MetalCodegen {
 
             // ==================== SPARSE QUATERNION OPERATIONS ====================
 
-            // SparseQuatLinearFwd: sparse quaternion linear forward
-            GpuOp::SparseQuatLinearFwd { w: _, w_metadata: _, x, b, out: _, in_features, out_features, sparsity_format: _ } => {
+            // SparseQuatLinearFwd: sparse quaternion linear forward with 2:4 structured sparsity
+            GpuOp::SparseQuatLinearFwd { w, w_metadata, x, b, out: _, in_features, out_features, sparsity_format: _ } => {
+                let w_name = self.get_var_name(*w);
+                let w_meta_name = self.get_var_name(*w_metadata);
                 let x_name = self.get_var_name(*x);
                 let b_name = self.get_var_name(*b);
-                self.emit(&format!("// SparseQuatLinearFwd: {}in -> {}out (sparse)", in_features, out_features));
-                self.emit(&format!("float4 sq_x = *(device float4*)(&{});", x_name));
-                self.emit(&format!("float4 sq_b = *(device float4*)(&{});", b_name));
-                self.emit(&format!("float4 {} = sq_x + sq_b; // Stub: full sparse impl needed", result_name));
+
+                self.emit(&format!("// SparseQuatLinearFwd: {}in -> {}out (2:4 sparsity)", in_features, out_features));
+                self.emit("// Setup pointers");
+                self.emit(&format!("device float4* sq_w = (device float4*){};", w_name));
+                self.emit(&format!("device uchar* sq_meta = (device uchar*){};", w_meta_name));
+                self.emit(&format!("device float4* sq_x = (device float4*){};", x_name));
+                self.emit(&format!("device float4* sq_b = (device float4*){};", b_name));
+
+                self.emit(&format!("uint sq_out_idx = thread_position_in_grid.x;"));
+                self.emit(&format!("if (sq_out_idx >= {}) return;", out_features));
+
+                self.emit("float4 sq_acc = sq_b[sq_out_idx];  // Initialize with bias");
+                self.emit(&format!("uint sq_group_count = ({} + 3) / 4;", in_features));
+
+                self.emit("// Process sparse quaternion groups with 2:4 sparsity");
+                self.emit("for (uint sq_group = 0; sq_group < sq_group_count; sq_group++) {");
+                self.emit("    // Load 2:4 sparsity metadata byte");
+                self.emit(&format!("    uint sq_meta_idx = sq_out_idx * sq_group_count + sq_group;"));
+                self.emit("    uchar sq_byte = sq_meta[sq_meta_idx];");
+
+                self.emit("    // Decode positions of 2 non-zero quaternions");
+                self.emit("    uint sq_pos0 = (sq_byte >> 0) & 0x3;");
+                self.emit("    uint sq_pos1 = (sq_byte >> 2) & 0x3;");
+
+                self.emit("    // Load weight quaternions");
+                self.emit(&format!("    uint sq_w_offset = (sq_out_idx * {} + sq_group) * 4;", (in_features + 3) / 4));
+                self.emit("    float4 sq_w0 = sq_w[sq_w_offset + 0];");
+                self.emit("    float4 sq_w1 = sq_w[sq_w_offset + 1];");
+
+                self.emit("    // Load input quaternions at sparse positions");
+                self.emit("    float4 sq_x0 = sq_x[sq_pos0];");
+                self.emit("    float4 sq_x1 = sq_x[sq_pos1];");
+
+                self.emit("    // Hamilton product: w0 ⊗ x0");
+                self.emit("    float4 sq_prod0;");
+                self.emit("    sq_prod0.w = sq_w0.w*sq_x0.w - sq_w0.x*sq_x0.x - sq_w0.y*sq_x0.y - sq_w0.z*sq_x0.z;");
+                self.emit("    sq_prod0.x = sq_w0.w*sq_x0.x + sq_w0.x*sq_x0.w + sq_w0.y*sq_x0.z - sq_w0.z*sq_x0.y;");
+                self.emit("    sq_prod0.y = sq_w0.w*sq_x0.y - sq_w0.x*sq_x0.z + sq_w0.y*sq_x0.w + sq_w0.z*sq_x0.x;");
+                self.emit("    sq_prod0.z = sq_w0.w*sq_x0.z + sq_w0.x*sq_x0.y - sq_w0.y*sq_x0.x + sq_w0.z*sq_x0.w;");
+
+                self.emit("    // Hamilton product: w1 ⊗ x1");
+                self.emit("    float4 sq_prod1;");
+                self.emit("    sq_prod1.w = sq_w1.w*sq_x1.w - sq_w1.x*sq_x1.x - sq_w1.y*sq_x1.y - sq_w1.z*sq_x1.z;");
+                self.emit("    sq_prod1.x = sq_w1.w*sq_x1.x + sq_w1.x*sq_x1.w + sq_w1.y*sq_x1.z - sq_w1.z*sq_x1.y;");
+                self.emit("    sq_prod1.y = sq_w1.w*sq_x1.y - sq_w1.x*sq_x1.z + sq_w1.y*sq_x1.w + sq_w1.z*sq_x1.x;");
+                self.emit("    sq_prod1.z = sq_w1.w*sq_x1.z + sq_w1.x*sq_x1.y - sq_w1.y*sq_x1.x + sq_w1.z*sq_x1.w;");
+
+                self.emit("    // Accumulate both products");
+                self.emit("    sq_acc += sq_prod0 + sq_prod1;");
+                self.emit("}");
+
+                self.emit(&format!("float4 {} = sq_acc;", result_name));
             }
 
-            // SparseQuatLinearBwd: sparse quaternion linear backward
-            GpuOp::SparseQuatLinearBwd { w: _, w_metadata: _, x: _, dy, dW: _, dx: _, in_features, out_features, sparsity_format: _ } => {
+            // SparseQuatLinearBwd: sparse quaternion linear backward (sparse-aware gradients)
+            // Computes dx and dW for sparse quaternion linear layer
+            // dx[i] = Σⱼ conj(W[j,i]) ⊗ dy[j]
+            // dW[j,i] = dy[j] ⊗ conj(x[i])
+            GpuOp::SparseQuatLinearBwd { w, w_metadata, x, dy, dW, dx, in_features, out_features, sparsity_format: _ } => {
+                let w_name = self.get_var_name(*w);
+                let w_meta_name = self.get_var_name(*w_metadata);
+                let x_name = self.get_var_name(*x);
                 let dy_name = self.get_var_name(*dy);
-                self.emit(&format!("// SparseQuatLinearBwd: {}in -> {}out (sparse)", in_features, out_features));
-                self.emit(&format!("float4 sq_dy = *(device float4*)(&{});", dy_name));
-                self.emit(&format!("float4 {} = sq_dy; // Stub: full sparse bwd impl needed", result_name));
+                let dx_name = self.get_var_name(*dx);
+                let dw_name = self.get_var_name(*dW);
+
+                self.emit(&format!("// SparseQuatLinearBwd: gradients for [{} ⊗ {}] (sparse)", in_features, out_features));
+                self.emit(&format!("device float4* sqb_w = (device float4*){};", w_name));
+                self.emit(&format!("device uchar* sqb_meta = (device uchar*){};", w_meta_name));
+                self.emit(&format!("device float4* sqb_x = (device float4*){};", x_name));
+                self.emit(&format!("device float4* sqb_dy = (device float4*){};", dy_name));
+                self.emit(&format!("device float4* sqb_dx = (device float4*){};", dx_name));
+                self.emit(&format!("device float4* sqb_dw = (device float4*){};", dw_name));
+
+                self.emit(&format!("uint sqb_idx = thread_position_in_grid.x;"));
+
+                self.emit("// Compute dx: gradient w.r.t. input");
+                self.emit(&format!("if (sqb_idx < {}) {{", in_features));
+                self.emit("    float4 sqb_dx_sum = float4(0.0f);");
+                self.emit(&format!("    for (uint sqb_out = 0; sqb_out < {}; sqb_out++) {{", out_features));
+                let w_stride = (in_features + 3) / 4;
+                self.emit(&format!("        float4 sqb_w_conj = float4(sqb_w[sqb_out * {} + sqb_idx].w,", w_stride));
+                self.emit(&format!("                             -sqb_w[sqb_out * {} + sqb_idx].x,", w_stride));
+                self.emit(&format!("                             -sqb_w[sqb_out * {} + sqb_idx].y,", w_stride));
+                self.emit(&format!("                             -sqb_w[sqb_out * {} + sqb_idx].z);", w_stride));
+                self.emit("        float4 sqb_dy_val = sqb_dy[sqb_out];");
+
+                self.emit("        // Hamilton product: conj(W) ⊗ dy");
+                self.emit("        float4 sqb_prod;");
+                self.emit("        sqb_prod.w = sqb_w_conj.w*sqb_dy_val.w - sqb_w_conj.x*sqb_dy_val.x - sqb_w_conj.y*sqb_dy_val.y - sqb_w_conj.z*sqb_dy_val.z;");
+                self.emit("        sqb_prod.x = sqb_w_conj.w*sqb_dy_val.x + sqb_w_conj.x*sqb_dy_val.w + sqb_w_conj.y*sqb_dy_val.z - sqb_w_conj.z*sqb_dy_val.y;");
+                self.emit("        sqb_prod.y = sqb_w_conj.w*sqb_dy_val.y - sqb_w_conj.x*sqb_dy_val.z + sqb_w_conj.y*sqb_dy_val.w + sqb_w_conj.z*sqb_dy_val.x;");
+                self.emit("        sqb_prod.z = sqb_w_conj.w*sqb_dy_val.z + sqb_w_conj.x*sqb_dy_val.y - sqb_w_conj.y*sqb_dy_val.x + sqb_w_conj.z*sqb_dy_val.w;");
+
+                self.emit("        sqb_dx_sum += sqb_prod;");
+                self.emit("    }");
+                self.emit("    sqb_dx[sqb_idx] = sqb_dx_sum;");
+                self.emit("}");
+
+                self.emit("// Compute dW: gradient w.r.t. weights");
+                self.emit(&format!("if (sqb_idx < {}) {{", out_features));
+                self.emit("    float4 sqb_dy_val = sqb_dy[sqb_idx];");
+                self.emit(&format!("    uint sqb_group_count = ({} + 3) / 4;", in_features));
+
+                self.emit("    for (uint sqb_group = 0; sqb_group < sqb_group_count; sqb_group++) {");
+                self.emit("        uint sqb_meta_idx = sqb_idx * sqb_group_count + sqb_group;");
+                self.emit("        uchar sqb_byte = sqb_meta[sqb_meta_idx];");
+
+                self.emit("        // Decode positions of 2 non-zero quaternions");
+                self.emit("        uint sqb_pos0 = (sqb_byte >> 0) & 0x3;");
+                self.emit("        uint sqb_pos1 = (sqb_byte >> 2) & 0x3;");
+
+                self.emit("        // Load input quaternions at sparse positions");
+                self.emit("        float4 sqb_x0 = sqb_x[sqb_pos0];");
+                self.emit("        float4 sqb_x1 = sqb_x[sqb_pos1];");
+
+                self.emit("        // dW = dy ⊗ conj(x)");
+                self.emit("        float4 sqb_x0_conj = float4(sqb_x0.w, -sqb_x0.x, -sqb_x0.y, -sqb_x0.z);");
+                self.emit("        float4 sqb_x1_conj = float4(sqb_x1.w, -sqb_x1.x, -sqb_x1.y, -sqb_x1.z);");
+
+                self.emit("        // First Hamilton product: dy ⊗ conj(x0)");
+                self.emit("        float4 sqb_dw0;");
+                self.emit("        sqb_dw0.w = sqb_dy_val.w*sqb_x0_conj.w - sqb_dy_val.x*sqb_x0_conj.x - sqb_dy_val.y*sqb_x0_conj.y - sqb_dy_val.z*sqb_x0_conj.z;");
+                self.emit("        sqb_dw0.x = sqb_dy_val.w*sqb_x0_conj.x + sqb_dy_val.x*sqb_x0_conj.w + sqb_dy_val.y*sqb_x0_conj.z - sqb_dy_val.z*sqb_x0_conj.y;");
+                self.emit("        sqb_dw0.y = sqb_dy_val.w*sqb_x0_conj.y - sqb_dy_val.x*sqb_x0_conj.z + sqb_dy_val.y*sqb_x0_conj.w + sqb_dy_val.z*sqb_x0_conj.x;");
+                self.emit("        sqb_dw0.z = sqb_dy_val.w*sqb_x0_conj.z + sqb_dy_val.x*sqb_x0_conj.y - sqb_dy_val.y*sqb_x0_conj.x + sqb_dy_val.z*sqb_x0_conj.w;");
+
+                self.emit("        // Second Hamilton product: dy ⊗ conj(x1)");
+                self.emit("        float4 sqb_dw1;");
+                self.emit("        sqb_dw1.w = sqb_dy_val.w*sqb_x1_conj.w - sqb_dy_val.x*sqb_x1_conj.x - sqb_dy_val.y*sqb_x1_conj.y - sqb_dy_val.z*sqb_x1_conj.z;");
+                self.emit("        sqb_dw1.x = sqb_dy_val.w*sqb_x1_conj.x + sqb_dy_val.x*sqb_x1_conj.w + sqb_dy_val.y*sqb_x1_conj.z - sqb_dy_val.z*sqb_x1_conj.y;");
+                self.emit("        sqb_dw1.y = sqb_dy_val.w*sqb_x1_conj.y - sqb_dy_val.x*sqb_x1_conj.z + sqb_dy_val.y*sqb_x1_conj.w + sqb_dy_val.z*sqb_x1_conj.x;");
+                self.emit("        sqb_dw1.z = sqb_dy_val.w*sqb_x1_conj.z + sqb_dy_val.x*sqb_x1_conj.y - sqb_dy_val.y*sqb_x1_conj.x + sqb_dy_val.z*sqb_x1_conj.w;");
+
+                self.emit("        // Store sparse weight gradients");
+                self.emit(&format!("        uint sqb_w_offset = (sqb_idx * {} + sqb_group) * 2;", (in_features + 3) / 4));
+                self.emit("        sqb_dw[sqb_w_offset + 0] = sqb_dw0;");
+                self.emit("        sqb_dw[sqb_w_offset + 1] = sqb_dw1;");
+                self.emit("    }");
+                self.emit("}");
+
+                self.emit(&format!("float4 {} = float4(0.0f);  // Result placeholder", result_name));
             }
 
             // SparseQuatLoad: load sparse quaternion

@@ -5446,37 +5446,216 @@ impl PtxCodegen {
 
             // ==================== SPARSE QUATERNION OPERATIONS ====================
 
-            // SparseQuatLinearFwd: sparse quaternion linear forward
-            GpuOp::SparseQuatLinearFwd { w: _, w_metadata: _, x, b, out: _, in_features, out_features, sparsity_format: _ } => {
+            // SparseQuatLinearFwd: sparse quaternion linear forward with 2:4 structured sparsity
+            GpuOp::SparseQuatLinearFwd { w, w_metadata, x, b, out, in_features, out_features, sparsity_format } => {
+                let rw = self.get_register(*w);
+                let rw_meta = self.get_register(*w_metadata);
                 let rx = self.get_register(*x);
                 let rb = self.get_register(*b);
-                let reg = self.alloc_register(&GpuType::Array(Box::new(GpuType::F32), 4));
-                self.registers.push(reg.clone());
+                let rout = self.get_register(*out);
+
+                writeln!(self.output, "{}// SparseQuatLinearFwd: {}in -> {}out (2:4 sparsity)", indent, in_features, out_features).unwrap();
+                writeln!(self.output, "{}{}", indent, ".reg .u32 %sq_out_idx, %sq_group_idx, %sq_group_count;").unwrap();
+                writeln!(self.output, "{}{}", indent, ".reg .u32 %sq_meta_byte, %sq_pos0, %sq_pos1, %sq_w_offset;").unwrap();
+                writeln!(self.output, "{}{}", indent, ".reg .f32 %sq_acc<4>, %sq_bias<4>, %sq_w0<4>, %sq_w1<4>;").unwrap();
+                writeln!(self.output, "{}{}", indent, ".reg .f32 %sq_x0<4>, %sq_x1<4>, %sq_prod0<4>, %sq_prod1<4>;").unwrap();
+
+                // Calculate output index based on thread
+                writeln!(self.output, "{}  mov.u32 %sq_out_idx, %tid.x;", indent).unwrap();
+                writeln!(self.output, "{}  setp.ge.u32 %p0, %sq_out_idx, {};", indent, out_features).unwrap();
+                writeln!(self.output, "{}  @%p0 bra $end_sq_linear_fwd;", indent).unwrap();
+
+                // Load bias for this output quaternion (4 floats)
+                writeln!(self.output, "{}  // Load bias[out_idx]", indent).unwrap();
+                for i in 0..4 {
+                    writeln!(self.output, "{}  ld.global.f32 %sq_bias{}, [{} + (%sq_out_idx * 16 + {})];", indent, i, rb, i * 4).unwrap();
+                }
+
+                // Initialize accumulator with bias
+                writeln!(self.output, "{}  // Initialize accumulator with bias", indent).unwrap();
+                for i in 0..4 {
+                    writeln!(self.output, "{}  mov.f32 %sq_acc{}, %sq_bias{};", indent, i, i).unwrap();
+                }
+
+                // Loop over input groups (each group has 4 input quaternions, 2 of which are non-zero)
+                writeln!(self.output, "{}  // Process sparse weights: 2:4 sparsity", indent).unwrap();
+                writeln!(self.output, "{}  mov.u32 %sq_group_count, {};", indent, (in_features + 3) / 4).unwrap();
+                writeln!(self.output, "{}  mov.u32 %sq_group_idx, 0;", indent).unwrap();
+                writeln!(self.output, "{}$sq_loop_begin:", indent).unwrap();
+                writeln!(self.output, "{}  setp.ge.u32 %p1, %sq_group_idx, %sq_group_count;", indent).unwrap();
+                writeln!(self.output, "{}  @%p1 bra $sq_loop_end;", indent).unwrap();
+
+                // Load metadata byte for this group
+                writeln!(self.output, "{}  // Load 2:4 sparsity metadata", indent).unwrap();
+                writeln!(self.output, "{}  mad.lo.u32 %sq_w_offset, %sq_out_idx, {}, %sq_group_idx;", indent, (in_features + 3) / 4).unwrap();
+                writeln!(self.output, "{}  ld.global.u8 %sq_meta_byte, [{} + %sq_w_offset];", indent, rw_meta).unwrap();
+
+                // Extract positions of 2 non-zero quaternions
+                writeln!(self.output, "{}  // Extract non-zero positions from metadata (2 bits each)", indent).unwrap();
+                writeln!(self.output, "{}  and.b32 %sq_pos0, %sq_meta_byte, 0x3;", indent).unwrap();
+                writeln!(self.output, "{}  shr.b32 %sq_meta_byte, %sq_meta_byte, 2;", indent).unwrap();
+                writeln!(self.output, "{}  and.b32 %sq_pos1, %sq_meta_byte, 0x3;", indent).unwrap();
+
+                // Calculate sparse weight storage offset (need to count non-zeros before)
+                writeln!(self.output, "{}  // Load non-zero weight quaternions", indent).unwrap();
+                writeln!(self.output, "{}  mad.lo.u32 %sq_w_offset, %sq_out_idx, {}, %sq_group_idx;", indent, in_features).unwrap();
+                writeln!(self.output, "{}  shl.b32 %sq_w_offset, %sq_w_offset, 2;  // *4 for quaternion size", indent).unwrap();
+
+                // Load first weight quaternion
+                for i in 0..4 {
+                    writeln!(self.output, "{}  ld.global.f32 %sq_w0{}, [{} + %sq_w_offset + {}];", indent, i, rw, i * 4).unwrap();
+                }
+
+                // Load second weight quaternion (offset by 16 = 1 quaternion)
+                writeln!(self.output, "{}  add.u32 %sq_w_offset, %sq_w_offset, 16;", indent).unwrap();
+                for i in 0..4 {
+                    writeln!(self.output, "{}  ld.global.f32 %sq_w1{}, [{} + %sq_w_offset + {}];", indent, i, rw, i * 4).unwrap();
+                }
+
+                // Load input quaternions at positions indicated by metadata
+                writeln!(self.output, "{}  // Load input quaternions", indent).unwrap();
+                writeln!(self.output, "{}  shl.b32 %sq_pos0, %sq_pos0, 4;  // *16 for quaternion", indent).unwrap();
+                writeln!(self.output, "{}  shl.b32 %sq_pos1, %sq_pos1, 4;", indent).unwrap();
+                writeln!(self.output, "{}  add.u32 %sq_pos0, {}, %sq_pos0;", indent, rx).unwrap();
+                writeln!(self.output, "{}  add.u32 %sq_pos1, {}, %sq_pos1;", indent, rx).unwrap();
+
+                for i in 0..4 {
+                    writeln!(self.output, "{}  ld.global.f32 %sq_x0{}, [%sq_pos0 + {}];", indent, i, i * 4).unwrap();
+                    writeln!(self.output, "{}  ld.global.f32 %sq_x1{}, [%sq_pos1 + {}];", indent, i, i * 4).unwrap();
+                }
+
+                // Compute Hamilton products: acc += w0 ⊗ x0 + w1 ⊗ x1
+                writeln!(self.output, "{}  // Quaternion multiplication: w0 ⊗ x0", indent).unwrap();
+                writeln!(self.output, "{}  call.uni __quat_mul_acc, (%sq_acc, %sq_w0, %sq_x0);", indent).unwrap();
+                writeln!(self.output, "{}  // Quaternion multiplication: w1 ⊗ x1", indent).unwrap();
+                writeln!(self.output, "{}  call.uni __quat_mul_acc, (%sq_acc, %sq_w1, %sq_x1);", indent).unwrap();
+
+                // Next group
+                writeln!(self.output, "{}  add.u32 %sq_group_idx, %sq_group_idx, 1;", indent).unwrap();
+                writeln!(self.output, "{}  bra $sq_loop_begin;", indent).unwrap();
+                writeln!(self.output, "{}$sq_loop_end:", indent).unwrap();
+
+                // Store result
+                writeln!(self.output, "{}  // Store result", indent).unwrap();
+                writeln!(self.output, "{}  mad.lo.u32 %sq_w_offset, %sq_out_idx, 16, {};", indent, rout).unwrap();
+                for i in 0..4 {
+                    writeln!(self.output, "{}  st.global.f32 [%sq_w_offset + {}], %sq_acc{};", indent, i * 4, i).unwrap();
+                }
+
+                writeln!(self.output, "{}$end_sq_linear_fwd:", indent).unwrap();
+
+                let result_reg = self.alloc_register(&GpuType::Array(Box::new(GpuType::F32), 4));
+                self.registers.push(result_reg.clone());
                 self.value_types.push(GpuType::Array(Box::new(GpuType::F32), 4));
-                writeln!(self.output, "{}// SparseQuatLinearFwd: {}in -> {}out (sparse stub)", indent, in_features, out_features).unwrap();
-                writeln!(self.output, "{}  .reg .f32 %sq_x<4>, %sq_b<4>, %sq_out<4>;", indent).unwrap();
-                for i in 0..4 {
-                    writeln!(self.output, "{}  ld.global.f32 %sq_x{}, [{} + {}];", indent, i, rx, i * 4).unwrap();
-                    writeln!(self.output, "{}  ld.global.f32 %sq_b{}, [{} + {}];", indent, i, rb, i * 4).unwrap();
-                    writeln!(self.output, "{}  add.f32 %sq_out{}, %sq_x{}, %sq_b{};", indent, i, i, i).unwrap();
-                }
-                for i in 0..4 {
-                    writeln!(self.output, "{}  st.global.f32 [{} + {}], %sq_out{};", indent, reg, i * 4, i).unwrap();
-                }
             }
 
             // SparseQuatLinearBwd: sparse quaternion linear backward
-            GpuOp::SparseQuatLinearBwd { w: _, w_metadata: _, x: _, dy, dW: _, dx: _, in_features, out_features, sparsity_format: _ } => {
+            // Computes dx and dW for sparse quaternion linear layer
+            // dx[i] = Σⱼ conj(W[j,i]) ⊗ dy[j]  (gradient w.r.t. input)
+            // dW[j,i] = dy[j] ⊗ conj(x[i])      (gradient w.r.t. weights)
+            GpuOp::SparseQuatLinearBwd { w, w_metadata, x, dy, dW, dx, in_features, out_features, sparsity_format: _ } => {
+                let rw = self.get_register(*w);
+                let rw_meta = self.get_register(*w_metadata);
+                let rx = self.get_register(*x);
                 let rdy = self.get_register(*dy);
-                let reg = self.alloc_register(&GpuType::Array(Box::new(GpuType::F32), 4));
-                self.registers.push(reg.clone());
-                self.value_types.push(GpuType::Array(Box::new(GpuType::F32), 4));
-                writeln!(self.output, "{}// SparseQuatLinearBwd: {}in -> {}out (sparse stub)", indent, in_features, out_features).unwrap();
-                writeln!(self.output, "{}  .reg .f32 %sqb_dy<4>;", indent).unwrap();
+                let rdx = self.get_register(*dx);
+                let rdW = self.get_register(*dW);
+
+                writeln!(self.output, "{}// SparseQuatLinearBwd: gradients for [{} ⊗ {}] (sparse)", indent, in_features, out_features).unwrap();
+                writeln!(self.output, "{}{}", indent, ".reg .u32 %sqb_idx, %sqb_group_idx, %sqb_group_count, %sqb_out_idx, %sqb_in_idx;").unwrap();
+                writeln!(self.output, "{}{}", indent, ".reg .u32 %sqb_meta_byte, %sqb_pos0, %sqb_pos1, %sqb_offset;").unwrap();
+                writeln!(self.output, "{}{}", indent, ".reg .f32 %sqb_dx_acc<4>, %sqb_dw_acc<4>;").unwrap();
+                writeln!(self.output, "{}{}", indent, ".reg .f32 %sqb_w<4>, %sqb_x<4>, %sqb_dy<4>, %sqb_x_conj<4>;").unwrap();
+
+                // Compute dx: gradient w.r.t. input
+                writeln!(self.output, "{}  // Compute dx: input gradients", indent).unwrap();
+                writeln!(self.output, "{}  mov.u32 %sqb_in_idx, %tid.x;", indent).unwrap();
+                writeln!(self.output, "{}  setp.ge.u32 %p0, %sqb_in_idx, {};", indent, in_features).unwrap();
+                writeln!(self.output, "{}  @%p0 bra $sqb_skip_dx;", indent).unwrap();
+
+                writeln!(self.output, "{}  // Initialize dx accumulator to zero", indent).unwrap();
                 for i in 0..4 {
-                    writeln!(self.output, "{}  ld.global.f32 %sqb_dy{}, [{} + {}];", indent, i, rdy, i * 4).unwrap();
-                    writeln!(self.output, "{}  st.global.f32 [{} + {}], %sqb_dy{};", indent, reg, i * 4, i).unwrap();
+                    writeln!(self.output, "{}  mov.f32 %sqb_dx_acc{}, 0.0f;", indent, i).unwrap();
                 }
+
+                writeln!(self.output, "{}  // Accumulate: dx = Σⱼ conj(W[j,i]) ⊗ dy[j]", indent).unwrap();
+                writeln!(self.output, "{}  for (mov.u32 %sqb_out_idx, 0; setp.lt.u32 %p1, %sqb_out_idx, {}; add.u32 %sqb_out_idx, %sqb_out_idx, 1)", indent, out_features).unwrap();
+                writeln!(self.output, "{}  {{", indent).unwrap();
+                writeln!(self.output, "{}    // Load dy[out_idx]", indent).unwrap();
+                writeln!(self.output, "{}    mad.lo.u32 %sqb_offset, %sqb_out_idx, 16, {};", indent, rdy).unwrap();
+                for i in 0..4 {
+                    writeln!(self.output, "{}    ld.global.f32 %sqb_dy{}, [%sqb_offset + {}];", indent, i, i * 4).unwrap();
+                }
+
+                writeln!(self.output, "{}    // Load conj(W[out_idx, in_idx])", indent).unwrap();
+                writeln!(self.output, "{}    mad.lo.u32 %sqb_offset, %sqb_out_idx, {} , %sqb_in_idx;", indent, in_features).unwrap();
+                writeln!(self.output, "{}    shl.b32 %sqb_offset, %sqb_offset, 4;", indent).unwrap();
+                writeln!(self.output, "{}    add.u32 %sqb_offset, %sqb_offset, {};", indent, rw).unwrap();
+                for i in 0..4 {
+                    writeln!(self.output, "{}    ld.global.f32 %sqb_w{}, [%sqb_offset + {}];", indent, i, i * 4).unwrap();
+                }
+
+                writeln!(self.output, "{}    // Conjugate: conj(q) = (w, -x, -y, -z)", indent).unwrap();
+                writeln!(self.output, "{}    mov.f32 %sqb_x_conj0, %sqb_w0;", indent).unwrap();
+                writeln!(self.output, "{}    neg.f32 %sqb_x_conj1, %sqb_w1;", indent).unwrap();
+                writeln!(self.output, "{}    neg.f32 %sqb_x_conj2, %sqb_w2;", indent).unwrap();
+                writeln!(self.output, "{}    neg.f32 %sqb_x_conj3, %sqb_w3;", indent).unwrap();
+
+                writeln!(self.output, "{}    // Accumulate: dx += conj(W) ⊗ dy", indent).unwrap();
+                writeln!(self.output, "{}    call.uni __quat_mul_acc, (%sqb_dx_acc, %sqb_x_conj, %sqb_dy);", indent).unwrap();
+                writeln!(self.output, "{}  }}", indent).unwrap();
+
+                writeln!(self.output, "{}  // Store dx[in_idx]", indent).unwrap();
+                writeln!(self.output, "{}  mad.lo.u32 %sqb_offset, %sqb_in_idx, 16, {};", indent, rdx).unwrap();
+                for i in 0..4 {
+                    writeln!(self.output, "{}  st.global.f32 [%sqb_offset + {}], %sqb_dx_acc{};", indent, i * 4, i).unwrap();
+                }
+
+                writeln!(self.output, "{}$sqb_skip_dx:", indent).unwrap();
+
+                // Compute dW: gradient w.r.t. weights (simplified - respects sparsity)
+                writeln!(self.output, "{}  // Compute dW: weight gradients (sparse-aware)", indent).unwrap();
+                writeln!(self.output, "{}  mov.u32 %sqb_out_idx, %tid.x;", indent).unwrap();
+                writeln!(self.output, "{}  setp.ge.u32 %p2, %sqb_out_idx, {};", indent, out_features).unwrap();
+                writeln!(self.output, "{}  @%p2 bra $sqb_skip_dw;", indent).unwrap();
+
+                writeln!(self.output, "{}  // Load dy[out_idx]", indent).unwrap();
+                writeln!(self.output, "{}  mad.lo.u32 %sqb_offset, %sqb_out_idx, 16, {};", indent, rdy).unwrap();
+                for i in 0..4 {
+                    writeln!(self.output, "{}  ld.global.f32 %sqb_dy{}, [%sqb_offset + {}];", indent, i, i * 4).unwrap();
+                }
+
+                writeln!(self.output, "{}  // Process sparse weight groups", indent).unwrap();
+                writeln!(self.output, "{}  mov.u32 %sqb_group_count, {};", indent, (in_features + 3) / 4).unwrap();
+                writeln!(self.output, "{}  mov.u32 %sqb_group_idx, 0;", indent).unwrap();
+
+                writeln!(self.output, "{}  for (; setp.lt.u32 %p3, %sqb_group_idx, %sqb_group_count; add.u32 %sqb_group_idx, %sqb_group_idx, 1) {{", indent).unwrap();
+                writeln!(self.output, "{}    // Load metadata for this group", indent).unwrap();
+                writeln!(self.output, "{}    mad.lo.u32 %sqb_offset, %sqb_out_idx, {}, %sqb_group_idx;", indent, (in_features + 3) / 4).unwrap();
+                writeln!(self.output, "{}    ld.global.u8 %sqb_meta_byte, [{} + %sqb_offset];", indent, rw_meta).unwrap();
+
+                writeln!(self.output, "{}    // Extract non-zero positions", indent).unwrap();
+                writeln!(self.output, "{}    and.b32 %sqb_pos0, %sqb_meta_byte, 0x3;", indent).unwrap();
+                writeln!(self.output, "{}    shr.b32 %sqb_meta_byte, %sqb_meta_byte, 2;", indent).unwrap();
+                writeln!(self.output, "{}    and.b32 %sqb_pos1, %sqb_meta_byte, 0x3;", indent).unwrap();
+
+                writeln!(self.output, "{}    // Load input quaternions at sparse positions", indent).unwrap();
+                writeln!(self.output, "{}    shl.b32 %sqb_pos0, %sqb_pos0, 4;", indent).unwrap();
+                writeln!(self.output, "{}    shl.b32 %sqb_pos1, %sqb_pos1, 4;", indent).unwrap();
+                for i in 0..4 {
+                    writeln!(self.output, "{}    ld.global.f32 %sqb_x{}, [{} + %sqb_pos0 + {}];", indent, i, rx, i * 4).unwrap();
+                }
+
+                writeln!(self.output, "{}    // dW = dy ⊗ conj(x)", indent).unwrap();
+                writeln!(self.output, "{}    call.uni __quat_conj, (%sqb_x_conj, %sqb_x);", indent).unwrap();
+                writeln!(self.output, "{}    call.uni __quat_mul, (%sqb_dw_acc, %sqb_dy, %sqb_x_conj);", indent).unwrap();
+                writeln!(self.output, "{}  }}", indent).unwrap();
+
+                writeln!(self.output, "{}$sqb_skip_dw:", indent).unwrap();
+
+                let result_reg = self.alloc_register(&GpuType::Array(Box::new(GpuType::F32), 4));
+                self.registers.push(result_reg.clone());
+                self.value_types.push(GpuType::Array(Box::new(GpuType::F32), 4));
             }
 
             // SparseQuatLoad: load sparse quaternion
