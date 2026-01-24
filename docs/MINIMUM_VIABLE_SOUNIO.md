@@ -18,10 +18,10 @@ Read this first. It supersedes aspiration in the other docs.
 ✅ **Units of measure** (mg, mL, h, etc.)
 ✅ **Refinement types** (basic)
 
-❌ **Module system** (`use` statements partially work, cross-module imports fixed)
+✅ **Module system** (`use` statements work for multi-file projects)
 ✅ **Forward references** (functions can be defined after use)
 ✅ **Tuple destructuring** (`let (x, y) = tuple` now supported)
-❌ **Visibility modifiers** (`pub` keyword ignored)
+✅ **Visibility modifiers** (`pub` keyword is enforced)
 
 ---
 
@@ -515,10 +515,13 @@ fn main() with IO {
 - ✅ Type aliases (`type Name = Type;` syntax)
 - ✅ Doc comments (`///` outer, `//!` inner)
 
-**Phase 4 In Progress** (v0.70.0)
+**Phase 4 Complete** ✅
 
-- Module system enhancements (`use` statements for multi-file projects)
-- Visibility modifiers (`pub` enforcement)
+- ✅ Module system (`use` statements for multi-file projects)
+- ✅ Nested module paths (`use utils::strings::concat;`)
+- ✅ Visibility modifiers (`pub` enforcement)
+
+**All known limitations from the original roadmap have been resolved!**
 
 ---
 

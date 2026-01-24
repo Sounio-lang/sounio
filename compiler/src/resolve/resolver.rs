@@ -637,6 +637,7 @@ impl Resolver {
             Item::Global(g) => self.define_global(g),
             Item::Module(m) => self.collect_module(m),
             Item::Import(i) => self.collect_import(i),
+            Item::Extern(e) => self.define_extern_block(e),
             _ => {}
         }
     }
@@ -812,6 +813,104 @@ impl Resolver {
                 visibility: f.visibility,
                 node_id: f.id,
             });
+        }
+    }
+
+    fn define_extern_block(&mut self, e: &ExternBlock) {
+        // Register each extern function in the symbol table
+        for item in &e.items {
+            match item {
+                ExternItem::Fn(f) => {
+                    let def_id = self.symbols.fresh_def_id();
+
+                    if let Err(_) = self.symbols.define(f.name.clone(), def_id) {
+                        self.errors.push(ResolveError::DuplicateDef {
+                            name: f.name.clone(),
+                            span: self.span_to_source(f.span),
+                        });
+                        continue;
+                    }
+
+                    self.symbols.insert(Symbol {
+                        def_id,
+                        name: f.name.clone(),
+                        kind: DefKind::Function,
+                        node_id: f.id,
+                        span: f.span,
+                        parent: None,
+                    });
+
+                    // Add to module tree
+                    if let Some(module) = self.module_tree.get_mut(&self.current_tree_module) {
+                        module.add_item(ModuleItem {
+                            name: f.name.clone(),
+                            kind: ItemKind::Function,
+                            visibility: Visibility::Public,
+                            node_id: f.id,
+                        });
+                    }
+                }
+                ExternItem::Static(s) => {
+                    let def_id = self.symbols.fresh_def_id();
+
+                    if let Err(_) = self.symbols.define(s.name.clone(), def_id) {
+                        self.errors.push(ResolveError::DuplicateDef {
+                            name: s.name.clone(),
+                            span: self.span_to_source(s.span),
+                        });
+                        continue;
+                    }
+
+                    self.symbols.insert(Symbol {
+                        def_id,
+                        name: s.name.clone(),
+                        kind: DefKind::Variable { mutable: s.is_mut },
+                        node_id: s.id,
+                        span: s.span,
+                        parent: None,
+                    });
+
+                    // Add to module tree
+                    if let Some(module) = self.module_tree.get_mut(&self.current_tree_module) {
+                        module.add_item(ModuleItem {
+                            name: s.name.clone(),
+                            kind: ItemKind::Const,
+                            visibility: Visibility::Public,
+                            node_id: s.id,
+                        });
+                    }
+                }
+                ExternItem::Type(t) => {
+                    let def_id = self.symbols.fresh_def_id();
+
+                    if let Err(_) = self.symbols.define_type(t.name.clone(), def_id) {
+                        self.errors.push(ResolveError::DuplicateDef {
+                            name: t.name.clone(),
+                            span: self.span_to_source(t.span),
+                        });
+                        continue;
+                    }
+
+                    self.symbols.insert(Symbol {
+                        def_id,
+                        name: t.name.clone(),
+                        kind: DefKind::TypeAlias,
+                        node_id: t.id,
+                        span: t.span,
+                        parent: None,
+                    });
+
+                    // Add to module tree
+                    if let Some(module) = self.module_tree.get_mut(&self.current_tree_module) {
+                        module.add_item(ModuleItem {
+                            name: t.name.clone(),
+                            kind: ItemKind::TypeAlias,
+                            visibility: Visibility::Public,
+                            node_id: t.id,
+                        });
+                    }
+                }
+            }
         }
     }
 
@@ -1008,6 +1107,7 @@ impl Resolver {
             Item::Global(g) => self.resolve_global(g),
             Item::Module(m) => self.resolve_module(m),
             Item::Import(_) => {} // Imports are fully handled in collect phase
+            Item::Extern(_) => {} // Extern functions have no body to resolve
             _ => {}
         }
     }

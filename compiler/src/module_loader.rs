@@ -48,6 +48,8 @@ struct ModuleData {
     module_id: ModuleId,
     /// Resolved import mappings for this module
     import_mappings: Vec<ImportMapping>,
+    /// The import path used to load this module (for creating proper nested structure)
+    import_from_path: Option<Vec<String>>,
 }
 
 impl ModuleLoader {
@@ -116,13 +118,20 @@ impl ModuleLoader {
             import_paths: import_paths.clone(),
             module_id,
             import_mappings,
+            import_from_path: None, // Will be set when loaded via import
         });
         self.path_to_id.insert(canonical.clone(), id);
 
         let import_paths_owned = import_paths;
         for import_path in &import_paths_owned {
             let import_file = resolve_import_path(&canonical, import_path, &self.stdlib_dir)?;
-            let _ = self.load_module(&import_file)?;
+            let loaded_id = self.load_module(&import_file)?;
+            // Track the import path used to load this module
+            if let Some(module_data) = self.modules.get_mut(loaded_id) {
+                if module_data.import_from_path.is_none() {
+                    module_data.import_from_path = Some(import_path.clone());
+                }
+            }
         }
 
         self.load_stack.pop();
@@ -141,22 +150,68 @@ impl ModuleLoader {
 
         let mut defined: HashMap<String, PathBuf> = HashMap::new();
 
-        for module in &mut self.modules {
-            for item in &module.ast.items {
-                if let Some(name) = item_name(item) {
-                    if let Some(prev_path) = defined.get(&name) {
-                        return Err(miette::miette!(
-                            "Duplicate definition `{}` in {} and {}",
-                            name,
-                            prev_path.display(),
-                            module.path.display()
-                        ));
+        for (idx, module) in self.modules.iter_mut().enumerate() {
+            if idx == root_id {
+                // Root module: add items directly (don't wrap)
+                for item in &module.ast.items {
+                    if let Some(name) = item_name(item) {
+                        if let Some(prev_path) = defined.get(&name) {
+                            return Err(miette::miette!(
+                                "Duplicate definition `{}` in {} and {}",
+                                name,
+                                prev_path.display(),
+                                module.path.display()
+                            ));
+                        }
+                        defined.insert(name, module.path.clone());
                     }
-                    defined.insert(name, module.path.clone());
+                }
+                items.append(&mut module.ast.items);
+            } else {
+                // Imported module: wrap in nested Module items based on import path
+                let import_path = module.import_from_path.clone().unwrap_or_else(|| {
+                    // Fallback: derive from file name
+                    let name = module
+                        .path
+                        .file_stem()
+                        .and_then(|s| s.to_str())
+                        .unwrap_or("unnamed")
+                        .to_string();
+                    vec![name]
+                });
+
+                if import_path.is_empty() {
+                    continue;
+                }
+
+                // Create nested module structure for multi-level imports
+                // e.g., import_path ["utils", "strings"] creates:
+                // module utils { module strings { ... } }
+                let inner_items = std::mem::take(&mut module.ast.items);
+                let wrapped = create_nested_modules(&mut self.next_node_id, &import_path, inner_items);
+
+                // Merge top-level module into items, or create if new
+                let top_name = &import_path[0];
+                if let Some(prev_path) = defined.get(top_name) {
+                    // Module already exists - need to merge
+                    // Find existing module and merge
+                    let existing = items.iter_mut().find(|item| {
+                        matches!(item, Item::Module(m) if &m.name == top_name)
+                    });
+                    if let Some(Item::Module(existing_mod)) = existing {
+                        if let (Some(existing_items), Item::Module(new_mod)) =
+                            (&mut existing_mod.items, &wrapped) {
+                            if let Some(new_items) = &new_mod.items {
+                                existing_items.extend(new_items.clone());
+                            }
+                        }
+                    }
+                } else {
+                    defined.insert(top_name.clone(), module.path.clone());
+                    items.push(wrapped);
                 }
             }
 
-            items.append(&mut module.ast.items);
             node_spans.extend(module.ast.node_spans.drain());
         }
 
@@ -166,6 +221,53 @@ impl ModuleLoader {
             node_spans,
         })
     }
+
+}
+
+/// Create nested module structure from an import path
+/// e.g., ["utils", "strings"] with items creates:
+/// module utils { module strings { ...items... } }
+fn create_nested_modules(next_node_id: &mut u32, path: &[String], inner_items: Vec<Item>) -> Item {
+    if path.is_empty() {
+        // This shouldn't happen, but handle gracefully
+        let id = *next_node_id;
+        *next_node_id += 1;
+        return Item::Module(ModuleDef {
+            id: crate::common::NodeId(id),
+            visibility: Visibility::Public,
+            name: "unnamed".to_string(),
+            items: Some(inner_items),
+            span: crate::common::Span::default(),
+        });
+    }
+
+    // Start from innermost and work outward
+    let mut current_items = inner_items;
+    for name in path.iter().rev() {
+        let id = *next_node_id;
+        *next_node_id += 1;
+        let module_def = ModuleDef {
+            id: crate::common::NodeId(id),
+            visibility: Visibility::Public,
+            name: name.clone(),
+            items: Some(current_items),
+            span: crate::common::Span::default(),
+        };
+        current_items = vec![Item::Module(module_def)];
+    }
+
+    // Return the outermost module
+    current_items.pop().unwrap_or_else(|| {
+        let id = *next_node_id;
+        *next_node_id += 1;
+        Item::Module(ModuleDef {
+            id: crate::common::NodeId(id),
+            visibility: Visibility::Public,
+            name: "unnamed".to_string(),
+            items: None,
+            span: crate::common::Span::default(),
+        })
+    })
 }
 
 fn find_stdlib_path() -> PathBuf {
@@ -290,8 +392,21 @@ fn collect_import_paths(ast: &Ast) -> Vec<Vec<String>> {
         .iter()
         .filter_map(|item| match item {
             Item::Import(import_def) => {
-                eprintln!("DEBUG: Import path segments: {:?}", import_def.path.segments);
-                Some(import_def.path.segments.clone())
+                let full_path = &import_def.path.segments;
+
+                // For `use foo::bar;` (no braces, items is None), only the first part
+                // is the module path, and the last part is an item name.
+                // For `use foo::{bar, baz};` (with braces), the full path is the module.
+                let module_path = match &import_def.items {
+                    Some(_) => full_path.clone(), // Has explicit items: full path is module
+                    None if full_path.len() > 1 => {
+                        // No braces, path > 1 segment: last segment is item name
+                        full_path[..full_path.len() - 1].to_vec()
+                    }
+                    None => full_path.clone(), // Single segment: `use foo;` imports module
+                };
+
+                Some(module_path)
             }
             _ => None,
         })
@@ -2068,14 +2183,23 @@ mod tests {
             "Expected test() to have statements in body"
         );
 
-        // Verify the imported sin function exists
-        let sin_func = ast.items.iter().find_map(|item| match item {
+        // Verify the imported sin function exists inside the math module
+        let math_module = ast.items.iter().find_map(|item| match item {
+            Item::Module(m) if m.name == "math" => Some(m),
+            _ => None,
+        });
+        assert!(
+            math_module.is_some(),
+            "Expected math module from import"
+        );
+        let math_items = math_module.unwrap().items.as_ref().unwrap();
+        let sin_func = math_items.iter().find_map(|item| match item {
             Item::Function(f) if f.name == "sin" => Some(f),
             _ => None,
         });
         assert!(
             sin_func.is_some(),
-            "Expected sin() function from math import"
+            "Expected sin() function inside math module"
         );
     }
 
