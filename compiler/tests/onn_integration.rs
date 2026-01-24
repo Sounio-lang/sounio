@@ -37,6 +37,7 @@ fn approx_eq_slice(a: &[f32], b: &[f32]) -> bool {
 #[test]
 fn test_octonion_identity_compiles() {
     let source = r#"
+        struct Octonion { w: f32, x: f32, y: f32, z: f32, t: f32, u: f32, v: f32, s: f32 }
         fn main() {
             let id = Octonion { w: 1.0, x: 0.0, y: 0.0, z: 0.0, t: 0.0, u: 0.0, v: 0.0, s: 0.0 }
             let w = id.w
@@ -46,13 +47,14 @@ fn test_octonion_identity_compiles() {
 
     let tokens = lexer::lex(source).unwrap();
     let ast = parser::parse(&tokens, source).unwrap();
-    let _hir = check::check(&ast).unwrap();
+    let _hir = check::check_ast(&ast).unwrap();
 }
 
 /// Test octonion conjugate operation
 #[test]
 fn test_octonion_conjugate_compiles() {
     let source = r#"
+        struct Octonion { w: f32, x: f32, y: f32, z: f32, t: f32, u: f32, v: f32, s: f32 }
         fn conjugate(o: Octonion) -> Octonion {
             Octonion {
                 w: o.w,
@@ -74,13 +76,14 @@ fn test_octonion_conjugate_compiles() {
 
     let tokens = lexer::lex(source).unwrap();
     let ast = parser::parse(&tokens, source).unwrap();
-    let _hir = check::check(&ast).unwrap();
+    let _hir = check::check_ast(&ast).unwrap();
 }
 
 /// Test octonion norm squared computation
 #[test]
 fn test_octonion_norm_sq_compiles() {
     let source = r#"
+        struct Octonion { w: f32, x: f32, y: f32, z: f32, t: f32, u: f32, v: f32, s: f32 }
         fn norm_sq(o: Octonion) -> f32 {
             o.w*o.w + o.x*o.x + o.y*o.y + o.z*o.z + o.t*o.t + o.u*o.u + o.v*o.v + o.s*o.s
         }
@@ -93,7 +96,7 @@ fn test_octonion_norm_sq_compiles() {
 
     let tokens = lexer::lex(source).unwrap();
     let ast = parser::parse(&tokens, source).unwrap();
-    let _hir = check::check(&ast).unwrap();
+    let _hir = check::check_ast(&ast).unwrap();
 }
 
 // ============================================================================
@@ -125,7 +128,7 @@ fn test_oct_linear_layer_types() {
 
     let tokens = lexer::lex(source).unwrap();
     let ast = parser::parse(&tokens, source).unwrap();
-    let _hir = check::check(&ast).unwrap();
+    let _hir = check::check_ast(&ast).unwrap();
 }
 
 /// Test weight initialization scale calculation
@@ -152,7 +155,7 @@ fn test_weight_init_scale_compiles() {
 
     let tokens = lexer::lex(source).unwrap();
     let ast = parser::parse(&tokens, source).unwrap();
-    let _hir = check::check(&ast).unwrap();
+    let _hir = check::check_ast(&ast).unwrap();
 }
 
 // ============================================================================
@@ -163,6 +166,7 @@ fn test_weight_init_scale_compiles() {
 #[test]
 fn test_oct_relu_activation_compiles() {
     let source = r#"
+        struct Octonion { w: f32, x: f32, y: f32, z: f32, t: f32, u: f32, v: f32, s: f32 }
         fn oct_relu(o: Octonion) -> Octonion {
             Octonion {
                 w: if o.w > 0.0 { o.w } else { 0.0 },
@@ -184,7 +188,7 @@ fn test_oct_relu_activation_compiles() {
 
     let tokens = lexer::lex(source).unwrap();
     let ast = parser::parse(&tokens, source).unwrap();
-    let _hir = check::check(&ast).unwrap();
+    let _hir = check::check_ast(&ast).unwrap();
 }
 
 /// Test sigmoid component function
@@ -204,7 +208,7 @@ fn test_sigmoid_component_compiles() {
 
     let tokens = lexer::lex(source).unwrap();
     let ast = parser::parse(&tokens, source).unwrap();
-    let _hir = check::check(&ast).unwrap();
+    let _hir = check::check_ast(&ast).unwrap();
 }
 
 // ============================================================================
@@ -215,6 +219,7 @@ fn test_sigmoid_component_compiles() {
 #[test]
 fn test_mse_loss_compiles() {
     let source = r#"
+        struct Octonion { w: f32, x: f32, y: f32, z: f32, t: f32, u: f32, v: f32, s: f32 }
         fn mse_loss_pair(pred: Octonion, target: Octonion) -> f32 {
             let dw = pred.w - target.w
             let dx = pred.x - target.x
@@ -237,7 +242,7 @@ fn test_mse_loss_compiles() {
 
     let tokens = lexer::lex(source).unwrap();
     let ast = parser::parse(&tokens, source).unwrap();
-    let _hir = check::check(&ast).unwrap();
+    let _hir = check::check_ast(&ast).unwrap();
 }
 
 // ============================================================================
@@ -273,7 +278,7 @@ fn test_sgd_optimizer_config_compiles() {
 
     let tokens = lexer::lex(source).unwrap();
     let ast = parser::parse(&tokens, source).unwrap();
-    let _hir = check::check(&ast).unwrap();
+    let _hir = check::check_ast(&ast).unwrap();
 }
 
 /// Test Adam optimizer configuration
@@ -313,7 +318,7 @@ fn test_adam_optimizer_config_compiles() {
 
     let tokens = lexer::lex(source).unwrap();
     let ast = parser::parse(&tokens, source).unwrap();
-    let _hir = check::check(&ast).unwrap();
+    let _hir = check::check_ast(&ast).unwrap();
 }
 
 // ============================================================================
@@ -351,7 +356,7 @@ fn test_training_state_config_compiles() {
 
     let tokens = lexer::lex(source).unwrap();
     let ast = parser::parse(&tokens, source).unwrap();
-    let _hir = check::check(&ast).unwrap();
+    let _hir = check::check_ast(&ast).unwrap();
 }
 
 /// Test learning rate scheduler configuration
@@ -388,7 +393,7 @@ fn test_lr_scheduler_config_compiles() {
 
     let tokens = lexer::lex(source).unwrap();
     let ast = parser::parse(&tokens, source).unwrap();
-    let _hir = check::check(&ast).unwrap();
+    let _hir = check::check_ast(&ast).unwrap();
 }
 
 // ============================================================================
@@ -421,7 +426,7 @@ fn test_batchnorm_stats_config_compiles() {
 
     let tokens = lexer::lex(source).unwrap();
     let ast = parser::parse(&tokens, source).unwrap();
-    let _hir = check::check(&ast).unwrap();
+    let _hir = check::check_ast(&ast).unwrap();
 }
 
 // ============================================================================
@@ -460,7 +465,7 @@ fn test_attention_config_compiles() {
 
     let tokens = lexer::lex(source).unwrap();
     let ast = parser::parse(&tokens, source).unwrap();
-    let _hir = check::check(&ast).unwrap();
+    let _hir = check::check_ast(&ast).unwrap();
 }
 
 // ============================================================================
@@ -487,7 +492,7 @@ fn test_finite_diff_gradient_compiles() {
 
     let tokens = lexer::lex(source).unwrap();
     let ast = parser::parse(&tokens, source).unwrap();
-    let _hir = check::check(&ast).unwrap();
+    let _hir = check::check_ast(&ast).unwrap();
 }
 
 /// Test RNG for dropout
@@ -510,5 +515,5 @@ fn test_dropout_rng_compiles() {
 
     let tokens = lexer::lex(source).unwrap();
     let ast = parser::parse(&tokens, source).unwrap();
-    let _hir = check::check(&ast).unwrap();
+    let _hir = check::check_ast(&ast).unwrap();
 }
