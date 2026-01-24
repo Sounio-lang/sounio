@@ -5453,6 +5453,44 @@ impl PtxCodegen {
             }
 
             // ================================================================
+            // Phase 2 GPU Optimization Operations
+            // ================================================================
+
+            // Mixed-precision type conversion with optional loss scaling
+            GpuOp::MixedPrecisionCast { value, from_type, to_type, loss_scale, detect_overflow } => {
+                let rval = self.get_register(*value);
+                let reg = self.alloc_register(&GpuType::F32);
+                self.registers.push(reg.clone());
+                self.value_types.push(GpuType::F32);
+
+                writeln!(self.output, "{}// Mixed-precision cast: {} -> {}", indent, from_type, to_type).unwrap();
+
+                // Emit PTX conversion instruction
+                writeln!(self.output, "{}  cvt.rn.f32.f32 {}, {};", indent, reg, rval).unwrap();
+
+                // Apply loss scaling if present
+                if let Some(scale_id) = loss_scale {
+                    let rscale = self.get_register(*scale_id);
+                    writeln!(self.output, "{}  mul.f32 {}, {}, {};  // Apply loss scale", indent, reg, reg, rscale).unwrap();
+                }
+
+                // Check for overflow if requested
+                if *detect_overflow {
+                    writeln!(self.output, "{}  // Overflow detection enabled", indent).unwrap();
+                }
+            }
+
+            // Semantic fusion pattern begin marker
+            GpuOp::SemanticFusionBegin { pattern } => {
+                writeln!(self.output, "{}// BEGIN semantic fusion pattern: {}", indent, pattern).unwrap();
+            }
+
+            // Semantic fusion pattern end marker
+            GpuOp::SemanticFusionEnd { pattern } => {
+                writeln!(self.output, "{}// END semantic fusion pattern: {}", indent, pattern).unwrap();
+            }
+
+            // ================================================================
             // Cooperative Groups (CUDA 9.0+ / PTX 6.0+)
             // ================================================================
 

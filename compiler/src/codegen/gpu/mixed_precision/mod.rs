@@ -5,6 +5,8 @@
 
 mod config;
 mod loss_scaler;
+mod transform;
 
 pub use config::{LowPrecision, MixedPrecisionConfig};
 pub use loss_scaler::{LossScaler, ScaleUpdate};
+pub use transform::MixedPrecisionTransform;

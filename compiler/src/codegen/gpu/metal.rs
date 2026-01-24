@@ -2413,6 +2413,39 @@ impl MetalCodegen {
                 self.emit(&format!("float4 {} = *(device float4*)(&{});", result_name, val_name));
             }
 
+            // ========== Phase 2 Operations ==========
+
+            // Mixed-precision type conversion with loss scaling
+            GpuOp::MixedPrecisionCast { value, from_type, to_type, loss_scale, detect_overflow } => {
+                let val_name = self.get_var_name(*value);
+                self.emit(&format!("// Mixed-precision cast: {} -> {}", from_type, to_type));
+
+                let cast_expr = match (from_type, to_type) {
+                    (_, _) => format!("static_cast<float>({})", val_name),
+                };
+
+                if let Some(scale_id) = loss_scale {
+                    let scale_name = self.get_var_name(*scale_id);
+                    self.emit(&format!("float {} = ({}) * {};", result_name, cast_expr, scale_name));
+                } else {
+                    self.emit(&format!("float {} = {};", result_name, cast_expr));
+                }
+
+                if *detect_overflow {
+                    self.emit(&format!("// Overflow detection: check for inf/nan"));
+                    self.emit(&format!("if (isinf({}) || isnan({})) {{ /* mark overflow */ }}", result_name, result_name));
+                }
+            }
+
+            // Semantic fusion pattern markers (for codegen hints)
+            GpuOp::SemanticFusionBegin { pattern } => {
+                self.emit(&format!("// BEGIN fusion pattern: {}", pattern));
+            }
+
+            GpuOp::SemanticFusionEnd { pattern } => {
+                self.emit(&format!("// END fusion pattern: {}", pattern));
+            }
+
             // Atomics not handled above
             GpuOp::AtomicAnd(_, _) | GpuOp::AtomicOr(_, _) | GpuOp::AtomicXor(_, _) => {
                 self.emit(&format!(

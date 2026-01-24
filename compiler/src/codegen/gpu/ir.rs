@@ -703,6 +703,86 @@ impl fmt::Display for SparseQuatFormat {
     }
 }
 
+// ============================================================================
+// Phase 2 GPU Optimization Types
+// ============================================================================
+
+/// Mixed-precision types for FP16/BF16 training with FP32 accumulation
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum MixedPrecisionType {
+    /// Standard 32-bit floating point
+    Fp32,
+    /// 16-bit floating point (IEEE 754)
+    Fp16,
+    /// Brain floating point (Google TPU format)
+    Bf16,
+    /// 8-bit floating point, exponent-biased (higher precision)
+    Fp8E4M3,
+    /// 8-bit floating point, range-optimized (larger range)
+    Fp8E5M2,
+    /// 4-bit quantized float (extreme compression)
+    F4,
+}
+
+impl fmt::Display for MixedPrecisionType {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            MixedPrecisionType::Fp32 => write!(f, "fp32"),
+            MixedPrecisionType::Fp16 => write!(f, "fp16"),
+            MixedPrecisionType::Bf16 => write!(f, "bf16"),
+            MixedPrecisionType::Fp8E4M3 => write!(f, "fp8_e4m3"),
+            MixedPrecisionType::Fp8E5M2 => write!(f, "fp8_e5m2"),
+            MixedPrecisionType::F4 => write!(f, "f4"),
+        }
+    }
+}
+
+/// Semantic fusion patterns for neural network kernel optimization
+/// Identifies sequences of operations that can be fused into a single kernel
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum SemanticFusionPatternKind {
+    /// Linear + BatchNorm + ReLU (three-way fusion)
+    LinearBnRelu,
+    /// Quaternion-aware Linear + BatchNorm + ReLU
+    QuatLinearBnRelu,
+    /// Octonion-aware Linear + BatchNorm + ReLU
+    OctLinearBnRelu,
+    /// Linear + BatchNorm (partial fusion)
+    LinearBn,
+    /// Quaternion Linear + BatchNorm
+    QuatLinearBn,
+    /// Linear + ReLU (partial fusion)
+    LinearRelu,
+    /// Quaternion Linear + ReLU
+    QuatLinearRelu,
+    /// BatchNorm + ReLU (partial fusion)
+    BnRelu,
+    /// Quaternion BatchNorm + ReLU
+    QuatBnRelu,
+    /// Convolution + BatchNorm + ReLU (Phase 3)
+    ConvBnRelu,
+    /// Attention + LayerNorm (Phase 3)
+    AttentionLayerNorm,
+}
+
+impl fmt::Display for SemanticFusionPatternKind {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            SemanticFusionPatternKind::LinearBnRelu => write!(f, "linear_bn_relu"),
+            SemanticFusionPatternKind::QuatLinearBnRelu => write!(f, "quat_linear_bn_relu"),
+            SemanticFusionPatternKind::OctLinearBnRelu => write!(f, "oct_linear_bn_relu"),
+            SemanticFusionPatternKind::LinearBn => write!(f, "linear_bn"),
+            SemanticFusionPatternKind::QuatLinearBn => write!(f, "quat_linear_bn"),
+            SemanticFusionPatternKind::LinearRelu => write!(f, "linear_relu"),
+            SemanticFusionPatternKind::QuatLinearRelu => write!(f, "quat_linear_relu"),
+            SemanticFusionPatternKind::BnRelu => write!(f, "bn_relu"),
+            SemanticFusionPatternKind::QuatBnRelu => write!(f, "quat_bn_relu"),
+            SemanticFusionPatternKind::ConvBnRelu => write!(f, "conv_bn_relu"),
+            SemanticFusionPatternKind::AttentionLayerNorm => write!(f, "attention_layernorm"),
+        }
+    }
+}
+
 /// TMA reduction operation type (sm_100+)
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum TmaReduceOp {
@@ -1964,6 +2044,31 @@ pub enum GpuOp {
         value: ValueId,
         metadata: ValueId,
         format: SparseQuatFormat,
+    },
+
+    // ==================== MIXED-PRECISION OPERATIONS ====================
+    // Phase 2 Feature: Mixed-Precision Training
+    // FP16 forward pass, FP32 backward pass with dynamic loss scaling
+
+    /// Mixed-precision type conversion with optional loss scaling
+    /// Used for transitioning between FP16 compute and FP32 accumulation
+    MixedPrecisionCast {
+        value: ValueId,
+        from_type: MixedPrecisionType,
+        to_type: MixedPrecisionType,
+        loss_scale: Option<ValueId>,
+        detect_overflow: bool,
+    },
+
+    /// Mark the beginning of a semantic fusion pattern for codegen hints
+    /// Enables backend to apply pattern-specific optimizations
+    SemanticFusionBegin {
+        pattern: SemanticFusionPatternKind,
+    },
+
+    /// Mark the end of a semantic fusion pattern
+    SemanticFusionEnd {
+        pattern: SemanticFusionPatternKind,
     },
 }
 
