@@ -290,24 +290,47 @@ impl TypeChecker {
         let Some(module_tree) = &self.module_tree else {
             return true;
         };
+        let Some(current_module) = &self.current_module else {
+            return true;
+        };
 
         // Look up the symbol for this DefId
         let Some(symbol) = symbols.get(*def_id) else {
             return true; // Builtin or internal, assume visible
         };
 
-        // Get the module where this item is defined
-        // For now, we check if it's public; private items visibility will be enforced
-        // when the module system is fully integrated
-        // This is a simplified version - in a full implementation, we'd check module scopes
-        match &self.current_module {
-            Some(_current_module) => {
-                // Placeholder: in full implementation, check if item_module is accessible
-                // from current_module using the module_tree
-                true
+        // Collect module IDs first to avoid borrow checker issues
+        let module_ids: Vec<_> = module_tree.all_module_ids().cloned().collect();
+
+        // Find which module this symbol belongs to by checking all modules
+        // We need to find the module that contains this item
+        for module_id in module_ids {
+            if let Some(module) = module_tree.get(&module_id) {
+                // Check if this symbol is in this module
+                if module.items.iter().any(|item| item.node_id == symbol.node_id) {
+                    // Found the module where this item is defined
+                    // Now check if it's visible from current_module
+                    for item in &module.items {
+                        if item.node_id == symbol.node_id {
+                            if !module.is_visible(item, current_module) {
+                                self.error(
+                                    format!(
+                                        "cannot access private {} `{}`",
+                                        item_type, item_name
+                                    ),
+                                    span,
+                                );
+                                return false;
+                            }
+                            return true;
+                        }
+                    }
+                }
             }
-            None => true,
         }
+
+        // If we can't find the module, assume it's visible (builtin/internal)
+        true
     }
 
     /// Look up which effect a handler handles by its name.
@@ -2135,6 +2158,19 @@ impl TypeChecker {
                     if let Some(binding) = self.env.lookup_qualified(&path.segments) {
                         let ty = binding.ty.clone();
                         let full_path = path.to_string();
+
+                        // Check visibility of qualified path
+                        if let Some(def_id) = self.symbols.as_ref()
+                            .and_then(|symbols| symbols.ref_for_node(*id))
+                        {
+                            let span = self
+                                .ast
+                                .as_ref()
+                                .map(|ast| self.expr_span(expr, ast.as_ref()))
+                                .unwrap_or_else(Span::dummy);
+                            self.check_item_visibility(&def_id, &full_path, "item", span);
+                        }
+
                         (HirExprKind::Global(full_path), self.type_to_hir(&ty))
                     } else {
                         // Check if it's an enum variant (EnumName::Variant)
@@ -2146,7 +2182,19 @@ impl TypeChecker {
                                 if let Some((_, variant_types)) =
                                     variants.iter().find(|(n, _)| n == variant_name)
                                 {
-                                    // Found enum variant
+                                    // Found enum variant - check visibility
+                                    if let Some(def_id) = self.symbols.as_ref()
+                                        .and_then(|symbols| symbols.ref_for_node(*id))
+                                    {
+                                        let span = self
+                                            .ast
+                                            .as_ref()
+                                            .map(|ast| self.expr_span(expr, ast.as_ref()))
+                                            .unwrap_or_else(Span::dummy);
+                                        let variant_full_name = format!("{}::{}", type_name, variant_name);
+                                        self.check_item_visibility(&def_id, &variant_full_name, "enum variant", span);
+                                    }
+
                                     let result_ty = HirType::Named {
                                         name: type_name.clone(),
                                         args: vec![],
@@ -2419,6 +2467,23 @@ impl TypeChecker {
                     Expr::Path { path, .. } => path.segments.last().cloned(),
                     _ => None,
                 };
+
+                // Check visibility of function being called
+                if let Expr::Path { id, path, .. } = callee.as_ref() {
+                    if let Some(def_id) = self.symbols.as_ref()
+                        .and_then(|symbols| symbols.ref_for_node(*id))
+                    {
+                        let fn_display = fn_name.as_ref()
+                            .map(|s| s.clone())
+                            .unwrap_or_else(|| path.to_string());
+                        let span = self
+                            .ast
+                            .as_ref()
+                            .map(|ast| self.expr_span(expr, ast.as_ref()))
+                            .unwrap_or_else(Span::dummy);
+                        self.check_item_visibility(&def_id, &fn_display, "function", span);
+                    }
+                }
 
                 // Get threshold for this function (from #[compat] annotation or default)
                 let threshold = fn_name
@@ -2801,6 +2866,19 @@ impl TypeChecker {
 
             Expr::StructLit { id, path, fields } => {
                 let struct_name = path.segments.last().cloned().unwrap_or_default();
+
+                // Check visibility of struct being constructed
+                if let Some(def_id) = self.symbols.as_ref()
+                    .and_then(|symbols| symbols.ref_for_node(*id))
+                {
+                    let span = self
+                        .ast
+                        .as_ref()
+                        .map(|ast| self.expr_span(expr, ast.as_ref()))
+                        .unwrap_or_else(Span::dummy);
+                    self.check_item_visibility(&def_id, &struct_name, "struct", span);
+                }
+
                 let checked_fields: Vec<_> = fields
                     .iter()
                     .map(|(name, expr)| {
