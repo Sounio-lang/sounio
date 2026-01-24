@@ -3,9 +3,7 @@
 // Miette's derive macros generate code that triggers unused_assignments warnings
 #![allow(unused_assignments)]
 
-use super::module_tree::{
-    ImportEntry, ItemKind, ModuleId as TreeModuleId, ModuleItem, ModuleTree,
-};
+use super::module_tree::{ImportEntry, ItemKind, ModuleId as TreeModuleId, ModuleItem, ModuleTree};
 use super::symbols::*;
 use crate::ast::{ModuleId, *};
 use crate::common::{NodeId, Span};
@@ -130,51 +128,147 @@ impl Resolver {
             "__builtin_slice_from_raw_parts",
             "__builtin_slice_from_raw_parts_mut",
             // I/O builtins
-            "print", "println", "dbg", "panic", "assert", "assert_eq",
-            "read_line", "format", "to_string",
+            "print",
+            "println",
+            "dbg",
+            "panic",
+            "assert",
+            "assert_eq",
+            "read_line",
+            "format",
+            "to_string",
             // Type introspection
-            "len", "type_of", "parse_int", "parse_float",
+            "len",
+            "type_of",
+            "parse_int",
+            "parse_float",
             // Math builtins
-            "sqrt", "abs", "sin", "cos", "tan", "exp", "log", "pow",
-            "floor", "ceil", "round", "min", "max",
+            "sqrt",
+            "abs",
+            "sin",
+            "cos",
+            "tan",
+            "exp",
+            "log",
+            "pow",
+            "floor",
+            "ceil",
+            "round",
+            "min",
+            "max",
             // Linear algebra
-            "vec2", "vec3", "vec4", "mat2", "mat3", "mat4", "quat",
-            "dot", "cross", "normalize", "length", "length_squared",
-            "quat_mul", "quat_conj", "quat_inv", "quat_normalize", "quat_identity",
-            "mat_mul", "transpose", "inverse", "determinant",
-            "lerp", "slerp",
-            "quat_to_euler", "euler_to_quat", "quat_to_mat3", "quat_to_mat4", "mat3_to_quat",
-            "hamilton_product", "quat_rotate_vec", "quat_score", "quat_embed_init",
-            "quat_normalize_embed", "quat_inner_product",
+            "vec2",
+            "vec3",
+            "vec4",
+            "mat2",
+            "mat3",
+            "mat4",
+            "quat",
+            "dot",
+            "cross",
+            "normalize",
+            "length",
+            "length_squared",
+            "quat_mul",
+            "quat_conj",
+            "quat_inv",
+            "quat_normalize",
+            "quat_identity",
+            "mat_mul",
+            "transpose",
+            "inverse",
+            "determinant",
+            "lerp",
+            "slerp",
+            "quat_to_euler",
+            "euler_to_quat",
+            "quat_to_mat3",
+            "quat_to_mat4",
+            "mat3_to_quat",
+            "hamilton_product",
+            "quat_rotate_vec",
+            "quat_score",
+            "quat_embed_init",
+            "quat_normalize_embed",
+            "quat_inner_product",
             // Dual number operations (forward-mode autodiff)
-            "dual", "dual_value", "dual_deriv",
-            "dual_add", "dual_sub", "dual_mul", "dual_div",
-            "dual_sin", "dual_cos", "dual_exp", "dual_log", "dual_sqrt", "dual_pow",
-            "dual_tan", "dual_atan", "dual_abs",
-            "dual_asin", "dual_acos", "dual_sinh", "dual_cosh", "dual_tanh",
-            "dual_asinh", "dual_acosh", "dual_atanh",
-            "dual_log2", "dual_log10", "dual_atan2",
+            "dual",
+            "dual_value",
+            "dual_deriv",
+            "dual_add",
+            "dual_sub",
+            "dual_mul",
+            "dual_div",
+            "dual_sin",
+            "dual_cos",
+            "dual_exp",
+            "dual_log",
+            "dual_sqrt",
+            "dual_pow",
+            "dual_tan",
+            "dual_atan",
+            "dual_abs",
+            "dual_asin",
+            "dual_acos",
+            "dual_sinh",
+            "dual_cosh",
+            "dual_tanh",
+            "dual_asinh",
+            "dual_acosh",
+            "dual_atanh",
+            "dual_log2",
+            "dual_log10",
+            "dual_atan2",
             // Autodiff higher-order functions
-            "grad", "jacobian", "hessian",
+            "grad",
+            "jacobian",
+            "hessian",
             // Array operations
-            "array_len", "array_ptr",
+            "array_len",
+            "array_ptr",
             // Pointer operations
-            "ptr_load_f64", "ptr_store_f64",
+            "ptr_load_f64",
+            "ptr_store_f64",
             // FFI / Raw pointer operations
-            "null_ptr", "null_mut", "is_null", "ptr_eq", "ptr_addr",
-            "ptr_from_addr", "ptr_from_addr_mut",
-            "ptr_offset", "ptr_add", "ptr_sub", "ptr_diff",
-            "as_const", "as_mut", "size_of", "align_of",
+            "null_ptr",
+            "null_mut",
+            "is_null",
+            "ptr_eq",
+            "ptr_addr",
+            "ptr_from_addr",
+            "ptr_from_addr_mut",
+            "ptr_offset",
+            "ptr_add",
+            "ptr_sub",
+            "ptr_diff",
+            "as_const",
+            "as_mut",
+            "size_of",
+            "align_of",
             // Option/Result constructors
-            "Some", "None", "Ok", "Err",
+            "Some",
+            "None",
+            "Ok",
+            "Err",
             // QNN (Quaternionic Neural Network) Intrinsics
-            "quat_linear_fwd", "quat_linear_bwd",
-            "quat_conv2d_fwd", "quat_conv2d_bwd",
-            "quat_relu", "quat_sigmoid", "quat_tanh", "quat_leaky_relu",
-            "quat_avg_pool2d", "quat_max_pool2d",
-            "quat_init_xavier", "quat_init_he", "quat_init_unit",
-            "quat_bn_create", "quat_bn_fwd", "quat_bn_bwd",
-            "quat_lstm_cell", "quat_gru_cell",
+            "quat_linear_fwd",
+            "quat_linear_bwd",
+            "quat_conv2d_fwd",
+            "quat_conv2d_bwd",
+            "quat_relu",
+            "quat_sigmoid",
+            "quat_tanh",
+            "quat_leaky_relu",
+            "quat_avg_pool2d",
+            "quat_max_pool2d",
+            "quat_init_xavier",
+            "quat_init_he",
+            "quat_init_unit",
+            "quat_bn_create",
+            "quat_bn_fwd",
+            "quat_bn_bwd",
+            "quat_lstm_cell",
+            "quat_gru_cell",
             "quat_attention",
         ];
 
@@ -226,15 +320,16 @@ impl Resolver {
     /// Returns the DefId if the name is:
     /// 1. Defined in the current lexical scope
     /// 2. Imported into the current module via use statement
+    /// 3. Defined as a module item (forward reference)
     fn lookup_with_imports(&self, name: &str) -> Option<DefId> {
-        // First check lexical scopes (locals, function params, etc.)
+        // Stage 1: lexical scopes (locals, function params, etc.)
         if let Some(def_id) = self.symbols.lookup(name) {
             return Some(def_id);
         }
 
-        // Then check imports in the current module tree module
+        // Stage 2 & 3: check current module in the module tree
         if let Some(module) = self.module_tree.get(&self.current_tree_module) {
-            // Check resolved imports
+            // Stage 2: Check resolved imports
             for import in &module.imports {
                 if import.local_name == name {
                     if let Some(node_id) = import.resolved {
@@ -252,20 +347,38 @@ impl Resolver {
                     }
                 }
             }
+
+            // Stage 3: Check module items (forward references)
+            for item in &module.items {
+                if item.name == name {
+                    // Check visibility: same module can see all, different module only public
+                    if module.is_visible(item, &self.current_tree_module) {
+                        if let Some(def_id) = self.symbols.def_for_node(item.node_id) {
+                            return Some(def_id);
+                        }
+                    }
+                }
+            }
         }
 
         None
     }
 
     /// Look up a type name in the current module, checking imports from ModuleTree
+    ///
+    /// Returns the DefId if the type name is:
+    /// 1. Defined in the current lexical scope
+    /// 2. Imported into the current module via use statement
+    /// 3. Defined as a module item (forward reference)
     fn lookup_type_with_imports(&self, name: &str) -> Option<DefId> {
-        // First check lexical scopes
+        // Stage 1: lexical scopes
         if let Some(def_id) = self.symbols.lookup_type(name) {
             return Some(def_id);
         }
 
-        // Then check imports in the current module tree module
+        // Stage 2 & 3: check current module in the module tree
         if let Some(module) = self.module_tree.get(&self.current_tree_module) {
+            // Stage 2: Check resolved imports
             for import in &module.imports {
                 if import.local_name == name {
                     if let Some(node_id) = import.resolved {
@@ -276,6 +389,18 @@ impl Resolver {
                             if let Some(def_id) = self.import_node_to_def.get(&node_id) {
                                 return Some(*def_id);
                             }
+                        }
+                    }
+                }
+            }
+
+            // Stage 3: Check module items (forward references)
+            for item in &module.items {
+                if item.name == name {
+                    // Check visibility: same module can see all, different module only public
+                    if module.is_visible(item, &self.current_tree_module) {
+                        if let Some(def_id) = self.symbols.def_for_node(item.node_id) {
+                            return Some(def_id);
                         }
                     }
                 }
@@ -313,7 +438,9 @@ impl Resolver {
                         // Look up the variant in the enum
                         let variant_name = &segments[1];
                         // Try to find a symbol for this variant under the enum
-                        if let Some(variant_id) = self.symbols.lookup_variant(type_def_id, variant_name) {
+                        if let Some(variant_id) =
+                            self.symbols.lookup_variant(type_def_id, variant_name)
+                        {
                             return Some(variant_id);
                         }
                     }
@@ -1158,7 +1285,8 @@ impl Resolver {
         } else {
             // Multi-segment type path (e.g., foo::Bar, std::collections::HashMap)
             if self.resolve_type_path_segments(&path.segments).is_none() {
-                let suggestion = self.find_similar_type(path.segments.last().unwrap_or(&String::new()));
+                let suggestion =
+                    self.find_similar_type(path.segments.last().unwrap_or(&String::new()));
                 self.errors.push(ResolveError::UndefinedType {
                     name: path.segments.join("::"),
                     suggestion,
@@ -1767,7 +1895,10 @@ mod tests {
                 helper1() + helper2()
             }
         "#;
-        assert!(resolves_ok(source), "Glob import should resolve all public items");
+        assert!(
+            resolves_ok(source),
+            "Glob import should resolve all public items"
+        );
     }
 
     #[test]
@@ -1800,8 +1931,10 @@ mod tests {
             }
         "#;
         // This should fail because private_fn is not public
-        assert!(resolution_fails_with(source, "private") || resolution_fails_with(source, "not found"),
-            "Private item should not be visible from outside");
+        assert!(
+            resolution_fails_with(source, "private") || resolution_fails_with(source, "not found"),
+            "Private item should not be visible from outside"
+        );
     }
 
     #[test]
@@ -1828,8 +1961,10 @@ mod tests {
                 private_fn()
             }
         "#;
-        assert!(resolution_fails_with(source_with_private, "private_fn"),
-            "Glob should not import private items");
+        assert!(
+            resolution_fails_with(source_with_private, "private_fn"),
+            "Glob should not import private items"
+        );
     }
 
     #[test]
@@ -1843,8 +1978,11 @@ mod tests {
                 foo::private_fn()
             }
         "#;
-        assert!(resolution_fails_with(source, "private") || resolution_fails_with(source, "PrivateItem"),
-            "Qualified path to private item should fail");
+        assert!(
+            resolution_fails_with(source, "private")
+                || resolution_fails_with(source, "PrivateItem"),
+            "Qualified path to private item should fail"
+        );
 
         // But public items should work
         let source_public = r#"
@@ -1856,7 +1994,10 @@ mod tests {
                 foo::public_fn()
             }
         "#;
-        assert!(resolves_ok(source_public), "Qualified path to public item should work");
+        assert!(
+            resolves_ok(source_public),
+            "Qualified path to public item should work"
+        );
     }
 
     // ==================== Re-export Tests ====================
@@ -1922,8 +2063,11 @@ mod tests {
             use foo::nonexistent;
             fn main() -> i32 { 0 }
         "#;
-        assert!(resolution_fails_with(source, "nonexistent") || resolution_fails_with(source, "not found"),
-            "Import of nonexistent item should fail");
+        assert!(
+            resolution_fails_with(source, "nonexistent")
+                || resolution_fails_with(source, "not found"),
+            "Import of nonexistent item should fail"
+        );
     }
 
     #[test]
@@ -2028,7 +2172,10 @@ mod tests {
                 func2()
             }
         "#;
-        assert!(resolves_ok(source), "Multiple imports from same module should resolve");
+        assert!(
+            resolves_ok(source),
+            "Multiple imports from same module should resolve"
+        );
     }
 
     #[test]
@@ -2044,6 +2191,54 @@ mod tests {
             }
         "#;
         // Local definitions should take precedence over glob imports
-        assert!(resolves_ok(source), "Local should not be shadowed by glob import");
+        assert!(
+            resolves_ok(source),
+            "Local should not be shadowed by glob import"
+        );
+    }
+
+    // ==================== Forward Reference Tests ====================
+
+    #[test]
+    fn test_forward_reference_in_same_module() {
+        let source = r#"
+            fn main() -> i32 {
+                helper()
+            }
+            fn helper() -> i32 {
+                42
+            }
+        "#;
+        assert!(resolves_ok(source), "Forward reference should resolve");
+    }
+
+    #[test]
+    fn test_forward_reference_chain() {
+        let source = r#"
+            fn a() -> i32 { b() + 1 }
+            fn b() -> i32 { c() + 2 }
+            fn c() -> i32 { 42 }
+        "#;
+        assert!(
+            resolves_ok(source),
+            "Forward reference chain should resolve"
+        );
+    }
+
+    #[test]
+    fn test_forward_reference_with_struct_creation() {
+        let source = r#"
+            struct Point { x: i32, y: i32 }
+            fn main() -> i32 {
+                make_point().x
+            }
+            fn make_point() -> Point {
+                Point { x: 1, y: 2 }
+            }
+        "#;
+        assert!(
+            resolves_ok(source),
+            "Forward reference with struct should resolve"
+        );
     }
 }
