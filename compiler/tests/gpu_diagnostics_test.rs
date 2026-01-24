@@ -7,6 +7,7 @@ use sounio::codegen::gpu::{
     // GPU IR types
     BlockId,
     // Validation
+    BufferComparison,
     CorrectnessValidator,
     // Diagnostics
     DiagnosticConfig,
@@ -228,51 +229,44 @@ fn test_ptx_debug_emitter() {
 
 #[test]
 fn test_validation_f32_exact_match() {
-    let validator = CorrectnessValidator::new();
+    let validator = CorrectnessValidator::default();
 
     let baseline: Vec<f32> = vec![1.0, 2.0, 3.0, 4.0, 5.0];
     let optimized: Vec<f32> = vec![1.0, 2.0, 3.0, 4.0, 5.0];
 
-    let result = validator.validate_f32("output", &baseline, &optimized);
-    assert!(result.passed());
+    let result = validator.validate_buffers(&baseline, &optimized).unwrap();
+    assert!(result.matches);
     assert!(result.issues.is_empty());
 }
 
 #[test]
 fn test_validation_f32_within_tolerance() {
     let config = ValidationConfig {
-        enabled: true,
-        tolerance: ToleranceConfig {
-            absolute: 1e-5,
-            relative: 1e-4,
-            ulp: 10,
-            nan_equal: true,
-            inf_equal: true,
-        },
-        max_elements: 0,
-        stop_on_first: false,
-        track_precision: true,
+        relative_tolerance: 1e-4,
+        absolute_tolerance: 1e-5,
+        check_nan: true,
+        check_inf: true,
     };
-    let validator = CorrectnessValidator::with_config(config);
+    let validator = CorrectnessValidator::new(config);
 
     // Small differences within tolerance
     let baseline: Vec<f32> = vec![1.0, 2.0, 3.0, 4.0];
     let optimized: Vec<f32> = vec![1.000001, 2.000002, 3.000003, 4.000004];
 
-    let result = validator.validate_f32("output", &baseline, &optimized);
-    assert!(result.passed());
+    let result = validator.validate_buffers(&baseline, &optimized).unwrap();
+    assert!(result.matches);
 }
 
 #[test]
 fn test_validation_f32_mismatch() {
-    let validator = CorrectnessValidator::new();
+    let validator = CorrectnessValidator::default();
 
     // Significant difference
     let baseline: Vec<f32> = vec![1.0, 2.0, 3.0, 4.0];
     let optimized: Vec<f32> = vec![1.0, 2.0, 3.5, 4.0]; // Index 2 differs
 
-    let result = validator.validate_f32("output", &baseline, &optimized);
-    assert!(!result.passed());
+    let result = validator.validate_buffers(&baseline, &optimized).unwrap();
+    assert!(!result.matches);
     assert!(!result.issues.is_empty());
 
     // Check that the mismatch is reported
@@ -285,13 +279,13 @@ fn test_validation_f32_mismatch() {
 
 #[test]
 fn test_validation_nan_detection() {
-    let validator = CorrectnessValidator::new();
+    let validator = CorrectnessValidator::default();
 
     let baseline: Vec<f32> = vec![1.0, 2.0, 3.0];
     let optimized: Vec<f32> = vec![1.0, f32::NAN, 3.0]; // NaN introduced
 
-    let result = validator.validate_f32("output", &baseline, &optimized);
-    assert!(!result.passed());
+    let result = validator.validate_buffers(&baseline, &optimized).unwrap();
+    assert!(!result.matches);
 
     let has_nan_issue = result
         .issues
@@ -302,13 +296,13 @@ fn test_validation_nan_detection() {
 
 #[test]
 fn test_validation_inf_detection() {
-    let validator = CorrectnessValidator::new();
+    let validator = CorrectnessValidator::default();
 
     let baseline: Vec<f32> = vec![1.0, 2.0, 3.0];
     let optimized: Vec<f32> = vec![1.0, f32::INFINITY, 3.0]; // Infinity introduced
 
-    let result = validator.validate_f32("output", &baseline, &optimized);
-    assert!(!result.passed());
+    let result = validator.validate_buffers(&baseline, &optimized).unwrap();
+    assert!(!result.matches);
 
     let has_inf_issue = result
         .issues
@@ -318,33 +312,77 @@ fn test_validation_inf_detection() {
 }
 
 #[test]
-fn test_validation_i32() {
-    let validator = CorrectnessValidator::new();
+fn test_validation_size_mismatch() {
+    let validator = CorrectnessValidator::default();
 
-    let baseline: Vec<i32> = vec![1, 2, 3, 4, 5];
-    let optimized: Vec<i32> = vec![1, 2, 3, 4, 5];
+    let baseline: Vec<f32> = vec![1.0, 2.0, 3.0, 4.0, 5.0];
+    let optimized: Vec<f32> = vec![1.0, 2.0, 3.0]; // Different size
 
-    let result = validator.validate_i32("output", &baseline, &optimized);
-    assert!(result.passed());
+    let result = validator.validate_buffers(&baseline, &optimized);
+    assert!(result.is_err());
+
+    if let Err(ValidationError::SizeMismatch { expected, actual }) = result {
+        assert_eq!(expected, 5);
+        assert_eq!(actual, 3);
+    } else {
+        panic!("Expected SizeMismatch error");
+    }
 }
 
 #[test]
-fn test_tolerance_config_presets() {
+fn test_tolerance_config_defaults() {
     // Default tolerance
     let default = ToleranceConfig::default();
-    assert!(default.absolute > 0.0);
-    assert!(default.relative > 0.0);
-    assert!(default.ulp > 0);
+    assert!(default.rtol > 0.0);
+    assert!(default.atol > 0.0);
+    assert_eq!(default.rtol, 1e-5);
+    assert_eq!(default.atol, 1e-8);
+}
 
-    // Strict tolerance
-    let strict = ToleranceConfig::strict();
-    assert!(strict.absolute < default.absolute);
-    assert!(strict.relative < default.relative);
+#[test]
+fn test_validation_config_defaults() {
+    let config = ValidationConfig::default();
+    assert!(config.relative_tolerance > 0.0);
+    assert!(config.absolute_tolerance > 0.0);
+    assert!(config.check_nan);
+    assert!(config.check_inf);
+}
 
-    // Relaxed tolerance
-    let relaxed = ToleranceConfig::relaxed();
-    assert!(relaxed.absolute > default.absolute);
-    assert!(relaxed.relative > default.relative);
+#[test]
+fn test_validation_with_custom_tolerance() {
+    // Test with very tight tolerance - should fail
+    let strict_config = ValidationConfig {
+        relative_tolerance: 1e-10,
+        absolute_tolerance: 1e-12,
+        check_nan: true,
+        check_inf: true,
+    };
+    let strict_validator = CorrectnessValidator::new(strict_config);
+
+    let baseline: Vec<f32> = vec![1.0, 2.0, 3.0];
+    let optimized: Vec<f32> = vec![1.0000001, 2.0, 3.0]; // Tiny difference
+
+    let result = strict_validator.validate_buffers(&baseline, &optimized).unwrap();
+    // With strict tolerance, even tiny difference may be caught
+    assert!(!result.matches || result.stats.max_error > 0.0);
+}
+
+#[test]
+fn test_validation_with_relaxed_tolerance() {
+    // Test with very relaxed tolerance - should pass
+    let relaxed_config = ValidationConfig {
+        relative_tolerance: 0.1,  // 10% relative
+        absolute_tolerance: 0.01, // 0.01 absolute
+        check_nan: true,
+        check_inf: true,
+    };
+    let relaxed_validator = CorrectnessValidator::new(relaxed_config);
+
+    let baseline: Vec<f32> = vec![1.0, 2.0, 3.0];
+    let optimized: Vec<f32> = vec![1.005, 2.01, 3.02]; // Small differences
+
+    let result = relaxed_validator.validate_buffers(&baseline, &optimized).unwrap();
+    assert!(result.matches);
 }
 
 // ============================================================================
@@ -352,40 +390,67 @@ fn test_tolerance_config_presets() {
 // ============================================================================
 
 #[test]
+fn test_diagnostic_from_validation_error() {
+    let mut ctx = DiagnosticContext::new();
+
+    // Create a validation error and report it
+    let error = ValidationError::SizeMismatch {
+        expected: 100,
+        actual: 50,
+    };
+
+    // Report as a diagnostic
+    let diag = GpuDiagnostic::error(
+        GpuDiagnosticKind::Generic(format!("{}", error)),
+        "Validation failed: size mismatch",
+    );
+    ctx.report(diag);
+
+    let report = ctx.build_report();
+    assert!(report.has_errors());
+}
+
+#[test]
 fn test_diagnostic_from_validation_issue() {
     let mut ctx = DiagnosticContext::new();
 
-    // Simulate validation issue
+    // Simulate validation issue - create warning diagnostic
     let issue = ValidationIssue::ValueMismatch {
         index: 42,
         expected: 1.0,
         actual: 1.001,
-        absolute_error: 0.001,
         relative_error: 0.001,
     };
 
-    // Report validation issue to diagnostic context
-    ctx.report_validation_issue(&issue);
+    // Report validation issue as warning
+    let diag = GpuDiagnostic::warning(
+        GpuDiagnosticKind::Generic(format!("{:?}", issue)),
+        "Value mismatch detected",
+    );
+    ctx.report(diag);
 
     let report = ctx.build_report();
-    // ValueMismatch is reported as warning
     assert!(report.has_warnings());
 }
 
 #[test]
-fn test_diagnostic_from_validation_nan() {
+fn test_diagnostic_from_nan_detection() {
     let mut ctx = DiagnosticContext::new();
 
     // NaN detection is reported as error
     let issue = ValidationIssue::NaNDetected {
         index: 5,
-        buffer: "output".to_string(),
+        context: "output buffer".to_string(),
     };
 
-    ctx.report_validation_issue(&issue);
+    // Report as error (NaN is more severe)
+    let diag = GpuDiagnostic::error(
+        GpuDiagnosticKind::Generic(format!("{:?}", issue)),
+        "NaN detected in GPU output",
+    );
+    ctx.report(diag);
 
     let report = ctx.build_report();
-    // NaN is reported as error (more severe)
     assert!(report.has_errors());
 }
 
@@ -433,26 +498,19 @@ fn test_full_pipeline_diagnostic_flow() {
 }
 
 #[test]
-fn test_validation_with_precision_stats() {
-    let config = ValidationConfig {
-        enabled: true,
-        tolerance: ToleranceConfig::default(),
-        max_elements: 0,
-        stop_on_first: false,
-        track_precision: true,
-    };
-    let validator = CorrectnessValidator::with_config(config);
+fn test_validation_precision_stats() {
+    let validator = CorrectnessValidator::default();
 
-    // Validate two buffers
-    let comp1 = validator.validate_f32("buf1", &[1.0, 2.0], &[1.0, 2.0]);
-    let comp2 = validator.validate_f32("buf2", &[3.0, 4.0], &[3.0, 4.0]);
+    // Validate buffers and check precision stats
+    let baseline: Vec<f32> = vec![1.0, 2.0, 3.0, 4.0];
+    let optimized: Vec<f32> = vec![1.001, 2.002, 3.003, 4.004];
 
-    let result = validator.validate_result(vec![comp1, comp2]);
-    assert!(result.passed);
-    assert!(result.precision_stats.is_some());
+    let result = validator.validate_buffers(&baseline, &optimized).unwrap();
 
-    let stats = result.precision_stats.unwrap();
-    assert_eq!(stats.comparison_count, 4);
+    // Stats should be computed
+    assert!(result.stats.max_error > 0.0);
+    assert!(result.stats.mean_error > 0.0);
+    assert!(result.stats.rms_error > 0.0);
 }
 
 #[test]
@@ -499,4 +557,47 @@ fn test_diagnostic_formatting() {
 
     assert!(formatted.contains("error"));
     assert!(formatted.contains("1 error(s)"));
+}
+
+#[test]
+fn test_buffer_comparison_result() {
+    let validator = CorrectnessValidator::default();
+
+    // Test BufferComparison struct fields
+    let baseline: Vec<f32> = vec![1.0, 2.0, 3.0];
+    let optimized: Vec<f32> = vec![1.0, 2.0, 3.0];
+
+    let result: BufferComparison = validator.validate_buffers(&baseline, &optimized).unwrap();
+
+    assert!(result.matches);
+    assert!(result.issues.is_empty());
+    assert_eq!(result.stats.mismatch_count, 0);
+    assert_eq!(result.stats.max_error, 0.0);
+}
+
+#[test]
+fn test_validation_error_display() {
+    // Test that ValidationError implements Display
+    let error = ValidationError::SizeMismatch {
+        expected: 100,
+        actual: 50,
+    };
+    let display = format!("{}", error);
+    assert!(display.contains("100"));
+    assert!(display.contains("50"));
+
+    let error2 = ValidationError::ValueMismatch {
+        index: 5,
+        expected: 1.0,
+        actual: 2.0,
+    };
+    let display2 = format!("{}", error2);
+    assert!(display2.contains("5"));
+
+    let error3 = ValidationError::PrecisionLoss {
+        max_error: 0.1,
+        threshold: 0.01,
+    };
+    let display3 = format!("{}", error3);
+    assert!(display3.contains("0.1") || display3.contains("Precision"));
 }

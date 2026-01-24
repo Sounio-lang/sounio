@@ -1387,6 +1387,11 @@ impl FusionAnalysis {
 
             // Calculate benefit score
             candidate.benefit_score = self.cost_model.evaluate(candidate, &original_estimates);
+
+            // Apply semantic fusion pattern benefit multiplier if pattern detected
+            if let Some(pattern) = candidate.semantic_pattern {
+                candidate.benefit_score *= pattern.benefit_multiplier();
+            }
         }
     }
 

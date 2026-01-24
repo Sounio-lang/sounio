@@ -771,6 +771,63 @@ impl PtxCodegen {
                 .unwrap();
             }
 
+            // Unsigned Integer Comparisons
+            GpuOp::LtU(lhs, rhs) => {
+                let l = self.get_register(*lhs);
+                let r = self.get_register(*rhs);
+                let reg = self.alloc_pred_register();
+                self.registers.push(reg.clone());
+                self.value_types.push(GpuType::Bool);
+                writeln!(
+                    self.output,
+                    "{}setp.lo.u32 {}, {}, {};",
+                    indent, reg, l, r
+                )
+                .unwrap();
+            }
+
+            GpuOp::LeU(lhs, rhs) => {
+                let l = self.get_register(*lhs);
+                let r = self.get_register(*rhs);
+                let reg = self.alloc_pred_register();
+                self.registers.push(reg.clone());
+                self.value_types.push(GpuType::Bool);
+                writeln!(
+                    self.output,
+                    "{}setp.ls.u32 {}, {}, {};",
+                    indent, reg, l, r
+                )
+                .unwrap();
+            }
+
+            GpuOp::GtU(lhs, rhs) => {
+                let l = self.get_register(*lhs);
+                let r = self.get_register(*rhs);
+                let reg = self.alloc_pred_register();
+                self.registers.push(reg.clone());
+                self.value_types.push(GpuType::Bool);
+                writeln!(
+                    self.output,
+                    "{}setp.hi.u32 {}, {}, {};",
+                    indent, reg, l, r
+                )
+                .unwrap();
+            }
+
+            GpuOp::GeU(lhs, rhs) => {
+                let l = self.get_register(*lhs);
+                let r = self.get_register(*rhs);
+                let reg = self.alloc_pred_register();
+                self.registers.push(reg.clone());
+                self.value_types.push(GpuType::Bool);
+                writeln!(
+                    self.output,
+                    "{}setp.hs.u32 {}, {}, {};",
+                    indent, reg, l, r
+                )
+                .unwrap();
+            }
+
             // Float Comparisons
             GpuOp::FLt(lhs, rhs) => {
                 let l = self.get_register(*lhs);

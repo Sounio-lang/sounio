@@ -7,38 +7,25 @@
 mod quat_runtime_tests {
     use std::f32::consts::PI;
 
-    // Import the runtime functions (they should be exposed via the library)
-    unsafe extern "C" {
-        fn sounio_quat_conj(q: *const f32, out: *mut f32);
-        fn sounio_quat_norm(q: *const f32) -> f32;
-        fn sounio_quat_norm_sq(q: *const f32) -> f32;
-        fn sounio_quat_normalize(q: *mut f32);
-        fn sounio_quat_inverse(q: *const f32, out: *mut f32);
-        fn sounio_quat_mul(q1: *const f32, q2: *const f32, out: *mut f32);
-        fn sounio_quat_rotate(q: *const f32, v: *const f32, out: *mut f32);
-        fn sounio_quat_lerp(q1: *const f32, q2: *const f32, t: f32, out: *mut f32);
-        fn sounio_quat_slerp(q1: *const f32, q2: *const f32, t: f32, out: *mut f32);
-        fn sounio_quat_batch_conj(qs: *const f32, outs: *mut f32, n: i32);
-        fn sounio_quat_batch_mul(q1s: *const f32, q2s: *const f32, outs: *mut f32, n: i32);
-        fn sounio_quat_batch_rotate(
-            qs: *const f32,
-            vs: *const f32,
-            outs: *mut f32,
-            n: i32,
-        );
-        fn sounio_quat_linear_fwd(
-            x: *const f32,
-            w: *const f32,
-            b: *const f32,
-            y: *mut f32,
-            batch: i32,
-            in_features: i32,
-            out_features: i32,
-        );
-        fn sounio_quat_relu(x: *const f32, y: *mut f32, n: i32);
-        fn sounio_quat_sigmoid(x: *const f32, y: *mut f32, n: i32);
-        fn sounio_quat_tanh(x: *const f32, y: *mut f32, n: i32);
-    }
+    // Import the runtime functions directly from the library
+    use sounio::backend::native::quat_runtime::{
+        sounio_quat_conj,
+        sounio_quat_norm,
+        sounio_quat_norm_sq,
+        sounio_quat_normalize,
+        sounio_quat_inverse,
+        sounio_quat_mul,
+        sounio_quat_rotate,
+        sounio_quat_lerp,
+        sounio_quat_slerp,
+        sounio_quat_batch_conj,
+        sounio_quat_batch_mul,
+        sounio_quat_batch_rotate,
+        sounio_quat_linear_fwd,
+        sounio_quat_relu,
+        sounio_quat_sigmoid,
+        sounio_quat_tanh,
+    };
 
     const EPSILON: f32 = 1e-5;
 
@@ -282,29 +269,28 @@ mod quat_runtime_tests {
 
     #[test]
     fn test_quat_linear_fwd() {
-        // Simple linear layer test: 1 input quaternion → 1 output quaternion
-        let x = [1.0, 0.0, 0.0, 0.0]; // Input: identity quaternion
-        let w = [1.0, 0.0, 0.0, 0.0,  // Weight matrix identity
+        // Simple linear layer test: 4 input features → 4 output features
+        // (this is a scalar linear layer, not quaternion-specific multiplication)
+        let x = [1.0, 0.0, 0.0, 0.0]; // Input vector
+        let w = [1.0, 0.0, 0.0, 0.0,  // Weight matrix (4x4 identity)
                  0.0, 1.0, 0.0, 0.0,
                  0.0, 0.0, 1.0, 0.0,
                  0.0, 0.0, 0.0, 1.0];
         let b = [0.1, 0.2, 0.3, 0.4]; // Bias
         let mut y = [0.0; 4];
 
-        unsafe {
-            sounio_quat_linear_fwd(
-                x.as_ptr(),
-                w.as_ptr(),
-                b.as_ptr(),
-                y.as_mut_ptr(),
-                1,
-                1, // in_features
-                1, // out_features
-            );
-        }
+        sounio_quat_linear_fwd(
+            x.as_ptr(),
+            w.as_ptr(),
+            b.as_ptr(),
+            y.as_mut_ptr(),
+            1,  // batch
+            4,  // in_features (4 scalar elements)
+            4,  // out_features (4 scalar elements)
+        );
 
-        // Expected: [1, 0, 0, 0] * identity_matrix + [0.1, 0.2, 0.3, 0.4]
-        //         = [1.1, 0.2, 0.3, 0.4]
+        // y = W @ x + b = identity @ [1,0,0,0] + [0.1,0.2,0.3,0.4]
+        //               = [1,0,0,0] + [0.1,0.2,0.3,0.4] = [1.1, 0.2, 0.3, 0.4]
         let expected = [1.1, 0.2, 0.3, 0.4];
         assert!(approx_eq_slice(&y, &expected));
     }

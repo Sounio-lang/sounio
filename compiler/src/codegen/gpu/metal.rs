@@ -666,6 +666,40 @@ impl MetalCodegen {
                 self.emit(&format!("bool {} = {} >= {};", result_name, a_name, b_name));
             }
 
+            // Unsigned integer comparisons
+            GpuOp::LtU(a, b) => {
+                let a_name = self.get_var_name(*a);
+                let b_name = self.get_var_name(*b);
+                self.emit(&format!(
+                    "bool {} = (uint){} < (uint){};",
+                    result_name, a_name, b_name
+                ));
+            }
+            GpuOp::LeU(a, b) => {
+                let a_name = self.get_var_name(*a);
+                let b_name = self.get_var_name(*b);
+                self.emit(&format!(
+                    "bool {} = (uint){} <= (uint){};",
+                    result_name, a_name, b_name
+                ));
+            }
+            GpuOp::GtU(a, b) => {
+                let a_name = self.get_var_name(*a);
+                let b_name = self.get_var_name(*b);
+                self.emit(&format!(
+                    "bool {} = (uint){} > (uint){};",
+                    result_name, a_name, b_name
+                ));
+            }
+            GpuOp::GeU(a, b) => {
+                let a_name = self.get_var_name(*a);
+                let b_name = self.get_var_name(*b);
+                self.emit(&format!(
+                    "bool {} = (uint){} >= (uint){};",
+                    result_name, a_name, b_name
+                ));
+            }
+
             // Float comparisons
             GpuOp::FEq(a, b)
             | GpuOp::FNe(a, b)

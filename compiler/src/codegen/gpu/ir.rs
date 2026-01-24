@@ -978,13 +978,19 @@ pub enum GpuOp {
     /// Maximum of two u32 values (unsigned)
     MaxU32(ValueId, ValueId),
 
-    // === Comparisons ===
+    // === Comparisons (signed) ===
     Eq(ValueId, ValueId),
     Ne(ValueId, ValueId),
     Lt(ValueId, ValueId),
     Le(ValueId, ValueId),
     Gt(ValueId, ValueId),
     Ge(ValueId, ValueId),
+
+    // Unsigned integer comparisons
+    LtU(ValueId, ValueId),
+    LeU(ValueId, ValueId),
+    GtU(ValueId, ValueId),
+    GeU(ValueId, ValueId),
 
     // Float comparisons
     FEq(ValueId, ValueId),

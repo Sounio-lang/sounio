@@ -612,7 +612,7 @@ impl SounioLspServer {
         // Simplified - would find actual definition location
         Some(GotoDefinitionResponse::Scalar(Location::new(
             Url::parse("file:///example.sio").unwrap(),
-            Range::new(Position::new(0, 0), Position::new(0, 0),
+            Range::new(Position::new(0, 0), Position::new(0, 0)),
         )))
     }
 

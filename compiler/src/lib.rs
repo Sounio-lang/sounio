@@ -264,7 +264,7 @@ pub mod wasm {
     }
 
     fn compile_internal(source: &str) -> Result<String, Box<dyn std::error::Error>> {
-        let mut diagnostics = Vec::new();
+        let mut diagnostics: Vec<serde_json::Value> = Vec::new();
 
         // Lex
         let tokens = match lexer::lex(source) {
@@ -489,7 +489,16 @@ pub mod wasm {
             .and_then(|tokens| parser::parse(&tokens, source))
             .and_then(|ast| check::check(&ast))
         {
-            Ok(hir) => serde_json::to_string_pretty(&hir).unwrap_or_else(|_| "{}".to_string()),
+            Ok(hir) => {
+                // Return a summary instead of the full HIR structure
+                // (HIR types don't implement Serialize)
+                serde_json::json!({
+                    "success": true,
+                    "items": hir.items.len(),
+                    "externs": hir.externs.len()
+                })
+                .to_string()
+            }
             Err(e) => serde_json::json!({
                 "error": format!("{}", e)
             })
