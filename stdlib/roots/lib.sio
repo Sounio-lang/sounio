@@ -1,0 +1,376 @@
+//! stdlib/roots/lib.sio - Root finding algorithms
+//!
+//! Provides numerical methods for finding roots of equations:
+//! - Bisection method (bracketing, guaranteed convergence)
+//! - Newton-Raphson method (fast convergence with derivative)
+//! - Secant method (fast, no derivative needed)
+//! - Fixed-point iteration
+//! - Brent's method (robust hybrid)
+//!
+//! Each method returns a RootResult with the root, iteration count, and convergence status.
+
+extern "C" {
+    fn fabs(x: f64) -> f64;
+    fn sqrt(x: f64) -> f64;
+}
+
+/// Result of a root-finding algorithm
+pub struct RootResult {
+    root: f64,
+    iterations: i32,
+    converged: bool,
+    function_value: f64,
+}
+
+/// Create a successful root result
+fn root_success(root: f64, iterations: i32, fval: f64) -> RootResult {
+    RootResult { root: root, iterations: iterations, converged: true, function_value: fval }
+}
+
+/// Create a failed root result
+fn root_failure(root: f64, iterations: i32, fval: f64) -> RootResult {
+    RootResult { root: root, iterations: iterations, converged: false, function_value: fval }
+}
+
+// =============================================================================
+// BISECTION METHOD
+// =============================================================================
+
+/// Bisection method for root finding.
+///
+/// Finds a root of f(x) = 0 in the interval [a, b].
+/// Requires f(a) and f(b) to have opposite signs (bracket the root).
+///
+/// Parameters:
+/// - a, b: Interval endpoints (must bracket the root)
+/// - tol: Tolerance for convergence (stops when |b-a| < tol)
+/// - max_iter: Maximum number of iterations
+/// - f: Function to find root of
+///
+/// Convergence: Guaranteed if f is continuous and brackets are valid.
+/// Convergence rate: Linear (one bit of precision per iteration).
+pub fn bisection(a: f64, b: f64, tol: f64, max_iter: i32, f: fn(f64) -> f64) -> RootResult with Div, Panic {
+    var lo = a
+    var hi = b
+    var f_lo = f(lo)
+    var f_hi = f(hi)
+
+    // Check if endpoints bracket a root
+    if f_lo * f_hi > 0.0 {
+        return root_failure((lo + hi) / 2.0, 0, f_lo)
+    }
+
+    // Handle case where endpoint is already a root
+    if f_lo == 0.0 {
+        return root_success(lo, 0, 0.0)
+    }
+    if f_hi == 0.0 {
+        return root_success(hi, 0, 0.0)
+    }
+
+    var iter = 0
+    var mid = (lo + hi) / 2.0
+    var f_mid = f(mid)
+
+    while iter < max_iter {
+        if fabs(hi - lo) < tol {
+            return root_success(mid, iter, f_mid)
+        }
+
+        mid = (lo + hi) / 2.0
+        f_mid = f(mid)
+
+        if fabs(f_mid) < tol {
+            return root_success(mid, iter + 1, f_mid)
+        }
+
+        if f_lo * f_mid < 0.0 {
+            hi = mid
+            f_hi = f_mid
+        } else {
+            lo = mid
+            f_lo = f_mid
+        }
+
+        iter = iter + 1
+    }
+
+    root_failure(mid, iter, f_mid)
+}
+
+// =============================================================================
+// NEWTON-RAPHSON METHOD
+// =============================================================================
+
+/// Newton-Raphson method for root finding.
+///
+/// Uses the iteration x_{n+1} = x_n - f(x_n) / f'(x_n)
+///
+/// Parameters:
+/// - x0: Initial guess
+/// - tol: Tolerance for convergence (stops when |f(x)| < tol)
+/// - max_iter: Maximum number of iterations
+/// - f: Function to find root of
+/// - df: Derivative of f
+///
+/// Convergence: Quadratic near simple roots (doubles precision each step).
+/// Warning: May diverge if starting point is far from root or derivative is small.
+pub fn newton_raphson(x0: f64, tol: f64, max_iter: i32, f: fn(f64) -> f64, df: fn(f64) -> f64) -> RootResult with Div, Panic {
+    var x = x0
+    var iter = 0
+
+    while iter < max_iter {
+        let fx = f(x)
+
+        if fabs(fx) < tol {
+            return root_success(x, iter, fx)
+        }
+
+        let dfx = df(x)
+
+        // Check for zero derivative
+        if dfx == 0.0 {
+            return root_failure(x, iter, fx)
+        }
+
+        x = x - fx / dfx
+        iter = iter + 1
+    }
+
+    let final_fx = f(x)
+    root_failure(x, iter, final_fx)
+}
+
+// =============================================================================
+// SECANT METHOD
+// =============================================================================
+
+/// Secant method for root finding.
+///
+/// Similar to Newton's method but approximates the derivative using finite differences:
+/// x_{n+1} = x_n - f(x_n) * (x_n - x_{n-1}) / (f(x_n) - f(x_{n-1}))
+///
+/// Parameters:
+/// - x0, x1: Two initial guesses
+/// - tol: Tolerance for convergence
+/// - max_iter: Maximum number of iterations
+/// - f: Function to find root of
+///
+/// Convergence: Superlinear (~1.618, the golden ratio).
+/// Advantage: Does not require derivative computation.
+pub fn secant(x0: f64, x1: f64, tol: f64, max_iter: i32, f: fn(f64) -> f64) -> RootResult with Div, Panic {
+    var x_prev = x0
+    var x_curr = x1
+    var f_prev = f(x_prev)
+    var f_curr = f(x_curr)
+    var iter = 0
+
+    while iter < max_iter {
+        if fabs(f_curr) < tol {
+            return root_success(x_curr, iter, f_curr)
+        }
+
+        let denom = f_curr - f_prev
+        if denom == 0.0 {
+            return root_failure(x_curr, iter, f_curr)
+        }
+
+        let x_next = x_curr - f_curr * (x_curr - x_prev) / denom
+
+        x_prev = x_curr
+        f_prev = f_curr
+        x_curr = x_next
+        f_curr = f(x_curr)
+
+        iter = iter + 1
+    }
+
+    root_failure(x_curr, iter, f_curr)
+}
+
+// =============================================================================
+// FIXED-POINT ITERATION
+// =============================================================================
+
+/// Fixed-point iteration for solving x = g(x).
+///
+/// Uses the iteration x_{n+1} = g(x_n)
+/// Converges to a fixed point x* where x* = g(x*).
+///
+/// Parameters:
+/// - x0: Initial guess
+/// - tol: Tolerance for convergence (stops when |x_{n+1} - x_n| < tol)
+/// - max_iter: Maximum number of iterations
+/// - g: Iteration function (seeking fixed point of g)
+///
+/// Convergence: Linear, requires |g'(x*)| < 1 near the fixed point.
+/// Note: To solve f(x) = 0, rewrite as x = x - c*f(x) for some constant c.
+pub fn fixed_point(x0: f64, tol: f64, max_iter: i32, g: fn(f64) -> f64) -> RootResult with Panic {
+    var x = x0
+    var iter = 0
+
+    while iter < max_iter {
+        let x_new = g(x)
+
+        if fabs(x_new - x) < tol {
+            return root_success(x_new, iter + 1, x_new - g(x_new))
+        }
+
+        x = x_new
+        iter = iter + 1
+    }
+
+    root_failure(x, iter, x - g(x))
+}
+
+// =============================================================================
+// BRENT'S METHOD
+// =============================================================================
+
+/// Brent's method for root finding.
+///
+/// A robust hybrid method combining bisection, secant, and inverse quadratic interpolation.
+/// Guaranteed to converge like bisection but often achieves superlinear convergence.
+///
+/// Parameters:
+/// - a, b: Interval endpoints (must bracket the root)
+/// - tol: Tolerance for convergence
+/// - max_iter: Maximum number of iterations
+/// - f: Function to find root of
+///
+/// This is generally the best choice for bracketed root finding.
+pub fn brent(a: f64, b: f64, tol: f64, max_iter: i32, f: fn(f64) -> f64) -> RootResult with Div, Panic {
+    var lo = a
+    var hi = b
+    var f_lo = f(lo)
+    var f_hi = f(hi)
+
+    // Check bracket
+    if f_lo * f_hi > 0.0 {
+        return root_failure((lo + hi) / 2.0, 0, f_lo)
+    }
+
+    // Ensure |f(lo)| >= |f(hi)|
+    if fabs(f_lo) < fabs(f_hi) {
+        // Swap
+        let tmp = lo
+        lo = hi
+        hi = tmp
+        let tmp_f = f_lo
+        f_lo = f_hi
+        f_hi = tmp_f
+    }
+
+    var c = lo
+    var f_c = f_lo
+    var d = hi - lo
+    var e = d
+
+    var iter = 0
+    while iter < max_iter {
+        if fabs(f_hi) < tol {
+            return root_success(hi, iter, f_hi)
+        }
+
+        if fabs(hi - lo) < tol {
+            return root_success(hi, iter, f_hi)
+        }
+
+        var use_bisection = true
+        var s = 0.0
+
+        // Try inverse quadratic interpolation if we have 3 distinct points
+        if f_lo != f_c && f_hi != f_c {
+            // Inverse quadratic interpolation
+            let r = f_hi / f_c
+            let q = f_lo / f_c
+            let p = f_hi / f_lo
+            s = p * (q * (r - q) * (c - hi) - (1.0 - r) * (hi - lo)) / ((q - 1.0) * (r - 1.0) * (p - 1.0))
+            s = hi + s
+            use_bisection = false
+        } else if f_lo != f_hi {
+            // Secant method
+            s = hi - f_hi * (hi - lo) / (f_hi - f_lo)
+            use_bisection = false
+        }
+
+        // Check if interpolation is acceptable
+        if !use_bisection {
+            let cond1 = if lo < hi { s < lo || s > hi } else { s < hi || s > lo }
+            let cond2 = fabs(s - hi) >= fabs(e) / 2.0
+            if cond1 || cond2 {
+                use_bisection = true
+            }
+        }
+
+        if use_bisection {
+            s = (lo + hi) / 2.0
+            e = hi - lo
+            d = e
+        } else {
+            e = d
+            d = s - hi
+        }
+
+        // Update points
+        c = hi
+        f_c = f_hi
+
+        let f_s = f(s)
+
+        if f_lo * f_s < 0.0 {
+            hi = s
+            f_hi = f_s
+        } else {
+            lo = s
+            f_lo = f_s
+        }
+
+        // Ensure |f(lo)| >= |f(hi)|
+        if fabs(f_lo) < fabs(f_hi) {
+            let tmp = lo
+            lo = hi
+            hi = tmp
+            let tmp_f = f_lo
+            f_lo = f_hi
+            f_hi = tmp_f
+        }
+
+        iter = iter + 1
+    }
+
+    root_failure(hi, iter, f_hi)
+}
+
+// =============================================================================
+// HELPER FUNCTIONS
+// =============================================================================
+
+/// Halley's method - cubic convergence when second derivative is available
+/// x_{n+1} = x_n - 2*f*f' / (2*f'^2 - f*f'')
+pub fn halley(x0: f64, tol: f64, max_iter: i32, f: fn(f64) -> f64, df: fn(f64) -> f64, d2f: fn(f64) -> f64) -> RootResult with Div, Panic {
+    var x = x0
+    var iter = 0
+
+    while iter < max_iter {
+        let fx = f(x)
+
+        if fabs(fx) < tol {
+            return root_success(x, iter, fx)
+        }
+
+        let dfx = df(x)
+        let d2fx = d2f(x)
+
+        let denom = 2.0 * dfx * dfx - fx * d2fx
+        if denom == 0.0 {
+            return root_failure(x, iter, fx)
+        }
+
+        x = x - 2.0 * fx * dfx / denom
+        iter = iter + 1
+    }
+
+    let final_fx = f(x)
+    root_failure(x, iter, final_fx)
+}
