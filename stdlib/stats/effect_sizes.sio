@@ -1,0 +1,205 @@
+// Effect Size Measures for Statistical Testing
+//
+// Implements robust and interpretable effect size measures for comparing groups:
+// - Cliff's delta: Nonparametric, robust to outliers
+// - Cohen's d: Standardized mean difference
+// - Hedges' g: Bias-corrected Cohen's d
+// - Simple statistics: mean, variance, std dev, CI
+
+module stats::effect_sizes
+
+// =============================================================================
+// Basic Statistics
+// =============================================================================
+
+/// Calculate mean of dataset
+pub fn mean(data: &[f64]) -> f64 {
+    if data.len() == 0 {
+        return 0.0
+    }
+
+    var sum: f64 = 0.0
+    var i: usize = 0
+    while i < data.len() {
+        sum = sum + data[i]
+        i = i + 1
+    }
+
+    sum / (data.len() as f64)
+}
+
+/// Calculate variance of dataset
+pub fn variance(data: &[f64]) -> f64 {
+    if data.len() == 0 {
+        return 0.0
+    }
+
+    let m = mean(data)
+    var sum_sq: f64 = 0.0
+    var i: usize = 0
+    while i < data.len() {
+        let diff = data[i] - m
+        sum_sq = sum_sq + (diff * diff)
+        i = i + 1
+    }
+
+    sum_sq / (data.len() as f64)
+}
+
+/// Calculate standard deviation
+pub fn std(data: &[f64]) -> f64 {
+    let var = variance(data)
+    if var < 0.0 {
+        return 0.0
+    }
+    sqrt_approx(var)
+}
+
+/// Approximate square root using Newton's method
+fn sqrt_approx(x: f64) -> f64 {
+    if x < 0.0 {
+        return 0.0
+    }
+    if x == 0.0 {
+        return 0.0
+    }
+
+    var guess: f64 = x
+    var i: usize = 0
+    while i < 10 {
+        guess = (guess + (x / guess)) / 2.0
+        i = i + 1
+    }
+
+    guess
+}
+
+/// Calculate 95% confidence interval for mean
+pub fn ci_95(data: &[f64]) -> (f64, f64) {
+    if data.len() == 0 {
+        return (0.0, 0.0)
+    }
+
+    let m = mean(data)
+    let s = std(data)
+    let n = data.len() as f64
+
+    // 95% CI with t-critical ≈ 1.96 for large n
+    let se = s / sqrt_approx(n)
+    let margin = 1.96 * se
+
+    (m - margin, m + margin)
+}
+
+// =============================================================================
+// Cliff's Delta - Nonparametric Effect Size
+// =============================================================================
+
+/// Cliff's delta: robust nonparametric effect size
+/// Measures probability that random value from x is greater than random value from y
+/// Range: [-1, 1], Interpretation: 0 = no effect, ±1 = complete separation
+pub fn cliffs_delta(x: &[f64], y: &[f64]) -> f64 {
+    if x.len() == 0 || y.len() == 0 {
+        return 0.0
+    }
+
+    // Count comparisons where x > y and x < y
+    var n_greater: f64 = 0.0
+    var n_less: f64 = 0.0
+
+    var i: usize = 0
+    while i < x.len() {
+        var j: usize = 0
+        while j < y.len() {
+            if x[i] > y[j] {
+                n_greater = n_greater + 1.0
+            } else if x[i] < y[j] {
+                n_less = n_less + 1.0
+            }
+            j = j + 1
+        }
+        i = i + 1
+    }
+
+    let n_total = (x.len() as f64) * (y.len() as f64)
+
+    // delta = (n_greater - n_less) / n_total
+    (n_greater - n_less) / n_total
+}
+
+/// Single-value Cliff's delta for comparing value to distribution
+pub fn cliffs_delta_single(value: f64, dist: &[f64]) -> f64 {
+    if dist.len() == 0 {
+        return 0.0
+    }
+
+    var n_greater: f64 = 0.0
+    var n_less: f64 = 0.0
+
+    var i: usize = 0
+    while i < dist.len() {
+        if value > dist[i] {
+            n_greater = n_greater + 1.0
+        } else if value < dist[i] {
+            n_less = n_less + 1.0
+        }
+        i = i + 1
+    }
+
+    let n_total = dist.len() as f64
+
+    (n_greater - n_less) / n_total
+}
+
+// =============================================================================
+// Cohen's d - Standardized Mean Difference
+// =============================================================================
+
+/// Cohen's d: standardized mean difference
+/// Interpretation: 0.2 = small, 0.5 = medium, 0.8 = large
+pub fn cohens_d(x: &[f64], y: &[f64]) -> f64 {
+    if x.len() == 0 || y.len() == 0 {
+        return 0.0
+    }
+
+    let mx = mean(x)
+    let my = mean(y)
+    let vx = variance(x)
+    let vy = variance(y)
+
+    let n1 = x.len() as f64
+    let n2 = y.len() as f64
+
+    // Pooled standard deviation
+    let pooled_var = ((n1 - 1.0) * vx + (n2 - 1.0) * vy) / (n1 + n2 - 2.0)
+    let pooled_std = sqrt_approx(pooled_var)
+
+    if pooled_std == 0.0 {
+        return 0.0
+    }
+
+    (mx - my) / pooled_std
+}
+
+/// Hedges' g: bias-corrected Cohen's d
+/// More conservative than Cohen's d for small samples
+pub fn hedges_g(x: &[f64], y: &[f64]) -> f64 {
+    let d = cohens_d(x, y)
+
+    let n1 = x.len() as f64
+    let n2 = y.len() as f64
+    let n = n1 + n2
+
+    // Correction factor for small samples
+    let correction = 1.0 - (3.0 / (4.0 * (n - 2.0) - 1.0))
+
+    d * correction
+}
+
+// =============================================================================
+// Helper Functions
+// =============================================================================
+
+fn abs_effect_size(x: f64) -> f64 {
+    if x < 0.0 { -x } else { x }
+}
