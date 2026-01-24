@@ -910,11 +910,9 @@ fn vec8_param(name: &str) -> GpuParam {
 /// Generate octonion multiplication kernel
 ///
 /// Computes: o1 * o2 via Cayley-Dickson construction
-/// o = (a, v) where a is real part, v is 7D imaginary vector
+/// Each octonion is represented as 8 f32 values: (real, e1, e2, e3, e4, e5, e6, e7)
 ///
-/// TODO: Reimplement using correct GPU IR operations (GetElementPtr + Load/Store)
-/// instead of non-existent ExtractElement/InsertElement
-/// For now, returns a placeholder kernel to allow compilation.
+/// Uses the standard octonion multiplication table based on the Fano plane.
 #[allow(dead_code)]
 pub fn gen_octonion_mul_kernel() -> GpuKernel {
     let mut kernel = GpuKernel::new("octonion_mul");
@@ -939,12 +937,266 @@ pub fn gen_octonion_mul_kernel() -> GpuKernel {
         terminator: GpuTerminator::CondBr(ValueId(6), BlockId(1), BlockId(2)),
     };
 
-    // Placeholder compute block - full implementation requires refactoring
-    // TODO: Implement proper octonion multiplication using GetElementPtr + Load/Store
+    // Compute block: Load 8 components from o1 and o2, multiply, store to out
+    let mut compute_instrs = Vec::new();
+    let mut vid = 10u32;
+
+    // Get base pointers for o1, o2, out arrays
+    compute_instrs.push((ValueId(vid), GpuOp::Param(0))); // o1 base
+    let o1_base = ValueId(vid);
+    vid += 1;
+
+    compute_instrs.push((ValueId(vid), GpuOp::Param(1))); // o2 base
+    let o2_base = ValueId(vid);
+    vid += 1;
+
+    compute_instrs.push((ValueId(vid), GpuOp::Param(2))); // out base
+    let out_base = ValueId(vid);
+    vid += 1;
+
+    // Compute byte offset for this thread's octonion: idx * 8 (array of 8 floats)
+    compute_instrs.push((ValueId(vid), GpuOp::ConstInt(8, GpuType::I32)));
+    let eight = ValueId(vid);
+    vid += 1;
+
+    compute_instrs.push((ValueId(vid), GpuOp::Mul(ValueId(4), eight)));
+    let base_offset = ValueId(vid);
+    vid += 1;
+
+    // Load all 8 components of o1[idx]
+    let mut a = [ValueId(0); 8];
+    for i in 0..8 {
+        compute_instrs.push((ValueId(vid), GpuOp::ConstInt(i as i64, GpuType::I32)));
+        let i_const = ValueId(vid);
+        vid += 1;
+
+        compute_instrs.push((ValueId(vid), GpuOp::Add(base_offset, i_const)));
+        let offset = ValueId(vid);
+        vid += 1;
+
+        compute_instrs.push((
+            ValueId(vid),
+            GpuOp::GetElementPtr(o1_base, vec![offset]),
+        ));
+        let ptr = ValueId(vid);
+        vid += 1;
+
+        compute_instrs.push((ValueId(vid), GpuOp::Load(ptr, MemorySpace::Global)));
+        a[i] = ValueId(vid);
+        vid += 1;
+    }
+
+    // Load all 8 components of o2[idx]
+    let mut b = [ValueId(0); 8];
+    for i in 0..8 {
+        compute_instrs.push((ValueId(vid), GpuOp::ConstInt(i as i64, GpuType::I32)));
+        let i_const = ValueId(vid);
+        vid += 1;
+
+        compute_instrs.push((ValueId(vid), GpuOp::Add(base_offset, i_const)));
+        let offset = ValueId(vid);
+        vid += 1;
+
+        compute_instrs.push((
+            ValueId(vid),
+            GpuOp::GetElementPtr(o2_base, vec![offset]),
+        ));
+        let ptr = ValueId(vid);
+        vid += 1;
+
+        compute_instrs.push((ValueId(vid), GpuOp::Load(ptr, MemorySpace::Global)));
+        b[i] = ValueId(vid);
+        vid += 1;
+    }
+
+    // Compute octonion product using standard multiplication table
+    // c0 = a0*b0 - a1*b1 - a2*b2 - a3*b3 - a4*b4 - a5*b5 - a6*b6 - a7*b7
+    // c1 = a0*b1 + a1*b0 + a2*b4 - a4*b2 + a3*b7 - a7*b3 + a5*b6 - a6*b5
+    // c2 = a0*b2 + a2*b0 + a4*b1 - a1*b4 + a3*b5 - a5*b3 + a6*b7 - a7*b6
+    // c3 = a0*b3 + a3*b0 + a7*b1 - a1*b7 + a5*b2 - a2*b5 + a4*b6 - a6*b4
+    // c4 = a0*b4 + a4*b0 + a1*b2 - a2*b1 + a3*b6 - a6*b3 + a7*b5 - a5*b7
+    // c5 = a0*b5 + a5*b0 + a3*b2 - a2*b3 + a6*b1 - a1*b6 + a4*b7 - a7*b4
+    // c6 = a0*b6 + a6*b0 + a5*b1 - a1*b5 + a4*b3 - a3*b4 + a7*b2 - a2*b7
+    // c7 = a0*b7 + a7*b0 + a1*b3 - a3*b1 + a2*b6 - a6*b2 + a5*b4 - a4*b5
+
+    // Helper closures for arithmetic operations
+    let mut fmul = |instrs: &mut Vec<(ValueId, GpuOp)>, v: &mut u32, x: ValueId, y: ValueId| -> ValueId {
+        instrs.push((ValueId(*v), GpuOp::FMul(x, y)));
+        let result = ValueId(*v);
+        *v += 1;
+        result
+    };
+
+    let mut fadd = |instrs: &mut Vec<(ValueId, GpuOp)>, v: &mut u32, x: ValueId, y: ValueId| -> ValueId {
+        instrs.push((ValueId(*v), GpuOp::FAdd(x, y)));
+        let result = ValueId(*v);
+        *v += 1;
+        result
+    };
+
+    let mut fsub = |instrs: &mut Vec<(ValueId, GpuOp)>, v: &mut u32, x: ValueId, y: ValueId| -> ValueId {
+        instrs.push((ValueId(*v), GpuOp::FSub(x, y)));
+        let result = ValueId(*v);
+        *v += 1;
+        result
+    };
+
+    // c0 = a0*b0 - a1*b1 - a2*b2 - a3*b3 - a4*b4 - a5*b5 - a6*b6 - a7*b7
+    let mut c0 = fmul(&mut compute_instrs, &mut vid, a[0], b[0]);
+    for i in 1..8 {
+        let prod = fmul(&mut compute_instrs, &mut vid, a[i], b[i]);
+        c0 = fsub(&mut compute_instrs, &mut vid, c0, prod);
+    }
+
+    // c1 = a0*b1 + a1*b0 + a2*b4 - a4*b2 + a3*b7 - a7*b3 + a5*b6 - a6*b5
+    let t1 = fmul(&mut compute_instrs, &mut vid, a[0], b[1]);
+    let t2 = fmul(&mut compute_instrs, &mut vid, a[1], b[0]);
+    let t3 = fmul(&mut compute_instrs, &mut vid, a[2], b[4]);
+    let t4 = fmul(&mut compute_instrs, &mut vid, a[4], b[2]);
+    let t5 = fmul(&mut compute_instrs, &mut vid, a[3], b[7]);
+    let t6 = fmul(&mut compute_instrs, &mut vid, a[7], b[3]);
+    let t7 = fmul(&mut compute_instrs, &mut vid, a[5], b[6]);
+    let t8 = fmul(&mut compute_instrs, &mut vid, a[6], b[5]);
+    let s1 = fadd(&mut compute_instrs, &mut vid, t1, t2);
+    let s2 = fsub(&mut compute_instrs, &mut vid, t3, t4);
+    let s3 = fsub(&mut compute_instrs, &mut vid, t5, t6);
+    let s4 = fsub(&mut compute_instrs, &mut vid, t7, t8);
+    let s5 = fadd(&mut compute_instrs, &mut vid, s1, s2);
+    let s6 = fadd(&mut compute_instrs, &mut vid, s3, s4);
+    let c1 = fadd(&mut compute_instrs, &mut vid, s5, s6);
+
+    // c2 = a0*b2 + a2*b0 + a4*b1 - a1*b4 + a3*b5 - a5*b3 + a6*b7 - a7*b6
+    let t1 = fmul(&mut compute_instrs, &mut vid, a[0], b[2]);
+    let t2 = fmul(&mut compute_instrs, &mut vid, a[2], b[0]);
+    let t3 = fmul(&mut compute_instrs, &mut vid, a[4], b[1]);
+    let t4 = fmul(&mut compute_instrs, &mut vid, a[1], b[4]);
+    let t5 = fmul(&mut compute_instrs, &mut vid, a[3], b[5]);
+    let t6 = fmul(&mut compute_instrs, &mut vid, a[5], b[3]);
+    let t7 = fmul(&mut compute_instrs, &mut vid, a[6], b[7]);
+    let t8 = fmul(&mut compute_instrs, &mut vid, a[7], b[6]);
+    let s1 = fadd(&mut compute_instrs, &mut vid, t1, t2);
+    let s2 = fsub(&mut compute_instrs, &mut vid, t3, t4);
+    let s3 = fsub(&mut compute_instrs, &mut vid, t5, t6);
+    let s4 = fsub(&mut compute_instrs, &mut vid, t7, t8);
+    let s5 = fadd(&mut compute_instrs, &mut vid, s1, s2);
+    let s6 = fadd(&mut compute_instrs, &mut vid, s3, s4);
+    let c2 = fadd(&mut compute_instrs, &mut vid, s5, s6);
+
+    // c3 = a0*b3 + a3*b0 + a7*b1 - a1*b7 + a5*b2 - a2*b5 + a4*b6 - a6*b4
+    let t1 = fmul(&mut compute_instrs, &mut vid, a[0], b[3]);
+    let t2 = fmul(&mut compute_instrs, &mut vid, a[3], b[0]);
+    let t3 = fmul(&mut compute_instrs, &mut vid, a[7], b[1]);
+    let t4 = fmul(&mut compute_instrs, &mut vid, a[1], b[7]);
+    let t5 = fmul(&mut compute_instrs, &mut vid, a[5], b[2]);
+    let t6 = fmul(&mut compute_instrs, &mut vid, a[2], b[5]);
+    let t7 = fmul(&mut compute_instrs, &mut vid, a[4], b[6]);
+    let t8 = fmul(&mut compute_instrs, &mut vid, a[6], b[4]);
+    let s1 = fadd(&mut compute_instrs, &mut vid, t1, t2);
+    let s2 = fsub(&mut compute_instrs, &mut vid, t3, t4);
+    let s3 = fsub(&mut compute_instrs, &mut vid, t5, t6);
+    let s4 = fsub(&mut compute_instrs, &mut vid, t7, t8);
+    let s5 = fadd(&mut compute_instrs, &mut vid, s1, s2);
+    let s6 = fadd(&mut compute_instrs, &mut vid, s3, s4);
+    let c3 = fadd(&mut compute_instrs, &mut vid, s5, s6);
+
+    // c4 = a0*b4 + a4*b0 + a1*b2 - a2*b1 + a3*b6 - a6*b3 + a7*b5 - a5*b7
+    let t1 = fmul(&mut compute_instrs, &mut vid, a[0], b[4]);
+    let t2 = fmul(&mut compute_instrs, &mut vid, a[4], b[0]);
+    let t3 = fmul(&mut compute_instrs, &mut vid, a[1], b[2]);
+    let t4 = fmul(&mut compute_instrs, &mut vid, a[2], b[1]);
+    let t5 = fmul(&mut compute_instrs, &mut vid, a[3], b[6]);
+    let t6 = fmul(&mut compute_instrs, &mut vid, a[6], b[3]);
+    let t7 = fmul(&mut compute_instrs, &mut vid, a[7], b[5]);
+    let t8 = fmul(&mut compute_instrs, &mut vid, a[5], b[7]);
+    let s1 = fadd(&mut compute_instrs, &mut vid, t1, t2);
+    let s2 = fsub(&mut compute_instrs, &mut vid, t3, t4);
+    let s3 = fsub(&mut compute_instrs, &mut vid, t5, t6);
+    let s4 = fsub(&mut compute_instrs, &mut vid, t7, t8);
+    let s5 = fadd(&mut compute_instrs, &mut vid, s1, s2);
+    let s6 = fadd(&mut compute_instrs, &mut vid, s3, s4);
+    let c4 = fadd(&mut compute_instrs, &mut vid, s5, s6);
+
+    // c5 = a0*b5 + a5*b0 + a3*b2 - a2*b3 + a6*b1 - a1*b6 + a4*b7 - a7*b4
+    let t1 = fmul(&mut compute_instrs, &mut vid, a[0], b[5]);
+    let t2 = fmul(&mut compute_instrs, &mut vid, a[5], b[0]);
+    let t3 = fmul(&mut compute_instrs, &mut vid, a[3], b[2]);
+    let t4 = fmul(&mut compute_instrs, &mut vid, a[2], b[3]);
+    let t5 = fmul(&mut compute_instrs, &mut vid, a[6], b[1]);
+    let t6 = fmul(&mut compute_instrs, &mut vid, a[1], b[6]);
+    let t7 = fmul(&mut compute_instrs, &mut vid, a[4], b[7]);
+    let t8 = fmul(&mut compute_instrs, &mut vid, a[7], b[4]);
+    let s1 = fadd(&mut compute_instrs, &mut vid, t1, t2);
+    let s2 = fsub(&mut compute_instrs, &mut vid, t3, t4);
+    let s3 = fsub(&mut compute_instrs, &mut vid, t5, t6);
+    let s4 = fsub(&mut compute_instrs, &mut vid, t7, t8);
+    let s5 = fadd(&mut compute_instrs, &mut vid, s1, s2);
+    let s6 = fadd(&mut compute_instrs, &mut vid, s3, s4);
+    let c5 = fadd(&mut compute_instrs, &mut vid, s5, s6);
+
+    // c6 = a0*b6 + a6*b0 + a5*b1 - a1*b5 + a4*b3 - a3*b4 + a7*b2 - a2*b7
+    let t1 = fmul(&mut compute_instrs, &mut vid, a[0], b[6]);
+    let t2 = fmul(&mut compute_instrs, &mut vid, a[6], b[0]);
+    let t3 = fmul(&mut compute_instrs, &mut vid, a[5], b[1]);
+    let t4 = fmul(&mut compute_instrs, &mut vid, a[1], b[5]);
+    let t5 = fmul(&mut compute_instrs, &mut vid, a[4], b[3]);
+    let t6 = fmul(&mut compute_instrs, &mut vid, a[3], b[4]);
+    let t7 = fmul(&mut compute_instrs, &mut vid, a[7], b[2]);
+    let t8 = fmul(&mut compute_instrs, &mut vid, a[2], b[7]);
+    let s1 = fadd(&mut compute_instrs, &mut vid, t1, t2);
+    let s2 = fsub(&mut compute_instrs, &mut vid, t3, t4);
+    let s3 = fsub(&mut compute_instrs, &mut vid, t5, t6);
+    let s4 = fsub(&mut compute_instrs, &mut vid, t7, t8);
+    let s5 = fadd(&mut compute_instrs, &mut vid, s1, s2);
+    let s6 = fadd(&mut compute_instrs, &mut vid, s3, s4);
+    let c6 = fadd(&mut compute_instrs, &mut vid, s5, s6);
+
+    // c7 = a0*b7 + a7*b0 + a1*b3 - a3*b1 + a2*b6 - a6*b2 + a5*b4 - a4*b5
+    let t1 = fmul(&mut compute_instrs, &mut vid, a[0], b[7]);
+    let t2 = fmul(&mut compute_instrs, &mut vid, a[7], b[0]);
+    let t3 = fmul(&mut compute_instrs, &mut vid, a[1], b[3]);
+    let t4 = fmul(&mut compute_instrs, &mut vid, a[3], b[1]);
+    let t5 = fmul(&mut compute_instrs, &mut vid, a[2], b[6]);
+    let t6 = fmul(&mut compute_instrs, &mut vid, a[6], b[2]);
+    let t7 = fmul(&mut compute_instrs, &mut vid, a[5], b[4]);
+    let t8 = fmul(&mut compute_instrs, &mut vid, a[4], b[5]);
+    let s1 = fadd(&mut compute_instrs, &mut vid, t1, t2);
+    let s2 = fsub(&mut compute_instrs, &mut vid, t3, t4);
+    let s3 = fsub(&mut compute_instrs, &mut vid, t5, t6);
+    let s4 = fsub(&mut compute_instrs, &mut vid, t7, t8);
+    let s5 = fadd(&mut compute_instrs, &mut vid, s1, s2);
+    let s6 = fadd(&mut compute_instrs, &mut vid, s3, s4);
+    let c7 = fadd(&mut compute_instrs, &mut vid, s5, s6);
+
+    let c = [c0, c1, c2, c3, c4, c5, c6, c7];
+
+    // Store all 8 components to out[idx]
+    for i in 0..8 {
+        compute_instrs.push((ValueId(vid), GpuOp::ConstInt(i as i64, GpuType::I32)));
+        let i_const = ValueId(vid);
+        vid += 1;
+
+        compute_instrs.push((ValueId(vid), GpuOp::Add(base_offset, i_const)));
+        let offset = ValueId(vid);
+        vid += 1;
+
+        compute_instrs.push((
+            ValueId(vid),
+            GpuOp::GetElementPtr(out_base, vec![offset]),
+        ));
+        let ptr = ValueId(vid);
+        vid += 1;
+
+        compute_instrs.push((
+            ValueId(vid),
+            GpuOp::Store(ptr, c[i], MemorySpace::Global),
+        ));
+        vid += 1;
+    }
+
     let compute_block = GpuBlock {
         id: BlockId(1),
         label: "compute".into(),
-        instructions: vec![],
+        instructions: compute_instrs,
         terminator: GpuTerminator::Br(BlockId(2)),
     };
 
@@ -961,6 +1213,8 @@ pub fn gen_octonion_mul_kernel() -> GpuKernel {
 }
 
 /// Generate octonion norm kernel
+///
+/// Computes: ||o|| = sqrt(sum of squares of all 8 components)
 pub fn gen_octonion_norm_kernel() -> GpuKernel {
     let mut kernel = GpuKernel::new("octonion_norm");
 
@@ -983,12 +1237,85 @@ pub fn gen_octonion_norm_kernel() -> GpuKernel {
         terminator: GpuTerminator::CondBr(ValueId(6), BlockId(1), BlockId(2)),
     };
 
-    // Placeholder compute block - full implementation requires refactoring
-    // TODO: Implement proper octonion norm using GetElementPtr + Load
+    let mut compute_instrs = Vec::new();
+    let mut vid = 10u32;
+
+    // Get base pointers
+    compute_instrs.push((ValueId(vid), GpuOp::Param(0))); // o base
+    let o_base = ValueId(vid);
+    vid += 1;
+
+    compute_instrs.push((ValueId(vid), GpuOp::Param(1))); // norm output
+    let norm_base = ValueId(vid);
+    vid += 1;
+
+    // Compute base offset: idx * 8
+    compute_instrs.push((ValueId(vid), GpuOp::ConstInt(8, GpuType::I32)));
+    let eight = ValueId(vid);
+    vid += 1;
+
+    compute_instrs.push((ValueId(vid), GpuOp::Mul(ValueId(4), eight)));
+    let base_offset = ValueId(vid);
+    vid += 1;
+
+    // Load all 8 components of o[idx] and compute sum of squares
+    compute_instrs.push((ValueId(vid), GpuOp::ConstFloat(0.0, GpuType::F32)));
+    let mut sum_sq = ValueId(vid);
+    vid += 1;
+
+    for i in 0..8 {
+        compute_instrs.push((ValueId(vid), GpuOp::ConstInt(i as i64, GpuType::I32)));
+        let i_const = ValueId(vid);
+        vid += 1;
+
+        compute_instrs.push((ValueId(vid), GpuOp::Add(base_offset, i_const)));
+        let offset = ValueId(vid);
+        vid += 1;
+
+        compute_instrs.push((
+            ValueId(vid),
+            GpuOp::GetElementPtr(o_base, vec![offset]),
+        ));
+        let ptr = ValueId(vid);
+        vid += 1;
+
+        compute_instrs.push((ValueId(vid), GpuOp::Load(ptr, MemorySpace::Global)));
+        let val = ValueId(vid);
+        vid += 1;
+
+        // val * val
+        compute_instrs.push((ValueId(vid), GpuOp::FMul(val, val)));
+        let sq = ValueId(vid);
+        vid += 1;
+
+        // sum_sq += sq
+        compute_instrs.push((ValueId(vid), GpuOp::FAdd(sum_sq, sq)));
+        sum_sq = ValueId(vid);
+        vid += 1;
+    }
+
+    // sqrt(sum_sq)
+    compute_instrs.push((ValueId(vid), GpuOp::FastSqrt(sum_sq)));
+    let norm_val = ValueId(vid);
+    vid += 1;
+
+    // Store norm to output
+    compute_instrs.push((
+        ValueId(vid),
+        GpuOp::GetElementPtr(norm_base, vec![ValueId(4)]),
+    ));
+    let out_ptr = ValueId(vid);
+    vid += 1;
+
+    compute_instrs.push((
+        ValueId(vid),
+        GpuOp::Store(out_ptr, norm_val, MemorySpace::Global),
+    ));
+
     let compute_block = GpuBlock {
         id: BlockId(1),
         label: "compute".into(),
-        instructions: vec![],
+        instructions: compute_instrs,
         terminator: GpuTerminator::Br(BlockId(2)),
     };
 

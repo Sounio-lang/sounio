@@ -397,6 +397,72 @@ impl GpuTopology {
         }
     }
 
+    /// Discover GPU topology for the specified backend.
+    ///
+    /// This method attempts to enumerate real GPU devices and their interconnects.
+    /// Currently falls back to simulated topology until FFI bindings are added.
+    ///
+    /// # Backend-specific discovery:
+    /// - **CUDA**: Would use `cuDeviceGetCount`, `cuDeviceGetAttribute`, `cuDeviceCanAccessPeer`
+    /// - **Metal**: Would use `MTLCopyAllDevices()` from Metal framework
+    /// - **Vulkan**: Would use `vkEnumeratePhysicalDevices`
+    /// - **Simulated**: Returns synthetic topology for testing
+    ///
+    /// # Future work
+    /// Real device discovery requires:
+    /// 1. FFI bindings to CUDA/Metal/Vulkan runtime APIs
+    /// 2. Conditional compilation for platform-specific code
+    /// 3. Proper error handling when no devices are available
+    pub fn discover(backend: GpuBackend, fallback_count: u32) -> Self {
+        match backend {
+            GpuBackend::Cuda => {
+                // TODO: Real CUDA discovery
+                // Would require linking against CUDA runtime/driver API:
+                //   - cuInit(0)
+                //   - cuDeviceGetCount(&count)
+                //   - cuDeviceGetName(name, 256, device)
+                //   - cuDeviceGet(&device, i)
+                //   - cuDeviceGetAttribute(&value, attr, device)
+                //   - cuDeviceCanAccessPeer(&can_access, dev1, dev2)
+                //
+                // For NVLink topology detection:
+                //   - Use nvmlDeviceGetNvLinkState / nvmlDeviceGetNvLinkCapability
+                //   - Detect NVSwitch presence via nvmlSystemGetNvLinkBridgeCount
+                Self::simulated(fallback_count)
+            }
+            GpuBackend::Metal => {
+                // TODO: Real Metal discovery
+                // Would require Objective-C FFI or objc crate:
+                //   - MTLCopyAllDevices() -> NSArray<id<MTLDevice>>
+                //   - device.name -> NSString
+                //   - device.recommendedMaxWorkingSetSize -> uint64_t
+                //   - device.maxThreadsPerThreadgroup -> MTLSize
+                //
+                // Apple Silicon unified memory:
+                //   - device.hasUnifiedMemory -> bool
+                //   - P2P not applicable (single GPU or unified memory)
+                Self::simulated(fallback_count)
+            }
+            GpuBackend::Vulkan => {
+                // TODO: Real Vulkan discovery
+                // Would require vulkan-sys or ash crate:
+                //   - vkEnumeratePhysicalDevices(instance, &count, devices)
+                //   - vkGetPhysicalDeviceProperties(device, &props)
+                //   - vkGetPhysicalDeviceMemoryProperties(device, &memProps)
+                Self::simulated(fallback_count)
+            }
+            GpuBackend::OpenCL => {
+                // TODO: Real OpenCL discovery
+                // Would require opencl-sys crate:
+                //   - clGetPlatformIDs
+                //   - clGetDeviceIDs
+                //   - clGetDeviceInfo
+                Self::simulated(fallback_count)
+            }
+            GpuBackend::Simulated => Self::simulated(fallback_count),
+        }
+    }
+
     /// Create a simulated topology with n devices
     pub fn simulated(n: u32) -> Self {
         let mut topology = Self::new();
@@ -668,10 +734,7 @@ impl MultiGpuRuntime {
 
     /// Create a new multi-GPU runtime with specific configuration
     pub fn with_config(config: MultiGpuConfig) -> Self {
-        let topology = match config.backend {
-            GpuBackend::Simulated => GpuTopology::simulated(config.device_count),
-            _ => GpuTopology::simulated(config.device_count), // TODO: real discovery
-        };
+        let topology = GpuTopology::discover(config.backend, config.device_count);
 
         // Build P2P capability matrix
         let mut p2p_capabilities = HashMap::new();

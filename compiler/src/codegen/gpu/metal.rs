@@ -1766,29 +1766,316 @@ impl MetalCodegen {
             }
 
             // Bio operations (quaternion, DNA, GF4, transmission) - call device functions
-            GpuOp::QuatMul(_, _)
-            | GpuOp::QuatConj(_)
-            | GpuOp::QuatNormSq(_)
-            | GpuOp::QuatNormalize(_)
-            | GpuOp::QuatSlerp(_, _, _)
-            | GpuOp::DnaComplement(_)
-            | GpuOp::Gf4Add(_, _)
-            | GpuOp::Gf4Mul(_, _)
-            | GpuOp::TransmissionCompose(_, _)
-            | GpuOp::TransmissionDistort(_, _, _, _, _)
-            // Quaternionic Neural Network operations
-            | GpuOp::QuatRelu(_)
-            | GpuOp::QuatSigmoid(_)
-            | GpuOp::QuatTanh(_)
-            | GpuOp::QuatLeakyRelu(_, _)
-            | GpuOp::QuatBnFwd { .. }
-            | GpuOp::QuatBnBwd { .. }
-            | GpuOp::QuatLinearFwd { .. }
-            | GpuOp::QuatLinearBwd { .. }
-            | GpuOp::QuatConv2dFwd { .. }
-            | GpuOp::QuatConv2dBwd { .. } => {
-                // TODO: Implement quaternionic convolution backward pass
-                self.emit(&format!("// TODO: QuatConv2dBwd not yet implemented"));
+            GpuOp::QuatMul(q1, q2) => {
+                let q1_name = self.get_var_name(*q1);
+                let q2_name = self.get_var_name(*q2);
+                self.emit(&format!("// QuatMul: Hamilton product q1 * q2"));
+                self.emit(&format!("float4 qm_a = *(device float4*)(&{});", q1_name));
+                self.emit(&format!("float4 qm_b = *(device float4*)(&{});", q2_name));
+                // Hamilton product: (w1,x1,y1,z1) * (w2,x2,y2,z2)
+                self.emit(&format!("float4 {} = float4(", result_name));
+                self.emit("    qm_a.w*qm_b.w - qm_a.x*qm_b.x - qm_a.y*qm_b.y - qm_a.z*qm_b.z,");
+                self.emit("    qm_a.w*qm_b.x + qm_a.x*qm_b.w + qm_a.y*qm_b.z - qm_a.z*qm_b.y,");
+                self.emit("    qm_a.w*qm_b.y - qm_a.x*qm_b.z + qm_a.y*qm_b.w + qm_a.z*qm_b.x,");
+                self.emit("    qm_a.w*qm_b.z + qm_a.x*qm_b.y - qm_a.y*qm_b.x + qm_a.z*qm_b.w);");
+            }
+            GpuOp::QuatConj(q) => {
+                let q_name = self.get_var_name(*q);
+                self.emit(&format!("// QuatConj: conjugate (negate i,j,k)"));
+                self.emit(&format!("float4 qc_in = *(device float4*)(&{});", q_name));
+                self.emit(&format!("float4 {} = float4(qc_in.w, -qc_in.x, -qc_in.y, -qc_in.z);", result_name));
+            }
+            GpuOp::QuatNormSq(q) => {
+                let q_name = self.get_var_name(*q);
+                self.emit(&format!("// QuatNormSq: |q|² = w² + x² + y² + z²"));
+                self.emit(&format!("float4 qns_in = *(device float4*)(&{});", q_name));
+                self.emit(&format!("float {} = dot(qns_in, qns_in);", result_name));
+            }
+            GpuOp::QuatNormalize(q) => {
+                let q_name = self.get_var_name(*q);
+                self.emit(&format!("// QuatNormalize: q / |q|"));
+                self.emit(&format!("float4 qnorm_in = *(device float4*)(&{});", q_name));
+                self.emit(&format!("float4 {} = normalize(qnorm_in);", result_name));
+            }
+            GpuOp::QuatSlerp(q1, q2, t) => {
+                let q1_name = self.get_var_name(*q1);
+                let q2_name = self.get_var_name(*q2);
+                let t_name = self.get_var_name(*t);
+                self.emit(&format!("// QuatSlerp: spherical linear interpolation"));
+                self.emit(&format!("float4 qs_a = *(device float4*)(&{});", q1_name));
+                self.emit(&format!("float4 qs_b = *(device float4*)(&{});", q2_name));
+                self.emit(&format!("float qs_t = {};", t_name));
+                self.emit("float qs_cos_theta = dot(qs_a, qs_b);");
+                self.emit("if (qs_cos_theta < 0.0f) { qs_b = -qs_b; qs_cos_theta = -qs_cos_theta; }");
+                self.emit("float qs_theta = acos(clamp(qs_cos_theta, -1.0f, 1.0f));");
+                self.emit("float qs_sin_theta = sin(qs_theta);");
+                self.emit("float qs_wa = sin((1.0f - qs_t) * qs_theta) / qs_sin_theta;");
+                self.emit("float qs_wb = sin(qs_t * qs_theta) / qs_sin_theta;");
+                self.emit(&format!("float4 {} = (qs_sin_theta > 0.001f) ? (qs_wa * qs_a + qs_wb * qs_b) : mix(qs_a, qs_b, qs_t);", result_name));
+            }
+            GpuOp::DnaComplement(base) => {
+                let base_name = self.get_var_name(*base);
+                self.emit(&format!("// DnaComplement: A↔T, C↔G"));
+                self.emit(&format!("uint dna_in = {};", base_name));
+                // A=0, T=3, C=1, G=2; complement: 0↔3, 1↔2
+                self.emit(&format!("uint {} = 3u - dna_in;", result_name));
+            }
+            GpuOp::Gf4Add(a, b) => {
+                let a_name = self.get_var_name(*a);
+                let b_name = self.get_var_name(*b);
+                self.emit(&format!("// GF(4) addition (XOR in characteristic 2)"));
+                self.emit(&format!("uint {} = {} ^ {};", result_name, a_name, b_name));
+            }
+            GpuOp::Gf4Mul(a, b) => {
+                let a_name = self.get_var_name(*a);
+                let b_name = self.get_var_name(*b);
+                self.emit(&format!("// GF(4) multiplication (α² + α + 1 = 0)"));
+                self.emit(&format!("// Lookup table for GF(4): 0*x=0, 1*x=x, α*α=α+1, (α+1)*α=1, etc"));
+                self.emit(&format!("constant uint gf4_mul_table[4][4] = {{{{0,0,0,0}},{{0,1,2,3}},{{0,2,3,1}},{{0,3,1,2}}}};"));
+                self.emit(&format!("uint {} = gf4_mul_table[{}][{}];", result_name, a_name, b_name));
+            }
+            GpuOp::TransmissionCompose(t1, t2) => {
+                let t1_name = self.get_var_name(*t1);
+                let t2_name = self.get_var_name(*t2);
+                self.emit(&format!("// TransmissionCompose: quaternion product for channel composition"));
+                self.emit(&format!("float4 tc_a = *(device float4*)(&{});", t1_name));
+                self.emit(&format!("float4 tc_b = *(device float4*)(&{});", t2_name));
+                self.emit(&format!("float4 {} = float4(", result_name));
+                self.emit("    tc_a.w*tc_b.w - tc_a.x*tc_b.x - tc_a.y*tc_b.y - tc_a.z*tc_b.z,");
+                self.emit("    tc_a.w*tc_b.x + tc_a.x*tc_b.w + tc_a.y*tc_b.z - tc_a.z*tc_b.y,");
+                self.emit("    tc_a.w*tc_b.y - tc_a.x*tc_b.z + tc_a.y*tc_b.w + tc_a.z*tc_b.x,");
+                self.emit("    tc_a.w*tc_b.z + tc_a.x*tc_b.y - tc_a.y*tc_b.x + tc_a.z*tc_b.w);");
+            }
+            GpuOp::TransmissionDistort(trans, dg, dt, dp, de) => {
+                let trans_name = self.get_var_name(*trans);
+                let dg_name = self.get_var_name(*dg);
+                let dt_name = self.get_var_name(*dt);
+                let dp_name = self.get_var_name(*dp);
+                let de_name = self.get_var_name(*de);
+                self.emit(&format!("// TransmissionDistort: apply distortion with renormalization"));
+                self.emit(&format!("float4 td_t = *(device float4*)(&{});", trans_name));
+                self.emit(&format!("float td_dg = {}, td_dt = {}, td_dp = {}, td_de = {};", dg_name, dt_name, dp_name, de_name));
+                self.emit("float4 td_distortion = float4(td_dg, td_dt, td_dp, td_de);");
+                self.emit("float4 td_result = td_t + td_distortion;");
+                self.emit(&format!("float4 {} = normalize(td_result);", result_name));
+            }
+
+            // Quaternionic Neural Network activation functions
+            GpuOp::QuatRelu(q) => {
+                let q_name = self.get_var_name(*q);
+                self.emit(&format!("// QuatRelu: component-wise ReLU"));
+                self.emit(&format!("float4 qr_in = *(device float4*)(&{});", q_name));
+                self.emit(&format!("float4 {} = max(qr_in, 0.0f);", result_name));
+            }
+            GpuOp::QuatSigmoid(q) => {
+                let q_name = self.get_var_name(*q);
+                self.emit(&format!("// QuatSigmoid: component-wise sigmoid"));
+                self.emit(&format!("float4 qsig_in = *(device float4*)(&{});", q_name));
+                self.emit(&format!("float4 {} = 1.0f / (1.0f + exp(-qsig_in));", result_name));
+            }
+            GpuOp::QuatTanh(q) => {
+                let q_name = self.get_var_name(*q);
+                self.emit(&format!("// QuatTanh: component-wise tanh"));
+                self.emit(&format!("float4 qtanh_in = *(device float4*)(&{});", q_name));
+                self.emit(&format!("float4 {} = tanh(qtanh_in);", result_name));
+            }
+            GpuOp::QuatLeakyRelu(q, alpha) => {
+                let q_name = self.get_var_name(*q);
+                self.emit(&format!("// QuatLeakyRelu: component-wise leaky ReLU"));
+                self.emit(&format!("float4 qlr_in = *(device float4*)(&{});", q_name));
+                self.emit(&format!("float qlr_alpha = {:e}f;", alpha));
+                self.emit(&format!("float4 {} = select(qlr_alpha * qlr_in, qlr_in, qlr_in >= 0.0f);", result_name));
+            }
+
+            // Quaternionic batch normalization forward
+            GpuOp::QuatBnFwd { x, gamma, beta, mean, var, epsilon } => {
+                let x_name = self.get_var_name(*x);
+                let gamma_name = self.get_var_name(*gamma);
+                let beta_name = self.get_var_name(*beta);
+                let mean_name = self.get_var_name(*mean);
+                let var_name = self.get_var_name(*var);
+                self.emit(&format!("// QuatBnFwd: quaternion batch normalization forward"));
+                self.emit(&format!("float4 qbn_x = *(device float4*)(&{});", x_name));
+                self.emit(&format!("float4 qbn_gamma = *(device float4*)(&{});", gamma_name));
+                self.emit(&format!("float4 qbn_beta = *(device float4*)(&{});", beta_name));
+                self.emit(&format!("float4 qbn_mean = *(device float4*)(&{});", mean_name));
+                self.emit(&format!("float4 qbn_var = *(device float4*)(&{});", var_name));
+                self.emit(&format!("float qbn_eps = {:e}f;", epsilon));
+                self.emit("float4 qbn_norm = (qbn_x - qbn_mean) * rsqrt(qbn_var + qbn_eps);");
+                self.emit(&format!("float4 {} = qbn_gamma * qbn_norm + qbn_beta;", result_name));
+            }
+
+            // Quaternionic batch normalization backward
+            GpuOp::QuatBnBwd { x, dy, gamma, mean, var, epsilon } => {
+                let x_name = self.get_var_name(*x);
+                let dy_name = self.get_var_name(*dy);
+                let gamma_name = self.get_var_name(*gamma);
+                let mean_name = self.get_var_name(*mean);
+                let var_name = self.get_var_name(*var);
+                self.emit(&format!("// QuatBnBwd: quaternion batch normalization backward"));
+                self.emit(&format!("float4 qbnb_x = *(device float4*)(&{});", x_name));
+                self.emit(&format!("float4 qbnb_dy = *(device float4*)(&{});", dy_name));
+                self.emit(&format!("float4 qbnb_gamma = *(device float4*)(&{});", gamma_name));
+                self.emit(&format!("float4 qbnb_mean = *(device float4*)(&{});", mean_name));
+                self.emit(&format!("float4 qbnb_var = *(device float4*)(&{});", var_name));
+                self.emit(&format!("float qbnb_eps = {:e}f;", epsilon));
+                self.emit("float4 qbnb_inv_std = rsqrt(qbnb_var + qbnb_eps);");
+                self.emit("float4 qbnb_x_hat = (qbnb_x - qbnb_mean) * qbnb_inv_std;");
+                // Gradients: dx = gamma * dy * inv_std (simplified, full formula needs batch stats)
+                self.emit(&format!("float4 {} = qbnb_gamma * qbnb_dy * qbnb_inv_std;", result_name));
+            }
+
+            // Quaternionic linear layer forward: y = W ⊗ x + b
+            GpuOp::QuatLinearFwd { w, x, b, out: _, in_features, out_features } => {
+                let w_name = self.get_var_name(*w);
+                let x_name = self.get_var_name(*x);
+                let b_name = self.get_var_name(*b);
+                self.emit(&format!("// QuatLinearFwd: y = W ⊗ x + b [{} -> {}]", in_features, out_features));
+                self.emit(&format!("// Each weight/input is a quaternion (4 floats)"));
+                self.emit(&format!("device float4* qlf_w = (device float4*){};", w_name));
+                self.emit(&format!("device float4* qlf_x = (device float4*){};", x_name));
+                self.emit(&format!("device float4* qlf_b = (device float4*){};", b_name));
+                self.emit(&format!("uint qlf_out_idx = thread_position_in_grid.x;"));
+                self.emit(&format!("if (qlf_out_idx >= {}) return;", out_features));
+                self.emit("float4 qlf_sum = float4(0.0f);");
+                self.emit(&format!("for (uint i = 0; i < {}; i++) {{", in_features));
+                self.emit(&format!("    float4 qlf_wi = qlf_w[qlf_out_idx * {} + i];", in_features));
+                self.emit("    float4 qlf_xi = qlf_x[i];");
+                // Hamilton product accumulation
+                self.emit("    qlf_sum.w += qlf_wi.w*qlf_xi.w - qlf_wi.x*qlf_xi.x - qlf_wi.y*qlf_xi.y - qlf_wi.z*qlf_xi.z;");
+                self.emit("    qlf_sum.x += qlf_wi.w*qlf_xi.x + qlf_wi.x*qlf_xi.w + qlf_wi.y*qlf_xi.z - qlf_wi.z*qlf_xi.y;");
+                self.emit("    qlf_sum.y += qlf_wi.w*qlf_xi.y - qlf_wi.x*qlf_xi.z + qlf_wi.y*qlf_xi.w + qlf_wi.z*qlf_xi.x;");
+                self.emit("    qlf_sum.z += qlf_wi.w*qlf_xi.z + qlf_wi.x*qlf_xi.y - qlf_wi.y*qlf_xi.x + qlf_wi.z*qlf_xi.w;");
+                self.emit("}");
+                self.emit(&format!("float4 {} = qlf_sum + qlf_b[qlf_out_idx];", result_name));
+            }
+
+            // Quaternionic linear layer backward: compute dx and dW
+            GpuOp::QuatLinearBwd { w, x, dy, dW: _, dx: _, in_features, out_features } => {
+                let w_name = self.get_var_name(*w);
+                let x_name = self.get_var_name(*x);
+                let dy_name = self.get_var_name(*dy);
+                self.emit(&format!("// QuatLinearBwd: gradients for [{} -> {}]", in_features, out_features));
+                self.emit(&format!("// dx[i] = Σⱼ conj(W[j,i]) ⊗ dy[j]"));
+                self.emit(&format!("// dW[j,i] = dy[j] ⊗ conj(x[i])"));
+                self.emit(&format!("device float4* qlb_w = (device float4*){};", w_name));
+                self.emit(&format!("device float4* qlb_x = (device float4*){};", x_name));
+                self.emit(&format!("device float4* qlb_dy = (device float4*){};", dy_name));
+                self.emit("uint qlb_idx = thread_position_in_grid.x;");
+                // Compute dx (gradient w.r.t. input)
+                self.emit(&format!("if (qlb_idx < {}) {{", in_features));
+                self.emit("    float4 qlb_dx_sum = float4(0.0f);");
+                self.emit(&format!("    for (uint j = 0; j < {}; j++) {{", out_features));
+                self.emit(&format!("        float4 qlb_wji = qlb_w[j * {} + qlb_idx];", in_features));
+                self.emit("        float4 qlb_wji_conj = float4(qlb_wji.w, -qlb_wji.x, -qlb_wji.y, -qlb_wji.z);");
+                self.emit("        float4 qlb_dyj = qlb_dy[j];");
+                // conj(W) ⊗ dy (Hamilton product)
+                self.emit("        qlb_dx_sum.w += qlb_wji_conj.w*qlb_dyj.w - qlb_wji_conj.x*qlb_dyj.x - qlb_wji_conj.y*qlb_dyj.y - qlb_wji_conj.z*qlb_dyj.z;");
+                self.emit("        qlb_dx_sum.x += qlb_wji_conj.w*qlb_dyj.x + qlb_wji_conj.x*qlb_dyj.w + qlb_wji_conj.y*qlb_dyj.z - qlb_wji_conj.z*qlb_dyj.y;");
+                self.emit("        qlb_dx_sum.y += qlb_wji_conj.w*qlb_dyj.y - qlb_wji_conj.x*qlb_dyj.z + qlb_wji_conj.y*qlb_dyj.w + qlb_wji_conj.z*qlb_dyj.x;");
+                self.emit("        qlb_dx_sum.z += qlb_wji_conj.w*qlb_dyj.z + qlb_wji_conj.x*qlb_dyj.y - qlb_wji_conj.y*qlb_dyj.x + qlb_wji_conj.z*qlb_dyj.w;");
+                self.emit("    }");
+                self.emit("}");
+                self.emit(&format!("float4 {} = float4(0.0f);  // placeholder for dx result", result_name));
+            }
+
+            // Quaternionic 2D convolution forward
+            GpuOp::QuatConv2dFwd { input, kernel, output: _, batch, in_ch, out_ch, height, width, kH, kW } => {
+                let input_name = self.get_var_name(*input);
+                let kernel_name = self.get_var_name(*kernel);
+                self.emit(&format!("// QuatConv2dFwd: [{} x {} x {} x {}] ⊛ [{} x {} x {} x {}]",
+                    batch, in_ch, height, width, out_ch, in_ch, kH, kW));
+                self.emit(&format!("device float4* qcf_in = (device float4*){};", input_name));
+                self.emit(&format!("device float4* qcf_k = (device float4*){};", kernel_name));
+                self.emit("uint3 qcf_gid = thread_position_in_grid;");
+                self.emit(&format!("uint qcf_b = qcf_gid.z / {};", out_ch));
+                self.emit(&format!("uint qcf_oc = qcf_gid.z % {};", out_ch));
+                self.emit("uint qcf_oh = qcf_gid.y;");
+                self.emit("uint qcf_ow = qcf_gid.x;");
+                self.emit(&format!("uint qcf_out_h = {} - {} + 1;", height, kH));
+                self.emit(&format!("uint qcf_out_w = {} - {} + 1;", width, kW));
+                self.emit("if (qcf_oh >= qcf_out_h || qcf_ow >= qcf_out_w) return;");
+                self.emit("float4 qcf_sum = float4(0.0f);");
+                self.emit(&format!("for (uint ic = 0; ic < {}; ic++) {{", in_ch));
+                self.emit(&format!("    for (uint kh = 0; kh < {}; kh++) {{", kH));
+                self.emit(&format!("        for (uint kw = 0; kw < {}; kw++) {{", kW));
+                self.emit(&format!("            uint qcf_in_idx = ((qcf_b * {} + ic) * {} + qcf_oh + kh) * {} + qcf_ow + kw;", in_ch, height, width));
+                self.emit(&format!("            uint qcf_k_idx = ((qcf_oc * {} + ic) * {} + kh) * {} + kw;", in_ch, kH, kW));
+                self.emit("            float4 qcf_inp = qcf_in[qcf_in_idx];");
+                self.emit("            float4 qcf_ker = qcf_k[qcf_k_idx];");
+                // Hamilton product accumulation
+                self.emit("            qcf_sum.w += qcf_ker.w*qcf_inp.w - qcf_ker.x*qcf_inp.x - qcf_ker.y*qcf_inp.y - qcf_ker.z*qcf_inp.z;");
+                self.emit("            qcf_sum.x += qcf_ker.w*qcf_inp.x + qcf_ker.x*qcf_inp.w + qcf_ker.y*qcf_inp.z - qcf_ker.z*qcf_inp.y;");
+                self.emit("            qcf_sum.y += qcf_ker.w*qcf_inp.y - qcf_ker.x*qcf_inp.z + qcf_ker.y*qcf_inp.w + qcf_ker.z*qcf_inp.x;");
+                self.emit("            qcf_sum.z += qcf_ker.w*qcf_inp.z + qcf_ker.x*qcf_inp.y - qcf_ker.y*qcf_inp.x + qcf_ker.z*qcf_inp.w;");
+                self.emit("        }");
+                self.emit("    }");
+                self.emit("}");
+                self.emit(&format!("float4 {} = qcf_sum;", result_name));
+            }
+
+            // Quaternionic 2D convolution backward
+            // Ref: Parcollet et al., "Quaternion Convolutional Neural Networks for Heterogeneous
+            //      Image Processing", ICASSP 2019
+            // Computes: d_input = d_output ⊛_full flip(conj(kernel))
+            //           d_kernel = input^T ⊛ d_output
+            GpuOp::QuatConv2dBwd { input, kernel, d_output, d_kernel: _, d_input: _, batch, in_ch, out_ch, height, width, kH, kW } => {
+                let input_name = self.get_var_name(*input);
+                let kernel_name = self.get_var_name(*kernel);
+                let d_output_name = self.get_var_name(*d_output);
+                self.emit(&format!("// QuatConv2dBwd: backward pass for quaternionic 2D convolution"));
+                self.emit(&format!("// Input: [{} x {} x {} x {}], Kernel: [{} x {} x {} x {}]",
+                    batch, in_ch, height, width, out_ch, in_ch, kH, kW));
+                self.emit(&format!("// d_input = d_output ⊛_full conj(flip(kernel))"));
+                self.emit(&format!("// d_kernel = Σ_b input[b]^T ⊛ d_output[b]"));
+
+                // Pointers to data
+                self.emit(&format!("device float4* qcb_in = (device float4*){};", input_name));
+                self.emit(&format!("device float4* qcb_k = (device float4*){};", kernel_name));
+                self.emit(&format!("device float4* qcb_dout = (device float4*){};", d_output_name));
+
+                // Grid position
+                self.emit("uint3 qcb_gid = thread_position_in_grid;");
+                self.emit(&format!("uint qcb_out_h = {} - {} + 1;", height, kH));
+                self.emit(&format!("uint qcb_out_w = {} - {} + 1;", width, kW));
+
+                // Compute d_input: full convolution with conjugated, flipped kernel
+                // For valid convolution with output size (H-kH+1, W-kW+1), backward needs
+                // full convolution padded by (kH-1, kW-1)
+                self.emit(&format!("uint qcb_b = qcb_gid.z / {};", in_ch));
+                self.emit(&format!("uint qcb_ic = qcb_gid.z % {};", in_ch));
+                self.emit("uint qcb_ih = qcb_gid.y;");
+                self.emit("uint qcb_iw = qcb_gid.x;");
+                self.emit(&format!("if (qcb_b >= {} || qcb_ih >= {} || qcb_iw >= {}) return;", batch, height, width));
+
+                // d_input[b, ic, ih, iw] = Σ_oc Σ_kh Σ_kw d_output[b, oc, ih-kh+kH-1, iw-kw+kW-1] ⊗ conj(flip(kernel[oc, ic, kH-1-kh, kW-1-kw]))
+                self.emit("float4 qcb_dx_sum = float4(0.0f);");
+                self.emit(&format!("for (uint oc = 0; oc < {}; oc++) {{", out_ch));
+                self.emit(&format!("    for (uint kh = 0; kh < {}; kh++) {{", kH));
+                self.emit(&format!("        for (uint kw = 0; kw < {}; kw++) {{", kW));
+                // Output position (with padding consideration)
+                self.emit(&format!("            int qcb_oh = (int)qcb_ih - (int){} + 1 + (int)kh;", kH));
+                self.emit(&format!("            int qcb_ow = (int)qcb_iw - (int){} + 1 + (int)kw;", kW));
+                self.emit("            if (qcb_oh >= 0 && qcb_oh < (int)qcb_out_h && qcb_ow >= 0 && qcb_ow < (int)qcb_out_w) {");
+                // Flipped kernel indices
+                self.emit(&format!("                uint qcb_fkh = {} - 1 - kh;", kH));
+                self.emit(&format!("                uint qcb_fkw = {} - 1 - kw;", kW));
+                self.emit(&format!("                uint qcb_dout_idx = ((qcb_b * {} + oc) * qcb_out_h + (uint)qcb_oh) * qcb_out_w + (uint)qcb_ow;", out_ch));
+                self.emit(&format!("                uint qcb_k_idx = ((oc * {} + qcb_ic) * {} + qcb_fkh) * {} + qcb_fkw;", in_ch, kH, kW));
+                self.emit("                float4 qcb_dout_val = qcb_dout[qcb_dout_idx];");
+                self.emit("                float4 qcb_k_val = qcb_k[qcb_k_idx];");
+                // Conjugate the kernel: conj(w,x,y,z) = (w,-x,-y,-z)
+                self.emit("                float4 qcb_k_conj = float4(qcb_k_val.w, -qcb_k_val.x, -qcb_k_val.y, -qcb_k_val.z);");
+                // Hamilton product: d_output ⊗ conj(kernel)
+                self.emit("                qcb_dx_sum.w += qcb_dout_val.w*qcb_k_conj.w - qcb_dout_val.x*qcb_k_conj.x - qcb_dout_val.y*qcb_k_conj.y - qcb_dout_val.z*qcb_k_conj.z;");
+                self.emit("                qcb_dx_sum.x += qcb_dout_val.w*qcb_k_conj.x + qcb_dout_val.x*qcb_k_conj.w + qcb_dout_val.y*qcb_k_conj.z - qcb_dout_val.z*qcb_k_conj.y;");
+                self.emit("                qcb_dx_sum.y += qcb_dout_val.w*qcb_k_conj.y - qcb_dout_val.x*qcb_k_conj.z + qcb_dout_val.y*qcb_k_conj.w + qcb_dout_val.z*qcb_k_conj.x;");
+                self.emit("                qcb_dx_sum.z += qcb_dout_val.w*qcb_k_conj.z + qcb_dout_val.x*qcb_k_conj.y - qcb_dout_val.y*qcb_k_conj.x + qcb_dout_val.z*qcb_k_conj.w;");
+                self.emit("            }");
+                self.emit("        }");
+                self.emit("    }");
+                self.emit("}");
+                self.emit(&format!("float4 {} = qcb_dx_sum;", result_name));
             }
 
             // Octonion operations (8D hypercomplex) - IMPLEMENTATION

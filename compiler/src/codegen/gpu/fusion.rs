@@ -1885,6 +1885,82 @@ impl FusionTransformer {
                 GpuOp::GetElementPtr(remap(*base), new_indices)
             }
 
+            // Quaternion operations (for quaternion-aware fusion patterns)
+            GpuOp::QuatLinearFwd { w, x, b, out, in_features, out_features } => {
+                GpuOp::QuatLinearFwd {
+                    w: remap(*w),
+                    x: remap(*x),
+                    b: remap(*b),
+                    out: remap(*out),
+                    in_features: *in_features,
+                    out_features: *out_features,
+                }
+            }
+            GpuOp::QuatLinearBwd { w, x, dy, dW, dx, in_features, out_features } => {
+                GpuOp::QuatLinearBwd {
+                    w: remap(*w),
+                    x: remap(*x),
+                    dy: remap(*dy),
+                    dW: remap(*dW),
+                    dx: remap(*dx),
+                    in_features: *in_features,
+                    out_features: *out_features,
+                }
+            }
+
+            GpuOp::QuatBnFwd { x, gamma, beta, mean, var, epsilon } => {
+                GpuOp::QuatBnFwd {
+                    x: remap(*x),
+                    gamma: remap(*gamma),
+                    beta: remap(*beta),
+                    mean: remap(*mean),
+                    var: remap(*var),
+                    epsilon: *epsilon,
+                }
+            }
+            GpuOp::QuatBnBwd { x, dy, gamma, mean, var, epsilon } => {
+                GpuOp::QuatBnBwd {
+                    x: remap(*x),
+                    dy: remap(*dy),
+                    gamma: remap(*gamma),
+                    mean: remap(*mean),
+                    var: remap(*var),
+                    epsilon: *epsilon,
+                }
+            }
+
+            GpuOp::QuatRelu(x) => GpuOp::QuatRelu(remap(*x)),
+            GpuOp::QuatLeakyRelu(x, alpha) => GpuOp::QuatLeakyRelu(remap(*x), *alpha),
+            GpuOp::QuatSigmoid(x) => GpuOp::QuatSigmoid(remap(*x)),
+            GpuOp::QuatTanh(x) => GpuOp::QuatTanh(remap(*x)),
+
+            // Sparse quaternion operations (for sparse fusion patterns)
+            GpuOp::SparseQuatLinearFwd { w, w_metadata, x, b, out, in_features, out_features, sparsity_format } => {
+                GpuOp::SparseQuatLinearFwd {
+                    w: remap(*w),
+                    w_metadata: remap(*w_metadata),
+                    x: remap(*x),
+                    b: remap(*b),
+                    out: remap(*out),
+                    in_features: *in_features,
+                    out_features: *out_features,
+                    sparsity_format: sparsity_format.clone(),
+                }
+            }
+            GpuOp::SparseQuatLinearBwd { w, w_metadata, x, dy, dW, dx, in_features, out_features, sparsity_format } => {
+                GpuOp::SparseQuatLinearBwd {
+                    w: remap(*w),
+                    w_metadata: remap(*w_metadata),
+                    x: remap(*x),
+                    dy: remap(*dy),
+                    dW: remap(*dW),
+                    dx: remap(*dx),
+                    in_features: *in_features,
+                    out_features: *out_features,
+                    sparsity_format: sparsity_format.clone(),
+                }
+            }
+
             // Pass through unchanged ops
             _ => op.clone(),
         }
