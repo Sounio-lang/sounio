@@ -18,6 +18,21 @@
 
 ---
 
+## Table of Contents
+
+- [The Metaphor](#the-metaphor)
+- [Why Sounio?](#why-sounio)
+- [Features](#features)
+- [Standard Library](#standard-library)
+- [Quick Start](#quick-start)
+- [Design Principles](#design-principles)
+- [Roadmap](#roadmap)
+- [Contributing](#contributing)
+- [Citation](#citation)
+- [License](#license)
+
+---
+
 ## The Metaphor
 
 > *"Place me on Sunium's marbled steep,*  
@@ -164,42 +179,6 @@ print("ATE: ", effect.value, " ± ", effect.uncertainty)
 | `linalg/` | 1,149 | Linear algebra |
 | `ode/` | 966 | ODE solvers |
 | `bayes/` | 1,500+ | Bayesian inference |
-
----
-
-## Quick Start
-
-**Troubleshooting Module Resolution Issues:**
-
-The `souc sysroot stdlib-paths` command diagnoses stdlib resolution problems:
-
-```bash
-souc sysroot stdlib-paths      # Show all search paths with existence status
-souc sysroot stdlib-paths -v   # Include compiler location and environment vars
-```
-
-**Common Issues:**
-
-- **"Import not found" errors** when stdlib exists: Run `souc sysroot stdlib-paths` to check which path is being used
-- **Program works in project root but not elsewhere**: The compiler finds stdlib via relative path from binary location
-
-**Fixes:**
-
-1. **Set environment variable** (preferred):
-   ```bash
-   export SOUNIO_STDLIB_PATH=/absolute/path/to/stdlib
-   ```
-
-2. **Install Sounio system-wide**:
-   ```bash
-   cargo install --path /usr/local
-   ```
-
-3. **Build from source** (includes stdlib):
-   ```bash
-   cd /path/to/sounio
-   cargo build --release
-   ```
 
 ---
 
