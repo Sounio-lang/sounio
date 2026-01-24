@@ -224,7 +224,7 @@ impl tower_lsp::LanguageServer for SounioLspServer {
             compilation_result: None,
         };
 
-        let mut store = self.documents.lock().unwrap();
+        let mut store = self.documents.lock().expect("mutex poisoned");
         store.documents.insert(params.text_document.uri.clone(), document);
 
         // Trigger compilation
@@ -232,7 +232,7 @@ impl tower_lsp::LanguageServer for SounioLspServer {
     }
 
     async fn did_change(&self, params: DidChangeTextDocumentParams) {
-        if let Some(mut document) = self.documents.lock().unwrap()
+        if let Some(mut document) = self.documents.lock().expect("mutex poisoned")
             .documents
             .get_mut(&params.text_document.uri) 
         {
@@ -254,12 +254,12 @@ impl tower_lsp::LanguageServer for SounioLspServer {
     }
 
     async fn did_close(&self, params: DidCloseTextDocumentParams) {
-        let mut store = self.documents.lock().unwrap();
+        let mut store = self.documents.lock().expect("mutex poisoned");
         store.documents.remove(&params.text_document.uri);
     }
 
     async fn completion(&self, params: CompletionParams) -> Result<Option<CompletionResponse>> {
-        let documents = self.documents.lock().unwrap();
+        let documents = self.documents.lock().expect("mutex poisoned");
         let position = params.text_document_position.position;
         
         if let Some(document) = documents.documents.get(&params.text_document_position.text_document.uri) {
@@ -271,7 +271,7 @@ impl tower_lsp::LanguageServer for SounioLspServer {
     }
 
     async fn hover(&self, params: HoverParams) -> Result<Option<Hover>> {
-        let documents = self.documents.lock().unwrap();
+        let documents = self.documents.lock().expect("mutex poisoned");
         let position = params.text_document_position_params.position;
         
         if let Some(document) = documents.documents.get(&params.text_document_position.text_document.uri.uri) {
@@ -283,7 +283,7 @@ impl tower_lsp::LanguageServer for SounioLspServer {
     }
 
     async fn goto_definition(&self, params: GotoDefinitionParams) -> Result<Option<GotoDefinitionResponse>> {
-        let documents = self.documents.lock().unwrap();
+        let documents = self.documents.lock().expect("mutex poisoned");
         let position = params.text_document_position_params.position;
         
         if let Some(document) = documents.documents.get(&params.text_document_position_params.text_document.uri.uri) {
@@ -295,7 +295,7 @@ impl tower_lsp::LanguageServer for SounioLspServer {
     }
 
     async fn references(&self, params: ReferenceParams) -> Result<Option<Vec<Location>>> {
-        let documents = self.documents.lock().unwrap();
+        let documents = self.documents.lock().expect("mutex poisoned");
         let position = params.text_document_position_params.position;
         
         if let Some(document) = documents.documents.get(&params.text_document_position_params.text_document.uri.uri) {
@@ -307,7 +307,7 @@ impl tower_lsp::LanguageServer for SounioLspServer {
     }
 
     async fn document_symbol(&self, params: DocumentSymbolParams) -> Result<Option<DocumentSymbolResponse>> {
-        let documents = self.documents.lock().unwrap();
+        let documents = self.documents.lock().expect("mutex poisoned");
         
         if let Some(document) = documents.documents.get(&params.text_document.uri) {
             let symbols = self.extract_document_symbols(&document.content);
@@ -318,7 +318,7 @@ impl tower_lsp::LanguageServer for SounioLspServer {
     }
 
     async fn rename(&self, params: RenameParams) -> Result<Option<WorkspaceEdit>> {
-        let documents = self.documents.lock().unwrap();
+        let documents = self.documents.lock().expect("mutex poisoned");
         let new_name = params.new_name;
         let position = params.text_document_position_params.position;
         
@@ -331,7 +331,7 @@ impl tower_lsp::LanguageServer for SounioLspServer {
     }
 
     async fn semantic_tokens_full(&self, params: SemanticTokensParams) -> Result<Option<SemanticTokensResponse>> {
-        let documents = self.documents.lock().unwrap();
+        let documents = self.documents.lock().expect("mutex poisoned");
         
         if let Some(document) = documents.documents.get(&params.text_document.uri) {
             let tokens = self.get_semantic_tokens(&document.content);
@@ -345,7 +345,7 @@ impl tower_lsp::LanguageServer for SounioLspServer {
     }
 
     async fn code_action(&self, params: CodeActionParams) -> Result<Option<CodeActionResponse>> {
-        let documents = self.documents.lock().unwrap();
+        let documents = self.documents.lock().expect("mutex poisoned");
         let range = params.range;
         
         if let Some(document) = documents.documents.get(&params.text_document.uri.uri) {
@@ -357,7 +357,7 @@ impl tower_lsp::LanguageServer for SounioLspServer {
     }
 
     async fn formatting(&self, params: DocumentFormattingParams) -> Result<Option<Vec<TextEdit>>> {
-        let documents = self.documents.lock().unwrap();
+        let documents = self.documents.lock().expect("mutex poisoned");
         
         if let Some(document) = documents.documents.get(&params.text_document.uri) {
             let edits = self.format_document(&document.content);
@@ -368,7 +368,7 @@ impl tower_lsp::LanguageServer for SounioLspServer {
     }
 
     async fn inlay_hint(&self, params: InlayHintParams) -> Result<Option<Vec<InlayHint>>> {
-        let documents = self.documents.lock().unwrap();
+        let documents = self.documents.lock().expect("mutex poisoned");
         let range = params.range;
         
         if let Some(document) = documents.documents.get(&params.text_document.uri.uri) {
@@ -395,7 +395,7 @@ impl SounioLspServer {
 
     /// Compile document and update cache
     async fn compile_document(&self, uri: &Url) {
-        let documents = self.documents.lock().unwrap();
+        let documents = self.documents.lock().expect("mutex poisoned");
         if let Some(document) = documents.documents.get(uri) {
             // Compile with Sounio compiler
             let result = self.run_compilation(&document.content);
@@ -690,7 +690,7 @@ impl SounioLspServer {
 
     /// Update symbol index
     fn update_symbol_index(&self, uri: &Url, result: &CompilationResult) {
-        let mut index = self.symbol_index.lock().unwrap();
+        let mut index = self.symbol_index.lock().expect("mutex poisoned");
         
         for symbol in &result.symbols {
             index.document_symbols

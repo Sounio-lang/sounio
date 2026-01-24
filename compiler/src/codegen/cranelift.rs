@@ -922,7 +922,7 @@ extern "C" fn runtime_jacobian(
     // Allocate result matrix (m × n)
     let result_size = m * n * std::mem::size_of::<f64>();
     let result_ptr = unsafe {
-        std::alloc::alloc(std::alloc::Layout::from_size_align(result_size, 8).unwrap())
+        std::alloc::alloc(std::alloc::Layout::from_size_align(result_size, 8).expect("valid layout"))
     } as *mut f64;
 
     if result_ptr.is_null() {
@@ -938,7 +938,7 @@ extern "C" fn runtime_jacobian(
         // Each dual is 16 bytes: [value: f64, derivative: f64]
         let input_size = n * 16;
         let input_ptr = unsafe {
-            std::alloc::alloc(std::alloc::Layout::from_size_align(input_size, 8).unwrap())
+            std::alloc::alloc(std::alloc::Layout::from_size_align(input_size, 8).expect("valid layout"))
         } as *mut f64;
 
         if input_ptr.is_null() {
@@ -970,7 +970,7 @@ extern "C" fn runtime_jacobian(
         unsafe {
             std::alloc::dealloc(
                 input_ptr as *mut u8,
-                std::alloc::Layout::from_size_align(input_size, 8).unwrap(),
+                std::alloc::Layout::from_size_align(input_size, 8).expect("valid layout"),
             );
         }
     }
@@ -1004,7 +1004,7 @@ extern "C" fn runtime_hessian(
     // Allocate result matrix (n × n)
     let result_size = n * n * std::mem::size_of::<f64>();
     let result_ptr = unsafe {
-        std::alloc::alloc(std::alloc::Layout::from_size_align(result_size, 8).unwrap())
+        std::alloc::alloc(std::alloc::Layout::from_size_align(result_size, 8).expect("valid layout"))
     } as *mut f64;
 
     if result_ptr.is_null() {
@@ -1021,7 +1021,7 @@ extern "C" fn runtime_hessian(
             // Create dual input with seed at j
             let input_size = n * 16;
             let input_ptr = unsafe {
-                std::alloc::alloc(std::alloc::Layout::from_size_align(input_size, 8).unwrap())
+                std::alloc::alloc(std::alloc::Layout::from_size_align(input_size, 8).expect("valid layout"))
             } as *mut f64;
 
             if input_ptr.is_null() {
@@ -1044,7 +1044,7 @@ extern "C" fn runtime_hessian(
             unsafe {
                 std::alloc::dealloc(
                     input_ptr as *mut u8,
-                    std::alloc::Layout::from_size_align(input_size, 8).unwrap(),
+                    std::alloc::Layout::from_size_align(input_size, 8).expect("valid layout"),
                 );
             }
         }
@@ -2264,7 +2264,8 @@ impl AotCompiler {
             // Get function references for calls
             let mut func_refs = HashMap::new();
             for (name, &id) in &self.func_ids {
-                let sig = self.func_sigs.get(name).cloned().unwrap();
+                let sig = self.func_sigs.get(name).cloned()
+                    .expect("function signature must exist for declared function");
                 let sig_ref = builder.import_signature(sig);
                 let func_ref = self.obj_module.declare_func_in_func(id, builder.func);
                 func_refs.insert(name.clone(), func_ref);
@@ -2323,13 +2324,17 @@ struct JitCompiler {
 impl JitCompiler {
     fn new(optimize: bool) -> Result<Self, String> {
         let mut flag_builder = settings::builder();
-        flag_builder.set("use_colocated_libcalls", "false").unwrap();
-        flag_builder.set("is_pic", "false").unwrap();
+        flag_builder.set("use_colocated_libcalls", "false")
+            .expect("valid Cranelift setting");
+        flag_builder.set("is_pic", "false")
+            .expect("valid Cranelift setting");
 
         if optimize {
-            flag_builder.set("opt_level", "speed").unwrap();
+            flag_builder.set("opt_level", "speed")
+                .expect("valid Cranelift opt_level");
         } else {
-            flag_builder.set("opt_level", "none").unwrap();
+            flag_builder.set("opt_level", "none")
+                .expect("valid Cranelift opt_level");
         }
 
         let isa_builder = cranelift_native::builder()
@@ -5435,14 +5440,14 @@ fn translate_instruction(
 
                 let effect_ptr = if let Ok(mut storage) = STRING_STORAGE.lock() {
                     storage.push(effect_cstr);
-                    storage.last().unwrap().as_ptr() as i64
+                    storage.last().expect("storage must have elements").as_ptr() as i64
                 } else {
                     0
                 };
 
                 let name_ptr = if let Ok(mut storage) = STRING_STORAGE.lock() {
                     storage.push(name_cstr);
-                    storage.last().unwrap().as_ptr() as i64
+                    storage.last().expect("storage must have elements").as_ptr() as i64
                 } else {
                     0
                 };
@@ -5480,14 +5485,14 @@ fn translate_instruction(
 
                 let effect_ptr = if let Ok(mut storage) = STRING_STORAGE.lock() {
                     storage.push(effect_cstr);
-                    storage.last().unwrap().as_ptr() as i64
+                    storage.last().expect("storage must have elements").as_ptr() as i64
                 } else {
                     0
                 };
 
                 let op_ptr = if let Ok(mut storage) = STRING_STORAGE.lock() {
                     storage.push(op_cstr);
-                    storage.last().unwrap().as_ptr() as i64
+                    storage.last().expect("storage must have elements").as_ptr() as i64
                 } else {
                     0
                 };
@@ -5583,7 +5588,7 @@ fn translate_constant(
             if let Ok(mut storage) = STRING_STORAGE.lock() {
                 storage.push(cstring);
                 // Get pointer from the stored CString (it's now at the end of the vec)
-                let stored_ptr = storage.last().unwrap().as_ptr() as i64;
+                let stored_ptr = storage.last().expect("storage must have elements").as_ptr() as i64;
                 Ok(builder.ins().iconst(types::I64, stored_ptr))
             } else {
                 // Fallback to null if lock fails
@@ -5598,7 +5603,7 @@ fn translate_constant(
             // Store in global storage to keep alive
             if let Ok(mut storage) = STRING_STORAGE.lock() {
                 storage.push(cstring);
-                let stored_ptr = storage.last().unwrap().as_ptr() as i64;
+                let stored_ptr = storage.last().expect("storage must have elements").as_ptr() as i64;
                 Ok(builder.ins().iconst(types::I64, stored_ptr))
             } else {
                 Ok(builder.ins().iconst(types::I64, 0))

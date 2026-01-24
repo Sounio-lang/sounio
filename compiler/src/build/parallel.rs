@@ -38,7 +38,7 @@ impl JobServer {
     pub fn acquire(&self) -> JobToken {
         loop {
             {
-                let mut active = self.active.lock().unwrap();
+                let mut active = self.active.lock().expect("mutex poisoned");
                 if *active < self.max_jobs {
                     *active += 1;
                     return JobToken {
@@ -53,7 +53,7 @@ impl JobServer {
 
     /// Try to acquire a job token (returns None if at capacity)
     pub fn try_acquire(&self) -> Option<JobToken> {
-        let mut active = self.active.lock().unwrap();
+        let mut active = self.active.lock().expect("mutex poisoned");
         if *active < self.max_jobs {
             *active += 1;
             Some(JobToken {
@@ -66,7 +66,7 @@ impl JobServer {
 
     /// Get current job count
     pub fn active_count(&self) -> usize {
-        *self.active.lock().unwrap()
+        *self.active.lock().expect("mutex poisoned")
     }
 
     /// Get maximum jobs
@@ -82,7 +82,7 @@ pub struct JobToken {
 
 impl Drop for JobToken {
     fn drop(&mut self) {
-        let mut active = self.server.lock().unwrap();
+        let mut active = self.server.lock().expect("mutex poisoned");
         *active -= 1;
     }
 }
@@ -172,7 +172,8 @@ impl ParallelExecutor {
         let tasks: Vec<BuildTask> = order
             .iter()
             .map(|&unit_id| {
-                let unit = graph.get_unit(unit_id).unwrap();
+                let unit = graph.get_unit(unit_id)
+                    .expect("unit must exist after topological sort");
                 let priority = unit.dependents.len() as i32; // Prioritize units with many dependents
                 BuildTask::new(unit_id, priority, unit.dependencies.clone())
             })
@@ -195,7 +196,7 @@ impl ParallelExecutor {
         loop {
             // Get next ready task
             let task = {
-                let comp = completed.lock().unwrap();
+                let comp = completed.lock().expect("mutex poisoned");
                 self.scheduler.next_ready(&comp)
             };
 
@@ -220,14 +221,14 @@ impl ParallelExecutor {
                             error: result.err(),
                         };
 
-                        results.lock().unwrap().push(build_result);
-                        completed.lock().unwrap().push(unit_id);
+                        results.lock().expect("mutex poisoned").push(build_result);
+                        completed.lock().expect("mutex poisoned").push(unit_id);
                         drop(token);
                     });
                 }
                 None => {
                     // No more ready tasks
-                    if self.scheduler.is_complete(&completed.lock().unwrap()) {
+                    if self.scheduler.is_complete(&completed.lock().expect("mutex poisoned")) {
                         break;
                     }
                     // Wait for some task to complete
@@ -241,7 +242,7 @@ impl ParallelExecutor {
             thread::sleep(Duration::from_millis(10));
         }
 
-        let final_results = results.lock().unwrap().clone();
+        let final_results = results.lock().expect("mutex poisoned").clone();
         Ok(final_results)
     }
 
@@ -271,8 +272,8 @@ impl BuildScheduler {
 
     /// Schedule tasks
     pub fn schedule(&mut self, tasks: Vec<BuildTask>) {
-        let mut queues = self.queues.lock().unwrap();
-        let mut all_tasks = self.all_tasks.lock().unwrap();
+        let mut queues = self.queues.lock().expect("mutex poisoned");
+        let mut all_tasks = self.all_tasks.lock().expect("mutex poisoned");
 
         for task in tasks {
             let priority = task.priority;
@@ -286,7 +287,7 @@ impl BuildScheduler {
 
     /// Get next ready task (dependencies satisfied)
     pub fn next_ready(&self, completed: &[UnitId]) -> Option<BuildTask> {
-        let mut queues = self.queues.lock().unwrap();
+        let mut queues = self.queues.lock().expect("mutex poisoned");
 
         // Sort priorities (highest first)
         let mut priorities: Vec<_> = queues.keys().copied().collect();
@@ -309,13 +310,13 @@ impl BuildScheduler {
 
     /// Check if all tasks are complete
     pub fn is_complete(&self, completed: &[UnitId]) -> bool {
-        let all_tasks = self.all_tasks.lock().unwrap();
+        let all_tasks = self.all_tasks.lock().expect("mutex poisoned");
         all_tasks.keys().all(|unit_id| completed.contains(unit_id))
     }
 
     /// Get number of pending tasks
     pub fn pending_count(&self) -> usize {
-        self.queues.lock().unwrap().values().map(|q| q.len()).sum()
+        self.queues.lock().expect("mutex poisoned").values().map(|q| q.len()).sum()
     }
 }
 
