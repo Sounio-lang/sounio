@@ -1,0 +1,429 @@
+// stats::effect_sizes — Effect Size Calculations with Uncertainty
+//
+// Parametric and non-parametric effect size measures for statistical analysis.
+// Computes point estimates, standard errors, and confidence intervals for:
+// - Cohen's d and Hedges' g (corrected for small samples)
+// - Cliff's delta (non-parametric, robust to outliers)
+// - Common Language Effect Size
+//
+// All measures return EffectSize struct with uncertainty quantification.
+//
+// References:
+// - Cohen (1988): "Statistical Power Analysis for the Behavioral Sciences"
+// - Hedges (1981): "Distribution Theory for Glass's Estimator of Effect size"
+// - Cliff (1993): "Dominance statistics: Ordinal analyses for ordinal data"
+
+module stats::effect_sizes
+
+extern "C" {
+    fn sqrt(x: f64) -> f64;
+    fn fabs(x: f64) -> f64;
+    fn exp(x: f64) -> f64;
+    fn log(x: f64) -> f64;
+    fn pow(x: f64, y: f64) -> f64;
+}
+
+// ============================================================================
+// EFFECT SIZE RESULT TYPE
+// ============================================================================
+
+/// Effect size with uncertainty quantification
+pub struct EffectSize {
+    pub value: f64,          // Point estimate (e.g., Cohen's d)
+    pub stderr: f64,         // Standard error
+    pub ci_lower: f64,       // 95% CI lower bound
+    pub ci_upper: f64,       // 95% CI upper bound
+    pub magnitude: string,   // Interpretation ("small", "medium", "large", etc.)
+}
+
+fn effect_size_new() -> EffectSize {
+    EffectSize {
+        value: 0.0,
+        stderr: 0.0,
+        ci_lower: 0.0,
+        ci_upper: 0.0,
+        magnitude: "",
+    }
+}
+
+// ============================================================================
+// HELPER FUNCTIONS
+// ============================================================================
+
+fn abs_f64(x: f64) -> f64 {
+    if x < 0.0 { -x } else { x }
+}
+
+fn min_f64(a: f64, b: f64) -> f64 {
+    if a < b { a } else { b }
+}
+
+fn max_f64(a: f64, b: f64) -> f64 {
+    if a > b { a } else { b }
+}
+
+/// Compute mean of data slice
+fn mean_slice(data: &[f64]) -> f64 {
+    let n = data.len()
+    if n == 0 { return 0.0 }
+
+    var sum = 0.0
+    var i: usize = 0
+    while i < n {
+        sum = sum + data[i]
+        i = i + 1
+    }
+    sum / (n as f64)
+}
+
+/// Compute variance of data slice
+fn variance_slice(data: &[f64]) -> f64 {
+    let n = data.len()
+    if n < 2 { return 0.0 }
+
+    let m = mean_slice(data)
+    var sum_sq = 0.0
+    var i: usize = 0
+    while i < n {
+        let diff = data[i] - m
+        sum_sq = sum_sq + diff * diff
+        i = i + 1
+    }
+    sum_sq / ((n - 1) as f64)
+}
+
+/// Compute pooled variance
+fn pooled_variance(var1: f64, n1: usize, var2: f64, n2: usize) -> f64 {
+    if n1 == 0 || n2 == 0 { return 0.0 }
+
+    let n1f = n1 as f64
+    let n2f = n2 as f64
+    let df1 = n1f - 1.0
+    let df2 = n2f - 1.0
+
+    if abs_f64(df1 + df2) < 1e-10 { return 0.0 }
+
+    (df1 * var1 + df2 * var2) / (df1 + df2)
+}
+
+/// Interpret Cohen's d magnitude
+fn interpret_cohens_d(d: f64) -> string {
+    let abs_d = abs_f64(d)
+    if abs_d < 0.2 {
+        return "negligible"
+    } else if abs_d < 0.5 {
+        return "small"
+    } else if abs_d < 0.8 {
+        return "medium"
+    } else {
+        return "large"
+    }
+}
+
+/// Interpret Cliff's delta magnitude
+fn interpret_cliffs_delta(delta: f64) -> string {
+    let abs_d = abs_f64(delta)
+    if abs_d < 0.147 {
+        return "negligible"
+    } else if abs_d < 0.330 {
+        return "small"
+    } else if abs_d < 0.474 {
+        return "medium"
+    } else {
+        return "large"
+    }
+}
+
+// ============================================================================
+// COHEN'S D - PARAMETRIC EFFECT SIZE
+// ============================================================================
+
+/// Cohen's d: standardized mean difference
+/// Assumes normal distributions with equal variances
+pub fn cohens_d(group1: &[f64], group2: &[f64]) -> EffectSize {
+    var result = effect_size_new()
+
+    let n1 = group1.len()
+    let n2 = group2.len()
+
+    if n1 == 0 || n2 == 0 {
+        return result
+    }
+
+    let m1 = mean_slice(group1)
+    let m2 = mean_slice(group2)
+    let v1 = variance_slice(group1)
+    let v2 = variance_slice(group2)
+
+    let sp = sqrt(pooled_variance(v1, n1, v2, n2))
+
+    if abs_f64(sp) < 1e-10 {
+        result.value = 0.0
+    } else {
+        result.value = (m1 - m2) / sp
+    }
+
+    // Standard error of Cohen's d
+    let n1f = n1 as f64
+    let n2f = n2 as f64
+    let se_d = sqrt((1.0 / n1f + 1.0 / n2f) * pooled_variance(v1, n1, v2, n2) / (sp * sp + 1e-10))
+    result.stderr = se_d
+
+    // 95% CI
+    let t_crit = 1.96
+    result.ci_lower = result.value - t_crit * se_d
+    result.ci_upper = result.value + t_crit * se_d
+
+    result.magnitude = interpret_cohens_d(result.value)
+
+    result
+}
+
+// ============================================================================
+// HEDGES' G - BIAS-CORRECTED EFFECT SIZE
+// ============================================================================
+
+/// Hedges' g: bias-corrected version of Cohen's d
+/// Better for small sample sizes
+pub fn hedges_g(group1: &[f64], group2: &[f64]) -> EffectSize {
+    var result = effect_size_new()
+
+    let n1 = group1.len()
+    let n2 = group2.len()
+
+    if n1 == 0 || n2 == 0 {
+        return result
+    }
+
+    // Start with Cohen's d
+    let d_result = cohens_d(group1, group2)
+    let d = d_result.value
+
+    // Bias correction factor: J = 1 - 3/(4(n1+n2-2) - 1)
+    let n1f = n1 as f64
+    let n2f = n2 as f64
+    let df = (n1f + n2f - 2.0)
+
+    if abs_f64(df) < 1e-10 {
+        result.value = d
+    } else {
+        let j = 1.0 - 3.0 / (4.0 * df - 1.0)
+        result.value = j * d
+    }
+
+    // SE for Hedges' g (slightly smaller than Cohen's d)
+    result.stderr = d_result.stderr * abs_f64(1.0 - 3.0 / (4.0 * df))
+
+    // 95% CI
+    let t_crit = 1.96
+    result.ci_lower = result.value - t_crit * result.stderr
+    result.ci_upper = result.value + t_crit * result.stderr
+
+    result.magnitude = interpret_cohens_d(result.value)
+
+    result
+}
+
+// ============================================================================
+// CLIFF'S DELTA - NON-PARAMETRIC EFFECT SIZE
+// ============================================================================
+
+/// Cliff's delta: non-parametric effect size based on dominance
+/// Robust to outliers, doesn't assume normality
+pub fn cliffs_delta(group1: &[f64], group2: &[f64]) -> EffectSize {
+    var result = effect_size_new()
+
+    let n1 = group1.len()
+    let n2 = group2.len()
+
+    if n1 == 0 || n2 == 0 {
+        return result
+    }
+
+    // Count dominance: (# times x1 > x2) - (# times x1 < x2)
+    var dominance: i64 = 0
+    var i: usize = 0
+    while i < n1 {
+        var j: usize = 0
+        while j < n2 {
+            if group1[i] > group2[j] {
+                dominance = dominance + 1
+            } else if group1[i] < group2[j] {
+                dominance = dominance - 1
+            }
+            j = j + 1
+        }
+        i = i + 1
+    }
+
+    let n1i = n1 as i64
+    let n2i = n2 as i64
+    let n_comp = n1i * n2i
+
+    if n_comp == 0 {
+        result.value = 0.0
+    } else {
+        result.value = (dominance as f64) / (n_comp as f64)
+    }
+
+    // Standard error of delta
+    let m = (dominance as f64) / (n1 as f64 * n2 as f64)
+    let variance_term = (m * m * (n1 as f64 + n2 as f64 - 2.0)) / ((n1 as f64 + n2 as f64) * (n1 as f64 + n2 as f64))
+    result.stderr = sqrt(variance_term + 1e-10)
+
+    // 95% CI
+    let z_crit = 1.96
+    result.ci_lower = result.value - z_crit * result.stderr
+    result.ci_upper = result.value + z_crit * result.stderr
+
+    // Clamp CI to valid range [-1, 1]
+    result.ci_lower = max_f64(-1.0, result.ci_lower)
+    result.ci_upper = min_f64(1.0, result.ci_upper)
+
+    result.magnitude = interpret_cliffs_delta(result.value)
+
+    result
+}
+
+// ============================================================================
+// COMMON LANGUAGE EFFECT SIZE
+// ============================================================================
+
+/// Common Language Effect Size (CLES)
+/// Probability that a random observation from group1 > random from group2
+pub fn common_language_es(group1: &[f64], group2: &[f64]) -> f64 {
+    let n1 = group1.len()
+    let n2 = group2.len()
+
+    if n1 == 0 || n2 == 0 {
+        return 0.5
+    }
+
+    var count_greater: usize = 0
+    var i: usize = 0
+    while i < n1 {
+        var j: usize = 0
+        while j < n2 {
+            if group1[i] > group2[j] {
+                count_greater = count_greater + 1
+            }
+            j = j + 1
+        }
+        i = i + 1
+    }
+
+    (count_greater as f64) / ((n1 * n2) as f64)
+}
+
+// ============================================================================
+// BOOTSTRAPPED CONFIDENCE INTERVALS
+// ============================================================================
+
+/// Simple bootstrap CI for effect sizes (without random number generator)
+/// Uses deterministic "pseudo-random" sequence
+fn bootstrap_ci_deterministic(
+    data1: &[f64],
+    data2: &[f64],
+    n_boot: usize,
+    seed: u64
+) -> (f64, f64) {
+    var min_es = 1000.0
+    var max_es = -1000.0
+
+    var boot_idx: u64 = seed
+    var b: usize = 0
+    while b < n_boot {
+        // Deterministic bootstrap sample selection
+        boot_idx = (boot_idx * 1103515245 + 12345) % 2147483648
+
+        let sample_size = data1.len() / 2
+        if sample_size > 0 {
+            // Compute effect size on sample
+            var sample1: [f64] = []
+            var sample2: [f64] = []
+
+            var i: usize = 0
+            while i < sample_size {
+                let idx1 = ((boot_idx + (i as u64) * 7) % (data1.len() as u64)) as usize
+                let idx2 = ((boot_idx + (i as u64) * 11) % (data2.len() as u64)) as usize
+                sample1.push(data1[idx1])
+                sample2.push(data2[idx2])
+                i = i + 1
+            }
+
+            let d = cohens_d(&sample1, &sample2)
+            if d.value < min_es {
+                min_es = d.value
+            }
+            if d.value > max_es {
+                max_es = d.value
+            }
+        }
+
+        b = b + 1
+    }
+
+    (min_es, max_es)
+}
+
+// ============================================================================
+// TESTS
+// ============================================================================
+
+/// Test: Cohen's d for equal groups should be near 0
+pub fn test_cohens_d_equal_groups() -> bool {
+    var g1: [f64] = [1.0, 2.0, 3.0, 4.0, 5.0]
+    var g2: [f64] = [1.0, 2.0, 3.0, 4.0, 5.0]
+
+    let d = cohens_d(&g1, &g2)
+    abs_f64(d.value) < 0.01  // Should be essentially 0
+}
+
+/// Test: Cohen's d for separated groups should be positive
+pub fn test_cohens_d_separated_groups() -> bool {
+    var g1: [f64] = [1.0, 2.0, 3.0]
+    var g2: [f64] = [10.0, 11.0, 12.0]
+
+    let d = cohens_d(&g1, &g2)
+    d.value < -0.5  // Large negative difference
+}
+
+/// Test: Cliff's delta extremes
+pub fn test_cliffs_delta_extremes() -> bool {
+    // All g1 > g2 should give delta ≈ 1
+    var g1: [f64] = [10.0, 11.0, 12.0]
+    var g2: [f64] = [1.0, 2.0, 3.0]
+
+    let delta = cliffs_delta(&g1, &g2)
+    abs_f64(delta.value - 1.0) < 0.01
+}
+
+/// Test: CLES should be symmetric for identical groups
+pub fn test_cles_identical_groups() -> bool {
+    var g1: [f64] = [1.0, 2.0, 3.0]
+    var g2: [f64] = [1.0, 2.0, 3.0]
+
+    let cles = common_language_es(&g1, &g2)
+    abs_f64(cles - 0.5) < 0.01  // Should be 0.5
+}
+
+/// Test: Hedges' g should be similar to Cohen's d
+pub fn test_hedges_g_vs_cohens_d() -> bool {
+    var g1: [f64] = [1.0, 2.0, 3.0, 4.0, 5.0]
+    var g2: [f64] = [2.0, 3.0, 4.0, 5.0, 6.0]
+
+    let d = cohens_d(&g1, &g2)
+    let g = hedges_g(&g1, &g2)
+
+    // g should be slightly smaller than d (bias correction)
+    abs_f64(d.value - g.value) < abs_f64(d.value) * 0.1
+}
+
+/// Master test function
+pub fn run_effect_size_tests() -> bool {
+    test_cohens_d_equal_groups() &&
+    test_cohens_d_separated_groups() &&
+    test_cliffs_delta_extremes() &&
+    test_cles_identical_groups() &&
+    test_hedges_g_vs_cohens_d()
+}

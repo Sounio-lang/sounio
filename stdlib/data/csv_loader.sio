@@ -1,0 +1,436 @@
+// stdlib/data/csv_loader — Network Graph CSV Loading
+//
+// Loads network/graph data from CSV files in edge list format.
+// Supports both weighted and unweighted networks.
+//
+// CSV Formats:
+// - Unweighted edge list: source,target
+// - Weighted edge list: source,target,weight
+//
+// Converts to graph representations:
+// - Adjacency list: [[usize]] for unweighted graphs
+// - Weighted adjacency: [[WeightedEdge]] for weighted networks
+//
+// References:
+// - Standard edge list format used in networkx, igraph
+
+module data::csv_loader
+
+extern "C" {
+    fn sqrt(x: f64) -> f64;
+}
+
+// ============================================================================
+// DATA STRUCTURES
+// ============================================================================
+
+/// Single edge in the network
+pub struct Edge {
+    pub source: usize,
+    pub target: usize,
+    pub weight: f64,
+}
+
+pub struct WeightedEdge {
+    pub neighbor: usize,
+    pub weight: f64,
+}
+
+/// Loaded network data
+pub struct NetworkData {
+    pub num_nodes: usize,
+    pub edges: [Edge],
+    pub node_labels: [string],
+    pub weighted: bool,
+}
+
+fn network_data_new() -> NetworkData {
+    var edges: [Edge] = []
+    var labels: [string] = []
+    NetworkData {
+        num_nodes: 0,
+        edges: edges,
+        node_labels: labels,
+        weighted: false,
+    }
+}
+
+// ============================================================================
+// HELPER FUNCTIONS
+// ============================================================================
+
+fn abs_i64(x: i64) -> i64 {
+    if x < 0 { -x } else { x }
+}
+
+fn max_usize(a: usize, b: usize) -> usize {
+    if a > b { a } else { b }
+}
+
+/// Parse string as integer
+fn parse_i64(s: string) -> i64 {
+    var result: i64 = 0
+    var i: usize = 0
+    var neg = false
+
+    // Check for negative sign
+    if i < s.len() {
+        let c = s.char_at(0)
+        if c == '-' {
+            neg = true
+            i = 1
+        } else if c == '+' {
+            i = 1
+        }
+    }
+
+    // Parse digits
+    while i < s.len() {
+        let c = s.char_at(i)
+        if c >= '0' && c <= '9' {
+            let digit = (c as i64) - ('0' as i64)
+            result = result * 10 + digit
+        }
+        i = i + 1
+    }
+
+    if neg { -result } else { result }
+}
+
+/// Parse string as float
+fn parse_f64(s: string) -> f64 {
+    var result: f64 = 0.0
+    var i: usize = 0
+    var neg = false
+    var found_dot = false
+    var decimal_places = 0
+
+    // Check for negative sign
+    if i < s.len() {
+        let c = s.char_at(0)
+        if c == '-' {
+            neg = true
+            i = 1
+        } else if c == '+' {
+            i = 1
+        }
+    }
+
+    // Parse digits and decimal point
+    while i < s.len() {
+        let c = s.char_at(i)
+        if c == '.' {
+            found_dot = true
+        } else if c >= '0' && c <= '9' {
+            let digit = ((c as i64) - ('0' as i64)) as f64
+            result = result * 10.0 + digit
+            if found_dot {
+                decimal_places = decimal_places + 1
+            }
+        }
+        i = i + 1
+    }
+
+    // Apply decimal scaling
+    var scale = 1.0
+    var j = 0
+    while j < decimal_places {
+        scale = scale * 0.1
+        j = j + 1
+    }
+    result = result * scale
+
+    if neg { -result } else { result }
+}
+
+/// Split string by delimiter
+fn split_string(s: string, delimiter: string) -> [string] {
+    var parts: [string] = []
+    var current: string = ""
+    var i: usize = 0
+
+    while i < s.len() {
+        if i + delimiter.len() <= s.len() {
+            // Check if delimiter matches at position i
+            var matches = true
+            var j: usize = 0
+            while j < delimiter.len() {
+                if s.char_at(i + j) != delimiter.char_at(j) {
+                    matches = false
+                }
+                j = j + 1
+            }
+
+            if matches {
+                parts.push(current)
+                current = ""
+                i = i + delimiter.len()
+                continue
+            }
+        }
+
+        current = current ++ s.char_at(i)
+        i = i + 1
+    }
+
+    if current.len() > 0 {
+        parts.push(current)
+    }
+
+    parts
+}
+
+/// Trim whitespace from string
+fn trim_string(s: string) -> string {
+    var start: usize = 0
+    var end: usize = s.len()
+
+    // Find first non-whitespace
+    while start < s.len() {
+        let c = s.char_at(start)
+        if c != ' ' && c != '\t' && c != '\n' && c != '\r' {
+            break
+        }
+        start = start + 1
+    }
+
+    // Find last non-whitespace
+    while end > start {
+        let c = s.char_at(end - 1)
+        if c != ' ' && c != '\t' && c != '\n' && c != '\r' {
+            break
+        }
+        end = end - 1
+    }
+
+    if end > start {
+        var result: string = ""
+        var i = start
+        while i < end {
+            result = result ++ s.char_at(i)
+            i = i + 1
+        }
+        result
+    } else {
+        ""
+    }
+}
+
+// ============================================================================
+// MAIN PARSING FUNCTIONS
+// ============================================================================
+
+/// Parse edge list from CSV content string
+pub fn parse_edge_list(csv_content: string) -> NetworkData {
+    var net = network_data_new()
+
+    var max_node: usize = 0
+    var lines = split_string(csv_content, "\n")
+
+    var line_idx: usize = 0
+    while line_idx < lines.len() {
+        let line = trim_string(lines[line_idx])
+
+        // Skip empty lines and comments
+        if line.len() == 0 || (line.len() > 0 && line.char_at(0) == '#') {
+            line_idx = line_idx + 1
+            continue
+        }
+
+        // Parse CSV line
+        let parts = split_string(line, ",")
+
+        if parts.len() >= 2 {
+            let source_str = trim_string(parts[0])
+            let target_str = trim_string(parts[1])
+
+            let source = (parse_i64(source_str) as usize)
+            let target = (parse_i64(target_str) as usize)
+
+            var weight = 1.0
+            if parts.len() >= 3 {
+                let weight_str = trim_string(parts[2])
+                weight = parse_f64(weight_str)
+                net.weighted = true
+            }
+
+            // Track maximum node ID to determine graph size
+            max_node = max_usize(max_node, source)
+            max_node = max_usize(max_node, target)
+
+            // Add edge
+            var edge = Edge {
+                source: source,
+                target: target,
+                weight: weight,
+            }
+            net.edges.push(edge)
+        }
+
+        line_idx = line_idx + 1
+    }
+
+    // Number of nodes is max_node + 1
+    net.num_nodes = max_node + 1
+
+    net
+}
+
+/// Load edge list from file
+pub fn load_edge_list(filepath: string) -> NetworkData with IO {
+    var net = network_data_new()
+    // Note: File I/O not implemented in interpreter; would need stdlib::fs module
+    net
+}
+
+// ============================================================================
+// GRAPH CONVERSION FUNCTIONS
+// ============================================================================
+
+/// Convert NetworkData to adjacency list (undirected, unweighted)
+pub fn to_adjacency_list(net: &NetworkData) -> [[usize]] {
+    var adj: [[usize]] = []
+
+    // Initialize adjacency list with empty vectors
+    var i: usize = 0
+    while i < net.num_nodes {
+        var empty: [usize] = []
+        adj.push(empty)
+        i = i + 1
+    }
+
+    // Add edges (both directions for undirected graph)
+    i = 0
+    while i < net.edges.len() {
+        let edge = net.edges[i]
+        let src = edge.source
+        let tgt = edge.target
+
+        // Add forward edge
+        if src < net.num_nodes {
+            adj[src].push(tgt)
+        }
+
+        // Add reverse edge (unless self-loop)
+        if tgt < net.num_nodes && src != tgt {
+            adj[tgt].push(src)
+        }
+
+        i = i + 1
+    }
+
+    adj
+}
+
+/// Convert NetworkData to weighted adjacency list
+pub fn to_weighted_adjacency(net: &NetworkData) -> [[WeightedEdge]] {
+    var adj: [[WeightedEdge]] = []
+
+    // Initialize adjacency list with empty vectors
+    var i: usize = 0
+    while i < net.num_nodes {
+        var empty: [WeightedEdge] = []
+        adj.push(empty)
+        i = i + 1
+    }
+
+    // Add edges (both directions for undirected graph)
+    i = 0
+    while i < net.edges.len() {
+        let edge = net.edges[i]
+        let src = edge.source
+        let tgt = edge.target
+        let w = edge.weight
+
+        // Add forward edge
+        if src < net.num_nodes {
+            var we = WeightedEdge {
+                neighbor: tgt,
+                weight: w,
+            }
+            adj[src].push(we)
+        }
+
+        // Add reverse edge (unless self-loop)
+        if tgt < net.num_nodes && src != tgt {
+            var we_rev = WeightedEdge {
+                neighbor: src,
+                weight: w,
+            }
+            adj[tgt].push(we_rev)
+        }
+
+        i = i + 1
+    }
+
+    adj
+}
+
+// ============================================================================
+// VALIDATION FUNCTIONS
+// ============================================================================
+
+/// Validate that edge list is consistent
+pub fn validate_edge_list(net: &NetworkData) -> bool {
+    var valid = true
+
+    // Check for invalid node indices
+    var i: usize = 0
+    while i < net.edges.len() {
+        let edge = net.edges[i]
+        if edge.source >= net.num_nodes || edge.target >= net.num_nodes {
+            valid = false
+        }
+        i = i + 1
+    }
+
+    valid
+}
+
+// ============================================================================
+// TESTS
+// ============================================================================
+
+/// Test: Parse simple unweighted edge list
+pub fn test_parse_simple_edge_list() -> bool {
+    let csv = "0,1\n1,2\n2,0\n"
+    let net = parse_edge_list(csv)
+
+    // Should have 3 nodes and 3 edges
+    net.num_nodes == 3 && net.edges.len() == 3 && !net.weighted
+}
+
+/// Test: Parse weighted edge list
+pub fn test_parse_weighted_edge_list() -> bool {
+    let csv = "0,1,0.5\n1,2,0.7\n2,0,0.3\n"
+    let net = parse_edge_list(csv)
+
+    // Should have 3 nodes, 3 edges, and be marked as weighted
+    net.num_nodes == 3 && net.edges.len() == 3 && net.weighted
+}
+
+/// Test: Adjacency list conversion
+pub fn test_adjacency_list_conversion() -> bool {
+    let csv = "0,1\n1,2\n"
+    let net = parse_edge_list(csv)
+    let adj = to_adjacency_list(&net)
+
+    // Check adjacency list structure
+    adj.len() == 3 && adj[0].len() >= 1 && adj[2].len() >= 1
+}
+
+/// Test: Handle comments and empty lines
+pub fn test_parse_with_comments() -> bool {
+    let csv = "# Comment\n0,1\n\n1,2\n"
+    let net = parse_edge_list(csv)
+
+    net.num_nodes == 3 && net.edges.len() == 2
+}
+
+/// Master test function
+pub fn run_csv_loader_tests() -> bool {
+    test_parse_simple_edge_list() &&
+    test_parse_weighted_edge_list() &&
+    test_adjacency_list_conversion() &&
+    test_parse_with_comments()
+}
