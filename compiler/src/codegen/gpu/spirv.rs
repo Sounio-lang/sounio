@@ -42,6 +42,9 @@ pub struct SpirvCodegen {
 
     /// Target environment
     target_env: SpirvTarget,
+
+    /// GLSL.std.450 extended instruction set ID (cached)
+    glsl_ext: Option<Word>,
 }
 
 /// SPIR-V target environment
@@ -82,6 +85,7 @@ impl SpirvCodegen {
             blocks: HashMap::new(),
             execution_model,
             target_env: SpirvTarget::default(),
+            glsl_ext: None,
         }
     }
 
@@ -362,6 +366,17 @@ impl SpirvCodegen {
         interface.push(wg_size);
 
         interface
+    }
+
+    /// Get or import the GLSL.std.450 extended instruction set
+    fn get_or_import_glsl_ext(&mut self) -> Word {
+        if let Some(ext) = self.glsl_ext {
+            ext
+        } else {
+            let ext = self.builder.ext_inst_import("GLSL.std.450");
+            self.glsl_ext = Some(ext);
+            ext
+        }
     }
 
     fn generate_op(&mut self, op: &GpuOp) -> Word {
@@ -798,6 +813,69 @@ impl SpirvCodegen {
                 let fv = self.values[f.0 as usize];
                 let ty = self.types["i32"];
                 self.builder.select(ty, None, c, tv, fv).unwrap()
+            }
+
+            // GLSL.std.450 extended math operations
+            GpuOp::AbsF32(val) => {
+                let v = self.values[val.0 as usize];
+                let ty = self.types["f32"];
+                let ext = self.get_or_import_glsl_ext();
+                self.builder.ext_inst(ty, None, ext, 4, vec![Operand::IdRef(v)]).unwrap()
+            }
+
+            GpuOp::AbsF64(val) => {
+                let v = self.values[val.0 as usize];
+                let ty = self.types["f64"];
+                let ext = self.get_or_import_glsl_ext();
+                self.builder.ext_inst(ty, None, ext, 4, vec![Operand::IdRef(v)]).unwrap()
+            }
+
+            GpuOp::AbsI32(val) => {
+                let v = self.values[val.0 as usize];
+                let ty = self.types["i32"];
+                let ext = self.get_or_import_glsl_ext();
+                self.builder.ext_inst(ty, None, ext, 5, vec![Operand::IdRef(v)]).unwrap()
+            }
+
+            GpuOp::MinF32(lhs, rhs) => {
+                let l = self.values[lhs.0 as usize];
+                let r = self.values[rhs.0 as usize];
+                let ty = self.types["f32"];
+                let ext = self.get_or_import_glsl_ext();
+                self.builder.ext_inst(ty, None, ext, 37, vec![Operand::IdRef(l), Operand::IdRef(r)]).unwrap()
+            }
+
+            GpuOp::MaxF32(lhs, rhs) => {
+                let l = self.values[lhs.0 as usize];
+                let r = self.values[rhs.0 as usize];
+                let ty = self.types["f32"];
+                let ext = self.get_or_import_glsl_ext();
+                self.builder.ext_inst(ty, None, ext, 40, vec![Operand::IdRef(l), Operand::IdRef(r)]).unwrap()
+            }
+
+            GpuOp::MinI32(lhs, rhs) => {
+                let l = self.values[lhs.0 as usize];
+                let r = self.values[rhs.0 as usize];
+                let ty = self.types["i32"];
+                let ext = self.get_or_import_glsl_ext();
+                self.builder.ext_inst(ty, None, ext, 39, vec![Operand::IdRef(l), Operand::IdRef(r)]).unwrap()
+            }
+
+            GpuOp::MaxI32(lhs, rhs) => {
+                let l = self.values[lhs.0 as usize];
+                let r = self.values[rhs.0 as usize];
+                let ty = self.types["i32"];
+                let ext = self.get_or_import_glsl_ext();
+                self.builder.ext_inst(ty, None, ext, 42, vec![Operand::IdRef(l), Operand::IdRef(r)]).unwrap()
+            }
+
+            GpuOp::FMulAdd(a, b, c) => {
+                let va = self.values[a.0 as usize];
+                let vb = self.values[b.0 as usize];
+                let vc = self.values[c.0 as usize];
+                let ty = self.types["f32"];
+                let ext = self.get_or_import_glsl_ext();
+                self.builder.ext_inst(ty, None, ext, 50, vec![Operand::IdRef(va), Operand::IdRef(vb), Operand::IdRef(vc)]).unwrap()
             }
 
             _ => {
