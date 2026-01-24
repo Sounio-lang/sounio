@@ -1108,6 +1108,24 @@ impl Interpreter {
                 }
             }
 
+            HirExprKind::Resume { value } => {
+                // Resume a suspended continuation with a value
+                // This is typically used inside effect handlers
+                let resume_value = self.eval_expr(value)?;
+
+                // In a full implementation, we would:
+                // 1. Look up the current continuation from the handler context
+                // 2. Invoke the continuation with the resume value
+                // 3. Return the result of the continuation
+                //
+                // For now, we return the resume value directly, which works
+                // for simple cases where resume is the last expression in a handler case.
+                //
+                // A full CPS transformation would capture the continuation when
+                // perform is called and invoke it here with the resume value.
+                Ok(resume_value)
+            }
+
             HirExprKind::Sample(dist_expr) => {
                 // Sample from a probability distribution (Prob effect)
                 let dist_val = self.eval_expr(dist_expr)?;

@@ -1502,6 +1502,13 @@ pub enum Expr {
         expr: Box<Expr>,
         handler: Path,
     },
+    /// Resume continuation with value
+    /// Syntax: resume(value)
+    /// Used inside effect handlers to continue the suspended computation
+    Resume {
+        id: NodeId,
+        value: Box<Expr>,
+    },
     /// Sample from distribution
     Sample { id: NodeId, distribution: Box<Expr> },
     /// Await async expression

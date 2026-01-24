@@ -1153,6 +1153,7 @@ fn rewrite_expr(expr: &mut Expr, prefixes: &[Vec<String>]) {
             rewrite_expr(expr, prefixes);
             rewrite_path(handler, prefixes);
         }
+        Expr::Resume { value, .. } => rewrite_expr(value, prefixes),
         Expr::Sample { distribution, .. } => rewrite_expr(distribution, prefixes),
         Expr::AsyncBlock { block, .. } => rewrite_block(block, prefixes),
         Expr::UnsafeBlock { block, .. } => rewrite_block(block, prefixes),
@@ -1894,6 +1895,7 @@ fn annotate_expr(expr: &mut Expr, prefixes: &[Vec<String>], sm: &ModuleId, im: &
             annotate_expr(expr, prefixes, sm, im);
             annotate_path(handler, prefixes, sm, im);
         }
+        Expr::Resume { value, .. } => annotate_expr(value, prefixes, sm, im),
         Expr::Sample { distribution, .. } => annotate_expr(distribution, prefixes, sm, im),
         Expr::AsyncBlock { block, .. } => annotate_block(block, prefixes, sm, im),
         Expr::UnsafeBlock { block, .. } => annotate_block(block, prefixes, sm, im),

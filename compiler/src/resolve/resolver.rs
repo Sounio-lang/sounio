@@ -432,6 +432,13 @@ impl Resolver {
                     }
                 }
             }
+
+            // Check for associated type pattern (TypeName::AssocType)
+            // Associated types are registered with the qualified name as the key
+            let qualified_name = format!("{}::{}", segments[0], segments[1]);
+            if let Some(assoc_def_id) = self.symbols.lookup_type(&qualified_name) {
+                return Some(assoc_def_id);
+            }
         }
 
         // Try to find the starting module
@@ -634,6 +641,7 @@ impl Resolver {
             Item::TypeAlias(t) => self.define_type_alias(t),
             Item::Effect(e) => self.define_effect(e),
             Item::Trait(t) => self.define_trait(t),
+            Item::Impl(i) => self.define_impl(i),
             Item::Global(g) => self.define_global(g),
             Item::Module(m) => self.collect_module(m),
             Item::Import(i) => self.collect_import(i),
@@ -1064,6 +1072,46 @@ impl Resolver {
                 visibility: t.visibility,
                 node_id: t.id,
             });
+        }
+    }
+
+    /// Define associated types from impl blocks
+    fn define_impl(&mut self, i: &ImplDef) {
+        // Get the target type name for qualified names
+        let type_name = match &i.target_type {
+            TypeExpr::Named { path, .. } => path.to_string(),
+            _ => return, // Can't create qualified names for complex types
+        };
+
+        // Register associated types as type aliases
+        for item in &i.items {
+            if let ImplItem::Type(impl_ty) = item {
+                // Create qualified name: TypeName::AssocTypeName
+                let qualified_name = format!("{}::{}", type_name, impl_ty.name);
+                let def_id = self.symbols.fresh_def_id();
+
+                // Define as a type alias
+                let _ = self.symbols.define_type(qualified_name.clone(), def_id);
+
+                self.symbols.insert(Symbol {
+                    def_id,
+                    name: qualified_name.clone(),
+                    kind: DefKind::TypeAlias,
+                    node_id: impl_ty.id,
+                    span: i.span,
+                    parent: None,
+                });
+
+                // Add to module tree
+                if let Some(module) = self.module_tree.get_mut(&self.current_tree_module) {
+                    module.add_item(ModuleItem {
+                        name: qualified_name,
+                        kind: ItemKind::TypeAlias,
+                        visibility: Visibility::Public, // Associated types are effectively public
+                        node_id: impl_ty.id,
+                    });
+                }
+            }
         }
     }
 
@@ -1664,6 +1712,10 @@ impl Resolver {
             Expr::Handle { expr, handler, .. } => {
                 self.resolve_expr(expr);
                 self.resolve_path_as_type(handler);
+            }
+
+            Expr::Resume { value, .. } => {
+                self.resolve_expr(value);
             }
 
             Expr::Sample { distribution, .. } => {

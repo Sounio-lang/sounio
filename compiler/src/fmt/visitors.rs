@@ -1667,6 +1667,13 @@ impl<'a> FormatVisitor<'a> {
                     Doc::text(format!(" with {}", handler.segments.join("::"))),
                 ])
             }
+            Expr::Resume { value, .. } => {
+                Doc::concat(vec![
+                    Doc::text("resume("),
+                    self.visit_expr(value),
+                    Doc::text(")"),
+                ])
+            }
             Expr::Sample { distribution, .. } => {
                 Doc::concat(vec![
                     Doc::text("sample("),

@@ -697,10 +697,14 @@ impl<'a> Parser<'a> {
             });
         }
 
-        // Handle &self and &mut self
+        // Handle &self, &mut self, and &!self (Sounio mutable reference)
         if self.at(TokenKind::Amp) {
             self.advance();
-            let is_ref_mut = if self.at(TokenKind::Mut) {
+            // Check for &!self (Sounio mutable reference) or &mut self (Rust-style)
+            let is_ref_mut = if self.at(TokenKind::Bang) {
+                self.advance();
+                true
+            } else if self.at(TokenKind::Mut) {
                 self.advance();
                 true
             } else {
@@ -4237,6 +4241,18 @@ impl<'a> Parser<'a> {
                     id: self.next_id(),
                     expr,
                     handler,
+                })
+            }
+
+            // Resume continuation: resume(value)
+            TokenKind::Resume => {
+                self.advance();
+                self.expect(TokenKind::LParen)?;
+                let value = self.parse_expr()?;
+                self.expect(TokenKind::RParen)?;
+                Ok(Expr::Resume {
+                    id: self.next_id(),
+                    value: Box::new(value),
                 })
             }
 

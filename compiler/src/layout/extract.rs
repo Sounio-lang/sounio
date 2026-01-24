@@ -463,6 +463,9 @@ impl HirConceptExtractor {
             HirExprKind::Handle { expr, .. } => {
                 self.visit_expr(expr);
             }
+            HirExprKind::Resume { value } => {
+                self.visit_expr(value);
+            }
             HirExprKind::Literal(_)
             | HirExprKind::Local(_)
             | HirExprKind::Global(_)

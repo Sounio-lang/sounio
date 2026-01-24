@@ -144,7 +144,21 @@ pub struct HirVariant {
 pub struct HirTrait {
     pub id: NodeId,
     pub name: String,
+    pub type_params: Vec<String>,
+    pub assoc_types: Vec<HirAssocTypeDecl>,
     pub methods: Vec<HirTraitMethod>,
+    pub supertraits: Vec<String>,
+}
+
+/// HIR associated type declaration (in trait definition)
+#[derive(Debug, Clone)]
+pub struct HirAssocTypeDecl {
+    pub id: NodeId,
+    pub name: String,
+    /// Type bounds on the associated type (e.g., `type Item: Clone`)
+    pub bounds: Vec<String>,
+    /// Default type (e.g., `type Item = i32`)
+    pub default: Option<HirType>,
 }
 
 /// HIR trait method
@@ -162,7 +176,17 @@ pub struct HirImpl {
     pub id: NodeId,
     pub trait_ref: Option<String>,
     pub self_ty: HirType,
+    pub type_params: Vec<String>,
+    pub assoc_types: Vec<HirAssocTypeImpl>,
     pub methods: Vec<HirFn>,
+}
+
+/// HIR associated type implementation (in impl block)
+#[derive(Debug, Clone)]
+pub struct HirAssocTypeImpl {
+    pub id: NodeId,
+    pub name: String,
+    pub ty: HirType,
 }
 
 /// HIR type alias
@@ -1061,6 +1085,8 @@ pub enum HirExprKind {
     },
     /// Handle effect
     Handle { expr: Box<HirExpr>, handler: String },
+    /// Resume continuation with value
+    Resume { value: Box<HirExpr> },
     /// Sample from distribution
     Sample(Box<HirExpr>),
 

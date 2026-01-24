@@ -811,6 +811,16 @@ impl<'a> LoweringContext<'a> {
 
             HirExprKind::Handle { expr, handler } => self.lower_effect_handle(expr, handler, &ty),
 
+            HirExprKind::Resume { value } => {
+                // Resume a continuation with a value
+                // For now, lower as a runtime call that invokes the captured continuation
+                let val = self.lower_expr(value)?;
+                Some(
+                    self.builder
+                        .build_call("__effect_resume".to_string(), vec![val], ty),
+                )
+            }
+
             HirExprKind::Sample(dist) => self.lower_sample(dist, &ty),
 
             // ==================== EPISTEMIC EXPRESSIONS ====================

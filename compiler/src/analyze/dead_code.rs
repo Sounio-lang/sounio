@@ -722,6 +722,9 @@ impl DeadCodeAnalyzer {
             Expr::Handle { expr, .. } => {
                 self.collect_expr_references(expr);
             }
+            Expr::Resume { value, .. } => {
+                self.collect_expr_references(value);
+            }
             Expr::Sample { distribution, .. } => {
                 self.collect_expr_references(distribution);
             }

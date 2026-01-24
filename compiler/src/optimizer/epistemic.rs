@@ -304,6 +304,9 @@ impl EpistemicOptimizer {
             HirExprKind::Handle { expr, .. } => {
                 self.optimize_expr(expr, ctx);
             }
+            HirExprKind::Resume { value } => {
+                self.optimize_expr(value, ctx);
+            }
             HirExprKind::Sample(e) => {
                 self.optimize_expr(e, ctx);
             }

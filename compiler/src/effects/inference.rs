@@ -744,6 +744,12 @@ impl<'a> EffectChecker<'a> {
                 result
             }
 
+            Expr::Resume { value, .. } => {
+                // Resume continues a continuation with a value
+                // The effects of resume are the effects of the value expression
+                self.infer_expr(value)
+            }
+
             Expr::Sample { distribution, .. } => {
                 let mut effects = self.infer_expr(distribution);
                 // Sample has Prob effect
@@ -1159,6 +1165,7 @@ impl<'a> EffectChecker<'a> {
             Expr::Try { id, .. } => *id,
             Expr::Perform { id, .. } => *id,
             Expr::Handle { id, .. } => *id,
+            Expr::Resume { id, .. } => *id,
             Expr::Sample { id, .. } => *id,
             Expr::Await { id, .. } => *id,
             Expr::AsyncBlock { id, .. } => *id,

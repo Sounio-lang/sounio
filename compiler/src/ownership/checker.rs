@@ -422,6 +422,10 @@ impl<'a> OwnershipChecker<'a> {
                 self.check_expr(expr, use_kind);
             }
 
+            Expr::Resume { value, .. } => {
+                self.check_expr(value, UseKind::Move);
+            }
+
             Expr::Sample { distribution, .. } => {
                 self.check_expr(distribution, UseKind::Move);
             }
@@ -1039,6 +1043,7 @@ fn get_expr_id(expr: &Expr) -> NodeId {
         Expr::Try { id, .. } => *id,
         Expr::Perform { id, .. } => *id,
         Expr::Handle { id, .. } => *id,
+        Expr::Resume { id, .. } => *id,
         Expr::Sample { id, .. } => *id,
         Expr::Await { id, .. } => *id,
         Expr::AsyncBlock { id, .. } => *id,

@@ -237,6 +237,10 @@ impl CoercionInserter {
                 Self::apply_to_expr_inner_static(inner, coercion_map);
             }
 
+            HirExprKind::Resume { value } => {
+                Self::apply_to_expr_inner_static(value, coercion_map);
+            }
+
             HirExprKind::Sample(inner) => {
                 Self::apply_to_expr_inner_static(inner, coercion_map);
             }

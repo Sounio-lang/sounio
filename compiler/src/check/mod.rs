@@ -593,6 +593,7 @@ impl TypeChecker {
             Expr::Try { id, .. } => *id,
             Expr::Perform { id, .. } => *id,
             Expr::Handle { id, .. } => *id,
+            Expr::Resume { id, .. } => *id,
             Expr::Sample { id, .. } => *id,
             Expr::Await { id, .. } => *id,
             Expr::AsyncBlock { id, .. } => *id,
@@ -1623,6 +1624,14 @@ impl TypeChecker {
                 // No HIR items produced
                 Ok(None)
             }
+            Item::Trait(t) => {
+                let hir_trait = self.check_trait(t)?;
+                Ok(Some(HirItem::Trait(hir_trait)))
+            }
+            Item::Impl(i) => {
+                let hir_impl = self.check_impl(i)?;
+                Ok(Some(HirItem::Impl(hir_impl)))
+            }
             _ => Ok(None),
         }
     }
@@ -1768,6 +1777,206 @@ impl TypeChecker {
             fields,
             is_linear: s.modifiers.linear,
             is_affine: s.modifiers.affine,
+        })
+    }
+
+    /// Type check a trait definition
+    fn check_trait(&mut self, t: &TraitDef) -> Result<HirTrait> {
+        // Extract type parameters
+        let type_params: Vec<String> = t
+            .generics
+            .params
+            .iter()
+            .filter_map(|p| {
+                if let GenericParam::Type { name, .. } = p {
+                    Some(name.clone())
+                } else {
+                    None
+                }
+            })
+            .collect();
+
+        // Process associated type declarations
+        let mut assoc_types = Vec::new();
+        for item in &t.items {
+            if let TraitItem::Type(assoc) = item {
+                let bounds: Vec<String> = assoc.bounds.iter().map(|p| p.to_string()).collect();
+                let default = assoc.default.as_ref().map(|ty| {
+                    let lowered = self.lower_type_expr(ty);
+                    self.type_to_hir(&lowered)
+                });
+                assoc_types.push(HirAssocTypeDecl {
+                    id: assoc.id,
+                    name: assoc.name.clone(),
+                    bounds,
+                    default,
+                });
+            }
+        }
+
+        // Process trait methods
+        let mut methods = Vec::new();
+        for item in &t.items {
+            if let TraitItem::Fn(f) = item {
+                let params: Vec<HirParam> = f
+                    .params
+                    .iter()
+                    .map(|p| {
+                        let ty = self.lower_type_expr(&p.ty);
+                        HirParam {
+                            id: p.id,
+                            name: self.pattern_name(&p.pattern),
+                            ty: self.type_to_hir(&ty),
+                            is_mut: p.is_mut,
+                        }
+                    })
+                    .collect();
+
+                let return_type = f
+                    .return_type
+                    .as_ref()
+                    .map(|ty| {
+                        let lowered = self.lower_type_expr(ty);
+                        self.type_to_hir(&lowered)
+                    })
+                    .unwrap_or(HirType::Unit);
+
+                let effects: Vec<HirEffect> = f
+                    .effects
+                    .iter()
+                    .map(|e| HirEffect {
+                        id: e.id,
+                        name: e.name.to_string(),
+                        operations: Vec::new(),
+                        effect_var: None,
+                    })
+                    .collect();
+
+                methods.push(HirTraitMethod {
+                    id: f.id,
+                    name: f.name.clone(),
+                    ty: HirFnType {
+                        params,
+                        return_type: Box::new(return_type),
+                        effects,
+                    },
+                    has_default: f.default_body.is_some(),
+                });
+            }
+        }
+
+        // Extract supertrait names
+        let supertraits: Vec<String> = t.supertraits.iter().map(|p| p.to_string()).collect();
+
+        // Register trait's associated types for later resolution
+        for item in &t.items {
+            if let TraitItem::Type(assoc) = item {
+                self.register_trait_assoc_type(&t.name, &assoc.name, assoc.default.as_ref());
+            }
+        }
+
+        Ok(HirTrait {
+            id: t.id,
+            name: t.name.clone(),
+            type_params,
+            assoc_types,
+            methods,
+            supertraits,
+        })
+    }
+
+    /// Register a trait's associated types for later resolution
+    fn register_trait_assoc_type(&mut self, trait_name: &str, assoc_name: &str, default_ty: Option<&TypeExpr>) {
+        // Register associated type placeholder
+        // Format: TraitName::AssocTypeName
+        let qualified_name = format!("{}::{}", trait_name, assoc_name);
+        // Store as a type alias to the default if available
+        if let Some(ty_expr) = default_ty {
+            let ty = self.lower_type_expr(ty_expr);
+            self.type_defs.insert(
+                qualified_name,
+                TypeDef::Alias(ty, Span::default(), None, Vec::new()),
+            );
+        }
+    }
+
+    /// Type check an impl block
+    fn check_impl(&mut self, i: &ImplDef) -> Result<HirImpl> {
+        // Extract type parameters
+        let type_params: Vec<String> = i
+            .generics
+            .params
+            .iter()
+            .filter_map(|p| {
+                if let GenericParam::Type { name, .. } = p {
+                    Some(name.clone())
+                } else {
+                    None
+                }
+            })
+            .collect();
+
+        // Lower the self type
+        let self_ty = self.lower_type_expr(&i.target_type);
+        let hir_self_ty = self.type_to_hir(&self_ty);
+
+        // Get the type name for qualified method names
+        let type_name = match &i.target_type {
+            TypeExpr::Named { path, .. } => path.to_string(),
+            _ => "<anonymous>".to_string(),
+        };
+
+        // Process associated type implementations
+        let mut assoc_types = Vec::new();
+        for item in &i.items {
+            if let ImplItem::Type(impl_ty) = item {
+                let lowered = self.lower_type_expr(&impl_ty.ty);
+                let hir_ty = self.type_to_hir(&lowered);
+
+                // Register the concrete associated type
+                // Format: TypeName::AssocTypeName for inherent impl
+                // Format: TraitName::AssocTypeName::for::TypeName for trait impl
+                if let Some(ref trait_ref) = i.trait_ref {
+                    let qualified = format!("{}::{}::for::{}", trait_ref, impl_ty.name, type_name);
+                    self.type_defs.insert(
+                        qualified,
+                        TypeDef::Alias(lowered.clone(), Span::default(), None, Vec::new()),
+                    );
+                }
+                // Also register as TypeName::AssocTypeName for direct access
+                let direct_name = format!("{}::{}", type_name, impl_ty.name);
+                self.type_defs.insert(
+                    direct_name,
+                    TypeDef::Alias(lowered, Span::default(), None, Vec::new()),
+                );
+
+                assoc_types.push(HirAssocTypeImpl {
+                    id: impl_ty.id,
+                    name: impl_ty.name.clone(),
+                    ty: hir_ty,
+                });
+            }
+        }
+
+        // Process methods
+        let mut methods = Vec::new();
+        for item in &i.items {
+            if let ImplItem::Fn(f) = item {
+                let hir_fn = self.check_function(f)?;
+                methods.push(hir_fn);
+            }
+        }
+
+        // Get trait reference name
+        let trait_ref = i.trait_ref.as_ref().map(|p| p.to_string());
+
+        Ok(HirImpl {
+            id: i.id,
+            trait_ref,
+            self_ty: hir_self_ty,
+            type_params,
+            assoc_types,
+            methods,
         })
     }
 
@@ -3874,6 +4083,22 @@ impl TypeChecker {
                 )
             }
 
+            // Resume continuation: resume(value)
+            Expr::Resume { id: _, value } => {
+                // Type-check the resume value
+                let value_expr = self.check_expr(value, None)?;
+                let value_ty = value_expr.ty.clone();
+
+                // The type of resume is the type of the resumed value
+                // In effect handlers, resume continues execution with this value
+                (
+                    HirExprKind::Resume {
+                        value: Box::new(value_expr),
+                    },
+                    value_ty,
+                )
+            }
+
             // Probabilistic sampling: sample distribution
             Expr::Sample {
                 id: _,
@@ -4100,6 +4325,7 @@ impl TypeChecker {
             | Expr::OntologyTerm { id, .. }
             | Expr::Perform { id, .. }
             | Expr::Handle { id, .. }
+            | Expr::Resume { id, .. }
             | Expr::Sample { id, .. }
             | Expr::Await { id, .. }
             | Expr::AsyncBlock { id, .. }

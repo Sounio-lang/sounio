@@ -407,6 +407,10 @@ impl SemanticTypeChecker {
                 self.check_expr(inner)?;
             }
 
+            HirExprKind::Resume { value } => {
+                self.check_expr(value)?;
+            }
+
             HirExprKind::Sample(inner) => {
                 self.check_expr(inner)?;
             }
