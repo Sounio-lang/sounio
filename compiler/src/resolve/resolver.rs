@@ -142,20 +142,6 @@ impl Resolver {
             "type_of",
             "parse_int",
             "parse_float",
-            // Math builtins
-            "sqrt",
-            "abs",
-            "sin",
-            "cos",
-            "tan",
-            "exp",
-            "log",
-            "pow",
-            "floor",
-            "ceil",
-            "round",
-            "min",
-            "max",
             // Linear algebra
             "vec2",
             "vec3",
@@ -725,30 +711,57 @@ impl Resolver {
     }
 
     fn collect_import(&mut self, i: &ImportDef) {
-        // Process import into the current module's symbol table
-        let path: Vec<String> = i.path.segments.clone();
-        if let Err(e) = self
-            .symbols
-            .process_import(&path, i.items.as_deref(), i.is_reexport)
-        {
-            // Track unresolved imports for verification after all modules loaded
-            // This handles cases where imports reference modules loaded later
+        let full_path: Vec<String> = i.path.segments.clone();
+
+        // Compute the effective module path and items for resolution
+        // For `use foo::bar;` (no braces), treat as importing item `bar` from module `foo`
+        let (module_path, effective_items): (Vec<String>, Option<Vec<ImportItem>>) =
+            match &i.items {
+                Some(items) => {
+                    // Explicit items: `use foo::{bar, baz}` or `use foo::*`
+                    (full_path.clone(), Some(items.clone()))
+                }
+                None if full_path.len() > 1 => {
+                    // `use foo::bar;` -> module=foo, item=bar
+                    let item_name = full_path.last().cloned().unwrap_or_default();
+                    let mod_path = full_path[..full_path.len() - 1].to_vec();
+                    (
+                        mod_path,
+                        Some(vec![ImportItem {
+                            name: item_name,
+                            alias: None,
+                            is_glob: false,
+                        }]),
+                    )
+                }
+                None => {
+                    // `use foo;` -> import entire module
+                    (full_path.clone(), None)
+                }
+            };
+
+        // Process import into symbol table
+        if let Err(e) = self.symbols.process_import(
+            &module_path,
+            effective_items.as_deref(),
+            i.is_reexport,
+        ) {
             self.unresolved_imports.push(PendingImport {
-                path: path.clone(),
+                path: module_path.clone(),
                 reason: e,
                 span: i.span,
             });
         }
 
-        // Also record import in module tree
+        // Record import in module tree
         if let Some(module) = self.module_tree.get_mut(&self.current_tree_module) {
-            match &i.items {
+            match effective_items {
                 Some(items) => {
                     for item in items {
                         let local_name = item.alias.clone().unwrap_or_else(|| item.name.clone());
                         module.add_import(ImportEntry {
                             local_name,
-                            source_path: path.clone(),
+                            source_path: module_path.clone(),
                             original_name: item.name.clone(),
                             is_glob: item.is_glob,
                             is_reexport: i.is_reexport,
@@ -757,11 +770,10 @@ impl Resolver {
                     }
                 }
                 None => {
-                    // Import entire module
-                    let module_name = path.last().cloned().unwrap_or_default();
+                    let module_name = module_path.last().cloned().unwrap_or_default();
                     module.add_import(ImportEntry {
                         local_name: module_name.clone(),
-                        source_path: path.clone(),
+                        source_path: module_path.clone(),
                         original_name: module_name,
                         is_glob: false,
                         is_reexport: i.is_reexport,
