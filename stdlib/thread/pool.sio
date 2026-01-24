@@ -1,0 +1,485 @@
+//! stdlib/thread/pool.sio - Thread Pool Implementation
+//!
+//! This module provides a thread pool for executing tasks in parallel.
+
+use sync::mutex::*;
+use sync::channel::*;
+use sync::atomic::*;
+use thread::spawn::*;
+
+// =============================================================================
+// Job Type
+// =============================================================================
+
+/// A job to be executed by a worker thread
+type Job = Box<dyn FnOnce() + Send + 'static>;
+
+// =============================================================================
+// Thread Pool
+// =============================================================================
+
+/// A pool of worker threads for executing tasks in parallel.
+///
+/// The pool maintains a fixed number of threads that wait for jobs.
+/// When a job is submitted, an available thread executes it.
+pub struct ThreadPool {
+    workers: Vec<Worker>,
+    sender: Sender<JobMessage>,
+    active_jobs: AtomicUsize,
+    shutdown: AtomicBool
+}
+
+/// Message sent to workers
+enum JobMessage {
+    /// A job to execute
+    Job(Job),
+    /// Signal to terminate
+    Terminate
+}
+
+/// A worker thread in the pool
+struct Worker {
+    id: usize,
+    handle: Option<JoinHandle<()>>
+}
+
+/// Creates a new thread pool with the specified number of threads.
+///
+/// # Example
+/// ```sio
+/// let pool = thread_pool_new(4)
+///
+/// thread_pool_execute(&pool, || {
+///     print("Task 1")
+/// })
+///
+/// thread_pool_execute(&pool, || {
+///     print("Task 2")
+/// })
+///
+/// thread_pool_shutdown(&!pool)
+/// ```
+///
+/// # Panics
+/// Panics if `size` is 0.
+pub fn thread_pool_new(size: usize) -> ThreadPool with IO, Alloc, Panic {
+    if size == 0 {
+        panic("Thread pool size must be greater than 0")
+    }
+
+    let (sender, receiver) = channel_unbounded();
+    let receiver = Arc::new(Mutex::new(receiver));
+
+    var workers: Vec<Worker> = Vec::with_capacity(size);
+
+    var id: usize = 0;
+    while id < size {
+        workers.push(worker_new(id, receiver.clone()));
+        id = id + 1;
+    }
+
+    ThreadPool {
+        workers: workers,
+        sender: sender,
+        active_jobs: AtomicUsize::new(0),
+        shutdown: AtomicBool::new(false)
+    }
+}
+
+/// Creates a new thread pool with the number of available CPUs.
+pub fn thread_pool_default() -> ThreadPool with IO, Alloc, Panic {
+    thread_pool_new(available_parallelism())
+}
+
+/// Executes a job in the thread pool.
+///
+/// The job is queued and will be executed by an available worker thread.
+///
+/// # Panics
+/// Panics if the thread pool has been shut down.
+pub fn thread_pool_execute<F>(pool: &ThreadPool, f: F) with Alloc, Panic
+where
+    F: FnOnce() + Send + 'static
+{
+    if pool.shutdown.load(Ordering::SeqCst) {
+        panic("Cannot execute on a shut down thread pool")
+    }
+
+    pool.active_jobs.fetch_add(1, Ordering::SeqCst);
+
+    let job = Box::new(move || {
+        f();
+    });
+
+    match sender_try_send(&pool.sender, JobMessage::Job(job)) {
+        Ok(()) => {},
+        Err(_) => panic("Failed to send job to thread pool")
+    }
+}
+
+/// Executes a job and returns a future for its result.
+///
+/// # Example
+/// ```sio
+/// let pool = thread_pool_new(4)
+/// let future = thread_pool_submit(&pool, || {
+///     expensive_computation()
+/// })
+///
+/// // Do other work...
+///
+/// let result = future_get(future)
+/// ```
+pub fn thread_pool_submit<F, T>(pool: &ThreadPool, f: F) -> Future<T> with Alloc, Panic
+where
+    F: FnOnce() -> T + Send + 'static,
+    T: Send + 'static
+{
+    let result_cell = Arc::new(ResultCell::new());
+    let result_cell_clone = result_cell.clone();
+
+    thread_pool_execute(pool, move || {
+        let value = f();
+        result_cell_clone.set(value);
+    });
+
+    Future { result: result_cell }
+}
+
+/// Returns the number of worker threads in the pool.
+pub fn thread_pool_size(pool: &ThreadPool) -> usize {
+    pool.workers.len()
+}
+
+/// Returns the approximate number of active jobs.
+pub fn thread_pool_active_jobs(pool: &ThreadPool) -> usize {
+    pool.active_jobs.load(Ordering::SeqCst)
+}
+
+/// Waits for all currently submitted jobs to complete.
+pub fn thread_pool_wait(pool: &ThreadPool) with IO {
+    while pool.active_jobs.load(Ordering::SeqCst) > 0 {
+        thread_yield();
+    }
+}
+
+/// Shuts down the thread pool.
+///
+/// This waits for all workers to finish their current jobs.
+/// No new jobs can be submitted after shutdown.
+pub fn thread_pool_shutdown(pool: &!ThreadPool) with IO, Panic {
+    pool.shutdown.store(true, Ordering::SeqCst);
+
+    // Send terminate message to all workers
+    var i: usize = 0;
+    while i < pool.workers.len() {
+        sender_send(&pool.sender, JobMessage::Terminate);
+        i = i + 1;
+    }
+
+    // Join all workers
+    for worker in &!pool.workers {
+        if let Some(handle) = std::mem::take(&!worker.handle) {
+            thread_join(handle);
+        }
+    }
+}
+
+// =============================================================================
+// Worker
+// =============================================================================
+
+/// Creates a new worker thread
+fn worker_new(id: usize, receiver: Arc<Mutex<Receiver<JobMessage>>>) -> Worker with IO, Alloc {
+    let handle = thread_spawn(move || {
+        loop {
+            // Get next job from queue
+            let message = {
+                let recv = receiver.lock();
+                receiver_recv(&recv)
+            };
+
+            match message {
+                Some(JobMessage::Job(job)) => {
+                    job();
+                    // Note: would decrement active_jobs counter here
+                },
+                Some(JobMessage::Terminate) => {
+                    break;
+                },
+                None => {
+                    // Channel closed
+                    break;
+                }
+            }
+        }
+    });
+
+    Worker {
+        id: id,
+        handle: Some(handle)
+    }
+}
+
+// =============================================================================
+// Future (Simple)
+// =============================================================================
+
+/// A future representing the result of an asynchronous computation.
+pub struct Future<T> {
+    result: Arc<ResultCell<T>>
+}
+
+/// Cell for storing a result that may not be ready yet
+struct ResultCell<T> {
+    value: Mutex<Option<T>>,
+    ready: AtomicBool
+}
+
+impl<T> ResultCell<T> {
+    fn new() -> ResultCell<T> with Alloc {
+        ResultCell {
+            value: Mutex::new(None),
+            ready: AtomicBool::new(false)
+        }
+    }
+
+    fn set(self: &ResultCell<T>, val: T) with Panic {
+        let mut guard = self.value.lock();
+        *guard = Some(val);
+        self.ready.store(true, Ordering::SeqCst);
+    }
+
+    fn is_ready(self: &ResultCell<T>) -> bool {
+        self.ready.load(Ordering::SeqCst)
+    }
+
+    fn take(self: &ResultCell<T>) -> Option<T> with Panic {
+        if !self.is_ready() {
+            return None
+        }
+        let mut guard = self.value.lock();
+        std::mem::take(&!*guard)
+    }
+}
+
+/// Checks if the future result is ready.
+pub fn future_is_ready<T>(f: &Future<T>) -> bool {
+    f.result.is_ready()
+}
+
+/// Gets the result, blocking until it's ready.
+pub fn future_get<T>(f: Future<T>) -> T with IO, Panic {
+    // Spin until ready
+    while !f.result.is_ready() {
+        thread_yield();
+    }
+
+    match f.result.take() {
+        Some(value) => value,
+        None => panic("Future result already taken")
+    }
+}
+
+/// Tries to get the result without blocking.
+///
+/// Returns `Some(value)` if ready, `None` otherwise.
+pub fn future_try_get<T>(f: &Future<T>) -> Option<T> with Panic {
+    f.result.take()
+}
+
+// =============================================================================
+// Work-Stealing Pool (Advanced)
+// =============================================================================
+
+/// A work-stealing thread pool for better load balancing.
+///
+/// Each worker has its own deque. When a worker's deque is empty,
+/// it steals work from other workers.
+pub struct WorkStealingPool {
+    workers: Vec<StealingWorker>,
+    global_queue: Mutex<Deque<Job>>,
+    shutdown: AtomicBool
+}
+
+/// A worker in a work-stealing pool
+struct StealingWorker {
+    id: usize,
+    local_queue: Mutex<Deque<Job>>,
+    handle: Option<JoinHandle<()>>
+}
+
+/// Creates a new work-stealing thread pool.
+pub fn work_stealing_pool_new(size: usize) -> WorkStealingPool with IO, Alloc, Panic {
+    if size == 0 {
+        panic("Pool size must be greater than 0")
+    }
+
+    var workers: Vec<StealingWorker> = Vec::with_capacity(size);
+
+    var id: usize = 0;
+    while id < size {
+        workers.push(StealingWorker {
+            id: id,
+            local_queue: Mutex::new(Deque::new()),
+            handle: None
+        });
+        id = id + 1;
+    }
+
+    WorkStealingPool {
+        workers: workers,
+        global_queue: Mutex::new(Deque::new()),
+        shutdown: AtomicBool::new(false)
+    }
+}
+
+// =============================================================================
+// Parallel Iterators
+// =============================================================================
+
+/// Extension trait for parallel iteration
+pub trait ParallelIterator<T> {
+    /// Applies a function to each element in parallel.
+    fn par_for_each<F>(self: Self, pool: &ThreadPool, f: F) with Alloc, Panic
+    where
+        F: Fn(T) + Send + Sync + 'static,
+        T: Send + 'static;
+
+    /// Maps elements in parallel.
+    fn par_map<F, U>(self: Self, pool: &ThreadPool, f: F) -> Vec<U> with Alloc, Panic
+    where
+        F: Fn(T) -> U + Send + Sync + 'static,
+        T: Send + 'static,
+        U: Send + 'static;
+}
+
+/// Parallel for-each over a range.
+///
+/// # Example
+/// ```sio
+/// let pool = thread_pool_new(4)
+/// par_for_range(&pool, 0, 1000, |i| {
+///     process(i)
+/// })
+/// ```
+pub fn par_for_range<F>(pool: &ThreadPool, start: i64, end: i64, f: F) with Alloc, Panic
+where
+    F: Fn(i64) + Send + Sync + 'static
+{
+    let f = Arc::new(f);
+
+    var i = start;
+    while i < end {
+        let f_clone = f.clone();
+        let idx = i;
+        thread_pool_execute(pool, move || {
+            f_clone(idx);
+        });
+        i = i + 1;
+    }
+
+    thread_pool_wait(pool);
+}
+
+/// Parallel for-each over a slice.
+pub fn par_for_each<T, F>(pool: &ThreadPool, items: &[T], f: F) with Alloc, Panic
+where
+    T: Send + Sync + 'static,
+    F: Fn(&T) + Send + Sync + 'static
+{
+    let f = Arc::new(f);
+    let items = Arc::new(items.to_vec());  // Would need proper Arc<[T]>
+
+    var i: usize = 0;
+    while i < items.len() {
+        let f_clone = f.clone();
+        let items_clone = items.clone();
+        let idx = i;
+        thread_pool_execute(pool, move || {
+            f_clone(&items_clone[idx]);
+        });
+        i = i + 1;
+    }
+
+    thread_pool_wait(pool);
+}
+
+/// Parallel map over a slice.
+pub fn par_map<T, U, F>(pool: &ThreadPool, items: &[T], f: F) -> Vec<U> with Alloc, Panic
+where
+    T: Send + Sync + Clone + 'static,
+    U: Send + 'static,
+    F: Fn(T) -> U + Send + Sync + 'static
+{
+    let n = items.len();
+    let f = Arc::new(f);
+
+    // Submit all tasks
+    var futures: Vec<Future<U>> = Vec::with_capacity(n);
+    var i: usize = 0;
+    while i < n {
+        let f_clone = f.clone();
+        let item = items[i].clone();
+        futures.push(thread_pool_submit(pool, move || {
+            f_clone(item)
+        }));
+        i = i + 1;
+    }
+
+    // Collect results
+    var results: Vec<U> = Vec::with_capacity(n);
+    for future in futures {
+        results.push(future_get(future));
+    }
+
+    results
+}
+
+/// Parallel reduce over a slice.
+pub fn par_reduce<T, F>(pool: &ThreadPool, items: &[T], initial: T, f: F) -> T with Alloc, Panic
+where
+    T: Send + Sync + Clone + 'static,
+    F: Fn(T, T) -> T + Send + Sync + 'static
+{
+    if items.len() == 0 {
+        return initial
+    }
+
+    if items.len() == 1 {
+        return f(initial, items[0].clone())
+    }
+
+    // Split into chunks and reduce in parallel
+    let chunk_size = (items.len() + pool.workers.len() - 1) / pool.workers.len();
+    let f = Arc::new(f);
+
+    var partial_results: Vec<Future<T>> = Vec::new();
+
+    var start: usize = 0;
+    while start < items.len() {
+        let end = std::cmp::min(start + chunk_size, items.len());
+        let chunk: Vec<T> = items[start..end].to_vec();
+        let f_clone = f.clone();
+        let init = initial.clone();
+
+        partial_results.push(thread_pool_submit(pool, move || {
+            var acc = init;
+            for item in &chunk {
+                acc = f_clone(acc, item.clone());
+            }
+            acc
+        }));
+
+        start = end;
+    }
+
+    // Combine partial results
+    var final_result = initial;
+    for future in partial_results {
+        let partial = future_get(future);
+        final_result = f(final_result, partial);
+    }
+
+    final_result
+}

@@ -1,0 +1,757 @@
+//! stdlib/collections/btree.sio - B-Tree Map and Set
+//!
+//! This module provides B-tree based sorted collections:
+//! - BTreeMap: A sorted map (dictionary) with O(log n) operations
+//! - BTreeSet: A sorted set with O(log n) operations
+//!
+//! B-trees are self-balancing and keep data sorted, making them ideal for
+//! ordered iteration and range queries.
+//!
+//! # Examples
+//! ```sio
+//! // BTreeMap usage
+//! var map = btree_map_new()
+//! btree_map_insert(&!map, "apple", 3)
+//! btree_map_insert(&!map, "banana", 5)
+//! btree_map_insert(&!map, "cherry", 2)
+//!
+//! // Keys are always sorted
+//! for entry in btree_map_iter(&map) {
+//!     print(entry.key ++ ": " ++ entry.value.to_string())
+//! }
+//! // Output: apple: 3, banana: 5, cherry: 2
+//!
+//! // Range query
+//! for entry in btree_map_range(&map, "b", "d") {
+//!     print(entry.key)  // banana, cherry
+//! }
+//! ```
+
+// =============================================================================
+// Constants
+// =============================================================================
+
+/// Minimum degree (t) - determines the capacity of nodes.
+/// Each node can have at most 2t-1 keys and at least t-1 keys (except root).
+let MIN_DEGREE: usize = 4;  // B-tree with order 8
+
+/// Maximum keys per node
+let MAX_KEYS: usize = 2 * MIN_DEGREE - 1;  // 7
+
+/// Minimum keys per node (except root)
+let MIN_KEYS: usize = MIN_DEGREE - 1;  // 3
+
+// =============================================================================
+// B-Tree Node
+// =============================================================================
+
+/// A node in the B-tree
+struct BTreeNode<K, V> {
+    /// Keys stored in this node
+    keys: Vec<K>,
+    /// Values corresponding to keys
+    values: Vec<V>,
+    /// Child pointers (len = keys.len() + 1 for internal nodes, 0 for leaves)
+    children: Vec<Box<BTreeNode<K, V>>>,
+    /// Whether this is a leaf node
+    is_leaf: bool
+}
+
+fn btree_node_new<K, V>(is_leaf: bool) -> BTreeNode<K, V> with Alloc {
+    BTreeNode {
+        keys: Vec::new(),
+        values: Vec::new(),
+        children: Vec::new(),
+        is_leaf: is_leaf
+    }
+}
+
+fn btree_node_is_full<K, V>(node: &BTreeNode<K, V>) -> bool {
+    node.keys.len() >= MAX_KEYS
+}
+
+fn btree_node_key_count<K, V>(node: &BTreeNode<K, V>) -> usize {
+    node.keys.len()
+}
+
+// =============================================================================
+// B-Tree Map
+// =============================================================================
+
+/// A sorted map implemented as a B-tree.
+///
+/// This provides O(log n) lookups, insertions, and deletions while keeping
+/// keys sorted. Iteration yields entries in sorted key order.
+pub struct BTreeMap<K, V> {
+    root: Option<Box<BTreeNode<K, V>>>,
+    len: usize
+}
+
+/// An entry in the B-tree map
+pub struct BTreeEntry<K, V> {
+    pub key: K,
+    pub value: V
+}
+
+/// Creates a new empty BTreeMap.
+pub fn btree_map_new<K, V>() -> BTreeMap<K, V> {
+    BTreeMap {
+        root: None,
+        len: 0
+    }
+}
+
+/// Returns the number of entries in the map.
+pub fn btree_map_len<K, V>(map: &BTreeMap<K, V>) -> usize {
+    map.len
+}
+
+/// Returns true if the map is empty.
+pub fn btree_map_is_empty<K, V>(map: &BTreeMap<K, V>) -> bool {
+    map.len == 0
+}
+
+/// Looks up a value by key.
+///
+/// Returns `Some(&value)` if the key exists, `None` otherwise.
+pub fn btree_map_get<'a, K, V>(map: &'a BTreeMap<K, V>, key: &K) -> Option<&'a V>
+where K: Ord
+{
+    match &map.root {
+        None => None,
+        Some(root) => btree_node_search(root, key)
+    }
+}
+
+/// Looks up a mutable reference to a value by key.
+pub fn btree_map_get_mut<'a, K, V>(map: &'a !BTreeMap<K, V>, key: &K) -> Option<&'a !V>
+where K: Ord
+{
+    match &!map.root {
+        None => None,
+        Some(root) => btree_node_search_mut(&!*root, key)
+    }
+}
+
+/// Returns true if the map contains the given key.
+pub fn btree_map_contains<K, V>(map: &BTreeMap<K, V>, key: &K) -> bool
+where K: Ord
+{
+    btree_map_get(map, key).is_some()
+}
+
+/// Inserts a key-value pair into the map.
+///
+/// If the key already exists, the old value is replaced and returned.
+pub fn btree_map_insert<K, V>(map: &!BTreeMap<K, V>, key: K, value: V) -> Option<V> with Alloc
+where K: Ord + Clone, V: Clone
+{
+    match &!map.root {
+        None => {
+            // Create root node
+            var root = btree_node_new(true);
+            root.keys.push(key);
+            root.values.push(value);
+            map.root = Some(Box::new(root));
+            map.len = 1;
+            None
+        },
+        Some(root) => {
+            // Check if root is full
+            if btree_node_is_full(root) {
+                // Split root
+                var new_root = btree_node_new(false);
+                var old_root = std::mem::take(&!map.root).unwrap();
+                new_root.children.push(old_root);
+                btree_split_child(&!new_root, 0);
+                map.root = Some(Box::new(new_root));
+            }
+
+            let result = btree_insert_non_full(&!*map.root.as_mut().unwrap(), key, value);
+            if result.is_none() {
+                map.len = map.len + 1;
+            }
+            result
+        }
+    }
+}
+
+/// Removes a key from the map.
+///
+/// Returns the removed value if the key existed.
+pub fn btree_map_remove<K, V>(map: &!BTreeMap<K, V>, key: &K) -> Option<V> with Alloc
+where K: Ord + Clone, V: Clone
+{
+    match &!map.root {
+        None => None,
+        Some(_) => {
+            let result = btree_remove(&!*map.root.as_mut().unwrap(), key);
+
+            if result.is_some() {
+                map.len = map.len - 1;
+
+                // If root has no keys and has a child, make the child the new root
+                if let Some(root) = &map.root {
+                    if root.keys.is_empty() && !root.is_leaf {
+                        let new_root = std::mem::take(&!map.root.as_mut().unwrap().children[0]);
+                        map.root = Some(new_root);
+                    }
+                }
+            }
+
+            result
+        }
+    }
+}
+
+/// Clears all entries from the map.
+pub fn btree_map_clear<K, V>(map: &!BTreeMap<K, V>) {
+    map.root = None;
+    map.len = 0;
+}
+
+// =============================================================================
+// B-Tree Search Operations
+// =============================================================================
+
+fn btree_node_search<'a, K, V>(node: &'a BTreeNode<K, V>, key: &K) -> Option<&'a V>
+where K: Ord
+{
+    // Binary search for the key
+    var i: usize = 0;
+    while i < node.keys.len() && key > &node.keys[i] {
+        i = i + 1;
+    }
+
+    if i < node.keys.len() && key == &node.keys[i] {
+        // Found key at index i
+        Some(&node.values[i])
+    } else if node.is_leaf {
+        // Key not in tree
+        None
+    } else {
+        // Search in appropriate child
+        btree_node_search(&node.children[i], key)
+    }
+}
+
+fn btree_node_search_mut<'a, K, V>(node: &'a !BTreeNode<K, V>, key: &K) -> Option<&'a !V>
+where K: Ord
+{
+    var i: usize = 0;
+    while i < node.keys.len() && key > &node.keys[i] {
+        i = i + 1;
+    }
+
+    if i < node.keys.len() && key == &node.keys[i] {
+        Some(&!node.values[i])
+    } else if node.is_leaf {
+        None
+    } else {
+        btree_node_search_mut(&!*node.children[i], key)
+    }
+}
+
+// =============================================================================
+// B-Tree Insertion
+// =============================================================================
+
+fn btree_split_child<K, V>(parent: &!BTreeNode<K, V>, child_idx: usize) with Alloc
+where K: Clone, V: Clone
+{
+    let child = &!*parent.children[child_idx];
+    let mid = MIN_DEGREE - 1;
+
+    // Create new node for right half
+    var new_node = btree_node_new(child.is_leaf);
+
+    // Move keys/values to new node
+    var i = mid + 1;
+    while i < child.keys.len() {
+        new_node.keys.push(child.keys[i].clone());
+        new_node.values.push(child.values[i].clone());
+        i = i + 1;
+    }
+
+    // Move children if not leaf
+    if !child.is_leaf {
+        var j = mid + 1;
+        while j <= child.children.len() {
+            new_node.children.push(std::mem::take(&!child.children[j]));
+            j = j + 1;
+        }
+    }
+
+    // Get median key/value
+    let median_key = child.keys[mid].clone();
+    let median_value = child.values[mid].clone();
+
+    // Truncate child
+    child.keys.truncate(mid);
+    child.values.truncate(mid);
+    if !child.is_leaf {
+        child.children.truncate(mid + 1);
+    }
+
+    // Insert median into parent
+    parent.keys.insert(child_idx, median_key);
+    parent.values.insert(child_idx, median_value);
+    parent.children.insert(child_idx + 1, Box::new(new_node));
+}
+
+fn btree_insert_non_full<K, V>(node: &!BTreeNode<K, V>, key: K, value: V) -> Option<V> with Alloc
+where K: Ord + Clone, V: Clone
+{
+    var i = node.keys.len();
+
+    if node.is_leaf {
+        // Find insertion point
+        while i > 0 && key < node.keys[i - 1] {
+            i = i - 1;
+        }
+
+        // Check for existing key
+        if i < node.keys.len() && key == node.keys[i] {
+            let old = std::mem::replace(&!node.values[i], value);
+            return Some(old)
+        }
+
+        // Insert new key/value
+        node.keys.insert(i, key);
+        node.values.insert(i, value);
+        None
+    } else {
+        // Find child to descend into
+        while i > 0 && key < node.keys[i - 1] {
+            i = i - 1;
+        }
+
+        // Check for existing key in this node
+        if i < node.keys.len() && key == node.keys[i] {
+            let old = std::mem::replace(&!node.values[i], value);
+            return Some(old)
+        }
+
+        // Check if child is full
+        if btree_node_is_full(&node.children[i]) {
+            btree_split_child(node, i);
+
+            // Determine which child to descend into after split
+            if key > node.keys[i] {
+                i = i + 1;
+            } else if key == node.keys[i] {
+                let old = std::mem::replace(&!node.values[i], value);
+                return Some(old)
+            }
+        }
+
+        btree_insert_non_full(&!*node.children[i], key, value)
+    }
+}
+
+// =============================================================================
+// B-Tree Deletion
+// =============================================================================
+
+fn btree_remove<K, V>(node: &!BTreeNode<K, V>, key: &K) -> Option<V> with Alloc
+where K: Ord + Clone, V: Clone
+{
+    var i: usize = 0;
+    while i < node.keys.len() && key > &node.keys[i] {
+        i = i + 1;
+    }
+
+    if i < node.keys.len() && key == &node.keys[i] {
+        // Key found in this node
+        if node.is_leaf {
+            // Case 1: Key in leaf - just remove
+            node.keys.remove(i);
+            Some(node.values.remove(i))
+        } else {
+            // Case 2: Key in internal node
+            btree_remove_internal(node, i)
+        }
+    } else if node.is_leaf {
+        // Key not in tree
+        None
+    } else {
+        // Key may be in subtree
+        btree_remove_from_child(node, i, key)
+    }
+}
+
+fn btree_remove_internal<K, V>(node: &!BTreeNode<K, V>, key_idx: usize) -> Option<V> with Alloc
+where K: Ord + Clone, V: Clone
+{
+    let key = node.keys[key_idx].clone();
+
+    // Case 2a: Left child has at least t keys - replace with predecessor
+    if node.children[key_idx].keys.len() >= MIN_DEGREE {
+        let (pred_key, pred_value) = btree_find_predecessor(&!*node.children[key_idx]);
+        node.keys[key_idx] = pred_key.clone();
+        let old_value = std::mem::replace(&!node.values[key_idx], pred_value);
+        btree_remove(&!*node.children[key_idx], &pred_key);
+        return Some(old_value)
+    }
+
+    // Case 2b: Right child has at least t keys - replace with successor
+    if node.children[key_idx + 1].keys.len() >= MIN_DEGREE {
+        let (succ_key, succ_value) = btree_find_successor(&!*node.children[key_idx + 1]);
+        node.keys[key_idx] = succ_key.clone();
+        let old_value = std::mem::replace(&!node.values[key_idx], succ_value);
+        btree_remove(&!*node.children[key_idx + 1], &succ_key);
+        return Some(old_value)
+    }
+
+    // Case 2c: Both children have t-1 keys - merge and recurse
+    let old_value = node.values[key_idx].clone();
+    btree_merge_children(node, key_idx);
+    btree_remove(&!*node.children[key_idx], &key);
+    Some(old_value)
+}
+
+fn btree_remove_from_child<K, V>(node: &!BTreeNode<K, V>, child_idx: usize, key: &K) -> Option<V> with Alloc
+where K: Ord + Clone, V: Clone
+{
+    // Ensure child has at least MIN_DEGREE keys before descending
+    if node.children[child_idx].keys.len() < MIN_DEGREE {
+        btree_fill_child(node, child_idx);
+    }
+
+    // Recalculate child index after potential changes
+    var new_idx = child_idx;
+    if child_idx > node.keys.len() {
+        new_idx = node.keys.len();
+    }
+
+    btree_remove(&!*node.children[new_idx], key)
+}
+
+fn btree_find_predecessor<K, V>(node: &!BTreeNode<K, V>) -> (K, V)
+where K: Clone, V: Clone
+{
+    var current = node;
+    while !current.is_leaf {
+        current = &!*current.children[current.children.len() - 1];
+    }
+    let last = current.keys.len() - 1;
+    (current.keys[last].clone(), current.values[last].clone())
+}
+
+fn btree_find_successor<K, V>(node: &!BTreeNode<K, V>) -> (K, V)
+where K: Clone, V: Clone
+{
+    var current = node;
+    while !current.is_leaf {
+        current = &!*current.children[0];
+    }
+    (current.keys[0].clone(), current.values[0].clone())
+}
+
+fn btree_merge_children<K, V>(node: &!BTreeNode<K, V>, idx: usize) with Alloc
+where K: Clone, V: Clone
+{
+    let left = &!*node.children[idx];
+    let right = &!*node.children[idx + 1];
+
+    // Move key from parent to left child
+    left.keys.push(node.keys[idx].clone());
+    left.values.push(node.values[idx].clone());
+
+    // Move all keys/values from right to left
+    for k in &right.keys {
+        left.keys.push(k.clone());
+    }
+    for v in &right.values {
+        left.values.push(v.clone());
+    }
+
+    // Move children from right to left
+    if !left.is_leaf {
+        for child in &right.children {
+            left.children.push(child.clone());
+        }
+    }
+
+    // Remove key from parent
+    node.keys.remove(idx);
+    node.values.remove(idx);
+    node.children.remove(idx + 1);
+}
+
+fn btree_fill_child<K, V>(node: &!BTreeNode<K, V>, idx: usize) with Alloc
+where K: Clone, V: Clone
+{
+    // Try borrowing from left sibling
+    if idx > 0 && node.children[idx - 1].keys.len() >= MIN_DEGREE {
+        btree_borrow_from_prev(node, idx);
+        return
+    }
+
+    // Try borrowing from right sibling
+    if idx < node.children.len() - 1 && node.children[idx + 1].keys.len() >= MIN_DEGREE {
+        btree_borrow_from_next(node, idx);
+        return
+    }
+
+    // Merge with sibling
+    if idx < node.children.len() - 1 {
+        btree_merge_children(node, idx);
+    } else {
+        btree_merge_children(node, idx - 1);
+    }
+}
+
+fn btree_borrow_from_prev<K, V>(node: &!BTreeNode<K, V>, idx: usize) with Alloc
+where K: Clone, V: Clone
+{
+    let child = &!*node.children[idx];
+    let sibling = &!*node.children[idx - 1];
+
+    // Move key from parent to child front
+    child.keys.insert(0, node.keys[idx - 1].clone());
+    child.values.insert(0, node.values[idx - 1].clone());
+
+    // Move last key from sibling to parent
+    let sibling_last = sibling.keys.len() - 1;
+    node.keys[idx - 1] = sibling.keys[sibling_last].clone();
+    node.values[idx - 1] = sibling.values[sibling_last].clone();
+    sibling.keys.pop();
+    sibling.values.pop();
+
+    // Move child if not leaf
+    if !sibling.is_leaf {
+        let last_child = sibling.children.pop().unwrap();
+        child.children.insert(0, last_child);
+    }
+}
+
+fn btree_borrow_from_next<K, V>(node: &!BTreeNode<K, V>, idx: usize) with Alloc
+where K: Clone, V: Clone
+{
+    let child = &!*node.children[idx];
+    let sibling = &!*node.children[idx + 1];
+
+    // Move key from parent to child end
+    child.keys.push(node.keys[idx].clone());
+    child.values.push(node.values[idx].clone());
+
+    // Move first key from sibling to parent
+    node.keys[idx] = sibling.keys[0].clone();
+    node.values[idx] = sibling.values[0].clone();
+    sibling.keys.remove(0);
+    sibling.values.remove(0);
+
+    // Move child if not leaf
+    if !sibling.is_leaf {
+        let first_child = sibling.children.remove(0);
+        child.children.push(first_child);
+    }
+}
+
+// =============================================================================
+// B-Tree Iteration
+// =============================================================================
+
+/// Iterator over B-tree map entries
+pub struct BTreeMapIter<'a, K, V> {
+    stack: Vec<(&'a BTreeNode<K, V>, usize)>,
+    current: Option<(&'a K, &'a V)>
+}
+
+/// Returns an iterator over the map entries in sorted order.
+pub fn btree_map_iter<'a, K, V>(map: &'a BTreeMap<K, V>) -> BTreeMapIter<'a, K, V> with Alloc {
+    var iter = BTreeMapIter {
+        stack: Vec::new(),
+        current: None
+    };
+
+    // Initialize by going to leftmost leaf
+    if let Some(root) = &map.root {
+        btree_iter_push_left(&!iter, root);
+    }
+
+    iter
+}
+
+fn btree_iter_push_left<'a, K, V>(iter: &!BTreeMapIter<'a, K, V>, node: &'a BTreeNode<K, V>) with Alloc {
+    var current = node;
+    while !current.is_leaf {
+        iter.stack.push((current, 0));
+        current = &current.children[0];
+    }
+    iter.stack.push((current, 0));
+}
+
+/// Advances the iterator and returns the next entry.
+pub fn btree_iter_next<'a, K, V>(iter: &!BTreeMapIter<'a, K, V>) -> Option<(&'a K, &'a V)> with Alloc {
+    if iter.stack.is_empty() {
+        return None
+    }
+
+    let (node, idx) = iter.stack.pop().unwrap();
+
+    if idx < node.keys.len() {
+        let result = (&node.keys[idx], &node.values[idx]);
+
+        // Push back with incremented index
+        iter.stack.push((node, idx + 1));
+
+        // If internal node, descend to right child then leftmost
+        if !node.is_leaf && idx + 1 < node.children.len() {
+            btree_iter_push_left(iter, &node.children[idx + 1]);
+        }
+
+        Some(result)
+    } else {
+        // Done with this node, continue with parent
+        btree_iter_next(iter)
+    }
+}
+
+// =============================================================================
+// B-Tree Range Queries
+// =============================================================================
+
+/// Returns an iterator over entries with keys in the given range [start, end).
+pub fn btree_map_range<'a, K, V>(map: &'a BTreeMap<K, V>, start: &K, end: &K) -> Vec<(&'a K, &'a V)> with Alloc
+where K: Ord
+{
+    var results: Vec<(&'a K, &'a V)> = Vec::new();
+
+    if let Some(root) = &map.root {
+        btree_collect_range(root, start, end, &!results);
+    }
+
+    results
+}
+
+fn btree_collect_range<'a, K, V>(node: &'a BTreeNode<K, V>, start: &K, end: &K, results: &!Vec<(&'a K, &'a V)>) with Alloc
+where K: Ord
+{
+    var i: usize = 0;
+
+    // Find first key >= start
+    while i < node.keys.len() && &node.keys[i] < start {
+        if !node.is_leaf {
+            // Check subtree
+            btree_collect_range(&node.children[i], start, end, results);
+        }
+        i = i + 1;
+    }
+
+    // Collect keys in range
+    while i < node.keys.len() && &node.keys[i] < end {
+        if !node.is_leaf {
+            btree_collect_range(&node.children[i], start, end, results);
+        }
+        results.push((&node.keys[i], &node.values[i]));
+        i = i + 1;
+    }
+
+    // Check last subtree
+    if !node.is_leaf && i < node.children.len() && (i == 0 || &node.keys[i - 1] < end) {
+        btree_collect_range(&node.children[i], start, end, results);
+    }
+}
+
+/// Returns the minimum key in the map.
+pub fn btree_map_min<'a, K, V>(map: &'a BTreeMap<K, V>) -> Option<(&'a K, &'a V)> {
+    match &map.root {
+        None => None,
+        Some(root) => {
+            var current = &**root;
+            while !current.is_leaf {
+                current = &current.children[0];
+            }
+            if current.keys.is_empty() {
+                None
+            } else {
+                Some((&current.keys[0], &current.values[0]))
+            }
+        }
+    }
+}
+
+/// Returns the maximum key in the map.
+pub fn btree_map_max<'a, K, V>(map: &'a BTreeMap<K, V>) -> Option<(&'a K, &'a V)> {
+    match &map.root {
+        None => None,
+        Some(root) => {
+            var current = &**root;
+            while !current.is_leaf {
+                current = &current.children[current.children.len() - 1];
+            }
+            if current.keys.is_empty() {
+                None
+            } else {
+                let last = current.keys.len() - 1;
+                Some((&current.keys[last], &current.values[last]))
+            }
+        }
+    }
+}
+
+// =============================================================================
+// B-Tree Set
+// =============================================================================
+
+/// A sorted set implemented as a B-tree.
+pub struct BTreeSet<T> {
+    map: BTreeMap<T, ()>
+}
+
+/// Creates a new empty BTreeSet.
+pub fn btree_set_new<T>() -> BTreeSet<T> {
+    BTreeSet { map: btree_map_new() }
+}
+
+/// Returns the number of elements in the set.
+pub fn btree_set_len<T>(set: &BTreeSet<T>) -> usize {
+    btree_map_len(&set.map)
+}
+
+/// Returns true if the set is empty.
+pub fn btree_set_is_empty<T>(set: &BTreeSet<T>) -> bool {
+    btree_map_is_empty(&set.map)
+}
+
+/// Returns true if the set contains the value.
+pub fn btree_set_contains<T>(set: &BTreeSet<T>, value: &T) -> bool
+where T: Ord
+{
+    btree_map_contains(&set.map, value)
+}
+
+/// Inserts a value into the set.
+///
+/// Returns true if the value was newly inserted, false if it already existed.
+pub fn btree_set_insert<T>(set: &!BTreeSet<T>, value: T) -> bool with Alloc
+where T: Ord + Clone
+{
+    btree_map_insert(&!set.map, value, ()).is_none()
+}
+
+/// Removes a value from the set.
+///
+/// Returns true if the value was present.
+pub fn btree_set_remove<T>(set: &!BTreeSet<T>, value: &T) -> bool with Alloc
+where T: Ord + Clone
+{
+    btree_map_remove(&!set.map, value).is_some()
+}
+
+/// Clears all elements from the set.
+pub fn btree_set_clear<T>(set: &!BTreeSet<T>) {
+    btree_map_clear(&!set.map);
+}
+
+/// Returns the minimum value in the set.
+pub fn btree_set_min<'a, T>(set: &'a BTreeSet<T>) -> Option<&'a T> {
+    btree_map_min(&set.map).map(|(k, _)| k)
+}
+
+/// Returns the maximum value in the set.
+pub fn btree_set_max<'a, T>(set: &'a BTreeSet<T>) -> Option<&'a T> {
+    btree_map_max(&set.map).map(|(k, _)| k)
+}

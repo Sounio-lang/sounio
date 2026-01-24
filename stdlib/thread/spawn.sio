@@ -1,0 +1,463 @@
+//! stdlib/thread/spawn.sio - Thread Creation and Management
+//!
+//! This module provides functions for spawning and managing threads.
+
+use sync::mutex::*;
+use sync::atomic::*;
+
+// =============================================================================
+// FFI Declarations (pthreads)
+// =============================================================================
+
+extern "C" {
+    fn pthread_create(
+        thread: *mut PthreadT,
+        attr: *const PthreadAttr,
+        start_routine: fn(*mut u8) -> *mut u8,
+        arg: *mut u8
+    ) -> i32;
+
+    fn pthread_join(thread: PthreadT, retval: *mut *mut u8) -> i32;
+    fn pthread_detach(thread: PthreadT) -> i32;
+    fn pthread_self() -> PthreadT;
+    fn pthread_equal(t1: PthreadT, t2: PthreadT) -> i32;
+    fn pthread_exit(retval: *mut u8) -> !;
+    fn pthread_cancel(thread: PthreadT) -> i32;
+
+    fn pthread_attr_init(attr: *mut PthreadAttr) -> i32;
+    fn pthread_attr_destroy(attr: *mut PthreadAttr) -> i32;
+    fn pthread_attr_setstacksize(attr: *mut PthreadAttr, stacksize: usize) -> i32;
+    fn pthread_attr_setdetachstate(attr: *mut PthreadAttr, detachstate: i32) -> i32;
+
+    fn sched_yield() -> i32;
+
+    // nanosleep for thread::sleep
+    fn nanosleep(req: *const Timespec, rem: *mut Timespec) -> i32;
+}
+
+/// Opaque pthread type
+struct PthreadT {
+    _data: u64
+}
+
+/// Opaque pthread attributes
+struct PthreadAttr {
+    _data: [u8; 64]
+}
+
+/// Timespec for nanosleep
+struct Timespec {
+    tv_sec: i64,
+    tv_nsec: i64
+}
+
+// Detach state constants
+let PTHREAD_CREATE_JOINABLE: i32 = 0;
+let PTHREAD_CREATE_DETACHED: i32 = 1;
+
+// =============================================================================
+// Thread Handle
+// =============================================================================
+
+/// A handle to a spawned thread.
+///
+/// This can be used to wait for the thread to finish and obtain its return value.
+pub struct JoinHandle<T> {
+    thread: PthreadT,
+    result_ptr: *mut Option<T>,
+    joined: AtomicBool
+}
+
+/// Marker for scoped threads (ensures thread doesn't outlive scope)
+pub struct ScopedJoinHandle<T> {
+    handle: JoinHandle<T>
+}
+
+// =============================================================================
+// Thread Builder
+// =============================================================================
+
+/// Builder for configuring and spawning threads.
+pub struct ThreadBuilder {
+    name: Option<string>,
+    stack_size: Option<usize>
+}
+
+/// Creates a new thread builder with default settings.
+pub fn thread_builder() -> ThreadBuilder {
+    ThreadBuilder {
+        name: None,
+        stack_size: None
+    }
+}
+
+/// Sets the name for the thread.
+pub fn builder_name(b: &!ThreadBuilder, name: string) -> &!ThreadBuilder {
+    b.name = Some(name);
+    b
+}
+
+/// Sets the stack size for the thread in bytes.
+pub fn builder_stack_size(b: &!ThreadBuilder, size: usize) -> &!ThreadBuilder {
+    b.stack_size = Some(size);
+    b
+}
+
+// =============================================================================
+// Thread Spawning
+// =============================================================================
+
+/// Spawns a new thread executing the given closure.
+///
+/// The closure must be `'static` - it cannot borrow data from the parent thread.
+/// Use `thread_scope` for scoped threads that can borrow.
+///
+/// # Example
+/// ```sio
+/// let handle = thread_spawn(|| {
+///     print("Hello from thread!")
+///     42
+/// })
+/// let result = thread_join(handle)
+/// ```
+pub fn thread_spawn<F, T>(f: F) -> JoinHandle<T> with IO, Alloc
+where
+    F: FnOnce() -> T + Send + 'static,
+    T: Send + 'static
+{
+    // Allocate space for the result
+    var result_box: Box<Option<T>> = Box::new(None);
+    let result_ptr = &!(*result_box) as *mut Option<T>;
+
+    // Create thread data containing the closure and result pointer
+    var thread_data = Box::new(ThreadData {
+        func: Some(f),
+        result_ptr: result_ptr
+    });
+    let data_ptr = &!(*thread_data) as *mut u8;
+
+    // Create thread
+    var thread_handle: PthreadT = PthreadT { _data: 0 };
+
+    let result = pthread_create(
+        &!thread_handle,
+        null,
+        thread_entry_point,
+        data_ptr
+    );
+
+    if result != 0 {
+        panic("Failed to spawn thread")
+    }
+
+    // Forget the boxes - they're now owned by the thread
+    std::mem::forget(thread_data);
+    std::mem::forget(result_box);
+
+    JoinHandle {
+        thread: thread_handle,
+        result_ptr: result_ptr,
+        joined: AtomicBool::new(false)
+    }
+}
+
+/// Thread data passed to the entry point
+struct ThreadData<F, T> {
+    func: Option<F>,
+    result_ptr: *mut Option<T>
+}
+
+/// Thread entry point called by pthreads
+fn thread_entry_point<F, T>(arg: *mut u8) -> *mut u8
+where
+    F: FnOnce() -> T
+{
+    let data = unsafe { &!*(arg as *mut ThreadData<F, T>) };
+
+    // Take the function out
+    let func = match std::mem::take(&!data.func) {
+        Some(f) => f,
+        None => return null
+    };
+
+    // Run the function
+    let result = func();
+
+    // Store the result
+    unsafe {
+        *data.result_ptr = Some(result);
+    }
+
+    // Free the thread data
+    unsafe {
+        drop(Box::from_raw(arg as *mut ThreadData<F, T>));
+    }
+
+    null
+}
+
+/// Waits for the thread to finish and returns its result.
+///
+/// This function will block until the thread terminates.
+///
+/// # Panics
+/// Panics if the thread panicked or if join has already been called.
+pub fn thread_join<T>(handle: JoinHandle<T>) -> T with Panic {
+    // Check if already joined
+    if handle.joined.swap(true, Ordering::SeqCst) {
+        panic("Thread already joined")
+    }
+
+    var retval: *mut u8 = null;
+    let result = pthread_join(handle.thread, &!retval);
+
+    if result != 0 {
+        panic("Failed to join thread")
+    }
+
+    // Get the result
+    let result_option = unsafe { std::ptr::read(handle.result_ptr) };
+
+    // Free the result box
+    unsafe {
+        drop(Box::from_raw(handle.result_ptr as *mut Option<T>));
+    }
+
+    match result_option {
+        Some(value) => value,
+        None => panic("Thread did not produce a result")
+    }
+}
+
+/// Detaches the thread, allowing it to run independently.
+///
+/// A detached thread cannot be joined.
+pub fn thread_detach<T>(handle: JoinHandle<T>) with IO {
+    pthread_detach(handle.thread);
+    // Mark as joined to prevent double-free
+    handle.joined.store(true, Ordering::SeqCst);
+}
+
+// =============================================================================
+// Current Thread Operations
+// =============================================================================
+
+/// Returns a handle to the current thread.
+pub struct ThreadId {
+    id: PthreadT
+}
+
+/// Gets the ID of the current thread.
+pub fn current_thread_id() -> ThreadId with IO {
+    ThreadId { id: pthread_self() }
+}
+
+/// Checks if two thread IDs refer to the same thread.
+pub fn thread_id_equals(a: &ThreadId, b: &ThreadId) -> bool with IO {
+    pthread_equal(a.id, b.id) != 0
+}
+
+/// Yields execution to another thread.
+///
+/// Hints to the scheduler that the current thread is willing to give up
+/// its time slice.
+pub fn thread_yield() with IO {
+    sched_yield();
+}
+
+/// Puts the current thread to sleep for the specified duration in nanoseconds.
+///
+/// # Example
+/// ```sio
+/// // Sleep for 1 second
+/// thread_sleep(1_000_000_000)
+/// ```
+pub fn thread_sleep(nanoseconds: i64) with IO {
+    let req = Timespec {
+        tv_sec: nanoseconds / 1_000_000_000,
+        tv_nsec: nanoseconds % 1_000_000_000
+    };
+    var rem = Timespec { tv_sec: 0, tv_nsec: 0 };
+
+    // Handle interruptions
+    while nanosleep(&req, &!rem) != 0 {
+        // Continue sleeping for remaining time
+    }
+}
+
+/// Puts the current thread to sleep for the specified duration in milliseconds.
+pub fn thread_sleep_ms(milliseconds: i64) with IO {
+    thread_sleep(milliseconds * 1_000_000)
+}
+
+/// Puts the current thread to sleep for the specified duration in seconds.
+pub fn thread_sleep_secs(seconds: i64) with IO {
+    thread_sleep(seconds * 1_000_000_000)
+}
+
+/// Parks the current thread.
+///
+/// The thread will remain parked until unparked by another thread.
+/// This is a lower-level primitive than condition variables.
+pub fn thread_park() with IO {
+    // Simplified implementation - would need proper support
+    thread_yield();
+}
+
+// =============================================================================
+// Scoped Threads
+// =============================================================================
+
+/// A scope for spawning threads that can borrow from the parent stack frame.
+pub struct Scope<'scope> {
+    handles: Vec<ScopedJoinHandle<()>>,
+    phantom: PhantomData<&'scope ()>
+}
+
+/// Creates a new scope for spawning threads that can borrow local data.
+///
+/// All threads spawned within the scope are guaranteed to terminate before
+/// this function returns.
+///
+/// # Example
+/// ```sio
+/// let data = [1, 2, 3, 4, 5]
+///
+/// thread_scope(|scope| {
+///     scope_spawn(scope, || {
+///         // Can borrow `data` safely
+///         print(data[0].to_string())
+///     })
+/// })
+/// // All threads have finished here
+/// ```
+pub fn thread_scope<F, R>(f: F) -> R with IO, Alloc, Panic
+where
+    F: FnOnce(&!Scope) -> R
+{
+    var scope = Scope {
+        handles: Vec::new(),
+        phantom: PhantomData
+    };
+
+    let result = f(&!scope);
+
+    // Join all spawned threads
+    for handle in scope.handles {
+        thread_join(handle.handle);
+    }
+
+    result
+}
+
+/// Spawns a scoped thread.
+///
+/// The spawned thread can borrow data from the enclosing scope.
+pub fn scope_spawn<'scope, F, T>(scope: &!Scope<'scope>, f: F) -> ScopedJoinHandle<T> with IO, Alloc
+where
+    F: FnOnce() -> T + Send + 'scope,
+    T: Send + 'scope
+{
+    let handle = thread_spawn(f);
+    ScopedJoinHandle { handle: handle }
+}
+
+// =============================================================================
+// Thread Local Storage
+// =============================================================================
+
+extern "C" {
+    fn pthread_key_create(key: *mut u64, destructor: Option<fn(*mut u8)>) -> i32;
+    fn pthread_key_delete(key: u64) -> i32;
+    fn pthread_getspecific(key: u64) -> *mut u8;
+    fn pthread_setspecific(key: u64, value: *mut u8) -> i32;
+}
+
+/// A key for thread-local storage.
+pub struct LocalKey<T> {
+    key: u64,
+    init: fn() -> T
+}
+
+/// Creates a new thread-local storage key.
+///
+/// The `init` function is called to create the initial value for each thread.
+pub fn local_key_new<T>(init: fn() -> T) -> LocalKey<T> with IO, Alloc {
+    var key: u64 = 0;
+    let result = pthread_key_create(&!key, None);
+
+    if result != 0 {
+        panic("Failed to create thread-local key")
+    }
+
+    LocalKey { key: key, init: init }
+}
+
+/// Gets a reference to the thread-local value.
+pub fn local_key_get<T>(lk: &LocalKey<T>) -> &T with IO, Alloc {
+    let ptr = pthread_getspecific(lk.key);
+
+    if ptr == null {
+        // Initialize the value
+        let value = Box::new((lk.init)());
+        let value_ptr = Box::into_raw(value);
+        pthread_setspecific(lk.key, value_ptr as *mut u8);
+        unsafe { &*value_ptr }
+    } else {
+        unsafe { &*(ptr as *const T) }
+    }
+}
+
+/// Gets a mutable reference to the thread-local value.
+pub fn local_key_get_mut<T>(lk: &LocalKey<T>) -> &!T with IO, Alloc {
+    let ptr = pthread_getspecific(lk.key);
+
+    if ptr == null {
+        // Initialize the value
+        let value = Box::new((lk.init)());
+        let value_ptr = Box::into_raw(value);
+        pthread_setspecific(lk.key, value_ptr as *mut u8);
+        unsafe { &!*value_ptr }
+    } else {
+        unsafe { &!*(ptr as *mut T) }
+    }
+}
+
+/// Destroys a thread-local storage key.
+pub fn local_key_destroy<T>(lk: LocalKey<T>) with IO {
+    pthread_key_delete(lk.key);
+}
+
+// =============================================================================
+// CPU and Processor Information
+// =============================================================================
+
+extern "C" {
+    fn sysconf(name: i32) -> i64;
+}
+
+// sysconf constants
+let _SC_NPROCESSORS_ONLN: i32 = 84;  // Linux
+let _SC_NPROCESSORS_CONF: i32 = 83;  // Linux
+
+/// Returns the number of CPUs available to the process.
+///
+/// This is useful for determining thread pool sizes.
+pub fn available_parallelism() -> usize with IO {
+    let count = sysconf(_SC_NPROCESSORS_ONLN);
+    if count > 0 {
+        count as usize
+    } else {
+        1  // Default to 1 if we can't determine
+    }
+}
+
+/// Returns the total number of CPUs configured on the system.
+pub fn num_cpus() -> usize with IO {
+    let count = sysconf(_SC_NPROCESSORS_CONF);
+    if count > 0 {
+        count as usize
+    } else {
+        1
+    }
+}

@@ -1,0 +1,505 @@
+//! Atomic Operations
+//!
+//! Lock-free atomic operations for concurrent programming.
+//!
+//! # Memory Ordering
+//! - `Relaxed` - No ordering guarantees beyond atomicity
+//! - `Acquire` - Subsequent reads see all writes before the release
+//! - `Release` - All previous writes visible to acquiring thread
+//! - `AcqRel` - Both acquire and release semantics
+//! - `SeqCst` - Sequentially consistent (strongest, default)
+//!
+//! # Examples
+//! ```sio
+//! var counter = AtomicI64::new(0)
+//!
+//! // Atomic increment
+//! let old = atomic_i64_fetch_add(&!counter, 1, Ordering::SeqCst)
+//!
+//! // Compare-and-swap
+//! let result = atomic_i64_compare_exchange(
+//!     &!counter, 1, 2, Ordering::SeqCst, Ordering::SeqCst
+//! )
+//! ```
+
+// =============================================================================
+// Memory Ordering
+// =============================================================================
+
+/// Memory ordering for atomic operations.
+pub enum Ordering {
+    /// No ordering constraints (only atomicity).
+    Relaxed,
+    /// Prevents reads from being reordered before this operation.
+    Acquire,
+    /// Prevents writes from being reordered after this operation.
+    Release,
+    /// Both Acquire and Release semantics.
+    AcqRel,
+    /// Sequentially consistent - total global order.
+    SeqCst,
+}
+
+fn ordering_to_int(ord: Ordering) -> i32 {
+    match ord {
+        Ordering::Relaxed => 0,
+        Ordering::Acquire => 2,
+        Ordering::Release => 3,
+        Ordering::AcqRel => 4,
+        Ordering::SeqCst => 5,
+    }
+}
+
+// =============================================================================
+// Compiler Intrinsics (via extern attributes)
+// =============================================================================
+
+// These would map to LLVM atomic intrinsics
+#[extern("llvm.sio.atomic.load.i64")]
+fn __atomic_load_i64(ptr: *const i64, ordering: i32) -> i64 { }
+
+#[extern("llvm.sio.atomic.store.i64")]
+fn __atomic_store_i64(ptr: *mut i64, val: i64, ordering: i32) { }
+
+#[extern("llvm.sio.atomic.cmpxchg.i64")]
+fn __atomic_cmpxchg_i64(ptr: *mut i64, expected: i64, desired: i64, success_ord: i32, fail_ord: i32) -> (i64, bool) { }
+
+#[extern("llvm.sio.atomic.rmw.add.i64")]
+fn __atomic_fetch_add_i64(ptr: *mut i64, val: i64, ordering: i32) -> i64 { }
+
+#[extern("llvm.sio.atomic.rmw.sub.i64")]
+fn __atomic_fetch_sub_i64(ptr: *mut i64, val: i64, ordering: i32) -> i64 { }
+
+#[extern("llvm.sio.atomic.rmw.and.i64")]
+fn __atomic_fetch_and_i64(ptr: *mut i64, val: i64, ordering: i32) -> i64 { }
+
+#[extern("llvm.sio.atomic.rmw.or.i64")]
+fn __atomic_fetch_or_i64(ptr: *mut i64, val: i64, ordering: i32) -> i64 { }
+
+#[extern("llvm.sio.atomic.rmw.xor.i64")]
+fn __atomic_fetch_xor_i64(ptr: *mut i64, val: i64, ordering: i32) -> i64 { }
+
+#[extern("llvm.sio.atomic.rmw.xchg.i64")]
+fn __atomic_swap_i64(ptr: *mut i64, val: i64, ordering: i32) -> i64 { }
+
+// Similar for other types
+#[extern("llvm.sio.atomic.load.i32")]
+fn __atomic_load_i32(ptr: *const i32, ordering: i32) -> i32 { }
+
+#[extern("llvm.sio.atomic.store.i32")]
+fn __atomic_store_i32(ptr: *mut i32, val: i32, ordering: i32) { }
+
+#[extern("llvm.sio.atomic.cmpxchg.i32")]
+fn __atomic_cmpxchg_i32(ptr: *mut i32, expected: i32, desired: i32, success_ord: i32, fail_ord: i32) -> (i32, bool) { }
+
+#[extern("llvm.sio.atomic.rmw.add.i32")]
+fn __atomic_fetch_add_i32(ptr: *mut i32, val: i32, ordering: i32) -> i32 { }
+
+#[extern("llvm.sio.atomic.load.u8")]
+fn __atomic_load_u8(ptr: *const u8, ordering: i32) -> u8 { }
+
+#[extern("llvm.sio.atomic.store.u8")]
+fn __atomic_store_u8(ptr: *mut u8, val: u8, ordering: i32) { }
+
+// =============================================================================
+// AtomicBool
+// =============================================================================
+
+/// Atomic boolean value.
+pub struct AtomicBool {
+    value: u8,
+}
+
+impl AtomicBool {
+    /// Create a new atomic boolean.
+    pub fn new(v: bool) -> AtomicBool {
+        AtomicBool { value: if v { 1 } else { 0 } }
+    }
+
+    /// Load the value.
+    pub fn load(self: &AtomicBool, ord: Ordering) -> bool {
+        __atomic_load_u8(&self.value, ordering_to_int(ord)) != 0
+    }
+
+    /// Store a value.
+    pub fn store(self: &!AtomicBool, v: bool, ord: Ordering) {
+        __atomic_store_u8(&!self.value, if v { 1 } else { 0 }, ordering_to_int(ord))
+    }
+
+    /// Swap and return the previous value.
+    pub fn swap(self: &!AtomicBool, v: bool, ord: Ordering) -> bool {
+        let old = self.load(ord)
+        self.store(v, ord)
+        old
+    }
+}
+
+// =============================================================================
+// AtomicI32
+// =============================================================================
+
+/// Atomic 32-bit signed integer.
+pub struct AtomicI32 {
+    value: i32,
+}
+
+impl AtomicI32 {
+    /// Create a new atomic i32.
+    pub fn new(v: i32) -> AtomicI32 {
+        AtomicI32 { value: v }
+    }
+
+    /// Load the value.
+    pub fn load(self: &AtomicI32, ord: Ordering) -> i32 {
+        __atomic_load_i32(&self.value, ordering_to_int(ord))
+    }
+
+    /// Store a value.
+    pub fn store(self: &!AtomicI32, v: i32, ord: Ordering) {
+        __atomic_store_i32(&!self.value, v, ordering_to_int(ord))
+    }
+
+    /// Swap and return the previous value.
+    pub fn swap(self: &!AtomicI32, v: i32, ord: Ordering) -> i32 {
+        let ord_int = ordering_to_int(ord)
+        loop {
+            let current = __atomic_load_i32(&self.value, ord_int)
+            let (old, success) = __atomic_cmpxchg_i32(&!self.value, current, v, ord_int, ord_int)
+            if success {
+                return old
+            }
+        }
+    }
+
+    /// Compare and exchange.
+    ///
+    /// If current value equals `current`, sets to `new` and returns Ok(current).
+    /// Otherwise returns Err(actual_value).
+    pub fn compare_exchange(
+        self: &!AtomicI32,
+        current: i32,
+        new: i32,
+        success: Ordering,
+        failure: Ordering
+    ) -> Result<i32, i32> {
+        let (old, ok) = __atomic_cmpxchg_i32(
+            &!self.value, current, new,
+            ordering_to_int(success), ordering_to_int(failure)
+        )
+        if ok { Ok(old) } else { Err(old) }
+    }
+
+    /// Atomically add and return the previous value.
+    pub fn fetch_add(self: &!AtomicI32, v: i32, ord: Ordering) -> i32 {
+        __atomic_fetch_add_i32(&!self.value, v, ordering_to_int(ord))
+    }
+
+    /// Atomically subtract and return the previous value.
+    pub fn fetch_sub(self: &!AtomicI32, v: i32, ord: Ordering) -> i32 {
+        __atomic_fetch_add_i32(&!self.value, -v, ordering_to_int(ord))
+    }
+}
+
+// =============================================================================
+// AtomicI64
+// =============================================================================
+
+/// Atomic 64-bit signed integer.
+pub struct AtomicI64 {
+    value: i64,
+}
+
+impl AtomicI64 {
+    /// Create a new atomic i64.
+    pub fn new(v: i64) -> AtomicI64 {
+        AtomicI64 { value: v }
+    }
+
+    /// Load the value.
+    pub fn load(self: &AtomicI64, ord: Ordering) -> i64 {
+        __atomic_load_i64(&self.value, ordering_to_int(ord))
+    }
+
+    /// Store a value.
+    pub fn store(self: &!AtomicI64, v: i64, ord: Ordering) {
+        __atomic_store_i64(&!self.value, v, ordering_to_int(ord))
+    }
+
+    /// Swap and return the previous value.
+    pub fn swap(self: &!AtomicI64, v: i64, ord: Ordering) -> i64 {
+        __atomic_swap_i64(&!self.value, v, ordering_to_int(ord))
+    }
+
+    /// Compare and exchange.
+    pub fn compare_exchange(
+        self: &!AtomicI64,
+        current: i64,
+        new: i64,
+        success: Ordering,
+        failure: Ordering
+    ) -> Result<i64, i64> {
+        let (old, ok) = __atomic_cmpxchg_i64(
+            &!self.value, current, new,
+            ordering_to_int(success), ordering_to_int(failure)
+        )
+        if ok { Ok(old) } else { Err(old) }
+    }
+
+    /// Weak compare and exchange (may spuriously fail).
+    pub fn compare_exchange_weak(
+        self: &!AtomicI64,
+        current: i64,
+        new: i64,
+        success: Ordering,
+        failure: Ordering
+    ) -> Result<i64, i64> {
+        // For now, same as strong version
+        self.compare_exchange(current, new, success, failure)
+    }
+
+    /// Atomically add and return the previous value.
+    pub fn fetch_add(self: &!AtomicI64, v: i64, ord: Ordering) -> i64 {
+        __atomic_fetch_add_i64(&!self.value, v, ordering_to_int(ord))
+    }
+
+    /// Atomically subtract and return the previous value.
+    pub fn fetch_sub(self: &!AtomicI64, v: i64, ord: Ordering) -> i64 {
+        __atomic_fetch_sub_i64(&!self.value, v, ordering_to_int(ord))
+    }
+
+    /// Atomically AND and return the previous value.
+    pub fn fetch_and(self: &!AtomicI64, v: i64, ord: Ordering) -> i64 {
+        __atomic_fetch_and_i64(&!self.value, v, ordering_to_int(ord))
+    }
+
+    /// Atomically OR and return the previous value.
+    pub fn fetch_or(self: &!AtomicI64, v: i64, ord: Ordering) -> i64 {
+        __atomic_fetch_or_i64(&!self.value, v, ordering_to_int(ord))
+    }
+
+    /// Atomically XOR and return the previous value.
+    pub fn fetch_xor(self: &!AtomicI64, v: i64, ord: Ordering) -> i64 {
+        __atomic_fetch_xor_i64(&!self.value, v, ordering_to_int(ord))
+    }
+
+    /// Atomically set to max(current, v) and return previous value.
+    pub fn fetch_max(self: &!AtomicI64, v: i64, ord: Ordering) -> i64 {
+        let ord_int = ordering_to_int(ord)
+        loop {
+            let current = __atomic_load_i64(&self.value, ord_int)
+            if current >= v {
+                return current
+            }
+            let (old, success) = __atomic_cmpxchg_i64(&!self.value, current, v, ord_int, ord_int)
+            if success {
+                return old
+            }
+        }
+    }
+
+    /// Atomically set to min(current, v) and return previous value.
+    pub fn fetch_min(self: &!AtomicI64, v: i64, ord: Ordering) -> i64 {
+        let ord_int = ordering_to_int(ord)
+        loop {
+            let current = __atomic_load_i64(&self.value, ord_int)
+            if current <= v {
+                return current
+            }
+            let (old, success) = __atomic_cmpxchg_i64(&!self.value, current, v, ord_int, ord_int)
+            if success {
+                return old
+            }
+        }
+    }
+}
+
+// =============================================================================
+// AtomicUsize
+// =============================================================================
+
+/// Atomic pointer-sized unsigned integer.
+pub struct AtomicUsize {
+    value: usize,
+}
+
+impl AtomicUsize {
+    /// Create a new atomic usize.
+    pub fn new(v: usize) -> AtomicUsize {
+        AtomicUsize { value: v }
+    }
+
+    /// Load the value.
+    pub fn load(self: &AtomicUsize, ord: Ordering) -> usize {
+        __atomic_load_i64(&(self.value as i64), ordering_to_int(ord)) as usize
+    }
+
+    /// Store a value.
+    pub fn store(self: &!AtomicUsize, v: usize, ord: Ordering) {
+        __atomic_store_i64(&!(self.value as i64), v as i64, ordering_to_int(ord))
+    }
+
+    /// Atomically add and return the previous value.
+    pub fn fetch_add(self: &!AtomicUsize, v: usize, ord: Ordering) -> usize {
+        __atomic_fetch_add_i64(&!(self.value as i64), v as i64, ordering_to_int(ord)) as usize
+    }
+
+    /// Atomically subtract and return the previous value.
+    pub fn fetch_sub(self: &!AtomicUsize, v: usize, ord: Ordering) -> usize {
+        __atomic_fetch_sub_i64(&!(self.value as i64), v as i64, ordering_to_int(ord)) as usize
+    }
+}
+
+// =============================================================================
+// Freestanding Functions (Alternative API)
+// =============================================================================
+
+/// Atomically load an i64.
+pub fn atomic_i64_load(a: &AtomicI64, ord: Ordering) -> i64 {
+    a.load(ord)
+}
+
+/// Atomically store an i64.
+pub fn atomic_i64_store(a: &!AtomicI64, v: i64, ord: Ordering) {
+    a.store(v, ord)
+}
+
+/// Atomically add to an i64 and return the previous value.
+pub fn atomic_i64_fetch_add(a: &!AtomicI64, v: i64, ord: Ordering) -> i64 {
+    a.fetch_add(v, ord)
+}
+
+/// Atomically subtract from an i64 and return the previous value.
+pub fn atomic_i64_fetch_sub(a: &!AtomicI64, v: i64, ord: Ordering) -> i64 {
+    a.fetch_sub(v, ord)
+}
+
+/// Compare and exchange an i64.
+pub fn atomic_i64_compare_exchange(
+    a: &!AtomicI64,
+    current: i64,
+    new: i64,
+    success: Ordering,
+    failure: Ordering
+) -> Result<i64, i64> {
+    a.compare_exchange(current, new, success, failure)
+}
+
+// =============================================================================
+// Memory Fence
+// =============================================================================
+
+/// Memory fence with specified ordering.
+#[extern("llvm.sio.atomic.fence")]
+fn __atomic_fence(ordering: i32) { }
+
+/// Issue a memory fence.
+pub fn fence(ord: Ordering) {
+    __atomic_fence(ordering_to_int(ord))
+}
+
+/// Compiler fence (prevents compiler reordering, not hardware).
+pub fn compiler_fence(ord: Ordering) {
+    // In practice, often same as fence for simplicity
+    __atomic_fence(ordering_to_int(ord))
+}
+
+// =============================================================================
+// Spin Lock (Simple Example)
+// =============================================================================
+
+/// A simple spin lock using atomic operations.
+///
+/// For demonstration purposes. In practice, use mutex for better
+/// performance under contention.
+pub struct SpinLock {
+    locked: AtomicBool,
+}
+
+impl SpinLock {
+    /// Create a new unlocked spinlock.
+    pub fn new() -> SpinLock {
+        SpinLock { locked: AtomicBool::new(false) }
+    }
+
+    /// Acquire the lock (busy-wait).
+    pub fn lock(self: &!SpinLock) {
+        while true {
+            // Try to acquire
+            if !self.locked.swap(true, Ordering::Acquire) {
+                break
+            }
+            // Spin while locked
+            while self.locked.load(Ordering::Relaxed) {
+                // Yield CPU hint would go here
+            }
+        }
+    }
+
+    /// Try to acquire without blocking.
+    pub fn try_lock(self: &!SpinLock) -> bool {
+        !self.locked.swap(true, Ordering::Acquire)
+    }
+
+    /// Release the lock.
+    pub fn unlock(self: &!SpinLock) {
+        self.locked.store(false, Ordering::Release)
+    }
+}
+
+// =============================================================================
+// Tests
+// =============================================================================
+
+fn test_atomic_i64_basic() -> bool {
+    var a = AtomicI64::new(0)
+
+    a.store(42, Ordering::SeqCst)
+    if a.load(Ordering::SeqCst) != 42 { return false }
+
+    let old = a.fetch_add(10, Ordering::SeqCst)
+    if old != 42 { return false }
+    if a.load(Ordering::SeqCst) != 52 { return false }
+
+    true
+}
+
+fn test_atomic_compare_exchange() -> bool {
+    var a = AtomicI64::new(10)
+
+    // Successful exchange
+    match a.compare_exchange(10, 20, Ordering::SeqCst, Ordering::SeqCst) {
+        Ok(10) => {},
+        _ => return false,
+    }
+
+    // Failed exchange (value is now 20, not 10)
+    match a.compare_exchange(10, 30, Ordering::SeqCst, Ordering::SeqCst) {
+        Err(20) => {},
+        _ => return false,
+    }
+
+    true
+}
+
+fn test_spinlock() -> bool {
+    var lock = SpinLock::new()
+
+    // Should be able to acquire
+    if !lock.try_lock() { return false }
+
+    // Should not be able to acquire again
+    if lock.try_lock() { return false }
+
+    // Release and re-acquire
+    lock.unlock()
+    if !lock.try_lock() { return false }
+
+    lock.unlock()
+    true
+}
+
+pub fn run_tests() -> bool {
+    test_atomic_i64_basic() &&
+    test_atomic_compare_exchange() &&
+    test_spinlock()
+}

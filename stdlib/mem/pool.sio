@@ -1,0 +1,169 @@
+//! Object pool allocator
+//!
+//! Pool provides efficient allocation and deallocation of fixed-size objects.
+//! All objects in a pool have the same size, enabling O(1) allocation and
+//! deallocation with minimal fragmentation.
+//!
+//! Ideal for:
+//! - Frequently allocated/deallocated objects of the same type
+//! - Game entities, network connections, database records
+//! - Any scenario with high allocation churn
+//!
+//! Functions:
+//! - pool_new(slot_size, capacity) -> Pool
+//! - pool_with_default_capacity(slot_size) -> Pool
+//! - pool_alloc(&!pool) -> *mut u8
+//! - pool_free(&!pool, ptr)
+//! - pool_reset(&!pool)
+//! - pool_drop(&!pool)
+//! - pool_allocated(&pool) -> usize
+//! - pool_capacity(&pool) -> usize
+//! - pool_available(&pool) -> usize
+//! - pool_slot_size(&pool) -> usize
+//! - pool_is_empty(&pool) -> bool
+//! - pool_is_full(&pool) -> bool
+
+extern "C" {
+    fn malloc(size: usize) -> *mut u8;
+    fn free(ptr: *mut u8);
+}
+
+// Default pool capacity (256 objects)
+const DEFAULT_POOL_CAPACITY: usize = 256
+
+// Minimum slot size (must hold a pointer for the free list)
+const MIN_SLOT_SIZE: usize = 8
+
+// A fixed-size object pool allocator with free list.
+pub struct Pool {
+    base: *mut u8,
+    slot_size: usize,
+    capacity: usize,
+    free_head: *mut u8,
+    allocated: usize,
+}
+
+// Creates a new pool with the specified slot size and capacity.
+// The slot_size is automatically bumped to at least 8 bytes.
+pub fn pool_new(slot_size: usize, capacity: usize) -> Pool with Alloc, Div, Panic {
+    // Ensure slot size can hold a pointer
+    let actual_slot_size = if slot_size < MIN_SLOT_SIZE { MIN_SLOT_SIZE } else { slot_size }
+
+    let total_size = actual_slot_size * capacity
+    let base = malloc(total_size)
+
+    // Initialize free list: each slot stores address of next free slot
+    var i: usize = 0
+    while i < capacity - 1 {
+        let current_addr = (base as usize) + (i * actual_slot_size)
+        let next_addr = (base as usize) + ((i + 1) * actual_slot_size)
+        // Store next slot address at current slot
+        let current_ptr = current_addr as *mut i64
+        current_ptr[0] = next_addr as i64
+        i = i + 1
+    }
+
+    // Last slot has null (0) as next pointer
+    let last_addr = (base as usize) + ((capacity - 1) * actual_slot_size)
+    let last_ptr = last_addr as *mut i64
+    last_ptr[0] = 0
+
+    let result = Pool {
+        base: base,
+        slot_size: actual_slot_size,
+        capacity: capacity,
+        free_head: base,
+        allocated: 0,
+    }
+    return result
+}
+
+// Creates a new pool with default capacity (256 slots).
+pub fn pool_with_default_capacity(slot_size: usize) -> Pool with Alloc, Div, Panic {
+    let result = pool_new(slot_size, DEFAULT_POOL_CAPACITY)
+    return result
+}
+
+// Allocates a slot from the pool.
+// Returns a pointer to the allocated slot, or null if the pool is exhausted.
+pub fn pool_alloc(pool: &!Pool) -> *mut u8 with Panic {
+    if pool.free_head == null_mut() {
+        let null = null_mut()
+        return null
+    }
+
+    let result = pool.free_head
+    // Read next free slot address from current slot
+    let slot_ptr = result as *mut i64
+    let next_addr = slot_ptr[0] as usize
+    pool.free_head = next_addr as *mut u8
+    pool.allocated = pool.allocated + 1
+    return result
+}
+
+// Frees a slot back to the pool.
+pub fn pool_free(pool: &!Pool, ptr: *mut u8) with Panic {
+    // Store current free_head at the slot being freed
+    let slot_ptr = ptr as *mut i64
+    slot_ptr[0] = pool.free_head as i64
+    pool.free_head = ptr
+    pool.allocated = pool.allocated - 1
+}
+
+// Returns the number of objects currently allocated.
+pub fn pool_allocated(pool: &Pool) -> usize {
+    return pool.allocated
+}
+
+// Returns the total capacity of the pool.
+pub fn pool_capacity(pool: &Pool) -> usize {
+    return pool.capacity
+}
+
+// Returns the number of free slots available.
+pub fn pool_available(pool: &Pool) -> usize {
+    return pool.capacity - pool.allocated
+}
+
+// Returns the size of each slot.
+pub fn pool_slot_size(pool: &Pool) -> usize {
+    return pool.slot_size
+}
+
+// Returns true if the pool has no allocated objects.
+pub fn pool_is_empty(pool: &Pool) -> bool {
+    return pool.allocated == 0
+}
+
+// Returns true if all slots are allocated.
+pub fn pool_is_full(pool: &Pool) -> bool {
+    return pool.free_head == null_mut()
+}
+
+// Resets the pool, returning all slots to the free list.
+pub fn pool_reset(pool: &!Pool) with Div, Panic {
+    // Rebuild the free list
+    var i: usize = 0
+    while i < pool.capacity - 1 {
+        let current_addr = (pool.base as usize) + (i * pool.slot_size)
+        let next_addr = (pool.base as usize) + ((i + 1) * pool.slot_size)
+        let current_ptr = current_addr as *mut i64
+        current_ptr[0] = next_addr as i64
+        i = i + 1
+    }
+
+    let last_addr = (pool.base as usize) + ((pool.capacity - 1) * pool.slot_size)
+    let last_ptr = last_addr as *mut i64
+    last_ptr[0] = 0
+
+    pool.free_head = pool.base
+    pool.allocated = 0
+}
+
+// Frees all memory associated with the pool.
+pub fn pool_drop(pool: &!Pool) with Alloc {
+    if pool.base != null_mut() {
+        free(pool.base)
+        pool.base = null_mut()
+    }
+}

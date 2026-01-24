@@ -1,0 +1,757 @@
+//! stdlib/compress/zstd.sio - Zstandard Compression
+//!
+//! This module provides Zstandard (zstd) compression and decompression
+//! via the libzstd library. Zstd offers high compression ratios with
+//! excellent decompression speed.
+//!
+//! # Features
+//! - Compression levels 1-22 (higher = better compression, slower)
+//! - Streaming compression/decompression
+//! - Dictionary compression for small data
+//!
+//! # Examples
+//! ```sio
+//! // Simple compression
+//! let data = "Hello, World!".as_bytes()
+//! let compressed = zstd_compress(&data, 3).unwrap()
+//! let decompressed = zstd_decompress(&compressed).unwrap()
+//!
+//! // Streaming compression
+//! var stream = zstd_stream_compress_new(5)
+//! zstd_stream_compress_write(&!stream, &chunk1)
+//! zstd_stream_compress_write(&!stream, &chunk2)
+//! let result = zstd_stream_compress_finish(&!stream)
+//! ```
+
+// =============================================================================
+// FFI Declarations
+// =============================================================================
+
+extern "C" {
+    // Version
+    fn ZSTD_versionNumber() -> u32;
+    fn ZSTD_versionString() -> *const u8;
+
+    // Simple compression
+    fn ZSTD_compress(
+        dst: *mut u8,
+        dstCapacity: usize,
+        src: *const u8,
+        srcSize: usize,
+        compressionLevel: i32
+    ) -> usize;
+
+    fn ZSTD_decompress(
+        dst: *mut u8,
+        dstCapacity: usize,
+        src: *const u8,
+        compressedSize: usize
+    ) -> usize;
+
+    // Bounds
+    fn ZSTD_compressBound(srcSize: usize) -> usize;
+    fn ZSTD_getFrameContentSize(src: *const u8, srcSize: usize) -> u64;
+
+    // Error handling
+    fn ZSTD_isError(code: usize) -> u32;
+    fn ZSTD_getErrorName(code: usize) -> *const u8;
+
+    // Compression levels
+    fn ZSTD_minCLevel() -> i32;
+    fn ZSTD_maxCLevel() -> i32;
+    fn ZSTD_defaultCLevel() -> i32;
+
+    // Streaming compression context
+    fn ZSTD_createCCtx() -> *mut ZstdCCtx;
+    fn ZSTD_freeCCtx(cctx: *mut ZstdCCtx) -> usize;
+    fn ZSTD_CCtx_setParameter(cctx: *mut ZstdCCtx, param: i32, value: i32) -> usize;
+    fn ZSTD_compressStream2(
+        cctx: *mut ZstdCCtx,
+        output: *mut ZstdOutBuffer,
+        input: *mut ZstdInBuffer,
+        endOp: i32
+    ) -> usize;
+
+    // Streaming decompression context
+    fn ZSTD_createDCtx() -> *mut ZstdDCtx;
+    fn ZSTD_freeDCtx(dctx: *mut ZstdDCtx) -> usize;
+    fn ZSTD_decompressStream(
+        dctx: *mut ZstdDCtx,
+        output: *mut ZstdOutBuffer,
+        input: *mut ZstdInBuffer
+    ) -> usize;
+
+    // Dictionary compression
+    fn ZSTD_compress_usingDict(
+        ctx: *mut ZstdCCtx,
+        dst: *mut u8,
+        dstCapacity: usize,
+        src: *const u8,
+        srcSize: usize,
+        dict: *const u8,
+        dictSize: usize,
+        compressionLevel: i32
+    ) -> usize;
+
+    fn ZSTD_decompress_usingDict(
+        dctx: *mut ZstdDCtx,
+        dst: *mut u8,
+        dstCapacity: usize,
+        src: *const u8,
+        srcSize: usize,
+        dict: *const u8,
+        dictSize: usize
+    ) -> usize;
+}
+
+/// Opaque compression context
+struct ZstdCCtx {
+    _opaque: u8
+}
+
+/// Opaque decompression context
+struct ZstdDCtx {
+    _opaque: u8
+}
+
+/// Input buffer for streaming
+#[repr(C)]
+struct ZstdInBuffer {
+    src: *const u8,
+    size: usize,
+    pos: usize
+}
+
+/// Output buffer for streaming
+#[repr(C)]
+struct ZstdOutBuffer {
+    dst: *mut u8,
+    size: usize,
+    pos: usize
+}
+
+// Streaming end operation
+let ZSTD_E_CONTINUE: i32 = 0;
+let ZSTD_E_FLUSH: i32 = 1;
+let ZSTD_E_END: i32 = 2;
+
+// Parameter IDs
+let ZSTD_C_COMPRESSIONLEVEL: i32 = 100;
+let ZSTD_C_WINDOWLOG: i32 = 101;
+let ZSTD_C_CHECKSUMFLAG: i32 = 201;
+
+// Special content size values
+let ZSTD_CONTENTSIZE_UNKNOWN: u64 = 0xffffffffffffffff;
+let ZSTD_CONTENTSIZE_ERROR: u64 = 0xfffffffffffffffe;
+
+// =============================================================================
+// Error Types
+// =============================================================================
+
+/// Errors that can occur during zstd operations
+pub enum ZstdError {
+    /// Invalid compression level
+    InvalidLevel { level: i32, min: i32, max: i32 },
+    /// Compression failed
+    CompressionFailed { message: string },
+    /// Decompression failed
+    DecompressionFailed { message: string },
+    /// Output buffer too small
+    BufferTooSmall { required: usize, available: usize },
+    /// Input data is corrupted
+    CorruptedData,
+    /// Content size unknown
+    UnknownContentSize,
+    /// Memory allocation failed
+    OutOfMemory,
+    /// Library not available
+    LibraryNotAvailable
+}
+
+/// Returns an error message
+pub fn zstd_error_message(err: &ZstdError) -> string {
+    match err {
+        ZstdError::InvalidLevel { level, min, max } =>
+            "Invalid compression level " ++ level.to_string() ++ " (valid: " ++ min.to_string() ++ "-" ++ max.to_string() ++ ")",
+        ZstdError::CompressionFailed { message } =>
+            "Compression failed: " ++ message.clone(),
+        ZstdError::DecompressionFailed { message } =>
+            "Decompression failed: " ++ message.clone(),
+        ZstdError::BufferTooSmall { required, available } =>
+            "Buffer too small: need " ++ required.to_string() ++ ", have " ++ available.to_string(),
+        ZstdError::CorruptedData =>
+            "Input data is corrupted".to_string(),
+        ZstdError::UnknownContentSize =>
+            "Cannot determine decompressed size".to_string(),
+        ZstdError::OutOfMemory =>
+            "Memory allocation failed".to_string(),
+        ZstdError::LibraryNotAvailable =>
+            "Zstd library not available".to_string()
+    }
+}
+
+fn zstd_get_error_string(code: usize) -> string with Alloc {
+    let ptr = ZSTD_getErrorName(code);
+    if ptr == null {
+        return "Unknown error".to_string()
+    }
+
+    // Convert C string
+    var len: usize = 0;
+    while unsafe { *(ptr.offset(len as isize)) } != 0u8 {
+        len = len + 1;
+    }
+
+    var bytes: Vec<u8> = Vec::with_capacity(len);
+    var i: usize = 0;
+    while i < len {
+        bytes.push(unsafe { *(ptr.offset(i as isize)) });
+        i = i + 1;
+    }
+
+    string::from_utf8_unchecked(bytes)
+}
+
+// =============================================================================
+// Version Information
+// =============================================================================
+
+/// Returns the zstd library version as (major, minor, patch)
+pub fn zstd_version() -> (u32, u32, u32) with IO {
+    let v = ZSTD_versionNumber();
+    let major = v / 10000;
+    let minor = (v / 100) % 100;
+    let patch = v % 100;
+    (major, minor, patch)
+}
+
+/// Returns the zstd version string
+pub fn zstd_version_string() -> string with IO, Alloc {
+    let ptr = ZSTD_versionString();
+    if ptr == null {
+        return "unknown".to_string()
+    }
+
+    var len: usize = 0;
+    while unsafe { *(ptr.offset(len as isize)) } != 0u8 {
+        len = len + 1;
+    }
+
+    var bytes: Vec<u8> = Vec::with_capacity(len);
+    var i: usize = 0;
+    while i < len {
+        bytes.push(unsafe { *(ptr.offset(i as isize)) });
+        i = i + 1;
+    }
+
+    string::from_utf8_unchecked(bytes)
+}
+
+// =============================================================================
+// Compression Level Utilities
+// =============================================================================
+
+/// Returns the minimum compression level (fastest)
+pub fn zstd_min_level() -> i32 with IO {
+    ZSTD_minCLevel()
+}
+
+/// Returns the maximum compression level (best compression)
+pub fn zstd_max_level() -> i32 with IO {
+    ZSTD_maxCLevel()
+}
+
+/// Returns the default compression level (good balance)
+pub fn zstd_default_level() -> i32 with IO {
+    ZSTD_defaultCLevel()
+}
+
+/// Validates a compression level
+pub fn zstd_validate_level(level: i32) -> Result<i32, ZstdError> with IO {
+    let min = zstd_min_level();
+    let max = zstd_max_level();
+
+    if level < min || level > max {
+        Err(ZstdError::InvalidLevel { level, min, max })
+    } else {
+        Ok(level)
+    }
+}
+
+// =============================================================================
+// Simple Compression/Decompression
+// =============================================================================
+
+/// Returns the maximum compressed size for a given input size.
+pub fn zstd_compress_bound(src_size: usize) -> usize with IO {
+    ZSTD_compressBound(src_size)
+}
+
+/// Compresses data using zstd.
+///
+/// # Arguments
+/// * `data` - The data to compress
+/// * `level` - Compression level (1-22, higher = better compression)
+///
+/// # Returns
+/// Compressed data or an error
+///
+/// # Example
+/// ```sio
+/// let data = "Hello, World!".as_bytes()
+/// let compressed = zstd_compress(&data, 3)?
+/// ```
+pub fn zstd_compress(data: &[u8], level: i32) -> Result<Vec<u8>, ZstdError> with IO, Alloc {
+    // Validate level
+    zstd_validate_level(level)?;
+
+    // Allocate output buffer
+    let max_size = zstd_compress_bound(data.len());
+    var output: Vec<u8> = Vec::with_capacity(max_size);
+    output.resize(max_size, 0u8);
+
+    // Compress
+    let result = ZSTD_compress(
+        output.as_mut_ptr(),
+        max_size,
+        data.as_ptr(),
+        data.len(),
+        level
+    );
+
+    // Check for error
+    if ZSTD_isError(result) != 0 {
+        return Err(ZstdError::CompressionFailed {
+            message: zstd_get_error_string(result)
+        })
+    }
+
+    // Resize to actual size
+    output.truncate(result);
+    Ok(output)
+}
+
+/// Decompresses zstd-compressed data.
+///
+/// # Arguments
+/// * `data` - The compressed data
+///
+/// # Returns
+/// Decompressed data or an error
+///
+/// # Example
+/// ```sio
+/// let decompressed = zstd_decompress(&compressed)?
+/// ```
+pub fn zstd_decompress(data: &[u8]) -> Result<Vec<u8>, ZstdError> with IO, Alloc {
+    // Get frame content size
+    let content_size = ZSTD_getFrameContentSize(data.as_ptr(), data.len());
+
+    if content_size == ZSTD_CONTENTSIZE_ERROR {
+        return Err(ZstdError::CorruptedData)
+    }
+
+    // If size is unknown, use streaming decompression
+    if content_size == ZSTD_CONTENTSIZE_UNKNOWN {
+        return zstd_decompress_streaming(data)
+    }
+
+    // Allocate output buffer
+    let out_size = content_size as usize;
+    var output: Vec<u8> = Vec::with_capacity(out_size);
+    output.resize(out_size, 0u8);
+
+    // Decompress
+    let result = ZSTD_decompress(
+        output.as_mut_ptr(),
+        out_size,
+        data.as_ptr(),
+        data.len()
+    );
+
+    // Check for error
+    if ZSTD_isError(result) != 0 {
+        return Err(ZstdError::DecompressionFailed {
+            message: zstd_get_error_string(result)
+        })
+    }
+
+    output.truncate(result);
+    Ok(output)
+}
+
+/// Decompresses data using streaming (when content size is unknown)
+fn zstd_decompress_streaming(data: &[u8]) -> Result<Vec<u8>, ZstdError> with IO, Alloc {
+    let dctx = ZSTD_createDCtx();
+    if dctx == null {
+        return Err(ZstdError::OutOfMemory)
+    }
+
+    var output: Vec<u8> = Vec::new();
+    let chunk_size: usize = 65536;  // 64KB chunks
+
+    var in_buffer = ZstdInBuffer {
+        src: data.as_ptr(),
+        size: data.len(),
+        pos: 0
+    };
+
+    var out_chunk: Vec<u8> = Vec::with_capacity(chunk_size);
+    out_chunk.resize(chunk_size, 0u8);
+
+    while in_buffer.pos < in_buffer.size {
+        var out_buffer = ZstdOutBuffer {
+            dst: out_chunk.as_mut_ptr(),
+            size: chunk_size,
+            pos: 0
+        };
+
+        let result = ZSTD_decompressStream(dctx, &!out_buffer, &!in_buffer);
+
+        if ZSTD_isError(result) != 0 {
+            ZSTD_freeDCtx(dctx);
+            return Err(ZstdError::DecompressionFailed {
+                message: zstd_get_error_string(result)
+            })
+        }
+
+        // Append to output
+        var i: usize = 0;
+        while i < out_buffer.pos {
+            output.push(out_chunk[i]);
+            i = i + 1;
+        }
+    }
+
+    ZSTD_freeDCtx(dctx);
+    Ok(output)
+}
+
+// =============================================================================
+// Streaming Compression
+// =============================================================================
+
+/// A streaming compression context.
+pub struct ZstdCompressor {
+    ctx: *mut ZstdCCtx,
+    level: i32,
+    output: Vec<u8>
+}
+
+/// Creates a new streaming compressor.
+pub fn zstd_compressor_new(level: i32) -> Result<ZstdCompressor, ZstdError> with IO, Alloc {
+    zstd_validate_level(level)?;
+
+    let ctx = ZSTD_createCCtx();
+    if ctx == null {
+        return Err(ZstdError::OutOfMemory)
+    }
+
+    // Set compression level
+    let result = ZSTD_CCtx_setParameter(ctx, ZSTD_C_COMPRESSIONLEVEL, level);
+    if ZSTD_isError(result) != 0 {
+        ZSTD_freeCCtx(ctx);
+        return Err(ZstdError::CompressionFailed {
+            message: zstd_get_error_string(result)
+        })
+    }
+
+    Ok(ZstdCompressor {
+        ctx: ctx,
+        level: level,
+        output: Vec::new()
+    })
+}
+
+/// Writes data to the compressor.
+pub fn zstd_compressor_write(c: &!ZstdCompressor, data: &[u8]) -> Result<(), ZstdError> with IO, Alloc {
+    let chunk_size: usize = 65536;
+    var out_chunk: Vec<u8> = Vec::with_capacity(chunk_size);
+    out_chunk.resize(chunk_size, 0u8);
+
+    var in_buffer = ZstdInBuffer {
+        src: data.as_ptr(),
+        size: data.len(),
+        pos: 0
+    };
+
+    while in_buffer.pos < in_buffer.size {
+        var out_buffer = ZstdOutBuffer {
+            dst: out_chunk.as_mut_ptr(),
+            size: chunk_size,
+            pos: 0
+        };
+
+        let result = ZSTD_compressStream2(c.ctx, &!out_buffer, &!in_buffer, ZSTD_E_CONTINUE);
+
+        if ZSTD_isError(result) != 0 {
+            return Err(ZstdError::CompressionFailed {
+                message: zstd_get_error_string(result)
+            })
+        }
+
+        // Append to output
+        var i: usize = 0;
+        while i < out_buffer.pos {
+            c.output.push(out_chunk[i]);
+            i = i + 1;
+        }
+    }
+
+    Ok(())
+}
+
+/// Finishes compression and returns the compressed data.
+pub fn zstd_compressor_finish(c: &!ZstdCompressor) -> Result<Vec<u8>, ZstdError> with IO, Alloc {
+    let chunk_size: usize = 65536;
+    var out_chunk: Vec<u8> = Vec::with_capacity(chunk_size);
+    out_chunk.resize(chunk_size, 0u8);
+
+    var in_buffer = ZstdInBuffer {
+        src: null,
+        size: 0,
+        pos: 0
+    };
+
+    loop {
+        var out_buffer = ZstdOutBuffer {
+            dst: out_chunk.as_mut_ptr(),
+            size: chunk_size,
+            pos: 0
+        };
+
+        let remaining = ZSTD_compressStream2(c.ctx, &!out_buffer, &!in_buffer, ZSTD_E_END);
+
+        if ZSTD_isError(remaining) != 0 {
+            return Err(ZstdError::CompressionFailed {
+                message: zstd_get_error_string(remaining)
+            })
+        }
+
+        // Append to output
+        var i: usize = 0;
+        while i < out_buffer.pos {
+            c.output.push(out_chunk[i]);
+            i = i + 1;
+        }
+
+        if remaining == 0 {
+            break
+        }
+    }
+
+    Ok(std::mem::take(&!c.output))
+}
+
+/// Frees the compressor resources.
+pub fn zstd_compressor_free(c: ZstdCompressor) with IO {
+    if c.ctx != null {
+        ZSTD_freeCCtx(c.ctx);
+    }
+}
+
+// =============================================================================
+// Streaming Decompression
+// =============================================================================
+
+/// A streaming decompression context.
+pub struct ZstdDecompressor {
+    ctx: *mut ZstdDCtx,
+    output: Vec<u8>
+}
+
+/// Creates a new streaming decompressor.
+pub fn zstd_decompressor_new() -> Result<ZstdDecompressor, ZstdError> with IO, Alloc {
+    let ctx = ZSTD_createDCtx();
+    if ctx == null {
+        return Err(ZstdError::OutOfMemory)
+    }
+
+    Ok(ZstdDecompressor {
+        ctx: ctx,
+        output: Vec::new()
+    })
+}
+
+/// Writes compressed data to the decompressor.
+pub fn zstd_decompressor_write(d: &!ZstdDecompressor, data: &[u8]) -> Result<(), ZstdError> with IO, Alloc {
+    let chunk_size: usize = 65536;
+    var out_chunk: Vec<u8> = Vec::with_capacity(chunk_size);
+    out_chunk.resize(chunk_size, 0u8);
+
+    var in_buffer = ZstdInBuffer {
+        src: data.as_ptr(),
+        size: data.len(),
+        pos: 0
+    };
+
+    while in_buffer.pos < in_buffer.size {
+        var out_buffer = ZstdOutBuffer {
+            dst: out_chunk.as_mut_ptr(),
+            size: chunk_size,
+            pos: 0
+        };
+
+        let result = ZSTD_decompressStream(d.ctx, &!out_buffer, &!in_buffer);
+
+        if ZSTD_isError(result) != 0 {
+            return Err(ZstdError::DecompressionFailed {
+                message: zstd_get_error_string(result)
+            })
+        }
+
+        // Append to output
+        var i: usize = 0;
+        while i < out_buffer.pos {
+            d.output.push(out_chunk[i]);
+            i = i + 1;
+        }
+    }
+
+    Ok(())
+}
+
+/// Returns the decompressed data accumulated so far.
+pub fn zstd_decompressor_take(d: &!ZstdDecompressor) -> Vec<u8> with Alloc {
+    std::mem::take(&!d.output)
+}
+
+/// Frees the decompressor resources.
+pub fn zstd_decompressor_free(d: ZstdDecompressor) with IO {
+    if d.ctx != null {
+        ZSTD_freeDCtx(d.ctx);
+    }
+}
+
+// =============================================================================
+// Dictionary Compression
+// =============================================================================
+
+/// Compresses data using a dictionary for better compression of small data.
+///
+/// Dictionary compression works best when:
+/// - Data is small (< 32KB)
+/// - Data is similar to the dictionary
+/// - Multiple pieces of similar data are compressed
+pub fn zstd_compress_with_dict(
+    data: &[u8],
+    dict: &[u8],
+    level: i32
+) -> Result<Vec<u8>, ZstdError> with IO, Alloc {
+    zstd_validate_level(level)?;
+
+    let ctx = ZSTD_createCCtx();
+    if ctx == null {
+        return Err(ZstdError::OutOfMemory)
+    }
+
+    let max_size = zstd_compress_bound(data.len());
+    var output: Vec<u8> = Vec::with_capacity(max_size);
+    output.resize(max_size, 0u8);
+
+    let result = ZSTD_compress_usingDict(
+        ctx,
+        output.as_mut_ptr(),
+        max_size,
+        data.as_ptr(),
+        data.len(),
+        dict.as_ptr(),
+        dict.len(),
+        level
+    );
+
+    ZSTD_freeCCtx(ctx);
+
+    if ZSTD_isError(result) != 0 {
+        return Err(ZstdError::CompressionFailed {
+            message: zstd_get_error_string(result)
+        })
+    }
+
+    output.truncate(result);
+    Ok(output)
+}
+
+/// Decompresses data that was compressed with a dictionary.
+pub fn zstd_decompress_with_dict(
+    data: &[u8],
+    dict: &[u8]
+) -> Result<Vec<u8>, ZstdError> with IO, Alloc {
+    let ctx = ZSTD_createDCtx();
+    if ctx == null {
+        return Err(ZstdError::OutOfMemory)
+    }
+
+    // Get content size
+    let content_size = ZSTD_getFrameContentSize(data.as_ptr(), data.len());
+
+    if content_size == ZSTD_CONTENTSIZE_ERROR {
+        ZSTD_freeDCtx(ctx);
+        return Err(ZstdError::CorruptedData)
+    }
+
+    if content_size == ZSTD_CONTENTSIZE_UNKNOWN {
+        ZSTD_freeDCtx(ctx);
+        return Err(ZstdError::UnknownContentSize)
+    }
+
+    let out_size = content_size as usize;
+    var output: Vec<u8> = Vec::with_capacity(out_size);
+    output.resize(out_size, 0u8);
+
+    let result = ZSTD_decompress_usingDict(
+        ctx,
+        output.as_mut_ptr(),
+        out_size,
+        data.as_ptr(),
+        data.len(),
+        dict.as_ptr(),
+        dict.len()
+    );
+
+    ZSTD_freeDCtx(ctx);
+
+    if ZSTD_isError(result) != 0 {
+        return Err(ZstdError::DecompressionFailed {
+            message: zstd_get_error_string(result)
+        })
+    }
+
+    output.truncate(result);
+    Ok(output)
+}
+
+// =============================================================================
+// Convenience Functions
+// =============================================================================
+
+/// Compresses data with the default compression level.
+pub fn zstd_compress_default(data: &[u8]) -> Result<Vec<u8>, ZstdError> with IO, Alloc {
+    zstd_compress(data, zstd_default_level())
+}
+
+/// Compresses data for maximum speed (level 1).
+pub fn zstd_compress_fast(data: &[u8]) -> Result<Vec<u8>, ZstdError> with IO, Alloc {
+    zstd_compress(data, 1)
+}
+
+/// Compresses data for maximum compression (level 19).
+pub fn zstd_compress_best(data: &[u8]) -> Result<Vec<u8>, ZstdError> with IO, Alloc {
+    zstd_compress(data, 19)
+}
+
+/// Compresses a string and returns compressed bytes.
+pub fn zstd_compress_string(s: &str, level: i32) -> Result<Vec<u8>, ZstdError> with IO, Alloc {
+    zstd_compress(s.as_bytes(), level)
+}
+
+/// Decompresses bytes and returns a string.
+pub fn zstd_decompress_string(data: &[u8]) -> Result<string, ZstdError> with IO, Alloc {
+    let bytes = zstd_decompress(data)?;
+    match String::from_utf8(bytes) {
+        Ok(s) => Ok(s),
+        Err(_) => Err(ZstdError::DecompressionFailed {
+            message: "Invalid UTF-8 in decompressed data".to_string()
+        })
+    }
+}
