@@ -1685,6 +1685,20 @@ impl TypeChecker {
         // Check for #[export] attribute - explicit FFI export marker
         let has_export_attr = f.attributes.iter().any(|attr| attr.name == "export");
 
+        // Extract #[extern("name")] attribute for FFI binding
+        let extern_name = f.attributes.iter().find_map(|attr| {
+            if attr.name == "extern" {
+                match &attr.args {
+                    crate::ast::AttributeArgs::Value(crate::ast::AttributeValue::String(name)) => {
+                        Some(name.clone())
+                    }
+                    _ => None,
+                }
+            } else {
+                None
+            }
+        });
+
         // Function is exported if:
         // 1. It has #[export] attribute (explicit FFI export), OR
         // 2. It's public (for module-level visibility)
@@ -1730,6 +1744,7 @@ impl TypeChecker {
             body,
             abi,
             is_exported,
+            extern_name,
         })
     }
 

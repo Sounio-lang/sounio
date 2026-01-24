@@ -18,8 +18,8 @@ Read this first. It supersedes aspiration in the other docs.
 ✅ **Units of measure** (mg, mL, h, etc.)
 ✅ **Refinement types** (basic)
 
-❌ **Module system** (`use` statements don't work)
-❌ **Forward references** (functions must be defined before use)
+❌ **Module system** (`use` statements partially work, cross-module imports fixed)
+✅ **Forward references** (functions can be defined after use)
 ✅ **Tuple destructuring** (`let (x, y) = tuple` now supported)
 ❌ **Visibility modifiers** (`pub` keyword ignored)
 
@@ -133,35 +133,27 @@ import data_loader    // ❌ No import keyword
 
 **When to expect**: Planned for v0.70.0 (Q1 2026 estimate based on roadmap)
 
-### 2. Forward References (Not Implemented)
+### 2. Forward References (NOW WORKING ✅)
 
-**Problem**: Functions must be defined before they're used.
+**Status**: Forward references within a single file are now fully supported.
 
-❌ **This doesn't work**:
+✅ **This now works**:
 ```sio
-fn main() {
-    helper()     // ❌ Error: helper not defined yet
+fn main() with IO {
+    helper()     // ✅ OK: forward reference resolved
 }
 
-fn helper() {
+fn helper() with IO {
     println("hello")
 }
 ```
 
-✅ **This works** (define helpers first):
-```sio
-fn helper() {
-    println("hello")
-}
+The resolver performs a two-pass analysis:
 
-fn main() {
-    helper()     // ✅ OK: helper defined above
-}
-```
+1. First pass: Collect all definitions
+2. Second pass: Resolve references (including forward references)
 
-**Workaround**: Use "bottom-up" ordering — put helper functions first, main functions last.
-
-### 3. Tuple Destructuring (Not Implemented)
+### 3. Tuple Destructuring (NOW WORKING ✅)
 
 **Problem**: Can't unpack tuples with `let (x, y) = ...` syntax.
 
@@ -202,20 +194,16 @@ fn my_function() { ... }       // Same as above
 
 This matters when modules are implemented. For now, all declarations are "public" (no encapsulation possible).
 
-### 5. Scientific Notation (Not Implemented)
+### 5. Scientific Notation (NOW WORKING ✅)
 
-**Status**: Planned for v0.67.0
+**Status**: Fully supported.
 
-❌ **Doesn't work**:
+✅ **These all work**:
 ```sio
-let large = 1e10      // ❌ Error
-let small = 1.5e-3    // ❌ Error
-```
-
-✅ **Workaround**: Write full decimal form:
-```sio
-let large = 10000000000.0
-let small = 0.0015
+let large = 1e10       // ✅ Integer with exponent
+let small = 1.5e-3     // ✅ Float with negative exponent
+let precise = 2.5E+3   // ✅ Uppercase E, positive exponent
+let big = 6.022e23     // ✅ Avogadro's number
 ```
 
 ---
@@ -386,11 +374,17 @@ fn small_function() { ... }    // Will ignore this
 
 ### "Why must I define functions before I use them?"
 
-**Answer**: Forward references not implemented. One-pass compilation only.
+**Answer**: ✅ **This is no longer a limitation!** Forward references now work.
 
-**Workaround**: Define helper functions first, then main logic.
+```sio
+fn main() with IO {
+    helper()     // ✅ Works - forward reference resolved
+}
 
-**When fixed**: Phase 2 of the plan (3-5 days estimated)
+fn helper() with IO {
+    println("hello")
+}
+```
 
 ### "How do I use tuple destructuring?"
 
@@ -509,15 +503,22 @@ fn main() with IO {
 - Issue #16 verified resolved
 - Documentation updated (this file)
 
-**Phase 2 In Progress** (Weeks 2-3)
+**Phase 2 Complete** ✅
 
 - ✅ Tuple destructuring (completed)
-- Forward references (two-pass name resolution — in progress)
+- ✅ Forward references (two-pass name resolution — completed)
+- ✅ Cross-module imports (path parsing fix — completed)
 
-**Phase 3** (Weeks 4-7)
+**Phase 3 Complete** ✅
 
-- Module system (`use` statements)
-- Visibility modifiers (`pub`)
+- ✅ Scientific notation (already implemented in lexer)
+- ✅ Type aliases (`type Name = Type;` syntax)
+- ✅ Doc comments (`///` outer, `//!` inner)
+
+**Phase 4 In Progress** (v0.70.0)
+
+- Module system enhancements (`use` statements for multi-file projects)
+- Visibility modifiers (`pub` enforcement)
 
 ---
 

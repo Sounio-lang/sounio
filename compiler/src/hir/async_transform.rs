@@ -574,6 +574,7 @@ mod tests {
             },
             abi: Abi::Rust,
             is_exported: false,
+            extern_name: None,
         }
     }
 
@@ -609,6 +610,7 @@ mod tests {
             },
             abi: Abi::Rust,
             is_exported: false,
+            extern_name: None,
         };
         assert!(!is_async_function(&sync_func));
     }

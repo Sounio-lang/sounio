@@ -74,6 +74,8 @@ pub struct HirFn {
     pub abi: Abi,
     /// Whether this function is exported (pub extern)
     pub is_exported: bool,
+    /// FFI binding name from #[extern("name")] attribute
+    pub extern_name: Option<String>,
 }
 
 /// Function type in HIR
