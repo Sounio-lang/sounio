@@ -139,7 +139,7 @@ impl From<&[String]> for ModuleId {
 }
 
 /// Module in the tree
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct Module {
     /// Unique identifier for this module
     pub id: ModuleId,
@@ -211,7 +211,7 @@ pub struct ImportEntry {
 }
 
 /// The complete module tree
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct ModuleTree {
     /// All modules indexed by their ID
     modules: HashMap<ModuleId, Module>,

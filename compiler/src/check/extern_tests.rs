@@ -18,7 +18,7 @@ fn extern_fn_is_resolved_and_lowered() {
 
     let tokens = lexer::lex(source).expect("lex");
     let ast = parser::parse(&tokens, source).expect("parse");
-    let hir = check::check(&ast).expect("typecheck");
+    let hir = check::check_ast(&ast).expect("typecheck");
 
     assert_eq!(hir.externs.len(), 1);
     assert_eq!(hir.externs[0].functions.len(), 1);

@@ -432,7 +432,7 @@ impl BuildExecutor {
             }
         };
 
-        let hir = match crate::check::check(&ast) {
+        let hir = match crate::check::check_ast(&ast) {
             Ok(h) => h,
             Err(e) => {
                 return Err(BuildError::Compile {

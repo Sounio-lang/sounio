@@ -706,7 +706,7 @@ fn compile_native(args: &BuildArgs) -> Result<(PathBuf, Option<NativeMetrics>), 
     use crate::backend::native::{NativeBackend, NativeBackendConfig, TargetArch};
     use crate::backend::native::thermal::ArrheniusModel;
     use crate::module_loader::load_program_ast;
-    use crate::check::check;
+    use crate::check::check_ast;
     use crate::hlir::lower as lower_hlir;
     use crate::sir::lower::lower_module;
     use crate::sir::emit::emit_code;
@@ -731,7 +731,7 @@ fn compile_native(args: &BuildArgs) -> Result<(PathBuf, Option<NativeMetrics>), 
 
     // Step 2: Type check (AST → HIR)
     let typecheck_start = Instant::now();
-    let hir = check(&ast)
+    let hir = check_ast(&ast)
         .map_err(|e| format!("Type check error: {}", e))?;
     let typecheck_ms = typecheck_start.elapsed().as_millis() as u64;
 
@@ -1156,7 +1156,7 @@ fn compile_cranelift(args: &BuildArgs) -> Result<(PathBuf, Option<NativeMetrics>
         use std::time::Instant;
         use crate::codegen::cranelift::CraneliftAot;
         use crate::module_loader::load_program_ast;
-        use crate::check::check;
+        use crate::check::check_ast;
         use crate::hlir::lower as lower_hlir;
         use crate::backend::native::linker::{Linker, LinkerConfig, LinkMode};
 
@@ -1181,7 +1181,7 @@ fn compile_cranelift(args: &BuildArgs) -> Result<(PathBuf, Option<NativeMetrics>
 
         // Step 2: Type check (AST -> HIR)
         let typecheck_start = Instant::now();
-        let hir = check(&ast)
+        let hir = check_ast(&ast)
             .map_err(|e| format!("Type check error: {}", e))?;
         let typecheck_ms = typecheck_start.elapsed().as_millis() as u64;
 

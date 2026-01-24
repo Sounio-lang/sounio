@@ -22,14 +22,21 @@ use crate::ast::*;
 use crate::common::{NodeId, Span};
 use crate::hir::*;
 use crate::macro_system::token_tree::{Delimiter, TokenTree};
+use crate::resolve;
 use crate::types::{self, Type, TypeVar, TensorShape, DimSize, effects::EffectInference, units::UnitChecker};
 use miette::Result;
 use std::collections::HashMap;
 
-/// Type check an AST and produce HIR
-pub fn check(ast: &Ast) -> Result<Hir> {
-    let mut checker = TypeChecker::new();
-    checker.check_program(ast)
+/// Type check a ResolvedAst and produce HIR
+pub fn check(resolved_ast: &resolve::ResolvedAst) -> Result<Hir> {
+    let mut checker = TypeChecker::new_with_resolved_ast(resolved_ast);
+    checker.check_program(&resolved_ast.ast)
+}
+
+/// Type check an AST and produce HIR (with automatic resolution)
+pub fn check_ast(ast: &Ast) -> Result<Hir> {
+    let resolved_ast = resolve::resolve(ast.clone())?;
+    check(&resolved_ast)
 }
 
 /// Type checker state
@@ -78,6 +85,12 @@ pub struct TypeChecker {
     /// is added to this set. This enables pure functions that use impure internals
     /// as long as all effects are handled before returning.
     masked_effects: types::EffectSet,
+    /// Symbol table from resolver (for visibility checking)
+    symbols: Option<std::sync::Arc<resolve::SymbolTable>>,
+    /// Module tree from resolver (for visibility checking)
+    module_tree: Option<std::sync::Arc<resolve::module_tree::ModuleTree>>,
+    /// Current module for visibility enforcement
+    current_module: Option<resolve::module_tree::ModuleId>,
 }
 
 /// Type environment with scopes and module awareness
@@ -151,9 +164,9 @@ pub struct TypeCheckResult {
 }
 
 /// Type check an AST and return structured result with errors
-pub fn check_with_errors(ast: &Ast) -> TypeCheckResult {
-    let mut checker = TypeChecker::new();
-    match checker.check_program_internal(ast) {
+pub fn check_with_errors(resolved_ast: &resolve::ResolvedAst) -> TypeCheckResult {
+    let mut checker = TypeChecker::new_with_resolved_ast(resolved_ast);
+    match checker.check_program_internal(&resolved_ast.ast) {
         Ok(hir) => TypeCheckResult {
             hir: Some(hir),
             errors: checker.errors,
@@ -189,7 +202,19 @@ impl TypeChecker {
             warnings: Vec::new(),
             handler_effects: HashMap::new(),
             masked_effects: types::EffectSet::new(),
+            symbols: None,
+            module_tree: None,
+            current_module: None,
         }
+    }
+
+    /// Create a TypeChecker with resolved AST visibility information
+    pub fn new_with_resolved_ast(resolved_ast: &resolve::ResolvedAst) -> Self {
+        let mut checker = Self::new();
+        checker.symbols = Some(std::sync::Arc::new(resolved_ast.symbols.clone()));
+        checker.module_tree = Some(std::sync::Arc::new(resolved_ast.module_tree.clone()));
+        checker.current_module = Some(resolve::module_tree::ModuleId::root());
+        checker
     }
 
     /// Generate a fresh type variable
@@ -248,6 +273,41 @@ impl TypeChecker {
             span,
             code: code.to_string(),
         });
+    }
+
+    /// Check visibility of a definition when accessing it
+    fn check_item_visibility(
+        &mut self,
+        def_id: &resolve::DefId,
+        item_name: &str,
+        item_type: &str,
+        span: Span,
+    ) -> bool {
+        // If no resolver info available, assume visible (backward compat)
+        let Some(symbols) = &self.symbols else {
+            return true;
+        };
+        let Some(module_tree) = &self.module_tree else {
+            return true;
+        };
+
+        // Look up the symbol for this DefId
+        let Some(symbol) = symbols.get(*def_id) else {
+            return true; // Builtin or internal, assume visible
+        };
+
+        // Get the module where this item is defined
+        // For now, we check if it's public; private items visibility will be enforced
+        // when the module system is fully integrated
+        // This is a simplified version - in a full implementation, we'd check module scopes
+        match &self.current_module {
+            Some(_current_module) => {
+                // Placeholder: in full implementation, check if item_module is accessible
+                // from current_module using the module_tree
+                true
+            }
+            None => true,
+        }
     }
 
     /// Look up which effect a handler handles by its name.

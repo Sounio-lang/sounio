@@ -2275,7 +2275,7 @@ fn build_gpu(
             ));
         }
 
-        let hir = sounio::check::check(&ast)?;
+        let hir = sounio::check::check_ast(&ast)?;
         let mut hlir = sounio::hlir::lower(&hir);
         for func in &mut hlir.functions {
             if kernel_names.contains(&func.name) {
@@ -2380,7 +2380,7 @@ fn build(
         let ast = sounio::module_loader::load_program_ast(input)?;
 
         // Type check
-        let hir = sounio::check::check(&ast)?;
+        let hir = sounio::check::check_ast(&ast)?;
 
         // Lower to HLIR
         let hlir = sounio::hlir::lower(&hir);
@@ -2596,12 +2596,12 @@ fn compile(
                 return Ok(());
             }
             EmitType::Hir => {
-                let hir = sounio::check::check(&ast)?;
+                let hir = sounio::check::check_ast(&ast)?;
                 println!("{:#?}", hir);
                 return Ok(());
             }
             EmitType::Hlir => {
-                let hir = sounio::check::check(&ast)?;
+                let hir = sounio::check::check_ast(&ast)?;
                 let hlir = sounio::hlir::lower(&hir);
                 println!("{:#?}", hlir);
                 return Ok(());
@@ -2613,7 +2613,7 @@ fn compile(
     }
 
     // Type check
-    let hir = sounio::check::check(&ast)?;
+    let hir = sounio::check::check_ast(&ast)?;
 
     // Lower to HLIR
     let hlir = sounio::hlir::lower(&hir);
@@ -2686,7 +2686,7 @@ fn check(
     }
 
     // 4. Type check
-    let check_result = sounio::check::check_with_errors(&resolved.ast);
+    let check_result = sounio::check::check_with_errors(&resolved);
 
     // Emit warnings (including unused import warnings)
     for warning in &check_result.warnings {
@@ -2867,7 +2867,7 @@ fn run(input: &std::path::Path, args: &[String]) -> Result<()> {
 
     // Load modules and parse (uses ModuleLoader to handle imports)
     let ast = sounio::module_loader::load_program_ast(input)?;
-    let hir = sounio::check::check(&ast)?;
+    let hir = sounio::check::check_ast(&ast)?;
 
     // Use tree-walking interpreter
     let mut interpreter = sounio::interp::Interpreter::new();
@@ -2891,7 +2891,7 @@ fn jit_run(input: &std::path::Path, optimize: bool, use_mir: bool, _args: &[Stri
 
         // Load modules and parse (uses ModuleLoader to handle imports)
         let ast = sounio::module_loader::load_program_ast(input)?;
-        let hir = sounio::check::check(&ast)?;
+        let hir = sounio::check::check_ast(&ast)?;
         let hlir = sounio::hlir::lower(&hir);
         let main_returns_value = hlir
             .find_function("main")
@@ -2973,7 +2973,7 @@ fn bench(input: &std::path::Path, iterations: u32) -> Result<()> {
 
     let tokens = sounio::lexer::lex(&source)?;
     let ast = sounio::parser::parse(&tokens, &source)?;
-    let hir = sounio::check::check(&ast)?;
+    let hir = sounio::check::check_ast(&ast)?;
 
     // Warm up
     println!("Warming up...");
@@ -3911,7 +3911,7 @@ fn profile(
 
     let tokens = sounio::lexer::lex(&source)?;
     let ast = sounio::parser::parse(&tokens, &source)?;
-    let hir = sounio::check::check(&ast)?;
+    let hir = sounio::check::check_ast(&ast)?;
 
     println!("=== Profile: {} ===", input.display());
     println!("Profile type: {}", profile_type);
@@ -4314,7 +4314,7 @@ fn diagnostics_check(
     };
 
     // Try to type check
-    match sounio::check::check(&ast) {
+    match sounio::check::check_ast(&ast) {
         Ok(hir) => {
             if handler.has_errors() {
                 handler.abort_if_errors();
@@ -4536,7 +4536,7 @@ fn diagnostics_stats(input: &std::path::Path) -> Result<()> {
 
     // Count type errors (if parsing succeeded)
     if let Ok(ast) = sounio::parser::parse(&tokens, &source) {
-        if sounio::check::check(&ast).is_err() {
+        if sounio::check::check_ast(&ast).is_err() {
             type_errors += 1;
         }
     }
@@ -4573,7 +4573,7 @@ fn generate_debug_info(
 
     let tokens = sounio::lexer::lex(&source)?;
     let ast = sounio::parser::parse(&tokens, &source)?;
-    let _hir = sounio::check::check(&ast)?;
+    let _hir = sounio::check::check_ast(&ast)?;
 
     let out_path = output.map(|p| p.to_path_buf()).unwrap_or_else(|| {
         let mut p = input.to_path_buf();
@@ -4655,7 +4655,7 @@ fn generate_source_map(input: &std::path::Path, output: Option<&std::path::Path>
 
     let tokens = sounio::lexer::lex(&source)?;
     let ast = sounio::parser::parse(&tokens, &source)?;
-    let _hir = sounio::check::check(&ast)?;
+    let _hir = sounio::check::check_ast(&ast)?;
 
     let out_path = output.map(|p| p.to_path_buf()).unwrap_or_else(|| {
         let mut p = input.to_path_buf();

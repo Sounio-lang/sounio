@@ -253,7 +253,7 @@ impl BuildManager {
             .map_err(|e| format!("Lexer error in {}: {}", path.display(), e))?;
         let ast = crate::parser::parse(&tokens, &source)
             .map_err(|e| format!("Parser error in {}: {}", path.display(), e))?;
-        let _hir = crate::check::check(&ast)
+        let _hir = crate::check::check_ast(&ast)
             .map_err(|e| format!("Type error in {}: {}", path.display(), e))?;
 
         if verbose {

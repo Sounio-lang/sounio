@@ -1803,7 +1803,7 @@ impl Repl {
                 match crate::parser::parse(&tokens, &source) {
                     Ok(ast) => {
                         // Type check
-                        match crate::check::check(&ast) {
+                        match crate::check::check_ast(&ast) {
                             Ok(hir) => {
                                 // Find the type of the last expression
                                 if let Some(item) = hir.items.last()
@@ -1900,7 +1900,7 @@ impl Repl {
         }
 
         // Type check
-        let hir = match crate::check::check(&ast) {
+        let hir = match crate::check::check_ast(&ast) {
             Ok(hir) => hir,
             Err(e) => {
                 display_repl_error(input, &source, ReplErrorKind::Type, &e);

@@ -114,7 +114,7 @@ pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 pub fn compile(source: &str) -> miette::Result<Vec<u8>> {
     let tokens = lexer::lex(source)?;
     let ast = parser::parse(&tokens, source)?;
-    let hir = check::check(&ast)?;
+    let hir = check::check_ast(&ast)?;
     let hlir = hlir::lower(&hir);
 
     // New MIR-based pipeline
@@ -156,7 +156,7 @@ pub fn compile(source: &str) -> miette::Result<Vec<u8>> {
 pub fn compile_to_gpu(source: &str, sm_version: (u32, u32)) -> miette::Result<String> {
     let tokens = lexer::lex(source)?;
     let ast = parser::parse(&tokens, source)?;
-    let hir = check::check(&ast)?;
+    let hir = check::check_ast(&ast)?;
     let hlir = hlir::lower(&hir);
 
     // New MIR-based pipeline
@@ -180,7 +180,7 @@ pub fn compile_to_gpu(source: &str, sm_version: (u32, u32)) -> miette::Result<St
 pub fn compile_to_gpu_epistemic(source: &str, sm_version: (u32, u32)) -> miette::Result<String> {
     let tokens = lexer::lex(source)?;
     let ast = parser::parse(&tokens, source)?;
-    let hir = check::check(&ast)?;
+    let hir = check::check_ast(&ast)?;
     let hlir = hlir::lower(&hir);
 
     // New MIR-based pipeline
@@ -201,7 +201,7 @@ pub fn compile_to_gpu_epistemic(source: &str, sm_version: (u32, u32)) -> miette:
 pub fn typecheck(source: &str) -> miette::Result<Hir> {
     let tokens = lexer::lex(source)?;
     let ast = parser::parse(&tokens, source)?;
-    check::check(&ast)
+    check::check_ast(&ast)
 }
 
 /// Parse source code to AST
@@ -214,7 +214,7 @@ pub fn parse(source: &str) -> miette::Result<Ast> {
 pub fn interpret(source: &str) -> miette::Result<interp::Value> {
     let tokens = lexer::lex(source)?;
     let ast = parser::parse(&tokens, source)?;
-    let hir = check::check(&ast)?;
+    let hir = check::check_ast(&ast)?;
     let mut interpreter = interp::Interpreter::new();
     interpreter.interpret(&hir)
 }

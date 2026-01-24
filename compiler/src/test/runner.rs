@@ -696,7 +696,7 @@ fn execute_test_function(test: &TestCase, _timeout: Duration) -> Result<(), Stri
 
     let ast = crate::parser::parse(&tokens, &source).map_err(|e| format!("Parse error: {}", e))?;
 
-    let hir = crate::check::check(&ast).map_err(|e| format!("Type check error: {}", e))?;
+    let hir = crate::check::check_ast(&ast).map_err(|e| format!("Type check error: {}", e))?;
 
     // Execute the test function using the interpreter
     execute_test_hir(&hir, &test.name)

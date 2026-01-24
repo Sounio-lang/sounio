@@ -88,7 +88,7 @@ pub enum ScopeKind {
 }
 
 /// A single scope
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct Scope {
     pub kind: ScopeKind,
     /// Names defined in this scope (values: variables, functions, etc.)
@@ -234,7 +234,7 @@ impl ModuleScope {
 }
 
 /// Symbol table with scoped lookups
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct SymbolTable {
     /// All symbols by DefId
     symbols: HashMap<DefId, Symbol>,
