@@ -1,233 +1,239 @@
-//! Mutual exclusion with Mutex<T>
+//! Mutex primitives using pthread FFI
 //!
-//! Mutex<T> provides mutual exclusion, ensuring only one thread
-//! can access the data at a time.
+//! Provides mutual exclusion synchronization using POSIX threads (pthread) library.
+//! This is a low-level implementation using freestanding functions and FFI.
+//!
+//! Functions:
+//! - mutex_new() -> Mutex
+//! - mutex_lock(m: &!Mutex)
+//! - mutex_try_lock(m: &!Mutex) -> bool
+//! - mutex_unlock(m: &!Mutex)
+//! - mutex_drop(m: &!Mutex)
+//!
+//! Example:
+//!   var m = mutex_new()
+//!   mutex_lock(&!m)
+//!   // ... critical section ...
+//!   mutex_unlock(&!m)
+//!   mutex_drop(&!m)
 
-use std::sync::atomic::{AtomicBool, Ordering}
-use std::ops::{Deref, DerefMut}
-use std::fmt::{Debug, Formatter, FmtError}
-use std::default::Default
-
-/// A mutual exclusion primitive useful for protecting shared data.
-///
-/// This mutex will block threads waiting for the lock to become available.
-/// The mutex can be statically initialized or created by the new constructor.
-///
-/// # Examples
-///
-/// ```d
-/// let mutex = Mutex::new(0)
-///
-/// {
-///     let mut guard = mutex.lock()
-///     *guard = 10
-/// }
-///
-/// assert_eq(*mutex.lock(), 10)
-/// ```
-pub struct Mutex<T> {
-    locked: AtomicBool,
-    value: T,
+// FFI declarations for pthread mutex functions
+extern "C" {
+    fn pthread_mutex_init(mutex: *mut u8, attr: *mut u8) -> i32;
+    fn pthread_mutex_lock(mutex: *mut u8) -> i32;
+    fn pthread_mutex_trylock(mutex: *mut u8) -> i32;
+    fn pthread_mutex_unlock(mutex: *mut u8) -> i32;
+    fn pthread_mutex_destroy(mutex: *mut u8) -> i32;
 }
 
-unsafe impl<T> Send for Mutex<T> where T: Send {}
-unsafe impl<T> Sync for Mutex<T> where T: Send {}
+// Size for pthread_mutex_t on Linux/macOS (typically 40-48 bytes)
+// We use 48 bytes to be safe across platforms
+const MUTEX_SIZE: usize = 48
 
-impl<T> Mutex<T> {
-    /// Creates a new mutex in an unlocked state.
-    ///
-    /// # Examples
-    ///
-    /// ```d
-    /// let mutex = Mutex::new(42)
-    /// ```
-    pub fn new(value: T) -> Mutex<T> {
-        Mutex {
-            locked: AtomicBool::new(false),
-            value,
-        }
+// A mutex wrapping pthread_mutex_t.
+// The data array holds the opaque pthread mutex structure.
+pub struct Mutex {
+    data: [u8; MUTEX_SIZE],
+}
+
+// Creates a new mutex in an unlocked state.
+// Initializes the underlying pthread_mutex_t structure.
+pub fn mutex_new() -> Mutex with Alloc, Panic {
+    var mutex = Mutex {
+        data: [0; MUTEX_SIZE],
     }
 
-    /// Acquires the mutex, blocking the current thread until it is able to do so.
-    ///
-    /// This function will block the local thread until it is available to acquire
-    /// the mutex. Upon returning, the thread is the only thread with the lock held.
-    /// A RAII guard is returned to allow scoped unlock of the lock.
-    ///
-    /// # Examples
-    ///
-    /// ```d
-    /// let mutex = Mutex::new(42)
-    /// let guard = mutex.lock()
-    /// println(*guard)
-    /// ```
-    pub fn lock(self: &Mutex<T>) -> MutexGuard<T> {
-        // Spin until we acquire the lock
-        while self.locked.compare_exchange_weak(
-            false, true,
-            Ordering::Acquire,
-            Ordering::Relaxed
-        ).is_err() {
-            // Spin hint - tells the CPU we're in a spin loop
-            std::hint::spin_loop()
-        }
+    // Get pointer to the data array
+    let mutex_ptr = &!mutex.data[0] as *mut u8
+    let null_ptr = null_mut()
 
-        MutexGuard { mutex: self }
+    // Initialize pthread mutex with default attributes (null)
+    let result = pthread_mutex_init(mutex_ptr, null_ptr)
+
+    if result != 0 {
+        panic("Failed to initialize mutex")
     }
 
-    /// Attempts to acquire the mutex without blocking.
-    ///
-    /// If the lock could not be acquired at this time, then None is returned.
-    /// Otherwise, a RAII guard is returned which will release the lock when dropped.
-    ///
-    /// # Examples
-    ///
-    /// ```d
-    /// let mutex = Mutex::new(42)
-    /// match mutex.try_lock() {
-    ///     Option::Some(guard) => println(*guard),
-    ///     Option::None => println("Couldn't get lock"),
-    /// }
-    /// ```
-    pub fn try_lock(self: &Mutex<T>) -> Option<MutexGuard<T>> {
-        if self.locked.compare_exchange(
-            false, true,
-            Ordering::Acquire,
-            Ordering::Relaxed
-        ).is_ok() {
-            Option::Some(MutexGuard { mutex: self })
-        } else {
-            Option::None
-        }
-    }
+    return mutex
+}
 
-    /// Returns whether the mutex is currently locked.
-    ///
-    /// This method does not provide any synchronization guarantees and
-    /// should only be used for heuristics or debugging.
-    pub fn is_locked(self: &Mutex<T>) -> bool {
-        self.locked.load(Ordering::Relaxed)
-    }
+// Acquires the mutex, blocking until it becomes available.
+// If the mutex is already locked by another thread, this function
+// will block until the mutex is unlocked.
+pub fn mutex_lock(m: &!Mutex) with Panic {
+    let mutex_ptr = &!m.data[0] as *mut u8
+    let result = pthread_mutex_lock(mutex_ptr)
 
-    /// Returns a mutable reference to the underlying data.
-    ///
-    /// Since this requires &! access to the Mutex, no locking is needed.
-    pub fn get_mut(self: &!Mutex<T>) -> &!T {
-        &!self.value
-    }
-
-    /// Consumes the mutex, returning the underlying data.
-    pub fn into_inner(self: Mutex<T>) -> T {
-        self.value
+    if result != 0 {
+        panic("Failed to lock mutex")
     }
 }
 
-impl<T> Default for Mutex<T>
-where T: Default
-{
-    fn default() -> Mutex<T> {
-        Mutex::new(T::default())
+// Attempts to acquire the mutex without blocking.
+// Returns true if the lock was successfully acquired, false otherwise.
+// This is a non-blocking operation - if the mutex is already locked,
+// it returns immediately with false.
+pub fn mutex_try_lock(m: &!Mutex) -> bool with Panic {
+    let mutex_ptr = &!m.data[0] as *mut u8
+    let result = pthread_mutex_trylock(mutex_ptr)
+
+    // pthread_trylock returns 0 on success, EBUSY (16) if already locked
+    return result == 0
+}
+
+// Releases the mutex.
+// The mutex must have been previously locked by the calling thread.
+// Unlocking a mutex that is not locked by the calling thread results
+// in undefined behavior.
+pub fn mutex_unlock(m: &!Mutex) with Panic {
+    let mutex_ptr = &!m.data[0] as *mut u8
+    let result = pthread_mutex_unlock(mutex_ptr)
+
+    if result != 0 {
+        panic("Failed to unlock mutex")
     }
 }
 
-impl<T> Debug for Mutex<T>
-where T: Debug
-{
-    fn fmt(self: &Mutex<T>, f: &!Formatter) -> Result<unit, FmtError> {
-        match self.try_lock() {
-            Option::Some(guard) => f.debug_struct("Mutex")
-                .field("data", &*guard)
-                .finish(),
-            Option::None => f.debug_struct("Mutex")
-                .field("data", &"<locked>")
-                .finish(),
-        }
+// Destroys the mutex and frees associated resources.
+// The mutex must not be locked when calling this function.
+// After calling mutex_drop, the mutex should not be used again.
+pub fn mutex_drop(m: &!Mutex) with Panic {
+    let mutex_ptr = &!m.data[0] as *mut u8
+    let result = pthread_mutex_destroy(mutex_ptr)
+
+    if result != 0 {
+        panic("Failed to destroy mutex")
     }
 }
 
-impl<T> From<T> for Mutex<T> {
-    fn from(value: T) -> Mutex<T> {
-        Mutex::new(value)
-    }
+//
+// Test functions
+//
+
+// Test basic mutex creation and destruction
+fn test_mutex_new_drop() with Alloc, Panic {
+    var m = mutex_new()
+    mutex_drop(&!m)
 }
 
-/// RAII structure used to release the exclusive lock on a mutex when dropped.
-///
-/// This structure implements Deref and DerefMut, so you can access the
-/// underlying data through it.
-pub struct MutexGuard<T> {
-    mutex: &Mutex<T>,
+// Test mutex lock and unlock
+fn test_mutex_lock_unlock() with Alloc, Panic {
+    var m = mutex_new()
+
+    mutex_lock(&!m)
+    mutex_unlock(&!m)
+
+    mutex_drop(&!m)
 }
 
-impl<T> Deref for MutexGuard<T> {
-    type Target = T
-
-    fn deref(self: &MutexGuard<T>) -> &T {
-        unsafe { &*(&self.mutex.value as *const T) }
-    }
-}
-
-impl<T> DerefMut for MutexGuard<T> {
-    fn deref_mut(self: &!MutexGuard<T>) -> &!T {
-        unsafe { &!*(&self.mutex.value as *const T as *mut T) }
-    }
-}
-
-impl<T> Drop for MutexGuard<T> {
-    fn drop(self: &!MutexGuard<T>) {
-        self.mutex.locked.store(false, Ordering::Release)
-    }
-}
-
-impl<T> Debug for MutexGuard<T>
-where T: Debug
-{
-    fn fmt(self: &MutexGuard<T>, f: &!Formatter) -> Result<unit, FmtError> {
-        (**self).fmt(f)
-    }
-}
-
-// Mark MutexGuard as !Send to prevent sending guards between threads
-// (the guard must be dropped on the same thread that acquired it)
-impl<T> !Send for MutexGuard<T> {}
-
-// Unit tests
-#[test]
-fn test_mutex_basic() {
-    let mutex = Mutex::new(42)
-    {
-        let guard = mutex.lock()
-        assert_eq(*guard, 42)
-    }
-}
-
-#[test]
-fn test_mutex_mutation() {
-    let mutex = Mutex::new(0)
-    {
-        let mut guard = mutex.lock()
-        *guard = 42
-    }
-    {
-        let guard = mutex.lock()
-        assert_eq(*guard, 42)
-    }
-}
-
-#[test]
-fn test_mutex_try_lock() {
-    let mutex = Mutex::new(42)
+// Test mutex try_lock
+fn test_mutex_try_lock() with Alloc, Panic {
+    var m = mutex_new()
 
     // First try_lock should succeed
-    let guard = mutex.try_lock()
-    assert(guard.is_some())
+    let acquired = mutex_try_lock(&!m)
+    if !acquired {
+        panic("First try_lock should succeed")
+    }
 
-    // Second try_lock should fail (already locked)
-    let guard2 = mutex.try_lock()
-    assert(guard2.is_none())
+    // Second try_lock should fail (mutex already locked)
+    let acquired2 = mutex_try_lock(&!m)
+    if acquired2 {
+        panic("Second try_lock should fail")
+    }
 
-    // After dropping, should be able to lock again
-    drop(guard)
-    let guard3 = mutex.try_lock()
-    assert(guard3.is_some())
+    // Unlock and try again
+    mutex_unlock(&!m)
+    let acquired3 = mutex_try_lock(&!m)
+    if !acquired3 {
+        panic("Third try_lock should succeed after unlock")
+    }
+
+    mutex_unlock(&!m)
+    mutex_drop(&!m)
+}
+
+// Test multiple lock/unlock cycles
+fn test_mutex_multiple_cycles() with Alloc, Panic, Div {
+    var m = mutex_new()
+
+    var i = 0
+    while i < 10 {
+        mutex_lock(&!m)
+        mutex_unlock(&!m)
+        i = i + 1
+    }
+
+    mutex_drop(&!m)
+}
+
+// Test mutex with critical section
+fn test_mutex_critical_section() with Alloc, Panic {
+    var m = mutex_new()
+    var counter = 0
+
+    mutex_lock(&!m)
+    counter = counter + 1
+    let value = counter
+    mutex_unlock(&!m)
+
+    if value != 1 {
+        panic("Counter should be 1")
+    }
+
+    mutex_drop(&!m)
+}
+
+// Demonstrates safe mutex usage pattern
+fn example_mutex_usage() with Alloc, Panic, IO, Div {
+    var shared_counter = 0
+    var m = mutex_new()
+
+    // Simulate multiple operations on shared data
+    var i = 0
+    while i < 5 {
+        mutex_lock(&!m)
+
+        // Critical section - only one thread can execute this at a time
+        shared_counter = shared_counter + 1
+        let current = shared_counter
+
+        mutex_unlock(&!m)
+
+        i = i + 1
+    }
+
+    // Final value should be 5
+    mutex_lock(&!m)
+    let final_value = shared_counter
+    mutex_unlock(&!m)
+
+    mutex_drop(&!m)
+}
+
+// Example with try_lock for non-blocking mutex acquisition
+fn example_try_lock_pattern() with Alloc, Panic, IO, Div {
+    var m = mutex_new()
+    var attempts = 0
+    var max_attempts = 3
+
+    while attempts < max_attempts {
+        let acquired = mutex_try_lock(&!m)
+
+        if acquired {
+            // Got the lock - do work
+            // ... critical section ...
+            mutex_unlock(&!m)
+            break
+        }
+
+        // Didn't get lock - could do other work here
+        attempts = attempts + 1
+    }
+
+    if attempts == max_attempts {
+        panic("Failed to acquire lock after max attempts")
+    }
+
+    mutex_drop(&!m)
 }
