@@ -1,0 +1,595 @@
+//! stdlib/log/mod.sio - Structured Logging
+//!
+//! Provides a structured logging framework with multiple log levels,
+//! formatters, and output destinations.
+//!
+//! # Log Levels
+//!
+//! - `Trace` - Very fine-grained debugging information
+//! - `Debug` - Debugging information
+//! - `Info` - Informational messages
+//! - `Warn` - Warning messages (potential issues)
+//! - `Error` - Error messages (failures)
+//!
+//! # Examples
+//!
+//! ```sio
+//! // Simple logging
+//! log_info("Application started")
+//! log_warn("Low memory: {} bytes remaining", free_mem)
+//! log_error("Failed to connect: {}", err_msg)
+//!
+//! // Structured logging with fields
+//! log_with_fields(LogLevel::Info, "Request processed", &[
+//!     ("method", "GET"),
+//!     ("path", "/api/users"),
+//!     ("duration_ms", "42"),
+//! ])
+//!
+//! // Configure logger
+//! log_set_level(LogLevel::Debug)
+//! log_set_formatter(LogFormat::Json)
+//! ```
+
+// ============================================================================
+// System FFI
+// ============================================================================
+
+extern "C" {
+    fn write(fd: i32, buf: *const u8, count: usize) -> i64
+    fn time(tloc: *mut i64) -> i64
+}
+
+const STDOUT_FILENO: i32 = 1
+const STDERR_FILENO: i32 = 2
+
+// ============================================================================
+// Types
+// ============================================================================
+
+/// Log severity levels.
+pub enum LogLevel {
+    Trace,
+    Debug,
+    Info,
+    Warn,
+    Error,
+}
+
+/// Log output format.
+pub enum LogFormat {
+    /// Human-readable text: [LEVEL] timestamp - message
+    Text,
+    /// JSON format: {"level": "INFO", "timestamp": "...", "message": "..."}
+    Json,
+    /// Compact format: LEVEL message
+    Compact,
+}
+
+/// Log output destination.
+pub enum LogOutput {
+    /// Standard output
+    Stdout,
+    /// Standard error
+    Stderr,
+    /// Custom writer function
+    Custom { write_fn: fn(&str) },
+}
+
+/// A log record.
+pub struct LogRecord {
+    /// Severity level
+    level: LogLevel,
+    /// Log message
+    message: String,
+    /// Unix timestamp
+    timestamp: i64,
+    /// Optional module/source
+    module: Option<String>,
+    /// Optional file name
+    file: Option<String>,
+    /// Optional line number
+    line: Option<u32>,
+    /// Additional structured fields
+    fields: Vec<(String, String)>,
+}
+
+/// Logger configuration.
+struct LoggerConfig {
+    /// Minimum level to log
+    min_level: LogLevel,
+    /// Output format
+    format: LogFormat,
+    /// Output destination
+    output: LogOutput,
+    /// Include timestamp
+    show_timestamp: bool,
+    /// Include source location
+    show_location: bool,
+}
+
+// Global logger state (simplified - in practice would use thread-local storage)
+static var LOGGER_CONFIG: LoggerConfig = LoggerConfig {
+    min_level: LogLevel::Info,
+    format: LogFormat::Text,
+    output: LogOutput::Stderr,
+    show_timestamp: true,
+    show_location: false,
+}
+
+// ============================================================================
+// Level Operations
+// ============================================================================
+
+/// Get numeric value for comparison.
+fn level_value(level: LogLevel) -> u8 {
+    match level {
+        LogLevel::Trace => 0,
+        LogLevel::Debug => 1,
+        LogLevel::Info => 2,
+        LogLevel::Warn => 3,
+        LogLevel::Error => 4,
+    }
+}
+
+/// Get string representation.
+fn level_str(level: LogLevel) -> &str {
+    match level {
+        LogLevel::Trace => "TRACE",
+        LogLevel::Debug => "DEBUG",
+        LogLevel::Info => "INFO",
+        LogLevel::Warn => "WARN",
+        LogLevel::Error => "ERROR",
+    }
+}
+
+/// Get colored string representation (ANSI codes).
+fn level_str_colored(level: LogLevel) -> String with Alloc {
+    match level {
+        LogLevel::Trace => string_from("\x1b[90mTRACE\x1b[0m"),   // Gray
+        LogLevel::Debug => string_from("\x1b[36mDEBUG\x1b[0m"),   // Cyan
+        LogLevel::Info => string_from("\x1b[32mINFO\x1b[0m"),     // Green
+        LogLevel::Warn => string_from("\x1b[33mWARN\x1b[0m"),     // Yellow
+        LogLevel::Error => string_from("\x1b[31mERROR\x1b[0m"),   // Red
+    }
+}
+
+/// Check if a level is enabled.
+pub fn log_is_enabled(level: LogLevel) -> bool {
+    level_value(level) >= level_value(LOGGER_CONFIG.min_level)
+}
+
+// ============================================================================
+// Configuration
+// ============================================================================
+
+/// Set the minimum log level.
+pub fn log_set_level(level: LogLevel) {
+    LOGGER_CONFIG.min_level = level
+}
+
+/// Set the output format.
+pub fn log_set_format(format: LogFormat) {
+    LOGGER_CONFIG.format = format
+}
+
+/// Set the output destination.
+pub fn log_set_output(output: LogOutput) {
+    LOGGER_CONFIG.output = output
+}
+
+/// Enable/disable timestamp in logs.
+pub fn log_show_timestamp(show: bool) {
+    LOGGER_CONFIG.show_timestamp = show
+}
+
+/// Enable/disable source location in logs.
+pub fn log_show_location(show: bool) {
+    LOGGER_CONFIG.show_location = show
+}
+
+// ============================================================================
+// Core Logging Functions
+// ============================================================================
+
+/// Log a message at the given level.
+pub fn log(level: LogLevel, message: &str) with IO, Alloc {
+    if !log_is_enabled(level) {
+        return
+    }
+
+    let record = LogRecord {
+        level: level,
+        message: string_from(message),
+        timestamp: get_timestamp(),
+        module: None,
+        file: None,
+        line: None,
+        fields: vec_new(),
+    }
+
+    write_record(&record)
+}
+
+/// Log a message with structured fields.
+pub fn log_with_fields(
+    level: LogLevel,
+    message: &str,
+    fields: &[(&str, &str)]
+) with IO, Alloc {
+    if !log_is_enabled(level) {
+        return
+    }
+
+    var field_vec = vec_new::<(String, String)>()
+    for (key, val) in fields {
+        vec_push(&!field_vec, (string_from(*key), string_from(*val)))
+    }
+
+    let record = LogRecord {
+        level: level,
+        message: string_from(message),
+        timestamp: get_timestamp(),
+        module: None,
+        file: None,
+        line: None,
+        fields: field_vec,
+    }
+
+    write_record(&record)
+}
+
+/// Log a message with module name.
+pub fn log_from_module(level: LogLevel, module: &str, message: &str) with IO, Alloc {
+    if !log_is_enabled(level) {
+        return
+    }
+
+    let record = LogRecord {
+        level: level,
+        message: string_from(message),
+        timestamp: get_timestamp(),
+        module: Some(string_from(module)),
+        file: None,
+        line: None,
+        fields: vec_new(),
+    }
+
+    write_record(&record)
+}
+
+// ============================================================================
+// Convenience Functions
+// ============================================================================
+
+/// Log at TRACE level.
+pub fn log_trace(message: &str) with IO, Alloc {
+    log(LogLevel::Trace, message)
+}
+
+/// Log at DEBUG level.
+pub fn log_debug(message: &str) with IO, Alloc {
+    log(LogLevel::Debug, message)
+}
+
+/// Log at INFO level.
+pub fn log_info(message: &str) with IO, Alloc {
+    log(LogLevel::Info, message)
+}
+
+/// Log at WARN level.
+pub fn log_warn(message: &str) with IO, Alloc {
+    log(LogLevel::Warn, message)
+}
+
+/// Log at ERROR level.
+pub fn log_error(message: &str) with IO, Alloc {
+    log(LogLevel::Error, message)
+}
+
+// ============================================================================
+// Formatters
+// ============================================================================
+
+fn format_record_text(record: &LogRecord) -> String with Alloc {
+    var result = string_new()
+
+    // Level
+    string_push(&!result, '[')
+    string_push_str(&!result, level_str(record.level))
+    string_push(&!result, ']')
+    string_push(&!result, ' ')
+
+    // Timestamp
+    if LOGGER_CONFIG.show_timestamp {
+        string_push_str(&!result, &format_timestamp(record.timestamp))
+        string_push(&!result, ' ')
+    }
+
+    // Module
+    if let Some(module) = &record.module {
+        string_push(&!result, '[')
+        string_push_str(&!result, module)
+        string_push(&!result, ']')
+        string_push(&!result, ' ')
+    }
+
+    // Message
+    string_push_str(&!result, &record.message)
+
+    // Fields
+    if vec_len(&record.fields) > 0 {
+        string_push_str(&!result, " {")
+        var first = true
+        for (key, val) in &record.fields {
+            if !first {
+                string_push_str(&!result, ", ")
+            }
+            string_push_str(&!result, key)
+            string_push(&!result, '=')
+            string_push(&!result, '"')
+            string_push_str(&!result, val)
+            string_push(&!result, '"')
+            first = false
+        }
+        string_push(&!result, '}')
+    }
+
+    string_push(&!result, '\n')
+    result
+}
+
+fn format_record_json(record: &LogRecord) -> String with Alloc {
+    var result = string_from("{")
+
+    // Level
+    string_push_str(&!result, "\"level\":\"")
+    string_push_str(&!result, level_str(record.level))
+    string_push(&!result, '"')
+
+    // Timestamp
+    string_push_str(&!result, ",\"timestamp\":")
+    string_push_str(&!result, &i64_to_string(record.timestamp))
+
+    // Module
+    if let Some(module) = &record.module {
+        string_push_str(&!result, ",\"module\":\"")
+        string_push_str(&!result, &json_escape(module))
+        string_push(&!result, '"')
+    }
+
+    // Message
+    string_push_str(&!result, ",\"message\":\"")
+    string_push_str(&!result, &json_escape(&record.message))
+    string_push(&!result, '"')
+
+    // Fields
+    if vec_len(&record.fields) > 0 {
+        for (key, val) in &record.fields {
+            string_push(&!result, ',')
+            string_push(&!result, '"')
+            string_push_str(&!result, &json_escape(key))
+            string_push_str(&!result, "\":\"")
+            string_push_str(&!result, &json_escape(val))
+            string_push(&!result, '"')
+        }
+    }
+
+    string_push_str(&!result, "}\n")
+    result
+}
+
+fn format_record_compact(record: &LogRecord) -> String with Alloc {
+    var result = string_new()
+
+    // Level (short)
+    match record.level {
+        LogLevel::Trace => string_push(&!result, 'T'),
+        LogLevel::Debug => string_push(&!result, 'D'),
+        LogLevel::Info => string_push(&!result, 'I'),
+        LogLevel::Warn => string_push(&!result, 'W'),
+        LogLevel::Error => string_push(&!result, 'E'),
+    }
+    string_push(&!result, ' ')
+
+    // Message
+    string_push_str(&!result, &record.message)
+
+    // Fields (if any)
+    if vec_len(&record.fields) > 0 {
+        for (key, val) in &record.fields {
+            string_push(&!result, ' ')
+            string_push_str(&!result, key)
+            string_push(&!result, '=')
+            string_push_str(&!result, val)
+        }
+    }
+
+    string_push(&!result, '\n')
+    result
+}
+
+fn format_timestamp(ts: i64) -> String with Alloc {
+    // Simple ISO 8601-ish format
+    // In practice, would use the time module
+    var result = string_new()
+
+    // Just show Unix timestamp for now
+    string_push_str(&!result, &i64_to_string(ts))
+
+    result
+}
+
+fn json_escape(s: &str) -> String with Alloc {
+    var result = string_new()
+
+    for c in s.chars() {
+        match c {
+            '"' => string_push_str(&!result, "\\\""),
+            '\\' => string_push_str(&!result, "\\\\"),
+            '\n' => string_push_str(&!result, "\\n"),
+            '\r' => string_push_str(&!result, "\\r"),
+            '\t' => string_push_str(&!result, "\\t"),
+            _ => string_push(&!result, c),
+        }
+    }
+
+    result
+}
+
+// ============================================================================
+// Output
+// ============================================================================
+
+fn write_record(record: &LogRecord) with IO, Alloc {
+    let formatted = match LOGGER_CONFIG.format {
+        LogFormat::Text => format_record_text(record),
+        LogFormat::Json => format_record_json(record),
+        LogFormat::Compact => format_record_compact(record),
+    }
+
+    match &LOGGER_CONFIG.output {
+        LogOutput::Stdout => write_to_fd(STDOUT_FILENO, &formatted),
+        LogOutput::Stderr => write_to_fd(STDERR_FILENO, &formatted),
+        LogOutput::Custom { write_fn } => write_fn(&formatted),
+    }
+}
+
+fn write_to_fd(fd: i32, s: &str) with IO {
+    let bytes = s.as_bytes()
+    write(fd, bytes.as_ptr(), bytes.len())
+}
+
+fn get_timestamp() -> i64 with IO {
+    var ts: i64 = 0
+    time(&!ts)
+    ts
+}
+
+// Helper
+fn i64_to_string(n: i64) -> String with Alloc {
+    if n == 0 {
+        return string_from("0")
+    }
+
+    var s = string_new()
+    var num = if n < 0 { -n } else { n }
+
+    while num > 0 {
+        let digit = ((num % 10) as u8 + ('0' as u8)) as char
+        string_push(&!s, digit)
+        num = num / 10
+    }
+
+    if n < 0 {
+        string_push(&!s, '-')
+    }
+
+    string_reverse(&!s)
+    s
+}
+
+// ============================================================================
+// Scoped Logger
+// ============================================================================
+
+/// A scoped logger that adds context to all log messages.
+pub struct ScopedLogger {
+    module: String,
+    fields: Vec<(String, String)>,
+}
+
+/// Create a new scoped logger.
+pub fn scoped_logger(module: &str) -> ScopedLogger with Alloc {
+    ScopedLogger {
+        module: string_from(module),
+        fields: vec_new(),
+    }
+}
+
+/// Add a field to the scoped logger.
+pub fn scoped_logger_with(
+    logger: &ScopedLogger,
+    key: &str,
+    value: &str
+) -> ScopedLogger with Alloc {
+    var fields = logger.fields.clone()
+    vec_push(&!fields, (string_from(key), string_from(value)))
+
+    ScopedLogger {
+        module: logger.module.clone(),
+        fields: fields,
+    }
+}
+
+/// Log with the scoped logger.
+pub fn scoped_log(logger: &ScopedLogger, level: LogLevel, message: &str) with IO, Alloc {
+    if !log_is_enabled(level) {
+        return
+    }
+
+    let record = LogRecord {
+        level: level,
+        message: string_from(message),
+        timestamp: get_timestamp(),
+        module: Some(logger.module.clone()),
+        file: None,
+        line: None,
+        fields: logger.fields.clone(),
+    }
+
+    write_record(&record)
+}
+
+/// Convenience methods for scoped logger
+pub fn scoped_trace(logger: &ScopedLogger, message: &str) with IO, Alloc {
+    scoped_log(logger, LogLevel::Trace, message)
+}
+
+pub fn scoped_debug(logger: &ScopedLogger, message: &str) with IO, Alloc {
+    scoped_log(logger, LogLevel::Debug, message)
+}
+
+pub fn scoped_info(logger: &ScopedLogger, message: &str) with IO, Alloc {
+    scoped_log(logger, LogLevel::Info, message)
+}
+
+pub fn scoped_warn(logger: &ScopedLogger, message: &str) with IO, Alloc {
+    scoped_log(logger, LogLevel::Warn, message)
+}
+
+pub fn scoped_error(logger: &ScopedLogger, message: &str) with IO, Alloc {
+    scoped_log(logger, LogLevel::Error, message)
+}
+
+// ============================================================================
+// Log Timers
+// ============================================================================
+
+/// A timer for measuring and logging duration.
+pub struct LogTimer {
+    label: String,
+    level: LogLevel,
+    start_time: i64,
+}
+
+/// Start a log timer.
+pub fn log_timer_start(label: &str, level: LogLevel) -> LogTimer with IO, Alloc {
+    LogTimer {
+        label: string_from(label),
+        level: level,
+        start_time: get_timestamp(),
+    }
+}
+
+/// Stop the timer and log the elapsed time.
+pub fn log_timer_stop(timer: &LogTimer) with IO, Alloc {
+    let elapsed = get_timestamp() - timer.start_time
+
+    var msg = string_from(&timer.label)
+    string_push_str(&!msg, " completed in ")
+    string_push_str(&!msg, &i64_to_string(elapsed))
+    string_push_str(&!msg, "s")
+
+    log(timer.level, &msg)
+}

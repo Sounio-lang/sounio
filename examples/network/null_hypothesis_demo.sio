@@ -1,0 +1,413 @@
+//! Null Hypothesis Testing for Network Analysis
+//!
+//! Demonstrates the complete workflow for statistical network analysis:
+//! 1. Load network data (typically from CSV edge list)
+//! 2. Compute observed network metric (e.g., clustering coefficient)
+//! 3. Generate null models with preserved degree sequence
+//! 4. Compute null distribution of the metric
+//! 5. Calculate z-score and p-value using effect size statistics
+//!
+//! This workflow addresses GitHub Issue #17 (Phase 2 research):
+//! Testing if network properties are statistically significant by
+//! comparing against configuration model null hypotheses.
+
+fn main() with IO, Alloc {
+    log_info("=== Network Null Hypothesis Testing ===\n")
+
+    // Create a synthetic network as adjacency list
+    // (In practice, this would be loaded from CSV via csv_loader module)
+    var adj = vec_new()
+
+    // Node 0: connected to 1, 2, 3
+    var neighbors_0 = vec_new()
+    vec_push(&!neighbors_0, 1)
+    vec_push(&!neighbors_0, 2)
+    vec_push(&!neighbors_0, 3)
+    vec_push(&!adj, neighbors_0)
+
+    // Node 1: connected to 0, 2, 4
+    var neighbors_1 = vec_new()
+    vec_push(&!neighbors_1, 0)
+    vec_push(&!neighbors_1, 2)
+    vec_push(&!neighbors_1, 4)
+    vec_push(&!adj, neighbors_1)
+
+    // Node 2: connected to 0, 1, 3, 4
+    var neighbors_2 = vec_new()
+    vec_push(&!neighbors_2, 0)
+    vec_push(&!neighbors_2, 1)
+    vec_push(&!neighbors_2, 3)
+    vec_push(&!neighbors_2, 4)
+    vec_push(&!adj, neighbors_2)
+
+    // Node 3: connected to 0, 2, 4
+    var neighbors_3 = vec_new()
+    vec_push(&!neighbors_3, 0)
+    vec_push(&!neighbors_3, 2)
+    vec_push(&!neighbors_3, 4)
+    vec_push(&!adj, neighbors_3)
+
+    // Node 4: connected to 1, 2, 3
+    var neighbors_4 = vec_new()
+    vec_push(&!neighbors_4, 1)
+    vec_push(&!neighbors_4, 2)
+    vec_push(&!neighbors_4, 3)
+    vec_push(&!adj, neighbors_4)
+
+    log_info("Network Summary:\n")
+    log_info(&format_usize(adj.len(), "  Nodes: "))
+    log_info(&string_from("\n"))
+
+    // Count total edges
+    var edge_count = 0
+    var i = 0
+    while i < adj.len() {
+        edge_count = edge_count + adj[i].len()
+        i = i + 1
+    }
+    // Divide by 2 for undirected graph
+    edge_count = edge_count / 2
+    log_info(&format_usize(edge_count, "  Edges: "))
+    log_info(&string_from("\n\n"))
+
+    // Step 1: Compute observed clustering coefficient
+    log_info("Step 1: Observed Network Metric\n")
+    let observed_clustering = clustering_coefficient(&adj)
+    log_info(&string_from("  Clustering Coefficient: "))
+    log_info(&format_float(observed_clustering))
+    log_info(&string_from("\n\n"))
+
+    // Step 2: Generate null models (configuration model)
+    log_info("Step 2: Generate Null Models (Configuration Model)\n")
+    let num_nulls = 10
+    log_info(&format_usize(num_nulls, "  Generating "))
+    log_info(&string_from(" null models...\n"))
+
+    var null_clusterings = vec_new()
+    var j = 0
+    while j < num_nulls {
+        // Generate random graph with same degree sequence
+        let null_adj = configuration_model_from_graph(&adj)
+        let null_clustering = clustering_coefficient(&null_adj)
+        vec_push(&!null_clusterings, null_clustering)
+        j = j + 1
+    }
+    log_info(&string_from("  Done.\n\n"))
+
+    // Step 3: Compute null distribution statistics
+    log_info("Step 3: Null Distribution Statistics\n")
+
+    // Calculate mean
+    var null_sum = 0.0
+    var k = 0
+    while k < null_clusterings.len() {
+        null_sum = null_sum + null_clusterings[k]
+        k = k + 1
+    }
+    let null_mean = null_sum / (null_clusterings.len() as f64)
+    log_info(&string_from("  Null Mean: "))
+    log_info(&format_float(null_mean))
+    log_info(&string_from("\n"))
+
+    // Calculate std dev
+    var null_var_sum = 0.0
+    k = 0
+    while k < null_clusterings.len() {
+        let diff = null_clusterings[k] - null_mean
+        null_var_sum = null_var_sum + (diff * diff)
+        k = k + 1
+    }
+    let null_std = (null_var_sum / (null_clusterings.len() as f64)).sqrt()
+    log_info(&string_from("  Null Std Dev: "))
+    log_info(&format_float(null_std))
+    log_info(&string_from("\n\n"))
+
+    // Step 4: Statistical significance testing
+    log_info("Step 4: Significance Test\n")
+
+    // Calculate z-score
+    let z_score = if null_std > 0.0 {
+        (observed_clustering - null_mean) / null_std
+    } else {
+        0.0
+    }
+
+    log_info(&string_from("  Z-score: "))
+    log_info(&format_float(z_score))
+    log_info(&string_from("\n"))
+
+    // Approximate two-tailed p-value
+    let p_value = 2.0 * normal_tail_probability(z_score.abs())
+    log_info(&string_from("  P-value (two-tailed): "))
+    log_info(&format_float(p_value))
+    log_info(&string_from("\n\n"))
+
+    // Step 5: Effect size (Cliff's delta between observed and null)
+    log_info("Step 5: Effect Size\n")
+    let cliffs_delta_val = cliffs_delta(&[observed_clustering], &null_clusterings)
+    log_info(&string_from("  Cliff's Delta: "))
+    log_info(&format_float(cliffs_delta_val))
+    log_info(&string_from("\n\n"))
+
+    // Interpretation
+    log_info("=== Results Interpretation ===\n")
+    if p_value < 0.05 {
+        log_info("Network clustering is SIGNIFICANTLY different from null model (p < 0.05)\n")
+    } else {
+        log_info("Network clustering is NOT significantly different from null model (p >= 0.05)\n")
+    }
+
+    let abs_cliffs = if cliffs_delta_val < 0.0 { -cliffs_delta_val } else { cliffs_delta_val }
+    if abs_cliffs < 0.147 {
+        log_info("  Effect size: NEGLIGIBLE\n")
+    } else if abs_cliffs < 0.330 {
+        log_info("  Effect size: SMALL\n")
+    } else if abs_cliffs < 0.474 {
+        log_info("  Effect size: MEDIUM\n")
+    } else {
+        log_info("  Effect size: LARGE\n")
+    }
+
+    log_info("\n=== End of Demo ===\n")
+}
+
+// ============================================================================
+// Network Metrics
+// ============================================================================
+
+/// Calculate clustering coefficient of a network
+fn clustering_coefficient(adj: &[Vec<usize>]) -> f64 with Alloc {
+    if adj.len() < 3 {
+        return 0.0
+    }
+
+    var triangles = 0
+    var triplets = 0
+
+    var i = 0
+    while i < adj.len() {
+        let ki = adj[i].len()
+
+        if ki < 2 {
+            i = i + 1
+            continue
+        }
+
+        // Count triangles
+        var j = 0
+        while j < adj[i].len() {
+            let neighbor_j = adj[i][j]
+
+            var k = j + 1
+            while k < adj[i].len() {
+                let neighbor_k = adj[i][k]
+
+                // Check if neighbor_j and neighbor_k are connected
+                var connected = false
+                var n = 0
+                while n < adj[neighbor_j].len() {
+                    if adj[neighbor_j][n] == neighbor_k {
+                        connected = true
+                        break
+                    }
+                    n = n + 1
+                }
+
+                if connected {
+                    triangles = triangles + 1
+                }
+
+                k = k + 1
+            }
+
+            j = j + 1
+        }
+
+        // Count possible triplets
+        triplets = triplets + ki * (ki - 1) / 2
+
+        i = i + 1
+    }
+
+    if triplets == 0 {
+        return 0.0
+    }
+
+    (triangles as f64) / (triplets as f64)
+}
+
+/// Generate configuration model (random graph with same degree sequence)
+fn configuration_model_from_graph(adj: &[Vec<usize>]) -> Vec<Vec<usize>> with IO, Alloc {
+    let degrees = get_degree_sequence_from_adj(adj)
+    configuration_model_from_degrees(&degrees)
+}
+
+fn get_degree_sequence_from_adj(adj: &[Vec<usize>]) -> Vec<usize> with Alloc {
+    var degrees = vec_new()
+    var i = 0
+    while i < adj.len() {
+        vec_push(&!degrees, adj[i].len())
+        i = i + 1
+    }
+    degrees
+}
+
+fn configuration_model_from_degrees(degrees: &[usize]) -> Vec<Vec<usize>> with IO, Alloc {
+    let n = degrees.len()
+
+    // Initialize adjacency list
+    var adj = vec_new()
+    var i = 0
+    while i < n {
+        vec_push(&!adj, vec_new())
+        i = i + 1
+    }
+
+    // Calculate total degree
+    var total_degree = 0
+    var j = 0
+    while j < degrees.len() {
+        total_degree = total_degree + degrees[j]
+        j = j + 1
+    }
+
+    if total_degree == 0 {
+        return adj
+    }
+
+    // Chung-Lu probabilistic model
+    i = 0
+    while i < n {
+        j = i + 1
+        while j < n {
+            let prob = (degrees[i] as f64 * degrees[j] as f64) / (total_degree as f64)
+            if prob > 0.5 {
+                vec_push(&!adj[i], j)
+                vec_push(&!adj[j], i)
+            }
+            j = j + 1
+        }
+        i = i + 1
+    }
+
+    adj
+}
+
+// ============================================================================
+// Statistics
+// ============================================================================
+
+/// Cliff's delta for non-parametric effect size
+fn cliffs_delta(data1: &[f64], data2: &[f64]) -> f64 {
+    if data1.len() == 0 || data2.len() == 0 {
+        return 0.0
+    }
+
+    var greater = 0i64
+    var less = 0i64
+
+    var i = 0
+    while i < data1.len() {
+        var j = 0
+        while j < data2.len() {
+            if data1[i] > data2[j] {
+                greater = greater + 1
+            } else if data1[i] < data2[j] {
+                less = less + 1
+            }
+            j = j + 1
+        }
+        i = i + 1
+    }
+
+    let total = (data1.len() * data2.len()) as i64
+    ((greater - less) as f64) / (total as f64)
+}
+
+/// Approximate normal tail probability
+fn normal_tail_probability(z: f64) -> f64 {
+    if z > 6.0 {
+        return 0.0
+    }
+    if z < -6.0 {
+        return 1.0
+    }
+
+    let p = 0.47047
+    let b1 = 0.3480242
+    let b2 = -0.0958798
+    let t = 1.0 / (1.0 + p * z)
+
+    let tau = t * (b1 + b2 * t * t)
+    let erf_approx = 1.0 - tau * (-z * z / 2.0).exp()
+
+    (1.0 - erf_approx) / 2.0
+}
+
+// ============================================================================
+// Utilities
+// ============================================================================
+
+fn log_info(msg: &str) with IO {
+    let bytes = msg.as_bytes()
+    write(1, bytes.as_ptr(), bytes.len())
+}
+
+fn format_float(val: f64) -> String with Alloc {
+    var s = string_new()
+    let int_part = (val as i64) as f64
+    let frac_part = (val - int_part) * 1000.0
+
+    var i = int_part as i64
+    if i < 0 {
+        string_push(&!s, '-')
+        i = -i
+    }
+    var int_str = string_new()
+    if i == 0 {
+        string_push(&!int_str, '0')
+    } else {
+        while i > 0 {
+            let digit = ((i % 10) as u8 + ('0' as u8)) as char
+            string_push(&!int_str, digit)
+            i = i / 10
+        }
+        string_reverse(&!int_str)
+    }
+    string_push_str(&!s, &int_str)
+    string_push(&!s, '.')
+
+    var frac_int = frac_part as i64
+    var j = 0
+    while j < 3 {
+        let digit = ((frac_int / (100i64.pow((2 - j) as u32)) % 10) as u8 + ('0' as u8)) as char
+        string_push(&!s, digit)
+        j = j + 1
+    }
+
+    s
+}
+
+fn format_usize(val: usize, prefix: &str) -> String with Alloc {
+    var s = string_from(prefix)
+    var n = val
+    var digits = string_new()
+
+    if n == 0 {
+        string_push(&!digits, '0')
+    } else {
+        while n > 0 {
+            let digit = ((n % 10) as u8 + ('0' as u8)) as char
+            string_push(&!digits, digit)
+            n = n / 10
+        }
+        string_reverse(&!digits)
+    }
+
+    string_push_str(&!s, &digits)
+    s
+}
+
+extern "C" {
+    fn write(fd: i32, buf: *const u8, count: usize) -> i64
+}
