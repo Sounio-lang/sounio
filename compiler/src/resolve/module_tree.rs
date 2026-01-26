@@ -217,6 +217,10 @@ pub struct ModuleTree {
     modules: HashMap<ModuleId, Module>,
     /// The root module ID
     root: ModuleId,
+    /// Mapping of ModuleId to allocated NodeId
+    module_node_ids: HashMap<ModuleId, NodeId>,
+    /// Counter for allocating new module NodeIds (start from 1000000 to avoid collisions)
+    next_module_node_id: u32,
 }
 
 impl ModuleTree {
@@ -224,6 +228,11 @@ impl ModuleTree {
     pub fn new() -> Self {
         let root = ModuleId::root();
         let mut modules = HashMap::new();
+        let mut module_node_ids = HashMap::new();
+
+        // Allocate the first module NodeId for root
+        module_node_ids.insert(root.clone(), NodeId(1000000));
+
         modules.insert(
             root.clone(),
             Module {
@@ -236,7 +245,12 @@ impl ModuleTree {
                 imports: Vec::new(),
             },
         );
-        Self { modules, root }
+        Self {
+            modules,
+            root,
+            module_node_ids,
+            next_module_node_id: 1000001,
+        }
     }
 
     /// Get the root module ID
@@ -252,6 +266,18 @@ impl ModuleTree {
     /// Get a mutable reference to a module by ID
     pub fn get_mut(&mut self, id: &ModuleId) -> Option<&mut Module> {
         self.modules.get_mut(id)
+    }
+
+    /// Get or allocate a NodeId for a module
+    pub fn get_module_node_id(&mut self, module_id: &ModuleId) -> NodeId {
+        if let Some(&node_id) = self.module_node_ids.get(module_id) {
+            node_id
+        } else {
+            let node_id = NodeId(self.next_module_node_id);
+            self.next_module_node_id += 1;
+            self.module_node_ids.insert(module_id.clone(), node_id);
+            node_id
+        }
     }
 
     /// Insert a module into the tree
@@ -412,7 +438,7 @@ impl ModuleTree {
     }
 
     /// Try to resolve a single import
-    fn try_resolve_import(&self, from: &ModuleId, import: &ImportEntry) -> ResolveResult {
+    fn try_resolve_import(&mut self, from: &ModuleId, import: &ImportEntry) -> ResolveResult {
         // Build target module path
         let target_id = ModuleId(import.source_path.clone());
 
@@ -447,7 +473,9 @@ impl ModuleTree {
 
         // Check child modules (e.g., `use foo::bar` where bar is a module)
         if let Some(child_id) = target.children.get(&import.original_name) {
-            if let Some(child_mod) = self.get(child_id) {
+            // Clone child_id before borrowing self again
+            let child_id_cloned = child_id.clone();
+            if let Some(child_mod) = self.get(&child_id_cloned) {
                 // Find the module item in parent that represents this child
                 if let Some(item) = target.items.iter().find(|i| {
                     i.name == import.original_name && matches!(i.kind, ItemKind::Module(_))
@@ -459,8 +487,11 @@ impl ModuleTree {
                     }
                 }
                 // If module exists but no item entry, it's implicitly public
-                // Return a synthetic NodeId based on the child module
-                return ResolveResult::Resolved(NodeId(child_mod.id.0.len() as u32));
+                // Return the allocated NodeId for this module
+                // Clone the id before the mutable borrow
+                let mod_id = child_mod.id.clone();
+                let node_id = self.get_module_node_id(&mod_id);
+                return ResolveResult::Resolved(node_id);
             }
         }
 
