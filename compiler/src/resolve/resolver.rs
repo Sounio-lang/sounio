@@ -959,7 +959,13 @@ impl Resolver {
     fn define_enum(&mut self, e: &EnumDef) {
         let def_id = self.symbols.fresh_def_id();
 
-        let _ = self.symbols.define_type(e.name.clone(), def_id);
+        if let Err(_) = self.symbols.define_type(e.name.clone(), def_id) {
+            self.errors.push(ResolveError::DuplicateDef {
+                name: e.name.clone(),
+                span: self.span_to_source(e.span),
+            });
+            return;
+        }
 
         self.symbols.insert(Symbol {
             def_id,
@@ -1002,7 +1008,13 @@ impl Resolver {
     fn define_type_alias(&mut self, t: &TypeAliasDef) {
         let def_id = self.symbols.fresh_def_id();
 
-        let _ = self.symbols.define_type(t.name.clone(), def_id);
+        if let Err(_) = self.symbols.define_type(t.name.clone(), def_id) {
+            self.errors.push(ResolveError::DuplicateDef {
+                name: t.name.clone(),
+                span: self.span_to_source(t.span),
+            });
+            return;
+        }
 
         self.symbols.insert(Symbol {
             def_id,
@@ -1028,7 +1040,13 @@ impl Resolver {
         let def_id = self.symbols.fresh_def_id();
 
         // Effects go in type namespace
-        let _ = self.symbols.define_type(e.name.clone(), def_id);
+        if let Err(_) = self.symbols.define_type(e.name.clone(), def_id) {
+            self.errors.push(ResolveError::DuplicateDef {
+                name: e.name.clone(),
+                span: self.span_to_source(e.span),
+            });
+            return;
+        }
 
         self.symbols.insert(Symbol {
             def_id,
@@ -1053,7 +1071,13 @@ impl Resolver {
     fn define_trait(&mut self, t: &TraitDef) {
         let def_id = self.symbols.fresh_def_id();
 
-        let _ = self.symbols.define_type(t.name.clone(), def_id);
+        if let Err(_) = self.symbols.define_type(t.name.clone(), def_id) {
+            self.errors.push(ResolveError::DuplicateDef {
+                name: t.name.clone(),
+                span: self.span_to_source(t.span),
+            });
+            return;
+        }
 
         self.symbols.insert(Symbol {
             def_id,
@@ -1091,7 +1115,13 @@ impl Resolver {
                 let def_id = self.symbols.fresh_def_id();
 
                 // Define as a type alias
-                let _ = self.symbols.define_type(qualified_name.clone(), def_id);
+                if let Err(_) = self.symbols.define_type(qualified_name.clone(), def_id) {
+                    self.errors.push(ResolveError::DuplicateDef {
+                        name: qualified_name.clone(),
+                        span: self.span_to_source(i.span),
+                    });
+                    continue;
+                }
 
                 self.symbols.insert(Symbol {
                     def_id,
@@ -1119,7 +1149,13 @@ impl Resolver {
         let def_id = self.symbols.fresh_def_id();
 
         if let Pattern::Binding { name, mutable } = &g.pattern {
-            let _ = self.symbols.define(name.clone(), def_id);
+            if let Err(_) = self.symbols.define(name.clone(), def_id) {
+                self.errors.push(ResolveError::DuplicateDef {
+                    name: name.clone(),
+                    span: self.span_to_source(g.span),
+                });
+                return;
+            }
             self.symbols.insert(Symbol {
                 def_id,
                 name: name.clone(),
