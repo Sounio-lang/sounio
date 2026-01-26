@@ -373,6 +373,46 @@ impl EffectInference {
                     Type::I64,                  // new pointer
                 )),
         );
+
+        // Panic effect - exceptional termination
+        //
+        // Represents panic/abort operations (e.g., division by zero, assertion failures).
+        // Specialized subset of Exn (panic operations terminate the program like exceptions).
+        // This enables fine-grained effect tracking: code can be marked as handling Exn but not Panic,
+        // or vice versa, depending on recovery strategy (graceful catch vs. hard abort).
+        self.definitions.push(
+            EffectDef::new("Panic")
+                .with_op(EffectOperation::new(
+                    "panic",
+                    vec![Type::String], // error message
+                    Type::Never,
+                )),
+        );
+
+        // Causal effect - counterfactual and causal reasoning operations
+        //
+        // Represents do-calculus interventions, counterfactual queries, and causal inference.
+        // Specialized subset of Epistemic (causal operations affect confidence/provenance tracking).
+        // Enables effect handlers that enforce epistemic firewalls for causal code sections.
+        // Distinguishes causal reasoning from other epistemic operations like uncertainty degradation.
+        self.definitions.push(
+            EffectDef::new("Causal")
+                .with_op(EffectOperation::new(
+                    "do",
+                    vec![Type::String, Type::Var(TypeVar(0))], // variable, value
+                    Type::Unit,
+                ))
+                .with_op(EffectOperation::new(
+                    "query",
+                    vec![Type::String], // query expression
+                    Type::Var(TypeVar(0)),
+                ))
+                .with_op(EffectOperation::new(
+                    "counterfactual",
+                    vec![Type::String, Type::Var(TypeVar(0))], // intervention, query
+                    Type::Var(TypeVar(0)),
+                )),
+        );
     }
 
     /// Create fresh effect variable
@@ -514,10 +554,23 @@ mod tests {
         assert!(ctx.lookup_effect("IO").is_some());
         assert!(ctx.lookup_effect("Prob").is_some());
         assert!(ctx.lookup_effect("GPU").is_some());
+        assert!(ctx.lookup_effect("Panic").is_some());
+        assert!(ctx.lookup_effect("Causal").is_some());
+        assert!(ctx.lookup_effect("Div").is_some());
 
         let print_op = ctx.lookup_operation("IO", "print");
         assert!(print_op.is_some());
         assert_eq!(print_op.unwrap().params.len(), 1);
+
+        // Test Panic operation
+        let panic_op = ctx.lookup_operation("Panic", "panic");
+        assert!(panic_op.is_some());
+        assert_eq!(panic_op.unwrap().params.len(), 1); // message parameter
+
+        // Test Causal operations
+        let do_op = ctx.lookup_operation("Causal", "do");
+        assert!(do_op.is_some());
+        assert_eq!(do_op.unwrap().params.len(), 2); // variable and value
     }
 
     #[test]
