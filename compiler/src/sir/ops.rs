@@ -102,6 +102,13 @@ pub enum CastOp {
     BitCast, // Reinterpret bits
 }
 
+/// Unary integer operations
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum UnaryIntOp {
+    Neg,
+    Not,
+}
+
 /// Unary floating point operations
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum UnaryFloatOp {
@@ -461,6 +468,12 @@ pub enum SirInst {
         val: ValueId,
     },
 
+    /// Unary integer operation
+    UnaryInt {
+        op: UnaryIntOp,
+        val: ValueId,
+    },
+
     /// Binary float operation
     BinaryFloat {
         op: BinaryFloatOp,
@@ -559,6 +572,7 @@ impl SirInst {
             SirInst::Cmp { lhs, rhs, .. } => vec![*lhs, *rhs],
             SirInst::Cast { val, .. } => vec![*val],
             SirInst::UnaryFloat { val, .. } => vec![*val],
+            SirInst::UnaryInt { val, .. } => vec![*val],
             SirInst::BinaryFloat { lhs, rhs, .. } => vec![*lhs, *rhs],
             SirInst::Select {
                 cond,
@@ -678,6 +692,7 @@ impl fmt::Display for SirInst {
             SirInst::Cmp { op, lhs, rhs } => write!(f, "{:?} {}, {}", op, lhs, rhs),
             SirInst::Cast { op, val, to_ty } => write!(f, "{:?} {} to {}", op, val, to_ty),
             SirInst::UnaryFloat { op, val } => write!(f, "{:?} {}", op, val),
+            SirInst::UnaryInt { op, val } => write!(f, "{:?} {}", op, val),
             SirInst::BinaryFloat { op, lhs, rhs } => write!(f, "{:?} {}, {}", op, lhs, rhs),
             SirInst::Select {
                 cond,

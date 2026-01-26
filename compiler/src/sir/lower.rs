@@ -33,7 +33,7 @@ use super::metadata::{EpistemicMetadata, Metadata, MetadataStore};
 use super::module::{ExternFunction, SirGlobal, SirModule};
 use super::ops::{
     ArithOp, CallInfo, Callee, CastOp, CmpOp, EpistemicOp, GepIndex, MemoryOp, SirInst,
-    UnaryFloatOp,
+    UnaryFloatOp, UnaryIntOp,
 };
 use super::types::{ArrayType, CallingConv, ScalarType, SirType, StructType};
 use super::values::{
@@ -434,13 +434,10 @@ fn lower_instruction(
                             val,
                         }
                     } else {
-                        // Integer negation: 0 - x
-                        let zero = ctx.alloc_value(result_ty.clone());
-                        // We'd need to emit a constant first - simplify by using negate
-                        SirInst::BinOp {
-                            op: ArithOp::Sub,
-                            lhs: zero, // This needs fixing - should emit const 0 first
-                            rhs: val,
+                        // Integer negation using two's complement
+                        SirInst::UnaryInt {
+                            op: UnaryIntOp::Neg,
+                            val,
                         }
                     }
                 }
@@ -449,11 +446,10 @@ fn lower_instruction(
                     val,
                 },
                 UnaryOp::Not => {
-                    // Logical not: xor with true/1
-                    SirInst::BinOp {
-                        op: ArithOp::Xor,
-                        lhs: val,
-                        rhs: val, // This should be 1, simplified for now
+                    // Bitwise not (one's complement)
+                    SirInst::UnaryInt {
+                        op: UnaryIntOp::Not,
+                        val,
                     }
                 }
             };
