@@ -3615,6 +3615,10 @@ impl<'a> Parser<'a> {
                 | TokenKind::FloatLit
                 | TokenKind::StringLit
                 | TokenKind::CharLit
+                | TokenKind::HexLit
+                | TokenKind::BinLit
+                | TokenKind::OctLit
+                | TokenKind::CStringLit
                 | TokenKind::True
                 | TokenKind::False
                 | TokenKind::LParen
@@ -3623,6 +3627,7 @@ impl<'a> Parser<'a> {
                 | TokenKind::Minus
                 | TokenKind::Bang
                 | TokenKind::Amp
+                | TokenKind::AmpBang
                 | TokenKind::Star
                 | TokenKind::If
                 | TokenKind::Match
@@ -3632,6 +3637,10 @@ impl<'a> Parser<'a> {
                 | TokenKind::Return
                 | TokenKind::Break
                 | TokenKind::Continue
+                | TokenKind::Do
+                | TokenKind::Query
+                | TokenKind::Observe
+                | TokenKind::Measured
         )
     }
 
