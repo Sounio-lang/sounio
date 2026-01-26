@@ -752,9 +752,32 @@ impl AsyncTransformer {
                 let mut new_then_stmts = Vec::new();
                 for stmt in &then_branch.stmts {
                     match stmt {
+                        HirStmt::Let {
+                            name,
+                            ty,
+                            value: Some(val),
+                            is_mut,
+                            layout_hint,
+                        } => {
+                            let new_val = self.extract_awaits_recursive(val, awaits);
+                            new_then_stmts.push(HirStmt::Let {
+                                name: name.clone(),
+                                ty: ty.clone(),
+                                value: Some(new_val),
+                                is_mut: *is_mut,
+                                layout_hint: layout_hint.clone(),
+                            });
+                        }
                         HirStmt::Expr(e) => {
                             let new_expr = self.extract_awaits_recursive(e, awaits);
                             new_then_stmts.push(HirStmt::Expr(new_expr));
+                        }
+                        HirStmt::Assign { target, value } => {
+                            let new_val = self.extract_awaits_recursive(value, awaits);
+                            new_then_stmts.push(HirStmt::Assign {
+                                target: target.clone(),
+                                value: new_val,
+                            });
                         }
                         _ => {
                             new_then_stmts.push(stmt.clone());
@@ -775,6 +798,132 @@ impl AsyncTransformer {
                             ty: then_branch.ty.clone(),
                         },
                         else_branch: new_else,
+                    },
+                    ty: expr.ty.clone(),
+                }
+            }
+
+            // While loops - check condition and body
+            HirExprKind::While { condition, body } => {
+                let new_condition = self.extract_awaits_recursive(condition, awaits);
+
+                let mut new_body_stmts = Vec::new();
+                for stmt in &body.stmts {
+                    match stmt {
+                        HirStmt::Let {
+                            name,
+                            ty,
+                            value: Some(val),
+                            is_mut,
+                            layout_hint,
+                        } => {
+                            let new_val = self.extract_awaits_recursive(val, awaits);
+                            new_body_stmts.push(HirStmt::Let {
+                                name: name.clone(),
+                                ty: ty.clone(),
+                                value: Some(new_val),
+                                is_mut: *is_mut,
+                                layout_hint: layout_hint.clone(),
+                            });
+                        }
+                        HirStmt::Expr(e) => {
+                            let new_expr = self.extract_awaits_recursive(e, awaits);
+                            new_body_stmts.push(HirStmt::Expr(new_expr));
+                        }
+                        HirStmt::Assign { target, value } => {
+                            let new_val = self.extract_awaits_recursive(value, awaits);
+                            new_body_stmts.push(HirStmt::Assign {
+                                target: target.clone(),
+                                value: new_val,
+                            });
+                        }
+                        _ => {
+                            new_body_stmts.push(stmt.clone());
+                        }
+                    }
+                }
+
+                HirExpr {
+                    id: expr.id,
+                    kind: HirExprKind::While {
+                        condition: Box::new(new_condition),
+                        body: HirBlock {
+                            stmts: new_body_stmts,
+                            ty: body.ty.clone(),
+                        },
+                    },
+                    ty: expr.ty.clone(),
+                }
+            }
+
+            // Loop expressions - check body statements
+            HirExprKind::Loop(body) => {
+                let mut new_stmts = Vec::new();
+                for stmt in &body.stmts {
+                    match stmt {
+                        HirStmt::Let {
+                            name,
+                            ty,
+                            value: Some(val),
+                            is_mut,
+                            layout_hint,
+                        } => {
+                            let new_val = self.extract_awaits_recursive(val, awaits);
+                            new_stmts.push(HirStmt::Let {
+                                name: name.clone(),
+                                ty: ty.clone(),
+                                value: Some(new_val),
+                                is_mut: *is_mut,
+                                layout_hint: layout_hint.clone(),
+                            });
+                        }
+                        HirStmt::Expr(e) => {
+                            let new_expr = self.extract_awaits_recursive(e, awaits);
+                            new_stmts.push(HirStmt::Expr(new_expr));
+                        }
+                        HirStmt::Assign { target, value } => {
+                            let new_val = self.extract_awaits_recursive(value, awaits);
+                            new_stmts.push(HirStmt::Assign {
+                                target: target.clone(),
+                                value: new_val,
+                            });
+                        }
+                        _ => {
+                            new_stmts.push(stmt.clone());
+                        }
+                    }
+                }
+
+                HirExpr {
+                    id: expr.id,
+                    kind: HirExprKind::Loop(HirBlock {
+                        stmts: new_stmts,
+                        ty: body.ty.clone(),
+                    }),
+                    ty: expr.ty.clone(),
+                }
+            }
+
+            // Match expressions - check scrutinee and arms
+            HirExprKind::Match { scrutinee, arms } => {
+                let new_scrutinee = self.extract_awaits_recursive(scrutinee, awaits);
+
+                let new_arms = arms
+                    .iter()
+                    .map(|arm| HirMatchArm {
+                        pattern: arm.pattern.clone(),
+                        guard: arm.guard.as_ref().map(|g| {
+                            Box::new(self.extract_awaits_recursive(g, awaits))
+                        }),
+                        body: self.extract_awaits_recursive(&arm.body, awaits),
+                    })
+                    .collect();
+
+                HirExpr {
+                    id: expr.id,
+                    kind: HirExprKind::Match {
+                        scrutinee: Box::new(new_scrutinee),
+                        arms: new_arms,
                     },
                     ty: expr.ty.clone(),
                 }
@@ -1300,5 +1449,180 @@ mod tests {
         // Should have one await with BinaryRight context
         assert_eq!(extracted.awaits.len(), 1);
         assert_eq!(extracted.awaits[0].context, EvalContext::BinaryRight);
+    }
+
+    #[test]
+    fn test_extract_await_in_if_condition() {
+        let mut transformer = AsyncTransformer::new();
+
+        // Create: if foo().await { ... }
+        let foo_call = HirExpr {
+            id: NodeId::dummy(),
+            kind: HirExprKind::Call {
+                func: Box::new(HirExpr {
+                    id: NodeId::dummy(),
+                    kind: HirExprKind::Local("foo".to_string()),
+                    ty: HirType::Bool,
+                }),
+                args: Vec::new(),
+            },
+            ty: HirType::Bool,
+        };
+
+        let await_foo = HirExpr {
+            id: NodeId::dummy(),
+            kind: HirExprKind::MethodCall {
+                receiver: Box::new(foo_call),
+                method: "await".to_string(),
+                args: Vec::new(),
+            },
+            ty: HirType::Bool,
+        };
+
+        let if_expr = HirExpr {
+            id: NodeId::dummy(),
+            kind: HirExprKind::If {
+                condition: Box::new(await_foo),
+                then_branch: HirBlock {
+                    stmts: vec![],
+                    ty: HirType::Unit,
+                },
+                else_branch: None,
+            },
+            ty: HirType::Unit,
+        };
+
+        let extracted = transformer.extract_awaits(&if_expr);
+
+        // Should have extracted the await from the condition
+        assert_eq!(extracted.awaits.len(), 1);
+
+        // The result should be an if expression with the condition replaced by a temp
+        match &extracted.expr.kind {
+            HirExprKind::If { condition, .. } => {
+                match &condition.kind {
+                    HirExprKind::Local(name) => {
+                        assert!(name.starts_with("__await_tmp_"));
+                    }
+                    _ => panic!("Expected local reference in condition"),
+                }
+            }
+            _ => panic!("Expected if expression"),
+        }
+    }
+
+    #[test]
+    fn test_extract_await_in_while_condition() {
+        let mut transformer = AsyncTransformer::new();
+
+        // Create: while foo().await { ... }
+        let foo_call = HirExpr {
+            id: NodeId::dummy(),
+            kind: HirExprKind::Call {
+                func: Box::new(HirExpr {
+                    id: NodeId::dummy(),
+                    kind: HirExprKind::Local("foo".to_string()),
+                    ty: HirType::Bool,
+                }),
+                args: Vec::new(),
+            },
+            ty: HirType::Bool,
+        };
+
+        let await_foo = HirExpr {
+            id: NodeId::dummy(),
+            kind: HirExprKind::MethodCall {
+                receiver: Box::new(foo_call),
+                method: "await".to_string(),
+                args: Vec::new(),
+            },
+            ty: HirType::Bool,
+        };
+
+        let while_expr = HirExpr {
+            id: NodeId::dummy(),
+            kind: HirExprKind::While {
+                condition: Box::new(await_foo),
+                body: HirBlock {
+                    stmts: vec![],
+                    ty: HirType::Unit,
+                },
+            },
+            ty: HirType::Unit,
+        };
+
+        let extracted = transformer.extract_awaits(&while_expr);
+
+        // Should have extracted the await from the condition
+        assert_eq!(extracted.awaits.len(), 1);
+
+        // The result should be a while expression with the condition replaced by a temp
+        match &extracted.expr.kind {
+            HirExprKind::While { condition, .. } => {
+                match &condition.kind {
+                    HirExprKind::Local(name) => {
+                        assert!(name.starts_with("__await_tmp_"));
+                    }
+                    _ => panic!("Expected local reference in condition"),
+                }
+            }
+            _ => panic!("Expected while expression"),
+        }
+    }
+
+    #[test]
+    fn test_extract_await_in_match_scrutinee() {
+        let mut transformer = AsyncTransformer::new();
+
+        // Create: match foo().await { ... }
+        let foo_call = HirExpr {
+            id: NodeId::dummy(),
+            kind: HirExprKind::Call {
+                func: Box::new(HirExpr {
+                    id: NodeId::dummy(),
+                    kind: HirExprKind::Local("foo".to_string()),
+                    ty: HirType::I32,
+                }),
+                args: Vec::new(),
+            },
+            ty: HirType::I32,
+        };
+
+        let await_foo = HirExpr {
+            id: NodeId::dummy(),
+            kind: HirExprKind::MethodCall {
+                receiver: Box::new(foo_call),
+                method: "await".to_string(),
+                args: Vec::new(),
+            },
+            ty: HirType::I32,
+        };
+
+        let match_expr = HirExpr {
+            id: NodeId::dummy(),
+            kind: HirExprKind::Match {
+                scrutinee: Box::new(await_foo),
+                arms: vec![],
+            },
+            ty: HirType::Unit,
+        };
+
+        let extracted = transformer.extract_awaits(&match_expr);
+
+        // Should have extracted the await from the scrutinee
+        assert_eq!(extracted.awaits.len(), 1);
+
+        // The result should be a match expression with the scrutinee replaced by a temp
+        match &extracted.expr.kind {
+            HirExprKind::Match { scrutinee, .. } => {
+                match &scrutinee.kind {
+                    HirExprKind::Local(name) => {
+                        assert!(name.starts_with("__await_tmp_"));
+                    }
+                    _ => panic!("Expected local reference in scrutinee"),
+                }
+            }
+            _ => panic!("Expected match expression"),
+        }
     }
 }
