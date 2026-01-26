@@ -491,9 +491,13 @@ impl Resolver {
                     return self.symbols.def_for_node(item.node_id);
                 }
 
-                // Check resolved imports (for re-exports) - re-exports are public by definition
+                // Check resolved imports (only re-exports are public by definition)
                 for import in &module.imports {
                     if import.local_name == *segment {
+                        // Only return if this is a re-export (pub use)
+                        if !import.is_reexport {
+                            continue;
+                        }
                         if let Some(node_id) = import.resolved {
                             if node_id.0 != u32::MAX {
                                 if let Some(def_id) = self.symbols.def_for_node(node_id) {
