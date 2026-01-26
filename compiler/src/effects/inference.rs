@@ -474,7 +474,11 @@ impl<'a> EffectChecker<'a> {
             Stmt::Assign { target, value, .. } => {
                 let mut effects = self.infer_expr(target);
                 effects = effects.union(&self.infer_expr(value));
-                // Assignment implies Mut effect if target is mutable
+                // Assignment always implies Mut effect (writing to a location)
+                effects.add(Effect {
+                    name: "Mut".to_string(),
+                    args: Vec::new(),
+                });
                 effects
             }
             Stmt::Empty | Stmt::MacroInvocation(_) | Stmt::LocalExtern(_) => EffectSet::new(),
