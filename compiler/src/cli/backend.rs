@@ -756,7 +756,7 @@ fn compile_native(args: &BuildArgs) -> Result<(PathBuf, Option<NativeMetrics>), 
 
     // Step 4: Lower to SIR (HLIR → SIR)
     let lower_sir_start = Instant::now();
-    let (mut sir_module, lowering_ctx) = lower_module(&hlir);
+    let (mut sir_module, lowering_ctx, _metadata_store) = lower_module(&hlir);
     
     // Set target architecture
     sir_module.target = crate::sir::module::TargetTriple::native();

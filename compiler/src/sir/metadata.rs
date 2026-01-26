@@ -193,6 +193,8 @@ pub struct MetadataStore {
     value_metadata: HashMap<ValueId, Vec<Metadata>>,
     /// Named metadata (module-level)
     named_metadata: HashMap<String, Vec<Metadata>>,
+    /// Field-level metadata: (value_id, field_index) -> metadata list
+    field_value_metadata: HashMap<(ValueId, usize), Vec<Metadata>>,
 }
 
 impl MetadataStore {
@@ -278,5 +280,33 @@ mod tests {
 
         assert!(meta.parallel);
         assert_eq!(meta.known_trip_count, Some(1000));
+    }
+}
+
+// Field-level metadata extension for Phase 2
+impl MetadataStore {
+    /// Field value metadata: (value_id, field_index) -> metadata list
+    /// This is stored separately from value metadata to support fine-grained tracking
+    /// Note: Currently not used - placeholder for future field-level tracking
+
+    /// Get metadata for a specific field of a value
+    pub fn field_metadata(&self, value: ValueId, field_index: usize) -> Option<&[Metadata]> {
+        self.field_value_metadata.get(&(value, field_index)).map(|v| v.as_slice())
+    }
+
+    /// Get all field metadata for a value
+    pub fn all_field_metadata(&self, value: ValueId) -> Vec<(usize, &[Metadata])> {
+        let mut result = Vec::new();
+        for ((val, field_idx), metadata) in &self.field_value_metadata {
+            if *val == value {
+                result.push((*field_idx, metadata.as_slice()));
+            }
+        }
+        result
+    }
+
+    /// Attach field metadata (internal use)
+    pub(crate) fn attach_field_metadata(&mut self, value: ValueId, field_index: usize, meta: Metadata) {
+        self.field_value_metadata.entry((value, field_index)).or_default().push(meta);
     }
 }
