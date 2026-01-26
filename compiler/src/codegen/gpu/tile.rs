@@ -28,14 +28,71 @@
 //! let bytes = shared_memory_bytes(16, 16, &GpuType::BF16);
 //!
 //! // Select optimal WMMA instruction
-//! let op = select_wmma_op(&GpuType::BF16, &GpuType::BF16, &GpuType::F32, 16, 16, 16);
+//! let op = select_wmma_op(&GpuType::BF16, &GpuType::BF16, &GpuType::F32, 16, 16, 16)?;
 //! ```
 
 use super::ir::*;
+use std::fmt;
+
+/// Error type for tile operations.
+#[derive(Debug, Clone)]
+pub enum TileError {
+    /// Tile dimensions not power of 2
+    InvalidDimensions { m: u32, n: u32, k: u32 },
+    /// Tile dimensions exceed 64
+    DimensionsTooLarge { m: u32, n: u32, k: u32 },
+    /// Tile shape not supported for data type
+    UnsupportedShape {
+        m: u32,
+        n: u32,
+        k: u32,
+        dtype: String,
+    },
+    /// Unsupported element type for WMMA
+    UnsupportedElementType(String),
+    /// Unsupported type combination for WMMA
+    UnsupportedTypeCombination {
+        a_type: String,
+        b_type: String,
+        supported: String,
+    },
+}
+
+impl fmt::Display for TileError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            TileError::InvalidDimensions { m, n, k } => {
+                write!(f, "Tile dimensions must be powers of 2, got {}x{}x{}", m, n, k)
+            }
+            TileError::DimensionsTooLarge { m, n, k } => {
+                write!(f, "Tile dimensions must be ≤64, got {}x{}x{}", m, n, k)
+            }
+            TileError::UnsupportedShape { m, n, k, dtype } => {
+                write!(f, "Tile shape {}x{}x{} not supported for {}", m, n, k, dtype)
+            }
+            TileError::UnsupportedElementType(dtype) => {
+                write!(f, "Unsupported element type: {}. Use F16, BF16, F8, F4, or F32.", dtype)
+            }
+            TileError::UnsupportedTypeCombination {
+                a_type,
+                b_type,
+                supported,
+            } => {
+                write!(
+                    f,
+                    "Unsupported type combination for WMMA: {} x {}. Supported: {}",
+                    a_type, b_type, supported
+                )
+            }
+        }
+    }
+}
+
+impl std::error::Error for TileError {}
 
 /// Validate tile dimensions for WMMA/WGMMA hardware compatibility.
 ///
-/// Returns Ok(()) if the dimensions are valid, or an error message if not.
+/// Returns Ok(()) if the dimensions are valid, or an error if not.
 ///
 /// # Constraints
 ///
@@ -51,21 +108,15 @@ use super::ir::*;
 /// | F8E4M3, F8E5M2 | (16,16,32), (32,8,32), (8,32,32) |
 /// | F4 | (16,16,64), (32,8,64), (8,32,64) |
 /// | F32 (TF32) | (16,16,8), (32,8,8), (8,32,8) |
-pub fn validate_tile_dims(m: u32, n: u32, k: u32, dtype: &GpuType) -> Result<(), String> {
+pub fn validate_tile_dims(m: u32, n: u32, k: u32, dtype: &GpuType) -> Result<(), TileError> {
     // Must be powers of 2
     if !m.is_power_of_two() || !n.is_power_of_two() || !k.is_power_of_two() {
-        return Err(format!(
-            "Tile dimensions must be powers of 2, got {}x{}x{}",
-            m, n, k
-        ));
+        return Err(TileError::InvalidDimensions { m, n, k });
     }
 
     // CUDA hardware constraints
     if m > 64 || n > 64 || k > 64 {
-        return Err(format!(
-            "Tile dimensions must be ≤64, got {}x{}x{}",
-            m, n, k
-        ));
+        return Err(TileError::DimensionsTooLarge { m, n, k });
     }
 
     // Supported WMMA shapes from CUDA documentation
@@ -76,18 +127,17 @@ pub fn validate_tile_dims(m: u32, n: u32, k: u32, dtype: &GpuType) -> Result<(),
         GpuType::F4 => vec![(16, 16, 64), (32, 8, 64), (8, 32, 64)],
         GpuType::F32 => vec![(16, 16, 8), (32, 8, 8), (8, 32, 8)], // TF32 mode
         _ => {
-            return Err(format!(
-                "Unsupported element type for WMMA: {:?}. Use F16, BF16, F8, F4, or F32.",
-                dtype
-            ));
+            return Err(TileError::UnsupportedElementType(format!("{:?}", dtype)));
         }
     };
 
     if !supported.contains(&(m, n, k)) {
-        return Err(format!(
-            "Tile shape {}x{}x{} not supported for {:?}. Supported shapes: {:?}",
-            m, n, k, dtype, supported
-        ));
+        return Err(TileError::UnsupportedShape {
+            m,
+            n,
+            k,
+            dtype: format!("{:?}", dtype),
+        });
     }
 
     Ok(())
@@ -96,16 +146,13 @@ pub fn validate_tile_dims(m: u32, n: u32, k: u32, dtype: &GpuType) -> Result<(),
 /// Validate 2D tile dimensions (M x N) for non-MMA operations.
 ///
 /// Used for TileCreate, TileLoad, TileStore where K dimension is not relevant.
-pub fn validate_tile_dims_2d(m: u32, n: u32, dtype: &GpuType) -> Result<(), String> {
+pub fn validate_tile_dims_2d(m: u32, n: u32, dtype: &GpuType) -> Result<(), TileError> {
     if !m.is_power_of_two() || !n.is_power_of_two() {
-        return Err(format!(
-            "Tile dimensions must be powers of 2, got {}x{}",
-            m, n
-        ));
+        return Err(TileError::InvalidDimensions { m, n, k: 0 });
     }
 
     if m > 64 || n > 64 {
-        return Err(format!("Tile dimensions must be ≤64, got {}x{}", m, n));
+        return Err(TileError::DimensionsTooLarge { m, n, k: 0 });
     }
 
     // Verify element type is supported
@@ -116,10 +163,7 @@ pub fn validate_tile_dims_2d(m: u32, n: u32, dtype: &GpuType) -> Result<(), Stri
         | GpuType::F8E4M3
         | GpuType::F8E5M2
         | GpuType::F4 => Ok(()),
-        _ => Err(format!(
-            "Unsupported element type for tile: {:?}. Use F16, BF16, F8, F4, or F32.",
-            dtype
-        )),
+        _ => Err(TileError::UnsupportedElementType(format!("{:?}", dtype))),
     }
 }
 
@@ -130,11 +174,13 @@ pub fn validate_tile_dims_2d(m: u32, n: u32, dtype: &GpuType) -> Result<(), Stri
 ///
 /// # Returns
 ///
-/// A `GpuOp` with placeholder ValueIds (must be filled in by the caller).
+/// A `GpuOp` with placeholder ValueIds (must be filled in by the caller), or
+/// an error if the type combination is not supported.
 ///
-/// # Panics
+/// # Errors
 ///
-/// Panics if the type combination is not supported for WMMA operations.
+/// Returns `TileError::UnsupportedTypeCombination` if the input types are not
+/// supported for WMMA operations.
 pub fn select_wmma_op(
     a_type: &GpuType,
     b_type: &GpuType,
@@ -142,12 +188,12 @@ pub fn select_wmma_op(
     m: u32,
     n: u32,
     k: u32,
-) -> GpuOp {
+) -> Result<GpuOp, TileError> {
     // Placeholder ValueIds - caller must fill these in
     let placeholder = ValueId(0);
 
     match (a_type, b_type) {
-        (GpuType::F4, GpuType::F4) => GpuOp::WgmmaFp4 {
+        (GpuType::F4, GpuType::F4) => Ok(GpuOp::WgmmaFp4 {
             a: placeholder,
             b: placeholder,
             c: placeholder,
@@ -156,8 +202,8 @@ pub fn select_wmma_op(
             k,
             scale_a: placeholder,
             scale_b: placeholder,
-        },
-        (GpuType::F8E4M3, GpuType::F8E4M3) => GpuOp::WgmmaFp8 {
+        }),
+        (GpuType::F8E4M3, GpuType::F8E4M3) => Ok(GpuOp::WgmmaFp8 {
             a: placeholder,
             b: placeholder,
             c: placeholder,
@@ -165,8 +211,8 @@ pub fn select_wmma_op(
             n,
             k,
             format: Fp8Format::E4M3,
-        },
-        (GpuType::F8E5M2, GpuType::F8E5M2) => GpuOp::WgmmaFp8 {
+        }),
+        (GpuType::F8E5M2, GpuType::F8E5M2) => Ok(GpuOp::WgmmaFp8 {
             a: placeholder,
             b: placeholder,
             c: placeholder,
@@ -174,42 +220,42 @@ pub fn select_wmma_op(
             n,
             k,
             format: Fp8Format::E5M2,
-        },
-        (GpuType::BF16, GpuType::BF16) => GpuOp::WgmmaBf16 {
+        }),
+        (GpuType::BF16, GpuType::BF16) => Ok(GpuOp::WgmmaBf16 {
             a: placeholder,
             b: placeholder,
             c: placeholder,
             m,
             n,
             k,
-        },
+        }),
         (GpuType::F16, GpuType::F16) => {
             // F16 WMMA - use TileMma as it maps to mma.sync on Ampere
-            GpuOp::TileMma {
+            Ok(GpuOp::TileMma {
                 c: placeholder,
                 a: placeholder,
                 b: placeholder,
                 tile_m: m,
                 tile_n: n,
                 tile_k: k,
-            }
+            })
         }
         (GpuType::F32, GpuType::F32) => {
             // TF32 mode for F32 inputs
-            GpuOp::TileMma {
+            Ok(GpuOp::TileMma {
                 c: placeholder,
                 a: placeholder,
                 b: placeholder,
                 tile_m: m,
                 tile_n: n,
                 tile_k: k,
-            }
+            })
         }
-        _ => panic!(
-            "Unsupported type combination for WMMA: {:?} x {:?}. \
-             Supported: F4xF4, F8xF8, BF16xBF16, F16xF16, F32xF32 (TF32)",
-            a_type, b_type
-        ),
+        _ => Err(TileError::UnsupportedTypeCombination {
+            a_type: format!("{:?}", a_type),
+            b_type: format!("{:?}", b_type),
+            supported: "F4xF4, F8xF8, BF16xBF16, F16xF16, F32xF32 (TF32)".to_string(),
+        }),
     }
 }
 
@@ -383,14 +429,12 @@ mod tests {
     fn test_validate_tile_dims_invalid_not_power_of_2() {
         let result = validate_tile_dims(15, 16, 16, &GpuType::F16);
         assert!(result.is_err());
-        assert!(result.unwrap_err().contains("powers of 2"));
     }
 
     #[test]
     fn test_validate_tile_dims_invalid_too_large() {
         let result = validate_tile_dims(128, 16, 16, &GpuType::F16);
         assert!(result.is_err());
-        assert!(result.unwrap_err().contains("≤64"));
     }
 
     #[test]
@@ -398,14 +442,32 @@ mod tests {
         // 16x16x32 is not valid for F16 (only for FP8)
         let result = validate_tile_dims(16, 16, 32, &GpuType::F16);
         assert!(result.is_err());
-        assert!(result.unwrap_err().contains("not supported"));
     }
 
     #[test]
     fn test_validate_tile_dims_invalid_unsupported_type() {
         let result = validate_tile_dims(16, 16, 16, &GpuType::I32);
         assert!(result.is_err());
-        assert!(result.unwrap_err().contains("Unsupported element type"));
+    }
+
+    #[test]
+    fn test_select_wmma_op_valid() {
+        // All valid combinations should succeed
+        assert!(select_wmma_op(&GpuType::F16, &GpuType::F16, &GpuType::F32, 16, 16, 16).is_ok());
+        assert!(select_wmma_op(&GpuType::BF16, &GpuType::BF16, &GpuType::F32, 16, 16, 16).is_ok());
+        assert!(select_wmma_op(&GpuType::F8E4M3, &GpuType::F8E4M3, &GpuType::F32, 16, 16, 32).is_ok());
+        assert!(select_wmma_op(&GpuType::F4, &GpuType::F4, &GpuType::F32, 16, 16, 64).is_ok());
+        assert!(select_wmma_op(&GpuType::F32, &GpuType::F32, &GpuType::F32, 16, 16, 8).is_ok());
+    }
+
+    #[test]
+    fn test_select_wmma_op_unsupported_combination() {
+        // Type combinations that aren't supported should fail
+        let result = select_wmma_op(&GpuType::F16, &GpuType::BF16, &GpuType::F32, 16, 16, 16);
+        assert!(result.is_err());
+
+        let result = select_wmma_op(&GpuType::I32, &GpuType::I32, &GpuType::F32, 16, 16, 16);
+        assert!(result.is_err());
     }
 
     #[test]

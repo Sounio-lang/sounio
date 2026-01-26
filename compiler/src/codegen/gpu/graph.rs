@@ -21,6 +21,42 @@
 
 use super::ir::{GpuModule, GpuType, ValueId};
 use rustc_hash::FxHashMap;
+use std::fmt;
+
+/// Error type for GPU graph operations
+#[derive(Debug, Clone)]
+pub enum GraphError {
+    /// Node not found in graph
+    NodeNotFound(GraphNodeId),
+    /// Buffer not found in graph
+    BufferNotFound(BufferId),
+    /// Edge references invalid node
+    InvalidEdge {
+        from: GraphNodeId,
+        to: GraphNodeId,
+    },
+    /// Graph contains cycles (not a DAG)
+    CyclicGraph,
+    /// Invalid operation on graph
+    InvalidOperation(String),
+}
+
+impl fmt::Display for GraphError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            GraphError::NodeNotFound(id) => write!(f, "Node not found: {:?}", id),
+            GraphError::BufferNotFound(id) => write!(f, "Buffer not found: {:?}", id),
+            GraphError::InvalidEdge { from, to } => {
+                write!(f, "Invalid edge: {:?} -> {:?} (nodes not in graph)", from, to)
+            }
+            GraphError::CyclicGraph => write!(f, "Graph contains cycles"),
+            GraphError::InvalidOperation(msg) => write!(f, "Invalid operation: {}", msg),
+        }
+    }
+}
+
+impl std::error::Error for GraphError {}
+
 
 /// Unique identifier for a graph node
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -502,7 +538,11 @@ impl GpuGraph {
     }
 
     /// Get topologically sorted node order
-    pub fn topological_sort(&self) -> Vec<GraphNodeId> {
+    ///
+    /// # Errors
+    ///
+    /// Returns `GraphError::InvalidEdge` if an edge references a non-existent node.
+    pub fn topological_sort(&self) -> Result<Vec<GraphNodeId>, GraphError> {
         let mut in_degree: FxHashMap<GraphNodeId, usize> = FxHashMap::default();
         let mut adj: FxHashMap<GraphNodeId, Vec<GraphNodeId>> = FxHashMap::default();
 
@@ -511,9 +551,23 @@ impl GpuGraph {
             adj.insert(node.id, Vec::new());
         }
 
+        // Validate that all edges reference existing nodes
         for (from, to) in &self.edges {
-            *in_degree.get_mut(to).unwrap() += 1;
-            adj.get_mut(from).unwrap().push(*to);
+            if !in_degree.contains_key(to) {
+                return Err(GraphError::InvalidEdge { from: *from, to: *to });
+            }
+            if !adj.contains_key(from) {
+                return Err(GraphError::InvalidEdge { from: *from, to: *to });
+            }
+        }
+
+        for (from, to) in &self.edges {
+            if let Some(deg) = in_degree.get_mut(to) {
+                *deg += 1;
+            }
+            if let Some(neighbors) = adj.get_mut(from) {
+                neighbors.push(*to);
+            }
         }
 
         let mut queue: Vec<GraphNodeId> = in_degree
@@ -528,16 +582,17 @@ impl GpuGraph {
             result.push(node);
             if let Some(neighbors) = adj.get(&node) {
                 for &neighbor in neighbors {
-                    let deg = in_degree.get_mut(&neighbor).unwrap();
-                    *deg -= 1;
-                    if *deg == 0 {
-                        queue.push(neighbor);
+                    if let Some(deg) = in_degree.get_mut(&neighbor) {
+                        *deg -= 1;
+                        if *deg == 0 {
+                            queue.push(neighbor);
+                        }
                     }
                 }
             }
         }
 
-        result
+        Ok(result)
     }
 
     /// Get node by ID
@@ -552,7 +607,10 @@ impl GpuGraph {
 
     /// Check if graph has cycles (should be DAG)
     pub fn is_acyclic(&self) -> bool {
-        self.topological_sort().len() == self.nodes.len()
+        match self.topological_sort() {
+            Ok(sorted) => sorted.len() == self.nodes.len(),
+            Err(_) => false, // Treat validation errors as cycles
+        }
     }
 }
 
@@ -720,7 +778,7 @@ mod tests {
 
         assert_eq!(graph.edges.len(), 2);
 
-        let sorted = graph.topological_sort();
+        let sorted = graph.topological_sort().expect("topological sort failed");
         assert_eq!(sorted, vec![n1, n2, n3]);
     }
 
@@ -835,7 +893,7 @@ mod tests {
         assert_eq!(graph.entry_nodes, vec![GraphNodeId(0)]);
         assert_eq!(graph.exit_nodes, vec![download]);
 
-        let order = graph.topological_sort();
+        let order = graph.topological_sort().expect("topological sort failed");
         assert_eq!(order.len(), 4);
         assert_eq!(order[0], upload);
         assert_eq!(order[3], download);
