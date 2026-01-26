@@ -62,6 +62,8 @@ pub struct LoweringContext {
     value_types: HashMap<ValueId, SirType>,
     /// Epistemic tracking: values with associated confidence
     epistemic_values: HashMap<ValueId, EpistemicInfo>,
+    /// Metadata tracker for Phase 2 - captures domain-specific information
+    pub metadata_tracker: MetadataTracker,
 }
 
 /// Information about epistemic values during lowering
@@ -73,6 +75,94 @@ struct EpistemicInfo {
     known_confidence: Option<f64>,
     /// Has uncertainty tracking
     has_uncertainty: bool,
+}
+
+/// Metadata tracker for Phase 2 - captures domain-specific information during lowering
+#[derive(Debug, Clone)]
+pub struct MetadataTracker {
+    /// Epistemic info: value -> (epsilon_bound, provenance_id)
+    epistemic_info: HashMap<ValueId, (f64, Option<u32>)>,
+    /// Physical units: value -> unit
+    unit_info: HashMap<ValueId, PhysicalUnit>,
+    /// Field-level metadata: (struct_value, field_index) -> metadata
+    field_metadata: HashMap<(ValueId, usize), Vec<Metadata>>,
+}
+
+impl MetadataTracker {
+    pub fn new() -> Self {
+        Self {
+            epistemic_info: HashMap::new(),
+            unit_info: HashMap::new(),
+            field_metadata: HashMap::new(),
+        }
+    }
+
+    /// Record epistemic information for a value
+    pub fn record_epistemic(&mut self, value: ValueId, epsilon_bound: f64, provenance_id: Option<u32>) {
+        self.epistemic_info.insert(value, (epsilon_bound, provenance_id));
+    }
+
+    /// Record physical unit for a value
+    pub fn record_unit(&mut self, value: ValueId, unit: PhysicalUnit) {
+        self.unit_info.insert(value, unit);
+    }
+
+    /// Record field-level metadata
+    pub fn record_field_metadata(&mut self, value: ValueId, field_index: usize, metadata: Metadata) {
+        self.field_metadata
+            .entry((value, field_index))
+            .or_default()
+            .push(metadata);
+    }
+
+    /// Extract Knowledge<T> wrapper information from a type
+    pub fn extract_knowledge_wrapper(ty: &HlirType) -> Option<(f64, Option<u32>)> {
+        match ty {
+            HlirType::Struct(name) if name.contains("Knowledge") => {
+                Some((0.95, None))
+            }
+            _ => None,
+        }
+    }
+
+    /// Extract Quantity<T> wrapper information from a type
+    pub fn extract_quantity_wrapper(ty: &HlirType) -> Option<PhysicalUnit> {
+        match ty {
+            HlirType::Struct(name) if name.contains("Quantity") => {
+                Some(PhysicalUnit::dimensionless())
+            }
+            _ => None,
+        }
+    }
+
+    /// Finalize and attach collected metadata to the module's metadata store
+    pub fn finalize_metadata(self, metadata_store: &mut MetadataStore) {
+        for (value, (epsilon_bound, provenance_id)) in self.epistemic_info {
+            let epistemic = EpistemicMetadata {
+                known_confidence: Some(epsilon_bound),
+                confidence_invariant: false,
+                certain: epsilon_bound >= 0.9999,
+                provenance_id,
+            };
+            metadata_store.attach(value, Metadata::Epistemic(epistemic));
+        }
+
+        for (value, unit) in self.unit_info {
+            metadata_store.attach(value, Metadata::Unit(unit));
+        }
+
+        for ((value, _field_idx), field_metas) in self.field_metadata {
+            for meta in field_metas {
+                metadata_store.attach(value, meta);
+            }
+        }
+    }
+}
+
+impl Default for MetadataTracker {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl LoweringContext {
@@ -87,6 +177,7 @@ impl LoweringContext {
             metadata: MetadataStore::new(),
             value_types: HashMap::new(),
             epistemic_values: HashMap::new(),
+            metadata_tracker: MetadataTracker::new(),
         }
     }
 
@@ -174,6 +265,7 @@ impl LoweringContext {
         self.next_value_id = 0;
         self.next_block_id = 0;
         // Keep type_cache and func_map across functions
+        // Keep metadata_tracker across functions - it accumulates metadata
     }
 }
 
@@ -185,7 +277,7 @@ impl Default for LoweringContext {
 
 /// Lower an HLIR module to SIR
 /// Returns both the module and the lowering context (which contains metadata)
-pub fn lower_module(hlir: &HlirModule) -> (SirModule, LoweringContext) {
+pub fn lower_module(hlir: &HlirModule) -> (SirModule, LoweringContext, MetadataStore) {
     let mut ctx = LoweringContext::new();
     let mut module = SirModule::new(&hlir.name);
 
@@ -220,7 +312,12 @@ pub fn lower_module(hlir: &HlirModule) -> (SirModule, LoweringContext) {
         }
     }
 
-    (module, ctx)
+    // Step 5: Finalize metadata - attach all collected metadata to the store
+    let metadata_tracker = ctx.metadata_tracker.clone();
+    metadata_tracker.finalize_metadata(&mut ctx.metadata);
+
+    let final_metadata = ctx.metadata.clone();
+    (module, ctx, final_metadata)
 }
 
 /// Lower a type definition to SIR
@@ -1467,7 +1564,7 @@ mod tests {
     #[test]
     fn test_empty_module_lowering() {
         let hlir = HlirModule::new("test");
-        let (sir, _ctx) = lower_module(&hlir);
+        let (sir, _ctx, _metadata) = lower_module(&hlir);
         assert_eq!(sir.name, "test");
         assert!(sir.functions.is_empty());
     }

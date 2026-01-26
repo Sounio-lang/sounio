@@ -230,6 +230,10 @@ pub struct SirModule {
     pub data_layout: Option<String>,
     /// Module flags
     pub flags: ModuleFlags,
+    
+    // === Effect Handler Management ===
+    /// Effect handler ID mapping (effect_name -> handler_id)
+    pub effect_handler_ids: HashMap<String, u32>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -261,6 +265,7 @@ impl SirModule {
             next_func_id: 0,
             data_layout: None,
             flags: ModuleFlags::default(),
+            effect_handler_ids: HashMap::new(),
         }
     }
 
