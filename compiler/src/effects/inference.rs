@@ -231,6 +231,29 @@ impl<'a> EffectChecker<'a> {
         }
     }
 
+    /// Determine which effect a handler handles based on its name.
+    ///
+    /// Uses the following logic:
+    /// 1. If handler name ends with "Handler", strip suffix and use as effect name
+    ///    (e.g., "IOHandler" -> "IO", "MutHandler" -> "Mut")
+    /// 2. Otherwise, use the handler name as-is
+    ///
+    /// This aligns with the convention used throughout the Sounio effect system where
+    /// handler names typically follow the pattern `{EffectName}Handler`.
+    fn determine_handled_effect(&self, handler_name: &str) -> Option<String> {
+        if handler_name.is_empty() {
+            return None;
+        }
+
+        // Check for XHandler pattern
+        if handler_name.ends_with("Handler") && handler_name.len() > 7 {
+            Some(handler_name[..handler_name.len() - 7].to_string())
+        } else {
+            // Use handler name as-is (for custom handlers or alternative naming)
+            Some(handler_name.to_string())
+        }
+    }
+
     /// Record an effect with its source location for better error messages
     fn record_effect(&mut self, effect: Effect, span: Span) {
         if !self.effect_sources.contains_key(&effect.name) {
@@ -733,11 +756,14 @@ impl<'a> EffectChecker<'a> {
 
             Expr::Handle { expr, handler, .. } => {
                 let body_effects = self.infer_expr(expr);
-                // Handler removes the handled effect
-                let handled_name = handler.name().unwrap_or("").to_string();
+                // Handler removes the handled effect(s)
+                let handler_name = handler.name().unwrap_or("").to_string();
+                let handled_effect = self.determine_handled_effect(&handler_name);
+
                 let mut result = EffectSet::new();
                 for eff in &body_effects.effects {
-                    if eff != &handled_name {
+                    // Remove the effect that this handler handles
+                    if !handled_effect.as_ref().map_or(false, |he| eff == he) {
                         result.effects.insert(eff.clone());
                     }
                 }

@@ -85,6 +85,9 @@ pub struct TypeChecker {
     /// is added to this set. This enables pure functions that use impure internals
     /// as long as all effects are handled before returning.
     masked_effects: types::EffectSet,
+    /// Effect operations registry: (effect_name, op_name) -> return_type
+    /// Used for type checking `perform Effect::op(args)` expressions
+    effect_operations: HashMap<(String, String), Type>,
     /// Symbol table from resolver (for visibility checking)
     symbols: Option<std::sync::Arc<resolve::SymbolTable>>,
     /// Module tree from resolver (for visibility checking)
@@ -202,6 +205,7 @@ impl TypeChecker {
             warnings: Vec::new(),
             handler_effects: HashMap::new(),
             masked_effects: types::EffectSet::new(),
+            effect_operations: HashMap::new(),
             symbols: None,
             module_tree: None,
             current_module: None,
@@ -655,10 +659,22 @@ impl TypeChecker {
                     .as_ref()
                     .map(|t| self.lower_type_expr(t))
                     .unwrap_or(Type::Unit);
+
+                // Extract effects from function declaration
+                let mut effect_set = types::EffectSet::new();
+                for effect_ref in &f.effects {
+                    if let Some(name) = effect_ref.as_simple_name() {
+                        effect_set.add(types::Effect {
+                            name: name.to_string(),
+                            args: Vec::new(), // TODO(issue-20): handle parameterized effects
+                        });
+                    }
+                }
+
                 let fn_type = Type::Function {
                     params,
                     return_type: Box::new(return_type),
-                    effects: types::EffectSet::new(),
+                    effects: effect_set,
                     abi: None,
                 };
                 self.env.bind(f.name.clone(), fn_type, false);
@@ -677,6 +693,7 @@ impl TypeChecker {
                             .map(|t| self.lower_type_expr(t))
                             .unwrap_or(Type::Unit);
 
+                        // Extern functions don't declare effects (they're C functions)
                         let fn_type = Type::Function {
                             params,
                             return_type: Box::new(return_type),
@@ -1732,12 +1749,18 @@ impl TypeChecker {
             .map(|e| self.lower_effect_ref(e))
             .collect();
 
-        // For now, we use the declared effects directly.
-        // The masked_effects tracking enables future improvements:
-        // - Warn if a function declares effects that are always handled internally
-        // - Allow inference of residual effects for functions without explicit signatures
-        // - Support effect polymorphism with masking
-        let effective_effects = declared_effects;
+        // Compute effective effects: declared effects minus any that are masked (handled internally).
+        // This enables pure functions to use impure operations internally as long as all
+        // effects are handled before returning.
+        //
+        // Example: fn pure_from_state() -> i32 {
+        //     handle { perform IO::print("hello"); 42 } with IOHandler
+        // }
+        // The IO effect is masked internally, so the function's effective effects are empty (pure).
+        let mut effective_effects = declared_effects;
+        for masked in &self.masked_effects.effects {
+            effective_effects.retain(|eff| &eff.name != masked);
+        }
 
         // Clean up effect parameters after checking the function
         self.clear_effect_params();
@@ -2102,6 +2125,17 @@ impl TypeChecker {
                 } else {
                     HirType::Unit
                 };
+
+                // Register this effect operation in the registry
+                let return_type_lowered = if let Some(t) = op.return_type.as_ref() {
+                    self.lower_type_expr(t)
+                } else {
+                    Type::Unit
+                };
+                self.effect_operations.insert(
+                    (e.name.clone(), op.name.clone()),
+                    return_type_lowered,
+                );
 
                 HirEffectOp {
                     id: op.id,
@@ -4028,9 +4062,14 @@ impl TypeChecker {
                     .cloned()
                     .unwrap_or_else(|| "Unknown".to_string());
 
-                // For effect operations, the return type depends on the specific effect/op
-                // For now, use Unit as the default - proper effect lookup requires effect definitions
-                let return_ty = HirType::Unit;
+                // Lookup the operation in the registry
+                let return_type = if let Some(ty) = self.effect_operations.get(&(effect_name.clone(), op.clone())) {
+                    ty.clone()
+                } else {
+                    // Effect operation not found - default to Unit but could emit error
+                    Type::Unit
+                };
+                let return_ty = self.type_to_hir(&return_type);
 
                 (
                     HirExprKind::Perform {
