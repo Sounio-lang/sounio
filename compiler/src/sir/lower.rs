@@ -811,21 +811,30 @@ fn lower_instruction(
         }
 
         Op::Tuple(values) => {
-            // Lower tuple construction to a struct
             let result = instr
                 .result
                 .map(|r| ctx.get_or_create_value(r, result_ty.clone()))?;
 
-            // Allocate tuple on stack and store values
-            let alloca_result = ctx.alloc_value(SirType::ptr(result_ty.clone()));
+            let sir_values: Vec<ValueId> =
+                values.iter().filter_map(|v| ctx.get_value(*v)).collect();
+
+            for (field_idx, (hlir_val, sir_val)) in values.iter().zip(sir_values.iter()).enumerate() {
+                if let Some((epsilon_bound, provenance_id)) = 
+                    MetadataTracker::extract_knowledge_wrapper(&locals.get(hlir_val).map(|t| t.clone()).unwrap_or(HlirType::Void)) {
+                    ctx.metadata_tracker.record_epistemic(*sir_val, epsilon_bound, provenance_id);
+                }
+                if let Some(unit) = 
+                    MetadataTracker::extract_quantity_wrapper(&locals.get(hlir_val).map(|t| t.clone()).unwrap_or(HlirType::Void)) {
+                    ctx.metadata_tracker.record_unit(*sir_val, unit);
+                }
+            }
 
             Some(Instruction::with_result(
-                alloca_result,
-                SirInst::Memory(MemoryOp::Alloca {
+                result,
+                SirInst::BuildAggregate {
+                    fields: sir_values,
                     ty: result_ty,
-                    count: None,
-                    align: None,
-                }),
+                },
             ))
         }
 
@@ -851,14 +860,28 @@ fn lower_instruction(
                 .result
                 .map(|r| ctx.get_or_create_value(r, result_ty.clone()))?;
 
-            // Allocate struct on stack
+            let sir_values: Vec<ValueId> =
+                fields.iter().filter_map(|(_field_name, v)| ctx.get_value(*v)).collect();
+
+            for (field_idx, (_field_name, hlir_field_val)) in fields.iter().enumerate() {
+                if let Some(sir_val) = ctx.get_value(*hlir_field_val) {
+                    if let Some((epsilon_bound, provenance_id)) = 
+                        MetadataTracker::extract_knowledge_wrapper(&locals.get(hlir_field_val).map(|t| t.clone()).unwrap_or(HlirType::Void)) {
+                        ctx.metadata_tracker.record_epistemic(sir_val, epsilon_bound, provenance_id);
+                    }
+                    if let Some(unit) = 
+                        MetadataTracker::extract_quantity_wrapper(&locals.get(hlir_field_val).map(|t| t.clone()).unwrap_or(HlirType::Void)) {
+                        ctx.metadata_tracker.record_unit(sir_val, unit);
+                    }
+                }
+            }
+
             Some(Instruction::with_result(
                 result,
-                SirInst::Memory(MemoryOp::Alloca {
+                SirInst::BuildAggregate {
+                    fields: sir_values,
                     ty: result_ty,
-                    count: None,
-                    align: None,
-                }),
+                },
             ))
         }
 
