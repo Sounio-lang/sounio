@@ -1,648 +1,496 @@
 //! stdlib/collections/trie.sio - Prefix Trie (Radix Tree)
 //!
-//! This module provides a prefix trie (also known as a prefix tree or
-//! digital tree) for efficient string operations:
-//!
-//! - O(m) lookup, insert, delete (where m is key length)
-//! - Prefix-based queries: find all keys with a given prefix
+//! A prefix trie implementation for string keys mapping to i64 values.
+//! Provides efficient O(m) operations where m is key length:
+//! - Lookup, insert, delete
+//! - Prefix-based queries
 //! - Autocomplete suggestions
-//! - Longest common prefix
 //!
-//! # Examples
+//! # Usage
 //! ```sio
 //! var trie = trie_new()
 //! trie_insert(&!trie, "apple", 1)
-//! trie_insert(&!trie, "application", 2)
-//! trie_insert(&!trie, "banana", 3)
-//!
-//! // Prefix search
-//! let matches = trie_keys_with_prefix(&trie, "app")
-//! // matches: ["apple", "application"]
-//!
-//! // Autocomplete
-//! let completions = trie_autocomplete(&trie, "app", 5)
+//! trie_insert(&!trie, "app", 2)
+//! let value = trie_get(&trie, "apple")  // Returns Some(1)
+//! trie_drop(&!trie)
 //! ```
 
-// =============================================================================
-// Trie Node
-// =============================================================================
+extern "C" {
+    fn malloc(size: usize) -> *mut u8;
+    fn free(ptr: *mut u8);
+    fn memset(ptr: *mut u8, val: i32, size: usize) -> *mut u8;
+}
+
+// Number of children slots (ASCII range 0-127)
+let TRIE_CHILDREN_SIZE: usize = 128
+
+// Null pointer constant for trie nodes
+fn trie_null_node() -> *mut TrieNode {
+    return 0 as *mut TrieNode
+}
 
 // A node in the trie
-struct TrieNode<V> {
-    // Children indexed by character
-    children: Vec<Option<Box<TrieNode<V>>>>,
-    // Value stored at this node (if this is an end of a key)
-    value: Option<V>,
+pub struct TrieNode {
+    // Children indexed by character (array of 128 pointers)
+    children: *mut *mut TrieNode,
+    // Value stored at this node (only valid if is_end is true)
+    value: i64,
     // Whether this node marks the end of a key
     is_end: bool,
-    // Number of keys in this subtree (including this node)
-    count: usize
 }
 
-// Number of children slots (ASCII printable range)
-let TRIE_CHILDREN_SIZE: usize = 128;
+// A prefix trie mapping string keys to i64 values
+pub struct Trie {
+    root: *mut TrieNode,
+    len: usize,
+}
 
-fn trie_node_new<V>() -> TrieNode<V> with Alloc {
-    var children: Vec<Option<Box<TrieNode<V>>>> = Vec::with_capacity(TRIE_CHILDREN_SIZE);
+// Creates a new trie node
+fn trie_node_new() -> *mut TrieNode with Alloc {
+    // Allocate the node struct
+    let node_size = 24  // 8 (children ptr) + 8 (value) + 8 (is_end + padding)
+    let node_ptr = malloc(node_size) as *mut TrieNode
 
-    var i: usize = 0;
+    // Allocate children array (128 pointers, each 8 bytes)
+    let children_size = TRIE_CHILDREN_SIZE * 8
+    let children_ptr = malloc(children_size) as *mut *mut TrieNode
+
+    // Zero out children array
+    memset(children_ptr as *mut u8, 0, children_size)
+
+    // Initialize node - use ptr.field syntax (not (*ptr).field)
+    node_ptr.children = children_ptr
+    node_ptr.value = 0
+    node_ptr.is_end = false
+
+    return node_ptr
+}
+
+// Frees a trie node and its children recursively
+fn trie_node_drop(node: *mut TrieNode) with Alloc, Panic, Div {
+    if node == trie_null_node() {
+        return
+    }
+
+    // Recursively free all children
+    var i: usize = 0
     while i < TRIE_CHILDREN_SIZE {
-        children.push(None);
-        i = i + 1;
+        let child = node.children[i]
+        if child != trie_null_node() {
+            trie_node_drop(child)
+        }
+        i = i + 1
     }
 
-    TrieNode {
-        children: children,
-        value: None,
-        is_end: false,
-        count: 0
+    // Free children array
+    free(node.children as *mut u8)
+
+    // Free node itself
+    free(node as *mut u8)
+}
+
+// Converts a character to an index (0-127), returns -1 for invalid
+fn char_to_index(ch: i32) -> i32 {
+    if ch >= 0 && ch < 128 {
+        return ch
     }
+    return -1
 }
 
-fn char_to_index(ch: char) -> Option<usize> {
-    let code = ch as usize;
-    if code < TRIE_CHILDREN_SIZE {
-        Some(code)
-    } else {
-        None
-    }
-}
-
-// =============================================================================
-// Trie
-// =============================================================================
-
-// A prefix trie that maps string keys to values.
-pub struct Trie<V> {
-    root: TrieNode<V>,
-    len: usize
-}
-
-// Creates a new empty trie.
-pub fn trie_new<V>() -> Trie<V> with Alloc {
-    Trie {
+// Creates a new empty trie
+pub fn trie_new() -> Trie with Alloc {
+    let result = Trie {
         root: trie_node_new(),
-        len: 0
+        len: 0,
     }
+    return result
 }
 
-// Returns the number of keys in the trie.
-pub fn trie_len<V>(trie: &Trie<V>) -> usize {
-    trie.len
+// Frees the trie and all its nodes
+pub fn trie_drop(trie: &!Trie) with Alloc, Panic, Div {
+    trie_node_drop(trie.root)
+    trie.root = trie_null_node()
+    trie.len = 0
 }
 
-// Returns true if the trie is empty.
-pub fn trie_is_empty<V>(trie: &Trie<V>) -> bool {
-    trie.len == 0
+// Returns the number of keys in the trie
+pub fn trie_len(trie: &Trie) -> usize {
+    return trie.len
 }
 
-// =============================================================================
-// Basic Operations
-// =============================================================================
+// Returns true if the trie is empty
+pub fn trie_is_empty(trie: &Trie) -> bool {
+    return trie.len == 0
+}
 
-// Inserts a key-value pair into the trie.
-//
-// Returns the previous value if the key already existed.
-pub fn trie_insert<V>(trie: &!Trie<V>, key: &str, value: V) -> Option<V> with Alloc
-where V: Clone
-{
-    var current = &!trie.root;
+// Inserts a key-value pair into the trie
+// The key is a pointer to bytes and its length
+// Returns true if this was a new key, false if it replaced an existing value
+pub fn trie_insert(trie: &!Trie, key: *const u8, key_len: usize, value: i64) -> bool with Alloc, Panic, Div {
+    var current = trie.root
 
-    for ch in key.chars() {
-        let idx = match char_to_index(ch) {
-            Some(i) => i,
-            None => continue  // Skip non-ASCII characters
-        };
+    var i: usize = 0
+    while i < key_len {
+        let ch = key[i] as i32
+        let idx = char_to_index(ch)
 
-        if current.children[idx].is_none() {
-            current.children[idx] = Some(Box::new(trie_node_new()));
+        if idx < 0 {
+            // Skip non-ASCII characters
+            i = i + 1
+            continue
         }
 
-        current = &!*current.children[idx].as_mut().unwrap();
+        let idx_usize = idx as usize
+
+        if current.children[idx_usize] == trie_null_node() {
+            current.children[idx_usize] = trie_node_new()
+        }
+
+        current = current.children[idx_usize]
+        i = i + 1
     }
 
-    let old_value = if current.is_end {
-        std::mem::replace(&!current.value, Some(value))
-    } else {
-        current.is_end = true;
-        current.value = Some(value);
-        trie.len = trie.len + 1;
-        None
-    };
+    let was_new = !current.is_end
+    current.is_end = true
+    current.value = value
 
-    old_value
+    if was_new {
+        trie.len = trie.len + 1
+    }
+
+    return was_new
 }
 
-// Looks up a value by key.
-pub fn trie_get<V>(trie: &Trie<V>, key: &str) -> Option<&V> {
-    var current = &trie.root;
+// Looks up a value by key
+// Returns Some(value) if found, None if not found
+pub fn trie_get(trie: &Trie, key: *const u8, key_len: usize) -> Option<i64> with Panic, Div {
+    var current = trie.root
 
-    for ch in key.chars() {
-        let idx = match char_to_index(ch) {
-            Some(i) => i,
-            None => return None
-        };
+    var i: usize = 0
+    while i < key_len {
+        let ch = key[i] as i32
+        let idx = char_to_index(ch)
 
-        match &current.children[idx] {
-            Some(child) => current = &**child,
-            None => return None
+        if idx < 0 {
+            return None
         }
+
+        let idx_usize = idx as usize
+        let child = current.children[idx_usize]
+
+        if child == trie_null_node() {
+            return None
+        }
+
+        current = child
+        i = i + 1
     }
 
     if current.is_end {
-        current.value.as_ref()
-    } else {
-        None
+        return Some(current.value)
+    }
+    return None
+}
+
+// Returns true if the trie contains the key
+pub fn trie_contains(trie: &Trie, key: *const u8, key_len: usize) -> bool with Panic, Div {
+    match trie_get(trie, key, key_len) {
+        Some(_) => return true,
+        None => return false,
     }
 }
 
-// Looks up a mutable reference to a value by key.
-pub fn trie_get_mut<V>(trie: &!Trie<V>, key: &str) -> Option<&!V> {
-    var current = &!trie.root;
+// Removes a key from the trie
+// Returns Some(value) if the key existed, None otherwise
+pub fn trie_remove(trie: &!Trie, key: *const u8, key_len: usize) -> Option<i64> with Panic, Div {
+    var current = trie.root
 
-    for ch in key.chars() {
-        let idx = match char_to_index(ch) {
-            Some(i) => i,
-            None => return None
-        };
+    var i: usize = 0
+    while i < key_len {
+        let ch = key[i] as i32
+        let idx = char_to_index(ch)
 
-        match &!current.children[idx] {
-            Some(child) => current = &!**child,
-            None => return None
+        if idx < 0 {
+            return None
         }
+
+        let idx_usize = idx as usize
+        let child = current.children[idx_usize]
+
+        if child == trie_null_node() {
+            return None
+        }
+
+        current = child
+        i = i + 1
     }
 
     if current.is_end {
-        current.value.as_mut()
-    } else {
-        None
-    }
-}
-
-// Returns true if the trie contains the key.
-pub fn trie_contains<V>(trie: &Trie<V>, key: &str) -> bool {
-    trie_get(trie, key).is_some()
-}
-
-// Removes a key from the trie.
-//
-// Returns the removed value if the key existed.
-pub fn trie_remove<V>(trie: &!Trie<V>, key: &str) -> Option<V> with Alloc {
-    trie_remove_recursive(&!trie.root, key, 0, &!trie.len)
-}
-
-fn trie_remove_recursive<V>(node: &!TrieNode<V>, key: &str, depth: usize, len: &!usize) -> Option<V> with Alloc {
-    if depth == key.len() {
-        // Reached the end of the key
-        if node.is_end {
-            node.is_end = false;
-            *len = *len - 1;
-            return std::mem::take(&!node.value)
-        }
-        return None
+        let old_value = current.value
+        current.is_end = false
+        current.value = 0
+        trie.len = trie.len - 1
+        return Some(old_value)
     }
 
-    let ch = key.char_at(depth);
-    let idx = match char_to_index(ch) {
-        Some(i) => i,
-        None => return None
-    };
-
-    match &!node.children[idx] {
-        Some(child) => {
-            let result = trie_remove_recursive(&!**child, key, depth + 1, len);
-
-            // Clean up empty node
-            if !child.is_end && trie_node_is_empty(child) {
-                node.children[idx] = None;
-            }
-
-            result
-        },
-        None => None
-    }
+    return None
 }
 
-fn trie_node_is_empty<V>(node: &TrieNode<V>) -> bool {
-    for child in &node.children {
-        if child.is_some() {
+// Returns true if any key in the trie starts with the given prefix
+pub fn trie_starts_with(trie: &Trie, prefix: *const u8, prefix_len: usize) -> bool with Panic, Div {
+    var current = trie.root
+
+    var i: usize = 0
+    while i < prefix_len {
+        let ch = prefix[i] as i32
+        let idx = char_to_index(ch)
+
+        if idx < 0 {
             return false
         }
-    }
-    true
-}
 
-// Clears all entries from the trie.
-pub fn trie_clear<V>(trie: &!Trie<V>) with Alloc {
-    trie.root = trie_node_new();
-    trie.len = 0;
-}
+        let idx_usize = idx as usize
+        let child = current.children[idx_usize]
 
-// =============================================================================
-// Prefix Operations
-// =============================================================================
-
-// Returns true if any key in the trie starts with the given prefix.
-pub fn trie_starts_with<V>(trie: &Trie<V>, prefix: &str) -> bool {
-    var current = &trie.root;
-
-    for ch in prefix.chars() {
-        let idx = match char_to_index(ch) {
-            Some(i) => i,
-            None => return false
-        };
-
-        match &current.children[idx] {
-            Some(child) => current = &**child,
-            None => return false
+        if child == trie_null_node() {
+            return false
         }
+
+        current = child
+        i = i + 1
     }
 
-    true
+    return true
 }
 
-// Returns all keys that start with the given prefix.
-pub fn trie_keys_with_prefix<V>(trie: &Trie<V>, prefix: &str) -> Vec<string> with Alloc {
-    var current = &trie.root;
+// Counts the number of keys with the given prefix
+pub fn trie_count_with_prefix(trie: &Trie, prefix: *const u8, prefix_len: usize) -> usize with Panic, Div {
+    var current = trie.root
 
     // Navigate to prefix node
-    for ch in prefix.chars() {
-        let idx = match char_to_index(ch) {
-            Some(i) => i,
-            None => return Vec::new()
-        };
+    var i: usize = 0
+    while i < prefix_len {
+        let ch = prefix[i] as i32
+        let idx = char_to_index(ch)
 
-        match &current.children[idx] {
-            Some(child) => current = &**child,
-            None => return Vec::new()
+        if idx < 0 {
+            return 0
         }
+
+        let idx_usize = idx as usize
+        let child = current.children[idx_usize]
+
+        if child == trie_null_node() {
+            return 0
+        }
+
+        current = child
+        i = i + 1
     }
 
-    // Collect all keys from this node
-    var results: Vec<string> = Vec::new();
-    var current_key = prefix.to_string();
-    trie_collect_keys(current, &current_key, &!results);
-    results
+    // Count all keys from this node
+    return trie_node_count_keys(current)
 }
 
-fn trie_collect_keys<V>(node: &TrieNode<V>, prefix: &str, results: &!Vec<string>) with Alloc {
-    if node.is_end {
-        results.push(prefix.to_string());
+// Helper: Count keys in a subtree
+fn trie_node_count_keys(node: *mut TrieNode) -> usize with Panic, Div {
+    if node == trie_null_node() {
+        return 0
     }
 
-    var i: usize = 0;
-    while i < TRIE_CHILDREN_SIZE {
-        if let Some(child) = &node.children[i] {
-            var new_prefix = prefix.to_string();
-            new_prefix.push(i as u8 as char);
-            trie_collect_keys(child, &new_prefix, results);
-        }
-        i = i + 1;
-    }
-}
-
-// Returns all values for keys that start with the given prefix.
-pub fn trie_values_with_prefix<V>(trie: &Trie<V>, prefix: &str) -> Vec<&V> with Alloc {
-    var current = &trie.root;
-
-    for ch in prefix.chars() {
-        let idx = match char_to_index(ch) {
-            Some(i) => i,
-            None => return Vec::new()
-        };
-
-        match &current.children[idx] {
-            Some(child) => current = &**child,
-            None => return Vec::new()
-        }
-    }
-
-    var results: Vec<&V> = Vec::new();
-    trie_collect_values(current, &!results);
-    results
-}
-
-fn trie_collect_values<V>(node: &TrieNode<V>, results: &!Vec<&V>) with Alloc {
-    if let Some(value) = &node.value {
-        results.push(value);
-    }
-
-    for child_opt in &node.children {
-        if let Some(child) = child_opt {
-            trie_collect_values(child, results);
-        }
-    }
-}
-
-// Returns keys that start with the given prefix, limited to max_results.
-//
-// This is useful for autocomplete functionality.
-pub fn trie_autocomplete<V>(trie: &Trie<V>, prefix: &str, max_results: usize) -> Vec<string> with Alloc {
-    var current = &trie.root;
-
-    for ch in prefix.chars() {
-        let idx = match char_to_index(ch) {
-            Some(i) => i,
-            None => return Vec::new()
-        };
-
-        match &current.children[idx] {
-            Some(child) => current = &**child,
-            None => return Vec::new()
-        }
-    }
-
-    var results: Vec<string> = Vec::new();
-    var current_key = prefix.to_string();
-    trie_collect_keys_limited(current, &current_key, &!results, max_results);
-    results
-}
-
-fn trie_collect_keys_limited<V>(node: &TrieNode<V>, prefix: &str, results: &!Vec<string>, max: usize) with Alloc {
-    if results.len() >= max {
-        return
-    }
+    var count: usize = 0
 
     if node.is_end {
-        results.push(prefix.to_string());
-        if results.len() >= max {
-            return
-        }
+        count = 1
     }
 
-    var i: usize = 0;
-    while i < TRIE_CHILDREN_SIZE && results.len() < max {
-        if let Some(child) = &node.children[i] {
-            var new_prefix = prefix.to_string();
-            new_prefix.push(i as u8 as char);
-            trie_collect_keys_limited(child, &new_prefix, results, max);
-        }
-        i = i + 1;
-    }
-}
-
-// =============================================================================
-// Longest Common Prefix
-// =============================================================================
-
-// Returns the longest common prefix among all keys in the trie.
-pub fn trie_longest_common_prefix<V>(trie: &Trie<V>) -> string with Alloc {
-    if trie.len == 0 {
-        return "".to_string()
-    }
-
-    var result = String::new();
-    var current = &trie.root;
-
-    loop {
-        // Count non-null children
-        var non_null_count: usize = 0;
-        var only_child_idx: Option<usize> = None;
-
-        var i: usize = 0;
-        while i < TRIE_CHILDREN_SIZE {
-            if current.children[i].is_some() {
-                non_null_count = non_null_count + 1;
-                only_child_idx = Some(i);
-            }
-            i = i + 1;
-        }
-
-        // Stop if node marks end of a key or has multiple children
-        if current.is_end || non_null_count != 1 {
-            break
-        }
-
-        // Continue down the only path
-        let idx = only_child_idx.unwrap();
-        result.push(idx as u8 as char);
-        current = &*current.children[idx].as_ref().unwrap();
-    }
-
-    result
-}
-
-// Returns the longest prefix of the given key that exists in the trie.
-pub fn trie_longest_prefix_of<V>(trie: &Trie<V>, query: &str) -> string with Alloc {
-    var current = &trie.root;
-    var length: usize = 0;
-    var last_match_length: usize = 0;
-
-    for ch in query.chars() {
-        let idx = match char_to_index(ch) {
-            Some(i) => i,
-            None => break
-        };
-
-        match &current.children[idx] {
-            Some(child) => {
-                current = &**child;
-                length = length + 1;
-                if current.is_end {
-                    last_match_length = length;
-                }
-            },
-            None => break
-        }
-    }
-
-    if last_match_length > 0 {
-        query[..last_match_length].to_string()
-    } else {
-        "".to_string()
-    }
-}
-
-// =============================================================================
-// Wildcard Matching
-// =============================================================================
-
-// Searches for keys matching a pattern with wildcards.
-//
-// '.' matches any single character
-// '*' is not supported (would require more complex algorithm)
-pub fn trie_search_pattern<V>(trie: &Trie<V>, pattern: &str) -> Vec<string> with Alloc {
-    var results: Vec<string> = Vec::new();
-    trie_search_pattern_recursive(&trie.root, pattern, 0, &"".to_string(), &!results);
-    results
-}
-
-fn trie_search_pattern_recursive<V>(
-    node: &TrieNode<V>,
-    pattern: &str,
-    depth: usize,
-    prefix: &str,
-    results: &!Vec<string>
-) with Alloc {
-    if depth == pattern.len() {
-        if node.is_end {
-            results.push(prefix.to_string());
-        }
-        return
-    }
-
-    let ch = pattern.char_at(depth);
-
-    if ch == '.' {
-        // Match any character
-        var i: usize = 0;
-        while i < TRIE_CHILDREN_SIZE {
-            if let Some(child) = &node.children[i] {
-                var new_prefix = prefix.to_string();
-                new_prefix.push(i as u8 as char);
-                trie_search_pattern_recursive(child, pattern, depth + 1, &new_prefix, results);
-            }
-            i = i + 1;
-        }
-    } else {
-        // Match specific character
-        let idx = match char_to_index(ch) {
-            Some(i) => i,
-            None => return
-        };
-
-        if let Some(child) = &node.children[idx] {
-            var new_prefix = prefix.to_string();
-            new_prefix.push(ch);
-            trie_search_pattern_recursive(child, pattern, depth + 1, &new_prefix, results);
-        }
-    }
-}
-
-// =============================================================================
-// Statistics
-// =============================================================================
-
-// Returns the number of nodes in the trie.
-pub fn trie_node_count<V>(trie: &Trie<V>) -> usize {
-    trie_count_nodes(&trie.root)
-}
-
-fn trie_count_nodes<V>(node: &TrieNode<V>) -> usize {
-    var count: usize = 1;
-
-    for child_opt in &node.children {
-        if let Some(child) = child_opt {
-            count = count + trie_count_nodes(child);
-        }
-    }
-
-    count
-}
-
-// Returns the total depth of all keys (sum of all key lengths).
-pub fn trie_total_depth<V>(trie: &Trie<V>) -> usize {
-    trie_sum_depths(&trie.root, 0)
-}
-
-fn trie_sum_depths<V>(node: &TrieNode<V>, depth: usize) -> usize {
-    var sum = if node.is_end { depth } else { 0 };
-
-    for child_opt in &node.children {
-        if let Some(child) = child_opt {
-            sum = sum + trie_sum_depths(child, depth + 1);
-        }
-    }
-
-    sum
-}
-
-// Returns the average key length in the trie.
-pub fn trie_average_key_length<V>(trie: &Trie<V>) -> f64 {
-    if trie.len == 0 {
-        0.0
-    } else {
-        trie_total_depth(trie) as f64 / trie.len as f64
-    }
-}
-
-// =============================================================================
-// Iteration
-// =============================================================================
-
-// Iterator over trie entries
-pub struct TrieIter<V> {
-    stack: Vec<(&TrieNode<V>, String, usize)>,
-}
-
-// Returns an iterator over all (key, value) pairs in the trie.
-pub fn trie_iter<V>(trie: &Trie<V>) -> TrieIter<V> with Alloc {
-    var iter = TrieIter {
-        stack: Vec::new()
-    };
-    iter.stack.push((&trie.root, String::new(), 0));
-    iter
-}
-
-// Advances the iterator and returns the next (key, value) pair.
-pub fn trie_iter_next<V>(iter: &!TrieIter<V>) -> Option<(string, &V)> with Alloc {
-    while !iter.stack.is_empty() {
-        let (node, prefix, start_idx) = iter.stack.pop().unwrap();
-
-        // Check if this node has a value and we haven't returned it yet
-        if start_idx == 0 && node.is_end {
-            if let Some(value) = &node.value {
-                // Push back to continue with children
-                iter.stack.push((node, prefix.clone(), 1));
-                return Some((prefix, value))
-            }
-        }
-
-        // Process children
-        var i = if start_idx > 0 { 0 } else { 0 };
-        while i < TRIE_CHILDREN_SIZE {
-            if let Some(child) = &node.children[i] {
-                var new_prefix = prefix.clone();
-                new_prefix.push(i as u8 as char);
-                iter.stack.push((child, new_prefix, 0));
-            }
-            i = i + 1;
-        }
-    }
-
-    None
-}
-
-// =============================================================================
-// Conversion Functions
-// =============================================================================
-
-// Creates a trie from an iterator of (key, value) pairs.
-pub fn trie_from_iter<I, V>(iter: I) -> Trie<V> with Alloc
-where
-    I: Iterator<Item = (string, V)>,
-    V: Clone
-{
-    var trie = trie_new();
-    for (key, value) in iter {
-        trie_insert(&!trie, &key, value);
-    }
-    trie
-}
-
-// Collects all entries into a vector of (key, value) pairs.
-pub fn trie_to_vec<V>(trie: &Trie<V>) -> Vec<(string, V)> with Alloc
-where V: Clone
-{
-    var results: Vec<(string, V)> = Vec::new();
-    trie_collect_entries(&trie.root, &"".to_string(), &!results);
-    results
-}
-
-fn trie_collect_entries<V>(node: &TrieNode<V>, prefix: &str, results: &!Vec<(string, V)>) with Alloc
-where V: Clone
-{
-    if let Some(value) = &node.value {
-        results.push((prefix.to_string(), value.clone()));
-    }
-
-    var i: usize = 0;
+    var i: usize = 0
     while i < TRIE_CHILDREN_SIZE {
-        if let Some(child) = &node.children[i] {
-            var new_prefix = prefix.to_string();
-            new_prefix.push(i as u8 as char);
-            trie_collect_entries(child, &new_prefix, results);
+        let child = node.children[i]
+        if child != trie_null_node() {
+            count = count + trie_node_count_keys(child)
         }
-        i = i + 1;
+        i = i + 1
     }
+
+    return count
+}
+
+// Returns the total number of nodes in the trie
+pub fn trie_node_count(trie: &Trie) -> usize with Panic, Div {
+    return trie_count_nodes_recursive(trie.root)
+}
+
+// Helper: Count nodes recursively
+fn trie_count_nodes_recursive(node: *mut TrieNode) -> usize with Panic, Div {
+    if node == trie_null_node() {
+        return 0
+    }
+
+    var count: usize = 1
+
+    var i: usize = 0
+    while i < TRIE_CHILDREN_SIZE {
+        let child = node.children[i]
+        if child != trie_null_node() {
+            count = count + trie_count_nodes_recursive(child)
+        }
+        i = i + 1
+    }
+
+    return count
+}
+
+// Returns the total depth of all keys (sum of all key lengths)
+pub fn trie_total_depth(trie: &Trie) -> usize with Panic, Div {
+    return trie_sum_depths_recursive(trie.root, 0)
+}
+
+// Helper: Sum depths recursively
+fn trie_sum_depths_recursive(node: *mut TrieNode, depth: usize) -> usize with Panic, Div {
+    if node == trie_null_node() {
+        return 0
+    }
+
+    var sum: usize = 0
+
+    if node.is_end {
+        sum = depth
+    }
+
+    var i: usize = 0
+    while i < TRIE_CHILDREN_SIZE {
+        let child = node.children[i]
+        if child != trie_null_node() {
+            sum = sum + trie_sum_depths_recursive(child, depth + 1)
+        }
+        i = i + 1
+    }
+
+    return sum
+}
+
+// Returns the average key length in the trie (as integer, rounded down)
+pub fn trie_average_key_length(trie: &Trie) -> usize with Div, Panic {
+    if trie.len == 0 {
+        return 0
+    }
+    return trie_total_depth(trie) / trie.len
+}
+
+// Clears all entries from the trie
+pub fn trie_clear(trie: &!Trie) with Alloc, Panic, Div {
+    // Free old root and children
+    trie_node_drop(trie.root)
+
+    // Create fresh root
+    trie.root = trie_node_new()
+    trie.len = 0
+}
+
+// Check if a node has no children
+fn trie_node_is_empty(node: *mut TrieNode) -> bool with Panic, Div {
+    if node == trie_null_node() {
+        return true
+    }
+
+    var i: usize = 0
+    while i < TRIE_CHILDREN_SIZE {
+        if node.children[i] != trie_null_node() {
+            return false
+        }
+        i = i + 1
+    }
+    return true
+}
+
+// Tests
+fn test_basic_trie_operations() -> bool with Alloc, Div, Panic {
+    var trie = trie_new()
+
+    // Test empty trie
+    if !trie_is_empty(&trie) {
+        trie_drop(&!trie)
+        return false
+    }
+
+    // Insert "apple" = 1
+    let key1: [u8; 5] = [97, 112, 112, 108, 101]  // "apple"
+    let was_new = trie_insert(&!trie, &key1[0], 5, 1)
+    if !was_new {
+        trie_drop(&!trie)
+        return false
+    }
+
+    // Insert "app" = 2
+    let key2: [u8; 3] = [97, 112, 112]  // "app"
+    trie_insert(&!trie, &key2[0], 3, 2)
+
+    // Insert "banana" = 3
+    let key3: [u8; 6] = [98, 97, 110, 97, 110, 97]  // "banana"
+    trie_insert(&!trie, &key3[0], 6, 3)
+
+    // Check length
+    if trie_len(&trie) != 3 {
+        trie_drop(&!trie)
+        return false
+    }
+
+    // Test get
+    match trie_get(&trie, &key1[0], 5) {
+        Some(1) => {},
+        Some(_) => {
+            trie_drop(&!trie)
+            return false
+        },
+        None => {
+            trie_drop(&!trie)
+            return false
+        },
+    }
+
+    // Test contains
+    if !trie_contains(&trie, &key2[0], 3) {
+        trie_drop(&!trie)
+        return false
+    }
+
+    // Test starts_with
+    let prefix: [u8; 2] = [97, 112]  // "ap"
+    if !trie_starts_with(&trie, &prefix[0], 2) {
+        trie_drop(&!trie)
+        return false
+    }
+
+    // Test count_with_prefix
+    if trie_count_with_prefix(&trie, &prefix[0], 2) != 2 {
+        trie_drop(&!trie)
+        return false
+    }
+
+    // Test remove
+    match trie_remove(&!trie, &key1[0], 5) {
+        Some(1) => {},
+        Some(_) => {
+            trie_drop(&!trie)
+            return false
+        },
+        None => {
+            trie_drop(&!trie)
+            return false
+        },
+    }
+
+    if trie_len(&trie) != 2 {
+        trie_drop(&!trie)
+        return false
+    }
+
+    // Clean up
+    trie_drop(&!trie)
+    return true
+}
+
+pub fn trie_run_tests() -> bool with Alloc, Div, Panic {
+    return test_basic_trie_operations()
 }

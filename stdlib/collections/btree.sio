@@ -7,25 +7,25 @@
 //! B-trees are self-balancing and keep data sorted, making them ideal for
 //! ordered iteration and range queries.
 //!
+//! Implementation uses arena allocation with index-based node references.
+//!
 //! # Examples
 //! ```sio
 //! // BTreeMap usage
 //! var map = btree_map_new()
-//! btree_map_insert(&!map, "apple", 3)
-//! btree_map_insert(&!map, "banana", 5)
-//! btree_map_insert(&!map, "cherry", 2)
+//! btree_map_insert(&!map, 10, 100)
+//! btree_map_insert(&!map, 5, 50)
+//! btree_map_insert(&!map, 15, 150)
 //!
 //! // Keys are always sorted
-//! for entry in btree_map_iter(&map) {
-//!     print(entry.key ++ ": " ++ entry.value.to_string())
-//! }
-//! // Output: apple: 3, banana: 5, cherry: 2
-//!
-//! // Range query
-//! for entry in btree_map_range(&map, "b", "d") {
-//!     print(entry.key)  // banana, cherry
-//! }
+//! let val = btree_map_get(&map, 10)  // Returns Some(100)
 //! ```
+
+extern "C" {
+    fn malloc(size: usize) -> *mut u8;
+    fn free(ptr: *mut u8);
+    fn realloc(ptr: *mut u8, size: usize) -> *mut u8;
+}
 
 // =============================================================================
 // Constants
@@ -33,222 +33,438 @@
 
 // Minimum degree (t) - determines the capacity of nodes.
 // Each node can have at most 2t-1 keys and at least t-1 keys (except root).
-let MIN_DEGREE: usize = 4;  // B-tree with order 8
+let BTREE_MIN_DEGREE: usize = 4
 
 // Maximum keys per node
-let MAX_KEYS: usize = 2 * MIN_DEGREE - 1;  // 7
+let BTREE_MAX_KEYS: usize = 7  // 2 * MIN_DEGREE - 1
 
 // Minimum keys per node (except root)
-let MIN_KEYS: usize = MIN_DEGREE - 1;  // 3
+let BTREE_MIN_KEYS: usize = 3  // MIN_DEGREE - 1
+
+// Invalid node index (sentinel)
+let BTREE_NULL: usize = 18446744073709551615  // usize::MAX
 
 // =============================================================================
-// B-Tree Node
+// B-Tree Node (arena-based with indices)
 // =============================================================================
 
 // A node in the B-tree
-struct BTreeNode<K, V> {
-    // Keys stored in this node
-    keys: Vec<K>,
+// Uses fixed-size arrays and index-based child references
+pub struct BTreeNode {
+    // Keys stored in this node (fixed capacity)
+    keys: *mut i64,
+    keys_len: usize,
     // Values corresponding to keys
-    values: Vec<V>,
-    // Child pointers (len = keys.len() + 1 for internal nodes, 0 for leaves)
-    children: Vec<Box<BTreeNode<K, V>>>,
+    values: *mut i64,
+    // Child indices (BTREE_NULL means no child)
+    children: *mut usize,
+    children_len: usize,
     // Whether this is a leaf node
-    is_leaf: bool
-}
-
-fn btree_node_new<K, V>(is_leaf: bool) -> BTreeNode<K, V> with Alloc {
-    BTreeNode {
-        keys: Vec::new(),
-        values: Vec::new(),
-        children: Vec::new(),
-        is_leaf: is_leaf
-    }
-}
-
-fn btree_node_is_full<K, V>(node: &BTreeNode<K, V>) -> bool {
-    node.keys.len() >= MAX_KEYS
-}
-
-fn btree_node_key_count<K, V>(node: &BTreeNode<K, V>) -> usize {
-    node.keys.len()
+    is_leaf: bool,
+    // Whether this slot is in use
+    active: bool,
 }
 
 // =============================================================================
-// B-Tree Map
+// B-Tree Map (arena-based)
 // =============================================================================
 
 // A sorted map implemented as a B-tree.
 //
 // This provides O(log n) lookups, insertions, and deletions while keeping
 // keys sorted. Iteration yields entries in sorted key order.
-pub struct BTreeMap<K, V> {
-    root: Option<Box<BTreeNode<K, V>>>,
-    len: usize
+pub struct BTreeMap {
+    // Arena of nodes
+    nodes: *mut BTreeNode,
+    nodes_len: usize,
+    nodes_cap: usize,
+    // Root node index (BTREE_NULL if empty)
+    root_idx: usize,
+    // Number of key-value pairs
+    len: usize,
+    // Free list head (index of first free slot, or BTREE_NULL)
+    free_head: usize,
 }
 
-// An entry in the B-tree map
-pub struct BTreeEntry<K, V> {
-    pub key: K,
-    pub value: V
+// =============================================================================
+// Arena node management helpers
+// =============================================================================
+
+// Initialize a node at a given index in the arena
+fn btree_init_node_at(map: &!BTreeMap, idx: usize, is_leaf: bool) with Alloc, Panic, Div {
+    // Get pointers to node data area
+    let node_ptr = map.nodes as usize + idx * 72  // sizeof(BTreeNode) approx 72 bytes
+    let node = node_ptr as *mut BTreeNode
+
+    // Allocate arrays for this node
+    let keys_ptr = malloc(BTREE_MAX_KEYS * 8) as *mut i64
+    let values_ptr = malloc(BTREE_MAX_KEYS * 8) as *mut i64
+    let children_ptr = malloc((BTREE_MAX_KEYS + 1) * 8) as *mut usize
+
+    // Initialize children to NULL
+    var i: usize = 0
+    while i <= BTREE_MAX_KEYS {
+        children_ptr[i] = BTREE_NULL
+        i = i + 1
+    }
+
+    // Store values via the arena accessor
+    btree_set_node_keys(map, idx, keys_ptr)
+    btree_set_node_values(map, idx, values_ptr)
+    btree_set_node_children(map, idx, children_ptr)
+    btree_set_node_keys_len(map, idx, 0)
+    btree_set_node_children_len(map, idx, 0)
+    btree_set_node_is_leaf(map, idx, is_leaf)
+    btree_set_node_active(map, idx, true)
 }
+
+// Access functions for node fields (reading)
+fn btree_get_node_keys(map: &BTreeMap, idx: usize) -> *mut i64 with Panic, Div {
+    let base = map.nodes as usize
+    let offset = idx * 72
+    let keys_field = (base + offset) as *mut *mut i64
+    return keys_field[0]
+}
+
+fn btree_get_node_keys_len(map: &BTreeMap, idx: usize) -> usize with Panic, Div {
+    let base = map.nodes as usize
+    let offset = idx * 72 + 8
+    let len_field = (base + offset) as *mut usize
+    return len_field[0]
+}
+
+fn btree_get_node_values(map: &BTreeMap, idx: usize) -> *mut i64 with Panic, Div {
+    let base = map.nodes as usize
+    let offset = idx * 72 + 16
+    let val_field = (base + offset) as *mut *mut i64
+    return val_field[0]
+}
+
+fn btree_get_node_children(map: &BTreeMap, idx: usize) -> *mut usize with Panic, Div {
+    let base = map.nodes as usize
+    let offset = idx * 72 + 24
+    let children_field = (base + offset) as *mut *mut usize
+    return children_field[0]
+}
+
+fn btree_get_node_children_len(map: &BTreeMap, idx: usize) -> usize with Panic, Div {
+    let base = map.nodes as usize
+    let offset = idx * 72 + 32
+    let len_field = (base + offset) as *mut usize
+    return len_field[0]
+}
+
+fn btree_get_node_is_leaf(map: &BTreeMap, idx: usize) -> bool with Panic, Div {
+    let base = map.nodes as usize
+    let offset = idx * 72 + 40
+    let leaf_field = (base + offset) as *mut bool
+    return leaf_field[0]
+}
+
+fn btree_get_node_active(map: &BTreeMap, idx: usize) -> bool with Panic, Div {
+    let base = map.nodes as usize
+    let offset = idx * 72 + 48
+    let active_field = (base + offset) as *mut bool
+    return active_field[0]
+}
+
+// Setter functions for node fields
+fn btree_set_node_keys(map: &!BTreeMap, idx: usize, ptr: *mut i64) with Panic, Div {
+    let base = map.nodes as usize
+    let offset = idx * 72
+    let keys_field = (base + offset) as *mut *mut i64
+    keys_field[0] = ptr
+}
+
+fn btree_set_node_keys_len(map: &!BTreeMap, idx: usize, len: usize) with Panic, Div {
+    let base = map.nodes as usize
+    let offset = idx * 72 + 8
+    let len_field = (base + offset) as *mut usize
+    len_field[0] = len
+}
+
+fn btree_set_node_values(map: &!BTreeMap, idx: usize, ptr: *mut i64) with Panic, Div {
+    let base = map.nodes as usize
+    let offset = idx * 72 + 16
+    let val_field = (base + offset) as *mut *mut i64
+    val_field[0] = ptr
+}
+
+fn btree_set_node_children(map: &!BTreeMap, idx: usize, ptr: *mut usize) with Panic, Div {
+    let base = map.nodes as usize
+    let offset = idx * 72 + 24
+    let children_field = (base + offset) as *mut *mut usize
+    children_field[0] = ptr
+}
+
+fn btree_set_node_children_len(map: &!BTreeMap, idx: usize, len: usize) with Panic, Div {
+    let base = map.nodes as usize
+    let offset = idx * 72 + 32
+    let len_field = (base + offset) as *mut usize
+    len_field[0] = len
+}
+
+fn btree_set_node_is_leaf(map: &!BTreeMap, idx: usize, is_leaf: bool) with Panic, Div {
+    let base = map.nodes as usize
+    let offset = idx * 72 + 40
+    let leaf_field = (base + offset) as *mut bool
+    leaf_field[0] = is_leaf
+}
+
+fn btree_set_node_active(map: &!BTreeMap, idx: usize, active: bool) with Panic, Div {
+    let base = map.nodes as usize
+    let offset = idx * 72 + 48
+    let active_field = (base + offset) as *mut bool
+    active_field[0] = active
+}
+
+// Allocate a new node from the arena
+fn btree_alloc_node(map: &!BTreeMap, is_leaf: bool) -> usize with Alloc, Panic, Div {
+    // Check free list first
+    if map.free_head != BTREE_NULL {
+        let idx = map.free_head
+        // Get next free from children[0] of this node
+        let children = btree_get_node_children(map, idx)
+        map.free_head = children[0]
+        btree_init_node_at(map, idx, is_leaf)
+        return idx
+    }
+
+    // Grow arena if needed
+    if map.nodes_len >= map.nodes_cap {
+        let new_cap = map.nodes_cap * 2
+        let size_bytes = new_cap * 72
+        let new_ptr = realloc(map.nodes as *mut u8, size_bytes) as *mut BTreeNode
+        map.nodes = new_ptr
+        map.nodes_cap = new_cap
+    }
+
+    let idx = map.nodes_len
+    map.nodes_len = map.nodes_len + 1
+    btree_init_node_at(map, idx, is_leaf)
+    return idx
+}
+
+// Free a node back to the arena
+fn btree_free_node(map: &!BTreeMap, idx: usize) with Alloc, Panic, Div {
+    // Free the arrays
+    let keys = btree_get_node_keys(map, idx)
+    let values = btree_get_node_values(map, idx)
+    let children = btree_get_node_children(map, idx)
+
+    free(keys as *mut u8)
+    free(values as *mut u8)
+    free(children as *mut u8)
+
+    btree_set_node_active(map, idx, false)
+
+    // Add to free list
+    // Reuse children[0] to store next free index
+    let temp_children = malloc(8) as *mut usize
+    temp_children[0] = map.free_head
+    btree_set_node_children(map, idx, temp_children)
+    map.free_head = idx
+}
+
+// =============================================================================
+// Node operation helpers
+// =============================================================================
+
+fn btree_node_is_full(map: &BTreeMap, idx: usize) -> bool with Panic, Div {
+    return btree_get_node_keys_len(map, idx) >= BTREE_MAX_KEYS
+}
+
+// Insert key at position in node's keys array
+fn btree_node_insert_key(map: &!BTreeMap, idx: usize, pos: usize, key: i64) with Panic, Div {
+    let keys = btree_get_node_keys(map, idx)
+    var len = btree_get_node_keys_len(map, idx)
+
+    // Shift keys to make room
+    var i = len
+    while i > pos {
+        keys[i] = keys[i - 1]
+        i = i - 1
+    }
+    keys[pos] = key
+    btree_set_node_keys_len(map, idx, len + 1)
+}
+
+// Insert value at position in node's values array
+fn btree_node_insert_value(map: &!BTreeMap, idx: usize, pos: usize, value: i64) with Panic, Div {
+    let values = btree_get_node_values(map, idx)
+    var len = btree_get_node_keys_len(map, idx) - 1  // Already incremented by insert_key
+
+    var i = len
+    while i > pos {
+        values[i] = values[i - 1]
+        i = i - 1
+    }
+    values[pos] = value
+}
+
+// Insert child at position in node's children array
+fn btree_node_insert_child(map: &!BTreeMap, idx: usize, pos: usize, child_idx: usize) with Panic, Div {
+    let children = btree_get_node_children(map, idx)
+    var len = btree_get_node_children_len(map, idx)
+
+    var i = len
+    while i > pos {
+        children[i] = children[i - 1]
+        i = i - 1
+    }
+    children[pos] = child_idx
+    btree_set_node_children_len(map, idx, len + 1)
+}
+
+// Remove key at position from node's keys array
+fn btree_node_remove_key(map: &!BTreeMap, idx: usize, pos: usize) -> i64 with Panic, Div {
+    let keys = btree_get_node_keys(map, idx)
+    var len = btree_get_node_keys_len(map, idx)
+
+    let key = keys[pos]
+    var i = pos
+    while i < len - 1 {
+        keys[i] = keys[i + 1]
+        i = i + 1
+    }
+    btree_set_node_keys_len(map, idx, len - 1)
+    return key
+}
+
+// Remove value at position from node's values array
+fn btree_node_remove_value(map: &!BTreeMap, idx: usize, pos: usize) -> i64 with Panic, Div {
+    let values = btree_get_node_values(map, idx)
+    var len = btree_get_node_keys_len(map, idx) + 1  // Already decremented by remove_key
+
+    let value = values[pos]
+    var i = pos
+    while i < len - 1 {
+        values[i] = values[i + 1]
+        i = i + 1
+    }
+    return value
+}
+
+// Remove child at position from node's children array
+fn btree_node_remove_child(map: &!BTreeMap, idx: usize, pos: usize) -> usize with Panic, Div {
+    let children = btree_get_node_children(map, idx)
+    var len = btree_get_node_children_len(map, idx)
+
+    let child = children[pos]
+    var i = pos
+    while i < len - 1 {
+        children[i] = children[i + 1]
+        i = i + 1
+    }
+    btree_set_node_children_len(map, idx, len - 1)
+    return child
+}
+
+// =============================================================================
+// B-Tree Map API
+// =============================================================================
 
 // Creates a new empty BTreeMap.
-pub fn btree_map_new<K, V>() -> BTreeMap<K, V> {
-    BTreeMap {
-        root: None,
-        len: 0
+pub fn btree_map_new() -> BTreeMap with Alloc, Panic, Div {
+    let initial_cap: usize = 16
+    let size_bytes = initial_cap * 72
+    let nodes_ptr = malloc(size_bytes) as *mut BTreeNode
+
+    let result = BTreeMap {
+        nodes: nodes_ptr,
+        nodes_len: 0,
+        nodes_cap: initial_cap,
+        root_idx: BTREE_NULL,
+        len: 0,
+        free_head: BTREE_NULL,
     }
+    return result
 }
 
 // Returns the number of entries in the map.
-pub fn btree_map_len<K, V>(map: &BTreeMap<K, V>) -> usize {
-    map.len
+pub fn btree_map_len(map: &BTreeMap) -> usize {
+    return map.len
 }
 
 // Returns true if the map is empty.
-pub fn btree_map_is_empty<K, V>(map: &BTreeMap<K, V>) -> bool {
-    map.len == 0
+pub fn btree_map_is_empty(map: &BTreeMap) -> bool {
+    return map.len == 0
 }
 
-// Looks up a value by key.
-//
-// Returns `Some(&value)` if the key exists, `None` otherwise.
-pub fn btree_map_get<K, V>(map: &BTreeMap<K, V>, key: &K) -> Option<&V>
-where K: Ord
-{
-    match &map.root {
-        None => None,
-        Some(root) => btree_node_search(root, key)
-    }
-}
-
-// Looks up a mutable reference to a value by key.
-pub fn btree_map_get_mut<K, V>(map: &!BTreeMap<K, V>, key: &K) -> Option<&!V>
-where K: Ord
-{
-    match &!map.root {
-        None => None,
-        Some(root) => btree_node_search_mut(&!*root, key)
-    }
-}
-
-// Returns true if the map contains the given key.
-pub fn btree_map_contains<K, V>(map: &BTreeMap<K, V>, key: &K) -> bool
-where K: Ord
-{
-    btree_map_get(map, key).is_some()
-}
-
-// Inserts a key-value pair into the map.
-//
-// If the key already exists, the old value is replaced and returned.
-pub fn btree_map_insert<K, V>(map: &!BTreeMap<K, V>, key: K, value: V) -> Option<V> with Alloc
-where K: Ord + Clone, V: Clone
-{
-    match &!map.root {
-        None => {
-            // Create root node
-            var root = btree_node_new(true);
-            root.keys.push(key);
-            root.values.push(value);
-            map.root = Some(Box::new(root));
-            map.len = 1;
-            None
-        },
-        Some(root) => {
-            // Check if root is full
-            if btree_node_is_full(root) {
-                // Split root
-                var new_root = btree_node_new(false);
-                var old_root = std::mem::take(&!map.root).unwrap();
-                new_root.children.push(old_root);
-                btree_split_child(&!new_root, 0);
-                map.root = Some(Box::new(new_root));
-            }
-
-            let result = btree_insert_non_full(&!*map.root.as_mut().unwrap(), key, value);
-            if result.is_none() {
-                map.len = map.len + 1;
-            }
-            result
+// Frees all memory associated with the map.
+pub fn btree_map_drop(map: &!BTreeMap) with Alloc, Panic, Div {
+    // Free all active nodes' arrays
+    var i: usize = 0
+    while i < map.nodes_len {
+        if btree_get_node_active(map, i) {
+            let keys = btree_get_node_keys(map, i)
+            let values = btree_get_node_values(map, i)
+            let children = btree_get_node_children(map, i)
+            free(keys as *mut u8)
+            free(values as *mut u8)
+            free(children as *mut u8)
         }
+        i = i + 1
     }
-}
 
-// Removes a key from the map.
-//
-// Returns the removed value if the key existed.
-pub fn btree_map_remove<K, V>(map: &!BTreeMap<K, V>, key: &K) -> Option<V> with Alloc
-where K: Ord + Clone, V: Clone
-{
-    match &!map.root {
-        None => None,
-        Some(_) => {
-            let result = btree_remove(&!*map.root.as_mut().unwrap(), key);
-
-            if result.is_some() {
-                map.len = map.len - 1;
-
-                // If root has no keys and has a child, make the child the new root
-                if let Some(root) = &map.root {
-                    if root.keys.is_empty() && !root.is_leaf {
-                        let new_root = std::mem::take(&!map.root.as_mut().unwrap().children[0]);
-                        map.root = Some(new_root);
-                    }
-                }
-            }
-
-            result
-        }
-    }
-}
-
-// Clears all entries from the map.
-pub fn btree_map_clear<K, V>(map: &!BTreeMap<K, V>) {
-    map.root = None;
-    map.len = 0;
+    // Free the arena
+    free(map.nodes as *mut u8)
+    map.nodes_len = 0
+    map.nodes_cap = 0
+    map.root_idx = BTREE_NULL
+    map.len = 0
+    map.free_head = BTREE_NULL
 }
 
 // =============================================================================
 // B-Tree Search Operations
 // =============================================================================
 
-fn btree_node_search<K, V>(node: &BTreeNode<K, V>, key: &K) -> Option<&V>
-where K: Ord
-{
-    // Binary search for the key
-    var i: usize = 0;
-    while i < node.keys.len() && key > &node.keys[i] {
-        i = i + 1;
+// Search for a key in a node, returns (found, index)
+fn btree_node_search_key(map: &BTreeMap, idx: usize, key: i64) -> (bool, usize) with Panic, Div {
+    let keys = btree_get_node_keys(map, idx)
+    let len = btree_get_node_keys_len(map, idx)
+
+    var i: usize = 0
+    while i < len && key > keys[i] {
+        i = i + 1
     }
 
-    if i < node.keys.len() && key == &node.keys[i] {
-        // Found key at index i
-        Some(&node.values[i])
-    } else if node.is_leaf {
-        // Key not in tree
-        None
+    if i < len && key == keys[i] {
+        return (true, i)
+    }
+    return (false, i)
+}
+
+// Recursive search for a key in the tree
+fn btree_search(map: &BTreeMap, idx: usize, key: i64) -> Option<i64> with Panic, Div {
+    if idx == BTREE_NULL {
+        return None
+    }
+
+    let (found, pos) = btree_node_search_key(map, idx, key)
+
+    if found {
+        let values = btree_get_node_values(map, idx)
+        return Some(values[pos])
+    } else if btree_get_node_is_leaf(map, idx) {
+        return None
     } else {
-        // Search in appropriate child
-        btree_node_search(&node.children[i], key)
+        let children = btree_get_node_children(map, idx)
+        return btree_search(map, children[pos], key)
     }
 }
 
-fn btree_node_search_mut<K, V>(node: &!BTreeNode<K, V>, key: &K) -> Option<&!V>
-where K: Ord
-{
-    var i: usize = 0;
-    while i < node.keys.len() && key > &node.keys[i] {
-        i = i + 1;
-    }
+// Looks up a value by key.
+pub fn btree_map_get(map: &BTreeMap, key: i64) -> Option<i64> with Panic, Div {
+    return btree_search(map, map.root_idx, key)
+}
 
-    if i < node.keys.len() && key == &node.keys[i] {
-        Some(&!node.values[i])
-    } else if node.is_leaf {
-        None
-    } else {
-        btree_node_search_mut(&!*node.children[i], key)
+// Returns true if the map contains the given key.
+pub fn btree_map_contains(map: &BTreeMap, key: i64) -> bool with Panic, Div {
+    match btree_map_get(map, key) {
+        Some(_) => return true,
+        None => return false,
     }
 }
 
@@ -256,502 +472,687 @@ where K: Ord
 // B-Tree Insertion
 // =============================================================================
 
-fn btree_split_child<K, V>(parent: &!BTreeNode<K, V>, child_idx: usize) with Alloc
-where K: Clone, V: Clone
-{
-    let child = &!*parent.children[child_idx];
-    let mid = MIN_DEGREE - 1;
+// Split a full child node
+fn btree_split_child(map: &!BTreeMap, parent_idx: usize, child_pos: usize) with Alloc, Panic, Div {
+    let children = btree_get_node_children(map, parent_idx)
+    let child_idx = children[child_pos]
+    let mid = BTREE_MIN_DEGREE - 1
+
+    let child_is_leaf = btree_get_node_is_leaf(map, child_idx)
+    let child_keys = btree_get_node_keys(map, child_idx)
+    let child_values = btree_get_node_values(map, child_idx)
+    let child_children = btree_get_node_children(map, child_idx)
+    let child_keys_len = btree_get_node_keys_len(map, child_idx)
+    let child_children_len = btree_get_node_children_len(map, child_idx)
 
     // Create new node for right half
-    var new_node = btree_node_new(child.is_leaf);
+    let new_idx = btree_alloc_node(map, child_is_leaf)
+    let new_keys = btree_get_node_keys(map, new_idx)
+    let new_values = btree_get_node_values(map, new_idx)
+    let new_children = btree_get_node_children(map, new_idx)
 
-    // Move keys/values to new node
-    var i = mid + 1;
-    while i < child.keys.len() {
-        new_node.keys.push(child.keys[i].clone());
-        new_node.values.push(child.values[i].clone());
-        i = i + 1;
+    // Move keys/values from mid+1 to end to new node
+    var i = mid + 1
+    var new_len: usize = 0
+    while i < child_keys_len {
+        new_keys[new_len] = child_keys[i]
+        new_values[new_len] = child_values[i]
+        new_len = new_len + 1
+        i = i + 1
     }
+    btree_set_node_keys_len(map, new_idx, new_len)
 
     // Move children if not leaf
-    if !child.is_leaf {
-        var j = mid + 1;
-        while j <= child.children.len() {
-            new_node.children.push(std::mem::take(&!child.children[j]));
-            j = j + 1;
+    if !child_is_leaf {
+        var j = mid + 1
+        var new_child_len: usize = 0
+        while j < child_children_len {
+            new_children[new_child_len] = child_children[j]
+            new_child_len = new_child_len + 1
+            j = j + 1
         }
+        btree_set_node_children_len(map, new_idx, new_child_len)
     }
 
     // Get median key/value
-    let median_key = child.keys[mid].clone();
-    let median_value = child.values[mid].clone();
+    let median_key = child_keys[mid]
+    let median_value = child_values[mid]
 
     // Truncate child
-    child.keys.truncate(mid);
-    child.values.truncate(mid);
-    if !child.is_leaf {
-        child.children.truncate(mid + 1);
+    btree_set_node_keys_len(map, child_idx, mid)
+    if !child_is_leaf {
+        btree_set_node_children_len(map, child_idx, mid + 1)
     }
 
     // Insert median into parent
-    parent.keys.insert(child_idx, median_key);
-    parent.values.insert(child_idx, median_value);
-    parent.children.insert(child_idx + 1, Box::new(new_node));
+    btree_node_insert_key(map, parent_idx, child_pos, median_key)
+    btree_node_insert_value(map, parent_idx, child_pos, median_value)
+    btree_node_insert_child(map, parent_idx, child_pos + 1, new_idx)
 }
 
-fn btree_insert_non_full<K, V>(node: &!BTreeNode<K, V>, key: K, value: V) -> Option<V> with Alloc
-where K: Ord + Clone, V: Clone
-{
-    var i = node.keys.len();
+// Insert into a non-full node
+fn btree_insert_non_full(map: &!BTreeMap, idx: usize, key: i64, value: i64) -> Option<i64> with Alloc, Panic, Div {
+    var keys_len = btree_get_node_keys_len(map, idx)
+    let keys = btree_get_node_keys(map, idx)
+    let values = btree_get_node_values(map, idx)
+    let children = btree_get_node_children(map, idx)
+    let is_leaf = btree_get_node_is_leaf(map, idx)
 
-    if node.is_leaf {
+    var i = keys_len
+
+    if is_leaf {
         // Find insertion point
-        while i > 0 && key < node.keys[i - 1] {
-            i = i - 1;
+        while i > 0 && key < keys[i - 1] {
+            i = i - 1
         }
 
         // Check for existing key
-        if i < node.keys.len() && key == node.keys[i] {
-            let old = std::mem::replace(&!node.values[i], value);
+        if i < keys_len && key == keys[i] {
+            let old = values[i]
+            values[i] = value
             return Some(old)
         }
 
         // Insert new key/value
-        node.keys.insert(i, key);
-        node.values.insert(i, value);
-        None
+        btree_node_insert_key(map, idx, i, key)
+        btree_node_insert_value(map, idx, i, value)
+        return None
     } else {
         // Find child to descend into
-        while i > 0 && key < node.keys[i - 1] {
-            i = i - 1;
+        while i > 0 && key < keys[i - 1] {
+            i = i - 1
         }
 
         // Check for existing key in this node
-        if i < node.keys.len() && key == node.keys[i] {
-            let old = std::mem::replace(&!node.values[i], value);
+        if i < keys_len && key == keys[i] {
+            let old = values[i]
+            values[i] = value
             return Some(old)
         }
 
         // Check if child is full
-        if btree_node_is_full(&node.children[i]) {
-            btree_split_child(node, i);
+        if btree_node_is_full(map, children[i]) {
+            btree_split_child(map, idx, i)
+
+            // Reload keys after split
+            let new_keys = btree_get_node_keys(map, idx)
 
             // Determine which child to descend into after split
-            if key > node.keys[i] {
-                i = i + 1;
-            } else if key == node.keys[i] {
-                let old = std::mem::replace(&!node.values[i], value);
+            if key > new_keys[i] {
+                i = i + 1
+            } else if key == new_keys[i] {
+                let new_values = btree_get_node_values(map, idx)
+                let old = new_values[i]
+                new_values[i] = value
                 return Some(old)
             }
         }
 
-        btree_insert_non_full(&!*node.children[i], key, value)
+        let new_children = btree_get_node_children(map, idx)
+        return btree_insert_non_full(map, new_children[i], key, value)
     }
 }
 
-// =============================================================================
-// B-Tree Deletion
-// =============================================================================
-
-fn btree_remove<K, V>(node: &!BTreeNode<K, V>, key: &K) -> Option<V> with Alloc
-where K: Ord + Clone, V: Clone
-{
-    var i: usize = 0;
-    while i < node.keys.len() && key > &node.keys[i] {
-        i = i + 1;
-    }
-
-    if i < node.keys.len() && key == &node.keys[i] {
-        // Key found in this node
-        if node.is_leaf {
-            // Case 1: Key in leaf - just remove
-            node.keys.remove(i);
-            Some(node.values.remove(i))
-        } else {
-            // Case 2: Key in internal node
-            btree_remove_internal(node, i)
-        }
-    } else if node.is_leaf {
-        // Key not in tree
-        None
-    } else {
-        // Key may be in subtree
-        btree_remove_from_child(node, i, key)
-    }
-}
-
-fn btree_remove_internal<K, V>(node: &!BTreeNode<K, V>, key_idx: usize) -> Option<V> with Alloc
-where K: Ord + Clone, V: Clone
-{
-    let key = node.keys[key_idx].clone();
-
-    // Case 2a: Left child has at least t keys - replace with predecessor
-    if node.children[key_idx].keys.len() >= MIN_DEGREE {
-        let (pred_key, pred_value) = btree_find_predecessor(&!*node.children[key_idx]);
-        node.keys[key_idx] = pred_key.clone();
-        let old_value = std::mem::replace(&!node.values[key_idx], pred_value);
-        btree_remove(&!*node.children[key_idx], &pred_key);
-        return Some(old_value)
-    }
-
-    // Case 2b: Right child has at least t keys - replace with successor
-    if node.children[key_idx + 1].keys.len() >= MIN_DEGREE {
-        let (succ_key, succ_value) = btree_find_successor(&!*node.children[key_idx + 1]);
-        node.keys[key_idx] = succ_key.clone();
-        let old_value = std::mem::replace(&!node.values[key_idx], succ_value);
-        btree_remove(&!*node.children[key_idx + 1], &succ_key);
-        return Some(old_value)
-    }
-
-    // Case 2c: Both children have t-1 keys - merge and recurse
-    let old_value = node.values[key_idx].clone();
-    btree_merge_children(node, key_idx);
-    btree_remove(&!*node.children[key_idx], &key);
-    Some(old_value)
-}
-
-fn btree_remove_from_child<K, V>(node: &!BTreeNode<K, V>, child_idx: usize, key: &K) -> Option<V> with Alloc
-where K: Ord + Clone, V: Clone
-{
-    // Ensure child has at least MIN_DEGREE keys before descending
-    if node.children[child_idx].keys.len() < MIN_DEGREE {
-        btree_fill_child(node, child_idx);
-    }
-
-    // Recalculate child index after potential changes
-    var new_idx = child_idx;
-    if child_idx > node.keys.len() {
-        new_idx = node.keys.len();
-    }
-
-    btree_remove(&!*node.children[new_idx], key)
-}
-
-fn btree_find_predecessor<K, V>(node: &!BTreeNode<K, V>) -> (K, V)
-where K: Clone, V: Clone
-{
-    var current = node;
-    while !current.is_leaf {
-        current = &!*current.children[current.children.len() - 1];
-    }
-    let last = current.keys.len() - 1;
-    (current.keys[last].clone(), current.values[last].clone())
-}
-
-fn btree_find_successor<K, V>(node: &!BTreeNode<K, V>) -> (K, V)
-where K: Clone, V: Clone
-{
-    var current = node;
-    while !current.is_leaf {
-        current = &!*current.children[0];
-    }
-    (current.keys[0].clone(), current.values[0].clone())
-}
-
-fn btree_merge_children<K, V>(node: &!BTreeNode<K, V>, idx: usize) with Alloc
-where K: Clone, V: Clone
-{
-    let left = &!*node.children[idx];
-    let right = &!*node.children[idx + 1];
-
-    // Move key from parent to left child
-    left.keys.push(node.keys[idx].clone());
-    left.values.push(node.values[idx].clone());
-
-    // Move all keys/values from right to left
-    for k in &right.keys {
-        left.keys.push(k.clone());
-    }
-    for v in &right.values {
-        left.values.push(v.clone());
-    }
-
-    // Move children from right to left
-    if !left.is_leaf {
-        for child in &right.children {
-            left.children.push(child.clone());
-        }
-    }
-
-    // Remove key from parent
-    node.keys.remove(idx);
-    node.values.remove(idx);
-    node.children.remove(idx + 1);
-}
-
-fn btree_fill_child<K, V>(node: &!BTreeNode<K, V>, idx: usize) with Alloc
-where K: Clone, V: Clone
-{
-    // Try borrowing from left sibling
-    if idx > 0 && node.children[idx - 1].keys.len() >= MIN_DEGREE {
-        btree_borrow_from_prev(node, idx);
-        return
-    }
-
-    // Try borrowing from right sibling
-    if idx < node.children.len() - 1 && node.children[idx + 1].keys.len() >= MIN_DEGREE {
-        btree_borrow_from_next(node, idx);
-        return
-    }
-
-    // Merge with sibling
-    if idx < node.children.len() - 1 {
-        btree_merge_children(node, idx);
-    } else {
-        btree_merge_children(node, idx - 1);
-    }
-}
-
-fn btree_borrow_from_prev<K, V>(node: &!BTreeNode<K, V>, idx: usize) with Alloc
-where K: Clone, V: Clone
-{
-    let child = &!*node.children[idx];
-    let sibling = &!*node.children[idx - 1];
-
-    // Move key from parent to child front
-    child.keys.insert(0, node.keys[idx - 1].clone());
-    child.values.insert(0, node.values[idx - 1].clone());
-
-    // Move last key from sibling to parent
-    let sibling_last = sibling.keys.len() - 1;
-    node.keys[idx - 1] = sibling.keys[sibling_last].clone();
-    node.values[idx - 1] = sibling.values[sibling_last].clone();
-    sibling.keys.pop();
-    sibling.values.pop();
-
-    // Move child if not leaf
-    if !sibling.is_leaf {
-        let last_child = sibling.children.pop().unwrap();
-        child.children.insert(0, last_child);
-    }
-}
-
-fn btree_borrow_from_next<K, V>(node: &!BTreeNode<K, V>, idx: usize) with Alloc
-where K: Clone, V: Clone
-{
-    let child = &!*node.children[idx];
-    let sibling = &!*node.children[idx + 1];
-
-    // Move key from parent to child end
-    child.keys.push(node.keys[idx].clone());
-    child.values.push(node.values[idx].clone());
-
-    // Move first key from sibling to parent
-    node.keys[idx] = sibling.keys[0].clone();
-    node.values[idx] = sibling.values[0].clone();
-    sibling.keys.remove(0);
-    sibling.values.remove(0);
-
-    // Move child if not leaf
-    if !sibling.is_leaf {
-        let first_child = sibling.children.remove(0);
-        child.children.push(first_child);
-    }
-}
-
-// =============================================================================
-// B-Tree Iteration
-// =============================================================================
-
-// Iterator over B-tree map entries
-pub struct BTreeMapIter<K, V> {
-    stack: Vec<(&BTreeNode<K, V>, usize)>,
-    current: Option<(&K, &V)>
-}
-
-// Returns an iterator over the map entries in sorted order.
-pub fn btree_map_iter<K, V>(map: &BTreeMap<K, V>) -> BTreeMapIter<K, V> with Alloc {
-    var iter = BTreeMapIter {
-        stack: Vec::new(),
-        current: None
-    };
-
-    // Initialize by going to leftmost leaf
-    if let Some(root) = &map.root {
-        btree_iter_push_left(&!iter, root);
-    }
-
-    iter
-}
-
-fn btree_iter_push_left<K, V>(iter: &!BTreeMapIter<K, V>, node: &BTreeNode<K, V>) with Alloc {
-    var current = node;
-    while !current.is_leaf {
-        iter.stack.push((current, 0));
-        current = &current.children[0];
-    }
-    iter.stack.push((current, 0));
-}
-
-// Advances the iterator and returns the next entry.
-pub fn btree_iter_next<K, V>(iter: &!BTreeMapIter<K, V>) -> Option<(&K, &V)> with Alloc {
-    if iter.stack.is_empty() {
+// Inserts a key-value pair into the map.
+pub fn btree_map_insert(map: &!BTreeMap, key: i64, value: i64) -> Option<i64> with Alloc, Panic, Div {
+    if map.root_idx == BTREE_NULL {
+        // Create root node
+        let root = btree_alloc_node(map, true)
+        let keys = btree_get_node_keys(map, root)
+        let values = btree_get_node_values(map, root)
+        keys[0] = key
+        values[0] = value
+        btree_set_node_keys_len(map, root, 1)
+        map.root_idx = root
+        map.len = 1
         return None
     }
 
-    let (node, idx) = iter.stack.pop().unwrap();
-
-    if idx < node.keys.len() {
-        let result = (&node.keys[idx], &node.values[idx]);
-
-        // Push back with incremented index
-        iter.stack.push((node, idx + 1));
-
-        // If internal node, descend to right child then leftmost
-        if !node.is_leaf && idx + 1 < node.children.len() {
-            btree_iter_push_left(iter, &node.children[idx + 1]);
-        }
-
-        Some(result)
-    } else {
-        // Done with this node, continue with parent
-        btree_iter_next(iter)
+    // Check if root is full
+    if btree_node_is_full(map, map.root_idx) {
+        // Split root
+        let new_root = btree_alloc_node(map, false)
+        let new_children = btree_get_node_children(map, new_root)
+        new_children[0] = map.root_idx
+        btree_set_node_children_len(map, new_root, 1)
+        btree_split_child(map, new_root, 0)
+        map.root_idx = new_root
     }
+
+    let result = btree_insert_non_full(map, map.root_idx, key, value)
+    if result.is_none() {
+        map.len = map.len + 1
+    }
+    return result
+}
+
+// =============================================================================
+// B-Tree Deletion (simplified - basic implementation)
+// =============================================================================
+
+// Find the predecessor (rightmost key in left subtree)
+fn btree_find_predecessor(map: &BTreeMap, idx: usize) -> (i64, i64) with Panic, Div {
+    var current = idx
+    while !btree_get_node_is_leaf(map, current) {
+        let children = btree_get_node_children(map, current)
+        let children_len = btree_get_node_children_len(map, current)
+        current = children[children_len - 1]
+    }
+    let keys = btree_get_node_keys(map, current)
+    let values = btree_get_node_values(map, current)
+    let last = btree_get_node_keys_len(map, current) - 1
+    return (keys[last], values[last])
+}
+
+// Find the successor (leftmost key in right subtree)
+fn btree_find_successor(map: &BTreeMap, idx: usize) -> (i64, i64) with Panic, Div {
+    var current = idx
+    while !btree_get_node_is_leaf(map, current) {
+        let children = btree_get_node_children(map, current)
+        current = children[0]
+    }
+    let keys = btree_get_node_keys(map, current)
+    let values = btree_get_node_values(map, current)
+    return (keys[0], values[0])
+}
+
+// Merge children[idx] and children[idx+1] with key from parent
+fn btree_merge_children(map: &!BTreeMap, parent_idx: usize, idx: usize) with Alloc, Panic, Div {
+    let parent_children = btree_get_node_children(map, parent_idx)
+    let left_idx = parent_children[idx]
+    let right_idx = parent_children[idx + 1]
+
+    let parent_keys = btree_get_node_keys(map, parent_idx)
+    let parent_values = btree_get_node_values(map, parent_idx)
+
+    let left_keys = btree_get_node_keys(map, left_idx)
+    let left_values = btree_get_node_values(map, left_idx)
+    let left_children = btree_get_node_children(map, left_idx)
+    var left_keys_len = btree_get_node_keys_len(map, left_idx)
+    var left_children_len = btree_get_node_children_len(map, left_idx)
+    let left_is_leaf = btree_get_node_is_leaf(map, left_idx)
+
+    let right_keys = btree_get_node_keys(map, right_idx)
+    let right_values = btree_get_node_values(map, right_idx)
+    let right_children = btree_get_node_children(map, right_idx)
+    let right_keys_len = btree_get_node_keys_len(map, right_idx)
+    let right_children_len = btree_get_node_children_len(map, right_idx)
+
+    // Move key from parent to left child
+    left_keys[left_keys_len] = parent_keys[idx]
+    left_values[left_keys_len] = parent_values[idx]
+    left_keys_len = left_keys_len + 1
+
+    // Move all keys/values from right to left
+    var i: usize = 0
+    while i < right_keys_len {
+        left_keys[left_keys_len] = right_keys[i]
+        left_values[left_keys_len] = right_values[i]
+        left_keys_len = left_keys_len + 1
+        i = i + 1
+    }
+    btree_set_node_keys_len(map, left_idx, left_keys_len)
+
+    // Move children from right to left
+    if !left_is_leaf {
+        var j: usize = 0
+        while j < right_children_len {
+            left_children[left_children_len] = right_children[j]
+            left_children_len = left_children_len + 1
+            j = j + 1
+        }
+        btree_set_node_children_len(map, left_idx, left_children_len)
+    }
+
+    // Remove key from parent
+    btree_node_remove_key(map, parent_idx, idx)
+    btree_node_remove_value(map, parent_idx, idx)
+    btree_node_remove_child(map, parent_idx, idx + 1)
+
+    // Free right node
+    btree_free_node(map, right_idx)
+}
+
+// Borrow a key from the left sibling
+fn btree_borrow_from_prev(map: &!BTreeMap, parent_idx: usize, idx: usize) with Panic, Div {
+    let parent_children = btree_get_node_children(map, parent_idx)
+    let child_idx = parent_children[idx]
+    let sibling_idx = parent_children[idx - 1]
+
+    let parent_keys = btree_get_node_keys(map, parent_idx)
+    let parent_values = btree_get_node_values(map, parent_idx)
+
+    // Move key from parent to child front
+    btree_node_insert_key(map, child_idx, 0, parent_keys[idx - 1])
+    btree_node_insert_value(map, child_idx, 0, parent_values[idx - 1])
+
+    // Move last key from sibling to parent
+    let sibling_keys = btree_get_node_keys(map, sibling_idx)
+    let sibling_values = btree_get_node_values(map, sibling_idx)
+    let sibling_last = btree_get_node_keys_len(map, sibling_idx) - 1
+    parent_keys[idx - 1] = sibling_keys[sibling_last]
+    parent_values[idx - 1] = sibling_values[sibling_last]
+    btree_set_node_keys_len(map, sibling_idx, sibling_last)
+
+    // Move child if not leaf
+    if !btree_get_node_is_leaf(map, sibling_idx) {
+        let sibling_children = btree_get_node_children(map, sibling_idx)
+        let sibling_children_len = btree_get_node_children_len(map, sibling_idx)
+        let last_child = sibling_children[sibling_children_len - 1]
+        btree_set_node_children_len(map, sibling_idx, sibling_children_len - 1)
+        btree_node_insert_child(map, child_idx, 0, last_child)
+    }
+}
+
+// Borrow a key from the right sibling
+fn btree_borrow_from_next(map: &!BTreeMap, parent_idx: usize, idx: usize) with Panic, Div {
+    let parent_children = btree_get_node_children(map, parent_idx)
+    let child_idx = parent_children[idx]
+    let sibling_idx = parent_children[idx + 1]
+
+    let parent_keys = btree_get_node_keys(map, parent_idx)
+    let parent_values = btree_get_node_values(map, parent_idx)
+
+    let child_keys = btree_get_node_keys(map, child_idx)
+    let child_values = btree_get_node_values(map, child_idx)
+    var child_keys_len = btree_get_node_keys_len(map, child_idx)
+
+    // Move key from parent to child end
+    child_keys[child_keys_len] = parent_keys[idx]
+    child_values[child_keys_len] = parent_values[idx]
+    btree_set_node_keys_len(map, child_idx, child_keys_len + 1)
+
+    // Move first key from sibling to parent
+    let sibling_keys = btree_get_node_keys(map, sibling_idx)
+    let sibling_values = btree_get_node_values(map, sibling_idx)
+    parent_keys[idx] = sibling_keys[0]
+    parent_values[idx] = sibling_values[0]
+    btree_node_remove_key(map, sibling_idx, 0)
+    btree_node_remove_value(map, sibling_idx, 0)
+
+    // Move child if not leaf
+    if !btree_get_node_is_leaf(map, sibling_idx) {
+        let sibling_children = btree_get_node_children(map, sibling_idx)
+        let first_child = sibling_children[0]
+        btree_node_remove_child(map, sibling_idx, 0)
+
+        let child_children = btree_get_node_children(map, child_idx)
+        let child_children_len = btree_get_node_children_len(map, child_idx)
+        child_children[child_children_len] = first_child
+        btree_set_node_children_len(map, child_idx, child_children_len + 1)
+    }
+}
+
+// Fill a child that has fewer than MIN_DEGREE keys
+fn btree_fill_child(map: &!BTreeMap, parent_idx: usize, idx: usize) with Alloc, Panic, Div {
+    let parent_children = btree_get_node_children(map, parent_idx)
+    let children_len = btree_get_node_children_len(map, parent_idx)
+
+    // Try borrowing from left sibling
+    if idx > 0 {
+        let left_sibling = parent_children[idx - 1]
+        if btree_get_node_keys_len(map, left_sibling) >= BTREE_MIN_DEGREE {
+            btree_borrow_from_prev(map, parent_idx, idx)
+            return
+        }
+    }
+
+    // Try borrowing from right sibling
+    if idx < children_len - 1 {
+        let right_sibling = parent_children[idx + 1]
+        if btree_get_node_keys_len(map, right_sibling) >= BTREE_MIN_DEGREE {
+            btree_borrow_from_next(map, parent_idx, idx)
+            return
+        }
+    }
+
+    // Merge with sibling
+    if idx < children_len - 1 {
+        btree_merge_children(map, parent_idx, idx)
+    } else {
+        btree_merge_children(map, parent_idx, idx - 1)
+    }
+}
+
+// Remove a key from an internal node
+fn btree_remove_internal(map: &!BTreeMap, idx: usize, key_pos: usize) -> Option<i64> with Alloc, Panic, Div {
+    let keys = btree_get_node_keys(map, idx)
+    let values = btree_get_node_values(map, idx)
+    let children = btree_get_node_children(map, idx)
+
+    let key = keys[key_pos]
+    let old_value = values[key_pos]
+
+    let left_child = children[key_pos]
+    let right_child = children[key_pos + 1]
+
+    // Case 2a: Left child has at least MIN_DEGREE keys
+    if btree_get_node_keys_len(map, left_child) >= BTREE_MIN_DEGREE {
+        let (pred_key, pred_value) = btree_find_predecessor(map, left_child)
+        keys[key_pos] = pred_key
+        values[key_pos] = pred_value
+        btree_remove(map, left_child, pred_key)
+        return Some(old_value)
+    }
+
+    // Case 2b: Right child has at least MIN_DEGREE keys
+    if btree_get_node_keys_len(map, right_child) >= BTREE_MIN_DEGREE {
+        let (succ_key, succ_value) = btree_find_successor(map, right_child)
+        keys[key_pos] = succ_key
+        values[key_pos] = succ_value
+        btree_remove(map, right_child, succ_key)
+        return Some(old_value)
+    }
+
+    // Case 2c: Both children have MIN_DEGREE-1 keys - merge and recurse
+    btree_merge_children(map, idx, key_pos)
+    btree_remove(map, children[key_pos], key)
+    return Some(old_value)
+}
+
+// Remove from a child, ensuring it has enough keys first
+fn btree_remove_from_child(map: &!BTreeMap, parent_idx: usize, child_pos: usize, key: i64) -> Option<i64> with Alloc, Panic, Div {
+    let children = btree_get_node_children(map, parent_idx)
+    let child_idx = children[child_pos]
+
+    // Ensure child has at least MIN_DEGREE keys before descending
+    if btree_get_node_keys_len(map, child_idx) < BTREE_MIN_DEGREE {
+        btree_fill_child(map, parent_idx, child_pos)
+    }
+
+    // Recalculate child index after potential changes
+    let keys_len = btree_get_node_keys_len(map, parent_idx)
+    var new_pos = child_pos
+    if child_pos > keys_len {
+        new_pos = keys_len
+    }
+
+    let new_children = btree_get_node_children(map, parent_idx)
+    return btree_remove(map, new_children[new_pos], key)
+}
+
+// Main remove function
+fn btree_remove(map: &!BTreeMap, idx: usize, key: i64) -> Option<i64> with Alloc, Panic, Div {
+    let (found, pos) = btree_node_search_key(map, idx, key)
+
+    if found {
+        // Key found in this node
+        if btree_get_node_is_leaf(map, idx) {
+            // Case 1: Key in leaf - just remove
+            btree_node_remove_key(map, idx, pos)
+            let value = btree_node_remove_value(map, idx, pos)
+            return Some(value)
+        } else {
+            // Case 2: Key in internal node
+            return btree_remove_internal(map, idx, pos)
+        }
+    } else if btree_get_node_is_leaf(map, idx) {
+        // Key not in tree
+        return None
+    } else {
+        // Key may be in subtree
+        return btree_remove_from_child(map, idx, pos, key)
+    }
+}
+
+// Removes a key from the map.
+pub fn btree_map_remove(map: &!BTreeMap, key: i64) -> Option<i64> with Alloc, Panic, Div {
+    if map.root_idx == BTREE_NULL {
+        return None
+    }
+
+    let result = btree_remove(map, map.root_idx, key)
+
+    if result.is_some() {
+        map.len = map.len - 1
+
+        // If root has no keys and has a child, make the child the new root
+        let root_keys_len = btree_get_node_keys_len(map, map.root_idx)
+        let root_is_leaf = btree_get_node_is_leaf(map, map.root_idx)
+        if root_keys_len == 0 && !root_is_leaf {
+            let old_root = map.root_idx
+            let root_children = btree_get_node_children(map, map.root_idx)
+            map.root_idx = root_children[0]
+            btree_free_node(map, old_root)
+        }
+    }
+
+    return result
+}
+
+// Clears all entries from the map.
+pub fn btree_map_clear(map: &!BTreeMap) with Alloc, Panic, Div {
+    // Free all nodes recursively would be complex
+    // For simplicity, just reset the map
+    btree_map_drop(map)
+
+    // Reinitialize
+    let initial_cap: usize = 16
+    let size_bytes = initial_cap * 72
+    map.nodes = malloc(size_bytes) as *mut BTreeNode
+    map.nodes_len = 0
+    map.nodes_cap = initial_cap
+    map.root_idx = BTREE_NULL
+    map.len = 0
+    map.free_head = BTREE_NULL
 }
 
 // =============================================================================
 // B-Tree Range Queries
 // =============================================================================
 
-// Returns an iterator over entries with keys in the given range [start, end).
-pub fn btree_map_range<K, V>(map: &BTreeMap<K, V>, start: &K, end: &K) -> Vec<(&K, &V)> with Alloc
-where K: Ord
-{
-    var results: Vec<(&K, &V)> = Vec::new();
-
-    if let Some(root) = &map.root {
-        btree_collect_range(root, start, end, &!results);
-    }
-
-    results
-}
-
-fn btree_collect_range<K, V>(node: &BTreeNode<K, V>, start: &K, end: &K, results: &!Vec<(&K, &V)>) with Alloc
-where K: Ord
-{
-    var i: usize = 0;
-
-    // Find first key >= start
-    while i < node.keys.len() && &node.keys[i] < start {
-        if !node.is_leaf {
-            // Check subtree
-            btree_collect_range(&node.children[i], start, end, results);
-        }
-        i = i + 1;
-    }
-
-    // Collect keys in range
-    while i < node.keys.len() && &node.keys[i] < end {
-        if !node.is_leaf {
-            btree_collect_range(&node.children[i], start, end, results);
-        }
-        results.push((&node.keys[i], &node.values[i]));
-        i = i + 1;
-    }
-
-    // Check last subtree
-    if !node.is_leaf && i < node.children.len() && (i == 0 || &node.keys[i - 1] < end) {
-        btree_collect_range(&node.children[i], start, end, results);
-    }
-}
-
 // Returns the minimum key in the map.
-pub fn btree_map_min<K, V>(map: &BTreeMap<K, V>) -> Option<(&K, &V)> {
-    match &map.root {
-        None => None,
-        Some(root) => {
-            var current = &**root;
-            while !current.is_leaf {
-                current = &current.children[0];
-            }
-            if current.keys.is_empty() {
-                None
-            } else {
-                Some((&current.keys[0], &current.values[0]))
-            }
-        }
+pub fn btree_map_min_key(map: &BTreeMap) -> Option<i64> with Panic, Div {
+    if map.root_idx == BTREE_NULL {
+        return None
     }
+
+    var current = map.root_idx
+    while !btree_get_node_is_leaf(map, current) {
+        let children = btree_get_node_children(map, current)
+        current = children[0]
+    }
+
+    let keys_len = btree_get_node_keys_len(map, current)
+    if keys_len == 0 {
+        return None
+    }
+    let keys = btree_get_node_keys(map, current)
+    return Some(keys[0])
 }
 
 // Returns the maximum key in the map.
-pub fn btree_map_max<K, V>(map: &BTreeMap<K, V>) -> Option<(&K, &V)> {
-    match &map.root {
-        None => None,
-        Some(root) => {
-            var current = &**root;
-            while !current.is_leaf {
-                current = &current.children[current.children.len() - 1];
-            }
-            if current.keys.is_empty() {
-                None
-            } else {
-                let last = current.keys.len() - 1;
-                Some((&current.keys[last], &current.values[last]))
-            }
-        }
+pub fn btree_map_max_key(map: &BTreeMap) -> Option<i64> with Panic, Div {
+    if map.root_idx == BTREE_NULL {
+        return None
     }
+
+    var current = map.root_idx
+    while !btree_get_node_is_leaf(map, current) {
+        let children = btree_get_node_children(map, current)
+        let children_len = btree_get_node_children_len(map, current)
+        current = children[children_len - 1]
+    }
+
+    let keys_len = btree_get_node_keys_len(map, current)
+    if keys_len == 0 {
+        return None
+    }
+    let keys = btree_get_node_keys(map, current)
+    let last = keys_len - 1
+    return Some(keys[last])
 }
 
 // =============================================================================
-// B-Tree Set
+// B-Tree Set (wrapper around BTreeMap)
 // =============================================================================
 
 // A sorted set implemented as a B-tree.
-pub struct BTreeSet<T> {
-    map: BTreeMap<T, ()>
+pub struct BTreeSet {
+    map: BTreeMap,
 }
 
 // Creates a new empty BTreeSet.
-pub fn btree_set_new<T>() -> BTreeSet<T> {
-    BTreeSet { map: btree_map_new() }
+pub fn btree_set_new() -> BTreeSet with Alloc, Panic, Div {
+    let result = BTreeSet {
+        map: btree_map_new(),
+    }
+    return result
 }
 
 // Returns the number of elements in the set.
-pub fn btree_set_len<T>(set: &BTreeSet<T>) -> usize {
-    btree_map_len(&set.map)
+pub fn btree_set_len(set: &BTreeSet) -> usize {
+    return btree_map_len(&set.map)
 }
 
 // Returns true if the set is empty.
-pub fn btree_set_is_empty<T>(set: &BTreeSet<T>) -> bool {
-    btree_map_is_empty(&set.map)
+pub fn btree_set_is_empty(set: &BTreeSet) -> bool {
+    return btree_map_is_empty(&set.map)
 }
 
 // Returns true if the set contains the value.
-pub fn btree_set_contains<T>(set: &BTreeSet<T>, value: &T) -> bool
-where T: Ord
-{
-    btree_map_contains(&set.map, value)
+pub fn btree_set_contains(set: &BTreeSet, value: i64) -> bool with Panic, Div {
+    return btree_map_contains(&set.map, value)
 }
 
 // Inserts a value into the set.
-//
-// Returns true if the value was newly inserted, false if it already existed.
-pub fn btree_set_insert<T>(set: &!BTreeSet<T>, value: T) -> bool with Alloc
-where T: Ord + Clone
-{
-    btree_map_insert(&!set.map, value, ()).is_none()
+pub fn btree_set_insert(set: &!BTreeSet, value: i64) -> bool with Alloc, Panic, Div {
+    let result = btree_map_insert(&!set.map, value, 0)
+    return result.is_none()
 }
 
 // Removes a value from the set.
-//
-// Returns true if the value was present.
-pub fn btree_set_remove<T>(set: &!BTreeSet<T>, value: &T) -> bool with Alloc
-where T: Ord + Clone
-{
-    btree_map_remove(&!set.map, value).is_some()
+pub fn btree_set_remove(set: &!BTreeSet, value: i64) -> bool with Alloc, Panic, Div {
+    let result = btree_map_remove(&!set.map, value)
+    return result.is_some()
 }
 
 // Clears all elements from the set.
-pub fn btree_set_clear<T>(set: &!BTreeSet<T>) {
-    btree_map_clear(&!set.map);
+pub fn btree_set_clear(set: &!BTreeSet) with Alloc, Panic, Div {
+    btree_map_clear(&!set.map)
+}
+
+// Frees all memory associated with the set.
+pub fn btree_set_drop(set: &!BTreeSet) with Alloc, Panic, Div {
+    btree_map_drop(&!set.map)
 }
 
 // Returns the minimum value in the set.
-pub fn btree_set_min<T>(set: &BTreeSet<T>) -> Option<&T> {
-    btree_map_min(&set.map).map(|(k, _)| k)
+pub fn btree_set_min(set: &BTreeSet) -> Option<i64> with Panic, Div {
+    return btree_map_min_key(&set.map)
 }
 
 // Returns the maximum value in the set.
-pub fn btree_set_max<T>(set: &BTreeSet<T>) -> Option<&T> {
-    btree_map_max(&set.map).map(|(k, _)| k)
+pub fn btree_set_max(set: &BTreeSet) -> Option<i64> with Panic, Div {
+    return btree_map_max_key(&set.map)
+}
+
+// =============================================================================
+// Tests
+// =============================================================================
+
+fn test_btree_basic_operations() -> bool with Alloc, Panic, Div {
+    var map = btree_map_new()
+
+    // Test insert
+    btree_map_insert(&!map, 10, 100)
+    btree_map_insert(&!map, 5, 50)
+    btree_map_insert(&!map, 15, 150)
+    btree_map_insert(&!map, 3, 30)
+    btree_map_insert(&!map, 7, 70)
+
+    // Test get
+    match btree_map_get(&map, 10) {
+        Some(100) => {},
+        _ => return false,
+    }
+    match btree_map_get(&map, 5) {
+        Some(50) => {},
+        _ => return false,
+    }
+    match btree_map_get(&map, 99) {
+        None => {},
+        _ => return false,
+    }
+
+    // Test len
+    if btree_map_len(&map) != 5 {
+        return false
+    }
+
+    // Test contains
+    if !btree_map_contains(&map, 7) {
+        return false
+    }
+    if btree_map_contains(&map, 99) {
+        return false
+    }
+
+    btree_map_drop(&!map)
+    return true
+}
+
+fn test_btree_removal() -> bool with Alloc, Panic, Div {
+    var map = btree_map_new()
+
+    // Insert values
+    btree_map_insert(&!map, 10, 100)
+    btree_map_insert(&!map, 5, 50)
+    btree_map_insert(&!map, 15, 150)
+
+    // Remove middle value
+    match btree_map_remove(&!map, 10) {
+        Some(100) => {},
+        _ => return false,
+    }
+
+    if btree_map_len(&map) != 2 {
+        return false
+    }
+
+    if btree_map_contains(&map, 10) {
+        return false
+    }
+
+    btree_map_drop(&!map)
+    return true
+}
+
+fn test_btree_set() -> bool with Alloc, Panic, Div {
+    var set = btree_set_new()
+
+    // Insert values
+    if !btree_set_insert(&!set, 10) {
+        return false
+    }
+    if !btree_set_insert(&!set, 5) {
+        return false
+    }
+    if btree_set_insert(&!set, 10) {  // Duplicate
+        return false
+    }
+
+    if btree_set_len(&set) != 2 {
+        return false
+    }
+
+    if !btree_set_contains(&set, 5) {
+        return false
+    }
+
+    btree_set_drop(&!set)
+    return true
+}
+
+pub fn btree_run_tests() -> bool with Alloc, Panic, Div {
+    if !test_btree_basic_operations() {
+        return false
+    }
+    if !test_btree_removal() {
+        return false
+    }
+    if !test_btree_set() {
+        return false
+    }
+    return true
 }
