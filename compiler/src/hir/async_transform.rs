@@ -116,12 +116,91 @@ pub struct CapturedLocal {
     pub used_in_states: Vec<u32>,
 }
 
+/// Information about a single extracted await
+#[derive(Debug, Clone)]
+pub struct AwaitExtraction {
+    /// The future expression being awaited
+    pub future: HirExpr,
+    /// Temporary variable name to store the result
+    pub temp_name: String,
+    /// The type of the awaited result
+    pub result_type: HirType,
+    /// The evaluation context where this await appears
+    pub context: EvalContext,
+}
+
+/// Represents the position of an await in an expression tree
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum EvalContext {
+    /// Await is at the root of the expression
+    Root,
+    /// Await is a function call argument (index)
+    CallArg(usize),
+    /// Await is the function being called
+    CallFunc,
+    /// Await is the left operand of a binary operation
+    BinaryLeft,
+    /// Await is the right operand of a binary operation
+    BinaryRight,
+    /// Await is inside a unary operation
+    UnaryOperand,
+    /// Await is the receiver of a method call
+    MethodReceiver,
+    /// Await is a method call argument (index)
+    MethodArg(usize),
+    /// Await is inside a block statement
+    BlockStmt,
+    /// Await is in the condition of an if expression
+    IfCondition,
+    /// Await is in the then branch of an if expression
+    IfThen,
+    /// Await is in the else branch of an if expression
+    IfElse,
+}
+
+/// Where a binding result should be stored
+#[derive(Debug, Clone)]
+pub enum BindingTarget {
+    /// Bind to a new let statement with the given name
+    Let { name: String, is_mut: bool },
+    /// Bind to an assignment target
+    Assign(String),
+    /// No binding, just execute for side effects
+    None,
+}
+
+/// Result of extracting all awaits from an expression
+#[derive(Debug, Clone)]
+pub struct ExtractedAwaits {
+    /// The expression with awaits replaced by temporaries
+    pub expr: HirExpr,
+    /// All extracted awaits in bottom-up order
+    pub awaits: Vec<AwaitExtraction>,
+}
+
+impl ExtractedAwaits {
+    /// Create an ExtractedAwaits with no extractions
+    pub fn none(expr: HirExpr) -> Self {
+        Self {
+            expr,
+            awaits: Vec::new(),
+        }
+    }
+
+    /// Check if any awaits were extracted
+    pub fn has_awaits(&self) -> bool {
+        !self.awaits.is_empty()
+    }
+}
+
 /// Async function transformer
 ///
 /// Transforms HIR async functions into state machines.
 pub struct AsyncTransformer {
     /// Counter for generating state indices
     state_counter: u32,
+    /// Counter for generating temporary variable names
+    temp_counter: u32,
     /// The states being built
     states: Vec<AsyncStateNode>,
     /// Captured locals discovered during transformation
@@ -137,6 +216,7 @@ impl AsyncTransformer {
     pub fn new() -> Self {
         Self {
             state_counter: 0,
+            temp_counter: 0,
             states: Vec::new(),
             captured_locals: HashMap::new(),
             current_state: 0,
@@ -174,6 +254,7 @@ impl AsyncTransformer {
     /// Reset the transformer for a new function
     fn reset(&mut self) {
         self.state_counter = 0;
+        self.temp_counter = 0;
         self.states.clear();
         self.captured_locals.clear();
         self.current_state = 0;
@@ -205,8 +286,6 @@ impl AsyncTransformer {
     /// Transform a block of statements
     fn transform_block(&mut self, block: &HirBlock) -> StateTransition {
         for (i, stmt) in block.stmts.iter().enumerate() {
-            let is_last = i == block.stmts.len() - 1;
-
             match stmt {
                 HirStmt::Let {
                     name,
@@ -216,41 +295,34 @@ impl AsyncTransformer {
                     layout_hint,
                 } => {
                     if let Some(expr) = value {
-                        // Check if the value expression contains an await
-                        if let Some(await_transition) = self.check_for_await(expr) {
-                            // We need to split here
-                            // First, finalize the current state with await transition
-                            let next_state = self.new_state(AsyncStateKind::ResumePoint {
-                                result_binding: Some(name.clone()),
-                            });
+                        // Extract all awaits from the value expression
+                        let extracted = self.extract_awaits(expr);
 
-                            // Track this as a captured local
-                            self.captured_locals.insert(
-                                name.clone(),
-                                CapturedLocal {
+                        if extracted.has_awaits() {
+                            // Build state sequence for awaits and bind result
+                            self.build_await_sequence(
+                                &extracted,
+                                &BindingTarget::Let {
                                     name: name.clone(),
-                                    ty: ty.clone(),
                                     is_mut: *is_mut,
-                                    defined_in_state: self.current_state,
-                                    used_in_states: vec![next_state],
                                 },
                             );
-
-                            self.finalize_state(StateTransition::Await {
-                                future_expr: await_transition,
-                                resume_state: next_state,
+                        } else {
+                            // No awaits - just add the statement normally
+                            self.current_stmts.push(HirStmt::Let {
+                                name: name.clone(),
+                                ty: ty.clone(),
+                                value: Some(extracted.expr),
+                                is_mut: *is_mut,
+                                layout_hint: layout_hint.clone(),
                             });
-
-                            // Continue from the new state
-                            self.current_state = next_state;
-                            continue;
                         }
+                    } else {
+                        // No value, just add as-is
+                        self.current_stmts.push(stmt.clone());
                     }
 
-                    // No await - just add the statement normally
-                    self.current_stmts.push(stmt.clone());
-
-                    // Track as captured if might be used across await
+                    // Track as captured local
                     self.captured_locals.insert(
                         name.clone(),
                         CapturedLocal {
@@ -264,22 +336,7 @@ impl AsyncTransformer {
                 }
 
                 HirStmt::Expr(expr) => {
-                    // Check for await in the expression
-                    if let Some(await_expr) = self.check_for_await(expr) {
-                        let next_state = self.new_state(AsyncStateKind::ResumePoint {
-                            result_binding: None,
-                        });
-
-                        self.finalize_state(StateTransition::Await {
-                            future_expr: await_expr,
-                            resume_state: next_state,
-                        });
-
-                        self.current_state = next_state;
-                        continue;
-                    }
-
-                    // Handle return expressions
+                    // Handle return expressions specially
                     if let HirExprKind::Return(ret_val) = &expr.kind {
                         let return_expr = ret_val.as_ref().map_or_else(
                             || HirExpr {
@@ -289,31 +346,62 @@ impl AsyncTransformer {
                             },
                             |e| (**e).clone(),
                         );
-                        return StateTransition::Return(return_expr);
+
+                        // Check if return value has awaits
+                        let extracted = self.extract_awaits(&return_expr);
+                        if extracted.has_awaits() {
+                            // Handle awaits in return value - create states for them
+                            // but the final transition should be Return instead of just an expr
+                            for (i, await_info) in extracted.awaits.iter().enumerate() {
+                                let next_state = self.new_state(AsyncStateKind::ResumePoint {
+                                    result_binding: Some(await_info.temp_name.clone()),
+                                });
+
+                                self.finalize_state(StateTransition::Await {
+                                    future_expr: await_info.future.clone(),
+                                    resume_state: next_state,
+                                });
+
+                                self.current_state = next_state;
+                            }
+                            return StateTransition::Return(extracted.expr);
+                        } else {
+                            return StateTransition::Return(extracted.expr);
+                        }
                     }
 
-                    // Normal expression statement
-                    self.current_stmts.push(stmt.clone());
+                    // Regular expression statement
+                    let extracted = self.extract_awaits(expr);
+
+                    if extracted.has_awaits() {
+                        // Build state sequence for awaits without binding
+                        self.build_await_sequence(&extracted, &BindingTarget::None);
+                    } else {
+                        // No awaits, just add expression
+                        self.current_stmts.push(HirStmt::Expr(extracted.expr));
+                    }
                 }
 
                 HirStmt::Assign { target, value } => {
-                    // Check for await in the value
-                    if let Some(await_expr) = self.check_for_await(value) {
-                        // Need to handle this specially - store the target info
-                        let next_state = self.new_state(AsyncStateKind::ResumePoint {
-                            result_binding: self.extract_assign_target(target),
-                        });
+                    // Extract awaits from the value
+                    let extracted = self.extract_awaits(value);
 
-                        self.finalize_state(StateTransition::Await {
-                            future_expr: await_expr,
-                            resume_state: next_state,
-                        });
+                    if extracted.has_awaits() {
+                        let target_name = self.extract_assign_target(target);
+                        let binding_target = if let Some(name) = target_name {
+                            BindingTarget::Assign(name)
+                        } else {
+                            BindingTarget::None
+                        };
 
-                        self.current_state = next_state;
-                        continue;
+                        self.build_await_sequence(&extracted, &binding_target);
+                    } else {
+                        // No awaits, just add the statement
+                        self.current_stmts.push(HirStmt::Assign {
+                            target: target.clone(),
+                            value: extracted.expr,
+                        });
                     }
-
-                    self.current_stmts.push(stmt.clone());
                 }
             }
         }
@@ -434,6 +522,363 @@ impl AsyncTransformer {
             HirExprKind::Local(name) => Some(name.clone()),
             _ => None,
         }
+    }
+
+    /// Generate a fresh temporary variable name
+    fn gen_temp(&mut self) -> String {
+        let name = format!("__await_tmp_{}", self.temp_counter);
+        self.temp_counter += 1;
+        name
+    }
+
+    /// Extract all awaits from an expression, replacing them with temporaries
+    /// Returns the modified expression and a list of extracted awaits
+    fn extract_awaits(&mut self, expr: &HirExpr) -> ExtractedAwaits {
+        let mut awaits = Vec::new();
+        let transformed = self.extract_awaits_recursive(expr, &mut awaits);
+        ExtractedAwaits {
+            expr: transformed,
+            awaits,
+        }
+    }
+
+    /// Recursively extract awaits from an expression
+    /// Collects extracted awaits in the provided vector in post-order (bottom-up)
+    fn extract_awaits_recursive(&mut self, expr: &HirExpr, awaits: &mut Vec<AwaitExtraction>) -> HirExpr {
+        match &expr.kind {
+            // Direct await - extract it
+            HirExprKind::MethodCall {
+                receiver,
+                method,
+                args: _,
+            } if method == "await" => {
+                let temp_name = self.gen_temp();
+                let result_type = expr.ty.clone();
+
+                awaits.push(AwaitExtraction {
+                    future: (**receiver).clone(),
+                    temp_name: temp_name.clone(),
+                    result_type,
+                    context: EvalContext::Root,
+                });
+
+                // Replace with a local reference to the temporary
+                HirExpr {
+                    id: expr.id,
+                    kind: HirExprKind::Local(temp_name),
+                    ty: expr.ty.clone(),
+                }
+            }
+
+            // Binary operation - check both sides and rebuild
+            HirExprKind::Binary { left, op, right } => {
+                let left_awaits_before = awaits.len();
+                let new_left = self.extract_awaits_recursive(left, awaits);
+                let left_had_awaits = awaits.len() > left_awaits_before;
+
+                let right_awaits_before = awaits.len();
+                let new_right = self.extract_awaits_recursive(right, awaits);
+                let right_had_awaits = awaits.len() > right_awaits_before;
+
+                // Update context information for extracted awaits
+                if left_had_awaits {
+                    for await_info in &mut awaits[left_awaits_before..] {
+                        if await_info.context == EvalContext::Root {
+                            await_info.context = EvalContext::BinaryLeft;
+                        }
+                    }
+                }
+                if right_had_awaits {
+                    for await_info in &mut awaits[right_awaits_before..] {
+                        if await_info.context == EvalContext::Root {
+                            await_info.context = EvalContext::BinaryRight;
+                        }
+                    }
+                }
+
+                HirExpr {
+                    id: expr.id,
+                    kind: HirExprKind::Binary {
+                        left: Box::new(new_left),
+                        op: op.clone(),
+                        right: Box::new(new_right),
+                    },
+                    ty: expr.ty.clone(),
+                }
+            }
+
+            // Unary operation
+            HirExprKind::Unary { op, expr: inner } => {
+                let new_inner = self.extract_awaits_recursive(inner, awaits);
+
+                // Update context for extracted awaits
+                if !awaits.is_empty() {
+                    if let Some(last_await) = awaits.last_mut() {
+                        if last_await.context == EvalContext::Root {
+                            last_await.context = EvalContext::UnaryOperand;
+                        }
+                    }
+                }
+
+                HirExpr {
+                    id: expr.id,
+                    kind: HirExprKind::Unary {
+                        op: op.clone(),
+                        expr: Box::new(new_inner),
+                    },
+                    ty: expr.ty.clone(),
+                }
+            }
+
+            // Function call - check function and all arguments
+            HirExprKind::Call { func, args } => {
+                let new_func = self.extract_awaits_recursive(func, awaits);
+
+                let mut new_args = Vec::new();
+                for (i, arg) in args.iter().enumerate() {
+                    let arg_awaits_before = awaits.len();
+                    let new_arg = self.extract_awaits_recursive(arg, awaits);
+
+                    // Update context for this argument's awaits
+                    for await_info in &mut awaits[arg_awaits_before..] {
+                        if await_info.context == EvalContext::Root {
+                            await_info.context = EvalContext::CallArg(i);
+                        }
+                    }
+
+                    new_args.push(new_arg);
+                }
+
+                HirExpr {
+                    id: expr.id,
+                    kind: HirExprKind::Call {
+                        func: Box::new(new_func),
+                        args: new_args,
+                    },
+                    ty: expr.ty.clone(),
+                }
+            }
+
+            // Method call - check receiver and arguments
+            HirExprKind::MethodCall {
+                receiver,
+                method,
+                args,
+            } => {
+                let new_receiver = self.extract_awaits_recursive(receiver, awaits);
+
+                let mut new_args = Vec::new();
+                for (i, arg) in args.iter().enumerate() {
+                    let arg_awaits_before = awaits.len();
+                    let new_arg = self.extract_awaits_recursive(arg, awaits);
+
+                    // Update context for this argument's awaits
+                    for await_info in &mut awaits[arg_awaits_before..] {
+                        if await_info.context == EvalContext::Root {
+                            await_info.context = EvalContext::MethodArg(i);
+                        }
+                    }
+
+                    new_args.push(new_arg);
+                }
+
+                HirExpr {
+                    id: expr.id,
+                    kind: HirExprKind::MethodCall {
+                        receiver: Box::new(new_receiver),
+                        method: method.clone(),
+                        args: new_args,
+                    },
+                    ty: expr.ty.clone(),
+                }
+            }
+
+            // Block expressions - check all statements
+            HirExprKind::Block(block) => {
+                let mut new_stmts = Vec::new();
+                for stmt in &block.stmts {
+                    match stmt {
+                        HirStmt::Let {
+                            name,
+                            ty,
+                            value: Some(val),
+                            is_mut,
+                            layout_hint,
+                        } => {
+                            let new_val = self.extract_awaits_recursive(val, awaits);
+                            new_stmts.push(HirStmt::Let {
+                                name: name.clone(),
+                                ty: ty.clone(),
+                                value: Some(new_val),
+                                is_mut: *is_mut,
+                                layout_hint: layout_hint.clone(),
+                            });
+                        }
+                        HirStmt::Assign { target, value } => {
+                            let new_val = self.extract_awaits_recursive(value, awaits);
+                            new_stmts.push(HirStmt::Assign {
+                                target: target.clone(),
+                                value: new_val,
+                            });
+                        }
+                        HirStmt::Expr(e) => {
+                            let new_expr = self.extract_awaits_recursive(e, awaits);
+                            new_stmts.push(HirStmt::Expr(new_expr));
+                        }
+                        _ => {
+                            new_stmts.push(stmt.clone());
+                        }
+                    }
+                }
+
+                HirExpr {
+                    id: expr.id,
+                    kind: HirExprKind::Block(HirBlock {
+                        stmts: new_stmts,
+                        ty: block.ty.clone(),
+                    }),
+                    ty: expr.ty.clone(),
+                }
+            }
+
+            // If expressions - check condition and branches
+            HirExprKind::If {
+                condition,
+                then_branch,
+                else_branch,
+            } => {
+                let new_condition = self.extract_awaits_recursive(condition, awaits);
+
+                let mut new_then_stmts = Vec::new();
+                for stmt in &then_branch.stmts {
+                    match stmt {
+                        HirStmt::Expr(e) => {
+                            let new_expr = self.extract_awaits_recursive(e, awaits);
+                            new_then_stmts.push(HirStmt::Expr(new_expr));
+                        }
+                        _ => {
+                            new_then_stmts.push(stmt.clone());
+                        }
+                    }
+                }
+
+                let new_else = else_branch.as_ref().map(|e| {
+                    Box::new(self.extract_awaits_recursive(e, awaits))
+                });
+
+                HirExpr {
+                    id: expr.id,
+                    kind: HirExprKind::If {
+                        condition: Box::new(new_condition),
+                        then_branch: HirBlock {
+                            stmts: new_then_stmts,
+                            ty: then_branch.ty.clone(),
+                        },
+                        else_branch: new_else,
+                    },
+                    ty: expr.ty.clone(),
+                }
+            }
+
+            // Other expressions - return as-is
+            _ => expr.clone(),
+        }
+    }
+
+    /// Build a sequence of states for multiple extracted awaits
+    /// Returns the next state to continue from after all awaits are processed
+    fn build_await_sequence(
+        &mut self,
+        extracted: &ExtractedAwaits,
+        binding: &BindingTarget,
+    ) -> u32 {
+        if extracted.awaits.is_empty() {
+            // No awaits to process - just add the expression as a statement
+            match binding {
+                BindingTarget::Let { name, is_mut } => {
+                    self.current_stmts.push(HirStmt::Let {
+                        name: name.clone(),
+                        ty: extracted.expr.ty.clone(),
+                        value: Some(extracted.expr.clone()),
+                        is_mut: *is_mut,
+                        layout_hint: None,
+                    });
+                }
+                BindingTarget::Assign(target) => {
+                    self.current_stmts.push(HirStmt::Assign {
+                        target: HirExpr {
+                            id: NodeId::dummy(),
+                            kind: HirExprKind::Local(target.clone()),
+                            ty: extracted.expr.ty.clone(),
+                        },
+                        value: extracted.expr.clone(),
+                    });
+                }
+                BindingTarget::None => {
+                    self.current_stmts.push(HirStmt::Expr(extracted.expr.clone()));
+                }
+            }
+            return self.current_state;
+        }
+
+        // Process awaits in order
+        for (i, await_info) in extracted.awaits.iter().enumerate() {
+            let is_last = i == extracted.awaits.len() - 1;
+
+            if i == 0 {
+                // First await - finalize current state with await transition
+                let next_state = self.new_state(AsyncStateKind::ResumePoint {
+                    result_binding: Some(await_info.temp_name.clone()),
+                });
+
+                self.finalize_state(StateTransition::Await {
+                    future_expr: await_info.future.clone(),
+                    resume_state: next_state,
+                });
+
+                self.current_state = next_state;
+            } else {
+                // Subsequent awaits - create transition from previous resume point
+                let next_state = self.new_state(AsyncStateKind::ResumePoint {
+                    result_binding: Some(await_info.temp_name.clone()),
+                });
+
+                self.finalize_state(StateTransition::Await {
+                    future_expr: await_info.future.clone(),
+                    resume_state: next_state,
+                });
+
+                self.current_state = next_state;
+            }
+        }
+
+        // After all awaits, add the final expression with binding
+        match binding {
+            BindingTarget::Let { name, is_mut } => {
+                self.current_stmts.push(HirStmt::Let {
+                    name: name.clone(),
+                    ty: extracted.expr.ty.clone(),
+                    value: Some(extracted.expr.clone()),
+                    is_mut: *is_mut,
+                    layout_hint: None,
+                });
+            }
+            BindingTarget::Assign(target) => {
+                self.current_stmts.push(HirStmt::Assign {
+                    target: HirExpr {
+                        id: NodeId::dummy(),
+                        kind: HirExprKind::Local(target.clone()),
+                        ty: extracted.expr.ty.clone(),
+                    },
+                    value: extracted.expr.clone(),
+                });
+            }
+            BindingTarget::None => {
+                self.current_stmts.push(HirStmt::Expr(extracted.expr.clone()));
+            }
+        }
+
+        self.current_state
     }
 }
 
@@ -613,5 +1058,247 @@ mod tests {
             extern_name: None,
         };
         assert!(!is_async_function(&sync_func));
+    }
+
+    #[test]
+    fn test_extract_simple_await() {
+        let mut transformer = AsyncTransformer::new();
+
+        // Create a simple await expression: foo().await
+        let foo_call = HirExpr {
+            id: NodeId::dummy(),
+            kind: HirExprKind::Call {
+                func: Box::new(HirExpr {
+                    id: NodeId::dummy(),
+                    kind: HirExprKind::Local("foo".to_string()),
+                    ty: HirType::String,
+                }),
+                args: Vec::new(),
+            },
+            ty: HirType::String,
+        };
+
+        let await_expr = HirExpr {
+            id: NodeId::dummy(),
+            kind: HirExprKind::MethodCall {
+                receiver: Box::new(foo_call.clone()),
+                method: "await".to_string(),
+                args: Vec::new(),
+            },
+            ty: HirType::String,
+        };
+
+        let extracted = transformer.extract_awaits(&await_expr);
+
+        // Should have extracted one await
+        assert_eq!(extracted.awaits.len(), 1);
+        assert_eq!(extracted.awaits[0].context, EvalContext::Root);
+
+        // The result should be a reference to a temporary
+        match &extracted.expr.kind {
+            HirExprKind::Local(name) => {
+                assert!(name.starts_with("__await_tmp_"));
+            }
+            _ => panic!("Expected local reference to temporary"),
+        }
+    }
+
+    #[test]
+    fn test_extract_nested_awaits_in_call() {
+        let mut transformer = AsyncTransformer::new();
+
+        // Create: foo(bar().await)
+        let bar_call = HirExpr {
+            id: NodeId::dummy(),
+            kind: HirExprKind::Call {
+                func: Box::new(HirExpr {
+                    id: NodeId::dummy(),
+                    kind: HirExprKind::Local("bar".to_string()),
+                    ty: HirType::String,
+                }),
+                args: Vec::new(),
+            },
+            ty: HirType::String,
+        };
+
+        let await_bar = HirExpr {
+            id: NodeId::dummy(),
+            kind: HirExprKind::MethodCall {
+                receiver: Box::new(bar_call),
+                method: "await".to_string(),
+                args: Vec::new(),
+            },
+            ty: HirType::String,
+        };
+
+        let foo_call = HirExpr {
+            id: NodeId::dummy(),
+            kind: HirExprKind::Call {
+                func: Box::new(HirExpr {
+                    id: NodeId::dummy(),
+                    kind: HirExprKind::Local("foo".to_string()),
+                    ty: HirType::String,
+                }),
+                args: vec![await_bar],
+            },
+            ty: HirType::String,
+        };
+
+        let extracted = transformer.extract_awaits(&foo_call);
+
+        // Should have extracted one await
+        assert_eq!(extracted.awaits.len(), 1);
+        assert_eq!(extracted.awaits[0].context, EvalContext::CallArg(0));
+
+        // The result expression should still be foo(temp)
+        match &extracted.expr.kind {
+            HirExprKind::Call { func: _, args } => {
+                assert_eq!(args.len(), 1);
+                match &args[0].kind {
+                    HirExprKind::Local(name) => {
+                        assert!(name.starts_with("__await_tmp_"));
+                    }
+                    _ => panic!("Expected local reference to temporary in argument"),
+                }
+            }
+            _ => panic!("Expected call expression"),
+        }
+    }
+
+    #[test]
+    fn test_extract_multiple_awaits() {
+        let mut transformer = AsyncTransformer::new();
+
+        // Create: foo(bar().await, baz().await)
+        let bar_call = HirExpr {
+            id: NodeId::dummy(),
+            kind: HirExprKind::Call {
+                func: Box::new(HirExpr {
+                    id: NodeId::dummy(),
+                    kind: HirExprKind::Local("bar".to_string()),
+                    ty: HirType::String,
+                }),
+                args: Vec::new(),
+            },
+            ty: HirType::String,
+        };
+
+        let await_bar = HirExpr {
+            id: NodeId::dummy(),
+            kind: HirExprKind::MethodCall {
+                receiver: Box::new(bar_call),
+                method: "await".to_string(),
+                args: Vec::new(),
+            },
+            ty: HirType::String,
+        };
+
+        let baz_call = HirExpr {
+            id: NodeId::dummy(),
+            kind: HirExprKind::Call {
+                func: Box::new(HirExpr {
+                    id: NodeId::dummy(),
+                    kind: HirExprKind::Local("baz".to_string()),
+                    ty: HirType::String,
+                }),
+                args: Vec::new(),
+            },
+            ty: HirType::String,
+        };
+
+        let await_baz = HirExpr {
+            id: NodeId::dummy(),
+            kind: HirExprKind::MethodCall {
+                receiver: Box::new(baz_call),
+                method: "await".to_string(),
+                args: Vec::new(),
+            },
+            ty: HirType::String,
+        };
+
+        let foo_call = HirExpr {
+            id: NodeId::dummy(),
+            kind: HirExprKind::Call {
+                func: Box::new(HirExpr {
+                    id: NodeId::dummy(),
+                    kind: HirExprKind::Local("foo".to_string()),
+                    ty: HirType::String,
+                }),
+                args: vec![await_bar, await_baz],
+            },
+            ty: HirType::String,
+        };
+
+        let extracted = transformer.extract_awaits(&foo_call);
+
+        // Should have extracted two awaits
+        assert_eq!(extracted.awaits.len(), 2);
+        assert_eq!(extracted.awaits[0].context, EvalContext::CallArg(0));
+        assert_eq!(extracted.awaits[1].context, EvalContext::CallArg(1));
+
+        // The result should be foo(temp0, temp1)
+        match &extracted.expr.kind {
+            HirExprKind::Call { func: _, args } => {
+                assert_eq!(args.len(), 2);
+                for i in 0..2 {
+                    match &args[i].kind {
+                        HirExprKind::Local(name) => {
+                            assert!(name.starts_with("__await_tmp_"));
+                        }
+                        _ => panic!("Expected local reference to temporary in argument {}", i),
+                    }
+                }
+            }
+            _ => panic!("Expected call expression"),
+        }
+    }
+
+    #[test]
+    fn test_eval_context_tracking() {
+        let mut transformer = AsyncTransformer::new();
+
+        // Create: a + b.await
+        let b_call = HirExpr {
+            id: NodeId::dummy(),
+            kind: HirExprKind::Call {
+                func: Box::new(HirExpr {
+                    id: NodeId::dummy(),
+                    kind: HirExprKind::Local("b".to_string()),
+                    ty: HirType::String,
+                }),
+                args: Vec::new(),
+            },
+            ty: HirType::String,
+        };
+
+        let await_b = HirExpr {
+            id: NodeId::dummy(),
+            kind: HirExprKind::MethodCall {
+                receiver: Box::new(b_call),
+                method: "await".to_string(),
+                args: Vec::new(),
+            },
+            ty: HirType::String,
+        };
+
+        let binary_expr = HirExpr {
+            id: NodeId::dummy(),
+            kind: HirExprKind::Binary {
+                left: Box::new(HirExpr {
+                    id: NodeId::dummy(),
+                    kind: HirExprKind::Local("a".to_string()),
+                    ty: HirType::String,
+                }),
+                op: HirBinaryOp::Add,
+                right: Box::new(await_b),
+            },
+            ty: HirType::String,
+        };
+
+        let extracted = transformer.extract_awaits(&binary_expr);
+
+        // Should have one await with BinaryRight context
+        assert_eq!(extracted.awaits.len(), 1);
+        assert_eq!(extracted.awaits[0].context, EvalContext::BinaryRight);
     }
 }
