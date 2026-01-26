@@ -3849,7 +3849,9 @@ impl<'a> Parser<'a> {
             // Literals
             TokenKind::IntLit => {
                 let text = self.advance().text.clone();
-                let value: i64 = text.replace('_', "").parse().unwrap_or(0);
+                let clean = text.replace('_', "");
+                let value: i64 = clean.parse()
+                    .map_err(|_| miette::miette!("integer literal too large: {}", text))?;
                 Ok(Expr::Literal {
                     id: self.next_id(),
                     value: Literal::Int(value),
@@ -3859,7 +3861,8 @@ impl<'a> Parser<'a> {
                 let text = self.advance().text.clone();
                 // Remove 0b prefix and underscores
                 let clean = text.trim_start_matches("0b").replace('_', "");
-                let value = i64::from_str_radix(&clean, 2).unwrap_or(0);
+                let value = i64::from_str_radix(&clean, 2)
+                    .map_err(|_| miette::miette!("invalid binary literal: {}", text))?;
                 Ok(Expr::Literal {
                     id: self.next_id(),
                     value: Literal::Int(value),
@@ -3869,7 +3872,8 @@ impl<'a> Parser<'a> {
                 let text = self.advance().text.clone();
                 // Remove 0o prefix and underscores
                 let clean = text.trim_start_matches("0o").replace('_', "");
-                let value = i64::from_str_radix(&clean, 8).unwrap_or(0);
+                let value = i64::from_str_radix(&clean, 8)
+                    .map_err(|_| miette::miette!("invalid octal literal: {}", text))?;
                 Ok(Expr::Literal {
                     id: self.next_id(),
                     value: Literal::Int(value),
@@ -3882,7 +3886,8 @@ impl<'a> Parser<'a> {
                     .trim_start_matches("0x")
                     .trim_start_matches("0X")
                     .replace('_', "");
-                let value = i64::from_str_radix(&clean, 16).unwrap_or(0);
+                let value = i64::from_str_radix(&clean, 16)
+                    .map_err(|_| miette::miette!("invalid hexadecimal literal: {}", text))?;
                 Ok(Expr::Literal {
                     id: self.next_id(),
                     value: Literal::Int(value),
@@ -3890,7 +3895,9 @@ impl<'a> Parser<'a> {
             }
             TokenKind::FloatLit => {
                 let text = self.advance().text.clone();
-                let value: f64 = text.replace('_', "").parse().unwrap_or(0.0);
+                let clean = text.replace('_', "");
+                let value: f64 = clean.parse()
+                    .map_err(|_| miette::miette!("invalid float literal: {}", text))?;
                 Ok(Expr::Literal {
                     id: self.next_id(),
                     value: Literal::Float(value),
@@ -3903,7 +3910,9 @@ impl<'a> Parser<'a> {
                 // Format: 123_unit or 123_456_unit (underscores in number)
                 // Find the last underscore followed by a letter
                 let (num_part, unit_part) = split_unit_literal(&text);
-                let value: i64 = num_part.replace('_', "").parse().unwrap_or(0);
+                let clean = num_part.replace('_', "");
+                let value: i64 = clean.parse()
+                    .map_err(|_| miette::miette!("invalid integer literal in unit: {}", text))?;
                 Ok(Expr::Literal {
                     id: self.next_id(),
                     value: Literal::IntUnit(value, unit_part.to_string()),
@@ -3913,7 +3922,9 @@ impl<'a> Parser<'a> {
                 let text = self.advance().text.clone();
                 // Split at the underscore separating number from unit
                 let (num_part, unit_part) = split_unit_literal(&text);
-                let value: f64 = num_part.replace('_', "").parse().unwrap_or(0.0);
+                let clean = num_part.replace('_', "");
+                let value: f64 = clean.parse()
+                    .map_err(|_| miette::miette!("invalid float literal in unit: {}", text))?;
                 Ok(Expr::Literal {
                     id: self.next_id(),
                     value: Literal::FloatUnit(value, unit_part.to_string()),
