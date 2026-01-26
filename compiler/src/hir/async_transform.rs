@@ -1,8 +1,8 @@
 //! Async Function Transformation for HIR
 //!
-//! This module transforms async functions into state machines.
-//! Each await point becomes a state transition, allowing the function
-//! to be suspended and resumed.
+//! This module transforms async functions into state machines using an ANF (Administrative Normal Form)
+//! approach that preserves evaluation context. Each await point becomes a state transition, allowing
+//! the function to be suspended and resumed.
 //!
 //! # Transformation Overview
 //!
@@ -28,6 +28,51 @@
 //!     - Store result in processed
 //!     - Transition to Completed
 //! ```
+//!
+//! # ANF-Based Await Extraction (Continuation Preservation)
+//!
+//! The new approach extracts all awaits from an expression bottom-up while preserving the
+//! evaluation context (where each await appears in the expression tree). This fixes the
+//! continuation-losing problem from the original implementation.
+//!
+//! ## Problem Example
+//!
+//! Before: `let x = foo(await bar(), await baz())`
+//!
+//! The old `check_for_await()` would find only the first await and lose the foo(...) context:
+//! ```text
+//! State 0: Await(bar(), resume: 1)  // Lost: foo(...) wrapper
+//! State 1: ??? (can't reconstruct foo call)
+//! ```
+//!
+//! After: With ANF-based extraction, the context is preserved:
+//! ```text
+//! State 0: Await(bar(), resume: 1)         // Extract bar()
+//! State 1: Await(baz(), resume: 2)         // Extract baz()
+//! State 2: Let(x = foo(__tmp0, __tmp1))   // Apply accumulated context
+//! ```
+//!
+//! ## How It Works
+//!
+//! 1. **Bottom-Up Traversal**: `extract_awaits_recursive()` walks the expression tree depth-first
+//! 2. **Context Tracking**: Each extracted await is labeled with its position (EvalContext):
+//!    - Root: Direct await
+//!    - CallArg(i): Await in function argument position i
+//!    - BinaryLeft/BinaryRight: Await in binary operator operands
+//!    - MethodReceiver/MethodArg(i): Await in method call positions
+//!    - IfCondition/IfThen/IfElse: Awaits in control flow
+//! 3. **Temporary Generation**: Each await gets a unique temporary variable
+//! 4. **Expression Reconstruction**: The expression is rebuilt with temporaries replacing awaits
+//! 5. **State Sequencing**: `build_await_sequence()` creates states for each await in order,
+//!    then applies the original expression with temporaries bound
+//!
+//! ## Control Flow Support
+//!
+//! The transformation handles awaits in complex control flow:
+//! - If conditions: Awaits are extracted before branching
+//! - While loops: Awaits in conditions are re-evaluated each iteration
+//! - Match expressions: Awaits in scrutinees are extracted first
+//! - Nested expressions: Awaits in all subexpressions are properly sequenced
 
 use crate::common::NodeId;
 use crate::hir::*;
@@ -117,26 +162,34 @@ pub struct CapturedLocal {
 }
 
 /// Information about a single extracted await
+///
+/// This represents an await that was extracted from a nested position in an expression.
+/// The extraction process replaces the await with a reference to a temporary variable,
+/// and records information needed to generate the state transition later.
 #[derive(Debug, Clone)]
 pub struct AwaitExtraction {
-    /// The future expression being awaited
+    /// The future expression being awaited (the argument to .await)
     pub future: HirExpr,
-    /// Temporary variable name to store the result
+    /// Temporary variable name to store the result (e.g., __await_tmp_0)
     pub temp_name: String,
-    /// The type of the awaited result
+    /// The type of the awaited result (what the future resolves to)
     pub result_type: HirType,
-    /// The evaluation context where this await appears
+    /// The evaluation context where this await appears in the original expression
+    /// This is used to reconstruct the expression structure after extraction
     pub context: EvalContext,
 }
 
 /// Represents the position of an await in an expression tree
+///
+/// This helps track where an await appeared in the original expression so that
+/// the expression can be properly reconstructed after extracting the await.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum EvalContext {
-    /// Await is at the root of the expression
+    /// Await is at the root of the expression (direct await)
     Root,
-    /// Await is a function call argument (index)
+    /// Await is a function call argument (index indicates which argument)
     CallArg(usize),
-    /// Await is the function being called
+    /// Await is the function being called itself
     CallFunc,
     /// Await is the left operand of a binary operation
     BinaryLeft,
@@ -146,7 +199,7 @@ pub enum EvalContext {
     UnaryOperand,
     /// Await is the receiver of a method call
     MethodReceiver,
-    /// Await is a method call argument (index)
+    /// Await is a method call argument (index indicates which argument)
     MethodArg(usize),
     /// Await is inside a block statement
     BlockStmt,
@@ -158,23 +211,29 @@ pub enum EvalContext {
     IfElse,
 }
 
-/// Where a binding result should be stored
+/// Where a binding result should be stored after awaits complete
 #[derive(Debug, Clone)]
 pub enum BindingTarget {
-    /// Bind to a new let statement with the given name
+    /// Bind to a new let statement with the given name (for let bindings)
     Let { name: String, is_mut: bool },
-    /// Bind to an assignment target
+    /// Bind to an assignment target (for assignments)
     Assign(String),
-    /// No binding, just execute for side effects
+    /// No binding, just execute for side effects (for expression statements)
     None,
 }
 
 /// Result of extracting all awaits from an expression
+///
+/// This represents an expression that has been transformed to extract all awaits
+/// into separate state transitions. The expression part will have all awaits
+/// replaced with references to temporaries, and the awaits vector lists all
+/// the extracted awaits in bottom-up (post-order) traversal order.
 #[derive(Debug, Clone)]
 pub struct ExtractedAwaits {
-    /// The expression with awaits replaced by temporaries
+    /// The expression with awaits replaced by temporary variable references
     pub expr: HirExpr,
-    /// All extracted awaits in bottom-up order
+    /// All extracted awaits in bottom-up order (children before parents)
+    /// This ordering is important for correct sequencing of state transitions
     pub awaits: Vec<AwaitExtraction>,
 }
 
@@ -532,7 +591,16 @@ impl AsyncTransformer {
     }
 
     /// Extract all awaits from an expression, replacing them with temporaries
-    /// Returns the modified expression and a list of extracted awaits
+    ///
+    /// This is the main entry point for await extraction. It performs a bottom-up traversal
+    /// of the expression tree, extracting all awaits and replacing them with references to
+    /// temporary variables. The extracted awaits are recorded in evaluation context order.
+    ///
+    /// # Example
+    ///
+    /// For the expression `foo(await bar(), await baz())`, this returns:
+    /// - expr: `foo(__await_tmp_0, __await_tmp_1)`
+    /// - awaits: [AwaitExtraction for bar (CallArg 0), AwaitExtraction for baz (CallArg 1)]
     fn extract_awaits(&mut self, expr: &HirExpr) -> ExtractedAwaits {
         let mut awaits = Vec::new();
         let transformed = self.extract_awaits_recursive(expr, &mut awaits);
@@ -543,7 +611,14 @@ impl AsyncTransformer {
     }
 
     /// Recursively extract awaits from an expression
-    /// Collects extracted awaits in the provided vector in post-order (bottom-up)
+    ///
+    /// This performs a depth-first traversal of the expression tree, extracting awaits
+    /// and collecting them in the awaits vector in post-order (bottom-up). Each extracted
+    /// await is replaced with a reference to its temporary variable.
+    ///
+    /// The EvalContext for each await is set during traversal to track its position
+    /// in the expression tree. This information is needed to properly reconstruct
+    /// the expression after state machine generation.
     fn extract_awaits_recursive(&mut self, expr: &HirExpr, awaits: &mut Vec<AwaitExtraction>) -> HirExpr {
         match &expr.kind {
             // Direct await - extract it
@@ -935,7 +1010,19 @@ impl AsyncTransformer {
     }
 
     /// Build a sequence of states for multiple extracted awaits
-    /// Returns the next state to continue from after all awaits are processed
+    ///
+    /// This creates a state for each extracted await (in order), then adds the final
+    /// expression statement with the awaits replaced by temporaries. Each state
+    /// awaits a future and transitions to the next resume point.
+    ///
+    /// # Example
+    ///
+    /// For `let x = foo(await bar(), await baz())` with extracted awaits [bar, baz]:
+    /// - State N: Await(bar(), resume: N+1)
+    /// - State N+1: Await(baz(), resume: N+2)
+    /// - State N+2: Let(x = foo(__await_tmp_0, __await_tmp_1)); continue
+    ///
+    /// Returns the state index to continue from after all awaits are processed.
     fn build_await_sequence(
         &mut self,
         extracted: &ExtractedAwaits,
