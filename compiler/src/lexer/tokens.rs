@@ -348,6 +348,8 @@ pub enum TokenKind {
     PercentEq,
     #[token("&=")]
     AmpEq,
+    #[token("&!")]
+    AmpBang,
     #[token("|=")]
     PipeEq,
     #[token("^=")]
@@ -695,6 +697,7 @@ impl TokenKind {
             TokenKind::SlashEq => "/=",
             TokenKind::PercentEq => "%=",
             TokenKind::AmpEq => "&=",
+            TokenKind::AmpBang => "&!",
             TokenKind::PipeEq => "|=",
             TokenKind::CaretEq => "^=",
             TokenKind::ShlEq => "<<=",

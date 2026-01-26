@@ -2678,7 +2678,7 @@ impl<'a> Parser<'a> {
             TokenKind::Amp => {
                 self.advance();
                 let is_mut = if self.at(TokenKind::Bang) {
-                    // Sounio canonical syntax: &!T for mutable reference
+                    // Sounio canonical syntax: &!T for mutable reference (two tokens)
                     self.advance();
                     true
                 } else if self.at(TokenKind::Mut) {
@@ -2691,6 +2691,16 @@ impl<'a> Parser<'a> {
                 let inner = self.parse_type_primary()?;
                 Ok(TypeExpr::Reference {
                     mutable: is_mut,
+                    inner: Box::new(inner),
+                })
+            }
+
+            // Exclusive/mutable reference: &!T (single token)
+            TokenKind::AmpBang => {
+                self.advance();
+                let inner = self.parse_type_primary()?;
+                Ok(TypeExpr::Reference {
+                    mutable: true,
                     inner: Box::new(inner),
                 })
             }
@@ -3674,7 +3684,12 @@ impl<'a> Parser<'a> {
             }
             TokenKind::Amp => {
                 self.advance();
-                let is_mut = if self.at(TokenKind::Mut) {
+                let is_mut = if self.at(TokenKind::Bang) {
+                    // Sounio canonical: &!expr for mutable reference (two tokens)
+                    self.advance();
+                    true
+                } else if self.at(TokenKind::Mut) {
+                    // Rust compatibility: &mut expr
                     self.advance();
                     true
                 } else {
@@ -3688,6 +3703,17 @@ impl<'a> Parser<'a> {
                     } else {
                         UnaryOp::Ref
                     },
+                    expr: Box::new(expr),
+                })
+            }
+
+            // Mutable reference: &!expr (single token)
+            TokenKind::AmpBang => {
+                self.advance();
+                let expr = self.parse_unary()?;
+                Ok(Expr::Unary {
+                    id: self.next_id(),
+                    op: UnaryOp::RefMut,
                     expr: Box::new(expr),
                 })
             }
