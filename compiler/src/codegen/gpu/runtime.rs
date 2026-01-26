@@ -13,7 +13,11 @@ use std::fmt;
 use std::ptr;
 
 #[cfg(feature = "cuda")]
+use std::collections::HashMap;
+#[cfg(feature = "cuda")]
 use std::sync::Arc;
+#[cfg(feature = "cuda")]
+use std::sync::{Mutex, OnceLock};
 
 #[cfg(feature = "cuda")]
 use cudarc::driver::{
@@ -22,6 +26,28 @@ use cudarc::driver::{
 
 #[cfg(feature = "cuda")]
 use cudarc::nvrtc::Ptx;
+
+#[cfg(feature = "cuda")]
+fn intern_cuda_symbol(name: &str) -> &'static str {
+    use std::sync::OnceLock;
+    static INTERN: OnceLock<Mutex<HashMap<String, Box<str>>>> = OnceLock::new();
+    
+    let mut map = INTERN
+        .get_or_init(|| Mutex::new(HashMap::new()))
+        .lock()
+        .expect("cuda symbol intern lock poisoned");
+    
+    // Use entry API to avoid double lookup
+    let boxed_str = map
+        .entry(name.to_string())
+        .or_insert_with(|| name.to_string().into_boxed_str());
+    
+    unsafe {
+        // SAFETY: The Box<str> is stored in the static INTERN map and will never be freed.
+        // The reference is safe to transmute to 'static because it's backed by a static allocation.
+        std::mem::transmute::<&str, &'static str>(&**boxed_str)
+    }
+}
 
 /// GPU Runtime abstraction
 pub struct GpuRuntime {
@@ -576,9 +602,9 @@ impl GpuRuntime {
             .as_ref()
             .ok_or_else(|| GpuError::DriverError("CUDA device not initialized".into()))?;
 
-        // Convert to owned strings for cudarc which requires 'static lifetime
-        let module_name: &'static str = Box::leak(kernel_name.to_string().into_boxed_str());
-        let func_name: &'static str = Box::leak(kernel_name.to_string().into_boxed_str());
+        // Convert to 'static strings for cudarc by interning symbols
+        let module_name: &'static str = intern_cuda_symbol(kernel_name);
+        let func_name: &'static str = intern_cuda_symbol(kernel_name);
 
         // Use cudarc to load PTX and get the kernel function
         device

@@ -343,8 +343,19 @@ impl GpuExecutor {
     #[cfg(feature = "cuda")]
     pub fn cache_kernel(&mut self, name: &str, ptx: &str) -> Result<(), GpuExecutorError> {
         // Create static lifetime strings for cudarc (it requires 'static)
-        let module_name: &'static str = Box::leak(name.to_string().into_boxed_str());
-        let func_name: &'static str = Box::leak(name.to_string().into_boxed_str());
+        // Cache the name string to avoid Box::leak memory leak
+        // Store as Box<str> in HashMap, then get &'static reference from it
+        let boxed_name = name.to_string().into_boxed_str();
+        let module_name: &'static str = unsafe {
+            // SAFETY: The string is stored in self.string_cache and will live as long as self.
+            // The lifetime is transmuted to 'static because cudarc requires it, but the actual
+            // lifetime is tied to self.string_cache ownership.
+            std::mem::transmute::<&str, &'static str>(&*boxed_name)
+        };
+        let func_name = module_name; // Same name for both module and function
+
+        // Store the string to keep it alive
+        self.string_cache.insert(name.to_string(), boxed_name);
 
         // Load PTX module
         self.device
