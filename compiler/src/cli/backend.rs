@@ -809,6 +809,20 @@ fn compile_native(args: &BuildArgs) -> Result<(PathBuf, Option<NativeMetrics>), 
     };
 
     let mut backend = NativeBackend::with_config(config);
+    
+    // Enable debug info if requested
+    if args.native_opts.debug_info {
+        let source_file = input_path.canonicalize()
+            .unwrap_or_else(|_| input_path.clone());
+        let directory = source_file.parent()
+            .map(|p| p.to_path_buf())
+            .unwrap_or_else(|| std::env::current_dir().unwrap_or_default());
+        backend.enable_debug(source_file, directory);
+        
+        if args.verbose {
+            println!("✓ Debug info enabled");
+        }
+    }
 
     // Step 6: Analyze SIR blocks with native backend and apply autotuning
     let analyze_start = Instant::now();
@@ -990,20 +1004,17 @@ fn compile_native(args: &BuildArgs) -> Result<(PathBuf, Option<NativeMetrics>), 
     match format {
         OutputFormat::Object => {
             // Write object file only (no linking)
-            use crate::sir::emit::code_segment_to_elf;
-            let elf_bytes = code_segment_to_elf(&code_segment)
+            let elf_bytes = backend.compile_to_object(&sir_module)
                 .map_err(|e| format!("ELF generation error: {:?}", e))?;
             std::fs::write(&output_path, &elf_bytes)
                 .map_err(|e| format!("Failed to write output: {}", e))?;
         }
         OutputFormat::Executable | OutputFormat::SharedLib => {
             // Generate object file, then link
-            use crate::sir::emit::code_segment_to_elf;
             use crate::backend::native::linker::{Linker, LinkerConfig, LinkMode};
 
-            let elf_bytes = code_segment_to_elf(&code_segment)
+            let elf_bytes = backend.compile_to_object(&sir_module)
                 .map_err(|e| format!("ELF generation error: {:?}", e))?;
-
             // Write temporary object file
             let obj_path = output_path.with_extension("o");
             std::fs::write(&obj_path, &elf_bytes)
