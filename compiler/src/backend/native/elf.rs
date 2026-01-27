@@ -594,6 +594,65 @@ impl ElfWriter {
         });
     }
 
+    /// Add a debug section from DWARF output
+    ///
+    /// Creates ELF sections for DWARF debug information (.debug_info, .debug_abbrev, etc.)
+    pub fn add_debug_section(&mut self, section_name: &str, data: Vec<u8>) -> usize {
+        if data.is_empty() {
+            return 0; // Don't add empty sections
+        }
+        
+        let name_offset = self.add_section_string(section_name);
+        let index = self.sections.len();
+        
+        self.sections.push(Section {
+            name: section_name.to_string(),
+            name_offset,
+            section_type: SHT_PROGBITS, // Debug sections are PROGBITS
+            flags: 0, // Debug sections are not loaded into memory
+            data,
+            link: 0,
+            info: 0,
+            addralign: 1,
+            entsize: 0,
+        });
+        
+        index
+    }
+    
+    /// Add multiple debug sections from DwarfOutput
+    ///
+    /// Convenience method to add all DWARF sections at once from a DwarfOutput struct.
+    /// This should be called after code/data sections but before finish().
+    pub fn add_dwarf_sections(&mut self, dwarf: &crate::codegen::debug::DwarfOutput) {
+        if !dwarf.debug_info.is_empty() {
+            self.add_debug_section(".debug_info", dwarf.debug_info.clone());
+        }
+        if !dwarf.debug_abbrev.is_empty() {
+            self.add_debug_section(".debug_abbrev", dwarf.debug_abbrev.clone());
+        }
+        if !dwarf.debug_line.is_empty() {
+            self.add_debug_section(".debug_line", dwarf.debug_line.clone());
+        }
+        if !dwarf.debug_str.is_empty() {
+            self.add_debug_section(".debug_str", dwarf.debug_str.clone());
+        }
+        if !dwarf.debug_loc.is_empty() {
+            self.add_debug_section(".debug_loc", dwarf.debug_loc.clone());
+        }
+        if !dwarf.debug_loclists.is_empty() {
+            self.add_debug_section(".debug_loclists", dwarf.debug_loclists.clone());
+        }
+        if !dwarf.debug_ranges.is_empty() {
+            self.add_debug_section(".debug_ranges", dwarf.debug_ranges.clone());
+        }
+        if !dwarf.debug_rnglists.is_empty() {
+            self.add_debug_section(".debug_rnglists", dwarf.debug_rnglists.clone());
+        }
+        if !dwarf.debug_frame.is_empty() {
+            self.add_debug_section(".debug_frame", dwarf.debug_frame.clone());
+        }
+    }
     /// Finalize and generate the ELF file bytes
     pub fn finish(mut self) -> io::Result<Vec<u8>> {
         // Sort symbols: locals first, then globals. Remap relocations to keep indices valid.
