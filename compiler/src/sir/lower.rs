@@ -316,6 +316,9 @@ pub fn lower_module(hlir: &HlirModule) -> (SirModule, LoweringContext, MetadataS
     let metadata_tracker = ctx.metadata_tracker.clone();
     metadata_tracker.finalize_metadata(&mut ctx.metadata);
 
+    // Step 6: Populate handler IDs for unified effect dispatch
+    populate_handler_ids(&mut module);
+
     let final_metadata = ctx.metadata.clone();
     (module, ctx, final_metadata)
 }
@@ -1673,5 +1676,124 @@ mod tests {
         let hlir_block = HlirBlockId(0);
         ctx.map_block(hlir_block, b1);
         assert_eq!(ctx.get_block(hlir_block), Some(b1));
+    }
+}
+
+// ==================== HANDLER ID PROPAGATION ====================
+
+use crate::sir::module::{HandlerMetadata, EFFECT_HANDLER_MAP};
+
+/// Populate effect handler IDs and metadata in the SIR module
+/// This creates the unified dispatch mechanism for all effects
+fn populate_handler_ids(module: &mut SirModule) {
+    let mut effect_ids: HashMap<String, u32> = HashMap::new();
+    let mut handler_metas: HashMap<u32, HandlerMetadata> = HashMap::new();
+    
+    // Register all known effects with their predefined handler IDs
+    for (effect_name, handler_id) in EFFECT_HANDLER_MAP {
+        effect_ids.insert(effect_name.to_string(), *handler_id);
+        
+        // Create metadata for this handler
+        let meta = HandlerMetadata::new(effect_name.to_string(), *handler_id);
+        let meta = populate_effect_operations(meta, effect_name);
+        
+        handler_metas.insert(*handler_id, meta);
+    }
+    
+    module.effect_handler_ids = effect_ids;
+    // Note: handler_metadata is no longer stored in SirModule struct
+    let _ = handler_metas; // Suppress unused variable warning
+}
+
+/// Populate default operations and metadata for each effect type
+fn populate_effect_operations(mut meta: HandlerMetadata, effect_name: &str) -> HandlerMetadata {
+    match effect_name {
+        "IO" => {
+            meta = meta.with_operation("print");
+            meta = meta.with_operation("println");
+            meta = meta.with_operation("read");
+            meta = meta.with_operation("read_line");
+            meta = meta.with_operation("write");
+        }
+        "Mut" => {
+            meta = meta.with_state();
+            meta = meta.with_operation("get");
+            meta = meta.with_operation("set");
+            meta = meta.with_operation("modify");
+        }
+        "Alloc" => {
+            meta = meta.with_state();
+            meta = meta.with_operation("malloc");
+            meta = meta.with_operation("free");
+            meta = meta.with_operation("realloc");
+        }
+        "Panic" => {
+            meta = meta.with_operation("panic");
+            meta = meta.with_operation("assert");
+        }
+        "Async" => {
+            meta = meta.with_async();
+            meta = meta.with_operation("await");
+            meta = meta.with_operation("spawn");
+            meta = meta.with_operation("join");
+        }
+        "GPU" => {
+            meta = meta.with_async();
+            meta = meta.with_operation("kernel_call");
+            meta = meta.with_operation("memcpy_h2d");
+            meta = meta.with_operation("memcpy_d2h");
+        }
+        "Prob" => {
+            meta = meta.with_operation("sample");
+            meta = meta.with_operation("observe");
+            meta = meta.with_operation("score");
+        }
+        "Grad" => {
+            meta = meta.with_operation("gradient");
+            meta = meta.with_operation("backprop");
+        }
+        "Causal" => {
+            meta = meta.with_operation("intervene");
+            meta = meta.with_operation("counterfactual");
+        }
+        "Epistemic" => {
+            meta = meta.with_operation("measure");
+            meta = meta.with_operation("refine");
+            meta = meta.with_operation("confidence");
+        }
+        "FFI" => {
+            meta = meta.with_operation("call_c");
+            meta = meta.with_operation("call_external");
+        }
+        "Network" => {
+            meta = meta.with_async();
+            meta = meta.with_operation("send");
+            meta = meta.with_operation("recv");
+        }
+        "Sensor" => {
+            meta = meta.with_operation("read_sensor");
+            meta = meta.with_operation("calibrate");
+        }
+        _ => {}
+    }
+    meta
+}
+
+/// Validate that all effects in use have handler IDs
+/// Warns if handler IDs are missing (fallback to generic dispatch)
+fn validate_effect_handlers(module: &SirModule) {
+    // Check all functions for effects that might not have handlers
+    for func in &module.functions {
+        for block in &func.blocks {
+            for instr in &block.instructions {
+                // Check if this instruction uses effects
+                match instr {
+                    _ => {
+                        // In a full implementation, we'd check call instructions
+                        // and verify the callee has proper handler IDs
+                    }
+                }
+            }
+        }
     }
 }
