@@ -9,6 +9,87 @@ use super::values::{Constant, FuncId};
 use std::collections::HashMap;
 use std::fmt;
 
+// ==================== EFFECT HANDLER MANAGEMENT ====================
+
+/// Metadata about an effect handler for unified dispatch
+#[derive(Debug, Clone)]
+pub struct HandlerMetadata {
+    /// The effect name this handler handles (e.g., "IO", "Mut", "Prob")
+    pub effect: String,
+    /// Handler ID for dispatch (1-13 for built-in effects, 0 for custom)
+    pub handler_id: u32,
+    /// List of operation names this handler implements
+    pub operations: Vec<String>,
+    /// Whether this handler requires stateful storage
+    pub requires_state: bool,
+    /// Whether this handler supports asynchronous operations
+    pub is_async: bool,
+}
+
+impl HandlerMetadata {
+    /// Create new handler metadata
+    pub fn new(effect: String, handler_id: u32) -> Self {
+        Self {
+            effect,
+            handler_id,
+            operations: Vec::new(),
+            requires_state: false,
+            is_async: false,
+        }
+    }
+
+    /// Add an operation name
+    pub fn with_operation(mut self, op_name: impl Into<String>) -> Self {
+        self.operations.push(op_name.into());
+        self
+    }
+
+    /// Mark as stateful
+    pub fn with_state(mut self) -> Self {
+        self.requires_state = true;
+        self
+    }
+
+    /// Mark as async-capable
+    pub fn with_async(mut self) -> Self {
+        self.is_async = true;
+        self
+    }
+}
+
+/// Effect name to handler ID mapping
+/// Maps canonical effect names to their predefined handler IDs
+pub const EFFECT_HANDLER_MAP: &[(&str, u32)] = &[
+    ("IO", 1),
+    ("Mut", 2),
+    ("Alloc", 3),
+    ("Panic", 4),
+    ("Async", 5),
+    ("GPU", 6),
+    ("Prob", 7),
+    ("Grad", 8),      // Gradient/autodiff
+    ("Causal", 9),    // Causal inference
+    ("Epistemic", 10),
+    ("FFI", 11),
+    ("Network", 12),
+    ("Sensor", 13),
+];
+
+/// Get handler ID for a known effect name
+pub fn get_handler_id(effect_name: &str) -> Option<u32> {
+    EFFECT_HANDLER_MAP.iter()
+        .find(|(name, _)| name == &effect_name)
+        .map(|(_, id)| *id)
+}
+
+/// Get effect name for a handler ID
+pub fn get_effect_name(handler_id: u32) -> Option<&'static str> {
+    EFFECT_HANDLER_MAP.iter()
+        .find(|(_, id)| *id == handler_id)
+        .map(|(name, _)| *name)
+}
+
+
 /// A global variable in SIR
 #[derive(Debug, Clone)]
 pub struct SirGlobal {
