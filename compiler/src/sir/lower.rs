@@ -1485,6 +1485,7 @@ pub fn lower_type(hlir_ty: &HlirType) -> SirType {
             ];
             SirType::Struct(StructType::new(fields).named("Dual"))
         }
+        HlirType::Knowledge { inner, .. } => lower_type(inner),
     }
 }
 

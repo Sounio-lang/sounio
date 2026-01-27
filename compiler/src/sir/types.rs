@@ -369,6 +369,39 @@ impl SirType {
         SirType::Pointer(PointerType::new(pointee))
     }
 
+    /// Construct a Knowledge type with appropriate struct layout based on mode
+    pub fn knowledge(inner: SirType, mode: crate::runtime::EpistemicMode) -> Self {
+        use crate::runtime::EpistemicMode;
+        
+        match mode {
+            EpistemicMode::Full => {
+                // Full: { value: T, confidence: f64, lower: f64, upper: f64, provenance_id: u32, flags: u32, _pad: [u8; 16] }
+                let fields = vec![
+                    (Some("value".to_string()), inner),
+                    (Some("confidence".to_string()), SirType::f64()),
+                    (Some("lower_bound".to_string()), SirType::f64()),
+                    (Some("upper_bound".to_string()), SirType::f64()),
+                    (Some("provenance_id".to_string()), SirType::i32()),
+                    (Some("flags".to_string()), SirType::i32()),
+                    // Padding to reach 64 bytes total (exact size depends on T)
+                ];
+                SirType::Struct(StructType::new(fields).named("Knowledge_Full"))
+            }
+            EpistemicMode::Compact => {
+                // Compact: { value: T, confidence: f64 }
+                let fields = vec![
+                    (Some("value".to_string()), inner),
+                    (Some("confidence".to_string()), SirType::f64()),
+                ];
+                SirType::Struct(StructType::new(fields).named("Knowledge_Compact"))
+            }
+            EpistemicMode::Erased => {
+                // Erased: just the value, no metadata
+                inner
+            }
+        }
+    }
+
     /// Is this a floating point scalar?
     pub fn is_float(&self) -> bool {
         matches!(self, SirType::Scalar(s) if s.is_float())
