@@ -118,8 +118,26 @@ impl MetadataTracker {
     /// Extract Knowledge<T> wrapper information from a type
     pub fn extract_knowledge_wrapper(ty: &HlirType) -> Option<(f64, Option<u32>)> {
         match ty {
+            HlirType::Knowledge { inner, mode } => {
+                use crate::runtime::EpistemicMode;
+                // Extract epsilon bound based on mode
+                // Epsilon = 1 - confidence, so 95% confidence = 0.05 epsilon
+                let epsilon_bound = match mode {
+                    EpistemicMode::Full | EpistemicMode::Compact => 0.05, // 95% confidence
+                    EpistemicMode::Erased => return None, // No runtime tracking
+                };
+                
+                // Provenance ID only tracked in Full mode
+                let provenance_id = match mode {
+                    EpistemicMode::Full => Some(0), // TODO: extract actual provenance from metadata
+                    _ => None,
+                };
+                
+                Some((epsilon_bound, provenance_id))
+            }
+            // Fallback for old-style struct names (backward compatibility)
             HlirType::Struct(name) if name.contains("Knowledge") => {
-                Some((0.95, None))
+                Some((0.05, None)) // Default 95% confidence
             }
             _ => None,
         }
@@ -1677,6 +1695,64 @@ mod tests {
         let hlir_block = HlirBlockId(0);
         ctx.map_block(hlir_block, b1);
         assert_eq!(ctx.get_block(hlir_block), Some(b1));
+    }
+
+    #[test]
+    fn test_extract_quantity_mg() {
+        let ty = HlirType::Struct("Quantity_mg".to_string());
+        let unit = MetadataTracker::extract_quantity_wrapper(&ty);
+        
+        assert!(unit.is_some());
+        let unit = unit.unwrap();
+        
+        // mg should have dimensions [1,0,0,0,0,0,0] (mass) and scale 1e-6
+        assert_eq!(unit.dimensions, [1, 0, 0, 0, 0, 0, 0]);
+        assert_eq!(unit.scale, 1e-6);
+    }
+
+    #[test]
+    fn test_extract_quantity_mg_per_l() {
+        let ty = HlirType::Struct("Quantity_mg_DIV_L".to_string());
+        let unit = MetadataTracker::extract_quantity_wrapper(&ty);
+        
+        assert!(unit.is_some());
+        let unit = unit.unwrap();
+        
+        // mg/L should have dimensions [1,-3,0,0,0,0,0] (mass/volume)
+        // mg is [1,0,0,0,0,0,0] scale 1e-6
+        // L is [0,3,0,0,0,0,0] scale 1e-3
+        // mg/L = [1,-3,0,0,0,0,0] scale 1e-6/1e-3 = 1e-3
+        assert_eq!(unit.dimensions, [1, -3, 0, 0, 0, 0, 0]);
+        assert_eq!(unit.scale, 1e-3);
+    }
+
+    #[test]
+    fn test_extract_non_quantity() {
+        let ty = HlirType::I32;
+        let unit = MetadataTracker::extract_quantity_wrapper(&ty);
+        assert!(unit.is_none());
+    }
+
+    #[test]
+    fn test_extract_quantity_simple_units() {
+        // Test various simple units
+        let test_cases = vec![
+            ("kg", [1, 0, 0, 0, 0, 0, 0], 1.0),
+            ("g", [1, 0, 0, 0, 0, 0, 0], 1e-3),
+            ("L", [0, 3, 0, 0, 0, 0, 0], 1e-3),
+            ("mL", [0, 3, 0, 0, 0, 0, 0], 1e-6),
+            ("h", [0, 0, 1, 0, 0, 0, 0], 3600.0),
+            ("min", [0, 0, 1, 0, 0, 0, 0], 60.0),
+        ];
+
+        for (unit_symbol, expected_dims, expected_scale) in test_cases {
+            let ty = HlirType::Struct(format!("Quantity_{}", unit_symbol));
+            let unit = MetadataTracker::extract_quantity_wrapper(&ty);
+            assert!(unit.is_some(), "Failed to extract unit for {}", unit_symbol);
+            let unit = unit.unwrap();
+            assert_eq!(unit.dimensions, expected_dims, "Wrong dimensions for {}", unit_symbol);
+            assert_eq!(unit.scale, expected_scale, "Wrong scale for {}", unit_symbol);
+        }
     }
 }
 
