@@ -5,6 +5,7 @@
 
 use crate::ast::Abi;
 use crate::hir::HirType;
+use crate::runtime::EpistemicMode;
 use std::collections::HashMap;
 
 /// HLIR module - top-level compilation unit
@@ -169,6 +170,11 @@ pub enum HlirType {
     Vec4d, // 4x f64 (32 bytes)
     // Automatic differentiation
     Dual, // Dual number: (value: f64, derivative: f64) = 128 bits
+    // Epistemic types
+    Knowledge {
+        inner: Box<HlirType>,
+        mode: EpistemicMode,
+    },
 }
 
 impl HlirType {
@@ -211,7 +217,20 @@ impl HlirType {
             HirType::Var(_) | HirType::Error | HirType::Never => HlirType::Void,
 
             // Epistemic types - lower to their inner representation
-            HirType::Knowledge { inner, .. } => Self::from_hir(inner),
+            // Epistemic types - preserve Knowledge wrapper
+            HirType::Knowledge { inner, epsilon_bound, provenance } => {
+                let mode = if provenance.is_some() {
+                    EpistemicMode::Full
+                } else if epsilon_bound.is_some() {
+                    EpistemicMode::Compact
+                } else {
+                    EpistemicMode::Erased
+                };
+                HlirType::Knowledge {
+                    inner: Box::new(Self::from_hir(inner)),
+                    mode,
+                }
+            }
             HirType::Quantity { numeric, .. } => Self::from_hir(numeric),
             HirType::Tensor { element, dims } => {
                 // Tensor becomes a struct with pointer to data and shape info
@@ -323,6 +342,7 @@ impl HlirType {
             HlirType::Vec3d => 256, // 3 x 64-bit floats, padded for SIMD
             HlirType::Vec4d => 256, // 4 x 64-bit floats
             HlirType::Dual => 128,  // 2 x 64-bit floats (value, derivative)
+            HlirType::Knowledge { inner, mode } => inner.size_bits() + (mode.size_bytes() * 8),
         }
     }
 }
