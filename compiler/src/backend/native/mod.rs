@@ -171,6 +171,9 @@ pub struct NativeBackend {
     config: NativeBackendConfig,
     metrics_estimator: metrics::SirMetricsEstimator,
     thermal_state: thermal::ThermalState,
+    
+    /// Debug information builder (optional)
+    debug_builder: Option<crate::codegen::debug::DebugInfoBuilder>,
 }
 
 impl NativeBackend {
@@ -190,6 +193,7 @@ impl NativeBackend {
             config,
             metrics_estimator,
             thermal_state: thermal::ThermalState::with_history(),
+            debug_builder: None,
         }
     }
 
@@ -310,6 +314,22 @@ impl NativeBackend {
     /// Get configuration
     pub fn config(&self) -> &NativeBackendConfig {
         &self.config
+    }
+    
+    /// Enable debug information generation
+    pub fn enable_debug(&mut self, source_file: std::path::PathBuf, directory: std::path::PathBuf) {
+        use crate::codegen::debug::DebugInfoBuilder;
+        self.debug_builder = Some(DebugInfoBuilder::new(source_file, directory));
+    }
+    
+    /// Check if debug info is enabled
+    pub fn has_debug(&self) -> bool {
+        self.debug_builder.is_some()
+    }
+    
+    /// Get mutable reference to debug builder
+    pub fn debug_builder_mut(&mut self) -> Option<&mut crate::codegen::debug::DebugInfoBuilder> {
+        self.debug_builder.as_mut()
     }
 }
 
@@ -444,3 +464,4 @@ mod tests {
         assert!(backend.thermal_state().accumulated_degradation > 0.0);
     }
 }
+
