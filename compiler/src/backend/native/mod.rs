@@ -264,9 +264,45 @@ impl NativeBackend {
             .emit_module(module)
             .map_err(|e| CompileError::EmissionFailed(format!("{:?}", e)))?;
 
-        // Use ELF conversion helper
-        let elf_bytes = elf::code_segment_to_elf(&code_segment)
-            .map_err(|e| CompileError::EmissionFailed(format!("ELF emission failed: {}", e)))?;
+        // Create ELF writer
+        let mut elf = elf::ElfWriter::new(elf::ElfConfig::default());
+        
+        // Add .text section
+        let text_section_idx = elf.add_text_section(&code_segment.code);
+        
+        // Add symbols
+        let mut symbol_indices = std::collections::HashMap::new();
+        for sym in &code_segment.symbols {
+            let size = elf::calculate_symbol_size(sym, &code_segment.symbols, code_segment.code.len());
+            let elf_idx = elf.add_function(&sym.name, sym.offset as u64, size, sym.global);
+            symbol_indices.insert(sym.name.clone(), elf_idx + 1);
+        }
+        
+        // Add undefined symbols
+        for reloc in &code_segment.relocations {
+            if !symbol_indices.contains_key(&reloc.symbol) {
+                let idx = elf.add_undefined_symbol(&reloc.symbol);
+                symbol_indices.insert(reloc.symbol.clone(), idx + 1);
+            }
+        }
+        
+        // Add relocations
+        for reloc in &code_segment.relocations {
+            let sym_idx = *symbol_indices.get(&reloc.symbol)
+                .ok_or_else(|| CompileError::EmissionFailed(format!("Symbol not found: {}", reloc.symbol)))?;
+            let reloc_type = elf::reloc_kind_to_type(&reloc.kind);
+            elf.add_relocation(text_section_idx, reloc.offset as u64, sym_idx, reloc_type, reloc.addend);
+        }
+        
+        // If debug info is enabled, finalize and add DWARF sections
+        if let Some(debug_builder) = self.debug_builder.take() {
+            let dwarf_output = debug_builder.finalize();
+            elf.add_dwarf_sections(&dwarf_output);
+            // Note: debug_builder is consumed by finalize(), so we don't put it back
+        }
+        
+        let elf_bytes = elf.finish()
+            .map_err(|e| CompileError::EmissionFailed(format!("ELF generation failed: {}", e)))?;
 
         Ok(elf_bytes)
     }

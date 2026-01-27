@@ -1161,7 +1161,7 @@ pub fn code_segment_to_elf(segment: &crate::sir::emit::CodeSegment) -> Result<Ve
 }
 
 /// Calculate symbol size from next symbol or end of code
-fn calculate_symbol_size(
+pub fn calculate_symbol_size(
     sym: &crate::sir::emit::Symbol,
     all_symbols: &[crate::sir::emit::Symbol],
     code_len: usize,
@@ -1179,7 +1179,7 @@ fn calculate_symbol_size(
 }
 
 /// Convert sir::emit::RelocKind to elf::RelocationType
-fn reloc_kind_to_type(kind: &crate::sir::emit::RelocKind) -> RelocationType {
+pub fn reloc_kind_to_type(kind: &crate::sir::emit::RelocKind) -> RelocationType {
     match kind {
         crate::sir::emit::RelocKind::Abs64 => RelocationType::Abs64,
         crate::sir::emit::RelocKind::PCRel32 => RelocationType::Pc32,
