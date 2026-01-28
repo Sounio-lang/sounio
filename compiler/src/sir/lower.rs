@@ -118,7 +118,7 @@ impl MetadataTracker {
     /// Extract Knowledge<T> wrapper information from a type
     pub fn extract_knowledge_wrapper(ty: &HlirType) -> Option<(f64, Option<u32>)> {
         match ty {
-            HlirType::Knowledge { inner, mode } => {
+            HlirType::Knowledge { inner, mode, .. } => {
                 use crate::runtime::EpistemicMode;
                 // Extract epsilon bound based on mode
                 // Epsilon = 1 - confidence, so 95% confidence = 0.05 epsilon
@@ -146,12 +146,71 @@ impl MetadataTracker {
     /// Extract Quantity<T> wrapper information from a type
     pub fn extract_quantity_wrapper(ty: &HlirType) -> Option<PhysicalUnit> {
         match ty {
-            HlirType::Struct(name) if name.contains("Quantity") => {
-                Some(PhysicalUnit::dimensionless())
+            HlirType::Struct(name) if name.starts_with("Quantity_") => {
+                // Extract unit string from struct name
+                // Format: Quantity_<unit_str> where operators are encoded as _DIV_, _MUL_, _POW_
+                let unit_encoded = name.strip_prefix("Quantity_")?;
+                
+                // Decode operators back to standard form
+                let unit_str = unit_encoded
+                    .replace("_DIV_", "/")
+                    .replace("_MUL_", "*")
+                    .replace("_POW_", "^");
+                
+                // Parse the unit string
+                Self::parse_unit_string(&unit_str)
             }
             _ => None,
         }
     }
+
+    /// Parse a unit string and return PhysicalUnit
+    /// Handles simple units like "mg", "L", "h"
+    /// Handles compound units like "mg/L", "L/h", "mg/h"
+    fn parse_unit_string(unit_str: &str) -> Option<PhysicalUnit> {
+        use crate::units::convert::parse_unit_expression;
+        
+        // Split by division operator
+        if let Some(div_pos) = unit_str.find('/') {
+            let (numerator, denominator) = unit_str.split_at(div_pos);
+            let denominator = &denominator[1..]; // Skip the '/' character
+            
+            // Parse numerator and denominator separately
+            let (num_dim, num_scale) = parse_unit_expression(numerator).ok()?;
+            let (den_dim, den_scale) = parse_unit_expression(denominator).ok()?;
+            
+            // Divide dimensions (subtract exponents)
+            let result_dim = num_dim.div(&den_dim);
+            // Divide scales
+            let result_scale = num_scale / den_scale;
+            
+            Some(PhysicalUnit {
+                dimensions: Self::dimension_to_array(&result_dim),
+                scale: result_scale,
+            })
+        } else {
+            // Simple unit
+            let (dim, scale) = parse_unit_expression(unit_str).ok()?;
+            Some(PhysicalUnit {
+                dimensions: Self::dimension_to_array(&dim),
+                scale,
+            })
+        }
+    }
+
+    /// Convert Dimension struct to 7-element array [mass, length, time, current, temp, amount, luminosity]
+    fn dimension_to_array(dim: &crate::units::dimension::Dimension) -> [i8; 7] {
+        [
+            dim.mass,
+            dim.length,
+            dim.time,
+            dim.current,
+            dim.temperature,
+            dim.amount,
+            dim.luminosity,
+        ]
+    }
+
 
     /// Finalize and attach collected metadata to the module's metadata store
     pub fn finalize_metadata(self, metadata_store: &mut MetadataStore) {
@@ -1751,6 +1810,23 @@ mod tests {
             assert!(unit.is_some(), "Failed to extract unit for {}", unit_symbol);
             let unit = unit.unwrap();
             assert_eq!(unit.dimensions, expected_dims, "Wrong dimensions for {}", unit_symbol);
+
+    #[test]
+    fn test_extract_quantity_clearance() {
+        // Test L/h (clearance unit)
+        let ty = HlirType::Struct("Quantity_L_DIV_h".to_string());
+        let unit = MetadataTracker::extract_quantity_wrapper(&ty);
+        
+        assert!(unit.is_some());
+        let unit = unit.unwrap();
+        
+        // L/h should have dimensions [0,3,-1,0,0,0,0] (volume/time = clearance)
+        // L is [0,3,0,0,0,0,0] scale 1e-3
+        // h is [0,0,1,0,0,0,0] scale 3600
+        // L/h = [0,3,-1,0,0,0,0] scale 1e-3/3600 ≈ 2.78e-7
+        assert_eq!(unit.dimensions, [0, 3, -1, 0, 0, 0, 0]);
+        assert!((unit.scale - 1e-3 / 3600.0).abs() < 1e-10);
+    }
             assert_eq!(unit.scale, expected_scale, "Wrong scale for {}", unit_symbol);
         }
     }
