@@ -1810,6 +1810,9 @@ mod tests {
             assert!(unit.is_some(), "Failed to extract unit for {}", unit_symbol);
             let unit = unit.unwrap();
             assert_eq!(unit.dimensions, expected_dims, "Wrong dimensions for {}", unit_symbol);
+            assert_eq!(unit.scale, expected_scale, "Wrong scale for {}", unit_symbol);
+        }
+    }
 
     #[test]
     fn test_extract_quantity_clearance() {
@@ -1826,9 +1829,6 @@ mod tests {
         // L/h = [0,3,-1,0,0,0,0] scale 1e-3/3600 ≈ 2.78e-7
         assert_eq!(unit.dimensions, [0, 3, -1, 0, 0, 0, 0]);
         assert!((unit.scale - 1e-3 / 3600.0).abs() < 1e-10);
-    }
-            assert_eq!(unit.scale, expected_scale, "Wrong scale for {}", unit_symbol);
-        }
     }
 }
 
