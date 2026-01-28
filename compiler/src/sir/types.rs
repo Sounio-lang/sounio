@@ -480,3 +480,48 @@ mod tests {
         assert_eq!(v.size_bytes(), 32); // 4 * 8 bytes
     }
 }
+
+    #[test]
+    fn test_knowledge_full_mode() {
+        use crate::runtime::EpistemicMode;
+        
+        let inner = SirType::f64();
+        let knowledge_ty = SirType::knowledge(inner, EpistemicMode::Full);
+        
+        // Full mode should create a struct with value + metadata fields
+        match knowledge_ty {
+            SirType::Struct(st) => {
+                assert!(st.name.as_ref().map_or(false, |n| n.contains("Knowledge_Full")));
+                assert!(st.fields.len() >= 6); // value, confidence, lower, upper, provenance, flags
+            }
+            _ => panic!("Expected Struct type for Full mode"),
+        }
+    }
+
+    #[test]
+    fn test_knowledge_compact_mode() {
+        use crate::runtime::EpistemicMode;
+        
+        let inner = SirType::i32();
+        let knowledge_ty = SirType::knowledge(inner, EpistemicMode::Compact);
+        
+        // Compact mode should create a struct with value + confidence
+        match knowledge_ty {
+            SirType::Struct(st) => {
+                assert!(st.name.as_ref().map_or(false, |n| n.contains("Knowledge_Compact")));
+                assert_eq!(st.fields.len(), 2); // value, confidence
+            }
+            _ => panic!("Expected Struct type for Compact mode"),
+        }
+    }
+
+    #[test]
+    fn test_knowledge_erased_mode() {
+        use crate::runtime::EpistemicMode;
+        
+        let inner = SirType::f32();
+        let knowledge_ty = SirType::knowledge(inner.clone(), EpistemicMode::Erased);
+        
+        // Erased mode should return just the inner type
+        assert_eq!(knowledge_ty, inner);
+    }
