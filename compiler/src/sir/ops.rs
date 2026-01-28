@@ -433,6 +433,23 @@ pub enum AutodiffMode {
     Reverse,
 }
 
+/// Failure mode for assertion violations
+#[derive(Debug, Clone, PartialEq)]
+pub enum FailureMode {
+    /// Emit trap instruction (ud2 on x86)
+    Trap,
+    /// Call runtime panic handler
+    Panic,
+    /// Degrade confidence by a factor (epistemic fallback)
+    DegradeConfidence(f64),
+}
+
+impl Default for FailureMode {
+    fn default() -> Self {
+        FailureMode::Panic
+    }
+}
+
 // ============================================================================
 // MAIN INSTRUCTION TYPE
 // ============================================================================
@@ -518,10 +535,11 @@ pub enum SirInst {
         name: String,
     },
 
-    /// Assertion (for refinement type checks in debug mode)
+    /// Assertion (for refinement type checks and runtime verification)
     Assert {
         cond: ValueId,
         message: String,
+        failure_mode: FailureMode,
     },
 
     /// Assume (optimization hint)
@@ -719,7 +737,7 @@ impl fmt::Display for SirInst {
             SirInst::Prob(prob) => write!(f, "prob.{:?}", prob),
             SirInst::Scientific(sci) => write!(f, "sci.{:?}", sci),
             SirInst::DebugValue { value, name } => write!(f, "debug.value {} = {}", name, value),
-            SirInst::Assert { cond, message } => write!(f, "assert {}, \"{}\"", cond, message),
+            SirInst::Assert { cond, message, failure_mode } => write!(f, "assert {}, \"{}\", mode={:?}", cond, message, failure_mode),
             SirInst::Assume(cond) => write!(f, "assume {}", cond),
             SirInst::BuildAggregate { fields, ty } => {
                 write!(f, "build_aggregate {:?} {{ {:?} }}", ty, fields)

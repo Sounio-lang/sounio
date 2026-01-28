@@ -2949,7 +2949,7 @@ impl X86_64Emitter {
             SirInst::DebugValue { .. } => {
                 // Debug values are no-ops in release builds
             }
-            SirInst::Assert { cond, message } => {
+            SirInst::Assert { cond, message, failure_mode } => {
                 // In debug mode, emit assertion check
                 // For now, skip assertions in codegen
             }
