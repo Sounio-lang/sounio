@@ -174,6 +174,8 @@ pub enum HlirType {
     Knowledge {
         inner: Box<HlirType>,
         mode: EpistemicMode,
+        epsilon_bound: Option<f64>,
+        provenance_id: Option<u32>,
     },
 }
 
@@ -226,12 +228,31 @@ impl HlirType {
                 } else {
                     EpistemicMode::Erased
                 };
+                
+                // Extract provenance ID if available
+                let provenance_id = provenance.as_ref().and_then(|p| {
+                    // For now, use hash of provenance as ID
+                    // TODO: proper provenance ID allocation
+                    use std::collections::hash_map::DefaultHasher;
+                    use std::hash::{Hash, Hasher};
+                    let mut hasher = DefaultHasher::new();
+                    format!("{:?}", p).hash(&mut hasher);
+                    Some((hasher.finish() & 0xFFFFFFFF) as u32)
+                });
+                
                 HlirType::Knowledge {
                     inner: Box::new(Self::from_hir(inner)),
                     mode,
+                    epsilon_bound: *epsilon_bound,
+                    provenance_id,
                 }
             }
-            HirType::Quantity { numeric, .. } => Self::from_hir(numeric),
+            HirType::Quantity { numeric, unit } => {
+                // Encode unit in struct name for later extraction in SIR
+                // Format: Quantity_<unit_str> where unit_str uses _DIV_, _MUL_, _POW_ for operators
+                let unit_str = unit.format().replace("/", "_DIV_").replace("*", "_MUL_").replace("^", "_POW_");
+                HlirType::Struct(format!("Quantity_{}", unit_str))
+            }
             HirType::Tensor { element, dims } => {
                 // Tensor becomes a struct with pointer to data and shape info
                 HlirType::Struct(format!("Tensor_{}", dims.len()))
@@ -342,7 +363,7 @@ impl HlirType {
             HlirType::Vec3d => 256, // 3 x 64-bit floats, padded for SIMD
             HlirType::Vec4d => 256, // 4 x 64-bit floats
             HlirType::Dual => 128,  // 2 x 64-bit floats (value, derivative)
-            HlirType::Knowledge { inner, mode } => inner.size_bits() + (mode.size_bytes() * 8),
+            HlirType::Knowledge { inner, mode, .. } => inner.size_bits() + (mode.size_bytes() * 8),
         }
     }
 }
