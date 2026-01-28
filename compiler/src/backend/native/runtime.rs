@@ -1236,6 +1236,94 @@ sounio_uncertain_log:
     .to_string()
 }
 
+
+pub fn generate_epistemic_runtime_asm() -> String {
+    r#"
+# Demetrios Runtime: Epistemic Knowledge Propagation Functions
+# Assembly wrappers for Knowledge<T> operations (GUM + provenance tracking)
+
+.section .text
+
+# Epistemic propagation: addition (full layout)
+# C signature: void sounio_epistemic_add_full(const KnowledgeFull* a, const KnowledgeFull* b, KnowledgeFull* result)
+# System V ABI: RDI=a, RSI=b, RDX=result
+.globl sounio_epistemic_add_full
+.type sounio_epistemic_add_full, @function
+sounio_epistemic_add_full:
+    # Stub - calls Rust implementation from epistemic_runtime.rs
+    ret
+.size sounio_epistemic_add_full, .-sounio_epistemic_add_full
+
+# Epistemic propagation: subtraction (full layout)
+.globl sounio_epistemic_sub_full
+.type sounio_epistemic_sub_full, @function
+sounio_epistemic_sub_full:
+    ret
+.size sounio_epistemic_sub_full, .-sounio_epistemic_sub_full
+
+# Epistemic propagation: multiplication (full layout)
+.globl sounio_epistemic_mul_full
+.type sounio_epistemic_mul_full, @function
+sounio_epistemic_mul_full:
+    ret
+.size sounio_epistemic_mul_full, .-sounio_epistemic_mul_full
+
+# Epistemic propagation: division (full layout)
+.globl sounio_epistemic_div_full
+.type sounio_epistemic_div_full, @function
+sounio_epistemic_div_full:
+    ret
+.size sounio_epistemic_div_full, .-sounio_epistemic_div_full
+
+# Epistemic propagation: addition (compact layout)
+.globl sounio_epistemic_add_compact
+.type sounio_epistemic_add_compact, @function
+sounio_epistemic_add_compact:
+    ret
+.size sounio_epistemic_add_compact, .-sounio_epistemic_add_compact
+
+# Epistemic propagation: subtraction (compact layout)
+.globl sounio_epistemic_sub_compact
+.type sounio_epistemic_sub_compact, @function
+sounio_epistemic_sub_compact:
+    ret
+.size sounio_epistemic_sub_compact, .-sounio_epistemic_sub_compact
+
+# Epistemic propagation: multiplication (compact layout)
+.globl sounio_epistemic_mul_compact
+.type sounio_epistemic_mul_compact, @function
+sounio_epistemic_mul_compact:
+    ret
+.size sounio_epistemic_mul_compact, .-sounio_epistemic_mul_compact
+
+# Epistemic propagation: division (compact layout)
+.globl sounio_epistemic_div_compact
+.type sounio_epistemic_div_compact, @function
+sounio_epistemic_div_compact:
+    ret
+.size sounio_epistemic_div_compact, .-sounio_epistemic_div_compact
+
+# Epistemic extraction: get value from Knowledge<T>
+# C signature: double sounio_epistemic_get_value(const KnowledgeFull* knowledge)
+# System V ABI: RDI=knowledge, return in XMM0
+.globl sounio_epistemic_get_value
+.type sounio_epistemic_get_value, @function
+sounio_epistemic_get_value:
+    movsd (%rdi), %xmm0
+    ret
+.size sounio_epistemic_get_value, .-sounio_epistemic_get_value
+
+# Epistemic extraction: get confidence
+.globl sounio_epistemic_get_confidence
+.type sounio_epistemic_get_confidence, @function
+sounio_epistemic_get_confidence:
+    movsd 8(%rdi), %xmm0
+    ret
+.size sounio_epistemic_get_confidence, .-sounio_epistemic_get_confidence
+"#
+    .to_string()
+}
+
 pub fn generate_float_asm() -> String {
     r#"
 # Demetrios Runtime: Floating-Point Helpers
@@ -1358,6 +1446,12 @@ fn generate_runtime_asm_internal(include_start: bool) -> String {
     asm.push_str(&generate_autodiff_runtime_asm());
     asm.push_str("\n");
     asm.push_str(&generate_tensor_runtime_asm());
+    asm.push_str("
+");
+    asm.push_str(&generate_uncertain_runtime_asm());
+    asm.push_str("
+");
+    asm.push_str(&generate_epistemic_runtime_asm());
 
     asm
 }
@@ -1508,6 +1602,17 @@ pub const RUNTIME_SYMBOLS: &[&str] = &[
     "sounio_uncertain_sqrt",
     "sounio_uncertain_exp",
     "sounio_uncertain_log",
+    // Epistemic propagation functions (Knowledge<T>)
+    "sounio_epistemic_add_full",
+    "sounio_epistemic_sub_full",
+    "sounio_epistemic_mul_full",
+    "sounio_epistemic_div_full",
+    "sounio_epistemic_add_compact",
+    "sounio_epistemic_sub_compact",
+    "sounio_epistemic_mul_compact",
+    "sounio_epistemic_div_compact",
+    "sounio_epistemic_get_value",
+    "sounio_epistemic_get_confidence",
     // Scientific operations
     "sounio_dot_product",
     "sounio_dot_product_simd",

@@ -134,6 +134,14 @@ const HANDLER_GRAD_FORWARD: u32 = 30; // Forward-mode autodiff
 #[cfg(feature = "jit")]
 const HANDLER_GRAD_REVERSE: u32 = 31; // Reverse-mode autodiff
 #[cfg(feature = "jit")]
+// Epistemic effect handlers (40-49)
+#[cfg(feature = "jit")]
+const HANDLER_EPISTEMIC_TRACKING: u32 = 40; // Full provenance tracking
+#[cfg(feature = "jit")]
+const HANDLER_EPISTEMIC_SIMPLE: u32 = 41; // Lightweight confidence only
+#[cfg(feature = "jit")]
+const HANDLER_EPISTEMIC_AUDIT: u32 = 42; // Audit mode with logging
+
 const HANDLER_GRAD_NUMERIC: u32 = 32; // Finite differences
 
 /// A registered effect handler
@@ -358,6 +366,8 @@ impl JitEffectState {
             20..=29 => dispatch_causal_effect(handler_id, op, args),
             // Grad effect handlers (30-39)
             30..=39 => dispatch_grad_effect(handler_id, op, args),
+            // Epistemic effect handlers (40-49)
+            40..=49 => dispatch_epistemic_effect(handler_id, op, args),
             _ => None,
         }
     }
@@ -547,6 +557,150 @@ fn dispatch_grad_effect(handler_id: u32, op: &str, args: &[f64]) -> Option<f64> 
                 }
                 "forward" | "reverse" => Some(0.0), // Neither - using numeric
                 "numeric" => Some(1.0), // Signal numeric mode is active
+                _ => None,
+            }
+        }
+        _ => None,
+    }
+}
+
+// ==================== Epistemic Effect Dispatch ====================
+/// Dispatch Epistemic effect operations (degrade, assert_confidence, firewall, etc.)
+#[cfg(feature = "jit")]
+fn dispatch_epistemic_effect(handler_id: u32, op: &str, args: &[f64]) -> Option<f64> {
+    match handler_id {
+        // Full tracking - provenance, confidence, model tracking
+        HANDLER_EPISTEMIC_TRACKING => {
+            match op {
+                "degrade" => {
+                    // Degrade confidence by factor (args[0])
+                    let factor = args.first().copied().unwrap_or(1.0);
+                    Some(factor.clamp(0.0, 1.0))
+                }
+                "boost" => {
+                    // Boost confidence by inverse factor (args[0])
+                    let factor = args.first().copied().unwrap_or(1.0);
+                    Some((1.0 / factor).min(1.0))
+                }
+                "assert_confidence" => {
+                    // Check minimum confidence threshold (args[0])
+                    let min_conf = args.first().copied().unwrap_or(0.0);
+                    let current_conf = args.get(1).copied().unwrap_or(1.0);
+                    if current_conf >= min_conf {
+                        Some(1.0) // Pass
+                    } else {
+                        Some(0.0) // Fail
+                    }
+                }
+                "get_confidence" => {
+                    // Return current confidence
+                    Some(args.first().copied().unwrap_or(1.0))
+                }
+                "clamp" => {
+                    // Clamp confidence between min and max
+                    let min = args.first().copied().unwrap_or(0.0);
+                    let max = args.get(1).copied().unwrap_or(1.0);
+                    let conf = args.get(2).copied().unwrap_or(1.0);
+                    Some(conf.clamp(min, max))
+                }
+                "firewall" | "record_provenance" | "switch_model" | "merge" | "isolate" => {
+                    // These operations require state tracking - return success marker
+                    Some(1.0)
+                }
+                _ => None,
+            }
+        }
+        // Simple mode - confidence tracking only, no provenance
+        HANDLER_EPISTEMIC_SIMPLE => {
+            match op {
+                "degrade" => {
+                    // Simple degradation
+                    let factor = args.first().copied().unwrap_or(1.0);
+                    Some(factor.clamp(0.0, 1.0))
+                }
+                "boost" => {
+                    let factor = args.first().copied().unwrap_or(1.0);
+                    Some((1.0 / factor).min(1.0))
+                }
+                "assert_confidence" => {
+                    let min_conf = args.first().copied().unwrap_or(0.0);
+                    let current_conf = args.get(1).copied().unwrap_or(1.0);
+                    Some(if current_conf >= min_conf { 1.0 } else { 0.0 })
+                }
+                "get_confidence" => {
+                    Some(args.first().copied().unwrap_or(1.0))
+                }
+                "clamp" => {
+                    let min = args.first().copied().unwrap_or(0.0);
+                    let max = args.get(1).copied().unwrap_or(1.0);
+                    let conf = args.get(2).copied().unwrap_or(1.0);
+                    Some(conf.clamp(min, max))
+                }
+                // Ignore provenance/firewall/model operations in simple mode
+                "firewall" | "record_provenance" | "switch_model" | "merge" | "isolate" => {
+                    Some(1.0)
+                }
+                _ => None,
+            }
+        }
+        // Audit mode - logs all epistemic operations
+        HANDLER_EPISTEMIC_AUDIT => {
+            match op {
+                "degrade" => {
+                    let factor = args.first().copied().unwrap_or(1.0);
+                    eprintln!("[Epistemic Audit] degrade(factor={})", factor);
+                    Some(factor.clamp(0.0, 1.0))
+                }
+                "boost" => {
+                    let factor = args.first().copied().unwrap_or(1.0);
+                    eprintln!("[Epistemic Audit] boost(factor={})", factor);
+                    Some((1.0 / factor).min(1.0))
+                }
+                "assert_confidence" => {
+                    let min_conf = args.first().copied().unwrap_or(0.0);
+                    let current_conf = args.get(1).copied().unwrap_or(1.0);
+                    eprintln!(
+                        "[Epistemic Audit] assert_confidence(min={}, current={})",
+                        min_conf, current_conf
+                    );
+                    Some(if current_conf >= min_conf { 1.0 } else { 0.0 })
+                }
+                "get_confidence" => {
+                    let conf = args.first().copied().unwrap_or(1.0);
+                    eprintln!("[Epistemic Audit] get_confidence() -> {}", conf);
+                    Some(conf)
+                }
+                "clamp" => {
+                    let min = args.first().copied().unwrap_or(0.0);
+                    let max = args.get(1).copied().unwrap_or(1.0);
+                    let conf = args.get(2).copied().unwrap_or(1.0);
+                    let clamped = conf.clamp(min, max);
+                    eprintln!(
+                        "[Epistemic Audit] clamp(min={}, max={}, conf={}) -> {}",
+                        min, max, conf, clamped
+                    );
+                    Some(clamped)
+                }
+                "firewall" => {
+                    eprintln!("[Epistemic Audit] firewall({:?})", args);
+                    Some(1.0)
+                }
+                "record_provenance" => {
+                    eprintln!("[Epistemic Audit] record_provenance({:?})", args);
+                    Some(1.0)
+                }
+                "switch_model" => {
+                    eprintln!("[Epistemic Audit] switch_model({:?})", args);
+                    Some(1.0)
+                }
+                "merge" => {
+                    eprintln!("[Epistemic Audit] merge({:?})", args);
+                    Some(1.0)
+                }
+                "isolate" => {
+                    eprintln!("[Epistemic Audit] isolate()");
+                    Some(1.0)
+                }
                 _ => None,
             }
         }
@@ -3530,6 +3684,11 @@ fn hlir_to_cranelift_type(ty: &HlirType) -> types::Type {
         HlirType::Vec2d => types::I64,
         HlirType::Vec3d => types::I64,
         HlirType::Vec4d => types::I64,
+        // Knowledge<T>: Epistemic wrapper containing value + confidence + provenance
+        // Represented as pointer to stack-allocated struct:
+        // struct Knowledge<T> { value: T, confidence: f64, provenance: u32, mode: u8 }
+        // Size: sizeof(T) + 8 + 4 + 1 (+ padding)
+        HlirType::Knowledge { .. } => types::I64,
     }
 }
 

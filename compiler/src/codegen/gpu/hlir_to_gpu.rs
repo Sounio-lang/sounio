@@ -964,6 +964,7 @@ impl HlirToGpuLowering {
             HlirType::Vec4d => GpuType::Vec4(Box::new(GpuType::F64)),
             // Dual number as vec2 of f64 (value, derivative)
             HlirType::Dual => GpuType::Vec2(Box::new(GpuType::F64)),
+            HlirType::Knowledge { inner, .. } => self.lower_type(inner),
         }
     }
 

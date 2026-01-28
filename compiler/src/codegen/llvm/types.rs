@@ -10,6 +10,7 @@ use inkwell::types::{
     StructType, VoidType,
 };
 
+use crate::runtime::EpistemicMode;
 use crate::hlir::HlirType;
 
 /// Type converter from HLIR types to LLVM types
@@ -142,6 +143,33 @@ impl<'ctx> TypeConverter<'ctx> {
                 self.context
                     .struct_type(&[f64_ty.into(), f64_ty.into()], false)
                     .into()
+            }
+
+            // Epistemic types - Knowledge wrapper
+            HlirType::Knowledge { inner, mode, .. } => {
+                let inner_ty = self.convert(inner);
+                match mode {
+                    EpistemicMode::Full => {
+                        // struct KnowledgeFull<T> { value: T, confidence: f64, lower: f64, upper: f64, 
+                        //                          provenance: [u8; 32], timestamp: u64 }
+                        // Total: sizeof(T) + 64 bytes
+                        let f64_ty = self.context.f64_type();
+                        let u64_ty = self.context.i64_type();
+                        let provenance_ty = self.context.i8_type().array_type(32);
+                        self.context.struct_type(
+                            &[inner_ty, f64_ty.into(), f64_ty.into(), f64_ty.into(), 
+                              provenance_ty.into(), u64_ty.into()],
+                            false
+                        ).into()
+                    }
+                    EpistemicMode::Compact => {
+                        // struct KnowledgeCompact<T> { value: T, confidence: u16, _padding: [u8; 14] }
+                        let u16_ty = self.context.i16_type();
+                        let padding_ty = self.context.i8_type().array_type(14);
+                        self.context.struct_type(&[inner_ty, u16_ty.into(), padding_ty.into()], false).into()
+                    }
+                    EpistemicMode::Erased => inner_ty, // Zero overhead - just the value
+                }
             }
         }
     }
@@ -303,6 +331,14 @@ impl<'ctx> TypeConverter<'ctx> {
             HlirType::Mat4 => 512, // 16x f32 = 512 bits
             HlirType::Quat => 128, // 4x f32 = 128 bits
             HlirType::Dual => 128, // 2x f64 = 128 bits
+            HlirType::Knowledge { inner, mode, .. } => {
+                let inner_bits = self.size_bits(inner);
+                match mode {
+                    EpistemicMode::Full => inner_bits + 512,    // +64 bytes (512 bits)
+                    EpistemicMode::Compact => inner_bits + 128, // +16 bytes (128 bits)
+                    EpistemicMode::Erased => inner_bits,        // Zero overhead
+                }
+            }
         }
     }
 
@@ -335,6 +371,10 @@ impl<'ctx> TypeConverter<'ctx> {
             HlirType::Mat3 => 16, // 16-byte alignment (rows are padded)
             HlirType::Mat4 => 16, // 16-byte alignment
             HlirType::Dual => 16, // 16-byte for 2x f64
+            HlirType::Knowledge { inner, .. } => {
+                // Knowledge structs use natural alignment (max of inner and metadata)
+                self.align_bytes(inner).max(8)
+            }
         }
     }
 

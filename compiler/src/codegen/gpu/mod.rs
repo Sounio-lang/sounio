@@ -56,6 +56,7 @@ pub mod portable;
 pub mod profiler;
 pub mod ptq;
 pub mod ptx;
+pub mod ptx_epistemic_bridge;
 pub mod qat;
 pub mod qnn_tensor_core;
 pub mod qnn_kernels;
@@ -84,6 +85,7 @@ pub use ir::{
     SharedMemDecl, SparseQuatFormat, TileLayout, TmaReduceOp, ValueId, WarpReduceOp, WarpVoteOp,
 };
 pub use ptx::PtxCodegen;
+pub use ptx_epistemic_bridge::EpistemicPtxCodegen;
 pub use runtime::{
     DeviceBuffer, GpuBackend, GpuError, GpuRuntime, Kernel, KernelArg, LaunchConfig,
 };

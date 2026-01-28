@@ -62,7 +62,7 @@ struct Patient {
     medications: Vec<Drug>,
 }
 
-fn analyze_patient(p: Patient) -> f64 {
+fn analyze_patient(p: Patient) -> f64 with Mut {
     var score = 0.0;
     for d in p.diseases {
         score = score + 1.0;
@@ -77,7 +77,7 @@ fn check_interactions(drugs: Vec<Drug>) -> bool {
     drugs.len() < 5
 }
 
-fn main() {
+fn main() with Mut {
     let patient = Patient {
         diseases: vec![mondo:0005015],
         phenotypes: vec![hp:0002315, hp:0001945],
@@ -442,7 +442,7 @@ fn test_branch_scaling() {
 #[test]
 fn test_loop_nesting_performance() {
     let source = r#"
-fn main() {
+fn main() with Mut {
     let mut sum = 0;
     for i in 0..10 {
         for j in 0..10 {

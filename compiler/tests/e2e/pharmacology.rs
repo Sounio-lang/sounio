@@ -382,7 +382,7 @@ struct DrugRegimen {
     interactions: Vec<(Drug, Drug, f64)>,  // (drug_a, drug_b, severity)
 }
 
-fn analyze_polypharmacy(regimen: DrugRegimen) -> f64 {
+fn analyze_polypharmacy(regimen: DrugRegimen) -> f64 with Mut {
     // Calculate overall risk score
     var risk = 0.0;
     for interaction in regimen.interactions {
@@ -397,7 +397,7 @@ fn suggest_alternatives(regimen: DrugRegimen) -> Vec<Drug> {
     vec![]
 }
 
-fn main() {
+fn main() with Mut {
     let patient_drugs: Vec<Drug> = vec![
         chebi:15365,  // Aspirin
         chebi:5855,   // Ibuprofen

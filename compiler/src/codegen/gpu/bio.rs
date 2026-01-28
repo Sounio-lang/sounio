@@ -1020,21 +1020,21 @@ pub fn gen_octonion_mul_kernel() -> GpuKernel {
     // c7 = a0*b7 + a7*b0 + a1*b3 - a3*b1 + a2*b6 - a6*b2 + a5*b4 - a4*b5
 
     // Helper closures for arithmetic operations
-    let mut fmul = |instrs: &mut Vec<(ValueId, GpuOp)>, v: &mut u32, x: ValueId, y: ValueId| -> ValueId {
+    let fmul = |instrs: &mut Vec<(ValueId, GpuOp)>, v: &mut u32, x: ValueId, y: ValueId| -> ValueId {
         instrs.push((ValueId(*v), GpuOp::FMul(x, y)));
         let result = ValueId(*v);
         *v += 1;
         result
     };
 
-    let mut fadd = |instrs: &mut Vec<(ValueId, GpuOp)>, v: &mut u32, x: ValueId, y: ValueId| -> ValueId {
+    let fadd = |instrs: &mut Vec<(ValueId, GpuOp)>, v: &mut u32, x: ValueId, y: ValueId| -> ValueId {
         instrs.push((ValueId(*v), GpuOp::FAdd(x, y)));
         let result = ValueId(*v);
         *v += 1;
         result
     };
 
-    let mut fsub = |instrs: &mut Vec<(ValueId, GpuOp)>, v: &mut u32, x: ValueId, y: ValueId| -> ValueId {
+    let fsub = |instrs: &mut Vec<(ValueId, GpuOp)>, v: &mut u32, x: ValueId, y: ValueId| -> ValueId {
         instrs.push((ValueId(*v), GpuOp::FSub(x, y)));
         let result = ValueId(*v);
         *v += 1;

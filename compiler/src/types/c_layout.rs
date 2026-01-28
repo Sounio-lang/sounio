@@ -209,6 +209,7 @@ impl CLayoutEngine {
 
             // Dual numbers (autodiff)
             HlirType::Dual => 16, // 2 x f64
+            HlirType::Knowledge { inner, .. } => self.size_of(inner),
 
             // Quaternionic Neural Network types - treat as structs
             HlirType::QuatLinear { .. } => 16,
@@ -266,6 +267,7 @@ impl CLayoutEngine {
             HlirType::Vec4d => 32,
 
             HlirType::Dual => 8, // Aligned to f64
+            HlirType::Knowledge { inner, .. } => self.align_of(inner),
 
             // Quaternionic Neural Network types
             HlirType::QuatLinear { .. } => 16,
@@ -480,6 +482,7 @@ impl CLayoutEngine {
             HlirType::QuatRnnState { .. } => false,
             HlirType::QuatGate { .. } => false,
             HlirType::Dual => false,
+            HlirType::Knowledge { .. } => false,
         }
     }
 
@@ -549,6 +552,7 @@ impl CLayoutEngine {
             HlirType::QuatRnnState { .. } => "float[hidden_size][4]".to_string(),
             HlirType::QuatGate { .. } => "struct { float* w_i; float* w_h; float* b; }".to_string(),
             HlirType::Dual => "struct { double value; double derivative; }".to_string(),
+            HlirType::Knowledge { inner, .. } => format!("/* Knowledge */ {}", self.to_c_type(inner)),
         }
     }
 }

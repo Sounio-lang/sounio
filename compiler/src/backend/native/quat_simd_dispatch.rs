@@ -24,6 +24,7 @@ pub enum SimdLevel {
     /// AVX2 (256-bit vectors, 2 quats per iteration, 4-5x speedup)
     Avx2 = 2,
     /// AVX-512 (512-bit vectors, 4 quats per iteration, 6-8x speedup)
+    #[cfg(all(target_arch = "x86_64", feature = "avx512"))]
     Avx512 = 3,
 }
 
@@ -35,9 +36,12 @@ static DETECTED_SIMD: OnceLock<SimdLevel> = OnceLock::new();
 fn detect_simd_level() -> SimdLevel {
     #[cfg(target_arch = "x86_64")]
     {
-        // Check for AVX-512 first (most powerful)
-        if is_x86_feature_detected!("avx512f") && is_x86_feature_detected!("avx512dq") {
-            return SimdLevel::Avx512;
+        #[cfg(feature = "avx512")]
+        {
+            // Check for AVX-512 first (most powerful)
+            if is_x86_feature_detected!("avx512f") && is_x86_feature_detected!("avx512dq") {
+                return SimdLevel::Avx512;
+            }
         }
 
         // Fall back to AVX2
@@ -102,7 +106,7 @@ pub type QuatLinearFwdFn = unsafe extern "C" fn(
 pub extern "C" fn sounio_quat_mul_dispatch(q1: *const f32, q2: *const f32, out: *mut f32) {
     unsafe {
         match simd_level() {
-            #[cfg(target_arch = "x86_64")]
+            #[cfg(all(target_arch = "x86_64", feature = "avx512"))]
             SimdLevel::Avx512 => {
                 sounio_quat_mul_avx512(q1, q2, out);
             }
@@ -133,7 +137,7 @@ pub extern "C" fn sounio_quat_batch_mul_dispatch(
 
     unsafe {
         match simd_level() {
-            #[cfg(target_arch = "x86_64")]
+            #[cfg(all(target_arch = "x86_64", feature = "avx512"))]
             SimdLevel::Avx512 => {
                 sounio_quat_batch_mul_avx512(q1s, q2s, outs, n);
             }
@@ -172,7 +176,7 @@ pub extern "C" fn sounio_quat_linear_fwd_dispatch(
 
     unsafe {
         match simd_level() {
-            #[cfg(target_arch = "x86_64")]
+            #[cfg(all(target_arch = "x86_64", feature = "avx512"))]
             SimdLevel::Avx512 => {
                 sounio_quat_linear_fwd_avx512(
                     input, weights, bias, output, input_dim, output_dim, batch_size,
@@ -335,7 +339,10 @@ unsafe extern "C" {
         output_dim: i32,
         batch_size: i32,
     );
+}
 
+#[cfg(all(target_arch = "x86_64", feature = "avx512"))]
+unsafe extern "C" {
     // AVX-512 implementations (512-bit, 4 quats per iteration)
     pub(crate) fn sounio_quat_mul_avx512(q1: *const f32, q2: *const f32, out: *mut f32);
     pub(crate) fn sounio_quat_batch_mul_avx512(

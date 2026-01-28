@@ -669,6 +669,115 @@ impl<'ctx> LLVMCodegen<'ctx> {
             .add_function("__sounio_pop_handler", fn_type, Some(Linkage::External))
     }
 
+    // ========================================================================
+    // Epistemic runtime function declarations
+    // ========================================================================
+
+    fn runtime_epistemic_add_full(&mut self) -> FunctionValue<'ctx> {
+        if let Some(func) = self.module.get_function("sounio_epistemic_add_full") {
+            return func;
+        }
+        let ptr_ty = self.context.ptr_type(AddressSpace::default());
+        let fn_type = self.context.void_type().fn_type(
+            &[ptr_ty.into(), ptr_ty.into(), ptr_ty.into()],
+            false,
+        );
+        self.module
+            .add_function("sounio_epistemic_add_full", fn_type, Some(Linkage::External))
+    }
+
+    fn runtime_epistemic_sub_full(&mut self) -> FunctionValue<'ctx> {
+        if let Some(func) = self.module.get_function("sounio_epistemic_sub_full") {
+            return func;
+        }
+        let ptr_ty = self.context.ptr_type(AddressSpace::default());
+        let fn_type = self.context.void_type().fn_type(
+            &[ptr_ty.into(), ptr_ty.into(), ptr_ty.into()],
+            false,
+        );
+        self.module
+            .add_function("sounio_epistemic_sub_full", fn_type, Some(Linkage::External))
+    }
+
+    fn runtime_epistemic_mul_full(&mut self) -> FunctionValue<'ctx> {
+        if let Some(func) = self.module.get_function("sounio_epistemic_mul_full") {
+            return func;
+        }
+        let ptr_ty = self.context.ptr_type(AddressSpace::default());
+        let fn_type = self.context.void_type().fn_type(
+            &[ptr_ty.into(), ptr_ty.into(), ptr_ty.into()],
+            false,
+        );
+        self.module
+            .add_function("sounio_epistemic_mul_full", fn_type, Some(Linkage::External))
+    }
+
+    fn runtime_epistemic_div_full(&mut self) -> FunctionValue<'ctx> {
+        if let Some(func) = self.module.get_function("sounio_epistemic_div_full") {
+            return func;
+        }
+        let ptr_ty = self.context.ptr_type(AddressSpace::default());
+        let fn_type = self.context.void_type().fn_type(
+            &[ptr_ty.into(), ptr_ty.into(), ptr_ty.into()],
+            false,
+        );
+        self.module
+            .add_function("sounio_epistemic_div_full", fn_type, Some(Linkage::External))
+    }
+
+    fn runtime_epistemic_add_compact(&mut self) -> FunctionValue<'ctx> {
+        if let Some(func) = self.module.get_function("sounio_epistemic_add_compact") {
+            return func;
+        }
+        let ptr_ty = self.context.ptr_type(AddressSpace::default());
+        let fn_type = self.context.void_type().fn_type(
+            &[ptr_ty.into(), ptr_ty.into(), ptr_ty.into()],
+            false,
+        );
+        self.module
+            .add_function("sounio_epistemic_add_compact", fn_type, Some(Linkage::External))
+    }
+
+    fn runtime_epistemic_sub_compact(&mut self) -> FunctionValue<'ctx> {
+        if let Some(func) = self.module.get_function("sounio_epistemic_sub_compact") {
+            return func;
+        }
+        let ptr_ty = self.context.ptr_type(AddressSpace::default());
+        let fn_type = self.context.void_type().fn_type(
+            &[ptr_ty.into(), ptr_ty.into(), ptr_ty.into()],
+            false,
+        );
+        self.module
+            .add_function("sounio_epistemic_sub_compact", fn_type, Some(Linkage::External))
+    }
+
+    fn runtime_epistemic_mul_compact(&mut self) -> FunctionValue<'ctx> {
+        if let Some(func) = self.module.get_function("sounio_epistemic_mul_compact") {
+            return func;
+        }
+        let ptr_ty = self.context.ptr_type(AddressSpace::default());
+        let fn_type = self.context.void_type().fn_type(
+            &[ptr_ty.into(), ptr_ty.into(), ptr_ty.into()],
+            false,
+        );
+        self.module
+            .add_function("sounio_epistemic_mul_compact", fn_type, Some(Linkage::External))
+    }
+
+    fn runtime_epistemic_div_compact(&mut self) -> FunctionValue<'ctx> {
+        if let Some(func) = self.module.get_function("sounio_epistemic_div_compact") {
+            return func;
+        }
+        let ptr_ty = self.context.ptr_type(AddressSpace::default());
+        let fn_type = self.context.void_type().fn_type(
+            &[ptr_ty.into(), ptr_ty.into(), ptr_ty.into()],
+            false,
+        );
+        self.module
+            .add_function("sounio_epistemic_div_compact", fn_type, Some(Linkage::External))
+    }
+    }
+
     fn get_or_create_cstr_ptr(&mut self, value: &str) -> Option<PointerValue<'ctx>> {
         if let Some(ptr) = self.strings.get(value) {
             return Some(*ptr);

@@ -93,7 +93,7 @@ pub mod quat_runtime;
 pub mod quat_simd_dispatch;
 #[cfg(target_arch = "x86_64")]
 pub mod quat_simd_avx2;
-#[cfg(target_arch = "x86_64")]
+#[cfg(all(target_arch = "x86_64", feature = "avx512"))]
 pub mod quat_simd_avx512;
 #[cfg(target_arch = "aarch64")]
 pub mod quat_simd_neon;

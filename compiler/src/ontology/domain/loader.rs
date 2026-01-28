@@ -8,8 +8,7 @@ use std::collections::HashMap;
 use crate::epistemic::{Confidence, EpistemicStatus, Evidence, EvidenceKind, Revisability, Source};
 use crate::ontology::OntologyError;
 
-use super::{DomainIndex, DomainTerm, OntologyMetadata};
-use crate::epistemic::TermId;
+use super::{DomainIndex, OntologyMetadata};
 
 /// Load an ontology from its SQLite database
 #[cfg(feature = "ontology")]
