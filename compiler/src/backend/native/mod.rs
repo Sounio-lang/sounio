@@ -98,6 +98,7 @@ pub mod quat_simd_avx512;
 #[cfg(target_arch = "aarch64")]
 pub mod quat_simd_neon;
 pub mod quat_runtime_i8;
+pub mod epistemic_runtime;
 
 // Re-export commonly used types
 pub mod prelude {
