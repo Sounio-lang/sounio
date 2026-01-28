@@ -495,9 +495,9 @@ pub unsafe extern "C" fn sounio_epistemic_meet(
     unsafe {
         // Take value with lower confidence (more skeptical)
         if (*a).confidence < (*b).confidence {
-            *result = *a;
+            std::ptr::copy_nonoverlapping(a, result, 1);
         } else {
-            *result = *b;
+            std::ptr::copy_nonoverlapping(b, result, 1);
         }
     }
 }
@@ -540,11 +540,11 @@ pub unsafe extern "C" fn sounio_epistemic_join(
 
         // Handle exact values (zero variance)
         if a_variance == 0.0 {
-            *result = *a;
+            std::ptr::copy_nonoverlapping(a, result, 1);
             return;
         }
         if b_variance == 0.0 {
-            *result = *b;
+            std::ptr::copy_nonoverlapping(b, result, 1);
             return;
         }
 

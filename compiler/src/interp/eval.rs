@@ -1146,11 +1146,34 @@ impl Interpreter {
                 validity,
                 provenance,
             } => {
-                // For interpreter, evaluate the inner value and wrap with epistemic metadata
+                // Evaluate the inner value
                 let val = self.eval_expr(value)?;
+                
+                // Extract confidence from epsilon (uncertainty)
                 let eps = self.eval_expr(epsilon)?;
-                // Return the value for now - a full implementation would return a Knowledge struct
-                Ok(val)
+                let confidence = match eps {
+                    Value::Float(e) => (1.0 - e).max(0.0).min(1.0),
+                    Value::Int(e) => (1.0 - (e as f64)).max(0.0).min(1.0),
+                    _ => 1.0, // Default to certain if epsilon is not numeric
+                };
+                
+                // Generate provenance ID from provenance expression
+                let provenance_id = if let Some(prov) = provenance {
+                    // Hash the provenance expression to get an ID
+                    use std::collections::hash_map::DefaultHasher;
+                    use std::hash::{Hash, Hasher};
+                    let mut hasher = DefaultHasher::new();
+                    format!("{:?}", prov).hash(&mut hasher);
+                    (hasher.finish() & 0xFFFFFFFF) as u32
+                } else {
+                    0 // No provenance
+                };
+                
+                Ok(Value::Knowledge {
+                    value: Box::new(val),
+                    confidence,
+                    provenance_id,
+                })
             }
 
             HirExprKind::Do { variable, value } => {
@@ -1628,29 +1651,75 @@ impl Interpreter {
         }
     }
 
+    /// Unwrap Knowledge values and extract their metadata
+    fn unwrap_knowledge(val: Value) -> (Value, f64, u32) {
+        match val {
+            Value::Knowledge { value, confidence, provenance_id } => {
+                (*value, confidence, provenance_id)
+            }
+            _ => (val, 1.0, 0), // Non-Knowledge values have confidence 1.0
+        }
+    }
+
+    /// Combine two confidence values for binary operations
+    fn combine_confidence(c1: f64, c2: f64) -> f64 {
+        // For now, use multiplication (confidence degrades)
+        (c1 * c2).max(0.0).min(1.0)
+    }
+
+    /// Combine two provenance IDs
+    fn combine_provenance(p1: u32, p2: u32) -> u32 {
+        // XOR for simple combination
+        p1 ^ p2
+    }
+
+    /// Wrap result in Knowledge if either operand was Knowledge
+    fn wrap_knowledge(
+        result: Value,
+        conf1: f64,
+        conf2: f64,
+        prov1: u32,
+        prov2: u32,
+    ) -> Value {
+        // If either input was Knowledge (confidence < 1.0 or prov != 0), wrap result
+        if conf1 < 1.0 || conf2 < 1.0 || prov1 != 0 || prov2 != 0 {
+            Value::Knowledge {
+                value: Box::new(result),
+                confidence: Self::combine_confidence(conf1, conf2),
+                provenance_id: Self::combine_provenance(prov1, prov2),
+            }
+        } else {
+            result
+        }
+    }
+
     /// Evaluate a binary operation
     fn eval_binary(&self, op: HirBinaryOp, lhs: Value, rhs: Value) -> Result<Value, ControlFlow> {
+        // Unwrap Knowledge values if present
+        let (lhs, lhs_conf, lhs_prov) = Self::unwrap_knowledge(lhs);
+        let (rhs, rhs_conf, rhs_prov) = Self::unwrap_knowledge(rhs);
+
         match op {
             HirBinaryOp::Add => match (lhs, rhs) {
-                (Value::Int(a), Value::Int(b)) => Ok(Value::Int(a + b)),
-                (Value::Float(a), Value::Float(b)) => Ok(Value::Float(a + b)),
-                (Value::Int(a), Value::Float(b)) => Ok(Value::Float(a as f64 + b)),
-                (Value::Float(a), Value::Int(b)) => Ok(Value::Float(a + b as f64)),
-                (Value::String(a), Value::String(b)) => Ok(Value::String(a + &b)),
+                (Value::Int(a), Value::Int(b)) => Ok(Self::wrap_knowledge(Value::Int(a + b), lhs_conf, rhs_conf, lhs_prov, rhs_prov)),
+                (Value::Float(a), Value::Float(b)) => Ok(Self::wrap_knowledge(Value::Float(a + b), lhs_conf, rhs_conf, lhs_prov, rhs_prov)),
+                (Value::Int(a), Value::Float(b)) => Ok(Self::wrap_knowledge(Value::Float(a as f64 + b), lhs_conf, rhs_conf, lhs_prov, rhs_prov)),
+                (Value::Float(a), Value::Int(b)) => Ok(Self::wrap_knowledge(Value::Float(a + b as f64), lhs_conf, rhs_conf, lhs_prov, rhs_prov)),
+                (Value::String(a), Value::String(b)) => Ok(Self::wrap_knowledge(Value::String(a + &b), lhs_conf, rhs_conf, lhs_prov, rhs_prov)),
                 _ => Err(ControlFlow::Return(Value::Unit)),
             },
             HirBinaryOp::Sub => match (lhs, rhs) {
-                (Value::Int(a), Value::Int(b)) => Ok(Value::Int(a - b)),
-                (Value::Float(a), Value::Float(b)) => Ok(Value::Float(a - b)),
-                (Value::Int(a), Value::Float(b)) => Ok(Value::Float(a as f64 - b)),
-                (Value::Float(a), Value::Int(b)) => Ok(Value::Float(a - b as f64)),
+                (Value::Int(a), Value::Int(b)) => Ok(Self::wrap_knowledge(Value::Int(a - b), lhs_conf, rhs_conf, lhs_prov, rhs_prov)),
+                (Value::Float(a), Value::Float(b)) => Ok(Self::wrap_knowledge(Value::Float(a - b), lhs_conf, rhs_conf, lhs_prov, rhs_prov)),
+                (Value::Int(a), Value::Float(b)) => Ok(Self::wrap_knowledge(Value::Float(a as f64 - b), lhs_conf, rhs_conf, lhs_prov, rhs_prov)),
+                (Value::Float(a), Value::Int(b)) => Ok(Self::wrap_knowledge(Value::Float(a - b as f64), lhs_conf, rhs_conf, lhs_prov, rhs_prov)),
                 _ => Err(ControlFlow::Return(Value::Unit)),
             },
             HirBinaryOp::Mul => match (lhs, rhs) {
-                (Value::Int(a), Value::Int(b)) => Ok(Value::Int(a * b)),
-                (Value::Float(a), Value::Float(b)) => Ok(Value::Float(a * b)),
-                (Value::Int(a), Value::Float(b)) => Ok(Value::Float(a as f64 * b)),
-                (Value::Float(a), Value::Int(b)) => Ok(Value::Float(a * b as f64)),
+                (Value::Int(a), Value::Int(b)) => Ok(Self::wrap_knowledge(Value::Int(a * b), lhs_conf, rhs_conf, lhs_prov, rhs_prov)),
+                (Value::Float(a), Value::Float(b)) => Ok(Self::wrap_knowledge(Value::Float(a * b), lhs_conf, rhs_conf, lhs_prov, rhs_prov)),
+                (Value::Int(a), Value::Float(b)) => Ok(Self::wrap_knowledge(Value::Float(a as f64 * b), lhs_conf, rhs_conf, lhs_prov, rhs_prov)),
+                (Value::Float(a), Value::Int(b)) => Ok(Self::wrap_knowledge(Value::Float(a * b as f64), lhs_conf, rhs_conf, lhs_prov, rhs_prov)),
                 _ => Err(ControlFlow::Return(Value::Unit)),
             },
             HirBinaryOp::Div => match (lhs, rhs) {
@@ -1658,12 +1727,12 @@ impl Interpreter {
                     if b == 0 {
                         Err(ControlFlow::Return(Value::Unit)) // Division by zero
                     } else {
-                        Ok(Value::Int(a / b))
+                        Ok(Self::wrap_knowledge(Value::Int(a / b), lhs_conf, rhs_conf, lhs_prov, rhs_prov))
                     }
                 }
-                (Value::Float(a), Value::Float(b)) => Ok(Value::Float(a / b)),
-                (Value::Int(a), Value::Float(b)) => Ok(Value::Float(a as f64 / b)),
-                (Value::Float(a), Value::Int(b)) => Ok(Value::Float(a / b as f64)),
+                (Value::Float(a), Value::Float(b)) => Ok(Self::wrap_knowledge(Value::Float(a / b), lhs_conf, rhs_conf, lhs_prov, rhs_prov)),
+                (Value::Int(a), Value::Float(b)) => Ok(Self::wrap_knowledge(Value::Float(a as f64 / b), lhs_conf, rhs_conf, lhs_prov, rhs_prov)),
+                (Value::Float(a), Value::Int(b)) => Ok(Self::wrap_knowledge(Value::Float(a / b as f64), lhs_conf, rhs_conf, lhs_prov, rhs_prov)),
                 _ => Err(ControlFlow::Return(Value::Unit)),
             },
             HirBinaryOp::Rem => match (lhs, rhs) {
@@ -1671,66 +1740,66 @@ impl Interpreter {
                     if b == 0 {
                         Err(ControlFlow::Return(Value::Unit))
                     } else {
-                        Ok(Value::Int(a % b))
+                        Ok(Self::wrap_knowledge(Value::Int(a % b), lhs_conf, rhs_conf, lhs_prov, rhs_prov))
                     }
                 }
-                (Value::Float(a), Value::Float(b)) => Ok(Value::Float(a % b)),
+                (Value::Float(a), Value::Float(b)) => Ok(Self::wrap_knowledge(Value::Float(a % b), lhs_conf, rhs_conf, lhs_prov, rhs_prov)),
                 _ => Err(ControlFlow::Return(Value::Unit)),
             },
-            HirBinaryOp::Eq => Ok(Value::Bool(lhs == rhs)),
-            HirBinaryOp::Ne => Ok(Value::Bool(lhs != rhs)),
+            HirBinaryOp::Eq => Ok(Self::wrap_knowledge(Value::Bool(lhs == rhs), lhs_conf, rhs_conf, lhs_prov, rhs_prov)),
+            HirBinaryOp::Ne => Ok(Self::wrap_knowledge(Value::Bool(lhs != rhs), lhs_conf, rhs_conf, lhs_prov, rhs_prov)),
             HirBinaryOp::Lt => match (lhs, rhs) {
-                (Value::Int(a), Value::Int(b)) => Ok(Value::Bool(a < b)),
-                (Value::Float(a), Value::Float(b)) => Ok(Value::Bool(a < b)),
-                (Value::String(a), Value::String(b)) => Ok(Value::Bool(a < b)),
+                (Value::Int(a), Value::Int(b)) => Ok(Self::wrap_knowledge(Value::Bool(a < b), lhs_conf, rhs_conf, lhs_prov, rhs_prov)),
+                (Value::Float(a), Value::Float(b)) => Ok(Self::wrap_knowledge(Value::Bool(a < b), lhs_conf, rhs_conf, lhs_prov, rhs_prov)),
+                (Value::String(a), Value::String(b)) => Ok(Self::wrap_knowledge(Value::Bool(a < b), lhs_conf, rhs_conf, lhs_prov, rhs_prov)),
                 _ => Err(ControlFlow::Return(Value::Unit)),
             },
             HirBinaryOp::Le => match (lhs, rhs) {
-                (Value::Int(a), Value::Int(b)) => Ok(Value::Bool(a <= b)),
-                (Value::Float(a), Value::Float(b)) => Ok(Value::Bool(a <= b)),
-                (Value::String(a), Value::String(b)) => Ok(Value::Bool(a <= b)),
+                (Value::Int(a), Value::Int(b)) => Ok(Self::wrap_knowledge(Value::Bool(a <= b), lhs_conf, rhs_conf, lhs_prov, rhs_prov)),
+                (Value::Float(a), Value::Float(b)) => Ok(Self::wrap_knowledge(Value::Bool(a <= b), lhs_conf, rhs_conf, lhs_prov, rhs_prov)),
+                (Value::String(a), Value::String(b)) => Ok(Self::wrap_knowledge(Value::Bool(a <= b), lhs_conf, rhs_conf, lhs_prov, rhs_prov)),
                 _ => Err(ControlFlow::Return(Value::Unit)),
             },
             HirBinaryOp::Gt => match (lhs, rhs) {
-                (Value::Int(a), Value::Int(b)) => Ok(Value::Bool(a > b)),
-                (Value::Float(a), Value::Float(b)) => Ok(Value::Bool(a > b)),
-                (Value::String(a), Value::String(b)) => Ok(Value::Bool(a > b)),
+                (Value::Int(a), Value::Int(b)) => Ok(Self::wrap_knowledge(Value::Bool(a > b), lhs_conf, rhs_conf, lhs_prov, rhs_prov)),
+                (Value::Float(a), Value::Float(b)) => Ok(Self::wrap_knowledge(Value::Bool(a > b), lhs_conf, rhs_conf, lhs_prov, rhs_prov)),
+                (Value::String(a), Value::String(b)) => Ok(Self::wrap_knowledge(Value::Bool(a > b), lhs_conf, rhs_conf, lhs_prov, rhs_prov)),
                 _ => Err(ControlFlow::Return(Value::Unit)),
             },
             HirBinaryOp::Ge => match (lhs, rhs) {
-                (Value::Int(a), Value::Int(b)) => Ok(Value::Bool(a >= b)),
-                (Value::Float(a), Value::Float(b)) => Ok(Value::Bool(a >= b)),
-                (Value::String(a), Value::String(b)) => Ok(Value::Bool(a >= b)),
+                (Value::Int(a), Value::Int(b)) => Ok(Self::wrap_knowledge(Value::Bool(a >= b), lhs_conf, rhs_conf, lhs_prov, rhs_prov)),
+                (Value::Float(a), Value::Float(b)) => Ok(Self::wrap_knowledge(Value::Bool(a >= b), lhs_conf, rhs_conf, lhs_prov, rhs_prov)),
+                (Value::String(a), Value::String(b)) => Ok(Self::wrap_knowledge(Value::Bool(a >= b), lhs_conf, rhs_conf, lhs_prov, rhs_prov)),
                 _ => Err(ControlFlow::Return(Value::Unit)),
             },
             HirBinaryOp::And => Ok(Value::Bool(lhs.is_truthy() && rhs.is_truthy())),
             HirBinaryOp::Or => Ok(Value::Bool(lhs.is_truthy() || rhs.is_truthy())),
             HirBinaryOp::BitAnd => match (lhs, rhs) {
-                (Value::Int(a), Value::Int(b)) => Ok(Value::Int(a & b)),
+                (Value::Int(a), Value::Int(b)) => Ok(Self::wrap_knowledge(Value::Int(a & b), lhs_conf, rhs_conf, lhs_prov, rhs_prov)),
                 _ => Err(ControlFlow::Return(Value::Unit)),
             },
             HirBinaryOp::BitOr => match (lhs, rhs) {
-                (Value::Int(a), Value::Int(b)) => Ok(Value::Int(a | b)),
+                (Value::Int(a), Value::Int(b)) => Ok(Self::wrap_knowledge(Value::Int(a | b), lhs_conf, rhs_conf, lhs_prov, rhs_prov)),
                 _ => Err(ControlFlow::Return(Value::Unit)),
             },
             HirBinaryOp::BitXor => match (lhs, rhs) {
-                (Value::Int(a), Value::Int(b)) => Ok(Value::Int(a ^ b)),
+                (Value::Int(a), Value::Int(b)) => Ok(Self::wrap_knowledge(Value::Int(a ^ b), lhs_conf, rhs_conf, lhs_prov, rhs_prov)),
                 _ => Err(ControlFlow::Return(Value::Unit)),
             },
             HirBinaryOp::Shl => match (lhs, rhs) {
-                (Value::Int(a), Value::Int(b)) => Ok(Value::Int(a << b)),
+                (Value::Int(a), Value::Int(b)) => Ok(Self::wrap_knowledge(Value::Int(a << b), lhs_conf, rhs_conf, lhs_prov, rhs_prov)),
                 _ => Err(ControlFlow::Return(Value::Unit)),
             },
             HirBinaryOp::Shr => match (lhs, rhs) {
-                (Value::Int(a), Value::Int(b)) => Ok(Value::Int(a >> b)),
+                (Value::Int(a), Value::Int(b)) => Ok(Self::wrap_knowledge(Value::Int(a >> b), lhs_conf, rhs_conf, lhs_prov, rhs_prov)),
                 _ => Err(ControlFlow::Return(Value::Unit)),
             },
             HirBinaryOp::PlusMinus => match (lhs, rhs) {
                 // Treat PlusMinus as Add (uncertainty is handled at type-check time)
-                (Value::Int(a), Value::Int(b)) => Ok(Value::Int(a + b)),
-                (Value::Float(a), Value::Float(b)) => Ok(Value::Float(a + b)),
-                (Value::Int(a), Value::Float(b)) => Ok(Value::Float(a as f64 + b)),
-                (Value::Float(a), Value::Int(b)) => Ok(Value::Float(a + b as f64)),
+                (Value::Int(a), Value::Int(b)) => Ok(Self::wrap_knowledge(Value::Int(a + b), lhs_conf, rhs_conf, lhs_prov, rhs_prov)),
+                (Value::Float(a), Value::Float(b)) => Ok(Self::wrap_knowledge(Value::Float(a + b), lhs_conf, rhs_conf, lhs_prov, rhs_prov)),
+                (Value::Int(a), Value::Float(b)) => Ok(Self::wrap_knowledge(Value::Float(a as f64 + b), lhs_conf, rhs_conf, lhs_prov, rhs_prov)),
+                (Value::Float(a), Value::Int(b)) => Ok(Self::wrap_knowledge(Value::Float(a + b as f64), lhs_conf, rhs_conf, lhs_prov, rhs_prov)),
                 _ => Err(ControlFlow::Return(Value::Unit)),
             },
             HirBinaryOp::Concat => match (lhs, rhs) {
@@ -1743,7 +1812,7 @@ impl Interpreter {
                     ))))
                 }
                 // Concatenate strings
-                (Value::String(a), Value::String(b)) => Ok(Value::String(a + &b)),
+                (Value::String(a), Value::String(b)) => Ok(Self::wrap_knowledge(Value::String(a + &b), lhs_conf, rhs_conf, lhs_prov, rhs_prov)),
                 _ => Err(ControlFlow::Return(Value::Unit)),
             },
         }

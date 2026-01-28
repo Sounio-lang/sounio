@@ -140,6 +140,15 @@ pub enum Value {
         /// The task handle
         handle: TaskHandle,
     },
+    /// Epistemic value with confidence tracking
+    Knowledge {
+        /// The wrapped value
+        value: Box<Value>,
+        /// Confidence level (0.0 to 1.0)
+        confidence: f64,
+        /// Provenance ID for tracking
+        provenance_id: u32,
+    },
 }
 
 impl Value {
@@ -173,6 +182,7 @@ impl Value {
             Value::HybridModel { .. } => "HybridModel",
             Value::Future { .. } => "Future",
             Value::Task { .. } => "Task",
+            Value::Knowledge { .. } => "Knowledge",
         }
     }
 
@@ -439,6 +449,7 @@ impl fmt::Debug for Value {
                     write!(f, "Task({:?}, pending)", handle.task_id())
                 }
             }
+            Value::Knowledge { value, confidence, provenance_id } => {                write!(f, "Knowledge({:?}, conf={:.3}, prov={})", value, confidence, provenance_id)            }
         }
     }
 }
@@ -571,6 +582,7 @@ impl fmt::Display for Value {
                     write!(f, "Task(pending)")
                 }
             }
+            Value::Knowledge { value, confidence, .. } => {                write!(f, "Knowledge({}, {:.3})", value, confidence)            }
         }
     }
 }
