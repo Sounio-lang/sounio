@@ -221,14 +221,14 @@ fn beta_update(c: &BetaConfidence, successes: i64, failures: i64) -> BetaConfide
 }
 \end{lstlisting}
 
-\subsection{Type-Level Effect Tracking}
+\subsection{Compiler Warnings for Uncertainty Loss}
 
-Sounio uses an algebraic effect system to track computational side effects.
-The effect \texttt{Epistemic} marks functions that introduce or propagate
-uncertainty:
+Sounio's type system prevents silent uncertainty loss through compile-time
+warnings. When a \texttt{Knowledge<T>} value is extracted to \texttt{T},
+the compiler issues a diagnostic:
 
-\begin{lstlisting}[caption={Effect-tracked measurement function}]
-fn measure(instrument: &Instrument) -> Knowledge<f64> with IO, Epistemic {
+\begin{lstlisting}[caption={Uncertainty extraction warning}]
+fn measure(instrument: &Instrument) -> Knowledge<f64> with IO {
     let raw = instrument.read()  // IO effect
     Knowledge::new(
         value: raw,
@@ -237,17 +237,13 @@ fn measure(instrument: &Instrument) -> Knowledge<f64> with IO, Epistemic {
         provenance: Provenance::measurement(instrument)
     )
 }
-\end{lstlisting}
 
-A function without \texttt{with Epistemic} cannot silently discard uncertainty:
-
-\begin{lstlisting}[caption={Type error: uncertainty lost}]
 fn compute_exact(x: f64) -> f64 { x * 2.0 }
 
 fn main() with IO {
     let k = Knowledge::measured(5.0, 0.01, "scale")
-    let bad = compute_exact(*k.get())  // Warning: uncertainty discarded
-    let good = k.scale(2.0)            // OK: uncertainty preserved
+    let bad = compute_exact(k.value())  // Warning: uncertainty discarded
+    let good = k.scale(2.0)              // OK: uncertainty preserved
 }
 \end{lstlisting}
 
@@ -258,9 +254,8 @@ required, generating compiler warnings when uncertainty is discarded:
 
 \begin{definition}[Epistemic Extraction]
 The operation $\text{extract}: \texttt{Knowledge<T>} \to \texttt{T}$ is
-\emph{effect-polymorphic}: it is always permitted but annotates the call
-site with a ``discarded uncertainty'' warning unless suppressed by
-\texttt{\#[allow(uncertainty\_loss)]}.
+always permitted but generates a compiler warning at the call site to
+signal that uncertainty information is being discarded.
 \end{definition}
 
 \subsection{Provenance Tracking}
@@ -438,13 +433,21 @@ computations:
   \item \textbf{Variance fusion}: $u^2(x + y + z)$ computed in one pass
   \item \textbf{Exact propagation}: Operations on \texttt{Knowledge::exact}
         skip variance computation
-  \item \textbf{SIMD vectorization}: Value and variance computed in parallel
   \item \textbf{Provenance elision}: When not required, provenance chains
         are not allocated
 \end{enumerate}
 
+Future native code generation will enable \textbf{SIMD vectorization} for
+parallel value and variance computation.
+
 \section{Implementation}
 \label{sec:implementation}
+
+\subsection{Implementation Status}
+
+The current v1.0 release provides full epistemic type support in the
+\textbf{interpreter}. Native code generation for \texttt{Knowledge<T>}
+is planned for v1.1 and will enable the SIMD optimizations described below.
 
 \subsection{Compiler Architecture}
 
@@ -458,11 +461,11 @@ organized as a multi-stage pipeline:
 The key innovation is the \textbf{Scientific IR (SIR)}, an intermediate
 representation that treats epistemic operations as first-class nodes:
 
-\begin{lstlisting}[caption={SIR epistemic instructions}]
+\begin{lstlisting}[caption={SIR epistemic instructions (design)}]
 enum SirInst {
-    EpistemicBinOp { op: EpOp, lhs: NodeId, rhs: NodeId, result: NodeId },
-    EpistemicUnaryOp { op: EpOp, arg: NodeId, result: NodeId },
-    CondPropagate { value: NodeId, variance: NodeId, confidence: NodeId },
+    PropagateAdd { lhs: NodeId, rhs: NodeId, result: NodeId },
+    PropagateMul { lhs: NodeId, rhs: NodeId, result: NodeId },
+    PropagateDiv { lhs: NodeId, rhs: NodeId, result: NodeId },
 }
 \end{lstlisting}
 
@@ -480,12 +483,13 @@ Operations involving \texttt{Knowledge::exact} (zero variance) skip variance
 propagation entirely, reducing to scalar multiplication.
 
 \paragraph{Provenance Elision}
-When \texttt{\#[no\_provenance]} is specified, Merkle hash computation is skipped,
+When provenance tracking is not required, Merkle hash computation is skipped,
 reducing overhead for non-audited computations.
 
 \subsection{Memory Layout}
 
-\texttt{Knowledge<f64>} occupies 40 bytes, stack-allocated:
+The planned native representation of \texttt{Knowledge<f64>} will occupy
+40 bytes, stack-allocated:
 \begin{center}
 \begin{tabular}{lr}
 \toprule
@@ -499,8 +503,8 @@ Field & Size \\
 \end{tabular}
 \end{center}
 
-Value and variance are computed in parallel using SIMD (AVX2 on x86-64),
-enabling 2-wide parallelism for epistemic arithmetic.
+The native backend will compute value and variance in parallel using SIMD
+(AVX2 on x86-64), enabling 2-wide parallelism for epistemic arithmetic.
 
 \section{Evaluation}
 \label{sec:evaluation}
