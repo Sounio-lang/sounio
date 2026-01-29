@@ -1,10 +1,10 @@
 # The Sounio Programming Language
 
-## Language Specification v0.1.0
+## Language Specification v1.0.0
 
-**Author**: Demetrios Chiuratto Agourakis  
-**Status**: Draft (Bootstrap Phase)  
-**Last Updated**: 2024
+**Author**: Demetrios Chiuratto Agourakis
+**Status**: Release Candidate
+**Last Updated**: 2026-01-29
 
 > Note: This spec is aspirational in places. For the compiler’s current behavior and supported syntax, see `compiler/docs/KNOWN_LIMITATIONS.md`, `docs/MV_CORE_CHECKLIST.md`, and the runnable fixtures under `tests/`.
 
@@ -21,6 +21,7 @@ Sounio is a novel systems programming language designed for scientific computing
 1. [Introduction](#1-introduction)
 2. [Lexical Structure](#2-lexical-structure)
 3. [Types](#3-types)
+   - 3.9 [Epistemic Types](#39-epistemic-types)
 4. [Expressions](#4-expressions)
 5. [Statements](#5-statements)
 6. [Declarations](#6-declarations)
@@ -210,7 +211,7 @@ false
 
 ### 2.7 Comments
 
-```d
+```sio
 // Single-line comment
 
 /* Multi-line
@@ -242,21 +243,21 @@ false
 
 #### 3.2.1 Tuples
 
-```d
+```sio
 let point: (f64, f64) = (1.0, 2.0)
 let (x, y) = point              // Destructuring
 ```
 
 #### 3.2.2 Arrays
 
-```d
+```sio
 let arr: [int; 5] = [1, 2, 3, 4, 5]
 let first = arr[0]
 ```
 
 #### 3.2.3 Slices
 
-```d
+```sio
 let slice: &[int] = &arr[1..4]
 ```
 
@@ -264,7 +265,7 @@ let slice: &[int] = &arr[1..4]
 
 #### 3.3.1 Structures
 
-```d
+```sio
 struct Point {
     x: f64,
     y: f64,
@@ -275,7 +276,7 @@ let p = Point { x: 1.0, y: 2.0 }
 
 #### 3.3.2 Enumerations
 
-```d
+```sio
 enum Option<T> {
     Some(T),
     None,
@@ -289,7 +290,7 @@ enum Result<T, E> {
 
 #### 3.3.3 Type Aliases
 
-```d
+```sio
 type Coordinate = (f64, f64)
 type Matrix = [[f64; 4]; 4]
 ```
@@ -298,21 +299,21 @@ type Matrix = [[f64; 4]; 4]
 
 #### 3.4.1 Shared References
 
-```d
+```sio
 let r: &int = &x        // Shared (immutable) borrow
 ```
 
 #### 3.4.2 Exclusive References
 
-```d
+```sio
 let r: &!int = &!x      // Exclusive (mutable) borrow
 ```
 
-Note: D uses `&!` instead of `&mut` for exclusive references.
+Note: Sounio uses `&!` instead of `&mut` for exclusive references.
 
 #### 3.4.3 Owned Values
 
-```d
+```sio
 fn consume(data: own Buffer)    // Takes ownership
 ```
 
@@ -322,7 +323,7 @@ fn consume(data: own Buffer)    // Takes ownership
 
 Linear types must be used exactly once:
 
-```d
+```sio
 linear struct FileHandle {
     fd: int,
 }
@@ -340,7 +341,7 @@ close(f)                // Must be consumed
 
 Affine types may be used at most once:
 
-```d
+```sio
 affine struct TempBuffer {
     ptr: *mut u8,
     size: usize,
@@ -351,14 +352,14 @@ affine struct TempBuffer {
 
 ### 3.6 Function Types
 
-```d
+```sio
 type BinaryOp = fn(int, int) -> int
 type Effectful = fn(string) -> Result<int, Error> with IO
 ```
 
 ### 3.7 Generic Types
 
-```d
+```sio
 struct Vec<T> {
     data: *mut T,
     len: usize,
@@ -372,13 +373,244 @@ fn identity<T>(x: T) -> T {
 
 ### 3.8 Type Inference
 
-D uses bidirectional type inference. Types can often be omitted:
+Sounio uses bidirectional type inference. Types can often be omitted:
 
-```d
+```sio
 let x = 42              // Inferred as int
 let y = 3.14            // Inferred as f64
 let z = [1, 2, 3]       // Inferred as [int; 3]
 ```
+
+### 3.9 Epistemic Types
+
+Epistemic types enable rigorous uncertainty quantification in scientific computing, following the Guide to the Expression of Uncertainty in Measurement (GUM, JCGM 100:2008).
+
+#### 3.9.1 The Knowledge\<T\> Type
+
+The `Knowledge<T>` type represents a value with associated uncertainty:
+
+```sio
+struct Knowledge<T> {
+    value: T,                    // Point estimate
+    variance: f64,               // Uncertainty (squared)
+    confidence: BetaConfidence,  // Bayesian credibility
+    provenance: Provenance,      // Audit trail
+}
+```
+
+**Construction:**
+
+```sio
+// From direct measurement
+let temp = Knowledge::new(
+    value: 98.6,
+    variance: 0.04,  // ±0.2°F standard uncertainty
+    confidence: BetaConfidence::new(alpha: 100.0, beta: 5.0),
+    provenance: Provenance::measurement("thermometer_A")
+)
+
+// Exact (zero uncertainty)
+let g = Knowledge::exact(9.81)  // Gravitational constant
+```
+
+#### 3.9.2 Uncertainty Propagation
+
+Arithmetic operations on `Knowledge<T>` values automatically propagate uncertainty according to GUM first-order Taylor series approximation:
+
+**Addition/Subtraction:**
+
+```
+u²(x + y) = u²(x) + u²(y)
+```
+
+**Multiplication:**
+
+```
+u²(x * y) = y² u²(x) + x² u²(y)
+```
+
+**Division:**
+
+```
+u²(x / y) = u²(x)/y² + x² u²(y)/y⁴
+```
+
+**Example:**
+
+```sio
+let dose_mg = Knowledge::measured(500.0, 5.0, "scale")     // 500 ± 5 mg
+let volume_mL = Knowledge::measured(250.0, 2.0, "pipette") // 250 ± 2 mL
+let conc = dose_mg / volume_mL  // Automatically: 2.0 ± 0.024 mg/mL
+```
+
+#### 3.9.3 BetaConfidence
+
+Confidence levels are represented using Beta distributions, supporting Bayesian updating:
+
+```sio
+struct BetaConfidence {
+    alpha: f64,  // Successes + prior
+    beta: f64,   // Failures + prior
+}
+
+fn beta_mean(c: &BetaConfidence) -> f64 {
+    c.alpha / (c.alpha + c.beta)
+}
+
+fn beta_update(c: &BetaConfidence, successes: i64, failures: i64)
+    -> BetaConfidence {
+    BetaConfidence {
+        alpha: c.alpha + successes,
+        beta: c.beta + failures
+    }
+}
+```
+
+#### 3.9.4 Provenance Tracking
+
+Every `Knowledge` value carries an immutable audit trail:
+
+```sio
+enum Source {
+    Measurement { instrument: string, timestamp: i64 },
+    Derived { op: string, inputs: Vec<ProvenanceId> },
+    Literature { doi: string, table: string },
+    Simulation { model: string, run_id: i64 },
+}
+
+struct Provenance {
+    id: ProvenanceId,      // Merkle hash
+    source: Source,
+    metadata: HashMap<string, string>,
+}
+```
+
+**Querying provenance:**
+
+```sio
+fn audit_calculation(result: Knowledge<f64>) {
+    let trace = result.provenance.trace()
+    for source in trace {
+        match source.source {
+            Source::Measurement { instrument, .. } =>
+                println("Used instrument: {}", instrument),
+            Source::Literature { doi, .. } =>
+                println("Cited: {}", doi),
+            _ => {}
+        }
+    }
+}
+```
+
+#### 3.9.5 Uncertainty Loss Warnings
+
+The type system prevents **silent uncertainty loss** through compile-time warnings:
+
+```sio
+fn compute_exact(x: f64) -> f64 { x * 2.0 }
+
+fn main() with IO {
+    let k = Knowledge::measured(5.0, 0.01, "scale")
+
+    // ⚠ Warning: uncertainty discarded
+    let bad = compute_exact(k.value())
+
+    // ✓ OK: uncertainty preserved
+    let good = k.scale(2.0)
+}
+```
+
+**Type safety theorem:** `Knowledge<T>` is not a subtype of `T`. Explicit extraction generates compiler warnings.
+
+#### 3.9.6 Operational Semantics
+
+Epistemic evaluation follows these reduction rules:
+
+**E-ADD:**
+
+```
+(v₁, σ₁², β₁, π₁) + (v₂, σ₂², β₂, π₂)
+  → (v₁+v₂, σ₁²+σ₂², comb(β₁,β₂), merge(π₁,π₂))
+```
+
+**E-MUL:**
+
+```
+(v₁, σ₁², β₁, π₁) × (v₂, σ₂², β₂, π₂)
+  → (v₁v₂, v₂²σ₁² + v₁²σ₂², comb(β₁,β₂), merge(π₁,π₂))
+```
+
+**E-DIV:**
+
+```
+(v₁, σ₁², β₁, π₁) / (v₂, σ₂², β₂, π₂)
+  → (v₁/v₂, σ₁²/v₂² + v₁²σ₂²/v₂⁴, comb(β₁,β₂), merge(π₁,π₂))
+```
+
+Where:
+
+- `comb(β₁,β₂)` combines confidence levels (minimum)
+- `merge(π₁,π₂)` creates derived provenance
+
+#### 3.9.7 GUM Compliance
+
+**Theorem (GUM Compliance):** For any expression `e`, if `eval(e) = (v, σ², β, π)`, then `σ²` equals the combined standard uncertainty `u_c²(e)` as defined by GUM Equation (10).
+
+**Proof sketch:** By structural induction on `e`. Base case: literals have exact variance. Inductive step: arithmetic operations use GUM propagation formulas.
+
+#### 3.9.8 Usage Examples
+
+**Pharmaceutical dosing:**
+
+```sio
+fn cockcroft_gault(
+    age: Knowledge<years>,
+    weight: Knowledge<kg>,
+    serum_cr: Knowledge<mg/dL>
+) -> Knowledge<mL/min> with IO {
+    let k = Knowledge::exact(140.0)
+    let numerator = (k - age) * weight
+    let denominator = serum_cr * Knowledge::exact(72.0)
+    numerator / denominator  // Uncertainty propagated through formula
+}
+```
+
+**Climate ensemble analysis:**
+
+```sio
+fn sea_level_rise_projection(
+    models: &[Knowledge<meters>],
+    scenario: EmissionScenario
+) -> Knowledge<meters> {
+    // Within-model uncertainty
+    var within_model = 0.0
+    for m in models { within_model = within_model + m.variance }
+    within_model = within_model / models.len()
+
+    // Between-model uncertainty (ensemble spread)
+    let mean_val = Knowledge::mean_value(models)
+    var between_model = 0.0
+    for m in models {
+        let diff = m.value - mean_val
+        between_model = between_model + diff * diff
+    }
+    between_model = between_model / (models.len() - 1)
+
+    Knowledge::new(
+        value: mean_val,
+        variance: within_model + between_model,
+        confidence: BetaConfidence::from_ensemble_size(models.len()),
+        provenance: Provenance::cmip6(scenario)
+    )
+}
+```
+
+#### 3.9.9 Implementation Notes
+
+- **v1.0 Status**: Full epistemic type support in interpreter
+- **Planned (v1.1)**: Native code generation with SIMD optimization
+- **Memory layout**: 40 bytes stack-allocated (value: 8B, variance: 8B, confidence: 16B, provenance: 8B pointer)
+- **Optimization**: Exact elision (zero-variance values skip propagation)
 
 ---
 
@@ -390,7 +622,7 @@ See Section 2.6 for literal syntax.
 
 ### 4.2 Path Expressions
 
-```d
+```sio
 x                       // Variable
 std::io::read           // Qualified path
 Option::Some(42)        // Variant constructor
@@ -418,7 +650,7 @@ Option::Some(42)        // Variant constructor
 
 ### 4.4 Block Expressions
 
-```d
+```sio
 let result = {
     let a = 1
     let b = 2
@@ -430,13 +662,13 @@ let result = {
 
 #### 4.5.1 If Expression
 
-```d
+```sio
 let max = if a > b { a } else { b }
 ```
 
 #### 4.5.2 Match Expression
 
-```d
+```sio
 let description = match value {
     0 -> "zero",
     1 -> "one",
@@ -447,14 +679,14 @@ let description = match value {
 
 ### 4.6 Function Calls
 
-```d
+```sio
 let result = add(1, 2)
 let chained = obj.method().another()
 ```
 
 ### 4.7 Lambda Expressions
 
-```d
+```sio
 let add = |a: int, b: int| -> int { a + b }
 let double = |x| x * 2          // Type inferred
 ```
@@ -463,7 +695,7 @@ let double = |x| x * 2          // Type inferred
 
 #### 4.8.1 With Expression
 
-```d
+```sio
 with handler {
     // Code runs with handler installed
     let x = perform SomeEffect::operation()
@@ -473,7 +705,7 @@ with handler {
 
 #### 4.8.2 Resume Expression
 
-```d
+```sio
 handle my_handler for MyEffect {
     on operation(arg) -> {
         let result = process(arg)
@@ -488,27 +720,27 @@ handle my_handler for MyEffect {
 
 ### 5.1 Let Bindings
 
-```d
+```sio
 let x: int = 42         // Immutable
 let y = compute()       // Type inferred
 ```
 
 ### 5.2 Var Bindings
 
-```d
+```sio
 var counter: int = 0    // Mutable
 counter = counter + 1
 ```
 
 ### 5.3 Const Bindings
 
-```d
+```sio
 const MAX_SIZE: int = 1024      // Compile-time constant
 ```
 
 ### 5.4 Return Statement
 
-```d
+```sio
 fn add(a: int, b: int) -> int {
     return a + b
 }
@@ -516,7 +748,7 @@ fn add(a: int, b: int) -> int {
 
 ### 5.5 Control Flow Statements
 
-```d
+```sio
 // While loop
 while condition {
     // ...
@@ -549,7 +781,7 @@ for i in 0..10 {
 
 ### 6.1 Function Declarations
 
-```d
+```sio
 fn function_name(param1: Type1, param2: Type2) -> ReturnType {
     // body
 }
@@ -569,7 +801,7 @@ fn swap<T>(a: &!T, b: &!T) {
 
 ### 6.2 Struct Declarations
 
-```d
+```sio
 struct Name {
     field1: Type1,
     field2: Type2,
@@ -587,7 +819,7 @@ struct Container<T> {
 
 ### 6.3 Enum Declarations
 
-```d
+```sio
 enum Status {
     Pending,
     Active,
@@ -602,7 +834,7 @@ enum Tree<T> {
 
 ### 6.4 Trait Declarations
 
-```d
+```sio
 trait Printable {
     fn print(&self) with IO
 }
@@ -615,7 +847,7 @@ trait Numeric {
 
 ### 6.5 Impl Blocks
 
-```d
+```sio
 impl Point {
     fn new(x: f64, y: f64) -> Point {
         Point { x, y }
@@ -637,7 +869,7 @@ impl Printable for Point {
 
 ### 6.6 Effect Declarations
 
-```d
+```sio
 effect State<S> {
     fn get() -> S
     fn put(s: S)
@@ -650,7 +882,7 @@ effect Exception<E> {
 
 ### 6.7 Module Declarations
 
-```d
+```sio
 module math
 
 import std::io
@@ -684,7 +916,7 @@ D features a complete algebraic effect system. Effects describe computational si
 
 ### 7.3 Effect Annotations
 
-```d
+```sio
 // Pure function (no effects)
 fn add(a: int, b: int) -> int {
     return a + b
@@ -703,7 +935,7 @@ fn simulate() -> f64 with Prob, Alloc, IO {
 
 ### 7.4 Effect Polymorphism
 
-```d
+```sio
 fn map<A, B, E>(f: fn(A) -> B with E, xs: List<A>) -> List<B> with E {
     // Effects of f propagate to map
 }
@@ -718,7 +950,7 @@ fn compose<A, B, C, E1, E2>(
 
 ### 7.5 Effect Handlers
 
-```d
+```sio
 // Define a handler
 handle state_handler<S>(initial: S) for State<S> {
     var current = initial
@@ -753,7 +985,7 @@ Pure <: E for any effect set E
 
 Effects are inferred from function bodies when not explicitly annotated:
 
-```d
+```sio
 fn example() {           // Effects inferred
     let f = open("x")    // IO, Panic
     let s = read(f)      // IO
@@ -774,7 +1006,7 @@ fn example() {           // Effects inferred
 
 ### 8.2 Moving Values
 
-```d
+```sio
 let s1 = String::from("hello")
 let s2 = s1                     // s1 is moved to s2
 // s1 is no longer valid
@@ -784,7 +1016,7 @@ let s2 = s1                     // s1 is moved to s2
 
 #### 8.3.1 Shared Borrows
 
-```d
+```sio
 let s = String::from("hello")
 let r1 = &s                     // Shared borrow
 let r2 = &s                     // Multiple shared borrows OK
@@ -793,7 +1025,7 @@ let r2 = &s                     // Multiple shared borrows OK
 
 #### 8.3.2 Exclusive Borrows
 
-```d
+```sio
 let s = String::from("hello")
 let r = &!s                     // Exclusive borrow
 // No other borrows allowed while r exists
@@ -809,7 +1041,7 @@ r.push('!')                     // Can mutate through r
 
 ### 8.5 Lifetime Annotations
 
-```d
+```sio
 fn longest<'a>(x: &'a string, y: &'a string) -> &'a string {
     if x.len() > y.len() { x } else { y }
 }
@@ -819,7 +1051,7 @@ fn longest<'a>(x: &'a string, y: &'a string) -> &'a string {
 
 Linear types provide stronger guarantees:
 
-```d
+```sio
 linear struct Connection {
     handle: *mut c_void,
 }
@@ -842,11 +1074,11 @@ fn bad_example() {
 
 ### 9.1 Overview
 
-D supports compile-time dimensional analysis through units of measure.
+Sounio supports compile-time dimensional analysis through units of measure.
 
 ### 9.2 Unit Literals
 
-```d
+```sio
 let mass: kg = 70.0_kg
 let distance: m = 100.0_m
 let time: s = 9.58_s
@@ -866,7 +1098,7 @@ let speed: m/s = distance / time
 ### 9.4 Predefined Units
 
 **SI Base Units:**
-```d
+```sio
 m       // meter (length)
 kg      // kilogram (mass)
 s       // second (time)
@@ -877,7 +1109,7 @@ cd      // candela (luminosity)
 ```
 
 **Medical Units:**
-```d
+```sio
 mg      // milligram
 mcg     // microgram
 mL      // milliliter
@@ -888,7 +1120,7 @@ min     // minute
 
 ### 9.5 Custom Units
 
-```d
+```sio
 unit mmHg = 133.322_Pa          // Derived unit
 unit BPM = 1/min                // Beats per minute
 
@@ -898,7 +1130,7 @@ let hr: BPM = 72.0_BPM
 
 ### 9.6 Unit Conversions
 
-```d
+```sio
 fn to_mg(g: g) -> mg {
     g * 1000.0
 }
@@ -908,7 +1140,7 @@ let dose: mg = to_mg(0.5_g)     // 500 mg
 
 ### 9.7 Dimensionless Values
 
-```d
+```sio
 let ratio: 1 = mass1 / mass2    // Dimensionless
 let percentage = ratio * 100.0
 ```
@@ -923,7 +1155,7 @@ Refinement types add predicate constraints to types, verified at compile time us
 
 ### 10.2 Syntax
 
-```d
+```sio
 type Positive = { x: int | x > 0 }
 type Percentage = { p: f64 | p >= 0.0 && p <= 100.0 }
 type NonEmpty<T> = { v: Vec<T> | v.len() > 0 }
@@ -931,7 +1163,7 @@ type NonEmpty<T> = { v: Vec<T> | v.len() > 0 }
 
 ### 10.3 Usage
 
-```d
+```sio
 fn sqrt(x: { n: f64 | n >= 0.0 }) -> f64 {
     // x is guaranteed non-negative
 }
@@ -943,7 +1175,7 @@ fn divide(a: int, b: { d: int | d != 0 }) -> int {
 
 ### 10.4 Medical Refinements
 
-```d
+```sio
 type SafeDose = { dose: mg | dose > 0.0 && dose <= max_therapeutic_dose }
 type ValidCrCl = { crcl: mL/min | crcl > 0.0 && crcl < 200.0 }
 type ValidBMI = { bmi: kg/m^2 | bmi > 10.0 && bmi < 100.0 }
@@ -969,11 +1201,11 @@ Refinement predicates are verified by:
 
 ### 11.1 Overview
 
-D provides first-class GPU support through the `GPU` effect and `kernel` functions.
+Sounio provides first-class GPU support through the `GPU` effect and `kernel` functions.
 
 ### 11.2 Kernel Functions
 
-```d
+```sio
 kernel fn vector_add(a: &[f32], b: &[f32], c: &![f32], n: int) {
     let i = gpu.thread_id.x
     if i < n {
@@ -984,7 +1216,7 @@ kernel fn vector_add(a: &[f32], b: &[f32], c: &![f32], n: int) {
 
 ### 11.3 GPU Memory
 
-```d
+```sio
 fn compute() with GPU, Alloc {
     // Allocate device memory (linear type)
     let d_a = gpu.alloc<f32>(1024)
@@ -1015,7 +1247,7 @@ fn compute() with GPU, Alloc {
 
 ### 11.4 GPU Intrinsics
 
-```d
+```sio
 gpu.thread_id.x         // Thread index in block (x dimension)
 gpu.thread_id.y
 gpu.thread_id.z
@@ -1027,7 +1259,7 @@ gpu.sync_threads()      // Synchronize threads in block
 
 ### 11.5 Shared Memory
 
-```d
+```sio
 kernel fn reduce(input: &[f32], output: &![f32], n: int) {
     shared let cache: [f32; 256]
     
@@ -1059,31 +1291,31 @@ kernel fn reduce(input: &[f32], output: &![f32], n: int) {
 
 ### 12.1 Core Module
 
-```d
+```sio
 import std::core::{Option, Result, Vec, String, Box}
 ```
 
 ### 12.2 IO Module
 
-```d
+```sio
 import std::io::{read_file, write_file, stdin, stdout, println}
 ```
 
 ### 12.3 Math Module
 
-```d
+```sio
 import std::math::{sin, cos, sqrt, exp, log, abs, min, max}
 ```
 
 ### 12.4 Collections Module
 
-```d
+```sio
 import std::collections::{HashMap, HashSet, BTreeMap, LinkedList}
 ```
 
 ### 12.5 Probability Module
 
-```d
+```sio
 import std::prob::{Normal, Uniform, Bernoulli, sample, observe}
 ```
 
