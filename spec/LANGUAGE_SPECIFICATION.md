@@ -607,10 +607,12 @@ fn sea_level_rise_projection(
 
 #### 3.9.9 Implementation Notes
 
-- **v1.0 Status**: Full epistemic type support in interpreter
-- **Planned (v1.1)**: Native code generation with SIMD optimization
+- **v1.0 Status**: Full native code generation with GUM-compliant propagation
+- **SIR Pass**: `epistemic_insertion.rs` transforms `BinOp` on `Knowledge<T>`
+- **Runtime**: 593 lines in `backend/native/epistemic_runtime.rs`
 - **Memory layout**: 40 bytes stack-allocated (value: 8B, variance: 8B, confidence: 16B, provenance: 8B pointer)
-- **Optimization**: Exact elision (zero-variance values skip propagation)
+- **SIMD**: AVX2 (x86-64), NEON (ARM) for parallel value/variance computation
+- **Optimizations**: Exact elision, variance fusion, provenance elision
 
 ---
 
