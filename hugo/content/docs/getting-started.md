@@ -1,254 +1,140 @@
 ---
-title: "Getting Started with Sounio"
-description: "Installation and first steps with the Sounio compiler"
-layout: "docs"
+title: "Getting Started"
+description: "Quick start guide for Sounio - install, write your first program, and explore epistemic computing."
 ---
 
-Welcome to **Sounio**, a systems programming language for epistemic computing — where every value can carry its uncertainty.
+# Getting Started with Sounio
 
 ## Installation
 
-### From Binary (Recommended)
+### Prerequisites
 
-Download the latest release for your platform:
+- **Rust 1.70+** (for the compiler)
+- **LLVM 16+** (optional, for LLVM backend)
+- **CUDA Toolkit 12+** (optional, for NVIDIA GPU support)
 
-```bash
-# Linux/macOS
-curl -sSf https://souniolang.org/install.sh | sh
-
-# Or download directly
-wget https://github.com/sounio-lang/sounio/releases/latest/download/souc-linux-x64.tar.gz
-tar xzf souc-linux-x64.tar.gz
-sudo mv souc /usr/local/bin/
-```
-
-### From Source
+### Install from Source
 
 ```bash
-git clone https://github.com/sounio-lang/sounio.git
-cd sounio/compiler
+# Clone the repository
+git clone https://github.com/Sounio-lang/sounio.git
+cd sounio
+
+# Build the compiler
+cd compiler
 cargo build --release
-sudo cp target/release/souc /usr/local/bin/
-```
 
-### Verify Installation
+# Install the sounio binary
+cargo install --path .
 
-```bash
+# Verify installation
 souc --version
-# souc 0.93.0
 ```
 
-## Your First Program
+### Pre-built Binaries
 
-Create a file `hello.sio`:
-
-```sounio
-fn main() -> i32 {
-    print("Hello, Sounio!")
-    println()
-    0
-}
-```
-
-Compile and run:
+Download from the [releases page](https://github.com/Sounio-lang/sounio/releases/latest):
 
 ```bash
-souc run hello.sio
-# Output: Hello, Sounio!
+# Linux (x86-64)
+wget https://github.com/Sounio-lang/sounio/releases/latest/download/sounio-x86_64-linux.tar.gz
+tar -xzf sounio-x86_64-linux.tar.gz
+./sounio-installer
+
+# macOS (Apple Silicon)
+wget https://github.com/Sounio-lang/sounio/releases/latest/download/sounio-aarch64-darwin.tar.gz
+tar -xzf sounio-aarch64-darwin.tar.gz
+./sounio-installer
 ```
 
-Or just check types:
+## Your First Sounio Program
+
+Create a file named `hello.sio`:
+
+```sio
+// Simple hello world with uncertainty
+fn main() {
+    let message: Knowledge<string> = measure("Hello, Sounio!", uncertainty: 0.0)
+    print(message.value)
+}
+```
+
+Run it:
 
 ```bash
-souc check hello.sio
+souc hello.sio
+output: Hello, Sounio!
 ```
 
-## Key Concepts
+## Epistemic Computing Basics
 
-### 1. Epistemic Types
+### Knowledge Type
 
-Sounio's signature feature is the `Knowledge<T>` type — values that carry their uncertainty:
+Every measurement knows its uncertainty:
 
-```sounio
-import sounio::epistemic::*
+```sio
+let temperature: Knowledge<kelvin> = measure(298.15, uncertainty: 0.1)
+let pressure: Knowledge<pascal> = measure(101325.0, uncertainty: 5.0)
 
-fn main() -> i32 {
-    // Value with uncertainty
-    let measurement = Knowledge::new(
-        value: 42.0,
-        uncertainty: 0.5,
-        confidence: 0.95
-    )
+// Uncertainty propagates automatically
+let ideal_gas = temperature * pressure
+// Result includes combined uncertainty
+```
 
-    // Uncertainty propagates through operations
-    let doubled = measurement.mul(Knowledge::exact(2.0))
+### Type-Safe Units
 
-    print(doubled.to_string())
-    // Output: 84.0000 +/- 1.9600 (95% CI)
+Prevent unit errors at compile time:
 
-    0
+```sio
+let mass: kg = 500.0
+let volume: m³ = 2.0
+let density: kg/m³ = mass / volume  // Correct!
+
+// This won't compile:
+// let bad: kg = volume  // Error: can't assign m³ to kg
+```
+
+### GPU Acceleration
+
+Simple GPU kernel syntax:
+
+```sio
+kernel fn vector_add(
+    a: &[f64],
+    b: &[f64], 
+    c: &![f64]
+) {
+    let i = gpu.thread_id.x
+    c[i] = a[i] + b[i]
 }
 ```
 
-### 2. Variables
+## Learning Paths
 
-```sounio
-let x = 5              // immutable
-var y = 10             // mutable
+Choose your path based on your background:
 
-y = y + 1              // OK: y is mutable
-// x = 6               // Error: x is immutable
-```
+### [Scientific Computing](/#learning-paths)
+For researchers and scientists working with measurements and uncertainty
 
-### 3. References
+### [Machine Learning](/#learning-paths)  
+For ML engineers interested in octonion neural networks and GPU acceleration
 
-Sounio uses `&!` for mutable references (not `&mut` like Rust):
+### [Systems Programming](/#learning-paths)
+For compiler and systems engineers wanting to understand the internals
 
-```sounio
-fn increment(x: &!i32) {
-    *x = *x + 1
-}
-
-fn main() -> i32 {
-    var value = 10
-    increment(&!value)
-    print(value)  // 11
-    0
-}
-```
-
-### 4. Physical Units
-
-Type-safe dimensional analysis:
-
-```sounio
-let distance: f64<m> = 100.0 m
-let time: f64<s> = 9.58 s
-let speed = distance / time  // Type: f64<m/s>
-
-// Compile error: can't add meters and seconds
-// let invalid = distance + time
-```
-
-### 5. Effects
-
-Functions declare their side effects:
-
-```sounio
-fn read_file(path: &str) -> String with IO {
-    // Can perform I/O
-}
-
-fn pure_function(x: i32) -> i32 {
-    // No effects allowed
-    x * 2
-}
-```
-
-### 6. MedLang DSL
-
-Domain-specific syntax for pharmacometrics:
-
-```sounio
-import sounio::medlang::*
-
-model OneCompartment {
-    param CL: Knowledge<f64> = Knowledge::new(
-        value: 10.0,
-        uncertainty: 3.0,
-        confidence: 0.95
-    )
-    param V: Knowledge<f64> = Knowledge::new(
-        value: 50.0,
-        uncertainty: 12.5,
-        confidence: 0.95
-    )
-
-    compartment Central { volume: V }
-    flow Central -> Elimination: CL
-
-    observe Cp = Central.concentration
-}
-```
-
-## Project Structure
-
-A typical Sounio project:
-
-```
-my_project/
-├── src/
-│   ├── main.sio
-│   └── lib.sio
-├── tests/
-│   └── test_main.sio
-├── examples/
-│   └── demo.sio
-└── sounio.toml
-```
-
-## Command Reference
-
-```bash
-# Type-check a file
-souc check file.sio
-
-# Run a file (JIT compilation)
-souc run file.sio
-
-# Compile to executable
-souc build file.sio -o output
-
-# Show AST
-souc check file.sio --show-ast
-
-# Show types
-souc check file.sio --show-types
-
-# Watch mode (recompile on changes)
-souc watch file.sio
-
-# Get help
-souc --help
-```
-
-## Examples
-
-The `examples/` directory contains many working examples:
-
-| File | Description |
-|------|-------------|
-| `hello.sio` | Hello World |
-| `fibonacci.sio` | Recursive and iterative Fibonacci |
-| `uncertainty.sio` | Knowledge<T> uncertainty propagation |
-| `pkpd.sio` | Two-compartment PK model |
-| `effects.sio` | Algebraic effects demo |
-| `gpu.sio` | GPU kernel example |
-| `ode_demo.sio` | ODE solving |
-| `autodiff.sio` | Automatic differentiation |
-
-Run any example:
-
-```bash
-cd examples
-souc run hello.sio
-souc run fibonacci.sio
-souc run uncertainty.sio
-```
+### [Domain Applications](/#learning-paths)
+For pharma, physics, climate, and finance professionals
 
 ## Next Steps
 
-- [Language Reference](./LLM_PROGRAMMING_GUIDE.md) — Complete syntax guide
-- [Standard Library](../stdlib/) — Browse the stdlib
-- [Examples](../examples/) — Working code examples
-- [CHANGELOG](../CHANGELOG.md) — Version history
+1. **Try the [Playground](/playground)** - No installation required
+2. **Read the [Language Guide](/docs/language/)** - Comprehensive documentation
+3. **Explore [Examples](/examples)** - Real-world use cases
+4. **Check [Architecture](/architecture/)** - Understand the internals
 
-## Getting Help
+## Help & Community
 
-- **GitHub Issues**: [sounio-lang/sounio](https://github.com/sounio-lang/sounio/issues)
-- **Discussions**: [GitHub Discussions](https://github.com/sounio-lang/sounio/discussions)
-- **Website**: [souniolang.org](https://souniolang.org)
-
----
-
-🏛️ **Sounio** — Compute at the Horizon of Certainty
+- **GitHub Issues** - Report bugs and request features
+- **Discord** - Join the community chat
+- **Documentation** - [API Reference](/docs/api/), [Standard Library](/docs/stdlib/)
+- **Research** - [Technical Reports](/research/), [Papers](/docs/papers/)
