@@ -20,7 +20,7 @@ fn test_quat_conjugate_compiles() {
 
     let tokens = lexer::lex(source).unwrap();
     let ast = parser::parse(&tokens, source).unwrap();
-    let _hir = check::check(&ast).unwrap();
+    let _hir = check::check_ast(&ast).unwrap();
 }
 
 /// Test quaternion operations parse and type-check
@@ -43,7 +43,7 @@ fn test_quat_operations_compile() {
 
     let tokens = lexer::lex(source).unwrap();
     let ast = parser::parse(&tokens, source).unwrap();
-    let _hir = check::check(&ast).unwrap();
+    let _hir = check::check_ast(&ast).unwrap();
 }
 
 /// Test Hamilton product type-checks
@@ -73,7 +73,7 @@ fn test_hamilton_product_types() {
 
     let tokens = lexer::lex(source).unwrap();
     let ast = parser::parse(&tokens, source).unwrap();
-    let _hir = check::check(&ast).unwrap();
+    let _hir = check::check_ast(&ast).unwrap();
 }
 
 /// Test quaternion layer types compile
@@ -101,7 +101,7 @@ fn test_quat_linear_layer_types() {
 
     let tokens = lexer::lex(source).unwrap();
     let ast = parser::parse(&tokens, source).unwrap();
-    let _hir = check::check(&ast).unwrap();
+    let _hir = check::check_ast(&ast).unwrap();
 }
 
 /// Test quaternion batch operations type-check
@@ -126,7 +126,7 @@ fn test_quat_batch_operations() {
 
     let tokens = lexer::lex(source).unwrap();
     let ast = parser::parse(&tokens, source).unwrap();
-    let _hir = check::check(&ast).unwrap();
+    let _hir = check::check_ast(&ast).unwrap();
 }
 
 /// Test quaternion intrinsic function signatures
@@ -149,7 +149,7 @@ fn test_quat_intrinsics_available() {
     let ast = parser::parse(&tokens, source).unwrap();
     // This will fail until we register the QNN types properly,
     // but that's expected for now
-    let result = check::check(&ast);
+    let result = check::check_ast(&ast);
     // For now, we just verify it parses - type checking will fail until
     // we have the full type system integration
     assert!(result.is_err() || result.is_ok());

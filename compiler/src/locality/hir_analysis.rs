@@ -521,6 +521,7 @@ mod tests {
             ],
             is_linear: false,
             is_affine: false,
+            doc: None,
         };
 
         analyzer.register_struct(&s);

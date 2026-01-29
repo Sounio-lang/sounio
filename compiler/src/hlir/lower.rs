@@ -2204,6 +2204,7 @@ mod tests {
                 abi: crate::ast::Abi::Rust,
                 is_exported: false,
                 extern_name: None,
+                doc: None,
             })],
             externs: Vec::new(),
         }
@@ -2284,6 +2285,7 @@ mod tests {
                 abi: crate::ast::Abi::Rust,
                 is_exported: false,
                 extern_name: None,
+                doc: None,
             })],
             externs: Vec::new(),
         }
@@ -2383,6 +2385,7 @@ mod tests {
                 abi: crate::ast::Abi::Rust,
                 is_exported: false,
                 extern_name: None,
+                doc: None,
             })],
             externs: Vec::new(),
         };
@@ -2467,6 +2470,7 @@ mod tests {
                 abi: crate::ast::Abi::Rust,
                 is_exported: false,
                 extern_name: None,
+                doc: None,
             })],
             externs: Vec::new(),
         };

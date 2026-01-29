@@ -65,6 +65,14 @@ impl<'a> FormatVisitor<'a> {
             Item::OdeDef(o) => self.visit_ode(o),
             Item::PdeDef(p) => self.visit_pde(p),
             Item::CausalModel(c) => self.visit_causal_model(c),
+            Item::Unit(u) => {
+                let vis = if matches!(u.visibility, Visibility::Public) { "pub " } else { "" };
+                if u.definition.is_some() {
+                    Doc::text(format!("{}unit {} = ...;", vis, u.name))
+                } else {
+                    Doc::text(format!("{}unit {};", vis, u.name))
+                }
+            }
             Item::Module(m) => self.visit_module(m),
         }
     }
@@ -1974,6 +1982,7 @@ mod tests {
             effects: vec![],
             where_clause: vec![],
             body: Block { stmts: vec![] },
+            doc: None,
             span: crate::common::Span::dummy(),
         };
 

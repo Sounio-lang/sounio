@@ -1,107 +1,89 @@
-# Known Language Limitations
+# Known Language Limitations - All Resolved
 
-This document tracks current limitations in the Sounio language implementation. These are planned for future releases.
+This document tracked limitations in the Sounio language implementation. As of **v0.99.0**, all previously documented limitations have been resolved. This file is retained for historical context and to document how each item was addressed.
 
-## Syntax Limitations
+## Syntax - All Resolved
 
 ### Module System
-- **Status**: Not implemented
-- **Issue**: `module` and `use` statements are not supported
-- **Workaround**: Define all code in a single file
-- **Priority**: High
+- **Status**: Resolved (v0.99.0)
+- **Resolution**: Full `module`/`use` support with file-based module loading and hierarchical namespace resolution.
 
 ### Visibility Modifiers
-- **Status**: Not implemented
-- **Issue**: `pub` keyword is not recognized
-- **Workaround**: Remove `pub` prefix from all declarations
-- **Priority**: Medium
+- **Status**: Resolved (v0.99.0)
+- **Resolution**: `pub` visibility supported and enforced across module boundaries.
 
 ### Logical Operators
-- **Status**: Implemented (v0.66.0)
-- **Operators**: `&&` (logical AND) and `||` (logical OR)
-- **Features**:
-  - Short-circuit evaluation: right operand only evaluated when necessary
-  - Type checking: both operands must be `bool`
+- **Status**: Resolved (v0.66.0)
+- **Resolution**: `&&` and `||` implemented with short-circuit evaluation and boolean type checking.
 ```sio
-// Both operators now work correctly:
 if a > 0 && b > 0 { ... }
 if is_empty || is_null { ... }
-
-// Short-circuit example: side_effect() only called if x is true
-if x && side_effect() { ... }
 ```
 
 ### Documentation Comments
-- **Status**: Not implemented
-- **Issue**: `///` doc comments are not parsed
-- **Workaround**: Use regular `//` comments
-- **Priority**: Low
+- **Status**: Resolved (v0.99.0)
+- **Resolution**: `///` outer docs and `//!` inner docs are parsed and preserved through AST → HIR.
 
 ### Numeric Literals
-- **Status**: Partial
-- **Issue**: Scientific notation (e.g., `1e10`) not supported
-- **Workaround**: Use full decimal form (e.g., `10000000000.0`)
-- **Priority**: Medium
+- **Status**: Resolved (v0.99.0)
+- **Resolution**: Scientific notation supported in the lexer (e.g., `1e10`, `1.5e-3`).
 
-## Type System Limitations
+## Type System - All Resolved
 
 ### Type Aliases
-- **Status**: Not implemented
-- **Issue**: `type` aliases are not supported
-- **Workaround**: Use structs directly or duplicate type annotations
-- **Priority**: Medium
+- **Status**: Resolved (v0.99.0)
+- **Resolution**: `type` aliases are supported, including generic aliases; aliases expand transparently during type checking.
+```sio
+type Vec2 = (f64, f64)
+```
 
 ### Unit Definitions
-- **Status**: Not implemented
-- **Issue**: Custom unit type definitions not supported
-- **Workaround**: Use structs with fields to represent units
+- **Status**: Resolved (v0.99.0)
+- **Resolution**: User-defined units are supported and integrate with unit checking.
 ```sio
-// Instead of:
 unit kg;
-
-// Use:
-struct Mass {
-    value: f64
-}
+unit mg = 0.001 * kg;
+unit velocity = m / s;
 ```
-- **Priority**: Medium
 
 ## Reserved Keywords
 
-The following identifiers are reserved and cannot be used as variable names:
-- `var`
-- `effect`
-- `type`
-- `module`
-- `use`
-- `pub`
+The following identifiers are reserved and used by the language:
+- `var` - mutable binding
+- `effect` - effect declaration
+- `type` - type alias definition
+- `module` - module declaration
+- `use` - module import
+- `pub` - public visibility modifier
+- `unit` - unit definition
 
-## Scoping Behavior
+## Scoping Behavior - All Resolved
 
 ### Variable Shadowing
-- **Issue**: Reusing variable names in nested scopes can have unexpected behavior
-- **Workaround**: Use unique variable names, especially in test code
-- **Priority**: Medium
+- **Status**: Resolved (v0.99.0)
+- **Resolution**: Shadowing works correctly across nested scopes.
 
 ### Forward Declarations
-- **Issue**: Functions must be defined before they are called
-- **Workaround**: Order function definitions with dependencies first (helpers at top)
-- **Priority**: High
+- **Status**: Resolved (v0.99.0)
+- **Resolution**: 2-pass resolver enables forward references and mutual recursion.
 
-## Planned Features
+## Feature Resolution Summary
 
-These limitations will be addressed in future releases:
+All previously planned features are implemented as of v0.99.0:
 
-| Feature | Target Version | Notes |
-|---------|---------------|-------|
-| Module system | 0.70.0 | Basic `module`/`use` support |
-| ~~`&&` / `\|\|` operators~~ | ~~0.66.0~~ | **Implemented** - Short-circuit logical operators |
-| `pub` visibility | 0.70.0 | With module system |
-| Scientific notation | 0.67.0 | `1e10`, `1.5e-3` |
-| Type aliases | 0.68.0 | `type Name = Type;` |
-| Doc comments | 0.69.0 | `///` to documentation |
+| Feature | Resolved In | Resolution |
+|---------|------------|------------|
+| Module system | v0.99.0 | File-based module loading with `module`/`use` |
+| `&&` / `\|\|` operators | v0.66.0 | Short-circuit logical operators |
+| `pub` visibility | v0.99.0 | Visibility enforcement across modules |
+| Scientific notation | v0.99.0 | Lexer supports `1e10`, `1.5e-3` |
+| Type aliases | v0.99.0 | `type Name = Type;` with generics |
+| Doc comments | v0.99.0 | `///` + `//!` parsed and preserved |
+| Variable shadowing | v0.99.0 | Correct scoping rules |
+| Forward declarations | v0.99.0 | 2-pass resolver |
+| Unit definitions | v0.99.0 | User-defined units + checking |
 
 ## Reporting Issues
 
-If you encounter additional limitations not listed here, please report them at:
+If you encounter any new issues, please report them at:
 https://github.com/Chiuratto-AI/sounio/issues

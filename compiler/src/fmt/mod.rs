@@ -298,6 +298,14 @@ impl Formatter {
             Item::OdeDef(o) => Doc::Text(format!("ode {} {{ ... }}", o.name)),
             Item::PdeDef(p) => Doc::Text(format!("pde {} {{ ... }}", p.name)),
             Item::CausalModel(c) => Doc::Text(format!("causal model {} {{ ... }}", c.name)),
+            Item::Unit(u) => {
+                let vis = if matches!(u.visibility, Visibility::Public) { "pub " } else { "" };
+                if u.definition.is_some() {
+                    Doc::Text(format!("{}unit {} = ...;", vis, u.name))
+                } else {
+                    Doc::Text(format!("{}unit {};", vis, u.name))
+                }
+            }
             Item::Module(m) => {
                 let vis = if matches!(m.visibility, Visibility::Public) {
                     "pub "

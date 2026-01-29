@@ -87,6 +87,9 @@ impl ModuleLoader {
         let (mut ast, next_id) = parser::parse_with_id_start(&tokens, &source, self.next_node_id)?;
         self.next_node_id = next_id;
 
+        // Resolve file-based module declarations (`mod foo;`)
+        self.fill_file_modules(&mut ast.items, &canonical)?;
+
         // Create module ID from file path
         let module_id = ModuleId::from_file_path(&canonical);
 
@@ -218,8 +221,69 @@ impl ModuleLoader {
         Ok(Ast {
             module_name: root_module_name,
             items,
+            inner_doc: None,
             node_spans,
         })
+    }
+
+    /// Resolve a file-based module declaration (`mod foo;`) to a source file path.
+    /// Searches:
+    ///   1. {parent_dir}/{name}.sio
+    ///   2. {parent_dir}/{name}/mod.sio
+    ///   3. {parent_dir}/{name}/lib.sio
+    ///   4. {stdlib_dir}/{name}.sio
+    ///   5. {stdlib_dir}/{name}/mod.sio
+    ///   6. {stdlib_dir}/{name}/lib.sio
+    fn resolve_module_file(&self, parent_dir: &StdPath, name: &str) -> Option<PathBuf> {
+        let candidates = [
+            parent_dir.join(format!("{}.sio", name)),
+            parent_dir.join(name).join("mod.sio"),
+            parent_dir.join(name).join("lib.sio"),
+            self.stdlib_dir.join(format!("{}.sio", name)),
+            self.stdlib_dir.join(name).join("mod.sio"),
+            self.stdlib_dir.join(name).join("lib.sio"),
+        ];
+        candidates.into_iter().find(|p| p.exists())
+    }
+
+    /// Walk AST items and replace file-based module declarations (`mod foo;`,
+    /// represented as `ModuleDef { items: None }`) with their loaded content.
+    fn fill_file_modules(&mut self, items: &mut Vec<Item>, source_path: &StdPath) -> Result<()> {
+        let parent_dir = source_path
+            .parent()
+            .unwrap_or_else(|| StdPath::new("."));
+
+        for item in items.iter_mut() {
+            if let Item::Module(module_def) = item {
+                if module_def.items.is_none() {
+                    // File-based module: resolve and load
+                    if let Some(file_path) = self.resolve_module_file(parent_dir, &module_def.name) {
+                        let source = std::fs::read_to_string(&file_path).map_err(|e| {
+                            miette::miette!(
+                                "Failed to read module file {}: {}",
+                                file_path.display(),
+                                e
+                            )
+                        })?;
+                        let tokens = lexer::lex(&source)?;
+                        let (mut sub_ast, next_id) =
+                            parser::parse_with_id_start(&tokens, &source, self.next_node_id)?;
+                        self.next_node_id = next_id;
+
+                        // Recursively resolve nested file modules
+                        self.fill_file_modules(&mut sub_ast.items, &file_path)?;
+
+                        module_def.items = Some(sub_ast.items);
+                    }
+                    // If file not found, leave items as None (will be caught later)
+                } else if let Some(inner_items) = &mut module_def.items {
+                    // Inline module: recursively resolve any nested file modules
+                    self.fill_file_modules(inner_items, source_path)?;
+                }
+            }
+        }
+
+        Ok(())
     }
 
 }
@@ -237,6 +301,7 @@ fn create_nested_modules(next_node_id: &mut u32, path: &[String], inner_items: V
             visibility: Visibility::Public,
             name: "unnamed".to_string(),
             items: Some(inner_items),
+            doc: None,
             span: crate::common::Span::default(),
         });
     }
@@ -251,6 +316,7 @@ fn create_nested_modules(next_node_id: &mut u32, path: &[String], inner_items: V
             visibility: Visibility::Public,
             name: name.clone(),
             items: Some(current_items),
+            doc: None,
             span: crate::common::Span::default(),
         };
         current_items = vec![Item::Module(module_def)];
@@ -265,6 +331,7 @@ fn create_nested_modules(next_node_id: &mut u32, path: &[String], inner_items: V
             visibility: Visibility::Public,
             name: "unnamed".to_string(),
             items: None,
+            doc: None,
             span: crate::common::Span::default(),
         })
     })

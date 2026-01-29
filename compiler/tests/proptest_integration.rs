@@ -142,7 +142,7 @@ fn typecheck_doesnt_panic(source: &str) -> bool {
     std::panic::catch_unwind(|| {
         if let Ok(tokens) = lexer::lex(source) {
             if let Ok(ast) = parser::parse(&tokens, source) {
-                let _ = check::check(&ast);
+                let _ = check::check_ast(&ast);
             }
         }
     })
@@ -153,7 +153,7 @@ fn typecheck_doesnt_panic(source: &str) -> bool {
 fn typechecks_ok(source: &str) -> bool {
     match lexer::lex(source) {
         Ok(tokens) => match parser::parse(&tokens, source) {
-            Ok(ast) => check::check(&ast).is_ok(),
+            Ok(ast) => check::check_ast(&ast).is_ok(),
             Err(_) => false,
         },
         Err(_) => false,
@@ -166,7 +166,7 @@ fn interpret_doesnt_panic(source: &str) -> bool {
         if let Ok(tokens) = lexer::lex(source) {
             if let Ok(ast) = parser::parse(&tokens, source) {
                 // check::check returns HIR
-                if let Ok(hir) = check::check(&ast) {
+                if let Ok(hir) = check::check_ast(&ast) {
                     let mut interpreter = interp::Interpreter::new();
                     let _ = interpreter.interpret(&hir);
                 }

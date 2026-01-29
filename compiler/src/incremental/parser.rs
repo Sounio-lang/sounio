@@ -194,6 +194,8 @@ impl IncrementalAst {
     pub fn to_ast(&self) -> Ast {
         Ast {
             items: self.items.iter().map(|n| n.node.clone()).collect(),
+            inner_doc: None,
+            ..Default::default()
         }
     }
 }

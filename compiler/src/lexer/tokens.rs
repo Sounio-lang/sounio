@@ -145,6 +145,10 @@ pub enum TokenKind {
     #[token("proof")]
     Proof,
 
+    // Unit definition keyword
+    #[token("unit")]
+    Unit,
+
     // Scientific DSL keywords
     #[token("ode")]
     Ode,
@@ -542,6 +546,7 @@ impl TokenKind {
                 | TokenKind::Nodes
                 | TokenKind::Edges
                 | TokenKind::Equations
+                | TokenKind::Unit
         )
     }
 
@@ -770,6 +775,7 @@ impl TokenKind {
             TokenKind::Nodes => "nodes",
             TokenKind::Edges => "edges",
             TokenKind::Equations => "equations",
+            TokenKind::Unit => "unit",
             TokenKind::State => "state",
             TokenKind::Params => "params",
             TokenKind::Domain => "domain",

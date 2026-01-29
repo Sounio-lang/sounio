@@ -108,6 +108,40 @@ impl<'a> Parser<'a> {
         }
     }
 
+    /// Collect consecutive `///` doc comments into a single string.
+    /// Returns None if no doc comments are present.
+    fn collect_doc_comments(&mut self) -> Option<String> {
+        let mut lines = Vec::new();
+        while self.at(TokenKind::DocCommentOuter) {
+            let text = self.advance().text.clone();
+            let content = text.strip_prefix("///").unwrap_or(&text);
+            let content = content.strip_prefix(' ').unwrap_or(content);
+            lines.push(content.to_string());
+        }
+        if lines.is_empty() {
+            None
+        } else {
+            Some(lines.join("\n"))
+        }
+    }
+
+    /// Collect consecutive `//!` inner doc comments into a single string.
+    /// Returns None if no inner doc comments are present.
+    fn collect_inner_doc_comments(&mut self) -> Option<String> {
+        let mut lines = Vec::new();
+        while self.at(TokenKind::DocCommentInner) {
+            let text = self.advance().text.clone();
+            let content = text.strip_prefix("//!").unwrap_or(&text);
+            let content = content.strip_prefix(' ').unwrap_or(content);
+            lines.push(content.to_string());
+        }
+        if lines.is_empty() {
+            None
+        } else {
+            Some(lines.join("\n"))
+        }
+    }
+
     /// Check if current token can be used as a macro name (identifier or keyword)
     fn can_be_macro_name(&self) -> bool {
         matches!(self.peek(), TokenKind::Ident) || self.peek().is_keyword()
@@ -257,10 +291,8 @@ impl<'a> Parser<'a> {
     fn parse_program(&mut self) -> Result<Ast> {
         let mut items = Vec::new();
 
-        // Skip file-level doc comments before module declaration
-        while self.at(TokenKind::DocCommentOuter) || self.at(TokenKind::DocCommentInner) {
-            self.advance();
-        }
+        // Collect file-level inner doc comments (`//!`)
+        let inner_doc = self.collect_inner_doc_comments();
 
         // Optional file-level module declaration (e.g., `module foo;` or `module foo::bar;`)
         // This is different from inline module definitions (`module foo { ... }`)
@@ -297,6 +329,7 @@ impl<'a> Parser<'a> {
         Ok(Ast {
             module_name,
             items,
+            inner_doc,
             node_spans: self.node_spans.clone(),
         })
     }
@@ -304,10 +337,8 @@ impl<'a> Parser<'a> {
     // ==================== ITEMS ====================
 
     pub fn parse_item(&mut self) -> Result<Item> {
-        // Skip doc comments (they are attached to following items)
-        while self.at(TokenKind::DocCommentOuter) || self.at(TokenKind::DocCommentInner) {
-            self.advance();
-        }
+        // Collect doc comments (they are attached to following items)
+        let doc = self.collect_doc_comments();
 
         // Check for macro invocation at item level (identifier or keyword followed by !)
         if self.can_be_macro_name() && self.peek_n(1) == TokenKind::Bang {
@@ -329,17 +360,17 @@ impl<'a> Parser<'a> {
         let modifiers = self.parse_modifiers();
 
         match self.peek() {
-            TokenKind::Fn | TokenKind::Kernel => self.parse_fn(visibility, modifiers, attributes),
+            TokenKind::Fn | TokenKind::Kernel => self.parse_fn(visibility, modifiers, attributes, doc),
             TokenKind::Let | TokenKind::Const | TokenKind::Var => {
-                self.parse_global(visibility, modifiers)
+                self.parse_global(visibility, modifiers, doc)
             }
-            TokenKind::Struct => self.parse_struct(visibility, modifiers),
-            TokenKind::Enum => self.parse_enum(visibility, modifiers),
-            TokenKind::Trait => self.parse_trait(visibility, modifiers),
-            TokenKind::Impl => self.parse_impl(),
-            TokenKind::Type => self.parse_type_alias(visibility),
-            TokenKind::Effect => self.parse_effect(visibility),
-            TokenKind::Handler => self.parse_handler(visibility),
+            TokenKind::Struct => self.parse_struct(visibility, modifiers, doc),
+            TokenKind::Enum => self.parse_enum(visibility, modifiers, doc),
+            TokenKind::Trait => self.parse_trait(visibility, modifiers, doc),
+            TokenKind::Impl => self.parse_impl_with_doc(doc),
+            TokenKind::Type => self.parse_type_alias(visibility, doc),
+            TokenKind::Effect => self.parse_effect(visibility, doc),
+            TokenKind::Handler => self.parse_handler(visibility, doc),
             TokenKind::Import | TokenKind::Use => self.parse_import_with_visibility(visibility),
             TokenKind::Export => self.parse_export(),
             TokenKind::Extern => self.parse_extern_with_visibility(visibility),
@@ -348,7 +379,8 @@ impl<'a> Parser<'a> {
             TokenKind::Ode => self.parse_ode_def(visibility),
             TokenKind::Pde => self.parse_pde_def(visibility),
             TokenKind::Causal => self.parse_causal_model_def(visibility),
-            TokenKind::Module => self.parse_module_decl(visibility),
+            TokenKind::Unit => self.parse_unit_def(visibility, doc),
+            TokenKind::Module => self.parse_module_decl(visibility, doc),
             _ => {
                 let found = self.peek();
                 let span = self.span();
@@ -599,6 +631,7 @@ impl<'a> Parser<'a> {
         visibility: Visibility,
         modifiers: Modifiers,
         attributes: Vec<Attribute>,
+        doc: Option<String>,
     ) -> Result<Item> {
         let start = self.span();
 
@@ -655,6 +688,7 @@ impl<'a> Parser<'a> {
             effects,
             where_clause,
             body,
+            doc,
             span: start.merge(end),
         }))
     }
@@ -782,7 +816,7 @@ impl<'a> Parser<'a> {
 
     // ==================== STRUCTS ====================
 
-    fn parse_struct(&mut self, visibility: Visibility, modifiers: Modifiers) -> Result<Item> {
+    fn parse_struct(&mut self, visibility: Visibility, modifiers: Modifiers, doc: Option<String>) -> Result<Item> {
         let start = self.span();
         self.expect(TokenKind::Struct)?;
 
@@ -817,6 +851,7 @@ impl<'a> Parser<'a> {
             generics,
             where_clause,
             fields,
+            doc,
             span: start.merge(end),
         }))
     }
@@ -838,7 +873,7 @@ impl<'a> Parser<'a> {
 
     // ==================== ENUMS ====================
 
-    fn parse_enum(&mut self, visibility: Visibility, modifiers: Modifiers) -> Result<Item> {
+    fn parse_enum(&mut self, visibility: Visibility, modifiers: Modifiers, doc: Option<String>) -> Result<Item> {
         let start = self.span();
         self.expect(TokenKind::Enum)?;
 
@@ -871,6 +906,7 @@ impl<'a> Parser<'a> {
             generics,
             where_clause,
             variants,
+            doc,
             span: start.merge(end),
         }))
     }
@@ -946,7 +982,7 @@ impl<'a> Parser<'a> {
 
     // ==================== TRAITS & IMPL ====================
 
-    fn parse_trait(&mut self, visibility: Visibility, _modifiers: Modifiers) -> Result<Item> {
+    fn parse_trait(&mut self, visibility: Visibility, _modifiers: Modifiers, doc: Option<String>) -> Result<Item> {
         let start = self.span();
         self.expect(TokenKind::Trait)?;
 
@@ -982,6 +1018,7 @@ impl<'a> Parser<'a> {
             supertraits,
             where_clause,
             items,
+            doc,
             span: start.merge(end),
         }))
     }
@@ -1054,7 +1091,7 @@ impl<'a> Parser<'a> {
         }
     }
 
-    fn parse_impl(&mut self) -> Result<Item> {
+    fn parse_impl_with_doc(&mut self, doc: Option<String>) -> Result<Item> {
         let start = self.span();
         self.expect(TokenKind::Impl)?;
 
@@ -1088,15 +1125,18 @@ impl<'a> Parser<'a> {
             target_type,
             where_clause,
             items,
+            doc,
             span: start.merge(end),
         }))
     }
 
+    fn parse_impl(&mut self) -> Result<Item> {
+        self.parse_impl_with_doc(None)
+    }
+
     fn parse_impl_item(&mut self) -> Result<ImplItem> {
-        // Skip doc comments before impl items
-        while self.at(TokenKind::DocCommentOuter) || self.at(TokenKind::DocCommentInner) {
-            self.advance();
-        }
+        // Collect doc comments before impl items
+        let doc = self.collect_doc_comments();
 
         let attributes = self.parse_item_attributes()?;
         let visibility = self.parse_visibility();
@@ -1104,7 +1144,7 @@ impl<'a> Parser<'a> {
 
         match self.peek() {
             TokenKind::Fn | TokenKind::Kernel => {
-                let item = self.parse_fn(visibility, modifiers, attributes)?;
+                let item = self.parse_fn(visibility, modifiers, attributes, doc)?;
                 if let Item::Function(f) = item {
                     Ok(ImplItem::Fn(f))
                 } else {
@@ -1132,7 +1172,7 @@ impl<'a> Parser<'a> {
 
     // ==================== TYPE ALIASES ====================
 
-    fn parse_type_alias(&mut self, visibility: Visibility) -> Result<Item> {
+    fn parse_type_alias(&mut self, visibility: Visibility, doc: Option<String>) -> Result<Item> {
         let start = self.span();
         self.expect(TokenKind::Type)?;
 
@@ -1153,13 +1193,14 @@ impl<'a> Parser<'a> {
             name,
             generics,
             ty,
+            doc,
             span: ty_start.merge(ty_end), // Use type expression span, not whole declaration
         }))
     }
 
     // ==================== EFFECTS ====================
 
-    fn parse_effect(&mut self, visibility: Visibility) -> Result<Item> {
+    fn parse_effect(&mut self, visibility: Visibility, doc: Option<String>) -> Result<Item> {
         let start = self.span();
         self.expect(TokenKind::Effect)?;
 
@@ -1181,6 +1222,7 @@ impl<'a> Parser<'a> {
             name,
             generics,
             operations,
+            doc,
             span: start.merge(end),
         }))
     }
@@ -1200,7 +1242,7 @@ impl<'a> Parser<'a> {
         })
     }
 
-    fn parse_handler(&mut self, visibility: Visibility) -> Result<Item> {
+    fn parse_handler(&mut self, visibility: Visibility, doc: Option<String>) -> Result<Item> {
         let start = self.span();
         self.expect(TokenKind::Handler)?;
 
@@ -1225,6 +1267,7 @@ impl<'a> Parser<'a> {
             generics,
             effect,
             cases,
+            doc,
             span: start.merge(end),
         }))
     }
@@ -1246,10 +1289,110 @@ impl<'a> Parser<'a> {
         })
     }
 
+    // ==================== UNIT DEFINITIONS ====================
+
+    /// Parse unit definition: `unit kg;` or `unit mg = 0.001 * g;`
+    fn parse_unit_def(&mut self, visibility: Visibility, doc: Option<String>) -> Result<Item> {
+        let start = self.span();
+        self.expect(TokenKind::Unit)?;
+        let name = self.parse_ident()?;
+
+        let definition = if self.at(TokenKind::Eq) {
+            self.advance();
+            Some(self.parse_unit_def_expr()?)
+        } else {
+            None
+        };
+
+        self.expect(TokenKind::Semi)?;
+        let end = self.span();
+
+        Ok(Item::Unit(UnitDef {
+            id: self.next_id(),
+            visibility,
+            name,
+            definition,
+            doc,
+            span: start.merge(end),
+        }))
+    }
+
+    /// Parse a unit definition expression (right-hand side of `=`).
+    /// Handles: `0.001 * g`, `m / s`, `kg * m / s^2`
+    fn parse_unit_def_expr(&mut self) -> Result<UnitDefExpr> {
+        let mut lhs = self.parse_unit_def_unary()?;
+
+        loop {
+            if self.at(TokenKind::Star) {
+                self.advance();
+                let rhs = self.parse_unit_def_unary()?;
+                lhs = UnitDefExpr::Product(Box::new(lhs), Box::new(rhs));
+            } else if self.at(TokenKind::Slash) {
+                self.advance();
+                let rhs = self.parse_unit_def_unary()?;
+                lhs = UnitDefExpr::Quotient(Box::new(lhs), Box::new(rhs));
+            } else {
+                break;
+            }
+        }
+
+        Ok(lhs)
+    }
+
+    /// Parse a unary unit expression: `g`, `m^2`, `0.001 * g`
+    fn parse_unit_def_unary(&mut self) -> Result<UnitDefExpr> {
+        // Check for numeric scale factor: `0.001 * g`
+        if matches!(self.peek(), TokenKind::FloatLit | TokenKind::IntLit) {
+            let text = self.advance().text.clone();
+            if self.at(TokenKind::Star) {
+                self.advance();
+                let scale: f64 = text.parse().unwrap_or(1.0);
+                let base = self.parse_unit_def_primary()?;
+                return Ok(UnitDefExpr::Scale(scale, Box::new(base)));
+            }
+            // Just a number used as a unit name (unlikely but handle gracefully)
+            return Ok(UnitDefExpr::Named(text));
+        }
+
+        self.parse_unit_def_primary()
+    }
+
+    /// Parse a primary unit expression: identifier with optional `^N` power
+    fn parse_unit_def_primary(&mut self) -> Result<UnitDefExpr> {
+        if self.at(TokenKind::LParen) {
+            self.advance();
+            let inner = self.parse_unit_def_expr()?;
+            self.expect(TokenKind::RParen)?;
+            // Check for power suffix
+            if self.at(TokenKind::Caret) {
+                self.advance();
+                let neg = if self.at(TokenKind::Minus) { self.advance(); true } else { false };
+                let text = self.expect(TokenKind::IntLit)?.text.clone();
+                let exp: i8 = text.parse().unwrap_or(1);
+                return Ok(UnitDefExpr::Power(Box::new(inner), if neg { -exp } else { exp }));
+            }
+            return Ok(inner);
+        }
+
+        let name = self.parse_ident()?;
+        let base = UnitDefExpr::Named(name);
+
+        // Check for power suffix: `m^2`, `s^-1`
+        if self.at(TokenKind::Caret) {
+            self.advance();
+            let neg = if self.at(TokenKind::Minus) { self.advance(); true } else { false };
+            let text = self.expect(TokenKind::IntLit)?.text.clone();
+            let exp: i8 = text.parse().unwrap_or(1);
+            Ok(UnitDefExpr::Power(Box::new(base), if neg { -exp } else { exp }))
+        } else {
+            Ok(base)
+        }
+    }
+
     // ==================== MODULES ====================
 
     /// Parse module declaration: `pub module foo { ... }` or `mod foo;`
-    fn parse_module_decl(&mut self, visibility: Visibility) -> Result<Item> {
+    fn parse_module_decl(&mut self, visibility: Visibility, doc: Option<String>) -> Result<Item> {
         let start = self.span();
         self.expect(TokenKind::Module)?;
         let name = self.parse_ident()?;
@@ -1269,6 +1412,7 @@ impl<'a> Parser<'a> {
                 visibility,
                 name,
                 items: Some(items),
+                doc,
                 span: start.merge(end),
             }))
         } else {
@@ -1281,6 +1425,7 @@ impl<'a> Parser<'a> {
                 visibility,
                 name,
                 items: None,
+                doc,
                 span: start.merge(end),
             }))
         }
@@ -2239,6 +2384,7 @@ impl<'a> Parser<'a> {
             effects,
             where_clause,
             body,
+            doc: None,
             span: start.merge(end),
         }))
     }
@@ -2394,7 +2540,7 @@ impl<'a> Parser<'a> {
 
     // ==================== GLOBALS ====================
 
-    fn parse_global(&mut self, visibility: Visibility, modifiers: Modifiers) -> Result<Item> {
+    fn parse_global(&mut self, visibility: Visibility, modifiers: Modifiers, doc: Option<String>) -> Result<Item> {
         let start = self.span();
         let start_kind = self.peek();
         let is_const = start_kind == TokenKind::Const;
@@ -2436,6 +2582,7 @@ impl<'a> Parser<'a> {
             pattern,
             ty,
             value,
+            doc,
             span: start.merge(end),
         }))
     }

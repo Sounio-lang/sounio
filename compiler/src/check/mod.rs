@@ -401,34 +401,42 @@ impl TypeChecker {
         inferred.subtract(&masked_names)
     }
 
-    /// Expand type aliases recursively
+    /// Expand type aliases recursively (entry point with cycle detection)
     fn expand_type_alias(&self, ty: &Type) -> Type {
+        let mut visited = std::collections::HashSet::new();
+        self.expand_type_alias_inner(ty, &mut visited)
+    }
+
+    /// Inner recursive alias expansion with cycle detection via visited set.
+    fn expand_type_alias_inner(&self, ty: &Type, visited: &mut std::collections::HashSet<String>) -> Type {
         match ty {
             Type::Named { name, args } => {
-                // Check if this is a type alias
                 if let Some(TypeDef::Alias(alias_ty, _, _, generic_params)) = self.type_defs.get(name) {
-                    // Substitute type arguments for generic parameters
+                    if !visited.insert(name.clone()) {
+                        return Type::Named {
+                            name: name.clone(),
+                            args: args.iter().map(|a| self.expand_type_alias_inner(a, visited)).collect(),
+                        };
+                    }
                     let substituted = if !generic_params.is_empty() && !args.is_empty() {
                         self.substitute_type_params(alias_ty, generic_params, args)
                     } else {
                         alias_ty.clone()
                     };
-                    // Recursively expand the substituted alias
-                    self.expand_type_alias(&substituted)
+                    self.expand_type_alias_inner(&substituted, visited)
                 } else {
-                    // Not an alias, but expand args recursively
                     Type::Named {
                         name: name.clone(),
-                        args: args.iter().map(|a| self.expand_type_alias(a)).collect(),
+                        args: args.iter().map(|a| self.expand_type_alias_inner(a, visited)).collect(),
                     }
                 }
             }
             Type::Array { element, size } => Type::Array {
-                element: Box::new(self.expand_type_alias(element)),
+                element: Box::new(self.expand_type_alias_inner(element, visited)),
                 size: *size,
             },
             Type::Tuple(elems) => {
-                Type::Tuple(elems.iter().map(|e| self.expand_type_alias(e)).collect())
+                Type::Tuple(elems.iter().map(|e| self.expand_type_alias_inner(e, visited)).collect())
             }
             Type::Ref {
                 mutable,
@@ -437,7 +445,7 @@ impl TypeChecker {
             } => Type::Ref {
                 mutable: *mutable,
                 lifetime: lifetime.clone(),
-                inner: Box::new(self.expand_type_alias(inner)),
+                inner: Box::new(self.expand_type_alias_inner(inner, visited)),
             },
             Type::Function {
                 params,
@@ -445,12 +453,11 @@ impl TypeChecker {
                 effects,
                 abi,
             } => Type::Function {
-                params: params.iter().map(|p| self.expand_type_alias(p)).collect(),
-                return_type: Box::new(self.expand_type_alias(return_type)),
+                params: params.iter().map(|p| self.expand_type_alias_inner(p, visited)).collect(),
+                return_type: Box::new(self.expand_type_alias_inner(return_type, visited)),
                 effects: effects.clone(),
                 abi: abi.clone(),
             },
-            // Primitive types don't need expansion
             _ => ty.clone(),
         }
     }
@@ -626,6 +633,9 @@ impl TypeChecker {
         let mut items = Vec::new();
         let mut externs = Vec::new();
 
+        // Register user-defined units before type checking
+        self.register_unit_defs(&ast.items);
+
         // First pass: collect ontology prefixes, type definitions, and alignments
         for item in &ast.items {
             self.collect_ontology_prefix(item);
@@ -779,6 +789,7 @@ impl TypeChecker {
                     id: NodeId(0), // ID not used for type aliases
                     name: name.clone(),
                     ty: hir_ty,
+                    doc: None,
                 }));
             }
         }
@@ -1777,6 +1788,7 @@ impl TypeChecker {
             abi,
             is_exported,
             extern_name,
+            doc: f.doc.clone(),
         })
     }
 
@@ -1800,6 +1812,7 @@ impl TypeChecker {
             fields,
             is_linear: s.modifiers.linear,
             is_affine: s.modifiers.affine,
+            doc: s.doc.clone(),
         })
     }
 
@@ -1905,6 +1918,7 @@ impl TypeChecker {
             assoc_types,
             methods,
             supertraits,
+            doc: t.doc.clone(),
         })
     }
 
@@ -2000,6 +2014,7 @@ impl TypeChecker {
             type_params,
             assoc_types,
             methods,
+            doc: i.doc.clone(),
         })
     }
 
@@ -2066,6 +2081,7 @@ impl TypeChecker {
             variants,
             is_linear: e.modifiers.linear,
             is_affine: e.modifiers.affine,
+            doc: e.doc.clone(),
         })
     }
 
@@ -2217,6 +2233,7 @@ impl TypeChecker {
             ty: self.type_to_hir(&ty),
             value,
             is_const: g.is_const,
+            doc: g.doc.clone(),
         })
     }
 
@@ -5838,6 +5855,10 @@ impl TypeChecker {
 
     /// Parse a unit string (e.g., "mg", "mL/min") into HirUnit
     fn parse_unit_string(&self, unit_str: &str) -> HirUnit {
+        // Prefer registered/custom units (and built-in aliases) if available
+        if let Some(unit) = self.units.parse(unit_str) {
+            return self.unit_to_hir(&unit);
+        }
         // Handle compound units with / and *
         if let Some(pos) = unit_str.find('/') {
             let num = &unit_str[..pos];
@@ -5855,6 +5876,91 @@ impl TypeChecker {
         }
         // Simple unit
         HirUnit::simple(unit_str)
+    }
+
+    /// Convert a Unit (from unit checker) into a HIR unit representation
+    fn unit_to_hir(&self, unit: &types::units::Unit) -> HirUnit {
+        let mut numerator = Vec::new();
+        let mut denominator = Vec::new();
+        for (name, exp) in &unit.dimensions {
+            if *exp > 0 {
+                numerator.push((name.clone(), *exp));
+            } else if *exp < 0 {
+                denominator.push((name.clone(), -*exp));
+            }
+        }
+        numerator.sort_by(|a, b| a.0.cmp(&b.0));
+        denominator.sort_by(|a, b| a.0.cmp(&b.0));
+        HirUnit { numerator, denominator }
+    }
+
+    /// Register unit declarations found in items (recursively).
+    fn register_unit_defs(&mut self, items: &[Item]) {
+        // Pass 1: base units (no definition)
+        for item in items {
+            match item {
+                Item::Unit(unit_def) if unit_def.definition.is_none() => {
+                    self.units.register(&unit_def.name, types::units::Unit::base(&unit_def.name));
+                }
+                Item::Module(m) => {
+                    if let Some(inner) = &m.items {
+                        self.register_unit_defs(inner);
+                    }
+                }
+                _ => {}
+            }
+        }
+
+        // Pass 2: derived/scaled units
+        for item in items {
+            match item {
+                Item::Unit(unit_def) => {
+                    if let Some(expr) = &unit_def.definition {
+                        match self.unit_def_expr_to_unit(expr) {
+                            Some(unit) => self.units.register(&unit_def.name, unit),
+                            None => self.error_with_code(
+                                "EUNIT",
+                                format!("Unknown unit in definition of `{}`", unit_def.name),
+                                unit_def.span,
+                            ),
+                        }
+                    }
+                }
+                Item::Module(m) => {
+                    if let Some(inner) = &m.items {
+                        self.register_unit_defs(inner);
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+
+    /// Evaluate a unit definition expression into a concrete Unit.
+    fn unit_def_expr_to_unit(&self, expr: &UnitDefExpr) -> Option<types::units::Unit> {
+        use types::units::Unit;
+        match expr {
+            UnitDefExpr::Named(name) => self.units.lookup(name).cloned(),
+            UnitDefExpr::Scale(scale, inner) => {
+                let mut unit = self.unit_def_expr_to_unit(inner)?;
+                unit.scale *= *scale;
+                Some(unit)
+            }
+            UnitDefExpr::Product(lhs, rhs) => {
+                let left = self.unit_def_expr_to_unit(lhs)?;
+                let right = self.unit_def_expr_to_unit(rhs)?;
+                Some(left.multiply(&right))
+            }
+            UnitDefExpr::Quotient(lhs, rhs) => {
+                let left = self.unit_def_expr_to_unit(lhs)?;
+                let right = self.unit_def_expr_to_unit(rhs)?;
+                Some(left.divide(&right))
+            }
+            UnitDefExpr::Power(base, exp) => {
+                let base = self.unit_def_expr_to_unit(base)?;
+                Some(base.power((*exp).into()))
+            }
+        }
     }
 
     fn binary_result_type(&self, op: BinaryOp, left: &HirType, right: &HirType) -> HirType {
@@ -6042,15 +6148,38 @@ impl TypeChecker {
                         "mat4" => Type::Mat4,
                         "quat" => Type::Quat,
                         "dual" => Type::Dual,
-                        _ => Type::Named {
-                            name: name.clone(),
-                            args: args.iter().map(|a| self.lower_type_expr(a)).collect(),
+                        _ => {
+                            let lowered_args: Vec<Type> = args.iter().map(|a| self.lower_type_expr(a)).collect();
+                            // Eagerly expand type aliases during lowering
+                            if let Some(TypeDef::Alias(alias_ty, _, _, generic_params)) = self.type_defs.get(name).cloned() {
+                                if !generic_params.is_empty() && !lowered_args.is_empty() {
+                                    self.substitute_type_params(&alias_ty, &generic_params, &lowered_args)
+                                } else {
+                                    alias_ty
+                                }
+                            } else {
+                                Type::Named {
+                                    name: name.clone(),
+                                    args: lowered_args,
+                                }
+                            }
                         },
                     }
                 } else {
-                    Type::Named {
-                        name: path.to_string(),
-                        args: args.iter().map(|a| self.lower_type_expr(a)).collect(),
+                    let full_name = path.to_string();
+                    let lowered_args: Vec<Type> = args.iter().map(|a| self.lower_type_expr(a)).collect();
+                    // Eagerly expand type aliases for multi-segment paths
+                    if let Some(TypeDef::Alias(alias_ty, _, _, generic_params)) = self.type_defs.get(&full_name).cloned() {
+                        if !generic_params.is_empty() && !lowered_args.is_empty() {
+                            self.substitute_type_params(&alias_ty, &generic_params, &lowered_args)
+                        } else {
+                            alias_ty
+                        }
+                    } else {
+                        Type::Named {
+                            name: full_name,
+                            args: lowered_args,
+                        }
                     }
                 };
                 // If there's a unit annotation, wrap in Quantity type
@@ -6849,6 +6978,9 @@ impl TypeChecker {
     }
 
     fn types_compatible(&self, t1: &Type, t2: &Type) -> bool {
+        // Expand type aliases before comparison so aliases are transparent
+        let t1 = &self.expand_type_alias(t1);
+        let t2 = &self.expand_type_alias(t2);
         match (t1, t2) {
             (Type::Var(_), _) | (_, Type::Var(_)) => true, // Type variables unify with anything
             (Type::Unknown, _) | (_, Type::Unknown) => true,

@@ -76,6 +76,8 @@ pub struct HirFn {
     pub is_exported: bool,
     /// FFI binding name from #[extern("name")] attribute
     pub extern_name: Option<String>,
+    /// Doc comments (`///`) attached to this function
+    pub doc: Option<String>,
 }
 
 /// Function type in HIR
@@ -105,6 +107,8 @@ pub struct HirStruct {
     pub fields: Vec<HirField>,
     pub is_linear: bool,
     pub is_affine: bool,
+    /// Doc comments (`///`) attached to this struct
+    pub doc: Option<String>,
 }
 
 /// HIR field
@@ -123,6 +127,8 @@ pub struct HirEnum {
     pub variants: Vec<HirVariant>,
     pub is_linear: bool,
     pub is_affine: bool,
+    /// Doc comments (`///`) attached to this enum
+    pub doc: Option<String>,
 }
 
 /// HIR variant
@@ -148,6 +154,8 @@ pub struct HirTrait {
     pub assoc_types: Vec<HirAssocTypeDecl>,
     pub methods: Vec<HirTraitMethod>,
     pub supertraits: Vec<String>,
+    /// Doc comments (`///`) attached to this trait
+    pub doc: Option<String>,
 }
 
 /// HIR associated type declaration (in trait definition)
@@ -179,6 +187,8 @@ pub struct HirImpl {
     pub type_params: Vec<String>,
     pub assoc_types: Vec<HirAssocTypeImpl>,
     pub methods: Vec<HirFn>,
+    /// Doc comments (`///`) attached to this impl block
+    pub doc: Option<String>,
 }
 
 /// HIR associated type implementation (in impl block)
@@ -195,6 +205,8 @@ pub struct HirTypeAlias {
     pub id: NodeId,
     pub name: String,
     pub ty: HirType,
+    /// Doc comments (`///`) attached to this type alias
+    pub doc: Option<String>,
 }
 
 /// HIR global
@@ -205,6 +217,8 @@ pub struct HirGlobal {
     pub ty: HirType,
     pub value: HirExpr,
     pub is_const: bool,
+    /// Doc comments (`///`) attached to this global
+    pub doc: Option<String>,
 }
 
 // ==================== EFFECTS ====================

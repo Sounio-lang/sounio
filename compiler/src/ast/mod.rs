@@ -113,6 +113,8 @@ impl Attribute {
 pub struct Ast {
     pub module_name: Option<Path>,
     pub items: Vec<Item>,
+    /// Inner doc comments (`//!`) for the module/file
+    pub inner_doc: Option<String>,
     /// Mapping from NodeId to source span for error reporting
     #[serde(skip)]
     pub node_spans: std::collections::HashMap<crate::common::NodeId, crate::common::Span>,
@@ -177,8 +179,40 @@ pub enum Item {
     PdeDef(PdeDef),
     /// Causal model definition: `causal model SmokingCancer { ... }`
     CausalModel(CausalModelDef),
+    /// User-defined unit declaration: `unit kg;`, `unit mg = 0.001 * g;`
+    Unit(UnitDef),
     /// Module definition: `pub module foo { ... }` or `mod foo;`
     Module(ModuleDef),
+}
+
+// ==================== UNIT DEFINITIONS ====================
+
+/// User-defined unit declaration
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct UnitDef {
+    pub id: NodeId,
+    pub visibility: Visibility,
+    pub name: String,
+    /// Unit definition expression (None = new base dimension)
+    pub definition: Option<UnitDefExpr>,
+    /// Doc comments attached to this unit declaration
+    pub doc: Option<String>,
+    pub span: Span,
+}
+
+/// Expression in a unit definition for derived or scaled units
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum UnitDefExpr {
+    /// Named unit reference: `kg`, `m`, `s`
+    Named(String),
+    /// Scaled: `0.001 * g`
+    Scale(f64, Box<UnitDefExpr>),
+    /// Product: `kg * m`
+    Product(Box<UnitDefExpr>, Box<UnitDefExpr>),
+    /// Quotient: `m / s`
+    Quotient(Box<UnitDefExpr>, Box<UnitDefExpr>),
+    /// Power: `m^2`
+    Power(Box<UnitDefExpr>, i8),
 }
 
 // ==================== MODULES ====================
@@ -195,6 +229,8 @@ pub struct ModuleDef {
     pub name: String,
     /// Module items: Some(items) for inline, None for file-based (`mod foo;`)
     pub items: Option<Vec<Item>>,
+    /// Doc comments (`///`) attached to this module declaration
+    pub doc: Option<String>,
     pub span: Span,
 }
 
@@ -215,6 +251,8 @@ pub struct FnDef {
     pub effects: Vec<EffectRef>,
     pub where_clause: Vec<WherePredicate>,
     pub body: Block,
+    /// Doc comments (`///`) attached to this function
+    pub doc: Option<String>,
     pub span: Span,
 }
 
@@ -243,6 +281,8 @@ pub struct StructDef {
     pub generics: Generics,
     pub where_clause: Vec<WherePredicate>,
     pub fields: Vec<FieldDef>,
+    /// Doc comments (`///`) attached to this struct
+    pub doc: Option<String>,
     pub span: Span,
 }
 
@@ -269,6 +309,8 @@ pub struct EnumDef {
     pub generics: Generics,
     pub where_clause: Vec<WherePredicate>,
     pub variants: Vec<VariantDef>,
+    /// Doc comments (`///`) attached to this enum
+    pub doc: Option<String>,
     pub span: Span,
 }
 
@@ -337,6 +379,8 @@ pub struct TraitDef {
     pub supertraits: Vec<Path>,
     pub where_clause: Vec<WherePredicate>,
     pub items: Vec<TraitItem>,
+    /// Doc comments (`///`) attached to this trait
+    pub doc: Option<String>,
     pub span: Span,
 }
 
@@ -380,6 +424,8 @@ pub struct ImplDef {
     pub target_type: TypeExpr,
     pub where_clause: Vec<WherePredicate>,
     pub items: Vec<ImplItem>,
+    /// Doc comments (`///`) attached to this impl block
+    pub doc: Option<String>,
     pub span: Span,
 }
 
@@ -408,6 +454,8 @@ pub struct TypeAliasDef {
     pub name: String,
     pub generics: Generics,
     pub ty: TypeExpr,
+    /// Doc comments (`///`) attached to this type alias
+    pub doc: Option<String>,
     pub span: Span,
 }
 
@@ -421,6 +469,8 @@ pub struct EffectDef {
     pub name: String,
     pub generics: Generics,
     pub operations: Vec<EffectOpDef>,
+    /// Doc comments (`///`) attached to this effect
+    pub doc: Option<String>,
     pub span: Span,
 }
 
@@ -471,6 +521,8 @@ pub struct HandlerDef {
     pub generics: Generics,
     pub effect: Path,
     pub cases: Vec<HandlerCase>,
+    /// Doc comments (`///`) attached to this handler
+    pub doc: Option<String>,
     pub span: Span,
 }
 
@@ -1013,6 +1065,8 @@ pub struct GlobalDef {
     pub pattern: Pattern,
     pub ty: Option<TypeExpr>,
     pub value: Expr,
+    /// Doc comments (`///`) attached to this global
+    pub doc: Option<String>,
     pub span: Span,
 }
 

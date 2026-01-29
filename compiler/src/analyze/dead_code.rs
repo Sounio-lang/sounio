@@ -431,6 +431,7 @@ impl DeadCodeAnalyzer {
             | Item::OdeDef(_)
             | Item::PdeDef(_)
             | Item::CausalModel(_)
+            | Item::Unit(_)
             | Item::Module(_) => {}
         }
     }
@@ -540,6 +541,7 @@ impl DeadCodeAnalyzer {
             | Item::OdeDef(_)
             | Item::PdeDef(_)
             | Item::CausalModel(_)
+            | Item::Unit(_)
             | Item::Module(_) => {}
         }
     }

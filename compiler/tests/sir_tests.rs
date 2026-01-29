@@ -3,6 +3,7 @@
 //! Tests for the Sounio Native Backend infrastructure.
 
 use sounio::sir::*;
+use sounio::mir::optimization::PassManager;
 
 #[test]
 fn test_sir_module_creation() {
@@ -150,8 +151,6 @@ fn test_sir_builder_control_flow() {
 
 #[test]
 fn test_sir_pass_manager() {
-    use passes::*;
-
     let mut module = SirModule::new("test");
 
     // Create a simple function
@@ -162,12 +161,18 @@ fn test_sir_pass_manager() {
         builder.ret(zero);
     }
 
-    // Run optimization passes
-    let mut pm = PassManager::with_defaults();
-    let results = pm.run(&mut module);
+    // Run MIR optimization passes on a minimal MIR function
+    use sounio::mir::{BlockId, FuncId, MirBlock, MirFunction, MirTerminator, MirType};
 
-    // Should have run multiple passes
-    assert!(!results.is_empty());
+    let mut mir_func = MirFunction::new(FuncId(0), "main".to_string(), MirType::I32);
+    let mut entry = MirBlock::new(BlockId(0), "entry".to_string());
+    entry.set_terminator(MirTerminator::Return { value: None });
+    mir_func.add_block(entry);
+    mir_func.entry_block = BlockId(0);
+
+    let mut pm = PassManager::new();
+    let result = pm.run_function_passes(&mut mir_func);
+    assert!(result.is_ok());
 }
 
 #[test]

@@ -842,6 +842,7 @@ impl Interpreter {
                     abi: crate::ast::Abi::Rust,
                     is_exported: false,
                     extern_name: None,
+                    doc: None,
                 };
 
                 Ok(Value::Function {

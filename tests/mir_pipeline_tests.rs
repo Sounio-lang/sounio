@@ -459,7 +459,7 @@ mod tests {
     /// Integration test for the complete compiler pipeline
     #[test]
     fn test_end_to_end_compilation() {
-        use sounio::check::check;
+        use sounio::check::check_ast;
         use sounio::hlir::lower;
         use sounio::lexer::lex;
         use sounio::parser::parse;
@@ -481,7 +481,7 @@ mod tests {
         // Test the complete pipeline: Source -> Lexer -> Parser -> Type Checker -> HLIR -> MIR
         let tokens = lex(source_code).expect("Lexing should succeed");
         let ast = parse(&tokens, source_code).expect("Parsing should succeed");
-        let hir = check(&ast).expect("Type checking should succeed");
+        let hir = check_ast(&ast).expect("Type checking should succeed");
         let hlir = lower(&hir);
 
         // Verify HLIR was created

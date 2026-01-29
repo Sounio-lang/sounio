@@ -26,7 +26,7 @@ fn extern_c_fn_from_imported_module_is_included() {
         "expected imported extern \"C\" fn in merged AST"
     );
 
-    let hir = check::check(&ast).expect("type check");
+    let hir = check::check_ast(&ast).expect("type check");
     let hlir = hlir::lower(&hir);
 
     let func = hlir

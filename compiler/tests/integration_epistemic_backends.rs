@@ -78,16 +78,8 @@ fn validate_code(code: &str) -> Result<(), String> {
     use sounio::lexer;
     
     // Tokenize the code
-    let tokens = lexer::lex(code);
-    
-    // Check for lexer errors
-    let has_errors = tokens.iter().any(|t| matches!(t.kind, sounio::lexer::TokenKind::Error));
-    
-    if has_errors {
-        Err("Lexer error in test code".to_string())
-    } else {
-        Ok(())
-    }
+    let _tokens = lexer::lex(code).map_err(|e| format!("Lexer error in test code: {}", e))?;
+    Ok(())
 }
 
 /// Run test across specified backends
