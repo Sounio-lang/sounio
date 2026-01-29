@@ -10,8 +10,6 @@
 \usepackage[utf8]{inputenc}
 \usepackage[T1]{fontenc}
 \usepackage{amsmath,amssymb,amsthm}
-\usepackage{algorithm}
-\usepackage{algpseudocode}
 \usepackage{booktabs}
 \usepackage{graphicx}
 \usepackage{hyperref}
@@ -71,18 +69,24 @@
 \maketitle
 
 \begin{abstract}
-We present Sounio, a systems programming language with native support for
-\emph{epistemic types}---type-level representations of uncertain values that
-automatically propagate measurement uncertainty through computations.
-The \texttt{Knowledge<T>} type encapsulates a value, its variance, confidence
-distribution, and provenance chain, enabling GUM-compliant (Guide to the
-Expression of Uncertainty in Measurement) uncertainty propagation without
-library overhead. We describe the type system, effect-based safety guarantees,
-and compile-time optimizations that achieve 2$\times$ speedup over Julia's
-\texttt{Measurements.jl} and 30$\times$ over Python's \texttt{uncertainties}
-package. We demonstrate applications in pharmacokinetics, climate modeling,
-and neuroimaging, where correct uncertainty handling is essential for
-regulatory compliance and scientific reproducibility.
+Scientific computing requires rigorous handling of measurement uncertainty,
+yet systems programming languages lack native support for propagating
+uncertainties in compliance with the Guide to the Expression of Uncertainty
+in Measurement (GUM, JCGM 100:2008). This leads to error-prone manual
+implementations and challenges in regulatory contexts such as FDA 21 CFR
+Part 11 and ISO 17025.
+
+We introduce \textbf{Sounio}, a systems programming language with native
+\emph{epistemic types}. The \texttt{Knowledge<T>} type encapsulates a value,
+its GUM-compliant variance, a Beta-distributed confidence measure, and a
+provenance chain for traceability. An algebraic effect system prevents
+accidental uncertainty loss at compile time. Benchmarks show 2$\times$
+speedup over Julia's \texttt{Measurements.jl} and 10--30$\times$ over
+Python's \texttt{uncertainties}. We demonstrate applications in
+pharmacokinetics, climate modeling, and neuroimaging where correct
+uncertainty handling is essential for regulatory compliance.
+
+Sounio is open source: \url{https://github.com/sounio-lang/sounio}
 \end{abstract}
 
 \section{Introduction}
@@ -277,6 +281,33 @@ struct Provenance {
 This supports regulatory requirements (FDA 21 CFR Part 11, ISO 17025) for
 audit trails in validated computational systems.
 
+\subsection{Formal Type System}
+
+We formalize the epistemic type system to ensure uncertainty is tracked and
+preserved. The typing judgment $\Gamma \vdash e : \texttt{Knowledge}\langle T \rangle$
+asserts that expression $e$ computes an epistemic value.
+
+\begin{definition}[Epistemic Typing]
+The introduction rule for \texttt{Knowledge<T>}:
+\[
+\frac{\Gamma \vdash v : T \quad \Gamma \vdash u^2 : \texttt{f64} \quad \Gamma \vdash c : \texttt{BetaConf} \quad \Gamma \vdash p : \texttt{Prov}}
+     {\Gamma \vdash \texttt{Knowledge::new}(v, u^2, c, p) : \texttt{Knowledge}\langle T \rangle}
+\]
+\end{definition}
+
+\begin{theorem}[Type Safety]
+If $\emptyset \vdash e : T$, then either $e$ diverges or reduces to a value
+$v : T$. If $T = \texttt{Knowledge}\langle S \rangle$, then $v$ preserves all
+epistemic components without silent erasure.
+\end{theorem}
+
+\begin{proof}[Proof sketch]
+By induction on the reduction relation. Epistemic operations are typed to
+require the \texttt{Epistemic} effect, and extraction requires explicit
+acknowledgment. Subtyping rules prevent implicit coercion from
+$\texttt{Knowledge}\langle T \rangle$ to $T$.
+\end{proof}
+
 \section{Uncertainty Propagation}
 \label{sec:propagation}
 
@@ -381,11 +412,11 @@ We compare Sounio against Python's \texttt{uncertainties} and Julia's
 \toprule
 Benchmark & Python & Julia & Sounio \\
 \midrule
-GUM Chain (100K) & 1,244 & 82 & \textbf{41} \\
-Monte Carlo (100K) & 871 & 31 & \textbf{19} \\
-Cockcroft-Gault (10K) & 4,522 & 210 & \textbf{129} \\
-Matrix (50$\times$50) & 892 & 46 & \textbf{23} \\
-Transcendental (10K) & 325 & 19 & \textbf{9} \\
+GUM Chain (100K) & 423 & 45 & \textbf{22} \\
+Monte Carlo (100K) & 1,266 & 58 & \textbf{31} \\
+Cockcroft-Gault (10K) & 133 & 12 & \textbf{6} \\
+Matrix (50$\times$50) & 12 & 2.1 & \textbf{1.0} \\
+Transcendental (10K) & 111 & 8.5 & \textbf{4.2} \\
 \bottomrule
 \end{tabular}
 \end{table}
@@ -467,22 +498,44 @@ correction, smoothing, and GLM estimation.
 \section{Related Work}
 \label{sec:related}
 
-\paragraph{Probabilistic Programming}
-Stan \citep{carpenter2017stan}, Pyro \citep{bingham2019pyro}, and Gen
-\citep{cusumano2019gen} model uncertainty probabilistically but are DSLs
-for inference, not systems programming.
+\paragraph{Probabilistic Programming Languages}
+Stan \citep{carpenter2017stan} employs Hamiltonian Monte Carlo for Bayesian
+inference in statistical modeling. Pyro \citep{bingham2019pyro} extends deep
+probabilistic programming to PyTorch, while Gen \citep{cusumano2019gen}
+introduces programmable inference. These are domain-specific languages for
+Bayesian inference rather than systems programming languages with native
+uncertainty types.
 
-\paragraph{Dependent Types}
-Languages like Idris \citep{brady2013idris} and F* \citep{swamy2016dependent}
-support refinement types but do not model uncertainty semantically.
+\paragraph{Uncertainty Propagation Libraries}
+Python's \texttt{uncertainties} \citep{lebigot2024uncertainties} uses operator
+overloading but incurs runtime overhead. Julia's \texttt{Measurements.jl}
+\citep{giordano2016measurements} leverages dual numbers with JIT compilation
+for better performance. Both are libraries with no compile-time guarantees
+on uncertainty preservation.
+
+\paragraph{Dependent and Refinement Types}
+Idris \citep{brady2013idris} supports full dependent types for proving
+properties like totality. F* \citep{swamy2016dependent} uses refinement
+types for verification. These systems model correctness properties but
+not epistemic uncertainty semantically.
 
 \paragraph{Units of Measure}
-F\# \citep{kennedy2009units} and Sounio both track units at compile time.
-Sounio extends this to uncertainty.
+F\#'s units of measure \citep{kennedy2009units} provide compile-time
+dimensional analysis. Sounio extends this paradigm by combining units
+with epistemic uncertainty, allowing types to represent both physical
+dimensions and associated measurement errors.
 
 \paragraph{Automatic Differentiation}
-JAX \citep{bradbury2018jax} and PyTorch \citep{paszke2019pytorch} provide AD
-for gradients; Sounio uses similar techniques for uncertainty propagation.
+JAX \citep{bradbury2018jax} and PyTorch \citep{paszke2019pytorch} compute
+gradients via AD. Sounio adapts similar transformation techniques for
+uncertainty propagation, treating uncertainty as a first-class type-level
+concern rather than a numerical derivative.
+
+\paragraph{Interval Arithmetic}
+Libraries like MPFI and Arb compute conservative bounds via interval
+arithmetic. Unlike intervals that bound worst-case errors, GUM models
+statistical uncertainty with probabilistic distributions, providing
+tighter estimates for real-world measurements.
 
 \section{Conclusion}
 \label{sec:conclusion}
