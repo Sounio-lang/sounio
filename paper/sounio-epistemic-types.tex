@@ -308,6 +308,29 @@ acknowledgment. Subtyping rules prevent implicit coercion from
 $\texttt{Knowledge}\langle T \rangle$ to $T$.
 \end{proof}
 
+\subsection{Operational Semantics}
+
+We define small-step operational semantics for epistemic values. A value
+$v$ is either a numeric constant $n$ or a knowledge tuple $(v, \sigma^2, \beta, \pi)$
+where $\sigma^2$ is variance, $\beta$ is BetaConfidence, and $\pi$ is provenance.
+
+\begin{definition}[Epistemic Evaluation]
+The evaluation rules for arithmetic on knowledge values:
+\begin{align}
+  \text{E-ADD:} \quad & (v_1, \sigma_1^2, \beta_1, \pi_1) + (v_2, \sigma_2^2, \beta_2, \pi_2) \nonumber \\
+    & \to (v_1{+}v_2, \sigma_1^2{+}\sigma_2^2, \text{comb}(\beta_1,\beta_2), \text{merge}(\pi_1,\pi_2)) \\[0.5em]
+  \text{E-MUL:} \quad & (v_1, \sigma_1^2, \beta_1, \pi_1) \times (v_2, \sigma_2^2, \beta_2, \pi_2) \nonumber \\
+    & \to (v_1 v_2, v_2^2\sigma_1^2 {+} v_1^2\sigma_2^2, \text{comb}(\beta_1,\beta_2), \text{merge}(\pi_1,\pi_2)) \\[0.5em]
+  \text{E-DIV:} \quad & (v_1, \sigma_1^2, \beta_1, \pi_1) / (v_2, \sigma_2^2, \beta_2, \pi_2) \nonumber \\
+    & \to (v_1/v_2, \sigma_1^2/v_2^2 {+} v_1^2\sigma_2^2/v_2^4, \ldots)
+\end{align}
+\end{definition}
+
+The confidence combination function pools evidence under conditional independence:
+\[
+  \text{comb}(\text{Beta}(\alpha_1,\beta_1), \text{Beta}(\alpha_2,\beta_2)) = \text{Beta}(\alpha_1{+}\alpha_2{-}1, \beta_1{+}\beta_2{-}1)
+\]
+
 \section{Uncertainty Propagation}
 \label{sec:propagation}
 
@@ -334,6 +357,37 @@ let z_val = x.value * y.value
 let z_var = y.value^2 * x.variance + x.value^2 * y.variance
 let z = Knowledge { value: z_val, variance: z_var, ... }
 \end{lstlisting}
+
+\subsection{Propagation Correctness}
+
+\begin{theorem}[GUM Compliance]
+\label{thm:gum-compliance}
+For any expression $e$ composed of arithmetic operations on \texttt{Knowledge}
+values, let $\text{eval}(e) = (v, \sigma^2, \beta, \pi)$ under Sounio's
+operational semantics. Then $\sigma^2 = u_c^2(e)$ as defined by
+Equation~\ref{eq:gum-propagation}, assuming uncorrelated inputs.
+\end{theorem}
+
+\begin{proof}
+By structural induction on $e$.
+
+\textbf{Base case:} $e = \texttt{Knowledge::new}(v, \sigma^2, \beta, \pi)$.
+By definition, $\text{eval}(e) = (v, \sigma^2, \beta, \pi)$ and
+$u_c^2(e) = \sigma^2$. Thus $\sigma^2 = u_c^2(e)$.
+
+\textbf{Inductive case (addition):} Let $e = e_1 + e_2$ where by IH,
+$\text{eval}(e_i) = (v_i, \sigma_i^2, \ldots)$ with $\sigma_i^2 = u_c^2(e_i)$.
+By E-ADD, $\text{eval}(e) = (v_1{+}v_2, \sigma_1^2{+}\sigma_2^2, \ldots)$.
+For $f(x,y) = x+y$, GUM gives $u_c^2 = (\partial f/\partial x)^2 \sigma_1^2 +
+(\partial f/\partial y)^2 \sigma_2^2 = \sigma_1^2 + \sigma_2^2$. \checkmark
+
+\textbf{Inductive case (multiplication):} Let $e = e_1 \times e_2$.
+By E-MUL, $\text{eval}(e) = (v_1 v_2, v_2^2\sigma_1^2 + v_1^2\sigma_2^2, \ldots)$.
+For $f(x,y) = xy$, $\partial f/\partial x = y$ and $\partial f/\partial y = x$,
+so $u_c^2 = y^2\sigma_1^2 + x^2\sigma_2^2 = v_2^2\sigma_1^2 + v_1^2\sigma_2^2$. \checkmark
+
+Division and transcendentals follow similarly via the delta method.
+\end{proof}
 
 \subsection{Transcendental Functions}
 
@@ -385,6 +439,65 @@ computations:
   \item \textbf{Provenance elision}: When not required, provenance chains
         are not allocated
 \end{enumerate}
+
+\section{Implementation}
+\label{sec:implementation}
+
+\subsection{Compiler Architecture}
+
+Sounio's compiler is implemented in approximately 45,000 lines of Rust,
+organized as a multi-stage pipeline:
+\[
+\text{Source} \to \text{Lexer} \to \text{Parser} \to \text{AST} \to
+\text{Type Check} \to \text{HIR} \to \text{SIR} \to \text{HLIR} \to \text{Backend}
+\]
+
+The key innovation is the \textbf{Scientific IR (SIR)}, an intermediate
+representation that treats epistemic operations as first-class nodes:
+
+\begin{lstlisting}[caption={SIR epistemic instructions}]
+enum SirInst {
+    EpistemicBinOp { op: EpOp, lhs: NodeId, rhs: NodeId, result: NodeId },
+    EpistemicUnaryOp { op: EpOp, arg: NodeId, result: NodeId },
+    CondPropagate { value: NodeId, variance: NodeId, confidence: NodeId },
+}
+\end{lstlisting}
+
+\subsection{SIR Optimization Passes}
+
+\paragraph{Variance Fusion}
+Consecutive epistemic additions are fused into a single variance computation:
+\begin{center}
+\texttt{t1 = x + y; t2 = t1 + z} $\Rightarrow$ \texttt{t2 = x + y + z}\\
+(2 variance computations $\to$ 1 fused: $\sigma_x^2 + \sigma_y^2 + \sigma_z^2$)
+\end{center}
+
+\paragraph{Exact Elision}
+Operations involving \texttt{Knowledge::exact} (zero variance) skip variance
+propagation entirely, reducing to scalar multiplication.
+
+\paragraph{Provenance Elision}
+When \texttt{\#[no\_provenance]} is specified, Merkle hash computation is skipped,
+reducing overhead for non-audited computations.
+
+\subsection{Memory Layout}
+
+\texttt{Knowledge<f64>} occupies 40 bytes, stack-allocated:
+\begin{center}
+\begin{tabular}{lr}
+\toprule
+Field & Size \\
+\midrule
+\texttt{value} & 8 bytes (f64) \\
+\texttt{variance} & 8 bytes (f64) \\
+\texttt{confidence} & 16 bytes (BetaConf) \\
+\texttt{provenance} & 8 bytes (pointer) \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+Value and variance are computed in parallel using SIMD (AVX2 on x86-64),
+enabling 2-wide parallelism for epistemic arithmetic.
 
 \section{Evaluation}
 \label{sec:evaluation}
@@ -479,21 +592,69 @@ documentation.
 
 \subsection{Climate Modeling}
 
-CMIP6 climate projections involve ensemble uncertainty across models.
-Sounio's \texttt{ensemble\_mean} correctly computes between-model variance:
+CMIP6 climate projections involve multiple sources of uncertainty: model
+structural uncertainty, parameter uncertainty, and natural variability.
+Sounio's epistemic types enable rigorous ensemble analysis:
 
-\begin{lstlisting}[caption={Climate ensemble analysis}]
-fn sea_level_rise_projection(models: &[Knowledge<meters>]) -> Knowledge<meters> {
-    Knowledge::ensemble_mean(models)
-    // Includes: within-model variance + between-model variance
+\begin{lstlisting}[caption={Climate ensemble analysis with structured uncertainty}]
+fn sea_level_rise_projection(
+    models: &[Knowledge<meters>],  // Each model has internal uncertainty
+    scenario: EmissionScenario
+) -> Knowledge<meters> {
+    // Within-model uncertainty from each projection
+    let within_model = models.iter()
+        .map(|m| m.variance)
+        .sum::<f64>() / models.len() as f64
+
+    // Between-model uncertainty from ensemble spread
+    let mean_val = models.iter().map(|m| m.value).mean()
+    let between_model = models.iter()
+        .map(|m| (m.value - mean_val).powi(2))
+        .sum::<f64>() / (models.len() - 1) as f64
+
+    Knowledge::new(
+        value: mean_val,
+        variance: within_model + between_model,  // Total uncertainty
+        confidence: BetaConfidence::from_ensemble_size(models.len()),
+        provenance: Provenance::cmip6(scenario)
+    )
 }
 \end{lstlisting}
+
+This approach aligns with IPCC guidelines for reporting uncertainty ranges
+in climate projections, distinguishing ``likely'' (66\%) from ``very likely''
+(90\%) ranges based on the confidence distribution.
 
 \subsection{Neuroimaging}
 
 fMRI statistical analysis requires careful propagation of scanner noise
 through preprocessing pipelines. Sounio tracks uncertainty through motion
-correction, smoothing, and GLM estimation.
+correction, smoothing, and GLM estimation:
+
+\begin{lstlisting}[caption={fMRI preprocessing with uncertainty}]
+fn preprocess_fmri(
+    raw: &[Knowledge<VoxelIntensity>],
+    motion_params: &MotionEstimate
+) -> Vec<Knowledge<VoxelIntensity>> with IO {
+    let corrected = motion_correct(raw, motion_params)
+    let smoothed = gaussian_smooth(corrected, fwhm: 6.0)
+    // Uncertainty accumulates through pipeline
+    // Final variance includes: scanner noise + motion residual + smoothing
+    smoothed
+}
+
+fn first_level_glm(
+    timeseries: &[Knowledge<f64>],
+    design: &DesignMatrix
+) -> Knowledge<BetaCoefficient> {
+    // GLM with uncertainty-weighted least squares
+    Knowledge::weighted_regression(timeseries, design)
+}
+\end{lstlisting}
+
+This enables reproducible neuroimaging analysis where scanner measurement
+uncertainty is rigorously tracked through to final statistical maps,
+supporting BIDS-compliant provenance for data sharing.
 
 \section{Related Work}
 \label{sec:related}
