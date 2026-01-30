@@ -43,6 +43,7 @@ pub mod composition;
 pub mod confidence;
 pub mod evolution;
 pub mod firewall;
+pub mod gaussian_process;
 pub mod heterogeneity;
 pub mod knowledge;
 pub mod mcmc;
@@ -141,3 +142,6 @@ pub use unscented_transform::{
 
 // MCMC samplers for Bayesian epistemic inference
 pub use mcmc::{compute_r_hat, HamiltonianMC, MCMCConfig, MCMCResult, MetropolisHastings, NUTS};
+
+// Gaussian Process regression for surrogate modeling and epistemic UQ
+pub use gaussian_process::{GPConfig, GPPrediction, GaussianProcess, Kernel};

@@ -20,8 +20,8 @@
 #![allow(clippy::excessive_nesting)]
 
 use super::alloc_policy::{
-    AllocPolicy, EpistemicMetadata, MetricsCollector, SpillEvent, SpillReason,
-    compute_attention_score,
+    compute_attention_score, AllocPolicy, EpistemicMetadata, MetricsCollector, SpillEvent,
+    SpillReason,
 };
 use crate::runtime::EpistemicMode;
 
@@ -64,12 +64,16 @@ pub struct Relocation {
 pub enum RelocKind {
     /// Absolute 64-bit address
     Abs64,
-    /// PC-relative 32-bit
+    /// PC-relative 32-bit (x86-64)
     PCRel32,
-    /// PLT entry
+    /// PLT entry (x86-64)
     PLT32,
-    /// GOT entry
+    /// GOT entry (x86-64)
     GOT32,
+    /// AArch64 BL/B instruction (26-bit PC-relative)
+    AArch64Call26,
+    /// AArch64 ADR/ADRP instruction (21-bit PC-relative)
+    AArch64Adr21,
 }
 
 /// A symbol definition
@@ -5787,8 +5791,8 @@ impl X86_64Emitter {
 
         // Test condition
         self.emit_cmp_rr(cond_reg, cond_reg); // Will set ZF based on cond
-        // We actually need: test cond_reg, cond_reg
-        // For now, emit CMOVZ (move if zero)
+                                              // We actually need: test cond_reg, cond_reg
+                                              // For now, emit CMOVZ (move if zero)
         self.emit_mov_rr(dst_reg, then_reg);
         // CMOVZ dst, else - if condition was 0, use else value
         // 0F 44 /r - CMOVZ

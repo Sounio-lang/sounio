@@ -30,7 +30,9 @@
 //!
 //! All effect dispatch functions return f64, so we use D0 for return values.
 
-use crate::backend::effect_dispatch::{EffectDispatch, EffectError, EffectOp, UnifiedEffectRuntime};
+use crate::backend::effect_dispatch::{
+    EffectDispatch, EffectError, EffectOp, UnifiedEffectRuntime,
+};
 use crate::backend::native::aarch64::{AArch64Emitter, AArch64Reg};
 
 /// Effect dispatcher for native AArch64 backend
@@ -320,7 +322,12 @@ impl Default for NativeEffectDispatcher {
 }
 
 impl EffectDispatch for NativeEffectDispatcher {
-    fn dispatch_effect(&mut self, effect: &str, op: &str, args: &[f64]) -> Result<f64, EffectError> {
+    fn dispatch_effect(
+        &mut self,
+        effect: &str,
+        op: &str,
+        args: &[f64],
+    ) -> Result<f64, EffectError> {
         // Delegate to the unified runtime for actual dispatch
         // (This is used for testing/validation, not code generation)
         self.runtime.dispatch_effect(effect, op, args)
@@ -344,23 +351,6 @@ impl EffectDispatch for NativeEffectDispatcher {
 // ============================================================================
 
 impl AArch64Emitter {
-    /// Branch-link to an external function (will be resolved by linker)
-    ///
-    /// This is a placeholder implementation. In a real linker-based system,
-    /// this would emit a relocation entry that the linker resolves to the
-    /// actual function address.
-    pub fn bl_external(&mut self, _name: &str) {
-        // For now, emit a NOP as a placeholder
-        // In a real implementation, we'd:
-        // 1. Add a relocation entry to the ELF object
-        // 2. Emit a BL instruction with offset 0 (to be patched by linker)
-        //
-        // BL instruction format: 0b100101 | (offset >> 2)
-        // We'll emit a BL to offset 0 as a placeholder
-        let bl_inst = 0b10010100_00000000_00000000_00000000u32;
-        self.emit(bl_inst);
-    }
-
     /// FMOV (register to register) for f64 values
     ///
     /// Copies a floating-point register to another floating-point register.
@@ -369,9 +359,7 @@ impl AArch64Emitter {
         // FMOV Vd, Vn (vector form, 64-bit)
         // Format: 0001111001100000000001nnnnnddddd
         // Where sf=0, type=01 (64-bit), rm=00000, opcode=000000, rn=nnnnn, rd=ddddd
-        let inst = 0b0001111001100000_00000100000_00000
-            | (vn.encoding() << 5)
-            | vd.encoding();
+        let inst = 0b0001111001100000_00000100000_00000 | (vn.encoding() << 5) | vd.encoding();
         self.emit(inst);
     }
 }

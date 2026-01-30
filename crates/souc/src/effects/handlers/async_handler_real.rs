@@ -356,7 +356,7 @@ impl HandlerCapability for RealAsyncHandler {
         match operation {
             "spawn" | "await" | "yield" => {
                 // Async operations introduce timing uncertainty
-                EpistemicImpact::new(ASYNC_CONFIDENCE_FACTOR, false)
+                EpistemicImpact::with_confidence(ASYNC_CONFIDENCE_FACTOR)
             }
             "sleep" => {
                 // Sleep is deterministic, no epistemic impact

@@ -64,6 +64,7 @@ const ET_DYN: u16 = 3; // Shared object file
 
 // ELF Machine
 const EM_X86_64: u16 = 62;
+const EM_AARCH64: u16 = 183;
 
 // Section Types
 const SHT_NULL: u32 = 0;
@@ -113,6 +114,16 @@ const R_X86_64_PLT32: u32 = 4;
 const R_X86_64_GOTPCREL: u32 = 9;
 const R_X86_64_32: u32 = 10;
 const R_X86_64_32S: u32 = 11;
+
+// Relocation Types (AArch64)
+const R_AARCH64_NONE: u32 = 0;
+const R_AARCH64_ABS64: u32 = 257;
+const R_AARCH64_ABS32: u32 = 258;
+const R_AARCH64_PREL32: u32 = 261;
+const R_AARCH64_PREL64: u32 = 262;
+const R_AARCH64_ADR_PREL_LO21: u32 = 274;
+const R_AARCH64_CALL26: u32 = 283;
+const R_AARCH64_JUMP26: u32 = 282;
 
 // ELF64 Header size
 const ELF64_EHDR_SIZE: usize = 64;
@@ -229,29 +240,43 @@ impl SymbolVisibility {
 /// Relocation type
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RelocationType {
-    /// 64-bit absolute address
+    /// 64-bit absolute address (x86-64)
     Abs64,
-    /// 32-bit PC-relative
+    /// 32-bit PC-relative (x86-64)
     Pc32,
-    /// 32-bit PC-relative PLT entry
+    /// 32-bit PC-relative PLT entry (x86-64)
     Plt32,
-    /// 32-bit GOT-relative
+    /// 32-bit GOT-relative (x86-64)
     GotPcRel,
-    /// 32-bit absolute
+    /// 32-bit absolute (x86-64)
     Abs32,
-    /// 32-bit signed absolute
+    /// 32-bit signed absolute (x86-64)
     Abs32S,
+    /// AArch64 BL/B instruction (26-bit PC-relative)
+    AArch64Call26,
+    /// AArch64 ADR/ADRP instruction (21-bit PC-relative)
+    AArch64AdrPrelLo21,
+    /// AArch64 64-bit absolute address
+    AArch64Abs64,
+    /// AArch64 32-bit absolute address
+    AArch64Abs32,
 }
 
 impl RelocationType {
     fn to_elf(&self) -> u32 {
         match self {
+            // x86-64 relocations
             RelocationType::Abs64 => R_X86_64_64,
             RelocationType::Pc32 => R_X86_64_PC32,
             RelocationType::Plt32 => R_X86_64_PLT32,
             RelocationType::GotPcRel => R_X86_64_GOTPCREL,
             RelocationType::Abs32 => R_X86_64_32,
             RelocationType::Abs32S => R_X86_64_32S,
+            // AArch64 relocations
+            RelocationType::AArch64Call26 => R_AARCH64_CALL26,
+            RelocationType::AArch64AdrPrelLo21 => R_AARCH64_ADR_PREL_LO21,
+            RelocationType::AArch64Abs64 => R_AARCH64_ABS64,
+            RelocationType::AArch64Abs32 => R_AARCH64_ABS32,
         }
     }
 }
@@ -1229,10 +1254,14 @@ pub fn calculate_symbol_size(
 /// Convert sir::emit::RelocKind to elf::RelocationType
 pub fn reloc_kind_to_type(kind: &crate::sir::emit::RelocKind) -> RelocationType {
     match kind {
+        // x86-64 relocations
         crate::sir::emit::RelocKind::Abs64 => RelocationType::Abs64,
         crate::sir::emit::RelocKind::PCRel32 => RelocationType::Pc32,
         crate::sir::emit::RelocKind::PLT32 => RelocationType::Plt32,
         crate::sir::emit::RelocKind::GOT32 => RelocationType::GotPcRel,
+        // AArch64 relocations
+        crate::sir::emit::RelocKind::AArch64Call26 => RelocationType::AArch64Call26,
+        crate::sir::emit::RelocKind::AArch64Adr21 => RelocationType::AArch64AdrPrelLo21,
     }
 }
 

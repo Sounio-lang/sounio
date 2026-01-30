@@ -205,6 +205,14 @@ fn generate_docs(
     let crate_doc = crate_doc
         .ok_or_else(|| miette::miette!("No documentation extracted - all files failed to parse"))?;
 
+    // Debug: Print what was extracted
+    tracing::info!(
+        "Extracted {} functions, {} types, {} traits",
+        crate_doc.root_module.functions.len(),
+        crate_doc.root_module.types.len(),
+        crate_doc.root_module.traits.len()
+    );
+
     // Generate HTML
     tracing::info!("Generating HTML documentation...");
     let renderer = HtmlRenderer::new(crate_doc, output_dir.to_path_buf())

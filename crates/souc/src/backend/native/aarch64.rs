@@ -302,6 +302,30 @@ pub enum Shift {
 // INSTRUCTION ENCODING
 // ============================================================================
 
+/// Relocation kind for external symbols
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RelocationKind {
+    /// AArch64 BL/B instruction (26-bit PC-relative)
+    AArch64Call26,
+    /// AArch64 ADR/ADRP instruction (21-bit PC-relative)
+    AArch64Adr21,
+    /// Absolute 64-bit address
+    Abs64,
+}
+
+/// External symbol relocation entry
+#[derive(Debug, Clone)]
+pub struct Relocation {
+    /// Offset in code buffer where relocation is needed
+    pub offset: usize,
+    /// Symbol name
+    pub symbol: String,
+    /// Relocation kind
+    pub kind: RelocationKind,
+    /// Addend to apply
+    pub addend: i64,
+}
+
 /// AArch64 code emitter with instruction encoding functions
 pub struct AArch64Emitter {
     /// Machine code buffer
@@ -312,6 +336,10 @@ pub struct AArch64Emitter {
     labels: std::collections::HashMap<String, u32>,
     /// Unresolved branch references (offset, label, is_cond)
     unresolved: Vec<(u32, String, bool)>,
+    /// External symbol relocations
+    relocations: Vec<Relocation>,
+    /// External symbols referenced (symbol name -> unique ID)
+    external_symbols: std::collections::HashMap<String, usize>,
 }
 
 impl AArch64Emitter {
@@ -322,6 +350,8 @@ impl AArch64Emitter {
             frame_size: 0,
             labels: std::collections::HashMap::new(),
             unresolved: Vec::new(),
+            relocations: Vec::new(),
+            external_symbols: std::collections::HashMap::new(),
         }
     }
 
@@ -387,6 +417,65 @@ impl AArch64Emitter {
         }
 
         Ok(self.code)
+    }
+
+    /// Add an external symbol reference and return its ID
+    pub fn add_external_symbol(&mut self, name: &str) -> usize {
+        let next_id = self.external_symbols.len();
+        *self
+            .external_symbols
+            .entry(name.to_string())
+            .or_insert(next_id)
+    }
+
+    /// Add a relocation entry
+    pub fn add_relocation(
+        &mut self,
+        offset: usize,
+        symbol: String,
+        kind: RelocationKind,
+        addend: i64,
+    ) {
+        self.relocations.push(Relocation {
+            offset,
+            symbol,
+            kind,
+            addend,
+        });
+    }
+
+    /// Get all relocations
+    pub fn relocations(&self) -> &[Relocation] {
+        &self.relocations
+    }
+
+    /// Get all external symbols
+    pub fn external_symbols(&self) -> &std::collections::HashMap<String, usize> {
+        &self.external_symbols
+    }
+
+    /// Branch-link to an external function with proper relocation tracking
+    ///
+    /// Emits a BL instruction with a relocation entry for the linker to resolve.
+    /// The instruction is emitted with offset 0 as a placeholder.
+    pub fn bl_external(&mut self, symbol_name: &str) {
+        let offset = self.offset() as usize;
+
+        // Emit BL instruction with offset 0 (to be resolved by linker)
+        // BL instruction format: 0b100101 | (imm26 << 0)
+        let bl_inst = 0b10010100_00000000_00000000_00000000u32;
+        self.emit(bl_inst);
+
+        // Add relocation entry
+        self.add_relocation(
+            offset,
+            symbol_name.to_string(),
+            RelocationKind::AArch64Call26,
+            0, // No addend for function calls
+        );
+
+        // Register the external symbol
+        self.add_external_symbol(symbol_name);
     }
 
     // ========================================================================
