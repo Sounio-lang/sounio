@@ -489,6 +489,8 @@ pub mod runtime {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::ast::Abi;
+    use crate::hlir::builder::FunctionBuilder;
 
     #[test]
     fn test_cps_context_creation() {
@@ -514,5 +516,92 @@ mod tests {
     #[test]
     fn test_cps_transform_creation() {
         let _transform = CpsTransform::new();
+    }
+
+    #[test]
+    fn test_cps_transform_effectful_function() {
+        // Create a simple function with an effect operation
+        let mut builder = FunctionBuilder::new("test_func".to_string(), HlirType::I32);
+        builder.set_effects(vec!["IO".to_string()]);
+
+        // Add entry block
+        builder.create_block("entry");
+        builder.set_current_block(BlockId(0));
+
+        // Perform IO effect
+        let print_result = builder.perform_effect("IO", "println", vec![], HlirType::Void);
+
+        // Return constant
+        let const_val = builder.int_const(42, HlirType::I32);
+        builder.ret(Some(const_val));
+
+        let func = builder.finish();
+
+        // Transform to CPS
+        let mut transform = CpsTransform::new();
+        let result = transform.transform_function(&func);
+
+        assert!(result.is_ok(), "CPS transformation should succeed");
+
+        let cps_func = result.unwrap();
+
+        // Verify transformation
+        assert_eq!(cps_func.name, "test_func_cps");
+        assert_eq!(
+            cps_func.params.len(),
+            func.params.len() + 1,
+            "Should have one additional continuation parameter"
+        );
+        assert_eq!(cps_func.params.last().unwrap().name, "__cont");
+    }
+
+    #[test]
+    fn test_cps_analysis_detects_effects() {
+        // Create a module with an effectful function
+        let mut module = HlirModule::new("test");
+
+        let mut builder = FunctionBuilder::new("with_effects".to_string(), HlirType::I32);
+        builder.set_effects(vec!["IO".to_string()]);
+        builder.create_block("entry");
+        builder.set_current_block(BlockId(0));
+        builder.perform_effect("IO", "println", vec![], HlirType::Void);
+        let val = builder.int_const(42, HlirType::I32);
+        builder.ret(Some(val));
+
+        module.functions.push(builder.finish());
+
+        // Analyze
+        let mut ctx = CpsContext::new();
+        ctx.analyze(&module);
+
+        assert!(
+            ctx.effectful_functions.contains("with_effects"),
+            "Should detect effectful function"
+        );
+        assert!(ctx.needs_cps("with_effects"));
+    }
+
+    #[test]
+    fn test_cps_analysis_ignores_pure_functions() {
+        // Create a module with a pure function
+        let mut module = HlirModule::new("test");
+
+        let mut builder = FunctionBuilder::new("pure_func".to_string(), HlirType::I32);
+        builder.create_block("entry");
+        builder.set_current_block(BlockId(0));
+        let val = builder.int_const(42, HlirType::I32);
+        builder.ret(Some(val));
+
+        module.functions.push(builder.finish());
+
+        // Analyze
+        let mut ctx = CpsContext::new();
+        ctx.analyze(&module);
+
+        assert!(
+            !ctx.effectful_functions.contains("pure_func"),
+            "Should not transform pure function"
+        );
+        assert!(!ctx.needs_cps("pure_func"));
     }
 }
