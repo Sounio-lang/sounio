@@ -190,6 +190,21 @@ fn generate_docs(
             }
         };
 
+        // Debug: Check AST items
+        tracing::info!("AST has {} items", ast.items.len());
+        for item in &ast.items {
+            tracing::debug!(
+                "Item: {:?}",
+                match item {
+                    sounio::ast::Item::Function(f) => format!("Function: {}", f.name),
+                    sounio::ast::Item::Struct(s) => format!("Struct: {}", s.name),
+                    sounio::ast::Item::Enum(e) => format!("Enum: {}", e.name),
+                    sounio::ast::Item::Trait(t) => format!("Trait: {}", t.name),
+                    _ => "Other".to_string(),
+                }
+            );
+        }
+
         // Extract documentation
         let doc = extractor.extract(&ast);
 
