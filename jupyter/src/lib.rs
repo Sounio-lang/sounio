@@ -12,6 +12,7 @@
 //! - Control: Shutdown and interrupt requests
 //! - Heartbeat: Simple echo for connection health
 
+use bytes::Bytes;
 use chrono::Utc;
 use hmac::{Hmac, Mac};
 use serde::{Deserialize, Serialize};
@@ -139,8 +140,8 @@ impl Message {
             return Ok(String::new());
         }
 
-        let mut mac = Hmac::<Sha256>::new_from_slice(key)
-            .map_err(|e| KernelError::Hmac(e.to_string()))?;
+        let mut mac =
+            Hmac::<Sha256>::new_from_slice(key).map_err(|e| KernelError::Hmac(e.to_string()))?;
 
         mac.update(serde_json::to_string(&self.header)?.as_bytes());
         mac.update(
@@ -208,7 +209,9 @@ impl Message {
         let identities = frames[..delim_pos].to_vec();
 
         if frames.len() < delim_pos + 6 {
-            return Err(KernelError::InvalidMessage("Not enough message parts".to_string()));
+            return Err(KernelError::InvalidMessage(
+                "Not enough message parts".to_string(),
+            ));
         }
 
         let signature = String::from_utf8_lossy(&frames[delim_pos + 1]).to_string();
@@ -353,11 +356,13 @@ impl ExecutionContext {
 
         let source = self.build_source(&wrapped);
 
-        // Parse and type-check
+        // Parse, resolve, and type-check
         let tokens = sounio::lexer::lex(&source).map_err(|e| format!("Lex error: {:?}", e))?;
         let ast =
             sounio::parser::parse(&tokens, &source).map_err(|e| format!("Parse error: {:?}", e))?;
-        let hir = sounio::check::check(&ast).map_err(|e| format!("Type error: {}", e))?;
+        let resolved_ast =
+            sounio::resolve::resolve(ast).map_err(|e| format!("Resolve error: {}", e))?;
+        let hir = sounio::check::check(&resolved_ast).map_err(|e| format!("Type error: {}", e))?;
 
         // Execute with interpreter
         let mut interp = sounio::interp::Interpreter::new();
@@ -503,11 +508,21 @@ impl SounioKernel {
         let mut heartbeat = zeromq::RepSocket::new();
 
         // Bind sockets
-        shell.bind(&self.conn_info.address(self.conn_info.shell_port)).await?;
-        iopub.bind(&self.conn_info.address(self.conn_info.iopub_port)).await?;
-        stdin.bind(&self.conn_info.address(self.conn_info.stdin_port)).await?;
-        control.bind(&self.conn_info.address(self.conn_info.control_port)).await?;
-        heartbeat.bind(&self.conn_info.address(self.conn_info.hb_port)).await?;
+        shell
+            .bind(&self.conn_info.address(self.conn_info.shell_port))
+            .await?;
+        iopub
+            .bind(&self.conn_info.address(self.conn_info.iopub_port))
+            .await?;
+        stdin
+            .bind(&self.conn_info.address(self.conn_info.stdin_port))
+            .await?;
+        control
+            .bind(&self.conn_info.address(self.conn_info.control_port))
+            .await?;
+        heartbeat
+            .bind(&self.conn_info.address(self.conn_info.hb_port))
+            .await?;
 
         tracing::info!("Sockets bound successfully");
 
@@ -538,7 +553,7 @@ impl SounioKernel {
                 msg = shell.recv() => {
                     match msg {
                         Ok(msg) => {
-                            let frames: Vec<Vec<u8>> = msg.into_iter().map(|f| f.to_vec()).collect();
+                            let frames: Vec<Vec<u8>> = msg.into_vec().into_iter().map(|f| f.to_vec()).collect();
                             if let Ok(msg) = Message::parse(frames, &self.key) {
                                 if let Err(e) = self.handle_shell_message(msg, &mut shell, iopub.clone()).await {
                                     tracing::error!("Error handling shell message: {}", e);
@@ -553,7 +568,7 @@ impl SounioKernel {
                 msg = control.recv() => {
                     match msg {
                         Ok(msg) => {
-                            let frames: Vec<Vec<u8>> = msg.into_iter().map(|f| f.to_vec()).collect();
+                            let frames: Vec<Vec<u8>> = msg.into_vec().into_iter().map(|f| f.to_vec()).collect();
                             if let Ok(msg) = Message::parse(frames, &self.key) {
                                 if msg.header.msg_type == "shutdown_request" {
                                     tracing::info!("Shutdown requested");
@@ -601,10 +616,13 @@ impl SounioKernel {
             }
             "comm_info_request" => {
                 // Comm info request - return empty comms
-                let reply = msg.reply("comm_info_reply", serde_json::json!({
-                    "status": "ok",
-                    "comms": {}
-                }));
+                let reply = msg.reply(
+                    "comm_info_reply",
+                    serde_json::json!({
+                        "status": "ok",
+                        "comms": {}
+                    }),
+                );
                 self.send_message(shell, reply).await?;
             }
             other => {
@@ -656,7 +674,8 @@ impl SounioKernel {
         let store_history = msg.content["store_history"].as_bool().unwrap_or(true);
 
         // Publish busy status
-        self.publish_status(ExecutionState::Busy, &msg, iopub.clone()).await?;
+        self.publish_status(ExecutionState::Busy, &msg, iopub.clone())
+            .await?;
 
         // Execute the code
         let mut ctx = self.context.lock().await;
@@ -707,16 +726,20 @@ impl SounioKernel {
                             buffers: vec![],
                         };
                         let mut iopub_lock = iopub.lock().await;
-                        self.send_iopub_message(&mut *iopub_lock, result_msg).await?;
+                        self.send_iopub_message(&mut *iopub_lock, result_msg)
+                            .await?;
                     }
                 }
 
                 // Send reply
-                let reply = msg.reply("execute_reply", serde_json::json!({
-                    "status": "ok",
-                    "execution_count": current_count,
-                    "user_expressions": {}
-                }));
+                let reply = msg.reply(
+                    "execute_reply",
+                    serde_json::json!({
+                        "status": "ok",
+                        "execution_count": current_count,
+                        "user_expressions": {}
+                    }),
+                );
                 self.send_message(shell, reply).await?;
             }
             Err(error) => {
@@ -739,19 +762,23 @@ impl SounioKernel {
                 }
 
                 // Send error reply
-                let reply = msg.reply("execute_reply", serde_json::json!({
-                    "status": "error",
-                    "execution_count": current_count,
-                    "ename": "SounioError",
-                    "evalue": &error,
-                    "traceback": [error]
-                }));
+                let reply = msg.reply(
+                    "execute_reply",
+                    serde_json::json!({
+                        "status": "error",
+                        "execution_count": current_count,
+                        "ename": "SounioError",
+                        "evalue": &error,
+                        "traceback": [error]
+                    }),
+                );
                 self.send_message(shell, reply).await?;
             }
         }
 
         // Publish idle status
-        self.publish_status(ExecutionState::Idle, &msg, iopub).await?;
+        self.publish_status(ExecutionState::Idle, &msg, iopub)
+            .await?;
 
         Ok(())
     }
@@ -850,7 +877,10 @@ impl SounioKernel {
     /// Send a message on a router socket
     async fn send_message(&self, socket: &mut zeromq::RouterSocket, msg: Message) -> Result<()> {
         let frames = msg.serialize(&self.key)?;
-        let zmq_msg: zeromq::ZmqMessage = frames.into_iter().map(|f| f.into()).collect();
+        let zmq_frames: Vec<Bytes> = frames.into_iter().map(Bytes::from).collect();
+        let zmq_msg = zeromq::ZmqMessage::try_from(zmq_frames).map_err(|e| {
+            KernelError::InvalidMessage(format!("Failed to create ZMQ message: {:?}", e))
+        })?;
         socket.send(zmq_msg).await?;
         Ok(())
     }
@@ -858,7 +888,10 @@ impl SounioKernel {
     /// Send a message on the iopub socket
     async fn send_iopub_message(&self, socket: &mut zeromq::PubSocket, msg: Message) -> Result<()> {
         let frames = msg.serialize(&self.key)?;
-        let zmq_msg: zeromq::ZmqMessage = frames.into_iter().map(|f| f.into()).collect();
+        let zmq_frames: Vec<Bytes> = frames.into_iter().map(Bytes::from).collect();
+        let zmq_msg = zeromq::ZmqMessage::try_from(zmq_frames).map_err(|e| {
+            KernelError::InvalidMessage(format!("Failed to create ZMQ message: {:?}", e))
+        })?;
         socket.send(zmq_msg).await?;
         Ok(())
     }

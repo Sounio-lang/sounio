@@ -7,11 +7,11 @@ set -e
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(dirname "$SCRIPT_DIR")"
-DC="${PROJECT_ROOT}/compiler/target/release/dc"
+DC="${PROJECT_ROOT}/target/release/souc"
 
 if [ ! -f "$DC" ]; then
     echo "ERROR: Compiler not found at $DC"
-    echo "Run: cd compiler && cargo build --release"
+    echo "Run: cargo build -p souc --release"
     exit 1
 fi
 

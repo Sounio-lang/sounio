@@ -6,13 +6,13 @@
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-gold.svg)](LICENSE)
 [![stdlib](https://img.shields.io/badge/stdlib-151K%2B%20lines-blue.svg)](#standard-library)
-[![Version](https://img.shields.io/badge/version-0.88.0-orange.svg)](CHANGELOG.md)
+[![Version](https://img.shields.io/badge/version-0.99.0-orange.svg)](CHANGELOG.md)
 
 <img src="docs/assets/sounio-logo.svg" alt="Sounio Logo" width="200">
 
 *A systems programming language for epistemic computing*
 
-[Documentation](https://sounio-lang.org) · [Manifesto](MANIFESTO.md) · [Examples](#examples) · [Contributing](CONTRIBUTING.md)
+[Getting Started](docs/guide/getting-started.md) · [Tutorial](docs/guide/tutorial.md) · [Manifesto](MANIFESTO.md) · [Examples](examples/) · [API Reference](docs/reference/STDLIB_REFERENCE.md) · [Contributing](CONTRIBUTING.md)
 
 </div>
 
@@ -25,8 +25,9 @@
 - [Features](#features)
 - [Standard Library](#standard-library)
 - [Quick Start](#quick-start)
+- [Learning Resources](#learning-resources)
 - [Design Principles](#design-principles)
-- [Roadmap](#roadmap)
+- [Project Status](#project-status)
 - [Contributing](#contributing)
 - [Citation](#citation)
 - [License](#license)
@@ -189,10 +190,13 @@ print("ATE: ", effect.value, " ± ", effect.uncertainty)
 git clone https://github.com/sounio-lang/sounio.git
 cd sounio
 
-# Build the compiler (requires Rust 1.70+)
-cd compiler && cargo build --release
+# Build the compiler (requires Rust 1.80+ with edition 2024)
+cargo build -p souc --release
 
 # Run your first Sounio program
+cargo run -p souc -- run examples/hello.sio
+
+# Or use the built binary directly
 ./target/release/souc run examples/hello.sio
 ```
 
@@ -257,6 +261,29 @@ This displays all search locations and which ones exist, helping you verify corr
 
 ---
 
+## Learning Resources
+
+### Documentation
+- **[Tutorial](docs/guide/tutorial.md)** - Step-by-step guide to Sounio
+- **[Language Guide](docs/LLM_PROGRAMMING_GUIDE.md)** - Complete language reference
+- **[API Reference](docs/reference/STDLIB_REFERENCE.md)** - Standard library documentation
+- **[FAQ](docs/FAQ.md)** - Frequently asked questions
+- **[Glossary](docs/GLOSSARY.md)** - Epistemic computing terminology
+
+### Examples
+- **[Basic Examples](examples/)** - Hello world, syntax basics
+- **[Scientific Computing](examples/scientific/)** - ODE solvers, signal processing
+- **[Medical Applications](examples/medical/)** - PK/PD models, PBPK
+- **[GPU Computing](examples/gpu/)** - High-performance kernels
+- **[Advanced Examples](examples/advanced/)** - Complex applications
+
+### For Contributors
+- **[Architecture Overview](docs/compiler/ARCHITECTURE.md)** - Compiler design
+- **[Contributing Guide](CONTRIBUTING.md)** - How to contribute
+- **[Style Guide](docs/STYLE_GUIDE.md)** - Code style conventions
+
+---
+
 ## Design Principles
 
 1. **Uncertainty is not optional** — Every scientific value has uncertainty. Ignoring it is a bug.
@@ -270,6 +297,39 @@ This displays all search locations and which ones exist, helping you verify corr
 5. **Standards compliance** — GUM (Guide to Uncertainty in Measurement), ISO 17025.
 
 See [MANIFESTO.md](MANIFESTO.md) for the complete philosophy.
+
+---
+
+## Project Status
+
+**Current Version**: 0.99.0 (Pre-1.0)
+
+### Implemented ✅
+- Core epistemic type system with `Knowledge<T>`
+- Uncertainty propagation (GUM-compliant)
+- MedLang PK/PD DSL
+- fMRI neuroimaging pipeline
+- GPU acceleration (CUDA, Metal)
+- Causal inference framework
+- 151K+ lines standard library
+- Native code generation (ELF/Mach-O)
+- Cranelift JIT backend
+- REPL (interactive mode)
+
+### In Progress 🚧
+- Language Server Protocol (LSP) - 80% complete
+- LLVM backend - Experimental
+- Package manager (`siopkg`) - Design phase
+- SMT-based refinement types - Proof of concept
+- WebAssembly target - Experimental
+
+### Planned 📋
+- Stabilized 1.0 API
+- Distributed compilation
+- Formal verification support
+- Additional scientific domains (materials, climate)
+
+See [CHANGELOG.md](CHANGELOG.md) for detailed version history.
 
 ---
 
@@ -293,13 +353,19 @@ We welcome contributions! See [CONTRIBUTING.md](CONTRIBUTING.md) for guidelines.
 
 ```bash
 # Run tests
-cargo test
+cargo test --workspace
 
 # Check formatting
-cargo fmt --check
+cargo fmt --all --check
 
 # Run clippy
-cargo clippy
+cargo clippy --workspace
+
+# Run fast gate (full check)
+./scripts/fast_gate.sh
+
+# Build with all features
+cargo build --workspace --all-features
 ```
 
 ---

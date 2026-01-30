@@ -1,105 +1,110 @@
-# Sounio Standard Library Examples
+# Sounio Examples
 
-This directory contains demonstrations of Sounio standard library modules. Each example shows how to use a particular stdlib feature in practice.
+This directory contains comprehensive examples demonstrating Sounio's features.
 
-## Organization
+## Quick Start
 
-Examples mirror the stdlib structure for easy discovery:
+**First Steps:**
+- [arithmetic.sio](arithmetic.sio) - Basic arithmetic operations
+- [async_demo.sio](async_demo.sio) - Async/await basics
 
-```
-examples/
-├── causal/              # Causal inference examples
-├── graph/               # Graph algorithms and analysis
-├── nn/                  # Neural networks (including quaternionic networks)
-├── ode/                 # ODE solvers and scientific modeling
-├── epistemic/           # Epistemic computing and uncertainty
-├── medlang/             # MedLang PK/PD domain-specific language
-├── autodiff/            # Automatic differentiation
-├── bayes/               # Bayesian inference (MCMC, VI)
-├── fmri/                # fMRI preprocessing and analysis
-├── gpu/                 # GPU-accelerated computations
-├── stats/               # Statistical analysis
-├── ontology/            # Scientific ontology queries
-├── data/                # Data manipulation and I/O
-└── ...                  # Other stdlib domains
-```
+**Key Features:**
+- [Epistemic Types](beta_epistemic.sio) - Uncertainty propagation
+- [Automatic Differentiation](autodiff/) - Gradient computation
+- [GPU Computing](gpu/) - High-performance kernels
+
+## Examples by Category
+
+### Language Basics
+- `arithmetic.sio` - Basic operations
+- `collections/` - Data structures
+- `algo/` - Algorithms
+
+### Type System
+- Epistemic types - `beta_epistemic.sio`
+- Linear types - Check compiler tests
+- Units of measure - `medlang/` examples
+
+### Effects & Async
+- `async_demo.sio` - Async programming
+- Effect handlers - See `tests/run-pass/`
+
+### Scientific Computing
+- `autodiff/` - Automatic differentiation
+- `ode/` - ODE solvers
+- `linalg/` - Linear algebra
+- `signal/` - Signal processing
+- `stats/` - Statistics
+- `bayes/` - Bayesian inference
+- `monte_carlo/` - Monte Carlo methods
+- `optimize/` - Optimization algorithms
+
+### Domain-Specific
+- `medlang/` - PK/PD models (pharmacokinetics/pharmacodynamics)
+- `pbpk/` - Physiologically-based PK
+- `fmri/` - fMRI neuroimaging analysis
+- `darwin_atlas/` - Darwin Atlas integration
+- `darwin_pbpk/` - Darwin + PBPK combination
+- `causal/` - Causal inference
+- `connectivity/` - Network analysis
+
+### GPU & ML
+- `gpu/` - GPU kernels
+- `qnn/` - Quantized neural networks
+- `nn/` - Neural network primitives
+- `ml/` - Machine learning
+- `fusion/` - Tensor operations
+- `autodiff/` - Automatic differentiation
+
+### Systems & I/O
+- `io/` - File I/O operations
+- `http/` - HTTP client/server
+- `network/` - Network programming
+- `csv/` - CSV processing
+- `serialization/` - Data serialization
+- `data_pipeline/` - Data processing
+
+### Advanced Examples
+- `alpha_sounio.sio` - Advanced language features
+- `alphageozero_*.sio` - Complex AI examples
+- `advanced_glm_optimization.sio` - ML-guided optimization
+- `cross_compilation.sio` - Multi-target builds
+- `build_system_demo.sio` - Build system features
+
+### Tools & Integration
+- `compiler/` - Compiler interaction
+- `build/` - Build system examples
+- `ontology/` - Scientific ontology queries
+- `fractal/` - Complex programs (Mandelbrot)
+- `graph/` - Graph algorithms
 
 ## Running Examples
 
 ```bash
-# From the repo root:
-cd /path/to/sounio
-export SOUNIO_STDLIB_PATH=$(pwd)/stdlib
+# Check syntax
+cargo run -p souc -- check examples/arithmetic.sio
 
-# Run an example
-./compiler/target/release/souc run examples/graph/curvature_demo.sio
+# Run with JIT
+cargo run -p souc --features jit -- run examples/async_demo.sio
 
-# Type-check an example
-./compiler/target/release/souc check examples/causal/core_demo.sio
+# Compile to native
+cargo run -p souc -- build examples/autodiff/gradient.sio -o gradient
 
-# See AST and types for debugging
-./compiler/target/release/souc check examples/nn/mlp_xor_demo.sio --show-ast --show-types
-```
-
-## Finding Examples
-
-If you want to learn about a particular stdlib module, its example is easy to find:
-
-- Module: `stdlib/graph/curvature.sio` → Example: `examples/graph/curvature_demo.sio`
-- Module: `stdlib/causal/core.sio` → Example: `examples/causal/core_demo.sio`
-- Module: `stdlib/nn/mlp_xor.sio` → Example: `examples/nn/mlp_xor_demo.sio`
-
-## Using Examples in Your Programs
-
-Examples demonstrate key functionality. You can learn from them and adapt them for your own work:
-
-```sio
-// myprogram.sio
-use std::graph::curvature::*
-
-fn main() {
-    // Learn from examples/graph/curvature_demo.sio
-    // Adapt the code for your use case
-}
-```
-
-## Composing Multiple stdlib Modules
-
-**This is now possible!** The main reason these examples were extracted was to remove `main()` conflicts. You can now compose multiple stdlib modules in your programs:
-
-```sio
-use std::graph::curvature::*
-use std::causal::core::*
-use std::stats::effect_sizes::*
-
-fn main() -> i32 {
-    // Use functions from all three modules!
-    print("Multi-module composition works!\n")
-    0
-}
-```
-
-## Building Examples
-
-All examples are standalone and can be compiled/run independently:
-
-```bash
-souc check examples/epistemic/gum_demo.sio
-souc run examples/bayes/mcmc_demo.sio
-souc run examples/ode/pbpk_minimal_demo.sio
+# With GPU support
+cargo run -p souc --features gpu -- run examples/gpu/matrix_mul.sio
 ```
 
 ## Contributing Examples
 
-When adding new stdlib features, please add a corresponding `*_demo.sio` file to demonstrate the functionality. Follow these guidelines:
+When adding new examples:
+1. Place in appropriate category directory
+2. Add clear comments explaining what's demonstrated
+3. Keep examples focused on one concept
+4. Include expected output as comments
+5. Update this README
 
-1. **Name**: Use the same module name + `_demo.sio`
-2. **Location**: Mirror the stdlib structure (e.g., `stdlib/newdomain/newmodule.sio` → `examples/newdomain/newmodule_demo.sio`)
-3. **Content**: Show realistic usage with clear output
-4. **Documentation**: Add comments explaining key concepts
+## See Also
 
-## Related
-
-- **Stdlib**: [../../stdlib/README.md](../stdlib/README.md)
-- **Tests**: [../tests/stdlib/README.md](../tests/stdlib/README.md)
-- **Documentation**: [../../docs/LLM_PROGRAMMING_GUIDE.md](../docs/LLM_PROGRAMMING_GUIDE.md)
+- [Language Guide](../docs/LLM_PROGRAMMING_GUIDE.md)
+- [Standard Library](../stdlib/)
+- [Tests](../tests/run-pass/) - Additional examples

@@ -778,13 +778,18 @@ impl EffectContext {
                 .clone() // Clone the Arc so we can release the registry borrow
         };
 
+        // Query the handler's operation linearity to determine if multi-shot
+        // This implements the Affect paper's one-shot/multi-shot tracking
+        let linearity = handler.operation_linearity(operation);
+        let is_multi_shot = matches!(linearity, crate::effects::linearity::Linearity::MultiShot);
+
         // Capture a real interpreter continuation for this effect operation.
         // The continuation represents "resume execution with the value".
         // For the interpreter, this is simply returning the value.
         let cont_id = self.capture_interpreter_continuation(
             effect_name,
             operation,
-            false, // one-shot by default
+            is_multi_shot, // Use linearity-based decision instead of hardcoded false
             |value| {
                 // Simple case: just return the value
                 // In more complex scenarios, this would restore interpreter state

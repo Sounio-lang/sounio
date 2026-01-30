@@ -106,6 +106,13 @@ pub enum UncertaintyModel {
     /// Provides global surrogate model with variance decomposition.
     /// Best for sensitivity analysis and high-dimensional UQ.
     PolynomialChaos(super::pce::PCEConfig),
+
+    /// Unscented Transform (UT)
+    ///
+    /// Nonlinear uncertainty propagation using deterministic sigma points.
+    /// Captures uncertainty to 3rd order (vs 1st order for Taylor/GUM).
+    /// Best for highly nonlinear transformations with moderate dimensions.
+    UnscentedTransform(super::unscented_transform::UTConfig),
 }
 
 impl Default for UncertaintyModel {
@@ -127,6 +134,7 @@ impl UncertaintyModel {
             UncertaintyModel::Bootstrap(_) => "Bootstrap",
             UncertaintyModel::CrossValidation(_) => "CrossValidation",
             UncertaintyModel::PolynomialChaos(_) => "PolynomialChaos",
+            UncertaintyModel::UnscentedTransform(_) => "UnscentedTransform",
         }
     }
 
@@ -169,6 +177,7 @@ impl UncertaintyModel {
             UncertaintyModel::Bootstrap(_) => 1.0, // SE propagation
             UncertaintyModel::CrossValidation(_) => 1.0, // SE propagation
             UncertaintyModel::PolynomialChaos(_) => 1.0, // Variance propagation via PCE
+            UncertaintyModel::UnscentedTransform(_) => 1.0, // Covariance propagation via UT
         }
     }
 }

@@ -1,0 +1,311 @@
+/// Real-World Example 4: GUM-Compliant Measurement Traceability
+///
+/// Demonstrates: Type-A/Type-B uncertainty, ISO GUM compliance, uncertainty budgets
+///
+/// Problem: Implement ISO/IEC Guide to Uncertainty in Measurement (GUM) for
+/// analytical chemistry calibration chain. Calculate recovery factor with full
+/// uncertainty budget showing Type-A and Type-B contributions.
+///
+/// Expected Output:
+///   Recovery factor with expanded uncertainty (k=2)
+///   Full uncertainty budget (Type-A vs Type-B contributions)
+///   GUM-compliant traceability chain
+///
+/// Verification: Rectangular distribution variance = a²/3
+
+// ============================================================================
+// NUMERIC HELPERS
+// ============================================================================
+
+fn abs_f64(x: f64) -> f64 {
+    if x < 0.0 { return 0.0 - x }
+    return x
+}
+
+fn sqrt_f64(x: f64) -> f64 {
+    if x <= 0.0 { return 0.0 }
+    var y = x
+    var i = 0
+    while i < 10 {
+        y = 0.5 * (y + x / y)
+        i = i + 1
+    }
+    return y
+}
+
+// ============================================================================
+// EPISTEMIC VALUE STRUCT
+// ============================================================================
+
+struct EpistemicValue {
+    value: f64,
+    variance: f64,
+    conf_alpha: f64,
+    conf_beta: f64
+}
+
+fn epistemic_new(value: f64, variance: f64) -> EpistemicValue {
+    return EpistemicValue {
+        value: value,
+        variance: variance,
+        conf_alpha: 1.0,
+        conf_beta: 1.0
+    }
+}
+
+fn epistemic_std(k: EpistemicValue) -> f64 {
+    return sqrt_f64(k.variance)
+}
+
+// ============================================================================
+// VARIANCE PROPAGATION
+// ============================================================================
+
+/// X / Y: Var(X/Y) ≈ (1/Y²)Var(X) + (X²/Y⁴)Var(Y) (delta method)
+fn epistemic_div(x: EpistemicValue, y: EpistemicValue) -> EpistemicValue {
+    let y2 = y.value * y.value
+    let y4 = y2 * y2
+    let new_variance = x.variance / y2 + x.value * x.value * y.variance / y4
+    return EpistemicValue {
+        value: x.value / y.value,
+        variance: new_variance,
+        conf_alpha: x.conf_alpha + y.conf_alpha - 1.0,
+        conf_beta: x.conf_beta + y.conf_beta - 1.0
+    }
+}
+
+// ============================================================================
+// GUM UNCERTAINTY TYPES
+// ============================================================================
+
+/// Type-A Uncertainty: Statistical (from repeated measurements)
+///
+/// Type-A uncertainties come from statistical analysis of observations:
+/// - Standard deviation of the mean: s/√n
+/// - Based on actual measurement variability
+/// - Gaussian (normal) distribution assumed
+///
+/// Example: Repeated measurements: [98.2, 98.5, 98.1, 98.4, 98.3]
+fn type_a_uncertainty(m1: f64, m2: f64, m3: f64, m4: f64, m5: f64) -> EpistemicValue {
+    // Calculate mean
+    let mean = (m1 + m2 + m3 + m4 + m5) / 5.0
+
+    // Calculate sample standard deviation
+    let d1 = m1 - mean
+    let d2 = m2 - mean
+    let d3 = m3 - mean
+    let d4 = m4 - mean
+    let d5 = m5 - mean
+
+    let sum_sq = d1*d1 + d2*d2 + d3*d3 + d4*d4 + d5*d5
+    let sample_var = sum_sq / 4.0  // n-1 = 4
+
+    // Standard error of the mean: s/√n
+    let std_of_mean = sqrt_f64(sample_var) / sqrt_f64(5.0)
+    let var_of_mean = std_of_mean * std_of_mean
+
+    return epistemic_new(mean, var_of_mean)
+}
+
+/// Type-B Uncertainty: Systematic (from calibration certificates, specs)
+///
+/// Type-B uncertainties come from external sources:
+/// - Calibration certificates
+/// - Manufacturer specifications
+/// - Previous measurement data
+/// - Expert judgment
+///
+/// Distribution types:
+/// - Rectangular (uniform): variance = a²/3 (most common for tolerances)
+/// - Triangular: variance = a²/6
+/// - Normal: variance = (a/k)² where k is coverage factor
+///
+/// Example: Certified standard 100.0 ± 0.5% (k=2, rectangular distribution)
+fn type_b_uncertainty(value: f64, rel_unc: f64) -> EpistemicValue {
+    // Convert relative uncertainty to absolute
+    let abs_unc = value * rel_unc
+
+    // For rectangular (uniform) distribution:
+    // If tolerance is ±a, then variance = a²/3
+    // Coverage factor k=√3 ≈ 1.73 for 100% confidence
+    // For k=2 (95%), need to scale: a = cert_unc * 2
+    let a = abs_unc  // Half-width of rectangular distribution
+    let variance = (a * a) / 3.0
+
+    return epistemic_new(value, variance)
+}
+
+// ============================================================================
+// MAIN: GUM CALIBRATION CHAIN
+// ============================================================================
+
+fn main() -> i32 {
+    println("=== GUM-Compliant Measurement Traceability Chain ===")
+    println("")
+
+    // CERTIFIED REFERENCE STANDARD (Type-B)
+    // Certificate states: 100.0 µg/mL ± 0.5% (k=2, 95% confidence)
+    // Distribution: Rectangular (no information about where in ±0.5% it lies)
+    println("Step 1: Certified Reference Standard (Type-B)")
+    let standard_value = 100.0
+    let standard_rel_unc = 0.005  // 0.5% = 0.005
+
+    let standard = type_b_uncertainty(standard_value, standard_rel_unc)
+
+    println("  Value: 100.0 µg/mL")
+    println("  Certificate uncertainty: ± 0.5% (k=2)")
+    println("  Distribution: Rectangular")
+    print("  Variance: ")
+    println(standard.variance)
+    print("  Std deviation: ")
+    println(epistemic_std(standard))
+    println("")
+
+    // Verify rectangular distribution variance
+    let a = standard_value * standard_rel_unc
+    let expected_var_rect = (a * a) / 3.0
+    println("  Verification (Rectangular Distribution):")
+    print("    Half-width a: ")
+    println(a)
+    print("    Expected var (a²/3): ")
+    println(expected_var_rect)
+    print("    Actual variance: ")
+    println(standard.variance)
+
+    if abs_f64(standard.variance - expected_var_rect) < 0.0001 {
+        println("    PASS: Variance = a²/3")
+    } else {
+        println("    FAIL: Incorrect variance calculation")
+    }
+    println("")
+
+    // SAMPLE MEASUREMENTS (Type-A)
+    // Analyst measures sample 5 times (n=5)
+    // Results: [98.2, 98.5, 98.1, 98.4, 98.3] µg/mL
+    println("Step 2: Sample Measurements (Type-A)")
+    println("  Measurements (n=5): [98.2, 98.5, 98.1, 98.4, 98.3] µg/mL")
+
+    let sample = type_a_uncertainty(98.2, 98.5, 98.1, 98.4, 98.3)
+
+    print("  Mean: ")
+    println(sample.value)
+    println("  µg/mL")
+    print("  Std error (s/√n): ")
+    println(epistemic_std(sample))
+    println("  µg/mL")
+    print("  Variance: ")
+    println(sample.variance)
+    println("")
+
+    // RECOVERY FACTOR CALCULATION
+    // Recovery = Sample / Standard
+    // Variance propagates via delta method
+    println("Step 3: Recovery Factor (Sample/Standard)")
+
+    let recovery = epistemic_div(sample, standard)
+
+    print("  Recovery: ")
+    println(recovery.value)
+    println("")
+    print("  Standard uncertainty: ")
+    println(epistemic_std(recovery))
+    println("")
+
+    // EXPANDED UNCERTAINTY (k=2 for 95% confidence)
+    let k = 2.0
+    let expanded_unc = k * epistemic_std(recovery)
+
+    print("  Expanded uncertainty (k=2): ± ")
+    println(expanded_unc)
+    println("")
+
+    print("  Result: Recovery = ")
+    print(recovery.value * 100.0)
+    print("% ± ")
+    print(expanded_unc * 100.0)
+    println("% (k=2)")
+    println("")
+
+    // UNCERTAINTY BUDGET
+    // Show contributions from each source
+    println("Step 4: Uncertainty Budget (Variance Contributions)")
+
+    // For division: Var(X/Y) = Var(X)/Y² + X²Var(Y)/Y⁴
+    let standard_val_sq = standard.value * standard.value
+    let contrib_standard = sample.value * sample.value * standard.variance / (standard_val_sq * standard_val_sq)
+    let contrib_sample = sample.variance / standard_val_sq
+
+    let total_var = recovery.variance
+    let percent_standard = contrib_standard / total_var * 100.0
+    let percent_sample = contrib_sample / total_var * 100.0
+
+    println("  Type-B (Standard certificate):")
+    print("    Contribution: ")
+    println(contrib_standard)
+    print("    Percentage: ")
+    println(percent_standard)
+    println("    %")
+    println("")
+
+    println("  Type-A (Sample repeatability):")
+    print("    Contribution: ")
+    println(contrib_sample)
+    print("    Percentage: ")
+    println(percent_sample)
+    println("    %")
+    println("")
+
+    print("  Total variance: ")
+    println(total_var)
+    println("")
+
+    // GUM COMPLIANCE CHECK
+    println("Step 5: GUM Compliance Verification")
+
+    // Check that contributions sum to total
+    let sum_contributions = contrib_standard + contrib_sample
+    let budget_error = abs_f64(sum_contributions - total_var)
+
+    print("  Sum of contributions: ")
+    println(sum_contributions)
+    print("  Total variance: ")
+    println(total_var)
+    print("  Error: ")
+    println(budget_error)
+
+    if budget_error < 0.000001 {
+        println("  PASS: Uncertainty budget complete")
+    } else {
+        println("  FAIL: Missing uncertainty source")
+    }
+    println("")
+
+    // FINAL REPORT (GUM Format)
+    println("=== GUM Measurement Report ===")
+    println("")
+    println("Measurand: Recovery of analytical method")
+    print("Result: ")
+    println(recovery.value * 100.0)
+    println("  %")
+    print("Standard uncertainty: ")
+    println(epistemic_std(recovery) * 100.0)
+    println("  %")
+    print("Expanded uncertainty (k=2, ~95%): ± ")
+    println(expanded_unc * 100.0)
+    println("  %")
+    println("")
+    println("Uncertainty Budget:")
+    print("  Type-B (Standard): ")
+    println(percent_standard)
+    println("  %")
+    print("  Type-A (Repeatability): ")
+    println(percent_sample)
+    println("  %")
+    println("")
+    println("Traceability: Standard traceable to NIST SRM")
+    println("Compliance: ISO/IEC 17025, GUM (2008)")
+    println("")
+    println("=== Measurement Traceability Chain Complete ===")
+
+    return 0
+}

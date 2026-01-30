@@ -78,6 +78,25 @@ Risk modeling and quantitative finance applications:
 - **Provenance tracking** for compliance
 - **GPU-accelerated** risk calculations
 
+## Visual Terminal Examples
+
+### [Terminal-Native Scientific Visualization](/showcases/visual/)
+
+ANSI color-coded visualization without GUI dependencies:
+
+- **Terminal-native plotting** using ANSI escape sequences
+- **SSH-friendly** visualization (no X11 forwarding needed)
+- **Publication-quality SVG export** for papers and presentations
+- **Color-coded scientific domains** (octonions, epistemic, PK/PD, epidemiology)
+
+### Featured Examples
+
+- **Octonion multiplication table** - Fano plane structure visualization
+- **Kalman filter sensor fusion** - Uncertainty reduction gradient
+- **SIR epidemic model** - Color-coded disease dynamics
+- **Climate ensemble projections** - Multi-model uncertainty
+- **[Interactive HTML showcase](/showcase/visual/)** with all examples
+
 ## Cross-Cutting Features
 
 All showcases demonstrate Sounio's core capabilities:

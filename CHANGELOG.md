@@ -7,13 +7,69 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.0.0] - 2026-01-29
+
+### Highlights
+
+Sounio v1.0 is the first production-ready release of the language. This release
+focuses on stabilization, completing core language features, and ensuring the
+foundational systems are robust.
+
 ### Added
-- **MedLang Integration**: MedLang unified into Sounio as `stdlib/medlang/`
-  - PK models: one-compartment and two-compartment models (IV and oral)
-  - Dosing protocols: Weekly, Q3W, Daily oral protocols
-  - Dosing policies: FixedDose, ANCBased, TumorResponseBased, CycleEscalation, TimeBasedReduction
-  - All models use `Knowledge<T>` for automatic uncertainty propagation
-  - Migrated from MedLang standalone repository (agourakis82/medlang → archived)
+
+#### Core Language
+- **File-based module loading**: `mod foo;` declarations now resolve to `foo.sio`,
+  `foo/mod.sio`, or `foo/lib.sio` files with recursive resolution
+- **Doc comments**: Support for `///` (outer) and `//!` (inner) documentation
+  comments, propagated through AST → HIR pipeline
+- **Custom unit definitions**: `unit kg;` and `unit mg = 0.001 * g;` syntax for
+  defining base and derived units of measure
+- **Type alias expansion**: Full expansion with cycle detection to prevent infinite
+  recursion (e.g., `type A = B; type B = A;` now errors)
+
+#### Compiler Infrastructure
+- **Native code generation**: Production-ready x86-64 backend without LLVM
+  dependency, ARM64 architecture support ready
+- **Cranelift JIT**: Fast compilation for development and REPL workflows
+- **Zero compiler warnings**: Cleaned up all non_snake_case and unused_imports
+  warnings with domain-appropriate `#[allow]` attributes
+
+#### Standard Library Integration
+- **MedLang DSL**: Unified pharmacokinetic modeling language from standalone
+  repository (agourakis82/medlang → archived)
+  - PK models: one-compartment and two-compartment (IV and oral)
+  - Dosing protocols: Weekly, Q3W, Daily oral
+  - Dosing policies: FixedDose, ANCBased, TumorResponseBased, CycleEscalation
+  - Full `Knowledge<T>` integration for uncertainty propagation
+
+### Changed
+- Module loader now searches 6 candidate paths for module resolution
+- Type checker performs eager alias expansion before type comparison
+- Build date embedded in compiler binary for version tracking
+
+### Fixed
+- Binding mode errors in module loader iterator patterns
+- Type alias cycle detection prevents stack overflow
+- Unit definition parsing correctly handles quotient expressions
+
+### Known Limitations
+See `compiler/docs/KNOWN_LIMITATIONS.md` for current language limitations and
+planned features for future releases.
+
+---
+
+## [0.99.0] - 2026-01-15
+
+### Added
+- Quaternion and octonion GPU kernels for neural network layers
+- Sparse quaternion operations with structured sparsity
+- Cooperative groups for advanced CUDA parallelism
+- Scientific ontology integration (15M+ terms)
+
+### Changed
+- Bumped version to indicate approaching v1.0 stability
+
+---
 
 ## [0.88.0] - 2025-12-25
 

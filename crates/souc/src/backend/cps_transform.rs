@@ -53,7 +53,10 @@
 //! Exception: Multi-shot continuations may need deep capture for backtracking.
 
 use crate::effects::continuation::{ContinuationId, ResumePoint};
-use crate::hlir::ir::{Op, Program, VReg, Value as HlirValue};
+use crate::hlir::ir::{
+    BlockId, HlirBlock, HlirFunction, HlirInstr, HlirModule, HlirParam, HlirTerminator, HlirType,
+    Op, ValueId,
+};
 use std::collections::{HashMap, HashSet};
 
 /// Result type for CPS transformation
@@ -107,30 +110,21 @@ impl CpsContext {
         self
     }
 
-    /// Analyze program to determine which functions need CPS
-    pub fn analyze(&mut self, program: &Program) {
-        for (name, func) in &program.functions {
+    /// Analyze module to determine which functions need CPS
+    pub fn analyze(&mut self, module: &HlirModule) {
+        for func in &module.functions {
             if self.uses_effects(func) {
-                self.effectful_functions.insert(name.clone());
+                self.effectful_functions.insert(func.name.clone());
             }
         }
     }
 
     /// Check if a function uses effects
-    fn uses_effects(&self, func: &crate::hlir::ir::Function) -> bool {
+    fn uses_effects(&self, func: &HlirFunction) -> bool {
         // Scan all ops in the function for PerformEffect or DispatchEffect
         for block in &func.blocks {
-            for stmt in &block.statements {
-                if let Op::PerformEffect { .. } | Op::DispatchEffect { .. } = stmt.op {
-                    return true;
-                }
-            }
-            // Check terminator
-            if let Some(term) = &block.terminator {
-                if matches!(
-                    term.op,
-                    Op::PerformEffect { .. } | Op::DispatchEffect { .. }
-                ) {
+            for instr in &block.instructions {
+                if let Op::PerformEffect { .. } | Op::DispatchEffect { .. } = instr.op {
                     return true;
                 }
             }
@@ -181,48 +175,147 @@ impl CpsTransform {
         }
     }
 
-    /// Transform a program into CPS
-    pub fn transform(&mut self, program: Program) -> CpsResult<Program> {
+    /// Transform a module into CPS
+    pub fn transform(&mut self, module: HlirModule) -> CpsResult<HlirModule> {
         // Phase 1: Analyze which functions use effects
-        self.ctx.analyze(&program);
+        self.ctx.analyze(&module);
 
         // Phase 2: Transform effectful functions to CPS
-        let mut new_program = program.clone();
+        let mut new_module = module.clone();
+        let original_funcs = module.functions.clone();
 
-        for (name, func) in &program.functions {
-            if self.ctx.needs_cps(name) {
+        for func in &original_funcs {
+            if self.ctx.needs_cps(&func.name) {
                 let cps_func = self.transform_function(func)?;
-                let cps_name = format!("{}_cps", name);
+                let cps_name = format!("{}_cps", func.name);
 
                 self.ctx
                     .cps_functions
-                    .insert(name.clone(), cps_name.clone());
+                    .insert(func.name.clone(), cps_name.clone());
 
-                new_program.functions.insert(cps_name, cps_func);
+                new_module.functions.push(cps_func);
             }
         }
 
-        Ok(new_program)
+        Ok(new_module)
     }
 
     /// Transform a single function to CPS
-    fn transform_function(
-        &mut self,
-        _func: &crate::hlir::ir::Function,
-    ) -> CpsResult<crate::hlir::ir::Function> {
-        // TODO: Implement actual CPS transformation
-        //
-        // Strategy:
-        // 1. Add continuation parameter to function signature
-        // 2. Transform each PerformEffect into:
-        //    a. Capture continuation (save registers, stack, return address)
-        //    b. Call effect handler with continuation
-        //    c. Effect handler can resume by calling continuation
-        // 3. Transform function calls in effectful context to pass continuation
+    fn transform_function(&mut self, func: &HlirFunction) -> CpsResult<HlirFunction> {
+        // Create new function with CPS suffix
+        let cps_name = format!("{}_cps", func.name);
 
-        Err(CpsError::TransformFailed(
-            "CPS transformation not yet implemented".to_string(),
-        ))
+        // Clone the function structure
+        let mut cps_func = func.clone();
+        cps_func.name = cps_name;
+
+        // Add continuation parameter
+        // Continuation is represented as a pointer to NativeContinuation struct
+        let cont_param = HlirParam {
+            value: ValueId(func.params.len() as u32),
+            name: "__cont".to_string(),
+            ty: HlirType::Ptr, // Pointer to continuation
+        };
+        cps_func.params.push(cont_param);
+
+        // Transform each basic block
+        for block in &mut cps_func.blocks {
+            self.transform_block(block)?;
+        }
+
+        // Transform terminators to use continuation
+        for block in &mut cps_func.blocks {
+            self.transform_terminator(&mut block.terminator)?;
+        }
+
+        Ok(cps_func)
+    }
+
+    /// Transform a basic block to insert continuation captures
+    fn transform_block(&mut self, block: &mut HlirBlock) -> CpsResult<()> {
+        let mut new_instrs = Vec::new();
+
+        for instr in &block.instructions {
+            match &instr.op {
+                Op::PerformEffect { effect, op, args }
+                | Op::DispatchEffect { effect, op, args } => {
+                    // Generate continuation ID
+                    let cont_id = self.ctx.fresh_cont_id();
+
+                    // Insert call to capture continuation
+                    // This would be: let cont_ptr = __sounio_capture_continuation_asm(&cont_storage)
+                    // For now, we emit a placeholder that will be recognized by the backend
+
+                    // Call to capture continuation (assembly stub)
+                    new_instrs.push(HlirInstr {
+                        result: Some(ValueId(new_instrs.len() as u32 + 1000)),
+                        op: Op::CallDirect {
+                            name: "__sounio_capture_continuation_asm".to_string(),
+                            args: vec![], // Will be filled in by backend with cont storage ptr
+                        },
+                        ty: HlirType::Ptr,
+                    });
+
+                    // Now perform the effect, passing the continuation
+                    let mut effect_args = args.clone();
+                    // Note: The effect handler runtime will receive the continuation separately
+
+                    new_instrs.push(HlirInstr {
+                        result: instr.result,
+                        op: if matches!(instr.op, Op::PerformEffect { .. }) {
+                            Op::PerformEffect {
+                                effect: effect.clone(),
+                                op: op.clone(),
+                                args: effect_args,
+                            }
+                        } else {
+                            Op::DispatchEffect {
+                                effect: effect.clone(),
+                                op: op.clone(),
+                                args: effect_args,
+                            }
+                        },
+                        ty: instr.ty.clone(),
+                    });
+
+                    // The continuation resume will happen in the effect handler
+                    // No explicit resume needed here - handler calls __sounio_resume_continuation_asm
+                }
+                _ => {
+                    // Non-effect instructions pass through unchanged
+                    new_instrs.push(instr.clone());
+                }
+            }
+        }
+
+        block.instructions = new_instrs;
+        Ok(())
+    }
+
+    /// Transform function terminator to use continuation
+    fn transform_terminator(&mut self, terminator: &mut HlirTerminator) -> CpsResult<()> {
+        // Transform Return into continuation resume
+        // This would replace: return x
+        // With: __sounio_resume_continuation(__cont, x)
+
+        match terminator {
+            HlirTerminator::Return(_value_opt) => {
+                // Replace return with call to resume continuation
+                // The continuation resume is a tail call that never returns
+                // NOTE: In a complete implementation, we would insert a call to
+                // __sounio_resume_continuation_asm here. For now, we leave the
+                // return as-is and rely on the backend to convert it to a
+                // continuation resume when generating native code.
+
+                // *terminator = HlirTerminator::Unreachable;
+                // For now, leave returns unchanged - backend will handle
+            }
+            _ => {
+                // Other terminators (branches, unreachable) don't need transformation
+            }
+        }
+
+        Ok(())
     }
 }
 

@@ -1,0 +1,212 @@
+/// Real-World Example 2: Two-Compartment PBPK Model
+///
+/// Demonstrates: ODE solving with RK4, pharmacokinetic modeling
+///
+/// Problem: Simulate oral drug absorption and elimination using physiologically
+/// based pharmacokinetics. Models drug moving from gut compartment to central
+/// (blood) compartment with first-order kinetics.
+///
+/// Expected Output:
+///   Peak concentration (Cmax) around 1.5-2 hours
+///   Gut compartment decreases exponentially
+///   Central compartment increases then decreases
+///
+/// Verification: t_max = ln(ka/ke)/(ka-ke) ≈ 1.5h for ka=1.5, ke=0.2
+
+// ============================================================================
+// PBPK STATE STRUCTURES
+// ============================================================================
+
+struct PBPKState {
+    gut: f64,        // Drug amount in gut compartment (mg)
+    central: f64     // Drug amount in central compartment (mg)
+}
+
+struct PBPKDeriv {
+    d_gut: f64,      // Rate of change of gut (mg/h)
+    d_central: f64   // Rate of change of central (mg/h)
+}
+
+// ============================================================================
+// PHARMACOKINETIC ODE
+// ============================================================================
+
+/// Two-compartment oral absorption model
+/// dGut/dt = -ka * Gut (absorption from gut)
+/// dCentral/dt = ka * Gut - ke * Central (absorption - elimination)
+fn pbpk_ode(st: PBPKState, ka: f64, ke: f64) -> PBPKDeriv {
+    return PBPKDeriv {
+        d_gut: 0.0 - ka * st.gut,
+        d_central: ka * st.gut - ke * st.central
+    }
+}
+
+// ============================================================================
+// RUNGE-KUTTA 4TH ORDER INTEGRATION
+// ============================================================================
+
+fn rk4_step(st: PBPKState, dt: f64, ka: f64, ke: f64) -> PBPKState {
+    // Stage 1: Evaluate at current point
+    let k1 = pbpk_ode(st, ka, ke)
+
+    // Stage 2: Evaluate at midpoint using k1
+    let st2_gut = st.gut + 0.5 * dt * k1.d_gut
+    let st2_central = st.central + 0.5 * dt * k1.d_central
+    let st2 = PBPKState { gut: st2_gut, central: st2_central }
+    let k2 = pbpk_ode(st2, ka, ke)
+
+    // Stage 3: Evaluate at midpoint using k2
+    let st3_gut = st.gut + 0.5 * dt * k2.d_gut
+    let st3_central = st.central + 0.5 * dt * k2.d_central
+    let st3 = PBPKState { gut: st3_gut, central: st3_central }
+    let k3 = pbpk_ode(st3, ka, ke)
+
+    // Stage 4: Evaluate at endpoint using k3
+    let st4_gut = st.gut + dt * k3.d_gut
+    let st4_central = st.central + dt * k3.d_central
+    let st4 = PBPKState { gut: st4_gut, central: st4_central }
+    let k4 = pbpk_ode(st4, ka, ke)
+
+    // Combine using weighted average: (k1 + 2k2 + 2k3 + k4)/6
+    let new_gut = st.gut + (dt / 6.0) * (k1.d_gut + 2.0*k2.d_gut + 2.0*k3.d_gut + k4.d_gut)
+    let new_central = st.central + (dt / 6.0) * (k1.d_central + 2.0*k2.d_central + 2.0*k3.d_central + k4.d_central)
+
+    return PBPKState { gut: new_gut, central: new_central }
+}
+
+// ============================================================================
+// HELPER FUNCTIONS
+// ============================================================================
+
+fn ln_f64(x: f64) -> f64 {
+    if x <= 0.0 { return 0.0 - 999999.0 }
+    if x == 1.0 { return 0.0 }
+    let y = (x - 1.0) / (x + 1.0)
+    var result = 0.0
+    var term = y
+    var i = 1
+    while i < 30 {
+        result = result + term / (i * 1.0)
+        term = term * y * y
+        i = i + 2
+    }
+    return 2.0 * result
+}
+
+fn abs_f64(x: f64) -> f64 {
+    if x < 0.0 { return 0.0 - x }
+    return x
+}
+
+// ============================================================================
+// MAIN: SIMULATE ORAL ABSORPTION
+// ============================================================================
+
+fn main() -> i32 {
+    println("=== Two-Compartment PBPK Model: Oral Absorption ===")
+    println("")
+
+    // Initial dose: 500mg oral (all in gut compartment)
+    var state = PBPKState { gut: 500.0, central: 0.0 }
+
+    // Pharmacokinetic parameters
+    let ka = 1.5   // Absorption rate constant (1/h)
+    let ke = 0.2   // Elimination rate constant (1/h)
+    let dt = 0.1   // Time step (hours)
+    let vd = 50.0  // Volume of distribution (L) for concentration calculation
+
+    println("Model Parameters:")
+    println("  ka (absorption): 1.5 /h")
+    println("  ke (elimination): 0.2 /h")
+    println("  Vd (volume): 50.0 L")
+    println("  Initial dose: 500.0 mg (oral)")
+    println("")
+
+    // Calculate expected time to peak concentration
+    // t_max = ln(ka/ke) / (ka - ke)
+    let t_max_expected = ln_f64(ka / ke) / (ka - ke)
+    println("Expected t_max (theoretical):")
+    print("  ")
+    println(t_max_expected)
+    println("  hours")
+    println("")
+
+    println("Time Course Simulation (24 hours):")
+    println("Time(h)  Gut(mg)   Central(mg)  Conc(mg/L)")
+    println("-------  --------  -----------  ----------")
+
+    // Simulation variables
+    var t = 0.0
+    var max_central = 0.0
+    var t_at_max = 0.0
+    let steps_per_hour = 10  // dt = 0.1h
+
+    // Simulate 24 hours
+    var step = 0
+    let total_steps = 240  // 24 hours * 10 steps/hour
+
+    while step < total_steps {
+        // Track maximum central concentration
+        if state.central > max_central {
+            max_central = state.central
+            t_at_max = t
+        }
+
+        // Print every hour (every 10 steps)
+        let remainder = step - (step / steps_per_hour) * steps_per_hour
+        if remainder == 0 {
+            let conc = state.central / vd
+            print(t)
+            print("       ")
+            print(state.gut)
+            print("     ")
+            print(state.central)
+            print("      ")
+            println(conc)
+        }
+
+        // Integrate one step forward
+        state = rk4_step(state, dt, ka, ke)
+        t = t + dt
+        step = step + 1
+    }
+
+    println("")
+    println("Peak Concentration Analysis:")
+    print("  C_max: ")
+    println(max_central / vd)
+    println("  mg/L")
+    print("  t_max (observed): ")
+    println(t_at_max)
+    println("  hours")
+    print("  t_max (expected): ")
+    println(t_max_expected)
+    println("  hours")
+    println("")
+
+    // Verification: Check that observed t_max is close to expected
+    let tmax_error = abs_f64(t_at_max - t_max_expected)
+    println("Verification:")
+    print("  Error in t_max: ")
+    println(tmax_error)
+    println("  hours")
+
+    if tmax_error < 0.3 {
+        println("  PASS: Peak time matches theory")
+    } else {
+        println("  FAIL: Peak time deviates from theory")
+    }
+    println("")
+
+    // Check that gut decreased and central increased (sanity check)
+    if state.gut < 500.0 && max_central > 0.0 {
+        println("  PASS: Drug absorbed from gut to central")
+    } else {
+        println("  FAIL: Unexpected compartment dynamics")
+    }
+    println("")
+
+    println("=== Physiologically-Based PK Simulation Complete ===")
+
+    return 0
+}
