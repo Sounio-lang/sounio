@@ -438,10 +438,7 @@ impl GaussianProcess {
         for &ls in &length_scales {
             // Update kernel
             match &mut self.config.kernel {
-                Kernel::RBF {
-                    ref mut length_scale,
-                    ..
-                } => *length_scale = ls,
+                Kernel::RBF { length_scale, .. } => *length_scale = ls,
                 _ => {}
             }
 

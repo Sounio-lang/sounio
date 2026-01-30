@@ -3,7 +3,7 @@
 //! This test verifies that the AArch64 emitter properly tracks external symbols
 //! and generates correct relocation entries for linking.
 
-use souc::backend::native::aarch64::{AArch64Emitter, AArch64Reg, RelocationKind};
+use souc::backend::native::aarch64::{AArch64Emitter, AArch64Reg, Relocation, RelocationKind};
 use souc::sir::emit::RelocKind;
 
 #[test]

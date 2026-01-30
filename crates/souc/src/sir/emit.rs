@@ -6087,6 +6087,8 @@ pub fn code_segment_to_elf(segment: &CodeSegment) -> Result<Vec<u8>, EmitError> 
             RelocKind::PCRel32 => RelocationType::Pc32,
             RelocKind::PLT32 => RelocationType::Plt32,
             RelocKind::GOT32 => RelocationType::GotPcRel,
+            RelocKind::AArch64Call26 => RelocationType::AArch64Call26,
+            RelocKind::AArch64Adr21 => RelocationType::AArch64AdrPrelLo21,
         };
 
         let symbol_idx = symbol_indices.get(&reloc.symbol).copied().unwrap_or(0);
