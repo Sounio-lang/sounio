@@ -6,7 +6,7 @@ use clap::{Parser, Subcommand};
 use miette::Result;
 use sounio::sir::AllocPolicy;
 use std::path::{Path, PathBuf};
-use tracing_subscriber::{EnvFilter, fmt, prelude::*};
+use tracing_subscriber::{fmt, prelude::*, EnvFilter};
 
 #[derive(Parser)]
 #[command(name = "souc")]
@@ -1650,6 +1650,7 @@ fn main() -> Result<()> {
                         cpu_features: target_cpu
                             .map(|s| s.split(',').map(|x| x.trim().to_string()).collect())
                             .unwrap_or_default(),
+                        enable_cps: None, // CPS transformation disabled by default (experimental)
                     },
                     verbose,
                     timing,
@@ -3722,7 +3723,7 @@ fn run_tests(
 ) -> Result<()> {
     use sounio::test::{
         coverage::{CoverageConfig, CoverageTracker},
-        discovery::{TestFilter, discover_tests},
+        discovery::{discover_tests, TestFilter},
         runner::{OutputFormat, TestRunner, TestRunnerConfig},
     };
 
@@ -3834,7 +3835,7 @@ fn run_benchmarks(
 ) -> Result<()> {
     use sounio::test::{
         bench::{BenchConfig, BenchmarkRunner},
-        discovery::{TestFilter, discover_tests},
+        discovery::{discover_tests, TestFilter},
     };
     use std::time::Duration;
 
@@ -4152,7 +4153,7 @@ fn debug_program(
 
 /// Explain an error code
 fn explain_error(code: &str) -> Result<()> {
-    use sounio::diagnostic::codes::{ErrorIndex, explain_error as get_explanation};
+    use sounio::diagnostic::codes::{explain_error as get_explanation, ErrorIndex};
 
     if let Some(explanation) = get_explanation(code) {
         println!("{}", explanation);
@@ -4345,7 +4346,7 @@ fn diagnostics_check(
 
 /// Show similar names for typo detection
 fn diagnostics_similar(name: &str, category: &str, max_distance: usize) -> Result<()> {
-    use sounio::diagnostic::typo::{SuggestionBuilder, find_similar};
+    use sounio::diagnostic::typo::{find_similar, SuggestionBuilder};
 
     let builder = SuggestionBuilder::new();
 
@@ -5234,7 +5235,7 @@ fn target_create(triple: &str, base: Option<&str>, output: Option<&std::path::Pa
 
 /// Show host target information
 fn target_host() -> Result<()> {
-    use sounio::target::{CfgContext, TargetSpec, host_triple};
+    use sounio::target::{host_triple, CfgContext, TargetSpec};
 
     let triple = host_triple();
     println!("Host target: {}", triple);
@@ -5270,7 +5271,7 @@ fn target_host() -> Result<()> {
 
 /// Check target cfg predicates
 fn target_cfg(target: Option<&str>, predicate: Option<&str>) -> Result<()> {
-    use sounio::target::{CfgContext, CfgPredicate, TargetRegistry, TargetSpec, host_triple};
+    use sounio::target::{host_triple, CfgContext, CfgPredicate, TargetRegistry, TargetSpec};
 
     let registry = TargetRegistry::with_builtins();
 
@@ -5582,7 +5583,7 @@ fn ontology_init(
     verbose: bool,
 ) -> Result<()> {
     use sounio::ontology::native::downloader::{
-        DownloadConfig, OntologyDownloader, core_ontologies,
+        core_ontologies, DownloadConfig, OntologyDownloader,
     };
 
     println!("Initializing ontology data...");
@@ -5832,11 +5833,11 @@ fn ontology_list(data_dir: &Path, verbose: bool) -> Result<()> {
 
 /// Lock ontology versions to ontology.lock
 fn ontology_lock(project_dir: &Path, output: &Path, force: bool) -> Result<()> {
-    use sounio::ontology::OntologyLayer;
     use sounio::ontology::native::NativeOntologyRegistry;
     use sounio::ontology::version::{
-        Manifest, OntologyEntry, OntologyVersion, manifest::OntologySource as ManifestSource,
+        manifest::OntologySource as ManifestSource, Manifest, OntologyEntry, OntologyVersion,
     };
+    use sounio::ontology::OntologyLayer;
 
     // Check if lock file already exists
     if output.exists() && !force {
@@ -6182,8 +6183,8 @@ fn layout_analyze(
     output: Option<&Path>,
 ) -> Result<()> {
     use sounio::layout::{
-        DistanceMatrix, LayoutConfig, cluster_concepts, extract_concepts_from_types,
-        generate_layout, generate_report,
+        cluster_concepts, extract_concepts_from_types, generate_layout, generate_report,
+        DistanceMatrix, LayoutConfig,
     };
     use sounio::ontology::native::NativeOntology;
     use std::io::Write;
@@ -6254,8 +6255,8 @@ fn layout_analyze(
 /// Simulate cache performance
 fn layout_simulate(input: &Path, data_dir: &Path, cache_size: usize, compare: bool) -> Result<()> {
     use sounio::layout::{
-        CacheInstrumentation, ConceptUsage, DistanceMatrix, LayoutConfig, cluster_concepts,
-        compare_layouts, generate_layout,
+        cluster_concepts, compare_layouts, generate_layout, CacheInstrumentation, ConceptUsage,
+        DistanceMatrix, LayoutConfig,
     };
     use sounio::ontology::native::NativeOntology;
 
@@ -6365,8 +6366,8 @@ fn layout_validate(
     iterations: usize,
 ) -> Result<()> {
     use sounio::layout::{
-        ConceptUsage, DistanceMatrix, LayoutConfig, cluster_concepts, compare_layouts,
-        generate_layout,
+        cluster_concepts, compare_layouts, generate_layout, ConceptUsage, DistanceMatrix,
+        LayoutConfig,
     };
     use sounio::ontology::native::NativeOntology;
 
@@ -6507,8 +6508,8 @@ fn layout_visualize(
     output: Option<&Path>,
 ) -> Result<()> {
     use sounio::layout::{
-        DistanceMatrix, LayoutConfig, cluster_concepts, extract_concepts_from_types,
-        generate_ascii, generate_layout, generate_mermaid, generate_table,
+        cluster_concepts, extract_concepts_from_types, generate_ascii, generate_layout,
+        generate_mermaid, generate_table, DistanceMatrix, LayoutConfig,
     };
     use sounio::ontology::native::NativeOntology;
     use std::io::Write;
@@ -6569,9 +6570,9 @@ fn layout_visualize(
 /// Validate layout constraints (Day 39 - Participatory Compilation)
 fn layout_constraints(input: &Path, data_dir: &Path, verbose: bool) -> Result<()> {
     use sounio::layout::{
+        cluster_concepts, format_diagnostics, solve_constraints, validate_constraints_diagnostic,
         ConstraintSet, ConstraintSource, DistanceMatrix, ForcedRegion, LayoutConfig,
-        LayoutConstraint, cluster_concepts, format_diagnostics, solve_constraints,
-        validate_constraints_diagnostic,
+        LayoutConstraint,
     };
 
     // Read constraint file (simple format: one constraint per line)
@@ -6706,8 +6707,8 @@ fn layout_constraints(input: &Path, data_dir: &Path, verbose: bool) -> Result<()
 /// Explain layout decision for a specific concept (Day 39)
 fn layout_explain(concept: &str, input: &Path, data_dir: &Path) -> Result<()> {
     use sounio::layout::{
-        DistanceMatrix, LayoutConfig, cluster_concepts, extract_concepts_from_types,
-        generate_layout,
+        cluster_concepts, extract_concepts_from_types, generate_layout, DistanceMatrix,
+        LayoutConfig,
     };
     use sounio::ontology::native::NativeOntology;
 
@@ -7941,8 +7942,8 @@ fn locality_codegen(
 // ============================================================================
 
 fn units_list(category: &str, format: &str, verbose: bool) -> Result<()> {
-    use sounio::units::Dimension;
     use sounio::units::check::UnitChecker;
+    use sounio::units::Dimension;
 
     let _checker = UnitChecker::new();
 

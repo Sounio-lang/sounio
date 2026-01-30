@@ -266,6 +266,8 @@ pub struct NativeBackendOptions {
     pub debug_info: bool,
     /// Target CPU features
     pub cpu_features: Vec<String>,
+    /// Enable CPS transformation for effect handlers (experimental)
+    pub enable_cps: Option<bool>,
 }
 
 impl Default for NativeBackendOptions {
@@ -277,6 +279,7 @@ impl Default for NativeBackendOptions {
             alloc_strategy: AllocStrategy::Epistemic,
             debug_info: false,
             cpu_features: vec!["sse4.2".into(), "avx2".into()],
+            enable_cps: None, // Disabled by default (experimental)
         }
     }
 }
@@ -776,11 +779,28 @@ fn compile_native(args: &BuildArgs) -> Result<(PathBuf, Option<NativeMetrics>), 
 
     // Step 3: Lower to HLIR (HIR → HLIR)
     let lower_hlir_start = Instant::now();
-    let hlir = lower_hlir(&hir);
+    let mut hlir = lower_hlir(&hir);
     let lower_hlir_ms = lower_hlir_start.elapsed().as_millis() as u64;
 
     if args.verbose {
         println!("✓ Lowered to HLIR in {}ms", lower_hlir_ms);
+    }
+
+    // Step 3.5: Apply CPS transformation (optional, for effect handlers in native code)
+    // This enables continuation capture for native backend effect handlers
+    if args.native_opts.enable_cps.unwrap_or(false) {
+        use crate::backend::cps_transform::CpsTransform;
+
+        let cps_start = Instant::now();
+        let mut transform = CpsTransform::new();
+        hlir = transform
+            .transform(hlir)
+            .map_err(|e| format!("CPS transformation error: {}", e))?;
+        let cps_ms = cps_start.elapsed().as_millis() as u64;
+
+        if args.verbose {
+            println!("✓ Applied CPS transformation in {}ms", cps_ms);
+        }
     }
 
     // Step 4: Lower to SIR (HLIR → SIR)
@@ -921,8 +941,8 @@ fn compile_native(args: &BuildArgs) -> Result<(PathBuf, Option<NativeMetrics>), 
     // Step 7: Run register allocation (if epistemic-aware)
     let alloc_start = Instant::now();
     use crate::backend::native::alloc::{
-        AllocConfig, AllocResult, EpistemicAllocator, RegClass, build_intervals_from_sir,
-        extract_epistemic_metadata,
+        build_intervals_from_sir, extract_epistemic_metadata, AllocConfig, AllocResult,
+        EpistemicAllocator, RegClass,
     };
     use crate::sir::values::FuncId;
     use std::collections::HashMap;
@@ -1477,9 +1497,9 @@ mod tests {
 
 pub mod prelude {
     pub use super::{
+        compile, extract_build_args, print_backend_help, print_backend_info, print_backend_list,
         AllocStrategy, Backend, BackendMetrics, BackendParseError, BuildArgs, CompileOutput,
         CompileTarget, CompileTiming, EmitStage, NativeBackendOptions, NativeMetrics, OptLevel,
-        OutputFormat, ThermalModel, compile, extract_build_args, print_backend_help,
-        print_backend_info, print_backend_list,
+        OutputFormat, ThermalModel,
     };
 }

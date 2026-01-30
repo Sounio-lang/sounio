@@ -54,8 +54,8 @@
 
 use crate::effects::continuation::{ContinuationId, ResumePoint};
 use crate::hlir::ir::{
-    BlockId, HlirBlock, HlirFunction, HlirInstr, HlirModule, HlirParam, HlirTerminator, HlirType,
-    Op, ValueId,
+    HlirBlock, HlirFunction, HlirInstr, HlirModule, HlirParam, HlirTerminator, HlirType, Op,
+    ValueId,
 };
 use std::collections::{HashMap, HashSet};
 
@@ -214,7 +214,7 @@ impl CpsTransform {
         let cont_param = HlirParam {
             value: ValueId(func.params.len() as u32),
             name: "__cont".to_string(),
-            ty: HlirType::Ptr, // Pointer to continuation
+            ty: HlirType::Ptr(Box::new(HlirType::U64)), // Pointer to continuation (opaque pointer)
         };
         cps_func.params.push(cont_param);
 
@@ -253,11 +253,11 @@ impl CpsTransform {
                             name: "__sounio_capture_continuation_asm".to_string(),
                             args: vec![], // Will be filled in by backend with cont storage ptr
                         },
-                        ty: HlirType::Ptr,
+                        ty: HlirType::Ptr(Box::new(HlirType::U64)),
                     });
 
                     // Now perform the effect, passing the continuation
-                    let mut effect_args = args.clone();
+                    let effect_args = args.clone();
                     // Note: The effect handler runtime will receive the continuation separately
 
                     new_instrs.push(HlirInstr {
@@ -444,7 +444,7 @@ pub mod runtime {
     ///
     /// # Returns
     /// Pointer to captured NativeContinuation
-    #[no_mangle]
+    #[unsafe(no_mangle)]
     pub extern "C" fn __sounio_capture_continuation(
         return_address: usize,
     ) -> *mut NativeContinuation {
@@ -469,20 +469,31 @@ pub mod runtime {
     ///
     /// # Safety
     /// This function never returns - it restores the saved execution context
-    #[no_mangle]
+    #[unsafe(no_mangle)]
     pub unsafe extern "C" fn __sounio_resume_continuation(
         cont_ptr: *mut NativeContinuation,
-        value: u64,
+        _value: u64,
     ) -> ! {
-        let mut cont = Box::from_raw(cont_ptr);
-        cont.resume(value)
+        #[cfg(target_arch = "aarch64")]
+        unsafe {
+            let mut cont = *Box::from_raw(cont_ptr);
+            cont.resume(_value)
+        }
+
+        #[cfg(not(target_arch = "aarch64"))]
+        {
+            let _ = cont_ptr;
+            panic!("Continuation resumption only implemented for AArch64")
+        }
     }
 
     /// Free a continuation without resuming it
-    #[no_mangle]
+    #[unsafe(no_mangle)]
     pub unsafe extern "C" fn __sounio_free_continuation(cont_ptr: *mut NativeContinuation) {
-        let _ = Box::from_raw(cont_ptr);
-        // Drop automatically frees the continuation
+        unsafe {
+            let _ = Box::from_raw(cont_ptr);
+            // Drop automatically frees the continuation
+        }
     }
 }
 
