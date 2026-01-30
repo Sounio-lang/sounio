@@ -25,6 +25,19 @@ fn main() {
     );
 
     println!("cargo:rustc-env=SOUNIO_BUILD_DATE={}", build_date);
+
+    // Compile AArch64 continuation assembly (only on AArch64 targets)
+    #[cfg(target_arch = "aarch64")]
+    {
+        let asm_file = "src/backend/native/aarch64_continuation.S";
+        println!("cargo:rerun-if-changed={}", asm_file);
+
+        cc::Build::new()
+            .file(asm_file)
+            .compile("aarch64_continuation");
+
+        println!("cargo:rustc-link-lib=static=aarch64_continuation");
+    }
 }
 
 fn get_git_hash() -> Option<String> {

@@ -104,7 +104,7 @@ pub use ast::Ast;
 pub use hir::Hir;
 pub use hlir::HlirModule;
 pub use mir::MirModule;
-pub use tools::pybindgen::{PythonBindingGenerator, generate_python_bindings};
+pub use tools::pybindgen::{generate_python_bindings, PythonBindingGenerator};
 pub use types::Type;
 
 /// Compiler version
@@ -115,7 +115,15 @@ pub fn compile(source: &str) -> miette::Result<Vec<u8>> {
     let tokens = lexer::lex(source)?;
     let ast = parser::parse(&tokens, source)?;
     let hir = check::check_ast(&ast)?;
-    let hlir = hlir::lower(&hir);
+    let mut hlir = hlir::lower(&hir);
+
+    // Apply CPS transformation for effect handlers
+    if hlir.functions.iter().any(|f| !f.effects.is_empty()) {
+        let mut cps = backend::cps_transform::CpsTransform::new();
+        hlir = cps
+            .transform(hlir)
+            .map_err(|e| miette::miette!("CPS transform failed: {}", e))?;
+    }
 
     // New MIR-based pipeline
     #[cfg(feature = "mir")]
@@ -157,7 +165,15 @@ pub fn compile_to_gpu(source: &str, sm_version: (u32, u32)) -> miette::Result<St
     let tokens = lexer::lex(source)?;
     let ast = parser::parse(&tokens, source)?;
     let hir = check::check_ast(&ast)?;
-    let hlir = hlir::lower(&hir);
+    let mut hlir = hlir::lower(&hir);
+
+    // Apply CPS transformation for effect handlers
+    if hlir.functions.iter().any(|f| !f.effects.is_empty()) {
+        let mut cps = backend::cps_transform::CpsTransform::new();
+        hlir = cps
+            .transform(hlir)
+            .map_err(|e| miette::miette!("CPS transform failed: {}", e))?;
+    }
 
     // New MIR-based pipeline
     #[cfg(feature = "mir")]
@@ -181,7 +197,15 @@ pub fn compile_to_gpu_epistemic(source: &str, sm_version: (u32, u32)) -> miette:
     let tokens = lexer::lex(source)?;
     let ast = parser::parse(&tokens, source)?;
     let hir = check::check_ast(&ast)?;
-    let hlir = hlir::lower(&hir);
+    let mut hlir = hlir::lower(&hir);
+
+    // Apply CPS transformation for effect handlers
+    if hlir.functions.iter().any(|f| !f.effects.is_empty()) {
+        let mut cps = backend::cps_transform::CpsTransform::new();
+        hlir = cps
+            .transform(hlir)
+            .map_err(|e| miette::miette!("CPS transform failed: {}", e))?;
+    }
 
     // New MIR-based pipeline
     #[cfg(feature = "mir")]
