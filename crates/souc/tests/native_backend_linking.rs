@@ -3,8 +3,8 @@
 //! This test verifies that the AArch64 emitter properly tracks external symbols
 //! and generates correct relocation entries for linking.
 
-use souc::backend::native::aarch64::{AArch64Emitter, AArch64Reg, Relocation, RelocationKind};
-use souc::sir::emit::RelocKind;
+use sounio::backend::native::aarch64::{AArch64Emitter, AArch64Reg, RelocationKind};
+use sounio::sir::emit::RelocKind;
 
 #[test]
 fn test_bl_external_generates_relocation() {
@@ -107,7 +107,7 @@ fn test_bl_external_emits_correct_instruction() {
 #[test]
 fn test_relocation_kind_conversion() {
     // Test that our RelocationKind converts correctly to sir::emit::RelocKind
-    use souc::backend::native::elf;
+    use sounio::backend::native::elf;
 
     // Create a RelocKind and convert it
     let reloc_kind = RelocKind::AArch64Call26;
@@ -123,7 +123,7 @@ fn test_relocation_kind_conversion() {
 
 #[test]
 fn test_effect_dispatch_with_external_linking() {
-    use souc::backend::native::effects::NativeEffectDispatcher;
+    use sounio::backend::native::effects::NativeEffectDispatcher;
 
     let dispatcher = NativeEffectDispatcher::new();
     let mut emitter = AArch64Emitter::new();
@@ -153,7 +153,7 @@ fn test_effect_dispatch_with_external_linking() {
 
 #[test]
 fn test_complete_effect_program() {
-    use souc::backend::native::effects::NativeEffectDispatcher;
+    use sounio::backend::native::effects::NativeEffectDispatcher;
 
     let dispatcher = NativeEffectDispatcher::new();
     let mut emitter = AArch64Emitter::new();
