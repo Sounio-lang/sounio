@@ -2,7 +2,7 @@
 
 **Date**: 2026-01-30
 **Phases**: 1 (CPS Infrastructure) + 4 (Real Operations)
-**Status**: 🚧 In Progress (55% Complete)
+**Status**: 🚧 In Progress (65% Complete)
 
 ## Overview
 
@@ -95,6 +95,22 @@ fn example_cps(k: Continuation) {
     let y = compute(10)
     resume_continuation(k, y)
 }
+```
+
+#### 5. Pipeline Integration
+- **Files Modified**: `crates/souc/src/cli/backend.rs`, `crates/souc/src/backend/mod.rs`, `crates/souc/src/main.rs`
+- **Status**: ✅ Complete
+
+**What Works:**
+- CPS transformation integrated into native backend compilation pipeline
+- Runs between HLIR lowering and SIR lowering (Step 3.5)
+- Opt-in via `enable_cps` flag in NativeBackendOptions
+- Full compilation flow: AST → HIR → HLIR → (CPS) → SIR → Native Code
+
+**Usage:**
+```bash
+# Enable CPS transformation (experimental, currently no CLI flag exposed)
+# Set via API: native_opts.enable_cps = Some(true)
 ```
 
 ### ⏳ In Progress (Current Focus)
