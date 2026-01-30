@@ -23,6 +23,7 @@ pub mod handler_capability;
 pub mod handlers;
 pub mod inference;
 pub mod jit_resume;
+pub mod linearity;
 
 pub use crate::types::effects::*;
 pub use continuation::{
@@ -49,6 +50,7 @@ pub use jit_resume::{
     schedule_jit_resume, store_jit_context, take_pending_jit_resume, JitResumeContext,
     JitResumeStore,
 };
+pub use linearity::{EffectOpInfo, Linearity};
 
 /// Runtime effect handler trait
 pub trait Handler<E> {
