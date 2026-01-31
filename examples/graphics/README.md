@@ -1,6 +1,6 @@
 # Sounio Terminal Graphics Library
 
-**Status:** Phase 1-5 Complete ✅
+**Status:** Phase 1-7 Complete ✅ (Library Complete!)
 
 A comprehensive terminal-based graphics library for Sounio that provides 2D plotting, 3D visualization, and animation capabilities using ANSI escape sequences and Unicode characters.
 
@@ -703,6 +703,368 @@ animation_cleanup()
 
 ---
 
+## Phase 6: Scientific Charts ✅
+
+Scientific visualization modules for dynamical systems, thermodynamics, and vector fields.
+
+### 50_phase_diagram.sio - Phase Diagram Visualization
+
+**PhaseRegion and PhaseDiagram structures:**
+
+```sio
+struct PhaseRegion {
+    id: i32,              // Region identifier
+    color: i32,           // ANSI color code
+    marker: i32,          // Character for filling
+    name_code: i32        // First char of name (S=Solid, L=Liquid, G=Gas)
+}
+
+struct PhaseDiagram {
+    x_min: f64, x_max: f64,   // Parameter bounds (e.g., temperature)
+    y_min: f64, y_max: f64,   // Parameter bounds (e.g., pressure)
+    width: i32, height: i32,   // Grid dimensions
+    regions: [PhaseRegion; 8], // Up to 8 phases
+    phase_field: [i32; 4096],  // Phase assignment per cell
+    // Critical points, triple points, boundaries...
+}
+```
+
+**Phase classification:**
+```sio
+phase_diagram_compute_field(&!diagram, classifier_fn)
+// classifier_fn: (x, y) -> phase_id
+// Automatically fills phase_field based on any classification function
+```
+
+**Built-in phases:**
+```sio
+phase_diagram_add_solid(&!diagram)        // Blue, '#'
+phase_diagram_add_liquid(&!diagram)       // Cyan, '~'
+phase_diagram_add_gas(&!diagram)          // Yellow, '.'
+phase_diagram_add_supercritical(&!diagram) // Magenta, '*'
+```
+
+---
+
+### 51_bifurcation.sio - Bifurcation Diagrams
+
+Visualize how dynamical systems change as control parameters vary.
+
+```sio
+struct BifurcationDiagram {
+    param_min: f64, param_max: f64,  // Control parameter range
+    state_min: f64, state_max: f64,  // State variable range
+    width: i32, height: i32,
+    density: [i32; 8192],            // Hit density per pixel
+    transient_iters: i32,            // Skip transient (reach attractor)
+    sample_iters: i32                // Points to plot
+}
+```
+
+**Map functions:**
+```sio
+fn logistic_map(x: f64, r: f64) -> f64  // x' = r*x*(1-x)
+fn tent_map(x: f64, r: f64) -> f64      // x' = r*min(x, 1-x)
+fn sine_map(x: f64, r: f64) -> f64      // x' = r*sin(π*x)
+fn cubic_map(x: f64, r: f64) -> f64     // x' = r*x - x³
+```
+
+**Usage:**
+```sio
+var diagram = bifurcation_new(2.5, 4.0, 0.0, 1.0, 80, 30)
+bifurcation_set_iterations(&!diagram, 500, 200)
+bifurcation_compute(&!diagram, logistic_map, 0.5)
+bifurcation_render(&diagram)
+```
+
+---
+
+### 52_poincare.sio - Poincaré Sections
+
+Reduce continuous systems to discrete maps by recording plane crossings.
+
+```sio
+struct PoincareSection {
+    section_z: f64,           // z-coordinate of section plane
+    crossing_direction: i32,  // 1=upward, -1=downward, 0=both
+    x_min: f64, x_max: f64,
+    y_min: f64, y_max: f64,
+    points_x: [f64; 2000],    // Crossing point coordinates
+    points_y: [f64; 2000],
+    num_points: i32,
+    density: [i32; 4096]      // Visualization grid
+}
+```
+
+**Example systems:**
+```sio
+fn lorenz_deriv(s: State3D) -> State3D   // σ=10, ρ=28, β=8/3
+fn rossler_deriv(s: State3D) -> State3D  // a=0.2, b=0.2, c=5.7
+fn driven_pendulum_deriv(s: State3D) -> State3D
+```
+
+**Computation:**
+```sio
+var section = poincare_new(27.0, -25.0, 25.0, -35.0, 35.0, 60, 30)
+poincare_set_integration(&!section, 0.005, 2000.0)
+let init = state3d_new(1.0, 1.0, 1.0)
+poincare_compute(&!section, init, lorenz_deriv)
+poincare_render(&section)
+```
+
+---
+
+### 53_streamlines.sio - Vector Field Streamlines
+
+Visualize flow patterns in 2D vector fields.
+
+```sio
+struct StreamlineField {
+    x_min: f64, x_max: f64,
+    y_min: f64, y_max: f64,
+    width: i32, height: i32,
+    streamlines: [Streamline; 50],
+    step_size: f64,
+    max_steps: i32,
+    display: [i32; 4096]      // Character display buffer
+}
+```
+
+**Seeding strategies:**
+```sio
+seed_grid(&!field, nx, ny, vector_fn)           // Regular grid
+seed_random(&!field, count, seed, vector_fn)    // Random points
+integrate_streamline(&!field, x, y, vector_fn)  // Single seed point
+```
+
+**Built-in vector fields:**
+```sio
+fn rotation_field(x: f64, y: f64) -> Vec2    // Circular flow
+fn saddle_field(x: f64, y: f64) -> Vec2      // Saddle point
+fn source_field(x: f64, y: f64) -> Vec2      // Point source
+fn dipole_field(x: f64, y: f64) -> Vec2      // Electric dipole
+fn vortex_pair(x: f64, y: f64) -> Vec2       // Two counter-rotating vortices
+```
+
+---
+
+### phase6_showcase.sio - Scientific Charts Demo
+
+Demonstrates all four scientific visualization modules in sequence:
+
+1. **Phase Diagram** - Water (H₂O) phase regions with ice, liquid, vapor, supercritical
+2. **Bifurcation Diagram** - Logistic map period-doubling cascade to chaos
+3. **Poincaré Section** - Lorenz attractor fractal structure at z=27
+4. **Streamlines** - Electric dipole field lines
+
+```bash
+# Run the showcase
+cd examples/graphics/demos
+cargo run -- run phase6_showcase.sio
+```
+
+---
+
+## Phase 7: Network/Graph Visualization ✅
+
+Network analysis and graph visualization modules with automatic layout algorithms.
+
+### 60_graph.sio - Graph Data Structure
+
+**Node and edge structures** for network representation:
+
+```sio
+struct GraphNode {
+    id: i32,
+    x: f64, y: f64, z: f64,   // Position
+    label_code: i32,           // Character label (A=65, B=66, ...)
+    color: i32,                // ANSI color
+    size: i32,                 // Display size (1-3)
+    fixed: i32                 // Fixed position flag
+}
+
+struct GraphEdge {
+    from_id: i32,
+    to_id: i32,
+    weight: f64,
+    color: i32,
+    directed: i32,             // 0=undirected, 1=directed
+    style: i32                 // 0=solid, 1=dashed, 2=dotted
+}
+
+struct Graph {
+    nodes: [GraphNode; 100],
+    edges: [GraphEdge; 500],
+    n_nodes: i32,
+    n_edges: i32,
+    adj_list: [i32; 1000],     // Adjacency list
+    adj_offset: [i32; 101]     // Offsets for adjacency
+}
+```
+
+**Graph operations:**
+```sio
+graph_add_node_at(&!graph, x, y) -> i32       // Add node at position
+graph_connect(&!graph, from, to) -> i32       // Add undirected edge
+graph_connect_directed(&!graph, from, to)     // Add directed edge
+graph_degree(&!graph, node_id) -> i32         // Get node degree
+graph_neighbor(&!graph, node_id, idx) -> i32  // Get nth neighbor
+```
+
+**Pre-built graph patterns:**
+```sio
+graph_create_complete(n) -> Graph    // K_n complete graph
+graph_create_cycle(n) -> Graph       // C_n cycle graph
+graph_create_star(n) -> Graph        // Star graph with center
+graph_create_grid(rows, cols) -> Graph // Grid/lattice graph
+graph_create_binary_tree(depth) -> Graph // Binary tree
+```
+
+---
+
+### 61_force_directed.sio - Fruchterman-Reingold Layout
+
+**Physics-based layout algorithm:**
+
+```sio
+struct ForceDirectedLayout {
+    width: f64, height: f64,
+    k: f64,                    // Optimal node distance
+    temperature: f64,          // Annealing temperature
+    cooling_rate: f64,         // Temperature decay rate
+    forces: [ForceVec; 100],
+    iteration: i32,
+    max_iterations: i32,
+    converged: i32
+}
+```
+
+**Layout operations:**
+```sio
+layout_new(width, height, n_nodes) -> ForceDirectedLayout
+layout_step(&!layout, &!nodes, n_nodes, &edges, n_edges)  // One iteration
+layout_run(&!layout, &!nodes, n_nodes, &edges, n_edges)   // Run to completion
+layout_randomize(&!nodes, n_nodes, width, height, seed)   // Random initial positions
+layout_center(&!nodes, n_nodes)                           // Center around origin
+layout_scale_to_fit(&!nodes, n_nodes, width, height, margin)
+```
+
+**Physics model:**
+- **Repulsive forces**: All node pairs repel (k²/d)
+- **Attractive forces**: Connected nodes attract (d²/k)
+- **Temperature limiting**: Simulated annealing for convergence
+- **Cooling schedule**: Geometric decay (T' = T * cooling_rate)
+
+---
+
+### 62_tree_layout.sio - Tree Layouts
+
+**Tree-specific node structure:**
+
+```sio
+struct TreeNode {
+    id: i32,
+    x: f64, y: f64,
+    label_code: i32,
+    parent: i32,               // -1 for root
+    children: [i32; 20],       // Child node IDs
+    n_children: i32,
+    depth: i32,                // Distance from root
+    subtree_width: f64         // For layout computation
+}
+
+struct Tree {
+    nodes: [TreeNode; 100],
+    n_nodes: i32,
+    root: i32,
+    level_height: f64,
+    node_separation: f64,
+    subtree_separation: f64
+}
+```
+
+**Layout algorithms:**
+```sio
+tree_layout_simple(&!tree)                    // Classic hierarchical
+tree_layout_radial(&!tree, radius_step)       // Circular from center
+tree_layout_reingold_tilford(&!tree)          // Space-efficient RT algorithm
+```
+
+**Tree construction:**
+```sio
+tree_add_root(&!tree, label) -> i32           // Create root node
+tree_add_child(&!tree, parent_id, label) -> i32 // Add child to parent
+tree_create_binary(depth) -> Tree             // Full binary tree
+tree_create_random(n_nodes, max_children, seed) -> Tree
+```
+
+---
+
+### 63_graph_render.sio - Graph Rendering
+
+**Rendering canvas for graphs:**
+
+```sio
+struct GraphCanvas {
+    buffer: [i32; 4800],       // Character buffer (80x60)
+    colors: [i32; 4800],       // Color for each cell
+    width: i32, height: i32,
+    world_min_x: f64, world_max_x: f64,
+    world_min_y: f64, world_max_y: f64,
+    margin: i32
+}
+```
+
+**Rendering operations:**
+```sio
+canvas_new(width, height) -> GraphCanvas
+canvas_clear(&!canvas)
+canvas_set_world_bounds(&!canvas, min_x, max_x, min_y, max_y)
+draw_node(canvas, &node)                      // Render single node
+draw_edge(canvas, &edge)                      // Render edge with line/arrow
+draw_graph(canvas, &render_data)              // Render full graph
+canvas_render(&canvas)                        // Output to terminal
+```
+
+**Graph traversal:**
+```sio
+struct TraversalState {
+    visited: [i32; 100],
+    queue: [i32; 100],
+    queue_front: i32,
+    queue_back: i32,
+    current_node: i32,
+    finished: i32
+}
+
+traversal_init_bfs(&!state, start_node)
+traversal_step_bfs(&!state, &adj_list, &adj_offset, n_nodes)
+```
+
+**Animation support:**
+```sio
+animate_layout_step(&!canvas, &data, &title)  // Animated layout frame
+highlight_path(&!data, &path, path_len)       // Highlight traversal path
+```
+
+---
+
+### phase7_showcase.sio - Network Visualization Demo
+
+Demonstrates all four network/graph modules:
+
+1. **Social Network** - Force-directed layout with Fruchterman-Reingold
+2. **Binary Tree** - Hierarchical top-down layout
+3. **Radial Tree** - Circular layout from center
+4. **BFS Traversal** - Breadth-first search with path visualization
+
+```bash
+# Run the showcase
+cargo run --features jit -- run examples/graphics/demos/phase7_showcase.sio
+```
+
+---
+
 ## Architecture
 
 ### Canvas Abstraction
@@ -952,23 +1314,22 @@ Styles:
 | Particle System | 600+ | <1s | <0.15s |
 | Fluid Simulation | 700+ | <1s | <0.2s |
 | Showcase | 500+ | <1s | <0.25s |
+| **Phase 6** | | | |
+| Phase Diagram | 500+ | <1s | <0.1s |
+| Bifurcation | 450+ | <1s | <0.2s |
+| Poincaré Section | 450+ | <1s | <0.3s |
+| Streamlines | 500+ | <1s | <0.1s |
+| Showcase | 450+ | <1s | <0.4s |
+| **Phase 7** | | | |
+| Graph | 550+ | <1s | <0.1s |
+| Force-Directed | 500+ | <1s | <0.15s |
+| Tree Layout | 550+ | <1s | <0.1s |
+| Graph Render | 500+ | <1s | <0.15s |
+| Showcase | 650+ | <1s | <0.3s |
 
-**Total:** ~11,200 lines of code across 24 modules, all type-checking and running successfully.
+**Total:** ~16,250 lines of code across 32 modules, all type-checking and running successfully.
 
 ---
-
-## Future Phases (Planned)
-
-### Phase 6: Scientific Charts
-- Phase diagrams
-- Bifurcation diagrams
-- Poincaré sections
-- Streamlines
-
-### Phase 7: Network/Graph Visualization
-- Force-directed layouts
-- Tree structures
-- Graph rendering
 
 ---
 
@@ -1028,6 +1389,7 @@ Styles:
 
 **Built with ❤️ using Sounio — Making scientific computing beautiful, one terminal at a time.**
 
-**Version**: 0.99.0
-**Phase**: 5/7 Complete (Phases 1-5: Core Graphics, 2D Plotting, 3D Visualization, Interactive Features, Advanced Animation)
+**Version**: 1.0.0
+**Phase**: 7/7 Complete — Library Complete! 🎉
+**Modules**: Core Graphics, 2D Plotting, 3D Visualization, Interactive Features, Advanced Animation, Scientific Charts, Network/Graph Visualization
 **Last Updated**: 2026-01-31
