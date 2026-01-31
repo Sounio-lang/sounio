@@ -17,7 +17,7 @@
 
 use tower_lsp::{LspService, Server};
 
-use sounio::lsp::SounioLanguageServer;
+use sounio::lsp::SounioLspServer;
 
 /// Command line arguments
 #[derive(Debug)]
@@ -112,7 +112,7 @@ async fn main() {
         let stdin = tokio::io::stdin();
         let stdout = tokio::io::stdout();
 
-        let (service, socket) = LspService::new(SounioLanguageServer::new);
+        let (service, socket) = LspService::new(SounioLspServer::new);
 
         Server::new(stdin, stdout, socket).serve(service).await;
     } else {

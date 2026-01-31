@@ -243,7 +243,7 @@ impl<H: HandlerCapability + RefUnwindSafe> ResilientDispatcher<H> {
         self.config = self.config.with_circuit_breaker(threshold, cooldown_ms);
 
         // Update the circuit breaker instance
-        let mut circuit = CircuitBreaker::new()
+        let circuit = CircuitBreaker::new()
             .with_threshold(threshold)
             .with_cooldown(Duration::from_millis(cooldown_ms));
 
