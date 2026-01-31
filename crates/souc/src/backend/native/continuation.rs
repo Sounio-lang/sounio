@@ -158,6 +158,33 @@ impl Default for X86_64Continuation {
     }
 }
 
+impl X86_64Continuation {
+    /// Create a new empty continuation
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Mark this continuation as resumed
+    pub fn mark_resumed(&mut self) {
+        self.resumed = true;
+    }
+
+    /// Check if this continuation has been resumed
+    pub fn is_resumed(&self) -> bool {
+        self.resumed
+    }
+
+    /// Get the return address (where to resume execution)
+    pub fn return_address(&self) -> usize {
+        self.rip as usize
+    }
+
+    /// Get the stack size in bytes
+    pub fn stack_size(&self) -> usize {
+        self.stack.len()
+    }
+}
+
 /// Platform-independent continuation
 #[derive(Clone, Debug)]
 pub enum Continuation {
@@ -281,14 +308,57 @@ pub unsafe fn resume_continuation(cont: &mut Continuation, value: u64) -> ! {
     }
 }
 
-/// Stub implementation for non-AArch64 platforms
-#[cfg(not(target_arch = "aarch64"))]
+/// Capture the current continuation (x86-64)
+#[cfg(target_arch = "x86_64")]
+pub unsafe fn capture_continuation() -> Continuation {
+    unsafe {
+        let mut cont = X86_64Continuation::new();
+
+        // Assembly only accesses fixed-size fields before the Vec
+        #[allow(improper_ctypes)]
+        unsafe extern "C" {
+            fn __sounio_capture_x86_64(cont: *mut X86_64Continuation);
+        }
+
+        __sounio_capture_x86_64(&mut cont as *mut _);
+
+        Continuation::X86_64(cont)
+    }
+}
+
+/// Resume a continuation (x86-64)
+#[cfg(target_arch = "x86_64")]
+pub unsafe fn resume_continuation(cont: &mut Continuation, value: u64) -> ! {
+    unsafe {
+        match cont {
+            Continuation::X86_64(x86_cont) => {
+                assert!(
+                    !x86_cont.is_resumed(),
+                    "Attempted to resume one-shot continuation twice"
+                );
+                x86_cont.mark_resumed();
+
+                // Assembly only accesses fixed-size fields before the Vec
+                #[allow(improper_ctypes)]
+                unsafe extern "C" {
+                    fn __sounio_resume_x86_64(cont: *const X86_64Continuation, value: u64) -> !;
+                }
+
+                __sounio_resume_x86_64(x86_cont as *const _, value)
+            }
+            _ => panic!("Wrong continuation type for x86-64"),
+        }
+    }
+}
+
+/// Stub implementation for unsupported platforms
+#[cfg(not(any(target_arch = "aarch64", target_arch = "x86_64")))]
 pub unsafe fn capture_continuation() -> Continuation {
     panic!("Continuation capture not implemented for this platform");
 }
 
-/// Stub implementation for non-AArch64 platforms
-#[cfg(not(target_arch = "aarch64"))]
+/// Stub implementation for unsupported platforms
+#[cfg(not(any(target_arch = "aarch64", target_arch = "x86_64")))]
 pub unsafe fn resume_continuation(_cont: &mut Continuation, _value: u64) -> ! {
     panic!("Continuation resume not implemented for this platform");
 }

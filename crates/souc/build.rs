@@ -38,6 +38,19 @@ fn main() {
 
         println!("cargo:rustc-link-lib=static=aarch64_continuation");
     }
+
+    // Compile x86-64 continuation assembly (only on x86-64 targets)
+    #[cfg(target_arch = "x86_64")]
+    {
+        let asm_file = "src/backend/native/x86_64_continuation.S";
+        println!("cargo:rerun-if-changed={}", asm_file);
+
+        cc::Build::new()
+            .file(asm_file)
+            .compile("x86_64_continuation");
+
+        println!("cargo:rustc-link-lib=static=x86_64_continuation");
+    }
 }
 
 fn get_git_hash() -> Option<String> {

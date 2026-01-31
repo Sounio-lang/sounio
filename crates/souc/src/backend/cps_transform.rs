@@ -619,6 +619,83 @@ impl NativeContinuation {
         cont
     }
 
+    /// Capture continuation with shallow stack (x86-64)
+    #[cfg(target_arch = "x86_64")]
+    pub unsafe fn capture_shallow() -> Self {
+        unsafe { Self::capture() }
+    }
+
+    /// Capture continuation with deep stack (x86-64)
+    #[cfg(target_arch = "x86_64")]
+    pub unsafe fn capture_deep() -> Self {
+        unsafe {
+            use crate::backend::native::continuation;
+
+            let native_cont = continuation::capture_continuation();
+            let mut cont = Self::new(native_cont.return_address(), false);
+
+            match &native_cont {
+                continuation::Continuation::X86_64(x86_cont) => {
+                    // Copy GP registers
+                    for i in 0..14 {
+                        cont.gp_registers[i] = x86_cont.gp_regs[i];
+                    }
+
+                    // Copy SSE registers
+                    for i in 0..16 {
+                        cont.fp_registers[i] = f64::from_bits(x86_cont.sse_regs[i * 2]);
+                    }
+
+                    cont.stack_pointer = x86_cont.rsp as usize;
+                    cont.frame_pointer = x86_cont.rbp as usize;
+
+                    // Deep stack capture: walk the call stack using frame pointers
+                    // x86-64 frame layout: [saved RBP, return address, ...]
+                    let _current_rbp = x86_cont.rbp as usize;
+                    let rsp = x86_cont.rsp as usize;
+                    let mut frame_count = 0;
+                    const MAX_FRAMES: usize = 100;
+
+                    let mut total_stack_size = 0;
+                    let mut temp_rbp = _current_rbp;
+
+                    while temp_rbp != 0 && frame_count < MAX_FRAMES {
+                        if temp_rbp < rsp {
+                            break;
+                        }
+
+                        let frame_size = if frame_count == 0 {
+                            temp_rbp - rsp
+                        } else {
+                            let prev_rbp_ptr = temp_rbp as *const usize;
+                            let prev_rbp = *prev_rbp_ptr;
+                            if prev_rbp <= temp_rbp || prev_rbp - temp_rbp > 1024 * 1024 {
+                                break;
+                            }
+                            prev_rbp - temp_rbp
+                        };
+
+                        total_stack_size += frame_size;
+                        frame_count += 1;
+
+                        let prev_rbp_ptr = temp_rbp as *const usize;
+                        temp_rbp = *prev_rbp_ptr;
+                    }
+
+                    cont.stack_data = Vec::with_capacity(total_stack_size);
+                    let stack_slice =
+                        std::slice::from_raw_parts(rsp as *const u8, total_stack_size);
+                    cont.stack_data.extend_from_slice(stack_slice);
+                    cont.stack_depth = frame_count;
+                }
+                #[allow(unreachable_patterns)]
+                _ => panic!("Unsupported continuation type for deep capture"),
+            }
+
+            cont
+        }
+    }
+
     /// Capture current machine state
     ///
     /// SAFETY: This is highly architecture-specific and unsafe.
@@ -653,13 +730,42 @@ impl NativeContinuation {
             _ => panic!("Unsupported continuation type"),
         }
 
-        // Placeholder - would use inline assembly here
-        // Example (pseudo-code):
-        // asm!("mov {}, x0", out(reg) cont.gp_registers[0]);
-        // ... save x1-x30 ...
-        // asm!("mov {}, sp", out(reg) cont.stack_pointer);
-
         cont
+    }
+
+    /// Capture current machine state (x86-64)
+    #[cfg(target_arch = "x86_64")]
+    pub unsafe fn capture() -> Self {
+        unsafe {
+            use crate::backend::native::continuation;
+
+            let native_cont = continuation::capture_continuation();
+
+            let mut cont = Self::new(native_cont.return_address(), true);
+
+            // Copy register state from native continuation
+            match native_cont {
+                continuation::Continuation::X86_64(x86_cont) => {
+                    // Copy GP registers (RAX, RBX, RCX, RDX, RSI, RDI, R8-R15)
+                    for i in 0..14 {
+                        cont.gp_registers[i] = x86_cont.gp_regs[i];
+                    }
+
+                    // Copy SSE registers (XMM0-XMM15, stored as pairs of u64)
+                    for i in 0..16 {
+                        cont.fp_registers[i] = f64::from_bits(x86_cont.sse_regs[i * 2]);
+                    }
+
+                    cont.stack_pointer = x86_cont.rsp as usize;
+                    cont.frame_pointer = x86_cont.rbp as usize;
+                    cont.stack_data = x86_cont.stack.clone();
+                }
+                #[allow(unreachable_patterns)]
+                _ => panic!("Unsupported continuation type"),
+            }
+
+            cont
+        }
     }
 
     /// Resume this continuation with a value
@@ -702,7 +808,47 @@ impl NativeContinuation {
             });
 
         continuation::resume_continuation(&mut native_cont, value);
-        panic!("Continuation resumption not yet implemented")
+    }
+
+    /// Resume this continuation with a value (x86-64)
+    #[cfg(target_arch = "x86_64")]
+    pub unsafe fn resume(&mut self, value: u64) -> ! {
+        // Check one-shot constraint
+        if self.is_one_shot && self.resume_count > 0 {
+            panic!("Attempted to resume one-shot continuation multiple times");
+        }
+        self.resume_count += 1;
+
+        unsafe {
+            use crate::backend::native::continuation;
+
+            // Reconstruct native continuation from our state
+            let mut native_cont =
+                continuation::Continuation::X86_64(continuation::X86_64Continuation {
+                    gp_regs: {
+                        let mut regs = [0u64; 14];
+                        for i in 0..14 {
+                            regs[i] = self.gp_registers[i];
+                        }
+                        regs
+                    },
+                    sse_regs: {
+                        let mut regs = [0u64; 32];
+                        for i in 0..16 {
+                            regs[i * 2] = self.fp_registers[i].to_bits();
+                            regs[i * 2 + 1] = 0; // High 64 bits
+                        }
+                        regs
+                    },
+                    rsp: self.stack_pointer as u64,
+                    rbp: self.frame_pointer as u64,
+                    rip: self.return_address as u64,
+                    stack: self.stack_data.clone(),
+                    resumed: false,
+                });
+
+            continuation::resume_continuation(&mut native_cont, value);
+        }
     }
 
     /// Convert to ResumePoint for effect handlers
@@ -734,16 +880,16 @@ pub mod runtime {
     pub extern "C" fn __sounio_capture_continuation(
         return_address: usize,
     ) -> *mut NativeContinuation {
-        #[cfg(target_arch = "aarch64")]
+        #[cfg(any(target_arch = "aarch64", target_arch = "x86_64"))]
         unsafe {
             let cont = NativeContinuation::capture();
             Box::into_raw(Box::new(cont))
         }
 
-        #[cfg(not(target_arch = "aarch64"))]
+        #[cfg(not(any(target_arch = "aarch64", target_arch = "x86_64")))]
         {
             let _ = return_address;
-            panic!("Continuation capture only implemented for AArch64")
+            panic!("Continuation capture only implemented for AArch64 and x86-64")
         }
     }
 
@@ -760,16 +906,16 @@ pub mod runtime {
         cont_ptr: *mut NativeContinuation,
         _value: u64,
     ) -> ! {
-        #[cfg(target_arch = "aarch64")]
+        #[cfg(any(target_arch = "aarch64", target_arch = "x86_64"))]
         unsafe {
             let mut cont = *Box::from_raw(cont_ptr);
             cont.resume(_value)
         }
 
-        #[cfg(not(target_arch = "aarch64"))]
+        #[cfg(not(any(target_arch = "aarch64", target_arch = "x86_64")))]
         {
             let _ = cont_ptr;
-            panic!("Continuation resumption only implemented for AArch64")
+            panic!("Continuation resumption only implemented for AArch64 and x86-64")
         }
     }
 
@@ -796,16 +942,16 @@ pub mod runtime {
     pub extern "C" fn __sounio_capture_continuation_multi_shot(
         return_address: usize,
     ) -> *mut NativeContinuation {
-        #[cfg(target_arch = "aarch64")]
+        #[cfg(any(target_arch = "aarch64", target_arch = "x86_64"))]
         unsafe {
             let cont = NativeContinuation::capture_deep();
             Box::into_raw(Box::new(cont))
         }
 
-        #[cfg(not(target_arch = "aarch64"))]
+        #[cfg(not(any(target_arch = "aarch64", target_arch = "x86_64")))]
         {
             let _ = return_address;
-            panic!("Multi-shot continuation capture only implemented for AArch64")
+            panic!("Multi-shot continuation capture only implemented for AArch64 and x86-64")
         }
     }
 
@@ -851,7 +997,7 @@ pub mod runtime {
         cont_ptr: *const NativeContinuation,
         _value: u64,
     ) -> ! {
-        #[cfg(target_arch = "aarch64")]
+        #[cfg(any(target_arch = "aarch64", target_arch = "x86_64"))]
         unsafe {
             let cont = &*cont_ptr;
             if cont.is_one_shot {
@@ -862,10 +1008,10 @@ pub mod runtime {
             cont_clone.resume(_value)
         }
 
-        #[cfg(not(target_arch = "aarch64"))]
+        #[cfg(not(any(target_arch = "aarch64", target_arch = "x86_64")))]
         {
             let _ = cont_ptr;
-            panic!("Multi-shot continuation resumption only implemented for AArch64")
+            panic!("Multi-shot continuation resumption only implemented for AArch64 and x86-64")
         }
     }
 }
