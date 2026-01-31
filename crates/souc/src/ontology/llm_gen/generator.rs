@@ -734,7 +734,11 @@ impl GeneratedOntologyFragment {
             count += 1;
         }
 
-        if count > 0 { total / count as f64 } else { 0.0 }
+        if count > 0 {
+            total / count as f64
+        } else {
+            0.0
+        }
     }
 }
 

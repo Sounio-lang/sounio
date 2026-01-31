@@ -132,6 +132,96 @@ impl HandlerRegistry {
     pub fn merge(&mut self, other: HandlerRegistry) {
         self.handlers.extend(other.handlers);
     }
+
+    /// Create a HandlerStack from registered handlers.
+    ///
+    /// Returns an error if any effect name is not registered.
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// let registry = HandlerRegistry::with_defaults();
+    /// let stack = registry.to_stack(&["IO", "Mut", "Panic"])?;
+    /// ```
+    pub fn to_stack(
+        &self,
+        effect_names: &[&str],
+    ) -> Result<super::composition::HandlerStack, String> {
+        use super::composition::HandlerStack;
+
+        let mut stack = HandlerStack::new();
+        for name in effect_names {
+            let handler = self
+                .get(name)
+                .ok_or_else(|| format!("Handler '{}' not registered", name))?
+                .clone();
+            stack.push_handler(handler);
+        }
+        Ok(stack)
+    }
+
+    /// Create a ComposedHandler from registered handlers.
+    ///
+    /// Returns an error if any effect name is not registered or if composition fails
+    /// (e.g., duplicate effects).
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// let registry = HandlerRegistry::with_defaults();
+    /// let composed = registry.compose(
+    ///     &["IO", "Mut", "Epistemic"],
+    ///     CompositionOrder::LeftToRight,
+    /// )?;
+    /// ```
+    pub fn compose(
+        &self,
+        effect_names: &[&str],
+        order: super::composition::CompositionOrder,
+    ) -> Result<super::composition::ComposedHandler, super::composition::ComposeError> {
+        use super::composition::HandlerComposer;
+
+        let mut composer = HandlerComposer::new().order(order);
+
+        for name in effect_names {
+            let handler = self
+                .get(name)
+                .ok_or_else(|| {
+                    super::composition::ComposeError::DuplicateEffect(format!(
+                        "Handler '{}' not registered",
+                        name
+                    ))
+                })?
+                .clone();
+            composer = composer.with(handler);
+        }
+
+        composer.build()
+    }
+
+    /// Create a ComposedHandler from all registered handlers.
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// let registry = HandlerRegistry::with_defaults();
+    /// let composed = registry.compose_all(CompositionOrder::LeftToRight)?;
+    /// // All 12 handlers composed
+    /// ```
+    pub fn compose_all(
+        &self,
+        order: super::composition::CompositionOrder,
+    ) -> Result<super::composition::ComposedHandler, super::composition::ComposeError> {
+        use super::composition::HandlerComposer;
+
+        let mut composer = HandlerComposer::new().order(order);
+
+        for handler in self.handlers() {
+            composer = composer.with(handler.clone());
+        }
+
+        composer.build()
+    }
 }
 
 impl std::fmt::Debug for HandlerRegistry {
@@ -343,6 +433,7 @@ impl HandlerRegistryBuilder {
 mod tests {
     use super::*;
     use crate::effects::handler_capability::{Continuation, HandlerState};
+    use crate::effects::handlers::{ComposeError, CompositionOrder};
 
     #[test]
     fn test_empty_registry() {
@@ -515,5 +606,76 @@ mod tests {
     fn test_from_factory() {
         let registry = HandlerRegistry::from_factory(&DefaultHandlerFactory);
         assert_eq!(registry.len(), 12);
+    }
+
+    #[test]
+    fn test_to_stack() {
+        let registry = HandlerRegistry::with_defaults();
+        let stack = registry
+            .to_stack(&["IO", "Mut", "Panic"])
+            .expect("Should create stack");
+
+        assert_eq!(stack.len(), 3);
+        assert_eq!(stack.effect_names(), vec!["Panic", "Mut", "IO"]); // Stack is LIFO
+    }
+
+    #[test]
+    fn test_to_stack_missing_handler() {
+        let mut registry = HandlerRegistry::new();
+        registry.register(IOHandler::new());
+
+        let result = registry.to_stack(&["IO", "NonExistent"]);
+        assert!(result.is_err());
+        assert!(result
+            .unwrap_err()
+            .contains("Handler 'NonExistent' not registered"));
+    }
+
+    #[test]
+    fn test_compose() {
+        let registry = HandlerRegistry::with_defaults();
+        let composed = registry
+            .compose(&["IO", "Mut"], CompositionOrder::LeftToRight)
+            .expect("Should create composed handler");
+
+        assert_eq!(composed.handler_count(), 2);
+        assert_eq!(composed.effect_names(), vec!["IO", "Mut"]);
+    }
+
+    #[test]
+    fn test_compose_with_priority() {
+        let registry = HandlerRegistry::with_defaults();
+        let priority = vec!["Mut".to_string(), "IO".to_string()];
+
+        let composed = registry
+            .compose(&["IO", "Mut"], CompositionOrder::Priority(priority))
+            .expect("Should create composed handler");
+
+        assert_eq!(composed.handler_count(), 2);
+    }
+
+    #[test]
+    fn test_compose_all() {
+        let registry = HandlerRegistry::with_defaults();
+        let composed = registry
+            .compose_all(CompositionOrder::LeftToRight)
+            .expect("Should compose all handlers");
+
+        assert_eq!(composed.handler_count(), 12);
+
+        // Verify all handlers are included
+        let names = composed.effect_names();
+        assert!(names.contains(&"IO"));
+        assert!(names.contains(&"Mut"));
+        assert!(names.contains(&"Epistemic"));
+        assert!(names.contains(&"GPU"));
+    }
+
+    #[test]
+    fn test_compose_empty_registry() {
+        let registry = HandlerRegistry::new();
+        let result = registry.compose_all(CompositionOrder::LeftToRight);
+
+        assert!(matches!(result, Err(ComposeError::EmptyComposition)));
     }
 }

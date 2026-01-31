@@ -57,11 +57,22 @@ impl DocExtractor {
 
     /// Extract documentation from AST
     pub fn extract(&self, ast: &Ast) -> CrateDoc {
+        self.extract_with_source(ast, None)
+    }
+
+    /// Extract documentation from AST with source text for intelligent comment extraction
+    pub fn extract_with_source(&self, ast: &Ast, source: Option<&str>) -> CrateDoc {
         let mut items = BTreeMap::new();
         let mut search_index = SearchIndex::new();
 
         // Extract root module
-        let root_module = self.extract_module(ast, &self.crate_name, &mut items, &mut search_index);
+        let root_module = self.extract_module_with_source(
+            ast,
+            &self.crate_name,
+            &mut items,
+            &mut search_index,
+            source,
+        );
 
         CrateDoc {
             name: self.crate_name.clone(),
@@ -89,6 +100,18 @@ impl DocExtractor {
         items: &mut BTreeMap<String, DocItem>,
         search_index: &mut SearchIndex,
     ) -> ModuleDoc {
+        self.extract_module_with_source(ast, path, items, search_index, None)
+    }
+
+    /// Extract a module with source text for intelligent comment extraction
+    fn extract_module_with_source(
+        &self,
+        ast: &Ast,
+        path: &str,
+        items: &mut BTreeMap<String, DocItem>,
+        search_index: &mut SearchIndex,
+        source: Option<&str>,
+    ) -> ModuleDoc {
         let name = path.rsplit("::").next().unwrap_or(path).to_string();
 
         let mut module = ModuleDoc::new(name.clone(), path.to_string());
@@ -106,7 +129,7 @@ impl DocExtractor {
             match item {
                 Item::Function(f) => {
                     if self.should_document_visibility(&f.visibility) {
-                        let func_doc = self.extract_function(f, path);
+                        let func_doc = self.extract_function_with_source(f, path, source);
 
                         // Add to search index
                         search_index.add(SearchEntry {
@@ -124,7 +147,8 @@ impl DocExtractor {
 
                 Item::Struct(s) => {
                     if self.should_document_visibility(&s.visibility) {
-                        let type_doc = self.extract_struct(s, path, search_index);
+                        let type_doc =
+                            self.extract_struct_with_source(s, path, search_index, source);
                         items.insert(type_doc.path.clone(), DocItem::Type(type_doc.clone()));
                         module.types.push(type_doc);
                     }
@@ -132,7 +156,7 @@ impl DocExtractor {
 
                 Item::Enum(e) => {
                     if self.should_document_visibility(&e.visibility) {
-                        let type_doc = self.extract_enum(e, path, search_index);
+                        let type_doc = self.extract_enum_with_source(e, path, search_index, source);
                         items.insert(type_doc.path.clone(), DocItem::Type(type_doc.clone()));
                         module.types.push(type_doc);
                     }
@@ -140,7 +164,8 @@ impl DocExtractor {
 
                 Item::Trait(t) => {
                     if self.should_document_visibility(&t.visibility) {
-                        let trait_doc = self.extract_trait(t, path, search_index);
+                        let trait_doc =
+                            self.extract_trait_with_source(t, path, search_index, source);
                         items.insert(trait_doc.path.clone(), DocItem::Trait(trait_doc.clone()));
                         module.traits.push(trait_doc);
                     }
@@ -204,6 +229,16 @@ impl DocExtractor {
 
     /// Extract function documentation
     fn extract_function(&self, f: &FnDef, parent_path: &str) -> FunctionDoc {
+        self.extract_function_with_source(f, parent_path, None)
+    }
+
+    /// Extract function documentation with source for intelligent comment extraction
+    fn extract_function_with_source(
+        &self,
+        f: &FnDef,
+        parent_path: &str,
+        source: Option<&str>,
+    ) -> FunctionDoc {
         let path = format!("{}::{}", parent_path, f.name);
         let sig = self.render_function_signature(f);
 
@@ -219,8 +254,10 @@ impl DocExtractor {
             column: 0,
         };
 
-        // Extract documentation
-        func.doc = f.doc.clone();
+        // Extract documentation - try parser first, then intelligent extraction
+        func.doc = f.doc.clone().or_else(|| {
+            source.and_then(|src| self.extract_line_comments_before(src, f.span.start))
+        });
 
         // Extract type parameters
         func.type_params = self.extract_generics(&f.generics);
@@ -352,11 +389,24 @@ impl DocExtractor {
         parent_path: &str,
         search_index: &mut SearchIndex,
     ) -> TypeDoc {
+        self.extract_struct_with_source(s, parent_path, search_index, None)
+    }
+
+    /// Extract struct documentation with source for intelligent comment extraction
+    fn extract_struct_with_source(
+        &self,
+        s: &StructDef,
+        parent_path: &str,
+        search_index: &mut SearchIndex,
+        source: Option<&str>,
+    ) -> TypeDoc {
         let path = format!("{}::{}", parent_path, s.name);
 
         let mut type_doc = TypeDoc::new(s.name.clone(), path.clone(), TypeKind::Struct);
         type_doc.visibility = self.convert_visibility(&s.visibility);
-        type_doc.doc = s.doc.clone();
+        type_doc.doc = s.doc.clone().or_else(|| {
+            source.and_then(|src| self.extract_line_comments_before(src, s.span.start))
+        });
         type_doc.type_params = self.extract_generics(&s.generics);
         type_doc.modifiers = TypeModifiers {
             linear: s.modifiers.linear,
@@ -412,11 +462,24 @@ impl DocExtractor {
         parent_path: &str,
         search_index: &mut SearchIndex,
     ) -> TypeDoc {
+        self.extract_enum_with_source(e, parent_path, search_index, None)
+    }
+
+    /// Extract enum documentation with source for intelligent comment extraction
+    fn extract_enum_with_source(
+        &self,
+        e: &EnumDef,
+        parent_path: &str,
+        search_index: &mut SearchIndex,
+        source: Option<&str>,
+    ) -> TypeDoc {
         let path = format!("{}::{}", parent_path, e.name);
 
         let mut type_doc = TypeDoc::new(e.name.clone(), path.clone(), TypeKind::Enum);
         type_doc.visibility = self.convert_visibility(&e.visibility);
-        type_doc.doc = e.doc.clone();
+        type_doc.doc = e.doc.clone().or_else(|| {
+            source.and_then(|src| self.extract_line_comments_before(src, e.span.start))
+        });
         type_doc.type_params = self.extract_generics(&e.generics);
         type_doc.modifiers = TypeModifiers {
             linear: e.modifiers.linear,
@@ -493,11 +556,24 @@ impl DocExtractor {
         parent_path: &str,
         search_index: &mut SearchIndex,
     ) -> TraitDoc {
+        self.extract_trait_with_source(t, parent_path, search_index, None)
+    }
+
+    /// Extract trait documentation with source for intelligent comment extraction
+    fn extract_trait_with_source(
+        &self,
+        t: &TraitDef,
+        parent_path: &str,
+        search_index: &mut SearchIndex,
+        source: Option<&str>,
+    ) -> TraitDoc {
         let path = format!("{}::{}", parent_path, t.name);
 
         let mut trait_doc = TraitDoc::new(t.name.clone(), path.clone());
         trait_doc.visibility = self.convert_visibility(&t.visibility);
-        trait_doc.doc = t.doc.clone();
+        trait_doc.doc = t.doc.clone().or_else(|| {
+            source.and_then(|src| self.extract_line_comments_before(src, t.span.start))
+        });
         trait_doc.type_params = self.extract_generics(&t.generics);
         trait_doc.super_traits = t.supertraits.iter().map(|s| s.to_string()).collect();
         trait_doc.source = SourceLocation {
@@ -788,6 +864,75 @@ impl DocExtractor {
         doc.as_ref()
             .and_then(|d| parser::parse_sections(d).summary)
             .unwrap_or_default()
+    }
+
+    /// Extract documentation from line comments (// style) before an item
+    ///
+    /// This implements intelligent extraction: consecutive // comments immediately
+    /// before an item (3+ lines) are treated as documentation. This allows stdlib
+    /// modules to use // comments for documentation without /// markers.
+    ///
+    /// Heuristic:
+    /// - Find all consecutive // lines before the item's span
+    /// - Require at least 3 lines to avoid treating single-line comments as docs
+    /// - Stop at blank lines or non-comment lines
+    /// - Skip /// and //! (these are handled by the parser)
+    fn extract_line_comments_before(&self, source: &str, span_start: usize) -> Option<String> {
+        // Get text before the item
+        if span_start == 0 || span_start > source.len() {
+            return None;
+        }
+
+        let before_text = &source[..span_start];
+        let lines: Vec<&str> = before_text.lines().collect();
+
+        if lines.is_empty() {
+            return None;
+        }
+
+        let mut comment_lines = Vec::new();
+        let mut blank_line_count = 0;
+
+        // Work backwards from the end
+        for line in lines.iter().rev() {
+            let trimmed = line.trim();
+
+            if trimmed.is_empty() {
+                // Allow up to 1 blank line between comments and item
+                blank_line_count += 1;
+                if blank_line_count > 1 {
+                    break;
+                }
+                continue;
+            }
+
+            // Check if it's a regular // comment (not /// or //!)
+            if let Some(content) = trimmed.strip_prefix("//") {
+                // Skip /// and //! (these are doc comments handled by parser)
+                if content.starts_with('/') || content.starts_with('!') {
+                    break;
+                }
+
+                // Extract the comment content (trim leading space)
+                let comment_text = content.trim_start();
+                comment_lines.push(comment_text);
+
+                // Reset blank line counter when we find a comment
+                blank_line_count = 0;
+            } else {
+                // Hit a non-comment line, stop
+                break;
+            }
+        }
+
+        // Require at least 3 consecutive comment lines to treat as documentation
+        if comment_lines.len() >= 3 {
+            // Reverse to get original order
+            comment_lines.reverse();
+            Some(comment_lines.join("\n"))
+        } else {
+            None
+        }
     }
 
     /// Convert type expression to TypeInfo
@@ -1225,5 +1370,127 @@ mod tests {
     fn test_extractor_document_private() {
         let extractor = DocExtractor::new("test", "0.1.0").document_private(true);
         assert!(extractor.document_private);
+    }
+
+    #[test]
+    fn test_extract_line_comments_basic() {
+        let extractor = DocExtractor::new("test", "0.1.0");
+        let source = r#"
+// First line of comment
+// Second line of comment
+// Third line of comment
+fn test_function() {}
+"#;
+
+        let span_start = source.find("fn test_function").unwrap();
+        let doc = extractor.extract_line_comments_before(source, span_start);
+
+        assert!(doc.is_some());
+        let doc = doc.unwrap();
+        assert!(doc.contains("First line of comment"));
+        assert!(doc.contains("Second line of comment"));
+        assert!(doc.contains("Third line of comment"));
+    }
+
+    #[test]
+    fn test_extract_line_comments_too_few() {
+        let extractor = DocExtractor::new("test", "0.1.0");
+        let source = r#"
+// Only one line
+fn test_function() {}
+"#;
+
+        let span_start = source.find("fn test_function").unwrap();
+        let doc = extractor.extract_line_comments_before(source, span_start);
+
+        // Should be None because we require 3+ lines
+        assert!(doc.is_none());
+    }
+
+    #[test]
+    fn test_extract_line_comments_skip_doc_comments() {
+        let extractor = DocExtractor::new("test", "0.1.0");
+        let source = r#"
+/// Doc comment line 1
+/// Doc comment line 2
+/// Doc comment line 3
+fn test_function() {}
+"#;
+
+        let span_start = source.find("fn test_function").unwrap();
+        let doc = extractor.extract_line_comments_before(source, span_start);
+
+        // Should be None because /// is handled by parser
+        assert!(doc.is_none());
+    }
+
+    #[test]
+    fn test_extract_line_comments_with_blank_line() {
+        let extractor = DocExtractor::new("test", "0.1.0");
+        let source = r#"
+// First line
+// Second line
+// Third line
+
+fn test_function() {}
+"#;
+
+        let span_start = source.find("fn test_function").unwrap();
+        let doc = extractor.extract_line_comments_before(source, span_start);
+
+        // Should still extract (allows 1 blank line)
+        assert!(doc.is_some());
+        let doc = doc.unwrap();
+        assert!(doc.contains("First line"));
+    }
+
+    #[test]
+    fn test_extract_line_comments_stops_at_code() {
+        let extractor = DocExtractor::new("test", "0.1.0");
+        let source = r#"
+let x = 5;
+// First line
+// Second line
+// Third line
+fn test_function() {}
+"#;
+
+        let span_start = source.find("fn test_function").unwrap();
+        let doc = extractor.extract_line_comments_before(source, span_start);
+
+        // Should extract only the 3 lines, not include the code above
+        assert!(doc.is_some());
+        let doc = doc.unwrap();
+        assert!(!doc.contains("let x = 5"));
+        assert!(doc.contains("First line"));
+    }
+
+    #[test]
+    fn test_extract_with_source_integration() {
+        let extractor = DocExtractor::new("test", "0.1.0").document_private(true);
+        let source = r#"
+// Adds two numbers
+// This is a simple function
+// It takes two parameters
+fn add(a: i32, b: i32) -> i32 {
+    a + b
+}
+"#;
+
+        let tokens = crate::lexer::lex(source).unwrap();
+        let ast = crate::parser::parse(&tokens, source).unwrap();
+        let crate_doc = extractor.extract_with_source(&ast, Some(source));
+
+        assert_eq!(crate_doc.root_module.functions.len(), 1);
+        let func = &crate_doc.root_module.functions[0];
+
+        assert!(
+            func.doc.is_some(),
+            "Function doc should be extracted from // comments"
+        );
+        let doc = func.doc.as_ref().unwrap();
+        assert!(doc.contains("Adds two numbers"));
+        assert!(doc.contains("This is a simple function"));
+        assert!(doc.contains("It takes two parameters"));
     }
 }

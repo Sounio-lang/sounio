@@ -15,6 +15,21 @@
 //! The `handlers` submodule contains concrete implementations of effect handlers
 //! using the `HandlerCapability` trait. These enable both Track A (CPS-based)
 //! and Track B (epistemic) effect handling.
+//!
+//! # SIMD Parallel Dispatch
+//!
+//! The `simd_dispatch` submodule provides parallel effect dispatch for performing
+//! multiple effect operations simultaneously:
+//!
+//! ```text
+//! // Instead of sequential:
+//! perform(msg1, print); perform(msg2, print); ... perform(msg8, print);
+//!
+//! // Use parallel simd_perform:
+//! simd_perform([msg1..msg8], print);  // 8 parallel IOs
+//! ```
+//!
+//! See [`SimdEffectDispatcher`] for the main API.
 
 pub mod continuation;
 pub mod continuation_context;
@@ -24,6 +39,7 @@ pub mod handlers;
 pub mod inference;
 pub mod jit_resume;
 pub mod linearity;
+pub mod simd_dispatch;
 
 pub use crate::types::effects::*;
 pub use continuation::{
@@ -51,6 +67,11 @@ pub use jit_resume::{
     JitResumeStore,
 };
 pub use linearity::{EffectOpInfo, Linearity};
+pub use simd_dispatch::{
+    simd_perform, simd_perform_batch, BatchEffectResult, DispatchError, DispatchHandle, EffectOp,
+    ParallelEffectResult, ParallelTiming, SimdContinuation, SimdDispatchConfig,
+    SimdEffectDispatcher,
+};
 
 /// Runtime effect handler trait
 pub trait Handler<E> {

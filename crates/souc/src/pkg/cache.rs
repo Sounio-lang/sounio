@@ -10,7 +10,7 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 use super::manifest::Version;
-use super::registry::{RegistryError, cache_dir, home_dir};
+use super::registry::{cache_dir, home_dir, RegistryError};
 
 #[cfg(feature = "pkg")]
 use flate2::read::GzDecoder;
@@ -484,8 +484,8 @@ pub fn create_tarball(
     source_dir: &Path,
     exclude_patterns: &[&str],
 ) -> Result<Vec<u8>, RegistryError> {
-    use flate2::Compression;
     use flate2::write::GzEncoder;
+    use flate2::Compression;
     use std::io::Write;
     use tar::Builder;
 

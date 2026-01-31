@@ -660,8 +660,8 @@ mod tests {
         );
 
         assert_eq!(layout.fields[0].offset, 0); // a
-        // inner should be aligned to 4 (its alignment from cache)
-        // but since Inner wasn't registered with proper size, this test shows the limitation
+                                                // inner should be aligned to 4 (its alignment from cache)
+                                                // but since Inner wasn't registered with proper size, this test shows the limitation
     }
 
     #[test]

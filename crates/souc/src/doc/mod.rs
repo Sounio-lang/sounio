@@ -35,7 +35,7 @@ pub use model::{
     ConstantDoc, CrateDoc, DocItem, FunctionDoc, ModuleDoc, SearchEntry, SearchIndex, SearchKind,
     TraitDoc, TypeDoc, Visibility,
 };
-pub use parser::{DocSections, parse_doc_comment};
+pub use parser::{parse_doc_comment, DocSections};
 
 /// Documentation attached to an item
 #[derive(Debug, Clone, PartialEq, Default)]

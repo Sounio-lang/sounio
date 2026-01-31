@@ -660,11 +660,9 @@ mod tests {
         assert_eq!(usage.co_occurrences.len(), 3);
 
         // Check canonical ordering
-        assert!(
-            usage
-                .co_occurrences
-                .contains_key(&("CHEBI:15365".to_string(), "GO:0008150".to_string()))
-        );
+        assert!(usage
+            .co_occurrences
+            .contains_key(&("CHEBI:15365".to_string(), "GO:0008150".to_string())));
     }
 
     #[test]
@@ -700,10 +698,8 @@ mod tests {
 
         assert_eq!(usage.concepts.len(), 3);
         // CHEBI and GO should have co-occurrence
-        assert!(
-            usage
-                .co_occurrences
-                .contains_key(&("CHEBI:15365".to_string(), "GO:0008150".to_string()))
-        );
+        assert!(usage
+            .co_occurrences
+            .contains_key(&("CHEBI:15365".to_string(), "GO:0008150".to_string())));
     }
 }

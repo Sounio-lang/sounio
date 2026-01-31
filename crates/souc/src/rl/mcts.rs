@@ -304,7 +304,11 @@ where
                         .values()
                         .map(|c| c.visits as f64)
                         .fold(0.0, f64::max);
-                    if v == max_visits { 1.0 / total } else { 0.0 }
+                    if v == max_visits {
+                        1.0 / total
+                    } else {
+                        0.0
+                    }
                 } else {
                     v.powf(1.0 / temperature) / total
                 };
@@ -679,7 +683,11 @@ mod tests {
 
         fn terminal_value(&self, player: Player) -> f64 {
             if self.count >= 10 {
-                if self.player == player { 0.0 } else { 1.0 }
+                if self.player == player {
+                    0.0
+                } else {
+                    1.0
+                }
             } else {
                 0.5
             }

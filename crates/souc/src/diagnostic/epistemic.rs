@@ -830,12 +830,10 @@ mod tests {
         checker.check_status(&status, "test");
 
         assert!(!checker.diagnostics().is_empty());
-        assert!(
-            checker
-                .diagnostics()
-                .iter()
-                .any(|d| d.code == EpistemicCode::LowConfidence)
-        );
+        assert!(checker
+            .diagnostics()
+            .iter()
+            .any(|d| d.code == EpistemicCode::LowConfidence));
     }
 
     #[test]
@@ -849,12 +847,10 @@ mod tests {
         checker.check_status(&status, "test");
 
         assert!(checker.has_errors());
-        assert!(
-            checker
-                .diagnostics()
-                .iter()
-                .any(|d| d.code == EpistemicCode::ZeroConfidence)
-        );
+        assert!(checker
+            .diagnostics()
+            .iter()
+            .any(|d| d.code == EpistemicCode::ZeroConfidence));
     }
 
     #[test]
@@ -891,12 +887,10 @@ mod tests {
         checker.check_status(&status, "test");
 
         assert!(checker.has_errors());
-        assert!(
-            checker
-                .diagnostics()
-                .iter()
-                .any(|d| d.code == EpistemicCode::RevisionRequired)
-        );
+        assert!(checker
+            .diagnostics()
+            .iter()
+            .any(|d| d.code == EpistemicCode::RevisionRequired));
     }
 
     #[test]
@@ -916,12 +910,10 @@ mod tests {
         checker.check_combination(&[&status1, &status2], "test", ResolutionStrategy::Bayesian);
 
         assert!(checker.has_warnings());
-        assert!(
-            checker
-                .diagnostics()
-                .iter()
-                .any(|d| d.code == EpistemicCode::HighHeterogeneity)
-        );
+        assert!(checker
+            .diagnostics()
+            .iter()
+            .any(|d| d.code == EpistemicCode::HighHeterogeneity));
     }
 
     #[test]
@@ -929,12 +921,10 @@ mod tests {
         let mut checker = EpistemicIntegrityChecker::new();
         checker.check_ontology_term("GO", "0000001", true, "test");
 
-        assert!(
-            checker
-                .diagnostics()
-                .iter()
-                .any(|d| d.code == EpistemicCode::DeprecatedTerm)
-        );
+        assert!(checker
+            .diagnostics()
+            .iter()
+            .any(|d| d.code == EpistemicCode::DeprecatedTerm));
     }
 
     #[test]
@@ -942,12 +932,10 @@ mod tests {
         let mut checker = EpistemicIntegrityChecker::new();
         checker.check_mapping(0.5, "CHEBI:12345", "DRUGBANK:DB00001", "test");
 
-        assert!(
-            checker
-                .diagnostics()
-                .iter()
-                .any(|d| d.code == EpistemicCode::UncertainMapping)
-        );
+        assert!(checker
+            .diagnostics()
+            .iter()
+            .any(|d| d.code == EpistemicCode::UncertainMapping));
     }
 
     #[test]
@@ -981,12 +969,10 @@ mod tests {
         let mut checker = EpistemicIntegrityChecker::new();
         checker.check_status(&status, "test");
 
-        assert!(
-            checker
-                .diagnostics()
-                .iter()
-                .any(|d| d.code == EpistemicCode::ProvenanceChainTooLong)
-        );
+        assert!(checker
+            .diagnostics()
+            .iter()
+            .any(|d| d.code == EpistemicCode::ProvenanceChainTooLong));
     }
 
     #[test]
@@ -1040,11 +1026,9 @@ mod tests {
         let mut checker = EpistemicIntegrityChecker::new();
         checker.check_status(&status, "test");
 
-        assert!(
-            checker
-                .diagnostics()
-                .iter()
-                .any(|d| d.code == EpistemicCode::WideConfidenceInterval)
-        );
+        assert!(checker
+            .diagnostics()
+            .iter()
+            .any(|d| d.code == EpistemicCode::WideConfidenceInterval));
     }
 }

@@ -13,8 +13,8 @@ use std::collections::HashSet;
 use std::io::{self, Write};
 use std::path::PathBuf;
 use std::sync::{
-    Arc, Mutex,
     atomic::{AtomicBool, Ordering},
+    Arc, Mutex,
 };
 use std::thread;
 use std::time::{Duration, Instant};

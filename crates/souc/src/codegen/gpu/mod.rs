@@ -39,6 +39,7 @@ pub mod counterfactual;
 pub mod counterfactual_metal;
 pub mod diagnostics;
 pub mod divergence;
+pub mod epistemic_kernels;
 pub mod epistemic_ptx;
 pub mod example_profiles;
 pub mod fusion;
@@ -105,6 +106,16 @@ pub use hlir_to_gpu::{
 // Epistemic PTX emission - shadow registers for uncertainty tracking
 pub use epistemic_ptx::{
     EpistemicPtxConfig, EpistemicPtxEmitter, EpistemicShadowRegs, WarpEpsilonOp,
+};
+
+// GPU Epistemic Kernels - WGSL compute shaders for Knowledge<T> operations
+pub use epistemic_kernels::{
+    bytes_to_knowledge_slice, gpu_epistemic_confidence_factor, knowledge_slice_to_bytes,
+    propagate_uncertainty_add, propagate_uncertainty_mul, AggregateMode, AggregateParams,
+    EpistemicKernelId, GpuEpistemicOps, GpuKnowledge, TransformParams, DEFAULT_WORKGROUP_SIZE,
+    GPU_EPISTEMIC_CONFIDENCE_FACTOR, KNOWLEDGE_STRUCT_SIZE, WGSL_CONFIDENCE_AGGREGATE,
+    WGSL_KNOWLEDGE_TRANSFORM, WGSL_UNCERTAINTY_ADD, WGSL_UNCERTAINTY_DIV, WGSL_UNCERTAINTY_MUL,
+    WGSL_UNCERTAINTY_SUB,
 };
 
 // Counterfactual GPU execution - Pearl's do-calculus as GPU primitives

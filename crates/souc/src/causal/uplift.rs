@@ -913,7 +913,11 @@ fn normal_quantile(p: f64) -> f64 {
 
     let result = t - (c0 + c1 * t + c2 * t * t) / (1.0 + d1 * t + d2 * t * t + d3 * t * t * t);
 
-    if p > 0.5 { -result } else { result }
+    if p > 0.5 {
+        -result
+    } else {
+        result
+    }
 }
 
 // ============================================================================

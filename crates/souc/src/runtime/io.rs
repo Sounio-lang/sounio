@@ -185,7 +185,11 @@ pub extern "C" fn __sounio_file_exists(path: *const u8, path_len: i64) -> i32 {
         Err(_) => return -1,
     };
 
-    if Path::new(path_str).exists() { 1 } else { 0 }
+    if Path::new(path_str).exists() {
+        1
+    } else {
+        0
+    }
 }
 
 /// Remove a file

@@ -9,7 +9,7 @@
 //!
 //! Run with: cargo run --example gaussian_process_demo
 
-use souc::epistemic::gaussian_process::{GPConfig, GaussianProcess, Kernel};
+use sounio::epistemic::gaussian_process::{GPConfig, GaussianProcess, Kernel};
 
 fn main() {
     println!("=== Gaussian Process Regression Demo ===\n");

@@ -23,10 +23,10 @@
 //! Key insight: Higher confidence and more specific ontology is a SUBTYPE
 //! (can be used where less is required).
 
-use super::TypeContext;
 use super::predicates::{ConfidencePredicate, Predicate};
 use super::proofs::Proof;
 use super::types::{ConfidenceType, EpistemicType, OntologyType};
+use super::TypeContext;
 
 /// Result of a subtyping check
 #[derive(Debug, Clone)]

@@ -120,9 +120,12 @@ pub fn compile(source: &str) -> miette::Result<Vec<u8>> {
     // Apply CPS transformation for effect handlers
     if hlir.functions.iter().any(|f| !f.effects.is_empty()) {
         let mut cps = backend::cps_transform::CpsTransform::new();
-        hlir = cps
-            .transform(hlir)
-            .map_err(|e| miette::miette!("CPS transform failed: {}", e))?;
+        #[allow(unused_assignments)]
+        {
+            hlir = cps
+                .transform(hlir)
+                .map_err(|e| miette::miette!("CPS transform failed: {}", e))?;
+        }
     }
 
     // New MIR-based pipeline

@@ -3,11 +3,11 @@
 //! Provides LSP server for IDEs to offer advanced Sounio language features.
 //! Supports epistemic types, scientific computing, and uncertainty-aware programming.
 
-use tower_lsp::LspService;
-use tower_lsp::Server;
 use tower_lsp::jsonrpc::Result;
 use tower_lsp::lsp_types::notification::Notification;
 use tower_lsp::lsp_types::*;
+use tower_lsp::LspService;
+use tower_lsp::Server;
 
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};

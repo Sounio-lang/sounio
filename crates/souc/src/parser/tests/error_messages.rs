@@ -188,7 +188,7 @@ mod tests {
     fn test_error_has_code() {
         // Test that type errors include error codes
         let err = parse_type_error("+"); // + is not a valid type start
-        // The error should include an error code
+                                         // The error should include an error code
         assert!(
             err.contains("P00") || err.contains("type"),
             "Error should include an error code or mention type: {}",

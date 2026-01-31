@@ -49,8 +49,8 @@
 
 #[cfg(feature = "smt")]
 use z3::{
+    ast::{Ast, Bool, Dynamic, Int, Real, BV},
     Config, Context, Model, Optimize, SatResult, Solver, Sort, Symbol,
-    ast::{Ast, BV, Bool, Dynamic, Int, Real},
 };
 
 use super::formula::SmtFormula;

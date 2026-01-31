@@ -468,7 +468,11 @@ impl Expression {
             ExprKind::Neg(a) => Some(-a.evaluate(bindings)?),
             ExprKind::Sqrt(a) => {
                 let av = a.evaluate(bindings)?;
-                if av < 0.0 { None } else { Some(av.sqrt()) }
+                if av < 0.0 {
+                    None
+                } else {
+                    Some(av.sqrt())
+                }
             }
             ExprKind::Sin(a) => Some(a.evaluate(bindings)?.sin()),
             ExprKind::Cos(a) => Some(a.evaluate(bindings)?.cos()),

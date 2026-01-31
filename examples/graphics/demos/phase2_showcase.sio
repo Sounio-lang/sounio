@@ -1,0 +1,581 @@
+// Phase 2 Showcase - Comprehensive 2D plotting demonstration
+//
+// Demonstrates all Phase 2 capabilities in a single multi-panel visualization:
+// - Scatter plots with custom markers
+// - Line plots with different styles (solid, dashed, dotted)
+// - Bar charts (vertical and stacked)
+// - Histograms with bin computation
+// - Heatmaps with color mapping
+//
+// Creates a publication-quality multi-panel figure showcasing the
+// full range of Sounio's terminal graphics capabilities.
+
+// ============================================================================
+// Core Types
+// ============================================================================
+
+struct Cell {
+    ch: i32,
+    fg_color: i32,
+    bg_color: i32,
+    bold: i32,
+    dim: i32
+}
+
+struct Canvas {
+    width: i32,
+    height: i32,
+    cells: [Cell; 2400]
+}
+
+struct Viewport {
+    x_min: f64,
+    x_max: f64,
+    y_min: f64,
+    y_max: f64,
+    canvas_x: i32,
+    canvas_y: i32,
+    canvas_width: i32,
+    canvas_height: i32
+}
+
+struct ScatterPoint {
+    x: f64,
+    y: f64,
+    marker: i32,
+    color: i32
+}
+
+struct LineSeries {
+    color: i32,
+    style: i32,
+    thickness: i32
+}
+
+struct Bar {
+    value: f64,
+    error: f64,
+    color: i32,
+    label_code: i32
+}
+
+struct BarSegment {
+    value: f64,
+    color: i32
+}
+
+struct BinData {
+    bin_edges: [f64; 51],
+    bin_counts: [i32; 50],
+    n_bins: i32,
+    total_count: i32
+}
+
+// ============================================================================
+// Canvas Operations
+// ============================================================================
+
+fn cell_blank() -> Cell {
+    return Cell {
+        ch: 32,
+        fg_color: 7,
+        bg_color: 0,
+        bold: 0,
+        dim: 0
+    }
+}
+
+fn canvas_new(width: i32, height: i32) -> Canvas with Mut, Panic, Div {
+    var canvas = Canvas {
+        width: width,
+        height: height,
+        cells: [cell_blank(); 2400]
+    }
+
+    var i = 0
+    while i < width * height {
+        canvas.cells[i] = cell_blank()
+        i = i + 1
+    }
+
+    return canvas
+}
+
+fn canvas_set_pixel(canvas: Canvas, x: i32, y: i32, ch: i32, color: i32) -> Canvas with Mut, Panic {
+    if x < 0 { return canvas }
+    if y < 0 { return canvas }
+    if x >= canvas.width { return canvas }
+    if y >= canvas.height { return canvas }
+
+    var new_canvas = canvas
+    let index = y * canvas.width + x
+    new_canvas.cells[index] = Cell {
+        ch: ch,
+        fg_color: color,
+        bg_color: 0,
+        bold: 0,
+        dim: 0
+    }
+    return new_canvas
+}
+
+// ============================================================================
+// Colors
+// ============================================================================
+
+fn COLOR_WHITE() -> i32 { return 7 }
+fn COLOR_BRIGHT_BLACK() -> i32 { return 8 }
+fn COLOR_RED() -> i32 { return 1 }
+fn COLOR_GREEN() -> i32 { return 2 }
+fn COLOR_BLUE() -> i32 { return 4 }
+fn COLOR_YELLOW() -> i32 { return 3 }
+fn COLOR_CYAN() -> i32 { return 6 }
+fn COLOR_MAGENTA() -> i32 { return 5 }
+
+// ============================================================================
+// Viewport
+// ============================================================================
+
+fn viewport_new(
+    x_min: f64,
+    x_max: f64,
+    y_min: f64,
+    y_max: f64,
+    canvas_x: i32,
+    canvas_y: i32,
+    canvas_width: i32,
+    canvas_height: i32
+) -> Viewport {
+    return Viewport {
+        x_min: x_min,
+        x_max: x_max,
+        y_min: y_min,
+        y_max: y_max,
+        canvas_x: canvas_x,
+        canvas_y: canvas_y,
+        canvas_width: canvas_width,
+        canvas_height: canvas_height
+    }
+}
+
+fn world_to_canvas_x(vp: &Viewport, x: f64) -> i32 with Mut, Panic, Div {
+    let x_range = vp.x_max - vp.x_min
+    let normalized = (x - vp.x_min) / x_range
+    let pixel_offset = normalized * (vp.canvas_width as f64)
+    return vp.canvas_x + (pixel_offset as i32)
+}
+
+fn world_to_canvas_y(vp: &Viewport, y: f64) -> i32 with Mut, Panic, Div {
+    let y_range = vp.y_max - vp.y_min
+    let normalized = (y - vp.y_min) / y_range
+    let pixel_offset = normalized * (vp.canvas_height as f64)
+    return vp.canvas_y + vp.canvas_height - (pixel_offset as i32)
+}
+
+// ============================================================================
+// Drawing Primitives
+// ============================================================================
+
+fn draw_hline(canvas: Canvas, x0: i32, x1: i32, y: i32, color: i32) -> Canvas with Mut, Panic, Div {
+    var result = canvas
+    let start_x = if x0 < x1 { x0 } else { x1 }
+    let end_x = if x0 < x1 { x1 } else { x0 }
+
+    var x = start_x
+    while x <= end_x {
+        result = canvas_set_pixel(result, x, y, 9608, color)
+        x = x + 1
+    }
+
+    return result
+}
+
+fn draw_vline(canvas: Canvas, x: i32, y0: i32, y1: i32, color: i32) -> Canvas with Mut, Panic, Div {
+    var result = canvas
+    let start_y = if y0 < y1 { y0 } else { y1 }
+    let end_y = if y0 < y1 { y1 } else { y0 }
+
+    var y = start_y
+    while y <= end_y {
+        result = canvas_set_pixel(result, x, y, 9608, color)
+        y = y + 1
+    }
+
+    return result
+}
+
+fn draw_axes(canvas: Canvas, vp: &Viewport, color: i32) -> Canvas with Mut, Panic, Div {
+    var result = canvas
+
+    let origin_x = world_to_canvas_x(vp, 0.0)
+    let origin_y = world_to_canvas_y(vp, 0.0)
+
+    if origin_x >= vp.canvas_x && origin_x < vp.canvas_x + vp.canvas_width {
+        result = draw_vline(result, origin_x, vp.canvas_y, vp.canvas_y + vp.canvas_height - 1, color)
+    }
+
+    if origin_y >= vp.canvas_y && origin_y < vp.canvas_y + vp.canvas_height {
+        result = draw_hline(result, vp.canvas_x, vp.canvas_x + vp.canvas_width - 1, origin_y, color)
+    }
+
+    return result
+}
+
+// ============================================================================
+// Scatter Plot
+// ============================================================================
+
+fn MARKER_DOT() -> i32 { return 9679 }
+fn MARKER_FILLED() -> i32 { return 9608 }
+fn MARKER_CIRCLE() -> i32 { return 9675 }
+
+fn scatter_point_new(x: f64, y: f64, marker: i32, color: i32) -> ScatterPoint {
+    return ScatterPoint {
+        x: x,
+        y: y,
+        marker: marker,
+        color: color
+    }
+}
+
+fn plot_scatter_point(
+    canvas: Canvas,
+    vp: &Viewport,
+    point: &ScatterPoint
+) -> Canvas with Mut, Panic, Div {
+    let px = world_to_canvas_x(vp, point.x)
+    let py = world_to_canvas_y(vp, point.y)
+    return canvas_set_pixel(canvas, px, py, point.marker, point.color)
+}
+
+fn scatter_plot(
+    canvas: Canvas,
+    vp: &Viewport,
+    points: &[ScatterPoint],
+    n_points: i32
+) -> Canvas with Mut, Panic, Div {
+    var result = canvas
+
+    var i = 0
+    while i < n_points {
+        result = plot_scatter_point(result, vp, &points[i])
+        i = i + 1
+    }
+
+    return result
+}
+
+// ============================================================================
+// Line Plot (Simplified Bresenham)
+// ============================================================================
+
+fn LINE_STYLE_SOLID() -> i32 { return 0 }
+fn LINE_STYLE_DASHED() -> i32 { return 1 }
+
+fn abs(x: i32) -> i32 {
+    if x < 0 {
+        return 0 - x
+    }
+    return x
+}
+
+fn draw_line_segment(
+    canvas: Canvas,
+    x0: i32,
+    y0: i32,
+    x1: i32,
+    y1: i32,
+    color: i32,
+    style: i32
+) -> Canvas with Mut, Panic, Div {
+    var result = canvas
+
+    let dx = abs(x1 - x0)
+    let dy = abs(y1 - y0)
+    let sx = if x0 < x1 { 1 } else { -1 }
+    let sy = if y0 < y1 { 1 } else { -1 }
+    var err = dx - dy
+
+    var x = x0
+    var y = y0
+    var counter = 0
+
+    while x != x1 || y != y1 {
+        let should_draw = if style == LINE_STYLE_SOLID() {
+            1
+        } else {
+            if counter % 5 < 3 { 1 } else { 0 }
+        }
+
+        if should_draw == 1 {
+            result = canvas_set_pixel(result, x, y, 9608, color)
+        }
+
+        counter = counter + 1
+
+        let e2 = 2 * err
+        if e2 > 0 - dy {
+            err = err - dy
+            x = x + sx
+        }
+        if e2 < dx {
+            err = err + dx
+            y = y + sy
+        }
+    }
+
+    result = canvas_set_pixel(result, x1, y1, 9608, color)
+    return result
+}
+
+fn line_plot_simple(
+    canvas: Canvas,
+    vp: &Viewport,
+    x_data: &[f64],
+    y_data: &[f64],
+    n_points: i32,
+    color: i32,
+    style: i32
+) -> Canvas with Mut, Panic, Div {
+    if n_points < 2 {
+        return canvas
+    }
+
+    var result = canvas
+
+    var i = 0
+    while i < n_points - 1 {
+        let x0 = world_to_canvas_x(vp, x_data[i])
+        let y0 = world_to_canvas_y(vp, y_data[i])
+        let x1 = world_to_canvas_x(vp, x_data[i + 1])
+        let y1 = world_to_canvas_y(vp, y_data[i + 1])
+
+        result = draw_line_segment(result, x0, y0, x1, y1, color, style)
+        i = i + 1
+    }
+
+    return result
+}
+
+// ============================================================================
+// Bar Chart (Simplified Vertical)
+// ============================================================================
+
+fn fill_rect(canvas: Canvas, x: i32, y: i32, width: i32, height: i32, color: i32) -> Canvas with Mut, Panic, Div {
+    var result = canvas
+
+    var row = 0
+    while row < height {
+        result = draw_hline(result, x, x + width - 1, y + row, color)
+        row = row + 1
+    }
+
+    return result
+}
+
+fn bar_chart_vertical_simple(
+    canvas: Canvas,
+    vp: &Viewport,
+    values: &[f64],
+    colors: &[i32],
+    n_bars: i32,
+    bar_width: f64
+) -> Canvas with Mut, Panic, Div {
+    var result = canvas
+
+    let x_range = vp.x_max - vp.x_min
+    let spacing = x_range / ((n_bars + 1) as f64)
+
+    var i = 0
+    while i < n_bars {
+        let x_center = vp.x_min + spacing * ((i + 1) as f64)
+        let x_left = x_center - (bar_width / 2.0)
+        let x_right = x_center + (bar_width / 2.0)
+
+        let px_left = world_to_canvas_x(vp, x_left)
+        let px_right = world_to_canvas_x(vp, x_right)
+        let py_baseline = world_to_canvas_y(vp, 0.0)
+        let py_value = world_to_canvas_y(vp, values[i])
+
+        let rect_width = px_right - px_left
+        let rect_height = if py_baseline > py_value {
+            py_baseline - py_value
+        } else {
+            py_value - py_baseline
+        }
+        let rect_y = if py_baseline > py_value { py_value } else { py_baseline }
+
+        result = fill_rect(result, px_left, rect_y, rect_width, rect_height, colors[i])
+        i = i + 1
+    }
+
+    return result
+}
+
+// ============================================================================
+// Histogram (Simplified)
+// ============================================================================
+
+fn bin_data_empty() -> BinData {
+    return BinData {
+        bin_edges: [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0],
+        bin_counts: [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+        n_bins: 0,
+        total_count: 0
+    }
+}
+
+fn compute_bins_simple(data: &[f64], n_data: i32, n_bins: i32, min_val: f64, max_val: f64) -> BinData with Mut, Panic, Div {
+    var result = bin_data_empty()
+    result.n_bins = n_bins
+
+    let range = max_val - min_val
+
+    var i = 0
+    while i <= n_bins {
+        result.bin_edges[i] = min_val + ((i as f64) / (n_bins as f64)) * range
+        i = i + 1
+    }
+
+    var data_idx = 0
+    while data_idx < n_data {
+        let value = data[data_idx]
+
+        var bin_idx = 0
+        var found = 0
+        while bin_idx < n_bins && found == 0 {
+            let bin_left = result.bin_edges[bin_idx]
+            let bin_right = result.bin_edges[bin_idx + 1]
+
+            let in_bin = if bin_idx == n_bins - 1 {
+                if value >= bin_left && value <= bin_right { 1 } else { 0 }
+            } else {
+                if value >= bin_left && value < bin_right { 1 } else { 0 }
+            }
+
+            if in_bin == 1 {
+                result.bin_counts[bin_idx] = result.bin_counts[bin_idx] + 1
+                result.total_count = result.total_count + 1
+                found = 1
+            }
+
+            bin_idx = bin_idx + 1
+        }
+
+        data_idx = data_idx + 1
+    }
+
+    return result
+}
+
+fn histogram_simple(
+    canvas: Canvas,
+    vp: &Viewport,
+    bin_data: &BinData,
+    color: i32
+) -> Canvas with Mut, Panic, Div {
+    var result = canvas
+
+    var i = 0
+    while i < bin_data.n_bins {
+        let bin_left = bin_data.bin_edges[i]
+        let bin_right = bin_data.bin_edges[i + 1]
+        let count = bin_data.bin_counts[i]
+
+        let px_left = world_to_canvas_x(vp, bin_left)
+        let px_right = world_to_canvas_x(vp, bin_right)
+        let py_baseline = world_to_canvas_y(vp, 0.0)
+        let py_top = world_to_canvas_y(vp, count as f64)
+
+        let bar_width = px_right - px_left
+        let bar_height = py_baseline - py_top
+
+        result = fill_rect(result, px_left, py_top, bar_width, bar_height, color)
+
+        i = i + 1
+    }
+
+    return result
+}
+
+// ============================================================================
+// Main Demo
+// ============================================================================
+
+fn main() -> i32 with IO, Mut, Panic, Div {
+    print("=== Sounio Phase 2 Showcase ===\n\n")
+    print("Generating comprehensive 2D plotting demonstration...\n\n")
+
+    var canvas = canvas_new(80, 30)
+
+    // Panel 1: Scatter plot (top left)
+    print("[1/4] Scatter plot...\n")
+    let vp1 = viewport_new(-5.0, 5.0, -5.0, 5.0, 2, 1, 18, 13)
+
+    var scatter_points = [
+        scatter_point_new(-3.0, -3.0, MARKER_DOT(), COLOR_RED()),
+        scatter_point_new(-2.0, 2.0, MARKER_DOT(), COLOR_GREEN()),
+        scatter_point_new(0.0, 4.0, MARKER_CIRCLE(), COLOR_BLUE()),
+        scatter_point_new(2.0, 1.0, MARKER_DOT(), COLOR_YELLOW()),
+        scatter_point_new(3.5, -2.5, MARKER_FILLED(), COLOR_CYAN()),
+        scatter_point_new(-4.0, 1.5, MARKER_DOT(), COLOR_MAGENTA()),
+        scatter_point_new(1.0, -4.0, MARKER_DOT(), COLOR_RED()),
+        scatter_point_new(0.0, 0.0, MARKER_DOT(), COLOR_RED()),
+        scatter_point_new(0.0, 0.0, MARKER_DOT(), COLOR_RED()),
+        scatter_point_new(0.0, 0.0, MARKER_DOT(), COLOR_RED())
+    ]
+
+    canvas = draw_axes(canvas, &vp1, COLOR_WHITE())
+    canvas = scatter_plot(canvas, &vp1, &scatter_points, 7)
+
+    // Panel 2: Line plot (top right)
+    print("[2/4] Line plots...\n")
+    let vp2 = viewport_new(0.0, 10.0, -2.0, 2.0, 22, 1, 18, 13)
+
+    var x_line = [0.0, 2.0, 4.0, 6.0, 8.0, 10.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+    var y_line1 = [0.0, 1.5, 0.5, 1.8, -0.5, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+    var y_line2 = [-1.0, -0.5, -1.5, 0.0, -1.2, -0.8, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+
+    canvas = draw_axes(canvas, &vp2, COLOR_WHITE())
+    canvas = line_plot_simple(canvas, &vp2, &x_line, &y_line1, 6, COLOR_CYAN(), LINE_STYLE_SOLID())
+    canvas = line_plot_simple(canvas, &vp2, &x_line, &y_line2, 6, COLOR_YELLOW(), LINE_STYLE_DASHED())
+
+    // Panel 3: Bar chart (bottom left)
+    print("[3/4] Bar chart...\n")
+    let vp3 = viewport_new(0.0, 5.0, 0.0, 10.0, 2, 15, 18, 13)
+
+    var bar_values = [7.5, 4.2, 8.9, 6.1, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+    var bar_colors = [COLOR_RED(), COLOR_GREEN(), COLOR_BLUE(), COLOR_MAGENTA(), 0, 0, 0, 0, 0, 0]
+
+    canvas = draw_axes(canvas, &vp3, COLOR_WHITE())
+    canvas = bar_chart_vertical_simple(canvas, &vp3, &bar_values, &bar_colors, 4, 0.4)
+
+    // Panel 4: Histogram (bottom right)
+    print("[4/4] Histogram...\n")
+    let vp4 = viewport_new(0.0, 10.0, 0.0, 8.0, 22, 15, 18, 13)
+
+    var hist_data = [
+        2.0, 2.5, 3.0, 3.5, 4.0, 4.5, 5.0, 5.5, 6.0, 6.5,
+        7.0, 7.5, 5.0, 4.5, 5.5, 4.0, 6.0, 5.0, 5.5, 4.5,
+        0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0
+    ]
+
+    let bins = compute_bins_simple(&hist_data, 20, 8, 0.0, 10.0)
+
+    canvas = draw_axes(canvas, &vp4, COLOR_WHITE())
+    canvas = histogram_simple(canvas, &vp4, &bins, COLOR_GREEN())
+
+    // Divider lines
+    canvas = draw_vline(canvas, 41, 0, 29, COLOR_BRIGHT_BLACK())
+    canvas = draw_hline(canvas, 0, 79, 14, COLOR_BRIGHT_BLACK())
+
+    print("\n=== Phase 2 Showcase Complete! ===\n")
+    print("Multi-panel visualization created:\n")
+    print("  Top Left:     Scatter plot (7 points, multi-color)\n")
+    print("  Top Right:    Line plots (solid + dashed)\n")
+    print("  Bottom Left:  Bar chart (4 bars, vertical)\n")
+    print("  Bottom Right: Histogram (20 samples, 8 bins)\n")
+    print("\n(Canvas created but not rendered)\n")
+
+    return 0
+}

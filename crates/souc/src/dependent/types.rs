@@ -1177,16 +1177,12 @@ mod tests {
 
         // G_X_: remove outgoing from X
         let g_x_under = graph.remove_outgoing("X");
-        assert!(
-            g_x_under
-                .edges
-                .contains(&("U".to_string(), "X".to_string()))
-        );
-        assert!(
-            !g_x_under
-                .edges
-                .contains(&("X".to_string(), "Y".to_string()))
-        );
+        assert!(g_x_under
+            .edges
+            .contains(&("U".to_string(), "X".to_string())));
+        assert!(!g_x_under
+            .edges
+            .contains(&("X".to_string(), "Y".to_string())));
     }
 
     #[test]

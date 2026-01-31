@@ -28,7 +28,7 @@ use super::alpha_geo_zero::{
 };
 use super::geo_game::{GeoGameConfig, GeoProofGame};
 use super::geo_training::{GeoNeuralNetwork, GeoTrainingExample, UniformGeoNetwork};
-use super::imo_benchmark::{BenchmarkConfig, BenchmarkStats, imo_ag_30, run_benchmark_on_problems};
+use super::imo_benchmark::{imo_ag_30, run_benchmark_on_problems, BenchmarkConfig, BenchmarkStats};
 use super::imo_parser::IMOProblem;
 use super::predicates::Predicate;
 use super::proof_state::ProofState;

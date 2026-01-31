@@ -1069,10 +1069,9 @@ mod tests {
         assert!(result.is_ok());
 
         // Check that epistemic value was created
-        assert!(
-            opt.epistemic_analysis
-                .epistemic_values
-                .contains_key(&ValueId(3))
-        );
+        assert!(opt
+            .epistemic_analysis
+            .epistemic_values
+            .contains_key(&ValueId(3)));
     }
 }

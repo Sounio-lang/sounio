@@ -7,6 +7,8 @@
 //! - Debug: DWARF debug information and source maps
 
 pub mod autodiff;
+pub mod autodiff_reverse;
+pub mod autodiff_tape;
 pub mod cranelift;
 pub mod debug;
 pub mod gpu;

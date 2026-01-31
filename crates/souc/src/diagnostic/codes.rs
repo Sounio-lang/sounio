@@ -166,7 +166,8 @@ impl ErrorIndex {
         self.register(ErrorCode {
             code: "L0001",
             title: "Invalid character",
-            explanation: "The source file contains a character that is not valid in Sounio source code.",
+            explanation:
+                "The source file contains a character that is not valid in Sounio source code.",
             example: Some("let x = @invalid;  // '@' is not a valid character"),
             category: ErrorCategory::Lexer,
         });
@@ -504,7 +505,8 @@ impl ErrorIndex {
         self.register(ErrorCode {
             code: "O0002",
             title: "Cannot borrow as mutable",
-            explanation: "The value cannot be borrowed mutably because it is not declared as mutable.",
+            explanation:
+                "The value cannot be borrowed mutably because it is not declared as mutable.",
             example: Some("let x = 5;\nincrement(&!x);  // cannot borrow 'x' as mutable"),
             category: ErrorCategory::Ownership,
         });
@@ -563,8 +565,11 @@ impl ErrorIndex {
         self.register(ErrorCode {
             code: "M0002",
             title: "Unreachable pattern",
-            explanation: "This pattern will never be matched because previous patterns cover all cases.",
-            example: Some("match x {\n    _ => {}\n    1 => {}  // unreachable: '_' matches everything\n}"),
+            explanation:
+                "This pattern will never be matched because previous patterns cover all cases.",
+            example: Some(
+                "match x {\n    _ => {}\n    1 => {}  // unreachable: '_' matches everything\n}",
+            ),
             category: ErrorCategory::Pattern,
         });
 

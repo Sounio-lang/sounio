@@ -12,10 +12,10 @@
 //! - **Confidence**: ε₁ ≥ ε₂
 //! - **Predicate**: P must be provable
 
-use super::TypeContext;
 use super::predicates::Predicate;
 use super::proof_search::{ProofResult, ProofSearchConfig, ProofSearcher};
 use super::types::{ConfidenceType, EpistemicType, OntologyType};
+use super::TypeContext;
 use std::collections::HashMap;
 
 /// A type variable

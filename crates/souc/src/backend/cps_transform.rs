@@ -54,8 +54,8 @@
 
 use crate::effects::continuation::{ContinuationId, ResumePoint};
 use crate::hlir::ir::{
-    BlockId, HlirBlock, HlirFunction, HlirInstr, HlirModule, HlirParam, HlirTerminator, HlirType,
-    Op, ValueId,
+    HlirBlock, HlirFunction, HlirInstr, HlirModule, HlirParam, HlirTerminator, HlirType, Op,
+    ValueId,
 };
 use std::collections::{HashMap, HashSet};
 
@@ -91,23 +91,50 @@ pub struct CpsContext {
 
     /// Whether to use selective or full CPS
     selective: bool,
+
+    /// Effect operations that require multi-shot continuations
+    /// (e.g., Amb::choose, Prob::branch_all, Search::backtrack)
+    multi_shot_operations: HashSet<(String, String)>, // (effect, operation)
 }
 
 impl CpsContext {
     /// Create a new CPS transformation context
     pub fn new() -> Self {
-        Self {
+        let mut ctx = Self {
             effectful_functions: HashSet::new(),
             cps_functions: HashMap::new(),
             next_cont_id: 0,
             selective: true, // Use selective CPS by default
-        }
+            multi_shot_operations: HashSet::new(),
+        };
+
+        // Register known multi-shot operations
+        ctx.register_multi_shot("Amb", "choose");
+        ctx.register_multi_shot("Amb", "all");
+        ctx.register_multi_shot("Prob", "branch_all");
+        ctx.register_multi_shot("Prob", "sample_many");
+        ctx.register_multi_shot("Search", "backtrack");
+        ctx.register_multi_shot("Nondeterminism", "choice");
+
+        ctx
     }
 
     /// Enable full CPS transformation (transform all functions)
     pub fn with_full_cps(mut self) -> Self {
         self.selective = false;
         self
+    }
+
+    /// Register an operation as requiring multi-shot continuations
+    pub fn register_multi_shot(&mut self, effect: &str, operation: &str) {
+        self.multi_shot_operations
+            .insert((effect.to_string(), operation.to_string()));
+    }
+
+    /// Check if an operation requires multi-shot continuation
+    pub fn is_multi_shot(&self, effect: &str, operation: &str) -> bool {
+        self.multi_shot_operations
+            .contains(&(effect.to_string(), operation.to_string()))
     }
 
     /// Analyze module to determine which functions need CPS
@@ -240,15 +267,26 @@ impl CpsTransform {
                     // Generate continuation ID for tracking/debugging
                     let _cont_id = self.ctx.fresh_cont_id();
 
+                    // Check if this operation requires multi-shot continuation
+                    let is_multi_shot = self.ctx.is_multi_shot(effect, op);
+
                     // Before performing the effect, capture the current continuation
-                    // This generates: let cont_ptr = __sounio_capture_continuation()
+                    // Use different functions for one-shot vs multi-shot
+                    // - One-shot: shallow capture (current frame only)
+                    // - Multi-shot: deep capture (full stack snapshot)
                     let cont_ptr_id = ValueId(next_temp_value_id);
                     next_temp_value_id += 1;
+
+                    let capture_fn = if is_multi_shot {
+                        "__sounio_capture_continuation_multi_shot"
+                    } else {
+                        "__sounio_capture_continuation"
+                    };
 
                     new_instrs.push(HlirInstr {
                         result: Some(cont_ptr_id),
                         op: Op::CallDirect {
-                            name: "__sounio_capture_continuation".to_string(),
+                            name: capture_fn.to_string(),
                             args: vec![], // Capture uses implicit state (registers, stack)
                         },
                         ty: HlirType::Ptr(Box::new(HlirType::U64)),
@@ -340,14 +378,72 @@ impl CpsTransform {
                 // Replace return with unreachable (continuation resume doesn't return)
                 block.terminator = HlirTerminator::Unreachable;
             }
-            HlirTerminator::CondBranch { .. } => {
-                // Conditional branches in CPS need special handling
-                // For now, leave them as-is - they'll be refined in a later phase
-                // when we implement proper continuation threading through branches
+            HlirTerminator::CondBranch {
+                condition: _,
+                then_block: _,
+                else_block: _,
+            } => {
+                // Conditional branches in CPS don't need transformation at the HLIR level.
+                //
+                // Since blocks are within the same function (not separate closures),
+                // both then_block and else_block have access to the continuation parameter
+                // through the function's scope. The continuation parameter (cont_param_id)
+                // is available to all blocks in the function.
+                //
+                // Example:
+                //   fn foo_cps(__cont: *Continuation, x: i32) {
+                //     bb0:
+                //       br_cond x > 0, bb1, bb2
+                //     bb1:  // then branch - __cont is in scope
+                //       let result = x + 1
+                //       __sounio_resume_continuation(__cont, result)
+                //       unreachable
+                //     bb2:  // else branch - __cont is in scope
+                //       let result = x - 1
+                //       __sounio_resume_continuation(__cont, result)
+                //       unreachable
+                //   }
+                //
+                // Both bb1 and bb2 can use __cont directly because it's a function parameter.
+                // No transformation needed - the terminator remains unchanged.
+
+                // Verify that the target blocks exist (defensive check)
+                // In a more complete implementation, we could validate that both branches
+                // properly use the continuation, but that's better done in a separate
+                // validation pass.
             }
-            HlirTerminator::Switch { .. } => {
-                // Switch terminators in CPS also need continuation threading
-                // For now, leave as-is for later refinement
+            HlirTerminator::Switch {
+                value: _,
+                default: _,
+                cases: _,
+            } => {
+                // Switch terminators in CPS also don't need transformation.
+                //
+                // Like conditional branches, all case blocks are within the same function
+                // and have access to the continuation parameter through function scope.
+                //
+                // Example:
+                //   fn handle_opcode_cps(__cont: *Continuation, opcode: i32) {
+                //     bb0:
+                //       switch opcode, default: bb_default, [
+                //         (1, bb_case1),
+                //         (2, bb_case2),
+                //         (3, bb_case3)
+                //       ]
+                //     bb_case1:  // __cont is in scope
+                //       let result = operation1()
+                //       __sounio_resume_continuation(__cont, result)
+                //       unreachable
+                //     bb_case2:  // __cont is in scope
+                //       let result = operation2()
+                //       __sounio_resume_continuation(__cont, result)
+                //       unreachable
+                //     bb_default:  // __cont is in scope
+                //       __sounio_resume_continuation(__cont, 0)
+                //       unreachable
+                //   }
+                //
+                // All case blocks can use __cont directly. No transformation needed.
             }
             HlirTerminator::Branch(_) | HlirTerminator::Unreachable => {
                 // Unconditional branches and unreachable don't need transformation
@@ -367,6 +463,20 @@ impl Default for CpsTransform {
 /// Native continuation capture state
 ///
 /// Represents the machine state needed to resume a native continuation.
+///
+/// # One-shot vs Multi-shot
+///
+/// - **One-shot** (is_one_shot = true): Shallow capture
+///   - Only captures the current stack frame
+///   - More efficient (less copying)
+///   - Cannot be resumed multiple times
+///   - Used for most effects (IO, State, Error, etc.)
+///
+/// - **Multi-shot** (is_one_shot = false): Deep capture
+///   - Captures the full call stack from current frame to effect handler
+///   - Required for backtracking effects (Amb, Search, Prob::branch_all)
+///   - Can be cloned and resumed multiple times
+///   - Higher overhead due to stack copying
 #[repr(C)]
 #[derive(Debug, Clone)]
 pub struct NativeContinuation {
@@ -389,6 +499,8 @@ pub struct NativeContinuation {
     pub frame_pointer: usize,
 
     /// Stack snapshot (captured stack frame)
+    /// - One-shot: Only current frame (FP to SP)
+    /// - Multi-shot: Full call stack (deep capture)
     pub stack_data: Vec<u8>,
 
     /// Whether this is a one-shot or multi-shot continuation
@@ -396,6 +508,9 @@ pub struct NativeContinuation {
 
     /// Resume count (for one-shot enforcement)
     pub resume_count: usize,
+
+    /// Stack depth (number of frames captured, for multi-shot)
+    pub stack_depth: usize,
 }
 
 impl NativeContinuation {
@@ -411,7 +526,97 @@ impl NativeContinuation {
             stack_data: Vec::new(),
             is_one_shot,
             resume_count: 0,
+            stack_depth: if is_one_shot { 1 } else { 0 },
         }
+    }
+
+    /// Capture continuation with shallow stack (current frame only)
+    ///
+    /// Used for one-shot continuations. More efficient than deep capture.
+    #[cfg(target_arch = "aarch64")]
+    pub unsafe fn capture_shallow() -> Self {
+        // Use the existing capture() method which does shallow capture
+        // It only saves register state via the native backend
+        Self::capture()
+    }
+
+    /// Capture continuation with deep stack (full call stack)
+    ///
+    /// Used for multi-shot continuations. Captures entire stack from
+    /// current frame up to the effect handler boundary.
+    #[cfg(target_arch = "aarch64")]
+    pub unsafe fn capture_deep() -> Self {
+        use crate::backend::native::continuation;
+
+        // First capture shallow state (registers)
+        let native_cont = continuation::capture_continuation();
+
+        let mut cont = Self::new(native_cont.return_address(), false);
+
+        // Copy register state from native continuation
+        match &native_cont {
+            continuation::Continuation::AArch64(aarch64_cont) => {
+                // Copy GP registers (X0-X30)
+                for i in 0..31 {
+                    cont.gp_registers[i] = aarch64_cont.gp_regs[i];
+                }
+
+                // Copy SIMD registers (stored as pairs of u64)
+                for i in 0..32 {
+                    cont.fp_registers[i] = f64::from_bits(aarch64_cont.simd_regs[i * 2]);
+                }
+
+                cont.stack_pointer = aarch64_cont.sp as usize;
+                cont.frame_pointer = aarch64_cont.fp as usize;
+
+                // Deep stack capture: walk the call stack using frame pointers
+                // Each frame on AArch64 has: [FP_prev, LR_prev] at the top
+                let mut current_fp = aarch64_cont.fp as usize;
+                let sp = aarch64_cont.sp as usize;
+                let mut frame_count = 0;
+                const MAX_FRAMES: usize = 100; // Safety limit
+
+                // Calculate total stack size by walking frame chain
+                let mut total_stack_size = 0;
+                let mut temp_fp = current_fp;
+
+                while temp_fp != 0 && frame_count < MAX_FRAMES {
+                    if temp_fp < sp {
+                        break; // Invalid frame pointer
+                    }
+
+                    // Each frame contributes from its FP to previous FP
+                    let frame_size = if frame_count == 0 {
+                        temp_fp - sp
+                    } else {
+                        // Read previous FP from current frame
+                        let prev_fp_ptr = temp_fp as *const usize;
+                        let prev_fp = *prev_fp_ptr;
+                        if prev_fp <= temp_fp || prev_fp - temp_fp > 1024 * 1024 {
+                            break; // Invalid or too large
+                        }
+                        prev_fp - temp_fp
+                    };
+
+                    total_stack_size += frame_size;
+                    frame_count += 1;
+
+                    // Move to previous frame
+                    let prev_fp_ptr = temp_fp as *const usize;
+                    temp_fp = *prev_fp_ptr;
+                }
+
+                // Allocate and copy the deep stack
+                cont.stack_data = Vec::with_capacity(total_stack_size);
+                let stack_slice = std::slice::from_raw_parts(sp as *const u8, total_stack_size);
+                cont.stack_data.extend_from_slice(stack_slice);
+                cont.stack_depth = frame_count;
+            }
+            #[allow(unreachable_patterns)]
+            _ => panic!("Unsupported continuation type for deep capture"),
+        }
+
+        cont
     }
 
     /// Capture current machine state
@@ -420,16 +625,33 @@ impl NativeContinuation {
     /// Must be called from assembly stubs that save registers.
     #[cfg(target_arch = "aarch64")]
     pub unsafe fn capture() -> Self {
-        // TODO: Implement actual register capture via inline assembly
-        //
-        // Strategy for AArch64:
-        // 1. Save x0-x30 (general-purpose registers)
-        // 2. Save v0-v31 (SIMD/FP registers)
-        // 3. Save SP (stack pointer)
-        // 4. Save FP (frame pointer / x29)
-        // 5. Capture stack frame (SP to FP range)
+        // Use native backend continuation capture
+        use crate::backend::native::continuation;
 
-        let mut cont = Self::new(0, true);
+        let native_cont = continuation::capture_continuation();
+
+        let mut cont = Self::new(native_cont.return_address(), true);
+
+        // Copy register state from native continuation
+        match native_cont {
+            continuation::Continuation::AArch64(aarch64_cont) => {
+                // Copy GP registers (X0-X30)
+                for i in 0..31 {
+                    cont.gp_registers[i] = aarch64_cont.gp_regs[i];
+                }
+
+                // Copy SIMD registers (stored as pairs of u64)
+                for i in 0..32 {
+                    cont.fp_registers[i] = f64::from_bits(aarch64_cont.simd_regs[i * 2]);
+                }
+
+                cont.stack_pointer = aarch64_cont.sp as usize;
+                cont.frame_pointer = aarch64_cont.fp as usize;
+                cont.stack_data = aarch64_cont.stack.clone();
+            }
+            #[allow(unreachable_patterns)]
+            _ => panic!("Unsupported continuation type"),
+        }
 
         // Placeholder - would use inline assembly here
         // Example (pseudo-code):
@@ -444,17 +666,42 @@ impl NativeContinuation {
     ///
     /// SAFETY: Extremely unsafe - overwrites current execution context
     #[cfg(target_arch = "aarch64")]
-    pub unsafe fn resume(&mut self, _value: u64) -> ! {
-        // TODO: Implement actual continuation resumption
-        //
-        // Strategy:
-        // 1. Check one-shot constraint
-        // 2. Restore stack frame from stack_data
-        // 3. Restore FP and SP
-        // 4. Restore v0-v31 (SIMD/FP registers)
-        // 5. Restore x1-x30 (keep x0 for return value)
-        // 6. Jump to return_address
+    pub unsafe fn resume(&mut self, value: u64) -> ! {
+        // Check one-shot constraint
+        if self.is_one_shot && self.resume_count > 0 {
+            panic!("Attempted to resume one-shot continuation multiple times");
+        }
+        self.resume_count += 1;
 
+        // Use native backend continuation resume
+        use crate::backend::native::continuation;
+
+        // Reconstruct native continuation from our state
+        let mut native_cont =
+            continuation::Continuation::AArch64(continuation::AArch64Continuation {
+                gp_regs: {
+                    let mut regs = [0u64; 31];
+                    for i in 0..31 {
+                        regs[i] = self.gp_registers[i];
+                    }
+                    regs
+                },
+                simd_regs: {
+                    let mut regs = [0u64; 64];
+                    for i in 0..32 {
+                        regs[i * 2] = self.fp_registers[i].to_bits();
+                        regs[i * 2 + 1] = 0; // High 64 bits (we only stored low 64)
+                    }
+                    regs
+                },
+                sp: self.stack_pointer as u64,
+                fp: self.frame_pointer as u64,
+                lr: self.return_address as u64,
+                stack: self.stack_data.clone(),
+                resumed: false,
+            });
+
+        continuation::resume_continuation(&mut native_cont, value);
         panic!("Continuation resumption not yet implemented")
     }
 
@@ -534,6 +781,93 @@ pub mod runtime {
             // Drop automatically frees the continuation
         }
     }
+
+    /// Capture a multi-shot continuation with deep stack capture
+    ///
+    /// Multi-shot continuations can be resumed multiple times, which is required
+    /// for backtracking effects like Amb, Prob, and Search.
+    ///
+    /// # Arguments
+    /// * `return_address` - Where to resume when continuation is invoked
+    ///
+    /// # Returns
+    /// Pointer to captured NativeContinuation with full call stack
+    #[unsafe(no_mangle)]
+    pub extern "C" fn __sounio_capture_continuation_multi_shot(
+        return_address: usize,
+    ) -> *mut NativeContinuation {
+        #[cfg(target_arch = "aarch64")]
+        unsafe {
+            let cont = NativeContinuation::capture_deep();
+            Box::into_raw(Box::new(cont))
+        }
+
+        #[cfg(not(target_arch = "aarch64"))]
+        {
+            let _ = return_address;
+            panic!("Multi-shot continuation capture only implemented for AArch64")
+        }
+    }
+
+    /// Clone a multi-shot continuation for reuse
+    ///
+    /// This allows a continuation to be resumed multiple times by creating
+    /// independent copies of the captured state.
+    ///
+    /// # Arguments
+    /// * `cont_ptr` - Pointer to NativeContinuation (must be multi-shot)
+    ///
+    /// # Returns
+    /// Pointer to cloned NativeContinuation
+    ///
+    /// # Safety
+    /// The original continuation pointer remains valid after cloning
+    #[unsafe(no_mangle)]
+    pub unsafe extern "C" fn __sounio_clone_continuation(
+        cont_ptr: *const NativeContinuation,
+    ) -> *mut NativeContinuation {
+        unsafe {
+            let cont = &*cont_ptr;
+            if cont.is_one_shot {
+                panic!("Cannot clone one-shot continuation");
+            }
+            Box::into_raw(Box::new(cont.clone()))
+        }
+    }
+
+    /// Resume a multi-shot continuation without consuming it
+    ///
+    /// Unlike one-shot resumption, this preserves the continuation for future resumes.
+    ///
+    /// # Arguments
+    /// * `cont_ptr` - Pointer to NativeContinuation (not consumed)
+    /// * `value` - Value to resume with (in x0/rax)
+    ///
+    /// # Safety
+    /// This function never returns - it restores the saved execution context.
+    /// The continuation pointer remains valid after resumption.
+    #[unsafe(no_mangle)]
+    pub unsafe extern "C" fn __sounio_resume_continuation_multi_shot(
+        cont_ptr: *const NativeContinuation,
+        _value: u64,
+    ) -> ! {
+        #[cfg(target_arch = "aarch64")]
+        unsafe {
+            let cont = &*cont_ptr;
+            if cont.is_one_shot {
+                panic!("Cannot multi-shot resume one-shot continuation");
+            }
+            // Clone the continuation to preserve the original
+            let mut cont_clone = cont.clone();
+            cont_clone.resume(_value)
+        }
+
+        #[cfg(not(target_arch = "aarch64"))]
+        {
+            let _ = cont_ptr;
+            panic!("Multi-shot continuation resumption only implemented for AArch64")
+        }
+    }
 }
 
 #[cfg(test)]
@@ -541,6 +875,7 @@ mod tests {
     use super::*;
     use crate::ast::Abi;
     use crate::hlir::builder::FunctionBuilder;
+    use crate::hlir::{FunctionId, HlirConstant};
 
     #[test]
     fn test_cps_context_creation() {
@@ -568,93 +903,94 @@ mod tests {
         let _transform = CpsTransform::new();
     }
 
-    // TODO: These tests need to be updated to use the new FunctionBuilder API
-    // #[test]
-    // fn test_cps_transform_effectful_function() {
-    //     // Create a simple function with an effect operation
-    //     let mut builder = FunctionBuilder::new("test_func".to_string(), HlirType::I32);
-    //     builder.set_effects(vec!["IO".to_string()]);
-    //
-    //     // Add entry block
-    //     builder.create_block("entry");
-    //     builder.set_current_block(BlockId(0));
-    //
-    //     // Perform IO effect
-    //     let print_result = builder.perform_effect("IO", "println", vec![], HlirType::Void);
-    //
-    //     // Return constant
-    //     let const_val = builder.int_const(42, HlirType::I32);
-    //     builder.ret(Some(const_val));
-    //
-    //     let func = builder.finish();
-    //
-    //     // Transform to CPS
-    //     let mut transform = CpsTransform::new();
-    //     let result = transform.transform_function(&func);
-    //
-    //     assert!(result.is_ok(), "CPS transformation should succeed");
-    //
-    //     let cps_func = result.unwrap();
-    //
-    //     // Verify transformation
-    //     assert_eq!(cps_func.name, "test_func_cps");
-    //     assert_eq!(
-    //         cps_func.params.len(),
-    //         func.params.len() + 1,
-    //         "Should have one additional continuation parameter"
-    //     );
-    //     assert_eq!(cps_func.params.last().unwrap().name, "__cont");
-    // }
+    #[test]
+    fn test_cps_transform_effectful_function() {
+        // Create a simple function with an effect operation
+        let mut builder = FunctionBuilder::new(FunctionId(0), "test_func", HlirType::I32);
 
-    // TODO: Update to use new FunctionBuilder API
-    // #[test]
-    // fn test_cps_analysis_detects_effects() {
-    //     // Create a module with an effectful function
-    //     let mut module = HlirModule::new("test");
-    //
-    //     let mut builder = FunctionBuilder::new("with_effects".to_string(), HlirType::I32);
-    //     builder.set_effects(vec!["IO".to_string()]);
-    //     builder.create_block("entry");
-    //     builder.set_current_block(BlockId(0));
-    //     builder.perform_effect("IO", "println", vec![], HlirType::Void);
-    //     let val = builder.int_const(42, HlirType::I32);
-    //     builder.ret(Some(val));
-    //
-    //     module.functions.push(builder.finish());
-    //
-    //     // Analyze
-    //     let mut ctx = CpsContext::new();
-    //     ctx.analyze(&module);
-    //
-    //     assert!(
-    //         ctx.effectful_functions.contains("with_effects"),
-    //         "Should detect effectful function"
-    //     );
-    //     assert!(ctx.needs_cps("with_effects"));
-    // }
+        // Add entry block
+        let entry = builder.create_block("entry");
+        builder.switch_to_block(entry);
 
-    // TODO: Update to use new FunctionBuilder API
-    // #[test]
-    // fn test_cps_analysis_ignores_pure_functions() {
-    //     // Create a module with a pure function
-    //     let mut module = HlirModule::new("test");
-    //
-    //     let mut builder = FunctionBuilder::new("pure_func".to_string(), HlirType::I32);
-    //     builder.create_block("entry");
-    //     builder.set_current_block(BlockId(0));
-    //     let val = builder.int_const(42, HlirType::I32);
-    //     builder.ret(Some(val));
-    //
-    //     module.functions.push(builder.finish());
-    //
-    //     // Analyze
-    //     let mut ctx = CpsContext::new();
-    //     ctx.analyze(&module);
-    //
-    //     assert!(
-    //         !ctx.effectful_functions.contains("pure_func"),
-    //         "Should not transform pure function"
-    //     );
-    //     assert!(!ctx.needs_cps("pure_func"));
-    // }
+        // Perform IO effect
+        let _print_result = builder.build_perform_effect("IO", "println", vec![], HlirType::Void);
+
+        // Return constant
+        let const_val = builder.build_const(HlirConstant::Int(42, HlirType::I32), HlirType::I32);
+        builder.build_return(Some(const_val));
+
+        let mut func = builder.build();
+        // Manually add effects since they're not set through builder
+        func.effects.push("IO".to_string());
+
+        // Transform to CPS
+        let mut transform = CpsTransform::new();
+        let result = transform.transform_function(&func);
+
+        assert!(result.is_ok(), "CPS transformation should succeed");
+
+        let cps_func = result.unwrap();
+
+        // Verify transformation
+        assert_eq!(cps_func.name, "test_func_cps");
+        assert_eq!(
+            cps_func.params.len(),
+            func.params.len() + 1,
+            "Should have one additional continuation parameter"
+        );
+        assert_eq!(cps_func.params.last().unwrap().name, "__cont");
+    }
+
+    #[test]
+    fn test_cps_analysis_detects_effects() {
+        // Create a module with an effectful function
+        let mut module = HlirModule::new("test");
+
+        let mut builder = FunctionBuilder::new(FunctionId(0), "with_effects", HlirType::I32);
+        let entry = builder.create_block("entry");
+        builder.switch_to_block(entry);
+        let _effect_result = builder.build_perform_effect("IO", "println", vec![], HlirType::Void);
+        let val = builder.build_const(HlirConstant::Int(42, HlirType::I32), HlirType::I32);
+        builder.build_return(Some(val));
+
+        let mut func = builder.build();
+        // Manually add effects since they're not set through builder
+        func.effects.push("IO".to_string());
+
+        module.functions.push(func);
+
+        // Analyze
+        let mut ctx = CpsContext::new();
+        ctx.analyze(&module);
+
+        assert!(
+            ctx.effectful_functions.contains("with_effects"),
+            "Should detect effectful function"
+        );
+        assert!(ctx.needs_cps("with_effects"));
+    }
+
+    #[test]
+    fn test_cps_analysis_ignores_pure_functions() {
+        // Create a module with a pure function
+        let mut module = HlirModule::new("test");
+
+        let mut builder = FunctionBuilder::new(FunctionId(0), "pure_func", HlirType::I32);
+        let entry = builder.create_block("entry");
+        builder.switch_to_block(entry);
+        let val = builder.build_const(HlirConstant::Int(42, HlirType::I32), HlirType::I32);
+        builder.build_return(Some(val));
+
+        module.functions.push(builder.build());
+
+        // Analyze
+        let mut ctx = CpsContext::new();
+        ctx.analyze(&module);
+
+        assert!(
+            !ctx.effectful_functions.contains("pure_func"),
+            "Should not transform pure function"
+        );
+        assert!(!ctx.needs_cps("pure_func"));
+    }
 }

@@ -232,7 +232,11 @@ impl JsonLdParser {
                     .filter_map(|v| v.as_str())
                     .map(|s| self.expand_iri(s, context))
                     .collect();
-                if types.is_empty() { None } else { Some(types) }
+                if types.is_empty() {
+                    None
+                } else {
+                    Some(types)
+                }
             }
             _ => None,
         }
@@ -654,15 +658,13 @@ mod tests {
         let term = terms[0].as_ref().unwrap();
 
         // Check relations were extracted
-        assert!(
-            term.relations
-                .iter()
-                .any(|r| r.predicate == "domainIncludes")
-        );
-        assert!(
-            term.relations
-                .iter()
-                .any(|r| r.predicate == "rangeIncludes")
-        );
+        assert!(term
+            .relations
+            .iter()
+            .any(|r| r.predicate == "domainIncludes"));
+        assert!(term
+            .relations
+            .iter()
+            .any(|r| r.predicate == "rangeIncludes"));
     }
 }

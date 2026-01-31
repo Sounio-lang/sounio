@@ -17,7 +17,7 @@
 //! 7. Would explicit coercion work?
 
 use crate::ontology::distance::SemanticDistance;
-use crate::ontology::loader::{IRI, OntologyId};
+use crate::ontology::loader::{OntologyId, IRI};
 use std::fmt;
 
 /// Source span (byte offsets)

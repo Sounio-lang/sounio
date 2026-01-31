@@ -205,8 +205,8 @@ fn generate_docs(
             );
         }
 
-        // Extract documentation
-        let doc = extractor.extract(&ast);
+        // Extract documentation with source for intelligent // comment extraction
+        let doc = extractor.extract_with_source(&ast, Some(&source));
 
         // Merge into crate doc (first file becomes root)
         if crate_doc.is_none() {

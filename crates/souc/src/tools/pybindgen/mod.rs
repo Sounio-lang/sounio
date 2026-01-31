@@ -54,7 +54,11 @@ impl PythonBindingGenerator {
             .iter()
             .filter_map(|item| {
                 if let HirItem::Function(func) = item {
-                    if func.is_exported { Some(func) } else { None }
+                    if func.is_exported {
+                        Some(func)
+                    } else {
+                        None
+                    }
                 } else {
                     None
                 }

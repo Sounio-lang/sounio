@@ -15,7 +15,7 @@ use std::time::Duration;
 use crate::epistemic::bayesian::BetaConfidence;
 
 use super::geo_training::UniformGeoNetwork;
-use super::imo_benchmark::{BenchmarkConfig, BenchmarkStats, imo_ag_30, run_benchmark_on_problems};
+use super::imo_benchmark::{imo_ag_30, run_benchmark_on_problems, BenchmarkConfig, BenchmarkStats};
 use super::imo_parser::IMOProblem;
 use super::self_play::{AlphaGeoZeroSelfPlay, SelfPlayConfig};
 

@@ -5,7 +5,7 @@
 //! - Extract Variable: Extract expression into a local variable
 //! - Extract Constant: Extract literal into a named constant
 
-use super::{RefactoringContext, RefactoringError, TextEdit, WorkspaceEdit, validate_new_name};
+use super::{validate_new_name, RefactoringContext, RefactoringError, TextEdit, WorkspaceEdit};
 use crate::ast::Ast;
 use std::collections::HashSet;
 

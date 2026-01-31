@@ -17,5 +17,5 @@ mod resolver;
 mod symbols;
 
 pub use module_tree::ImportError;
-pub use resolver::{ResolvedAst, Resolver, resolve};
+pub use resolver::{resolve, ResolvedAst, Resolver};
 pub use symbols::{DefId, DefKind, Scope, ScopeKind, Symbol, SymbolTable};

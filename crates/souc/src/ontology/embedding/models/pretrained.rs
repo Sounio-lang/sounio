@@ -198,8 +198,8 @@ impl PretrainedGenerator {
 
     /// Load native DMBE format
     fn load_native(path: &Path) -> Result<Self, EmbeddingError> {
-        use super::super::EmbeddingStore;
         use super::super::storage::mmap::MmapStore;
+        use super::super::EmbeddingStore;
 
         // Use MmapStore to load
         let store = MmapStore::open_path(path, 0)?; // 0 = auto-detect dimensions

@@ -806,7 +806,7 @@ pub fn generate_proof_game<E>(
 where
     E: crate::rl::mcts::NeuralEvaluator<GeoProofGame>,
 {
-    use crate::rl::mcts::{MCTSConfig, MCTSTree, search};
+    use crate::rl::mcts::{search, MCTSConfig, MCTSTree};
 
     let mut game = GeoProofGame::for_goal(state.clone(), goal, 0.9);
     let mut trajectory = Vec::new();
@@ -939,7 +939,7 @@ pub fn triangle_congruence_sas() -> (ProofState, Predicate) {
     // Add axioms for SAS
     state.add_axiom(Predicate::equal_length("A", "B", "D", "E")); // AB = DE
     state.add_axiom(Predicate::equal_length("A", "C", "D", "F")); // AC = DF
-    // Angle BAC = Angle EDF (represented as equal angles)
+                                                                  // Angle BAC = Angle EDF (represented as equal angles)
     let angle_equal = Predicate::new(
         PredicateKind::EqualAngle,
         vec![

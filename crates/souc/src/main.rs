@@ -127,6 +127,10 @@ enum Commands {
         /// Target CPU features (comma-separated)
         #[arg(long)]
         target_cpu: Option<String>,
+
+        /// Enable CPS transformation for effect handlers (experimental)
+        #[arg(long)]
+        enable_cps: bool,
     },
 
     /// Type-check a Sounio source file without compiling
@@ -1632,6 +1636,7 @@ fn main() -> Result<()> {
             timing,
             emit,
             target_cpu,
+            enable_cps,
         } => {
             // If native backend, use new CLI integration
             if backend == sounio::cli::backend::Backend::Native {
@@ -1650,7 +1655,7 @@ fn main() -> Result<()> {
                         cpu_features: target_cpu
                             .map(|s| s.split(',').map(|x| x.trim().to_string()).collect())
                             .unwrap_or_default(),
-                        enable_cps: None, // CPS transformation disabled by default (experimental)
+                        enable_cps: if enable_cps { Some(true) } else { None },
                     },
                     verbose,
                     timing,

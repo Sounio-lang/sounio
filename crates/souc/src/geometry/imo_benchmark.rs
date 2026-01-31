@@ -20,11 +20,11 @@ use std::time::{Duration, Instant};
 
 use crate::epistemic::bayesian::BetaConfidence;
 use crate::rl::game::{GameState, GameTrait};
-use crate::rl::mcts::{MCTSConfig, MCTSTree, search};
+use crate::rl::mcts::{search, MCTSConfig, MCTSTree};
 
 use super::geo_game::{GeoGameConfig, GeoProofGame, ProofGameEpisode};
 use super::geo_training::{GeoNetworkEvaluator, GeoNeuralNetwork, UniformGeoNetwork};
-use super::imo_parser::{IMOProblem, parse_imo_problem};
+use super::imo_parser::{parse_imo_problem, IMOProblem};
 use super::predicates::Predicate;
 use super::proof_state::ProofState;
 

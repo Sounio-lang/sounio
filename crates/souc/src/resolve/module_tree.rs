@@ -1027,11 +1027,9 @@ mod tests {
         assert!(result.is_err(), "Should fail to import private item");
 
         let errors = result.unwrap_err();
-        assert!(
-            errors.iter().any(
-                |e| matches!(e, ImportError::NotVisible { name, .. } if name == "private_item")
-            )
-        );
+        assert!(errors
+            .iter()
+            .any(|e| matches!(e, ImportError::NotVisible { name, .. } if name == "private_item")));
     }
 
     #[test]
@@ -1055,11 +1053,9 @@ mod tests {
         assert!(result.is_err(), "Should fail for non-existent item");
 
         let errors = result.unwrap_err();
-        assert!(
-            errors.iter().any(
-                |e| matches!(e, ImportError::Unresolved { name, .. } if name == "NonExistent")
-            )
-        );
+        assert!(errors
+            .iter()
+            .any(|e| matches!(e, ImportError::Unresolved { name, .. } if name == "NonExistent")));
     }
 
     #[test]
@@ -1083,11 +1079,9 @@ mod tests {
         assert!(result.is_err());
 
         let errors = result.unwrap_err();
-        assert!(
-            errors.iter().any(
-                |e| matches!(e, ImportError::ModuleNotFound { path } if path == "nonexistent")
-            )
-        );
+        assert!(errors
+            .iter()
+            .any(|e| matches!(e, ImportError::ModuleNotFound { path } if path == "nonexistent")));
     }
 
     #[test]

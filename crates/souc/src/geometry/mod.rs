@@ -41,32 +41,32 @@ pub use predicates::{Predicate, PredicateKind, PredicatePattern};
 pub use primitives::{Angle, Circle, GeometryPrimitive, Line, Point, Segment};
 pub use proof_state::{ProofState, ProofStep, ProvenanceNode};
 pub use reasoning_effect::{
-    GeometryReasoningHandler, MerkleProof, NeSyHandler, NeuralSuggester, PureSymbolicHandler,
-    geometry_reasoning_effect,
+    geometry_reasoning_effect, GeometryReasoningHandler, MerkleProof, NeSyHandler, NeuralSuggester,
+    PureSymbolicHandler,
 };
 pub use rules::{GeometryRule, RuleDatabase, RuleMatch};
 
 // Geometry Game for AlphaGeometry-style self-play
 pub use geo_game::{
-    GeoAction, GeoConstruction, GeoGameConfig, GeoProofGame, ProofGameEpisode, TrajectoryStep,
     generate_proof_game, generate_proof_game_random, isoceles_perpendicular, midpoint_theorem,
-    triangle_congruence_sas,
+    triangle_congruence_sas, GeoAction, GeoConstruction, GeoGameConfig, GeoProofGame,
+    ProofGameEpisode, TrajectoryStep,
 };
 
 // Geometry Self-Play Training
 pub use geo_training::{
-    GeoNetworkEvaluator, GeoNeuralNetwork, GeoProblem, GeoSelfPlayTrainer, GeoTrainingConfig,
-    GeoTrainingExample, IterationResult, ProblemGenerator, ProblemType, TrainingStats,
-    UniformGeoNetwork, test_midpoint_theorem, test_triangle_congruence, train_geometry_prover,
+    test_midpoint_theorem, test_triangle_congruence, train_geometry_prover, GeoNetworkEvaluator,
+    GeoNeuralNetwork, GeoProblem, GeoSelfPlayTrainer, GeoTrainingConfig, GeoTrainingExample,
+    IterationResult, ProblemGenerator, ProblemType, TrainingStats, UniformGeoNetwork,
 };
 
 // IMO Benchmark
 pub use imo_benchmark::{
-    BenchmarkConfig, BenchmarkResult, BenchmarkStats, generate_synthetic_training, get_problem,
-    get_problems_by_difficulty, get_problems_by_year, imo_ag_30, run_baseline_benchmark,
-    run_benchmark, run_benchmark_on_problems,
+    generate_synthetic_training, get_problem, get_problems_by_difficulty, get_problems_by_year,
+    imo_ag_30, run_baseline_benchmark, run_benchmark, run_benchmark_on_problems, BenchmarkConfig,
+    BenchmarkResult, BenchmarkStats,
 };
-pub use imo_parser::{AGParser, IMOProblem, ParseError, parse_ag_problem, parse_imo_problem};
+pub use imo_parser::{parse_ag_problem, parse_imo_problem, AGParser, IMOProblem, ParseError};
 
 // AlphaGeoZero: Full Self-Play Training Loop with Epistemic MCTS
 pub use alpha_geo_zero::{
@@ -77,19 +77,19 @@ pub use alpha_geo_zero::{
 
 // Synthetic Problem Generation
 pub use synthetic::{
-    GeneratorConfig, GeneratorStats, ProblemTemplate, ProblemVariation, SyntheticProblem,
-    SyntheticProblemGenerator, generate_batch, generate_curriculum_batch,
+    generate_batch, generate_curriculum_batch, GeneratorConfig, GeneratorStats, ProblemTemplate,
+    ProblemVariation, SyntheticProblem, SyntheticProblemGenerator,
 };
 
 // Full Self-Play Loop
 pub use self_play::{
-    AlphaGeoZeroSelfPlay, BenchmarkSnapshot, SelfPlayConfig, SelfPlayStats as FullSelfPlayStats,
-    TemplateStats, TrainingStepResult, VarianceReplayBuffer, run_default_self_play,
+    run_default_self_play, AlphaGeoZeroSelfPlay, BenchmarkSnapshot, SelfPlayConfig,
+    SelfPlayStats as FullSelfPlayStats, TemplateStats, TrainingStepResult, VarianceReplayBuffer,
 };
 
 // Final Integration: Complete AlphaGeoZero System
 pub use final_integration::{
-    AlphaGeoZeroFull, AlphaGeoZeroFullConfig, BenchmarkSnapshot as FinalBenchmarkSnapshot,
-    FullTrainingStats, TemplatePerfStats, main_alphageozero, run_full_training, run_quick_test,
-    run_with_config,
+    main_alphageozero, run_full_training, run_quick_test, run_with_config, AlphaGeoZeroFull,
+    AlphaGeoZeroFullConfig, BenchmarkSnapshot as FinalBenchmarkSnapshot, FullTrainingStats,
+    TemplatePerfStats,
 };

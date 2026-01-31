@@ -1893,12 +1893,10 @@ mod tests {
         assert!(reduction.coarsening_factors.iter().any(|&c| c >= 8));
 
         let stencil = VariantSpace::for_stencil();
-        assert!(
-            stencil
-                .layout_options
-                .iter()
-                .any(|l| matches!(l, Layout::Blocked { .. }))
-        );
+        assert!(stencil
+            .layout_options
+            .iter()
+            .any(|l| matches!(l, Layout::Blocked { .. })));
 
         let elementwise = VariantSpace::for_elementwise();
         assert!(elementwise.shared_mem_options.contains(&0));

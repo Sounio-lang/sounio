@@ -96,6 +96,11 @@ pub struct RealAsyncHandler {
     #[cfg(feature = "tokio")]
     runtime: Arc<Mutex<Runtime>>,
 
+    /// Storage for task handles indexed by task ID
+    /// Wrapped in Arc<Mutex<>> for thread-safe access from multiple contexts
+    #[cfg(feature = "tokio")]
+    task_handles: Arc<Mutex<HashMap<i64, JoinHandle<Value>>>>,
+
     /// Placeholder when tokio feature is not enabled
     #[cfg(not(feature = "tokio"))]
     _phantom: std::marker::PhantomData<()>,
@@ -112,6 +117,7 @@ impl RealAsyncHandler {
 
         Self {
             runtime: Arc::new(Mutex::new(runtime)),
+            task_handles: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 
@@ -148,29 +154,42 @@ impl RealAsyncHandler {
             ));
         }
 
-        // Extract task function (for now, we only support lambda/closure values)
-        let task_fn = &args[0];
+        // Extract task function
+        // For now, we support:
+        // - Value::Closure (future work - requires interpreter integration)
+        // - Value::Int (simulates a computation that returns after N milliseconds)
+        // - Any other value is used as the immediate result
+        let task_arg = args[0].clone();
 
         // Generate unique task ID
         let task_id = Self::next_task_id(state);
 
         // Spawn task on Tokio runtime
         let runtime = self.runtime.clone();
-        let _handle = {
+        let handle = {
             let rt = runtime.lock().unwrap();
             rt.spawn(async move {
-                // Execute the task
-                // For now, we simulate work - in a real implementation,
-                // we'd need to evaluate the task_fn closure in the async context
-                tokio::time::sleep(tokio::time::Duration::from_millis(1)).await;
-                Value::Int(42) // Placeholder result
+                // For now, interpret Int values as sleep durations
+                // This allows testing spawn/await without full closure support
+                match task_arg {
+                    Value::Int(ms) if ms > 0 => {
+                        tokio::time::sleep(tokio::time::Duration::from_millis(ms as u64)).await;
+                        Value::Int(ms * 2) // Return doubled value as a placeholder result
+                    }
+                    other => {
+                        // For any other value, yield once and return it
+                        tokio::task::yield_now().await;
+                        other
+                    }
+                }
             })
         };
 
-        // Store task handle in state
-        // Note: We can't actually store the JoinHandle in Value enum,
-        // so we'll use an external HashMap in the runtime
-        // For now, just return the task ID
+        // Store the JoinHandle for later await
+        {
+            let mut handles = self.task_handles.lock().unwrap();
+            handles.insert(task_id, handle);
+        }
 
         HandlerResult::Resume(Value::Int(task_id))
     }
@@ -187,7 +206,7 @@ impl RealAsyncHandler {
 
     /// Handle await operation
     #[cfg(feature = "tokio")]
-    fn handle_await(&self, args: &[Value], state: &mut HandlerState) -> HandlerResult {
+    fn handle_await(&self, args: &[Value], _state: &mut HandlerState) -> HandlerResult {
         if args.is_empty() {
             return HandlerResult::Abort(HandlerError::new(
                 "Async",
@@ -207,16 +226,32 @@ impl RealAsyncHandler {
             }
         };
 
-        // For now, simulate awaiting by creating a suspension point
-        // In a real implementation, we'd poll the JoinHandle
-        let suspension_id = SuspensionId::new();
+        // Retrieve the JoinHandle from storage
+        let handle = {
+            let mut handles = self.task_handles.lock().unwrap();
+            match handles.remove(&task_id) {
+                Some(h) => h,
+                None => {
+                    return HandlerResult::Abort(HandlerError::new(
+                        "Async",
+                        "await",
+                        format!("Invalid task ID {} or task already awaited", task_id),
+                    ));
+                }
+            }
+        };
 
-        state.named_state.insert(
-            format!("__async_suspension_{}", suspension_id.0),
-            Value::Tuple(vec![Value::String("await".into()), Value::Int(task_id)]),
-        );
-
-        HandlerResult::Suspend(suspension_id)
+        // Block on the JoinHandle to get the result
+        // Use the runtime's block_on to wait for completion
+        let runtime = self.runtime.lock().unwrap();
+        match runtime.block_on(handle) {
+            Ok(result) => HandlerResult::Resume(result),
+            Err(e) => HandlerResult::Abort(HandlerError::new(
+                "Async",
+                "await",
+                format!("Task panicked or was cancelled: {}", e),
+            )),
+        }
     }
 
     /// Handle await (fallback without tokio)
@@ -420,6 +455,199 @@ mod tests {
 
         // Should have actually slept
         assert!(elapsed.as_millis() >= 10);
+    }
+
+    #[test]
+    #[cfg(feature = "tokio")]
+    fn test_spawn_await_basic() {
+        let handler = RealAsyncHandler::new();
+        let mut state = HandlerState::new();
+
+        // Spawn a task that sleeps for 50ms and returns doubled value
+        let spawn_result =
+            handler.handle("spawn", &[Value::Int(50)], Continuation::new(), &mut state);
+
+        let task_id = match spawn_result {
+            HandlerResult::Resume(Value::Int(id)) => id,
+            other => panic!("expected Resume(Int), got {:?}", other),
+        };
+
+        assert!(task_id > 0, "task ID should be positive");
+
+        // Await the task
+        let start = std::time::Instant::now();
+        let await_result = handler.handle(
+            "await",
+            &[Value::Int(task_id)],
+            Continuation::new(),
+            &mut state,
+        );
+        let elapsed = start.elapsed();
+
+        match await_result {
+            HandlerResult::Resume(Value::Int(result)) => {
+                assert_eq!(result, 100, "task should return doubled value (50 * 2)");
+            }
+            other => panic!("expected Resume(Int), got {:?}", other),
+        }
+
+        // Should have waited at least 50ms
+        assert!(
+            elapsed.as_millis() >= 50,
+            "await should block until task completes"
+        );
+    }
+
+    #[test]
+    #[cfg(feature = "tokio")]
+    fn test_spawn_await_immediate_value() {
+        let handler = RealAsyncHandler::new();
+        let mut state = HandlerState::new();
+
+        // Spawn a task with a non-Int value (should return immediately after yield)
+        let spawn_result = handler.handle(
+            "spawn",
+            &[Value::String("hello".to_string())],
+            Continuation::new(),
+            &mut state,
+        );
+
+        let task_id = match spawn_result {
+            HandlerResult::Resume(Value::Int(id)) => id,
+            other => panic!("expected Resume(Int), got {:?}", other),
+        };
+
+        // Await the task
+        let await_result = handler.handle(
+            "await",
+            &[Value::Int(task_id)],
+            Continuation::new(),
+            &mut state,
+        );
+
+        match await_result {
+            HandlerResult::Resume(Value::String(s)) => {
+                assert_eq!(s, "hello", "task should return the original value");
+            }
+            other => panic!("expected Resume(String), got {:?}", other),
+        }
+    }
+
+    #[test]
+    #[cfg(feature = "tokio")]
+    fn test_await_invalid_task_id() {
+        let handler = RealAsyncHandler::new();
+        let mut state = HandlerState::new();
+
+        // Try to await a task that doesn't exist
+        let result = handler.handle(
+            "await",
+            &[Value::Int(9999)],
+            Continuation::new(),
+            &mut state,
+        );
+
+        match result {
+            HandlerResult::Abort(err) => {
+                assert!(err.message.contains("Invalid task ID"));
+            }
+            other => panic!("expected Abort, got {:?}", other),
+        }
+    }
+
+    #[test]
+    #[cfg(feature = "tokio")]
+    fn test_await_same_task_twice() {
+        let handler = RealAsyncHandler::new();
+        let mut state = HandlerState::new();
+
+        // Spawn a task
+        let spawn_result =
+            handler.handle("spawn", &[Value::Int(10)], Continuation::new(), &mut state);
+
+        let task_id = match spawn_result {
+            HandlerResult::Resume(Value::Int(id)) => id,
+            other => panic!("expected Resume(Int), got {:?}", other),
+        };
+
+        // Await the task once
+        let _first_await = handler.handle(
+            "await",
+            &[Value::Int(task_id)],
+            Continuation::new(),
+            &mut state,
+        );
+
+        // Try to await again (should fail - task consumed)
+        let second_await = handler.handle(
+            "await",
+            &[Value::Int(task_id)],
+            Continuation::new(),
+            &mut state,
+        );
+
+        match second_await {
+            HandlerResult::Abort(err) => {
+                assert!(err.message.contains("Invalid task ID"));
+            }
+            other => panic!("expected Abort on second await, got {:?}", other),
+        }
+    }
+
+    #[test]
+    #[cfg(feature = "tokio")]
+    fn test_multiple_concurrent_tasks() {
+        let handler = RealAsyncHandler::new();
+        let mut state = HandlerState::new();
+
+        // Spawn multiple tasks
+        let task1 =
+            match handler.handle("spawn", &[Value::Int(20)], Continuation::new(), &mut state) {
+                HandlerResult::Resume(Value::Int(id)) => id,
+                _ => panic!("spawn failed"),
+            };
+
+        let task2 =
+            match handler.handle("spawn", &[Value::Int(30)], Continuation::new(), &mut state) {
+                HandlerResult::Resume(Value::Int(id)) => id,
+                _ => panic!("spawn failed"),
+            };
+
+        let task3 =
+            match handler.handle("spawn", &[Value::Int(10)], Continuation::new(), &mut state) {
+                HandlerResult::Resume(Value::Int(id)) => id,
+                _ => panic!("spawn failed"),
+            };
+
+        // All task IDs should be different
+        assert_ne!(task1, task2);
+        assert_ne!(task2, task3);
+        assert_ne!(task1, task3);
+
+        // Await in reverse order (fastest first)
+        let result3 = handler.handle(
+            "await",
+            &[Value::Int(task3)],
+            Continuation::new(),
+            &mut state,
+        );
+        assert!(matches!(result3, HandlerResult::Resume(Value::Int(20))));
+
+        let result1 = handler.handle(
+            "await",
+            &[Value::Int(task1)],
+            Continuation::new(),
+            &mut state,
+        );
+        assert!(matches!(result1, HandlerResult::Resume(Value::Int(40))));
+
+        let result2 = handler.handle(
+            "await",
+            &[Value::Int(task2)],
+            Continuation::new(),
+            &mut state,
+        );
+        assert!(matches!(result2, HandlerResult::Resume(Value::Int(60))));
     }
 
     #[test]

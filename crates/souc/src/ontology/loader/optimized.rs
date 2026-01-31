@@ -9,7 +9,7 @@
 // Compiler internals often require deep nesting for pattern matching and control flow.
 #![allow(clippy::excessive_nesting)]
 
-use super::{IRI, LoadedTerm};
+use super::{LoadedTerm, IRI};
 use std::collections::{HashMap, HashSet};
 use std::sync::RwLock;
 

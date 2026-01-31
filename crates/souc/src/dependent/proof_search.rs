@@ -11,13 +11,13 @@
 //! 6. **Transitivity**: Try chaining through intermediates
 //! 7. **Fallback**: Runtime check (if gradual) or failure
 
-use super::TypeContext;
 use super::predicates::{
     CausalPredicate, ConfidencePredicate, OntologyPredicate, Predicate, PredicateKind,
     TemporalPredicate,
 };
 use super::proofs::{ArithDerivation, CausalProof, Proof, ProofKind};
 use super::types::{CausalGraphType, ConfidenceType};
+use super::TypeContext;
 use std::collections::HashSet;
 
 /// Result of proof search

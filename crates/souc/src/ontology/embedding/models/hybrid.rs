@@ -14,7 +14,7 @@ use super::super::{
 };
 use super::structural::StructuralGenerator;
 use super::textual::TextualGenerator;
-use crate::ontology::loader::{IRI, LoadedTerm};
+use crate::ontology::loader::{LoadedTerm, IRI};
 
 /// Hybrid embedding generator combining structural and textual approaches
 pub struct HybridGenerator {

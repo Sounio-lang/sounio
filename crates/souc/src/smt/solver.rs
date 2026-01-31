@@ -298,7 +298,11 @@ impl MockSolver {
                         None => all_true = false,
                     }
                 }
-                if all_true { Some(true) } else { None }
+                if all_true {
+                    Some(true)
+                } else {
+                    None
+                }
             }
 
             SmtFormula::Or(fs) => {
@@ -310,7 +314,11 @@ impl MockSolver {
                         None => all_false = false,
                     }
                 }
-                if all_false { Some(false) } else { None }
+                if all_false {
+                    Some(false)
+                } else {
+                    None
+                }
             }
 
             SmtFormula::Implies(p, q) => {

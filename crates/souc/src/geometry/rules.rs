@@ -734,19 +734,15 @@ mod tests {
 
         // midpoint should subsume collinear
         let subsumes_collinear = registry.subsumes(&PredicateKind::Midpoint);
-        assert!(
-            subsumes_collinear
-                .iter()
-                .any(|r| r.specific == PredicateKind::Collinear)
-        );
+        assert!(subsumes_collinear
+            .iter()
+            .any(|r| r.specific == PredicateKind::Collinear));
 
         // collinear should be subsumed by midpoint
         let subsumed = registry.subsumed_by(&PredicateKind::Collinear);
-        assert!(
-            subsumed
-                .iter()
-                .any(|r| r.general == PredicateKind::Midpoint)
-        );
+        assert!(subsumed
+            .iter()
+            .any(|r| r.general == PredicateKind::Midpoint));
     }
 
     #[test]

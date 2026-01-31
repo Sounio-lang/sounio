@@ -8,7 +8,7 @@ use std::fmt;
 use std::hash::{Hash, Hasher};
 
 use crate::epistemic::bayesian::BetaConfidence;
-use crate::epistemic::merkle::{Hash256, hash};
+use crate::epistemic::merkle::{hash, Hash256};
 use crate::epistemic::{Revisability, Source};
 
 /// Kind of geometric predicate

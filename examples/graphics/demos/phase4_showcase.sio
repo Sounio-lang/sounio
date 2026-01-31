@@ -1,0 +1,364 @@
+// phase4_showcase.sio - Interactive Features Demo
+//
+// Demonstrates Phase 4 capabilities:
+// - Interactive plot state management
+// - Zoom operations (in/out, centered)
+// - Pan operations (directional)
+// - Reset view functionality
+// - Control hints display
+// - Multiple visualization states
+
+import "stdlib/math/core.sio"
+import "../lib/00_canvas.sio"
+import "../lib/01_colors.sio"
+import "../lib/02_drawing.sio"
+import "../lib/03_text.sio"
+import "../lib/10_axes.sio"
+import "../lib/11_scatter.sio"
+import "../lib/12_line_plot.sio"
+import "../lib/30_input.sio"
+import "../lib/31_interactive_plot.sio"
+
+// ============================================================================
+// Demo Configuration
+// ============================================================================
+
+struct DemoState {
+    step: i32,           // Current demo step
+    max_steps: i32,      // Total number of steps
+    paused: i32          // 1 if paused, 0 if running
+}
+
+fn demo_state_new(max_steps: i32) -> DemoState {
+    return DemoState {
+        step: 0,
+        max_steps: max_steps,
+        paused: 0
+    }
+}
+
+// ============================================================================
+// Sample Data Generation
+// ============================================================================
+
+// Generate sine wave data
+fn generate_sine_data(n_points: i32, amplitude: f64, frequency: f64) -> ([f64; 100], [f64; 100]) with Mut, Panic, Div {
+    var x_data: [f64; 100] = [0.0; 100]
+    var y_data: [f64; 100] = [0.0; 100]
+
+    var i = 0
+    while i < n_points {
+        let x = (i as f64) / ((n_points - 1) as f64) * 10.0 - 5.0
+        let y = amplitude * sin(frequency * x)
+
+        x_data[i] = x
+        y_data[i] = y
+        i = i + 1
+    }
+
+    return (x_data, y_data)
+}
+
+// Generate scatter points
+fn generate_scatter_points(n_points: i32, seed: i32) -> [ScatterPoint; 50] with Mut, Panic {
+    var points: [ScatterPoint; 50] = [scatter_point_default(); 50]
+
+    var i = 0
+    var rng = seed
+    while i < n_points {
+        // Simple LCG random number generator
+        rng = (rng * 1103515245 + 12345) % 2147483648
+        let x = ((rng % 1000) as f64 / 1000.0) * 10.0 - 5.0
+
+        rng = (rng * 1103515245 + 12345) % 2147483648
+        let y = ((rng % 1000) as f64 / 1000.0) * 6.0 - 3.0
+
+        points[i] = scatter_point_new(x, y, MARKER_DOT(), COLOR_CYAN())
+        i = i + 1
+    }
+
+    return points
+}
+
+// ============================================================================
+// Render Functions
+// ============================================================================
+
+// Draw the current plot with interactive state
+fn draw_interactive_scene(
+    canvas: Canvas,
+    plot: &InteractivePlot,
+    x_data: &[f64],
+    y_data: &[f64],
+    scatter_points: &[ScatterPoint],
+    n_scatter: i32
+) -> Canvas with Mut, Panic, Div {
+    var c = canvas
+
+    let vp = &plot.viewport
+
+    // Draw axes and grid
+    c = draw_axes(c, vp, COLOR_WHITE())
+    c = draw_grid(c, vp, COLOR_DARK_GRAY())
+
+    // Draw sine wave
+    let series = line_series_new(COLOR_GREEN(), LINE_SOLID(), 1)
+    c = line_plot(c, vp, x_data, y_data, 50, series)
+
+    // Draw scatter points
+    c = scatter_plot(c, vp, scatter_points, n_scatter)
+
+    // Draw controls and indicators
+    c = plot_draw_controls(c, plot)
+    c = plot_draw_indicator(c, plot)
+
+    return c
+}
+
+// Draw step description
+fn draw_step_description(canvas: Canvas, step: i32) -> Canvas with Mut, Panic {
+    var c = canvas
+
+    let style = text_style_colored(COLOR_YELLOW())
+
+    if step == 0 {
+        c = draw_text(c, 2, 0, "Step 1/6: Initial View (1.0x zoom)", style)
+        c = draw_text(c, 2, 1, "  Original viewport: (-5, 5) x (-3, 3)", text_style_colored(COLOR_DARK_GRAY()))
+    }
+
+    if step == 1 {
+        c = draw_text(c, 2, 0, "Step 2/6: Zoom In (1.5x)", style)
+        c = draw_text(c, 2, 1, "  Narrower view, more detail visible", text_style_colored(COLOR_DARK_GRAY()))
+    }
+
+    if step == 2 {
+        c = draw_text(c, 2, 0, "Step 3/6: Pan Right", style)
+        c = draw_text(c, 2, 1, "  Shifted viewport to the right", text_style_colored(COLOR_DARK_GRAY()))
+    }
+
+    if step == 3 {
+        c = draw_text(c, 2, 0, "Step 4/6: Zoom In More (2.5x)", style)
+        c = draw_text(c, 2, 1, "  Very narrow view, examining details", text_style_colored(COLOR_DARK_GRAY()))
+    }
+
+    if step == 4 {
+        c = draw_text(c, 2, 0, "Step 5/6: Pan Up", style)
+        c = draw_text(c, 2, 1, "  Shifted viewport upward", text_style_colored(COLOR_DARK_GRAY()))
+    }
+
+    if step == 5 {
+        c = draw_text(c, 2, 0, "Step 6/6: Reset View", style)
+        c = draw_text(c, 2, 1, "  Back to original viewport", text_style_colored(COLOR_DARK_GRAY()))
+    }
+
+    return c
+}
+
+// ============================================================================
+// Demo Steps
+// ============================================================================
+
+fn execute_demo_step(plot: &!InteractivePlot, step: i32) with Mut, Div {
+    if step == 0 {
+        // Initial view - do nothing
+    }
+
+    if step == 1 {
+        // Zoom in 1.5x
+        plot_zoom_in(plot, 1.5)
+    }
+
+    if step == 2 {
+        // Pan right
+        plot_pan(plot, 2.0, 0.0)
+    }
+
+    if step == 3 {
+        // Zoom in more (2.5x total from original)
+        plot_set_zoom(plot, 2.5)
+    }
+
+    if step == 4 {
+        // Pan up
+        plot_pan(plot, 0.0, 1.5)
+    }
+
+    if step == 5 {
+        // Reset to original view
+        plot_reset_view(plot)
+    }
+}
+
+// ============================================================================
+// Main Demo Loop
+// ============================================================================
+
+fn main() -> i32 with IO, Mut, Panic, Div {
+    print("\x1b[2J\x1b[H")  // Clear screen
+    print("=== Phase 4: Interactive Features Showcase ===\n\n")
+    print("This demo shows zoom and pan operations applied to a plot.\n")
+    print("Press Enter to advance through the steps...\n\n")
+
+    // Generate sample data
+    let sine_data = generate_sine_data(50, 2.0, 1.0)
+    let x_data = sine_data.0
+    let y_data = sine_data.1
+    let scatter_points = generate_scatter_points(25, 12345)
+
+    // Create initial viewport and interactive plot
+    let viewport = viewport_new(-5.0, 5.0, -3.0, 3.0, 5, 4, 70, 24)
+    var plot = interactive_plot_new(viewport)
+
+    // Demo state
+    var demo = demo_state_new(6)
+
+    // Run demo steps
+    while demo.step < demo.max_steps {
+        // Execute the step's operation
+        execute_demo_step(&!plot, demo.step)
+
+        // Clear and render
+        print("\x1b[2J\x1b[H")
+
+        var canvas = canvas_new(80, 30)
+        canvas = canvas_clear(canvas)
+
+        // Draw step description
+        canvas = draw_step_description(canvas, demo.step)
+
+        // Draw the scene
+        canvas = draw_interactive_scene(canvas, &plot, &x_data, &y_data, &scatter_points, 25)
+
+        // Render to terminal
+        canvas_render(&canvas)
+
+        // Print current state info
+        print("\n")
+        print("Current State:\n")
+        print("  Zoom: ")
+        print_f64(plot.zoom_level)
+        print("x\n")
+        print("  Pan:  (")
+        print_f64(plot.pan_x)
+        print(", ")
+        print_f64(plot.pan_y)
+        print(")\n")
+        print("  Viewport: (")
+        print_f64(plot.viewport.x_min)
+        print(", ")
+        print_f64(plot.viewport.x_max)
+        print(") x (")
+        print_f64(plot.viewport.y_min)
+        print(", ")
+        print_f64(plot.viewport.y_max)
+        print(")\n\n")
+
+        // Pause between steps
+        if demo.step < demo.max_steps - 1 {
+            print("Press Enter for next step...")
+            // Note: In full implementation, would read stdin here
+            // For now, just continue automatically
+        }
+
+        demo.step = demo.step + 1
+    }
+
+    print("\n=== Demo Complete ===\n\n")
+    print("Interactive Features Demonstrated:\n")
+    print("  • plot_zoom_in() - Increases zoom level\n")
+    print("  • plot_zoom_out() - Decreases zoom level\n")
+    print("  • plot_set_zoom() - Sets specific zoom level\n")
+    print("  • plot_pan() - Shifts viewport by offset\n")
+    print("  • plot_reset_view() - Returns to original view\n")
+    print("  • plot_update_viewport() - Recalculates bounds\n\n")
+
+    print("Mouse Event Handlers (require event loop):\n")
+    print("  • plot_on_mouse_press() - Start drag operation\n")
+    print("  • plot_on_mouse_move() - Pan while dragging\n")
+    print("  • plot_on_mouse_release() - End drag operation\n")
+    print("  • plot_on_mouse_scroll() - Zoom at cursor position\n\n")
+
+    print("Keyboard Event Handlers (require event loop):\n")
+    print("  • Arrow keys - Pan in direction\n")
+    print("  • +/= keys - Zoom in\n")
+    print("  • - key - Zoom out\n")
+    print("  • r key - Reset view\n")
+    print("  • h key - Toggle help display\n\n")
+
+    print("Future Enhancement:\n")
+    print("  Full event loop with raw terminal mode for\n")
+    print("  real-time mouse and keyboard interaction.\n")
+
+    return 0
+}
+
+// ============================================================================
+// Helper Functions
+// ============================================================================
+
+fn print_f64(x: f64) with IO, Div, Panic {
+    if x < 0.0 {
+        print("-")
+        print_f64_unsigned(0.0 - x)
+    } else {
+        print_f64_unsigned(x)
+    }
+}
+
+fn print_f64_unsigned(x: f64) with IO, Div, Panic {
+    let int_part = x as i32
+    print_i32(int_part)
+    print(".")
+
+    let frac = x - (int_part as f64)
+    let scaled = (frac * 100.0) as i32
+    if scaled < 10 {
+        print("0")
+    }
+    print_i32(scaled)
+}
+
+fn print_i32(x: i32) with IO, Div, Panic {
+    if x == 0 {
+        print("0")
+        return
+    }
+
+    if x < 0 {
+        print("-")
+        print_i32_unsigned(0 - x)
+    } else {
+        print_i32_unsigned(x)
+    }
+}
+
+fn print_i32_unsigned(x: i32) with IO, Div, Panic {
+    if x == 0 {
+        return
+    }
+
+    let digit = x % 10
+    let rest = x / 10
+
+    if rest > 0 {
+        print_i32_unsigned(rest)
+    }
+
+    let ch = 48 + digit
+    print_char(ch)
+}
+
+fn print_char(code: i32) with IO {
+    if code == 48 { print("0") }
+    else { if code == 49 { print("1") }
+    else { if code == 50 { print("2") }
+    else { if code == 51 { print("3") }
+    else { if code == 52 { print("4") }
+    else { if code == 53 { print("5") }
+    else { if code == 54 { print("6") }
+    else { if code == 55 { print("7") }
+    else { if code == 56 { print("8") }
+    else { if code == 57 { print("9") }
+    else { print("?") }
+    }}}}}}}}}}
+}

@@ -63,6 +63,9 @@ pub mod promotion;
 // Epistemic + Refinement Type integration
 pub mod refined_epistemic;
 
+// SIMD-accelerated epistemic operations
+pub mod simd_knowledge;
+
 pub use confidence::{Confidence, EpistemicStatus, Evidence, EvidenceKind, Revisability, Source};
 pub use heterogeneity::{
     HeterogeneityConfig, HeterogeneityResolver, ResolutionResult, ResolutionStrategy,
@@ -145,3 +148,8 @@ pub use mcmc::{compute_r_hat, HamiltonianMC, MCMCConfig, MCMCResult, MetropolisH
 
 // Gaussian Process regression for surrogate modeling and epistemic UQ
 pub use gaussian_process::{GPConfig, GPPrediction, GaussianProcess, Kernel};
+
+// SIMD-accelerated epistemic knowledge vectors
+pub use simd_knowledge::{
+    batch_add_uncertainties, batch_weighted_mean, KnowledgeVec4, KnowledgeVec8,
+};

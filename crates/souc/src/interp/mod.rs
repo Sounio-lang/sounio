@@ -15,7 +15,7 @@ pub mod value;
 pub use autodiff::Tape;
 pub use builtins::BuiltinRegistry;
 pub use causal::{CausalDAG, CausalModel};
-pub use closure::{DCallable, InterpreterClosure, extract_closure};
+pub use closure::{extract_closure, DCallable, InterpreterClosure};
 pub use effect_dispatch::{
     DispatchResult, EffectContext, EffectError, EffectHandler, EffectKind, HandlerState,
 };

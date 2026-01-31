@@ -8,6 +8,20 @@ weight: 4
 
 This section covers the Sounio compiler API, runtime services, and tooling interfaces.
 
+## Standard Library API Reference
+
+**[📚 Browse the complete Standard Library API documentation →](/api/)**
+
+Auto-generated documentation for all stdlib modules, including:
+- Mathematical functions (math, linalg, stats)
+- Epistemic types (Knowledge, Uncertainty)
+- Scientific computing (ODE solvers, optimization)
+- Quantum computing (QNN, quantum circuits)
+- GPU programming (kernels, tensors)
+- And much more...
+
+---
+
 ## Compiler API
 
 ### Command Line Interface

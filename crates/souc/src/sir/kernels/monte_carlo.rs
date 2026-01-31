@@ -1383,11 +1383,9 @@ mod tests {
         assert!(module.function_by_name("mc_propagate_low").is_some());
         assert!(module.function_by_name("mc_update_weights").is_some());
         assert!(module.function_by_name("mc_resample").is_some());
-        assert!(
-            module
-                .function_by_name("mc_partition_by_confidence")
-                .is_some()
-        );
+        assert!(module
+            .function_by_name("mc_partition_by_confidence")
+            .is_some());
         assert!(module.function_by_name("mc_epistemic_reduction").is_some());
 
         // Check epistemic optimization flag is set

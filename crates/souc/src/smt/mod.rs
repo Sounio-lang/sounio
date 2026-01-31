@@ -33,13 +33,13 @@ pub use solver::{MockSolver, SmtSolver, SolverError, VerificationResult};
 
 // Z3 solver exports
 pub use z3_solver::{
-    Counterexample, CounterexampleValue, EpistemicProperty as Z3EpistemicProperty,
-    EpistemicVerifier as Z3EpistemicVerifier, EpistemicVerifyResult, MockEpistemicVerifier,
-    create_epistemic_verifier,
+    create_epistemic_verifier, Counterexample, CounterexampleValue,
+    EpistemicProperty as Z3EpistemicProperty, EpistemicVerifier as Z3EpistemicVerifier,
+    EpistemicVerifyResult, MockEpistemicVerifier,
 };
 
 #[cfg(feature = "smt")]
-pub use z3_solver::{Z3Model, Z3Solver, Z3Stats, create_z3_context};
+pub use z3_solver::{create_z3_context, Z3Model, Z3Solver, Z3Stats};
 
 use crate::refinement::predicate::{Atom, BinOp, CompareOp, Predicate, Term, UnOp};
 

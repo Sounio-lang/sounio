@@ -7,7 +7,7 @@ use std::collections::{HashMap, HashSet};
 
 use super::cluster::{Cluster, ClusteringResult};
 use super::constraint::{ConstraintSet, ForcedRegion, LayoutConstraint};
-use super::plan::{LayoutConfig, LayoutPlan, MemoryRegion, generate_layout};
+use super::plan::{generate_layout, LayoutConfig, LayoutPlan, MemoryRegion};
 
 /// Result of constraint solving
 #[derive(Debug)]

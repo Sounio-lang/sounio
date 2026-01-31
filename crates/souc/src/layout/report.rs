@@ -259,8 +259,8 @@ pub fn brief_summary(plan: &LayoutPlan, comparison: Option<&LayoutComparison>) -
 mod tests {
     use super::super::cluster::Cluster;
     use super::super::cluster::ClusteringResult;
-    use super::super::plan::LayoutConfig;
     use super::super::plan::generate_layout;
+    use super::super::plan::LayoutConfig;
     use super::*;
 
     #[test]

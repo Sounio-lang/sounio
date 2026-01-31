@@ -76,7 +76,6 @@
 use std::collections::HashMap;
 use std::fmt;
 
-use super::SirModule;
 use super::blocks::{BasicBlock, SirFunction, Terminator};
 use super::ops::{ArithOp, EpistemicOp, MemoryOp, SirInst};
 use super::types::{
@@ -84,6 +83,7 @@ use super::types::{
     VectorType,
 };
 use super::values::{BlockId, Constant, FuncId, ValueId};
+use super::SirModule;
 
 // ============================================================================
 // SPIR-V Types and Constants

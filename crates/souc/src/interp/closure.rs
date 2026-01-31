@@ -8,7 +8,7 @@ use std::cell::RefCell;
 use std::collections::HashMap;
 use std::rc::Rc;
 
-use miette::{Result, miette};
+use miette::{miette, Result};
 
 use crate::hir::HirFn;
 

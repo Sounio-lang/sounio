@@ -450,7 +450,8 @@ impl LatentMCTSNode {
 
     /// Check if this node should be pruned due to uncertainty
     pub fn should_prune(&self, config: &LatentMCTSConfig) -> bool {
-        self.state.mean_uncertainty() > config.uncertainty_threshold && self.visits > 10 // Only prune after some exploration
+        self.state.mean_uncertainty() > config.uncertainty_threshold && self.visits > 10
+        // Only prune after some exploration
     }
 
     /// Expand this node using the model

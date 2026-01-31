@@ -542,8 +542,8 @@ impl ModuleAliasAnalysis {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::mir::FuncId;
     use crate::mir::builder::{FunctionBuilder, ModuleBuilder};
+    use crate::mir::FuncId;
 
     #[test]
     fn test_alias_result_meet() {

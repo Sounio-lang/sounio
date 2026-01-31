@@ -7,8 +7,8 @@
 #![allow(clippy::excessive_nesting)]
 
 use super::pass_manager::MIRPass;
-use crate::mir::MirModule;
 use crate::mir::analysis::ssa_validator::SSAValidator;
+use crate::mir::MirModule;
 use std::collections::HashMap;
 
 /// Optimization pipeline with integrated SSA validation

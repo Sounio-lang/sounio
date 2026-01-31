@@ -10,7 +10,7 @@ use std::time::{Duration, Instant};
 
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
-use tokio::sync::{Mutex, RwLock, broadcast, mpsc};
+use tokio::sync::{broadcast, mpsc, Mutex, RwLock};
 
 use super::protocol::*;
 

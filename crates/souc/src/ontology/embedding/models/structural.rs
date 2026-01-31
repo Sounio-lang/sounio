@@ -18,7 +18,7 @@
 use std::collections::HashMap;
 
 use super::super::{Embedding, EmbeddingError, EmbeddingGenerator, EmbeddingModel};
-use crate::ontology::loader::{IRI, LoadedTerm};
+use crate::ontology::loader::{LoadedTerm, IRI};
 
 /// OWL2Vec*-style structural embedding generator
 pub struct StructuralGenerator {

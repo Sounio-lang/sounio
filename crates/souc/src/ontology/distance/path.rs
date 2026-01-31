@@ -1,11 +1,11 @@
 // Sounio Compiler - Ontology Hierarchy Graph Operations
 // Path-based semantic distance calculations using graph structures
 
-use petgraph::Direction;
 use petgraph::graph::{DiGraph, NodeIndex};
+use petgraph::Direction;
 use std::collections::{HashMap, HashSet, VecDeque};
 
-use crate::ontology::loader::{IRI, LoadedTerm};
+use crate::ontology::loader::{LoadedTerm, IRI};
 
 /// Hierarchy graph for computing path-based semantic distances
 ///

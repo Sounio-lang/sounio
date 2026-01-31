@@ -17,4 +17,4 @@
 
 pub mod pybindgen;
 
-pub use pybindgen::{PythonBindingGenerator, generate_python_bindings};
+pub use pybindgen::{generate_python_bindings, PythonBindingGenerator};

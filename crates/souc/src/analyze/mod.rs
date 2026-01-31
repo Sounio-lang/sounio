@@ -9,5 +9,5 @@
 pub mod dead_code;
 pub mod metrics;
 
-pub use dead_code::{DeadCodeReport, UnreachableCode, UnusedItem, analyze_dead_code};
-pub use metrics::{FileMetrics, FunctionMetrics, calculate_metrics};
+pub use dead_code::{analyze_dead_code, DeadCodeReport, UnreachableCode, UnusedItem};
+pub use metrics::{calculate_metrics, FileMetrics, FunctionMetrics};

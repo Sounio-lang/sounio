@@ -10,8 +10,8 @@
 //! - L2: Large (100K), warm pairs promoted to L1 after repeated access
 
 use std::collections::HashMap;
-use std::sync::RwLock;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::RwLock;
 
 /// Cache key for distance lookups (normalized for symmetry)
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -232,7 +232,8 @@ impl DistanceCache {
     /// Memory usage estimate in bytes
     pub fn memory_bytes(&self) -> usize {
         self.len()
-            * (std::mem::size_of::<DistanceCacheKey>() + std::mem::size_of::<CachedDistance>() + 32) // HashMap overhead estimate
+            * (std::mem::size_of::<DistanceCacheKey>() + std::mem::size_of::<CachedDistance>() + 32)
+        // HashMap overhead estimate
     }
 }
 

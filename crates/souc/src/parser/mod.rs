@@ -1530,7 +1530,7 @@ impl<'a> Parser<'a> {
                 // Glob import: `use path::*`
                 self.advance(); // consume ::
                 self.advance(); // consume *
-                // Accept optional semicolon after import statement
+                                // Accept optional semicolon after import statement
                 if self.at(TokenKind::Semi) {
                     self.advance();
                 }

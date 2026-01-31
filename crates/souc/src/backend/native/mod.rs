@@ -81,6 +81,7 @@
 pub mod aarch64;
 pub mod alloc;
 pub mod autodiff_runtime;
+pub mod continuation;
 pub mod effects;
 pub mod elf;
 pub mod epistemic_runtime;

@@ -41,8 +41,8 @@ pub use client::{BuildClient, ClientConfig, ClientError};
 pub use protocol::{
     Artifact, BuildConfig, BuildError, BuildJob, BuildMessage, BuildResult, BuildStats,
     ClientCapabilities, Dependency, DependencyType, Diagnostic, DiagnosticSeverity, ErrorCode,
-    FileInfo, JobProgress, JobType, OutputSpec, OutputType, PROTOCOL_VERSION, ProtocolError,
-    ServerCapabilities, SourceFile, WorkerInfo, WorkerStatus,
+    FileInfo, JobProgress, JobType, OutputSpec, OutputType, ProtocolError, ServerCapabilities,
+    SourceFile, WorkerInfo, WorkerStatus, PROTOCOL_VERSION,
 };
 pub use reproducible::{
     BuildEnvironment, BuildInputs, BuildProvenance, DependencyInput, ReproducibilityResult,

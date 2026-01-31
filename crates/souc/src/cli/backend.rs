@@ -526,6 +526,11 @@ pub fn extract_build_args(arg_matches: &clap::ArgMatches) -> Result<BuildArgs, S
             .collect();
     }
 
+    // Enable CPS transformation
+    if arg_matches.get_flag("enable_cps") {
+        build_args.native_opts.enable_cps = Some(true);
+    }
+
     // Check backend availability
     if !build_args.backend.is_available() {
         return Err(format!(
@@ -552,6 +557,7 @@ pub fn print_backend_help() {
     println!("  --alloc=<strategy>           Allocation strategy (epistemic, linear, graph)");
     println!("  -g, --debug                  Emit debug information");
     println!("  --emit=<stages>              Emit intermediate stages (ast,sir,asm)");
+    println!("  --enable-cps                 Enable CPS transformation for effect handlers (experimental)");
     println!();
 }
 
@@ -792,14 +798,22 @@ fn compile_native(args: &BuildArgs) -> Result<(PathBuf, Option<NativeMetrics>), 
         use crate::backend::cps_transform::CpsTransform;
 
         let cps_start = Instant::now();
+        let func_count_before = hlir.functions.len();
         let mut transform = CpsTransform::new();
         hlir = transform
             .transform(hlir)
             .map_err(|e| format!("CPS transformation error: {}", e))?;
+        let func_count_after = hlir.functions.len();
         let cps_ms = cps_start.elapsed().as_millis() as u64;
 
         if args.verbose {
             println!("✓ Applied CPS transformation in {}ms", cps_ms);
+            let transformed_count = func_count_after - func_count_before;
+            if transformed_count > 0 {
+                println!("  {} functions transformed to CPS", transformed_count);
+            } else {
+                println!("  No effectful functions found (CPS transformation skipped)");
+            }
         }
     }
 
@@ -1285,11 +1299,35 @@ fn compile_cranelift(args: &BuildArgs) -> Result<(PathBuf, Option<NativeMetrics>
 
         // Step 3: Lower to HLIR (HIR -> HLIR)
         let lower_hlir_start = Instant::now();
-        let hlir = lower_hlir(&hir);
+        let mut hlir = lower_hlir(&hir);
         let lower_hlir_ms = lower_hlir_start.elapsed().as_millis() as u64;
 
         if args.verbose {
             println!("Cranelift: Lowered to HLIR in {}ms", lower_hlir_ms);
+        }
+
+        // Step 3.5: Apply CPS transformation if requested
+        if args.native_opts.enable_cps.unwrap_or(false) {
+            use crate::backend::cps_transform::CpsTransform;
+
+            let cps_start = Instant::now();
+            let func_count_before = hlir.functions.len();
+            let mut transform = CpsTransform::new();
+            hlir = transform
+                .transform(hlir)
+                .map_err(|e| format!("CPS transformation error: {}", e))?;
+            let func_count_after = hlir.functions.len();
+            let cps_ms = cps_start.elapsed().as_millis() as u64;
+
+            if args.verbose {
+                println!("Cranelift: Applied CPS transformation in {}ms", cps_ms);
+                let transformed_count = func_count_after - func_count_before;
+                if transformed_count > 0 {
+                    println!("  {} functions transformed to CPS", transformed_count);
+                } else {
+                    println!("  No effectful functions found (CPS transformation skipped)");
+                }
+            }
         }
 
         // Step 4: Compile through Cranelift AOT

@@ -12,7 +12,7 @@
 //! ```
 
 use super::attrs::{
-    AttributeArgs, AttributeValue, RawAttribute, TestAttributes, parse_test_attributes,
+    parse_test_attributes, AttributeArgs, AttributeValue, RawAttribute, TestAttributes,
 };
 use crate::ast::{Ast, FnDef, Item};
 use crate::common::{NodeId, Span};

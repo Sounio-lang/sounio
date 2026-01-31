@@ -162,7 +162,11 @@ fn days_from_date(year: i32, month: u32, day: u32) -> Option<i64> {
     }
 
     fn days_in_year(y: i32) -> i64 {
-        if is_leap_year(y) { 366 } else { 365 }
+        if is_leap_year(y) {
+            366
+        } else {
+            365
+        }
     }
 
     // Calculate days from 1970 to start of year
@@ -200,7 +204,11 @@ fn epoch_to_iso_date(epoch_secs: i64) -> String {
     }
 
     fn days_in_year(y: i32) -> i64 {
-        if is_leap_year(y) { 366 } else { 365 }
+        if is_leap_year(y) {
+            366
+        } else {
+            365
+        }
     }
 
     let days = epoch_secs / 86400;
