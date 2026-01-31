@@ -532,7 +532,7 @@ impl ResilientBuilder {
     }
 
     /// Build a resilient dispatcher wrapping the given handler.
-    pub fn wrap<H: HandlerCapability>(self, handler: H) -> ResilientDispatcher<H> {
+    pub fn wrap<H: HandlerCapability + RefUnwindSafe>(self, handler: H) -> ResilientDispatcher<H> {
         ResilientDispatcher::with_config(handler, self.config)
     }
 }
@@ -554,6 +554,9 @@ mod tests {
         fail_count: AtomicU32,
         fail_until: u32,
     }
+
+    // AtomicU32 is RefUnwindSafe, so this is safe
+    impl RefUnwindSafe for FailingHandler {}
 
     impl FailingHandler {
         fn new(fail_until: u32) -> Self {

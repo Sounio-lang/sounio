@@ -725,20 +725,70 @@ impl SounioLspServer {
     }
 
     /// Extract document symbols
+    #[allow(deprecated)]
     fn extract_document_symbols(&self, content: &str) -> Vec<DocumentSymbol> {
         let mut symbols = Vec::new();
         let lines: Vec<&str> = content.lines().collect();
 
         for (i, line) in lines.iter().enumerate() {
-            if line.contains("fn ") {
-                symbols.push(DocumentSymbol::new(
-                    "function".to_string(),
-                    SymbolKind::Function,
-                    Range::new(
+            // Function definitions
+            if let Some(fn_pos) = line.find("fn ") {
+                let name_start = fn_pos + 3;
+                let name_end = line[name_start..]
+                    .find(|c: char| !c.is_alphanumeric() && c != '_')
+                    .map(|p| name_start + p)
+                    .unwrap_or(line.len());
+                let name = line[name_start..name_end].trim();
+
+                if !name.is_empty() {
+                    let range = Range::new(
                         Position::new(i as u32, 0),
                         Position::new(i as u32, line.len() as u32),
-                    ),
-                ));
+                    );
+                    symbols.push(DocumentSymbol {
+                        name: name.to_string(),
+                        detail: None,
+                        kind: SymbolKind::FUNCTION,
+                        tags: None,
+                        deprecated: None,
+                        range,
+                        selection_range: Range::new(
+                            Position::new(i as u32, name_start as u32),
+                            Position::new(i as u32, name_end as u32),
+                        ),
+                        children: None,
+                    });
+                }
+            }
+
+            // Struct definitions
+            if let Some(struct_pos) = line.find("struct ") {
+                let name_start = struct_pos + 7;
+                let name_end = line[name_start..]
+                    .find(|c: char| !c.is_alphanumeric() && c != '_')
+                    .map(|p| name_start + p)
+                    .unwrap_or(line.len());
+                let name = line[name_start..name_end].trim();
+
+                if !name.is_empty() {
+                    let range = Range::new(
+                        Position::new(i as u32, 0),
+                        Position::new(i as u32, line.len() as u32),
+                    );
+                    symbols.push(DocumentSymbol {
+                        name: name.to_string(),
+                        detail: None,
+                        kind: SymbolKind::STRUCT,
+                        tags: None,
+                        deprecated: None,
+                        range,
+                        selection_range: Range::new(
+                            Position::new(i as u32, name_start as u32),
+                            Position::new(i as u32, name_end as u32),
+                        ),
+                        children: None,
+                    });
+                }
             }
         }
 
@@ -756,21 +806,27 @@ impl SounioLspServer {
         Some(WorkspaceEdit::new(HashMap::new()))
     }
 
-    /// Get semantic tokens
+    /// Get semantic tokens (internal representation)
+    #[allow(dead_code)]
     fn get_semantic_tokens(&self, content: &str) -> Vec<SemanticToken> {
         self.analyze_tokens(content)
     }
 
     /// Get code actions
-    fn get_code_actions(&self, content: str, range: Range) -> Vec<CodeAction> {
-        let mut actions = Vec::new();
+    fn get_code_actions(&self, _content: &str, _range: Range) -> CodeActionResponse {
+        let mut actions: Vec<CodeActionOrCommand> = Vec::new();
 
         // Add epistemic actions
-        actions.push(CodeAction::new(
-            "Add uncertainty bounds".to_string(),
-            None,
-            CodeActionKind::REFACTOR_INLINE,
-        ));
+        actions.push(CodeActionOrCommand::CodeAction(CodeAction {
+            title: "Add uncertainty bounds".to_string(),
+            kind: Some(CodeActionKind::REFACTOR_INLINE),
+            diagnostics: None,
+            edit: None,
+            command: None,
+            is_preferred: None,
+            disabled: None,
+            data: None,
+        }));
 
         actions
     }
@@ -782,15 +838,56 @@ impl SounioLspServer {
     }
 
     /// Get inlay hints
-    fn get_inlay_hints(&self, content: str, range: Range) -> Vec<InlayHint> {
+    fn get_inlay_hints(&self, content: &str, range: Range) -> Vec<InlayHint> {
         let mut hints = Vec::new();
+        let lines: Vec<&str> = content.lines().collect();
 
-        // Uncertainty hints
-        hints.push(InlayHint::new(
-            range.end,
-            "uncertainty: f64",
-            InlayHintLabel::String("uncertainty: f64".to_string()),
-        ));
+        // Only process lines in the requested range
+        let start_line = range.start.line as usize;
+        let end_line = (range.end.line as usize).min(lines.len());
+
+        for (i, line) in lines
+            .iter()
+            .enumerate()
+            .skip(start_line)
+            .take(end_line - start_line + 1)
+        {
+            // Type inference hints for let bindings without type annotation
+            if line.contains("let ") && !line.contains(':') && line.contains('=') {
+                if let Some(eq_pos) = line.find('=') {
+                    hints.push(InlayHint {
+                        position: Position::new(i as u32, eq_pos as u32),
+                        label: InlayHintLabel::String(": inferred".to_string()),
+                        kind: Some(InlayHintKind::TYPE),
+                        text_edits: None,
+                        tooltip: Some(InlayHintTooltip::String(
+                            "Type inferred by compiler".to_string(),
+                        )),
+                        padding_left: Some(false),
+                        padding_right: Some(true),
+                        data: None,
+                    });
+                }
+            }
+
+            // Epistemic confidence hints
+            if line.contains("Knowledge") || line.contains("confidence") {
+                if let Some(pos) = line.find("Knowledge") {
+                    hints.push(InlayHint {
+                        position: Position::new(i as u32, (pos + 9) as u32),
+                        label: InlayHintLabel::String("🔬 epistemic".to_string()),
+                        kind: Some(InlayHintKind::TYPE),
+                        text_edits: None,
+                        tooltip: Some(InlayHintTooltip::String(
+                            "Epistemic type with uncertainty tracking".to_string(),
+                        )),
+                        padding_left: Some(true),
+                        padding_right: Some(false),
+                        data: None,
+                    });
+                }
+            }
+        }
 
         hints
     }
@@ -809,8 +906,4 @@ impl SounioLspServer {
     }
 }
 
-impl Default for SounioLspServer {
-    fn default() -> Self {
-        Self::new()
-    }
-}
+// Note: Default cannot be implemented for SounioLspServer as it requires a Client

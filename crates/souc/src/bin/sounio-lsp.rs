@@ -3,23 +3,23 @@
 //! Entry point for LSP server that can be run as standalone executable.
 
 use sounio::lsp::server::SounioLspServer;
-use tower_lsp::Server;
-use tower_lsp::LspService;
+use tower_lsp::{LspService, Server};
 
 #[tokio::main]
-async fn main() -> Result<(), Box<dyn std::error::Error>> {
+async fn main() {
     // Initialize tracing
     tracing_subscriber::fmt::init();
 
     eprintln!("Starting Sounio LSP Server...");
 
-    // Create LSP service
-    let (service, socket) = LspService::new(SounioLspServer::new());
-    
+    // Create LSP service with factory function
+    let stdin = tokio::io::stdin();
+    let stdout = tokio::io::stdout();
+
+    let (service, socket) = LspService::new(SounioLspServer::new);
+
     // Run server
-    Server::new(socket).serve(service).await?;
-    
+    Server::new(stdin, stdout, socket).serve(service).await;
+
     eprintln!("Sounio LSP Server stopped");
-    
-    Ok(())
 }

@@ -447,7 +447,7 @@ impl HandlerRegistryBuilder {
     /// Add a custom handler wrapped with resilience patterns.
     pub fn with_resilient<H>(mut self, handler: H) -> Self
     where
-        H: HandlerCapability + Send + Sync + 'static,
+        H: HandlerCapability + Send + Sync + std::panic::RefUnwindSafe + 'static,
     {
         use crate::effects::resilient_dispatch::ResilientDispatcher;
         let resilient = ResilientDispatcher::new(handler).with_retry(3, 100);
