@@ -37,6 +37,9 @@ use crate::lexer::{self, TokenKind};
 use crate::resolve::SymbolTable;
 use crate::types::Type;
 
+use super::query_bridge::{EffectInfo, EpistemicInfo, UnitInfo};
+use super::rich_info::confidence_badge;
+
 // ============================================================================
 // Configuration
 // ============================================================================
@@ -54,6 +57,10 @@ pub struct InlayHintConfig {
     pub closure_return_hints: bool,
     /// Show effect annotations
     pub effect_hints: bool,
+    /// Show epistemic confidence badges
+    pub epistemic_hints: bool,
+    /// Show unit annotations
+    pub unit_hints: bool,
     /// Show lifetime annotations
     pub lifetime_hints: bool,
     /// Show tensor shape hints
@@ -72,6 +79,8 @@ impl Default for InlayHintConfig {
             chaining_hints: true,
             closure_return_hints: true,
             effect_hints: true,
+            epistemic_hints: true,
+            unit_hints: true,
             lifetime_hints: false, // Disabled by default
             tensor_shape_hints: true,
             tensor_shape_warnings: true,
@@ -291,6 +300,9 @@ impl InlayHintProvider {
             Stmt::MacroInvocation(_) => {
                 // Macro invocations are expanded before inlay hint processing
             }
+            Stmt::LocalExtern(_) => {
+                // Local extern declarations don't need inlay hints
+            }
         }
     }
 
@@ -507,6 +519,7 @@ impl InlayHintProvider {
                     Literal::Float(_) => Some(Type::F64),
                     Literal::Bool(_) => Some(Type::Bool),
                     Literal::String(_) => Some(Type::String),
+                    Literal::CString(_) => Some(Type::String), // C string literal
                     Literal::Char(_) => Some(Type::Char),
                     Literal::Unit => Some(Type::Unit),
                     Literal::IntUnit(_, _) | Literal::FloatUnit(_, _) => {
@@ -1072,6 +1085,284 @@ impl InlayHintProvider {
             data: None,
         })
     }
+
+    // ========================================================================
+    // Epistemic Hints
+    // ========================================================================
+
+    /// Generate epistemic confidence badge hint
+    ///
+    /// Shows a colored confidence indicator next to variables with epistemic types:
+    /// - 🟢 95% (high confidence)
+    /// - 🟡 75% (medium confidence)
+    /// - 🟠 50% (low confidence)
+    /// - 🔴 25% (very low confidence)
+    pub fn epistemic_confidence_hint(
+        &self,
+        epistemic: &EpistemicInfo,
+        span: Span,
+        source: &str,
+    ) -> Option<InlayHint> {
+        if !self.config.epistemic_hints {
+            return None;
+        }
+
+        let badge = confidence_badge(epistemic.confidence);
+        let percent = (epistemic.confidence * 100.0).round() as u32;
+
+        // Build tooltip with detailed epistemic information
+        let mut tooltip_parts = vec![format!("**Epistemic Status**\n\nConfidence: {}%", percent)];
+
+        // Add confidence interval if available
+        if let (Some(lower), Some(upper)) = (epistemic.confidence_lower, epistemic.confidence_upper)
+        {
+            tooltip_parts.push(format!(
+                "Interval: [{:.1}%, {:.1}%]",
+                lower * 100.0,
+                upper * 100.0
+            ));
+        }
+
+        // Add source information
+        if !epistemic.source.is_empty() {
+            tooltip_parts.push(format!("Source: {}", epistemic.source));
+        }
+
+        // Add revisability status
+        if epistemic.revisable {
+            tooltip_parts.push("Status: Revisable (can be updated with new evidence)".to_string());
+        } else {
+            tooltip_parts.push("Status: Fixed (immutable knowledge)".to_string());
+        }
+
+        // Add evidence count if any
+        if !epistemic.evidence.is_empty() {
+            tooltip_parts.push(format!("Evidence items: {}", epistemic.evidence.len()));
+        }
+
+        let label = format!(" {} {}%", badge, percent);
+
+        Some(InlayHint {
+            position: self.offset_to_position(source, span.end),
+            label: InlayHintLabel::String(label),
+            kind: Some(InlayHintKind::TYPE),
+            text_edits: None,
+            tooltip: Some(InlayHintTooltip::String(tooltip_parts.join("\n"))),
+            padding_left: Some(true),
+            padding_right: Some(false),
+            data: None,
+        })
+    }
+
+    /// Generate epistemic provenance hint showing the source of knowledge
+    pub fn epistemic_provenance_hint(
+        &self,
+        epistemic: &EpistemicInfo,
+        span: Span,
+        source: &str,
+    ) -> Option<InlayHint> {
+        if !self.config.epistemic_hints {
+            return None;
+        }
+
+        // Only show provenance hint if there's meaningful provenance info
+        let provenance = epistemic.provenance.as_ref()?;
+
+        let label = format!(" ← {}", provenance.origin);
+
+        let mut tooltip_parts = vec![
+            "**Provenance**".to_string(),
+            format!("Origin: {}", provenance.origin),
+        ];
+
+        if !provenance.transformations.is_empty() {
+            tooltip_parts.push(format!(
+                "Transformations: {}",
+                provenance.transformations.join(" → ")
+            ));
+        }
+
+        if !provenance.dependencies.is_empty() {
+            tooltip_parts.push(format!(
+                "Dependencies: {}",
+                provenance.dependencies.join(", ")
+            ));
+        }
+
+        Some(InlayHint {
+            position: self.offset_to_position(source, span.end),
+            label: InlayHintLabel::String(label),
+            kind: None, // Not a type hint
+            text_edits: None,
+            tooltip: Some(InlayHintTooltip::String(tooltip_parts.join("\n"))),
+            padding_left: Some(true),
+            padding_right: Some(false),
+            data: None,
+        })
+    }
+
+    // ========================================================================
+    // Unit Hints
+    // ========================================================================
+
+    /// Generate unit annotation hint for quantities
+    ///
+    /// Shows the inferred or explicit unit for numeric quantities:
+    /// - `@kg*m/s^2` for force
+    /// - `@m/s` for velocity
+    /// - `@dimensionless` for pure numbers
+    pub fn unit_hint(&self, unit: &UnitInfo, span: Span, source: &str) -> Option<InlayHint> {
+        if !self.config.unit_hints {
+            return None;
+        }
+
+        // Don't show hint for dimensionless quantities unless they have an explicit unit
+        if unit.is_dimensionless && unit.unit.is_empty() {
+            return None;
+        }
+
+        let label = if unit.unit.is_empty() {
+            " @dimensionless".to_string()
+        } else {
+            format!(" @{}", unit.unit)
+        };
+
+        let tooltip = if unit.is_dimensionless {
+            "**Unit**: dimensionless\n\nThis quantity has no physical dimension.".to_string()
+        } else {
+            format!(
+                "**Unit**: {}\n**Dimension**: {}\n\n\
+                 This quantity carries physical dimensions.",
+                unit.unit, unit.dimension
+            )
+        };
+
+        Some(InlayHint {
+            position: self.offset_to_position(source, span.end),
+            label: InlayHintLabel::String(label),
+            kind: Some(InlayHintKind::TYPE),
+            text_edits: None,
+            tooltip: Some(InlayHintTooltip::String(tooltip)),
+            padding_left: Some(false),
+            padding_right: Some(true),
+            data: None,
+        })
+    }
+
+    /// Generate detailed unit hint with conversions
+    pub fn unit_hint_with_conversions(
+        &self,
+        unit: &UnitInfo,
+        conversions: &[(String, f64)],
+        span: Span,
+        source: &str,
+    ) -> Option<InlayHint> {
+        if !self.config.unit_hints {
+            return None;
+        }
+
+        if unit.is_dimensionless {
+            return None;
+        }
+
+        let label = format!(" @{}", unit.unit);
+
+        let mut tooltip_lines = vec![
+            format!("**Unit**: {}", unit.unit),
+            format!("**Dimension**: {}", unit.dimension),
+        ];
+
+        if !conversions.is_empty() {
+            tooltip_lines.push("\n**Conversions**:".to_string());
+            for (target_unit, factor) in conversions {
+                tooltip_lines.push(format!(
+                    "  • 1 {} = {:.6} {}",
+                    unit.unit, factor, target_unit
+                ));
+            }
+        }
+
+        Some(InlayHint {
+            position: self.offset_to_position(source, span.end),
+            label: InlayHintLabel::String(label),
+            kind: Some(InlayHintKind::TYPE),
+            text_edits: None,
+            tooltip: Some(InlayHintTooltip::String(tooltip_lines.join("\n"))),
+            padding_left: Some(false),
+            padding_right: Some(true),
+            data: None,
+        })
+    }
+
+    // ========================================================================
+    // Effect Hints
+    // ========================================================================
+
+    /// Generate effect annotation hint for function calls
+    ///
+    /// Shows the effects of a function call:
+    /// - `with IO` for I/O operations
+    /// - `with Mut` for mutation
+    /// - `with IO, Mut, Alloc` for multiple effects
+    pub fn effect_hint(&self, effects: &EffectInfo, span: Span, source: &str) -> Option<InlayHint> {
+        if !self.config.effect_hints {
+            return None;
+        }
+
+        // Don't show hint for pure (effectless) operations
+        if effects.effects.is_empty() {
+            return None;
+        }
+
+        let effects_str = effects.effects.join(", ");
+        let label = format!(" with {}", effects_str);
+
+        // Build detailed tooltip
+        let mut tooltip_lines = vec![format!("**Effects**: {}", effects_str)];
+
+        if !effects.sources.is_empty() {
+            tooltip_lines.push("\n**Sources**:".to_string());
+            for source in &effects.sources {
+                tooltip_lines.push(format!("  • `{}` from line {}", source.effect, source.line));
+            }
+        }
+
+        tooltip_lines.push("\n_Effects indicate side effects that must be handled._".to_string());
+
+        Some(InlayHint {
+            position: self.offset_to_position(source, span.end),
+            label: InlayHintLabel::String(label),
+            kind: None, // Effect hints are not type hints
+            text_edits: None,
+            tooltip: Some(InlayHintTooltip::String(tooltip_lines.join("\n"))),
+            padding_left: Some(true),
+            padding_right: Some(false),
+            data: None,
+        })
+    }
+
+    /// Generate a "pure" hint for effectless functions
+    pub fn pure_hint(&self, span: Span, source: &str) -> Option<InlayHint> {
+        if !self.config.effect_hints {
+            return None;
+        }
+
+        Some(InlayHint {
+            position: self.offset_to_position(source, span.end),
+            label: InlayHintLabel::String(" (pure)".to_string()),
+            kind: None,
+            text_edits: None,
+            tooltip: Some(InlayHintTooltip::String(
+                "**Pure Function**\n\n\
+                 This function has no side effects and always returns \
+                 the same output for the same input."
+                    .to_string(),
+            )),
+            padding_left: Some(true),
+            padding_right: Some(false),
+            data: None,
+        })
+    }
 }
 
 impl Default for InlayHintProvider {
@@ -1096,6 +1387,8 @@ mod tests {
         assert!(config.chaining_hints);
         assert!(config.closure_return_hints);
         assert!(config.effect_hints);
+        assert!(config.epistemic_hints);
+        assert!(config.unit_hints);
         assert!(!config.lifetime_hints);
         assert!(config.tensor_shape_hints);
         assert!(config.tensor_shape_warnings);
@@ -1358,6 +1651,293 @@ mod tests {
         let span = crate::common::Span { start: 0, end: 10 };
 
         let hint = provider.tensor_shape_hint_from_hir(&HirType::I32, span, source);
+        assert!(hint.is_none());
+    }
+
+    // ========================================================================
+    // Epistemic Hint Tests
+    // ========================================================================
+
+    #[test]
+    fn test_epistemic_confidence_hint_high() {
+        use super::EpistemicInfo;
+
+        let provider = InlayHintProvider::new();
+        let source = "let x = measure(100.0)";
+        let span = crate::common::Span { start: 0, end: 22 };
+
+        let epistemic = EpistemicInfo {
+            confidence: 0.95,
+            confidence_lower: Some(0.92),
+            confidence_upper: Some(0.98),
+            source: "calibrated sensor".to_string(),
+            revisable: true,
+            evidence: vec![],
+            provenance: None,
+        };
+
+        let hint = provider.epistemic_confidence_hint(&epistemic, span, source);
+        assert!(hint.is_some());
+
+        let hint = hint.unwrap();
+        if let InlayHintLabel::String(label) = &hint.label {
+            assert!(label.contains("95%"));
+            assert!(label.contains("🟢")); // High confidence badge
+        } else {
+            panic!("Expected string label");
+        }
+    }
+
+    #[test]
+    fn test_epistemic_confidence_hint_low() {
+        use super::EpistemicInfo;
+
+        let provider = InlayHintProvider::new();
+        let source = "let estimate = guess()";
+        let span = crate::common::Span { start: 0, end: 22 };
+
+        let epistemic = EpistemicInfo {
+            confidence: 0.3,
+            confidence_lower: None,
+            confidence_upper: None,
+            source: "heuristic".to_string(),
+            revisable: true,
+            evidence: vec![],
+            provenance: None,
+        };
+
+        let hint = provider.epistemic_confidence_hint(&epistemic, span, source);
+        assert!(hint.is_some());
+
+        let hint = hint.unwrap();
+        if let InlayHintLabel::String(label) = &hint.label {
+            assert!(label.contains("30%"));
+            assert!(label.contains("🔴")); // Low confidence badge
+        } else {
+            panic!("Expected string label");
+        }
+    }
+
+    #[test]
+    fn test_epistemic_hints_disabled() {
+        use super::EpistemicInfo;
+
+        let config = InlayHintConfig {
+            epistemic_hints: false,
+            ..Default::default()
+        };
+        let provider = InlayHintProvider::with_config(config);
+        let source = "let x = measure(100.0)";
+        let span = crate::common::Span { start: 0, end: 22 };
+
+        let epistemic = EpistemicInfo {
+            confidence: 0.95,
+            confidence_lower: None,
+            confidence_upper: None,
+            source: "test".to_string(),
+            revisable: false,
+            evidence: vec![],
+            provenance: None,
+        };
+
+        let hint = provider.epistemic_confidence_hint(&epistemic, span, source);
+        assert!(hint.is_none());
+    }
+
+    // ========================================================================
+    // Unit Hint Tests
+    // ========================================================================
+
+    #[test]
+    fn test_unit_hint() {
+        use super::UnitInfo;
+
+        let provider = InlayHintProvider::new();
+        let source = "let force = mass * accel";
+        let span = crate::common::Span { start: 0, end: 24 };
+
+        let unit = UnitInfo {
+            unit: "kg*m/s^2".to_string(),
+            dimension: "M*L*T^-2".to_string(),
+            is_dimensionless: false,
+        };
+
+        let hint = provider.unit_hint(&unit, span, source);
+        assert!(hint.is_some());
+
+        let hint = hint.unwrap();
+        if let InlayHintLabel::String(label) = &hint.label {
+            assert!(label.contains("@kg*m/s^2"));
+        } else {
+            panic!("Expected string label");
+        }
+    }
+
+    #[test]
+    fn test_unit_hint_dimensionless() {
+        use super::UnitInfo;
+
+        let provider = InlayHintProvider::new();
+        let source = "let ratio = a / b";
+        let span = crate::common::Span { start: 0, end: 17 };
+
+        let unit = UnitInfo {
+            unit: "".to_string(),
+            dimension: "".to_string(),
+            is_dimensionless: true,
+        };
+
+        // Dimensionless quantities without explicit unit should not show hint
+        let hint = provider.unit_hint(&unit, span, source);
+        assert!(hint.is_none());
+    }
+
+    #[test]
+    fn test_unit_hints_disabled() {
+        use super::UnitInfo;
+
+        let config = InlayHintConfig {
+            unit_hints: false,
+            ..Default::default()
+        };
+        let provider = InlayHintProvider::with_config(config);
+        let source = "let force = mass * accel";
+        let span = crate::common::Span { start: 0, end: 24 };
+
+        let unit = UnitInfo {
+            unit: "N".to_string(),
+            dimension: "M*L*T^-2".to_string(),
+            is_dimensionless: false,
+        };
+
+        let hint = provider.unit_hint(&unit, span, source);
+        assert!(hint.is_none());
+    }
+
+    #[test]
+    fn test_unit_hint_with_conversions() {
+        use super::UnitInfo;
+
+        let provider = InlayHintProvider::new();
+        let source = "let distance = 100.0";
+        let span = crate::common::Span { start: 0, end: 20 };
+
+        let unit = UnitInfo {
+            unit: "m".to_string(),
+            dimension: "L".to_string(),
+            is_dimensionless: false,
+        };
+
+        let conversions = vec![
+            ("ft".to_string(), 3.28084),
+            ("km".to_string(), 0.001),
+            ("mi".to_string(), 0.000621371),
+        ];
+
+        let hint = provider.unit_hint_with_conversions(&unit, &conversions, span, source);
+        assert!(hint.is_some());
+
+        let hint = hint.unwrap();
+        if let InlayHintLabel::String(label) = &hint.label {
+            assert!(label.contains("@m"));
+        }
+        // Check tooltip contains conversion info
+        if let Some(InlayHintTooltip::String(tooltip)) = &hint.tooltip {
+            assert!(tooltip.contains("Conversions"));
+            assert!(tooltip.contains("ft"));
+        }
+    }
+
+    // ========================================================================
+    // Effect Hint Tests
+    // ========================================================================
+
+    #[test]
+    fn test_effect_hint() {
+        use super::EffectInfo;
+        use crate::lsp::query_bridge::EffectSource;
+
+        let provider = InlayHintProvider::new();
+        let source = "fn process() with IO { read_file() }";
+        let span = crate::common::Span { start: 0, end: 36 };
+
+        let effects = EffectInfo {
+            effects: vec!["IO".to_string(), "Mut".to_string()],
+            sources: vec![EffectSource {
+                effect: "IO".to_string(),
+                line: 1,
+                expr: "read_file()".to_string(),
+            }],
+        };
+
+        let hint = provider.effect_hint(&effects, span, source);
+        assert!(hint.is_some());
+
+        let hint = hint.unwrap();
+        if let InlayHintLabel::String(label) = &hint.label {
+            assert!(label.contains("with"));
+            assert!(label.contains("IO"));
+            assert!(label.contains("Mut"));
+        } else {
+            panic!("Expected string label");
+        }
+    }
+
+    #[test]
+    fn test_effect_hint_pure() {
+        use super::EffectInfo;
+
+        let provider = InlayHintProvider::new();
+        let source = "fn add(a: i32, b: i32) -> i32 { a + b }";
+        let span = crate::common::Span { start: 0, end: 39 };
+
+        let effects = EffectInfo {
+            effects: vec![],
+            sources: vec![],
+        };
+
+        // Pure functions should not show effect hint
+        let hint = provider.effect_hint(&effects, span, source);
+        assert!(hint.is_none());
+    }
+
+    #[test]
+    fn test_pure_hint() {
+        let provider = InlayHintProvider::new();
+        let source = "fn add(a: i32, b: i32) -> i32";
+        let span = crate::common::Span { start: 0, end: 29 };
+
+        let hint = provider.pure_hint(span, source);
+        assert!(hint.is_some());
+
+        let hint = hint.unwrap();
+        if let InlayHintLabel::String(label) = &hint.label {
+            assert!(label.contains("pure"));
+        }
+    }
+
+    #[test]
+    fn test_effect_hints_disabled() {
+        use super::EffectInfo;
+
+        let config = InlayHintConfig {
+            effect_hints: false,
+            ..Default::default()
+        };
+        let provider = InlayHintProvider::with_config(config);
+        let source = "fn process() { io_op() }";
+        let span = crate::common::Span { start: 0, end: 24 };
+
+        let effects = EffectInfo {
+            effects: vec!["IO".to_string()],
+            sources: vec![],
+        };
+
+        let hint = provider.effect_hint(&effects, span, source);
+        assert!(hint.is_none());
+
+        // Also verify pure hint is disabled
+        let hint = provider.pure_hint(span, source);
         assert!(hint.is_none());
     }
 }

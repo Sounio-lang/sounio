@@ -7,175 +7,52 @@ use tower_lsp::jsonrpc::Result;
 use tower_lsp::lsp_types::*;
 use tower_lsp::{Client, LspService, Server};
 
-use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
+
+use super::analysis::AnalysisHost;
+use super::document::Document;
 
 /// Sounio LSP Server State
 pub struct SounioLspServer {
     /// LSP client for sending notifications
     client: Client,
-    /// Document store
-    documents: Arc<Mutex<DocumentStore>>,
-    /// Symbol index
+    /// Document store with rope-based editing
+    documents: Arc<Mutex<HashMap<Url, Document>>>,
+    /// Analysis host with query-based incremental analysis
+    analysis: Arc<Mutex<AnalysisHost>>,
+    /// Symbol index (legacy, kept for cross-file lookups)
     symbol_index: Arc<Mutex<SymbolIndex>>,
-    /// Compilation cache
+    /// Compilation cache (legacy, for backward compat)
     compilation_cache: Arc<Mutex<CompilationCache>>,
 }
 
 /// Type alias for the language server (consistent naming)
 pub type SounioLanguageServer = SounioLspServer;
 
-/// Document store for LSP
-#[derive(Debug)]
-pub struct DocumentStore {
-    /// Opened documents
-    documents: HashMap<Url, Document>,
-}
-
-/// Document representation for LSP
-#[derive(Debug)]
-pub struct Document {
-    /// Document URL
-    pub uri: Url,
-    /// Document content
-    pub content: String,
-    /// Document version
-    pub version: i32,
-    /// Last compilation result
-    pub compilation_result: Option<CompilationResult>,
-}
-
-/// Compilation result from Sounio compiler
+// Legacy types kept for cross-file symbol index (will be replaced in Phase 9)
+#[allow(dead_code)]
 #[derive(Debug, Clone)]
-pub struct CompilationResult {
-    /// Diagnostics
-    pub diagnostics: Vec<Diagnostic>,
-    /// Symbols found
-    pub symbols: Vec<Symbol>,
-    /// Semantic tokens
-    pub tokens: Vec<SemanticToken>,
+struct LegacySymbol {
+    name: String,
+    kind: SymbolKind,
+    range: Range,
 }
 
-/// Symbol information
-#[derive(Debug, Clone)]
-pub struct Symbol {
-    /// Symbol name
-    pub name: String,
-    /// Symbol kind
-    pub kind: SymbolKind,
-    /// Symbol range
-    pub range: Range,
-    /// Symbol documentation
-    pub documentation: Option<String>,
-}
-
-/// Semantic token information
-#[derive(Debug, Clone)]
-pub struct SemanticToken {
-    /// Token range
-    pub range: Range,
-    /// Token type
-    pub token_type: SemanticTokenType,
-    /// Token modifiers
-    pub modifiers: Vec<SemanticTokenModifier>,
-}
-
-/// Symbol index for fast lookups
-#[derive(Debug)]
+/// Symbol index for cross-file lookups (legacy, will be migrated to query system)
+#[derive(Debug, Default)]
 pub struct SymbolIndex {
     /// Global symbols
-    global_symbols: HashMap<String, Symbol>,
+    global_symbols: HashMap<String, LegacySymbol>,
     /// Document-specific symbols
-    document_symbols: HashMap<Url, HashMap<String, Symbol>>,
+    document_symbols: HashMap<Url, HashMap<String, LegacySymbol>>,
 }
 
-/// Compilation cache for performance
-#[derive(Debug)]
+/// Compilation cache (legacy, will be replaced by query database)
+#[derive(Debug, Default)]
 pub struct CompilationCache {
-    /// Compiled modules cache
-    modules: HashMap<Url, CompiledModule>,
-    /// Type information cache
-    types: HashMap<String, TypeInfo>,
-}
-
-/// Compiled module information
-#[derive(Debug, Clone)]
-pub struct CompiledModule {
-    /// Module symbols
-    pub symbols: Vec<Symbol>,
-    /// Epistemic types
-    pub epistemic_types: Vec<EpistemicType>,
-    /// Import graph
-    pub imports: Vec<Import>,
-}
-
-/// Epistemic type information
-#[derive(Debug, Clone)]
-pub struct EpistemicType {
-    /// Type name
-    pub name: String,
-    /// Uncertainty bounds
-    pub uncertainty: Option<UncertaintyBounds>,
-    /// Confidence information
-    pub confidence: Option<f64>,
-    /// Provenance chain
-    pub provenance: Vec<String>,
-}
-
-/// Uncertainty bounds
-#[derive(Debug, Clone)]
-pub struct UncertaintyBounds {
-    /// Lower bound
-    pub lower: f64,
-    /// Upper bound
-    pub upper: f64,
-    /// Distribution type
-    pub distribution: UncertaintyDistribution,
-}
-
-/// Uncertainty distribution types
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub enum UncertaintyDistribution {
-    /// Normal distribution
-    Normal { mean: f64, stddev: f64 },
-    /// Uniform distribution
-    Uniform { min: f64, max: f64 },
-    /// Custom distribution
-    Custom { values: Vec<f64> },
-}
-
-/// Import information
-#[derive(Debug, Clone)]
-pub struct Import {
-    /// Imported module
-    pub module: String,
-    /// Import range
-    pub range: Range,
-    /// Import type
-    pub kind: ImportKind,
-}
-
-/// Import types
-#[derive(Debug, Clone)]
-pub enum ImportKind {
-    /// Standard library import
-    Stdlib,
-    /// User module import
-    User,
-    /// External library import
-    External,
-}
-
-/// Type information cache
-#[derive(Debug, Clone)]
-pub struct TypeInfo {
-    /// Type name
-    pub name: String,
-    /// Type definition
-    pub definition: String,
-    /// Type examples
-    pub examples: Vec<String>,
+    /// Placeholder - actual caching done by LspQueryDatabase
+    _placeholder: (),
 }
 
 impl SounioLspServer {
@@ -183,17 +60,10 @@ impl SounioLspServer {
     pub fn new(client: Client) -> Self {
         Self {
             client,
-            documents: Arc::new(Mutex::new(DocumentStore {
-                documents: HashMap::new(),
-            })),
-            symbol_index: Arc::new(Mutex::new(SymbolIndex {
-                global_symbols: HashMap::new(),
-                document_symbols: HashMap::new(),
-            })),
-            compilation_cache: Arc::new(Mutex::new(CompilationCache {
-                modules: HashMap::new(),
-                types: HashMap::new(),
-            })),
+            documents: Arc::new(Mutex::new(HashMap::new())),
+            analysis: Arc::new(Mutex::new(AnalysisHost::new())),
+            symbol_index: Arc::new(Mutex::new(SymbolIndex::default())),
+            compilation_cache: Arc::new(Mutex::new(CompilationCache::default())),
         }
     }
 
@@ -224,61 +94,85 @@ impl tower_lsp::LanguageServer for SounioLspServer {
 
     async fn did_open(&self, params: DidOpenTextDocumentParams) {
         let uri = params.text_document.uri.clone();
-        let document = Document {
-            uri: uri.clone(),
-            content: params.text_document.text,
-            version: params.text_document.version,
-            compilation_result: None,
-        };
+        let text = params.text_document.text.clone();
+        let version = params.text_document.version;
+
+        // Create document with rope-based storage
+        let document = Document::new(text.clone(), version);
 
         {
-            let mut store = self.documents.lock().expect("mutex poisoned");
-            store.documents.insert(uri.clone(), document);
-        } // MutexGuard dropped here before await
+            let mut docs = self.documents.lock().expect("mutex poisoned");
+            docs.insert(uri.clone(), document);
+        }
 
-        // Trigger compilation
-        self.compile_document(&uri).await;
+        // Analyze using query database
+        let diagnostics = {
+            let mut analysis = self.analysis.lock().expect("mutex poisoned");
+            analysis.analyze(&text, &uri)
+        };
+
+        // Publish diagnostics to client
+        self.client
+            .publish_diagnostics(uri, diagnostics, Some(version))
+            .await;
     }
 
     async fn did_change(&self, params: DidChangeTextDocumentParams) {
-        // Extract URI before acquiring lock to avoid holding MutexGuard across await
         let uri = params.text_document.uri.clone();
+        let version = params.text_document.version;
 
-        {
-            let mut store = self.documents.lock().expect("mutex poisoned");
-            if let Some(document) = store.documents.get_mut(&uri) {
-                document.version = params.text_document.version;
-
-                // Update content with changes
+        // Apply incremental changes to document
+        let text = {
+            let mut docs = self.documents.lock().expect("mutex poisoned");
+            if let Some(doc) = docs.get_mut(&uri) {
                 for change in params.content_changes {
-                    if let Some(range) = change.range {
-                        // Apply text change
-                        let _ = self.apply_change(&mut document.content, range, change.text);
-                    } else {
-                        document.content = change.text;
-                    }
+                    doc.apply_change(change, version);
                 }
+                doc.text()
+            } else {
+                return;
             }
-        } // MutexGuard dropped here before await
+        };
 
-        // Recompile
-        self.compile_document(&uri).await;
+        // Re-analyze using query database (incremental)
+        let diagnostics = {
+            let mut analysis = self.analysis.lock().expect("mutex poisoned");
+            analysis.analyze(&text, &uri)
+        };
+
+        // Publish diagnostics
+        self.client
+            .publish_diagnostics(uri, diagnostics, Some(version))
+            .await;
     }
 
     async fn did_close(&self, params: DidCloseTextDocumentParams) {
-        let mut store = self.documents.lock().expect("mutex poisoned");
-        store.documents.remove(&params.text_document.uri);
+        let uri = params.text_document.uri;
+
+        // Remove from document store
+        {
+            let mut docs = self.documents.lock().expect("mutex poisoned");
+            docs.remove(&uri);
+        }
+
+        // Notify analysis host
+        {
+            let mut analysis = self.analysis.lock().expect("mutex poisoned");
+            analysis.file_closed(&uri);
+        }
+
+        // Clear diagnostics for closed file
+        self.client.publish_diagnostics(uri, vec![], None).await;
     }
 
     async fn completion(&self, params: CompletionParams) -> Result<Option<CompletionResponse>> {
-        let documents = self.documents.lock().expect("mutex poisoned");
+        let uri = &params.text_document_position.text_document.uri;
         let position = params.text_document_position.position;
 
-        if let Some(document) = documents
-            .documents
-            .get(&params.text_document_position.text_document.uri)
-        {
-            let completions = self.get_completions(&document.content, position);
+        let docs = self.documents.lock().expect("mutex poisoned");
+        if let Some(doc) = docs.get(uri) {
+            let analysis = self.analysis.lock().expect("mutex poisoned");
+            let completions = analysis.completions(doc, position);
             Ok(Some(CompletionResponse::Array(completions)))
         } else {
             Ok(None)
@@ -286,15 +180,13 @@ impl tower_lsp::LanguageServer for SounioLspServer {
     }
 
     async fn hover(&self, params: HoverParams) -> Result<Option<Hover>> {
-        let documents = self.documents.lock().expect("mutex poisoned");
+        let uri = &params.text_document_position_params.text_document.uri;
         let position = params.text_document_position_params.position;
 
-        if let Some(document) = documents
-            .documents
-            .get(&params.text_document_position_params.text_document.uri)
-        {
-            let hover = self.get_hover(&document.content, position);
-            Ok(hover)
+        let docs = self.documents.lock().expect("mutex poisoned");
+        if let Some(doc) = docs.get(uri) {
+            let analysis = self.analysis.lock().expect("mutex poisoned");
+            Ok(analysis.hover(doc, position, uri))
         } else {
             Ok(None)
         }
@@ -304,30 +196,26 @@ impl tower_lsp::LanguageServer for SounioLspServer {
         &self,
         params: GotoDefinitionParams,
     ) -> Result<Option<GotoDefinitionResponse>> {
-        let documents = self.documents.lock().expect("mutex poisoned");
+        let uri = &params.text_document_position_params.text_document.uri;
         let position = params.text_document_position_params.position;
 
-        if let Some(document) = documents
-            .documents
-            .get(&params.text_document_position_params.text_document.uri)
-        {
-            let definition = self.get_definition(&document.content, position);
-            Ok(definition)
+        let docs = self.documents.lock().expect("mutex poisoned");
+        if let Some(doc) = docs.get(uri) {
+            let analysis = self.analysis.lock().expect("mutex poisoned");
+            Ok(analysis.goto_definition(doc, position, uri))
         } else {
             Ok(None)
         }
     }
 
     async fn references(&self, params: ReferenceParams) -> Result<Option<Vec<Location>>> {
-        let documents = self.documents.lock().expect("mutex poisoned");
+        let uri = &params.text_document_position.text_document.uri;
         let position = params.text_document_position.position;
 
-        if let Some(document) = documents
-            .documents
-            .get(&params.text_document_position.text_document.uri)
-        {
-            let references = self.find_references(&document.content, position);
-            Ok(Some(references))
+        let docs = self.documents.lock().expect("mutex poisoned");
+        if let Some(doc) = docs.get(uri) {
+            let analysis = self.analysis.lock().expect("mutex poisoned");
+            Ok(analysis.find_references(doc, position, uri))
         } else {
             Ok(None)
         }
@@ -337,10 +225,12 @@ impl tower_lsp::LanguageServer for SounioLspServer {
         &self,
         params: DocumentSymbolParams,
     ) -> Result<Option<DocumentSymbolResponse>> {
-        let documents = self.documents.lock().expect("mutex poisoned");
+        let uri = &params.text_document.uri;
 
-        if let Some(document) = documents.documents.get(&params.text_document.uri) {
-            let symbols = self.extract_document_symbols(&document.content);
+        let docs = self.documents.lock().expect("mutex poisoned");
+        if let Some(doc) = docs.get(uri) {
+            let analysis = self.analysis.lock().expect("mutex poisoned");
+            let symbols = analysis.document_symbols(doc, uri);
             Ok(Some(DocumentSymbolResponse::Nested(symbols)))
         } else {
             Ok(None)
@@ -348,16 +238,14 @@ impl tower_lsp::LanguageServer for SounioLspServer {
     }
 
     async fn rename(&self, params: RenameParams) -> Result<Option<WorkspaceEdit>> {
-        let documents = self.documents.lock().expect("mutex poisoned");
-        let new_name = params.new_name;
+        let uri = &params.text_document_position.text_document.uri;
         let position = params.text_document_position.position;
+        let new_name = params.new_name;
 
-        if let Some(document) = documents
-            .documents
-            .get(&params.text_document_position.text_document.uri)
-        {
-            let edit = self.rename_symbol(&document.content, position, &new_name);
-            Ok(edit)
+        let docs = self.documents.lock().expect("mutex poisoned");
+        if let Some(doc) = docs.get(uri) {
+            let analysis = self.analysis.lock().expect("mutex poisoned");
+            Ok(analysis.rename(doc, position, &new_name, uri))
         } else {
             Ok(None)
         }
@@ -367,25 +255,27 @@ impl tower_lsp::LanguageServer for SounioLspServer {
         &self,
         params: SemanticTokensParams,
     ) -> Result<Option<SemanticTokensResult>> {
-        let documents = self.documents.lock().expect("mutex poisoned");
+        let uri = &params.text_document.uri;
 
-        if let Some(document) = documents.documents.get(&params.text_document.uri) {
-            let tokens = self.get_semantic_tokens_encoded(&document.content);
-            Ok(Some(SemanticTokensResult::Tokens(SemanticTokens {
-                result_id: None,
-                data: tokens,
-            })))
+        let docs = self.documents.lock().expect("mutex poisoned");
+        if let Some(doc) = docs.get(uri) {
+            let analysis = self.analysis.lock().expect("mutex poisoned");
+            let tokens = analysis.semantic_tokens(doc);
+            Ok(Some(SemanticTokensResult::Tokens(tokens)))
         } else {
             Ok(None)
         }
     }
 
     async fn code_action(&self, params: CodeActionParams) -> Result<Option<CodeActionResponse>> {
-        let documents = self.documents.lock().expect("mutex poisoned");
+        let uri = &params.text_document.uri;
         let range = params.range;
+        let diagnostics = &params.context.diagnostics;
 
-        if let Some(document) = documents.documents.get(&params.text_document.uri) {
-            let actions = self.get_code_actions(&document.content, range);
+        let docs = self.documents.lock().expect("mutex poisoned");
+        if let Some(doc) = docs.get(uri) {
+            let analysis = self.analysis.lock().expect("mutex poisoned");
+            let actions = analysis.code_actions(doc, range, diagnostics, uri);
             Ok(Some(actions))
         } else {
             Ok(None)
@@ -393,22 +283,25 @@ impl tower_lsp::LanguageServer for SounioLspServer {
     }
 
     async fn formatting(&self, params: DocumentFormattingParams) -> Result<Option<Vec<TextEdit>>> {
-        let documents = self.documents.lock().expect("mutex poisoned");
+        let uri = &params.text_document.uri;
 
-        if let Some(document) = documents.documents.get(&params.text_document.uri) {
-            let edits = self.format_document(&document.content);
-            Ok(Some(edits))
+        let docs = self.documents.lock().expect("mutex poisoned");
+        if let Some(doc) = docs.get(uri) {
+            let analysis = self.analysis.lock().expect("mutex poisoned");
+            Ok(analysis.format(doc))
         } else {
             Ok(None)
         }
     }
 
     async fn inlay_hint(&self, params: InlayHintParams) -> Result<Option<Vec<InlayHint>>> {
-        let documents = self.documents.lock().expect("mutex poisoned");
+        let uri = &params.text_document.uri;
         let range = params.range;
 
-        if let Some(document) = documents.documents.get(&params.text_document.uri) {
-            let hints = self.get_inlay_hints(&document.content, range);
+        let docs = self.documents.lock().expect("mutex poisoned");
+        if let Some(doc) = docs.get(uri) {
+            let analysis = self.analysis.lock().expect("mutex poisoned");
+            let hints = analysis.inlay_hints(doc, range, uri);
             Ok(Some(hints))
         } else {
             Ok(None)
@@ -420,490 +313,6 @@ impl tower_lsp::LanguageServer for SounioLspServer {
     }
 }
 
-impl SounioLspServer {
-    /// Apply text change to document content
-    fn apply_change(&self, content: &mut String, range: Range, text: String) {
-        let _ = content.replace_range(
-            (range.start.character as usize)..(range.end.character as usize),
-            &text,
-        );
-    }
-
-    /// Compile document and update cache
-    async fn compile_document(&self, uri: &Url) {
-        let documents = self.documents.lock().expect("mutex poisoned");
-        if let Some(document) = documents.documents.get(uri) {
-            // Compile with Sounio compiler
-            let result = self.run_compilation(&document.content);
-
-            // Update compilation result
-            if let Ok(mut doc_store) = self.documents.lock() {
-                if let Some(doc) = doc_store.documents.get_mut(uri) {
-                    doc.compilation_result = Some(result.clone());
-                }
-            }
-
-            // Update symbol index
-            self.update_symbol_index(uri, &result);
-        }
-    }
-
-    /// Run Sounio compilation
-    fn run_compilation(&self, content: &str) -> CompilationResult {
-        // Simplified compilation - in real implementation would use full Sounio compiler
-        CompilationResult {
-            diagnostics: self.analyze_diagnostics(content),
-            symbols: self.extract_symbols(content),
-            tokens: self.analyze_tokens(content),
-        }
-    }
-
-    /// Analyze diagnostics in content
-    fn analyze_diagnostics(&self, content: &str) -> Vec<Diagnostic> {
-        let mut diagnostics = Vec::new();
-
-        // Basic syntax analysis
-        let lines: Vec<&str> = content.lines().collect();
-        for (i, line) in lines.iter().enumerate() {
-            let line_num = (i + 1) as u32;
-
-            // Check for common issues
-            if line.contains("Knowledge<T>") {
-                if !line.contains("import") && !line.contains("struct") {
-                    diagnostics.push(Diagnostic {
-                        range: Range::new(
-                            Position::new(line_num, 0),
-                            Position::new(line_num, line.len() as u32),
-                        ),
-                        severity: Some(DiagnosticSeverity::Warning),
-                        code: Some(NumberOrString::String("EPISTEMIC_001".to_string())),
-                        source: Some("Sounio LSP".to_string()),
-                        message: "Epistemic type Knowledge<T> requires import or type definition"
-                            .to_string(),
-                        related_information: None,
-                        tags: None,
-                    });
-                }
-            }
-        }
-
-        diagnostics
-    }
-
-    /// Extract symbols from content
-    fn extract_symbols(&self, content: &str) -> Vec<Symbol> {
-        let mut symbols = Vec::new();
-        let lines: Vec<&str> = content.lines().collect();
-
-        for (i, line) in lines.iter().enumerate() {
-            let line_num = i as u32;
-
-            // Function definitions
-            if line.contains("fn ") {
-                if let Some(name_start) = line.find("fn ") {
-                    let name_end = line.find('(').unwrap_or(line.len());
-                    let name = &line[name_start + 3..name_end];
-
-                    symbols.push(Symbol {
-                        name: name.trim().to_string(),
-                        kind: SymbolKind::Function,
-                        range: Range::new(
-                            Position::new(line_num, name_start as u32),
-                            Position::new(line_num, name_end as u32),
-                        ),
-                        documentation: None,
-                    });
-                }
-            }
-
-            // Type definitions
-            if line.contains("struct ") {
-                if let Some(name_start) = line.find("struct ") {
-                    let name_end = line.find('{').unwrap_or(line.len());
-                    let name = &line[name_start + 7..name_end];
-
-                    symbols.push(Symbol {
-                        name: name.trim().to_string(),
-                        kind: SymbolKind::Struct,
-                        range: Range::new(
-                            Position::new(line_num, name_start as u32),
-                            Position::new(line_num, name_end as u32),
-                        ),
-                        documentation: None,
-                    });
-                }
-            }
-
-            // Knowledge<T> types
-            if line.contains("Knowledge<T>") {
-                symbols.push(Symbol {
-                    name: "Knowledge".to_string(),
-                    kind: SymbolKind::TypeParameter,
-                    range: Range::new(Position::new(line_num, 0), Position::new(line_num, 15)),
-                    documentation: Some(
-                        "Epistemic type that carries uncertainty and confidence information"
-                            .to_string(),
-                    ),
-                });
-            }
-        }
-
-        symbols
-    }
-
-    /// Analyze semantic tokens (internal representation)
-    fn analyze_tokens(&self, content: &str) -> Vec<SemanticToken> {
-        let mut tokens = Vec::new();
-        let lines: Vec<&str> = content.lines().collect();
-
-        for (i, line) in lines.iter().enumerate() {
-            let line_num = i as u32;
-
-            // Keyword tokens - find actual position of "fn "
-            if let Some(pos) = line.find("fn ") {
-                tokens.push(SemanticToken {
-                    range: Range::new(
-                        Position::new(line_num, pos as u32),
-                        Position::new(line_num, (pos + 2) as u32),
-                    ),
-                    token_type: SemanticTokenType::KEYWORD,
-                    modifiers: vec![],
-                });
-            }
-
-            // Struct keyword
-            if let Some(pos) = line.find("struct ") {
-                tokens.push(SemanticToken {
-                    range: Range::new(
-                        Position::new(line_num, pos as u32),
-                        Position::new(line_num, (pos + 6) as u32),
-                    ),
-                    token_type: SemanticTokenType::KEYWORD,
-                    modifiers: vec![],
-                });
-            }
-
-            // Epistemic type tokens
-            if let Some(pos) = line.find("Knowledge") {
-                tokens.push(SemanticToken {
-                    range: Range::new(
-                        Position::new(line_num, pos as u32),
-                        Position::new(line_num, (pos + 9) as u32),
-                    ),
-                    token_type: SemanticTokenType::TYPE,
-                    modifiers: vec![],
-                });
-            }
-        }
-
-        tokens
-    }
-
-    /// Get semantic tokens in LSP delta-encoded format
-    fn get_semantic_tokens_encoded(
-        &self,
-        content: &str,
-    ) -> Vec<tower_lsp::lsp_types::SemanticToken> {
-        let tokens = self.analyze_tokens(content);
-        let mut result = Vec::new();
-
-        // Token type legend indices
-        let type_to_index = |t: &SemanticTokenType| -> u32 {
-            match t.as_str() {
-                "keyword" => 0,
-                "type" => 1,
-                "function" => 2,
-                "variable" => 3,
-                "string" => 4,
-                "number" => 5,
-                "comment" => 6,
-                _ => 0,
-            }
-        };
-
-        let mut prev_line = 0u32;
-        let mut prev_char = 0u32;
-
-        for token in &tokens {
-            let line = token.range.start.line;
-            let char = token.range.start.character;
-            let length = token
-                .range
-                .end
-                .character
-                .saturating_sub(token.range.start.character);
-
-            let delta_line = line - prev_line;
-            let delta_start = if delta_line == 0 {
-                char - prev_char
-            } else {
-                char
-            };
-
-            result.push(tower_lsp::lsp_types::SemanticToken {
-                delta_line,
-                delta_start,
-                length,
-                token_type: type_to_index(&token.token_type),
-                token_modifiers_bitset: 0,
-            });
-
-            prev_line = line;
-            prev_char = char;
-        }
-
-        result
-    }
-
-    /// Get completions at position
-    fn get_completions(&self, content: &str, position: Position) -> Vec<CompletionItem> {
-        let mut completions = Vec::new();
-
-        // Basic completions
-        completions.extend(vec![
-            CompletionItem::new_simple("fn", "fn function_name(parameters) -> ReturnType"),
-            CompletionItem::new_simple("struct", "struct Name { }"),
-            CompletionItem::new_simple("import", "import stdlib.*"),
-        ]);
-
-        // Epistemic completions
-        completions.extend(vec![
-            CompletionItem::new_simple(
-                "Knowledge::new",
-                "Knowledge::new(value, uncertainty, confidence, source)",
-            ),
-            CompletionItem::new_simple("uncertainty", "uncertainty: f64"),
-            CompletionItem::new_simple("confidence", "confidence: f64"),
-        ]);
-
-        completions
-    }
-
-    /// Get hover information
-    fn get_hover(&self, content: &str, position: Position) -> Option<Hover> {
-        let lines: Vec<&str> = content.lines().collect();
-
-        if let Some(line) = lines.get(position.line as usize) {
-            let char_idx = position.character as usize;
-            if char_idx >= line.len() {
-                return None;
-            }
-            let line_part = &line[char_idx..];
-
-            // Knowledge<T> hover
-            if line_part.starts_with("Knowledge") {
-                Some(Hover {
-                    contents: HoverContents::Markup(MarkupContent {
-                        kind: MarkupKind::Markdown,
-                        value: "Epistemic type that carries both value and uncertainty information\n\n\
-                            **Usage:** `Knowledge<T>::new(value, uncertainty, confidence, source)`\n\n\
-                            **Example:** `Knowledge::new(42.0, 0.1, 0.95, \"measurement\")`".to_string(),
-                    }),
-                    range: Some(Range::new(position, position)),
-                })
-            } else {
-                None
-            }
-        } else {
-            None
-        }
-    }
-
-    /// Get definition location
-    fn get_definition(&self, content: &str, position: Position) -> Option<GotoDefinitionResponse> {
-        // Simplified - would find actual definition location
-        Some(GotoDefinitionResponse::Scalar(Location::new(
-            Url::parse("file:///example.sio").unwrap(),
-            Range::new(Position::new(0, 0), Position::new(0, 0)),
-        )))
-    }
-
-    /// Find references
-    fn find_references(&self, content: &str, position: Position) -> Vec<Location> {
-        // Would find all references to symbol at position
-        vec![]
-    }
-
-    /// Extract document symbols
-    #[allow(deprecated)]
-    fn extract_document_symbols(&self, content: &str) -> Vec<DocumentSymbol> {
-        let mut symbols = Vec::new();
-        let lines: Vec<&str> = content.lines().collect();
-
-        for (i, line) in lines.iter().enumerate() {
-            // Function definitions
-            if let Some(fn_pos) = line.find("fn ") {
-                let name_start = fn_pos + 3;
-                let name_end = line[name_start..]
-                    .find(|c: char| !c.is_alphanumeric() && c != '_')
-                    .map(|p| name_start + p)
-                    .unwrap_or(line.len());
-                let name = line[name_start..name_end].trim();
-
-                if !name.is_empty() {
-                    let range = Range::new(
-                        Position::new(i as u32, 0),
-                        Position::new(i as u32, line.len() as u32),
-                    );
-                    symbols.push(DocumentSymbol {
-                        name: name.to_string(),
-                        detail: None,
-                        kind: SymbolKind::FUNCTION,
-                        tags: None,
-                        deprecated: None,
-                        range,
-                        selection_range: Range::new(
-                            Position::new(i as u32, name_start as u32),
-                            Position::new(i as u32, name_end as u32),
-                        ),
-                        children: None,
-                    });
-                }
-            }
-
-            // Struct definitions
-            if let Some(struct_pos) = line.find("struct ") {
-                let name_start = struct_pos + 7;
-                let name_end = line[name_start..]
-                    .find(|c: char| !c.is_alphanumeric() && c != '_')
-                    .map(|p| name_start + p)
-                    .unwrap_or(line.len());
-                let name = line[name_start..name_end].trim();
-
-                if !name.is_empty() {
-                    let range = Range::new(
-                        Position::new(i as u32, 0),
-                        Position::new(i as u32, line.len() as u32),
-                    );
-                    symbols.push(DocumentSymbol {
-                        name: name.to_string(),
-                        detail: None,
-                        kind: SymbolKind::STRUCT,
-                        tags: None,
-                        deprecated: None,
-                        range,
-                        selection_range: Range::new(
-                            Position::new(i as u32, name_start as u32),
-                            Position::new(i as u32, name_end as u32),
-                        ),
-                        children: None,
-                    });
-                }
-            }
-        }
-
-        symbols
-    }
-
-    /// Rename symbol
-    fn rename_symbol(
-        &self,
-        content: &str,
-        position: Position,
-        new_name: &str,
-    ) -> Option<WorkspaceEdit> {
-        // Would perform actual renaming
-        Some(WorkspaceEdit::new(HashMap::new()))
-    }
-
-    /// Get semantic tokens (internal representation)
-    #[allow(dead_code)]
-    fn get_semantic_tokens(&self, content: &str) -> Vec<SemanticToken> {
-        self.analyze_tokens(content)
-    }
-
-    /// Get code actions
-    fn get_code_actions(&self, _content: &str, _range: Range) -> CodeActionResponse {
-        let mut actions: Vec<CodeActionOrCommand> = Vec::new();
-
-        // Add epistemic actions
-        actions.push(CodeActionOrCommand::CodeAction(CodeAction {
-            title: "Add uncertainty bounds".to_string(),
-            kind: Some(CodeActionKind::REFACTOR_INLINE),
-            diagnostics: None,
-            edit: None,
-            command: None,
-            is_preferred: None,
-            disabled: None,
-            data: None,
-        }));
-
-        actions
-    }
-
-    /// Format document
-    fn format_document(&self, content: &str) -> Vec<TextEdit> {
-        // Basic formatting
-        vec![]
-    }
-
-    /// Get inlay hints
-    fn get_inlay_hints(&self, content: &str, range: Range) -> Vec<InlayHint> {
-        let mut hints = Vec::new();
-        let lines: Vec<&str> = content.lines().collect();
-
-        // Only process lines in the requested range
-        let start_line = range.start.line as usize;
-        let end_line = (range.end.line as usize).min(lines.len());
-
-        for (i, line) in lines
-            .iter()
-            .enumerate()
-            .skip(start_line)
-            .take(end_line - start_line + 1)
-        {
-            // Type inference hints for let bindings without type annotation
-            if line.contains("let ") && !line.contains(':') && line.contains('=') {
-                if let Some(eq_pos) = line.find('=') {
-                    hints.push(InlayHint {
-                        position: Position::new(i as u32, eq_pos as u32),
-                        label: InlayHintLabel::String(": inferred".to_string()),
-                        kind: Some(InlayHintKind::TYPE),
-                        text_edits: None,
-                        tooltip: Some(InlayHintTooltip::String(
-                            "Type inferred by compiler".to_string(),
-                        )),
-                        padding_left: Some(false),
-                        padding_right: Some(true),
-                        data: None,
-                    });
-                }
-            }
-
-            // Epistemic confidence hints
-            if line.contains("Knowledge") || line.contains("confidence") {
-                if let Some(pos) = line.find("Knowledge") {
-                    hints.push(InlayHint {
-                        position: Position::new(i as u32, (pos + 9) as u32),
-                        label: InlayHintLabel::String("🔬 epistemic".to_string()),
-                        kind: Some(InlayHintKind::TYPE),
-                        text_edits: None,
-                        tooltip: Some(InlayHintTooltip::String(
-                            "Epistemic type with uncertainty tracking".to_string(),
-                        )),
-                        padding_left: Some(true),
-                        padding_right: Some(false),
-                        data: None,
-                    });
-                }
-            }
-        }
-
-        hints
-    }
-
-    /// Update symbol index
-    fn update_symbol_index(&self, uri: &Url, result: &CompilationResult) {
-        let mut index = self.symbol_index.lock().expect("mutex poisoned");
-
-        for symbol in &result.symbols {
-            index
-                .document_symbols
-                .entry(uri.clone())
-                .or_insert_with(HashMap::new)
-                .insert(symbol.name.clone(), symbol.clone());
-        }
-    }
-}
+// Note: All document manipulation and analysis is delegated to AnalysisHost
 
 // Note: Default cannot be implemented for SounioLspServer as it requires a Client

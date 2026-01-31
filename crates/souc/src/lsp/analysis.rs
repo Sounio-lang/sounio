@@ -1,6 +1,7 @@
 //! Semantic analysis for LSP features
 //!
 //! Manages parsing, name resolution, and type checking with caching.
+//! Uses LspQueryDatabase for demand-driven incremental analysis.
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -12,14 +13,16 @@ use super::definition::DefinitionProvider;
 use super::diagnostics::DiagnosticsProvider;
 use super::document::Document;
 use super::hover::HoverProvider;
+use super::inlay_hints::InlayHintProvider;
+use super::query_bridge::{LspQueryDatabase, SmtStatus};
 use super::references::ReferencesProvider;
+use super::rich_info::confidence_badge;
 use super::semantic_tokens::SemanticTokensProvider;
 use super::workspace::Workspace;
 
 use crate::ast::Ast;
 use crate::common::Span;
 use crate::lexer;
-use crate::parser;
 use crate::resolve::SymbolTable;
 
 /// Cached analysis result for a document
@@ -50,8 +53,14 @@ impl Default for AnalysisResult {
 }
 
 /// Analysis host manages incremental analysis and caching
+///
+/// Uses LspQueryDatabase for demand-driven incremental analysis,
+/// with a legacy cache for backward compatibility with providers.
 pub struct AnalysisHost {
-    /// Cached results per file
+    /// Query-based incremental database (primary)
+    query_db: LspQueryDatabase,
+
+    /// Legacy cached results per file (for backward compat with providers)
     cache: HashMap<Url, AnalysisResult>,
 
     /// Completion provider
@@ -72,6 +81,9 @@ pub struct AnalysisHost {
     /// Diagnostics provider
     diagnostics_provider: DiagnosticsProvider,
 
+    /// Inlay hints provider
+    inlay_hints: InlayHintProvider,
+
     /// Workspace reference for cross-file features
     workspace: Option<Arc<RwLock<Workspace>>>,
 }
@@ -80,6 +92,7 @@ impl AnalysisHost {
     /// Create a new analysis host
     pub fn new() -> Self {
         Self {
+            query_db: LspQueryDatabase::new(),
             cache: HashMap::new(),
             completion: CompletionProvider::new(),
             hover: HoverProvider::new(),
@@ -87,6 +100,7 @@ impl AnalysisHost {
             references: ReferencesProvider::new(),
             semantic_tokens: SemanticTokensProvider::new(),
             diagnostics_provider: DiagnosticsProvider::new(),
+            inlay_hints: InlayHintProvider::new(),
             workspace: None,
         }
     }
@@ -94,6 +108,7 @@ impl AnalysisHost {
     /// Create a new analysis host with workspace
     pub fn with_workspace(workspace: Arc<RwLock<Workspace>>) -> Self {
         Self {
+            query_db: LspQueryDatabase::new(),
             cache: HashMap::new(),
             completion: CompletionProvider::new(),
             hover: HoverProvider::new(),
@@ -101,6 +116,7 @@ impl AnalysisHost {
             references: ReferencesProvider::new(),
             semantic_tokens: SemanticTokensProvider::new(),
             diagnostics_provider: DiagnosticsProvider::new(),
+            inlay_hints: InlayHintProvider::new(),
             workspace: Some(workspace),
         }
     }
@@ -116,37 +132,22 @@ impl AnalysisHost {
     }
 
     /// Analyze a document and return diagnostics
+    ///
+    /// Uses the query database for incremental analysis, then populates
+    /// the legacy cache for backward compatibility with existing providers.
     pub fn analyze(&mut self, source: &str, uri: &Url) -> Vec<Diagnostic> {
-        let mut diagnostics = Vec::new();
-        let mut ast = None;
-        let mut symbols = None;
+        // Update the query database with new file contents
+        self.query_db.file_changed(uri, source);
 
-        // Phase 1: Lexing
-        match lexer::lex(source) {
-            Ok(tokens) => {
-                // Phase 2: Parsing
-                match parser::parse(&tokens, source) {
-                    Ok(parsed_ast) => {
-                        ast = Some(parsed_ast.clone());
+        // Get analysis result from query database
+        let result = self.query_db.analyze(uri);
 
-                        // Phase 3: Name resolution
-                        let sym_table = SymbolTable::new();
-                        // Note: Full resolution would involve more work
-                        // For now, just create a basic symbol table
-                        symbols = Some(sym_table);
-                    }
-                    Err(err) => {
-                        diagnostics
-                            .push(self.diagnostics_provider.miette_to_diagnostic(&err, source));
-                    }
-                }
-            }
-            Err(err) => {
-                diagnostics.push(self.diagnostics_provider.miette_to_diagnostic(&err, source));
-            }
-        }
+        // Convert to legacy cache format for backward compatibility
+        let ast = result.ast.as_ref().map(|a| (**a).clone());
+        let symbols = result.symbols.clone();
+        let diagnostics = result.diagnostics.clone();
 
-        // Cache the result
+        // Populate legacy cache
         self.cache.insert(
             uri.clone(),
             AnalysisResult {
@@ -160,19 +161,288 @@ impl AnalysisHost {
         diagnostics
     }
 
+    /// Get the query database (for advanced features)
+    pub fn query_db(&self) -> &LspQueryDatabase {
+        &self.query_db
+    }
+
+    /// Get mutable query database
+    pub fn query_db_mut(&mut self) -> &mut LspQueryDatabase {
+        &mut self.query_db
+    }
+
+    /// Notify that a file was closed
+    pub fn file_closed(&mut self, uri: &Url) {
+        self.query_db.file_closed(uri);
+        self.cache.remove(uri);
+    }
+
+    /// Get effect information for a function (from query database)
+    pub fn get_effect_info(
+        &mut self,
+        uri: &Url,
+        function_name: &str,
+    ) -> Option<super::query_bridge::EffectInfo> {
+        self.query_db.get_effects(uri, function_name)
+    }
+
+    /// Get unit information for an expression (from query database)
+    pub fn get_unit_info(
+        &mut self,
+        uri: &Url,
+        node_id: u32,
+    ) -> Option<super::query_bridge::UnitInfo> {
+        self.query_db.get_unit(uri, node_id)
+    }
+
+    /// Get epistemic information for a variable (from query database)
+    pub fn get_epistemic_info(
+        &mut self,
+        uri: &Url,
+        var_name: &str,
+    ) -> Option<super::query_bridge::EpistemicInfo> {
+        self.query_db.get_epistemic(uri, var_name)
+    }
+
     /// Get hover information at a position
+    ///
+    /// This method combines:
+    /// - Basic symbol information (type, kind)
+    /// - Effect annotations (IO, Mut, etc.)
+    /// - Epistemic status (confidence, source)
+    /// - Unit information (dimensional analysis)
+    /// - Refinement predicates (when available)
     pub fn hover(&self, doc: &Document, pos: Position, uri: &Url) -> Option<Hover> {
         let (word, range) = doc.word_at(pos)?;
 
         // Check cached analysis
         if let Some(result) = self.cache.get(uri) {
             if let Some(ref symbols) = result.symbols {
-                return self.hover.hover_for_symbol(&word, range, symbols);
+                // Get basic symbol hover
+                let base_hover = self.hover.hover_for_symbol(&word, range, symbols);
+
+                // Enhance with rich information from query_db
+                return self.enhance_hover_with_rich_info(base_hover, &word, range, uri);
             }
         }
 
         // Fallback to keyword hover
         self.hover.hover_for_keyword(&word, range)
+    }
+
+    /// Enhance a hover with effect, epistemic, and unit information
+    fn enhance_hover_with_rich_info(
+        &self,
+        base_hover: Option<Hover>,
+        word: &str,
+        range: Range,
+        uri: &Url,
+    ) -> Option<Hover> {
+        // Get the base hover content
+        let base_content = match &base_hover {
+            Some(hover) => match &hover.contents {
+                HoverContents::Markup(m) => m.value.clone(),
+                HoverContents::Scalar(MarkedString::String(s)) => s.clone(),
+                HoverContents::Scalar(MarkedString::LanguageString(ls)) => {
+                    format!("```{}\n{}\n```", ls.language, ls.value)
+                }
+                HoverContents::Array(arr) => arr
+                    .iter()
+                    .map(|m| match m {
+                        MarkedString::String(s) => s.clone(),
+                        MarkedString::LanguageString(ls) => {
+                            format!("```{}\n{}\n```", ls.language, ls.value)
+                        }
+                    })
+                    .collect::<Vec<_>>()
+                    .join("\n\n"),
+            },
+            None => String::new(),
+        };
+
+        // Build enhanced content
+        let mut content = base_content;
+
+        // Try to get effect information (for functions)
+        if let Some(analysis_result) = self.cache.get(uri) {
+            // Check if this is a function with effects
+            if let Some(effect_info) = analysis_result
+                .ast
+                .as_ref()
+                .and_then(|_ast| self.get_effect_info_for_symbol(word, uri))
+            {
+                if !effect_info.effects.is_empty() {
+                    let effects_str = effect_info.effects.join(", ");
+                    content.push_str(&format!("\n\n**Effects:** `{}`", effects_str));
+
+                    // Add effect sources if available
+                    if !effect_info.sources.is_empty() {
+                        content.push_str("\n");
+                        for src in &effect_info.sources {
+                            content.push_str(&format!(
+                                "\n- `{}` from line {} (`{}`)",
+                                src.effect, src.line, src.expr
+                            ));
+                        }
+                    }
+                } else {
+                    content.push_str("\n\n**Effects:** *pure* (no side effects)");
+                }
+            }
+        }
+
+        // Try to get epistemic information (for variables)
+        if let Some(epistemic_info) = self.get_epistemic_info_for_symbol(word, uri) {
+            let badge = confidence_badge(epistemic_info.confidence);
+            content.push_str(&format!(
+                "\n\n**Confidence:** {} {:.0}%",
+                badge,
+                epistemic_info.confidence * 100.0
+            ));
+
+            // Add confidence bounds if available
+            if let (Some(lower), Some(upper)) = (
+                epistemic_info.confidence_lower,
+                epistemic_info.confidence_upper,
+            ) {
+                content.push_str(&format!(" [{:.0}% - {:.0}%]", lower * 100.0, upper * 100.0));
+            }
+
+            // Add source information
+            if !epistemic_info.source.is_empty() {
+                content.push_str(&format!("\n**Source:** {}", epistemic_info.source));
+            }
+
+            // Add revisability
+            if epistemic_info.revisable {
+                content.push_str("\n**Revisability:** revisable");
+            } else {
+                content.push_str("\n**Revisability:** non-revisable");
+            }
+
+            // Add evidence if available
+            if !epistemic_info.evidence.is_empty() {
+                content.push_str("\n**Evidence:**");
+                for ev in &epistemic_info.evidence {
+                    content.push_str(&format!(
+                        "\n- {}: {} (strength: {:.0}%)",
+                        ev.kind,
+                        ev.reference,
+                        ev.strength * 100.0
+                    ));
+                }
+            }
+        }
+
+        // Try to get unit information
+        if let Some(unit_info) = self.get_unit_info_for_symbol(word, uri) {
+            content.push_str(&format!("\n\n**Unit:** `{}`", unit_info.unit));
+            if !unit_info.dimension.is_empty() {
+                content.push_str(&format!(" (dimension: {})", unit_info.dimension));
+            }
+            if unit_info.is_dimensionless {
+                content.push_str(" (dimensionless)");
+            }
+        }
+
+        // Try to get refinement information
+        if let Some(refinement_info) = self.get_refinement_info_for_symbol(word, uri) {
+            content.push_str(&format!(
+                "\n\n**Refinement:** `{{ {}: {} | {} }}`",
+                refinement_info.variable, refinement_info.base_type, refinement_info.predicate
+            ));
+
+            let status_str = match refinement_info.status {
+                SmtStatus::Verified => "verified",
+                SmtStatus::Failed => "failed",
+                SmtStatus::Unknown => "unknown",
+                SmtStatus::Pending => "pending",
+            };
+            content.push_str(&format!("\n**SMT Status:** {}", status_str));
+
+            if let Some(ref cex) = refinement_info.counterexample {
+                content.push_str("\n**Counterexample:**");
+                for (var, val) in &cex.bindings {
+                    content.push_str(&format!("\n- {} = {}", var, val));
+                }
+            }
+        }
+
+        // Return enhanced hover or base hover
+        if content.is_empty() && base_hover.is_none() {
+            return None;
+        }
+
+        Some(Hover {
+            contents: HoverContents::Markup(MarkupContent {
+                kind: MarkupKind::Markdown,
+                value: content,
+            }),
+            range: Some(range),
+        })
+    }
+
+    /// Get effect information for a symbol (function name)
+    fn get_effect_info_for_symbol(
+        &self,
+        name: &str,
+        uri: &Url,
+    ) -> Option<super::query_bridge::EffectInfo> {
+        // Query the analysis result for effect information
+        let analysis_result = self.cache.get(uri)?;
+
+        // Look up in the query database cache
+        // Note: In the current implementation, we need to look at the AST
+        // to find functions and their declared effects
+        if let Some(ref ast) = analysis_result.ast {
+            for item in &ast.items {
+                if let crate::ast::Item::Function(f) = item {
+                    if f.name == name {
+                        return Some(super::query_bridge::EffectInfo {
+                            effects: f.effects.iter().map(|e| e.name.to_string()).collect(),
+                            sources: vec![],
+                        });
+                    }
+                }
+            }
+        }
+
+        None
+    }
+
+    /// Get epistemic information for a symbol (variable name)
+    fn get_epistemic_info_for_symbol(
+        &self,
+        _name: &str,
+        _uri: &Url,
+    ) -> Option<super::query_bridge::EpistemicInfo> {
+        // TODO: Implement epistemic info extraction from HIR
+        // This requires type-checking to determine if a variable has
+        // an epistemic type (Knowledge<T>)
+        None
+    }
+
+    /// Get unit information for a symbol
+    fn get_unit_info_for_symbol(
+        &self,
+        _name: &str,
+        _uri: &Url,
+    ) -> Option<super::query_bridge::UnitInfo> {
+        // TODO: Implement unit info extraction from HIR
+        // This requires type-checking to determine if a variable has
+        // a unit-annotated type
+        None
+    }
+
+    /// Get refinement information for a symbol
+    fn get_refinement_info_for_symbol(
+        &self,
+        _name: &str,
+        _uri: &Url,
+    ) -> Option<super::query_bridge::RefinementInfo> {
+        // TODO: Implement refinement info extraction from HIR
+        // This requires type-checking to extract refinement predicates
+        None
     }
 
     /// Go to definition
@@ -421,46 +691,22 @@ impl AnalysisHost {
     }
 
     /// Get inlay hints
-    pub fn inlay_hints(&self, doc: &Document, range: Range) -> Vec<InlayHint> {
-        let mut hints = Vec::new();
+    ///
+    /// Returns inlay hints for the given document and range, including:
+    /// - Type hints for let bindings without explicit types
+    /// - Parameter hints at call sites
+    /// - Tensor shape hints
+    ///
+    /// Note: Epistemic/unit/effect hints from query database require
+    /// architectural changes (RwLock on query_db) for safe &self access.
+    /// These will be enabled in a future iteration.
+    pub fn inlay_hints(&self, doc: &Document, range: Range, uri: &Url) -> Vec<InlayHint> {
         let source = doc.text();
 
-        // Parse and find let bindings without explicit types
-        if let Ok(tokens) = lexer::lex(&source) {
-            let mut i = 0;
-            while i < tokens.len() {
-                // Look for "let" keyword
-                if tokens[i].kind == crate::lexer::TokenKind::Let {
-                    // Check if there's no type annotation
-                    // Pattern: let <name> = <value>
-                    if i + 3 < tokens.len() {
-                        if let crate::lexer::TokenKind::Ident = tokens[i + 1].kind {
-                            if tokens[i + 2].kind == crate::lexer::TokenKind::Eq {
-                                // No type annotation, could add inlay hint
-                                let pos = doc.offset_to_position(tokens[i + 1].span.end);
-                                if pos.line >= range.start.line && pos.line <= range.end.line {
-                                    hints.push(InlayHint {
-                                        position: pos,
-                                        label: InlayHintLabel::String(": <inferred>".to_string()),
-                                        kind: Some(InlayHintKind::TYPE),
-                                        text_edits: None,
-                                        tooltip: Some(InlayHintTooltip::String(
-                                            "Inferred type".to_string(),
-                                        )),
-                                        padding_left: Some(false),
-                                        padding_right: Some(true),
-                                        data: None,
-                                    });
-                                }
-                            }
-                        }
-                    }
-                }
-                i += 1;
-            }
-        }
-
-        hints
+        // Get hints from the provider (type hints, parameter hints, tensor hints)
+        let ast = self.cache.get(uri).and_then(|r| r.ast.as_ref());
+        let symbols = self.cache.get(uri).and_then(|r| r.symbols.as_ref());
+        self.inlay_hints.hints(&source, range, ast, symbols)
     }
 
     /// Format document
@@ -870,6 +1116,38 @@ fn format_type(ty: &crate::ast::TypeExpr) -> String {
             } else {
                 format!("*{}", format_type(inner))
             }
+        }
+        // Never type (bottom type, e.g., for diverging functions)
+        crate::ast::TypeExpr::Never => "!".to_string(),
+        // Scientific array with dimension
+        crate::ast::TypeExpr::ScientificArray { element_type, dim } => {
+            format!(
+                "Array[{}, {}]",
+                format_type(element_type),
+                format_tensor_dim(dim)
+            )
+        }
+        // Scientific matrix
+        crate::ast::TypeExpr::ScientificMatrix {
+            element_type,
+            rows,
+            cols,
+        } => {
+            format!(
+                "Matrix[{}, {}, {}]",
+                format_type(element_type),
+                format_tensor_dim(rows),
+                format_tensor_dim(cols)
+            )
+        }
+        // Forall quantified types
+        crate::ast::TypeExpr::Forall { vars, inner } => {
+            let vars_str = vars
+                .iter()
+                .map(|v| v.name.clone())
+                .collect::<Vec<_>>()
+                .join(", ");
+            format!("forall<{}> {}", vars_str, format_type(inner))
         }
     }
 }

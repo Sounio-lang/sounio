@@ -1201,6 +1201,234 @@ impl CodeActionProvider {
         })
     }
 
+    // =========================================================================
+    // Effect Code Actions (Phase 4)
+    // =========================================================================
+
+    /// Create code action to wrap expression with an effect handler
+    pub fn wrap_with_handler(
+        &self,
+        uri: &Url,
+        range: Range,
+        source: &str,
+        effect: &str,
+    ) -> CodeActionOrCommand {
+        let expr_text = self.get_text_in_range(source, range);
+        let indent = get_line_indent(source, range.start.line as usize);
+        let inner_indent = format!("{}    ", indent);
+
+        // Generate handler template based on effect type
+        let handler_body = match effect {
+            "IO" => format!(
+                "handle {} {{\n{}return {{\n{}    {}\n{}}}\n{}}}",
+                effect,
+                inner_indent,
+                inner_indent,
+                expr_text.trim(),
+                inner_indent,
+                indent
+            ),
+            "Mut" => format!(
+                "handle {} {{\n{}var state = initial_state\n{}return {{\n{}    {}\n{}}}\n{}}}",
+                effect,
+                inner_indent,
+                inner_indent,
+                inner_indent,
+                expr_text.trim(),
+                inner_indent,
+                indent
+            ),
+            "Panic" => format!(
+                "handle {} {{\n{}case panic(msg) => resume(default_value)\n{}return {{\n{}    {}\n{}}}\n{}}}",
+                effect,
+                inner_indent,
+                inner_indent,
+                inner_indent,
+                expr_text.trim(),
+                inner_indent,
+                indent
+            ),
+            "Async" => format!(
+                "handle {} {{\n{}case await(future) => resume(future.block())\n{}return {{\n{}    {}\n{}}}\n{}}}",
+                effect,
+                inner_indent,
+                inner_indent,
+                inner_indent,
+                expr_text.trim(),
+                inner_indent,
+                indent
+            ),
+            "Prob" => format!(
+                "handle {} {{\n{}case sample(dist) => resume(dist.expectation())\n{}return {{\n{}    {}\n{}}}\n{}}}",
+                effect,
+                inner_indent,
+                inner_indent,
+                inner_indent,
+                expr_text.trim(),
+                inner_indent,
+                indent
+            ),
+            _ => format!(
+                "handle {} {{\n{}return {{\n{}    {}\n{}}}\n{}}}",
+                effect,
+                inner_indent,
+                inner_indent,
+                expr_text.trim(),
+                inner_indent,
+                indent
+            ),
+        };
+
+        CodeActionOrCommand::CodeAction(CodeAction {
+            title: format!("Wrap with `handle {}` block", effect),
+            kind: Some(CodeActionKind::REFACTOR_REWRITE),
+            diagnostics: None,
+            edit: Some(WorkspaceEdit {
+                changes: Some(
+                    [(
+                        uri.clone(),
+                        vec![TextEdit {
+                            range,
+                            new_text: handler_body,
+                        }],
+                    )]
+                    .into_iter()
+                    .collect(),
+                ),
+                ..Default::default()
+            }),
+            command: None,
+            is_preferred: Some(false),
+            disabled: None,
+            data: Some(serde_json::json!({
+                "action": "wrap_handler",
+                "effect": effect
+            })),
+        })
+    }
+
+    /// Create code action to extract effectful expression to a separate function
+    pub fn extract_to_effectful_function(
+        &self,
+        uri: &Url,
+        range: Range,
+        source: &str,
+        effects: &[String],
+    ) -> CodeActionOrCommand {
+        let expr_text = self.get_text_in_range(source, range);
+        let indent = get_line_indent(source, range.start.line as usize);
+
+        // Build effects clause
+        let effects_clause = if effects.is_empty() {
+            String::new()
+        } else {
+            format!(" with {}", effects.join(", "))
+        };
+
+        // Generate function definition
+        let fn_def = format!(
+            "\nfn extracted(){} {{\n    {}\n}}\n",
+            effects_clause,
+            expr_text.trim()
+        );
+
+        // Find insertion point (before current function or at end of file)
+        let insert_line = find_function_start(source, range.start.line as usize).unwrap_or(0);
+
+        CodeActionOrCommand::CodeAction(CodeAction {
+            title: format!("Extract to effectful function"),
+            kind: Some(CodeActionKind::REFACTOR_EXTRACT),
+            diagnostics: None,
+            edit: Some(WorkspaceEdit {
+                changes: Some(
+                    [(
+                        uri.clone(),
+                        vec![
+                            // Insert new function before current function
+                            TextEdit {
+                                range: Range {
+                                    start: Position::new(insert_line as u32, 0),
+                                    end: Position::new(insert_line as u32, 0),
+                                },
+                                new_text: fn_def,
+                            },
+                            // Replace selected expression with function call
+                            TextEdit {
+                                range,
+                                new_text: "extracted()".to_string(),
+                            },
+                        ],
+                    )]
+                    .into_iter()
+                    .collect(),
+                ),
+                ..Default::default()
+            }),
+            command: None,
+            is_preferred: Some(false),
+            disabled: None,
+            data: Some(serde_json::json!({
+                "action": "extract_effectful",
+                "effects": effects
+            })),
+        })
+    }
+
+    /// Add effect-specific refactoring actions based on selection
+    fn add_effect_refactoring_actions(
+        &self,
+        uri: &Url,
+        range: Range,
+        source: &str,
+        actions: &mut Vec<CodeActionOrCommand>,
+    ) {
+        // Check if selection contains effectful operations
+        let selected = self.get_text_in_range(source, range);
+        if selected.is_empty() || range.start == range.end {
+            return;
+        }
+
+        let mut detected_effects = Vec::new();
+
+        // Detect effects in the selected code
+        for effect in BUILTIN_EFFECTS {
+            // Check for effect-related keywords and functions
+            let patterns: &[&str] = match *effect {
+                "IO" => &["print", "read", "write", "open", "close", "file"],
+                "Mut" => &["var ", ":=", ".set(", ".update("],
+                "Panic" => &["panic", "assert", "unwrap", "expect"],
+                "Async" => &["await", "spawn", "async"],
+                "Prob" => &["sample", "observe", "infer"],
+                "GPU" => &["gpu_", "kernel", "device"],
+                "Alloc" => &["Vec::new", "Box::new", "alloc"],
+                "Div" => &["loop", "while", "recurse"],
+                _ => &[],
+            };
+
+            if patterns.iter().any(|p| selected.contains(p)) {
+                detected_effects.push(effect.to_string());
+            }
+        }
+
+        // If effectful operations detected, offer handler wrapping
+        if !detected_effects.is_empty() {
+            for effect in &detected_effects {
+                actions.push(self.wrap_with_handler(uri, range, source, effect));
+            }
+
+            // Also offer extraction to separate function
+            actions.push(self.extract_to_effectful_function(uri, range, source, &detected_effects));
+        }
+
+        // Always offer generic handler wrapping for all effects
+        for effect in BUILTIN_EFFECTS.iter().take(4) {
+            // Top 4 most common effects
+            if !detected_effects.contains(&effect.to_string()) {
+                actions.push(self.wrap_with_handler(uri, range, source, effect));
+            }
+        }
+    }
+
     /// Add refactoring actions based on selection
     fn add_refactoring_actions(
         &self,
@@ -1305,6 +1533,9 @@ impl CodeActionProvider {
                 data: None,
             }));
         }
+
+        // Add effect-specific refactoring actions
+        self.add_effect_refactoring_actions(uri, range, source, actions);
     }
 
     /// Add source-level actions
@@ -1532,6 +1763,23 @@ fn get_line_indent(source: &str, line_num: usize) -> String {
             line[..line.len() - trimmed.len()].to_string()
         })
         .unwrap_or_default()
+}
+
+/// Find the start of the function containing a given line
+fn find_function_start(source: &str, line_num: usize) -> Option<usize> {
+    let lines: Vec<&str> = source.lines().collect();
+
+    // Search backward from the given line to find "fn "
+    for search_line in (0..=line_num).rev() {
+        if let Some(line) = lines.get(search_line) {
+            let trimmed = line.trim_start();
+            if trimmed.starts_with("fn ") || trimmed.starts_with("pub fn ") {
+                return Some(search_line);
+            }
+        }
+    }
+
+    None
 }
 
 /// Find the end of a function signature (before the opening brace)
@@ -1927,5 +2175,189 @@ mod tests {
         assert_eq!(get_line_indent(source, 0), "");
         assert_eq!(get_line_indent(source, 1), "    ");
         assert_eq!(get_line_indent(source, 2), "        ");
+    }
+
+    // =========================================================================
+    // Effect Code Action Tests
+    // =========================================================================
+
+    #[test]
+    fn test_wrap_with_handler_io() {
+        let provider = CodeActionProvider::new();
+        let uri = Url::parse("file:///test.sio").unwrap();
+        let source = "println(\"hello\")";
+        let range = Range {
+            start: Position::new(0, 0),
+            end: Position::new(0, 16),
+        };
+
+        let action = provider.wrap_with_handler(&uri, range, source, "IO");
+
+        match action {
+            CodeActionOrCommand::CodeAction(ca) => {
+                assert!(ca.title.contains("IO"));
+                assert!(ca.title.contains("handle"));
+                assert!(ca.edit.is_some());
+                if let Some(edit) = ca.edit {
+                    if let Some(changes) = edit.changes {
+                        let edits = changes.get(&uri).unwrap();
+                        assert!(!edits.is_empty());
+                        assert!(edits[0].new_text.contains("handle IO"));
+                    }
+                }
+            }
+            _ => panic!("Expected CodeAction"),
+        }
+    }
+
+    #[test]
+    fn test_wrap_with_handler_panic() {
+        let provider = CodeActionProvider::new();
+        let uri = Url::parse("file:///test.sio").unwrap();
+        let source = "unwrap(value)";
+        let range = Range {
+            start: Position::new(0, 0),
+            end: Position::new(0, 13),
+        };
+
+        let action = provider.wrap_with_handler(&uri, range, source, "Panic");
+
+        match action {
+            CodeActionOrCommand::CodeAction(ca) => {
+                assert!(ca.title.contains("Panic"));
+                if let Some(edit) = ca.edit {
+                    if let Some(changes) = edit.changes {
+                        let edits = changes.get(&uri).unwrap();
+                        // Panic handler should have case panic(msg) pattern
+                        assert!(edits[0].new_text.contains("panic(msg)"));
+                    }
+                }
+            }
+            _ => panic!("Expected CodeAction"),
+        }
+    }
+
+    #[test]
+    fn test_extract_to_effectful_function() {
+        let provider = CodeActionProvider::new();
+        let uri = Url::parse("file:///test.sio").unwrap();
+        let source = "fn main() {\n    println(\"hello\")\n}";
+        let range = Range {
+            start: Position::new(1, 4),
+            end: Position::new(1, 20),
+        };
+
+        let action =
+            provider.extract_to_effectful_function(&uri, range, source, &["IO".to_string()]);
+
+        match action {
+            CodeActionOrCommand::CodeAction(ca) => {
+                assert!(ca.title.contains("Extract"));
+                assert!(ca.edit.is_some());
+                if let Some(edit) = ca.edit {
+                    if let Some(changes) = edit.changes {
+                        let edits = changes.get(&uri).unwrap();
+                        // Should have two edits: function definition and replacement
+                        assert_eq!(edits.len(), 2);
+                        // One should contain "fn extracted" with "with IO"
+                        let fn_edit = edits.iter().find(|e| e.new_text.contains("fn extracted"));
+                        assert!(fn_edit.is_some());
+                        assert!(fn_edit.unwrap().new_text.contains("with IO"));
+                    }
+                }
+            }
+            _ => panic!("Expected CodeAction"),
+        }
+    }
+
+    #[test]
+    fn test_effect_detection_in_refactoring() {
+        let provider = CodeActionProvider::new();
+        let uri = Url::parse("file:///test.sio").unwrap();
+        // Code with IO effect (print)
+        let source = "print(x)";
+        let range = Range {
+            start: Position::new(0, 0),
+            end: Position::new(0, 8),
+        };
+
+        let actions = provider.code_actions(&uri, range, &[], source, None, None);
+
+        // Should have wrap with IO handler action
+        let titles: Vec<_> = actions
+            .iter()
+            .filter_map(|a| match a {
+                CodeActionOrCommand::CodeAction(ca) => Some(ca.title.as_str()),
+                _ => None,
+            })
+            .collect();
+
+        assert!(titles.iter().any(|t| t.contains("handle IO")));
+    }
+
+    #[test]
+    fn test_effect_detection_panic() {
+        let provider = CodeActionProvider::new();
+        let uri = Url::parse("file:///test.sio").unwrap();
+        // Code with Panic effect
+        let source = "assert(x > 0)";
+        let range = Range {
+            start: Position::new(0, 0),
+            end: Position::new(0, 13),
+        };
+
+        let actions = provider.code_actions(&uri, range, &[], source, None, None);
+
+        let titles: Vec<_> = actions
+            .iter()
+            .filter_map(|a| match a {
+                CodeActionOrCommand::CodeAction(ca) => Some(ca.title.as_str()),
+                _ => None,
+            })
+            .collect();
+
+        assert!(titles.iter().any(|t| t.contains("Panic")));
+    }
+
+    #[test]
+    fn test_find_function_start() {
+        let source = "fn foo() {\n    let x = 1\n}\n\nfn bar() {\n    let y = 2\n}";
+
+        // Line 1 should find function starting at line 0
+        assert_eq!(find_function_start(source, 1), Some(0));
+
+        // Line 5 should find function starting at line 4
+        assert_eq!(find_function_start(source, 5), Some(4));
+    }
+
+    #[test]
+    fn test_missing_effect_fix() {
+        let provider = CodeActionProvider::new();
+        let uri = Url::parse("file:///test.sio").unwrap();
+        let source = "fn hello() {\n    print(\"hi\")\n}";
+        let diagnostic = Diagnostic {
+            range: Range {
+                start: Position::new(1, 4),
+                end: Position::new(1, 17),
+            },
+            severity: Some(DiagnosticSeverity::ERROR),
+            code: Some(NumberOrString::String("E0006".to_string())),
+            message: "effect `IO` not declared in function signature".to_string(),
+            ..Default::default()
+        };
+
+        let actions =
+            provider.code_actions(&uri, diagnostic.range, &[diagnostic], source, None, None);
+
+        let titles: Vec<_> = actions
+            .iter()
+            .filter_map(|a| match a {
+                CodeActionOrCommand::CodeAction(ca) => Some(ca.title.as_str()),
+                _ => None,
+            })
+            .collect();
+
+        // Should have "Add with IO to function signature"
+        assert!(titles.iter().any(|t| t.contains("Add") && t.contains("IO")));
     }
 }

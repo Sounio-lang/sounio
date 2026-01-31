@@ -733,6 +733,14 @@ impl SemanticTokensProvider {
             Item::Module(_) => {
                 // Nested module - recursive analysis could be added
             }
+            Item::Unit(u) => {
+                // Unit definition
+                builder.push(
+                    &u.span,
+                    SemanticTokenType::Type,
+                    SemanticTokenModifiers::DEFINITION,
+                );
+            }
         }
     }
 
@@ -903,6 +911,18 @@ impl SemanticTokensProvider {
             }
             TypeExpr::Refinement { base_type, .. } => {
                 self.analyze_type(base_type, builder);
+            }
+            TypeExpr::Never => {
+                // Never type (bottom type)
+            }
+            TypeExpr::ScientificArray { element_type, .. } => {
+                self.analyze_type(element_type, builder);
+            }
+            TypeExpr::ScientificMatrix { element_type, .. } => {
+                self.analyze_type(element_type, builder);
+            }
+            TypeExpr::Forall { inner, .. } => {
+                self.analyze_type(inner, builder);
             }
         }
         // Suppress unused warning
@@ -1136,6 +1156,14 @@ impl SemanticTokensProvider {
                     self.analyze_expr(value, symbols, builder);
                 }
             }
+            Expr::Resume { value, .. } => {
+                self.analyze_expr(value, symbols, builder);
+            }
+            Expr::UnsafeBlock { block, .. } => {
+                for stmt in &block.stmts {
+                    self.analyze_stmt(stmt, symbols, builder);
+                }
+            }
         }
     }
 
@@ -1168,6 +1196,9 @@ impl SemanticTokensProvider {
             crate::ast::Stmt::Empty => {}
             crate::ast::Stmt::MacroInvocation(_) => {
                 // Macro invocations are expanded before semantic token processing
+            }
+            crate::ast::Stmt::LocalExtern(_) => {
+                // Local extern declarations
             }
         }
     }

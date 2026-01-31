@@ -293,7 +293,7 @@ impl LspQueryDatabase {
     /// Perform the actual analysis
     fn do_analyze(&mut self, uri: &Url) -> LspAnalysisResult {
         let mut result = LspAnalysisResult::default();
-        result.revision = self.inner.current_revision().0 as u64;
+        result.revision = self.inner.current_revision().get();
 
         // Get file contents
         let contents = match self.file_contents.get(uri) {
@@ -308,7 +308,7 @@ impl LspQueryDatabase {
             Err(err) => {
                 result
                     .diagnostics
-                    .push(Self::error_to_diagnostic(&err, &contents));
+                    .push(Self::message_to_diagnostic(&err.to_string(), &contents));
                 return result;
             }
         };
@@ -322,7 +322,7 @@ impl LspQueryDatabase {
             Err(err) => {
                 result
                     .diagnostics
-                    .push(Self::error_to_diagnostic(&err, &contents));
+                    .push(Self::message_to_diagnostic(&err.to_string(), &contents));
                 return result;
             }
         };
@@ -330,14 +330,16 @@ impl LspQueryDatabase {
         // Phase 3: Name resolution
         let resolved = match crate::resolve::resolve(ast.clone()) {
             Ok(resolved) => {
-                result.resolved = Some(Arc::new(resolved.clone()));
+                // Extract symbols before wrapping in Arc (ResolvedAst doesn't impl Clone)
                 result.symbols = Some(resolved.symbols.clone());
-                resolved
+                let resolved_arc = Arc::new(resolved);
+                result.resolved = Some(resolved_arc.clone());
+                resolved_arc
             }
             Err(err) => {
                 result
                     .diagnostics
-                    .push(Self::error_to_diagnostic(&err, &contents));
+                    .push(Self::message_to_diagnostic(&err.to_string(), &contents));
                 return result;
             }
         };
@@ -348,7 +350,7 @@ impl LspQueryDatabase {
                 result.hir = Some(Arc::new(hir));
 
                 // Extract rich type information from the AST
-                Self::extract_effects(&ast, &mut result.effects);
+                Self::extract_effects(&result.ast.as_ref().unwrap(), &mut result.effects);
                 // TODO: Extract units, epistemic, refinements from HIR
             }
             Err(_err) => {
@@ -418,12 +420,10 @@ impl LspQueryDatabase {
         path
     }
 
-    /// Convert an error to LSP diagnostic
-    fn error_to_diagnostic(err: &dyn std::error::Error, source: &str) -> Diagnostic {
-        let message = err.to_string();
-
+    /// Convert an error message to LSP diagnostic
+    fn message_to_diagnostic(message: &str, source: &str) -> Diagnostic {
         // Try to extract span from error message
-        let range = Self::extract_range_from_message(&message, source).unwrap_or(Range {
+        let range = Self::extract_range_from_message(message, source).unwrap_or(Range {
             start: Position::new(0, 0),
             end: Position::new(0, 1),
         });
@@ -434,7 +434,7 @@ impl LspQueryDatabase {
             code: None,
             code_description: None,
             source: Some("sounio".to_string()),
-            message,
+            message: message.to_string(),
             related_information: None,
             tags: None,
             data: None,
@@ -596,5 +596,139 @@ mod tests {
         let r = range.unwrap();
         assert_eq!(r.start.line, 1); // 0-indexed
         assert_eq!(r.start.character, 4); // 0-indexed
+    }
+
+    #[test]
+    fn test_analyze_with_symbols() {
+        let mut db = LspQueryDatabase::new();
+        let uri = Url::parse("file:///test.sio").unwrap();
+        let code = r#"
+fn add(x: i32, y: i32) -> i32 {
+    x + y
+}
+
+fn main() -> i32 {
+    add(1, 2)
+}
+"#;
+        db.file_changed(&uri, code);
+        let result = db.analyze(&uri);
+
+        // Should have symbols
+        assert!(result.symbols.is_some(), "Should have symbol table");
+
+        if let Some(ref symbols) = result.symbols {
+            // Should find the 'add' function
+            let add_def = symbols.lookup("add");
+            assert!(add_def.is_some(), "Should find 'add' function");
+
+            // Should find the 'main' function
+            let main_def = symbols.lookup("main");
+            assert!(main_def.is_some(), "Should find 'main' function");
+        }
+
+        // Should have effect info for functions
+        assert!(
+            result.effects.contains_key("add"),
+            "Should have effect info for 'add'"
+        );
+        assert!(
+            result.effects.contains_key("main"),
+            "Should have effect info for 'main'"
+        );
+    }
+
+    #[test]
+    fn test_analyze_function_with_effects() {
+        let mut db = LspQueryDatabase::new();
+        let uri = Url::parse("file:///test.sio").unwrap();
+        let code = r#"
+fn print_value(x: i32) -> () with IO {
+    // uses IO effect
+}
+"#;
+        db.file_changed(&uri, code);
+        let result = db.analyze(&uri);
+
+        // Should extract effect information
+        assert!(result.effects.contains_key("print_value"));
+        let effect_info = result.effects.get("print_value").unwrap();
+        assert!(
+            effect_info.effects.contains(&"IO".to_string()),
+            "Should have IO effect"
+        );
+    }
+
+    #[test]
+    fn test_analyze_struct_definition() {
+        let mut db = LspQueryDatabase::new();
+        let uri = Url::parse("file:///test.sio").unwrap();
+        let code = r#"
+struct Point {
+    x: i32,
+    y: i32
+}
+"#;
+        db.file_changed(&uri, code);
+        let result = db.analyze(&uri);
+
+        assert!(result.symbols.is_some());
+        if let Some(ref symbols) = result.symbols {
+            let point_def = symbols.lookup_type("Point");
+            assert!(point_def.is_some(), "Should find 'Point' struct");
+        }
+    }
+
+    #[test]
+    fn test_analyze_syntax_error_produces_diagnostics() {
+        let mut db = LspQueryDatabase::new();
+        let uri = Url::parse("file:///test.sio").unwrap();
+        let code = r#"
+fn broken() -> i32 {
+    let x =  // missing expression
+}
+"#;
+        db.file_changed(&uri, code);
+        let result = db.analyze(&uri);
+
+        // Should have diagnostics for the syntax error
+        assert!(
+            !result.diagnostics.is_empty(),
+            "Should have diagnostics for syntax error"
+        );
+    }
+
+    #[test]
+    fn test_file_closed_removes_cache() {
+        let mut db = LspQueryDatabase::new();
+        let uri = Url::parse("file:///test.sio").unwrap();
+
+        db.file_changed(&uri, "fn test() {}");
+        assert!(db.file_contents.contains_key(&uri));
+
+        db.file_closed(&uri);
+        assert!(!db.file_contents.contains_key(&uri));
+        assert!(!db.analysis_cache.contains_key(&uri));
+    }
+
+    #[test]
+    fn test_multiple_files() {
+        let mut db = LspQueryDatabase::new();
+        let uri1 = Url::parse("file:///test1.sio").unwrap();
+        let uri2 = Url::parse("file:///test2.sio").unwrap();
+
+        db.file_changed(&uri1, "fn foo() -> i32 { 1 }");
+        db.file_changed(&uri2, "fn bar() -> i32 { 2 }");
+
+        let result1 = db.analyze(&uri1);
+        let result2 = db.analyze(&uri2);
+
+        // Both should have their respective symbols
+        assert!(result1.effects.contains_key("foo"));
+        assert!(result2.effects.contains_key("bar"));
+
+        // Ensure no cross-contamination
+        assert!(!result1.effects.contains_key("bar"));
+        assert!(!result2.effects.contains_key("foo"));
     }
 }

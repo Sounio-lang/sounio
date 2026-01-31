@@ -41,6 +41,7 @@ pub mod hover;
 pub mod inlay_hints;
 pub mod query_bridge;
 pub mod references;
+pub mod rich_info;
 pub mod semantic_tokens;
 pub mod server;
 pub mod workspace;
