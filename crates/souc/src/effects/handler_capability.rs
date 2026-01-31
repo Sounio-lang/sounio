@@ -35,8 +35,11 @@ use crate::effects::epistemic_effects::{
     ConfidenceModifier as EpistemicConfidenceModifier, EpistemicImpactRegistry, EpistemicTracker,
 };
 use crate::interp::Value;
+use std::collections::HashMap;
 use std::fmt::Debug;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::Instant;
+use tracing::{debug, instrument, warn};
 
 /// Global counter for generating unique continuation IDs
 static CONTINUATION_ID_COUNTER: AtomicU64 = AtomicU64::new(1);
@@ -110,11 +113,25 @@ pub enum HandlerResult {
 pub struct SuspensionId(pub u64);
 
 /// Error from handler execution
+///
+/// Extended for D.4 production hardening with:
+/// - Source error chain for debugging
+/// - Context map for request correlation
+/// - Timestamps for error timing analysis
 #[derive(Debug, Clone)]
 pub struct HandlerError {
+    /// Human-readable error message
     pub message: String,
+    /// Effect that produced the error
     pub effect: String,
+    /// Operation that failed
     pub operation: String,
+    /// Source error message (for error chaining)
+    pub source: Option<String>,
+    /// Contextual information (request_id, handler_name, etc.)
+    pub context: HashMap<String, String>,
+    /// When the error occurred (monotonic, for duration calculations)
+    pub timestamp: Option<Instant>,
 }
 
 impl HandlerError {
@@ -123,11 +140,57 @@ impl HandlerError {
         operation: impl Into<String>,
         message: impl Into<String>,
     ) -> Self {
+        let effect_str = effect.into();
+        let operation_str = operation.into();
+        let message_str = message.into();
+
+        // Log the error at warn level for observability
+        warn!(
+            effect = %effect_str,
+            operation = %operation_str,
+            "Handler error: {}",
+            message_str
+        );
+
         Self {
-            effect: effect.into(),
-            operation: operation.into(),
-            message: message.into(),
+            effect: effect_str,
+            operation: operation_str,
+            message: message_str,
+            source: None,
+            context: HashMap::new(),
+            timestamp: Some(Instant::now()),
         }
+    }
+
+    /// Create an error with a source cause
+    pub fn with_source(mut self, source: impl Into<String>) -> Self {
+        self.source = Some(source.into());
+        self
+    }
+
+    /// Add context to the error
+    pub fn with_context(mut self, key: impl Into<String>, value: impl Into<String>) -> Self {
+        self.context.insert(key.into(), value.into());
+        self
+    }
+
+    /// Create from another error type
+    pub fn from_error<E: std::error::Error>(
+        effect: impl Into<String>,
+        operation: impl Into<String>,
+        error: E,
+    ) -> Self {
+        Self::new(effect, operation, error.to_string()).with_source(format!("{:?}", error))
+    }
+
+    /// Get a formatted error chain for debugging
+    pub fn error_chain(&self) -> String {
+        let mut chain = self.message.clone();
+        if let Some(ref source) = self.source {
+            chain.push_str("\n  caused by: ");
+            chain.push_str(source);
+        }
+        chain
     }
 }
 
@@ -513,6 +576,149 @@ pub trait HandlerCapability: Debug {
     }
 }
 
+/// Instrumented handler dispatch with tracing and timing
+///
+/// Wraps a handler call with:
+/// - Tracing span for the operation
+/// - Timing measurement
+/// - Debug logging for entry/exit
+/// - Warning logging for errors
+///
+/// Use this for production-hardened handler dispatch.
+#[instrument(
+    skip(handler, args, continuation, state),
+    fields(
+        effect = %handler.effect_name(),
+        handler = %handler.handler_name(),
+    )
+)]
+pub fn instrumented_dispatch<H: HandlerCapability + ?Sized>(
+    handler: &H,
+    operation: &str,
+    args: &[Value],
+    continuation: Continuation,
+    state: &mut HandlerState,
+) -> HandlerResult {
+    let start = Instant::now();
+    debug!(
+        operation = %operation,
+        num_args = args.len(),
+        "Dispatching effect operation"
+    );
+
+    let result = handler.handle(operation, args, continuation, state);
+    let elapsed = start.elapsed();
+
+    match &result {
+        HandlerResult::Return(val) => {
+            debug!(
+                operation = %operation,
+                elapsed_us = elapsed.as_micros(),
+                "Handler returned: {:?}",
+                val
+            );
+        }
+        HandlerResult::Resume(val) => {
+            debug!(
+                operation = %operation,
+                elapsed_us = elapsed.as_micros(),
+                "Handler resumed with: {:?}",
+                val
+            );
+        }
+        HandlerResult::Suspend(id) => {
+            debug!(
+                operation = %operation,
+                elapsed_us = elapsed.as_micros(),
+                suspension_id = ?id,
+                "Handler suspended"
+            );
+        }
+        HandlerResult::Abort(err) => {
+            warn!(
+                operation = %operation,
+                elapsed_us = elapsed.as_micros(),
+                error = %err.message,
+                source = ?err.source,
+                "Handler aborted"
+            );
+        }
+    }
+
+    result
+}
+
+/// Panic-safe handler dispatch
+///
+/// Wraps handler execution in `catch_unwind` to convert panics to errors.
+/// This prevents handler panics from crashing the entire runtime.
+///
+/// # Safety
+///
+/// This function catches panics and converts them to `HandlerResult::Abort`.
+/// The handler must be `UnwindSafe` - most handlers satisfy this by not
+/// holding mutable references across the call boundary.
+///
+/// # Example
+///
+/// ```ignore
+/// use sounio::effects::handler_capability::safe_dispatch;
+///
+/// let result = safe_dispatch(&handler, "print", &args, cont, &mut state);
+/// // Even if handler panics, we get HandlerResult::Abort instead of unwinding
+/// ```
+pub fn safe_dispatch<H: HandlerCapability + std::panic::RefUnwindSafe + ?Sized>(
+    handler: &H,
+    operation: &str,
+    args: &[Value],
+    continuation: Continuation,
+    state: &mut HandlerState,
+) -> HandlerResult {
+    use std::panic::{catch_unwind, AssertUnwindSafe};
+
+    let effect_name = handler.effect_name().to_string();
+    let handler_name = handler.handler_name().to_string();
+    let operation = operation.to_string();
+
+    // We need to wrap state in AssertUnwindSafe since it contains non-UnwindSafe types
+    // This is safe because we're not resuming from the panic - we're converting it to an error
+    let result = catch_unwind(AssertUnwindSafe(|| {
+        handler.handle(&operation, args, continuation, state)
+    }));
+
+    match result {
+        Ok(handler_result) => handler_result,
+        Err(panic_payload) => {
+            // Extract panic message
+            let panic_msg = if let Some(s) = panic_payload.downcast_ref::<&str>() {
+                s.to_string()
+            } else if let Some(s) = panic_payload.downcast_ref::<String>() {
+                s.clone()
+            } else {
+                "unknown panic".to_string()
+            };
+
+            warn!(
+                effect = %effect_name,
+                handler = %handler_name,
+                operation = %operation,
+                "Handler panicked: {}",
+                panic_msg
+            );
+
+            HandlerResult::Abort(
+                HandlerError::new(
+                    &effect_name,
+                    &operation,
+                    format!("Handler panicked: {}", panic_msg),
+                )
+                .with_context("handler", handler_name)
+                .with_context("panic_recovered", "true"),
+            )
+        }
+    }
+}
+
 /// Helper macro for defining simple handlers
 #[macro_export]
 macro_rules! define_handler {
@@ -750,5 +956,81 @@ mod tests {
 
         // But history is not recorded (for performance)
         assert_eq!(state.epistemic_tracker.event_count(), 0);
+    }
+
+    /// Handler that panics for testing panic safety
+    #[derive(Debug)]
+    struct PanickingHandler;
+
+    impl std::panic::RefUnwindSafe for PanickingHandler {}
+
+    impl HandlerCapability for PanickingHandler {
+        fn effect_name(&self) -> &str {
+            "Panic"
+        }
+        fn handler_name(&self) -> &str {
+            "PanickingHandler"
+        }
+        fn operations(&self) -> &[OperationSpec] {
+            &[]
+        }
+        fn handle(
+            &self,
+            operation: &str,
+            _args: &[Value],
+            _continuation: Continuation,
+            _state: &mut HandlerState,
+        ) -> HandlerResult {
+            if operation == "panic" {
+                panic!("intentional test panic");
+            }
+            HandlerResult::Resume(Value::Unit)
+        }
+    }
+
+    #[test]
+    fn test_safe_dispatch_catches_panic() {
+        let handler = PanickingHandler;
+        let mut state = HandlerState::default();
+        let continuation = Continuation::placeholder(1);
+
+        // Normal operation should work
+        let result = safe_dispatch(
+            &handler,
+            "normal",
+            &[],
+            Continuation::placeholder(2),
+            &mut state,
+        );
+        assert!(matches!(result, HandlerResult::Resume(Value::Unit)));
+
+        // Panicking operation should be caught and converted to Abort
+        let result = safe_dispatch(&handler, "panic", &[], continuation, &mut state);
+        match result {
+            HandlerResult::Abort(err) => {
+                assert!(err.message.contains("panicked"));
+                assert_eq!(
+                    err.context.get("panic_recovered"),
+                    Some(&"true".to_string())
+                );
+            }
+            _ => panic!("Expected Abort for panicking handler"),
+        }
+    }
+
+    #[test]
+    fn test_handler_error_with_context() {
+        let err = HandlerError::new("Test", "op", "test error")
+            .with_source("underlying cause")
+            .with_context("request_id", "123")
+            .with_context("user_id", "456");
+
+        assert_eq!(err.source, Some("underlying cause".to_string()));
+        assert_eq!(err.context.get("request_id"), Some(&"123".to_string()));
+        assert_eq!(err.context.get("user_id"), Some(&"456".to_string()));
+
+        let chain = err.error_chain();
+        assert!(chain.contains("test error"));
+        assert!(chain.contains("underlying cause"));
     }
 }

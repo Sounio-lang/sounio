@@ -423,6 +423,38 @@ impl HandlerRegistryBuilder {
         self
     }
 
+    /// Add the Network handler with resilience patterns.
+    ///
+    /// Wraps the network handler with retry and circuit breaker for
+    /// production-grade fault tolerance.
+    pub fn with_resilient_network(mut self) -> Self {
+        use crate::effects::resilient_dispatch::ResilientBuilder;
+        let resilient = ResilientBuilder::for_network().wrap(NetworkHandler::new());
+        self.registry.register(resilient);
+        self
+    }
+
+    /// Add the IO handler with resilience patterns.
+    ///
+    /// Wraps the IO handler with retry for transient file system errors.
+    pub fn with_resilient_io(mut self) -> Self {
+        use crate::effects::resilient_dispatch::ResilientBuilder;
+        let resilient = ResilientBuilder::for_io().wrap(IOHandler::new());
+        self.registry.register(resilient);
+        self
+    }
+
+    /// Add a custom handler wrapped with resilience patterns.
+    pub fn with_resilient<H>(mut self, handler: H) -> Self
+    where
+        H: HandlerCapability + Send + Sync + 'static,
+    {
+        use crate::effects::resilient_dispatch::ResilientDispatcher;
+        let resilient = ResilientDispatcher::new(handler).with_retry(3, 100);
+        self.registry.register(resilient);
+        self
+    }
+
     /// Build the registry.
     pub fn build(self) -> HandlerRegistry {
         self.registry

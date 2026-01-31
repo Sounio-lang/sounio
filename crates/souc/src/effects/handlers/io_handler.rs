@@ -42,6 +42,9 @@
 use std::fs;
 use std::io::{self, BufRead, Write as IoWrite};
 use std::sync::OnceLock;
+use std::time::Instant;
+
+use tracing::{debug, instrument, warn};
 
 use crate::effects::handler_capability::{
     Continuation, EpistemicImpact, HandlerCapability, HandlerError, HandlerResult, HandlerState,
@@ -320,6 +323,7 @@ impl HandlerCapability for IOHandler {
         get_io_operations()
     }
 
+    #[instrument(skip(self, args, _continuation, state), fields(effect = "IO"))]
     fn handle(
         &self,
         operation: &str,
@@ -327,7 +331,10 @@ impl HandlerCapability for IOHandler {
         _continuation: Continuation,
         state: &mut HandlerState,
     ) -> HandlerResult {
-        match operation {
+        let start = Instant::now();
+        debug!(num_args = args.len(), "Dispatching IO operation");
+
+        let result = match operation {
             "print" => self.handle_print(args, state),
             "println" => self.handle_println(args, state),
             "read_line" => self.handle_read_line(args, state),
@@ -338,7 +345,24 @@ impl HandlerCapability for IOHandler {
                 operation,
                 format!("Unknown IO operation: {}", operation),
             )),
+        };
+
+        let elapsed = start.elapsed();
+        match &result {
+            HandlerResult::Resume(_) | HandlerResult::Return(_) => {
+                debug!(elapsed_us = elapsed.as_micros(), "IO operation completed");
+            }
+            HandlerResult::Abort(err) => {
+                warn!(
+                    elapsed_us = elapsed.as_micros(),
+                    error = %err.message,
+                    "IO operation failed"
+                );
+            }
+            _ => {}
         }
+
+        result
     }
 
     fn epistemic_impact(&self, operation: &str) -> EpistemicImpact {

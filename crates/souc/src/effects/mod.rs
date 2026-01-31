@@ -39,6 +39,8 @@ pub mod handlers;
 pub mod inference;
 pub mod jit_resume;
 pub mod linearity;
+pub mod resilience;
+pub mod resilient_dispatch;
 pub mod simd_dispatch;
 
 pub use crate::types::effects::*;
@@ -67,6 +69,10 @@ pub use jit_resume::{
     JitResumeStore,
 };
 pub use linearity::{EffectOpInfo, Linearity};
+pub use resilience::{with_retry, CircuitBreaker, CircuitState, RetryConfig, RetryResult};
+pub use resilient_dispatch::{
+    DispatchConfig, DispatchOutcome, ResilientBuilder, ResilientDispatcher,
+};
 pub use simd_dispatch::{
     simd_perform, simd_perform_batch, BatchEffectResult, DispatchError, DispatchHandle, EffectOp,
     ParallelEffectResult, ParallelTiming, SimdContinuation, SimdDispatchConfig,
