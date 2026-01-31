@@ -75,7 +75,11 @@ pub fn normalized_levenshtein(s1: &str, s2: &str) -> f32 {
 }
 
 /// Find similar names in a list using Levenshtein distance
-pub fn find_similar_names(target: &str, candidates: &[String], max_distance: usize) -> Vec<(String, usize)> {
+pub fn find_similar_names(
+    target: &str,
+    candidates: &[String],
+    max_distance: usize,
+) -> Vec<(String, usize)> {
     let mut matches: Vec<(String, usize)> = candidates
         .iter()
         .filter_map(|candidate| {
@@ -140,7 +144,7 @@ impl TypeKind {
 
         // Handle arrays
         if s.starts_with('[') && s.ends_with(']') {
-            let inner = &s[1..s.len()-1];
+            let inner = &s[1..s.len() - 1];
             // Handle sized arrays [T; N]
             if let Some(semi_pos) = inner.rfind(';') {
                 return TypeKind::Array(Box::new(TypeKind::parse(&inner[..semi_pos].trim())));
@@ -149,18 +153,54 @@ impl TypeKind {
         }
 
         match s {
-            "i8" => TypeKind::Int { bits: 8, signed: true },
-            "i16" => TypeKind::Int { bits: 16, signed: true },
-            "i32" => TypeKind::Int { bits: 32, signed: true },
-            "i64" => TypeKind::Int { bits: 64, signed: true },
-            "i128" => TypeKind::Int { bits: 128, signed: true },
-            "isize" => TypeKind::Int { bits: 64, signed: true }, // platform-dependent
-            "u8" => TypeKind::Int { bits: 8, signed: false },
-            "u16" => TypeKind::Int { bits: 16, signed: false },
-            "u32" => TypeKind::Int { bits: 32, signed: false },
-            "u64" => TypeKind::Int { bits: 64, signed: false },
-            "u128" => TypeKind::Int { bits: 128, signed: false },
-            "usize" => TypeKind::Int { bits: 64, signed: false },
+            "i8" => TypeKind::Int {
+                bits: 8,
+                signed: true,
+            },
+            "i16" => TypeKind::Int {
+                bits: 16,
+                signed: true,
+            },
+            "i32" => TypeKind::Int {
+                bits: 32,
+                signed: true,
+            },
+            "i64" => TypeKind::Int {
+                bits: 64,
+                signed: true,
+            },
+            "i128" => TypeKind::Int {
+                bits: 128,
+                signed: true,
+            },
+            "isize" => TypeKind::Int {
+                bits: 64,
+                signed: true,
+            }, // platform-dependent
+            "u8" => TypeKind::Int {
+                bits: 8,
+                signed: false,
+            },
+            "u16" => TypeKind::Int {
+                bits: 16,
+                signed: false,
+            },
+            "u32" => TypeKind::Int {
+                bits: 32,
+                signed: false,
+            },
+            "u64" => TypeKind::Int {
+                bits: 64,
+                signed: false,
+            },
+            "u128" => TypeKind::Int {
+                bits: 128,
+                signed: false,
+            },
+            "usize" => TypeKind::Int {
+                bits: 64,
+                signed: false,
+            },
             "f32" => TypeKind::Float { bits: 32 },
             "f64" => TypeKind::Float { bits: 64 },
             "bool" => TypeKind::Bool,
@@ -201,11 +241,11 @@ impl TypeKind {
 
         match (self, target) {
             // Numeric casts use `as`
-            (TypeKind::Int { .. }, TypeKind::Int { .. }) |
-            (TypeKind::Int { .. }, TypeKind::Float { .. }) |
-            (TypeKind::Float { .. }, TypeKind::Int { .. }) |
-            (TypeKind::Float { .. }, TypeKind::Float { .. }) |
-            (TypeKind::Bool, TypeKind::Int { .. }) => {
+            (TypeKind::Int { .. }, TypeKind::Int { .. })
+            | (TypeKind::Int { .. }, TypeKind::Float { .. })
+            | (TypeKind::Float { .. }, TypeKind::Int { .. })
+            | (TypeKind::Float { .. }, TypeKind::Float { .. })
+            | (TypeKind::Bool, TypeKind::Int { .. }) => {
                 Some(format!("{} as {}", expr, target.type_name()))
             }
 
@@ -224,18 +264,54 @@ impl TypeKind {
     /// Get type name as string
     pub fn type_name(&self) -> String {
         match self {
-            TypeKind::Int { bits: 8, signed: true } => "i8".to_string(),
-            TypeKind::Int { bits: 16, signed: true } => "i16".to_string(),
-            TypeKind::Int { bits: 32, signed: true } => "i32".to_string(),
-            TypeKind::Int { bits: 64, signed: true } => "i64".to_string(),
-            TypeKind::Int { bits: 128, signed: true } => "i128".to_string(),
-            TypeKind::Int { bits: 8, signed: false } => "u8".to_string(),
-            TypeKind::Int { bits: 16, signed: false } => "u16".to_string(),
-            TypeKind::Int { bits: 32, signed: false } => "u32".to_string(),
-            TypeKind::Int { bits: 64, signed: false } => "u64".to_string(),
-            TypeKind::Int { bits: 128, signed: false } => "u128".to_string(),
-            TypeKind::Int { bits: _, signed: true } => "isize".to_string(),
-            TypeKind::Int { bits: _, signed: false } => "usize".to_string(),
+            TypeKind::Int {
+                bits: 8,
+                signed: true,
+            } => "i8".to_string(),
+            TypeKind::Int {
+                bits: 16,
+                signed: true,
+            } => "i16".to_string(),
+            TypeKind::Int {
+                bits: 32,
+                signed: true,
+            } => "i32".to_string(),
+            TypeKind::Int {
+                bits: 64,
+                signed: true,
+            } => "i64".to_string(),
+            TypeKind::Int {
+                bits: 128,
+                signed: true,
+            } => "i128".to_string(),
+            TypeKind::Int {
+                bits: 8,
+                signed: false,
+            } => "u8".to_string(),
+            TypeKind::Int {
+                bits: 16,
+                signed: false,
+            } => "u16".to_string(),
+            TypeKind::Int {
+                bits: 32,
+                signed: false,
+            } => "u32".to_string(),
+            TypeKind::Int {
+                bits: 64,
+                signed: false,
+            } => "u64".to_string(),
+            TypeKind::Int {
+                bits: 128,
+                signed: false,
+            } => "u128".to_string(),
+            TypeKind::Int {
+                bits: _,
+                signed: true,
+            } => "isize".to_string(),
+            TypeKind::Int {
+                bits: _,
+                signed: false,
+            } => "usize".to_string(),
             TypeKind::Float { bits: 32 } => "f32".to_string(),
             TypeKind::Float { bits: 64 } => "f64".to_string(),
             TypeKind::Float { bits: _ } => "f64".to_string(), // Default to f64 for other float sizes
@@ -256,14 +332,14 @@ impl TypeKind {
 
 /// Built-in effects in Sounio
 pub const BUILTIN_EFFECTS: &[&str] = &[
-    "IO",     // File, network, console I/O
-    "Mut",    // Mutable state
-    "Alloc",  // Heap allocation
-    "Panic",  // Recoverable failure
-    "Async",  // Asynchronous operations
-    "GPU",    // GPU kernel launch, device memory
-    "Prob",   // Probabilistic computation
-    "Div",    // Potential divergence
+    "IO",    // File, network, console I/O
+    "Mut",   // Mutable state
+    "Alloc", // Heap allocation
+    "Panic", // Recoverable failure
+    "Async", // Asynchronous operations
+    "GPU",   // GPU kernel launch, device memory
+    "Prob",  // Probabilistic computation
+    "Div",   // Potential divergence
 ];
 
 /// Functions and their associated effects
@@ -358,31 +434,39 @@ impl CodeActionProvider {
         // Extract error code
         let code = match &diagnostic.code {
             Some(NumberOrString::String(s)) => s.as_str(),
-            Some(NumberOrString::Number(n)) => {
-                match n {
-                    1 => "E0001",
-                    2 => "E0002",
-                    3 => "E0003",
-                    4 => "E0004",
-                    5 => "E0005",
-                    6 => "E0006",
-                    _ => return,
-                }
-            }
+            Some(NumberOrString::Number(n)) => match n {
+                1 => "E0001",
+                2 => "E0002",
+                3 => "E0003",
+                4 => "E0004",
+                5 => "E0005",
+                6 => "E0006",
+                _ => return,
+            },
             None => {
                 // Try to infer from message content
                 let msg = diagnostic.message.to_lowercase();
-                if msg.contains("type mismatch") || msg.contains("expected") && msg.contains("found") {
+                if msg.contains("type mismatch")
+                    || msg.contains("expected") && msg.contains("found")
+                {
                     "E0001"
-                } else if msg.contains("undefined") || msg.contains("not found") || msg.contains("cannot find") {
+                } else if msg.contains("undefined")
+                    || msg.contains("not found")
+                    || msg.contains("cannot find")
+                {
                     "E0002"
                 } else if msg.contains("unused") {
                     "E0003"
                 } else if msg.contains("missing return type") {
                     "E0004"
-                } else if msg.contains("moved") || msg.contains("borrow") || msg.contains("ownership") {
+                } else if msg.contains("moved")
+                    || msg.contains("borrow")
+                    || msg.contains("ownership")
+                {
                     "E0005"
-                } else if msg.contains("effect") && (msg.contains("not declared") || msg.contains("missing")) {
+                } else if msg.contains("effect")
+                    && (msg.contains("not declared") || msg.contains("missing"))
+                {
                     "E0006"
                 } else {
                     return;
@@ -431,7 +515,8 @@ impl CodeActionProvider {
 
         // Extract expected and found types from message
         // Common patterns: "expected `X`, found `Y`" or "expected X but found Y"
-        let (expected_type, found_type) = if let Some((exp, found)) = extract_type_mismatch(message) {
+        let (expected_type, found_type) = if let Some((exp, found)) = extract_type_mismatch(message)
+        {
             (exp, found)
         } else {
             return;
@@ -644,7 +729,10 @@ impl CodeActionProvider {
             let title = if *distance == 1 {
                 format!("Did you mean `{}`?", suggestion)
             } else {
-                format!("Did you mean `{}`? (edit distance: {})", suggestion, distance)
+                format!(
+                    "Did you mean `{}`? (edit distance: {})",
+                    suggestion, distance
+                )
             };
 
             actions.push(CodeActionOrCommand::CodeAction(CodeAction {
@@ -1086,24 +1174,22 @@ impl CodeActionProvider {
             title: format!("Add `with {}` to function signature", effect),
             kind: Some(CodeActionKind::QUICKFIX),
             diagnostics: Some(vec![diagnostic.clone()]),
-            edit: fn_sig_end.map(|(line, col)| {
-                WorkspaceEdit {
-                    changes: Some(
-                        [(
-                            uri.clone(),
-                            vec![TextEdit {
-                                range: Range {
-                                    start: Position::new(line as u32, col as u32),
-                                    end: Position::new(line as u32, col as u32),
-                                },
-                                new_text: format!(" with {}", effect),
-                            }],
-                        )]
-                        .into_iter()
-                        .collect(),
-                    ),
-                    ..Default::default()
-                }
+            edit: fn_sig_end.map(|(line, col)| WorkspaceEdit {
+                changes: Some(
+                    [(
+                        uri.clone(),
+                        vec![TextEdit {
+                            range: Range {
+                                start: Position::new(line as u32, col as u32),
+                                end: Position::new(line as u32, col as u32),
+                            },
+                            new_text: format!(" with {}", effect),
+                        }],
+                    )]
+                    .into_iter()
+                    .collect(),
+                ),
+                ..Default::default()
             }),
             command: None,
             is_preferred: Some(true),
@@ -1154,7 +1240,11 @@ impl CodeActionProvider {
                                     start: Position::new(range.start.line, 0),
                                     end: Position::new(range.start.line, 0),
                                 },
-                                new_text: format!("{}let extracted = {}\n", indent, selected.trim()),
+                                new_text: format!(
+                                    "{}let extracted = {}\n",
+                                    indent,
+                                    selected.trim()
+                                ),
                             },
                             // Replace selection with variable name
                             TextEdit {
@@ -1372,7 +1462,8 @@ fn extract_type_mismatch(message: &str) -> Option<(String, String)> {
         extract_quoted_name(after_exp)?
     } else {
         // Non-quoted: take until comma or "but" or "found"
-        let end = after_exp.find(',')
+        let end = after_exp
+            .find(',')
             .or_else(|| after_exp.to_lowercase().find(" but"))
             .or_else(|| after_exp.to_lowercase().find(" found"))
             .unwrap_or(after_exp.len());
@@ -1480,24 +1571,83 @@ fn find_function_signature_end(source: &str, start_line: usize) -> Option<(usize
 fn get_builtin_names() -> Vec<&'static str> {
     vec![
         // Types
-        "i8", "i16", "i32", "i64", "i128", "isize",
-        "u8", "u16", "u32", "u64", "u128", "usize",
-        "f32", "f64", "bool", "char", "String", "str",
-        "Vec", "HashMap", "HashSet", "Option", "Result",
+        "i8",
+        "i16",
+        "i32",
+        "i64",
+        "i128",
+        "isize",
+        "u8",
+        "u16",
+        "u32",
+        "u64",
+        "u128",
+        "usize",
+        "f32",
+        "f64",
+        "bool",
+        "char",
+        "String",
+        "str",
+        "Vec",
+        "HashMap",
+        "HashSet",
+        "Option",
+        "Result",
         // Functions
-        "print", "println", "dbg", "panic", "assert", "assert_eq",
-        "len", "sqrt", "abs", "sin", "cos", "tan", "exp", "log",
-        "min", "max", "floor", "ceil", "round",
+        "print",
+        "println",
+        "dbg",
+        "panic",
+        "assert",
+        "assert_eq",
+        "len",
+        "sqrt",
+        "abs",
+        "sin",
+        "cos",
+        "tan",
+        "exp",
+        "log",
+        "min",
+        "max",
+        "floor",
+        "ceil",
+        "round",
         // Option/Result variants
-        "Some", "None", "Ok", "Err",
+        "Some",
+        "None",
+        "Ok",
+        "Err",
         // Effects
-        "IO", "Mut", "Alloc", "Panic", "Async", "GPU", "Prob", "Div",
+        "IO",
+        "Mut",
+        "Alloc",
+        "Panic",
+        "Async",
+        "GPU",
+        "Prob",
+        "Div",
         // Linear algebra
-        "vec2", "vec3", "vec4", "mat2", "mat3", "mat4", "quat",
-        "dot", "cross", "normalize", "length",
+        "vec2",
+        "vec3",
+        "vec4",
+        "mat2",
+        "mat3",
+        "mat4",
+        "quat",
+        "dot",
+        "cross",
+        "normalize",
+        "length",
         // Probabilistic
-        "sample", "observe", "infer",
-        "Normal", "Uniform", "Beta", "Gamma",
+        "sample",
+        "observe",
+        "infer",
+        "Normal",
+        "Uniform",
+        "Beta",
+        "Gamma",
     ]
 }
 
@@ -1604,26 +1754,44 @@ mod tests {
 
     #[test]
     fn test_type_kind_parse() {
-        assert_eq!(TypeKind::parse("i32"), TypeKind::Int { bits: 32, signed: true });
+        assert_eq!(
+            TypeKind::parse("i32"),
+            TypeKind::Int {
+                bits: 32,
+                signed: true
+            }
+        );
         assert_eq!(TypeKind::parse("f64"), TypeKind::Float { bits: 64 });
         assert_eq!(TypeKind::parse("bool"), TypeKind::Bool);
 
         // Sounio mutable reference syntax
         assert_eq!(
             TypeKind::parse("&!i32"),
-            TypeKind::RefMut(Box::new(TypeKind::Int { bits: 32, signed: true }))
+            TypeKind::RefMut(Box::new(TypeKind::Int {
+                bits: 32,
+                signed: true
+            }))
         );
 
         assert_eq!(
             TypeKind::parse("&i32"),
-            TypeKind::Ref(Box::new(TypeKind::Int { bits: 32, signed: true }))
+            TypeKind::Ref(Box::new(TypeKind::Int {
+                bits: 32,
+                signed: true
+            }))
         );
     }
 
     #[test]
     fn test_type_kind_can_cast() {
-        let i32_ty = TypeKind::Int { bits: 32, signed: true };
-        let i64_ty = TypeKind::Int { bits: 64, signed: true };
+        let i32_ty = TypeKind::Int {
+            bits: 32,
+            signed: true,
+        };
+        let i64_ty = TypeKind::Int {
+            bits: 64,
+            signed: true,
+        };
         let f64_ty = TypeKind::Float { bits: 64 };
 
         assert!(i32_ty.can_cast_to(&i64_ty));
@@ -1715,7 +1883,9 @@ mod tests {
             })
             .collect();
 
-        assert!(titles.iter().any(|t| t.contains("Cast") || t.contains("into")));
+        assert!(titles
+            .iter()
+            .any(|t| t.contains("Cast") || t.contains("into")));
     }
 
     #[test]
@@ -1742,10 +1912,12 @@ mod tests {
 
     #[test]
     fn test_extract_effects_from_message() {
-        let effects = extract_effects_from_message("effect `IO` not declared in function signature");
+        let effects =
+            extract_effects_from_message("effect `IO` not declared in function signature");
         assert!(effects.contains(&"IO".to_string()));
 
-        let effects = extract_effects_from_message("function uses Prob effect without declaring it");
+        let effects =
+            extract_effects_from_message("function uses Prob effect without declaring it");
         assert!(effects.contains(&"Prob".to_string()));
     }
 

@@ -835,38 +835,27 @@ impl InlayHintProvider {
                     "Matrix multiplication result shape",
                 ))
             }
-            "reshape" | "view" => {
-                Some(self.create_tensor_hint(
-                    span,
-                    source,
-                    " (reshape)",
-                    "Tensor reshape operation",
-                ))
-            }
-            "transpose" | "t" | "T" => {
-                Some(self.create_tensor_hint(
-                    span,
-                    source,
-                    " (transposed)",
-                    "Tensor transpose operation - dimensions swapped",
-                ))
-            }
-            "broadcast" | "expand" => {
-                Some(self.create_tensor_hint(
-                    span,
-                    source,
-                    " (broadcast)",
-                    "Tensor broadcast operation",
-                ))
-            }
-            "zeros" | "ones" | "rand" | "randn" | "zeros_like" | "ones_like" => {
-                Some(self.create_tensor_hint(
-                    span,
-                    source,
-                    " (tensor init)",
-                    "Tensor initialization",
-                ))
-            }
+            "reshape" | "view" => Some(self.create_tensor_hint(
+                span,
+                source,
+                " (reshape)",
+                "Tensor reshape operation",
+            )),
+            "transpose" | "t" | "T" => Some(self.create_tensor_hint(
+                span,
+                source,
+                " (transposed)",
+                "Tensor transpose operation - dimensions swapped",
+            )),
+            "broadcast" | "expand" => Some(self.create_tensor_hint(
+                span,
+                source,
+                " (broadcast)",
+                "Tensor broadcast operation",
+            )),
+            "zeros" | "ones" | "rand" | "randn" | "zeros_like" | "ones_like" => Some(
+                self.create_tensor_hint(span, source, " (tensor init)", "Tensor initialization"),
+            ),
             _ => None,
         }
     }
@@ -881,62 +870,45 @@ impl InlayHintProvider {
         span: Span,
     ) -> Option<InlayHint> {
         match method {
-            "reshape" | "view" => {
-                Some(self.create_tensor_hint(
-                    span,
-                    source,
-                    " (reshaped)",
-                    "Returns tensor with new shape",
-                ))
-            }
-            "transpose" | "t" => {
-                Some(self.create_tensor_hint(
-                    span,
-                    source,
-                    " (transposed)",
-                    "Returns transposed tensor",
-                ))
-            }
-            "squeeze" => {
-                Some(self.create_tensor_hint(
-                    span,
-                    source,
-                    " (squeezed)",
-                    "Removes dimensions of size 1",
-                ))
-            }
-            "unsqueeze" => {
-                Some(self.create_tensor_hint(
-                    span,
-                    source,
-                    " (expanded)",
-                    "Adds dimension of size 1",
-                ))
-            }
+            "reshape" | "view" => Some(self.create_tensor_hint(
+                span,
+                source,
+                " (reshaped)",
+                "Returns tensor with new shape",
+            )),
+            "transpose" | "t" => Some(self.create_tensor_hint(
+                span,
+                source,
+                " (transposed)",
+                "Returns transposed tensor",
+            )),
+            "squeeze" => Some(self.create_tensor_hint(
+                span,
+                source,
+                " (squeezed)",
+                "Removes dimensions of size 1",
+            )),
+            "unsqueeze" => Some(self.create_tensor_hint(
+                span,
+                source,
+                " (expanded)",
+                "Adds dimension of size 1",
+            )),
             "flatten" => {
-                Some(self.create_tensor_hint(
-                    span,
-                    source,
-                    " -> [N]",
-                    "Flattens to 1D tensor",
-                ))
+                Some(self.create_tensor_hint(span, source, " -> [N]", "Flattens to 1D tensor"))
             }
-            "sum" | "mean" | "max" | "min" => {
-                Some(self.create_tensor_hint(
-                    span,
-                    source,
-                    " (reduced)",
-                    "Reduction operation along dimensions",
-                ))
-            }
-            "matmul" | "mm" | "bmm" => {
-                Some(self.create_tensor_hint(
-                    span,
-                    source,
-                    " -> [M, N]",
-                    "Matrix multiplication result",
-                ))
-            }
+            "sum" | "mean" | "max" | "min" => Some(self.create_tensor_hint(
+                span,
+                source,
+                " (reduced)",
+                "Reduction operation along dimensions",
+            )),
+            "matmul" | "mm" | "bmm" => Some(self.create_tensor_hint(
+                span,
+                source,
+                " -> [M, N]",
+                "Matrix multiplication result",
+            )),
             _ => None,
         }
     }
@@ -1283,10 +1255,7 @@ mod tests {
 
         let tensor_type = HirType::Tensor {
             element: Box::new(HirType::F64),
-            dims: vec![
-                HirTensorDim::Dynamic,
-                HirTensorDim::Fixed(512),
-            ],
+            dims: vec![HirTensorDim::Dynamic, HirTensorDim::Fixed(512)],
         };
 
         let hint = provider.tensor_shape_hint_from_hir(&tensor_type, span, source);
@@ -1294,7 +1263,7 @@ mod tests {
 
         let hint = hint.unwrap();
         if let InlayHintLabel::String(label) = &hint.label {
-            assert!(label.contains("?"));  // Dynamic dimension marker
+            assert!(label.contains("?")); // Dynamic dimension marker
             assert!(label.contains("512"));
         }
     }
@@ -1337,7 +1306,8 @@ mod tests {
         let source = "matmul(a, b)";
         let span = crate::common::Span { start: 0, end: 12 };
 
-        let hint = provider.tensor_shape_warning_hint("Dimension mismatch: 128 vs 256", span, source);
+        let hint =
+            provider.tensor_shape_warning_hint("Dimension mismatch: 128 vs 256", span, source);
         assert!(hint.is_some());
 
         let hint = hint.unwrap();

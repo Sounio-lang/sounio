@@ -1122,7 +1122,12 @@ impl SemanticTokensProvider {
                 self.analyze_expr(data, symbols, builder);
                 self.analyze_expr(distribution, symbols, builder);
             }
-            Expr::Query { target, given, interventions, .. } => {
+            Expr::Query {
+                target,
+                given,
+                interventions,
+                ..
+            } => {
                 self.analyze_expr(target, symbols, builder);
                 for g in given {
                     self.analyze_expr(g, symbols, builder);

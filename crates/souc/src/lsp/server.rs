@@ -4,18 +4,17 @@
 //! Supports epistemic types, scientific computing, and uncertainty-aware programming.
 
 use tower_lsp::jsonrpc::Result;
-use tower_lsp::lsp_types::notification::Notification;
 use tower_lsp::lsp_types::*;
-use tower_lsp::LspService;
-use tower_lsp::Server;
+use tower_lsp::{Client, LspService, Server};
 
 use serde::{Deserialize, Serialize};
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
 /// Sounio LSP Server State
-#[derive(Debug)]
 pub struct SounioLspServer {
+    /// LSP client for sending notifications
+    client: Client,
     /// Document store
     documents: Arc<Mutex<DocumentStore>>,
     /// Symbol index
@@ -23,6 +22,9 @@ pub struct SounioLspServer {
     /// Compilation cache
     compilation_cache: Arc<Mutex<CompilationCache>>,
 }
+
+/// Type alias for the language server (consistent naming)
+pub type SounioLanguageServer = SounioLspServer;
 
 /// Document store for LSP
 #[derive(Debug)]
@@ -177,9 +179,10 @@ pub struct TypeInfo {
 }
 
 impl SounioLspServer {
-    /// Create new LSP server
-    pub fn new() -> Self {
+    /// Create new LSP server with client
+    pub fn new(client: Client) -> Self {
         Self {
+            client,
             documents: Arc::new(Mutex::new(DocumentStore {
                 documents: HashMap::new(),
             })),
@@ -194,11 +197,14 @@ impl SounioLspServer {
         }
     }
 
-    /// Initialize LSP server
-    pub async fn run() -> Result<()> {
-        let (service, socket) = LspService::new(SounioLspServer::new());
-        Server::new(socket).serve(service).await;
-        Ok(())
+    /// Initialize LSP server over stdin/stdout
+    pub async fn run_stdio() {
+        let stdin = tokio::io::stdin();
+        let stdout = tokio::io::stdout();
+
+        let (service, socket) = LspService::new(Self::new);
+
+        Server::new(stdin, stdout, socket).serve(service).await;
     }
 }
 
@@ -285,7 +291,7 @@ impl tower_lsp::LanguageServer for SounioLspServer {
 
         if let Some(document) = documents
             .documents
-            .get(&params.text_document_position.text_document.uri.uri)
+            .get(&params.text_document_position_params.text_document.uri)
         {
             let hover = self.get_hover(&document.content, position);
             Ok(hover)
@@ -303,7 +309,7 @@ impl tower_lsp::LanguageServer for SounioLspServer {
 
         if let Some(document) = documents
             .documents
-            .get(&params.text_document_position_params.text_document.uri.uri)
+            .get(&params.text_document_position_params.text_document.uri)
         {
             let definition = self.get_definition(&document.content, position);
             Ok(definition)
@@ -314,11 +320,11 @@ impl tower_lsp::LanguageServer for SounioLspServer {
 
     async fn references(&self, params: ReferenceParams) -> Result<Option<Vec<Location>>> {
         let documents = self.documents.lock().expect("mutex poisoned");
-        let position = params.text_document_position_params.position;
+        let position = params.text_document_position.position;
 
         if let Some(document) = documents
             .documents
-            .get(&params.text_document_position_params.text_document.uri.uri)
+            .get(&params.text_document_position.text_document.uri)
         {
             let references = self.find_references(&document.content, position);
             Ok(Some(references))
@@ -344,11 +350,11 @@ impl tower_lsp::LanguageServer for SounioLspServer {
     async fn rename(&self, params: RenameParams) -> Result<Option<WorkspaceEdit>> {
         let documents = self.documents.lock().expect("mutex poisoned");
         let new_name = params.new_name;
-        let position = params.text_document_position_params.position;
+        let position = params.text_document_position.position;
 
         if let Some(document) = documents
             .documents
-            .get(&params.text_document_position_params.text_document.uri.uri)
+            .get(&params.text_document_position.text_document.uri)
         {
             let edit = self.rename_symbol(&document.content, position, &new_name);
             Ok(edit)
@@ -360,12 +366,12 @@ impl tower_lsp::LanguageServer for SounioLspServer {
     async fn semantic_tokens_full(
         &self,
         params: SemanticTokensParams,
-    ) -> Result<Option<SemanticTokensResponse>> {
+    ) -> Result<Option<SemanticTokensResult>> {
         let documents = self.documents.lock().expect("mutex poisoned");
 
         if let Some(document) = documents.documents.get(&params.text_document.uri) {
-            let tokens = self.get_semantic_tokens(&document.content);
-            Ok(Some(SemanticTokensResponse::Tokens(SemanticTokens {
+            let tokens = self.get_semantic_tokens_encoded(&document.content);
+            Ok(Some(SemanticTokensResult::Tokens(SemanticTokens {
                 result_id: None,
                 data: tokens,
             })))
@@ -378,9 +384,9 @@ impl tower_lsp::LanguageServer for SounioLspServer {
         let documents = self.documents.lock().expect("mutex poisoned");
         let range = params.range;
 
-        if let Some(document) = documents.documents.get(&params.text_document.uri.uri) {
+        if let Some(document) = documents.documents.get(&params.text_document.uri) {
             let actions = self.get_code_actions(&document.content, range);
-            Ok(Some(CodeActionResponse::from(actions)))
+            Ok(Some(actions))
         } else {
             Ok(None)
         }
@@ -401,7 +407,7 @@ impl tower_lsp::LanguageServer for SounioLspServer {
         let documents = self.documents.lock().expect("mutex poisoned");
         let range = params.range;
 
-        if let Some(document) = documents.documents.get(&params.text_document.uri.uri) {
+        if let Some(document) = documents.documents.get(&params.text_document.uri) {
             let hints = self.get_inlay_hints(&document.content, range);
             Ok(Some(hints))
         } else {
@@ -545,7 +551,7 @@ impl SounioLspServer {
         symbols
     }
 
-    /// Analyze semantic tokens
+    /// Analyze semantic tokens (internal representation)
     fn analyze_tokens(&self, content: &str) -> Vec<SemanticToken> {
         let mut tokens = Vec::new();
         let lines: Vec<&str> = content.lines().collect();
@@ -553,34 +559,100 @@ impl SounioLspServer {
         for (i, line) in lines.iter().enumerate() {
             let line_num = i as u32;
 
-            // Keyword tokens
-            if line.contains("fn ") {
+            // Keyword tokens - find actual position of "fn "
+            if let Some(pos) = line.find("fn ") {
                 tokens.push(SemanticToken {
-                    range: Range::new(Position::new(line_num, 0), Position::new(line_num, 2)),
-                    token_type: SemanticTokenType::Keyword,
+                    range: Range::new(
+                        Position::new(line_num, pos as u32),
+                        Position::new(line_num, (pos + 2) as u32),
+                    ),
+                    token_type: SemanticTokenType::KEYWORD,
                     modifiers: vec![],
                 });
             }
 
-            if line.contains("struct ") {
+            // Struct keyword
+            if let Some(pos) = line.find("struct ") {
                 tokens.push(SemanticToken {
-                    range: Range::new(Position::new(line_num, 0), Position::new(line_num, 6)),
-                    token_type: SemanticTokenType::Keyword,
+                    range: Range::new(
+                        Position::new(line_num, pos as u32),
+                        Position::new(line_num, (pos + 6) as u32),
+                    ),
+                    token_type: SemanticTokenType::KEYWORD,
                     modifiers: vec![],
                 });
             }
 
             // Epistemic type tokens
-            if line.contains("Knowledge<T>") {
+            if let Some(pos) = line.find("Knowledge") {
                 tokens.push(SemanticToken {
-                    range: Range::new(Position::new(line_num, 0), Position::new(line_num, 9)),
-                    token_type: SemanticTokenType::Type,
-                    modifiers: vec![SemanticTokenModifier::Epistemic],
+                    range: Range::new(
+                        Position::new(line_num, pos as u32),
+                        Position::new(line_num, (pos + 9) as u32),
+                    ),
+                    token_type: SemanticTokenType::TYPE,
+                    modifiers: vec![],
                 });
             }
         }
 
         tokens
+    }
+
+    /// Get semantic tokens in LSP delta-encoded format
+    fn get_semantic_tokens_encoded(
+        &self,
+        content: &str,
+    ) -> Vec<tower_lsp::lsp_types::SemanticToken> {
+        let tokens = self.analyze_tokens(content);
+        let mut result = Vec::new();
+
+        // Token type legend indices
+        let type_to_index = |t: &SemanticTokenType| -> u32 {
+            match t.as_str() {
+                "keyword" => 0,
+                "type" => 1,
+                "function" => 2,
+                "variable" => 3,
+                "string" => 4,
+                "number" => 5,
+                "comment" => 6,
+                _ => 0,
+            }
+        };
+
+        let mut prev_line = 0u32;
+        let mut prev_char = 0u32;
+
+        for token in &tokens {
+            let line = token.range.start.line;
+            let char = token.range.start.character;
+            let length = token
+                .range
+                .end
+                .character
+                .saturating_sub(token.range.start.character);
+
+            let delta_line = line - prev_line;
+            let delta_start = if delta_line == 0 {
+                char - prev_char
+            } else {
+                char
+            };
+
+            result.push(tower_lsp::lsp_types::SemanticToken {
+                delta_line,
+                delta_start,
+                length,
+                token_type: type_to_index(&token.token_type),
+                token_modifiers_bitset: 0,
+            });
+
+            prev_line = line;
+            prev_char = char;
+        }
+
+        result
     }
 
     /// Get completions at position
@@ -612,16 +684,21 @@ impl SounioLspServer {
         let lines: Vec<&str> = content.lines().collect();
 
         if let Some(line) = lines.get(position.line as usize) {
-            let line_part = &line[position.character as usize..];
+            let char_idx = position.character as usize;
+            if char_idx >= line.len() {
+                return None;
+            }
+            let line_part = &line[char_idx..];
 
             // Knowledge<T> hover
             if line_part.starts_with("Knowledge") {
                 Some(Hover {
-                    contents: HoverContents::Scalar(MarkUpContent::plain_markdown(
-                        "Epistemic type that carries both value and uncertainty information\n\n\
-                        **Usage:** `Knowledge<T>::new(value, uncertainty, confidence, source)`\n\n\
-                        **Example:** `Knowledge::new(42.0, 0.1, 0.95, \"measurement\")`",
-                    )),
+                    contents: HoverContents::Markup(MarkupContent {
+                        kind: MarkupKind::Markdown,
+                        value: "Epistemic type that carries both value and uncertainty information\n\n\
+                            **Usage:** `Knowledge<T>::new(value, uncertainty, confidence, source)`\n\n\
+                            **Example:** `Knowledge::new(42.0, 0.1, 0.95, \"measurement\")`".to_string(),
+                    }),
                     range: Some(Range::new(position, position)),
                 })
             } else {

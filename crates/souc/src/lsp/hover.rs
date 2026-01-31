@@ -1072,8 +1072,7 @@ Flattens tensor into 1D or flattens a range of dimensions."#
         shape_b: &[HirTensorDim],
         range: Range,
     ) -> Option<Hover> {
-        let (compatible, message, result_shape) =
-            HirTensorDim::matmul_compatible(shape_a, shape_b);
+        let (compatible, message, result_shape) = HirTensorDim::matmul_compatible(shape_a, shape_b);
 
         let shape_a_str = shape_a
             .iter()
