@@ -1,0 +1,108 @@
+name: GLM Pattern Mining
+
+on:
+  schedule:
+    # Run nightly at 3 AM UTC
+    - cron: '0 3 * * *'
+  workflow_dispatch:
+    inputs:
+      input_dir:
+        description: 'Directory to analyze'
+        required: false
+        default: 'examples'
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  mine-patterns:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: pip install requests
+
+      - name: Create output directory
+        run: mkdir -p data/optimization_patterns
+
+      - name: Mine patterns from examples
+        env:
+          GLM_API_KEY: ${{ secrets.GLM_API_KEY }}
+        run: |
+          python scripts/glm_pattern_miner.py \
+            --input-dir ${{ github.event.inputs.input_dir || 'examples' }} \
+            --output-dir data/optimization_patterns
+
+      - name: Mine patterns from stdlib
+        env:
+          GLM_API_KEY: ${{ secrets.GLM_API_KEY }}
+        run: |
+          python scripts/glm_pattern_miner.py \
+            --input-dir stdlib \
+            --output-dir data/optimization_patterns
+        continue-on-error: true
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: optimization-patterns-${{ github.run_number }}
+          path: data/optimization_patterns/
+          retention-days: 30
+
+      - name: Generate weekly report
+        if: github.event.schedule && (github.event.schedule == '0 3 * * 0')
+        run: |
+          echo "# Weekly Pattern Mining Report" > data/optimization_patterns/WEEKLY_REPORT.md
+          echo "" >> data/optimization_patterns/WEEKLY_REPORT.md
+          echo "Generated: $(date -u)" >> data/optimization_patterns/WEEKLY_REPORT.md
+          echo "" >> data/optimization_patterns/WEEKLY_REPORT.md
+          echo "## Pattern Counts" >> data/optimization_patterns/WEEKLY_REPORT.md
+          find data/optimization_patterns -name "*.jsonl" -mtime -7 | wc -l >> data/optimization_patterns/WEEKLY_REPORT.md
+
+      - name: Check for high-confidence patterns
+        id: check-patterns
+        run: |
+          # Check if any patterns have confidence > 0.9
+          HIGH_CONF=$(grep -r '"confidence": 0.9' data/optimization_patterns/*.jsonl 2>/dev/null | wc -l || echo "0")
+          echo "high_confidence_count=$HIGH_CONF" >> $GITHUB_OUTPUT
+          echo "Found $HIGH_CONF high-confidence patterns"
+
+      - name: Create PR for high-confidence patterns
+        if: steps.check-patterns.outputs.high_confidence_count > 0
+        uses: peter-evans/create-pull-request@v6
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+          commit-message: "[glm] Add mined optimization patterns"
+          title: "🧠 GLM Pattern Mining: ${{ steps.check-patterns.outputs.high_confidence_count }} high-confidence patterns"
+          body: |
+            ## Automated Pattern Mining Results
+
+            This PR contains optimization patterns discovered by GLM-4.7 analysis.
+
+            **High-confidence patterns found:** ${{ steps.check-patterns.outputs.high_confidence_count }}
+
+            ### Review Checklist
+            - [ ] Review each suggestion for correctness
+            - [ ] Verify patterns are applicable to Sounio
+            - [ ] Consider encoding as deterministic heuristics
+
+            ---
+            *Generated automatically by the GLM Pattern Mining workflow*
+          branch: glm-patterns-${{ github.run_number }}
+          base: main
+          labels: |
+            glm
+            optimization
+            automated

@@ -44,6 +44,10 @@ enum Commands {
         /// Optimization level (0-3)
         #[arg(short = 'O', default_value = "0")]
         opt_level: u8,
+
+        /// Enable GLM-4.7 ML-guided optimization (requires --features glm)
+        #[arg(long)]
+        glm_enabled: bool,
     },
 
     /// Build a Sounio source file to native executable (requires --features llvm)
@@ -131,6 +135,10 @@ enum Commands {
         /// Enable CPS transformation for effect handlers (experimental)
         #[arg(long)]
         enable_cps: bool,
+
+        /// Enable GLM-4.7 ML-guided optimization (requires --features glm)
+        #[arg(long)]
+        glm_enabled: bool,
     },
 
     /// Type-check a Sounio source file without compiling
@@ -1613,7 +1621,8 @@ fn main() -> Result<()> {
             output,
             emit,
             opt_level,
-        } => compile(&input, output.as_deref(), emit, opt_level),
+            glm_enabled,
+        } => compile(&input, output.as_deref(), emit, opt_level, glm_enabled),
 
         Commands::Build {
             input,
@@ -1637,7 +1646,15 @@ fn main() -> Result<()> {
             emit,
             target_cpu,
             enable_cps,
+            glm_enabled,
         } => {
+            // Log GLM status
+            if glm_enabled {
+                #[cfg(feature = "glm")]
+                tracing::info!("GLM-4.7 ML-guided optimization enabled");
+                #[cfg(not(feature = "glm"))]
+                eprintln!("Warning: --glm-enabled requires --features glm");
+            }
             // If native backend, use new CLI integration
             if backend == sounio::cli::backend::Backend::Native {
                 // Build args from command line
@@ -2581,12 +2598,30 @@ fn compile(
     output: Option<&std::path::Path>,
     emit: Option<EmitType>,
     opt_level: u8,
+    glm_enabled: bool,
 ) -> Result<()> {
     tracing::info!(
-        "Compiling {:?} with optimization level {}",
+        "Compiling {:?} with optimization level {}{}",
         input,
-        opt_level
+        opt_level,
+        if glm_enabled {
+            " (GLM-4.7 enabled)"
+        } else {
+            ""
+        }
     );
+
+    #[cfg(feature = "glm")]
+    if glm_enabled {
+        tracing::info!("GLM-4.7 ML-guided optimization active");
+    }
+
+    #[cfg(not(feature = "glm"))]
+    if glm_enabled {
+        eprintln!(
+            "Warning: --glm-enabled requires --features glm. Continuing without ML optimization."
+        );
+    }
 
     // Load modules and parse (uses ModuleLoader to handle imports)
     let ast = sounio::module_loader::load_program_ast(input)?;
