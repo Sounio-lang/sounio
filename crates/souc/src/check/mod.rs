@@ -28,7 +28,7 @@ use crate::hir::*;
 use crate::macro_system::token_tree::{Delimiter, TokenTree};
 use crate::resolve;
 use crate::types::{
-    self, effects::EffectInference, units::UnitChecker, DimSize, TensorShape, Type, TypeVar,
+    self, DimSize, TensorShape, Type, TypeVar, effects::EffectInference, units::UnitChecker,
 };
 use miette::Result;
 use std::collections::HashMap;

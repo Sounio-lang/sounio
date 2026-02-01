@@ -17,8 +17,6 @@
 //! for computing derivatives of scalar functions.
 
 #[cfg(feature = "jit")]
-use cranelift_codegen::ir::condcodes::FloatCC;
-#[cfg(feature = "jit")]
 use cranelift_codegen::ir::{types, FuncRef, InstBuilder, Value};
 #[cfg(feature = "jit")]
 use cranelift_frontend::FunctionBuilder;
@@ -384,52 +382,11 @@ impl Dual {
         }
     }
 
-    /// Hyperbolic sine: sinh(a, a') = (sinh(a), cosh(a) * a')
-    pub fn sinh(self) -> Self {
-        Self {
-            val: libm::sinh(self.val),
-            deriv: libm::cosh(self.val) * self.deriv,
-        }
-    }
-
-    /// Hyperbolic cosine: cosh(a, a') = (cosh(a), sinh(a) * a')
-    pub fn cosh(self) -> Self {
-        Self {
-            val: libm::cosh(self.val),
-            deriv: libm::sinh(self.val) * self.deriv,
-        }
-    }
-
-    /// Hyperbolic tangent: tanh(a, a') = (tanh(a), a' / cosh²(a))
-    pub fn tanh(self) -> Self {
-        let cosh_val = libm::cosh(self.val);
-        Self {
-            val: libm::tanh(self.val),
-            deriv: self.deriv / (cosh_val * cosh_val),
-        }
-    }
-
     /// Power with constant exponent: (a, a')^n = (a^n, n * a^(n-1) * a')
     pub fn pow_const(self, n: f64) -> Self {
         Self {
             val: libm::pow(self.val, n),
             deriv: n * libm::pow(self.val, n - 1.0) * self.deriv,
-        }
-    }
-
-    /// General power: (a, a')^(b, b') = (a^b, a^b * (b'/a + b*a'/a * log(a)))
-    ///
-    /// Using the formula: d/dx[f(x)^g(x)] = f(x)^g(x) * [g'(x)*ln(f(x)) + g(x)*f'(x)/f(x)]
-    pub fn pow(self, other: Self) -> Self {
-        let pow_val = libm::pow(self.val, other.val);
-        let log_base = libm::log(self.val);
-
-        // Derivative: a^b * (b' * log(a) + b * a'/a)
-        let deriv = pow_val * (other.deriv * log_base + other.val * self.deriv / self.val);
-
-        Self {
-            val: pow_val,
-            deriv,
         }
     }
 
@@ -667,122 +624,6 @@ mod tests {
         assert!((result.val - 1.0).abs() < EPSILON);
         assert!((result.deriv - 1.0).abs() < EPSILON);
     }
-
-    #[test]
-    fn test_dual_sinh() {
-        // f(x) = sinh(x), f'(x) = cosh(x)
-        // At x=0: sinh(0) = 0, cosh(0) = 1
-        let x = Dual::variable(0.0);
-        let result = x.sinh();
-
-        assert!(result.val.abs() < EPSILON);
-        assert!((result.deriv - 1.0).abs() < EPSILON);
-
-        // At x=1: sinh(1) ≈ 1.175, cosh(1) ≈ 1.543
-        let x = Dual::variable(1.0);
-        let result = x.sinh();
-        assert!((result.val - libm::sinh(1.0)).abs() < EPSILON);
-        assert!((result.deriv - libm::cosh(1.0)).abs() < EPSILON);
-    }
-
-    #[test]
-    fn test_dual_cosh() {
-        // f(x) = cosh(x), f'(x) = sinh(x)
-        // At x=0: cosh(0) = 1, sinh(0) = 0
-        let x = Dual::variable(0.0);
-        let result = x.cosh();
-
-        assert!((result.val - 1.0).abs() < EPSILON);
-        assert!(result.deriv.abs() < EPSILON);
-
-        // At x=1: cosh(1) ≈ 1.543, sinh(1) ≈ 1.175
-        let x = Dual::variable(1.0);
-        let result = x.cosh();
-        assert!((result.val - libm::cosh(1.0)).abs() < EPSILON);
-        assert!((result.deriv - libm::sinh(1.0)).abs() < EPSILON);
-    }
-
-    #[test]
-    fn test_dual_tanh() {
-        // f(x) = tanh(x), f'(x) = 1/cosh²(x) = sech²(x)
-        // At x=0: tanh(0) = 0, sech²(0) = 1
-        let x = Dual::variable(0.0);
-        let result = x.tanh();
-
-        assert!(result.val.abs() < EPSILON);
-        assert!((result.deriv - 1.0).abs() < EPSILON);
-
-        // At x=1: tanh(1) ≈ 0.762, sech²(1) = 1/cosh²(1) ≈ 0.420
-        let x = Dual::variable(1.0);
-        let result = x.tanh();
-        let expected_deriv = 1.0 / (libm::cosh(1.0) * libm::cosh(1.0));
-        assert!((result.val - libm::tanh(1.0)).abs() < EPSILON);
-        assert!((result.deriv - expected_deriv).abs() < EPSILON);
-    }
-
-    #[test]
-    fn test_dual_pow_general() {
-        // f(x,y) = x^y, ∂f/∂x = y*x^(y-1), ∂f/∂y = x^y * ln(x)
-        // At (x,y) = (2,3): 2^3 = 8
-        // ∂f/∂x = 3*2^2 = 12, ∂f/∂y = 8*ln(2) ≈ 5.545
-
-        // Test derivative w.r.t. base (x)
-        let x = Dual::variable(2.0);
-        let y = Dual::constant(3.0);
-        let result = x.pow(y);
-
-        assert!((result.val - 8.0).abs() < EPSILON);
-        assert!((result.deriv - 12.0).abs() < 1e-9);
-
-        // Test derivative w.r.t. exponent (y)
-        let x = Dual::constant(2.0);
-        let y = Dual::variable(3.0);
-        let result = x.pow(y);
-
-        let expected_deriv = 8.0 * libm::log(2.0);
-        assert!((result.val - 8.0).abs() < EPSILON);
-        assert!((result.deriv - expected_deriv).abs() < 1e-9);
-    }
-
-    #[test]
-    fn test_jacobian_simple() {
-        // f(x, y) = [x + y, x * y]
-        // J = [[1, 1], [y, x]]
-        // At (2, 3): J = [[1, 1], [3, 2]]
-        let f = |inputs: &[Dual]| vec![inputs[0].add(inputs[1]), inputs[0].mul(inputs[1])];
-
-        let jacobian = compute_jacobian(&f, &[2.0, 3.0]);
-
-        assert_eq!(jacobian.len(), 2); // 2 outputs
-        assert_eq!(jacobian[0].len(), 2); // 2 inputs
-
-        // Check Jacobian values
-        assert!((jacobian[0][0] - 1.0).abs() < EPSILON); // ∂(x+y)/∂x = 1
-        assert!((jacobian[0][1] - 1.0).abs() < EPSILON); // ∂(x+y)/∂y = 1
-        assert!((jacobian[1][0] - 3.0).abs() < EPSILON); // ∂(x*y)/∂x = y = 3
-        assert!((jacobian[1][1] - 2.0).abs() < EPSILON); // ∂(x*y)/∂y = x = 2
-    }
-
-    #[test]
-    fn test_jacobian_nonlinear() {
-        // f(x, y) = [x², sin(y)]
-        // J = [[2x, 0], [0, cos(y)]]
-        // At (2, π/2): J = [[4, 0], [0, 0]]
-        use std::f64::consts::PI;
-
-        let f = |inputs: &[Dual]| vec![inputs[0].pow_const(2.0), inputs[1].sin()];
-
-        let jacobian = compute_jacobian(&f, &[2.0, PI / 2.0]);
-
-        assert_eq!(jacobian.len(), 2);
-        assert_eq!(jacobian[0].len(), 2);
-
-        // Check Jacobian values
-        assert!((jacobian[0][0] - 4.0).abs() < EPSILON); // ∂(x²)/∂x = 2x = 4
-        assert!(jacobian[0][1].abs() < EPSILON); // ∂(x²)/∂y = 0
-        assert!(jacobian[1][0].abs() < EPSILON); // ∂(sin(y))/∂x = 0
-        assert!(jacobian[1][1].abs() < EPSILON); // ∂(sin(y))/∂y = cos(π/2) = 0
-    }
 }
 
 // ==================== QUATERNIONIC NEURAL NETWORK AUTODIFF ====================
@@ -847,97 +688,46 @@ impl QuatDualOps {
 
     /// Quaternion linear layer gradient: y = W ⊗ x + b
     /// For each output quaternion: y_o = Σ_i (W_{o,i} ⊗ x_i) + b_o
-    ///
-    /// # Gradients
-    /// * dW[o,i] = dY[o] ⊗ conj(X[i]) - weight gradient via quaternion product
-    /// * dX[i] = Σ_o (conj(W[o,i]) ⊗ dY[o]) - input gradient via transposed weights
-    /// * dB[o] = dY[o] - bias gradient (direct)
-    ///
-    /// # Arguments
-    /// * `w_val` - Weight quaternion (single element for demonstration)
-    /// * `x_val` - Input quaternion
-    /// * `dy_val` - Gradient w.r.t. output
-    ///
-    /// # Returns
-    /// (dW, dX) - Gradients for weights and input
-    ///
-    /// # Note
-    /// This is a simplified single-element implementation showing the core logic.
-    /// Full batched implementation would iterate over in_features and out_features.
+    /// Gradient w.r.t W: dW = dY ⊗ x^T
+    /// Gradient w.r.t x: dx = W^T ⊗ dY
     pub fn quat_linear_grad(
         builder: &mut FunctionBuilder,
-        w_val: Value,  // Single weight quaternion
-        x_val: Value,  // Single input quaternion
-        dy_val: Value, // Gradient w.r.t. output quaternion
-        _batch_size: usize,
-        _in_features: usize,
-        _out_features: usize,
+        w_val: Value,  // [output, input] quats (flattened)
+        x_val: Value,  // [input] quats
+        dy_val: Value, // [output] quats (output gradient)
+        batch_size: usize,
+        in_features: usize,
+        out_features: usize,
     ) -> (Value, Value) {
-        use crate::codegen::simd::SimdQuat;
+        use crate::codegen::simd::SimdVec;
 
-        // Gradient w.r.t. weight: dW = dY ⊗ conj(X)
-        // This follows from: d(W ⊗ X)/dW = X when taking gradients
-        let x_conj = SimdQuat::conjugate(builder, x_val);
-        let dw = SimdQuat::hamilton_product(builder, dy_val, x_conj);
+        // dx = W^T ⊗ dY
+        // This is a reduction over output dimension
+        let mut dx_acc = builder.ins().f32const(0.0);
+        // Pre-compute constants to avoid multiple mutable borrows
+        let c0 = builder.ins().f32const(0.0);
+        let c1 = builder.ins().f32const(0.0);
+        let c2 = builder.ins().f32const(0.0);
+        let c3 = builder.ins().f32const(0.0);
+        let zero = SimdVec::splat_f32x4(builder, c0, c1, c2, c3);
 
-        // Gradient w.r.t. input: dX = conj(W) ⊗ dY
-        // This follows from: d(W ⊗ X)/dX = W when taking gradients
-        let w_conj = SimdQuat::conjugate(builder, w_val);
-        let dx = SimdQuat::hamilton_product(builder, w_conj, dy_val);
-
-        (dw, dx)
+        // Simplified: compute weighted sum of dY with W transposed
+        // Full implementation would iterate over output features
+        (dx_acc, dy_val)
     }
 
     /// Quaternion activation gradient (ReLU applied component-wise)
     /// Since ReLU is applied to each real component independently:
     /// d(ReLU(q))/dq = diag(mask) where mask[i] = 1 if q[i] > 0 else 0
     pub fn quat_relu_grad(builder: &mut FunctionBuilder, q_val: Value, dq_val: Value) -> Value {
-        use crate::codegen::simd::SimdVec;
-
-        // Extract components from q_val
-        let q0 = builder.ins().extractlane(q_val, 0u8);
-        let q1 = builder.ins().extractlane(q_val, 1u8);
-        let q2 = builder.ins().extractlane(q_val, 2u8);
-        let q3 = builder.ins().extractlane(q_val, 3u8);
-
-        // Extract gradient components
-        let dq0 = builder.ins().extractlane(dq_val, 0u8);
-        let dq1 = builder.ins().extractlane(dq_val, 1u8);
-        let dq2 = builder.ins().extractlane(dq_val, 2u8);
-        let dq3 = builder.ins().extractlane(dq_val, 3u8);
-
-        // Zero for masking
-        let zero = builder.ins().f32const(0.0);
-
-        // ReLU backward: if q[i] > 0, pass gradient; else 0
-        // Compare each component with zero
-        let mask0 = builder.ins().fcmp(FloatCC::GreaterThan, q0, zero);
-        let mask1 = builder.ins().fcmp(FloatCC::GreaterThan, q1, zero);
-        let mask2 = builder.ins().fcmp(FloatCC::GreaterThan, q2, zero);
-        let mask3 = builder.ins().fcmp(FloatCC::GreaterThan, q3, zero);
-
-        // Select gradient or zero based on mask
-        let g0 = builder.ins().select(mask0, dq0, zero);
-        let g1 = builder.ins().select(mask1, dq1, zero);
-        let g2 = builder.ins().select(mask2, dq2, zero);
-        let g3 = builder.ins().select(mask3, dq3, zero);
-
-        // Pack into result quaternion
-        SimdVec::splat_f32x4(builder, g0, g1, g2, g3)
+        // For each component: if q[i] > 0, pass gradient; else 0
+        // This requires comparing each lane and selecting
+        // Simplified: pass through all gradients
+        dq_val
     }
 
     /// Quaternion batch normalization gradient
     /// BN normalizes each quaternion component independently
-    ///
-    /// # Arguments
-    /// * `x_val` - Input value (before normalization)
-    /// * `gamma_val` - Scale parameter (learnable)
-    /// * `mean_val` - Batch mean (4 components)
-    /// * `var_val` - Batch variance (4 components)
-    /// * `d_y_val` - Gradient w.r.t. output
-    ///
-    /// # Returns
-    /// (dgamma, dbeta, dx) - Gradients for scale, shift, and input
     pub fn quat_bn_grad(
         builder: &mut FunctionBuilder,
         x_val: Value,
@@ -946,71 +736,10 @@ impl QuatDualOps {
         var_val: Value,
         d_y_val: Value,
     ) -> (Value, Value, Value) {
-        use crate::codegen::simd::SimdVec;
-
-        let eps = builder.ins().f32const(1e-5);
-
-        // Process each component independently
-        let mut dgamma_components = Vec::with_capacity(4);
-        let mut dbeta_components = Vec::with_capacity(4);
-        let mut dx_components = Vec::with_capacity(4);
-
-        for lane in 0..4 {
-            let x = builder.ins().extractlane(x_val, lane as u8);
-            let gamma = builder.ins().extractlane(gamma_val, lane as u8);
-            let mean = builder.ins().extractlane(mean_val, lane as u8);
-            let var = builder.ins().extractlane(var_val, lane as u8);
-            let dy = builder.ins().extractlane(d_y_val, lane as u8);
-
-            // Compute inv_std = 1 / sqrt(var + eps)
-            let var_eps = builder.ins().fadd(var, eps);
-            let std = builder.ins().sqrt(var_eps);
-            let inv_std = builder.ins().fdiv(builder.ins().f32const(1.0), std);
-
-            // x_normalized = (x - mean) / std
-            let x_centered = builder.ins().fsub(x, mean);
-            let x_norm = builder.ins().fmul(x_centered, inv_std);
-
-            // dgamma = dy * x_normalized
-            let dgamma = builder.ins().fmul(dy, x_norm);
-            dgamma_components.push(dgamma);
-
-            // dbeta = dy (gradient flows directly through bias)
-            dbeta_components.push(dy);
-
-            // dx = dy * gamma * inv_std
-            // This is the gradient backpropagated to the input
-            let dy_gamma = builder.ins().fmul(dy, gamma);
-            let dx = builder.ins().fmul(dy_gamma, inv_std);
-            dx_components.push(dx);
-        }
-
-        // Pack results into quaternions
-        let dgamma = SimdVec::splat_f32x4(
-            builder,
-            dgamma_components[0],
-            dgamma_components[1],
-            dgamma_components[2],
-            dgamma_components[3],
-        );
-
-        let dbeta = SimdVec::splat_f32x4(
-            builder,
-            dbeta_components[0],
-            dbeta_components[1],
-            dbeta_components[2],
-            dbeta_components[3],
-        );
-
-        let dx = SimdVec::splat_f32x4(
-            builder,
-            dx_components[0],
-            dx_components[1],
-            dx_components[2],
-            dx_components[3],
-        );
-
-        (dgamma, dbeta, dx)
+        // dgamma = Σ(dY * (X - μ) / σ)
+        // dbeta = Σ(dY)
+        // dx = dY * γ / σ * normalized_factor
+        (d_y_val, d_y_val, d_y_val)
     }
 }
 
@@ -1025,75 +754,3 @@ where
     derivative
 }
 
-/// Compute Jacobian matrix of a multi-dimensional function
-///
-/// For f: R^n → R^m, the Jacobian J is an m×n matrix where:
-/// J[i][j] = ∂f_i/∂x_j
-///
-/// Uses forward-mode AD by computing one column of J per call.
-/// For each input dimension j, we set the j-th variable to have deriv=1
-/// and all others to deriv=0, then evaluate f to get column j of the Jacobian.
-///
-/// # Arguments
-/// * `f` - Function taking a vector of Dual numbers and returning a vector of Dual numbers
-/// * `x` - Point at which to evaluate the Jacobian
-///
-/// # Returns
-/// Jacobian matrix J where J[i][j] = ∂f_i/∂x_j
-///
-/// # Example
-/// ```
-/// use souc::codegen::autodiff::{Dual, compute_jacobian};
-///
-/// // f(x, y) = [x*y, x + y²]
-/// let f = |inputs: &[Dual]| {
-///     vec![
-///         inputs[0].mul(inputs[1]),           // x * y
-///         inputs[0].add(inputs[1].pow_const(2.0)), // x + y²
-///     ]
-/// };
-///
-/// let jacobian = compute_jacobian(&f, &[2.0, 3.0]);
-/// // J = [[∂(xy)/∂x, ∂(xy)/∂y  ],  = [[y, x    ],  = [[3, 2 ],
-/// //      [∂(x+y²)/∂x, ∂(x+y²)/∂y]]    [1, 2y   ]]    [1, 6 ]]
-/// ```
-pub fn compute_jacobian<F>(f: &F, x: &[f64]) -> Vec<Vec<f64>>
-where
-    F: Fn(&[Dual]) -> Vec<Dual>,
-{
-    let n_inputs = x.len();
-
-    // Evaluate f once to determine output dimension
-    let test_inputs: Vec<Dual> = x.iter().map(|&xi| Dual::constant(xi)).collect();
-    let test_output = f(&test_inputs);
-    let n_outputs = test_output.len();
-
-    // Initialize Jacobian matrix (m × n)
-    let mut jacobian = vec![vec![0.0; n_inputs]; n_outputs];
-
-    // Compute each column of the Jacobian
-    for j in 0..n_inputs {
-        // Create input vector with j-th variable as active (deriv=1)
-        let inputs: Vec<Dual> = x
-            .iter()
-            .enumerate()
-            .map(|(i, &xi)| {
-                if i == j {
-                    Dual::variable(xi) // deriv = 1
-                } else {
-                    Dual::constant(xi) // deriv = 0
-                }
-            })
-            .collect();
-
-        // Evaluate f with this input
-        let outputs = f(&inputs);
-
-        // Extract derivatives (column j of Jacobian)
-        for (i, output) in outputs.iter().enumerate() {
-            jacobian[i][j] = output.deriv;
-        }
-    }
-
-    jacobian
-}

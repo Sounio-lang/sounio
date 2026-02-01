@@ -614,10 +614,6 @@ impl<'a> Parser<'a> {
                     self.advance();
                     mods.affine = true;
                 }
-                TokenKind::Relevant => {
-                    self.advance();
-                    mods.relevant = true;
-                }
                 TokenKind::Async => {
                     self.advance();
                     mods.is_async = true;
@@ -859,7 +855,6 @@ impl<'a> Parser<'a> {
             modifiers: TypeModifiers {
                 linear: modifiers.linear,
                 affine: modifiers.affine,
-                relevant: modifiers.relevant,
             },
             attributes: Vec::new(),
             name,
@@ -921,7 +916,6 @@ impl<'a> Parser<'a> {
             modifiers: TypeModifiers {
                 linear: modifiers.linear,
                 affine: modifiers.affine,
-                relevant: modifiers.relevant,
             },
             name,
             generics,
@@ -1536,7 +1530,7 @@ impl<'a> Parser<'a> {
                 // Glob import: `use path::*`
                 self.advance(); // consume ::
                 self.advance(); // consume *
-                                // Accept optional semicolon after import statement
+                // Accept optional semicolon after import statement
                 if self.at(TokenKind::Semi) {
                     self.advance();
                 }
