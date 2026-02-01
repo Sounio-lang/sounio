@@ -42,6 +42,7 @@
 use std::path::PathBuf;
 
 use super::cache::{CacheConfig, CachedTermData, OntologyCache, SubsumptionCache};
+use super::foundation::FoundationOntologies;
 use super::primitive::{PRIMITIVE_BFO, PRIMITIVE_COB, PRIMITIVE_RO};
 use super::sssom::SssomMappingSet;
 use super::{OntologyError, OntologyLayer, OntologyResult, OntologyStats, ParsedTermRef};
@@ -227,6 +228,8 @@ pub struct OntologyResolver {
     subsumption_cache: SubsumptionCache,
     /// SSSOM mappings (loaded lazily)
     mappings: Option<SssomMappingSet>,
+    /// L2 Foundation ontologies (PATO, UO, IAO, Schema.org, FHIR)
+    foundation: Option<FoundationOntologies>,
     /// Statistics
     stats: OntologyStats,
 }
@@ -237,11 +240,15 @@ impl OntologyResolver {
         let cache = OntologyCache::new(config.cache.clone());
         let subsumption_cache = SubsumptionCache::new(10000);
 
+        // Initialize L2 foundation ontologies using bootstrap (no external files needed)
+        let foundation = Some(FoundationOntologies::bootstrap());
+
         Ok(Self {
             config,
             cache,
             subsumption_cache,
             mappings: None,
+            foundation,
             stats: OntologyStats::default(),
         })
     }
@@ -380,15 +387,34 @@ impl OntologyResolver {
 
     /// Resolve from L2 foundation ontologies
     fn resolve_foundation(&self, parsed: &ParsedTermRef) -> Option<ResolvedTerm> {
-        // Foundation ontologies would be loaded from embedded data or files
-        // For now, return None as placeholder
-        match parsed.prefix.as_str() {
-            "PATO" | "UO" | "IAO" | "SCHEMA" | "FHIR" => {
-                // TODO: Implement foundation resolution
-                None
-            }
-            _ => None,
-        }
+        let foundation = self.foundation.as_ref()?;
+
+        // Map the parsed prefix to the key format used in the foundation index
+        // The foundation index uses: "PATO", "UO", "IAO", "Schema", "FHIR"
+        // But parsed.prefix is uppercase, so "SCHEMA" needs to be mapped to "Schema"
+        let index_prefix = match parsed.prefix.as_str() {
+            "PATO" => "PATO",
+            "UO" => "UO",
+            "IAO" => "IAO",
+            "SCHEMA" => "Schema",
+            "FHIR" => "FHIR",
+            _ => return None,
+        };
+
+        // Build the key to look up in the foundation index
+        let key = format!("{}:{}", index_prefix, parsed.local_id);
+        let term = foundation.get(&key)?;
+
+        // Convert FoundationTerm to ResolvedTerm
+        Some(ResolvedTerm {
+            curie: parsed.curie.clone(),
+            label: term.entry.id.label.clone(),
+            definition: term.entry.definition.clone(),
+            superclasses: term.entry.parents.clone(),
+            synonyms: vec![],
+            layer: OntologyLayer::Foundation,
+            iri: None,
+        })
     }
 
     /// Resolve from L3 domain ontologies (SQLite)

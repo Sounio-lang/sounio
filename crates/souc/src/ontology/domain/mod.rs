@@ -53,6 +53,9 @@ pub struct LazyOntology {
     loaded: bool,
     /// In-memory index (populated on first access)
     index: Option<DomainIndex>,
+    /// SQLite connection for lazy term loading (large ontologies)
+    #[cfg(feature = "ontology")]
+    connection: Option<rusqlite::Connection>,
 }
 
 /// Metadata about a domain ontology
@@ -119,6 +122,8 @@ impl DomainOntologies {
                     metadata: meta,
                     loaded: false,
                     index: None,
+                    #[cfg(feature = "ontology")]
+                    connection: None,
                 },
             );
         }
@@ -297,7 +302,7 @@ impl DomainOntologies {
         }
 
         // Parse CURIE to get prefix
-        let (prefix, local_id) = curie.split_once(':').ok_or_else(|| {
+        let (prefix, _local_id) = curie.split_once(':').ok_or_else(|| {
             OntologyError::InvalidTermFormat(format!("Invalid CURIE format: {}", curie))
         })?;
 
@@ -311,7 +316,7 @@ impl DomainOntologies {
         // Load ontology if needed
         self.ensure_loaded(&prefix)?;
 
-        // Look up term
+        // Look up term in index first
         if let Some(ontology) = self.ontologies.get(&prefix)
             && let Some(index) = &ontology.index
             && let Some(term) = index.terms.get(curie)
@@ -319,6 +324,19 @@ impl DomainOntologies {
             // Cache the result
             self.cache.put(curie.to_string(), term.clone());
             return Ok(Some(term.clone()));
+        }
+
+        // For large ontologies with lazy loading, try on-demand loading
+        #[cfg(feature = "ontology")]
+        {
+            if let Some(ontology) = self.ontologies.get(&prefix)
+                && ontology.connection.is_some()
+            {
+                if let Some(term) = self.load_term_on_demand(&prefix, curie)? {
+                    self.cache.put(curie.to_string(), term.clone());
+                    return Ok(Some(term));
+                }
+            }
         }
 
         Ok(None)
@@ -359,6 +377,9 @@ impl DomainOntologies {
         Ok(false)
     }
 
+    /// Threshold for lazy loading (ontologies with more terms use on-demand loading)
+    const LAZY_LOAD_THRESHOLD: usize = 100_000;
+
     /// Ensure an ontology is loaded into memory
     fn ensure_loaded(&mut self, prefix: &str) -> Result<(), OntologyError> {
         let ontology = self.ontologies.get_mut(prefix).ok_or_else(|| {
@@ -379,9 +400,31 @@ impl DomainOntologies {
         // Load from SQLite database
         #[cfg(feature = "ontology")]
         {
-            let index = loader::load_ontology_from_sqlite(&ontology.metadata)?;
-            ontology.index = Some(index);
-            ontology.loaded = true;
+            // For large ontologies (e.g., NCBITaxon, PR), use lazy loading
+            if ontology.metadata.term_count > Self::LAZY_LOAD_THRESHOLD {
+                // Open connection for on-demand queries
+                let conn = rusqlite::Connection::open(&ontology.metadata.db_file).map_err(|e| {
+                    OntologyError::DatabaseError(format!(
+                        "Failed to open database {:?}: {}",
+                        ontology.metadata.db_file, e
+                    ))
+                })?;
+
+                // Load only the ancestor index for subsumption checks
+                let ancestors = loader::load_ancestors_only(&conn, &ontology.metadata.prefix)?;
+
+                ontology.index = Some(DomainIndex {
+                    terms: HashMap::new(), // Terms loaded on-demand
+                    ancestors,
+                });
+                ontology.connection = Some(conn);
+                ontology.loaded = true;
+            } else {
+                // For smaller ontologies, load everything into memory
+                let index = loader::load_ontology_from_sqlite(&ontology.metadata)?;
+                ontology.index = Some(index);
+                ontology.loaded = true;
+            }
         }
 
         #[cfg(not(feature = "ontology"))]
@@ -395,6 +438,38 @@ impl DomainOntologies {
         }
 
         Ok(())
+    }
+
+    /// Load a single term on-demand (for large ontologies)
+    #[cfg(feature = "ontology")]
+    fn load_term_on_demand(
+        &mut self,
+        prefix: &str,
+        curie: &str,
+    ) -> Result<Option<DomainTerm>, OntologyError> {
+        let ontology = self.ontologies.get_mut(prefix).ok_or_else(|| {
+            OntologyError::OntologyNotAvailable(format!("Unknown ontology: {}", prefix))
+        })?;
+
+        // Check if already in index
+        if let Some(index) = &ontology.index {
+            if let Some(term) = index.terms.get(curie) {
+                return Ok(Some(term.clone()));
+            }
+        }
+
+        // Try to load from database connection
+        if let Some(conn) = &ontology.connection {
+            if let Some(term) = loader::load_single_term(conn, prefix, curie)? {
+                // Cache in index
+                if let Some(index) = &mut ontology.index {
+                    index.terms.insert(curie.to_string(), term.clone());
+                }
+                return Ok(Some(term));
+            }
+        }
+
+        Ok(None)
     }
 
     /// Get statistics

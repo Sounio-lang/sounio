@@ -26,6 +26,7 @@ use crate::ast::*;
 use crate::common::{NodeId, Span};
 use crate::hir::*;
 use crate::macro_system::token_tree::{Delimiter, TokenTree};
+use crate::ontology::{OntologyResolver, ResolverConfig, SubsumptionResult};
 use crate::refinement::{
     solver::SimpleChecker, Atom, BinOp as RefinementBinOp, CompareOp, Predicate, Term,
 };
@@ -114,6 +115,9 @@ pub struct TypeChecker {
     current_module: Option<resolve::module_tree::ModuleId>,
     /// Refinement info for function parameters: fn_name -> list of refinement info per param
     fn_param_refinements: HashMap<String, Vec<Option<RefinementInfo>>>,
+    /// Ontology resolver for dynamic term resolution and semantic distance calculation
+    /// across all 4 layers (L1 Primitive, L2 Foundation, L3 Domain, L4 Federated)
+    ontology_resolver: Option<OntologyResolver>,
 }
 
 /// Type environment with scopes and module awareness
@@ -163,7 +167,7 @@ enum TypeDef {
 }
 
 /// Type constraint for unification
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 struct TypeConstraint {
     expected: Type,
     actual: Type,
@@ -205,6 +209,15 @@ pub fn check_with_errors(resolved_ast: &resolve::ResolvedAst) -> TypeCheckResult
 
 impl TypeChecker {
     pub fn new() -> Self {
+        // Initialize ontology resolver with default config (offline mode for fast startup)
+        // The resolver supports 4 layers:
+        // - L1: Primitive (BFO/RO/COB) - compiled in
+        // - L2: Foundation (PATO/UO/IAO) - shipped with stdlib
+        // - L3: Domain (ChEBI/GO) - lazy SQLite
+        // - L4: Federated (BioPortal/OLS4) - network queries
+        let resolver_config = ResolverConfig::default().offline();
+        let ontology_resolver = OntologyResolver::new(resolver_config).ok();
+
         Self {
             env: TypeEnv::default(),
             type_defs: HashMap::new(),
@@ -230,6 +243,7 @@ impl TypeChecker {
             module_tree: None,
             current_module: None,
             fn_param_refinements: HashMap::new(),
+            ontology_resolver,
         }
     }
 
@@ -240,6 +254,22 @@ impl TypeChecker {
         checker.module_tree = Some(std::sync::Arc::new(resolved_ast.module_tree.clone()));
         checker.current_module = Some(resolve::module_tree::ModuleId::root());
         checker
+    }
+
+    /// Create a TypeChecker with custom ontology resolver configuration
+    pub fn new_with_ontology_config(config: ResolverConfig) -> Self {
+        let mut checker = Self::new();
+        checker.ontology_resolver = OntologyResolver::new(config).ok();
+        checker
+    }
+
+    /// Enable federated ontology queries (L4 layer - BioPortal/OLS4)
+    /// This allows resolution of 15M+ ontology terms via network
+    pub fn enable_federated_ontology(&mut self) {
+        let config = ResolverConfig::default();
+        if let Ok(resolver) = OntologyResolver::new(config) {
+            self.ontology_resolver = Some(resolver);
+        }
     }
 
     /// Generate a fresh type variable
@@ -1715,22 +1745,153 @@ impl TypeChecker {
         }
     }
 
-    /// Get semantic distance between two ontology types
-    fn get_semantic_distance(&self, t1: &str, t2: &str) -> Option<f64> {
+    /// Get semantic distance between two ontology types.
+    ///
+    /// This method uses a multi-layer strategy:
+    /// 1. Check explicit alignments from `align` declarations
+    /// 2. Use OntologyResolver for dynamic resolution (L1-L4 layers)
+    /// 3. Fall back to default heuristics for same-ontology terms
+    fn get_semantic_distance(&mut self, t1: &str, t2: &str) -> Option<f64> {
         if t1 == t2 {
             return Some(0.0);
         }
+
+        // First check explicit alignments from source code
         let key = if t1 <= t2 {
             (t1.to_string(), t2.to_string())
         } else {
             (t2.to_string(), t1.to_string())
         };
-        self.alignments.get(&key).copied()
+        if let Some(distance) = self.alignments.get(&key).copied() {
+            return Some(distance);
+        }
+
+        // Try using OntologyResolver for dynamic resolution
+        if let Some(ref mut resolver) = self.ontology_resolver {
+            // Check subsumption relationship (is-a hierarchy)
+            if let Ok(result) = resolver.is_subclass_of(t1, t2) {
+                match result {
+                    SubsumptionResult::Equivalent => return Some(0.0),
+                    SubsumptionResult::IsSubclass => return Some(0.05), // Direct subsumption
+                    SubsumptionResult::NotSubclass => {
+                        // Check reverse direction
+                        if let Ok(SubsumptionResult::IsSubclass) = resolver.is_subclass_of(t2, t1) {
+                            return Some(0.1); // Superclass relationship
+                        }
+                    }
+                    SubsumptionResult::Unknown => {}
+                }
+            }
+
+            // Try to resolve both terms and compute distance based on shared ancestors
+            let term1_resolved = resolver.resolve(t1).ok();
+            let term2_resolved = resolver.resolve(t2).ok();
+
+            if let (Some(term1), Some(term2)) = (term1_resolved, term2_resolved) {
+                // If both terms exist and share the same ontology, compute path-based distance
+                if term1.layer == term2.layer {
+                    // Check for shared superclasses (common ancestor)
+                    let common = term1
+                        .superclasses
+                        .iter()
+                        .filter(|s| term2.superclasses.contains(s))
+                        .count();
+
+                    if common > 0 {
+                        // Close siblings in hierarchy
+                        return Some(0.15);
+                    } else if !term1.superclasses.is_empty() || !term2.superclasses.is_empty() {
+                        // Same ontology but more distant
+                        return Some(0.3);
+                    }
+                }
+            }
+        }
+
+        None
     }
 
-    /// Check if two ontology types are compatible within given threshold
+    /// Compute semantic distance with confidence for coercion decisions.
+    ///
+    /// Returns (distance, confidence) where:
+    /// - distance: 0.0 = identical, 1.0 = completely unrelated
+    /// - confidence: 0.0-1.0, how confident we are in this distance
+    fn compute_semantic_distance_with_confidence(&mut self, t1: &str, t2: &str) -> (f64, f64) {
+        if t1 == t2 {
+            return (0.0, 1.0); // Identical, full confidence
+        }
+
+        // Check explicit alignments (highest confidence)
+        let key = if t1 <= t2 {
+            (t1.to_string(), t2.to_string())
+        } else {
+            (t2.to_string(), t1.to_string())
+        };
+        if let Some(distance) = self.alignments.get(&key).copied() {
+            return (distance, 0.95); // Explicit alignment, high confidence
+        }
+
+        // Use resolver
+        if let Some(ref mut resolver) = self.ontology_resolver {
+            // Subsumption check
+            if let Ok(result) = resolver.is_subclass_of(t1, t2) {
+                match result {
+                    SubsumptionResult::Equivalent => return (0.0, 1.0),
+                    SubsumptionResult::IsSubclass => return (0.05, 0.9),
+                    SubsumptionResult::NotSubclass => {
+                        if let Ok(SubsumptionResult::IsSubclass) = resolver.is_subclass_of(t2, t1) {
+                            return (0.1, 0.9);
+                        }
+                    }
+                    SubsumptionResult::Unknown => {}
+                }
+            }
+
+            // Term resolution
+            let term1 = resolver.resolve(t1).ok();
+            let term2 = resolver.resolve(t2).ok();
+
+            match (&term1, &term2) {
+                (Some(t1_resolved), Some(t2_resolved)) => {
+                    // Both terms resolved - check layer and hierarchy
+                    if t1_resolved.layer == t2_resolved.layer {
+                        let common = t1_resolved
+                            .superclasses
+                            .iter()
+                            .filter(|s| t2_resolved.superclasses.contains(s))
+                            .count();
+
+                        if common > 0 {
+                            return (0.15, 0.8); // Siblings
+                        }
+                        return (0.4, 0.7); // Same layer, no common ancestor
+                    }
+                    // Different layers
+                    return (0.5, 0.5);
+                }
+                (Some(_), None) | (None, Some(_)) => {
+                    // One term not found
+                    return (0.7, 0.3);
+                }
+                (None, None) => {
+                    // Neither found
+                    return (1.0, 0.1);
+                }
+            }
+        }
+
+        // No resolver available
+        (1.0, 0.0)
+    }
+
+    /// Check if two ontology types are compatible within given threshold.
+    ///
+    /// Uses the OntologyResolver to check:
+    /// 1. Subsumption (is-a relationship) via L1-L4 layers
+    /// 2. Semantic distance via alignments and hierarchy
+    /// 3. Confidence-weighted coercion decisions
     fn check_ontology_compatibility(
-        &self,
+        &mut self,
         expected_ns: &str,
         expected_term: &str,
         found_ns: &str,
@@ -1740,29 +1901,52 @@ impl TypeChecker {
         let expected = format!("{}:{}", expected_ns, expected_term);
         let found = format!("{}:{}", found_ns, found_term);
 
-        if let Some(distance) = self.get_semantic_distance(&expected, &found) {
-            if distance <= threshold {
-                Ok(distance)
-            } else {
-                Err(format!(
-                    "semantic distance {} exceeds threshold {} between {} and {}",
-                    distance, threshold, expected, found
-                ))
+        // Mark ontology prefixes as used (for unused import warnings)
+        self.used_ontology_prefixes.insert(expected_ns.to_string());
+        self.used_ontology_prefixes.insert(found_ns.to_string());
+
+        // Identical terms
+        if expected == found {
+            return Ok(0.0);
+        }
+
+        // Compute distance with confidence
+        let (distance, confidence) =
+            self.compute_semantic_distance_with_confidence(&expected, &found);
+
+        // Adjust effective threshold based on confidence
+        // Low confidence requires stricter threshold to be safe
+        let effective_threshold = threshold * confidence.max(0.5);
+
+        if distance <= threshold {
+            // Within explicit threshold
+            if confidence < 0.5 {
+                // Low confidence - add warning
+                self.warnings.push(format!(
+                    "low_confidence_coercion: semantic distance {:.3} between {} and {} has low confidence {:.2}",
+                    distance, expected, found, confidence
+                ));
             }
+            Ok(distance)
+        } else if distance <= effective_threshold * 1.5 && confidence >= 0.8 {
+            // High confidence allows slightly exceeding threshold with warning
+            self.warnings.push(format!(
+                "semantic_coercion: {} coerced to {} (distance {:.3}, threshold {:.3})",
+                found, expected, distance, threshold
+            ));
+            Ok(distance)
+        } else if distance > 0.8 {
+            // Very different ontologies
+            Err(format!(
+                "incompatible ontology types: {} and {} are semantically distant ({:.3} > {:.3})",
+                expected, found, distance, threshold
+            ))
         } else {
-            // No alignment found - check if same ontology/term
-            if expected_ns == found_ns && expected_term == found_term {
-                Ok(0.0)
-            } else if expected_ns == found_ns {
-                // Same ontology, different term - assume related
-                Ok(0.5) // Default distance for same-ontology terms
-            } else {
-                // Different ontologies with no alignment
-                Err(format!(
-                    "no alignment found between {} and {} (different ontologies require explicit align declaration)",
-                    expected, found
-                ))
-            }
+            // Distance exceeds threshold
+            Err(format!(
+                "semantic distance {:.3} exceeds threshold {:.3} between {} and {}",
+                distance, threshold, expected, found
+            ))
         }
     }
 
@@ -1774,8 +1958,60 @@ impl TypeChecker {
         threshold: f64,
         span: Span,
     ) {
-        // Check if both types are ontology types
+        // Extract ontology info from types, cloning to avoid borrow issues
+        // when calling check_ontology_compatibility (which needs &mut self)
+        let ontology_info = self.extract_ontology_info(expected, found);
+
+        if let Some((exp_ns, exp_term, found_ns, found_term, exp_alias, found_alias)) =
+            ontology_info
+        {
+            match self.check_ontology_compatibility(
+                &exp_ns,
+                &exp_term,
+                &found_ns,
+                &found_term,
+                threshold,
+            ) {
+                Ok(distance) => {
+                    // Types are compatible within threshold
+                    if distance > 0.0 {
+                        // Could add a note about semantic coercion here
+                    }
+                }
+                Err(msg) => {
+                    // Include type alias names in error message if available
+                    let full_msg =
+                        if let (Some(exp_name), Some(found_name)) = (exp_alias, found_alias) {
+                            format!(
+                                "type mismatch: expected `{}` ({}:{}), found `{}` ({}:{}): {}",
+                                exp_name, exp_ns, exp_term, found_name, found_ns, found_term, msg
+                            )
+                        } else {
+                            msg
+                        };
+                    self.error(full_msg, span);
+                }
+            }
+        }
+    }
+
+    /// Extract ontology namespace/term info from HirTypes.
+    /// Returns (exp_ns, exp_term, found_ns, found_term, exp_alias_name, found_alias_name)
+    /// The alias names are Some if the type came from a named type alias.
+    fn extract_ontology_info(
+        &self,
+        expected: &HirType,
+        found: &HirType,
+    ) -> Option<(
+        String,
+        String,
+        String,
+        String,
+        Option<String>,
+        Option<String>,
+    )> {
         match (expected, found) {
+            // Both are direct ontology types
             (
                 HirType::Ontology {
                     namespace: exp_ns,
@@ -1785,72 +2021,70 @@ impl TypeChecker {
                     namespace: found_ns,
                     term: found_term,
                 },
-            ) => {
-                match self
-                    .check_ontology_compatibility(exp_ns, exp_term, found_ns, found_term, threshold)
-                {
-                    Ok(distance) => {
-                        // Types are compatible within threshold
-                        if distance > 0.0 {
-                            // Could add a note about semantic coercion here
-                        }
-                    }
-                    Err(msg) => {
-                        self.error(msg, span);
-                    }
-                }
-            }
-            // For named types, check if they resolve to ontology types
+            ) => Some((
+                exp_ns.clone(),
+                exp_term.clone(),
+                found_ns.clone(),
+                found_term.clone(),
+                None,
+                None,
+            )),
+
+            // Both are named types that might alias ontology types
             (
                 HirType::Named { name: exp_name, .. },
                 HirType::Named {
                     name: found_name, ..
                 },
             ) => {
-                // Look up if these are type aliases to ontology types
-                if let (
-                    Some(TypeDef::Alias(exp_ty, _, _, _)),
-                    Some(TypeDef::Alias(found_ty, _, _, _)),
-                ) = (self.type_defs.get(exp_name), self.type_defs.get(found_name))
-                {
-                    if let (
+                let exp_ont = self.type_defs.get(exp_name).and_then(|def| {
+                    if let TypeDef::Alias(
                         Type::Ontology {
-                            namespace: exp_ns,
-                            term: exp_term,
+                            namespace, term, ..
                         },
-                        Type::Ontology {
-                            namespace: found_ns,
-                            term: found_term,
-                        },
-                    ) = (exp_ty, found_ty)
+                        _,
+                        _,
+                        _,
+                    ) = def
                     {
-                        match self.check_ontology_compatibility(
-                            &exp_ns,
-                            &exp_term,
-                            &found_ns,
-                            &found_term,
-                            threshold,
-                        ) {
-                            Ok(_) => {}
-                            Err(msg) => {
-                                // Include type alias names in error message
-                                let full_msg = format!(
-                                    "type mismatch: expected `{}` ({}:{}), found `{}` ({}:{}): {}",
-                                    exp_name,
-                                    exp_ns,
-                                    exp_term,
-                                    found_name,
-                                    found_ns,
-                                    found_term,
-                                    msg
-                                );
-                                self.error(full_msg, span);
-                            }
-                        }
+                        Some((namespace.clone(), term.clone()))
+                    } else {
+                        None
                     }
+                });
+                let found_ont = self.type_defs.get(found_name).and_then(|def| {
+                    if let TypeDef::Alias(
+                        Type::Ontology {
+                            namespace, term, ..
+                        },
+                        _,
+                        _,
+                        _,
+                    ) = def
+                    {
+                        Some((namespace.clone(), term.clone()))
+                    } else {
+                        None
+                    }
+                });
+
+                if let (Some((exp_ns, exp_term)), Some((found_ns, found_term))) =
+                    (exp_ont, found_ont)
+                {
+                    Some((
+                        exp_ns,
+                        exp_term,
+                        found_ns,
+                        found_term,
+                        Some(exp_name.clone()),
+                        Some(found_name.clone()),
+                    ))
+                } else {
+                    None
                 }
             }
-            // For mixed cases (named + ontology), also check
+
+            // Mixed: Named expected, Ontology found
             (
                 HirType::Named { name, .. },
                 HirType::Ontology {
@@ -1858,26 +2092,35 @@ impl TypeChecker {
                     term: found_term,
                 },
             ) => {
-                if let Some(TypeDef::Alias(
-                    Type::Ontology {
-                        namespace: exp_ns,
-                        term: exp_term,
-                    },
-                    _,
-                    _,
-                    _,
-                )) = self.type_defs.get(name)
-                {
-                    match self.check_ontology_compatibility(
-                        exp_ns, exp_term, found_ns, found_term, threshold,
-                    ) {
-                        Ok(_) => {}
-                        Err(msg) => {
-                            self.error(msg, span);
-                        }
+                let exp_ont = self.type_defs.get(name).and_then(|def| {
+                    if let TypeDef::Alias(
+                        Type::Ontology {
+                            namespace, term, ..
+                        },
+                        _,
+                        _,
+                        _,
+                    ) = def
+                    {
+                        Some((namespace.clone(), term.clone()))
+                    } else {
+                        None
                     }
-                }
+                });
+
+                exp_ont.map(|(exp_ns, exp_term)| {
+                    (
+                        exp_ns,
+                        exp_term,
+                        found_ns.clone(),
+                        found_term.clone(),
+                        Some(name.clone()),
+                        None,
+                    )
+                })
             }
+
+            // Mixed: Ontology expected, Named found
             (
                 HirType::Ontology {
                     namespace: exp_ns,
@@ -1885,28 +2128,36 @@ impl TypeChecker {
                 },
                 HirType::Named { name, .. },
             ) => {
-                if let Some(TypeDef::Alias(
-                    Type::Ontology {
-                        namespace: found_ns,
-                        term: found_term,
-                    },
-                    _,
-                    _,
-                    _,
-                )) = self.type_defs.get(name)
-                {
-                    match self.check_ontology_compatibility(
-                        exp_ns, exp_term, found_ns, found_term, threshold,
-                    ) {
-                        Ok(_) => {}
-                        Err(msg) => {
-                            self.error(msg, span);
-                        }
+                let found_ont = self.type_defs.get(name).and_then(|def| {
+                    if let TypeDef::Alias(
+                        Type::Ontology {
+                            namespace, term, ..
+                        },
+                        _,
+                        _,
+                        _,
+                    ) = def
+                    {
+                        Some((namespace.clone(), term.clone()))
+                    } else {
+                        None
                     }
-                }
+                });
+
+                found_ont.map(|(found_ns, found_term)| {
+                    (
+                        exp_ns.clone(),
+                        exp_term.clone(),
+                        found_ns,
+                        found_term,
+                        None,
+                        Some(name.clone()),
+                    )
+                })
             }
+
             // Other types: no ontology checking needed
-            _ => {}
+            _ => None,
         }
     }
 
@@ -7442,21 +7693,21 @@ impl TypeChecker {
 
     fn solve_constraints(&mut self) -> Result<()> {
         // Simple unification - a real implementation would be more sophisticated
-        // Collect errors first to avoid borrow issues
-        let errors: Vec<_> = self
-            .constraints
-            .iter()
-            .filter(|c| !self.types_compatible(&c.expected, &c.actual))
-            .map(|c| {
-                (
+        // Clone constraints to avoid borrow issues with types_compatible(&mut self)
+        let constraints: Vec<_> = self.constraints.clone();
+        let mut errors = Vec::new();
+
+        for c in &constraints {
+            if !self.types_compatible(&c.expected, &c.actual) {
+                errors.push((
                     format!(
                         "Type mismatch: expected {:?}, found {:?}",
                         c.expected, c.actual
                     ),
                     c.span,
-                )
-            })
-            .collect();
+                ));
+            }
+        }
 
         for (msg, span) in errors {
             self.errors.push(TypeError {
@@ -7608,7 +7859,7 @@ impl TypeChecker {
         }
     }
 
-    fn types_compatible(&self, t1: &Type, t2: &Type) -> bool {
+    fn types_compatible(&mut self, t1: &Type, t2: &Type) -> bool {
         // Expand type aliases before comparison so aliases are transparent
         let t1 = &self.expand_type_alias(t1);
         let t2 = &self.expand_type_alias(t2);

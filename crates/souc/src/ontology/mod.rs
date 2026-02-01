@@ -101,7 +101,7 @@ pub use primitive::{
 };
 pub use resolver::{
     OntologyMetadata, OntologyResolver, RelationInfo, ResolutionError, ResolvedTerm,
-    SubsumptionResult, TermInfo,
+    ResolverConfig, SubsumptionResult, TermInfo,
 };
 #[cfg(feature = "ontology")]
 pub use semantic_sql::{SemanticSqlStore, SqlOntology, SqlTerm};

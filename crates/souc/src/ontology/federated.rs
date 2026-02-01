@@ -36,12 +36,22 @@
 //!
 //! Both services have rate limits. This module implements exponential backoff
 //! and request throttling to stay within limits.
+//!
+//! # Feature Gates
+//!
+//! HTTP functionality requires the `network` feature to be enabled. Without
+//! this feature, queries will return an error indicating network support is
+//! not available.
 
 use std::collections::HashMap;
+use std::sync::{Arc, RwLock};
 use std::time::{Duration, Instant};
 
 use super::{OntologyError, OntologyResult};
 use crate::epistemic::{Confidence, EpistemicStatus, Evidence, EvidenceKind, Revisability, Source};
+
+#[cfg(feature = "network")]
+use serde::Deserialize;
 
 /// Configuration for federated resolution
 #[derive(Debug, Clone)]
@@ -234,6 +244,25 @@ impl FederatedTerm {
     }
 }
 
+/// Cache entry for federated terms
+#[derive(Debug, Clone)]
+struct CacheEntry {
+    /// The cached term
+    term: FederatedTerm,
+    /// When this entry was cached
+    cached_at: Instant,
+}
+
+impl CacheEntry {
+    /// Check if this entry has expired
+    fn is_expired(&self, ttl_seconds: u64) -> bool {
+        self.cached_at.elapsed() > Duration::from_secs(ttl_seconds)
+    }
+}
+
+/// Thread-safe cache for federated terms
+type TermCache = Arc<RwLock<HashMap<String, CacheEntry>>>;
+
 /// The federated resolver
 pub struct FederatedResolver {
     /// Configuration
@@ -246,6 +275,11 @@ pub struct FederatedResolver {
     request_count: HashMap<String, usize>,
     /// Error counts per source
     error_count: HashMap<String, usize>,
+    /// Term cache to avoid repeated network calls
+    cache: TermCache,
+    /// HTTP client (when network feature is enabled)
+    #[cfg(feature = "network")]
+    client: Option<reqwest::blocking::Client>,
 }
 
 impl FederatedResolver {
@@ -257,18 +291,36 @@ impl FederatedResolver {
             last_request: HashMap::new(),
             request_count: HashMap::new(),
             error_count: HashMap::new(),
+            cache: Arc::new(RwLock::new(HashMap::new())),
+            #[cfg(feature = "network")]
+            client: Self::build_client(FederatedConfig::default().timeout_ms),
         }
     }
 
     /// Create with custom configuration
     pub fn with_config(config: FederatedConfig) -> Self {
+        #[cfg(feature = "network")]
+        let client = Self::build_client(config.timeout_ms);
         Self {
-            config,
             sources: vec![],
             last_request: HashMap::new(),
             request_count: HashMap::new(),
             error_count: HashMap::new(),
+            cache: Arc::new(RwLock::new(HashMap::new())),
+            #[cfg(feature = "network")]
+            client,
+            config,
         }
+    }
+
+    /// Build the HTTP client
+    #[cfg(feature = "network")]
+    fn build_client(timeout_ms: u64) -> Option<reqwest::blocking::Client> {
+        reqwest::blocking::Client::builder()
+            .timeout(Duration::from_millis(timeout_ms))
+            .user_agent("Sounio-Compiler/1.0.0 (https://sounio-lang.org)")
+            .build()
+            .ok()
     }
 
     /// Add a source
@@ -289,8 +341,16 @@ impl FederatedResolver {
 
     /// Resolve a term from federated sources
     ///
-    /// Tries sources in order until one succeeds.
+    /// Checks the cache first, then tries sources in order until one succeeds.
     pub fn resolve(&mut self, query: &FederatedQuery) -> OntologyResult<FederatedTerm> {
+        // Generate cache key
+        let cache_key = self.cache_key(query);
+
+        // Check cache first
+        if let Some(term) = self.get_from_cache(&cache_key) {
+            return Ok(term);
+        }
+
         if self.sources.is_empty() {
             return Err(OntologyError::ResolutionFailed(
                 "No federated sources configured".to_string(),
@@ -301,7 +361,11 @@ impl FederatedResolver {
 
         for source in &self.sources.clone() {
             match self.query_source(source, query) {
-                Ok(term) => return Ok(term),
+                Ok(term) => {
+                    // Cache the successful result
+                    self.insert_into_cache(cache_key, term.clone());
+                    return Ok(term);
+                }
                 Err(e) => {
                     *self
                         .error_count
@@ -316,6 +380,58 @@ impl FederatedResolver {
             ontology: query.ontology.clone().unwrap_or_default(),
             term: query.term_id.clone(),
         }))
+    }
+
+    /// Generate a cache key for a query
+    fn cache_key(&self, query: &FederatedQuery) -> String {
+        match &query.ontology {
+            Some(ont) => format!("{}:{}", ont, query.term_id),
+            None => query.term_id.clone(),
+        }
+    }
+
+    /// Get a term from the cache if it exists and hasn't expired
+    fn get_from_cache(&self, key: &str) -> Option<FederatedTerm> {
+        let cache = self.cache.read().ok()?;
+        let entry = cache.get(key)?;
+        if entry.is_expired(self.config.cache_ttl_seconds) {
+            None
+        } else {
+            Some(entry.term.clone())
+        }
+    }
+
+    /// Insert a term into the cache
+    fn insert_into_cache(&self, key: String, term: FederatedTerm) {
+        if let Ok(mut cache) = self.cache.write() {
+            cache.insert(
+                key,
+                CacheEntry {
+                    term,
+                    cached_at: Instant::now(),
+                },
+            );
+        }
+    }
+
+    /// Clear expired entries from the cache
+    pub fn evict_expired(&self) {
+        if let Ok(mut cache) = self.cache.write() {
+            let ttl = self.config.cache_ttl_seconds;
+            cache.retain(|_, entry| !entry.is_expired(ttl));
+        }
+    }
+
+    /// Clear the entire cache
+    pub fn clear_cache(&self) {
+        if let Ok(mut cache) = self.cache.write() {
+            cache.clear();
+        }
+    }
+
+    /// Get the number of cached entries
+    pub fn cache_size(&self) -> usize {
+        self.cache.read().map(|c| c.len()).unwrap_or(0)
     }
 
     /// Query a specific source
@@ -357,40 +473,100 @@ impl FederatedResolver {
         self.last_request.insert(source_name, Instant::now());
     }
 
-    /// Query OLS4
+    /// Query OLS4 (EMBL-EBI Ontology Lookup Service)
+    ///
+    /// OLS4 API documentation: https://www.ebi.ac.uk/ols4/api/
+    #[cfg(feature = "network")]
     fn query_ols4(&self, query: &FederatedQuery) -> OntologyResult<FederatedTerm> {
-        // Build URL
+        let client = self.client.as_ref().ok_or_else(|| {
+            OntologyError::NetworkError("HTTP client not initialized".to_string())
+        })?;
+
+        // OLS4 uses a different URL structure depending on whether we know the ontology
         let url = if let Some(ref ontology) = query.ontology {
+            // Search within a specific ontology
+            // OLS4 expects double-encoded IRIs for the term endpoint
+            let iri = format!(
+                "http://purl.obolibrary.org/obo/{}_{}",
+                ontology.to_uppercase(),
+                &query.term_id
+            );
+            let encoded_iri = urlencoded(&urlencoded(&iri));
             format!(
                 "{}/ontologies/{}/terms/{}",
                 FederatedSource::OLS4.base_url(),
                 ontology.to_lowercase(),
-                urlencoded(&query.term_id)
+                encoded_iri
             )
         } else {
+            // Search across all ontologies using the search endpoint
             format!(
-                "{}/terms/{}",
+                "{}/search?q={}&exact=true&rows=1",
                 FederatedSource::OLS4.base_url(),
                 urlencoded(&query.term_id)
             )
         };
 
-        // In a real implementation, this would make an HTTP request
-        // For now, return a placeholder error indicating network would be needed
-        Err(OntologyError::NetworkError(format!(
-            "Would query OLS4 at: {}. Network requests not implemented in this context.",
-            url
-        )))
+        let response = client
+            .get(&url)
+            .header("Accept", "application/json")
+            .send()
+            .map_err(|e| OntologyError::NetworkError(format!("OLS4 request failed: {}", e)))?;
+
+        let status = response.status();
+        if !status.is_success() {
+            return Err(OntologyError::NetworkError(format!(
+                "OLS4 returned status {}: {}",
+                status.as_u16(),
+                status.canonical_reason().unwrap_or("Unknown error")
+            )));
+        }
+
+        let body = response.text().map_err(|e| {
+            OntologyError::NetworkError(format!("Failed to read OLS4 response: {}", e))
+        })?;
+
+        if query.ontology.is_some() {
+            // Parse direct term response
+            parse_ols4_term_response(&body, query)
+        } else {
+            // Parse search response
+            parse_ols4_search_response(&body, query)
+        }
     }
 
-    /// Query BioPortal
+    /// Query OLS4 - stub when network feature is disabled
+    #[cfg(not(feature = "network"))]
+    fn query_ols4(&self, query: &FederatedQuery) -> OntologyResult<FederatedTerm> {
+        let _ = query;
+        Err(OntologyError::NetworkError(
+            "OLS4 queries require the 'network' feature. Rebuild with --features network"
+                .to_string(),
+        ))
+    }
+
+    /// Query BioPortal (NCBO BioPortal)
+    ///
+    /// BioPortal API documentation: https://data.bioontology.org/documentation
+    #[cfg(feature = "network")]
     fn query_bioportal(
         &self,
         query: &FederatedQuery,
-        _api_key: &str,
+        api_key: &str,
     ) -> OntologyResult<FederatedTerm> {
-        // Build URL
+        let client = self.client.as_ref().ok_or_else(|| {
+            OntologyError::NetworkError("HTTP client not initialized".to_string())
+        })?;
+
+        // Build URL based on whether we have an ontology filter
         let url = if let Some(ref ontology) = query.ontology {
+            // Direct class lookup - BioPortal uses IRI for class ID
+            let iri = format!(
+                "http://purl.obolibrary.org/obo/{}_{}",
+                ontology.to_uppercase(),
+                &query.term_id
+            );
+            let encoded_iri = urlencoded(&iri);
             format!(
                 "{}/ontologies/{}/classes/{}",
                 FederatedSource::BioPortal {
@@ -398,11 +574,12 @@ impl FederatedResolver {
                 }
                 .base_url(),
                 ontology.to_uppercase(),
-                urlencoded(&query.term_id)
+                encoded_iri
             )
         } else {
+            // Search across all ontologies
             format!(
-                "{}/search?q={}",
+                "{}/search?q={}&pagesize=1&include=prefLabel,definition,synonym,obsolete",
                 FederatedSource::BioPortal {
                     api_key: String::new()
                 }
@@ -411,11 +588,55 @@ impl FederatedResolver {
             )
         };
 
-        // In a real implementation, this would make an HTTP request
-        Err(OntologyError::NetworkError(format!(
-            "Would query BioPortal at: {}. Network requests not implemented in this context.",
-            url
-        )))
+        let response = client
+            .get(&url)
+            .header("Accept", "application/json")
+            .header("Authorization", format!("apikey token={}", api_key))
+            .send()
+            .map_err(|e| OntologyError::NetworkError(format!("BioPortal request failed: {}", e)))?;
+
+        let status = response.status();
+
+        // Handle rate limiting with exponential backoff
+        if status.as_u16() == 429 {
+            return Err(OntologyError::NetworkError(
+                "BioPortal rate limit exceeded. Please wait before retrying.".to_string(),
+            ));
+        }
+
+        if !status.is_success() {
+            return Err(OntologyError::NetworkError(format!(
+                "BioPortal returned status {}: {}",
+                status.as_u16(),
+                status.canonical_reason().unwrap_or("Unknown error")
+            )));
+        }
+
+        let body = response.text().map_err(|e| {
+            OntologyError::NetworkError(format!("Failed to read BioPortal response: {}", e))
+        })?;
+
+        if query.ontology.is_some() {
+            // Parse direct class response
+            parse_bioportal_class_response(&body, query)
+        } else {
+            // Parse search response
+            parse_bioportal_search_response(&body, query)
+        }
+    }
+
+    /// Query BioPortal - stub when network feature is disabled
+    #[cfg(not(feature = "network"))]
+    fn query_bioportal(
+        &self,
+        query: &FederatedQuery,
+        _api_key: &str,
+    ) -> OntologyResult<FederatedTerm> {
+        let _ = query;
+        Err(OntologyError::NetworkError(
+            "BioPortal queries require the 'network' feature. Rebuild with --features network"
+                .to_string(),
+        ))
     }
 
     /// Get request statistics
@@ -488,26 +709,273 @@ fn urlencoded(s: &str) -> String {
         .replace('=', "%3D")
 }
 
-/// Parse OLS4 JSON response
-#[allow(dead_code)]
-fn parse_ols4_response(json: &str) -> OntologyResult<FederatedTerm> {
-    // Would use serde_json to parse
-    // Placeholder implementation
-    Err(OntologyError::ResolutionFailed(format!(
-        "OLS4 response parsing not implemented. JSON length: {}",
-        json.len()
-    )))
+// ============================================================================
+// OLS4 JSON Response Structures
+// ============================================================================
+
+/// OLS4 term response structure
+#[cfg(feature = "network")]
+#[derive(Debug, Deserialize)]
+struct Ols4TermResponse {
+    iri: Option<String>,
+    label: Option<String>,
+    description: Option<Vec<String>>,
+    synonyms: Option<Vec<String>>,
+    ontology_name: Option<String>,
+    is_obsolete: Option<bool>,
+    obo_id: Option<String>,
 }
 
-/// Parse BioPortal JSON response
-#[allow(dead_code)]
-fn parse_bioportal_response(json: &str) -> OntologyResult<FederatedTerm> {
-    // Would use serde_json to parse
-    // Placeholder implementation
-    Err(OntologyError::ResolutionFailed(format!(
-        "BioPortal response parsing not implemented. JSON length: {}",
-        json.len()
-    )))
+/// OLS4 search response structure
+#[cfg(feature = "network")]
+#[derive(Debug, Deserialize)]
+struct Ols4SearchResponse {
+    response: Option<Ols4SearchDocs>,
+}
+
+#[cfg(feature = "network")]
+#[derive(Debug, Deserialize)]
+struct Ols4SearchDocs {
+    docs: Option<Vec<Ols4TermResponse>>,
+}
+
+/// Parse OLS4 direct term response
+#[cfg(feature = "network")]
+fn parse_ols4_term_response(json: &str, query: &FederatedQuery) -> OntologyResult<FederatedTerm> {
+    let response: Ols4TermResponse = serde_json::from_str(json).map_err(|e| {
+        OntologyError::ResolutionFailed(format!("Failed to parse OLS4 term response: {}", e))
+    })?;
+
+    let iri = response.iri.unwrap_or_default();
+    let curie = response
+        .obo_id
+        .clone()
+        .unwrap_or_else(|| iri_to_curie(&iri));
+    let ontology = response
+        .ontology_name
+        .clone()
+        .or_else(|| query.ontology.clone())
+        .unwrap_or_else(|| extract_ontology_from_iri(&iri));
+    let obsolete = response.is_obsolete.unwrap_or(false);
+    let has_definition = response.description.as_ref().is_some_and(|d| !d.is_empty());
+
+    Ok(FederatedTerm {
+        iri,
+        curie,
+        label: response.label,
+        definition: response.description.and_then(|d| d.into_iter().next()),
+        synonyms: response.synonyms.unwrap_or_default(),
+        ontology: ontology.clone(),
+        obsolete,
+        source: "OLS4".to_string(),
+        epistemic: FederatedTerm::compute_epistemic(
+            "OLS4",
+            &ontology,
+            &query.term_id,
+            has_definition,
+            obsolete,
+        ),
+    })
+}
+
+/// Parse OLS4 search response
+#[cfg(feature = "network")]
+fn parse_ols4_search_response(json: &str, query: &FederatedQuery) -> OntologyResult<FederatedTerm> {
+    let response: Ols4SearchResponse = serde_json::from_str(json).map_err(|e| {
+        OntologyError::ResolutionFailed(format!("Failed to parse OLS4 search response: {}", e))
+    })?;
+
+    let docs =
+        response
+            .response
+            .and_then(|r| r.docs)
+            .ok_or_else(|| OntologyError::TermNotFound {
+                ontology: query.ontology.clone().unwrap_or_default(),
+                term: query.term_id.clone(),
+            })?;
+
+    let term = docs
+        .into_iter()
+        .next()
+        .ok_or_else(|| OntologyError::TermNotFound {
+            ontology: query.ontology.clone().unwrap_or_default(),
+            term: query.term_id.clone(),
+        })?;
+
+    let iri = term.iri.unwrap_or_default();
+    let curie = term.obo_id.clone().unwrap_or_else(|| iri_to_curie(&iri));
+    let ontology = term
+        .ontology_name
+        .clone()
+        .unwrap_or_else(|| extract_ontology_from_iri(&iri));
+    let obsolete = term.is_obsolete.unwrap_or(false);
+    let has_definition = term.description.as_ref().is_some_and(|d| !d.is_empty());
+
+    Ok(FederatedTerm {
+        iri,
+        curie,
+        label: term.label,
+        definition: term.description.and_then(|d| d.into_iter().next()),
+        synonyms: term.synonyms.unwrap_or_default(),
+        ontology: ontology.clone(),
+        obsolete,
+        source: "OLS4".to_string(),
+        epistemic: FederatedTerm::compute_epistemic(
+            "OLS4",
+            &ontology,
+            &query.term_id,
+            has_definition,
+            obsolete,
+        ),
+    })
+}
+
+// ============================================================================
+// BioPortal JSON Response Structures
+// ============================================================================
+
+/// BioPortal class response structure
+#[cfg(feature = "network")]
+#[derive(Debug, Deserialize)]
+struct BioPortalClassResponse {
+    #[serde(rename = "@id")]
+    id: Option<String>,
+    #[serde(rename = "prefLabel")]
+    pref_label: Option<String>,
+    definition: Option<Vec<String>>,
+    synonym: Option<Vec<String>>,
+    obsolete: Option<bool>,
+}
+
+/// BioPortal search response structure
+#[cfg(feature = "network")]
+#[derive(Debug, Deserialize)]
+struct BioPortalSearchResponse {
+    collection: Option<Vec<BioPortalClassResponse>>,
+}
+
+/// Parse BioPortal direct class response
+#[cfg(feature = "network")]
+fn parse_bioportal_class_response(
+    json: &str,
+    query: &FederatedQuery,
+) -> OntologyResult<FederatedTerm> {
+    let response: BioPortalClassResponse = serde_json::from_str(json).map_err(|e| {
+        OntologyError::ResolutionFailed(format!("Failed to parse BioPortal class response: {}", e))
+    })?;
+
+    let iri = response.id.unwrap_or_default();
+    let curie = iri_to_curie(&iri);
+    let ontology = query
+        .ontology
+        .clone()
+        .unwrap_or_else(|| extract_ontology_from_iri(&iri));
+    let obsolete = response.obsolete.unwrap_or(false);
+    let has_definition = response.definition.as_ref().is_some_and(|d| !d.is_empty());
+
+    Ok(FederatedTerm {
+        iri,
+        curie,
+        label: response.pref_label,
+        definition: response.definition.and_then(|d| d.into_iter().next()),
+        synonyms: response.synonym.unwrap_or_default(),
+        ontology: ontology.clone(),
+        obsolete,
+        source: "BioPortal".to_string(),
+        epistemic: FederatedTerm::compute_epistemic(
+            "BioPortal",
+            &ontology,
+            &query.term_id,
+            has_definition,
+            obsolete,
+        ),
+    })
+}
+
+/// Parse BioPortal search response
+#[cfg(feature = "network")]
+fn parse_bioportal_search_response(
+    json: &str,
+    query: &FederatedQuery,
+) -> OntologyResult<FederatedTerm> {
+    let response: BioPortalSearchResponse = serde_json::from_str(json).map_err(|e| {
+        OntologyError::ResolutionFailed(format!("Failed to parse BioPortal search response: {}", e))
+    })?;
+
+    let collection = response
+        .collection
+        .ok_or_else(|| OntologyError::TermNotFound {
+            ontology: query.ontology.clone().unwrap_or_default(),
+            term: query.term_id.clone(),
+        })?;
+
+    let class = collection
+        .into_iter()
+        .next()
+        .ok_or_else(|| OntologyError::TermNotFound {
+            ontology: query.ontology.clone().unwrap_or_default(),
+            term: query.term_id.clone(),
+        })?;
+
+    let iri = class.id.unwrap_or_default();
+    let curie = iri_to_curie(&iri);
+    let ontology = query
+        .ontology
+        .clone()
+        .unwrap_or_else(|| extract_ontology_from_iri(&iri));
+    let obsolete = class.obsolete.unwrap_or(false);
+    let has_definition = class.definition.as_ref().is_some_and(|d| !d.is_empty());
+
+    Ok(FederatedTerm {
+        iri,
+        curie,
+        label: class.pref_label,
+        definition: class.definition.and_then(|d| d.into_iter().next()),
+        synonyms: class.synonym.unwrap_or_default(),
+        ontology: ontology.clone(),
+        obsolete,
+        source: "BioPortal".to_string(),
+        epistemic: FederatedTerm::compute_epistemic(
+            "BioPortal",
+            &ontology,
+            &query.term_id,
+            has_definition,
+            obsolete,
+        ),
+    })
+}
+
+// ============================================================================
+// Helper Functions
+// ============================================================================
+
+/// Convert an IRI to a CURIE (compact URI)
+#[cfg(feature = "network")]
+fn iri_to_curie(iri: &str) -> String {
+    // Handle OBO format: http://purl.obolibrary.org/obo/CHEBI_15365 -> CHEBI:15365
+    if iri.contains("obolibrary.org/obo/") {
+        if let Some(local) = iri.rsplit('/').next() {
+            if let Some((prefix, id)) = local.split_once('_') {
+                return format!("{}:{}", prefix, id);
+            }
+        }
+    }
+    // Fallback: use the last path segment
+    iri.rsplit('/').next().unwrap_or(iri).to_string()
+}
+
+/// Extract ontology name from an IRI
+#[cfg(feature = "network")]
+fn extract_ontology_from_iri(iri: &str) -> String {
+    // Handle OBO format
+    if iri.contains("obolibrary.org/obo/") {
+        if let Some(local) = iri.rsplit('/').next() {
+            if let Some((prefix, _)) = local.split_once('_') {
+                return prefix.to_lowercase();
+            }
+        }
+    }
+    "unknown".to_string()
 }
 
 #[cfg(test)]
@@ -575,5 +1043,203 @@ mod tests {
         assert_eq!(stats.total_requests(), 15);
         assert_eq!(stats.total_errors(), 1);
         assert!(stats.success_rate() > 0.9);
+    }
+
+    #[test]
+    fn test_cache_operations() {
+        let resolver = FederatedResolver::new();
+        assert_eq!(resolver.cache_size(), 0);
+
+        // Insert a term
+        let term = FederatedTerm {
+            iri: "http://purl.obolibrary.org/obo/CHEBI_15365".to_string(),
+            curie: "CHEBI:15365".to_string(),
+            label: Some("aspirin".to_string()),
+            definition: Some("A benzoic acid derivative".to_string()),
+            synonyms: vec!["acetylsalicylic acid".to_string()],
+            ontology: "chebi".to_string(),
+            obsolete: false,
+            source: "test".to_string(),
+            epistemic: FederatedTerm::compute_epistemic("OLS4", "chebi", "15365", true, false),
+        };
+
+        resolver.insert_into_cache("CHEBI:15365".to_string(), term.clone());
+        assert_eq!(resolver.cache_size(), 1);
+
+        // Retrieve from cache
+        let cached = resolver.get_from_cache("CHEBI:15365");
+        assert!(cached.is_some());
+        assert_eq!(cached.unwrap().label, Some("aspirin".to_string()));
+
+        // Clear cache
+        resolver.clear_cache();
+        assert_eq!(resolver.cache_size(), 0);
+    }
+
+    #[test]
+    fn test_cache_key_generation() {
+        let resolver = FederatedResolver::new();
+
+        let query_with_ontology = FederatedQuery::term("15365").in_ontology("chebi");
+        assert_eq!(resolver.cache_key(&query_with_ontology), "chebi:15365");
+
+        let query_without_ontology = FederatedQuery::term("CHEBI:15365");
+        assert_eq!(resolver.cache_key(&query_without_ontology), "CHEBI:15365");
+    }
+
+    #[test]
+    fn test_epistemic_status_computation() {
+        // OLS4 with definition
+        let status = FederatedTerm::compute_epistemic("OLS4", "chebi", "15365", true, false);
+        assert!(status.confidence.value() > 0.8);
+
+        // BioPortal without definition
+        let status = FederatedTerm::compute_epistemic("BioPortal", "chebi", "15365", false, false);
+        assert!(status.confidence.value() > 0.7);
+        assert!(status.confidence.value() < 0.85);
+
+        // Obsolete term
+        let status = FederatedTerm::compute_epistemic("OLS4", "chebi", "15365", true, true);
+        assert!(status.confidence.value() < 0.5);
+    }
+
+    #[cfg(feature = "network")]
+    mod network_tests {
+        use super::*;
+
+        #[test]
+        fn test_iri_to_curie() {
+            assert_eq!(
+                iri_to_curie("http://purl.obolibrary.org/obo/CHEBI_15365"),
+                "CHEBI:15365"
+            );
+            assert_eq!(
+                iri_to_curie("http://purl.obolibrary.org/obo/GO_0008150"),
+                "GO:0008150"
+            );
+            // Fallback for non-OBO IRIs
+            assert_eq!(iri_to_curie("http://example.org/terms/example"), "example");
+        }
+
+        #[test]
+        fn test_extract_ontology_from_iri() {
+            assert_eq!(
+                extract_ontology_from_iri("http://purl.obolibrary.org/obo/CHEBI_15365"),
+                "chebi"
+            );
+            assert_eq!(
+                extract_ontology_from_iri("http://purl.obolibrary.org/obo/GO_0008150"),
+                "go"
+            );
+            assert_eq!(
+                extract_ontology_from_iri("http://example.org/unknown"),
+                "unknown"
+            );
+        }
+
+        #[test]
+        fn test_parse_ols4_term_response() {
+            let json = r#"{
+                "iri": "http://purl.obolibrary.org/obo/GO_0008150",
+                "label": "biological_process",
+                "description": ["A biological process is a recognized set of events..."],
+                "synonyms": ["biological process", "physiological process"],
+                "ontology_name": "go",
+                "is_obsolete": false,
+                "obo_id": "GO:0008150"
+            }"#;
+
+            let query = FederatedQuery::term("0008150").in_ontology("go");
+            let result = parse_ols4_term_response(json, &query);
+            assert!(result.is_ok());
+
+            let term = result.unwrap();
+            assert_eq!(term.curie, "GO:0008150");
+            assert_eq!(term.label, Some("biological_process".to_string()));
+            assert_eq!(term.ontology, "go");
+            assert!(!term.obsolete);
+            assert!(!term.synonyms.is_empty());
+        }
+
+        #[test]
+        fn test_parse_ols4_search_response() {
+            let json = r#"{
+                "response": {
+                    "docs": [{
+                        "iri": "http://purl.obolibrary.org/obo/CHEBI_15365",
+                        "label": "aspirin",
+                        "description": ["A benzoic acid..."],
+                        "synonyms": ["acetylsalicylic acid"],
+                        "ontology_name": "chebi",
+                        "is_obsolete": false,
+                        "obo_id": "CHEBI:15365"
+                    }]
+                }
+            }"#;
+
+            let query = FederatedQuery::term("aspirin");
+            let result = parse_ols4_search_response(json, &query);
+            assert!(result.is_ok());
+
+            let term = result.unwrap();
+            assert_eq!(term.curie, "CHEBI:15365");
+            assert_eq!(term.source, "OLS4");
+        }
+
+        #[test]
+        fn test_parse_bioportal_class_response() {
+            let json = r#"{
+                "@id": "http://purl.obolibrary.org/obo/CHEBI_15365",
+                "prefLabel": "aspirin",
+                "definition": ["A member of the class of benzoic acids..."],
+                "synonym": ["acetylsalicylic acid", "2-acetoxybenzoic acid"],
+                "obsolete": false
+            }"#;
+
+            let query = FederatedQuery::term("15365").in_ontology("chebi");
+            let result = parse_bioportal_class_response(json, &query);
+            assert!(result.is_ok());
+
+            let term = result.unwrap();
+            assert_eq!(term.curie, "CHEBI:15365");
+            assert_eq!(term.label, Some("aspirin".to_string()));
+            assert_eq!(term.source, "BioPortal");
+            assert_eq!(term.synonyms.len(), 2);
+        }
+
+        #[test]
+        fn test_parse_bioportal_search_response() {
+            let json = r#"{
+                "collection": [{
+                    "@id": "http://purl.obolibrary.org/obo/GO_0008150",
+                    "prefLabel": "biological_process",
+                    "definition": ["A biological process..."],
+                    "synonym": [],
+                    "obsolete": false
+                }]
+            }"#;
+
+            let query = FederatedQuery::term("biological_process");
+            let result = parse_bioportal_search_response(json, &query);
+            assert!(result.is_ok());
+
+            let term = result.unwrap();
+            assert_eq!(term.curie, "GO:0008150");
+            assert_eq!(term.source, "BioPortal");
+        }
+
+        #[test]
+        fn test_parse_empty_search_results() {
+            // OLS4 empty search
+            let ols4_json = r#"{"response": {"docs": []}}"#;
+            let query = FederatedQuery::term("nonexistent");
+            let result = parse_ols4_search_response(ols4_json, &query);
+            assert!(result.is_err());
+
+            // BioPortal empty search
+            let bp_json = r#"{"collection": []}"#;
+            let result = parse_bioportal_search_response(bp_json, &query);
+            assert!(result.is_err());
+        }
     }
 }

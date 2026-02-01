@@ -208,6 +208,21 @@ impl PhysicalCost {
     }
 }
 
+/// IC-based similarity metric to use
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ICSimilarityMetric {
+    /// Lin similarity: 2*IC(LCA) / (IC(a) + IC(b))
+    /// Normalized to [0, 1], commonly used
+    #[default]
+    Lin,
+    /// Resnik similarity: IC(LCA)
+    /// Not normalized, represents shared information
+    Resnik,
+    /// Jiang-Conrath distance: IC(a) + IC(b) - 2*IC(LCA)
+    /// Lower is more similar
+    JiangConrath,
+}
+
 /// Configuration for distance calculation
 #[derive(Debug, Clone)]
 pub struct DistanceConfig {
@@ -234,6 +249,12 @@ pub struct DistanceConfig {
 
     /// Whether to use embeddings in distance calculation
     pub use_embeddings: bool,
+
+    /// Which IC-based similarity metric to use
+    pub ic_metric: ICSimilarityMetric,
+
+    /// Whether to use intrinsic IC as fallback when corpus IC unavailable
+    pub use_intrinsic_ic_fallback: bool,
 }
 
 impl Default for DistanceConfig {
@@ -247,6 +268,8 @@ impl Default for DistanceConfig {
             unknown_distance: 0.9,
             min_mapping_confidence: 0.5,
             use_embeddings: true,
+            ic_metric: ICSimilarityMetric::Lin,
+            use_intrinsic_ic_fallback: true,
         }
     }
 }
@@ -345,13 +368,50 @@ impl Default for SSSOMIndex {
     }
 }
 
+/// Cached term text information for embedding-based similarity
+#[derive(Debug, Clone)]
+pub struct TermText {
+    /// Human-readable label
+    pub label: String,
+    /// Definition text (if available)
+    pub definition: Option<String>,
+    /// Synonyms
+    pub synonyms: Vec<String>,
+}
+
+impl TermText {
+    /// Create from a loaded term
+    pub fn from_loaded_term(term: &LoadedTerm) -> Self {
+        Self {
+            label: term.label.clone(),
+            definition: term.definition.clone(),
+            synonyms: term.synonyms.iter().map(|s| s.text.clone()).collect(),
+        }
+    }
+
+    /// Concatenate all text for embedding
+    pub fn to_embedding_text(&self) -> String {
+        let mut parts = vec![self.label.clone()];
+        if let Some(ref def) = self.definition {
+            parts.push(def.clone());
+        }
+        for syn in &self.synonyms {
+            parts.push(syn.clone());
+        }
+        parts.join(" . ")
+    }
+}
+
 /// Index structure for fast semantic distance lookup
 pub struct SemanticDistanceIndex {
     /// Graph structure for path-based distance
     hierarchy_graph: path::HierarchyGraph,
 
-    /// Information content values for IC-based similarity
+    /// Information content values for IC-based similarity (corpus-based)
     ic_values: HashMap<IRI, f64>,
+
+    /// Full IC index with intrinsic IC fallback support
+    ic_index: information_content::ICIndex,
 
     /// SSSOM mappings for cross-ontology distance
     sssom_mappings: SSSOMIndex,
@@ -362,11 +422,18 @@ pub struct SemanticDistanceIndex {
     /// Embedding space for geometric distance (optional)
     embedding_space: Option<super::embedding::EmbeddingSpace>,
 
+    /// Term text cache for label-based similarity fallback
+    /// Used when full embedding space is not available
+    term_texts: HashMap<IRI, TermText>,
+
     /// Precomputed distances for common pairs
     distance_cache: RwLock<lru::LruCache<(IRI, IRI), SemanticDistance>>,
 
     /// Configuration
     config: DistanceConfig,
+
+    /// Maximum IC value for normalization (Resnik)
+    max_ic: f64,
 }
 
 impl SemanticDistanceIndex {
@@ -380,13 +447,16 @@ impl SemanticDistanceIndex {
         Self {
             hierarchy_graph: path::HierarchyGraph::new(),
             ic_values: HashMap::new(),
+            ic_index: information_content::ICIndex::new(),
             sssom_mappings: SSSOMIndex::new(),
             alignment_index: None,
             embedding_space: None,
+            term_texts: HashMap::new(),
             distance_cache: RwLock::new(lru::LruCache::new(
                 std::num::NonZeroUsize::new(100_000).unwrap(),
             )),
             config,
+            max_ic: 0.0,
         }
     }
 
@@ -405,20 +475,42 @@ impl SemanticDistanceIndex {
         self.alignment_index.as_mut()
     }
 
+    /// Get a reference to the hierarchy graph for path-based operations
+    pub fn hierarchy_graph(&self) -> &path::HierarchyGraph {
+        &self.hierarchy_graph
+    }
+
     /// Build index from loaded terms
     pub fn build_from_terms(&mut self, terms: &[LoadedTerm]) {
-        // Build hierarchy graph
+        // Build hierarchy graph and term text cache
         for term in terms {
             self.hierarchy_graph.add_term(&term.iri, &term.superclasses);
+
+            // Cache term text for embedding-based similarity fallback
+            if self.config.use_embeddings {
+                self.term_texts
+                    .insert(term.iri.clone(), TermText::from_loaded_term(term));
+            }
         }
 
-        // Compute information content
+        // Compute information content (both corpus-based and intrinsic)
         self.compute_information_content(terms);
+
+        // Compute intrinsic IC as fallback (based on hierarchy structure)
+        if self.config.use_intrinsic_ic_fallback {
+            self.ic_index.compute_intrinsic_ic(&self.hierarchy_graph);
+        }
     }
 
     /// Add a single term to the index
     pub fn add_term(&mut self, term: &LoadedTerm) {
         self.hierarchy_graph.add_term(&term.iri, &term.superclasses);
+
+        // Cache term text for embedding-based similarity fallback
+        if self.config.use_embeddings {
+            self.term_texts
+                .insert(term.iri.clone(), TermText::from_loaded_term(term));
+        }
     }
 
     /// Load SSSOM mappings
@@ -534,14 +626,118 @@ impl SemanticDistanceIndex {
     }
 
     /// Compute embedding-based semantic distance
+    ///
+    /// This function uses a multi-tier fallback strategy:
+    /// 1. Full embedding space (if loaded) - highest quality
+    /// 2. Label/definition text similarity - fallback when embeddings not loaded
+    ///
+    /// The text similarity uses a hash-based embedding approach that captures
+    /// lexical overlap between term labels and definitions.
     fn compute_embedding_distance(&self, from: &IRI, to: &IRI) -> Option<f64> {
         if !self.config.use_embeddings {
             return None;
         }
 
-        self.embedding_space
-            .as_ref()
-            .and_then(|space| space.embedding_distance(from, to).ok())
+        // Try full embedding space first (highest quality)
+        if let Some(ref space) = self.embedding_space {
+            if let Ok(distance) = space.embedding_distance(from, to) {
+                return Some(distance);
+            }
+        }
+
+        // Fallback: compute text-based similarity from cached term texts
+        self.compute_text_similarity(from, to)
+    }
+
+    /// Compute text-based similarity between two terms using their labels/definitions
+    ///
+    /// Uses a hash-based embedding approach similar to the TextualGenerator,
+    /// computing cosine similarity between the embedded text representations.
+    fn compute_text_similarity(&self, from: &IRI, to: &IRI) -> Option<f64> {
+        let from_text = self.term_texts.get(from)?;
+        let to_text = self.term_texts.get(to)?;
+
+        let from_embedding = self.embed_text(&from_text.to_embedding_text());
+        let to_embedding = self.embed_text(&to_text.to_embedding_text());
+
+        // Compute cosine similarity
+        let similarity = self.cosine_similarity(&from_embedding, &to_embedding);
+
+        // Convert similarity [-1, 1] to distance [0, 1]
+        // sim=1 -> dist=0, sim=0 -> dist=0.5, sim=-1 -> dist=1
+        Some(((1.0 - similarity) / 2.0).clamp(0.0, 1.0))
+    }
+
+    /// Generate a hash-based text embedding vector
+    ///
+    /// This is a lightweight embedding approach that captures lexical features.
+    /// For production use with high accuracy requirements, this would be replaced
+    /// with a proper sentence transformer (e.g., via ONNX runtime or external API).
+    fn embed_text(&self, text: &str) -> Vec<f32> {
+        use std::collections::hash_map::DefaultHasher;
+        use std::hash::{Hash, Hasher};
+
+        // Use 128 dimensions for lightweight text embeddings
+        const DIMENSIONS: usize = 128;
+        let mut vector = vec![0.0f32; DIMENSIONS];
+
+        // Tokenize and embed each word with position-weighted contribution
+        for (word_idx, word) in text.split_whitespace().enumerate() {
+            let normalized = word.to_lowercase();
+
+            let mut hasher = DefaultHasher::new();
+            normalized.hash(&mut hasher);
+            let hash = hasher.finish();
+
+            // Spread the word's contribution across dimensions
+            for j in 0..DIMENSIONS {
+                let idx = (hash.wrapping_add(j as u64) as usize) % DIMENSIONS;
+                let sign = if (hash >> (j % 64)) & 1 == 0 {
+                    1.0
+                } else {
+                    -1.0
+                };
+                // Earlier words (label) have higher weight than later words (synonyms)
+                let magnitude = 1.0 / (word_idx as f32 + 1.0).sqrt();
+
+                vector[idx] += sign * magnitude;
+            }
+        }
+
+        // Normalize to unit length
+        let norm: f32 = vector.iter().map(|x| x * x).sum::<f32>().sqrt();
+        if norm > 1e-10 {
+            for x in &mut vector {
+                *x /= norm;
+            }
+        }
+
+        vector
+    }
+
+    /// Compute cosine similarity between two vectors
+    fn cosine_similarity(&self, a: &[f32], b: &[f32]) -> f64 {
+        debug_assert_eq!(a.len(), b.len(), "Vector dimensions must match");
+
+        let dot_product: f32 = a.iter().zip(b.iter()).map(|(x, y)| x * y).sum();
+
+        // Vectors are already normalized, so just return dot product
+        dot_product as f64
+    }
+
+    /// Get term text for an IRI (public API for introspection)
+    pub fn get_term_text(&self, iri: &IRI) -> Option<&TermText> {
+        self.term_texts.get(iri)
+    }
+
+    /// Check if term texts are available for embedding similarity
+    pub fn has_term_texts(&self) -> bool {
+        !self.term_texts.is_empty()
+    }
+
+    /// Get the number of cached term texts
+    pub fn term_text_count(&self) -> usize {
+        self.term_texts.len()
     }
 
     /// Combine multiple distance metrics with configured weights
@@ -699,28 +895,122 @@ impl SemanticDistanceIndex {
         }
     }
 
-    fn compute_ic_distance(&self, from: &IRI, to: &IRI) -> f64 {
-        let ic_from = self.ic_values.get(from).copied().unwrap_or(0.0);
-        let ic_to = self.ic_values.get(to).copied().unwrap_or(0.0);
-
-        if ic_from == 0.0 || ic_to == 0.0 {
-            return 0.0; // No IC data available
+    /// Get IC value for a term, with intrinsic IC fallback if configured
+    fn get_ic_value(&self, iri: &IRI) -> Option<f64> {
+        // Try corpus-based IC first
+        if let Some(ic) = self.ic_values.get(iri).copied() {
+            return Some(ic);
         }
 
-        // Find LCA IC
-        let ic_lca = if let Some(lca) = self.hierarchy_graph.lowest_common_ancestor(from, to) {
-            self.ic_values.get(&lca).copied().unwrap_or(0.0)
-        } else {
-            0.0
+        // Try intrinsic IC fallback if enabled
+        if self.config.use_intrinsic_ic_fallback {
+            if let Some(ic) = self.ic_index.get_intrinsic_ic(iri) {
+                return Some(ic);
+            }
+        }
+
+        None
+    }
+
+    fn compute_ic_distance(&self, from: &IRI, to: &IRI) -> f64 {
+        // Get IC values with fallback support
+        let ic_from = match self.get_ic_value(from) {
+            Some(ic) => ic,
+            None => return 0.0, // No IC data, signal unavailable
         };
 
-        // Lin similarity: 2 * IC(LCA) / (IC(a) + IC(b))
-        if ic_from + ic_to > 0.0 {
-            let similarity = 2.0 * ic_lca / (ic_from + ic_to);
-            1.0 - similarity // Convert similarity to distance
-        } else {
-            1.0
+        let ic_to = match self.get_ic_value(to) {
+            Some(ic) => ic,
+            None => return 0.0, // No IC data, signal unavailable
+        };
+
+        // Find LCA and its IC
+        let lca = match self.hierarchy_graph.lowest_common_ancestor(from, to) {
+            Some(lca) => lca,
+            None => {
+                // No common ancestor found - use path-based fallback
+                // Return high distance (dissimilar)
+                return 1.0;
+            }
+        };
+
+        let ic_lca = self.get_ic_value(&lca).unwrap_or(0.0);
+
+        // Compute distance based on configured metric
+        match self.config.ic_metric {
+            ICSimilarityMetric::Lin => {
+                // Lin similarity: 2 * IC(LCA) / (IC(a) + IC(b))
+                let denominator = ic_from + ic_to;
+                if denominator == 0.0 {
+                    return 0.0; // Both are root concepts, identical
+                }
+                let similarity = 2.0 * ic_lca / denominator;
+                1.0 - similarity.clamp(0.0, 1.0) // Convert to distance [0, 1]
+            }
+            ICSimilarityMetric::Resnik => {
+                // Resnik similarity: IC(LCA)
+                // Need to normalize to [0, 1] using max_ic
+                if self.max_ic == 0.0 {
+                    return 0.0;
+                }
+                let normalized_similarity = ic_lca / self.max_ic;
+                1.0 - normalized_similarity.clamp(0.0, 1.0) // Convert to distance
+            }
+            ICSimilarityMetric::JiangConrath => {
+                // Jiang-Conrath distance: IC(a) + IC(b) - 2*IC(LCA)
+                // Already a distance metric, but unbounded - need to normalize
+                let jc_distance = ic_from + ic_to - 2.0 * ic_lca;
+                // Normalize by 2*max_ic (theoretical maximum)
+                if self.max_ic == 0.0 {
+                    return 0.0;
+                }
+                (jc_distance / (2.0 * self.max_ic)).clamp(0.0, 1.0)
+            }
         }
+    }
+
+    /// Compute Resnik similarity directly: IC(LCA)
+    /// Returns None if IC data unavailable
+    pub fn resnik_similarity(&self, from: &IRI, to: &IRI) -> Option<f64> {
+        let lca = self.hierarchy_graph.lowest_common_ancestor(from, to)?;
+        self.get_ic_value(&lca)
+    }
+
+    /// Compute Lin similarity directly: 2*IC(LCA) / (IC(a) + IC(b))
+    /// Returns None if IC data unavailable
+    pub fn lin_similarity(&self, from: &IRI, to: &IRI) -> Option<f64> {
+        let ic_from = self.get_ic_value(from)?;
+        let ic_to = self.get_ic_value(to)?;
+        let lca = self.hierarchy_graph.lowest_common_ancestor(from, to)?;
+        let ic_lca = self.get_ic_value(&lca).unwrap_or(0.0);
+
+        let denominator = ic_from + ic_to;
+        if denominator == 0.0 {
+            return Some(1.0); // Both are root concepts
+        }
+
+        Some(2.0 * ic_lca / denominator)
+    }
+
+    /// Compute Jiang-Conrath distance directly: IC(a) + IC(b) - 2*IC(LCA)
+    /// Returns None if IC data unavailable
+    pub fn jiang_conrath_distance(&self, from: &IRI, to: &IRI) -> Option<f64> {
+        let ic_from = self.get_ic_value(from)?;
+        let ic_to = self.get_ic_value(to)?;
+        let lca = self.hierarchy_graph.lowest_common_ancestor(from, to)?;
+        let ic_lca = self.get_ic_value(&lca).unwrap_or(0.0);
+
+        Some(ic_from + ic_to - 2.0 * ic_lca)
+    }
+
+    /// Get IC value for a term (public API)
+    pub fn get_ic(&self, iri: &IRI) -> Option<f64> {
+        self.get_ic_value(iri)
+    }
+
+    /// Check if IC data is available for distance calculations
+    pub fn has_ic_data(&self) -> bool {
+        !self.ic_values.is_empty() || self.ic_index.stats().num_intrinsic > 0
     }
 
     fn compute_information_content(&mut self, terms: &[LoadedTerm]) {
@@ -740,11 +1030,24 @@ impl SemanticDistanceIndex {
         }
 
         // Compute IC = -log(p(term))
-        for (iri, count) in counts {
-            let probability = count as f64 / total;
+        self.max_ic = 0.0;
+        for (iri, count) in &counts {
+            let probability = *count as f64 / total;
             let ic = -probability.ln();
-            self.ic_values.insert(iri, ic);
+            self.ic_values.insert(iri.clone(), ic);
+
+            // Track max IC for Resnik normalization
+            if ic > self.max_ic {
+                self.max_ic = ic;
+            }
+
+            // Also populate the IC index for fallback support
+            self.ic_index.add_frequency(iri.clone(), *count as u64);
         }
+
+        // Compute IC values in the IC index
+        self.ic_index
+            .compute_ic(&information_content::ICConfig::default());
     }
 
     /// Check if 'to' is an ancestor of 'from' (subsumption)
@@ -859,5 +1162,525 @@ mod tests {
 
         let incompatible = SemanticDistance::new(0.8);
         assert!(!incompatible.is_explicitly_compatible());
+    }
+
+    fn make_test_terms() -> Vec<LoadedTerm> {
+        use super::super::loader::OntologyId;
+
+        // Create a simple hierarchy:
+        //        Thing
+        //       /     \
+        //    Animal   Plant
+        //    /    \
+        //  Dog    Cat
+        let thing = IRI::new("http://example.org/Thing");
+        let animal = IRI::new("http://example.org/Animal");
+        let plant = IRI::new("http://example.org/Plant");
+        let dog = IRI::new("http://example.org/Dog");
+        let cat = IRI::new("http://example.org/Cat");
+
+        vec![
+            LoadedTerm {
+                iri: thing.clone(),
+                label: "Thing".to_string(),
+                ontology: OntologyId::Unknown,
+                superclasses: vec![],
+                subclasses: vec![animal.clone(), plant.clone()],
+                properties: vec![],
+                restrictions: vec![],
+                xrefs: vec![],
+                definition: None,
+                synonyms: vec![],
+                hierarchy_depth: 0,
+                information_content: 0.0,
+                is_obsolete: false,
+                replaced_by: None,
+            },
+            LoadedTerm {
+                iri: animal.clone(),
+                label: "Animal".to_string(),
+                ontology: OntologyId::Unknown,
+                superclasses: vec![thing.clone()],
+                subclasses: vec![dog.clone(), cat.clone()],
+                properties: vec![],
+                restrictions: vec![],
+                xrefs: vec![],
+                definition: None,
+                synonyms: vec![],
+                hierarchy_depth: 1,
+                information_content: 0.0,
+                is_obsolete: false,
+                replaced_by: None,
+            },
+            LoadedTerm {
+                iri: plant.clone(),
+                label: "Plant".to_string(),
+                ontology: OntologyId::Unknown,
+                superclasses: vec![thing.clone()],
+                subclasses: vec![],
+                properties: vec![],
+                restrictions: vec![],
+                xrefs: vec![],
+                definition: None,
+                synonyms: vec![],
+                hierarchy_depth: 1,
+                information_content: 0.0,
+                is_obsolete: false,
+                replaced_by: None,
+            },
+            LoadedTerm {
+                iri: dog.clone(),
+                label: "Dog".to_string(),
+                ontology: OntologyId::Unknown,
+                superclasses: vec![animal.clone()],
+                subclasses: vec![],
+                properties: vec![],
+                restrictions: vec![],
+                xrefs: vec![],
+                definition: None,
+                synonyms: vec![],
+                hierarchy_depth: 2,
+                information_content: 0.0,
+                is_obsolete: false,
+                replaced_by: None,
+            },
+            LoadedTerm {
+                iri: cat.clone(),
+                label: "Cat".to_string(),
+                ontology: OntologyId::Unknown,
+                superclasses: vec![animal.clone()],
+                subclasses: vec![],
+                properties: vec![],
+                restrictions: vec![],
+                xrefs: vec![],
+                definition: None,
+                synonyms: vec![],
+                hierarchy_depth: 2,
+                information_content: 0.0,
+                is_obsolete: false,
+                replaced_by: None,
+            },
+        ]
+    }
+
+    #[test]
+    fn test_ic_distance_lin() {
+        let terms = make_test_terms();
+        let mut index = SemanticDistanceIndex::new();
+        index.build_from_terms(&terms);
+
+        let dog = IRI::new("http://example.org/Dog");
+        let cat = IRI::new("http://example.org/Cat");
+
+        // Lin similarity should work
+        let lin_sim = index.lin_similarity(&dog, &cat);
+        assert!(lin_sim.is_some());
+        let sim = lin_sim.unwrap();
+        assert!(
+            sim > 0.0 && sim < 1.0,
+            "Lin similarity should be between 0 and 1"
+        );
+
+        // IC distance should contribute to overall distance
+        let ic_distance = index.compute_ic_distance(&dog, &cat);
+        assert!(
+            ic_distance > 0.0,
+            "IC distance should be positive for non-identical terms"
+        );
+        assert!(
+            ic_distance < 1.0,
+            "IC distance should be < 1 for related terms"
+        );
+    }
+
+    #[test]
+    fn test_ic_distance_resnik() {
+        let terms = make_test_terms();
+        let mut config = DistanceConfig::default();
+        config.ic_metric = ICSimilarityMetric::Resnik;
+
+        let mut index = SemanticDistanceIndex::with_config(config);
+        index.build_from_terms(&terms);
+
+        let dog = IRI::new("http://example.org/Dog");
+        let cat = IRI::new("http://example.org/Cat");
+
+        // Resnik similarity (IC of LCA)
+        let resnik = index.resnik_similarity(&dog, &cat);
+        assert!(resnik.is_some());
+        assert!(
+            resnik.unwrap() > 0.0,
+            "LCA (Animal) should have positive IC"
+        );
+
+        // Distance should be normalized
+        let ic_distance = index.compute_ic_distance(&dog, &cat);
+        assert!(ic_distance >= 0.0 && ic_distance <= 1.0);
+    }
+
+    #[test]
+    fn test_ic_distance_jiang_conrath() {
+        let terms = make_test_terms();
+        let mut config = DistanceConfig::default();
+        config.ic_metric = ICSimilarityMetric::JiangConrath;
+
+        let mut index = SemanticDistanceIndex::with_config(config);
+        index.build_from_terms(&terms);
+
+        let dog = IRI::new("http://example.org/Dog");
+        let cat = IRI::new("http://example.org/Cat");
+
+        // Jiang-Conrath distance
+        let jc = index.jiang_conrath_distance(&dog, &cat);
+        assert!(jc.is_some());
+        assert!(jc.unwrap() >= 0.0, "JC distance should be non-negative");
+
+        // Normalized distance
+        let ic_distance = index.compute_ic_distance(&dog, &cat);
+        assert!(ic_distance >= 0.0 && ic_distance <= 1.0);
+    }
+
+    #[test]
+    fn test_ic_fallback_unavailable() {
+        // Test with empty index (no IC data)
+        let index = SemanticDistanceIndex::new();
+
+        let dog = IRI::new("http://example.org/Dog");
+        let cat = IRI::new("http://example.org/Cat");
+
+        // Should return 0.0 when IC data unavailable (signals to use other metrics)
+        let ic_distance = index.compute_ic_distance(&dog, &cat);
+        assert_eq!(
+            ic_distance, 0.0,
+            "Should return 0.0 when no IC data available"
+        );
+
+        assert!(!index.has_ic_data());
+    }
+
+    #[test]
+    fn test_ic_contributes_to_distance() {
+        let terms = make_test_terms();
+        let mut index = SemanticDistanceIndex::new();
+        index.build_from_terms(&terms);
+
+        assert!(index.has_ic_data());
+
+        let dog = IRI::new("http://example.org/Dog");
+        let cat = IRI::new("http://example.org/Cat");
+
+        // Overall distance should be computed (combining path and IC)
+        let distance = index.distance(&dog, &cat);
+        assert!(distance.conceptual > 0.0);
+        assert!(distance.conceptual < 1.0);
+    }
+
+    #[test]
+    fn test_ic_identical_terms() {
+        let terms = make_test_terms();
+        let mut index = SemanticDistanceIndex::new();
+        index.build_from_terms(&terms);
+
+        let dog = IRI::new("http://example.org/Dog");
+
+        // Same term should have zero distance
+        let distance = index.distance(&dog, &dog);
+        assert_eq!(distance.conceptual, 0.0);
+    }
+
+    #[test]
+    fn test_ic_metric_enum() {
+        assert_eq!(ICSimilarityMetric::default(), ICSimilarityMetric::Lin);
+    }
+
+    // ============== Embedding Similarity Tests ==============
+
+    fn make_test_terms_with_definitions() -> Vec<LoadedTerm> {
+        use super::super::loader::{OntologyId, Synonym, SynonymScope};
+
+        let heart = IRI::new("http://example.org/Heart");
+        let cardiac = IRI::new("http://example.org/Cardiac");
+        let liver = IRI::new("http://example.org/Liver");
+        let software = IRI::new("http://example.org/Software");
+
+        vec![
+            LoadedTerm {
+                iri: heart.clone(),
+                label: "Heart".to_string(),
+                ontology: OntologyId::Unknown,
+                superclasses: vec![],
+                subclasses: vec![],
+                properties: vec![],
+                restrictions: vec![],
+                xrefs: vec![],
+                definition: Some(
+                    "A muscular organ that pumps blood through the circulatory system".to_string(),
+                ),
+                synonyms: vec![Synonym {
+                    text: "cardiac organ".to_string(),
+                    scope: SynonymScope::Exact,
+                }],
+                hierarchy_depth: 0,
+                information_content: 0.0,
+                is_obsolete: false,
+                replaced_by: None,
+            },
+            LoadedTerm {
+                iri: cardiac.clone(),
+                label: "Cardiac".to_string(),
+                ontology: OntologyId::Unknown,
+                superclasses: vec![],
+                subclasses: vec![],
+                properties: vec![],
+                restrictions: vec![],
+                xrefs: vec![],
+                definition: Some("Relating to or affecting the heart".to_string()),
+                synonyms: vec![],
+                hierarchy_depth: 0,
+                information_content: 0.0,
+                is_obsolete: false,
+                replaced_by: None,
+            },
+            LoadedTerm {
+                iri: liver.clone(),
+                label: "Liver".to_string(),
+                ontology: OntologyId::Unknown,
+                superclasses: vec![],
+                subclasses: vec![],
+                properties: vec![],
+                restrictions: vec![],
+                xrefs: vec![],
+                definition: Some(
+                    "A large organ in the abdomen that produces bile and processes nutrients"
+                        .to_string(),
+                ),
+                synonyms: vec![Synonym {
+                    text: "hepatic organ".to_string(),
+                    scope: SynonymScope::Exact,
+                }],
+                hierarchy_depth: 0,
+                information_content: 0.0,
+                is_obsolete: false,
+                replaced_by: None,
+            },
+            LoadedTerm {
+                iri: software.clone(),
+                label: "Software".to_string(),
+                ontology: OntologyId::Unknown,
+                superclasses: vec![],
+                subclasses: vec![],
+                properties: vec![],
+                restrictions: vec![],
+                xrefs: vec![],
+                definition: Some("Computer programs and related data".to_string()),
+                synonyms: vec![Synonym {
+                    text: "application".to_string(),
+                    scope: SynonymScope::Broad,
+                }],
+                hierarchy_depth: 0,
+                information_content: 0.0,
+                is_obsolete: false,
+                replaced_by: None,
+            },
+        ]
+    }
+
+    #[test]
+    fn test_term_text_caching() {
+        let terms = make_test_terms_with_definitions();
+        let mut index = SemanticDistanceIndex::new();
+        index.build_from_terms(&terms);
+
+        // Term texts should be cached
+        assert!(index.has_term_texts());
+        assert_eq!(index.term_text_count(), 4);
+
+        // Check that term text is retrievable
+        let heart = IRI::new("http://example.org/Heart");
+        let term_text = index.get_term_text(&heart);
+        assert!(term_text.is_some());
+
+        let text = term_text.unwrap();
+        assert_eq!(text.label, "Heart");
+        assert!(text.definition.is_some());
+        assert!(!text.synonyms.is_empty());
+    }
+
+    #[test]
+    fn test_embedding_text_generation() {
+        let terms = make_test_terms_with_definitions();
+        let mut index = SemanticDistanceIndex::new();
+        index.build_from_terms(&terms);
+
+        let heart = IRI::new("http://example.org/Heart");
+        let term_text = index.get_term_text(&heart).unwrap();
+
+        let embedding_text = term_text.to_embedding_text();
+        assert!(embedding_text.contains("Heart"));
+        assert!(embedding_text.contains("muscular organ"));
+        assert!(embedding_text.contains("cardiac organ"));
+    }
+
+    #[test]
+    fn test_text_similarity_related_terms() {
+        let terms = make_test_terms_with_definitions();
+        let mut index = SemanticDistanceIndex::new();
+        index.build_from_terms(&terms);
+
+        let heart = IRI::new("http://example.org/Heart");
+        let cardiac = IRI::new("http://example.org/Cardiac");
+        let software = IRI::new("http://example.org/Software");
+
+        // Heart and Cardiac should have embedding similarity (shared word "heart")
+        let heart_cardiac_dist = index.compute_embedding_distance(&heart, &cardiac);
+        assert!(heart_cardiac_dist.is_some());
+        let hc_dist = heart_cardiac_dist.unwrap();
+
+        // Heart and Software should have low similarity (unrelated domains)
+        let heart_software_dist = index.compute_embedding_distance(&heart, &software);
+        assert!(heart_software_dist.is_some());
+        let hs_dist = heart_software_dist.unwrap();
+
+        // Heart-Cardiac should be closer than Heart-Software
+        assert!(
+            hc_dist < hs_dist,
+            "Heart-Cardiac distance ({}) should be less than Heart-Software distance ({})",
+            hc_dist,
+            hs_dist
+        );
+    }
+
+    #[test]
+    fn test_text_similarity_organs() {
+        let terms = make_test_terms_with_definitions();
+        let mut index = SemanticDistanceIndex::new();
+        index.build_from_terms(&terms);
+
+        let heart = IRI::new("http://example.org/Heart");
+        let liver = IRI::new("http://example.org/Liver");
+        let software = IRI::new("http://example.org/Software");
+
+        // Heart and Liver are both organs - should have some similarity
+        let heart_liver_dist = index.compute_embedding_distance(&heart, &liver);
+        assert!(heart_liver_dist.is_some());
+        let hl_dist = heart_liver_dist.unwrap();
+
+        // Heart and Software should have low similarity
+        let heart_software_dist = index.compute_embedding_distance(&heart, &software);
+        assert!(heart_software_dist.is_some());
+        let hs_dist = heart_software_dist.unwrap();
+
+        // Heart-Liver (both organs) should be closer than Heart-Software
+        assert!(
+            hl_dist < hs_dist,
+            "Heart-Liver distance ({}) should be less than Heart-Software distance ({})",
+            hl_dist,
+            hs_dist
+        );
+    }
+
+    #[test]
+    fn test_embedding_distance_bounds() {
+        let terms = make_test_terms_with_definitions();
+        let mut index = SemanticDistanceIndex::new();
+        index.build_from_terms(&terms);
+
+        let heart = IRI::new("http://example.org/Heart");
+        let cardiac = IRI::new("http://example.org/Cardiac");
+
+        let distance = index.compute_embedding_distance(&heart, &cardiac);
+        assert!(distance.is_some());
+        let dist = distance.unwrap();
+
+        // Distance should be in [0, 1] range
+        assert!(
+            dist >= 0.0 && dist <= 1.0,
+            "Distance {} should be in [0, 1]",
+            dist
+        );
+    }
+
+    #[test]
+    fn test_embedding_contributes_to_overall_distance() {
+        let terms = make_test_terms_with_definitions();
+        let mut index = SemanticDistanceIndex::new();
+        index.build_from_terms(&terms);
+
+        let heart = IRI::new("http://example.org/Heart");
+        let cardiac = IRI::new("http://example.org/Cardiac");
+
+        // Get the overall semantic distance
+        let distance = index.distance(&heart, &cardiac);
+
+        // Distance should be computed (not MAX or some default)
+        assert!(
+            distance.conceptual < 1.0,
+            "Terms with shared content should have distance < 1.0"
+        );
+    }
+
+    #[test]
+    fn test_embedding_disabled() {
+        let terms = make_test_terms_with_definitions();
+        let mut config = DistanceConfig::default();
+        config.use_embeddings = false;
+
+        let mut index = SemanticDistanceIndex::with_config(config);
+        index.build_from_terms(&terms);
+
+        // Term texts should not be cached when embeddings are disabled
+        assert!(!index.has_term_texts());
+        assert_eq!(index.term_text_count(), 0);
+
+        let heart = IRI::new("http://example.org/Heart");
+        let cardiac = IRI::new("http://example.org/Cardiac");
+
+        // Embedding distance should return None
+        let distance = index.compute_embedding_distance(&heart, &cardiac);
+        assert!(
+            distance.is_none(),
+            "Embedding distance should be None when embeddings disabled"
+        );
+    }
+
+    #[test]
+    fn test_embedding_distance_unknown_term() {
+        let terms = make_test_terms_with_definitions();
+        let mut index = SemanticDistanceIndex::new();
+        index.build_from_terms(&terms);
+
+        let heart = IRI::new("http://example.org/Heart");
+        let unknown = IRI::new("http://example.org/UnknownTerm");
+
+        // Distance to unknown term should return None
+        let distance = index.compute_embedding_distance(&heart, &unknown);
+        assert!(
+            distance.is_none(),
+            "Distance to unknown term should be None"
+        );
+    }
+
+    #[test]
+    fn test_cosine_similarity_normalized() {
+        let index = SemanticDistanceIndex::new();
+
+        // Test with normalized vectors
+        let a = vec![1.0f32, 0.0, 0.0];
+        let b = vec![0.0f32, 1.0, 0.0];
+        let c = vec![1.0f32, 0.0, 0.0];
+
+        // Orthogonal vectors should have 0 similarity
+        let sim_ab = index.cosine_similarity(&a, &b);
+        assert!(
+            sim_ab.abs() < 0.001,
+            "Orthogonal vectors should have ~0 similarity"
+        );
+
+        // Identical vectors should have 1.0 similarity
+        let sim_ac = index.cosine_similarity(&a, &c);
+        assert!(
+            (sim_ac - 1.0).abs() < 0.001,
+            "Identical vectors should have ~1.0 similarity"
+        );
     }
 }

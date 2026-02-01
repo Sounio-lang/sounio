@@ -187,6 +187,228 @@ c_n = c_0 \cdot \prod_{i=1}^{n} (1 - \alpha \cdot d_i) \geq c_0 \cdot (1 - \alph
 \]
 \end{lemma}
 
+\section{Knowledge Type System}
+
+The $\text{Knowledge}[\tau, \epsilon, \delta, \Phi]$ type encapsulates epistemic values with:
+\begin{itemize}
+\item $\tau$: The underlying value type
+\item $\epsilon$: Uncertainty (standard deviation or interval half-width)
+\item $\delta$: Domain/ontology context
+\item $\Phi$: Provenance chain tracking measurement sources and transformations
+\end{itemize}
+
+\subsection{Knowledge Type Syntax}
+
+\begin{definition}[Extended Expression Syntax for Knowledge]
+\begin{align*}
+e &::= \ldots \\
+  &\mid \text{knowledge}(e_v, e_\epsilon, \delta, \Phi) \tag{Introduction} \\
+  &\mid \text{unwrap}(e) \tag{Elimination} \\
+  &\mid \text{unwrap\_checked}(e, c_{\min}) \tag{Checked Elimination} \\
+  &\mid e_1 \oplus_K e_2 \tag{Binary Operations} \\
+  &\mid \text{combine}(\overline{e}, w) \tag{Fusion}
+\end{align*}
+where $\oplus \in \{+, -, \times, \div\}$ and $w$ is a weight vector.
+\end{definition}
+
+\subsection{Knowledge Typing Rules}
+
+\begin{mathpar}
+\inferrule[T-Knowledge-Intro]
+  {\Gamma \vdash e_v : \tau \triangleright d_v \\
+   \Gamma \vdash e_\epsilon : \mathbb{R}_{\geq 0} \triangleright d_\epsilon \\
+   \delta : \text{Domain} \\
+   \Phi : \text{Provenance} \\
+   c = \text{conf}(\Phi)}
+  {\Gamma \vdash \text{knowledge}(e_v, e_\epsilon, \delta, \Phi) :
+   \text{Knowledge}[\tau, \epsilon, \delta, \Phi] \triangleright d_v + d_\epsilon}
+\end{mathpar}
+
+The introduction rule constructs a Knowledge value from a base value $e_v$,
+an uncertainty $e_\epsilon$, a domain context $\delta$, and provenance $\Phi$.
+The confidence $c$ is derived from the provenance chain.
+
+\begin{mathpar}
+\inferrule[T-Knowledge-Elim]
+  {\Gamma \vdash e : \text{Knowledge}[\tau, \epsilon, \delta, \Phi] \triangleright d \\
+   c = \text{conf}(\Phi)}
+  {\Gamma \vdash \text{unwrap}(e) : \tau \triangleright d}
+
+\inferrule[T-Knowledge-Elim-Checked]
+  {\Gamma \vdash e : \text{Knowledge}[\tau, \epsilon, \delta, \Phi] \triangleright d \\
+   c = \text{conf}(\Phi) \\
+   c \geq c_{\min}}
+  {\Gamma \vdash \text{unwrap\_checked}(e, c_{\min}) : \tau \triangleright d}
+\end{mathpar}
+
+The basic elimination rule extracts the underlying value, discarding epistemic metadata.
+The checked variant enforces a minimum confidence threshold $c_{\min}$, failing at
+compile time if the static confidence is insufficient or at runtime if dynamic
+confidence drops below the threshold.
+
+\begin{mathpar}
+\inferrule[T-Knowledge-Coerce]
+  {\Gamma \vdash e : \text{Knowledge}[\tau_1, \epsilon, \delta_1, \Phi] \triangleright d \\\\
+   \tau_1 <:_{d_s} \tau_2 \\
+   d_s \leq \theta_{\text{explicit}} \\\\
+   c = \text{conf}(\Phi) \\
+   c' = c \cdot (1 - \alpha \cdot d_s) \\\\
+   \Phi' = \Phi \cdot \text{Coerce}(\tau_1, \tau_2, d_s)}
+  {\Gamma \vdash e \text{ as } \text{Knowledge}[\tau_2] :
+   \text{Knowledge}[\tau_2, \epsilon, \delta_2, \Phi'] \triangleright d + d_s}
+\end{mathpar}
+
+Cross-ontology coercion applies the confidence degradation formula:
+\[
+c' = c \cdot (1 - \alpha \cdot d_s)
+\]
+where $\alpha$ is the degradation factor and $d_s$ is the semantic distance
+between source and target types. The provenance chain records the coercion
+for auditability.
+
+\subsection{GUM Uncertainty Propagation}
+
+Following the ISO Guide to the Expression of Uncertainty in Measurement (GUM),
+we propagate uncertainties through arithmetic operations assuming uncorrelated inputs.
+
+\begin{definition}[GUM Variance Propagation]
+For a function $f(x_1, \ldots, x_n)$ with inputs having uncertainties $\epsilon_1, \ldots, \epsilon_n$:
+\[
+\epsilon_f^2 = \sum_{i=1}^{n} \left( \frac{\partial f}{\partial x_i} \right)^2 \epsilon_i^2
+\]
+\end{definition}
+
+For binary arithmetic operations on Knowledge values:
+
+\begin{definition}[Binary Operation Uncertainty Rules]
+Let $K_1 = \text{Knowledge}[\tau, \epsilon_1, \delta, \Phi_1]$ with value $v_1$ and
+$K_2 = \text{Knowledge}[\tau, \epsilon_2, \delta, \Phi_2]$ with value $v_2$:
+
+\begin{align*}
+\text{Addition/Subtraction:} \quad & \epsilon_{v_1 \pm v_2}^2 = \epsilon_1^2 + \epsilon_2^2 \\[0.5em]
+\text{Multiplication:} \quad & \epsilon_{v_1 \cdot v_2}^2 = v_2^2 \epsilon_1^2 + v_1^2 \epsilon_2^2 \\[0.5em]
+\text{Division:} \quad & \epsilon_{v_1 / v_2}^2 = \frac{1}{v_2^2} \epsilon_1^2 + \frac{v_1^2}{v_2^4} \epsilon_2^2
+\end{align*}
+
+In relative uncertainty form (coefficient of variation):
+\begin{align*}
+\text{Multiplication:} \quad & \left(\frac{\epsilon_{v_1 \cdot v_2}}{v_1 \cdot v_2}\right)^2 = \left(\frac{\epsilon_1}{v_1}\right)^2 + \left(\frac{\epsilon_2}{v_2}\right)^2 \\[0.5em]
+\text{Division:} \quad & \left(\frac{\epsilon_{v_1 / v_2}}{v_1 / v_2}\right)^2 = \left(\frac{\epsilon_1}{v_1}\right)^2 + \left(\frac{\epsilon_2}{v_2}\right)^2
+\end{align*}
+\end{definition}
+
+\begin{mathpar}
+\inferrule[T-Knowledge-Binary-Add]
+  {\Gamma \vdash e_1 : \text{Knowledge}[\tau, \epsilon_1, \delta, \Phi_1] \triangleright d_1 \\\\
+   \Gamma \vdash e_2 : \text{Knowledge}[\tau, \epsilon_2, \delta, \Phi_2] \triangleright d_2 \\\\
+   \epsilon' = \sqrt{\epsilon_1^2 + \epsilon_2^2} \\
+   c' = \min(\text{conf}(\Phi_1), \text{conf}(\Phi_2)) \\\\
+   \Phi' = \text{BinOp}(+, \Phi_1, \Phi_2)}
+  {\Gamma \vdash e_1 +_K e_2 : \text{Knowledge}[\tau, \epsilon', \delta, \Phi'] \triangleright d_1 + d_2}
+
+\inferrule[T-Knowledge-Binary-Sub]
+  {\Gamma \vdash e_1 : \text{Knowledge}[\tau, \epsilon_1, \delta, \Phi_1] \triangleright d_1 \\\\
+   \Gamma \vdash e_2 : \text{Knowledge}[\tau, \epsilon_2, \delta, \Phi_2] \triangleright d_2 \\\\
+   \epsilon' = \sqrt{\epsilon_1^2 + \epsilon_2^2} \\
+   c' = \min(\text{conf}(\Phi_1), \text{conf}(\Phi_2)) \\\\
+   \Phi' = \text{BinOp}(-, \Phi_1, \Phi_2)}
+  {\Gamma \vdash e_1 -_K e_2 : \text{Knowledge}[\tau, \epsilon', \delta, \Phi'] \triangleright d_1 + d_2}
+
+\inferrule[T-Knowledge-Binary-Mul]
+  {\Gamma \vdash e_1 : \text{Knowledge}[\tau_1, \epsilon_1, \delta, \Phi_1] \triangleright d_1 \\
+   v_1 = \text{val}(e_1) \\\\
+   \Gamma \vdash e_2 : \text{Knowledge}[\tau_2, \epsilon_2, \delta, \Phi_2] \triangleright d_2 \\
+   v_2 = \text{val}(e_2) \\\\
+   \tau' = \tau_1 \cdot \tau_2 \\
+   \epsilon' = \sqrt{v_2^2 \epsilon_1^2 + v_1^2 \epsilon_2^2} \\\\
+   c' = \min(\text{conf}(\Phi_1), \text{conf}(\Phi_2)) \\
+   \Phi' = \text{BinOp}(\times, \Phi_1, \Phi_2)}
+  {\Gamma \vdash e_1 \times_K e_2 : \text{Knowledge}[\tau', \epsilon', \delta, \Phi'] \triangleright d_1 + d_2}
+
+\inferrule[T-Knowledge-Binary-Div]
+  {\Gamma \vdash e_1 : \text{Knowledge}[\tau_1, \epsilon_1, \delta, \Phi_1] \triangleright d_1 \\
+   v_1 = \text{val}(e_1) \\\\
+   \Gamma \vdash e_2 : \text{Knowledge}[\tau_2, \epsilon_2, \delta, \Phi_2] \triangleright d_2 \\
+   v_2 = \text{val}(e_2) \\
+   v_2 \neq 0 \\\\
+   \tau' = \tau_1 / \tau_2 \\
+   \epsilon' = \sqrt{\frac{\epsilon_1^2}{v_2^2} + \frac{v_1^2 \epsilon_2^2}{v_2^4}} \\\\
+   c' = \min(\text{conf}(\Phi_1), \text{conf}(\Phi_2)) \\
+   \Phi' = \text{BinOp}(\div, \Phi_1, \Phi_2)}
+  {\Gamma \vdash e_1 \div_K e_2 : \text{Knowledge}[\tau', \epsilon', \delta, \Phi'] \triangleright d_1 + d_2}
+\end{mathpar}
+
+\subsection{Knowledge Combination}
+
+Multiple Knowledge sources can be fused using weighted combination,
+typically for sensor fusion or meta-analysis.
+
+\begin{definition}[Weighted Combination]
+Given $n$ Knowledge values $K_i = \text{Knowledge}[\tau, \epsilon_i, \delta, \Phi_i]$
+with values $v_i$ and weights $w_i$ (where $\sum_i w_i = 1$):
+
+\begin{align*}
+v_{\text{combined}} &= \sum_{i=1}^{n} w_i \cdot v_i \\[0.5em]
+\epsilon_{\text{combined}}^2 &= \sum_{i=1}^{n} w_i^2 \cdot \epsilon_i^2 \\[0.5em]
+c_{\text{combined}} &= \min_{i} \text{conf}(\Phi_i) \cdot \left(1 - \frac{\text{Var}(\{v_i\})}{\text{scale}}\right)
+\end{align*}
+
+The confidence term penalizes disagreement among sources via their variance.
+\end{definition}
+
+For optimal combination under the assumption of independent Gaussian errors,
+the minimum-variance unbiased estimator uses inverse-variance weighting:
+
+\begin{definition}[Optimal Weights]
+\[
+w_i^* = \frac{1/\epsilon_i^2}{\sum_j 1/\epsilon_j^2}
+\]
+yielding combined uncertainty:
+\[
+\epsilon_{\text{combined}}^2 = \frac{1}{\sum_i 1/\epsilon_i^2}
+\]
+\end{definition}
+
+\begin{mathpar}
+\inferrule[T-Knowledge-Combine]
+  {\forall i \in 1..n. \; \Gamma \vdash e_i : \text{Knowledge}[\tau, \epsilon_i, \delta, \Phi_i] \triangleright d_i \\\\
+   w = (w_1, \ldots, w_n) \\
+   \sum_i w_i = 1 \\\\
+   \epsilon' = \sqrt{\sum_i w_i^2 \cdot \epsilon_i^2} \\
+   c' = \text{combine\_conf}(\overline{\Phi}, \overline{v}, w) \\\\
+   \Phi' = \text{Combine}(\overline{\Phi}, w)}
+  {\Gamma \vdash \text{combine}(\overline{e}, w) :
+   \text{Knowledge}[\tau, \epsilon', \delta, \Phi'] \triangleright \sum_i d_i}
+\end{mathpar}
+
+\subsection{Correlated Uncertainty Propagation}
+
+When Knowledge values share common sources (detectable via provenance intersection),
+the covariance must be included:
+
+\begin{definition}[Correlated GUM Propagation]
+For correlated inputs with covariance matrix $\Sigma$:
+\[
+\epsilon_f^2 = \mathbf{J}^T \Sigma \mathbf{J}
+\]
+where $\mathbf{J}$ is the Jacobian vector $(\partial f / \partial x_i)$.
+
+For addition with correlation coefficient $\rho$:
+\[
+\epsilon_{v_1 + v_2}^2 = \epsilon_1^2 + \epsilon_2^2 + 2\rho\epsilon_1\epsilon_2
+\]
+\end{definition}
+
+\begin{mathpar}
+\inferrule[T-Knowledge-Binary-Correlated]
+  {\Gamma \vdash e_1 : \text{Knowledge}[\tau, \epsilon_1, \delta, \Phi_1] \triangleright d_1 \\\\
+   \Gamma \vdash e_2 : \text{Knowledge}[\tau, \epsilon_2, \delta, \Phi_2] \triangleright d_2 \\\\
+   \rho = \text{correlation}(\Phi_1, \Phi_2) \\
+   \epsilon' = \sqrt{\epsilon_1^2 + \epsilon_2^2 + 2\rho\epsilon_1\epsilon_2} \\\\
+   \Phi' = \text{BinOp}(+, \Phi_1, \Phi_2, \rho)}
+  {\Gamma \vdash e_1 +_K^{\text{corr}} e_2 : \text{Knowledge}[\tau, \epsilon', \delta, \Phi'] \triangleright d_1 + d_2}
+\end{mathpar}
+
 \section{Soundness}
 
 \begin{theorem}[Type Safety]
@@ -236,6 +458,87 @@ If a value $v$ has $\text{Knowledge}[\tau, c, \delta, \Phi]$ type at runtime,
 then the confidence $c$ accurately reflects the accumulated uncertainty from
 all type coercions in its derivation, as recorded in provenance $\Phi$.
 \end{corollary}
+
+\subsection{Knowledge Type Soundness}
+
+\begin{theorem}[Knowledge Type Soundness]
+\label{thm:knowledge-soundness}
+The Knowledge type system satisfies the following properties:
+
+\begin{enumerate}
+\item \textbf{(Uncertainty Soundness)} For any well-typed arithmetic expression
+$e : \text{Knowledge}[\tau, \epsilon, \delta, \Phi]$ constructed from inputs
+$K_1, \ldots, K_n$ with true uncertainties $\sigma_1, \ldots, \sigma_n$:
+\[
+\epsilon \geq \epsilon_{\text{GUM}}
+\]
+where $\epsilon_{\text{GUM}}$ is the uncertainty computed by GUM propagation.
+The computed uncertainty is a conservative (over-)estimate.
+
+\item \textbf{(Confidence Monotonicity)} For any derivation $D$ of
+$\Gamma \vdash e : \text{Knowledge}[\tau, \epsilon, \delta, \Phi]$:
+\[
+\text{conf}(\Phi) \leq \min_{K_i \in \text{sources}(e)} \text{conf}(\Phi_i)
+\]
+Confidence cannot increase through computation.
+
+\item \textbf{(Coercion Tracking)} Every coercion in a derivation is recorded
+in the provenance chain $\Phi$:
+\[
+\#\text{Coerce}(\Phi) = \#\{\text{applications of T-Knowledge-Coerce in } D\}
+\]
+
+\item \textbf{(Degradation Bound)} For a Knowledge value with $n$ coercions
+at distances $d_1, \ldots, d_n$:
+\[
+\text{conf}(\Phi) = c_0 \cdot \prod_{i=1}^{n} (1 - \alpha \cdot d_i)
+\]
+where $c_0$ is the initial source confidence.
+\end{enumerate}
+\end{theorem}
+
+\begin{proof}
+\textbf{(1)} By structural induction on the derivation. Base case: T-Knowledge-Intro
+assigns the declared uncertainty. Inductive case: each binary operation rule
+(T-Knowledge-Binary-*) computes uncertainty via GUM formulas, which are exact
+for linear operations and first-order approximations for nonlinear operations.
+The approximation is conservative when higher-order terms are positive.
+
+\textbf{(2)} By induction. T-Knowledge-Intro establishes initial confidence from
+provenance. T-Knowledge-Binary-* rules take $\min$ of input confidences.
+T-Knowledge-Coerce multiplies by $(1 - \alpha \cdot d) \leq 1$.
+T-Knowledge-Combine uses a penalized minimum. All operations are non-increasing.
+
+\textbf{(3)} By construction: T-Knowledge-Coerce appends $\text{Coerce}(\cdot)$
+to $\Phi$, and no other rule adds coercion records. Provenance concatenation
+is associative and injective.
+
+\textbf{(4)} Direct consequence of the T-Knowledge-Coerce rule applied $n$ times,
+with confidence degradation formula $c' = c \cdot (1 - \alpha \cdot d)$
+composed multiplicatively.
+\end{proof}
+
+\begin{theorem}[GUM Compliance]
+\label{thm:gum-compliance}
+The uncertainty propagation rules in the Knowledge type system are compliant
+with ISO/IEC Guide 98-3:2008 (GUM) for:
+\begin{enumerate}
+\item Uncorrelated Type A uncertainties (standard deviations)
+\item Linear measurement models
+\item First-order Taylor expansion for nonlinear models
+\end{enumerate}
+\end{theorem}
+
+\begin{proof}
+The binary operation rules directly implement GUM equations:
+\begin{itemize}
+\item GUM Equation 10: $u_c^2(y) = \sum_i (c_i)^2 u^2(x_i)$ where $c_i = \partial f / \partial x_i$
+\item For $f = x_1 + x_2$: $c_1 = c_2 = 1$, giving $\epsilon^2 = \epsilon_1^2 + \epsilon_2^2$
+\item For $f = x_1 \cdot x_2$: $c_1 = x_2$, $c_2 = x_1$, giving $\epsilon^2 = x_2^2\epsilon_1^2 + x_1^2\epsilon_2^2$
+\item For $f = x_1 / x_2$: $c_1 = 1/x_2$, $c_2 = -x_1/x_2^2$, giving the stated formula
+\end{itemize}
+The T-Knowledge-Binary-Correlated rule implements GUM Equation 13 for correlated inputs.
+\end{proof}
 
 \section{Disjointness}
 

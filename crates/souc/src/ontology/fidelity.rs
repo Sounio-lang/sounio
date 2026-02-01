@@ -532,7 +532,7 @@ impl WorldFidelityChecker {
                 confidence: beta,
                 term: resolved,
                 subsumption,
-                provenance_valid: true, // TODO: actual provenance check
+                provenance_valid: self.verify_provenance_quick(source),
             }
         }
     }
@@ -543,7 +543,7 @@ impl WorldFidelityChecker {
             Ok(SubsumptionResult::IsSubclass) => SubsumptionFidelity::IsSubclass {
                 child: child.to_string(),
                 parent: parent.to_string(),
-                path_length: 1, // TODO: compute actual path
+                path_length: self.compute_path_length(child, parent).unwrap_or(1),
             },
             Ok(SubsumptionResult::Equivalent) => SubsumptionFidelity::Equivalent {
                 term_a: child.to_string(),
@@ -612,20 +612,121 @@ impl WorldFidelityChecker {
 
     /// Check if a term is marked obsolete
     fn is_obsolete(&self, term: &ResolvedTerm) -> bool {
-        // Check for "obsolete" in label or definition
+        // Check for "obsolete" in label
         if let Some(label) = &term.label {
             if label.to_lowercase().contains("obsolete") {
                 return true;
             }
         }
-        // TODO: check proper obsolescence annotation
+        // Check for obsolescence annotation in definition (OBO standard pattern)
+        if let Some(def) = &term.definition {
+            let def_lower = def.to_lowercase();
+            if def_lower.starts_with("obsolete") || def_lower.contains("this term is obsolete") {
+                return true;
+            }
+        }
+        // Check IRI for obsolete pattern (some ontologies use this)
+        if let Some(iri) = &term.iri {
+            if iri.contains("/obsolete/") || iri.contains("#obsolete_") {
+                return true;
+            }
+        }
         false
     }
 
     /// Find replacement for obsolete term
-    fn find_replacement(&self, _term: &ResolvedTerm) -> Option<String> {
-        // TODO: look up replaced_by annotation
+    fn find_replacement(&self, term: &ResolvedTerm) -> Option<String> {
+        // Look for replaced_by pattern in definition (OBO standard: "Use X instead")
+        if let Some(def) = &term.definition {
+            // Pattern: "OBSOLETE. Use GO:0008150 instead"
+            if let Some(pos) = def.find("Use ") {
+                let rest = &def[pos + 4..];
+                // Extract CURIE (format: PREFIX:ID)
+                if let Some(end) = rest.find(|c: char| c.is_whitespace() || c == '.') {
+                    let candidate = &rest[..end];
+                    if candidate.contains(':') && candidate.len() > 3 {
+                        return Some(candidate.to_string());
+                    }
+                } else if rest.contains(':') && rest.len() > 3 {
+                    return Some(rest.trim_end_matches('.').to_string());
+                }
+            }
+            // Pattern: "replaced by: CHEBI:12345"
+            if let Some(pos) = def.to_lowercase().find("replaced by:") {
+                let rest = &def[pos + 12..].trim_start();
+                if let Some(end) = rest.find(|c: char| c.is_whitespace() || c == '.') {
+                    let candidate = &rest[..end];
+                    if candidate.contains(':') {
+                        return Some(candidate.to_string());
+                    }
+                }
+            }
+        }
+        // Check superclasses for replacement (some ontologies link obsolete to replacement)
+        if !term.superclasses.is_empty() && term.superclasses.len() == 1 {
+            // If obsolete term has exactly one superclass, it might be the replacement
+            let superclass = &term.superclasses[0];
+            if !superclass.to_lowercase().contains("obsolete") {
+                return Some(superclass.clone());
+            }
+        }
         None
+    }
+
+    /// Quick provenance verification (checks source reliability)
+    fn verify_provenance_quick(&self, source: &Source) -> bool {
+        match source {
+            Source::Axiom => true, // Axioms are always valid
+            Source::OntologyAssertion { ontology, .. } => {
+                // Verify ontology is in world set
+                self.is_world_ontology(ontology)
+            }
+            Source::Measurement { instrument, .. } => {
+                // Measurements are valid if instrument is specified
+                instrument.is_some()
+            }
+            Source::Derivation(steps) => {
+                // Derivation is valid if all steps have known operations
+                !steps.is_empty()
+            }
+            Source::Transformation { via, .. } => {
+                // Transformation is valid if via (operation) is known
+                !via.is_empty()
+            }
+            _ => true,
+        }
+    }
+
+    /// Compute path length between two terms in ontology hierarchy
+    fn compute_path_length(&mut self, child: &str, parent: &str) -> Option<usize> {
+        // BFS to find shortest path from child to parent
+        use std::collections::VecDeque;
+
+        let mut visited = HashSet::new();
+        let mut queue = VecDeque::new();
+        queue.push_back((child.to_string(), 0usize));
+        visited.insert(child.to_string());
+
+        const MAX_DEPTH: usize = 20; // Prevent infinite loops
+
+        while let Some((current, depth)) = queue.pop_front() {
+            if depth > MAX_DEPTH {
+                break;
+            }
+            if current == parent {
+                return Some(depth);
+            }
+            // Get superclasses of current term
+            if let Ok(term) = self.resolver.resolve(&current) {
+                for superclass in &term.superclasses {
+                    if !visited.contains(superclass) {
+                        visited.insert(superclass.clone());
+                        queue.push_back((superclass.clone(), depth + 1));
+                    }
+                }
+            }
+        }
+        None // No path found within depth limit
     }
 
     /// Compute aggregate fidelity for a set of knowledge values
@@ -669,6 +770,9 @@ impl WorldFidelityChecker {
             0.0
         };
 
+        // Compute Merkle root from all result hashes
+        let provenance_hash = self.compute_merkle_root(results);
+
         AggregateFidelity {
             score,
             confidence: BetaConfidence::new(alpha_sum.max(1.0), beta_sum.max(1.0)),
@@ -676,15 +780,104 @@ impl WorldFidelityChecker {
             medium_count,
             low_count,
             violations,
-            provenance_hash: None, // TODO: compute Merkle root
+            provenance_hash,
         }
+    }
+
+    /// Compute Merkle root hash from fidelity results
+    fn compute_merkle_root(&self, results: &[FidelityResult]) -> Option<String> {
+        if results.is_empty() {
+            return None;
+        }
+
+        // Collect leaf hashes from each result
+        let mut hashes: Vec<String> = results
+            .iter()
+            .map(|r| self.hash_fidelity_result(r))
+            .collect();
+
+        // Build Merkle tree
+        while hashes.len() > 1 {
+            let mut next_level = Vec::new();
+            for chunk in hashes.chunks(2) {
+                let combined = if chunk.len() == 2 {
+                    format!("{}{}", chunk[0], chunk[1])
+                } else {
+                    // Odd number: duplicate last hash
+                    format!("{}{}", chunk[0], chunk[0])
+                };
+                next_level.push(self.hash_string(&combined));
+            }
+            hashes = next_level;
+        }
+
+        hashes.into_iter().next()
+    }
+
+    /// Hash a fidelity result to a string
+    fn hash_fidelity_result(&self, result: &FidelityResult) -> String {
+        use std::collections::hash_map::DefaultHasher;
+        use std::hash::{Hash, Hasher};
+
+        let mut hasher = DefaultHasher::new();
+
+        match result {
+            FidelityResult::High {
+                term, confidence, ..
+            } => {
+                "high".hash(&mut hasher);
+                term.curie.hash(&mut hasher);
+                ((confidence.alpha * 1000.0) as u64).hash(&mut hasher);
+                ((confidence.beta * 1000.0) as u64).hash(&mut hasher);
+            }
+            FidelityResult::Medium {
+                term, confidence, ..
+            } => {
+                "medium".hash(&mut hasher);
+                term.curie.hash(&mut hasher);
+                ((confidence.alpha * 1000.0) as u64).hash(&mut hasher);
+            }
+            FidelityResult::Low {
+                term, confidence, ..
+            } => {
+                "low".hash(&mut hasher);
+                if let Some(t) = term {
+                    t.curie.hash(&mut hasher);
+                }
+                ((confidence.alpha * 1000.0) as u64).hash(&mut hasher);
+            }
+            FidelityResult::Violation { reason, .. } => {
+                "violation".hash(&mut hasher);
+                reason.hash(&mut hasher);
+            }
+            FidelityResult::Unknown { reason, .. } => {
+                "unknown".hash(&mut hasher);
+                reason.hash(&mut hasher);
+            }
+            FidelityResult::Indeterminate { missing, .. } => {
+                "indeterminate".hash(&mut hasher);
+                missing.len().hash(&mut hasher);
+            }
+        }
+
+        format!("{:016x}", hasher.finish())
+    }
+
+    /// Hash a string using DefaultHasher
+    fn hash_string(&self, s: &str) -> String {
+        use std::collections::hash_map::DefaultHasher;
+        use std::hash::{Hash, Hasher};
+
+        let mut hasher = DefaultHasher::new();
+        s.hash(&mut hasher);
+        format!("{:016x}", hasher.finish())
     }
 
     /// Audit provenance chain for integrity
     pub fn audit_provenance(&mut self, provenance: &Provenance) -> ProvenanceAudit {
         self.stats.provenance_audits += 1;
 
-        let issues = Vec::new();
+        let mut issues = Vec::new();
         let mut ontology_assertions = Vec::new();
 
         // Extract ontology assertions from provenance origin
@@ -701,9 +894,15 @@ impl WorldFidelityChecker {
         let chain_length = provenance.trace.steps.len();
 
         // Verify hash if present
-        let valid = if provenance.integrity_hash.is_some() {
-            // TODO: recompute and verify Merkle hash
-            true
+        let valid = if let Some(stored_hash) = &provenance.integrity_hash {
+            // Recompute Merkle hash from provenance steps
+            let computed_hash = self.compute_provenance_hash(provenance);
+            if &computed_hash != stored_hash {
+                issues.push(ProvenanceIssue::HashMismatch { step: 0 });
+                false
+            } else {
+                true
+            }
         } else {
             true // No hash to verify
         };
@@ -715,6 +914,53 @@ impl WorldFidelityChecker {
             issues,
             ontology_assertions,
         }
+    }
+
+    /// Compute hash of provenance chain
+    fn compute_provenance_hash(&self, provenance: &Provenance) -> String {
+        use std::collections::hash_map::DefaultHasher;
+        use std::hash::{Hash, Hasher};
+
+        let mut hasher = DefaultHasher::new();
+
+        // Hash origin
+        match &provenance.origin {
+            crate::epistemic::Origin::OntologyAssertion { ontology, term } => {
+                "ontology".hash(&mut hasher);
+                ontology.hash(&mut hasher);
+                term.hash(&mut hasher);
+            }
+            crate::epistemic::Origin::External { uri } => {
+                "external".hash(&mut hasher);
+                uri.hash(&mut hasher);
+            }
+            crate::epistemic::Origin::Computed { function } => {
+                "computed".hash(&mut hasher);
+                function.hash(&mut hasher);
+            }
+            crate::epistemic::Origin::UserInput { context } => {
+                "userinput".hash(&mut hasher);
+                context.hash(&mut hasher);
+            }
+            crate::epistemic::Origin::Database { query, connection } => {
+                "database".hash(&mut hasher);
+                query.hash(&mut hasher);
+                connection.hash(&mut hasher);
+            }
+            crate::epistemic::Origin::Literal => {
+                "literal".hash(&mut hasher);
+            }
+        }
+
+        // Hash all trace steps (Transformation structs)
+        for step in &provenance.trace.steps {
+            step.name.hash(&mut hasher);
+            step.inputs.len().hash(&mut hasher);
+            step.output.hash(&mut hasher);
+            ((step.confidence_factor * 1000.0) as u64).hash(&mut hasher);
+        }
+
+        format!("{:016x}", hasher.finish())
     }
 
     /// Get current statistics

@@ -5,10 +5,12 @@
 
 use std::collections::HashMap;
 
-use crate::epistemic::{Confidence, EpistemicStatus, Evidence, EvidenceKind, Revisability, Source};
+use crate::epistemic::{
+    Confidence, EpistemicStatus, Evidence, EvidenceKind, Revisability, Source, TermId,
+};
 use crate::ontology::OntologyError;
 
-use super::{DomainIndex, OntologyMetadata};
+use super::{DomainIndex, DomainTerm, OntologyMetadata};
 
 /// Load an ontology from its SQLite database
 #[cfg(feature = "ontology")]
@@ -248,6 +250,90 @@ fn default_epistemic(term_id: &str, ontology: &str) -> EpistemicStatus {
             strength: Confidence::new(0.90),
         }],
     }
+}
+
+/// Load only the ancestors index (for lazy loading large ontologies)
+#[cfg(feature = "ontology")]
+pub(crate) fn load_ancestors_only(
+    conn: &rusqlite::Connection,
+    prefix: &str,
+) -> Result<HashMap<String, Vec<String>>, OntologyError> {
+    let mut ancestors = HashMap::new();
+    load_ancestors(conn, prefix, &mut ancestors)?;
+    Ok(ancestors)
+}
+
+/// Load a single term on demand
+#[cfg(feature = "ontology")]
+pub(crate) fn load_single_term(
+    conn: &rusqlite::Connection,
+    prefix: &str,
+    curie: &str,
+) -> Result<Option<DomainTerm>, OntologyError> {
+    // Query for the term label
+    let label: Option<String> = conn
+        .query_row(
+            "SELECT value FROM statements
+             WHERE predicate = 'rdfs:label'
+             AND subject = ?",
+            [curie],
+            |row| row.get(0),
+        )
+        .ok();
+
+    let label = match label {
+        Some(l) => l,
+        None => return Ok(None), // Term not found
+    };
+
+    // Query for definition
+    let definition: Option<String> = conn
+        .query_row(
+            "SELECT value FROM statements
+             WHERE (predicate = 'IAO:0000115' OR predicate = 'obo:IAO_0000115' OR predicate LIKE '%definition%')
+             AND subject = ?",
+            [curie],
+            |row| row.get(0),
+        )
+        .ok();
+
+    // Query for parents
+    let mut parents = Vec::new();
+    if let Ok(mut stmt) = conn.prepare(
+        "SELECT object FROM edge
+         WHERE predicate = 'rdfs:subClassOf'
+         AND subject = ?",
+    ) {
+        if let Ok(rows) = stmt.query_map([curie], |row| row.get::<_, String>(0)) {
+            for row in rows.flatten() {
+                parents.push(row);
+            }
+        }
+    }
+
+    // Query for synonyms
+    let mut synonyms = Vec::new();
+    if let Ok(mut stmt) = conn.prepare(
+        "SELECT value FROM statements
+         WHERE predicate LIKE '%synonym%'
+         AND subject = ?",
+    ) {
+        if let Ok(rows) = stmt.query_map([curie], |row| row.get::<_, String>(0)) {
+            for row in rows.flatten() {
+                synonyms.push(row);
+            }
+        }
+    }
+
+    Ok(Some(DomainTerm {
+        id: TermId::with_label(curie, &label),
+        ontology: prefix.to_string(),
+        definition,
+        parents,
+        synonyms,
+        xrefs: vec![],
+        epistemic: default_epistemic(curie, prefix),
+    }))
 }
 
 /// Bootstrap loader for when SQLite is not available

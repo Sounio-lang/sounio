@@ -413,10 +413,12 @@ impl<'a> DiagnosticBuilder<'a> {
     }
 
     /// Get direct parent (first superclass)
-    fn get_direct_parent(&self, _iri: &IRI) -> Option<IRI> {
-        // This would query the distance index's hierarchy graph
-        // For now, return None as placeholder
-        None
+    fn get_direct_parent(&self, iri: &IRI) -> Option<IRI> {
+        self.distance_index
+            .hierarchy_graph()
+            .get_parents(iri)
+            .first()
+            .cloned()
     }
 
     /// Find common ancestor between two paths
@@ -432,14 +434,35 @@ impl<'a> DiagnosticBuilder<'a> {
     /// Find alternative types that would be compatible
     fn find_alternatives(
         &self,
-        _source: &IRI,
-        _target: &IRI,
-        _threshold: f64,
+        source: &IRI,
+        target: &IRI,
+        threshold: f64,
     ) -> Option<Vec<(IRI, SemanticDistance)>> {
-        // This would search for types in the same ontology that are
-        // within the threshold distance to the target
-        // For now, return None as placeholder
-        None
+        let hierarchy = self.distance_index.hierarchy_graph();
+        let mut alternatives = Vec::new();
+
+        // Get siblings via shared parents
+        for parent in hierarchy.get_parents(source) {
+            for sibling in hierarchy.get_children(&parent) {
+                if &sibling == source {
+                    continue;
+                }
+                let dist = self.distance_index.distance(&sibling, target);
+                if dist.conceptual <= threshold {
+                    alternatives.push((sibling, dist));
+                }
+            }
+        }
+
+        // Sort by distance ascending
+        alternatives.sort_by(|a, b| a.1.conceptual.partial_cmp(&b.1.conceptual).unwrap());
+
+        // Return top 5 alternatives
+        if alternatives.is_empty() {
+            None
+        } else {
+            Some(alternatives.into_iter().take(5).collect())
+        }
     }
 }
 
