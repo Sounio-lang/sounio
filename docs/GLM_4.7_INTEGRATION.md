@@ -113,7 +113,7 @@ Edite `compiler/src/mir/optimization/ml_guided_optimization.rs`:
 
 ```rust
 let config = GLMConfig {
-    api_url: "https://open.bigmodel.cn/api/paas/v4/chat/completions".to_string(),
+    api_url: "https://open.bigmodel.cn/api/coding/paas/v4/chat/completions".to_string(),
     api_key: std::env::var("GLM_API_KEY")
         .unwrap_or_else(|_| "622f603bf3a04a6c91b967d33231df34.BiTCkvs9VxeAywva".to_string()),
     max_tokens: 1000,        // Tokens máximos por resposta

@@ -3,8 +3,8 @@
 //! This module integrates GLM-4.7 (a large language model) into the Sounio compiler
 //! to make intelligent optimization decisions based on code analysis.
 
-use crate::mir::{MirModule, MirFunction, MirBlock};
-use crate::mir::instructions::{MirInstruction, MirBinaryOp};
+use crate::mir::instructions::{MirBinaryOp, MirInstruction};
+use crate::mir::{MirBlock, MirFunction, MirModule};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
@@ -26,9 +26,10 @@ pub struct GLMConfig {
 impl Default for GLMConfig {
     fn default() -> Self {
         Self {
-            api_url: "https://open.bigmodel.cn/api/paas/v4/chat/completions".to_string(),
-            api_key: std::env::var("GLM_API_KEY")
-                .unwrap_or_else(|_| "622f603bf3a04a6c91b967d33231df34.BiTCkvs9VxeAywva".to_string()),
+            api_url: "https://open.bigmodel.cn/api/coding/paas/v4/chat/completions".to_string(),
+            api_key: std::env::var("GLM_API_KEY").unwrap_or_else(|_| {
+                "622f603bf3a04a6c91b967d33231df34.BiTCkvs9VxeAywva".to_string()
+            }),
             max_tokens: 1000,
             temperature: 0.1,
             timeout_secs: 30,
@@ -50,10 +51,10 @@ pub struct CodeFeatures {
     pub call_count: usize,
     pub arithmetic_ops: usize,
     pub memory_ops: usize,
-    
+
     /// Block-level features
     pub block_features: Vec<BlockFeatures>,
-    
+
     /// Type information
     pub type_distribution: HashMap<String, usize>,
     pub epistemic_types: usize, // Knowledge<T> types
@@ -138,7 +139,7 @@ impl GLMManager {
     ) -> Result<Vec<OptimizationSuggestion>, String> {
         // Generate cache key
         let cache_key = self.generate_cache_key(module, function_name);
-        
+
         // Check cache first
         if let Some(suggestions) = self.cache.get(&cache_key) {
             return Ok(vec![suggestions.clone()]);
@@ -146,10 +147,10 @@ impl GLMManager {
 
         // Extract code features
         let features = self.extract_features(module, function_name);
-        
+
         // Query GLM-4.7
         let suggestions = self.query_glm(&features).await?;
-        
+
         // Cache results
         if !suggestions.is_empty() {
             self.cache.insert(cache_key, suggestions[0].clone());
@@ -182,11 +183,11 @@ impl GLMManager {
             for block in &func.blocks {
                 let block_features = self.analyze_block(block);
                 features.block_features.push(block_features.clone());
-                
+
                 features.total_blocks += 1;
                 features.total_instructions += block.instructions.len();
                 features.max_block_size = features.max_block_size.max(block.instructions.len());
-                
+
                 // Count operations
                 for inst in &block.instructions {
                     match inst {
@@ -195,14 +196,17 @@ impl GLMManager {
                                 features.arithmetic_ops += 1;
                             }
                         }
-                        MirInstruction::Load { .. } | MirInstruction::Store { .. } => features.memory_ops += 1,
+                        MirInstruction::Load { .. } | MirInstruction::Store { .. } => {
+                            features.memory_ops += 1
+                        }
                         MirInstruction::Call { .. } => features.call_count += 1,
                         _ => {}
                     }
                 }
             }
-            
-            features.avg_block_size = features.total_instructions as f64 / features.total_blocks.max(1) as f64;
+
+            features.avg_block_size =
+                features.total_instructions as f64 / features.total_blocks.max(1) as f64;
         }
 
         features
@@ -245,9 +249,9 @@ impl GLMManager {
         features: &CodeFeatures,
     ) -> Result<Vec<OptimizationSuggestion>, String> {
         let prompt = self.build_prompt(features);
-        
+
         let request_body = serde_json::json!({
-            "model": "glm-4",
+            "model": "glm-4.7",
             "messages": [
                 {
                     "role": "system",
@@ -262,7 +266,8 @@ impl GLMManager {
             "temperature": self.config.temperature
         });
 
-        let response = self.client
+        let response = self
+            .client
             .post(&self.config.api_url)
             .header("Authorization", format!("Bearer {}", self.config.api_key))
             .header("Content-Type", "application/json")
@@ -334,7 +339,10 @@ Provide 1-3 specific optimization suggestions in JSON format:
     }
 
     /// Parse GLM response
-    fn parse_response(&self, response: serde_json::Value) -> Result<Vec<OptimizationSuggestion>, String> {
+    fn parse_response(
+        &self,
+        response: serde_json::Value,
+    ) -> Result<Vec<OptimizationSuggestion>, String> {
         let content = response
             .get("choices")
             .and_then(|choices| choices.as_array())
@@ -347,20 +355,22 @@ Provide 1-3 specific optimization suggestions in JSON format:
         // Try to parse JSON from response
         let json_start = content.find('{');
         let json_end = content.rfind('}');
-        
+
         if let (Some(start), Some(end)) = (json_start, json_end) {
             let json_str = &content[start..=end];
             let parsed: serde_json::Value = serde_json::from_str(json_str)
                 .map_err(|e| format!("Failed to parse suggestions JSON: {}", e))?;
 
-            let suggestions_json = parsed.get("suggestions")
+            let suggestions_json = parsed
+                .get("suggestions")
                 .and_then(|s| s.as_array())
                 .ok_or("No suggestions found")?;
 
             let mut suggestions = Vec::new();
             for suggestion_json in suggestions_json {
-                let suggestion: OptimizationSuggestion = serde_json::from_value(suggestion_json.clone())
-                    .map_err(|e| format!("Failed to parse suggestion: {}", e))?;
+                let suggestion: OptimizationSuggestion =
+                    serde_json::from_value(suggestion_json.clone())
+                        .map_err(|e| format!("Failed to parse suggestion: {}", e))?;
                 suggestions.push(suggestion);
             }
 
@@ -379,7 +389,7 @@ Provide 1-3 specific optimization suggestions in JSON format:
         module.hash(&mut hasher);
         function_name.hash(&mut hasher);
         let hash = hasher.finish();
-        
+
         format!("{}_{:x}", function_name, hash)
     }
 
@@ -430,16 +440,17 @@ mod tests {
             optimization_type: OptimizationType::ConstantPropagation,
             confidence: 0.95,
             target: "test_function".to_string(),
-            parameters: HashMap::from([
-                ("threshold".to_string(), "0.8".to_string())
-            ]),
+            parameters: HashMap::from([("threshold".to_string(), "0.8".to_string())]),
             reasoning: "High confidence constant propagation opportunity".to_string(),
         };
 
         let json = serde_json::to_string(&suggestion).unwrap();
         let parsed: OptimizationSuggestion = serde_json::from_str(&json).unwrap();
-        
-        assert_eq!(parsed.optimization_type, OptimizationType::ConstantPropagation);
+
+        assert_eq!(
+            parsed.optimization_type,
+            OptimizationType::ConstantPropagation
+        );
         assert_eq!(parsed.confidence, 0.95);
     }
 }
