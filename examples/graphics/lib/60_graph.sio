@@ -1,0 +1,863 @@
+// 60_graph.sio - Graph data structure for network visualization
+//
+// Provides fundamental graph structures for network analysis and visualization:
+// - Nodes with position, label, color, and size
+// - Edges with weight, direction, and styling
+// - Adjacency operations and graph queries
+//
+// This module is the foundation for force-directed layouts, tree layouts,
+// and graph rendering.
+
+// ============================================================================
+// Node Structure
+// ============================================================================
+
+struct GraphNode {
+    id: i32,
+    x: f64,           // Position x
+    y: f64,           // Position y
+    z: f64,           // Position z (for 3D layouts, usually 0)
+    label_code: i32,  // Character code for label (A=65, B=66, etc.)
+    color: i32,       // ANSI color code
+    size: i32,        // Display size (1-3)
+    fixed: i32        // 0 = movable, 1 = fixed position
+}
+
+fn node_new(id: i32) -> GraphNode {
+    return GraphNode {
+        id: id,
+        x: 0.0,
+        y: 0.0,
+        z: 0.0,
+        label_code: 65 + id,  // A, B, C, ...
+        color: 37,            // White
+        size: 1,
+        fixed: 0
+    }
+}
+
+fn node_new_at(id: i32, x: f64, y: f64) -> GraphNode {
+    return GraphNode {
+        id: id,
+        x: x,
+        y: y,
+        z: 0.0,
+        label_code: 65 + id,
+        color: 37,
+        size: 1,
+        fixed: 0
+    }
+}
+
+fn node_set_position(node: &!GraphNode, x: f64, y: f64) with Mut {
+    node.x = x
+    node.y = y
+}
+
+fn node_set_color(node: &!GraphNode, color: i32) with Mut {
+    node.color = color
+}
+
+fn node_set_size(node: &!GraphNode, size: i32) with Mut {
+    node.size = size
+}
+
+fn node_set_fixed(node: &!GraphNode, fixed: i32) with Mut {
+    node.fixed = fixed
+}
+
+fn node_distance(n1: &GraphNode, n2: &GraphNode) -> f64 with Mut, Panic, Div {
+    let dx = n2.x - n1.x
+    let dy = n2.y - n1.y
+    return sqrt_approx(dx * dx + dy * dy)
+}
+
+// ============================================================================
+// Edge Structure
+// ============================================================================
+
+struct GraphEdge {
+    from_id: i32,
+    to_id: i32,
+    weight: f64,
+    color: i32,
+    directed: i32,    // 0 = undirected, 1 = directed
+    style: i32        // 0 = solid, 1 = dashed, 2 = dotted
+}
+
+fn edge_new(from_id: i32, to_id: i32) -> GraphEdge {
+    return GraphEdge {
+        from_id: from_id,
+        to_id: to_id,
+        weight: 1.0,
+        color: 37,
+        directed: 0,
+        style: 0
+    }
+}
+
+fn edge_new_weighted(from_id: i32, to_id: i32, weight: f64) -> GraphEdge {
+    return GraphEdge {
+        from_id: from_id,
+        to_id: to_id,
+        weight: weight,
+        color: 37,
+        directed: 0,
+        style: 0
+    }
+}
+
+fn edge_new_directed(from_id: i32, to_id: i32) -> GraphEdge {
+    return GraphEdge {
+        from_id: from_id,
+        to_id: to_id,
+        weight: 1.0,
+        color: 37,
+        directed: 1,
+        style: 0
+    }
+}
+
+fn edge_set_color(edge: &!GraphEdge, color: i32) with Mut {
+    edge.color = color
+}
+
+fn edge_set_style(edge: &!GraphEdge, style: i32) with Mut {
+    edge.style = style
+}
+
+// ============================================================================
+// Graph Structure
+// ============================================================================
+
+struct Graph {
+    nodes: [GraphNode; 100],
+    edges: [GraphEdge; 500],
+    n_nodes: i32,
+    n_edges: i32,
+
+    // Adjacency list (flat array with offsets)
+    // adj_list[adj_offset[i]..adj_offset[i+1]] = neighbors of node i
+    adj_list: [i32; 1000],
+    adj_offset: [i32; 101],  // n_nodes + 1 offsets
+    adj_built: i32           // 0 = needs rebuild, 1 = valid
+}
+
+fn graph_new() -> Graph {
+    return Graph {
+        nodes: [node_new(0); 100],
+        edges: [edge_new(0, 0); 500],
+        n_nodes: 0,
+        n_edges: 0,
+        adj_list: [0; 1000],
+        adj_offset: [0; 101],
+        adj_built: 0
+    }
+}
+
+// ============================================================================
+// Node Operations
+// ============================================================================
+
+fn graph_add_node(graph: &!Graph, node: GraphNode) -> i32 with Mut, Panic {
+    if graph.n_nodes >= 100 {
+        return -1
+    }
+    let id = graph.n_nodes
+    graph.nodes[id] = node
+    graph.nodes[id].id = id
+    graph.n_nodes = graph.n_nodes + 1
+    graph.adj_built = 0
+    return id
+}
+
+fn graph_add_node_at(graph: &!Graph, x: f64, y: f64) -> i32 with Mut, Panic {
+    let node = node_new_at(graph.n_nodes, x, y)
+    return graph_add_node(graph, node)
+}
+
+fn graph_get_node(graph: &Graph, id: i32) -> GraphNode with Panic {
+    if id >= 0 {
+        if id < graph.n_nodes {
+            return graph.nodes[id]
+        }
+    }
+    return node_new(-1)
+}
+
+fn graph_set_node_position(graph: &!Graph, id: i32, x: f64, y: f64) with Mut, Panic {
+    if id >= 0 {
+        if id < graph.n_nodes {
+            graph.nodes[id].x = x
+            graph.nodes[id].y = y
+        }
+    }
+}
+
+// ============================================================================
+// Value-Passing Node Operations (for use in loops)
+// ============================================================================
+
+fn graph_add_node_v(graph: Graph, node: GraphNode) -> Graph with Mut, Panic {
+    if graph.n_nodes >= 100 {
+        return graph
+    }
+    var g = graph
+    let id = g.n_nodes
+    g.nodes[id] = node
+    g.nodes[id].id = id
+    g.n_nodes = g.n_nodes + 1
+    g.adj_built = 0
+    return g
+}
+
+fn graph_add_node_at_v(graph: Graph, x: f64, y: f64) -> Graph with Mut, Panic {
+    let node = node_new_at(graph.n_nodes, x, y)
+    return graph_add_node_v(graph, node)
+}
+
+// ============================================================================
+// Edge Operations
+// ============================================================================
+
+fn graph_add_edge(graph: &!Graph, edge: GraphEdge) -> i32 with Mut, Panic {
+    if graph.n_edges >= 500 {
+        return -1
+    }
+    let id = graph.n_edges
+    graph.edges[id] = edge
+    graph.n_edges = graph.n_edges + 1
+    graph.adj_built = 0
+    return id
+}
+
+fn graph_connect(graph: &!Graph, from_id: i32, to_id: i32) -> i32 with Mut, Panic {
+    let edge = edge_new(from_id, to_id)
+    return graph_add_edge(graph, edge)
+}
+
+fn graph_connect_weighted(graph: &!Graph, from_id: i32, to_id: i32, weight: f64) -> i32 with Mut, Panic {
+    let edge = edge_new_weighted(from_id, to_id, weight)
+    return graph_add_edge(graph, edge)
+}
+
+fn graph_connect_directed(graph: &!Graph, from_id: i32, to_id: i32) -> i32 with Mut, Panic {
+    let edge = edge_new_directed(from_id, to_id)
+    return graph_add_edge(graph, edge)
+}
+
+// ============================================================================
+// Value-Passing Edge Operations (for use in loops)
+// ============================================================================
+
+fn graph_add_edge_v(graph: Graph, edge: GraphEdge) -> Graph with Mut, Panic {
+    if graph.n_edges >= 500 {
+        return graph
+    }
+    var g = graph
+    let id = g.n_edges
+    g.edges[id] = edge
+    g.n_edges = g.n_edges + 1
+    g.adj_built = 0
+    return g
+}
+
+fn graph_connect_v(graph: Graph, from_id: i32, to_id: i32) -> Graph with Mut, Panic {
+    let edge = edge_new(from_id, to_id)
+    return graph_add_edge_v(graph, edge)
+}
+
+fn graph_connect_weighted_v(graph: Graph, from_id: i32, to_id: i32, weight: f64) -> Graph with Mut, Panic {
+    let edge = edge_new_weighted(from_id, to_id, weight)
+    return graph_add_edge_v(graph, edge)
+}
+
+fn graph_connect_directed_v(graph: Graph, from_id: i32, to_id: i32) -> Graph with Mut, Panic {
+    let edge = edge_new_directed(from_id, to_id)
+    return graph_add_edge_v(graph, edge)
+}
+
+fn graph_has_edge(graph: &Graph, from_id: i32, to_id: i32) -> i32 with Mut, Panic, Div {
+    var i = 0
+    while i < graph.n_edges {
+        let e = graph.edges[i]
+        if e.from_id == from_id {
+            if e.to_id == to_id {
+                return 1
+            }
+        }
+        // Check reverse for undirected
+        if e.directed == 0 {
+            if e.from_id == to_id {
+                if e.to_id == from_id {
+                    return 1
+                }
+            }
+        }
+        i = i + 1
+    }
+    return 0
+}
+
+// ============================================================================
+// Adjacency List
+// ============================================================================
+
+fn graph_build_adjacency(graph: &!Graph) with Mut, Panic, Div {
+    if graph.adj_built == 1 {
+        return
+    }
+
+    // Count neighbors for each node
+    var counts: [i32; 100] = [0; 100]
+
+    var e = 0
+    while e < graph.n_edges {
+        let edge = graph.edges[e]
+        counts[edge.from_id] = counts[edge.from_id] + 1
+        if edge.directed == 0 {
+            counts[edge.to_id] = counts[edge.to_id] + 1
+        }
+        e = e + 1
+    }
+
+    // Build offsets
+    graph.adj_offset[0] = 0
+    var n = 0
+    while n < graph.n_nodes {
+        graph.adj_offset[n + 1] = graph.adj_offset[n] + counts[n]
+        n = n + 1
+    }
+
+    // Reset counts for filling
+    var c = 0
+    while c < 100 {
+        counts[c] = 0
+        c = c + 1
+    }
+
+    // Fill adjacency list
+    e = 0
+    while e < graph.n_edges {
+        let edge = graph.edges[e]
+        let from = edge.from_id
+        let to = edge.to_id
+
+        let idx1 = graph.adj_offset[from] + counts[from]
+        if idx1 < 1000 {
+            graph.adj_list[idx1] = to
+            counts[from] = counts[from] + 1
+        }
+
+        if edge.directed == 0 {
+            let idx2 = graph.adj_offset[to] + counts[to]
+            if idx2 < 1000 {
+                graph.adj_list[idx2] = from
+                counts[to] = counts[to] + 1
+            }
+        }
+
+        e = e + 1
+    }
+
+    graph.adj_built = 1
+}
+
+// Value-passing version for use with local variables
+fn graph_build_adjacency_v(graph: Graph) -> Graph with Mut, Panic, Div {
+    if graph.adj_built == 1 {
+        return graph
+    }
+
+    var g = graph
+
+    // Count neighbors for each node
+    var counts: [i32; 100] = [0; 100]
+
+    var e = 0
+    while e < g.n_edges {
+        let edge = g.edges[e]
+        counts[edge.from_id] = counts[edge.from_id] + 1
+        if edge.directed == 0 {
+            counts[edge.to_id] = counts[edge.to_id] + 1
+        }
+        e = e + 1
+    }
+
+    // Build offsets
+    g.adj_offset[0] = 0
+    var n = 0
+    while n < g.n_nodes {
+        g.adj_offset[n + 1] = g.adj_offset[n] + counts[n]
+        n = n + 1
+    }
+
+    // Reset counts for filling
+    var c = 0
+    while c < 100 {
+        counts[c] = 0
+        c = c + 1
+    }
+
+    // Fill adjacency list
+    e = 0
+    while e < g.n_edges {
+        let edge = g.edges[e]
+        let from = edge.from_id
+        let to = edge.to_id
+
+        let idx1 = g.adj_offset[from] + counts[from]
+        if idx1 < 1000 {
+            g.adj_list[idx1] = to
+            counts[from] = counts[from] + 1
+        }
+
+        if edge.directed == 0 {
+            let idx2 = g.adj_offset[to] + counts[to]
+            if idx2 < 1000 {
+                g.adj_list[idx2] = from
+                counts[to] = counts[to] + 1
+            }
+        }
+
+        e = e + 1
+    }
+
+    g.adj_built = 1
+    return g
+}
+
+fn graph_degree(graph: &!Graph, node_id: i32) -> i32 with Mut, Panic, Div {
+    graph_build_adjacency(graph)
+    if node_id >= 0 {
+        if node_id < graph.n_nodes {
+            return graph.adj_offset[node_id + 1] - graph.adj_offset[node_id]
+        }
+    }
+    return 0
+}
+
+fn graph_neighbor(graph: &!Graph, node_id: i32, neighbor_idx: i32) -> i32 with Mut, Panic, Div {
+    graph_build_adjacency(graph)
+    if node_id >= 0 {
+        if node_id < graph.n_nodes {
+            let start = graph.adj_offset[node_id]
+            let end = graph.adj_offset[node_id + 1]
+            let idx = start + neighbor_idx
+            if idx >= start {
+                if idx < end {
+                    return graph.adj_list[idx]
+                }
+            }
+        }
+    }
+    return -1
+}
+
+// ============================================================================
+// Graph Queries
+// ============================================================================
+
+fn graph_center_of_mass(graph: &Graph) -> GraphNode with Mut, Div, Panic {
+    if graph.n_nodes == 0 {
+        return node_new(-1)
+    }
+
+    var cx = 0.0
+    var cy = 0.0
+    var i = 0
+    while i < graph.n_nodes {
+        cx = cx + graph.nodes[i].x
+        cy = cy + graph.nodes[i].y
+        i = i + 1
+    }
+
+    let n = graph.n_nodes as f64
+    var result = node_new(-1)
+    result.x = cx / n
+    result.y = cy / n
+    return result
+}
+
+fn graph_bounding_box(
+    graph: &Graph
+) -> GraphNode with Mut, Div, Panic {  // Returns (min_x, min_y) in x,y and (max_x, max_y) in z (hack)
+    if graph.n_nodes == 0 {
+        var empty = node_new(-1)
+        empty.x = 0.0
+        empty.y = 0.0
+        empty.z = 0.0
+        return empty
+    }
+
+    var min_x = graph.nodes[0].x
+    var max_x = graph.nodes[0].x
+    var min_y = graph.nodes[0].y
+    var max_y = graph.nodes[0].y
+
+    var i = 1
+    while i < graph.n_nodes {
+        let node = graph.nodes[i]
+        if node.x < min_x { min_x = node.x }
+        if node.x > max_x { max_x = node.x }
+        if node.y < min_y { min_y = node.y }
+        if node.y > max_y { max_y = node.y }
+        i = i + 1
+    }
+
+    // Encode both corners in result
+    var result = node_new(-1)
+    result.x = min_x
+    result.y = min_y
+    result.z = max_x  // Hack: store max values
+    result.label_code = max_y as i32  // Another hack
+    return result
+}
+
+// ============================================================================
+// Graph Builders (Common Patterns)
+// ============================================================================
+
+fn graph_create_complete(n: i32) -> Graph with Mut, Panic, Div {
+    var graph = graph_new()
+
+    // Add nodes in a circle
+    let angle_step = 6.28318 / (n as f64)
+    var i = 0
+    while i < n {
+        let angle = (i as f64) * angle_step
+        let x = cos_approx(angle) * 10.0
+        let y = sin_approx(angle) * 10.0
+        graph = graph_add_node_at_v(graph, x, y)
+        i = i + 1
+    }
+
+    // Connect all pairs
+    i = 0
+    while i < n {
+        var j = i + 1
+        while j < n {
+            graph = graph_connect_v(graph, i, j)
+            j = j + 1
+        }
+        i = i + 1
+    }
+
+    return graph
+}
+
+fn graph_create_cycle(n: i32) -> Graph with Mut, Panic, Div {
+    var graph = graph_new()
+
+    let angle_step = 6.28318 / (n as f64)
+    var i = 0
+    while i < n {
+        let angle = (i as f64) * angle_step
+        let x = cos_approx(angle) * 10.0
+        let y = sin_approx(angle) * 10.0
+        graph = graph_add_node_at_v(graph, x, y)
+        i = i + 1
+    }
+
+    // Connect in cycle
+    i = 0
+    while i < n {
+        let next = (i + 1) % n
+        graph = graph_connect_v(graph, i, next)
+        i = i + 1
+    }
+
+    return graph
+}
+
+fn graph_create_star(n: i32) -> Graph with Mut, Panic, Div {
+    var graph = graph_new()
+
+    // Center node
+    graph = graph_add_node_at_v(graph, 0.0, 0.0)
+
+    // Outer nodes
+    let angle_step = 6.28318 / ((n - 1) as f64)
+    var i = 1
+    while i < n {
+        let angle = ((i - 1) as f64) * angle_step
+        let x = cos_approx(angle) * 10.0
+        let y = sin_approx(angle) * 10.0
+        graph = graph_add_node_at_v(graph, x, y)
+
+        // Connect to center
+        graph = graph_connect_v(graph, 0, i)
+        i = i + 1
+    }
+
+    return graph
+}
+
+fn graph_create_grid(rows: i32, cols: i32) -> Graph with Mut, Panic, Div {
+    var graph = graph_new()
+
+    // Add nodes
+    var r = 0
+    while r < rows {
+        var c = 0
+        while c < cols {
+            let x = (c as f64) * 3.0
+            let y = (r as f64) * 3.0
+            graph = graph_add_node_at_v(graph, x, y)
+            c = c + 1
+        }
+        r = r + 1
+    }
+
+    // Connect horizontally and vertically
+    r = 0
+    while r < rows {
+        var c = 0
+        while c < cols {
+            let id = r * cols + c
+
+            // Right neighbor
+            if c + 1 < cols {
+                graph = graph_connect_v(graph, id, id + 1)
+            }
+
+            // Down neighbor
+            if r + 1 < rows {
+                graph = graph_connect_v(graph, id, id + cols)
+            }
+
+            c = c + 1
+        }
+        r = r + 1
+    }
+
+    return graph
+}
+
+fn graph_create_binary_tree(depth: i32) -> Graph with Mut, Panic, Div {
+    var graph = graph_new()
+
+    // Number of nodes: 2^depth - 1
+    var n = 1
+    var d = 0
+    while d < depth {
+        n = n * 2
+        d = d + 1
+    }
+    n = n - 1
+
+    // Add nodes
+    var i = 0
+    while i < n {
+        graph = graph_add_node_at_v(graph, 0.0, 0.0)  // Positions set later
+        i = i + 1
+    }
+
+    // Connect parent to children
+    i = 0
+    while i < n {
+        let left = 2 * i + 1
+        let right = 2 * i + 2
+        if left < n {
+            graph = graph_connect_v(graph, i, left)
+        }
+        if right < n {
+            graph = graph_connect_v(graph, i, right)
+        }
+        i = i + 1
+    }
+
+    return graph
+}
+
+// ============================================================================
+// Math Helpers
+// ============================================================================
+
+fn sqrt_approx(x: f64) -> f64 with Mut, Panic, Div {
+    if x <= 0.0 { return 0.0 }
+    var guess = x * 0.5
+    var i = 0
+    while i < 10 {
+        guess = (guess + x / guess) * 0.5
+        i = i + 1
+    }
+    return guess
+}
+
+fn sin_approx(x: f64) -> f64 with Mut, Div {
+    var xx = x
+    while xx > 3.14159 { xx = xx - 6.28318 }
+    while xx < -3.14159 { xx = xx + 6.28318 }
+    let x2 = xx * xx
+    let x3 = x2 * xx
+    let x5 = x3 * x2
+    return xx - x3 * 0.16667 + x5 * 0.00833
+}
+
+fn cos_approx(x: f64) -> f64 with Mut, Panic, Div {
+    return sin_approx(x + 1.5708)
+}
+
+// ============================================================================
+// Main Demo
+// ============================================================================
+
+fn main() -> i32 with IO, Mut, Div, Panic {
+    print("Graph Data Structure Demo\n")
+    print("========================\n\n")
+
+    // Create a small social network graph using value-passing
+    var graph = graph_new()
+
+    // Add people (nodes) using value-passing
+    graph = graph_add_node_at_v(graph, 0.0, 0.0)    // Alice (0)
+    graph = graph_add_node_at_v(graph, 5.0, 0.0)    // Bob (1)
+    graph = graph_add_node_at_v(graph, 2.5, 4.0)    // Carol (2)
+    graph = graph_add_node_at_v(graph, -2.0, 3.0)   // Dave (3)
+    graph = graph_add_node_at_v(graph, 7.0, 3.0)    // Eve (4)
+
+    // Set node labels
+    graph.nodes[0].label_code = 65  // A
+    graph.nodes[1].label_code = 66  // B
+    graph.nodes[2].label_code = 67  // C
+    graph.nodes[3].label_code = 68  // D
+    graph.nodes[4].label_code = 69  // E
+
+    // Add friendships (edges) using value-passing
+    graph = graph_connect_v(graph, 0, 1)  // Alice - Bob
+    graph = graph_connect_v(graph, 0, 2)  // Alice - Carol
+    graph = graph_connect_v(graph, 0, 3)  // Alice - Dave
+    graph = graph_connect_v(graph, 1, 2)  // Bob - Carol
+    graph = graph_connect_v(graph, 1, 4)  // Bob - Eve
+    graph = graph_connect_v(graph, 2, 4)  // Carol - Eve
+
+    print("Created graph with ")
+    print_i32(graph.n_nodes)
+    print(" nodes and ")
+    print_i32(graph.n_edges)
+    print(" edges\n\n")
+
+    // Build adjacency list once before the loops (use value-passing)
+    graph = graph_build_adjacency_v(graph)
+
+    // Show degrees (adjacency already built, use direct lookup)
+    print("Node degrees:\n")
+    var i = 0
+    while i < graph.n_nodes {
+        let deg = graph.adj_offset[i + 1] - graph.adj_offset[i]
+        print("  Node ")
+        print_char(graph.nodes[i].label_code)
+        print(": degree ")
+        print_i32(deg)
+        print("\n")
+        i = i + 1
+    }
+
+    print("\nAdjacency lists:\n")
+    i = 0
+    while i < graph.n_nodes {
+        let deg = graph.adj_offset[i + 1] - graph.adj_offset[i]
+        print("  ")
+        print_char(graph.nodes[i].label_code)
+        print(" -> ")
+        var j = 0
+        while j < deg {
+            let idx = graph.adj_offset[i] + j
+            let neighbor = graph.adj_list[idx]
+            print_char(graph.nodes[neighbor].label_code)
+            if j < deg - 1 {
+                print(", ")
+            }
+            j = j + 1
+        }
+        print("\n")
+        i = i + 1
+    }
+
+    print("\n--- Pre-built Graph Patterns ---\n\n")
+
+    let complete = graph_create_complete(5)
+    print("Complete K5: ")
+    print_i32(complete.n_nodes)
+    print(" nodes, ")
+    print_i32(complete.n_edges)
+    print(" edges\n")
+
+    let cycle = graph_create_cycle(6)
+    print("Cycle C6: ")
+    print_i32(cycle.n_nodes)
+    print(" nodes, ")
+    print_i32(cycle.n_edges)
+    print(" edges\n")
+
+    let star = graph_create_star(7)
+    print("Star S7: ")
+    print_i32(star.n_nodes)
+    print(" nodes, ")
+    print_i32(star.n_edges)
+    print(" edges\n")
+
+    let grid = graph_create_grid(3, 4)
+    print("Grid 3x4: ")
+    print_i32(grid.n_nodes)
+    print(" nodes, ")
+    print_i32(grid.n_edges)
+    print(" edges\n")
+
+    let tree = graph_create_binary_tree(4)
+    print("Binary tree depth 4: ")
+    print_i32(tree.n_nodes)
+    print(" nodes, ")
+    print_i32(tree.n_edges)
+    print(" edges\n")
+
+    return 0
+}
+
+// ============================================================================
+// Helper Functions
+// ============================================================================
+
+fn print_i32(x: i32) with IO, Div, Panic {
+    if x == 0 { print("0"); return }
+    if x < 0 { print("-"); print_i32_unsigned(0 - x) }
+    else { print_i32_unsigned(x) }
+}
+
+fn print_i32_unsigned(x: i32) with IO, Div, Panic {
+    if x == 0 { return }
+    let digit = x % 10
+    let rest = x / 10
+    if rest > 0 { print_i32_unsigned(rest) }
+    print_digit(digit)
+}
+
+fn print_digit(d: i32) with IO {
+    if d == 0 { print("0") }
+    else { if d == 1 { print("1") }
+    else { if d == 2 { print("2") }
+    else { if d == 3 { print("3") }
+    else { if d == 4 { print("4") }
+    else { if d == 5 { print("5") }
+    else { if d == 6 { print("6") }
+    else { if d == 7 { print("7") }
+    else { if d == 8 { print("8") }
+    else { if d == 9 { print("9") }
+    }}}}}}}}}
+}
+
+fn print_char(code: i32) with IO {
+    if code == 65 { print("A") }
+    else { if code == 66 { print("B") }
+    else { if code == 67 { print("C") }
+    else { if code == 68 { print("D") }
+    else { if code == 69 { print("E") }
+    else { if code == 70 { print("F") }
+    else { if code == 71 { print("G") }
+    else { if code == 72 { print("H") }
+    else { if code == 73 { print("I") }
+    else { if code == 74 { print("J") }
+    else { print("?") }
+    }}}}}}}}}
+}

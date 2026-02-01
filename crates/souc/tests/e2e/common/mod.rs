@@ -40,17 +40,32 @@ impl TestHarness {
     pub fn new() -> Self {
         // Look for compiler binary (souc / souc.exe on Windows)
         // Check release first, then fall back to debug
+        // Check both crate-local and workspace-level target directories
         let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        let workspace_dir = manifest_dir
+            .parent()
+            .and_then(|p| p.parent())
+            .unwrap_or(&manifest_dir);
         #[cfg(windows)]
         let binary_name = "souc.exe";
         #[cfg(not(windows))]
         let binary_name = "souc";
-        let release_path = manifest_dir.join(format!("target/release/{}", binary_name));
-        let debug_path = manifest_dir.join(format!("target/debug/{}", binary_name));
-        let compiler_path = if release_path.exists() {
-            release_path
+
+        // Try workspace paths first (most common with `cargo test`)
+        let workspace_release = workspace_dir.join(format!("target/release/{}", binary_name));
+        let workspace_debug = workspace_dir.join(format!("target/debug/{}", binary_name));
+        // Then try crate-local paths
+        let crate_release = manifest_dir.join(format!("target/release/{}", binary_name));
+        let crate_debug = manifest_dir.join(format!("target/debug/{}", binary_name));
+
+        let compiler_path = if workspace_release.exists() {
+            workspace_release
+        } else if workspace_debug.exists() {
+            workspace_debug
+        } else if crate_release.exists() {
+            crate_release
         } else {
-            debug_path
+            crate_debug
         };
 
         // Use both process id and a counter to make temp dirs unique across parallel tests

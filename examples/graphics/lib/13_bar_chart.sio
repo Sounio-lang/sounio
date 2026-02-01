@@ -1,0 +1,556 @@
+// Bar Charts - Vertical and horizontal bar visualization
+//
+// Provides bar chart functionality with support for vertical/horizontal
+// orientations, stacked bars, grouped bars, and error bars for epistemic
+// uncertainty.
+
+// ============================================================================
+// Duplicate necessary types
+// ============================================================================
+
+struct Cell {
+    ch: i32,
+    fg_color: i32,
+    bg_color: i32,
+    bold: i32,
+    dim: i32
+}
+
+struct Canvas {
+    width: i32,
+    height: i32,
+    cells: [Cell; 2400]
+}
+
+struct Viewport {
+    x_min: f64,
+    x_max: f64,
+    y_min: f64,
+    y_max: f64,
+    canvas_x: i32,
+    canvas_y: i32,
+    canvas_width: i32,
+    canvas_height: i32
+}
+
+// ============================================================================
+// Bar Chart Data Structures
+// ============================================================================
+
+// Single bar with optional error
+struct Bar {
+    value: f64,
+    error: f64,      // Standard deviation or error bar size
+    color: i32,
+    label_code: i32  // Single character code for label
+}
+
+fn bar_new(value: f64, error: f64, color: i32, label: i32) -> Bar {
+    return Bar {
+        value: value,
+        error: error,
+        color: color,
+        label_code: label
+    }
+}
+
+// Stacked bar component
+struct BarSegment {
+    value: f64,
+    color: i32
+}
+
+fn bar_segment_new(value: f64, color: i32) -> BarSegment {
+    return BarSegment {
+        value: value,
+        color: color
+    }
+}
+
+// ============================================================================
+// Coordinate Transformation (from 10_axes.sio)
+// ============================================================================
+
+fn world_to_canvas_x(vp: &Viewport, x: f64) -> i32 with Mut, Panic, Div {
+    let x_range = vp.x_max - vp.x_min
+    let normalized = (x - vp.x_min) / x_range
+    let pixel_offset = normalized * (vp.canvas_width as f64)
+    return vp.canvas_x + (pixel_offset as i32)
+}
+
+fn world_to_canvas_y(vp: &Viewport, y: f64) -> i32 with Mut, Panic, Div {
+    let y_range = vp.y_max - vp.y_min
+    let normalized = (y - vp.y_min) / y_range
+    let pixel_offset = normalized * (vp.canvas_height as f64)
+
+    // Flip Y axis (canvas Y increases downward, world Y increases upward)
+    return vp.canvas_y + vp.canvas_height - (pixel_offset as i32)
+}
+
+// ============================================================================
+// Canvas Operations
+// ============================================================================
+
+fn canvas_set_pixel(canvas: Canvas, x: i32, y: i32, ch: i32, color: i32) -> Canvas with Mut, Panic {
+    if x < 0 { return canvas }
+    if y < 0 { return canvas }
+    if x >= canvas.width { return canvas }
+    if y >= canvas.height { return canvas }
+
+    var new_canvas = canvas
+    let index = y * canvas.width + x
+    new_canvas.cells[index] = Cell {
+        ch: ch,
+        fg_color: color,
+        bg_color: 0,
+        bold: 0,
+        dim: 0
+    }
+    return new_canvas
+}
+
+// ============================================================================
+// Drawing Primitives
+// ============================================================================
+
+fn draw_hline(canvas: Canvas, x0: i32, x1: i32, y: i32, color: i32) -> Canvas with Mut, Panic, Div {
+    var result = canvas
+    let start_x = if x0 < x1 { x0 } else { x1 }
+    let end_x = if x0 < x1 { x1 } else { x0 }
+
+    var x = start_x
+    while x <= end_x {
+        result = canvas_set_pixel(result, x, y, 9608, color)
+        x = x + 1
+    }
+
+    return result
+}
+
+fn draw_vline(canvas: Canvas, x: i32, y0: i32, y1: i32, color: i32) -> Canvas with Mut, Panic, Div {
+    var result = canvas
+    let start_y = if y0 < y1 { y0 } else { y1 }
+    let end_y = if y0 < y1 { y1 } else { y0 }
+
+    var y = start_y
+    while y <= end_y {
+        result = canvas_set_pixel(result, x, y, 9608, color)
+        y = y + 1
+    }
+
+    return result
+}
+
+fn fill_rect(canvas: Canvas, x: i32, y: i32, width: i32, height: i32, color: i32) -> Canvas with Mut, Panic, Div {
+    var result = canvas
+
+    var row = 0
+    while row < height {
+        result = draw_hline(result, x, x + width - 1, y + row, color)
+        row = row + 1
+    }
+
+    return result
+}
+
+// ============================================================================
+// Bar Chart Rendering - Vertical
+// ============================================================================
+
+// Draw single vertical bar from baseline to value
+fn draw_vertical_bar(
+    canvas: Canvas,
+    vp: &Viewport,
+    x_center: f64,
+    bar_width: f64,
+    value: f64,
+    baseline: f64,
+    color: i32
+) -> Canvas with Mut, Panic, Div {
+    let x_left = x_center - (bar_width / 2.0)
+    let x_right = x_center + (bar_width / 2.0)
+
+    let px_left = world_to_canvas_x(vp, x_left)
+    let px_right = world_to_canvas_x(vp, x_right)
+    let py_baseline = world_to_canvas_y(vp, baseline)
+    let py_value = world_to_canvas_y(vp, value)
+
+    let rect_width = px_right - px_left
+    let rect_height = if py_baseline > py_value {
+        py_baseline - py_value
+    } else {
+        py_value - py_baseline
+    }
+    let rect_y = if py_baseline > py_value { py_value } else { py_baseline }
+
+    return fill_rect(canvas, px_left, rect_y, rect_width, rect_height, color)
+}
+
+// Vertical bar chart with uniform bar width
+fn bar_chart_vertical(
+    canvas: Canvas,
+    vp: &Viewport,
+    values: &[f64],
+    colors: &[i32],
+    n_bars: i32,
+    bar_width: f64,
+    baseline: f64
+) -> Canvas with Mut, Panic, Div {
+    var result = canvas
+
+    // Calculate spacing between bars
+    let x_range = vp.x_max - vp.x_min
+    let spacing = x_range / ((n_bars + 1) as f64)
+
+    var i = 0
+    while i < n_bars {
+        let x_center = vp.x_min + spacing * ((i + 1) as f64)
+        result = draw_vertical_bar(result, vp, x_center, bar_width, values[i], baseline, colors[i])
+        i = i + 1
+    }
+
+    return result
+}
+
+// Vertical bar chart with error bars
+fn bar_chart_vertical_epistemic(
+    canvas: Canvas,
+    vp: &Viewport,
+    bars: &[Bar],
+    n_bars: i32,
+    bar_width: f64,
+    baseline: f64
+) -> Canvas with Mut, Panic, Div {
+    var result = canvas
+
+    let x_range = vp.x_max - vp.x_min
+    let spacing = x_range / ((n_bars + 1) as f64)
+
+    var i = 0
+    while i < n_bars {
+        let x_center = vp.x_min + spacing * ((i + 1) as f64)
+        let bar = bars[i]
+
+        // Draw bar
+        result = draw_vertical_bar(result, vp, x_center, bar_width, bar.value, baseline, bar.color)
+
+        // Draw error bar (if error > 0)
+        if bar.error > 0.0 {
+            let error_top = bar.value + bar.error
+            let error_bottom = bar.value - bar.error
+
+            let px_center = world_to_canvas_x(vp, x_center)
+            let py_top = world_to_canvas_y(vp, error_top)
+            let py_bottom = world_to_canvas_y(vp, error_bottom)
+            let py_value = world_to_canvas_y(vp, bar.value)
+
+            // Vertical error line
+            result = draw_vline(result, px_center, py_bottom, py_top, bar.color)
+
+            // Top cap
+            let cap_width = 2
+            result = draw_hline(result, px_center - cap_width, px_center + cap_width, py_top, bar.color)
+
+            // Bottom cap
+            result = draw_hline(result, px_center - cap_width, px_center + cap_width, py_bottom, bar.color)
+        }
+
+        i = i + 1
+    }
+
+    return result
+}
+
+// ============================================================================
+// Bar Chart Rendering - Horizontal
+// ============================================================================
+
+// Draw single horizontal bar
+fn draw_horizontal_bar(
+    canvas: Canvas,
+    vp: &Viewport,
+    y_center: f64,
+    bar_height: f64,
+    value: f64,
+    baseline: f64,
+    color: i32
+) -> Canvas with Mut, Panic, Div {
+    let y_bottom = y_center - (bar_height / 2.0)
+    let y_top = y_center + (bar_height / 2.0)
+
+    let py_bottom = world_to_canvas_y(vp, y_bottom)
+    let py_top = world_to_canvas_y(vp, y_top)
+    let px_baseline = world_to_canvas_x(vp, baseline)
+    let px_value = world_to_canvas_x(vp, value)
+
+    let rect_height = py_bottom - py_top
+    let rect_width = if px_value > px_baseline {
+        px_value - px_baseline
+    } else {
+        px_baseline - px_value
+    }
+    let rect_x = if px_value > px_baseline { px_baseline } else { px_value }
+
+    return fill_rect(canvas, rect_x, py_top, rect_width, rect_height, color)
+}
+
+// Horizontal bar chart
+fn bar_chart_horizontal(
+    canvas: Canvas,
+    vp: &Viewport,
+    values: &[f64],
+    colors: &[i32],
+    n_bars: i32,
+    bar_height: f64,
+    baseline: f64
+) -> Canvas with Mut, Panic, Div {
+    var result = canvas
+
+    let y_range = vp.y_max - vp.y_min
+    let spacing = y_range / ((n_bars + 1) as f64)
+
+    var i = 0
+    while i < n_bars {
+        let y_center = vp.y_min + spacing * ((i + 1) as f64)
+        result = draw_horizontal_bar(result, vp, y_center, bar_height, values[i], baseline, colors[i])
+        i = i + 1
+    }
+
+    return result
+}
+
+// ============================================================================
+// Stacked Bar Chart
+// ============================================================================
+
+// Stacked vertical bars (e.g., for SIR model)
+fn bar_chart_stacked_vertical(
+    canvas: Canvas,
+    vp: &Viewport,
+    segments_array: &[[BarSegment; 10]],
+    n_segments_per_bar: &[i32],
+    n_bars: i32,
+    bar_width: f64
+) -> Canvas with Mut, Panic, Div {
+    var result = canvas
+
+    let x_range = vp.x_max - vp.x_min
+    let spacing = x_range / ((n_bars + 1) as f64)
+
+    var bar_idx = 0
+    while bar_idx < n_bars {
+        let x_center = vp.x_min + spacing * ((bar_idx + 1) as f64)
+        var cumulative_value = 0.0
+
+        var seg_idx = 0
+        let n_segs = n_segments_per_bar[bar_idx]
+        while seg_idx < n_segs {
+            let segment = segments_array[bar_idx][seg_idx]
+            let bottom = cumulative_value
+            let top = cumulative_value + segment.value
+
+            result = draw_vertical_bar(result, vp, x_center, bar_width, top, bottom, segment.color)
+
+            cumulative_value = top
+            seg_idx = seg_idx + 1
+        }
+
+        bar_idx = bar_idx + 1
+    }
+
+    return result
+}
+
+// ============================================================================
+// Axes Drawing
+// ============================================================================
+
+fn draw_axes(canvas: Canvas, vp: &Viewport, color: i32) -> Canvas with Mut, Panic, Div {
+    var result = canvas
+
+    let origin_x = world_to_canvas_x(vp, 0.0)
+    let origin_y = world_to_canvas_y(vp, 0.0)
+
+    // Y axis
+    if origin_x >= vp.canvas_x && origin_x < vp.canvas_x + vp.canvas_width {
+        result = draw_vline(result, origin_x, vp.canvas_y, vp.canvas_y + vp.canvas_height - 1, color)
+    }
+
+    // X axis
+    if origin_y >= vp.canvas_y && origin_y < vp.canvas_y + vp.canvas_height {
+        result = draw_hline(result, vp.canvas_x, vp.canvas_x + vp.canvas_width - 1, origin_y, color)
+    }
+
+    return result
+}
+
+// ============================================================================
+// Viewport Creation
+// ============================================================================
+
+fn viewport_new(
+    x_min: f64,
+    x_max: f64,
+    y_min: f64,
+    y_max: f64,
+    canvas_x: i32,
+    canvas_y: i32,
+    canvas_width: i32,
+    canvas_height: i32
+) -> Viewport {
+    return Viewport {
+        x_min: x_min,
+        x_max: x_max,
+        y_min: y_min,
+        y_max: y_max,
+        canvas_x: canvas_x,
+        canvas_y: canvas_y,
+        canvas_width: canvas_width,
+        canvas_height: canvas_height
+    }
+}
+
+// ============================================================================
+// Test/Demo
+// ============================================================================
+
+fn cell_blank() -> Cell {
+    return Cell {
+        ch: 32,
+        fg_color: 7,
+        bg_color: 0,
+        bold: 0,
+        dim: 0
+    }
+}
+
+fn canvas_new(width: i32, height: i32) -> Canvas with Mut, Panic, Div {
+    var canvas = Canvas {
+        width: width,
+        height: height,
+        cells: [cell_blank(); 2400]
+    }
+
+    var i = 0
+    while i < width * height {
+        canvas.cells[i] = cell_blank()
+        i = i + 1
+    }
+
+    return canvas
+}
+
+fn COLOR_WHITE() -> i32 { return 7 }
+fn COLOR_BRIGHT_BLACK() -> i32 { return 8 }
+fn COLOR_RED() -> i32 { return 1 }
+fn COLOR_GREEN() -> i32 { return 2 }
+fn COLOR_BLUE() -> i32 { return 4 }
+fn COLOR_YELLOW() -> i32 { return 3 }
+fn COLOR_CYAN() -> i32 { return 6 }
+fn COLOR_MAGENTA() -> i32 { return 5 }
+
+fn main() -> i32 with IO, Mut, Panic, Div {
+    print("=== Sounio Bar Chart Demo ===\n\n")
+
+    // Create canvas
+    var canvas = canvas_new(70, 30)
+
+    // Test 1: Vertical bar chart
+    print("Drawing vertical bar chart...\n")
+    let vp1 = viewport_new(0.0, 6.0, 0.0, 10.0, 5, 2, 28, 12)
+
+    var values_v = [7.5, 4.2, 8.9, 3.1, 6.8, 0.0, 0.0, 0.0, 0.0, 0.0]
+    var colors_v = [COLOR_RED(), COLOR_GREEN(), COLOR_BLUE(), COLOR_YELLOW(), COLOR_CYAN(), 0, 0, 0, 0, 0]
+
+    canvas = draw_axes(canvas, &vp1, COLOR_WHITE())
+    canvas = bar_chart_vertical(canvas, &vp1, &values_v, &colors_v, 5, 0.5, 0.0)
+
+    // Test 2: Horizontal bar chart
+    print("Drawing horizontal bar chart...\n")
+    let vp2 = viewport_new(0.0, 10.0, 0.0, 5.0, 38, 2, 28, 12)
+
+    var values_h = [6.2, 8.5, 4.1, 7.9, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+    var colors_h = [COLOR_MAGENTA(), COLOR_CYAN(), COLOR_GREEN(), COLOR_YELLOW(), 0, 0, 0, 0, 0, 0]
+
+    canvas = draw_axes(canvas, &vp2, COLOR_WHITE())
+    canvas = bar_chart_horizontal(canvas, &vp2, &values_h, &colors_h, 4, 0.4, 0.0)
+
+    // Test 3: Vertical bars with error bars
+    print("Drawing bars with error bars...\n")
+    let vp3 = viewport_new(0.0, 4.0, 0.0, 12.0, 5, 16, 28, 12)
+
+    var bars_epistemic = [
+        bar_new(8.5, 1.2, COLOR_RED(), 65),
+        bar_new(6.3, 0.8, COLOR_GREEN(), 66),
+        bar_new(10.2, 1.5, COLOR_BLUE(), 67),
+        bar_new(0.0, 0.0, 0, 0),
+        bar_new(0.0, 0.0, 0, 0),
+        bar_new(0.0, 0.0, 0, 0),
+        bar_new(0.0, 0.0, 0, 0),
+        bar_new(0.0, 0.0, 0, 0),
+        bar_new(0.0, 0.0, 0, 0),
+        bar_new(0.0, 0.0, 0, 0)
+    ]
+
+    canvas = draw_axes(canvas, &vp3, COLOR_WHITE())
+    canvas = bar_chart_vertical_epistemic(canvas, &vp3, &bars_epistemic, 3, 0.5, 0.0)
+
+    // Test 4: Stacked bar chart (SIR model style)
+    print("Drawing stacked bar chart...\n")
+    let vp4 = viewport_new(0.0, 4.0, 0.0, 100.0, 38, 16, 28, 12)
+
+    var stack1 = [
+        bar_segment_new(60.0, COLOR_BLUE()),    // Susceptible
+        bar_segment_new(30.0, COLOR_RED()),     // Infectious
+        bar_segment_new(10.0, COLOR_GREEN()),   // Recovered
+        bar_segment_new(0.0, 0),
+        bar_segment_new(0.0, 0),
+        bar_segment_new(0.0, 0),
+        bar_segment_new(0.0, 0),
+        bar_segment_new(0.0, 0),
+        bar_segment_new(0.0, 0),
+        bar_segment_new(0.0, 0)
+    ]
+
+    var stack2 = [
+        bar_segment_new(40.0, COLOR_BLUE()),
+        bar_segment_new(35.0, COLOR_RED()),
+        bar_segment_new(25.0, COLOR_GREEN()),
+        bar_segment_new(0.0, 0),
+        bar_segment_new(0.0, 0),
+        bar_segment_new(0.0, 0),
+        bar_segment_new(0.0, 0),
+        bar_segment_new(0.0, 0),
+        bar_segment_new(0.0, 0),
+        bar_segment_new(0.0, 0)
+    ]
+
+    var stack3 = [
+        bar_segment_new(20.0, COLOR_BLUE()),
+        bar_segment_new(25.0, COLOR_RED()),
+        bar_segment_new(55.0, COLOR_GREEN()),
+        bar_segment_new(0.0, 0),
+        bar_segment_new(0.0, 0),
+        bar_segment_new(0.0, 0),
+        bar_segment_new(0.0, 0),
+        bar_segment_new(0.0, 0),
+        bar_segment_new(0.0, 0),
+        bar_segment_new(0.0, 0)
+    ]
+
+    var stacks = [stack1, stack2, stack3, stack1, stack1, stack1, stack1, stack1, stack1, stack1]
+    var n_segments = [3, 3, 3, 0, 0, 0, 0, 0, 0, 0]
+
+    canvas = draw_axes(canvas, &vp4, COLOR_WHITE())
+    canvas = bar_chart_stacked_vertical(canvas, &vp4, &stacks, &n_segments, 3, 0.6)
+
+    print("\n=== Bar chart rendering complete! ===\n")
+    print("Rendered:\n")
+    print("  - Vertical bars (top left)\n")
+    print("  - Horizontal bars (top right)\n")
+    print("  - Error bars (bottom left)\n")
+    print("  - Stacked bars (bottom right, SIR-style)\n")
+    print("(Canvas created but not rendered)\n")
+
+    return 0
+}

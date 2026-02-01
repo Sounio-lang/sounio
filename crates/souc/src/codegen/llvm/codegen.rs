@@ -428,7 +428,7 @@ impl<'ctx> LLVMCodegen<'ctx> {
 
                 let types: Vec<_> = vals.iter().map(|v| v.get_type()).collect();
                 let struct_ty = self.context.struct_type(&types, false);
-                let mut struct_val = struct_ty.get_undef();
+                let mut struct_val = struct_ty.const_zero();
 
                 for (i, val) in vals.iter().enumerate() {
                     struct_val = self
@@ -460,7 +460,7 @@ impl<'ctx> LLVMCodegen<'ctx> {
                     inkwell::types::BasicTypeEnum::StructType(t) => t.array_type(len),
                     inkwell::types::BasicTypeEnum::VectorType(t) => t.array_type(len),
                 };
-                let mut arr_val = arr_ty.get_undef();
+                let mut arr_val = arr_ty.const_zero();
 
                 for (i, val) in vals.iter().enumerate() {
                     arr_val = self
@@ -481,7 +481,7 @@ impl<'ctx> LLVMCodegen<'ctx> {
 
                 let types: Vec<_> = vals.iter().map(|v| v.get_type()).collect();
                 let struct_ty = self.context.struct_type(&types, false);
-                let mut struct_val = struct_ty.get_undef();
+                let mut struct_val = struct_ty.const_zero();
 
                 for (i, val) in vals.iter().enumerate() {
                     struct_val = self

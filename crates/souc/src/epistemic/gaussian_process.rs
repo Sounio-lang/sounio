@@ -639,10 +639,17 @@ mod tests {
     #[test]
     fn test_gp_interpolation() {
         // GP should interpolate between points
+        // Disable hyperparameter optimization for stability with only 2 points
         let x_train = vec![vec![0.0], vec![2.0]];
         let y_train = vec![0.0, 2.0];
 
-        let mut gp = GaussianProcess::new(GPConfig::default());
+        let config = GPConfig {
+            kernel: Kernel::rbf(1.5, 1.0),
+            noise_variance: 1e-6,
+            optimize_hyperparameters: false,
+            ..GPConfig::default()
+        };
+        let mut gp = GaussianProcess::new(config);
         gp.fit(&x_train, &y_train);
 
         // Predict at midpoint

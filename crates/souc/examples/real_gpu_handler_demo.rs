@@ -15,18 +15,22 @@
 //! cargo run --example real_gpu_handler_demo
 //! ```
 
-use souc::effects::handler_capability::{Continuation, HandlerCapability, HandlerState};
-use souc::effects::handlers::RealGpuHandler;
-use souc::interp::Value;
+use sounio::effects::handler_capability::{Continuation, HandlerCapability, HandlerState};
+use sounio::effects::handlers::RealGpuHandler;
+use sounio::interp::Value;
 use std::cell::RefCell;
 use std::rc::Rc;
+
+/// Create a fresh continuation for each handler call
+fn fresh_cont() -> Continuation {
+    Continuation::new()
+}
 
 fn main() {
     println!("=== Real GPU Handler Demo ===\n");
 
     let handler = RealGpuHandler::new();
     let mut state = HandlerState::new();
-    let cont = Continuation::new();
 
     println!("Handler: {}", handler.handler_name());
     println!("Effect: {}\n", handler.effect_name());
@@ -46,12 +50,12 @@ fn main() {
     // Example 1: Get device info
     println!("Example 1: Get Device Info");
     println!("----------------------------");
-    let result = handler.handle("get_device_info", &[], cont.clone(), &mut state);
+    let result = handler.handle("get_device_info", &[], fresh_cont(), &mut state);
     match result {
-        souc::effects::handler_capability::HandlerResult::Resume(value) => {
+        sounio::effects::handler_capability::HandlerResult::Resume(value) => {
             println!("Device info: {:?}", value);
         }
-        souc::effects::handler_capability::HandlerResult::Abort(err) => {
+        sounio::effects::handler_capability::HandlerResult::Abort(err) => {
             println!("Error: {}", err.message);
         }
         _ => println!("Unexpected result"),
@@ -76,14 +80,14 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
     let source = Value::String(wgsl_source.to_string());
     let entry = Value::String("main".to_string());
 
-    let result = handler.handle("compile_kernel", &[source, entry], cont.clone(), &mut state);
+    let result = handler.handle("compile_kernel", &[source, entry], fresh_cont(), &mut state);
 
     let kernel_id = match result {
-        souc::effects::handler_capability::HandlerResult::Resume(Value::Int(id)) => {
+        sounio::effects::handler_capability::HandlerResult::Resume(Value::Int(id)) => {
             println!("Shader compiled successfully! Kernel ID: {}", id);
             id
         }
-        souc::effects::handler_capability::HandlerResult::Abort(err) => {
+        sounio::effects::handler_capability::HandlerResult::Abort(err) => {
             println!("Compilation failed: {}", err.message);
             return;
         }
@@ -100,13 +104,13 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
 
     // Allocate input buffer (1024 * 4 bytes = 4 KB)
     let size = Value::Int(4096);
-    let result = handler.handle("allocate", &[size.clone()], cont.clone(), &mut state);
+    let result = handler.handle("allocate", &[size.clone()], fresh_cont(), &mut state);
     let input_buffer_id = match result {
-        souc::effects::handler_capability::HandlerResult::Resume(Value::Int(id)) => {
+        sounio::effects::handler_capability::HandlerResult::Resume(Value::Int(id)) => {
             println!("Input buffer allocated: ID = {}", id);
             id
         }
-        souc::effects::handler_capability::HandlerResult::Abort(err) => {
+        sounio::effects::handler_capability::HandlerResult::Abort(err) => {
             println!("Allocation failed: {}", err.message);
             return;
         }
@@ -117,9 +121,9 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
     };
 
     // Allocate output buffer
-    let result = handler.handle("allocate", &[size], cont.clone(), &mut state);
+    let result = handler.handle("allocate", &[size], fresh_cont(), &mut state);
     let output_buffer_id = match result {
-        souc::effects::handler_capability::HandlerResult::Resume(Value::Int(id)) => {
+        sounio::effects::handler_capability::HandlerResult::Resume(Value::Int(id)) => {
             println!("Output buffer allocated: ID = {}", id);
             id
         }
@@ -145,15 +149,15 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
     let result = handler.handle(
         "copy_to_device",
         &[input_array, Value::Int(input_buffer_id)],
-        cont.clone(),
+        fresh_cont(),
         &mut state,
     );
 
     match result {
-        souc::effects::handler_capability::HandlerResult::Resume(Value::Unit) => {
+        sounio::effects::handler_capability::HandlerResult::Resume(Value::Unit) => {
             println!("Data copied to device successfully!");
         }
-        souc::effects::handler_capability::HandlerResult::Abort(err) => {
+        sounio::effects::handler_capability::HandlerResult::Abort(err) => {
             println!("Copy to device failed: {}", err.message);
             return;
         }
@@ -176,18 +180,18 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
     let result = handler.handle(
         "launch",
         &[Value::Int(kernel_id), grid_dims, block_dims],
-        cont.clone(),
+        fresh_cont(),
         &mut state,
     );
 
     match result {
-        souc::effects::handler_capability::HandlerResult::Resume(Value::Unit) => {
+        sounio::effects::handler_capability::HandlerResult::Resume(Value::Unit) => {
             println!("Kernel launched successfully!");
             println!("  Grid dimensions: (4, 1, 1)");
             println!("  Workgroup size: (256, 1, 1)");
             println!("  Total threads: 1024");
         }
-        souc::effects::handler_capability::HandlerResult::Abort(err) => {
+        sounio::effects::handler_capability::HandlerResult::Abort(err) => {
             println!("Kernel launch failed: {}", err.message);
             return;
         }
@@ -202,12 +206,12 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
     println!("Example 6: Synchronize GPU");
     println!("--------------------------");
 
-    let result = handler.handle("sync", &[], cont.clone(), &mut state);
+    let result = handler.handle("sync", &[], fresh_cont(), &mut state);
     match result {
-        souc::effects::handler_capability::HandlerResult::Resume(Value::Unit) => {
+        sounio::effects::handler_capability::HandlerResult::Resume(Value::Unit) => {
             println!("GPU synchronized successfully!");
         }
-        souc::effects::handler_capability::HandlerResult::Abort(err) => {
+        sounio::effects::handler_capability::HandlerResult::Abort(err) => {
             println!("Sync failed: {}", err.message);
             return;
         }
@@ -225,19 +229,19 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
     let result = handler.handle(
         "copy_to_host",
         &[Value::Int(output_buffer_id), Value::Int(1024)],
-        cont.clone(),
+        fresh_cont(),
         &mut state,
     );
 
     match result {
-        souc::effects::handler_capability::HandlerResult::Resume(Value::Array(arr)) => {
+        sounio::effects::handler_capability::HandlerResult::Resume(Value::Array(arr)) => {
             let data = arr.borrow();
             println!("Copied {} elements from device", data.len());
             if !data.is_empty() {
                 println!("First 5 elements: {:?}", &data[..5.min(data.len())]);
             }
         }
-        souc::effects::handler_capability::HandlerResult::Abort(err) => {
+        sounio::effects::handler_capability::HandlerResult::Abort(err) => {
             println!("Copy to host failed: {}", err.message);
             return;
         }
@@ -255,11 +259,11 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
     let result = handler.handle(
         "free",
         &[Value::Int(input_buffer_id)],
-        cont.clone(),
+        fresh_cont(),
         &mut state,
     );
     match result {
-        souc::effects::handler_capability::HandlerResult::Resume(Value::Unit) => {
+        sounio::effects::handler_capability::HandlerResult::Resume(Value::Unit) => {
             println!("Input buffer freed");
         }
         _ => println!("Failed to free input buffer"),
@@ -268,11 +272,11 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
     let result = handler.handle(
         "free",
         &[Value::Int(output_buffer_id)],
-        cont.clone(),
+        fresh_cont(),
         &mut state,
     );
     match result {
-        souc::effects::handler_capability::HandlerResult::Resume(Value::Unit) => {
+        sounio::effects::handler_capability::HandlerResult::Resume(Value::Unit) => {
             println!("Output buffer freed");
         }
         _ => println!("Failed to free output buffer"),

@@ -1,0 +1,507 @@
+// 52_poincare.sio - Poincaré section visualization
+//
+// A Poincaré section reduces a continuous-time dynamical system to a discrete
+// map by recording where trajectories cross a chosen surface (section).
+// Essential for analyzing:
+// - Periodic orbits (appear as fixed points)
+// - Quasiperiodic motion (appears as curves)
+// - Chaos (appears as scattered points with structure)
+//
+// This module supports 3D systems with a z=const section plane.
+
+// ============================================================================
+// Poincaré Section Structure
+// ============================================================================
+
+struct PoincareSection {
+    // Section plane: z = section_z (crossing from below)
+    section_z: f64,
+    crossing_direction: i32,  // 1 = upward, -1 = downward, 0 = both
+
+    // View bounds (x, y coordinates on the section)
+    x_min: f64,
+    x_max: f64,
+    y_min: f64,
+    y_max: f64,
+
+    // Display grid
+    width: i32,
+    height: i32,
+
+    // Points storage (up to 2000 crossing points)
+    points_x: [f64; 2000],
+    points_y: [f64; 2000],
+    num_points: i32,
+
+    // Density grid for visualization
+    density: [i32; 4096],
+    max_density: i32,
+
+    // Integration parameters
+    dt: f64,
+    max_time: f64
+}
+
+// ============================================================================
+// State Vector for 3D Systems
+// ============================================================================
+
+struct State3D {
+    x: f64,
+    y: f64,
+    z: f64
+}
+
+fn state3d_new(x: f64, y: f64, z: f64) -> State3D {
+    return State3D { x: x, y: y, z: z }
+}
+
+// ============================================================================
+// Initialization
+// ============================================================================
+
+fn poincare_new(
+    section_z: f64,
+    x_min: f64, x_max: f64,
+    y_min: f64, y_max: f64,
+    width: i32, height: i32
+) -> PoincareSection {
+    return PoincareSection {
+        section_z: section_z,
+        crossing_direction: 1,  // Default: upward crossings
+        x_min: x_min,
+        x_max: x_max,
+        y_min: y_min,
+        y_max: y_max,
+        width: width,
+        height: height,
+        points_x: [0.0; 2000],
+        points_y: [0.0; 2000],
+        num_points: 0,
+        density: [0; 4096],
+        max_density: 1,
+        dt: 0.01,
+        max_time: 1000.0
+    }
+}
+
+fn poincare_set_integration(
+    section: &!PoincareSection,
+    dt: f64,
+    max_time: f64
+) with Mut {
+    section.dt = dt
+    section.max_time = max_time
+}
+
+fn poincare_set_direction(section: &!PoincareSection, direction: i32) with Mut {
+    section.crossing_direction = direction
+}
+
+fn poincare_clear(section: &!PoincareSection) with Mut {
+    section.num_points = 0
+    var i = 0
+    while i < 4096 {
+        section.density[i] = 0
+        i = i + 1
+    }
+    section.max_density = 1
+}
+
+// ============================================================================
+// Coordinate Mapping
+// ============================================================================
+
+fn x_to_grid(section: &PoincareSection, x: f64) -> i32 with Div, Panic {
+    let range = section.x_max - section.x_min
+    if range <= 0.0 { return 0 }
+    let t = (x - section.x_min) / range
+    return (t * ((section.width - 1) as f64)) as i32
+}
+
+fn y_to_grid(section: &PoincareSection, y: f64) -> i32 with Div, Panic {
+    let range = section.y_max - section.y_min
+    if range <= 0.0 { return 0 }
+    let t = (y - section.y_min) / range
+    return (t * ((section.height - 1) as f64)) as i32
+}
+
+// ============================================================================
+// Point Recording
+// ============================================================================
+
+fn record_crossing(
+    section: &!PoincareSection,
+    x: f64,
+    y: f64
+) with Mut, Div, Panic {
+    // Store point
+    if section.num_points < 2000 {
+        section.points_x[section.num_points] = x
+        section.points_y[section.num_points] = y
+        section.num_points = section.num_points + 1
+    }
+
+    // Update density grid
+    let gx = x_to_grid(section, x)
+    let gy = y_to_grid(section, y)
+
+    if gx >= 0 {
+        if gx < section.width {
+            if gy >= 0 {
+                if gy < section.height {
+                    let idx = gy * section.width + gx
+                    if idx < 4096 {
+                        section.density[idx] = section.density[idx] + 1
+                        if section.density[idx] > section.max_density {
+                            section.max_density = section.density[idx]
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+// ============================================================================
+// ODE Integration (RK4)
+// ============================================================================
+
+fn rk4_step(
+    state: State3D,
+    dt: f64,
+    deriv_fn: fn(State3D) -> State3D
+) -> State3D {
+    let k1 = deriv_fn(state)
+
+    let s2 = State3D {
+        x: state.x + k1.x * dt * 0.5,
+        y: state.y + k1.y * dt * 0.5,
+        z: state.z + k1.z * dt * 0.5
+    }
+    let k2 = deriv_fn(s2)
+
+    let s3 = State3D {
+        x: state.x + k2.x * dt * 0.5,
+        y: state.y + k2.y * dt * 0.5,
+        z: state.z + k2.z * dt * 0.5
+    }
+    let k3 = deriv_fn(s3)
+
+    let s4 = State3D {
+        x: state.x + k3.x * dt,
+        y: state.y + k3.y * dt,
+        z: state.z + k3.z * dt
+    }
+    let k4 = deriv_fn(s4)
+
+    return State3D {
+        x: state.x + (k1.x + 2.0 * k2.x + 2.0 * k3.x + k4.x) * dt / 6.0,
+        y: state.y + (k1.y + 2.0 * k2.y + 2.0 * k3.y + k4.y) * dt / 6.0,
+        z: state.z + (k1.z + 2.0 * k2.z + 2.0 * k3.z + k4.z) * dt / 6.0
+    }
+}
+
+// ============================================================================
+// Section Computation
+// ============================================================================
+
+fn poincare_compute(
+    section: &!PoincareSection,
+    initial: State3D,
+    deriv_fn: fn(State3D) -> State3D
+) with Mut, Div, Panic {
+    var state = initial
+    var prev_state = state
+    var t = 0.0
+    let dt = section.dt
+    let max_t = section.max_time
+
+    // Skip initial transient (first 10% of time)
+    let transient_time = max_t * 0.1
+    while t < transient_time {
+        prev_state = state
+        state = rk4_step(state, dt, deriv_fn)
+        t = t + dt
+    }
+
+    // Record crossings
+    while t < max_t {
+        prev_state = state
+        state = rk4_step(state, dt, deriv_fn)
+
+        // Check for crossing
+        let crossed = check_crossing(section, prev_state.z, state.z)
+
+        if crossed == 1 {
+            // Linear interpolation to find crossing point
+            let dz = state.z - prev_state.z
+            if dz != 0.0 {
+                let alpha = (section.section_z - prev_state.z) / dz
+                let cross_x = prev_state.x + alpha * (state.x - prev_state.x)
+                let cross_y = prev_state.y + alpha * (state.y - prev_state.y)
+                record_crossing(section, cross_x, cross_y)
+            }
+        }
+
+        t = t + dt
+    }
+}
+
+fn check_crossing(section: &PoincareSection, z_prev: f64, z_curr: f64) -> i32 {
+    let z_sec = section.section_z
+    let dir = section.crossing_direction
+
+    // Upward crossing
+    if dir >= 0 {
+        if z_prev < z_sec {
+            if z_curr >= z_sec {
+                return 1
+            }
+        }
+    }
+
+    // Downward crossing
+    if dir <= 0 {
+        if z_prev > z_sec {
+            if z_curr <= z_sec {
+                return 1
+            }
+        }
+    }
+
+    return 0
+}
+
+// ============================================================================
+// Example Systems
+// ============================================================================
+
+// Lorenz system: classic chaotic attractor
+// Parameters: sigma=10, rho=28, beta=8/3
+fn lorenz_deriv(s: State3D) -> State3D {
+    let sigma = 10.0
+    let rho = 28.0
+    let beta = 2.667
+
+    return State3D {
+        x: sigma * (s.y - s.x),
+        y: s.x * (rho - s.z) - s.y,
+        z: s.x * s.y - beta * s.z
+    }
+}
+
+// Rössler system: simpler chaotic attractor
+// Parameters: a=0.2, b=0.2, c=5.7
+fn rossler_deriv(s: State3D) -> State3D {
+    let a = 0.2
+    let b = 0.2
+    let c = 5.7
+
+    return State3D {
+        x: 0.0 - s.y - s.z,
+        y: s.x + a * s.y,
+        z: b + s.z * (s.x - c)
+    }
+}
+
+// Driven damped pendulum (in 3D: theta, omega, time)
+// theta' = omega
+// omega' = -gamma*omega - sin(theta) + A*cos(omega_d * t)
+fn driven_pendulum_deriv(s: State3D) -> State3D {
+    let gamma = 0.1    // Damping
+    let A = 1.5        // Driving amplitude
+    let omega_d = 0.67 // Driving frequency
+
+    let theta = s.x
+    let omega = s.y
+    let t = s.z
+
+    return State3D {
+        x: omega,
+        y: 0.0 - gamma * omega - sin_approx(theta) + A * cos_approx(omega_d * t),
+        z: 1.0  // dt/dt = 1
+    }
+}
+
+fn sin_approx(x: f64) -> f64 {
+    var xx = x
+    while xx > 3.14159 { xx = xx - 6.28318 }
+    while xx < -3.14159 { xx = xx + 6.28318 }
+    let x2 = xx * xx
+    let x3 = x2 * xx
+    let x5 = x3 * x2
+    return xx - x3 * 0.16667 + x5 * 0.00833
+}
+
+fn cos_approx(x: f64) -> f64 {
+    return sin_approx(x + 1.5708)
+}
+
+// ============================================================================
+// Rendering
+// ============================================================================
+
+fn density_to_char(d: i32, max_d: i32) -> i32 with Div, Panic {
+    if d == 0 { return 32 }
+    let ratio = (d * 5) / (max_d + 1)
+    if ratio == 0 { return 46 }      // '.'
+    else { if ratio == 1 { return 43 }  // '+'
+    else { if ratio == 2 { return 42 }  // '*'
+    else { if ratio == 3 { return 35 }  // '#'
+    else { return 64 }}}}}               // '@'
+}
+
+fn density_to_color(d: i32, max_d: i32) -> i32 with Div, Panic {
+    if d == 0 { return 30 }
+    let ratio = (d * 5) / (max_d + 1)
+    if ratio == 0 { return 34 }      // Blue
+    else { if ratio == 1 { return 36 }  // Cyan
+    else { if ratio == 2 { return 32 }  // Green
+    else { if ratio == 3 { return 33 }  // Yellow
+    else { return 31 }}}}}               // Red
+}
+
+fn poincare_render(section: &PoincareSection) with IO, Div, Panic {
+    print("\x1b[2J\x1b[H")
+
+    print("\x1b[1m=== Poincare Section ===\x1b[0m\n")
+    print("z = ")
+    print_f64(section.section_z)
+    print(", points: ")
+    print_i32(section.num_points)
+    print("\n\n")
+
+    // Y-axis label
+    print("  y\n")
+    print("  ^\n")
+
+    // Render from top to bottom
+    var y = section.height - 1
+    while y >= 0 {
+        print("  |")
+
+        var x = 0
+        while x < section.width {
+            let idx = y * section.width + x
+            var d = 0
+            if idx < 4096 {
+                d = section.density[idx]
+            }
+
+            let ch = density_to_char(d, section.max_density)
+            let color = density_to_color(d, section.max_density)
+
+            print("\x1b[")
+            print_i32(color)
+            print("m")
+            print_char_code(ch)
+            print("\x1b[0m")
+
+            x = x + 1
+        }
+
+        print("\n")
+        y = y - 1
+    }
+
+    // X-axis
+    print("  +")
+    var xi = 0
+    while xi < section.width {
+        print("-")
+        xi = xi + 1
+    }
+    print("> x\n\n")
+
+    // Bounds info
+    print("  x: [")
+    print_f64(section.x_min)
+    print(", ")
+    print_f64(section.x_max)
+    print("]  y: [")
+    print_f64(section.y_min)
+    print(", ")
+    print_f64(section.y_max)
+    print("]\n")
+}
+
+// ============================================================================
+// Helper Functions
+// ============================================================================
+
+fn print_char_code(code: i32) with IO {
+    if code == 32 { print(" ") }
+    else { if code == 35 { print("#") }
+    else { if code == 42 { print("*") }
+    else { if code == 43 { print("+") }
+    else { if code == 46 { print(".") }
+    else { if code == 64 { print("@") }
+    else { print("?") }
+    }}}}}
+}
+
+fn print_i32(x: i32) with IO, Div, Panic {
+    if x == 0 { print("0"); return }
+    if x < 0 { print("-"); print_i32_unsigned(0 - x) }
+    else { print_i32_unsigned(x) }
+}
+
+fn print_i32_unsigned(x: i32) with IO, Div, Panic {
+    if x == 0 { return }
+    let digit = x % 10
+    let rest = x / 10
+    if rest > 0 { print_i32_unsigned(rest) }
+    print_digit(digit)
+}
+
+fn print_digit(d: i32) with IO {
+    if d == 0 { print("0") }
+    else { if d == 1 { print("1") }
+    else { if d == 2 { print("2") }
+    else { if d == 3 { print("3") }
+    else { if d == 4 { print("4") }
+    else { if d == 5 { print("5") }
+    else { if d == 6 { print("6") }
+    else { if d == 7 { print("7") }
+    else { if d == 8 { print("8") }
+    else { if d == 9 { print("9") }
+    }}}}}}}}}}
+}
+
+fn print_f64(x: f64) with IO, Div, Panic {
+    if x < 0.0 { print("-"); let x = 0.0 - x }
+    let int_part = x as i32
+    print_i32(int_part)
+    print(".")
+    let frac = x - (int_part as f64)
+    let frac_scaled = (frac * 100.0) as i32
+    if frac_scaled < 10 { print("0") }
+    print_i32_unsigned(frac_scaled)
+}
+
+// ============================================================================
+// Main Demo
+// ============================================================================
+
+fn main() -> i32 with IO, Mut, Div, Panic {
+    print("Computing Poincare section for Lorenz system...\n")
+
+    // Create section at z = 27 (near the attractor's saddle point)
+    var section = poincare_new(27.0, -25.0, 25.0, -35.0, 35.0, 60, 30)
+    poincare_set_integration(&!section, 0.005, 2000.0)
+
+    // Initial condition on the attractor
+    let init = state3d_new(1.0, 1.0, 1.0)
+
+    // Compute the section
+    poincare_compute(&!section, init, lorenz_deriv)
+
+    // Render
+    poincare_render(&section)
+
+    print("\nLorenz attractor Poincare section\n")
+    print("Shows the fractal structure of the strange attractor\n")
+
+    return 0
+}

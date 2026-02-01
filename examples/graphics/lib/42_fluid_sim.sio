@@ -1,0 +1,573 @@
+// 42_fluid_sim.sio - Fluid dynamics simulation
+//
+// Provides 2D fluid simulation using Navier-Stokes equations:
+// - Incompressible fluid flow
+// - Velocity field (u, v)
+// - Density/dye visualization
+// - Vorticity confinement (optional)
+// - Semi-Lagrangian advection
+//
+// Based on Jos Stam's "Stable Fluids" (SIGGRAPH 1999)
+// Simplified for terminal visualization
+
+import "stdlib/math/core.sio"
+import "00_canvas.sio"
+import "01_colors.sio"
+import "15_heatmap.sio"
+
+// ============================================================================
+// Fluid Grid Structure
+// ============================================================================
+
+struct FluidGrid {
+    width: i32,
+    height: i32,
+
+    // Velocity field
+    u: [f64; 2500],      // X-velocity at each cell
+    v: [f64; 2500],      // Y-velocity at each cell
+    u_prev: [f64; 2500], // Previous X-velocity
+    v_prev: [f64; 2500], // Previous Y-velocity
+
+    // Density/dye field
+    density: [f64; 2500],
+    density_prev: [f64; 2500],
+
+    // Simulation parameters
+    diffusion: f64,      // Viscosity coefficient
+    viscosity: f64,      // Kinematic viscosity
+    dt: f64              // Time step
+}
+
+fn fluid_grid_new(width: i32, height: i32, diffusion: f64, viscosity: f64) -> FluidGrid {
+    return FluidGrid {
+        width: width,
+        height: height,
+        u: [0.0; 2500],
+        v: [0.0; 2500],
+        u_prev: [0.0; 2500],
+        v_prev: [0.0; 2500],
+        density: [0.0; 2500],
+        density_prev: [0.0; 2500],
+        diffusion: diffusion,
+        viscosity: viscosity,
+        dt: 0.016  // ~60 FPS
+    }
+}
+
+// ============================================================================
+// Grid Access Helpers
+// ============================================================================
+
+fn ix(x: i32, y: i32, width: i32) -> i32 with Panic {
+    return y * width + x
+}
+
+fn get_cell(grid: &[f64], x: i32, y: i32, width: i32, height: i32) -> f64 with Panic {
+    if x < 0 || x >= width || y < 0 || y >= height {
+        return 0.0
+    }
+    return grid[ix(x, y, width)]
+}
+
+fn set_cell(grid: &![f64], x: i32, y: i32, width: i32, height: i32, value: f64) with Mut, Panic {
+    if x >= 0 && x < width && y >= 0 && y < height {
+        grid[ix(x, y, width)] = value
+    }
+}
+
+// ============================================================================
+// Boundary Conditions
+// ============================================================================
+
+// Apply boundary conditions to scalar field
+fn set_bounds_scalar(field: &![f64], width: i32, height: i32) with Mut, Panic {
+    // Left and right edges
+    var y = 1
+    while y < height - 1 {
+        field[ix(0, y, width)] = field[ix(1, y, width)]
+        field[ix(width - 1, y, width)] = field[ix(width - 2, y, width)]
+        y = y + 1
+    }
+
+    // Top and bottom edges
+    var x = 1
+    while x < width - 1 {
+        field[ix(x, 0, width)] = field[ix(x, 1, width)]
+        field[ix(x, height - 1, width)] = field[ix(x, height - 2, width)]
+        x = x + 1
+    }
+
+    // Corners
+    field[ix(0, 0, width)] = (field[ix(1, 0, width)] + field[ix(0, 1, width)]) / 2.0
+    field[ix(width - 1, 0, width)] = (field[ix(width - 2, 0, width)] + field[ix(width - 1, 1, width)]) / 2.0
+    field[ix(0, height - 1, width)] = (field[ix(1, height - 1, width)] + field[ix(0, height - 2, width)]) / 2.0
+    field[ix(width - 1, height - 1, width)] = (field[ix(width - 2, height - 1, width)] + field[ix(width - 1, height - 2, width)]) / 2.0
+}
+
+// Apply boundary conditions to velocity field
+fn set_bounds_velocity(u: &![f64], v: &![f64], width: i32, height: i32) with Mut, Panic {
+    // U velocity (horizontal): reverse at left/right walls
+    var y = 1
+    while y < height - 1 {
+        u[ix(0, y, width)] = 0.0 - u[ix(1, y, width)]
+        u[ix(width - 1, y, width)] = 0.0 - u[ix(width - 2, y, width)]
+        y = y + 1
+    }
+
+    // V velocity (vertical): reverse at top/bottom walls
+    var x = 1
+    while x < width - 1 {
+        v[ix(x, 0, width)] = 0.0 - v[ix(x, 1, width)]
+        v[ix(x, height - 1, width)] = 0.0 - v[ix(x, height - 2, width)]
+        x = x + 1
+    }
+}
+
+// ============================================================================
+// Diffusion (Implicit Method)
+// ============================================================================
+
+// Gauss-Seidel relaxation for diffusion
+fn diffuse(
+    current: &![f64],
+    prev: &[f64],
+    diff_coeff: f64,
+    dt: f64,
+    width: i32,
+    height: i32,
+    iterations: i32
+) with Mut, Panic, Div {
+    let a = dt * diff_coeff * ((width - 2) * (height - 2)) as f64
+
+    var iter = 0
+    while iter < iterations {
+        var y = 1
+        while y < height - 1 {
+            var x = 1
+            while x < width - 1 {
+                let idx = ix(x, y, width)
+
+                let neighbors =
+                    current[ix(x - 1, y, width)] +
+                    current[ix(x + 1, y, width)] +
+                    current[ix(x, y - 1, width)] +
+                    current[ix(x, y + 1, width)]
+
+                current[idx] = (prev[idx] + a * neighbors) / (1.0 + 4.0 * a)
+
+                x = x + 1
+            }
+            y = y + 1
+        }
+
+        set_bounds_scalar(current, width, height)
+        iter = iter + 1
+    }
+}
+
+// ============================================================================
+// Advection (Semi-Lagrangian)
+// ============================================================================
+
+// Advect scalar field by velocity field
+fn advect(
+    current: &![f64],
+    prev: &[f64],
+    u: &[f64],
+    v: &[f64],
+    dt: f64,
+    width: i32,
+    height: i32
+) with Mut, Panic, Div {
+    let dt_x = dt * (width - 2) as f64
+    let dt_y = dt * (height - 2) as f64
+
+    var y = 1
+    while y < height - 1 {
+        var x = 1
+        while x < width - 1 {
+            let idx = ix(x, y, width)
+
+            // Backtrack position
+            let x_back = (x as f64) - dt_x * u[idx]
+            let y_back = (y as f64) - dt_y * v[idx]
+
+            // Clamp to grid bounds
+            let x_clamp = if x_back < 0.5 {
+                0.5
+            } else { if x_back > (width as f64) - 1.5 {
+                (width as f64) - 1.5
+            } else {
+                x_back
+            }}
+
+            let y_clamp = if y_back < 0.5 {
+                0.5
+            } else { if y_back > (height as f64) - 1.5 {
+                (height as f64) - 1.5
+            } else {
+                y_back
+            }}
+
+            // Bilinear interpolation
+            let i0 = x_clamp as i32
+            let i1 = i0 + 1
+            let j0 = y_clamp as i32
+            let j1 = j0 + 1
+
+            let s1 = x_clamp - (i0 as f64)
+            let s0 = 1.0 - s1
+            let t1 = y_clamp - (j0 as f64)
+            let t0 = 1.0 - t1
+
+            current[idx] =
+                s0 * (t0 * prev[ix(i0, j0, width)] + t1 * prev[ix(i0, j1, width)]) +
+                s1 * (t0 * prev[ix(i1, j0, width)] + t1 * prev[ix(i1, j1, width)])
+
+            x = x + 1
+        }
+        y = y + 1
+    }
+
+    set_bounds_scalar(current, width, height)
+}
+
+// ============================================================================
+// Projection (Incompressibility)
+// ============================================================================
+
+// Project velocity field to be divergence-free
+fn project(
+    u: &![f64],
+    v: &![f64],
+    p: &![f64],    // Pressure
+    div: &![f64],  // Divergence
+    width: i32,
+    height: i32,
+    iterations: i32
+) with Mut, Panic, Div {
+    // Compute divergence
+    var y = 1
+    while y < height - 1 {
+        var x = 1
+        while x < width - 1 {
+            let idx = ix(x, y, width)
+
+            div[idx] = -0.5 * (
+                u[ix(x + 1, y, width)] - u[ix(x - 1, y, width)] +
+                v[ix(x, y + 1, width)] - v[ix(x, y - 1, width)]
+            ) / (width as f64)
+
+            p[idx] = 0.0
+
+            x = x + 1
+        }
+        y = y + 1
+    }
+
+    set_bounds_scalar(div, width, height)
+    set_bounds_scalar(p, width, height)
+
+    // Solve for pressure (Gauss-Seidel)
+    var iter = 0
+    while iter < iterations {
+        y = 1
+        while y < height - 1 {
+            x = 1
+            while x < width - 1 {
+                let idx = ix(x, y, width)
+
+                p[idx] = (
+                    div[idx] +
+                    p[ix(x - 1, y, width)] +
+                    p[ix(x + 1, y, width)] +
+                    p[ix(x, y - 1, width)] +
+                    p[ix(x, y + 1, width)]
+                ) / 4.0
+
+                x = x + 1
+            }
+            y = y + 1
+        }
+
+        set_bounds_scalar(p, width, height)
+        iter = iter + 1
+    }
+
+    // Subtract pressure gradient from velocity
+    y = 1
+    while y < height - 1 {
+        x = 1
+        while x < width - 1 {
+            let idx = ix(x, y, width)
+
+            u[idx] = u[idx] - 0.5 * (width as f64) * (p[ix(x + 1, y, width)] - p[ix(x - 1, y, width)])
+            v[idx] = v[idx] - 0.5 * (height as f64) * (p[ix(x, y + 1, width)] - p[ix(x, y - 1, width)])
+
+            x = x + 1
+        }
+        y = y + 1
+    }
+
+    set_bounds_velocity(u, v, width, height)
+}
+
+// ============================================================================
+// Fluid Simulation Step
+// ============================================================================
+
+fn fluid_step(fluid: &!FluidGrid) with Mut, Panic, Div {
+    let width = fluid.width
+    let height = fluid.height
+    let dt = fluid.dt
+    let visc = fluid.viscosity
+    let diff = fluid.diffusion
+
+    // Temporary arrays for projection
+    var p: [f64; 2500] = [0.0; 2500]
+    var div: [f64; 2500] = [0.0; 2500]
+
+    // ========================================================================
+    // Velocity Step
+    // ========================================================================
+
+    // Diffusion (viscosity)
+    if visc > 0.0001 {
+        diffuse(&!fluid.u, &fluid.u_prev, visc, dt, width, height, 4)
+        diffuse(&!fluid.v, &fluid.v_prev, visc, dt, width, height, 4)
+    }
+
+    // Projection (incompressibility)
+    project(&!fluid.u, &!fluid.v, &!p, &!div, width, height, 4)
+
+    // Save for advection
+    fluid.u_prev = fluid.u
+    fluid.v_prev = fluid.v
+
+    // Advection (self-advection of velocity)
+    advect(&!fluid.u, &fluid.u_prev, &fluid.u_prev, &fluid.v_prev, dt, width, height)
+    advect(&!fluid.v, &fluid.v_prev, &fluid.u_prev, &fluid.v_prev, dt, width, height)
+
+    // Final projection
+    project(&!fluid.u, &!fluid.v, &!p, &!div, width, height, 4)
+
+    // ========================================================================
+    // Density Step
+    // ========================================================================
+
+    // Diffusion
+    if diff > 0.0001 {
+        diffuse(&!fluid.density, &fluid.density_prev, diff, dt, width, height, 4)
+        fluid.density_prev = fluid.density
+    }
+
+    // Advection
+    advect(&!fluid.density, &fluid.density_prev, &fluid.u, &fluid.v, dt, width, height)
+}
+
+// ============================================================================
+// User Interaction Helpers
+// ============================================================================
+
+// Add density at position
+fn add_density(fluid: &!FluidGrid, x: i32, y: i32, amount: f64) with Mut, Panic {
+    if x >= 0 && x < fluid.width && y >= 0 && y < fluid.height {
+        let idx = ix(x, y, fluid.width)
+        fluid.density[idx] = fluid.density[idx] + amount
+    }
+}
+
+// Add velocity at position
+fn add_velocity(fluid: &!FluidGrid, x: i32, y: i32, vx: f64, vy: f64) with Mut, Panic {
+    if x >= 0 && x < fluid.width && y >= 0 && y < fluid.height {
+        let idx = ix(x, y, fluid.width)
+        fluid.u[idx] = fluid.u[idx] + vx
+        fluid.v[idx] = fluid.v[idx] + vy
+    }
+}
+
+// Clear density field
+fn clear_density(fluid: &!FluidGrid) with Mut {
+    fluid.density = [0.0; 2500]
+}
+
+// Fade density over time
+fn fade_density(fluid: &!FluidGrid, fade_rate: f64) with Mut, Panic {
+    var i = 0
+    while i < fluid.width * fluid.height {
+        fluid.density[i] = fluid.density[i] * fade_rate
+        i = i + 1
+    }
+}
+
+// ============================================================================
+// Rendering
+// ============================================================================
+
+// Render fluid density as heatmap
+fn fluid_render(
+    canvas: Canvas,
+    fluid: &FluidGrid,
+    vp: &Viewport,
+    colormap: i32
+) -> Canvas with Mut, Panic, Div {
+    // Find max density for normalization
+    var max_density = 0.0
+    var i = 0
+    while i < fluid.width * fluid.height {
+        if fluid.density[i] > max_density {
+            max_density = fluid.density[i]
+        }
+        i = i + 1
+    }
+
+    // Render using heatmap
+    return heatmap(
+        canvas,
+        vp,
+        &fluid.density,
+        fluid.width,
+        fluid.height,
+        0.0,
+        max_density,
+        colormap
+    )
+}
+
+// ============================================================================
+// Example/Test Function
+// ============================================================================
+
+fn main() -> i32 with IO, Mut, Panic, Div {
+    print("\x1b[2J\x1b[H")  // Clear screen
+    print("=== Fluid Simulation Test ===\n\n")
+
+    // Create fluid grid
+    var fluid = fluid_grid_new(30, 30, 0.0, 0.0001)
+
+    print("Fluid grid created:\n")
+    print("  Size: ")
+    print_i32(fluid.width)
+    print(" x ")
+    print_i32(fluid.height)
+    print("\n")
+    print("  Viscosity: ")
+    print_f64(fluid.viscosity)
+    print("\n")
+    print("  Diffusion: ")
+    print_f64(fluid.diffusion)
+    print("\n\n")
+
+    // Add some initial density and velocity
+    add_density(&!fluid, 15, 15, 100.0)
+    add_velocity(&!fluid, 15, 15, 5.0, 3.0)
+
+    print("Initial conditions:\n")
+    print("  Density at (15, 15): ")
+    print_f64(fluid.density[ix(15, 15, fluid.width)])
+    print("\n")
+    print("  Velocity at (15, 15): (")
+    print_f64(fluid.u[ix(15, 15, fluid.width)])
+    print(", ")
+    print_f64(fluid.v[ix(15, 15, fluid.width)])
+    print(")\n\n")
+
+    // Simulate a few steps
+    print("Simulation steps:\n")
+
+    var step = 0
+    while step < 5 {
+        fluid_step(&!fluid)
+
+        print("  Step ")
+        print_i32(step)
+        print(": density at (15, 15) = ")
+        print_f64(fluid.density[ix(15, 15, fluid.width)])
+        print("\n")
+
+        step = step + 1
+    }
+
+    print("\n=== Fluid Simulation Ready ===\n")
+    print("Methods:\n")
+    print("  • add_density(x, y, amount) - Add dye\n")
+    print("  • add_velocity(x, y, vx, vy) - Add force\n")
+    print("  • fluid_step() - Advance simulation\n")
+    print("  • fluid_render() - Visualize density field\n")
+
+    return 0
+}
+
+// ============================================================================
+// Helper Functions
+// ============================================================================
+
+fn print_f64(x: f64) with IO, Div, Panic {
+    if x < 0.0 {
+        print("-")
+        print_f64_unsigned(0.0 - x)
+    } else {
+        print_f64_unsigned(x)
+    }
+}
+
+fn print_f64_unsigned(x: f64) with IO, Div, Panic {
+    let int_part = x as i32
+    print_i32(int_part)
+    print(".")
+
+    let frac = x - (int_part as f64)
+    let scaled = (frac * 1000.0) as i32
+    if scaled < 10 {
+        print("00")
+    } else { if scaled < 100 {
+        print("0")
+    }}
+    print_i32(scaled)
+}
+
+fn print_i32(x: i32) with IO, Div, Panic {
+    if x == 0 {
+        print("0")
+        return
+    }
+
+    if x < 0 {
+        print("-")
+        print_i32_unsigned(0 - x)
+    } else {
+        print_i32_unsigned(x)
+    }
+}
+
+fn print_i32_unsigned(x: i32) with IO, Div, Panic {
+    if x == 0 {
+        return
+    }
+
+    let digit = x % 10
+    let rest = x / 10
+
+    if rest > 0 {
+        print_i32_unsigned(rest)
+    }
+
+    let ch = 48 + digit
+    print_char(ch)
+}
+
+fn print_char(code: i32) with IO {
+    if code == 48 { print("0") }
+    else { if code == 49 { print("1") }
+    else { if code == 50 { print("2") }
+    else { if code == 51 { print("3") }
+    else { if code == 52 { print("4") }
+    else { if code == 53 { print("5") }
+    else { if code == 54 { print("6") }
+    else { if code == 55 { print("7") }
+    else { if code == 56 { print("8") }
+    else { if code == 57 { print("9") }
+    else { print("?") }
+    }}}}}}}}}}
+}

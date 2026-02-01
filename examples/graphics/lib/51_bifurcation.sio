@@ -1,0 +1,460 @@
+// 51_bifurcation.sio - Bifurcation diagram visualization
+//
+// Bifurcation diagrams show how the long-term behavior of a dynamical system
+// changes as a control parameter is varied. Key for understanding:
+// - Period-doubling cascades
+// - Routes to chaos
+// - Stability analysis
+// - Attractors and their basins
+//
+// Classic example: Logistic map x_{n+1} = r * x_n * (1 - x_n)
+
+// ============================================================================
+// Bifurcation Diagram Structure
+// ============================================================================
+
+struct BifurcationDiagram {
+    // Parameter range (horizontal axis)
+    param_min: f64,
+    param_max: f64,
+
+    // State variable range (vertical axis)
+    state_min: f64,
+    state_max: f64,
+
+    // Grid dimensions
+    width: i32,
+    height: i32,
+
+    // Density field (counts hits per pixel)
+    // Higher values = more frequently visited states
+    density: [i32; 8192],  // Up to 128x64
+
+    // Iteration parameters
+    transient_iters: i32,   // Iterations to skip (reach attractor)
+    sample_iters: i32,      // Iterations to plot
+
+    // Maximum density for normalization
+    max_density: i32
+}
+
+// ============================================================================
+// Initialization
+// ============================================================================
+
+fn bifurcation_new(
+    param_min: f64, param_max: f64,
+    state_min: f64, state_max: f64,
+    width: i32, height: i32
+) -> BifurcationDiagram {
+    return BifurcationDiagram {
+        param_min: param_min,
+        param_max: param_max,
+        state_min: state_min,
+        state_max: state_max,
+        width: width,
+        height: height,
+        density: [0; 8192],
+        transient_iters: 200,
+        sample_iters: 100,
+        max_density: 1
+    }
+}
+
+fn bifurcation_set_iterations(
+    diagram: &!BifurcationDiagram,
+    transient: i32,
+    sample: i32
+) with Mut {
+    diagram.transient_iters = transient
+    diagram.sample_iters = sample
+}
+
+// ============================================================================
+// Density Field Operations
+// ============================================================================
+
+fn density_index(diagram: &BifurcationDiagram, x: i32, y: i32) -> i32 {
+    return y * diagram.width + x
+}
+
+fn density_get(diagram: &BifurcationDiagram, x: i32, y: i32) -> i32 {
+    if x >= 0 {
+        if x < diagram.width {
+            if y >= 0 {
+                if y < diagram.height {
+                    let idx = density_index(diagram, x, y)
+                    if idx < 8192 {
+                        return diagram.density[idx]
+                    }
+                }
+            }
+        }
+    }
+    return 0
+}
+
+fn density_increment(diagram: &!BifurcationDiagram, x: i32, y: i32) with Mut {
+    if x >= 0 {
+        if x < diagram.width {
+            if y >= 0 {
+                if y < diagram.height {
+                    let idx = density_index(diagram, x, y)
+                    if idx < 8192 {
+                        diagram.density[idx] = diagram.density[idx] + 1
+                        if diagram.density[idx] > diagram.max_density {
+                            diagram.max_density = diagram.density[idx]
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+fn density_clear(diagram: &!BifurcationDiagram) with Mut {
+    var i = 0
+    while i < 8192 {
+        diagram.density[i] = 0
+        i = i + 1
+    }
+    diagram.max_density = 1
+}
+
+// ============================================================================
+// Coordinate Conversion
+// ============================================================================
+
+fn param_to_grid(diagram: &BifurcationDiagram, param: f64) -> i32 with Div, Panic {
+    let range = diagram.param_max - diagram.param_min
+    if range <= 0.0 {
+        return 0
+    }
+    let t = (param - diagram.param_min) / range
+    let x = (t * ((diagram.width - 1) as f64)) as i32
+    return x
+}
+
+fn state_to_grid(diagram: &BifurcationDiagram, state: f64) -> i32 with Div, Panic {
+    let range = diagram.state_max - diagram.state_min
+    if range <= 0.0 {
+        return 0
+    }
+    let t = (state - diagram.state_min) / range
+    let y = (t * ((diagram.height - 1) as f64)) as i32
+    return y
+}
+
+fn grid_to_param(diagram: &BifurcationDiagram, x: i32) -> f64 with Div, Panic {
+    let t = (x as f64) / ((diagram.width - 1) as f64)
+    return diagram.param_min + t * (diagram.param_max - diagram.param_min)
+}
+
+// ============================================================================
+// Map Functions
+// ============================================================================
+
+// Logistic map: x_{n+1} = r * x_n * (1 - x_n)
+fn logistic_map(x: f64, r: f64) -> f64 {
+    return r * x * (1.0 - x)
+}
+
+// Sine map: x_{n+1} = r * sin(pi * x)
+fn sine_map(x: f64, r: f64) -> f64 {
+    // Approximate sin(pi * x) using Taylor series
+    let pi_x = 3.14159265 * x
+    return r * sin_approx(pi_x)
+}
+
+// Tent map: x_{n+1} = r * min(x, 1-x)
+fn tent_map(x: f64, r: f64) -> f64 {
+    if x < 0.5 {
+        return r * x * 2.0
+    } else {
+        return r * (1.0 - x) * 2.0
+    }
+}
+
+// Cubic map: x_{n+1} = r * x - x^3
+fn cubic_map(x: f64, r: f64) -> f64 {
+    return r * x - x * x * x
+}
+
+// Helper: sin approximation
+fn sin_approx(x: f64) -> f64 {
+    // Reduce to [0, 2*pi]
+    var xx = x
+    while xx > 6.28318 {
+        xx = xx - 6.28318
+    }
+    while xx < 0.0 {
+        xx = xx + 6.28318
+    }
+
+    // Taylor series around 0
+    let x2 = xx * xx
+    let x3 = x2 * xx
+    let x5 = x3 * x2
+    let x7 = x5 * x2
+
+    return xx - x3 * 0.16667 + x5 * 0.00833 - x7 * 0.0001984
+}
+
+// ============================================================================
+// Bifurcation Computation
+// ============================================================================
+
+// Compute bifurcation diagram for a generic 1D map
+fn bifurcation_compute(
+    diagram: &!BifurcationDiagram,
+    map_fn: fn(f64, f64) -> f64,
+    initial_state: f64
+) with Mut, Div, Panic {
+    density_clear(diagram)
+
+    // For each parameter value (column)
+    var px = 0
+    while px < diagram.width {
+        let param = grid_to_param(diagram, px)
+
+        // Start from initial condition
+        var state = initial_state
+
+        // Skip transient
+        var t = 0
+        while t < diagram.transient_iters {
+            state = map_fn(state, param)
+
+            // Bound check
+            if state < -1000.0 {
+                state = 0.5
+            }
+            if state > 1000.0 {
+                state = 0.5
+            }
+
+            t = t + 1
+        }
+
+        // Sample the attractor
+        var s = 0
+        while s < diagram.sample_iters {
+            state = map_fn(state, param)
+
+            // Bound check
+            if state < -1000.0 {
+                state = 0.5
+            }
+            if state > 1000.0 {
+                state = 0.5
+            }
+
+            // Map to grid and increment
+            let gy = state_to_grid(diagram, state)
+            density_increment(diagram, px, gy)
+
+            s = s + 1
+        }
+
+        px = px + 1
+    }
+}
+
+// Convenience function for logistic map
+fn bifurcation_compute_logistic(diagram: &!BifurcationDiagram) with Mut, Div, Panic {
+    bifurcation_compute(diagram, logistic_map, 0.5)
+}
+
+// ============================================================================
+// Rendering
+// ============================================================================
+
+fn density_to_char(density: i32, max_density: i32) -> i32 with Div, Panic {
+    if density == 0 {
+        return 32  // Space
+    }
+
+    // Normalize to 0-7 scale
+    let ratio = (density * 8) / (max_density + 1)
+
+    if ratio == 0 { return 46 }       // '.'
+    else { if ratio == 1 { return 58 }  // ':'
+    else { if ratio == 2 { return 43 }  // '+'
+    else { if ratio == 3 { return 42 }  // '*'
+    else { if ratio == 4 { return 35 }  // '#'
+    else { if ratio == 5 { return 37 }  // '%'
+    else { if ratio == 6 { return 64 }  // '@'
+    else { return 64 }  // '@'
+    }}}}}}}
+}
+
+fn density_to_color(density: i32, max_density: i32) -> i32 with Div, Panic {
+    if density == 0 {
+        return 30  // Black
+    }
+
+    let ratio = (density * 6) / (max_density + 1)
+
+    if ratio == 0 { return 34 }       // Blue
+    else { if ratio == 1 { return 36 }  // Cyan
+    else { if ratio == 2 { return 32 }  // Green
+    else { if ratio == 3 { return 33 }  // Yellow
+    else { if ratio == 4 { return 31 }  // Red
+    else { return 35 }  // Magenta
+    }}}}}
+}
+
+fn bifurcation_render(diagram: &BifurcationDiagram) with IO, Div, Panic {
+    print("\x1b[2J\x1b[H")
+
+    print("\x1b[1m=== Bifurcation Diagram ===\x1b[0m\n\n")
+
+    // State axis label
+    print("  x\n")
+    print("  ^\n")
+
+    // Render from top to bottom
+    var y = diagram.height - 1
+    while y >= 0 {
+        print("  |")
+
+        var x = 0
+        while x < diagram.width {
+            let d = density_get(diagram, x, y)
+            let ch = density_to_char(d, diagram.max_density)
+            let color = density_to_color(d, diagram.max_density)
+
+            print("\x1b[")
+            print_i32(color)
+            print("m")
+            print_char_code(ch)
+            print("\x1b[0m")
+
+            x = x + 1
+        }
+
+        print("\n")
+        y = y - 1
+    }
+
+    // X-axis
+    print("  +")
+    var xi = 0
+    while xi < diagram.width {
+        print("-")
+        xi = xi + 1
+    }
+    print("> r\n\n")
+
+    // Parameter range
+    print("  r: ")
+    print_f64(diagram.param_min)
+    print(" to ")
+    print_f64(diagram.param_max)
+    print("\n")
+
+    // State range
+    print("  x: ")
+    print_f64(diagram.state_min)
+    print(" to ")
+    print_f64(diagram.state_max)
+    print("\n")
+}
+
+// ============================================================================
+// Helper Functions
+// ============================================================================
+
+fn print_char_code(code: i32) with IO {
+    if code == 32 { print(" ") }
+    else { if code == 35 { print("#") }
+    else { if code == 37 { print("%") }
+    else { if code == 42 { print("*") }
+    else { if code == 43 { print("+") }
+    else { if code == 46 { print(".") }
+    else { if code == 58 { print(":") }
+    else { if code == 64 { print("@") }
+    else { print("?") }
+    }}}}}}}}
+}
+
+fn print_i32(x: i32) with IO, Div, Panic {
+    if x == 0 {
+        print("0")
+        return
+    }
+    if x < 0 {
+        print("-")
+        print_i32_unsigned(0 - x)
+    } else {
+        print_i32_unsigned(x)
+    }
+}
+
+fn print_i32_unsigned(x: i32) with IO, Div, Panic {
+    if x == 0 { return }
+    let digit = x % 10
+    let rest = x / 10
+    if rest > 0 {
+        print_i32_unsigned(rest)
+    }
+    print_digit(digit)
+}
+
+fn print_digit(d: i32) with IO {
+    if d == 0 { print("0") }
+    else { if d == 1 { print("1") }
+    else { if d == 2 { print("2") }
+    else { if d == 3 { print("3") }
+    else { if d == 4 { print("4") }
+    else { if d == 5 { print("5") }
+    else { if d == 6 { print("6") }
+    else { if d == 7 { print("7") }
+    else { if d == 8 { print("8") }
+    else { if d == 9 { print("9") }
+    }}}}}}}}}}
+}
+
+fn print_f64(x: f64) with IO, Div, Panic {
+    if x < 0.0 {
+        print("-")
+        let x = 0.0 - x
+    }
+
+    let int_part = x as i32
+    print_i32(int_part)
+    print(".")
+
+    let frac = x - (int_part as f64)
+    let frac_scaled = (frac * 100.0) as i32
+    if frac_scaled < 10 {
+        print("0")
+    }
+    print_i32_unsigned(frac_scaled)
+}
+
+// ============================================================================
+// Main Demo
+// ============================================================================
+
+fn main() -> i32 with IO, Mut, Div, Panic {
+    // Create bifurcation diagram for logistic map
+    // r ranges from 2.5 to 4.0 (period-doubling region)
+    // x ranges from 0 to 1
+    var diagram = bifurcation_new(2.5, 4.0, 0.0, 1.0, 80, 30)
+
+    // Set iteration parameters
+    bifurcation_set_iterations(&!diagram, 500, 200)
+
+    // Compute the diagram
+    print("Computing bifurcation diagram...\n")
+    bifurcation_compute_logistic(&!diagram)
+
+    // Render
+    bifurcation_render(&diagram)
+
+    print("\nLogistic map: x_{n+1} = r * x_n * (1 - x_n)\n")
+    print("Shows period-doubling route to chaos as r increases\n")
+
+    return 0
+}

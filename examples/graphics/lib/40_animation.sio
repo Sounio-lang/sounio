@@ -1,0 +1,337 @@
+// 40_animation.sio - Animation framework with double buffering
+//
+// Provides terminal animation capabilities:
+// - Frame management and timing
+// - Double buffering (in-place updates)
+// - FPS control (limited by terminal I/O speed)
+// - Animation state tracking
+//
+// NOTE: Sleep/delay functionality requires FFI to platform timing.
+// Current implementation relies on terminal I/O as the bottleneck.
+
+// No imports needed - standalone module
+
+// ============================================================================
+// Animation State
+// ============================================================================
+
+struct AnimationState {
+    frame: i32,           // Current frame number
+    max_frames: i32,      // Total frames (0 = infinite loop)
+    frame_delay_ms: i32,  // Target delay between frames
+    running: i32,         // 1 if running, 0 if stopped
+    loop_mode: i32,       // 0=once, 1=loop, 2=bounce
+    fps_target: i32,      // Target frames per second
+    elapsed_frames: i32   // Total frames elapsed (for statistics)
+}
+
+fn animation_state_new(max_frames: i32, fps: i32) -> AnimationState with Panic, Div {
+    let frame_delay = if fps > 0 {
+        1000 / fps
+    } else {
+        33  // Default ~30 FPS
+    }
+
+    return AnimationState {
+        frame: 0,
+        max_frames: max_frames,
+        frame_delay_ms: frame_delay,
+        running: 1,
+        loop_mode: 0,
+        fps_target: fps,
+        elapsed_frames: 0
+    }
+}
+
+fn animation_state_infinite(fps: i32) -> AnimationState with Panic, Div {
+    return animation_state_new(0, fps)
+}
+
+fn animation_state_looping(max_frames: i32, fps: i32) -> AnimationState with Panic, Div, Mut {
+    var state = animation_state_new(max_frames, fps)
+    state.loop_mode = 1
+    return state
+}
+
+// ============================================================================
+// Animation Control
+// ============================================================================
+
+// Initialize animation (clear screen, hide cursor)
+fn animation_init() with IO {
+    print("\x1b[2J")      // Clear screen
+    print("\x1b[H")       // Home cursor
+    print("\x1b[?25l")    // Hide cursor
+}
+
+// Cleanup animation (show cursor, reset colors)
+fn animation_cleanup() with IO {
+    print("\x1b[?25h")    // Show cursor
+    print("\x1b[0m")      // Reset colors
+    print("\n")
+}
+
+// Begin a new frame (clear and home cursor)
+fn animation_begin_frame() with IO {
+    print("\x1b[H")       // Home cursor (don't clear to avoid flicker)
+}
+
+// End frame and update state
+fn animation_end_frame(state: &!AnimationState) with Mut {
+    state.frame = state.frame + 1
+    state.elapsed_frames = state.elapsed_frames + 1
+
+    // Check if animation should stop
+    if state.max_frames > 0 {
+        if state.frame >= state.max_frames {
+            if state.loop_mode == 0 {
+                // Stop after max frames
+                state.running = 0
+            } else { if state.loop_mode == 1 {
+                // Loop mode: restart
+                state.frame = 0
+            } else {
+                // Bounce mode: reverse (not implemented yet)
+                state.running = 0
+            }}
+        }
+    }
+
+    // TODO: Sleep for frame_delay_ms
+    // This requires FFI to platform sleep function
+    // For now, terminal I/O provides natural throttling
+}
+
+// Check if animation should continue
+fn animation_should_continue(state: &AnimationState) -> i32 {
+    return state.running
+}
+
+// Stop animation
+fn animation_stop(state: &!AnimationState) with Mut {
+    state.running = 0
+}
+
+// Restart animation
+fn animation_restart(state: &!AnimationState) with Mut {
+    state.frame = 0
+    state.running = 1
+}
+
+// ============================================================================
+// Frame Utilities
+// ============================================================================
+
+// Get normalized time (0.0 to 1.0) within animation
+fn animation_get_t(state: &AnimationState) -> f64 with Div, Panic {
+    if state.max_frames <= 0 {
+        return 0.0
+    }
+
+    return (state.frame as f64) / (state.max_frames as f64)
+}
+
+// Get frame progress percentage (0-100)
+fn animation_get_progress(state: &AnimationState) -> i32 with Div, Panic {
+    if state.max_frames <= 0 {
+        return 0
+    }
+
+    return (state.frame * 100) / state.max_frames
+}
+
+// Oscillate between 0.0 and 1.0 (smooth back-and-forth)
+fn animation_oscillate(state: &AnimationState) -> f64 with Div, Panic {
+    let t = animation_get_t(state)
+    // sin((t * 2π)) maps to [-1, 1], we want [0, 1]
+    // So use: (1 + sin(2π * t - π/2)) / 2
+    // Simplified: (1 - cos(2π * t)) / 2
+
+    // For now, use triangle wave approximation
+    if t < 0.5 {
+        return t * 2.0
+    } else {
+        return 2.0 - t * 2.0
+    }
+}
+
+// ============================================================================
+// Animation Loop Pattern
+// ============================================================================
+//
+// NOTE: Animation loops that use Canvas are implemented in demo files
+// where Canvas is available. This module provides only the core state
+// management, timing, and easing functions.
+
+// ============================================================================
+// Easing Functions (for smooth animations)
+// ============================================================================
+
+// Linear interpolation: out = a + t * (b - a)
+// Note: A lerp function may exist in math stdlib, but we define our own for standalone use
+fn anim_lerp(a: f64, b: f64, t: f64) -> f64 {
+    return a + t * (b - a)
+}
+
+// Ease in (quadratic): starts slow, accelerates
+fn ease_in(t: f64) -> f64 {
+    return t * t
+}
+
+// Ease out (quadratic): starts fast, decelerates
+fn ease_out(t: f64) -> f64 {
+    return t * (2.0 - t)
+}
+
+// Ease in-out (quadratic): slow start and end, fast middle
+fn ease_in_out(t: f64) -> f64 {
+    if t < 0.5 {
+        return 2.0 * t * t
+    } else {
+        let s = t - 0.5
+        return 0.5 + 2.0 * s * (1.0 - s)
+    }
+}
+
+// Bounce easing (simulates elastic bounce)
+fn ease_bounce(t: f64) -> f64 {
+    if t < 0.5 {
+        return 8.0 * t * t * t * t
+    } else {
+        let s = t - 1.0
+        return 1.0 - 8.0 * s * s * s * s
+    }
+}
+
+// ============================================================================
+// Helper Functions
+// ============================================================================
+
+fn print_i32(x: i32) with IO, Div, Panic {
+    if x == 0 {
+        print("0")
+        return
+    }
+
+    if x < 0 {
+        print("-")
+        print_i32_unsigned(0 - x)
+    } else {
+        print_i32_unsigned(x)
+    }
+}
+
+fn print_i32_unsigned(x: i32) with IO, Div, Panic {
+    if x == 0 {
+        return
+    }
+
+    let digit = x % 10
+    let rest = x / 10
+
+    if rest > 0 {
+        print_i32_unsigned(rest)
+    }
+
+    let ch = 48 + digit
+    print_char(ch)
+}
+
+fn print_char(code: i32) with IO {
+    if code == 48 { print("0") }
+    else { if code == 49 { print("1") }
+    else { if code == 50 { print("2") }
+    else { if code == 51 { print("3") }
+    else { if code == 52 { print("4") }
+    else { if code == 53 { print("5") }
+    else { if code == 54 { print("6") }
+    else { if code == 55 { print("7") }
+    else { if code == 56 { print("8") }
+    else { if code == 57 { print("9") }
+    else { print("?") }
+    }}}}}}}}}
+}
+
+// ============================================================================
+// Example/Test Function
+// ============================================================================
+
+fn main() -> i32 with IO, Mut, Panic, Div {
+    print("\x1b[2J\x1b[H")  // Clear screen
+    print("=== Animation Framework Test ===\n\n")
+
+    // Create animation state
+    var state = animation_state_new(10, 30)
+
+    print("Animation state created:\n")
+    print("  Max frames: ")
+    print_i32(state.max_frames)
+    print("\n")
+    print("  FPS target: ")
+    print_i32(state.fps_target)
+    print("\n")
+    print("  Frame delay: ")
+    print_i32(state.frame_delay_ms)
+    print("ms\n\n")
+
+    print("Frame progression test:\n")
+
+    var i = 0
+    while i < 12 {
+        print("  Frame ")
+        print_i32(state.frame)
+        print(": t=")
+
+        let t = animation_get_t(&state)
+        let t_int = (t * 100.0) as i32
+        print_i32(t_int / 100)
+        print(".")
+        let frac = t_int % 100
+        if frac < 10 {
+            print("0")
+        }
+        print_i32(frac)
+
+        print(", progress=")
+        print_i32(animation_get_progress(&state))
+        print("%, running=")
+        print_i32(state.running)
+        print("\n")
+
+        animation_end_frame(&!state)
+        i = i + 1
+    }
+
+    print("\nEasing functions test (t=0.0 to 1.0):\n")
+
+    var j = 0
+    while j <= 10 {
+        let t = (j as f64) / 10.0
+
+        print("  t=")
+        let t_int = (t * 10.0) as i32
+        print_i32(t_int / 10)
+        print(".")
+        print_i32(t_int % 10)
+
+        print(": ease_in=")
+        let ei = (ease_in(t) * 100.0) as i32
+        print_i32(ei)
+
+        print(", ease_out=")
+        let eo = (ease_out(t) * 100.0) as i32
+        print_i32(eo)
+
+        print(", ease_in_out=")
+        let eio = (ease_in_out(t) * 100.0) as i32
+        print_i32(eio)
+        print("\n")
+
+        j = j + 1
+    }
+
+    print("\n=== Animation Framework Ready ===\n")
+    print("Use animation_loop() or animation_loop_time() for canvas animation\n")
+
+    return 0
+}

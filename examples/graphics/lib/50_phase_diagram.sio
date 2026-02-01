@@ -1,0 +1,615 @@
+// 50_phase_diagram.sio - Phase diagram visualization for scientific computing
+//
+// Phase diagrams show regions of different system states based on two
+// control parameters (e.g., temperature vs pressure, composition vs temperature).
+// Essential for materials science, thermodynamics, and dynamical systems.
+//
+// Features:
+// - Multiple phase regions with distinct colors
+// - Phase boundaries (coexistence curves)
+// - Critical points and triple points
+// - Tie lines for two-phase regions
+// - Labeled axes with scientific units
+
+// ============================================================================
+// Phase Region Types
+// ============================================================================
+
+struct PhaseRegion {
+    id: i32,              // Region identifier
+    color: i32,           // ANSI color code
+    marker: i32,          // Character code for filling
+    name_code: i32        // First character of phase name (S=83, L=76, G=71, etc.)
+}
+
+struct PhaseBoundary {
+    phase1: i32,          // ID of first phase
+    phase2: i32,          // ID of second phase
+    // Boundary is defined by points
+    x_points: [f64; 100],
+    y_points: [f64; 100],
+    num_points: i32
+}
+
+struct CriticalPoint {
+    x: f64,
+    y: f64,
+    marker: i32           // Character to display
+}
+
+struct TriplePoint {
+    x: f64,
+    y: f64,
+    marker: i32
+}
+
+struct PhaseDiagram {
+    // Viewport bounds
+    x_min: f64,
+    x_max: f64,
+    y_min: f64,
+    y_max: f64,
+
+    // Grid dimensions for rendering
+    width: i32,
+    height: i32,
+
+    // Phase regions (up to 8)
+    regions: [PhaseRegion; 8],
+    num_regions: i32,
+
+    // Boundaries (up to 16)
+    boundaries: [PhaseBoundary; 16],
+    num_boundaries: i32,
+
+    // Special points
+    critical_points: [CriticalPoint; 4],
+    num_critical: i32,
+    triple_points: [TriplePoint; 4],
+    num_triple: i32,
+
+    // Phase field (stores which phase each grid cell belongs to)
+    phase_field: [i32; 4096],  // Up to 64x64 grid
+
+    // Axis labels (as character codes)
+    x_label: i32,  // First char of x-axis label
+    y_label: i32   // First char of y-axis label
+}
+
+// ============================================================================
+// Initialization
+// ============================================================================
+
+fn phase_diagram_new(
+    x_min: f64, x_max: f64,
+    y_min: f64, y_max: f64,
+    width: i32, height: i32
+) -> PhaseDiagram {
+    let empty_region = PhaseRegion {
+        id: 0,
+        color: 0,
+        marker: 32,  // Space
+        name_code: 32
+    }
+
+    let empty_boundary = PhaseBoundary {
+        phase1: 0,
+        phase2: 0,
+        x_points: [0.0; 100],
+        y_points: [0.0; 100],
+        num_points: 0
+    }
+
+    let empty_critical = CriticalPoint {
+        x: 0.0,
+        y: 0.0,
+        marker: 67  // 'C'
+    }
+
+    let empty_triple = TriplePoint {
+        x: 0.0,
+        y: 0.0,
+        marker: 84  // 'T'
+    }
+
+    return PhaseDiagram {
+        x_min: x_min,
+        x_max: x_max,
+        y_min: y_min,
+        y_max: y_max,
+        width: width,
+        height: height,
+        regions: [empty_region; 8],
+        num_regions: 0,
+        boundaries: [empty_boundary; 16],
+        num_boundaries: 0,
+        critical_points: [empty_critical; 4],
+        num_critical: 0,
+        triple_points: [empty_triple; 4],
+        num_triple: 0,
+        phase_field: [0; 4096],
+        x_label: 84,  // 'T' for temperature
+        y_label: 80   // 'P' for pressure
+    }
+}
+
+// ============================================================================
+// Phase Region Management
+// ============================================================================
+
+fn phase_diagram_add_region(
+    diagram: &!PhaseDiagram,
+    id: i32,
+    color: i32,
+    marker: i32,
+    name_code: i32
+) with Mut {
+    if diagram.num_regions < 8 {
+        let idx = diagram.num_regions
+        diagram.regions[idx] = PhaseRegion {
+            id: id,
+            color: color,
+            marker: marker,
+            name_code: name_code
+        }
+        diagram.num_regions = diagram.num_regions + 1
+    }
+}
+
+// Standard phases for materials
+fn phase_diagram_add_solid(diagram: &!PhaseDiagram) with Mut {
+    phase_diagram_add_region(diagram, 1, 34, 35, 83)  // Blue, '#', 'S'
+}
+
+fn phase_diagram_add_liquid(diagram: &!PhaseDiagram) with Mut {
+    phase_diagram_add_region(diagram, 2, 36, 126, 76)  // Cyan, '~', 'L'
+}
+
+fn phase_diagram_add_gas(diagram: &!PhaseDiagram) with Mut {
+    phase_diagram_add_region(diagram, 3, 33, 46, 71)  // Yellow, '.', 'G'
+}
+
+fn phase_diagram_add_supercritical(diagram: &!PhaseDiagram) with Mut {
+    phase_diagram_add_region(diagram, 4, 35, 42, 88)  // Magenta, '*', 'X'
+}
+
+// ============================================================================
+// Phase Field Computation
+// ============================================================================
+
+// Set phase for a grid cell
+fn phase_field_set(diagram: &!PhaseDiagram, x: i32, y: i32, phase: i32) with Mut {
+    if x >= 0 {
+        if x < diagram.width {
+            if y >= 0 {
+                if y < diagram.height {
+                    let idx = y * diagram.width + x
+                    if idx < 4096 {
+                        diagram.phase_field[idx] = phase
+                    }
+                }
+            }
+        }
+    }
+}
+
+// Get phase for a grid cell
+fn phase_field_get(diagram: &PhaseDiagram, x: i32, y: i32) -> i32 {
+    if x >= 0 {
+        if x < diagram.width {
+            if y >= 0 {
+                if y < diagram.height {
+                    let idx = y * diagram.width + x
+                    if idx < 4096 {
+                        return diagram.phase_field[idx]
+                    }
+                }
+            }
+        }
+    }
+    return 0
+}
+
+// Convert grid coordinates to data coordinates
+fn grid_to_data_x(diagram: &PhaseDiagram, gx: i32) -> f64 with Div, Panic {
+    let t = (gx as f64) / ((diagram.width - 1) as f64)
+    return diagram.x_min + t * (diagram.x_max - diagram.x_min)
+}
+
+fn grid_to_data_y(diagram: &PhaseDiagram, gy: i32) -> f64 with Div, Panic {
+    let t = (gy as f64) / ((diagram.height - 1) as f64)
+    return diagram.y_min + t * (diagram.y_max - diagram.y_min)
+}
+
+// Fill phase field using a classifier function
+// classifier: given (x, y) returns phase id
+fn phase_diagram_compute_field(
+    diagram: &!PhaseDiagram,
+    classifier: fn(f64, f64) -> i32
+) with Mut, Div, Panic {
+    var y = 0
+    while y < diagram.height {
+        var x = 0
+        while x < diagram.width {
+            let data_x = grid_to_data_x(diagram, x)
+            let data_y = grid_to_data_y(diagram, y)
+            let phase = classifier(data_x, data_y)
+            phase_field_set(diagram, x, y, phase)
+            x = x + 1
+        }
+        y = y + 1
+    }
+}
+
+// ============================================================================
+// Special Points
+// ============================================================================
+
+fn phase_diagram_add_critical_point(
+    diagram: &!PhaseDiagram,
+    x: f64,
+    y: f64
+) with Mut {
+    if diagram.num_critical < 4 {
+        let idx = diagram.num_critical
+        diagram.critical_points[idx] = CriticalPoint {
+            x: x,
+            y: y,
+            marker: 67  // 'C'
+        }
+        diagram.num_critical = diagram.num_critical + 1
+    }
+}
+
+fn phase_diagram_add_triple_point(
+    diagram: &!PhaseDiagram,
+    x: f64,
+    y: f64
+) with Mut {
+    if diagram.num_triple < 4 {
+        let idx = diagram.num_triple
+        diagram.triple_points[idx] = TriplePoint {
+            x: x,
+            y: y,
+            marker: 84  // 'T'
+        }
+        diagram.num_triple = diagram.num_triple + 1
+    }
+}
+
+// ============================================================================
+// Rendering Helpers
+// ============================================================================
+
+fn print_char_code(code: i32) with IO {
+    if code == 32 { print(" ") }
+    else { if code == 35 { print("#") }
+    else { if code == 42 { print("*") }
+    else { if code == 46 { print(".") }
+    else { if code == 67 { print("C") }
+    else { if code == 71 { print("G") }
+    else { if code == 76 { print("L") }
+    else { if code == 80 { print("P") }
+    else { if code == 83 { print("S") }
+    else { if code == 84 { print("T") }
+    else { if code == 88 { print("X") }
+    else { if code == 124 { print("|") }
+    else { if code == 126 { print("~") }
+    else { print("?") }
+    }}}}}}}}}}}}}
+}
+
+fn get_region_by_id(diagram: &PhaseDiagram, id: i32) -> PhaseRegion {
+    var i = 0
+    while i < diagram.num_regions {
+        if diagram.regions[i].id == id {
+            return diagram.regions[i]
+        }
+        i = i + 1
+    }
+    // Return default
+    return PhaseRegion {
+        id: 0,
+        color: 37,  // White
+        marker: 32,
+        name_code: 32
+    }
+}
+
+// Check if a cell is on a phase boundary
+fn is_boundary_cell(diagram: &PhaseDiagram, x: i32, y: i32) -> i32 {
+    let phase = phase_field_get(diagram, x, y)
+
+    // Check neighbors
+    if x > 0 {
+        if phase_field_get(diagram, x - 1, y) != phase {
+            return 1
+        }
+    }
+    if x < diagram.width - 1 {
+        if phase_field_get(diagram, x + 1, y) != phase {
+            return 1
+        }
+    }
+    if y > 0 {
+        if phase_field_get(diagram, x, y - 1) != phase {
+            return 1
+        }
+    }
+    if y < diagram.height - 1 {
+        if phase_field_get(diagram, x, y + 1) != phase {
+            return 1
+        }
+    }
+
+    return 0
+}
+
+// ============================================================================
+// Main Rendering
+// ============================================================================
+
+fn phase_diagram_render(diagram: &PhaseDiagram) with IO, Div, Panic {
+    // Clear screen and position cursor
+    print("\x1b[2J\x1b[H")
+
+    // Title
+    print("\x1b[1m=== Phase Diagram ===\x1b[0m\n\n")
+
+    // Y-axis label
+    print("  ")
+    print_char_code(diagram.y_label)
+    print("\n")
+    print("  ^\n")
+
+    // Render from top to bottom (high y first)
+    var y = diagram.height - 1
+    while y >= 0 {
+        // Y-axis
+        print("  |")
+
+        var x = 0
+        while x < diagram.width {
+            let phase = phase_field_get(diagram, x, y)
+            let region = get_region_by_id(diagram, phase)
+
+            // Check for special points
+            let data_x = grid_to_data_x(diagram, x)
+            let data_y = grid_to_data_y(diagram, y)
+            var is_special = 0
+            var special_marker = 0
+
+            // Check critical points
+            var ci = 0
+            while ci < diagram.num_critical {
+                let cp = diagram.critical_points[ci]
+                let dx = data_x - cp.x
+                let dy = data_y - cp.y
+                if dx < 0.0 { let dx = 0.0 - dx }
+                if dy < 0.0 { let dy = 0.0 - dy }
+                let range_x = (diagram.x_max - diagram.x_min) / (diagram.width as f64)
+                let range_y = (diagram.y_max - diagram.y_min) / (diagram.height as f64)
+                if dx < range_x {
+                    if dy < range_y {
+                        is_special = 1
+                        special_marker = cp.marker
+                    }
+                }
+                ci = ci + 1
+            }
+
+            // Check triple points
+            var ti = 0
+            while ti < diagram.num_triple {
+                let tp = diagram.triple_points[ti]
+                let dx = data_x - tp.x
+                let dy = data_y - tp.y
+                if dx < 0.0 { let dx = 0.0 - dx }
+                if dy < 0.0 { let dy = 0.0 - dy }
+                let range_x = (diagram.x_max - diagram.x_min) / (diagram.width as f64)
+                let range_y = (diagram.y_max - diagram.y_min) / (diagram.height as f64)
+                if dx < range_x {
+                    if dy < range_y {
+                        is_special = 1
+                        special_marker = tp.marker
+                    }
+                }
+                ti = ti + 1
+            }
+
+            // Render cell
+            if is_special == 1 {
+                print("\x1b[1;31m")  // Bold red for special points
+                print_char_code(special_marker)
+                print("\x1b[0m")
+            } else { if is_boundary_cell(diagram, x, y) == 1 {
+                print("\x1b[1;37m")  // Bold white for boundaries
+                print("|")
+                print("\x1b[0m")
+            } else {
+                // Normal phase cell
+                print("\x1b[")
+                print_i32(region.color)
+                print("m")
+                print_char_code(region.marker)
+                print("\x1b[0m")
+            }}
+
+            x = x + 1
+        }
+
+        print("\n")
+        y = y - 1
+    }
+
+    // X-axis
+    print("  +")
+    var xi = 0
+    while xi < diagram.width {
+        print("-")
+        xi = xi + 1
+    }
+    print("> ")
+    print_char_code(diagram.x_label)
+    print("\n\n")
+
+    // Legend
+    print("Legend: ")
+    var ri = 0
+    while ri < diagram.num_regions {
+        let region = diagram.regions[ri]
+        print("\x1b[")
+        print_i32(region.color)
+        print("m")
+        print_char_code(region.marker)
+        print("\x1b[0m=")
+        print_char_code(region.name_code)
+        print(" ")
+        ri = ri + 1
+    }
+
+    if diagram.num_critical > 0 {
+        print(" \x1b[1;31mC\x1b[0m=Critical")
+    }
+    if diagram.num_triple > 0 {
+        print(" \x1b[1;31mT\x1b[0m=Triple")
+    }
+    print("\n")
+}
+
+// ============================================================================
+// Helper: Print integer
+// ============================================================================
+
+fn print_i32(x: i32) with IO, Div, Panic {
+    if x == 0 {
+        print("0")
+        return
+    }
+
+    if x < 0 {
+        print("-")
+        print_i32_unsigned(0 - x)
+    } else {
+        print_i32_unsigned(x)
+    }
+}
+
+fn print_i32_unsigned(x: i32) with IO, Div, Panic {
+    if x == 0 {
+        return
+    }
+
+    let digit = x % 10
+    let rest = x / 10
+
+    if rest > 0 {
+        print_i32_unsigned(rest)
+    }
+
+    print_digit(digit)
+}
+
+fn print_digit(d: i32) with IO {
+    if d == 0 { print("0") }
+    else { if d == 1 { print("1") }
+    else { if d == 2 { print("2") }
+    else { if d == 3 { print("3") }
+    else { if d == 4 { print("4") }
+    else { if d == 5 { print("5") }
+    else { if d == 6 { print("6") }
+    else { if d == 7 { print("7") }
+    else { if d == 8 { print("8") }
+    else { if d == 9 { print("9") }
+    }}}}}}}}}}
+}
+
+// ============================================================================
+// Example: Water Phase Diagram Classifier
+// ============================================================================
+
+// Simple water phase classifier (T in Kelvin, P in kPa)
+fn water_phase_classifier(t: f64, p: f64) -> i32 {
+    // Very simplified model
+    // Triple point: ~273.16 K, 0.611 kPa
+    // Critical point: ~647 K, 22064 kPa
+
+    // Below triple point pressure: sublimation
+    if p < 0.611 {
+        if t < 273.16 {
+            return 1  // Solid (ice)
+        } else {
+            return 3  // Gas (vapor)
+        }
+    }
+
+    // Above critical point: supercritical
+    if t > 647.0 {
+        if p > 22064.0 {
+            return 4  // Supercritical
+        }
+    }
+
+    // Melting curve (solid-liquid boundary)
+    // Simplified: nearly vertical at 273 K
+    if t < 273.15 {
+        return 1  // Solid
+    }
+
+    // Vapor pressure curve (liquid-gas boundary)
+    // Clausius-Clapeyron approximation
+    // ln(P/P0) = -L/R * (1/T - 1/T0)
+    // Simplified exponential fit
+    let vapor_pressure = 0.611 * exp_approx((t - 273.15) * 0.05)
+
+    if p < vapor_pressure {
+        return 3  // Gas
+    } else {
+        return 2  // Liquid
+    }
+}
+
+// Simple exponential approximation
+fn exp_approx(x: f64) -> f64 {
+    // Taylor series: 1 + x + x^2/2 + x^3/6 + x^4/24
+    if x > 10.0 {
+        return 22000.0  // Cap for large values
+    }
+    if x < -10.0 {
+        return 0.00001
+    }
+
+    let x2 = x * x
+    let x3 = x2 * x
+    let x4 = x3 * x
+
+    return 1.0 + x + x2 * 0.5 + x3 * 0.1667 + x4 * 0.0417
+}
+
+// ============================================================================
+// Main Demo
+// ============================================================================
+
+fn main() -> i32 with IO, Mut, Div, Panic {
+    // Create a water phase diagram
+    // T: 200-700 K, P: 0.1-25000 kPa (log scale would be better but simplified here)
+    var diagram = phase_diagram_new(200.0, 700.0, 0.0, 25000.0, 50, 25)
+
+    // Add phases
+    phase_diagram_add_solid(&!diagram)
+    phase_diagram_add_liquid(&!diagram)
+    phase_diagram_add_gas(&!diagram)
+    phase_diagram_add_supercritical(&!diagram)
+
+    // Add special points
+    phase_diagram_add_triple_point(&!diagram, 273.16, 0.611)
+    phase_diagram_add_critical_point(&!diagram, 647.0, 22064.0)
+
+    // Compute phase field
+    phase_diagram_compute_field(&!diagram, water_phase_classifier)
+
+    // Render
+    phase_diagram_render(&diagram)
+
+    return 0
+}

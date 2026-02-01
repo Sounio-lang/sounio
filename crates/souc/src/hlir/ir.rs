@@ -374,6 +374,54 @@ impl HlirType {
             HlirType::Knowledge { inner, mode, .. } => inner.size_bits() + (mode.size_bytes() * 8),
         }
     }
+
+    /// Calculate size in bytes, looking up struct definitions from type_defs
+    pub fn size_bytes_with_defs(&self, types: &[HlirTypeDef]) -> usize {
+        match self {
+            HlirType::Void => 0,
+            HlirType::Bool | HlirType::I8 | HlirType::U8 => 1,
+            HlirType::I16 | HlirType::U16 => 2,
+            HlirType::I32 | HlirType::U32 | HlirType::F32 => 4,
+            HlirType::I64 | HlirType::U64 | HlirType::F64 => 8,
+            HlirType::I128 | HlirType::U128 => 16,
+            HlirType::Ptr(_) | HlirType::Function { .. } => 8,
+            HlirType::Array(elem, len) => elem.size_bytes_with_defs(types) * len,
+            HlirType::Tuple(elems) => elems.iter().map(|e| e.size_bytes_with_defs(types)).sum(),
+            HlirType::Struct(name) => types
+                .iter()
+                .find(|t| &t.name == name)
+                .and_then(|td| match &td.kind {
+                    HlirTypeDefKind::Struct(fields) => Some(
+                        fields
+                            .iter()
+                            .map(|(_, ty)| ty.size_bytes_with_defs(types))
+                            .sum(),
+                    ),
+                    _ => None,
+                })
+                .unwrap_or(8),
+            // Linear algebra primitives
+            HlirType::Vec2 => 8,      // 2 x 32-bit floats
+            HlirType::Vec3 => 16,     // 3 x 32-bit floats, padded
+            HlirType::Vec4 => 16,     // 4 x 32-bit floats
+            HlirType::Mat2 => 16,     // 4 x 32-bit floats
+            HlirType::Mat3 => 36,     // 9 x 32-bit floats
+            HlirType::Mat4 => 64,     // 16 x 32-bit floats
+            HlirType::Quat => 16,     // 4 x 32-bit floats
+            HlirType::Octonion => 32, // 8 x 32-bit floats
+            HlirType::QuatLinear
+            | HlirType::QuatConv2d
+            | HlirType::QuatRnnState
+            | HlirType::QuatGate => 16,
+            HlirType::Vec2d => 16, // 2 x 64-bit floats
+            HlirType::Vec3d => 32, // 3 x 64-bit floats, padded
+            HlirType::Vec4d => 32, // 4 x 64-bit floats
+            HlirType::Dual => 16,  // 2 x 64-bit floats
+            HlirType::Knowledge { inner, mode, .. } => {
+                inner.size_bytes_with_defs(types) + mode.size_bytes()
+            }
+        }
+    }
 }
 
 /// HLIR basic block

@@ -101,8 +101,9 @@ fn main() {
 
     result
         .assert_failure()
-        .assert_error_contains("Drug")
-        .assert_error_contains("Phenotype");
+        // Error now shows ontology terms rather than type aliases
+        .assert_error_contains("chebi:drug")
+        .assert_error_contains("hp:phenotypic_abnormality");
 }
 
 /// Test that suggestions include semantic distance

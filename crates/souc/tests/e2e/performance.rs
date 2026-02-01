@@ -261,14 +261,14 @@ type Drug = chebi:drug;
 type Process = go:biological_process;
 type Phenotype = hp:phenotypic_abnormality;
 type Disease = mondo:disease;
-type Unit = uo:unit;
+type MeasureUnit = uo:unit;
 
 fn analyze(
     drug: Drug,
     process: Process,
     phenotype: Phenotype,
     disease: Disease,
-    unit: Unit,
+    measure: MeasureUnit,
 ) -> bool {
     true
 }

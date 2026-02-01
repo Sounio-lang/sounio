@@ -1,0 +1,533 @@
+// Viewport and Axes - Coordinate transformation for 2D plotting
+//
+// Provides transformation between world coordinates (data space) and
+// canvas coordinates (pixel space), plus axis rendering with labels and ticks.
+
+// ============================================================================
+// Duplicate necessary types from previous modules
+// ============================================================================
+
+struct Cell {
+    ch: i32,
+    fg_color: i32,
+    bg_color: i32,
+    bold: i32,
+    dim: i32
+}
+
+struct Canvas {
+    width: i32,
+    height: i32,
+    cells: [Cell; 2400]
+}
+
+struct TextStyle {
+    fg_color: i32,
+    bg_color: i32,
+    bold: i32,
+    dim: i32
+}
+
+// ============================================================================
+// Viewport - Maps world coordinates to canvas pixels
+// ============================================================================
+
+struct Viewport {
+    // World coordinate bounds (data space)
+    x_min: f64,
+    x_max: f64,
+    y_min: f64,
+    y_max: f64,
+
+    // Canvas region (pixel space)
+    canvas_x: i32,      // Left edge of plot area
+    canvas_y: i32,      // Top edge of plot area
+    canvas_width: i32,  // Width of plot area
+    canvas_height: i32  // Height of plot area
+}
+
+// Create a new viewport with specified world bounds and canvas region
+fn viewport_new(
+    x_min: f64,
+    x_max: f64,
+    y_min: f64,
+    y_max: f64,
+    canvas_x: i32,
+    canvas_y: i32,
+    canvas_width: i32,
+    canvas_height: i32
+) -> Viewport {
+    return Viewport {
+        x_min: x_min,
+        x_max: x_max,
+        y_min: y_min,
+        y_max: y_max,
+        canvas_x: canvas_x,
+        canvas_y: canvas_y,
+        canvas_width: canvas_width,
+        canvas_height: canvas_height
+    }
+}
+
+// ============================================================================
+// Coordinate Transformations
+// ============================================================================
+
+// Transform world coordinates to canvas pixel coordinates
+fn world_to_canvas_x(vp: &Viewport, x: f64) -> i32 with Mut, Panic, Div {
+    let x_range = vp.x_max - vp.x_min
+    let normalized = (x - vp.x_min) / x_range
+    let pixel_offset = normalized * (vp.canvas_width as f64)
+    return vp.canvas_x + (pixel_offset as i32)
+}
+
+fn world_to_canvas_y(vp: &Viewport, y: f64) -> i32 with Mut, Panic, Div {
+    let y_range = vp.y_max - vp.y_min
+    let normalized = (y - vp.y_min) / y_range
+    let pixel_offset = normalized * (vp.canvas_height as f64)
+
+    // Flip Y axis (canvas Y increases downward, world Y increases upward)
+    return vp.canvas_y + vp.canvas_height - (pixel_offset as i32)
+}
+
+// Transform canvas pixel coordinates back to world coordinates
+fn canvas_to_world_x(vp: &Viewport, px: i32) -> f64 with Mut, Panic, Div {
+    let pixel_offset = px - vp.canvas_x
+    let normalized = (pixel_offset as f64) / (vp.canvas_width as f64)
+    return vp.x_min + normalized * (vp.x_max - vp.x_min)
+}
+
+fn canvas_to_world_y(vp: &Viewport, py: i32) -> f64 with Mut, Panic, Div {
+    let pixel_offset = vp.canvas_y + vp.canvas_height - py  // Flip Y
+    let normalized = (pixel_offset as f64) / (vp.canvas_height as f64)
+    return vp.y_min + normalized * (vp.y_max - vp.y_min)
+}
+
+// ============================================================================
+// Drawing primitives (from 02_drawing.sio)
+// ============================================================================
+
+fn canvas_set_pixel(canvas: Canvas, x: i32, y: i32, ch: i32, color: i32) -> Canvas with Mut, Panic {
+    if x < 0 { return canvas }
+    if y < 0 { return canvas }
+    if x >= canvas.width { return canvas }
+    if y >= canvas.height { return canvas }
+
+    var new_canvas = canvas
+    let index = y * canvas.width + x
+    new_canvas.cells[index] = Cell {
+        ch: ch,
+        fg_color: color,
+        bg_color: 0,
+        bold: 0,
+        dim: 0
+    }
+    return new_canvas
+}
+
+fn draw_hline(canvas: Canvas, x0: i32, x1: i32, y: i32, color: i32) -> Canvas with Mut, Panic, Div {
+    var result = canvas
+    let start_x = if x0 < x1 { x0 } else { x1 }
+    let end_x = if x0 < x1 { x1 } else { x0 }
+
+    var x = start_x
+    while x <= end_x {
+        result = canvas_set_pixel(result, x, y, 9608, color)
+        x = x + 1
+    }
+
+    return result
+}
+
+fn draw_vline(canvas: Canvas, x: i32, y0: i32, y1: i32, color: i32) -> Canvas with Mut, Panic, Div {
+    var result = canvas
+    let start_y = if y0 < y1 { y0 } else { y1 }
+    let end_y = if y0 < y1 { y1 } else { y0 }
+
+    var y = start_y
+    while y <= end_y {
+        result = canvas_set_pixel(result, x, y, 9608, color)
+        y = y + 1
+    }
+
+    return result
+}
+
+// ============================================================================
+// Text rendering (from 03_text.sio)
+// ============================================================================
+
+fn canvas_set_char(canvas: Canvas, x: i32, y: i32, ch: i32, style: TextStyle) -> Canvas with Mut, Panic {
+    if x < 0 { return canvas }
+    if y < 0 { return canvas }
+    if x >= canvas.width { return canvas }
+    if y >= canvas.height { return canvas }
+
+    var new_canvas = canvas
+    let index = y * canvas.width + x
+    new_canvas.cells[index] = Cell {
+        ch: ch,
+        fg_color: style.fg_color,
+        bg_color: style.bg_color,
+        bold: style.bold,
+        dim: style.dim
+    }
+    return new_canvas
+}
+
+fn string_length(chars: &[i32], max_len: i32) -> i32 with Mut, Panic, Div {
+    var len = 0
+    while len < max_len {
+        if chars[len] == -1 {
+            return len
+        }
+        len = len + 1
+    }
+    return len
+}
+
+fn draw_text_left(
+    canvas: Canvas,
+    x: i32,
+    y: i32,
+    text: &[i32],
+    max_len: i32,
+    style: TextStyle
+) -> Canvas with Mut, Panic, Div {
+    var result = canvas
+    var i = 0
+    var cur_x = x
+
+    while i < max_len {
+        let ch = text[i]
+        if ch == -1 {
+            return result
+        }
+
+        result = canvas_set_char(result, cur_x, y, ch, style)
+        cur_x = cur_x + 1
+        i = i + 1
+    }
+
+    return result
+}
+
+fn text_style_new(fg: i32, bg: i32, bold: i32, dim: i32) -> TextStyle {
+    return TextStyle {
+        fg_color: fg,
+        bg_color: bg,
+        bold: bold,
+        dim: dim
+    }
+}
+
+// Format integer to character codes
+fn digit_to_char(digit: i32) -> i32 {
+    return 48 + digit  // ASCII '0' = 48
+}
+
+fn format_int_impl(value: i32, output: &![i32]) -> i32 with Mut, Panic, Div {
+    if value == 0 {
+        output[0] = 48  // '0'
+        output[1] = -1
+        return 1
+    }
+
+    // Handle negative
+    var val = value
+    var is_negative = 0
+    if val < 0 {
+        is_negative = 1
+        val = -val
+    }
+
+    // Count digits
+    var temp = val
+    var digit_count = 0
+    while temp > 0 {
+        temp = temp / 10
+        digit_count = digit_count + 1
+    }
+
+    // Add negative sign offset
+    var start_idx = 0
+    if is_negative == 1 {
+        output[0] = 45  // '-'
+        start_idx = 1
+    }
+
+    // Extract digits (right to left)
+    temp = val
+    var i = digit_count - 1
+    while i >= 0 {
+        let digit = temp % 10
+        output[start_idx + i] = digit_to_char(digit)
+        temp = temp / 10
+        i = i - 1
+    }
+
+    output[start_idx + digit_count] = -1
+    return start_idx + digit_count
+}
+
+// Format f64 to character codes (simplified - 2 decimal places)
+fn format_f64_impl(value: f64, output: &![i32]) -> i32 with Mut, Panic, Div {
+    // Convert to int with 2 decimal places
+    let scaled = (value * 100.0) as i32
+    var val = scaled
+    var is_negative = 0
+
+    if val < 0 {
+        is_negative = 1
+        val = -val
+    }
+
+    // Count total digits
+    var temp = val
+    var digit_count = 0
+    if temp == 0 {
+        digit_count = 1
+    } else {
+        while temp > 0 {
+            temp = temp / 10
+            digit_count = digit_count + 1
+        }
+    }
+
+    // Ensure at least 3 digits for decimal point placement
+    if digit_count < 3 {
+        digit_count = 3
+    }
+
+    var idx = 0
+    if is_negative == 1 {
+        output[0] = 45  // '-'
+        idx = 1
+    }
+
+    // Extract digits
+    temp = val
+    var i = digit_count - 1
+    while i >= 0 {
+        let digit = temp % 10
+        output[idx + i] = digit_to_char(digit)
+        temp = temp / 10
+        i = i - 1
+    }
+
+    // Pad with zeros if needed
+    while i >= 0 {
+        output[idx + i] = 48  // '0'
+        i = i - 1
+    }
+
+    // Insert decimal point (2 places from end)
+    let decimal_pos = idx + digit_count - 2
+
+    // Shift right
+    i = idx + digit_count
+    while i > decimal_pos {
+        output[i] = output[i - 1]
+        i = i - 1
+    }
+    output[decimal_pos] = 46  // '.'
+
+    output[idx + digit_count + 1] = -1
+    return idx + digit_count + 1
+}
+
+// ============================================================================
+// Axis Rendering
+// ============================================================================
+
+fn COLOR_WHITE() -> i32 { return 7 }
+fn COLOR_BRIGHT_BLACK() -> i32 { return 8 }
+
+// Draw X and Y axes
+fn draw_axes(canvas: Canvas, vp: &Viewport, color: i32) -> Canvas with Mut, Panic, Div {
+    var result = canvas
+
+    // Find pixel coordinates for origin (0, 0)
+    let origin_x = world_to_canvas_x(vp, 0.0)
+    let origin_y = world_to_canvas_y(vp, 0.0)
+
+    // Draw Y axis (vertical line at x=0)
+    if origin_x >= vp.canvas_x && origin_x < vp.canvas_x + vp.canvas_width {
+        result = draw_vline(result, origin_x, vp.canvas_y, vp.canvas_y + vp.canvas_height - 1, color)
+    }
+
+    // Draw X axis (horizontal line at y=0)
+    if origin_y >= vp.canvas_y && origin_y < vp.canvas_y + vp.canvas_height {
+        result = draw_hline(result, vp.canvas_x, vp.canvas_x + vp.canvas_width - 1, origin_y, color)
+    }
+
+    return result
+}
+
+// Draw background grid
+fn draw_grid(canvas: Canvas, vp: &Viewport, n_x_lines: i32, n_y_lines: i32, color: i32) -> Canvas with Mut, Panic, Div {
+    var result = canvas
+
+    // Vertical grid lines
+    var i = 0
+    while i <= n_x_lines {
+        let fraction = (i as f64) / (n_x_lines as f64)
+        let world_x = vp.x_min + fraction * (vp.x_max - vp.x_min)
+        let pixel_x = world_to_canvas_x(vp, world_x)
+
+        result = draw_vline(result, pixel_x, vp.canvas_y, vp.canvas_y + vp.canvas_height - 1, color)
+        i = i + 1
+    }
+
+    // Horizontal grid lines
+    i = 0
+    while i <= n_y_lines {
+        let fraction = (i as f64) / (n_y_lines as f64)
+        let world_y = vp.y_min + fraction * (vp.y_max - vp.y_min)
+        let pixel_y = world_to_canvas_y(vp, world_y)
+
+        result = draw_hline(result, vp.canvas_x, vp.canvas_x + vp.canvas_width - 1, pixel_y, color)
+        i = i + 1
+    }
+
+    return result
+}
+
+// Draw X axis labels (below axis)
+fn draw_x_labels(canvas: Canvas, vp: &Viewport, n_ticks: i32, label_color: i32) -> Canvas with Mut, Panic, Div {
+    var result = canvas
+
+    let origin_y = world_to_canvas_y(vp, 0.0)
+    let label_y = if origin_y + 2 < canvas.height { origin_y + 2 } else { vp.canvas_y + vp.canvas_height + 1 }
+
+    let style = text_style_new(label_color, 0, 0, 0)
+
+    var i = 0
+    while i <= n_ticks {
+        let fraction = (i as f64) / (n_ticks as f64)
+        let world_x = vp.x_min + fraction * (vp.x_max - vp.x_min)
+        let pixel_x = world_to_canvas_x(vp, world_x)
+
+        // Format label - skip for now (formatting not implemented yet)
+        // TODO: Add proper f64 to string formatting
+
+        // Draw tick mark
+        result = canvas_set_pixel(result, pixel_x, label_y - 1, 124, label_color)  // '|'
+
+        i = i + 1
+    }
+
+    return result
+}
+
+// Draw Y axis labels (left of axis)
+fn draw_y_labels(canvas: Canvas, vp: &Viewport, n_ticks: i32, label_color: i32) -> Canvas with Mut, Panic, Div {
+    var result = canvas
+
+    let origin_x = world_to_canvas_x(vp, 0.0)
+    let label_x = if origin_x - 6 >= 0 { origin_x - 6 } else { vp.canvas_x - 7 }
+
+    let style = text_style_new(label_color, 0, 0, 0)
+
+    var i = 0
+    while i <= n_ticks {
+        let fraction = (i as f64) / (n_ticks as f64)
+        let world_y = vp.y_min + fraction * (vp.y_max - vp.y_min)
+        let pixel_y = world_to_canvas_y(vp, world_y)
+
+        // Format label - skip for now (formatting not implemented yet)
+        // TODO: Add proper f64 to string formatting
+
+        // Draw tick mark
+        result = canvas_set_pixel(result, label_x + 5, pixel_y, 45, label_color)  // '-'
+
+        i = i + 1
+    }
+
+    return result
+}
+
+// ============================================================================
+// Test/Demo
+// ============================================================================
+
+fn cell_blank() -> Cell {
+    return Cell {
+        ch: 32,
+        fg_color: 7,
+        bg_color: 0,
+        bold: 0,
+        dim: 0
+    }
+}
+
+fn canvas_new(width: i32, height: i32) -> Canvas with Mut, Panic, Div {
+    var canvas = Canvas {
+        width: width,
+        height: height,
+        cells: [cell_blank(); 2400]
+    }
+
+    var i = 0
+    while i < width * height {
+        canvas.cells[i] = cell_blank()
+        i = i + 1
+    }
+
+    return canvas
+}
+
+fn main() -> i32 with IO, Mut, Panic, Div {
+    print("=== Sounio Viewport and Axes Demo ===\n\n")
+
+    // Create canvas
+    var canvas = canvas_new(70, 30)
+
+    // Create viewport: world space [-10, 10] x [-5, 5], plot area [10, 3] to [65, 25]
+    let vp = viewport_new(
+        -10.0, 10.0,   // x_min, x_max
+        -5.0, 5.0,     // y_min, y_max
+        10, 3,         // canvas_x, canvas_y
+        55, 22         // canvas_width, canvas_height
+    )
+
+    print("Viewport created:\n")
+    print("  World: x=[-10, 10], y=[-5, 5]\n")
+    print("  Canvas: [10, 3] size 55×22\n\n")
+
+    // Test coordinate transformations
+    print("Testing transformations:\n")
+    let test_x = 5.0
+    let test_y = 2.5
+    let pixel_x = world_to_canvas_x(&vp, test_x)
+    let pixel_y = world_to_canvas_y(&vp, test_y)
+    print("  World (5.0, 2.5) → Canvas ")
+    if pixel_x == 51 && pixel_y == 14 {
+        print("(51, 14) ✓\n")
+    } else {
+        print("(?, ?) ✗\n")
+    }
+
+    // Draw grid
+    print("\nDrawing grid...\n")
+    canvas = draw_grid(canvas, &vp, 4, 4, COLOR_BRIGHT_BLACK())
+
+    // Draw axes
+    print("Drawing axes...\n")
+    canvas = draw_axes(canvas, &vp, COLOR_WHITE())
+
+    // Draw labels
+    print("Drawing labels...\n")
+    canvas = draw_x_labels(canvas, &vp, 4, COLOR_WHITE())
+    canvas = draw_y_labels(canvas, &vp, 4, COLOR_WHITE())
+
+    // Add title
+    var title = [86, 105, 101, 119, 112, 111, 114, 116, 32, 68, 101, 109, 111, -1]  // "Viewport Demo"
+    let title_style = text_style_new(6, 0, 1, 0)  // Cyan + bold
+    canvas = draw_text_left(canvas, 25, 1, &title, 20, title_style)
+
+    print("\n=== Viewport and axes rendering complete! ===\n")
+    print("(Canvas created but not rendered to avoid ANSI complexity)\n")
+
+    return 0
+}

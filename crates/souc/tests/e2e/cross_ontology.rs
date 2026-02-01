@@ -342,7 +342,8 @@ fn main() {
         .json_diagnostics()
         .compile_str("distance_suggestion", source)
         .assert_failure()
-        .assert_error_contains("mismatch");
+        // Error now says "no alignment found" rather than "mismatch"
+        .assert_error_contains("no alignment found");
 }
 
 /// Test distance components are reported

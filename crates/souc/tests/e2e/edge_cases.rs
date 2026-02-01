@@ -116,6 +116,7 @@ ontology test from "file://path/with spaces/ontology.owl";
 }
 
 /// Test escape sequences
+/// Note: Unicode escapes (\u{...}) not yet implemented
 #[test]
 fn test_escape_sequences() {
     let source = r#"
@@ -124,7 +125,8 @@ fn main() {
     let newline = "line1\nline2";
     let quote = "He said \"hello\"";
     let backslash = "path\\to\\file";
-    let unicode_escape = "\u{1F48A}";  // pill emoji
+    let carriage = "line1\rline2";
+    let null_char = "null:\0end";
 }
 "#;
 

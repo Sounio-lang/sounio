@@ -1,0 +1,618 @@
+// 62_tree_layout.sio - Tree layout algorithms
+//
+// Provides hierarchical tree layout algorithms for visualizing tree structures:
+// - Binary tree layout: classic top-down arrangement
+// - Radial tree layout: circular arrangement from center
+// - Reingold-Tilford algorithm: space-efficient tree drawing
+//
+// Trees are a special case of graphs with no cycles and a designated root.
+
+// ============================================================================
+// Tree Node (extends GraphNode with tree-specific data)
+// ============================================================================
+
+struct TreeNode {
+    // Core graph properties
+    id: i32,
+    x: f64,
+    y: f64,
+    label_code: i32,
+    color: i32,
+    size: i32,
+
+    // Tree-specific properties
+    parent: i32,           // Parent node ID (-1 for root)
+    children: [i32; 20],   // Child node IDs
+    n_children: i32,
+    depth: i32,            // Distance from root
+
+    // Layout helpers
+    subtree_width: f64,    // Width of subtree rooted here
+    prelim: f64,           // Preliminary x-coordinate
+    modifier: f64          // Modifier for subtree positioning
+}
+
+fn tree_node_new(id: i32) -> TreeNode {
+    return TreeNode {
+        id: id,
+        x: 0.0,
+        y: 0.0,
+        label_code: 65 + id,
+        color: 37,
+        size: 1,
+        parent: -1,
+        children: [-1; 20],
+        n_children: 0,
+        depth: 0,
+        subtree_width: 1.0,
+        prelim: 0.0,
+        modifier: 0.0
+    }
+}
+
+// ============================================================================
+// Tree Structure
+// ============================================================================
+
+struct Tree {
+    nodes: [TreeNode; 100],
+    n_nodes: i32,
+    root: i32,             // Root node ID
+
+    // Layout parameters
+    level_height: f64,     // Vertical distance between levels
+    node_separation: f64,  // Horizontal distance between siblings
+    subtree_separation: f64 // Horizontal distance between subtrees
+}
+
+fn tree_new() -> Tree {
+    return Tree {
+        nodes: [tree_node_new(0); 100],
+        n_nodes: 0,
+        root: -1,
+        level_height: 3.0,
+        node_separation: 2.0,
+        subtree_separation: 3.0
+    }
+}
+
+// ============================================================================
+// Tree Construction (Value-Passing)
+// ============================================================================
+
+fn tree_add_root_v(tree: Tree, label: i32) -> Tree with Mut, Panic {
+    var t = tree
+    if t.n_nodes >= 100 { return t }
+
+    let id = t.n_nodes
+    t.nodes[id] = tree_node_new(id)
+    t.nodes[id].label_code = label
+    t.nodes[id].depth = 0
+    t.root = id
+    t.n_nodes = t.n_nodes + 1
+    return t
+}
+
+fn tree_add_child_v(tree: Tree, parent_id: i32, label: i32) -> Tree with Mut, Panic {
+    var t = tree
+    if t.n_nodes >= 100 { return t }
+    if parent_id < 0 { return t }
+    if parent_id >= t.n_nodes { return t }
+
+    let id = t.n_nodes
+    t.nodes[id] = tree_node_new(id)
+    t.nodes[id].label_code = label
+    t.nodes[id].parent = parent_id
+    t.nodes[id].depth = t.nodes[parent_id].depth + 1
+
+    // Add child to parent's children array
+    if t.nodes[parent_id].n_children < 20 {
+        t.nodes[parent_id].children[t.nodes[parent_id].n_children] = id
+        t.nodes[parent_id].n_children = t.nodes[parent_id].n_children + 1
+    }
+
+    t.n_nodes = t.n_nodes + 1
+    return t
+}
+
+fn tree_depth(tree: &Tree) -> i32 with Mut, Panic, Div {
+    var max_depth = 0
+    var i = 0
+    while i < tree.n_nodes {
+        if tree.nodes[i].depth > max_depth {
+            max_depth = tree.nodes[i].depth
+        }
+        i = i + 1
+    }
+    return max_depth
+}
+
+// ============================================================================
+// Simple Binary Tree Layout (Value-Passing)
+// ============================================================================
+
+fn tree_layout_simple_v(tree: Tree) -> Tree with Mut, Div, Panic {
+    var t = tree
+    if t.root < 0 { return t }
+
+    // Compute subtree widths bottom-up
+    t = compute_subtree_widths_v(t)
+
+    // Position root
+    t.nodes[t.root].x = 0.0
+    t.nodes[t.root].y = 0.0
+
+    // Position children top-down
+    t = position_children_simple_v(t, t.root)
+    return t
+}
+
+fn compute_subtree_widths_v(tree: Tree) -> Tree with Mut, Panic, Div {
+    var t = tree
+    // Process nodes in reverse order (children before parents)
+    var i = t.n_nodes - 1
+    while i >= 0 {
+        if t.nodes[i].n_children == 0 {
+            t.nodes[i].subtree_width = 1.0
+        } else {
+            var width = 0.0
+            var c = 0
+            while c < t.nodes[i].n_children {
+                let child = t.nodes[i].children[c]
+                if child >= 0 {
+                    width = width + t.nodes[child].subtree_width
+                }
+                c = c + 1
+            }
+            // Add separation between children
+            let n_gaps = t.nodes[i].n_children - 1
+            if n_gaps > 0 {
+                width = width + (n_gaps as f64) * t.node_separation
+            }
+            t.nodes[i].subtree_width = width
+        }
+        i = i - 1
+    }
+    return t
+}
+
+fn position_children_simple_v(tree: Tree, node_id: i32) -> Tree with Mut, Div, Panic {
+    var t = tree
+    let node = t.nodes[node_id]
+    let n_children = node.n_children
+
+    if n_children == 0 { return t }
+
+    // Starting x position for leftmost child
+    var x_offset = node.x - node.subtree_width * 0.5
+
+    var c = 0
+    while c < n_children {
+        let child_id = node.children[c]
+        if child_id >= 0 {
+            let child_width = t.nodes[child_id].subtree_width
+
+            // Center child within its subtree space
+            t.nodes[child_id].x = x_offset + child_width * 0.5
+            t.nodes[child_id].y = node.y + t.level_height
+
+            // Move offset for next child
+            x_offset = x_offset + child_width + t.node_separation
+
+            // Recursively position grandchildren
+            t = position_children_simple_v(t, child_id)
+        }
+        c = c + 1
+    }
+    return t
+}
+
+// ============================================================================
+// Radial Tree Layout (Value-Passing)
+// ============================================================================
+
+fn tree_layout_radial_v(tree: Tree, radius_step: f64) -> Tree with Mut, Div, Panic {
+    var t = tree
+    if t.root < 0 { return t }
+
+    // Root at center
+    t.nodes[t.root].x = 0.0
+    t.nodes[t.root].y = 0.0
+
+    // Compute angular extents for each subtree
+    t = compute_angular_widths_v(t)
+
+    // Position nodes radially
+    t = position_children_radial_v(t, t.root, 0.0, 6.28318, radius_step)
+    return t
+}
+
+fn compute_angular_widths_v(tree: Tree) -> Tree with Mut, Panic, Div {
+    var t = tree
+    var i = t.n_nodes - 1
+    while i >= 0 {
+        if t.nodes[i].n_children == 0 {
+            t.nodes[i].subtree_width = 1.0
+        } else {
+            var width = 0.0
+            var c = 0
+            while c < t.nodes[i].n_children {
+                let child = t.nodes[i].children[c]
+                if child >= 0 {
+                    width = width + t.nodes[child].subtree_width
+                }
+                c = c + 1
+            }
+            t.nodes[i].subtree_width = width
+        }
+        i = i - 1
+    }
+    return t
+}
+
+fn position_children_radial_v(
+    tree: Tree,
+    node_id: i32,
+    angle_start: f64,
+    angle_end: f64,
+    radius_step: f64
+) -> Tree with Mut, Div, Panic {
+    var t = tree
+    let node = t.nodes[node_id]
+    let n_children = node.n_children
+
+    if n_children == 0 { return t }
+
+    let radius = (node.depth as f64 + 1.0) * radius_step
+    let total_angular_span = angle_end - angle_start
+
+    var current_angle = angle_start
+
+    var c = 0
+    while c < n_children {
+        let child_id = node.children[c]
+        if child_id >= 0 {
+            let child_width = t.nodes[child_id].subtree_width
+            let parent_width = t.nodes[node_id].subtree_width
+
+            let angular_width = if parent_width > 0.0 {
+                (child_width / parent_width) * total_angular_span
+            } else {
+                total_angular_span / (n_children as f64)
+            }
+
+            let mid_angle = current_angle + angular_width * 0.5
+            t.nodes[child_id].x = cos_approx(mid_angle) * radius
+            t.nodes[child_id].y = sin_approx(mid_angle) * radius
+
+            t = position_children_radial_v(
+                t, child_id,
+                current_angle, current_angle + angular_width,
+                radius_step
+            )
+
+            current_angle = current_angle + angular_width
+        }
+        c = c + 1
+    }
+    return t
+}
+
+// ============================================================================
+// Reingold-Tilford Algorithm (Value-Passing)
+// ============================================================================
+
+fn tree_layout_reingold_tilford_v(tree: Tree) -> Tree with Mut, Div, Panic {
+    var t = tree
+    if t.root < 0 { return t }
+
+    // First pass: compute preliminary positions bottom-up
+    t = rt_first_walk_v(t, t.root)
+
+    // Second pass: compute final positions top-down
+    t = rt_second_walk_v(t, t.root, 0.0)
+
+    // Set y-coordinates based on depth
+    var i = 0
+    while i < t.n_nodes {
+        t.nodes[i].y = (t.nodes[i].depth as f64) * t.level_height
+        i = i + 1
+    }
+    return t
+}
+
+fn rt_first_walk_v(tree: Tree, node_id: i32) -> Tree with Mut, Div, Panic {
+    var t = tree
+    let n_children = t.nodes[node_id].n_children
+
+    if n_children == 0 {
+        t.nodes[node_id].prelim = 0.0
+        return t
+    }
+
+    // Process children first
+    var c = 0
+    while c < n_children {
+        let child_id = t.nodes[node_id].children[c]
+        if child_id >= 0 {
+            t = rt_first_walk_v(t, child_id)
+        }
+        c = c + 1
+    }
+
+    // Position children relative to each other
+    c = 0
+    while c < n_children {
+        let child_id = t.nodes[node_id].children[c]
+        if child_id >= 0 {
+            if c == 0 {
+                t.nodes[child_id].prelim = 0.0
+            } else {
+                let prev_child = t.nodes[node_id].children[c - 1]
+                if prev_child >= 0 {
+                    let min_sep = t.node_separation +
+                        t.nodes[prev_child].subtree_width * 0.5 +
+                        t.nodes[child_id].subtree_width * 0.5
+
+                    t.nodes[child_id].prelim =
+                        t.nodes[prev_child].prelim + min_sep
+                }
+            }
+        }
+        c = c + 1
+    }
+
+    // Center parent over children
+    let first_child = t.nodes[node_id].children[0]
+    let last_child = t.nodes[node_id].children[n_children - 1]
+
+    if first_child >= 0 {
+        if last_child >= 0 {
+            let midpoint = (t.nodes[first_child].prelim +
+                           t.nodes[last_child].prelim) * 0.5
+            t.nodes[node_id].prelim = midpoint
+        }
+    }
+
+    // Compute subtree width for this node
+    t = compute_subtree_widths_v(t)
+    return t
+}
+
+fn rt_second_walk_v(tree: Tree, node_id: i32, modifier: f64) -> Tree with Mut, Panic, Div {
+    var t = tree
+    t.nodes[node_id].x = t.nodes[node_id].prelim + modifier
+
+    let n_children = t.nodes[node_id].n_children
+    var c = 0
+    while c < n_children {
+        let child_id = t.nodes[node_id].children[c]
+        if child_id >= 0 {
+            t = rt_second_walk_v(t, child_id, modifier + t.nodes[node_id].modifier)
+        }
+        c = c + 1
+    }
+    return t
+}
+
+// ============================================================================
+// Tree Builders (Value-Passing)
+// ============================================================================
+
+fn tree_create_binary(depth: i32) -> Tree with Mut, Div, Panic {
+    var tree = tree_new()
+
+    // Create root
+    tree = tree_add_root_v(tree, 65)  // 'A'
+
+    // Build binary tree level by level
+    var level_start = 0
+    var level_size = 1
+    var d = 0
+
+    while d < depth - 1 {
+        var i = 0
+        while i < level_size {
+            let parent = level_start + i
+            // Add left child
+            tree = tree_add_child_v(tree, parent, tree.n_nodes + 65)
+            // Add right child
+            tree = tree_add_child_v(tree, parent, tree.n_nodes + 65)
+            i = i + 1
+        }
+        level_start = level_start + level_size
+        level_size = level_size * 2
+        d = d + 1
+    }
+
+    return tree
+}
+
+fn tree_create_random(n_nodes: i32, max_children: i32, seed: i32) -> Tree with Mut, Div, Panic {
+    var tree = tree_new()
+    var rng = seed
+    if rng == 0 { rng = 12345 }
+
+    // Create root
+    tree = tree_add_root_v(tree, 65)
+
+    // Add remaining nodes
+    var i = 1
+    while i < n_nodes {
+        // Pick a random existing node as parent
+        rng = (rng * 1103515245 + 12345) % 2147483647
+        let parent = rng % tree.n_nodes
+
+        // Check if parent can have more children
+        if tree.nodes[parent].n_children < max_children {
+            tree = tree_add_child_v(tree, parent, 65 + i)
+        } else {
+            // Try to find another parent
+            var found = 0
+            var try_idx = 0
+            while try_idx < tree.n_nodes {
+                if tree.nodes[try_idx].n_children < max_children {
+                    tree = tree_add_child_v(tree, try_idx, 65 + i)
+                    found = 1
+                    try_idx = tree.n_nodes  // Break
+                }
+                try_idx = try_idx + 1
+            }
+            if found == 0 {
+                i = n_nodes  // Can't add more, stop
+            }
+        }
+        i = i + 1
+    }
+
+    return tree
+}
+
+// ============================================================================
+// Math Helpers
+// ============================================================================
+
+fn sin_approx(x: f64) -> f64 with Mut, Div {
+    var xx = x
+    while xx > 3.14159 { xx = xx - 6.28318 }
+    while xx < -3.14159 { xx = xx + 6.28318 }
+    let x2 = xx * xx
+    let x3 = x2 * xx
+    let x5 = x3 * x2
+    return xx - x3 * 0.16667 + x5 * 0.00833
+}
+
+fn cos_approx(x: f64) -> f64 with Mut, Div {
+    return sin_approx(x + 1.5708)
+}
+
+// ============================================================================
+// Main Demo
+// ============================================================================
+
+fn main() -> i32 with IO, Mut, Div, Panic {
+    print("Tree Layout Demo\n")
+    print("================\n\n")
+
+    // Create a binary tree of depth 4
+    var tree = tree_create_binary(4)
+
+    print("Created binary tree with ")
+    print_i32(tree.n_nodes)
+    print(" nodes, depth ")
+    print_i32(tree_depth(&tree))
+    print("\n\n")
+
+    // Apply simple layout
+    print("=== Simple Layout ===\n")
+    tree = tree_layout_simple_v(tree)
+    print_tree_positions(&tree)
+
+    // Apply radial layout
+    print("\n=== Radial Layout ===\n")
+    tree = tree_layout_radial_v(tree, 5.0)
+    print_tree_positions(&tree)
+
+    // Apply Reingold-Tilford layout
+    print("\n=== Reingold-Tilford Layout ===\n")
+    tree = tree_layout_reingold_tilford_v(tree)
+    print_tree_positions(&tree)
+
+    // Create and layout a random tree
+    print("\n=== Random Tree (10 nodes, max 3 children) ===\n")
+    var random_tree = tree_create_random(10, 3, 42)
+    random_tree = tree_layout_simple_v(random_tree)
+    print_tree_positions(&random_tree)
+
+    return 0
+}
+
+fn print_tree_positions(tree: &Tree) with IO, Mut, Div, Panic {
+    var i = 0
+    while i < tree.n_nodes {
+        let node = tree.nodes[i]
+        print("  ")
+        print_char(node.label_code)
+        print(" (depth ")
+        print_i32(node.depth)
+        print("): (")
+        print_f64(node.x)
+        print(", ")
+        print_f64(node.y)
+        print(")")
+        if node.parent >= 0 {
+            print(" parent=")
+            print_char(tree.nodes[node.parent].label_code)
+        } else {
+            print(" [root]")
+        }
+        print("\n")
+        i = i + 1
+    }
+}
+
+// ============================================================================
+// Print Helpers
+// ============================================================================
+
+fn print_i32(x: i32) with IO, Div, Panic {
+    if x == 0 { print("0"); return }
+    if x < 0 { print("-"); print_i32_unsigned(0 - x) }
+    else { print_i32_unsigned(x) }
+}
+
+fn print_i32_unsigned(x: i32) with IO, Div, Panic {
+    if x == 0 { return }
+    let digit = x % 10
+    let rest = x / 10
+    if rest > 0 { print_i32_unsigned(rest) }
+    print_digit(digit)
+}
+
+fn print_digit(d: i32) with IO {
+    if d == 0 { print("0"); return }
+    if d == 1 { print("1"); return }
+    if d == 2 { print("2"); return }
+    if d == 3 { print("3"); return }
+    if d == 4 { print("4"); return }
+    if d == 5 { print("5"); return }
+    if d == 6 { print("6"); return }
+    if d == 7 { print("7"); return }
+    if d == 8 { print("8"); return }
+    if d == 9 { print("9"); return }
+}
+
+fn print_f64(x: f64) with IO, Div, Panic {
+    if x < 0.0 { print("-"); print_f64_pos(0.0 - x) }
+    else { print_f64_pos(x) }
+}
+
+fn print_f64_pos(x: f64) with IO, Div, Panic {
+    let int_part = x as i32
+    print_i32(int_part)
+    print(".")
+    let frac = x - (int_part as f64)
+    let frac_scaled = (frac * 100.0) as i32
+    if frac_scaled < 10 { print("0") }
+    if frac_scaled < 0 { print("00") }
+    else { print_i32_unsigned(frac_scaled) }
+}
+
+fn print_char(code: i32) with IO {
+    if code == 65 { print("A"); return }
+    if code == 66 { print("B"); return }
+    if code == 67 { print("C"); return }
+    if code == 68 { print("D"); return }
+    if code == 69 { print("E"); return }
+    if code == 70 { print("F"); return }
+    if code == 71 { print("G"); return }
+    if code == 72 { print("H"); return }
+    if code == 73 { print("I"); return }
+    if code == 74 { print("J"); return }
+    if code == 75 { print("K"); return }
+    if code == 76 { print("L"); return }
+    if code == 77 { print("M"); return }
+    if code == 78 { print("N"); return }
+    if code == 79 { print("O"); return }
+    print("?")
+}

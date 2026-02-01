@@ -3,7 +3,7 @@
 // Tests compilation of realistic drug-phenotype-disease analysis code
 // using actual ChEBI, HP, MONDO, and GO ontology terms.
 
-use super::common::{TestHarness, fixtures};
+use super::common::{fixtures, TestHarness};
 use std::time::Duration;
 
 // ============================================================================
@@ -291,7 +291,7 @@ type TimeUnit = uo:time_unit;
 struct Dosage {
     drug: Drug,
     amount: f64,
-    unit: MassUnit,
+    mass_unit: MassUnit,
     frequency: TimeUnit,
 }
 
@@ -304,7 +304,7 @@ fn main() {
     let dose = Dosage {
         drug: chebi:15365,     // Aspirin
         amount: 325.0,
-        unit: uo:0000022,      // Milligram
+        mass_unit: uo:0000022,      // Milligram
         frequency: uo:0000032, // Hour (every 4 hours)
     };
 

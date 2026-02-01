@@ -1,0 +1,511 @@
+// 31_interactive_plot.sio - Interactive plotting with zoom and pan
+//
+// Provides interactive visualization capabilities:
+// - Zoom in/out (mouse wheel or keyboard)
+// - Pan (mouse drag or arrow keys)
+// - Reset view
+// - Dynamic data updates
+//
+// NOTE: Full interactivity requires raw terminal mode and event loop.
+// This implementation provides the core zoom/pan logic that can be
+// integrated with input events when available.
+
+import "stdlib/math/core.sio"
+import "00_canvas.sio"
+import "01_colors.sio"
+import "02_drawing.sio"
+import "03_text.sio"
+import "10_axes.sio"
+import "11_scatter.sio"
+import "12_line_plot.sio"
+import "30_input.sio"
+
+// ============================================================================
+// Interactive Plot State
+// ============================================================================
+
+struct InteractivePlot {
+    // Viewport (current view bounds)
+    viewport: Viewport,
+
+    // Original viewport (for reset)
+    original_viewport: Viewport,
+
+    // Zoom state
+    zoom_level: f64,     // 1.0 = original, 2.0 = 2x zoom, 0.5 = zoom out
+    min_zoom: f64,       // Minimum zoom (e.g., 0.1)
+    max_zoom: f64,       // Maximum zoom (e.g., 10.0)
+
+    // Pan state
+    pan_x: f64,          // Pan offset in world coordinates
+    pan_y: f64,
+
+    // Mouse interaction
+    mouse_down: i32,     // 1 if mouse button is down
+    drag_start_x: i32,   // Drag start position (canvas coords)
+    drag_start_y: i32,
+    last_mouse_x: i32,
+    last_mouse_y: i32,
+
+    // Keyboard interaction
+    pan_speed: f64,      // Pan speed for keyboard arrows
+
+    // Visual feedback
+    show_controls: i32,  // 1 to show control help, 0 to hide
+    dirty: i32           // 1 if needs redraw, 0 if clean
+}
+
+fn interactive_plot_new(viewport: Viewport) -> InteractivePlot {
+    return InteractivePlot {
+        viewport: viewport,
+        original_viewport: viewport,
+        zoom_level: 1.0,
+        min_zoom: 0.1,
+        max_zoom: 10.0,
+        pan_x: 0.0,
+        pan_y: 0.0,
+        mouse_down: 0,
+        drag_start_x: 0,
+        drag_start_y: 0,
+        last_mouse_x: 0,
+        last_mouse_y: 0,
+        pan_speed: 0.1,
+        show_controls: 1,
+        dirty: 1
+    }
+}
+
+// ============================================================================
+// Zoom Operations
+// ============================================================================
+
+// Zoom in by a factor (e.g., 1.2 for 20% zoom in)
+fn plot_zoom_in(plot: &!InteractivePlot, factor: f64) with Mut, Div {
+    let new_zoom = plot.zoom_level * factor
+
+    // Clamp to limits
+    if new_zoom > plot.max_zoom {
+        plot.zoom_level = plot.max_zoom
+    } else {
+        plot.zoom_level = new_zoom
+    }
+
+    // Update viewport based on zoom
+    plot_update_viewport(plot)
+    plot.dirty = 1
+}
+
+// Zoom out by a factor
+fn plot_zoom_out(plot: &!InteractivePlot, factor: f64) with Mut, Div {
+    let new_zoom = plot.zoom_level / factor
+
+    // Clamp to limits
+    if new_zoom < plot.min_zoom {
+        plot.zoom_level = plot.min_zoom
+    } else {
+        plot.zoom_level = new_zoom
+    }
+
+    // Update viewport
+    plot_update_viewport(plot)
+    plot.dirty = 1
+}
+
+// Zoom to specific level
+fn plot_set_zoom(plot: &!InteractivePlot, zoom: f64) with Mut {
+    // Clamp
+    if zoom < plot.min_zoom {
+        plot.zoom_level = plot.min_zoom
+    } else { if zoom > plot.max_zoom {
+        plot.zoom_level = plot.max_zoom
+    } else {
+        plot.zoom_level = zoom
+    }}
+
+    plot_update_viewport(plot)
+    plot.dirty = 1
+}
+
+// Zoom centered on a specific point (world coordinates)
+fn plot_zoom_at_point(
+    plot: &!InteractivePlot,
+    world_x: f64,
+    world_y: f64,
+    factor: f64
+) with Mut, Div {
+    // Calculate offset from center before zoom
+    let vp = &plot.viewport
+    let center_x = (vp.x_min + vp.x_max) / 2.0
+    let center_y = (vp.y_min + vp.y_max) / 2.0
+    let offset_x = world_x - center_x
+    let offset_y = world_y - center_y
+
+    // Apply zoom
+    let old_zoom = plot.zoom_level
+    plot_zoom_in(plot, factor)
+    let zoom_ratio = plot.zoom_level / old_zoom
+
+    // Adjust pan to keep point centered
+    plot.pan_x = plot.pan_x + offset_x * (1.0 - zoom_ratio)
+    plot.pan_y = plot.pan_y + offset_y * (1.0 - zoom_ratio)
+
+    plot_update_viewport(plot)
+    plot.dirty = 1
+}
+
+// ============================================================================
+// Pan Operations
+// ============================================================================
+
+// Pan by offset in world coordinates
+fn plot_pan(plot: &!InteractivePlot, dx: f64, dy: f64) with Mut {
+    plot.pan_x = plot.pan_x + dx
+    plot.pan_y = plot.pan_y + dy
+
+    plot_update_viewport(plot)
+    plot.dirty = 1
+}
+
+// Pan to center on a specific point
+fn plot_center_on(plot: &!InteractivePlot, world_x: f64, world_y: f64) with Mut, Div {
+    let vp = &plot.viewport
+    let center_x = (vp.x_min + vp.x_max) / 2.0
+    let center_y = (vp.y_min + vp.y_max) / 2.0
+
+    plot.pan_x = plot.pan_x + (world_x - center_x)
+    plot.pan_y = plot.pan_y + (world_y - center_y)
+
+    plot_update_viewport(plot)
+    plot.dirty = 1
+}
+
+// Reset view to original
+fn plot_reset_view(plot: &!InteractivePlot) with Mut {
+    plot.zoom_level = 1.0
+    plot.pan_x = 0.0
+    plot.pan_y = 0.0
+
+    plot.viewport = plot.original_viewport
+    plot.dirty = 1
+}
+
+// ============================================================================
+// Viewport Update
+// ============================================================================
+
+// Update viewport based on zoom and pan
+fn plot_update_viewport(plot: &!InteractivePlot) with Mut, Div {
+    let orig = &plot.original_viewport
+
+    // Calculate width and height based on zoom
+    let orig_width = orig.x_max - orig.x_min
+    let orig_height = orig.y_max - orig.y_min
+
+    let new_width = orig_width / plot.zoom_level
+    let new_height = orig_height / plot.zoom_level
+
+    // Calculate center with pan offset
+    let orig_center_x = (orig.x_min + orig.x_max) / 2.0
+    let orig_center_y = (orig.y_min + orig.y_max) / 2.0
+
+    let new_center_x = orig_center_x + plot.pan_x
+    let new_center_y = orig_center_y + plot.pan_y
+
+    // Update viewport bounds
+    plot.viewport.x_min = new_center_x - new_width / 2.0
+    plot.viewport.x_max = new_center_x + new_width / 2.0
+    plot.viewport.y_min = new_center_y - new_height / 2.0
+    plot.viewport.y_max = new_center_y + new_height / 2.0
+}
+
+// ============================================================================
+// Mouse Event Handling
+// ============================================================================
+
+// Handle mouse press
+fn plot_on_mouse_press(plot: &!InteractivePlot, evt: &MouseEvent) with Mut {
+    if evt.button == BUTTON_LEFT() {
+        plot.mouse_down = 1
+        plot.drag_start_x = evt.x
+        plot.drag_start_y = evt.y
+        plot.last_mouse_x = evt.x
+        plot.last_mouse_y = evt.y
+    }
+}
+
+// Handle mouse release
+fn plot_on_mouse_release(plot: &!InteractivePlot, evt: &MouseEvent) with Mut {
+    if evt.button == BUTTON_LEFT() {
+        plot.mouse_down = 0
+    }
+}
+
+// Handle mouse move (pan if dragging)
+fn plot_on_mouse_move(plot: &!InteractivePlot, evt: &MouseEvent) with Mut, Div {
+    if plot.mouse_down == 1 {
+        // Calculate delta in canvas pixels
+        let dx_pixels = evt.x - plot.last_mouse_x
+        let dy_pixels = evt.y - plot.last_mouse_y
+
+        // Convert to world coordinates
+        let vp = &plot.viewport
+        let world_width = vp.x_max - vp.x_min
+        let world_height = vp.y_max - vp.y_min
+
+        let dx_world = ((dx_pixels as f64) / (vp.canvas_width as f64)) * world_width
+        let dy_world = ((dy_pixels as f64) / (vp.canvas_height as f64)) * world_height
+
+        // Pan (note: invert y since canvas y increases downward)
+        plot_pan(plot, 0.0 - dx_world, dy_world)
+
+        plot.last_mouse_x = evt.x
+        plot.last_mouse_y = evt.y
+    }
+}
+
+// Handle mouse scroll (zoom)
+fn plot_on_mouse_scroll(plot: &!InteractivePlot, evt: &MouseEvent) with Mut, Div {
+    // Convert mouse position to world coordinates
+    let world_pos = canvas_to_world(&plot.viewport, evt.x, evt.y)
+
+    // Zoom factor
+    let factor = if evt.event_type == MOUSE_SCROLL_UP() {
+        1.2  // Zoom in
+    } else {
+        1.2  // Zoom out (will be inverted)
+    }
+
+    // Zoom at mouse position
+    if evt.event_type == MOUSE_SCROLL_UP() {
+        plot_zoom_at_point(plot, world_pos.0, world_pos.1, factor)
+    } else {
+        plot_zoom_out(plot, factor)
+    }
+}
+
+// ============================================================================
+// Keyboard Event Handling
+// ============================================================================
+
+// Handle key press
+fn plot_on_key_press(plot: &!InteractivePlot, evt: &KeyEvent) with Mut, Div {
+    // Arrow keys for panning
+    if evt.key_code == KEY_LEFT() {
+        let vp = &plot.viewport
+        let pan_amount = (vp.x_max - vp.x_min) * plot.pan_speed
+        plot_pan(plot, 0.0 - pan_amount, 0.0)
+    }
+
+    if evt.key_code == KEY_RIGHT() {
+        let vp = &plot.viewport
+        let pan_amount = (vp.x_max - vp.x_min) * plot.pan_speed
+        plot_pan(plot, pan_amount, 0.0)
+    }
+
+    if evt.key_code == KEY_UP() {
+        let vp = &plot.viewport
+        let pan_amount = (vp.y_max - vp.y_min) * plot.pan_speed
+        plot_pan(plot, 0.0, pan_amount)
+    }
+
+    if evt.key_code == KEY_DOWN() {
+        let vp = &plot.viewport
+        let pan_amount = (vp.y_max - vp.y_min) * plot.pan_speed
+        plot_pan(plot, 0.0, 0.0 - pan_amount)
+    }
+
+    // '+' or '=' for zoom in
+    if evt.key_code == 43 {  // '+'
+        plot_zoom_in(plot, 1.2)
+    }
+    if evt.key_code == 61 {  // '='
+        plot_zoom_in(plot, 1.2)
+    }
+
+    // '-' for zoom out
+    if evt.key_code == 45 {  // '-'
+        plot_zoom_out(plot, 1.2)
+    }
+
+    // 'r' for reset
+    if evt.key_code == 114 {  // 'r'
+        plot_reset_view(plot)
+    }
+
+    // 'h' for toggle help
+    if evt.key_code == 104 {  // 'h'
+        plot.show_controls = if plot.show_controls == 1 { 0 } else { 1 }
+        plot.dirty = 1
+    }
+}
+
+// ============================================================================
+// Rendering with Controls
+// ============================================================================
+
+// Draw control hints
+fn plot_draw_controls(canvas: Canvas, plot: &InteractivePlot) -> Canvas with Mut, Panic {
+    if plot.show_controls == 0 {
+        return canvas
+    }
+
+    var c = canvas
+
+    // Control panel in bottom-right corner
+    let x = 50
+    let y = 25
+
+    let style = text_style_colored(COLOR_YELLOW())
+
+    c = draw_text(c, x, y, "Controls:", style)
+    c = draw_text(c, x, y + 1, "  Arrows: Pan", style)
+    c = draw_text(c, x, y + 2, "  +/-: Zoom", style)
+    c = draw_text(c, x, y + 3, "  r: Reset", style)
+    c = draw_text(c, x, y + 4, "  h: Hide", style)
+
+    return c
+}
+
+// Draw zoom/pan indicator
+fn plot_draw_indicator(canvas: Canvas, plot: &InteractivePlot) -> Canvas with Mut, Panic, Div {
+    var c = canvas
+
+    let style = text_style_colored(COLOR_CYAN())
+
+    // Zoom level
+    c = draw_text(c, 2, 28, "Zoom:", style)
+
+    // Convert zoom to string (simplified)
+    let zoom_int = (plot.zoom_level * 10.0) as i32
+    c = draw_text(c, 8, 28, "x.x", style)
+
+    return c
+}
+
+// ============================================================================
+// Example/Test Function
+// ============================================================================
+
+fn main() -> i32 with IO, Mut, Panic, Div {
+    print("\x1b[2J\x1b[H")  // Clear screen
+    print("=== Interactive Plot Module Test ===\n\n")
+
+    // Create viewport
+    let viewport = viewport_new(-10.0, 10.0, -10.0, 10.0, 5, 2, 70, 25)
+
+    // Create interactive plot
+    var plot = interactive_plot_new(viewport)
+
+    print("Interactive plot created:\n")
+    print("  Initial zoom: 1.0x\n")
+    print("  Pan: (0.0, 0.0)\n\n")
+
+    print("Operations:\n")
+
+    // Test zoom in
+    plot_zoom_in(&!plot, 1.5)
+    print("  • Zoom in 1.5x: zoom_level = ")
+    print_f64(plot.zoom_level)
+    print("\n")
+
+    // Test pan
+    plot_pan(&!plot, 2.0, 3.0)
+    print("  • Pan (2.0, 3.0): pan = (")
+    print_f64(plot.pan_x)
+    print(", ")
+    print_f64(plot.pan_y)
+    print(")\n")
+
+    // Test reset
+    plot_reset_view(&!plot)
+    print("  • Reset: zoom_level = ")
+    print_f64(plot.zoom_level)
+    print("\n\n")
+
+    print("Event handlers:\n")
+    print("  • plot_on_mouse_press() - Start drag\n")
+    print("  • plot_on_mouse_move() - Pan while dragging\n")
+    print("  • plot_on_mouse_scroll() - Zoom at mouse position\n")
+    print("  • plot_on_key_press() - Arrow keys, +/-, r, h\n\n")
+
+    print("Keyboard controls:\n")
+    print("  Arrows - Pan\n")
+    print("  +/-    - Zoom in/out\n")
+    print("  r      - Reset view\n")
+    print("  h      - Toggle help\n\n")
+
+    print("Mouse controls:\n")
+    print("  Drag   - Pan\n")
+    print("  Scroll - Zoom at cursor\n")
+
+    return 0
+}
+
+// Helper functions
+
+fn print_f64(x: f64) with IO, Div, Panic {
+    if x < 0.0 {
+        print("-")
+        print_f64_unsigned(0.0 - x)
+    } else {
+        print_f64_unsigned(x)
+    }
+}
+
+fn print_f64_unsigned(x: f64) with IO, Div, Panic {
+    let int_part = x as i32
+    print_i32(int_part)
+    print(".")
+
+    let frac = x - (int_part as f64)
+    let scaled = (frac * 100.0) as i32
+    if scaled < 10 {
+        print("0")
+    }
+    print_i32(scaled)
+}
+
+fn print_i32(x: i32) with IO, Div, Panic {
+    if x == 0 {
+        print("0")
+        return
+    }
+
+    if x < 0 {
+        print("-")
+        print_i32_unsigned(0 - x)
+    } else {
+        print_i32_unsigned(x)
+    }
+}
+
+fn print_i32_unsigned(x: i32) with IO, Div, Panic {
+    if x == 0 {
+        return
+    }
+
+    let digit = x % 10
+    let rest = x / 10
+
+    if rest > 0 {
+        print_i32_unsigned(rest)
+    }
+
+    let ch = 48 + digit
+    print_char(ch)
+}
+
+fn print_char(code: i32) with IO {
+    if code == 48 { print("0") }
+    else { if code == 49 { print("1") }
+    else { if code == 50 { print("2") }
+    else { if code == 51 { print("3") }
+    else { if code == 52 { print("4") }
+    else { if code == 53 { print("5") }
+    else { if code == 54 { print("6") }
+    else { if code == 55 { print("7") }
+    else { if code == 56 { print("8") }
+    else { if code == 57 { print("9") }
+    else { print("?") }
+    }}}}}}}}}}
+}

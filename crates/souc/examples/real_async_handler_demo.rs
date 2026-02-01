@@ -14,7 +14,7 @@
 use sounio::effects::handler_capability::{
     Continuation, HandlerCapability, HandlerResult, HandlerState,
 };
-use sounio::effects::handlers::async_handler_real::RealAsyncHandler;
+use sounio::effects::handlers::RealAsyncHandler;
 use sounio::interp::Value;
 
 fn main() {
@@ -128,7 +128,7 @@ fn main() {
         println!(
             "  {} ({}) -> {}",
             op_spec.name,
-            op_spec.params.join(", "),
+            op_spec.param_types.join(", "),
             op_spec.return_type
         );
         if let Some(factor) = op_spec.confidence_factor {

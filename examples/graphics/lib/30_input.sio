@@ -1,0 +1,420 @@
+// 30_input.sio - Terminal input handling (mouse and keyboard)
+//
+// Provides terminal input event handling for interactive graphics.
+// Uses ANSI escape sequences for mouse tracking and keyboard events.
+//
+// IMPORTANT: This module requires raw terminal mode for full functionality.
+// The current implementation provides a simplified interface that works
+// within Sounio's current I/O capabilities.
+
+import "stdlib/math/core.sio"
+
+// ============================================================================
+// Event Types
+// ============================================================================
+
+// Mouse event types
+fn MOUSE_PRESS() -> i32 { return 0 }
+fn MOUSE_RELEASE() -> i32 { return 1 }
+fn MOUSE_MOVE() -> i32 { return 2 }
+fn MOUSE_DRAG() -> i32 { return 3 }
+fn MOUSE_SCROLL_UP() -> i32 { return 4 }
+fn MOUSE_SCROLL_DOWN() -> i32 { return 5 }
+
+// Mouse buttons
+fn BUTTON_LEFT() -> i32 { return 0 }
+fn BUTTON_RIGHT() -> i32 { return 1 }
+fn BUTTON_MIDDLE() -> i32 { return 2 }
+
+// Keyboard modifiers
+fn MOD_NONE() -> i32 { return 0 }
+fn MOD_SHIFT() -> i32 { return 1 }
+fn MOD_CTRL() -> i32 { return 2 }
+fn MOD_ALT() -> i32 { return 4 }
+fn MOD_META() -> i32 { return 8 }
+
+// Special keys
+fn KEY_ESCAPE() -> i32 { return 27 }
+fn KEY_ENTER() -> i32 { return 13 }
+fn KEY_TAB() -> i32 { return 9 }
+fn KEY_BACKSPACE() -> i32 { return 8 }
+fn KEY_SPACE() -> i32 { return 32 }
+fn KEY_UP() -> i32 { return 1000 }
+fn KEY_DOWN() -> i32 { return 1001 }
+fn KEY_LEFT() -> i32 { return 1002 }
+fn KEY_RIGHT() -> i32 { return 1003 }
+
+// ============================================================================
+// Event Structures
+// ============================================================================
+
+struct MouseEvent {
+    event_type: i32,  // MOUSE_PRESS, MOUSE_RELEASE, etc.
+    button: i32,      // BUTTON_LEFT, BUTTON_RIGHT, BUTTON_MIDDLE
+    x: i32,           // Column (0-based)
+    y: i32,           // Row (0-based)
+    modifiers: i32    // MOD_SHIFT | MOD_CTRL | etc.
+}
+
+fn mouse_event_new(event_type: i32, button: i32, x: i32, y: i32, modifiers: i32) -> MouseEvent {
+    return MouseEvent {
+        event_type: event_type,
+        button: button,
+        x: x,
+        y: y,
+        modifiers: modifiers
+    }
+}
+
+fn mouse_event_none() -> MouseEvent {
+    return mouse_event_new(0, 0, 0, 0, 0)
+}
+
+struct KeyEvent {
+    key_code: i32,    // ASCII code or KEY_* constant
+    modifiers: i32,   // MOD_SHIFT | MOD_CTRL | etc.
+    is_char: i32      // 1 if printable character, 0 if special key
+}
+
+fn key_event_new(key_code: i32, modifiers: i32, is_char: i32) -> KeyEvent {
+    return KeyEvent {
+        key_code: key_code,
+        modifiers: modifiers,
+        is_char: is_char
+    }
+}
+
+fn key_event_none() -> KeyEvent {
+    return key_event_new(0, 0, 0)
+}
+
+// ============================================================================
+// Mouse Tracking Control
+// ============================================================================
+
+// Enable mouse tracking in terminal
+// Sends ANSI escape sequences to enable mouse reporting
+fn enable_mouse_tracking() with IO {
+    // Enable mouse button press/release tracking (X10 mode)
+    print("\x1b[?1000h")
+
+    // Enable mouse motion tracking
+    print("\x1b[?1002h")
+
+    // Enable SGR extended mouse mode (better coordinate reporting)
+    print("\x1b[?1006h")
+
+    // Enable alternate scroll mode
+    print("\x1b[?1015h")
+}
+
+// Disable mouse tracking
+fn disable_mouse_tracking() with IO {
+    print("\x1b[?1000l")
+    print("\x1b[?1002l")
+    print("\x1b[?1006l")
+    print("\x1b[?1015l")
+}
+
+// Enable raw mode (no line buffering, no echo)
+// NOTE: This is a simplified version using ANSI codes
+// Full implementation would require FFI to termios
+fn enable_raw_mode() with IO {
+    // Disable line buffering and echo
+    print("\x1b[?25l")  // Hide cursor
+    print("\x1b[?7l")   // Disable line wrapping
+}
+
+// Disable raw mode
+fn disable_raw_mode() with IO {
+    print("\x1b[?25h")  // Show cursor
+    print("\x1b[?7h")   // Enable line wrapping
+}
+
+// ============================================================================
+// Input State Management
+// ============================================================================
+
+struct InputState {
+    mouse_enabled: i32,
+    raw_mode: i32,
+    last_mouse_x: i32,
+    last_mouse_y: i32,
+    last_button: i32,
+    button_pressed: i32  // 1 if button currently pressed, 0 otherwise
+}
+
+fn input_state_new() -> InputState {
+    return InputState {
+        mouse_enabled: 0,
+        raw_mode: 0,
+        last_mouse_x: 0,
+        last_mouse_y: 0,
+        last_button: 0,
+        button_pressed: 0
+    }
+}
+
+fn input_init(state: &!InputState) with IO, Mut {
+    enable_mouse_tracking()
+    enable_raw_mode()
+    state.mouse_enabled = 1
+    state.raw_mode = 1
+}
+
+fn input_cleanup(state: &!InputState) with IO, Mut {
+    if state.mouse_enabled == 1 {
+        disable_mouse_tracking()
+        state.mouse_enabled = 0
+    }
+    if state.raw_mode == 1 {
+        disable_raw_mode()
+        state.raw_mode = 0
+    }
+}
+
+// ============================================================================
+// Event Polling (Simplified)
+// ============================================================================
+
+// NOTE: These functions provide a simplified interface.
+// Full implementation would require:
+// 1. Non-blocking I/O (select/poll)
+// 2. Escape sequence parsing
+// 3. Raw terminal mode via termios
+
+// Poll for mouse event (returns mouse_event_none() if no event)
+fn poll_mouse_event(state: &!InputState) -> MouseEvent with Mut {
+    // SIMPLIFIED: In real implementation, this would:
+    // 1. Read from stdin with timeout
+    // 2. Parse ANSI escape sequences like "\x1b[<0;25;10M"
+    // 3. Extract button, x, y coordinates
+    // 4. Return MouseEvent
+
+    // For now, return no event
+    return mouse_event_none()
+}
+
+// Poll for keyboard event (returns key_event_none() if no event)
+fn poll_key_event() -> KeyEvent {
+    // SIMPLIFIED: In real implementation, this would:
+    // 1. Read from stdin with timeout
+    // 2. Parse escape sequences for special keys
+    // 3. Handle modifier keys (Ctrl, Alt, Shift)
+    // 4. Return KeyEvent
+
+    // For now, return no event
+    return key_event_none()
+}
+
+// Check if a specific key is currently pressed
+fn is_key_pressed(key_code: i32) -> i32 {
+    // SIMPLIFIED: Would require keyboard state tracking
+    return 0
+}
+
+// ============================================================================
+// Simulated Input Events (for testing/demos)
+// ============================================================================
+
+// Generate a simulated mouse click event
+fn simulate_mouse_click(x: i32, y: i32, button: i32) -> MouseEvent {
+    return mouse_event_new(MOUSE_PRESS(), button, x, y, MOD_NONE())
+}
+
+// Generate a simulated mouse drag event
+fn simulate_mouse_drag(x1: i32, y1: i32, x2: i32, y2: i32) -> [MouseEvent; 3] with Mut {
+    var events: [MouseEvent; 3] = [mouse_event_none(); 3]
+
+    // Press at start
+    events[0] = mouse_event_new(MOUSE_PRESS(), BUTTON_LEFT(), x1, y1, MOD_NONE())
+
+    // Drag to end
+    events[1] = mouse_event_new(MOUSE_DRAG(), BUTTON_LEFT(), x2, y2, MOD_NONE())
+
+    // Release at end
+    events[2] = mouse_event_new(MOUSE_RELEASE(), BUTTON_LEFT(), x2, y2, MOD_NONE())
+
+    return events
+}
+
+// Generate simulated scroll event
+fn simulate_scroll(x: i32, y: i32, direction: i32) -> MouseEvent {
+    let event_type = if direction > 0 {
+        MOUSE_SCROLL_UP()
+    } else {
+        MOUSE_SCROLL_DOWN()
+    }
+
+    return mouse_event_new(event_type, BUTTON_MIDDLE(), x, y, MOD_NONE())
+}
+
+// ============================================================================
+// Event Handlers (Callback Pattern)
+// ============================================================================
+
+// Event handler function type
+// Note: Function pointers in Sounio use this syntax
+// type MouseHandler = fn(&!InputState, &MouseEvent) -> i32
+// type KeyHandler = fn(&KeyEvent) -> i32
+
+// Simple event loop with handlers
+// Returns 0 to continue, 1 to exit
+fn event_loop_step(
+    state: &!InputState,
+    on_mouse: fn(&!InputState, &MouseEvent) -> i32,
+    on_key: fn(&KeyEvent) -> i32
+) -> i32 with Mut {
+    // Poll for mouse event
+    let mouse_evt = poll_mouse_event(state)
+    if mouse_evt.event_type != 0 {
+        let result = on_mouse(state, &mouse_evt)
+        if result == 1 {
+            return 1  // Exit requested
+        }
+    }
+
+    // Poll for keyboard event
+    let key_evt = poll_key_event()
+    if key_evt.key_code != 0 {
+        let result = on_key(&key_evt)
+        if result == 1 {
+            return 1  // Exit requested
+        }
+    }
+
+    return 0  // Continue
+}
+
+// ============================================================================
+// Utility Functions
+// ============================================================================
+
+// Check if mouse event is at given position (with tolerance)
+fn mouse_event_at(evt: &MouseEvent, x: i32, y: i32, tolerance: i32) -> i32 with Panic {
+    let dx = if evt.x > x { evt.x - x } else { x - evt.x }
+    let dy = if evt.y > y { evt.y - y } else { y - evt.y }
+
+    if dx <= tolerance {
+        if dy <= tolerance {
+            return 1
+        }
+    }
+
+    return 0
+}
+
+// Check if mouse event is within rectangle
+fn mouse_event_in_rect(evt: &MouseEvent, x: i32, y: i32, width: i32, height: i32) -> i32 {
+    if evt.x >= x {
+        if evt.x < x + width {
+            if evt.y >= y {
+                if evt.y < y + height {
+                    return 1
+                }
+            }
+        }
+    }
+
+    return 0
+}
+
+// Check if modifier is active
+fn has_modifier(modifiers: i32, mod_flag: i32) -> i32 {
+    return if (modifiers & mod_flag) != 0 { 1 } else { 0 }
+}
+
+// Combine modifiers
+fn combine_modifiers(mod1: i32, mod2: i32) -> i32 {
+    return mod1 | mod2
+}
+
+// ============================================================================
+// Example/Test Function
+// ============================================================================
+
+fn main() -> i32 with IO, Mut {
+    print("=== Terminal Input Module Test ===\n\n")
+
+    // Create input state
+    var state = input_state_new()
+
+    print("Mouse tracking control:\n")
+    print("  • enable_mouse_tracking() - Enable ANSI mouse events\n")
+    print("  • disable_mouse_tracking() - Disable mouse tracking\n")
+    print("  • enable_raw_mode() - Raw terminal mode\n")
+    print("  • disable_raw_mode() - Normal terminal mode\n\n")
+
+    print("Event structures:\n")
+    print("  • MouseEvent: type, button, x, y, modifiers\n")
+    print("  • KeyEvent: key_code, modifiers, is_char\n\n")
+
+    print("Event polling (simplified interface):\n")
+    print("  • poll_mouse_event() - Returns MouseEvent or none\n")
+    print("  • poll_key_event() - Returns KeyEvent or none\n\n")
+
+    print("Simulated events for testing:\n")
+    let click = simulate_mouse_click(10, 5, BUTTON_LEFT())
+    print("  • Click at (10, 5): x=")
+    print_i32(click.x)
+    print(", y=")
+    print_i32(click.y)
+    print("\n")
+
+    let scroll = simulate_scroll(20, 10, 1)
+    print("  • Scroll up at (20, 10): type=")
+    print_i32(scroll.event_type)
+    print("\n\n")
+
+    print("NOTE: Full mouse/keyboard input requires raw terminal mode\n")
+    print("      and escape sequence parsing (future enhancement).\n")
+
+    return 0
+}
+
+// Helper function for printing integers
+fn print_i32(x: i32) with IO, Div, Panic {
+    if x == 0 {
+        print("0")
+        return
+    }
+
+    if x < 0 {
+        print("-")
+        print_i32_unsigned(0 - x)
+    } else {
+        print_i32_unsigned(x)
+    }
+}
+
+fn print_i32_unsigned(x: i32) with IO, Div, Panic {
+    if x == 0 {
+        return
+    }
+
+    let digit = x % 10
+    let rest = x / 10
+
+    if rest > 0 {
+        print_i32_unsigned(rest)
+    }
+
+    // Print digit
+    let ch = 48 + digit  // '0' is ASCII 48
+    print_char(ch)
+}
+
+fn print_char(code: i32) with IO {
+    if code == 48 { print("0") }
+    else { if code == 49 { print("1") }
+    else { if code == 50 { print("2") }
+    else { if code == 51 { print("3") }
+    else { if code == 52 { print("4") }
+    else { if code == 53 { print("5") }
+    else { if code == 54 { print("6") }
+    else { if code == 55 { print("7") }
+    else { if code == 56 { print("8") }
+    else { if code == 57 { print("9") }
+    else { print("?") }
+    }}}}}}}}}}
+}

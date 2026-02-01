@@ -1,0 +1,436 @@
+// 23_scatter3d.sio - 3D scatter plot visualization
+//
+// Provides 3D scatter plotting with various markers, colors,
+// and projection modes for visualizing point clouds in 3D space.
+
+import "stdlib/math/core.sio"
+import "00_canvas.sio"
+import "01_colors.sio"
+import "02_drawing.sio"
+import "10_axes.sio"
+import "20_projection.sio"
+
+// ============================================================================
+// 3D Scatter Point Structure
+// ============================================================================
+
+struct Point3D {
+    pos: Vec3D,
+    marker: i32,  // Character code for marker symbol
+    color: i32,   // ANSI color code (0-15)
+    size: i32     // Size: 1=small, 2=medium, 3=large
+}
+
+fn point3d_new(pos: Vec3D, marker: i32, color: i32, size: i32) -> Point3D {
+    return Point3D {
+        pos: pos,
+        marker: marker,
+        color: color,
+        size: size
+    }
+}
+
+// Default point with circle marker
+fn point3d_default(pos: Vec3D) -> Point3D {
+    return point3d_new(pos, MARKER_CIRCLE(), COLOR_CYAN(), 1)
+}
+
+// ============================================================================
+// Marker Constants
+// ============================================================================
+
+fn MARKER_DOT() -> i32 { return 9679 }        // ●
+fn MARKER_CIRCLE() -> i32 { return 9675 }     // ○
+fn MARKER_SQUARE() -> i32 { return 9632 }     // ■
+fn MARKER_DIAMOND() -> i32 { return 9670 }    // ◆
+fn MARKER_STAR() -> i32 { return 9733 }       // ★
+fn MARKER_PLUS() -> i32 { return 43 }         // +
+fn MARKER_CROSS() -> i32 { return 120 }       // x
+fn MARKER_TRIANGLE() -> i32 { return 9650 }   // ▲
+
+// ============================================================================
+// 3D Scatter Plot Rendering
+// ============================================================================
+
+// Scatter plot with isometric projection
+fn scatter_plot_3d_isometric(
+    canvas: Canvas,
+    vp: &Viewport,
+    points: &[Point3D],
+    n_points: i32,
+    scale: f64
+) -> Canvas with Mut, Panic, Div {
+    var c = canvas
+
+    var i = 0
+    while i < n_points {
+        let pt = &points[i]
+
+        // Project 3D point to 2D
+        let projected = isometric_project_scaled(&pt.pos, scale)
+
+        // Transform to canvas coordinates
+        let canvas_pos = world_to_canvas(vp, projected.x, projected.y)
+        let px = canvas_pos.0
+        let py = canvas_pos.1
+
+        // Draw marker based on size
+        if pt.size == 1 {
+            // Small: single character
+            c = canvas_set_char(c, px, py, pt.marker, pt.color)
+        } else { if pt.size == 2 {
+            // Medium: 3x3 grid
+            c = canvas_set_char(c, px, py, pt.marker, pt.color)
+            c = canvas_set_char(c, px - 1, py, pt.marker, pt.color)
+            c = canvas_set_char(c, px + 1, py, pt.marker, pt.color)
+        } else {
+            // Large: 5x5 grid
+            c = canvas_set_char(c, px, py, pt.marker, pt.color)
+            c = canvas_set_char(c, px - 1, py, pt.marker, pt.color)
+            c = canvas_set_char(c, px + 1, py, pt.marker, pt.color)
+            c = canvas_set_char(c, px, py - 1, pt.marker, pt.color)
+            c = canvas_set_char(c, px, py + 1, pt.marker, pt.color)
+        }}
+
+        i = i + 1
+    }
+
+    return c
+}
+
+// Scatter plot with perspective projection
+fn scatter_plot_3d_perspective(
+    canvas: Canvas,
+    vp: &Viewport,
+    points: &[Point3D],
+    n_points: i32,
+    focal_length: f64
+) -> Canvas with Mut, Panic, Div {
+    var c = canvas
+
+    var i = 0
+    while i < n_points {
+        let pt = &points[i]
+
+        // Project 3D point to 2D
+        let projected = perspective_project(&pt.pos, focal_length)
+
+        // Transform to canvas coordinates
+        let canvas_pos = world_to_canvas(vp, projected.x, projected.y)
+        let px = canvas_pos.0
+        let py = canvas_pos.1
+
+        // Draw marker (perspective affects apparent size too)
+        let apparent_size = if pt.pos.z > 0.0 {
+            // Closer objects appear larger
+            if pt.size == 1 { 2 } else { if pt.size == 2 { 3 } else { 3 }}
+        } else {
+            // Further objects appear smaller
+            if pt.size >= 2 { 1 } else { 1 }
+        }
+
+        if apparent_size == 1 {
+            c = canvas_set_char(c, px, py, pt.marker, pt.color)
+        } else { if apparent_size == 2 {
+            c = canvas_set_char(c, px, py, pt.marker, pt.color)
+            c = canvas_set_char(c, px - 1, py, pt.marker, pt.color)
+            c = canvas_set_char(c, px + 1, py, pt.marker, pt.color)
+        } else {
+            c = canvas_set_char(c, px, py, pt.marker, pt.color)
+            c = canvas_set_char(c, px - 1, py, pt.marker, pt.color)
+            c = canvas_set_char(c, px + 1, py, pt.marker, pt.color)
+            c = canvas_set_char(c, px, py - 1, pt.marker, pt.color)
+            c = canvas_set_char(c, px, py + 1, pt.marker, pt.color)
+        }}
+
+        i = i + 1
+    }
+
+    return c
+}
+
+// Scatter plot with rotation
+fn scatter_plot_3d_rotated(
+    canvas: Canvas,
+    vp: &Viewport,
+    points: &[Point3D],
+    n_points: i32,
+    rotation: Vec3D,
+    scale: f64
+) -> Canvas with Mut, Panic, Div {
+    // Rotate all points
+    var rotated_points: [Point3D; 500] = [point3d_default(vec3d_zero()); 500]
+
+    var i = 0
+    while i < n_points {
+        let pt = &points[i]
+        let rotated_pos = rotate_xyz(&pt.pos, rotation.x, rotation.y, rotation.z)
+        rotated_points[i] = point3d_new(rotated_pos, pt.marker, pt.color, pt.size)
+        i = i + 1
+    }
+
+    // Plot rotated points
+    return scatter_plot_3d_isometric(canvas, vp, &rotated_points, n_points, scale)
+}
+
+// ============================================================================
+// Depth Sorting (for better visualization)
+// ============================================================================
+
+// Sort points by Z-depth (furthest first for correct occlusion)
+// Simple bubble sort - good enough for small point sets
+fn sort_points_by_depth(points: &![Point3D], n_points: i32) with Mut, Panic {
+    var i = 0
+    while i < n_points - 1 {
+        var j = 0
+        while j < n_points - i - 1 {
+            // Sort by z coordinate (furthest first)
+            if points[j].pos.z > points[j + 1].pos.z {
+                // Swap
+                let temp = points[j]
+                points[j] = points[j + 1]
+                points[j + 1] = temp
+            }
+            j = j + 1
+        }
+        i = i + 1
+    }
+}
+
+// Scatter plot with depth sorting
+fn scatter_plot_3d_depth_sorted(
+    canvas: Canvas,
+    vp: &Viewport,
+    points: &[Point3D],
+    n_points: i32,
+    scale: f64
+) -> Canvas with Mut, Panic, Div {
+    // Copy points to mutable array
+    var sorted_points: [Point3D; 500] = [point3d_default(vec3d_zero()); 500]
+
+    var i = 0
+    while i < n_points {
+        sorted_points[i] = points[i]
+        i = i + 1
+    }
+
+    // Sort by depth
+    sort_points_by_depth(&!sorted_points, n_points)
+
+    // Plot sorted points
+    return scatter_plot_3d_isometric(canvas, vp, &sorted_points, n_points, scale)
+}
+
+// ============================================================================
+// Color Mapping by Coordinate
+// ============================================================================
+
+// Color points based on Z coordinate
+fn colorize_by_z(
+    points: &![Point3D],
+    n_points: i32,
+    z_min: f64,
+    z_max: f64
+) with Mut, Panic, Div {
+    let range = z_max - z_min
+
+    var i = 0
+    while i < n_points {
+        let normalized = if range > 0.0001 {
+            (points[i].pos.z - z_min) / range
+        } else {
+            0.5
+        }
+
+        // Map to color gradient (blue -> green -> yellow -> red)
+        points[i].color = if normalized < 0.25 {
+            COLOR_BLUE()
+        } else { if normalized < 0.5 {
+            COLOR_CYAN()
+        } else { if normalized < 0.75 {
+            COLOR_YELLOW()
+        } else {
+            COLOR_RED()
+        }}}
+
+        i = i + 1
+    }
+}
+
+// Color points based on distance from origin
+fn colorize_by_distance(
+    points: &![Point3D],
+    n_points: i32
+) with Mut, Panic, Div {
+    // Find max distance
+    var max_dist = 0.0
+    var i = 0
+    while i < n_points {
+        let dist = vec3d_magnitude(&points[i].pos)
+        if dist > max_dist {
+            max_dist = dist
+        }
+        i = i + 1
+    }
+
+    // Colorize based on distance
+    i = 0
+    while i < n_points {
+        let dist = vec3d_magnitude(&points[i].pos)
+        let normalized = if max_dist > 0.0001 {
+            dist / max_dist
+        } else {
+            0.5
+        }
+
+        points[i].color = if normalized < 0.33 {
+            COLOR_GREEN()
+        } else { if normalized < 0.66 {
+            COLOR_YELLOW()
+        } else {
+            COLOR_RED()
+        }}
+
+        i = i + 1
+    }
+}
+
+// ============================================================================
+// Point Cloud Generators
+// ============================================================================
+
+// Generate random points in a cube
+fn generate_cube_points(
+    n_points: i32,
+    size: f64,
+    seed: i32
+) -> [Point3D; 500] with Mut, Panic {
+    var points: [Point3D; 500] = [point3d_default(vec3d_zero()); 500]
+
+    var i = 0
+    var rng = seed
+    while i < n_points {
+        // Simple LCG random number generator
+        rng = (rng * 1103515245 + 12345) % 2147483648
+        let x = ((rng % 1000) as f64 / 1000.0) * size - size / 2.0
+
+        rng = (rng * 1103515245 + 12345) % 2147483648
+        let y = ((rng % 1000) as f64 / 1000.0) * size - size / 2.0
+
+        rng = (rng * 1103515245 + 12345) % 2147483648
+        let z = ((rng % 1000) as f64 / 1000.0) * size - size / 2.0
+
+        points[i] = point3d_new(
+            vec3d_new(x, y, z),
+            MARKER_DOT(),
+            COLOR_CYAN(),
+            1
+        )
+
+        i = i + 1
+    }
+
+    return points
+}
+
+// Generate points on a sphere surface
+fn generate_sphere_points(
+    n_points: i32,
+    radius: f64,
+    seed: i32
+) -> [Point3D; 500] with Mut, Panic {
+    var points: [Point3D; 500] = [point3d_default(vec3d_zero()); 500]
+
+    var i = 0
+    var rng = seed
+    while i < n_points {
+        // Random spherical coordinates
+        rng = (rng * 1103515245 + 12345) % 2147483648
+        let theta = ((rng % 1000) as f64 / 1000.0) * 3.14159265359 * 2.0
+
+        rng = (rng * 1103515245 + 12345) % 2147483648
+        let phi = ((rng % 1000) as f64 / 1000.0) * 3.14159265359
+
+        // Convert to Cartesian
+        let x = radius * sin(phi) * cos(theta)
+        let y = radius * sin(phi) * sin(theta)
+        let z = radius * cos(phi)
+
+        points[i] = point3d_new(
+            vec3d_new(x, y, z),
+            MARKER_DOT(),
+            COLOR_GREEN(),
+            1
+        )
+
+        i = i + 1
+    }
+
+    return points
+}
+
+// Generate points on a helix
+fn generate_helix_points(
+    n_points: i32,
+    radius: f64,
+    pitch: f64
+) -> [Point3D; 500] with Mut, Panic {
+    var points: [Point3D; 500] = [point3d_default(vec3d_zero()); 500]
+
+    var i = 0
+    while i < n_points {
+        let t = (i as f64) / (n_points as f64) * 6.28318530718 * 3.0  // 3 turns
+
+        let x = radius * cos(t)
+        let y = radius * sin(t)
+        let z = pitch * t
+
+        points[i] = point3d_new(
+            vec3d_new(x, y, z),
+            MARKER_DOT(),
+            COLOR_MAGENTA(),
+            1
+        )
+
+        i = i + 1
+    }
+
+    return points
+}
+
+// ============================================================================
+// Example/Test Function
+// ============================================================================
+
+fn main() -> i32 with IO, Mut, Panic, Div {
+    print("\x1b[2J\x1b[H")  // Clear screen
+    print("=== 3D Scatter Plot Test ===\n\n")
+
+    // Create canvas
+    var canvas = canvas_new(80, 30)
+    canvas = canvas_clear(canvas)
+
+    // Set up viewport
+    let vp = viewport_new(-5.0, 5.0, -5.0, 5.0, 10, 2, 60, 26)
+
+    // Generate helix points
+    var points = generate_helix_points(50, 2.0, 0.3)
+
+    // Colorize by z-coordinate
+    colorize_by_z(&!points, 50, -5.0, 5.0)
+
+    // Draw with rotation
+    let rotation = vec3d_new(deg_to_rad(20.0), deg_to_rad(45.0), 0.0)
+    canvas = scatter_plot_3d_rotated(canvas, &vp, &points, 50, rotation, 1.5)
+
+    // Add title
+    canvas = draw_text(canvas, 5, 0, "3D Helix (50 points)", text_style_default())
+
+    // Render
+    canvas_render(&canvas)
+
+    print("\nGenerated 50 points on a helix\n")
+    print("Colors represent Z-coordinate (blue=low, red=high)\n")
+
+    return 0
+}

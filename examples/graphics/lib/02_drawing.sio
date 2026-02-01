@@ -1,0 +1,393 @@
+// Drawing Primitives - Bresenham lines, circles, rectangles, and fills
+//
+// Implements efficient raster drawing algorithms for terminal graphics.
+// All functions use functional style to avoid borrow checker issues.
+
+// NOTE: This file needs Canvas type from 00_canvas.sio
+// For now, we duplicate the necessary types until module system is ready
+
+// Cell represents a single character cell
+struct Cell {
+    ch: i32,
+    fg_color: i32,
+    bg_color: i32,
+    bold: i32,
+    dim: i32
+}
+
+// Canvas framebuffer
+struct Canvas {
+    width: i32,
+    height: i32,
+    cells: [Cell; 2400]
+}
+
+// Helper to set a single pixel on canvas (functional style)
+fn canvas_set_pixel(canvas: Canvas, x: i32, y: i32, ch: i32, color: i32) -> Canvas with Mut, Panic {
+    // Bounds check
+    if x < 0 { return canvas }
+    if y < 0 { return canvas }
+    if x >= canvas.width { return canvas }
+    if y >= canvas.height { return canvas }
+
+    var new_canvas = canvas
+    let index = y * canvas.width + x
+    new_canvas.cells[index] = Cell {
+        ch: ch,
+        fg_color: color,
+        bg_color: 0,
+        bold: 0,
+        dim: 0
+    }
+    return new_canvas
+}
+
+// ============================================================================
+// Line Drawing - Bresenham's Algorithm
+// ============================================================================
+
+// Draw a line from (x0, y0) to (x1, y1) using Bresenham's algorithm
+fn draw_line(canvas: Canvas, x0: i32, y0: i32, x1: i32, y1: i32, color: i32) -> Canvas with Mut, Panic, Div {
+    var result = canvas
+
+    // Calculate deltas
+    let dx = if x1 > x0 { x1 - x0 } else { x0 - x1 }
+    let dy = if y1 > y0 { y1 - y0 } else { y0 - y1 }
+
+    // Determine step directions
+    let sx = if x0 < x1 { 1 } else { -1 }
+    let sy = if y0 < y1 { 1 } else { -1 }
+
+    var err = dx - dy
+    var x = x0
+    var y = y0
+
+    // Bresenham's loop
+    var done = 0
+    while done == 0 {
+        // Plot current point
+        result = canvas_set_pixel(result, x, y, 9608, color)  // Full block █
+
+        // Check if we've reached the end
+        if x == x1 && y == y1 {
+            done = 1
+        } else {
+            let e2 = 2 * err
+
+            if e2 > -dy {
+                err = err - dy
+                x = x + sx
+            }
+
+            if e2 < dx {
+                err = err + dx
+                y = y + sy
+            }
+        }
+    }
+
+    return result
+}
+
+// Draw a horizontal line (optimized)
+fn draw_hline(canvas: Canvas, x0: i32, x1: i32, y: i32, color: i32) -> Canvas with Mut, Panic, Div {
+    var result = canvas
+
+    let start_x = if x0 < x1 { x0 } else { x1 }
+    let end_x = if x0 < x1 { x1 } else { x0 }
+
+    var x = start_x
+    while x <= end_x {
+        result = canvas_set_pixel(result, x, y, 9608, color)
+        x = x + 1
+    }
+
+    return result
+}
+
+// Draw a vertical line (optimized)
+fn draw_vline(canvas: Canvas, x: i32, y0: i32, y1: i32, color: i32) -> Canvas with Mut, Panic, Div {
+    var result = canvas
+
+    let start_y = if y0 < y1 { y0 } else { y1 }
+    let end_y = if y0 < y1 { y1 } else { y0 }
+
+    var y = start_y
+    while y <= end_y {
+        result = canvas_set_pixel(result, x, y, 9608, color)
+        y = y + 1
+    }
+
+    return result
+}
+
+// ============================================================================
+// Circle Drawing - Midpoint Circle Algorithm
+// ============================================================================
+
+// Helper: Draw 8-way symmetric circle points
+fn draw_circle_points(canvas: Canvas, cx: i32, cy: i32, x: i32, y: i32, color: i32) -> Canvas with Mut, Panic {
+    var result = canvas
+
+    // 8 symmetric points
+    result = canvas_set_pixel(result, cx + x, cy + y, 9679, color)  // ○
+    result = canvas_set_pixel(result, cx - x, cy + y, 9679, color)
+    result = canvas_set_pixel(result, cx + x, cy - y, 9679, color)
+    result = canvas_set_pixel(result, cx - x, cy - y, 9679, color)
+    result = canvas_set_pixel(result, cx + y, cy + x, 9679, color)
+    result = canvas_set_pixel(result, cx - y, cy + x, 9679, color)
+    result = canvas_set_pixel(result, cx + y, cy - x, 9679, color)
+    result = canvas_set_pixel(result, cx - y, cy - x, 9679, color)
+
+    return result
+}
+
+// Draw a circle outline using midpoint algorithm
+fn draw_circle(canvas: Canvas, cx: i32, cy: i32, radius: i32, color: i32) -> Canvas with Mut, Panic, Div {
+    var result = canvas
+
+    var x = 0
+    var y = radius
+    var d = 1 - radius  // Decision parameter
+
+    // Draw initial point
+    result = draw_circle_points(result, cx, cy, x, y, color)
+
+    while x < y {
+        x = x + 1
+
+        // Update decision parameter
+        if d < 0 {
+            d = d + 2 * x + 1
+        } else {
+            y = y - 1
+            d = d + 2 * (x - y) + 1
+        }
+
+        result = draw_circle_points(result, cx, cy, x, y, color)
+    }
+
+    return result
+}
+
+// Draw a filled circle
+fn draw_circle_filled(canvas: Canvas, cx: i32, cy: i32, radius: i32, color: i32) -> Canvas with Mut, Panic, Div {
+    var result = canvas
+
+    var y = -radius
+    while y <= radius {
+        var x = -radius
+        while x <= radius {
+            // Check if point is inside circle
+            let dist_sq = x * x + y * y
+            if dist_sq <= radius * radius {
+                result = canvas_set_pixel(result, cx + x, cy + y, 9608, color)
+            }
+            x = x + 1
+        }
+        y = y + 1
+    }
+
+    return result
+}
+
+// ============================================================================
+// Rectangle Drawing
+// ============================================================================
+
+// Draw a rectangle outline
+fn draw_rect(canvas: Canvas, x: i32, y: i32, width: i32, height: i32, color: i32) -> Canvas with Mut, Panic, Div {
+    var result = canvas
+
+    // Top and bottom edges
+    result = draw_hline(result, x, x + width - 1, y, color)
+    result = draw_hline(result, x, x + width - 1, y + height - 1, color)
+
+    // Left and right edges
+    result = draw_vline(result, x, y, y + height - 1, color)
+    result = draw_vline(result, x + width - 1, y, y + height - 1, color)
+
+    return result
+}
+
+// Draw a filled rectangle
+fn fill_rect(canvas: Canvas, x: i32, y: i32, width: i32, height: i32, color: i32) -> Canvas with Mut, Panic, Div {
+    var result = canvas
+
+    var row = 0
+    while row < height {
+        result = draw_hline(result, x, x + width - 1, y + row, color)
+        row = row + 1
+    }
+
+    return result
+}
+
+// ============================================================================
+// Triangle Drawing
+// ============================================================================
+
+// Draw a triangle outline
+fn draw_triangle(
+    canvas: Canvas,
+    x0: i32,
+    y0: i32,
+    x1: i32,
+    y1: i32,
+    x2: i32,
+    y2: i32,
+    color: i32
+) -> Canvas with Mut, Panic, Div {
+    var result = canvas
+
+    result = draw_line(result, x0, y0, x1, y1, color)
+    result = draw_line(result, x1, y1, x2, y2, color)
+    result = draw_line(result, x2, y2, x0, y0, color)
+
+    return result
+}
+
+// ============================================================================
+// Polygon Drawing (general N-sided)
+// ============================================================================
+
+// Draw a polygon from an array of points
+// NOTE: Simplified version without Point2D struct for now
+fn draw_polygon_4(
+    canvas: Canvas,
+    x0: i32,
+    y0: i32,
+    x1: i32,
+    y1: i32,
+    x2: i32,
+    y2: i32,
+    x3: i32,
+    y3: i32,
+    color: i32
+) -> Canvas with Mut, Panic, Div {
+    var result = canvas
+
+    result = draw_line(result, x0, y0, x1, y1, color)
+    result = draw_line(result, x1, y1, x2, y2, color)
+    result = draw_line(result, x2, y2, x3, y3, color)
+    result = draw_line(result, x3, y3, x0, y0, color)
+
+    return result
+}
+
+// ============================================================================
+// Plotting Single Points
+// ============================================================================
+
+// Draw a single point with specific marker
+fn draw_point(canvas: Canvas, x: i32, y: i32, marker: i32, color: i32) -> Canvas with Mut, Panic {
+    return canvas_set_pixel(canvas, x, y, marker, color)
+}
+
+// Draw a point with default marker (small dot)
+fn draw_dot(canvas: Canvas, x: i32, y: i32, color: i32) -> Canvas with Mut, Panic {
+    return canvas_set_pixel(canvas, x, y, 9679, color)  // ○
+}
+
+// ============================================================================
+// Grid Drawing
+// ============================================================================
+
+// Draw a rectangular grid
+fn draw_grid(canvas: Canvas, x: i32, y: i32, width: i32, height: i32, spacing: i32, color: i32) -> Canvas with Mut, Panic, Div {
+    var result = canvas
+
+    // Vertical lines
+    var vx = x
+    while vx <= x + width {
+        result = draw_vline(result, vx, y, y + height, color)
+        vx = vx + spacing
+    }
+
+    // Horizontal lines
+    var hy = y
+    while hy <= y + height {
+        result = draw_hline(result, x, x + width, hy, color)
+        hy = hy + spacing
+    }
+
+    return result
+}
+
+// ============================================================================
+// Test/Demo Function
+// ============================================================================
+
+// Helper: Create blank cell
+fn cell_blank() -> Cell {
+    return Cell {
+        ch: 32,
+        fg_color: 7,
+        bg_color: 0,
+        bold: 0,
+        dim: 0
+    }
+}
+
+// Helper: Initialize canvas
+fn canvas_new(width: i32, height: i32) -> Canvas with Mut, Panic, Div {
+    var canvas = Canvas {
+        width: width,
+        height: height,
+        cells: [cell_blank(); 2400]
+    }
+
+    var i = 0
+    while i < width * height {
+        canvas.cells[i] = cell_blank()
+        i = i + 1
+    }
+
+    return canvas
+}
+
+fn main() -> i32 with IO, Mut, Panic, Div {
+    print("=== Sounio Drawing Primitives Demo ===\n\n")
+
+    // Create a test canvas
+    var canvas = canvas_new(60, 30)
+
+    // Test 1: Horizontal line
+    print("Drawing horizontal line (y=5)...\n")
+    canvas = draw_hline(canvas, 5, 25, 5, 2)  // Green line
+
+    // Test 2: Vertical line
+    print("Drawing vertical line (x=10)...\n")
+    canvas = draw_vline(canvas, 10, 8, 20, 4)  // Blue line
+
+    // Test 3: Diagonal line (Bresenham)
+    print("Drawing diagonal line...\n")
+    canvas = draw_line(canvas, 15, 10, 40, 20, 1)  // Red line
+
+    // Test 4: Rectangle
+    print("Drawing rectangle...\n")
+    canvas = draw_rect(canvas, 25, 5, 10, 8, 3)  // Yellow rectangle
+
+    // Test 5: Filled rectangle
+    print("Drawing filled rectangle...\n")
+    canvas = fill_rect(canvas, 30, 15, 8, 5, 5)  // Magenta filled
+
+    // Test 6: Circle
+    print("Drawing circle...\n")
+    canvas = draw_circle(canvas, 50, 15, 7, 6)  // Cyan circle
+
+    // Test 7: Triangle
+    print("Drawing triangle...\n")
+    canvas = draw_triangle(canvas, 5, 22, 10, 28, 15, 22, 2)  // Green triangle
+
+    // Test 8: Dots
+    print("Drawing scattered dots...\n")
+    canvas = draw_dot(canvas, 45, 5, 1)
+    canvas = draw_dot(canvas, 47, 6, 1)
+    canvas = draw_dot(canvas, 49, 7, 1)
+
+    print("\n=== All drawing primitives tested! ===\n")
+    print("(Canvas created with various shapes, but not rendered to avoid ANSI complexity)\n")
+
+    return 0
+}

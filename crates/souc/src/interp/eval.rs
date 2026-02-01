@@ -2559,10 +2559,39 @@ impl Interpreter {
     fn assign_target(&mut self, target: &HirExpr, value: Value) -> Result<(), ControlFlow> {
         match &target.kind {
             HirExprKind::Local(name) => {
+                // If existing binding is a Ref (mutable struct variable), update its
+                // content rather than replacing the binding. This preserves the Ref
+                // wrapper so subsequent field assignments continue to work.
+                if let Some(existing) = self.env.get(name) {
+                    if let Value::Ref(r) = existing {
+                        *r.borrow_mut() = value;
+                        return Ok(());
+                    }
+                }
                 self.env.assign(name, value);
                 Ok(())
             }
             HirExprKind::Field { base, field } => {
+                // Special case: arr[i].field = value - need to modify array element in-place
+                if let HirExprKind::Index {
+                    base: arr_base,
+                    index,
+                } = &base.kind
+                {
+                    let arr_val = self.eval_expr(arr_base)?;
+                    let idx = self.eval_expr(index)?.as_int().unwrap_or(0) as usize;
+
+                    if let Value::Array(arr) = arr_val {
+                        let mut arr = arr.borrow_mut();
+                        if idx < arr.len() {
+                            if let Value::Struct { ref mut fields, .. } = arr[idx] {
+                                fields.insert(field.clone(), value);
+                            }
+                        }
+                    }
+                    return Ok(());
+                }
+
                 let base_val = self.eval_expr(base)?;
                 if let Value::Ref(r) = base_val
                     && let Value::Struct { ref mut fields, .. } = *r.borrow_mut()

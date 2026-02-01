@@ -374,7 +374,8 @@ mod tests {
 
     #[test]
     fn test_native_dispatcher_creation() {
-        let dispatcher = NativeEffectDispatcher::new();
+        let mut dispatcher = NativeEffectDispatcher::new();
+        dispatcher.runtime_mut().reset(); // Reset global state for parallel test execution
         assert_eq!(dispatcher.handler_depth(), 0);
     }
 

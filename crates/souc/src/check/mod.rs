@@ -26,12 +26,24 @@ use crate::ast::*;
 use crate::common::{NodeId, Span};
 use crate::hir::*;
 use crate::macro_system::token_tree::{Delimiter, TokenTree};
+use crate::refinement::{
+    solver::SimpleChecker, Atom, BinOp as RefinementBinOp, CompareOp, Predicate, Term,
+};
 use crate::resolve;
 use crate::types::{
-    self, DimSize, TensorShape, Type, TypeVar, effects::EffectInference, units::UnitChecker,
+    self, effects::EffectInference, units::UnitChecker, DimSize, TensorShape, Type, TypeVar,
 };
 use miette::Result;
 use std::collections::HashMap;
+
+/// Refinement info for a function parameter
+#[derive(Clone)]
+struct RefinementInfo {
+    /// The refinement variable name (e.g., "n" in { n: i32 | n > 0 })
+    var: String,
+    /// The predicate expression from the AST
+    predicate: Box<Expr>,
+}
 
 /// Type check a ResolvedAst and produce HIR
 pub fn check(resolved_ast: &resolve::ResolvedAst) -> Result<Hir> {
@@ -100,6 +112,8 @@ pub struct TypeChecker {
     module_tree: Option<std::sync::Arc<resolve::module_tree::ModuleTree>>,
     /// Current module for visibility enforcement
     current_module: Option<resolve::module_tree::ModuleId>,
+    /// Refinement info for function parameters: fn_name -> list of refinement info per param
+    fn_param_refinements: HashMap<String, Vec<Option<RefinementInfo>>>,
 }
 
 /// Type environment with scopes and module awareness
@@ -215,6 +229,7 @@ impl TypeChecker {
             symbols: None,
             module_tree: None,
             current_module: None,
+            fn_param_refinements: HashMap::new(),
         }
     }
 
@@ -406,6 +421,220 @@ impl TypeChecker {
     ) -> types::EffectSet {
         let masked_names: Vec<String> = masked.effects.iter().cloned().collect();
         inferred.subtract(&masked_names)
+    }
+
+    /// Convert an AST expression to a refinement Predicate for SimpleChecker.
+    fn expr_to_predicate(&self, expr: &Expr, var_name: &str) -> Option<Predicate> {
+        match expr {
+            Expr::Binary {
+                op, left, right, ..
+            } => {
+                // Check if this is a comparison (Atom) or logical connective (And/Or)
+                match op {
+                    BinaryOp::And => {
+                        let l = self.expr_to_predicate(left, var_name)?;
+                        let r = self.expr_to_predicate(right, var_name)?;
+                        Some(Predicate::And(vec![l, r]))
+                    }
+                    BinaryOp::Or => {
+                        let l = self.expr_to_predicate(left, var_name)?;
+                        let r = self.expr_to_predicate(right, var_name)?;
+                        Some(Predicate::Or(vec![l, r]))
+                    }
+                    // Comparisons become Atoms
+                    BinaryOp::Lt
+                    | BinaryOp::Le
+                    | BinaryOp::Gt
+                    | BinaryOp::Ge
+                    | BinaryOp::Eq
+                    | BinaryOp::Ne => {
+                        let compare_op = match op {
+                            BinaryOp::Lt => CompareOp::Lt,
+                            BinaryOp::Le => CompareOp::Le,
+                            BinaryOp::Gt => CompareOp::Gt,
+                            BinaryOp::Ge => CompareOp::Ge,
+                            BinaryOp::Eq => CompareOp::Eq,
+                            BinaryOp::Ne => CompareOp::Ne,
+                            _ => return None,
+                        };
+                        let l = self.expr_to_term(left, var_name)?;
+                        let r = self.expr_to_term(right, var_name)?;
+                        Some(Predicate::Atom(Atom {
+                            op: compare_op,
+                            lhs: l,
+                            rhs: r,
+                        }))
+                    }
+                    _ => None,
+                }
+            }
+            Expr::Unary {
+                op, expr: inner, ..
+            } if matches!(op, UnaryOp::Not) => {
+                let pred = self.expr_to_predicate(inner, var_name)?;
+                Some(Predicate::Not(Box::new(pred)))
+            }
+            _ => None,
+        }
+    }
+
+    /// Convert an AST expression to a refinement Term for SimpleChecker.
+    fn expr_to_term(&self, expr: &Expr, var_name: &str) -> Option<Term> {
+        match expr {
+            Expr::Literal { value, .. } => match value {
+                Literal::Int(n) => Some(Term::Int(*n)),
+                Literal::Float(f) => Some(Term::Float(*f)),
+                Literal::Bool(b) => Some(Term::Bool(*b)),
+                _ => None,
+            },
+            Expr::Path { path, .. } => {
+                let name = path.to_string();
+                if name == var_name {
+                    Some(Term::Var(name))
+                } else {
+                    // Could be another variable or constant - treat as a variable
+                    Some(Term::Var(name))
+                }
+            }
+            Expr::Binary {
+                op, left, right, ..
+            } => {
+                let bin_op = match op {
+                    BinaryOp::Add => RefinementBinOp::Add,
+                    BinaryOp::Sub => RefinementBinOp::Sub,
+                    BinaryOp::Mul => RefinementBinOp::Mul,
+                    BinaryOp::Div => RefinementBinOp::Div,
+                    BinaryOp::Rem => RefinementBinOp::Mod,
+                    _ => return None,
+                };
+                let l = self.expr_to_term(left, var_name)?;
+                let r = self.expr_to_term(right, var_name)?;
+                Some(Term::BinOp(bin_op, Box::new(l), Box::new(r)))
+            }
+            Expr::Unary {
+                op, expr: inner, ..
+            } => {
+                match op {
+                    UnaryOp::Neg => {
+                        let term = self.expr_to_term(inner, var_name)?;
+                        // -x is 0 - x
+                        Some(Term::BinOp(
+                            RefinementBinOp::Sub,
+                            Box::new(Term::Int(0)),
+                            Box::new(term),
+                        ))
+                    }
+                    _ => None,
+                }
+            }
+            _ => None,
+        }
+    }
+
+    /// Check if a literal value satisfies a refinement predicate.
+    /// Returns an error message if the check fails.
+    fn check_literal_refinement(
+        &self,
+        value: i64,
+        var_name: &str,
+        predicate: &Expr,
+    ) -> Result<(), String> {
+        let pred = match self.expr_to_predicate(predicate, var_name) {
+            Some(p) => p,
+            None => return Ok(()), // Can't convert, skip check
+        };
+
+        // Substitute the refinement variable with the actual value
+        let substituted = pred.substitute(var_name, &Term::Int(value));
+
+        // Use SimpleChecker to evaluate the predicate with constants
+        match SimpleChecker::check(&substituted) {
+            Some(true) => Ok(()),
+            Some(false) => Err(format!(
+                "value {} does not satisfy refinement predicate",
+                value
+            )),
+            None => Ok(()), // Can't evaluate, skip check
+        }
+    }
+
+    /// Try to extract a constant integer value from an expression.
+    /// Handles literals directly and also -literal for negative numbers.
+    fn try_extract_const_value(&self, expr: &Expr) -> Option<i64> {
+        match expr {
+            Expr::Literal { value, .. } => match value {
+                Literal::Int(n) => Some(*n),
+                _ => None,
+            },
+            // Handle -5 which is parsed as Unary(Neg, Literal(5))
+            Expr::Unary {
+                op, expr: inner, ..
+            } if matches!(op, UnaryOp::Neg) => {
+                if let Expr::Literal { value, .. } = inner.as_ref() {
+                    match value {
+                        Literal::Int(n) => Some(-(*n)),
+                        _ => None,
+                    }
+                } else {
+                    None
+                }
+            }
+            _ => None,
+        }
+    }
+
+    /// Try to extract a constant float value from an expression.
+    /// Handles literals directly and also -literal for negative numbers.
+    fn try_extract_float_value(&self, expr: &Expr) -> Option<f64> {
+        match expr {
+            Expr::Literal { value, .. } => match value {
+                Literal::Float(f) => Some(*f),
+                Literal::Int(n) => Some(*n as f64), // Allow int literals in float context
+                _ => None,
+            },
+            // Handle -1.5 which is parsed as Unary(Neg, Literal(1.5))
+            Expr::Unary {
+                op, expr: inner, ..
+            } if matches!(op, UnaryOp::Neg) => {
+                if let Expr::Literal { value, .. } = inner.as_ref() {
+                    match value {
+                        Literal::Float(f) => Some(-(*f)),
+                        Literal::Int(n) => Some(-(*n as f64)),
+                        _ => None,
+                    }
+                } else {
+                    None
+                }
+            }
+            _ => None,
+        }
+    }
+
+    /// Check if a float literal value satisfies a refinement predicate.
+    /// Returns an error message if the check fails.
+    fn check_float_literal_refinement(
+        &self,
+        value: f64,
+        var_name: &str,
+        predicate: &Expr,
+    ) -> Result<(), String> {
+        let pred = match self.expr_to_predicate(predicate, var_name) {
+            Some(p) => p,
+            None => return Ok(()), // Can't convert, skip check
+        };
+
+        // Substitute the refinement variable with the actual value
+        let substituted = pred.substitute(var_name, &Term::Float(value));
+
+        // Use SimpleChecker to evaluate the predicate with constants
+        match SimpleChecker::check(&substituted) {
+            Some(true) => Ok(()),
+            Some(false) => Err(format!(
+                "value {} does not satisfy refinement predicate",
+                value
+            )),
+            None => Ok(()), // Can't evaluate, skip check
+        }
     }
 
     /// Expand type aliases recursively (entry point with cycle detection)
@@ -734,6 +963,23 @@ impl TypeChecker {
                     abi: None,
                 };
                 self.env.bind(f.name.clone(), fn_type, false);
+
+                // Collect refinement info for parameters
+                let mut param_refinements = Vec::new();
+                for param in &f.params {
+                    if let TypeExpr::Refinement { var, predicate, .. } = &param.ty {
+                        param_refinements.push(Some(RefinementInfo {
+                            var: var.clone(),
+                            predicate: predicate.clone(),
+                        }));
+                    } else {
+                        param_refinements.push(None);
+                    }
+                }
+                if param_refinements.iter().any(|r| r.is_some()) {
+                    self.fn_param_refinements
+                        .insert(f.name.clone(), param_refinements);
+                }
             }
             if let Item::Extern(extern_block) = item {
                 for ext_item in &extern_block.items {
@@ -2949,6 +3195,52 @@ impl TypeChecker {
                         threshold,
                         arg_span,
                     );
+                }
+
+                // Check refinement predicates for literal arguments
+                if let Some(fn_name_str) = &fn_name {
+                    if let Some(refinements) = self.fn_param_refinements.get(fn_name_str).cloned() {
+                        for (i, refinement_opt) in refinements.iter().enumerate() {
+                            if let Some(refinement) = refinement_opt {
+                                if let Some(arg_expr) = args.get(i) {
+                                    // Try to extract a constant value from the argument
+                                    // First try integer, then try float
+                                    let check_result = if let Some(int_val) =
+                                        self.try_extract_const_value(arg_expr)
+                                    {
+                                        Some(self.check_literal_refinement(
+                                            int_val,
+                                            &refinement.var,
+                                            &refinement.predicate,
+                                        ))
+                                    } else if let Some(float_val) =
+                                        self.try_extract_float_value(arg_expr)
+                                    {
+                                        Some(self.check_float_literal_refinement(
+                                            float_val,
+                                            &refinement.var,
+                                            &refinement.predicate,
+                                        ))
+                                    } else {
+                                        None
+                                    };
+
+                                    if let Some(Err(msg)) = check_result {
+                                        let arg_span = if let Some(ast_ref) = &self.ast {
+                                            self.expr_span(arg_expr, ast_ref.as_ref())
+                                        } else {
+                                            Span::dummy()
+                                        };
+                                        self.error_with_code(
+                                            "E0600",
+                                            format!("refinement type violation: {}", msg),
+                                            arg_span,
+                                        );
+                                    }
+                                }
+                            }
+                        }
+                    }
                 }
 
                 (

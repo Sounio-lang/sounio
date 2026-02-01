@@ -1,0 +1,493 @@
+// Heatmaps - 2D intensity visualization with color mapping
+//
+// Provides heatmap functionality with various color schemes, value mapping,
+// and optional color bar legends for scientific data visualization.
+
+// ============================================================================
+// Duplicate necessary types
+// ============================================================================
+
+struct Cell {
+    ch: i32,
+    fg_color: i32,
+    bg_color: i32,
+    bold: i32,
+    dim: i32
+}
+
+struct Canvas {
+    width: i32,
+    height: i32,
+    cells: [Cell; 2400]
+}
+
+struct Viewport {
+    x_min: f64,
+    x_max: f64,
+    y_min: f64,
+    y_max: f64,
+    canvas_x: i32,
+    canvas_y: i32,
+    canvas_width: i32,
+    canvas_height: i32
+}
+
+// ============================================================================
+// Color Mapping Constants
+// ============================================================================
+
+fn COLORMAP_GRAYSCALE() -> i32 { return 0 }
+fn COLORMAP_TEMPERATURE() -> i32 { return 1 }
+fn COLORMAP_RAINBOW() -> i32 { return 2 }
+
+// ============================================================================
+// Color Functions
+// ============================================================================
+
+fn COLOR_BLACK() -> i32 { return 0 }
+fn COLOR_RED() -> i32 { return 1 }
+fn COLOR_GREEN() -> i32 { return 2 }
+fn COLOR_YELLOW() -> i32 { return 3 }
+fn COLOR_BLUE() -> i32 { return 4 }
+fn COLOR_MAGENTA() -> i32 { return 5 }
+fn COLOR_CYAN() -> i32 { return 6 }
+fn COLOR_WHITE() -> i32 { return 7 }
+fn COLOR_BRIGHT_BLACK() -> i32 { return 8 }
+fn COLOR_BRIGHT_RED() -> i32 { return 9 }
+fn COLOR_BRIGHT_GREEN() -> i32 { return 10 }
+fn COLOR_BRIGHT_YELLOW() -> i32 { return 11 }
+fn COLOR_BRIGHT_BLUE() -> i32 { return 12 }
+fn COLOR_BRIGHT_MAGENTA() -> i32 { return 13 }
+fn COLOR_BRIGHT_CYAN() -> i32 { return 14 }
+fn COLOR_BRIGHT_WHITE() -> i32 { return 15 }
+
+// Map normalized value [0.0, 1.0] to grayscale color
+fn value_to_grayscale(normalized: f64) -> i32 {
+    if normalized < 0.25 {
+        return COLOR_BLACK()
+    }
+    if normalized < 0.5 {
+        return COLOR_BRIGHT_BLACK()
+    }
+    if normalized < 0.75 {
+        return COLOR_WHITE()
+    }
+    return COLOR_BRIGHT_WHITE()
+}
+
+// Map normalized value [0.0, 1.0] to temperature color (cold to hot)
+fn value_to_temperature(normalized: f64) -> i32 {
+    if normalized < 0.2 {
+        return COLOR_BLUE()           // Very cold
+    }
+    if normalized < 0.4 {
+        return COLOR_CYAN()           // Cold
+    }
+    if normalized < 0.6 {
+        return COLOR_GREEN()          // Warm
+    }
+    if normalized < 0.8 {
+        return COLOR_YELLOW()         // Hot
+    }
+    return COLOR_RED()                 // Very hot
+}
+
+// Map normalized value [0.0, 1.0] to rainbow colors
+fn value_to_rainbow(normalized: f64) -> i32 {
+    if normalized < 0.16 {
+        return COLOR_MAGENTA()
+    }
+    if normalized < 0.33 {
+        return COLOR_BLUE()
+    }
+    if normalized < 0.5 {
+        return COLOR_CYAN()
+    }
+    if normalized < 0.66 {
+        return COLOR_GREEN()
+    }
+    if normalized < 0.83 {
+        return COLOR_YELLOW()
+    }
+    return COLOR_RED()
+}
+
+// Map value to color based on colormap type
+fn value_to_color(value: f64, min_val: f64, max_val: f64, colormap: i32) -> i32 with Div, Panic {
+    let range = max_val - min_val
+    let normalized = if range < 0.0001 {
+        0.5
+    } else {
+        (value - min_val) / range
+    }
+
+    // Clamp to [0, 1]
+    let clamped = if normalized < 0.0 {
+        0.0
+    } else { if normalized > 1.0 {
+        1.0
+    } else {
+        normalized
+    }}
+
+    if colormap == COLORMAP_GRAYSCALE() {
+        return value_to_grayscale(clamped)
+    }
+    if colormap == COLORMAP_TEMPERATURE() {
+        return value_to_temperature(clamped)
+    }
+    if colormap == COLORMAP_RAINBOW() {
+        return value_to_rainbow(clamped)
+    }
+
+    return COLOR_WHITE()
+}
+
+// ============================================================================
+// Coordinate Transformation
+// ============================================================================
+
+fn world_to_canvas_x(vp: &Viewport, x: f64) -> i32 with Mut, Panic, Div {
+    let x_range = vp.x_max - vp.x_min
+    let normalized = (x - vp.x_min) / x_range
+    let pixel_offset = normalized * (vp.canvas_width as f64)
+    return vp.canvas_x + (pixel_offset as i32)
+}
+
+fn world_to_canvas_y(vp: &Viewport, y: f64) -> i32 with Mut, Panic, Div {
+    let y_range = vp.y_max - vp.y_min
+    let normalized = (y - vp.y_min) / y_range
+    let pixel_offset = normalized * (vp.canvas_height as f64)
+    return vp.canvas_y + vp.canvas_height - (pixel_offset as i32)
+}
+
+// ============================================================================
+// Canvas Operations
+// ============================================================================
+
+fn canvas_set_pixel(canvas: Canvas, x: i32, y: i32, ch: i32, color: i32) -> Canvas with Mut, Panic {
+    if x < 0 { return canvas }
+    if y < 0 { return canvas }
+    if x >= canvas.width { return canvas }
+    if y >= canvas.height { return canvas }
+
+    var new_canvas = canvas
+    let index = y * canvas.width + x
+    new_canvas.cells[index] = Cell {
+        ch: ch,
+        fg_color: color,
+        bg_color: 0,
+        bold: 0,
+        dim: 0
+    }
+    return new_canvas
+}
+
+fn fill_rect(canvas: Canvas, x: i32, y: i32, width: i32, height: i32, ch: i32, color: i32) -> Canvas with Mut, Panic, Div {
+    var result = canvas
+
+    var row = 0
+    while row < height {
+        var col = 0
+        while col < width {
+            result = canvas_set_pixel(result, x + col, y + row, ch, color)
+            col = col + 1
+        }
+        row = row + 1
+    }
+
+    return result
+}
+
+// ============================================================================
+// Heatmap Rendering
+// ============================================================================
+
+// Find min and max values in grid
+fn find_grid_min_max(grid: &[f64], size: i32) -> (f64, f64) with Mut, Panic, Div {
+    if size == 0 {
+        return (0.0, 1.0)
+    }
+
+    var min_val = grid[0]
+    var max_val = grid[0]
+
+    var i = 1
+    while i < size {
+        if grid[i] < min_val {
+            min_val = grid[i]
+        }
+        if grid[i] > max_val {
+            max_val = grid[i]
+        }
+        i = i + 1
+    }
+
+    return (min_val, max_val)
+}
+
+// Render heatmap from 2D grid data
+fn heatmap(
+    canvas: Canvas,
+    vp: &Viewport,
+    grid: &[f64],
+    grid_width: i32,
+    grid_height: i32,
+    min_val: f64,
+    max_val: f64,
+    colormap: i32
+) -> Canvas with Mut, Panic, Div {
+    var result = canvas
+
+    let canvas_width = vp.canvas_width
+    let canvas_height = vp.canvas_height
+
+    // Calculate cell sizes
+    let cell_width = canvas_width / grid_width
+    let cell_height = canvas_height / grid_height
+
+    var row = 0
+    while row < grid_height {
+        var col = 0
+        while col < grid_width {
+            let grid_idx = row * grid_width + col
+            let value = grid[grid_idx]
+            let color = value_to_color(value, min_val, max_val, colormap)
+
+            // Calculate canvas position
+            let px = vp.canvas_x + col * cell_width
+            let py = vp.canvas_y + row * cell_height
+
+            // Draw filled rectangle for this cell
+            result = fill_rect(result, px, py, cell_width, cell_height, 9608, color)
+
+            col = col + 1
+        }
+        row = row + 1
+    }
+
+    return result
+}
+
+// Heatmap with automatic min/max detection
+fn heatmap_auto(
+    canvas: Canvas,
+    vp: &Viewport,
+    grid: &[f64],
+    grid_width: i32,
+    grid_height: i32,
+    colormap: i32
+) -> Canvas with Mut, Panic, Div {
+    let total_size = grid_width * grid_height
+    let min_max = find_grid_min_max(grid, total_size)
+    let min_val = min_max.0
+    let max_val = min_max.1
+
+    return heatmap(canvas, vp, grid, grid_width, grid_height, min_val, max_val, colormap)
+}
+
+// Draw color bar legend
+fn draw_colorbar(
+    canvas: Canvas,
+    x: i32,
+    y: i32,
+    width: i32,
+    height: i32,
+    min_val: f64,
+    max_val: f64,
+    colormap: i32
+) -> Canvas with Mut, Panic, Div {
+    var result = canvas
+
+    var i = 0
+    while i < height {
+        // Calculate normalized value for this row (bottom to top)
+        let normalized = (i as f64) / (height as f64)
+        let value = min_val + normalized * (max_val - min_val)
+        let color = value_to_color(value, min_val, max_val, colormap)
+
+        // Draw horizontal bar for this color level
+        let bar_y = y + height - i - 1  // Flip Y to go bottom to top
+        var j = 0
+        while j < width {
+            result = canvas_set_pixel(result, x + j, bar_y, 9608, color)
+            j = j + 1
+        }
+
+        i = i + 1
+    }
+
+    return result
+}
+
+// Heatmap with color bar
+fn heatmap_with_colorbar(
+    canvas: Canvas,
+    vp: &Viewport,
+    grid: &[f64],
+    grid_width: i32,
+    grid_height: i32,
+    colormap: i32,
+    colorbar_x: i32,
+    colorbar_y: i32
+) -> Canvas with Mut, Panic, Div {
+    var result = canvas
+
+    // Draw heatmap
+    let total_size = grid_width * grid_height
+    let min_max = find_grid_min_max(grid, total_size)
+    let min_val = min_max.0
+    let max_val = min_max.1
+
+    result = heatmap(result, vp, grid, grid_width, grid_height, min_val, max_val, colormap)
+
+    // Draw colorbar
+    result = draw_colorbar(result, colorbar_x, colorbar_y, 3, 20, min_val, max_val, colormap)
+
+    return result
+}
+
+// ============================================================================
+// Viewport Creation
+// ============================================================================
+
+fn viewport_new(
+    x_min: f64,
+    x_max: f64,
+    y_min: f64,
+    y_max: f64,
+    canvas_x: i32,
+    canvas_y: i32,
+    canvas_width: i32,
+    canvas_height: i32
+) -> Viewport {
+    return Viewport {
+        x_min: x_min,
+        x_max: x_max,
+        y_min: y_min,
+        y_max: y_max,
+        canvas_x: canvas_x,
+        canvas_y: canvas_y,
+        canvas_width: canvas_width,
+        canvas_height: canvas_height
+    }
+}
+
+// ============================================================================
+// Test/Demo
+// ============================================================================
+
+fn cell_blank() -> Cell {
+    return Cell {
+        ch: 32,
+        fg_color: 7,
+        bg_color: 0,
+        bold: 0,
+        dim: 0
+    }
+}
+
+fn canvas_new(width: i32, height: i32) -> Canvas with Mut, Panic, Div {
+    var canvas = Canvas {
+        width: width,
+        height: height,
+        cells: [cell_blank(); 2400]
+    }
+
+    var i = 0
+    while i < width * height {
+        canvas.cells[i] = cell_blank()
+        i = i + 1
+    }
+
+    return canvas
+}
+
+fn main() -> i32 with IO, Mut, Panic, Div {
+    print("=== Sounio Heatmap Demo ===\n\n")
+
+    // Create canvas
+    var canvas = canvas_new(70, 30)
+
+    // Test 1: Grayscale heatmap (gradient pattern)
+    print("Creating grayscale heatmap...\n")
+    var grid1 = [
+        0.0, 0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7,
+        0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8,
+        0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9,
+        0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1.0,
+        0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1.0, 0.9,
+        0.5, 0.6, 0.7, 0.8, 0.9, 1.0, 0.9, 0.8,
+        0.6, 0.7, 0.8, 0.9, 1.0, 0.9, 0.8, 0.7,
+        0.7, 0.8, 0.9, 1.0, 0.9, 0.8, 0.7, 0.6,
+        0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+        0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0
+    ]
+
+    let vp1 = viewport_new(0.0, 8.0, 0.0, 8.0, 2, 2, 16, 12)
+    canvas = heatmap(canvas, &vp1, &grid1, 8, 8, 0.0, 1.0, COLORMAP_GRAYSCALE())
+
+    // Test 2: Temperature heatmap (radial pattern)
+    print("Creating temperature heatmap...\n")
+    var grid2 = [
+        0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9,
+        0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 0.8,
+        0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 0.8, 0.7,
+        0.5, 0.6, 0.7, 0.8, 0.9, 0.8, 0.7, 0.6,
+        0.6, 0.7, 0.8, 0.9, 0.8, 0.7, 0.6, 0.5,
+        0.7, 0.8, 0.9, 0.8, 0.7, 0.6, 0.5, 0.4,
+        0.8, 0.9, 0.8, 0.7, 0.6, 0.5, 0.4, 0.3,
+        0.9, 0.8, 0.7, 0.6, 0.5, 0.4, 0.3, 0.2,
+        0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+        0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0
+    ]
+
+    let vp2 = viewport_new(0.0, 8.0, 0.0, 8.0, 22, 2, 16, 12)
+    canvas = heatmap(canvas, &vp2, &grid2, 8, 8, 0.0, 1.0, COLORMAP_TEMPERATURE())
+
+    // Test 3: Rainbow heatmap (wave pattern)
+    print("Creating rainbow heatmap...\n")
+    var grid3 = [
+        0.0, 0.2, 0.4, 0.6, 0.8, 1.0, 0.8, 0.6,
+        0.1, 0.3, 0.5, 0.7, 0.9, 0.9, 0.7, 0.5,
+        0.2, 0.4, 0.6, 0.8, 1.0, 0.8, 0.6, 0.4,
+        0.3, 0.5, 0.7, 0.9, 0.9, 0.7, 0.5, 0.3,
+        0.4, 0.6, 0.8, 1.0, 0.8, 0.6, 0.4, 0.2,
+        0.5, 0.7, 0.9, 0.9, 0.7, 0.5, 0.3, 0.1,
+        0.6, 0.8, 1.0, 0.8, 0.6, 0.4, 0.2, 0.0,
+        0.7, 0.9, 0.9, 0.7, 0.5, 0.3, 0.1, 0.0,
+        0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+        0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0
+    ]
+
+    let vp3 = viewport_new(0.0, 8.0, 0.0, 8.0, 42, 2, 16, 12)
+    canvas = heatmap(canvas, &vp3, &grid3, 8, 8, 0.0, 1.0, COLORMAP_RAINBOW())
+
+    // Test 4: Heatmap with colorbar
+    print("Creating heatmap with colorbar...\n")
+    var grid4 = [
+        0.1, 0.2, 0.3, 0.4, 0.5, 0.6,
+        0.2, 0.3, 0.4, 0.5, 0.6, 0.7,
+        0.3, 0.4, 0.5, 0.6, 0.7, 0.8,
+        0.4, 0.5, 0.6, 0.7, 0.8, 0.9,
+        0.5, 0.6, 0.7, 0.8, 0.9, 1.0,
+        0.6, 0.7, 0.8, 0.9, 1.0, 0.9,
+        0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+        0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+        0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+        0.0, 0.0, 0.0, 0.0, 0.0, 0.0
+    ]
+
+    let vp4 = viewport_new(0.0, 6.0, 0.0, 6.0, 8, 16, 18, 12)
+    canvas = heatmap_with_colorbar(canvas, &vp4, &grid4, 6, 6, COLORMAP_TEMPERATURE(), 30, 16)
+
+    print("\n=== Heatmap rendering complete! ===\n")
+    print("Rendered:\n")
+    print("  - Grayscale heatmap (top left)\n")
+    print("  - Temperature heatmap (top middle)\n")
+    print("  - Rainbow heatmap (top right)\n")
+    print("  - Heatmap with colorbar (bottom)\n")
+    print("(Canvas created but not rendered)\n")
+
+    return 0
+}

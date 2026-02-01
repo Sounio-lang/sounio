@@ -1,0 +1,604 @@
+// 63_graph_render.sio - Graph rendering with animation
+//
+// Provides terminal-based visualization of graphs including:
+// - Node rendering with labels and colors
+// - Edge rendering with direction arrows and weights
+// - Graph traversal animations (BFS, DFS)
+// - Path highlighting
+
+// ============================================================================
+// Rendering Canvas
+// ============================================================================
+
+struct GraphCanvas {
+    // Display buffer
+    buffer: [i32; 4800],    // 80x60 character buffer
+    colors: [i32; 4800],    // Color for each cell
+    width: i32,
+    height: i32,
+
+    // World to canvas mapping
+    world_min_x: f64,
+    world_max_x: f64,
+    world_min_y: f64,
+    world_max_y: f64,
+    margin: i32
+}
+
+fn canvas_new(width: i32, height: i32) -> GraphCanvas {
+    return GraphCanvas {
+        buffer: [32; 4800],    // Space character
+        colors: [37; 4800],    // White
+        width: width,
+        height: height,
+        world_min_x: -20.0,
+        world_max_x: 20.0,
+        world_min_y: -15.0,
+        world_max_y: 15.0,
+        margin: 2
+    }
+}
+
+// Value-passing canvas clear
+fn canvas_clear_v(canvas: GraphCanvas) -> GraphCanvas with Mut, Panic, Div {
+    var c = canvas
+    var i = 0
+    while i < 4800 {
+        c.buffer[i] = 32
+        c.colors[i] = 37
+        i = i + 1
+    }
+    return c
+}
+
+fn canvas_set_world_bounds_v(
+    canvas: GraphCanvas,
+    min_x: f64, max_x: f64,
+    min_y: f64, max_y: f64
+) -> GraphCanvas with Mut {
+    var c = canvas
+    c.world_min_x = min_x
+    c.world_max_x = max_x
+    c.world_min_y = min_y
+    c.world_max_y = max_y
+    return c
+}
+
+fn world_to_screen_x(canvas: &GraphCanvas, x: f64) -> i32 with Div, Panic {
+    let range = canvas.world_max_x - canvas.world_min_x
+    if range <= 0.0 { return canvas.margin }
+    let t = (x - canvas.world_min_x) / range
+    let screen_width = canvas.width - 2 * canvas.margin
+    return canvas.margin + (t * (screen_width as f64)) as i32
+}
+
+fn world_to_screen_y(canvas: &GraphCanvas, y: f64) -> i32 with Div, Panic {
+    let range = canvas.world_max_y - canvas.world_min_y
+    if range <= 0.0 { return canvas.margin }
+    let t = (y - canvas.world_min_y) / range
+    let screen_height = canvas.height - 2 * canvas.margin
+    // Flip Y for terminal (0 at top)
+    return canvas.height - canvas.margin - 1 - (t * (screen_height as f64)) as i32
+}
+
+// Value-passing canvas set
+fn canvas_set_v(canvas: GraphCanvas, x: i32, y: i32, ch: i32, color: i32) -> GraphCanvas with Mut, Panic {
+    var c = canvas
+    if x >= 0 {
+        if x < c.width {
+            if y >= 0 {
+                if y < c.height {
+                    let idx = y * c.width + x
+                    if idx < 4800 {
+                        c.buffer[idx] = ch
+                        c.colors[idx] = color
+                    }
+                }
+            }
+        }
+    }
+    return c
+}
+
+// ============================================================================
+// Drawing Primitives (Value-Passing)
+// ============================================================================
+
+// Bresenham's line algorithm (value-passing)
+fn canvas_draw_line_v(
+    canvas: GraphCanvas,
+    x0: i32, y0: i32,
+    x1: i32, y1: i32,
+    ch: i32, color: i32
+) -> GraphCanvas with Mut, Panic, Div {
+    var c = canvas
+    var dx = x1 - x0
+    var dy = y1 - y0
+    var abs_dx = dx
+    var abs_dy = dy
+    if dx < 0 { abs_dx = 0 - dx }
+    if dy < 0 { abs_dy = 0 - dy }
+
+    var sx = 1
+    var sy = 1
+    if dx < 0 { sx = -1 }
+    if dy < 0 { sy = -1 }
+
+    var err = abs_dx - abs_dy
+    var x = x0
+    var y = y0
+
+    var steps = 0
+    let max_steps = abs_dx + abs_dy + 1
+
+    while steps < max_steps {
+        c = canvas_set_v(c, x, y, ch, color)
+
+        if x == x1 {
+            if y == y1 {
+                return c
+            }
+        }
+
+        let e2 = 2 * err
+
+        if e2 > 0 - abs_dy {
+            err = err - abs_dy
+            x = x + sx
+        }
+        if e2 < abs_dx {
+            err = err + abs_dx
+            y = y + sy
+        }
+
+        steps = steps + 1
+    }
+    return c
+}
+
+// ============================================================================
+// Node Rendering
+// ============================================================================
+
+struct RenderNode {
+    x: f64,
+    y: f64,
+    label_code: i32,
+    color: i32,
+    size: i32,
+    highlighted: i32    // 1 = highlighted, 0 = normal
+}
+
+fn render_node_new(
+    x: f64, y: f64,
+    label: i32, color: i32, size: i32
+) -> RenderNode {
+    return RenderNode {
+        x: x,
+        y: y,
+        label_code: label,
+        color: color,
+        size: size,
+        highlighted: 0
+    }
+}
+
+fn draw_node_v(canvas: GraphCanvas, node: &RenderNode) -> GraphCanvas with Mut, Div, Panic {
+    var c = canvas
+    let sx = world_to_screen_x(&c, node.x)
+    let sy = world_to_screen_y(&c, node.y)
+
+    var color = node.color
+    if node.highlighted == 1 {
+        color = 33  // Yellow for highlight
+    }
+
+    // Draw node marker based on size
+    if node.size >= 2 {
+        // Larger node: draw box
+        c = canvas_set_v(c, sx - 1, sy - 1, 43, color)  // +
+        c = canvas_set_v(c, sx, sy - 1, 45, color)      // -
+        c = canvas_set_v(c, sx + 1, sy - 1, 43, color)  // +
+        c = canvas_set_v(c, sx - 1, sy, 124, color)     // |
+        c = canvas_set_v(c, sx, sy, node.label_code, color)
+        c = canvas_set_v(c, sx + 1, sy, 124, color)     // |
+        c = canvas_set_v(c, sx - 1, sy + 1, 43, color)  // +
+        c = canvas_set_v(c, sx, sy + 1, 45, color)      // -
+        c = canvas_set_v(c, sx + 1, sy + 1, 43, color)  // +
+    } else {
+        // Small node: just the label
+        c = canvas_set_v(c, sx, sy, node.label_code, color)
+    }
+    return c
+}
+
+// ============================================================================
+// Edge Rendering
+// ============================================================================
+
+struct RenderEdge {
+    from_x: f64,
+    from_y: f64,
+    to_x: f64,
+    to_y: f64,
+    color: i32,
+    directed: i32,
+    style: i32,         // 0=solid, 1=dashed
+    highlighted: i32
+}
+
+fn render_edge_new(
+    from_x: f64, from_y: f64,
+    to_x: f64, to_y: f64,
+    color: i32, directed: i32
+) -> RenderEdge {
+    return RenderEdge {
+        from_x: from_x,
+        from_y: from_y,
+        to_x: to_x,
+        to_y: to_y,
+        color: color,
+        directed: directed,
+        style: 0,
+        highlighted: 0
+    }
+}
+
+fn draw_edge_v(canvas: GraphCanvas, edge: &RenderEdge) -> GraphCanvas with Mut, Div, Panic {
+    var c = canvas
+    let sx0 = world_to_screen_x(&c, edge.from_x)
+    let sy0 = world_to_screen_y(&c, edge.from_y)
+    let sx1 = world_to_screen_x(&c, edge.to_x)
+    let sy1 = world_to_screen_y(&c, edge.to_y)
+
+    var color = edge.color
+    if edge.highlighted == 1 {
+        color = 32  // Green for highlighted edges
+    }
+
+    // Choose line character based on direction
+    let dx = sx1 - sx0
+    let dy = sy1 - sy0
+    var abs_dx = dx
+    var abs_dy = dy
+    if dx < 0 { abs_dx = 0 - dx }
+    if dy < 0 { abs_dy = 0 - dy }
+
+    var ch = 45  // '-' horizontal
+    if abs_dy > abs_dx * 2 {
+        ch = 124  // '|' vertical
+    } else { if abs_dy > abs_dx / 2 {
+        if dx * dy > 0 {
+            ch = 92   // '\' diagonal
+        } else {
+            ch = 47   // '/' diagonal
+        }
+    }}
+
+    // Draw the line
+    c = canvas_draw_line_v(c, sx0, sy0, sx1, sy1, ch, color)
+
+    // Draw arrow for directed edges
+    if edge.directed == 1 {
+        c = draw_arrow_head_v(c, sx0, sy0, sx1, sy1, color)
+    }
+    return c
+}
+
+fn draw_arrow_head_v(
+    canvas: GraphCanvas,
+    x0: i32, y0: i32,
+    x1: i32, y1: i32,
+    color: i32
+) -> GraphCanvas with Mut, Div, Panic {
+    let dx = x1 - x0
+    let dy = y1 - y0
+
+    // Determine arrow character based on direction
+    var arrow = 62  // '>'
+
+    if dx == 0 {
+        if dy < 0 { arrow = 94 }   // '^'
+        else { arrow = 118 }        // 'v'
+    } else { if dy == 0 {
+        if dx < 0 { arrow = 60 }   // '<'
+        else { arrow = 62 }         // '>'
+    } else {
+        var abs_dx = dx
+        var abs_dy = dy
+        if dx < 0 { abs_dx = 0 - dx }
+        if dy < 0 { abs_dy = 0 - dy }
+
+        if abs_dx > abs_dy {
+            if dx > 0 { arrow = 62 }  // '>'
+            else { arrow = 60 }        // '<'
+        } else {
+            if dy < 0 { arrow = 94 }  // '^'
+            else { arrow = 118 }       // 'v'
+        }
+    }}
+
+    return canvas_set_v(canvas, x1, y1, arrow, color)
+}
+
+// ============================================================================
+// Graph Rendering
+// ============================================================================
+
+// Node and edge arrays for rendering
+struct GraphRenderData {
+    nodes: [RenderNode; 100],
+    edges: [RenderEdge; 500],
+    n_nodes: i32,
+    n_edges: i32
+}
+
+fn render_data_new() -> GraphRenderData {
+    return GraphRenderData {
+        nodes: [RenderNode {
+            x: 0.0, y: 0.0, label_code: 63,
+            color: 37, size: 1, highlighted: 0
+        }; 100],
+        edges: [RenderEdge {
+            from_x: 0.0, from_y: 0.0, to_x: 0.0, to_y: 0.0,
+            color: 37, directed: 0, style: 0, highlighted: 0
+        }; 500],
+        n_nodes: 0,
+        n_edges: 0
+    }
+}
+
+// Value-passing graph drawing
+fn draw_graph_v(
+    canvas: GraphCanvas,
+    data: &GraphRenderData
+) -> GraphCanvas with Mut, Div, Panic {
+    var c = canvas
+
+    // Draw edges first (so nodes appear on top)
+    var e = 0
+    while e < data.n_edges {
+        c = draw_edge_v(c, &(data.edges[e]))
+        e = e + 1
+    }
+
+    // Draw nodes
+    var n = 0
+    while n < data.n_nodes {
+        c = draw_node_v(c, &(data.nodes[n]))
+        n = n + 1
+    }
+    return c
+}
+
+// ============================================================================
+// Canvas Output
+// ============================================================================
+
+fn canvas_render(canvas: &GraphCanvas) with IO, Mut, Panic, Div {
+    // Clear screen and move cursor to home
+    print("\x1b[2J\x1b[H")
+
+    var y = 0
+    while y < canvas.height {
+        var x = 0
+        while x < canvas.width {
+            let idx = y * canvas.width + x
+            let ch = canvas.buffer[idx]
+            let color = canvas.colors[idx]
+
+            // Set color
+            print("\x1b[")
+            print_i32_inline(color)
+            print("m")
+
+            // Print character
+            print_char_code(ch)
+
+            x = x + 1
+        }
+        print("\x1b[0m\n")
+        y = y + 1
+    }
+}
+
+// ============================================================================
+// Demo Helpers
+// ============================================================================
+
+fn print_char_code(code: i32) with IO {
+    // Use early returns to avoid deep nesting
+    if code == 32 { print(" "); return }
+    if code == 33 { print("!"); return }
+    if code == 35 { print("#"); return }
+    if code == 42 { print("*"); return }
+    if code == 43 { print("+"); return }
+    if code == 45 { print("-"); return }
+    if code == 46 { print("."); return }
+    if code == 47 { print("/"); return }
+    if code == 60 { print("<"); return }
+    if code == 62 { print(">"); return }
+    if code == 63 { print("?"); return }
+    if code == 64 { print("@"); return }
+    if code == 92 { print("\\"); return }
+    if code == 94 { print("^"); return }
+    if code == 118 { print("v"); return }
+    if code == 124 { print("|"); return }
+    // A-Z
+    if code == 65 { print("A"); return }
+    if code == 66 { print("B"); return }
+    if code == 67 { print("C"); return }
+    if code == 68 { print("D"); return }
+    if code == 69 { print("E"); return }
+    if code == 70 { print("F"); return }
+    if code == 71 { print("G"); return }
+    if code == 72 { print("H"); return }
+    if code == 73 { print("I"); return }
+    if code == 74 { print("J"); return }
+    if code == 75 { print("K"); return }
+    if code == 76 { print("L"); return }
+    if code == 77 { print("M"); return }
+    if code == 78 { print("N"); return }
+    if code == 79 { print("O"); return }
+    if code == 80 { print("P"); return }
+    if code == 81 { print("Q"); return }
+    if code == 82 { print("R"); return }
+    if code == 83 { print("S"); return }
+    if code == 84 { print("T"); return }
+    if code == 85 { print("U"); return }
+    if code == 86 { print("V"); return }
+    if code == 87 { print("W"); return }
+    if code == 88 { print("X"); return }
+    if code == 89 { print("Y"); return }
+    if code == 90 { print("Z"); return }
+    // Default
+    print("?")
+}
+
+fn print_i32_inline(x: i32) with IO, Panic, Div {
+    if x < 10 {
+        print_digit_inline(x)
+    } else {
+        print_i32_inline(x / 10)
+        print_digit_inline(x % 10)
+    }
+}
+
+fn print_digit_inline(d: i32) with IO {
+    if d == 0 { print("0"); return }
+    if d == 1 { print("1"); return }
+    if d == 2 { print("2"); return }
+    if d == 3 { print("3"); return }
+    if d == 4 { print("4"); return }
+    if d == 5 { print("5"); return }
+    if d == 6 { print("6"); return }
+    if d == 7 { print("7"); return }
+    if d == 8 { print("8"); return }
+    if d == 9 { print("9"); return }
+}
+
+// ============================================================================
+// Main Demo
+// ============================================================================
+
+fn main() -> i32 with IO, Mut, Div, Panic {
+    print("Graph Rendering Demo\n")
+    print("====================\n\n")
+
+    // Create a canvas
+    var canvas = canvas_new(60, 25)
+    canvas = canvas_set_world_bounds_v(canvas, -15.0, 15.0, -10.0, 10.0)
+
+    // Create render data for a small graph
+    var data = render_data_new()
+
+    // Add nodes in a pentagon pattern
+    let r = 8.0
+    var i = 0
+    while i < 5 {
+        let angle = (i as f64) * 1.2566 - 1.5708  // 72 degrees apart, start at top
+        let x = cos_approx(angle) * r
+        let y = sin_approx(angle) * r
+
+        data.nodes[i] = RenderNode {
+            x: x,
+            y: y,
+            label_code: 65 + i,  // A, B, C, D, E
+            color: 36,           // Cyan
+            size: 2,
+            highlighted: 0
+        }
+        i = i + 1
+    }
+    data.n_nodes = 5
+
+    // Add edges (pentagon + star)
+    // Pentagon edges
+    data.edges[0] = render_edge_new(
+        data.nodes[0].x, data.nodes[0].y,
+        data.nodes[1].x, data.nodes[1].y,
+        37, 0
+    )
+    data.edges[1] = render_edge_new(
+        data.nodes[1].x, data.nodes[1].y,
+        data.nodes[2].x, data.nodes[2].y,
+        37, 0
+    )
+    data.edges[2] = render_edge_new(
+        data.nodes[2].x, data.nodes[2].y,
+        data.nodes[3].x, data.nodes[3].y,
+        37, 0
+    )
+    data.edges[3] = render_edge_new(
+        data.nodes[3].x, data.nodes[3].y,
+        data.nodes[4].x, data.nodes[4].y,
+        37, 0
+    )
+    data.edges[4] = render_edge_new(
+        data.nodes[4].x, data.nodes[4].y,
+        data.nodes[0].x, data.nodes[0].y,
+        37, 0
+    )
+
+    // Star edges (directed)
+    data.edges[5] = render_edge_new(
+        data.nodes[0].x, data.nodes[0].y,
+        data.nodes[2].x, data.nodes[2].y,
+        33, 1  // Yellow, directed
+    )
+    data.edges[6] = render_edge_new(
+        data.nodes[2].x, data.nodes[2].y,
+        data.nodes[4].x, data.nodes[4].y,
+        33, 1
+    )
+    data.edges[7] = render_edge_new(
+        data.nodes[4].x, data.nodes[4].y,
+        data.nodes[1].x, data.nodes[1].y,
+        33, 1
+    )
+    data.edges[8] = render_edge_new(
+        data.nodes[1].x, data.nodes[1].y,
+        data.nodes[3].x, data.nodes[3].y,
+        33, 1
+    )
+    data.edges[9] = render_edge_new(
+        data.nodes[3].x, data.nodes[3].y,
+        data.nodes[0].x, data.nodes[0].y,
+        33, 1
+    )
+    data.n_edges = 10
+
+    // Highlight one node
+    data.nodes[0].highlighted = 1
+
+    // Draw and render
+    canvas = canvas_clear_v(canvas)
+    canvas = draw_graph_v(canvas, &data)
+    canvas_render(&canvas)
+
+    print("\n\x1b[1mPentagram Graph\x1b[0m\n")
+    print("- Cyan nodes (A-E) in pentagon\n")
+    print("- White edges: pentagon outline\n")
+    print("- Yellow arrows: star pattern (directed)\n")
+    print("- Node A highlighted in yellow\n")
+
+    return 0
+}
+
+// ============================================================================
+// Math Helpers
+// ============================================================================
+
+fn sin_approx(x: f64) -> f64 with Mut, Div {
+    var xx = x
+    while xx > 3.14159 { xx = xx - 6.28318 }
+    while xx < -3.14159 { xx = xx + 6.28318 }
+    let x2 = xx * xx
+    let x3 = x2 * xx
+    let x5 = x3 * x2
+    return xx - x3 * 0.16667 + x5 * 0.00833
+}
+
+fn cos_approx(x: f64) -> f64 with Mut, Div {
+    return sin_approx(x + 1.5708)
+}

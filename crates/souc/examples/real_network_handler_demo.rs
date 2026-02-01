@@ -16,8 +16,10 @@
 use sounio::effects::handler_capability::{
     Continuation, HandlerCapability, HandlerResult, HandlerState,
 };
-use sounio::effects::handlers::network_handler_real::RealNetworkHandler;
+use sounio::effects::handlers::RealNetworkHandler;
 use sounio::interp::Value;
+use std::cell::RefCell;
+use std::rc::Rc;
 
 fn main() {
     println!("=== Real Network Handler Demonstration ===\n");
@@ -38,7 +40,7 @@ fn main() {
         println!(
             "  {} ({}) -> {}",
             op_spec.name,
-            op_spec.params.join(", "),
+            op_spec.param_types.join(", "),
             op_spec.return_type
         );
     }
@@ -156,7 +158,7 @@ fn main() {
                 &[
                     Value::String("127.0.0.1".to_string()),
                     Value::Int(9999),
-                    Value::Array(packet_data),
+                    Value::Array(Rc::new(RefCell::new(packet_data))),
                 ],
                 Continuation::new(),
                 &mut state,

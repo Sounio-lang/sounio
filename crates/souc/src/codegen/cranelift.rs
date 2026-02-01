@@ -2297,6 +2297,8 @@ struct AotCompiler {
     variadic_funcs: HashMap<String, usize>,
     /// ISA for code generation
     isa: std::sync::Arc<dyn cranelift_codegen::isa::TargetIsa>,
+    /// Type definitions for calculating struct sizes
+    type_defs: Vec<crate::hlir::HlirTypeDef>,
 }
 
 #[cfg(feature = "jit")]
@@ -2317,10 +2319,14 @@ impl AotCompiler {
             exported_funcs: std::collections::HashSet::new(),
             variadic_funcs: HashMap::new(),
             isa,
+            type_defs: Vec::new(),
         })
     }
 
     fn compile_module(&mut self, module: &HlirModule) -> Result<(), String> {
+        // Store type definitions for size calculations
+        self.type_defs = module.types.clone();
+
         // Declare runtime functions first
         self.declare_runtime_functions()?;
 
@@ -2490,6 +2496,7 @@ impl AotCompiler {
                 &func_refs,
                 &self.variadic_funcs,
                 &self.func_sigs,
+                &self.type_defs,
             )?;
 
             builder.finalize();
@@ -2531,6 +2538,8 @@ struct JitCompiler {
     /// Map from variadic function names to their fixed parameter count
     /// Used for proper variadic call handling in FFI
     variadic_funcs: HashMap<String, usize>,
+    /// Type definitions for calculating struct sizes
+    type_defs: Vec<crate::hlir::HlirTypeDef>,
 }
 
 #[cfg(feature = "jit")]
@@ -2846,10 +2855,13 @@ impl JitCompiler {
             func_sigs: HashMap::new(),
             exported_funcs: std::collections::HashSet::new(),
             variadic_funcs: HashMap::new(),
+            type_defs: Vec::new(),
         })
     }
 
     fn compile_module(&mut self, module: &HlirModule) -> Result<(), String> {
+        // Store type definitions for size calculations
+        self.type_defs = module.types.clone();
         // Declare runtime functions first
         self.declare_runtime_functions()?;
 
@@ -3770,6 +3782,7 @@ impl JitCompiler {
                 &local_func_refs,
                 &self.variadic_funcs,
                 &self.func_sigs,
+                &self.type_defs,
             )?;
             builder.finalize();
         }
@@ -3870,6 +3883,7 @@ fn translate_function(
     func_refs: &HashMap<String, cranelift_codegen::ir::FuncRef>,
     variadic_funcs: &HashMap<String, usize>,
     func_sigs: &HashMap<String, Signature>,
+    type_defs: &[crate::hlir::HlirTypeDef],
 ) -> Result<(), String> {
     let mut values: HashMap<ValueId, cranelift_codegen::ir::Value> = HashMap::new();
     let mut blocks: HashMap<BlockId, cranelift_codegen::ir::Block> = HashMap::new();
@@ -3907,6 +3921,7 @@ fn translate_function(
             func_refs,
             variadic_funcs,
             func_sigs,
+            type_defs,
             first,
         )?;
         first = false;
@@ -3928,6 +3943,7 @@ fn translate_block(
     func_refs: &HashMap<String, cranelift_codegen::ir::FuncRef>,
     variadic_funcs: &HashMap<String, usize>,
     func_sigs: &HashMap<String, Signature>,
+    type_defs: &[crate::hlir::HlirTypeDef],
     is_entry: bool,
 ) -> Result<(), String> {
     let cl_block = blocks[&block.id];
@@ -3947,6 +3963,7 @@ fn translate_block(
             func_refs,
             variadic_funcs,
             func_sigs,
+            type_defs,
         )?;
         if let (Some(res_id), Some(val)) = (instr.result, result) {
             values.insert(res_id, val);
@@ -3968,6 +3985,7 @@ fn translate_instruction(
     func_refs: &HashMap<String, cranelift_codegen::ir::FuncRef>,
     variadic_funcs: &HashMap<String, usize>,
     func_sigs: &HashMap<String, Signature>,
+    type_defs: &[crate::hlir::HlirTypeDef],
 ) -> Result<Option<cranelift_codegen::ir::Value>, String> {
     let ty = hlir_to_cranelift_type(&instr.ty);
 
@@ -5600,7 +5618,12 @@ fn translate_instruction(
         }
 
         Op::Alloca { ty: alloc_ty } => {
-            let size = alloc_ty.size_bits() / 8;
+            // Use size_bytes_with_defs for accurate struct sizes
+            let mut size = alloc_ty.size_bytes_with_defs(type_defs);
+            // Arrays need an 8-byte header for the length
+            if matches!(alloc_ty, crate::hlir::HlirType::Array(_, _)) {
+                size += 8;
+            }
             let size = if size == 0 { 8 } else { size };
             let slot = builder.create_sized_stack_slot(cranelift_codegen::ir::StackSlotData::new(
                 cranelift_codegen::ir::StackSlotKind::ExplicitSlot,
@@ -5626,20 +5649,16 @@ fn translate_instruction(
                 t if t.is_int() && t.bits() < 64 => builder.ins().sextend(types::I64, idx_val),
                 _ => idx_val,
             };
-            // Extract element size from pointer type (fixes issue #11)
+            // Extract element size from pointer type, using type defs for accurate struct sizes
             let elem_size = match &instr.ty {
-                HlirType::Ptr(inner) => {
-                    let bits = inner.size_bits();
-                    if bits == 0 {
-                        8
-                    } else {
-                        bits / 8
-                    }
-                }
+                HlirType::Ptr(inner) => inner.size_bytes_with_defs(type_defs),
                 _ => 8, // Fallback for non-pointer types
             } as i64;
+            // Arrays have an 8-byte length header at offset 0, elements start at offset 8
+            // We add 8 to skip the header when indexing into arrays
             let offset = builder.ins().imul_imm(idx_val, elem_size);
-            let ptr = builder.ins().iadd(base_val, offset);
+            let with_header = builder.ins().iadd_imm(offset, 8);
+            let ptr = builder.ins().iadd(base_val, with_header);
             Ok(Some(ptr))
         }
 
@@ -5731,7 +5750,20 @@ fn translate_instruction(
         Op::Array(vals) => {
             // Arrays: include length header at offset 0, data starts at offset 8
             // Layout: [length: i64, elem0, elem1, ...]
-            let size = (vals.len() * 8 + 8) as u32; // +8 for length header
+            // Get element type and size from array type
+            let (elem_ty, elem_size) = match &instr.ty {
+                crate::hlir::HlirType::Array(elem_ty, _) => (
+                    Some(elem_ty.as_ref()),
+                    elem_ty.size_bytes_with_defs(type_defs),
+                ),
+                _ => (None, 8), // fallback to pointer size
+            };
+            // Check if element is an aggregate type (struct/tuple) - these are passed by pointer
+            let elem_is_aggregate = matches!(
+                elem_ty,
+                Some(crate::hlir::HlirType::Struct(_) | crate::hlir::HlirType::Tuple(_))
+            );
+            let size = (vals.len() * elem_size + 8) as u32; // +8 for length header
             let slot = builder.create_sized_stack_slot(cranelift_codegen::ir::StackSlotData::new(
                 cranelift_codegen::ir::StackSlotKind::ExplicitSlot,
                 size,
@@ -5746,27 +5778,118 @@ fn translate_instruction(
             // Store elements starting at offset 8
             for (i, v) in vals.iter().enumerate() {
                 let val = get_value(values, *v)?;
-                let offset = (i * 8 + 8) as i32; // +8 to skip length header
-                builder.ins().store(MemFlags::new(), val, base, offset);
+                let offset = (i * elem_size + 8) as i32; // +8 to skip length header
+
+                if elem_size <= 8 && !elem_is_aggregate {
+                    // Small primitive elements - store directly
+                    builder.ins().store(MemFlags::new(), val, base, offset);
+                } else {
+                    // Large elements or aggregate types (structs/tuples) - val is a pointer, copy data
+                    let src_ptr = val;
+                    let dst_ptr = builder.ins().iadd_imm(base, offset as i64);
+                    // Copy word-by-word
+                    let words = elem_size / 8;
+                    for w in 0..words {
+                        let word_off = (w * 8) as i32;
+                        let word =
+                            builder
+                                .ins()
+                                .load(types::I64, MemFlags::new(), src_ptr, word_off);
+                        builder
+                            .ins()
+                            .store(MemFlags::new(), word, dst_ptr, word_off);
+                    }
+                    // Copy remaining bytes
+                    let remainder = elem_size % 8;
+                    if remainder > 0 {
+                        let rem_off = (words * 8) as i32;
+                        for b in 0..remainder {
+                            let byte_off = rem_off + b as i32;
+                            let byte =
+                                builder
+                                    .ins()
+                                    .load(types::I8, MemFlags::new(), src_ptr, byte_off);
+                            builder
+                                .ins()
+                                .store(MemFlags::new(), byte, dst_ptr, byte_off);
+                        }
+                    }
+                }
             }
 
             Ok(Some(base))
         }
 
-        Op::Struct { name: _, fields } => {
-            // Similar to tuple
-            let size = (fields.len() * 8) as u32;
+        Op::Struct { name, fields } => {
+            // Calculate actual struct size using type definitions
+            let struct_ty = crate::hlir::HlirType::Struct(name.clone());
+            let size = struct_ty.size_bytes_with_defs(type_defs).max(8) as u32;
             let slot = builder.create_sized_stack_slot(cranelift_codegen::ir::StackSlotData::new(
                 cranelift_codegen::ir::StackSlotKind::ExplicitSlot,
                 size,
-                0,
+                8, // 8-byte alignment
             ));
             let base = builder.ins().stack_addr(types::I64, slot, 0);
 
+            // Get field types from type definition to calculate proper offsets
+            let field_types: Vec<crate::hlir::HlirType> = type_defs
+                .iter()
+                .find(|t| &t.name == name)
+                .and_then(|td| match &td.kind {
+                    crate::hlir::HlirTypeDefKind::Struct(fs) => {
+                        Some(fs.iter().map(|(_, ty)| ty.clone()).collect())
+                    }
+                    _ => None,
+                })
+                .unwrap_or_else(Vec::new);
+
+            let mut offset = 0i32;
             for (i, (_, v)) in fields.iter().enumerate() {
                 let val = get_value(values, *v)?;
-                let offset = (i * 8) as i32;
-                builder.ins().store(MemFlags::new(), val, base, offset);
+                let field_size = field_types
+                    .get(i)
+                    .map(|ty| ty.size_bytes_with_defs(type_defs))
+                    .unwrap_or(8);
+                // For small scalar fields, use direct store
+                // For larger fields (arrays, nested structs), they're passed as pointers and need memcpy
+                if field_size <= 8 {
+                    builder.ins().store(MemFlags::new(), val, base, offset);
+                } else {
+                    // Large field - val is a pointer to the data, need to copy it
+                    // Use a simple byte-by-byte copy loop
+                    let src_ptr = val;
+                    let dst_ptr = builder.ins().iadd_imm(base, offset as i64);
+                    let field_size_val = builder.ins().iconst(types::I64, field_size as i64);
+                    // Call memcpy - we need to emit a loop or call libc memcpy
+                    // For now, use a simple word-by-word copy for performance
+                    let words = field_size / 8;
+                    for w in 0..words {
+                        let word_off = (w * 8) as i32;
+                        let word =
+                            builder
+                                .ins()
+                                .load(types::I64, MemFlags::new(), src_ptr, word_off);
+                        builder
+                            .ins()
+                            .store(MemFlags::new(), word, dst_ptr, word_off);
+                    }
+                    // Copy remaining bytes if any
+                    let remainder = field_size % 8;
+                    if remainder > 0 {
+                        let rem_off = (words * 8) as i32;
+                        for b in 0..remainder {
+                            let byte_off = rem_off + b as i32;
+                            let byte =
+                                builder
+                                    .ins()
+                                    .load(types::I8, MemFlags::new(), src_ptr, byte_off);
+                            builder
+                                .ins()
+                                .store(MemFlags::new(), byte, dst_ptr, byte_off);
+                        }
+                    }
+                }
+                offset += field_size as i32;
             }
 
             Ok(Some(base))

@@ -1,0 +1,476 @@
+// 61_force_directed.sio - Force-directed graph layout
+//
+// Implements the Fruchterman-Reingold algorithm for automatic graph layout.
+// This physics-based approach models:
+// - Repulsive forces between all node pairs (like electric charges)
+// - Attractive forces along edges (like springs)
+//
+// The algorithm iteratively moves nodes to minimize energy, resulting in
+// aesthetically pleasing layouts where connected nodes are close together
+// and unconnected nodes are spread apart.
+
+// ============================================================================
+// Force Vector
+// ============================================================================
+
+struct ForceVec {
+    fx: f64,
+    fy: f64
+}
+
+fn force_new() -> ForceVec {
+    return ForceVec { fx: 0.0, fy: 0.0 }
+}
+
+// ============================================================================
+// Layout State
+// ============================================================================
+
+struct ForceDirectedLayout {
+    // Layout area
+    width: f64,
+    height: f64,
+
+    // Algorithm parameters
+    k: f64,             // Optimal distance between nodes
+    temperature: f64,   // Current temperature (decreases over time)
+    cooling_rate: f64,  // Temperature reduction per iteration
+    min_temp: f64,      // Stop when temperature falls below this
+
+    // Force storage
+    forces: [ForceVec; 100],
+
+    // Iteration tracking
+    iteration: i32,
+    max_iterations: i32,
+    converged: i32      // 1 if layout has converged
+}
+
+fn layout_new(width: f64, height: f64, n_nodes: i32) -> ForceDirectedLayout with Mut, Div, Panic {
+    // Optimal distance: proportional to sqrt(area / n_nodes)
+    let area = width * height
+    let k = sqrt_approx(area / (n_nodes as f64 + 1.0)) * 0.8
+
+    return ForceDirectedLayout {
+        width: width,
+        height: height,
+        k: k,
+        temperature: width * 0.1,  // Start with large temperature
+        cooling_rate: 0.95,
+        min_temp: 0.01,
+        forces: [force_new(); 100],
+        iteration: 0,
+        max_iterations: 500,
+        converged: 0
+    }
+}
+
+// ============================================================================
+// Graph Node/Edge Types (must match 60_graph.sio)
+// ============================================================================
+
+struct GraphNode {
+    id: i32,
+    x: f64,
+    y: f64,
+    z: f64,
+    label_code: i32,
+    color: i32,
+    size: i32,
+    fixed: i32
+}
+
+struct GraphEdge {
+    from_id: i32,
+    to_id: i32,
+    weight: f64,
+    color: i32,
+    directed: i32,
+    style: i32
+}
+
+// ============================================================================
+// Value-Passing Layout Functions
+// ============================================================================
+
+// Single iteration of force-directed layout (value-passing version)
+fn layout_step_v(
+    layout: ForceDirectedLayout,
+    nodes: [GraphNode; 100],
+    n_nodes: i32,
+    edges: &[GraphEdge],
+    n_edges: i32
+) -> LayoutResult with Mut, Div, Panic {
+    var lay = layout
+    var nds = nodes
+
+    if lay.converged == 1 {
+        return LayoutResult { layout: lay, nodes: nds }
+    }
+    if lay.iteration >= lay.max_iterations {
+        lay.converged = 1
+        return LayoutResult { layout: lay, nodes: nds }
+    }
+
+    // Reset forces
+    var i = 0
+    while i < n_nodes {
+        lay.forces[i] = force_new()
+        i = i + 1
+    }
+
+    // Compute repulsive forces between all node pairs
+    let k = lay.k
+    let k2 = k * k
+    i = 0
+    while i < n_nodes {
+        let ni = nds[i]
+        var j = 0
+        while j < n_nodes {
+            if i != j {
+                let nj = nds[j]
+                let dx = ni.x - nj.x
+                let dy = ni.y - nj.y
+                let dist2 = dx * dx + dy * dy + 0.0001
+                let dist = sqrt_approx(dist2)
+                let force_mag = k2 / dist
+                let fx = (dx / dist) * force_mag
+                let fy = (dy / dist) * force_mag
+                lay.forces[i].fx = lay.forces[i].fx + fx
+                lay.forces[i].fy = lay.forces[i].fy + fy
+            }
+            j = j + 1
+        }
+        i = i + 1
+    }
+
+    // Compute attractive forces along edges
+    var e = 0
+    while e < n_edges {
+        let edge = edges[e]
+        let from = edge.from_id
+        let to = edge.to_id
+        let n1 = nds[from]
+        let n2 = nds[to]
+        let dx = n2.x - n1.x
+        let dy = n2.y - n1.y
+        let dist = sqrt_approx(dx * dx + dy * dy) + 0.0001
+        let force_mag = (dist * dist / k) * edge.weight
+        let fx = (dx / dist) * force_mag
+        let fy = (dy / dist) * force_mag
+        lay.forces[from].fx = lay.forces[from].fx + fx
+        lay.forces[from].fy = lay.forces[from].fy + fy
+        lay.forces[to].fx = lay.forces[to].fx - fx
+        lay.forces[to].fy = lay.forces[to].fy - fy
+        e = e + 1
+    }
+
+    // Apply forces with temperature limiting
+    let temp = lay.temperature
+    let half_w = lay.width * 0.5
+    let half_h = lay.height * 0.5
+    var max_displacement = 0.0
+
+    i = 0
+    while i < n_nodes {
+        if nds[i].fixed == 0 {
+            // Limit force by temperature
+            let mag = sqrt_approx(lay.forces[i].fx * lay.forces[i].fx + lay.forces[i].fy * lay.forces[i].fy)
+            if mag > temp {
+                if mag > 0.0001 {
+                    lay.forces[i].fx = lay.forces[i].fx * temp / mag
+                    lay.forces[i].fy = lay.forces[i].fy * temp / mag
+                }
+            }
+
+            let fx = lay.forces[i].fx
+            let fy = lay.forces[i].fy
+
+            // Track displacement
+            let disp = sqrt_approx(fx * fx + fy * fy)
+            if disp > max_displacement {
+                max_displacement = disp
+            }
+
+            // Update position
+            nds[i].x = nds[i].x + fx
+            nds[i].y = nds[i].y + fy
+
+            // Keep within bounds
+            if nds[i].x < 0.0 - half_w { nds[i].x = 0.0 - half_w }
+            if nds[i].x > half_w { nds[i].x = half_w }
+            if nds[i].y < 0.0 - half_h { nds[i].y = 0.0 - half_h }
+            if nds[i].y > half_h { nds[i].y = half_h }
+        }
+        i = i + 1
+    }
+
+    // Check for convergence
+    if max_displacement < lay.min_temp {
+        lay.converged = 1
+    }
+
+    // Cool temperature
+    lay.temperature = lay.temperature * lay.cooling_rate
+    if lay.temperature < lay.min_temp {
+        lay.temperature = lay.min_temp
+    }
+    lay.iteration = lay.iteration + 1
+
+    return LayoutResult { layout: lay, nodes: nds }
+}
+
+// Result type for value-passing layout
+struct LayoutResult {
+    layout: ForceDirectedLayout,
+    nodes: [GraphNode; 100]
+}
+
+// Run layout to completion (value-passing version)
+fn layout_run_v(
+    layout: ForceDirectedLayout,
+    nodes: [GraphNode; 100],
+    n_nodes: i32,
+    edges: &[GraphEdge],
+    n_edges: i32
+) -> LayoutResult with Mut, Div, Panic {
+    var result = LayoutResult { layout: layout, nodes: nodes }
+
+    while result.layout.converged == 0 {
+        if result.layout.iteration >= result.layout.max_iterations {
+            break
+        }
+        result = layout_step_v(result.layout, result.nodes, n_nodes, edges, n_edges)
+    }
+
+    return result
+}
+
+// Initialize random positions for nodes (value-passing version)
+fn layout_randomize_v(
+    nodes: [GraphNode; 100],
+    n_nodes: i32,
+    width: f64,
+    height: f64,
+    seed: i32
+) -> [GraphNode; 100] with Mut, Div, Panic {
+    var nds = nodes
+    var rng_state = seed
+    if rng_state == 0 {
+        rng_state = 12345
+    }
+
+    var i = 0
+    while i < n_nodes {
+        rng_state = (rng_state * 1103515245 + 12345) % 2147483647
+        let rx = ((rng_state % 1000) as f64) / 1000.0
+        rng_state = (rng_state * 1103515245 + 12345) % 2147483647
+        let ry = ((rng_state % 1000) as f64) / 1000.0
+
+        nds[i].x = (rx - 0.5) * width
+        nds[i].y = (ry - 0.5) * height
+        i = i + 1
+    }
+    return nds
+}
+
+// Center the layout around origin (value-passing version)
+fn layout_center_v(
+    nodes: [GraphNode; 100],
+    n_nodes: i32
+) -> [GraphNode; 100] with Mut, Div, Panic {
+    if n_nodes == 0 { return nodes }
+
+    var nds = nodes
+
+    // Find center of mass
+    var cx = 0.0
+    var cy = 0.0
+    var i = 0
+    while i < n_nodes {
+        cx = cx + nds[i].x
+        cy = cy + nds[i].y
+        i = i + 1
+    }
+    cx = cx / (n_nodes as f64)
+    cy = cy / (n_nodes as f64)
+
+    // Shift all nodes
+    i = 0
+    while i < n_nodes {
+        nds[i].x = nds[i].x - cx
+        nds[i].y = nds[i].y - cy
+        i = i + 1
+    }
+    return nds
+}
+
+// ============================================================================
+// Math Helpers
+// ============================================================================
+
+fn sqrt_approx(x: f64) -> f64 with Mut, Panic, Div {
+    if x <= 0.0 { return 0.0 }
+    var guess = x * 0.5
+    var i = 0
+    while i < 10 {
+        guess = (guess + x / guess) * 0.5
+        i = i + 1
+    }
+    return guess
+}
+
+// ============================================================================
+// Main Demo
+// ============================================================================
+
+fn main() -> i32 with IO, Mut, Div, Panic {
+    print("Force-Directed Layout Demo\n")
+    print("==========================\n\n")
+
+    // Create a sample graph (social network)
+    var nodes: [GraphNode; 100] = [GraphNode {
+        id: 0, x: 0.0, y: 0.0, z: 0.0,
+        label_code: 65, color: 37, size: 1, fixed: 0
+    }; 100]
+
+    var edges: [GraphEdge; 500] = [GraphEdge {
+        from_id: 0, to_id: 0, weight: 1.0,
+        color: 37, directed: 0, style: 0
+    }; 500]
+
+    let n_nodes = 8
+    let n_edges = 12
+
+    // Initialize nodes with labels
+    var i = 0
+    while i < n_nodes {
+        nodes[i].id = i
+        nodes[i].label_code = 65 + i  // A, B, C, ...
+        i = i + 1
+    }
+
+    // Create edges (a connected graph)
+    edges[0] = GraphEdge { from_id: 0, to_id: 1, weight: 1.0, color: 37, directed: 0, style: 0 }
+    edges[1] = GraphEdge { from_id: 0, to_id: 2, weight: 1.0, color: 37, directed: 0, style: 0 }
+    edges[2] = GraphEdge { from_id: 1, to_id: 2, weight: 1.0, color: 37, directed: 0, style: 0 }
+    edges[3] = GraphEdge { from_id: 1, to_id: 3, weight: 1.0, color: 37, directed: 0, style: 0 }
+    edges[4] = GraphEdge { from_id: 2, to_id: 4, weight: 1.0, color: 37, directed: 0, style: 0 }
+    edges[5] = GraphEdge { from_id: 3, to_id: 4, weight: 1.0, color: 37, directed: 0, style: 0 }
+    edges[6] = GraphEdge { from_id: 3, to_id: 5, weight: 1.0, color: 37, directed: 0, style: 0 }
+    edges[7] = GraphEdge { from_id: 4, to_id: 6, weight: 1.0, color: 37, directed: 0, style: 0 }
+    edges[8] = GraphEdge { from_id: 5, to_id: 6, weight: 1.0, color: 37, directed: 0, style: 0 }
+    edges[9] = GraphEdge { from_id: 5, to_id: 7, weight: 1.0, color: 37, directed: 0, style: 0 }
+    edges[10] = GraphEdge { from_id: 6, to_id: 7, weight: 1.0, color: 37, directed: 0, style: 0 }
+    edges[11] = GraphEdge { from_id: 0, to_id: 7, weight: 1.0, color: 37, directed: 0, style: 0 }
+
+    // Randomize initial positions
+    print("Initial random positions:\n")
+    nodes = layout_randomize_v(nodes, n_nodes, 40.0, 40.0, 42)
+    print_positions(&nodes, n_nodes)
+
+    // Create layout and run
+    var layout = layout_new(40.0, 40.0, n_nodes)
+    print("\nRunning Fruchterman-Reingold layout...\n")
+    print("k = ")
+    print_f64(layout.k)
+    print("\n\n")
+
+    let result = layout_run_v(layout, nodes, n_nodes, &edges, n_edges)
+    layout = result.layout
+    nodes = result.nodes
+
+    print("Layout completed after ")
+    print_i32(layout.iteration)
+    print(" iterations\n\n")
+
+    // Center and show final positions
+    nodes = layout_center_v(nodes, n_nodes)
+
+    print("Final positions:\n")
+    print_positions(&nodes, n_nodes)
+
+    print("\nLayout quality indicators:\n")
+    print("- Converged: ")
+    if layout.converged == 1 { print("yes\n") } else { print("no\n") }
+    print("- Final temperature: ")
+    print_f64(layout.temperature)
+    print("\n")
+
+    return 0
+}
+
+fn print_positions(nodes: &[GraphNode], n: i32) with IO, Mut, Div, Panic {
+    var i = 0
+    while i < n {
+        print("  ")
+        print_char(nodes[i].label_code)
+        print(": (")
+        print_f64(nodes[i].x)
+        print(", ")
+        print_f64(nodes[i].y)
+        print(")\n")
+        i = i + 1
+    }
+}
+
+// ============================================================================
+// Print Helpers
+// ============================================================================
+
+fn print_i32(x: i32) with IO, Div, Panic {
+    if x == 0 { print("0"); return }
+    if x < 0 { print("-"); print_i32_unsigned(0 - x) }
+    else { print_i32_unsigned(x) }
+}
+
+fn print_i32_unsigned(x: i32) with IO, Div, Panic {
+    if x == 0 { return }
+    let digit = x % 10
+    let rest = x / 10
+    if rest > 0 { print_i32_unsigned(rest) }
+    print_digit(digit)
+}
+
+fn print_digit(d: i32) with IO {
+    if d == 0 { print("0"); return }
+    if d == 1 { print("1"); return }
+    if d == 2 { print("2"); return }
+    if d == 3 { print("3"); return }
+    if d == 4 { print("4"); return }
+    if d == 5 { print("5"); return }
+    if d == 6 { print("6"); return }
+    if d == 7 { print("7"); return }
+    if d == 8 { print("8"); return }
+    if d == 9 { print("9"); return }
+}
+
+fn print_f64(x: f64) with IO, Div, Panic {
+    if x < 0.0 { print("-"); print_f64_pos(0.0 - x) }
+    else { print_f64_pos(x) }
+}
+
+fn print_f64_pos(x: f64) with IO, Div, Panic {
+    let int_part = x as i32
+    print_i32(int_part)
+    print(".")
+    let frac = x - (int_part as f64)
+    let frac_scaled = (frac * 100.0) as i32
+    if frac_scaled < 10 { print("0") }
+    if frac_scaled < 0 { print("00") }
+    else { print_i32_unsigned(frac_scaled) }
+}
+
+fn print_char(code: i32) with IO {
+    if code == 65 { print("A"); return }
+    if code == 66 { print("B"); return }
+    if code == 67 { print("C"); return }
+    if code == 68 { print("D"); return }
+    if code == 69 { print("E"); return }
+    if code == 70 { print("F"); return }
+    if code == 71 { print("G"); return }
+    if code == 72 { print("H"); return }
+    if code == 73 { print("I"); return }
+    if code == 74 { print("J"); return }
+    print("?")
+}

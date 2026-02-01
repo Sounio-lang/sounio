@@ -1,0 +1,457 @@
+// 21_wireframe.sio - 3D wireframe mesh rendering
+//
+// Provides 3D mesh data structures and wireframe rendering with
+// rotation, projection, and hidden line removal.
+
+import "stdlib/math/core.sio"
+import "00_canvas.sio"
+import "02_drawing.sio"
+import "10_axes.sio"
+import "20_projection.sio"
+
+// ============================================================================
+// 3D Mesh Structures
+// ============================================================================
+
+// Edge connecting two vertices
+struct Edge3D {
+    v1_idx: i32,  // Index into vertex array
+    v2_idx: i32   // Index into vertex array
+}
+
+fn edge3d_new(v1: i32, v2: i32) -> Edge3D {
+    return Edge3D { v1_idx: v1, v2_idx: v2 }
+}
+
+// Triangle face (for future surface rendering)
+struct Face3D {
+    v1_idx: i32,
+    v2_idx: i32,
+    v3_idx: i32
+}
+
+fn face3d_new(v1: i32, v2: i32, v3: i32) -> Face3D {
+    return Face3D { v1_idx: v1, v2_idx: v2, v3_idx: v3 }
+}
+
+// 3D mesh with vertices and edges
+struct Mesh3D {
+    vertices: [Vec3D; 1000],     // Vertex positions
+    edges: [Edge3D; 2000],       // Edges connecting vertices
+    faces: [Face3D; 500],        // Triangle faces (optional)
+    n_vertices: i32,
+    n_edges: i32,
+    n_faces: i32
+}
+
+fn mesh3d_new() -> Mesh3D {
+    let vertices: [Vec3D; 1000] = [vec3d_zero(); 1000]
+    let edges: [Edge3D; 2000] = [edge3d_new(0, 0); 2000]
+    let faces: [Face3D; 500] = [face3d_new(0, 0, 0); 500]
+
+    return Mesh3D {
+        vertices: vertices,
+        edges: edges,
+        faces: faces,
+        n_vertices: 0,
+        n_edges: 0,
+        n_faces: 0
+    }
+}
+
+// Add vertex to mesh, returns index
+fn mesh_add_vertex(mesh: &!Mesh3D, v: Vec3D) -> i32 with Mut, Panic {
+    let idx = mesh.n_vertices
+    mesh.vertices[idx] = v
+    mesh.n_vertices = mesh.n_vertices + 1
+    return idx
+}
+
+// Add edge to mesh
+fn mesh_add_edge(mesh: &!Mesh3D, v1: i32, v2: i32) with Mut, Panic {
+    let idx = mesh.n_edges
+    mesh.edges[idx] = edge3d_new(v1, v2)
+    mesh.n_edges = mesh.n_edges + 1
+}
+
+// Add face to mesh
+fn mesh_add_face(mesh: &!Mesh3D, v1: i32, v2: i32, v3: i32) with Mut, Panic {
+    let idx = mesh.n_faces
+    mesh.faces[idx] = face3d_new(v1, v2, v3)
+    mesh.n_faces = mesh.n_faces + 1
+}
+
+// ============================================================================
+// Basic 3D Shapes
+// ============================================================================
+
+// Create a cube mesh centered at origin
+fn mesh_cube(size: f64) -> Mesh3D with Mut, Panic {
+    var mesh = mesh3d_new()
+
+    let half = size / 2.0
+
+    // 8 vertices of cube
+    let v0 = mesh_add_vertex(&!mesh, vec3d_new(-half, -half, -half))
+    let v1 = mesh_add_vertex(&!mesh, vec3d_new(half, -half, -half))
+    let v2 = mesh_add_vertex(&!mesh, vec3d_new(half, half, -half))
+    let v3 = mesh_add_vertex(&!mesh, vec3d_new(-half, half, -half))
+    let v4 = mesh_add_vertex(&!mesh, vec3d_new(-half, -half, half))
+    let v5 = mesh_add_vertex(&!mesh, vec3d_new(half, -half, half))
+    let v6 = mesh_add_vertex(&!mesh, vec3d_new(half, half, half))
+    let v7 = mesh_add_vertex(&!mesh, vec3d_new(-half, half, half))
+
+    // 12 edges
+    // Bottom face
+    mesh_add_edge(&!mesh, v0, v1)
+    mesh_add_edge(&!mesh, v1, v2)
+    mesh_add_edge(&!mesh, v2, v3)
+    mesh_add_edge(&!mesh, v3, v0)
+    // Top face
+    mesh_add_edge(&!mesh, v4, v5)
+    mesh_add_edge(&!mesh, v5, v6)
+    mesh_add_edge(&!mesh, v6, v7)
+    mesh_add_edge(&!mesh, v7, v4)
+    // Vertical edges
+    mesh_add_edge(&!mesh, v0, v4)
+    mesh_add_edge(&!mesh, v1, v5)
+    mesh_add_edge(&!mesh, v2, v6)
+    mesh_add_edge(&!mesh, v3, v7)
+
+    return mesh
+}
+
+// Create a pyramid mesh
+fn mesh_pyramid(base_size: f64, height: f64) -> Mesh3D with Mut, Panic {
+    var mesh = mesh3d_new()
+
+    let half = base_size / 2.0
+
+    // 5 vertices: 4 base corners + 1 apex
+    let v0 = mesh_add_vertex(&!mesh, vec3d_new(-half, -half, 0.0))
+    let v1 = mesh_add_vertex(&!mesh, vec3d_new(half, -half, 0.0))
+    let v2 = mesh_add_vertex(&!mesh, vec3d_new(half, half, 0.0))
+    let v3 = mesh_add_vertex(&!mesh, vec3d_new(-half, half, 0.0))
+    let v4 = mesh_add_vertex(&!mesh, vec3d_new(0.0, 0.0, height))
+
+    // Base edges
+    mesh_add_edge(&!mesh, v0, v1)
+    mesh_add_edge(&!mesh, v1, v2)
+    mesh_add_edge(&!mesh, v2, v3)
+    mesh_add_edge(&!mesh, v3, v0)
+
+    // Edges to apex
+    mesh_add_edge(&!mesh, v0, v4)
+    mesh_add_edge(&!mesh, v1, v4)
+    mesh_add_edge(&!mesh, v2, v4)
+    mesh_add_edge(&!mesh, v3, v4)
+
+    return mesh
+}
+
+// Create a tetrahedron (4-sided pyramid)
+fn mesh_tetrahedron(size: f64) -> Mesh3D with Mut, Panic {
+    var mesh = mesh3d_new()
+
+    // Regular tetrahedron vertices
+    let a = size * 0.816496580927  // sqrt(2/3)
+    let b = size * 0.471404520791  // sqrt(2)/3
+    let c = size * 0.333333333333  // 1/3
+
+    let v0 = mesh_add_vertex(&!mesh, vec3d_new(0.0, 0.0, size))
+    let v1 = mesh_add_vertex(&!mesh, vec3d_new(a, 0.0, -c))
+    let v2 = mesh_add_vertex(&!mesh, vec3d_new(-b, a * 0.866025403784, -c))
+    let v3 = mesh_add_vertex(&!mesh, vec3d_new(-b, -a * 0.866025403784, -c))
+
+    // 6 edges
+    mesh_add_edge(&!mesh, v0, v1)
+    mesh_add_edge(&!mesh, v0, v2)
+    mesh_add_edge(&!mesh, v0, v3)
+    mesh_add_edge(&!mesh, v1, v2)
+    mesh_add_edge(&!mesh, v2, v3)
+    mesh_add_edge(&!mesh, v3, v1)
+
+    return mesh
+}
+
+// Create an octahedron
+fn mesh_octahedron(size: f64) -> Mesh3D with Mut, Panic {
+    var mesh = mesh3d_new()
+
+    // 6 vertices: +/- along each axis
+    let v0 = mesh_add_vertex(&!mesh, vec3d_new(size, 0.0, 0.0))
+    let v1 = mesh_add_vertex(&!mesh, vec3d_new(-size, 0.0, 0.0))
+    let v2 = mesh_add_vertex(&!mesh, vec3d_new(0.0, size, 0.0))
+    let v3 = mesh_add_vertex(&!mesh, vec3d_new(0.0, -size, 0.0))
+    let v4 = mesh_add_vertex(&!mesh, vec3d_new(0.0, 0.0, size))
+    let v5 = mesh_add_vertex(&!mesh, vec3d_new(0.0, 0.0, -size))
+
+    // 12 edges
+    mesh_add_edge(&!mesh, v0, v2)
+    mesh_add_edge(&!mesh, v0, v3)
+    mesh_add_edge(&!mesh, v0, v4)
+    mesh_add_edge(&!mesh, v0, v5)
+    mesh_add_edge(&!mesh, v1, v2)
+    mesh_add_edge(&!mesh, v1, v3)
+    mesh_add_edge(&!mesh, v1, v4)
+    mesh_add_edge(&!mesh, v1, v5)
+    mesh_add_edge(&!mesh, v2, v4)
+    mesh_add_edge(&!mesh, v2, v5)
+    mesh_add_edge(&!mesh, v3, v4)
+    mesh_add_edge(&!mesh, v3, v5)
+
+    return mesh
+}
+
+// ============================================================================
+// Wireframe Rendering
+// ============================================================================
+
+// Transform all vertices by rotation
+fn mesh_transform(mesh: &Mesh3D, rx: f64, ry: f64, rz: f64) -> Mesh3D with Mut, Panic {
+    var result = mesh3d_new()
+    result.n_vertices = mesh.n_vertices
+    result.n_edges = mesh.n_edges
+    result.n_faces = mesh.n_faces
+
+    // Copy and transform vertices
+    var i = 0
+    while i < mesh.n_vertices {
+        result.vertices[i] = rotate_xyz(&mesh.vertices[i], rx, ry, rz)
+        i = i + 1
+    }
+
+    // Copy edges
+    i = 0
+    while i < mesh.n_edges {
+        result.edges[i] = mesh.edges[i]
+        i = i + 1
+    }
+
+    // Copy faces
+    i = 0
+    while i < mesh.n_faces {
+        result.faces[i] = mesh.faces[i]
+        i = i + 1
+    }
+
+    return result
+}
+
+// Draw wireframe using isometric projection
+fn draw_wireframe_isometric(
+    canvas: Canvas,
+    vp: &Viewport,
+    mesh: &Mesh3D,
+    color: i32,
+    scale: f64
+) -> Canvas with Mut, Panic, Div {
+    var c = canvas
+
+    // Project and draw each edge
+    var i = 0
+    while i < mesh.n_edges {
+        let edge = &mesh.edges[i]
+        let v1 = &mesh.vertices[edge.v1_idx]
+        let v2 = &mesh.vertices[edge.v2_idx]
+
+        // Project to 2D
+        let p1_2d = isometric_project_scaled(v1, scale)
+        let p2_2d = isometric_project_scaled(v2, scale)
+
+        // Transform to canvas coordinates
+        let canvas_p1 = world_to_canvas(vp, p1_2d.x, p1_2d.y)
+        let canvas_p2 = world_to_canvas(vp, p2_2d.x, p2_2d.y)
+
+        // Draw line
+        c = draw_line_solid(c, canvas_p1.0, canvas_p1.1, canvas_p2.0, canvas_p2.1, color)
+
+        i = i + 1
+    }
+
+    return c
+}
+
+// Draw wireframe using perspective projection
+fn draw_wireframe_perspective(
+    canvas: Canvas,
+    vp: &Viewport,
+    mesh: &Mesh3D,
+    color: i32,
+    focal_length: f64
+) -> Canvas with Mut, Panic, Div {
+    var c = canvas
+
+    // Project and draw each edge
+    var i = 0
+    while i < mesh.n_edges {
+        let edge = &mesh.edges[i]
+        let v1 = &mesh.vertices[edge.v1_idx]
+        let v2 = &mesh.vertices[edge.v2_idx]
+
+        // Project to 2D
+        let p1_2d = perspective_project(v1, focal_length)
+        let p2_2d = perspective_project(v2, focal_length)
+
+        // Transform to canvas coordinates
+        let canvas_p1 = world_to_canvas(vp, p1_2d.x, p1_2d.y)
+        let canvas_p2 = world_to_canvas(vp, p2_2d.x, p2_2d.y)
+
+        // Draw line
+        c = draw_line_solid(c, canvas_p1.0, canvas_p1.1, canvas_p2.0, canvas_p2.1, color)
+
+        i = i + 1
+    }
+
+    return c
+}
+
+// Draw wireframe with automatic centering and scaling
+fn draw_wireframe_auto(
+    canvas: Canvas,
+    vp: &Viewport,
+    mesh: &Mesh3D,
+    rotation: Vec3D,
+    color: i32
+) -> Canvas with Mut, Panic, Div {
+    // Transform mesh
+    let transformed = mesh_transform(mesh, rotation.x, rotation.y, rotation.z)
+
+    // Auto-scale to fit viewport (use isometric projection with scale 1.0)
+    return draw_wireframe_isometric(canvas, vp, &transformed, color, 1.0)
+}
+
+// ============================================================================
+// Grid/Axes Helpers for 3D
+// ============================================================================
+
+// Draw 3D coordinate axes
+fn draw_axes_3d(
+    canvas: Canvas,
+    vp: &Viewport,
+    length: f64,
+    scale: f64
+) -> Canvas with Mut, Panic, Div {
+    var c = canvas
+
+    // X axis (red)
+    let x_start = vec3d_new(0.0, 0.0, 0.0)
+    let x_end = vec3d_new(length, 0.0, 0.0)
+    let x_start_2d = isometric_project_scaled(&x_start, scale)
+    let x_end_2d = isometric_project_scaled(&x_end, scale)
+    let x_p1 = world_to_canvas(vp, x_start_2d.x, x_start_2d.y)
+    let x_p2 = world_to_canvas(vp, x_end_2d.x, x_end_2d.y)
+    c = draw_line_solid(c, x_p1.0, x_p1.1, x_p2.0, x_p2.1, COLOR_RED())
+
+    // Y axis (green)
+    let y_start = vec3d_new(0.0, 0.0, 0.0)
+    let y_end = vec3d_new(0.0, length, 0.0)
+    let y_start_2d = isometric_project_scaled(&y_start, scale)
+    let y_end_2d = isometric_project_scaled(&y_end, scale)
+    let y_p1 = world_to_canvas(vp, y_start_2d.x, y_start_2d.y)
+    let y_p2 = world_to_canvas(vp, y_end_2d.x, y_end_2d.y)
+    c = draw_line_solid(c, y_p1.0, y_p1.1, y_p2.0, y_p2.1, COLOR_GREEN())
+
+    // Z axis (blue)
+    let z_start = vec3d_new(0.0, 0.0, 0.0)
+    let z_end = vec3d_new(0.0, 0.0, length)
+    let z_start_2d = isometric_project_scaled(&z_start, scale)
+    let z_end_2d = isometric_project_scaled(&z_end, scale)
+    let z_p1 = world_to_canvas(vp, z_start_2d.x, z_start_2d.y)
+    let z_p2 = world_to_canvas(vp, z_end_2d.x, z_end_2d.y)
+    c = draw_line_solid(c, z_p1.0, z_p1.1, z_p2.0, z_p2.1, COLOR_BLUE())
+
+    return c
+}
+
+// ============================================================================
+// Example/Test Function
+// ============================================================================
+
+fn main() -> i32 with IO, Mut, Panic, Div {
+    print("\x1b[2J\x1b[H")  // Clear screen
+    print("=== 3D Wireframe Rendering Test ===\n\n")
+
+    // Create canvas
+    var canvas = canvas_new(80, 30)
+    canvas = canvas_clear(canvas)
+
+    // Set up viewport
+    let vp = viewport_new(-10.0, 10.0, -10.0, 10.0, 5, 2, 70, 26)
+
+    // Create a cube
+    let cube = mesh_cube(3.0)
+
+    // Rotate cube (45 degrees around Y and Z)
+    let rotation = vec3d_new(0.0, deg_to_rad(45.0), deg_to_rad(30.0))
+
+    // Draw axes
+    canvas = draw_axes_3d(canvas, &vp, 5.0, 1.0)
+
+    // Draw wireframe
+    canvas = draw_wireframe_auto(canvas, &vp, &cube, rotation, COLOR_CYAN())
+
+    // Add title
+    canvas = draw_text(canvas, 15, 0, "Rotating Cube (Isometric)", text_style_default())
+
+    // Render
+    canvas_render(&canvas)
+
+    print("\n\n")
+    print("Cube has ")
+    print_i32(cube.n_vertices)
+    print(" vertices and ")
+    print_i32(cube.n_edges)
+    print(" edges\n")
+
+    return 0
+}
+
+// Helper functions from other modules referenced inline
+
+fn print_i32(x: i32) with IO, Div, Panic {
+    if x == 0 {
+        print("0")
+        return
+    }
+
+    if x < 0 {
+        print("-")
+        print_i32_unsigned(0 - x)
+    } else {
+        print_i32_unsigned(x)
+    }
+}
+
+fn print_i32_unsigned(x: i32) with IO, Div, Panic {
+    if x == 0 {
+        return
+    }
+
+    let digit = x % 10
+    let rest = x / 10
+
+    if rest > 0 {
+        print_i32_unsigned(rest)
+    }
+
+    // Print digit as character
+    let ch = 48 + digit  // '0' is ASCII 48
+    print_char(ch)
+}
+
+fn print_char(code: i32) with IO {
+    // Print digit characters
+    if code == 48 { print("0") }
+    else { if code == 49 { print("1") }
+    else { if code == 50 { print("2") }
+    else { if code == 51 { print("3") }
+    else { if code == 52 { print("4") }
+    else { if code == 53 { print("5") }
+    else { if code == 54 { print("6") }
+    else { if code == 55 { print("7") }
+    else { if code == 56 { print("8") }
+    else { if code == 57 { print("9") }
+    else { print("?") }
+    }}}}}}}}}}
+}

@@ -789,7 +789,17 @@ impl<'a> LoweringContext<'a> {
                 let base_val = self.lower_expr(base)?;
                 let idx_val = self.lower_expr(index)?;
                 let elem_ptr = self.builder.build_elem_ptr(base_val, idx_val, ty.clone());
-                Some(self.builder.build_load(elem_ptr, ty))
+                // For aggregate types (structs, tuples, arrays), return the pointer
+                // since they're represented as pointers at runtime.
+                // For primitive types, load the actual value.
+                if matches!(
+                    ty,
+                    HlirType::Struct(_) | HlirType::Tuple(_) | HlirType::Array(_, _)
+                ) {
+                    Some(elem_ptr)
+                } else {
+                    Some(self.builder.build_load(elem_ptr, ty))
+                }
             }
 
             HirExprKind::Ref {

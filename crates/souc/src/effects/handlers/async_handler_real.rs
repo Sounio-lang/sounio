@@ -331,7 +331,20 @@ impl RealAsyncHandler {
         // Fallback: use std::thread::sleep
         let ms = match &args[0] {
             Value::Int(n) if *n >= 0 => *n as u64,
-            _ => return HandlerResult::Resume(Value::Unit),
+            Value::Int(n) => {
+                return HandlerResult::Abort(HandlerError::new(
+                    "Async",
+                    "sleep",
+                    format!("sleep duration must be non-negative, got {}", n),
+                ));
+            }
+            _ => {
+                return HandlerResult::Abort(HandlerError::new(
+                    "Async",
+                    "sleep",
+                    "sleep duration must be an integer",
+                ));
+            }
         };
 
         std::thread::sleep(std::time::Duration::from_millis(ms));

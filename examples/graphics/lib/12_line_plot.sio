@@ -1,0 +1,504 @@
+// Line Plots - Connected curves for time series and continuous functions
+//
+// Provides line plot functionality with support for multiple series,
+// different line styles (solid, dashed, dotted), and colors.
+
+// ============================================================================
+// Duplicate necessary types
+// ============================================================================
+
+struct Cell {
+    ch: i32,
+    fg_color: i32,
+    bg_color: i32,
+    bold: i32,
+    dim: i32
+}
+
+struct Canvas {
+    width: i32,
+    height: i32,
+    cells: [Cell; 2400]
+}
+
+struct Viewport {
+    x_min: f64,
+    x_max: f64,
+    y_min: f64,
+    y_max: f64,
+    canvas_x: i32,
+    canvas_y: i32,
+    canvas_width: i32,
+    canvas_height: i32
+}
+
+// ============================================================================
+// Line Plot Data Structures
+// ============================================================================
+
+// Line style options
+fn LINE_STYLE_SOLID() -> i32 { return 0 }
+fn LINE_STYLE_DASHED() -> i32 { return 1 }
+fn LINE_STYLE_DOTTED() -> i32 { return 2 }
+
+// Line series styling
+struct LineSeries {
+    color: i32,
+    style: i32,      // 0=solid, 1=dashed, 2=dotted
+    thickness: i32   // 1-3 (number of pixels)
+}
+
+fn line_series_new(color: i32, style: i32, thickness: i32) -> LineSeries {
+    return LineSeries {
+        color: color,
+        style: style,
+        thickness: thickness
+    }
+}
+
+// ============================================================================
+// Coordinate Transformation (from 10_axes.sio)
+// ============================================================================
+
+fn world_to_canvas_x(vp: &Viewport, x: f64) -> i32 with Mut, Panic, Div {
+    let x_range = vp.x_max - vp.x_min
+    let normalized = (x - vp.x_min) / x_range
+    let pixel_offset = normalized * (vp.canvas_width as f64)
+    return vp.canvas_x + (pixel_offset as i32)
+}
+
+fn world_to_canvas_y(vp: &Viewport, y: f64) -> i32 with Mut, Panic, Div {
+    let y_range = vp.y_max - vp.y_min
+    let normalized = (y - vp.y_min) / y_range
+    let pixel_offset = normalized * (vp.canvas_height as f64)
+
+    // Flip Y axis (canvas Y increases downward, world Y increases upward)
+    return vp.canvas_y + vp.canvas_height - (pixel_offset as i32)
+}
+
+// ============================================================================
+// Canvas Operations
+// ============================================================================
+
+fn canvas_set_pixel(canvas: Canvas, x: i32, y: i32, ch: i32, color: i32) -> Canvas with Mut, Panic {
+    if x < 0 { return canvas }
+    if y < 0 { return canvas }
+    if x >= canvas.width { return canvas }
+    if y >= canvas.height { return canvas }
+
+    var new_canvas = canvas
+    let index = y * canvas.width + x
+    new_canvas.cells[index] = Cell {
+        ch: ch,
+        fg_color: color,
+        bg_color: 0,
+        bold: 0,
+        dim: 0
+    }
+    return new_canvas
+}
+
+// ============================================================================
+// Line Drawing (Bresenham's algorithm from 02_drawing.sio)
+// ============================================================================
+
+fn abs(x: i32) -> i32 {
+    if x < 0 {
+        return 0 - x
+    }
+    return x
+}
+
+fn draw_line_segment(
+    canvas: Canvas,
+    x0: i32,
+    y0: i32,
+    x1: i32,
+    y1: i32,
+    ch: i32,
+    color: i32,
+    style: i32,
+    dash_counter: i32
+) -> Canvas with Mut, Panic, Div {
+    var result = canvas
+
+    let dx = abs(x1 - x0)
+    let dy = abs(y1 - y0)
+    let sx = if x0 < x1 { 1 } else { -1 }
+    let sy = if y0 < y1 { 1 } else { -1 }
+    var err = dx - dy
+
+    var x = x0
+    var y = y0
+    var counter = dash_counter
+
+    while x != x1 || y != y1 {
+        // Draw pixel based on style
+        let should_draw = if style == LINE_STYLE_SOLID() {
+            1
+        } else { if style == LINE_STYLE_DASHED() {
+            // Dash pattern: 3 on, 2 off
+            if counter % 5 < 3 { 1 } else { 0 }
+        } else {
+            // Dotted pattern: 1 on, 2 off
+            if counter % 3 == 0 { 1 } else { 0 }
+        }}
+
+        if should_draw == 1 {
+            result = canvas_set_pixel(result, x, y, ch, color)
+        }
+
+        counter = counter + 1
+
+        let e2 = 2 * err
+        if e2 > 0 - dy {
+            err = err - dy
+            x = x + sx
+        }
+        if e2 < dx {
+            err = err + dx
+            y = y + sy
+        }
+    }
+
+    // Draw final pixel
+    result = canvas_set_pixel(result, x1, y1, ch, color)
+    return result
+}
+
+// ============================================================================
+// Line Plot Rendering
+// ============================================================================
+
+// Plot single line series
+fn line_plot(
+    canvas: Canvas,
+    vp: &Viewport,
+    x_data: &[f64],
+    y_data: &[f64],
+    n_points: i32,
+    series: LineSeries
+) -> Canvas with Mut, Panic, Div {
+    if n_points < 2 {
+        return canvas
+    }
+
+    var result = canvas
+    var dash_counter = 0
+    let ch = 9608  // Full block █
+
+    var i = 0
+    while i < n_points - 1 {
+        let x0 = world_to_canvas_x(vp, x_data[i])
+        let y0 = world_to_canvas_y(vp, y_data[i])
+        let x1 = world_to_canvas_x(vp, x_data[i + 1])
+        let y1 = world_to_canvas_y(vp, y_data[i + 1])
+
+        result = draw_line_segment(
+            result,
+            x0, y0, x1, y1,
+            ch,
+            series.color,
+            series.style,
+            dash_counter
+        )
+
+        // Update dash counter for continuous pattern
+        let dx = abs(x1 - x0)
+        let dy = abs(y1 - y0)
+        let segment_length = if dx > dy { dx } else { dy }
+        dash_counter = dash_counter + segment_length
+
+        i = i + 1
+    }
+
+    return result
+}
+
+// Plot multiple line series on the same viewport
+fn multi_line_plot(
+    canvas: Canvas,
+    vp: &Viewport,
+    x_arrays: &[[f64; 100]],
+    y_arrays: &[[f64; 100]],
+    n_points_array: &[i32],
+    series_styles: &[LineSeries],
+    n_series: i32
+) -> Canvas with Mut, Panic, Div {
+    var result = canvas
+
+    var i = 0
+    while i < n_series {
+        result = line_plot(
+            result,
+            vp,
+            &x_arrays[i],
+            &y_arrays[i],
+            n_points_array[i],
+            series_styles[i]
+        )
+        i = i + 1
+    }
+
+    return result
+}
+
+// ============================================================================
+// Specialized Line Plots
+// ============================================================================
+
+// Plot function y = f(x) over a range
+// Note: Function pointers not fully supported yet, so this is conceptual
+fn function_plot(
+    canvas: Canvas,
+    vp: &Viewport,
+    x_min: f64,
+    x_max: f64,
+    n_samples: i32,
+    series: LineSeries
+) -> Canvas with Mut, Panic, Div {
+    // This would need function pointer support
+    // For now, return canvas unchanged
+    return canvas
+}
+
+// Step plot (for discrete/categorical data)
+fn step_plot(
+    canvas: Canvas,
+    vp: &Viewport,
+    x_data: &[f64],
+    y_data: &[f64],
+    n_points: i32,
+    series: LineSeries
+) -> Canvas with Mut, Panic, Div {
+    if n_points < 2 {
+        return canvas
+    }
+
+    var result = canvas
+    let ch = 9608  // Full block █
+
+    var i = 0
+    while i < n_points - 1 {
+        let x0 = world_to_canvas_x(vp, x_data[i])
+        let y0 = world_to_canvas_y(vp, y_data[i])
+        let x1 = world_to_canvas_x(vp, x_data[i + 1])
+        let y1 = world_to_canvas_y(vp, y_data[i + 1])
+
+        // Draw horizontal segment at current y
+        result = draw_line_segment(result, x0, y0, x1, y0, ch, series.color, series.style, 0)
+        // Draw vertical segment at next x
+        result = draw_line_segment(result, x1, y0, x1, y1, ch, series.color, series.style, 0)
+
+        i = i + 1
+    }
+
+    return result
+}
+
+// ============================================================================
+// Axes Drawing (from 10_axes.sio)
+// ============================================================================
+
+fn draw_hline(canvas: Canvas, x0: i32, x1: i32, y: i32, color: i32) -> Canvas with Mut, Panic, Div {
+    var result = canvas
+    let start_x = if x0 < x1 { x0 } else { x1 }
+    let end_x = if x0 < x1 { x1 } else { x0 }
+
+    var x = start_x
+    while x <= end_x {
+        result = canvas_set_pixel(result, x, y, 9608, color)
+        x = x + 1
+    }
+
+    return result
+}
+
+fn draw_vline(canvas: Canvas, x: i32, y0: i32, y1: i32, color: i32) -> Canvas with Mut, Panic, Div {
+    var result = canvas
+    let start_y = if y0 < y1 { y0 } else { y1 }
+    let end_y = if y0 < y1 { y1 } else { y0 }
+
+    var y = start_y
+    while y <= end_y {
+        result = canvas_set_pixel(result, x, y, 9608, color)
+        y = y + 1
+    }
+
+    return result
+}
+
+fn draw_axes(canvas: Canvas, vp: &Viewport, color: i32) -> Canvas with Mut, Panic, Div {
+    var result = canvas
+
+    // Find pixel coordinates for origin (0, 0)
+    let origin_x = world_to_canvas_x(vp, 0.0)
+    let origin_y = world_to_canvas_y(vp, 0.0)
+
+    // Draw Y axis (vertical line at x=0)
+    if origin_x >= vp.canvas_x && origin_x < vp.canvas_x + vp.canvas_width {
+        result = draw_vline(result, origin_x, vp.canvas_y, vp.canvas_y + vp.canvas_height - 1, color)
+    }
+
+    // Draw X axis (horizontal line at y=0)
+    if origin_y >= vp.canvas_y && origin_y < vp.canvas_y + vp.canvas_height {
+        result = draw_hline(result, vp.canvas_x, vp.canvas_x + vp.canvas_width - 1, origin_y, color)
+    }
+
+    return result
+}
+
+fn draw_grid(canvas: Canvas, vp: &Viewport, n_x_lines: i32, n_y_lines: i32, color: i32) -> Canvas with Mut, Panic, Div {
+    var result = canvas
+
+    // Vertical grid lines
+    var i = 0
+    while i <= n_x_lines {
+        let fraction = (i as f64) / (n_x_lines as f64)
+        let world_x = vp.x_min + fraction * (vp.x_max - vp.x_min)
+        let pixel_x = world_to_canvas_x(vp, world_x)
+
+        result = draw_vline(result, pixel_x, vp.canvas_y, vp.canvas_y + vp.canvas_height - 1, color)
+        i = i + 1
+    }
+
+    // Horizontal grid lines
+    i = 0
+    while i <= n_y_lines {
+        let fraction = (i as f64) / (n_y_lines as f64)
+        let world_y = vp.y_min + fraction * (vp.y_max - vp.y_min)
+        let pixel_y = world_to_canvas_y(vp, world_y)
+
+        result = draw_hline(result, vp.canvas_x, vp.canvas_x + vp.canvas_width - 1, pixel_y, color)
+        i = i + 1
+    }
+
+    return result
+}
+
+// ============================================================================
+// Viewport Creation
+// ============================================================================
+
+fn viewport_new(
+    x_min: f64,
+    x_max: f64,
+    y_min: f64,
+    y_max: f64,
+    canvas_x: i32,
+    canvas_y: i32,
+    canvas_width: i32,
+    canvas_height: i32
+) -> Viewport {
+    return Viewport {
+        x_min: x_min,
+        x_max: x_max,
+        y_min: y_min,
+        y_max: y_max,
+        canvas_x: canvas_x,
+        canvas_y: canvas_y,
+        canvas_width: canvas_width,
+        canvas_height: canvas_height
+    }
+}
+
+// ============================================================================
+// Test/Demo
+// ============================================================================
+
+fn cell_blank() -> Cell {
+    return Cell {
+        ch: 32,
+        fg_color: 7,
+        bg_color: 0,
+        bold: 0,
+        dim: 0
+    }
+}
+
+fn canvas_new(width: i32, height: i32) -> Canvas with Mut, Panic, Div {
+    var canvas = Canvas {
+        width: width,
+        height: height,
+        cells: [cell_blank(); 2400]
+    }
+
+    var i = 0
+    while i < width * height {
+        canvas.cells[i] = cell_blank()
+        i = i + 1
+    }
+
+    return canvas
+}
+
+fn COLOR_WHITE() -> i32 { return 7 }
+fn COLOR_BRIGHT_BLACK() -> i32 { return 8 }
+fn COLOR_RED() -> i32 { return 1 }
+fn COLOR_GREEN() -> i32 { return 2 }
+fn COLOR_BLUE() -> i32 { return 4 }
+fn COLOR_YELLOW() -> i32 { return 3 }
+fn COLOR_CYAN() -> i32 { return 6 }
+fn COLOR_MAGENTA() -> i32 { return 5 }
+
+fn main() -> i32 with IO, Mut, Panic, Div {
+    print("=== Sounio Line Plot Demo ===\n\n")
+
+    // Create canvas
+    var canvas = canvas_new(70, 30)
+
+    // Create viewport: [-10, 10] x [-10, 10]
+    let vp = viewport_new(
+        -10.0, 10.0,
+        -10.0, 10.0,
+        5, 2,
+        60, 26
+    )
+
+    // Draw grid and axes
+    print("Drawing grid and axes...\n")
+    canvas = draw_grid(canvas, &vp, 4, 4, COLOR_BRIGHT_BLACK())
+    canvas = draw_axes(canvas, &vp, COLOR_WHITE())
+
+    // Test 1: Simple line plot (sine wave approximation)
+    print("Plotting sine wave...\n")
+    var x_sine = [-10.0, -8.0, -6.0, -4.0, -2.0, 0.0, 2.0, 4.0, 6.0, 8.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+    var y_sine = [0.0, -5.0, -8.0, -9.5, -9.0, -7.0, -4.0, 0.0, 5.0, 8.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+
+    let sine_series = line_series_new(COLOR_CYAN(), LINE_STYLE_SOLID(), 1)
+    canvas = line_plot(canvas, &vp, &x_sine, &y_sine, 10, sine_series)
+
+    // Test 2: Dashed line
+    print("Plotting dashed line...\n")
+    var x_dashed = [-9.0, -6.0, -3.0, 0.0, 3.0, 6.0, 9.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+    var y_dashed = [7.0, 7.0, 7.0, 7.0, 7.0, 7.0, 7.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+
+    let dashed_series = line_series_new(COLOR_YELLOW(), LINE_STYLE_DASHED(), 1)
+    canvas = line_plot(canvas, &vp, &x_dashed, &y_dashed, 7, dashed_series)
+
+    // Test 3: Dotted line
+    print("Plotting dotted line...\n")
+    var x_dotted = [-9.0, -6.0, -3.0, 0.0, 3.0, 6.0, 9.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+    var y_dotted = [-7.0, -7.0, -7.0, -7.0, -7.0, -7.0, -7.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+
+    let dotted_series = line_series_new(COLOR_MAGENTA(), LINE_STYLE_DOTTED(), 1)
+    canvas = line_plot(canvas, &vp, &x_dotted, &y_dotted, 7, dotted_series)
+
+    // Test 4: Step plot
+    print("Plotting step function...\n")
+    var x_step = [-8.0, -4.0, 0.0, 4.0, 8.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+    var y_step = [-5.0, -2.0, 3.0, 6.0, 8.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+
+    let step_series = line_series_new(COLOR_GREEN(), LINE_STYLE_SOLID(), 1)
+    canvas = step_plot(canvas, &vp, &x_step, &y_step, 5, step_series)
+
+    print("\n=== Line plot rendering complete! ===\n")
+    print("Plotted:\n")
+    print("  - Solid line (cyan sine wave)\n")
+    print("  - Dashed line (yellow horizontal)\n")
+    print("  - Dotted line (magenta horizontal)\n")
+    print("  - Step plot (green)\n")
+    print("(Canvas created but not rendered)\n")
+
+    return 0
+}

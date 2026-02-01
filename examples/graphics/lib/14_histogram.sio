@@ -1,0 +1,506 @@
+// Histograms - Distribution visualization with automatic binning
+//
+// Provides histogram functionality with bin computation, multiple
+// distributions overlay, and support for frequency/density plots.
+
+// ============================================================================
+// Duplicate necessary types
+// ============================================================================
+
+struct Cell {
+    ch: i32,
+    fg_color: i32,
+    bg_color: i32,
+    bold: i32,
+    dim: i32
+}
+
+struct Canvas {
+    width: i32,
+    height: i32,
+    cells: [Cell; 2400]
+}
+
+struct Viewport {
+    x_min: f64,
+    x_max: f64,
+    y_min: f64,
+    y_max: f64,
+    canvas_x: i32,
+    canvas_y: i32,
+    canvas_width: i32,
+    canvas_height: i32
+}
+
+// ============================================================================
+// Histogram Data Structures
+// ============================================================================
+
+// Histogram bin data
+struct BinData {
+    bin_edges: [f64; 51],     // n_bins + 1 edges
+    bin_counts: [i32; 50],    // n_bins counts
+    n_bins: i32,
+    total_count: i32
+}
+
+fn bin_data_empty() -> BinData {
+    return BinData {
+        bin_edges: [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0],
+        bin_counts: [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+        n_bins: 0,
+        total_count: 0
+    }
+}
+
+// ============================================================================
+// Bin Computation
+// ============================================================================
+
+// Find min and max values in data
+fn find_min_max(data: &[f64], n_data: i32) -> (f64, f64) with Mut, Panic, Div {
+    if n_data == 0 {
+        return (0.0, 1.0)
+    }
+
+    var min_val = data[0]
+    var max_val = data[0]
+
+    var i = 1
+    while i < n_data {
+        if data[i] < min_val {
+            min_val = data[i]
+        }
+        if data[i] > max_val {
+            max_val = data[i]
+        }
+        i = i + 1
+    }
+
+    return (min_val, max_val)
+}
+
+// Compute histogram bins from data
+fn compute_bins(data: &[f64], n_data: i32, n_bins: i32) -> BinData with Mut, Panic, Div {
+    var result = bin_data_empty()
+    result.n_bins = n_bins
+
+    if n_data == 0 || n_bins == 0 {
+        return result
+    }
+
+    // Find data range
+    let min_max = find_min_max(data, n_data)
+    let min_val = min_max.0
+    let max_val = min_max.1
+    let range = max_val - min_val
+
+    // Handle edge case: all values are the same
+    let actual_range = if range < 0.0001 { 1.0 } else { range }
+
+    // Create bin edges
+    var i = 0
+    while i <= n_bins {
+        result.bin_edges[i] = min_val + ((i as f64) / (n_bins as f64)) * actual_range
+        i = i + 1
+    }
+
+    // Count data points in each bin
+    var data_idx = 0
+    while data_idx < n_data {
+        let value = data[data_idx]
+
+        // Find which bin this value belongs to
+        var bin_idx = 0
+        var found = 0
+        while bin_idx < n_bins && found == 0 {
+            let bin_left = result.bin_edges[bin_idx]
+            let bin_right = result.bin_edges[bin_idx + 1]
+
+            // Check if value is in this bin [left, right)
+            // Last bin includes right edge
+            let in_bin = if bin_idx == n_bins - 1 {
+                if value >= bin_left && value <= bin_right { 1 } else { 0 }
+            } else {
+                if value >= bin_left && value < bin_right { 1 } else { 0 }
+            }
+
+            if in_bin == 1 {
+                result.bin_counts[bin_idx] = result.bin_counts[bin_idx] + 1
+                result.total_count = result.total_count + 1
+                found = 1
+            }
+
+            bin_idx = bin_idx + 1
+        }
+
+        data_idx = data_idx + 1
+    }
+
+    return result
+}
+
+// ============================================================================
+// Coordinate Transformation (from 10_axes.sio)
+// ============================================================================
+
+fn world_to_canvas_x(vp: &Viewport, x: f64) -> i32 with Mut, Panic, Div {
+    let x_range = vp.x_max - vp.x_min
+    let normalized = (x - vp.x_min) / x_range
+    let pixel_offset = normalized * (vp.canvas_width as f64)
+    return vp.canvas_x + (pixel_offset as i32)
+}
+
+fn world_to_canvas_y(vp: &Viewport, y: f64) -> i32 with Mut, Panic, Div {
+    let y_range = vp.y_max - vp.y_min
+    let normalized = (y - vp.y_min) / y_range
+    let pixel_offset = normalized * (vp.canvas_height as f64)
+    return vp.canvas_y + vp.canvas_height - (pixel_offset as i32)
+}
+
+// ============================================================================
+// Canvas Operations
+// ============================================================================
+
+fn canvas_set_pixel(canvas: Canvas, x: i32, y: i32, ch: i32, color: i32) -> Canvas with Mut, Panic {
+    if x < 0 { return canvas }
+    if y < 0 { return canvas }
+    if x >= canvas.width { return canvas }
+    if y >= canvas.height { return canvas }
+
+    var new_canvas = canvas
+    let index = y * canvas.width + x
+    new_canvas.cells[index] = Cell {
+        ch: ch,
+        fg_color: color,
+        bg_color: 0,
+        bold: 0,
+        dim: 0
+    }
+    return new_canvas
+}
+
+fn draw_hline(canvas: Canvas, x0: i32, x1: i32, y: i32, color: i32) -> Canvas with Mut, Panic, Div {
+    var result = canvas
+    let start_x = if x0 < x1 { x0 } else { x1 }
+    let end_x = if x0 < x1 { x1 } else { x0 }
+
+    var x = start_x
+    while x <= end_x {
+        result = canvas_set_pixel(result, x, y, 9608, color)
+        x = x + 1
+    }
+
+    return result
+}
+
+fn draw_vline(canvas: Canvas, x: i32, y0: i32, y1: i32, color: i32) -> Canvas with Mut, Panic, Div {
+    var result = canvas
+    let start_y = if y0 < y1 { y0 } else { y1 }
+    let end_y = if y0 < y1 { y1 } else { y0 }
+
+    var y = start_y
+    while y <= end_y {
+        result = canvas_set_pixel(result, x, y, 9608, color)
+        y = y + 1
+    }
+
+    return result
+}
+
+fn fill_rect(canvas: Canvas, x: i32, y: i32, width: i32, height: i32, color: i32) -> Canvas with Mut, Panic, Div {
+    var result = canvas
+
+    var row = 0
+    while row < height {
+        result = draw_hline(result, x, x + width - 1, y + row, color)
+        row = row + 1
+    }
+
+    return result
+}
+
+// ============================================================================
+// Histogram Rendering
+// ============================================================================
+
+// Render histogram as vertical bars
+fn histogram(
+    canvas: Canvas,
+    vp: &Viewport,
+    bin_data: &BinData,
+    color: i32,
+    fill: i32  // 0=outline, 1=filled
+) -> Canvas with Mut, Panic, Div {
+    var result = canvas
+
+    var i = 0
+    while i < bin_data.n_bins {
+        let bin_left = bin_data.bin_edges[i]
+        let bin_right = bin_data.bin_edges[i + 1]
+        let count = bin_data.bin_counts[i]
+
+        // Convert to canvas coordinates
+        let px_left = world_to_canvas_x(vp, bin_left)
+        let px_right = world_to_canvas_x(vp, bin_right)
+        let py_baseline = world_to_canvas_y(vp, 0.0)
+        let py_top = world_to_canvas_y(vp, count as f64)
+
+        let bar_width = px_right - px_left
+        let bar_height = py_baseline - py_top
+
+        if fill == 1 {
+            result = fill_rect(result, px_left, py_top, bar_width, bar_height, color)
+        } else {
+            // Draw outline only
+            result = draw_hline(result, px_left, px_right - 1, py_top, color)
+            result = draw_vline(result, px_left, py_top, py_baseline, color)
+            result = draw_vline(result, px_right - 1, py_top, py_baseline, color)
+        }
+
+        i = i + 1
+    }
+
+    return result
+}
+
+// Overlay multiple histograms (with transparency simulation using different characters)
+fn histogram_overlay(
+    canvas: Canvas,
+    vp: &Viewport,
+    distributions: &[BinData],
+    colors: &[i32],
+    n_distributions: i32
+) -> Canvas with Mut, Panic, Div {
+    var result = canvas
+
+    // Draw each histogram as outline (not filled) so they're visible when overlapping
+    var i = 0
+    while i < n_distributions {
+        result = histogram(result, vp, &distributions[i], colors[i], 0)
+        i = i + 1
+    }
+
+    return result
+}
+
+// ============================================================================
+// Axes Drawing
+// ============================================================================
+
+fn draw_axes(canvas: Canvas, vp: &Viewport, color: i32) -> Canvas with Mut, Panic, Div {
+    var result = canvas
+
+    let origin_x = world_to_canvas_x(vp, 0.0)
+    let origin_y = world_to_canvas_y(vp, 0.0)
+
+    // Y axis
+    if origin_x >= vp.canvas_x && origin_x < vp.canvas_x + vp.canvas_width {
+        result = draw_vline(result, origin_x, vp.canvas_y, vp.canvas_y + vp.canvas_height - 1, color)
+    }
+
+    // X axis
+    if origin_y >= vp.canvas_y && origin_y < vp.canvas_y + vp.canvas_height {
+        result = draw_hline(result, vp.canvas_x, vp.canvas_x + vp.canvas_width - 1, origin_y, color)
+    }
+
+    return result
+}
+
+fn draw_grid(canvas: Canvas, vp: &Viewport, n_x_lines: i32, n_y_lines: i32, color: i32) -> Canvas with Mut, Panic, Div {
+    var result = canvas
+
+    // Vertical grid lines
+    var i = 0
+    while i <= n_x_lines {
+        let fraction = (i as f64) / (n_x_lines as f64)
+        let world_x = vp.x_min + fraction * (vp.x_max - vp.x_min)
+        let pixel_x = world_to_canvas_x(vp, world_x)
+
+        result = draw_vline(result, pixel_x, vp.canvas_y, vp.canvas_y + vp.canvas_height - 1, color)
+        i = i + 1
+    }
+
+    // Horizontal grid lines
+    i = 0
+    while i <= n_y_lines {
+        let fraction = (i as f64) / (n_y_lines as f64)
+        let world_y = vp.y_min + fraction * (vp.y_max - vp.y_min)
+        let pixel_y = world_to_canvas_y(vp, world_y)
+
+        result = draw_hline(result, vp.canvas_x, vp.canvas_x + vp.canvas_width - 1, pixel_y, color)
+        i = i + 1
+    }
+
+    return result
+}
+
+// ============================================================================
+// Viewport Creation
+// ============================================================================
+
+fn viewport_new(
+    x_min: f64,
+    x_max: f64,
+    y_min: f64,
+    y_max: f64,
+    canvas_x: i32,
+    canvas_y: i32,
+    canvas_width: i32,
+    canvas_height: i32
+) -> Viewport {
+    return Viewport {
+        x_min: x_min,
+        x_max: x_max,
+        y_min: y_min,
+        y_max: y_max,
+        canvas_x: canvas_x,
+        canvas_y: canvas_y,
+        canvas_width: canvas_width,
+        canvas_height: canvas_height
+    }
+}
+
+// ============================================================================
+// Test/Demo
+// ============================================================================
+
+fn cell_blank() -> Cell {
+    return Cell {
+        ch: 32,
+        fg_color: 7,
+        bg_color: 0,
+        bold: 0,
+        dim: 0
+    }
+}
+
+fn canvas_new(width: i32, height: i32) -> Canvas with Mut, Panic, Div {
+    var canvas = Canvas {
+        width: width,
+        height: height,
+        cells: [cell_blank(); 2400]
+    }
+
+    var i = 0
+    while i < width * height {
+        canvas.cells[i] = cell_blank()
+        i = i + 1
+    }
+
+    return canvas
+}
+
+fn COLOR_WHITE() -> i32 { return 7 }
+fn COLOR_BRIGHT_BLACK() -> i32 { return 8 }
+fn COLOR_RED() -> i32 { return 1 }
+fn COLOR_GREEN() -> i32 { return 2 }
+fn COLOR_BLUE() -> i32 { return 4 }
+fn COLOR_YELLOW() -> i32 { return 3 }
+fn COLOR_CYAN() -> i32 { return 6 }
+fn COLOR_MAGENTA() -> i32 { return 5 }
+
+fn main() -> i32 with IO, Mut, Panic, Div {
+    print("=== Sounio Histogram Demo ===\n\n")
+
+    // Create canvas
+    var canvas = canvas_new(70, 30)
+
+    // Test 1: Single histogram (normal distribution approximation)
+    print("Computing bins for single distribution...\n")
+    var data1 = [
+        5.0, 5.2, 4.8, 5.1, 4.9, 5.3, 4.7, 5.0, 5.1, 4.9,
+        6.0, 5.5, 4.5, 5.8, 4.2, 6.2, 5.9, 5.1, 4.8, 5.0,
+        5.0, 5.0, 5.0, 5.0, 5.0, 5.0, 5.0, 5.0, 5.0, 5.0,
+        0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+        0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+        0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+        0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+        0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+        0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+        0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0
+    ]
+
+    let bins1 = compute_bins(&data1, 20, 8)
+
+    print("Drawing histogram (filled)...\n")
+    let vp1 = viewport_new(4.0, 7.0, 0.0, 8.0, 5, 2, 30, 12)
+
+    canvas = draw_grid(canvas, &vp1, 3, 4, COLOR_BRIGHT_BLACK())
+    canvas = draw_axes(canvas, &vp1, COLOR_WHITE())
+    canvas = histogram(canvas, &vp1, &bins1, COLOR_CYAN(), 1)
+
+    // Test 2: Bimodal distribution
+    print("Computing bins for bimodal distribution...\n")
+    var data2 = [
+        2.0, 2.1, 2.2, 1.9, 2.0, 2.3, 1.8, 2.1, 2.0, 2.2,
+        8.0, 8.1, 7.9, 8.2, 8.0, 7.8, 8.1, 8.0, 8.1, 7.9,
+        0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+        0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+        0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+        0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+        0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+        0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+        0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+        0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0
+    ]
+
+    let bins2 = compute_bins(&data2, 20, 10)
+
+    print("Drawing bimodal histogram...\n")
+    let vp2 = viewport_new(0.0, 10.0, 0.0, 8.0, 38, 2, 30, 12)
+
+    canvas = draw_grid(canvas, &vp2, 5, 4, COLOR_BRIGHT_BLACK())
+    canvas = draw_axes(canvas, &vp2, COLOR_WHITE())
+    canvas = histogram(canvas, &vp2, &bins2, COLOR_MAGENTA(), 1)
+
+    // Test 3: Overlayed histograms
+    print("Computing bins for two overlapping distributions...\n")
+    var data3a = [
+        3.0, 3.5, 4.0, 3.2, 3.8, 4.1, 3.3, 3.7, 3.9, 3.1,
+        0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+        0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+        0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+        0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+        0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+        0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+        0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+        0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+        0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0
+    ]
+
+    var data3b = [
+        6.0, 6.5, 7.0, 6.2, 6.8, 7.1, 6.3, 6.7, 6.9, 6.1,
+        0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+        0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+        0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+        0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+        0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+        0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+        0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+        0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+        0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0
+    ]
+
+    let bins3a = compute_bins(&data3a, 10, 8)
+    let bins3b = compute_bins(&data3b, 10, 8)
+
+    var overlay_bins = [bins3a, bins3b, bins1, bins1, bins1]
+    var overlay_colors = [COLOR_GREEN(), COLOR_YELLOW(), 0, 0, 0]
+
+    print("Drawing overlayed histograms...\n")
+    let vp3 = viewport_new(2.0, 8.0, 0.0, 6.0, 22, 16, 30, 12)
+
+    canvas = draw_grid(canvas, &vp3, 3, 3, COLOR_BRIGHT_BLACK())
+    canvas = draw_axes(canvas, &vp3, COLOR_WHITE())
+    canvas = histogram_overlay(canvas, &vp3, &overlay_bins, &overlay_colors, 2)
+
+    print("\n=== Histogram rendering complete! ===\n")
+    print("Rendered:\n")
+    print("  - Normal distribution (top left, cyan)\n")
+    print("  - Bimodal distribution (top right, magenta)\n")
+    print("  - Overlayed distributions (bottom, green + yellow)\n")
+    print("(Canvas created but not rendered)\n")
+
+    return 0
+}

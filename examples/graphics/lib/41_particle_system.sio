@@ -1,0 +1,546 @@
+// 41_particle_system.sio - Particle physics simulation
+//
+// Provides particle system for visual effects:
+// - 2D/3D particle simulation with physics
+// - Forces: gravity, drag, wind
+// - Particle lifecycle management (birth, death)
+// - Emitters with various patterns
+// - Visual rendering with markers and trails
+
+import "stdlib/math/core.sio"
+import "00_canvas.sio"
+import "01_colors.sio"
+import "02_drawing.sio"
+import "10_axes.sio"
+import "20_projection.sio"
+
+// ============================================================================
+// Particle Structure
+// ============================================================================
+
+struct Particle {
+    pos: Vec3D,        // Position (x, y, z)
+    vel: Vec3D,        // Velocity (dx/dt, dy/dt, dz/dt)
+    acc: Vec3D,        // Acceleration (forces applied)
+    color: i32,        // Particle color (0-15)
+    marker: i32,       // Character marker
+    size: i32,         // Particle size (1-3)
+    life: f64,         // Remaining lifetime (seconds)
+    max_life: f64,     // Initial lifetime
+    mass: f64,         // Particle mass (affects forces)
+    alive: i32         // 1 if active, 0 if dead
+}
+
+fn particle_new(
+    pos: Vec3D,
+    vel: Vec3D,
+    color: i32,
+    marker: i32,
+    life: f64,
+    mass: f64
+) -> Particle {
+    return Particle {
+        pos: pos,
+        vel: vel,
+        acc: vec3d_zero(),
+        color: color,
+        marker: marker,
+        size: 1,
+        life: life,
+        max_life: life,
+        mass: mass,
+        alive: 1
+    }
+}
+
+fn particle_dead() -> Particle {
+    return Particle {
+        pos: vec3d_zero(),
+        vel: vec3d_zero(),
+        acc: vec3d_zero(),
+        color: 0,
+        marker: 32,  // Space
+        size: 1,
+        life: 0.0,
+        max_life: 1.0,
+        mass: 1.0,
+        alive: 0
+    }
+}
+
+// ============================================================================
+// Particle System
+// ============================================================================
+
+struct ParticleSystem {
+    particles: [Particle; 500],
+    n_particles: i32,
+    max_particles: i32,
+
+    // Global forces
+    gravity: Vec3D,
+    wind: Vec3D,
+    drag: f64,          // Air resistance coefficient
+
+    // Emitter settings
+    emit_pos: Vec3D,
+    emit_rate: i32,     // Particles per frame
+    emit_velocity: f64, // Initial speed
+    emit_spread: f64,   // Angle spread (radians)
+
+    // Particle lifecycle
+    particle_lifetime: f64,
+    particle_mass: f64,
+
+    // Rendering
+    trail_length: i32,  // 0 = no trails
+    fade_with_age: i32  // 1 = fade color as particle ages
+}
+
+fn particle_system_new(max_particles: i32) -> ParticleSystem {
+    return ParticleSystem {
+        particles: [particle_dead(); 500],
+        n_particles: 0,
+        max_particles: max_particles,
+        gravity: vec3d_new(0.0, -9.8, 0.0),
+        wind: vec3d_zero(),
+        drag: 0.01,
+        emit_pos: vec3d_zero(),
+        emit_rate: 5,
+        emit_velocity: 10.0,
+        emit_spread: 0.5,
+        particle_lifetime: 3.0,
+        particle_mass: 1.0,
+        trail_length: 0,
+        fade_with_age: 1
+    }
+}
+
+fn particle_system_fountain(max_particles: i32) -> ParticleSystem {
+    var sys = particle_system_new(max_particles)
+    sys.emit_pos = vec3d_new(0.0, -5.0, 0.0)
+    sys.emit_velocity = 15.0
+    sys.emit_spread = 0.8
+    sys.emit_rate = 10
+    sys.particle_lifetime = 2.5
+    sys.gravity = vec3d_new(0.0, -15.0, 0.0)
+    sys.drag = 0.02
+    return sys
+}
+
+fn particle_system_explosion(max_particles: i32) -> ParticleSystem {
+    var sys = particle_system_new(max_particles)
+    sys.emit_pos = vec3d_zero()
+    sys.emit_velocity = 20.0
+    sys.emit_spread = 3.14159265359  // Full sphere
+    sys.emit_rate = 50
+    sys.particle_lifetime = 1.5
+    sys.gravity = vec3d_new(0.0, -5.0, 0.0)
+    sys.drag = 0.05
+    return sys
+}
+
+// ============================================================================
+// Particle Emission
+// ============================================================================
+
+// Emit a single particle
+fn emit_particle(
+    sys: &!ParticleSystem,
+    direction: Vec3D,
+    velocity: f64,
+    color: i32,
+    marker: i32
+) with Mut, Panic {
+    // Find dead particle slot
+    var i = 0
+    while i < sys.max_particles {
+        if sys.particles[i].alive == 0 {
+            let dir_norm = vec3d_normalize(&direction)
+            let vel = vec3d_scale(&dir_norm, velocity)
+
+            sys.particles[i] = particle_new(
+                sys.emit_pos,
+                vel,
+                color,
+                marker,
+                sys.particle_lifetime,
+                sys.particle_mass
+            )
+
+            sys.n_particles = sys.n_particles + 1
+            return
+        }
+        i = i + 1
+    }
+}
+
+// Emit particles from emitter (called each frame)
+fn emit_particles(sys: &!ParticleSystem, rng_seed: &!i32) with Mut, Panic, Div {
+    var i = 0
+    while i < sys.emit_rate {
+        // Generate random direction within spread cone
+        // Simple pseudo-random using LCG
+        rng_seed.val = (rng_seed.val * 1103515245 + 12345) % 2147483648
+        let theta = ((rng_seed.val % 1000) as f64 / 1000.0) * sys.emit_spread
+
+        rng_seed.val = (rng_seed.val * 1103515245 + 12345) % 2147483648
+        let phi = ((rng_seed.val % 1000) as f64 / 1000.0) * 6.28318530718
+
+        // Spherical to Cartesian
+        let x = sin(theta) * cos(phi)
+        let y = cos(theta)
+        let z = sin(theta) * sin(phi)
+
+        let direction = vec3d_new(x, y, z)
+
+        // Random color
+        rng_seed.val = (rng_seed.val * 1103515245 + 12345) % 2147483648
+        let color = (rng_seed.val % 6) + 2  // Colors 2-7 (avoid black/white)
+
+        emit_particle(sys, direction, sys.emit_velocity, color as i32, 9679)  // ●
+        i = i + 1
+    }
+}
+
+// ============================================================================
+// Particle Physics Update
+// ============================================================================
+
+// Apply forces to particle
+fn apply_forces(particle: &!Particle, gravity: Vec3D, wind: Vec3D, drag: f64) with Mut {
+    // Reset acceleration
+    particle.acc = vec3d_zero()
+
+    // Gravity (F = m * g)
+    let gravity_force = vec3d_scale(&gravity, particle.mass)
+    particle.acc = vec3d_add(&particle.acc, &gravity_force)
+
+    // Wind (constant force)
+    particle.acc = vec3d_add(&particle.acc, &wind)
+
+    // Drag (F = -drag * v)
+    let drag_force = vec3d_scale(&particle.vel, 0.0 - drag)
+    particle.acc = vec3d_add(&particle.acc, &drag_force)
+}
+
+// Update single particle (Euler integration)
+fn update_particle(
+    particle: &!Particle,
+    dt: f64,
+    gravity: Vec3D,
+    wind: Vec3D,
+    drag: f64
+) with Mut {
+    if particle.alive == 0 {
+        return
+    }
+
+    // Apply forces
+    apply_forces(particle, gravity, wind, drag)
+
+    // Update velocity: v = v + a * dt
+    let dv = vec3d_scale(&particle.acc, dt)
+    particle.vel = vec3d_add(&particle.vel, &dv)
+
+    // Update position: p = p + v * dt
+    let dp = vec3d_scale(&particle.vel, dt)
+    particle.pos = vec3d_add(&particle.pos, &dp)
+
+    // Update lifetime
+    particle.life = particle.life - dt
+    if particle.life <= 0.0 {
+        particle.alive = 0
+    }
+}
+
+// Update entire particle system
+fn particle_system_update(sys: &!ParticleSystem, dt: f64) with Mut, Panic {
+    var i = 0
+    var alive_count = 0
+
+    while i < sys.max_particles {
+        if sys.particles[i].alive == 1 {
+            update_particle(
+                &!sys.particles[i],
+                dt,
+                sys.gravity,
+                sys.wind,
+                sys.drag
+            )
+
+            if sys.particles[i].alive == 1 {
+                alive_count = alive_count + 1
+            }
+        }
+        i = i + 1
+    }
+
+    sys.n_particles = alive_count
+}
+
+// ============================================================================
+// Particle Rendering
+// ============================================================================
+
+// Render particle system (2D projection)
+fn particle_system_render_2d(
+    canvas: Canvas,
+    sys: &ParticleSystem,
+    vp: &Viewport
+) -> Canvas with Mut, Panic, Div {
+    var c = canvas
+
+    var i = 0
+    while i < sys.max_particles {
+        let p = &sys.particles[i]
+
+        if p.alive == 1 {
+            // Project 3D position to 2D (use x, y, ignore z for now)
+            let px = world_to_canvas_x(vp, p.pos.x)
+            let py = world_to_canvas_y(vp, p.pos.y)
+
+            // Fade color with age if enabled
+            let color = if sys.fade_with_age == 1 {
+                let age_ratio = p.life / p.max_life
+                if age_ratio < 0.33 {
+                    8  // Dark gray (fading out)
+                } else {
+                    p.color
+                }
+            } else {
+                p.color
+            }
+
+            // Draw particle
+            c = canvas_set_char(c, px, py, p.marker, color)
+        }
+
+        i = i + 1
+    }
+
+    return c
+}
+
+// Render particle system (3D with isometric projection)
+fn particle_system_render_3d(
+    canvas: Canvas,
+    sys: &ParticleSystem,
+    vp: &Viewport,
+    scale: f64
+) -> Canvas with Mut, Panic, Div {
+    var c = canvas
+
+    var i = 0
+    while i < sys.max_particles {
+        let p = &sys.particles[i]
+
+        if p.alive == 1 {
+            // Isometric projection
+            let projected = isometric_project_scaled(&p.pos, scale)
+
+            let px = world_to_canvas_x(vp, projected.x)
+            let py = world_to_canvas_y(vp, projected.y)
+
+            // Fade color with age
+            let color = if sys.fade_with_age == 1 {
+                let age_ratio = p.life / p.max_life
+                if age_ratio < 0.25 {
+                    8  // Dark gray
+                } else { if age_ratio < 0.5 {
+                    p.color + 8  // Bright version
+                } else {
+                    p.color
+                }}
+            } else {
+                p.color
+            }
+
+            // Draw particle
+            c = canvas_set_char(c, px, py, p.marker, color)
+        }
+
+        i = i + 1
+    }
+
+    return c
+}
+
+// ============================================================================
+// Particle Effects Presets
+// ============================================================================
+
+// Create fountain effect
+fn create_fountain(sys: &!ParticleSystem) with Mut {
+    sys.emit_pos = vec3d_new(0.0, -5.0, 0.0)
+    sys.emit_velocity = 15.0
+    sys.emit_spread = 0.5
+    sys.emit_rate = 8
+    sys.particle_lifetime = 2.5
+    sys.gravity = vec3d_new(0.0, -12.0, 0.0)
+    sys.drag = 0.02
+}
+
+// Create explosion effect
+fn create_explosion(sys: &!ParticleSystem) with Mut {
+    sys.emit_pos = vec3d_zero()
+    sys.emit_velocity = 18.0
+    sys.emit_spread = 3.14159265359
+    sys.emit_rate = 40
+    sys.particle_lifetime = 1.8
+    sys.gravity = vec3d_new(0.0, -8.0, 0.0)
+    sys.drag = 0.03
+}
+
+// Create smoke effect
+fn create_smoke(sys: &!ParticleSystem) with Mut {
+    sys.emit_pos = vec3d_new(0.0, -5.0, 0.0)
+    sys.emit_velocity = 3.0
+    sys.emit_spread = 0.3
+    sys.emit_rate = 12
+    sys.particle_lifetime = 4.0
+    sys.gravity = vec3d_new(0.0, 2.0, 0.0)  // Smoke rises
+    sys.drag = 0.08
+    sys.wind = vec3d_new(2.0, 0.0, 0.0)
+}
+
+// Create rain effect
+fn create_rain(sys: &!ParticleSystem) with Mut {
+    sys.emit_pos = vec3d_new(0.0, 10.0, 0.0)
+    sys.emit_velocity = 15.0
+    sys.emit_spread = 0.1
+    sys.emit_rate = 15
+    sys.particle_lifetime = 2.0
+    sys.gravity = vec3d_new(0.0, -20.0, 0.0)
+    sys.drag = 0.0
+    sys.wind = vec3d_new(3.0, 0.0, 0.0)
+}
+
+// ============================================================================
+// Example/Test Function
+// ============================================================================
+
+fn main() -> i32 with IO, Mut, Panic, Div {
+    print("\x1b[2J\x1b[H")  // Clear screen
+    print("=== Particle System Test ===\n\n")
+
+    // Create particle system
+    var sys = particle_system_fountain(100)
+
+    print("Particle system created:\n")
+    print("  Max particles: ")
+    print_i32(sys.max_particles)
+    print("\n")
+    print("  Emit rate: ")
+    print_i32(sys.emit_rate)
+    print("/frame\n")
+    print("  Particle lifetime: ")
+    print_f64(sys.particle_lifetime)
+    print("s\n")
+    print("  Gravity: (")
+    print_f64(sys.gravity.x)
+    print(", ")
+    print_f64(sys.gravity.y)
+    print(", ")
+    print_f64(sys.gravity.z)
+    print(")\n\n")
+
+    // Simulate a few steps
+    var rng = 12345
+    var frame = 0
+
+    print("Simulation:\n")
+
+    while frame < 5 {
+        emit_particles(&!sys, &!rng)
+        particle_system_update(&!sys, 0.016)  // ~60 FPS
+
+        print("  Frame ")
+        print_i32(frame)
+        print(": ")
+        print_i32(sys.n_particles)
+        print(" particles alive\n")
+
+        frame = frame + 1
+    }
+
+    print("\n=== Particle System Ready ===\n")
+    print("Effect presets:\n")
+    print("  • create_fountain() - Upward spray\n")
+    print("  • create_explosion() - Radial burst\n")
+    print("  • create_smoke() - Rising particles\n")
+    print("  • create_rain() - Downward fall\n")
+
+    return 0
+}
+
+// ============================================================================
+// Helper Functions
+// ============================================================================
+
+fn print_f64(x: f64) with IO, Div, Panic {
+    if x < 0.0 {
+        print("-")
+        print_f64_unsigned(0.0 - x)
+    } else {
+        print_f64_unsigned(x)
+    }
+}
+
+fn print_f64_unsigned(x: f64) with IO, Div, Panic {
+    let int_part = x as i32
+    print_i32(int_part)
+    print(".")
+
+    let frac = x - (int_part as f64)
+    let scaled = (frac * 100.0) as i32
+    if scaled < 10 {
+        print("0")
+    }
+    print_i32(scaled)
+}
+
+fn print_i32(x: i32) with IO, Div, Panic {
+    if x == 0 {
+        print("0")
+        return
+    }
+
+    if x < 0 {
+        print("-")
+        print_i32_unsigned(0 - x)
+    } else {
+        print_i32_unsigned(x)
+    }
+}
+
+fn print_i32_unsigned(x: i32) with IO, Div, Panic {
+    if x == 0 {
+        return
+    }
+
+    let digit = x % 10
+    let rest = x / 10
+
+    if rest > 0 {
+        print_i32_unsigned(rest)
+    }
+
+    let ch = 48 + digit
+    print_char(ch)
+}
+
+fn print_char(code: i32) with IO {
+    if code == 48 { print("0") }
+    else { if code == 49 { print("1") }
+    else { if code == 50 { print("2") }
+    else { if code == 51 { print("3") }
+    else { if code == 52 { print("4") }
+    else { if code == 53 { print("5") }
+    else { if code == 54 { print("6") }
+    else { if code == 55 { print("7") }
+    else { if code == 56 { print("8") }
+    else { if code == 57 { print("9") }
+    else { print("?") }
+    }}}}}}}}}}
+}

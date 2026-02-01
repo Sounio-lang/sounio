@@ -1,0 +1,366 @@
+// Text Rendering - Arbitrary positioning with alignment and styling
+//
+// Provides text rendering capabilities for terminal graphics with support
+// for different alignments, colors, bold, and dim styling.
+
+// Duplicate necessary types (until module system is ready)
+struct Cell {
+    ch: i32,
+    fg_color: i32,
+    bg_color: i32,
+    bold: i32,
+    dim: i32
+}
+
+struct Canvas {
+    width: i32,
+    height: i32,
+    cells: [Cell; 2400]
+}
+
+// Text styling options
+struct TextStyle {
+    fg_color: i32,
+    bg_color: i32,
+    bold: i32,      // 0 or 1
+    dim: i32        // 0 or 1
+}
+
+// Default text style (white on black, normal intensity)
+fn text_style_default() -> TextStyle {
+    return TextStyle {
+        fg_color: 7,    // White
+        bg_color: 0,    // Black
+        bold: 0,
+        dim: 0
+    }
+}
+
+// Create a styled text config
+fn text_style_new(fg: i32, bg: i32, bold: i32, dim: i32) -> TextStyle {
+    return TextStyle {
+        fg_color: fg,
+        bg_color: bg,
+        bold: bold,
+        dim: dim
+    }
+}
+
+// ============================================================================
+// Character Rendering
+// ============================================================================
+
+// Helper: Set a character with style
+fn canvas_set_char(canvas: Canvas, x: i32, y: i32, ch: i32, style: TextStyle) -> Canvas with Mut, Panic {
+    // Bounds check
+    if x < 0 { return canvas }
+    if y < 0 { return canvas }
+    if x >= canvas.width { return canvas }
+    if y >= canvas.height { return canvas }
+
+    var new_canvas = canvas
+    let index = y * canvas.width + x
+    new_canvas.cells[index] = Cell {
+        ch: ch,
+        fg_color: style.fg_color,
+        bg_color: style.bg_color,
+        bold: style.bold,
+        dim: style.dim
+    }
+    return new_canvas
+}
+
+// ============================================================================
+// String Length Calculation (character codes)
+// ============================================================================
+
+// Calculate length of a string represented as character codes
+// For simplicity, we'll use fixed-length arrays and a sentinel value
+// Sentinel: -1 marks end of string
+fn string_length(chars: &[i32], max_len: i32) -> i32 with Mut, Panic, Div {
+    var len = 0
+    while len < max_len {
+        if chars[len] == -1 {
+            return len
+        }
+        len = len + 1
+    }
+    return len
+}
+
+// ============================================================================
+// Left-aligned Text
+// ============================================================================
+
+// Draw text left-aligned from (x, y)
+// Text is array of character codes ending with -1 sentinel
+fn draw_text_left(
+    canvas: Canvas,
+    x: i32,
+    y: i32,
+    text: &[i32],
+    max_len: i32,
+    style: TextStyle
+) -> Canvas with Mut, Panic, Div {
+    var result = canvas
+    var i = 0
+    var cur_x = x
+
+    while i < max_len {
+        let ch = text[i]
+        if ch == -1 {
+            return result  // End of string
+        }
+
+        result = canvas_set_char(result, cur_x, y, ch, style)
+        cur_x = cur_x + 1
+        i = i + 1
+    }
+
+    return result
+}
+
+// ============================================================================
+// Right-aligned Text
+// ============================================================================
+
+// Draw text right-aligned ending at (x, y)
+fn draw_text_right(
+    canvas: Canvas,
+    x: i32,
+    y: i32,
+    text: &[i32],
+    max_len: i32,
+    style: TextStyle
+) -> Canvas with Mut, Panic, Div {
+    let text_len = string_length(text, max_len)
+    let start_x = x - text_len + 1
+
+    return draw_text_left(canvas, start_x, y, text, max_len, style)
+}
+
+// ============================================================================
+// Center-aligned Text
+// ============================================================================
+
+// Draw text centered at (x, y)
+fn draw_text_center(
+    canvas: Canvas,
+    x: i32,
+    y: i32,
+    text: &[i32],
+    max_len: i32,
+    style: TextStyle
+) -> Canvas with Mut, Panic, Div {
+    let text_len = string_length(text, max_len)
+    let start_x = x - (text_len / 2)
+
+    return draw_text_left(canvas, start_x, y, text, max_len, style)
+}
+
+// ============================================================================
+// Multiline Text (automatic wrapping)
+// ============================================================================
+
+// Draw text with wrapping at specified width
+// Returns the canvas and the number of lines used
+fn draw_text_wrapped(
+    canvas: Canvas,
+    x: i32,
+    y: i32,
+    text: &[i32],
+    max_len: i32,
+    wrap_width: i32,
+    style: TextStyle
+) -> Canvas with Mut, Panic, Div {
+    var result = canvas
+    var i = 0
+    var cur_x = x
+    var cur_y = y
+    var chars_in_line = 0
+
+    while i < max_len {
+        let ch = text[i]
+        if ch == -1 {
+            return result  // End of string
+        }
+
+        // Check if we need to wrap
+        if chars_in_line >= wrap_width {
+            cur_x = x
+            cur_y = cur_y + 1
+            chars_in_line = 0
+        }
+
+        result = canvas_set_char(result, cur_x, cur_y, ch, style)
+        cur_x = cur_x + 1
+        chars_in_line = chars_in_line + 1
+        i = i + 1
+    }
+
+    return result
+}
+
+// ============================================================================
+// Number Formatting (for labels, axes, etc.)
+// ============================================================================
+
+// Convert digit (0-9) to ASCII character code
+fn digit_to_char(digit: i32) -> i32 {
+    return 48 + digit  // ASCII '0' = 48
+}
+
+// Format an integer as string (character codes)
+// Stores result in output array, returns length
+// NOTE: Simplified - only handles positive integers up to 99999
+fn format_int(value: i32, output: &![i32]) -> i32 with Mut, Panic, Div {
+    if value == 0 {
+        output[0] = 48  // '0'
+        output[1] = -1  // Sentinel
+        return 1
+    }
+
+    // Count digits
+    var temp = value
+    var digit_count = 0
+    while temp > 0 {
+        temp = temp / 10
+        digit_count = digit_count + 1
+    }
+
+    // Extract digits (right to left)
+    temp = value
+    var i = digit_count - 1
+    while i >= 0 {
+        let digit = temp % 10
+        output[i] = digit_to_char(digit)
+        temp = temp / 10
+        i = i - 1
+    }
+
+    output[digit_count] = -1  // Sentinel
+    return digit_count
+}
+
+// ============================================================================
+// Label Rendering (text + box)
+// ============================================================================
+
+// Draw a label with border (useful for legends, annotations)
+fn draw_label(
+    canvas: Canvas,
+    x: i32,
+    y: i32,
+    text: &[i32],
+    max_len: i32,
+    border_color: i32,
+    text_style: TextStyle
+) -> Canvas with Mut, Panic, Div {
+    var result = canvas
+
+    // Calculate label dimensions
+    let text_len = string_length(text, max_len)
+    let box_width = text_len + 2  // Padding
+    let box_height = 3
+
+    // Draw border (simple box with +, -, |)
+    // Top edge
+    var bx = 0
+    while bx < box_width {
+        let border_ch = if bx == 0 { 43 } else { if bx == box_width - 1 { 43 } else { 45 } }  // + or -
+        let border_style = text_style_new(border_color, 0, 0, 0)
+        result = canvas_set_char(result, x + bx, y, border_ch, border_style)
+        bx = bx + 1
+    }
+
+    // Middle (text) - left border, text, right border
+    let left_border = text_style_new(border_color, 0, 0, 0)
+    result = canvas_set_char(result, x, y + 1, 124, left_border)  // |
+    result = draw_text_left(result, x + 1, y + 1, text, max_len, text_style)
+    result = canvas_set_char(result, x + box_width - 1, y + 1, 124, left_border)
+
+    // Bottom edge
+    bx = 0
+    while bx < box_width {
+        let border_ch = if bx == 0 { 43 } else { if bx == box_width - 1 { 43 } else { 45 } }
+        let border_style = text_style_new(border_color, 0, 0, 0)
+        result = canvas_set_char(result, x + bx, y + 2, border_ch, border_style)
+        bx = bx + 1
+    }
+
+    return result
+}
+
+// ============================================================================
+// Test/Demo
+// ============================================================================
+
+fn cell_blank() -> Cell {
+    return Cell {
+        ch: 32,
+        fg_color: 7,
+        bg_color: 0,
+        bold: 0,
+        dim: 0
+    }
+}
+
+fn canvas_new(width: i32, height: i32) -> Canvas with Mut, Panic, Div {
+    var canvas = Canvas {
+        width: width,
+        height: height,
+        cells: [cell_blank(); 2400]
+    }
+
+    var i = 0
+    while i < width * height {
+        canvas.cells[i] = cell_blank()
+        i = i + 1
+    }
+
+    return canvas
+}
+
+fn main() -> i32 with IO, Mut, Panic, Div {
+    print("=== Sounio Text Rendering Demo ===\n\n")
+
+    // Create test canvas
+    var canvas = canvas_new(60, 20)
+
+    // Test 1: Left-aligned text
+    print("Drawing left-aligned text...\n")
+    var text1 = [72, 101, 108, 108, 111, -1, 0, 0, 0, 0]  // "Hello" + sentinel
+    let style_green = text_style_new(2, 0, 0, 0)  // Green
+    canvas = draw_text_left(canvas, 5, 2, &text1, 10, style_green)
+
+    // Test 2: Right-aligned text
+    print("Drawing right-aligned text...\n")
+    var text2 = [87, 111, 114, 108, 100, -1, 0, 0, 0, 0]  // "World" + sentinel
+    let style_blue = text_style_new(4, 0, 0, 0)  // Blue
+    canvas = draw_text_right(canvas, 55, 5, &text2, 10, style_blue)
+
+    // Test 3: Center-aligned text
+    print("Drawing center-aligned text...\n")
+    var text3 = [83, 111, 117, 110, 105, 111, -1, 0, 0, 0]  // "Sounio" + sentinel
+    let style_yellow_bold = text_style_new(3, 0, 1, 0)  // Yellow + bold
+    canvas = draw_text_center(canvas, 30, 8, &text3, 10, style_yellow_bold)
+
+    // Test 4: Format integer
+    print("Formatting integer 12345...\n")
+    var formatted = [-1, -1, -1, -1, -1, -1, -1, -1, -1, -1]
+    let num_digits = format_int(12345, &!formatted)
+    if num_digits == 5 {
+        print("  Successfully formatted to 5 digits\n")
+    }
+
+    // Test 5: Text label with border
+    print("Drawing labeled box...\n")
+    var label_text = [66, 111, 120, -1, 0, 0, 0, 0, 0, 0]  // "Box" + sentinel
+    let style_magenta = text_style_new(5, 0, 0, 0)  // Magenta
+    canvas = draw_label(canvas, 10, 12, &label_text, 10, 6, style_magenta)  // Cyan border
+
+    print("\n=== All text rendering features tested! ===\n")
+    print("(Canvas created with various text styles, but not rendered)\n")
+
+    return 0
+}

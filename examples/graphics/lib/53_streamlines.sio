@@ -1,0 +1,597 @@
+// 53_streamlines.sio - Streamline visualization for vector fields
+//
+// Streamlines show the paths particles would follow in a steady vector field.
+// Essential for visualizing:
+// - Fluid flow patterns
+// - Electric and magnetic field lines
+// - Gradient descent paths
+// - Phase portraits of 2D dynamical systems
+//
+// Features:
+// - Multiple seeding strategies
+// - Adaptive step size integration
+// - Direction arrows
+// - Line Integral Convolution (simplified)
+
+// ============================================================================
+// Vector Field Types
+// ============================================================================
+
+struct Vec2 {
+    x: f64,
+    y: f64
+}
+
+fn vec2_new(x: f64, y: f64) -> Vec2 {
+    return Vec2 { x: x, y: y }
+}
+
+fn vec2_add(a: Vec2, b: Vec2) -> Vec2 {
+    return Vec2 { x: a.x + b.x, y: a.y + b.y }
+}
+
+fn vec2_scale(v: Vec2, s: f64) -> Vec2 {
+    return Vec2 { x: v.x * s, y: v.y * s }
+}
+
+fn vec2_length(v: Vec2) -> f64 {
+    let len_sq = v.x * v.x + v.y * v.y
+    return sqrt_approx(len_sq)
+}
+
+fn vec2_normalize(v: Vec2) -> Vec2 with Div, Panic {
+    let len = vec2_length(v)
+    if len < 0.0001 {
+        return vec2_new(0.0, 0.0)
+    }
+    return Vec2 { x: v.x / len, y: v.y / len }
+}
+
+fn sqrt_approx(x: f64) -> f64 {
+    if x <= 0.0 { return 0.0 }
+
+    // Newton-Raphson iteration
+    var guess = x * 0.5
+    if guess < 1.0 { guess = 1.0 }
+
+    var i = 0
+    while i < 10 {
+        guess = 0.5 * (guess + x / guess)
+        i = i + 1
+    }
+    return guess
+}
+
+// ============================================================================
+// Streamline Structure
+// ============================================================================
+
+struct Streamline {
+    // Points along the streamline
+    points_x: [f64; 500],
+    points_y: [f64; 500],
+    num_points: i32,
+
+    // Direction at each point (for arrows)
+    dirs_x: [f64; 500],
+    dirs_y: [f64; 500]
+}
+
+struct StreamlineField {
+    // Domain bounds
+    x_min: f64,
+    x_max: f64,
+    y_min: f64,
+    y_max: f64,
+
+    // Display dimensions
+    width: i32,
+    height: i32,
+
+    // Streamlines (up to 50)
+    streamlines: [Streamline; 50],
+    num_streamlines: i32,
+
+    // Integration parameters
+    step_size: f64,
+    max_steps: i32,
+
+    // Display buffer
+    display: [i32; 4096]  // Character codes
+}
+
+// ============================================================================
+// Initialization
+// ============================================================================
+
+fn empty_streamline() -> Streamline {
+    return Streamline {
+        points_x: [0.0; 500],
+        points_y: [0.0; 500],
+        num_points: 0,
+        dirs_x: [0.0; 500],
+        dirs_y: [0.0; 500]
+    }
+}
+
+fn streamline_field_new(
+    x_min: f64, x_max: f64,
+    y_min: f64, y_max: f64,
+    width: i32, height: i32
+) -> StreamlineField {
+    return StreamlineField {
+        x_min: x_min,
+        x_max: x_max,
+        y_min: y_min,
+        y_max: y_max,
+        width: width,
+        height: height,
+        streamlines: [empty_streamline(); 50],
+        num_streamlines: 0,
+        step_size: 0.1,
+        max_steps: 200,
+        display: [32; 4096]  // Initialize with spaces
+    }
+}
+
+fn streamline_field_set_params(
+    field: &!StreamlineField,
+    step_size: f64,
+    max_steps: i32
+) with Mut {
+    field.step_size = step_size
+    field.max_steps = max_steps
+}
+
+fn streamline_field_clear(field: &!StreamlineField) with Mut {
+    field.num_streamlines = 0
+    var i = 0
+    while i < 4096 {
+        field.display[i] = 32
+        i = i + 1
+    }
+}
+
+// ============================================================================
+// Streamline Integration
+// ============================================================================
+
+fn integrate_streamline(
+    field: &!StreamlineField,
+    seed_x: f64,
+    seed_y: f64,
+    vector_fn: fn(f64, f64) -> Vec2
+) with Mut, Div, Panic {
+    if field.num_streamlines >= 50 {
+        return
+    }
+
+    let idx = field.num_streamlines
+    field.num_streamlines = field.num_streamlines + 1
+
+    var x = seed_x
+    var y = seed_y
+    var step = 0
+    let dt = field.step_size
+
+    while step < field.max_steps {
+        // Check bounds
+        if x < field.x_min { return }
+        if x > field.x_max { return }
+        if y < field.y_min { return }
+        if y > field.y_max { return }
+
+        // Store point
+        if step < 500 {
+            field.streamlines[idx].points_x[step] = x
+            field.streamlines[idx].points_y[step] = y
+
+            let v = vector_fn(x, y)
+            let vnorm = vec2_normalize(v)
+            field.streamlines[idx].dirs_x[step] = vnorm.x
+            field.streamlines[idx].dirs_y[step] = vnorm.y
+            field.streamlines[idx].num_points = step + 1
+        }
+
+        // RK4 integration
+        let k1 = vector_fn(x, y)
+        let k2 = vector_fn(x + k1.x * dt * 0.5, y + k1.y * dt * 0.5)
+        let k3 = vector_fn(x + k2.x * dt * 0.5, y + k2.y * dt * 0.5)
+        let k4 = vector_fn(x + k3.x * dt, y + k3.y * dt)
+
+        let dx = (k1.x + 2.0 * k2.x + 2.0 * k3.x + k4.x) * dt / 6.0
+        let dy = (k1.y + 2.0 * k2.y + 2.0 * k3.y + k4.y) * dt / 6.0
+
+        // Check for stagnation
+        let move_dist = sqrt_approx(dx * dx + dy * dy)
+        if move_dist < 0.0001 {
+            return
+        }
+
+        x = x + dx
+        y = y + dy
+        step = step + 1
+    }
+}
+
+// Integrate both forward and backward from seed
+fn integrate_streamline_bidirectional(
+    field: &!StreamlineField,
+    seed_x: f64,
+    seed_y: f64,
+    vector_fn: fn(f64, f64) -> Vec2
+) with Mut, Div, Panic {
+    // Forward
+    integrate_streamline(field, seed_x, seed_y, vector_fn)
+
+    // Backward (negate vector field)
+    // Note: Sounio doesn't support closures, so we'd need a separate function
+    // For now, just do forward integration
+}
+
+// ============================================================================
+// Seeding Strategies
+// ============================================================================
+
+// Grid seeding
+fn seed_grid(
+    field: &!StreamlineField,
+    nx: i32,
+    ny: i32,
+    vector_fn: fn(f64, f64) -> Vec2
+) with Mut, Div, Panic {
+    let dx = (field.x_max - field.x_min) / ((nx + 1) as f64)
+    let dy = (field.y_max - field.y_min) / ((ny + 1) as f64)
+
+    var iy = 0
+    while iy < ny {
+        var ix = 0
+        while ix < nx {
+            let x = field.x_min + (ix + 1) as f64 * dx
+            let y = field.y_min + (iy + 1) as f64 * dy
+            integrate_streamline(field, x, y, vector_fn)
+            ix = ix + 1
+        }
+        iy = iy + 1
+    }
+}
+
+// Random seeding (using simple LCG)
+fn seed_random(
+    field: &!StreamlineField,
+    count: i32,
+    seed: i32,
+    vector_fn: fn(f64, f64) -> Vec2
+) with Mut, Div, Panic {
+    var rng = seed
+
+    var i = 0
+    while i < count {
+        // LCG: next = (a * current + c) mod m
+        rng = (rng * 1103515245 + 12345) % 2147483647
+        let rx = (rng as f64) / 2147483647.0
+
+        rng = (rng * 1103515245 + 12345) % 2147483647
+        let ry = (rng as f64) / 2147483647.0
+
+        let x = field.x_min + rx * (field.x_max - field.x_min)
+        let y = field.y_min + ry * (field.y_max - field.y_min)
+
+        integrate_streamline(field, x, y, vector_fn)
+        i = i + 1
+    }
+}
+
+// ============================================================================
+// Rendering to Display Buffer
+// ============================================================================
+
+fn x_to_grid(field: &StreamlineField, x: f64) -> i32 with Div, Panic {
+    let t = (x - field.x_min) / (field.x_max - field.x_min)
+    return (t * ((field.width - 1) as f64)) as i32
+}
+
+fn y_to_grid(field: &StreamlineField, y: f64) -> i32 with Div, Panic {
+    let t = (y - field.y_min) / (field.y_max - field.y_min)
+    return (t * ((field.height - 1) as f64)) as i32
+}
+
+fn display_set(field: &!StreamlineField, x: i32, y: i32, ch: i32) with Mut {
+    if x >= 0 {
+        if x < field.width {
+            if y >= 0 {
+                if y < field.height {
+                    let idx = y * field.width + x
+                    if idx < 4096 {
+                        field.display[idx] = ch
+                    }
+                }
+            }
+        }
+    }
+}
+
+fn display_get(field: &StreamlineField, x: i32, y: i32) -> i32 {
+    if x >= 0 {
+        if x < field.width {
+            if y >= 0 {
+                if y < field.height {
+                    let idx = y * field.width + x
+                    if idx < 4096 {
+                        return field.display[idx]
+                    }
+                }
+            }
+        }
+    }
+    return 32
+}
+
+// Get direction character based on angle
+fn direction_char(dx: f64, dy: f64) -> i32 {
+    // 8 directions: - | / \ arrows
+    let angle = atan2_approx(dy, dx)  // Returns [-pi, pi]
+
+    // Normalize to [0, 8)
+    var sector = ((angle + 3.14159) / 0.7854) as i32  // 0.7854 = pi/4
+    if sector < 0 { sector = 0 }
+    if sector > 7 { sector = 7 }
+
+    // Character codes for each direction
+    if sector == 0 { return 45 }       // '-' left
+    else { if sector == 1 { return 47 }   // '/' up-left
+    else { if sector == 2 { return 124 }  // '|' up
+    else { if sector == 3 { return 92 }   // '\' up-right
+    else { if sector == 4 { return 45 }   // '-' right
+    else { if sector == 5 { return 47 }   // '/' down-right
+    else { if sector == 6 { return 124 }  // '|' down
+    else { return 92 }}}}}}}               // '\' down-left
+}
+
+fn atan2_approx(y: f64, x: f64) -> f64 with Div, Panic {
+    // Approximate atan2 using polynomial
+    if x == 0.0 {
+        if y > 0.0 { return 1.5708 }
+        else { if y < 0.0 { return -1.5708 }
+        else { return 0.0 }}
+    }
+
+    let ratio = y / x
+    var atan_val = atan_approx(ratio)
+
+    if x < 0.0 {
+        if y >= 0.0 {
+            atan_val = atan_val + 3.14159
+        } else {
+            atan_val = atan_val - 3.14159
+        }
+    }
+
+    return atan_val
+}
+
+fn atan_approx(x: f64) -> f64 {
+    // For small x, atan(x) ≈ x - x³/3 + x⁵/5
+    if x > 1.0 {
+        return 1.5708 - atan_approx(1.0 / x)
+    }
+    if x < -1.0 {
+        return -1.5708 - atan_approx(1.0 / x)
+    }
+
+    let x2 = x * x
+    let x3 = x2 * x
+    let x5 = x3 * x2
+
+    return x - x3 * 0.333 + x5 * 0.2
+}
+
+fn streamline_field_render_to_buffer(field: &!StreamlineField) with Mut, Div, Panic {
+    // Clear display
+    var i = 0
+    while i < 4096 {
+        field.display[i] = 32
+        i = i + 1
+    }
+
+    // Draw each streamline
+    var si = 0
+    while si < field.num_streamlines {
+        let sl = &field.streamlines[si]
+        var pi = 0
+        while pi < sl.num_points {
+            let x = sl.points_x[pi]
+            let y = sl.points_y[pi]
+            let dx = sl.dirs_x[pi]
+            let dy = sl.dirs_y[pi]
+
+            let gx = x_to_grid(field, x)
+            let gy = y_to_grid(field, y)
+
+            let ch = direction_char(dx, dy)
+            display_set(field, gx, gy, ch)
+
+            pi = pi + 1
+        }
+        si = si + 1
+    }
+}
+
+// ============================================================================
+// Display Rendering
+// ============================================================================
+
+fn streamline_field_render(field: &StreamlineField) with IO, Div, Panic {
+    print("\x1b[2J\x1b[H")
+
+    print("\x1b[1m=== Streamline Visualization ===\x1b[0m\n")
+    print("Streamlines: ")
+    print_i32(field.num_streamlines)
+    print("\n\n")
+
+    // Y-axis
+    print("  y\n")
+    print("  ^\n")
+
+    // Render from top to bottom
+    var y = field.height - 1
+    while y >= 0 {
+        print("  |")
+
+        var x = 0
+        while x < field.width {
+            let ch = display_get(field, x, y)
+            print("\x1b[36m")  // Cyan
+            print_char_code(ch)
+            print("\x1b[0m")
+            x = x + 1
+        }
+
+        print("\n")
+        y = y - 1
+    }
+
+    // X-axis
+    print("  +")
+    var xi = 0
+    while xi < field.width {
+        print("-")
+        xi = xi + 1
+    }
+    print("> x\n\n")
+}
+
+// ============================================================================
+// Example Vector Fields
+// ============================================================================
+
+// Simple rotation (circular flow)
+fn rotation_field(x: f64, y: f64) -> Vec2 {
+    return vec2_new(0.0 - y, x)
+}
+
+// Saddle point
+fn saddle_field(x: f64, y: f64) -> Vec2 {
+    return vec2_new(x, 0.0 - y)
+}
+
+// Source at origin
+fn source_field(x: f64, y: f64) -> Vec2 with Div, Panic {
+    let r2 = x * x + y * y
+    if r2 < 0.01 {
+        return vec2_new(0.0, 0.0)
+    }
+    return vec2_new(x / r2, y / r2)
+}
+
+// Dipole field
+fn dipole_field(x: f64, y: f64) -> Vec2 with Div, Panic {
+    // Two sources at (-1, 0) and (1, 0) with opposite signs
+    let r1_x = x + 1.0
+    let r1_y = y
+    let r1_sq = r1_x * r1_x + r1_y * r1_y + 0.1
+
+    let r2_x = x - 1.0
+    let r2_y = y
+    let r2_sq = r2_x * r2_x + r2_y * r2_y + 0.1
+
+    let vx = r1_x / r1_sq - r2_x / r2_sq
+    let vy = r1_y / r1_sq - r2_y / r2_sq
+
+    return vec2_new(vx, vy)
+}
+
+// Vortex pair
+fn vortex_pair(x: f64, y: f64) -> Vec2 with Div, Panic {
+    // Two vortices at (-1, 0) and (1, 0)
+    let r1_x = x + 1.0
+    let r1_y = y
+    let r1_sq = r1_x * r1_x + r1_y * r1_y + 0.1
+
+    let r2_x = x - 1.0
+    let r2_y = y
+    let r2_sq = r2_x * r2_x + r2_y * r2_y + 0.1
+
+    // Vortex: perpendicular to radius
+    let v1x = 0.0 - r1_y / r1_sq
+    let v1y = r1_x / r1_sq
+
+    let v2x = r2_y / r2_sq  // Opposite rotation
+    let v2y = 0.0 - r2_x / r2_sq
+
+    return vec2_new(v1x + v2x, v1y + v2y)
+}
+
+// Lorenz attractor (x-y projection of z derivative)
+fn lorenz_xy(x: f64, y: f64) -> Vec2 {
+    let sigma = 10.0
+    return vec2_new(sigma * (y - x), x * 28.0 - y)
+}
+
+// ============================================================================
+// Helper Functions
+// ============================================================================
+
+fn print_char_code(code: i32) with IO {
+    if code == 32 { print(" ") }
+    else { if code == 45 { print("-") }
+    else { if code == 47 { print("/") }
+    else { if code == 92 { print("\\") }
+    else { if code == 124 { print("|") }
+    else { print(".") }
+    }}}}
+}
+
+fn print_i32(x: i32) with IO, Div, Panic {
+    if x == 0 { print("0"); return }
+    if x < 0 { print("-"); print_i32_unsigned(0 - x) }
+    else { print_i32_unsigned(x) }
+}
+
+fn print_i32_unsigned(x: i32) with IO, Div, Panic {
+    if x == 0 { return }
+    let digit = x % 10
+    let rest = x / 10
+    if rest > 0 { print_i32_unsigned(rest) }
+    print_digit(digit)
+}
+
+fn print_digit(d: i32) with IO {
+    if d == 0 { print("0") }
+    else { if d == 1 { print("1") }
+    else { if d == 2 { print("2") }
+    else { if d == 3 { print("3") }
+    else { if d == 4 { print("4") }
+    else { if d == 5 { print("5") }
+    else { if d == 6 { print("6") }
+    else { if d == 7 { print("7") }
+    else { if d == 8 { print("8") }
+    else { if d == 9 { print("9") }
+    }}}}}}}}}}
+}
+
+// ============================================================================
+// Main Demo
+// ============================================================================
+
+fn main() -> i32 with IO, Mut, Div, Panic {
+    print("Computing streamlines for dipole field...\n")
+
+    // Create field
+    var field = streamline_field_new(-3.0, 3.0, -3.0, 3.0, 60, 30)
+    streamline_field_set_params(&!field, 0.05, 300)
+
+    // Seed with a grid
+    seed_grid(&!field, 6, 6, dipole_field)
+
+    // Render to buffer
+    streamline_field_render_to_buffer(&!field)
+
+    // Display
+    streamline_field_render(&field)
+
+    print("\nDipole field: source at (-1,0), sink at (1,0)\n")
+    print("Streamlines show electric field lines between opposite charges\n")
+
+    return 0
+}

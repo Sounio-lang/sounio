@@ -114,6 +114,8 @@ pub enum TokenKind {
     Linear,
     #[token("affine")]
     Affine,
+    #[token("relevant")]
+    Relevant,
     #[token("move")]
     Move,
     #[token("copy")]
@@ -481,6 +483,7 @@ impl TokenKind {
                 | TokenKind::Resume
                 | TokenKind::Linear
                 | TokenKind::Affine
+                | TokenKind::Relevant
                 | TokenKind::Move
                 | TokenKind::Copy
                 | TokenKind::Drop
@@ -637,6 +640,7 @@ impl TokenKind {
             TokenKind::Resume => "resume",
             TokenKind::Linear => "linear",
             TokenKind::Affine => "affine",
+            TokenKind::Relevant => "relevant",
             TokenKind::Move => "move",
             TokenKind::Copy => "copy",
             TokenKind::Drop => "drop",

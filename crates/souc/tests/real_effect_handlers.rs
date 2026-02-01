@@ -16,7 +16,7 @@
 use sounio::effects::handler_capability::{
     Continuation, EpistemicImpact, HandlerCapability, HandlerResult, HandlerState,
 };
-use sounio::effects::handlers::async_handler_real::RealAsyncHandler;
+use sounio::effects::handlers::RealAsyncHandler;
 use sounio::effects::linearity::Linearity;
 use sounio::interp::Value;
 
@@ -167,7 +167,7 @@ fn test_async_handler_not_multishot() {
 #[cfg(feature = "wgpu")]
 #[test]
 fn test_gpu_handler_creation() {
-    use sounio::effects::handlers::gpu_handler_real::RealGpuHandler;
+    use sounio::effects::handlers::RealGpuHandler;
 
     let handler = RealGpuHandler::new();
     assert_eq!(handler.effect_name(), "GPU");
@@ -177,7 +177,7 @@ fn test_gpu_handler_creation() {
 #[cfg(feature = "wgpu")]
 #[test]
 fn test_gpu_handler_operations_list() {
-    use sounio::effects::handlers::gpu_handler_real::RealGpuHandler;
+    use sounio::effects::handlers::RealGpuHandler;
 
     let handler = RealGpuHandler::new();
     let ops = handler.operations();
@@ -199,7 +199,7 @@ fn test_gpu_handler_operations_list() {
 #[cfg(feature = "wgpu")]
 #[test]
 fn test_gpu_handler_linearity() {
-    use sounio::effects::handlers::gpu_handler_real::RealGpuHandler;
+    use sounio::effects::handlers::RealGpuHandler;
 
     let handler = RealGpuHandler::new();
 
@@ -217,7 +217,7 @@ fn test_gpu_handler_linearity() {
 #[cfg(feature = "wgpu")]
 #[test]
 fn test_gpu_handler_epistemic_impact() {
-    use sounio::effects::handlers::gpu_handler_real::RealGpuHandler;
+    use sounio::effects::handlers::RealGpuHandler;
 
     let handler = RealGpuHandler::new();
 
@@ -230,7 +230,7 @@ fn test_gpu_handler_epistemic_impact() {
 #[cfg(feature = "wgpu")]
 #[test]
 fn test_gpu_compile_kernel_invalid_shader() {
-    use sounio::effects::handlers::gpu_handler_real::RealGpuHandler;
+    use sounio::effects::handlers::RealGpuHandler;
 
     let handler = RealGpuHandler::new();
     let mut state = HandlerState::new();
@@ -257,7 +257,7 @@ fn test_gpu_compile_kernel_invalid_shader() {
 #[cfg(feature = "wgpu")]
 #[test]
 fn test_gpu_compile_kernel_valid_shader() {
-    use sounio::effects::handlers::gpu_handler_real::RealGpuHandler;
+    use sounio::effects::handlers::RealGpuHandler;
 
     let handler = RealGpuHandler::new();
     let mut state = HandlerState::new();
@@ -289,7 +289,7 @@ fn test_gpu_compile_kernel_valid_shader() {
 #[cfg(feature = "wgpu")]
 #[test]
 fn test_gpu_allocate_buffer() {
-    use sounio::effects::handlers::gpu_handler_real::RealGpuHandler;
+    use sounio::effects::handlers::RealGpuHandler;
 
     let handler = RealGpuHandler::new();
     let mut state = HandlerState::new();
@@ -309,7 +309,7 @@ fn test_gpu_allocate_buffer() {
 #[cfg(feature = "wgpu")]
 #[test]
 fn test_gpu_allocate_invalid_size() {
-    use sounio::effects::handlers::gpu_handler_real::RealGpuHandler;
+    use sounio::effects::handlers::RealGpuHandler;
 
     let handler = RealGpuHandler::new();
     let mut state = HandlerState::new();
@@ -327,7 +327,7 @@ fn test_gpu_allocate_invalid_size() {
 #[cfg(feature = "wgpu")]
 #[test]
 fn test_gpu_get_device_info() {
-    use sounio::effects::handlers::gpu_handler_real::RealGpuHandler;
+    use sounio::effects::handlers::RealGpuHandler;
 
     let handler = RealGpuHandler::new();
     let mut state = HandlerState::new();
@@ -351,7 +351,7 @@ fn test_gpu_get_device_info() {
 #[cfg(feature = "tokio")]
 #[test]
 fn test_network_handler_creation() {
-    use sounio::effects::handlers::network_handler_real::RealNetworkHandler;
+    use sounio::effects::handlers::RealNetworkHandler;
 
     let handler = RealNetworkHandler::new();
     assert_eq!(handler.effect_name(), "Network");
@@ -361,7 +361,7 @@ fn test_network_handler_creation() {
 #[cfg(feature = "tokio")]
 #[test]
 fn test_network_handler_operations_list() {
-    use sounio::effects::handlers::network_handler_real::RealNetworkHandler;
+    use sounio::effects::handlers::RealNetworkHandler;
 
     let handler = RealNetworkHandler::new();
     let ops = handler.operations();
@@ -385,7 +385,7 @@ fn test_network_handler_operations_list() {
 #[cfg(feature = "tokio")]
 #[test]
 fn test_network_handler_linearity() {
-    use sounio::effects::handlers::network_handler_real::RealNetworkHandler;
+    use sounio::effects::handlers::RealNetworkHandler;
 
     let handler = RealNetworkHandler::new();
 
@@ -397,7 +397,7 @@ fn test_network_handler_linearity() {
 #[cfg(feature = "tokio")]
 #[test]
 fn test_network_handler_epistemic_impact() {
-    use sounio::effects::handlers::network_handler_real::RealNetworkHandler;
+    use sounio::effects::handlers::RealNetworkHandler;
 
     let handler = RealNetworkHandler::new();
 
@@ -414,7 +414,7 @@ fn test_network_handler_epistemic_impact() {
 #[cfg(feature = "tokio")]
 #[test]
 fn test_network_connect_invalid_host() {
-    use sounio::effects::handlers::network_handler_real::RealNetworkHandler;
+    use sounio::effects::handlers::RealNetworkHandler;
 
     let handler = RealNetworkHandler::new();
     let mut state = HandlerState::new();
@@ -442,7 +442,7 @@ fn test_network_connect_invalid_host() {
 #[cfg(feature = "tokio")]
 #[test]
 fn test_network_connect_missing_arguments() {
-    use sounio::effects::handlers::network_handler_real::RealNetworkHandler;
+    use sounio::effects::handlers::RealNetworkHandler;
 
     let handler = RealNetworkHandler::new();
     let mut state = HandlerState::new();
@@ -467,7 +467,7 @@ fn test_network_connect_missing_arguments() {
 #[cfg(all(feature = "tokio", feature = "reqwest"))]
 #[test]
 fn test_network_http_get_invalid_url() {
-    use sounio::effects::handlers::network_handler_real::RealNetworkHandler;
+    use sounio::effects::handlers::RealNetworkHandler;
 
     let handler = RealNetworkHandler::new();
     let mut state = HandlerState::new();
@@ -493,7 +493,7 @@ fn test_network_http_get_invalid_url() {
 #[test]
 #[ignore] // Requires network access
 fn test_network_http_get_success() {
-    use sounio::effects::handlers::network_handler_real::RealNetworkHandler;
+    use sounio::effects::handlers::RealNetworkHandler;
 
     let handler = RealNetworkHandler::new();
     let mut state = HandlerState::new();
@@ -531,7 +531,7 @@ fn test_async_handler_works_without_tokio_feature() {
 #[cfg(not(feature = "wgpu"))]
 #[test]
 fn test_gpu_handler_fallback_without_wgpu() {
-    use sounio::effects::handlers::gpu_handler_real::RealGpuHandler;
+    use sounio::effects::handlers::RealGpuHandler;
 
     let handler = RealGpuHandler::new();
     let mut state = HandlerState::new();
@@ -551,7 +551,7 @@ fn test_gpu_handler_fallback_without_wgpu() {
 #[cfg(not(feature = "tokio"))]
 #[test]
 fn test_network_handler_fallback_without_tokio() {
-    use sounio::effects::handlers::network_handler_real::RealNetworkHandler;
+    use sounio::effects::handlers::RealNetworkHandler;
 
     let handler = RealNetworkHandler::new();
     let mut state = HandlerState::new();
@@ -581,7 +581,7 @@ fn test_network_handler_fallback_without_tokio() {
 #[test]
 #[ignore] // Requires network access
 fn test_async_with_network() {
-    use sounio::effects::handlers::network_handler_real::RealNetworkHandler;
+    use sounio::effects::handlers::RealNetworkHandler;
 
     // Test that async and network handlers can work together
     let async_handler = RealAsyncHandler::new();
@@ -612,7 +612,7 @@ fn test_async_with_network() {
 #[cfg(feature = "wgpu")]
 #[test]
 fn test_gpu_with_epistemic_tracking() {
-    use sounio::effects::handlers::gpu_handler_real::RealGpuHandler;
+    use sounio::effects::handlers::RealGpuHandler;
 
     let handler = RealGpuHandler::new();
 

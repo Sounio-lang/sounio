@@ -18,6 +18,55 @@ use miette::Result;
 
 use errors::{expr_error_for_token, pattern_error_for_token, type_error_for_token};
 
+/// Process escape sequences in a string literal
+fn unescape_string(s: &str) -> Result<String> {
+    let mut result = String::with_capacity(s.len());
+    let mut chars = s.chars().peekable();
+
+    while let Some(c) = chars.next() {
+        if c == '\\' {
+            match chars.next() {
+                Some('n') => result.push('\n'),
+                Some('t') => result.push('\t'),
+                Some('r') => result.push('\r'),
+                Some('\\') => result.push('\\'),
+                Some('"') => result.push('"'),
+                Some('\'') => result.push('\''),
+                Some('0') => result.push('\0'),
+                Some('x') => {
+                    // Hex escape: \xNN
+                    let mut hex = String::new();
+                    for _ in 0..2 {
+                        if let Some(&c) = chars.peek() {
+                            if c.is_ascii_hexdigit() {
+                                hex.push(chars.next().unwrap());
+                            }
+                        }
+                    }
+                    if hex.len() != 2 {
+                        return Err(miette::miette!(
+                            "invalid hex escape: \\x{} (expected 2 hex digits)",
+                            hex
+                        ));
+                    }
+                    let code = u8::from_str_radix(&hex, 16)
+                        .map_err(|_| miette::miette!("invalid hex escape: \\x{}", hex))?;
+                    result.push(code as char);
+                }
+                Some(other) => {
+                    return Err(miette::miette!("unknown escape sequence: \\{}", other));
+                }
+                None => {
+                    return Err(miette::miette!("trailing backslash in string literal"));
+                }
+            }
+        } else {
+            result.push(c);
+        }
+    }
+    Ok(result)
+}
+
 /// Parse a token stream into an AST
 pub fn parse(tokens: &[Token], source: &str) -> Result<Ast> {
     let mut parser = Parser::with_source(tokens, source);
@@ -153,6 +202,27 @@ impl<'a> Parser<'a> {
     /// Get the text of the current token as a macro name
     fn get_macro_name(&self) -> String {
         self.current().text.clone()
+    }
+
+    /// Check if a token kind can be used as an ontology term name.
+    /// This includes identifiers, integer literals (for numeric IDs like chebi:15365),
+    /// and keywords that might be valid ontology term names (like `unit` in `uo:unit`).
+    fn is_ontology_term_name(kind: TokenKind) -> bool {
+        matches!(kind, TokenKind::Ident | TokenKind::IntLit) || kind.is_keyword()
+    }
+
+    /// Check if the token at offset n from current can be an ontology term name
+    fn peek_is_ontology_term_name(&self, n: usize) -> bool {
+        Self::is_ontology_term_name(self.peek_n(n))
+    }
+
+    /// Get the current token's text if it can be an ontology term name, and advance
+    fn consume_ontology_term_name(&mut self) -> Option<String> {
+        if Self::is_ontology_term_name(self.peek()) {
+            Some(self.advance().text.clone())
+        } else {
+            None
+        }
     }
 
     /// Record the span of a node for error reporting
@@ -1530,7 +1600,7 @@ impl<'a> Parser<'a> {
                 // Glob import: `use path::*`
                 self.advance(); // consume ::
                 self.advance(); // consume *
-                // Accept optional semicolon after import statement
+                                // Accept optional semicolon after import statement
                 if self.at(TokenKind::Semi) {
                     self.advance();
                 }
@@ -2310,21 +2380,17 @@ impl<'a> Parser<'a> {
         Ok(equations)
     }
 
-    /// Parse ontology term reference: `chebi:drug` or `SNOMED:12345`
+    /// Parse ontology term reference: `chebi:drug`, `SNOMED:12345`, or `uo:unit`
     fn parse_ontology_term_ref(&mut self) -> Result<OntologyTermRef> {
         let start = self.span();
 
         let ontology = self.parse_ident()?;
         self.expect(TokenKind::Colon)?;
 
-        // Term can be an identifier or a number
-        let term = if self.at(TokenKind::Ident) {
-            self.advance().text.clone()
-        } else if self.at(TokenKind::IntLit) {
-            self.advance().text.clone()
-        } else {
-            return Err(miette::miette!("Expected term identifier or number"));
-        };
+        // Term can be an identifier, a number, or a keyword (e.g., `unit` in `uo:unit`)
+        let term = self
+            .consume_ontology_term_name()
+            .ok_or_else(|| miette::miette!("Expected term identifier, number, or keyword"))?;
 
         let end = self.span();
 
@@ -2947,18 +3013,15 @@ impl<'a> Parser<'a> {
             TokenKind::Ident => {
                 // Check if this is an ontology term reference: prefix:term (single colon)
                 // vs a path: module::Type (double colon)
-                // Term can be an identifier (chebi:drug) or a number (chebi:15365)
-                if self.peek_n(1) == TokenKind::Colon
-                    && matches!(self.peek_n(2), TokenKind::Ident | TokenKind::IntLit)
-                {
-                    // This is an ontology term reference like chebi:drug or chebi:15365
+                // Term can be an identifier (chebi:drug), a number (chebi:15365),
+                // or a keyword used as ontology term name (uo:unit)
+                if self.peek_n(1) == TokenKind::Colon && self.peek_is_ontology_term_name(2) {
+                    // This is an ontology term reference like chebi:drug, chebi:15365, or uo:unit
                     let prefix = self.parse_ident()?;
                     self.expect(TokenKind::Colon)?;
-                    let term = if self.at(TokenKind::IntLit) {
-                        self.advance().text.clone()
-                    } else {
-                        self.parse_ident()?
-                    };
+                    let term = self
+                        .consume_ontology_term_name()
+                        .ok_or_else(|| miette::miette!("Expected ontology term name"))?;
                     return Ok(TypeExpr::Ontology {
                         ontology: prefix,
                         term: Some(term),
@@ -3862,24 +3925,41 @@ impl<'a> Parser<'a> {
     fn parse_unary(&mut self) -> Result<Expr> {
         match self.peek() {
             TokenKind::Minus => {
+                let start = self.current().span.start;
                 self.advance();
                 let expr = self.parse_unary()?;
+                let id = self.next_id();
+                let end = self
+                    .tokens
+                    .get(self.pos.saturating_sub(1))
+                    .map(|t| t.span.end)
+                    .unwrap_or(start);
+                self.record_span(id, Span::new(start, end));
                 Ok(Expr::Unary {
-                    id: self.next_id(),
+                    id,
                     op: UnaryOp::Neg,
                     expr: Box::new(expr),
                 })
             }
             TokenKind::Bang => {
+                let start = self.current().span.start;
                 self.advance();
                 let expr = self.parse_unary()?;
+                let id = self.next_id();
+                let end = self
+                    .tokens
+                    .get(self.pos.saturating_sub(1))
+                    .map(|t| t.span.end)
+                    .unwrap_or(start);
+                self.record_span(id, Span::new(start, end));
                 Ok(Expr::Unary {
-                    id: self.next_id(),
+                    id,
                     op: UnaryOp::Not,
                     expr: Box::new(expr),
                 })
             }
             TokenKind::Amp => {
+                let start = self.current().span.start;
                 self.advance();
                 let is_mut = if self.at(TokenKind::Bang) {
                     // Sounio canonical: &!expr for mutable reference (two tokens)
@@ -3893,8 +3973,15 @@ impl<'a> Parser<'a> {
                     false
                 };
                 let expr = self.parse_unary()?;
+                let id = self.next_id();
+                let end = self
+                    .tokens
+                    .get(self.pos.saturating_sub(1))
+                    .map(|t| t.span.end)
+                    .unwrap_or(start);
+                self.record_span(id, Span::new(start, end));
                 Ok(Expr::Unary {
-                    id: self.next_id(),
+                    id,
                     op: if is_mut {
                         UnaryOp::RefMut
                     } else {
@@ -3906,19 +3993,35 @@ impl<'a> Parser<'a> {
 
             // Mutable reference: &!expr (single token)
             TokenKind::AmpBang => {
+                let start = self.current().span.start;
                 self.advance();
                 let expr = self.parse_unary()?;
+                let id = self.next_id();
+                let end = self
+                    .tokens
+                    .get(self.pos.saturating_sub(1))
+                    .map(|t| t.span.end)
+                    .unwrap_or(start);
+                self.record_span(id, Span::new(start, end));
                 Ok(Expr::Unary {
-                    id: self.next_id(),
+                    id,
                     op: UnaryOp::RefMut,
                     expr: Box::new(expr),
                 })
             }
             TokenKind::Star => {
+                let start = self.current().span.start;
                 self.advance();
                 let expr = self.parse_unary()?;
+                let id = self.next_id();
+                let end = self
+                    .tokens
+                    .get(self.pos.saturating_sub(1))
+                    .map(|t| t.span.end)
+                    .unwrap_or(start);
+                self.record_span(id, Span::new(start, end));
                 Ok(Expr::Unary {
-                    id: self.next_id(),
+                    id,
                     op: UnaryOp::Deref,
                     expr: Box::new(expr),
                 })
@@ -4160,8 +4263,9 @@ impl<'a> Parser<'a> {
             TokenKind::StringLit => {
                 let span = self.current().span;
                 let text = self.advance().text.clone();
-                // Remove quotes
-                let value = text[1..text.len() - 1].to_string();
+                // Remove quotes and process escape sequences
+                let raw = &text[1..text.len() - 1];
+                let value = unescape_string(raw)?;
                 let id = self.next_id();
                 self.record_span(id, span);
                 Ok(Expr::Literal {
@@ -4173,8 +4277,9 @@ impl<'a> Parser<'a> {
                 // C string literal: c"content" -> null-terminated string, type: *const i8
                 let span = self.current().span;
                 let text = self.advance().text.clone();
-                // Remove c" prefix (2 chars) and trailing " (1 char)
-                let value = text[2..text.len() - 1].to_string();
+                // Remove c" prefix (2 chars) and trailing " (1 char), process escapes
+                let raw = &text[2..text.len() - 1];
+                let value = unescape_string(raw)?;
                 let id = self.next_id();
                 self.record_span(id, span);
                 Ok(Expr::Literal {
@@ -4255,17 +4360,13 @@ impl<'a> Parser<'a> {
                     return Ok(Expr::MacroInvocation(macro_inv));
                 }
 
-                // Check for ontology term literal: prefix:term (e.g., drugbank:DB00945)
-                if self.peek_n(1) == TokenKind::Colon
-                    && matches!(self.peek_n(2), TokenKind::Ident | TokenKind::IntLit)
-                {
+                // Check for ontology term literal: prefix:term (e.g., drugbank:DB00945, uo:unit)
+                if self.peek_n(1) == TokenKind::Colon && self.peek_is_ontology_term_name(2) {
                     let prefix = self.parse_ident()?;
                     self.expect(TokenKind::Colon)?;
-                    let term = if self.at(TokenKind::Ident) {
-                        self.advance().text.clone()
-                    } else {
-                        self.advance().text.clone() // IntLit
-                    };
+                    let term = self
+                        .consume_ontology_term_name()
+                        .expect("peek_is_ontology_term_name verified this");
                     return Ok(Expr::OntologyTerm {
                         id: self.next_id(),
                         ontology: prefix,
