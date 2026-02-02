@@ -43,6 +43,7 @@ pub mod check;
 pub mod cli;
 pub mod codegen;
 pub mod common;
+pub mod compiler_loader;
 pub mod dependent;
 pub mod diagnostic;
 pub mod diagnostics;
