@@ -45,6 +45,7 @@ pub mod evolution;
 pub mod firewall;
 pub mod gaussian_process;
 pub mod heterogeneity;
+pub mod information_geometry;
 pub mod knowledge;
 pub mod mcmc;
 pub mod merkle;
@@ -55,6 +56,7 @@ pub mod provenance;
 pub mod temporal;
 pub mod time_travel;
 pub mod unscented_transform;
+pub mod wasserstein;
 
 // Uncertainty promotion lattice and KEC auto-selection
 pub mod kec;
@@ -92,7 +94,12 @@ pub use bayesian::{
     BayesianFusionResult, BeliefMass, BetaBound, BetaConfidence, BetaConstraintResult,
     DSTCombinationResult, EvidenceAssessment, HierarchicalPrior, OntologyDomain, SourceReliability,
 };
+
+// Information geometry on type spaces (Fisher metric, natural gradient)
 pub use firewall::{EpistemicFirewall, FirewallConfig, FirewallMode, FirewallViolation};
+pub use information_geometry::{AlphaConnection, FisherMatrix, NaturalGradientOptimizer};
+
+// Optimal transport (Wasserstein-2 distance for type composition)
 pub use merkle::{
     AuditTrail, Hash256, MerkleProvenanceDAG, MerkleProvenanceNode, OperationKind,
     ProvenanceMetadata, ProvenanceOperation, ProvenanceSignature,
@@ -101,6 +108,10 @@ pub use models::{
     propagate_binary, AffineConfig, BayesianConfig, BinaryOp, CombinationRule,
     DempsterShaferConfig, EpistemicConfig, FuzzyConfig, IntervalConfig, ProbabilisticConfig,
     UncertainValue, UncertaintyModel,
+};
+pub use wasserstein::{
+    transport_cost, wasserstein2_distance, wasserstein_barycenter, WassersteinBarycenter,
+    WassersteinDistance,
 };
 
 // Beta-epistemic knowledge types (revolutionary full-distribution epistemic computing)

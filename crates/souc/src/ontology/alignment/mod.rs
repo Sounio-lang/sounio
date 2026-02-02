@@ -40,6 +40,7 @@
 
 pub mod cui;
 pub mod loom;
+pub mod sheaf;
 pub mod unified;
 
 use crate::ontology::distance::sssom::MappingPredicate;
@@ -47,6 +48,7 @@ use crate::ontology::loader::IRI;
 
 pub use cui::{CUIBridge, CUIMapping, UMLSConcept};
 pub use loom::{LOOMClient, LOOMMapping};
+pub use sheaf::{CellularSheaf, CohomologyGroup};
 pub use unified::{AlignmentIndex, AlignmentMethod, AlignmentResult};
 
 /// Confidence threshold for accepting a mapping

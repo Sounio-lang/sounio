@@ -69,3 +69,9 @@ pub use causal::{
     CausalAssumption, CausalEdgeDef, CausalError, CausalGraphDef, CausalGraphRegistry,
     CausalNodeDef, CausalResult,
 };
+
+// Tropical geometry - min-plus algebra for resource analysis
+pub use tropical::{
+    parallel_compose, sequential_compose, tropical_add, tropical_matmul, tropical_mul,
+    tropical_power, ResourceType, TropicalMatrix, TropicalNumber,
+};

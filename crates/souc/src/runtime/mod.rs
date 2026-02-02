@@ -138,3 +138,7 @@ pub use handler_stack::{
 pub use gpu_bridge::{
     get_gpu_bridge, init_gpu_bridge, BridgeStats, GpuBridgeError, GpuRuntimeBridge,
 };
+
+// FFI layer for self-hosting (new)
+pub mod ffi;
+pub use ffi::{ffi_io, ffi_process, ffi_stdio, ffi_alloc, ffi_path, ffi_time};
