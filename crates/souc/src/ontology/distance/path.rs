@@ -648,6 +648,24 @@ impl HierarchyGraph {
         Some(length as f64 / max_path as f64)
     }
 
+    /// Get all term IRIs in the graph
+    pub fn all_terms(&self) -> impl Iterator<Item = &IRI> {
+        self.iri_to_node.keys()
+    }
+
+    /// Get all root IRIs (terms with no parents)
+    pub fn get_roots(&self) -> Vec<IRI> {
+        self.roots
+            .iter()
+            .filter_map(|&idx| self.graph.node_weight(idx).cloned())
+            .collect()
+    }
+
+    /// Get the number of nodes in the graph
+    pub fn node_count(&self) -> usize {
+        self.graph.node_count()
+    }
+
     /// Get maximum depth in the graph
     pub fn max_depth(&self) -> u32 {
         self.leaves
