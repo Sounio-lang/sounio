@@ -21,9 +21,14 @@
 //!
 //! These relationships become part of the type system.
 
+pub mod hyperbolic;
 pub mod models;
+pub mod riemannian;
 pub mod simd;
 pub mod storage;
+
+pub use hyperbolic::{HyperbolicGenerator, PoincarePoint};
+pub use riemannian::{HierarchyLearner, RiemannianConfig, RiemannianGradientDescent};
 
 use std::num::NonZeroUsize;
 use std::path::PathBuf;

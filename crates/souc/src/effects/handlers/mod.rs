@@ -20,6 +20,7 @@
 //! - `RealGpuHandler`: Real GPU handler using actual GPU operations
 //! - `BatchedGpuHandler`: Batching wrapper for GPU operations (reduces sync overhead)
 //! - `EpistemicHandler`: Handles epistemic operations (degrade, assert_confidence, firewall, etc.)
+//! - `CausalHandler`: Handles causal inference operations (do, query, counterfactual, etc.)
 //! - `NetworkHandler`: Handles network operations (fetch, post, websocket, etc.) - simulated
 //! - `RealNetworkHandler`: Real network handler using Tokio for TCP/UDP/HTTP
 //! - `SensorHandler`: Handles sensor operations (read, calibrate, batch_read, etc.)
@@ -75,6 +76,7 @@ mod alloc_handler;
 mod async_handler;
 mod async_handler_real;
 mod batched_gpu_handler;
+mod causal_handler;
 mod composition;
 mod div_handler;
 mod epistemic_handler;
@@ -94,6 +96,7 @@ pub use alloc_handler::AllocHandler;
 pub use async_handler::AsyncHandler;
 pub use async_handler_real::RealAsyncHandler;
 pub use batched_gpu_handler::{BatchError, BatchedGpuHandler, BatchedOp};
+pub use causal_handler::CausalHandler;
 pub use composition::{
     ComposeError, ComposedHandler, CompositionOrder, HandlerComposer, HandlerStack,
 };

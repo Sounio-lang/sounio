@@ -481,6 +481,15 @@ pub enum Type {
     /// Dual number for forward-mode autodiff: dual (value: f64, derivative: f64)
     Dual,
 
+    // Causal inference types
+    /// Causal graph reference: Causal<GraphName>
+    /// Used in effect signatures: `fn f() with Causal<MyGraph>`
+    /// The graph_name references a declared `causal model` or `causal graph`
+    CausalGraph {
+        /// Name of the declared causal model/graph
+        graph_name: String,
+    },
+
     // Special types
     /// Never type (!)
     Never,

@@ -16,14 +16,18 @@
 
 pub mod compatibility;
 pub mod conformal;
+pub mod dependent;
 pub mod diagnostics;
 pub mod epistemic;
+pub mod probabilistic;
 pub mod rankn;
 
 pub use conformal::{
     CalibrationExample, ConformalConfig, ConformalResult, ConformalTypeChecker,
     MondrianConformalChecker,
 };
+pub use dependent::{DependentTypeChecker, RefinementValidator};
+pub use probabilistic::{ProbabilisticTypeInference, SubtypePolymorphismChecker};
 
 #[cfg(test)]
 mod extern_tests;

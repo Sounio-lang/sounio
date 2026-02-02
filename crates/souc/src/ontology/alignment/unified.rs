@@ -21,6 +21,7 @@
 use std::collections::{HashMap, HashSet, VecDeque};
 
 use crate::ontology::distance::sssom::{MappingPredicate, SSSOMIndex, SSSOMMapping};
+use crate::ontology::embedding::EmbeddingSpace;
 use crate::ontology::loader::IRI;
 
 use super::cui::CUIBridge;
@@ -87,6 +88,8 @@ pub struct AlignmentIndex {
     loom: LOOMClient,
     /// Embedding similarity threshold
     embedding_threshold: f64,
+    /// Embedding space for similarity fallback
+    embedding_space: Option<EmbeddingSpace>,
     /// Cache for computed alignments
     cache: HashMap<(IRI, IRI), Option<AlignmentResult>>,
     /// Enable transitive inference
@@ -103,6 +106,7 @@ impl AlignmentIndex {
             cui_bridge: CUIBridge::new(),
             loom: LOOMClient::new(),
             embedding_threshold: 0.85,
+            embedding_space: None,
             cache: HashMap::new(),
             transitive_enabled: true,
             stats: AlignmentStats::default(),
@@ -130,6 +134,12 @@ impl AlignmentIndex {
     /// Set embedding similarity threshold
     pub fn with_embedding_threshold(mut self, threshold: f64) -> Self {
         self.embedding_threshold = threshold;
+        self
+    }
+
+    /// Set embedding space for similarity fallback
+    pub fn with_embedding_space(mut self, space: EmbeddingSpace) -> Self {
+        self.embedding_space = Some(space);
         self
     }
 
@@ -186,6 +196,13 @@ impl AlignmentIndex {
             && let Some(alignment) = self.find_transitive_alignment(source, target)
         {
             results.push((alignment, AlignmentMethod::Transitive));
+        }
+
+        // 5. Embedding similarity fallback
+        if results.is_empty() {
+            if let Some(alignment) = self.find_embedding_alignment(source, target) {
+                results.push((alignment, AlignmentMethod::Embedding));
+            }
         }
 
         if results.is_empty() {
@@ -266,6 +283,24 @@ impl AlignmentIndex {
                 MappingPredicate::CloseMatch,
                 confidence,
                 AlignmentSource::LOOM,
+            ));
+        }
+        None
+    }
+
+    /// Find alignment via embedding similarity
+    fn find_embedding_alignment(&self, source: &IRI, target: &IRI) -> Option<Alignment> {
+        let space = self.embedding_space.as_ref()?;
+        let similarity = space.cosine_similarity(source, target).ok()?;
+        let confidence = similarity as f64;
+
+        if confidence >= self.embedding_threshold {
+            return Some(Alignment::direct(
+                source.clone(),
+                target.clone(),
+                MappingPredicate::CloseMatch,
+                confidence,
+                AlignmentSource::Embedding,
             ));
         }
         None

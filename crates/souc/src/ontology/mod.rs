@@ -50,6 +50,7 @@
 //! ```
 
 pub mod alignment;
+pub mod applications;
 pub mod build;
 pub mod cache;
 pub mod distance;
@@ -64,6 +65,7 @@ pub mod native;
 #[cfg(feature = "ontology")]
 pub mod semantic_sql;
 pub mod sssom;
+pub mod topology;
 pub mod version;
 
 mod federated;

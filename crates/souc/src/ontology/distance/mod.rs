@@ -29,7 +29,12 @@
 pub mod cache;
 pub mod information_content;
 pub mod path;
+pub mod spectral;
 pub mod sssom;
+
+pub use spectral::{
+    SpectralConfig, SpectralDistance, SpectralDistanceType, SpectralWaveletDistance,
+};
 
 use std::collections::HashMap;
 use std::sync::RwLock;

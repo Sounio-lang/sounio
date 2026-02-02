@@ -127,6 +127,9 @@ pub fn ownership_of(ty: &Type) -> Ownership {
 
         // Matrices are Affine (heap allocated for large sizes)
         Type::Matrix { .. } => Ownership::Affine,
+
+        // Causal graph references are Copy (type-level identifier)
+        Type::CausalGraph { .. } => Ownership::Copy,
     }
 }
 

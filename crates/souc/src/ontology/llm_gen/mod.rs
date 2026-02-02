@@ -56,6 +56,7 @@
 //! ```
 
 pub mod generator;
+pub mod sounio_codegen;
 pub mod validator;
 
 pub use generator::{
@@ -63,6 +64,7 @@ pub use generator::{
     GeneratedProperty, GenerationConfig, GenerationStats, LLMProvenance, OntologyGenerator,
     TaxonomicRelation,
 };
+pub use sounio_codegen::{FieldStyle, SounioCodegenConfig, SounioStructGenerator};
 pub use validator::{
     OntologyValidator, ValidationConfig, ValidationIssue, ValidationResult, ValidationSeverity,
 };
@@ -83,6 +85,8 @@ pub enum GenerationError {
     NoTermsExtracted,
     /// Ontology generation not available (feature not enabled)
     NotAvailable,
+    /// Custom error message
+    Custom(String),
 }
 
 impl fmt::Display for GenerationError {
@@ -95,6 +99,7 @@ impl fmt::Display for GenerationError {
             GenerationError::NotAvailable => {
                 write!(f, "Ontology generation requires the 'llm' feature")
             }
+            GenerationError::Custom(msg) => write!(f, "{}", msg),
         }
     }
 }

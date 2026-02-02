@@ -171,6 +171,10 @@ enum Commands {
         #[arg(long, default_value = "human")]
         error_format: String,
 
+        /// Warn when using deprecated ontology terms
+        #[arg(long)]
+        warn_deprecated: bool,
+
         /// Warning flags (e.g., --warn=unused-imports)
         #[arg(long = "warn")]
         warnings: Vec<String>,
@@ -1771,6 +1775,7 @@ fn main() -> Result<()> {
             show_effects,
             skip_ownership,
             error_format,
+            warn_deprecated,
             warnings: _,
         } => check(
             &input,
@@ -1780,6 +1785,7 @@ fn main() -> Result<()> {
             show_effects,
             skip_ownership,
             &error_format,
+            warn_deprecated,
         ),
 
         Commands::Run { input, args } => run(&input, &args),
@@ -2686,7 +2692,9 @@ fn check(
     show_effects: bool,
     skip_ownership: bool,
     error_format: &str,
+    warn_deprecated: bool,
 ) -> Result<()> {
+    let _ = warn_deprecated; // TODO: Wire up deprecation tracking when enabled
     let use_json = error_format == "json";
     tracing::info!("Type-checking {:?}", input);
 

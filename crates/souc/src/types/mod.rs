@@ -10,6 +10,7 @@
 //! - Quantitative Type Theory (multiplicities for erasure)
 
 pub mod c_layout;
+pub mod causal;
 pub mod core;
 pub mod dimension_solver;
 pub mod effects;
@@ -59,4 +60,11 @@ pub use erasure::{
 pub use ontology_erasure::{
     CompilationErasure, ErasedRepresentation, FunctionErasureInfo, OntologicalType,
     OntologyErasureAnalyzer, OntologyErasureStats,
+};
+
+// Causal types - do-calculus and causal inference
+pub use causal::{
+    causal_confidence_factor, check_d_separation, find_backdoor_adjustment, validate_dag,
+    CausalAssumption, CausalEdgeDef, CausalError, CausalGraphDef, CausalGraphRegistry,
+    CausalNodeDef, CausalResult,
 };
