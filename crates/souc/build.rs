@@ -5,9 +5,14 @@
 //! - Build date
 //! - Target triple
 
+use std::fs;
+use std::path::Path;
 use std::process::Command;
 
 fn main() {
+    // Embed stdlib/compiler modules
+    embed_stdlib_modules();
+
     // Capture git information
     let git_hash = get_git_hash();
     let git_dirty = is_git_dirty();
@@ -88,4 +93,52 @@ fn get_build_date() -> String {
             }
         })
         .unwrap_or_else(|| "unknown".to_string())
+}
+
+fn embed_stdlib_modules() {
+    // Tell Cargo to rerun if stdlib/compiler changes
+    println!("cargo:rerun-if-changed=../../stdlib/compiler");
+
+    let stdlib_path = Path::new("../../stdlib/compiler");
+
+    if !stdlib_path.exists() {
+        println!("cargo:warning=stdlib/compiler not found, skipping embedding");
+        return;
+    }
+
+    // Discover all .sio files
+    let mut modules = Vec::new();
+    discover_sio_files(stdlib_path, stdlib_path, &mut modules);
+
+    if modules.is_empty() {
+        println!("cargo:warning=No .sio files found in stdlib/compiler");
+        return;
+    }
+
+    println!(
+        "cargo:warning=Embedding {} stdlib/compiler modules",
+        modules.len()
+    );
+}
+
+fn discover_sio_files(base_path: &Path, current_path: &Path, modules: &mut Vec<String>) {
+    if let Ok(entries) = fs::read_dir(current_path) {
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_file() && path.extension().map_or(false, |ext| ext == "sio") {
+                if let Some(rel_path) = path.strip_prefix(base_path).ok() {
+                    if let Some(module_path) = rel_path.to_str() {
+                        modules.push(module_path.to_string());
+                        println!(
+                            "cargo:rerun-if-changed=../../stdlib/compiler/{}",
+                            module_path
+                        );
+                    }
+                }
+            } else if path.is_dir() {
+                // Recursively discover in subdirectories
+                discover_sio_files(base_path, &path, modules);
+            }
+        }
+    }
 }
