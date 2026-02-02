@@ -186,6 +186,10 @@ enum Commands {
         #[arg(value_name = "FILE")]
         input: PathBuf,
 
+        /// Use self-hosted Sounio compiler (week 2 bootstrap feature)
+        #[arg(long)]
+        use_sounio_compiler: bool,
+
         /// Arguments to pass to the program
         #[arg(trailing_var_arg = true)]
         args: Vec<String>,
@@ -1788,7 +1792,11 @@ fn main() -> Result<()> {
             warn_deprecated,
         ),
 
-        Commands::Run { input, args } => run(&input, &args),
+        Commands::Run {
+            input,
+            use_sounio_compiler,
+            args,
+        } => run(&input, &args, use_sounio_compiler),
 
         Commands::Jit {
             input,
@@ -2911,8 +2919,35 @@ fn check(
     Ok(())
 }
 
-fn run(input: &std::path::Path, args: &[String]) -> Result<()> {
-    tracing::info!("Running {:?} with args {:?}", input, args);
+fn run(input: &std::path::Path, args: &[String], use_sounio_compiler: bool) -> Result<()> {
+    tracing::info!(
+        "Running {:?} with args {:?} (use_sounio_compiler={})",
+        input,
+        args,
+        use_sounio_compiler
+    );
+
+    if use_sounio_compiler {
+        // Use the self-hosted Sounio compiler (week 2 bootstrap feature)
+        tracing::info!("Using self-hosted Sounio compiler from stdin");
+
+        // Get the stdlib path from environment or use default
+        let stdlib_path =
+            std::env::var("SOUNIO_STDLIB_PATH").unwrap_or_else(|_| "stdlib/compiler".to_string());
+
+        // Create the self-hosted compiler
+        let _compiler =
+            sounio::compiler_loader::SounioCompiler::new(&stdlib_path).map_err(|e| {
+                miette::miette!(
+                    "Failed to initialize self-hosted compiler: {}",
+                    e.to_string()
+                )
+            })?;
+
+        // TODO: Once fully integrated, compile source to bytecode here
+        // For now, fall back to Rust compiler
+        tracing::warn!("Self-hosted compiler integration in progress - using Rust compiler");
+    }
 
     // Load modules and parse (uses ModuleLoader to handle imports)
     let ast = sounio::module_loader::load_program_ast(input)?;
