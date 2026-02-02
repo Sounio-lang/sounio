@@ -753,4 +753,3 @@ where
     let (_, derivative) = f(x, 1.0);
     derivative
 }
-

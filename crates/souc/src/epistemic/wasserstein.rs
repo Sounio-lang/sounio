@@ -47,7 +47,7 @@ fn lgamma(x: f64) -> f64 {
     }
 
     // Stirling's approximation: ln(Γ(x)) ≈ (x-0.5)ln(x) - x + 0.5ln(2π)
-    let mut z = x - 0.5;
+    let z = x - 0.5;
     z * z.ln() - z + 0.9189385332046727 // 0.5 * ln(2π)
 }
 

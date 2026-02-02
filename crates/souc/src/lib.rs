@@ -94,6 +94,7 @@ pub mod tools;
 pub mod typeck;
 pub mod types;
 pub mod units;
+pub mod vm;
 pub mod watch;
 
 // Re-export diagnostics for convenience

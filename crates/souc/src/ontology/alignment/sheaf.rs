@@ -1,7 +1,6 @@
 // Sounio Compiler - Sheaf-Theoretic Type Checking
 // Cellular sheaves over ontology graphs with Čech cohomology
 
-use crate::ontology::loader::Ontology;
 use crate::types::Type;
 use std::collections::HashMap;
 
@@ -135,7 +134,7 @@ impl Default for CellularSheaf {
 ///
 /// Each ontology becomes an open set in the sheaf, with local type contexts.
 /// Restriction maps encode how types specialize across domains.
-pub fn align_federated_ontologies(_ontologies: &[Ontology]) -> Result<CellularSheaf, String> {
+pub fn align_federated_ontologies(_ontology_ids: &[String]) -> Result<CellularSheaf, String> {
     let sheaf = CellularSheaf::new();
 
     // TODO: Full implementation would:
