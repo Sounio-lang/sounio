@@ -327,6 +327,7 @@ impl<'ctx> DebugBuilder<'ctx> {
             HlirType::Vec3d => self.create_basic_type("vec3d", 256, DW_ATE_FLOAT),
             HlirType::Vec4d => self.create_basic_type("vec4d", 256, DW_ATE_FLOAT),
             HlirType::Octonion => self.create_basic_type("octonion", 256, DW_ATE_FLOAT),
+            HlirType::Sedenion => self.create_basic_type("sedenion", 512, DW_ATE_FLOAT),
             HlirType::QuatLinear => self.create_basic_type("quat_linear", 64, DW_ATE_ADDRESS),
             HlirType::QuatConv2d => self.create_basic_type("quat_conv2d", 64, DW_ATE_ADDRESS),
             HlirType::QuatRnnState => self.create_basic_type("quat_rnn_state", 64, DW_ATE_ADDRESS),
@@ -378,6 +379,7 @@ fn type_size_bits(ty: &HlirType) -> u64 {
         HlirType::Vec2d => 128,
         HlirType::Vec3d | HlirType::Vec4d => 256,
         HlirType::Octonion => 256,
+        HlirType::Sedenion => 512,
         HlirType::QuatLinear
         | HlirType::QuatConv2d
         | HlirType::QuatRnnState

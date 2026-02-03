@@ -162,6 +162,9 @@ impl<'ctx> TypeConverter<'ctx> {
             // Octonion: 8x f32 hypercomplex number
             HlirType::Octonion => self.context.f32_type().vec_type(8).into(),
 
+            // Sedenion: 16x f32 hypercomplex number
+            HlirType::Sedenion => self.context.f32_type().vec_type(16).into(),
+
             // Quaternionic neural network types - pointer to opaque struct
             HlirType::QuatLinear
             | HlirType::QuatConv2d
@@ -368,6 +371,7 @@ impl<'ctx> TypeConverter<'ctx> {
             HlirType::Vec3d => 256,    // 4x f64 (padded) = 256 bits
             HlirType::Vec4d => 256,    // 4x f64 = 256 bits
             HlirType::Octonion => 256, // 8x f32 = 256 bits
+            HlirType::Sedenion => 512, // 16x f32 = 512 bits
             HlirType::QuatLinear
             | HlirType::QuatConv2d
             | HlirType::QuatRnnState
@@ -415,6 +419,7 @@ impl<'ctx> TypeConverter<'ctx> {
             HlirType::Vec2d => 16, // 16-byte for 2x f64
             HlirType::Vec3d | HlirType::Vec4d => 32, // 32-byte for 4x f64
             HlirType::Octonion => 32, // 32-byte alignment for 8x f32
+            HlirType::Sedenion => 64, // 64-byte alignment for 16x f32
             HlirType::QuatLinear
             | HlirType::QuatConv2d
             | HlirType::QuatRnnState

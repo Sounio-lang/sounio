@@ -121,6 +121,23 @@ pub fn check_ast(ast: &Ast) -> Result<Hir> {
     check(&resolved_ast)
 }
 
+/// Type check with external types pre-registered.
+///
+/// Used for multi-module compilation where types from other modules
+/// need to be available during type checking.
+///
+/// # Arguments
+/// * `resolved_ast` - The resolved AST to check
+/// * `external_types` - Iterator of (type_name, source_module) pairs
+pub fn check_with_external_types(
+    resolved_ast: &resolve::ResolvedAst,
+    external_types: impl IntoIterator<Item = (String, String)>,
+) -> Result<Hir> {
+    let mut checker = TypeChecker::new_with_resolved_ast(resolved_ast);
+    checker.register_external_types(external_types);
+    checker.check_program(&resolved_ast.ast)
+}
+
 /// Type checker state
 pub struct TypeChecker {
     /// Type environment (variable -> type)
@@ -342,6 +359,48 @@ impl TypeChecker {
         let mut checker = Self::new();
         checker.ontology_resolver = OntologyResolver::new(config).ok();
         checker
+    }
+
+    /// Pre-register external type names for cross-module compilation.
+    ///
+    /// This allows the type checker to recognize types from other modules
+    /// without having their full definitions. The types are registered as
+    /// opaque struct definitions with no fields.
+    ///
+    /// Used during stdlib bootstrap to enable modules to reference types
+    /// defined in other modules (e.g., `TypeContext` from `check::context`).
+    pub fn register_external_types(&mut self, types: impl IntoIterator<Item = (String, String)>) {
+        for (type_name, _source_module) in types {
+            // Register as an opaque struct with no fields
+            // This allows type references to resolve, even if we don't have
+            // the full struct definition
+            if !self.type_defs.contains_key(&type_name) {
+                self.type_defs.insert(
+                    type_name,
+                    TypeDef::Struct {
+                        fields: Vec::new(), // Opaque - fields unknown
+                        linear: false,
+                        affine: false,
+                        source_module: None, // Cross-module source
+                    },
+                );
+            }
+        }
+    }
+
+    /// Pre-register external enum types for cross-module compilation.
+    pub fn register_external_enum(&mut self, name: &str, variants: Vec<(String, Vec<Type>)>) {
+        if !self.type_defs.contains_key(name) {
+            self.type_defs.insert(
+                name.to_string(),
+                TypeDef::Enum {
+                    variants,
+                    linear: false,
+                    affine: false,
+                    source_module: None,
+                },
+            );
+        }
     }
 
     /// Enable federated ontology queries (L4 layer - BioPortal/OLS4)
@@ -7598,6 +7657,11 @@ impl TypeChecker {
                 name: format!("Causal<{}>", graph_name),
                 args: vec![],
             },
+            // Sedenion type (16D hypercomplex)
+            Type::Sedenion => HirType::Named {
+                name: "Sedenion".to_string(),
+                args: vec![],
+            },
         }
     }
 
@@ -7808,6 +7872,8 @@ impl TypeChecker {
                 rows: self.hir_tensor_dim_to_dim_size(rows),
                 cols: self.hir_tensor_dim_to_dim_size(cols),
             },
+            // Sedenion type (16D hypercomplex)
+            HirType::Sedenion => Type::Sedenion,
         }
     }
 

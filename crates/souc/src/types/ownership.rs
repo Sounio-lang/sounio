@@ -130,6 +130,9 @@ pub fn ownership_of(ty: &Type) -> Ownership {
 
         // Causal graph references are Copy (type-level identifier)
         Type::CausalGraph { .. } => Ownership::Copy,
+
+        // Sedenion type (16D hypercomplex) is Copy (16 f32, stack-allocated)
+        Type::Sedenion => Ownership::Copy,
     }
 }
 
