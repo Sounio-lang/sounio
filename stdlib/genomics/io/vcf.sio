@@ -1,0 +1,371 @@
+//! VCF (Variant Call Format) parser
+//!
+//! Parse VCF files into epistemic Variant records with Knowledge<GF4>.
+//! VCF format: CHROM POS ID REF ALT QUAL FILTER INFO FORMAT [SAMPLES...]
+//! Fields are tab-separated.
+
+use types::*
+use variant::*
+use io::*
+
+/// Error type for VCF parsing
+enum VcfError {
+    IoError { message: str },
+    ParseError { line: u32, message: str },
+    InvalidBase { line: u32, base: char },
+    InvalidQuality { line: u32 },
+}
+
+/// VCF file header information
+struct VcfHeader {
+    file_format: str,      // ##fileformat=VCFv4.x
+    info_fields: Vec<str>, // INFO field definitions
+    format_fields: Vec<str>, // FORMAT field definitions
+    samples: Vec<str>,     // Sample names from #CHROM line
+    contigs: Vec<str>,     // Contig/chromosome names
+}
+
+/// Parse a VCF file and return vector of variants
+fn parse_vcf(file_path: str) -> Result<Vec<Variant>, VcfError> with IO {
+    let content = match io::read_file(file_path) {
+        Ok(c) => c,
+        Err(e) => return Err(VcfError::IoError { message: "Failed to read file" })
+    }
+
+    parse_vcf_string(content)
+}
+
+/// Parse VCF format from string content
+fn parse_vcf_string(content: str) -> Result<Vec<Variant>, VcfError> {
+    let lines = split_by_newline(content)
+
+    var variants = Vec::new()
+    var line_num: u32 = 0
+
+    for line in lines {
+        line_num = line_num + 1
+        let trimmed = trim(line)
+
+        // Skip empty lines
+        if trimmed.len() == 0 {
+            continue
+        }
+
+        // Skip header lines (starting with #)
+        if trimmed.char_at(0) == '#' {
+            continue
+        }
+
+        // Parse data line
+        let fields = split_by_tab(trimmed)
+
+        // VCF requires at least 8 mandatory fields
+        if fields.len() < 8 {
+            continue  // Skip malformed lines
+        }
+
+        // Parse mandatory fields
+        let chrom = fields[0]
+        let pos = parse_u32(fields[1])
+        let _id = fields[2]  // Variant ID (often ".")
+        let ref_str = fields[3]
+        let alt_str = fields[4]
+        let qual_str = fields[5]
+        let filter = fields[6]
+        let info = fields[7]
+
+        // Parse quality score (can be "." for missing)
+        let qual: u8 = if qual_str == "." {
+            0
+        } else {
+            let q = parse_u32(qual_str)
+            if q > 60 { 60 } else { q as u8 }
+        }
+
+        // Parse reference base (first character for SNPs)
+        let ref_base = match char_to_gf4(ref_str.char_at(0)) {
+            Ok(b) => b,
+            Err(_) => return Err(VcfError::InvalidBase { line: line_num, base: ref_str.char_at(0) })
+        }
+
+        // Parse alternate base(s) - for now handle single SNP
+        let alt_base = match char_to_gf4(alt_str.char_at(0)) {
+            Ok(b) => b,
+            Err(_) => return Err(VcfError::InvalidBase { line: line_num, base: alt_str.char_at(0) })
+        }
+
+        // Convert quality to epistemic confidence
+        let (alpha, beta) = phred_to_beta(qual)
+        let confidence = alpha / (alpha + beta)
+
+        // Parse INFO field for additional data
+        let info_map = parse_vcf_info(info)
+        let read_depth = parse_info_dp(info_map)
+        let allele_freq = parse_info_af(info_map)
+
+        // Parse genotype from FORMAT/sample columns if present
+        let genotype = if fields.len() >= 10 {
+            parse_vcf_genotype(fields[8], fields[9], qual)
+        } else {
+            // Default to heterozygous if no sample data
+            measure(Genotype::Het, confidence: 0.5)
+        }
+
+        // Parse filters
+        let filters = if filter == "." || filter == "PASS" {
+            Vec::new()
+        } else {
+            split_by_semicolon(filter)
+        }
+
+        variants.push(Variant {
+            position: pos as bp,
+            chromosome: chrom,
+            ref_base: ref_base,
+            alt_base: measure(alt_base, confidence: confidence),
+            genotype: genotype,
+            quality: measure(qual, confidence: confidence),
+            read_depth: measure(read_depth, confidence: 0.9),
+            allele_frequency: measure(allele_freq as f32, confidence: confidence),
+            provenance: generate_provenance_id(),
+            filters: filters,
+        })
+    }
+
+    Ok(variants)
+}
+
+/// Convert character to GF(4) with Result
+fn char_to_gf4(c: char) -> Result<GF4, str> {
+    match c {
+        'A' => Ok(0),
+        'C' => Ok(1),
+        'G' => Ok(2),
+        'T' => Ok(3),
+        'a' => Ok(0),
+        'c' => Ok(1),
+        'g' => Ok(2),
+        't' => Ok(3),
+        _ => Err("Invalid base")
+    }
+}
+
+/// Parse VCF INFO field into key-value map
+fn parse_vcf_info(info: str) -> Vec<(str, str)> {
+    var result = Vec::new()
+
+    if info == "." {
+        return result
+    }
+
+    let pairs = split_by_semicolon(info)
+    for pair in pairs {
+        let kv = split_by_equals(pair)
+        if kv.len() == 1 {
+            // Flag field (no value)
+            result.push((kv[0], "true"))
+        } else if kv.len() >= 2 {
+            result.push((kv[0], kv[1]))
+        }
+    }
+
+    result
+}
+
+/// Get INFO field value by key
+fn get_info_value(info_map: Vec<(str, str)>, key: str) -> Option<str> {
+    for kv in info_map {
+        if kv.0 == key {
+            return Option::Some(kv.1)
+        }
+    }
+    Option::None
+}
+
+/// Parse DP (read depth) from INFO
+fn parse_info_dp(info_map: Vec<(str, str)>) -> u32 {
+    match get_info_value(info_map, "DP") {
+        Option::Some(v) => parse_u32(v),
+        Option::None => 0
+    }
+}
+
+/// Parse AF (allele frequency) from INFO
+fn parse_info_af(info_map: Vec<(str, str)>) -> f64 {
+    match get_info_value(info_map, "AF") {
+        Option::Some(v) => parse_f64(v),
+        Option::None => 0.5  // Default to 50% if unknown
+    }
+}
+
+/// Parse genotype from FORMAT and sample columns
+fn parse_vcf_genotype(format: str, sample: str, qual: u8) -> Knowledge<Genotype> {
+    // FORMAT typically starts with GT (genotype)
+    let format_fields = split_by_colon(format)
+    let sample_fields = split_by_colon(sample)
+
+    // Find GT field index
+    var gt_idx: i32 = -1
+    var gq_idx: i32 = -1
+    for i in 0..format_fields.len() {
+        if format_fields[i] == "GT" {
+            gt_idx = i as i32
+        }
+        if format_fields[i] == "GQ" {
+            gq_idx = i as i32
+        }
+    }
+
+    if gt_idx < 0 || (gt_idx as usize) >= sample_fields.len() {
+        // No GT field found, return uncertain
+        return measure(Genotype::Het, confidence: 0.5)
+    }
+
+    let gt = sample_fields[gt_idx as usize]
+
+    // Parse GT field: 0/0, 0/1, 1/1, etc.
+    let genotype = if gt == "0/0" || gt == "0|0" {
+        Genotype::HomRef
+    } else if gt == "0/1" || gt == "1/0" || gt == "0|1" || gt == "1|0" {
+        Genotype::Het
+    } else if gt == "1/1" || gt == "1|1" {
+        Genotype::HomAlt
+    } else {
+        // Multi-allelic or other
+        Genotype::HetAlt
+    }
+
+    // Get genotype quality if available
+    let gq = if gq_idx >= 0 && (gq_idx as usize) < sample_fields.len() {
+        let gq_val = parse_u32(sample_fields[gq_idx as usize])
+        if gq_val > 99 { 99 } else { gq_val as u8 }
+    } else {
+        qual  // Fall back to variant quality
+    }
+
+    let (alpha, beta) = phred_to_beta(gq)
+    let confidence = alpha / (alpha + beta)
+
+    measure(genotype, confidence: confidence)
+}
+
+/// Split by colon (for FORMAT/sample fields)
+fn split_by_colon(s: str) -> Vec<str> {
+    var result = Vec::new()
+    var current = ""
+    for c in s.chars() {
+        if c == ':' {
+            result.push(current)
+            current = ""
+        } else {
+            current = current ++ c.to_string()
+        }
+    }
+    if current.len() > 0 {
+        result.push(current)
+    }
+    result
+}
+
+/// Parse VCF header (returns header info)
+fn parse_vcf_header(content: str) -> VcfHeader {
+    let lines = split_by_newline(content)
+
+    var file_format = "VCFv4.0"
+    var info_fields = Vec::new()
+    var format_fields = Vec::new()
+    var samples = Vec::new()
+    var contigs = Vec::new()
+
+    for line in lines {
+        let trimmed = trim(line)
+
+        if trimmed.len() < 2 {
+            continue
+        }
+
+        // ##fileformat line
+        if trimmed.starts_with("##fileformat=") {
+            file_format = trimmed.slice(13, trimmed.len())
+        }
+        // ##INFO lines
+        else if trimmed.starts_with("##INFO=") {
+            info_fields.push(trimmed)
+        }
+        // ##FORMAT lines
+        else if trimmed.starts_with("##FORMAT=") {
+            format_fields.push(trimmed)
+        }
+        // ##contig lines
+        else if trimmed.starts_with("##contig=") {
+            contigs.push(trimmed)
+        }
+        // #CHROM line (column headers with sample names)
+        else if trimmed.starts_with("#CHROM") {
+            let fields = split_by_tab(trimmed)
+            // Sample names start at column 9 (0-indexed)
+            for i in 9..fields.len() {
+                samples.push(fields[i])
+            }
+        }
+    }
+
+    VcfHeader {
+        file_format: file_format,
+        info_fields: info_fields,
+        format_fields: format_fields,
+        samples: samples,
+        contigs: contigs,
+    }
+}
+
+/// Filter variants by chromosome
+fn vcf_filter_by_chrom(variants: Vec<Variant>, chrom: str) -> Vec<Variant> {
+    var filtered = Vec::new()
+    for v in variants {
+        if v.chromosome == chrom {
+            filtered.push(v)
+        }
+    }
+    filtered
+}
+
+/// Filter variants by quality threshold
+fn vcf_filter_by_quality(variants: Vec<Variant>, min_qual: u8) -> Vec<Variant> {
+    var filtered = Vec::new()
+    for v in variants {
+        if v.quality.value() >= min_qual {
+            filtered.push(v)
+        }
+    }
+    filtered
+}
+
+/// Filter variants that passed all filters
+fn vcf_filter_passed(variants: Vec<Variant>) -> Vec<Variant> {
+    var filtered = Vec::new()
+    for v in variants {
+        if v.filters.len() == 0 {
+            filtered.push(v)
+        }
+    }
+    filtered
+}
+
+/// Count variants by genotype
+fn vcf_count_by_genotype(variants: Vec<Variant>) -> (u32, u32, u32) {
+    var hom_ref: u32 = 0
+    var het: u32 = 0
+    var hom_alt: u32 = 0
+
+    for v in variants {
+        match v.genotype.value() {
+            Genotype::HomRef => hom_ref = hom_ref + 1,
+            Genotype::Het => het = het + 1,
+            Genotype::HomAlt => hom_alt = hom_alt + 1,
+            Genotype::HetAlt => het = het + 1  // Count with het
+        }
+    }
+
+    (hom_ref, het, hom_alt)
+}

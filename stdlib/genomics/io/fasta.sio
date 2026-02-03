@@ -1,0 +1,173 @@
+//! FASTA/FASTQ format parsers
+//!
+//! Parse FASTA files into GF(4) sequences for algebraic genomics operations.
+//! FASTA format: >header\nSEQUENCE\n
+
+use types::*
+use io::*
+
+/// Error type for FASTA parsing
+enum FastaError {
+    IoError { message: str },
+    InvalidBase { line: u32, base: char },
+    EmptyFile,
+}
+
+/// Parse a FASTA file and return vector of records
+/// Each record contains a header and sequence as GF(4) elements
+fn parse_fasta(file_path: str) -> Result<Vec<FastaRecord>, FastaError> with IO {
+    let content = match io::read_file(file_path) {
+        Ok(c) => c,
+        Err(e) => return Err(FastaError::IoError { message: "Failed to read file" })
+    }
+
+    parse_fasta_string(content)
+}
+
+/// Parse FASTA format from string content
+fn parse_fasta_string(content: str) -> Result<Vec<FastaRecord>, FastaError> {
+    let lines = split_by_newline(content)
+
+    if lines.len() == 0 {
+        return Err(FastaError::EmptyFile)
+    }
+
+    var records = Vec::new()
+    var current_header = ""
+    var current_seq = Vec::new()
+    var line_num: u32 = 0
+
+    for line in lines {
+        line_num = line_num + 1
+        let trimmed = trim(line)
+
+        // Skip empty lines
+        if trimmed.len() == 0 {
+            continue
+        }
+
+        // Check for header line
+        if trimmed.char_at(0) == '>' {
+            // Save previous record if exists
+            if current_header.len() > 0 {
+                records.push(FastaRecord {
+                    header: current_header,
+                    sequence: current_seq
+                })
+            }
+
+            // Start new record - extract header (skip '>')
+            current_header = trimmed.slice(1, trimmed.len())
+            current_seq = Vec::new()
+        } else {
+            // Sequence line - convert each character to GF(4)
+            for c in trimmed.chars() {
+                // Skip whitespace
+                if c == ' ' || c == '\t' {
+                    continue
+                }
+
+                // Convert to GF(4), handling lowercase
+                let base = match c {
+                    'A' => 0,
+                    'C' => 1,
+                    'G' => 2,
+                    'T' => 3,
+                    'a' => 0,
+                    'c' => 1,
+                    'g' => 2,
+                    't' => 3,
+                    'N' => 0,  // Unknown base -> A (or could use special handling)
+                    'n' => 0,
+                    _ => return Err(FastaError::InvalidBase { line: line_num, base: c })
+                }
+                current_seq.push(base)
+            }
+        }
+    }
+
+    // Don't forget the last record
+    if current_header.len() > 0 {
+        records.push(FastaRecord {
+            header: current_header,
+            sequence: current_seq
+        })
+    }
+
+    Ok(records)
+}
+
+/// Write FASTA records to file
+fn write_fasta(file_path: str, records: Vec<FastaRecord>) -> Result<(), FastaError> with IO {
+    var content = ""
+
+    for record in records {
+        // Write header
+        content = content ++ ">" ++ record.header ++ "\n"
+
+        // Write sequence in 80-character lines
+        var i = 0
+        while i < record.sequence.len() {
+            var line_end = i + 80
+            if line_end > record.sequence.len() {
+                line_end = record.sequence.len()
+            }
+
+            for j in i..line_end {
+                content = content ++ gf4_to_char(record.sequence[j]).to_string()
+            }
+            content = content ++ "\n"
+            i = line_end
+        }
+    }
+
+    match io::write_file(file_path, content) {
+        Ok(_) => Ok(()),
+        Err(e) => Err(FastaError::IoError { message: "Failed to write file" })
+    }
+}
+
+/// Parse multiple FASTA files and concatenate records
+fn parse_fasta_multi(file_paths: Vec<str>) -> Result<Vec<FastaRecord>, FastaError> with IO {
+    var all_records = Vec::new()
+
+    for path in file_paths {
+        match parse_fasta(path) {
+            Ok(records) => {
+                for record in records {
+                    all_records.push(record)
+                }
+            },
+            Err(e) => return Err(e)
+        }
+    }
+
+    Ok(all_records)
+}
+
+/// Get total sequence length across all records
+fn fasta_total_length(records: Vec<FastaRecord>) -> u64 {
+    var total: u64 = 0
+    for record in records {
+        total = total + (record.sequence.len() as u64)
+    }
+    total
+}
+
+/// Find record by header (exact match)
+fn fasta_find_by_header(records: Vec<FastaRecord>, header: str) -> Option<FastaRecord> {
+    for record in records {
+        if record.header == header {
+            return Option::Some(record)
+        }
+    }
+    Option::None
+}
+
+/// Convert FastaRecord to DnaStrand
+fn fasta_to_dna_strand(record: FastaRecord) -> DnaStrand {
+    DnaStrand {
+        sequence: record.sequence,
+        length: record.sequence.len() as bp
+    }
+}

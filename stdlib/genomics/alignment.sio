@@ -1,0 +1,660 @@
+//! stdlib/genomics/alignment.sio - Sequence Alignment with Epistemic Uncertainty
+//!
+//! Smith-Waterman local alignment with affine gap penalties.
+//! Returns alignment results with CIGAR strings and epistemic confidence.
+
+use types::*
+
+// ============================================================================
+// Alignment Result Types
+// ============================================================================
+
+/// Result of a local alignment operation
+struct AlignmentResult {
+    score: i32,                    // Alignment score
+    query_start: u32,              // Start position in query (0-based)
+    query_end: u32,                // End position in query (exclusive)
+    ref_start: u32,                // Start position in reference (0-based)
+    ref_end: u32,                  // End position in reference (exclusive)
+    cigar: str,                    // CIGAR string (e.g., "10M2I5M1D3M")
+    identity: f64,                 // Sequence identity (0.0-1.0)
+    aligned_query: Vec<GF4>,       // Aligned query sequence
+    aligned_ref: Vec<GF4>,         // Aligned reference sequence
+}
+
+/// Traceback direction for DP matrix
+enum TraceDir {
+    None,       // End of alignment (score 0)
+    Diag,       // Match/mismatch (diagonal)
+    Up,         // Gap in reference (insertion in query)
+    Left,       // Gap in query (deletion from reference)
+    GapUp,      // Continue gap in reference
+    GapLeft,    // Continue gap in query
+}
+
+// ============================================================================
+// Scoring Functions
+// ============================================================================
+
+/// Default match score
+fn match_score() -> i32 { 2 }
+
+/// Default mismatch penalty (negative)
+fn mismatch_penalty() -> i32 { -1 }
+
+/// Calculate score for aligning two bases
+fn base_score(a: GF4, b: GF4) -> i32 {
+    if a == b {
+        match_score()
+    } else {
+        mismatch_penalty()
+    }
+}
+
+// ============================================================================
+// Smith-Waterman Local Alignment
+// ============================================================================
+
+/// Smith-Waterman local alignment with affine gap penalties
+///
+/// Uses dynamic programming to find the highest-scoring local alignment.
+/// Affine gaps: gap_open + gap_extend * (length - 1) for gaps of length > 1
+///
+/// # Arguments
+/// * `query` - Query sequence as GF(4) elements
+/// * `reference` - Reference sequence as GF(4) elements
+/// * `gap_open` - Gap opening penalty (negative, e.g., -10)
+/// * `gap_extend` - Gap extension penalty (negative, e.g., -1)
+///
+/// # Returns
+/// AlignmentResult with score, positions, and CIGAR string
+fn smith_waterman(
+    query: Vec<GF4>,
+    reference: Vec<GF4>,
+    gap_open: i32,
+    gap_extend: i32
+) -> AlignmentResult {
+    let m = query.len()
+    let n = reference.len()
+
+    // Handle empty sequences
+    if m == 0 || n == 0 {
+        return AlignmentResult {
+            score: 0,
+            query_start: 0,
+            query_end: 0,
+            ref_start: 0,
+            ref_end: 0,
+            cigar: "",
+            identity: 0.0,
+            aligned_query: Vec::new(),
+            aligned_ref: Vec::new(),
+        }
+    }
+
+    // DP matrices (m+1 x n+1)
+    // H[i][j] = best score ending at query[i-1], ref[j-1]
+    // E[i][j] = best score ending with gap in reference (insertion)
+    // F[i][j] = best score ending with gap in query (deletion)
+    var H = init_matrix(m + 1, n + 1, 0)
+    var E = init_matrix(m + 1, n + 1, -1000000)  // Large negative
+    var F = init_matrix(m + 1, n + 1, -1000000)
+    var trace = init_trace_matrix(m + 1, n + 1)
+
+    // Track maximum score position
+    var max_score: i32 = 0
+    var max_i: usize = 0
+    var max_j: usize = 0
+
+    // Fill DP matrices
+    for i in 1..(m + 1) {
+        for j in 1..(n + 1) {
+            // Match/mismatch from diagonal
+            let diag_score = H[i - 1][j - 1] + base_score(query[i - 1], reference[j - 1])
+
+            // Gap in reference (insertion in query) - coming from above
+            let e_open = H[i - 1][j] + gap_open + gap_extend
+            let e_extend = E[i - 1][j] + gap_extend
+            if e_open > e_extend {
+                E[i][j] = e_open
+            } else {
+                E[i][j] = e_extend
+            }
+
+            // Gap in query (deletion from reference) - coming from left
+            let f_open = H[i][j - 1] + gap_open + gap_extend
+            let f_extend = F[i][j - 1] + gap_extend
+            if f_open > f_extend {
+                F[i][j] = f_open
+            } else {
+                F[i][j] = f_extend
+            }
+
+            // Best score at this cell (local alignment allows 0)
+            var best = 0
+            var best_dir = TraceDir::None
+
+            if diag_score > best {
+                best = diag_score
+                best_dir = TraceDir::Diag
+            }
+            if E[i][j] > best {
+                best = E[i][j]
+                best_dir = TraceDir::Up
+            }
+            if F[i][j] > best {
+                best = F[i][j]
+                best_dir = TraceDir::Left
+            }
+
+            H[i][j] = best
+            trace[i][j] = best_dir
+
+            // Track maximum
+            if best > max_score {
+                max_score = best
+                max_i = i
+                max_j = j
+            }
+        }
+    }
+
+    // Traceback from maximum score position
+    let (cigar, q_start, r_start, aligned_q, aligned_r, matches) =
+        traceback(query, reference, H, trace, max_i, max_j)
+
+    // Calculate identity
+    let align_len = aligned_q.len()
+    let identity = if align_len > 0 {
+        (matches as f64) / (align_len as f64)
+    } else {
+        0.0
+    }
+
+    AlignmentResult {
+        score: max_score,
+        query_start: q_start,
+        query_end: max_i as u32,
+        ref_start: r_start,
+        ref_end: max_j as u32,
+        cigar: cigar,
+        identity: identity,
+        aligned_query: aligned_q,
+        aligned_ref: aligned_r,
+    }
+}
+
+/// Initialize a 2D matrix with a default value
+fn init_matrix(rows: usize, cols: usize, default: i32) -> Vec<Vec<i32>> {
+    var matrix = Vec::new()
+    for i in 0..rows {
+        var row = Vec::new()
+        for j in 0..cols {
+            row.push(default)
+        }
+        matrix.push(row)
+    }
+    matrix
+}
+
+/// Initialize traceback matrix
+fn init_trace_matrix(rows: usize, cols: usize) -> Vec<Vec<TraceDir>> {
+    var matrix = Vec::new()
+    for i in 0..rows {
+        var row = Vec::new()
+        for j in 0..cols {
+            row.push(TraceDir::None)
+        }
+        matrix.push(row)
+    }
+    matrix
+}
+
+/// Traceback to construct alignment and CIGAR string
+fn traceback(
+    query: Vec<GF4>,
+    reference: Vec<GF4>,
+    H: Vec<Vec<i32>>,
+    trace: Vec<Vec<TraceDir>>,
+    end_i: usize,
+    end_j: usize
+) -> (str, u32, u32, Vec<GF4>, Vec<GF4>, u32) {
+    var cigar_ops = Vec::new()  // Vector of (char, count) for CIGAR
+    var aligned_q = Vec::new()
+    var aligned_r = Vec::new()
+    var matches: u32 = 0
+
+    var i = end_i
+    var j = end_j
+
+    // Traceback until we hit a cell with score 0
+    while i > 0 && j > 0 && H[i][j] > 0 {
+        match trace[i][j] {
+            TraceDir::Diag => {
+                // Match or mismatch
+                i = i - 1
+                j = j - 1
+                aligned_q.push(query[i])
+                aligned_r.push(reference[j])
+                if query[i] == reference[j] {
+                    matches = matches + 1
+                }
+                add_cigar_op(cigar_ops, 'M')
+            },
+            TraceDir::Up => {
+                // Gap in reference (insertion)
+                i = i - 1
+                aligned_q.push(query[i])
+                aligned_r.push(255 as GF4)  // Gap marker
+                add_cigar_op(cigar_ops, 'I')
+            },
+            TraceDir::Left => {
+                // Gap in query (deletion)
+                j = j - 1
+                aligned_q.push(255 as GF4)  // Gap marker
+                aligned_r.push(reference[j])
+                add_cigar_op(cigar_ops, 'D')
+            },
+            TraceDir::None => {
+                break
+            },
+            _ => {
+                break
+            }
+        }
+    }
+
+    // Reverse alignments (traceback goes backwards)
+    let aligned_q_rev = reverse_gf4(aligned_q)
+    let aligned_r_rev = reverse_gf4(aligned_r)
+
+    // Build CIGAR string (reverse order)
+    let cigar = build_cigar_string(cigar_ops)
+
+    (cigar, i as u32, j as u32, aligned_q_rev, aligned_r_rev, matches)
+}
+
+/// Add operation to CIGAR ops list (run-length encoding)
+fn add_cigar_op(ops: &! Vec<(char, u32)>, op: char) {
+    let n = ops.len()
+    if n > 0 && ops[n - 1].0 == op {
+        // Extend existing run
+        let count = ops[n - 1].1
+        ops[n - 1] = (op, count + 1)
+    } else {
+        // Start new run
+        ops.push((op, 1))
+    }
+}
+
+/// Build CIGAR string from operations (in reverse order)
+fn build_cigar_string(ops: Vec<(char, u32)>) -> str {
+    var cigar = ""
+    // Reverse iterate through ops
+    var i = ops.len()
+    while i > 0 {
+        i = i - 1
+        let op = ops[i]
+        cigar = cigar ++ op.1.to_string() ++ op.0.to_string()
+    }
+    cigar
+}
+
+/// Reverse a GF4 vector
+fn reverse_gf4(v: Vec<GF4>) -> Vec<GF4> {
+    var result = Vec::new()
+    var i = v.len()
+    while i > 0 {
+        i = i - 1
+        result.push(v[i])
+    }
+    result
+}
+
+// ============================================================================
+// Needleman-Wunsch Global Alignment
+// ============================================================================
+
+/// Needleman-Wunsch global alignment with affine gap penalties
+///
+/// Unlike Smith-Waterman, this aligns the entire sequences end-to-end.
+fn needleman_wunsch(
+    query: Vec<GF4>,
+    reference: Vec<GF4>,
+    gap_open: i32,
+    gap_extend: i32
+) -> AlignmentResult {
+    let m = query.len()
+    let n = reference.len()
+
+    if m == 0 || n == 0 {
+        return AlignmentResult {
+            score: 0,
+            query_start: 0,
+            query_end: 0,
+            ref_start: 0,
+            ref_end: 0,
+            cigar: "",
+            identity: 0.0,
+            aligned_query: Vec::new(),
+            aligned_ref: Vec::new(),
+        }
+    }
+
+    // DP matrices with gap penalty initialization
+    var H = init_matrix(m + 1, n + 1, 0)
+    var trace = init_trace_matrix(m + 1, n + 1)
+
+    // Initialize first row and column with gap penalties
+    for i in 1..(m + 1) {
+        H[i][0] = gap_open + gap_extend * (i as i32)
+        trace[i][0] = TraceDir::Up
+    }
+    for j in 1..(n + 1) {
+        H[0][j] = gap_open + gap_extend * (j as i32)
+        trace[0][j] = TraceDir::Left
+    }
+
+    // Fill DP matrix
+    for i in 1..(m + 1) {
+        for j in 1..(n + 1) {
+            let diag = H[i - 1][j - 1] + base_score(query[i - 1], reference[j - 1])
+            let up = H[i - 1][j] + gap_open + gap_extend
+            let left = H[i][j - 1] + gap_open + gap_extend
+
+            var best = diag
+            var best_dir = TraceDir::Diag
+
+            if up > best {
+                best = up
+                best_dir = TraceDir::Up
+            }
+            if left > best {
+                best = left
+                best_dir = TraceDir::Left
+            }
+
+            H[i][j] = best
+            trace[i][j] = best_dir
+        }
+    }
+
+    // Traceback from bottom-right corner
+    let (cigar, q_start, r_start, aligned_q, aligned_r, matches) =
+        traceback_global(query, reference, trace, m, n)
+
+    let align_len = aligned_q.len()
+    let identity = if align_len > 0 {
+        (matches as f64) / (align_len as f64)
+    } else {
+        0.0
+    }
+
+    AlignmentResult {
+        score: H[m][n],
+        query_start: 0,
+        query_end: m as u32,
+        ref_start: 0,
+        ref_end: n as u32,
+        cigar: cigar,
+        identity: identity,
+        aligned_query: aligned_q,
+        aligned_ref: aligned_r,
+    }
+}
+
+/// Traceback for global alignment (goes to origin)
+fn traceback_global(
+    query: Vec<GF4>,
+    reference: Vec<GF4>,
+    trace: Vec<Vec<TraceDir>>,
+    end_i: usize,
+    end_j: usize
+) -> (str, u32, u32, Vec<GF4>, Vec<GF4>, u32) {
+    var cigar_ops = Vec::new()
+    var aligned_q = Vec::new()
+    var aligned_r = Vec::new()
+    var matches: u32 = 0
+
+    var i = end_i
+    var j = end_j
+
+    while i > 0 || j > 0 {
+        if i == 0 {
+            // Gap in query
+            j = j - 1
+            aligned_q.push(255 as GF4)
+            aligned_r.push(reference[j])
+            add_cigar_op(cigar_ops, 'D')
+        } else if j == 0 {
+            // Gap in reference
+            i = i - 1
+            aligned_q.push(query[i])
+            aligned_r.push(255 as GF4)
+            add_cigar_op(cigar_ops, 'I')
+        } else {
+            match trace[i][j] {
+                TraceDir::Diag => {
+                    i = i - 1
+                    j = j - 1
+                    aligned_q.push(query[i])
+                    aligned_r.push(reference[j])
+                    if query[i] == reference[j] {
+                        matches = matches + 1
+                    }
+                    add_cigar_op(cigar_ops, 'M')
+                },
+                TraceDir::Up => {
+                    i = i - 1
+                    aligned_q.push(query[i])
+                    aligned_r.push(255 as GF4)
+                    add_cigar_op(cigar_ops, 'I')
+                },
+                TraceDir::Left => {
+                    j = j - 1
+                    aligned_q.push(255 as GF4)
+                    aligned_r.push(reference[j])
+                    add_cigar_op(cigar_ops, 'D')
+                },
+                _ => {
+                    break
+                }
+            }
+        }
+    }
+
+    let aligned_q_rev = reverse_gf4(aligned_q)
+    let aligned_r_rev = reverse_gf4(aligned_r)
+    let cigar = build_cigar_string(cigar_ops)
+
+    (cigar, 0, 0, aligned_q_rev, aligned_r_rev, matches)
+}
+
+// ============================================================================
+// Alignment Utilities
+// ============================================================================
+
+/// Calculate alignment score from CIGAR and sequences
+fn score_alignment(
+    query: Vec<GF4>,
+    reference: Vec<GF4>,
+    cigar: str,
+    gap_open: i32,
+    gap_extend: i32
+) -> i32 {
+    var score: i32 = 0
+    var qi: usize = 0
+    var ri: usize = 0
+    var in_gap = false
+
+    // Parse CIGAR and score
+    let ops = parse_cigar(cigar)
+    for op in ops {
+        let count = op.1
+        match op.0 {
+            'M' => {
+                // Match/mismatch
+                for k in 0..count {
+                    if qi < query.len() && ri < reference.len() {
+                        score = score + base_score(query[qi], reference[ri])
+                        qi = qi + 1
+                        ri = ri + 1
+                    }
+                }
+                in_gap = false
+            },
+            'I' => {
+                // Insertion in query
+                if !in_gap {
+                    score = score + gap_open
+                    in_gap = true
+                }
+                score = score + gap_extend * (count as i32)
+                qi = qi + (count as usize)
+            },
+            'D' => {
+                // Deletion from reference
+                if !in_gap {
+                    score = score + gap_open
+                    in_gap = true
+                }
+                score = score + gap_extend * (count as i32)
+                ri = ri + (count as usize)
+            },
+            _ => {}
+        }
+    }
+
+    score
+}
+
+/// Parse CIGAR string into operations
+fn parse_cigar(cigar: str) -> Vec<(char, u32)> {
+    var ops = Vec::new()
+    var num_str = ""
+
+    for c in cigar.chars() {
+        if c >= '0' && c <= '9' {
+            num_str = num_str ++ c.to_string()
+        } else {
+            // c is an operation character
+            let count = if num_str.len() > 0 {
+                parse_u32(num_str)
+            } else {
+                1
+            }
+            ops.push((c, count))
+            num_str = ""
+        }
+    }
+
+    ops
+}
+
+/// Calculate percent identity from alignment result
+fn alignment_identity(result: AlignmentResult) -> f64 {
+    result.identity
+}
+
+/// Get alignment length (including gaps)
+fn alignment_length(result: AlignmentResult) -> u32 {
+    result.aligned_query.len() as u32
+}
+
+/// Print aligned sequences (for debugging)
+fn format_alignment(result: AlignmentResult) -> str {
+    var query_line = ""
+    var match_line = ""
+    var ref_line = ""
+
+    let len = result.aligned_query.len()
+    var min_len = len
+    if result.aligned_ref.len() < min_len {
+        min_len = result.aligned_ref.len()
+    }
+
+    for i in 0..min_len {
+        let q = result.aligned_query[i]
+        let r = result.aligned_ref[i]
+
+        // Query base
+        if q == 255 {
+            query_line = query_line ++ "-"
+        } else {
+            query_line = query_line ++ gf4_to_char(q).to_string()
+        }
+
+        // Reference base
+        if r == 255 {
+            ref_line = ref_line ++ "-"
+        } else {
+            ref_line = ref_line ++ gf4_to_char(r).to_string()
+        }
+
+        // Match indicator
+        if q == 255 || r == 255 {
+            match_line = match_line ++ " "
+        } else if q == r {
+            match_line = match_line ++ "|"
+        } else {
+            match_line = match_line ++ "."
+        }
+    }
+
+    query_line ++ "\n" ++ match_line ++ "\n" ++ ref_line
+}
+
+// ============================================================================
+// Multiple Sequence Alignment (Simple)
+// ============================================================================
+
+/// Pairwise alignment scores for multiple sequences
+fn pairwise_scores(
+    sequences: Vec<Vec<GF4>>,
+    gap_open: i32,
+    gap_extend: i32
+) -> Vec<Vec<i32>> {
+    let n = sequences.len()
+    var scores = Vec::new()
+
+    for i in 0..n {
+        var row = Vec::new()
+        for j in 0..n {
+            if i == j {
+                row.push(0)
+            } else if j < i {
+                // Already computed (symmetric)
+                row.push(scores[j][i])
+            } else {
+                let result = smith_waterman(sequences[i], sequences[j], gap_open, gap_extend)
+                row.push(result.score)
+            }
+        }
+        scores.push(row)
+    }
+
+    scores
+}
+
+/// Find best matching pair from multiple sequences
+fn best_pair(sequences: Vec<Vec<GF4>>, gap_open: i32, gap_extend: i32) -> (usize, usize, i32) {
+    let scores = pairwise_scores(sequences, gap_open, gap_extend)
+    let n = sequences.len()
+
+    var best_i: usize = 0
+    var best_j: usize = 1
+    var best_score: i32 = -1000000
+
+    for i in 0..n {
+        for j in (i + 1)..n {
+            if scores[i][j] > best_score {
+                best_score = scores[i][j]
+                best_i = i
+                best_j = j
+            }
+        }
+    }
+
+    (best_i, best_j, best_score)
+}
+

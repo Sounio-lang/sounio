@@ -1,0 +1,228 @@
+//! stdlib/genomics/dihedral.sio - Dihedral Group Operations on DNA
+//!
+//! DNA sequences as elements of dihedral group D₂:
+//! D₂ = {e (identity), r (complement), s (reverse), rs (reverse_complement)}
+//!
+//! Group operations model DNA symmetries:
+//! - Complement: Watson-Crick base pairing (A↔T, C↔G)
+//! - Reverse: sequence reversal along 5'→3' axis
+//! - Reverse-complement: anti-parallel strand
+//!
+//! Applications:
+//! - Palindromic sequence detection (restriction sites)
+//! - Hairpin loop detection (self-complementary regions)
+//! - Dyad symmetry analysis (transcription factor binding)
+
+use types::*
+
+// ============================================================================
+// Dihedral Group Operations: D₂ = {e, r, s, rs}
+// ============================================================================
+
+/// Complement operation: Watson-Crick base pairing via GF(4)
+/// A(0) XOR 3 = T(3), C(1) XOR 3 = G(2)
+fn complement(seq: Vec<GF4>) -> Vec<GF4> with GPU {
+    // Uses existing GpuOp::DnaComplement kernel when compiled with GPU
+    // Falls back to CPU implementation when needed
+    var result = Vec::new()
+    for base in seq {
+        result.push(base ^ 3)  // XOR with 3 = complement in GF(4)
+    }
+    result
+}
+
+/// Reverse operation: reverse sequence along 5'→3' axis
+fn reverse(seq: Vec<GF4>) -> Vec<GF4> {
+    var result = Vec::new()
+    let len = seq.len()
+
+    // Reverse iteration (using indexed access)
+    for i in 0..len {
+        let idx = len - 1 - i
+        result.push(seq[idx])
+    }
+
+    result
+}
+
+/// Reverse-complement: D₂ generator composition
+/// First reverse, then complement (equivalent to reading anti-parallel strand)
+fn reverse_complement(seq: Vec<GF4>) -> Vec<GF4> with GPU {
+    let reversed = reverse(seq)
+    complement(reversed)
+}
+
+/// Check if sequence is palindromic (self-symmetric under reverse-complement)
+fn is_palindromic(seq: Vec<GF4>) -> bool {
+    let revcomp = reverse_complement(seq)
+    sequences_equal(seq, revcomp)
+}
+
+/// Find all palindromic sites (restriction enzyme recognition sites)
+fn find_palindromes(seq: Vec<GF4>, min_length: u32) -> Vec<PalindromicSite> {
+    var sites = Vec::new()
+
+    let seq_len = seq.len()
+
+    // Slide window of various lengths
+    for start in 0..(seq_len - min_length) {
+        // Try different palindrome lengths
+        for len in min_length..20 {
+            // Check bounds
+            if start + len > seq_len {
+                break
+            }
+
+            // Extract window
+            var window = Vec::new()
+            for i in 0..len {
+                window.push(seq[start + i])
+            }
+
+            // Test for palindrome
+            if is_palindromic(window) {
+                sites.push(PalindromicSite {
+                    position: start,
+                    length: len,
+                    sequence: window,
+                })
+            }
+        }
+    }
+
+    sites
+}
+
+/// Find dyadic symmetry: 2-fold rotational symmetry common in TF binding
+/// Pattern: ACGT...ACGT (two identical half-sites with reverse-complement symmetry)
+fn find_dyad_symmetries(seq: Vec<GF4>, min_half_site: u32) -> Vec<DyadSymmetry> {
+    var sites = Vec::new()
+
+    let seq_len = seq.len()
+    let max_half = seq_len / 2
+
+    // Try all positions and half-site lengths
+    for pos in 0..(seq_len - min_half_site * 2) {
+        for half_len in min_half_site..(max_half + 1) {
+            if pos + half_len * 2 > seq_len {
+                break
+            }
+
+            // Extract two half-sites
+            var half1 = Vec::new()
+            for i in 0..half_len {
+                half1.push(seq[pos + i])
+            }
+
+            var half2 = Vec::new()
+            for i in 0..half_len {
+                half2.push(seq[pos + half_len + i])
+            }
+
+            // Check if half2 is reverse-complement of half1 (dyadic symmetry)
+            let half1_revcomp = reverse_complement(half1.clone())
+            if sequences_equal(half2, half1_revcomp) {
+                sites.push(DyadSymmetry {
+                    position: pos,
+                    half_site_1: half1,
+                    half_site_2: half2,
+                })
+            }
+        }
+    }
+
+    sites
+}
+
+/// Find hairpin loops (self-complementary inverted repeats)
+struct HairpinLoop {
+    left_position: u32,
+    right_position: u32,
+    loop_size: u32,  // Size of unpaired loop region
+    stem_length: u32,  // Length of complementary stem
+}
+
+fn find_hairpins(seq: Vec<GF4>, min_stem: u32, max_loop: u32) -> Vec<HairpinLoop> {
+    var hairpins = Vec::new()
+
+    let seq_len = seq.len()
+
+    // For each potential hairpin center
+    for loop_start in min_stem..(seq_len - min_stem) {
+        // Try different loop sizes
+        for loop_size in 0..max_loop {
+            let loop_end = loop_start + loop_size
+
+            if loop_end + min_stem > seq_len {
+                break
+            }
+
+            // Check stem complementarity
+            var stem_len = 0
+            var valid = true
+
+            // Check pairs: seq[loop_start - i - 1] complement to seq[loop_end + i]
+            for i in 0..min_stem {
+                if loop_start <= i || loop_end + i >= seq_len {
+                    valid = false
+                    break
+                }
+
+                let left_base = seq[loop_start - i - 1]
+                let right_base = seq[loop_end + i]
+
+                // Check if complementary
+                if gf4_add(left_base, right_base) == 3 {
+                    stem_len += 1
+                } else {
+                    break
+                }
+            }
+
+            if stem_len >= min_stem {
+                hairpins.push(HairpinLoop {
+                    left_position: loop_start - stem_len,
+                    right_position: loop_end,
+                    loop_size: loop_size,
+                    stem_length: stem_len,
+                })
+            }
+        }
+    }
+
+    hairpins
+}
+
+/// Count motif occurrences with D₂ symmetry awareness
+fn count_motif_symmetric(seq: Vec<GF4>, motif: Vec<GF4>) -> u32 {
+    let motif_revcomp = reverse_complement(motif.clone())
+    var count = 0
+
+    for i in 0..(seq.len() - motif.len()) {
+        var window = Vec::new()
+        for j in 0..motif.len() {
+            window.push(seq[i + j])
+        }
+
+        if sequences_equal(window, motif) || sequences_equal(window, motif_revcomp) {
+            count += 1
+        }
+    }
+
+    count
+}
+
+/// Helper: Compare two sequences for equality
+fn sequences_equal(a: Vec<GF4>, b: Vec<GF4>) -> bool {
+    if a.len() != b.len() {
+        return false
+    }
+
+    for i in 0..a.len() {
+        if a[i] != b[i] {
+            return false
+        }
+    }
+
+    true
+}
