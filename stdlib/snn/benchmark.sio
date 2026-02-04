@@ -1,0 +1,534 @@
+// Sounio Standard Library: Sedenion NN Benchmark Framework
+//
+// Tests the parameter efficiency hypothesis:
+// "Sedenion NN with N params must match Real-valued NN with 16N params"
+//
+// Kill Switch Criteria:
+// - sedenion_accuracy >= 0.94 * real_accuracy
+// - sedenion_params <= real_params / 15
+// - No NaN/Inf during training
+// - zero_divisor_rate < 0.01
+//
+// Benchmark Tasks:
+// - HSI tissue classification (4 classes: normal/tumor/necrosis/edema)
+// - Synthetic 16D classification
+// - Multi-omics cancer type prediction
+
+use snn/sedenion_layer
+use medical/hyperspectral
+use math/sedenion
+
+// ============================================================================
+// BENCHMARK CONFIGURATION
+// ============================================================================
+
+struct BenchmarkConfig {
+    // Dataset parameters
+    num_samples: i32,
+    num_classes: i32,
+    noise_level: f32,
+
+    // Network architecture (for sedenion MLP)
+    hidden_sizes: [i32],
+
+    // Training parameters
+    epochs: i32,
+    learning_rate: f64,
+
+    // Evaluation
+    train_split: f64,     // Fraction for training
+    num_runs: i32,        // Multiple runs for statistics
+
+    // Kill switch thresholds
+    accuracy_threshold: f64,  // sedenion must achieve this * real accuracy
+    param_ratio_min: f64,     // real_params / sedenion_params >= this
+    max_zd_fraction: f64,     // Maximum zero divisor fraction allowed
+}
+
+// Default configuration for HSI glioblastoma benchmark
+fn default_hsi_config() -> BenchmarkConfig {
+    BenchmarkConfig {
+        num_samples: 1000,
+        num_classes: 4,       // normal, tumor, necrosis, edema
+        noise_level: 0.1,
+        hidden_sizes: [8],    // 1 input -> 8 hidden -> 4 output
+        epochs: 100,
+        learning_rate: 0.01,
+        train_split: 0.8,
+        num_runs: 10,
+        accuracy_threshold: 0.94,
+        param_ratio_min: 15.0,
+        max_zd_fraction: 0.01,
+    }
+}
+
+// ============================================================================
+// BENCHMARK RESULTS
+// ============================================================================
+
+struct BenchmarkResult {
+    // Sedenion NN results
+    sedenion_accuracy: f64,
+    sedenion_accuracy_std: f64,
+    sedenion_params: i64,
+    sedenion_train_time_ms: i64,
+    sedenion_zd_fraction: f64,
+
+    // Real-valued NN results
+    real_accuracy: f64,
+    real_accuracy_std: f64,
+    real_params: i64,
+    real_train_time_ms: i64,
+
+    // Comparative metrics
+    param_ratio: f64,        // real_params / sedenion_params
+    accuracy_ratio: f64,     // sedenion_accuracy / real_accuracy
+
+    // Kill switch verdict
+    kill_switch_passed: bool,
+    failure_reason: str,
+}
+
+// ============================================================================
+// REAL-VALUED BASELINE (for comparison)
+// ============================================================================
+
+// Simple real-valued dense layer (no hypercomplex structure)
+struct RealLayer {
+    weights: [f64],     // [out_size * in_size]
+    biases: [f64],      // [out_size]
+    input_size: i32,
+    output_size: i32,
+}
+
+fn real_layer_new(input_size: i32, output_size: i32) -> RealLayer {
+    let n_weights = input_size * output_size
+    let scale = sqrt_f64(2.0 / ((input_size + output_size) as f64))
+
+    var weights: [f64] = []
+    for i in 0..n_weights {
+        // Deterministic pseudo-random initialization
+        let val = scale * (1.0 - 2.0 * ((i % 17) as f64 / 17.0))
+        weights = weights ++ [val]
+    }
+
+    var biases: [f64] = []
+    for i in 0..output_size {
+        biases = biases ++ [0.0]
+    }
+
+    RealLayer {
+        weights: weights,
+        biases: biases,
+        input_size: input_size,
+        output_size: output_size,
+    }
+}
+
+fn real_layer_forward(layer: RealLayer, inputs: [f64]) -> [f64] {
+    var outputs: [f64] = []
+
+    for out_idx in 0..layer.output_size {
+        var sum = layer.biases[out_idx]
+
+        for in_idx in 0..layer.input_size {
+            let w_idx = out_idx * layer.input_size + in_idx
+            sum = sum + layer.weights[w_idx] * inputs[in_idx]
+        }
+
+        // ReLU activation
+        let activated = if sum > 0.0 { sum } else { 0.0 }
+        outputs = outputs ++ [activated]
+    }
+
+    outputs
+}
+
+fn real_layer_param_count(layer: RealLayer) -> i64 {
+    (layer.input_size * layer.output_size + layer.output_size) as i64
+}
+
+// Real MLP
+struct RealMLP {
+    layers: [RealLayer],
+    layer_count: i32,
+}
+
+fn real_mlp_new(architecture: [i32]) -> RealMLP {
+    var layers: [RealLayer] = []
+    let n_layers = len(architecture) - 1
+
+    for i in 0..(n_layers as i32) {
+        let layer = real_layer_new(architecture[i], architecture[i + 1])
+        layers = layers ++ [layer]
+    }
+
+    RealMLP {
+        layers: layers,
+        layer_count: n_layers as i32,
+    }
+}
+
+fn real_mlp_forward(mlp: RealMLP, inputs: [f64]) -> [f64] {
+    var current = inputs
+    for i in 0..mlp.layer_count {
+        current = real_layer_forward(mlp.layers[i], current)
+    }
+    current
+}
+
+fn real_mlp_param_count(mlp: RealMLP) -> i64 {
+    var total = 0i64
+    for i in 0..mlp.layer_count {
+        total = total + real_layer_param_count(mlp.layers[i])
+    }
+    total
+}
+
+// ============================================================================
+// DATA PREPARATION
+// ============================================================================
+
+// Prepare sedenion dataset from HSI
+struct SedenionDataset {
+    inputs: [Sedenion],
+    labels: [i32],
+    num_samples: i32,
+    num_classes: i32,
+}
+
+// Prepare real-valued dataset (16x expansion of sedenion data)
+struct RealDataset {
+    inputs: [[f64]],    // Each sample is [f64; 16]
+    labels: [i32],
+    num_samples: i32,
+    num_classes: i32,
+}
+
+// Convert sedenion to f64 array (for real baseline)
+fn sedenion_to_f64_array(s: Sedenion) -> [f64] {
+    var arr: [f64] = []
+    for i in 0..16 {
+        arr = arr ++ [sedenion_get_component(s, i) as f64]
+    }
+    arr
+}
+
+// Split dataset into train/test
+fn split_dataset(
+    inputs: [Sedenion],
+    labels: [i32],
+    train_fraction: f64
+) -> (SedenionDataset, SedenionDataset) {
+    let n = len(inputs) as i32
+    let n_train = (n as f64 * train_fraction) as i32
+
+    var train_inputs: [Sedenion] = []
+    var train_labels: [i32] = []
+    var test_inputs: [Sedenion] = []
+    var test_labels: [i32] = []
+
+    for i in 0..n {
+        if i < n_train {
+            train_inputs = train_inputs ++ [inputs[i]]
+            train_labels = train_labels ++ [labels[i]]
+        } else {
+            test_inputs = test_inputs ++ [inputs[i]]
+            test_labels = test_labels ++ [labels[i]]
+        }
+    }
+
+    let num_classes = max_i32_array(labels) + 1
+
+    let train = SedenionDataset {
+        inputs: train_inputs,
+        labels: train_labels,
+        num_samples: n_train,
+        num_classes: num_classes,
+    }
+
+    let test = SedenionDataset {
+        inputs: test_inputs,
+        labels: test_labels,
+        num_samples: n - n_train,
+        num_classes: num_classes,
+    }
+
+    (train, test)
+}
+
+// ============================================================================
+// EVALUATION
+// ============================================================================
+
+// Compute classification accuracy for sedenion MLP
+fn evaluate_sedenion_mlp(mlp: SedenionMLP, dataset: SedenionDataset) -> f64 {
+    var correct = 0
+    let n = dataset.num_samples
+
+    for i in 0..n {
+        let input = [dataset.inputs[i]]  // Batch of 1
+        let output = sedenion_mlp_forward(mlp, input)
+
+        // Predict: argmax over class logits (sedenion components)
+        let pred_class = sedenion_argmax(output[0], dataset.num_classes)
+        let true_class = dataset.labels[i]
+
+        if pred_class == true_class {
+            correct = correct + 1
+        }
+    }
+
+    (correct as f64) / (n as f64)
+}
+
+// Compute classification accuracy for real MLP
+fn evaluate_real_mlp(mlp: RealMLP, inputs: [[f64]], labels: [i32]) -> f64 {
+    var correct = 0
+    let n = len(inputs) as i32
+
+    for i in 0..n {
+        let output = real_mlp_forward(mlp, inputs[i])
+
+        // Predict: argmax
+        let pred_class = f64_argmax(output)
+        let true_class = labels[i]
+
+        if pred_class == true_class {
+            correct = correct + 1
+        }
+    }
+
+    (correct as f64) / (n as f64)
+}
+
+// Argmax over sedenion components (for classification)
+fn sedenion_argmax(s: Sedenion, num_classes: i32) -> i32 {
+    var max_val = -1e30
+    var max_idx = 0
+
+    for i in 0..min_i32(16, num_classes) {
+        let val = sedenion_get_component(s, i) as f64
+        if val > max_val {
+            max_val = val
+            max_idx = i
+        }
+    }
+
+    max_idx
+}
+
+// Argmax over f64 array
+fn f64_argmax(arr: [f64]) -> i32 {
+    var max_val = -1e30
+    var max_idx = 0
+
+    for i in 0..(len(arr) as i32) {
+        if arr[i] > max_val {
+            max_val = arr[i]
+            max_idx = i
+        }
+    }
+
+    max_idx
+}
+
+// ============================================================================
+// KILL SWITCH TEST
+// ============================================================================
+
+// Run the kill switch benchmark
+fn run_kill_switch_benchmark(config: BenchmarkConfig) -> BenchmarkResult with Prob {
+    // Generate synthetic HSI data
+    let (hsi, labels) = generate_synthetic_hsi(
+        32, 32,  // width x height = 1024 pixels
+        config.num_classes,
+        config.noise_level
+    )
+
+    let sedenion_inputs = get_all_pixels(hsi)
+
+    // Split data
+    let (train_sed, test_sed) = split_dataset(sedenion_inputs, labels, config.train_split)
+
+    // Convert to real-valued dataset
+    var train_real: [[f64]] = []
+    var test_real: [[f64]] = []
+    for i in 0..train_sed.num_samples {
+        train_real = train_real ++ [sedenion_to_f64_array(train_sed.inputs[i])]
+    }
+    for i in 0..test_sed.num_samples {
+        test_real = test_real ++ [sedenion_to_f64_array(test_sed.inputs[i])]
+    }
+
+    // Create architectures
+    // Sedenion: 1 input sedenion -> hidden -> num_classes output sedenions
+    var sed_arch: [i32] = [1]
+    for h in config.hidden_sizes {
+        sed_arch = sed_arch ++ [h]
+    }
+    sed_arch = sed_arch ++ [config.num_classes]
+
+    // Real: 16 input scalars -> 16*hidden -> num_classes output scalars
+    var real_arch: [i32] = [16]
+    for h in config.hidden_sizes {
+        real_arch = real_arch ++ [h * 16]
+    }
+    real_arch = real_arch ++ [config.num_classes]
+
+    // Create models
+    let sed_mlp = sedenion_mlp_new(sed_arch)
+    let real_mlp = real_mlp_new(real_arch)
+
+    // Get parameter counts
+    let sed_params = sedenion_mlp_param_count(sed_mlp)
+    let real_params = real_mlp_param_count(real_mlp)
+
+    // Training would happen here (simplified: just evaluate random init)
+    // In real impl, would run SGD for config.epochs
+
+    // Evaluate
+    let sed_accuracy = evaluate_sedenion_mlp(sed_mlp, test_sed)
+    let real_accuracy = evaluate_real_mlp(real_mlp, test_real, test_sed.labels)
+
+    // Get zero divisor fraction
+    let zd_fraction = sedenion_mlp_zd_loss(sed_mlp)
+
+    // Compute comparative metrics
+    let param_ratio = (real_params as f64) / (sed_params as f64)
+    let accuracy_ratio = sed_accuracy / (real_accuracy + 1e-10)
+
+    // Kill switch decision
+    var passed = true
+    var failure = ""
+
+    if accuracy_ratio < config.accuracy_threshold {
+        passed = false
+        failure = "accuracy_ratio " ++ f64_to_str(accuracy_ratio) ++ " < " ++ f64_to_str(config.accuracy_threshold)
+    }
+
+    if param_ratio < config.param_ratio_min {
+        passed = false
+        failure = failure ++ "; param_ratio " ++ f64_to_str(param_ratio) ++ " < " ++ f64_to_str(config.param_ratio_min)
+    }
+
+    if zd_fraction > config.max_zd_fraction {
+        passed = false
+        failure = failure ++ "; zd_fraction " ++ f64_to_str(zd_fraction) ++ " > " ++ f64_to_str(config.max_zd_fraction)
+    }
+
+    BenchmarkResult {
+        sedenion_accuracy: sed_accuracy,
+        sedenion_accuracy_std: 0.0,  // Would be computed over num_runs
+        sedenion_params: sed_params,
+        sedenion_train_time_ms: 0,
+        sedenion_zd_fraction: zd_fraction,
+
+        real_accuracy: real_accuracy,
+        real_accuracy_std: 0.0,
+        real_params: real_params,
+        real_train_time_ms: 0,
+
+        param_ratio: param_ratio,
+        accuracy_ratio: accuracy_ratio,
+
+        kill_switch_passed: passed,
+        failure_reason: failure,
+    }
+}
+
+// ============================================================================
+// RESULT FORMATTING
+// ============================================================================
+
+// Format benchmark result as string
+fn format_result(result: BenchmarkResult) -> str {
+    var s = "=== Sedenion NN Kill Switch Benchmark ===\n"
+
+    s = s ++ "\nSedenion NN:\n"
+    s = s ++ "  Accuracy: " ++ f64_to_str(result.sedenion_accuracy * 100.0) ++ "%\n"
+    s = s ++ "  Parameters: " ++ i64_to_str(result.sedenion_params) ++ "\n"
+    s = s ++ "  Zero divisor fraction: " ++ f64_to_str(result.sedenion_zd_fraction) ++ "\n"
+
+    s = s ++ "\nReal-valued NN:\n"
+    s = s ++ "  Accuracy: " ++ f64_to_str(result.real_accuracy * 100.0) ++ "%\n"
+    s = s ++ "  Parameters: " ++ i64_to_str(result.real_params) ++ "\n"
+
+    s = s ++ "\nComparison:\n"
+    s = s ++ "  Parameter ratio: " ++ f64_to_str(result.param_ratio) ++ "x\n"
+    s = s ++ "  Accuracy ratio: " ++ f64_to_str(result.accuracy_ratio) ++ "\n"
+
+    s = s ++ "\nKill Switch: "
+    if result.kill_switch_passed {
+        s = s ++ "PASSED\n"
+    } else {
+        s = s ++ "FAILED\n"
+        s = s ++ "  Reason: " ++ result.failure_reason ++ "\n"
+    }
+
+    s
+}
+
+// ============================================================================
+// UTILITY FUNCTIONS
+// ============================================================================
+
+fn sqrt_f64(x: f64) -> f64 {
+    if x <= 0.0 { return 0.0 }
+    var guess = x / 2.0
+    for i in 0..20 {
+        guess = (guess + x / guess) / 2.0
+    }
+    guess
+}
+
+fn min_i32(a: i32, b: i32) -> i32 {
+    if a < b { a } else { b }
+}
+
+fn max_i32_array(arr: [i32]) -> i32 {
+    var max_val = arr[0]
+    for i in 1..(len(arr) as i32) {
+        if arr[i] > max_val {
+            max_val = arr[i]
+        }
+    }
+    max_val
+}
+
+fn f64_to_str(x: f64) -> str {
+    // Placeholder - real impl would format properly
+    ""
+}
+
+fn i64_to_str(x: i64) -> str {
+    // Placeholder - real impl would format properly
+    ""
+}
+
+// ============================================================================
+// MODULE EXPORTS
+// ============================================================================
+
+mod benchmark {
+    // Types
+    pub type BenchmarkConfig
+    pub type BenchmarkResult
+    pub type SedenionDataset
+    pub type RealDataset
+    pub type RealLayer
+    pub type RealMLP
+
+    // Configuration
+    pub fn default_hsi_config
+
+    // Benchmark
+    pub fn run_kill_switch_benchmark
+
+    // Evaluation
+    pub fn evaluate_sedenion_mlp
+    pub fn evaluate_real_mlp
+
+    // Results
+    pub fn format_result
+}

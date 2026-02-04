@@ -19,6 +19,7 @@ pub mod conformal;
 pub mod dependent;
 pub mod diagnostics;
 pub mod epistemic;
+pub mod pac;
 pub mod probabilistic;
 pub mod rankn;
 

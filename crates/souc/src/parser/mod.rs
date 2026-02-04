@@ -5608,6 +5608,18 @@ impl<'a> Parser<'a> {
                 // Unit and epistemic keywords (can be field names or type names)
                 | TokenKind::Unit      // e.g., `unit: Unit` field
                 | TokenKind::Knowledge // e.g., `Knowledge<T>` type
+                // Provenance keywords (can be enum/type names in stdlib)
+                | TokenKind::SourceProv     // "Source" - used in enum Source
+                | TokenKind::Computed       // Provenance variant
+                | TokenKind::Derived        // Provenance variant
+                | TokenKind::Literature     // Provenance variant
+                | TokenKind::Measured       // Provenance variant
+                // DSL keywords (can be module names or identifiers)
+                | TokenKind::Ode            // "ode" - for module epistemic::ode
+                | TokenKind::Pde            // "pde" - for module epistemic::pde
+                | TokenKind::Causal         // "causal" - for module epistemic::causal
+                | TokenKind::Kernel         // "kernel" - for struct Kernel types
+                | TokenKind::Counterfactual // When not followed by '{'
         )
     }
 

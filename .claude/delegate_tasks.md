@@ -1,178 +1,133 @@
 # Self-Hosting Bootstrap: Delegate Tasks
 
-**Status:** 3/34 stdlib modules compile. 30 modules blocked by known issues.
-**Target:** Enable all 34 stdlib modules to compile through bytecode codegen pipeline.
+**Status:** 24/33 stdlib modules compile. 9 modules blocked by remaining issues.
+**Previous:** 8/33 (up from 3/34 at start of sprint)
+**Target:** Enable all 33 stdlib modules to compile through bytecode codegen pipeline.
 
-## Task Distribution
+## Current Progress
 
-### Priority 1: Bytecode Codegen - Complex Assignments (2 modules)
-**Modules:** `parser::expr`, `parser::stmt`
-**Issue:** Bytecode codegen doesn't support field/index assignment targets
-**Error:** `Unsupported: Complex assignment target`
-
-**Specific fix needed:**
-- File: `crates/souc/src/codegen/bytecode.rs`
-- Function: `compile_expr_assign()`
-- Add cases for:
-  - Field assignment: `expr.field = value` → bytecode for struct field write
-  - Index assignment: `arr[idx] = value` → bytecode for array write
-- Generate: LOAD expr, LOAD value, STORE_FIELD/STORE_INDEX
-- Tests: Add 2-3 cases for each assignment type
-
-**Effort:** 50 LOC, 2-3 hours
+### Completed: Effect Signature Annotations
+Added `with Mut, Panic, Div` effect annotations to 16 modules that were blocking on undeclared effects:
+- check/checker, check/context, check/env, check/types
+- codegen/bytecode, codegen/vm
+- lexer/comparison_harness, lexer/keywords, lexer/mod, lexer/scanner
+- parser/ast, parser/expr, parser/mod, parser/stmt, parser/stmt_parse
+- types/type
 
 ---
 
-### Priority 2: Type Checker - Duplicate Externs (2 modules)
-**Modules:** `parser::expr_parse`, `parser::mod`
-**Issue:** Type checker rejects duplicate extern declarations
-**Error:** `Duplicate definition: print` (in extern blocks)
+## Remaining Blockers
 
-**Specific fix needed:**
-- File: `crates/souc/src/check/mod.rs`
-- Function: `check_extern_decl()` or similar
-- Change: Merge duplicates with same signature instead of error
-- Logic:
-  ```
-  If extern with same name exists:
-    Check signature matches
-    If yes: skip (use first definition)
-    If no: error (signature mismatch)
-  ```
+### Category 1: Type Mismatch Errors (5 modules)
+**Modules:** `check/pattern`, `effects/effect`, `parser/expr_parse`, `parser/expr_simple`, `units/dimension`
 
-**Effort:** 30 LOC, 1-2 hours
+**Root cause:** These modules call methods on placeholder types that don't exist.
 
----
-
-### Priority 3: Parser - Expression Errors (3 modules)
-**Modules:** `parser::expr_simple`, `parser::stmt_parse`, `check::env`
-**Issue:** Parser expects expressions but gets something else
-**Error:** `Expected an expression`
-
-**Investigation needed:**
-- For each module, find exact line causing error
-- Check for:
-  - Incomplete expression parsing (missing cases)
-  - Operator precedence issues
-  - Token lookahead problems
-  - Comment/whitespace handling
-- Test: Create minimal reproducers for each
-
-**Effort:** 4-6 hours analysis + fixes
-
----
-
-### Priority 4: Type System - Definitions & Mismatches (3 modules)
-**Modules:** `parser::struct_def`, `linear::modality`, `check::expr`
-**Issues:**
-- `struct_def`: Infinite size (recursive struct)
-- `modality`: Type mismatch bool vs int
-- `expr`: 40+ undefined types/variables
-
-**Fixes:**
-1. **Struct recursion:** Add Box wrapper
-   ```sio
-   struct Recursive {
-     next: Box<Recursive>,  // Not: next: Recursive
-   }
-   ```
-
-2. **Type mismatches:** Add explicit conversions
-   ```sio
-   fn bool_to_int(b: bool) -> i32 {
-     if b { 1 } else { 0 }
-   }
-   ```
-
-3. **Undefined types:** Find where used and declare
-   - Search: `Undefined type: HirExpr`
-   - Add: `struct HirExpr { ... }`
-
-**Effort:** 3-5 hours
-
----
-
-### Priority 5: Module Linking (8+ modules)
-**Modules:** `check::stmt`, `check::expr`, `epistemic/*`, `effects/*`, etc.
-**Issue:** Missing type/variable definitions from unimplemented imports
-**Error:** 30+ undefined types per module
-
-**Current state:**
-- Stdlib modules exist but don't import from each other
-- No module dependency resolution
-- Type definitions scattered across files
-
-**High-level approach:**
-1. Define module boundaries (already in place)
-2. Add `use` statements for cross-module types
-3. Implement basic import resolution in type checker
-4. Add missing type stubs where needed
-
-**Example fix for `check::expr`:**
+Example from `check/pattern.sio`:
 ```sio
-// Add at top of check/expr.sio:
-use types::{Type, Kind}
-use ast::{Expr, BinaryOp}
+struct TypePool {
+    count: i64,  // Placeholder only
+}
 
-// Then reference types as: Type, Kind, etc.
+// Code calls non-existent method:
+ctx.type_pool.get_primitive_type("i64")
 ```
 
-**Effort:** 8-10 hours (largest task)
+**Fix options:**
+1. Add stub methods to placeholder types
+2. Refactor code to not depend on unimplemented methods
+3. Create proper type definitions
+
+**Effort:** 2-4 hours per module
 
 ---
 
-## Testing Strategy
+### Category 2: Resolution Errors - Missing Types (3 modules)
+**Modules:** `check/stmt`, `effects/handler`, `effects/infer`
 
-After each fix:
-```bash
-# Test single module compilation
-cargo run --bin souc -- check stdlib/compiler/parser/expr.sio
+**Issue:** References to undefined types from other modules.
 
-# Run self-compilation test
-cargo test test_compile_stdlib_module_to_bytecode -- --nocapture
+`check/stmt` missing:
+- TypeContext, HirStmtKind, HirStmtKindLet, HirStmtKindAssign
+- HirStmtKindExprStmt, HirStmtKindReturn, HirStmtKindWhile
+- HirStmtKindBlock, HirStmt, HirExpr
 
-# Expected output: module compiles with X bytecode instructions
-# compiled parser::expr (XXX instructions)
-```
+`effects/handler` missing:
+- Duplicate definition: Result
+- Undefined: resolve_handler_impl, execute_computation, null, allocate_memory
+
+`effects/infer` missing:
+- TypeContext, CompileError, HirExpr, SourceLocation
+- FunctionDef, FunctionSignature
+
+**Fix options:**
+1. Add forward declarations/stubs for missing types
+2. Implement module imports (use statements)
+3. Create shared types module
+
+**Effort:** 4-6 hours
 
 ---
 
-## Success Criteria
+### Category 3: Parse Error (1 module)
+**Module:** `epistemic/knowledge`
+**Error:** `P0001: Expected [, found {`
 
-- [ ] All 5 Priority 1 modules work (currently 3/3 working)
-- [ ] Add Priority 2 modules (0/2 working)
-- [ ] Add Priority 3 modules (0/3 working)
-- [ ] Add Priority 4 modules (0/3 working)
-- [ ] Add Priority 5 modules (0/8+ working)
-- **Goal:** 15+ modules compiling by end of sprint
+**Investigation needed:** Check actual syntax causing parse failure.
 
----
-
-## Notes for Implementers
-
-1. **Reuse existing patterns** - Look at working modules for patterns
-2. **Minimal changes** - Don't refactor, just fix the specific error
-3. **Test after each fix** - Run the test immediately
-4. **Document findings** - If error pattern is unusual, note it
-5. **Use cheaper models** - haiku/claude works fine for these
+**Effort:** 1-2 hours
 
 ---
 
 ## Module Status Summary
 
 ```
-✅ Working (3):
-  - parser::fn_def (675 instructions)
-  - parser::item (362 instructions)
-  - parser::impl_def (175 instructions)
+✅ Working (24):
+  - check/checker, check/context, check/env, check/expr, check/types
+  - codegen/bytecode, codegen/vm
+  - lexer/comparison_harness, lexer/keywords, lexer/mod, lexer/scanner, lexer/tokens
+  - linear/modality
+  - parser/ast, parser/expr, parser/fn_def, parser/impl_def, parser/item
+  - parser/mod, parser/stmt, parser/stmt_parse, parser/struct_def
+  - types/type, types/unify
 
-❌ Blocked (30):
-  Priority 1 (Complex assignment): 2 modules
-  Priority 2 (Duplicate externs): 2 modules
-  Priority 3 (Parse errors): 3 modules
-  Priority 4 (Type system): 3 modules
-  Priority 5 (Module linking): 8+ modules
-  Other (unspecified): ~12 modules
+❌ Blocked (9):
+  Type mismatch (5): check/pattern, effects/effect, parser/expr_parse,
+                     parser/expr_simple, units/dimension
+  Resolution (3):    check/stmt, effects/handler, effects/infer
+  Parse error (1):   epistemic/knowledge
 ```
 
-Last updated: 2026-02-03
+---
+
+## Testing Commands
+
+```bash
+# Test single module compilation
+target/debug/souc check stdlib/compiler/<module>.sio
+
+# Count all passing modules
+for f in stdlib/compiler/*/*.sio; do
+  result=$(target/debug/souc check "$f" 2>&1)
+  if echo "$result" | grep -q "All checks passed"; then
+    echo "✅ $(basename $f .sio)"
+  fi
+done | wc -l
+
+# Run self-compilation test
+cargo test test_compile_stdlib_module_to_bytecode -- --nocapture
+```
+
+---
+
+## Next Steps
+
+1. **Quick wins:** Fix epistemic/knowledge parse error (1 module)
+2. **Medium effort:** Add type stubs to fix resolution errors (3 modules)
+3. **Larger effort:** Add method stubs or refactor type mismatch modules (5 modules)
+
+**Goal:** 27+ modules compiling (add 3 more from resolution/parse fixes)
+
+---
+
+Last updated: 2026-02-04

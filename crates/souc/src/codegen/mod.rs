@@ -9,11 +9,15 @@
 pub mod autodiff;
 pub mod autodiff_reverse;
 pub mod autodiff_tape;
+pub mod bytecode;
 pub mod cranelift;
 pub mod debug;
 pub mod gpu;
 pub mod mir_cranelift;
 pub mod simd;
+
+// Re-export bytecode codegen for self-hosting
+pub use bytecode::{compile_hir, BytecodeCodegen, BytecodeError, BytecodeResult};
 
 // The LLVM backend is in a subdirectory when the feature is enabled
 #[cfg(feature = "llvm-base")]

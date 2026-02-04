@@ -1,0 +1,766 @@
+// Sounio Standard Library: Hyperspectral Tissue Imaging with Sedenions
+//
+// This module provides sedenion-based processing of hyperspectral imaging (HSI)
+// data for medical applications like tumor detection and tissue classification.
+// Sedenions (16D hypercomplex numbers) encode 16 physically-selected spectral bands.
+//
+// Applications:
+// - Tumor delineation (normal/tumor/necrosis/edema classification)
+// - Intraoperative margin assessment (glioblastoma, breast, etc.)
+// - Virtual staining (H&E reconstruction from unstained tissue)
+// - Multi-spectral biomarker detection
+//
+// Physical Band Selection (16 wavelengths at absorption peaks):
+//   e0  = 540nm  (Oxy-hemoglobin)      e8  = 970nm  (Water absorption)
+//   e1  = 580nm  (Deoxy-hemoglobin)    e9  = 1050nm (Deep tissue)
+//   e2  = 650nm  (General absorption)  e10 = 1200nm (Lipids strong)
+//   e3  = 700nm  (Red edge)            e11 = 1300nm (Collagen)
+//   e4  = 750nm  (Tissue penetration)  e12 = 1400nm (Water strong)
+//   e5  = 800nm  (Near-IR window)      e13 = 1500nm (Lipids peak)
+//   e6  = 850nm  (Water weak)          e14 = 1650nm (C-H stretch)
+//   e7  = 900nm  (Lipids start)        e15 = 1700nm (Lipids end)
+//
+// Mathematical Framework:
+// - Each pixel is a sedenion encoding 16 spectral band intensities
+// - Sedenion multiplication captures cross-spectral interactions
+// - Zero divisors may indicate spectral anomalies (e.g., tumor signatures)
+//
+// References:
+// - Calin et al. (2014) Hyperspectral imaging for cancer detection
+// - Lu & Fei (2014) Medical hyperspectral imaging: a review
+// - TCIA HISTOLOGYHSI-GB glioblastoma dataset
+
+use math/sedenion
+use epistemic/knowledge
+
+// ============================================================================
+// PHYSICAL BAND CONSTANTS
+// ============================================================================
+
+// Target wavelengths (nm) for 16-band sedenion encoding
+// Selected at known chromophore absorption peaks
+let BAND_WAVELENGTHS: [f32; 16] = [
+    540.0,   // e0:  Oxy-hemoglobin peak (Q-band)
+    580.0,   // e1:  Deoxy-hemoglobin (shifted Q-band)
+    650.0,   // e2:  General tissue absorption
+    700.0,   // e3:  Red edge (chlorophyll proxy in plants, melanin in skin)
+    750.0,   // e4:  Tissue penetration window
+    800.0,   // e5:  Near-IR optical window
+    850.0,   // e6:  Water (weak absorption)
+    900.0,   // e7:  Lipids (C-H first overtone starts)
+    970.0,   // e8:  Water absorption (O-H second overtone)
+    1050.0,  // e9:  Deep tissue penetration
+    1200.0,  // e10: Lipids (C-H combination bands)
+    1300.0,  // e11: Collagen (amide bands)
+    1400.0,  // e12: Water (O-H first overtone)
+    1500.0,  // e13: Lipids peak (C-H stretch overtone)
+    1650.0,  // e14: C-H stretch (protein/lipid)
+    1700.0,  // e15: Lipids (end of C-H window)
+]
+
+// Band names for display
+let BAND_NAMES: [str; 16] = [
+    "Oxy-Hb 540nm",
+    "Deoxy-Hb 580nm",
+    "Absorption 650nm",
+    "Red edge 700nm",
+    "Tissue 750nm",
+    "NIR window 800nm",
+    "Water (w) 850nm",
+    "Lipids (s) 900nm",
+    "Water 970nm",
+    "Deep 1050nm",
+    "Lipids 1200nm",
+    "Collagen 1300nm",
+    "Water (s) 1400nm",
+    "Lipids peak 1500nm",
+    "C-H 1650nm",
+    "Lipids (e) 1700nm",
+]
+
+// Tissue class labels (glioblastoma benchmark)
+let TISSUE_NORMAL: i32 = 0
+let TISSUE_TUMOR: i32 = 1
+let TISSUE_NECROSIS: i32 = 2
+let TISSUE_EDEMA: i32 = 3
+
+// ============================================================================
+// DATA STRUCTURES
+// ============================================================================
+
+// Hyperspectral cube metadata
+struct HSICubeMeta {
+    width: i32,          // Pixels in X
+    height: i32,         // Pixels in Y
+    num_bands: i32,      // Total bands in raw cube (typically 100-800)
+    band_centers: [f32], // Wavelength (nm) per band
+    pixel_size_um: f32,  // Microns per pixel
+    acquisition: str,    // "pushbroom", "snapshot", "tunable"
+}
+
+// Raw hyperspectral cube (before band selection)
+struct HSICube {
+    meta: HSICubeMeta,
+    // Flattened: data[band * width * height + y * width + x]
+    data: [f32],
+}
+
+// Sedenion-encoded hyperspectral image (16 selected bands)
+struct SedenionHSI {
+    width: i32,
+    height: i32,
+    // Flattened: pixels[y * width + x]
+    pixels: [Sedenion],
+    // Maps sedenion component to original band index
+    band_mapping: [i32; 16],
+}
+
+// Single hyperspectral pixel with position and label
+struct HSIPixel {
+    value: Sedenion,
+    x: i32,
+    y: i32,
+    label: Knowledge<i32>,  // Tissue class with uncertainty
+}
+
+// Band selection result
+struct BandSelection {
+    indices: [i32; 16],       // Indices into original cube bands
+    wavelengths: [f32; 16],   // Actual wavelengths selected
+    deviations: [f32; 16],    // |selected - target| in nm
+}
+
+// ============================================================================
+// BAND SELECTION (Physics-Based)
+// ============================================================================
+
+// Select 16 bands closest to target absorption wavelengths
+// This is NOT arbitrary PCA - it's physics-based selection
+fn select_bands(meta: HSICubeMeta) -> BandSelection
+  requires meta.num_bands > 0
+  requires len(meta.band_centers) == meta.num_bands
+{
+    var indices: [i32; 16] = [0; 16]
+    var wavelengths: [f32; 16] = [0.0; 16]
+    var deviations: [f32; 16] = [0.0; 16]
+
+    for i in 0..16 {
+        let target = BAND_WAVELENGTHS[i]
+        var best_idx = 0
+        var best_diff = 1e30
+
+        for j in 0..meta.num_bands {
+            let diff = abs(meta.band_centers[j] - target)
+            if diff < best_diff {
+                best_diff = diff
+                best_idx = j
+            }
+        }
+
+        indices[i] = best_idx
+        wavelengths[i] = meta.band_centers[best_idx]
+        deviations[i] = best_diff
+    }
+
+    BandSelection {
+        indices: indices,
+        wavelengths: wavelengths,
+        deviations: deviations,
+    }
+}
+
+// Check if band selection is within tolerance
+fn band_selection_valid(selection: BandSelection, max_deviation_nm: f32) -> bool {
+    for i in 0..16 {
+        if selection.deviations[i] > max_deviation_nm {
+            return false
+        }
+    }
+    true
+}
+
+// ============================================================================
+// CUBE OPERATIONS
+// ============================================================================
+
+// Create empty HSI cube
+fn create_hsi_cube(meta: HSICubeMeta) -> HSICube {
+    let n_elements = meta.width * meta.height * meta.num_bands
+    var data: [f32] = []
+
+    for i in 0..n_elements {
+        data = data ++ [0.0]
+    }
+
+    HSICube {
+        meta: meta,
+        data: data,
+    }
+}
+
+// Get raw pixel value at position and band
+fn get_cube_value(cube: HSICube, x: i32, y: i32, band: i32) -> f32 {
+    if x < 0 || x >= cube.meta.width { return 0.0 }
+    if y < 0 || y >= cube.meta.height { return 0.0 }
+    if band < 0 || band >= cube.meta.num_bands { return 0.0 }
+
+    let idx = band * (cube.meta.width * cube.meta.height) + y * cube.meta.width + x
+    cube.data[idx]
+}
+
+// Normalize cube: min-max per band to [0, 1]
+fn normalize_cube(&!cube: &!HSICube) {
+    let n_pixels = cube.meta.width * cube.meta.height
+
+    for band in 0..cube.meta.num_bands {
+        var min_val = 1e30
+        var max_val = -1e30
+
+        // Find min/max for this band
+        for i in 0..n_pixels {
+            let idx = band * n_pixels + i
+            let val = cube.data[idx]
+            if val < min_val { min_val = val }
+            if val > max_val { max_val = val }
+        }
+
+        let range = max_val - min_val
+        if range > 0.0 {
+            for i in 0..n_pixels {
+                let idx = band * n_pixels + i
+                cube.data[idx] = (cube.data[idx] - min_val) / range
+            }
+        }
+    }
+}
+
+// ============================================================================
+// SEDENION CONVERSION
+// ============================================================================
+
+// Convert raw HSI cube to sedenion-encoded image
+fn cube_to_sedenion(cube: HSICube) -> SedenionHSI {
+    let selection = select_bands(cube.meta)
+    let n_pixels = cube.meta.width * cube.meta.height
+
+    var pixels: [Sedenion] = []
+
+    for y in 0..cube.meta.height {
+        for x in 0..cube.meta.width {
+            var components: [f32; 16] = [0.0; 16]
+
+            for i in 0..16 {
+                let band_idx = selection.indices[i]
+                components[i] = get_cube_value(cube, x, y, band_idx)
+            }
+
+            let sed = sedenion_from_array(components)
+            pixels = pixels ++ [sed]
+        }
+    }
+
+    SedenionHSI {
+        width: cube.meta.width,
+        height: cube.meta.height,
+        pixels: pixels,
+        band_mapping: selection.indices,
+    }
+}
+
+// Get sedenion pixel at position
+fn get_sedenion_pixel(img: SedenionHSI, x: i32, y: i32) -> Sedenion {
+    if x < 0 || x >= img.width { return sedenion_zero() }
+    if y < 0 || y >= img.height { return sedenion_zero() }
+
+    let idx = y * img.width + x
+    img.pixels[idx]
+}
+
+// Extract all pixels as flat array (for batch NN processing)
+fn get_all_pixels(img: SedenionHSI) -> [Sedenion] {
+    img.pixels
+}
+
+// ============================================================================
+// SPECTRAL FEATURES (Sedenion-Based)
+// ============================================================================
+
+// Compute hemoglobin oxygenation ratio from sedenion
+// Uses e0 (oxy-Hb) and e1 (deoxy-Hb) components
+fn compute_oxygenation(pixel: Sedenion) -> f32 {
+    let oxy = sedenion_get_component(pixel, 0)    // e0 = 540nm
+    let deoxy = sedenion_get_component(pixel, 1)  // e1 = 580nm
+
+    let total = oxy + deoxy
+    if total > 0.0 {
+        oxy / total
+    } else {
+        0.5  // undefined → neutral
+    }
+}
+
+// Compute lipid/water ratio (metabolic marker)
+// High lipid/water often indicates necrosis
+fn compute_lipid_water_ratio(pixel: Sedenion) -> f32 {
+    let lipids = sedenion_get_component(pixel, 10) +   // e10 = 1200nm
+                 sedenion_get_component(pixel, 13)     // e13 = 1500nm
+    let water = sedenion_get_component(pixel, 8) +     // e8 = 970nm
+                sedenion_get_component(pixel, 12)      // e12 = 1400nm
+
+    if water > 0.0 {
+        lipids / water
+    } else {
+        0.0
+    }
+}
+
+// Compute tissue scatter index using sedenion norm
+// Higher scatter may indicate cellular abnormality
+fn compute_scatter_index(pixel: Sedenion) -> f32 {
+    // Norm across all bands captures total signal magnitude
+    let norm = sedenion_norm(pixel)
+
+    // Self-multiplication reveals algebraic coherence
+    let squared = sedenion_mul(pixel, pixel)
+    let squared_norm = sedenion_norm(squared)
+
+    // Ratio indicates spectral "coherence"
+    if norm > 0.0 {
+        squared_norm / (norm * norm)
+    } else {
+        0.0
+    }
+}
+
+// Check if pixel might be a spectral anomaly (tumor signature?)
+// Uses zero divisor proximity as novelty detector
+fn is_spectral_anomaly(pixel: Sedenion, threshold: f32) -> bool {
+    // If sedenion is close to zero divisor subspace, it's anomalous
+    let putative_inv = sedenion_putative_inv(pixel)
+    let product = sedenion_mul(pixel, putative_inv)
+
+    // Distance from identity indicates zero divisor proximity
+    let deviation = sedenion_norm(sedenion_sub(product, sedenion_one()))
+    deviation > threshold
+}
+
+// ============================================================================
+// CLASSIFICATION FEATURES
+// ============================================================================
+
+// Feature vector for tissue classification
+struct TissueFeatures {
+    oxygenation: f32,
+    lipid_water: f32,
+    scatter: f32,
+    nir_mean: f32,        // Near-IR window average
+    swir_mean: f32,       // Short-wave IR average
+    gradient_mag: f32,    // Spatial gradient
+    zero_div_score: f32,  // Zero divisor proximity
+}
+
+// Extract classification features from sedenion pixel
+fn extract_tissue_features(pixel: Sedenion) -> TissueFeatures {
+    let oxy = compute_oxygenation(pixel)
+    let lw_ratio = compute_lipid_water_ratio(pixel)
+    let scatter = compute_scatter_index(pixel)
+
+    // NIR mean (bands 4-7: 750-900nm)
+    var nir_sum = 0.0
+    for i in 4..8 {
+        nir_sum = nir_sum + sedenion_get_component(pixel, i)
+    }
+    let nir_mean = nir_sum / 4.0
+
+    // SWIR mean (bands 10-15: 1200-1700nm)
+    var swir_sum = 0.0
+    for i in 10..16 {
+        swir_sum = swir_sum + sedenion_get_component(pixel, i)
+    }
+    let swir_mean = swir_sum / 6.0
+
+    // Zero divisor score
+    let putative_inv = sedenion_putative_inv(pixel)
+    let product = sedenion_mul(pixel, putative_inv)
+    let zd_score = sedenion_norm(sedenion_sub(product, sedenion_one()))
+
+    TissueFeatures {
+        oxygenation: oxy,
+        lipid_water: lw_ratio,
+        scatter: scatter,
+        nir_mean: nir_mean,
+        swir_mean: swir_mean,
+        gradient_mag: 0.0,  // Set by caller with spatial context
+        zero_div_score: zd_score,
+    }
+}
+
+// ============================================================================
+// SPATIAL OPERATIONS
+// ============================================================================
+
+// Compute spatial gradient magnitude at pixel
+fn compute_gradient(img: SedenionHSI, x: i32, y: i32) -> f32 {
+    let px_plus = get_sedenion_pixel(img, x + 1, y)
+    let px_minus = get_sedenion_pixel(img, x - 1, y)
+    let py_plus = get_sedenion_pixel(img, x, y + 1)
+    let py_minus = get_sedenion_pixel(img, x, y - 1)
+
+    let dx = sedenion_scale(sedenion_sub(px_plus, px_minus), 0.5)
+    let dy = sedenion_scale(sedenion_sub(py_plus, py_minus), 0.5)
+
+    let grad_sq = sedenion_norm_sq(dx) + sedenion_norm_sq(dy)
+    sqrt(grad_sq)
+}
+
+// Apply 3x3 Gaussian smoothing
+fn gaussian_smooth_2d(img: SedenionHSI, sigma: f32) -> SedenionHSI {
+    let kernel = compute_gaussian_kernel_3x3(sigma)
+    var new_pixels: [Sedenion] = []
+
+    for y in 0..img.height {
+        for x in 0..img.width {
+            var smoothed = sedenion_zero()
+            var weight_sum = 0.0
+
+            for dy in -1..2 {
+                for dx in -1..2 {
+                    let px = get_sedenion_pixel(img, x + dx, y + dy)
+                    let kid = (dy + 1) * 3 + (dx + 1)
+                    let w = kernel[kid]
+                    smoothed = sedenion_add(smoothed, sedenion_scale(px, w))
+                    weight_sum = weight_sum + w
+                }
+            }
+
+            if weight_sum > 0.0 {
+                smoothed = sedenion_scale(smoothed, 1.0 / weight_sum)
+            }
+
+            new_pixels = new_pixels ++ [smoothed]
+        }
+    }
+
+    SedenionHSI {
+        width: img.width,
+        height: img.height,
+        pixels: new_pixels,
+        band_mapping: img.band_mapping,
+    }
+}
+
+// Compute 3x3 Gaussian kernel
+fn compute_gaussian_kernel_3x3(sigma: f32) -> [f32; 9] {
+    var kernel: [f32; 9] = [0.0; 9]
+    let sigma2 = sigma * sigma
+    var sum = 0.0
+
+    for dy in -1..2 {
+        for dx in -1..2 {
+            let r2 = (dx * dx + dy * dy) as f32
+            let w = exp(-r2 / (2.0 * sigma2))
+            let idx = (dy + 1) * 3 + (dx + 1)
+            kernel[idx] = w
+            sum = sum + w
+        }
+    }
+
+    // Normalize
+    for i in 0..9 {
+        kernel[i] = kernel[i] / sum
+    }
+
+    kernel
+}
+
+// ============================================================================
+// I/O (ENVI FORMAT - Common for HSI)
+// ============================================================================
+
+// ENVI header structure
+struct ENVIHeader {
+    samples: i32,     // width
+    lines: i32,       // height
+    bands: i32,       // number of bands
+    data_type: i32,   // 4 = float32
+    interleave: str,  // "bsq", "bil", "bip"
+    wavelength_units: str,
+    wavelength: [f32],
+}
+
+// Parse ENVI header file
+fn parse_envi_header(header_text: str) -> ENVIHeader with IO {
+    // Simplified parser - real impl would handle full ENVI spec
+    var header = ENVIHeader {
+        samples: 0,
+        lines: 0,
+        bands: 0,
+        data_type: 4,
+        interleave: "bsq",
+        wavelength_units: "nm",
+        wavelength: [],
+    }
+
+    // Parse key = value pairs
+    // ... (implementation would parse actual header)
+
+    header
+}
+
+// Load raw HSI cube from ENVI format
+fn load_envi_cube(header_path: str, data_path: str) -> HSICube with IO {
+    // Parse header
+    let header_text = read_file(header_path)
+    let header = parse_envi_header(header_text)
+
+    // Create metadata
+    let meta = HSICubeMeta {
+        width: header.samples,
+        height: header.lines,
+        num_bands: header.bands,
+        band_centers: header.wavelength,
+        pixel_size_um: 1.0,  // From header if available
+        acquisition: header.interleave,
+    }
+
+    // Load binary data (assumes float32 BSQ)
+    let raw_data = read_binary_f32(data_path)
+
+    HSICube {
+        meta: meta,
+        data: raw_data,
+    }
+}
+
+// ============================================================================
+// SYNTHETIC DATA GENERATION (For Testing)
+// ============================================================================
+
+// Generate synthetic HSI for benchmark testing
+fn generate_synthetic_hsi(
+    width: i32,
+    height: i32,
+    num_classes: i32,
+    noise_level: f32
+) -> (SedenionHSI, [i32]) with Prob {
+    var pixels: [Sedenion] = []
+    var labels: [i32] = []
+
+    // Class centroids (spectral signatures)
+    let centroids = generate_class_centroids(num_classes)
+
+    for y in 0..height {
+        for x in 0..width {
+            // Assign class based on spatial region (quadrants)
+            let class_id = if x < width / 2 && y < height / 2 { 0 }
+                          else if x >= width / 2 && y < height / 2 { 1 }
+                          else if x < width / 2 && y >= height / 2 { 2 }
+                          else { 3 % num_classes }
+
+            // Get class centroid and add noise
+            let centroid = centroids[class_id]
+            let noisy = add_spectral_noise(centroid, noise_level)
+
+            pixels = pixels ++ [noisy]
+            labels = labels ++ [class_id]
+        }
+    }
+
+    let img = SedenionHSI {
+        width: width,
+        height: height,
+        pixels: pixels,
+        band_mapping: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15],
+    }
+
+    (img, labels)
+}
+
+// Generate class-specific spectral centroids
+fn generate_class_centroids(num_classes: i32) -> [Sedenion] {
+    var centroids: [Sedenion] = []
+
+    // Normal tissue: balanced hemoglobin, low lipid/water
+    let normal = sedenion_from_array([
+        0.7, 0.3, 0.5, 0.4, 0.5, 0.6, 0.4, 0.3,
+        0.5, 0.4, 0.2, 0.3, 0.5, 0.2, 0.3, 0.2
+    ])
+
+    // Tumor: high deoxy-Hb (hypoxia), high scatter
+    let tumor = sedenion_from_array([
+        0.4, 0.7, 0.6, 0.5, 0.6, 0.7, 0.5, 0.4,
+        0.6, 0.5, 0.4, 0.4, 0.6, 0.4, 0.4, 0.3
+    ])
+
+    // Necrosis: high lipid, low blood
+    let necrosis = sedenion_from_array([
+        0.2, 0.2, 0.3, 0.3, 0.4, 0.5, 0.3, 0.6,
+        0.4, 0.3, 0.7, 0.5, 0.4, 0.8, 0.6, 0.7
+    ])
+
+    // Edema: high water content
+    let edema = sedenion_from_array([
+        0.5, 0.5, 0.4, 0.4, 0.5, 0.5, 0.6, 0.4,
+        0.8, 0.5, 0.3, 0.4, 0.8, 0.3, 0.4, 0.3
+    ])
+
+    centroids = centroids ++ [normal, tumor, necrosis, edema]
+
+    // Repeat or truncate to num_classes
+    var result: [Sedenion] = []
+    for i in 0..num_classes {
+        result = result ++ [centroids[i % 4]]
+    }
+
+    result
+}
+
+// Add spectral noise to sedenion
+fn add_spectral_noise(sed: Sedenion, noise_level: f32) -> Sedenion with Prob {
+    var components: [f32; 16] = [0.0; 16]
+
+    for i in 0..16 {
+        let base = sedenion_get_component(sed, i)
+        let noise = random_gaussian(0.0, noise_level)
+        components[i] = clamp(base + noise, 0.0, 1.0)
+    }
+
+    sedenion_from_array(components)
+}
+
+// ============================================================================
+// UTILITY FUNCTIONS
+// ============================================================================
+
+fn abs(x: f32) -> f32 {
+    if x < 0.0 { -x } else { x }
+}
+
+fn sqrt(x: f32) -> f32 {
+    if x <= 0.0 { return 0.0 }
+    var guess = x / 2.0
+    for i in 0..20 {
+        guess = (guess + x / guess) / 2.0
+    }
+    guess
+}
+
+fn exp(x: f32) -> f32 {
+    if x > 20.0 { return exp(x / 2.0) * exp(x / 2.0) }
+    if x < -20.0 { return 1.0 / exp(-x) }
+    var sum = 1.0
+    var term = 1.0
+    for i in 1..20 {
+        term = term * x / (i as f32)
+        sum = sum + term
+    }
+    sum
+}
+
+fn clamp(x: f32, min_val: f32, max_val: f32) -> f32 {
+    if x < min_val { min_val }
+    else if x > max_val { max_val }
+    else { x }
+}
+
+// Placeholder - real impl uses PRNG
+fn random_gaussian(mean: f32, std: f32) -> f32 with Prob {
+    // Box-Muller transform
+    let u1 = random_uniform()
+    let u2 = random_uniform()
+    let z = sqrt(-2.0 * ln(u1)) * cos(2.0 * 3.14159 * u2)
+    mean + std * z
+}
+
+fn random_uniform() -> f32 with Prob {
+    // Placeholder - real impl uses PRNG state
+    0.5
+}
+
+fn ln(x: f32) -> f32 {
+    if x <= 0.0 { return -1e30 }
+    let y = (x - 1.0) / (x + 1.0)
+    var result = 0.0
+    var term = y
+    for i in 0..30 {
+        let n = 2 * i + 1
+        result = result + term / (n as f32)
+        term = term * y * y
+    }
+    2.0 * result
+}
+
+fn cos(x: f32) -> f32 {
+    var sum = 1.0
+    var term = 1.0
+    for i in 1..15 {
+        term = term * (-x * x) / ((2 * i - 1) * (2 * i)) as f32
+        sum = sum + term
+    }
+    sum
+}
+
+fn read_file(path: str) -> str with IO {
+    // Placeholder - real impl uses IO effect
+    ""
+}
+
+fn read_binary_f32(path: str) -> [f32] with IO {
+    // Placeholder - real impl uses IO effect
+    []
+}
+
+// ============================================================================
+// MODULE EXPORTS
+// ============================================================================
+
+mod hyperspectral {
+    // Constants
+    pub let BAND_WAVELENGTHS
+    pub let BAND_NAMES
+    pub let TISSUE_NORMAL
+    pub let TISSUE_TUMOR
+    pub let TISSUE_NECROSIS
+    pub let TISSUE_EDEMA
+
+    // Types
+    pub type HSICubeMeta
+    pub type HSICube
+    pub type SedenionHSI
+    pub type HSIPixel
+    pub type BandSelection
+    pub type TissueFeatures
+    pub type ENVIHeader
+
+    // Band selection
+    pub fn select_bands
+    pub fn band_selection_valid
+
+    // Cube operations
+    pub fn create_hsi_cube
+    pub fn get_cube_value
+    pub fn normalize_cube
+    pub fn cube_to_sedenion
+
+    // Sedenion operations
+    pub fn get_sedenion_pixel
+    pub fn get_all_pixels
+
+    // Feature extraction
+    pub fn compute_oxygenation
+    pub fn compute_lipid_water_ratio
+    pub fn compute_scatter_index
+    pub fn is_spectral_anomaly
+    pub fn extract_tissue_features
+
+    // Spatial operations
+    pub fn compute_gradient
+    pub fn gaussian_smooth_2d
+
+    // I/O
+    pub fn parse_envi_header
+    pub fn load_envi_cube
+
+    // Synthetic data
+    pub fn generate_synthetic_hsi
+}

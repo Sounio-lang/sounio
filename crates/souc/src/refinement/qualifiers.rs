@@ -628,6 +628,178 @@ pub fn medical_qualifiers() -> Vec<Qualifier> {
     ]
 }
 
+/// PAC Learning qualifiers for sample complexity and generalization bounds
+///
+/// These qualifiers encode constraints from computational learning theory,
+/// enabling compile-time verification of machine learning sample requirements.
+///
+/// Key concepts:
+/// - VC dimension: hypothesis class complexity measure
+/// - Sample complexity: minimum samples for (ε, δ)-learning
+/// - Generalization bounds: test_error ≤ train_error + ε with prob ≥ 1-δ
+pub fn pac_qualifiers() -> Vec<Qualifier> {
+    vec![
+        // ======== Parameter validity ========
+
+        // Valid epsilon (accuracy parameter): 0 < ε < 1
+        Qualifier::pac(
+            "ValidEpsilon",
+            vec!["eps"],
+            Predicate::and([
+                Predicate::gt(Term::var("eps"), Term::float(0.0)),
+                Predicate::lt(Term::var("eps"), Term::float(1.0)),
+            ]),
+        ),
+        // Valid delta (confidence parameter): 0 < δ < 1
+        Qualifier::pac(
+            "ValidDelta",
+            vec!["delta"],
+            Predicate::and([
+                Predicate::gt(Term::var("delta"), Term::float(0.0)),
+                Predicate::lt(Term::var("delta"), Term::float(1.0)),
+            ]),
+        ),
+        // Valid VC dimension: d > 0
+        Qualifier::pac(
+            "ValidVCDim",
+            vec!["d"],
+            Predicate::gt(Term::var("d"), Term::int(0)),
+        ),
+        // ======== Sample complexity constraints ========
+
+        // Sufficient samples for PAC learning: m ≥ sample_complexity(d, ε, δ)
+        // This is the core constraint for compile-time verification
+        Qualifier::pac(
+            "SufficientSamples",
+            vec!["m", "d", "eps", "delta"],
+            Predicate::ge(
+                Term::var("m"),
+                Term::App(
+                    "sample_complexity".to_string(),
+                    vec![Term::var("d"), Term::var("eps"), Term::var("delta")],
+                ),
+            ),
+        ),
+        // Tight sample complexity bound (Hanneke 2016)
+        Qualifier::pac(
+            "SufficientSamplesTight",
+            vec!["m", "d", "eps", "delta"],
+            Predicate::ge(
+                Term::var("m"),
+                Term::App(
+                    "sample_complexity_tight".to_string(),
+                    vec![Term::var("d"), Term::var("eps"), Term::var("delta")],
+                ),
+            ),
+        ),
+        // ======== Generalization bounds ========
+
+        // Generalization guarantee: with prob ≥ 1-δ, |train_err - test_err| ≤ gap
+        Qualifier::pac(
+            "GeneralizationBound",
+            vec!["gap", "d", "m", "delta"],
+            Predicate::le(
+                Term::var("gap"),
+                Term::App(
+                    "gen_bound".to_string(),
+                    vec![Term::var("d"), Term::var("m"), Term::var("delta")],
+                ),
+            ),
+        ),
+        // PAC-Bayes bound (McAllester 1999): tighter for posterior distributions
+        Qualifier::pac(
+            "PACBayesBound",
+            vec!["gap", "kl_div", "m", "delta"],
+            Predicate::le(
+                Term::var("gap"),
+                Term::App(
+                    "pac_bayes_bound".to_string(),
+                    vec![Term::var("kl_div"), Term::var("m"), Term::var("delta")],
+                ),
+            ),
+        ),
+        // Rademacher complexity bound
+        Qualifier::pac(
+            "RademacherBound",
+            vec!["gap", "rademacher", "m", "delta"],
+            Predicate::le(
+                Term::var("gap"),
+                Term::App(
+                    "rademacher_bound".to_string(),
+                    vec![Term::var("rademacher"), Term::var("m"), Term::var("delta")],
+                ),
+            ),
+        ),
+        // ======== VC dimension relationships ========
+
+        // Linear classifier: VC(d) = d + 1
+        Qualifier::pac(
+            "VCLinear",
+            vec!["vc", "d"],
+            Predicate::eq(
+                Term::var("vc"),
+                Term::BinOp(BinOp::Add, Box::new(Term::var("d")), Box::new(Term::int(1))),
+            ),
+        ),
+        // Neural network VC dimension bound: O(W log W) where W = weights
+        Qualifier::pac(
+            "VCNeuralNet",
+            vec!["vc", "weights"],
+            Predicate::le(
+                Term::var("vc"),
+                Term::App("vc_neural_net".to_string(), vec![Term::var("weights")]),
+            ),
+        ),
+        // Decision tree: VC(depth, features) = O(2^depth * log(features))
+        Qualifier::pac(
+            "VCDecisionTree",
+            vec!["vc", "depth", "features"],
+            Predicate::le(
+                Term::var("vc"),
+                Term::App(
+                    "vc_decision_tree".to_string(),
+                    vec![Term::var("depth"), Term::var("features")],
+                ),
+            ),
+        ),
+        // ======== Error bounds ========
+
+        // Valid training error: 0 ≤ train_err ≤ 1
+        Qualifier::pac(
+            "ValidTrainError",
+            vec!["err"],
+            Predicate::and([
+                Predicate::ge(Term::var("err"), Term::float(0.0)),
+                Predicate::le(Term::var("err"), Term::float(1.0)),
+            ]),
+        ),
+        // Test error bounded by train + gap
+        Qualifier::pac(
+            "TestErrorBound",
+            vec!["test_err", "train_err", "gap"],
+            Predicate::le(
+                Term::var("test_err"),
+                Term::BinOp(
+                    BinOp::Add,
+                    Box::new(Term::var("train_err")),
+                    Box::new(Term::var("gap")),
+                ),
+            ),
+        ),
+        // ======== Sample monotonicity ========
+
+        // More samples → better bound (monotonicity)
+        Qualifier::pac(
+            "SampleMonotonicity",
+            vec!["m1", "m2", "gap1", "gap2"],
+            Predicate::Implies(
+                Box::new(Predicate::ge(Term::var("m2"), Term::var("m1"))),
+                Box::new(Predicate::le(Term::var("gap2"), Term::var("gap1"))),
+            ),
+        ),
+    ]
+}
+
 /// A qualifier set for inference
 ///
 /// Manages a collection of qualifiers and their instantiations.
@@ -667,11 +839,19 @@ impl QualifierSet {
         set
     }
 
-    /// Create a qualifier set with all domain qualifiers (medical + sedenion)
+    /// Create a qualifier set with PAC learning qualifiers
+    pub fn with_pac() -> Self {
+        let mut set = Self::standard();
+        set.add_all(pac_qualifiers());
+        set
+    }
+
+    /// Create a qualifier set with all domain qualifiers (medical + sedenion + PAC)
     pub fn with_all_domains() -> Self {
         let mut set = Self::standard();
         set.add_all(medical_qualifiers());
         set.add_all(sedenion_qualifiers());
+        set.add_all(pac_qualifiers());
         set
     }
 

@@ -54,6 +54,62 @@ impl KnowledgeType {
         self.temporal_constraint = Some(constraint);
         self
     }
+
+    /// Create a KnowledgeType from PAC learning output
+    ///
+    /// PAC (Probably Approximately Correct) learning provides formal guarantees:
+    /// - With probability >= (1 - delta), the learned model generalizes
+    /// - The test error is bounded by train_error + epsilon
+    ///
+    /// This creates a Knowledge type with:
+    /// - Confidence = 1 - delta (the PAC confidence guarantee)
+    /// - Provenance = "PAC_learning" (tracks the learning source)
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// let model_type = KnowledgeType::from_pac_learning(
+    ///     Type::Struct("LinearClassifier".to_string()),
+    ///     0.95,  // 95% confidence (delta = 0.05)
+    ///     0.01,  // 1% accuracy loss (epsilon)
+    ///     5000,  // samples used
+    /// );
+    /// ```
+    pub fn from_pac_learning(
+        inner: super::Type,
+        confidence: f64,
+        epsilon: f64,
+        samples_used: u64,
+    ) -> Self {
+        Self {
+            inner_type: Box::new(inner),
+            confidence_bound: Some(ConfidenceBound::at_least(confidence)),
+            provenance_constraint: Some(ProvenanceConstraint::DerivedFrom(vec![format!(
+                "PAC_learning(ε={}, m={})",
+                epsilon, samples_used
+            )])),
+            temporal_constraint: None,
+        }
+    }
+
+    /// Check if this knowledge type has PAC learning provenance
+    pub fn is_pac_derived(&self) -> bool {
+        match &self.provenance_constraint {
+            Some(ProvenanceConstraint::DerivedFrom(sources)) => {
+                sources.iter().any(|s| s.starts_with("PAC_learning"))
+            }
+            _ => false,
+        }
+    }
+
+    /// Get the PAC confidence if this is PAC-derived knowledge
+    pub fn pac_confidence(&self) -> Option<f64> {
+        if self.is_pac_derived() {
+            self.confidence_bound.as_ref().map(|b| b.value)
+        } else {
+            None
+        }
+    }
 }
 
 /// Confidence bound: ε >= value, ε > value, ε == value
