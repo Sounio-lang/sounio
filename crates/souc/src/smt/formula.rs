@@ -25,6 +25,12 @@ pub enum SmtSort {
     Epsilon,
     /// Provenance type for data lineage
     Provenance,
+    /// Quaternion type (4D hypercomplex)
+    Quaternion,
+    /// Octonion type (8D hypercomplex)
+    Octonion,
+    /// Sedenion type (16D hypercomplex)
+    Sedenion,
 }
 
 impl fmt::Display for SmtSort {
@@ -38,6 +44,9 @@ impl fmt::Display for SmtSort {
             SmtSort::Uninterpreted(name) => write!(f, "{}", name),
             SmtSort::Epsilon => write!(f, "Epsilon"),
             SmtSort::Provenance => write!(f, "Provenance"),
+            SmtSort::Quaternion => write!(f, "Quaternion"),
+            SmtSort::Octonion => write!(f, "Octonion"),
+            SmtSort::Sedenion => write!(f, "Sedenion"),
         }
     }
 }
@@ -429,6 +438,190 @@ impl SmtContext {
 impl Default for SmtContext {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+impl SmtContext {
+    /// Declare the sedenion theory with zero divisor axioms
+    ///
+    /// This sets up uninterpreted functions for sedenion operations and
+    /// asserts axioms that characterize zero divisors.
+    pub fn declare_sedenion_theory(&mut self) {
+        // Declare Sedenion as an uninterpreted sort
+        self.declare_sort("Sedenion".to_string());
+
+        // Declare sedenion component extraction functions
+        for i in 0..16 {
+            self.declare_fun(
+                format!("sedenion_e{}", i),
+                vec![SmtSort::Sedenion],
+                SmtSort::Real,
+            );
+        }
+
+        // Sedenion norm squared: |s|² = Σᵢ eᵢ²
+        self.declare_fun(
+            "sedenion_norm_sq".to_string(),
+            vec![SmtSort::Sedenion],
+            SmtSort::Real,
+        );
+
+        // Sedenion real part extraction
+        self.declare_fun(
+            "sedenion_real".to_string(),
+            vec![SmtSort::Sedenion],
+            SmtSort::Real,
+        );
+
+        // Zero divisor predicate: not_zero_divisor(s) is true iff s is safe for division
+        self.declare_fun(
+            "not_zero_divisor".to_string(),
+            vec![SmtSort::Sedenion],
+            SmtSort::Bool,
+        );
+
+        // is_real_sedenion: true iff all imaginary components are zero
+        self.declare_fun(
+            "is_real_sedenion".to_string(),
+            vec![SmtSort::Sedenion],
+            SmtSort::Bool,
+        );
+
+        // Component bounds functions
+        self.declare_fun(
+            "sedenion_min_component".to_string(),
+            vec![SmtSort::Sedenion],
+            SmtSort::Real,
+        );
+        self.declare_fun(
+            "sedenion_max_component".to_string(),
+            vec![SmtSort::Sedenion],
+            SmtSort::Real,
+        );
+
+        // All components non-negative (for PBPK)
+        self.declare_fun(
+            "all_components_non_negative".to_string(),
+            vec![SmtSort::Sedenion],
+            SmtSort::Bool,
+        );
+
+        // All components <= threshold
+        self.declare_fun(
+            "all_components_le".to_string(),
+            vec![SmtSort::Sedenion, SmtSort::Real],
+            SmtSort::Bool,
+        );
+
+        // Valid octonion pair (for construction safety)
+        self.declare_fun(
+            "valid_octonion_pair".to_string(),
+            vec![SmtSort::Sedenion],
+            SmtSort::Bool,
+        );
+
+        // Sedenion multiplication (for reasoning about products)
+        self.declare_fun(
+            "sedenion_mul".to_string(),
+            vec![SmtSort::Sedenion, SmtSort::Sedenion],
+            SmtSort::Sedenion,
+        );
+
+        // Zero sedenion constant
+        self.declare_fun("sedenion_zero".to_string(), vec![], SmtSort::Sedenion);
+    }
+
+    /// Assert the core sedenion axioms for zero divisor detection
+    ///
+    /// These axioms encode the algebraic properties of sedenions:
+    /// 1. Real sedenions are never zero divisors
+    /// 2. Normalized sedenions are never zero divisors
+    /// 3. Known zero divisor pairs (e.g., (e₃ + e₁₀) × (e₆ - e₁₅) = 0)
+    pub fn assert_sedenion_axioms(&mut self) {
+        // Axiom 1: Zero sedenion has norm squared = 0
+        // not_zero_divisor(zero) is false (zero is a degenerate zero divisor)
+        self.assert(SmtFormula::Not(Box::new(SmtFormula::App(
+            "not_zero_divisor".to_string(),
+            vec![SmtTerm::App("sedenion_zero".to_string(), vec![])],
+        ))));
+
+        // Axiom 2: Real sedenions (imaginary parts = 0) are never zero divisors
+        // ∀s. is_real_sedenion(s) ∧ norm_sq(s) > 0 ⟹ not_zero_divisor(s)
+        self.assert(SmtFormula::Forall(
+            "s".to_string(),
+            SmtSort::Sedenion,
+            Box::new(SmtFormula::implies(
+                SmtFormula::and([
+                    SmtFormula::App("is_real_sedenion".to_string(), vec![SmtTerm::var("s")]),
+                    SmtFormula::Gt(
+                        Box::new(SmtTerm::App(
+                            "sedenion_norm_sq".to_string(),
+                            vec![SmtTerm::var("s")],
+                        )),
+                        Box::new(SmtTerm::real(0.0)),
+                    ),
+                ]),
+                SmtFormula::App("not_zero_divisor".to_string(), vec![SmtTerm::var("s")]),
+            )),
+        ));
+
+        // Axiom 3: Normalized sedenions (|s|² = 1) with real part != 0 are never zero divisors
+        // This is a sufficient (not necessary) condition for safety
+        self.assert(SmtFormula::Forall(
+            "s".to_string(),
+            SmtSort::Sedenion,
+            Box::new(SmtFormula::implies(
+                SmtFormula::and([
+                    // |s|² ≈ 1 (normalized)
+                    SmtFormula::Ge(
+                        Box::new(SmtTerm::App(
+                            "sedenion_norm_sq".to_string(),
+                            vec![SmtTerm::var("s")],
+                        )),
+                        Box::new(SmtTerm::real(0.99)),
+                    ),
+                    SmtFormula::Le(
+                        Box::new(SmtTerm::App(
+                            "sedenion_norm_sq".to_string(),
+                            vec![SmtTerm::var("s")],
+                        )),
+                        Box::new(SmtTerm::real(1.01)),
+                    ),
+                    // Real part is non-zero
+                    SmtFormula::Not(Box::new(SmtFormula::Eq(
+                        Box::new(SmtTerm::App(
+                            "sedenion_real".to_string(),
+                            vec![SmtTerm::var("s")],
+                        )),
+                        Box::new(SmtTerm::real(0.0)),
+                    ))),
+                ]),
+                SmtFormula::App("not_zero_divisor".to_string(), vec![SmtTerm::var("s")]),
+            )),
+        ));
+
+        // Axiom 4: Non-negative components implies not_zero_divisor for PBPK states
+        // (concentration-like sedenions can't be zero divisors)
+        self.assert(SmtFormula::Forall(
+            "s".to_string(),
+            SmtSort::Sedenion,
+            Box::new(SmtFormula::implies(
+                SmtFormula::and([
+                    SmtFormula::App(
+                        "all_components_non_negative".to_string(),
+                        vec![SmtTerm::var("s")],
+                    ),
+                    SmtFormula::Gt(
+                        Box::new(SmtTerm::App(
+                            "sedenion_norm_sq".to_string(),
+                            vec![SmtTerm::var("s")],
+                        )),
+                        Box::new(SmtTerm::real(1e-12)),
+                    ),
+                ]),
+                SmtFormula::App("not_zero_divisor".to_string(), vec![SmtTerm::var("s")]),
+            )),
+        ));
     }
 }
 

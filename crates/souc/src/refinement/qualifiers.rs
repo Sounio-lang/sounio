@@ -56,6 +56,10 @@ pub enum QualifierCategory {
     Bounds,
     /// Medical/domain-specific
     Medical,
+    /// Hypercomplex numbers (quaternions, octonions, sedenions)
+    Hypercomplex,
+    /// PAC learning (VC dimension, sample complexity, generalization bounds)
+    PAC,
     /// Custom user-defined
     Custom,
 }
@@ -94,6 +98,11 @@ impl Qualifier {
     /// Create a medical qualifier
     pub fn medical(name: impl Into<String>, params: Vec<&str>, pred: Predicate) -> Self {
         Self::new(name, params, pred, QualifierCategory::Medical)
+    }
+
+    /// Create a PAC learning qualifier
+    pub fn pac(name: impl Into<String>, params: Vec<&str>, pred: Predicate) -> Self {
+        Self::new(name, params, pred, QualifierCategory::PAC)
     }
 
     /// Instantiate the qualifier with concrete terms
@@ -361,6 +370,122 @@ pub fn standard_qualifiers() -> Vec<Qualifier> {
     ]
 }
 
+/// Sedenion-specific qualifiers for hypercomplex number systems
+///
+/// These qualifiers encode constraints specific to 16D hypercomplex numbers,
+/// particularly zero divisor detection for compile-time safety.
+pub fn sedenion_qualifiers() -> Vec<Qualifier> {
+    vec![
+        // ======== Zero divisor constraints ========
+
+        // Not a zero divisor: !is_zero_divisor(s)
+        // This is encoded as a predicate application that the SMT solver
+        // will verify against the sedenion zero divisor theory
+        Qualifier::new(
+            "NotZeroDivisor",
+            vec!["s"],
+            Predicate::App("not_zero_divisor".to_string(), vec![Term::var("s")]),
+            QualifierCategory::Hypercomplex,
+        ),
+        // Safe sedenion: norm squared > epsilon (numerical stability)
+        Qualifier::new(
+            "SafeSedenion",
+            vec!["s"],
+            Predicate::gt(
+                Term::App("sedenion_norm_sq".to_string(), vec![Term::var("s")]),
+                Term::float(1e-12),
+            ),
+            QualifierCategory::Hypercomplex,
+        ),
+        // Normalized sedenion: |s| = 1
+        Qualifier::new(
+            "NormalizedSedenion",
+            vec!["s"],
+            Predicate::and([
+                Predicate::ge(
+                    Term::App("sedenion_norm_sq".to_string(), vec![Term::var("s")]),
+                    Term::float(0.999999),
+                ),
+                Predicate::le(
+                    Term::App("sedenion_norm_sq".to_string(), vec![Term::var("s")]),
+                    Term::float(1.000001),
+                ),
+            ]),
+            QualifierCategory::Hypercomplex,
+        ),
+        // Real sedenion: all imaginary components are zero
+        Qualifier::new(
+            "RealSedenion",
+            vec!["s"],
+            Predicate::App("is_real_sedenion".to_string(), vec![Term::var("s")]),
+            QualifierCategory::Hypercomplex,
+        ),
+        // Pure imaginary sedenion: real component is zero
+        Qualifier::new(
+            "PureImaginarySedenion",
+            vec!["s"],
+            Predicate::eq(
+                Term::App("sedenion_real".to_string(), vec![Term::var("s")]),
+                Term::float(0.0),
+            ),
+            QualifierCategory::Hypercomplex,
+        ),
+        // ======== Octonion pair constraints ========
+
+        // Sedenion from valid octonion pair
+        Qualifier::new(
+            "ValidOctonionPair",
+            vec!["s"],
+            Predicate::App("valid_octonion_pair".to_string(), vec![Term::var("s")]),
+            QualifierCategory::Hypercomplex,
+        ),
+        // ======== Medical sedenion constraints ========
+
+        // Valid PBPK compartment values: all non-negative
+        Qualifier::new(
+            "ValidPBPKCompartments",
+            vec!["s"],
+            Predicate::App(
+                "all_components_non_negative".to_string(),
+                vec![Term::var("s")],
+            ),
+            QualifierCategory::Hypercomplex,
+        ),
+        // Valid concentration sedenion for 16-compartment model
+        Qualifier::new(
+            "ValidConcentrations16",
+            vec!["s", "max"],
+            Predicate::and([
+                Predicate::App(
+                    "all_components_non_negative".to_string(),
+                    vec![Term::var("s")],
+                ),
+                Predicate::App(
+                    "all_components_le".to_string(),
+                    vec![Term::var("s"), Term::var("max")],
+                ),
+            ]),
+            QualifierCategory::Hypercomplex,
+        ),
+        // Valid EEG signal sedenion (bounded amplitude)
+        Qualifier::new(
+            "ValidEEGSignal",
+            vec!["s"],
+            Predicate::and([
+                Predicate::ge(
+                    Term::App("sedenion_min_component".to_string(), vec![Term::var("s")]),
+                    Term::float(-1000.0), // microvolts
+                ),
+                Predicate::le(
+                    Term::App("sedenion_max_component".to_string(), vec![Term::var("s")]),
+                    Term::float(1000.0),
+                ),
+            ]),
+            QualifierCategory::Hypercomplex,
+        ),
+    ]
+}
+
 /// Medical-specific qualifiers for pharmacological computing
 ///
 /// These qualifiers encode domain-specific constraints for medical applications.
@@ -532,6 +657,21 @@ impl QualifierSet {
     pub fn with_medical() -> Self {
         let mut set = Self::standard();
         set.add_all(medical_qualifiers());
+        set
+    }
+
+    /// Create a qualifier set with sedenion/hypercomplex qualifiers
+    pub fn with_sedenion() -> Self {
+        let mut set = Self::standard();
+        set.add_all(sedenion_qualifiers());
+        set
+    }
+
+    /// Create a qualifier set with all domain qualifiers (medical + sedenion)
+    pub fn with_all_domains() -> Self {
+        let mut set = Self::standard();
+        set.add_all(medical_qualifiers());
+        set.add_all(sedenion_qualifiers());
         set
     }
 
@@ -737,5 +877,103 @@ mod tests {
 
         let combos_2 = generate_combinations(&elements, 2);
         assert!(combos_2.len() >= 3); // (a,a), (a,b), (b,b)
+    }
+
+    #[test]
+    fn test_sedenion_qualifiers_count() {
+        let qualifiers = sedenion_qualifiers();
+
+        // Should have sedenion qualifiers (at least 9)
+        assert!(qualifiers.len() >= 9);
+
+        // All should be hypercomplex category
+        for q in &qualifiers {
+            assert_eq!(q.category, QualifierCategory::Hypercomplex);
+        }
+    }
+
+    #[test]
+    fn test_sedenion_zero_divisor_qualifier() {
+        let qualifiers = sedenion_qualifiers();
+
+        let not_zd = qualifiers
+            .iter()
+            .find(|q| q.name == "NotZeroDivisor")
+            .expect("Should have NotZeroDivisor qualifier");
+
+        assert_eq!(not_zd.params.len(), 1);
+
+        // Instantiate with a sedenion variable
+        let result = not_zd.instantiate(&[Term::var("my_sedenion")]);
+        assert!(result.is_some());
+
+        let pred = result.unwrap();
+        // Should be an App predicate
+        assert!(matches!(pred, Predicate::App(name, _) if name == "not_zero_divisor"));
+    }
+
+    #[test]
+    fn test_qualifier_set_with_sedenion() {
+        let set = QualifierSet::with_sedenion();
+
+        let standard = QualifierSet::standard();
+        assert!(set.len() > standard.len());
+
+        // Should have hypercomplex qualifiers
+        let hypercomplex = set.by_category(QualifierCategory::Hypercomplex);
+        assert!(!hypercomplex.is_empty());
+    }
+
+    #[test]
+    fn test_qualifier_set_with_all_domains() {
+        let set = QualifierSet::with_all_domains();
+
+        let standard = QualifierSet::standard();
+        let medical_only = QualifierSet::with_medical();
+        let sedenion_only = QualifierSet::with_sedenion();
+
+        // Should have more qualifiers than any single domain set
+        assert!(set.len() > medical_only.len());
+        assert!(set.len() > sedenion_only.len());
+        assert!(set.len() > standard.len());
+
+        // Should have both medical and hypercomplex
+        let medical = set.by_category(QualifierCategory::Medical);
+        let hypercomplex = set.by_category(QualifierCategory::Hypercomplex);
+        assert!(!medical.is_empty());
+        assert!(!hypercomplex.is_empty());
+    }
+
+    #[test]
+    fn test_valid_pbpk_qualifier() {
+        let qualifiers = sedenion_qualifiers();
+
+        let pbpk = qualifiers
+            .iter()
+            .find(|q| q.name == "ValidPBPKCompartments")
+            .expect("Should have ValidPBPKCompartments qualifier");
+
+        assert_eq!(pbpk.params.len(), 1);
+        assert_eq!(pbpk.category, QualifierCategory::Hypercomplex);
+    }
+
+    #[test]
+    fn test_valid_eeg_signal_qualifier() {
+        let qualifiers = sedenion_qualifiers();
+
+        let eeg = qualifiers
+            .iter()
+            .find(|q| q.name == "ValidEEGSignal")
+            .expect("Should have ValidEEGSignal qualifier");
+
+        assert_eq!(eeg.params.len(), 1);
+
+        // Instantiate and check the predicate structure
+        let result = eeg.instantiate(&[Term::var("signal")]);
+        assert!(result.is_some());
+
+        // Should be an And predicate (bounded amplitude)
+        let pred = result.unwrap();
+        assert!(matches!(pred, Predicate::And(_)));
     }
 }

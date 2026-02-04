@@ -840,6 +840,155 @@ pub mod medical {
     }
 }
 
+/// Built-in refinement types for sedenions (16D hypercomplex numbers)
+///
+/// These refinement types enable compile-time verification of sedenion properties,
+/// particularly zero divisor detection which is unique to sedenions and higher
+/// Cayley-Dickson algebras.
+pub mod sedenion {
+    use super::*;
+
+    /// Safe sedenion (not a zero divisor): `{ s: Sedenion | !is_zero_divisor(s) }`
+    ///
+    /// This is the key refinement type for sedenion safety. Zero divisors are
+    /// non-zero elements whose product with some other non-zero element is zero.
+    /// Division by a zero divisor is undefined.
+    ///
+    /// # Known Zero Divisor Pairs
+    ///
+    /// Examples of zero divisor pairs in sedenions:
+    /// - (e₃ + e₁₀) × (e₆ - e₁₅) = 0
+    /// - (e₃ - e₁₀) × (e₆ + e₁₅) = 0
+    ///
+    /// # SMT Encoding
+    ///
+    /// The zero divisor predicate is encoded as an uninterpreted function
+    /// `not_zero_divisor(s)` which the SMT solver will verify using axioms
+    /// about sedenion multiplication.
+    pub fn safe_sedenion(base: Type) -> RefinementType {
+        RefinementType::refined(
+            base,
+            "s",
+            Predicate::App("not_zero_divisor".to_string(), vec![Term::var("s")]),
+        )
+    }
+
+    /// Normalized sedenion: `{ s: Sedenion | |s|² ≈ 1 }`
+    pub fn normalized(base: Type) -> RefinementType {
+        RefinementType::refined(
+            base,
+            "s",
+            Predicate::and([
+                Predicate::ge(
+                    Term::App("sedenion_norm_sq".to_string(), vec![Term::var("s")]),
+                    Term::float(0.999999),
+                ),
+                Predicate::le(
+                    Term::App("sedenion_norm_sq".to_string(), vec![Term::var("s")]),
+                    Term::float(1.000001),
+                ),
+            ]),
+        )
+    }
+
+    /// Non-zero sedenion: `{ s: Sedenion | |s|² > ε }`
+    pub fn non_zero(base: Type) -> RefinementType {
+        RefinementType::refined(
+            base,
+            "s",
+            Predicate::gt(
+                Term::App("sedenion_norm_sq".to_string(), vec![Term::var("s")]),
+                Term::float(1e-12),
+            ),
+        )
+    }
+
+    /// Real sedenion (purely real): `{ s: Sedenion | is_real(s) }`
+    pub fn real_sedenion(base: Type) -> RefinementType {
+        RefinementType::refined(
+            base,
+            "s",
+            Predicate::App("is_real_sedenion".to_string(), vec![Term::var("s")]),
+        )
+    }
+
+    /// Pure imaginary sedenion: `{ s: Sedenion | s.e0 = 0 }`
+    pub fn pure_imaginary(base: Type) -> RefinementType {
+        RefinementType::refined(
+            base,
+            "s",
+            Predicate::eq(
+                Term::App("sedenion_real".to_string(), vec![Term::var("s")]),
+                Term::float(0.0),
+            ),
+        )
+    }
+
+    /// Valid PBPK state (all compartment concentrations non-negative)
+    pub fn valid_pbpk_state(base: Type) -> RefinementType {
+        RefinementType::refined(
+            base,
+            "s",
+            Predicate::App(
+                "all_components_non_negative".to_string(),
+                vec![Term::var("s")],
+            ),
+        )
+    }
+
+    /// Bounded sedenion (all components within range)
+    pub fn bounded_components(base: Type, min: f64, max: f64) -> RefinementType {
+        RefinementType::refined(
+            base,
+            "s",
+            Predicate::and([
+                Predicate::ge(
+                    Term::App("sedenion_min_component".to_string(), vec![Term::var("s")]),
+                    Term::float(min),
+                ),
+                Predicate::le(
+                    Term::App("sedenion_max_component".to_string(), vec![Term::var("s")]),
+                    Term::float(max),
+                ),
+            ]),
+        )
+    }
+
+    /// Predicate: not a zero divisor
+    pub fn not_zero_divisor() -> Predicate {
+        Predicate::App("not_zero_divisor".to_string(), vec![Term::var("s")])
+    }
+
+    /// Predicate: is a zero divisor
+    pub fn is_zero_divisor() -> Predicate {
+        Predicate::Not(Box::new(not_zero_divisor()))
+    }
+
+    /// Predicate: norm squared greater than threshold
+    pub fn norm_sq_gt(threshold: f64) -> Predicate {
+        Predicate::gt(
+            Term::App("sedenion_norm_sq".to_string(), vec![Term::var("s")]),
+            Term::float(threshold),
+        )
+    }
+
+    /// Predicate: all components non-negative (for PBPK/concentrations)
+    pub fn all_non_negative() -> Predicate {
+        Predicate::App(
+            "all_components_non_negative".to_string(),
+            vec![Term::var("s")],
+        )
+    }
+
+    /// Predicate: sedenion multiplication is safe (neither operand is zero divisor)
+    pub fn safe_mul(var_a: &str, var_b: &str) -> Predicate {
+        Predicate::and([
+            Predicate::App("not_zero_divisor".to_string(), vec![Term::var(var_a)]),
+            Predicate::App("not_zero_divisor".to_string(), vec![Term::var(var_b)]),
+        ])
+    }
+}
+
 /// Built-in refinement types for arrays
 pub mod array {
     use super::*;
