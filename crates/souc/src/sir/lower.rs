@@ -1617,6 +1617,13 @@ pub fn lower_type(hlir_ty: &HlirType) -> SirType {
             SirType::Struct(StructType::new(fields).named("Dual"))
         }
         HlirType::Knowledge { inner, .. } => lower_type(inner),
+        // Sedenion: 16 x f32 struct (16D hypercomplex)
+        HlirType::Sedenion => {
+            let fields: Vec<(Option<String>, SirType)> = (0..16)
+                .map(|i| (Some(format!("c{}", i)), SirType::f32()))
+                .collect();
+            SirType::Struct(StructType::new(fields).named("Sedenion"))
+        }
     }
 }
 

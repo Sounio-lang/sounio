@@ -795,6 +795,8 @@ impl HlirToMir {
             HlirType::Vec4d => MirType::Array(Box::new(MirType::F64), 4),
             HlirType::Dual => MirType::Tuple(vec![MirType::F64, MirType::F64]),
             HlirType::Knowledge { inner, .. } => self.hlir_type_to_mir(inner),
+            // Sedenion: 16 x f32
+            HlirType::Sedenion => MirType::Array(Box::new(MirType::F32), 16),
         }
     }
 

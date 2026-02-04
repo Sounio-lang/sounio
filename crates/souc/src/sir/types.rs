@@ -91,6 +91,10 @@ impl VectorType {
     pub fn f32x8() -> Self {
         Self::new(ScalarType::F32, 8)
     }
+    /// 16-lane f32 for sedenions (512 bits, AVX-512 or 2x AVX-256)
+    pub fn f32x16() -> Self {
+        Self::new(ScalarType::F32, 16)
+    }
     pub fn i32x4() -> Self {
         Self::new(ScalarType::I32, 4)
     }

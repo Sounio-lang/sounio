@@ -19,6 +19,7 @@ pub mod erasure;
 pub mod multiplicity;
 pub mod ontology_erasure;
 pub mod ownership;
+pub mod pac;
 pub mod refinement;
 pub mod semantic;
 pub mod tropical;
@@ -74,4 +75,12 @@ pub use causal::{
 pub use tropical::{
     parallel_compose, sequential_compose, tropical_add, tropical_matmul, tropical_mul,
     tropical_power, ResourceType, TropicalMatrix, TropicalNumber,
+};
+
+// PAC learning types - VC dimension and sample complexity
+pub use pac::{
+    compute_generalization_gap, compute_pac_bayes_gap, compute_sample_complexity,
+    compute_sample_complexity_tight, DeltaBound, EpsilonBound, ErrorBound, GeneralizationBound,
+    HypothesisClass, PACBayesBound, RademacherBound, SampleBound, SampleComplexity, VCDimExpr,
+    VCDimension,
 };

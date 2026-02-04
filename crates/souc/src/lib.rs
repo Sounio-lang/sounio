@@ -51,6 +51,7 @@ pub mod diagnostics;
 pub mod distributed;
 pub mod doc;
 pub mod effects;
+pub mod embedded_stdlib;
 pub mod epistemic;
 pub mod fmt;
 pub mod geometry;

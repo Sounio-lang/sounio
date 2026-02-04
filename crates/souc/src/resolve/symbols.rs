@@ -630,6 +630,22 @@ impl SymbolTable {
         None
     }
 
+    /// Check if a name is defined in the current scope (not outer scopes)
+    pub fn is_defined_in_current_scope(&self, name: &str) -> bool {
+        self.scopes
+            .last()
+            .map(|scope| scope.names.contains_key(name))
+            .unwrap_or(false)
+    }
+
+    /// Check if a type is defined in the current scope (not outer scopes)
+    pub fn is_type_defined_in_current_scope(&self, name: &str) -> bool {
+        self.scopes
+            .last()
+            .map(|scope| scope.types.contains_key(name))
+            .unwrap_or(false)
+    }
+
     /// Get symbol by DefId
     pub fn get(&self, def_id: DefId) -> Option<&Symbol> {
         self.symbols.get(&def_id)

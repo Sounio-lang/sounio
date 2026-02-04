@@ -157,8 +157,9 @@ pub enum HlirType {
     Mat3, // 3x3 f32 (9 floats, may be padded)
     Mat4, // 4x4 f32 (16 floats)
     Quat, // 4x f32 (x, y, z, w)
-    // Octonion type (8x f32)
-    Octonion, // 8x f32 (a, b, c, d, e, f, g, h)
+    // Hypercomplex types (Cayley-Dickson sequence)
+    Octonion, // 8x f32 (a, b, c, d, e, f, g, h) - 256 bits
+    Sedenion, // 16x f32 (e₀=1, e₁, ..., e₁₅) - 512 bits, has zero divisors
     // Quaternionic Neural Network types
     QuatLinear,   // Quaternionic linear layer (struct with weights)
     QuatConv2d,   // Quaternionic 2D convolution (struct with kernel)
@@ -277,8 +278,9 @@ impl HlirType {
             HirType::Mat3 => HlirType::Mat3,
             HirType::Mat4 => HlirType::Mat4,
             HirType::Quat => HlirType::Quat,
-            // Octonion type (8D hypercomplex)
+            // Hypercomplex types (Cayley-Dickson sequence)
             HirType::Octonion => HlirType::Octonion,
+            HirType::Sedenion => HlirType::Sedenion,
             // Quaternionic Neural Network types
             HirType::QuatLinear { .. } => HlirType::QuatLinear,
             HirType::QuatConv2d { .. } => HlirType::QuatConv2d,
@@ -360,8 +362,9 @@ impl HlirType {
             HlirType::Mat3 => 288, // 9 x 32-bit floats
             HlirType::Mat4 => 512, // 16 x 32-bit floats
             HlirType::Quat => 128, // 4 x 32-bit floats (x, y, z, w)
-            // Octonion: 8 x 32-bit floats = 256 bits
-            HlirType::Octonion => 256,
+            // Hypercomplex types (Cayley-Dickson sequence)
+            HlirType::Octonion => 256, // 8 x 32-bit floats = 256 bits
+            HlirType::Sedenion => 512, // 16 x 32-bit floats = 512 bits
             // Quaternionic Neural Network types
             HlirType::QuatLinear => 128, // Pointer-sized estimate
             HlirType::QuatConv2d => 128,
@@ -409,6 +412,7 @@ impl HlirType {
             HlirType::Mat4 => 64,     // 16 x 32-bit floats
             HlirType::Quat => 16,     // 4 x 32-bit floats
             HlirType::Octonion => 32, // 8 x 32-bit floats
+            HlirType::Sedenion => 64, // 16 x 32-bit floats
             HlirType::QuatLinear
             | HlirType::QuatConv2d
             | HlirType::QuatRnnState

@@ -227,6 +227,8 @@ impl MirType {
 
             // Octonion: 8 x f32
             HirType::Octonion => MirType::Array(Box::new(MirType::F32), 8),
+            // Sedenion: 16 x f32
+            HirType::Sedenion => MirType::Array(Box::new(MirType::F32), 16),
             // Quaternionic Neural Network types - treat as arrays for now
             HirType::QuatLinear { .. } => MirType::Array(Box::new(MirType::F32), 0),
             HirType::QuatConv2d { .. } => MirType::Array(Box::new(MirType::F32), 0),

@@ -216,6 +216,8 @@ impl CLayoutEngine {
             HlirType::QuatConv2d { .. } => 16,
             HlirType::QuatRnnState { .. } => 16,
             HlirType::QuatGate { .. } => 16,
+            // Sedenion: 16 x f32 = 64 bytes
+            HlirType::Sedenion => 64,
         }
     }
 
@@ -274,6 +276,8 @@ impl CLayoutEngine {
             HlirType::QuatConv2d { .. } => 16,
             HlirType::QuatRnnState { .. } => 16,
             HlirType::QuatGate { .. } => 16,
+            // Sedenion: aligned to 64 for SIMD
+            HlirType::Sedenion => 64,
         }
     }
 
@@ -483,6 +487,8 @@ impl CLayoutEngine {
             HlirType::QuatGate { .. } => false,
             HlirType::Dual => false,
             HlirType::Knowledge { .. } => false,
+            // Sedenion needs special handling (16 floats)
+            HlirType::Sedenion => false,
         }
     }
 
@@ -555,6 +561,8 @@ impl CLayoutEngine {
             HlirType::Knowledge { inner, .. } => {
                 format!("/* Knowledge */ {}", self.to_c_type(inner))
             }
+            // Sedenion: 16 floats (512 bits)
+            HlirType::Sedenion => "float[16]".to_string(),
         }
     }
 }

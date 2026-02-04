@@ -313,9 +313,13 @@ pub enum HirType {
     /// Quaternion (4x f32: x, y, z, w)
     Quat,
 
-    // ==================== OCTONION TYPES (8D Hypercomplex) ====================
+    // ==================== HYPERCOMPLEX TYPES (Cayley-Dickson sequence) ====================
     /// Octonion (8x f32: a, b, c, d, e, f, g, h for 1, i, j, k, l, il, jl, kl)
     Octonion,
+    /// Sedenion (16x f32: e₀=1, e₁, e₂, ..., e₁₅)
+    /// NOTE: Sedenions have ZERO DIVISORS (non-zero elements whose product is zero)
+    /// Medical applications: 16-compartment PBPK, multi-modal imaging, EEG/MEG
+    Sedenion,
 
     // ==================== QUATERNIONIC NEURAL NETWORK TYPES ====================
     /// Quaternionic Linear Layer
@@ -707,6 +711,7 @@ impl HirType {
             HirType::Mat4 => "mat4".to_string(),
             HirType::Quat => "quat".to_string(),
             HirType::Octonion => "oct".to_string(),
+            HirType::Sedenion => "sed".to_string(),
             HirType::QuatLinear {
                 input_features,
                 output_features,

@@ -834,6 +834,11 @@ impl Resolver {
         for item in &e.items {
             match item {
                 ExternItem::Fn(f) => {
+                    // For externs, allow duplicates (they all refer to the same C function).
+                    if self.symbols.is_defined_in_current_scope(&f.name) {
+                        continue;
+                    }
+
                     let def_id = self.symbols.fresh_def_id();
 
                     if let Err(_) = self.symbols.define(f.name.clone(), def_id) {
@@ -864,6 +869,11 @@ impl Resolver {
                     }
                 }
                 ExternItem::Static(s) => {
+                    // For extern statics, allow duplicates (they all refer to the same C variable).
+                    if self.symbols.is_defined_in_current_scope(&s.name) {
+                        continue;
+                    }
+
                     let def_id = self.symbols.fresh_def_id();
 
                     if let Err(_) = self.symbols.define(s.name.clone(), def_id) {
@@ -894,6 +904,11 @@ impl Resolver {
                     }
                 }
                 ExternItem::Type(t) => {
+                    // For extern types, allow duplicates (they all refer to the same C type).
+                    if self.symbols.is_type_defined_in_current_scope(&t.name) {
+                        continue;
+                    }
+
                     let def_id = self.symbols.fresh_def_id();
 
                     if let Err(_) = self.symbols.define_type(t.name.clone(), def_id) {

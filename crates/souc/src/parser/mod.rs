@@ -5605,6 +5605,9 @@ impl<'a> Parser<'a> {
                 // Other contextual keywords
                 | TokenKind::Type
                 | TokenKind::Module
+                // Unit and epistemic keywords (can be field names or type names)
+                | TokenKind::Unit      // e.g., `unit: Unit` field
+                | TokenKind::Knowledge // e.g., `Knowledge<T>` type
         )
     }
 

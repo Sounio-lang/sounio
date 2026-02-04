@@ -433,11 +433,18 @@ pub enum Type {
     /// Quaternion: quat (4x f32: x, y, z, w)
     Quat,
 
-    // ==================== OCTONION TYPES (8D Hypercomplex) ====================
+    // ==================== HYPERCOMPLEX TYPES ====================
     /// Octonion: oct (8x f32: basis 1, i, j, k, l, il, jl, kl)
     /// Octonions form a division algebra over R with 8 dimensions
     /// Used for exceptional Lie groups, string theory, and 8x parameter efficiency in ML
     Octonion,
+
+    /// Sedenion: sed (16x f32: basis e₀=1, e₁, e₂, ..., e₁₅)
+    /// Sedenions are 16-dimensional hypercomplex numbers via Cayley-Dickson construction
+    /// IMPORTANT: Sedenions have ZERO DIVISORS (non-zero elements whose product is zero)
+    /// Used for: 16-compartment PBPK models, multi-modal imaging fusion, EEG/MEG analysis
+    /// Medical applications: unified multi-organ pharmacokinetics, protein conformation
+    Sedenion,
 
     // ==================== QUATERNIONIC NEURAL NETWORK TYPES ====================
     /// Quaternionic Linear Layer weights: Quat[input_features, output_features]
@@ -530,6 +537,8 @@ impl Type {
                 | Type::Mat3
                 | Type::Mat4
                 | Type::Quat
+                | Type::Octonion
+                | Type::Sedenion
                 | Type::Dual
         )
     }
@@ -674,9 +683,41 @@ impl Type {
         matches!(self, Type::Quat)
     }
 
+    /// Check if this type is an octonion
+    pub fn is_octonion(&self) -> bool {
+        matches!(self, Type::Octonion)
+    }
+
+    /// Check if this type is a sedenion
+    pub fn is_sedenion(&self) -> bool {
+        matches!(self, Type::Sedenion)
+    }
+
+    /// Check if this type is a hypercomplex number (quaternion, octonion, or sedenion)
+    /// These form the Cayley-Dickson sequence: ℝ → ℂ → ℍ → 𝕆 → 𝕊
+    pub fn is_hypercomplex(&self) -> bool {
+        matches!(self, Type::Quat | Type::Octonion | Type::Sedenion)
+    }
+
+    /// Get the dimension of a hypercomplex type (4, 8, or 16)
+    pub fn hypercomplex_dimension(&self) -> Option<usize> {
+        match self {
+            Type::Quat => Some(4),
+            Type::Octonion => Some(8),
+            Type::Sedenion => Some(16),
+            _ => None,
+        }
+    }
+
+    /// Check if this hypercomplex type has zero divisors
+    /// Only sedenions (and higher Cayley-Dickson constructions) have zero divisors
+    pub fn has_zero_divisors(&self) -> bool {
+        matches!(self, Type::Sedenion)
+    }
+
     /// Check if this type is a linear algebra primitive
     pub fn is_linear_algebra(&self) -> bool {
-        self.is_vector() || self.is_matrix() || self.is_quaternion()
+        self.is_vector() || self.is_matrix() || self.is_hypercomplex()
     }
 
     /// Check if this type is a dual number (for autodiff)

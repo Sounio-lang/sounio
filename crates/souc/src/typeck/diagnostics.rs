@@ -533,6 +533,8 @@ fn format_type(ty: &HirType) -> String {
                 cols_str
             )
         }
+        // Sedenion type (16D hypercomplex)
+        HirType::Sedenion => "sedenion".to_string(),
     }
 }
 
