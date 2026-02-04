@@ -18,25 +18,23 @@ mod integration_tests {
     // ============================================================================
 
     #[test]
-    #[ignore] // TODO: Fisher matrix positive definiteness - numerical precision issue
     fn test_fisher_metric_with_wasserstein_composition() {
         // Create two Beta distributions
-        // Use larger alpha/beta values to ensure Fisher matrix is positive definite
         let p = BetaConfidence::new(10.0, 8.0);
         let q = BetaConfidence::new(8.0, 10.0);
 
-        // Compute Fisher metrics
-        let fisher_p = FisherMatrix::from_beta(p.alpha, p.beta);
-        let fisher_q = FisherMatrix::from_beta(q.alpha, q.beta);
+        // Compute Fisher metrics using log-parameterization for positive definiteness
+        let fisher_p = FisherMatrix::from_beta_log(p.alpha, p.beta);
+        let fisher_q = FisherMatrix::from_beta_log(q.alpha, q.beta);
 
         // Both Fisher matrices should be positive definite (determinant > 0)
         assert!(
             fisher_p.determinant() > 0.0,
-            "Fisher matrix P must be positive definite"
+            "Fisher matrix P must be positive definite (log-parameterization)"
         );
         assert!(
             fisher_q.determinant() > 0.0,
-            "Fisher matrix Q must be positive definite"
+            "Fisher matrix Q must be positive definite (log-parameterization)"
         );
 
         // Compute Wasserstein distance between distributions
@@ -279,22 +277,26 @@ mod integration_tests {
     // ============================================================================
 
     #[test]
-    #[ignore] // TODO: Fisher matrix positive definiteness - numerical precision issue
     fn test_fisher_metric_distance_vs_wasserstein() {
         // Two nearby Beta distributions
-        // Use larger values to ensure Fisher matrix is positive definite
         let p = BetaConfidence::new(10.0, 8.0);
         let q = BetaConfidence::new(10.5, 8.5);
 
-        // Compute Fisher information matrices
-        let fisher_p = FisherMatrix::from_beta(p.alpha, p.beta);
-        let fisher_q = FisherMatrix::from_beta(q.alpha, q.beta);
+        // Compute Fisher information matrices using log-parameterization
+        let fisher_p = FisherMatrix::from_beta_log(p.alpha, p.beta);
+        let fisher_q = FisherMatrix::from_beta_log(q.alpha, q.beta);
 
-        // Both matrices should be invertible
+        // Both matrices should be invertible (positive definite)
         let det_p = fisher_p.determinant();
         let det_q = fisher_q.determinant();
-        assert!(det_p > 0.0, "Fisher matrix P must be invertible");
-        assert!(det_q > 0.0, "Fisher matrix Q must be invertible");
+        assert!(
+            det_p > 0.0,
+            "Fisher matrix P must be invertible (log-parameterization)"
+        );
+        assert!(
+            det_q > 0.0,
+            "Fisher matrix Q must be invertible (log-parameterization)"
+        );
 
         // Condition numbers should indicate numerical stability
         let cond_p = fisher_p.condition_number();
