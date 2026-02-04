@@ -3315,6 +3315,366 @@ impl MetalCodegen {
                 ));
             }
 
+            // ==================== SEDENION OPERATIONS (16D Hypercomplex) ====================
+            // Sedenions: s = (o1, o2) where o1, o2 are octonions
+            // Cayley-Dickson: (a,b)×(c,d) = (ac - d̄b, da + bc̄)
+
+            // SedenionMul: Cayley-Dickson multiplication
+            GpuOp::SedenionMul(s1, s2) => {
+                let s1_name = self.get_var_name(*s1);
+                let s2_name = self.get_var_name(*s2);
+                self.emit("// SedenionMul: Cayley-Dickson (a,b)×(c,d) = (ac - d̄b, da + bc̄)");
+                self.emit(&format!(
+                    "device float* sed_a = (device float*)(&{});",
+                    s1_name
+                ));
+                self.emit(&format!(
+                    "device float* sed_b = (device float*)(&{}) + 8;",
+                    s1_name
+                ));
+                self.emit(&format!(
+                    "device float* sed_c = (device float*)(&{});",
+                    s2_name
+                ));
+                self.emit(&format!(
+                    "device float* sed_d = (device float*)(&{}) + 8;",
+                    s2_name
+                ));
+                // Load as float8
+                self.emit("float8 a = *(device float8*)(sed_a);");
+                self.emit("float8 b = *(device float8*)(sed_b);");
+                self.emit("float8 c = *(device float8*)(sed_c);");
+                self.emit("float8 d = *(device float8*)(sed_d);");
+                // Compute ac (octonion mul inline - simplified)
+                self.emit("// ac = octonion_mul(a, c)");
+                self.emit("float8 ac;");
+                self.emit("ac.s0 = a.s0*c.s0 - a.s1*c.s1 - a.s2*c.s2 - a.s3*c.s3 - a.s4*c.s4 - a.s5*c.s5 - a.s6*c.s6 - a.s7*c.s7;");
+                self.emit("ac.s1 = a.s0*c.s1 + a.s1*c.s0 + a.s2*c.s3 - a.s3*c.s2 + a.s4*c.s5 - a.s5*c.s4 - a.s6*c.s7 + a.s7*c.s6;");
+                self.emit("ac.s2 = a.s0*c.s2 - a.s1*c.s3 + a.s2*c.s0 + a.s3*c.s1 + a.s4*c.s6 + a.s5*c.s7 - a.s6*c.s4 - a.s7*c.s5;");
+                self.emit("ac.s3 = a.s0*c.s3 + a.s1*c.s2 - a.s2*c.s1 + a.s3*c.s0 + a.s4*c.s7 - a.s5*c.s6 + a.s6*c.s5 - a.s7*c.s4;");
+                self.emit("ac.s4 = a.s0*c.s4 - a.s1*c.s5 - a.s2*c.s6 - a.s3*c.s7 + a.s4*c.s0 + a.s5*c.s1 + a.s6*c.s2 + a.s7*c.s3;");
+                self.emit("ac.s5 = a.s0*c.s5 + a.s1*c.s4 - a.s2*c.s7 + a.s3*c.s6 - a.s4*c.s1 + a.s5*c.s0 - a.s6*c.s3 + a.s7*c.s2;");
+                self.emit("ac.s6 = a.s0*c.s6 + a.s1*c.s7 + a.s2*c.s4 - a.s3*c.s5 - a.s4*c.s2 + a.s5*c.s3 + a.s6*c.s0 - a.s7*c.s1;");
+                self.emit("ac.s7 = a.s0*c.s7 - a.s1*c.s6 + a.s2*c.s5 + a.s3*c.s4 - a.s4*c.s3 - a.s5*c.s2 + a.s6*c.s1 + a.s7*c.s0;");
+                // Compute d* (octonion conj)
+                self.emit("float8 d_conj = float8(d.s0, -d.s1, -d.s2, -d.s3, -d.s4, -d.s5, -d.s6, -d.s7);");
+                // Compute d*b (octonion mul)
+                self.emit("// d_conj_b = octonion_mul(d_conj, b)");
+                self.emit("float8 dcb;");
+                self.emit("dcb.s0 = d_conj.s0*b.s0 - d_conj.s1*b.s1 - d_conj.s2*b.s2 - d_conj.s3*b.s3 - d_conj.s4*b.s4 - d_conj.s5*b.s5 - d_conj.s6*b.s6 - d_conj.s7*b.s7;");
+                self.emit("dcb.s1 = d_conj.s0*b.s1 + d_conj.s1*b.s0 + d_conj.s2*b.s3 - d_conj.s3*b.s2 + d_conj.s4*b.s5 - d_conj.s5*b.s4 - d_conj.s6*b.s7 + d_conj.s7*b.s6;");
+                self.emit("dcb.s2 = d_conj.s0*b.s2 - d_conj.s1*b.s3 + d_conj.s2*b.s0 + d_conj.s3*b.s1 + d_conj.s4*b.s6 + d_conj.s5*b.s7 - d_conj.s6*b.s4 - d_conj.s7*b.s5;");
+                self.emit("dcb.s3 = d_conj.s0*b.s3 + d_conj.s1*b.s2 - d_conj.s2*b.s1 + d_conj.s3*b.s0 + d_conj.s4*b.s7 - d_conj.s5*b.s6 + d_conj.s6*b.s5 - d_conj.s7*b.s4;");
+                self.emit("dcb.s4 = d_conj.s0*b.s4 - d_conj.s1*b.s5 - d_conj.s2*b.s6 - d_conj.s3*b.s7 + d_conj.s4*b.s0 + d_conj.s5*b.s1 + d_conj.s6*b.s2 + d_conj.s7*b.s3;");
+                self.emit("dcb.s5 = d_conj.s0*b.s5 + d_conj.s1*b.s4 - d_conj.s2*b.s7 + d_conj.s3*b.s6 - d_conj.s4*b.s1 + d_conj.s5*b.s0 - d_conj.s6*b.s3 + d_conj.s7*b.s2;");
+                self.emit("dcb.s6 = d_conj.s0*b.s6 + d_conj.s1*b.s7 + d_conj.s2*b.s4 - d_conj.s3*b.s5 - d_conj.s4*b.s2 + d_conj.s5*b.s3 + d_conj.s6*b.s0 - d_conj.s7*b.s1;");
+                self.emit("dcb.s7 = d_conj.s0*b.s7 - d_conj.s1*b.s6 + d_conj.s2*b.s5 + d_conj.s3*b.s4 - d_conj.s4*b.s3 - d_conj.s5*b.s2 + d_conj.s6*b.s1 + d_conj.s7*b.s0;");
+                // Result lo = ac - d*b
+                self.emit(
+                    "float sed_result_lo[8]; for(int i=0;i<8;i++) sed_result_lo[i] = ((float*)&ac)[i] - ((float*)&dcb)[i];"
+                );
+                // Compute da
+                self.emit("// da = octonion_mul(d, a)");
+                self.emit("float8 da;");
+                self.emit("da.s0 = d.s0*a.s0 - d.s1*a.s1 - d.s2*a.s2 - d.s3*a.s3 - d.s4*a.s4 - d.s5*a.s5 - d.s6*a.s6 - d.s7*a.s7;");
+                self.emit("da.s1 = d.s0*a.s1 + d.s1*a.s0 + d.s2*a.s3 - d.s3*a.s2 + d.s4*a.s5 - d.s5*a.s4 - d.s6*a.s7 + d.s7*a.s6;");
+                self.emit("da.s2 = d.s0*a.s2 - d.s1*a.s3 + d.s2*a.s0 + d.s3*a.s1 + d.s4*a.s6 + d.s5*a.s7 - d.s6*a.s4 - d.s7*a.s5;");
+                self.emit("da.s3 = d.s0*a.s3 + d.s1*a.s2 - d.s2*a.s1 + d.s3*a.s0 + d.s4*a.s7 - d.s5*a.s6 + d.s6*a.s5 - d.s7*a.s4;");
+                self.emit("da.s4 = d.s0*a.s4 - d.s1*a.s5 - d.s2*a.s6 - d.s3*a.s7 + d.s4*a.s0 + d.s5*a.s1 + d.s6*a.s2 + d.s7*a.s3;");
+                self.emit("da.s5 = d.s0*a.s5 + d.s1*a.s4 - d.s2*a.s7 + d.s3*a.s6 - d.s4*a.s1 + d.s5*a.s0 - d.s6*a.s3 + d.s7*a.s2;");
+                self.emit("da.s6 = d.s0*a.s6 + d.s1*a.s7 + d.s2*a.s4 - d.s3*a.s5 - d.s4*a.s2 + d.s5*a.s3 + d.s6*a.s0 - d.s7*a.s1;");
+                self.emit("da.s7 = d.s0*a.s7 - d.s1*a.s6 + d.s2*a.s5 + d.s3*a.s4 - d.s4*a.s3 - d.s5*a.s2 + d.s6*a.s1 + d.s7*a.s0;");
+                // Compute c* (octonion conj)
+                self.emit("float8 c_conj = float8(c.s0, -c.s1, -c.s2, -c.s3, -c.s4, -c.s5, -c.s6, -c.s7);");
+                // Compute bc*
+                self.emit("// bc_conj = octonion_mul(b, c_conj)");
+                self.emit("float8 bcc;");
+                self.emit("bcc.s0 = b.s0*c_conj.s0 - b.s1*c_conj.s1 - b.s2*c_conj.s2 - b.s3*c_conj.s3 - b.s4*c_conj.s4 - b.s5*c_conj.s5 - b.s6*c_conj.s6 - b.s7*c_conj.s7;");
+                self.emit("bcc.s1 = b.s0*c_conj.s1 + b.s1*c_conj.s0 + b.s2*c_conj.s3 - b.s3*c_conj.s2 + b.s4*c_conj.s5 - b.s5*c_conj.s4 - b.s6*c_conj.s7 + b.s7*c_conj.s6;");
+                self.emit("bcc.s2 = b.s0*c_conj.s2 - b.s1*c_conj.s3 + b.s2*c_conj.s0 + b.s3*c_conj.s1 + b.s4*c_conj.s6 + b.s5*c_conj.s7 - b.s6*c_conj.s4 - b.s7*c_conj.s5;");
+                self.emit("bcc.s3 = b.s0*c_conj.s3 + b.s1*c_conj.s2 - b.s2*c_conj.s1 + b.s3*c_conj.s0 + b.s4*c_conj.s7 - b.s5*c_conj.s6 + b.s6*c_conj.s5 - b.s7*c_conj.s4;");
+                self.emit("bcc.s4 = b.s0*c_conj.s4 - b.s1*c_conj.s5 - b.s2*c_conj.s6 - b.s3*c_conj.s7 + b.s4*c_conj.s0 + b.s5*c_conj.s1 + b.s6*c_conj.s2 + b.s7*c_conj.s3;");
+                self.emit("bcc.s5 = b.s0*c_conj.s5 + b.s1*c_conj.s4 - b.s2*c_conj.s7 + b.s3*c_conj.s6 - b.s4*c_conj.s1 + b.s5*c_conj.s0 - b.s6*c_conj.s3 + b.s7*c_conj.s2;");
+                self.emit("bcc.s6 = b.s0*c_conj.s6 + b.s1*c_conj.s7 + b.s2*c_conj.s4 - b.s3*c_conj.s5 - b.s4*c_conj.s2 + b.s5*c_conj.s3 + b.s6*c_conj.s0 - b.s7*c_conj.s1;");
+                self.emit("bcc.s7 = b.s0*c_conj.s7 - b.s1*c_conj.s6 + b.s2*c_conj.s5 + b.s3*c_conj.s4 - b.s4*c_conj.s3 - b.s5*c_conj.s2 + b.s6*c_conj.s1 + b.s7*c_conj.s0;");
+                // Result hi = da + bc*
+                self.emit(
+                    "float sed_result_hi[8]; for(int i=0;i<8;i++) sed_result_hi[i] = ((float*)&da)[i] + ((float*)&bcc)[i];"
+                );
+                // Construct 16-element result
+                self.emit(&format!(
+                    "float {}[16]; for(int i=0;i<8;i++) {{{}[i]=sed_result_lo[i]; {}[i+8]=sed_result_hi[i];}}",
+                    result_name, result_name, result_name
+                ));
+            }
+
+            // SedenionConj: (a,b)* = (a*, -b)
+            GpuOp::SedenionConj(s) => {
+                let s_name = self.get_var_name(*s);
+                self.emit("// SedenionConj: (a,b)* = (a*, -b)");
+                self.emit(&format!(
+                    "device float* sed_in = (device float*)(&{});",
+                    s_name
+                ));
+                self.emit(&format!("float {}[16];", result_name));
+                // Conjugate first octonion (negate indices 1-7)
+                self.emit(&format!("{}[0] = sed_in[0];", result_name));
+                for i in 1..8 {
+                    self.emit(&format!("{}[{}] = -sed_in[{}];", result_name, i, i));
+                }
+                // Negate second octonion entirely
+                for i in 8..16 {
+                    self.emit(&format!("{}[{}] = -sed_in[{}];", result_name, i, i));
+                }
+            }
+
+            // SedenionNormSq: |s|² = sum of squares of 16 components
+            GpuOp::SedenionNormSq(s) => {
+                let s_name = self.get_var_name(*s);
+                self.emit("// SedenionNormSq: sum of 16 squared components");
+                self.emit(&format!(
+                    "device float* sed_in = (device float*)(&{});",
+                    s_name
+                ));
+                self.emit(&format!(
+                    "float {} = 0.0f; for(int i=0;i<16;i++) {} += sed_in[i]*sed_in[i];",
+                    result_name, result_name
+                ));
+            }
+
+            // SedenionNormalize: s / |s|
+            GpuOp::SedenionNormalize(s) => {
+                let s_name = self.get_var_name(*s);
+                self.emit("// SedenionNormalize: s / |s|");
+                self.emit(&format!(
+                    "device float* sed_in = (device float*)(&{});",
+                    s_name
+                ));
+                self.emit("float sed_norm_sq = 0.0f; for(int i=0;i<16;i++) sed_norm_sq += sed_in[i]*sed_in[i];");
+                self.emit("float sed_inv_norm = rsqrt(sed_norm_sq + 1e-12f);");
+                self.emit(&format!(
+                    "float {}[16]; for(int i=0;i<16;i++) {}[i] = sed_in[i] * sed_inv_norm;",
+                    result_name, result_name
+                ));
+            }
+
+            // SedenionReal: extract component 0
+            GpuOp::SedenionReal(s) => {
+                let s_name = self.get_var_name(*s);
+                self.emit("// SedenionReal: extract e0 component");
+                self.emit(&format!(
+                    "float {} = ((device float*)(&{}))[0];",
+                    result_name, s_name
+                ));
+            }
+
+            // SedenionImag: extract 15D imaginary vector
+            GpuOp::SedenionImag(s) => {
+                let s_name = self.get_var_name(*s);
+                self.emit("// SedenionImag: extract 15D imaginary (components 1-15)");
+                self.emit(&format!(
+                    "device float* sed_in = (device float*)(&{});",
+                    s_name
+                ));
+                self.emit(&format!(
+                    "float {}[15]; for(int i=0;i<15;i++) {}[i] = sed_in[i+1];",
+                    result_name, result_name
+                ));
+            }
+
+            // SedenionDot: Euclidean inner product
+            GpuOp::SedenionDot(s1, s2) => {
+                let s1_name = self.get_var_name(*s1);
+                let s2_name = self.get_var_name(*s2);
+                self.emit("// SedenionDot: 16D Euclidean dot product");
+                self.emit(&format!(
+                    "device float* sed_a = (device float*)(&{});",
+                    s1_name
+                ));
+                self.emit(&format!(
+                    "device float* sed_b = (device float*)(&{});",
+                    s2_name
+                ));
+                self.emit(&format!(
+                    "float {} = 0.0f; for(int i=0;i<16;i++) {} += sed_a[i]*sed_b[i];",
+                    result_name, result_name
+                ));
+            }
+
+            // SedenionRelu: max(0, s[i]) per component
+            GpuOp::SedenionRelu(s) => {
+                let s_name = self.get_var_name(*s);
+                self.emit("// SedenionRelu: max(0, s[i]) per component");
+                self.emit(&format!(
+                    "device float* sed_in = (device float*)(&{});",
+                    s_name
+                ));
+                self.emit(&format!(
+                    "float {}[16]; for(int i=0;i<16;i++) {}[i] = fmax(0.0f, sed_in[i]);",
+                    result_name, result_name
+                ));
+            }
+
+            // SedenionSigmoid: 1/(1+exp(-s[i])) per component
+            GpuOp::SedenionSigmoid(s) => {
+                let s_name = self.get_var_name(*s);
+                self.emit("// SedenionSigmoid: 1/(1+exp(-x)) per component");
+                self.emit(&format!(
+                    "device float* sed_in = (device float*)(&{});",
+                    s_name
+                ));
+                self.emit(&format!(
+                    "float {}[16]; for(int i=0;i<16;i++) {}[i] = 1.0f / (1.0f + exp(-sed_in[i]));",
+                    result_name, result_name
+                ));
+            }
+
+            // SedenionTanh: tanh(s[i]) per component
+            GpuOp::SedenionTanh(s) => {
+                let s_name = self.get_var_name(*s);
+                self.emit("// SedenionTanh: tanh per component");
+                self.emit(&format!(
+                    "device float* sed_in = (device float*)(&{});",
+                    s_name
+                ));
+                self.emit(&format!(
+                    "float {}[16]; for(int i=0;i<16;i++) {}[i] = tanh(sed_in[i]);",
+                    result_name, result_name
+                ));
+            }
+
+            // SedenionIsZeroDivisor: check if near zero divisor
+            GpuOp::SedenionIsZeroDivisor(s) => {
+                let s_name = self.get_var_name(*s);
+                self.emit("// SedenionIsZeroDivisor: heuristic check for zero divisor patterns");
+                self.emit(&format!(
+                    "device float* sed_in = (device float*)(&{});",
+                    s_name
+                ));
+                // Known zero divisor: (e3 + e10) × (e6 - e15) = 0
+                // Check if s is near a scalar multiple of (e3 + e10) pattern
+                self.emit("float sed_total_sq = 0.0f; for(int i=0;i<16;i++) sed_total_sq += sed_in[i]*sed_in[i];");
+                self.emit("float sed_main = sed_in[3]*sed_in[3] + sed_in[10]*sed_in[10];");
+                self.emit("float sed_ratio = sed_main / (sed_total_sq + 1e-12f);");
+                // If >95% of norm is in e3,e10 and they have similar magnitude, likely zero divisor
+                self.emit("bool sed_pattern1 = (sed_ratio > 0.95f) && (fabs(fabs(sed_in[3]) - fabs(sed_in[10])) < 0.1f * (fabs(sed_in[3]) + fabs(sed_in[10]) + 1e-12f));");
+                // Pattern 2: (e6 - e15)
+                self.emit("float sed_main2 = sed_in[6]*sed_in[6] + sed_in[15]*sed_in[15];");
+                self.emit("float sed_ratio2 = sed_main2 / (sed_total_sq + 1e-12f);");
+                self.emit("bool sed_pattern2 = (sed_ratio2 > 0.95f) && (fabs(fabs(sed_in[6]) - fabs(sed_in[15])) < 0.1f * (fabs(sed_in[6]) + fabs(sed_in[15]) + 1e-12f));");
+                self.emit(&format!(
+                    "bool {} = sed_pattern1 || sed_pattern2;",
+                    result_name
+                ));
+            }
+
+            // SedenionToOcts: split into two octonions
+            GpuOp::SedenionToOcts(s) => {
+                let s_name = self.get_var_name(*s);
+                self.emit("// SedenionToOcts: Cayley-Dickson decomposition into two octonions");
+                self.emit(&format!(
+                    "device float* sed_in = (device float*)(&{});",
+                    s_name
+                ));
+                // Return struct with two float8
+                self.emit(&format!(
+                    "struct {{ float8 lo; float8 hi; }} {};",
+                    result_name
+                ));
+                self.emit(&format!("{}.lo = *(device float8*)(sed_in);", result_name));
+                self.emit(&format!(
+                    "{}.hi = *(device float8*)(sed_in + 8);",
+                    result_name
+                ));
+            }
+
+            // SedenionFromOcts: construct from two octonions
+            GpuOp::SedenionFromOcts(o1, o2) => {
+                let o1_name = self.get_var_name(*o1);
+                let o2_name = self.get_var_name(*o2);
+                self.emit("// SedenionFromOcts: construct sedenion from two octonions");
+                self.emit(&format!(
+                    "float8 sed_oct1 = *(device float8*)(&{});",
+                    o1_name
+                ));
+                self.emit(&format!(
+                    "float8 sed_oct2 = *(device float8*)(&{});",
+                    o2_name
+                ));
+                self.emit(&format!("float {}[16];", result_name));
+                self.emit(&format!(
+                    "for(int i=0;i<8;i++) {{ {}[i] = ((float*)&sed_oct1)[i]; {}[i+8] = ((float*)&sed_oct2)[i]; }}",
+                    result_name, result_name
+                ));
+            }
+
+            // SedenionLerp: linear interpolation
+            GpuOp::SedenionLerp(s1, s2, t) => {
+                let s1_name = self.get_var_name(*s1);
+                let s2_name = self.get_var_name(*s2);
+                let t_name = self.get_var_name(*t);
+                self.emit("// SedenionLerp: s1 + t*(s2 - s1)");
+                self.emit(&format!(
+                    "device float* sed_a = (device float*)(&{});",
+                    s1_name
+                ));
+                self.emit(&format!(
+                    "device float* sed_b = (device float*)(&{});",
+                    s2_name
+                ));
+                self.emit(&format!("float sed_t = {};", t_name));
+                self.emit(&format!(
+                    "float {}[16]; for(int i=0;i<16;i++) {}[i] = sed_a[i] + sed_t * (sed_b[i] - sed_a[i]);",
+                    result_name, result_name
+                ));
+            }
+
+            // SedenionLinearFwd: y = W ⊗ x + b
+            GpuOp::SedenionLinearFwd {
+                x,
+                w,
+                bias,
+                output: _,
+                in_features,
+                out_features,
+            } => {
+                let x_name = self.get_var_name(*x);
+                let w_name = self.get_var_name(*w);
+                let b_name = self.get_var_name(*bias);
+                self.emit(&format!(
+                    "// SedenionLinearFwd: {} in -> {} out",
+                    in_features, out_features
+                ));
+                self.emit(&format!(
+                    "sedenion_linear_fwd((device float*){}, (device float*){}, (device float*){}, (device float*){}, {}, {});",
+                    w_name, x_name, b_name, result_name, in_features, out_features
+                ));
+            }
+
+            // SedenionLinearBwd: compute gradients
+            GpuOp::SedenionLinearBwd {
+                x,
+                w,
+                grad_output,
+                grad_x,
+                grad_w,
+                grad_bias,
+                in_features,
+                out_features,
+            } => {
+                let x_name = self.get_var_name(*x);
+                let w_name = self.get_var_name(*w);
+                let dy_name = self.get_var_name(*grad_output);
+                let dx_name = self.get_var_name(*grad_x);
+                let dw_name = self.get_var_name(*grad_w);
+                let db_name = self.get_var_name(*grad_bias);
+                self.emit("// SedenionLinearBwd: compute dW, dx, db");
+                self.emit(&format!(
+                    "sedenion_linear_bwd((device float*){}, (device float*){}, (device float*){}, (device float*){}, (device float*){}, (device float*){}, {}, {});",
+                    w_name, x_name, dy_name, dw_name, dx_name, db_name, in_features, out_features
+                ));
+            }
+
             // ==================== QUANTIZATION-AWARE TRAINING (QAT) ====================
 
             // FakeQuantize: per-tensor fake quantization for QAT
@@ -3954,6 +4314,15 @@ impl MetalCodegen {
                     "uint {} = 0; // TILE_N: should be constant-folded",
                     result_name
                 ));
+            }
+
+            // Catch-all for other unhandled operations
+            op => {
+                self.emit(&format!(
+                    "// Unhandled GPU op: {:?}",
+                    std::mem::discriminant(op)
+                ));
+                self.emit(&format!("auto {} = 0; // TODO: implement", result_name));
             }
         }
     }

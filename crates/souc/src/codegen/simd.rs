@@ -304,6 +304,227 @@ pub fn lerp(builder: &mut FunctionBuilder, a: Value, b: Value, t: Value) -> Valu
     SimdVec::add(builder, scaled_a, scaled_b)
 }
 
+// ==================== SEDENION SIMD OPERATIONS ====================
+// Sedenions: 16-dimensional hypercomplex numbers (512 bits = 16 x f32)
+// Represented as 4 F32X4 vectors (SSE/NEON compatible) or 2 F32X8 (AVX)
+//
+// IMPORTANT: Sedenions have ZERO DIVISORS unlike quaternions/octonions
+// The norm is not multiplicative: |a*b| ≠ |a|*|b| for some a, b
+
+/// SIMD operations for sedenions (16D hypercomplex)
+/// Uses 4 F32X4 vectors for maximum compatibility (SSE4, NEON, etc.)
+#[cfg(feature = "jit")]
+pub struct SimdSedenion;
+
+#[cfg(feature = "jit")]
+impl SimdSedenion {
+    /// Create sedenion from 16 f32 values
+    /// Returns (v0, v1, v2, v3) where each is a F32X4
+    pub fn splat_f32x16(
+        builder: &mut FunctionBuilder,
+        e0: Value,
+        e1: Value,
+        e2: Value,
+        e3: Value,
+        e4: Value,
+        e5: Value,
+        e6: Value,
+        e7: Value,
+        e8: Value,
+        e9: Value,
+        e10: Value,
+        e11: Value,
+        e12: Value,
+        e13: Value,
+        e14: Value,
+        e15: Value,
+    ) -> (Value, Value, Value, Value) {
+        let v0 = SimdVec::splat_f32x4(builder, e0, e1, e2, e3);
+        let v1 = SimdVec::splat_f32x4(builder, e4, e5, e6, e7);
+        let v2 = SimdVec::splat_f32x4(builder, e8, e9, e10, e11);
+        let v3 = SimdVec::splat_f32x4(builder, e12, e13, e14, e15);
+        (v0, v1, v2, v3)
+    }
+
+    /// Extract component from sedenion (0-15)
+    pub fn extract_lane(
+        builder: &mut FunctionBuilder,
+        s: (Value, Value, Value, Value),
+        lane: u8,
+    ) -> Value {
+        let (v0, v1, v2, v3) = s;
+        match lane {
+            0..=3 => builder.ins().extractlane(v0, lane),
+            4..=7 => builder.ins().extractlane(v1, lane - 4),
+            8..=11 => builder.ins().extractlane(v2, lane - 8),
+            12..=15 => builder.ins().extractlane(v3, lane - 12),
+            _ => builder.ins().f32const(0.0), // Out of bounds
+        }
+    }
+
+    /// Sedenion addition: a + b (component-wise)
+    pub fn add(
+        builder: &mut FunctionBuilder,
+        a: (Value, Value, Value, Value),
+        b: (Value, Value, Value, Value),
+    ) -> (Value, Value, Value, Value) {
+        (
+            builder.ins().fadd(a.0, b.0),
+            builder.ins().fadd(a.1, b.1),
+            builder.ins().fadd(a.2, b.2),
+            builder.ins().fadd(a.3, b.3),
+        )
+    }
+
+    /// Sedenion subtraction: a - b (component-wise)
+    pub fn sub(
+        builder: &mut FunctionBuilder,
+        a: (Value, Value, Value, Value),
+        b: (Value, Value, Value, Value),
+    ) -> (Value, Value, Value, Value) {
+        (
+            builder.ins().fsub(a.0, b.0),
+            builder.ins().fsub(a.1, b.1),
+            builder.ins().fsub(a.2, b.2),
+            builder.ins().fsub(a.3, b.3),
+        )
+    }
+
+    /// Scalar multiplication: s * k
+    pub fn scale(
+        builder: &mut FunctionBuilder,
+        s: (Value, Value, Value, Value),
+        scalar: Value,
+    ) -> (Value, Value, Value, Value) {
+        let splat = builder.ins().splat(types::F32X4, scalar);
+        (
+            builder.ins().fmul(s.0, splat),
+            builder.ins().fmul(s.1, splat),
+            builder.ins().fmul(s.2, splat),
+            builder.ins().fmul(s.3, splat),
+        )
+    }
+
+    /// Sedenion conjugate: negate all imaginary parts (e1-e15)
+    /// conj(e0 + e1*i1 + ... + e15*i15) = e0 - e1*i1 - ... - e15*i15
+    pub fn conjugate(
+        builder: &mut FunctionBuilder,
+        s: (Value, Value, Value, Value),
+    ) -> (Value, Value, Value, Value) {
+        // v0 = (e0, e1, e2, e3) -> (e0, -e1, -e2, -e3)
+        let e0 = builder.ins().extractlane(s.0, 0u8);
+        let e1 = builder.ins().extractlane(s.0, 1u8);
+        let e2 = builder.ins().extractlane(s.0, 2u8);
+        let e3 = builder.ins().extractlane(s.0, 3u8);
+
+        // Negate components separately to avoid borrow issues
+        let neg_e1 = builder.ins().fneg(e1);
+        let neg_e2 = builder.ins().fneg(e2);
+        let neg_e3 = builder.ins().fneg(e3);
+        let v0 = SimdVec::splat_f32x4(builder, e0, neg_e1, neg_e2, neg_e3);
+
+        // v1, v2, v3: negate all components
+        let v1 = builder.ins().fneg(s.1);
+        let v2 = builder.ins().fneg(s.2);
+        let v3 = builder.ins().fneg(s.3);
+
+        (v0, v1, v2, v3)
+    }
+
+    /// Sedenion norm squared: |s|² = e0² + e1² + ... + e15²
+    pub fn norm_squared(builder: &mut FunctionBuilder, s: (Value, Value, Value, Value)) -> Value {
+        // Sum of squares for each vector
+        let sq0 = builder.ins().fmul(s.0, s.0);
+        let sq1 = builder.ins().fmul(s.1, s.1);
+        let sq2 = builder.ins().fmul(s.2, s.2);
+        let sq3 = builder.ins().fmul(s.3, s.3);
+
+        // Horizontal sum for each F32X4
+        let sum0 = Self::horizontal_sum_f32x4(builder, sq0);
+        let sum1 = Self::horizontal_sum_f32x4(builder, sq1);
+        let sum2 = Self::horizontal_sum_f32x4(builder, sq2);
+        let sum3 = Self::horizontal_sum_f32x4(builder, sq3);
+
+        // Total sum
+        let sum01 = builder.ins().fadd(sum0, sum1);
+        let sum23 = builder.ins().fadd(sum2, sum3);
+        builder.ins().fadd(sum01, sum23)
+    }
+
+    /// Helper: horizontal sum of F32X4 components
+    fn horizontal_sum_f32x4(builder: &mut FunctionBuilder, v: Value) -> Value {
+        let e0 = builder.ins().extractlane(v, 0u8);
+        let e1 = builder.ins().extractlane(v, 1u8);
+        let e2 = builder.ins().extractlane(v, 2u8);
+        let e3 = builder.ins().extractlane(v, 3u8);
+
+        let sum01 = builder.ins().fadd(e0, e1);
+        let sum23 = builder.ins().fadd(e2, e3);
+        builder.ins().fadd(sum01, sum23)
+    }
+
+    /// Sedenion norm: |s| = sqrt(|s|²)
+    pub fn norm(builder: &mut FunctionBuilder, s: (Value, Value, Value, Value)) -> Value {
+        let norm_sq = Self::norm_squared(builder, s);
+        builder.ins().sqrt(norm_sq)
+    }
+
+    /// Sedenion normalize: s / |s|
+    pub fn normalize(
+        builder: &mut FunctionBuilder,
+        s: (Value, Value, Value, Value),
+    ) -> (Value, Value, Value, Value) {
+        let norm = Self::norm(builder, s);
+        let one = builder.ins().f32const(1.0);
+        let inv_norm = builder.ins().fdiv(one, norm);
+        Self::scale(builder, s, inv_norm)
+    }
+
+    /// Sedenion dot product: a · b = Σ(ai * bi)
+    pub fn dot(
+        builder: &mut FunctionBuilder,
+        a: (Value, Value, Value, Value),
+        b: (Value, Value, Value, Value),
+    ) -> Value {
+        let prod0 = builder.ins().fmul(a.0, b.0);
+        let prod1 = builder.ins().fmul(a.1, b.1);
+        let prod2 = builder.ins().fmul(a.2, b.2);
+        let prod3 = builder.ins().fmul(a.3, b.3);
+
+        let sum0 = Self::horizontal_sum_f32x4(builder, prod0);
+        let sum1 = Self::horizontal_sum_f32x4(builder, prod1);
+        let sum2 = Self::horizontal_sum_f32x4(builder, prod2);
+        let sum3 = Self::horizontal_sum_f32x4(builder, prod3);
+
+        let sum01 = builder.ins().fadd(sum0, sum1);
+        let sum23 = builder.ins().fadd(sum2, sum3);
+        builder.ins().fadd(sum01, sum23)
+    }
+
+    /// Check if sedenion is approximately zero (for zero divisor detection)
+    /// Returns 1.0 if norm_sq < epsilon, 0.0 otherwise
+    pub fn is_approx_zero(
+        builder: &mut FunctionBuilder,
+        s: (Value, Value, Value, Value),
+        epsilon: Value,
+    ) -> Value {
+        let norm_sq = Self::norm_squared(builder, s);
+        let is_zero = builder.ins().fcmp(
+            cranelift_codegen::ir::condcodes::FloatCC::LessThan,
+            norm_sq,
+            epsilon,
+        );
+        let one = builder.ins().f32const(1.0);
+        let zero = builder.ins().f32const(0.0);
+        builder.ins().select(is_zero, one, zero)
+    }
+
+    // NOTE: Sedenion multiplication (Cayley-Dickson) is complex (~500 FLOPs)
+    // and is better implemented in the stdlib or via GPU kernels.
+    // The SIMD version here provides component-wise operations for building
+    // blocks that can be composed for the full multiplication.
+}
+
 #[cfg(test)]
 mod tests {
     #[test]

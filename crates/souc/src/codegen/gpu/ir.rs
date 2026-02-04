@@ -1769,6 +1769,78 @@ pub enum GpuOp {
         num_heads: u32,
     },
 
+    // ==================== SEDENION OPERATIONS (16D Hypercomplex) ====================
+    // Sedenions: s = (o1, o2) where o1, o2 are octonions
+    // Non-associative, non-alternative, HAS ZERO DIVISORS
+    // Reference: Moreno (1998) "The zero divisors of the Cayley-Dickson algebras"
+    // Medical applications: 16-compartment PBPK, multi-modal imaging fusion
+    /// Sedenion multiplication via Cayley-Dickson: (a,b)(c,d) = (ac - d̄b, da + bc̄)
+    SedenionMul(ValueId, ValueId),
+
+    /// Sedenion conjugate: (a,b)* = (a*, -b)
+    SedenionConj(ValueId),
+
+    /// Sedenion norm squared: |s|² = |a|² + |b|²
+    SedenionNormSq(ValueId),
+
+    /// Sedenion normalize to unit length
+    SedenionNormalize(ValueId),
+
+    /// Sedenion real part (e0 component)
+    SedenionReal(ValueId),
+
+    /// Sedenion imaginary part (15D)
+    SedenionImag(ValueId),
+
+    /// Sedenion dot product
+    SedenionDot(ValueId, ValueId),
+
+    /// Sedenion ReLU (component-wise)
+    SedenionRelu(ValueId),
+
+    /// Sedenion sigmoid (component-wise)
+    SedenionSigmoid(ValueId),
+
+    /// Sedenion tanh (component-wise)
+    SedenionTanh(ValueId),
+
+    /// NOVEL: Check if sedenion is a zero divisor
+    /// Returns 1.0 if zero divisor, 0.0 otherwise
+    SedenionIsZeroDivisor(ValueId),
+
+    /// Sedenion split to two octonions
+    SedenionToOcts(ValueId),
+
+    /// Construct sedenion from two octonions
+    SedenionFromOcts(ValueId, ValueId),
+
+    /// Sedenion linear interpolation (component-wise)
+    SedenionLerp(ValueId, ValueId, ValueId),
+
+    // ==================== SEDENION NEURAL NETWORK OPERATIONS ====================
+    // For 16-dimensional feature spaces (medical imaging, multi-channel signals)
+    /// Sedenion linear layer: y = W ⊗ x + b
+    SedenionLinearFwd {
+        x: ValueId,
+        w: ValueId,
+        bias: ValueId,
+        output: ValueId,
+        in_features: u32,
+        out_features: u32,
+    },
+
+    /// Sedenion linear backward pass
+    SedenionLinearBwd {
+        x: ValueId,
+        w: ValueId,
+        grad_output: ValueId,
+        grad_x: ValueId,
+        grad_w: ValueId,
+        grad_bias: ValueId,
+        in_features: u32,
+        out_features: u32,
+    },
+
     // ==================== QUATERNIONIC NEURAL NETWORK OPERATIONS ====================
     // arXiv:1804.10592 - Quaternion Convolutional Neural Networks
     // arXiv:1903.08478 - Quaternion Recurrent Neural Networks

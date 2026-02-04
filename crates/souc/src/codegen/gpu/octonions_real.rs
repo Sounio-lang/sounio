@@ -65,12 +65,12 @@ pub fn gen_octonion_mul_kernel() -> GpuKernel {
         instructions: vec![
             // Load o1
             (ValueId(10), GpuOp::Param(0)),
-            (ValueId(11), GpuOp::GetElementPtr(ValueId(10), vec![ValueId(4)]),
+            (ValueId(11), GpuOp::GetElementPtr(ValueId(10), vec![ValueId(4)])),
             (ValueId(12), GpuOp::Load(ValueId(11), MemorySpace::Global)),
             
             // Load o2  
             (ValueId(20), GpuOp::Param(1)),
-            (ValueId(21), GpuOp::GetElementPtr(ValueId(20), vec![ValueId(4)]),
+            (ValueId(21), GpuOp::GetElementPtr(ValueId(20), vec![ValueId(4)])),
             (ValueId(22), GpuOp::Load(ValueId(21), MemorySpace::Global)),
             
             // Octonion multiplication nativa (Graves-Adcock)
@@ -78,7 +78,7 @@ pub fn gen_octonion_mul_kernel() -> GpuKernel {
             
             // Store resultado
             (ValueId(40), GpuOp::Param(2)),
-            (ValueId(41), GpuOp::GetElementPtr(ValueId(40), vec![ValueId(4)]),
+            (ValueId(41), GpuOp::GetElementPtr(ValueId(40), vec![ValueId(4)])),
             (ValueId(42), GpuOp::Store(ValueId(41), ValueId(30), MemorySpace::Global)),
         ],
         terminator: GpuTerminator::Br(BlockId(2)),
@@ -137,7 +137,7 @@ pub fn gen_octonion_norm_kernel() -> GpuKernel {
         instructions: vec![
             // Load o
             (ValueId(10), GpuOp::Param(0)),
-            (ValueId(11), GpuOp::GetElementPtr(ValueId(10), vec![ValueId(4)]),
+            (ValueId(11), GpuOp::GetElementPtr(ValueId(10), vec![ValueId(4)])),
             (ValueId(12), GpuOp::Load(ValueId(11), MemorySpace::Global)),
             
             // Operação nativa OctonionNormSq
@@ -145,7 +145,7 @@ pub fn gen_octonion_norm_kernel() -> GpuKernel {
             
             // Store norma
             (ValueId(14), GpuOp::Param(1)),
-            (ValueId(15), GpuOp::GetElementPtr(ValueId(14), vec![ValueId(4)]),
+            (ValueId(15), GpuOp::GetElementPtr(ValueId(14), vec![ValueId(4)])),
             (ValueId(16), GpuOp::Store(ValueId(15), ValueId(13), MemorySpace::Global)),
         ],
         terminator: GpuTerminator::Br(BlockId(2)),
@@ -199,7 +199,7 @@ pub fn gen_octonion_normalize_kernel() -> GpuKernel {
         instructions: vec![
             // Load o
             (ValueId(10), GpuOp::Param(0)),
-            (ValueId(11), GpuOp::GetElementPtr(ValueId(10), vec![ValueId(4)]),
+            (ValueId(11), GpuOp::GetElementPtr(ValueId(10), vec![ValueId(4)])),
             (ValueId(12), GpuOp::Load(ValueId(11), MemorySpace::Global)),
             
             // Operação nativa OctonionNormalize
@@ -207,7 +207,7 @@ pub fn gen_octonion_normalize_kernel() -> GpuKernel {
             
             // Store resultado normalizado
             (ValueId(20), GpuOp::Param(1)),
-            (ValueId(21), GpuOp::GetElementPtr(ValueId(20), vec![ValueId(4)]),
+            (ValueId(21), GpuOp::GetElementPtr(ValueId(20), vec![ValueId(4)])),
             (ValueId(22), GpuOp::Store(ValueId(21), ValueId(13), MemorySpace::Global)),
         ],
         terminator: GpuTerminator::Br(BlockId(2)),
@@ -261,7 +261,7 @@ pub fn gen_octonion_relu_kernel() -> GpuKernel {
         instructions: vec![
             // Load input
             (ValueId(10), GpuOp::Param(0)),
-            (ValueId(11), GpuOp::GetElementPtr(ValueId(10), vec![ValueId(4)]),
+            (ValueId(11), GpuOp::GetElementPtr(ValueId(10), vec![ValueId(4)])),
             (ValueId(12), GpuOp::Load(ValueId(11), MemorySpace::Global)),
             
             // Operação nativa OctonionReLU
@@ -269,7 +269,7 @@ pub fn gen_octonion_relu_kernel() -> GpuKernel {
             
             // Store output
             (ValueId(20), GpuOp::Param(1)),
-            (ValueId(21), GpuOp::GetElementPtr(ValueId(20), vec![ValueId(4)]),
+            (ValueId(21), GpuOp::GetElementPtr(ValueId(20), vec![ValueId(4)])),
             (ValueId(22), GpuOp::Store(ValueId(21), ValueId(13), MemorySpace::Global)),
         ],
         terminator: GpuTerminator::Br(BlockId(2)),
@@ -331,7 +331,7 @@ pub fn gen_octonion_linear_fwd_kernel() -> GpuKernel {
         instructions: vec![
             // y[out_idx] = Σ_i W[out_idx, i] ⊗ x[i] + b[out_idx]
             (ValueId(10), GpuOp::Param(2)), // bias ptr
-            (ValueId(11), GpuOp::GetElementPtr(ValueId(10), vec![ValueId(4)]),
+            (ValueId(11), GpuOp::GetElementPtr(ValueId(10), vec![ValueId(4)])),
             (ValueId(12), GpuOp::Load(ValueId(11), MemorySpace::Global)),
         ],
         terminator: GpuTerminator::Br(BlockId(2)),

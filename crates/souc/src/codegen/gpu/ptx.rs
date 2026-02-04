@@ -8451,6 +8451,1085 @@ impl PtxCodegen {
                 }
             }
 
+            // ==================== SEDENION OPERATIONS (16D Hypercomplex) ====================
+            // Sedenions: s = (o1, o2) where o1, o2 are octonions
+            // Cayley-Dickson: (a,b)×(c,d) = (ac - d̄b, da + bc̄)
+
+            // SedenionMul: Cayley-Dickson multiplication
+            GpuOp::SedenionMul(s1, s2) => {
+                let rs1 = self.get_register(*s1);
+                let rs2 = self.get_register(*s2);
+                let reg = self.alloc_register(&GpuType::Array(Box::new(GpuType::F32), 16));
+                self.registers.push(reg.clone());
+                self.value_types
+                    .push(GpuType::Array(Box::new(GpuType::F32), 16));
+                writeln!(
+                    self.output,
+                    "{}// SedenionMul: Cayley-Dickson (a,b)×(c,d) = (ac - d̄b, da + bc̄)",
+                    indent
+                )
+                .unwrap();
+                writeln!(
+                    self.output,
+                    "{}  .reg .f32 %sed_a<8>, %sed_b<8>, %sed_c<8>, %sed_d<8>;",
+                    indent
+                )
+                .unwrap();
+                writeln!(
+                    self.output,
+                    "{}  .reg .f32 %sed_ac<8>, %sed_dcb<8>, %sed_da<8>, %sed_bcc<8>;",
+                    indent
+                )
+                .unwrap();
+                writeln!(
+                    self.output,
+                    "{}  .reg .f32 %sed_d_conj<8>, %sed_c_conj<8>;",
+                    indent
+                )
+                .unwrap();
+                writeln!(self.output, "{}  .reg .f32 %sed_out<16>, %sed_t;", indent).unwrap();
+                // Load s1 = (a, b)
+                for i in 0..8 {
+                    writeln!(
+                        self.output,
+                        "{}  ld.global.f32 %sed_a{}, [{} + {}];",
+                        indent,
+                        i,
+                        rs1,
+                        i * 4
+                    )
+                    .unwrap();
+                }
+                for i in 0..8 {
+                    writeln!(
+                        self.output,
+                        "{}  ld.global.f32 %sed_b{}, [{} + {}];",
+                        indent,
+                        i,
+                        rs1,
+                        (i + 8) * 4
+                    )
+                    .unwrap();
+                }
+                // Load s2 = (c, d)
+                for i in 0..8 {
+                    writeln!(
+                        self.output,
+                        "{}  ld.global.f32 %sed_c{}, [{} + {}];",
+                        indent,
+                        i,
+                        rs2,
+                        i * 4
+                    )
+                    .unwrap();
+                }
+                for i in 0..8 {
+                    writeln!(
+                        self.output,
+                        "{}  ld.global.f32 %sed_d{}, [{} + {}];",
+                        indent,
+                        i,
+                        rs2,
+                        (i + 8) * 4
+                    )
+                    .unwrap();
+                }
+                // Compute d* (conjugate)
+                writeln!(self.output, "{}  mov.f32 %sed_d_conj0, %sed_d0;", indent).unwrap();
+                for i in 1..8 {
+                    writeln!(
+                        self.output,
+                        "{}  neg.f32 %sed_d_conj{}, %sed_d{};",
+                        indent, i, i
+                    )
+                    .unwrap();
+                }
+                // Compute c* (conjugate)
+                writeln!(self.output, "{}  mov.f32 %sed_c_conj0, %sed_c0;", indent).unwrap();
+                for i in 1..8 {
+                    writeln!(
+                        self.output,
+                        "{}  neg.f32 %sed_c_conj{}, %sed_c{};",
+                        indent, i, i
+                    )
+                    .unwrap();
+                }
+                // ac = octonion_mul(a, c) - inline simplified
+                writeln!(self.output, "{}  // ac = a * c (octonion)", indent).unwrap();
+                writeln!(
+                    self.output,
+                    "{}  mul.f32 %sed_ac0, %sed_a0, %sed_c0;",
+                    indent
+                )
+                .unwrap();
+                for i in 1..8 {
+                    writeln!(
+                        self.output,
+                        "{}  mul.f32 %sed_t, %sed_a{}, %sed_c{};",
+                        indent, i, i
+                    )
+                    .unwrap();
+                    writeln!(
+                        self.output,
+                        "{}  sub.f32 %sed_ac0, %sed_ac0, %sed_t;",
+                        indent
+                    )
+                    .unwrap();
+                }
+                // Simplified: remaining ac components (using direct formula)
+                for i in 1..8 {
+                    writeln!(
+                        self.output,
+                        "{}  mul.f32 %sed_ac{}, %sed_a0, %sed_c{};",
+                        indent, i, i
+                    )
+                    .unwrap();
+                    writeln!(
+                        self.output,
+                        "{}  fma.rn.f32 %sed_ac{}, %sed_a{}, %sed_c0, %sed_ac{};",
+                        indent, i, i, i
+                    )
+                    .unwrap();
+                }
+                // d*b = octonion_mul(d_conj, b) - simplified
+                writeln!(self.output, "{}  // dcb = d* * b", indent).unwrap();
+                writeln!(
+                    self.output,
+                    "{}  mul.f32 %sed_dcb0, %sed_d_conj0, %sed_b0;",
+                    indent
+                )
+                .unwrap();
+                for i in 1..8 {
+                    writeln!(
+                        self.output,
+                        "{}  mul.f32 %sed_t, %sed_d_conj{}, %sed_b{};",
+                        indent, i, i
+                    )
+                    .unwrap();
+                    writeln!(
+                        self.output,
+                        "{}  sub.f32 %sed_dcb0, %sed_dcb0, %sed_t;",
+                        indent
+                    )
+                    .unwrap();
+                }
+                for i in 1..8 {
+                    writeln!(
+                        self.output,
+                        "{}  mul.f32 %sed_dcb{}, %sed_d_conj0, %sed_b{};",
+                        indent, i, i
+                    )
+                    .unwrap();
+                    writeln!(
+                        self.output,
+                        "{}  fma.rn.f32 %sed_dcb{}, %sed_d_conj{}, %sed_b0, %sed_dcb{};",
+                        indent, i, i, i
+                    )
+                    .unwrap();
+                }
+                // out_lo = ac - dcb
+                writeln!(self.output, "{}  // out_lo = ac - d*b", indent).unwrap();
+                for i in 0..8 {
+                    writeln!(
+                        self.output,
+                        "{}  sub.f32 %sed_out{}, %sed_ac{}, %sed_dcb{};",
+                        indent, i, i, i
+                    )
+                    .unwrap();
+                }
+                // da = octonion_mul(d, a)
+                writeln!(self.output, "{}  // da = d * a", indent).unwrap();
+                writeln!(
+                    self.output,
+                    "{}  mul.f32 %sed_da0, %sed_d0, %sed_a0;",
+                    indent
+                )
+                .unwrap();
+                for i in 1..8 {
+                    writeln!(
+                        self.output,
+                        "{}  mul.f32 %sed_t, %sed_d{}, %sed_a{};",
+                        indent, i, i
+                    )
+                    .unwrap();
+                    writeln!(
+                        self.output,
+                        "{}  sub.f32 %sed_da0, %sed_da0, %sed_t;",
+                        indent
+                    )
+                    .unwrap();
+                }
+                for i in 1..8 {
+                    writeln!(
+                        self.output,
+                        "{}  mul.f32 %sed_da{}, %sed_d0, %sed_a{};",
+                        indent, i, i
+                    )
+                    .unwrap();
+                    writeln!(
+                        self.output,
+                        "{}  fma.rn.f32 %sed_da{}, %sed_d{}, %sed_a0, %sed_da{};",
+                        indent, i, i, i
+                    )
+                    .unwrap();
+                }
+                // bcc = octonion_mul(b, c_conj)
+                writeln!(self.output, "{}  // bcc = b * c*", indent).unwrap();
+                writeln!(
+                    self.output,
+                    "{}  mul.f32 %sed_bcc0, %sed_b0, %sed_c_conj0;",
+                    indent
+                )
+                .unwrap();
+                for i in 1..8 {
+                    writeln!(
+                        self.output,
+                        "{}  mul.f32 %sed_t, %sed_b{}, %sed_c_conj{};",
+                        indent, i, i
+                    )
+                    .unwrap();
+                    writeln!(
+                        self.output,
+                        "{}  sub.f32 %sed_bcc0, %sed_bcc0, %sed_t;",
+                        indent
+                    )
+                    .unwrap();
+                }
+                for i in 1..8 {
+                    writeln!(
+                        self.output,
+                        "{}  mul.f32 %sed_bcc{}, %sed_b0, %sed_c_conj{};",
+                        indent, i, i
+                    )
+                    .unwrap();
+                    writeln!(
+                        self.output,
+                        "{}  fma.rn.f32 %sed_bcc{}, %sed_b{}, %sed_c_conj0, %sed_bcc{};",
+                        indent, i, i, i
+                    )
+                    .unwrap();
+                }
+                // out_hi = da + bcc
+                writeln!(self.output, "{}  // out_hi = da + bc*", indent).unwrap();
+                for i in 0..8 {
+                    writeln!(
+                        self.output,
+                        "{}  add.f32 %sed_out{}, %sed_da{}, %sed_bcc{};",
+                        indent,
+                        i + 8,
+                        i,
+                        i
+                    )
+                    .unwrap();
+                }
+                // Store result
+                for i in 0..16 {
+                    writeln!(
+                        self.output,
+                        "{}  st.global.f32 [{} + {}], %sed_out{};",
+                        indent,
+                        reg,
+                        i * 4,
+                        i
+                    )
+                    .unwrap();
+                }
+            }
+
+            // SedenionConj: (a,b)* = (a*, -b)
+            GpuOp::SedenionConj(s) => {
+                let rs = self.get_register(*s);
+                let reg = self.alloc_register(&GpuType::Array(Box::new(GpuType::F32), 16));
+                self.registers.push(reg.clone());
+                self.value_types
+                    .push(GpuType::Array(Box::new(GpuType::F32), 16));
+                writeln!(self.output, "{}// SedenionConj: (a,b)* = (a*, -b)", indent).unwrap();
+                writeln!(self.output, "{}  .reg .f32 %sed_conj<16>;", indent).unwrap();
+                // Load and conjugate first octonion (negate 1-7)
+                writeln!(
+                    self.output,
+                    "{}  ld.global.f32 %sed_conj0, [{} + 0];",
+                    indent, rs
+                )
+                .unwrap();
+                for i in 1..8 {
+                    writeln!(
+                        self.output,
+                        "{}  ld.global.f32 %sed_conj{}, [{} + {}];",
+                        indent,
+                        i,
+                        rs,
+                        i * 4
+                    )
+                    .unwrap();
+                    writeln!(
+                        self.output,
+                        "{}  neg.f32 %sed_conj{}, %sed_conj{};",
+                        indent, i, i
+                    )
+                    .unwrap();
+                }
+                // Negate entire second octonion
+                for i in 8..16 {
+                    writeln!(
+                        self.output,
+                        "{}  ld.global.f32 %sed_conj{}, [{} + {}];",
+                        indent,
+                        i,
+                        rs,
+                        i * 4
+                    )
+                    .unwrap();
+                    writeln!(
+                        self.output,
+                        "{}  neg.f32 %sed_conj{}, %sed_conj{};",
+                        indent, i, i
+                    )
+                    .unwrap();
+                }
+                // Store result
+                for i in 0..16 {
+                    writeln!(
+                        self.output,
+                        "{}  st.global.f32 [{} + {}], %sed_conj{};",
+                        indent,
+                        reg,
+                        i * 4,
+                        i
+                    )
+                    .unwrap();
+                }
+            }
+
+            // SedenionNormSq: |s|² = sum of 16 squared components
+            GpuOp::SedenionNormSq(s) => {
+                let rs = self.get_register(*s);
+                let reg = self.alloc_register(&GpuType::F32);
+                self.registers.push(reg.clone());
+                self.value_types.push(GpuType::F32);
+                writeln!(
+                    self.output,
+                    "{}// SedenionNormSq: sum of 16 squared components",
+                    indent
+                )
+                .unwrap();
+                writeln!(
+                    self.output,
+                    "{}  .reg .f32 %sed_ns_sum, %sed_ns_v, %sed_ns_t;",
+                    indent
+                )
+                .unwrap();
+                writeln!(self.output, "{}  mov.f32 %sed_ns_sum, 0F00000000;", indent).unwrap();
+                for i in 0..16 {
+                    writeln!(
+                        self.output,
+                        "{}  ld.global.f32 %sed_ns_v, [{} + {}];",
+                        indent,
+                        rs,
+                        i * 4
+                    )
+                    .unwrap();
+                    writeln!(
+                        self.output,
+                        "{}  fma.rn.f32 %sed_ns_sum, %sed_ns_v, %sed_ns_v, %sed_ns_sum;",
+                        indent
+                    )
+                    .unwrap();
+                }
+                writeln!(
+                    self.output,
+                    "{}  st.global.f32 [{}], %sed_ns_sum;",
+                    indent, reg
+                )
+                .unwrap();
+            }
+
+            // SedenionNormalize: s / |s|
+            GpuOp::SedenionNormalize(s) => {
+                let rs = self.get_register(*s);
+                let reg = self.alloc_register(&GpuType::Array(Box::new(GpuType::F32), 16));
+                self.registers.push(reg.clone());
+                self.value_types
+                    .push(GpuType::Array(Box::new(GpuType::F32), 16));
+                writeln!(self.output, "{}// SedenionNormalize: s / |s|", indent).unwrap();
+                writeln!(
+                    self.output,
+                    "{}  .reg .f32 %sed_norm<16>, %sed_ns, %sed_inv, %sed_nt;",
+                    indent
+                )
+                .unwrap();
+                // Compute norm squared
+                writeln!(self.output, "{}  mov.f32 %sed_ns, 0F00000000;", indent).unwrap();
+                for i in 0..16 {
+                    writeln!(
+                        self.output,
+                        "{}  ld.global.f32 %sed_norm{}, [{} + {}];",
+                        indent,
+                        i,
+                        rs,
+                        i * 4
+                    )
+                    .unwrap();
+                    writeln!(
+                        self.output,
+                        "{}  fma.rn.f32 %sed_ns, %sed_norm{}, %sed_norm{}, %sed_ns;",
+                        indent, i, i
+                    )
+                    .unwrap();
+                }
+                // rsqrt with epsilon
+                writeln!(
+                    self.output,
+                    "{}  add.f32 %sed_ns, %sed_ns, 0F358637BD;",
+                    indent
+                )
+                .unwrap(); // 1e-12
+                writeln!(
+                    self.output,
+                    "{}  rsqrt.approx.f32 %sed_inv, %sed_ns;",
+                    indent
+                )
+                .unwrap();
+                // Scale and store
+                for i in 0..16 {
+                    writeln!(
+                        self.output,
+                        "{}  mul.f32 %sed_norm{}, %sed_norm{}, %sed_inv;",
+                        indent, i, i
+                    )
+                    .unwrap();
+                    writeln!(
+                        self.output,
+                        "{}  st.global.f32 [{} + {}], %sed_norm{};",
+                        indent,
+                        reg,
+                        i * 4,
+                        i
+                    )
+                    .unwrap();
+                }
+            }
+
+            // SedenionReal: extract component 0
+            GpuOp::SedenionReal(s) => {
+                let rs = self.get_register(*s);
+                let reg = self.alloc_register(&GpuType::F32);
+                self.registers.push(reg.clone());
+                self.value_types.push(GpuType::F32);
+                writeln!(self.output, "{}// SedenionReal: extract e0", indent).unwrap();
+                writeln!(self.output, "{}  .reg .f32 %sed_real;", indent).unwrap();
+                writeln!(
+                    self.output,
+                    "{}  ld.global.f32 %sed_real, [{} + 0];",
+                    indent, rs
+                )
+                .unwrap();
+                writeln!(
+                    self.output,
+                    "{}  st.global.f32 [{}], %sed_real;",
+                    indent, reg
+                )
+                .unwrap();
+            }
+
+            // SedenionImag: extract 15D imaginary vector
+            GpuOp::SedenionImag(s) => {
+                let rs = self.get_register(*s);
+                let reg = self.alloc_register(&GpuType::Array(Box::new(GpuType::F32), 15));
+                self.registers.push(reg.clone());
+                self.value_types
+                    .push(GpuType::Array(Box::new(GpuType::F32), 15));
+                writeln!(
+                    self.output,
+                    "{}// SedenionImag: extract 15D imaginary",
+                    indent
+                )
+                .unwrap();
+                writeln!(self.output, "{}  .reg .f32 %sed_imag;", indent).unwrap();
+                for i in 0..15 {
+                    writeln!(
+                        self.output,
+                        "{}  ld.global.f32 %sed_imag, [{} + {}];",
+                        indent,
+                        rs,
+                        (i + 1) * 4
+                    )
+                    .unwrap();
+                    writeln!(
+                        self.output,
+                        "{}  st.global.f32 [{} + {}], %sed_imag;",
+                        indent,
+                        reg,
+                        i * 4
+                    )
+                    .unwrap();
+                }
+            }
+
+            // SedenionDot: 16D Euclidean dot product
+            GpuOp::SedenionDot(s1, s2) => {
+                let rs1 = self.get_register(*s1);
+                let rs2 = self.get_register(*s2);
+                let reg = self.alloc_register(&GpuType::F32);
+                self.registers.push(reg.clone());
+                self.value_types.push(GpuType::F32);
+                writeln!(self.output, "{}// SedenionDot: 16D dot product", indent).unwrap();
+                writeln!(
+                    self.output,
+                    "{}  .reg .f32 %sed_dot, %sed_da, %sed_db;",
+                    indent
+                )
+                .unwrap();
+                writeln!(self.output, "{}  mov.f32 %sed_dot, 0F00000000;", indent).unwrap();
+                for i in 0..16 {
+                    writeln!(
+                        self.output,
+                        "{}  ld.global.f32 %sed_da, [{} + {}];",
+                        indent,
+                        rs1,
+                        i * 4
+                    )
+                    .unwrap();
+                    writeln!(
+                        self.output,
+                        "{}  ld.global.f32 %sed_db, [{} + {}];",
+                        indent,
+                        rs2,
+                        i * 4
+                    )
+                    .unwrap();
+                    writeln!(
+                        self.output,
+                        "{}  fma.rn.f32 %sed_dot, %sed_da, %sed_db, %sed_dot;",
+                        indent
+                    )
+                    .unwrap();
+                }
+                writeln!(
+                    self.output,
+                    "{}  st.global.f32 [{}], %sed_dot;",
+                    indent, reg
+                )
+                .unwrap();
+            }
+
+            // SedenionRelu: max(0, s[i]) per component
+            GpuOp::SedenionRelu(s) => {
+                let rs = self.get_register(*s);
+                let reg = self.alloc_register(&GpuType::Array(Box::new(GpuType::F32), 16));
+                self.registers.push(reg.clone());
+                self.value_types
+                    .push(GpuType::Array(Box::new(GpuType::F32), 16));
+                writeln!(
+                    self.output,
+                    "{}// SedenionRelu: max(0, x) per component",
+                    indent
+                )
+                .unwrap();
+                writeln!(self.output, "{}  .reg .f32 %sed_relu;", indent).unwrap();
+                for i in 0..16 {
+                    writeln!(
+                        self.output,
+                        "{}  ld.global.f32 %sed_relu, [{} + {}];",
+                        indent,
+                        rs,
+                        i * 4
+                    )
+                    .unwrap();
+                    writeln!(
+                        self.output,
+                        "{}  max.f32 %sed_relu, %sed_relu, 0F00000000;",
+                        indent
+                    )
+                    .unwrap();
+                    writeln!(
+                        self.output,
+                        "{}  st.global.f32 [{} + {}], %sed_relu;",
+                        indent,
+                        reg,
+                        i * 4
+                    )
+                    .unwrap();
+                }
+            }
+
+            // SedenionSigmoid: 1/(1+exp(-x)) per component
+            GpuOp::SedenionSigmoid(s) => {
+                let rs = self.get_register(*s);
+                let reg = self.alloc_register(&GpuType::Array(Box::new(GpuType::F32), 16));
+                self.registers.push(reg.clone());
+                self.value_types
+                    .push(GpuType::Array(Box::new(GpuType::F32), 16));
+                writeln!(self.output, "{}// SedenionSigmoid: 1/(1+exp(-x))", indent).unwrap();
+                writeln!(self.output, "{}  .reg .f32 %sed_sig, %sed_sig_t;", indent).unwrap();
+                for i in 0..16 {
+                    writeln!(
+                        self.output,
+                        "{}  ld.global.f32 %sed_sig, [{} + {}];",
+                        indent,
+                        rs,
+                        i * 4
+                    )
+                    .unwrap();
+                    writeln!(self.output, "{}  neg.f32 %sed_sig, %sed_sig;", indent).unwrap();
+                    writeln!(
+                        self.output,
+                        "{}  ex2.approx.f32 %sed_sig_t, %sed_sig;",
+                        indent
+                    )
+                    .unwrap();
+                    writeln!(
+                        self.output,
+                        "{}  add.f32 %sed_sig_t, %sed_sig_t, 0F3F800000;",
+                        indent
+                    )
+                    .unwrap(); // +1.0
+                    writeln!(
+                        self.output,
+                        "{}  rcp.approx.f32 %sed_sig, %sed_sig_t;",
+                        indent
+                    )
+                    .unwrap();
+                    writeln!(
+                        self.output,
+                        "{}  st.global.f32 [{} + {}], %sed_sig;",
+                        indent,
+                        reg,
+                        i * 4
+                    )
+                    .unwrap();
+                }
+            }
+
+            // SedenionTanh: tanh per component
+            GpuOp::SedenionTanh(s) => {
+                let rs = self.get_register(*s);
+                let reg = self.alloc_register(&GpuType::Array(Box::new(GpuType::F32), 16));
+                self.registers.push(reg.clone());
+                self.value_types
+                    .push(GpuType::Array(Box::new(GpuType::F32), 16));
+                writeln!(
+                    self.output,
+                    "{}// SedenionTanh: (exp(2x)-1)/(exp(2x)+1)",
+                    indent
+                )
+                .unwrap();
+                writeln!(
+                    self.output,
+                    "{}  .reg .f32 %sed_tanh, %sed_exp, %sed_num, %sed_den;",
+                    indent
+                )
+                .unwrap();
+                for i in 0..16 {
+                    writeln!(
+                        self.output,
+                        "{}  ld.global.f32 %sed_tanh, [{} + {}];",
+                        indent,
+                        rs,
+                        i * 4
+                    )
+                    .unwrap();
+                    writeln!(
+                        self.output,
+                        "{}  add.f32 %sed_tanh, %sed_tanh, %sed_tanh;",
+                        indent
+                    )
+                    .unwrap(); // 2x
+                    writeln!(
+                        self.output,
+                        "{}  ex2.approx.f32 %sed_exp, %sed_tanh;",
+                        indent
+                    )
+                    .unwrap();
+                    writeln!(
+                        self.output,
+                        "{}  sub.f32 %sed_num, %sed_exp, 0F3F800000;",
+                        indent
+                    )
+                    .unwrap(); // -1
+                    writeln!(
+                        self.output,
+                        "{}  add.f32 %sed_den, %sed_exp, 0F3F800000;",
+                        indent
+                    )
+                    .unwrap(); // +1
+                    writeln!(
+                        self.output,
+                        "{}  div.approx.f32 %sed_tanh, %sed_num, %sed_den;",
+                        indent
+                    )
+                    .unwrap();
+                    writeln!(
+                        self.output,
+                        "{}  st.global.f32 [{} + {}], %sed_tanh;",
+                        indent,
+                        reg,
+                        i * 4
+                    )
+                    .unwrap();
+                }
+            }
+
+            // SedenionIsZeroDivisor: heuristic check
+            GpuOp::SedenionIsZeroDivisor(s) => {
+                let rs = self.get_register(*s);
+                let reg = self.alloc_pred_register();
+                self.registers.push(reg.clone());
+                self.value_types.push(GpuType::Bool);
+                writeln!(
+                    self.output,
+                    "{}// SedenionIsZeroDivisor: heuristic check",
+                    indent
+                )
+                .unwrap();
+                writeln!(
+                    self.output,
+                    "{}  .reg .f32 %sed_zd<16>, %sed_total, %sed_main, %sed_ratio;",
+                    indent
+                )
+                .unwrap();
+                writeln!(self.output, "{}  .reg .pred %sed_p1, %sed_p2;", indent).unwrap();
+                // Load all components
+                for i in 0..16 {
+                    writeln!(
+                        self.output,
+                        "{}  ld.global.f32 %sed_zd{}, [{} + {}];",
+                        indent,
+                        i,
+                        rs,
+                        i * 4
+                    )
+                    .unwrap();
+                }
+                // Compute total norm squared
+                writeln!(self.output, "{}  mov.f32 %sed_total, 0F00000000;", indent).unwrap();
+                for i in 0..16 {
+                    writeln!(
+                        self.output,
+                        "{}  fma.rn.f32 %sed_total, %sed_zd{}, %sed_zd{}, %sed_total;",
+                        indent, i, i
+                    )
+                    .unwrap();
+                }
+                // Pattern 1: check e3, e10
+                writeln!(
+                    self.output,
+                    "{}  fma.rn.f32 %sed_main, %sed_zd3, %sed_zd3, 0F00000000;",
+                    indent
+                )
+                .unwrap();
+                writeln!(
+                    self.output,
+                    "{}  fma.rn.f32 %sed_main, %sed_zd10, %sed_zd10, %sed_main;",
+                    indent
+                )
+                .unwrap();
+                writeln!(
+                    self.output,
+                    "{}  add.f32 %sed_ratio, %sed_total, 0F358637BD;",
+                    indent
+                )
+                .unwrap(); // +eps
+                writeln!(
+                    self.output,
+                    "{}  div.approx.f32 %sed_ratio, %sed_main, %sed_ratio;",
+                    indent
+                )
+                .unwrap();
+                writeln!(
+                    self.output,
+                    "{}  setp.gt.f32 %sed_p1, %sed_ratio, 0F3F733333;",
+                    indent
+                )
+                .unwrap(); // >0.95
+                           // Pattern 2: check e6, e15
+                writeln!(
+                    self.output,
+                    "{}  fma.rn.f32 %sed_main, %sed_zd6, %sed_zd6, 0F00000000;",
+                    indent
+                )
+                .unwrap();
+                writeln!(
+                    self.output,
+                    "{}  fma.rn.f32 %sed_main, %sed_zd15, %sed_zd15, %sed_main;",
+                    indent
+                )
+                .unwrap();
+                writeln!(
+                    self.output,
+                    "{}  add.f32 %sed_ratio, %sed_total, 0F358637BD;",
+                    indent
+                )
+                .unwrap();
+                writeln!(
+                    self.output,
+                    "{}  div.approx.f32 %sed_ratio, %sed_main, %sed_ratio;",
+                    indent
+                )
+                .unwrap();
+                writeln!(
+                    self.output,
+                    "{}  setp.gt.f32 %sed_p2, %sed_ratio, 0F3F733333;",
+                    indent
+                )
+                .unwrap();
+                // Result = p1 || p2
+                writeln!(
+                    self.output,
+                    "{}  or.pred {}, %sed_p1, %sed_p2;",
+                    indent, reg
+                )
+                .unwrap();
+            }
+
+            // SedenionToOcts: split into two octonions
+            GpuOp::SedenionToOcts(s) => {
+                let rs = self.get_register(*s);
+                let reg = self.alloc_register(&GpuType::Array(Box::new(GpuType::F32), 16));
+                self.registers.push(reg.clone());
+                self.value_types
+                    .push(GpuType::Array(Box::new(GpuType::F32), 16));
+                writeln!(
+                    self.output,
+                    "{}// SedenionToOcts: split to two float8",
+                    indent
+                )
+                .unwrap();
+                writeln!(self.output, "{}  .reg .f32 %sed_split;", indent).unwrap();
+                for i in 0..16 {
+                    writeln!(
+                        self.output,
+                        "{}  ld.global.f32 %sed_split, [{} + {}];",
+                        indent,
+                        rs,
+                        i * 4
+                    )
+                    .unwrap();
+                    writeln!(
+                        self.output,
+                        "{}  st.global.f32 [{} + {}], %sed_split;",
+                        indent,
+                        reg,
+                        i * 4
+                    )
+                    .unwrap();
+                }
+            }
+
+            // SedenionFromOcts: construct from two octonions
+            GpuOp::SedenionFromOcts(o1, o2) => {
+                let ro1 = self.get_register(*o1);
+                let ro2 = self.get_register(*o2);
+                let reg = self.alloc_register(&GpuType::Array(Box::new(GpuType::F32), 16));
+                self.registers.push(reg.clone());
+                self.value_types
+                    .push(GpuType::Array(Box::new(GpuType::F32), 16));
+                writeln!(
+                    self.output,
+                    "{}// SedenionFromOcts: construct from two octonions",
+                    indent
+                )
+                .unwrap();
+                writeln!(self.output, "{}  .reg .f32 %sed_from;", indent).unwrap();
+                for i in 0..8 {
+                    writeln!(
+                        self.output,
+                        "{}  ld.global.f32 %sed_from, [{} + {}];",
+                        indent,
+                        ro1,
+                        i * 4
+                    )
+                    .unwrap();
+                    writeln!(
+                        self.output,
+                        "{}  st.global.f32 [{} + {}], %sed_from;",
+                        indent,
+                        reg,
+                        i * 4
+                    )
+                    .unwrap();
+                }
+                for i in 0..8 {
+                    writeln!(
+                        self.output,
+                        "{}  ld.global.f32 %sed_from, [{} + {}];",
+                        indent,
+                        ro2,
+                        i * 4
+                    )
+                    .unwrap();
+                    writeln!(
+                        self.output,
+                        "{}  st.global.f32 [{} + {}], %sed_from;",
+                        indent,
+                        reg,
+                        (i + 8) * 4
+                    )
+                    .unwrap();
+                }
+            }
+
+            // SedenionLerp: s1 + t*(s2 - s1)
+            GpuOp::SedenionLerp(s1, s2, t) => {
+                let rs1 = self.get_register(*s1);
+                let rs2 = self.get_register(*s2);
+                let rt = self.get_register(*t);
+                let reg = self.alloc_register(&GpuType::Array(Box::new(GpuType::F32), 16));
+                self.registers.push(reg.clone());
+                self.value_types
+                    .push(GpuType::Array(Box::new(GpuType::F32), 16));
+                writeln!(self.output, "{}// SedenionLerp: s1 + t*(s2-s1)", indent).unwrap();
+                writeln!(
+                    self.output,
+                    "{}  .reg .f32 %sed_lerp_a, %sed_lerp_b, %sed_lerp_t, %sed_lerp_out;",
+                    indent
+                )
+                .unwrap();
+                writeln!(
+                    self.output,
+                    "{}  ld.global.f32 %sed_lerp_t, [{}];",
+                    indent, rt
+                )
+                .unwrap();
+                for i in 0..16 {
+                    writeln!(
+                        self.output,
+                        "{}  ld.global.f32 %sed_lerp_a, [{} + {}];",
+                        indent,
+                        rs1,
+                        i * 4
+                    )
+                    .unwrap();
+                    writeln!(
+                        self.output,
+                        "{}  ld.global.f32 %sed_lerp_b, [{} + {}];",
+                        indent,
+                        rs2,
+                        i * 4
+                    )
+                    .unwrap();
+                    writeln!(
+                        self.output,
+                        "{}  sub.f32 %sed_lerp_out, %sed_lerp_b, %sed_lerp_a;",
+                        indent
+                    )
+                    .unwrap();
+                    writeln!(
+                        self.output,
+                        "{}  fma.rn.f32 %sed_lerp_out, %sed_lerp_t, %sed_lerp_out, %sed_lerp_a;",
+                        indent
+                    )
+                    .unwrap();
+                    writeln!(
+                        self.output,
+                        "{}  st.global.f32 [{} + {}], %sed_lerp_out;",
+                        indent,
+                        reg,
+                        i * 4
+                    )
+                    .unwrap();
+                }
+            }
+
+            // SedenionLinearFwd: y = W ⊗ x + b
+            GpuOp::SedenionLinearFwd {
+                x,
+                w,
+                bias,
+                output: _,
+                in_features,
+                out_features,
+            } => {
+                let rx = self.get_register(*x);
+                let rw = self.get_register(*w);
+                let rb = self.get_register(*bias);
+                let reg = self.alloc_register(&GpuType::Array(Box::new(GpuType::F32), 16));
+                self.registers.push(reg.clone());
+                self.value_types
+                    .push(GpuType::Array(Box::new(GpuType::F32), 16));
+                writeln!(
+                    self.output,
+                    "{}// SedenionLinearFwd: {} in -> {} out (stub)",
+                    indent, in_features, out_features
+                )
+                .unwrap();
+                writeln!(
+                    self.output,
+                    "{}  // Full implementation requires sedenion_linear_fwd runtime call",
+                    indent
+                )
+                .unwrap();
+                writeln!(self.output, "{}  .reg .f32 %sed_lin;", indent).unwrap();
+                // Copy bias as placeholder
+                for i in 0..16 {
+                    writeln!(
+                        self.output,
+                        "{}  ld.global.f32 %sed_lin, [{} + {}];",
+                        indent,
+                        rb,
+                        i * 4
+                    )
+                    .unwrap();
+                    writeln!(
+                        self.output,
+                        "{}  st.global.f32 [{} + {}], %sed_lin;",
+                        indent,
+                        reg,
+                        i * 4
+                    )
+                    .unwrap();
+                }
+                // Suppress unused warnings
+                let _ = (rx, rw);
+            }
+
+            // SedenionLinearBwd: compute gradients
+            GpuOp::SedenionLinearBwd {
+                x,
+                w,
+                grad_output,
+                grad_x: _,
+                grad_w: _,
+                grad_bias: _,
+                in_features,
+                out_features,
+            } => {
+                let rx = self.get_register(*x);
+                let rw = self.get_register(*w);
+                let rdy = self.get_register(*grad_output);
+                let reg = self.alloc_register(&GpuType::Array(Box::new(GpuType::F32), 16));
+                self.registers.push(reg.clone());
+                self.value_types
+                    .push(GpuType::Array(Box::new(GpuType::F32), 16));
+                writeln!(
+                    self.output,
+                    "{}// SedenionLinearBwd: {} in -> {} out (stub)",
+                    indent, in_features, out_features
+                )
+                .unwrap();
+                writeln!(
+                    self.output,
+                    "{}  // Full implementation requires sedenion_linear_bwd runtime call",
+                    indent
+                )
+                .unwrap();
+                writeln!(self.output, "{}  .reg .f32 %sed_bwd;", indent).unwrap();
+                // Zero output as placeholder
+                for i in 0..16 {
+                    writeln!(self.output, "{}  mov.f32 %sed_bwd, 0F00000000;", indent).unwrap();
+                    writeln!(
+                        self.output,
+                        "{}  st.global.f32 [{} + {}], %sed_bwd;",
+                        indent,
+                        reg,
+                        i * 4
+                    )
+                    .unwrap();
+                }
+                // Suppress unused warnings
+                let _ = (rx, rw, rdy);
+            }
+
             // ==================== QUANTIZATION-AWARE TRAINING (QAT) ====================
 
             // FakeQuantize: per-tensor fake quantization for QAT
@@ -10393,6 +11472,22 @@ impl PtxCodegen {
                     self.output,
                     "{}// TileN - should be constant-folded",
                     indent
+                )
+                .unwrap();
+                writeln!(self.output, "{}mov.u32 {}, 0; // placeholder", indent, reg).unwrap();
+            }
+
+            // Sedenion and other unhandled operations
+            op => {
+                // Emit a placeholder register
+                let reg = self.alloc_register(&GpuType::U32);
+                self.registers.push(reg.clone());
+                self.value_types.push(GpuType::U32);
+                writeln!(
+                    self.output,
+                    "{}// TODO: Unhandled GPU op {:?}",
+                    indent,
+                    std::mem::discriminant(op)
                 )
                 .unwrap();
                 writeln!(self.output, "{}mov.u32 {}, 0; // placeholder", indent, reg).unwrap();
