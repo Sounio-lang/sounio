@@ -711,6 +711,132 @@ fn read_binary_f32(path: str) -> [f32] with IO {
 }
 
 // ============================================================================
+// DATA VALIDATION FUNCTIONS
+// ============================================================================
+
+// Validates that selected bands match physics expectations
+// e.g., oxy-Hb band should be 540nm (±20nm tolerance)
+fn validate_band_selection(bands: [f32]) -> bool {
+    // Check that we have 16 bands
+    if len(bands) != 16 {
+        return false
+    }
+
+    let tolerance = 20.0  // nm tolerance around expected wavelength
+
+    // Expected wavelengths (from BAND_WAVELENGTHS_NM)
+    let expected = [
+        540.0,   // e0: Oxy-hemoglobin
+        580.0,   // e1: Deoxy-hemoglobin
+        650.0,   // e2: General absorption
+        700.0,   // e3: Red edge
+        750.0,   // e4: Tissue penetration
+        800.0,   // e5: Near-IR window
+        850.0,   // e6: Water weak
+        900.0,   // e7: Lipids start
+        970.0,   // e8: Water absorption
+        1050.0,  // e9: Deep tissue
+        1200.0,  // e10: Lipids strong
+        1300.0,  // e11: Collagen
+        1400.0,  // e12: Water strong
+        1500.0,  // e13: Lipids peak
+        1650.0,  // e14: C-H stretch
+        1700.0,  // e15: Lipids end
+    ]
+
+    // Check each band is within tolerance of expected
+    for i in 0..16 {
+        let deviation = abs(bands[i] - expected[i])
+        if deviation > tolerance {
+            return false
+        }
+    }
+
+    true
+}
+
+// Validates that class centroids are sufficiently separated in 16D space
+// Minimum separation ensures classes are distinguishable
+fn validate_tissue_centroids(centroids: [Sedenion]) -> bool {
+    let min_separation = 0.3  // Minimum norm distance
+
+    // Need at least 2 centroids to compare
+    if len(centroids) < 2 {
+        return false
+    }
+
+    // Check all pairwise distances
+    for i in 0..len(centroids) {
+        for j in (i+1)..len(centroids) {
+            let diff = sedenion_sub(centroids[i], centroids[j])
+            let dist = sedenion_norm(diff)
+
+            // All pairs must be sufficiently separated
+            if dist < min_separation {
+                return false
+            }
+        }
+    }
+
+    true
+}
+
+// Validates that computed spectral features are within physiological ranges
+fn validate_spectral_features(oxygenation: f32, lipid_ratio: f32, scatter: f32) -> bool {
+    // Oxygenation ratio: 0.5-0.95 (50-95%)
+    let oxy_valid = oxygenation >= 0.5 && oxygenation <= 0.95
+
+    // Lipid-water ratio: 0.1-2.0 (reasonable tissue composition)
+    let lipid_valid = lipid_ratio >= 0.1 && lipid_ratio <= 2.0
+
+    // Scatter index: 0.0-1.0 (normalized)
+    let scatter_valid = scatter >= 0.0 && scatter <= 1.0
+
+    oxy_valid && lipid_valid && scatter_valid
+}
+
+// Validates complete HSI cube for NaN/Inf and value ranges
+fn validate_hsi_cube(hsi: HSICube) -> bool {
+    // Check dimensions are positive
+    if hsi.width <= 0 || hsi.height <= 0 || hsi.num_bands != 16 {
+        return false
+    }
+
+    // Check that pixel data exists and is reasonable
+    if len(hsi.data) != (hsi.width * hsi.height * 16) {
+        return false
+    }
+
+    // Check all pixel values are in reasonable range
+    var idx = 0
+    for y in 0..hsi.height {
+        for x in 0..hsi.width {
+            for b in 0..hsi.num_bands {
+                if idx >= len(hsi.data) {
+                    return false
+                }
+
+                let val = hsi.data[idx]
+
+                // Check reasonable range [0, 10] for normalized reflectance
+                if val < 0.0 || val > 10.0 {
+                    return false
+                }
+
+                idx = idx + 1
+            }
+        }
+    }
+
+    true
+}
+
+// Helper: Absolute value
+fn abs(x: f32) -> f32 {
+    if x < 0.0 { -x } else { x }
+}
+
+// ============================================================================
 // MODULE EXPORTS
 // ============================================================================
 
