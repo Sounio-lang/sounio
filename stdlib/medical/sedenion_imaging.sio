@@ -1,0 +1,496 @@
+// Sounio Standard Library: Multi-Modal Medical Imaging with Sedenions
+//
+// This module provides sedenion-based fusion of multiple imaging modalities.
+// Sedenions (16D hypercomplex numbers) naturally encode 16-channel data,
+// making them ideal for combining multiple imaging sequences or modalities.
+//
+// Applications:
+// - MRI multi-sequence fusion (T1, T2, FLAIR, DWI, ADC, etc.)
+// - PET/CT/SPECT registration and fusion
+// - Multi-spectral imaging analysis
+// - Radiomics feature extraction
+//
+// Channel Mapping (16 imaging modalities/sequences):
+//   e0  = T1-weighted MRI       e8  = Phase contrast
+//   e1  = T2-weighted MRI       e9  = Perfusion (CBF)
+//   e2  = FLAIR                 e10 = Diffusion tensor (FA)
+//   e3  = DWI (b=1000)          e11 = Susceptibility (SWI)
+//   e4  = ADC map               e12 = ASL (arterial spin)
+//   e5  = T1-contrast           e13 = PET-FDG
+//   e6  = T2*-weighted          e14 = SPECT
+//   e7  = Proton density        e15 = CT Hounsfield
+//
+// Mathematical Framework:
+// - Each voxel is represented as a sedenion
+// - Image operations preserve hypercomplex structure
+// - Fusion uses sedenion multiplication for cross-modal correlation
+//
+// References:
+// - Rathi et al. (2010) Multi-modal image registration
+// - Alexander et al. (2007) Diffusion tensor imaging
+// - Lambin et al. (2012) Radiomics
+
+use math/sedenion
+
+// Imaging modality indices
+let T1W: i32 = 0
+let T2W: i32 = 1
+let FLAIR: i32 = 2
+let DWI: i32 = 3
+let ADC: i32 = 4
+let T1C: i32 = 5
+let T2STAR: i32 = 6
+let PD: i32 = 7
+let PHASE: i32 = 8
+let CBF: i32 = 9
+let FA: i32 = 10
+let SWI: i32 = 11
+let ASL: i32 = 12
+let PET: i32 = 13
+let SPECT: i32 = 14
+let CT: i32 = 15
+
+// 3D image dimensions
+struct ImageDims {
+    width: i32,
+    height: i32,
+    depth: i32,
+    voxel_size_mm: [f32; 3],  // mm per voxel
+}
+
+// Sedenion-encoded voxel with 16 intensity channels
+struct MultiModalVoxel {
+    intensities: Sedenion,
+    position: [f32; 3],  // World coordinates (mm)
+}
+
+// 3D multi-modal image volume
+struct MultiModalImage {
+    dims: ImageDims,
+    // Flattened voxel array: index = z * (width * height) + y * width + x
+    voxels: [Sedenion],
+}
+
+// Create empty multi-modal image
+fn create_image(dims: ImageDims) -> MultiModalImage {
+    let n_voxels = dims.width * dims.height * dims.depth
+    var voxels: [Sedenion] = []
+
+    for i in 0..n_voxels {
+        voxels = voxels ++ [sedenion_zero()]
+    }
+
+    MultiModalImage {
+        dims: dims,
+        voxels: voxels,
+    }
+}
+
+// Get voxel index from 3D coordinates
+fn voxel_index(dims: ImageDims, x: i32, y: i32, z: i32) -> i32 {
+    z * (dims.width * dims.height) + y * dims.width + x
+}
+
+// Get voxel at position
+fn get_voxel(img: MultiModalImage, x: i32, y: i32, z: i32) -> Sedenion {
+    let idx = voxel_index(img.dims, x, y, z)
+    if idx >= 0 && idx < len(img.voxels) {
+        img.voxels[idx]
+    } else {
+        sedenion_zero()
+    }
+}
+
+// Set voxel at position (returns new image)
+fn set_voxel(img: MultiModalImage, x: i32, y: i32, z: i32, val: Sedenion) -> MultiModalImage {
+    let idx = voxel_index(img.dims, x, y, z)
+    var new_voxels = img.voxels
+
+    if idx >= 0 && idx < len(new_voxels) {
+        new_voxels[idx] = val
+    }
+
+    MultiModalImage {
+        dims: img.dims,
+        voxels: new_voxels,
+    }
+}
+
+// Load single modality into a channel
+fn load_modality(img: MultiModalImage, data: [f32], channel: i32) -> MultiModalImage {
+    var result = img
+
+    for i in 0..len(img.voxels) {
+        if i < len(data) {
+            let voxel = img.voxels[i]
+            let updated = sedenion_set_component(voxel, channel, data[i])
+            result.voxels[i] = updated
+        }
+    }
+
+    result
+}
+
+// Extract single modality as array
+fn extract_modality(img: MultiModalImage, channel: i32) -> [f32] {
+    var data: [f32] = []
+
+    for voxel in img.voxels {
+        data = data ++ [sedenion_get_component(voxel, channel)]
+    }
+
+    data
+}
+
+// Normalize intensities to [0, 1] range per channel
+fn normalize_image(img: MultiModalImage) -> MultiModalImage {
+    // Find min/max per channel
+    var mins: [f32; 16] = [1e30; 16]
+    var maxs: [f32; 16] = [-1e30; 16]
+
+    for voxel in img.voxels {
+        for c in 0..16 {
+            let val = sedenion_get_component(voxel, c)
+            if val < mins[c] { mins[c] = val }
+            if val > maxs[c] { maxs[c] = val }
+        }
+    }
+
+    // Normalize each voxel
+    var result = img
+
+    for i in 0..len(img.voxels) {
+        var normalized = img.voxels[i]
+        for c in 0..16 {
+            let val = sedenion_get_component(img.voxels[i], c)
+            let range = maxs[c] - mins[c]
+            if range > 0.0 {
+                let norm_val = (val - mins[c]) / range
+                normalized = sedenion_set_component(normalized, c, norm_val)
+            }
+        }
+        result.voxels[i] = normalized
+    }
+
+    result
+}
+
+// Compute sedenion-based feature: cross-modal correlation at voxel
+// Uses sedenion multiplication to capture inter-modality relationships
+fn compute_cross_modal_feature(voxel: Sedenion) -> f32 {
+    // Sedenion norm captures magnitude across all modalities
+    let norm = sedenion_norm(voxel)
+
+    // Sedenion self-multiplication reveals algebraic structure
+    let squared = sedenion_mul(voxel, voxel)
+    let squared_norm = sedenion_norm(squared)
+
+    // Feature: ratio reveals "coherence" of multi-modal signal
+    if norm > 0.0 {
+        squared_norm / (norm * norm)
+    } else {
+        0.0
+    }
+}
+
+// Compute gradient magnitude using sedenion operations
+fn compute_gradient_magnitude(img: MultiModalImage, x: i32, y: i32, z: i32) -> f32 {
+    // Central differences in each direction
+    let vx_plus = get_voxel(img, x + 1, y, z)
+    let vx_minus = get_voxel(img, x - 1, y, z)
+    let vy_plus = get_voxel(img, x, y + 1, z)
+    let vy_minus = get_voxel(img, x, y - 1, z)
+    let vz_plus = get_voxel(img, x, y, z + 1)
+    let vz_minus = get_voxel(img, x, y, z - 1)
+
+    let dx = sedenion_scale(sedenion_sub(vx_plus, vx_minus), 0.5)
+    let dy = sedenion_scale(sedenion_sub(vy_plus, vy_minus), 0.5)
+    let dz = sedenion_scale(sedenion_sub(vz_plus, vz_minus), 0.5)
+
+    // Total gradient as sedenion norm of gradient vector
+    let grad_sq = sedenion_norm_sq(dx) + sedenion_norm_sq(dy) + sedenion_norm_sq(dz)
+    sqrt(grad_sq)
+}
+
+// Apply 3x3x3 Gaussian smoothing
+fn gaussian_smooth(img: MultiModalImage, sigma: f32) -> MultiModalImage with Epistemic {
+    var result = create_image(img.dims)
+
+    // Gaussian kernel weights (precomputed for 3x3x3)
+    let kernel = compute_gaussian_kernel_3x3x3(sigma)
+
+    for z in 1..(img.dims.depth - 1) {
+        for y in 1..(img.dims.height - 1) {
+            for x in 1..(img.dims.width - 1) {
+                var smoothed = sedenion_zero()
+                var weight_sum = 0.0
+
+                // Convolve with kernel
+                for dz in -1..2 {
+                    for dy in -1..2 {
+                        for dx in -1..2 {
+                            let voxel = get_voxel(img, x + dx, y + dy, z + dz)
+                            let kid = (dz + 1) * 9 + (dy + 1) * 3 + (dx + 1)
+                            let weight = kernel[kid]
+                            smoothed = sedenion_add(smoothed, sedenion_scale(voxel, weight))
+                            weight_sum = weight_sum + weight
+                        }
+                    }
+                }
+
+                if weight_sum > 0.0 {
+                    smoothed = sedenion_scale(smoothed, 1.0 / weight_sum)
+                }
+
+                result = set_voxel(result, x, y, z, smoothed)
+            }
+        }
+    }
+
+    result
+}
+
+// Compute 3x3x3 Gaussian kernel
+fn compute_gaussian_kernel_3x3x3(sigma: f32) -> [f32; 27] {
+    var kernel: [f32; 27] = [0.0; 27]
+    let sigma2 = sigma * sigma
+    var sum = 0.0
+
+    for dz in -1..2 {
+        for dy in -1..2 {
+            for dx in -1..2 {
+                let r2 = (dx * dx + dy * dy + dz * dz) as f32
+                let w = exp(-r2 / (2.0 * sigma2))
+                let idx = (dz + 1) * 9 + (dy + 1) * 3 + (dx + 1)
+                kernel[idx] = w
+                sum = sum + w
+            }
+        }
+    }
+
+    // Normalize
+    for i in 0..27 {
+        kernel[i] = kernel[i] / sum
+    }
+
+    kernel
+}
+
+// Image fusion: weighted combination of modalities
+struct FusionWeights {
+    weights: Sedenion,  // Weight per modality channel
+}
+
+fn fuse_modalities(img: MultiModalImage, weights: FusionWeights) -> [f32] {
+    var result: [f32] = []
+
+    for voxel in img.voxels {
+        // Weighted sum using sedenion dot product
+        let weighted = sedenion_mul_componentwise(voxel, weights.weights)
+        let fused_val = sedenion_sum_components(weighted)
+        result = result ++ [fused_val]
+    }
+
+    result
+}
+
+// Sedenion component-wise multiplication
+fn sedenion_mul_componentwise(a: Sedenion, b: Sedenion) -> Sedenion {
+    var result = sedenion_zero()
+    for i in 0..16 {
+        let ai = sedenion_get_component(a, i)
+        let bi = sedenion_get_component(b, i)
+        result = sedenion_set_component(result, i, ai * bi)
+    }
+    result
+}
+
+// Sum all sedenion components
+fn sedenion_sum_components(s: Sedenion) -> f32 {
+    var sum = 0.0
+    for i in 0..16 {
+        sum = sum + sedenion_get_component(s, i)
+    }
+    sum
+}
+
+// Radiomics: Extract statistical features from region
+struct RadiomicsFeatures {
+    mean: Sedenion,           // Mean per channel
+    std_dev: Sedenion,        // Standard deviation per channel
+    skewness: Sedenion,       // Skewness per channel
+    kurtosis: Sedenion,       // Kurtosis per channel
+    cross_modal_corr: f32,    // Cross-modal correlation
+    entropy: f32,             // Multi-modal entropy
+    gradient_mean: f32,       // Mean gradient magnitude
+}
+
+// Extract radiomics features from image region
+fn extract_radiomics(
+    img: MultiModalImage,
+    x_start: i32, y_start: i32, z_start: i32,
+    x_end: i32, y_end: i32, z_end: i32
+) -> RadiomicsFeatures with Epistemic {
+    var voxels: [Sedenion] = []
+    var gradients: [f32] = []
+
+    // Collect voxels in region
+    for z in z_start..z_end {
+        for y in y_start..y_end {
+            for x in x_start..x_end {
+                let v = get_voxel(img, x, y, z)
+                voxels = voxels ++ [v]
+                gradients = gradients ++ [compute_gradient_magnitude(img, x, y, z)]
+            }
+        }
+    }
+
+    let n = len(voxels)
+    if n == 0 {
+        return RadiomicsFeatures {
+            mean: sedenion_zero(),
+            std_dev: sedenion_zero(),
+            skewness: sedenion_zero(),
+            kurtosis: sedenion_zero(),
+            cross_modal_corr: 0.0,
+            entropy: 0.0,
+            gradient_mean: 0.0,
+        }
+    }
+
+    // Compute mean
+    var mean = sedenion_zero()
+    for v in voxels {
+        mean = sedenion_add(mean, v)
+    }
+    mean = sedenion_scale(mean, 1.0 / (n as f32))
+
+    // Compute variance, skewness, kurtosis (per channel)
+    var variance = sedenion_zero()
+    var m3 = sedenion_zero()  // 3rd moment
+    var m4 = sedenion_zero()  // 4th moment
+
+    for v in voxels {
+        let diff = sedenion_sub(v, mean)
+        let diff2 = sedenion_mul_componentwise(diff, diff)
+        let diff3 = sedenion_mul_componentwise(diff2, diff)
+        let diff4 = sedenion_mul_componentwise(diff3, diff)
+
+        variance = sedenion_add(variance, diff2)
+        m3 = sedenion_add(m3, diff3)
+        m4 = sedenion_add(m4, diff4)
+    }
+
+    variance = sedenion_scale(variance, 1.0 / (n as f32))
+    m3 = sedenion_scale(m3, 1.0 / (n as f32))
+    m4 = sedenion_scale(m4, 1.0 / (n as f32))
+
+    var std_dev = sedenion_zero()
+    var skewness = sedenion_zero()
+    var kurtosis = sedenion_zero()
+
+    for i in 0..16 {
+        let var_i = sedenion_get_component(variance, i)
+        let sd_i = sqrt(var_i)
+        std_dev = sedenion_set_component(std_dev, i, sd_i)
+
+        if sd_i > 0.0 {
+            let skew_i = sedenion_get_component(m3, i) / (sd_i * sd_i * sd_i)
+            let kurt_i = sedenion_get_component(m4, i) / (var_i * var_i) - 3.0
+            skewness = sedenion_set_component(skewness, i, skew_i)
+            kurtosis = sedenion_set_component(kurtosis, i, kurt_i)
+        }
+    }
+
+    // Cross-modal correlation
+    var cross_corr = 0.0
+    for v in voxels {
+        cross_corr = cross_corr + compute_cross_modal_feature(v)
+    }
+    cross_corr = cross_corr / (n as f32)
+
+    // Multi-modal entropy (simplified using norm distribution)
+    var entropy = 0.0
+    for v in voxels {
+        let norm = sedenion_norm(v)
+        if norm > 0.0 {
+            let p = norm / (sedenion_norm(mean) + 1e-10)
+            entropy = entropy - p * log2(p + 1e-10)
+        }
+    }
+    entropy = entropy / (n as f32)
+
+    // Gradient mean
+    var grad_mean = 0.0
+    for g in gradients {
+        grad_mean = grad_mean + g
+    }
+    grad_mean = grad_mean / (n as f32)
+
+    RadiomicsFeatures {
+        mean: mean,
+        std_dev: std_dev,
+        skewness: skewness,
+        kurtosis: kurtosis,
+        cross_modal_corr: cross_corr,
+        entropy: entropy,
+        gradient_mean: grad_mean,
+    }
+}
+
+// Thresholding: segment image based on sedenion magnitude
+fn threshold_by_magnitude(img: MultiModalImage, threshold: f32) -> [bool] {
+    var mask: [bool] = []
+
+    for voxel in img.voxels {
+        let mag = sedenion_norm(voxel)
+        mask = mask ++ [mag > threshold]
+    }
+
+    mask
+}
+
+// Get modality name from index
+fn modality_name(index: i32) -> str {
+    match index {
+        0 => "T1-weighted",
+        1 => "T2-weighted",
+        2 => "FLAIR",
+        3 => "DWI",
+        4 => "ADC",
+        5 => "T1-contrast",
+        6 => "T2*",
+        7 => "Proton density",
+        8 => "Phase contrast",
+        9 => "Perfusion (CBF)",
+        10 => "FA (DTI)",
+        11 => "SWI",
+        12 => "ASL",
+        13 => "PET-FDG",
+        14 => "SPECT",
+        15 => "CT",
+        _ => "Unknown",
+    }
+}
+
+// Module exports
+mod sedenion_imaging {
+    pub type ImageDims
+    pub type MultiModalVoxel
+    pub type MultiModalImage
+    pub type FusionWeights
+    pub type RadiomicsFeatures
+
+    pub fn create_image
+    pub fn get_voxel
+    pub fn set_voxel
+    pub fn load_modality
+    pub fn extract_modality
+    pub fn normalize_image
+    pub fn gaussian_smooth
+    pub fn fuse_modalities
+    pub fn extract_radiomics
+    pub fn threshold_by_magnitude
+    pub fn compute_gradient_magnitude
+    pub fn modality_name
+}
