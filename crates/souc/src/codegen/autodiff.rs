@@ -398,6 +398,40 @@ impl Dual {
             deriv: sign * self.deriv,
         }
     }
+
+    /// Hyperbolic sine: sinh(a, a') = (sinh(a), cosh(a) * a')
+    pub fn sinh(self) -> Self {
+        Self {
+            val: libm::sinh(self.val),
+            deriv: libm::cosh(self.val) * self.deriv,
+        }
+    }
+
+    /// Hyperbolic cosine: cosh(a, a') = (cosh(a), sinh(a) * a')
+    pub fn cosh(self) -> Self {
+        Self {
+            val: libm::cosh(self.val),
+            deriv: libm::sinh(self.val) * self.deriv,
+        }
+    }
+
+    /// Hyperbolic tangent: tanh(a, a') = (tanh(a), (1 - tanh²(a)) * a')
+    pub fn tanh(self) -> Self {
+        let tanh_val = libm::tanh(self.val);
+        Self {
+            val: tanh_val,
+            deriv: (1.0 - tanh_val * tanh_val) * self.deriv,
+        }
+    }
+
+    /// General power: (a, a')^(b, b') = (a^b, a^b * (b' * ln(a) + b * a'/a))
+    /// Derivative uses: d(x^y) = x^y * (y' * ln(x) + y * x'/x)
+    pub fn pow(self, other: Self) -> Self {
+        let val = libm::pow(self.val, other.val);
+        // d(x^y)/dt = x^y * (dy/dt * ln(x) + y * dx/dt / x)
+        let deriv = val * (other.deriv * libm::log(self.val) + other.val * self.deriv / self.val);
+        Self { val, deriv }
+    }
 }
 
 #[cfg(test)]
@@ -752,4 +786,54 @@ where
 {
     let (_, derivative) = f(x, 1.0);
     derivative
+}
+
+/// Compute Jacobian matrix of a vector function using forward-mode AD
+///
+/// For f: R^n -> R^m, computes the m×n Jacobian matrix where J[i][j] = ∂f_i/∂x_j
+///
+/// # Arguments
+/// * `f` - A function that takes a slice of Dual numbers and returns a Vec of Dual numbers
+/// * `x` - The point at which to evaluate the Jacobian
+///
+/// # Returns
+/// A Vec<Vec<f64>> representing the Jacobian matrix
+pub fn compute_jacobian<F>(f: &F, x: &[f64]) -> Vec<Vec<f64>>
+where
+    F: Fn(&[Dual]) -> Vec<Dual>,
+{
+    let n = x.len();
+
+    // Compute each column of the Jacobian by setting deriv=1 for one variable at a time
+    let mut columns: Vec<Vec<f64>> = Vec::with_capacity(n);
+
+    for j in 0..n {
+        // Create input with deriv=1 for variable j, deriv=0 for others
+        let inputs: Vec<Dual> = x
+            .iter()
+            .enumerate()
+            .map(|(i, &val)| Dual::new(val, if i == j { 1.0 } else { 0.0 }))
+            .collect();
+
+        // Evaluate function
+        let outputs = f(&inputs);
+
+        // Extract derivatives (column j of Jacobian)
+        columns.push(outputs.iter().map(|d| d.deriv).collect());
+    }
+
+    // Transpose from column-major to row-major
+    let m = if columns.is_empty() {
+        0
+    } else {
+        columns[0].len()
+    };
+    let mut jacobian = vec![vec![0.0; n]; m];
+    for j in 0..n {
+        for i in 0..m {
+            jacobian[i][j] = columns[j][i];
+        }
+    }
+
+    jacobian
 }

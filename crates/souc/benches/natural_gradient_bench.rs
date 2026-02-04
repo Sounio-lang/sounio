@@ -144,8 +144,8 @@ fn benchmark_fisher_matrix_operations(c: &mut Criterion) {
         group.bench_with_input(
             BenchmarkId::from_parameter(&param_id),
             &(alpha, beta),
-            |b, &(a, b)| {
-                b.iter(|| {
+            |bencher, &(a, b)| {
+                bencher.iter(|| {
                     let fisher = FisherMatrix::from_beta(black_box(a), black_box(b));
                     black_box(fisher.determinant());
                     black_box(fisher.condition_number());
@@ -191,8 +191,8 @@ fn benchmark_trigamma_computation(c: &mut Criterion) {
         group.bench_with_input(
             BenchmarkId::from_parameter(point.to_string()),
             &point,
-            |b, &p| {
-                b.iter(|| {
+            |bencher, &p| {
+                bencher.iter(|| {
                     let fisher = FisherMatrix::from_beta(black_box(p), black_box(p));
                     black_box(fisher.determinant())
                 })
