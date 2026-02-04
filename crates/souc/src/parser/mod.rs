@@ -3171,13 +3171,48 @@ impl<'a> Parser<'a> {
             }
 
             // Knowledge type: Knowledge[T, ε < 0.05, Valid(duration), Derived]
-            TokenKind::Knowledge => self.parse_knowledge_type(),
+            // Only parse as Knowledge type if followed by [ or < (for generic syntax)
+            TokenKind::Knowledge => {
+                if self.peek_n(1) == TokenKind::LBracket || self.peek_n(1) == TokenKind::Lt {
+                    self.parse_knowledge_type()
+                } else {
+                    // Treat as a regular type identifier
+                    let name = self.advance().text.clone();
+                    Ok(TypeExpr::Named {
+                        path: Path::simple(&name),
+                        args: Vec::new(),
+                        unit: None,
+                    })
+                }
+            }
 
             // Quantity type: Quantity[f64, meters]
-            TokenKind::Quantity => self.parse_quantity_type(),
+            TokenKind::Quantity => {
+                if self.peek_n(1) == TokenKind::LBracket || self.peek_n(1) == TokenKind::Lt {
+                    self.parse_quantity_type()
+                } else {
+                    let name = self.advance().text.clone();
+                    Ok(TypeExpr::Named {
+                        path: Path::simple(&name),
+                        args: Vec::new(),
+                        unit: None,
+                    })
+                }
+            }
 
             // Tensor type: Tensor[f32, (batch, channels, height, width)]
-            TokenKind::Tensor => self.parse_tensor_type(),
+            TokenKind::Tensor => {
+                if self.peek_n(1) == TokenKind::LBracket || self.peek_n(1) == TokenKind::Lt {
+                    self.parse_tensor_type()
+                } else {
+                    let name = self.advance().text.clone();
+                    Ok(TypeExpr::Named {
+                        path: Path::simple(&name),
+                        args: Vec::new(),
+                        unit: None,
+                    })
+                }
+            }
 
             // Tile type: tile<f16, 16, 16>
             TokenKind::Tile => self.parse_tile_type(),
