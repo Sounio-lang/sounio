@@ -3858,6 +3858,8 @@ fn hlir_to_cranelift_type(ty: &HlirType) -> types::Type {
         HlirType::Dual => types::I64,
         // Octonion: 8x f32 = 256 bits, represent as pointer to data
         HlirType::Octonion => types::I64,
+        // Sedenion: 16x f32 = 512 bits, represent as pointer to data
+        HlirType::Sedenion => types::I64,
         // Quaternionic neural network types - represent as pointers to structs
         HlirType::QuatLinear => types::I64,
         HlirType::QuatConv2d => types::I64,

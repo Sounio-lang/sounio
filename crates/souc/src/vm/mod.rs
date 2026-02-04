@@ -5,10 +5,12 @@
 
 pub mod bytecode;
 pub mod memory;
+pub mod serialize;
 pub mod stack;
 
 pub use bytecode::{Bytecode, Value};
 pub use memory::Heap;
+pub use serialize::{deserialize, serialize, SerializeError, BYTECODE_MAGIC, BYTECODE_VERSION};
 
 use crate::runtime::ffi;
 use std::collections::HashMap;
@@ -195,6 +197,24 @@ impl BytecodeVM {
                     };
                     self.stack.push(result);
                 }
+                Bytecode::Shl => {
+                    let b = self.stack.pop().ok_or(VmError::StackUnderflow)?;
+                    let a = self.stack.pop().ok_or(VmError::StackUnderflow)?;
+                    let result = match (a, b) {
+                        (Value::Int(a), Value::Int(b)) => Value::Int(a << b),
+                        _ => return Err(VmError::TypeMismatch("Shl".to_string())),
+                    };
+                    self.stack.push(result);
+                }
+                Bytecode::Shr => {
+                    let b = self.stack.pop().ok_or(VmError::StackUnderflow)?;
+                    let a = self.stack.pop().ok_or(VmError::StackUnderflow)?;
+                    let result = match (a, b) {
+                        (Value::Int(a), Value::Int(b)) => Value::Int(a >> b),
+                        _ => return Err(VmError::TypeMismatch("Shr".to_string())),
+                    };
+                    self.stack.push(result);
+                }
                 Bytecode::Eq => {
                     let b = self.stack.pop().ok_or(VmError::StackUnderflow)?;
                     let a = self.stack.pop().ok_or(VmError::StackUnderflow)?;
@@ -361,6 +381,164 @@ impl BytecodeVM {
                     let addr = self.heap.alloc(*size);
                     self.stack.push(Value::Pointer(addr));
                     tracing::trace!("VM: Allocated {} bytes at {}", size, addr);
+                }
+
+                // Field and index operations
+                Bytecode::StoreField(field_name) => {
+                    // Stack: [... target, value] -> [...]
+                    // Pop value and target, store value in target's field
+                    let value = self.stack.pop().ok_or(VmError::StackUnderflow)?;
+                    let _target = self.stack.pop().ok_or(VmError::StackUnderflow)?;
+
+                    // For now, we just discard the assignment since we don't have a proper object model
+                    // In a full implementation, this would update the field in the target struct
+                    tracing::trace!("VM: StoreField {} = {:?}", field_name, value);
+                }
+
+                Bytecode::StoreIndex => {
+                    // Stack: [... target, index, value] -> [...]
+                    // Pop value, index, and target; store value at target[index]
+                    let value = self.stack.pop().ok_or(VmError::StackUnderflow)?;
+                    let index = self.stack.pop().ok_or(VmError::StackUnderflow)?;
+                    let mut target = self.stack.pop().ok_or(VmError::StackUnderflow)?;
+
+                    // Handle list/array indexing
+                    match (&mut target, index) {
+                        (Value::List(items), Value::Int(idx)) => {
+                            let idx = idx as usize;
+                            if idx < items.len() {
+                                items[idx] = value;
+                                self.stack.push(target);
+                            } else {
+                                return Err(VmError::MemoryError(format!(
+                                    "Index {} out of bounds for list of length {}",
+                                    idx,
+                                    items.len()
+                                )));
+                            }
+                        }
+                        _ => {
+                            return Err(VmError::TypeMismatch(
+                                "StoreIndex requires list and integer index".to_string(),
+                            ))
+                        }
+                    }
+                }
+
+                // GetField: get field from struct/map
+                Bytecode::GetField(field_name) => {
+                    let target = self.stack.pop().ok_or(VmError::StackUnderflow)?;
+                    match target {
+                        Value::Struct(fields) => {
+                            if let Some(value) = fields.get(field_name) {
+                                self.stack.push(value.clone());
+                            } else {
+                                return Err(VmError::TypeMismatch(format!(
+                                    "Field '{}' not found in struct",
+                                    field_name
+                                )));
+                            }
+                        }
+                        _ => {
+                            // For other types, return a placeholder
+                            tracing::trace!(
+                                "VM: GetField {} on non-struct, returning Unit",
+                                field_name
+                            );
+                            self.stack.push(Value::Unit);
+                        }
+                    }
+                }
+
+                // GetIndex: get element from tuple/array at constant index
+                Bytecode::GetIndex(index) => {
+                    let target = self.stack.pop().ok_or(VmError::StackUnderflow)?;
+                    match target {
+                        Value::List(items) => {
+                            if *index < items.len() {
+                                self.stack.push(items[*index].clone());
+                            } else {
+                                return Err(VmError::MemoryError(format!(
+                                    "Index {} out of bounds for list of length {}",
+                                    index,
+                                    items.len()
+                                )));
+                            }
+                        }
+                        _ => {
+                            tracing::trace!("VM: GetIndex {} on non-list, returning Unit", index);
+                            self.stack.push(Value::Unit);
+                        }
+                    }
+                }
+
+                // IndexOp: runtime indexing (array and index on stack)
+                Bytecode::IndexOp => {
+                    let index = self.stack.pop().ok_or(VmError::StackUnderflow)?;
+                    let target = self.stack.pop().ok_or(VmError::StackUnderflow)?;
+                    match (target, index) {
+                        (Value::List(items), Value::Int(idx)) => {
+                            let idx = idx as usize;
+                            if idx < items.len() {
+                                self.stack.push(items[idx].clone());
+                            } else {
+                                return Err(VmError::MemoryError(format!(
+                                    "Index {} out of bounds for list of length {}",
+                                    idx,
+                                    items.len()
+                                )));
+                            }
+                        }
+                        (Value::String(s), Value::Int(idx)) => {
+                            let idx = idx as usize;
+                            if let Some(c) = s.chars().nth(idx) {
+                                self.stack.push(Value::Int(c as i64));
+                            } else {
+                                return Err(VmError::MemoryError(format!(
+                                    "Index {} out of bounds for string of length {}",
+                                    idx,
+                                    s.len()
+                                )));
+                            }
+                        }
+                        _ => {
+                            return Err(VmError::TypeMismatch(
+                                "IndexOp requires list/string and integer".to_string(),
+                            ))
+                        }
+                    }
+                }
+
+                // MakeVariant: construct an enum variant
+                Bytecode::MakeVariant {
+                    enum_name,
+                    variant,
+                    field_count,
+                } => {
+                    let mut fields = Vec::with_capacity(*field_count);
+                    for _ in 0..*field_count {
+                        fields.push(self.stack.pop().ok_or(VmError::StackUnderflow)?);
+                    }
+                    fields.reverse(); // Fields were pushed in order
+                                      // Represent variant as a struct with special enum fields
+                    let mut variant_fields = HashMap::new();
+                    variant_fields.insert("__enum".to_string(), Value::String(enum_name.clone()));
+                    variant_fields.insert("__variant".to_string(), Value::String(variant.clone()));
+                    for (i, field) in fields.into_iter().enumerate() {
+                        variant_fields.insert(format!("_{}", i), field);
+                    }
+                    self.stack.push(Value::Struct(variant_fields));
+                }
+
+                // MakeRange: construct a range value
+                Bytecode::MakeRange { inclusive } => {
+                    let end = self.stack.pop().ok_or(VmError::StackUnderflow)?;
+                    let start = self.stack.pop().ok_or(VmError::StackUnderflow)?;
+                    let mut range_fields = HashMap::new();
+                    range_fields.insert("start".to_string(), start);
+                    range_fields.insert("end".to_string(), end);
+                    range_fields.insert("inclusive".to_string(), Value::Bool(*inclusive));
+                    self.stack.push(Value::Struct(range_fields));
                 }
 
                 // FFI calls

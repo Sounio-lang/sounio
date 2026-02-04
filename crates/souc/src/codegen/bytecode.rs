@@ -671,6 +671,8 @@ impl BytecodeCodegen {
             HirBinaryOp::Or => Bytecode::Or,
             HirBinaryOp::BitAnd => Bytecode::And, // Reuse logical for now
             HirBinaryOp::BitOr => Bytecode::Or,
+            HirBinaryOp::Shl => Bytecode::Shl,
+            HirBinaryOp::Shr => Bytecode::Shr,
             _ => {
                 return Err(BytecodeError::Unsupported(format!(
                     "Binary operator: {:?}",

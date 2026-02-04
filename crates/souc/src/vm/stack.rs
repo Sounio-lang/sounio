@@ -20,6 +20,14 @@ impl Stack {
                 let strs: Vec<String> = items.iter().map(|v| Self::value_to_string(v)).collect();
                 format!("[{}]", strs.join(", "))
             }
+            Value::Struct(fields) => {
+                let mut entries: Vec<String> = fields
+                    .iter()
+                    .map(|(k, v)| format!("{}: {}", k, Self::value_to_string(v)))
+                    .collect();
+                entries.sort();
+                format!("{{ {} }}", entries.join(", "))
+            }
         }
     }
 
