@@ -742,6 +742,8 @@ impl<'a> Parser<'a> {
         let return_type = self.parse_return_type()?;
         let effects = self.parse_effect_clause()?;
         let where_clause = self.parse_where_clause()?;
+        let requires = self.parse_requires_clause()?;
+        let ensures = self.parse_ensures_clause()?;
         let body = self.parse_block()?;
 
         let end = self.span();
@@ -762,6 +764,8 @@ impl<'a> Parser<'a> {
             return_type,
             effects,
             where_clause,
+            requires,
+            ensures,
             body,
             doc,
             span: start.merge(end),
@@ -2465,6 +2469,8 @@ impl<'a> Parser<'a> {
         let return_type = self.parse_return_type()?;
         let effects = self.parse_effect_clause()?;
         let where_clause = self.parse_where_clause()?;
+        let requires = self.parse_requires_clause()?;
+        let ensures = self.parse_ensures_clause()?;
         let body = self.parse_block()?;
 
         let end = self.span();
@@ -2485,6 +2491,8 @@ impl<'a> Parser<'a> {
             return_type,
             effects,
             where_clause,
+            requires,
+            ensures,
             body,
             doc: None,
             span: start.merge(end),
@@ -2847,6 +2855,28 @@ impl<'a> Parser<'a> {
         Ok(predicates)
     }
 
+    /// Parse zero or more `requires <expr>` precondition clauses
+    fn parse_requires_clause(&mut self) -> Result<Vec<Expr>> {
+        let mut requires = Vec::new();
+        while self.at(TokenKind::Requires) {
+            self.advance();
+            let expr = self.parse_expr()?;
+            requires.push(expr);
+        }
+        Ok(requires)
+    }
+
+    /// Parse zero or more `ensures <expr>` postcondition clauses
+    fn parse_ensures_clause(&mut self) -> Result<Vec<Expr>> {
+        let mut ensures = Vec::new();
+        while self.at(TokenKind::Ensures) {
+            self.advance();
+            let expr = self.parse_expr()?;
+            ensures.push(expr);
+        }
+        Ok(ensures)
+    }
+
     // ==================== TYPES ====================
 
     pub fn parse_type(&mut self) -> Result<TypeExpr> {
@@ -3052,8 +3082,31 @@ impl<'a> Parser<'a> {
 
                 // Check for compound unit as standalone type: mL/min, kg*m/s2
                 // This is shorthand for f64@mL/min
+                // IMPORTANT: Do NOT treat `/` or `*` after primitive numeric types as unit operators.
+                // This ensures `x as f64 / 17.0` parses as `(x as f64) / 17.0` not `x as (f64/17.0)`.
+                let is_primitive_type = path.segments.len() == 1
+                    && matches!(
+                        path.segments[0].as_str(),
+                        "i8" | "i16"
+                            | "i32"
+                            | "i64"
+                            | "i128"
+                            | "isize"
+                            | "u8"
+                            | "u16"
+                            | "u32"
+                            | "u64"
+                            | "u128"
+                            | "usize"
+                            | "f32"
+                            | "f64"
+                            | "bool"
+                            | "char"
+                            | "str"
+                    );
                 if args.is_empty()
                     && path.segments.len() == 1
+                    && !is_primitive_type
                     && (self.at(TokenKind::Slash) || self.at(TokenKind::Star))
                 {
                     let mut unit_str = path.segments[0].clone();

@@ -250,6 +250,10 @@ pub struct FnDef {
     pub return_type: Option<TypeExpr>,
     pub effects: Vec<EffectRef>,
     pub where_clause: Vec<WherePredicate>,
+    /// Preconditions: `requires <expr>` clauses
+    pub requires: Vec<Expr>,
+    /// Postconditions: `ensures <expr>` clauses
+    pub ensures: Vec<Expr>,
     pub body: Block,
     /// Doc comments (`///`) attached to this function
     pub doc: Option<String>,

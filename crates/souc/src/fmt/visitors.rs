@@ -2020,6 +2020,8 @@ mod tests {
             return_type: None,
             effects: vec![],
             where_clause: vec![],
+            requires: vec![],
+            ensures: vec![],
             body: Block { stmts: vec![] },
             doc: None,
             span: crate::common::Span::dummy(),
