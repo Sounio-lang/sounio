@@ -1,0 +1,481 @@
+//! stdlib/compiler/effects/compile.sio - Compile Effect Definition
+//!
+//! The Compile effect models compilation as an algebraic effect.
+//! This is the foundation for the metacircular self-hosted compiler.
+//!
+//! Novel aspects:
+//! - Compilation is an effect that can be handled/intercepted
+//! - Each phase returns Knowledge<T> with confidence bounds
+//! - Enables partial evaluation via effect interpretation
+//! - Supports cross-stage persistence of provenance
+
+// ============================================================================
+// SEDENION AST TYPE (shared with sedenion_encoding.sio)
+// ============================================================================
+
+struct Sedenion {
+    e0: f32, e1: f32, e2: f32, e3: f32,
+    e4: f32, e5: f32, e6: f32, e7: f32,
+    e8: f32, e9: f32, e10: f32, e11: f32,
+    e12: f32, e13: f32, e14: f32, e15: f32,
+}
+
+fn sed_zero() -> Sedenion {
+    Sedenion {
+        e0: 0.0, e1: 0.0, e2: 0.0, e3: 0.0,
+        e4: 0.0, e5: 0.0, e6: 0.0, e7: 0.0,
+        e8: 0.0, e9: 0.0, e10: 0.0, e11: 0.0,
+        e12: 0.0, e13: 0.0, e14: 0.0, e15: 0.0
+    }
+}
+
+// ============================================================================
+// KNOWLEDGE TYPE FOR EPISTEMIC TRACKING
+// ============================================================================
+
+// A provenance step in the compilation chain
+struct ProvenanceStep {
+    name: [i8; 64],      // Step name (e.g., "parse", "check")
+    name_len: i64,
+    confidence: f32,      // Confidence of this step
+    timestamp: i64,       // When step occurred (optional)
+}
+
+fn provenance_step_new() -> ProvenanceStep {
+    ProvenanceStep {
+        name: [0; 64],
+        name_len: 0,
+        confidence: 1.0,
+        timestamp: 0,
+    }
+}
+
+fn provenance_step_from_name(name_bytes: [i8; 64], len: i64, conf: f32) -> ProvenanceStep {
+    ProvenanceStep {
+        name: name_bytes,
+        name_len: len,
+        confidence: conf,
+        timestamp: 0,
+    }
+}
+
+// Knowledge type: value with epistemic metadata
+// Knowledge<T, epsilon, Phi> where epsilon is confidence and Phi is provenance
+struct KnowledgeAST {
+    value: Sedenion,               // The AST as sedenion
+    confidence: f32,               // epsilon: confidence bound [0, 1]
+    provenance: [ProvenanceStep; 16], // Phi: transformation chain
+    n_provenance: i64,
+    is_verified: bool,             // Has been cross-validated?
+}
+
+fn knowledge_ast_new(val: Sedenion) -> KnowledgeAST {
+    KnowledgeAST {
+        value: val,
+        confidence: 1.0,
+        provenance: [provenance_step_new(); 16],
+        n_provenance: 0,
+        is_verified: false,
+    }
+}
+
+fn knowledge_ast_with_confidence(k: KnowledgeAST, conf: f32) -> KnowledgeAST {
+    KnowledgeAST {
+        value: k.value,
+        confidence: conf,
+        provenance: k.provenance,
+        n_provenance: k.n_provenance,
+        is_verified: k.is_verified,
+    }
+}
+
+fn knowledge_ast_add_provenance(k: KnowledgeAST, step: ProvenanceStep) -> KnowledgeAST with Mut, Panic {
+    var new_prov = k.provenance
+    let idx = k.n_provenance
+    if idx < 16 {
+        new_prov[idx as usize] = step
+    }
+    KnowledgeAST {
+        value: k.value,
+        confidence: k.confidence * step.confidence,  // Confidence compounds
+        provenance: new_prov,
+        n_provenance: if idx < 16 { idx + 1 } else { idx },
+        is_verified: k.is_verified,
+    }
+}
+
+fn knowledge_ast_mark_verified(k: KnowledgeAST) -> KnowledgeAST {
+    KnowledgeAST {
+        value: k.value,
+        confidence: k.confidence,
+        provenance: k.provenance,
+        n_provenance: k.n_provenance,
+        is_verified: true,
+    }
+}
+
+// Knowledge for typed AST (after type checking)
+struct TypedAST {
+    ast: Sedenion,                 // The AST
+    type_info: [i64; 64],          // Type annotations (simplified)
+    n_types: i64,
+}
+
+fn typed_ast_new(ast: Sedenion) -> TypedAST {
+    TypedAST {
+        ast: ast,
+        type_info: [0; 64],
+        n_types: 0,
+    }
+}
+
+struct KnowledgeTypedAST {
+    value: TypedAST,
+    confidence: f32,
+    provenance: [ProvenanceStep; 16],
+    n_provenance: i64,
+    is_verified: bool,
+}
+
+fn knowledge_typed_ast_new(val: TypedAST) -> KnowledgeTypedAST {
+    KnowledgeTypedAST {
+        value: val,
+        confidence: 1.0,
+        provenance: [provenance_step_new(); 16],
+        n_provenance: 0,
+        is_verified: false,
+    }
+}
+
+// Knowledge for emitted code
+struct Code {
+    bytes: [i8; 4096],   // Machine code (limited for now)
+    len: i64,
+    target: i32,         // 0 = x86-64, 1 = AArch64
+}
+
+fn code_new() -> Code {
+    Code {
+        bytes: [0; 4096],
+        len: 0,
+        target: 0,
+    }
+}
+
+struct KnowledgeCode {
+    value: Code,
+    confidence: f32,
+    provenance: [ProvenanceStep; 16],
+    n_provenance: i64,
+    is_verified: bool,
+}
+
+fn knowledge_code_new(val: Code) -> KnowledgeCode {
+    KnowledgeCode {
+        value: val,
+        confidence: 1.0,
+        provenance: [provenance_step_new(); 16],
+        n_provenance: 0,
+        is_verified: false,
+    }
+}
+
+// ============================================================================
+// COMPILE EFFECT OPERATIONS
+// ============================================================================
+
+// Effect operation kinds
+fn OP_PARSE() -> i32 { 0 }      // source -> AST
+fn OP_CHECK() -> i32 { 1 }      // AST -> TypedAST
+fn OP_EMIT() -> i32 { 2 }       // TypedAST -> Code
+fn OP_SPECIALIZE() -> i32 { 3 } // Code + static_args -> Code
+
+// An effect operation represents a pending compilation step
+struct CompileOperation {
+    kind: i32,
+    // Input data (varies by operation kind)
+    source_ptr: i64,        // For parse: pointer to source string
+    source_len: i64,
+    ast_input: Sedenion,    // For check: input AST
+    typed_input: TypedAST,  // For emit: input typed AST
+    code_input: Code,       // For specialize: input code
+    // Static arguments for specialization
+    static_args: [i64; 16],
+    n_static_args: i64,
+}
+
+fn compile_op_parse(src_ptr: i64, src_len: i64) -> CompileOperation {
+    CompileOperation {
+        kind: OP_PARSE(),
+        source_ptr: src_ptr,
+        source_len: src_len,
+        ast_input: sed_zero(),
+        typed_input: typed_ast_new(sed_zero()),
+        code_input: code_new(),
+        static_args: [0; 16],
+        n_static_args: 0,
+    }
+}
+
+fn compile_op_check(ast: Sedenion) -> CompileOperation {
+    CompileOperation {
+        kind: OP_CHECK(),
+        source_ptr: 0,
+        source_len: 0,
+        ast_input: ast,
+        typed_input: typed_ast_new(sed_zero()),
+        code_input: code_new(),
+        static_args: [0; 16],
+        n_static_args: 0,
+    }
+}
+
+fn compile_op_emit(typed: TypedAST) -> CompileOperation {
+    CompileOperation {
+        kind: OP_EMIT(),
+        source_ptr: 0,
+        source_len: 0,
+        ast_input: sed_zero(),
+        typed_input: typed,
+        code_input: code_new(),
+        static_args: [0; 16],
+        n_static_args: 0,
+    }
+}
+
+fn compile_op_specialize(code: Code, args: [i64; 16], n_args: i64) -> CompileOperation {
+    CompileOperation {
+        kind: OP_SPECIALIZE(),
+        source_ptr: 0,
+        source_len: 0,
+        ast_input: sed_zero(),
+        typed_input: typed_ast_new(sed_zero()),
+        code_input: code,
+        static_args: args,
+        n_static_args: n_args,
+    }
+}
+
+// ============================================================================
+// COMPILE EFFECT RESULT
+// ============================================================================
+
+// Result from handling a compile operation
+struct CompileResult {
+    success: bool,
+    error_code: i32,
+    // Output (only one is valid based on operation kind)
+    ast_output: KnowledgeAST,
+    typed_output: KnowledgeTypedAST,
+    code_output: KnowledgeCode,
+}
+
+fn compile_result_ok_ast(ast: KnowledgeAST) -> CompileResult {
+    CompileResult {
+        success: true,
+        error_code: 0,
+        ast_output: ast,
+        typed_output: knowledge_typed_ast_new(typed_ast_new(sed_zero())),
+        code_output: knowledge_code_new(code_new()),
+    }
+}
+
+fn compile_result_ok_typed(typed: KnowledgeTypedAST) -> CompileResult {
+    CompileResult {
+        success: true,
+        error_code: 0,
+        ast_output: knowledge_ast_new(sed_zero()),
+        typed_output: typed,
+        code_output: knowledge_code_new(code_new()),
+    }
+}
+
+fn compile_result_ok_code(code: KnowledgeCode) -> CompileResult {
+    CompileResult {
+        success: true,
+        error_code: 0,
+        ast_output: knowledge_ast_new(sed_zero()),
+        typed_output: knowledge_typed_ast_new(typed_ast_new(sed_zero())),
+        code_output: code,
+    }
+}
+
+fn compile_result_error(code: i32) -> CompileResult {
+    CompileResult {
+        success: false,
+        error_code: code,
+        ast_output: knowledge_ast_new(sed_zero()),
+        typed_output: knowledge_typed_ast_new(typed_ast_new(sed_zero())),
+        code_output: knowledge_code_new(code_new()),
+    }
+}
+
+// Error codes
+fn ERR_PARSE_FAILED() -> i32 { 1 }
+fn ERR_CHECK_FAILED() -> i32 { 2 }
+fn ERR_EMIT_FAILED() -> i32 { 3 }
+fn ERR_SPECIALIZE_FAILED() -> i32 { 4 }
+fn ERR_INTERNAL() -> i32 { 99 }
+
+// ============================================================================
+// COMPILE EFFECT HANDLER INTERFACE
+// ============================================================================
+
+// Handler state for the Compile effect
+struct CompileHandler {
+    handler_id: i64,
+    target_arch: i32,      // 0 = x86-64, 1 = AArch64
+    opt_level: i32,        // 0-3
+    emit_debug: bool,
+    total_confidence: f32, // Accumulated confidence across operations
+    operations_count: i64, // Number of operations handled
+}
+
+fn compile_handler_new(target: i32) -> CompileHandler {
+    CompileHandler {
+        handler_id: 0,
+        target_arch: target,
+        opt_level: 2,
+        emit_debug: false,
+        total_confidence: 1.0,
+        operations_count: 0,
+    }
+}
+
+// Target architecture constants
+fn TARGET_X86_64() -> i32 { 0 }
+fn TARGET_AARCH64() -> i32 { 1 }
+
+// Handler dispatch function type
+// In a full implementation, this would be a trait or effect handler
+
+// Accumulate confidence from a result
+fn handler_accumulate_confidence(h: CompileHandler, conf: f32) -> CompileHandler {
+    CompileHandler {
+        handler_id: h.handler_id,
+        target_arch: h.target_arch,
+        opt_level: h.opt_level,
+        emit_debug: h.emit_debug,
+        total_confidence: h.total_confidence * conf,
+        operations_count: h.operations_count + 1,
+    }
+}
+
+// ============================================================================
+// COMPILE CONFIDENCE CONSTANTS
+// ============================================================================
+
+// Default confidence values for each phase
+// These are based on the stability/correctness of each compiler pass
+
+fn CONFIDENCE_PARSE() -> f32 { 1.0 }      // Parsing is deterministic
+fn CONFIDENCE_CHECK_SIMPLE() -> f32 { 0.99 }   // Simple type inference
+fn CONFIDENCE_CHECK_POLY() -> f32 { 0.95 }     // Polymorphic inference
+fn CONFIDENCE_CHECK_HIGHER() -> f32 { 0.90 }   // Higher-rank types
+fn CONFIDENCE_CHECK_UNDER() -> f32 { 0.80 }    // Underconstrained types
+fn CONFIDENCE_EMIT() -> f32 { 0.98 }           // Code generation
+fn CONFIDENCE_SPECIALIZE() -> f32 { 0.95 }     // Partial evaluation
+
+// ============================================================================
+// EFFECT SIGNATURE
+// ============================================================================
+
+// The Compile effect adds the Compile effect to the effect set
+fn EFFECT_COMPILE() -> i32 { 11 }  // Effect bit for Compile
+
+// Effect signature for functions that perform compilation
+// A function with `with Compile` can perform parse/check/emit operations
+
+// ============================================================================
+// STAGE TRACKING FOR BOOTSTRAP
+// ============================================================================
+
+// Bootstrap stage constants
+fn STAGE_RUST() -> i32 { 0 }    // Stage 0: Rust compiler (trusted baseline)
+fn STAGE_SELF1() -> i32 { 1 }   // Stage 1: Self-compiled by Stage 0
+fn STAGE_SELF2() -> i32 { 2 }   // Stage 2: Self-compiled by Stage 1
+fn STAGE_VERIFIED() -> i32 { 3 } // Stage 3+: Cross-validated
+
+struct BootstrapStage {
+    stage: i32,
+    parent_stage: i32,        // Which stage compiled this
+    confidence: f32,          // Accumulated confidence
+    cross_validated: bool,    // Stage N == Stage N-1?
+}
+
+fn bootstrap_stage_new(stage: i32, parent: i32) -> BootstrapStage {
+    BootstrapStage {
+        stage: stage,
+        parent_stage: parent,
+        confidence: 1.0,
+        cross_validated: false,
+    }
+}
+
+// Confidence boost when cross-validation passes
+fn CROSS_VALIDATION_BOOST() -> f32 { 1.04 }  // ~4% confidence boost
+
+fn bootstrap_mark_cross_validated(bs: BootstrapStage) -> BootstrapStage {
+    let boosted = if bs.confidence * CROSS_VALIDATION_BOOST() > 1.0 {
+        0.99  // Cap at 99%
+    } else {
+        bs.confidence * CROSS_VALIDATION_BOOST()
+    }
+    BootstrapStage {
+        stage: bs.stage,
+        parent_stage: bs.parent_stage,
+        confidence: boosted,
+        cross_validated: true,
+    }
+}
+
+// ============================================================================
+// FULL COMPILATION PIPELINE (CONVENIENCE)
+// ============================================================================
+
+// Represents a complete compilation request
+struct CompilationRequest {
+    source_ptr: i64,
+    source_len: i64,
+    target_arch: i32,
+    opt_level: i32,
+    emit_debug: bool,
+    stage: BootstrapStage,
+}
+
+fn compilation_request_new(src_ptr: i64, src_len: i64, target: i32) -> CompilationRequest {
+    CompilationRequest {
+        source_ptr: src_ptr,
+        source_len: src_len,
+        target_arch: target,
+        opt_level: 2,
+        emit_debug: false,
+        stage: bootstrap_stage_new(STAGE_RUST(), STAGE_RUST()),
+    }
+}
+
+// Represents the final compilation result with full provenance
+struct CompilationResult {
+    success: bool,
+    code: KnowledgeCode,
+    overall_confidence: f32,
+    stage: BootstrapStage,
+}
+
+fn compilation_result_success(code: KnowledgeCode, stage: BootstrapStage) -> CompilationResult {
+    CompilationResult {
+        success: true,
+        code: code,
+        overall_confidence: code.confidence,
+        stage: stage,
+    }
+}
+
+fn compilation_result_failure(stage: BootstrapStage) -> CompilationResult {
+    CompilationResult {
+        success: false,
+        code: knowledge_code_new(code_new()),
+        overall_confidence: 0.0,
+        stage: stage,
+    }
+}

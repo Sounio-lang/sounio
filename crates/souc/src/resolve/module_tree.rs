@@ -209,6 +209,10 @@ pub struct ImportEntry {
     pub is_glob: bool,
     /// Whether this is a re-export (`pub use`)
     pub is_reexport: bool,
+    /// Whether this imports a module itself (vs an item from a module)
+    /// For `use foo::bar;` where bar is a module, this is true.
+    /// For `use foo::{item}` or `use foo::item` where item is a function/type, this is false.
+    pub is_module_import: bool,
     /// Resolved node ID (set during resolution)
     pub resolved: Option<NodeId>,
 }
@@ -373,6 +377,20 @@ impl ModuleTree {
                 };
 
                 for (idx, import) in unresolved {
+                    // Skip module imports - they don't need item resolution
+                    if import.is_module_import {
+                        // For module imports, just verify the module exists
+                        let target_id = ModuleId(import.source_path.clone());
+                        if self.contains(&target_id) {
+                            // Mark as resolved (no specific item, just the module)
+                            if let Some(module) = self.get_mut(&module_id) {
+                                module.imports[idx].resolved = Some(NodeId(0)); // Sentinel for "module resolved"
+                            }
+                            changed = true;
+                        }
+                        continue;
+                    }
+
                     match self.try_resolve_import(&module_id, &import) {
                         ResolveResult::Resolved(node_id) => {
                             if let Some(module) = self.get_mut(&module_id) {
@@ -409,7 +427,7 @@ impl ModuleTree {
                 None => continue,
             };
             for import in &module.imports {
-                if import.resolved.is_none() && !import.is_glob {
+                if import.resolved.is_none() && !import.is_glob && !import.is_module_import {
                     // Check if it's a module not found vs item not found
                     let target_id = ModuleId(import.source_path.clone());
                     if !self.contains(&target_id) {
@@ -573,6 +591,7 @@ impl ModuleTree {
                             original_name: name,
                             is_glob: false,
                             is_reexport: glob_import.is_reexport,
+                            is_module_import: false,
                             resolved: Some(node_id),
                         });
                     }
@@ -856,6 +875,7 @@ mod tests {
                 original_name: "Bar".to_string(),
                 is_glob: false,
                 is_reexport: false,
+                is_module_import: false,
                 resolved: None,
             });
         }
@@ -884,6 +904,7 @@ mod tests {
                 original_name: "Bar".to_string(),
                 is_glob: false,
                 is_reexport: false,
+                is_module_import: false,
                 resolved: None,
             });
             root.add_import(ImportEntry {
@@ -892,6 +913,7 @@ mod tests {
                 original_name: "Baz".to_string(),
                 is_glob: false,
                 is_reexport: false,
+                is_module_import: false,
                 resolved: None,
             });
         }
@@ -920,6 +942,7 @@ mod tests {
                 original_name: "*".to_string(),
                 is_glob: true,
                 is_reexport: false,
+                is_module_import: false,
                 resolved: None,
             });
         }
@@ -975,6 +998,7 @@ mod tests {
                 original_name: "Thing".to_string(),
                 is_glob: false,
                 is_reexport: true, // pub use
+                is_module_import: false,
                 resolved: None,
             });
         }
@@ -988,6 +1012,7 @@ mod tests {
                 original_name: "Thing".to_string(),
                 is_glob: false,
                 is_reexport: false,
+                is_module_import: false,
                 resolved: None,
             });
         }
@@ -1019,6 +1044,7 @@ mod tests {
                 original_name: "private_item".to_string(),
                 is_glob: false,
                 is_reexport: false,
+                is_module_import: false,
                 resolved: None,
             });
         }
@@ -1045,6 +1071,7 @@ mod tests {
                 original_name: "NonExistent".to_string(),
                 is_glob: false,
                 is_reexport: false,
+                is_module_import: false,
                 resolved: None,
             });
         }
@@ -1071,6 +1098,7 @@ mod tests {
                 original_name: "Item".to_string(),
                 is_glob: false,
                 is_reexport: false,
+                is_module_import: false,
                 resolved: None,
             });
         }
@@ -1113,6 +1141,7 @@ mod tests {
                 original_name: "DeepItem".to_string(),
                 is_glob: false,
                 is_reexport: true,
+                is_module_import: false,
                 resolved: None,
             });
         }
@@ -1128,6 +1157,7 @@ mod tests {
                 original_name: "DeepItem".to_string(),
                 is_glob: false,
                 is_reexport: true,
+                is_module_import: false,
                 resolved: None,
             });
         }
@@ -1141,6 +1171,7 @@ mod tests {
                 original_name: "DeepItem".to_string(),
                 is_glob: false,
                 is_reexport: false,
+                is_module_import: false,
                 resolved: None,
             });
         }
@@ -1213,6 +1244,7 @@ mod tests {
                 original_name: "Bar".to_string(),
                 is_glob: false,
                 is_reexport: false,
+                is_module_import: false,
                 resolved: None,
             });
         }
@@ -1237,6 +1269,7 @@ mod tests {
                 original_name: "Bar".to_string(), // original name
                 is_glob: false,
                 is_reexport: false,
+                is_module_import: false,
                 resolved: None,
             });
         }
@@ -1274,6 +1307,7 @@ mod tests {
                 original_name: "*".to_string(),
                 is_glob: true,
                 is_reexport: false,
+                is_module_import: false,
                 resolved: None,
             });
         }

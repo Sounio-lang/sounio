@@ -1,0 +1,829 @@
+//! stdlib/compiler/ast/sedenion_encoding.sio - Sedenion AST Encoding
+//!
+//! Encodes AST nodes as 16-dimensional sedenion points for algebraic manipulation.
+//! This is the foundation for the novel self-hosted compiler architecture.
+//!
+//! Encoding scheme (each component is f32):
+//!   e0  = Node type (0-63)           // Expr, Stmt, Item, Type, Pattern
+//!   e1  = Operator/keyword ID        // BinOp, UnOp, keyword index
+//!   e2  = Arity (child count)        // 0-16
+//!   e3  = Depth in tree              // Structural position
+//!   e4  = Scope level                // Lexical nesting
+//!   e5  = Type hint category         // Type category index
+//!   e6  = Effect mask (low 8 bits)   // IO|Mut|Alloc|Panic
+//!   e7  = Effect mask (high 8 bits)  // Async|GPU|Prob|Epistemic
+//!   e8  = Linearity mode             // 0=Unrestricted, 1=Affine, 2=Linear
+//!   e9  = Confidence (epistemic)     // 0.0-1.0
+//!   e10 = Literal value (if any)     // Embedded constant
+//!   e11 = Name hash (low bits)       // Identifier fingerprint
+//!   e12 = Name hash (high bits)      // For lookup/matching
+//!   e13 = Source span start          // For error messages
+//!   e14 = Source span end            // For error messages
+//!   e15 = Checksum                   // Integrity verification
+//!
+//! Novel aspects:
+//! - AST nodes as algebraic objects in 16D hypercomplex space
+//! - Non-associative sedenion multiplication captures AST composition
+//! - Zero divisor detection identifies malformed AST structures
+//! - Interpretable components enable semantic analysis
+
+// ============================================================================
+// INLINE SEDENION ALGEBRA (self-contained to avoid import resolution issues)
+// ============================================================================
+
+// Sedenion type: 16-dimensional hypercomplex number
+struct Sedenion {
+    e0: f32, e1: f32, e2: f32, e3: f32,
+    e4: f32, e5: f32, e6: f32, e7: f32,
+    e8: f32, e9: f32, e10: f32, e11: f32,
+    e12: f32, e13: f32, e14: f32, e15: f32,
+}
+
+// Constructs a sedenion from 16 components
+fn sed(e0: f32, e1: f32, e2: f32, e3: f32, e4: f32, e5: f32, e6: f32, e7: f32,
+       e8: f32, e9: f32, e10: f32, e11: f32, e12: f32, e13: f32, e14: f32, e15: f32) -> Sedenion {
+    Sedenion {
+        e0: e0, e1: e1, e2: e2, e3: e3, e4: e4, e5: e5, e6: e6, e7: e7,
+        e8: e8, e9: e9, e10: e10, e11: e11, e12: e12, e13: e13, e14: e14, e15: e15
+    }
+}
+
+// Returns the zero sedenion
+fn sed_zero() -> Sedenion {
+    sed(0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+        0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0)
+}
+
+// Returns the unit sedenion (multiplicative identity)
+fn sed_one() -> Sedenion {
+    sed(1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+        0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0)
+}
+
+// Gets a component by index
+fn sedenion_get_component(s: Sedenion, idx: i32) -> f32 {
+    if idx == 0 { s.e0 }
+    else if idx == 1 { s.e1 }
+    else if idx == 2 { s.e2 }
+    else if idx == 3 { s.e3 }
+    else if idx == 4 { s.e4 }
+    else if idx == 5 { s.e5 }
+    else if idx == 6 { s.e6 }
+    else if idx == 7 { s.e7 }
+    else if idx == 8 { s.e8 }
+    else if idx == 9 { s.e9 }
+    else if idx == 10 { s.e10 }
+    else if idx == 11 { s.e11 }
+    else if idx == 12 { s.e12 }
+    else if idx == 13 { s.e13 }
+    else if idx == 14 { s.e14 }
+    else { s.e15 }
+}
+
+// Computes the conjugate of a sedenion
+fn sed_conj(s: Sedenion) -> Sedenion {
+    Sedenion {
+        e0: s.e0,
+        e1: -s.e1, e2: -s.e2, e3: -s.e3, e4: -s.e4,
+        e5: -s.e5, e6: -s.e6, e7: -s.e7, e8: -s.e8,
+        e9: -s.e9, e10: -s.e10, e11: -s.e11, e12: -s.e12,
+        e13: -s.e13, e14: -s.e14, e15: -s.e15
+    }
+}
+
+// Computes the squared norm
+fn sed_norm_sq(s: Sedenion) -> f32 {
+    s.e0 * s.e0 + s.e1 * s.e1 + s.e2 * s.e2 + s.e3 * s.e3 +
+    s.e4 * s.e4 + s.e5 * s.e5 + s.e6 * s.e6 + s.e7 * s.e7 +
+    s.e8 * s.e8 + s.e9 * s.e9 + s.e10 * s.e10 + s.e11 * s.e11 +
+    s.e12 * s.e12 + s.e13 * s.e13 + s.e14 * s.e14 + s.e15 * s.e15
+}
+
+// Computes the Euclidean norm
+fn sedenion_norm(s: Sedenion) -> f32 {
+    sed_norm_sq(s).sqrt()
+}
+
+// Scales a sedenion by a scalar
+fn sed_scale(s: Sedenion, k: f32) -> Sedenion {
+    Sedenion {
+        e0: s.e0 * k, e1: s.e1 * k, e2: s.e2 * k, e3: s.e3 * k,
+        e4: s.e4 * k, e5: s.e5 * k, e6: s.e6 * k, e7: s.e7 * k,
+        e8: s.e8 * k, e9: s.e9 * k, e10: s.e10 * k, e11: s.e11 * k,
+        e12: s.e12 * k, e13: s.e13 * k, e14: s.e14 * k, e15: s.e15 * k
+    }
+}
+
+// Helper: Octonion multiplication for Cayley-Dickson
+fn oct_mul_components(
+    a0: f32, a1: f32, a2: f32, a3: f32, a4: f32, a5: f32, a6: f32, a7: f32,
+    b0: f32, b1: f32, b2: f32, b3: f32, b4: f32, b5: f32, b6: f32, b7: f32
+) -> (f32, f32, f32, f32, f32, f32, f32, f32) {
+    let c0 = a0*b0 - a1*b1 - a2*b2 - a3*b3 - a4*b4 - a5*b5 - a6*b6 - a7*b7
+    let c1 = a0*b1 + a1*b0 + a2*b3 - a3*b2 + a4*b5 - a5*b4 - a6*b7 + a7*b6
+    let c2 = a0*b2 - a1*b3 + a2*b0 + a3*b1 + a4*b6 + a5*b7 - a6*b4 - a7*b5
+    let c3 = a0*b3 + a1*b2 - a2*b1 + a3*b0 + a4*b7 - a5*b6 + a6*b5 - a7*b4
+    let c4 = a0*b4 - a1*b5 - a2*b6 - a3*b7 + a4*b0 + a5*b1 + a6*b2 + a7*b3
+    let c5 = a0*b5 + a1*b4 - a2*b7 + a3*b6 - a4*b1 + a5*b0 - a6*b3 + a7*b2
+    let c6 = a0*b6 + a1*b7 + a2*b4 - a3*b5 - a4*b2 + a5*b3 + a6*b0 - a7*b1
+    let c7 = a0*b7 - a1*b6 + a2*b5 + a3*b4 - a4*b3 - a5*b2 + a6*b1 + a7*b0
+    (c0, c1, c2, c3, c4, c5, c6, c7)
+}
+
+// Sedenion multiplication via Cayley-Dickson construction
+// IMPORTANT: NON-ASSOCIATIVE! (a * b) * c != a * (b * c)
+fn sed_mul(a: Sedenion, b: Sedenion) -> Sedenion {
+    // Compute o1a * o1b
+    let p1 = oct_mul_components(
+        a.e0, a.e1, a.e2, a.e3, a.e4, a.e5, a.e6, a.e7,
+        b.e0, b.e1, b.e2, b.e3, b.e4, b.e5, b.e6, b.e7
+    )
+    // Compute conj(o2b) * o2a
+    let p2 = oct_mul_components(
+        b.e8, -b.e9, -b.e10, -b.e11, -b.e12, -b.e13, -b.e14, -b.e15,
+        a.e8, a.e9, a.e10, a.e11, a.e12, a.e13, a.e14, a.e15
+    )
+    // First result octonion
+    let r0 = p1.0 - p2.0
+    let r1 = p1.1 - p2.1
+    let r2 = p1.2 - p2.2
+    let r3 = p1.3 - p2.3
+    let r4 = p1.4 - p2.4
+    let r5 = p1.5 - p2.5
+    let r6 = p1.6 - p2.6
+    let r7 = p1.7 - p2.7
+    // Compute o2b * o1a
+    let p3 = oct_mul_components(
+        b.e8, b.e9, b.e10, b.e11, b.e12, b.e13, b.e14, b.e15,
+        a.e0, a.e1, a.e2, a.e3, a.e4, a.e5, a.e6, a.e7
+    )
+    // Compute o2a * conj(o1b)
+    let p4 = oct_mul_components(
+        a.e8, a.e9, a.e10, a.e11, a.e12, a.e13, a.e14, a.e15,
+        b.e0, -b.e1, -b.e2, -b.e3, -b.e4, -b.e5, -b.e6, -b.e7
+    )
+    // Second result octonion
+    let r8 = p3.0 + p4.0
+    let r9 = p3.1 + p4.1
+    let r10 = p3.2 + p4.2
+    let r11 = p3.3 + p4.3
+    let r12 = p3.4 + p4.4
+    let r13 = p3.5 + p4.5
+    let r14 = p3.6 + p4.6
+    let r15 = p3.7 + p4.7
+
+    Sedenion {
+        e0: r0, e1: r1, e2: r2, e3: r3, e4: r4, e5: r5, e6: r6, e7: r7,
+        e8: r8, e9: r9, e10: r10, e11: r11, e12: r12, e13: r13, e14: r14, e15: r15
+    }
+}
+
+// Checks if a sedenion is approximately the identity
+fn sed_is_approx_one(s: Sedenion) -> bool {
+    let eps = 0.000001
+    let diff_real = s.e0 - 1.0
+    let deviation = diff_real * diff_real +
+        s.e1 * s.e1 + s.e2 * s.e2 + s.e3 * s.e3 + s.e4 * s.e4 +
+        s.e5 * s.e5 + s.e6 * s.e6 + s.e7 * s.e7 + s.e8 * s.e8 +
+        s.e9 * s.e9 + s.e10 * s.e10 + s.e11 * s.e11 + s.e12 * s.e12 +
+        s.e13 * s.e13 + s.e14 * s.e14 + s.e15 * s.e15
+    deviation < eps
+}
+
+// Computes putative inverse: conj(s) / ||s||^2
+fn sed_putative_inv(s: Sedenion) -> Sedenion with Div, Panic {
+    let norm_sq = sed_norm_sq(s)
+    let inv_norm_sq = 1.0 / norm_sq
+    sed_scale(sed_conj(s), inv_norm_sq)
+}
+
+// Checks if a sedenion is a zero divisor
+// Zero divisors exist in sedenions: non-zero s,t where s*t = 0
+fn sedenion_is_zero_divisor(s: Sedenion) -> bool with Div, Panic {
+    let norm_sq = sed_norm_sq(s)
+    if norm_sq < 0.0000000001 {
+        true  // Zero sedenion
+    } else {
+        let inv = sed_putative_inv(s)
+        let product = sed_mul(s, inv)
+        !sed_is_approx_one(product)
+    }
+}
+
+// ============================================================================
+// NODE CATEGORY CONSTANTS (for e0)
+// ============================================================================
+
+fn NODE_EXPR() -> i32 { 0 }        // Expression
+fn NODE_STMT() -> i32 { 1 }        // Statement
+fn NODE_ITEM() -> i32 { 2 }        // Item (fn, struct, etc.)
+fn NODE_TYPE() -> i32 { 3 }        // Type expression
+fn NODE_PATTERN() -> i32 { 4 }     // Pattern
+fn NODE_PATH() -> i32 { 5 }        // Path expression
+fn NODE_LITERAL() -> i32 { 6 }     // Literal value
+fn NODE_BLOCK() -> i32 { 7 }       // Block
+
+// Expression subcategories (offset by 8)
+fn NODE_EXPR_LITERAL() -> i32 { 8 }
+fn NODE_EXPR_PATH() -> i32 { 9 }
+fn NODE_EXPR_BINARY() -> i32 { 10 }
+fn NODE_EXPR_UNARY() -> i32 { 11 }
+fn NODE_EXPR_CALL() -> i32 { 12 }
+fn NODE_EXPR_METHOD() -> i32 { 13 }
+fn NODE_EXPR_FIELD() -> i32 { 14 }
+fn NODE_EXPR_INDEX() -> i32 { 15 }
+fn NODE_EXPR_CAST() -> i32 { 16 }
+fn NODE_EXPR_BLOCK() -> i32 { 17 }
+fn NODE_EXPR_IF() -> i32 { 18 }
+fn NODE_EXPR_MATCH() -> i32 { 19 }
+fn NODE_EXPR_LOOP() -> i32 { 20 }
+fn NODE_EXPR_WHILE() -> i32 { 21 }
+fn NODE_EXPR_FOR() -> i32 { 22 }
+fn NODE_EXPR_RETURN() -> i32 { 23 }
+fn NODE_EXPR_BREAK() -> i32 { 24 }
+fn NODE_EXPR_CONTINUE() -> i32 { 25 }
+fn NODE_EXPR_CLOSURE() -> i32 { 26 }
+fn NODE_EXPR_TUPLE() -> i32 { 27 }
+fn NODE_EXPR_ARRAY() -> i32 { 28 }
+fn NODE_EXPR_STRUCT() -> i32 { 29 }
+fn NODE_EXPR_RANGE() -> i32 { 30 }
+
+// Item subcategories (offset by 32)
+fn NODE_ITEM_FN() -> i32 { 32 }
+fn NODE_ITEM_STRUCT() -> i32 { 33 }
+fn NODE_ITEM_ENUM() -> i32 { 34 }
+fn NODE_ITEM_TRAIT() -> i32 { 35 }
+fn NODE_ITEM_IMPL() -> i32 { 36 }
+fn NODE_ITEM_MOD() -> i32 { 37 }
+fn NODE_ITEM_USE() -> i32 { 38 }
+fn NODE_ITEM_TYPE() -> i32 { 39 }
+fn NODE_ITEM_CONST() -> i32 { 40 }
+fn NODE_ITEM_STATIC() -> i32 { 41 }
+fn NODE_ITEM_EFFECT() -> i32 { 42 }
+fn NODE_ITEM_HANDLER() -> i32 { 43 }
+
+// Type expression subcategories (offset by 48)
+fn NODE_TYPE_PATH() -> i32 { 48 }
+fn NODE_TYPE_REF() -> i32 { 49 }
+fn NODE_TYPE_REF_MUT() -> i32 { 50 }
+fn NODE_TYPE_ARRAY() -> i32 { 51 }
+fn NODE_TYPE_SLICE() -> i32 { 52 }
+fn NODE_TYPE_TUPLE() -> i32 { 53 }
+fn NODE_TYPE_FUNC() -> i32 { 54 }
+fn NODE_TYPE_UNIT() -> i32 { 55 }
+fn NODE_TYPE_NEVER() -> i32 { 56 }
+fn NODE_TYPE_INFER() -> i32 { 57 }
+
+// ============================================================================
+// OPERATOR CONSTANTS (for e1)
+// ============================================================================
+
+fn OP_NONE() -> i32 { 0 }
+fn OP_ADD() -> i32 { 1 }
+fn OP_SUB() -> i32 { 2 }
+fn OP_MUL() -> i32 { 3 }
+fn OP_DIV() -> i32 { 4 }
+fn OP_REM() -> i32 { 5 }
+fn OP_AND() -> i32 { 6 }
+fn OP_OR() -> i32 { 7 }
+fn OP_BIT_AND() -> i32 { 8 }
+fn OP_BIT_OR() -> i32 { 9 }
+fn OP_BIT_XOR() -> i32 { 10 }
+fn OP_SHL() -> i32 { 11 }
+fn OP_SHR() -> i32 { 12 }
+fn OP_EQ() -> i32 { 13 }
+fn OP_NE() -> i32 { 14 }
+fn OP_LT() -> i32 { 15 }
+fn OP_LE() -> i32 { 16 }
+fn OP_GT() -> i32 { 17 }
+fn OP_GE() -> i32 { 18 }
+fn OP_NEG() -> i32 { 19 }
+fn OP_NOT() -> i32 { 20 }
+fn OP_REF() -> i32 { 21 }
+fn OP_REF_MUT() -> i32 { 22 }
+fn OP_DEREF() -> i32 { 23 }
+fn OP_ASSIGN() -> i32 { 24 }
+fn OP_CONCAT() -> i32 { 25 }  // ++
+
+// ============================================================================
+// LINEARITY MODE CONSTANTS (for e8)
+// ============================================================================
+
+fn LIN_UNRESTRICTED() -> i32 { 0 }
+fn LIN_AFFINE() -> i32 { 1 }
+fn LIN_LINEAR() -> i32 { 2 }
+
+// ============================================================================
+// EFFECT BITS (for e6, e7)
+// ============================================================================
+
+fn EFF_IO() -> i32 { 1 }
+fn EFF_MUT() -> i32 { 2 }
+fn EFF_ALLOC() -> i32 { 4 }
+fn EFF_PANIC() -> i32 { 8 }
+fn EFF_DIV() -> i32 { 16 }
+fn EFF_ASYNC() -> i32 { 32 }
+fn EFF_GPU() -> i32 { 64 }
+fn EFF_PROB() -> i32 { 128 }
+fn EFF_EPISTEMIC() -> i32 { 256 }
+fn EFF_SENSOR() -> i32 { 512 }
+fn EFF_NETWORK() -> i32 { 1024 }
+fn EFF_COMPILE() -> i32 { 2048 }  // Novel: compilation as effect
+
+// ============================================================================
+// HELPER FUNCTIONS
+// ============================================================================
+
+// Simple hash function for names (djb2 variant)
+fn hash_name(name: [i8; 64], len: i64) -> i64 with Mut, Div, Panic {
+    var hash: i64 = 5381
+    var i: i64 = 0
+    while i < len && i < 64 {
+        let c = name[i as usize] as i64
+        hash = ((hash * 33) + c) % 2147483647
+        i = i + 1
+    }
+    hash
+}
+
+// Extract low 32 bits as f32
+fn hash_low(h: i64) -> f32 with Panic {
+    (h % 65536) as f32
+}
+
+// Extract high 32 bits as f32
+fn hash_high(h: i64) -> f32 with Panic {
+    ((h / 65536) % 65536) as f32
+}
+
+// Compute checksum from other components
+fn compute_checksum(e0: f32, e1: f32, e2: f32, e3: f32, e4: f32, e5: f32, e6: f32, e7: f32,
+                    e8: f32, e9: f32, e10: f32, e11: f32, e12: f32, e13: f32, e14: f32) -> f32 with Panic {
+    // XOR-based checksum
+    let sum = e0 + e1 * 2.0 + e2 * 3.0 + e3 * 5.0 + e4 * 7.0 + e5 * 11.0 + e6 * 13.0 + e7 * 17.0 +
+              e8 * 19.0 + e9 * 23.0 + e10 * 29.0 + e11 * 31.0 + e12 * 37.0 + e13 * 41.0 + e14 * 43.0
+    sum % 65536.0
+}
+
+// ============================================================================
+// SEDENION AST ENCODING
+// ============================================================================
+
+// Encodes basic expression info to sedenion
+fn encode_expr_basic(
+    node_type: i32,
+    operator: i32,
+    arity: i32,
+    depth: i32,
+    scope: i32,
+    span_start: i64,
+    span_end: i64
+) -> Sedenion with Panic {
+    let e0 = node_type as f32
+    let e1 = operator as f32
+    let e2 = arity as f32
+    let e3 = depth as f32
+    let e4 = scope as f32
+    let e5 = 0.0  // type hint (unknown)
+    let e6 = 0.0  // effects low (unknown)
+    let e7 = 0.0  // effects high (unknown)
+    let e8 = LIN_UNRESTRICTED() as f32
+    let e9 = 1.0  // confidence (default full)
+    let e10 = 0.0  // literal value (none)
+    let e11 = 0.0  // name hash low
+    let e12 = 0.0  // name hash high
+    let e13 = span_start as f32
+    let e14 = span_end as f32
+    let e15 = compute_checksum(e0, e1, e2, e3, e4, e5, e6, e7, e8, e9, e10, e11, e12, e13, e14)
+
+    sed(e0, e1, e2, e3, e4, e5, e6, e7, e8, e9, e10, e11, e12, e13, e14, e15)
+}
+
+// Encodes a literal expression
+fn encode_literal_int(value: i64, span_start: i64, span_end: i64, depth: i32, scope: i32) -> Sedenion with Panic {
+    let e0 = NODE_EXPR_LITERAL() as f32
+    let e1 = OP_NONE() as f32
+    let e2 = 0.0  // arity 0
+    let e3 = depth as f32
+    let e4 = scope as f32
+    let e5 = 0.0  // type hint
+    let e6 = 0.0
+    let e7 = 0.0
+    let e8 = LIN_UNRESTRICTED() as f32
+    let e9 = 1.0
+    let e10 = (value % 65536) as f32  // literal value (truncated)
+    let e11 = 0.0
+    let e12 = 0.0
+    let e13 = span_start as f32
+    let e14 = span_end as f32
+    let e15 = compute_checksum(e0, e1, e2, e3, e4, e5, e6, e7, e8, e9, e10, e11, e12, e13, e14)
+
+    sed(e0, e1, e2, e3, e4, e5, e6, e7, e8, e9, e10, e11, e12, e13, e14, e15)
+}
+
+// Encodes a literal float
+fn encode_literal_float(value: f64, span_start: i64, span_end: i64, depth: i32, scope: i32) -> Sedenion with Panic {
+    let e0 = NODE_EXPR_LITERAL() as f32
+    let e1 = OP_NONE() as f32
+    let e2 = 0.0
+    let e3 = depth as f32
+    let e4 = scope as f32
+    let e5 = 1.0  // float type hint
+    let e6 = 0.0
+    let e7 = 0.0
+    let e8 = LIN_UNRESTRICTED() as f32
+    let e9 = 1.0
+    let e10 = value as f32  // literal value
+    let e11 = 0.0
+    let e12 = 0.0
+    let e13 = span_start as f32
+    let e14 = span_end as f32
+    let e15 = compute_checksum(e0, e1, e2, e3, e4, e5, e6, e7, e8, e9, e10, e11, e12, e13, e14)
+
+    sed(e0, e1, e2, e3, e4, e5, e6, e7, e8, e9, e10, e11, e12, e13, e14, e15)
+}
+
+// Encodes a path/identifier expression
+fn encode_path(name: [i8; 64], name_len: i64, span_start: i64, span_end: i64, depth: i32, scope: i32) -> Sedenion with Mut, Div, Panic {
+    let h = hash_name(name, name_len)
+    let e0 = NODE_EXPR_PATH() as f32
+    let e1 = OP_NONE() as f32
+    let e2 = 0.0  // arity 0
+    let e3 = depth as f32
+    let e4 = scope as f32
+    let e5 = 0.0
+    let e6 = 0.0
+    let e7 = 0.0
+    let e8 = LIN_UNRESTRICTED() as f32
+    let e9 = 1.0
+    let e10 = 0.0
+    let e11 = hash_low(h)
+    let e12 = hash_high(h)
+    let e13 = span_start as f32
+    let e14 = span_end as f32
+    let e15 = compute_checksum(e0, e1, e2, e3, e4, e5, e6, e7, e8, e9, e10, e11, e12, e13, e14)
+
+    sed(e0, e1, e2, e3, e4, e5, e6, e7, e8, e9, e10, e11, e12, e13, e14, e15)
+}
+
+// Encodes a binary expression
+fn encode_binary(op: i32, span_start: i64, span_end: i64, depth: i32, scope: i32) -> Sedenion with Panic {
+    let e0 = NODE_EXPR_BINARY() as f32
+    let e1 = op as f32
+    let e2 = 2.0  // arity 2
+    let e3 = depth as f32
+    let e4 = scope as f32
+    let e5 = 0.0
+    let e6 = 0.0
+    let e7 = 0.0
+    let e8 = LIN_UNRESTRICTED() as f32
+    let e9 = 1.0
+    let e10 = 0.0
+    let e11 = 0.0
+    let e12 = 0.0
+    let e13 = span_start as f32
+    let e14 = span_end as f32
+    let e15 = compute_checksum(e0, e1, e2, e3, e4, e5, e6, e7, e8, e9, e10, e11, e12, e13, e14)
+
+    sed(e0, e1, e2, e3, e4, e5, e6, e7, e8, e9, e10, e11, e12, e13, e14, e15)
+}
+
+// Encodes a unary expression
+fn encode_unary(op: i32, span_start: i64, span_end: i64, depth: i32, scope: i32) -> Sedenion with Panic {
+    let e0 = NODE_EXPR_UNARY() as f32
+    let e1 = op as f32
+    let e2 = 1.0  // arity 1
+    let e3 = depth as f32
+    let e4 = scope as f32
+    let e5 = 0.0
+    let e6 = 0.0
+    let e7 = 0.0
+    let e8 = LIN_UNRESTRICTED() as f32
+    let e9 = 1.0
+    let e10 = 0.0
+    let e11 = 0.0
+    let e12 = 0.0
+    let e13 = span_start as f32
+    let e14 = span_end as f32
+    let e15 = compute_checksum(e0, e1, e2, e3, e4, e5, e6, e7, e8, e9, e10, e11, e12, e13, e14)
+
+    sed(e0, e1, e2, e3, e4, e5, e6, e7, e8, e9, e10, e11, e12, e13, e14, e15)
+}
+
+// Encodes a function call expression
+fn encode_call(n_args: i32, span_start: i64, span_end: i64, depth: i32, scope: i32) -> Sedenion with Panic {
+    let e0 = NODE_EXPR_CALL() as f32
+    let e1 = OP_NONE() as f32
+    let e2 = (n_args + 1) as f32  // arity = callee + args
+    let e3 = depth as f32
+    let e4 = scope as f32
+    let e5 = 0.0
+    let e6 = 0.0
+    let e7 = 0.0
+    let e8 = LIN_UNRESTRICTED() as f32
+    let e9 = 1.0
+    let e10 = 0.0
+    let e11 = 0.0
+    let e12 = 0.0
+    let e13 = span_start as f32
+    let e14 = span_end as f32
+    let e15 = compute_checksum(e0, e1, e2, e3, e4, e5, e6, e7, e8, e9, e10, e11, e12, e13, e14)
+
+    sed(e0, e1, e2, e3, e4, e5, e6, e7, e8, e9, e10, e11, e12, e13, e14, e15)
+}
+
+// Encodes an if expression
+fn encode_if(has_else: bool, span_start: i64, span_end: i64, depth: i32, scope: i32) -> Sedenion with Panic {
+    let e0 = NODE_EXPR_IF() as f32
+    let e1 = OP_NONE() as f32
+    let e2 = if has_else { 3.0 } else { 2.0 }  // condition + then [+ else]
+    let e3 = depth as f32
+    let e4 = scope as f32
+    let e5 = 0.0
+    let e6 = 0.0
+    let e7 = 0.0
+    let e8 = LIN_UNRESTRICTED() as f32
+    let e9 = 1.0
+    let e10 = 0.0
+    let e11 = 0.0
+    let e12 = 0.0
+    let e13 = span_start as f32
+    let e14 = span_end as f32
+    let e15 = compute_checksum(e0, e1, e2, e3, e4, e5, e6, e7, e8, e9, e10, e11, e12, e13, e14)
+
+    sed(e0, e1, e2, e3, e4, e5, e6, e7, e8, e9, e10, e11, e12, e13, e14, e15)
+}
+
+// Encodes a block expression
+fn encode_block(n_stmts: i32, span_start: i64, span_end: i64, depth: i32, scope: i32) -> Sedenion with Panic {
+    let e0 = NODE_EXPR_BLOCK() as f32
+    let e1 = OP_NONE() as f32
+    let e2 = n_stmts as f32
+    let e3 = depth as f32
+    let e4 = scope as f32
+    let e5 = 0.0
+    let e6 = 0.0
+    let e7 = 0.0
+    let e8 = LIN_UNRESTRICTED() as f32
+    let e9 = 1.0
+    let e10 = 0.0
+    let e11 = 0.0
+    let e12 = 0.0
+    let e13 = span_start as f32
+    let e14 = span_end as f32
+    let e15 = compute_checksum(e0, e1, e2, e3, e4, e5, e6, e7, e8, e9, e10, e11, e12, e13, e14)
+
+    sed(e0, e1, e2, e3, e4, e5, e6, e7, e8, e9, e10, e11, e12, e13, e14, e15)
+}
+
+// Encodes a function item
+fn encode_fn_item(name: [i8; 64], name_len: i64, n_params: i32, span_start: i64, span_end: i64, depth: i32, scope: i32) -> Sedenion with Mut, Div, Panic {
+    let h = hash_name(name, name_len)
+    let e0 = NODE_ITEM_FN() as f32
+    let e1 = OP_NONE() as f32
+    let e2 = n_params as f32  // arity = parameter count
+    let e3 = depth as f32
+    let e4 = scope as f32
+    let e5 = 0.0
+    let e6 = 0.0
+    let e7 = 0.0
+    let e8 = LIN_UNRESTRICTED() as f32
+    let e9 = 1.0
+    let e10 = 0.0
+    let e11 = hash_low(h)
+    let e12 = hash_high(h)
+    let e13 = span_start as f32
+    let e14 = span_end as f32
+    let e15 = compute_checksum(e0, e1, e2, e3, e4, e5, e6, e7, e8, e9, e10, e11, e12, e13, e14)
+
+    sed(e0, e1, e2, e3, e4, e5, e6, e7, e8, e9, e10, e11, e12, e13, e14, e15)
+}
+
+// Encodes a struct item
+fn encode_struct_item(name: [i8; 64], name_len: i64, n_fields: i32, span_start: i64, span_end: i64, depth: i32, scope: i32) -> Sedenion with Mut, Div, Panic {
+    let h = hash_name(name, name_len)
+    let e0 = NODE_ITEM_STRUCT() as f32
+    let e1 = OP_NONE() as f32
+    let e2 = n_fields as f32
+    let e3 = depth as f32
+    let e4 = scope as f32
+    let e5 = 0.0
+    let e6 = 0.0
+    let e7 = 0.0
+    let e8 = LIN_UNRESTRICTED() as f32
+    let e9 = 1.0
+    let e10 = 0.0
+    let e11 = hash_low(h)
+    let e12 = hash_high(h)
+    let e13 = span_start as f32
+    let e14 = span_end as f32
+    let e15 = compute_checksum(e0, e1, e2, e3, e4, e5, e6, e7, e8, e9, e10, e11, e12, e13, e14)
+
+    sed(e0, e1, e2, e3, e4, e5, e6, e7, e8, e9, e10, e11, e12, e13, e14, e15)
+}
+
+// ============================================================================
+// SEDENION AST DECODING
+// ============================================================================
+
+// Extracts node type from sedenion
+fn decode_node_type(s: Sedenion) -> i32 {
+    sedenion_get_component(s, 0) as i32
+}
+
+// Extracts operator from sedenion
+fn decode_operator(s: Sedenion) -> i32 {
+    sedenion_get_component(s, 1) as i32
+}
+
+// Extracts arity from sedenion
+fn decode_arity(s: Sedenion) -> i32 {
+    sedenion_get_component(s, 2) as i32
+}
+
+// Extracts depth from sedenion
+fn decode_depth(s: Sedenion) -> i32 {
+    sedenion_get_component(s, 3) as i32
+}
+
+// Extracts scope level from sedenion
+fn decode_scope(s: Sedenion) -> i32 {
+    sedenion_get_component(s, 4) as i32
+}
+
+// Extracts confidence from sedenion
+fn decode_confidence(s: Sedenion) -> f32 {
+    sedenion_get_component(s, 9)
+}
+
+// Extracts literal value from sedenion
+fn decode_literal_value(s: Sedenion) -> f32 {
+    sedenion_get_component(s, 10)
+}
+
+// Extracts name hash from sedenion
+fn decode_name_hash(s: Sedenion) -> i64 {
+    let low = sedenion_get_component(s, 11) as i64
+    let high = sedenion_get_component(s, 12) as i64
+    low + (high * 65536)
+}
+
+// Extracts span start from sedenion
+fn decode_span_start(s: Sedenion) -> i64 {
+    sedenion_get_component(s, 13) as i64
+}
+
+// Extracts span end from sedenion
+fn decode_span_end(s: Sedenion) -> i64 {
+    sedenion_get_component(s, 14) as i64
+}
+
+// Verifies checksum integrity
+fn verify_checksum(s: Sedenion) -> bool with Panic {
+    let e0 = sedenion_get_component(s, 0)
+    let e1 = sedenion_get_component(s, 1)
+    let e2 = sedenion_get_component(s, 2)
+    let e3 = sedenion_get_component(s, 3)
+    let e4 = sedenion_get_component(s, 4)
+    let e5 = sedenion_get_component(s, 5)
+    let e6 = sedenion_get_component(s, 6)
+    let e7 = sedenion_get_component(s, 7)
+    let e8 = sedenion_get_component(s, 8)
+    let e9 = sedenion_get_component(s, 9)
+    let e10 = sedenion_get_component(s, 10)
+    let e11 = sedenion_get_component(s, 11)
+    let e12 = sedenion_get_component(s, 12)
+    let e13 = sedenion_get_component(s, 13)
+    let e14 = sedenion_get_component(s, 14)
+    let e15 = sedenion_get_component(s, 15)
+
+    let expected = compute_checksum(e0, e1, e2, e3, e4, e5, e6, e7, e8, e9, e10, e11, e12, e13, e14)
+    let diff = e15 - expected
+    let diff_abs = if diff < 0.0 { -diff } else { diff }
+    diff_abs < 1.0  // Allow small floating-point error
+}
+
+// ============================================================================
+// ALGEBRAIC AST OPERATIONS
+// ============================================================================
+
+// Composes parent node with child nodes via sedenion multiplication
+// CRITICAL: Sedenion multiplication is NON-ASSOCIATIVE!
+// (a * b) * c != a * (b * c)
+// This captures the non-commutative nature of AST composition.
+fn compose_ast(parent: Sedenion, child: Sedenion) -> Sedenion {
+    sed_mul(parent, child)
+}
+
+// Composes parent with multiple children (left-to-right)
+fn compose_ast_children(parent: Sedenion, children: [Sedenion; 16], n_children: i32) -> Sedenion with Mut, Div, Panic {
+    var result = parent
+    var i: i32 = 0
+    while i < n_children && i < 16 {
+        result = sed_mul(result, children[i as usize])
+        i = i + 1
+    }
+    result
+}
+
+// Checks if a sedenion AST node is valid (not a zero divisor)
+fn is_valid_ast_node(s: Sedenion) -> bool with Div, Panic {
+    !sedenion_is_zero_divisor(s) && verify_checksum(s)
+}
+
+// Computes AST "complexity" via norm
+fn ast_complexity(s: Sedenion) -> f32 {
+    sedenion_norm(s)
+}
+
+// Updates confidence in a sedenion AST node
+fn with_confidence(s: Sedenion, confidence: f32) -> Sedenion with Panic {
+    let e0 = sedenion_get_component(s, 0)
+    let e1 = sedenion_get_component(s, 1)
+    let e2 = sedenion_get_component(s, 2)
+    let e3 = sedenion_get_component(s, 3)
+    let e4 = sedenion_get_component(s, 4)
+    let e5 = sedenion_get_component(s, 5)
+    let e6 = sedenion_get_component(s, 6)
+    let e7 = sedenion_get_component(s, 7)
+    let e8 = sedenion_get_component(s, 8)
+    let e10 = sedenion_get_component(s, 10)
+    let e11 = sedenion_get_component(s, 11)
+    let e12 = sedenion_get_component(s, 12)
+    let e13 = sedenion_get_component(s, 13)
+    let e14 = sedenion_get_component(s, 14)
+    let e15 = compute_checksum(e0, e1, e2, e3, e4, e5, e6, e7, e8, confidence, e10, e11, e12, e13, e14)
+
+    sed(e0, e1, e2, e3, e4, e5, e6, e7, e8, confidence, e10, e11, e12, e13, e14, e15)
+}
+
+// Updates effects in a sedenion AST node
+fn with_effects(s: Sedenion, effects_low: i32, effects_high: i32) -> Sedenion with Panic {
+    let e0 = sedenion_get_component(s, 0)
+    let e1 = sedenion_get_component(s, 1)
+    let e2 = sedenion_get_component(s, 2)
+    let e3 = sedenion_get_component(s, 3)
+    let e4 = sedenion_get_component(s, 4)
+    let e5 = sedenion_get_component(s, 5)
+    let e6 = effects_low as f32
+    let e7 = effects_high as f32
+    let e8 = sedenion_get_component(s, 8)
+    let e9 = sedenion_get_component(s, 9)
+    let e10 = sedenion_get_component(s, 10)
+    let e11 = sedenion_get_component(s, 11)
+    let e12 = sedenion_get_component(s, 12)
+    let e13 = sedenion_get_component(s, 13)
+    let e14 = sedenion_get_component(s, 14)
+    let e15 = compute_checksum(e0, e1, e2, e3, e4, e5, e6, e7, e8, e9, e10, e11, e12, e13, e14)
+
+    sed(e0, e1, e2, e3, e4, e5, e6, e7, e8, e9, e10, e11, e12, e13, e14, e15)
+}
+
+// ============================================================================
+// AST CLASSIFICATION
+// ============================================================================
+
+// Checks if node is an expression
+fn is_expression(s: Sedenion) -> bool {
+    let t = decode_node_type(s)
+    t >= 8 && t < 32  // Expression range
+}
+
+// Checks if node is an item (fn, struct, etc.)
+fn is_item(s: Sedenion) -> bool {
+    let t = decode_node_type(s)
+    t >= 32 && t < 48  // Item range
+}
+
+// Checks if node is a type expression
+fn is_type_expr(s: Sedenion) -> bool {
+    let t = decode_node_type(s)
+    t >= 48 && t < 64  // Type range
+}
+
+// Checks if node is a literal
+fn is_literal(s: Sedenion) -> bool {
+    decode_node_type(s) == NODE_EXPR_LITERAL()
+}
+
+// Checks if node is a binary operation
+fn is_binary(s: Sedenion) -> bool {
+    decode_node_type(s) == NODE_EXPR_BINARY()
+}
+
+// Checks if node is a function call
+fn is_call(s: Sedenion) -> bool {
+    decode_node_type(s) == NODE_EXPR_CALL()
+}
+
+// ============================================================================
+// DEBUG / DISPLAY
+// ============================================================================
+
+// Returns a string description of node type
+fn node_type_name(t: i32) -> [i8; 32] with Mut {
+    var name: [i8; 32] = [0; 32]
+    // Note: In full implementation, would populate with actual names
+    // For now, return empty (type system would need string support)
+    name
+}

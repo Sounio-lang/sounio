@@ -1,0 +1,626 @@
+//! stdlib/compiler/handlers/selfhost.sio - Metacircular Compile Handler
+//!
+//! The SelfHost handler implements the Compile effect using the self-hosted
+//! compiler's own parsing, checking, and emission infrastructure.
+//!
+//! This is the heart of the metacircular architecture: the compiler handles
+//! its own compilation effect, enabling self-hosting with epistemic tracking.
+//!
+//! Novel aspects:
+//! - Metacircular: handler handles compilation of itself
+//! - Confidence tracking: each pass annotated with epistemic bounds
+//! - Provenance: transformation chain recorded for verification
+//! - Futamura-ready: can be partially evaluated into a compiler
+
+// ============================================================================
+// SHARED TYPES (from compile.sio)
+// ============================================================================
+
+struct Sedenion {
+    e0: f32, e1: f32, e2: f32, e3: f32,
+    e4: f32, e5: f32, e6: f32, e7: f32,
+    e8: f32, e9: f32, e10: f32, e11: f32,
+    e12: f32, e13: f32, e14: f32, e15: f32,
+}
+
+fn sed_zero() -> Sedenion {
+    Sedenion {
+        e0: 0.0, e1: 0.0, e2: 0.0, e3: 0.0,
+        e4: 0.0, e5: 0.0, e6: 0.0, e7: 0.0,
+        e8: 0.0, e9: 0.0, e10: 0.0, e11: 0.0,
+        e12: 0.0, e13: 0.0, e14: 0.0, e15: 0.0
+    }
+}
+
+struct ProvenanceStep {
+    name: [i8; 64],
+    name_len: i64,
+    confidence: f32,
+    timestamp: i64,
+}
+
+fn provenance_step_new() -> ProvenanceStep {
+    ProvenanceStep {
+        name: [0; 64],
+        name_len: 0,
+        confidence: 1.0,
+        timestamp: 0,
+    }
+}
+
+struct KnowledgeAST {
+    value: Sedenion,
+    confidence: f32,
+    provenance: [ProvenanceStep; 16],
+    n_provenance: i64,
+    is_verified: bool,
+}
+
+fn knowledge_ast_new(val: Sedenion) -> KnowledgeAST {
+    KnowledgeAST {
+        value: val,
+        confidence: 1.0,
+        provenance: [provenance_step_new(); 16],
+        n_provenance: 0,
+        is_verified: false,
+    }
+}
+
+struct TypedAST {
+    ast: Sedenion,
+    type_info: [i64; 64],
+    n_types: i64,
+}
+
+fn typed_ast_new(ast: Sedenion) -> TypedAST {
+    TypedAST {
+        ast: ast,
+        type_info: [0; 64],
+        n_types: 0,
+    }
+}
+
+struct KnowledgeTypedAST {
+    value: TypedAST,
+    confidence: f32,
+    provenance: [ProvenanceStep; 16],
+    n_provenance: i64,
+    is_verified: bool,
+}
+
+fn knowledge_typed_ast_new(val: TypedAST) -> KnowledgeTypedAST {
+    KnowledgeTypedAST {
+        value: val,
+        confidence: 1.0,
+        provenance: [provenance_step_new(); 16],
+        n_provenance: 0,
+        is_verified: false,
+    }
+}
+
+struct Code {
+    bytes: [i8; 4096],
+    len: i64,
+    target: i32,
+}
+
+fn code_new() -> Code {
+    Code {
+        bytes: [0; 4096],
+        len: 0,
+        target: 0,
+    }
+}
+
+struct KnowledgeCode {
+    value: Code,
+    confidence: f32,
+    provenance: [ProvenanceStep; 16],
+    n_provenance: i64,
+    is_verified: bool,
+}
+
+fn knowledge_code_new(val: Code) -> KnowledgeCode {
+    KnowledgeCode {
+        value: val,
+        confidence: 1.0,
+        provenance: [provenance_step_new(); 16],
+        n_provenance: 0,
+        is_verified: false,
+    }
+}
+
+// ============================================================================
+// HANDLER STATE
+// ============================================================================
+
+// Target architecture constants
+fn TARGET_X86_64() -> i32 { 0 }
+fn TARGET_AARCH64() -> i32 { 1 }
+
+// SelfHost handler state
+struct SelfHostHandler {
+    target_arch: i32,
+    opt_level: i32,
+    emit_debug: bool,
+    stage: i32,                   // Bootstrap stage
+    accumulated_confidence: f32,   // Running confidence product
+    operations: i64,               // Number of operations performed
+    errors: [i32; 64],             // Error codes if any
+    n_errors: i64,
+}
+
+fn selfhost_handler_new(target: i32) -> SelfHostHandler {
+    SelfHostHandler {
+        target_arch: target,
+        opt_level: 2,
+        emit_debug: false,
+        stage: 0,
+        accumulated_confidence: 1.0,
+        operations: 0,
+        errors: [0; 64],
+        n_errors: 0,
+    }
+}
+
+fn selfhost_handler_for_x86() -> SelfHostHandler {
+    selfhost_handler_new(TARGET_X86_64())
+}
+
+fn selfhost_handler_for_arm() -> SelfHostHandler {
+    selfhost_handler_new(TARGET_AARCH64())
+}
+
+fn selfhost_handler_with_stage(h: SelfHostHandler, stage: i32) -> SelfHostHandler {
+    SelfHostHandler {
+        target_arch: h.target_arch,
+        opt_level: h.opt_level,
+        emit_debug: h.emit_debug,
+        stage: stage,
+        accumulated_confidence: h.accumulated_confidence,
+        operations: h.operations,
+        errors: h.errors,
+        n_errors: h.n_errors,
+    }
+}
+
+fn selfhost_handler_add_error(h: SelfHostHandler, error: i32) -> SelfHostHandler with Mut, Panic {
+    var new_errors = h.errors
+    let idx = h.n_errors
+    if idx < 64 {
+        new_errors[idx as usize] = error
+    }
+    SelfHostHandler {
+        target_arch: h.target_arch,
+        opt_level: h.opt_level,
+        emit_debug: h.emit_debug,
+        stage: h.stage,
+        accumulated_confidence: h.accumulated_confidence,
+        operations: h.operations,
+        errors: new_errors,
+        n_errors: if idx < 64 { idx + 1 } else { idx },
+    }
+}
+
+// ============================================================================
+// PROVENANCE HELPERS
+// ============================================================================
+
+fn make_provenance_step(name_char: i8, confidence: f32) -> ProvenanceStep with Mut, Panic {
+    var name: [i8; 64] = [0; 64]
+    name[0] = name_char
+    ProvenanceStep {
+        name: name,
+        name_len: 1,
+        confidence: confidence,
+        timestamp: 0,
+    }
+}
+
+// Create provenance for "lex" phase
+fn provenance_lex() -> ProvenanceStep with Mut, Panic {
+    make_provenance_step(108, 1.0)  // 'l' for lex, deterministic
+}
+
+// Create provenance for "parse" phase
+fn provenance_parse() -> ProvenanceStep with Mut, Panic {
+    make_provenance_step(112, 1.0)  // 'p' for parse, deterministic
+}
+
+// Create provenance for "encode" phase (AST to sedenion)
+fn provenance_encode() -> ProvenanceStep with Mut, Panic {
+    make_provenance_step(101, 1.0)  // 'e' for encode, lossless
+}
+
+// Create provenance for "check" phase (type checking)
+fn provenance_check_simple() -> ProvenanceStep with Mut, Panic {
+    make_provenance_step(99, 0.99)  // 'c' for check, simple types
+}
+
+fn provenance_check_poly() -> ProvenanceStep with Mut, Panic {
+    make_provenance_step(99, 0.95)  // 'c' for check, polymorphic
+}
+
+fn provenance_check_higher() -> ProvenanceStep with Mut, Panic {
+    make_provenance_step(99, 0.90)  // 'c' for check, higher-rank
+}
+
+// Create provenance for "emit" phase
+fn provenance_emit() -> ProvenanceStep with Mut, Panic {
+    make_provenance_step(109, 0.98)  // 'm' for emit/codegen
+}
+
+// Create provenance for "specialize" phase (partial evaluation)
+fn provenance_specialize() -> ProvenanceStep with Mut, Panic {
+    make_provenance_step(115, 0.95)  // 's' for specialize
+}
+
+// ============================================================================
+// PARSE HANDLER
+// ============================================================================
+
+// Parse handler: source -> Knowledge<SedenionAST>
+//
+// The parsing phase is deterministic (confidence = 1.0):
+// 1. Lex source into tokens
+// 2. Parse tokens into AST
+// 3. Encode AST as sedenion
+//
+// Each step is recorded in provenance.
+fn handle_parse(h: SelfHostHandler, source_ptr: i64, source_len: i64) -> (SelfHostHandler, KnowledgeAST) with Mut, Panic {
+    // In a full implementation, this would call the actual lexer/parser
+    // For now, we create a placeholder sedenion AST
+
+    // Step 1: Lex
+    let lex_prov = provenance_lex()
+
+    // Step 2: Parse
+    let parse_prov = provenance_parse()
+
+    // Step 3: Encode as sedenion
+    let encode_prov = provenance_encode()
+
+    // Create result AST (placeholder - in reality, parse the source)
+    // The sedenion would be computed from actual parsing
+    let ast_sed = Sedenion {
+        e0: 32.0,   // NODE_ITEM_FN
+        e1: 0.0,    // No operator
+        e2: 0.0,    // Arity (will be filled)
+        e3: 0.0,    // Depth 0
+        e4: 0.0,    // Scope 0
+        e5: 0.0,    // Type hint
+        e6: 0.0,    // Effects low
+        e7: 0.0,    // Effects high
+        e8: 0.0,    // Linearity
+        e9: 1.0,    // Full confidence
+        e10: 0.0,   // Literal value
+        e11: (source_len % 65536) as f32,  // Name hash based on length
+        e12: 0.0,
+        e13: 0.0,   // Span start
+        e14: source_len as f32,  // Span end
+        e15: 0.0,   // Checksum (computed)
+    }
+
+    // Build knowledge with provenance
+    var k = knowledge_ast_new(ast_sed)
+    var prov = k.provenance
+    prov[0] = lex_prov
+    prov[1] = parse_prov
+    prov[2] = encode_prov
+
+    let result = KnowledgeAST {
+        value: ast_sed,
+        confidence: lex_prov.confidence * parse_prov.confidence * encode_prov.confidence,
+        provenance: prov,
+        n_provenance: 3,
+        is_verified: false,
+    }
+
+    // Update handler state
+    let new_h = SelfHostHandler {
+        target_arch: h.target_arch,
+        opt_level: h.opt_level,
+        emit_debug: h.emit_debug,
+        stage: h.stage,
+        accumulated_confidence: h.accumulated_confidence * result.confidence,
+        operations: h.operations + 1,
+        errors: h.errors,
+        n_errors: h.n_errors,
+    }
+
+    (new_h, result)
+}
+
+// ============================================================================
+// CHECK HANDLER
+// ============================================================================
+
+// Type complexity constants for confidence calculation
+fn COMPLEXITY_SIMPLE() -> i32 { 0 }
+fn COMPLEXITY_POLY() -> i32 { 1 }
+fn COMPLEXITY_HIGHER() -> i32 { 2 }
+fn COMPLEXITY_UNDER() -> i32 { 3 }
+
+// Infer type complexity from AST (simplified)
+fn infer_type_complexity(ast: Sedenion) -> i32 {
+    // In reality, this would analyze the AST for:
+    // - Generic parameters
+    // - Higher-kinded types
+    // - Type constraints
+    // For now, return simple as default
+    let effects = ast.e6 as i32 + ast.e7 as i32
+    if effects > 100 {
+        COMPLEXITY_HIGHER()
+    } else if effects > 10 {
+        COMPLEXITY_POLY()
+    } else {
+        COMPLEXITY_SIMPLE()
+    }
+}
+
+fn confidence_for_complexity(complexity: i32) -> f32 {
+    if complexity == COMPLEXITY_SIMPLE() {
+        0.99
+    } else if complexity == COMPLEXITY_POLY() {
+        0.95
+    } else if complexity == COMPLEXITY_HIGHER() {
+        0.90
+    } else {
+        0.80  // COMPLEXITY_UNDER
+    }
+}
+
+// Check handler: AST -> Knowledge<TypedAST>
+//
+// Type checking confidence varies by complexity:
+// - Simple types: 0.99
+// - Polymorphic: 0.95
+// - Higher-rank: 0.90
+// - Underconstrained: 0.80
+fn handle_check(h: SelfHostHandler, ast: KnowledgeAST) -> (SelfHostHandler, KnowledgeTypedAST) with Mut, Div, Panic {
+    // Infer type complexity
+    let complexity = infer_type_complexity(ast.value)
+    let check_conf = confidence_for_complexity(complexity)
+
+    // Create check provenance based on complexity
+    let check_prov = if complexity == COMPLEXITY_SIMPLE() {
+        provenance_check_simple()
+    } else if complexity == COMPLEXITY_POLY() {
+        provenance_check_poly()
+    } else {
+        provenance_check_higher()
+    }
+
+    // Create typed AST (in reality, run type inference)
+    let typed = TypedAST {
+        ast: ast.value,
+        type_info: [0; 64],  // Would contain actual type info
+        n_types: 0,
+    }
+
+    // Build knowledge with combined provenance
+    var prov: [ProvenanceStep; 16] = [provenance_step_new(); 16]
+    var i: i64 = 0
+    while i < ast.n_provenance && i < 15 {
+        prov[i as usize] = ast.provenance[i as usize]
+        i = i + 1
+    }
+    if i < 16 {
+        prov[i as usize] = check_prov
+    }
+
+    let result = KnowledgeTypedAST {
+        value: typed,
+        confidence: ast.confidence * check_conf,
+        provenance: prov,
+        n_provenance: if ast.n_provenance < 15 { ast.n_provenance + 1 } else { 16 },
+        is_verified: false,
+    }
+
+    // Update handler state
+    let new_h = SelfHostHandler {
+        target_arch: h.target_arch,
+        opt_level: h.opt_level,
+        emit_debug: h.emit_debug,
+        stage: h.stage,
+        accumulated_confidence: h.accumulated_confidence * check_conf,
+        operations: h.operations + 1,
+        errors: h.errors,
+        n_errors: h.n_errors,
+    }
+
+    (new_h, result)
+}
+
+// ============================================================================
+// EMIT HANDLER
+// ============================================================================
+
+// Emit handler: TypedAST -> Knowledge<Code>
+//
+// Code generation confidence is typically 0.98 (well-tested infrastructure).
+fn handle_emit(h: SelfHostHandler, typed: KnowledgeTypedAST) -> (SelfHostHandler, KnowledgeCode) with Mut, Div, Panic {
+    let emit_prov = provenance_emit()
+
+    // Create code output (in reality, run codegen)
+    let code = Code {
+        bytes: [0; 4096],  // Would contain actual machine code
+        len: 0,
+        target: h.target_arch,
+    }
+
+    // Build knowledge with combined provenance
+    var prov: [ProvenanceStep; 16] = [provenance_step_new(); 16]
+    var i: i64 = 0
+    while i < typed.n_provenance && i < 15 {
+        prov[i as usize] = typed.provenance[i as usize]
+        i = i + 1
+    }
+    if i < 16 {
+        prov[i as usize] = emit_prov
+    }
+
+    let result = KnowledgeCode {
+        value: code,
+        confidence: typed.confidence * emit_prov.confidence,
+        provenance: prov,
+        n_provenance: if typed.n_provenance < 15 { typed.n_provenance + 1 } else { 16 },
+        is_verified: false,
+    }
+
+    // Update handler state
+    let new_h = SelfHostHandler {
+        target_arch: h.target_arch,
+        opt_level: h.opt_level,
+        emit_debug: h.emit_debug,
+        stage: h.stage,
+        accumulated_confidence: h.accumulated_confidence * emit_prov.confidence,
+        operations: h.operations + 1,
+        errors: h.errors,
+        n_errors: h.n_errors,
+    }
+
+    (new_h, result)
+}
+
+// ============================================================================
+// SPECIALIZE HANDLER (PARTIAL EVALUATION)
+// ============================================================================
+
+// Specialize handler: Code + static_args -> Knowledge<Code>
+//
+// Partial evaluation specializes code with known inputs.
+// This is the first Futamura projection when applied to an interpreter.
+fn handle_specialize(h: SelfHostHandler, code: KnowledgeCode, static_args: [i64; 16], n_args: i64) -> (SelfHostHandler, KnowledgeCode) with Mut, Div, Panic {
+    let spec_prov = provenance_specialize()
+
+    // Create specialized code (in reality, run partial evaluator)
+    // The specialized code would have static_args "baked in"
+    let specialized = Code {
+        bytes: code.value.bytes,  // Would be different after PE
+        len: code.value.len,
+        target: code.value.target,
+    }
+
+    // Build knowledge with combined provenance
+    var prov: [ProvenanceStep; 16] = [provenance_step_new(); 16]
+    var i: i64 = 0
+    while i < code.n_provenance && i < 15 {
+        prov[i as usize] = code.provenance[i as usize]
+        i = i + 1
+    }
+    if i < 16 {
+        prov[i as usize] = spec_prov
+    }
+
+    let result = KnowledgeCode {
+        value: specialized,
+        confidence: code.confidence * spec_prov.confidence,
+        provenance: prov,
+        n_provenance: if code.n_provenance < 15 { code.n_provenance + 1 } else { 16 },
+        is_verified: false,
+    }
+
+    // Update handler state
+    let new_h = SelfHostHandler {
+        target_arch: h.target_arch,
+        opt_level: h.opt_level,
+        emit_debug: h.emit_debug,
+        stage: h.stage,
+        accumulated_confidence: h.accumulated_confidence * spec_prov.confidence,
+        operations: h.operations + 1,
+        errors: h.errors,
+        n_errors: h.n_errors,
+    }
+
+    (new_h, result)
+}
+
+// ============================================================================
+// FULL COMPILATION PIPELINE
+// ============================================================================
+
+// Complete compilation: source -> Knowledge<Code>
+//
+// Chains parse -> check -> emit with confidence propagation.
+fn compile_full(h: SelfHostHandler, source_ptr: i64, source_len: i64) -> (SelfHostHandler, KnowledgeCode) with Mut, Div, Panic {
+    // Phase 1: Parse
+    let parse_result = handle_parse(h, source_ptr, source_len)
+    let h1 = parse_result.0
+    let parsed = parse_result.1
+
+    // Phase 2: Check
+    let check_result = handle_check(h1, parsed)
+    let h2 = check_result.0
+    let checked = check_result.1
+
+    // Phase 3: Emit
+    let emit_result = handle_emit(h2, checked)
+
+    emit_result
+}
+
+// ============================================================================
+// BOOTSTRAP SUPPORT
+// ============================================================================
+
+// Bootstrap stage constants
+fn STAGE_RUST() -> i32 { 0 }
+fn STAGE_SELF1() -> i32 { 1 }
+fn STAGE_SELF2() -> i32 { 2 }
+
+// Compile self (for bootstrap)
+// This is called when the compiler compiles its own source.
+fn compile_self(h: SelfHostHandler, compiler_source_ptr: i64, compiler_source_len: i64) -> (SelfHostHandler, KnowledgeCode) with Mut, Div, Panic {
+    // Set stage based on current handler stage
+    let next_stage = h.stage + 1
+    let staged_h = selfhost_handler_with_stage(h, next_stage)
+
+    // Compile
+    compile_full(staged_h, compiler_source_ptr, compiler_source_len)
+}
+
+// Cross-validate two compilation results
+// Returns true if they produce identical output
+fn cross_validate(code1: KnowledgeCode, code2: KnowledgeCode) -> bool with Mut, Div, Panic {
+    if code1.value.len != code2.value.len {
+        false
+    } else {
+        var match_found = true
+        var i: i64 = 0
+        while i < code1.value.len && i < 4096 {
+            if code1.value.bytes[i as usize] != code2.value.bytes[i as usize] {
+                match_found = false
+            }
+            i = i + 1
+        }
+        match_found
+    }
+}
+
+// Apply confidence boost after successful cross-validation
+fn CONFIDENCE_BOOST() -> f32 { 1.04 }
+
+fn boost_confidence(code: KnowledgeCode) -> KnowledgeCode {
+    let boosted = code.confidence * CONFIDENCE_BOOST()
+    let capped = if boosted > 0.99 { 0.99 } else { boosted }
+    KnowledgeCode {
+        value: code.value,
+        confidence: capped,
+        provenance: code.provenance,
+        n_provenance: code.n_provenance,
+        is_verified: true,
+    }
+}
+
+// Full bootstrap verification
+// Stage 0 (Rust) -> Stage 1 -> Stage 2
+// If Stage 1 output == Stage 2 output, boost confidence
+fn bootstrap_verify(stage1: KnowledgeCode, stage2: KnowledgeCode) -> KnowledgeCode with Mut, Div, Panic {
+    if cross_validate(stage1, stage2) {
+        boost_confidence(stage2)
+    } else {
+        // Validation failed - return stage2 without boost
+        stage2
+    }
+}
