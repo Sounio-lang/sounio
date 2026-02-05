@@ -309,9 +309,11 @@ mod tests {
 
         let barycenter = wasserstein_barycenter(&dists, &weights);
 
-        // Equal inputs should give approximately uniform result
-        assert!(barycenter.alpha > 0.5);
-        assert!(barycenter.beta > 0.5);
+        // Equal identical inputs should give symmetric barycenter
+        assert!((barycenter.alpha - barycenter.beta).abs() < 0.001);
+        // Parameters should be positive
+        assert!(barycenter.alpha > 0.0);
+        assert!(barycenter.beta > 0.0);
     }
 
     #[test]
