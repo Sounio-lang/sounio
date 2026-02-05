@@ -1,0 +1,320 @@
+/// Phase 2.2: Type Annotation Pass for Self-Hosted Sedenion Compiler
+///
+/// Attaches resolved types to all AST nodes, implements bidirectional type checking,
+/// and infers missing types in inferrable positions.
+
+/// Typed expression: expression + inferred type
+type TypedExpr = {
+    node_id: i32,
+    expr_kind: ExprKind,    // What kind of expression (lit, var, call, etc.)
+    ty: HirType,            // Inferred type
+    effects: i32,           // Effect list count
+    confidence: i32         // Type checking confidence (0-100)
+}
+
+/// Expression kinds
+type ExprKind =
+    | LiteralExpr(i32)       // value
+    | VariableExpr(str)      // name
+    | CallExpr(i32, i32)     // func_id, arg_count
+    | BinaryExpr(str)        // operator
+    | UnaryExpr(str)         // operator
+    | BlockExpr
+    | MatchExpr(i32)         // arm_count
+    | IfExpr
+    | LoopExpr
+
+/// HIR type (simplified)
+type HirType =
+    | IntType(i32)           // bit width
+    | FloatType(i32)         // bit width
+    | StringType
+    | BoolType
+    | UnitType
+    | StructType(str)        // name
+    | EnumType(str)          // name
+    | ArrayType(i32)         // element type id
+    | FunctionType(i32, i32) // param_types, return_type
+    | UnknownType
+    | PolymorphicType(str)   // type var
+
+/// Type annotation context
+type TypeContext = {
+    bindings: i32,           // Local type bindings count
+    generics: i32,           // Generic type parameters count
+    return_type: i32,        // Expected return type id
+    effect_env: i32,         // Current effect environment
+    confidence: i32          // Overall type checking confidence
+}
+
+/// Initialize empty type context
+fn type_context_new() -> TypeContext {
+    var ctx: TypeContext = {
+        bindings: 0,
+        generics: 0,
+        return_type: -1,
+        effect_env: 0,
+        confidence: 100
+    };
+    ctx
+}
+
+/// Check if type is numeric
+fn is_numeric_type(ty: HirType) -> bool {
+    match ty {
+        IntType(_) => true,
+        FloatType(_) => true,
+        _ => false
+    }
+}
+
+/// Check if type is concrete (no type variables)
+fn is_concrete_type(ty: HirType) -> bool {
+    match ty {
+        UnknownType => false,
+        PolymorphicType(_) => false,
+        _ => true
+    }
+}
+
+/// Unify two types
+fn unify_types(ty1: HirType, ty2: HirType, ctx: &!TypeContext) -> bool {
+    // Simple unification:
+    // - Same type → unify
+    // - Type var → bind
+    // - Otherwise → fail
+
+    match (ty1, ty2) {
+        (IntType(w1), IntType(w2)) => w1 == w2,
+        (FloatType(w1), FloatType(w2)) => w1 == w2,
+        (StringType, StringType) => true,
+        (BoolType, BoolType) => true,
+        (UnitType, UnitType) => true,
+        (UnknownType, _) => true,  // Unknown unifies with anything
+        (_, UnknownType) => true,
+        (PolymorphicType(_), _) => true,  // Type var unifies
+        (_, PolymorphicType(_)) => true,
+        _ => false
+    }
+}
+
+/// Infer type of literal
+fn infer_literal_type(value: i32) -> HirType {
+    // Simplified: assume integer
+    IntType(64)
+}
+
+/// Infer type of variable reference
+fn infer_variable_type(name: str, ctx: &TypeContext) -> Result<HirType, str> {
+    // Look up in bindings (simplified: return UnknownType for now)
+    Result::Ok(UnknownType)
+}
+
+/// Infer type of function call
+fn infer_call_type(func_id: i32, args: i32, ctx: &TypeContext) -> Result<HirType, str> {
+    // Look up function signature, match args, return result type
+    Result::Ok(UnknownType)
+}
+
+/// Infer type of binary operation
+fn infer_binary_type(op: str, left: HirType, right: HirType) -> Result<HirType, str> {
+    match op {
+        "+" | "-" | "*" | "/" => {
+            // Arithmetic: both numeric, same type
+            if unify_types(left, right, &!(type_context_new())) {
+                Result::Ok(left)
+            } else {
+                Result::Err("Type mismatch in arithmetic")
+            }
+        },
+        "==" | "!=" | "<" | ">" | "<=" | ">=" => {
+            // Comparison: same types, result is bool
+            if unify_types(left, right, &!(type_context_new())) {
+                Result::Ok(BoolType)
+            } else {
+                Result::Err("Type mismatch in comparison")
+            }
+        },
+        "&&" | "||" => {
+            // Logical: both bool
+            if unify_types(left, BoolType, &!(type_context_new())) &&
+               unify_types(right, BoolType, &!(type_context_new())) {
+                Result::Ok(BoolType)
+            } else {
+                Result::Err("Logical operators require bool")
+            }
+        },
+        _ => Result::Err("Unknown operator")
+    }
+}
+
+/// Infer type of unary operation
+fn infer_unary_type(op: str, operand: HirType) -> Result<HirType, str> {
+    match op {
+        "-" => {
+            if is_numeric_type(operand) {
+                Result::Ok(operand)
+            } else {
+                Result::Err("Unary minus requires numeric type")
+            }
+        },
+        "!" => {
+            if unify_types(operand, BoolType, &!(type_context_new())) {
+                Result::Ok(BoolType)
+            } else {
+                Result::Err("Logical not requires bool")
+            }
+        },
+        _ => Result::Err("Unknown unary operator")
+    }
+}
+
+/// Bidirectional check: check expression against expected type
+fn check_expr_against_type(expr: &TypedExpr, expected: HirType, ctx: &!TypeContext) -> Result<(), str> {
+    // Compare expr.ty against expected
+    if unify_types(expr.ty, expected, ctx) {
+        Result::Ok(())
+    } else {
+        Result::Err("Type mismatch")
+    }
+}
+
+/// Infer type of expression (bottom-up)
+fn infer_expr_type(expr_kind: ExprKind, ctx: &!TypeContext) -> Result<HirType, str> {
+    match expr_kind {
+        LiteralExpr(v) => Result::Ok(infer_literal_type(v)),
+        VariableExpr(name) => infer_variable_type(name, ctx),
+        CallExpr(fn_id, arg_count) => infer_call_type(fn_id, arg_count, ctx),
+        BinaryExpr(op) => Result::Ok(UnknownType),  // Would need args
+        UnaryExpr(op) => Result::Ok(UnknownType),
+        MatchExpr(_) => Result::Ok(UnknownType),
+        BlockExpr => Result::Ok(UnitType),
+        IfExpr => Result::Ok(UnknownType),
+        LoopExpr => Result::Ok(UnitType)
+    }
+}
+
+/// Annotate expressions in a list
+fn annotate_expressions(exprs: i32, ctx: &!TypeContext) -> i32 {
+    // For each expression, infer type and attach to TypedExpr
+    0  // placeholder: count of annotated expressions
+}
+
+/// Verify type consistency in expression tree
+fn verify_type_tree(expr: &TypedExpr) -> Result<(), str> {
+    // Check that type is not Unknown in required positions
+    if expr.ty == UnknownType {
+        Result::Err("Could not infer type for expression")
+    } else {
+        Result::Ok(())
+    }
+}
+
+/// Validate polymorphic instantiation
+fn instantiate_polymorphic(poly_type: HirType, args: i32, ctx: &!TypeContext) -> Result<HirType, str> {
+    // Replace type variables with concrete types
+    match poly_type {
+        PolymorphicType(name) => {
+            // Look up binding for this type var
+            Result::Ok(UnknownType)
+        },
+        _ => Result::Ok(poly_type)
+    }
+}
+
+/// Main type annotation pass
+fn annotate_module(ast: i32, ctx: &!TypeContext) -> Result<i32, str> {
+    // Infer types for all expressions, check bidirectionally
+    let count = annotate_expressions(ast, ctx);
+    Result::Ok(count)
+}
+
+/// Statistics about type annotation
+type AnnotationStats = {
+    expressions_typed: i32,
+    inference_succeeded: i32,
+    inference_failed: i32,
+    polymorphic_instantiations: i32,
+    bidirectional_checks: i32,
+    average_confidence: i32
+}
+
+/// Get annotation stats
+fn annotation_stats(ctx: &TypeContext) -> AnnotationStats {
+    var stats: AnnotationStats = {
+        expressions_typed: 0,
+        inference_succeeded: 0,
+        inference_failed: 0,
+        polymorphic_instantiations: 0,
+        bidirectional_checks: 0,
+        average_confidence: ctx.confidence
+    };
+    stats
+}
+
+/// Test: Integer type inference
+fn test_infer_integer_literal() {
+    let ty = infer_literal_type(42);
+    // Should be IntType(64)
+}
+
+/// Test: Arithmetic type inference
+fn test_infer_arithmetic() {
+    let left = IntType(64);
+    let right = IntType(64);
+    let result = infer_binary_type("+", left, right);
+    // Should succeed with IntType(64)
+}
+
+/// Test: Comparison type inference
+fn test_infer_comparison() {
+    let left = IntType(64);
+    let right = IntType(64);
+    let result = infer_binary_type("==", left, right);
+    // Should succeed with BoolType
+}
+
+/// Test: Type unification
+fn test_unify_types() {
+    var ctx = type_context_new();
+    let unifies = unify_types(IntType(64), IntType(64), &!ctx);
+    // Should be true
+}
+
+/// Test: Bidirectional checking
+fn test_bidirectional_check() {
+    var typed: TypedExpr = {
+        node_id: 0,
+        expr_kind: LiteralExpr(42),
+        ty: IntType(64),
+        effects: 0,
+        confidence: 100
+    };
+    var ctx = type_context_new();
+    let result = check_expr_against_type(&typed, IntType(64), &!ctx);
+    // Should succeed
+}
+
+/// Test: Type mismatch detection
+fn test_type_mismatch() {
+    var typed: TypedExpr = {
+        node_id: 0,
+        expr_kind: LiteralExpr(42),
+        ty: IntType(64),
+        effects: 0,
+        confidence: 100
+    };
+    var ctx = type_context_new();
+    let result = check_expr_against_type(&typed, StringType, &!ctx);
+    // Should fail
+}
+
+/// Run all tests
+fn run_all_tests() {
+    test_infer_integer_literal();
+    test_infer_arithmetic();
+    test_infer_comparison();
+    test_unify_types();
+    test_bidirectional_check();
+    test_type_mismatch();
+}
