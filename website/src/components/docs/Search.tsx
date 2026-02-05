@@ -22,7 +22,39 @@ interface SearchResult {
   url: string;
 }
 
-export default function Search() {
+interface SearchStrings {
+  button: string;
+  placeholder: string;
+  searching: string;
+  noResults: string;
+  noResultsHint: string;
+  startTyping: string;
+  startTypingHint: string;
+  toSelect: string;
+  toNavigate: string;
+  poweredBy: string;
+}
+
+interface Props {
+  locale: string;
+  strings: SearchStrings;
+}
+
+const NON_DEFAULT_LOCALES = ['pt', 'el', 'zh', 'ja', 'es'] as const;
+
+function urlMatchesLocale(url: string, locale: string): boolean {
+  // Pagefind returns site-relative urls (e.g. "/pt/docs/...").
+  // Treat the default locale ("en") as "no locale prefix".
+  const path = url.startsWith('http') ? new URL(url).pathname : url;
+
+  if (locale === 'en') {
+    return !NON_DEFAULT_LOCALES.some((l) => path === `/${l}` || path.startsWith(`/${l}/`));
+  }
+
+  return path === `/${locale}` || path.startsWith(`/${locale}/`);
+}
+
+export default function Search({ locale, strings }: Props) {
   const [isOpen, setIsOpen] = useState(false);
   const [query, setQuery] = useState('');
   const [results, setResults] = useState<SearchResult[]>([]);
@@ -30,10 +62,22 @@ export default function Search() {
   const inputRef = useRef<HTMLInputElement>(null);
   const searchTimeout = useRef<ReturnType<typeof setTimeout>>();
 
-  // Keyboard shortcut to open search (Cmd/Ctrl + K)
+  // Keyboard shortcut to open search (Cmd/Ctrl + K, or /)
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
+      const active = document.activeElement;
+      const isTyping =
+        active &&
+        (active.tagName === 'INPUT' ||
+          active.tagName === 'TEXTAREA' ||
+          (active as HTMLElement).isContentEditable);
+
       if ((e.metaKey || e.ctrlKey) && e.key === 'k') {
+        e.preventDefault();
+        setIsOpen(true);
+      }
+
+      if (!isTyping && !e.metaKey && !e.ctrlKey && e.key === '/') {
         e.preventDefault();
         setIsOpen(true);
       }
@@ -84,14 +128,14 @@ export default function Search() {
           };
         })
       );
-      setResults(formattedResults);
+      setResults(formattedResults.filter((r) => urlMatchesLocale(r.url, locale)));
     } catch (error) {
       console.error('Search error:', error);
       setResults([]);
     } finally {
       setLoading(false);
     }
-  }, []);
+  }, [locale]);
 
   // Debounce search input
   useEffect(() => {
@@ -132,7 +176,7 @@ export default function Search() {
       <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
         <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z" />
       </svg>
-      <span className="hidden sm:inline">Search</span>
+      <span className="hidden sm:inline">{strings.button}</span>
       <kbd className="hidden sm:inline-block px-1.5 py-0.5 text-xs bg-[var(--color-bg)] border border-[var(--color-border)] rounded">⌘K</kbd>
     </button>
   );
@@ -162,7 +206,7 @@ export default function Search() {
               type="text"
               value={query}
               onChange={(e) => setQuery(e.target.value)}
-              placeholder="Search documentation..."
+              placeholder={strings.placeholder}
               className="flex-1 bg-transparent text-lg text-[var(--color-text)] placeholder-[var(--color-text-muted)] focus:outline-none"
               aria-label="Search input"
             />
@@ -183,7 +227,7 @@ export default function Search() {
                   <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
                   <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z" />
                 </svg>
-                Searching...
+                {strings.searching}
               </div>
             ) : query.trim() ? (
               results.length > 0 ? (
@@ -209,14 +253,16 @@ export default function Search() {
                   <svg className="w-12 h-12 mx-auto mb-4 opacity-50" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                     <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M9.172 16.172a4 4 0 015.656 0M9 10h.01M15 10h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
                   </svg>
-                  <p>No results found for "{query}"</p>
-                  <p className="text-sm mt-1">Try different keywords</p>
+                  <p>
+                    {strings.noResults} <span className="font-mono">"{query}"</span>
+                  </p>
+                  <p className="text-sm mt-1">{strings.noResultsHint}</p>
                 </div>
               )
             ) : (
               <div className="py-12 text-center text-[var(--color-text-muted)]">
-                <p>Start typing to search...</p>
-                <p className="text-sm mt-1">Search docs, tutorials, and API references</p>
+                <p>{strings.startTyping}</p>
+                <p className="text-sm mt-1">{strings.startTypingHint}</p>
               </div>
             )}
           </div>
@@ -226,14 +272,14 @@ export default function Search() {
             <div className="flex items-center gap-4">
               <span className="flex items-center gap-1">
                 <kbd className="px-1 py-0.5 bg-[var(--color-bg-alt)] border border-[var(--color-border)] rounded">↵</kbd>
-                to select
+                {strings.toSelect}
               </span>
               <span className="flex items-center gap-1">
                 <kbd className="px-1 py-0.5 bg-[var(--color-bg-alt)] border border-[var(--color-border)] rounded">↑↓</kbd>
-                to navigate
+                {strings.toNavigate}
               </span>
             </div>
-            <span>Powered by Pagefind</span>
+            <span>{strings.poweredBy}</span>
           </div>
         </div>
       </div>

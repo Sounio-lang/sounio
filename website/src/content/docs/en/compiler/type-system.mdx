@@ -1,0 +1,117 @@
+---
+title: "Type System"
+description: "Bidirectional type checking with effects, units, ownership/multiplicity, and epistemic-aware typing."
+weight: 62
+category: "compiler"
+---
+
+# Type System
+
+Sounio’s type checker is responsible for more than “just types”. In practice it enforces (or records) several *orthogonal* constraints:
+
+- **Types**: inference + checking + unification
+- **Effects**: explicit `with IO, GPU, Async, ...` annotations and effectful operations
+- **Units**: dimensional analysis and unit inference (where enabled/available)
+- **Ownership / multiplicity**: affine/linear constraints (when used)
+- **Epistemic types**: constraints around `Knowledge<T>` and explicit extraction
+- **Refinements**: parsed/type-checked predicates; full proving may be feature-gated
+
+## Where the Checker Lives
+
+- `crates/souc/src/check/` — main type checking implementation
+- `crates/souc/src/types/` — core type representations and solvers (effects/units/refinements/ownership)
+- `crates/souc/src/hir/` and `crates/souc/src/hlir/` — typed IRs produced by checking and lowering
+
+## Type Checker Shape (Selected Fields)
+
+The checker maintains scoped environments, fresh type/effect variables, and specialized sub-checkers:
+
+```rust
+pub struct TypeChecker {
+    env: TypeEnv,
+    type_defs: HashMap<String, TypeDef>,
+    effects: EffectInference,
+    units: UnitChecker,
+    next_type_var: u32,
+    next_effect_var: u32,
+    constraints: Vec<TypeConstraint>,
+    ontology_resolver: Option<OntologyResolver>,
+    conformal_checker: Option<ConformalTypeChecker>,
+    // ...
+}
+```
+
+## High-Level Flow
+
+```text
+AST (parsed)
+  -> resolver (module tree + imports)
+  -> checker (types + effects + units + ownership)
+  -> HIR / HLIR (typed)
+  -> MIR + backends
+```
+
+## Bidirectional Checking (Synthesis vs Checking)
+
+The checker uses a bidirectional style:
+
+- **Synthesize**: infer the type of an expression bottom-up
+- **Check**: validate an expression against an expected type top-down
+
+This keeps inference predictable while still supporting ergonomic local type inference.
+
+## Units and Dimensions
+
+Units are tracked via a dimension model (7 SI base dimensions). A separate solver and inference layer is used to:
+
+- reject obvious mismatches (`kg` vs `m`)
+- infer derived units through arithmetic (`kg / m^3`, etc.)
+- support user-defined `unit` declarations (where enabled)
+
+> Spec vs implementation: unit syntax and enforcement can be mode/feature dependent. When in doubt, validate with a `tests/` fixture or run `souc check`.
+
+### Dimension Representation
+
+```rust
+pub struct Dimension {
+    pub mass: i8,        // [M]
+    pub length: i8,      // [L]
+    pub time: i8,        // [T]
+    pub current: i8,     // [I]
+    pub temperature: i8, // [Θ]
+    pub amount: i8,      // [N]
+    pub luminosity: i8,  // [J]
+}
+```
+
+## Effects Integration
+
+Effects are part of the function type and are checked alongside expression typing. The type checker feeds type information to effect inference so the compiler can pinpoint effect sources more precisely (method calls, higher-order functions, etc.).
+
+## Epistemic-Aware Typing
+
+The compiler treats `Knowledge<T>` as a distinct type that cannot be silently coerced into `T`. Operations that “drop epistemic context” must be explicit (e.g., an `unwrap("reason")`-style operation).
+
+### `Knowledge` Type (Compiler View)
+
+At the type level, epistemic values carry metadata (temporal context, epistemic status, ontology binding, provenance, ...):
+
+```rust
+pub struct Knowledge {
+    pub content: Box<Type>,
+    pub temporal: ContextTime,
+    pub epistemic: EpistemicStatus,
+    pub domain: OntologyBinding,
+    pub provenance: Provenance,
+    pub span: Span,
+}
+```
+
+### Ontology Layers (Design Overview)
+
+The architecture distinguishes multiple ontology “tiers” (compiled primitives up to federated runtime resolution). Exact behavior depends on how ontology resources are configured and which features are enabled.
+
+## Next
+
+- [Effect System](../effect-system)
+- [Code Generation](../codegen)

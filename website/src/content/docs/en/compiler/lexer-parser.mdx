@@ -1,0 +1,234 @@
+---
+title: "Lexer & Parser"
+description: "How `.sio` source becomes an AST: Logos tokens, spans, and the recursive descent parser."
+weight: 61
+category: "compiler"
+---
+
+# Lexer & Parser
+
+The compiler frontend turns `.sio` source text into an AST (Abstract Syntax Tree) in two stages:
+
+1. **Lexing**: UTF-8 text -> tokens (with spans + original text)
+2. **Parsing**: tokens -> AST (with node ids + span map)
+
+## Lexer (Tokenization)
+
+**Code**: `crates/souc/src/lexer/`
+
+The lexer is built with **Logos** and produces a `Vec<Token>`.
+
+Key files:
+
+- `crates/souc/src/lexer/mod.rs` — `lex(...)`
+- `crates/souc/src/lexer/tokens.rs` — `Token`, `TokenKind` (Logos rules)
+
+### Output: `Token` + Span
+
+Tokens preserve both kind and source location:
+
+```rust
+pub struct Token {
+    pub kind: TokenKind,
+    pub span: Span,
+    pub text: String,
+}
+```
+
+### Token Kinds
+
+`TokenKind` contains keywords, operators, literals, and doc comments. A few notable categories:
+
+- Keywords: `fn`, `let`, `var`, `struct`, `enum`, `trait`, `impl`, `module`, `use`, `pub`, `effect`, `handler`, `with`, ...
+- Operators: `&&`, `||`, `==`, `!=`, `<=`, `>=`, `<<`, `>>`, ...
+- Literals:
+  - ints/floats (including exponent notation)
+  - strings and C strings (`c"..."`) for FFI
+  - **unit literals** like `500_mg` (lexed as a single token)
+- Doc comments: `///`, `//!`, `/** ... */`, `/*! ... */`
+
+### Lexer Control Flow
+
+`lex(...)` loops over Logos results and converts them to `Token` values, always appending an EOF token:
+
+```rust
+pub fn lex(source: &str) -> Result<Vec<Token>> {
+    let mut tokens = Vec::new();
+    let mut lexer = TokenKind::lexer(source);
+
+    while let Some(result) = lexer.next() {
+        let span = lexer.span();
+        let kind = match result {
+            Ok(kind) => kind,
+            Err(_) => {
+                return Err(miette::miette!(
+                    "Unexpected character at position {}: {:?}",
+                    span.start,
+                    &source[span.clone()]
+                ));
+            }
+        };
+
+        tokens.push(Token {
+            kind,
+            span: Span::new(span.start, span.end),
+            text: source[span].to_string(),
+        });
+    }
+
+    tokens.push(Token {
+        kind: TokenKind::Eof,
+        span: Span::new(source.len(), source.len()),
+        text: String::new(),
+    });
+
+    Ok(tokens)
+}
+```
+
+### Literal Rules (Examples)
+
+Some notable literal/token rules from `TokenKind`:
+
+```rust
+// Integers: 42, 0xFF, 0b1010, 0o755
+#[regex(r"[0-9][0-9_]*", priority = 2)]
+IntLit,
+
+// Floats: 3.14, 1e10, 3.14e-10
+#[regex(r"[0-9][0-9_]*\.[0-9][0-9_]*([eE][+-]?[0-9]+)?")]
+FloatLit,
+
+// Strings: "hello"
+#[regex(r#""([^"\\]|\\.)*""#)]
+StringLit,
+
+// C strings: c"hello" (null-terminated for FFI)
+#[regex(r#"c"([^"\\]|\\.)*""#, priority = 2)]
+CStringLit,
+
+// Unit literals: 500_mg, 10.5_mL, 5.0_mg/mL
+#[regex(r"[0-9][0-9_]*_[a-zA-Z][a-zA-Z0-9_/]*", priority = 3)]
+IntUnitLit,
+```
+
+### Unit Literals
+
+Unit literals are lexed as a single token (e.g. `500_mg`), which makes later unit handling simpler:
+
+```sio
+let dose = 500_mg + 200_mg
+let conc = 10.5_mL / 5.0_mg
+```
+
+### Spans
+
+Every token carries a span. Spans are used by diagnostics (`miette` and `codespan-reporting`) to provide precise error locations.
+
+## Parser (AST Construction)
+
+**Code**: `crates/souc/src/parser/`
+
+The parser is **recursive descent** for statements/items and uses **Pratt parsing** for expressions (precedence + associativity).
+
+Key files:
+
+- `crates/souc/src/parser/mod.rs` — parser implementation
+- `crates/souc/src/parser/errors.rs` — parser diagnostics
+- `crates/souc/src/parser/recovery.rs` — recovery strategies
+
+### Key Features
+
+- Disambiguates blocks vs struct literals (context-sensitive parsing).
+- Handles nested generics by splitting `>>` when needed (so `Option<Box<T>>` can parse).
+- Attaches doc comments to items so they can flow through AST/HIR and tooling.
+- Performs limited error recovery to avoid diagnostic cascades.
+
+### The Parser Struct (Shape)
+
+```rust
+pub struct Parser<'a> {
+    tokens: &'a [Token],
+    pos: usize,
+    id_gen: IdGenerator,
+    allow_struct_literals: bool,
+    node_spans: HashMap<NodeId, Span>,
+    pending_gt: bool, // used to split `>>` for nested generics
+    source: &'a str,
+}
+```
+
+### Entry Point: `parse_program`
+
+At a high level, parsing:
+
+- collects file-level inner docs
+- optionally parses a `module ...;` declaration
+- parses items until EOF
+
+```rust
+pub fn parse(tokens: &[Token], source: &str) -> Result<Ast> {
+    let mut parser = Parser::with_source(tokens, source);
+    parser.parse_program()
+}
+```
+
+### Output: AST + Span Map
+
+The root AST stores:
+
+- `items`: top-level declarations
+- `module_name`: optional module path
+- `node_spans`: `NodeId -> Span` for later passes
+
+## AST (Syntax-Level IR)
+
+**Code**: `crates/souc/src/ast/mod.rs`
+
+The root:
+
+```rust
+pub struct Ast {
+    pub module_name: Option<Path>,
+    pub items: Vec<Item>,
+    pub inner_doc: Option<String>,
+    pub node_spans: HashMap<NodeId, Span>,
+}
+```
+
+Top-level items include functions/types/modules, but also domain constructs such as `unit` declarations and scientific DSL nodes:
+
+```rust
+pub enum Item {
+    Function(FnDef),
+    Struct(StructDef),
+    Enum(EnumDef),
+    Trait(TraitDef),
+    Impl(ImplDef),
+    TypeAlias(TypeAliasDef),
+    Effect(EffectDef),
+    Handler(HandlerDef),
+    Import(ImportDef),
+    Export(ExportDef),
+    Extern(ExternBlock),
+    Global(GlobalDef),
+    // Domain and scientific DSL
+    OntologyImport(OntologyImportDef),
+    AlignDecl(AlignDef),
+    OdeDef(OdeDef),
+    PdeDef(PdeDef),
+    CausalModel(CausalModelDef),
+    Unit(UnitDef),
+    Module(ModuleDef),
+}
+```
+
+## Next
+
+- [Type System](../type-system)
+- [Compiler Overview](../)
+
+## Next
+
+- [Type System](../type-system)
+- [Compiler Overview](../)
