@@ -779,6 +779,7 @@ impl Resolver {
                             original_name: item.name.clone(),
                             is_glob: item.is_glob,
                             is_reexport: i.is_reexport,
+                            is_module_import: false,
                             resolved: None,
                         });
                     }
@@ -791,6 +792,7 @@ impl Resolver {
                         original_name: module_name,
                         is_glob: false,
                         is_reexport: i.is_reexport,
+                        is_module_import: true,
                         resolved: None,
                     });
                 }
