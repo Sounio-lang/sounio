@@ -363,6 +363,11 @@ impl RankNChecker {
 
     /// Try to unify two types, updating the substitution if successful
     fn unify(&mut self, ty1: &Type, ty2: &Type) -> bool {
+        // Fast path: identical types (before substitution)
+        if ty1 == ty2 {
+            return true;
+        }
+
         let ty1 = self.apply_subst(ty1);
         let ty2 = self.apply_subst(ty2);
 

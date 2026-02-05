@@ -211,6 +211,8 @@ pub struct TypeChecker {
     hyperbolic_generator: Option<HyperbolicGenerator>,
     /// Conformal type checker for uncertainty quantification (optional)
     conformal_checker: Option<ConformalTypeChecker>,
+    /// Cache for expand_type_alias results (avoids re-expanding common aliases)
+    alias_expansion_cache: std::cell::RefCell<std::collections::HashMap<String, Type>>,
 }
 
 /// Type environment with scopes and module awareness
@@ -343,6 +345,7 @@ impl TypeChecker {
             spectral_distance: None, // Initialized on demand when ontology is available
             hyperbolic_generator: Some(HyperbolicGenerator::new(64)), // Default 64 dimensions
             conformal_checker: Some(ConformalTypeChecker::new(ConformalConfig::default())),
+            alias_expansion_cache: std::cell::RefCell::new(std::collections::HashMap::new()),
         }
     }
 
@@ -883,8 +886,24 @@ impl TypeChecker {
 
     /// Expand type aliases recursively (entry point with cycle detection)
     fn expand_type_alias(&self, ty: &Type) -> Type {
+        // Cache key: use type name for Named types, otherwise return as-is
+        if let Type::Named { name, .. } = ty {
+            if let Some(cached) = self.alias_expansion_cache.borrow().get(name) {
+                return cached.clone();
+            }
+        }
+
         let mut visited = std::collections::HashSet::new();
-        self.expand_type_alias_inner(ty, &mut visited)
+        let result = self.expand_type_alias_inner(ty, &mut visited);
+
+        // Cache result if it's a Named type
+        if let Type::Named { name, .. } = ty {
+            self.alias_expansion_cache
+                .borrow_mut()
+                .insert(name.clone(), result.clone());
+        }
+
+        result
     }
 
     /// Inner recursive alias expansion with cycle detection via visited set.
