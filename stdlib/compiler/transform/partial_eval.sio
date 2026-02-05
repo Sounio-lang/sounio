@@ -1,0 +1,513 @@
+//! stdlib/compiler/transform/partial_eval.sio - Partial Evaluation Engine
+//!
+//! Implements binding-time analysis and partial evaluation for Futamura projections.
+//! Enables specialization of sedenion-encoded ASTs based on static argument values.
+
+// ============================================================================
+// SEDENION TYPE (matches sedenion_encoding.sio)
+// ============================================================================
+
+struct Sedenion {
+    e0: f32, e1: f32, e2: f32, e3: f32,
+    e4: f32, e5: f32, e6: f32, e7: f32,
+    e8: f32, e9: f32, e10: f32, e11: f32,
+    e12: f32, e13: f32, e14: f32, e15: f32,
+}
+
+// ============================================================================
+// BINDING TIME CONSTANTS
+// ============================================================================
+
+let BT_STATIC: i32 = 0   // Known at compile time
+let BT_DYNAMIC: i32 = 1  // Known only at runtime
+
+// ============================================================================
+// OPERATOR CONSTANTS
+// ============================================================================
+
+let OP_ADD: i32 = 0
+let OP_SUB: i32 = 1
+let OP_MUL: i32 = 2
+let OP_DIV: i32 = 3
+let OP_NEG: i32 = 10
+
+// ============================================================================
+// NODE TYPE CONSTANTS (encoded in e0)
+// ============================================================================
+
+let NODE_LITERAL: i32 = 8
+let NODE_VAR: i32 = 9
+let NODE_EXPR_BINARY: i32 = 10
+let NODE_EXPR_UNARY: i32 = 11
+
+// ============================================================================
+// BINDING ENVIRONMENT
+// ============================================================================
+
+struct BindingEnv {
+    bindings: [i32; 256],     // Variable index → binding time
+    n_bindings: i64,
+}
+
+fn binding_env_new() -> BindingEnv {
+    BindingEnv {
+        bindings: [BT_DYNAMIC; 256],  // Default to dynamic
+        n_bindings: 0,
+    }
+}
+
+// ============================================================================
+// PARTIAL RESULT
+// ============================================================================
+
+struct PartialResult {
+    residual: Sedenion,       // Residualized AST node
+    value: f32,               // Static value (if BT_STATIC)
+    binding_time: i32,
+    is_reduced: bool,
+}
+
+// ============================================================================
+// SPECIALIZER
+// ============================================================================
+
+struct Specializer {
+    env: BindingEnv,
+    static_args: [f32; 16],
+    n_static: i64,
+    reductions: i64,
+}
+
+fn specializer_new() -> Specializer {
+    Specializer {
+        env: binding_env_new(),
+        static_args: [0.0; 16],
+        n_static: 0,
+        reductions: 0,
+    }
+}
+
+// ============================================================================
+// SEDENION HELPERS
+// ============================================================================
+
+fn sed_zero() -> Sedenion {
+    Sedenion {
+        e0: 0.0, e1: 0.0, e2: 0.0, e3: 0.0,
+        e4: 0.0, e5: 0.0, e6: 0.0, e7: 0.0,
+        e8: 0.0, e9: 0.0, e10: 0.0, e11: 0.0,
+        e12: 0.0, e13: 0.0, e14: 0.0, e15: 0.0,
+    }
+}
+
+fn sed(e0: f32, e1: f32, e2: f32, e3: f32, e4: f32, e5: f32, e6: f32, e7: f32,
+       e8: f32, e9: f32, e10: f32, e11: f32, e12: f32, e13: f32, e14: f32, e15: f32) -> Sedenion {
+    Sedenion {
+        e0: e0, e1: e1, e2: e2, e3: e3, e4: e4, e5: e5, e6: e6, e7: e7,
+        e8: e8, e9: e9, e10: e10, e11: e11, e12: e12, e13: e13, e14: e14, e15: e15
+    }
+}
+
+fn sedenion_get_component(s: Sedenion, idx: i32) -> f32 {
+    if idx == 0 { s.e0 }
+    else if idx == 1 { s.e1 }
+    else if idx == 2 { s.e2 }
+    else if idx == 3 { s.e3 }
+    else if idx == 4 { s.e4 }
+    else if idx == 5 { s.e5 }
+    else if idx == 6 { s.e6 }
+    else if idx == 7 { s.e7 }
+    else if idx == 8 { s.e8 }
+    else if idx == 9 { s.e9 }
+    else if idx == 10 { s.e10 }
+    else if idx == 11 { s.e11 }
+    else if idx == 12 { s.e12 }
+    else if idx == 13 { s.e13 }
+    else if idx == 14 { s.e14 }
+    else { s.e15 }
+}
+
+fn sedenion_set_component(s: Sedenion, idx: i32, val: f32) -> Sedenion {
+    if idx == 0 { sed(val, s.e1, s.e2, s.e3, s.e4, s.e5, s.e6, s.e7, s.e8, s.e9, s.e10, s.e11, s.e12, s.e13, s.e14, s.e15) }
+    else if idx == 1 { sed(s.e0, val, s.e2, s.e3, s.e4, s.e5, s.e6, s.e7, s.e8, s.e9, s.e10, s.e11, s.e12, s.e13, s.e14, s.e15) }
+    else if idx == 2 { sed(s.e0, s.e1, val, s.e3, s.e4, s.e5, s.e6, s.e7, s.e8, s.e9, s.e10, s.e11, s.e12, s.e13, s.e14, s.e15) }
+    else if idx == 3 { sed(s.e0, s.e1, s.e2, val, s.e4, s.e5, s.e6, s.e7, s.e8, s.e9, s.e10, s.e11, s.e12, s.e13, s.e14, s.e15) }
+    else if idx == 4 { sed(s.e0, s.e1, s.e2, s.e3, val, s.e5, s.e6, s.e7, s.e8, s.e9, s.e10, s.e11, s.e12, s.e13, s.e14, s.e15) }
+    else if idx == 5 { sed(s.e0, s.e1, s.e2, s.e3, s.e4, val, s.e6, s.e7, s.e8, s.e9, s.e10, s.e11, s.e12, s.e13, s.e14, s.e15) }
+    else if idx == 6 { sed(s.e0, s.e1, s.e2, s.e3, s.e4, s.e5, val, s.e7, s.e8, s.e9, s.e10, s.e11, s.e12, s.e13, s.e14, s.e15) }
+    else if idx == 7 { sed(s.e0, s.e1, s.e2, s.e3, s.e4, s.e5, s.e6, val, s.e8, s.e9, s.e10, s.e11, s.e12, s.e13, s.e14, s.e15) }
+    else if idx == 8 { sed(s.e0, s.e1, s.e2, s.e3, s.e4, s.e5, s.e6, s.e7, val, s.e9, s.e10, s.e11, s.e12, s.e13, s.e14, s.e15) }
+    else if idx == 9 { sed(s.e0, s.e1, s.e2, s.e3, s.e4, s.e5, s.e6, s.e7, s.e8, val, s.e10, s.e11, s.e12, s.e13, s.e14, s.e15) }
+    else if idx == 10 { sed(s.e0, s.e1, s.e2, s.e3, s.e4, s.e5, s.e6, s.e7, s.e8, s.e9, val, s.e11, s.e12, s.e13, s.e14, s.e15) }
+    else if idx == 11 { sed(s.e0, s.e1, s.e2, s.e3, s.e4, s.e5, s.e6, s.e7, s.e8, s.e9, s.e10, val, s.e12, s.e13, s.e14, s.e15) }
+    else if idx == 12 { sed(s.e0, s.e1, s.e2, s.e3, s.e4, s.e5, s.e6, s.e7, s.e8, s.e9, s.e10, s.e11, val, s.e13, s.e14, s.e15) }
+    else if idx == 13 { sed(s.e0, s.e1, s.e2, s.e3, s.e4, s.e5, s.e6, s.e7, s.e8, s.e9, s.e10, s.e11, s.e12, val, s.e14, s.e15) }
+    else if idx == 14 { sed(s.e0, s.e1, s.e2, s.e3, s.e4, s.e5, s.e6, s.e7, s.e8, s.e9, s.e10, s.e11, s.e12, s.e13, val, s.e15) }
+    else { sed(s.e0, s.e1, s.e2, s.e3, s.e4, s.e5, s.e6, s.e7, s.e8, s.e9, s.e10, s.e11, s.e12, s.e13, s.e14, val) }
+}
+
+// ============================================================================
+// MATH HELPERS
+// ============================================================================
+
+fn sqrt_f32(x: f32) -> f32 with Mut, Div, Panic {
+    if x <= 0.0 { 0.0 }
+    else {
+        // Newton-Raphson approximation
+        var guess: f32 = x / 2.0
+        var i: i32 = 0
+        while i < 10 {
+            guess = (guess + x / guess) / 2.0
+            i = i + 1
+        }
+        guess
+    }
+}
+
+// ============================================================================
+// ENVIRONMENT MANAGEMENT
+// ============================================================================
+
+fn get_binding(env: BindingEnv, var_idx: i64) -> i32 with Panic {
+    if var_idx < 0 || var_idx >= 256 {
+        BT_DYNAMIC  // Unbound vars are dynamic
+    } else {
+        env.bindings[var_idx as usize]
+    }
+}
+
+fn mark_static(env: BindingEnv, var_idx: i64) -> BindingEnv with Mut, Panic {
+    if var_idx >= 0 && var_idx < 256 {
+        var new_bindings = env.bindings
+        new_bindings[var_idx as usize] = BT_STATIC
+        var new_n = env.n_bindings
+        if var_idx >= new_n { new_n = var_idx + 1 }
+        BindingEnv {
+            bindings: new_bindings,
+            n_bindings: new_n,
+        }
+    } else {
+        env
+    }
+}
+
+fn mark_dynamic(env: BindingEnv, var_idx: i64) -> BindingEnv with Mut, Panic {
+    if var_idx >= 0 && var_idx < 256 {
+        var new_bindings = env.bindings
+        new_bindings[var_idx as usize] = BT_DYNAMIC
+        var new_n = env.n_bindings
+        if var_idx >= new_n { new_n = var_idx + 1 }
+        BindingEnv {
+            bindings: new_bindings,
+            n_bindings: new_n,
+        }
+    } else {
+        env
+    }
+}
+
+// ============================================================================
+// SPECIALIZER MANAGEMENT
+// ============================================================================
+
+fn specializer_with_args(args: [f32; 16], n: i64) -> Specializer with Mut, Div, Panic {
+    var s = specializer_new()
+    s = Specializer {
+        env: s.env,
+        static_args: args,
+        n_static: n,
+        reductions: 0,
+    }
+    // Mark first n args as static
+    var env = s.env
+    var i: i64 = 0
+    while i < n {
+        env = mark_static(env, i)
+        i = i + 1
+    }
+    Specializer {
+        env: env,
+        static_args: args,
+        n_static: n,
+        reductions: 0,
+    }
+}
+
+fn specializer_inc_reductions(s: Specializer) -> Specializer {
+    Specializer {
+        env: s.env,
+        static_args: s.static_args,
+        n_static: s.n_static,
+        reductions: s.reductions + 1,
+    }
+}
+
+// ============================================================================
+// STATIC EVALUATION
+// ============================================================================
+
+fn eval_static_binary(op: i32, left: f32, right: f32) -> f32 with Div, Panic {
+    if op == OP_ADD { left + right }
+    else if op == OP_SUB { left - right }
+    else if op == OP_MUL { left * right }
+    else if op == OP_DIV {
+        if right == 0.0 { 0.0 }  // Handle div by zero
+        else { left / right }
+    }
+    else { 0.0 }  // Unsupported op
+}
+
+fn eval_static_unary(op: i32, operand: f32) -> f32 {
+    if op == OP_NEG { -operand }
+    else { operand }  // Identity for unsupported ops
+}
+
+// ============================================================================
+// NODE TYPE HELPERS
+// ============================================================================
+
+fn get_node_type(node: Sedenion) -> i32 {
+    sedenion_get_component(node, 0) as i32
+}
+
+fn is_literal_node(node: Sedenion) -> bool {
+    get_node_type(node) == NODE_LITERAL
+}
+
+fn is_var_node(node: Sedenion) -> bool {
+    get_node_type(node) == NODE_VAR
+}
+
+fn get_literal_value(node: Sedenion) -> f32 {
+    sedenion_get_component(node, 10)  // e10 holds literal value
+}
+
+fn get_var_idx(node: Sedenion) -> i64 {
+    sedenion_get_component(node, 10) as i64  // e10 holds var index
+}
+
+fn get_binary_op(node: Sedenion) -> i32 {
+    sedenion_get_component(node, 1) as i32  // e1 holds operator
+}
+
+// ============================================================================
+// BINDING-TIME ANALYSIS
+// ============================================================================
+
+fn analyze_binding_time(node: Sedenion, env: BindingEnv) -> i32 with Panic {
+    let node_type = get_node_type(node)
+    if node_type == NODE_LITERAL {
+        BT_STATIC
+    } else if node_type == NODE_VAR {
+        let var_idx = get_var_idx(node)
+        get_binding(env, var_idx)
+    } else {
+        // For expressions, default to dynamic (conservative)
+        BT_DYNAMIC
+    }
+}
+
+fn is_static(pr: PartialResult) -> bool {
+    pr.binding_time == BT_STATIC
+}
+
+// ============================================================================
+// PARTIAL EVALUATION CORE
+// ============================================================================
+
+fn partial_result_static(value: f32) -> PartialResult {
+    PartialResult {
+        residual: sed_zero(),
+        value: value,
+        binding_time: BT_STATIC,
+        is_reduced: true,
+    }
+}
+
+fn partial_result_dynamic(residual: Sedenion) -> PartialResult {
+    PartialResult {
+        residual: residual,
+        value: 0.0,
+        binding_time: BT_DYNAMIC,
+        is_reduced: false,
+    }
+}
+
+fn partial_eval_literal(node: Sedenion) -> PartialResult {
+    let value = get_literal_value(node)
+    partial_result_static(value)
+}
+
+fn make_literal_node(value: f32) -> Sedenion {
+    sed(NODE_LITERAL as f32, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+        0.0, 0.0, value, 0.0, 0.0, 0.0, 0.0, 0.0)
+}
+
+// ============================================================================
+// RESIDUALIZATION
+// ============================================================================
+
+fn residualize_binary(op: i32, left: Sedenion, right: Sedenion) -> Sedenion {
+    // Create binary expression node with operator and child info encoded
+    sed(NODE_EXPR_BINARY as f32,   // e0: type
+        op as f32,                  // e1: operator
+        2.0,                        // e2: arity
+        0.0,                        // e3: depth
+        0.0, 0.0, 0.0, 0.0,        // e4-e7: unused
+        0.0, 0.0, 0.0, 0.0,        // e8-e11: unused
+        0.0, 0.0, 0.0, 0.0)        // e12-e15: unused
+}
+
+fn residualize_unary(op: i32, operand: Sedenion) -> Sedenion {
+    sed(NODE_EXPR_UNARY as f32,    // e0: type
+        op as f32,                  // e1: operator
+        1.0,                        // e2: arity
+        0.0, 0.0, 0.0, 0.0, 0.0,   // e3-e7
+        0.0, 0.0, 0.0, 0.0,        // e8-e11
+        0.0, 0.0, 0.0, 0.0)        // e12-e15
+}
+
+// ============================================================================
+// PARTIAL EVALUATION OF EXPRESSIONS
+// ============================================================================
+
+fn partial_eval_binary(op: i32, left: PartialResult, right: PartialResult) -> PartialResult with Div, Panic {
+    if is_static(left) && is_static(right) {
+        // Both static: compute value
+        let result_val = eval_static_binary(op, left.value, right.value)
+        partial_result_static(result_val)
+    } else {
+        // At least one dynamic: residualize
+        let left_res = if is_static(left) {
+            make_literal_node(left.value)
+        } else {
+            left.residual
+        }
+        let right_res = if is_static(right) {
+            make_literal_node(right.value)
+        } else {
+            right.residual
+        }
+        let res_node = residualize_binary(op, left_res, right_res)
+        partial_result_dynamic(res_node)
+    }
+}
+
+fn partial_eval_unary(op: i32, operand: PartialResult) -> PartialResult {
+    if is_static(operand) {
+        let result_val = eval_static_unary(op, operand.value)
+        partial_result_static(result_val)
+    } else {
+        let res_node = residualize_unary(op, operand.residual)
+        partial_result_dynamic(res_node)
+    }
+}
+
+// ============================================================================
+// SPECIALIZATION
+// ============================================================================
+
+fn specialize(code: Sedenion, static_args: [f32; 16], n: i64) -> Sedenion with Mut, Div, Panic {
+    let spec = specializer_with_args(static_args, n)
+    let node_type = get_node_type(code)
+
+    if node_type == NODE_LITERAL {
+        // Literals are already specialized
+        code
+    } else if node_type == NODE_VAR {
+        // Check if var is static
+        let var_idx = get_var_idx(code)
+        let bt = get_binding(spec.env, var_idx)
+        if bt == BT_STATIC && var_idx < n {
+            make_literal_node(static_args[var_idx as usize])
+        } else {
+            code  // Keep as dynamic
+        }
+    } else {
+        code  // Default: return unchanged
+    }
+}
+
+// ============================================================================
+// FUTAMURA PROJECTIONS
+// ============================================================================
+
+// Level 1: specialize interpreter with program → compiled program
+fn futamura_1(interp: Sedenion, program: Sedenion) -> Sedenion with Mut, Div, Panic {
+    // Placeholder: actual implementation requires interpreter structure
+    // Returns specialized form that captures program behavior
+    var args: [f32; 16] = [0.0; 16]
+    args[0] = sedenion_get_component(program, 0)
+    specialize(interp, args, 1)
+}
+
+// Level 2: specialize specializer with interpreter → compiler
+fn futamura_2(specializer_ast: Sedenion, interp: Sedenion) -> Sedenion with Mut, Div, Panic {
+    // Placeholder: actual implementation requires full PE infrastructure
+    var args: [f32; 16] = [0.0; 16]
+    args[0] = sedenion_get_component(interp, 0)
+    specialize(specializer_ast, args, 1)
+}
+
+// Level 3: specialize specializer with specializer → compiler generator
+fn futamura_3(specializer_ast: Sedenion) -> Sedenion with Mut, Div, Panic {
+    // Placeholder: self-application of specializer
+    var args: [f32; 16] = [0.0; 16]
+    specialize(specializer_ast, args, 0)
+}
+
+// ============================================================================
+// INTERPOLATION HELPERS (for smooth specialization)
+// ============================================================================
+
+fn lerp_f32(a: f32, b: f32, t: f32) -> f32 {
+    a * (1.0 - t) + b * t
+}
+
+fn ast_lerp(a: Sedenion, b: Sedenion, t: f32) -> Sedenion {
+    sed(lerp_f32(a.e0, b.e0, t),
+        lerp_f32(a.e1, b.e1, t),
+        lerp_f32(a.e2, b.e2, t),
+        lerp_f32(a.e3, b.e3, t),
+        lerp_f32(a.e4, b.e4, t),
+        lerp_f32(a.e5, b.e5, t),
+        lerp_f32(a.e6, b.e6, t),
+        lerp_f32(a.e7, b.e7, t),
+        lerp_f32(a.e8, b.e8, t),
+        lerp_f32(a.e9, b.e9, t),
+        lerp_f32(a.e10, b.e10, t),
+        lerp_f32(a.e11, b.e11, t),
+        lerp_f32(a.e12, b.e12, t),
+        lerp_f32(a.e13, b.e13, t),
+        lerp_f32(a.e14, b.e14, t),
+        lerp_f32(a.e15, b.e15, t))
+}
+
+fn specialization_distance(original: Sedenion, specialized: Sedenion) -> f32 with Mut, Div, Panic {
+    var sum: f32 = 0.0
+    let d0 = original.e0 - specialized.e0
+    let d1 = original.e1 - specialized.e1
+    let d2 = original.e2 - specialized.e2
+    let d3 = original.e3 - specialized.e3
+    let d4 = original.e4 - specialized.e4
+    let d5 = original.e5 - specialized.e5
+    let d6 = original.e6 - specialized.e6
+    let d7 = original.e7 - specialized.e7
+    let d8 = original.e8 - specialized.e8
+    let d9 = original.e9 - specialized.e9
+    let d10 = original.e10 - specialized.e10
+    let d11 = original.e11 - specialized.e11
+    let d12 = original.e12 - specialized.e12
+    let d13 = original.e13 - specialized.e13
+    let d14 = original.e14 - specialized.e14
+    let d15 = original.e15 - specialized.e15
+    sum = d0*d0 + d1*d1 + d2*d2 + d3*d3 + d4*d4 + d5*d5 + d6*d6 + d7*d7 +
+          d8*d8 + d9*d9 + d10*d10 + d11*d11 + d12*d12 + d13*d13 + d14*d14 + d15*d15
+    sqrt_f32(sum)
+}
+
+// Interpolates between original and specialized based on confidence
+fn interpolate_specialization(original: Sedenion, specialized: Sedenion, confidence: f32) -> Sedenion {
+    // Higher confidence → closer to specialized form
+    ast_lerp(original, specialized, confidence)
+}

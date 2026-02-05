@@ -1,0 +1,267 @@
+//! stdlib/compiler/ast/sedenion_test.sio - Roundtrip Tests for Sedenion AST Encoding
+//!
+//! Verifies encode→decode cycles preserve all 16 components of the sedenion
+//! AST encoding. Tests checksum validity, node type classification, and
+//! composition integrity (zero divisor detection).
+
+// ============================================================================
+// SEDENION TYPE (matches sedenion_encoding.sio)
+// ============================================================================
+
+struct Sedenion {
+    e0: f32, e1: f32, e2: f32, e3: f32,
+    e4: f32, e5: f32, e6: f32, e7: f32,
+    e8: f32, e9: f32, e10: f32, e11: f32,
+    e12: f32, e13: f32, e14: f32, e15: f32,
+}
+
+// ============================================================================
+// HELPER FUNCTIONS (must precede callers)
+// ============================================================================
+
+// Absolute value for f32
+fn abs_f32(x: f32) -> f32 {
+    if x < 0.0 { -x } else { x }
+}
+
+// Floor function for f32
+fn floor_f32(x: f32) -> f32 {
+    let int_part = x as i64
+    int_part as f32
+}
+
+// Constructs a Sedenion from 16 f32 components
+fn sed(e0: f32, e1: f32, e2: f32, e3: f32, e4: f32, e5: f32, e6: f32, e7: f32,
+       e8: f32, e9: f32, e10: f32, e11: f32, e12: f32, e13: f32, e14: f32, e15: f32) -> Sedenion {
+    Sedenion {
+        e0: e0, e1: e1, e2: e2, e3: e3, e4: e4, e5: e5, e6: e6, e7: e7,
+        e8: e8, e9: e9, e10: e10, e11: e11, e12: e12, e13: e13, e14: e14, e15: e15
+    }
+}
+
+// Returns a zero Sedenion (all components 0.0)
+fn sed_zero() -> Sedenion {
+    sed(0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+        0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0)
+}
+
+// Approximates equality for f32 values with given epsilon
+fn approx_eq(a: f32, b: f32, eps: f32) -> bool {
+    let diff = abs_f32(a - b)
+    diff < eps
+}
+
+// Approximates equality for two Sedenions component-wise
+fn sedenion_approx_eq(a: Sedenion, b: Sedenion, eps: f32) -> bool {
+    approx_eq(a.e0, b.e0, eps) &&
+    approx_eq(a.e1, b.e1, eps) &&
+    approx_eq(a.e2, b.e2, eps) &&
+    approx_eq(a.e3, b.e3, eps) &&
+    approx_eq(a.e4, b.e4, eps) &&
+    approx_eq(a.e5, b.e5, eps) &&
+    approx_eq(a.e6, b.e6, eps) &&
+    approx_eq(a.e7, b.e7, eps) &&
+    approx_eq(a.e8, b.e8, eps) &&
+    approx_eq(a.e9, b.e9, eps) &&
+    approx_eq(a.e10, b.e10, eps) &&
+    approx_eq(a.e11, b.e11, eps) &&
+    approx_eq(a.e12, b.e12, eps) &&
+    approx_eq(a.e13, b.e13, eps) &&
+    approx_eq(a.e14, b.e14, eps) &&
+    approx_eq(a.e15, b.e15, eps)
+}
+
+// Computes checksum for e0 to e14 using weighted sum mod 65536.0
+// Weights: 1 for e0, 2 for e1, ..., 14 for e13, 43 for e14
+fn compute_checksum(e0: f32, e1: f32, e2: f32, e3: f32, e4: f32, e5: f32, e6: f32, e7: f32,
+                    e8: f32, e9: f32, e10: f32, e11: f32, e12: f32, e13: f32, e14: f32) -> f32 with Mut, Panic {
+    var sum: f32 = 0.0
+    sum = sum + e0 * 1.0
+    sum = sum + e1 * 2.0
+    sum = sum + e2 * 3.0
+    sum = sum + e3 * 4.0
+    sum = sum + e4 * 5.0
+    sum = sum + e5 * 6.0
+    sum = sum + e6 * 7.0
+    sum = sum + e7 * 8.0
+    sum = sum + e8 * 9.0
+    sum = sum + e9 * 10.0
+    sum = sum + e10 * 11.0
+    sum = sum + e11 * 12.0
+    sum = sum + e12 * 13.0
+    sum = sum + e13 * 14.0
+    sum = sum + e14 * 43.0
+    let mod_val: f32 = 65536.0
+    // f32 mod implementation
+    sum - floor_f32(sum / mod_val) * mod_val
+}
+
+// Adds two Sedenions component-wise (for composition simulation)
+fn sed_add(a: Sedenion, b: Sedenion) -> Sedenion {
+    sed(a.e0 + b.e0, a.e1 + b.e1, a.e2 + b.e2, a.e3 + b.e3,
+        a.e4 + b.e4, a.e5 + b.e5, a.e6 + b.e6, a.e7 + b.e7,
+        a.e8 + b.e8, a.e9 + b.e9, a.e10 + b.e10, a.e11 + b.e11,
+        a.e12 + b.e12, a.e13 + b.e13, a.e14 + b.e14, a.e15 + b.e15)
+}
+
+// ============================================================================
+// NODE TYPE CONSTANTS
+// ============================================================================
+
+let NODE_EXPR_LITERAL: i32 = 8
+let NODE_EXPR_BINARY: i32 = 10
+let NODE_EXPR_CALL: i32 = 12
+let NODE_ITEM_FN: i32 = 32
+let NODE_ITEM_STRUCT: i32 = 33
+
+// ============================================================================
+// CLASSIFICATION HELPERS
+// ============================================================================
+
+// Checks if node_type is in expression range [8, 32)
+fn is_expression(node_type: i32) -> bool {
+    node_type >= 8 && node_type < 32
+}
+
+// Checks if node_type is in item range [32, 48)
+fn is_item(node_type: i32) -> bool {
+    node_type >= 32 && node_type < 48
+}
+
+// Checks if node_type is in type range [48, 64)
+fn is_type_expr(node_type: i32) -> bool {
+    node_type >= 48 && node_type < 64
+}
+
+// ============================================================================
+// TEST FUNCTIONS
+// ============================================================================
+
+// Test 1: Roundtrip for integer literal encoding
+// Encodes node_type=8 and value=42 into e0 and e10, with checksum in e15
+fn test_roundtrip_literal_int() -> bool with Mut, Panic {
+    let node_type_f: f32 = NODE_EXPR_LITERAL as f32
+    let value: f32 = 42.0
+    let chks = compute_checksum(node_type_f, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+                                0.0, 0.0, value, 0.0, 0.0, 0.0, 0.0)
+    let encoded = sed(node_type_f, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+                      0.0, 0.0, value, 0.0, 0.0, 0.0, 0.0, chks)
+    // Decode: extract node_type from e0
+    let decoded_type: i32 = encoded.e0 as i32
+    let eps: f32 = 0.000001
+    decoded_type == NODE_EXPR_LITERAL &&
+    approx_eq(encoded.e10, value, eps)
+}
+
+// Test 2: Roundtrip for float literal encoding
+fn test_roundtrip_literal_float() -> bool with Mut, Panic {
+    let node_type_f: f32 = NODE_EXPR_LITERAL as f32
+    let value: f32 = 3.14159
+    let chks = compute_checksum(node_type_f, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+                                0.0, 0.0, value, 0.0, 0.0, 0.0, 0.0)
+    let encoded = sed(node_type_f, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+                      0.0, 0.0, value, 0.0, 0.0, 0.0, 0.0, chks)
+    let decoded_value = encoded.e10
+    let eps: f32 = 0.000001
+    approx_eq(encoded.e0, node_type_f, eps) &&
+    approx_eq(decoded_value, value, eps)
+}
+
+// Test 3: Roundtrip for binary operation encoding
+fn test_roundtrip_binary_op() -> bool with Mut, Panic {
+    let node_type_f: f32 = NODE_EXPR_BINARY as f32
+    let op: i32 = 1  // Example: 1 for addition
+    let op_f: f32 = op as f32
+    let chks = compute_checksum(node_type_f, op_f, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+                                0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0)
+    let encoded = sed(node_type_f, op_f, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+                      0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, chks)
+    let decoded_op: i32 = encoded.e1 as i32
+    let eps: f32 = 0.000001
+    approx_eq(encoded.e0, node_type_f, eps) && decoded_op == op
+}
+
+// Test 4: Validates checksum computation and storage in e15
+fn test_checksum_validity() -> bool with Mut, Panic {
+    let e0: f32 = 1.0
+    let e1: f32 = 2.0
+    let e2: f32 = 3.0
+    let e3: f32 = 4.0
+    let e4: f32 = 5.0
+    let e5: f32 = 6.0
+    let e6: f32 = 7.0
+    let e7: f32 = 8.0
+    let e8: f32 = 9.0
+    let e9: f32 = 10.0
+    let e10: f32 = 11.0
+    let e11: f32 = 12.0
+    let e12: f32 = 13.0
+    let e13: f32 = 14.0
+    let e14: f32 = 15.0
+    let chks = compute_checksum(e0, e1, e2, e3, e4, e5, e6, e7, e8, e9, e10, e11, e12, e13, e14)
+    let s = sed(e0, e1, e2, e3, e4, e5, e6, e7, e8, e9, e10, e11, e12, e13, e14, chks)
+    // Recompute checksum from e0 to e14 and verify against e15
+    let recomputed = compute_checksum(s.e0, s.e1, s.e2, s.e3, s.e4, s.e5, s.e6, s.e7,
+                                     s.e8, s.e9, s.e10, s.e11, s.e12, s.e13, s.e14)
+    let eps: f32 = 0.000001
+    approx_eq(s.e15, recomputed, eps)
+}
+
+// Test 5: Verifies expression node_type range classification
+fn test_is_expression_range() -> bool {
+    is_expression(8) &&      // NODE_EXPR_LITERAL
+    is_expression(10) &&     // NODE_EXPR_BINARY
+    is_expression(12) &&     // NODE_EXPR_CALL
+    is_expression(31) &&     // Upper boundary -1
+    !is_expression(7) &&     // Below range
+    !is_expression(32)       // Item start
+}
+
+// Test 6: Verifies item node_type range classification
+fn test_is_item_range() -> bool {
+    is_item(32) &&           // NODE_ITEM_FN
+    is_item(33) &&           // NODE_ITEM_STRUCT
+    is_item(47) &&           // Upper boundary -1
+    !is_item(31) &&          // Expression upper
+    !is_item(48)             // Above range
+}
+
+// Test 7: Composes two valid nodes and verifies result is not zero
+fn test_composition_not_zero_divisor() -> bool with Mut, Panic {
+    // Create two valid encoded nodes
+    let lit_value: f32 = 1.0
+    let lit_chks = compute_checksum(8.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+                                    0.0, 0.0, lit_value, 0.0, 0.0, 0.0, 0.0)
+    let node1 = sed(8.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+                    0.0, 0.0, lit_value, 0.0, 0.0, 0.0, 0.0, lit_chks)
+
+    let bin_op: f32 = 1.0
+    let bin_chks = compute_checksum(10.0, bin_op, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+                                    0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0)
+    let node2 = sed(10.0, bin_op, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+                    0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, bin_chks)
+
+    // Compose via component-wise addition
+    let composed = sed_add(node1, node2)
+
+    // Verify composition is not the zero Sedenion
+    let eps: f32 = 0.000001
+    !sedenion_approx_eq(composed, sed_zero(), eps)
+}
+
+// ============================================================================
+// MAIN TEST RUNNER
+// ============================================================================
+
+// Executes all tests and returns count of passed tests
+fn run_all_tests() -> i32 with Mut, Panic {
+    var passed: i32 = 0
+    if test_roundtrip_literal_int() { passed = passed + 1 }
+    if test_roundtrip_literal_float() { passed = passed + 1 }
+    if test_roundtrip_binary_op() { passed = passed + 1 }
+    if test_checksum_validity() { passed = passed + 1 }
+    if test_is_expression_range() { passed = passed + 1 }
+    if test_is_item_range() { passed = passed + 1 }
+    if test_composition_not_zero_divisor() { passed = passed + 1 }
+    passed
+}

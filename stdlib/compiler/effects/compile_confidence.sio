@@ -1,0 +1,339 @@
+//! stdlib/compiler/effects/compile_confidence.sio - Epistemic Tracking Utilities
+//!
+//! Higher-level confidence tracking for the compilation pipeline. Provides
+//! structures and functions for modeling confidence levels across phases,
+//! type complexity classification, bootstrap propagation, and attestation.
+
+// ============================================================================
+// PROVENANCE STEP
+// ============================================================================
+
+struct ProvenanceStep {
+    name: [i8; 64],
+    name_len: i64,
+    confidence: f32,
+    timestamp: i64,
+}
+
+fn provenance_step_new() -> ProvenanceStep {
+    ProvenanceStep {
+        name: [0; 64],
+        name_len: 0,
+        confidence: 0.0,
+        timestamp: 0,
+    }
+}
+
+fn provenance_step_with_conf(conf: f32, ts: i64) -> ProvenanceStep {
+    ProvenanceStep {
+        name: [0; 64],
+        name_len: 0,
+        confidence: conf,
+        timestamp: ts,
+    }
+}
+
+// ============================================================================
+// PIPELINE CONFIDENCE
+// ============================================================================
+
+struct PipelineConfidence {
+    parse_conf: f32,      // Always 1.0 (deterministic)
+    check_conf: f32,      // 0.80-0.99 based on type complexity
+    emit_conf: f32,       // Typically 0.98
+    total_conf: f32,      // Product of all phases
+    phase_count: i32,
+}
+
+fn pipeline_confidence_new() -> PipelineConfidence {
+    PipelineConfidence {
+        parse_conf: 1.0,
+        check_conf: 0.0,
+        emit_conf: 0.0,
+        total_conf: 1.0,
+        phase_count: 0,
+    }
+}
+
+// ============================================================================
+// CONFIDENCE REPORT
+// ============================================================================
+
+struct ConfidenceReport {
+    pipeline: PipelineConfidence,
+    bootstrap_stage: i32,
+    cross_validated: bool,
+    attestation_chain: [ProvenanceStep; 16],
+    n_attestations: i64,
+}
+
+fn confidence_report_new() -> ConfidenceReport {
+    ConfidenceReport {
+        pipeline: pipeline_confidence_new(),
+        bootstrap_stage: 0,
+        cross_validated: false,
+        attestation_chain: [provenance_step_new(); 16],
+        n_attestations: 0,
+    }
+}
+
+// ============================================================================
+// CONFIDENCE CONSTANTS
+// ============================================================================
+
+let CONFIDENCE_PARSE: f32 = 1.0
+let CONFIDENCE_CHECK_SIMPLE: f32 = 0.99
+let CONFIDENCE_CHECK_POLY: f32 = 0.95
+let CONFIDENCE_CHECK_HIGHER: f32 = 0.90
+let CONFIDENCE_CHECK_UNDER: f32 = 0.80
+let CONFIDENCE_EMIT: f32 = 0.98
+let CONFIDENCE_SPECIALIZE: f32 = 0.95
+let CROSS_VALIDATION_BOOST: f32 = 1.04
+let MAX_CONFIDENCE: f32 = 0.99
+
+// ============================================================================
+// TYPE COMPLEXITY LEVELS
+// ============================================================================
+
+let COMPLEXITY_SIMPLE: i32 = 0    // Monomorphic types
+let COMPLEXITY_POLY: i32 = 1      // Polymorphic types
+let COMPLEXITY_HIGHER: i32 = 2    // Higher-rank types
+let COMPLEXITY_UNDER: i32 = 3     // Underconstrained
+
+// ============================================================================
+// HELPER FUNCTIONS
+// ============================================================================
+
+// Clamps a value between min and max
+fn clamp_f32(val: f32, min_val: f32, max_val: f32) -> f32 {
+    if val < min_val { min_val }
+    else if val > max_val { max_val }
+    else { val }
+}
+
+// Power function for f32 (simple integer exponent)
+fn pow_f32(base: f32, exp: i32) -> f32 with Mut, Div, Panic {
+    if exp == 0 { 1.0 }
+    else if exp < 0 { 1.0 / pow_f32(base, -exp) }
+    else {
+        var result: f32 = 1.0
+        var i: i32 = 0
+        while i < exp {
+            result = result * base
+            i = i + 1
+        }
+        result
+    }
+}
+
+// ============================================================================
+// PHASE AGGREGATION
+// ============================================================================
+
+// Computes product of phase confidences
+fn aggregate_confidence(parse: f32, check: f32, emit: f32) -> f32 {
+    var total = parse * check * emit
+    clamp_f32(total, 0.0, 1.0)
+}
+
+// Updates pipeline confidence for a specific phase
+// Phases: 0=parse, 1=check, 2=emit
+fn update_pipeline(p: PipelineConfidence, phase: i32, conf: f32) -> PipelineConfidence with Mut {
+    let clamped_conf = clamp_f32(conf, 0.0, 1.0)
+    var new_p = p
+
+    if phase == 0 {
+        new_p = PipelineConfidence {
+            parse_conf: clamped_conf,
+            check_conf: p.check_conf,
+            emit_conf: p.emit_conf,
+            total_conf: p.total_conf,
+            phase_count: p.phase_count + 1,
+        }
+    } else if phase == 1 {
+        new_p = PipelineConfidence {
+            parse_conf: p.parse_conf,
+            check_conf: clamped_conf,
+            emit_conf: p.emit_conf,
+            total_conf: p.total_conf,
+            phase_count: p.phase_count + 1,
+        }
+    } else if phase == 2 {
+        new_p = PipelineConfidence {
+            parse_conf: p.parse_conf,
+            check_conf: p.check_conf,
+            emit_conf: clamped_conf,
+            total_conf: p.total_conf,
+            phase_count: p.phase_count + 1,
+        }
+    } else {
+        new_p = p
+    }
+
+    // Recompute total
+    let new_total = aggregate_confidence(new_p.parse_conf, new_p.check_conf, new_p.emit_conf)
+    PipelineConfidence {
+        parse_conf: new_p.parse_conf,
+        check_conf: new_p.check_conf,
+        emit_conf: new_p.emit_conf,
+        total_conf: new_total,
+        phase_count: new_p.phase_count,
+    }
+}
+
+// Returns the total confidence from a PipelineConfidence
+fn pipeline_total(p: PipelineConfidence) -> f32 {
+    p.total_conf
+}
+
+// ============================================================================
+// TYPE COMPLEXITY
+// ============================================================================
+
+// Maps type complexity level to the corresponding check-phase confidence
+fn confidence_for_complexity(complexity: i32) -> f32 {
+    if complexity == COMPLEXITY_SIMPLE { CONFIDENCE_CHECK_SIMPLE }
+    else if complexity == COMPLEXITY_POLY { CONFIDENCE_CHECK_POLY }
+    else if complexity == COMPLEXITY_HIGHER { CONFIDENCE_CHECK_HIGHER }
+    else if complexity == COMPLEXITY_UNDER { CONFIDENCE_CHECK_UNDER }
+    else { CONFIDENCE_CHECK_SIMPLE }  // Default fallback
+}
+
+// Placeholder for sedenion-based type complexity analysis
+fn classify_type_complexity_placeholder(type_hint: i32) -> i32 {
+    // Clamp to valid range [0,3]
+    if type_hint < COMPLEXITY_SIMPLE { COMPLEXITY_SIMPLE }
+    else if type_hint > COMPLEXITY_UNDER { COMPLEXITY_UNDER }
+    else { type_hint }
+}
+
+// ============================================================================
+// BOOTSTRAP CONFIDENCE
+// ============================================================================
+
+// Computes bootstrap confidence for a given stage, propagating from parent
+// Formula: parent_conf * (0.99 ^ stage)
+fn bootstrap_confidence(stage: i32, parent_conf: f32) -> f32 with Mut, Div, Panic {
+    var effective_stage = stage
+    if effective_stage < 0 { effective_stage = 0 }
+    let degradation = pow_f32(0.99, effective_stage)
+    let result = parent_conf * degradation
+    clamp_f32(result, 0.0, 1.0)
+}
+
+// Applies cross-validation boost, capped at MAX_CONFIDENCE
+fn cross_validation_boost(conf: f32) -> f32 {
+    let boosted = conf * CROSS_VALIDATION_BOOST
+    if boosted > MAX_CONFIDENCE { MAX_CONFIDENCE }
+    else if boosted < 0.0 { 0.0 }
+    else { boosted }
+}
+
+// Creates an attestation ProvenanceStep for a bootstrap stage
+fn create_attestation(stage: i32, conf: f32, timestamp: i64) -> ProvenanceStep with Mut {
+    var effective_ts = timestamp
+    if effective_ts < 0 { effective_ts = 0 }
+
+    ProvenanceStep {
+        name: [0; 64],  // Name would be set externally
+        name_len: 0,
+        confidence: conf,
+        timestamp: effective_ts,
+    }
+}
+
+// ============================================================================
+// REPORTING
+// ============================================================================
+
+// Creates a full ConfidenceReport from pipeline and bootstrap stage
+fn create_report(pipeline: PipelineConfidence, stage: i32) -> ConfidenceReport with Mut, Div, Panic {
+    var effective_stage = stage
+    if effective_stage < 0 { effective_stage = 0 }
+
+    var report_total = pipeline.total_conf
+    if effective_stage > 0 {
+        // Apply bootstrap degradation
+        report_total = bootstrap_confidence(effective_stage, pipeline.total_conf)
+    }
+
+    let adjusted_pipeline = PipelineConfidence {
+        parse_conf: pipeline.parse_conf,
+        check_conf: pipeline.check_conf,
+        emit_conf: pipeline.emit_conf,
+        total_conf: report_total,
+        phase_count: pipeline.phase_count,
+    }
+
+    ConfidenceReport {
+        pipeline: adjusted_pipeline,
+        bootstrap_stage: effective_stage,
+        cross_validated: false,
+        attestation_chain: [provenance_step_new(); 16],
+        n_attestations: 0,
+    }
+}
+
+// Adds a ProvenanceStep to a ConfidenceReport's attestation chain
+fn add_attestation(r: ConfidenceReport, step: ProvenanceStep) -> ConfidenceReport with Mut, Panic {
+    let current_n = r.n_attestations
+    if current_n < 16 {
+        var new_chain = r.attestation_chain
+        new_chain[current_n as usize] = step
+        ConfidenceReport {
+            pipeline: r.pipeline,
+            bootstrap_stage: r.bootstrap_stage,
+            cross_validated: r.cross_validated,
+            attestation_chain: new_chain,
+            n_attestations: current_n + 1,
+        }
+    } else {
+        r  // Chain full, return unchanged
+    }
+}
+
+// Applies cross-validation to an existing report
+fn apply_cross_validation(r: ConfidenceReport) -> ConfidenceReport {
+    if !r.cross_validated {
+        let boosted = cross_validation_boost(r.pipeline.total_conf)
+        let new_pipeline = PipelineConfidence {
+            parse_conf: r.pipeline.parse_conf,
+            check_conf: r.pipeline.check_conf,
+            emit_conf: r.pipeline.emit_conf,
+            total_conf: boosted,
+            phase_count: r.pipeline.phase_count,
+        }
+        ConfidenceReport {
+            pipeline: new_pipeline,
+            bootstrap_stage: r.bootstrap_stage,
+            cross_validated: true,
+            attestation_chain: r.attestation_chain,
+            n_attestations: r.n_attestations,
+        }
+    } else {
+        r
+    }
+}
+
+// Validates a ConfidenceReport for consistency
+fn validate_report(report: ConfidenceReport) -> bool {
+    let computed_total = aggregate_confidence(
+        report.pipeline.parse_conf,
+        report.pipeline.check_conf,
+        report.pipeline.emit_conf
+    )
+
+    // Allow some tolerance due to bootstrap degradation
+    let diff = report.pipeline.total_conf - computed_total
+    let abs_diff = if diff < 0.0 { -diff } else { diff }
+    let total_valid = abs_diff < 0.1  // Relaxed tolerance
+
+    let conf_valid = report.pipeline.parse_conf >= 0.0 && report.pipeline.parse_conf <= 1.0 &&
+                     report.pipeline.check_conf >= 0.0 && report.pipeline.check_conf <= 1.0 &&
+                     report.pipeline.emit_conf >= 0.0 && report.pipeline.emit_conf <= 1.0 &&
+                     report.pipeline.total_conf >= 0.0 && report.pipeline.total_conf <= 1.0
+
+    let attest_valid = report.n_attestations >= 0 && report.n_attestations <= 16
+
+    total_valid && conf_valid && attest_valid
+}

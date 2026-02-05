@@ -1,0 +1,394 @@
+//! stdlib/compiler/bootstrap/verify.sio - Bootstrap Verification Harness
+//!
+//! Multi-stage bootstrap verification with attestation chain for the
+//! metacircular self-hosted compiler. Implements cross-validation between
+//! Stage 1 and Stage 2 to verify compilation correctness.
+
+// ============================================================================
+// PROVENANCE STEP
+// ============================================================================
+
+struct ProvenanceStep {
+    name: [i8; 64],
+    name_len: i64,
+    confidence: f32,
+    timestamp: i64,
+}
+
+fn provenance_step_new() -> ProvenanceStep {
+    ProvenanceStep {
+        name: [0; 64],
+        name_len: 0,
+        confidence: 0.0,
+        timestamp: 0,
+    }
+}
+
+// ============================================================================
+// BOOTSTRAP RESULT
+// ============================================================================
+
+struct BootstrapResult {
+    stage: i32,                    // 0=Rust, 1=Self1, 2=Self2, 3+=Verified
+    code: [i8; 65536],             // Generated code bytes
+    code_len: i64,
+    confidence: f32,
+    provenance: [ProvenanceStep; 16],
+    n_provenance: i64,
+}
+
+fn bootstrap_result_new() -> BootstrapResult {
+    BootstrapResult {
+        stage: 0,
+        code: [0; 65536],
+        code_len: 0,
+        confidence: 0.0,
+        provenance: [provenance_step_new(); 16],
+        n_provenance: 0,
+    }
+}
+
+// ============================================================================
+// VERIFICATION RESULT
+// ============================================================================
+
+struct VerificationResult {
+    stage1: BootstrapResult,
+    stage2: BootstrapResult,
+    byte_match: bool,
+    semantic_match: bool,
+    confidence_boost: f32,
+    final_confidence: f32,
+    verified: bool,
+}
+
+fn verification_result_new() -> VerificationResult {
+    VerificationResult {
+        stage1: bootstrap_result_new(),
+        stage2: bootstrap_result_new(),
+        byte_match: false,
+        semantic_match: false,
+        confidence_boost: 1.0,
+        final_confidence: 0.0,
+        verified: false,
+    }
+}
+
+// ============================================================================
+// ATTESTATION CHAIN
+// ============================================================================
+
+struct AttestationChain {
+    stages: [BootstrapResult; 4],
+    n_stages: i64,
+    root_confidence: f32,
+    verified_to_stage: i32,
+}
+
+fn attestation_chain_new() -> AttestationChain {
+    AttestationChain {
+        stages: [bootstrap_result_new(); 4],
+        n_stages: 0,
+        root_confidence: 0.0,
+        verified_to_stage: -1,
+    }
+}
+
+// ============================================================================
+// STAGE CONSTANTS
+// ============================================================================
+
+let STAGE_RUST: i32 = 0
+let STAGE_SELF1: i32 = 1
+let STAGE_SELF2: i32 = 2
+let STAGE_VERIFIED: i32 = 3
+
+// ============================================================================
+// CONFIDENCE CONSTANTS
+// ============================================================================
+
+let CROSS_VALIDATION_BOOST: f32 = 1.04
+let MAX_CONFIDENCE: f32 = 0.99
+let CONFIDENCE_THRESHOLD: f32 = 0.9
+
+// ============================================================================
+// ERROR CODES
+// ============================================================================
+
+let ERR_NONE: i32 = 0
+let ERR_BYTE_MISMATCH: i32 = 1
+let ERR_SEMANTIC_MISMATCH: i32 = 2
+let ERR_LOW_CONFIDENCE: i32 = 3
+let ERR_STAGE_FAILURE: i32 = 4
+
+// ============================================================================
+// CODE COMPARISON
+// ============================================================================
+
+// Compares two code buffers byte-by-byte
+fn compare_code_bytes(a: [i8; 65536], a_len: i64, b: [i8; 65536], b_len: i64) -> bool with Mut, Div, Panic {
+    if a_len != b_len { false }
+    else {
+        var matches: bool = true
+        var i: i64 = 0
+        while i < a_len && matches {
+            if a[i as usize] != b[i as usize] {
+                matches = false
+            }
+            i = i + 1
+        }
+        matches
+    }
+}
+
+// Computes a simple DJB2 hash of the code buffer
+fn code_hash(code: [i8; 65536], len: i64) -> i64 with Mut, Div, Panic {
+    var hash: i64 = 5381
+    var i: i64 = 0
+    while i < len {
+        let byte_val: i8 = code[i as usize]
+        let c: i64 = if byte_val < 0 { (byte_val as i64) + 256 } else { byte_val as i64 }
+        hash = hash * 33 + c
+        i = i + 1
+    }
+    hash
+}
+
+// ============================================================================
+// BOOTSTRAP STAGES (placeholders for actual compilation)
+// ============================================================================
+
+// Rust compiler bootstrap stage (trusted base)
+fn bootstrap_stage_0(source: [i8; 65536], len: i64) -> BootstrapResult with Mut {
+    var result = bootstrap_result_new()
+    result = BootstrapResult {
+        stage: STAGE_RUST,
+        code: source,  // In real impl, would invoke Rust compiler
+        code_len: len,
+        confidence: 1.0,  // Rust compiler is fully trusted
+        provenance: result.provenance,
+        n_provenance: 0,
+    }
+    result
+}
+
+// Self-compiled Stage 1
+fn bootstrap_stage_1(stage0: BootstrapResult, source: [i8; 65536], len: i64) -> BootstrapResult with Mut {
+    var result = bootstrap_result_new()
+    // Confidence degrades by 2% per stage
+    let new_conf = stage0.confidence * 0.98
+    result = BootstrapResult {
+        stage: STAGE_SELF1,
+        code: source,  // In real impl, would use stage0 compiler
+        code_len: len,
+        confidence: new_conf,
+        provenance: result.provenance,
+        n_provenance: 0,
+    }
+    result
+}
+
+// Self-compiled Stage 2
+fn bootstrap_stage_2(stage1: BootstrapResult, source: [i8; 65536], len: i64) -> BootstrapResult with Mut {
+    var result = bootstrap_result_new()
+    let new_conf = stage1.confidence * 0.98
+    result = BootstrapResult {
+        stage: STAGE_SELF2,
+        code: source,  // In real impl, would use stage1 compiler
+        code_len: len,
+        confidence: new_conf,
+        provenance: result.provenance,
+        n_provenance: 0,
+    }
+    result
+}
+
+// ============================================================================
+// CONFIDENCE FUNCTIONS
+// ============================================================================
+
+// Applies cross-validation boost, capped at MAX_CONFIDENCE
+fn apply_cross_validation_boost(conf: f32, verified: bool) -> f32 {
+    if verified {
+        let new_conf = conf * CROSS_VALIDATION_BOOST
+        if new_conf > MAX_CONFIDENCE { MAX_CONFIDENCE }
+        else { new_conf }
+    } else {
+        conf
+    }
+}
+
+// ============================================================================
+// CROSS-VALIDATION
+// ============================================================================
+
+// Performs cross-validation between stage1 and stage2 results
+fn cross_validate(stage1: BootstrapResult, stage2: BootstrapResult) -> VerificationResult with Mut, Div, Panic {
+    let byte_match = compare_code_bytes(stage1.code, stage1.code_len,
+                                        stage2.code, stage2.code_len)
+    // Assume semantic match if bytes match (placeholder)
+    let semantic_match = byte_match
+    let verified = byte_match && semantic_match
+    let boost = if verified { CROSS_VALIDATION_BOOST } else { 1.0 }
+    let final_conf = apply_cross_validation_boost(stage2.confidence, verified)
+
+    VerificationResult {
+        stage1: stage1,
+        stage2: stage2,
+        byte_match: byte_match,
+        semantic_match: semantic_match,
+        confidence_boost: boost,
+        final_confidence: final_conf,
+        verified: verified,
+    }
+}
+
+// ============================================================================
+// ATTESTATION CHAIN MANAGEMENT
+// ============================================================================
+
+// Creates an AttestationChain from an array of results
+fn create_attestation_chain(results: [BootstrapResult; 4], n: i64) -> AttestationChain with Mut, Panic {
+    var chain = attestation_chain_new()
+    chain = AttestationChain {
+        stages: results,
+        n_stages: n,
+        root_confidence: if n > 0 { results[0].confidence } else { 0.0 },
+        verified_to_stage: if n > 0 { results[(n - 1) as usize].stage } else { -1 },
+    }
+    chain
+}
+
+// Adds a stage to the chain if capacity allows (max 4)
+fn add_stage_to_chain(chain: AttestationChain, result: BootstrapResult) -> AttestationChain with Mut, Panic {
+    let idx = chain.n_stages
+    if idx < 4 {
+        var new_stages = chain.stages
+        new_stages[idx as usize] = result
+        AttestationChain {
+            stages: new_stages,
+            n_stages: idx + 1,
+            root_confidence: if idx == 0 { result.confidence } else { chain.root_confidence },
+            verified_to_stage: result.stage,
+        }
+    } else {
+        chain  // Chain full
+    }
+}
+
+// Verifies the attestation chain
+fn verify_attestation(chain: AttestationChain) -> bool {
+    chain.verified_to_stage >= STAGE_VERIFIED
+}
+
+// Accumulates overall confidence as product of all stage confidences
+fn accumulate_bootstrap_confidence(chain: AttestationChain) -> f32 with Mut, Div, Panic {
+    var conf: f32 = 1.0
+    var i: i64 = 0
+    while i < chain.n_stages && i < 4 {
+        conf = conf * chain.stages[i as usize].confidence
+        i = i + 1
+    }
+    conf
+}
+
+// ============================================================================
+// FULL BOOTSTRAP
+// ============================================================================
+
+// Runs the full multi-stage bootstrap process
+fn run_full_bootstrap(source: [i8; 65536], len: i64) -> AttestationChain with Mut, Div, Panic {
+    // Stage 0: Rust compiler (trusted)
+    let stage0 = bootstrap_stage_0(source, len)
+
+    // Stage 1: Self-compiled with stage0
+    let stage1 = bootstrap_stage_1(stage0, source, len)
+
+    // Stage 2: Self-compiled with stage1
+    let stage2 = bootstrap_stage_2(stage1, source, len)
+
+    // Cross-validate stage1 vs stage2
+    let verif = cross_validate(stage1, stage2)
+
+    // Create stage3 based on verification result
+    var stage3 = bootstrap_result_new()
+    let stage3_stage = if verif.verified { STAGE_VERIFIED } else { STAGE_SELF2 }
+    let stage3_conf = if verif.verified { verif.final_confidence } else { stage2.confidence }
+    stage3 = BootstrapResult {
+        stage: stage3_stage,
+        code: stage2.code,
+        code_len: stage2.code_len,
+        confidence: stage3_conf,
+        provenance: stage3.provenance,
+        n_provenance: 0,
+    }
+
+    // Build attestation chain
+    var results: [BootstrapResult; 4] = [bootstrap_result_new(); 4]
+    results[0] = stage0
+    results[1] = stage1
+    results[2] = stage2
+    results[3] = stage3
+    create_attestation_chain(results, 4)
+}
+
+// ============================================================================
+// FAILURE HANDLING
+// ============================================================================
+
+// Handles verification failure by returning appropriate error code
+fn handle_verification_failure(result: VerificationResult) -> i32 {
+    if result.verified { ERR_NONE }
+    else if !result.byte_match { ERR_BYTE_MISMATCH }
+    else if !result.semantic_match { ERR_SEMANTIC_MISMATCH }
+    else if result.final_confidence < CONFIDENCE_THRESHOLD { ERR_LOW_CONFIDENCE }
+    else { ERR_STAGE_FAILURE }
+}
+
+// Falls back to the BootstrapResult from the specified target stage
+fn fallback_to_stage(chain: AttestationChain, target: i32) -> BootstrapResult with Mut, Div, Panic {
+    var i: i64 = 0
+    while i < chain.n_stages && i < 4 {
+        if chain.stages[i as usize].stage == target {
+            // Need to copy the result out
+            let found = chain.stages[i as usize]
+            // Return the found result
+            // Since we can't return early in Sounio, use a flag
+            var result = found
+            i = chain.n_stages  // Exit loop
+            result
+        } else {
+            i = i + 1
+        }
+    }
+    // Not found
+    bootstrap_result_new()
+}
+
+// ============================================================================
+// UTILITY FUNCTIONS
+// ============================================================================
+
+// Checks if bootstrap was successful
+fn bootstrap_succeeded(chain: AttestationChain) -> bool with Mut, Div, Panic {
+    chain.verified_to_stage >= STAGE_VERIFIED &&
+    accumulate_bootstrap_confidence(chain) >= CONFIDENCE_THRESHOLD
+}
+
+// Gets the final verified result from the chain
+fn get_verified_result(chain: AttestationChain) -> BootstrapResult with Panic {
+    if chain.n_stages > 0 {
+        chain.stages[(chain.n_stages - 1) as usize]
+    } else {
+        bootstrap_result_new()
+    }
+}
+
+// Computes confidence improvement from cross-validation
+fn confidence_improvement(before: f32, after: f32) -> f32 with Div, Panic {
+    if before > 0.0 {
+        ((after - before) / before) * 100.0  // Percent improvement
+    } else {
+        0.0
+    }
+}
