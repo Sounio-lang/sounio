@@ -6,91 +6,157 @@
 //! - Parameter efficiency against baseline
 //! - Kill switch criteria (accuracy, params, zero divisor rate)
 //! - Integration of neural nets with PAC learning theory
+//!
+//! NOTE: Tests use 30-second timeouts due to known type inference performance
+//! issues with large stdlib modules. See MEMORY.md for details on the quadratic
+//! type inference issue with the epistemic module.
 
 use std::fs;
-use std::path::Path;
-use std::process::Command;
+use std::io::Read;
+use std::process::{Command, Output, Stdio};
+use std::thread;
+use std::time::{Duration, Instant};
+
+/// Run a command with a timeout. Returns Ok(Output) on success, Err(message) on timeout/failure.
+fn run_with_timeout(cmd: &str, args: &[&str], timeout_secs: u64) -> Result<Output, String> {
+    let mut child = Command::new(cmd)
+        .args(args)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|e| format!("Failed to spawn: {}", e))?;
+
+    let timeout = Duration::from_secs(timeout_secs);
+    let start = Instant::now();
+
+    while start.elapsed() < timeout {
+        match child.try_wait() {
+            Ok(Some(status)) => {
+                let stdout = child.stdout.take().map_or(Vec::new(), |mut s| {
+                    let mut buf = Vec::new();
+                    let _ = s.read_to_end(&mut buf);
+                    buf
+                });
+                let stderr = child.stderr.take().map_or(Vec::new(), |mut s| {
+                    let mut buf = Vec::new();
+                    let _ = s.read_to_end(&mut buf);
+                    buf
+                });
+                return Ok(Output {
+                    status,
+                    stdout,
+                    stderr,
+                });
+            }
+            Ok(None) => thread::sleep(Duration::from_millis(100)),
+            Err(e) => return Err(format!("Wait error: {}", e)),
+        }
+    }
+
+    let _ = child.kill();
+    Err(format!("Command timed out after {} seconds", timeout_secs))
+}
 
 #[test]
 fn test_sedenion_benchmark_compiles() {
     // Test that the benchmark runner compiles without errors
-    let output = Command::new("cargo")
-        .args(&[
+    // Note: 30s timeout due to type inference performance with large modules
+    let result = run_with_timeout(
+        "cargo",
+        &[
             "run",
             "--bin",
             "souc",
             "--",
             "check",
             "examples/run_sedenion_benchmark.sio",
-        ])
-        .output()
-        .expect("Failed to run souc compiler");
+        ],
+        30,
+    );
 
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        panic!("Benchmark failed to compile: {}", stderr);
+    match result {
+        Ok(output) => {
+            if !output.status.success() {
+                let stderr = String::from_utf8_lossy(&output.stderr);
+                panic!("Benchmark failed to compile: {}", stderr);
+            }
+        }
+        Err(e) => panic!("Compilation failed or timed out: {}", e),
     }
-
-    // Verify no error output
-    assert!(output.status.success(), "Benchmark compilation failed");
 }
 
 #[test]
 fn test_hsi_classification_compiles() {
     // Test that the classification example compiles without errors
-    let output = Command::new("cargo")
-        .args(&[
+    let output = match run_with_timeout(
+        "cargo",
+        &[
             "run",
             "--bin",
             "souc",
             "--",
             "check",
             "examples/hsi_tissue_classification.sio",
-        ])
-        .output()
-        .expect("Failed to run souc compiler");
+        ],
+        30,
+    ) {
+        Ok(o) => o,
+        Err(e) => panic!("Failed to run souc compiler: {}", e),
+    };
 
-    assert!(
-        output.status.success(),
-        "Classification example failed to compile"
-    );
+    if !output.status.success() {
+        panic!(
+            "Classification example failed to compile: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
 }
 
 #[test]
 fn test_pac_training_module_compiles() {
     // Test that PAC training module compiles
-    let output = Command::new("cargo")
-        .args(&[
+    let output = match run_with_timeout(
+        "cargo",
+        &[
             "run",
             "--bin",
             "souc",
             "--",
             "check",
             "stdlib/snn/pac_training.sio",
-        ])
-        .output()
-        .expect("Failed to check pac_training");
+        ],
+        30,
+    ) {
+        Ok(o) => o,
+        Err(e) => panic!("Failed to check pac_training: {}", e),
+    };
 
-    assert!(
-        output.status.success(),
-        "PAC training module failed compilation"
-    );
+    if !output.status.success() {
+        panic!(
+            "PAC training module failed compilation: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
 }
 
 #[test]
 fn test_sedenion_layer_module_compiles() {
     // Test that sedenion layer module compiles
-    let output = Command::new("cargo")
-        .args(&[
+    let output = match run_with_timeout(
+        "cargo",
+        &[
             "run",
             "--bin",
             "souc",
             "--",
             "check",
             "stdlib/snn/sedenion_layer.sio",
-        ])
-        .output()
-        .expect("Failed to check sedenion_layer");
+        ],
+        30,
+    ) {
+        Ok(o) => o,
+        Err(e) => panic!("Failed to check sedenion_layer: {}", e),
+    };
 
     assert!(
         output.status.success(),
