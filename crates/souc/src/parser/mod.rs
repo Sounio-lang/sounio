@@ -5671,6 +5671,8 @@ impl<'a> Parser<'a> {
             | TokenKind::Do => next == TokenKind::LParen,
             // Keywords with {...} syntax
             TokenKind::Counterfactual => next == TokenKind::LBrace,
+            // Knowledge has special syntax: Knowledge { ... } or Knowledge::new(...)
+            TokenKind::Knowledge => next == TokenKind::LBrace || next == TokenKind::ColonColon,
             _ => false,
         }
     }
