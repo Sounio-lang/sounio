@@ -1,0 +1,359 @@
+//! Epistemic confidence metadata for type checking
+//!
+//! This module defines metadata types that attach to AST nodes, types, and
+//! unification constraints during type checking. It bridges the runtime
+//! `Knowledge<T>` system with compile-time type inference.
+
+use core::{Option, Result, Vec}
+use epistemic::knowledge::{BetaConfidence}
+use compiler::types::{TypeId, TypeVar}
+use compiler::ast::{NodeId, Span}
+
+// ============================================================================
+// 1. ConfidenceLevel - Discrete confidence levels
+// ============================================================================
+
+pub enum ConfidenceLevel {
+    Certain,      // Proven (literals, explicit annotations)
+    High,         // Strong inference from constraints
+    Medium,       // Standard type inference
+    Low,          // Defaulting or partial constraints
+    Uncertain,    // Speculative or ambiguous
+}
+
+impl ConfidenceLevel {
+    pub fn to_beta(self: &ConfidenceLevel) -> BetaConfidence {
+        match self {
+            ConfidenceLevel::Certain => BetaConfidence::strong(0.99, 1000.0),
+            ConfidenceLevel::High => BetaConfidence::strong(0.85, 100.0),
+            ConfidenceLevel::Medium => BetaConfidence::strong(0.65, 50.0),
+            ConfidenceLevel::Low => BetaConfidence::strong(0.40, 20.0),
+            ConfidenceLevel::Uncertain => BetaConfidence::strong(0.20, 10.0),
+        }
+    }
+
+    pub fn from_beta(b: &BetaConfidence) -> ConfidenceLevel {
+        let m = b.mean()
+        if m >= 0.90 {
+            ConfidenceLevel::Certain
+        } else if m >= 0.75 {
+            ConfidenceLevel::High
+        } else if m >= 0.55 {
+            ConfidenceLevel::Medium
+        } else if m >= 0.30 {
+            ConfidenceLevel::Low
+        } else {
+            ConfidenceLevel::Uncertain
+        }
+    }
+
+    pub fn combine(self: &ConfidenceLevel, other: &ConfidenceLevel) -> ConfidenceLevel {
+        let self_val = self.to_value()
+        let other_val = other.to_value()
+        let min_val = if self_val < other_val { self_val } else { other_val }
+        ConfidenceLevel::from_value(min_val)
+    }
+
+    fn to_value(self: &ConfidenceLevel) -> i32 {
+        match self {
+            ConfidenceLevel::Certain => 5,
+            ConfidenceLevel::High => 4,
+            ConfidenceLevel::Medium => 3,
+            ConfidenceLevel::Low => 2,
+            ConfidenceLevel::Uncertain => 1,
+        }
+    }
+
+    fn from_value(val: i32) -> ConfidenceLevel {
+        if val >= 5 { ConfidenceLevel::Certain }
+        else if val >= 4 { ConfidenceLevel::High }
+        else if val >= 3 { ConfidenceLevel::Medium }
+        else if val >= 2 { ConfidenceLevel::Low }
+        else { ConfidenceLevel::Uncertain }
+    }
+}
+
+// ============================================================================
+// 2. InferenceSource - Where did this inference come from?
+// ============================================================================
+
+pub enum InferenceSource {
+    Annotation { node: NodeId, span: Span },
+    Literal { node: NodeId, value: string },
+    Unification { lhs: TypeId, rhs: TypeId },
+    ReturnType { fn_id: NodeId },
+    Default { reason: string },
+    Refinement { constraint: string },
+    Effect { effect: string },
+    External { module: string },
+}
+
+impl InferenceSource {
+    pub fn confidence_level(self: &InferenceSource) -> ConfidenceLevel {
+        match self {
+            InferenceSource::Annotation { .. } => ConfidenceLevel::Certain,
+            InferenceSource::Literal { .. } => ConfidenceLevel::Certain,
+            InferenceSource::ReturnType { .. } => ConfidenceLevel::High,
+            InferenceSource::Refinement { .. } => ConfidenceLevel::High,
+            InferenceSource::Effect { .. } => ConfidenceLevel::Medium,
+            InferenceSource::Unification { .. } => ConfidenceLevel::Medium,
+            InferenceSource::Default { .. } => ConfidenceLevel::Low,
+            InferenceSource::External { .. } => ConfidenceLevel::Uncertain,
+        }
+    }
+
+    pub fn span(self: &InferenceSource) -> Option<Span> {
+        match self {
+            InferenceSource::Annotation { span, .. } => Option::Some(span),
+            _ => Option::None,
+        }
+    }
+}
+
+// ============================================================================
+// 3. InferenceStep - Single step in provenance chain
+// ============================================================================
+
+pub struct InferenceStep {
+    operation: string,
+    from_type: Option<TypeId>,
+    to_type: TypeId,
+    decay_factor: f64,
+    reason: string,
+}
+
+impl InferenceStep {
+    pub fn new(op: string, to: TypeId, reason: string) -> InferenceStep {
+        InferenceStep {
+            operation: op,
+            from_type: Option::None,
+            to_type: to,
+            decay_factor: 1.0,
+            reason: reason,
+        }
+    }
+
+    pub fn with_from(self: InferenceStep, from: TypeId) -> InferenceStep {
+        InferenceStep {
+            operation: self.operation,
+            from_type: Option::Some(from),
+            to_type: self.to_type,
+            decay_factor: self.decay_factor,
+            reason: self.reason,
+        }
+    }
+
+    pub fn with_decay(self: InferenceStep, factor: f64) -> InferenceStep {
+        InferenceStep {
+            operation: self.operation,
+            from_type: self.from_type,
+            to_type: self.to_type,
+            decay_factor: factor,
+            reason: self.reason,
+        }
+    }
+}
+
+// ============================================================================
+// 4. TypeConfidenceMetadata - Confidence for a type
+// ============================================================================
+
+pub struct TypeConfidenceMetadata {
+    type_id: TypeId,
+    confidence: ConfidenceLevel,
+    beta: BetaConfidence,
+    source: InferenceSource,
+    provenance: Vec<InferenceStep>,
+    is_annotated: bool,
+}
+
+impl TypeConfidenceMetadata {
+    pub fn new(type_id: TypeId, source: InferenceSource) -> TypeConfidenceMetadata {
+        let conf_level = source.confidence_level()
+        TypeConfidenceMetadata {
+            type_id: type_id,
+            confidence: conf_level,
+            beta: conf_level.to_beta(),
+            source: source,
+            provenance: Vec::new(),
+            is_annotated: false,
+        }
+    }
+
+    pub fn certain(type_id: TypeId, node: NodeId) -> TypeConfidenceMetadata {
+        let source = InferenceSource::Literal {
+            node: node,
+            value: "certain",
+        }
+        TypeConfidenceMetadata {
+            type_id: type_id,
+            confidence: ConfidenceLevel::Certain,
+            beta: ConfidenceLevel::Certain.to_beta(),
+            source: source,
+            provenance: Vec::new(),
+            is_annotated: false,
+        }
+    }
+
+    pub fn annotated(type_id: TypeId, node: NodeId, span: Span) -> TypeConfidenceMetadata {
+        let source = InferenceSource::Annotation {
+            node: node,
+            span: span,
+        }
+        TypeConfidenceMetadata {
+            type_id: type_id,
+            confidence: ConfidenceLevel::Certain,
+            beta: ConfidenceLevel::Certain.to_beta(),
+            source: source,
+            provenance: Vec::new(),
+            is_annotated: true,
+        }
+    }
+
+    pub fn update_confidence(self: &!TypeConfidenceMetadata, conf: ConfidenceLevel) {
+        self.confidence = conf
+        self.beta = conf.to_beta()
+    }
+
+    pub fn add_step(self: &!TypeConfidenceMetadata, step: InferenceStep) {
+        self.provenance.push(step)
+    }
+
+    pub fn decay(self: &TypeConfidenceMetadata, factor: f64) -> TypeConfidenceMetadata {
+        let new_beta = self.beta.decay(factor)
+        let new_conf = ConfidenceLevel::from_beta(&new_beta)
+        TypeConfidenceMetadata {
+            type_id: self.type_id,
+            confidence: new_conf,
+            beta: new_beta,
+            source: self.source,
+            provenance: self.provenance,
+            is_annotated: self.is_annotated,
+        }
+    }
+
+    pub fn is_certain(self: &TypeConfidenceMetadata) -> bool {
+        match self.confidence {
+            ConfidenceLevel::Certain => true,
+            _ => false,
+        }
+    }
+
+    pub fn is_reliable(self: &TypeConfidenceMetadata) -> bool {
+        self.confidence.to_value() >= 4
+    }
+}
+
+// ============================================================================
+// 5. ConstraintConfidence - Confidence in unification constraint
+// ============================================================================
+
+pub struct ConstraintConfidence {
+    lhs: TypeId,
+    rhs: TypeId,
+    confidence: BetaConfidence,
+    source: InferenceSource,
+    is_explicit: bool,
+}
+
+impl ConstraintConfidence {
+    pub fn new(lhs: TypeId, rhs: TypeId, source: InferenceSource) -> ConstraintConfidence {
+        let conf_level = source.confidence_level()
+        ConstraintConfidence {
+            lhs: lhs,
+            rhs: rhs,
+            confidence: conf_level.to_beta(),
+            source: source,
+            is_explicit: false,
+        }
+    }
+
+    pub fn explicit(lhs: TypeId, rhs: TypeId, node: NodeId, span: Span) -> ConstraintConfidence {
+        let source = InferenceSource::Annotation {
+            node: node,
+            span: span,
+        }
+        ConstraintConfidence {
+            lhs: lhs,
+            rhs: rhs,
+            confidence: BetaConfidence::strong(0.99, 1000.0),
+            source: source,
+            is_explicit: true,
+        }
+    }
+
+    pub fn implicit(lhs: TypeId, rhs: TypeId) -> ConstraintConfidence {
+        let source = InferenceSource::Unification { lhs: lhs, rhs: rhs }
+        ConstraintConfidence {
+            lhs: lhs,
+            rhs: rhs,
+            confidence: BetaConfidence::uniform(),
+            source: source,
+            is_explicit: false,
+        }
+    }
+
+    pub fn combine(self: &ConstraintConfidence, other: &ConstraintConfidence) -> ConstraintConfidence {
+        let combined = self.confidence.combine(&other.confidence)
+        ConstraintConfidence {
+            lhs: self.lhs,
+            rhs: self.rhs,
+            confidence: combined,
+            source: self.source,
+            is_explicit: self.is_explicit || other.is_explicit,
+        }
+    }
+
+    pub fn is_reliable(self: &ConstraintConfidence) -> bool {
+        self.confidence.mean() >= 0.75
+    }
+}
+
+// ============================================================================
+// 6. ConfidenceContext - Global tracking context
+// ============================================================================
+
+pub struct ConfidenceContext {
+    default_confidence: ConfidenceLevel,
+    default_decay: f64,
+}
+
+impl ConfidenceContext {
+    pub fn new() -> ConfidenceContext {
+        ConfidenceContext {
+            default_confidence: ConfidenceLevel::Medium,
+            default_decay: 0.95,
+        }
+    }
+}
+
+// ============================================================================
+// 7. Helper functions
+// ============================================================================
+
+fn source_to_confidence(source: &InferenceSource) -> ConfidenceLevel {
+    source.confidence_level()
+}
+
+fn combine_confidences(levels: &[ConfidenceLevel]) -> ConfidenceLevel {
+    if levels.len() == 0 {
+        return ConfidenceLevel::Uncertain
+    }
+    var result = levels[0]
+    var i = 1
+    while i < levels.len() {
+        result = result.combine(&levels[i])
+        i = i + 1
+    }
+    result
+}
+
+fn decay_confidence(level: ConfidenceLevel, factor: f64) -> ConfidenceLevel {
+    let beta = level.to_beta()
+    let decayed = beta.decay(factor)
+    ConfidenceLevel::from_beta(&decayed)
+}
+
+fn is_reliable_confidence(level: ConfidenceLevel) -> bool {
+    level.to_value() >= 4
+}
