@@ -1,0 +1,849 @@
+// self-hosted::test_lexer — Integration tests for the self-hosted lexer
+//
+// 40 test vectors covering: empty input, whitespace, keywords, identifiers,
+// numbers (int/float/hex/bin/oct/scientific/suffixes), strings (with escapes),
+// char literals, operators (single/compound/epistemic), delimiters, punctuation,
+// comments (line/block/nested/doc), multi-token sequences, edge cases.
+//
+// Pattern: each test returns bool, main() aggregates with pass/fail count.
+// Helpers precede callers (Sounio requirement).
+
+// ============================================================================
+// TEST SOURCE BUILDER
+// ============================================================================
+
+struct TestSource {
+    data: [i8; 1048576],
+    len: i64,
+}
+
+fn ts_empty() -> TestSource {
+    TestSource { data: [0; 1048576], len: 0 }
+}
+
+fn ts_from(input: [i8; 256], len: i64) -> TestSource with Mut, Div, Panic {
+    var ts = ts_empty()
+    var i: i64 = 0
+    while i < len {
+        ts.data[i as usize] = input[i as usize]
+        i = i + 1
+    }
+    ts.len = len
+    ts
+}
+
+fn run_lex(input: [i8; 256], len: i64) -> LexerState with Mut, Div, Panic {
+    let ts = ts_from(input, len)
+    lex(ts.data, ts.len, 0)
+}
+
+// ============================================================================
+// EDGE CASE TESTS
+// ============================================================================
+
+// T01: Empty input produces only EOF
+fn test_empty_input() -> bool with Mut, Div, Panic {
+    var input: [i8; 256] = [0; 256]
+    let state = run_lex(input, 0)
+    state.token_count == 1 && state.tokens[0].kind == 0  // TK_EOF
+}
+
+// T02: Whitespace-only input produces only EOF
+fn test_whitespace_only() -> bool with Mut, Div, Panic {
+    var input: [i8; 256] = [0; 256]
+    input[0] = 32   // space
+    input[1] = 9    // tab
+    input[2] = 32   // space
+    let state = run_lex(input, 3)
+    state.token_count == 1 && state.tokens[0].kind == 0  // TK_EOF
+}
+
+// T03: Single newline produces only EOF
+fn test_single_newline() -> bool with Mut, Div, Panic {
+    var input: [i8; 256] = [0; 256]
+    input[0] = 10  // '\n'
+    let state = run_lex(input, 1)
+    state.token_count == 1 && state.tokens[0].kind == 0
+}
+
+// ============================================================================
+// KEYWORD TESTS
+// ============================================================================
+
+// T04: "let" -> TK_LET (15)
+fn test_let_keyword() -> bool with Mut, Div, Panic {
+    var input: [i8; 256] = [0; 256]
+    input[0] = 108  // l
+    input[1] = 101  // e
+    input[2] = 116  // t
+    let state = run_lex(input, 3)
+    state.token_count == 2 && state.tokens[0].kind == 15
+}
+
+// T05: "fn" -> TK_FN (14)
+fn test_fn_keyword() -> bool with Mut, Div, Panic {
+    var input: [i8; 256] = [0; 256]
+    input[0] = 102  // f
+    input[1] = 110  // n
+    let state = run_lex(input, 2)
+    state.token_count == 2 && state.tokens[0].kind == 14
+}
+
+// T06: "struct" -> TK_STRUCT (20)
+fn test_struct_keyword() -> bool with Mut, Div, Panic {
+    var input: [i8; 256] = [0; 256]
+    input[0] = 115  // s
+    input[1] = 116  // t
+    input[2] = 114  // r
+    input[3] = 117  // u
+    input[4] = 99   // c
+    input[5] = 116  // t
+    let state = run_lex(input, 6)
+    state.token_count == 2 && state.tokens[0].kind == 20
+}
+
+// T07: "if" -> TK_IF (24)
+fn test_if_keyword() -> bool with Mut, Div, Panic {
+    var input: [i8; 256] = [0; 256]
+    input[0] = 105  // i
+    input[1] = 102  // f
+    let state = run_lex(input, 2)
+    state.token_count == 2 && state.tokens[0].kind == 24
+}
+
+// T08: "match" -> TK_MATCH (26)
+fn test_match_keyword() -> bool with Mut, Div, Panic {
+    var input: [i8; 256] = [0; 256]
+    input[0] = 109  // m
+    input[1] = 97   // a
+    input[2] = 116  // t
+    input[3] = 99   // c
+    input[4] = 104  // h
+    let state = run_lex(input, 5)
+    state.token_count == 2 && state.tokens[0].kind == 26
+}
+
+// T09: "with" -> TK_WITH (53)
+fn test_with_keyword() -> bool with Mut, Div, Panic {
+    var input: [i8; 256] = [0; 256]
+    input[0] = 119  // w
+    input[1] = 105  // i
+    input[2] = 116  // t
+    input[3] = 104  // h
+    let state = run_lex(input, 4)
+    state.token_count == 2 && state.tokens[0].kind == 53
+}
+
+// ============================================================================
+// IDENTIFIER TESTS
+// ============================================================================
+
+// T10: "foo" -> TK_IDENT (100)
+fn test_identifier() -> bool with Mut, Div, Panic {
+    var input: [i8; 256] = [0; 256]
+    input[0] = 102  // f
+    input[1] = 111  // o
+    input[2] = 111  // o
+    let state = run_lex(input, 3)
+    state.token_count == 2 && state.tokens[0].kind == 100
+}
+
+// T11: "_bar" -> TK_IDENT (100) — underscore-prefixed
+fn test_underscore_ident() -> bool with Mut, Div, Panic {
+    var input: [i8; 256] = [0; 256]
+    input[0] = 95   // _
+    input[1] = 98   // b
+    input[2] = 97   // a
+    input[3] = 114  // r
+    let state = run_lex(input, 4)
+    state.token_count == 2 && state.tokens[0].kind == 100
+}
+
+// ============================================================================
+// NUMERIC LITERAL TESTS
+// ============================================================================
+
+// T12: "42" -> TK_INT_LIT (101)
+fn test_int_literal() -> bool with Mut, Div, Panic {
+    var input: [i8; 256] = [0; 256]
+    input[0] = 52  // '4'
+    input[1] = 50  // '2'
+    let state = run_lex(input, 2)
+    state.token_count == 2 && state.tokens[0].kind == 101
+}
+
+// T13: "3.14" -> TK_FLOAT_LIT (102)
+fn test_float_literal() -> bool with Mut, Div, Panic {
+    var input: [i8; 256] = [0; 256]
+    input[0] = 51   // '3'
+    input[1] = 46   // '.'
+    input[2] = 49   // '1'
+    input[3] = 52   // '4'
+    let state = run_lex(input, 4)
+    state.token_count == 2 && state.tokens[0].kind == 102
+}
+
+// T14: "0xFF" -> TK_HEX_LIT (106)
+fn test_hex_literal() -> bool with Mut, Div, Panic {
+    var input: [i8; 256] = [0; 256]
+    input[0] = 48   // '0'
+    input[1] = 120  // 'x'
+    input[2] = 70   // 'F'
+    input[3] = 70   // 'F'
+    let state = run_lex(input, 4)
+    state.token_count == 2 && state.tokens[0].kind == 106
+}
+
+// T15: "0b101" -> TK_BIN_LIT (107)
+fn test_bin_literal() -> bool with Mut, Div, Panic {
+    var input: [i8; 256] = [0; 256]
+    input[0] = 48   // '0'
+    input[1] = 98   // 'b'
+    input[2] = 49   // '1'
+    input[3] = 48   // '0'
+    input[4] = 49   // '1'
+    let state = run_lex(input, 5)
+    state.token_count == 2 && state.tokens[0].kind == 107
+}
+
+// T16: "0o17" -> TK_OCT_LIT (108)
+fn test_oct_literal() -> bool with Mut, Div, Panic {
+    var input: [i8; 256] = [0; 256]
+    input[0] = 48   // '0'
+    input[1] = 111  // 'o'
+    input[2] = 49   // '1'
+    input[3] = 55   // '7'
+    let state = run_lex(input, 4)
+    state.token_count == 2 && state.tokens[0].kind == 108
+}
+
+// T17: "1e10" -> TK_FLOAT_LIT (102) — scientific notation
+fn test_scientific_notation() -> bool with Mut, Div, Panic {
+    var input: [i8; 256] = [0; 256]
+    input[0] = 49   // '1'
+    input[1] = 101  // 'e'
+    input[2] = 49   // '1'
+    input[3] = 48   // '0'
+    let state = run_lex(input, 4)
+    state.token_count == 2 && state.tokens[0].kind == 102
+}
+
+// T18: "42i32" -> TK_INT_LIT with suffix consumed
+fn test_numeric_suffix_i32() -> bool with Mut, Div, Panic {
+    var input: [i8; 256] = [0; 256]
+    input[0] = 52   // '4'
+    input[1] = 50   // '2'
+    input[2] = 105  // 'i'
+    input[3] = 51   // '3'
+    input[4] = 50   // '2'
+    let state = run_lex(input, 5)
+    // Should produce one INT_LIT (suffix consumed) + EOF
+    state.token_count == 2 && state.tokens[0].kind == 101
+}
+
+// T19: "3.14f64" -> TK_FLOAT_LIT with suffix consumed
+fn test_numeric_suffix_f64() -> bool with Mut, Div, Panic {
+    var input: [i8; 256] = [0; 256]
+    input[0] = 51   // '3'
+    input[1] = 46   // '.'
+    input[2] = 49   // '1'
+    input[3] = 52   // '4'
+    input[4] = 102  // 'f'
+    input[5] = 54   // '6'
+    input[6] = 52   // '4'
+    let state = run_lex(input, 7)
+    state.token_count == 2 && state.tokens[0].kind == 102
+}
+
+// T20: "1_000" -> TK_INT_LIT (underscore separator)
+fn test_underscore_separator() -> bool with Mut, Div, Panic {
+    var input: [i8; 256] = [0; 256]
+    input[0] = 49   // '1'
+    input[1] = 95   // '_'
+    input[2] = 48   // '0'
+    input[3] = 48   // '0'
+    input[4] = 48   // '0'
+    let state = run_lex(input, 5)
+    state.token_count == 2 && state.tokens[0].kind == 101
+}
+
+// ============================================================================
+// STRING AND CHAR TESTS
+// ============================================================================
+
+// T21: "hi" (with quotes) -> TK_STRING_LIT (103)
+fn test_string_literal() -> bool with Mut, Div, Panic {
+    var input: [i8; 256] = [0; 256]
+    input[0] = 34   // '"'
+    input[1] = 104  // 'h'
+    input[2] = 105  // 'i'
+    input[3] = 34   // '"'
+    let state = run_lex(input, 4)
+    state.token_count == 2 && state.tokens[0].kind == 103
+}
+
+// T22: "a\nb" (with escape) -> TK_STRING_LIT, text[1] == 10 (LF)
+fn test_string_escape() -> bool with Mut, Div, Panic {
+    var input: [i8; 256] = [0; 256]
+    input[0] = 34   // '"'
+    input[1] = 97   // 'a'
+    input[2] = 92   // '\'
+    input[3] = 110  // 'n'
+    input[4] = 98   // 'b'
+    input[5] = 34   // '"'
+    let state = run_lex(input, 6)
+    state.token_count == 2 &&
+        state.tokens[0].kind == 103 &&
+        state.tokens[0].text[1] == 10  // escape \n -> LF byte
+}
+
+// T23: 'x' -> TK_CHAR_LIT (104)
+fn test_char_literal() -> bool with Mut, Div, Panic {
+    var input: [i8; 256] = [0; 256]
+    input[0] = 39   // '\''
+    input[1] = 120  // 'x'
+    input[2] = 39   // '\''
+    let state = run_lex(input, 3)
+    state.token_count == 2 && state.tokens[0].kind == 104
+}
+
+// ============================================================================
+// OPERATOR TESTS
+// ============================================================================
+
+// T24: "+" -> TK_PLUS (120)
+fn test_plus_operator() -> bool with Mut, Div, Panic {
+    var input: [i8; 256] = [0; 256]
+    input[0] = 43  // '+'
+    let state = run_lex(input, 1)
+    state.token_count == 2 && state.tokens[0].kind == 120
+}
+
+// T25: "->" -> TK_ARROW (152)
+fn test_arrow_operator() -> bool with Mut, Div, Panic {
+    var input: [i8; 256] = [0; 256]
+    input[0] = 45  // '-'
+    input[1] = 62  // '>'
+    let state = run_lex(input, 2)
+    state.token_count == 2 && state.tokens[0].kind == 152
+}
+
+// T26: "=>" -> TK_FAT_ARROW (153)
+fn test_fat_arrow() -> bool with Mut, Div, Panic {
+    var input: [i8; 256] = [0; 256]
+    input[0] = 61  // '='
+    input[1] = 62  // '>'
+    let state = run_lex(input, 2)
+    state.token_count == 2 && state.tokens[0].kind == 153
+}
+
+// T27: "&!" -> TK_AMP_BANG (157) — Sounio exclusive ref
+fn test_amp_bang() -> bool with Mut, Div, Panic {
+    var input: [i8; 256] = [0; 256]
+    input[0] = 38  // '&'
+    input[1] = 33  // '!'
+    let state = run_lex(input, 2)
+    state.token_count == 2 && state.tokens[0].kind == 157
+}
+
+// T28: "~" -> TK_TILDE (132) — epistemic operator
+fn test_tilde_operator() -> bool with Mut, Div, Panic {
+    var input: [i8; 256] = [0; 256]
+    input[0] = 126  // '~'
+    let state = run_lex(input, 1)
+    state.token_count == 2 && state.tokens[0].kind == 132
+}
+
+// T29: "+-" -> TK_PLUS_MINUS (167) — epistemic ±
+fn test_plus_minus() -> bool with Mut, Div, Panic {
+    var input: [i8; 256] = [0; 256]
+    input[0] = 43  // '+'
+    input[1] = 45  // '-'
+    let state = run_lex(input, 2)
+    state.token_count == 2 && state.tokens[0].kind == 167
+}
+
+// T30: ".." -> TK_DOT_DOT (154) — range
+fn test_range_operator() -> bool with Mut, Div, Panic {
+    var input: [i8; 256] = [0; 256]
+    input[0] = 46  // '.'
+    input[1] = 46  // '.'
+    let state = run_lex(input, 2)
+    state.token_count == 2 && state.tokens[0].kind == 154
+}
+
+// T31: "..=" -> TK_DOT_DOT_EQ (155) — inclusive range
+fn test_range_inclusive() -> bool with Mut, Div, Panic {
+    var input: [i8; 256] = [0; 256]
+    input[0] = 46  // '.'
+    input[1] = 46  // '.'
+    input[2] = 61  // '='
+    let state = run_lex(input, 3)
+    state.token_count == 2 && state.tokens[0].kind == 155
+}
+
+// T32: "|=" -> TK_PIPE_EQ (159)
+fn test_pipe_eq() -> bool with Mut, Div, Panic {
+    var input: [i8; 256] = [0; 256]
+    input[0] = 124  // '|'
+    input[1] = 61   // '='
+    let state = run_lex(input, 2)
+    state.token_count == 2 && state.tokens[0].kind == 159
+}
+
+// ============================================================================
+// DELIMITER AND PUNCTUATION TESTS
+// ============================================================================
+
+// T33: "(){}" -> LPAREN RPAREN LBRACE RBRACE + EOF
+fn test_delimiters() -> bool with Mut, Div, Panic {
+    var input: [i8; 256] = [0; 256]
+    input[0] = 40   // '('
+    input[1] = 41   // ')'
+    input[2] = 123  // '{'
+    input[3] = 125  // '}'
+    let state = run_lex(input, 4)
+    state.token_count == 5 &&
+        state.tokens[0].kind == 170 &&  // TK_LPAREN
+        state.tokens[1].kind == 171 &&  // TK_RPAREN
+        state.tokens[2].kind == 172 &&  // TK_LBRACE
+        state.tokens[3].kind == 173     // TK_RBRACE
+}
+
+// ============================================================================
+// COMMENT TESTS
+// ============================================================================
+
+// T34: "// comment\n42" -> line comment skipped, TK_INT_LIT + EOF
+fn test_line_comment() -> bool with Mut, Div, Panic {
+    var input: [i8; 256] = [0; 256]
+    // "// comment\n42"
+    input[0] = 47   // '/'
+    input[1] = 47   // '/'
+    input[2] = 32   // ' '
+    input[3] = 99   // 'c'
+    input[4] = 111  // 'o'
+    input[5] = 109  // 'm'
+    input[6] = 10   // '\n'
+    input[7] = 52   // '4'
+    input[8] = 50   // '2'
+    let state = run_lex(input, 9)
+    state.token_count == 2 && state.tokens[0].kind == 101  // TK_INT_LIT
+}
+
+// T35: "/* blah */42" -> block comment skipped, TK_INT_LIT + EOF
+fn test_block_comment() -> bool with Mut, Div, Panic {
+    var input: [i8; 256] = [0; 256]
+    input[0] = 47   // '/'
+    input[1] = 42   // '*'
+    input[2] = 32   // ' '
+    input[3] = 98   // 'b'
+    input[4] = 32   // ' '
+    input[5] = 42   // '*'
+    input[6] = 47   // '/'
+    input[7] = 52   // '4'
+    input[8] = 50   // '2'
+    let state = run_lex(input, 9)
+    state.token_count == 2 && state.tokens[0].kind == 101
+}
+
+// T36: "/* /* inner */ outer */" -> nested block comment
+fn test_nested_block_comment() -> bool with Mut, Div, Panic {
+    var input: [i8; 256] = [0; 256]
+    // /* /* x */ */42
+    input[0] = 47    // /
+    input[1] = 42    // *
+    input[2] = 32    // ' '
+    input[3] = 47    // /
+    input[4] = 42    // *
+    input[5] = 32    // ' '
+    input[6] = 120   // 'x'
+    input[7] = 32    // ' '
+    input[8] = 42    // *
+    input[9] = 47    // /
+    input[10] = 32   // ' '
+    input[11] = 42   // *
+    input[12] = 47   // /
+    input[13] = 52   // '4'
+    input[14] = 50   // '2'
+    let state = run_lex(input, 15)
+    state.token_count == 2 && state.tokens[0].kind == 101  // TK_INT_LIT
+}
+
+// T37: "/// doc text" -> TK_DOC_OUTER (190)
+fn test_doc_comment_outer() -> bool with Mut, Div, Panic {
+    var input: [i8; 256] = [0; 256]
+    input[0] = 47   // '/'
+    input[1] = 47   // '/'
+    input[2] = 47   // '/'
+    input[3] = 32   // ' '
+    input[4] = 100  // 'd'
+    input[5] = 111  // 'o'
+    input[6] = 99   // 'c'
+    let state = run_lex(input, 7)
+    state.token_count == 2 && state.tokens[0].kind == 190
+}
+
+// ============================================================================
+// MULTI-TOKEN SEQUENCE TESTS
+// ============================================================================
+
+// T38: "let x = 5" -> TK_LET TK_IDENT TK_EQ TK_INT_LIT + EOF
+fn test_let_binding() -> bool with Mut, Div, Panic {
+    var input: [i8; 256] = [0; 256]
+    // l  e  t  _  x  _  =  _  5
+    input[0] = 108  // 'l'
+    input[1] = 101  // 'e'
+    input[2] = 116  // 't'
+    input[3] = 32   // ' '
+    input[4] = 120  // 'x'
+    input[5] = 32   // ' '
+    input[6] = 61   // '='
+    input[7] = 32   // ' '
+    input[8] = 53   // '5'
+    let state = run_lex(input, 9)
+    state.token_count == 5 &&
+        state.tokens[0].kind == 15 &&   // TK_LET
+        state.tokens[1].kind == 100 &&  // TK_IDENT
+        state.tokens[2].kind == 125 &&  // TK_EQ
+        state.tokens[3].kind == 101     // TK_INT_LIT
+}
+
+// T39: "fn f() -> i32" -> TK_FN TK_IDENT TK_LPAREN TK_RPAREN TK_ARROW TK_IDENT + EOF
+fn test_fn_signature() -> bool with Mut, Div, Panic {
+    var input: [i8; 256] = [0; 256]
+    // f  n  _  f  (  )  _  -  >  _  i  3  2
+    input[0] = 102   // 'f'
+    input[1] = 110   // 'n'
+    input[2] = 32    // ' '
+    input[3] = 102   // 'f'
+    input[4] = 40    // '('
+    input[5] = 41    // ')'
+    input[6] = 32    // ' '
+    input[7] = 45    // '-'
+    input[8] = 62    // '>'
+    input[9] = 32    // ' '
+    input[10] = 105  // 'i'
+    input[11] = 51   // '3'
+    input[12] = 50   // '2'
+    let state = run_lex(input, 13)
+    state.token_count == 7 &&
+        state.tokens[0].kind == 14 &&   // TK_FN
+        state.tokens[1].kind == 100 &&  // TK_IDENT (f)
+        state.tokens[2].kind == 170 &&  // TK_LPAREN
+        state.tokens[3].kind == 171 &&  // TK_RPAREN
+        state.tokens[4].kind == 152 &&  // TK_ARROW
+        state.tokens[5].kind == 100     // TK_IDENT (i32)
+}
+
+// ============================================================================
+// EPISTEMIC KEYWORD TESTS
+// ============================================================================
+
+// T40: "uncertain" -> TK_UNCERTAIN (80)
+fn test_epistemic_uncertain() -> bool with Mut, Div, Panic {
+    var input: [i8; 256] = [0; 256]
+    // u  n  c  e  r  t  a  i  n
+    input[0] = 117  // u
+    input[1] = 110  // n
+    input[2] = 99   // c
+    input[3] = 101  // e
+    input[4] = 114  // r
+    input[5] = 116  // t
+    input[6] = 97   // a
+    input[7] = 105  // i
+    input[8] = 110  // n
+    let state = run_lex(input, 9)
+    state.token_count == 2 && state.tokens[0].kind == 80
+}
+
+// T41: "belief" -> TK_BELIEF (81)
+fn test_epistemic_belief() -> bool with Mut, Div, Panic {
+    var input: [i8; 256] = [0; 256]
+    input[0] = 98   // b
+    input[1] = 101  // e
+    input[2] = 108  // l
+    input[3] = 105  // i
+    input[4] = 101  // e
+    input[5] = 102  // f
+    let state = run_lex(input, 6)
+    state.token_count == 2 && state.tokens[0].kind == 81
+}
+
+// T42: "posterior" -> TK_POSTERIOR (85)
+fn test_epistemic_posterior() -> bool with Mut, Div, Panic {
+    var input: [i8; 256] = [0; 256]
+    input[0] = 112  // p
+    input[1] = 111  // o
+    input[2] = 115  // s
+    input[3] = 116  // t
+    input[4] = 101  // e
+    input[5] = 114  // r
+    input[6] = 105  // i
+    input[7] = 111  // o
+    input[8] = 114  // r
+    let state = run_lex(input, 9)
+    state.token_count == 2 && state.tokens[0].kind == 85
+}
+
+// ============================================================================
+// ARRAY REPEAT SYNTAX
+// ============================================================================
+
+// T43: "[0; 256]" -> LBRACKET INT_LIT SEMI INT_LIT RBRACKET + EOF
+fn test_array_repeat() -> bool with Mut, Div, Panic {
+    var input: [i8; 256] = [0; 256]
+    // [  0  ;  _  2  5  6  ]
+    input[0] = 91   // '['
+    input[1] = 48   // '0'
+    input[2] = 59   // ';'
+    input[3] = 32   // ' '
+    input[4] = 50   // '2'
+    input[5] = 53   // '5'
+    input[6] = 54   // '6'
+    input[7] = 93   // ']'
+    let state = run_lex(input, 8)
+    state.token_count == 6 &&
+        state.tokens[0].kind == 174 &&  // TK_LBRACKET
+        state.tokens[1].kind == 101 &&  // TK_INT_LIT
+        state.tokens[2].kind == 180 &&  // TK_SEMI
+        state.tokens[3].kind == 101 &&  // TK_INT_LIT
+        state.tokens[4].kind == 175     // TK_RBRACKET
+}
+
+// ============================================================================
+// COMPOUND OPERATOR TESTS
+// ============================================================================
+
+// T44: "==" -> TK_EQ_EQ (140)
+fn test_eq_eq() -> bool with Mut, Div, Panic {
+    var input: [i8; 256] = [0; 256]
+    input[0] = 61  // '='
+    input[1] = 61  // '='
+    let state = run_lex(input, 2)
+    state.token_count == 2 && state.tokens[0].kind == 140
+}
+
+// T45: "::" -> TK_COLON_COLON (156)
+fn test_colon_colon() -> bool with Mut, Div, Panic {
+    var input: [i8; 256] = [0; 256]
+    input[0] = 58  // ':'
+    input[1] = 58  // ':'
+    let state = run_lex(input, 2)
+    state.token_count == 2 && state.tokens[0].kind == 156
+}
+
+// T46: "..." -> TK_DOT_DOT_DOT (166) — variadic / spread
+fn test_ellipsis() -> bool with Mut, Div, Panic {
+    var input: [i8; 256] = [0; 256]
+    input[0] = 46  // '.'
+    input[1] = 46  // '.'
+    input[2] = 46  // '.'
+    let state = run_lex(input, 3)
+    state.token_count == 2 && state.tokens[0].kind == 166
+}
+
+// ============================================================================
+// SHIFT AND ASSIGN OPERATOR TESTS
+// ============================================================================
+
+// T47: "<<=" -> TK_SHL_EQ (160)
+fn test_shl_eq() -> bool with Mut, Div, Panic {
+    var input: [i8; 256] = [0; 256]
+    input[0] = 60  // '<'
+    input[1] = 60  // '<'
+    input[2] = 61  // '='
+    let state = run_lex(input, 3)
+    state.token_count == 2 && state.tokens[0].kind == 160
+}
+
+// ============================================================================
+// ERROR TESTS
+// ============================================================================
+
+// T48: Unterminated string produces error
+fn test_unterminated_string() -> bool with Mut, Div, Panic {
+    var input: [i8; 256] = [0; 256]
+    input[0] = 34   // '"'
+    input[1] = 104  // 'h'
+    input[2] = 105  // 'i'
+    // no closing quote
+    let state = run_lex(input, 3)
+    state.error_count > 0
+}
+
+// ============================================================================
+// TEST RUNNER
+// ============================================================================
+
+fn main() -> i32 with IO, Mut, Div, Panic {
+    var passed: i64 = 0
+    var total: i64 = 0
+
+    // Edge cases
+    total = total + 1
+    if test_empty_input() { passed = passed + 1 } else { print("FAIL: T01 empty_input\n") }
+
+    total = total + 1
+    if test_whitespace_only() { passed = passed + 1 } else { print("FAIL: T02 whitespace_only\n") }
+
+    total = total + 1
+    if test_single_newline() { passed = passed + 1 } else { print("FAIL: T03 single_newline\n") }
+
+    // Keywords
+    total = total + 1
+    if test_let_keyword() { passed = passed + 1 } else { print("FAIL: T04 let_keyword\n") }
+
+    total = total + 1
+    if test_fn_keyword() { passed = passed + 1 } else { print("FAIL: T05 fn_keyword\n") }
+
+    total = total + 1
+    if test_struct_keyword() { passed = passed + 1 } else { print("FAIL: T06 struct_keyword\n") }
+
+    total = total + 1
+    if test_if_keyword() { passed = passed + 1 } else { print("FAIL: T07 if_keyword\n") }
+
+    total = total + 1
+    if test_match_keyword() { passed = passed + 1 } else { print("FAIL: T08 match_keyword\n") }
+
+    total = total + 1
+    if test_with_keyword() { passed = passed + 1 } else { print("FAIL: T09 with_keyword\n") }
+
+    // Identifiers
+    total = total + 1
+    if test_identifier() { passed = passed + 1 } else { print("FAIL: T10 identifier\n") }
+
+    total = total + 1
+    if test_underscore_ident() { passed = passed + 1 } else { print("FAIL: T11 underscore_ident\n") }
+
+    // Numeric
+    total = total + 1
+    if test_int_literal() { passed = passed + 1 } else { print("FAIL: T12 int_literal\n") }
+
+    total = total + 1
+    if test_float_literal() { passed = passed + 1 } else { print("FAIL: T13 float_literal\n") }
+
+    total = total + 1
+    if test_hex_literal() { passed = passed + 1 } else { print("FAIL: T14 hex_literal\n") }
+
+    total = total + 1
+    if test_bin_literal() { passed = passed + 1 } else { print("FAIL: T15 bin_literal\n") }
+
+    total = total + 1
+    if test_oct_literal() { passed = passed + 1 } else { print("FAIL: T16 oct_literal\n") }
+
+    total = total + 1
+    if test_scientific_notation() { passed = passed + 1 } else { print("FAIL: T17 scientific_notation\n") }
+
+    total = total + 1
+    if test_numeric_suffix_i32() { passed = passed + 1 } else { print("FAIL: T18 numeric_suffix_i32\n") }
+
+    total = total + 1
+    if test_numeric_suffix_f64() { passed = passed + 1 } else { print("FAIL: T19 numeric_suffix_f64\n") }
+
+    total = total + 1
+    if test_underscore_separator() { passed = passed + 1 } else { print("FAIL: T20 underscore_separator\n") }
+
+    // Strings and chars
+    total = total + 1
+    if test_string_literal() { passed = passed + 1 } else { print("FAIL: T21 string_literal\n") }
+
+    total = total + 1
+    if test_string_escape() { passed = passed + 1 } else { print("FAIL: T22 string_escape\n") }
+
+    total = total + 1
+    if test_char_literal() { passed = passed + 1 } else { print("FAIL: T23 char_literal\n") }
+
+    // Operators
+    total = total + 1
+    if test_plus_operator() { passed = passed + 1 } else { print("FAIL: T24 plus_operator\n") }
+
+    total = total + 1
+    if test_arrow_operator() { passed = passed + 1 } else { print("FAIL: T25 arrow_operator\n") }
+
+    total = total + 1
+    if test_fat_arrow() { passed = passed + 1 } else { print("FAIL: T26 fat_arrow\n") }
+
+    total = total + 1
+    if test_amp_bang() { passed = passed + 1 } else { print("FAIL: T27 amp_bang\n") }
+
+    total = total + 1
+    if test_tilde_operator() { passed = passed + 1 } else { print("FAIL: T28 tilde_operator\n") }
+
+    total = total + 1
+    if test_plus_minus() { passed = passed + 1 } else { print("FAIL: T29 plus_minus\n") }
+
+    total = total + 1
+    if test_range_operator() { passed = passed + 1 } else { print("FAIL: T30 range_operator\n") }
+
+    total = total + 1
+    if test_range_inclusive() { passed = passed + 1 } else { print("FAIL: T31 range_inclusive\n") }
+
+    total = total + 1
+    if test_pipe_eq() { passed = passed + 1 } else { print("FAIL: T32 pipe_eq\n") }
+
+    // Delimiters
+    total = total + 1
+    if test_delimiters() { passed = passed + 1 } else { print("FAIL: T33 delimiters\n") }
+
+    // Comments
+    total = total + 1
+    if test_line_comment() { passed = passed + 1 } else { print("FAIL: T34 line_comment\n") }
+
+    total = total + 1
+    if test_block_comment() { passed = passed + 1 } else { print("FAIL: T35 block_comment\n") }
+
+    total = total + 1
+    if test_nested_block_comment() { passed = passed + 1 } else { print("FAIL: T36 nested_block_comment\n") }
+
+    total = total + 1
+    if test_doc_comment_outer() { passed = passed + 1 } else { print("FAIL: T37 doc_comment_outer\n") }
+
+    // Multi-token sequences
+    total = total + 1
+    if test_let_binding() { passed = passed + 1 } else { print("FAIL: T38 let_binding\n") }
+
+    total = total + 1
+    if test_fn_signature() { passed = passed + 1 } else { print("FAIL: T39 fn_signature\n") }
+
+    // Epistemic
+    total = total + 1
+    if test_epistemic_uncertain() { passed = passed + 1 } else { print("FAIL: T40 epistemic_uncertain\n") }
+
+    total = total + 1
+    if test_epistemic_belief() { passed = passed + 1 } else { print("FAIL: T41 epistemic_belief\n") }
+
+    total = total + 1
+    if test_epistemic_posterior() { passed = passed + 1 } else { print("FAIL: T42 epistemic_posterior\n") }
+
+    // Array repeat
+    total = total + 1
+    if test_array_repeat() { passed = passed + 1 } else { print("FAIL: T43 array_repeat\n") }
+
+    // Compound operators
+    total = total + 1
+    if test_eq_eq() { passed = passed + 1 } else { print("FAIL: T44 eq_eq\n") }
+
+    total = total + 1
+    if test_colon_colon() { passed = passed + 1 } else { print("FAIL: T45 colon_colon\n") }
+
+    total = total + 1
+    if test_ellipsis() { passed = passed + 1 } else { print("FAIL: T46 ellipsis\n") }
+
+    total = total + 1
+    if test_shl_eq() { passed = passed + 1 } else { print("FAIL: T47 shl_eq\n") }
+
+    // Errors
+    total = total + 1
+    if test_unterminated_string() { passed = passed + 1 } else { print("FAIL: T48 unterminated_string\n") }
+
+    // Summary
+    if passed == total {
+        print("ALL TESTS PASSED\n")
+    }
+    print("Lexer tests: ")
+    // Can't easily print integers without printf-style formatting,
+    // so we return 0 for all-pass, 1 for failures.
+
+    if passed == total { 0 } else { 1 }
+}

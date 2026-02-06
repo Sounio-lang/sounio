@@ -1,0 +1,206 @@
+// self-hosted::lexer::numparse — Parse numeric literal text into values
+//
+// Converts source byte ranges into i64/f64 values.
+// Handles decimal, hex, binary, octal, float, and scientific notation.
+// Underscore separators are skipped.
+
+// ============================================================================
+// DECIMAL INTEGER PARSING
+// ============================================================================
+
+fn num_parse_decimal(source: [i8; 1048576], start: i64, end: i64) -> i64 with Mut, Div, Panic {
+    var result: i64 = 0
+    var i = start
+    while i < end {
+        let ch = source[i as usize]
+        if ch == 95 {  // '_' separator
+            i = i + 1
+            continue
+        }
+        // Stop at suffix characters (i, u, f)
+        if ch == 105 || ch == 117 || ch == 102 { break }
+        // Stop at dot or 'e'/'E' (float territory)
+        if ch == 46 || ch == 101 || ch == 69 { break }
+        if ch >= 48 && ch <= 57 {
+            result = result * 10 + (ch - 48) as i64
+        }
+        i = i + 1
+    }
+    result
+}
+
+// ============================================================================
+// HEXADECIMAL INTEGER PARSING (0x...)
+// ============================================================================
+
+fn num_parse_hex(source: [i8; 1048576], start: i64, end: i64) -> i64 with Mut, Div, Panic {
+    var result: i64 = 0
+    var i = start + 2  // skip "0x"
+    while i < end {
+        let ch = source[i as usize]
+        if ch == 95 { i = i + 1; continue }
+        if ch == 105 || ch == 117 { break }  // suffix
+        if ch >= 48 && ch <= 57 {
+            result = result * 16 + (ch - 48) as i64
+        } else if ch >= 97 && ch <= 102 {
+            result = result * 16 + (ch - 97 + 10) as i64
+        } else if ch >= 65 && ch <= 70 {
+            result = result * 16 + (ch - 65 + 10) as i64
+        } else {
+            break
+        }
+        i = i + 1
+    }
+    result
+}
+
+// ============================================================================
+// BINARY INTEGER PARSING (0b...)
+// ============================================================================
+
+fn num_parse_binary(source: [i8; 1048576], start: i64, end: i64) -> i64 with Mut, Div, Panic {
+    var result: i64 = 0
+    var i = start + 2  // skip "0b"
+    while i < end {
+        let ch = source[i as usize]
+        if ch == 95 { i = i + 1; continue }
+        if ch == 105 || ch == 117 { break }  // suffix
+        if ch == 48 {
+            result = result * 2
+        } else if ch == 49 {
+            result = result * 2 + 1
+        } else {
+            break
+        }
+        i = i + 1
+    }
+    result
+}
+
+// ============================================================================
+// OCTAL INTEGER PARSING (0o...)
+// ============================================================================
+
+fn num_parse_octal(source: [i8; 1048576], start: i64, end: i64) -> i64 with Mut, Div, Panic {
+    var result: i64 = 0
+    var i = start + 2  // skip "0o"
+    while i < end {
+        let ch = source[i as usize]
+        if ch == 95 { i = i + 1; continue }
+        if ch == 105 || ch == 117 { break }  // suffix
+        if ch >= 48 && ch <= 55 {
+            result = result * 8 + (ch - 48) as i64
+        } else {
+            break
+        }
+        i = i + 1
+    }
+    result
+}
+
+// ============================================================================
+// FLOAT PARSING (with scientific notation)
+// ============================================================================
+
+fn num_parse_float(source: [i8; 1048576], start: i64, end: i64) -> f64 with Mut, Div, Panic {
+    // Parse integer part
+    var result: f64 = 0.0
+    var i = start
+    while i < end {
+        let ch = source[i as usize]
+        if ch == 95 { i = i + 1; continue }
+        if ch == 46 || ch == 101 || ch == 69 || ch == 102 { break }
+        if ch >= 48 && ch <= 57 {
+            result = result * 10.0 + (ch - 48) as f64
+        } else {
+            break
+        }
+        i = i + 1
+    }
+
+    // Parse fractional part
+    if i < end && source[i as usize] == 46 {  // '.'
+        i = i + 1
+        var frac: f64 = 0.1
+        while i < end {
+            let ch = source[i as usize]
+            if ch == 95 { i = i + 1; continue }
+            if ch == 101 || ch == 69 || ch == 102 { break }
+            if ch >= 48 && ch <= 57 {
+                result = result + (ch - 48) as f64 * frac
+                frac = frac * 0.1
+            } else {
+                break
+            }
+            i = i + 1
+        }
+    }
+
+    // Parse exponent
+    if i < end && (source[i as usize] == 101 || source[i as usize] == 69) {  // 'e' or 'E'
+        i = i + 1
+        var exp_negative = false
+        if i < end && source[i as usize] == 45 {  // '-'
+            exp_negative = true
+            i = i + 1
+        } else if i < end && source[i as usize] == 43 {  // '+'
+            i = i + 1
+        }
+        var exp: i64 = 0
+        while i < end {
+            let ch = source[i as usize]
+            if ch >= 48 && ch <= 57 {
+                exp = exp * 10 + (ch - 48) as i64
+            } else {
+                break
+            }
+            i = i + 1
+        }
+        // Apply exponent: result * 10^exp
+        var power: f64 = 1.0
+        var e = exp
+        while e > 0 {
+            power = power * 10.0
+            e = e - 1
+        }
+        if exp_negative {
+            result = result / power
+        } else {
+            result = result * power
+        }
+    }
+
+    result
+}
+
+// ============================================================================
+// UNIFIED NUMERIC PARSE (dispatches by token kind)
+// ============================================================================
+
+struct NumericValue {
+    int_val: i64,
+    float_val: f64,
+    is_float: bool,
+}
+
+fn parse_numeric(source: [i8; 1048576], start: i64, end: i64, kind: i32) -> NumericValue with Mut, Div, Panic {
+    if kind == 102 {  // TK_FLOAT_LIT
+        let v = num_parse_float(source, start, end)
+        return NumericValue { int_val: 0, float_val: v, is_float: true }
+    }
+    if kind == 106 {  // TK_HEX_LIT
+        let v = num_parse_hex(source, start, end)
+        return NumericValue { int_val: v, float_val: 0.0, is_float: false }
+    }
+    if kind == 107 {  // TK_BIN_LIT
+        let v = num_parse_binary(source, start, end)
+        return NumericValue { int_val: v, float_val: 0.0, is_float: false }
+    }
+    if kind == 108 {  // TK_OCT_LIT
+        let v = num_parse_octal(source, start, end)
+        return NumericValue { int_val: v, float_val: 0.0, is_float: false }
+    }
+    // Default: decimal integer
+    let v = num_parse_decimal(source, start, end)
+    NumericValue { int_val: v, float_val: 0.0, is_float: false }
+}
