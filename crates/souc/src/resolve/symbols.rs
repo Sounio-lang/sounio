@@ -3,7 +3,7 @@
 // Compiler internals often require deep nesting for pattern matching and control flow.
 #![allow(clippy::excessive_nesting)]
 
-use crate::ast::{ImportItem, ModuleId, Visibility};
+use crate::ast::{ImportItem, ModuleId, TypeExpr, Visibility, WherePredicate};
 use crate::common::{NodeId, Span};
 use std::collections::HashMap;
 
@@ -56,6 +56,53 @@ pub enum DefKind {
     BuiltinType,
     /// Built-in function (print, println, etc.)
     BuiltinFunction,
+}
+
+/// Method definition information
+#[derive(Debug, Clone)]
+pub struct MethodDef {
+    pub name: String,
+    pub params: Vec<TypeExpr>,
+    pub return_type: Option<TypeExpr>,
+    pub source: MethodSource,
+}
+
+/// Source of a method (trait or impl)
+#[derive(Debug, Clone)]
+pub enum MethodSource {
+    Trait {
+        trait_name: String,
+    },
+    Impl {
+        impl_id: NodeId,
+        trait_ref: Option<String>,
+    },
+}
+
+/// Type information with methods and impls
+#[derive(Debug, Clone)]
+pub struct TypeInfo {
+    pub def_id: Option<DefId>,
+    pub methods: HashMap<String, MethodDef>,
+    pub impls: Vec<ImplInfo>,
+}
+
+impl TypeInfo {
+    pub fn new() -> Self {
+        Self {
+            def_id: None,
+            methods: HashMap::new(),
+            impls: Vec::new(),
+        }
+    }
+}
+
+/// Impl block information
+#[derive(Debug, Clone)]
+pub struct ImplInfo {
+    pub impl_id: NodeId,
+    pub trait_ref: Option<String>,
+    pub where_clause: Vec<WherePredicate>,
 }
 
 /// Symbol information
@@ -253,6 +300,8 @@ pub struct SymbolTable {
     modules: HashMap<ModuleId, ModuleScope>,
     /// Current module context for resolution
     current_module: ModuleId,
+    /// Type registry: type name -> TypeInfo with methods and impls
+    pub type_registry: HashMap<String, TypeInfo>,
 }
 
 impl SymbolTable {
@@ -269,6 +318,7 @@ impl SymbolTable {
             node_to_ref: HashMap::new(),
             modules,
             current_module: root_module,
+            type_registry: HashMap::new(),
         };
         // Start with module scope
         table.push_scope(ScopeKind::Module, None);
@@ -964,6 +1014,38 @@ impl SymbolTable {
     /// Get all module IDs
     pub fn all_modules(&self) -> impl Iterator<Item = &ModuleId> {
         self.modules.keys()
+    }
+
+    // ==================== METHOD REGISTRATION ====================
+
+    /// Register a method for a type
+    pub fn register_method(&mut self, type_name: String, method_def: MethodDef) {
+        self.type_registry
+            .entry(type_name)
+            .or_insert_with(TypeInfo::new)
+            .methods
+            .insert(method_def.name.clone(), method_def);
+    }
+
+    /// Look up a method for a type
+    pub fn lookup_method(&self, type_name: &str, method_name: &str) -> Option<&MethodDef> {
+        self.type_registry.get(type_name)?.methods.get(method_name)
+    }
+
+    /// Register an impl block
+    pub fn register_impl(&mut self, type_name: String, impl_info: ImplInfo) {
+        self.type_registry
+            .entry(type_name)
+            .or_insert_with(TypeInfo::new)
+            .impls
+            .push(impl_info);
+    }
+
+    /// Get all impls for a type
+    pub fn get_impls(&self, type_name: &str) -> Option<&[ImplInfo]> {
+        self.type_registry
+            .get(type_name)
+            .map(|info| info.impls.as_slice())
     }
 }
 

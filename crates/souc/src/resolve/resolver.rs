@@ -1119,6 +1119,23 @@ impl Resolver {
                 node_id: t.id,
             });
         }
+
+        // Register trait methods
+        for item in &t.items {
+            if let TraitItem::Fn(f) = item {
+                let method_def = MethodDef {
+                    name: f.name.clone(),
+                    params: f.params.iter().map(|p| p.ty.clone()).collect(),
+                    return_type: f.return_type.clone(),
+                    source: MethodSource::Trait {
+                        trait_name: t.name.clone(),
+                    },
+                };
+
+                // Register for the trait itself as a type
+                self.symbols.register_method(t.name.clone(), method_def);
+            }
+        }
     }
 
     /// Define associated types from impl blocks
@@ -1165,6 +1182,31 @@ impl Resolver {
                 }
             }
         }
+
+        // Register methods from impl block
+        for item in &i.items {
+            if let ImplItem::Fn(f) = item {
+                let method_def = MethodDef {
+                    name: f.name.clone(),
+                    params: f.params.iter().map(|p| p.ty.clone()).collect(),
+                    return_type: f.return_type.clone(),
+                    source: MethodSource::Impl {
+                        impl_id: i.id,
+                        trait_ref: i.trait_ref.as_ref().map(|tr| tr.to_string()),
+                    },
+                };
+
+                self.symbols.register_method(type_name.clone(), method_def);
+            }
+        }
+
+        // Register impl block info
+        let impl_info = ImplInfo {
+            impl_id: i.id,
+            trait_ref: i.trait_ref.as_ref().map(|tr| tr.to_string()),
+            where_clause: i.where_clause.clone(),
+        };
+        self.symbols.register_impl(type_name.clone(), impl_info);
     }
 
     fn define_global(&mut self, g: &GlobalDef) {

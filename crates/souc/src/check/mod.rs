@@ -7996,12 +7996,82 @@ impl TypeChecker {
     }
 
     /// Get the return type of a method call based on receiver type and method name
+    /// Convert HirType to a type name string for method lookup
+    fn hir_type_to_name(&self, ty: &HirType) -> String {
+        match ty {
+            HirType::Named { name, .. } => name.clone(),
+            HirType::String => "str".to_string(),
+            HirType::Bool => "bool".to_string(),
+            HirType::I8 => "i8".to_string(),
+            HirType::I16 => "i16".to_string(),
+            HirType::I32 => "i32".to_string(),
+            HirType::I64 => "i64".to_string(),
+            HirType::I128 => "i128".to_string(),
+            HirType::Isize => "isize".to_string(),
+            HirType::U8 => "u8".to_string(),
+            HirType::U16 => "u16".to_string(),
+            HirType::U32 => "u32".to_string(),
+            HirType::U64 => "u64".to_string(),
+            HirType::U128 => "u128".to_string(),
+            HirType::Usize => "usize".to_string(),
+            HirType::F32 => "f32".to_string(),
+            HirType::F64 => "f64".to_string(),
+            HirType::Char => "char".to_string(),
+            HirType::Unit => "()".to_string(),
+            HirType::Never => "!".to_string(),
+            HirType::Array { element, .. } => format!("[{}]", self.hir_type_to_name(element)),
+            HirType::Tuple(elems) => {
+                let elem_names: Vec<_> = elems.iter().map(|e| self.hir_type_to_name(e)).collect();
+                format!("({})", elem_names.join(", "))
+            }
+            HirType::Ref { mutable, inner } => {
+                if *mutable {
+                    format!("&!{}", self.hir_type_to_name(inner))
+                } else {
+                    format!("&{}", self.hir_type_to_name(inner))
+                }
+            }
+            HirType::Fn { .. } => "fn".to_string(),
+            HirType::Error => "<error>".to_string(),
+            HirType::Var(_) => "<var>".to_string(),
+            HirType::Knowledge { inner, .. } => {
+                format!("Knowledge<{}>", self.hir_type_to_name(inner))
+            }
+            _ => "<unknown>".to_string(), // Catch-all for other types
+        }
+    }
+
     fn get_method_return_type(
-        &self,
+        &mut self,
         receiver_ty: &HirType,
         method: &str,
         _args: &[HirExpr],
     ) -> HirType {
+        // First, try to look up the method in the resolver's symbol table
+        let type_name = self.hir_type_to_name(receiver_ty);
+        let return_type_opt = if let Some(symbols) = &self.symbols {
+            symbols
+                .lookup_method(&type_name, method)
+                .and_then(|method_def| method_def.return_type.clone())
+        } else {
+            None
+        };
+
+        if let Some(return_type_expr) = return_type_opt {
+            let ty = self.lower_type_expr(&return_type_expr);
+            return self.type_to_hir(&ty);
+        }
+
+        // Check if method was found but has no return type (returns Unit)
+        if let Some(symbols) = &self.symbols {
+            if let Some(method_def) = symbols.lookup_method(&type_name, method) {
+                if method_def.return_type.is_none() {
+                    return HirType::Unit;
+                }
+            }
+        }
+
+        // Fall back to built-in method types
         match receiver_ty {
             // Vec<T> methods
             HirType::Named { name, args } if name == "Vec" => {
