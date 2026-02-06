@@ -1,0 +1,600 @@
+// self-hosted::lexer::mod — Main lexer entry point
+//
+// Tokenizes Sounio source code into a flat token array.
+// Handles: identifiers, keywords, numbers (int/float/hex/bin/oct with suffixes),
+// strings, chars, line comments, nestable block comments, doc comments,
+// operators (max-munch), delimiters, and epistemic operators.
+
+// ============================================================================
+// LEXER STATE
+// ============================================================================
+
+// Maximum tokens per file
+let MAX_TOKENS: i64 = 65536
+// Maximum errors per file
+let MAX_ERRORS: i64 = 256
+
+struct LexerState {
+    cursor: Cursor,
+    file_id: i32,
+    tokens: [Token; 65536],
+    token_count: i64,
+    errors: [LexError; 256],
+    error_count: i64,
+}
+
+fn lexer_new(source: [i8; 1048576], source_len: i64, file_id: i32) -> LexerState {
+    LexerState {
+        cursor: cursor_init(source, source_len),
+        file_id: file_id,
+        tokens: [token_new(); 65536],
+        token_count: 0,
+        errors: [lex_error_new(0, 0, 0, 0); 256],
+        error_count: 0,
+    }
+}
+
+// ============================================================================
+// TOKEN EMISSION
+// ============================================================================
+
+fn emit_token(state: LexerState, tok: Token) -> LexerState with Mut, Panic {
+    var s = state
+    if s.token_count < MAX_TOKENS {
+        s.tokens[s.token_count as usize] = tok
+        s.token_count = s.token_count + 1
+    }
+    s
+}
+
+fn emit_error(state: LexerState, err: LexError) -> LexerState with Mut, Panic {
+    var s = state
+    if s.error_count < MAX_ERRORS {
+        s.errors[s.error_count as usize] = err
+        s.error_count = s.error_count + 1
+    }
+    s
+}
+
+// ============================================================================
+// WHITESPACE AND COMMENT HANDLING
+// ============================================================================
+
+fn skip_whitespace(c: Cursor) -> Cursor with Mut, Div, Panic {
+    var cur = c
+    while !cursor_is_eof(cur) && is_whitespace(cur.current) {
+        cur = cursor_advance(cur)
+    }
+    cur
+}
+
+fn skip_line_comment(c: Cursor) -> Cursor with Mut, Div, Panic {
+    var cur = c
+    while !cursor_is_eof(cur) && cur.current != 10 {  // until '\n'
+        cur = cursor_advance(cur)
+    }
+    cur
+}
+
+// Skip block comment with nesting support: /* ... /* inner */ ... */
+struct SkipBlockResult {
+    cursor: Cursor,
+    unterminated: bool,
+}
+
+fn skip_block_comment(c: Cursor) -> SkipBlockResult with Mut, Div, Panic {
+    var cur = cursor_advance_n(c, 2)  // skip /*
+    var depth: i64 = 1
+    while !cursor_is_eof(cur) && depth > 0 {
+        if cur.current == 42 && cursor_peek(cur) == 47 {  // */
+            cur = cursor_advance_n(cur, 2)
+            depth = depth - 1
+        } else if cur.current == 47 && cursor_peek(cur) == 42 {  // /* (nested)
+            cur = cursor_advance_n(cur, 2)
+            depth = depth + 1
+        } else {
+            cur = cursor_advance(cur)
+        }
+    }
+    SkipBlockResult { cursor: cur, unterminated: depth > 0 }
+}
+
+// ============================================================================
+// IDENTIFIER AND KEYWORD SCANNING
+// ============================================================================
+
+fn scan_identifier(c: Cursor) -> ScanResult with Mut, Panic {
+    var cur = c
+    let start = cur.pos
+    let line = cur.line
+    let col = cur.col
+    var text: [i8; 256] = [0; 256]
+    var text_idx: i64 = 0
+
+    while !cursor_is_eof(cur) && is_ident_continue(cur.current) && text_idx < 256 {
+        text[text_idx as usize] = cur.current
+        text_idx = text_idx + 1
+        cur = cursor_advance(cur)
+    }
+
+    let end = cur.pos
+    let kind = keyword_lookup(text, text_idx)
+    scan_result_with_text(cur, kind, start, end, text, text_idx)
+}
+
+// ============================================================================
+// NUMBER SCANNING (int, float, hex, bin, oct, suffixes)
+// ============================================================================
+
+fn scan_number(c: Cursor) -> ScanResult with Mut, Div, Panic {
+    var cur = c
+    let start = cur.pos
+    var kind: i32 = 101  // TK_INT_LIT
+
+    // Check for 0x, 0b, 0o prefixes
+    if cur.current == 48 {  // '0'
+        let next = cursor_peek(cur)
+        if next == 120 || next == 88 {  // 'x' or 'X'
+            cur = cursor_advance_n(cur, 2)
+            cur = cursor_bump_while_hex(cur)
+            // Allow underscore separators
+            while !cursor_is_eof(cur) && (is_hex_digit(cur.current) || cur.current == 95) {
+                cur = cursor_advance(cur)
+            }
+            kind = 106  // TK_HEX_LIT
+            // Check for suffix (u8, u16, u32, u64, i8, i16, i32, i64)
+            cur = skip_numeric_suffix(cur)
+            let end = cur.pos
+            return scan_result_new(cur, kind, start, end)
+        }
+        if next == 98 || next == 66 {  // 'b' or 'B'
+            cur = cursor_advance_n(cur, 2)
+            while !cursor_is_eof(cur) && (is_bin_digit(cur.current) || cur.current == 95) {
+                cur = cursor_advance(cur)
+            }
+            kind = 107  // TK_BIN_LIT
+            cur = skip_numeric_suffix(cur)
+            let end = cur.pos
+            return scan_result_new(cur, kind, start, end)
+        }
+        if next == 111 || next == 79 {  // 'o' or 'O'
+            cur = cursor_advance_n(cur, 2)
+            while !cursor_is_eof(cur) && (is_oct_digit(cur.current) || cur.current == 95) {
+                cur = cursor_advance(cur)
+            }
+            kind = 108  // TK_OCT_LIT
+            cur = skip_numeric_suffix(cur)
+            let end = cur.pos
+            return scan_result_new(cur, kind, start, end)
+        }
+    }
+
+    // Decimal digits (with underscore separators)
+    while !cursor_is_eof(cur) && (is_digit(cur.current) || cur.current == 95) {
+        cur = cursor_advance(cur)
+    }
+
+    // Check for decimal point (but not ".." range)
+    if !cursor_is_eof(cur) && cur.current == 46 {  // '.'
+        let after_dot = cursor_peek(cur)
+        if is_digit(after_dot) {
+            // Float: consume dot and fractional part
+            cur = cursor_advance(cur)
+            while !cursor_is_eof(cur) && (is_digit(cur.current) || cur.current == 95) {
+                cur = cursor_advance(cur)
+            }
+            kind = 102  // TK_FLOAT_LIT
+        }
+        // If next is '.' it's a range operator, don't consume
+    }
+
+    // Scientific notation: e/E followed by optional +/- and digits
+    if !cursor_is_eof(cur) && (cur.current == 101 || cur.current == 69) {  // 'e' or 'E'
+        let after_e = cursor_peek(cur)
+        if is_digit(after_e) || after_e == 43 || after_e == 45 {  // digit, '+', '-'
+            cur = cursor_advance(cur)  // consume 'e'
+            if !cursor_is_eof(cur) && (cur.current == 43 || cur.current == 45) {
+                cur = cursor_advance(cur)  // consume sign
+            }
+            while !cursor_is_eof(cur) && is_digit(cur.current) {
+                cur = cursor_advance(cur)
+            }
+            kind = 102  // TK_FLOAT_LIT
+        }
+    }
+
+    // Numeric suffix: i8, i16, i32, i64, u8, u16, u32, u64, f32, f64
+    cur = skip_numeric_suffix(cur)
+
+    let end = cur.pos
+    scan_result_new(cur, kind, start, end)
+}
+
+fn skip_numeric_suffix(c: Cursor) -> Cursor with Mut, Div, Panic {
+    var cur = c
+    if cursor_is_eof(cur) { return cur }
+
+    // Check for i/u/f suffix
+    let ch = cur.current
+    if ch == 105 || ch == 117 || ch == 102 {  // 'i', 'u', 'f'
+        let n1 = cursor_peek(cur)
+        let n2 = cursor_peek_n(cur, 2)
+        // f32, f64
+        if ch == 102 {
+            if n1 == 51 && n2 == 50 { cur = cursor_advance_n(cur, 3) }   // "f32"
+            else if n1 == 54 && n2 == 52 { cur = cursor_advance_n(cur, 3) }  // "f64"
+        }
+        // i8, i16, i32, i64
+        if ch == 105 {
+            if n1 == 56 { cur = cursor_advance_n(cur, 2) }                      // "i8"
+            else if n1 == 49 && n2 == 54 { cur = cursor_advance_n(cur, 3) }     // "i16"
+            else if n1 == 51 && n2 == 50 { cur = cursor_advance_n(cur, 3) }     // "i32"
+            else if n1 == 54 && n2 == 52 { cur = cursor_advance_n(cur, 3) }     // "i64"
+        }
+        // u8, u16, u32, u64
+        if ch == 117 {
+            if n1 == 56 { cur = cursor_advance_n(cur, 2) }                      // "u8"
+            else if n1 == 49 && n2 == 54 { cur = cursor_advance_n(cur, 3) }     // "u16"
+            else if n1 == 51 && n2 == 50 { cur = cursor_advance_n(cur, 3) }     // "u32"
+            else if n1 == 54 && n2 == 52 { cur = cursor_advance_n(cur, 3) }     // "u64"
+        }
+    }
+    cur
+}
+
+// ============================================================================
+// STRING SCANNING (with escape processing)
+// ============================================================================
+
+fn scan_string(c: Cursor) -> ScanResult with Mut, Panic {
+    var cur = c
+    let start = cur.pos
+    var text: [i8; 256] = [0; 256]
+    var text_idx: i64 = 0
+
+    cur = cursor_advance(cur)  // skip opening '"'
+
+    while !cursor_is_eof(cur) && cur.current != 34 && text_idx < 255 {  // '"'
+        if cur.current == 92 {  // backslash
+            cur = cursor_advance(cur)  // skip '\'
+            if !cursor_is_eof(cur) {
+                let esc = cur.current
+                // Translate escape sequences
+                if esc == 110 { text[text_idx as usize] = 10 }       // \n -> LF
+                else if esc == 116 { text[text_idx as usize] = 9 }   // \t -> TAB
+                else if esc == 114 { text[text_idx as usize] = 13 }  // \r -> CR
+                else if esc == 92 { text[text_idx as usize] = 92 }   // \\ -> backslash
+                else if esc == 34 { text[text_idx as usize] = 34 }   // \" -> quote
+                else if esc == 48 { text[text_idx as usize] = 0 }    // \0 -> null
+                else { text[text_idx as usize] = esc }               // unknown escape: keep as-is
+                text_idx = text_idx + 1
+                cur = cursor_advance(cur)
+            }
+        } else {
+            text[text_idx as usize] = cur.current
+            text_idx = text_idx + 1
+            cur = cursor_advance(cur)
+        }
+    }
+
+    var unterminated = true
+    if !cursor_is_eof(cur) && cur.current == 34 {
+        cur = cursor_advance(cur)  // skip closing '"'
+        unterminated = false
+    }
+
+    let end = cur.pos
+    if unterminated {
+        scan_result_with_text(cur, 1, start, end, text, text_idx)  // TK_ERROR
+    } else {
+        scan_result_with_text(cur, 103, start, end, text, text_idx)  // TK_STRING_LIT
+    }
+}
+
+// ============================================================================
+// CHAR LITERAL SCANNING
+// ============================================================================
+
+fn scan_char_literal(c: Cursor) -> ScanResult with Mut, Panic {
+    var cur = c
+    let start = cur.pos
+
+    cur = cursor_advance(cur)  // skip opening '\''
+
+    // Handle escape sequence
+    if !cursor_is_eof(cur) && cur.current == 92 {  // backslash
+        cur = cursor_advance(cur)  // skip '\'
+        if !cursor_is_eof(cur) {
+            cur = cursor_advance(cur)  // skip escaped char
+        }
+    } else if !cursor_is_eof(cur) {
+        cur = cursor_advance(cur)  // regular char
+    }
+
+    // Expect closing quote
+    if !cursor_is_eof(cur) && cur.current == 39 {  // '\''
+        cur = cursor_advance(cur)
+    }
+
+    let end = cur.pos
+    scan_result_new(cur, 104, start, end)  // TK_CHAR_LIT
+}
+
+// ============================================================================
+// DOC COMMENT SCANNING
+// ============================================================================
+
+fn scan_doc_comment_line(c: Cursor, is_inner: bool) -> ScanResult with Mut, Div, Panic {
+    var cur = c
+    let start = cur.pos
+    var text: [i8; 256] = [0; 256]
+    var text_idx: i64 = 0
+    var kind: i32 = 190  // TK_DOC_OUTER
+
+    if is_inner {
+        kind = 191  // TK_DOC_INNER
+        cur = cursor_advance_n(cur, 3)  // skip //!
+    } else {
+        cur = cursor_advance_n(cur, 3)  // skip ///
+    }
+
+    // Collect text until newline
+    while !cursor_is_eof(cur) && cur.current != 10 && text_idx < 256 {
+        text[text_idx as usize] = cur.current
+        text_idx = text_idx + 1
+        cur = cursor_advance(cur)
+    }
+
+    let end = cur.pos
+    scan_result_with_text(cur, kind, start, end, text, text_idx)
+}
+
+fn scan_doc_comment_block(c: Cursor, is_inner: bool) -> ScanResult with Mut, Div, Panic {
+    var cur = c
+    let start = cur.pos
+    var text: [i8; 256] = [0; 256]
+    var text_idx: i64 = 0
+    var kind: i32 = 192  // TK_DOC_BLOCK_OUTER
+
+    if is_inner {
+        kind = 193  // TK_DOC_BLOCK_INNER
+    }
+
+    cur = cursor_advance_n(cur, 3)  // skip /** or /*!
+
+    while !cursor_is_eof(cur) && text_idx < 256 {
+        if cur.current == 42 && cursor_peek(cur) == 47 {  // */
+            cur = cursor_advance_n(cur, 2)
+            break
+        }
+        text[text_idx as usize] = cur.current
+        text_idx = text_idx + 1
+        cur = cursor_advance(cur)
+    }
+
+    let end = cur.pos
+    scan_result_with_text(cur, kind, start, end, text, text_idx)
+}
+
+// ============================================================================
+// MAIN LEXER LOOP
+// ============================================================================
+
+fn lex(source: [i8; 1048576], source_len: i64, file_id: i32) -> LexerState with Mut, Div, Panic {
+    var state = lexer_new(source, source_len, file_id)
+
+    while !cursor_is_eof(state.cursor) {
+        let ch = state.cursor.current
+
+        // Skip non-newline whitespace
+        if is_whitespace(ch) {
+            state.cursor = skip_whitespace(state.cursor)
+            continue
+        }
+
+        // Newline (significant for some contexts)
+        if ch == 10 {  // '\n'
+            state.cursor = cursor_advance(state.cursor)
+            continue
+        }
+
+        // Comments: // and /* (check before operator scanning)
+        if ch == 47 {  // '/'
+            let next = cursor_peek(state.cursor)
+
+            // Doc comment: /// (but not ////)
+            if next == 47 {
+                let third = cursor_peek_n(state.cursor, 2)
+                if third == 47 && cursor_peek_n(state.cursor, 3) != 47 {
+                    let result = scan_doc_comment_line(state.cursor, false)
+                    state.cursor = result.cursor
+                    let tok = token_with_kind(result.kind, result.start, result.end, state.cursor.line, state.cursor.col)
+                    state = emit_token(state, tok)
+                    continue
+                }
+                // Inner doc comment: //!
+                if third == 33 {  // '!'
+                    let result = scan_doc_comment_line(state.cursor, true)
+                    state.cursor = result.cursor
+                    let tok = token_with_kind(result.kind, result.start, result.end, state.cursor.line, state.cursor.col)
+                    state = emit_token(state, tok)
+                    continue
+                }
+                // Regular line comment
+                state.cursor = skip_line_comment(state.cursor)
+                continue
+            }
+
+            // Block doc comment: /** or /*!
+            if next == 42 {  // '*'
+                let third = cursor_peek_n(state.cursor, 2)
+                if third == 42 && cursor_peek_n(state.cursor, 3) != 47 {  // /** but not /**/
+                    let result = scan_doc_comment_block(state.cursor, false)
+                    state.cursor = result.cursor
+                    let tok = token_with_kind(result.kind, result.start, result.end, state.cursor.line, state.cursor.col)
+                    state = emit_token(state, tok)
+                    continue
+                }
+                if third == 33 {  // /*!
+                    let result = scan_doc_comment_block(state.cursor, true)
+                    state.cursor = result.cursor
+                    let tok = token_with_kind(result.kind, result.start, result.end, state.cursor.line, state.cursor.col)
+                    state = emit_token(state, tok)
+                    continue
+                }
+                // Regular block comment (nestable)
+                let block_result = skip_block_comment(state.cursor)
+                state.cursor = block_result.cursor
+                if block_result.unterminated {
+                    let err = lex_error_new(3, state.cursor.pos, state.cursor.line, state.cursor.col)
+                    state = emit_error(state, err)
+                }
+                continue
+            }
+
+            // Not a comment — fall through to operator scanning
+        }
+
+        // String literal: "..."
+        if ch == 34 {  // '"'
+            let line = state.cursor.line
+            let col = state.cursor.col
+            let result = scan_string(state.cursor)
+            state.cursor = result.cursor
+            var tok = token_with_kind(result.kind, result.start, result.end, line, col)
+            tok.text = result.text
+            tok.text_len = result.text_len
+            state = emit_token(state, tok)
+            if result.kind == 1 {  // TK_ERROR (unterminated string)
+                let err = lex_error_new(2, result.start, line, col)
+                state = emit_error(state, err)
+            }
+            continue
+        }
+
+        // Char literal: '.'
+        if ch == 39 {  // '\''
+            let line = state.cursor.line
+            let col = state.cursor.col
+            let result = scan_char_literal(state.cursor)
+            state.cursor = result.cursor
+            let tok = token_with_kind(result.kind, result.start, result.end, line, col)
+            state = emit_token(state, tok)
+            continue
+        }
+
+        // Numeric literals: 0-9
+        if is_digit(ch) {
+            let line = state.cursor.line
+            let col = state.cursor.col
+            let result = scan_number(state.cursor)
+            state.cursor = result.cursor
+            let tok = token_with_kind(result.kind, result.start, result.end, line, col)
+            state = emit_token(state, tok)
+            continue
+        }
+
+        // Identifiers and keywords: a-z, A-Z, _
+        if is_ident_start(ch) {
+            let line = state.cursor.line
+            let col = state.cursor.col
+            let result = scan_identifier(state.cursor)
+            state.cursor = result.cursor
+            var tok = token_with_kind(result.kind, result.start, result.end, line, col)
+            tok.text = result.text
+            tok.text_len = result.text_len
+            state = emit_token(state, tok)
+            continue
+        }
+
+        // Operators (check before delimiters for multi-char operators like .., ::, etc.)
+        // Dot needs special handling: could be '.', '..', '..=', '...'
+        if ch == 46 {  // '.'
+            let next = cursor_peek(state.cursor)
+            if next == 46 {
+                // ".." or "..=" or "..."
+                let line = state.cursor.line
+                let col = state.cursor.col
+                let result = scan_operator(state.cursor)
+                state.cursor = result.cursor
+                let tok = token_with_kind(result.kind, result.start, result.end, line, col)
+                state = emit_token(state, tok)
+                continue
+            }
+            // Single dot -> punctuation
+            let line = state.cursor.line
+            let col = state.cursor.col
+            let result = scan_punctuation(state.cursor)
+            state.cursor = result.cursor
+            let tok = token_with_kind(result.kind, result.start, result.end, line, col)
+            state = emit_token(state, tok)
+            continue
+        }
+
+        // Colon: could be ':' or '::'
+        if ch == 58 {  // ':'
+            let next = cursor_peek(state.cursor)
+            if next == 58 {
+                let line = state.cursor.line
+                let col = state.cursor.col
+                let result = scan_operator(state.cursor)
+                state.cursor = result.cursor
+                let tok = token_with_kind(result.kind, result.start, result.end, line, col)
+                state = emit_token(state, tok)
+                continue
+            }
+            // Single colon -> punctuation
+            let line = state.cursor.line
+            let col = state.cursor.col
+            let result = scan_punctuation(state.cursor)
+            state.cursor = result.cursor
+            let tok = token_with_kind(result.kind, result.start, result.end, line, col)
+            state = emit_token(state, tok)
+            continue
+        }
+
+        // Other operators
+        if is_operator_start(ch) {
+            let line = state.cursor.line
+            let col = state.cursor.col
+            let result = scan_operator(state.cursor)
+            state.cursor = result.cursor
+            let tok = token_with_kind(result.kind, result.start, result.end, line, col)
+            state = emit_token(state, tok)
+            continue
+        }
+
+        // Delimiters: ( ) { } [ ]
+        if is_delimiter(ch) {
+            let line = state.cursor.line
+            let col = state.cursor.col
+            let result = scan_delimiter(state.cursor)
+            state.cursor = result.cursor
+            let tok = token_with_kind(result.kind, result.start, result.end, line, col)
+            state = emit_token(state, tok)
+            continue
+        }
+
+        // Remaining punctuation: ; , @ #
+        if is_punctuation(ch) {
+            let line = state.cursor.line
+            let col = state.cursor.col
+            let result = scan_punctuation(state.cursor)
+            state.cursor = result.cursor
+            let tok = token_with_kind(result.kind, result.start, result.end, line, col)
+            state = emit_token(state, tok)
+            continue
+        }
+
+        // Unknown character
+        let err = lex_error_with_char(1, state.cursor.pos, state.cursor.line, state.cursor.col, ch)
+        state = emit_error(state, err)
+        state.cursor = cursor_advance(state.cursor)
+    }
+
+    // Emit EOF token
+    let eof_tok = token_eof(state.cursor.pos, state.cursor.line, state.cursor.col)
+    state = emit_token(state, eof_tok)
+
+    state
+}
