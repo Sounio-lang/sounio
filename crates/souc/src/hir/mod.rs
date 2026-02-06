@@ -145,6 +145,15 @@ pub struct HirVariant {
     pub type_indices: Vec<(String, HirType)>,
 }
 
+/// HIR where predicate (trait bound constraint)
+#[derive(Debug, Clone)]
+pub struct HirWherePredicate {
+    /// The type being constrained (e.g., `T` in `where T: Clone`)
+    pub ty: HirType,
+    /// The trait bounds (e.g., `["Clone", "Debug"]` in `where T: Clone + Debug`)
+    pub bounds: Vec<String>,
+}
+
 /// HIR trait
 #[derive(Debug, Clone)]
 pub struct HirTrait {
@@ -154,6 +163,8 @@ pub struct HirTrait {
     pub assoc_types: Vec<HirAssocTypeDecl>,
     pub methods: Vec<HirTraitMethod>,
     pub supertraits: Vec<String>,
+    /// Where clause constraints (e.g., `where T: Clone`)
+    pub where_clause: Vec<HirWherePredicate>,
     /// Doc comments (`///`) attached to this trait
     pub doc: Option<String>,
 }
@@ -187,6 +198,8 @@ pub struct HirImpl {
     pub type_params: Vec<String>,
     pub assoc_types: Vec<HirAssocTypeImpl>,
     pub methods: Vec<HirFn>,
+    /// Where clause constraints (e.g., `where T: Clone`)
+    pub where_clause: Vec<HirWherePredicate>,
     /// Doc comments (`///`) attached to this impl block
     pub doc: Option<String>,
 }

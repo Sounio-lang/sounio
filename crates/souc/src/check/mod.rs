@@ -2724,6 +2724,9 @@ impl TypeChecker {
             }
         }
 
+        // Lower where clause
+        let where_clause = self.lower_where_clause(&t.where_clause);
+
         Ok(HirTrait {
             id: t.id,
             name: t.name.clone(),
@@ -2731,6 +2734,7 @@ impl TypeChecker {
             assoc_types,
             methods,
             supertraits,
+            where_clause,
             doc: t.doc.clone(),
         })
     }
@@ -2825,6 +2829,9 @@ impl TypeChecker {
         // Get trait reference name
         let trait_ref = i.trait_ref.as_ref().map(|p| p.to_string());
 
+        // Lower where clause
+        let where_clause = self.lower_where_clause(&i.where_clause);
+
         Ok(HirImpl {
             id: i.id,
             trait_ref,
@@ -2832,6 +2839,7 @@ impl TypeChecker {
             type_params,
             assoc_types,
             methods,
+            where_clause,
             doc: i.doc.clone(),
         })
     }
@@ -7550,6 +7558,19 @@ impl TypeChecker {
             // For other types, delegate to the standard lowering
             _ => self.lower_type_expr(ty),
         }
+    }
+
+    /// Lower AST where clause to HIR where predicates
+    fn lower_where_clause(&mut self, predicates: &[WherePredicate]) -> Vec<HirWherePredicate> {
+        predicates
+            .iter()
+            .map(|pred| {
+                let ty_lowered = self.lower_type_expr(&pred.ty);
+                let ty_hir = self.type_to_hir(&ty_lowered);
+                let bounds = pred.bounds.iter().map(|p| p.to_string()).collect();
+                HirWherePredicate { ty: ty_hir, bounds }
+            })
+            .collect()
     }
 
     fn type_to_hir(&self, ty: &Type) -> HirType {
