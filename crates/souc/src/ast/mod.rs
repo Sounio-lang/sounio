@@ -299,6 +299,8 @@ pub struct FieldDef {
     pub attributes: Vec<Attribute>,
     pub name: String,
     pub ty: TypeExpr,
+    /// Doc comments (`///`) attached to this field
+    pub doc: Option<String>,
 }
 
 // ==================== ENUMS ====================
@@ -349,6 +351,8 @@ pub struct VariantDef {
     /// For example, in `Nil: Vec<T, Zero>`, the return type is `Vec<T, Zero>`
     /// which differs from the declared `Vec<T, N>`.
     pub gadt_return_type: Option<GadtReturnType>,
+    /// Doc comments (`///`) attached to this variant
+    pub doc: Option<String>,
 }
 
 /// GADT return type specification for a variant constructor

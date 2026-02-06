@@ -383,7 +383,14 @@ impl<'a> Parser<'a> {
                 None
             } else {
                 self.advance();
-                let name = self.parse_path()?;
+                let name_str = self.parse_module_path()?;
+                // Convert the dotted path string to a Path
+                let segments: Vec<String> = name_str.split('.').map(|s| s.to_string()).collect();
+                let name = Path {
+                    segments,
+                    source_module: None,
+                    resolved_module: None,
+                };
                 // Accept optional semicolon after module declaration
                 if self.at(TokenKind::Semi) {
                     self.advance();
@@ -941,6 +948,7 @@ impl<'a> Parser<'a> {
     }
 
     fn parse_field(&mut self) -> Result<FieldDef> {
+        let doc = self.collect_doc_comments();
         let visibility = self.parse_visibility();
         let name = self.parse_ident()?;
         self.expect(TokenKind::Colon)?;
@@ -952,6 +960,7 @@ impl<'a> Parser<'a> {
             attributes: Vec::new(),
             name,
             ty,
+            doc,
         })
     }
 
@@ -1012,6 +1021,7 @@ impl<'a> Parser<'a> {
     /// - `Cons(T, Vec<T, M>): Vec<T, Succ<M>>` (tuple GADT)
     /// - `Node { value: T, left: Tree<T>, right: Tree<T> }: Tree<T>` (struct GADT)
     fn parse_variant(&mut self) -> Result<VariantDef> {
+        let doc = self.collect_doc_comments();
         let name = self.parse_ident()?;
         let data = if self.at(TokenKind::LParen) {
             self.advance();
@@ -1066,6 +1076,7 @@ impl<'a> Parser<'a> {
             name,
             data,
             gadt_return_type,
+            doc,
         })
     }
 
@@ -1502,10 +1513,21 @@ impl<'a> Parser<'a> {
     // ==================== MODULES ====================
 
     /// Parse module declaration: `pub module foo { ... }` or `mod foo;`
+    fn parse_module_path(&mut self) -> Result<String> {
+        let mut path = self.parse_ident()?;
+        while self.at(TokenKind::Dot) {
+            self.advance();
+            let segment = self.parse_ident()?;
+            path.push('.');
+            path.push_str(&segment);
+        }
+        Ok(path)
+    }
+
     fn parse_module_decl(&mut self, visibility: Visibility, doc: Option<String>) -> Result<Item> {
         let start = self.span();
         self.expect(TokenKind::Module)?;
-        let name = self.parse_ident()?;
+        let name = self.parse_module_path()?;
 
         if self.at(TokenKind::LBrace) {
             // Inline module: `module foo { ... }`
@@ -1579,7 +1601,7 @@ impl<'a> Parser<'a> {
             return self.parse_import_from_syntax(start, is_reexport);
         }
 
-        // Parse the base path
+        // Parse the base path (original parse_path which only supports ::)
         let path = self.parse_path()?;
 
         // Check for `use path::{items}` Rust-style syntax
