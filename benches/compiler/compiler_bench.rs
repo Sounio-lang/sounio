@@ -291,7 +291,7 @@ fn bench_typecheck(c: &mut Criterion) {
         let ast = parser::parse(&tokens, &source).unwrap();
         group.throughput(Throughput::Elements(n as u64));
         group.bench_with_input(BenchmarkId::new("simple_functions", n), &ast, |b, a| {
-            b.iter(|| check::check(black_box(a)))
+            b.iter(|| check::check_ast(black_box(a)))
         });
     }
 
@@ -303,7 +303,7 @@ fn bench_typecheck(c: &mut Criterion) {
                 group.bench_with_input(
                     BenchmarkId::new("call_chain_depth", depth),
                     &ast,
-                    |b, a| b.iter(|| check::check(black_box(a))),
+                    |b, a| b.iter(|| check::check_ast(black_box(a))),
                 );
             }
         }
@@ -315,7 +315,7 @@ fn bench_typecheck(c: &mut Criterion) {
         if let Ok(tokens) = lexer::lex(&source) {
             if let Ok(ast) = parser::parse(&tokens, &source) {
                 group.bench_with_input(BenchmarkId::new("with_effects", n), &ast, |b, a| {
-                    b.iter(|| check::check(black_box(a)))
+                    b.iter(|| check::check_ast(black_box(a)))
                 });
             }
         }
@@ -326,7 +326,7 @@ fn bench_typecheck(c: &mut Criterion) {
     if let Ok(tokens) = lexer::lex(&pk_source) {
         if let Ok(ast) = parser::parse(&tokens, &pk_source) {
             group.bench_with_input(BenchmarkId::new("pk_model", 1), &ast, |b, a| {
-                b.iter(|| check::check(black_box(a)))
+                b.iter(|| check::check_ast(black_box(a)))
             });
         }
     }
@@ -351,7 +351,7 @@ fn main() -> i32 {
 "#;
     if let Ok(tokens) = lexer::lex(arith) {
         if let Ok(ast) = parser::parse(&tokens, arith) {
-            if let Ok(hir) = check::check(&ast) {
+            if let Ok(hir) = check::check_ast(&ast) {
                 group.bench_function("simple_arithmetic", |b| {
                     b.iter(|| {
                         let mut interp = Interpreter::new();
@@ -366,7 +366,7 @@ fn main() -> i32 {
     let calls = generate_call_program(10);
     if let Ok(tokens) = lexer::lex(&calls) {
         if let Ok(ast) = parser::parse(&tokens, &calls) {
-            if let Ok(hir) = check::check(&ast) {
+            if let Ok(hir) = check::check_ast(&ast) {
                 group.bench_function("function_calls_10", |b| {
                     b.iter(|| {
                         let mut interp = Interpreter::new();
@@ -395,7 +395,7 @@ fn main() -> i32 {{
         );
         if let Ok(tokens) = lexer::lex(&loop_prog) {
             if let Ok(ast) = parser::parse(&tokens, &loop_prog) {
-                if let Ok(hir) = check::check(&ast) {
+                if let Ok(hir) = check::check_ast(&ast) {
                     group.throughput(Throughput::Elements(n as u64));
                     group.bench_with_input(BenchmarkId::new("loop_iterations", n), &hir, |b, h| {
                         b.iter(|| {
@@ -424,7 +424,7 @@ fn main() -> i32 {
 "#;
     if let Ok(tokens) = lexer::lex(fib) {
         if let Ok(ast) = parser::parse(&tokens, fib) {
-            if let Ok(hir) = check::check(&ast) {
+            if let Ok(hir) = check::check_ast(&ast) {
                 group.bench_function("fibonacci_15", |b| {
                     b.iter(|| {
                         let mut interp = Interpreter::new();
@@ -453,7 +453,7 @@ fn bench_full_pipeline(c: &mut Criterion) {
             b.iter(|| {
                 let tokens = lexer::lex(black_box(s)).unwrap();
                 let ast = parser::parse(&tokens, s).unwrap();
-                check::check(&ast)
+                check::check_ast(&ast)
             })
         });
     }
@@ -464,7 +464,7 @@ fn bench_full_pipeline(c: &mut Criterion) {
         b.iter(|| {
             let tokens = lexer::lex(black_box(s)).unwrap();
             let ast = parser::parse(&tokens, s).unwrap();
-            if let Ok(hir) = check::check(&ast) {
+            if let Ok(hir) = check::check_ast(&ast) {
                 let mut interp = Interpreter::new();
                 interp.interpret(&hir)
             } else {
