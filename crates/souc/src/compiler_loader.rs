@@ -705,56 +705,64 @@ mod tests {
 
     #[test]
     fn test_cross_module_compilation() {
-        let ctx = StdlibCompilationContext::from_embedded().unwrap();
+        // Use a larger stack (8MB) to handle deep type hierarchies in 50 stdlib modules
+        std::thread::Builder::new()
+            .stack_size(8 * 1024 * 1024)
+            .spawn(|| {
+                let ctx = StdlibCompilationContext::from_embedded().unwrap();
 
-        // Try to compile each module and track success/failure
-        let modules: Vec<String> = embedded_stdlib::list_modules()
-            .iter()
-            .map(|s| s.to_string())
-            .collect();
+                // Try to compile each module and track success/failure
+                let modules: Vec<String> = embedded_stdlib::list_modules()
+                    .iter()
+                    .map(|s| s.to_string())
+                    .collect();
 
-        let mut success_count = 0;
-        let mut fail_count = 0;
-        let mut failures: Vec<(String, String)> = Vec::new();
+                let mut success_count = 0;
+                let mut fail_count = 0;
+                let mut failures: Vec<(String, String)> = Vec::new();
 
-        for module in &modules {
-            match ctx.compile_module(module) {
-                Ok(bytecode) => {
-                    success_count += 1;
-                    println!("✓ {} ({} instructions)", module, bytecode.len());
+                for module in &modules {
+                    match ctx.compile_module(module) {
+                        Ok(bytecode) => {
+                            success_count += 1;
+                            println!("✓ {} ({} instructions)", module, bytecode.len());
+                        }
+                        Err(e) => {
+                            fail_count += 1;
+                            let error_msg = format!("{}", e);
+                            // Truncate long errors for readability
+                            let short_error = if error_msg.len() > 100 {
+                                format!("{}...", &error_msg[..100])
+                            } else {
+                                error_msg.clone()
+                            };
+                            println!("✗ {}: {}", module, short_error);
+                            failures.push((module.clone(), short_error));
+                        }
+                    }
                 }
-                Err(e) => {
-                    fail_count += 1;
-                    let error_msg = format!("{}", e);
-                    // Truncate long errors for readability
-                    let short_error = if error_msg.len() > 100 {
-                        format!("{}...", &error_msg[..100])
-                    } else {
-                        error_msg.clone()
-                    };
-                    println!("✗ {}: {}", module, short_error);
-                    failures.push((module.clone(), short_error));
+
+                println!("\n=== Summary ===");
+                println!("Success: {}/{}", success_count, modules.len());
+                println!("Failed: {}", fail_count);
+
+                // Print first 5 failure reasons for debugging
+                if !failures.is_empty() {
+                    println!("\nSample failures:");
+                    for (module, error) in failures.iter().take(5) {
+                        println!("  {}: {}", module, error);
+                    }
                 }
-            }
-        }
 
-        println!("\n=== Summary ===");
-        println!("Success: {}/{}", success_count, modules.len());
-        println!("Failed: {}", fail_count);
-
-        // Print first 5 failure reasons for debugging
-        if !failures.is_empty() {
-            println!("\nSample failures:");
-            for (module, error) in failures.iter().take(5) {
-                println!("  {}: {}", module, error);
-            }
-        }
-
-        // Target: at least 10 modules should compile with external types
-        assert!(
-            success_count >= 7,
-            "Expected at least 7 modules to compile, got {}",
-            success_count
-        );
+                // Target: at least 10 modules should compile with external types
+                assert!(
+                    success_count >= 7,
+                    "Expected at least 7 modules to compile, got {}",
+                    success_count
+                );
+            })
+            .unwrap()
+            .join()
+            .unwrap();
     }
 }
