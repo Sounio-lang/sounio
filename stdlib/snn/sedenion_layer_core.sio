@@ -30,6 +30,48 @@
 use math::sedenion::*;
 
 // ============================================================================
+// UTILITY FUNCTIONS (must be defined before use)
+// ============================================================================
+
+fn sqrt_f64(x: f64) -> f64 with Panic, Mut {
+    if x <= 0.0 { return 0.0 }
+    var guess = x / 2.0
+    for i in 0..20 {
+        guess = (guess + x / guess) / 2.0
+    }
+    guess
+}
+
+fn exp_f64(x: f64) -> f64 with Panic, Mut {
+    if x > 20.0 { return exp_f64(x / 2.0) * exp_f64(x / 2.0) }
+    if x < -20.0 { return 1.0 / exp_f64(-x) }
+    var sum = 1.0
+    var term = 1.0
+    for i in 1..20 {
+        term = term * x / (i as f64)
+        sum = sum + term
+    }
+    sum
+}
+
+fn ln_f64(x: f64) -> f64 with Panic, Mut {
+    if x <= 0.0 { return -1e30 }
+    let y = (x - 1.0) / (x + 1.0)
+    var result = 0.0
+    var term = y
+    for i in 0..30 {
+        let n = 2 * i + 1
+        result = result + term / (n as f64)
+        term = term * y * y
+    }
+    2.0 * result
+}
+
+fn min_i32(a: i32, b: i32) -> i32 {
+    if a < b { a } else { b }
+}
+
+// ============================================================================
 // DENSE SEDENION LAYER
 // ============================================================================
 
@@ -40,12 +82,11 @@ use math::sedenion::*;
 // Forward: y[i] = activation(sum_j(W[i,j] * x[j]) + b[i])
 //
 // CRITICAL: Accumulation is left-to-right due to non-associativity!
-struct SedenionLayer {
-    // Weight matrix: weights[out_idx * input_size + in_idx]
-    weights: [Sedenion],
-
-    // Bias vector: biases[out_idx]
-    biases: [Sedenion],
+pub struct SedenionLayer {
+    // Combined params array: first (in*out) are weights, last (out) are biases
+    // Layout: params[0..in*out] = weights, params[in*out..in*out+out] = biases
+    // This works around a compiler bug with multiple [Sedenion] fields
+    params: [Sedenion],
 
     // Input size (number of input sedenions)
     input_size: i32,
@@ -58,7 +99,7 @@ struct SedenionLayer {
 }
 
 // Activation functions for sedenion layers
-enum SedenionActivation {
+pub enum SedenionActivation {
     None,        // Identity
     ReLU,        // Component-wise ReLU
     Sigmoid,     // Component-wise sigmoid
@@ -71,11 +112,11 @@ enum SedenionActivation {
 // ============================================================================
 
 // Create a new dense sedenion layer with Xavier initialization
-fn sedenion_layer_new(
+pub fn sedenion_layer_new(
     input_size: i32,
     output_size: i32,
     activation: SedenionActivation
-) -> SedenionLayer
+) -> SedenionLayer with Panic, Mut
   // requires input_size > 0
   // requires output_size > 0
 {
@@ -85,20 +126,21 @@ fn sedenion_layer_new(
     // Scale by sqrt(2 / (fan_in + fan_out)) / 4 for 16D
     let scale = sqrt_f64(2.0 / ((input_size + output_size) as f64)) / 4.0
 
-    var weights: [Sedenion] = []
+    // Combined params: weights first, then biases
+    var params: [Sedenion] = []
+
+    // Add weights
     for i in 0..total_weights {
-        // Initialize with small real component, zero imaginaries
-        weights = weights ++ [sedenion_scale(sedenion_one(), scale as f32)]
+        params = params ++ [sedenion_scale(sedenion_one(), scale as f32)]
     }
 
-    var biases: [Sedenion] = []
+    // Add biases
     for i in 0..output_size {
-        biases = biases ++ [sedenion_zero()]
+        params = params ++ [sedenion_zero()]
     }
 
     SedenionLayer {
-        weights: weights,
-        biases: biases,
+        params: params,
         input_size: input_size,
         output_size: output_size,
         activation: activation,
@@ -106,29 +148,30 @@ fn sedenion_layer_new(
 }
 
 // Create layer with custom initialization scale
-fn sedenion_layer_from_scale(
+pub fn sedenion_layer_from_scale(
     input_size: i32,
     output_size: i32,
     activation: SedenionActivation,
     init_scale: f64
-) -> SedenionLayer {
+) -> SedenionLayer with Panic, Mut {
     let total_weights = input_size * output_size
 
-    var weights: [Sedenion] = []
+    // Combined params: weights first, then biases
+    var params: [Sedenion] = []
+
+    // Add weights
     for i in 0..total_weights {
-        // Random-ish initialization using index for determinism
         let real_part = init_scale * (1.0 - 2.0 * ((i % 17) as f64) / 17.0)
-        weights = weights ++ [sedenion_scale(sedenion_one(), real_part as f32)]
+        params = params ++ [sedenion_scale(sedenion_one(), real_part as f32)]
     }
 
-    var biases: [Sedenion] = []
+    // Add biases
     for i in 0..output_size {
-        biases = biases ++ [sedenion_zero()]
+        params = params ++ [sedenion_zero()]
     }
 
     SedenionLayer {
-        weights: weights,
-        biases: biases,
+        params: params,
         input_size: input_size,
         output_size: output_size,
         activation: activation,
@@ -150,24 +193,26 @@ fn sedenion_layer_from_scale(
 //
 // Returns:
 //   Vector of output sedenions (length = output_size)
-fn sedenion_layer_forward(
+pub fn sedenion_layer_forward(
     layer: SedenionLayer,
     inputs: [Sedenion]
-) -> [Sedenion]
+) -> [Sedenion] with Panic, Mut
   // requires len(inputs) == layer.input_size
   // ensures len(result) == layer.output_size
 {
     var outputs: [Sedenion] = []
+    let num_weights = layer.input_size * layer.output_size
 
     for out_idx in 0..layer.output_size {
-        // Start with bias (leftmost in accumulation)
-        var sum = layer.biases[out_idx]
+        // Bias is stored after weights: params[num_weights + out_idx]
+        let bias_idx = num_weights + out_idx
+        var sum = layer.params[bias_idx]
 
         // Left-to-right accumulation
         // IMPORTANT: This order must match backprop for gradients!
         for in_idx in 0..layer.input_size {
             let weight_idx = out_idx * layer.input_size + in_idx
-            let weight = layer.weights[weight_idx]
+            let weight = layer.params[weight_idx]
             let input = inputs[in_idx]
 
             // Sedenion multiplication: weight * input
@@ -192,7 +237,7 @@ fn sedenion_layer_forward(
 }
 
 // Apply activation function to sedenion
-fn apply_sedenion_activation(activation: SedenionActivation, input: Sedenion) -> Sedenion {
+pub fn apply_sedenion_activation(activation: SedenionActivation, input: Sedenion) -> Sedenion with Panic {
     match activation {
         SedenionActivation::None => input,
         SedenionActivation::ReLU => sedenion_relu(input),
@@ -207,39 +252,38 @@ fn apply_sedenion_activation(activation: SedenionActivation, input: Sedenion) ->
 // ============================================================================
 
 // Get total parameter count (in scalar values)
-fn sedenion_layer_param_count(layer: SedenionLayer) -> i64 {
+pub fn sedenion_layer_param_count(layer: SedenionLayer) -> i64 {
     let weight_params = layer.input_size * layer.output_size * 16
     let bias_params = layer.output_size * 16
     (weight_params + bias_params) as i64
 }
 
 // Get weight at specific indices
-fn sedenion_layer_get_weight(
+pub fn sedenion_layer_get_weight(
     layer: SedenionLayer,
     in_idx: i32,
     out_idx: i32
-) -> Sedenion
+) -> Sedenion with Panic
   // requires in_idx >= 0 && in_idx < layer.input_size
   // requires out_idx >= 0 && out_idx < layer.output_size
 {
     let idx = out_idx * layer.input_size + in_idx
-    layer.weights[idx]
+    layer.params[idx]
 }
 
 // Set weight at specific indices (returns new layer)
-fn sedenion_layer_set_weight(
+pub fn sedenion_layer_set_weight(
     layer: SedenionLayer,
     in_idx: i32,
     out_idx: i32,
     weight: Sedenion
-) -> SedenionLayer {
+) -> SedenionLayer with Panic, Mut {
     let idx = out_idx * layer.input_size + in_idx
-    var new_weights = layer.weights
-    new_weights[idx] = weight
+    var new_params = layer.params
+    new_params[idx] = weight
 
     SedenionLayer {
-        weights: new_weights,
-        biases: layer.biases,
+        params: new_params,
         input_size: layer.input_size,
         output_size: layer.output_size,
         activation: layer.activation,
@@ -247,24 +291,25 @@ fn sedenion_layer_set_weight(
 }
 
 // Get bias at specific index
-fn sedenion_layer_get_bias(layer: SedenionLayer, out_idx: i32) -> Sedenion
+pub fn sedenion_layer_get_bias(layer: SedenionLayer, out_idx: i32) -> Sedenion with Panic
   // requires out_idx >= 0 && out_idx < layer.output_size
 {
-    layer.biases[out_idx]
+    let num_weights = layer.input_size * layer.output_size
+    layer.params[num_weights + out_idx]
 }
 
 // Set bias at specific index (returns new layer)
-fn sedenion_layer_set_bias(
+pub fn sedenion_layer_set_bias(
     layer: SedenionLayer,
     out_idx: i32,
     bias: Sedenion
-) -> SedenionLayer {
-    var new_biases = layer.biases
-    new_biases[out_idx] = bias
+) -> SedenionLayer with Panic, Mut {
+    let num_weights = layer.input_size * layer.output_size
+    var new_params = layer.params
+    new_params[num_weights + out_idx] = bias
 
     SedenionLayer {
-        weights: layer.weights,
-        biases: new_biases,
+        params: new_params,
         input_size: layer.input_size,
         output_size: layer.output_size,
         activation: layer.activation,
@@ -279,12 +324,12 @@ fn sedenion_layer_set_bias(
 // Penalizes weights that are close to zero divisor subspace
 //
 // Loss = mean(||w * w^(-1) - 1||^2) over all weights
-fn zero_divisor_loss(layer: SedenionLayer) -> f64 {
+pub fn zero_divisor_loss(layer: SedenionLayer) -> f64 with Panic, Mut {
     var total_loss = 0.0
     let n_weights = layer.input_size * layer.output_size
 
     for i in 0..n_weights {
-        let w = layer.weights[i]
+        let w = layer.params[i]
 
         // Compute putative inverse
         let w_inv = sedenion_putative_inv(w)
@@ -303,12 +348,12 @@ fn zero_divisor_loss(layer: SedenionLayer) -> f64 {
 }
 
 // Check what fraction of weights are near zero divisors
-fn zero_divisor_fraction(layer: SedenionLayer, threshold: f32) -> f64 {
+pub fn zero_divisor_fraction(layer: SedenionLayer, threshold: f32) -> f64 with Panic, Mut {
     var count = 0
     let n_weights = layer.input_size * layer.output_size
 
     for i in 0..n_weights {
-        if sedenion_is_zero_divisor(layer.weights[i]) {
+        if sedenion_is_zero_divisor(layer.params[i]) {
             count = count + 1
         }
     }
@@ -321,14 +366,14 @@ fn zero_divisor_fraction(layer: SedenionLayer, threshold: f32) -> f64 {
 // ============================================================================
 
 // MLP composed of multiple dense sedenion layers
-struct SedenionMLP {
+pub struct SedenionMLP {
     layers: [SedenionLayer],
     layer_count: i32,
 }
 
 // Create MLP with specified architecture
 // architecture = [input_size, hidden1, hidden2, ..., output_size]
-fn sedenion_mlp_new(architecture: [i32]) -> SedenionMLP
+pub fn sedenion_mlp_new(architecture: [i32]) -> SedenionMLP with Panic, Mut
   // requires len(architecture) >= 2
 {
     var layers: [SedenionLayer] = []
@@ -356,7 +401,7 @@ fn sedenion_mlp_new(architecture: [i32]) -> SedenionMLP
 }
 
 // Forward pass through MLP
-fn sedenion_mlp_forward(mlp: SedenionMLP, inputs: [Sedenion]) -> [Sedenion] {
+pub fn sedenion_mlp_forward(mlp: SedenionMLP, inputs: [Sedenion]) -> [Sedenion] with Panic, Mut {
     var current = inputs
 
     for i in 0..mlp.layer_count {
@@ -368,8 +413,8 @@ fn sedenion_mlp_forward(mlp: SedenionMLP, inputs: [Sedenion]) -> [Sedenion] {
 }
 
 // Get total parameter count for MLP
-fn sedenion_mlp_param_count(mlp: SedenionMLP) -> i64 {
-    var total = 0i64
+pub fn sedenion_mlp_param_count(mlp: SedenionMLP) -> i64 with Panic, Mut {
+    var total: i64 = 0
     for i in 0..mlp.layer_count {
         total = total + sedenion_layer_param_count(mlp.layers[i])
     }
@@ -381,7 +426,7 @@ fn sedenion_mlp_param_count(mlp: SedenionMLP) -> i64 {
 // ============================================================================
 
 // Mean Squared Error loss for sedenion outputs
-fn sedenion_mse_loss(predicted: [Sedenion], target: [Sedenion]) -> f64 {
+pub fn sedenion_mse_loss(predicted: [Sedenion], target: [Sedenion]) -> f64 with Panic, Mut {
     var total_loss = 0.0
     var count = 0
 
@@ -402,11 +447,11 @@ fn sedenion_mse_loss(predicted: [Sedenion], target: [Sedenion]) -> f64 {
 }
 
 // Cross-entropy loss for classification (using real component)
-fn sedenion_cross_entropy_loss(
+pub fn sedenion_cross_entropy_loss(
     predicted: [Sedenion],
     target_classes: [i32],
     num_classes: i32
-) -> f64 {
+) -> f64 with Panic, Mut {
     var total_loss = 0.0
     let n = min_i32(len(predicted) as i32, len(target_classes) as i32)
 
@@ -442,44 +487,3 @@ fn sedenion_cross_entropy_loss(
     }
 }
 
-// ============================================================================
-// UTILITY FUNCTIONS
-// ============================================================================
-
-fn sqrt_f64(x: f64) -> f64 {
-    if x <= 0.0 { return 0.0 }
-    var guess = x / 2.0
-    for i in 0..20 {
-        guess = (guess + x / guess) / 2.0
-    }
-    guess
-}
-
-fn exp_f64(x: f64) -> f64 {
-    if x > 20.0 { return exp_f64(x / 2.0) * exp_f64(x / 2.0) }
-    if x < -20.0 { return 1.0 / exp_f64(-x) }
-    var sum = 1.0
-    var term = 1.0
-    for i in 1..20 {
-        term = term * x / (i as f64)
-        sum = sum + term
-    }
-    sum
-}
-
-fn ln_f64(x: f64) -> f64 {
-    if x <= 0.0 { return -1e30 }
-    let y = (x - 1.0) / (x + 1.0)
-    var result = 0.0
-    var term = y
-    for i in 0..30 {
-        let n = 2 * i + 1
-        result = result + term / (n as f64)
-        term = term * y * y
-    }
-    2.0 * result
-}
-
-fn min_i32(a: i32, b: i32) -> i32 {
-    if a < b { a } else { b }
-}

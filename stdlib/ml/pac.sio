@@ -19,22 +19,58 @@ use math::core;
 // Knowledge<> integration can be done by callers if needed
 
 // ============================================================================
+// Utility Functions (must precede callers)
+// ============================================================================
+
+fn ln_f64(x: f64) -> f64 with Panic, Mut {
+    if x <= 0.0 { return -1e30 }
+    let y = (x - 1.0) / (x + 1.0)
+    var result = 0.0
+    var term = y
+    for i in 0..30 {
+        let n = 2 * i + 1
+        result = result + term / (n as f64)
+        term = term * y * y
+    }
+    2.0 * result
+}
+
+fn sqrt_f64(x: f64) -> f64 with Panic, Mut {
+    if x <= 0.0 { return 0.0 }
+    var guess = x / 2.0
+    for i in 0..20 {
+        guess = (guess + x / guess) / 2.0
+    }
+    guess
+}
+
+fn ceil_f64(x: f64) -> f64 {
+    let i = x as i64
+    if (i as f64) < x { (i + 1) as f64 } else { i as f64 }
+}
+
+fn log2_f64(x: f64) -> f64 with Panic, Mut {
+    // log2(x) = ln(x) / ln(2)
+    ln_f64(x) / 0.6931471805599453
+}
+
+// ============================================================================
 // Core Types
 // ============================================================================
 
 // VC Dimension - measures hypothesis class complexity
 // A class can shatter d points but not d+1 points
-type VCDim = i64;
+pub type VCDim = i64;
 
 // Sample complexity parameters
-struct SampleComplexityParams {
+pub struct SampleComplexityParams {
     vc_dim: VCDim,       // VC dimension of hypothesis class
     epsilon: f64,        // Accuracy parameter (0 < ε < 1)
     delta: f64,          // Confidence parameter (0 < δ < 1)
 }
 
 // Generalization bound result
-struct GeneralizationBound {
+pub struct GeneralizationBound {
     train_error: f64,    // Training error achieved
     gap: f64,            // Generalization gap bound
     confidence: f64,     // Probability bound holds (1 - δ)
@@ -45,93 +81,38 @@ struct GeneralizationBound {
 // ============================================================================
 
 // Trait for hypothesis classes with known VC dimension
-trait Learnable {
+pub trait Learnable {
     // The VC dimension of this hypothesis class
-    fn vc_dim() -> VCDim
+    fn vc_dim() -> VCDim;
 
     // The associated model type
-    type Model
-}
-
-// Linear classifier in d dimensions
-// VC dimension = d + 1 (by Radon's theorem)
-struct LinearClassifier<const D: i64> {
-    weights: [f64; D],
-    bias: f64,
-}
-
-impl<const D: i64> Learnable for LinearClassifier<D> {
-    fn vc_dim() -> VCDim {
-        D + 1
-    }
-
-    type Model = LinearClassifier<D>
+    type Model;
 }
 
 // Decision stump (single threshold on one feature)
 // VC dimension = 1
-struct DecisionStump {
+pub struct DecisionStump {
     feature_idx: i32,
     threshold: f64,
-    direction: bool,  // true: x > threshold => positive
+    direction: bool,
 }
 
 impl Learnable for DecisionStump {
     fn vc_dim() -> VCDim {
-        1
+        1i64
     }
 
-    type Model = DecisionStump
+    type Model = DecisionStump;
 }
 
-// Axis-aligned rectangle in d dimensions
-// VC dimension = 2d
-struct AxisAlignedRectangle<const D: i64> {
-    lower: [f64; D],
-    upper: [f64; D],
-}
-
-impl<const D: i64> Learnable for AxisAlignedRectangle<D> {
-    fn vc_dim() -> VCDim {
-        2 * D
-    }
-
-    type Model = AxisAlignedRectangle<D>
-}
-
-// Neural network with L layers, W weights per layer
-// VC dimension ≈ O(W * L * log(W * L)) - Bartlett et al.
-struct NeuralNetwork<const L: i64, const W: i64> {
-    layers: [[f64; W]; L],
-    biases: [f64; L],
-}
-
-impl<const L: i64, const W: i64> Learnable for NeuralNetwork<L, W> {
-    fn vc_dim() -> VCDim {
-        // Approximate: W * L (ignoring log factor for simplicity)
-        W * L
-    }
-
-    type Model = NeuralNetwork<L, W>
-}
-
-// Decision tree with depth D and F features
-// VC dimension ≈ O(2^D * log(F))
-struct DecisionTree<const D: i64, const F: i64> {
-    // Tree structure encoded as array
-    nodes: [i32; 1 << D],
-}
-
-impl<const D: i64, const F: i64> Learnable for DecisionTree<D, F> {
-    fn vc_dim() -> VCDim {
-        // 2^depth * log2(features)
-        let two_pow_d = 1 << D
-        let log_f = if F > 1 { (F as f64).log2().ceil() as i64 } else { 1 }
-        two_pow_d * log_f
-    }
-
-    type Model = DecisionTree<D, F>
-}
+// NOTE: Const generic types (LinearClassifier<const D>, AxisAlignedRectangle<const D>,
+// NeuralNetwork<const L, const W>, DecisionTree<const D, const F>) are deferred
+// until const generics and fixed-size arrays [T; N] are implemented in the parser.
+// VC dimension formulas:
+//   LinearClassifier<D>:          D + 1 (Radon's theorem)
+//   AxisAlignedRectangle<D>:      2 * D
+//   NeuralNetwork<L, W>:          W * L (Bartlett et al.)
+//   DecisionTree<D, F>:           2^D * log2(F)
 
 // ============================================================================
 // Sample Complexity Functions
@@ -144,7 +125,7 @@ impl<const D: i64, const F: i64> Learnable for DecisionTree<D, F> {
 // Returns the minimum number of samples needed to achieve:
 // - accuracy: at least 1 - ε (e.g., ε=0.01 means 99% accuracy)
 // - confidence: at least 1 - δ (e.g., δ=0.05 means 95% confidence)
-fn sample_complexity(vc_dim: VCDim, epsilon: f64, delta: f64) -> i64
+pub fn sample_complexity(vc_dim: VCDim, epsilon: f64, delta: f64) -> i64
   requires epsilon > 0.0 && epsilon < 1.0
   requires delta > 0.0 && delta < 1.0
   requires vc_dim > 0
@@ -152,8 +133,8 @@ fn sample_complexity(vc_dim: VCDim, epsilon: f64, delta: f64) -> i64
 {
     let eps_sq = epsilon * epsilon
     let d = vc_dim as f64
-    let bound = (1.0 / eps_sq) * (d + (1.0 / delta).ln())
-    bound.ceil() as i64
+    let bound = (1.0 / eps_sq) * (d + ln_f64(1.0 / delta))
+    ceil_f64(bound) as i64
 }
 
 // Compute tighter sample complexity (Hanneke 2016)
@@ -161,7 +142,7 @@ fn sample_complexity(vc_dim: VCDim, epsilon: f64, delta: f64) -> i64
 // Formula: m ≥ d/ε + ln(1/δ)/ε²
 //
 // This is asymptotically optimal and tighter when ε is small.
-fn sample_complexity_tight(vc_dim: VCDim, epsilon: f64, delta: f64) -> i64
+pub fn sample_complexity_tight(vc_dim: VCDim, epsilon: f64, delta: f64) -> i64
   requires epsilon > 0.0 && epsilon < 1.0
   requires delta > 0.0 && delta < 1.0
   requires vc_dim > 0
@@ -170,8 +151,8 @@ fn sample_complexity_tight(vc_dim: VCDim, epsilon: f64, delta: f64) -> i64
     let d = vc_dim as f64
     let eps = epsilon
     let eps_sq = epsilon * epsilon
-    let bound = d / eps + (1.0 / delta).ln() / eps_sq
-    bound.ceil() as i64
+    let bound = d / eps + ln_f64(1.0 / delta) / eps_sq
+    ceil_f64(bound) as i64
 }
 
 // ============================================================================
@@ -183,7 +164,7 @@ fn sample_complexity_tight(vc_dim: VCDim, epsilon: f64, delta: f64) -> i64
 // Gap ≤ √((d·ln(2m/d) + ln(4/δ)) / m)
 //
 // With probability ≥ 1-δ: |test_error - train_error| ≤ gap
-fn generalization_gap(vc_dim: VCDim, samples: i64, delta: f64) -> f64
+pub fn generalization_gap(vc_dim: VCDim, samples: i64, delta: f64) -> f64
   requires vc_dim > 0
   requires samples > 0
   requires delta > 0.0 && delta < 1.0
@@ -192,14 +173,14 @@ fn generalization_gap(vc_dim: VCDim, samples: i64, delta: f64) -> f64
     let d = vc_dim as f64
     let m = samples as f64
 
-    let term1 = d * (2.0 * m / d).ln()
-    let term2 = (4.0 / delta).ln()
+    let term1 = d * ln_f64(2.0 * m / d)
+    let term2 = ln_f64(4.0 / delta)
 
-    ((term1 + term2) / m).sqrt()
+    sqrt_f64((term1 + term2) / m)
 }
 
 // Create a generalization bound from PAC parameters
-fn make_bound(
+pub fn make_bound(
     vc_dim: VCDim,
     samples: i64,
     delta: f64,
@@ -219,7 +200,7 @@ fn make_bound(
 }
 
 // Get upper bound on test error
-fn test_error_bound(bound: GeneralizationBound) -> f64
+pub fn test_error_bound(bound: GeneralizationBound) -> f64
   ensures result >= 0.0
 {
     bound.train_error + bound.gap
@@ -236,7 +217,7 @@ fn test_error_bound(bound: GeneralizationBound) -> f64
 //
 // The returned GeneralizationBound can be wrapped in Knowledge<> by the caller
 // if needed for epistemic tracking.
-fn pac_bound(
+pub fn pac_bound(
     vc_dim: VCDim,
     samples: i64,
     train_error: f64,
@@ -252,7 +233,7 @@ fn pac_bound(
 }
 
 // Check if dataset is sufficient for learning
-fn is_sufficient<H: Learnable>(
+pub fn is_sufficient<H: Learnable>(
     samples: i64,
     epsilon: f64,
     delta: f64
@@ -268,7 +249,7 @@ fn is_sufficient<H: Learnable>(
 // ============================================================================
 
 // PAC-Bayes bound parameters
-struct PACBayesParams {
+pub struct PACBayesParams {
     kl_divergence: f64,  // KL(posterior || prior)
     samples: i64,
     delta: f64,
@@ -279,7 +260,7 @@ struct PACBayesParams {
 // Gap ≤ √((KL + ln(2√m/δ)) / (2m))
 //
 // Tighter than VC bounds when we have a good prior.
-fn pac_bayes_gap(params: PACBayesParams) -> f64
+pub fn pac_bayes_gap(params: PACBayesParams) -> f64
   requires params.kl_divergence >= 0.0
   requires params.samples > 0
   requires params.delta > 0.0 && params.delta < 1.0
@@ -288,8 +269,8 @@ fn pac_bayes_gap(params: PACBayesParams) -> f64
     let m = params.samples as f64
     let kl = params.kl_divergence
 
-    let numerator = kl + (2.0 * m.sqrt() / params.delta).ln()
-    (numerator / (2.0 * m)).sqrt()
+    let numerator = kl + ln_f64(2.0 * sqrt_f64(m) / params.delta)
+    sqrt_f64(numerator / (2.0 * m))
 }
 
 // ============================================================================
@@ -301,13 +282,13 @@ fn pac_bayes_gap(params: PACBayesParams) -> f64
 // Gap ≤ 2R(H, m) + √(ln(1/δ)/(2m))
 //
 // where R(H, m) is the empirical Rademacher complexity.
-fn rademacher_gap(rademacher: f64, samples: i64, delta: f64) -> f64
+pub fn rademacher_gap(rademacher: f64, samples: i64, delta: f64) -> f64
   requires rademacher >= 0.0
   requires samples > 0
   requires delta > 0.0 && delta < 1.0
   ensures result >= 0.0
 {
     let m = samples as f64
-    2.0 * rademacher + ((1.0 / delta).ln() / (2.0 * m)).sqrt()
+    2.0 * rademacher + sqrt_f64(ln_f64(1.0 / delta) / (2.0 * m))
 }
 
