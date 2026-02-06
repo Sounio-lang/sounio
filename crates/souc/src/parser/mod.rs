@@ -163,6 +163,9 @@ impl<'a> Parser<'a> {
     /// Collect consecutive `///` doc comments into a single string.
     /// Returns None if no doc comments are present.
     fn collect_doc_comments(&mut self) -> Option<String> {
+        if !self.at(TokenKind::DocCommentOuter) {
+            return None;
+        }
         let mut lines = Vec::new();
         while self.at(TokenKind::DocCommentOuter) {
             let text = self.advance().text.clone();
@@ -170,16 +173,15 @@ impl<'a> Parser<'a> {
             let content = content.strip_prefix(' ').unwrap_or(content);
             lines.push(content.to_string());
         }
-        if lines.is_empty() {
-            None
-        } else {
-            Some(lines.join("\n"))
-        }
+        Some(lines.join("\n"))
     }
 
     /// Collect consecutive `//!` inner doc comments into a single string.
     /// Returns None if no inner doc comments are present.
     fn collect_inner_doc_comments(&mut self) -> Option<String> {
+        if !self.at(TokenKind::DocCommentInner) {
+            return None;
+        }
         let mut lines = Vec::new();
         while self.at(TokenKind::DocCommentInner) {
             let text = self.advance().text.clone();
@@ -187,11 +189,7 @@ impl<'a> Parser<'a> {
             let content = content.strip_prefix(' ').unwrap_or(content);
             lines.push(content.to_string());
         }
-        if lines.is_empty() {
-            None
-        } else {
-            Some(lines.join("\n"))
-        }
+        Some(lines.join("\n"))
     }
 
     /// Check if current token can be used as a macro name (identifier or keyword)
