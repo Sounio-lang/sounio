@@ -559,6 +559,12 @@ impl Interpreter {
                 Ok(Value::Array(Rc::new(RefCell::new(values))))
             }
 
+            HirExprKind::ArrayRepeat { value, count } => {
+                let val = self.eval_expr(value)?;
+                let values = vec![val; *count];
+                Ok(Value::Array(Rc::new(RefCell::new(values))))
+            }
+
             HirExprKind::Range {
                 start,
                 end,

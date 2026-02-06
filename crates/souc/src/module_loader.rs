@@ -1194,6 +1194,10 @@ fn rewrite_expr(expr: &mut Expr, prefixes: &[Vec<String>]) {
                 rewrite_expr(elem, prefixes);
             }
         }
+        Expr::ArrayRepeat { value, count, .. } => {
+            rewrite_expr(value, prefixes);
+            rewrite_expr(count, prefixes);
+        }
         Expr::Range { start, end, .. } => {
             if let Some(start) = start {
                 rewrite_expr(start, prefixes);
@@ -1935,6 +1939,10 @@ fn annotate_expr(expr: &mut Expr, prefixes: &[Vec<String>], sm: &ModuleId, im: &
             for e in elements {
                 annotate_expr(e, prefixes, sm, im);
             }
+        }
+        Expr::ArrayRepeat { value, count, .. } => {
+            annotate_expr(value, prefixes, sm, im);
+            annotate_expr(count, prefixes, sm, im);
         }
         Expr::Range { start, end, .. } => {
             if let Some(s) = start {

@@ -1782,6 +1782,11 @@ impl Resolver {
                 }
             }
 
+            Expr::ArrayRepeat { value, count, .. } => {
+                self.resolve_expr(value);
+                self.resolve_expr(count);
+            }
+
             Expr::Range { start, end, .. } => {
                 if let Some(s) = start {
                     self.resolve_expr(s);

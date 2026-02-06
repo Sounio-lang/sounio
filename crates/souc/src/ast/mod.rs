@@ -1533,6 +1533,12 @@ pub enum Expr {
     Tuple { id: NodeId, elements: Vec<Expr> },
     /// Array expression
     Array { id: NodeId, elements: Vec<Expr> },
+    /// Array repeat expression [value; count]
+    ArrayRepeat {
+        id: NodeId,
+        value: Box<Expr>,
+        count: Box<Expr>,
+    },
     /// Range expression (start..end or start..=end)
     Range {
         id: NodeId,

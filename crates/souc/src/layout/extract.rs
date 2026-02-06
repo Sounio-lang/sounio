@@ -435,6 +435,9 @@ impl HirConceptExtractor {
                     self.visit_expr(e);
                 }
             }
+            HirExprKind::ArrayRepeat { value, .. } => {
+                self.visit_expr(value);
+            }
             HirExprKind::Range { start, end, .. } => {
                 if let Some(s) = start {
                     self.visit_expr(s);

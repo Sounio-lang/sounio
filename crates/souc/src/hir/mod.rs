@@ -1088,6 +1088,8 @@ pub enum HirExprKind {
     Tuple(Vec<HirExpr>),
     /// Array
     Array(Vec<HirExpr>),
+    /// Array repeat expression [value; count]
+    ArrayRepeat { value: Box<HirExpr>, count: usize },
     /// Range expression (start..end or start..=end)
     Range {
         start: Option<Box<HirExpr>>,

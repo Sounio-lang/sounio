@@ -708,6 +708,10 @@ impl<'a> EffectChecker<'a> {
                 effects
             }
 
+            Expr::ArrayRepeat { value, count, .. } => {
+                self.infer_expr(value).union(&self.infer_expr(count))
+            }
+
             Expr::Range { start, end, .. } => {
                 let mut effects = EffectSet::new();
                 if let Some(s) = start {
@@ -1189,6 +1193,7 @@ impl<'a> EffectChecker<'a> {
             Expr::Closure { id, .. } => *id,
             Expr::Tuple { id, .. } => *id,
             Expr::Array { id, .. } => *id,
+            Expr::ArrayRepeat { id, .. } => *id,
             Expr::Range { id, .. } => *id,
             Expr::StructLit { id, .. } => *id,
             Expr::Try { id, .. } => *id,

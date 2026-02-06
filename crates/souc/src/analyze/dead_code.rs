@@ -674,6 +674,10 @@ impl DeadCodeAnalyzer {
                     self.collect_expr_references(elem);
                 }
             }
+            Expr::ArrayRepeat { value, count, .. } => {
+                self.collect_expr_references(value);
+                self.collect_expr_references(count);
+            }
             Expr::Range { start, end, .. } => {
                 if let Some(s) = start {
                     self.collect_expr_references(s);

@@ -342,6 +342,10 @@ impl SemanticTypeChecker {
                 }
             }
 
+            HirExprKind::ArrayRepeat { value, .. } => {
+                self.check_expr(value)?;
+            }
+
             HirExprKind::Range { start, end, .. } => {
                 if let Some(s) = start {
                     self.check_expr(s)?;

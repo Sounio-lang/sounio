@@ -396,6 +396,11 @@ impl<'a> OwnershipChecker<'a> {
                 }
             }
 
+            Expr::ArrayRepeat { value, count, .. } => {
+                self.check_expr(value, use_kind);
+                self.check_expr(count, use_kind);
+            }
+
             Expr::Range { start, end, .. } => {
                 if let Some(s) = start {
                     self.check_expr(s, use_kind);
@@ -975,6 +980,10 @@ impl<'a> OwnershipChecker<'a> {
                     self.find_free_variables(elem, bound_vars, captures);
                 }
             }
+            Expr::ArrayRepeat { value, count, .. } => {
+                self.find_free_variables(value, bound_vars, captures);
+                self.find_free_variables(count, bound_vars, captures);
+            }
             Expr::StructLit { fields, .. } => {
                 for (_, field_expr) in fields {
                     self.find_free_variables(field_expr, bound_vars, captures);
@@ -1041,6 +1050,7 @@ fn get_expr_id(expr: &Expr) -> NodeId {
         Expr::Closure { id, .. } => *id,
         Expr::Tuple { id, .. } => *id,
         Expr::Array { id, .. } => *id,
+        Expr::ArrayRepeat { id, .. } => *id,
         Expr::Range { id, .. } => *id,
         Expr::StructLit { id, .. } => *id,
         Expr::Try { id, .. } => *id,

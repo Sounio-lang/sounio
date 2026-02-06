@@ -1139,6 +1139,7 @@ impl TypeChecker {
             Expr::Closure { id, .. } => *id,
             Expr::Tuple { id, .. } => *id,
             Expr::Array { id, .. } => *id,
+            Expr::ArrayRepeat { id, .. } => *id,
             Expr::Range { id, .. } => *id,
             Expr::StructLit { id, .. } => *id,
             Expr::Try { id, .. } => *id,
@@ -1923,11 +1924,13 @@ impl TypeChecker {
                 visited.insert(name.clone());
 
                 for (field_name, field_ty) in fields {
-                    if self.type_has_infinite_size(field_ty, &mut visited.clone()) {
+                    // Don't clone visited - we need to track all types seen across all fields
+                    // to correctly detect cycles through multiple indirection paths
+                    if self.type_has_infinite_size(field_ty, &mut visited) {
                         self.error(
                             format!(
-                                "Struct `{}` has infinite size: field `{}` contains `{}` without indirection (use Box, &, or Option<Box<...>>)",
-                                name, field_name, name
+                                "Struct `{}` has infinite size: field `{}` creates a cycle without indirection (use Box, &, or Option<Box<...>>)",
+                                name, field_name
                             ),
                             Span::dummy(),
                         );
@@ -3873,6 +3876,41 @@ impl TypeChecker {
                 (HirExprKind::Array(exprs), result_ty)
             }
 
+            Expr::ArrayRepeat { id, value, count } => {
+                // Extract element type from expected type
+                let elem_ty = expected
+                    .and_then(|t| match t {
+                        Type::Array { element, .. } => Some(element.as_ref().clone()),
+                        _ => None,
+                    })
+                    .unwrap_or_else(|| self.fresh_type_var());
+
+                // Type check the value expression
+                let value_expr = self.check_expr(value, Some(&elem_ty))?;
+
+                // Evaluate count as a constant usize
+                let count_val = self.eval_const_usize(count).unwrap_or_else(|| {
+                    self.error(
+                        "Array repeat count must be a compile-time constant",
+                        Span::dummy(),
+                    );
+                    0
+                });
+
+                let result_ty = HirType::Array {
+                    element: Box::new(value_expr.ty.clone()),
+                    size: Some(count_val),
+                };
+
+                (
+                    HirExprKind::ArrayRepeat {
+                        value: Box::new(value_expr),
+                        count: count_val,
+                    },
+                    result_ty,
+                )
+            }
+
             Expr::Range {
                 id,
                 start,
@@ -5274,6 +5312,7 @@ impl TypeChecker {
             | Expr::Return { id, .. }
             | Expr::Tuple { id, .. }
             | Expr::Array { id, .. }
+            | Expr::ArrayRepeat { id, .. }
             | Expr::Cast { id, .. }
             | Expr::OntologyTerm { id, .. }
             | Expr::Perform { id, .. }

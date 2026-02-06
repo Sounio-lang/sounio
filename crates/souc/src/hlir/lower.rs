@@ -743,6 +743,12 @@ impl<'a> LoweringContext<'a> {
                 Some(self.builder.build_array(vals, ty))
             }
 
+            HirExprKind::ArrayRepeat { value, count } => {
+                let val = self.lower_expr(value)?;
+                let vals = vec![val; *count];
+                Some(self.builder.build_array(vals, ty))
+            }
+
             HirExprKind::Range {
                 start,
                 end,

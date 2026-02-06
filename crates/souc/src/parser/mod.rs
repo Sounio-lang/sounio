@@ -1601,8 +1601,8 @@ impl<'a> Parser<'a> {
             return self.parse_import_from_syntax(start, is_reexport);
         }
 
-        // Parse the base path (original parse_path which only supports ::)
-        let path = self.parse_path()?;
+        // Parse the base path - accepts both :: and . separators for import statements
+        let path = self.parse_import_path()?;
 
         // Check for `use path::{items}` Rust-style syntax
         if self.at(TokenKind::ColonColon) {
@@ -4592,26 +4592,11 @@ impl<'a> Parser<'a> {
                     let count_expr = self.parse_expr()?;
                     self.expect(TokenKind::RBracket)?;
 
-                    // For now, expand into repeated elements if count is a literal
-                    // In a full implementation, this would be a separate AST node
-                    if let Expr::Literal {
-                        value: Literal::Int(count),
-                        ..
-                    } = &count_expr
-                    {
-                        let count = *count as usize;
-                        elements.push(first.clone());
-                        for _ in 1..count {
-                            elements.push(first.clone());
-                        }
-                    } else {
-                        // If count is not a literal, just use first element
-                        // TODO: Add proper ArrayRepeat AST node
-                        elements.push(first);
-                    }
-                    return Ok(Expr::Array {
+                    // Emit ArrayRepeat AST node - count will be evaluated during type checking
+                    return Ok(Expr::ArrayRepeat {
                         id: self.next_id(),
-                        elements,
+                        value: Box::new(first),
+                        count: Box::new(count_expr),
                     });
                 }
 
@@ -5796,6 +5781,30 @@ impl<'a> Parser<'a> {
         // Expr::Field). Field access is now handled in parse_postfix via TokenKind::Dot.
         while self.at(TokenKind::ColonColon) {
             // Stop if next token after :: is { or * (for import syntax like `use foo::{a, b}` or `use foo::*`)
+            let next = self.peek_n(1);
+            if next == TokenKind::LBrace || next == TokenKind::Star {
+                break;
+            }
+            self.advance();
+            segments.push(self.parse_ident()?);
+        }
+
+        Ok(Path {
+            segments,
+            source_module: None,
+            resolved_module: None,
+        })
+    }
+
+    /// Parse a path in import context - accepts both :: and . as separators
+    /// This enables both Rust-style (std::core::option) and Darwin Atlas style (std.core.option)
+    fn parse_import_path(&mut self) -> Result<Path> {
+        let mut segments = vec![self.parse_ident()?];
+
+        // Accept both :: and . as path separators in import context
+        // This is safe because imports are always in statement context, no ambiguity with field access
+        while self.at(TokenKind::ColonColon) || self.at(TokenKind::Dot) {
+            // Stop if next token after separator is { or * (for `use foo::{a, b}` or `use foo::*`)
             let next = self.peek_n(1);
             if next == TokenKind::LBrace || next == TokenKind::Star {
                 break;

@@ -1656,6 +1656,13 @@ impl<'a> FormatVisitor<'a> {
                     Doc::text("]"),
                 ])))
             }
+            Expr::ArrayRepeat { value, count, .. } => Doc::Group(Box::new(Doc::concat(vec![
+                Doc::text("["),
+                self.visit_expr(value),
+                Doc::text("; "),
+                self.visit_expr(count),
+                Doc::text("]"),
+            ]))),
             Expr::Range {
                 start,
                 end,

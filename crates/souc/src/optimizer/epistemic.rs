@@ -275,6 +275,9 @@ impl EpistemicOptimizer {
                     self.optimize_expr(e, ctx);
                 }
             }
+            HirExprKind::ArrayRepeat { value, .. } => {
+                self.optimize_expr(value, ctx);
+            }
             HirExprKind::Range { start, end, .. } => {
                 if let Some(s) = start {
                     self.optimize_expr(s, ctx);

@@ -176,6 +176,10 @@ impl CoercionInserter {
                 }
             }
 
+            HirExprKind::ArrayRepeat { value, .. } => {
+                Self::apply_to_expr_inner_static(value, coercion_map);
+            }
+
             HirExprKind::Range { start, end, .. } => {
                 if let Some(s) = start {
                     Self::apply_to_expr_inner_static(s, coercion_map);
