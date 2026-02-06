@@ -150,6 +150,14 @@ fn is_zero_literal(expr: &Expr) -> bool {
             value: Literal::Float(f),
             ..
         } => *f == 0.0,
+        Expr::Literal {
+            value: Literal::TypedInt(0, _),
+            ..
+        } => true,
+        Expr::Literal {
+            value: Literal::TypedFloat(f, _),
+            ..
+        } => *f == 0.0,
         _ => false,
     }
 }

@@ -1718,6 +1718,10 @@ pub enum Literal {
     IntUnit(i64, String),
     /// Float with unit of measure (e.g., 10.5_mL)
     FloatUnit(f64, String),
+    /// Integer with explicit type suffix (e.g., 42i32, 0u8)
+    TypedInt(i64, String),
+    /// Float with explicit type suffix (e.g., 1.0f32, 3.14f64)
+    TypedFloat(f64, String),
 }
 
 /// Binary operators

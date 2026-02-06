@@ -4370,6 +4370,41 @@ impl<'a> Parser<'a> {
                     value: Literal::FloatUnit(value, unit_part.to_string()),
                 })
             }
+            TokenKind::TypedIntLit => {
+                let text = self.advance().text.clone();
+                let (num_str, suffix) = split_typed_literal(&text);
+                let clean = num_str.replace('_', "");
+                if suffix == "f32" || suffix == "f64" {
+                    // Integer syntax with float suffix: 0f32, 0_f32
+                    let value: f64 = clean
+                        .parse()
+                        .map_err(|_| miette::miette!("invalid float literal: {}", text))?;
+                    Ok(Expr::Literal {
+                        id: self.next_id(),
+                        value: Literal::TypedFloat(value, suffix.to_string()),
+                    })
+                } else {
+                    let value: i64 = clean
+                        .parse()
+                        .map_err(|_| miette::miette!("integer literal too large: {}", text))?;
+                    Ok(Expr::Literal {
+                        id: self.next_id(),
+                        value: Literal::TypedInt(value, suffix.to_string()),
+                    })
+                }
+            }
+            TokenKind::TypedFloatLit => {
+                let text = self.advance().text.clone();
+                let (num_str, suffix) = split_typed_literal(&text);
+                let clean = num_str.replace('_', "");
+                let value: f64 = clean
+                    .parse()
+                    .map_err(|_| miette::miette!("invalid float literal: {}", text))?;
+                Ok(Expr::Literal {
+                    id: self.next_id(),
+                    value: Literal::TypedFloat(value, suffix.to_string()),
+                })
+            }
             TokenKind::StringLit => {
                 let span = self.current().span;
                 let text = self.advance().text.clone();
@@ -5921,5 +5956,26 @@ fn split_unit_literal(text: &str) -> (&str, &str) {
         }
     }
     // Fallback: shouldn't happen with valid unit literals
+    (text, "")
+}
+
+/// Split a typed literal into its numeric and type suffix parts.
+/// For example: "42i32" -> ("42", "i32"), "1_000u64" -> ("1_000", "u64"), "1.0f32" -> ("1.0", "f32")
+fn split_typed_literal(text: &str) -> (&str, &str) {
+    // Type suffixes are: i8, i16, i32, i64, i128, isize, u8, u16, u32, u64, u128, usize, f32, f64
+    // Try longest match first to avoid matching "i8" when we have "i128"
+    for suffix in &[
+        "i128", "isize", "u128", "usize", "i16", "i32", "i64", "u16", "u32", "u64", "f32", "f64",
+        "i8", "u8",
+    ] {
+        if text.ends_with(suffix) {
+            let num_end = text.len() - suffix.len();
+            let num_str = &text[..num_end];
+            // Strip trailing underscore if present (for 0_f32 style)
+            let num_str = num_str.trim_end_matches('_');
+            return (num_str, suffix);
+        }
+    }
+    // Fallback (shouldn't happen with valid typed literals)
     (text, "")
 }

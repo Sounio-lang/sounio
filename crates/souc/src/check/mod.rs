@@ -732,6 +732,8 @@ impl TypeChecker {
                 Literal::Int(n) => Some(Term::Int(*n)),
                 Literal::Float(f) => Some(Term::Float(*f)),
                 Literal::Bool(b) => Some(Term::Bool(*b)),
+                Literal::TypedInt(n, _) => Some(Term::Int(*n)),
+                Literal::TypedFloat(f, _) => Some(Term::Float(*f)),
                 _ => None,
             },
             Expr::Path { path, .. } => {
@@ -5351,6 +5353,31 @@ impl TypeChecker {
                         unit: hir_unit,
                     },
                 )
+            }
+            Literal::TypedInt(i, suffix) => {
+                let ty = match suffix.as_str() {
+                    "i8" => HirType::I8,
+                    "i16" => HirType::I16,
+                    "i32" => HirType::I32,
+                    "i64" => HirType::I64,
+                    "i128" => HirType::I128,
+                    "isize" => HirType::Isize,
+                    "u8" => HirType::U8,
+                    "u16" => HirType::U16,
+                    "u32" => HirType::U32,
+                    "u64" => HirType::U64,
+                    "u128" => HirType::U128,
+                    "usize" => HirType::Usize,
+                    _ => HirType::I64,
+                };
+                (HirLiteral::Int(*i), ty)
+            }
+            Literal::TypedFloat(f, suffix) => {
+                let ty = match suffix.as_str() {
+                    "f32" => HirType::F32,
+                    _ => HirType::F64,
+                };
+                (HirLiteral::Float(*f), ty)
             }
         }
     }

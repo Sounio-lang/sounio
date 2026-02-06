@@ -194,6 +194,14 @@ fn extract_float_literal(expr: &Expr) -> Option<f64> {
             value: crate::ast::Literal::Int(i),
             ..
         } => Some(*i as f64),
+        Expr::Literal {
+            value: crate::ast::Literal::TypedFloat(f, _),
+            ..
+        } => Some(*f),
+        Expr::Literal {
+            value: crate::ast::Literal::TypedInt(i, _),
+            ..
+        } => Some(*i as f64),
         _ => None,
     }
 }

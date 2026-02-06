@@ -1277,6 +1277,8 @@ impl DocExtractor {
             ast::Literal::CString(s) => format!("c\"{}\"", s),
             ast::Literal::IntUnit(i, u) => format!("{}_{}", i, u),
             ast::Literal::FloatUnit(f, u) => format!("{}_{}", f, u),
+            ast::Literal::TypedInt(i, suffix) => format!("{}{}", i, suffix),
+            ast::Literal::TypedFloat(f, suffix) => format!("{}{}", f, suffix),
         }
     }
 

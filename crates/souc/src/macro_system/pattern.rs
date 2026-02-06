@@ -241,6 +241,10 @@ impl PatternMatcher {
                         t.token.kind,
                         TokenKind::IntLit
                             | TokenKind::FloatLit
+                            | TokenKind::IntUnitLit
+                            | TokenKind::FloatUnitLit
+                            | TokenKind::TypedIntLit
+                            | TokenKind::TypedFloatLit
                             | TokenKind::StringLit
                             | TokenKind::CharLit
                     ) =>

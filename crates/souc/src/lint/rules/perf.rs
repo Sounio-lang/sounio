@@ -565,6 +565,8 @@ fn is_trivially_copyable(expr: &Expr) -> bool {
                     | crate::ast::Literal::Float(_)
                     | crate::ast::Literal::Bool(_)
                     | crate::ast::Literal::Char(_)
+                    | crate::ast::Literal::TypedInt(..)
+                    | crate::ast::Literal::TypedFloat(..)
             )
         }
         _ => false,

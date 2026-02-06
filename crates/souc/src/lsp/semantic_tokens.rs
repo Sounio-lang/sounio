@@ -461,6 +461,9 @@ impl SemanticTokensProvider {
                 Some((SemanticTokenType::Number, SemanticTokenModifiers::NONE))
             }
             TokenKind::FloatLit => Some((SemanticTokenType::Number, SemanticTokenModifiers::NONE)),
+            TokenKind::TypedIntLit | TokenKind::TypedFloatLit => {
+                Some((SemanticTokenType::Number, SemanticTokenModifiers::NONE))
+            }
 
             // Unit literals - special highlighting
             TokenKind::IntUnitLit | TokenKind::FloatUnitLit => {

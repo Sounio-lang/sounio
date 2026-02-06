@@ -1953,6 +1953,16 @@ impl<'a> FormatVisitor<'a> {
             Literal::CString(s) => Doc::text(format!("c\"{}\"", s.escape_default())),
             Literal::IntUnit(i, u) => Doc::text(format!("{}_{}", i, u)),
             Literal::FloatUnit(f, u) => Doc::text(format!("{}_{}", f, u)),
+            Literal::TypedInt(i, suffix) => Doc::text(format!("{}{}", i, suffix)),
+            Literal::TypedFloat(f, suffix) => {
+                let s = f.to_string();
+                let num = if s.contains('.') || s.contains('e') || s.contains('E') {
+                    s
+                } else {
+                    format!("{}.0", s)
+                };
+                Doc::text(format!("{}{}", num, suffix))
+            }
         }
     }
 

@@ -291,6 +291,18 @@ pub enum TokenKind {
     )]
     FloatUnitLit,
 
+    // Typed numeric literals (number with type suffix)
+    // e.g., 42i32, 0u8, 1_000i64, 0f32
+    // Priority 4 to win over IntUnitLit (priority 3) for type suffixes
+    #[regex(
+        r"[0-9][0-9_]*(i8|i16|i32|i64|i128|isize|u8|u16|u32|u64|u128|usize|f32|f64)",
+        priority = 4
+    )]
+    TypedIntLit,
+    // e.g., 1.0f32, 3.14_f64, 1.0e10f32
+    #[regex(r"[0-9][0-9_]*\.[0-9][0-9_]*([eE][+-]?[0-9]+)?(f32|f64)", priority = 4)]
+    TypedFloatLit,
+
     // Identifiers (priority 1 so _ token takes precedence)
     #[regex(r"[a-zA-Z_][a-zA-Z0-9_]*", priority = 1)]
     Ident,
@@ -567,6 +579,8 @@ impl TokenKind {
                 | TokenKind::CharLit
                 | TokenKind::IntUnitLit
                 | TokenKind::FloatUnitLit
+                | TokenKind::TypedIntLit
+                | TokenKind::TypedFloatLit
                 | TokenKind::True
                 | TokenKind::False
         )
@@ -677,6 +691,8 @@ impl TokenKind {
             TokenKind::CharLit => "<char>",
             TokenKind::IntUnitLit => "<int_unit>",
             TokenKind::FloatUnitLit => "<float_unit>",
+            TokenKind::TypedIntLit => "<typed_int>",
+            TokenKind::TypedFloatLit => "<typed_float>",
             TokenKind::Ident => "<ident>",
             TokenKind::Plus => "+",
             TokenKind::Minus => "-",

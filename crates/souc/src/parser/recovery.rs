@@ -263,6 +263,10 @@ pub fn can_start_expression(kind: TokenKind) -> bool {
             | TokenKind::OctLit
             | TokenKind::HexLit
             | TokenKind::FloatLit
+            | TokenKind::IntUnitLit
+            | TokenKind::FloatUnitLit
+            | TokenKind::TypedIntLit
+            | TokenKind::TypedFloatLit
             | TokenKind::StringLit
             | TokenKind::CharLit
             | TokenKind::True

@@ -201,6 +201,66 @@ mod tests {
     }
 
     #[test]
+    fn test_lex_typed_literals() {
+        // Integer type suffixes
+        let tokens = lex("42i32").unwrap();
+        assert_eq!(tokens[0].kind, TokenKind::TypedIntLit);
+        assert_eq!(tokens[0].text, "42i32");
+
+        let tokens = lex("0u8").unwrap();
+        assert_eq!(tokens[0].kind, TokenKind::TypedIntLit);
+        assert_eq!(tokens[0].text, "0u8");
+
+        let tokens = lex("1_000_i64").unwrap();
+        assert_eq!(tokens[0].kind, TokenKind::TypedIntLit);
+        assert_eq!(tokens[0].text, "1_000_i64");
+
+        // Float type suffixes
+        let tokens = lex("1.0f32").unwrap();
+        assert_eq!(tokens[0].kind, TokenKind::TypedFloatLit);
+        assert_eq!(tokens[0].text, "1.0f32");
+
+        let tokens = lex("3.14_f64").unwrap();
+        assert_eq!(tokens[0].kind, TokenKind::TypedFloatLit);
+        assert_eq!(tokens[0].text, "3.14_f64");
+
+        // Integer syntax with float suffix (treated as typed int literal)
+        let tokens = lex("0f32").unwrap();
+        assert_eq!(tokens[0].kind, TokenKind::TypedIntLit);
+        assert_eq!(tokens[0].text, "0f32");
+
+        let tokens = lex("0_f64").unwrap();
+        assert_eq!(tokens[0].kind, TokenKind::TypedIntLit);
+        assert_eq!(tokens[0].text, "0_f64");
+
+        // Verify units still work (mg is not a type suffix)
+        let tokens = lex("500_mg").unwrap();
+        assert_eq!(tokens[0].kind, TokenKind::IntUnitLit);
+
+        // i64 no longer misclassified as unit (was a bug)
+        let tokens = lex("0_i64").unwrap();
+        assert_eq!(tokens[0].kind, TokenKind::TypedIntLit);
+        assert_eq!(tokens[0].text, "0_i64");
+
+        // All integer type suffixes
+        let tokens = lex("1i8 2i16 3i32 4i64 5i128 6isize").unwrap();
+        assert_eq!(tokens[0].kind, TokenKind::TypedIntLit);
+        assert_eq!(tokens[1].kind, TokenKind::TypedIntLit);
+        assert_eq!(tokens[2].kind, TokenKind::TypedIntLit);
+        assert_eq!(tokens[3].kind, TokenKind::TypedIntLit);
+        assert_eq!(tokens[4].kind, TokenKind::TypedIntLit);
+        assert_eq!(tokens[5].kind, TokenKind::TypedIntLit);
+
+        let tokens = lex("1u8 2u16 3u32 4u64 5u128 6usize").unwrap();
+        assert_eq!(tokens[0].kind, TokenKind::TypedIntLit);
+        assert_eq!(tokens[1].kind, TokenKind::TypedIntLit);
+        assert_eq!(tokens[2].kind, TokenKind::TypedIntLit);
+        assert_eq!(tokens[3].kind, TokenKind::TypedIntLit);
+        assert_eq!(tokens[4].kind, TokenKind::TypedIntLit);
+        assert_eq!(tokens[5].kind, TokenKind::TypedIntLit);
+    }
+
+    #[test]
     fn test_lex_doc_comments() {
         // Outer doc comment
         let tokens = lex("/// This is a doc comment\nfn foo() {}").unwrap();

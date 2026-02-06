@@ -526,6 +526,25 @@ impl InlayHintProvider {
                         // Unit literals - would need unit type info
                         None
                     }
+                    Literal::TypedInt(_, suffix) => match suffix.as_str() {
+                        "i8" => Some(Type::I8),
+                        "i16" => Some(Type::I16),
+                        "i32" => Some(Type::I32),
+                        "i64" => Some(Type::I64),
+                        "i128" => Some(Type::I128),
+                        "isize" => Some(Type::Isize),
+                        "u8" => Some(Type::U8),
+                        "u16" => Some(Type::U16),
+                        "u32" => Some(Type::U32),
+                        "u64" => Some(Type::U64),
+                        "u128" => Some(Type::U128),
+                        "usize" => Some(Type::Usize),
+                        _ => Some(Type::I64),
+                    },
+                    Literal::TypedFloat(_, suffix) => match suffix.as_str() {
+                        "f32" => Some(Type::F32),
+                        _ => Some(Type::F64),
+                    },
                 }
             }
             Expr::Array { elements, .. } => {
