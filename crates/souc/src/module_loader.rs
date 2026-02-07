@@ -58,17 +58,35 @@ pub fn load_program_ast(entry_path: &StdPath) -> Result<Ast> {
     loader.into_ast(root_id)
 }
 
-/// Load all `.sio` files in a directory as a single flat compilation unit.
-/// Files are sorted alphabetically, with `mod.sio` always last (as the entry point).
+/// Recursively collect all `.sio` files from a directory tree.
+fn collect_sio_files(dir: &StdPath, files: &mut Vec<PathBuf>) -> Result<()> {
+    let entries = std::fs::read_dir(dir)
+        .map_err(|e| miette::miette!("Cannot read directory {}: {}", dir.display(), e))?;
+    let mut subdirs = Vec::new();
+    for entry in entries {
+        let entry = entry.map_err(|e| miette::miette!("Directory entry error: {}", e))?;
+        let path = entry.path();
+        if path.is_dir() {
+            subdirs.push(path);
+        } else if path.extension().and_then(|x| x.to_str()) == Some("sio") {
+            files.push(path);
+        }
+    }
+    subdirs.sort();
+    for subdir in subdirs {
+        collect_sio_files(&subdir, files)?;
+    }
+    Ok(())
+}
+
+/// Load all `.sio` files in a directory tree as a single flat compilation unit.
+/// Files are sorted: subdirectories before parent (deeper first), alphabetical
+/// within same depth, `mod.sio` always last within its directory.
 /// This enables multi-file projects where definitions in earlier files are
 /// visible to later files without explicit import statements.
 fn load_directory_ast(dir: &StdPath) -> Result<Ast> {
-    let mut files: Vec<PathBuf> = std::fs::read_dir(dir)
-        .map_err(|e| miette::miette!("Cannot read directory {}: {}", dir.display(), e))?
-        .filter_map(|entry| entry.ok())
-        .map(|entry| entry.path())
-        .filter(|p| p.extension().and_then(|x| x.to_str()) == Some("sio"))
-        .collect();
+    let mut files: Vec<PathBuf> = Vec::new();
+    collect_sio_files(dir, &mut files)?;
 
     if files.is_empty() {
         return Err(miette::miette!(
@@ -77,8 +95,19 @@ fn load_directory_ast(dir: &StdPath) -> Result<Ast> {
         ));
     }
 
-    // Sort: alphabetical by filename, but mod.sio always last
+    // Sort: subdirectories before parent (deeper first), alphabetical within
+    // same depth, mod.sio always last within its directory.
     files.sort_by(|a, b| {
+        let a_dir = a.parent().unwrap_or(StdPath::new(""));
+        let b_dir = b.parent().unwrap_or(StdPath::new(""));
+        if a_dir != b_dir {
+            let a_depth = a_dir.components().count();
+            let b_depth = b_dir.components().count();
+            if a_depth != b_depth {
+                return b_depth.cmp(&a_depth);
+            }
+            return a_dir.cmp(b_dir);
+        }
         let a_is_mod = a.file_name().and_then(|f| f.to_str()) == Some("mod.sio");
         let b_is_mod = b.file_name().and_then(|f| f.to_str()) == Some("mod.sio");
         match (a_is_mod, b_is_mod) {
@@ -1092,6 +1121,9 @@ fn rewrite_generics(generics: &mut Generics, prefixes: &[Vec<String>]) {
             GenericParam::Effect { .. } => {
                 // Effect parameters don't need rewriting
             }
+            GenericParam::Lifetime { .. } => {
+                // Lifetime parameters don't need rewriting
+            }
         }
     }
 }
@@ -1817,6 +1849,9 @@ fn annotate_generics(
             GenericParam::Const { ty, .. } => annotate_type_expr(ty, prefixes, sm, im),
             GenericParam::Effect { .. } => {
                 // Effect parameters don't need annotation
+            }
+            GenericParam::Lifetime { .. } => {
+                // Lifetime parameters don't need annotation
             }
         }
     }
