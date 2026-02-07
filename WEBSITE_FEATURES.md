@@ -502,7 +502,7 @@ Sounio's type system foundations are developed with rigorous mathematical valida
 
 ---
 
-## 8. Standard Library: 151,000+ Lines of Scientific Computing
+## 8. Standard Library: 215,000+ Lines of Scientific Computing
 
 ### Comprehensive Module Coverage
 

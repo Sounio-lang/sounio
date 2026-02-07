@@ -45,7 +45,7 @@ cargo build --release
 
 # 5. Verify installation
 ./target/release/souc --version
-# Expected output: souc 0.99.0
+# Expected output: souc 0.100.0
 ```
 
 ### Quick Verification
@@ -106,7 +106,7 @@ With the minimal installation, reviewers can:
    - Example: `./target/release/souc compile examples/fibonacci.sio`
 
 3. **Standard Library**:
-   - 151,000+ lines of scientific computing code
+   - 215,000+ lines of scientific computing code
    - Located in `stdlib/` directory
    - Examples using stdlib: `uncertainty.sio`, `units_simple.sio`, `ode_demo.sio`
 
@@ -569,7 +569,7 @@ For a complete list of examples, see the `examples/` directory.
 Expected output:
 
 ```
-souc 0.99.0
+souc 0.100.0
 ```
 
 ### Step 2: Run the Test Suite
@@ -980,8 +980,8 @@ If you use Sounio in your research, please cite:
 @software{sounio2025,
   title = {Sounio: A Systems Language for Epistemic Computing},
   author = {Agourakis, Demetrios Chiuratto},
-  year = {2025},
-  version = {0.99.0},
+  year = {2025--2026},
+  version = {0.100.0},
   url = {https://github.com/sounio-lang/sounio},
   note = {Under review at SoftwareX}
 }
@@ -989,6 +989,6 @@ If you use Sounio in your research, please cite:
 
 ---
 
-*Last updated: January 2026*
-*Sounio version: 0.99.0*
+*Last updated: February 2026*
+*Sounio version: 0.100.0*
 *For questions or issues, please open an issue on GitHub: https://github.com/sounio-lang/sounio/issues*

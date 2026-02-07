@@ -248,7 +248,7 @@ export default function PlaygroundEditor({ initialCode, theme = 'dark' }: Playgr
 
       {/* Status Bar */}
       <div className="flex items-center justify-between px-4 py-2 bg-[var(--color-navy-900)] text-white/60 text-xs font-mono border-t border-white/10">
-        <span>Sounio v0.99.0</span>
+        <span>Sounio v0.100.0</span>
         <span>UTF-8</span>
       </div>
     </div>

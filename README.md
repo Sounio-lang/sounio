@@ -5,8 +5,8 @@
 ### *Compute at the Horizon of Certainty*
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-gold.svg)](LICENSE)
-[![stdlib](https://img.shields.io/badge/stdlib-151K%2B%20lines-blue.svg)](#standard-library)
-[![Version](https://img.shields.io/badge/version-0.99.0-orange.svg)](CHANGELOG.md)
+[![stdlib](https://img.shields.io/badge/stdlib-215K%2B%20lines-blue.svg)](#standard-library)
+[![Version](https://img.shields.io/badge/version-0.100.0-orange.svg)](CHANGELOG.md)
 
 <img src="docs/assets/sounio-logo.svg" alt="Sounio Logo" width="200">
 
@@ -161,25 +161,38 @@ print("ATE: ", effect.value, " ± ", effect.uncertainty)
 
 ## Standard Library
 
-**151,000+ lines** of production-ready scientific computing:
+**215,000+ lines** of production-ready scientific computing (512 files, 76 modules):
 
 | Module | Lines | Description |
-|--------|-------|-------------|
-| `epistemic/` | 7,780 | Core uncertainty types, propagation, provenance |
-| `medlang/` | 9,800 | PK/PD DSL with PBPK and quantum binding |
-| `fmri/` | 5,073 | Neuroimaging pipeline with atlas support |
-| `causal/` | 3,773 | Causal inference and discovery |
-| `connectivity/` | 3,792 | Graph metrics, network analysis |
-| `optimize/` | 3,766 | Optimization algorithms |
-| `signal/` | 3,068 | Signal processing, spectral analysis |
-| `gpu/` | 2,487 | GPU kernels (FFT, smoothing, statistics) |
-| `data/` | 2,576 | DataFrames and data manipulation |
-| `mcmc/` | 1,203 | MCMC sampling |
-| `random/` | 1,599 | Random number generation |
-| `quantum/` | 1,264 | Quantum computing primitives |
-| `linalg/` | 1,149 | Linear algebra |
-| `ode/` | 966 | ODE solvers |
-| `bayes/` | 1,500+ | Bayesian inference |
+|--------|------:|-------------|
+| `epistemic/` | 31,962 | Core uncertainty types, GUM propagation, provenance |
+| `compiler/` | 17,923 | Self-hosted compiler (lexer, parser, checker, codegen) |
+| `nn/` | 13,693 | Neural networks, autograd, backpropagation |
+| `medlang/` | 8,147 | PK/PD domain-specific language |
+| `async/` | 7,435 | Async runtime, channels, streams, executors |
+| `darwin_pbpk/` | 6,036 | PBPK modeling with DARWIN integration |
+| `collections/` | 5,355 | BTree, HashMap, Trie, Deque, BitSet |
+| `genomics/` | 4,925 | Genomics, FASTA/VCF I/O, octonion GRN |
+| `linalg/` | 4,825 | Linear algebra, BLAS fallback |
+| `ml/` | 4,315 | Tensors, autodiff, Gaussian processes |
+| `qnn/` | 3,829 | Quaternion neural networks with MNIST |
+| `ontology/` | 3,691 | Biomedical ontologies (SNOMED, GO, HPO, LOINC) |
+| `stats/` | 3,444 | Statistical testing, distributions |
+| `ode/` | 3,340 | ODE solvers (RK4, Tsit5, PBPK) |
+| `causal/` | 3,139 | Causal inference and discovery |
+| `geometry/` | 3,586 | Computational geometry |
+| `fractal/` | 2,872 | KEC framework, box counting, GPU-accelerated |
+| `data/` | 2,874 | DataFrames, CSV, I/O |
+| `optimize/` | 2,600 | BFGS, Nelder-Mead, Levenberg-Marquardt |
+| `medical/` | 2,503 | Sedenion EEG, PBPK, hyperspectral imaging |
+| `gpu/` | 2,386 | GPU kernels (FFT, smoothing, statistics) |
+| `signal/` | 2,386 | Signal processing, spectral analysis |
+| `fmri/` | 2,356 | Neuroimaging pipeline with atlas support |
+| `onn/` | 2,015 | Octonion neural networks |
+| `connectivity/` | 1,552 | Network metrics, phase analysis |
+| `quantum/` | 1,392 | Quantum computing primitives (VQE) |
+| `bayes/` | 1,371 | Bayesian inference, MCMC, VI |
+| `random/` | 1,068 | Random number generation |
 
 ---
 
@@ -302,26 +315,27 @@ See [MANIFESTO.md](MANIFESTO.md) for the complete philosophy.
 
 ## Project Status
 
-**Current Version**: 0.99.0 (Pre-1.0)
+**Current Version**: 0.100.0
 
 ### Implemented ✅
-- Core epistemic type system with `Knowledge<T>`
+- Core epistemic type system with `Knowledge<T>` (25K+ lines in compiler, 31K+ in stdlib)
 - Uncertainty propagation (GUM-compliant)
-- MedLang PK/PD DSL
-- fMRI neuroimaging pipeline
-- GPU acceleration (CUDA, Metal)
-- Causal inference framework
-- 151K+ lines standard library
+- MedLang PK/PD DSL (8,147 lines)
+- fMRI neuroimaging pipeline (2,356 lines)
+- GPU acceleration (82,537 lines total subsystem)
+- Causal inference framework (3,139 in stdlib + 9,538 in compiler)
+- 215K+ lines standard library
 - Native code generation (ELF/Mach-O)
 - Cranelift JIT backend
-- REPL (interactive mode)
+- Language Server Protocol (13,752 lines)
+- REPL (2,286 lines)
+- Package manager `siopkg` (5,740 lines)
 
 ### In Progress 🚧
-- Language Server Protocol (LSP) - 80% complete
-- LLVM backend - Experimental
-- Package manager (`siopkg`) - Design phase
+- LLVM backend (864 lines — partial)
 - SMT-based refinement types - Proof of concept
 - WebAssembly target - Experimental
+- Self-hosted compiler (20,712 lines)
 
 ### Planned 📋
 - Stabilized 1.0 API
@@ -335,15 +349,15 @@ See [CHANGELOG.md](CHANGELOG.md) for detailed version history.
 
 ## Roadmap
 
-- [x] Core epistemic type system
-- [x] MedLang PK/PD DSL
-- [x] fMRI preprocessing pipeline
-- [x] GPU acceleration
-- [x] Causal inference
-- [ ] Language Server Protocol (LSP)
-- [ ] LLVM backend
-- [ ] Package manager (`siopkg`)
-- [ ] Interactive REPL
+- [x] Core epistemic type system (25K+ compiler, 31K+ stdlib)
+- [x] MedLang PK/PD DSL (8,147 lines)
+- [x] fMRI preprocessing pipeline (2,356 lines)
+- [x] GPU acceleration (82,537 lines total subsystem)
+- [x] Causal inference (3,139 in stdlib + 9,538 in compiler)
+- [x] Language Server Protocol (13,752 lines)
+- [x] Interactive REPL (2,286 lines)
+- [x] Package manager `siopkg` (5,740 lines)
+- [ ] LLVM backend (864 lines — partial)
 
 ---
 
@@ -378,7 +392,8 @@ If you use Sounio in academic work, please cite:
 @software{sounio2025,
   title = {Sounio: A Systems Language for Epistemic Computing},
   author = {Agourakis, Demetrios Chiuratto},
-  year = {2025},
+  year = {2025--2026},
+  version = {0.100.0},
   url = {https://github.com/sounio-lang/sounio}
 }
 ```

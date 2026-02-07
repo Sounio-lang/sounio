@@ -236,4 +236,4 @@ Future: AFL-style fuzzing for parser robustness.
 ---
 
 *Last updated: January 2024*
-*Test suite maintained with each compiler release (v0.99.0)*
+*Test suite maintained with each compiler release (v0.100.0)*

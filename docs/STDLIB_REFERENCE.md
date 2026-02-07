@@ -1,6 +1,6 @@
-# Sounio Standard Library Reference (December 2025)
+# Sounio Standard Library Reference (February 2026)
 
-Comprehensive analysis of all 49 stdlib modules with implementation status, LOC, and usage guidance.
+Comprehensive analysis of all 76 stdlib modules with implementation status, LOC, and usage guidance.
 
 ---
 
@@ -8,9 +8,9 @@ Comprehensive analysis of all 49 stdlib modules with implementation status, LOC,
 
 | Metric | Value |
 |--------|-------|
-| **Total .sio files** | 290 |
-| **Total modules** | 49 |
-| **Total LOC** | ~207,000 |
+| **Total .sio files** | 512 |
+| **Total modules** | 76 |
+| **Total LOC** | ~215,725 |
 | **Production-ready modules** | 20+ |
 | **Stub/minimal modules** | 12 |
 
@@ -322,7 +322,7 @@ where F: Fn(f64, &[f64]) -> Vec<f64>
 ### epistemic/ (Epistemic Core)
 
 ```
-Status: Heavily Implemented (30+ files, 20K+ lines)
+Status: Heavily Implemented (40 files, 31,962 lines)
 ```
 
 **Core Types:**
@@ -402,7 +402,7 @@ impl Dual {
 ### nn/ (Neural Networks)
 
 ```
-Status: Heavily Implemented (12.7K lines autograd)
+Status: Heavily Implemented (13,693 lines)
 ```
 
 **Autograd Engine:**
@@ -424,7 +424,7 @@ Status: Heavily Implemented (12.7K lines autograd)
 ### quantum/ (Quantum Computing)
 
 ```
-Status: Implemented (1,337 lines)
+Status: Implemented (1,392 lines)
 ```
 
 **VQE (Variational Quantum Eigensolver):**
@@ -463,7 +463,7 @@ Status: Implemented (atlas.sio)
 ### darwin_pbpk/ (PBPK Simulation)
 
 ```
-Status: Heavily Implemented (2,000+ lines)
+Status: Heavily Implemented (6,036 lines)
 ```
 
 **Models:**
@@ -483,7 +483,7 @@ Status: Heavily Implemented (2,000+ lines)
 ### async/
 
 ```
-Status: Fully Specified (217 lines index)
+Status: Implemented (7,435 lines, 13 files)
 ```
 
 **Submodules:**
@@ -620,4 +620,4 @@ Most modules compile with `souc check`. Known issues:
 
 ---
 
-*Generated: December 2025*
+*Generated: February 2026*

@@ -387,7 +387,7 @@ planned features for future releases.
 - Provenance tracking for data lineage
 - Confidence-gated execution
 
-#### Standard Library (151,000+ lines)
+#### Standard Library (215,000+ lines)
 
 **Epistemic Module** (`stdlib/epistemic/`)
 - `Knowledge<T>` type with value, uncertainty, confidence, provenance

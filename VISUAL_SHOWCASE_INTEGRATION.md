@@ -210,5 +210,5 @@ For questions about the visual examples or showcase integration:
 ---
 
 **Built:** 2026-01-30
-**Version:** Sounio 0.99.0
+**Version:** Sounio 0.100.0
 **Status:** Ready for Hugo build and deployment

@@ -96,9 +96,9 @@ O **Compilador Sounio** (`souc`) é um compilador multi-estágio para a linguage
 | Métrica | Valor |
 |---------|-------|
 | **Linguagem** | Rust 2024 Edition |
-| **Versão** | 0.99.0 (Pre-1.0) |
-| **Linhas do Compilador** | ~50,000+ |
-| **Linhas da Stdlib** | 151,000+ |
+| **Versão** | 0.100.0 |
+| **Linhas do Compilador** | ~566,719 |
+| **Linhas da Stdlib** | 215,000+ |
 | **Módulos Principais** | 50+ |
 | **Backends** | 4 (Cranelift, Native, LLVM, GPU) |
 
@@ -597,7 +597,7 @@ sounio/
 │           ├── quantum/            # Quantum computing
 │           ├── optimizer/           # Optimization
 │           └── ...
-├── stdlib/                         # Standard library (151K+ lines)
+├── stdlib/                         # Standard library (215K+ lines)
 ├── tests/                          # Integration tests
 ├── benches/                         # Benchmarks
 └── docs/

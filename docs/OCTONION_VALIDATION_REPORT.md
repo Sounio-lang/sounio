@@ -1,7 +1,7 @@
 # Sounio Octonion Algebra Validation Report
 
 **Date**: 2026-01-28
-**Version**: Sounio v0.99.0
+**Version**: Sounio v0.100.0
 **Compiler**: `souc` with Cranelift JIT + Interpreter backends
 **Build**: `cargo build --features "jit,gpu" --release`
 
@@ -20,7 +20,7 @@ This report documents the successful validation of **native octonion algebra** o
 | Property | Value |
 |----------|-------|
 | **Platform** | Linux x86-64 (6.18.0-8-generic) |
-| **Compiler Version** | Sounio v0.99.0 |
+| **Compiler Version** | Sounio v0.100.0 |
 | **Binary Size** | 12 MB (release build) |
 | **Feature Flags** | `jit`, `gpu` |
 | **JIT Backend** | Cranelift |

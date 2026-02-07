@@ -63,7 +63,7 @@ The system knows what it doesn't know.
 
 ### Tweet 5
 ```
-151,000+ lines of stdlib:
+215,000+ lines of stdlib:
 
 • Epistemic types with provenance
 • MedLang DSL for PK/PD modeling
@@ -117,7 +117,7 @@ Confidence gates can halt execution when certainty drops below thresholds. The s
 
 WHAT'S INCLUDED
 
-The standard library (151,000+ lines) includes:
+The standard library (215,000+ lines) includes:
 
 • Epistemic type system with automatic propagation
 • MedLang DSL for PK/PD and PBPK modeling
@@ -182,7 +182,7 @@ The type system prevents you from accidentally treating uncertain values as cert
 
 **Stdlib:**
 
-151K+ lines including:
+215K+ lines including:
 - PK/PD modeling DSL (pharmacokinetics)
 - fMRI preprocessing pipeline
 - Causal inference
@@ -220,7 +220,7 @@ The type system prevents accidentally dropping uncertainty. You can't convert Kn
 
 Named after Cape Sounion in Greece, where the Temple of Poseidon marks the horizon between land and sea—certainty and uncertainty.
 
-MIT licensed, 151K lines of stdlib for scientific computing.
+MIT licensed, 215K lines of stdlib for scientific computing.
 
 https://github.com/sounio-lang/sounio
 ```

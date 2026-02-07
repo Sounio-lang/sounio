@@ -30,9 +30,9 @@ Existing languages treat uncertainty as an afterthought (manual error propagatio
 
 ### Is Sounio production-ready?
 
-**Current status (v0.99.0)**: Pre-1.0, suitable for research and evaluation.
+**Current status (v0.100.0)**: Pre-1.0, suitable for research and evaluation.
 - ✅ Core language features stable
-- ✅ 151K+ lines standard library
+- ✅ 215K+ lines standard library
 - 🚧 Some advanced features experimental (LLVM backend, LSP)
 - 📋 API may change before 1.0
 
