@@ -415,6 +415,11 @@ impl<'a> Parser<'a> {
     // ==================== ITEMS ====================
 
     pub fn parse_item(&mut self) -> Result<Item> {
+        // Skip inner doc comments (//!) — these are module-level docs, not item docs
+        while self.at(TokenKind::DocCommentInner) {
+            self.advance();
+        }
+
         // Collect doc comments (they are attached to following items)
         let doc = self.collect_doc_comments();
 
@@ -1131,6 +1136,11 @@ impl<'a> Parser<'a> {
     }
 
     fn parse_trait_item(&mut self) -> Result<TraitItem> {
+        // Skip doc comments on trait items (they're informational but not stored in AST)
+        while self.at(TokenKind::DocCommentOuter) || self.at(TokenKind::DocCommentInner) {
+            self.advance();
+        }
+
         let visibility = self.parse_visibility();
         let modifiers = self.parse_modifiers();
 
@@ -1646,11 +1656,11 @@ impl<'a> Parser<'a> {
         // Parse the base path - accepts both :: and . separators for import statements
         let path = self.parse_import_path()?;
 
-        // Check for `use path::{items}` Rust-style syntax
-        if self.at(TokenKind::ColonColon) {
+        // Check for `use path::{items}` or `use path.{items}` selective/glob syntax
+        if self.at(TokenKind::ColonColon) || self.at(TokenKind::Dot) {
             let next = self.peek_n(1);
             if next == TokenKind::LBrace {
-                self.advance(); // consume ::
+                self.advance(); // consume :: or .
                 let items = self.parse_import_items()?;
                 // Accept optional semicolon after import statement
                 if self.at(TokenKind::Semi) {
@@ -1665,8 +1675,8 @@ impl<'a> Parser<'a> {
                     span: start.merge(end),
                 }));
             } else if next == TokenKind::Star {
-                // Glob import: `use path::*`
-                self.advance(); // consume ::
+                // Glob import: `use path::*` or `use path.*`
+                self.advance(); // consume :: or .
                 self.advance(); // consume *
                                 // Accept optional semicolon after import statement
                 if self.at(TokenKind::Semi) {
@@ -4365,7 +4375,10 @@ impl<'a> Parser<'a> {
                     .trim_start_matches("0x")
                     .trim_start_matches("0X")
                     .replace('_', "");
-                let value = i64::from_str_radix(&clean, 16)
+                // Parse as u64 first — hex literals are often unsigned bit patterns
+                // (e.g., 0xbb67ae8584caa73b for SHA-256 constants), then reinterpret as i64
+                let value = u64::from_str_radix(&clean, 16)
+                    .map(|v| v as i64)
                     .map_err(|_| miette::miette!("invalid hexadecimal literal: {}", text))?;
                 Ok(Expr::Literal {
                     id: self.next_id(),
@@ -4499,6 +4512,7 @@ impl<'a> Parser<'a> {
 
             // Linear algebra constructors: vec2(x, y), vec3(x, y, z), etc.
             // Autodiff constructors: dual(value, derivative)
+            // Guard with peek_n(1) so these keywords can also be used as identifiers
             TokenKind::Vec2
             | TokenKind::Vec3
             | TokenKind::Vec4
@@ -4509,7 +4523,9 @@ impl<'a> Parser<'a> {
             | TokenKind::Dual
             | TokenKind::Grad
             | TokenKind::Jacobian
-            | TokenKind::Hessian => {
+            | TokenKind::Hessian
+                if self.peek_n(1) == TokenKind::LParen =>
+            {
                 let type_name = self.advance().text.clone();
                 self.expect(TokenKind::LParen)?;
                 let mut args = Vec::new();
@@ -4535,11 +4551,11 @@ impl<'a> Parser<'a> {
             }
 
             // Identifiers and paths (including contextual keywords used as identifiers)
-            // Note: contextual keywords with special syntax (Sample, Query, Observe, etc.)
-            // are handled AFTER this case when followed by their special syntax patterns
+            // Exclude DSL keywords when followed by their special syntax so they fall
+            // through to their guarded match arms below (Do, Sample, Query, etc.)
             _ if self.at(TokenKind::Ident)
                 || self.at(TokenKind::SelfLower)
-                || (self.is_contextual_keyword() && !self.is_dsl_keyword_with_parens()) =>
+                || (self.is_contextual_keyword() && !self.is_keyword_with_special_expr()) =>
             {
                 // Check for macro invocation (identifier followed by !)
                 if self.peek_n(1) == TokenKind::Bang {
@@ -4767,8 +4783,8 @@ impl<'a> Parser<'a> {
                 })
             }
 
-            // Probabilistic operations
-            TokenKind::Sample => {
+            // Probabilistic operations (only when followed by '(' — otherwise it's an identifier)
+            TokenKind::Sample if self.peek_n(1) == TokenKind::LParen => {
                 self.advance();
                 self.expect(TokenKind::LParen)?;
                 let dist = self.parse_expr()?;
@@ -4779,46 +4795,39 @@ impl<'a> Parser<'a> {
                 })
             }
 
-            // Async block: async { ... }
-            TokenKind::Async => {
+            // Async block: async { ... } or async |...| { ... }
+            TokenKind::Async
+                if self.peek_n(1) == TokenKind::LBrace || self.peek_n(1) == TokenKind::Pipe =>
+            {
                 self.advance();
                 if self.at(TokenKind::Pipe) {
                     // Async closure: async |x| { ... }
                     self.parse_async_closure()
-                } else if self.at(TokenKind::LBrace) {
+                } else {
                     // Async block: async { ... }
                     let block = self.parse_block()?;
                     Ok(Expr::AsyncBlock {
                         id: self.next_id(),
                         block,
                     })
-                } else {
-                    Err(miette::miette!(
-                        "Expected '{{' or '|' after 'async', found {:?}",
-                        self.peek()
-                    ))
                 }
             }
 
             // Unsafe block: unsafe { ... }
-            TokenKind::Unsafe => {
+            TokenKind::Unsafe if self.peek_n(1) == TokenKind::LBrace => {
                 self.advance();
-                if self.at(TokenKind::LBrace) {
-                    let block = self.parse_block()?;
-                    Ok(Expr::UnsafeBlock {
-                        id: self.next_id(),
-                        block,
-                    })
-                } else {
-                    Err(miette::miette!(
-                        "Expected '{{' after 'unsafe', found {:?}",
-                        self.peek()
-                    ))
-                }
+                let block = self.parse_block()?;
+                Ok(Expr::UnsafeBlock {
+                    id: self.next_id(),
+                    block,
+                })
             }
 
-            // Spawn: spawn { ... } or spawn expr
-            TokenKind::Spawn => {
+            // Spawn: spawn { ... } or spawn expr (when followed by { or expression-starting token)
+            TokenKind::Spawn
+                if self.peek_n(1) == TokenKind::LBrace
+                    || recovery::can_start_expression(self.peek_n(1)) =>
+            {
                 self.advance();
                 let expr = if self.at(TokenKind::LBrace) {
                     let block = self.parse_block()?;
@@ -4847,17 +4856,21 @@ impl<'a> Parser<'a> {
 
             // ==================== SOUNIO EPISTEMIC EXPRESSIONS ====================
 
-            // do(X = 1) - Pearl's causal intervention
-            TokenKind::Do => self.parse_do_expr(),
+            // do(X = 1) - Pearl's causal intervention (only when followed by '(')
+            TokenKind::Do if self.peek_n(1) == TokenKind::LParen => self.parse_do_expr(),
 
-            // counterfactual { factual; do(X=1); outcome }
-            TokenKind::Counterfactual => self.parse_counterfactual_expr(),
+            // counterfactual { factual; do(X=1); outcome } (only when followed by '{')
+            TokenKind::Counterfactual if self.peek_n(1) == TokenKind::LBrace => {
+                self.parse_counterfactual_expr()
+            }
 
-            // query P(Y | X, do(Z))
-            TokenKind::Query => self.parse_query_expr(),
+            // query P(Y | X, do(Z)) — query is followed by target expression, not '('
+            TokenKind::Query if recovery::can_start_expression(self.peek_n(1)) => {
+                self.parse_query_expr()
+            }
 
-            // observe(data ~ distribution)
-            TokenKind::Observe => self.parse_observe_expr(),
+            // observe(data ~ distribution) (only when followed by '(')
+            TokenKind::Observe if self.peek_n(1) == TokenKind::LParen => self.parse_observe_expr(),
 
             // Knowledge type constructor: Knowledge { value, epsilon, validity, provenance }
             TokenKind::Knowledge => self.parse_knowledge_expr(),
@@ -5748,9 +5761,9 @@ impl<'a> Parser<'a> {
     /// These are "soft keywords" that have special meaning in specific syntactic positions
     /// but can be used as variable/parameter names when the context is unambiguous.
     ///
-    /// NOTE: Keywords with special expression syntax (Sample, Query, Observe, Infer, Do,
-    /// Counterfactual) are NOT included here because they have unambiguous syntactic
-    /// positions and shouldn't be used as variable names.
+    /// DSL keywords with special expression syntax (Sample, Query, Observe, Infer, Do)
+    /// are included here so they work as parameter names and pattern bindings.
+    /// Their special parsing in parse_primary() is guarded by peek_n(1) checks.
     fn is_contextual_keyword(&self) -> bool {
         matches!(
             self.peek(),
@@ -5792,6 +5805,36 @@ impl<'a> Parser<'a> {
                 | TokenKind::Causal         // "causal" - for module epistemic::causal
                 | TokenKind::Kernel         // "kernel" - for struct Kernel types
                 | TokenKind::Counterfactual // When not followed by '{'
+                // DSL keywords with special (...) syntax — contextual when NOT followed by (
+                | TokenKind::Sample         // "sample" - parameter/variable name
+                | TokenKind::Query          // "query" - parameter/variable name
+                | TokenKind::Observe        // "observe" - parameter/variable name
+                | TokenKind::Infer          // "infer" - parameter/variable name
+                | TokenKind::Do             // "do" - identifier in non-DSL context
+                // Autodiff/linalg type keywords (used as struct/field/param names in stdlib)
+                | TokenKind::Tensor         // "Tensor" - struct name in nn modules
+                | TokenKind::Hessian        // "Hessian" - type/field name
+                | TokenKind::Jacobian       // "Jacobian" - type/field name
+                | TokenKind::Grad           // "grad" - variable/function name
+                | TokenKind::Dual           // "dual" - variable/type name
+                | TokenKind::Quantity       // "Quantity" - type name
+                // Safety/FFI/modifier keywords (used as identifiers in stdlib)
+                | TokenKind::Assert         // "assert" - function name in test module
+                | TokenKind::Assume         // "assume" - function name
+                | TokenKind::Unsafe         // "unsafe" - identifier in some contexts
+                | TokenKind::Extern         // "extern" - identifier in FFI contexts
+                | TokenKind::Affine         // "affine" - type/property name
+                | TokenKind::Linear         // "linear" - type/property name
+                | TokenKind::Copy           // "copy" - trait/identifier name
+                | TokenKind::Move           // "move" - identifier name
+                | TokenKind::Drop           // "drop" - function/identifier name
+                | TokenKind::Device         // "device" - identifier name
+                | TokenKind::Shared         // "shared" - identifier name
+                | TokenKind::Async          // "async" - module name, identifier
+                | TokenKind::Spawn          // "spawn" - function name in thread module
+                | TokenKind::Valid          // "Valid" - enum variant/identifier
+                | TokenKind::ValidUntil     // "ValidUntil" - identifier
+                | TokenKind::ValidWhile // "ValidWhile" - identifier
         )
     }
 
@@ -5810,6 +5853,36 @@ impl<'a> Parser<'a> {
             TokenKind::Counterfactual => next == TokenKind::LBrace,
             // Knowledge has special syntax: Knowledge { ... } or Knowledge::new(...)
             TokenKind::Knowledge => next == TokenKind::LBrace || next == TokenKind::ColonColon,
+            _ => false,
+        }
+    }
+
+    /// Check if the current token is a contextual keyword that has special expression syntax.
+    /// When this returns true, the identifier fallback in parse_primary() should NOT match,
+    /// allowing the specific guarded match arms to handle these tokens instead.
+    fn is_keyword_with_special_expr(&self) -> bool {
+        let next = self.peek_n(1);
+        match self.peek() {
+            // Epistemic DSL keywords with (...) syntax
+            TokenKind::Sample | TokenKind::Observe | TokenKind::Infer | TokenKind::Do => {
+                next == TokenKind::LParen
+            }
+            // Query uses `query <expr>` syntax (e.g., `query P(Y | X)`)
+            TokenKind::Query => recovery::can_start_expression(next),
+            // Keywords with {...} syntax
+            TokenKind::Counterfactual => next == TokenKind::LBrace,
+            // Knowledge: { ... } or ::new(...)
+            TokenKind::Knowledge => next == TokenKind::LBrace || next == TokenKind::ColonColon,
+            // Async block/closure: async { ... } or async |...|
+            TokenKind::Async => next == TokenKind::LBrace || next == TokenKind::Pipe,
+            // Unsafe block: unsafe { ... }
+            TokenKind::Unsafe => next == TokenKind::LBrace,
+            // Spawn expression: spawn { ... } or spawn <expr>
+            TokenKind::Spawn => next == TokenKind::LBrace || recovery::can_start_expression(next),
+            // Linalg/autodiff constructors: hessian(...), grad(...), etc.
+            TokenKind::Hessian | TokenKind::Jacobian | TokenKind::Grad | TokenKind::Dual => {
+                next == TokenKind::LParen
+            }
             _ => false,
         }
     }

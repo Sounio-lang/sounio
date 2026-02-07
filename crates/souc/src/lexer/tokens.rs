@@ -280,6 +280,10 @@ pub enum TokenKind {
     CStringLit,
     #[regex(r#"'([^'\\]|\\.)'"#)]
     CharLit,
+    // Lifetime annotations: 'a, 'static, '_
+    // Priority 2 so that 'x' (CharLit) wins over 'x (Lifetime) when closing quote exists
+    #[regex(r"'[a-zA-Z_][a-zA-Z0-9_]*", priority = 2)]
+    Lifetime,
 
     // Unit literals (number with underscore-prefixed unit suffix)
     // e.g., 500_mg, 10.5_mL, 3.14_kg
@@ -689,6 +693,7 @@ impl TokenKind {
             TokenKind::StringLit => "<string>",
             TokenKind::CStringLit => "<c_string>",
             TokenKind::CharLit => "<char>",
+            TokenKind::Lifetime => "<lifetime>",
             TokenKind::IntUnitLit => "<int_unit>",
             TokenKind::FloatUnitLit => "<float_unit>",
             TokenKind::TypedIntLit => "<typed_int>",
