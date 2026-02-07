@@ -173,6 +173,8 @@ pub struct TypeChecker {
     ast: Option<std::sync::Arc<Ast>>,
     /// Current function being type-checked (for threshold lookup)
     current_fn: Option<String>,
+    /// Current impl target type (for resolving `Self` / `self` parameter types)
+    current_impl_type: Option<Type>,
     /// Declared ontology prefixes (from `ontology X from "..."` declarations)
     ontology_prefixes: std::collections::HashSet<String>,
     /// Used ontology prefixes (to detect unused imports)
@@ -329,6 +331,7 @@ impl TypeChecker {
             probabilistic_threshold: None, // Enable with enable_probabilistic_checking()
             ast: None,
             current_fn: None,
+            current_impl_type: None,
             ontology_prefixes: std::collections::HashSet::new(),
             used_ontology_prefixes: std::collections::HashSet::new(),
             warnings: Vec::new(),
@@ -2782,6 +2785,10 @@ impl TypeChecker {
         let self_ty = self.lower_type_expr(&i.target_type);
         let hir_self_ty = self.type_to_hir(&self_ty);
 
+        // Set impl context so self parameter types resolve correctly
+        let prev_impl_type = self.current_impl_type.take();
+        self.current_impl_type = Some(self_ty.clone());
+
         // Get the type name for qualified method names
         let type_name = match &i.target_type {
             TypeExpr::Named { path, .. } => path.to_string(),
@@ -2828,6 +2835,9 @@ impl TypeChecker {
                 methods.push(hir_fn);
             }
         }
+
+        // Restore previous impl context
+        self.current_impl_type = prev_impl_type;
 
         // Get trait reference name
         let trait_ref = i.trait_ref.as_ref().map(|p| p.to_string());
@@ -7431,7 +7441,13 @@ impl TypeChecker {
                 abi: abi.as_ref().map(|a| a.to_string()),
             },
             TypeExpr::Infer => Type::Unknown,
-            TypeExpr::SelfType => Type::SelfType,
+            TypeExpr::SelfType => {
+                if let Some(impl_ty) = &self.current_impl_type {
+                    impl_ty.clone()
+                } else {
+                    Type::SelfType
+                }
+            }
 
             TypeExpr::Knowledge { value_type, .. } => Type::Named {
                 name: "Knowledge".to_string(),
@@ -7739,6 +7755,8 @@ impl TypeChecker {
                 term: term.clone(),
             },
             Type::Never => HirType::Never,
+            // NB: SelfType is still reachable for `Self` used outside impl blocks,
+            // which is a semantic error. Do not remove.
             Type::Unknown | Type::Error | Type::SelfType => HirType::Error,
             // Linear algebra primitives
             Type::Vec2 => HirType::Vec2,
