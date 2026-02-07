@@ -441,6 +441,11 @@ impl Resolver {
             if let Some(assoc_def_id) = self.symbols.lookup_type(&qualified_name) {
                 return Some(assoc_def_id);
             }
+
+            // Check for associated function (TypeName::fn_name)
+            if let Some(fn_def_id) = self.symbols.lookup(&qualified_name) {
+                return Some(fn_def_id);
+            }
         }
 
         // Try to find the starting module
@@ -1186,6 +1191,27 @@ impl Resolver {
         // Register methods from impl block
         for item in &i.items {
             if let ImplItem::Fn(f) = item {
+                // Check if it's an associated function (no self parameter)
+                let is_associated = f.params.first().map_or(
+                    true,
+                    |p| !matches!(&p.pattern, Pattern::Binding { name, .. } if name == "self"),
+                );
+
+                // Register associated functions as resolvable value definitions
+                if is_associated {
+                    let qualified_name = format!("{}::{}", type_name, f.name);
+                    let def_id = self.symbols.fresh_def_id();
+                    let _ = self.symbols.define(qualified_name.clone(), def_id);
+                    self.symbols.insert(Symbol {
+                        def_id,
+                        name: qualified_name,
+                        kind: DefKind::Function,
+                        node_id: f.id,
+                        span: f.span,
+                        parent: None,
+                    });
+                }
+
                 let method_def = MethodDef {
                     name: f.name.clone(),
                     params: f.params.iter().map(|p| p.ty.clone()).collect(),

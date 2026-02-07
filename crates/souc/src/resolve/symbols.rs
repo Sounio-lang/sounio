@@ -605,6 +605,33 @@ impl SymbolTable {
                 },
             );
         }
+
+        // Built-in associated functions (constructors)
+        let builtin_assoc_fns = [
+            "Vec::new",
+            "Vec::with_capacity",
+            "Box::new",
+            "HashMap::new",
+            "HashSet::new",
+            "String::new",
+            "String::from",
+        ];
+
+        for name in builtin_assoc_fns {
+            let def_id = self.fresh_def_id();
+            let _ = self.define(name.to_string(), def_id);
+            self.symbols.insert(
+                def_id,
+                Symbol {
+                    def_id,
+                    name: name.to_string(),
+                    kind: DefKind::BuiltinFunction,
+                    node_id: NodeId(0),
+                    span: Span::default(),
+                    parent: None,
+                },
+            );
+        }
     }
 
     /// Generate fresh DefId

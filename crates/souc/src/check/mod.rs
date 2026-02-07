@@ -3325,6 +3325,11 @@ impl TypeChecker {
                             } else {
                                 (HirExprKind::Global(path.to_string()), HirType::Error)
                             }
+                        } else if self.is_builtin_associated_fn(&path.segments) {
+                            // Builtin associated function (Vec::new, Box::new, etc.)
+                            let full_path = path.to_string();
+                            let ty = self.get_builtin_associated_fn_type(&path.segments);
+                            (HirExprKind::Global(full_path), ty)
                         } else {
                             // Module-qualified path not found - include module info in error if available
                             let error_msg = if let Some(ref resolved) = path.resolved_module {
@@ -4928,9 +4933,16 @@ impl TypeChecker {
                 let mut checked_arms = Vec::new();
                 let mut arm_types = Vec::new();
 
+                // Convert scrutinee HirType to internal Type for pattern binding
+                let scrutinee_internal_ty = self.hir_type_to_type(&scrutinee_ty);
+
                 for arm in arms {
+                    // Push scope for pattern variables
+                    self.env.push_scope();
+
                     // Bind pattern variables based on scrutinee type
-                    // For now, just check the body
+                    self.bind_pattern_to_type(&arm.pattern, &scrutinee_internal_ty, false);
+
                     let body_expr = self.check_expr(&arm.body, None)?;
                     arm_types.push(body_expr.ty.clone());
 
@@ -4939,6 +4951,9 @@ impl TypeChecker {
                         guard: None,
                         body: body_expr,
                     });
+
+                    // Pop pattern variable scope
+                    self.env.pop_scope();
                 }
 
                 // Determine the result type:
@@ -5886,6 +5901,50 @@ impl TypeChecker {
             || name.starts_with("quat_sigmoid")
         {}
         result
+    }
+
+    /// Check if a qualified path is a builtin associated function
+    fn is_builtin_associated_fn(&self, segments: &[String]) -> bool {
+        if segments.len() != 2 {
+            return false;
+        }
+        let full_name = format!("{}::{}", segments[0], segments[1]);
+        matches!(
+            full_name.as_str(),
+            "Vec::new"
+                | "Vec::with_capacity"
+                | "Box::new"
+                | "HashMap::new"
+                | "HashSet::new"
+                | "String::new"
+                | "String::from"
+        )
+    }
+
+    /// Get the return type of a builtin associated function
+    fn get_builtin_associated_fn_type(&self, segments: &[String]) -> HirType {
+        let type_name = &segments[0];
+        let fn_name = &segments[1];
+        match (type_name.as_str(), fn_name.as_str()) {
+            ("Vec", "new") | ("Vec", "with_capacity") => HirType::Named {
+                name: "Vec".to_string(),
+                args: vec![],
+            },
+            ("Box", "new") => HirType::Named {
+                name: "Box".to_string(),
+                args: vec![],
+            },
+            ("HashMap", "new") => HirType::Named {
+                name: "HashMap".to_string(),
+                args: vec![],
+            },
+            ("HashSet", "new") => HirType::Named {
+                name: "HashSet".to_string(),
+                args: vec![],
+            },
+            ("String", "new") | ("String", "from") => HirType::String,
+            _ => HirType::Error,
+        }
     }
 
     /// Get the type of a builtin function
@@ -8019,8 +8078,64 @@ impl TypeChecker {
             Pattern::Wildcard | Pattern::Literal(_) => {
                 // No bindings to create
             }
-            _ => {
-                // Other patterns not yet supported in let statements
+            Pattern::Enum { path, patterns } => {
+                // Look up the variant in the enum's TypeDef to get field types
+                let variant_name = path.segments.last().cloned().unwrap_or_default();
+                let enum_name = if path.segments.len() >= 2 {
+                    path.segments[path.segments.len() - 2].clone()
+                } else if let Type::Named { name, .. } = ty {
+                    name.clone()
+                } else {
+                    return;
+                };
+                // Clone field types to avoid borrow conflict with self
+                let field_types_cloned = self.type_defs.get(&enum_name).and_then(|td| {
+                    if let TypeDef::Enum { variants, .. } = td {
+                        variants
+                            .iter()
+                            .find(|(v, _)| *v == variant_name)
+                            .map(|(_, types)| types.clone())
+                    } else {
+                        None
+                    }
+                });
+                if let Some(field_types) = field_types_cloned {
+                    if let Some(pats) = patterns {
+                        for (pat, field_ty) in pats.iter().zip(field_types.iter()) {
+                            self.bind_pattern_to_type(pat, field_ty, is_mut);
+                        }
+                    }
+                }
+            }
+            Pattern::Struct { path, fields } => {
+                // Look up struct type to find field types (clone to avoid borrow conflict)
+                let type_name = path.segments.last().cloned().unwrap_or_default();
+                let struct_fields_cloned = self.type_defs.get(&type_name).and_then(|td| {
+                    if let TypeDef::Struct {
+                        fields: struct_fields,
+                        ..
+                    } = td
+                    {
+                        Some(struct_fields.clone())
+                    } else {
+                        None
+                    }
+                });
+                if let Some(struct_fields) = struct_fields_cloned {
+                    for (field_name, field_pat) in fields {
+                        if let Some((_, field_ty)) =
+                            struct_fields.iter().find(|(n, _)| n == field_name)
+                        {
+                            self.bind_pattern_to_type(field_pat, field_ty, is_mut);
+                        }
+                    }
+                }
+            }
+            Pattern::Or(patterns) => {
+                // Bind variables from the first alternative (all alternatives must bind the same names)
+                if let Some(first) = patterns.first() {
+                    self.bind_pattern_to_type(first, ty, is_mut);
+                }
             }
         }
     }
