@@ -2706,8 +2706,35 @@ fn check(
     let use_json = error_format == "json";
     tracing::info!("Type-checking {:?}", input);
 
-    let source_content = std::fs::read_to_string(input)
-        .map_err(|e| miette::miette!("Failed to read input file: {}", e))?;
+    let source_content = if input.is_dir() {
+        // Directory compilation mode: concatenate all .sio files for diagnostics
+        let mut files: Vec<std::path::PathBuf> = std::fs::read_dir(input)
+            .map_err(|e| miette::miette!("Cannot read directory {}: {}", input.display(), e))?
+            .filter_map(|entry| entry.ok())
+            .map(|entry| entry.path())
+            .filter(|p| p.extension().and_then(|x| x.to_str()) == Some("sio"))
+            .collect();
+        files.sort_by(|a, b| {
+            let a_is_mod = a.file_name().and_then(|f| f.to_str()) == Some("mod.sio");
+            let b_is_mod = b.file_name().and_then(|f| f.to_str()) == Some("mod.sio");
+            match (a_is_mod, b_is_mod) {
+                (true, false) => std::cmp::Ordering::Greater,
+                (false, true) => std::cmp::Ordering::Less,
+                _ => a.cmp(b),
+            }
+        });
+        let mut combined = String::new();
+        for file in &files {
+            if let Ok(content) = std::fs::read_to_string(file) {
+                combined.push_str(&content);
+                combined.push('\n');
+            }
+        }
+        combined
+    } else {
+        std::fs::read_to_string(input)
+            .map_err(|e| miette::miette!("Failed to read input file: {}", e))?
+    };
 
     let source_file =
         sounio::SourceFile::new(input.to_string_lossy().to_string(), source_content.clone());

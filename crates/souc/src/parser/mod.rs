@@ -461,6 +461,10 @@ impl<'a> Parser<'a> {
             TokenKind::Causal => self.parse_causal_model_def(visibility),
             TokenKind::Unit => self.parse_unit_def(visibility, doc),
             TokenKind::Module => self.parse_module_decl(visibility, doc),
+            // Handle `mod` as alias for `module` (e.g., `pub mod foo;`)
+            TokenKind::Ident if self.current().text == "mod" => {
+                self.parse_mod_shorthand(visibility, doc)
+            }
             _ => {
                 let found = self.peek();
                 let span = self.span();
@@ -1513,7 +1517,9 @@ impl<'a> Parser<'a> {
     /// Parse module declaration: `pub module foo { ... }` or `mod foo;`
     fn parse_module_path(&mut self) -> Result<String> {
         let mut path = self.parse_ident()?;
-        while self.at(TokenKind::Dot) {
+        // Accept both . and :: as module path separators
+        // `module ffi.cstring` and `module ffi::cstring` are equivalent
+        while self.at(TokenKind::Dot) || self.at(TokenKind::ColonColon) {
             self.advance();
             let segment = self.parse_ident()?;
             path.push('.');
@@ -1547,6 +1553,44 @@ impl<'a> Parser<'a> {
             }))
         } else {
             // File module: `mod foo;`
+            self.expect(TokenKind::Semi)?;
+            let end = self.span();
+
+            Ok(Item::Module(ModuleDef {
+                id: self.next_id(),
+                visibility,
+                name,
+                items: None,
+                doc,
+                span: start.merge(end),
+            }))
+        }
+    }
+
+    /// Parse `mod` as shorthand for `module` (e.g., `pub mod foo;`)
+    fn parse_mod_shorthand(&mut self, visibility: Visibility, doc: Option<String>) -> Result<Item> {
+        let start = self.span();
+        self.advance(); // consume `mod` identifier
+        let name = self.parse_module_path()?;
+
+        if self.at(TokenKind::LBrace) {
+            self.advance();
+            let mut items = Vec::new();
+            while !self.at(TokenKind::RBrace) && !self.at(TokenKind::Eof) {
+                items.push(self.parse_item()?);
+            }
+            self.expect(TokenKind::RBrace)?;
+            let end = self.span();
+
+            Ok(Item::Module(ModuleDef {
+                id: self.next_id(),
+                visibility,
+                name,
+                items: Some(items),
+                doc,
+                span: start.merge(end),
+            }))
+        } else {
             self.expect(TokenKind::Semi)?;
             let end = self.span();
 

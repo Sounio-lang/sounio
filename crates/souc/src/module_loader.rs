@@ -29,9 +29,85 @@ pub struct ImportMapping {
 }
 
 pub fn load_program_ast(entry_path: &StdPath) -> Result<Ast> {
+    // Directory compilation mode: when given a directory or mod.sio,
+    // concatenate all .sio files into a single flat compilation unit.
+    if entry_path.is_dir() {
+        return load_directory_ast(entry_path);
+    }
+    if entry_path.file_name().and_then(|f| f.to_str()) == Some("mod.sio") {
+        if let Some(dir) = entry_path.parent() {
+            // Only use directory mode if there are sibling .sio files
+            let sibling_count = std::fs::read_dir(dir)
+                .map(|rd| {
+                    rd.filter_map(|e| e.ok())
+                        .filter(|e| {
+                            e.path().extension().and_then(|x| x.to_str()) == Some("sio")
+                                && e.path() != entry_path
+                        })
+                        .count()
+                })
+                .unwrap_or(0);
+            if sibling_count > 0 {
+                return load_directory_ast(dir);
+            }
+        }
+    }
+
     let mut loader = ModuleLoader::new()?;
     let root_id = loader.load_module(entry_path)?;
     loader.into_ast(root_id)
+}
+
+/// Load all `.sio` files in a directory as a single flat compilation unit.
+/// Files are sorted alphabetically, with `mod.sio` always last (as the entry point).
+/// This enables multi-file projects where definitions in earlier files are
+/// visible to later files without explicit import statements.
+fn load_directory_ast(dir: &StdPath) -> Result<Ast> {
+    let mut files: Vec<PathBuf> = std::fs::read_dir(dir)
+        .map_err(|e| miette::miette!("Cannot read directory {}: {}", dir.display(), e))?
+        .filter_map(|entry| entry.ok())
+        .map(|entry| entry.path())
+        .filter(|p| p.extension().and_then(|x| x.to_str()) == Some("sio"))
+        .collect();
+
+    if files.is_empty() {
+        return Err(miette::miette!(
+            "No .sio files found in directory {}",
+            dir.display()
+        ));
+    }
+
+    // Sort: alphabetical by filename, but mod.sio always last
+    files.sort_by(|a, b| {
+        let a_is_mod = a.file_name().and_then(|f| f.to_str()) == Some("mod.sio");
+        let b_is_mod = b.file_name().and_then(|f| f.to_str()) == Some("mod.sio");
+        match (a_is_mod, b_is_mod) {
+            (true, false) => std::cmp::Ordering::Greater,
+            (false, true) => std::cmp::Ordering::Less,
+            _ => a.cmp(b),
+        }
+    });
+
+    let mut all_items = Vec::new();
+    let mut all_node_spans = std::collections::HashMap::new();
+    let mut next_node_id = 0u32;
+
+    for file in &files {
+        let source = std::fs::read_to_string(file)
+            .map_err(|e| miette::miette!("Failed to read {}: {}", file.display(), e))?;
+        let tokens = lexer::lex(&source)?;
+        let (mut ast, next_id) = parser::parse_with_id_start(&tokens, &source, next_node_id)?;
+        next_node_id = next_id;
+        all_items.append(&mut ast.items);
+        all_node_spans.extend(ast.node_spans);
+    }
+
+    Ok(Ast {
+        module_name: None,
+        items: all_items,
+        inner_doc: None,
+        node_spans: all_node_spans,
+    })
 }
 
 struct ModuleLoader {
