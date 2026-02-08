@@ -1,0 +1,877 @@
+// AST Pretty-Printer
+//
+// Walks the full AST and emits Sounio source code via print/print_char/print_int.
+// Uses an indent level for nested blocks. Each helper covers one AST node type.
+// Helpers must precede callers (no forward refs in Sounio).
+
+// ============================================================
+// Low-level output helpers
+// ============================================================
+
+fn print_name(name: Name) with IO, Mut, Panic, Div {
+    var i: i64 = 0
+    while i < name.len {
+        print_char(name.buf[i])
+        i = i + 1
+    }
+}
+
+fn print_indent(level: i64) with IO, Mut, Panic, Div {
+    var i: i64 = 0
+    while i < level {
+        print("    ")
+        i = i + 1
+    }
+}
+
+fn print_string_list_segment(seg: StringList) with IO, Mut, Panic, Div, Alloc {
+    var i: i64 = 0
+    while i < seg.head_len {
+        print_char(seg.head_buf[i])
+        i = i + 1
+    }
+}
+
+// ============================================================
+// Path printing: Foo::Bar::Baz
+// ============================================================
+
+fn print_path_segments(segs: Option<Box<StringList>>, remaining: i64) with IO, Mut, Panic, Div, Alloc {
+    match segs {
+        Some(list) => {
+            print_string_list_segment(*list)
+            if remaining > 1 {
+                print("::")
+                print_path_segments((*list).tail, remaining - 1)
+            }
+        }
+        None => {}
+    }
+}
+
+fn print_path(path: AstPath) with IO, Mut, Panic, Div, Alloc {
+    print_path_segments(Some(Box::new(path.segments)), path.seg_count)
+}
+
+// ============================================================
+// Type expression printing
+// ============================================================
+
+fn print_type_expr(te: TypeExpr) with IO, Mut, Panic, Div, Alloc {
+    match te.kind {
+        TypeNamed => {
+            print_path(te.path)
+            print_type_args_opt(te.type_args)
+        }
+        TypeReference => {
+            print("&")
+            print_type_inner(te.inner)
+        }
+        TypeRefMut => {
+            print("&!")
+            print_type_inner(te.inner)
+        }
+        TypeArray => {
+            print("[")
+            print_type_inner(te.inner)
+            print_array_size(te.array_size)
+            print("]")
+        }
+        TypeTuple => {
+            print("(")
+            print_type_expr_list_comma(te.type_args)
+            print(")")
+        }
+        TypeFn => {
+            print("fn(")
+            print_type_expr_list_comma(te.type_args)
+            print(")")
+            print_type_return(te.inner)
+            print_effect_list_opt(te.effects)
+        }
+        TypeUnit => {
+            print("()")
+        }
+        TypeNever => {
+            print("!")
+        }
+        TypeSelfUpper => {
+            print("Self")
+        }
+        TypeInfer => {
+            print("_")
+        }
+    }
+}
+
+fn print_type_inner(opt: Option<Box<TypeExpr>>) with IO, Mut, Panic, Div, Alloc {
+    match opt {
+        Some(te) => print_type_expr(*te)
+        None => {}
+    }
+}
+
+fn print_type_return(opt: Option<Box<TypeExpr>>) with IO, Mut, Panic, Div, Alloc {
+    match opt {
+        Some(te) => {
+            print(" -> ")
+            print_type_expr(*te)
+        }
+        None => {}
+    }
+}
+
+fn print_array_size(opt: Option<Box<Expr>>) with IO, Mut, Panic, Div, Alloc {
+    match opt {
+        Some(e) => {
+            print("; ")
+            print_expr(*e)
+        }
+        None => {}
+    }
+}
+
+fn print_type_args_opt(opt: Option<Box<TypeExprList>>) with IO, Mut, Panic, Div, Alloc {
+    match opt {
+        Some(list) => {
+            print("<")
+            print_type_expr_list_comma_inner(*list, true)
+            print(">")
+        }
+        None => {}
+    }
+}
+
+fn print_type_expr_list_comma(opt: Option<Box<TypeExprList>>) with IO, Mut, Panic, Div, Alloc {
+    match opt {
+        Some(list) => print_type_expr_list_comma_inner(*list, true)
+        None => {}
+    }
+}
+
+fn print_type_expr_list_comma_inner(list: TypeExprList, first: bool) with IO, Mut, Panic, Div, Alloc {
+    if !first {
+        print(", ")
+    }
+    print_type_expr(list.head)
+    match list.tail {
+        Some(rest) => print_type_expr_list_comma_inner(*rest, false)
+        None => {}
+    }
+}
+
+// ============================================================
+// Effect list printing: with IO, Mut, Alloc
+// ============================================================
+
+fn print_effect_list_opt(opt: Option<Box<EffectList>>) with IO, Mut, Panic, Div, Alloc {
+    match opt {
+        Some(list) => {
+            print(" with ")
+            print_effect_list_inner(*list, true)
+        }
+        None => {}
+    }
+}
+
+fn print_effect_list_inner(list: EffectList, first: bool) with IO, Mut, Panic, Div, Alloc {
+    if !first {
+        print(", ")
+    }
+    print_effect_ref(list.head)
+    match list.tail {
+        Some(rest) => print_effect_list_inner(*rest, false)
+        None => {}
+    }
+}
+
+fn print_effect_ref(eff: EffectRef) with IO, Mut, Panic, Div {
+    var i: i64 = 0
+    while i < eff.name_len {
+        print_char(eff.name_buf[i])
+        i = i + 1
+    }
+}
+
+// ============================================================
+// Pattern printing
+// ============================================================
+
+fn print_pattern(pat: Pattern) with IO, Mut, Panic, Div, Alloc {
+    match pat.kind {
+        PatWildcard => print("_")
+        PatBinding => {
+            if pat.is_mut {
+                print("var ")
+            }
+            print_name(pat.name)
+        }
+        PatIntLit => print_int(pat.int_val)
+        PatBoolTrue => print("true")
+        PatBoolFalse => print("false")
+        PatStringLit => {
+            print("\"")
+            print_name(pat.name)
+            print("\"")
+        }
+        PatEnum => {
+            print_path(pat.path)
+            print_pat_sub_patterns(pat.sub_patterns)
+        }
+        PatStruct => {
+            print_path(pat.path)
+            print(" { ")
+            print_pat_fields(pat.pat_fields)
+            print(" }")
+        }
+        PatTuple => {
+            print("(")
+            print_pattern_list_comma(pat.sub_patterns)
+            print(")")
+        }
+        PatOr => {
+            print_pattern_list_or(pat.sub_patterns)
+        }
+    }
+}
+
+fn print_pat_sub_patterns(opt: Option<Box<PatternList>>) with IO, Mut, Panic, Div, Alloc {
+    match opt {
+        Some(list) => {
+            print("(")
+            print_pattern_list_comma_inner(*list, true)
+            print(")")
+        }
+        None => {}
+    }
+}
+
+fn print_pattern_list_comma(opt: Option<Box<PatternList>>) with IO, Mut, Panic, Div, Alloc {
+    match opt {
+        Some(list) => print_pattern_list_comma_inner(*list, true)
+        None => {}
+    }
+}
+
+fn print_pattern_list_comma_inner(list: PatternList, first: bool) with IO, Mut, Panic, Div, Alloc {
+    if !first {
+        print(", ")
+    }
+    print_pattern(list.head)
+    match list.tail {
+        Some(rest) => print_pattern_list_comma_inner(*rest, false)
+        None => {}
+    }
+}
+
+fn print_pattern_list_or(opt: Option<Box<PatternList>>) with IO, Mut, Panic, Div, Alloc {
+    match opt {
+        Some(list) => print_pattern_list_or_inner(*list, true)
+        None => {}
+    }
+}
+
+fn print_pattern_list_or_inner(list: PatternList, first: bool) with IO, Mut, Panic, Div, Alloc {
+    if !first {
+        print(" | ")
+    }
+    print_pattern(list.head)
+    match list.tail {
+        Some(rest) => print_pattern_list_or_inner(*rest, false)
+        None => {}
+    }
+}
+
+fn print_pat_fields(opt: Option<Box<PatFieldList>>) with IO, Mut, Panic, Div, Alloc {
+    match opt {
+        Some(list) => print_pat_fields_inner(*list, true)
+        None => {}
+    }
+}
+
+fn print_pat_fields_inner(list: PatFieldList, first: bool) with IO, Mut, Panic, Div, Alloc {
+    if !first {
+        print(", ")
+    }
+    print_name(list.head.name)
+    print(": ")
+    print_pattern(list.head.pattern)
+    match list.tail {
+        Some(rest) => print_pat_fields_inner(*rest, false)
+        None => {}
+    }
+}
+
+// ============================================================
+// Expression printing
+// ============================================================
+
+fn print_expr(e: Expr) with IO, Mut, Panic, Div, Alloc {
+    match e.kind {
+        ExprIntLit => print_int(e.int_val)
+        ExprFloatLit => {
+            // TODO: float formatting — for now just print as int
+            print_int(e.int_val)
+        }
+        ExprBoolTrue => print("true")
+        ExprBoolFalse => print("false")
+        ExprStringLit => {
+            print("\"")
+            print_name(e.name)
+            print("\"")
+        }
+        ExprCharLit => {
+            print("'")
+            print_char(e.int_val)
+            print("'")
+        }
+        ExprIdent => print_name(e.name)
+        ExprPath => print_path(e.path)
+        ExprBinary => {
+            print_expr_opt(e.left)
+            print_binop(e.bin_op)
+            print_expr_opt(e.right)
+        }
+        ExprUnary => {
+            print_unaryop(e.un_op)
+            print_expr_opt(e.left)
+        }
+        ExprFieldAccess => {
+            print_expr_opt(e.left)
+            print(".")
+            print_name(e.name)
+        }
+        ExprIndex => {
+            print_expr_opt(e.left)
+            print("[")
+            print_expr_opt(e.right)
+            print("]")
+        }
+        ExprMethodCall => {
+            print_expr_opt(e.left)
+            print(".")
+            print_name(e.name)
+            print("(")
+            print_expr_list_comma(e.args)
+            print(")")
+        }
+        ExprCall => {
+            print_expr_opt(e.left)
+            print("(")
+            print_expr_list_comma(e.args)
+            print(")")
+        }
+        ExprIf => {
+            print("if ")
+            print_expr_opt(e.left)
+            print(" ")
+            print_block_opt(e.block, 0)
+            print_else_opt(e.else_expr)
+        }
+        ExprMatch => {
+            print("match ")
+            print_expr_opt(e.left)
+            print(" {\n")
+            print_match_arms(e.arms, 1)
+            print("}")
+        }
+        ExprWhile => {
+            print("while ")
+            print_expr_opt(e.left)
+            print(" ")
+            print_block_opt(e.block, 0)
+        }
+        ExprLoop => {
+            print("loop ")
+            print_block_opt(e.block, 0)
+        }
+        ExprBlock => {
+            print_block_opt(e.block, 0)
+        }
+        ExprReturn => {
+            print("return")
+            print_return_val(e.left)
+        }
+        ExprBreak => {
+            print("break")
+            print_return_val(e.left)
+        }
+        ExprContinue => print("continue")
+        ExprStructLit => {
+            print_path(e.path)
+            print(" { ")
+            print_struct_fields(e.fields)
+            print(" }")
+        }
+        ExprArrayLit => {
+            print("[")
+            print_expr_list_comma(e.args)
+            print("]")
+        }
+        ExprTupleLit => {
+            print("(")
+            print_expr_list_comma(e.args)
+            print(")")
+        }
+        ExprRange => {
+            print_expr_opt(e.left)
+            print_binop(e.bin_op)
+            print_expr_opt(e.right)
+        }
+        ExprError => print("/* error */")
+    }
+}
+
+fn print_expr_opt(opt: Option<Box<Expr>>) with IO, Mut, Panic, Div, Alloc {
+    match opt {
+        Some(e) => print_expr(*e)
+        None => {}
+    }
+}
+
+fn print_return_val(opt: Option<Box<Expr>>) with IO, Mut, Panic, Div, Alloc {
+    match opt {
+        Some(e) => {
+            print(" ")
+            print_expr(*e)
+        }
+        None => {}
+    }
+}
+
+fn print_else_opt(opt: Option<Box<Expr>>) with IO, Mut, Panic, Div, Alloc {
+    match opt {
+        Some(e) => {
+            print(" else ")
+            print_expr(*e)
+        }
+        None => {}
+    }
+}
+
+fn print_binop(op: BinaryOp) with IO {
+    match op {
+        OpAdd => print(" + ")
+        OpSub => print(" - ")
+        OpMul => print(" * ")
+        OpDiv => print(" / ")
+        OpRem => print(" % ")
+        OpEq => print(" == ")
+        OpNe => print(" != ")
+        OpLt => print(" < ")
+        OpLe => print(" <= ")
+        OpGt => print(" > ")
+        OpGe => print(" >= ")
+        OpAnd => print(" && ")
+        OpOr => print(" || ")
+        OpBitAnd => print(" & ")
+        OpBitOr => print(" | ")
+        OpBitXor => print(" ^ ")
+        OpShl => print(" << ")
+        OpShr => print(" >> ")
+        OpConcat => print(" ++ ")
+        OpRange => print("..")
+        OpRangeInclusive => print("..=")
+    }
+}
+
+fn print_unaryop(op: UnaryOp) with IO {
+    match op {
+        OpNeg => print("-")
+        OpNot => print("!")
+        OpRef => print("&")
+        OpRefMut => print("&!")
+        OpDeref => print("*")
+    }
+}
+
+fn print_expr_list_comma(opt: Option<Box<ExprList>>) with IO, Mut, Panic, Div, Alloc {
+    match opt {
+        Some(list) => print_expr_list_comma_inner(*list, true)
+        None => {}
+    }
+}
+
+fn print_expr_list_comma_inner(list: ExprList, first: bool) with IO, Mut, Panic, Div, Alloc {
+    if !first {
+        print(", ")
+    }
+    print_expr(list.head)
+    match list.tail {
+        Some(rest) => print_expr_list_comma_inner(*rest, false)
+        None => {}
+    }
+}
+
+fn print_match_arms(opt: Option<Box<MatchArmList>>, indent: i64) with IO, Mut, Panic, Div, Alloc {
+    match opt {
+        Some(list) => print_match_arms_inner(*list, indent)
+        None => {}
+    }
+}
+
+fn print_match_arms_inner(list: MatchArmList, indent: i64) with IO, Mut, Panic, Div, Alloc {
+    print_indent(indent)
+    print_pattern(list.head.pattern)
+    print(" => ")
+    print_expr(list.head.body)
+    print("\n")
+    match list.tail {
+        Some(rest) => print_match_arms_inner(*rest, indent)
+        None => {}
+    }
+}
+
+fn print_struct_fields(opt: Option<Box<StructFieldList>>) with IO, Mut, Panic, Div, Alloc {
+    match opt {
+        Some(list) => print_struct_fields_inner(*list, true)
+        None => {}
+    }
+}
+
+fn print_struct_fields_inner(list: StructFieldList, first: bool) with IO, Mut, Panic, Div, Alloc {
+    if !first {
+        print(", ")
+    }
+    print_name(list.head.name)
+    print(": ")
+    print_expr(list.head.value)
+    match list.tail {
+        Some(rest) => print_struct_fields_inner(*rest, false)
+        None => {}
+    }
+}
+
+// ============================================================
+// Block and statement printing
+// ============================================================
+
+fn print_block_opt(opt: Option<Box<Block>>, indent: i64) with IO, Mut, Panic, Div, Alloc {
+    match opt {
+        Some(blk) => print_block(*blk, indent)
+        None => {}
+    }
+}
+
+fn print_block(blk: Block, indent: i64) with IO, Mut, Panic, Div, Alloc {
+    print("{\n")
+    print_stmt_list(blk.stmts, indent + 1)
+    print_indent(indent)
+    print("}")
+}
+
+fn print_stmt_list(opt: Option<Box<StmtList>>, indent: i64) with IO, Mut, Panic, Div, Alloc {
+    match opt {
+        Some(list) => print_stmt_list_inner(*list, indent)
+        None => {}
+    }
+}
+
+fn print_stmt_list_inner(list: StmtList, indent: i64) with IO, Mut, Panic, Div, Alloc {
+    print_indent(indent)
+    print_stmt(list.head, indent)
+    print("\n")
+    match list.tail {
+        Some(rest) => print_stmt_list_inner(*rest, indent)
+        None => {}
+    }
+}
+
+fn print_stmt(s: Stmt, indent: i64) with IO, Mut, Panic, Div, Alloc {
+    match s.kind {
+        StmtLet => {
+            print("let ")
+            print_name(s.name)
+            print_optional_type_annot(s.ty)
+            print_optional_init(s.expr)
+        }
+        StmtVar => {
+            print("var ")
+            print_name(s.name)
+            print_optional_type_annot(s.ty)
+            print_optional_init(s.expr)
+        }
+        StmtExpr => {
+            print_expr_opt(s.expr)
+        }
+        StmtAssign => {
+            print_expr_opt(s.target)
+            print_assign_op(s.assign_op)
+            print_expr_opt(s.expr)
+        }
+    }
+}
+
+fn print_optional_type_annot(opt: Option<Box<TypeExpr>>) with IO, Mut, Panic, Div, Alloc {
+    match opt {
+        Some(te) => {
+            print(": ")
+            print_type_expr(*te)
+        }
+        None => {}
+    }
+}
+
+fn print_optional_init(opt: Option<Box<Expr>>) with IO, Mut, Panic, Div, Alloc {
+    match opt {
+        Some(e) => {
+            print(" = ")
+            print_expr(*e)
+        }
+        None => {}
+    }
+}
+
+fn print_assign_op(op: AssignOp) with IO {
+    match op {
+        AssignEq => print(" = ")
+        AssignAdd => print(" += ")
+        AssignSub => print(" -= ")
+        AssignMul => print(" *= ")
+        AssignDiv => print(" /= ")
+        AssignRem => print(" %= ")
+    }
+}
+
+// ============================================================
+// Item printing (top-level declarations)
+// ============================================================
+
+fn print_item_list_top(opt: Option<Box<ItemList>>) with IO, Mut, Panic, Div, Alloc {
+    match opt {
+        Some(list) => print_item_list_top_inner(*list)
+        None => {}
+    }
+}
+
+fn print_item_list_top_inner(list: ItemList) with IO, Mut, Panic, Div, Alloc {
+    print_item(list.head, 0)
+    print("\n")
+    match list.tail {
+        Some(rest) => {
+            print("\n")
+            print_item_list_top_inner(*rest)
+        }
+        None => {}
+    }
+}
+
+fn print_item(item: Item, indent: i64) with IO, Mut, Panic, Div, Alloc {
+    match item.kind {
+        ItemFn => print_fn_item(item.fn_def, indent)
+        ItemStruct => print_struct_item(item.name, item.struct_def, indent)
+        ItemEnum => print_enum_item(item.name, item.enum_def, indent)
+        ItemImpl => print_impl_item(item.impl_def, indent)
+        ItemTypeAlias => {
+            print_indent(indent)
+            print("type ")
+            print_name(item.name)
+            print(" = ")
+            print_type_inner(item.type_alias_ty)
+        }
+        ItemUse => {
+            print_indent(indent)
+            print("use ")
+            print_path(item.use_path)
+            if item.use_glob {
+                print("::*")
+            }
+        }
+    }
+}
+
+// ============================================================
+// Function definition
+// ============================================================
+
+fn print_fn_item(opt: Option<Box<FnDef>>, indent: i64) with IO, Mut, Panic, Div, Alloc {
+    match opt {
+        Some(fd) => print_fn_def(*fd, indent)
+        None => {}
+    }
+}
+
+fn print_fn_def(fd: FnDef, indent: i64) with IO, Mut, Panic, Div, Alloc {
+    print_indent(indent)
+    print("fn ")
+    print_name(fd.name)
+    print("(")
+    print_param_list(fd.params)
+    print(")")
+    print_optional_return(fd.return_type)
+    print_effect_list_opt(fd.effects)
+    print(" ")
+    print_block(fd.body, indent)
+}
+
+fn print_optional_return(opt: Option<Box<TypeExpr>>) with IO, Mut, Panic, Div, Alloc {
+    match opt {
+        Some(te) => {
+            print(" -> ")
+            print_type_expr(*te)
+        }
+        None => {}
+    }
+}
+
+fn print_param_list(opt: Option<Box<ParamList>>) with IO, Mut, Panic, Div, Alloc {
+    match opt {
+        Some(list) => print_param_list_inner(*list, true)
+        None => {}
+    }
+}
+
+fn print_param_list_inner(list: ParamList, first: bool) with IO, Mut, Panic, Div, Alloc {
+    if !first {
+        print(", ")
+    }
+    print_param(list.head)
+    match list.tail {
+        Some(rest) => print_param_list_inner(*rest, false)
+        None => {}
+    }
+}
+
+fn print_param(p: Param) with IO, Mut, Panic, Div, Alloc {
+    if p.is_self {
+        if p.is_self_mut {
+            print("&!self")
+        } else {
+            print("self")
+        }
+    } else {
+        print_name(p.name)
+        print(": ")
+        print_type_expr(p.ty)
+    }
+}
+
+// ============================================================
+// Struct definition
+// ============================================================
+
+fn print_struct_item(name: Name, opt: Option<Box<StructDef>>, indent: i64) with IO, Mut, Panic, Div, Alloc {
+    match opt {
+        Some(sd) => print_struct_def(name, *sd, indent)
+        None => {}
+    }
+}
+
+fn print_struct_def(name: Name, sd: StructDef, indent: i64) with IO, Mut, Panic, Div, Alloc {
+    print_indent(indent)
+    if sd.is_linear {
+        print("linear ")
+    }
+    print("struct ")
+    print_name(name)
+    print(" {\n")
+    print_field_def_list(sd.fields, indent + 1)
+    print_indent(indent)
+    print("}")
+}
+
+fn print_field_def_list(opt: Option<Box<FieldDefList>>, indent: i64) with IO, Mut, Panic, Div, Alloc {
+    match opt {
+        Some(list) => print_field_def_list_inner(*list, indent)
+        None => {}
+    }
+}
+
+fn print_field_def_list_inner(list: FieldDefList, indent: i64) with IO, Mut, Panic, Div, Alloc {
+    print_indent(indent)
+    print_name(list.head.name)
+    print(": ")
+    print_type_expr(list.head.ty)
+    // Always use comma separator for struct fields
+    match list.tail {
+        Some(rest) => {
+            print(",\n")
+            print_field_def_list_inner(*rest, indent)
+        }
+        None => {
+            print("\n")
+        }
+    }
+}
+
+// ============================================================
+// Enum definition
+// ============================================================
+
+fn print_enum_item(name: Name, opt: Option<Box<EnumDef>>, indent: i64) with IO, Mut, Panic, Div, Alloc {
+    match opt {
+        Some(ed) => print_enum_def(name, *ed, indent)
+        None => {}
+    }
+}
+
+fn print_enum_def(name: Name, ed: EnumDef, indent: i64) with IO, Mut, Panic, Div, Alloc {
+    print_indent(indent)
+    print("enum ")
+    print_name(name)
+    print(" {\n")
+    print_variant_list(ed.variants, indent + 1)
+    print_indent(indent)
+    print("}")
+}
+
+fn print_variant_list(opt: Option<Box<VariantDefList>>, indent: i64) with IO, Mut, Panic, Div, Alloc {
+    match opt {
+        Some(list) => print_variant_list_inner(*list, indent)
+        None => {}
+    }
+}
+
+fn print_variant_list_inner(list: VariantDefList, indent: i64) with IO, Mut, Panic, Div, Alloc {
+    print_indent(indent)
+    print_name(list.head.name)
+    match list.tail {
+        Some(rest) => {
+            print(",\n")
+            print_variant_list_inner(*rest, indent)
+        }
+        None => {
+            print("\n")
+        }
+    }
+}
+
+// ============================================================
+// Impl definition
+// ============================================================
+
+fn print_impl_item(opt: Option<Box<ImplDef>>, indent: i64) with IO, Mut, Panic, Div, Alloc {
+    match opt {
+        Some(id) => print_impl_def(*id, indent)
+        None => {}
+    }
+}
+
+fn print_impl_def(id: ImplDef, indent: i64) with IO, Mut, Panic, Div, Alloc {
+    print_indent(indent)
+    print("impl ")
+    print_type_expr(id.target_type)
+    print(" {\n")
+    print_impl_methods(id.methods, indent + 1)
+    print_indent(indent)
+    print("}")
+}
+
+fn print_impl_methods(opt: Option<Box<ItemList>>, indent: i64) with IO, Mut, Panic, Div, Alloc {
+    match opt {
+        Some(list) => print_impl_methods_inner(*list, indent)
+        None => {}
+    }
+}
+
+fn print_impl_methods_inner(list: ItemList, indent: i64) with IO, Mut, Panic, Div, Alloc {
+    print_item(list.head, indent)
+    print("\n")
+    match list.tail {
+        Some(rest) => {
+            print("\n")
+            print_impl_methods_inner(*rest, indent)
+        }
+        None => {}
+    }
+}
