@@ -2,9 +2,13 @@
 //!
 //! This module integrates GLM-4.7 (a large language model) into the Sounio compiler
 //! to make intelligent optimization decisions based on code analysis.
+//!
+//! Types are shared with the local heuristic optimizer via `optimization_types`.
 
-use crate::mir::instructions::{MirBinaryOp, MirInstruction};
-use crate::mir::{MirBlock, MirFunction, MirModule};
+use super::optimization_types::{
+    BlockFeatures, CodeFeatures, OptimizationSuggestion, OptimizationType,
+};
+use crate::mir::MirModule;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
@@ -27,82 +31,12 @@ impl Default for GLMConfig {
     fn default() -> Self {
         Self {
             api_url: "https://open.bigmodel.cn/api/coding/paas/v4/chat/completions".to_string(),
-            api_key: std::env::var("GLM_API_KEY").unwrap_or_else(|_| {
-                "622f603bf3a04a6c91b967d33231df34.BiTCkvs9VxeAywva".to_string()
-            }),
+            api_key: std::env::var("GLM_API_KEY").unwrap_or_default(),
             max_tokens: 1000,
             temperature: 0.1,
             timeout_secs: 30,
         }
     }
-}
-
-/// Code analysis features for ML model
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct CodeFeatures {
-    /// Function-level features
-    pub function_count: usize,
-    pub total_blocks: usize,
-    pub total_instructions: usize,
-    pub avg_block_size: f64,
-    pub max_block_size: usize,
-    pub loop_count: usize,
-    pub branch_count: usize,
-    pub call_count: usize,
-    pub arithmetic_ops: usize,
-    pub memory_ops: usize,
-
-    /// Block-level features
-    pub block_features: Vec<BlockFeatures>,
-
-    /// Type information
-    pub type_distribution: HashMap<String, usize>,
-    pub epistemic_types: usize, // Knowledge<T> types
-    pub uncertainty_ops: usize, // Operations involving uncertainty
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct BlockFeatures {
-    pub instruction_count: usize,
-    pub arithmetic_ops: usize,
-    pub memory_loads: usize,
-    pub memory_stores: usize,
-    pub branches: usize,
-    pub phi_nodes: usize,
-    pub loop_depth: usize,
-    pub has_uncertainty: bool,
-}
-
-/// Optimization suggestion from GLM-4.7
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct OptimizationSuggestion {
-    /// Type of optimization recommended
-    pub optimization_type: OptimizationType,
-    /// Confidence score (0.0-1.0)
-    pub confidence: f32,
-    /// Target (function name, block label, etc.)
-    pub target: String,
-    /// Parameters for the optimization
-    pub parameters: HashMap<String, String>,
-    /// Reasoning from the model
-    pub reasoning: String,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-pub enum OptimizationType {
-    ConstantPropagation,
-    DeadCodeElimination,
-    FunctionInlining,
-    LoopUnrolling,
-    StrengthReduction,
-    CommonSubexpressionElimination,
-    LoopInvariantCodeMotion,
-    AliasAnalysis,
-    ScalarReplacementOfAggregates,
-    // ML-specific optimizations
-    PredictiveInlining,
-    AdaptiveUnrolling,
-    UncertaintyAwareOptimization,
 }
 
 /// GLM-4.7 Integration Manager
@@ -145,8 +79,8 @@ impl GLMManager {
             return Ok(vec![suggestions.clone()]);
         }
 
-        // Extract code features
-        let features = self.extract_features(module, function_name);
+        // Extract code features using shared extraction
+        let features = super::optimization_types::extract_features(module, function_name);
 
         // Query GLM-4.7
         let suggestions = self.query_glm(&features).await?;
@@ -157,89 +91,6 @@ impl GLMManager {
         }
 
         Ok(suggestions)
-    }
-
-    /// Extract relevant features from MIR for ML analysis
-    fn extract_features(&self, module: &MirModule, function_name: &str) -> CodeFeatures {
-        let mut features = CodeFeatures {
-            function_count: module.functions.len(),
-            total_blocks: 0,
-            total_instructions: 0,
-            avg_block_size: 0.0,
-            max_block_size: 0,
-            loop_count: 0,
-            branch_count: 0,
-            call_count: 0,
-            arithmetic_ops: 0,
-            memory_ops: 0,
-            block_features: Vec::new(),
-            type_distribution: HashMap::new(),
-            epistemic_types: 0,
-            uncertainty_ops: 0,
-        };
-
-        // Find target function
-        if let Some(func) = module.functions.iter().find(|f| f.name == function_name) {
-            for block in &func.blocks {
-                let block_features = self.analyze_block(block);
-                features.block_features.push(block_features.clone());
-
-                features.total_blocks += 1;
-                features.total_instructions += block.instructions.len();
-                features.max_block_size = features.max_block_size.max(block.instructions.len());
-
-                // Count operations
-                for inst in &block.instructions {
-                    match inst {
-                        MirInstruction::Binary { op, .. } => {
-                            if op.is_arithmetic() {
-                                features.arithmetic_ops += 1;
-                            }
-                        }
-                        MirInstruction::Load { .. } | MirInstruction::Store { .. } => {
-                            features.memory_ops += 1
-                        }
-                        MirInstruction::Call { .. } => features.call_count += 1,
-                        _ => {}
-                    }
-                }
-            }
-
-            features.avg_block_size =
-                features.total_instructions as f64 / features.total_blocks.max(1) as f64;
-        }
-
-        features
-    }
-
-    /// Analyze a single block
-    fn analyze_block(&self, block: &MirBlock) -> BlockFeatures {
-        let mut features = BlockFeatures {
-            instruction_count: block.instructions.len(),
-            arithmetic_ops: 0,
-            memory_loads: 0,
-            memory_stores: 0,
-            branches: 0,
-            phi_nodes: 0,
-            loop_depth: 0,
-            has_uncertainty: false,
-        };
-
-        for inst in &block.instructions {
-            match inst {
-                MirInstruction::Binary { op, .. } => {
-                    if op.is_arithmetic() {
-                        features.arithmetic_ops += 1;
-                    }
-                }
-                MirInstruction::Load { .. } => features.memory_loads += 1,
-                MirInstruction::Store { .. } => features.memory_stores += 1,
-                MirInstruction::Phi { .. } => features.phi_nodes += 1,
-                _ => {}
-            }
-        }
-
-        features
     }
 
     /// Query GLM-4.7 API for optimization suggestions
@@ -429,7 +280,11 @@ mod tests {
     #[test]
     fn test_glm_config_default() {
         let config = GLMConfig::default();
-        assert!(!config.api_key.is_empty());
+        // API key comes from GLM_API_KEY env var; empty when unset
+        assert_eq!(
+            config.api_key,
+            std::env::var("GLM_API_KEY").unwrap_or_default()
+        );
         assert_eq!(config.max_tokens, 1000);
         assert_eq!(config.temperature, 0.1);
     }

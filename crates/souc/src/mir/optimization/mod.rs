@@ -21,6 +21,14 @@ pub mod alias_analysis;
 pub mod licm;
 pub mod sroa;
 
+// Shared types for ML-guided and heuristic optimization (always available)
+pub mod local_optimizer;
+pub mod optimization_types;
+
+// GLM-4.7 API-based ML-guided optimization
+#[cfg(feature = "glm")]
+pub mod glm_integration;
+
 // Re-export commonly used optimization types
 pub use common_subexpression_elimination::CommonSubexpressionElimination;
 pub use constant_propagation::ConstantPropagation;
@@ -40,6 +48,16 @@ pub use pipeline_with_validation::{PipelineResult, ValidatedOptimizationPipeline
 pub use alias_analysis::{AliasAnalysis, AliasAnalysisResult, AliasQuery, AliasResult};
 pub use licm::LoopInvariantCodeMotion;
 pub use sroa::Sroa;
+
+// Shared optimization types (always available — no feature gate)
+pub use local_optimizer::{DataCollector, HeuristicOptimizer};
+pub use optimization_types::{
+    BlockFeatures, CodeFeatures, OptimizationSuggestion, OptimizationType,
+};
+
+// GLM-4.7 exports (only GLMConfig and GLMManager; types come from optimization_types)
+#[cfg(feature = "glm")]
+pub use glm_integration::{GLMConfig, GLMManager};
 
 /// Create a default optimization pipeline with validation
 pub fn create_validated_optimization_pipeline() -> ValidatedOptimizationPipeline {
@@ -80,17 +98,56 @@ pub enum OptimizationLevel {
 /// Pass manager for running optimization passes
 pub struct PassManager {
     level: OptimizationLevel,
+    glm_enabled: bool,
+    ml_opt_enabled: bool,
+    collect_opt_data: bool,
+    data_collector: Option<local_optimizer::DataCollector>,
 }
 
 impl PassManager {
     pub fn new() -> Self {
         Self {
             level: OptimizationLevel::O2,
+            glm_enabled: false,
+            ml_opt_enabled: false,
+            collect_opt_data: false,
+            data_collector: None,
         }
     }
 
     pub fn new_with_level(level: OptimizationLevel) -> Self {
-        Self { level }
+        Self {
+            level,
+            glm_enabled: false,
+            ml_opt_enabled: false,
+            collect_opt_data: false,
+            data_collector: None,
+        }
+    }
+
+    pub fn new_with_glm(level: OptimizationLevel, glm_enabled: bool) -> Self {
+        Self {
+            level,
+            glm_enabled,
+            ml_opt_enabled: false,
+            collect_opt_data: false,
+            data_collector: None,
+        }
+    }
+
+    /// Create a pass manager with local ML-guided optimization
+    pub fn new_with_ml_opt(level: OptimizationLevel, ml_opt: bool, collect_data: bool) -> Self {
+        Self {
+            level,
+            glm_enabled: false,
+            ml_opt_enabled: ml_opt,
+            collect_opt_data: collect_data,
+            data_collector: if collect_data {
+                Some(local_optimizer::DataCollector::new())
+            } else {
+                None
+            },
+        }
     }
 
     pub fn run_function_passes(
@@ -158,6 +215,180 @@ impl PassManager {
             instructions_reduced: 0,
         })
     }
+
+    /// Run standard passes plus local heuristic ML-guided suggestions (no feature gate)
+    pub fn run_function_passes_with_ml_opt(
+        &mut self,
+        func: &mut crate::mir::MirFunction,
+        module: &crate::mir::MirModule,
+    ) -> Result<PassResult, String> {
+        let mut result = self.run_function_passes(func)?;
+
+        if self.ml_opt_enabled
+            && (self.level == OptimizationLevel::O2 || self.level == OptimizationLevel::O3)
+        {
+            let features = optimization_types::extract_features(module, &func.name);
+            let optimizer = HeuristicOptimizer::new(0.7);
+            let suggestions = optimizer.suggest(&features, &func.name);
+
+            for suggestion in &suggestions {
+                let before = count_instructions(func);
+                tracing::info!(
+                    "ML-opt suggests {:?} on '{}' (confidence: {:.2}): {}",
+                    suggestion.optimization_type,
+                    suggestion.target,
+                    suggestion.confidence,
+                    suggestion.reasoning
+                );
+                match self.apply_suggestion(func, suggestion) {
+                    Ok(modified) => {
+                        if modified {
+                            result.modified = true;
+                        }
+                        if self.collect_opt_data {
+                            let after = count_instructions(func);
+                            if let Some(ref mut collector) = self.data_collector {
+                                collector.collect_pass_result(
+                                    &func.name,
+                                    &features,
+                                    &format!("{:?}", suggestion.optimization_type),
+                                    modified,
+                                    before,
+                                    after,
+                                );
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        tracing::debug!(
+                            "ML-opt suggestion {:?} failed: {}",
+                            suggestion.optimization_type,
+                            e
+                        );
+                    }
+                }
+            }
+        }
+
+        Ok(result)
+    }
+
+    /// Run standard passes plus GLM-4.7 ML-guided suggestions
+    #[cfg(feature = "glm")]
+    pub fn run_function_passes_with_glm(
+        &mut self,
+        func: &mut crate::mir::MirFunction,
+        module: &crate::mir::MirModule,
+    ) -> Result<PassResult, String> {
+        let mut result = self.run_function_passes(func)?;
+
+        if self.glm_enabled
+            && (self.level == OptimizationLevel::O2 || self.level == OptimizationLevel::O3)
+        {
+            match self.apply_glm_suggestions(func, module) {
+                Ok(true) => {
+                    result.modified = true;
+                }
+                Ok(false) => {}
+                Err(e) => {
+                    tracing::warn!("GLM optimization skipped: {}", e);
+                }
+            }
+        }
+
+        Ok(result)
+    }
+
+    #[cfg(feature = "glm")]
+    fn apply_glm_suggestions(
+        &mut self,
+        func: &mut crate::mir::MirFunction,
+        module: &crate::mir::MirModule,
+    ) -> Result<bool, String> {
+        let config = glm_integration::GLMConfig::default();
+        if config.api_key.is_empty() {
+            tracing::warn!("GLM_API_KEY not set, skipping GLM optimization");
+            return Ok(false);
+        }
+
+        let mut manager = glm_integration::GLMManager::new(config);
+
+        let rt = tokio::runtime::Runtime::new()
+            .map_err(|e| format!("Tokio runtime init failed: {}", e))?;
+
+        let suggestions = rt.block_on(manager.analyze_and_suggest(module, &func.name))?;
+
+        let mut modified = false;
+        for suggestion in &suggestions {
+            if suggestion.confidence < 0.7 {
+                tracing::debug!(
+                    "GLM suggestion {:?} skipped (confidence {:.2} < 0.7)",
+                    suggestion.optimization_type,
+                    suggestion.confidence
+                );
+                continue;
+            }
+            tracing::info!(
+                "GLM suggests {:?} on '{}' (confidence: {:.2}): {}",
+                suggestion.optimization_type,
+                suggestion.target,
+                suggestion.confidence,
+                suggestion.reasoning
+            );
+            match self.apply_suggestion(func, suggestion) {
+                Ok(true) => {
+                    modified = true;
+                }
+                Ok(false) => {}
+                Err(e) => {
+                    tracing::debug!(
+                        "GLM suggestion {:?} failed: {}",
+                        suggestion.optimization_type,
+                        e
+                    );
+                }
+            }
+        }
+
+        Ok(modified)
+    }
+
+    /// Apply a single optimization suggestion (shared by both local and GLM paths)
+    fn apply_suggestion(
+        &self,
+        func: &mut crate::mir::MirFunction,
+        suggestion: &optimization_types::OptimizationSuggestion,
+    ) -> Result<bool, String> {
+        use optimization_types::OptimizationType as OT;
+        match suggestion.optimization_type {
+            OT::ConstantPropagation => ConstantPropagation::new().run_on_function(func),
+            OT::DeadCodeElimination => DeadCodeElimination::new().run_on_function(func),
+            OT::CommonSubexpressionElimination => {
+                CommonSubexpressionElimination::new().run_on_function(func)
+            }
+            OT::StrengthReduction => StrengthReduction::new().run_on_function(func),
+            OT::FunctionInlining => FunctionInlining::new().run_on_function(func),
+            OT::LoopInvariantCodeMotion => LoopInvariantCodeMotion.run_on_function(func),
+            OT::ScalarReplacementOfAggregates => Sroa::new().run_on_function(func),
+            _ => {
+                tracing::debug!(
+                    "Suggested {:?} but no pass implements it yet",
+                    suggestion.optimization_type
+                );
+                Ok(false)
+            }
+        }
+    }
+
+    /// Take the data collector (transfers ownership for writing to file)
+    pub fn take_data_collector(&mut self) -> Option<local_optimizer::DataCollector> {
+        self.data_collector.take()
+    }
+}
+
+/// Count total instructions across all blocks in a function
+fn count_instructions(func: &crate::mir::MirFunction) -> usize {
+    func.blocks.iter().map(|b| b.instructions.len()).sum()
 }
 
 /// Result from running optimization passes
