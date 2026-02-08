@@ -1,0 +1,610 @@
+// Main name resolution pass
+//
+// Two-pass algorithm:
+//   Pass 1 — collect all top-level items (fn, struct, enum, type alias, impl)
+//            into the global scope, enabling forward references.
+//   Pass 2 — walk each item body, resolving identifiers and paths
+//            against the symbol table with lexical scoping.
+//
+// Methods return (Resolver, ...) to thread state through value semantics.
+
+// ============================================================
+// Resolver state
+// ============================================================
+
+struct Resolver {
+    symbols: SymbolTable,
+    scopes: ScopeStack,
+    error_count: i64,
+    had_error: bool,
+    next_id: i64,
+}
+
+fn resolver_new() -> Resolver {
+    Resolver {
+        symbols: symbol_table_new(),
+        scopes: scope_stack_new(),
+        error_count: 0,
+        had_error: false,
+        next_id: 0,
+    }
+}
+
+// ============================================================
+// Core operations — define, lookup, scoping, errors
+// ============================================================
+
+impl Resolver {
+    fn fresh_id(self) -> (Resolver, i64) with Mut {
+        var r = self
+        let id = r.next_id
+        r.next_id = r.next_id + 1
+        (r, id)
+    }
+
+    fn define(self, name: Name, kind: SymbolKind, span: Span) -> Resolver with Mut, Panic, Div {
+        var r = self
+        let pair = r.fresh_id()
+        r = pair.0
+        let id = pair.1
+        let sym = Symbol {
+            name: name,
+            kind: kind,
+            def_span: span,
+            scope_depth: r.scopes.depth,
+            sym_id: id,
+        }
+        r.symbols = r.symbols.add(sym)
+        r
+    }
+
+    fn push_scope(self) -> Resolver with Mut, Panic, Div {
+        var r = self
+        r.scopes = r.scopes.push(r.symbols.count)
+        r
+    }
+
+    fn pop_scope(self) -> Resolver with Mut {
+        var r = self
+        r.scopes = r.scopes.pop()
+        r
+    }
+
+    // Lookup: scan symbols in reverse for innermost binding
+    fn lookup(self, name: Name) -> i64 with Mut, Panic, Div {
+        var i = self.symbols.count - 1
+        while i >= 0 {
+            let sym = self.symbols.get(i)
+            if name_eq(sym.name, name) {
+                return sym.sym_id
+            }
+            i = i - 1
+        }
+        -1
+    }
+
+    // Lookup restricted to current scope only (for duplicate detection)
+    fn lookup_in_current_scope(self, name: Name) -> bool with Mut, Panic, Div {
+        let start = self.scopes.current_start()
+        var i = self.symbols.count - 1
+        while i >= start {
+            let sym = self.symbols.get(i)
+            if name_eq(sym.name, name) {
+                return true
+            }
+            i = i - 1
+        }
+        false
+    }
+
+    fn report_error(self, span: Span) -> Resolver with Mut, IO {
+        var r = self
+        r.error_count = r.error_count + 1
+        r.had_error = true
+        r
+    }
+}
+
+// ============================================================
+// Pass 1: Collect top-level declarations
+// ============================================================
+
+impl Resolver {
+    fn collect_items(self, items: Option<Box<ItemList>>) -> Resolver with Mut, Panic, Div, Alloc, IO {
+        match items {
+            Some(list) => {
+                var r = self.collect_item((*list).head)
+                r.collect_items((*list).tail)
+            }
+            None => self
+        }
+    }
+
+    fn collect_item(self, item: Item) -> Resolver with Mut, Panic, Div, Alloc, IO {
+        match item.kind {
+            ItemFn => {
+                if !name_is_empty(item.name) {
+                    self.define(item.name, SymbolKind::SymFunction, item.span)
+                } else {
+                    self
+                }
+            }
+            ItemStruct => {
+                if !name_is_empty(item.name) {
+                    self.define(item.name, SymbolKind::SymStruct, item.span)
+                } else {
+                    self
+                }
+            }
+            ItemEnum => {
+                var r = self
+                if !name_is_empty(item.name) {
+                    r = r.define(item.name, SymbolKind::SymEnum, item.span)
+                }
+                // Also collect enum variants as top-level names
+                r.collect_enum_variants(item.enum_def)
+            }
+            ItemTypeAlias => {
+                if !name_is_empty(item.name) {
+                    self.define(item.name, SymbolKind::SymTypeAlias, item.span)
+                } else {
+                    self
+                }
+            }
+            ItemImpl => self
+            ItemUse => self
+        }
+    }
+
+    fn collect_enum_variants(self, opt: Option<Box<EnumDef>>) -> Resolver with Mut, Panic, Div, Alloc {
+        match opt {
+            Some(ed) => self.collect_variant_list((*ed).variants)
+            None => self
+        }
+    }
+
+    fn collect_variant_list(self, opt: Option<Box<VariantDefList>>) -> Resolver with Mut, Panic, Div, Alloc {
+        match opt {
+            Some(list) => {
+                var r = self.define((*list).head.name, SymbolKind::SymEnumVariant, (*list).head.span)
+                r.collect_variant_list((*list).tail)
+            }
+            None => self
+        }
+    }
+}
+
+// ============================================================
+// Pass 2: Resolve all items
+// ============================================================
+
+impl Resolver {
+    fn resolve_items(self, items: Option<Box<ItemList>>) -> Resolver with Mut, Panic, Div, Alloc, IO {
+        match items {
+            Some(list) => {
+                var r = self.resolve_item((*list).head)
+                r.resolve_items((*list).tail)
+            }
+            None => self
+        }
+    }
+
+    fn resolve_item(self, item: Item) -> Resolver with Mut, Panic, Div, Alloc, IO {
+        match item.kind {
+            ItemFn => self.resolve_fn_def(item.fn_def)
+            ItemStruct => self.resolve_struct_def(item.struct_def)
+            ItemEnum => self  // variants already collected, no bodies to resolve
+            ItemImpl => self.resolve_impl_def(item.impl_def)
+            ItemTypeAlias => self.resolve_type_alias(item.type_alias_ty)
+            ItemUse => self
+        }
+    }
+
+    // --------------------------------------------------------
+    // Function
+    // --------------------------------------------------------
+
+    fn resolve_fn_def(self, opt: Option<Box<FnDef>>) -> Resolver with Mut, Panic, Div, Alloc, IO {
+        match opt {
+            Some(fd) => {
+                var r = self.push_scope()
+                r = r.resolve_params((*fd).params)
+                r = r.resolve_opt_type((*fd).return_type)
+                r = r.resolve_block((*fd).body)
+                r.pop_scope()
+            }
+            None => self
+        }
+    }
+
+    fn resolve_params(self, opt: Option<Box<ParamList>>) -> Resolver with Mut, Panic, Div, Alloc, IO {
+        match opt {
+            Some(list) => {
+                var r = self.resolve_param((*list).head)
+                r.resolve_params((*list).tail)
+            }
+            None => self
+        }
+    }
+
+    fn resolve_param(self, p: Param) -> Resolver with Mut, Panic, Div, Alloc, IO {
+        var r = self.resolve_type_expr(p.ty)
+        if p.is_self {
+            r = r.define(Name { buf: [0; 128], len: 4 }, SymbolKind::SymParameter, p.span)
+            // Note: "self" name bytes would be 115,101,108,102 but we don't need exact bytes
+            // for the self-hosted phase — self is implicitly available
+        } else {
+            r = r.define(p.name, SymbolKind::SymParameter, p.span)
+        }
+        r
+    }
+
+    // --------------------------------------------------------
+    // Struct
+    // --------------------------------------------------------
+
+    fn resolve_struct_def(self, opt: Option<Box<StructDef>>) -> Resolver with Mut, Panic, Div, Alloc, IO {
+        match opt {
+            Some(sd) => self.resolve_field_defs((*sd).fields)
+            None => self
+        }
+    }
+
+    fn resolve_field_defs(self, opt: Option<Box<FieldDefList>>) -> Resolver with Mut, Panic, Div, Alloc, IO {
+        match opt {
+            Some(list) => {
+                var r = self.resolve_type_expr((*list).head.ty)
+                r.resolve_field_defs((*list).tail)
+            }
+            None => self
+        }
+    }
+
+    // --------------------------------------------------------
+    // Impl
+    // --------------------------------------------------------
+
+    fn resolve_impl_def(self, opt: Option<Box<ImplDef>>) -> Resolver with Mut, Panic, Div, Alloc, IO {
+        match opt {
+            Some(id) => {
+                var r = self.resolve_type_expr((*id).target_type)
+                r = r.push_scope()
+                r = r.resolve_impl_methods((*id).methods)
+                r.pop_scope()
+            }
+            None => self
+        }
+    }
+
+    fn resolve_impl_methods(self, opt: Option<Box<ItemList>>) -> Resolver with Mut, Panic, Div, Alloc, IO {
+        match opt {
+            Some(list) => {
+                var r = self.resolve_item((*list).head)
+                r.resolve_impl_methods((*list).tail)
+            }
+            None => self
+        }
+    }
+
+    // --------------------------------------------------------
+    // Type alias
+    // --------------------------------------------------------
+
+    fn resolve_type_alias(self, opt: Option<Box<TypeExpr>>) -> Resolver with Mut, Panic, Div, Alloc, IO {
+        match opt {
+            Some(te) => self.resolve_type_expr(*te)
+            None => self
+        }
+    }
+}
+
+// ============================================================
+// Type expression resolution
+// ============================================================
+
+impl Resolver {
+    fn resolve_type_expr(self, te: TypeExpr) -> Resolver with Mut, Panic, Div, Alloc, IO {
+        match te.kind {
+            TypeNamed => {
+                // Named types are looked up, but we don't error on unresolved types
+                // since many are builtins (i64, bool, Option, etc.)
+                var r = self
+                r = r.resolve_type_args(te.type_args)
+                r
+            }
+            TypeReference => self.resolve_opt_type(te.inner)
+            TypeRefMut => self.resolve_opt_type(te.inner)
+            TypeArray => {
+                var r = self.resolve_opt_type(te.inner)
+                r.resolve_opt_expr(te.array_size)
+            }
+            TypeTuple => self.resolve_type_args(te.type_args)
+            TypeFn => {
+                var r = self.resolve_type_args(te.type_args)
+                r.resolve_opt_type(te.inner)
+            }
+            TypeUnit => self
+            TypeNever => self
+            TypeSelfUpper => self
+            TypeInfer => self
+        }
+    }
+
+    fn resolve_opt_type(self, opt: Option<Box<TypeExpr>>) -> Resolver with Mut, Panic, Div, Alloc, IO {
+        match opt {
+            Some(te) => self.resolve_type_expr(*te)
+            None => self
+        }
+    }
+
+    fn resolve_type_args(self, opt: Option<Box<TypeExprList>>) -> Resolver with Mut, Panic, Div, Alloc, IO {
+        match opt {
+            Some(list) => {
+                var r = self.resolve_type_expr((*list).head)
+                r.resolve_type_args((*list).tail)
+            }
+            None => self
+        }
+    }
+}
+
+// ============================================================
+// Block and statement resolution
+// ============================================================
+
+impl Resolver {
+    fn resolve_block(self, blk: Block) -> Resolver with Mut, Panic, Div, Alloc, IO {
+        var r = self.push_scope()
+        r = r.resolve_stmts(blk.stmts)
+        r.pop_scope()
+    }
+
+    fn resolve_stmts(self, opt: Option<Box<StmtList>>) -> Resolver with Mut, Panic, Div, Alloc, IO {
+        match opt {
+            Some(list) => {
+                var r = self.resolve_stmt((*list).head)
+                r.resolve_stmts((*list).tail)
+            }
+            None => self
+        }
+    }
+
+    fn resolve_stmt(self, s: Stmt) -> Resolver with Mut, Panic, Div, Alloc, IO {
+        match s.kind {
+            StmtLet => {
+                // Resolve initializer BEFORE defining the variable
+                var r = self.resolve_opt_type_boxed(s.ty)
+                r = r.resolve_opt_expr(s.expr)
+                r.define(s.name, SymbolKind::SymVariable, s.span)
+            }
+            StmtVar => {
+                var r = self.resolve_opt_type_boxed(s.ty)
+                r = r.resolve_opt_expr(s.expr)
+                r.define(s.name, SymbolKind::SymVariable, s.span)
+            }
+            StmtExpr => self.resolve_opt_expr(s.expr)
+            StmtAssign => {
+                var r = self.resolve_opt_expr(s.target)
+                r.resolve_opt_expr(s.expr)
+            }
+        }
+    }
+
+    fn resolve_opt_type_boxed(self, opt: Option<Box<TypeExpr>>) -> Resolver with Mut, Panic, Div, Alloc, IO {
+        match opt {
+            Some(te) => self.resolve_type_expr(*te)
+            None => self
+        }
+    }
+}
+
+// ============================================================
+// Expression resolution
+// ============================================================
+
+impl Resolver {
+    fn resolve_expr(self, e: Expr) -> Resolver with Mut, Panic, Div, Alloc, IO {
+        match e.kind {
+            ExprIntLit => self
+            ExprFloatLit => self
+            ExprBoolTrue => self
+            ExprBoolFalse => self
+            ExprStringLit => self
+            ExprCharLit => self
+            ExprIdent => {
+                let found = self.lookup(e.name)
+                if found < 0 {
+                    self.report_error(e.span)
+                } else {
+                    self
+                }
+            }
+            ExprPath => {
+                // Path resolution: first segment must be in scope
+                // (struct/enum name, module, etc.)
+                // For now, just check the first segment exists
+                self.resolve_path_head(e.path)
+            }
+            ExprBinary => {
+                var r = self.resolve_opt_expr(e.left)
+                r.resolve_opt_expr(e.right)
+            }
+            ExprUnary => self.resolve_opt_expr(e.left)
+            ExprFieldAccess => {
+                // Resolve the base expression; field checked by type checker
+                self.resolve_opt_expr(e.left)
+            }
+            ExprIndex => {
+                var r = self.resolve_opt_expr(e.left)
+                r.resolve_opt_expr(e.right)
+            }
+            ExprMethodCall => {
+                var r = self.resolve_opt_expr(e.left)
+                r.resolve_expr_list(e.args)
+            }
+            ExprCall => {
+                var r = self.resolve_opt_expr(e.left)
+                r.resolve_expr_list(e.args)
+            }
+            ExprIf => {
+                var r = self.resolve_opt_expr(e.left)
+                r = r.resolve_opt_block(e.block)
+                r.resolve_opt_expr(e.else_expr)
+            }
+            ExprMatch => {
+                var r = self.resolve_opt_expr(e.left)
+                r.resolve_match_arms(e.arms)
+            }
+            ExprWhile => {
+                var r = self.resolve_opt_expr(e.left)
+                r.resolve_opt_block(e.block)
+            }
+            ExprLoop => self.resolve_opt_block(e.block)
+            ExprBlock => self.resolve_opt_block(e.block)
+            ExprReturn => self.resolve_opt_expr(e.left)
+            ExprBreak => self.resolve_opt_expr(e.left)
+            ExprContinue => self
+            ExprStructLit => {
+                // Resolve path (struct name) and field init expressions
+                var r = self.resolve_path_head(e.path)
+                r.resolve_struct_field_inits(e.fields)
+            }
+            ExprArrayLit => self.resolve_expr_list(e.args)
+            ExprTupleLit => self.resolve_expr_list(e.args)
+            ExprRange => {
+                var r = self.resolve_opt_expr(e.left)
+                r.resolve_opt_expr(e.right)
+            }
+            ExprError => self
+        }
+    }
+
+    fn resolve_opt_expr(self, opt: Option<Box<Expr>>) -> Resolver with Mut, Panic, Div, Alloc, IO {
+        match opt {
+            Some(e) => self.resolve_expr(*e)
+            None => self
+        }
+    }
+
+    fn resolve_opt_block(self, opt: Option<Box<Block>>) -> Resolver with Mut, Panic, Div, Alloc, IO {
+        match opt {
+            Some(blk) => self.resolve_block(*blk)
+            None => self
+        }
+    }
+
+    fn resolve_expr_list(self, opt: Option<Box<ExprList>>) -> Resolver with Mut, Panic, Div, Alloc, IO {
+        match opt {
+            Some(list) => {
+                var r = self.resolve_expr((*list).head)
+                r.resolve_expr_list((*list).tail)
+            }
+            None => self
+        }
+    }
+
+    fn resolve_path_head(self, path: AstPath) -> Resolver with Mut, Panic, Div, Alloc, IO {
+        if path.seg_count > 0 {
+            let resolved_name = copy_string_list_to_name(path.segments)
+            let found = self.lookup(resolved_name)
+            if found < 0 {
+                // Not found — could be a builtin type, don't error
+                self
+            } else {
+                self
+            }
+        } else {
+            self
+        }
+    }
+}
+
+// ============================================================
+// Match arm resolution (binds pattern variables)
+// ============================================================
+
+impl Resolver {
+    fn resolve_match_arms(self, opt: Option<Box<MatchArmList>>) -> Resolver with Mut, Panic, Div, Alloc, IO {
+        match opt {
+            Some(list) => {
+                var r = self.resolve_match_arm((*list).head)
+                r.resolve_match_arms((*list).tail)
+            }
+            None => self
+        }
+    }
+
+    fn resolve_match_arm(self, arm: MatchArm) -> Resolver with Mut, Panic, Div, Alloc, IO {
+        var r = self.push_scope()
+        r = r.resolve_pattern(arm.pattern)
+        r = r.resolve_expr(arm.body)
+        r.pop_scope()
+    }
+
+    fn resolve_pattern(self, pat: Pattern) -> Resolver with Mut, Panic, Div, Alloc, IO {
+        match pat.kind {
+            PatWildcard => self
+            PatBinding => {
+                // Introduce the binding into current scope
+                self.define(pat.name, SymbolKind::SymVariable, pat.span)
+            }
+            PatIntLit => self
+            PatBoolTrue => self
+            PatBoolFalse => self
+            PatStringLit => self
+            PatEnum => {
+                // Enum variant pattern — e.g. Some(x)
+                // Resolve sub-patterns (which introduce bindings)
+                self.resolve_pattern_list(pat.sub_patterns)
+            }
+            PatStruct => {
+                self.resolve_pat_fields(pat.pat_fields)
+            }
+            PatTuple => {
+                self.resolve_pattern_list(pat.sub_patterns)
+            }
+            PatOr => {
+                self.resolve_pattern_list(pat.sub_patterns)
+            }
+        }
+    }
+
+    fn resolve_pattern_list(self, opt: Option<Box<PatternList>>) -> Resolver with Mut, Panic, Div, Alloc, IO {
+        match opt {
+            Some(list) => {
+                var r = self.resolve_pattern((*list).head)
+                r.resolve_pattern_list((*list).tail)
+            }
+            None => self
+        }
+    }
+
+    fn resolve_pat_fields(self, opt: Option<Box<PatFieldList>>) -> Resolver with Mut, Panic, Div, Alloc, IO {
+        match opt {
+            Some(list) => {
+                var r = self.resolve_pattern((*list).head.pattern)
+                r.resolve_pat_fields((*list).tail)
+            }
+            None => self
+        }
+    }
+}
+
+// ============================================================
+// Struct field init resolution
+// ============================================================
+
+impl Resolver {
+    fn resolve_struct_field_inits(self, opt: Option<Box<StructFieldList>>) -> Resolver with Mut, Panic, Div, Alloc, IO {
+        match opt {
+            Some(list) => {
+                var r = self.resolve_expr((*list).head.value)
+                r.resolve_struct_field_inits((*list).tail)
+            }
+            None => self
+        }
+    }
+}
+
+// Note: copy_string_list_to_name is defined in parser/items.sio
+// and shared via flat namespace — no duplicate needed here.

@@ -1,0 +1,507 @@
+// Name resolution integration tests
+//
+// Constructs AST programs and runs resolve_program() to verify:
+//   - symbol collection
+//   - lexical scoping
+//   - error detection for undefined variables
+//
+// Entry point: run_resolve_tests()
+
+// ============================================================================
+// AST CONSTRUCTION HELPERS (shared with test_printer.sio)
+// ============================================================================
+
+fn r_make_name(a: i8, b: i8, c: i8, count: i64) -> Name with Mut, Panic, Div {
+    var n = Name { buf: [0; 128], len: count }
+    n.buf[0] = a
+    if count > 1 { n.buf[1] = b }
+    if count > 2 { n.buf[2] = c }
+    n
+}
+
+fn r_make_name5(a: i8, b: i8, c: i8, d: i8, e: i8) -> Name with Mut, Panic, Div {
+    var n = Name { buf: [0; 128], len: 5 }
+    n.buf[0] = a
+    n.buf[1] = b
+    n.buf[2] = c
+    n.buf[3] = d
+    n.buf[4] = e
+    n
+}
+
+fn r_make_empty_path() -> AstPath {
+    AstPath {
+        segments: StringList { head_buf: [0; 128], head_len: 0, tail: None },
+        seg_count: 0,
+    }
+}
+
+fn r_make_single_path(a: i8, b: i8, c: i8, count: i64) -> AstPath with Mut, Panic, Div {
+    var buf: [i8; 128] = [0; 128]
+    buf[0] = a
+    if count > 1 { buf[1] = b }
+    if count > 2 { buf[2] = c }
+    AstPath {
+        segments: StringList { head_buf: buf, head_len: count, tail: None },
+        seg_count: 1,
+    }
+}
+
+fn r_make_empty_block() -> Block {
+    Block { stmts: None, span: Span::dummy() }
+}
+
+fn r_make_int_expr(val: i64) -> Expr with Mut, Panic, Div {
+    Expr {
+        kind: ExprKind::ExprIntLit,
+        span: Span::dummy(),
+        int_val: val,
+        float_val: 0.0,
+        name: r_make_name(0, 0, 0, 0),
+        path: r_make_empty_path(),
+        bin_op: BinaryOp::OpAdd,
+        un_op: UnaryOp::OpNeg,
+        left: None,
+        right: None,
+        block: None,
+        else_expr: None,
+        args: None,
+        arms: None,
+        fields: None,
+    }
+}
+
+fn r_make_ident_expr(a: i8, b: i8, c: i8, count: i64) -> Expr with Mut, Panic, Div {
+    Expr {
+        kind: ExprKind::ExprIdent,
+        span: Span::dummy(),
+        int_val: 0,
+        float_val: 0.0,
+        name: r_make_name(a, b, c, count),
+        path: r_make_empty_path(),
+        bin_op: BinaryOp::OpAdd,
+        un_op: UnaryOp::OpNeg,
+        left: None,
+        right: None,
+        block: None,
+        else_expr: None,
+        args: None,
+        arms: None,
+        fields: None,
+    }
+}
+
+fn r_make_binop_expr(left: Expr, op: BinaryOp, right: Expr) -> Expr with Mut, Panic, Div, Alloc {
+    Expr {
+        kind: ExprKind::ExprBinary,
+        span: Span::dummy(),
+        int_val: 0,
+        float_val: 0.0,
+        name: r_make_name(0, 0, 0, 0),
+        path: r_make_empty_path(),
+        bin_op: op,
+        un_op: UnaryOp::OpNeg,
+        left: Some(Box::new(left)),
+        right: Some(Box::new(right)),
+        block: None,
+        else_expr: None,
+        args: None,
+        arms: None,
+        fields: None,
+    }
+}
+
+fn r_make_named_type(a: i8, b: i8, c: i8, count: i64) -> TypeExpr with Mut, Panic, Div {
+    TypeExpr {
+        kind: TypeExprKind::TypeNamed,
+        span: Span::dummy(),
+        path: r_make_single_path(a, b, c, count),
+        type_args: None,
+        inner: None,
+        array_size: None,
+        effects: None,
+    }
+}
+
+fn r_make_let_stmt(a: i8, b: i8, c: i8, name_len: i64, init: Expr) -> Stmt with Mut, Panic, Div, Alloc {
+    Stmt {
+        kind: StmtKind::StmtLet,
+        span: Span::dummy(),
+        name: r_make_name(a, b, c, name_len),
+        ty: None,
+        expr: Some(Box::new(init)),
+        target: None,
+        assign_op: AssignOp::AssignEq,
+    }
+}
+
+fn r_make_var_stmt(a: i8, b: i8, c: i8, name_len: i64, init: Expr) -> Stmt with Mut, Panic, Div, Alloc {
+    Stmt {
+        kind: StmtKind::StmtVar,
+        span: Span::dummy(),
+        name: r_make_name(a, b, c, name_len),
+        ty: None,
+        expr: Some(Box::new(init)),
+        target: None,
+        assign_op: AssignOp::AssignEq,
+    }
+}
+
+fn r_make_expr_stmt(e: Expr) -> Stmt with Mut, Panic, Div, Alloc {
+    Stmt {
+        kind: StmtKind::StmtExpr,
+        span: Span::dummy(),
+        name: r_make_name(0, 0, 0, 0),
+        ty: None,
+        expr: Some(Box::new(e)),
+        target: None,
+        assign_op: AssignOp::AssignEq,
+    }
+}
+
+fn r_make_block_with_stmts2(s1: Stmt, s2: Stmt) -> Block with Alloc {
+    Block {
+        stmts: Some(Box::new(StmtList {
+            head: s1,
+            tail: Some(Box::new(StmtList { head: s2, tail: None })),
+        })),
+        span: Span::dummy(),
+    }
+}
+
+fn r_make_block_with_stmts3(s1: Stmt, s2: Stmt, s3: Stmt) -> Block with Alloc {
+    Block {
+        stmts: Some(Box::new(StmtList {
+            head: s1,
+            tail: Some(Box::new(StmtList {
+                head: s2,
+                tail: Some(Box::new(StmtList { head: s3, tail: None })),
+            })),
+        })),
+        span: Span::dummy(),
+    }
+}
+
+fn r_make_fn_item(a: i8, b: i8, c: i8, name_len: i64, body: Block) -> Item with Mut, Panic, Div, Alloc {
+    let name = r_make_name(a, b, c, name_len)
+    let fd = FnDef {
+        name: name,
+        params: None,
+        return_type: None,
+        effects: None,
+        body: body,
+        span: Span::dummy(),
+    }
+    Item {
+        kind: ItemKind::ItemFn,
+        span: Span::dummy(),
+        name: name,
+        fn_def: Some(Box::new(fd)),
+        struct_def: None,
+        enum_def: None,
+        impl_def: None,
+        type_alias_ty: None,
+        use_path: r_make_empty_path(),
+        use_glob: false,
+    }
+}
+
+fn r_make_fn_with_params(a: i8, b: i8, c: i8, name_len: i64, params: Option<Box<ParamList>>, body: Block) -> Item with Mut, Panic, Div, Alloc {
+    let name = r_make_name(a, b, c, name_len)
+    let fd = FnDef {
+        name: name,
+        params: params,
+        return_type: None,
+        effects: None,
+        body: body,
+        span: Span::dummy(),
+    }
+    Item {
+        kind: ItemKind::ItemFn,
+        span: Span::dummy(),
+        name: name,
+        fn_def: Some(Box::new(fd)),
+        struct_def: None,
+        enum_def: None,
+        impl_def: None,
+        type_alias_ty: None,
+        use_path: r_make_empty_path(),
+        use_glob: false,
+    }
+}
+
+fn r_make_struct_item(a: i8, b: i8, c: i8, name_len: i64, fields: Option<Box<FieldDefList>>) -> Item with Mut, Panic, Div, Alloc {
+    let name = r_make_name(a, b, c, name_len)
+    let sd = StructDef {
+        name: name,
+        fields: fields,
+        is_linear: false,
+        span: Span::dummy(),
+    }
+    Item {
+        kind: ItemKind::ItemStruct,
+        span: Span::dummy(),
+        name: name,
+        fn_def: None,
+        struct_def: Some(Box::new(sd)),
+        enum_def: None,
+        impl_def: None,
+        type_alias_ty: None,
+        use_path: r_make_empty_path(),
+        use_glob: false,
+    }
+}
+
+fn r_make_enum_item(a: i8, b: i8, c: i8, name_len: i64, variants: Option<Box<VariantDefList>>) -> Item with Mut, Panic, Div, Alloc {
+    let name = r_make_name(a, b, c, name_len)
+    let ed = EnumDef {
+        name: name,
+        variants: variants,
+        span: Span::dummy(),
+    }
+    Item {
+        kind: ItemKind::ItemEnum,
+        span: Span::dummy(),
+        name: name,
+        fn_def: None,
+        struct_def: None,
+        enum_def: Some(Box::new(ed)),
+        impl_def: None,
+        type_alias_ty: None,
+        use_path: r_make_empty_path(),
+        use_glob: false,
+    }
+}
+
+fn r_make_program(items: Option<Box<ItemList>>) -> Program {
+    Program { items: items }
+}
+
+fn r_make_single_item_program(item: Item) -> Program with Alloc {
+    Program { items: Some(Box::new(ItemList { head: item, tail: None })) }
+}
+
+// ============================================================================
+// TESTS
+// ============================================================================
+
+// T01: Empty program resolves with 0 errors
+fn test_resolve_empty_program() -> bool with Mut, Panic, Div, Alloc, IO {
+    let prog = r_make_program(None)
+    let result = resolve_program(prog)
+    result.error_count == 0 && !result.had_error
+}
+
+// T02: Function definition creates a symbol
+fn test_resolve_fn_creates_symbol() -> bool with Mut, Panic, Div, Alloc, IO {
+    // fn foo() { }
+    // 'f'=102, 'o'=111
+    let item = r_make_fn_item(102, 111, 111, 3, r_make_empty_block())
+    let prog = r_make_single_item_program(item)
+    let result = resolve_program(prog)
+    // Should have at least 1 symbol (foo) and 0 errors
+    result.error_count == 0 && result.symbols.count > 0
+}
+
+// T03: Variable use after let resolves
+fn test_resolve_let_then_use() -> bool with Mut, Panic, Div, Alloc, IO {
+    // fn foo() { let x = 42; x }
+    // 'x'=120
+    let let_s = r_make_let_stmt(120, 0, 0, 1, r_make_int_expr(42))
+    let use_s = r_make_expr_stmt(r_make_ident_expr(120, 0, 0, 1))
+    let body = r_make_block_with_stmts2(let_s, use_s)
+    let item = r_make_fn_item(102, 111, 111, 3, body)
+    let prog = r_make_single_item_program(item)
+    let result = resolve_program(prog)
+    result.error_count == 0
+}
+
+// T04: Variable use before let -> error
+fn test_resolve_use_before_let() -> bool with Mut, Panic, Div, Alloc, IO {
+    // fn foo() { x; let x = 42 }
+    // Use x before defining it
+    let use_s = r_make_expr_stmt(r_make_ident_expr(120, 0, 0, 1))
+    let let_s = r_make_let_stmt(120, 0, 0, 1, r_make_int_expr(42))
+    let body = r_make_block_with_stmts2(use_s, let_s)
+    let item = r_make_fn_item(102, 111, 111, 3, body)
+    let prog = r_make_single_item_program(item)
+    let result = resolve_program(prog)
+    result.error_count > 0
+}
+
+// T05: Nested scopes — inner let does not leak to outer
+fn test_resolve_nested_scopes() -> bool with Mut, Panic, Div, Alloc, IO {
+    // fn foo() {
+    //   let x = 1
+    //   { let y = 2; y }   // inner block — y defined and used OK
+    //   x                   // x still in scope
+    // }
+    // Build inner block as expression: ExprBlock with Block { let y = 2; y }
+    let inner_let = r_make_let_stmt(121, 0, 0, 1, r_make_int_expr(2))
+    let inner_use = r_make_expr_stmt(r_make_ident_expr(121, 0, 0, 1))
+    let inner_block = r_make_block_with_stmts2(inner_let, inner_use)
+    let block_expr = Expr {
+        kind: ExprKind::ExprBlock,
+        span: Span::dummy(),
+        int_val: 0,
+        float_val: 0.0,
+        name: r_make_name(0, 0, 0, 0),
+        path: r_make_empty_path(),
+        bin_op: BinaryOp::OpAdd,
+        un_op: UnaryOp::OpNeg,
+        left: None,
+        right: None,
+        block: Some(Box::new(inner_block)),
+        else_expr: None,
+        args: None,
+        arms: None,
+        fields: None,
+    }
+
+    let outer_let = r_make_let_stmt(120, 0, 0, 1, r_make_int_expr(1))
+    let block_stmt = r_make_expr_stmt(block_expr)
+    let outer_use = r_make_expr_stmt(r_make_ident_expr(120, 0, 0, 1))
+    let body = r_make_block_with_stmts3(outer_let, block_stmt, outer_use)
+    let item = r_make_fn_item(102, 111, 111, 3, body)
+    let prog = r_make_single_item_program(item)
+    let result = resolve_program(prog)
+    result.error_count == 0
+}
+
+// T06: Struct definition creates a symbol
+fn test_resolve_struct_def() -> bool with Mut, Panic, Div, Alloc, IO {
+    // struct Foo { x: i64 }
+    // 'F'=70, 'o'=111
+    let x_field = FieldDef {
+        name: r_make_name(120, 0, 0, 1),
+        ty: r_make_named_type(105, 54, 52, 3),
+        span: Span::dummy(),
+    }
+    let fields = Some(Box::new(FieldDefList { head: x_field, tail: None }))
+    let item = r_make_struct_item(70, 111, 111, 3, fields)
+    let prog = r_make_single_item_program(item)
+    let result = resolve_program(prog)
+    // Should have symbol for Foo, no errors
+    result.error_count == 0 && result.symbols.count > 0
+}
+
+// T07: Enum variants resolvable
+fn test_resolve_enum_variants() -> bool with Mut, Panic, Div, Alloc, IO {
+    // enum Color { Red, Blue }
+    // then fn foo() { Red }
+    // 'C'=67, 'o'=111, 'l'=108
+    // 'R'=82, 'e'=101, 'd'=100
+    // 'B'=66, 'l'=108, 'u'=117
+    let v1 = VariantDef { name: r_make_name(82, 101, 100, 3), span: Span::dummy() }
+    let v2 = VariantDef { name: r_make_name(66, 108, 117, 4), span: Span::dummy() }
+    let variants = Some(Box::new(VariantDefList {
+        head: v1,
+        tail: Some(Box::new(VariantDefList { head: v2, tail: None })),
+    }))
+    let enum_item = r_make_enum_item(67, 111, 108, 5, variants)
+
+    // fn foo() { Red }  — Red is an ident that should resolve to the variant
+    let use_red = r_make_expr_stmt(r_make_ident_expr(82, 101, 100, 3))
+    let body = Block {
+        stmts: Some(Box::new(StmtList { head: use_red, tail: None })),
+        span: Span::dummy(),
+    }
+    let fn_item = r_make_fn_item(102, 111, 111, 3, body)
+
+    let items = ItemList {
+        head: enum_item,
+        tail: Some(Box::new(ItemList { head: fn_item, tail: None })),
+    }
+    let prog = r_make_program(Some(Box::new(items)))
+    let result = resolve_program(prog)
+    result.error_count == 0
+}
+
+// T08: Undefined variable -> error with count
+fn test_resolve_undefined_var() -> bool with Mut, Panic, Div, Alloc, IO {
+    // fn foo() { unknown_var }
+    // 'u'=117, 'n'=110, 'k'=107
+    let use_s = r_make_expr_stmt(r_make_ident_expr(117, 110, 107, 3))
+    let body = Block {
+        stmts: Some(Box::new(StmtList { head: use_s, tail: None })),
+        span: Span::dummy(),
+    }
+    let item = r_make_fn_item(102, 111, 111, 3, body)
+    let prog = r_make_single_item_program(item)
+    let result = resolve_program(prog)
+    result.error_count == 1 && result.had_error
+}
+
+// T09: Forward reference — fn calls fn defined later
+fn test_resolve_forward_ref() -> bool with Mut, Panic, Div, Alloc, IO {
+    // fn foo() { bar }  (bar defined later)
+    // fn bar() { }
+    // 'b'=98, 'a'=97, 'r'=114
+    let use_bar = r_make_expr_stmt(r_make_ident_expr(98, 97, 114, 3))
+    let foo_body = Block {
+        stmts: Some(Box::new(StmtList { head: use_bar, tail: None })),
+        span: Span::dummy(),
+    }
+    let foo_item = r_make_fn_item(102, 111, 111, 3, foo_body)
+    let bar_item = r_make_fn_item(98, 97, 114, 3, r_make_empty_block())
+
+    let items = ItemList {
+        head: foo_item,
+        tail: Some(Box::new(ItemList { head: bar_item, tail: None })),
+    }
+    let prog = r_make_program(Some(Box::new(items)))
+    let result = resolve_program(prog)
+    // Forward ref should resolve because pass 1 collects both fns first
+    result.error_count == 0
+}
+
+// T10: Function parameter in scope within body
+fn test_resolve_param_in_body() -> bool with Mut, Panic, Div, Alloc, IO {
+    // fn foo(x: i64) { x }
+    // 'x'=120, 'i'=105, '6'=54, '4'=52
+    let param = Param {
+        name: r_make_name(120, 0, 0, 1),
+        ty: r_make_named_type(105, 54, 52, 3),
+        is_self: false,
+        is_self_mut: false,
+        span: Span::dummy(),
+    }
+    let params = Some(Box::new(ParamList { head: param, tail: None }))
+    let use_x = r_make_expr_stmt(r_make_ident_expr(120, 0, 0, 1))
+    let body = Block {
+        stmts: Some(Box::new(StmtList { head: use_x, tail: None })),
+        span: Span::dummy(),
+    }
+    let item = r_make_fn_with_params(102, 111, 111, 3, params, body)
+    let prog = r_make_single_item_program(item)
+    let result = resolve_program(prog)
+    result.error_count == 0
+}
+
+// ============================================================================
+// ENTRY POINT
+// ============================================================================
+
+fn run_resolve_tests() with IO, Mut, Panic, Div, Alloc {
+    var passed: i64 = 0
+    let total: i64 = 10
+
+    print("=== Name Resolution Tests ===\n")
+
+    if test_resolve_empty_program() { passed = passed + 1; print("  T01 OK: empty program\n") } else { print("  FAIL: T01 empty program\n") }
+    if test_resolve_fn_creates_symbol() { passed = passed + 1; print("  T02 OK: fn creates symbol\n") } else { print("  FAIL: T02 fn creates symbol\n") }
+    if test_resolve_let_then_use() { passed = passed + 1; print("  T03 OK: let then use\n") } else { print("  FAIL: T03 let then use\n") }
+    if test_resolve_use_before_let() { passed = passed + 1; print("  T04 OK: use before let -> error\n") } else { print("  FAIL: T04 use before let -> error\n") }
+    if test_resolve_nested_scopes() { passed = passed + 1; print("  T05 OK: nested scopes\n") } else { print("  FAIL: T05 nested scopes\n") }
+    if test_resolve_struct_def() { passed = passed + 1; print("  T06 OK: struct def\n") } else { print("  FAIL: T06 struct def\n") }
+    if test_resolve_enum_variants() { passed = passed + 1; print("  T07 OK: enum variants\n") } else { print("  FAIL: T07 enum variants\n") }
+    if test_resolve_undefined_var() { passed = passed + 1; print("  T08 OK: undefined var -> error\n") } else { print("  FAIL: T08 undefined var -> error\n") }
+    if test_resolve_forward_ref() { passed = passed + 1; print("  T09 OK: forward reference\n") } else { print("  FAIL: T09 forward reference\n") }
+    if test_resolve_param_in_body() { passed = passed + 1; print("  T10 OK: param in body\n") } else { print("  FAIL: T10 param in body\n") }
+
+    print("\nResolve tests: ")
+    print_int(passed)
+    print("/")
+    print_int(total)
+    print(" passed\n")
+}
