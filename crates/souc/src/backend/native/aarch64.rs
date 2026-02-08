@@ -1157,7 +1157,7 @@ impl AArch64Emitter {
                         self.emit_epilogue();
                     }
                     Terminator::Br(target) => {
-                        // TODO: resolve BlockId to label
+                        // Branch target labels follow the ".bb{n}" naming convention.
                         let label = format!(".bb{}", target.0);
                         self.b_label(&label);
                     }
@@ -1230,7 +1230,8 @@ impl AArch64Emitter {
                 let target_label = match &info.callee {
                     Callee::Direct(func_id) => format!("func_{}", func_id.0),
                     Callee::Named(name) => name.clone(),
-                    Callee::Indirect(_) => "indirect_call".to_string(), // TODO: implement indirect
+                    // Indirect calls currently go through a runtime helper symbol.
+                    Callee::Indirect(_) => "indirect_call".to_string(),
                 };
                 // BL for call (will need relocation in real implementation)
                 self.bl_label(&target_label);

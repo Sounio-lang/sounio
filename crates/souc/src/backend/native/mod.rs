@@ -76,7 +76,7 @@
 //! - `metrics`: Cycle and power estimation based on microarchitecture models
 //! - `thermal`: Arrhenius degradation and self-heating models
 //! - `alloc`: Epistemic-aware register allocation
-//! - `emit`: x86-64 machine code emission (TODO: connect)
+//! - `emit`: x86-64 machine code emission (integration pending)
 
 pub mod aarch64;
 pub mod alloc;
@@ -401,8 +401,7 @@ pub struct BlockAnalysis {
     pub thermal: Option<thermal::DegradationResult>,
 }
 
-/// Placeholder for SIR module type
-/// TODO: Import from actual SIR module when available
+/// Temporary local stand-in for the SIR module type used by this backend.
 #[derive(Debug)]
 pub struct SirModule {
     pub name: String,
