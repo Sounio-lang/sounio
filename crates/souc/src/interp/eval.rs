@@ -2258,6 +2258,21 @@ impl Interpreter {
                 self.output.push(line);
                 Ok(Value::Unit)
             }
+            "print_char" => {
+                if let Some(Value::Int(code)) = args.first() {
+                    let ch = (*code as u8) as char;
+                    print!("{}", ch);
+                    self.output.push(ch.to_string());
+                }
+                Ok(Value::Unit)
+            }
+            "print_int" => {
+                if let Some(Value::Int(n)) = args.first() {
+                    print!("{}", n);
+                    self.output.push(n.to_string());
+                }
+                Ok(Value::Unit)
+            }
             "println" => {
                 let output: Vec<String> = args.iter().map(|v| format!("{}", v)).collect();
                 let line = output.join(" ");

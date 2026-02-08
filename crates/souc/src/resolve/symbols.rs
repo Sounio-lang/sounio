@@ -281,6 +281,15 @@ impl ModuleScope {
     pub fn public_items(&self) -> impl Iterator<Item = (&String, &DefId)> {
         self.public_names.iter().chain(self.public_types.iter())
     }
+
+    /// Get all items regardless of visibility (for glob imports in languages without `pub`)
+    pub fn all_items(&self) -> impl Iterator<Item = (&String, &DefId)> {
+        self.private_names
+            .iter()
+            .chain(self.private_types.iter())
+            .chain(self.public_names.iter())
+            .chain(self.public_types.iter())
+    }
 }
 
 /// Symbol table with scoped lookups
@@ -422,13 +431,15 @@ impl SymbolTable {
 
         // Built-in functions
         let builtin_functions = [
-            "print",     // Print without newline
-            "println",   // Print with newline
-            "assert",    // Runtime assertion
-            "assert_eq", // Assert equality
-            "panic",     // Abort with message
-            "dbg",       // Debug print
-            "format",    // String formatting
+            "print",      // Print without newline
+            "println",    // Print with newline
+            "print_char", // Print single char from i64 code point
+            "print_int",  // Print integer
+            "assert",     // Runtime assertion
+            "assert_eq",  // Assert equality
+            "panic",      // Abort with message
+            "dbg",        // Debug print
+            "format",     // String formatting
             // Utility functions
             "len",         // Get length of array/string/tuple
             "type_of",     // Get type name as string
@@ -662,12 +673,25 @@ impl SymbolTable {
                     .get(&existing)
                     .is_some_and(|sym| matches!(sym.kind, DefKind::BuiltinFunction))
                 {
-                    scope.names.insert(name, def_id);
+                    scope.names.insert(name.clone(), def_id);
+                    // Also register in current module scope for cross-module imports
+                    if scope.kind == ScopeKind::Module {
+                        if let Some(module) = self.modules.get_mut(&self.current_module) {
+                            module.define(name, def_id, Visibility::Private);
+                        }
+                    }
                     return Ok(());
                 }
                 return Err(format!("Duplicate definition: {}", name));
             }
-            scope.names.insert(name, def_id);
+            let is_module_scope = scope.kind == ScopeKind::Module;
+            scope.names.insert(name.clone(), def_id);
+            // Also register in current module scope for cross-module imports
+            if is_module_scope {
+                if let Some(module) = self.modules.get_mut(&self.current_module) {
+                    module.define(name, def_id, Visibility::Private);
+                }
+            }
             Ok(())
         } else {
             Err("No scope".to_string())
@@ -680,7 +704,14 @@ impl SymbolTable {
             if scope.types.contains_key(&name) {
                 return Err(format!("Duplicate type: {}", name));
             }
-            scope.types.insert(name, def_id);
+            let is_module_scope = scope.kind == ScopeKind::Module;
+            scope.types.insert(name.clone(), def_id);
+            // Also register in current module scope for cross-module imports
+            if is_module_scope {
+                if let Some(module) = self.modules.get_mut(&self.current_module) {
+                    module.define_type(name, def_id, Visibility::Private);
+                }
+            }
             Ok(())
         } else {
             Err("No scope".to_string())
@@ -973,28 +1004,64 @@ impl SymbolTable {
             Some(items) => {
                 for item in items {
                     if item.is_glob {
-                        // Glob import: import all public items
-                        let public_items: Vec<_> = source_module
-                            .public_items()
+                        // Glob import: import all items from the source module.
+                        // Uses private_names/types (not just public) because Sounio
+                        // doesn't use `pub` — all module-level items are accessible.
+                        let value_items: Vec<_> = source_module
+                            .private_names
+                            .iter()
+                            .map(|(n, d)| (n.clone(), *d))
+                            .collect();
+                        let type_items: Vec<_> = source_module
+                            .private_types
+                            .iter()
                             .map(|(n, d)| (n.clone(), *d))
                             .collect();
 
+                        // Register in module scope
                         if let Some(current_mod) = self.modules.get_mut(&current) {
-                            for (name, def_id) in public_items {
+                            for (name, def_id) in &value_items {
                                 if is_reexport {
                                     current_mod.add_reexport(
                                         name.clone(),
                                         source_module_id.clone(),
-                                        name,
-                                        def_id,
+                                        name.clone(),
+                                        *def_id,
                                     );
                                 } else {
                                     current_mod.add_import(
                                         name.clone(),
                                         source_module_id.clone(),
-                                        name,
+                                        name.clone(),
                                     );
                                 }
+                            }
+                            for (name, def_id) in &type_items {
+                                if is_reexport {
+                                    current_mod.add_reexport(
+                                        name.clone(),
+                                        source_module_id.clone(),
+                                        name.clone(),
+                                        *def_id,
+                                    );
+                                } else {
+                                    current_mod.add_import(
+                                        name.clone(),
+                                        source_module_id.clone(),
+                                        name.clone(),
+                                    );
+                                }
+                            }
+                        }
+
+                        // Also define in current lexical scope so regular name
+                        // resolution finds these items without module qualification.
+                        if let Some(scope) = self.scopes.last_mut() {
+                            for (name, def_id) in &value_items {
+                                scope.names.insert(name.clone(), *def_id);
+                            }
+                            for (name, def_id) in &type_items {
+                                scope.types.insert(name.clone(), *def_id);
                             }
                         }
                     } else {
@@ -1002,10 +1069,11 @@ impl SymbolTable {
                         let local_name = item.alias.clone().unwrap_or_else(|| item.name.clone());
                         let orig_name = &item.name;
 
-                        // Verify the item exists and is public
+                        // Verify the item exists (use from_same_module=true since
+                        // Sounio has no pub — all items are accessible)
                         let def_id = source_module
-                            .lookup(orig_name, false)
-                            .or_else(|| source_module.lookup_type(orig_name, false))
+                            .lookup(orig_name, true)
+                            .or_else(|| source_module.lookup_type(orig_name, true))
                             .ok_or_else(|| {
                                 format!(
                                     "Item `{}` not found or not public in module `{}`",
@@ -1017,17 +1085,27 @@ impl SymbolTable {
                         if let Some(current_mod) = self.modules.get_mut(&current) {
                             if is_reexport {
                                 current_mod.add_reexport(
-                                    local_name,
+                                    local_name.clone(),
                                     source_module_id.clone(),
                                     orig_name.clone(),
                                     def_id,
                                 );
                             } else {
                                 current_mod.add_import(
-                                    local_name,
+                                    local_name.clone(),
                                     source_module_id.clone(),
                                     orig_name.clone(),
                                 );
+                            }
+                        }
+
+                        // Also define in current scope for direct access
+                        let is_type = source_module.private_types.contains_key(orig_name);
+                        if let Some(scope) = self.scopes.last_mut() {
+                            if is_type {
+                                scope.types.insert(local_name, def_id);
+                            } else {
+                                scope.names.insert(local_name, def_id);
                             }
                         }
                     }

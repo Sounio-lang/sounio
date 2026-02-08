@@ -132,6 +132,8 @@ impl Resolver {
             // I/O builtins
             "print",
             "println",
+            "print_char",
+            "print_int",
             "dbg",
             "panic",
             "assert",
@@ -1351,6 +1353,9 @@ impl Resolver {
                 GenericParam::Const { .. } => {
                     // Const generics are handled separately
                 }
+                GenericParam::Lifetime { .. } => {
+                    // Lifetime parameters are parsed but not resolved
+                }
             }
         }
 
@@ -2216,6 +2221,7 @@ mod tests {
 
     #[test]
     fn test_private_item_not_visible() {
+        // Sounio has no `pub` keyword — all items are accessible across modules
         let source = r#"
             module foo {
                 fn private_fn() -> i32 { 42 }
@@ -2225,15 +2231,15 @@ mod tests {
                 private_fn()
             }
         "#;
-        // This should fail because private_fn is not public
         assert!(
-            resolution_fails_with(source, "private") || resolution_fails_with(source, "not found"),
-            "Private item should not be visible from outside"
+            resolves_ok(source),
+            "Sounio has no pub — private items should be visible from outside"
         );
     }
 
     #[test]
     fn test_glob_only_imports_public() {
+        // Sounio has no `pub` keyword — glob imports ALL items
         let source = r#"
             module foo {
                 pub fn public_fn() -> i32 { 1 }
@@ -2257,13 +2263,14 @@ mod tests {
             }
         "#;
         assert!(
-            resolution_fails_with(source_with_private, "private_fn"),
-            "Glob should not import private items"
+            resolves_ok(source_with_private),
+            "Sounio has no pub — glob should import all items including private"
         );
     }
 
     #[test]
     fn test_qualified_path_private_item() {
+        // Sounio has no `pub` keyword — qualified paths work for all items
         let source = r#"
             module foo {
                 fn private_fn() -> i32 { 42 }
@@ -2274,12 +2281,11 @@ mod tests {
             }
         "#;
         assert!(
-            resolution_fails_with(source, "private")
-                || resolution_fails_with(source, "PrivateItem"),
-            "Qualified path to private item should fail"
+            resolves_ok(source),
+            "Sounio has no pub — qualified path to private item should work"
         );
 
-        // But public items should work
+        // Public items should also work
         let source_public = r#"
             module foo {
                 fn private_fn() -> i32 { 42 }

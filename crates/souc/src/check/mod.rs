@@ -5863,6 +5863,8 @@ impl TypeChecker {
             name,
             "print"
                 | "println"
+                | "print_char"
+                | "print_int"
                 | "assert"
                 | "assert_eq"
                 | "len"
@@ -6064,7 +6066,8 @@ impl TypeChecker {
     fn get_builtin_type(&self, name: &str) -> HirType {
         // For simplicity, most builtins are treated as functions that take any args and return unit or the appropriate type
         match name {
-            "print" | "println" | "dbg" | "panic" | "assert" | "assert_eq" => {
+            "print" | "println" | "print_char" | "print_int" | "dbg" | "panic" | "assert"
+            | "assert_eq" => {
                 // These return unit
                 HirType::Fn {
                     params: vec![], // Variadic, but we'll be lenient
