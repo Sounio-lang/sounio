@@ -129,18 +129,23 @@ impl MetadataTracker {
     /// Extract Knowledge<T> wrapper information from a type
     pub fn extract_knowledge_wrapper(ty: &HlirType) -> Option<(f64, Option<u32>)> {
         match ty {
-            HlirType::Knowledge { inner, mode, .. } => {
+            HlirType::Knowledge {
+                inner: _,
+                mode,
+                epsilon_bound,
+                provenance_id,
+            } => {
                 use crate::runtime::EpistemicMode;
                 // Extract epsilon bound based on mode
                 // Epsilon = 1 - confidence, so 95% confidence = 0.05 epsilon
                 let epsilon_bound = match mode {
-                    EpistemicMode::Full | EpistemicMode::Compact => 0.05, // 95% confidence
-                    EpistemicMode::Erased => return None,                 // No runtime tracking
+                    EpistemicMode::Full | EpistemicMode::Compact => epsilon_bound.unwrap_or(0.05),
+                    EpistemicMode::Erased => return None, // No runtime tracking
                 };
 
                 // Provenance ID only tracked in Full mode
                 let provenance_id = match mode {
-                    EpistemicMode::Full => Some(0), // TODO: extract actual provenance from metadata
+                    EpistemicMode::Full => *provenance_id,
                     _ => None,
                 };
 
@@ -1851,6 +1856,45 @@ mod tests {
         let ty = HlirType::I32;
         let unit = MetadataTracker::extract_quantity_wrapper(&ty);
         assert!(unit.is_none());
+    }
+
+    #[test]
+    fn test_extract_knowledge_full_mode_preserves_metadata() {
+        let ty = HlirType::Knowledge {
+            inner: Box::new(HlirType::F64),
+            mode: crate::runtime::EpistemicMode::Full,
+            epsilon_bound: Some(0.01),
+            provenance_id: Some(42),
+        };
+
+        let metadata = MetadataTracker::extract_knowledge_wrapper(&ty);
+        assert_eq!(metadata, Some((0.01, Some(42))));
+    }
+
+    #[test]
+    fn test_extract_knowledge_compact_mode_clears_provenance() {
+        let ty = HlirType::Knowledge {
+            inner: Box::new(HlirType::F64),
+            mode: crate::runtime::EpistemicMode::Compact,
+            epsilon_bound: Some(0.02),
+            provenance_id: Some(99),
+        };
+
+        let metadata = MetadataTracker::extract_knowledge_wrapper(&ty);
+        assert_eq!(metadata, Some((0.02, None)));
+    }
+
+    #[test]
+    fn test_extract_knowledge_erased_mode_returns_none() {
+        let ty = HlirType::Knowledge {
+            inner: Box::new(HlirType::F64),
+            mode: crate::runtime::EpistemicMode::Erased,
+            epsilon_bound: Some(0.03),
+            provenance_id: Some(7),
+        };
+
+        let metadata = MetadataTracker::extract_knowledge_wrapper(&ty);
+        assert_eq!(metadata, None);
     }
 
     #[test]

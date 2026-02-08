@@ -92,12 +92,12 @@ impl UnitCheckInsertion {
                                 UnitCompatibility::Compatible => {
                                     // No action needed
                                 }
-                                UnitCompatibility::ConvertibleFrom { .. } => {
+                                UnitCompatibility::ConvertibleFrom { from, to, scale } => {
                                     if self.auto_convert {
-                                        // Insert conversion instruction
-                                        // TODO: Implement actual conversion
-                                        result.conversions_inserted += 1;
-                                        result.modified = true;
+                                        // Conversion op emission is not available in SIR yet.
+                                        // Keep the arithmetic op unchanged instead of reporting
+                                        // a conversion that did not happen.
+                                        let _ = (from, to, scale);
                                     } else if self.strict {
                                         // Insert assertion
                                         self.insert_unit_assert(
@@ -286,5 +286,21 @@ mod tests {
         let second = PhysicalUnit::second();
         let result = pass.check_unit_compatibility(&ArithOp::Mul, &meter, &second);
         assert!(matches!(result, UnitCompatibility::Compatible));
+    }
+
+    #[test]
+    fn test_unit_compatibility_different_scales_convertible() {
+        let pass = UnitCheckInsertion::new();
+
+        let lhs = PhysicalUnit::kilogram();
+        let rhs = PhysicalUnit::milligram();
+        let result = pass.check_unit_compatibility(&ArithOp::Add, &lhs, &rhs);
+
+        match result {
+            UnitCompatibility::ConvertibleFrom { scale, .. } => {
+                assert!((scale - 1e-6).abs() < 1e-12);
+            }
+            other => panic!("Expected conversion, got {:?}", other),
+        }
     }
 }

@@ -1075,6 +1075,34 @@ pub struct CapabilityDiff {
 }
 
 impl TargetCapabilities {
+    fn parameterized_kind(cap: &Capability) -> Option<u8> {
+        match cap {
+            Capability::SharedMemKb(_) => Some(0),
+            Capability::MaxSharedPerBlock(_) => Some(1),
+            Capability::WarpSize(_) => Some(2),
+            Capability::SubgroupSize(_) => Some(3),
+            Capability::MaxRegistersPerThread(_) => Some(4),
+            Capability::MaxThreadsPerBlock(_) => Some(5),
+            Capability::ComputeCapability(_, _) => Some(6),
+            Capability::AmdGcnVersion(_) => Some(7),
+            Capability::IntelXeVersion(_) => Some(8),
+            Capability::AppleGpuFamily(_) => Some(9),
+            Capability::TensorCoreGen(_) => Some(10),
+            Capability::NvLink(_) => Some(11),
+            _ => None,
+        }
+    }
+
+    fn parameterized_caps_by_kind(&self) -> std::collections::HashMap<u8, Capability> {
+        let mut by_kind = std::collections::HashMap::new();
+        for cap in &self.capabilities {
+            if let Some(kind) = Self::parameterized_kind(cap) {
+                by_kind.insert(kind, *cap);
+            }
+        }
+        by_kind
+    }
+
     /// Compare this capability set with another
     pub fn diff(&self, other: &TargetCapabilities) -> CapabilityDiff {
         let self_caps: HashSet<_> = self.capabilities.iter().cloned().collect();
@@ -1093,10 +1121,35 @@ impl TargetCapabilities {
             .cloned()
             .collect();
 
+        let self_param = self.parameterized_caps_by_kind();
+        let other_param = other.parameterized_caps_by_kind();
+        let mut different = Vec::new();
+        let mut missing = missing;
+        let mut extra = extra;
+
+        let mut keys: Vec<u8> = self_param.keys().chain(other_param.keys()).copied().collect();
+        keys.sort_unstable();
+        keys.dedup();
+
+        for key in keys {
+            match (self_param.get(&key), other_param.get(&key)) {
+                (Some(self_cap), Some(other_cap)) if self_cap != other_cap => {
+                    different.push((*self_cap, *other_cap));
+                }
+                (None, Some(other_cap)) => missing.push(*other_cap),
+                (Some(self_cap), None) => extra.push(*self_cap),
+                _ => {}
+            }
+        }
+
+        missing.sort_by_key(|c| c.to_string());
+        extra.sort_by_key(|c| c.to_string());
+        different.sort_by_key(|(src, dst)| format!("{}->{}", src, dst));
+
         CapabilityDiff {
             missing,
             extra,
-            different: Vec::new(), // TODO: Handle parameterized differences
+            different,
         }
     }
 
@@ -1302,5 +1355,42 @@ mod tests {
         assert_eq!(ampere.optimal_tile_size(), (32, 32));
         // Vulkan portable has no tensor cores
         assert_eq!(vulkan.optimal_tile_size(), (32, 32));
+    }
+
+    #[test]
+    fn test_diff_reports_parameterized_capability_changes() {
+        let source = TargetCapabilities::new("source")
+            .with_capability(Capability::TensorOps)
+            .with_capability(Capability::SharedMemKb(48))
+            .with_capability(Capability::WarpSize(32));
+
+        let target = TargetCapabilities::new("target")
+            .with_capability(Capability::TensorOps)
+            .with_capability(Capability::SharedMemKb(64))
+            .with_capability(Capability::WarpSize(32));
+
+        let diff = source.diff(&target);
+
+        assert!(diff
+            .different
+            .contains(&(Capability::SharedMemKb(48), Capability::SharedMemKb(64))));
+        assert!(diff.missing.is_empty());
+        assert!(diff.extra.is_empty());
+    }
+
+    #[test]
+    fn test_diff_reports_missing_and_extra_parameterized_capabilities() {
+        let source = TargetCapabilities::new("source")
+            .with_capability(Capability::SharedMemKb(48))
+            .with_capability(Capability::WarpSize(32));
+
+        let target = TargetCapabilities::new("target")
+            .with_capability(Capability::SharedMemKb(48))
+            .with_capability(Capability::ComputeCapability(8, 0));
+
+        let diff = source.diff(&target);
+
+        assert!(diff.missing.contains(&Capability::ComputeCapability(8, 0)));
+        assert!(diff.extra.contains(&Capability::WarpSize(32)));
     }
 }
