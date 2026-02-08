@@ -282,7 +282,15 @@ impl RankNChecker {
                 return SubsumptionResult::Fail(format!("Return type mismatch: {}", msg));
             }
 
-            // TODO: Check effects subsumption
+            // Check effects: a more general function type may declare a superset
+            // of effects compared to a more specific one.
+            if !self.effects_subsume(effects1, effects2) {
+                let missing_effects = self.missing_effects(effects1, effects2);
+                return SubsumptionResult::Fail(format!(
+                    "Effect mismatch: expected effects {:?} to subsume {:?}; missing {:?}",
+                    effects1.effects, effects2.effects, missing_effects
+                ));
+            }
             return SubsumptionResult::Ok;
         }
 
@@ -359,6 +367,36 @@ impl RankNChecker {
             }
             _ => false,
         }
+    }
+
+    /// Check whether `general` effect set subsumes `specific`.
+    ///
+    /// For effect rows, subsumption here means:
+    /// - all concrete effects in `specific` must be present in `general`
+    /// - all effect variables in `specific` must be present in `general`
+    fn effects_subsume(
+        &self,
+        general: &crate::types::EffectSet,
+        specific: &crate::types::EffectSet,
+    ) -> bool {
+        #[allow(deprecated)]
+        {
+            specific.effects.is_subset(&general.effects)
+                && specific.effect_vars.is_subset(&general.effect_vars)
+                && specific.vars.is_subset(&general.vars)
+        }
+    }
+
+    fn missing_effects(
+        &self,
+        general: &crate::types::EffectSet,
+        specific: &crate::types::EffectSet,
+    ) -> Vec<String> {
+        specific
+            .effects
+            .difference(&general.effects)
+            .cloned()
+            .collect()
     }
 
     /// Try to unify two types, updating the substitution if successful
@@ -821,6 +859,54 @@ mod tests {
         assert!(
             result.is_fail(),
             "i32 -> i32 should not subsume forall T. T -> T"
+        );
+    }
+
+    #[test]
+    fn test_subsumption_effect_superset_subsumes_subset() {
+        let mut checker = RankNChecker::new();
+
+        let general = Type::Function {
+            params: vec![Type::I32],
+            return_type: Box::new(Type::I32),
+            effects: EffectSet::from_effects(&["IO", "Mut"]),
+            abi: None,
+        };
+        let specific = Type::Function {
+            params: vec![Type::I32],
+            return_type: Box::new(Type::I32),
+            effects: EffectSet::from_effects(&["IO"]),
+            abi: None,
+        };
+
+        let result = checker.subsumes(&general, &specific);
+        assert!(
+            result.is_ok(),
+            "function with superset effects should subsume subset effect signature"
+        );
+    }
+
+    #[test]
+    fn test_subsumption_effect_subset_does_not_subsume_superset() {
+        let mut checker = RankNChecker::new();
+
+        let less_general = Type::Function {
+            params: vec![Type::I32],
+            return_type: Box::new(Type::I32),
+            effects: EffectSet::from_effects(&["IO"]),
+            abi: None,
+        };
+        let more_specific = Type::Function {
+            params: vec![Type::I32],
+            return_type: Box::new(Type::I32),
+            effects: EffectSet::from_effects(&["IO", "Mut"]),
+            abi: None,
+        };
+
+        let result = checker.subsumes(&less_general, &more_specific);
+        assert!(
+            result.is_fail(),
+            "function with subset effects must not subsume superset effect signature"
         );
     }
 

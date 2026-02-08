@@ -1230,12 +1230,16 @@ impl TypeChecker {
                 // Extract effects from function declaration
                 let mut effect_set = types::EffectSet::new();
                 for effect_ref in &f.effects {
-                    if let Some(name) = effect_ref.as_simple_name() {
-                        effect_set.add(types::Effect {
-                            name: name.to_string(),
-                            args: Vec::new(), // TODO(issue-20): handle parameterized effects
-                        });
-                    }
+                    let effect_name = effect_ref.name.to_string();
+                    let effect_args = effect_ref
+                        .args
+                        .iter()
+                        .map(|arg| self.lower_type_expr(arg))
+                        .collect();
+                    effect_set.add(types::Effect {
+                        name: effect_name,
+                        args: effect_args,
+                    });
                 }
 
                 let fn_type = Type::Function {
@@ -1612,6 +1616,14 @@ impl TypeChecker {
     }
 
     fn collect_type_def(&mut self, item: &Item) {
+        let source_module = self
+            .current_module
+            .as_ref()
+            .map(|m| ModuleId::new(m.segments().to_vec()));
+        self.collect_type_def_in_module(item, source_module);
+    }
+
+    fn collect_type_def_in_module(&mut self, item: &Item, source_module: Option<ModuleId>) {
         match item {
             Item::Struct(s) => {
                 let fields: Vec<_> = s
@@ -1625,7 +1637,7 @@ impl TypeChecker {
                         fields,
                         linear: s.modifiers.linear,
                         affine: s.modifiers.affine,
-                        source_module: None, // TODO: extract from struct's module context
+                        source_module,
                     },
                 );
             }
@@ -1652,7 +1664,7 @@ impl TypeChecker {
                         variants,
                         linear: e.modifiers.linear,
                         affine: e.modifiers.affine,
-                        source_module: None, // TODO: extract from enum's module context
+                        source_module,
                     },
                 );
             }
@@ -1672,14 +1684,18 @@ impl TypeChecker {
                     .collect();
                 self.type_defs.insert(
                     t.name.clone(),
-                    TypeDef::Alias(ty, t.span, None, generic_params),
+                    TypeDef::Alias(ty, t.span, source_module, generic_params),
                 );
             }
             Item::Module(m) => {
                 // Recursively collect type definitions from nested modules
                 if let Some(ref items) = m.items {
+                    let nested_module = source_module
+                        .as_ref()
+                        .map(|module_id| module_id.join(&m.name))
+                        .or_else(|| Some(ModuleId::new(vec![m.name.clone()])));
                     for item in items {
-                        self.collect_type_def(item);
+                        self.collect_type_def_in_module(item, nested_module.clone());
                     }
                 }
             }

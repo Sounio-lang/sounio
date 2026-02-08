@@ -1,10 +1,8 @@
 // Sounio Compiler - Dependent Type Checking with Epistemic Constraints
 // Validates refinement predicates and dependent type satisfaction
 
-use crate::ast::Expr;
 use crate::check::TypeEnv;
 use crate::common::Span;
-use crate::ontology::loader::IRI;
 use crate::refinement::Predicate;
 use crate::types::Type;
 use std::collections::HashMap;

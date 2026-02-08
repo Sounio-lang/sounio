@@ -31,7 +31,7 @@ use std::collections::HashMap;
 use crate::common::Span;
 use crate::types::pac::{
     compute_sample_complexity, compute_sample_complexity_tight, DeltaBound, EpsilonBound,
-    GeneralizationBound, HypothesisClass, SampleBound, SampleComplexity, VCDimension,
+    GeneralizationBound, HypothesisClass, SampleBound, VCDimension,
 };
 
 /// Error from PAC type checking
