@@ -27,7 +27,6 @@ fn find_extern_c_fn(items: &[Item], name: &str) -> bool {
 }
 
 #[test]
-#[ignore = "pub import re-export: checker/HLIR don't traverse Module wrappers yet (pre-existing since directory compilation)"]
 fn extern_c_fn_from_imported_module_is_included() {
     let dir = tempfile::tempdir().expect("temp dir");
     let lib_path = dir.path().join("lib.sio");

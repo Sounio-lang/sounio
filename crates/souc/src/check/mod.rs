@@ -1346,16 +1346,8 @@ impl TypeChecker {
             }
         }
 
-        // Third pass: type check items
-        for item in &ast.items {
-            if let Item::Extern(extern_block) = item {
-                externs.push(self.lower_extern_block(extern_block)?);
-                continue;
-            }
-            if let Some(hir_item) = self.check_item(item)? {
-                items.push(hir_item);
-            }
-        }
+        // Third pass: type check items (flattening Module wrappers)
+        self.check_items_recursive(&ast.items, &mut items, &mut externs)?;
 
         // Emit type aliases to HIR so they can be resolved during HLIR lowering
         // This is essential for refinement types: `type OrbitRatio = { r: f64 | ... }`
@@ -1791,6 +1783,13 @@ impl TypeChecker {
             let key = if t1 <= t2 { (t1, t2) } else { (t2, t1) };
             self.alignments.insert(key, align.distance);
         }
+        if let Item::Module(m) = item {
+            if let Some(ref items) = m.items {
+                for inner in items {
+                    self.collect_alignment(inner);
+                }
+            }
+        }
     }
 
     /// Collect function-level compatibility thresholds from #[compat] annotations
@@ -1815,6 +1814,13 @@ impl TypeChecker {
                         }
                         _ => {}
                     }
+                }
+            }
+        }
+        if let Item::Module(m) = item {
+            if let Some(ref items) = m.items {
+                for inner in items {
+                    self.collect_fn_threshold(inner);
                 }
             }
         }
@@ -1857,6 +1863,13 @@ impl TypeChecker {
                 );
             } else {
                 self.ontology_prefixes.insert(ont.prefix.clone());
+            }
+        }
+        if let Item::Module(m) = item {
+            if let Some(ref items) = m.items {
+                for inner in items {
+                    self.collect_ontology_prefix(inner);
+                }
             }
         }
     }
@@ -2518,6 +2531,33 @@ impl TypeChecker {
             // Other types: no ontology checking needed
             _ => None,
         }
+    }
+
+    /// Recursively type-check items, flattening Module wrappers so that
+    /// functions inside imported modules appear in the parent HIR.
+    fn check_items_recursive(
+        &mut self,
+        items: &[Item],
+        hir_items: &mut Vec<HirItem>,
+        externs: &mut Vec<HirExternBlock>,
+    ) -> Result<()> {
+        for item in items {
+            if let Item::Extern(extern_block) = item {
+                externs.push(self.lower_extern_block(extern_block)?);
+                continue;
+            }
+            if let Item::Module(m) = item {
+                // Flatten: recurse into module items instead of dropping them
+                if let Some(ref inner) = m.items {
+                    self.check_items_recursive(inner, hir_items, externs)?;
+                }
+                continue;
+            }
+            if let Some(hir_item) = self.check_item(item)? {
+                hir_items.push(hir_item);
+            }
+        }
+        Ok(())
     }
 
     fn check_item(&mut self, item: &Item) -> Result<Option<HirItem>> {
