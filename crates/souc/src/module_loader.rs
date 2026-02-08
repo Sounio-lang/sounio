@@ -17,6 +17,21 @@ use crate::ast::*;
 use crate::lexer;
 use crate::parser;
 
+fn module_loader_debug_enabled() -> bool {
+    matches!(
+        std::env::var("SOUNIO_DEBUG_MODULE_LOADER").ok().as_deref(),
+        Some("1" | "true" | "TRUE" | "yes" | "YES" | "on" | "ON")
+    )
+}
+
+macro_rules! module_loader_debug {
+    ($($arg:tt)*) => {
+        if module_loader_debug_enabled() {
+            eprintln!($($arg)*);
+        }
+    };
+}
+
 /// Mapping from import prefix to resolved module info
 #[derive(Debug, Clone)]
 pub struct ImportMapping {
@@ -189,25 +204,84 @@ impl ModuleLoader {
 
         self.load_stack.push(canonical.clone());
 
-        let source = std::fs::read_to_string(&canonical)
-            .map_err(|e| miette::miette!("Failed to read {}: {}", canonical.display(), e))?;
-        let tokens = lexer::lex(&source)?;
-        let (mut ast, next_id) = parser::parse_with_id_start(&tokens, &source, self.next_node_id)?;
-        self.next_node_id = next_id;
+        // Directory import mode: when importing a mod.sio that has sibling .sio files,
+        // load all files in the directory as a single flat module (same as directory mode).
+        let is_mod_sio = canonical.file_name().and_then(|f| f.to_str()) == Some("mod.sio");
+        let sibling_count = if is_mod_sio {
+            canonical
+                .parent()
+                .and_then(|dir| std::fs::read_dir(dir).ok())
+                .map(|rd| {
+                    rd.filter_map(|e| e.ok())
+                        .filter(|e| {
+                            e.path().extension().and_then(|x| x.to_str()) == Some("sio")
+                                && e.path() != canonical
+                        })
+                        .count()
+                })
+                .unwrap_or(0)
+        } else {
+            0
+        };
 
-        // Resolve file-based module declarations (`mod foo;`)
-        self.fill_file_modules(&mut ast.items, &canonical)?;
+        let mut ast = if is_mod_sio && sibling_count > 0 {
+            let dir = canonical.parent().unwrap();
+            load_directory_ast(dir)?
+        } else {
+            let source = std::fs::read_to_string(&canonical)
+                .map_err(|e| miette::miette!("Failed to read {}: {}", canonical.display(), e))?;
+            let tokens = lexer::lex(&source)?;
+            let (mut parsed_ast, next_id) =
+                parser::parse_with_id_start(&tokens, &source, self.next_node_id)?;
+            self.next_node_id = next_id;
+
+            // Resolve file-based module declarations (`mod foo;`)
+            self.fill_file_modules(&mut parsed_ast.items, &canonical)?;
+            parsed_ast
+        };
 
         // Create module ID from file path
         let module_id = ModuleId::from_file_path(&canonical);
 
+        let import_count = ast
+            .items
+            .iter()
+            .filter(|i| matches!(i, Item::Import(_)))
+            .count();
+        module_loader_debug!(
+            "[module_loader] Loaded {}: {} items, {} Import items",
+            canonical.display(),
+            ast.items.len(),
+            import_count
+        );
+        for (idx, item) in ast.items.iter().enumerate().take(5) {
+            let kind = match item {
+                Item::Import(i) => format!("Import({:?})", i.path.segments),
+                Item::Function(f) => format!("Function({})", f.name),
+                Item::Struct(s) => format!("Struct({})", s.name),
+                Item::Enum(e) => format!("Enum({})", e.name),
+                Item::Module(m) => format!("Module({})", m.name),
+                Item::Global(_) => "Global".to_string(),
+                _ => "Other".to_string(),
+            };
+            module_loader_debug!("[module_loader]   item[{}] = {}", idx, kind);
+        }
         let import_paths = collect_import_paths(&ast);
+        module_loader_debug!(
+            "[module_loader]   Resolved import_paths: {:?}",
+            import_paths
+        );
 
         // Build import mappings (will be populated after resolving imports)
         let mut import_mappings = Vec::new();
         for import_path in &import_paths {
-            if let Ok(import_file) = resolve_import_path(&canonical, import_path, &self.stdlib_dir)
-            {
+            let resolve_result = resolve_import_path(&canonical, import_path, &self.stdlib_dir);
+            module_loader_debug!(
+                "[module_loader]   Resolving {:?} -> {:?}",
+                import_path,
+                resolve_result
+            );
+            if let Ok(import_file) = resolve_result {
                 let imported_module_id = ModuleId::from_file_path(&import_file);
                 import_mappings.push(ImportMapping {
                     prefix: import_path.clone(),
@@ -234,9 +308,24 @@ impl ModuleLoader {
         self.path_to_id.insert(canonical.clone(), id);
 
         let import_paths_owned = import_paths;
+        module_loader_debug!(
+            "[load_module] Processing {} imports for {}",
+            import_paths_owned.len(),
+            canonical.display()
+        );
         for import_path in &import_paths_owned {
             let import_file = resolve_import_path(&canonical, import_path, &self.stdlib_dir)?;
+            module_loader_debug!(
+                "[load_module]   Loading import {:?} -> {}",
+                import_path,
+                import_file.display()
+            );
             let loaded_id = self.load_module(&import_file)?;
+            module_loader_debug!(
+                "[load_module]   Loaded as module {}, total modules now: {}",
+                loaded_id,
+                self.modules.len()
+            );
             // Track the import path used to load this module
             if let Some(module_data) = self.modules.get_mut(loaded_id) {
                 if module_data.import_from_path.is_none() {
@@ -261,23 +350,11 @@ impl ModuleLoader {
 
         let mut defined: HashMap<String, PathBuf> = HashMap::new();
 
+        // Process imported modules FIRST so they're defined before root's import
+        // statements reference them (the resolver processes items sequentially).
         for (idx, module) in self.modules.iter_mut().enumerate() {
             if idx == root_id {
-                // Root module: add items directly (don't wrap)
-                for item in &module.ast.items {
-                    if let Some(name) = item_name(item) {
-                        if let Some(prev_path) = defined.get(&name) {
-                            return Err(miette::miette!(
-                                "Duplicate definition `{}` in {} and {}",
-                                name,
-                                prev_path.display(),
-                                module.path.display()
-                            ));
-                        }
-                        defined.insert(name, module.path.clone());
-                    }
-                }
-                items.append(&mut module.ast.items);
+                continue; // Skip root, handle after imports
             } else {
                 // Imported module: wrap in nested Module items based on import path
                 let import_path = module.import_from_path.clone().unwrap_or_else(|| {
@@ -327,6 +404,36 @@ impl ModuleLoader {
 
             node_spans.extend(module.ast.node_spans.drain());
         }
+
+        // Now add root module items (after imported modules are already in `items`)
+        module_loader_debug!(
+            "[into_ast] {} imported module items so far, {} total modules, root_id={}",
+            items.len(),
+            self.modules.len(),
+            root_id
+        );
+        if let Some(root_module) = self.modules.get_mut(root_id) {
+            module_loader_debug!(
+                "[into_ast] Root module has {} items",
+                root_module.ast.items.len()
+            );
+            for item in &root_module.ast.items {
+                if let Some(name) = item_name(item) {
+                    if let Some(prev_path) = defined.get(&name) {
+                        return Err(miette::miette!(
+                            "Duplicate definition `{}` in {}\nand {}",
+                            name,
+                            prev_path.display(),
+                            root_module.path.display()
+                        ));
+                    }
+                    defined.insert(name, root_module.path.clone());
+                }
+            }
+            items.append(&mut root_module.ast.items);
+            node_spans.extend(root_module.ast.node_spans.drain());
+        }
+        module_loader_debug!("[into_ast] Final: {} items", items.len());
 
         Ok(Ast {
             module_name: root_module_name,

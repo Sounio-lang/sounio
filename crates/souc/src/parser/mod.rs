@@ -1102,10 +1102,19 @@ impl<'a> Parser<'a> {
         let generics = self.parse_generics()?;
         let supertraits = if self.at(TokenKind::Colon) {
             self.advance();
-            let mut traits = vec![self.parse_path()?];
+            let mut traits = Vec::new();
+            if self.at(TokenKind::Lifetime) {
+                self.advance(); // Skip lifetime bounds like 'static
+            } else {
+                traits.push(self.parse_path()?);
+            }
             while self.at(TokenKind::Plus) {
                 self.advance();
-                traits.push(self.parse_path()?);
+                if self.at(TokenKind::Lifetime) {
+                    self.advance(); // Skip lifetime bounds like + 'static
+                } else {
+                    traits.push(self.parse_path()?);
+                }
             }
             traits
         } else {
@@ -1157,7 +1166,10 @@ impl<'a> Parser<'a> {
                 let default_body = if self.at(TokenKind::LBrace) {
                     Some(self.parse_block()?)
                 } else {
-                    self.expect(TokenKind::Semi)?;
+                    // Semicolons are optional after trait function declarations
+                    if self.at(TokenKind::Semi) {
+                        self.advance();
+                    }
                     None
                 };
 
@@ -1192,7 +1204,10 @@ impl<'a> Parser<'a> {
                 } else {
                     None
                 };
-                self.expect(TokenKind::Semi)?;
+                // Semicolons are optional after trait type declarations
+                if self.at(TokenKind::Semi) {
+                    self.advance();
+                }
 
                 Ok(TraitItem::Type(TraitTypeDef {
                     id: self.next_id(),
@@ -1214,9 +1229,46 @@ impl<'a> Parser<'a> {
 
         let generics = self.parse_generics()?;
 
-        // Check if this is a trait impl
-        let (trait_ref, target_type) = if self.peek_n(1) == TokenKind::For {
+        // Check if this is a trait impl by scanning ahead for `for` at top-level
+        // Simple peek_n(1) fails for `impl<T> Index<Range<usize>> for Vec<T>` because
+        // peek_n(1) sees `<` not `for`. We scan ahead counting <> nesting.
+        let is_trait_impl = {
+            let mut i = 1;
+            let mut depth = 0;
+            let mut found_for = false;
+            loop {
+                let tok = self.peek_n(i);
+                match tok {
+                    TokenKind::Lt => depth += 1,
+                    TokenKind::Gt | TokenKind::Shr => {
+                        if tok == TokenKind::Shr {
+                            depth -= 2;
+                        } else {
+                            depth -= 1;
+                        }
+                    }
+                    TokenKind::For if depth <= 0 => {
+                        found_for = true;
+                        break;
+                    }
+                    TokenKind::LBrace | TokenKind::Where | TokenKind::Eof => break,
+                    _ => {}
+                }
+                i += 1;
+                if i > 100 {
+                    break; // Safety bound
+                }
+            }
+            found_for
+        };
+
+        let (trait_ref, target_type) = if is_trait_impl {
             let trait_path = self.parse_path()?;
+            // Skip generic args on trait reference (e.g., Index<Range<usize>>)
+            if self.at(TokenKind::Lt) {
+                // Consume the generic type args — they're informational for now
+                let _type_args = self.parse_type_args()?;
+            }
             self.expect(TokenKind::For)?;
             let ty = self.parse_type()?;
             (Some(trait_path), ty)
@@ -2800,6 +2852,29 @@ impl<'a> Parser<'a> {
     }
 
     fn parse_generic_param(&mut self) -> Result<GenericParam> {
+        // Check for lifetime parameter: `'a`, `'a: 'b + 'c`
+        if self.at(TokenKind::Lifetime) {
+            let text = self.advance().text.clone();
+            let name = text[1..].to_string(); // Strip leading '
+            let bounds = if self.at(TokenKind::Colon) {
+                self.advance();
+                let mut bounds = Vec::new();
+                if self.at(TokenKind::Lifetime) {
+                    bounds.push(self.advance().text[1..].to_string());
+                }
+                while self.at(TokenKind::Plus) {
+                    self.advance();
+                    if self.at(TokenKind::Lifetime) {
+                        bounds.push(self.advance().text[1..].to_string());
+                    }
+                }
+                bounds
+            } else {
+                Vec::new()
+            };
+            return Ok(GenericParam::Lifetime { name, bounds });
+        }
+
         // Check for const generic: `const N: usize`
         if self.at(TokenKind::Const) {
             self.advance();
@@ -2818,14 +2893,24 @@ impl<'a> Parser<'a> {
             return Ok(GenericParam::Effect { name });
         }
 
-        // Type parameter: `T`, `T: Bound`, `T = Default`
+        // Type parameter: `T`, `T: Bound`, `T: Send + 'static`
         let name = self.parse_ident()?;
         let bounds = if self.at(TokenKind::Colon) {
             self.advance();
-            let mut bounds = vec![self.parse_path()?];
+            let mut bounds = Vec::new();
+            // First bound: could be a path or lifetime
+            if self.at(TokenKind::Lifetime) {
+                self.advance(); // Skip lifetime bounds like 'static
+            } else {
+                bounds.push(self.parse_path()?);
+            }
             while self.at(TokenKind::Plus) {
                 self.advance();
-                bounds.push(self.parse_path()?);
+                if self.at(TokenKind::Lifetime) {
+                    self.advance(); // Skip lifetime bounds like + 'static
+                } else {
+                    bounds.push(self.parse_path()?);
+                }
             }
             bounds
         } else {
@@ -2910,12 +2995,41 @@ impl<'a> Parser<'a> {
         let mut predicates = Vec::new();
 
         loop {
+            // Skip lifetime predicates like `'a: 'b`
+            if self.at(TokenKind::Lifetime) {
+                self.advance();
+                if self.at(TokenKind::Colon) {
+                    self.advance();
+                    while self.at(TokenKind::Lifetime) {
+                        self.advance();
+                        if !self.at(TokenKind::Plus) {
+                            break;
+                        }
+                        self.advance();
+                    }
+                }
+                if self.at(TokenKind::Comma) {
+                    self.advance();
+                    continue;
+                } else {
+                    break;
+                }
+            }
             let ty = self.parse_type()?;
             self.expect(TokenKind::Colon)?;
-            let mut bounds = vec![self.parse_path()?];
+            let mut bounds = Vec::new();
+            if self.at(TokenKind::Lifetime) {
+                self.advance(); // Skip lifetime bounds
+            } else {
+                bounds.push(self.parse_path()?);
+            }
             while self.at(TokenKind::Plus) {
                 self.advance();
-                bounds.push(self.parse_path()?);
+                if self.at(TokenKind::Lifetime) {
+                    self.advance(); // Skip lifetime bounds like + 'static
+                } else {
+                    bounds.push(self.parse_path()?);
+                }
             }
             predicates.push(WherePredicate { ty, bounds });
 
@@ -3033,8 +3147,13 @@ impl<'a> Parser<'a> {
 
             // Reference types: &T (shared) or &!T (mutable/exclusive)
             // Also supports &mut T for Rust compatibility
+            // Lifetime annotations (&'a T) are parsed but not stored yet
             TokenKind::Amp => {
                 self.advance();
+                // Skip lifetime annotation if present: &'a T
+                if self.at(TokenKind::Lifetime) {
+                    self.advance();
+                }
                 let is_mut = if self.at(TokenKind::Bang) {
                     // Sounio canonical syntax: &!T for mutable reference (two tokens)
                     self.advance();
@@ -3352,6 +3471,17 @@ impl<'a> Parser<'a> {
 
             // Higher-rank polymorphism: forall T. T -> T
             TokenKind::Forall => self.parse_forall_type(),
+
+            // Lifetime in type position: 'a, 'static — parsed as opaque type for now
+            // Appears in contexts like `Box<dyn Future + Send + 'static>` or `T: 'a`
+            TokenKind::Lifetime => {
+                let text = self.advance().text.clone();
+                Ok(TypeExpr::Named {
+                    path: Path::simple(&text),
+                    args: Vec::new(),
+                    unit: None,
+                })
+            }
 
             _ => {
                 // Generate context-aware error message
@@ -4274,7 +4404,8 @@ impl<'a> Parser<'a> {
                         let field = self.parse_ident()?;
 
                         // Check if this is a method call: expr.method(args)
-                        if self.at(TokenKind::LParen) {
+                        // Like plain calls, don't treat '(' on a new line as a method call.
+                        if self.at(TokenKind::LParen) && !self.had_newline_before_current() {
                             self.advance();
                             let mut args = Vec::new();
                             while !self.at(TokenKind::RParen) {
