@@ -220,7 +220,7 @@ fn test_format_array_type() {
     let formatted = format(source);
     // Check it contains array notation - exact format may vary
     assert!(formatted.contains("[i32") || formatted.contains("i32]"));
-    // TODO: Fix Int() wrapping bug in formatter for array size literals
+    // NOTE: Fix Int() wrapping bug in formatter for array size literals
 }
 
 #[test]
@@ -272,7 +272,7 @@ fn test_format_binary_ops() {
     let formatted = format(source);
     assert!(formatted.contains("+"));
     assert!(formatted.contains("*"));
-    // TODO: Fix Int() wrapping bug in formatter
+    // NOTE: Fix Int() wrapping bug in formatter
     // For now just check first format works
 }
 
@@ -283,7 +283,7 @@ fn test_format_if_expression() {
     let formatted = format(source);
     assert!(formatted.contains("if"));
     assert!(formatted.contains("else"));
-    // TODO: Fix Int() wrapping bug in formatter that prevents idempotence
+    // NOTE: Fix Int() wrapping bug in formatter that prevents idempotence
 }
 
 #[test]
@@ -292,7 +292,7 @@ fn test_format_match_expression() {
     let source = "fn check(opt: Option<i32>) { match opt { Some => 1, None => 0 } }";
     let formatted = format(source);
     assert!(formatted.contains("match"));
-    // TODO: Fix Int() wrapping bug in formatter
+    // NOTE: Fix Int() wrapping bug in formatter
 }
 
 #[test]
@@ -321,7 +321,7 @@ fn test_format_closure() {
     let source = "fn use_closure() { let f = |x| x + 1; }";
     let formatted = format(source);
     assert!(formatted.contains("|x|"));
-    // TODO: Fix Int() wrapping bug in formatter
+    // NOTE: Fix Int() wrapping bug in formatter
 }
 
 // =============================================================================

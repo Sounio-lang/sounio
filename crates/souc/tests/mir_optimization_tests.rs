@@ -3,6 +3,7 @@
 //! This module provides comprehensive tests for the MIR optimization pipeline,
 //! validating that all optimization passes work correctly together.
 
+use sounio::mir::BlockId;
 use sounio::mir::analysis::ssa_validator::SSAValidator;
 use sounio::mir::builder::ModuleBuilder;
 use sounio::mir::optimization::{
@@ -10,7 +11,6 @@ use sounio::mir::optimization::{
     MIRPass, StrengthReduction,
 };
 use sounio::mir::types::MirType;
-use sounio::mir::BlockId;
 use std::time::Instant;
 
 /// Test constant propagation optimization
