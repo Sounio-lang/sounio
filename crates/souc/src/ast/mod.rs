@@ -1097,6 +1097,8 @@ pub enum GenericParam {
         bounds: Vec<Path>,
         default: Option<TypeExpr>,
     },
+    /// Lifetime parameter: `'a`, `'a: 'b`
+    Lifetime { name: String, bounds: Vec<String> },
     /// Const parameter: `const N: usize`
     Const { name: String, ty: TypeExpr },
     /// Effect parameter for row polymorphism: `effect E`

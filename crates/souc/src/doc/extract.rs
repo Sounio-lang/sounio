@@ -341,6 +341,10 @@ impl DocExtractor {
                         sig.push_str("effect ");
                         sig.push_str(name);
                     }
+                    GenericParam::Lifetime { name, .. } => {
+                        sig.push('\'');
+                        sig.push_str(name);
+                    }
                 }
             }
             sig.push('>');
@@ -808,6 +812,11 @@ impl DocExtractor {
                     GenericParam::Const { .. } => None, // Handle const generics separately if needed
                     GenericParam::Effect { name } => Some(TypeParamInfo {
                         name: format!("effect {}", name),
+                        bounds: Vec::new(),
+                        default: None,
+                    }),
+                    GenericParam::Lifetime { name, .. } => Some(TypeParamInfo {
+                        name: format!("'{}", name),
                         bounds: Vec::new(),
                         default: None,
                     }),

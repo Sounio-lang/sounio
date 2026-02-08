@@ -1023,6 +1023,21 @@ impl<'a> FormatVisitor<'a> {
                 self.visit_type(ty),
             ]),
             GenericParam::Effect { name } => Doc::text(format!("effect {}", name)),
+            GenericParam::Lifetime { name, bounds } => {
+                if bounds.is_empty() {
+                    Doc::text(format!("'{}", name))
+                } else {
+                    Doc::text(format!(
+                        "'{}: {}",
+                        name,
+                        bounds
+                            .iter()
+                            .map(|b| format!("'{}", b))
+                            .collect::<Vec<_>>()
+                            .join(" + ")
+                    ))
+                }
+            }
         }
     }
 
