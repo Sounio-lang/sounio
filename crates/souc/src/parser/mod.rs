@@ -4122,6 +4122,17 @@ impl<'a> Parser<'a> {
                     break;
                 }
 
+                // Don't treat `-` on a new line as binary subtraction when the
+                // left side is a block expression (while/if/for/match/loop/block).
+                // Without this, `while cond { ... }\n-1` is parsed as
+                // `(while cond { ... }) - 1` instead of two separate statements.
+                if op == BinaryOp::Sub
+                    && self.had_newline_before_current()
+                    && Self::is_block_expr(&left)
+                {
+                    break;
+                }
+
                 self.advance();
                 let next_min = if assoc == Assoc::Left { prec + 1 } else { prec };
                 let right = self.parse_expr_with_precedence(next_min)?;
@@ -4184,6 +4195,19 @@ impl<'a> Parser<'a> {
                 | TokenKind::Query
                 | TokenKind::Observe
                 | TokenKind::Measured
+        )
+    }
+
+    /// Returns true if the expression is a block-like expression that ends with `}`.
+    fn is_block_expr(expr: &Expr) -> bool {
+        matches!(
+            expr,
+            Expr::Block { .. }
+                | Expr::If { .. }
+                | Expr::Match { .. }
+                | Expr::Loop { .. }
+                | Expr::While { .. }
+                | Expr::For { .. }
         )
     }
 
