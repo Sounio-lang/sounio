@@ -1,0 +1,367 @@
+// Printer integration tests
+//
+// Constructs AST nodes and calls the printer to verify it type-checks
+// and exercises the full print pipeline.
+// Entry point: run_printer_tests() (not main, to avoid flat-namespace collision)
+
+// ============================================================================
+// AST CONSTRUCTION HELPERS
+// ============================================================================
+
+fn make_name(a: i8, b: i8, c: i8, count: i64) -> Name with Mut, Panic, Div {
+    var n = Name { buf: [0; 128], len: count }
+    n.buf[0] = a
+    if count > 1 { n.buf[1] = b }
+    if count > 2 { n.buf[2] = c }
+    n
+}
+
+fn make_empty_path() -> AstPath {
+    AstPath {
+        segments: StringList { head_buf: [0; 128], head_len: 0, tail: None },
+        seg_count: 0,
+    }
+}
+
+fn make_single_path(a: i8, b: i8, c: i8, count: i64) -> AstPath with Mut, Panic, Div {
+    var buf: [i8; 128] = [0; 128]
+    buf[0] = a
+    if count > 1 { buf[1] = b }
+    if count > 2 { buf[2] = c }
+    AstPath {
+        segments: StringList { head_buf: buf, head_len: count, tail: None },
+        seg_count: 1,
+    }
+}
+
+fn dummy_span() -> Span {
+    Span::dummy()
+}
+
+fn make_int_expr(val: i64) -> Expr with Mut, Panic, Div {
+    Expr {
+        kind: ExprKind::ExprIntLit,
+        span: dummy_span(),
+        int_val: val,
+        float_val: 0.0,
+        name: make_name(0, 0, 0, 0),
+        path: make_empty_path(),
+        bin_op: BinaryOp::OpAdd,
+        un_op: UnaryOp::OpNeg,
+        left: None,
+        right: None,
+        block: None,
+        else_expr: None,
+        args: None,
+        arms: None,
+        fields: None,
+    }
+}
+
+fn make_ident_expr(a: i8, b: i8, c: i8, count: i64) -> Expr with Mut, Panic, Div {
+    Expr {
+        kind: ExprKind::ExprIdent,
+        span: dummy_span(),
+        int_val: 0,
+        float_val: 0.0,
+        name: make_name(a, b, c, count),
+        path: make_empty_path(),
+        bin_op: BinaryOp::OpAdd,
+        un_op: UnaryOp::OpNeg,
+        left: None,
+        right: None,
+        block: None,
+        else_expr: None,
+        args: None,
+        arms: None,
+        fields: None,
+    }
+}
+
+fn make_binop_expr(left: Expr, op: BinaryOp, right: Expr) -> Expr with Mut, Panic, Div, Alloc {
+    Expr {
+        kind: ExprKind::ExprBinary,
+        span: dummy_span(),
+        int_val: 0,
+        float_val: 0.0,
+        name: make_name(0, 0, 0, 0),
+        path: make_empty_path(),
+        bin_op: op,
+        un_op: UnaryOp::OpNeg,
+        left: Some(Box::new(left)),
+        right: Some(Box::new(right)),
+        block: None,
+        else_expr: None,
+        args: None,
+        arms: None,
+        fields: None,
+    }
+}
+
+fn make_named_type(a: i8, b: i8, c: i8, count: i64) -> TypeExpr with Mut, Panic, Div {
+    TypeExpr {
+        kind: TypeExprKind::TypeNamed,
+        span: dummy_span(),
+        path: make_single_path(a, b, c, count),
+        type_args: None,
+        inner: None,
+        array_size: None,
+        effects: None,
+    }
+}
+
+fn make_empty_block() -> Block {
+    Block { stmts: None, span: Span::dummy() }
+}
+
+fn make_let_stmt(a: i8, b: i8, c: i8, name_len: i64, init: Expr) -> Stmt with Mut, Panic, Div, Alloc {
+    Stmt {
+        kind: StmtKind::StmtLet,
+        span: dummy_span(),
+        name: make_name(a, b, c, name_len),
+        ty: None,
+        expr: Some(Box::new(init)),
+        target: None,
+        assign_op: AssignOp::AssignEq,
+    }
+}
+
+fn make_block_with_stmt(s: Stmt) -> Block with Alloc {
+    Block {
+        stmts: Some(Box::new(StmtList { head: s, tail: None })),
+        span: Span::dummy(),
+    }
+}
+
+// ============================================================================
+// ITEM BUILDERS
+// ============================================================================
+
+// fn foo() { }
+fn make_empty_fn(a: i8, b: i8, c: i8, name_len: i64) -> Item with Mut, Panic, Div, Alloc {
+    let name = make_name(a, b, c, name_len)
+    let fd = FnDef {
+        name: name,
+        params: None,
+        return_type: None,
+        effects: None,
+        body: make_empty_block(),
+        span: dummy_span(),
+    }
+    Item {
+        kind: ItemKind::ItemFn,
+        span: dummy_span(),
+        name: name,
+        fn_def: Some(Box::new(fd)),
+        struct_def: None,
+        enum_def: None,
+        impl_def: None,
+        type_alias_ty: None,
+        use_path: make_empty_path(),
+        use_glob: false,
+    }
+}
+
+// fn foo(x: i64) -> i64 { let y = x + 1 }
+fn make_fn_with_body() -> Item with Mut, Panic, Div, Alloc {
+    // 'x' = 120, 'y' = 121, 'i' = 105, '6' = 54, '4' = 52
+    let x_name = make_name(120, 0, 0, 1)
+    let i64_type = make_named_type(105, 54, 52, 3)
+    let param = Param {
+        name: x_name,
+        ty: i64_type,
+        is_self: false,
+        is_self_mut: false,
+        span: dummy_span(),
+    }
+    let x_expr = make_ident_expr(120, 0, 0, 1)
+    let one_expr = make_int_expr(1)
+    let add_expr = make_binop_expr(x_expr, BinaryOp::OpAdd, one_expr)
+    let let_stmt = make_let_stmt(121, 0, 0, 1, add_expr)
+    let body = make_block_with_stmt(let_stmt)
+    let ret_type = make_named_type(105, 54, 52, 3)
+
+    let fn_name = make_name(102, 111, 111, 3)
+    let fd = FnDef {
+        name: fn_name,
+        params: Some(Box::new(ParamList { head: param, tail: None })),
+        return_type: Some(Box::new(ret_type)),
+        effects: None,
+        body: body,
+        span: dummy_span(),
+    }
+    Item {
+        kind: ItemKind::ItemFn,
+        span: dummy_span(),
+        name: fn_name,
+        fn_def: Some(Box::new(fd)),
+        struct_def: None,
+        enum_def: None,
+        impl_def: None,
+        type_alias_ty: None,
+        use_path: make_empty_path(),
+        use_glob: false,
+    }
+}
+
+// struct Foo { x: i64, y: i64 }
+fn make_struct_item() -> Item with Mut, Panic, Div, Alloc {
+    let name = make_name(70, 111, 111, 3)
+    let x_field = FieldDef {
+        name: make_name(120, 0, 0, 1),
+        ty: make_named_type(105, 54, 52, 3),
+        span: dummy_span(),
+    }
+    let y_field = FieldDef {
+        name: make_name(121, 0, 0, 1),
+        ty: make_named_type(105, 54, 52, 3),
+        span: dummy_span(),
+    }
+    let fields = FieldDefList {
+        head: x_field,
+        tail: Some(Box::new(FieldDefList { head: y_field, tail: None })),
+    }
+    let sd = StructDef {
+        name: name,
+        fields: Some(Box::new(fields)),
+        is_linear: false,
+        span: dummy_span(),
+    }
+    Item {
+        kind: ItemKind::ItemStruct,
+        span: dummy_span(),
+        name: name,
+        fn_def: None,
+        struct_def: Some(Box::new(sd)),
+        enum_def: None,
+        impl_def: None,
+        type_alias_ty: None,
+        use_path: make_empty_path(),
+        use_glob: false,
+    }
+}
+
+// enum Color { Red, Green, Blue }
+fn make_enum_item() -> Item with Mut, Panic, Div, Alloc {
+    // C=67, o=111, l=108, r=114
+    let name = make_name(67, 111, 108, 5)
+    // R=82, e=101, d=100
+    let v1 = VariantDef { name: make_name(82, 101, 100, 3), span: dummy_span() }
+    let v2 = VariantDef { name: make_name(71, 114, 101, 5), span: dummy_span() }
+    let v3 = VariantDef { name: make_name(66, 108, 117, 4), span: dummy_span() }
+    let variants = VariantDefList {
+        head: v1,
+        tail: Some(Box::new(VariantDefList {
+            head: v2,
+            tail: Some(Box::new(VariantDefList { head: v3, tail: None })),
+        })),
+    }
+    let ed = EnumDef {
+        name: name,
+        variants: Some(Box::new(variants)),
+        span: dummy_span(),
+    }
+    Item {
+        kind: ItemKind::ItemEnum,
+        span: dummy_span(),
+        name: name,
+        fn_def: None,
+        struct_def: None,
+        enum_def: Some(Box::new(ed)),
+        impl_def: None,
+        type_alias_ty: None,
+        use_path: make_empty_path(),
+        use_glob: false,
+    }
+}
+
+// ============================================================================
+// TESTS
+// ============================================================================
+
+fn test_print_empty_fn() -> bool with IO, Mut, Panic, Div, Alloc {
+    // fn a() { }
+    let item = make_empty_fn(97, 0, 0, 1)
+    let prog = Program {
+        items: Some(Box::new(ItemList { head: item, tail: None })),
+    }
+    print("=== T01: empty fn ===\n")
+    print_program(prog)
+    print("\n")
+    true
+}
+
+fn test_print_fn_with_body() -> bool with IO, Mut, Panic, Div, Alloc {
+    let item = make_fn_with_body()
+    let prog = Program {
+        items: Some(Box::new(ItemList { head: item, tail: None })),
+    }
+    print("=== T02: fn with body ===\n")
+    print_program(prog)
+    print("\n")
+    true
+}
+
+fn test_print_struct() -> bool with IO, Mut, Panic, Div, Alloc {
+    let item = make_struct_item()
+    let prog = Program {
+        items: Some(Box::new(ItemList { head: item, tail: None })),
+    }
+    print("=== T03: struct ===\n")
+    print_program(prog)
+    print("\n")
+    true
+}
+
+fn test_print_enum() -> bool with IO, Mut, Panic, Div, Alloc {
+    let item = make_enum_item()
+    let prog = Program {
+        items: Some(Box::new(ItemList { head: item, tail: None })),
+    }
+    print("=== T04: enum ===\n")
+    print_program(prog)
+    print("\n")
+    true
+}
+
+fn test_print_multi_item() -> bool with IO, Mut, Panic, Div, Alloc {
+    let fn_item = make_fn_with_body()
+    let struct_item = make_struct_item()
+    let enum_item = make_enum_item()
+    let items = ItemList {
+        head: fn_item,
+        tail: Some(Box::new(ItemList {
+            head: struct_item,
+            tail: Some(Box::new(ItemList {
+                head: enum_item,
+                tail: None,
+            })),
+        })),
+    }
+    let prog = Program { items: Some(Box::new(items)) }
+    print("=== T05: multi-item program ===\n")
+    print_program(prog)
+    print("\n")
+    true
+}
+
+// ============================================================================
+// ENTRY POINT
+// ============================================================================
+
+fn run_printer_tests() with IO, Mut, Panic, Div, Alloc {
+    var passed: i64 = 0
+    let total: i64 = 5
+
+    if test_print_empty_fn() { passed = passed + 1 } else { print("FAIL: T01\n") }
+    if test_print_fn_with_body() { passed = passed + 1 } else { print("FAIL: T02\n") }
+    if test_print_struct() { passed = passed + 1 } else { print("FAIL: T03\n") }
+    if test_print_enum() { passed = passed + 1 } else { print("FAIL: T04\n") }
+    if test_print_multi_item() { passed = passed + 1 } else { print("FAIL: T05\n") }
+
+    print("\nPrinter tests: ")
+    print_int(passed)
+    print("/")
+    print_int(total)
+    print(" passed\n")
+}
