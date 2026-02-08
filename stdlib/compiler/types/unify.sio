@@ -33,12 +33,10 @@ struct UnifyResult {
 }
 
 fn unify_ok() -> UnifyResult {
-    // TODO: Return a successful UnifyResult
     UnifyResult { status: UNIFY_OK(), left_idx: -1, right_idx: -1 }
 }
 
 fn unify_err(status: i32, left: i64, right: i64) -> UnifyResult {
-    // TODO: Return an error UnifyResult with given status and indices
     UnifyResult { status: status, left_idx: left, right_idx: right }
 }
 
@@ -54,28 +52,57 @@ struct Substitution {
 }
 
 fn subst_new() -> Substitution {
-    // TODO: Initialize an empty Substitution
-    Substitution { var_ids: [0; 128], type_idxs: [0; 128], count: 0 }
+    Substitution { var_ids: [-1; 128], type_idxs: [-1; 128], count: 0 }
 }
 
 // Add mapping: var_id -> type_idx
-fn subst_add(s: Substitution, var_id: i64, type_idx: i64) -> Substitution {
-    // TODO: Add the mapping to the substitution array if space allows
+fn subst_add(s: Substitution, var_id: i64, type_idx: i64) -> Substitution with Mut, Div, Panic {
     var mut new_s = s;
-    // ... implementation
+
+    // Replace existing mapping if already present.
+    var i: i64 = 0;
+    while i < new_s.count {
+        if new_s.var_ids[i as usize] == var_id {
+            new_s.type_idxs[i as usize] = type_idx;
+            return new_s
+        }
+        i = i + 1
+    }
+
+    // Otherwise append when capacity allows.
+    if new_s.count < 128 {
+        let idx = new_s.count;
+        new_s.var_ids[idx as usize] = var_id;
+        new_s.type_idxs[idx as usize] = type_idx;
+        new_s.count = new_s.count + 1;
+    }
+
     new_s
 }
 
 // Lookup: returns type_idx or -1 if not found
-fn subst_lookup(s: Substitution, var_id: i64) -> i64 {
-    // TODO: Search the substitution arrays for the var_id and return mapped type_idx or -1
-    -1
+fn subst_lookup(s: Substitution, var_id: i64) -> i64 with Mut, Div, Panic {
+    var i: i64 = 0;
+    while i < s.count {
+        if s.var_ids[i as usize] == var_id {
+            return s.type_idxs[i as usize]
+        }
+        i = i + 1
+    }
+    return -1
 }
 
 // Compose substitutions: s2 after s1
-fn subst_compose(s1: Substitution, s2: Substitution) -> Substitution {
-    // TODO: Compose the substitutions, applying s1 then s2
-    subst_new()
+fn subst_compose(s1: Substitution, s2: Substitution) -> Substitution with Mut, Div, Panic {
+    // Conservative composition for self-hosted phase:
+    // start with s1 and overlay mappings from s2.
+    var out = s1;
+    var i: i64 = 0;
+    while i < s2.count {
+        out = subst_add(out, s2.var_ids[i as usize], s2.type_idxs[i as usize]);
+        i = i + 1
+    }
+    return out
 }
 
 // ============================================================================
@@ -84,8 +111,9 @@ fn subst_compose(s1: Substitution, s2: Substitution) -> Substitution {
 
 // Check if type variable occurs in type (would create infinite type)
 fn occurs_in(var_id: i64, type_idx: i64, pool: TypePool) -> bool {
-    // TODO: Recursively traverse the type at type_idx in the pool to check if var_id appears
-    false
+    // NOTE: TypePool is currently a stub in self-hosted mode.
+    // We conservatively detect only direct self-reference here.
+    var_id == type_idx
 }
 
 // ============================================================================
@@ -100,33 +128,77 @@ struct UnifyState {
 }
 
 fn unify_state_new(pool: TypePool) -> UnifyState {
-    // TODO: Initialize UnifyState with given pool and empty substitution/errors
     UnifyState { pool: pool, subst: subst_new(), errors: [unify_ok(); 32], n_errors: 0 }
+}
+
+fn is_type_var(type_idx: i64) -> bool {
+    // NOTE: self-hosted placeholder convention.
+    // Negative indices are treated as type variables.
+    type_idx < 0
+}
+
+fn add_unify_error(state: UnifyState, err: UnifyResult) -> UnifyState with Mut, Panic {
+    var mut s = state;
+    if s.n_errors < 32 {
+        let idx = s.n_errors;
+        s.errors[idx as usize] = err;
+        s.n_errors = s.n_errors + 1;
+    }
+    s
 }
 
 // Main unification function
 // Returns updated state with substitution or error
-fn unify(state: UnifyState, t1_idx: i64, t2_idx: i64) -> UnifyState {
-    // TODO: Implement the unification algorithm as described:
-    // - Apply substitution to both types
-    // - Handle cases: identical, var to concrete, concrete to var, occurs check, array/ref/function matching, etc.
-    // - Update substitution or add error
-    var mut new_state = state;
-    // ... implementation
-    new_state
+fn unify(state: UnifyState, t1_idx: i64, t2_idx: i64) -> UnifyState with Mut, Div, Panic {
+    var new_state = state;
+    let left = resolve_type(new_state, t1_idx);
+    let right = resolve_type(new_state, t2_idx);
+
+    if left == right {
+        return new_state
+    }
+
+    // Variable -> concrete/variable binding.
+    if is_type_var(left) {
+        if occurs_in(left, right, new_state.pool) {
+            return add_unify_error(new_state, unify_err(UNIFY_OCCURS(), left, right))
+        }
+        new_state.subst = subst_add(new_state.subst, left, right);
+        return new_state
+    }
+
+    if is_type_var(right) {
+        if occurs_in(right, left, new_state.pool) {
+            return add_unify_error(new_state, unify_err(UNIFY_OCCURS(), left, right))
+        }
+        new_state.subst = subst_add(new_state.subst, right, left);
+        return new_state
+    }
+
+    // With stub TypePool we cannot structurally compare composite types yet.
+    // Distinct non-variable ids are treated as mismatch.
+    add_unify_error(new_state, unify_err(UNIFY_MISMATCH(), left, right))
 }
 
 // Apply current substitution to a type, returning new type index
-fn apply_subst_type(state: UnifyState, type_idx: i64) -> i64 {
-    // TODO: If the type is a var, lookup in subst and recurse; otherwise return as-is
-    type_idx
+fn apply_subst_type(state: UnifyState, type_idx: i64) -> i64 with Mut, Div, Panic {
+    resolve_type(state, type_idx)
 }
 
 // Unify lists of types (for function params, tuple elements)
-fn unify_lists(state: UnifyState, idxs1: [i64; 16], n1: i64, idxs2: [i64; 16], n2: i64) -> UnifyState {
-    // TODO: Check lengths, then pairwise unify each pair of indices
-    var mut new_state = state;
-    // ... implementation
+fn unify_lists(state: UnifyState, idxs1: [i64; 16], n1: i64, idxs2: [i64; 16], n2: i64) -> UnifyState with Mut, Div, Panic {
+    var new_state = state;
+
+    if n1 != n2 {
+        return add_unify_error(new_state, unify_err(UNIFY_ARITY(), n1, n2))
+    }
+
+    var i: i64 = 0;
+    while i < n1 {
+        new_state = unify(new_state, idxs1[i as usize], idxs2[i as usize]);
+        i = i + 1
+    }
+
     new_state
 }
 
@@ -135,9 +207,24 @@ fn unify_lists(state: UnifyState, idxs1: [i64; 16], n1: i64, idxs2: [i64; 16], n
 // ============================================================================
 
 // If type is a variable with a substitution, follow the chain
-fn resolve_type(state: UnifyState, type_idx: i64) -> i64 {
-    // TODO: Recursively resolve the type by following subst lookups until non-var or fixed point
-    type_idx
+fn resolve_type(state: UnifyState, type_idx: i64) -> i64 with Mut, Div, Panic {
+    if !is_type_var(type_idx) {
+        return type_idx
+    }
+
+    // Iterative chain following with a fixed step cap for safety.
+    var current = type_idx;
+    var steps: i64 = 0;
+    while steps < 256 {
+        let mapped = subst_lookup(state.subst, current);
+        if mapped == -1 || mapped == current {
+            return current
+        }
+        current = mapped;
+        steps = steps + 1;
+    }
+
+    current
 }
 
 // ============================================================================
