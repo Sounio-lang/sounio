@@ -2131,9 +2131,11 @@ mod tests {
             })
             .collect();
 
-        assert!(titles
-            .iter()
-            .any(|t| t.contains("Cast") || t.contains("into")));
+        assert!(
+            titles
+                .iter()
+                .any(|t| t.contains("Cast") || t.contains("into"))
+        );
     }
 
     #[test]

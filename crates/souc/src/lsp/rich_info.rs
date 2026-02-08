@@ -617,12 +617,13 @@ mod tests {
         assert!(matches!(info.kind, RichInfoKind::Function));
         assert!(info.effects.is_some());
         assert!(!info.effects.as_ref().unwrap().effects.is_empty());
-        assert!(info
-            .effects
-            .as_ref()
-            .unwrap()
-            .effects
-            .contains(&"IO".to_string()));
+        assert!(
+            info.effects
+                .as_ref()
+                .unwrap()
+                .effects
+                .contains(&"IO".to_string())
+        );
 
         // Test signature formatting
         let sig = info.format_signature("process");

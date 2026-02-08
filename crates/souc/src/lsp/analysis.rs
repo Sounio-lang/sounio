@@ -22,6 +22,7 @@ use super::workspace::Workspace;
 
 use crate::ast::Ast;
 use crate::common::Span;
+use crate::fmt::Formatter as SourceFormatter;
 use crate::lexer;
 use crate::resolve::SymbolTable;
 
@@ -413,36 +414,663 @@ impl AnalysisHost {
     /// Get epistemic information for a symbol (variable name)
     fn get_epistemic_info_for_symbol(
         &self,
-        _name: &str,
-        _uri: &Url,
+        name: &str,
+        uri: &Url,
     ) -> Option<super::query_bridge::EpistemicInfo> {
-        // TODO: Implement epistemic info extraction from HIR
-        // This requires type-checking to determine if a variable has
-        // an epistemic type (Knowledge<T>)
+        let analysis_result = self.cache.get(uri)?;
+        let ast = analysis_result.ast.as_ref()?;
+
+        for item in &ast.items {
+            match item {
+                crate::ast::Item::Function(f) => {
+                    for param in &f.params {
+                        if Self::binding_name(&param.pattern) == Some(name) {
+                            if let Some(info) = Self::epistemic_from_type(&param.ty) {
+                                return Some(info);
+                            }
+                        }
+                    }
+                    if let Some(info) = Self::epistemic_from_block(&f.body, name) {
+                        return Some(info);
+                    }
+                }
+                crate::ast::Item::Global(g) => {
+                    if Self::binding_name(&g.pattern) == Some(name) {
+                        if let Some(ty) = &g.ty {
+                            if let Some(info) = Self::epistemic_from_type(ty) {
+                                return Some(info);
+                            }
+                        }
+                        if let Some(info) = Self::epistemic_from_expr(&g.value) {
+                            return Some(info);
+                        }
+                    }
+                }
+                crate::ast::Item::Impl(impl_def) => {
+                    for impl_item in &impl_def.items {
+                        if let crate::ast::ImplItem::Fn(f) = impl_item {
+                            for param in &f.params {
+                                if Self::binding_name(&param.pattern) == Some(name) {
+                                    if let Some(info) = Self::epistemic_from_type(&param.ty) {
+                                        return Some(info);
+                                    }
+                                }
+                            }
+                            if let Some(info) = Self::epistemic_from_block(&f.body, name) {
+                                return Some(info);
+                            }
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+
         None
     }
 
     /// Get unit information for a symbol
     fn get_unit_info_for_symbol(
         &self,
-        _name: &str,
-        _uri: &Url,
+        name: &str,
+        uri: &Url,
     ) -> Option<super::query_bridge::UnitInfo> {
-        // TODO: Implement unit info extraction from HIR
-        // This requires type-checking to determine if a variable has
-        // a unit-annotated type
+        let analysis_result = self.cache.get(uri)?;
+        let ast = analysis_result.ast.as_ref()?;
+
+        for item in &ast.items {
+            match item {
+                crate::ast::Item::Function(f) => {
+                    for param in &f.params {
+                        if Self::binding_name(&param.pattern) == Some(name) {
+                            if let Some(info) = Self::unit_from_type(&param.ty) {
+                                return Some(info);
+                            }
+                        }
+                    }
+                    if let Some(info) = Self::unit_from_block(&f.body, name) {
+                        return Some(info);
+                    }
+                }
+                crate::ast::Item::Global(g) => {
+                    if Self::binding_name(&g.pattern) == Some(name) {
+                        if let Some(ty) = &g.ty {
+                            if let Some(info) = Self::unit_from_type(ty) {
+                                return Some(info);
+                            }
+                        }
+                        if let Some(info) = Self::unit_from_expr(&g.value) {
+                            return Some(info);
+                        }
+                    }
+                }
+                crate::ast::Item::Impl(impl_def) => {
+                    for impl_item in &impl_def.items {
+                        if let crate::ast::ImplItem::Fn(f) = impl_item {
+                            for param in &f.params {
+                                if Self::binding_name(&param.pattern) == Some(name) {
+                                    if let Some(info) = Self::unit_from_type(&param.ty) {
+                                        return Some(info);
+                                    }
+                                }
+                            }
+                            if let Some(info) = Self::unit_from_block(&f.body, name) {
+                                return Some(info);
+                            }
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+
         None
     }
 
     /// Get refinement information for a symbol
     fn get_refinement_info_for_symbol(
         &self,
-        _name: &str,
-        _uri: &Url,
+        name: &str,
+        uri: &Url,
     ) -> Option<super::query_bridge::RefinementInfo> {
-        // TODO: Implement refinement info extraction from HIR
-        // This requires type-checking to extract refinement predicates
+        let analysis_result = self.cache.get(uri)?;
+        let ast = analysis_result.ast.as_ref()?;
+
+        for item in &ast.items {
+            match item {
+                crate::ast::Item::Function(f) => {
+                    for param in &f.params {
+                        if Self::binding_name(&param.pattern) == Some(name) {
+                            if let Some(info) = Self::refinement_from_type(name, &param.ty) {
+                                return Some(info);
+                            }
+                        }
+                    }
+                    if let Some(info) = Self::refinement_from_block(&f.body, name) {
+                        return Some(info);
+                    }
+                }
+                crate::ast::Item::Global(g) => {
+                    if Self::binding_name(&g.pattern) == Some(name) {
+                        if let Some(ty) = &g.ty {
+                            if let Some(info) = Self::refinement_from_type(name, ty) {
+                                return Some(info);
+                            }
+                        }
+                    }
+                }
+                crate::ast::Item::Impl(impl_def) => {
+                    for impl_item in &impl_def.items {
+                        if let crate::ast::ImplItem::Fn(f) = impl_item {
+                            for param in &f.params {
+                                if Self::binding_name(&param.pattern) == Some(name) {
+                                    if let Some(info) = Self::refinement_from_type(name, &param.ty)
+                                    {
+                                        return Some(info);
+                                    }
+                                }
+                            }
+                            if let Some(info) = Self::refinement_from_block(&f.body, name) {
+                                return Some(info);
+                            }
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+
         None
+    }
+
+    fn binding_name(pattern: &crate::ast::Pattern) -> Option<&str> {
+        if let crate::ast::Pattern::Binding { name, .. } = pattern {
+            Some(name)
+        } else {
+            None
+        }
+    }
+
+    fn numeric_literal(expr: &crate::ast::Expr) -> Option<f64> {
+        match expr {
+            crate::ast::Expr::Literal { value, .. } => match value {
+                crate::ast::Literal::Int(v)
+                | crate::ast::Literal::TypedInt(v, _)
+                | crate::ast::Literal::IntUnit(v, _) => Some(*v as f64),
+                crate::ast::Literal::Float(v)
+                | crate::ast::Literal::TypedFloat(v, _)
+                | crate::ast::Literal::FloatUnit(v, _) => Some(*v),
+                _ => None,
+            },
+            _ => None,
+        }
+    }
+
+    fn unit_expr_label(unit: &crate::ast::UnitExpr) -> String {
+        if unit.base_units.is_empty() {
+            return "1".to_string();
+        }
+        unit.base_units
+            .iter()
+            .map(|(name, power)| {
+                if *power == 1 {
+                    name.clone()
+                } else {
+                    format!("{}^{}", name, power)
+                }
+            })
+            .collect::<Vec<_>>()
+            .join("*")
+    }
+
+    fn infer_unit_dimension(unit: &str) -> String {
+        if unit.is_empty() || unit == "1" {
+            return "dimensionless".to_string();
+        }
+        let u = unit.to_ascii_lowercase();
+        if matches!(u.as_str(), "kg" | "g" | "mg" | "ug" | "ng") {
+            return "M".to_string();
+        }
+        if matches!(u.as_str(), "m" | "cm" | "mm" | "um" | "nm" | "km") {
+            return "L".to_string();
+        }
+        if matches!(u.as_str(), "s" | "ms" | "min" | "h" | "d") {
+            return "T".to_string();
+        }
+        if matches!(u.as_str(), "l" | "ml" | "ul") {
+            return "L^3".to_string();
+        }
+        if u.contains('/') {
+            return "ratio".to_string();
+        }
+        "composite".to_string()
+    }
+
+    fn epistemic_from_type(
+        ty: &crate::ast::TypeExpr,
+    ) -> Option<super::query_bridge::EpistemicInfo> {
+        if let crate::ast::TypeExpr::Knowledge {
+            epsilon,
+            validity,
+            provenance,
+            ..
+        } = ty
+        {
+            let mut info = super::query_bridge::EpistemicInfo {
+                confidence: 0.85,
+                confidence_lower: None,
+                confidence_upper: None,
+                source: "knowledge-type".to_string(),
+                revisable: validity.is_some(),
+                evidence: Vec::new(),
+                provenance: None,
+            };
+
+            if let Some(eps) = epsilon {
+                if let Some(v) = Self::numeric_literal(&eps.value) {
+                    let confidence = (1.0 - v.abs()).clamp(0.0, 1.0);
+                    info.confidence = confidence;
+                    info.confidence_lower = Some((confidence - 0.1).max(0.0));
+                    info.confidence_upper = Some((confidence + 0.1).min(1.0));
+                }
+            }
+
+            if let Some(prov) = provenance {
+                let source = prov
+                    .source
+                    .as_ref()
+                    .map(|e| Self::expr_label(e))
+                    .unwrap_or_else(|| format!("{:?}", prov.kind).to_lowercase());
+                info.source = source.clone();
+                info.provenance = Some(super::query_bridge::ProvenanceInfo {
+                    origin: source,
+                    transformations: Vec::new(),
+                    dependencies: Vec::new(),
+                });
+            }
+
+            return Some(info);
+        }
+
+        None
+    }
+
+    fn epistemic_from_expr(expr: &crate::ast::Expr) -> Option<super::query_bridge::EpistemicInfo> {
+        match expr {
+            crate::ast::Expr::KnowledgeExpr {
+                epsilon,
+                provenance,
+                ..
+            } => {
+                let mut info = super::query_bridge::EpistemicInfo {
+                    confidence: 0.8,
+                    confidence_lower: None,
+                    confidence_upper: None,
+                    source: "derived".to_string(),
+                    revisable: true,
+                    evidence: Vec::new(),
+                    provenance: None,
+                };
+                if let Some(eps) = epsilon {
+                    if let Some(v) = Self::numeric_literal(eps) {
+                        let confidence = (1.0 - v.abs()).clamp(0.0, 1.0);
+                        info.confidence = confidence;
+                        info.confidence_lower = Some((confidence - 0.1).max(0.0));
+                        info.confidence_upper = Some((confidence + 0.1).min(1.0));
+                    }
+                }
+                if let Some(src) = provenance {
+                    let origin = Self::expr_label(src);
+                    info.source = origin.clone();
+                    info.provenance = Some(super::query_bridge::ProvenanceInfo {
+                        origin,
+                        transformations: Vec::new(),
+                        dependencies: Vec::new(),
+                    });
+                }
+                Some(info)
+            }
+            crate::ast::Expr::Uncertain { uncertainty, .. } => {
+                let sigma = Self::numeric_literal(uncertainty).unwrap_or(0.25);
+                let confidence = (1.0 / (1.0 + sigma.abs())).clamp(0.0, 1.0);
+                Some(super::query_bridge::EpistemicInfo {
+                    confidence,
+                    confidence_lower: Some((confidence - 0.1).max(0.0)),
+                    confidence_upper: Some((confidence + 0.1).min(1.0)),
+                    source: "uncertainty-propagated".to_string(),
+                    revisable: true,
+                    evidence: Vec::new(),
+                    provenance: None,
+                })
+            }
+            _ => None,
+        }
+    }
+
+    fn epistemic_from_block(
+        block: &crate::ast::Block,
+        name: &str,
+    ) -> Option<super::query_bridge::EpistemicInfo> {
+        for stmt in &block.stmts {
+            if let Some(info) = Self::epistemic_from_stmt(stmt, name) {
+                return Some(info);
+            }
+        }
+        None
+    }
+
+    fn epistemic_from_stmt(
+        stmt: &crate::ast::Stmt,
+        name: &str,
+    ) -> Option<super::query_bridge::EpistemicInfo> {
+        match stmt {
+            crate::ast::Stmt::Let {
+                pattern, ty, value, ..
+            } => {
+                if Self::binding_name(pattern) == Some(name) {
+                    if let Some(ty) = ty {
+                        if let Some(info) = Self::epistemic_from_type(ty) {
+                            return Some(info);
+                        }
+                    }
+                    if let Some(expr) = value {
+                        if let Some(info) = Self::epistemic_from_expr(expr) {
+                            return Some(info);
+                        }
+                    }
+                }
+                if let Some(expr) = value {
+                    return Self::epistemic_in_expr(expr, name);
+                }
+                None
+            }
+            crate::ast::Stmt::Expr { expr, .. } => Self::epistemic_in_expr(expr, name),
+            crate::ast::Stmt::Assign { target, value, .. } => {
+                if let crate::ast::Expr::Path { path, .. } = target {
+                    if path.name() == Some(name) {
+                        return Self::epistemic_from_expr(value);
+                    }
+                }
+                Self::epistemic_in_expr(value, name)
+            }
+            crate::ast::Stmt::Empty
+            | crate::ast::Stmt::MacroInvocation(_)
+            | crate::ast::Stmt::LocalExtern(_) => None,
+        }
+    }
+
+    fn epistemic_in_expr(
+        expr: &crate::ast::Expr,
+        name: &str,
+    ) -> Option<super::query_bridge::EpistemicInfo> {
+        match expr {
+            crate::ast::Expr::Block { block, .. }
+            | crate::ast::Expr::Loop { body: block, .. }
+            | crate::ast::Expr::AsyncBlock { block, .. }
+            | crate::ast::Expr::UnsafeBlock { block, .. } => {
+                Self::epistemic_from_block(block, name)
+            }
+            crate::ast::Expr::If {
+                then_branch,
+                else_branch,
+                ..
+            } => {
+                if let Some(info) = Self::epistemic_from_block(then_branch, name) {
+                    return Some(info);
+                }
+                if let Some(else_expr) = else_branch {
+                    return Self::epistemic_in_expr(else_expr, name);
+                }
+                None
+            }
+            crate::ast::Expr::Match { arms, .. } => {
+                for arm in arms {
+                    if let Some(info) = Self::epistemic_in_expr(&arm.body, name) {
+                        return Some(info);
+                    }
+                }
+                None
+            }
+            _ => None,
+        }
+    }
+
+    fn unit_from_type(ty: &crate::ast::TypeExpr) -> Option<super::query_bridge::UnitInfo> {
+        match ty {
+            crate::ast::TypeExpr::Quantity { unit, .. } => {
+                let unit_label = Self::unit_expr_label(unit);
+                Some(super::query_bridge::UnitInfo {
+                    dimension: Self::infer_unit_dimension(&unit_label),
+                    is_dimensionless: unit_label == "1",
+                    unit: unit_label,
+                })
+            }
+            crate::ast::TypeExpr::Named {
+                unit: Some(unit), ..
+            } => Some(super::query_bridge::UnitInfo {
+                unit: unit.clone(),
+                dimension: Self::infer_unit_dimension(unit),
+                is_dimensionless: unit == "1",
+            }),
+            _ => None,
+        }
+    }
+
+    fn unit_from_expr(expr: &crate::ast::Expr) -> Option<super::query_bridge::UnitInfo> {
+        if let crate::ast::Expr::Literal { value, .. } = expr {
+            let unit = match value {
+                crate::ast::Literal::IntUnit(_, unit) | crate::ast::Literal::FloatUnit(_, unit) => {
+                    unit.clone()
+                }
+                _ => return None,
+            };
+            return Some(super::query_bridge::UnitInfo {
+                dimension: Self::infer_unit_dimension(&unit),
+                is_dimensionless: unit == "1",
+                unit,
+            });
+        }
+        None
+    }
+
+    fn unit_from_block(
+        block: &crate::ast::Block,
+        name: &str,
+    ) -> Option<super::query_bridge::UnitInfo> {
+        for stmt in &block.stmts {
+            if let Some(info) = Self::unit_from_stmt(stmt, name) {
+                return Some(info);
+            }
+        }
+        None
+    }
+
+    fn unit_from_stmt(
+        stmt: &crate::ast::Stmt,
+        name: &str,
+    ) -> Option<super::query_bridge::UnitInfo> {
+        match stmt {
+            crate::ast::Stmt::Let {
+                pattern, ty, value, ..
+            } => {
+                if Self::binding_name(pattern) == Some(name) {
+                    if let Some(ty) = ty {
+                        if let Some(info) = Self::unit_from_type(ty) {
+                            return Some(info);
+                        }
+                    }
+                    if let Some(value) = value {
+                        if let Some(info) = Self::unit_from_expr(value) {
+                            return Some(info);
+                        }
+                    }
+                }
+                if let Some(value) = value {
+                    return Self::unit_in_expr(value, name);
+                }
+                None
+            }
+            crate::ast::Stmt::Expr { expr, .. } => Self::unit_in_expr(expr, name),
+            crate::ast::Stmt::Assign { target, value, .. } => {
+                if let crate::ast::Expr::Path { path, .. } = target {
+                    if path.name() == Some(name) {
+                        return Self::unit_from_expr(value);
+                    }
+                }
+                Self::unit_in_expr(value, name)
+            }
+            crate::ast::Stmt::Empty
+            | crate::ast::Stmt::MacroInvocation(_)
+            | crate::ast::Stmt::LocalExtern(_) => None,
+        }
+    }
+
+    fn unit_in_expr(expr: &crate::ast::Expr, name: &str) -> Option<super::query_bridge::UnitInfo> {
+        match expr {
+            crate::ast::Expr::Block { block, .. }
+            | crate::ast::Expr::Loop { body: block, .. }
+            | crate::ast::Expr::AsyncBlock { block, .. }
+            | crate::ast::Expr::UnsafeBlock { block, .. } => Self::unit_from_block(block, name),
+            crate::ast::Expr::If {
+                then_branch,
+                else_branch,
+                ..
+            } => {
+                if let Some(info) = Self::unit_from_block(then_branch, name) {
+                    return Some(info);
+                }
+                if let Some(else_expr) = else_branch {
+                    return Self::unit_in_expr(else_expr, name);
+                }
+                None
+            }
+            crate::ast::Expr::Match { arms, .. } => {
+                for arm in arms {
+                    if let Some(info) = Self::unit_in_expr(&arm.body, name) {
+                        return Some(info);
+                    }
+                }
+                None
+            }
+            _ => None,
+        }
+    }
+
+    fn refinement_from_type(
+        binding: &str,
+        ty: &crate::ast::TypeExpr,
+    ) -> Option<super::query_bridge::RefinementInfo> {
+        if let crate::ast::TypeExpr::Refinement {
+            var,
+            base_type,
+            predicate,
+        } = ty
+        {
+            return Some(super::query_bridge::RefinementInfo {
+                variable: binding.to_string(),
+                base_type: format_type(base_type),
+                predicate: format!("{} (binder `{}`)", Self::expr_label(predicate), var),
+                status: SmtStatus::Pending,
+                counterexample: None,
+                span: (0, 0),
+            });
+        }
+        None
+    }
+
+    fn refinement_from_block(
+        block: &crate::ast::Block,
+        name: &str,
+    ) -> Option<super::query_bridge::RefinementInfo> {
+        for stmt in &block.stmts {
+            if let Some(info) = Self::refinement_from_stmt(stmt, name) {
+                return Some(info);
+            }
+        }
+        None
+    }
+
+    fn refinement_from_stmt(
+        stmt: &crate::ast::Stmt,
+        name: &str,
+    ) -> Option<super::query_bridge::RefinementInfo> {
+        match stmt {
+            crate::ast::Stmt::Let { pattern, ty, .. } => {
+                if Self::binding_name(pattern) == Some(name) {
+                    return ty
+                        .as_ref()
+                        .and_then(|ty| Self::refinement_from_type(name, ty));
+                }
+                None
+            }
+            crate::ast::Stmt::Expr { expr, .. } => Self::refinement_in_expr(expr, name),
+            crate::ast::Stmt::Assign { value, .. } => Self::refinement_in_expr(value, name),
+            crate::ast::Stmt::Empty
+            | crate::ast::Stmt::MacroInvocation(_)
+            | crate::ast::Stmt::LocalExtern(_) => None,
+        }
+    }
+
+    fn refinement_in_expr(
+        expr: &crate::ast::Expr,
+        name: &str,
+    ) -> Option<super::query_bridge::RefinementInfo> {
+        match expr {
+            crate::ast::Expr::Block { block, .. }
+            | crate::ast::Expr::Loop { body: block, .. }
+            | crate::ast::Expr::AsyncBlock { block, .. }
+            | crate::ast::Expr::UnsafeBlock { block, .. } => {
+                Self::refinement_from_block(block, name)
+            }
+            crate::ast::Expr::If {
+                then_branch,
+                else_branch,
+                ..
+            } => {
+                if let Some(info) = Self::refinement_from_block(then_branch, name) {
+                    return Some(info);
+                }
+                if let Some(else_expr) = else_branch {
+                    return Self::refinement_in_expr(else_expr, name);
+                }
+                None
+            }
+            crate::ast::Expr::Match { arms, .. } => {
+                for arm in arms {
+                    if let Some(info) = Self::refinement_in_expr(&arm.body, name) {
+                        return Some(info);
+                    }
+                }
+                None
+            }
+            _ => None,
+        }
+    }
+
+    fn expr_label(expr: &crate::ast::Expr) -> String {
+        match expr {
+            crate::ast::Expr::Literal { value, .. } => match value {
+                crate::ast::Literal::Bool(v) => v.to_string(),
+                crate::ast::Literal::Int(v) => v.to_string(),
+                crate::ast::Literal::Float(v) => v.to_string(),
+                crate::ast::Literal::String(v) => format!("{:?}", v),
+                crate::ast::Literal::IntUnit(v, unit) => format!("{}_{}", v, unit),
+                crate::ast::Literal::FloatUnit(v, unit) => format!("{}_{}", v, unit),
+                _ => format!("{:?}", value),
+            },
+            crate::ast::Expr::Path { path, .. } => path.to_string(),
+            crate::ast::Expr::Call { callee, .. } => format!("{}(...)", Self::expr_label(callee)),
+            crate::ast::Expr::MethodCall { method, .. } => format!(".{}(...)", method),
+            crate::ast::Expr::Binary {
+                op, left, right, ..
+            } => format!(
+                "({} {:?} {})",
+                Self::expr_label(left),
+                op,
+                Self::expr_label(right)
+            ),
+            _ => format!("{:?}", expr),
+        }
     }
 
     /// Go to definition
@@ -710,9 +1338,22 @@ impl AnalysisHost {
     }
 
     /// Format document
-    pub fn format(&self, _doc: &Document) -> Option<Vec<TextEdit>> {
-        // TODO: Implement formatter
-        None
+    pub fn format(&self, doc: &Document) -> Option<Vec<TextEdit>> {
+        let source = doc.text();
+        let mut formatter = SourceFormatter::default();
+        let formatted = formatter.format(&source).ok()?;
+
+        if formatted == source {
+            return Some(Vec::new());
+        }
+
+        Some(vec![TextEdit {
+            range: Range {
+                start: Position::new(0, 0),
+                end: doc.offset_to_position(doc.len()),
+            },
+            new_text: formatted,
+        }])
     }
 
     /// Get folding ranges

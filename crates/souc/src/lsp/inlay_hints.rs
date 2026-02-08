@@ -28,10 +28,11 @@
 //! let t: Tensor[f32, (batch, 128, 256)] = ...;  // Shows shape info
 //! ```
 
+use std::collections::HashMap;
 use tower_lsp::lsp_types::*;
 
 use crate::ast::{Ast, Expr, Item, Stmt, TensorDim, TypeExpr};
-use crate::common::Span;
+use crate::common::{NodeId, Span};
 use crate::hir::{HirTensorDim, HirType};
 use crate::lexer::{self, TokenKind};
 use crate::resolve::SymbolTable;
@@ -635,7 +636,7 @@ impl InlayHintProvider {
         }
 
         for item in &ast.items {
-            self.visit_item_for_tensors(source, range, item, hints);
+            self.visit_item_for_tensors(source, range, item, &ast.node_spans, hints);
         }
     }
 
@@ -645,6 +646,7 @@ impl InlayHintProvider {
         source: &str,
         range: Range,
         item: &Item,
+        node_spans: &HashMap<NodeId, Span>,
         hints: &mut Vec<InlayHint>,
     ) {
         match item {
@@ -659,7 +661,7 @@ impl InlayHintProvider {
                 }
                 // Visit function body
                 for stmt in &f.body.stmts {
-                    self.visit_stmt_for_tensors(source, range, stmt, hints);
+                    self.visit_stmt_for_tensors(source, range, stmt, node_spans, hints);
                 }
             }
             Item::Struct(s) => {
@@ -677,7 +679,7 @@ impl InlayHintProvider {
                             self.check_type_expr_for_tensor(source, range, ret, hints);
                         }
                         for stmt in &f.body.stmts {
-                            self.visit_stmt_for_tensors(source, range, stmt, hints);
+                            self.visit_stmt_for_tensors(source, range, stmt, node_spans, hints);
                         }
                     }
                 }
@@ -695,6 +697,7 @@ impl InlayHintProvider {
         source: &str,
         range: Range,
         stmt: &Stmt,
+        node_spans: &HashMap<NodeId, Span>,
         hints: &mut Vec<InlayHint>,
     ) {
         match stmt {
@@ -705,15 +708,15 @@ impl InlayHintProvider {
                 }
                 // Check value expression
                 if let Some(expr) = value {
-                    self.visit_expr_for_tensors(source, range, expr, hints);
+                    self.visit_expr_for_tensors(source, range, expr, node_spans, hints);
                 }
             }
             Stmt::Expr { expr, .. } => {
-                self.visit_expr_for_tensors(source, range, expr, hints);
+                self.visit_expr_for_tensors(source, range, expr, node_spans, hints);
             }
             Stmt::Assign { target, value, .. } => {
-                self.visit_expr_for_tensors(source, range, target, hints);
-                self.visit_expr_for_tensors(source, range, value, hints);
+                self.visit_expr_for_tensors(source, range, target, node_spans, hints);
+                self.visit_expr_for_tensors(source, range, value, node_spans, hints);
             }
             _ => {}
         }
@@ -725,6 +728,7 @@ impl InlayHintProvider {
         source: &str,
         range: Range,
         expr: &Expr,
+        node_spans: &HashMap<NodeId, Span>,
         hints: &mut Vec<InlayHint>,
     ) {
         match expr {
@@ -732,7 +736,7 @@ impl InlayHintProvider {
                 // Check for tensor operations like matmul, reshape, etc.
                 if let Some(func_name) = self.extract_function_name(callee) {
                     // Get the span from the expression using helper
-                    if let Some(expr_span) = self.get_expr_span(expr) {
+                    if let Some(expr_span) = self.get_expr_span(expr, node_spans) {
                         if let Some(hint) =
                             self.tensor_operation_hint(&func_name, args, source, expr_span)
                         {
@@ -744,9 +748,9 @@ impl InlayHintProvider {
                     }
                 }
                 // Recurse
-                self.visit_expr_for_tensors(source, range, callee, hints);
+                self.visit_expr_for_tensors(source, range, callee, node_spans, hints);
                 for arg in args {
-                    self.visit_expr_for_tensors(source, range, arg, hints);
+                    self.visit_expr_for_tensors(source, range, arg, node_spans, hints);
                 }
             }
             Expr::MethodCall {
@@ -756,7 +760,7 @@ impl InlayHintProvider {
                 ..
             } => {
                 // Check for tensor methods like .reshape(), .transpose(), etc.
-                if let Some(expr_span) = self.get_expr_span(expr) {
+                if let Some(expr_span) = self.get_expr_span(expr, node_spans) {
                     if let Some(hint) =
                         self.tensor_method_hint(method, receiver, args, source, expr_span)
                     {
@@ -766,14 +770,14 @@ impl InlayHintProvider {
                         }
                     }
                 }
-                self.visit_expr_for_tensors(source, range, receiver, hints);
+                self.visit_expr_for_tensors(source, range, receiver, node_spans, hints);
                 for arg in args {
-                    self.visit_expr_for_tensors(source, range, arg, hints);
+                    self.visit_expr_for_tensors(source, range, arg, node_spans, hints);
                 }
             }
             Expr::Binary { left, right, .. } => {
-                self.visit_expr_for_tensors(source, range, left, hints);
-                self.visit_expr_for_tensors(source, range, right, hints);
+                self.visit_expr_for_tensors(source, range, left, node_spans, hints);
+                self.visit_expr_for_tensors(source, range, right, node_spans, hints);
             }
             Expr::If {
                 condition,
@@ -781,30 +785,27 @@ impl InlayHintProvider {
                 else_branch,
                 ..
             } => {
-                self.visit_expr_for_tensors(source, range, condition, hints);
+                self.visit_expr_for_tensors(source, range, condition, node_spans, hints);
                 for stmt in &then_branch.stmts {
-                    self.visit_stmt_for_tensors(source, range, stmt, hints);
+                    self.visit_stmt_for_tensors(source, range, stmt, node_spans, hints);
                 }
                 if let Some(else_expr) = else_branch {
-                    self.visit_expr_for_tensors(source, range, else_expr, hints);
+                    self.visit_expr_for_tensors(source, range, else_expr, node_spans, hints);
                 }
             }
             Expr::Block { block, .. } => {
                 for stmt in &block.stmts {
-                    self.visit_stmt_for_tensors(source, range, stmt, hints);
+                    self.visit_stmt_for_tensors(source, range, stmt, node_spans, hints);
                 }
             }
             _ => {}
         }
     }
 
-    /// Get span from an expression (helper for expressions without explicit span field)
-    fn get_expr_span(&self, _expr: &Expr) -> Option<Span> {
-        // For now, return a placeholder span
-        // In a full implementation, we would extract this from the AST
-        // or track spans during parsing
-        // TODO: Implement proper span extraction from AST nodes
-        Some(Span { start: 0, end: 0 })
+    /// Get source span for an AST expression via the parser-populated node span map.
+    fn get_expr_span(&self, expr: &Expr, node_spans: &HashMap<NodeId, Span>) -> Option<Span> {
+        let expr_id = get_expr_id(expr);
+        node_spans.get(&expr_id).copied()
     }
 
     /// Check a type expression for tensor types and add shape hints
@@ -1387,6 +1388,57 @@ impl InlayHintProvider {
 impl Default for InlayHintProvider {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+fn get_expr_id(expr: &Expr) -> NodeId {
+    match expr {
+        Expr::Literal { id, .. } => *id,
+        Expr::Path { id, .. } => *id,
+        Expr::Binary { id, .. } => *id,
+        Expr::Unary { id, .. } => *id,
+        Expr::Call { id, .. } => *id,
+        Expr::MethodCall { id, .. } => *id,
+        Expr::Field { id, .. } => *id,
+        Expr::TupleField { id, .. } => *id,
+        Expr::Index { id, .. } => *id,
+        Expr::Cast { id, .. } => *id,
+        Expr::Block { id, .. } => *id,
+        Expr::If { id, .. } => *id,
+        Expr::Match { id, .. } => *id,
+        Expr::Loop { id, .. } => *id,
+        Expr::While { id, .. } => *id,
+        Expr::For { id, .. } => *id,
+        Expr::Return { id, .. } => *id,
+        Expr::Break { id, .. } => *id,
+        Expr::Continue { id, .. } => *id,
+        Expr::Closure { id, .. } => *id,
+        Expr::Tuple { id, .. } => *id,
+        Expr::Array { id, .. } => *id,
+        Expr::ArrayRepeat { id, .. } => *id,
+        Expr::Range { id, .. } => *id,
+        Expr::StructLit { id, .. } => *id,
+        Expr::Try { id, .. } => *id,
+        Expr::Perform { id, .. } => *id,
+        Expr::Handle { id, .. } => *id,
+        Expr::Resume { id, .. } => *id,
+        Expr::Sample { id, .. } => *id,
+        Expr::Await { id, .. } => *id,
+        Expr::AsyncBlock { id, .. } => *id,
+        Expr::UnsafeBlock { id, .. } => *id,
+        Expr::AsyncClosure { id, .. } => *id,
+        Expr::Spawn { id, .. } => *id,
+        Expr::Select { id, .. } => *id,
+        Expr::Join { id, .. } => *id,
+        Expr::MacroInvocation(m) => m.id,
+        Expr::Do { id, .. } => *id,
+        Expr::Counterfactual { id, .. } => *id,
+        Expr::KnowledgeExpr { id, .. } => *id,
+        Expr::Uncertain { id, .. } => *id,
+        Expr::GpuAnnotated { id, .. } => *id,
+        Expr::Observe { id, .. } => *id,
+        Expr::Query { id, .. } => *id,
+        Expr::OntologyTerm { id, .. } => *id,
     }
 }
 

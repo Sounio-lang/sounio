@@ -45,15 +45,15 @@ impl CompletionProvider {
             CompletionContext::Unit => {
                 items.extend(self.unit_completions());
             }
-            CompletionContext::Member(_base_type) => {
-                // TODO: Look up type and provide field/method completions
-                items.extend(self.common_methods());
+            CompletionContext::Member(base_type) => {
+                items.extend(self.member_completions(&base_type));
             }
             CompletionContext::Pattern => {
                 items.extend(self.pattern_completions(cache));
             }
         }
 
+        deduplicate_completion_items(&mut items);
         items
     }
 
@@ -66,8 +66,8 @@ impl CompletionProvider {
         };
 
         // Check for member access
-        if context.ends_with('.') {
-            return CompletionContext::Member("unknown".to_string());
+        if context.trim_end().ends_with('.') {
+            return CompletionContext::Member(self.extract_member_base(context));
         }
 
         // Check for type position (after colon)
@@ -559,6 +559,116 @@ impl CompletionProvider {
             method_item("err", "err()", "Get error from Result"),
         ]
     }
+
+    /// Type-aware member completions using lightweight context heuristics
+    fn member_completions(&self, base_hint: &str) -> Vec<CompletionItem> {
+        let hint = base_hint.trim();
+        let hint_lower = hint.to_ascii_lowercase();
+
+        if hint_lower.contains("option") {
+            return vec![
+                method_item("is_some", "is_some()", "Check if Option has value"),
+                method_item("is_none", "is_none()", "Check if Option is empty"),
+                method_item("unwrap", "unwrap()", "Extract inner value"),
+                method_item("unwrap_or", "unwrap_or(${1:default})", "Default if None"),
+                method_item("map", "map(|${1:x}| $0)", "Map Option value"),
+                method_item("and_then", "and_then(|${1:x}| $0)", "Flat-map Option"),
+                method_item("ok_or", "ok_or(${1:err})", "Convert Option to Result"),
+            ];
+        }
+
+        if hint_lower.contains("result") {
+            return vec![
+                method_item("is_ok", "is_ok()", "Check if Result is Ok"),
+                method_item("is_err", "is_err()", "Check if Result is Err"),
+                method_item("unwrap", "unwrap()", "Extract Ok value"),
+                method_item("unwrap_or", "unwrap_or(${1:default})", "Default on Err"),
+                method_item("map", "map(|${1:x}| $0)", "Map Ok value"),
+                method_item("map_err", "map_err(|${1:e}| $0)", "Map Err value"),
+                method_item("ok", "ok()", "Convert Result to Option"),
+                method_item("err", "err()", "Extract error"),
+            ];
+        }
+
+        if hint.starts_with('"')
+            || hint.starts_with('\'')
+            || hint_lower.contains("str")
+            || hint_lower.contains("string")
+        {
+            return vec![
+                method_item("len", "len()", "String length"),
+                method_item("is_empty", "is_empty()", "Check if empty"),
+                method_item("contains", "contains(${1:needle})", "Substring search"),
+                method_item("starts_with", "starts_with(${1:prefix})", "Prefix check"),
+                method_item("ends_with", "ends_with(${1:suffix})", "Suffix check"),
+                method_item("trim", "trim()", "Trim whitespace"),
+                method_item("split", "split(${1:sep})", "Split string"),
+                method_item("to_lowercase", "to_lowercase()", "Lowercase conversion"),
+                method_item("to_uppercase", "to_uppercase()", "Uppercase conversion"),
+            ];
+        }
+
+        if hint.starts_with('[')
+            || hint_lower.contains("vec")
+            || hint_lower.contains("array")
+            || hint_lower.contains("slice")
+        {
+            return vec![
+                method_item("len", "len()", "Get length"),
+                method_item("is_empty", "is_empty()", "Check if empty"),
+                method_item("push", "push($0)", "Add element"),
+                method_item("pop", "pop()", "Pop last element"),
+                method_item("get", "get($0)", "Get by index"),
+                method_item("iter", "iter()", "Iterator"),
+                method_item("map", "map(|${1:x}| $0)", "Transform elements"),
+                method_item("filter", "filter(|${1:x}| $0)", "Filter elements"),
+                method_item("collect", "collect::<${1:Vec<_>>>()", "Collect iterator"),
+            ];
+        }
+
+        if hint_lower.contains("map") || hint_lower.contains("dict") {
+            return vec![
+                method_item("len", "len()", "Number of entries"),
+                method_item("is_empty", "is_empty()", "Check if empty"),
+                method_item("insert", "insert(${1:key}, ${2:value})", "Insert key/value"),
+                method_item("get", "get(${1:key})", "Lookup by key"),
+                method_item("contains_key", "contains_key(${1:key})", "Key membership"),
+                method_item("remove", "remove(${1:key})", "Remove key"),
+                method_item("keys", "keys()", "Iterate keys"),
+                method_item("values", "values()", "Iterate values"),
+            ];
+        }
+
+        self.common_methods()
+    }
+
+    /// Extract the base expression fragment before member access.
+    fn extract_member_base(&self, context: &str) -> String {
+        let trimmed = context.trim_end();
+        let without_dot = trimmed.strip_suffix('.').unwrap_or(trimmed).trim_end();
+        if without_dot.is_empty() {
+            return "unknown".to_string();
+        }
+
+        let mut start = without_dot.len();
+        for (idx, ch) in without_dot.char_indices().rev() {
+            let is_member_char =
+                ch.is_ascii_alphanumeric() || matches!(ch, '_' | ')' | ']' | '>' | '"' | '\'');
+            if is_member_char {
+                start = idx;
+                continue;
+            }
+            start = idx + ch.len_utf8();
+            break;
+        }
+
+        let fragment = without_dot[start..].trim();
+        if fragment.is_empty() {
+            "unknown".to_string()
+        } else {
+            fragment.to_string()
+        }
+    }
 }
 
 impl Default for CompletionProvider {
@@ -649,4 +759,11 @@ fn method_item(name: &str, snippet: &str, detail: &str) -> CompletionItem {
         insert_text_format: Some(InsertTextFormat::SNIPPET),
         ..Default::default()
     }
+}
+
+fn deduplicate_completion_items(items: &mut Vec<CompletionItem>) {
+    use std::collections::HashSet;
+
+    let mut seen = HashSet::new();
+    items.retain(|item| seen.insert(item.label.clone()));
 }
