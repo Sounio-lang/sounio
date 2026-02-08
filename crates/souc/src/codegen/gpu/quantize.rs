@@ -82,11 +82,7 @@ impl QuantDtype {
 
     /// Get the number of values packed per byte
     pub fn values_per_byte(&self) -> u32 {
-        if self.is_packed() {
-            2
-        } else {
-            1
-        }
+        if self.is_packed() { 2 } else { 1 }
     }
 
     /// Get the minimum CUDA compute capability required

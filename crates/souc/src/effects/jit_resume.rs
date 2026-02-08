@@ -405,11 +405,7 @@ pub extern "C" fn jit_capture_continuation(
 /// Called from JIT code to check if a resume is pending
 #[unsafe(no_mangle)]
 pub extern "C" fn jit_has_pending_resume() -> i64 {
-    if has_pending_jit_resume() {
-        1
-    } else {
-        0
-    }
+    if has_pending_jit_resume() { 1 } else { 0 }
 }
 
 /// Called from JIT code to get the pending resume value

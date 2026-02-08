@@ -152,7 +152,6 @@ where
 {
     let start = std::time::Instant::now();
     let mut attempts = 0;
-    let mut last_error: Option<E> = None;
 
     loop {
         attempts += 1;
@@ -186,8 +185,6 @@ where
                         total_duration: start.elapsed(),
                     };
                 }
-
-                last_error = Some(e);
 
                 // Calculate and apply delay
                 let delay = config.delay_for_attempt(attempts - 1);

@@ -479,24 +479,32 @@ mod tests {
     fn test_top_is_supertype() {
         let checker = LinearSubtypeChecker::new();
 
-        assert!(checker
-            .is_subtype(&LinearType::One, &LinearType::Top)
-            .is_ok());
-        assert!(checker
-            .is_subtype(&LinearType::Zero, &LinearType::Top)
-            .is_ok());
+        assert!(
+            checker
+                .is_subtype(&LinearType::One, &LinearType::Top)
+                .is_ok()
+        );
+        assert!(
+            checker
+                .is_subtype(&LinearType::Zero, &LinearType::Top)
+                .is_ok()
+        );
     }
 
     #[test]
     fn test_zero_is_subtype() {
         let checker = LinearSubtypeChecker::new();
 
-        assert!(checker
-            .is_subtype(&LinearType::Zero, &LinearType::One)
-            .is_ok());
-        assert!(checker
-            .is_subtype(&LinearType::Zero, &LinearType::Top)
-            .is_ok());
+        assert!(
+            checker
+                .is_subtype(&LinearType::Zero, &LinearType::One)
+                .is_ok()
+        );
+        assert!(
+            checker
+                .is_subtype(&LinearType::Zero, &LinearType::Top)
+                .is_ok()
+        );
     }
 
     #[test]

@@ -43,10 +43,10 @@ use rustc_hash::FxHashMap;
 use std::collections::HashMap;
 
 use super::async_pipeline::{
-    create_pipeline_from_tile, schedule_pipeline, AsyncPipeline, PipelineSchedule,
+    AsyncPipeline, PipelineSchedule, create_pipeline_from_tile, schedule_pipeline,
 };
 use super::autotune::{AutoTuneConfig, AutoTuner, TunedConfig};
-use super::fusion::{analyze_and_fuse_kernels, FusionConfig, FusionError};
+use super::fusion::{FusionConfig, FusionError, analyze_and_fuse_kernels};
 use super::graph::build_graph_from_module;
 use super::ir::*;
 use crate::hlir::{

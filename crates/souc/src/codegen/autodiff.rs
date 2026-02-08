@@ -17,7 +17,7 @@
 //! for computing derivatives of scalar functions.
 
 #[cfg(feature = "jit")]
-use cranelift_codegen::ir::{types, FuncRef, InstBuilder, Value};
+use cranelift_codegen::ir::{FuncRef, InstBuilder, Value, types};
 #[cfg(feature = "jit")]
 use cranelift_frontend::FunctionBuilder;
 

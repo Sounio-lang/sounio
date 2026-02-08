@@ -3,7 +3,7 @@
 //! Tests for retry + circuit breaker composition patterns.
 
 use sounio::effects::resilience::{
-    with_retry, CircuitBreaker, CircuitState, RetryConfig, RetryResult,
+    CircuitBreaker, CircuitState, RetryConfig, RetryResult, with_retry,
 };
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::time::{Duration, Instant};

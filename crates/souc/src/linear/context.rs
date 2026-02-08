@@ -10,9 +10,9 @@
 use std::collections::{HashMap, HashSet};
 use std::fmt;
 
+use super::LinearError;
 use super::linear_types::LinearType;
 use super::modality::Modality;
-use super::LinearError;
 
 /// Usage count for tracking how many times a variable has been used
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Default)]

@@ -11,7 +11,7 @@
 //!
 //! Run with: cargo run --example forward_mode_ad_demo
 
-use sounio::codegen::autodiff::{compute_jacobian, Dual};
+use sounio::codegen::autodiff::{Dual, compute_jacobian};
 
 fn main() {
     println!("=== Forward-Mode Automatic Differentiation Demo ===\n");

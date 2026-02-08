@@ -74,10 +74,10 @@ mod resolver;
 
 pub use cache::{CacheConfig, CacheStats, OntologyCache};
 pub use distance::{
+    DistanceConfig, PhysicalCost, SemanticDistance, SemanticDistanceIndex,
     information_content::{ICConfig, ICIndex, ICSimilarity},
     path::{HierarchyGraph, HierarchyStats, LCAResult, PathResult},
     sssom::{MappingPredicate, SSSOMIndex, SSSOMMapping, SSSOMParser, SSSOMSet},
-    DistanceConfig, PhysicalCost, SemanticDistance, SemanticDistanceIndex,
 };
 pub use domain::{
     DomainOntologies, DomainStats, DomainTerm, OntologyMetadata as DomainOntologyMetadata,
@@ -89,17 +89,17 @@ pub use fidelity::{
     ViolationType, WorldFidelityChecker,
 };
 pub use foundation::{
+    CurationStatus, FoundationOntologies, FoundationTerm, OntologySource, TermEntry, TermMapping,
     augmentation::EpistemicAugmenter, fhir::FHIROntology, iao::IAOOntology, pato::PATOOntology,
-    schema_org::SchemaOrgOntology, uo::UOOntology, CurationStatus, FoundationOntologies,
-    FoundationTerm, OntologySource, TermEntry, TermMapping,
+    schema_org::SchemaOrgOntology, uo::UOOntology,
 };
 pub use loader::{
+    IRI, LoadedTerm, OntologyId, OntologyLoader, OntologyLoaderConfig,
     bioportal::BioPortalClient,
-    obo_parser::{parse_obo_file, OboParseError},
-    LoadedTerm, OntologyId, OntologyLoader, OntologyLoaderConfig, IRI,
+    obo_parser::{OboParseError, parse_obo_file},
 };
 pub use primitive::{
-    BfoClass, CobClass, PrimitiveStore, RoRelation, PRIMITIVE_BFO, PRIMITIVE_COB, PRIMITIVE_RO,
+    BfoClass, CobClass, PRIMITIVE_BFO, PRIMITIVE_COB, PRIMITIVE_RO, PrimitiveStore, RoRelation,
 };
 pub use resolver::{
     OntologyMetadata, OntologyResolver, RelationInfo, ResolutionError, ResolvedTerm,
@@ -108,7 +108,7 @@ pub use resolver::{
 #[cfg(feature = "ontology")]
 pub use semantic_sql::{SemanticSqlStore, SqlOntology, SqlTerm};
 pub use sssom::{
-    load_sssom_mappings, MappingDirection, MappingJustification, SssomMapping, SssomMappingSet,
+    MappingDirection, MappingJustification, SssomMapping, SssomMappingSet, load_sssom_mappings,
 };
 
 use crate::epistemic::{OntologyBinding, OntologyRef, TermId};

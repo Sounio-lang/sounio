@@ -10,7 +10,7 @@ pub mod stack;
 
 pub use bytecode::{Bytecode, Value};
 pub use memory::Heap;
-pub use serialize::{deserialize, serialize, SerializeError, BYTECODE_MAGIC, BYTECODE_VERSION};
+pub use serialize::{BYTECODE_MAGIC, BYTECODE_VERSION, SerializeError, deserialize, serialize};
 
 use crate::runtime::ffi;
 use std::collections::HashMap;
@@ -373,7 +373,7 @@ impl BytecodeVM {
                         _ => {
                             return Err(VmError::TypeMismatch(
                                 "Store expects (value, pointer)".to_string(),
-                            ))
+                            ));
                         }
                     }
                 }
@@ -420,7 +420,7 @@ impl BytecodeVM {
                         _ => {
                             return Err(VmError::TypeMismatch(
                                 "StoreIndex requires list and integer index".to_string(),
-                            ))
+                            ));
                         }
                     }
                 }
@@ -504,7 +504,7 @@ impl BytecodeVM {
                         _ => {
                             return Err(VmError::TypeMismatch(
                                 "IndexOp requires list/string and integer".to_string(),
-                            ))
+                            ));
                         }
                     }
                 }
@@ -520,7 +520,7 @@ impl BytecodeVM {
                         fields.push(self.stack.pop().ok_or(VmError::StackUnderflow)?);
                     }
                     fields.reverse(); // Fields were pushed in order
-                                      // Represent variant as a struct with special enum fields
+                    // Represent variant as a struct with special enum fields
                     let mut variant_fields = HashMap::new();
                     variant_fields.insert("__enum".to_string(), Value::String(enum_name.clone()));
                     variant_fields.insert("__variant".to_string(), Value::String(variant.clone()));

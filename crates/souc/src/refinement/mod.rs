@@ -41,6 +41,6 @@ pub mod subtype;
 pub use constraint::*;
 pub use infer::RefinementInference;
 pub use predicate::*;
-pub use qualifiers::{medical_qualifiers, sedenion_qualifiers, standard_qualifiers, Qualifier};
+pub use qualifiers::{Qualifier, medical_qualifiers, sedenion_qualifiers, standard_qualifiers};
 pub use solver::{Counterexample, VerifyResult, Z3Solver};
 pub use subtype::SubtypeChecker;

@@ -191,12 +191,16 @@ mod tests {
 
     #[test]
     fn test_lint_groups() {
-        assert!(LintGroup::Linear
-            .lint_ids()
-            .contains(&"unused_linear_value"));
-        assert!(LintGroup::Epistemic
-            .lint_ids()
-            .contains(&"low_confidence_propagation"));
+        assert!(
+            LintGroup::Linear
+                .lint_ids()
+                .contains(&"unused_linear_value")
+        );
+        assert!(
+            LintGroup::Epistemic
+                .lint_ids()
+                .contains(&"low_confidence_propagation")
+        );
     }
 
     #[test]

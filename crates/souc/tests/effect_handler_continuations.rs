@@ -7,9 +7,9 @@
 //! 4. Continuation is properly cleaned up after handler completes
 
 use sounio::effects::handlers::HandlerRegistry;
+use sounio::interp::EffectKind;
 use sounio::interp::effect_dispatch::{DispatchResult, EffectContext};
 use sounio::interp::value::Value;
-use sounio::interp::EffectKind;
 
 #[test]
 fn test_effect_dispatch_captures_continuation() {

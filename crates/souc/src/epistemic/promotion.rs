@@ -676,11 +676,7 @@ impl Promoter {
         let z = t
             - (2.515517 + 0.802853 * t + 0.010328 * t * t)
                 / (1.0 + 1.432788 * t + 0.189269 * t * t + 0.001308 * t * t * t);
-        if p > 0.5 {
-            -z
-        } else {
-            z
-        }
+        if p > 0.5 { -z } else { z }
     }
 
     /// Promote a Bootstrap value to a target uncertainty level

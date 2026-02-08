@@ -41,18 +41,18 @@ pub mod report;
 pub mod solver;
 pub mod visualize;
 
-pub use cluster::{cluster_concepts, Cluster, ClusteringResult};
+pub use cluster::{Cluster, ClusteringResult, cluster_concepts};
 pub use constraint::{ConstraintSet, ConstraintSource, ForcedRegion, LayoutConstraint};
 pub use diagnostics::{
-    format_diagnostics, generate_solver_diagnostics, layout_summary_diagnostic,
-    validate_constraints_diagnostic, DiagnosticLevel, LayoutDiagnostic,
+    DiagnosticLevel, LayoutDiagnostic, format_diagnostics, generate_solver_diagnostics,
+    layout_summary_diagnostic, validate_constraints_diagnostic,
 };
 pub use distance::DistanceMatrix;
-pub use extract::{extract_concepts_from_hir, extract_concepts_from_types, ConceptUsage};
-pub use instrument::{compare_layouts, CacheInstrumentation, CacheStats, LayoutComparison};
-pub use plan::{generate_layout, LayoutConfig, LayoutPlan, MemoryRegion};
+pub use extract::{ConceptUsage, extract_concepts_from_hir, extract_concepts_from_types};
+pub use instrument::{CacheInstrumentation, CacheStats, LayoutComparison, compare_layouts};
+pub use plan::{LayoutConfig, LayoutPlan, MemoryRegion, generate_layout};
 pub use report::generate_report;
-pub use solver::{solve_constraints, SolverResult};
+pub use solver::{SolverResult, solve_constraints};
 pub use visualize::{generate_ascii, generate_mermaid, generate_summary, generate_table};
 
 use crate::ontology::native::NativeOntology;

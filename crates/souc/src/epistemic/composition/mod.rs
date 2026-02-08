@@ -66,7 +66,7 @@ pub mod tensor;
 pub use category::{EpistemicCategory, EpistemicFunctor, EpistemicMonad};
 pub use condition::{ConditioningStrategy, Evidence, EvidenceStrength};
 pub use confidence::{
-    combine_confidence, select_strategy, CombinationStrategy, ConfidenceError, ConfidenceValue,
+    CombinationStrategy, ConfidenceError, ConfidenceValue, combine_confidence, select_strategy,
 };
 pub use join::{ConflictLevel, Fusible, JoinResult};
 pub use knowledge::{EpistemicValue, ExtractError, OntologyRef as CompositionOntologyRef};

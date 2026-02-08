@@ -232,11 +232,7 @@ pub fn bn_backward_cpu(
 
 /// Backward pass for ReLU: dy/dx = if x > 0 then dy else 0
 pub fn relu_backward_cpu(dy: f32, x: f32) -> f32 {
-    if x > 0.0 {
-        dy
-    } else {
-        0.0
-    }
+    if x > 0.0 { dy } else { 0.0 }
 }
 
 // ============================================================================

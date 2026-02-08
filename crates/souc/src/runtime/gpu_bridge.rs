@@ -352,11 +352,7 @@ pub extern "C" fn __sounio_gpu_alloc(size: usize) -> u64 {
 #[unsafe(no_mangle)]
 pub extern "C" fn __sounio_gpu_free(buffer_id: u64) -> u64 {
     if let Ok(mut bridge) = get_gpu_bridge().lock() {
-        if bridge.free(buffer_id).is_ok() {
-            1
-        } else {
-            0
-        }
+        if bridge.free(buffer_id).is_ok() { 1 } else { 0 }
     } else {
         0
     }
@@ -484,11 +480,7 @@ pub extern "C" fn __sounio_gpu_launch(
             &kernel_args,
         );
 
-        if result.is_ok() {
-            1
-        } else {
-            0
-        }
+        if result.is_ok() { 1 } else { 0 }
     } else {
         0
     }
@@ -500,11 +492,7 @@ pub extern "C" fn __sounio_gpu_launch(
 #[unsafe(no_mangle)]
 pub extern "C" fn __sounio_gpu_sync() -> u64 {
     if let Ok(bridge) = get_gpu_bridge().lock() {
-        if bridge.synchronize().is_ok() {
-            1
-        } else {
-            0
-        }
+        if bridge.synchronize().is_ok() { 1 } else { 0 }
     } else {
         0
     }

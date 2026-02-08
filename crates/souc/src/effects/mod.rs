@@ -49,8 +49,8 @@ pub use continuation::{
 };
 pub use continuation_context::ContinuationContext;
 pub use epistemic_effects::{
-    apply_epistemic_tracking, ConfidenceModifier, EpistemicEvent, EpistemicImpactRegistry,
-    EpistemicTracker,
+    ConfidenceModifier, EpistemicEvent, EpistemicImpactRegistry, EpistemicTracker,
+    apply_epistemic_tracking,
 };
 pub use handler_capability::{
     ConfidenceModifier as HandlerConfidenceModifier, Continuation as HandlerContinuation,
@@ -64,19 +64,18 @@ pub use handlers::{
 };
 pub use inference::{EffectChecker, EffectError, EffectErrorKind, EffectSource, TypeInfo};
 pub use jit_resume::{
-    clear_jit_resume_state, f64_to_value, has_pending_jit_resume, resume_jit_continuation,
-    schedule_jit_resume, store_jit_context, take_pending_jit_resume, JitResumeContext,
-    JitResumeStore,
+    JitResumeContext, JitResumeStore, clear_jit_resume_state, f64_to_value, has_pending_jit_resume,
+    resume_jit_continuation, schedule_jit_resume, store_jit_context, take_pending_jit_resume,
 };
 pub use linearity::{EffectOpInfo, Linearity};
-pub use resilience::{with_retry, CircuitBreaker, CircuitState, RetryConfig, RetryResult};
+pub use resilience::{CircuitBreaker, CircuitState, RetryConfig, RetryResult, with_retry};
 pub use resilient_dispatch::{
     DispatchConfig, DispatchOutcome, ResilientBuilder, ResilientDispatcher,
 };
 pub use simd_dispatch::{
-    simd_perform, simd_perform_batch, BatchEffectResult, DispatchError, DispatchHandle, EffectOp,
-    ParallelEffectResult, ParallelTiming, SimdContinuation, SimdDispatchConfig,
-    SimdEffectDispatcher,
+    BatchEffectResult, DispatchError, DispatchHandle, EffectOp, ParallelEffectResult,
+    ParallelTiming, SimdContinuation, SimdDispatchConfig, SimdEffectDispatcher, simd_perform,
+    simd_perform_batch,
 };
 
 /// Runtime effect handler trait

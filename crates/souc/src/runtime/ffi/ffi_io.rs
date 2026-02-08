@@ -10,7 +10,7 @@
 //! - __sounio_file_exists
 //! - __sounio_file_metadata
 
-use std::fs::{self, File, OpenOptions};
+use std::fs::{self, OpenOptions};
 use std::io::Write;
 use std::path::Path;
 use std::slice;

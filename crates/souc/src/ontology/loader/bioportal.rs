@@ -13,13 +13,13 @@
 //!
 //! Required for production use. Get one at https://bioportal.bioontology.org/account
 
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Mutex;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
 use serde::Deserialize;
 
-use super::{LoadedTerm, OntologyId, ResolutionError, Synonym, SynonymScope, IRI};
+use super::{IRI, LoadedTerm, OntologyId, ResolutionError, Synonym, SynonymScope};
 
 const BIOPORTAL_BASE: &str = "https://data.bioontology.org";
 

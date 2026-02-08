@@ -27,12 +27,14 @@ use tokio::task::JoinHandle;
 
 use crate::effects::handler_capability::{
     Continuation, EpistemicImpact, HandlerCapability, HandlerError, HandlerResult, HandlerState,
-    OperationSpec, SuspensionId,
+    OperationSpec,
 };
 use crate::effects::linearity::Linearity;
 use crate::interp::Value;
+#[cfg(feature = "tokio")]
 use std::collections::HashMap;
 use std::sync::OnceLock;
+#[cfg(feature = "tokio")]
 use std::sync::{Arc, Mutex};
 
 /// Key for storing the Tokio runtime in handler state

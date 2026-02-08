@@ -413,7 +413,7 @@ mod tests {
         let result = composed.apply(v);
 
         assert_eq!(*result.value(), 11); // (5*2)+1 = 11
-                                         // Confidence: 1.0 × 0.9 × 0.95 = 0.855
+        // Confidence: 1.0 × 0.9 × 0.95 = 0.855
         assert!((result.confidence().value() - 0.855).abs() < 1e-10);
     }
 

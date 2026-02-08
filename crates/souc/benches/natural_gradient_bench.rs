@@ -1,6 +1,6 @@
 /// Benchmarks for natural gradient descent convergence
 /// Compares natural gradient (5-10x speedup) vs Euclidean gradient on Beta parameter estimation
-use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion};
+use criterion::{BenchmarkId, Criterion, black_box, criterion_group, criterion_main};
 use sounio::epistemic::{FisherMatrix, NaturalGradientOptimizer};
 
 /// Simple loss function: KL divergence from target Beta(target_α, target_β)

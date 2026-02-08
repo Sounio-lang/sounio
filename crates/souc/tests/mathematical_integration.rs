@@ -3,14 +3,14 @@
 
 #[cfg(test)]
 mod integration_tests {
-    use sounio::epistemic::{transport_cost, wasserstein2_distance, wasserstein_barycenter};
     use sounio::epistemic::{BetaConfidence, FisherMatrix, NaturalGradientOptimizer};
+    use sounio::epistemic::{transport_cost, wasserstein_barycenter, wasserstein2_distance};
     use sounio::ontology::alignment::{Alignment, AlignmentSource, CellularSheaf};
     use sounio::ontology::distance::sssom::MappingPredicate;
     use sounio::ontology::loader::IRI;
     use sounio::types::{
-        parallel_compose, sequential_compose, tropical_matmul, tropical_power, ResourceType,
-        TropicalMatrix, TropicalNumber, Type,
+        ResourceType, TropicalMatrix, TropicalNumber, Type, parallel_compose, sequential_compose,
+        tropical_matmul, tropical_power,
     };
 
     // ============================================================================

@@ -997,11 +997,13 @@ mod tests {
     #[test]
     fn test_federated_source_urls() {
         assert!(FederatedSource::OLS4.base_url().contains("ebi.ac.uk"));
-        assert!(FederatedSource::BioPortal {
-            api_key: "test".into()
-        }
-        .base_url()
-        .contains("bioontology.org"));
+        assert!(
+            FederatedSource::BioPortal {
+                api_key: "test".into()
+            }
+            .base_url()
+            .contains("bioontology.org")
+        );
     }
 
     #[test]

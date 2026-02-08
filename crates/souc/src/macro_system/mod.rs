@@ -16,7 +16,7 @@ pub mod token_tree;
 
 pub use ctfe::{ConstValue, CtfeContext, CtfeError};
 pub use declarative::{MacroArm, MacroDef, MacroExpander};
-pub use derive::{parse_derive_input, DeriveInput};
+pub use derive::{DeriveInput, parse_derive_input};
 pub use pattern::{Bindings, FragmentSpecifier, Pattern, PatternMatcher};
 pub use proc_macro::{ProcMacroDef, ProcMacroError, ProcMacroKind, ProcMacroRegistry, TokenStream};
 pub use token_tree::{Delimiter, MacroError, SyntaxContext, TokenTree, TokenWithCtx};

@@ -219,12 +219,16 @@ impl SemanticFusionPattern {
             [OpCategory::Linear, OpCategory::BatchNorm, OpCategory::ReLU] => {
                 Some(SemanticFusionPattern::LinearBnRelu)
             }
-            [OpCategory::QuatLinear, OpCategory::QuatBatchNorm, OpCategory::QuatReLU] => {
-                Some(SemanticFusionPattern::QuatLinearBnRelu)
-            }
-            [OpCategory::OctLinear, OpCategory::OctBatchNorm, OpCategory::OctReLU] => {
-                Some(SemanticFusionPattern::OctLinearBnRelu)
-            }
+            [
+                OpCategory::QuatLinear,
+                OpCategory::QuatBatchNorm,
+                OpCategory::QuatReLU,
+            ] => Some(SemanticFusionPattern::QuatLinearBnRelu),
+            [
+                OpCategory::OctLinear,
+                OpCategory::OctBatchNorm,
+                OpCategory::OctReLU,
+            ] => Some(SemanticFusionPattern::OctLinearBnRelu),
 
             // Partial patterns (2 ops)
             [OpCategory::Linear, OpCategory::BatchNorm] => Some(SemanticFusionPattern::LinearBn),

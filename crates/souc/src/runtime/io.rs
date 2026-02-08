@@ -16,9 +16,6 @@
 //! responsible for calling `__sounio_free_string` to deallocate.
 
 use std::env;
-use std::fs;
-use std::io::{self, BufRead, Write};
-use std::path::Path;
 use std::sync::OnceLock;
 
 // ============================================================================

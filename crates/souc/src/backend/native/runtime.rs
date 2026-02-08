@@ -1683,8 +1683,8 @@ mod tests {
 
 pub mod prelude {
     pub use super::{
-        build_runtime_object, build_runtime_object_without_start, generate_runtime_asm,
-        generate_runtime_asm_without_start, is_runtime_symbol, write_runtime_asm,
-        write_runtime_asm_without_start, RUNTIME_SYMBOLS,
+        RUNTIME_SYMBOLS, build_runtime_object, build_runtime_object_without_start,
+        generate_runtime_asm, generate_runtime_asm_without_start, is_runtime_symbol,
+        write_runtime_asm, write_runtime_asm_without_start,
     };
 }

@@ -34,7 +34,7 @@ use std::sync::Arc;
 
 use super::multi_gpu::{DeviceId, MultiGpuError, MultiGpuRuntime};
 use super::p2p_transfer::{
-    generate_allgather_steps, generate_reduce_scatter_steps, P2PManager, ReduceOp,
+    P2PManager, ReduceOp, generate_allgather_steps, generate_reduce_scatter_steps,
 };
 
 // ============================================================================

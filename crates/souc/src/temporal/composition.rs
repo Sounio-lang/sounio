@@ -28,8 +28,8 @@
 use super::knowledge::TemporalKnowledge;
 use super::types::Temporal;
 use crate::epistemic::composition::{
-    combine_confidence, CombinationStrategy, ConfidenceValue, EpistemicValue, Fusible,
-    ProvenanceNode,
+    CombinationStrategy, ConfidenceValue, EpistemicValue, Fusible, ProvenanceNode,
+    combine_confidence,
 };
 use chrono::Utc;
 use std::collections::HashSet;

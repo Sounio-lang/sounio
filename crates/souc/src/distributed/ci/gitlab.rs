@@ -226,9 +226,11 @@ impl PipelineGenerator {
                 }]),
                 needs: None,
                 parallel: Some(Parallel {
-                    matrix: vec![[("TARGET".into(), self.targets.clone())]
-                        .into_iter()
-                        .collect()],
+                    matrix: vec![
+                        [("TARGET".into(), self.targets.clone())]
+                            .into_iter()
+                            .collect(),
+                    ],
                 }),
                 tags: None,
                 allow_failure: None,

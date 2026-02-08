@@ -451,7 +451,7 @@ fn main() {
         .json_diagnostics()
         .compile_str("transitive_distance", source)
         .assert_failure()
-        .assert_error_contains("distance");
+        .assert_error_contains("no alignment found");
 }
 
 // ============================================================================

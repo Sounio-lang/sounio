@@ -6,8 +6,8 @@
 //! This module bridges semantic knowledge (ontology relationships) with
 //! physical optimization (memory prefetching).
 
-use super::types::Locality;
 use super::Ontology;
+use super::types::Locality;
 use std::collections::HashMap;
 
 /// Semantic distance between concepts, normalized to [0.0, 1.0].

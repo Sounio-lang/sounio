@@ -27,11 +27,11 @@ use crate::hlir::{
     Op, ValueId,
 };
 
+use super::PolyResult;
 use super::affine::{AffineExpr, AffineMap};
 use super::analysis::ScopInfo;
 use super::domain::Constraint;
 use super::transform::{Schedule, ScheduleNode};
-use super::PolyResult;
 
 /// Code generator for polyhedral schedules
 pub struct PolyhedralCodegen {

@@ -1,8 +1,7 @@
 //! Memory Allocation FFI Functions
 //! Implements 6 allocation functions: alloc, dealloc, realloc, alloc_zeroed, alloc_array, dealloc_array
 
-use std::alloc::{alloc, dealloc, realloc, Layout};
-use std::ptr::NonNull;
+use std::alloc::{Layout, alloc, dealloc, realloc};
 
 #[unsafe(no_mangle)]
 pub extern "C" fn __sounio_alloc(size: usize, align: usize) -> *mut u8 {

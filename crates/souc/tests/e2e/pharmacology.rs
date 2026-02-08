@@ -3,7 +3,7 @@
 // Tests compilation of realistic drug-phenotype-disease analysis code
 // using actual ChEBI, HP, MONDO, and GO ontology terms.
 
-use super::common::{fixtures, TestHarness};
+use super::common::{TestHarness, fixtures};
 use std::time::Duration;
 
 // ============================================================================

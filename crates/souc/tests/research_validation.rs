@@ -6,13 +6,13 @@
 mod research_validation {
     use sounio::epistemic::wasserstein::verify_triangle_inequality;
     use sounio::epistemic::{
-        transport_cost, wasserstein2_distance, wasserstein_barycenter, BetaConfidence,
-        FisherMatrix, NaturalGradientOptimizer,
+        BetaConfidence, FisherMatrix, NaturalGradientOptimizer, transport_cost,
+        wasserstein_barycenter, wasserstein2_distance,
     };
     use sounio::ontology::alignment::CellularSheaf;
     use sounio::types::{
-        parallel_compose, sequential_compose, tropical_matmul, ResourceType, TropicalMatrix,
-        TropicalNumber, Type,
+        ResourceType, TropicalMatrix, TropicalNumber, Type, parallel_compose, sequential_compose,
+        tropical_matmul,
     };
 
     // ============================================================================

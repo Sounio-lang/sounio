@@ -76,8 +76,8 @@ pub mod types;
 
 // Re-exports
 pub use gradual::{
-    confidence_check, GradualAnnotation, GradualConfig, GradualDiagnostics, GradualMode,
-    GradualWarning, RuntimeCheck, RuntimeCheckKind, SourceLocation,
+    GradualAnnotation, GradualConfig, GradualDiagnostics, GradualMode, GradualWarning,
+    RuntimeCheck, RuntimeCheckKind, SourceLocation, confidence_check,
 };
 pub use inference::{
     Constraint, ConstraintKind, ConstraintSolver, InferenceContext, InferenceError,

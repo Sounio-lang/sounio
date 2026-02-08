@@ -265,11 +265,13 @@ impl RecoveryGenerator {
     /// Generate hints for fusion errors
     pub fn for_fusion_error(err: &FusionError) -> Vec<RecoveryHint> {
         match err {
-            FusionError::KernelNotFound(name) => vec![RecoveryHint::new(
-                format!("Check kernel name '{}'", name),
-                "Ensure the kernel exists in the module and is spelled correctly",
-            )
-            .with_confidence(HintConfidence::High)],
+            FusionError::KernelNotFound(name) => vec![
+                RecoveryHint::new(
+                    format!("Check kernel name '{}'", name),
+                    "Ensure the kernel exists in the module and is spelled correctly",
+                )
+                .with_confidence(HintConfidence::High),
+            ],
             FusionError::BlockNotFound(id) => vec![RecoveryHint::new(
                 format!("Block {} not found", id),
                 "The block may have been optimized away or the ID is invalid",

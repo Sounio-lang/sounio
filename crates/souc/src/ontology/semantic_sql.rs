@@ -41,7 +41,7 @@
 
 use std::path::Path;
 
-use rusqlite::{params, Connection, OpenFlags};
+use rusqlite::{Connection, OpenFlags, params};
 
 use super::{OntologyError, OntologyResult};
 

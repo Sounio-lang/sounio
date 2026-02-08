@@ -80,7 +80,7 @@ pub use muzero::{
 };
 pub use neural::{NeuralConfig, NeuralEval, PolicyValue, TrainingExample};
 pub use refinements::{
-    BoardDimensions, CellConstraint, Dim15x15, Dim19x19, Dim3x3, Dim8x8, GameRuleVerifier,
+    BoardDimensions, CellConstraint, Dim3x3, Dim8x8, Dim15x15, Dim19x19, GameRuleVerifier,
     GameStateRefinement, MoveRefinement, Position, StateRepr, TransitionRefinement,
 };
 pub use selfplay::{SelfPlayConfig, Trajectory};

@@ -78,9 +78,9 @@ pub use knowledge::{
     PrimitiveOntology, QuantifiedIndices, TermId, TranslationPath, TranslationStep,
 };
 pub use operations::{
-    assert_knowledge, query_knowledge, revise_knowledge, translate_knowledge, EpistemicConstraint,
-    InspectField, InspectOp, KnowledgeOp, MergeOp, MergeStrategy, QueryOp, RelationalConstraint,
-    ReviseOp, RevisionStrategy, TranslateOp, TranslateOptions,
+    EpistemicConstraint, InspectField, InspectOp, KnowledgeOp, MergeOp, MergeStrategy, QueryOp,
+    RelationalConstraint, ReviseOp, RevisionStrategy, TranslateOp, TranslateOptions,
+    assert_knowledge, query_knowledge, revise_knowledge, translate_knowledge,
 };
 pub use provenance::{
     FunctorTrace, Origin, Provenance, Transformation, TransformationKind, TransformationMetadata,
@@ -89,10 +89,10 @@ pub use temporal::{ContextIndex, ContextTime, TemporalIndex, TemporalOffset, Val
 
 // New modules for advanced epistemic computing
 pub use bayesian::{
-    check_beta_constraint, combine_epistemic_beta, combine_epistemic_beta_with_prior,
-    combine_epistemic_hierarchical, dempster_combine, dempster_combine_multiple,
     BayesianFusionResult, BeliefMass, BetaBound, BetaConfidence, BetaConstraintResult,
     DSTCombinationResult, EvidenceAssessment, HierarchicalPrior, OntologyDomain, SourceReliability,
+    check_beta_constraint, combine_epistemic_beta, combine_epistemic_beta_with_prior,
+    combine_epistemic_hierarchical, dempster_combine, dempster_combine_multiple,
 };
 
 // Information geometry on type spaces (Fisher metric, natural gradient)
@@ -105,33 +105,33 @@ pub use merkle::{
     ProvenanceMetadata, ProvenanceOperation, ProvenanceSignature,
 };
 pub use models::{
-    propagate_binary, AffineConfig, BayesianConfig, BinaryOp, CombinationRule,
-    DempsterShaferConfig, EpistemicConfig, FuzzyConfig, IntervalConfig, ProbabilisticConfig,
-    UncertainValue, UncertaintyModel,
+    AffineConfig, BayesianConfig, BinaryOp, CombinationRule, DempsterShaferConfig, EpistemicConfig,
+    FuzzyConfig, IntervalConfig, ProbabilisticConfig, UncertainValue, UncertaintyModel,
+    propagate_binary,
 };
 pub use wasserstein::{
-    transport_cost, wasserstein2_distance, wasserstein_barycenter, WassersteinBarycenter,
-    WassersteinDistance,
+    WassersteinBarycenter, WassersteinDistance, transport_cost, wasserstein_barycenter,
+    wasserstein2_distance,
 };
 
 // Beta-epistemic knowledge types (revolutionary full-distribution epistemic computing)
 pub use beta_knowledge::{
-    exploration_priorities, variance_penalty, ActiveInferenceMetrics, BetaEpistemicStatus,
-    BetaKnowledge, DecayModel, PriorType, SourcePriorType,
+    ActiveInferenceMetrics, BetaEpistemicStatus, BetaKnowledge, DecayModel, PriorType,
+    SourcePriorType, exploration_priorities, variance_penalty,
 };
 
 // Time-travel debugging for epistemic provenance
 pub use time_travel::{
-    verify_external, BreakAction, BreakCondition, BreakpointManager, ConfidenceDelta,
-    CustodyRecord, DegradationReason, DegradingOperation, EpistemicBreakpoint, EpistemicSnapshot,
+    BreakAction, BreakCondition, BreakpointManager, ConfidenceDelta, CustodyRecord,
+    DegradationReason, DegradingOperation, EpistemicBreakpoint, EpistemicSnapshot,
     FDAComplianceProof, ProofVerificationError, TimeTravelResult, TimelineGraph, TimelineState,
-    VerificationResult,
+    VerificationResult, verify_external,
 };
 
 // KEC auto-selection for optimal uncertainty model
 pub use kec::{
-    auto_select_model, select_for_operation, ComplexityMetrics, KECConfig, KECResult, KECSelector,
-    UncertaintyMetrics,
+    ComplexityMetrics, KECConfig, KECResult, KECSelector, UncertaintyMetrics, auto_select_model,
+    select_for_operation,
 };
 
 // Uncertainty promotion lattice
@@ -155,12 +155,12 @@ pub use unscented_transform::{
 };
 
 // MCMC samplers for Bayesian epistemic inference
-pub use mcmc::{compute_r_hat, HamiltonianMC, MCMCConfig, MCMCResult, MetropolisHastings, NUTS};
+pub use mcmc::{HamiltonianMC, MCMCConfig, MCMCResult, MetropolisHastings, NUTS, compute_r_hat};
 
 // Gaussian Process regression for surrogate modeling and epistemic UQ
 pub use gaussian_process::{GPConfig, GPPrediction, GaussianProcess, Kernel};
 
 // SIMD-accelerated epistemic knowledge vectors
 pub use simd_knowledge::{
-    batch_add_uncertainties, batch_weighted_mean, KnowledgeVec4, KnowledgeVec8,
+    KnowledgeVec4, KnowledgeVec8, batch_add_uncertainties, batch_weighted_mean,
 };

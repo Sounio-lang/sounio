@@ -11,7 +11,7 @@ use std::time::{Duration, Instant};
 use sha2::{Digest, Sha256};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
-use tokio::sync::{mpsc, oneshot, Mutex, RwLock};
+use tokio::sync::{Mutex, RwLock, mpsc, oneshot};
 
 use super::protocol::*;
 

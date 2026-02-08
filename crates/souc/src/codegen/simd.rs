@@ -10,7 +10,7 @@
 //! - mat3, mat4: Pointer to aligned memory (multiple F32X4 lanes)
 
 #[cfg(feature = "jit")]
-use cranelift_codegen::ir::{types, InstBuilder, Value};
+use cranelift_codegen::ir::{InstBuilder, Value, types};
 #[cfg(feature = "jit")]
 use cranelift_frontend::FunctionBuilder;
 

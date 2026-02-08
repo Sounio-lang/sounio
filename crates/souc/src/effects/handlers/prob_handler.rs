@@ -46,8 +46,8 @@ use crate::effects::handler_capability::{
     OperationSpec,
 };
 use crate::effects::linearity::Linearity;
-use crate::interp::value::Distribution;
 use crate::interp::Value;
+use crate::interp::value::Distribution;
 use std::f64::consts::PI;
 use std::sync::OnceLock;
 
@@ -254,11 +254,7 @@ impl ProbHandler {
                     return f64::NEG_INFINITY;
                 }
                 let p = probs[idx];
-                if p <= 0.0 {
-                    f64::NEG_INFINITY
-                } else {
-                    p.ln()
-                }
+                if p <= 0.0 { f64::NEG_INFINITY } else { p.ln() }
             }
         }
     }

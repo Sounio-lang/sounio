@@ -8,12 +8,12 @@
 //! - Qualifier-based refinement type checking
 
 use sounio::check::pac::{PACChecker, PACConstraint, PACErrorKind, PACVerifyResult};
+use sounio::types::Type;
 use sounio::types::epistemic::{ConfidenceOp, KnowledgeType};
 use sounio::types::pac::{
-    compute_generalization_gap, compute_sample_complexity, compute_sample_complexity_tight,
-    GeneralizationBound, HypothesisClass, VCDimExpr, VCDimension,
+    GeneralizationBound, HypothesisClass, VCDimExpr, VCDimension, compute_generalization_gap,
+    compute_sample_complexity, compute_sample_complexity_tight,
 };
-use sounio::types::Type;
 
 // ============================================================================
 // Sample Complexity Tests

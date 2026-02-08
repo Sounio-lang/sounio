@@ -2,7 +2,7 @@
 //!
 //! Provides concrete agent types for different epistemic operations.
 
-use super::{tasks::*, AgentError, AgentOpResult, KnowledgeBase};
+use super::{AgentError, AgentOpResult, KnowledgeBase, tasks::*};
 use crate::llm::LLMClientRegistry;
 use crate::ontology::llm_gen::{GenerationConfig, OntologyGenerator};
 use std::collections::VecDeque;

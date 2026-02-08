@@ -475,15 +475,21 @@ impl AlignmentIndex {
         let sssom_stats = self.sssom.stats();
         let cui_stats = self.cui_bridge.stats();
         let loom_stats = self.loom.stats();
+        let embedding_alignments = self
+            .embedding_space
+            .as_ref()
+            .map(|space| space.stats().total_embeddings)
+            .unwrap_or(0);
 
         self.stats = AlignmentStats {
             total_alignments: sssom_stats.total_mappings
                 + cui_stats.total_mappings
-                + loom_stats.total_mappings,
+                + loom_stats.total_mappings
+                + embedding_alignments,
             sssom_alignments: sssom_stats.total_mappings,
             umls_alignments: cui_stats.total_mappings,
             loom_alignments: loom_stats.total_mappings,
-            embedding_alignments: 0,  // TODO: add when embeddings integrated
+            embedding_alignments,
             transitive_alignments: 0, // Computed on-demand
             unique_terms: sssom_stats.unique_subjects
                 + sssom_stats.unique_objects
@@ -700,5 +706,33 @@ mod tests {
         let result = result.unwrap();
         assert_eq!(result.method, AlignmentMethod::Transitive);
         assert!(result.alignment.provenance.len() > 2);
+    }
+
+    #[test]
+    fn test_recompute_stats_counts_embeddings() {
+        use crate::ontology::embedding::{Embedding, EmbeddingConfig, EmbeddingModel, EmbeddingSpace};
+
+        let mut embedding_space =
+            EmbeddingSpace::new(EmbeddingConfig::default()).expect("embedding space");
+        embedding_space
+            .add(Embedding::new(
+                IRI::from_curie("CHEBI", "15365"),
+                vec![1.0, 0.0],
+                EmbeddingModel::Random,
+            ))
+            .expect("add embedding");
+        embedding_space
+            .add(Embedding::new(
+                IRI::from_curie("CHEBI", "15366"),
+                vec![0.0, 1.0],
+                EmbeddingModel::Random,
+            ))
+            .expect("add embedding");
+
+        let mut index = AlignmentIndex::new().with_embedding_space(embedding_space);
+        index.recompute_stats();
+
+        assert_eq!(index.stats().embedding_alignments, 2);
+        assert_eq!(index.stats().total_alignments, 2);
     }
 }

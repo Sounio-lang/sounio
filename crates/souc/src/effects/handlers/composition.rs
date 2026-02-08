@@ -29,8 +29,8 @@
 //! ```
 
 use crate::effects::{
-    handler_capability::Continuation, HandlerCapability, HandlerError, HandlerResult, HandlerState,
-    OperationSpec,
+    HandlerCapability, HandlerError, HandlerResult, HandlerState, OperationSpec,
+    handler_capability::Continuation,
 };
 use crate::interp::Value;
 use std::collections::HashSet;

@@ -1346,7 +1346,7 @@ mod tests {
 
 pub mod prelude {
     pub use super::{
-        code_segment_to_elf, AllocStats, ElfConfig, ElfWriter, EpistemicSectionData,
-        FunctionEpistemic, OsAbi, RelocationType, SymbolBinding, SymbolType, SymbolVisibility,
+        AllocStats, ElfConfig, ElfWriter, EpistemicSectionData, FunctionEpistemic, OsAbi,
+        RelocationType, SymbolBinding, SymbolType, SymbolVisibility, code_segment_to_elf,
     };
 }

@@ -7633,7 +7633,7 @@ impl PtxCodegen {
                     indent
                 )
                 .unwrap(); // 1/8
-                           // Compute variance and normalize
+                // Compute variance and normalize
                 writeln!(self.output, "{}  mov.f32 %ln_var, 0F00000000;", indent).unwrap();
                 for i in 0..8 {
                     writeln!(
@@ -9242,7 +9242,7 @@ impl PtxCodegen {
                     indent
                 )
                 .unwrap(); // >0.95
-                           // Pattern 2: check e6, e15
+                // Pattern 2: check e6, e15
                 writeln!(
                     self.output,
                     "{}  fma.rn.f32 %sed_main, %sed_zd6, %sed_zd6, 0F00000000;",
@@ -11477,21 +11477,6 @@ impl PtxCodegen {
                 writeln!(self.output, "{}mov.u32 {}, 0; // placeholder", indent, reg).unwrap();
             }
 
-            // Sedenion and other unhandled operations
-            op => {
-                // Emit a placeholder register
-                let reg = self.alloc_register(&GpuType::U32);
-                self.registers.push(reg.clone());
-                self.value_types.push(GpuType::U32);
-                writeln!(
-                    self.output,
-                    "{}// TODO: Unhandled GPU op {:?}",
-                    indent,
-                    std::mem::discriminant(op)
-                )
-                .unwrap();
-                writeln!(self.output, "{}mov.u32 {}, 0; // placeholder", indent, reg).unwrap();
-            }
         }
 
         self.registers.clear_current();

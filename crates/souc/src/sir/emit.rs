@@ -20,8 +20,8 @@
 #![allow(clippy::excessive_nesting)]
 
 use super::alloc_policy::{
-    compute_attention_score, AllocPolicy, EpistemicMetadata, MetricsCollector, SpillEvent,
-    SpillReason,
+    AllocPolicy, EpistemicMetadata, MetricsCollector, SpillEvent, SpillReason,
+    compute_attention_score,
 };
 use crate::runtime::EpistemicMode;
 
@@ -5791,8 +5791,8 @@ impl X86_64Emitter {
 
         // Test condition
         self.emit_cmp_rr(cond_reg, cond_reg); // Will set ZF based on cond
-                                              // We actually need: test cond_reg, cond_reg
-                                              // For now, emit CMOVZ (move if zero)
+        // We actually need: test cond_reg, cond_reg
+        // For now, emit CMOVZ (move if zero)
         self.emit_mov_rr(dst_reg, then_reg);
         // CMOVZ dst, else - if condition was 0, use else value
         // 0F 44 /r - CMOVZ

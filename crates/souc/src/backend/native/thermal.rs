@@ -772,8 +772,8 @@ mod tests {
 
 pub mod prelude {
     pub use super::{
-        apply_degradation_full, apply_epistemic_degradation, ArrheniusModel, DegradationMechanism,
-        DegradationResult, DegradationWarning, SelfHeatingModel, ThermalSample, ThermalState,
-        K_B_EV_PER_K, T_REFERENCE_K,
+        ArrheniusModel, DegradationMechanism, DegradationResult, DegradationWarning, K_B_EV_PER_K,
+        SelfHeatingModel, T_REFERENCE_K, ThermalSample, ThermalState, apply_degradation_full,
+        apply_epistemic_degradation,
     };
 }

@@ -467,15 +467,17 @@ mod tests {
         // All valid combinations should succeed
         assert!(select_wmma_op(&GpuType::F16, &GpuType::F16, &GpuType::F32, 16, 16, 16).is_ok());
         assert!(select_wmma_op(&GpuType::BF16, &GpuType::BF16, &GpuType::F32, 16, 16, 16).is_ok());
-        assert!(select_wmma_op(
-            &GpuType::F8E4M3,
-            &GpuType::F8E4M3,
-            &GpuType::F32,
-            16,
-            16,
-            32
-        )
-        .is_ok());
+        assert!(
+            select_wmma_op(
+                &GpuType::F8E4M3,
+                &GpuType::F8E4M3,
+                &GpuType::F32,
+                16,
+                16,
+                32
+            )
+            .is_ok()
+        );
         assert!(select_wmma_op(&GpuType::F4, &GpuType::F4, &GpuType::F32, 16, 16, 64).is_ok());
         assert!(select_wmma_op(&GpuType::F32, &GpuType::F32, &GpuType::F32, 16, 16, 8).is_ok());
     }

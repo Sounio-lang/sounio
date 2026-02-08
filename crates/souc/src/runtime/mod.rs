@@ -41,15 +41,15 @@ pub mod tensor;
 pub mod uncertain;
 
 pub use causal::{
-    counterfactual, estimate_ate, find_backdoor_adjustment, satisfies_backdoor, ATEResult,
-    CausalModel, CounterfactualResult, Evidence, DAG,
+    ATEResult, CausalModel, CounterfactualResult, DAG, Evidence, counterfactual, estimate_ate,
+    find_backdoor_adjustment, satisfies_backdoor,
 };
 pub use discover::{
-    compute_derivatives, discover_ode, dynamics_library, polynomial_library, sindy,
     DiscoveredModel, DiscoveredODE, FunctionLibrary, LibraryTerm, SINDyOptions,
+    compute_derivatives, discover_ode, dynamics_library, polynomial_library, sindy,
 };
 pub use einsum::{
-    diagonal, einsum, sum_axis, tensordot, trace, transpose, EinsumError, EinsumExpr,
+    EinsumError, EinsumExpr, diagonal, einsum, sum_axis, tensordot, trace, transpose,
 };
 pub use epistemic::{
     CompactKnowledge, EpistemicMode, EpistemicRuntime, ErasedKnowledge, FullKnowledge,
@@ -62,45 +62,29 @@ pub use gpu_scientific::{
     ReductionKernel, ReductionOp, StencilKernel, StencilType, TensorContractionKernel,
 };
 pub use ode::{
-    solve, solve_euler, solve_rk4, solve_rk45, ODESolution, SolverMethod, SolverOptions,
+    ODESolution, SolverMethod, SolverOptions, solve, solve_euler, solve_rk4, solve_rk45,
 };
 pub use pde::{
-    advection_equation_1d, diffusion_reaction_1d, heat_equation_1d_crank_nicolson,
-    heat_equation_1d_explicit, heat_equation_2d_explicit, wave_equation_1d, BoundaryCondition,
-    Domain1D, Domain2D, PDESolution1D, PDESolution2D,
+    BoundaryCondition, Domain1D, Domain2D, PDESolution1D, PDESolution2D, advection_equation_1d,
+    diffusion_reaction_1d, heat_equation_1d_crank_nicolson, heat_equation_1d_explicit,
+    heat_equation_2d_explicit, wave_equation_1d,
 };
 pub use prob::{Distribution, InferenceMethod, ProbRuntime};
 pub use stiff::{
-    implicit_euler, rosenbrock, solve_lsoda, solve_stiff, BDFCoefficients, BDFConfig, BDFSolver,
-    LSODAConfig, LSODASolver, MethodType, NewtonConfig, SolverStats, StiffSolution,
+    BDFCoefficients, BDFConfig, BDFSolver, LSODAConfig, LSODASolver, MethodType, NewtonConfig,
+    SolverStats, StiffSolution, implicit_euler, rosenbrock, solve_lsoda, solve_stiff,
 };
 pub use symbolic::{
-    compile_expr, differentiate, evaluate, expand, integrate, simplify, solve_polynomial,
-    substitute, Expr,
+    Expr, compile_expr, differentiate, evaluate, expand, integrate, simplify, solve_polynomial,
+    substitute,
 };
 pub use tensor::{
-    verify_elementwise, verify_matmul, verify_reshape, Dim, Shape, ShapeError, Tensor,
+    Dim, Shape, ShapeError, Tensor, verify_elementwise, verify_matmul, verify_reshape,
 };
 pub use uncertain::{Uncertain, UncertainOps};
 
 // Async runtime
 pub use async_runtime::{
-    block_on,
-    bounded_channel,
-    channel,
-    init_runtime,
-    init_scheduler,
-    join,
-    join2,
-    join3,
-    run_scheduler,
-    runtime,
-    schedule,
-    scheduler,
-    select,
-    select2,
-    select3,
-    spawn,
     AsyncContext,
     AsyncState,
     ChannelError,
@@ -121,6 +105,22 @@ pub use async_runtime::{
     TaskId,
     // Task scheduler
     TaskScheduler,
+    block_on,
+    bounded_channel,
+    channel,
+    init_runtime,
+    init_scheduler,
+    join,
+    join2,
+    join3,
+    run_scheduler,
+    runtime,
+    schedule,
+    scheduler,
+    select,
+    select2,
+    select3,
+    spawn,
 };
 
 // GPU Executor (cudarc-based kernel execution runtime)
@@ -131,12 +131,12 @@ pub use gpu_executor::{
 
 // Runtime handler stack for effect dispatch
 pub use handler_stack::{
-    get_handler_stack, reset_handler_stack, RuntimeHandler, RuntimeHandlerStack,
+    RuntimeHandler, RuntimeHandlerStack, get_handler_stack, reset_handler_stack,
 };
 
 // GPU Runtime Bridge for kernel launch and memory management
 pub use gpu_bridge::{
-    get_gpu_bridge, init_gpu_bridge, BridgeStats, GpuBridgeError, GpuRuntimeBridge,
+    BridgeStats, GpuBridgeError, GpuRuntimeBridge, get_gpu_bridge, init_gpu_bridge,
 };
 
 // FFI layer for self-hosting (new)

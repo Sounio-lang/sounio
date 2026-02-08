@@ -39,7 +39,7 @@ use crate::epistemic::bayesian::BetaConfidence;
 use crate::smt::{SmtContext, SmtFormula, SmtSort};
 
 #[cfg(feature = "smt")]
-use crate::smt::{create_z3_context, Z3Solver};
+use crate::smt::{Z3Solver, create_z3_context};
 
 /// Result of Z3-backed causal identification
 #[derive(Debug, Clone)]

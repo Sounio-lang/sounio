@@ -25,7 +25,7 @@ pub use ir::*;
 pub use lower::lower;
 
 // Re-export polyhedral types for convenient access
-pub use polyhedral::{optimize_function as polyhedral_optimize, PolyError, PolyResult};
+pub use polyhedral::{PolyError, PolyResult, optimize_function as polyhedral_optimize};
 
 #[cfg(test)]
 mod tests {

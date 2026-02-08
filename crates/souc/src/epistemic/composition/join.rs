@@ -21,7 +21,7 @@
 //! | Resolved | 0.05 ≤ κ < θ | avg × (1-κ) (penalty) | Merged value |
 //! | Irreconcilable | κ ≥ θ | - | Both preserved |
 
-use super::confidence::{combine_confidence, CombinationStrategy};
+use super::confidence::{CombinationStrategy, combine_confidence};
 use super::knowledge::EpistemicValue;
 use super::provenance::ProvenanceNode;
 use std::fmt;

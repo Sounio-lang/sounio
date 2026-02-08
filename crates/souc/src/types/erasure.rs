@@ -392,9 +392,11 @@ mod tests {
         assert!(info.erased);
         assert_eq!(info.category, Some(ErasureCategory::Ontological));
 
-        assert!(analyzer
-            .erasures()
-            .is_binding_erased("http://snomed.info/id/73211009"));
+        assert!(
+            analyzer
+                .erasures()
+                .is_binding_erased("http://snomed.info/id/73211009")
+        );
     }
 
     #[test]

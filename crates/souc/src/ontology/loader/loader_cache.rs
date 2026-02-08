@@ -5,15 +5,15 @@
 //! federated resolution.
 
 use std::path::Path;
-use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::sync::RwLock;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 use rustc_hash::FxHashMap;
 
 use super::{
-    CrossReference, LoadedTerm, OntologyId, Restriction, RestrictionType, Synonym, SynonymScope,
-    IRI,
+    CrossReference, IRI, LoadedTerm, OntologyId, Restriction, RestrictionType, Synonym,
+    SynonymScope,
 };
 
 /// Cache error type

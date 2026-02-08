@@ -2,7 +2,7 @@
 
 use std::path::PathBuf;
 
-use super::build::{num_cpus, BuildContext, BuildExecutor, BuildProfile};
+use super::build::{BuildContext, BuildExecutor, BuildProfile, num_cpus};
 use super::manifest::{Dependency, DependencyDetail, Manifest};
 
 #[allow(unused_imports)]
@@ -1119,7 +1119,7 @@ pub fn cmd_tree(_package: Option<String>, _invert: bool, _depth: Option<usize>) 
 
 /// Show cache statistics
 pub fn cmd_cache_stats() -> Result<()> {
-    use super::cache::{format_size, PackageCache};
+    use super::cache::{PackageCache, format_size};
 
     let cache = PackageCache::new()?;
     let stats = cache.stats();

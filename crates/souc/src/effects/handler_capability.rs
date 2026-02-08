@@ -674,7 +674,7 @@ pub fn safe_dispatch<H: HandlerCapability + std::panic::RefUnwindSafe + ?Sized>(
     continuation: Continuation,
     state: &mut HandlerState,
 ) -> HandlerResult {
-    use std::panic::{catch_unwind, AssertUnwindSafe};
+    use std::panic::{AssertUnwindSafe, catch_unwind};
 
     let effect_name = handler.effect_name().to_string();
     let handler_name = handler.handler_name().to_string();

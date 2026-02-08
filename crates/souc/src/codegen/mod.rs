@@ -17,7 +17,7 @@ pub mod mir_cranelift;
 pub mod simd;
 
 // Re-export bytecode codegen for self-hosting
-pub use bytecode::{compile_hir, BytecodeCodegen, BytecodeError, BytecodeResult};
+pub use bytecode::{BytecodeCodegen, BytecodeError, BytecodeResult, compile_hir};
 
 // The LLVM backend is in a subdirectory when the feature is enabled
 #[cfg(feature = "llvm-base")]

@@ -253,8 +253,7 @@ pub fn all_epistemic_tensor_intrinsics() -> Vec<EpistemicTensorIntrinsic> {
         EpistemicTensorIntrinsic {
             name: "epistemic.reduce.confidence_weighted",
             short_name: "reduce_confidence",
-            description:
-                "Reduction weighted by inverse uncertainty (high confidence = high weight).",
+            description: "Reduction weighted by inverse uncertainty (high confidence = high weight).",
             category: EpistemicTensorCategory::Reduction,
             tensor_op: None,
             epsilon_propagation: EpsilonPropagationRule::WeightedMean,
@@ -300,8 +299,7 @@ pub fn all_epistemic_tensor_intrinsics() -> Vec<EpistemicTensorIntrinsic> {
         EpistemicTensorIntrinsic {
             name: "epistemic.attention.full",
             short_name: "attention",
-            description:
-                "Full attention block: softmax(Q*K^T/sqrt(d)) * V with epistemic tracking.",
+            description: "Full attention block: softmax(Q*K^T/sqrt(d)) * V with epistemic tracking.",
             category: EpistemicTensorCategory::Attention,
             tensor_op: Some(TensorCoreOp::Wmma),
             epsilon_propagation: EpsilonPropagationRule::Computed,

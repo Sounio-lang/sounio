@@ -40,7 +40,7 @@ use std::collections::HashMap;
 use std::sync::RwLock;
 
 use super::alignment::{AlignmentIndex, AlignmentResult};
-use super::loader::{LoadedTerm, IRI};
+use super::loader::{IRI, LoadedTerm};
 
 /// Semantic distance between two ontological terms
 #[derive(Debug, Clone, Copy)]

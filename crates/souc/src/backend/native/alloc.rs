@@ -1229,9 +1229,10 @@ mod tests {
 
         // No more available
         assert_eq!(pool.available_count(RegClass::GeneralPurpose), 0);
-        assert!(pool
-            .try_allocate(RegClass::GeneralPurpose, VirtReg(100))
-            .is_none());
+        assert!(
+            pool.try_allocate(RegClass::GeneralPurpose, VirtReg(100))
+                .is_none()
+        );
 
         // Free one
         pool.free(PhysReg::new(RegClass::GeneralPurpose, 0));
@@ -1652,8 +1653,8 @@ fn type_to_reg_class(ty: &crate::sir::types::SirType) -> RegClass {
 
 pub mod prelude {
     pub use super::{
-        build_intervals_from_sir, extract_epistemic_metadata, AllocConfig, AllocResult,
-        AllocStatistics, EpistemicAllocator, EpistemicMetadata, LiveInterval, PhysReg, RegClass,
-        RegisterPool, SpillReloadOp, SpillSlot, SpillSlotManager, UseKind, UsePosition, VirtReg,
+        AllocConfig, AllocResult, AllocStatistics, EpistemicAllocator, EpistemicMetadata,
+        LiveInterval, PhysReg, RegClass, RegisterPool, SpillReloadOp, SpillSlot, SpillSlotManager,
+        UseKind, UsePosition, VirtReg, build_intervals_from_sir, extract_epistemic_metadata,
     };
 }

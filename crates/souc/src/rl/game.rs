@@ -38,11 +38,7 @@ impl Player {
 
     /// Create from index
     pub fn from_index(idx: usize) -> Self {
-        if idx == 0 {
-            Player::One
-        } else {
-            Player::Two
-        }
+        if idx == 0 { Player::One } else { Player::Two }
     }
 }
 
@@ -158,11 +154,7 @@ pub trait GameTrait: GameState {
         (0..Self::num_actions())
             .map(|i| {
                 if let Some(action) = Self::index_to_action(i) {
-                    if legal.contains(&action) {
-                        1.0
-                    } else {
-                        0.0
-                    }
+                    if legal.contains(&action) { 1.0 } else { 0.0 }
                 } else {
                     0.0
                 }

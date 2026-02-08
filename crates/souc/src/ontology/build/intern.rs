@@ -7,8 +7,8 @@
 //! - Thread-safe access
 
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::RwLock;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 /// Handle to an interned string
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]

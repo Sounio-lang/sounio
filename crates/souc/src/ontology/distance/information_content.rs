@@ -544,11 +544,7 @@ impl SetSimilarity {
             }
         }
 
-        if count == 0 {
-            0.0
-        } else {
-            sum / count as f64
-        }
+        if count == 0 { 0.0 } else { sum / count as f64 }
     }
 }
 

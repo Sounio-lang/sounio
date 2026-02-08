@@ -53,7 +53,7 @@ pub trait EffectDispatch {
     /// # Returns
     /// Result value as f64, or error if dispatch failed
     fn dispatch_effect(&mut self, effect: &str, op: &str, args: &[f64])
-        -> Result<f64, EffectError>;
+    -> Result<f64, EffectError>;
 
     /// Push a handler onto the effect handler stack
     ///

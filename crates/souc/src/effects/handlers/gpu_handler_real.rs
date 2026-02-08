@@ -49,6 +49,7 @@ use crate::effects::handler_capability::{
 };
 use crate::effects::linearity::Linearity;
 use crate::interp::Value;
+#[cfg(feature = "wgpu")]
 use std::collections::HashMap;
 use std::sync::OnceLock;
 

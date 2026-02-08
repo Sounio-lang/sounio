@@ -10,8 +10,8 @@
 //! - L2: Large (100K), warm pairs promoted to L1 after repeated access
 
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::RwLock;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 /// Cache key for distance lookups (normalized for symmetry)
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]

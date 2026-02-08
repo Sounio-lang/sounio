@@ -457,9 +457,11 @@ mod tests {
         let result_reg = AArch64Reg::V0;
 
         let initial_len = emitter.offset();
-        assert!(dispatcher
-            .emit_effect_dispatch(&mut emitter, "IO", "print", &arg_regs, result_reg)
-            .is_ok());
+        assert!(
+            dispatcher
+                .emit_effect_dispatch(&mut emitter, "IO", "print", &arg_regs, result_reg)
+                .is_ok()
+        );
 
         // Should have emitted instructions (move + BL at minimum)
         assert!(emitter.offset() > initial_len);

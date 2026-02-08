@@ -495,10 +495,11 @@ fn test_knowledge_full_mode() {
     // Full mode should create a struct with value + metadata fields
     match knowledge_ty {
         SirType::Struct(st) => {
-            assert!(st
-                .name
-                .as_ref()
-                .map_or(false, |n| n.contains("Knowledge_Full")));
+            assert!(
+                st.name
+                    .as_ref()
+                    .map_or(false, |n| n.contains("Knowledge_Full"))
+            );
             assert!(st.fields.len() >= 6); // value, confidence, lower, upper, provenance, flags
         }
         _ => panic!("Expected Struct type for Full mode"),
@@ -515,10 +516,11 @@ fn test_knowledge_compact_mode() {
     // Compact mode should create a struct with value + confidence
     match knowledge_ty {
         SirType::Struct(st) => {
-            assert!(st
-                .name
-                .as_ref()
-                .map_or(false, |n| n.contains("Knowledge_Compact")));
+            assert!(
+                st.name
+                    .as_ref()
+                    .map_or(false, |n| n.contains("Knowledge_Compact"))
+            );
             assert_eq!(st.fields.len(), 2); // value, confidence
         }
         _ => panic!("Expected Struct type for Compact mode"),

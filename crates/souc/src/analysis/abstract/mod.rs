@@ -75,7 +75,7 @@ pub mod transfer;
 pub use congruence::Congruence;
 pub use domain::{AbstractDomain, BoolDomain, Flat, Lifted, PowerSet};
 pub use fixpoint::{
-    simple_fixpoint, FixpointConfig, FixpointEngine, FixpointResult, SccDecomposition,
+    FixpointConfig, FixpointEngine, FixpointResult, SccDecomposition, simple_fixpoint,
 };
 pub use intervals::{Bound, Interval, ThresholdWidening};
 pub use octagon::{Octagon, VarId, Weight};

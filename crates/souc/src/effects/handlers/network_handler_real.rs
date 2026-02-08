@@ -41,11 +41,17 @@ use tokio::net::{TcpListener, TcpStream, UdpSocket};
 #[cfg(feature = "tokio")]
 use tokio::runtime::Runtime;
 #[cfg(feature = "tokio")]
-use tokio::time::{timeout, Duration};
+use tokio::time::{Duration, timeout};
 
 // WebSocket support via tokio-tungstenite
-#[cfg(feature = "websocket")]
+#[cfg(all(feature = "tokio", feature = "websocket"))]
+use futures_util::{SinkExt, StreamExt};
+#[cfg(all(feature = "tokio", feature = "websocket"))]
 use tokio_tungstenite::connect_async;
+#[cfg(all(feature = "tokio", feature = "websocket"))]
+use tokio_tungstenite::tungstenite::Message;
+#[cfg(all(feature = "tokio", feature = "websocket"))]
+use tokio_tungstenite::{MaybeTlsStream, WebSocketStream};
 
 use crate::effects::handler_capability::{
     Continuation, EpistemicImpact, HandlerCapability, HandlerError, HandlerResult, HandlerState,
@@ -82,6 +88,9 @@ const NETWORK_CONFIDENCE_FACTOR: f64 = 0.9;
 
 /// Static operation specifications
 static REAL_NETWORK_OPERATIONS: OnceLock<Vec<OperationSpec>> = OnceLock::new();
+
+#[cfg(all(feature = "tokio", feature = "websocket"))]
+type WebSocketConnection = Arc<tokio::sync::Mutex<WebSocketStream<MaybeTlsStream<TcpStream>>>>;
 
 fn get_real_network_operations() -> &'static [OperationSpec] {
     REAL_NETWORK_OPERATIONS.get_or_init(|| {
@@ -153,6 +162,10 @@ pub struct RealNetworkHandler {
     #[cfg(feature = "tokio")]
     runtime: Arc<Mutex<Runtime>>,
 
+    /// Active WebSocket connections indexed by socket ID.
+    #[cfg(all(feature = "tokio", feature = "websocket"))]
+    websocket_connections: Arc<Mutex<HashMap<i64, WebSocketConnection>>>,
+
     /// Connection timeout in milliseconds
     timeout_ms: u64,
 
@@ -172,6 +185,8 @@ impl RealNetworkHandler {
 
         Self {
             runtime: Arc::new(Mutex::new(runtime)),
+            #[cfg(all(feature = "tokio", feature = "websocket"))]
+            websocket_connections: Arc::new(Mutex::new(HashMap::new())),
             timeout_ms: DEFAULT_TIMEOUT_MS,
         }
     }
@@ -186,6 +201,8 @@ impl RealNetworkHandler {
 
         Self {
             runtime: Arc::new(Mutex::new(runtime)),
+            #[cfg(all(feature = "tokio", feature = "websocket"))]
+            websocket_connections: Arc::new(Mutex::new(HashMap::new())),
             timeout_ms,
         }
     }
@@ -195,6 +212,8 @@ impl RealNetworkHandler {
     pub fn with_runtime(runtime: Arc<Mutex<Runtime>>) -> Self {
         Self {
             runtime,
+            #[cfg(all(feature = "tokio", feature = "websocket"))]
+            websocket_connections: Arc::new(Mutex::new(HashMap::new())),
             timeout_ms: DEFAULT_TIMEOUT_MS,
         }
     }
@@ -544,10 +563,25 @@ impl RealNetworkHandler {
         let key = Self::socket_key(socket_id);
         let listener_key = Self::listener_key(socket_id);
         let udp_key = Self::udp_socket_key(socket_id);
+        let websocket_key = Self::websocket_key(socket_id);
+
+        #[cfg(all(feature = "tokio", feature = "websocket"))]
+        let websocket_removed = {
+            let removed_state = state.named_state.remove(&websocket_key).is_some();
+            let removed_conn = {
+                let mut connections = self.websocket_connections.lock().unwrap();
+                connections.remove(&socket_id).is_some()
+            };
+            removed_state || removed_conn
+        };
+
+        #[cfg(not(all(feature = "tokio", feature = "websocket")))]
+        let websocket_removed = state.named_state.remove(&websocket_key).is_some();
 
         let removed = state.named_state.remove(&key).is_some()
             || state.named_state.remove(&listener_key).is_some()
-            || state.named_state.remove(&udp_key).is_some();
+            || state.named_state.remove(&udp_key).is_some()
+            || websocket_removed;
 
         if !removed {
             return HandlerResult::Abort(HandlerError::new(
@@ -901,6 +935,12 @@ impl RealNetworkHandler {
         format!("{}{}", WEBSOCKET_PREFIX, id)
     }
 
+    #[cfg(all(feature = "tokio", feature = "websocket"))]
+    fn get_websocket_connection(&self, socket_id: i64) -> Option<WebSocketConnection> {
+        let connections = self.websocket_connections.lock().unwrap();
+        connections.get(&socket_id).cloned()
+    }
+
     /// Handle websocket_connect operation
     ///
     /// Note: Full WebSocket support requires careful async integration.
@@ -937,15 +977,19 @@ impl RealNetworkHandler {
 
         // Attempt real connection to validate the URL
         let rt = self.runtime.lock().unwrap();
-        let connect_result =
-            rt.block_on(async { timeout(timeout_duration, connect_async(&url)).await });
+        let connect_result = rt.block_on(async {
+            timeout(timeout_duration, connect_async(&url)).await
+        });
 
         match connect_result {
-            Ok(Ok((_ws_stream, _response))) => {
-                // Store connection info in state
-                // Note: Full stream management requires additional infrastructure
-                // for proper async/sync bridging. For now, we validate the connection
-                // and store metadata.
+            Ok(Ok((ws_stream, _response))) => {
+                // Store persistent connection for websocket_send/websocket_receive.
+                {
+                    let mut connections = self.websocket_connections.lock().unwrap();
+                    connections.insert(socket_id, Arc::new(tokio::sync::Mutex::new(ws_stream)));
+                }
+
+                // Keep lightweight metadata in handler state.
                 let key = Self::websocket_key(socket_id);
                 state.named_state.insert(
                     key,
@@ -1003,7 +1047,7 @@ impl RealNetworkHandler {
             Err(result) => return result,
         };
 
-        let _message = match Self::extract_string(&args[1], "websocket_send", "message") {
+        let message = match Self::extract_string(&args[1], "websocket_send", "message") {
             Ok(m) => m,
             Err(result) => return result,
         };
@@ -1021,10 +1065,42 @@ impl RealNetworkHandler {
             ));
         }
 
-        // TODO: Implement actual message sending via persistent stream connection
-        // For now, we validate the connection exists and return success
-        // Full implementation requires async stream management infrastructure
-        HandlerResult::Resume(Value::Unit)
+        let connection = match self.get_websocket_connection(socket_id) {
+            Some(conn) => conn,
+            None => {
+                return HandlerResult::Abort(HandlerError::new(
+                    "Network",
+                    "websocket_send",
+                    format!(
+                        "WebSocket {} is not active. Reconnect with websocket_connect()",
+                        socket_id
+                    ),
+                ));
+            }
+        };
+
+        let timeout_duration = Duration::from_millis(self.timeout_ms);
+        let send_result = {
+            let rt = self.runtime.lock().unwrap();
+            rt.block_on(async {
+                let mut ws = connection.lock().await;
+                match timeout(
+                    timeout_duration,
+                    ws.send(Message::Text(message.clone().into())),
+                )
+                .await
+                {
+                    Ok(Ok(())) => Ok(()),
+                    Ok(Err(e)) => Err(format!("WebSocket send failed: {}", e)),
+                    Err(_) => Err(format!("WebSocket send timed out after {}ms", self.timeout_ms)),
+                }
+            })
+        };
+
+        match send_result {
+            Ok(()) => HandlerResult::Resume(Value::Unit),
+            Err(e) => HandlerResult::Abort(HandlerError::new("Network", "websocket_send", e)),
+        }
     }
 
     /// Handle websocket_send (fallback without websocket feature)
@@ -1069,10 +1145,67 @@ impl RealNetworkHandler {
             ));
         }
 
-        // TODO: Implement actual message receiving via persistent stream connection
-        // For now, we validate the connection exists and return a placeholder
-        // Full implementation requires async stream management infrastructure
-        HandlerResult::Resume(Value::String("websocket_message_placeholder".to_string()))
+        let connection = match self.get_websocket_connection(socket_id) {
+            Some(conn) => conn,
+            None => {
+                return HandlerResult::Abort(HandlerError::new(
+                    "Network",
+                    "websocket_receive",
+                    format!(
+                        "WebSocket {} is not active. Reconnect with websocket_connect()",
+                        socket_id
+                    ),
+                ));
+            }
+        };
+
+        let timeout_duration = Duration::from_millis(self.timeout_ms);
+        let recv_result = {
+            let rt = self.runtime.lock().unwrap();
+            rt.block_on(async {
+                let mut ws = connection.lock().await;
+                loop {
+                    match timeout(timeout_duration, ws.next()).await {
+                        Ok(Some(Ok(Message::Text(text)))) => return Ok(text.to_string()),
+                        Ok(Some(Ok(Message::Binary(data)))) => {
+                            return String::from_utf8(data.to_vec()).map_err(|e| {
+                                format!("received non-UTF8 binary message: {}", e)
+                            });
+                        }
+                        Ok(Some(Ok(Message::Ping(payload)))) => {
+                            if let Err(e) = ws.send(Message::Pong(payload)).await {
+                                return Err(format!("failed to respond to ping: {}", e));
+                            }
+                        }
+                        Ok(Some(Ok(Message::Pong(_)))) => {
+                            // Keep waiting for payload frames.
+                        }
+                        Ok(Some(Ok(Message::Close(frame)))) => {
+                            let reason = frame
+                                .map(|f| f.reason.to_string())
+                                .unwrap_or_else(|| "peer closed connection".to_string());
+                            return Err(format!("WebSocket closed: {}", reason));
+                        }
+                        Ok(Some(Ok(_))) => {
+                            // Ignore other control frames.
+                        }
+                        Ok(Some(Err(e))) => return Err(format!("WebSocket receive failed: {}", e)),
+                        Ok(None) => return Err("WebSocket stream closed".to_string()),
+                        Err(_) => {
+                            return Err(format!(
+                                "WebSocket receive timed out after {}ms",
+                                self.timeout_ms
+                            ));
+                        }
+                    }
+                }
+            })
+        };
+
+        match recv_result {
+            Ok(text) => HandlerResult::Resume(Value::String(text)),
+            Err(e) => HandlerResult::Abort(HandlerError::new("Network", "websocket_receive", e)),
+        }
     }
 
     /// Handle websocket_receive (fallback without websocket feature)
@@ -1105,9 +1238,45 @@ impl RealNetworkHandler {
             Err(result) => return result,
         };
 
-        // Remove from state
+        // Remove from state and active connection table.
         let key = Self::websocket_key(socket_id);
-        state.named_state.remove(&key);
+        let removed_state = state.named_state.remove(&key).is_some();
+        let connection = {
+            let mut connections = self.websocket_connections.lock().unwrap();
+            connections.remove(&socket_id)
+        };
+
+        if !removed_state && connection.is_none() {
+            return HandlerResult::Abort(HandlerError::new(
+                "Network",
+                "websocket_close",
+                format!(
+                    "WebSocket {} not found. Use websocket_connect() first",
+                    socket_id
+                ),
+            ));
+        }
+
+        if let Some(conn) = connection {
+            let timeout_duration = Duration::from_millis(self.timeout_ms);
+            let close_result = {
+                let rt = self.runtime.lock().unwrap();
+                rt.block_on(async {
+                    let mut ws = conn.lock().await;
+                    match timeout(timeout_duration, ws.close(None)).await {
+                        Ok(Ok(())) => Ok(()),
+                        Ok(Err(e)) => Err(format!("WebSocket close failed: {}", e)),
+                        Err(_) => {
+                            Err(format!("WebSocket close timed out after {}ms", self.timeout_ms))
+                        }
+                    }
+                })
+            };
+
+            if let Err(e) = close_result {
+                return HandlerResult::Abort(HandlerError::new("Network", "websocket_close", e));
+            }
+        }
 
         HandlerResult::Resume(Value::Unit)
     }
@@ -1503,5 +1672,42 @@ mod tests {
     fn test_default_impl() {
         let handler = RealNetworkHandler::default();
         assert_eq!(handler.effect_name(), "Network");
+    }
+
+    #[test]
+    #[cfg(all(feature = "tokio", feature = "websocket"))]
+    fn test_websocket_send_not_found() {
+        let handler = RealNetworkHandler::new();
+        let mut state = new_state();
+
+        let result = handler.handle(
+            "websocket_send",
+            &[Value::Int(999), Value::String("hello".to_string())],
+            cont(),
+            &mut state,
+        );
+
+        match result {
+            HandlerResult::Abort(e) => {
+                assert!(e.message.contains("not found"));
+            }
+            other => panic!("expected Abort, got {:?}", other),
+        }
+    }
+
+    #[test]
+    #[cfg(all(feature = "tokio", feature = "websocket"))]
+    fn test_websocket_receive_not_found() {
+        let handler = RealNetworkHandler::new();
+        let mut state = new_state();
+
+        let result = handler.handle("websocket_receive", &[Value::Int(999)], cont(), &mut state);
+
+        match result {
+            HandlerResult::Abort(e) => {
+                assert!(e.message.contains("not found"));
+            }
+            other => panic!("expected Abort, got {:?}", other),
+        }
     }
 }

@@ -16,7 +16,7 @@ use crate::epistemic::bayesian::BetaConfidence;
 use crate::epistemic::merkle::{MerkleProvenanceDAG, OperationKind, ProvenanceOperation};
 
 use super::game::{GameOutcome, GameTrait, Player};
-use super::mcts::{search, MCTSConfig, MCTSStats, MCTSTree};
+use super::mcts::{MCTSConfig, MCTSStats, MCTSTree, search};
 use super::neural::{NeuralConfig, NeuralEval, NeuralNetwork, TrainingExample};
 
 // =============================================================================

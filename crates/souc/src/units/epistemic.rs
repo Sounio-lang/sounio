@@ -35,10 +35,10 @@ use std::marker::PhantomData;
 use super::dimension::Dimension;
 use super::quantity::Quantity;
 use super::si::base::Unit;
+use crate::epistemic::ContextTime;
 use crate::epistemic::confidence::EpistemicStatus;
 use crate::epistemic::knowledge::OntologyBinding;
 use crate::epistemic::provenance::{Provenance, Transformation};
-use crate::epistemic::ContextTime;
 
 // ============================================================================
 // QUANTIFIED KNOWLEDGE

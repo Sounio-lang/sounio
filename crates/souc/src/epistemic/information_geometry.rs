@@ -2,6 +2,7 @@
 // Fisher information metric on statistical manifolds of Beta distributions
 // Natural gradient descent for efficient epistemic type inference
 
+#[cfg(test)]
 use std::f64::consts::PI;
 
 /// Trigamma function ψ₁(x) - derivative of digamma

@@ -13,7 +13,7 @@
 //! - Posterior accuracy
 //! - Computational efficiency
 
-use sounio::epistemic::mcmc::{compute_r_hat, HamiltonianMC, MCMCConfig, MetropolisHastings, NUTS};
+use sounio::epistemic::mcmc::{HamiltonianMC, MCMCConfig, MetropolisHastings, NUTS, compute_r_hat};
 
 fn main() {
     println!("=== MCMC Sampler Comparison for Bayesian Inference ===\n");

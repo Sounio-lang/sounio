@@ -3,7 +3,7 @@
 
 use crate::ontology::embedding::PoincarePoint;
 use crate::ontology::loader::IRI;
-use std::collections::{BTreeSet, HashSet};
+use std::collections::HashSet;
 
 /// Rips complex: union of simplices where points within distance r
 pub struct RipsComplex {

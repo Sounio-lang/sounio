@@ -557,7 +557,9 @@ pub fn print_backend_help() {
     println!("  --alloc=<strategy>           Allocation strategy (epistemic, linear, graph)");
     println!("  -g, --debug                  Emit debug information");
     println!("  --emit=<stages>              Emit intermediate stages (ast,sir,asm)");
-    println!("  --enable-cps                 Enable CPS transformation for effect handlers (experimental)");
+    println!(
+        "  --enable-cps                 Enable CPS transformation for effect handlers (experimental)"
+    );
     println!();
 }
 
@@ -955,8 +957,8 @@ fn compile_native(args: &BuildArgs) -> Result<(PathBuf, Option<NativeMetrics>), 
     // Step 7: Run register allocation (if epistemic-aware)
     let alloc_start = Instant::now();
     use crate::backend::native::alloc::{
-        build_intervals_from_sir, extract_epistemic_metadata, AllocConfig, AllocResult,
-        EpistemicAllocator, RegClass,
+        AllocConfig, AllocResult, EpistemicAllocator, RegClass, build_intervals_from_sir,
+        extract_epistemic_metadata,
     };
     use crate::sir::values::FuncId;
     use std::collections::HashMap;
@@ -1535,9 +1537,9 @@ mod tests {
 
 pub mod prelude {
     pub use super::{
-        compile, extract_build_args, print_backend_help, print_backend_info, print_backend_list,
         AllocStrategy, Backend, BackendMetrics, BackendParseError, BuildArgs, CompileOutput,
         CompileTarget, CompileTiming, EmitStage, NativeBackendOptions, NativeMetrics, OptLevel,
-        OutputFormat, ThermalModel,
+        OutputFormat, ThermalModel, compile, extract_build_args, print_backend_help,
+        print_backend_info, print_backend_list,
     };
 }

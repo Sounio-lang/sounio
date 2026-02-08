@@ -56,7 +56,7 @@ pub mod confidence;
 pub mod prompts;
 
 pub use client::{AnthropicClient, LLMClient, LLMClientRegistry, OllamaClient, OpenAIClient};
-pub use confidence::{analyze_confidence, indicators_to_confidence, ConfidenceIndicators};
+pub use confidence::{ConfidenceIndicators, analyze_confidence, indicators_to_confidence};
 pub use prompts::{OntologyTask, PromptExample, PromptTemplate, PromptTemplates};
 
 use std::fmt;

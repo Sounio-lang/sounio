@@ -535,8 +535,8 @@ fn get_block_successors(terminator: &MirTerminator) -> Vec<BlockId> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::mir::builder::ModuleBuilder;
     use crate::mir::MirType;
+    use crate::mir::builder::ModuleBuilder;
 
     #[test]
     fn test_ssa_validator_creation() {

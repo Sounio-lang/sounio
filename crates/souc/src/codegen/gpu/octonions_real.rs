@@ -1,7 +1,7 @@
 //! Implementação real de kernels Octonion no Sounio GPU
-//! 
+//!
 //! Esta implementação usa as operações nativas Octonion* do IR ao invés de matemática manual
-//! 
+//!
 //! Kernels reais implementados:
 //! - OctonionMul com Graves-Adcock multiplication nativa
 //! - OctonionNormSq com redução eficiente
@@ -13,8 +13,7 @@
 //! - Test suite matemático
 
 use super::ir::{
-    BlockId, GpuBlock, GpuKernel, GpuOp, GpuParam, GpuTerminator, GpuType,
-    MemorySpace, ValueId,
+    BlockId, GpuBlock, GpuKernel, GpuOp, GpuParam, GpuTerminator, GpuType, MemorySpace, ValueId,
 };
 
 /// Helper para criar parâmetros Octonion
@@ -28,11 +27,11 @@ fn octonion_param(name: &str) -> GpuParam {
 }
 
 /// Generate octonion multiplication kernel (REAL IMPLEMENTATION)
-/// 
+///
 /// Usa a operação nativa OctonionMul do IR que implementa Graves-Adcock multiplication
 pub fn gen_octonion_mul_kernel() -> GpuKernel {
     let mut kernel = GpuKernel::new("octonion_mul");
-    
+
     kernel.add_param(octonion_param("o1"));
     kernel.add_param(octonion_param("o2"));
     kernel.add_param(octonion_param("out"));
@@ -65,21 +64,30 @@ pub fn gen_octonion_mul_kernel() -> GpuKernel {
         instructions: vec![
             // Load o1
             (ValueId(10), GpuOp::Param(0)),
-            (ValueId(11), GpuOp::GetElementPtr(ValueId(10), vec![ValueId(4)])),
+            (
+                ValueId(11),
+                GpuOp::GetElementPtr(ValueId(10), vec![ValueId(4)]),
+            ),
             (ValueId(12), GpuOp::Load(ValueId(11), MemorySpace::Global)),
-            
-            // Load o2  
+            // Load o2
             (ValueId(20), GpuOp::Param(1)),
-            (ValueId(21), GpuOp::GetElementPtr(ValueId(20), vec![ValueId(4)])),
+            (
+                ValueId(21),
+                GpuOp::GetElementPtr(ValueId(20), vec![ValueId(4)]),
+            ),
             (ValueId(22), GpuOp::Load(ValueId(21), MemorySpace::Global)),
-            
             // Octonion multiplication nativa (Graves-Adcock)
             (ValueId(30), GpuOp::OctonionMul(ValueId(12), ValueId(22))),
-            
             // Store resultado
             (ValueId(40), GpuOp::Param(2)),
-            (ValueId(41), GpuOp::GetElementPtr(ValueId(40), vec![ValueId(4)])),
-            (ValueId(42), GpuOp::Store(ValueId(41), ValueId(30), MemorySpace::Global)),
+            (
+                ValueId(41),
+                GpuOp::GetElementPtr(ValueId(40), vec![ValueId(4)]),
+            ),
+            (
+                ValueId(42),
+                GpuOp::Store(ValueId(41), ValueId(30), MemorySpace::Global),
+            ),
         ],
         terminator: GpuTerminator::Br(BlockId(2)),
     };
@@ -97,7 +105,7 @@ pub fn gen_octonion_mul_kernel() -> GpuKernel {
 }
 
 /// Generate octonion norm squared kernel (REAL IMPLEMENTATION)
-/// 
+///
 /// Usa operação nativa OctonionNormSq do IR
 pub fn gen_octonion_norm_kernel() -> GpuKernel {
     let mut kernel = GpuKernel::new("octonion_norm");
@@ -137,16 +145,23 @@ pub fn gen_octonion_norm_kernel() -> GpuKernel {
         instructions: vec![
             // Load o
             (ValueId(10), GpuOp::Param(0)),
-            (ValueId(11), GpuOp::GetElementPtr(ValueId(10), vec![ValueId(4)])),
+            (
+                ValueId(11),
+                GpuOp::GetElementPtr(ValueId(10), vec![ValueId(4)]),
+            ),
             (ValueId(12), GpuOp::Load(ValueId(11), MemorySpace::Global)),
-            
             // Operação nativa OctonionNormSq
             (ValueId(13), GpuOp::OctonionNormSq(ValueId(12))),
-            
             // Store norma
             (ValueId(14), GpuOp::Param(1)),
-            (ValueId(15), GpuOp::GetElementPtr(ValueId(14), vec![ValueId(4)])),
-            (ValueId(16), GpuOp::Store(ValueId(15), ValueId(13), MemorySpace::Global)),
+            (
+                ValueId(15),
+                GpuOp::GetElementPtr(ValueId(14), vec![ValueId(4)]),
+            ),
+            (
+                ValueId(16),
+                GpuOp::Store(ValueId(15), ValueId(13), MemorySpace::Global),
+            ),
         ],
         terminator: GpuTerminator::Br(BlockId(2)),
     };
@@ -164,7 +179,7 @@ pub fn gen_octonion_norm_kernel() -> GpuKernel {
 }
 
 /// Generate octonion normalize kernel (REAL IMPLEMENTATION)
-/// 
+///
 /// Usa operação nativa OctonionNormalize do IR
 pub fn gen_octonion_normalize_kernel() -> GpuKernel {
     let mut kernel = GpuKernel::new("octonion_normalize");
@@ -199,16 +214,23 @@ pub fn gen_octonion_normalize_kernel() -> GpuKernel {
         instructions: vec![
             // Load o
             (ValueId(10), GpuOp::Param(0)),
-            (ValueId(11), GpuOp::GetElementPtr(ValueId(10), vec![ValueId(4)])),
+            (
+                ValueId(11),
+                GpuOp::GetElementPtr(ValueId(10), vec![ValueId(4)]),
+            ),
             (ValueId(12), GpuOp::Load(ValueId(11), MemorySpace::Global)),
-            
             // Operação nativa OctonionNormalize
             (ValueId(13), GpuOp::OctonionNormalize(ValueId(12))),
-            
             // Store resultado normalizado
             (ValueId(20), GpuOp::Param(1)),
-            (ValueId(21), GpuOp::GetElementPtr(ValueId(20), vec![ValueId(4)])),
-            (ValueId(22), GpuOp::Store(ValueId(21), ValueId(13), MemorySpace::Global)),
+            (
+                ValueId(21),
+                GpuOp::GetElementPtr(ValueId(20), vec![ValueId(4)]),
+            ),
+            (
+                ValueId(22),
+                GpuOp::Store(ValueId(21), ValueId(13), MemorySpace::Global),
+            ),
         ],
         terminator: GpuTerminator::Br(BlockId(2)),
     };
@@ -226,7 +248,7 @@ pub fn gen_octonion_normalize_kernel() -> GpuKernel {
 }
 
 /// Generate octonion ReLU kernel (REAL IMPLEMENTATION)
-/// 
+///
 /// Usa operação nativa OctonionReLU do IR
 pub fn gen_octonion_relu_kernel() -> GpuKernel {
     let mut kernel = GpuKernel::new("octonion_relu");
@@ -261,16 +283,23 @@ pub fn gen_octonion_relu_kernel() -> GpuKernel {
         instructions: vec![
             // Load input
             (ValueId(10), GpuOp::Param(0)),
-            (ValueId(11), GpuOp::GetElementPtr(ValueId(10), vec![ValueId(4)])),
+            (
+                ValueId(11),
+                GpuOp::GetElementPtr(ValueId(10), vec![ValueId(4)]),
+            ),
             (ValueId(12), GpuOp::Load(ValueId(11), MemorySpace::Global)),
-            
             // Operação nativa OctonionReLU
             (ValueId(13), GpuOp::OctonionRelu(ValueId(12))),
-            
             // Store output
             (ValueId(20), GpuOp::Param(1)),
-            (ValueId(21), GpuOp::GetElementPtr(ValueId(20), vec![ValueId(4)])),
-            (ValueId(22), GpuOp::Store(ValueId(21), ValueId(13), MemorySpace::Global)),
+            (
+                ValueId(21),
+                GpuOp::GetElementPtr(ValueId(20), vec![ValueId(4)]),
+            ),
+            (
+                ValueId(22),
+                GpuOp::Store(ValueId(21), ValueId(13), MemorySpace::Global),
+            ),
         ],
         terminator: GpuTerminator::Br(BlockId(2)),
     };
@@ -288,7 +317,7 @@ pub fn gen_octonion_relu_kernel() -> GpuKernel {
 }
 
 /// Generate octonion linear layer forward pass (REAL IMPLEMENTATION)
-/// 
+///
 /// y = W ⊗ x + b onde ⊗ é OctonionMul nativo
 pub fn gen_octonion_linear_fwd_kernel() -> GpuKernel {
     let mut kernel = GpuKernel::new("octonion_linear_fwd");
@@ -331,7 +360,10 @@ pub fn gen_octonion_linear_fwd_kernel() -> GpuKernel {
         instructions: vec![
             // y[out_idx] = Σ_i W[out_idx, i] ⊗ x[i] + b[out_idx]
             (ValueId(10), GpuOp::Param(2)), // bias ptr
-            (ValueId(11), GpuOp::GetElementPtr(ValueId(10), vec![ValueId(4)])),
+            (
+                ValueId(11),
+                GpuOp::GetElementPtr(ValueId(10), vec![ValueId(4)]),
+            ),
             (ValueId(12), GpuOp::Load(ValueId(11), MemorySpace::Global)),
         ],
         terminator: GpuTerminator::Br(BlockId(2)),
@@ -350,7 +382,7 @@ pub fn gen_octonion_linear_fwd_kernel() -> GpuKernel {
 }
 
 /// Generate octonion linear layer backward pass (REAL IMPLEMENTATION)
-/// 
+///
 /// dW[o,i] += dy[o] ⊗ x[i] e dx[i] += W[:,i]^T ⊗ dy[o]
 pub fn gen_octonion_linear_bwd_kernel() -> GpuKernel {
     let mut kernel = GpuKernel::new("octonion_linear_bwd");

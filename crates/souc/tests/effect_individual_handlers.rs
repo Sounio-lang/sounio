@@ -2,9 +2,9 @@
 //!
 //! Verifies that each of the 12 handlers works correctly with continuations.
 
+use sounio::interp::EffectKind;
 use sounio::interp::effect_dispatch::{DispatchResult, EffectContext};
 use sounio::interp::value::Value;
-use sounio::interp::EffectKind;
 
 /// Test IO handler operations
 #[test]

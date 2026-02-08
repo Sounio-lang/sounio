@@ -31,5 +31,5 @@ pub mod runner;
 pub use attrs::{BenchAttr, TestAttr, TestAttributes};
 pub use bench::{BenchResult, Bencher, BenchmarkRunner};
 pub use coverage::{CoverageData, CoverageReport, CoverageTracker};
-pub use discovery::{discover_tests, TestCase, TestFilter, TestSuite};
+pub use discovery::{TestCase, TestFilter, TestSuite, discover_tests};
 pub use runner::{TestOutcome, TestReport, TestResult, TestRunner, TestRunnerConfig};

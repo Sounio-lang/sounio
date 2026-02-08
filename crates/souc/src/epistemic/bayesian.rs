@@ -1899,11 +1899,7 @@ fn normal_quantile(p: f64) -> f64 {
 
     let result = t - (C0 + C1 * t + C2 * t * t) / (1.0 + D1 * t + D2 * t * t + D3 * t * t * t);
 
-    if p < 0.5 {
-        -result
-    } else {
-        result
-    }
+    if p < 0.5 { -result } else { result }
 }
 
 #[cfg(test)]

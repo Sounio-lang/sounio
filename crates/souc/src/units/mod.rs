@@ -33,7 +33,7 @@ pub mod si;
 
 // Re-exports
 pub use check::{UnitChecker, UnitError, UnitType, UnitVar};
-pub use convert::{conversion_factor, convert, convert_affine, ArithmeticOp, ConversionError};
+pub use convert::{ArithmeticOp, ConversionError, conversion_factor, convert, convert_affine};
 pub use dimension::Dimension;
 pub use epistemic::{
     ConfidencePropagation, DynamicQuantifiedKnowledge, QuantifiedKnowledge, WithEpistemic,

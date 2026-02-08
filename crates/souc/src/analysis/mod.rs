@@ -21,10 +21,10 @@ pub mod r#abstract;
 
 // Re-export abstract interpretation types
 pub use r#abstract::{
-    analyze_function, simple_fixpoint, AbstractDomain, AbstractInterpreter, AbstractState,
-    AnalysisConfig, AnalysisResult, ArrayBoundsAnalysis, BoolDomain, Bound, Congruence,
-    FixpointConfig, FixpointEngine, FixpointResult, Flat, Interval, IntervalCongruence,
-    IntervalSign, IntervalTransfer, Invariant, Lifted, LoopInvariant, NumericDomain,
-    NumericTransfer, Octagon, PowerSet, Product, RefinementIntegration, SafetyResult,
-    SccDecomposition, Sign, ThresholdWidening, VarId, Weight,
+    AbstractDomain, AbstractInterpreter, AbstractState, AnalysisConfig, AnalysisResult,
+    ArrayBoundsAnalysis, BoolDomain, Bound, Congruence, FixpointConfig, FixpointEngine,
+    FixpointResult, Flat, Interval, IntervalCongruence, IntervalSign, IntervalTransfer, Invariant,
+    Lifted, LoopInvariant, NumericDomain, NumericTransfer, Octagon, PowerSet, Product,
+    RefinementIntegration, SafetyResult, SccDecomposition, Sign, ThresholdWidening, VarId, Weight,
+    analyze_function, simple_fixpoint,
 };

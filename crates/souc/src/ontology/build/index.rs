@@ -595,9 +595,11 @@ mod tests {
         }
 
         // Look up non-existent
-        assert!(index
-            .lookup(hash_iri("http://nonexistent.org/term"))
-            .is_none());
+        assert!(
+            index
+                .lookup(hash_iri("http://nonexistent.org/term"))
+                .is_none()
+        );
     }
 
     #[test]

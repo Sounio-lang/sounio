@@ -52,8 +52,8 @@ use crate::effects::handler_capability::{
 use crate::interp::Value;
 use std::cell::RefCell;
 use std::rc::Rc;
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::OnceLock;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 /// Key prefix for storing future state in HandlerState
 const FUTURE_PREFIX: &str = "__async_future_";

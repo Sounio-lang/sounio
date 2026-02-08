@@ -16,7 +16,7 @@
 //!
 //! Run with: cargo run --example reverse_mode_ad_demo
 
-use sounio::codegen::autodiff_reverse::{compute_jacobian_reverse, TapeValue};
+use sounio::codegen::autodiff_reverse::{TapeValue, compute_jacobian_reverse};
 use sounio::codegen::autodiff_tape::Tape;
 use std::cell::RefCell;
 use std::rc::Rc;
@@ -273,7 +273,10 @@ fn demo_jacobian_multi_output() {
     let cos_y = libm::cos(y_val);
     println!(
         "  [{:8.4}, {:8.4}]  (∂(e^x·sin(y))/∂x = e^x·sin(y) ≈ {:.4}, ∂(e^x·sin(y))/∂y = e^x·cos(y) ≈ {:.4})",
-        exp_x * sin_y, exp_x * cos_y, exp_x * sin_y, exp_x * cos_y
+        exp_x * sin_y,
+        exp_x * cos_y,
+        exp_x * sin_y,
+        exp_x * cos_y
     );
     println!();
 }

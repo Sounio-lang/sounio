@@ -66,21 +66,21 @@ pub use ontology_erasure::{
 
 // Causal types - do-calculus and causal inference
 pub use causal::{
-    causal_confidence_factor, check_d_separation, find_backdoor_adjustment, validate_dag,
     CausalAssumption, CausalEdgeDef, CausalError, CausalGraphDef, CausalGraphRegistry,
-    CausalNodeDef, CausalResult,
+    CausalNodeDef, CausalResult, causal_confidence_factor, check_d_separation,
+    find_backdoor_adjustment, validate_dag,
 };
 
 // Tropical geometry - min-plus algebra for resource analysis
 pub use tropical::{
-    parallel_compose, sequential_compose, tropical_add, tropical_matmul, tropical_mul,
-    tropical_power, ResourceType, TropicalMatrix, TropicalNumber,
+    ResourceType, TropicalMatrix, TropicalNumber, parallel_compose, sequential_compose,
+    tropical_add, tropical_matmul, tropical_mul, tropical_power,
 };
 
 // PAC learning types - VC dimension and sample complexity
 pub use pac::{
+    DeltaBound, EpsilonBound, ErrorBound, GeneralizationBound, HypothesisClass, PACBayesBound,
+    RademacherBound, SampleBound, SampleComplexity, VCDimExpr, VCDimension,
     compute_generalization_gap, compute_pac_bayes_gap, compute_sample_complexity,
-    compute_sample_complexity_tight, DeltaBound, EpsilonBound, ErrorBound, GeneralizationBound,
-    HypothesisClass, PACBayesBound, RademacherBound, SampleBound, SampleComplexity, VCDimExpr,
-    VCDimension,
+    compute_sample_complexity_tight,
 };

@@ -5,7 +5,7 @@
 use sounio::effects::handler_capability::{
     Continuation, HandlerCapability, HandlerError, HandlerResult, HandlerState, OperationSpec,
 };
-use sounio::effects::resilience::{with_retry, CircuitBreaker, CircuitState, RetryConfig};
+use sounio::effects::resilience::{CircuitBreaker, CircuitState, RetryConfig, with_retry};
 use sounio::interp::Value;
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::time::{Duration, Instant};

@@ -34,7 +34,7 @@
 //! - union_of: Union definition
 //! - disjoint_from: Disjointness axiom
 
-use super::{CrossReference, LoadedTerm, Restriction, RestrictionType, Synonym, SynonymScope, IRI};
+use super::{CrossReference, IRI, LoadedTerm, Restriction, RestrictionType, Synonym, SynonymScope};
 
 /// Parse error for OBO files
 #[derive(Debug, Clone, thiserror::Error)]

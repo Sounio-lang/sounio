@@ -27,13 +27,13 @@
 //! - NVPTX Backend: <https://llvm.org/docs/NVPTXUsage.html>
 //! - AMDGPU Backend: <https://llvm.org/docs/AMDGPUUsage.html>
 
+use inkwell::AddressSpace;
 use inkwell::basic_block::BasicBlock;
 use inkwell::builder::Builder;
 use inkwell::context::Context;
 use inkwell::module::{Linkage, Module};
 use inkwell::types::{BasicMetadataTypeEnum, BasicType, BasicTypeEnum, FloatType, IntType};
 use inkwell::values::{BasicValueEnum, FunctionValue, IntValue, PointerValue};
-use inkwell::AddressSpace;
 use inkwell::{FloatPredicate, IntPredicate};
 
 use std::collections::HashMap;

@@ -47,12 +47,12 @@ pub enum DispatchResult {
         continuation_id: ContinuationId,
     },
 }
+use crate::effects::EpistemicImpactRegistry;
 use crate::effects::handler_capability::{
     Continuation as CapabilityContinuation, HandlerCapability, HandlerResult as CapabilityResult,
     HandlerState as CapabilityHandlerState,
 };
 use crate::effects::handlers::HandlerRegistry;
-use crate::effects::EpistemicImpactRegistry;
 use crate::runtime::causal;
 use crate::runtime::prob::{self, ProbContext, Rng};
 
@@ -2372,8 +2372,8 @@ mod tests {
         let mut ctx = EffectContext::new();
 
         // Create a counter to track how many times the closure is called
-        use std::sync::atomic::{AtomicUsize, Ordering};
         use std::sync::Arc;
+        use std::sync::atomic::{AtomicUsize, Ordering};
 
         let call_count = Arc::new(AtomicUsize::new(0));
         let call_count_clone = Arc::clone(&call_count);
@@ -2402,8 +2402,8 @@ mod tests {
         let mut ctx = EffectContext::new();
 
         // Use Arc<AtomicI64> to share state across multi-shot resumes
-        use std::sync::atomic::{AtomicI64, Ordering};
         use std::sync::Arc;
+        use std::sync::atomic::{AtomicI64, Ordering};
 
         let accumulator = Arc::new(AtomicI64::new(0));
         let acc_clone = Arc::clone(&accumulator);

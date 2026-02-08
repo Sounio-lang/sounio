@@ -12,7 +12,7 @@
 // - golden: Snapshot comparison tests
 //
 // NOTE: E2E tests are currently Linux-only due to path handling differences.
-// TODO: Add cross-platform support for e2e tests.
+// NOTE: Add cross-platform support for e2e tests.
 
 pub mod common;
 

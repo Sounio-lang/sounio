@@ -55,7 +55,7 @@ use crate::effects::handler_capability::{
     OperationSpec,
 };
 use crate::interp::Value;
-use crate::types::causal::{causal_confidence_factor, CausalAssumption};
+use crate::types::causal::{CausalAssumption, causal_confidence_factor};
 use std::cell::RefCell;
 use std::rc::Rc;
 use std::sync::OnceLock;

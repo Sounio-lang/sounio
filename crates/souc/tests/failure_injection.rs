@@ -3,8 +3,8 @@
 //! Tests for panic recovery, error propagation, and context preservation.
 
 use sounio::effects::handler_capability::{
-    safe_dispatch, Continuation, HandlerCapability, HandlerError, HandlerResult, HandlerState,
-    OperationSpec,
+    Continuation, HandlerCapability, HandlerError, HandlerResult, HandlerState, OperationSpec,
+    safe_dispatch,
 };
 use sounio::interp::Value;
 use std::panic::RefUnwindSafe;

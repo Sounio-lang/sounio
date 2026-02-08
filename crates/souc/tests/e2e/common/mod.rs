@@ -38,7 +38,31 @@ pub struct TestHarness {
 impl TestHarness {
     /// Create a new test harness
     pub fn new() -> Self {
-        // Look for compiler binary (souc / souc.exe on Windows)
+        // Prefer Cargo-provided binary path for this test run. This keeps the
+        // harness aligned with custom CARGO_TARGET_DIR values.
+        if let Ok(path) = std::env::var("CARGO_BIN_EXE_souc") {
+            let compiler_path = PathBuf::from(path);
+            if compiler_path.exists() {
+                // Use both process id and a counter to make temp dirs unique across parallel tests
+                use std::sync::atomic::{AtomicU64, Ordering};
+                static COUNTER: AtomicU64 = AtomicU64::new(0);
+                let unique_id = COUNTER.fetch_add(1, Ordering::SeqCst);
+                let temp_dir = std::env::temp_dir()
+                    .join(format!("sounio_test_{}_{}", std::process::id(), unique_id));
+                fs::create_dir_all(&temp_dir).expect("Failed to create temp dir");
+
+                return Self {
+                    compiler_path,
+                    temp_dir,
+                    env_vars: HashMap::new(),
+                    flags: Vec::new(),
+                    ontology_paths: Vec::new(),
+                    capture_timing: false,
+                };
+            }
+        }
+
+        // Fallback: look for compiler binary (souc / souc.exe on Windows)
         // Check release first, then fall back to debug
         // Check both crate-local and workspace-level target directories
         let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));

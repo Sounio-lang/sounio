@@ -30,7 +30,7 @@
 //! // ε = 0.90 × 0.85 × 1.0 = 0.765 (ontologies disjoint)
 //! ```
 
-use super::confidence::{combine_confidence, CombinationStrategy, ConfidenceValue};
+use super::confidence::{CombinationStrategy, ConfidenceValue, combine_confidence};
 use super::knowledge::{EpistemicValue, OntologyRef};
 use super::provenance::ProvenanceNode;
 use std::collections::HashSet;

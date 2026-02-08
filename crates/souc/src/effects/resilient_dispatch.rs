@@ -45,8 +45,8 @@
 //! ```
 
 use crate::effects::handler_capability::{
-    safe_dispatch, Continuation, HandlerCapability, HandlerError, HandlerResult, HandlerState,
-    OperationSpec,
+    Continuation, HandlerCapability, HandlerError, HandlerResult, HandlerState, OperationSpec,
+    safe_dispatch,
 };
 use crate::effects::linearity::Linearity;
 use crate::effects::resilience::{CircuitBreaker, CircuitState, RetryConfig};

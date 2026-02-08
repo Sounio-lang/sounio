@@ -1903,7 +1903,7 @@ mod tests {
 
 // ==================== HANDLER ID PROPAGATION ====================
 
-use crate::sir::module::{HandlerMetadata, EFFECT_HANDLER_MAP};
+use crate::sir::module::{EFFECT_HANDLER_MAP, HandlerMetadata};
 
 /// Populate effect handler IDs and metadata in the SIR module
 /// This creates the unified dispatch mechanism for all effects

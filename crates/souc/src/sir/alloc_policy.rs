@@ -595,11 +595,7 @@ impl ABComparisonResult {
         let timing_overhead = {
             let c = self.classic_metrics.allocation_time.as_secs_f64();
             let a = self.attention_metrics.allocation_time.as_secs_f64();
-            if c == 0.0 {
-                0.0
-            } else {
-                (a - c) / c
-            }
+            if c == 0.0 { 0.0 } else { (a - c) / c }
         };
 
         let verdict = {

@@ -6,7 +6,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
-use super::registry::{home_dir, RegistryError};
+use super::registry::{RegistryError, home_dir};
 
 /// Credentials store for registry authentication
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]

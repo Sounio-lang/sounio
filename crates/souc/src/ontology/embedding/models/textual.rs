@@ -18,7 +18,7 @@
 use std::collections::HashMap;
 
 use super::super::{Embedding, EmbeddingError, EmbeddingGenerator, EmbeddingModel};
-use crate::ontology::loader::{LoadedTerm, IRI};
+use crate::ontology::loader::{IRI, LoadedTerm};
 
 /// Textual embedding generator
 pub struct TextualGenerator {

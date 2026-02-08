@@ -33,11 +33,11 @@ use std::collections::HashMap;
 
 use crate::epistemic::bayesian::BetaConfidence;
 use crate::rl::game::{GameState, GameTrait};
-use crate::rl::mcts::{search, MCTSConfig, MCTSTree, NeuralEvaluator};
+use crate::rl::mcts::{MCTSConfig, MCTSTree, NeuralEvaluator, search};
 
 use super::geo_game::{
-    generate_proof_game_random, isoceles_perpendicular, midpoint_theorem, triangle_congruence_sas,
     GeoAction, GeoGameConfig, GeoProofGame, ProofGameEpisode, TrajectoryStep,
+    generate_proof_game_random, isoceles_perpendicular, midpoint_theorem, triangle_congruence_sas,
 };
 use super::predicates::Predicate;
 use super::proof_state::ProofState;

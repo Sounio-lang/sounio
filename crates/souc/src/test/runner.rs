@@ -483,29 +483,31 @@ impl TestRunner {
             let fail_fast_flag = Arc::clone(&fail_fast);
             let config = self.config.clone();
 
-            let handle = std::thread::spawn(move || loop {
-                if config.fail_fast && fail_fast_flag.load(Ordering::SeqCst) {
-                    break;
+            let handle = std::thread::spawn(move || {
+                loop {
+                    if config.fail_fast && fail_fast_flag.load(Ordering::SeqCst) {
+                        break;
+                    }
+
+                    let idx = counter.fetch_add(1, Ordering::SeqCst);
+                    if idx >= tests.len() {
+                        break;
+                    }
+
+                    let test = &tests[idx];
+                    let result = run_test_isolated(test, &config);
+
+                    if config.show_progress {
+                        print!("{}", result.outcome.colored_symbol());
+                        std::io::stdout().flush().ok();
+                    }
+
+                    if result.outcome.is_failure() {
+                        fail_fast_flag.store(true, Ordering::SeqCst);
+                    }
+
+                    results.lock().unwrap().push(result);
                 }
-
-                let idx = counter.fetch_add(1, Ordering::SeqCst);
-                if idx >= tests.len() {
-                    break;
-                }
-
-                let test = &tests[idx];
-                let result = run_test_isolated(test, &config);
-
-                if config.show_progress {
-                    print!("{}", result.outcome.colored_symbol());
-                    std::io::stdout().flush().ok();
-                }
-
-                if result.outcome.is_failure() {
-                    fail_fast_flag.store(true, Ordering::SeqCst);
-                }
-
-                results.lock().unwrap().push(result);
             });
 
             handles.push(handle);

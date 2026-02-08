@@ -39,16 +39,16 @@ use std::path::PathBuf;
 pub use codes::{ErrorCode, ErrorIndex};
 pub use emitter::{DiagnosticEmitter, HumanEmitter, JsonEmitter};
 pub use progress::{
-    format_bytes, format_duration, CompilationProgress, Progress, ProgressStyle, StatusLine,
+    CompilationProgress, Progress, ProgressStyle, StatusLine, format_bytes, format_duration,
 };
 pub use render::{
-    render_distance_suggestions, DiagnosticStyle, DistanceSuggestion, RichRenderer, TerminalCaps,
+    DiagnosticStyle, DistanceSuggestion, RichRenderer, TerminalCaps, render_distance_suggestions,
 };
 pub use semantic::{
     DistanceComponents, SemanticAnnotator, SemanticContext, SemanticSuggestion, TermInfo,
 };
 pub use suggestion::{Suggestion, SuggestionApplicability};
-pub use type_diff::{render_type_diff, TypeDiff, TypeErrorBuilder};
+pub use type_diff::{TypeDiff, TypeErrorBuilder, render_type_diff};
 pub use typo::{SuggestionBuilder as TypoSuggestionBuilder, TypoDetector, TypoSuggestion};
 
 /// Source location span

@@ -29,8 +29,8 @@
 
 use super::autotune::{AutoTuneConfig, AutoTuner, TunedConfig};
 use super::fusion::{
-    analyze_and_fuse_kernels, FusionAnalysis, FusionConfig, FusionCostModel, FusionError,
-    FusionPlan,
+    FusionAnalysis, FusionConfig, FusionCostModel, FusionError, FusionPlan,
+    analyze_and_fuse_kernels,
 };
 use super::graph::build_graph_from_module;
 use super::ir::GpuModule;

@@ -81,18 +81,18 @@ pub use variants::{
 
 // GPU attention-based register allocation
 pub use gpu_attention::{
-    active_threads_ratio, combined_occupancy, divergence_cost, divergence_probability,
-    occupancy_for_registers, optimal_register_target, select_spill_batch, select_spill_victim,
     GpuAllocationMetrics, GpuAttentionConfig, GpuAttentionScore, GpuLiveInterval, GpuMemorySpace,
-    GpuPressureAnalysis, GpuResourceBudget,
+    GpuPressureAnalysis, GpuResourceBudget, active_threads_ratio, combined_occupancy,
+    divergence_cost, divergence_probability, occupancy_for_registers, optimal_register_target,
+    select_spill_batch, select_spill_victim,
 };
 
 // A/B allocation policy comparison
 pub use alloc_policy::{
+    ABComparisonResult, AllocPolicy, AllocationMetrics, AllocatorOptions, AttentionConfig,
+    ConfidenceClass, EpistemicMetadata, MetricsCollector, SpillCandidate, SpillEvent, SpillReason,
     attention_score, classify_confidence, compute_attention_score,
-    select_spill_victim as cpu_select_spill_victim, select_spill_victims, ABComparisonResult,
-    AllocPolicy, AllocationMetrics, AllocatorOptions, AttentionConfig, ConfidenceClass,
-    EpistemicMetadata, MetricsCollector, SpillCandidate, SpillEvent, SpillReason,
+    select_spill_victim as cpu_select_spill_victim, select_spill_victims,
 };
 
 // SKIR cost annotation system (declarative performance primitives)

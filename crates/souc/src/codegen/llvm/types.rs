@@ -3,12 +3,12 @@
 //! This module provides conversion from Sounio HLIR types to LLVM types
 //! using inkwell's type system.
 
+use inkwell::AddressSpace;
 use inkwell::context::Context;
 use inkwell::types::{
     BasicMetadataTypeEnum, BasicType, BasicTypeEnum, FloatType, FunctionType, IntType, PointerType,
     StructType, VoidType,
 };
-use inkwell::AddressSpace;
 
 use crate::hlir::HlirType;
 use crate::runtime::EpistemicMode;

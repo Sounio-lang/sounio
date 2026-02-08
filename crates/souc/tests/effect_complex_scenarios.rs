@@ -8,9 +8,9 @@
 //! 5. Error propagation through continuations
 
 use sounio::effects::handlers::HandlerRegistry;
+use sounio::interp::EffectKind;
 use sounio::interp::effect_dispatch::{DispatchResult, EffectContext};
 use sounio::interp::value::Value;
-use sounio::interp::EffectKind;
 
 #[test]
 fn test_multiple_sequential_effects() {

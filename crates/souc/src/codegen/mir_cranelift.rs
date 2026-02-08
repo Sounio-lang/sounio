@@ -165,6 +165,12 @@ pub struct MirAwareCraneliftJit {
     optimize: bool,
     /// MIR optimization level
     mir_opt_level: Option<OptimizationLevel>,
+    /// Whether GLM-4.7 ML-guided optimization is enabled
+    glm_enabled: bool,
+    /// Whether local heuristic ML-guided optimization is enabled
+    ml_opt_enabled: bool,
+    /// Whether to collect optimization data for ML training
+    collect_opt_data: bool,
 }
 
 #[cfg(feature = "jit")]
@@ -173,6 +179,9 @@ impl MirAwareCraneliftJit {
         Self {
             optimize: false,
             mir_opt_level: None,
+            glm_enabled: false,
+            ml_opt_enabled: false,
+            collect_opt_data: false,
         }
     }
 
@@ -187,16 +196,65 @@ impl MirAwareCraneliftJit {
         self
     }
 
+    /// Enable GLM-4.7 ML-guided optimization
+    pub fn with_glm(mut self, enabled: bool) -> Self {
+        self.glm_enabled = enabled;
+        self
+    }
+
+    /// Enable local heuristic ML-guided optimization
+    pub fn with_ml_opt(mut self, enabled: bool) -> Self {
+        self.ml_opt_enabled = enabled;
+        self
+    }
+
+    /// Enable optimization data collection for ML training
+    pub fn with_opt_data_collection(mut self, enabled: bool) -> Self {
+        self.collect_opt_data = enabled;
+        self
+    }
+
     /// Compile MIR module and return a handle to the compiled code
     pub fn compile_mir(&self, mir_module: &MirModule) -> Result<CompiledModule, String> {
         // Run MIR optimization passes if enabled
         let optimized_module = if let Some(opt_level) = self.mir_opt_level {
             let mut module_clone = mir_module.clone();
-            let mut pass_manager = PassManager::new_with_level(opt_level);
-            // Run optimization passes on each function
-            for func in &mut module_clone.functions {
-                let _ = pass_manager.run_function_passes(func)?;
+
+            // Choose optimization strategy: local ML-opt, GLM, or standard
+            if self.ml_opt_enabled {
+                let mut pass_manager =
+                    PassManager::new_with_ml_opt(opt_level, true, self.collect_opt_data);
+                for func in &mut module_clone.functions {
+                    let _ = pass_manager.run_function_passes_with_ml_opt(func, mir_module)?;
+                }
+                // Write collected data if enabled
+                if self.collect_opt_data {
+                    if let Some(collector) = pass_manager.take_data_collector() {
+                        if collector.record_count() > 0 {
+                            let path = std::path::Path::new("opt_data.json");
+                            if let Err(e) = collector.write_to_file(path) {
+                                tracing::warn!("Failed to write optimization data: {}", e);
+                            } else {
+                                tracing::info!(
+                                    "Wrote {} optimization records to opt_data.json",
+                                    collector.record_count()
+                                );
+                            }
+                        }
+                    }
+                }
+            } else {
+                let mut pass_manager = PassManager::new_with_glm(opt_level, self.glm_enabled);
+                for func in &mut module_clone.functions {
+                    #[cfg(feature = "glm")]
+                    if self.glm_enabled {
+                        let _ = pass_manager.run_function_passes_with_glm(func, mir_module)?;
+                        continue;
+                    }
+                    let _ = pass_manager.run_function_passes(func)?;
+                }
             }
+
             module_clone
         } else {
             mir_module.clone()

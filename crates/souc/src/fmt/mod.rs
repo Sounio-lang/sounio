@@ -706,6 +706,7 @@ impl Formatter {
                 self.type_to_doc(ty),
             ]),
             crate::ast::GenericParam::Effect { name } => Doc::Text(format!("effect {}", name)),
+            crate::ast::GenericParam::Lifetime { name, .. } => Doc::Text(format!("'{}", name)),
         }
     }
 

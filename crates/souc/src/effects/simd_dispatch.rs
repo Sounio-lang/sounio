@@ -53,8 +53,8 @@
 use crate::effects::handler_capability::{Continuation, HandlerError, HandlerResult, HandlerState};
 use crate::effects::handlers::HandlerRegistry;
 use crate::interp::Value;
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Instant;
 
 // ============================================================================

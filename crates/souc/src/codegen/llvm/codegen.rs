@@ -3,12 +3,12 @@
 //! This module provides the core code generation logic that translates
 //! HLIR to LLVM IR.
 
+use inkwell::AddressSpace;
 use inkwell::basic_block::BasicBlock;
 use inkwell::builder::Builder;
 use inkwell::context::Context;
 use inkwell::module::{Linkage, Module};
 use inkwell::values::{BasicMetadataValueEnum, BasicValueEnum, FunctionValue, PointerValue};
-use inkwell::AddressSpace;
 use inkwell::{FloatPredicate, IntPredicate};
 
 use std::collections::HashMap;

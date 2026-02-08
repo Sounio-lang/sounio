@@ -82,11 +82,11 @@ pub use dag::{
 };
 pub use do_calculus::{AdjustmentSet, AdjustmentType, CausalQuery, DoCalculus};
 pub use effects::{
-    average_treatment_effect, conditional_average_treatment_effect, local_average_treatment_effect,
-    mediation_effects, AverageTreatmentEffect, ConditionalAverageTreatmentEffect,
-    LocalAverageTreatmentEffect, MediationEffects,
+    AverageTreatmentEffect, ConditionalAverageTreatmentEffect, LocalAverageTreatmentEffect,
+    MediationEffects, average_treatment_effect, conditional_average_treatment_effect,
+    local_average_treatment_effect, mediation_effects,
 };
 pub use identifiability::{
-    check_frontdoor_criterion, d_separation, find_backdoor_paths, find_valid_adjustment_sets,
-    BackdoorPath, BackdoorPathAnalysis,
+    BackdoorPath, BackdoorPathAnalysis, check_frontdoor_criterion, d_separation,
+    find_backdoor_paths, find_valid_adjustment_sets,
 };

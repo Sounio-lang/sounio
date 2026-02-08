@@ -5,8 +5,8 @@
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::Mutex;
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::time::SystemTime;
 
 use serde::{Deserialize, Serialize};
@@ -307,8 +307,8 @@ impl CacheClient {
 
         // Compress if enabled
         let body = if self.config.compression {
-            use flate2::write::GzEncoder;
             use flate2::Compression;
+            use flate2::write::GzEncoder;
             use std::io::Write;
 
             let mut encoder = GzEncoder::new(Vec::new(), Compression::fast());
@@ -644,12 +644,12 @@ impl CacheServer {
     /// Start the cache server
     pub async fn start(self: std::sync::Arc<Self>, addr: &str) -> Result<(), std::io::Error> {
         use axum::{
+            Json, Router,
             body::Bytes,
             extract::{Path as AxumPath, Query, State},
             http::{HeaderMap, StatusCode},
             response::IntoResponse,
             routing::{delete, get, head, put},
-            Json, Router,
         };
 
         let router = Router::new()

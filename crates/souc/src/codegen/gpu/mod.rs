@@ -80,7 +80,7 @@ pub mod tile;
 pub mod uplift_trees;
 pub mod validation;
 
-pub use intrinsics::{all_intrinsics, get_intrinsic, is_gpu_intrinsic, GpuIntrinsic};
+pub use intrinsics::{GpuIntrinsic, all_intrinsics, get_intrinsic, is_gpu_intrinsic};
 pub use ir::{
     BlockId, CoopReduceOp, CooperativeGroupId, CooperativeScope, CudaArch, CudaFeatures, Fp8Format,
     GpuBlock, GpuConstValue, GpuConstant, GpuFunction, GpuKernel, GpuModule, GpuOp, GpuParam,
@@ -95,14 +95,14 @@ pub use runtime::{
 #[cfg(feature = "gpu")]
 pub use spirv::SpirvCodegen;
 pub use tensor_epistemic::{
-    all_epistemic_tensor_intrinsics, get_epistemic_intrinsic, is_epistemic_tensor_intrinsic,
     EpistemicTensorCategory, EpistemicTensorIntrinsic, EpsilonPropagationRule, TensorCoreOp,
+    all_epistemic_tensor_intrinsics, get_epistemic_intrinsic, is_epistemic_tensor_intrinsic,
 };
 
 // HLIR to GPU lowering - the critical bridge
 pub use hlir_to_gpu::{
-    compile_to_ptx, compile_to_ptx_epistemic, lower, lower_and_optimize, lower_with_config,
-    LoweringConfig, OptimizedGpuModule,
+    LoweringConfig, OptimizedGpuModule, compile_to_ptx, compile_to_ptx_epistemic, lower,
+    lower_and_optimize, lower_with_config,
 };
 
 // Epistemic PTX emission - shadow registers for uncertainty tracking
@@ -112,12 +112,12 @@ pub use epistemic_ptx::{
 
 // GPU Epistemic Kernels - WGSL compute shaders for Knowledge<T> operations
 pub use epistemic_kernels::{
-    bytes_to_knowledge_slice, gpu_epistemic_confidence_factor, knowledge_slice_to_bytes,
-    propagate_uncertainty_add, propagate_uncertainty_mul, AggregateMode, AggregateParams,
-    EpistemicKernelId, GpuEpistemicOps, GpuKnowledge, TransformParams, DEFAULT_WORKGROUP_SIZE,
-    GPU_EPISTEMIC_CONFIDENCE_FACTOR, KNOWLEDGE_STRUCT_SIZE, WGSL_CONFIDENCE_AGGREGATE,
-    WGSL_KNOWLEDGE_TRANSFORM, WGSL_UNCERTAINTY_ADD, WGSL_UNCERTAINTY_DIV, WGSL_UNCERTAINTY_MUL,
-    WGSL_UNCERTAINTY_SUB,
+    AggregateMode, AggregateParams, DEFAULT_WORKGROUP_SIZE, EpistemicKernelId,
+    GPU_EPISTEMIC_CONFIDENCE_FACTOR, GpuEpistemicOps, GpuKnowledge, KNOWLEDGE_STRUCT_SIZE,
+    TransformParams, WGSL_CONFIDENCE_AGGREGATE, WGSL_KNOWLEDGE_TRANSFORM, WGSL_UNCERTAINTY_ADD,
+    WGSL_UNCERTAINTY_DIV, WGSL_UNCERTAINTY_MUL, WGSL_UNCERTAINTY_SUB, bytes_to_knowledge_slice,
+    gpu_epistemic_confidence_factor, knowledge_slice_to_bytes, propagate_uncertainty_add,
+    propagate_uncertainty_mul,
 };
 
 // Counterfactual GPU execution - Pearl's do-calculus as GPU primitives
@@ -127,12 +127,12 @@ pub use counterfactual::{
 };
 
 // Metal Shading Language (MSL) codegen - native Apple GPU support
-pub use metal::{compile_to_msl, compile_to_msl_epistemic, MetalCodegen, MetalCodegenConfig};
+pub use metal::{MetalCodegen, MetalCodegenConfig, compile_to_msl, compile_to_msl_epistemic};
 
 // Counterfactual Metal execution - Pearl's do-calculus for Apple Silicon
 pub use counterfactual_metal::{
-    compile_counterfactual_metal, generate_counterfactual_metal_library, CounterfactualMetalConfig,
-    CounterfactualMetalEmitter,
+    CounterfactualMetalConfig, CounterfactualMetalEmitter, compile_counterfactual_metal,
+    generate_counterfactual_metal_library,
 };
 
 // Metal runtime - native Apple GPU execution
@@ -155,16 +155,16 @@ pub use cooperative::{
 
 // CUDA Graphs with dynamic control flow
 pub use graph::{
-    build_graph_from_module, BufferId, BufferInfo, BufferLocation, ConditionType, ConditionalNode,
-    GpuGraph, GraphExecConfig, GraphKernelArg, GraphNode, GraphNodeId, GraphNodeType, KernelNode,
-    LoopNode, MemcpyNode, MemsetNode, StreamId,
+    BufferId, BufferInfo, BufferLocation, ConditionType, ConditionalNode, GpuGraph,
+    GraphExecConfig, GraphKernelArg, GraphNode, GraphNodeId, GraphNodeType, KernelNode, LoopNode,
+    MemcpyNode, MemsetNode, StreamId, build_graph_from_module,
 };
 
 // Cross-platform portable GPU IR (write-once, compile-anywhere)
 pub use portable::{
-    compile_kernel, compile_to_all, AvailableBackends, BackendCapabilities, Capability,
-    CompileError, CompileResult, CompiledKernel, Dimension, PortableGpuOp, PortableMemorySpace,
-    PortableType, UnifiedCompiler, UnifiedKernel, UnifiedParam, UnifiedSharedMem,
+    AvailableBackends, BackendCapabilities, Capability, CompileError, CompileResult,
+    CompiledKernel, Dimension, PortableGpuOp, PortableMemorySpace, PortableType, UnifiedCompiler,
+    UnifiedKernel, UnifiedParam, UnifiedSharedMem, compile_kernel, compile_to_all,
 };
 
 // Tile programming utilities (CUDA 13+)
@@ -176,32 +176,32 @@ pub use tile::{
 
 // Kernel fusion optimization (Phase 3)
 pub use fusion::{
-    analyze_and_fuse_kernels, ArchConstraints, CostWeights, DependencyType, FusionAnalysis,
-    FusionCandidate, FusionCandidateId, FusionConfig, FusionCostModel, FusionError, FusionGroup,
-    FusionGroupId, FusionPlan, FusionStats, FusionTransformer, FusionType, KernelDependencyGraph,
-    KernelId, LaunchConfig as FusionLaunchConfig, OpCategory, ResourceEstimate,
-    SemanticFusionPattern, SharedMemLayout,
+    ArchConstraints, CostWeights, DependencyType, FusionAnalysis, FusionCandidate,
+    FusionCandidateId, FusionConfig, FusionCostModel, FusionError, FusionGroup, FusionGroupId,
+    FusionPlan, FusionStats, FusionTransformer, FusionType, KernelDependencyGraph, KernelId,
+    LaunchConfig as FusionLaunchConfig, OpCategory, ResourceEstimate, SemanticFusionPattern,
+    SharedMemLayout, analyze_and_fuse_kernels,
 };
 
 // Auto-tuning for kernel launch configuration (Phase 4)
 pub use autotune::{
-    tune_module, ArchConstants, AutoTuneConfig, AutoTuner, BlockShape, InstructionMix,
-    KernelAnalyzer, KernelPattern, KernelProfile, MemoryPattern, OccupancyCalculator,
-    OccupancyInfo, OccupancyLimiter, TileConfig, TunedConfig, TuningStrategy,
+    ArchConstants, AutoTuneConfig, AutoTuner, BlockShape, InstructionMix, KernelAnalyzer,
+    KernelPattern, KernelProfile, MemoryPattern, OccupancyCalculator, OccupancyInfo,
+    OccupancyLimiter, TileConfig, TunedConfig, TuningStrategy, tune_module,
 };
 
 // Async memory pipeline (Phase 5)
 pub use async_pipeline::{
-    apply_pipeline, create_pipeline_from_tile, schedule_pipeline, AsyncOp, AsyncOpGraph, AsyncOpId,
-    AsyncOpKind, AsyncPipeline, Barrier, BarrierId, BarrierKind, BarrierPool, BarrierScheduler,
-    BufferConfig, DependencyAnalyzer, PipelineBuilder, PipelineCodegen, PipelineSchedule,
-    PipelineScheduler, PipelineStage, ScheduledOp, StageBuffer, StageId,
+    AsyncOp, AsyncOpGraph, AsyncOpId, AsyncOpKind, AsyncPipeline, Barrier, BarrierId, BarrierKind,
+    BarrierPool, BarrierScheduler, BufferConfig, DependencyAnalyzer, PipelineBuilder,
+    PipelineCodegen, PipelineSchedule, PipelineScheduler, PipelineStage, ScheduledOp, StageBuffer,
+    StageId, apply_pipeline, create_pipeline_from_tile, schedule_pipeline,
 };
 
 // GPU Optimization Pipeline (Phase 8)
 pub use optimizer::{
-    optimize_module, optimize_module_aggressive, GpuOptimizer, OptimizationReport, OptimizerConfig,
-    OptimizerError, PassStats,
+    GpuOptimizer, OptimizationReport, OptimizerConfig, OptimizerError, PassStats, optimize_module,
+    optimize_module_aggressive,
 };
 
 // GPU Diagnostics & Validation (Phase 9)
@@ -233,9 +233,9 @@ pub use multi_gpu::{
     MultiGpuConfig, MultiGpuError, MultiGpuEvent, MultiGpuRuntime, P2PCapability,
 };
 pub use p2p_transfer::{
-    generate_allgather_steps, generate_reduce_scatter_steps, split_into_chunks, AsyncTransfer,
-    P2PManager, P2PStats, ReduceOp, RingTransferStep, TransferChunk, TransferDescriptor,
-    TransferDirection,
+    AsyncTransfer, P2PManager, P2PStats, ReduceOp, RingTransferStep, TransferChunk,
+    TransferDescriptor, TransferDirection, generate_allgather_steps, generate_reduce_scatter_steps,
+    split_into_chunks,
 };
 
 // Quantization Pipeline (Phase 11)
@@ -247,8 +247,8 @@ pub use ptq::{
     QuantizedModule, WeightQuantConfig,
 };
 pub use quantize::{
-    pack_int4, quantize_tensor_int4, quantize_tensor_int8, unpack_int4, PerChannelQuantParams,
-    QuantDtype, QuantError, QuantErrorAnalyzer, QuantParams, QuantScheme, QuantizedTensor,
+    PerChannelQuantParams, QuantDtype, QuantError, QuantErrorAnalyzer, QuantParams, QuantScheme,
+    QuantizedTensor, pack_int4, quantize_tensor_int4, quantize_tensor_int8, unpack_int4,
 };
 
 // Performance Profiling & Roofline Analysis (Phase 12)
@@ -270,23 +270,23 @@ pub use system_profiler::{
 
 // Numerical Stability & Error Propagation (Phase 13)
 pub use numerical::{
-    error_to_epistemic_epsilon, risk_to_validity_confidence, synthesize_provenance,
     AppliedMitigation, ErrorBound, ErrorEvent, ErrorPropagator, MitigationStrategy,
     MixedPrecisionStrategy, Precision, PrecisionAdvisor, PropagationMode, StabilityAnalyzer,
     StabilityIssue, StabilityMitigator, StabilityRisk, StabilitySummary, UlpError,
+    error_to_epistemic_epsilon, risk_to_validity_confidence, synthesize_provenance,
 };
 
 // Sparse Tensor Compiler (Phase 14)
 pub use sparse::{
-    add_sparse_kernels, AnalyzerConfig, BlockMap, SparseConvKernel, SparseFormat,
-    SparseFusionAnalyzer, SparseGemmKernel, SparseMVKernel, SparseOpInfo, SparseOpType,
-    SparsePattern, SparseTensor, SparsityAnalyzer, SparsityCost, StructureInfo,
+    AnalyzerConfig, BlockMap, SparseConvKernel, SparseFormat, SparseFusionAnalyzer,
+    SparseGemmKernel, SparseMVKernel, SparseOpInfo, SparseOpType, SparsePattern, SparseTensor,
+    SparsityAnalyzer, SparsityCost, StructureInfo, add_sparse_kernels,
 };
 
 // GPU-Accelerated Uplift Trees with Epistemic Heads (CausalML Phase 15)
 pub use uplift_trees::{
-    compile_uplift_tree_ptx, CustomerSegment, NodeType, SplitCriterion, UpliftHistBin,
-    UpliftTreeGpu, UpliftTreeGpuConfig, UpliftTreeGpuRuntime, UpliftTreeNode, UpliftTreePtxEmitter,
+    CustomerSegment, NodeType, SplitCriterion, UpliftHistBin, UpliftTreeGpu, UpliftTreeGpuConfig,
+    UpliftTreeGpuRuntime, UpliftTreeNode, UpliftTreePtxEmitter, compile_uplift_tree_ptx,
 };
 
 // GPU Automatic Differentiation (Reverse-Mode / Backpropagation)

@@ -242,9 +242,12 @@ impl HierarchyLearner {
                 }
             }
 
+            let sample_count = samples.len() as f64;
+            if sample_count > 0.0 {
+                total_loss /= sample_count;
+                total_grad_norm /= sample_count;
+            }
             self.optimizer.step(total_loss);
-            total_loss /= samples.len() as f64;
-            total_grad_norm /= samples.len() as f64;
 
             if self.optimizer.has_converged(total_grad_norm) {
                 break;
