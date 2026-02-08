@@ -26,12 +26,14 @@
 //! # Example
 //!
 //! ```rust
-//! use sounio::epistemic::pce::{PCEConfig, PCEExpansion, PolynomialFamily};
+//! use sounio::epistemic::pce::{PCEConfig, PCEExpansion, PolynomialFamily, TruncationScheme};
 //!
 //! let config = PCEConfig {
 //!     max_degree: 3,
 //!     family: PolynomialFamily::Hermite,
 //!     n_quadrature_points: 10,
+//!     sparse_grid: false,
+//!     truncation: TruncationScheme::TotalDegree,
 //! };
 //!
 //! let pce = PCEExpansion::new(config, 2); // 2D expansion

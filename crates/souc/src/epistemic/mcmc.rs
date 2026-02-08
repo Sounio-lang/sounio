@@ -17,7 +17,7 @@
 //! # Example
 //!
 //! ```rust
-//! use sounio::epistemic::mcmc::{MCMCConfig, MCMCSampler, MetropolisHastings};
+//! use sounio::epistemic::mcmc::{MCMCConfig, MetropolisHastings};
 //!
 //! // Define log-posterior: log p(θ|data) = log p(data|θ) + log p(θ)
 //! let log_posterior = |theta: &[f64]| {
