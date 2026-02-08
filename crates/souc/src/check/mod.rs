@@ -42,7 +42,7 @@ use crate::macro_system::token_tree::{Delimiter, TokenTree};
 use crate::ontology::distance::SpectralDistance;
 use crate::ontology::embedding::HyperbolicGenerator;
 use crate::ontology::fidelity::{FidelityResult, WorldFidelityChecker};
-use crate::ontology::version::{DeprecationTracker, DeprecationWarning};
+use crate::ontology::version::DeprecationTracker;
 use crate::ontology::{OntologyResolver, ResolverConfig, SubsumptionResult};
 use crate::refinement::{
     solver::SimpleChecker, Atom, BinOp as RefinementBinOp, CompareOp, Predicate, Term,
@@ -2172,7 +2172,7 @@ impl TypeChecker {
                             .filter(|s| t2_resolved.superclasses.contains(s))
                             .count();
 
-                        let mut distance = if common > 0 {
+                        let distance = if common > 0 {
                             0.15_f64 // Siblings
                         } else {
                             0.4_f64 // Same layer, no common ancestor
@@ -7347,6 +7347,12 @@ impl TypeChecker {
             UnaryOp::Deref => {
                 if let HirType::Ref { inner, .. } = operand {
                     *inner.clone()
+                } else if let HirType::Named { name, args } = operand {
+                    if name == "Box" && !args.is_empty() {
+                        args[0].clone()
+                    } else {
+                        HirType::Error
+                    }
                 } else {
                     HirType::Error
                 }
