@@ -474,8 +474,8 @@ impl ModuleTree {
 
         // First try direct lookup
         if let Some(item) = target.items.iter().find(|i| i.name == import.original_name) {
-            // Check visibility
-            if from_same || matches!(item.visibility, Visibility::Public) {
+            // Check visibility (Sounio has no `pub`, so all items are accessible)
+            if target.is_visible(item, from) {
                 return ResolveResult::Resolved(item.node_id);
             } else {
                 return ResolveResult::NotVisible;
@@ -501,7 +501,7 @@ impl ModuleTree {
                 if let Some(item) = target.items.iter().find(|i| {
                     i.name == import.original_name && matches!(i.kind, ItemKind::Module(_))
                 }) {
-                    if from_same || matches!(item.visibility, Visibility::Public) {
+                    if target.is_visible(item, from) {
                         return ResolveResult::Resolved(item.node_id);
                     } else {
                         return ResolveResult::NotVisible;
@@ -715,12 +715,9 @@ impl Module {
         match item.visibility {
             Visibility::Public => true,
             Visibility::Private => {
-                // Private items are visible if 'from' is the same module or a child
-                // Check if from starts with self.id's path
-                if from.0.len() < self.id.0.len() {
-                    return false;
-                }
-                from.0.starts_with(&self.id.0)
+                // Sounio has no `pub` keyword — all items default to Private but
+                // are intended to be accessible across modules. Treat as visible.
+                true
             }
         }
     }
@@ -1032,10 +1029,10 @@ mod tests {
 
     #[test]
     fn test_visibility_error() {
-        // Test: trying to import a private item should fail
+        // Test: Sounio has no `pub` keyword, so importing a "private" item should succeed
         let mut tree = create_test_tree_with_modules();
 
-        // Try to import private item
+        // Import a private item — should work because all items are accessible
         {
             let root = tree.get_mut(&ModuleId::root()).unwrap();
             root.add_import(ImportEntry {
@@ -1050,12 +1047,19 @@ mod tests {
         }
 
         let result = tree.resolve_imports();
-        assert!(result.is_err(), "Should fail to import private item");
+        assert!(
+            result.is_ok(),
+            "Sounio has no pub — private items should be importable"
+        );
 
-        let errors = result.unwrap_err();
-        assert!(errors
+        // Verify the import resolved to the correct node
+        let root = tree.get(&ModuleId::root()).unwrap();
+        let import = root
+            .imports
             .iter()
-            .any(|e| matches!(e, ImportError::NotVisible { name, .. } if name == "private_item")));
+            .find(|i| i.local_name == "private_item")
+            .unwrap();
+        assert_eq!(import.resolved, Some(NodeId(102)));
     }
 
     #[test]
@@ -1220,15 +1224,15 @@ mod tests {
         assert!(module.is_visible(&public_item, &from_child));
         assert!(module.is_visible(&private_item, &from_child));
 
-        // From a different module - only public visible
+        // From a different module - Sounio has no `pub`, all items visible
         let from_other = ModuleId(vec!["other".to_string()]);
         assert!(module.is_visible(&public_item, &from_other));
-        assert!(!module.is_visible(&private_item, &from_other));
+        assert!(module.is_visible(&private_item, &from_other));
 
-        // From root - only public visible
+        // From root - Sounio has no `pub`, all items visible
         let from_root = ModuleId::root();
         assert!(module.is_visible(&public_item, &from_root));
-        assert!(!module.is_visible(&private_item, &from_root));
+        assert!(module.is_visible(&private_item, &from_root));
     }
 
     #[test]

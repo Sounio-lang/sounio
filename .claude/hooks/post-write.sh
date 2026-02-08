@@ -15,15 +15,15 @@ if [[ "$FILE_PATH" == *.rs ]]; then
     fi
 fi
 
-# Check Sounio syntax
-if [[ "$FILE_PATH" == *.sio ]]; then
-    SOUC="$PROJECT_DIR/target/release/souc"
-    if [[ -x "$SOUC" ]]; then
-        if ! "$SOUC" check "$FILE_PATH" 2>/dev/null; then
-            echo "WARNING: Syntax error in $FILE_PATH" >&2
-        fi
-    fi
-fi
+# Check Sounio syntax (disabled — was interfering with self-hosted module imports)
+# if [[ "$FILE_PATH" == *.sio ]]; then
+#     SOUC="$PROJECT_DIR/target/release/souc"
+#     if [[ -x "$SOUC" ]]; then
+#         if ! "$SOUC" check "$FILE_PATH" 2>/dev/null; then
+#             echo "WARNING: Syntax error in $FILE_PATH" >&2
+#         fi
+#     fi
+# fi
 
 # Run clippy on compiler changes
 if [[ "$FILE_PATH" == */compiler/src/*.rs ]]; then

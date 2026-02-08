@@ -146,12 +146,127 @@ fn load_directory_ast(dir: &StdPath) -> Result<Ast> {
         all_node_spans.extend(ast.node_spans);
     }
 
+    // Resolve external imports: find `use` items that reference modules outside
+    // this directory (e.g., `use lexer::*` from a parser/ directory), load them,
+    // and prepend their items so types/functions are available.
+    let stdlib_dir = find_stdlib_path();
+    let canonical_dir = dir.canonicalize().unwrap_or_else(|_| dir.to_path_buf());
+    let mod_sio = canonical_dir.join("mod.sio");
+    let reference_path = if mod_sio.exists() {
+        &mod_sio
+    } else {
+        &files[0]
+    };
+
+    let external_import_paths = collect_import_paths_from_items(&all_items);
+    let mut external_items = Vec::new();
+    let mut loaded_external = std::collections::HashSet::new();
+
+    for import_path in &external_import_paths {
+        // Skip if this import resolves within the directory itself
+        let local_check = resolve_in_directory_silent(&canonical_dir, import_path);
+        if local_check.is_ok() {
+            continue;
+        }
+
+        let import_key = import_path.join("::");
+        if loaded_external.contains(&import_key) {
+            continue;
+        }
+
+        // Try to resolve externally (parent dir, then stdlib)
+        if let Ok(external_file) =
+            resolve_direct_or_local_import(reference_path, import_path, &stdlib_dir)
+        {
+            module_loader_debug!(
+                "[load_directory_ast] Resolved external import '{}' -> {}",
+                import_key,
+                external_file.display()
+            );
+            loaded_external.insert(import_key);
+
+            // Load the external module (which may itself be a directory module)
+            let ext_canonical = external_file
+                .canonicalize()
+                .unwrap_or(external_file.clone());
+            let is_mod = ext_canonical.file_name().and_then(|f| f.to_str()) == Some("mod.sio");
+            let ext_ast = if is_mod {
+                if let Some(ext_dir) = ext_canonical.parent() {
+                    let has_siblings = std::fs::read_dir(ext_dir)
+                        .map(|rd| {
+                            rd.filter_map(|e| e.ok()).any(|e| {
+                                e.path().extension().and_then(|x| x.to_str()) == Some("sio")
+                                    && e.path() != ext_canonical
+                            })
+                        })
+                        .unwrap_or(false);
+                    if has_siblings {
+                        load_directory_ast(ext_dir)?
+                    } else {
+                        let src = std::fs::read_to_string(&ext_canonical).map_err(|e| {
+                            miette::miette!("Failed to read {}: {}", ext_canonical.display(), e)
+                        })?;
+                        let toks = lexer::lex(&src)?;
+                        let (parsed, nid) = parser::parse_with_id_start(&toks, &src, next_node_id)?;
+                        next_node_id = nid;
+                        parsed
+                    }
+                } else {
+                    continue;
+                }
+            } else {
+                let src = std::fs::read_to_string(&ext_canonical).map_err(|e| {
+                    miette::miette!("Failed to read {}: {}", ext_canonical.display(), e)
+                })?;
+                let toks = lexer::lex(&src)?;
+                let (parsed, nid) = parser::parse_with_id_start(&toks, &src, next_node_id)?;
+                next_node_id = nid;
+                parsed
+            };
+
+            // Wrap the external items in a Module so `use lexer::*` etc. can find them
+            let module_name = import_path.first().cloned().unwrap_or_default();
+            let module_item = Item::Module(crate::ast::ModuleDef {
+                id: crate::common::NodeId::dummy(),
+                visibility: crate::ast::Visibility::Public,
+                name: module_name,
+                items: Some(ext_ast.items),
+                doc: None,
+                span: crate::common::Span::dummy(),
+            });
+            external_items.push(module_item);
+            all_node_spans.extend(ext_ast.node_spans);
+        }
+    }
+
+    // Prepend external module items so they're visible to the directory's own items
+    external_items.append(&mut all_items);
+
     Ok(Ast {
         module_name: None,
-        items: all_items,
+        items: external_items,
         inner_doc: None,
         node_spans: all_node_spans,
     })
+}
+
+/// Extract import paths from a list of items (for use in load_directory_ast).
+fn collect_import_paths_from_items(items: &[Item]) -> Vec<Vec<String>> {
+    items
+        .iter()
+        .filter_map(|item| match item {
+            Item::Import(import_def) => {
+                let full_path = &import_def.path.segments;
+                let module_path = match &import_def.items {
+                    Some(_) => full_path.clone(),
+                    None if full_path.len() > 1 => full_path[..full_path.len() - 1].to_vec(),
+                    None => full_path.clone(),
+                };
+                Some(module_path)
+            }
+            _ => None,
+        })
+        .collect()
 }
 
 struct ModuleLoader {
@@ -801,7 +916,19 @@ fn resolve_direct_or_local_import(
         return Ok(result);
     }
 
-    // Second attempt: search in stdlib as fallback
+    // Second attempt: search in parent directory (for cross-module deps like parser importing lexer)
+    if let Some(parent_dir) = local_dir.parent() {
+        if let Ok(result) = resolve_in_directory_silent(parent_dir, import_path) {
+            module_loader_debug!(
+                "  resolved '{}' via parent dir: {}",
+                import_path.join("::"),
+                parent_dir.display()
+            );
+            return Ok(result);
+        }
+    }
+
+    // Third attempt: search in stdlib as fallback
     // This allows qualified imports like `qnn::mnist::data_loader` to resolve from stdlib
     if let Ok(result) = resolve_in_directory_silent(stdlib_dir, import_path) {
         return Ok(result);
