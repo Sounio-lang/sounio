@@ -14,33 +14,38 @@ use tempfile::TempDir;
 
 /// Get the path to the compiled souc binary
 fn souc_bin() -> PathBuf {
-    let mut path = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-    path.push("target/debug/souc");
+    // CARGO_MANIFEST_DIR is crates/souc; workspace root is two levels up.
+    let workspace_root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .and_then(|p| p.parent())
+        .expect("workspace root")
+        .to_path_buf();
 
-    // If debug binary doesn't exist, try release
-    if !path.exists() {
-        path.pop();
-        path.pop();
-        path.push("release/souc");
+    let debug_bin = workspace_root.join("target/debug/souc");
+    if debug_bin.exists() {
+        return debug_bin;
     }
 
-    // If still doesn't exist, build it
-    if !path.exists() {
-        eprintln!("Building souc binary...");
-        path.pop();
-        path.pop();
-        let status = Command::new("cargo")
-            .args(["build", "--bin", "souc"])
-            .current_dir(&path)
-            .status()
-            .expect("Failed to build souc");
-        assert!(status.success(), "Failed to build souc binary");
-
-        path.push("target/debug/souc");
+    let release_bin = workspace_root.join("target/release/souc");
+    if release_bin.exists() {
+        return release_bin;
     }
 
-    assert!(path.exists(), "souc binary not found at {:?}", path);
-    path
+    // Build it
+    eprintln!("Building souc binary...");
+    let status = Command::new("cargo")
+        .args(["build", "--bin", "souc"])
+        .current_dir(&workspace_root)
+        .status()
+        .expect("Failed to build souc");
+    assert!(status.success(), "Failed to build souc binary");
+
+    assert!(
+        debug_bin.exists(),
+        "souc binary not found at {:?}",
+        debug_bin
+    );
+    debug_bin
 }
 
 /// Create a temporary test file with the given content
