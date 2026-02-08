@@ -124,7 +124,7 @@ fn embed_stdlib_modules() {
     generate_embedded_modules_file(&modules, stdlib_path);
 }
 
-fn generate_embedded_modules_file(modules: &[String], stdlib_path: &Path) {
+fn generate_embedded_modules_file(modules: &[String], _stdlib_path: &Path) {
     use std::io::Write;
 
     let out_dir = std::env::var("OUT_DIR").expect("OUT_DIR not set");

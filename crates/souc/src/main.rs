@@ -209,6 +209,18 @@ enum Commands {
         #[arg(long)]
         mir: bool,
 
+        /// Enable local heuristic ML-guided optimization
+        #[arg(long)]
+        ml_opt: bool,
+
+        /// Collect optimization pass data for ML training (writes opt_data.json)
+        #[arg(long)]
+        collect_opt_data: bool,
+
+        /// Enable GLM-4.7 ML-guided optimization (requires --features glm)
+        #[arg(long)]
+        glm_enabled: bool,
+
         /// Arguments to pass to the program
         #[arg(trailing_var_arg = true)]
         args: Vec<String>,
@@ -1613,7 +1625,8 @@ impl From<AllocPolicyCli> for AllocPolicy {
 fn main() -> Result<()> {
     // Initialize tracing
     tracing_subscriber::registry()
-        .with(fmt::layer())
+        // Keep structured logs on stderr so command stdout stays machine/data friendly.
+        .with(fmt::layer().with_writer(std::io::stderr))
         .with(EnvFilter::from_default_env())
         .init();
 
@@ -1802,8 +1815,19 @@ fn main() -> Result<()> {
             input,
             optimize,
             mir,
+            ml_opt,
+            collect_opt_data,
+            glm_enabled,
             args,
-        } => jit_run(&input, optimize, mir, &args),
+        } => jit_run(
+            &input,
+            optimize,
+            mir,
+            ml_opt,
+            collect_opt_data,
+            glm_enabled,
+            &args,
+        ),
 
         Commands::Repl { jit } => repl(jit),
 
@@ -2995,10 +3019,45 @@ fn run(input: &std::path::Path, args: &[String], use_sounio_compiler: bool) -> R
     }
 }
 
-fn jit_run(input: &std::path::Path, optimize: bool, use_mir: bool, _args: &[String]) -> Result<()> {
+fn jit_run(
+    input: &std::path::Path,
+    optimize: bool,
+    use_mir: bool,
+    ml_opt: bool,
+    collect_opt_data: bool,
+    glm_enabled: bool,
+    _args: &[String],
+) -> Result<()> {
+    // --glm-enabled without glm feature falls through to local optimizer
+    #[cfg(not(feature = "glm"))]
+    if glm_enabled {
+        eprintln!(
+            "Warning: --glm-enabled requires --features glm. Using local heuristic optimizer instead."
+        );
+    }
+
+    // Determine effective ml_opt: explicit flag or fallback from glm_enabled without feature
+    let effective_ml_opt = ml_opt || {
+        #[cfg(not(feature = "glm"))]
+        {
+            glm_enabled
+        }
+        #[cfg(feature = "glm")]
+        {
+            false
+        }
+    };
+
     #[cfg(feature = "jit")]
     {
-        tracing::info!("JIT compiling {:?} (optimize={})", input, optimize);
+        tracing::info!(
+            "JIT compiling {:?} (optimize={}, ml_opt={}, collect_data={}, glm={})",
+            input,
+            optimize,
+            effective_ml_opt,
+            collect_opt_data,
+            glm_enabled
+        );
 
         // Load modules and parse (uses ModuleLoader to handle imports)
         let ast = sounio::module_loader::load_program_ast(input)?;
@@ -3014,8 +3073,14 @@ fn jit_run(input: &std::path::Path, optimize: bool, use_mir: bool, _args: &[Stri
                 sounio::codegen::mir_cranelift::MirAwareCraneliftJit::new()
                     .with_optimization()
                     .with_mir_optimization(sounio::mir::optimization::OptimizationLevel::O2)
+                    .with_ml_opt(effective_ml_opt)
+                    .with_opt_data_collection(collect_opt_data)
+                    .with_glm(glm_enabled)
             } else {
                 sounio::codegen::mir_cranelift::MirAwareCraneliftJit::new()
+                    .with_ml_opt(effective_ml_opt)
+                    .with_opt_data_collection(collect_opt_data)
+                    .with_glm(glm_enabled)
             };
 
             let compiled = jit
@@ -3057,7 +3122,7 @@ fn jit_run(input: &std::path::Path, optimize: bool, use_mir: bool, _args: &[Stri
 
     #[cfg(not(feature = "jit"))]
     {
-        let _ = (input, optimize, use_mir); // Suppress unused warnings
+        let _ = (input, optimize, use_mir, effective_ml_opt, collect_opt_data);
         Err(miette::miette!(
             "JIT backend not enabled. Recompile with --features jit"
         ))

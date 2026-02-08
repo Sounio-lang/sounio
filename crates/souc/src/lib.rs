@@ -107,7 +107,7 @@ pub use ast::Ast;
 pub use hir::Hir;
 pub use hlir::HlirModule;
 pub use mir::MirModule;
-pub use tools::pybindgen::{generate_python_bindings, PythonBindingGenerator};
+pub use tools::pybindgen::{PythonBindingGenerator, generate_python_bindings};
 pub use types::Type;
 
 /// Compiler version
