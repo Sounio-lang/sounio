@@ -1,0 +1,383 @@
+// self-hosted::test_parser — Integration tests for the self-hosted parser
+//
+// 10 test vectors covering: empty program, fn/struct/enum items,
+// multi-item programs, return types, effects, parameters,
+// let statements, and binary expressions.
+//
+// Pattern: construct token arrays, feed to parse_program, verify AST.
+// Helpers precede callers (Sounio requirement).
+// Each helper does at most ONE level of match to avoid nested-match scoping bug.
+
+// ============================================================================
+// TOKEN CONSTRUCTION HELPERS
+// ============================================================================
+
+fn ptok(kind: TokenKind) -> Token {
+    Token::with_kind(kind, 0, 0, 1, 1)
+}
+
+fn ptok_eof() -> Token {
+    Token::eof(0, 1, 1)
+}
+
+fn ptok_int(value: i64) -> Token {
+    Token::with_int(TokenKind::IntLit, 0, 0, 1, 1, value)
+}
+
+fn ptok_id1(c0: i8) -> Token with Mut, Panic {
+    var tok = Token::with_kind(TokenKind::Ident, 0, 0, 1, 1)
+    var buf: [i8; 256] = [0; 256]
+    buf[0] = c0
+    tok.text = buf
+    tok.text_len = 1
+    tok
+}
+
+fn ptok_id2(c0: i8, c1: i8) -> Token with Mut, Panic {
+    var tok = Token::with_kind(TokenKind::Ident, 0, 0, 1, 1)
+    var buf: [i8; 256] = [0; 256]
+    buf[0] = c0
+    buf[1] = c1
+    tok.text = buf
+    tok.text_len = 2
+    tok
+}
+
+fn ptok_id3(c0: i8, c1: i8, c2: i8) -> Token with Mut, Panic {
+    var tok = Token::with_kind(TokenKind::Ident, 0, 0, 1, 1)
+    var buf: [i8; 256] = [0; 256]
+    buf[0] = c0
+    buf[1] = c1
+    buf[2] = c2
+    tok.text = buf
+    tok.text_len = 3
+    tok
+}
+
+// ============================================================================
+// SINGLE-LEVEL AST INSPECTION HELPERS
+// ============================================================================
+// Each function performs at most one match on Option<Box<T>> to work
+// around the nested-match variable scoping limitation.
+
+// --- FnDef property checks (leaf level) ---
+
+fn fndef_has_ret(fd: FnDef) -> bool {
+    match fd.return_type {
+        Some(_) => true,
+        None => false,
+    }
+}
+
+fn fndef_has_params(fd: FnDef) -> bool {
+    match fd.params {
+        Some(_) => true,
+        None => false,
+    }
+}
+
+fn fndef_has_effects(fd: FnDef) -> bool {
+    match fd.effects {
+        Some(_) => true,
+        None => false,
+    }
+}
+
+fn fndef_body_has_stmts(fd: FnDef) -> bool {
+    match fd.body.stmts {
+        Some(_) => true,
+        None => false,
+    }
+}
+
+// --- FnDef option unwrap + check (one match on Option<Box<FnDef>>) ---
+
+fn fndef_opt_has_ret(opt: Option<Box<FnDef>>) -> bool with Alloc {
+    match opt {
+        Some(fd) => fndef_has_ret(*fd),
+        None => false,
+    }
+}
+
+fn fndef_opt_has_params(opt: Option<Box<FnDef>>) -> bool with Alloc {
+    match opt {
+        Some(fd) => fndef_has_params(*fd),
+        None => false,
+    }
+}
+
+fn fndef_opt_has_effects(opt: Option<Box<FnDef>>) -> bool with Alloc {
+    match opt {
+        Some(fd) => fndef_has_effects(*fd),
+        None => false,
+    }
+}
+
+fn fndef_opt_body_has_stmts(opt: Option<Box<FnDef>>) -> bool with Alloc {
+    match opt {
+        Some(fd) => fndef_body_has_stmts(*fd),
+        None => false,
+    }
+}
+
+// --- ItemList tail access (one match on Option<Box<ItemList>>) ---
+
+fn tail_item_kind(tail: Option<Box<ItemList>>) -> ItemKind with Alloc {
+    match tail {
+        Some(rest) => (*rest).head.kind,
+        None => ItemKind::ItemFn,
+    }
+}
+
+// --- Top-level program inspectors (one match each) ---
+
+fn first_item_kind(prog: Program) -> ItemKind with Alloc {
+    match prog.items {
+        Some(list) => (*list).head.kind,
+        None => ItemKind::ItemFn,
+    }
+}
+
+fn second_item_kind(prog: Program) -> ItemKind with Alloc {
+    match prog.items {
+        Some(list) => tail_item_kind((*list).tail),
+        None => ItemKind::ItemFn,
+    }
+}
+
+fn first_fn_has_ret(prog: Program) -> bool with Alloc {
+    match prog.items {
+        Some(list) => fndef_opt_has_ret((*list).head.fn_def),
+        None => false,
+    }
+}
+
+fn first_fn_has_params(prog: Program) -> bool with Alloc {
+    match prog.items {
+        Some(list) => fndef_opt_has_params((*list).head.fn_def),
+        None => false,
+    }
+}
+
+fn first_fn_has_effects(prog: Program) -> bool with Alloc {
+    match prog.items {
+        Some(list) => fndef_opt_has_effects((*list).head.fn_def),
+        None => false,
+    }
+}
+
+fn first_fn_body_has_stmts(prog: Program) -> bool with Alloc {
+    match prog.items {
+        Some(list) => fndef_opt_body_has_stmts((*list).head.fn_def),
+        None => false,
+    }
+}
+
+// ============================================================================
+// TESTS
+// ============================================================================
+
+// T01: Empty program — just EOF → 0 items
+fn test_empty_program() -> bool with Mut, IO, Panic, Div, Alloc {
+    var tokens: [Token; 65536] = [Token::new(); 65536]
+    tokens[0] = ptok_eof()
+    let prog = parse_program(tokens, 1)
+    count_items(prog) == 0
+}
+
+// T02: fn f() {} → 1 item, ItemFn
+fn test_single_fn() -> bool with Mut, IO, Panic, Div, Alloc {
+    var tokens: [Token; 65536] = [Token::new(); 65536]
+    tokens[0] = ptok(TokenKind::Fn)
+    tokens[1] = ptok_id1(102)  // 'f'
+    tokens[2] = ptok(TokenKind::LParen)
+    tokens[3] = ptok(TokenKind::RParen)
+    tokens[4] = ptok(TokenKind::LBrace)
+    tokens[5] = ptok(TokenKind::RBrace)
+    tokens[6] = ptok_eof()
+    let prog = parse_program(tokens, 7)
+    count_items(prog) == 1 && first_item_kind(prog) == ItemKind::ItemFn
+}
+
+// T03: struct S { x: i64 } → 1 item, ItemStruct
+fn test_struct_item() -> bool with Mut, IO, Panic, Div, Alloc {
+    var tokens: [Token; 65536] = [Token::new(); 65536]
+    tokens[0] = ptok(TokenKind::Struct)
+    tokens[1] = ptok_id1(83)   // 'S'
+    tokens[2] = ptok(TokenKind::LBrace)
+    tokens[3] = ptok_id1(120)  // 'x'
+    tokens[4] = ptok(TokenKind::Colon)
+    tokens[5] = ptok_id3(105, 54, 52)  // "i64"
+    tokens[6] = ptok(TokenKind::RBrace)
+    tokens[7] = ptok_eof()
+    let prog = parse_program(tokens, 8)
+    count_items(prog) == 1 && first_item_kind(prog) == ItemKind::ItemStruct
+}
+
+// T04: enum E { A, B } → 1 item, ItemEnum
+fn test_enum_item() -> bool with Mut, IO, Panic, Div, Alloc {
+    var tokens: [Token; 65536] = [Token::new(); 65536]
+    tokens[0] = ptok(TokenKind::Enum)
+    tokens[1] = ptok_id1(69)   // 'E'
+    tokens[2] = ptok(TokenKind::LBrace)
+    tokens[3] = ptok_id1(65)   // 'A'
+    tokens[4] = ptok(TokenKind::Comma)
+    tokens[5] = ptok_id1(66)   // 'B'
+    tokens[6] = ptok(TokenKind::RBrace)
+    tokens[7] = ptok_eof()
+    let prog = parse_program(tokens, 8)
+    count_items(prog) == 1 && first_item_kind(prog) == ItemKind::ItemEnum
+}
+
+// T05: struct S {} + fn f() {} → 2 items with correct kinds
+fn test_two_items() -> bool with Mut, IO, Panic, Div, Alloc {
+    var tokens: [Token; 65536] = [Token::new(); 65536]
+    // struct S {}
+    tokens[0] = ptok(TokenKind::Struct)
+    tokens[1] = ptok_id1(83)   // 'S'
+    tokens[2] = ptok(TokenKind::LBrace)
+    tokens[3] = ptok(TokenKind::RBrace)
+    // fn f() {}
+    tokens[4] = ptok(TokenKind::Fn)
+    tokens[5] = ptok_id1(102)  // 'f'
+    tokens[6] = ptok(TokenKind::LParen)
+    tokens[7] = ptok(TokenKind::RParen)
+    tokens[8] = ptok(TokenKind::LBrace)
+    tokens[9] = ptok(TokenKind::RBrace)
+    tokens[10] = ptok_eof()
+    let prog = parse_program(tokens, 11)
+    count_items(prog) == 2
+        && first_item_kind(prog) == ItemKind::ItemStruct
+        && second_item_kind(prog) == ItemKind::ItemFn
+}
+
+// T06: fn f() -> i64 { 42 } → has return type
+fn test_fn_with_return_type() -> bool with Mut, IO, Panic, Div, Alloc {
+    var tokens: [Token; 65536] = [Token::new(); 65536]
+    tokens[0] = ptok(TokenKind::Fn)
+    tokens[1] = ptok_id1(102)  // 'f'
+    tokens[2] = ptok(TokenKind::LParen)
+    tokens[3] = ptok(TokenKind::RParen)
+    tokens[4] = ptok(TokenKind::Arrow)
+    tokens[5] = ptok_id3(105, 54, 52)  // "i64"
+    tokens[6] = ptok(TokenKind::LBrace)
+    tokens[7] = ptok_int(42)
+    tokens[8] = ptok(TokenKind::RBrace)
+    tokens[9] = ptok_eof()
+    let prog = parse_program(tokens, 10)
+    count_items(prog) == 1 && first_fn_has_ret(prog)
+}
+
+// T07: fn f() with IO {} → has effects
+fn test_fn_with_effects() -> bool with Mut, IO, Panic, Div, Alloc {
+    var tokens: [Token; 65536] = [Token::new(); 65536]
+    tokens[0] = ptok(TokenKind::Fn)
+    tokens[1] = ptok_id1(102)  // 'f'
+    tokens[2] = ptok(TokenKind::LParen)
+    tokens[3] = ptok(TokenKind::RParen)
+    tokens[4] = ptok(TokenKind::With)
+    tokens[5] = ptok_id2(73, 79)  // "IO"
+    tokens[6] = ptok(TokenKind::LBrace)
+    tokens[7] = ptok(TokenKind::RBrace)
+    tokens[8] = ptok_eof()
+    let prog = parse_program(tokens, 9)
+    count_items(prog) == 1 && first_fn_has_effects(prog)
+}
+
+// T08: fn f(x: i64) {} → has params
+fn test_fn_with_param() -> bool with Mut, IO, Panic, Div, Alloc {
+    var tokens: [Token; 65536] = [Token::new(); 65536]
+    tokens[0] = ptok(TokenKind::Fn)
+    tokens[1] = ptok_id1(102)  // 'f'
+    tokens[2] = ptok(TokenKind::LParen)
+    tokens[3] = ptok_id1(120)  // 'x'
+    tokens[4] = ptok(TokenKind::Colon)
+    tokens[5] = ptok_id3(105, 54, 52)  // "i64"
+    tokens[6] = ptok(TokenKind::RParen)
+    tokens[7] = ptok(TokenKind::LBrace)
+    tokens[8] = ptok(TokenKind::RBrace)
+    tokens[9] = ptok_eof()
+    let prog = parse_program(tokens, 10)
+    count_items(prog) == 1 && first_fn_has_params(prog)
+}
+
+// T09: fn f() { let x = 5 } → body has stmts
+fn test_fn_with_let() -> bool with Mut, IO, Panic, Div, Alloc {
+    var tokens: [Token; 65536] = [Token::new(); 65536]
+    tokens[0] = ptok(TokenKind::Fn)
+    tokens[1] = ptok_id1(102)  // 'f'
+    tokens[2] = ptok(TokenKind::LParen)
+    tokens[3] = ptok(TokenKind::RParen)
+    tokens[4] = ptok(TokenKind::LBrace)
+    tokens[5] = ptok(TokenKind::Let)
+    tokens[6] = ptok_id1(120)  // 'x'
+    tokens[7] = ptok(TokenKind::Eq)
+    tokens[8] = ptok_int(5)
+    tokens[9] = ptok(TokenKind::RBrace)
+    tokens[10] = ptok_eof()
+    let prog = parse_program(tokens, 11)
+    count_items(prog) == 1 && first_fn_body_has_stmts(prog)
+}
+
+// T10: fn f() { 1 + 2 } → body has stmts (expression stmt with binary op)
+fn test_fn_with_binop() -> bool with Mut, IO, Panic, Div, Alloc {
+    var tokens: [Token; 65536] = [Token::new(); 65536]
+    tokens[0] = ptok(TokenKind::Fn)
+    tokens[1] = ptok_id1(102)  // 'f'
+    tokens[2] = ptok(TokenKind::LParen)
+    tokens[3] = ptok(TokenKind::RParen)
+    tokens[4] = ptok(TokenKind::LBrace)
+    tokens[5] = ptok_int(1)
+    tokens[6] = ptok(TokenKind::Plus)
+    tokens[7] = ptok_int(2)
+    tokens[8] = ptok(TokenKind::RBrace)
+    tokens[9] = ptok_eof()
+    let prog = parse_program(tokens, 10)
+    count_items(prog) == 1 && first_fn_body_has_stmts(prog)
+}
+
+// ============================================================================
+// TEST RUNNER
+// ============================================================================
+
+fn run_parser_tests() -> i32 with IO, Mut, Panic, Div, Alloc {
+    var passed: i64 = 0
+    var total: i64 = 0
+
+    total = total + 1
+    if test_empty_program() { passed = passed + 1 } else { print("FAIL: T01 empty_program\n") }
+
+    total = total + 1
+    if test_single_fn() { passed = passed + 1 } else { print("FAIL: T02 single_fn\n") }
+
+    total = total + 1
+    if test_struct_item() { passed = passed + 1 } else { print("FAIL: T03 struct_item\n") }
+
+    total = total + 1
+    if test_enum_item() { passed = passed + 1 } else { print("FAIL: T04 enum_item\n") }
+
+    total = total + 1
+    if test_two_items() { passed = passed + 1 } else { print("FAIL: T05 two_items\n") }
+
+    total = total + 1
+    if test_fn_with_return_type() { passed = passed + 1 } else { print("FAIL: T06 fn_with_return_type\n") }
+
+    total = total + 1
+    if test_fn_with_effects() { passed = passed + 1 } else { print("FAIL: T07 fn_with_effects\n") }
+
+    total = total + 1
+    if test_fn_with_param() { passed = passed + 1 } else { print("FAIL: T08 fn_with_param\n") }
+
+    total = total + 1
+    if test_fn_with_let() { passed = passed + 1 } else { print("FAIL: T09 fn_with_let\n") }
+
+    total = total + 1
+    if test_fn_with_binop() { passed = passed + 1 } else { print("FAIL: T10 fn_with_binop\n") }
+
+    if passed == total {
+        print("ALL PARSER TESTS PASSED\n")
+    }
+    print("Parser tests: ")
+
+    if passed == total { 0 } else { 1 }
+}

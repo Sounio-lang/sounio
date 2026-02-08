@@ -1,0 +1,469 @@
+// Parser — top-level item parsing
+//
+// Handles: fn, struct, enum, impl, type alias, use declarations.
+
+impl Parser {
+    // ============================================================
+    // Parse a single item
+    // ============================================================
+
+    fn parse_item(self) -> (Parser, Item) with Mut, IO, Panic, Div, Alloc {
+        let k = self.peek()
+
+        // Handle optional 'pub' visibility
+        var is_pub = false
+        var p = self
+        if k == TokenKind::Pub {
+            is_pub = true
+            p = p.advance()
+        }
+
+        // Handle optional 'linear' modifier
+        var is_linear = false
+        if p.peek() == TokenKind::Linear {
+            is_linear = true
+            p = p.advance()
+        }
+
+        let item_kind = p.peek()
+
+        if item_kind == TokenKind::Fn {
+            p.parse_fn_item()
+        } else if item_kind == TokenKind::Struct {
+            p.parse_struct_item(is_linear)
+        } else if item_kind == TokenKind::Enum {
+            p.parse_enum_item()
+        } else if item_kind == TokenKind::Impl {
+            p.parse_impl_item()
+        } else if item_kind == TokenKind::Type {
+            p.parse_type_alias_item()
+        } else if item_kind == TokenKind::Use {
+            p.parse_use_item()
+        } else {
+            // Error recovery: skip token
+            let span = p.current_span()
+            p.had_error = true
+            p.error_count = p.error_count + 1
+            let pa = p.advance()
+            (pa, Item {
+                kind: ItemKind::ItemFn,
+                span: span,
+                name: empty_name(),
+                fn_def: None,
+                struct_def: None,
+                enum_def: None,
+                impl_def: None,
+                type_alias_ty: None,
+                use_path: empty_path(),
+                use_glob: false,
+            })
+        }
+    }
+
+    // ============================================================
+    // Function: fn name(params) -> RetType with Effects { body }
+    // ============================================================
+
+    fn parse_fn_item(self) -> (Parser, Item) with Mut, IO, Panic, Div, Alloc {
+        let start = self.current_span()
+        var p = self.advance()  // skip 'fn'
+
+        let name = p.current_name()
+        p = p.expect_ident()
+
+        // Parameters
+        p = p.expect(TokenKind::LParen)
+        let (p2, params_opt) = p.parse_param_list()
+        p = p2
+        p = p.expect(TokenKind::RParen)
+
+        // Return type
+        let (p3, ret_ty) = p.parse_optional_return_type()
+        p = p3
+
+        // Effects
+        var effects_opt: Option<Box<EffectList>> = None
+        if p.peek() == TokenKind::With {
+            let (p4, effs) = p.parse_effect_list()
+            p = p4
+            effects_opt = Some(Box::new(effs))
+        }
+
+        // Body
+        let (p5, body) = p.parse_block()
+        p = p5
+
+        let span = p.span_from(start)
+        let fn_def = FnDef {
+            name: name,
+            params: params_opt,
+            return_type: ret_ty,
+            effects: effects_opt,
+            body: body,
+            span: span,
+        }
+
+        (p, Item {
+            kind: ItemKind::ItemFn,
+            span: span,
+            name: name,
+            fn_def: Some(Box::new(fn_def)),
+            struct_def: None,
+            enum_def: None,
+            impl_def: None,
+            type_alias_ty: None,
+            use_path: empty_path(),
+            use_glob: false,
+        })
+    }
+
+    // ============================================================
+    // Parameter list
+    // ============================================================
+
+    fn parse_param_list(self) -> (Parser, Option<Box<ParamList>>) with Mut, IO, Panic, Div, Alloc {
+        if self.peek() == TokenKind::RParen {
+            return (self, None)
+        }
+
+        let (p1, first) = self.parse_param()
+        var p = p1
+        var list = ParamList { head: first, tail: None }
+
+        while p.peek() == TokenKind::Comma {
+            p = p.advance()
+            if p.peek() == TokenKind::RParen { break }
+            let (p2, next) = p.parse_param()
+            p = p2
+            let new_node = ParamList { head: next, tail: None }
+            list = param_list_append(list, new_node)
+        }
+
+        (p, Some(Box::new(list)))
+    }
+
+    // ============================================================
+    // Single parameter: name: Type  or  self
+    // ============================================================
+
+    fn parse_param(self) -> (Parser, Param) with Mut, IO, Panic, Div, Alloc {
+        let start = self.current_span()
+
+        if self.peek() == TokenKind::SelfLower {
+            // self parameter
+            let name = self.current_name()
+            let p = self.advance()
+            let span = p.span_from(start)
+            (p, Param {
+                name: name,
+                ty: dummy_type_expr(),
+                is_self: true,
+                is_self_mut: false,
+                span: span,
+            })
+        } else {
+            let name = self.current_name()
+            var p = self.expect_ident()
+            p = p.expect(TokenKind::Colon)
+            let (p2, ty) = p.parse_type()
+            p = p2
+            let span = p.span_from(start)
+            (p, Param {
+                name: name,
+                ty: ty,
+                is_self: false,
+                is_self_mut: false,
+                span: span,
+            })
+        }
+    }
+
+    // ============================================================
+    // Struct: struct Name { field: Type, ... }
+    // ============================================================
+
+    fn parse_struct_item(self, is_linear: bool) -> (Parser, Item) with Mut, IO, Panic, Div, Alloc {
+        let start = self.current_span()
+        var p = self.advance()  // skip 'struct'
+
+        let name = p.current_name()
+        p = p.expect_ident()
+        p = p.expect(TokenKind::LBrace)
+
+        // Parse fields
+        var fields_opt: Option<Box<FieldDefList>> = None
+        var first_field = true
+
+        while p.peek() != TokenKind::RBrace && p.peek() != TokenKind::Eof {
+            let field_start = p.current_span()
+            let field_name = p.current_name()
+            p = p.expect_ident()
+            p = p.expect(TokenKind::Colon)
+            let (p2, field_ty) = p.parse_type()
+            p = p2
+
+            let field = FieldDef { name: field_name, ty: field_ty, span: p.span_from(field_start) }
+
+            if first_field {
+                fields_opt = Some(Box::new(FieldDefList { head: field, tail: None }))
+                first_field = false
+            } else {
+                match fields_opt {
+                    Some(list) => {
+                        let new_node = FieldDefList { head: field, tail: None }
+                        fields_opt = Some(Box::new(field_def_list_append(*list, new_node)))
+                    },
+                    None => {
+                        fields_opt = Some(Box::new(FieldDefList { head: field, tail: None }))
+                    },
+                }
+            }
+
+            if p.peek() == TokenKind::Comma {
+                p = p.advance()
+            }
+        }
+
+        p = p.expect(TokenKind::RBrace)
+        let span = p.span_from(start)
+        let sdef = StructDef { name: name, fields: fields_opt, is_linear: is_linear, span: span }
+
+        (p, Item {
+            kind: ItemKind::ItemStruct,
+            span: span,
+            name: name,
+            fn_def: None,
+            struct_def: Some(Box::new(sdef)),
+            enum_def: None,
+            impl_def: None,
+            type_alias_ty: None,
+            use_path: empty_path(),
+            use_glob: false,
+        })
+    }
+
+    // ============================================================
+    // Enum: enum Name { Variant1, Variant2, ... }
+    // ============================================================
+
+    fn parse_enum_item(self) -> (Parser, Item) with Mut, IO, Panic, Div, Alloc {
+        let start = self.current_span()
+        var p = self.advance()  // skip 'enum'
+
+        let name = p.current_name()
+        p = p.expect_ident()
+        p = p.expect(TokenKind::LBrace)
+
+        var variants_opt: Option<Box<VariantDefList>> = None
+        var first_variant = true
+
+        while p.peek() != TokenKind::RBrace && p.peek() != TokenKind::Eof {
+            let v_start = p.current_span()
+            let v_name = p.current_name()
+            p = p.expect_ident()
+            let v_span = p.span_from(v_start)
+
+            let variant = VariantDef { name: v_name, span: v_span }
+
+            if first_variant {
+                variants_opt = Some(Box::new(VariantDefList { head: variant, tail: None }))
+                first_variant = false
+            } else {
+                match variants_opt {
+                    Some(list) => {
+                        let new_node = VariantDefList { head: variant, tail: None }
+                        variants_opt = Some(Box::new(variant_def_list_append(*list, new_node)))
+                    },
+                    None => {
+                        variants_opt = Some(Box::new(VariantDefList { head: variant, tail: None }))
+                    },
+                }
+            }
+
+            if p.peek() == TokenKind::Comma {
+                p = p.advance()
+            }
+        }
+
+        p = p.expect(TokenKind::RBrace)
+        let span = p.span_from(start)
+        let edef = EnumDef { name: name, variants: variants_opt, span: span }
+
+        (p, Item {
+            kind: ItemKind::ItemEnum,
+            span: span,
+            name: name,
+            fn_def: None,
+            struct_def: None,
+            enum_def: Some(Box::new(edef)),
+            impl_def: None,
+            type_alias_ty: None,
+            use_path: empty_path(),
+            use_glob: false,
+        })
+    }
+
+    // ============================================================
+    // Impl: impl Type { fn method() { } ... }
+    // ============================================================
+
+    fn parse_impl_item(self) -> (Parser, Item) with Mut, IO, Panic, Div, Alloc {
+        let start = self.current_span()
+        var p = self.advance()  // skip 'impl'
+
+        let (p2, target_ty) = p.parse_type()
+        p = p2
+        p = p.expect(TokenKind::LBrace)
+
+        var methods_opt: Option<Box<ItemList>> = None
+        var first_method = true
+
+        while p.peek() != TokenKind::RBrace && p.peek() != TokenKind::Eof {
+            let (p3, method) = p.parse_fn_item()
+            p = p3
+
+            if first_method {
+                methods_opt = Some(Box::new(ItemList { head: method, tail: None }))
+                first_method = false
+            } else {
+                match methods_opt {
+                    Some(list) => {
+                        let new_node = ItemList { head: method, tail: None }
+                        methods_opt = Some(Box::new(item_list_append(*list, new_node)))
+                    },
+                    None => {
+                        methods_opt = Some(Box::new(ItemList { head: method, tail: None }))
+                    },
+                }
+            }
+        }
+
+        p = p.expect(TokenKind::RBrace)
+        let span = p.span_from(start)
+
+        // Extract name from target type path
+        let impl_name = empty_name()  // TODO: extract from path
+
+        let idef = ImplDef { target_type: target_ty, methods: methods_opt, span: span }
+
+        (p, Item {
+            kind: ItemKind::ItemImpl,
+            span: span,
+            name: impl_name,
+            fn_def: None,
+            struct_def: None,
+            enum_def: None,
+            impl_def: Some(Box::new(idef)),
+            type_alias_ty: None,
+            use_path: empty_path(),
+            use_glob: false,
+        })
+    }
+
+    // ============================================================
+    // Type alias: type Name = Type
+    // ============================================================
+
+    fn parse_type_alias_item(self) -> (Parser, Item) with Mut, IO, Panic, Div, Alloc {
+        let start = self.current_span()
+        var p = self.advance()  // skip 'type'
+
+        let name = p.current_name()
+        p = p.expect_ident()
+        p = p.expect(TokenKind::Eq)
+
+        let (p2, ty) = p.parse_type()
+        p = p2
+
+        let span = p.span_from(start)
+        (p, Item {
+            kind: ItemKind::ItemTypeAlias,
+            span: span,
+            name: name,
+            fn_def: None,
+            struct_def: None,
+            enum_def: None,
+            impl_def: None,
+            type_alias_ty: Some(Box::new(ty)),
+            use_path: empty_path(),
+            use_glob: false,
+        })
+    }
+
+    // ============================================================
+    // Use declaration: use path::to::module [::*]
+    // ============================================================
+
+    fn parse_use_item(self) -> (Parser, Item) with Mut, IO, Panic, Div, Alloc {
+        let start = self.current_span()
+        var p = self.advance()  // skip 'use'
+
+        let (p2, path) = p.parse_type_path()
+        p = p2
+
+        var is_glob = false
+        if p.peek() == TokenKind::ColonColon && p.peek_ahead(1) == TokenKind::Star {
+            p = p.advance()  // skip ::
+            p = p.advance()  // skip *
+            is_glob = true
+        }
+
+        let span = p.span_from(start)
+        (p, Item {
+            kind: ItemKind::ItemUse,
+            span: span,
+            name: empty_name(),
+            fn_def: None,
+            struct_def: None,
+            enum_def: None,
+            impl_def: None,
+            type_alias_ty: None,
+            use_path: path,
+            use_glob: is_glob,
+        })
+    }
+}
+
+// ============================================================
+// Linked-list helpers for item parsing
+// ============================================================
+
+fn param_list_append(list: ParamList, node: ParamList) -> ParamList with Mut, Alloc {
+    match list.tail {
+        None => ParamList { head: list.head, tail: Some(Box::new(node)) },
+        Some(rest) => ParamList {
+            head: list.head,
+            tail: Some(Box::new(param_list_append(*rest, node))),
+        },
+    }
+}
+
+fn field_def_list_append(list: FieldDefList, node: FieldDefList) -> FieldDefList with Mut, Alloc {
+    match list.tail {
+        None => FieldDefList { head: list.head, tail: Some(Box::new(node)) },
+        Some(rest) => FieldDefList {
+            head: list.head,
+            tail: Some(Box::new(field_def_list_append(*rest, node))),
+        },
+    }
+}
+
+fn variant_def_list_append(list: VariantDefList, node: VariantDefList) -> VariantDefList with Mut, Alloc {
+    match list.tail {
+        None => VariantDefList { head: list.head, tail: Some(Box::new(node)) },
+        Some(rest) => VariantDefList {
+            head: list.head,
+            tail: Some(Box::new(variant_def_list_append(*rest, node))),
+        },
+    }
+}
+
+fn item_list_append(list: ItemList, node: ItemList) -> ItemList with Mut, Alloc {
+    match list.tail {
+        None => ItemList { head: list.head, tail: Some(Box::new(node)) },
+        Some(rest) => ItemList {
+            head: list.head,
+            tail: Some(Box::new(item_list_append(*rest, node))),
+        },
+    }
+}

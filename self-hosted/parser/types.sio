@@ -1,0 +1,426 @@
+// Parser — type expression parsing
+//
+// Handles: named types, references, arrays, tuples, function types,
+// generic arguments, and effect lists.
+
+impl Parser {
+    // ============================================================
+    // Type expression entry point
+    // ============================================================
+
+    fn parse_type(self) -> (Parser, TypeExpr) with Mut, IO, Panic, Div {
+        let k = self.peek()
+
+        if k == TokenKind::Amp {
+            self.parse_ref_type()
+        } else if k == TokenKind::AmpBang {
+            self.parse_ref_mut_type()
+        } else if k == TokenKind::LBracket {
+            self.parse_array_type()
+        } else if k == TokenKind::LParen {
+            self.parse_tuple_or_fn_type()
+        } else if k == TokenKind::Bang {
+            let span = self.current_span()
+            let p = self.advance()
+            (p, TypeExpr {
+                kind: TypeExprKind::TypeNever,
+                span: span,
+                path: empty_path(),
+                type_args: None,
+                inner: None,
+                array_size: None,
+                effects: None,
+            })
+        } else if k == TokenKind::SelfUpper {
+            let span = self.current_span()
+            let p = self.advance()
+            (p, TypeExpr {
+                kind: TypeExprKind::TypeSelfUpper,
+                span: span,
+                path: empty_path(),
+                type_args: None,
+                inner: None,
+                array_size: None,
+                effects: None,
+            })
+        } else if k == TokenKind::Underscore {
+            let span = self.current_span()
+            let p = self.advance()
+            (p, TypeExpr {
+                kind: TypeExprKind::TypeInfer,
+                span: span,
+                path: empty_path(),
+                type_args: None,
+                inner: None,
+                array_size: None,
+                effects: None,
+            })
+        } else if k == TokenKind::Fn {
+            self.parse_fn_type()
+        } else {
+            // Named type (possibly with :: path and <> generic args)
+            self.parse_named_type()
+        }
+    }
+
+    // ============================================================
+    // Named type: Foo, Foo::Bar, Option<Box<T>>
+    // ============================================================
+
+    fn parse_named_type(self) -> (Parser, TypeExpr) with Mut, IO, Panic, Div {
+        let start = self.current_span()
+        let (p1, path) = self.parse_type_path()
+
+        // Check for generic arguments <T, U>
+        if p1.peek() == TokenKind::Lt {
+            let (p2, args) = p1.parse_type_args()
+            let span = p2.span_from(start)
+            (p2, TypeExpr {
+                kind: TypeExprKind::TypeNamed,
+                span: span,
+                path: path,
+                type_args: Some(Box::new(args)),
+                inner: None,
+                array_size: None,
+                effects: None,
+            })
+        } else {
+            let span = p1.span_from(start)
+            (p1, TypeExpr {
+                kind: TypeExprKind::TypeNamed,
+                span: span,
+                path: path,
+                type_args: None,
+                inner: None,
+                array_size: None,
+                effects: None,
+            })
+        }
+    }
+
+    // ============================================================
+    // Type path: Foo or Foo::Bar::Baz
+    // ============================================================
+
+    fn parse_type_path(self) -> (Parser, AstPath) with Mut, IO, Panic, Div {
+        let name = self.current_name()
+        var p = self.advance()
+        var segs = StringList { head_buf: name.buf, head_len: name.len, tail: None }
+        var count: i64 = 1
+
+        while p.peek() == TokenKind::ColonColon && p.peek_ahead(1) == TokenKind::Ident {
+            p = p.advance()  // skip ::
+            let seg_name = p.current_name()
+            let new_node = StringList { head_buf: seg_name.buf, head_len: seg_name.len, tail: None }
+            segs = string_list_append(segs, new_node)
+            count = count + 1
+            p = p.advance()  // skip ident
+        }
+
+        (p, AstPath { segments: segs, seg_count: count })
+    }
+
+    // ============================================================
+    // Generic arguments: <T, U, V>
+    // ============================================================
+
+    fn parse_type_args(self) -> (Parser, TypeExprList) with Mut, IO, Panic, Div {
+        var p = self.advance()  // skip <
+        let (p2, first_ty) = p.parse_type()
+        p = p2
+        var list = TypeExprList { head: first_ty, tail: None }
+
+        while p.peek() == TokenKind::Comma {
+            p = p.advance()  // skip ,
+            let (p3, next_ty) = p.parse_type()
+            p = p3
+            let new_node = TypeExprList { head: next_ty, tail: None }
+            list = type_expr_list_append(list, new_node)
+        }
+
+        p = p.expect(TokenKind::Gt)
+        (p, list)
+    }
+
+    // ============================================================
+    // Reference type: &T
+    // ============================================================
+
+    fn parse_ref_type(self) -> (Parser, TypeExpr) with Mut, IO, Panic, Div {
+        let start = self.current_span()
+        var p = self.advance()  // skip &
+        let (p2, inner) = p.parse_type()
+        let span = p2.span_from(start)
+        (p2, TypeExpr {
+            kind: TypeExprKind::TypeReference,
+            span: span,
+            path: empty_path(),
+            type_args: None,
+            inner: Some(Box::new(inner)),
+            array_size: None,
+            effects: None,
+        })
+    }
+
+    // ============================================================
+    // Exclusive reference type: &!T
+    // ============================================================
+
+    fn parse_ref_mut_type(self) -> (Parser, TypeExpr) with Mut, IO, Panic, Div {
+        let start = self.current_span()
+        var p = self.advance()  // skip &!
+        let (p2, inner) = p.parse_type()
+        let span = p2.span_from(start)
+        (p2, TypeExpr {
+            kind: TypeExprKind::TypeRefMut,
+            span: span,
+            path: empty_path(),
+            type_args: None,
+            inner: Some(Box::new(inner)),
+            array_size: None,
+            effects: None,
+        })
+    }
+
+    // ============================================================
+    // Array type: [T; N]
+    // ============================================================
+
+    fn parse_array_type(self) -> (Parser, TypeExpr) with Mut, IO, Panic, Div {
+        let start = self.current_span()
+        var p = self.advance()  // skip [
+        let (p2, elem_ty) = p.parse_type()
+        p = p2.expect(TokenKind::Semi)
+        let (p3, size_expr) = p.parse_expr()
+        p = p3.expect(TokenKind::RBracket)
+        let span = p.span_from(start)
+        (p, TypeExpr {
+            kind: TypeExprKind::TypeArray,
+            span: span,
+            path: empty_path(),
+            type_args: None,
+            inner: Some(Box::new(elem_ty)),
+            array_size: Some(Box::new(size_expr)),
+            effects: None,
+        })
+    }
+
+    // ============================================================
+    // Tuple type: (T, U) or unit type: ()
+    // ============================================================
+
+    fn parse_tuple_or_fn_type(self) -> (Parser, TypeExpr) with Mut, IO, Panic, Div {
+        let start = self.current_span()
+        var p = self.advance()  // skip (
+
+        // Unit type ()
+        if p.peek() == TokenKind::RParen {
+            p = p.advance()
+            let span = p.span_from(start)
+            (p, TypeExpr {
+                kind: TypeExprKind::TypeUnit,
+                span: span,
+                path: empty_path(),
+                type_args: None,
+                inner: None,
+                array_size: None,
+                effects: None,
+            })
+        } else {
+            // Parse first type
+            let (p2, first_ty) = p.parse_type()
+            p = p2
+
+            if p.peek() == TokenKind::Comma {
+                // Tuple type
+                p = p.advance()  // skip ,
+                var list = TypeExprList { head: first_ty, tail: None }
+                while p.peek() != TokenKind::RParen && p.peek() != TokenKind::Eof {
+                    let (p3, next_ty) = p.parse_type()
+                    p = p3
+                    let new_node = TypeExprList { head: next_ty, tail: None }
+                    list = type_expr_list_append(list, new_node)
+                    if p.peek() == TokenKind::Comma {
+                        p = p.advance()
+                    }
+                }
+                p = p.expect(TokenKind::RParen)
+                let span = p.span_from(start)
+                (p, TypeExpr {
+                    kind: TypeExprKind::TypeTuple,
+                    span: span,
+                    path: empty_path(),
+                    type_args: Some(Box::new(list)),
+                    inner: None,
+                    array_size: None,
+                    effects: None,
+                })
+            } else {
+                // Parenthesized single type
+                p = p.expect(TokenKind::RParen)
+                (p, first_ty)
+            }
+        }
+    }
+
+    // ============================================================
+    // Function type: fn(T, U) -> V with E1, E2
+    // ============================================================
+
+    fn parse_fn_type(self) -> (Parser, TypeExpr) with Mut, IO, Panic, Div {
+        let start = self.current_span()
+        var p = self.advance()  // skip fn
+        p = p.expect(TokenKind::LParen)
+
+        // Parse parameter types
+        var has_params = false
+        var param_list = TypeExprList { head: dummy_type_expr(), tail: None }
+
+        if p.peek() != TokenKind::RParen {
+            let (p2, first_ty) = p.parse_type()
+            p = p2
+            param_list = TypeExprList { head: first_ty, tail: None }
+            has_params = true
+
+            while p.peek() == TokenKind::Comma {
+                p = p.advance()
+                let (p3, next_ty) = p.parse_type()
+                p = p3
+                let new_node = TypeExprList { head: next_ty, tail: None }
+                param_list = type_expr_list_append(param_list, new_node)
+            }
+        }
+
+        p = p.expect(TokenKind::RParen)
+
+        // Parse return type
+        var ret_ty = dummy_type_expr()
+        var has_ret = false
+        if p.peek() == TokenKind::Arrow {
+            p = p.advance()
+            let (p4, r) = p.parse_type()
+            p = p4
+            ret_ty = r
+            has_ret = true
+        }
+
+        // Parse effects
+        var effs: Option<Box<EffectList>> = None
+        if p.peek() == TokenKind::With {
+            let (p5, eff_list) = p.parse_effect_list()
+            p = p5
+            effs = Some(Box::new(eff_list))
+        }
+
+        let span = p.span_from(start)
+        (p, TypeExpr {
+            kind: TypeExprKind::TypeFn,
+            span: span,
+            path: empty_path(),
+            type_args: if has_params { Some(Box::new(param_list)) } else { None },
+            inner: if has_ret { Some(Box::new(ret_ty)) } else { None },
+            array_size: None,
+            effects: effs,
+        })
+    }
+
+    // ============================================================
+    // Effect list: with IO, Mut, Alloc
+    // ============================================================
+
+    fn parse_effect_list(self) -> (Parser, EffectList) with Mut, IO, Panic, Div {
+        var p = self.advance()  // skip 'with'
+        let first_name = p.current_name()
+        let first_eff = EffectRef { name_buf: [0; 64], name_len: first_name.len }
+        var first = copy_name_to_effect(first_name, first_eff)
+        p = p.advance()  // skip effect name
+
+        var list = EffectList { head: first, tail: None }
+
+        while p.peek() == TokenKind::Comma {
+            p = p.advance()  // skip ,
+            let eff_name = p.current_name()
+            let eff = EffectRef { name_buf: [0; 64], name_len: eff_name.len }
+            var e = copy_name_to_effect(eff_name, eff)
+            let new_node = EffectList { head: e, tail: None }
+            list = effect_list_append(list, new_node)
+            p = p.advance()  // skip effect name
+        }
+
+        (p, list)
+    }
+
+    // ============================================================
+    // Optional type annotation: ': Type'
+    // ============================================================
+
+    fn parse_optional_type(self) -> (Parser, Option<Box<TypeExpr>>) with Mut, IO, Panic, Div {
+        if self.peek() == TokenKind::Colon {
+            var p = self.advance()  // skip :
+            let (p2, ty) = p.parse_type()
+            (p2, Some(Box::new(ty)))
+        } else {
+            (self, None)
+        }
+    }
+
+    // ============================================================
+    // Optional return type: '-> Type'
+    // ============================================================
+
+    fn parse_optional_return_type(self) -> (Parser, Option<Box<TypeExpr>>) with Mut, IO, Panic, Div {
+        if self.peek() == TokenKind::Arrow {
+            var p = self.advance()  // skip ->
+            let (p2, ty) = p.parse_type()
+            (p2, Some(Box::new(ty)))
+        } else {
+            (self, None)
+        }
+    }
+}
+
+// ============================================================
+// Linked-list helpers for type parsing
+// ============================================================
+
+fn type_expr_list_append(list: TypeExprList, node: TypeExprList) -> TypeExprList with Mut, Alloc {
+    match list.tail {
+        None => TypeExprList { head: list.head, tail: Some(Box::new(node)) },
+        Some(rest) => TypeExprList {
+            head: list.head,
+            tail: Some(Box::new(type_expr_list_append(*rest, node))),
+        },
+    }
+}
+
+fn effect_list_append(list: EffectList, node: EffectList) -> EffectList with Mut, Alloc {
+    match list.tail {
+        None => EffectList { head: list.head, tail: Some(Box::new(node)) },
+        Some(rest) => EffectList {
+            head: list.head,
+            tail: Some(Box::new(effect_list_append(*rest, node))),
+        },
+    }
+}
+
+fn string_list_append(list: StringList, node: StringList) -> StringList with Mut, Alloc {
+    match list.tail {
+        None => StringList { head_buf: list.head_buf, head_len: list.head_len, tail: Some(Box::new(node)) },
+        Some(rest) => StringList {
+            head_buf: list.head_buf,
+            head_len: list.head_len,
+            tail: Some(Box::new(string_list_append(*rest, node))),
+        },
+    }
+}
+
+fn copy_name_to_effect(name: Name, eff: EffectRef) -> EffectRef with Mut, Panic, Div {
+    var result = eff
+    var i: i64 = 0
+    while i < name.len && i < 64 {
+        result.name_buf[i] = name.buf[i]
+        i = i + 1
+    }
+    result.name_len = name.len
+    result
+}

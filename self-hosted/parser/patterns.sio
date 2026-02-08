@@ -1,0 +1,482 @@
+// Parser — pattern parsing
+//
+// Handles: wildcard, binding, literal, enum variant, struct, tuple, or-patterns.
+
+fn empty_pattern(span: Span) -> Pattern {
+    Pattern {
+        kind: PatternKind::PatWildcard,
+        span: span,
+        name: empty_name(),
+        int_val: 0,
+        path: empty_path(),
+        sub_patterns: None,
+        pat_fields: None,
+        is_mut: false,
+    }
+}
+
+impl Parser {
+    // ============================================================
+    // Pattern entry point
+    // ============================================================
+
+    fn parse_pattern(self) -> (Parser, Pattern) with Mut, IO, Panic, Div, Alloc {
+        let (p1, first) = self.parse_pattern_atom()
+
+        // Check for or-pattern: pat1 | pat2 | pat3
+        if p1.peek() == TokenKind::Pipe {
+            var p = p1
+            var list = PatternList { head: first, tail: None }
+            while p.peek() == TokenKind::Pipe {
+                p = p.advance()  // skip |
+                let (p2, next_pat) = p.parse_pattern_atom()
+                p = p2
+                let new_node = PatternList { head: next_pat, tail: None }
+                list = pattern_list_append(list, new_node)
+            }
+            let span = p.span_from(first.span)
+            (p, Pattern {
+                kind: PatternKind::PatOr,
+                span: span,
+                name: empty_name(),
+                int_val: 0,
+                path: empty_path(),
+                sub_patterns: Some(Box::new(list)),
+                pat_fields: None,
+                is_mut: false,
+            })
+        } else {
+            (p1, first)
+        }
+    }
+
+    // ============================================================
+    // Pattern atom (no or-pattern at this level)
+    // ============================================================
+
+    fn parse_pattern_atom(self) -> (Parser, Pattern) with Mut, IO, Panic, Div, Alloc {
+        let k = self.peek()
+
+        if k == TokenKind::Underscore {
+            self.parse_wildcard_pattern()
+        } else if k == TokenKind::True {
+            let span = self.current_span()
+            let p = self.advance()
+            (p, Pattern {
+                kind: PatternKind::PatBoolTrue,
+                span: span,
+                name: empty_name(),
+                int_val: 0,
+                path: empty_path(),
+                sub_patterns: None,
+                pat_fields: None,
+                is_mut: false,
+            })
+        } else if k == TokenKind::False {
+            let span = self.current_span()
+            let p = self.advance()
+            (p, Pattern {
+                kind: PatternKind::PatBoolFalse,
+                span: span,
+                name: empty_name(),
+                int_val: 0,
+                path: empty_path(),
+                sub_patterns: None,
+                pat_fields: None,
+                is_mut: false,
+            })
+        } else if k == TokenKind::IntLit || k == TokenKind::HexLit || k == TokenKind::BinLit || k == TokenKind::OctLit {
+            self.parse_int_pattern()
+        } else if k == TokenKind::Minus {
+            // Negative int pattern
+            self.parse_neg_int_pattern()
+        } else if k == TokenKind::StringLit {
+            self.parse_string_pattern()
+        } else if k == TokenKind::LParen {
+            self.parse_tuple_pattern()
+        } else if k == TokenKind::Ident {
+            self.parse_ident_or_enum_pattern()
+        } else if k == TokenKind::Var {
+            self.parse_mut_binding_pattern()
+        } else {
+            // Error recovery: consume token and return wildcard
+            let span = self.current_span()
+            var p = self
+            p.had_error = true
+            p.error_count = p.error_count + 1
+            (p, empty_pattern(span))
+        }
+    }
+
+    // ============================================================
+    // Wildcard: _
+    // ============================================================
+
+    fn parse_wildcard_pattern(self) -> (Parser, Pattern) with Mut, IO, Panic, Div {
+        let span = self.current_span()
+        let p = self.advance()
+        (p, Pattern {
+            kind: PatternKind::PatWildcard,
+            span: span,
+            name: empty_name(),
+            int_val: 0,
+            path: empty_path(),
+            sub_patterns: None,
+            pat_fields: None,
+            is_mut: false,
+        })
+    }
+
+    // ============================================================
+    // Integer literal pattern
+    // ============================================================
+
+    fn parse_int_pattern(self) -> (Parser, Pattern) with Mut, IO, Panic, Div {
+        let span = self.current_span()
+        let tok = self.current()
+        let p = self.advance()
+        (p, Pattern {
+            kind: PatternKind::PatIntLit,
+            span: span,
+            name: empty_name(),
+            int_val: tok.int_value,
+            path: empty_path(),
+            sub_patterns: None,
+            pat_fields: None,
+            is_mut: false,
+        })
+    }
+
+    // ============================================================
+    // Negative integer pattern: -42
+    // ============================================================
+
+    fn parse_neg_int_pattern(self) -> (Parser, Pattern) with Mut, IO, Panic, Div {
+        let start = self.current_span()
+        var p = self.advance()  // skip -
+        let tok = p.current()
+        let span = p.span_from(start)
+        p = p.advance()
+        (p, Pattern {
+            kind: PatternKind::PatIntLit,
+            span: span,
+            name: empty_name(),
+            int_val: 0 - tok.int_value,
+            path: empty_path(),
+            sub_patterns: None,
+            pat_fields: None,
+            is_mut: false,
+        })
+    }
+
+    // ============================================================
+    // String literal pattern
+    // ============================================================
+
+    fn parse_string_pattern(self) -> (Parser, Pattern) with Mut, IO, Panic, Div {
+        let span = self.current_span()
+        let name = self.current_name()
+        let p = self.advance()
+        (p, Pattern {
+            kind: PatternKind::PatStringLit,
+            span: span,
+            name: name,
+            int_val: 0,
+            path: empty_path(),
+            sub_patterns: None,
+            pat_fields: None,
+            is_mut: false,
+        })
+    }
+
+    // ============================================================
+    // Tuple pattern: (a, b, c)
+    // ============================================================
+
+    fn parse_tuple_pattern(self) -> (Parser, Pattern) with Mut, IO, Panic, Div, Alloc {
+        let start = self.current_span()
+        var p = self.advance()  // skip (
+
+        if p.peek() == TokenKind::RParen {
+            // Empty tuple pattern
+            p = p.advance()
+            let span = p.span_from(start)
+            (p, Pattern {
+                kind: PatternKind::PatTuple,
+                span: span,
+                name: empty_name(),
+                int_val: 0,
+                path: empty_path(),
+                sub_patterns: None,
+                pat_fields: None,
+                is_mut: false,
+            })
+        } else {
+            let (p2, first) = p.parse_pattern()
+            p = p2
+            var list = PatternList { head: first, tail: None }
+
+            while p.peek() == TokenKind::Comma {
+                p = p.advance()
+                if p.peek() == TokenKind::RParen { break }
+                let (p3, next_pat) = p.parse_pattern()
+                p = p3
+                let new_node = PatternList { head: next_pat, tail: None }
+                list = pattern_list_append(list, new_node)
+            }
+
+            p = p.expect(TokenKind::RParen)
+            let span = p.span_from(start)
+            (p, Pattern {
+                kind: PatternKind::PatTuple,
+                span: span,
+                name: empty_name(),
+                int_val: 0,
+                path: empty_path(),
+                sub_patterns: Some(Box::new(list)),
+                pat_fields: None,
+                is_mut: false,
+            })
+        }
+    }
+
+    // ============================================================
+    // Identifier-leading: binding, enum variant, struct pattern
+    // ============================================================
+
+    fn parse_ident_or_enum_pattern(self) -> (Parser, Pattern) with Mut, IO, Panic, Div, Alloc {
+        let start = self.current_span()
+        let name = self.current_name()
+
+        // Check for :: => enum variant path
+        if self.peek_ahead(1) == TokenKind::ColonColon {
+            let (p1, path) = self.parse_type_path()
+
+            if p1.peek() == TokenKind::LParen {
+                // Enum variant with sub-patterns: Some(x), Ok(v)
+                var p = p1.advance()  // skip (
+                var list_opt: Option<Box<PatternList>> = None
+
+                if p.peek() != TokenKind::RParen {
+                    let (p2, first) = p.parse_pattern()
+                    p = p2
+                    var list = PatternList { head: first, tail: None }
+                    while p.peek() == TokenKind::Comma {
+                        p = p.advance()
+                        let (p3, next_pat) = p.parse_pattern()
+                        p = p3
+                        let new_node = PatternList { head: next_pat, tail: None }
+                        list = pattern_list_append(list, new_node)
+                    }
+                    list_opt = Some(Box::new(list))
+                }
+
+                p = p.expect(TokenKind::RParen)
+                let span = p.span_from(start)
+                (p, Pattern {
+                    kind: PatternKind::PatEnum,
+                    span: span,
+                    name: empty_name(),
+                    int_val: 0,
+                    path: path,
+                    sub_patterns: list_opt,
+                    pat_fields: None,
+                    is_mut: false,
+                })
+            } else if p1.peek() == TokenKind::LBrace {
+                // Struct pattern: Foo { x, y: pat }
+                self.parse_struct_pattern_body(p1, path, start)
+            } else {
+                // Enum unit variant: None, MyEnum::Variant
+                let span = p1.span_from(start)
+                (p1, Pattern {
+                    kind: PatternKind::PatEnum,
+                    span: span,
+                    name: empty_name(),
+                    int_val: 0,
+                    path: path,
+                    sub_patterns: None,
+                    pat_fields: None,
+                    is_mut: false,
+                })
+            }
+        } else if self.peek_ahead(1) == TokenKind::LParen {
+            // Bare name with parens: Some(x), None is handled below
+            // Build single-segment path
+            var p = self.advance()  // skip ident
+            let path = AstPath {
+                segments: StringList { head_buf: name.buf, head_len: name.len, tail: None },
+                seg_count: 1,
+            }
+
+            // Enum variant with sub-patterns
+            p = p.advance()  // skip (
+            var list_opt: Option<Box<PatternList>> = None
+
+            if p.peek() != TokenKind::RParen {
+                let (p2, first) = p.parse_pattern()
+                p = p2
+                var list = PatternList { head: first, tail: None }
+                while p.peek() == TokenKind::Comma {
+                    p = p.advance()
+                    let (p3, next_pat) = p.parse_pattern()
+                    p = p3
+                    let new_node = PatternList { head: next_pat, tail: None }
+                    list = pattern_list_append(list, new_node)
+                }
+                list_opt = Some(Box::new(list))
+            }
+
+            p = p.expect(TokenKind::RParen)
+            let span = p.span_from(start)
+            (p, Pattern {
+                kind: PatternKind::PatEnum,
+                span: span,
+                name: empty_name(),
+                int_val: 0,
+                path: path,
+                sub_patterns: list_opt,
+                pat_fields: None,
+                is_mut: false,
+            })
+        } else if self.peek_ahead(1) == TokenKind::LBrace {
+            // Struct pattern: MyStruct { field: pat }
+            var p = self.advance()
+            let path = AstPath {
+                segments: StringList { head_buf: name.buf, head_len: name.len, tail: None },
+                seg_count: 1,
+            }
+            self.parse_struct_pattern_body(p, path, start)
+        } else {
+            // Simple binding
+            let span = self.current_span()
+            let p = self.advance()
+            (p, Pattern {
+                kind: PatternKind::PatBinding,
+                span: span,
+                name: name,
+                int_val: 0,
+                path: empty_path(),
+                sub_patterns: None,
+                pat_fields: None,
+                is_mut: false,
+            })
+        }
+    }
+
+    // ============================================================
+    // Struct pattern body: { field1: pat1, field2: pat2 }
+    // ============================================================
+
+    fn parse_struct_pattern_body(self, p: Parser, path: AstPath, start: Span) -> (Parser, Pattern) with Mut, IO, Panic, Div, Alloc {
+        var parser = p.advance()  // skip {
+        var fields_opt: Option<Box<PatFieldList>> = None
+
+        if parser.peek() != TokenKind::RBrace {
+            let (p2, first_field) = parser.parse_pat_field()
+            parser = p2
+            var field_list = PatFieldList { head: first_field, tail: None }
+
+            while parser.peek() == TokenKind::Comma {
+                parser = parser.advance()
+                if parser.peek() == TokenKind::RBrace { break }
+                let (p3, next_field) = parser.parse_pat_field()
+                parser = p3
+                let new_node = PatFieldList { head: next_field, tail: None }
+                field_list = pat_field_list_append(field_list, new_node)
+            }
+
+            fields_opt = Some(Box::new(field_list))
+        }
+
+        parser = parser.expect(TokenKind::RBrace)
+        let span = parser.span_from(start)
+        (parser, Pattern {
+            kind: PatternKind::PatStruct,
+            span: span,
+            name: empty_name(),
+            int_val: 0,
+            path: path,
+            sub_patterns: None,
+            pat_fields: fields_opt,
+            is_mut: false,
+        })
+    }
+
+    // ============================================================
+    // Pattern field: name: pattern  OR  name (shorthand binding)
+    // ============================================================
+
+    fn parse_pat_field(self) -> (Parser, PatField) with Mut, IO, Panic, Div, Alloc {
+        let name = self.current_name()
+        var p = self.advance()  // skip field name
+
+        if p.peek() == TokenKind::Colon {
+            p = p.advance()  // skip :
+            let (p2, pat) = p.parse_pattern()
+            (p2, PatField { name: name, pattern: pat })
+        } else {
+            // Shorthand: field name is also binding name
+            let span = self.current_span()
+            (p, PatField {
+                name: name,
+                pattern: Pattern {
+                    kind: PatternKind::PatBinding,
+                    span: span,
+                    name: name,
+                    int_val: 0,
+                    path: empty_path(),
+                    sub_patterns: None,
+                    pat_fields: None,
+                    is_mut: false,
+                },
+            })
+        }
+    }
+
+    // ============================================================
+    // Mutable binding: var x
+    // ============================================================
+
+    fn parse_mut_binding_pattern(self) -> (Parser, Pattern) with Mut, IO, Panic, Div {
+        let start = self.current_span()
+        var p = self.advance()  // skip var
+        let name = p.current_name()
+        let span = p.span_from(start)
+        p = p.advance()
+        (p, Pattern {
+            kind: PatternKind::PatBinding,
+            span: span,
+            name: name,
+            int_val: 0,
+            path: empty_path(),
+            sub_patterns: None,
+            pat_fields: None,
+            is_mut: true,
+        })
+    }
+}
+
+// ============================================================
+// Linked-list helpers for pattern parsing
+// ============================================================
+
+fn pattern_list_append(list: PatternList, node: PatternList) -> PatternList with Mut, Alloc {
+    match list.tail {
+        None => PatternList { head: list.head, tail: Some(Box::new(node)) },
+        Some(rest) => PatternList {
+            head: list.head,
+            tail: Some(Box::new(pattern_list_append(*rest, node))),
+        },
+    }
+}
+
+fn pat_field_list_append(list: PatFieldList, node: PatFieldList) -> PatFieldList with Mut, Alloc {
+    match list.tail {
+        None => PatFieldList { head: list.head, tail: Some(Box::new(node)) },
+        Some(rest) => PatFieldList {
+            head: list.head,
+            tail: Some(Box::new(pat_field_list_append(*rest, node))),
+        },
+    }
+}

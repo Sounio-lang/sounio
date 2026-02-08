@@ -1,0 +1,195 @@
+// Parser — statement and block parsing
+//
+// Handles: let bindings, var declarations, expression statements,
+// assignment statements, and blocks.
+
+impl Parser {
+    // ============================================================
+    // Block: { stmt; stmt; expr }
+    // ============================================================
+
+    fn parse_block(self) -> (Parser, Block) with Mut, IO, Panic, Div, Alloc {
+        let start = self.current_span()
+        var p = self.expect(TokenKind::LBrace)
+
+        var stmts_opt: Option<Box<StmtList>> = None
+        var first_stmt = true
+
+        while p.peek() != TokenKind::RBrace && p.peek() != TokenKind::Eof {
+            let (p2, stmt) = p.parse_stmt()
+            p = p2
+
+            if first_stmt {
+                stmts_opt = Some(Box::new(StmtList { head: stmt, tail: None }))
+                first_stmt = false
+            } else {
+                match stmts_opt {
+                    Some(list) => {
+                        let new_node = StmtList { head: stmt, tail: None }
+                        stmts_opt = Some(Box::new(stmt_list_append(*list, new_node)))
+                    },
+                    None => {
+                        stmts_opt = Some(Box::new(StmtList { head: stmt, tail: None }))
+                    },
+                }
+            }
+
+            // Skip optional semicolons between statements
+            while p.peek() == TokenKind::Semi {
+                p = p.advance()
+            }
+        }
+
+        p = p.expect(TokenKind::RBrace)
+        let span = p.span_from(start)
+        (p, Block { stmts: stmts_opt, span: span })
+    }
+
+    // ============================================================
+    // Statement
+    // ============================================================
+
+    fn parse_stmt(self) -> (Parser, Stmt) with Mut, IO, Panic, Div, Alloc {
+        let k = self.peek()
+
+        if k == TokenKind::Let {
+            self.parse_let_stmt()
+        } else if k == TokenKind::Var {
+            self.parse_var_stmt()
+        } else {
+            // Expression statement or assignment
+            self.parse_expr_or_assign_stmt()
+        }
+    }
+
+    // ============================================================
+    // Let binding: let name [: Type] = expr
+    // ============================================================
+
+    fn parse_let_stmt(self) -> (Parser, Stmt) with Mut, IO, Panic, Div, Alloc {
+        let start = self.current_span()
+        var p = self.advance()  // skip 'let'
+
+        let name = p.current_name()
+        p = p.expect_ident()
+
+        // Optional type annotation
+        let (p2, ty_opt) = p.parse_optional_type()
+        p = p2
+
+        // = expr
+        p = p.expect(TokenKind::Eq)
+        let (p3, init_expr) = p.parse_expr()
+        p = p3
+
+        let span = p.span_from(start)
+        (p, Stmt {
+            kind: StmtKind::StmtLet,
+            span: span,
+            name: name,
+            ty: ty_opt,
+            expr: Some(Box::new(init_expr)),
+            target: None,
+            assign_op: AssignOp::AssignEq,
+        })
+    }
+
+    // ============================================================
+    // Var declaration: var name [: Type] = expr
+    // ============================================================
+
+    fn parse_var_stmt(self) -> (Parser, Stmt) with Mut, IO, Panic, Div, Alloc {
+        let start = self.current_span()
+        var p = self.advance()  // skip 'var'
+
+        let name = p.current_name()
+        p = p.expect_ident()
+
+        // Optional type annotation
+        let (p2, ty_opt) = p.parse_optional_type()
+        p = p2
+
+        // = expr
+        p = p.expect(TokenKind::Eq)
+        let (p3, init_expr) = p.parse_expr()
+        p = p3
+
+        let span = p.span_from(start)
+        (p, Stmt {
+            kind: StmtKind::StmtVar,
+            span: span,
+            name: name,
+            ty: ty_opt,
+            expr: Some(Box::new(init_expr)),
+            target: None,
+            assign_op: AssignOp::AssignEq,
+        })
+    }
+
+    // ============================================================
+    // Expression or assignment statement
+    // ============================================================
+
+    fn parse_expr_or_assign_stmt(self) -> (Parser, Stmt) with Mut, IO, Panic, Div, Alloc {
+        let start = self.current_span()
+        let (p1, lhs) = self.parse_expr()
+
+        let k = p1.peek()
+        if k == TokenKind::Eq || k == TokenKind::PlusEq || k == TokenKind::MinusEq
+            || k == TokenKind::StarEq || k == TokenKind::SlashEq || k == TokenKind::PercentEq {
+            // Assignment
+            let op = parse_assign_op(k)
+            var p = p1.advance()  // skip operator
+            let (p2, rhs) = p.parse_expr()
+            p = p2
+            let span = p.span_from(start)
+            (p, Stmt {
+                kind: StmtKind::StmtAssign,
+                span: span,
+                name: empty_name(),
+                ty: None,
+                expr: Some(Box::new(rhs)),
+                target: Some(Box::new(lhs)),
+                assign_op: op,
+            })
+        } else {
+            // Expression statement
+            let span = p1.span_from(start)
+            (p1, Stmt {
+                kind: StmtKind::StmtExpr,
+                span: span,
+                name: empty_name(),
+                ty: None,
+                expr: Some(Box::new(lhs)),
+                target: None,
+                assign_op: AssignOp::AssignEq,
+            })
+        }
+    }
+}
+
+// ============================================================
+// Helpers
+// ============================================================
+
+fn parse_assign_op(kind: TokenKind) -> AssignOp {
+    match kind {
+        TokenKind::Eq => AssignOp::AssignEq,
+        TokenKind::PlusEq => AssignOp::AssignAdd,
+        TokenKind::MinusEq => AssignOp::AssignSub,
+        TokenKind::StarEq => AssignOp::AssignMul,
+        TokenKind::SlashEq => AssignOp::AssignDiv,
+        TokenKind::PercentEq => AssignOp::AssignRem,
+        _ => AssignOp::AssignEq,
+    }
+}
+
+fn stmt_list_append(list: StmtList, node: StmtList) -> StmtList with Mut, Alloc {
+    match list.tail {
+        None => StmtList { head: list.head, tail: Some(Box::new(node)) },
+        Some(rest) => StmtList {
+            head: list.head,
+            tail: Some(Box::new(stmt_list_append(*rest, node))),
+        },
+    }
+}

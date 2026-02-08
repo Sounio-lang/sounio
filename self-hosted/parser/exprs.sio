@@ -1,0 +1,818 @@
+// Parser — Pratt expression parser
+//
+// Precedence-climbing for binary operators, prefix/postfix handling,
+// and all expression forms (literals, calls, field access, if, match, etc).
+
+impl Parser {
+    // ============================================================
+    // Expression entry point (dispatches to Pratt parser)
+    // ============================================================
+
+    fn parse_expr(self) -> (Parser, Expr) with Mut, IO, Panic, Div, Alloc {
+        self.parse_expr_bp(0)
+    }
+
+    // ============================================================
+    // Pratt parser: parse expression with minimum binding power
+    // ============================================================
+
+    fn parse_expr_bp(self, min_bp: i64) -> (Parser, Expr) with Mut, IO, Panic, Div, Alloc {
+        // Parse prefix / atom
+        let (p1, lhs_init) = self.parse_prefix()
+        var p = p1
+        var lhs = lhs_init
+
+        // Parse infix operators
+        while !p.at_eof() {
+            let op_kind = p.peek()
+            let prec = tk_precedence(op_kind)
+
+            // Stop if current operator has lower or equal precedence
+            if prec <= min_bp { break }
+
+            // Postfix: function call, method call, field access, index
+            if op_kind == TokenKind::LParen {
+                let (p2, call_expr) = p.parse_call_expr(lhs)
+                p = p2
+                lhs = call_expr
+                continue
+            }
+
+            if op_kind == TokenKind::LBracket {
+                let (p2, idx_expr) = p.parse_index_expr(lhs)
+                p = p2
+                lhs = idx_expr
+                continue
+            }
+
+            if op_kind == TokenKind::Dot {
+                let (p2, dot_expr) = p.parse_dot_expr(lhs)
+                p = p2
+                lhs = dot_expr
+                continue
+            }
+
+            // Range operators (non-associative)
+            if op_kind == TokenKind::DotDot || op_kind == TokenKind::DotDotEq {
+                let bin_op = if op_kind == TokenKind::DotDot { BinaryOp::OpRange } else { BinaryOp::OpRangeInclusive }
+                p = p.advance()
+                if p.at_expr_start() {
+                    let (p2, rhs) = p.parse_expr_bp(prec)
+                    p = p2
+                    let span = p.span_from(lhs.span)
+                    lhs = Expr {
+                        kind: ExprKind::ExprRange,
+                        span: span,
+                        int_val: 0,
+                        float_val: 0.0,
+                        name: empty_name(),
+                        path: empty_path(),
+                        bin_op: bin_op,
+                        un_op: UnaryOp::OpNeg,
+                        left: Some(Box::new(lhs)),
+                        right: Some(Box::new(rhs)),
+                        block: None,
+                        else_expr: None,
+                        args: None,
+                        arms: None,
+                        fields: None,
+                    }
+                } else {
+                    // Half-open range: expr..
+                    let span = p.span_from(lhs.span)
+                    lhs = Expr {
+                        kind: ExprKind::ExprRange,
+                        span: span,
+                        int_val: 0,
+                        float_val: 0.0,
+                        name: empty_name(),
+                        path: empty_path(),
+                        bin_op: bin_op,
+                        un_op: UnaryOp::OpNeg,
+                        left: Some(Box::new(lhs)),
+                        right: None,
+                        block: None,
+                        else_expr: None,
+                        args: None,
+                        arms: None,
+                        fields: None,
+                    }
+                }
+                continue
+            }
+
+            // Standard binary operator
+            if prec == 0 { break }
+
+            let bin_op = token_to_binop(op_kind)
+            p = p.advance()
+
+            // Right-hand side: use prec for left-associativity
+            let (p2, rhs) = p.parse_expr_bp(prec)
+            p = p2
+            let span = p.span_from(lhs.span)
+
+            lhs = Expr {
+                kind: ExprKind::ExprBinary,
+                span: span,
+                int_val: 0,
+                float_val: 0.0,
+                name: empty_name(),
+                path: empty_path(),
+                bin_op: bin_op,
+                un_op: UnaryOp::OpNeg,
+                left: Some(Box::new(lhs)),
+                right: Some(Box::new(rhs)),
+                block: None,
+                else_expr: None,
+                args: None,
+                arms: None,
+                fields: None,
+            }
+        }
+
+        (p, lhs)
+    }
+
+    // ============================================================
+    // Prefix / atom expressions
+    // ============================================================
+
+    fn parse_prefix(self) -> (Parser, Expr) with Mut, IO, Panic, Div, Alloc {
+        let k = self.peek()
+
+        // Unary operators
+        if k == TokenKind::Minus {
+            self.parse_unary(UnaryOp::OpNeg)
+        } else if k == TokenKind::Bang {
+            self.parse_unary(UnaryOp::OpNot)
+        } else if k == TokenKind::Amp {
+            self.parse_unary(UnaryOp::OpRef)
+        } else if k == TokenKind::AmpBang {
+            self.parse_unary(UnaryOp::OpRefMut)
+        } else if k == TokenKind::Star {
+            self.parse_unary(UnaryOp::OpDeref)
+        }
+        // Literals
+        else if k == TokenKind::IntLit || k == TokenKind::HexLit || k == TokenKind::BinLit || k == TokenKind::OctLit {
+            self.parse_int_literal()
+        } else if k == TokenKind::FloatLit {
+            self.parse_float_literal()
+        } else if k == TokenKind::StringLit {
+            self.parse_string_literal()
+        } else if k == TokenKind::CharLit {
+            self.parse_char_literal()
+        } else if k == TokenKind::True {
+            let span = self.current_span()
+            let p = self.advance()
+            (p, mk_expr(ExprKind::ExprBoolTrue, span))
+        } else if k == TokenKind::False {
+            let span = self.current_span()
+            let p = self.advance()
+            (p, mk_expr(ExprKind::ExprBoolFalse, span))
+        }
+        // Grouping / tuple
+        else if k == TokenKind::LParen {
+            self.parse_paren_expr()
+        }
+        // Array literal
+        else if k == TokenKind::LBracket {
+            self.parse_array_literal()
+        }
+        // Block expression
+        else if k == TokenKind::LBrace {
+            self.parse_block_expr()
+        }
+        // Control flow
+        else if k == TokenKind::If {
+            self.parse_if_expr()
+        } else if k == TokenKind::Match {
+            self.parse_match_expr()
+        } else if k == TokenKind::While {
+            self.parse_while_expr()
+        } else if k == TokenKind::Loop {
+            self.parse_loop_expr()
+        } else if k == TokenKind::Return {
+            self.parse_return_expr()
+        } else if k == TokenKind::Break {
+            self.parse_break_expr()
+        } else if k == TokenKind::Continue {
+            let span = self.current_span()
+            let p = self.advance()
+            (p, mk_expr(ExprKind::ExprContinue, span))
+        }
+        // Self
+        else if k == TokenKind::SelfLower {
+            let span = self.current_span()
+            let name = self.current_name()
+            let p = self.advance()
+            var e = mk_expr(ExprKind::ExprIdent, span)
+            e.name = name
+            (p, e)
+        }
+        // Identifier (variable, function name, enum path, struct literal)
+        else if k == TokenKind::Ident {
+            self.parse_ident_expr()
+        }
+        // Error recovery
+        else {
+            let span = self.current_span()
+            var p = self
+            p.had_error = true
+            p.error_count = p.error_count + 1
+            (p, error_expr(span))
+        }
+    }
+
+    // ============================================================
+    // Unary expression: -x, !x, &x, &!x, *x
+    // ============================================================
+
+    fn parse_unary(self, op: UnaryOp) -> (Parser, Expr) with Mut, IO, Panic, Div, Alloc {
+        let start = self.current_span()
+        var p = self.advance()  // skip operator
+        let (p2, operand) = p.parse_expr_bp(13)  // unary precedence
+        p = p2
+        let span = p.span_from(start)
+        var e = mk_expr(ExprKind::ExprUnary, span)
+        e.un_op = op
+        e.left = Some(Box::new(operand))
+        (p, e)
+    }
+
+    // ============================================================
+    // Integer literal
+    // ============================================================
+
+    fn parse_int_literal(self) -> (Parser, Expr) with Mut, IO, Panic, Div {
+        let span = self.current_span()
+        let tok = self.current()
+        let p = self.advance()
+        var e = mk_expr(ExprKind::ExprIntLit, span)
+        e.int_val = tok.int_value
+        (p, e)
+    }
+
+    // ============================================================
+    // Float literal
+    // ============================================================
+
+    fn parse_float_literal(self) -> (Parser, Expr) with Mut, IO, Panic, Div {
+        let span = self.current_span()
+        let tok = self.current()
+        let p = self.advance()
+        var e = mk_expr(ExprKind::ExprFloatLit, span)
+        e.float_val = tok.float_value
+        (p, e)
+    }
+
+    // ============================================================
+    // String literal
+    // ============================================================
+
+    fn parse_string_literal(self) -> (Parser, Expr) with Mut, IO, Panic, Div {
+        let span = self.current_span()
+        let name = self.current_name()
+        let p = self.advance()
+        var e = mk_expr(ExprKind::ExprStringLit, span)
+        e.name = name
+        (p, e)
+    }
+
+    // ============================================================
+    // Char literal
+    // ============================================================
+
+    fn parse_char_literal(self) -> (Parser, Expr) with Mut, IO, Panic, Div {
+        let span = self.current_span()
+        let tok = self.current()
+        let p = self.advance()
+        var e = mk_expr(ExprKind::ExprCharLit, span)
+        e.int_val = tok.int_value
+        (p, e)
+    }
+
+    // ============================================================
+    // Parenthesized expression or tuple: (expr) or (a, b, c)
+    // ============================================================
+
+    fn parse_paren_expr(self) -> (Parser, Expr) with Mut, IO, Panic, Div, Alloc {
+        let start = self.current_span()
+        var p = self.advance()  // skip (
+
+        if p.peek() == TokenKind::RParen {
+            // Unit value ()
+            p = p.advance()
+            let span = p.span_from(start)
+            (p, mk_expr(ExprKind::ExprTupleLit, span))
+        } else {
+            let (p2, first) = p.parse_expr()
+            p = p2
+
+            if p.peek() == TokenKind::Comma {
+                // Tuple literal
+                p = p.advance()
+                var list = ExprList { head: first, tail: None }
+                while p.peek() != TokenKind::RParen && p.peek() != TokenKind::Eof {
+                    let (p3, next) = p.parse_expr()
+                    p = p3
+                    let new_node = ExprList { head: next, tail: None }
+                    list = expr_list_append(list, new_node)
+                    if p.peek() == TokenKind::Comma {
+                        p = p.advance()
+                    }
+                }
+                p = p.expect(TokenKind::RParen)
+                let span = p.span_from(start)
+                var e = mk_expr(ExprKind::ExprTupleLit, span)
+                e.args = Some(Box::new(list))
+                (p, e)
+            } else {
+                // Just grouping
+                p = p.expect(TokenKind::RParen)
+                (p, first)
+            }
+        }
+    }
+
+    // ============================================================
+    // Array literal: [a, b, c] or [val; count]
+    // ============================================================
+
+    fn parse_array_literal(self) -> (Parser, Expr) with Mut, IO, Panic, Div, Alloc {
+        let start = self.current_span()
+        var p = self.advance()  // skip [
+
+        if p.peek() == TokenKind::RBracket {
+            // Empty array
+            p = p.advance()
+            let span = p.span_from(start)
+            (p, mk_expr(ExprKind::ExprArrayLit, span))
+        } else {
+            let (p2, first) = p.parse_expr()
+            p = p2
+
+            if p.peek() == TokenKind::Semi {
+                // Array repeat: [val; count]
+                p = p.advance()  // skip ;
+                let (p3, count) = p.parse_expr()
+                p = p3.expect(TokenKind::RBracket)
+                let span = p.span_from(start)
+                var e = mk_expr(ExprKind::ExprArrayLit, span)
+                e.left = Some(Box::new(first))
+                e.right = Some(Box::new(count))
+                (p, e)
+            } else {
+                // Array elements: [a, b, c]
+                var list = ExprList { head: first, tail: None }
+                while p.peek() == TokenKind::Comma {
+                    p = p.advance()
+                    if p.peek() == TokenKind::RBracket { break }
+                    let (p3, next) = p.parse_expr()
+                    p = p3
+                    let new_node = ExprList { head: next, tail: None }
+                    list = expr_list_append(list, new_node)
+                }
+                p = p.expect(TokenKind::RBracket)
+                let span = p.span_from(start)
+                var e = mk_expr(ExprKind::ExprArrayLit, span)
+                e.args = Some(Box::new(list))
+                (p, e)
+            }
+        }
+    }
+
+    // ============================================================
+    // Block expression: { ... }
+    // ============================================================
+
+    fn parse_block_expr(self) -> (Parser, Expr) with Mut, IO, Panic, Div, Alloc {
+        let start = self.current_span()
+        let (p, blk) = self.parse_block()
+        let span = p.span_from(start)
+        var e = mk_expr(ExprKind::ExprBlock, span)
+        e.block = Some(Box::new(blk))
+        (p, e)
+    }
+
+    // ============================================================
+    // If expression: if cond { ... } [else { ... }]
+    // ============================================================
+
+    fn parse_if_expr(self) -> (Parser, Expr) with Mut, IO, Panic, Div, Alloc {
+        let start = self.current_span()
+        var p = self.advance()  // skip 'if'
+        let (p2, cond) = p.parse_expr()
+        p = p2
+        let (p3, then_block) = p.parse_block()
+        p = p3
+
+        var else_opt: Option<Box<Expr>> = None
+        if p.peek() == TokenKind::Else {
+            p = p.advance()  // skip 'else'
+            if p.peek() == TokenKind::If {
+                // else if
+                let (p4, else_if) = p.parse_if_expr()
+                p = p4
+                else_opt = Some(Box::new(else_if))
+            } else {
+                // else { ... }
+                let (p4, else_block) = p.parse_block()
+                p = p4
+                let else_span = p.span_from(start)
+                var else_expr = mk_expr(ExprKind::ExprBlock, else_span)
+                else_expr.block = Some(Box::new(else_block))
+                else_opt = Some(Box::new(else_expr))
+            }
+        }
+
+        let span = p.span_from(start)
+        var e = mk_expr(ExprKind::ExprIf, span)
+        e.left = Some(Box::new(cond))
+        e.block = Some(Box::new(then_block))
+        e.else_expr = else_opt
+        (p, e)
+    }
+
+    // ============================================================
+    // Match expression: match expr { pat => body, ... }
+    // ============================================================
+
+    fn parse_match_expr(self) -> (Parser, Expr) with Mut, IO, Panic, Div, Alloc {
+        let start = self.current_span()
+        var p = self.advance()  // skip 'match'
+        let (p2, scrutinee) = p.parse_expr()
+        p = p2
+        p = p.expect(TokenKind::LBrace)
+
+        // Parse arms
+        var arms_opt: Option<Box<MatchArmList>> = None
+        var first_arm = true
+
+        while p.peek() != TokenKind::RBrace && p.peek() != TokenKind::Eof {
+            let arm_start = p.current_span()
+            let (p3, pattern) = p.parse_pattern()
+            p = p3
+            p = p.expect(TokenKind::FatArrow)
+
+            let (p4, body) = if p.peek() == TokenKind::LBrace {
+                // Block body
+                let (pb, blk) = p.parse_block()
+                let blk_span = pb.span_from(arm_start)
+                var be = mk_expr(ExprKind::ExprBlock, blk_span)
+                be.block = Some(Box::new(blk))
+                (pb, be)
+            } else {
+                p.parse_expr()
+            }
+            p = p4
+
+            let arm = MatchArm { pattern: pattern, body: body, span: p.span_from(arm_start) }
+
+            if first_arm {
+                arms_opt = Some(Box::new(MatchArmList { head: arm, tail: None }))
+                first_arm = false
+            } else {
+                match arms_opt {
+                    Some(list) => {
+                        let new_node = MatchArmList { head: arm, tail: None }
+                        arms_opt = Some(Box::new(match_arm_list_append(*list, new_node)))
+                    },
+                    None => {
+                        arms_opt = Some(Box::new(MatchArmList { head: arm, tail: None }))
+                    },
+                }
+            }
+
+            // Skip comma between arms
+            if p.peek() == TokenKind::Comma {
+                p = p.advance()
+            }
+        }
+
+        p = p.expect(TokenKind::RBrace)
+        let span = p.span_from(start)
+        var e = mk_expr(ExprKind::ExprMatch, span)
+        e.left = Some(Box::new(scrutinee))
+        e.arms = arms_opt
+        (p, e)
+    }
+
+    // ============================================================
+    // While expression: while cond { ... }
+    // ============================================================
+
+    fn parse_while_expr(self) -> (Parser, Expr) with Mut, IO, Panic, Div, Alloc {
+        let start = self.current_span()
+        var p = self.advance()  // skip 'while'
+        let (p2, cond) = p.parse_expr()
+        p = p2
+        let (p3, body) = p.parse_block()
+        p = p3
+        let span = p.span_from(start)
+        var e = mk_expr(ExprKind::ExprWhile, span)
+        e.left = Some(Box::new(cond))
+        e.block = Some(Box::new(body))
+        (p, e)
+    }
+
+    // ============================================================
+    // Loop expression: loop { ... }
+    // ============================================================
+
+    fn parse_loop_expr(self) -> (Parser, Expr) with Mut, IO, Panic, Div, Alloc {
+        let start = self.current_span()
+        var p = self.advance()  // skip 'loop'
+        let (p2, body) = p.parse_block()
+        p = p2
+        let span = p.span_from(start)
+        var e = mk_expr(ExprKind::ExprLoop, span)
+        e.block = Some(Box::new(body))
+        (p, e)
+    }
+
+    // ============================================================
+    // Return expression: return [expr]
+    // ============================================================
+
+    fn parse_return_expr(self) -> (Parser, Expr) with Mut, IO, Panic, Div, Alloc {
+        let start = self.current_span()
+        var p = self.advance()  // skip 'return'
+        var e = mk_expr(ExprKind::ExprReturn, start)
+        if p.at_expr_start() {
+            let (p2, val) = p.parse_expr()
+            p = p2
+            e.left = Some(Box::new(val))
+            e.span = p.span_from(start)
+        }
+        (p, e)
+    }
+
+    // ============================================================
+    // Break expression: break [expr]
+    // ============================================================
+
+    fn parse_break_expr(self) -> (Parser, Expr) with Mut, IO, Panic, Div, Alloc {
+        let start = self.current_span()
+        var p = self.advance()  // skip 'break'
+        var e = mk_expr(ExprKind::ExprBreak, start)
+        if p.at_expr_start() {
+            let (p2, val) = p.parse_expr()
+            p = p2
+            e.left = Some(Box::new(val))
+            e.span = p.span_from(start)
+        }
+        (p, e)
+    }
+
+    // ============================================================
+    // Identifier expression (variable, path, struct literal, call)
+    // ============================================================
+
+    fn parse_ident_expr(self) -> (Parser, Expr) with Mut, IO, Panic, Div, Alloc {
+        let start = self.current_span()
+        let name = self.current_name()
+
+        // Check for path: Foo::Bar::baz
+        if self.peek_ahead(1) == TokenKind::ColonColon {
+            let (p1, path) = self.parse_type_path()
+
+            if p1.peek() == TokenKind::LBrace {
+                // Struct literal: Foo { x: 1, y: 2 }
+                p1.parse_struct_literal(path, start)
+            } else {
+                // Path expression: Foo::Bar
+                let span = p1.span_from(start)
+                var e = mk_expr(ExprKind::ExprPath, span)
+                e.path = path
+                (p1, e)
+            }
+        } else if self.peek_ahead(1) == TokenKind::LBrace {
+            // Struct literal with simple name: Point { x: 1, y: 2 }
+            var p = self.advance()
+            let path = AstPath {
+                segments: StringList { head_buf: name.buf, head_len: name.len, tail: None },
+                seg_count: 1,
+            }
+            p.parse_struct_literal(path, start)
+        } else {
+            // Simple identifier
+            let span = self.current_span()
+            let p = self.advance()
+            var e = mk_expr(ExprKind::ExprIdent, span)
+            e.name = name
+            (p, e)
+        }
+    }
+
+    // ============================================================
+    // Struct literal: Path { field: expr, ... }
+    // ============================================================
+
+    fn parse_struct_literal(self, path: AstPath, start: Span) -> (Parser, Expr) with Mut, IO, Panic, Div, Alloc {
+        var p = self.advance()  // skip {
+
+        var fields_opt: Option<Box<StructFieldList>> = None
+        var first_field = true
+
+        while p.peek() != TokenKind::RBrace && p.peek() != TokenKind::Eof {
+            let field_name = p.current_name()
+            p = p.expect_ident()
+            p = p.expect(TokenKind::Colon)
+            let (p2, field_val) = p.parse_expr()
+            p = p2
+
+            let field = StructFieldInit { name: field_name, value: field_val }
+
+            if first_field {
+                fields_opt = Some(Box::new(StructFieldList { head: field, tail: None }))
+                first_field = false
+            } else {
+                match fields_opt {
+                    Some(list) => {
+                        let new_node = StructFieldList { head: field, tail: None }
+                        fields_opt = Some(Box::new(struct_field_list_append(*list, new_node)))
+                    },
+                    None => {
+                        fields_opt = Some(Box::new(StructFieldList { head: field, tail: None }))
+                    },
+                }
+            }
+
+            if p.peek() == TokenKind::Comma {
+                p = p.advance()
+            }
+        }
+
+        p = p.expect(TokenKind::RBrace)
+        let span = p.span_from(start)
+        var e = mk_expr(ExprKind::ExprStructLit, span)
+        e.path = path
+        e.fields = fields_opt
+        (p, e)
+    }
+
+    // ============================================================
+    // Call expression: callee(arg1, arg2)
+    // ============================================================
+
+    fn parse_call_expr(self, callee: Expr) -> (Parser, Expr) with Mut, IO, Panic, Div, Alloc {
+        let start = callee.span
+        var p = self.advance()  // skip (
+
+        var args_opt: Option<Box<ExprList>> = None
+
+        if p.peek() != TokenKind::RParen {
+            let (p2, first) = p.parse_expr()
+            p = p2
+            var list = ExprList { head: first, tail: None }
+
+            while p.peek() == TokenKind::Comma {
+                p = p.advance()
+                if p.peek() == TokenKind::RParen { break }
+                let (p3, next) = p.parse_expr()
+                p = p3
+                let new_node = ExprList { head: next, tail: None }
+                list = expr_list_append(list, new_node)
+            }
+
+            args_opt = Some(Box::new(list))
+        }
+
+        p = p.expect(TokenKind::RParen)
+        let span = p.span_from(start)
+        var e = mk_expr(ExprKind::ExprCall, span)
+        e.left = Some(Box::new(callee))
+        e.args = args_opt
+        (p, e)
+    }
+
+    // ============================================================
+    // Index expression: base[index]
+    // ============================================================
+
+    fn parse_index_expr(self, base: Expr) -> (Parser, Expr) with Mut, IO, Panic, Div, Alloc {
+        let start = base.span
+        var p = self.advance()  // skip [
+        let (p2, index) = p.parse_expr()
+        p = p2.expect(TokenKind::RBracket)
+        let span = p.span_from(start)
+        var e = mk_expr(ExprKind::ExprIndex, span)
+        e.left = Some(Box::new(base))
+        e.right = Some(Box::new(index))
+        (p, e)
+    }
+
+    // ============================================================
+    // Dot expression: field access or method call
+    // ============================================================
+
+    fn parse_dot_expr(self, base: Expr) -> (Parser, Expr) with Mut, IO, Panic, Div, Alloc {
+        let start = base.span
+        var p = self.advance()  // skip .
+        let name = p.current_name()
+        p = p.advance()  // skip field/method name
+
+        if p.peek() == TokenKind::LParen {
+            // Method call: base.method(args)
+            p = p.advance()  // skip (
+            var args_opt: Option<Box<ExprList>> = None
+
+            if p.peek() != TokenKind::RParen {
+                let (p2, first) = p.parse_expr()
+                p = p2
+                var list = ExprList { head: first, tail: None }
+
+                while p.peek() == TokenKind::Comma {
+                    p = p.advance()
+                    if p.peek() == TokenKind::RParen { break }
+                    let (p3, next) = p.parse_expr()
+                    p = p3
+                    let new_node = ExprList { head: next, tail: None }
+                    list = expr_list_append(list, new_node)
+                }
+                args_opt = Some(Box::new(list))
+            }
+
+            p = p.expect(TokenKind::RParen)
+            let span = p.span_from(start)
+            var e = mk_expr(ExprKind::ExprMethodCall, span)
+            e.name = name
+            e.left = Some(Box::new(base))
+            e.args = args_opt
+            (p, e)
+        } else {
+            // Field access: base.field
+            let span = p.span_from(start)
+            var e = mk_expr(ExprKind::ExprFieldAccess, span)
+            e.name = name
+            e.left = Some(Box::new(base))
+            (p, e)
+        }
+    }
+}
+
+// ============================================================
+// Token to binary operator mapping
+// ============================================================
+
+fn token_to_binop(kind: TokenKind) -> BinaryOp {
+    match kind {
+        TokenKind::Plus => BinaryOp::OpAdd,
+        TokenKind::Minus => BinaryOp::OpSub,
+        TokenKind::Star => BinaryOp::OpMul,
+        TokenKind::Slash => BinaryOp::OpDiv,
+        TokenKind::Percent => BinaryOp::OpRem,
+        TokenKind::EqEq => BinaryOp::OpEq,
+        TokenKind::BangEq => BinaryOp::OpNe,
+        TokenKind::Lt => BinaryOp::OpLt,
+        TokenKind::LtEq => BinaryOp::OpLe,
+        TokenKind::Gt => BinaryOp::OpGt,
+        TokenKind::GtEq => BinaryOp::OpGe,
+        TokenKind::AmpAmp => BinaryOp::OpAnd,
+        TokenKind::PipePipe => BinaryOp::OpOr,
+        TokenKind::Amp => BinaryOp::OpBitAnd,
+        TokenKind::Pipe => BinaryOp::OpBitOr,
+        TokenKind::Caret => BinaryOp::OpBitXor,
+        TokenKind::Shl => BinaryOp::OpShl,
+        TokenKind::Shr => BinaryOp::OpShr,
+        TokenKind::PlusPlus => BinaryOp::OpConcat,
+        TokenKind::DotDot => BinaryOp::OpRange,
+        TokenKind::DotDotEq => BinaryOp::OpRangeInclusive,
+        _ => BinaryOp::OpAdd,
+    }
+}
+
+// ============================================================
+// Linked-list helpers for expression parsing
+// ============================================================
+
+fn expr_list_append(list: ExprList, node: ExprList) -> ExprList with Mut, Alloc {
+    match list.tail {
+        None => ExprList { head: list.head, tail: Some(Box::new(node)) },
+        Some(rest) => ExprList {
+            head: list.head,
+            tail: Some(Box::new(expr_list_append(*rest, node))),
+        },
+    }
+}
+
+fn match_arm_list_append(list: MatchArmList, node: MatchArmList) -> MatchArmList with Mut, Alloc {
+    match list.tail {
+        None => MatchArmList { head: list.head, tail: Some(Box::new(node)) },
+        Some(rest) => MatchArmList {
+            head: list.head,
+            tail: Some(Box::new(match_arm_list_append(*rest, node))),
+        },
+    }
+}
+
+fn struct_field_list_append(list: StructFieldList, node: StructFieldList) -> StructFieldList with Mut, Alloc {
+    match list.tail {
+        None => StructFieldList { head: list.head, tail: Some(Box::new(node)) },
+        Some(rest) => StructFieldList {
+            head: list.head,
+            tail: Some(Box::new(struct_field_list_append(*rest, node))),
+        },
+    }
+}
