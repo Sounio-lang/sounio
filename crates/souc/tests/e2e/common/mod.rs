@@ -702,7 +702,7 @@ fn normalize_output(s: &str) -> String {
         .map(|line| line.trim_end())
         .map(|line| {
             temp_path_re
-                .replace_all(line, "/tmp/sounio_test_XXXX/")
+                .replace_all(line, "/tmp/sounio_test_TEMP/")
                 .to_string()
         })
         .collect::<Vec<_>>()
