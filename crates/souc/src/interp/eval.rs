@@ -2459,7 +2459,13 @@ impl Interpreter {
             // Box::new(v) is transparent in the interpreter — just return the value
             "Box::new" => {
                 if let Some(val) = args.into_iter().next() {
-                    Ok(val)
+                    match val {
+                        // Avoid leaking internal mutable-cell refs into boxed value positions.
+                        // This preserves value semantics for self-hosted AST nodes that use
+                        // Box<T> pervasively and prevents accidental self-referential cycles.
+                        Value::Ref(r) => Ok(r.borrow().clone()),
+                        other => Ok(other),
+                    }
                 } else {
                     Ok(Value::Unit)
                 }
