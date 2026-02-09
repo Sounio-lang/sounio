@@ -6003,6 +6003,13 @@ impl TypeChecker {
                 | "write_bytes"
                 | "arg_count"
                 | "get_arg"
+                | "str_len"
+                | "str_eq"
+                | "str_concat"
+                | "str_slice"
+                | "str_char_at"
+                | "str_from_bytes"
+                | "int_to_str"
                 | "read_line"
                 | "read_byte"
                 | "parse_int"
@@ -6220,6 +6227,40 @@ impl TypeChecker {
                 return_type: Box::new(HirType::I64),
             },
             "get_arg" => HirType::Fn {
+                params: vec![HirType::I64],
+                return_type: Box::new(HirType::String),
+            },
+            "str_len" => HirType::Fn {
+                params: vec![HirType::String],
+                return_type: Box::new(HirType::I64),
+            },
+            "str_eq" => HirType::Fn {
+                params: vec![HirType::String, HirType::String],
+                return_type: Box::new(HirType::Bool),
+            },
+            "str_concat" => HirType::Fn {
+                params: vec![HirType::String, HirType::String],
+                return_type: Box::new(HirType::String),
+            },
+            "str_slice" => HirType::Fn {
+                params: vec![HirType::String, HirType::I64, HirType::I64],
+                return_type: Box::new(HirType::String),
+            },
+            "str_char_at" => HirType::Fn {
+                params: vec![HirType::String, HirType::I64],
+                return_type: Box::new(HirType::I64),
+            },
+            "str_from_bytes" => HirType::Fn {
+                params: vec![
+                    HirType::Array {
+                        element: Box::new(HirType::I8),
+                        size: None,
+                    },
+                    HirType::I64,
+                ],
+                return_type: Box::new(HirType::String),
+            },
+            "int_to_str" => HirType::Fn {
                 params: vec![HirType::I64],
                 return_type: Box::new(HirType::String),
             },

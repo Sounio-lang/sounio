@@ -445,9 +445,21 @@ impl SymbolTable {
             "type_of",     // Get type name as string
             "read_line",   // Read line from stdin
             "read_byte",   // Read single byte from stdin (-1 on EOF)
+            "read_file",   // Read file contents as byte array
+            "file_size",   // Get file size in bytes
+            "write_bytes", // Write byte array to file
+            "arg_count",   // Number of CLI user args after --
+            "get_arg",     // Get nth CLI user arg or empty string
             "parse_int",   // Parse string to int
             "parse_float", // Parse string to float
             "to_string",   // Convert to string
+            "str_len",     // String length in bytes
+            "str_eq",      // String equality
+            "str_concat",  // String concatenation
+            "str_slice",   // Byte-indexed string slice
+            "str_char_at", // Byte at index or -1
+            "str_from_bytes", // Build string from [i8] and length
+            "int_to_str",  // Convert i64 to string
             // Math functions
             "sqrt",  // Square root
             "abs",   // Absolute value

@@ -508,6 +508,135 @@ impl BuiltinRegistry {
         );
 
         self.register(
+            "str_len",
+            Rc::new(|args| {
+                if args.len() != 1 {
+                    return Err(format!("str_len expects 1 argument, got {}", args.len()));
+                }
+                match &args[0] {
+                    Value::String(s) => Ok(Value::Int(s.len() as i64)),
+                    _ => Err("str_len expects a string".to_string()),
+                }
+            }),
+        );
+
+        self.register(
+            "str_eq",
+            Rc::new(|args| {
+                if args.len() != 2 {
+                    return Err(format!("str_eq expects 2 arguments, got {}", args.len()));
+                }
+                match (&args[0], &args[1]) {
+                    (Value::String(a), Value::String(b)) => Ok(Value::Bool(a == b)),
+                    _ => Err("str_eq expects string arguments".to_string()),
+                }
+            }),
+        );
+
+        self.register(
+            "str_concat",
+            Rc::new(|args| {
+                if args.len() != 2 {
+                    return Err(format!("str_concat expects 2 arguments, got {}", args.len()));
+                }
+                match (&args[0], &args[1]) {
+                    (Value::String(a), Value::String(b)) => Ok(Value::String(format!("{}{}", a, b))),
+                    _ => Err("str_concat expects string arguments".to_string()),
+                }
+            }),
+        );
+
+        self.register(
+            "str_slice",
+            Rc::new(|args| {
+                if args.len() != 3 {
+                    return Err(format!("str_slice expects 3 arguments, got {}", args.len()));
+                }
+                match (&args[0], &args[1], &args[2]) {
+                    (Value::String(s), Value::Int(start), Value::Int(end)) => {
+                        let len = s.len() as i64;
+                        let start = (*start).clamp(0, len) as usize;
+                        let end = (*end).clamp(0, len) as usize;
+                        let end = end.max(start);
+                        let bytes = &s.as_bytes()[start..end];
+                        Ok(Value::String(String::from_utf8_lossy(bytes).into_owned()))
+                    }
+                    _ => Err("str_slice expects (string, int, int)".to_string()),
+                }
+            }),
+        );
+
+        self.register(
+            "str_char_at",
+            Rc::new(|args| {
+                if args.len() != 2 {
+                    return Err(format!(
+                        "str_char_at expects 2 arguments, got {}",
+                        args.len()
+                    ));
+                }
+                match (&args[0], &args[1]) {
+                    (Value::String(s), Value::Int(index)) => {
+                        if *index < 0 || (*index as usize) >= s.len() {
+                            Ok(Value::Int(-1))
+                        } else {
+                            Ok(Value::Int(s.as_bytes()[*index as usize] as i64))
+                        }
+                    }
+                    _ => Err("str_char_at expects (string, int)".to_string()),
+                }
+            }),
+        );
+
+        self.register(
+            "str_from_bytes",
+            Rc::new(|args| {
+                if args.len() != 2 {
+                    return Err(format!(
+                        "str_from_bytes expects 2 arguments, got {}",
+                        args.len()
+                    ));
+                }
+
+                let values = match &args[0] {
+                    Value::Array(data) => data.borrow().clone(),
+                    Value::Ref(r) => match &*r.borrow() {
+                        Value::Array(data) => data.borrow().clone(),
+                        _ => return Err("str_from_bytes expects an [i8] array".to_string()),
+                    },
+                    _ => return Err("str_from_bytes expects an [i8] array".to_string()),
+                };
+                let length = match &args[1] {
+                    Value::Int(n) => *n,
+                    _ => return Err("str_from_bytes expects (array, int)".to_string()),
+                };
+
+                let max_len = length.clamp(0, values.len() as i64) as usize;
+                let mut bytes = Vec::with_capacity(max_len);
+                for value in values.iter().take(max_len) {
+                    match value {
+                        Value::Int(i) => bytes.push((*i as i8) as u8),
+                        _ => return Err("str_from_bytes expects an [i8] array".to_string()),
+                    }
+                }
+                Ok(Value::String(String::from_utf8_lossy(&bytes).into_owned()))
+            }),
+        );
+
+        self.register(
+            "int_to_str",
+            Rc::new(|args| {
+                if args.len() != 1 {
+                    return Err(format!("int_to_str expects 1 argument, got {}", args.len()));
+                }
+                match &args[0] {
+                    Value::Int(n) => Ok(Value::String(n.to_string())),
+                    _ => Err("int_to_str expects an int".to_string()),
+                }
+            }),
+        );
+
+        self.register(
             "len",
             Rc::new(|args| {
                 if args.len() != 1 {
@@ -1545,6 +1674,81 @@ mod tests {
 
         let out_of_bounds = registry.call("get_arg", &[Value::Int(5)]).unwrap();
         assert_eq!(out_of_bounds, Value::String(String::new()));
+    }
+
+    #[test]
+    fn test_string_builtins() {
+        let registry = BuiltinRegistry::new();
+
+        let len = registry
+            .call("str_len", &[Value::String("hello".to_string())])
+            .unwrap();
+        assert_eq!(len, Value::Int(5));
+
+        let eq = registry
+            .call(
+                "str_eq",
+                &[
+                    Value::String("abc".to_string()),
+                    Value::String("abc".to_string()),
+                ],
+            )
+            .unwrap();
+        assert_eq!(eq, Value::Bool(true));
+
+        let concat = registry
+            .call(
+                "str_concat",
+                &[Value::String("foo".to_string()), Value::String("bar".to_string())],
+            )
+            .unwrap();
+        assert_eq!(concat, Value::String("foobar".to_string()));
+
+        let slice = registry
+            .call(
+                "str_slice",
+                &[
+                    Value::String("hello".to_string()),
+                    Value::Int(1),
+                    Value::Int(4),
+                ],
+            )
+            .unwrap();
+        assert_eq!(slice, Value::String("ell".to_string()));
+
+        let char_at = registry
+            .call(
+                "str_char_at",
+                &[Value::String("abc".to_string()), Value::Int(1)],
+            )
+            .unwrap();
+        assert_eq!(char_at, Value::Int(98));
+
+        let out_of_bounds = registry
+            .call(
+                "str_char_at",
+                &[Value::String("abc".to_string()), Value::Int(10)],
+            )
+            .unwrap();
+        assert_eq!(out_of_bounds, Value::Int(-1));
+
+        let from_bytes = registry
+            .call(
+                "str_from_bytes",
+                &[
+                    Value::Array(Rc::new(RefCell::new(vec![
+                        Value::Int(104),
+                        Value::Int(105),
+                        Value::Int(33),
+                    ]))),
+                    Value::Int(2),
+                ],
+            )
+            .unwrap();
+        assert_eq!(from_bytes, Value::String("hi".to_string()));
+
+        let int_to_str = registry.call("int_to_str", &[Value::Int(42)]).unwrap();
+        assert_eq!(int_to_str, Value::String("42".to_string()));
     }
 
     #[test]
