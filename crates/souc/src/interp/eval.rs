@@ -421,6 +421,10 @@ impl Interpreter {
             }
 
             HirExprKind::Global(name) => {
+                // Resolve Option/Result constructors to native values
+                if name == "None" {
+                    return Ok(Value::None);
+                }
                 // Check if it's a function
                 if let Some(func) = self.functions.get(name).cloned() {
                     Ok(Value::Function {
