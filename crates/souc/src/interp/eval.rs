@@ -7,7 +7,7 @@ use std::cell::RefCell;
 use std::collections::HashMap;
 use std::rc::Rc;
 
-use miette::{miette, Result};
+use miette::{Result, miette};
 
 use crate::hir::*;
 use crate::runtime::async_runtime::{SounioFuture, SounioRuntime, SounioValue};
@@ -286,7 +286,7 @@ impl Interpreter {
         for item in &hir.items {
             if let HirItem::Global(g) = item {
                 let val = self.eval_expr(&g.value).unwrap_or(Value::Unit);
-                self.env.set(g.name.clone(), val);
+                self.env.define(g.name.clone(), val);
             }
         }
 
@@ -819,7 +819,9 @@ impl Interpreter {
                             .cloned()
                             .ok_or(ControlFlow::Return(Value::Unit))
                     }
-                    _ => Err(ControlFlow::Return(Value::Unit)),
+                    // Box::new is transparent in the interpreter, so deref on
+                    // a non-ref value (e.g. a struct from Box) passes through
+                    other => Ok(other),
                 }
             }
 
@@ -2185,7 +2187,8 @@ impl Interpreter {
                         .cloned()
                         .ok_or(ControlFlow::Return(Value::Unit))
                 }
-                _ => Err(ControlFlow::Return(Value::Unit)),
+                // Box deref is transparent — pass through non-ref values
+                other => Ok(other),
             },
         }
     }
@@ -2234,6 +2237,8 @@ impl Interpreter {
             name,
             "print"
                 | "println"
+                | "print_int"
+                | "print_char"
                 | "assert"
                 | "assert_eq"
                 | "len"
@@ -2242,6 +2247,7 @@ impl Interpreter {
                 | "None"
                 | "Ok"
                 | "Err"
+                | "Box::new"
                 | "dbg"
                 | "panic"
                 | "format"
@@ -2372,6 +2378,14 @@ impl Interpreter {
                 }
             }
             "None" => Ok(Value::None),
+            // Box::new(v) is transparent in the interpreter — just return the value
+            "Box::new" => {
+                if let Some(val) = args.into_iter().next() {
+                    Ok(val)
+                } else {
+                    Ok(Value::Unit)
+                }
+            }
             "Ok" => {
                 if let Some(val) = args.into_iter().next() {
                     Ok(Value::Ok(Box::new(val)))
@@ -2543,7 +2557,30 @@ impl Interpreter {
         match pattern {
             HirPattern::Wildcard => Some(vec![]),
 
-            HirPattern::Binding { name, .. } => Some(vec![(name.clone(), value.clone())]),
+            HirPattern::Binding { name, .. } => {
+                // HIR lowering may emit `None` as a Binding instead of a Variant.
+                // Treat binding named "None" as a variant match when the value is
+                // Option::None (either Value::None or Value::Variant with variant_name "None").
+                if name == "None" {
+                    match value {
+                        Value::None => return Some(vec![]),
+                        Value::Some(_) => return None,
+                        Value::Variant {
+                            variant_name,
+                            fields,
+                            ..
+                        } => {
+                            if variant_name == "None" && fields.is_empty() {
+                                return Some(vec![]);
+                            } else {
+                                return None;
+                            }
+                        }
+                        _ => {} // Fall through to normal binding
+                    }
+                }
+                Some(vec![(name.clone(), value.clone())])
+            }
 
             HirPattern::Literal(lit) => {
                 let lit_val = self.eval_literal(lit);
@@ -2594,13 +2631,49 @@ impl Interpreter {
                 variant,
                 patterns,
             } => {
+                // Handle builtin Value::None and Value::Some for Option pattern matching.
+                // The HIR may emit Some(v) as Variant { enum_name: "", variant: "Some", patterns: [v] }
+                // but the runtime uses Value::Some(inner) / Value::None instead of Value::Variant.
+                if variant == "None" {
+                    if matches!(value, Value::None) && patterns.is_empty() {
+                        return Some(vec![]);
+                    }
+                    // Also handle Value::Variant with variant_name "None"
+                    if let Value::Variant {
+                        variant_name,
+                        fields,
+                        ..
+                    } = value
+                    {
+                        if variant_name == "None" && fields.is_empty() && patterns.is_empty() {
+                            return Some(vec![]);
+                        }
+                    }
+                    return None;
+                }
+                if variant == "Some" {
+                    if let Value::Some(inner) = value {
+                        if patterns.len() == 1 {
+                            return self.match_pattern(&patterns[0], inner);
+                        }
+                        return if patterns.is_empty() {
+                            Some(vec![])
+                        } else {
+                            None
+                        };
+                    }
+                }
+
                 if let Value::Variant {
                     enum_name: e,
                     variant_name: v,
                     fields,
                 } = value
                 {
-                    if enum_name != e || variant != v {
+                    // Allow empty enum_name in pattern to match any enum type
+                    // (HIR lowering doesn't always resolve the enum name for
+                    //  well-known types like Option)
+                    if (!enum_name.is_empty() && enum_name != e) || variant != v {
                         return None;
                     }
                     if patterns.len() != fields.len() {
@@ -2823,6 +2896,53 @@ mod tests {
         // Pop should return something
         let popped = interp.pop_handler();
         assert!(popped.is_some());
+    }
+
+    #[test]
+    fn test_method_call_assignment_with_print_int_keeps_struct_state() {
+        let source = r#"
+struct Span {
+    start: i64,
+    end: i64,
+}
+
+struct Checker {
+    error_count: i64,
+    had_error: bool,
+}
+
+impl Checker {
+    fn report_mismatch(self, span: Span, code: i64) -> Checker with IO, Mut, Panic, Div, Alloc {
+        var c = self
+        c.error_count = c.error_count + 1
+        c.had_error = true
+        print("error[E")
+        if code < 100 { print("0") }
+        if code < 10 { print("0") }
+        print_int(code)
+        print("]\n")
+        c
+    }
+}
+
+fn main() -> i32 with IO, Mut, Panic, Div, Alloc {
+    var c = Checker { error_count: 0, had_error: false }
+    let sp = Span { start: 0, end: 0 }
+    c = c.report_mismatch(sp, 8)
+    print_int(c.error_count)
+    print("\n")
+    0
+}
+"#;
+
+        let tokens = crate::lexer::lex(source).expect("lex should succeed");
+        let ast = crate::parser::parse(&tokens, source).expect("parse should succeed");
+        let hir = crate::check::check_ast(&ast).expect("typecheck should succeed");
+
+        let mut interp = Interpreter::new();
+        let result = interp.interpret(&hir).expect("interpret should succeed");
+
+        assert_eq!(result, Value::Int(0));
     }
 
     #[test]
