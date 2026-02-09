@@ -10,6 +10,7 @@
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::rc::Rc;
+use std::sync::{Mutex, OnceLock};
 use std::{fs, io};
 
 use crate::interp::value::Value;
@@ -18,6 +19,25 @@ use crate::interp::value::Value;
 // Maps memory addresses to Values for simulating pointer operations in the interpreter
 thread_local! {
     static FFI_MEMORY: RefCell<HashMap<usize, Value>> = RefCell::new(HashMap::new());
+}
+
+static USER_ARGS: OnceLock<Mutex<Vec<String>>> = OnceLock::new();
+
+fn user_args_store() -> &'static Mutex<Vec<String>> {
+    USER_ARGS.get_or_init(|| Mutex::new(Vec::new()))
+}
+
+pub fn set_user_args(args: Vec<String>) {
+    if let Ok(mut guard) = user_args_store().lock() {
+        *guard = args;
+    }
+}
+
+fn get_user_args() -> Vec<String> {
+    user_args_store()
+        .lock()
+        .map(|guard| guard.clone())
+        .unwrap_or_default()
 }
 
 /// Type alias for a builtin function handler
@@ -461,6 +481,32 @@ impl BuiltinRegistry {
 
     /// Register utility builtins (len, type_of, assert, etc)
     fn register_utility_builtins(&mut self) {
+        self.register(
+            "arg_count",
+            Rc::new(|args| {
+                if !args.is_empty() {
+                    return Err(format!("arg_count expects 0 arguments, got {}", args.len()));
+                }
+                Ok(Value::Int(get_user_args().len() as i64))
+            }),
+        );
+
+        self.register(
+            "get_arg",
+            Rc::new(|args| {
+                if args.len() != 1 {
+                    return Err(format!("get_arg expects 1 argument, got {}", args.len()));
+                }
+                let n = match &args[0] {
+                    Value::Int(n) if *n >= 0 => *n as usize,
+                    _ => return Ok(Value::String(String::new())),
+                };
+                Ok(Value::String(
+                    get_user_args().get(n).cloned().unwrap_or_default(),
+                ))
+            }),
+        );
+
         self.register(
             "len",
             Rc::new(|args| {
@@ -1477,6 +1523,28 @@ mod tests {
 
         let _ = std::fs::remove_file(src_path);
         let _ = std::fs::remove_file(dst_path);
+    }
+
+    #[test]
+    fn test_arg_builtins() {
+        set_user_args(vec![
+            "hello".to_string(),
+            "world".to_string(),
+            "--flag".to_string(),
+        ]);
+        let registry = BuiltinRegistry::new();
+
+        let count = registry.call("arg_count", &[]).unwrap();
+        assert_eq!(count, Value::Int(3));
+
+        let arg0 = registry.call("get_arg", &[Value::Int(0)]).unwrap();
+        assert_eq!(arg0, Value::String("hello".to_string()));
+
+        let arg2 = registry.call("get_arg", &[Value::Int(2)]).unwrap();
+        assert_eq!(arg2, Value::String("--flag".to_string()));
+
+        let out_of_bounds = registry.call("get_arg", &[Value::Int(5)]).unwrap();
+        assert_eq!(out_of_bounds, Value::String(String::new()));
     }
 
     #[test]

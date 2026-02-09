@@ -12,7 +12,7 @@ use miette::{Result, miette};
 use crate::hir::*;
 use crate::runtime::async_runtime::{SounioFuture, SounioRuntime, SounioValue};
 
-use super::builtins::BuiltinRegistry;
+use super::builtins::{BuiltinRegistry, set_user_args};
 use super::effect_dispatch::{
     CapabilityAdapter, DispatchResult, EffectContext, EffectError, EffectHandler, EffectKind,
 };
@@ -41,6 +41,8 @@ pub struct Interpreter {
     effect_ctx: EffectContext,
     /// Emit interpreter trace logs to stderr
     trace: bool,
+    /// User arguments passed from CLI (after `--`)
+    user_args: Vec<String>,
 }
 
 impl Interpreter {
@@ -56,6 +58,7 @@ impl Interpreter {
             async_runtime: SounioRuntime::new(),
             effect_ctx: EffectContext::new(),
             trace: false,
+            user_args: Vec::new(),
         }
     }
 
@@ -71,6 +74,7 @@ impl Interpreter {
             async_runtime: SounioRuntime::new(),
             effect_ctx: EffectContext::with_seed(seed),
             trace: false,
+            user_args: Vec::new(),
         }
     }
 
@@ -96,6 +100,7 @@ impl Interpreter {
             async_runtime: SounioRuntime::new(),
             effect_ctx: EffectContext::with_all_handlers(),
             trace: false,
+            user_args: Vec::new(),
         }
     }
 
@@ -113,6 +118,7 @@ impl Interpreter {
             async_runtime: SounioRuntime::new(),
             effect_ctx: EffectContext::with_registry(registry),
             trace: false,
+            user_args: Vec::new(),
         }
     }
 
@@ -121,6 +127,12 @@ impl Interpreter {
         let mut interp = Self::new();
         interp.trace = trace;
         interp
+    }
+
+    /// Set user args passed after `--` in CLI mode.
+    pub fn set_user_args(&mut self, args: Vec<String>) {
+        self.user_args = args.clone();
+        set_user_args(args);
     }
 
     /// Get mutable access to effect context
@@ -2324,6 +2336,8 @@ impl Interpreter {
                 | "read_file"
                 | "file_size"
                 | "write_bytes"
+                | "arg_count"
+                | "get_arg"
                 | "read_line"
                 | "parse_int"
                 | "parse_float"

@@ -2998,6 +2998,7 @@ fn run(
     );
 
     let input_path = input.to_path_buf();
+    let user_args = args.to_vec();
     let run_result = std::thread::Builder::new()
         .name("interp".into())
         .stack_size(64 * 1024 * 1024)
@@ -3043,6 +3044,7 @@ fn run(
 
             // Use tree-walking interpreter
             let mut interpreter = sounio::interp::Interpreter::with_trace(trace_interp);
+            interpreter.set_user_args(user_args);
             match interpreter.interpret(&hir) {
                 Ok(result) => {
                     // Only print non-unit results
