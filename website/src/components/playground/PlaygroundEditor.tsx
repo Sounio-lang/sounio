@@ -27,6 +27,9 @@ interface WasmApi {
   version?: () => string;
 }
 
+const WASM_JS_URL = '/wasm/sounio_compiler.js';
+const WASM_BIN_URL = '/wasm/sounio_compiler_bg.wasm';
+
 const EXAMPLES = [
   {
     name: 'Hello World',
@@ -86,8 +89,8 @@ export default function PlaygroundEditor({ initialCode, theme = 'dark' }: Playgr
 
     async function loadWasm() {
       try {
-        const wasmModule = await import('/wasm/sounio_compiler.js');
-        await wasmModule.default('/wasm/sounio_compiler_bg.wasm');
+        const wasmModule = await import(/* @vite-ignore */ WASM_JS_URL);
+        await wasmModule.default(WASM_BIN_URL);
         if (cancelled) return;
         setWasmApi({
           compile: wasmModule.compile,
@@ -99,7 +102,11 @@ export default function PlaygroundEditor({ initialCode, theme = 'dark' }: Playgr
       } catch (error) {
         if (cancelled) return;
         setWasmStatus('error');
-        setOutput(`Failed to load Sounio WASM runtime:\n${String(error)}`);
+        setOutput(
+          `Failed to load Sounio WASM runtime.\n` +
+            `Expected assets:\n- ${WASM_JS_URL}\n- ${WASM_BIN_URL}\n\n` +
+            `${String(error)}`,
+        );
       }
     }
 

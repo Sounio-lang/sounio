@@ -16,7 +16,7 @@ Welcome to the Sounio documentation. Sounio is a systems programming language fo
 ## Language Reference
 
 - **[Language Guide](/docs/language/)** — Complete syntax and semantics reference
-- **[Standard Library](/docs/stdlib/)** — API documentation for 49 stdlib modules
+- **[Standard Library](/docs/stdlib/)** — API documentation for 76 stdlib modules
 - **[API Reference](/docs/api/)** — Compiler and runtime APIs
 
 ## Core Concepts

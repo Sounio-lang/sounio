@@ -1,6 +1,6 @@
-# Sounio: Epistemic Types for Scientific Computing
+# Sounio Papers
 
-ArXiv preprint for the Sounio programming language.
+This directory contains both the legacy TeX preprint source and the JOSS submission source.
 
 ## Abstract
 
@@ -18,9 +18,11 @@ make clean  # Remove build artifacts
 
 ## Files
 
-- `sounio-epistemic-types.tex` — Main paper
-- `references.bib` — Bibliography
-- `Makefile` — Build script
+- `paper.md` — JOSS paper source
+- `paper.bib` — JOSS bibliography
+- `sounio-epistemic-types.tex` — TeX preprint source
+- `references.bib` — TeX preprint bibliography
+- `Makefile` — TeX build script
 
 ## Target Venues
 

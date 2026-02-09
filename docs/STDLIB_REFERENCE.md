@@ -16,7 +16,7 @@ Comprehensive analysis of all 76 stdlib modules with implementation status, LOC,
 
 ---
 
-## All Modules (49 Total)
+## Core Module Index (49 Listed)
 
 | Module | Purpose | Status |
 |--------|---------|--------|

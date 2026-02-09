@@ -1,12 +1,12 @@
 ---
 title: "Standard Library"
-description: "API reference for Sounio's 49 standard library modules"
+description: "API reference for Sounio's 76 standard library modules"
 weight: 3
 ---
 
 # Standard Library Reference
 
-Sounio's standard library provides 49 modules covering scientific computing, uncertainty quantification, I/O, collections, and GPU primitives.
+Sounio's standard library provides 76 modules covering scientific computing, uncertainty quantification, I/O, collections, and GPU primitives.
 
 ## Core Modules
 
