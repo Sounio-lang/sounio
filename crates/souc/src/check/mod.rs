@@ -5998,7 +5998,11 @@ impl TypeChecker {
                 | "dbg"
                 | "panic"
                 | "format"
+                | "read_file"
+                | "file_size"
+                | "write_bytes"
                 | "read_line"
+                | "read_byte"
                 | "parse_int"
                 | "parse_float"
                 | "to_string"
@@ -6204,6 +6208,32 @@ impl TypeChecker {
             "type_of" | "format" | "to_string" | "read_line" => HirType::Fn {
                 params: vec![],
                 return_type: Box::new(HirType::String),
+            },
+            "read_byte" => HirType::Fn {
+                params: vec![],
+                return_type: Box::new(HirType::I64),
+            },
+            "read_file" => HirType::Fn {
+                params: vec![HirType::String],
+                return_type: Box::new(HirType::Array {
+                    element: Box::new(HirType::I8),
+                    size: None,
+                }),
+            },
+            "file_size" => HirType::Fn {
+                params: vec![HirType::String],
+                return_type: Box::new(HirType::I64),
+            },
+            "write_bytes" => HirType::Fn {
+                params: vec![
+                    HirType::String,
+                    HirType::Array {
+                        element: Box::new(HirType::I8),
+                        size: None,
+                    },
+                    HirType::I64,
+                ],
+                return_type: Box::new(HirType::Bool),
             },
             "parse_int" | "parse_float" => HirType::Fn {
                 params: vec![HirType::String],

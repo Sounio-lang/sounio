@@ -2255,6 +2255,10 @@ impl Interpreter {
                 | "dbg"
                 | "panic"
                 | "format"
+                | "read_byte"
+                | "read_file"
+                | "file_size"
+                | "write_bytes"
                 | "read_line"
                 | "parse_int"
                 | "parse_float"
@@ -2447,6 +2451,14 @@ impl Interpreter {
                     }
                 } else {
                     Ok(Value::None)
+                }
+            }
+            "read_byte" => {
+                use std::io::Read;
+                let mut buf = [0u8; 1];
+                match std::io::stdin().lock().read(&mut buf) {
+                    Ok(1) => Ok(Value::Int(buf[0] as i64)),
+                    _ => Ok(Value::Int(-1)), // EOF
                 }
             }
             "read_line" => {

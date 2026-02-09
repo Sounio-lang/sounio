@@ -10,6 +10,7 @@
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::rc::Rc;
+use std::{fs, io};
 
 use crate::interp::value::Value;
 
@@ -117,6 +118,137 @@ impl BuiltinRegistry {
                     .join("");
                 println!("{}", output);
                 Ok(Value::Unit)
+            }),
+        );
+
+        self.register(
+            "read_file",
+            Rc::new(|args| {
+                if args.len() != 1 {
+                    return Err(format!("read_file expects 1 argument, got {}", args.len()));
+                }
+
+                let path = match &args[0] {
+                    Value::String(s) => s,
+                    other => {
+                        return Err(format!(
+                            "read_file expects string path, got {}",
+                            other.type_name()
+                        ));
+                    }
+                };
+
+                match fs::read(path) {
+                    Ok(bytes) => {
+                        let values = bytes
+                            .into_iter()
+                            .map(|b| Value::Int((b as i8) as i64))
+                            .collect::<Vec<_>>();
+                        Ok(Value::Array(Rc::new(RefCell::new(values))))
+                    }
+                    Err(err) => {
+                        eprintln!("warning: read_file('{}') failed: {}", path, err);
+                        Ok(Value::Array(Rc::new(RefCell::new(Vec::new()))))
+                    }
+                }
+            }),
+        );
+
+        self.register(
+            "file_size",
+            Rc::new(|args| {
+                if args.len() != 1 {
+                    return Err(format!("file_size expects 1 argument, got {}", args.len()));
+                }
+
+                let path = match &args[0] {
+                    Value::String(s) => s,
+                    other => {
+                        return Err(format!(
+                            "file_size expects string path, got {}",
+                            other.type_name()
+                        ));
+                    }
+                };
+
+                match fs::metadata(path) {
+                    Ok(meta) => Ok(Value::Int(i64::try_from(meta.len()).unwrap_or(i64::MAX))),
+                    Err(err) => {
+                        eprintln!("warning: file_size('{}') failed: {}", path, err);
+                        Ok(Value::Int(-1))
+                    }
+                }
+            }),
+        );
+
+        self.register(
+            "write_bytes",
+            Rc::new(|args| {
+                if args.len() != 3 {
+                    return Err(format!("write_bytes expects 3 arguments, got {}", args.len()));
+                }
+
+                let path = match &args[0] {
+                    Value::String(s) => s,
+                    other => {
+                        return Err(format!(
+                            "write_bytes expects string path as arg0, got {}",
+                            other.type_name()
+                        ));
+                    }
+                };
+
+                let byte_values = match &args[1] {
+                    Value::Array(arr) => arr.borrow().clone(),
+                    Value::Ref(r) => match &*r.borrow() {
+                        Value::Array(arr) => arr.borrow().clone(),
+                        other => {
+                            return Err(format!(
+                                "write_bytes expects array<i8> as arg1, got {}",
+                                other.type_name()
+                            ));
+                        }
+                    },
+                    other => {
+                        return Err(format!(
+                            "write_bytes expects array<i8> as arg1, got {}",
+                            other.type_name()
+                        ));
+                    }
+                };
+
+                let length = match &args[2] {
+                    Value::Int(n) if *n >= 0 => *n as usize,
+                    Value::Int(_) => 0usize,
+                    other => {
+                        return Err(format!(
+                            "write_bytes expects i64 length as arg2, got {}",
+                            other.type_name()
+                        ));
+                    }
+                };
+
+                let mut bytes = Vec::with_capacity(byte_values.len().min(length));
+                for value in byte_values.iter().take(length) {
+                    match value {
+                        Value::Int(n) => bytes.push((*n as i8) as u8),
+                        other => {
+                            return Err(format!(
+                                "write_bytes data must contain ints, got {}",
+                                other.type_name()
+                            ));
+                        }
+                    }
+                }
+
+                match fs::File::create(path).and_then(|mut f| io::Write::write_all(&mut f, &bytes))
+                {
+                    Ok(()) => Ok(Value::Bool(true)),
+                    Err(err) => {
+                        eprintln!("warning: write_bytes('{}') failed: {}", path, err);
+                        Ok(Value::Bool(false))
+                    }
+                }
             }),
         );
     }
@@ -1296,6 +1428,55 @@ mod tests {
         // Wrong argument type
         let result = registry.call("sqrt", &[Value::String("hello".to_string())]);
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_file_io_builtins() {
+        use std::time::{SystemTime, UNIX_EPOCH};
+
+        let registry = BuiltinRegistry::new();
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let src_path = std::env::temp_dir().join(format!("sounio_builtin_src_{}.txt", unique));
+        let dst_path = std::env::temp_dir().join(format!("sounio_builtin_dst_{}.bin", unique));
+
+        std::fs::write(&src_path, b"abc").unwrap();
+
+        let src_arg = Value::String(src_path.to_string_lossy().to_string());
+        let size = registry.call("file_size", std::slice::from_ref(&src_arg)).unwrap();
+        assert_eq!(size, Value::Int(3));
+
+        let content = registry.call("read_file", std::slice::from_ref(&src_arg)).unwrap();
+        match content {
+            Value::Array(arr) => {
+                let values = arr.borrow();
+                assert_eq!(values.len(), 3);
+                assert_eq!(values[0], Value::Int(97));
+                assert_eq!(values[1], Value::Int(98));
+                assert_eq!(values[2], Value::Int(99));
+            }
+            _ => panic!("expected array from read_file"),
+        }
+
+        let dst_arg = Value::String(dst_path.to_string_lossy().to_string());
+        let data = Value::Array(Rc::new(RefCell::new(vec![
+            Value::Int(120),
+            Value::Int(121),
+            Value::Int(122),
+            Value::Int(33),
+        ])));
+        let ok = registry
+            .call("write_bytes", &[dst_arg, data, Value::Int(3)])
+            .unwrap();
+        assert_eq!(ok, Value::Bool(true));
+
+        let written = std::fs::read(&dst_path).unwrap();
+        assert_eq!(written, b"xyz");
+
+        let _ = std::fs::remove_file(src_path);
+        let _ = std::fs::remove_file(dst_path);
     }
 
     #[test]
