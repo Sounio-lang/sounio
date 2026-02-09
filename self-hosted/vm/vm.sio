@@ -1,0 +1,410 @@
+// Minimal IR VM
+
+struct CallFrame {
+    fn_id: i64,
+    return_pc: i64,
+    return_reg: i64,
+    base_reg: i64,
+}
+
+struct VmState {
+    regs: [i64; 256],
+    float_regs: [f64; 256],
+    pc: i64,
+    call_stack: [CallFrame; 256],
+    call_depth: i64,
+    halted: bool,
+    exit_code: i64,
+    current_fn: i64,
+}
+
+var VM_IO_SILENT: bool = false
+
+fn vm_set_io_silent(silent: bool) with Mut {
+    VM_IO_SILENT = silent
+}
+
+fn vm_empty_frame() -> CallFrame {
+    CallFrame {
+        fn_id: -1,
+        return_pc: 0,
+        return_reg: -1,
+        base_reg: 0,
+    }
+}
+
+fn vm_new_state(entry_fn: i64) -> VmState {
+    VmState {
+        regs: [0; 256],
+        float_regs: [0.0; 256],
+        pc: 0,
+        call_stack: [vm_empty_frame(); 256],
+        call_depth: 0,
+        halted: false,
+        exit_code: 0,
+        current_fn: entry_fn,
+    }
+}
+
+fn vm_is_print_name(n: Name) -> bool with Mut, Panic, Div {
+    n.len == 5 && n.buf[0] == 112 && n.buf[1] == 114 && n.buf[2] == 105 && n.buf[3] == 110 && n.buf[4] == 116
+}
+
+fn vm_is_print_int_name(n: Name) -> bool with Mut, Panic, Div {
+    n.len == 9 && n.buf[0] == 112 && n.buf[1] == 114 && n.buf[2] == 105 && n.buf[3] == 110 && n.buf[4] == 116 && n.buf[5] == 95 && n.buf[6] == 105 && n.buf[7] == 110 && n.buf[8] == 116
+}
+
+fn vm_is_print_char_name(n: Name) -> bool with Mut, Panic, Div {
+    n.len == 10 && n.buf[0] == 112 && n.buf[1] == 114 && n.buf[2] == 105 && n.buf[3] == 110 && n.buf[4] == 116 && n.buf[5] == 95 && n.buf[6] == 99 && n.buf[7] == 104 && n.buf[8] == 97 && n.buf[9] == 114
+}
+
+fn vm_main_name() -> Name with Mut, Panic, Div {
+    ir_name_from_bytes(109, 97, 105, 110, 4)
+}
+
+fn vm_find_main_fn_id(m: IrModule) -> i64 with Mut, Panic, Div {
+    let main_name = vm_main_name()
+    var i: i64 = 0
+    while i < m.fn_count {
+        if ir_name_eq(m.functions[i].name, main_name) {
+            return i
+        }
+        i = i + 1
+    }
+    -1
+}
+
+fn vm_find_label_pc(f: IrFunction, label_id: i64) -> i64 with Mut, Panic, Div {
+    var i: i64 = 0
+    while i < f.instr_count {
+        let ins = f.instrs[i]
+        if ins.op == IrOpcode::IrLabel && ins.label_id == label_id {
+            return i
+        }
+        i = i + 1
+    }
+    f.instr_count
+}
+
+fn vm_print_digit(d: i64) with IO {
+    if d == 0 { print("0") }
+    else if d == 1 { print("1") }
+    else if d == 2 { print("2") }
+    else if d == 3 { print("3") }
+    else if d == 4 { print("4") }
+    else if d == 5 { print("5") }
+    else if d == 6 { print("6") }
+    else if d == 7 { print("7") }
+    else if d == 8 { print("8") }
+    else { print("9") }
+}
+
+fn vm_print_i64(v: i64) with IO, Mut, Panic, Div {
+    if v == 0 {
+        print("0")
+        return
+    }
+
+    var n = v
+    if n < 0 {
+        print("-")
+        n = -n
+    }
+
+    var digits: [i64; 32] = [0; 32]
+    var len: i64 = 0
+    while n > 0 && len < 32 {
+        digits[len] = n % 10
+        n = n / 10
+        len = len + 1
+    }
+
+    while len > 0 {
+        len = len - 1
+        vm_print_digit(digits[len])
+    }
+}
+
+fn vm_write_call_args(state: VmState, ins: IrInstr, callee: IrFunction) -> VmState with Mut, Panic, Div {
+    var st = state
+    if ins.arg_count > 0 && callee.param_count > 0 {
+        let preg0 = callee.param_regs[0]
+        let src0 = ins.src1
+        if preg0 >= 0 && preg0 < 256 && src0 >= 0 && src0 < 256 {
+            st.regs[preg0] = st.regs[src0]
+        }
+    }
+    if ins.arg_count > 1 && callee.param_count > 1 {
+        let preg1 = callee.param_regs[1]
+        let src1 = ins.src2
+        if preg1 >= 0 && preg1 < 256 && src1 >= 0 && src1 < 256 {
+            st.regs[preg1] = st.regs[src1]
+        }
+    }
+    st
+}
+
+fn vm_eval_binop(op: BinaryOp, lhs: i64, rhs: i64) -> i64 with Div, Panic {
+    if op == BinaryOp::OpAdd { lhs + rhs }
+    else if op == BinaryOp::OpSub { lhs - rhs }
+    else if op == BinaryOp::OpMul { lhs * rhs }
+    else if op == BinaryOp::OpDiv { if rhs == 0 { 0 } else { lhs / rhs } }
+    else if op == BinaryOp::OpRem { if rhs == 0 { 0 } else { lhs % rhs } }
+    else if op == BinaryOp::OpEq { if lhs == rhs { 1 } else { 0 } }
+    else if op == BinaryOp::OpNe { if lhs != rhs { 1 } else { 0 } }
+    else if op == BinaryOp::OpLt { if lhs < rhs { 1 } else { 0 } }
+    else if op == BinaryOp::OpLe { if lhs <= rhs { 1 } else { 0 } }
+    else if op == BinaryOp::OpGt { if lhs > rhs { 1 } else { 0 } }
+    else if op == BinaryOp::OpGe { if lhs >= rhs { 1 } else { 0 } }
+    else if op == BinaryOp::OpAnd { if lhs != 0 && rhs != 0 { 1 } else { 0 } }
+    else if op == BinaryOp::OpOr { if lhs != 0 || rhs != 0 { 1 } else { 0 } }
+    else if op == BinaryOp::OpBitAnd { lhs & rhs }
+    else if op == BinaryOp::OpBitOr { lhs | rhs }
+    else if op == BinaryOp::OpBitXor { lhs ^ rhs }
+    else if op == BinaryOp::OpShl { lhs << rhs }
+    else if op == BinaryOp::OpShr { lhs >> rhs }
+    else if op == BinaryOp::OpConcat { lhs + rhs }
+    else if op == BinaryOp::OpRange { rhs - lhs }
+    else { rhs - lhs + 1 }
+}
+
+fn vm_eval_unop(op: UnaryOp, src: i64) -> i64 {
+    if op == UnaryOp::OpNeg { -src }
+    else if op == UnaryOp::OpNot { if src == 0 { 1 } else { 0 } }
+    else if op == UnaryOp::OpRef { src }
+    else if op == UnaryOp::OpRefMut { src }
+    else { src }
+}
+
+fn vm_do_return(state: VmState, ret_val: i64) -> VmState with Mut, Panic, Div {
+    var st = state
+    if st.call_depth <= 0 {
+        st.halted = true
+        st.exit_code = ret_val
+        return st
+    }
+
+    st.call_depth = st.call_depth - 1
+    let frame = st.call_stack[st.call_depth]
+    st.current_fn = frame.fn_id
+    st.pc = frame.return_pc
+
+    if frame.return_reg >= 0 && frame.return_reg < 256 {
+        st.regs[frame.return_reg] = ret_val
+    }
+    st
+}
+
+fn vm_try_builtin_call(state: VmState, ins: IrInstr) -> (VmState, bool) with Mut, Panic, Div, Alloc, IO {
+    if vm_is_print_int_name(ins.name) {
+        var st = state
+        let arg_reg = ins.src1
+        if !VM_IO_SILENT && arg_reg >= 0 && arg_reg < 256 {
+            vm_print_i64(st.regs[arg_reg])
+        }
+        if ins.dst >= 0 && ins.dst < 256 {
+            st.regs[ins.dst] = 0
+        }
+        st.pc = st.pc + 1
+        return (st, true)
+    }
+
+    if vm_is_print_char_name(ins.name) {
+        var st = state
+        let arg_reg = ins.src1
+        if !VM_IO_SILENT && arg_reg >= 0 && arg_reg < 256 {
+            print_char(st.regs[arg_reg] as i8)
+        }
+        if ins.dst >= 0 && ins.dst < 256 {
+            st.regs[ins.dst] = 0
+        }
+        st.pc = st.pc + 1
+        return (st, true)
+    }
+
+    if vm_is_print_name(ins.name) {
+        var st = state
+        let arg_reg = ins.src1
+        if !VM_IO_SILENT && arg_reg >= 0 && arg_reg < 256 {
+            vm_print_i64(st.regs[arg_reg])
+        }
+        if ins.dst >= 0 && ins.dst < 256 {
+            st.regs[ins.dst] = 0
+        }
+        st.pc = st.pc + 1
+        return (st, true)
+    }
+
+    (state, false)
+}
+
+fn vm_step(state: VmState, m: IrModule) -> VmState with Mut, Panic, Div, Alloc, IO {
+    var st = state
+    if st.halted {
+        return st
+    }
+
+    if st.current_fn < 0 || st.current_fn >= m.fn_count {
+        st.halted = true
+        st.exit_code = 1
+        return st
+    }
+
+    let f = m.functions[st.current_fn]
+    if st.pc < 0 || st.pc >= f.instr_count {
+        return vm_do_return(st, 0)
+    }
+
+    let ins = f.instrs[st.pc]
+
+    if ins.op == IrOpcode::IrLoadImm {
+        if ins.dst >= 0 && ins.dst < 256 {
+            st.regs[ins.dst] = ins.imm_i64
+        }
+        st.pc = st.pc + 1
+        st
+    } else if ins.op == IrOpcode::IrLoadFloat {
+        if ins.dst >= 0 && ins.dst < 256 {
+            st.float_regs[ins.dst] = ins.imm_f64
+            st.regs[ins.dst] = ins.imm_f64 as i64
+        }
+        st.pc = st.pc + 1
+        st
+    } else if ins.op == IrOpcode::IrLoadBool {
+        if ins.dst >= 0 && ins.dst < 256 {
+            st.regs[ins.dst] = ins.imm_i64
+        }
+        st.pc = st.pc + 1
+        st
+    } else if ins.op == IrOpcode::IrLoadString {
+        if ins.dst >= 0 && ins.dst < 256 {
+            st.regs[ins.dst] = ins.imm_i64
+        }
+        st.pc = st.pc + 1
+        st
+    } else if ins.op == IrOpcode::IrCopy {
+        if ins.dst >= 0 && ins.dst < 256 && ins.src1 >= 0 && ins.src1 < 256 {
+            st.regs[ins.dst] = st.regs[ins.src1]
+        }
+        st.pc = st.pc + 1
+        st
+    } else if ins.op == IrOpcode::IrBinOp {
+        if ins.dst >= 0 && ins.dst < 256 && ins.src1 >= 0 && ins.src1 < 256 && ins.src2 >= 0 && ins.src2 < 256 {
+            st.regs[ins.dst] = vm_eval_binop(ins.bin_op, st.regs[ins.src1], st.regs[ins.src2])
+        }
+        st.pc = st.pc + 1
+        st
+    } else if ins.op == IrOpcode::IrUnaryOp {
+        if ins.dst >= 0 && ins.dst < 256 && ins.src1 >= 0 && ins.src1 < 256 {
+            st.regs[ins.dst] = vm_eval_unop(ins.un_op, st.regs[ins.src1])
+        }
+        st.pc = st.pc + 1
+        st
+    } else if ins.op == IrOpcode::IrCall {
+        let builtin_pair = vm_try_builtin_call(st, ins)
+        st = builtin_pair.0
+        if builtin_pair.1 {
+            return st
+        }
+
+        if ins.fn_id < 0 || ins.fn_id >= m.fn_count {
+            if ins.dst >= 0 && ins.dst < 256 {
+                st.regs[ins.dst] = 0
+            }
+            st.pc = st.pc + 1
+            return st
+        }
+
+        if st.call_depth >= 256 {
+            st.halted = true
+            st.exit_code = 2
+            return st
+        }
+
+        let frame = CallFrame {
+            fn_id: st.current_fn,
+            return_pc: st.pc + 1,
+            return_reg: ins.dst,
+            base_reg: 0,
+        }
+        st.call_stack[st.call_depth] = frame
+        st.call_depth = st.call_depth + 1
+
+        let callee = m.functions[ins.fn_id]
+        st = vm_write_call_args(st, ins, callee)
+        st.current_fn = ins.fn_id
+        st.pc = 0
+        st
+    } else if ins.op == IrOpcode::IrReturn {
+        var ret_val: i64 = 0
+        if ins.src1 >= 0 && ins.src1 < 256 {
+            ret_val = st.regs[ins.src1]
+        }
+        vm_do_return(st, ret_val)
+    } else if ins.op == IrOpcode::IrJump {
+        st.pc = vm_find_label_pc(f, ins.label_id)
+        st
+    } else if ins.op == IrOpcode::IrBranchTrue {
+        let cond = if ins.src1 >= 0 && ins.src1 < 256 { st.regs[ins.src1] } else { 0 }
+        if cond != 0 {
+            st.pc = vm_find_label_pc(f, ins.label_id)
+        } else {
+            st.pc = st.pc + 1
+        }
+        st
+    } else if ins.op == IrOpcode::IrBranchFalse {
+        let cond = if ins.src1 >= 0 && ins.src1 < 256 { st.regs[ins.src1] } else { 0 }
+        if cond == 0 {
+            st.pc = vm_find_label_pc(f, ins.label_id)
+        } else {
+            st.pc = st.pc + 1
+        }
+        st
+    } else if ins.op == IrOpcode::IrFieldGet {
+        if ins.dst >= 0 && ins.dst < 256 && ins.src1 >= 0 && ins.src1 < 256 {
+            st.regs[ins.dst] = st.regs[ins.src1]
+        }
+        st.pc = st.pc + 1
+        st
+    } else if ins.op == IrOpcode::IrFieldSet {
+        st.pc = st.pc + 1
+        st
+    } else if ins.op == IrOpcode::IrIndexGet {
+        if ins.dst >= 0 && ins.dst < 256 && ins.src1 >= 0 && ins.src1 < 256 {
+            st.regs[ins.dst] = st.regs[ins.src1]
+        }
+        st.pc = st.pc + 1
+        st
+    } else if ins.op == IrOpcode::IrIndexSet {
+        st.pc = st.pc + 1
+        st
+    } else if ins.op == IrOpcode::IrAlloc {
+        if ins.dst >= 0 && ins.dst < 256 {
+            st.regs[ins.dst] = ins.dst + 1000
+        }
+        st.pc = st.pc + 1
+        st
+    } else if ins.op == IrOpcode::IrLabel {
+        st.pc = st.pc + 1
+        st
+    } else if ins.op == IrOpcode::IrNop {
+        st.pc = st.pc + 1
+        st
+    } else {
+        st.pc = st.pc + 1
+        st
+    }
+}
+
+fn run_module_impl(m: IrModule) -> i64 with Mut, Panic, Div, Alloc, IO {
+    let main_id = vm_find_main_fn_id(m)
+    if main_id < 0 {
+        return 1
+    }
+
+    var st = vm_new_state(main_id)
+    while !st.halted {
+        st = vm_step(st, m)
+    }
+    st.exit_code
+}

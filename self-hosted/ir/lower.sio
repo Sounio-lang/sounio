@@ -1,0 +1,813 @@
+// AST -> IR lowering
+
+struct Lowerer {
+    module: IrModule,
+    current_fn: i64,
+    env: Option<Box<IrEnvList>>,
+    scope_depth: i64,
+    break_labels: [i64; 256],
+    continue_labels: [i64; 256],
+    loop_depth: i64,
+    error_count: i64,
+    had_error: bool,
+}
+
+fn lowerer_new() -> Lowerer {
+    Lowerer {
+        module: ir_empty_module(),
+        current_fn: IR_INVALID_FN,
+        env: None,
+        scope_depth: 0,
+        break_labels: [IR_INVALID_LABEL; 256],
+        continue_labels: [IR_INVALID_LABEL; 256],
+        loop_depth: 0,
+        error_count: 0,
+        had_error: false,
+    }
+}
+
+impl Lowerer {
+    fn report_error(self) -> Lowerer with Mut {
+        var lo = self
+        lo.error_count = lo.error_count + 1
+        lo.had_error = true
+        lo
+    }
+
+    fn enter_scope(self) -> Lowerer with Mut {
+        var lo = self
+        lo.scope_depth = lo.scope_depth + 1
+        lo
+    }
+
+    fn exit_scope(self) -> Lowerer with Mut {
+        var lo = self
+        if lo.scope_depth > 0 {
+            lo.scope_depth = lo.scope_depth - 1
+        }
+        lo
+    }
+
+    fn bind_local(self, name: Name, reg: i64, is_mut: bool) -> Lowerer with Mut, Alloc {
+        var lo = self
+        let b = IrEnvBinding {
+            name: name,
+            reg: reg,
+            is_mut: is_mut,
+            depth: lo.scope_depth,
+        }
+        lo.env = ir_env_push(lo.env, b)
+        lo
+    }
+
+    fn lookup_local(self, name: Name) -> i64 with Mut, Panic, Div, Alloc {
+        ir_env_lookup(self.env, name, self.scope_depth)
+    }
+
+    fn current_fn_value(self) -> IrFunction with Panic {
+        self.module.functions[self.current_fn]
+    }
+
+    fn set_current_fn_value(self, f: IrFunction) -> Lowerer with Mut, Panic, Div {
+        var lo = self
+        if lo.current_fn >= 0 && lo.current_fn < lo.module.fn_count {
+            var m = lo.module
+            m.functions[lo.current_fn] = f
+            lo.module = m
+        }
+        lo
+    }
+
+    fn fresh_reg(self) -> (Lowerer, i64) with Mut, Panic, Div {
+        if self.current_fn < 0 || self.current_fn >= self.module.fn_count {
+            let loe = self.report_error()
+            return (loe, 0)
+        }
+        let f = self.current_fn_value()
+        let reg = f.reg_count
+        var f2 = f
+        f2.reg_count = f2.reg_count + 1
+        let lo2 = self.set_current_fn_value(f2)
+        (lo2, reg)
+    }
+
+    fn fresh_label(self) -> (Lowerer, i64) with Mut, Panic, Div {
+        if self.current_fn < 0 || self.current_fn >= self.module.fn_count {
+            let loe = self.report_error()
+            return (loe, 0)
+        }
+        let f = self.current_fn_value()
+        let label = f.label_count
+        var f2 = f
+        f2.label_count = f2.label_count + 1
+        let lo2 = self.set_current_fn_value(f2)
+        (lo2, label)
+    }
+
+    fn emit(self, instr: IrInstr) -> Lowerer with Mut, Panic, Div {
+        if self.current_fn < 0 || self.current_fn >= self.module.fn_count {
+            return self.report_error()
+        }
+        var f = self.current_fn_value()
+        if f.instr_count < IR_MAX_INSTRS {
+            f.instrs[f.instr_count] = instr
+            f.instr_count = f.instr_count + 1
+            self.set_current_fn_value(f)
+        } else {
+            self.report_error()
+        }
+    }
+
+    fn emit_unit(self) -> (Lowerer, i64) with Mut, Panic, Div {
+        let pair = self.fresh_reg()
+        let lo = pair.0
+        let reg = pair.1
+        let lo2 = lo.emit(ir_load_imm(reg, 0))
+        (lo2, reg)
+    }
+
+    fn intern_string(self, n: Name) -> (Lowerer, i64) with Mut, Panic, Div {
+        var i: i64 = 0
+        while i < self.module.string_count {
+            if ir_name_eq(self.module.string_table[i], n) {
+                return (self, i)
+            }
+            i = i + 1
+        }
+        var lo = self
+        if lo.module.string_count < IR_MAX_STRINGS {
+            let idx = lo.module.string_count
+            var m = lo.module
+            m.string_table[idx] = n
+            m.string_count = m.string_count + 1
+            lo.module = m
+            (lo, idx)
+        } else {
+            let loe = lo.report_error()
+            (loe, -1)
+        }
+    }
+
+    fn find_or_add_fn_id(self, name: Name) -> (Lowerer, i64) with Mut, Panic, Div {
+        var i: i64 = 0
+        while i < self.module.fn_count {
+            if ir_name_eq(self.module.functions[i].name, name) {
+                return (self, i)
+            }
+            i = i + 1
+        }
+
+        var lo = self
+        if lo.module.fn_count < IR_MAX_FUNCS {
+            let idx = lo.module.fn_count
+            var m = lo.module
+            var f = m.functions[idx]
+            f.name = name
+            f.instr_count = 0
+            f.reg_count = 0
+            f.label_count = 0
+            f.param_count = 0
+            f.param_regs = [IR_INVALID_REG; 64]
+            m.functions[idx] = f
+            m.fn_count = m.fn_count + 1
+            lo.module = m
+            (lo, idx)
+        } else {
+            let loe = lo.report_error()
+            (loe, -1)
+        }
+    }
+
+    fn fn_ends_with_return(self) -> bool with Mut, Panic, Div {
+        if self.current_fn < 0 || self.current_fn >= self.module.fn_count {
+            return false
+        }
+        let count = self.module.functions[self.current_fn].instr_count
+        if count <= 0 {
+            return false
+        }
+        let last = self.module.functions[self.current_fn].instrs[count - 1]
+        last.op == IrOpcode::IrReturn
+    }
+
+    fn push_loop_labels(self, continue_label: i64, break_label: i64) -> Lowerer with Mut, Panic, Div {
+        var lo = self
+        if lo.loop_depth < 256 {
+            lo.continue_labels[lo.loop_depth] = continue_label
+            lo.break_labels[lo.loop_depth] = break_label
+            lo.loop_depth = lo.loop_depth + 1
+            lo
+        } else {
+            lo.report_error()
+        }
+    }
+
+    fn pop_loop_labels(self) -> Lowerer with Mut {
+        var lo = self
+        if lo.loop_depth > 0 {
+            lo.loop_depth = lo.loop_depth - 1
+        }
+        lo
+    }
+
+    fn current_break_label(self) -> i64 with Panic {
+        if self.loop_depth <= 0 {
+            IR_INVALID_LABEL
+        } else {
+            self.break_labels[self.loop_depth - 1]
+        }
+    }
+
+    fn current_continue_label(self) -> i64 with Panic {
+        if self.loop_depth <= 0 {
+            IR_INVALID_LABEL
+        } else {
+            self.continue_labels[self.loop_depth - 1]
+        }
+    }
+
+    fn field_idx_from_name(self, n: Name) -> i64 with Mut, Panic, Div {
+        if n.len <= 0 {
+            0
+        } else {
+            (n.buf[0] as i64) % 64
+        }
+    }
+
+    fn lower_program_items(self, items: Option<Box<ItemList>>) -> Lowerer with Mut, Panic, Div, Alloc, IO {
+        match items {
+            Some(list) => {
+                let tail_items: Option<Box<ItemList>> = (*list).tail
+                var lo1 = self
+                let head_kind = (*list).head.kind
+                if head_kind == ItemKind::ItemFn {
+                    let head_name = (*list).head.name
+                    let head_fn_def = (*list).head.fn_def
+                    lo1 = lo1.lower_fn_item(head_name, head_fn_def)
+                }
+                lo1.lower_program_items(tail_items)
+            }
+            _ => self,
+        }
+    }
+
+    fn lower_item(self, item: Item) -> Lowerer with Mut, Panic, Div, Alloc, IO {
+        let k = item.kind
+        let name = item.name
+        let fn_def = item.fn_def
+        if k == ItemKind::ItemFn {
+            self.lower_fn_item(name, fn_def)
+        } else if k == ItemKind::ItemStruct {
+            self
+        } else if k == ItemKind::ItemEnum {
+            self
+        } else if k == ItemKind::ItemImpl {
+            self
+        } else if k == ItemKind::ItemTypeAlias {
+            self
+        } else {
+            self
+        }
+    }
+
+    fn lower_fn_params(self, params: Option<Box<ParamList>>) -> Lowerer with Mut, Panic, Div, Alloc, IO {
+        match params {
+            Some(pl) => {
+                let pair = self.fresh_reg()
+                var lo = pair.0
+                let preg = pair.1
+
+                var f = lo.current_fn_value()
+                if f.param_count < IR_MAX_PARAMS {
+                    f.param_regs[f.param_count] = preg
+                    f.param_count = f.param_count + 1
+                    lo = lo.set_current_fn_value(f)
+                } else {
+                    lo = lo.report_error()
+                }
+
+                lo = lo.bind_local((*pl).head.name, preg, (*pl).head.is_self_mut)
+                lo.lower_fn_params((*pl).tail)
+            }
+            _ => self,
+        }
+    }
+
+    fn lower_fn_item(self, name: Name, opt: Option<Box<FnDef>>) -> Lowerer with Mut, Panic, Div, Alloc, IO {
+        match opt {
+            Some(fd) => {
+                let pair = self.find_or_add_fn_id(name)
+                var lo = pair.0
+                let fn_id = pair.1
+                if fn_id < 0 {
+                    return lo.report_error()
+                }
+
+                lo.current_fn = fn_id
+                lo.env = None
+                lo.scope_depth = 0
+                lo.loop_depth = 0
+
+                let fd_params: Option<Box<ParamList>> = (*fd).params
+                let fd_body: Block = (*fd).body
+
+                lo = lo.enter_scope()
+                lo = lo.lower_fn_params(fd_params)
+                let bpair = lo.lower_block(fd_body)
+                lo = bpair.0
+                let result_reg = bpair.1
+
+                if !lo.fn_ends_with_return() {
+                    lo = lo.emit(ir_return(result_reg))
+                }
+
+                lo = lo.exit_scope()
+                lo.current_fn = IR_INVALID_FN
+                lo
+            }
+            _ => self,
+        }
+    }
+
+    fn lower_block(self, blk: Block) -> (Lowerer, i64) with Mut, Panic, Div, Alloc, IO {
+        var lo = self.enter_scope()
+        let pair = lo.lower_stmt_list(blk.stmts)
+        lo = pair.0
+        let reg = pair.1
+        lo = lo.exit_scope()
+        (lo, reg)
+    }
+
+    fn lower_stmt_list(self, stmts: Option<Box<StmtList>>) -> (Lowerer, i64) with Mut, Panic, Div, Alloc, IO {
+        match stmts {
+            Some(list) => {
+                let head_stmt: Stmt = (*list).head
+                let tail_stmts: Option<Box<StmtList>> = (*list).tail
+                let pair1 = self.lower_stmt(head_stmt)
+                let lo1 = pair1.0
+                let reg1 = pair1.1
+                match tail_stmts {
+                    Some(_) => lo1.lower_stmt_list(tail_stmts),
+                    _ => (lo1, reg1),
+                }
+            }
+            _ => self.emit_unit(),
+        }
+    }
+
+    fn lower_stmt(self, s: Stmt) -> (Lowerer, i64) with Mut, Panic, Div, Alloc, IO {
+        if s.kind == StmtKind::StmtLet {
+            self.lower_let_stmt(s, false)
+        } else if s.kind == StmtKind::StmtVar {
+            self.lower_let_stmt(s, true)
+        } else if s.kind == StmtKind::StmtExpr {
+            self.lower_expr_stmt(s)
+        } else {
+            self.lower_assign_stmt(s)
+        }
+    }
+
+    fn lower_let_stmt(self, s: Stmt, is_mut: bool) -> (Lowerer, i64) with Mut, Panic, Div, Alloc, IO {
+        let pair = self.lower_opt_expr(s.expr)
+        var lo = pair.0
+        let reg = pair.1
+        lo = lo.bind_local(s.name, reg, is_mut)
+        (lo, reg)
+    }
+
+    fn lower_expr_stmt(self, s: Stmt) -> (Lowerer, i64) with Mut, Panic, Div, Alloc, IO {
+        self.lower_opt_expr(s.expr)
+    }
+
+    fn lower_assign_stmt(self, s: Stmt) -> (Lowerer, i64) with Mut, Panic, Div, Alloc, IO {
+        let pair_rhs = self.lower_opt_expr(s.expr)
+        var lo = pair_rhs.0
+        let rhs = pair_rhs.1
+
+        match s.target {
+            Some(target_expr) => {
+                if (*target_expr).kind == ExprKind::ExprIdent {
+                        let dst = lo.lookup_local((*target_expr).name)
+                        if dst < 0 {
+                            lo = lo.report_error()
+                            (lo, rhs)
+                        } else {
+                            lo = lo.emit(ir_copy(dst, rhs))
+                            (lo, dst)
+                        }
+                } else if (*target_expr).kind == ExprKind::ExprFieldAccess {
+                        match (*target_expr).left {
+                            Some(base_expr) => {
+                                let pair_base = lo.lower_expr(*base_expr)
+                                lo = pair_base.0
+                                let base_reg = pair_base.1
+                                let fidx = lo.field_idx_from_name((*target_expr).name)
+                                lo = lo.emit(ir_field_set(base_reg, fidx, rhs, (*target_expr).name))
+                                (lo, rhs)
+                            }
+                            _ => (lo.report_error(), rhs),
+                        }
+                } else if (*target_expr).kind == ExprKind::ExprIndex {
+                        let pair_base = lo.lower_opt_expr((*target_expr).left)
+                        lo = pair_base.0
+                        let base_reg = pair_base.1
+                        let pair_idx = lo.lower_opt_expr((*target_expr).right)
+                        lo = pair_idx.0
+                        let idx_reg = pair_idx.1
+                        lo = lo.emit(ir_index_set(base_reg, idx_reg, rhs))
+                        (lo, rhs)
+                } else {
+                    lo = lo.report_error()
+                    (lo, rhs)
+                }
+            }
+            _ => (lo.report_error(), rhs),
+        }
+    }
+
+    fn lower_opt_expr(self, opt: Option<Box<Expr>>) -> (Lowerer, i64) with Mut, Panic, Div, Alloc, IO {
+        match opt {
+            Some(e) => self.lower_expr(*e),
+            _ => self.emit_unit(),
+        }
+    }
+
+    fn lower_expr_args(self, opt: Option<Box<ExprList>>) -> (Lowerer, IrRegList, i64) with Mut, Panic, Div, Alloc, IO {
+        match opt {
+            Some(list) => {
+                let head_expr: Expr = (*list).head
+                let rest: Option<Box<ExprList>> = (*list).tail
+                let pair_head = self.lower_expr(head_expr)
+                let lo1: Lowerer = pair_head.0
+                let reg: i64 = pair_head.1
+                let pair_tail: (Lowerer, IrRegList, i64) = lo1.lower_expr_args(rest)
+                let lo2: Lowerer = pair_tail.0
+                let tail_args: IrRegList = pair_tail.1
+                let tail_count: i64 = pair_tail.2
+                if tail_count <= 0 {
+                    let node: IrRegList = IrRegList { head: reg, tail: None }
+                    (lo2, node, 1)
+                } else {
+                    let node: IrRegList = IrRegList { head: reg, tail: Some(Box::new(tail_args)) }
+                    (lo2, node, tail_count + 1)
+                }
+            }
+            _ => {
+                let empty = IrRegList { head: 0, tail: None }
+                (self, empty, 0)
+            }
+        }
+    }
+
+    fn prepend_arg(self, reg: i64, args: Option<Box<IrRegList>>) -> Option<Box<IrRegList>> with Alloc {
+        Some(Box::new(IrRegList { head: reg, tail: args }))
+    }
+
+    fn expr_to_callee_name(self, e: Expr) -> Name with Mut, Panic, Div {
+        if e.kind == ExprKind::ExprIdent {
+            e.name
+        } else if e.kind == ExprKind::ExprPath {
+            ir_path_first_name(e.path)
+        } else if e.kind == ExprKind::ExprFieldAccess {
+            e.name
+        } else if e.kind == ExprKind::ExprMethodCall {
+            e.name
+        } else {
+            ir_empty_name()
+        }
+    }
+
+    fn lower_struct_fields(self, base_reg: i64, fields: Option<Box<StructFieldList>>, idx: i64) -> Lowerer with Mut, Panic, Div, Alloc, IO {
+        match fields {
+            Some(list) => {
+                let pair = self.lower_expr((*list).head.value)
+                var lo = pair.0
+                let vreg = pair.1
+                lo = lo.emit(ir_field_set(base_reg, idx, vreg, (*list).head.name))
+                lo.lower_struct_fields(base_reg, (*list).tail, idx + 1)
+            }
+            _ => self,
+        }
+    }
+
+    fn lower_array_elems(self, base_reg: i64, elems: Option<Box<ExprList>>, idx: i64) -> Lowerer with Mut, Panic, Div, Alloc, IO {
+        match elems {
+            Some(list) => {
+                let pair_v = self.lower_expr((*list).head)
+                var lo = pair_v.0
+                let vreg = pair_v.1
+                let pair_i = lo.fresh_reg()
+                lo = pair_i.0
+                let ireg = pair_i.1
+                lo = lo.emit(ir_load_imm(ireg, idx))
+                lo = lo.emit(ir_index_set(base_reg, ireg, vreg))
+                lo.lower_array_elems(base_reg, (*list).tail, idx + 1)
+            }
+            _ => self,
+        }
+    }
+
+    fn lower_expr(self, e: Expr) -> (Lowerer, i64) with Mut, Panic, Div, Alloc, IO {
+        if e.kind == ExprKind::ExprIntLit {
+            let pair = self.fresh_reg()
+            let lo = pair.0
+            let reg = pair.1
+            let lo2 = lo.emit(ir_load_imm(reg, e.int_val))
+            (lo2, reg)
+        } else if e.kind == ExprKind::ExprFloatLit {
+            let pair = self.fresh_reg()
+            let lo = pair.0
+            let reg = pair.1
+            let lo2 = lo.emit(ir_load_float(reg, e.float_val))
+            (lo2, reg)
+        } else if e.kind == ExprKind::ExprBoolTrue {
+            let pair = self.fresh_reg()
+            let lo = pair.0
+            let reg = pair.1
+            let lo2 = lo.emit(ir_load_bool(reg, true))
+            (lo2, reg)
+        } else if e.kind == ExprKind::ExprBoolFalse {
+            let pair = self.fresh_reg()
+            let lo = pair.0
+            let reg = pair.1
+            let lo2 = lo.emit(ir_load_bool(reg, false))
+            (lo2, reg)
+        } else if e.kind == ExprKind::ExprStringLit {
+            let pair_idx = self.intern_string(e.name)
+            let lo1 = pair_idx.0
+            let idx = pair_idx.1
+            let pair_reg = lo1.fresh_reg()
+            let lo2 = pair_reg.0
+            let reg = pair_reg.1
+            let lo3 = lo2.emit(ir_load_string(reg, idx, e.name))
+            (lo3, reg)
+        } else if e.kind == ExprKind::ExprCharLit {
+            let pair = self.fresh_reg()
+            let lo = pair.0
+            let reg = pair.1
+            let lo2 = lo.emit(ir_load_imm(reg, e.int_val))
+            (lo2, reg)
+        } else if e.kind == ExprKind::ExprIdent {
+            let src = self.lookup_local(e.name)
+            if src >= 0 {
+                (self, src)
+            } else {
+                let loe = self.report_error()
+                loe.emit_unit()
+            }
+        } else if e.kind == ExprKind::ExprPath {
+            let n = ir_path_first_name(e.path)
+            let src = self.lookup_local(n)
+            if src >= 0 {
+                (self, src)
+            } else {
+                let loe = self.report_error()
+                loe.emit_unit()
+            }
+        } else if e.kind == ExprKind::ExprCall {
+            let callee_name = match e.left {
+                Some(c) => self.expr_to_callee_name(*c),
+                None => ir_empty_name(),
+            }
+            let pair_fn = self.find_or_add_fn_id(callee_name)
+            let lo1 = pair_fn.0
+            let fn_id = pair_fn.1
+            let pair_args: (Lowerer, IrRegList, i64) = lo1.lower_expr_args(e.args)
+            let lo2 = pair_args.0
+            let args = if pair_args.2 <= 0 { None } else { Some(Box::new(pair_args.1)) }
+            let argc = pair_args.2
+            let pair_d = lo2.fresh_reg()
+            let lo3 = pair_d.0
+            let dst = pair_d.1
+            let lo4 = lo3.emit(ir_call(dst, fn_id, callee_name, args, argc))
+            (lo4, dst)
+        } else if e.kind == ExprKind::ExprBinary {
+            let pair_l = self.lower_opt_expr(e.left)
+            let lo1 = pair_l.0
+            let lhs = pair_l.1
+            let pair_r = lo1.lower_opt_expr(e.right)
+            let lo2 = pair_r.0
+            let rhs = pair_r.1
+            let pair_d = lo2.fresh_reg()
+            let lo3 = pair_d.0
+            let dst = pair_d.1
+            let lo4 = lo3.emit(ir_binop(dst, lhs, e.bin_op, rhs))
+            (lo4, dst)
+        } else if e.kind == ExprKind::ExprUnary {
+            let pair_s = self.lower_opt_expr(e.left)
+            let lo1 = pair_s.0
+            let src = pair_s.1
+            let pair_d = lo1.fresh_reg()
+            let lo2 = pair_d.0
+            let dst = pair_d.1
+            let lo3 = lo2.emit(ir_unaryop(dst, e.un_op, src))
+            (lo3, dst)
+        } else if e.kind == ExprKind::ExprFieldAccess {
+            let pair_b = self.lower_opt_expr(e.left)
+            let lo1 = pair_b.0
+            let base = pair_b.1
+            let fidx = lo1.field_idx_from_name(e.name)
+            let pair_d = lo1.fresh_reg()
+            let lo2 = pair_d.0
+            let dst = pair_d.1
+            let lo3 = lo2.emit(ir_field_get(dst, base, fidx, e.name))
+            (lo3, dst)
+        } else if e.kind == ExprKind::ExprIndex {
+            let pair_b = self.lower_opt_expr(e.left)
+            let lo1 = pair_b.0
+            let base = pair_b.1
+            let pair_i = lo1.lower_opt_expr(e.right)
+            let lo2 = pair_i.0
+            let idx = pair_i.1
+            let pair_d = lo2.fresh_reg()
+            let lo3 = pair_d.0
+            let dst = pair_d.1
+            let lo4 = lo3.emit(ir_index_get(dst, base, idx))
+            (lo4, dst)
+        } else if e.kind == ExprKind::ExprMethodCall {
+            let pair_b = self.lower_opt_expr(e.left)
+            let lo1 = pair_b.0
+            let base_reg = pair_b.1
+            let pair_args: (Lowerer, IrRegList, i64) = lo1.lower_expr_args(e.args)
+            let lo2 = pair_args.0
+            let arg_list = if pair_args.2 <= 0 { None } else { Some(Box::new(pair_args.1)) }
+            let arg_count = pair_args.2
+            let args2 = lo2.prepend_arg(base_reg, arg_list)
+            let pair_fn = lo2.find_or_add_fn_id(e.name)
+            let lo3 = pair_fn.0
+            let fn_id = pair_fn.1
+            let pair_d = lo3.fresh_reg()
+            let lo4 = pair_d.0
+            let dst = pair_d.1
+            let lo5 = lo4.emit(ir_call(dst, fn_id, e.name, args2, arg_count + 1))
+            (lo5, dst)
+        } else if e.kind == ExprKind::ExprIf {
+            let pair_cond = self.lower_opt_expr(e.left)
+            let lo1 = pair_cond.0
+            let cond = pair_cond.1
+
+            let pair_l_else = lo1.fresh_label()
+            let lo2 = pair_l_else.0
+            let l_else = pair_l_else.1
+            let pair_l_end = lo2.fresh_label()
+            let lo3 = pair_l_end.0
+            let l_end = pair_l_end.1
+            let pair_res = lo3.fresh_reg()
+            let lo4 = pair_res.0
+            let res = pair_res.1
+
+            var lo = lo4.emit(ir_branch_false(cond, l_else))
+
+            let pair_then = match e.block {
+                Some(blk) => lo.lower_block(*blk),
+                None => lo.emit_unit(),
+            }
+            lo = pair_then.0
+            let then_reg = pair_then.1
+            lo = lo.emit(ir_copy(res, then_reg))
+            lo = lo.emit(ir_jump(l_end))
+            lo = lo.emit(ir_label(l_else))
+
+            let pair_else = match e.else_expr {
+                Some(ee) => lo.lower_expr(*ee),
+                None => lo.emit_unit(),
+            }
+            lo = pair_else.0
+            let else_reg = pair_else.1
+            lo = lo.emit(ir_copy(res, else_reg))
+            lo = lo.emit(ir_label(l_end))
+            (lo, res)
+        } else if e.kind == ExprKind::ExprMatch {
+            let pair_scrut = self.lower_opt_expr(e.left)
+            var lo = pair_scrut.0
+            let _scrut = pair_scrut.1
+            lo = lo.report_error()
+            lo.emit_unit()
+        } else if e.kind == ExprKind::ExprWhile {
+            let pair_l_top = self.fresh_label()
+            let lo1 = pair_l_top.0
+            let l_top = pair_l_top.1
+            let pair_l_end = lo1.fresh_label()
+            let lo2 = pair_l_end.0
+            let l_end = pair_l_end.1
+
+            var lo = lo2.emit(ir_label(l_top))
+            let pair_cond = lo.lower_opt_expr(e.left)
+            lo = pair_cond.0
+            let cond = pair_cond.1
+            lo = lo.emit(ir_branch_false(cond, l_end))
+            lo = lo.push_loop_labels(l_top, l_end)
+            match e.block {
+                Some(blk) => {
+                    let pair_body = lo.lower_block(*blk)
+                    lo = pair_body.0
+                }
+                None => {}
+            }
+            lo = lo.pop_loop_labels()
+            lo = lo.emit(ir_jump(l_top))
+            lo = lo.emit(ir_label(l_end))
+            lo.emit_unit()
+        } else if e.kind == ExprKind::ExprLoop {
+            let pair_l_top = self.fresh_label()
+            let lo1 = pair_l_top.0
+            let l_top = pair_l_top.1
+            let pair_l_end = lo1.fresh_label()
+            let lo2 = pair_l_end.0
+            let l_end = pair_l_end.1
+
+            var lo = lo2.emit(ir_label(l_top))
+            lo = lo.push_loop_labels(l_top, l_end)
+            match e.block {
+                Some(blk) => {
+                    let pair_body = lo.lower_block(*blk)
+                    lo = pair_body.0
+                }
+                None => {}
+            }
+            lo = lo.pop_loop_labels()
+            lo = lo.emit(ir_jump(l_top))
+            lo = lo.emit(ir_label(l_end))
+            lo.emit_unit()
+        } else if e.kind == ExprKind::ExprBlock {
+            match e.block {
+                Some(blk) => self.lower_block(*blk),
+                None => self.emit_unit(),
+            }
+        } else if e.kind == ExprKind::ExprReturn {
+            let pair = self.lower_opt_expr(e.left)
+            let lo = pair.0
+            let reg = pair.1
+            let lo2 = lo.emit(ir_return(reg))
+            (lo2, reg)
+        } else if e.kind == ExprKind::ExprBreak {
+            let pair = self.lower_opt_expr(e.left)
+            var lo = pair.0
+            let reg = pair.1
+            let target = lo.current_break_label()
+            if target >= 0 {
+                lo = lo.emit(ir_jump(target))
+            } else {
+                lo = lo.report_error()
+            }
+            (lo, reg)
+        } else if e.kind == ExprKind::ExprContinue {
+            let pair = self.emit_unit()
+            var lo = pair.0
+            let reg = pair.1
+            let target = lo.current_continue_label()
+            if target >= 0 {
+                lo = lo.emit(ir_jump(target))
+            } else {
+                lo = lo.report_error()
+            }
+            (lo, reg)
+        } else if e.kind == ExprKind::ExprStructLit {
+            let pair_dst = self.fresh_reg()
+            var lo = pair_dst.0
+            let dst = pair_dst.1
+            lo = lo.emit(ir_alloc(dst, 0))
+            lo = lo.lower_struct_fields(dst, e.fields, 0)
+            (lo, dst)
+        } else if e.kind == ExprKind::ExprArrayLit {
+            let pair_dst = self.fresh_reg()
+            var lo = pair_dst.0
+            let dst = pair_dst.1
+            lo = lo.emit(ir_alloc(dst, 1))
+            lo = lo.lower_array_elems(dst, e.args, 0)
+            (lo, dst)
+        } else if e.kind == ExprKind::ExprTupleLit {
+            let pair_dst = self.fresh_reg()
+            var lo = pair_dst.0
+            let dst = pair_dst.1
+            lo = lo.emit(ir_alloc(dst, 2))
+            lo = lo.lower_array_elems(dst, e.args, 0)
+            (lo, dst)
+        } else if e.kind == ExprKind::ExprRange {
+            let pair_l = self.lower_opt_expr(e.left)
+            let lo1 = pair_l.0
+            let lhs = pair_l.1
+            let pair_r = lo1.lower_opt_expr(e.right)
+            let lo2 = pair_r.0
+            let rhs = pair_r.1
+            let pair_d = lo2.fresh_reg()
+            let lo3 = pair_d.0
+            let dst = pair_d.1
+            let lo4 = lo3.emit(ir_binop(dst, lhs, e.bin_op, rhs))
+            (lo4, dst)
+        } else {
+            let loe = self.report_error()
+            loe.emit_unit()
+        }
+    }
+}
+
+fn lower_program_to_ir(prog: Program) -> IrLowerResult with Mut, Panic, Div, Alloc, IO {
+    let lo = lowerer_new()
+    let lo2 = lo.lower_program_items(prog.items)
+    IrLowerResult {
+        module: lo2.module,
+        error_count: lo2.error_count,
+        had_error: lo2.had_error,
+    }
+}

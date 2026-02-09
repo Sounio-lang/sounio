@@ -1,0 +1,637 @@
+// IR definitions for self-hosted post-checker phases
+
+let IR_MAX_FUNCS: i64 = 4
+let IR_MAX_STRINGS: i64 = 16
+let IR_MAX_INSTRS: i64 = 24
+let IR_MAX_PARAMS: i64 = 64
+let IR_INVALID_REG: i64 = -1
+let IR_INVALID_LABEL: i64 = -1
+let IR_INVALID_FN: i64 = -1
+
+enum IrOpcode {
+    IrLoadImm,
+    IrLoadFloat,
+    IrLoadBool,
+    IrLoadString,
+    IrCopy,
+    IrBinOp,
+    IrUnaryOp,
+    IrCall,
+    IrReturn,
+    IrJump,
+    IrBranchTrue,
+    IrBranchFalse,
+    IrFieldGet,
+    IrFieldSet,
+    IrIndexGet,
+    IrIndexSet,
+    IrAlloc,
+    IrLabel,
+    IrNop,
+    IrPhi,
+}
+
+struct IrRegList {
+    head: i64,
+    tail: Option<Box<IrRegList>>,
+}
+
+struct IrInstr {
+    op: IrOpcode,
+    dst: i64,
+    src1: i64,
+    src2: i64,
+    imm_i64: i64,
+    imm_f64: f64,
+    label_id: i64,
+    fn_id: i64,
+    field_idx: i64,
+    bin_op: BinaryOp,
+    un_op: UnaryOp,
+    name: Name,
+    call_args: Option<Box<IrRegList>>,
+    arg_count: i64,
+}
+
+struct IrFunction {
+    name: Name,
+    instrs: [IrInstr; 24],
+    instr_count: i64,
+    reg_count: i64,
+    label_count: i64,
+    param_count: i64,
+    param_regs: [i64; 64],
+}
+
+struct IrModule {
+    functions: [IrFunction; 4],
+    fn_count: i64,
+    string_table: [Name; 16],
+    string_count: i64,
+}
+
+struct IrEnvBinding {
+    name: Name,
+    reg: i64,
+    is_mut: bool,
+    depth: i64,
+}
+
+struct IrEnvList {
+    head: IrEnvBinding,
+    tail: Option<Box<IrEnvList>>,
+}
+
+struct IrLowerResult {
+    module: IrModule,
+    error_count: i64,
+    had_error: bool,
+}
+
+fn ir_empty_name() -> Name {
+    Name { buf: [0; 128], len: 0 }
+}
+
+fn ir_name_eq(a: Name, b: Name) -> bool with Mut, Panic, Div {
+    if a.len != b.len {
+        return false
+    }
+    var i: i64 = 0
+    while i < a.len {
+        if a.buf[i] != b.buf[i] {
+            return false
+        }
+        i = i + 1
+    }
+    true
+}
+
+fn ir_name_from_bytes(a: i8, b: i8, c: i8, d: i8, len: i64) -> Name with Mut, Panic, Div {
+    var n = Name { buf: [0; 128], len: len }
+    if len > 0 { n.buf[0] = a }
+    if len > 1 { n.buf[1] = b }
+    if len > 2 { n.buf[2] = c }
+    if len > 3 { n.buf[3] = d }
+    n
+}
+
+fn ir_name_from_string_list(sl: StringList) -> Name with Mut, Panic, Div {
+    var n = Name { buf: [0; 128], len: sl.head_len }
+    var i: i64 = 0
+    while i < sl.head_len && i < 128 {
+        n.buf[i] = sl.head_buf[i]
+        i = i + 1
+    }
+    n
+}
+
+fn ir_path_first_name(p: AstPath) -> Name with Mut, Panic, Div {
+    if p.seg_count <= 0 {
+        ir_empty_name()
+    } else {
+        ir_name_from_string_list(p.segments)
+    }
+}
+
+fn ir_empty_reg_list() -> Option<Box<IrRegList>> {
+    None
+}
+
+fn ir_reg_list_single(reg: i64) -> IrRegList {
+    IrRegList { head: reg, tail: None }
+}
+
+fn ir_reg_list_append(list: IrRegList, reg: i64) -> IrRegList with Alloc {
+    match list.tail {
+        Some(rest) => IrRegList {
+            head: list.head,
+            tail: Some(Box::new(ir_reg_list_append(*rest, reg))),
+        }
+        _ => IrRegList {
+            head: list.head,
+            tail: Some(Box::new(IrRegList { head: reg, tail: None })),
+        }
+    }
+}
+
+fn ir_reg_list_count(opt: Option<Box<IrRegList>>) -> i64 with Alloc {
+    match opt {
+        Some(list) => 1 + ir_reg_list_count((*list).tail),
+        _ => 0,
+    }
+}
+
+fn ir_empty_env() -> Option<Box<IrEnvList>> {
+    None
+}
+
+fn ir_env_push(env: Option<Box<IrEnvList>>, b: IrEnvBinding) -> Option<Box<IrEnvList>> with Alloc {
+    Some(Box::new(IrEnvList {
+        head: b,
+        tail: env,
+    }))
+}
+
+fn ir_env_lookup(env: Option<Box<IrEnvList>>, name: Name, depth: i64) -> i64 with Mut, Panic, Div, Alloc {
+    match env {
+        Some(list) => {
+            let b = (*list).head
+            if b.depth <= depth && ir_name_eq(b.name, name) {
+                b.reg
+            } else {
+                ir_env_lookup((*list).tail, name, depth)
+            }
+        }
+        _ => IR_INVALID_REG,
+    }
+}
+
+fn ir_instr_new(op: IrOpcode) -> IrInstr {
+    IrInstr {
+        op: op,
+        dst: IR_INVALID_REG,
+        src1: IR_INVALID_REG,
+        src2: IR_INVALID_REG,
+        imm_i64: 0,
+        imm_f64: 0.0,
+        label_id: IR_INVALID_LABEL,
+        fn_id: IR_INVALID_FN,
+        field_idx: -1,
+        bin_op: BinaryOp::OpAdd,
+        un_op: UnaryOp::OpNeg,
+        name: ir_empty_name(),
+        call_args: None,
+        arg_count: 0,
+    }
+}
+
+fn ir_nop() -> IrInstr {
+    ir_instr_new(IrOpcode::IrNop)
+}
+
+fn ir_label(label_id: i64) -> IrInstr {
+    let base = ir_instr_new(IrOpcode::IrLabel)
+    IrInstr {
+        op: base.op,
+        dst: base.dst,
+        src1: base.src1,
+        src2: base.src2,
+        imm_i64: base.imm_i64,
+        imm_f64: base.imm_f64,
+        label_id: label_id,
+        fn_id: base.fn_id,
+        field_idx: base.field_idx,
+        bin_op: base.bin_op,
+        un_op: base.un_op,
+        name: base.name,
+        call_args: base.call_args,
+        arg_count: base.arg_count,
+    }
+}
+
+fn ir_jump(label_id: i64) -> IrInstr {
+    let base = ir_instr_new(IrOpcode::IrJump)
+    IrInstr {
+        op: base.op,
+        dst: base.dst,
+        src1: base.src1,
+        src2: base.src2,
+        imm_i64: base.imm_i64,
+        imm_f64: base.imm_f64,
+        label_id: label_id,
+        fn_id: base.fn_id,
+        field_idx: base.field_idx,
+        bin_op: base.bin_op,
+        un_op: base.un_op,
+        name: base.name,
+        call_args: base.call_args,
+        arg_count: base.arg_count,
+    }
+}
+
+fn ir_branch_true(cond: i64, label_id: i64) -> IrInstr {
+    let base = ir_instr_new(IrOpcode::IrBranchTrue)
+    IrInstr {
+        op: base.op,
+        dst: base.dst,
+        src1: cond,
+        src2: base.src2,
+        imm_i64: base.imm_i64,
+        imm_f64: base.imm_f64,
+        label_id: label_id,
+        fn_id: base.fn_id,
+        field_idx: base.field_idx,
+        bin_op: base.bin_op,
+        un_op: base.un_op,
+        name: base.name,
+        call_args: base.call_args,
+        arg_count: base.arg_count,
+    }
+}
+
+fn ir_branch_false(cond: i64, label_id: i64) -> IrInstr {
+    let base = ir_instr_new(IrOpcode::IrBranchFalse)
+    IrInstr {
+        op: base.op,
+        dst: base.dst,
+        src1: cond,
+        src2: base.src2,
+        imm_i64: base.imm_i64,
+        imm_f64: base.imm_f64,
+        label_id: label_id,
+        fn_id: base.fn_id,
+        field_idx: base.field_idx,
+        bin_op: base.bin_op,
+        un_op: base.un_op,
+        name: base.name,
+        call_args: base.call_args,
+        arg_count: base.arg_count,
+    }
+}
+
+fn ir_load_imm(dst: i64, value: i64) -> IrInstr {
+    let base = ir_instr_new(IrOpcode::IrLoadImm)
+    IrInstr {
+        op: base.op,
+        dst: dst,
+        src1: base.src1,
+        src2: base.src2,
+        imm_i64: value,
+        imm_f64: base.imm_f64,
+        label_id: base.label_id,
+        fn_id: base.fn_id,
+        field_idx: base.field_idx,
+        bin_op: base.bin_op,
+        un_op: base.un_op,
+        name: base.name,
+        call_args: base.call_args,
+        arg_count: base.arg_count,
+    }
+}
+
+fn ir_load_float(dst: i64, value: f64) -> IrInstr {
+    let base = ir_instr_new(IrOpcode::IrLoadFloat)
+    IrInstr {
+        op: base.op,
+        dst: dst,
+        src1: base.src1,
+        src2: base.src2,
+        imm_i64: base.imm_i64,
+        imm_f64: value,
+        label_id: base.label_id,
+        fn_id: base.fn_id,
+        field_idx: base.field_idx,
+        bin_op: base.bin_op,
+        un_op: base.un_op,
+        name: base.name,
+        call_args: base.call_args,
+        arg_count: base.arg_count,
+    }
+}
+
+fn ir_load_bool(dst: i64, value: bool) -> IrInstr {
+    let base = ir_instr_new(IrOpcode::IrLoadBool)
+    IrInstr {
+        op: base.op,
+        dst: dst,
+        src1: base.src1,
+        src2: base.src2,
+        imm_i64: if value { 1 } else { 0 },
+        imm_f64: base.imm_f64,
+        label_id: base.label_id,
+        fn_id: base.fn_id,
+        field_idx: base.field_idx,
+        bin_op: base.bin_op,
+        un_op: base.un_op,
+        name: base.name,
+        call_args: base.call_args,
+        arg_count: base.arg_count,
+    }
+}
+
+fn ir_load_string(dst: i64, string_idx: i64, n: Name) -> IrInstr {
+    let base = ir_instr_new(IrOpcode::IrLoadString)
+    IrInstr {
+        op: base.op,
+        dst: dst,
+        src1: base.src1,
+        src2: base.src2,
+        imm_i64: string_idx,
+        imm_f64: base.imm_f64,
+        label_id: base.label_id,
+        fn_id: base.fn_id,
+        field_idx: base.field_idx,
+        bin_op: base.bin_op,
+        un_op: base.un_op,
+        name: n,
+        call_args: base.call_args,
+        arg_count: base.arg_count,
+    }
+}
+
+fn ir_copy(dst: i64, src: i64) -> IrInstr {
+    let base = ir_instr_new(IrOpcode::IrCopy)
+    IrInstr {
+        op: base.op,
+        dst: dst,
+        src1: src,
+        src2: base.src2,
+        imm_i64: base.imm_i64,
+        imm_f64: base.imm_f64,
+        label_id: base.label_id,
+        fn_id: base.fn_id,
+        field_idx: base.field_idx,
+        bin_op: base.bin_op,
+        un_op: base.un_op,
+        name: base.name,
+        call_args: base.call_args,
+        arg_count: base.arg_count,
+    }
+}
+
+fn ir_binop(dst: i64, lhs: i64, op: BinaryOp, rhs: i64) -> IrInstr {
+    let base = ir_instr_new(IrOpcode::IrBinOp)
+    IrInstr {
+        op: base.op,
+        dst: dst,
+        src1: lhs,
+        src2: rhs,
+        imm_i64: base.imm_i64,
+        imm_f64: base.imm_f64,
+        label_id: base.label_id,
+        fn_id: base.fn_id,
+        field_idx: base.field_idx,
+        bin_op: op,
+        un_op: base.un_op,
+        name: base.name,
+        call_args: base.call_args,
+        arg_count: base.arg_count,
+    }
+}
+
+fn ir_unaryop(dst: i64, op: UnaryOp, src: i64) -> IrInstr {
+    let base = ir_instr_new(IrOpcode::IrUnaryOp)
+    IrInstr {
+        op: base.op,
+        dst: dst,
+        src1: src,
+        src2: base.src2,
+        imm_i64: base.imm_i64,
+        imm_f64: base.imm_f64,
+        label_id: base.label_id,
+        fn_id: base.fn_id,
+        field_idx: base.field_idx,
+        bin_op: base.bin_op,
+        un_op: op,
+        name: base.name,
+        call_args: base.call_args,
+        arg_count: base.arg_count,
+    }
+}
+
+fn ir_call(dst: i64, fn_id: i64, fn_name: Name, args: Option<Box<IrRegList>>, arg_count: i64) -> IrInstr {
+    let pair_regs = ir_reg_list_first_two(args)
+    let arg0 = pair_regs.0
+    let arg1 = pair_regs.1
+    let base = ir_instr_new(IrOpcode::IrCall)
+    IrInstr {
+        op: base.op,
+        dst: dst,
+        src1: arg0,
+        src2: arg1,
+        imm_i64: base.imm_i64,
+        imm_f64: base.imm_f64,
+        label_id: base.label_id,
+        fn_id: fn_id,
+        field_idx: base.field_idx,
+        bin_op: base.bin_op,
+        un_op: base.un_op,
+        name: fn_name,
+        call_args: None,
+        arg_count: arg_count,
+    }
+}
+
+fn ir_reg_list_first_two(args: Option<Box<IrRegList>>) -> (i64, i64) {
+    match args {
+        Some(list) => {
+            let a0 = (*list).head
+            match (*list).tail {
+                Some(rest) => (a0, (*rest).head),
+                _ => (a0, IR_INVALID_REG),
+            }
+        }
+        _ => (IR_INVALID_REG, IR_INVALID_REG),
+    }
+}
+
+fn ir_return(src: i64) -> IrInstr {
+    let base = ir_instr_new(IrOpcode::IrReturn)
+    IrInstr {
+        op: base.op,
+        dst: base.dst,
+        src1: src,
+        src2: base.src2,
+        imm_i64: base.imm_i64,
+        imm_f64: base.imm_f64,
+        label_id: base.label_id,
+        fn_id: base.fn_id,
+        field_idx: base.field_idx,
+        bin_op: base.bin_op,
+        un_op: base.un_op,
+        name: base.name,
+        call_args: base.call_args,
+        arg_count: base.arg_count,
+    }
+}
+
+fn ir_field_get(dst: i64, base_reg: i64, field_idx: i64, field_name: Name) -> IrInstr {
+    let base = ir_instr_new(IrOpcode::IrFieldGet)
+    IrInstr {
+        op: base.op,
+        dst: dst,
+        src1: base_reg,
+        src2: base.src2,
+        imm_i64: base.imm_i64,
+        imm_f64: base.imm_f64,
+        label_id: base.label_id,
+        fn_id: base.fn_id,
+        field_idx: field_idx,
+        bin_op: base.bin_op,
+        un_op: base.un_op,
+        name: field_name,
+        call_args: base.call_args,
+        arg_count: base.arg_count,
+    }
+}
+
+fn ir_field_set(base_reg: i64, field_idx: i64, src: i64, field_name: Name) -> IrInstr {
+    let base = ir_instr_new(IrOpcode::IrFieldSet)
+    IrInstr {
+        op: base.op,
+        dst: base.dst,
+        src1: base_reg,
+        src2: src,
+        imm_i64: base.imm_i64,
+        imm_f64: base.imm_f64,
+        label_id: base.label_id,
+        fn_id: base.fn_id,
+        field_idx: field_idx,
+        bin_op: base.bin_op,
+        un_op: base.un_op,
+        name: field_name,
+        call_args: base.call_args,
+        arg_count: base.arg_count,
+    }
+}
+
+fn ir_index_get(dst: i64, base_reg: i64, idx_reg: i64) -> IrInstr {
+    let base = ir_instr_new(IrOpcode::IrIndexGet)
+    IrInstr {
+        op: base.op,
+        dst: dst,
+        src1: base_reg,
+        src2: idx_reg,
+        imm_i64: base.imm_i64,
+        imm_f64: base.imm_f64,
+        label_id: base.label_id,
+        fn_id: base.fn_id,
+        field_idx: base.field_idx,
+        bin_op: base.bin_op,
+        un_op: base.un_op,
+        name: base.name,
+        call_args: base.call_args,
+        arg_count: base.arg_count,
+    }
+}
+
+fn ir_index_set(base_reg: i64, idx_reg: i64, src_reg: i64) -> IrInstr {
+    let base = ir_instr_new(IrOpcode::IrIndexSet)
+    IrInstr {
+        op: base.op,
+        dst: base.dst,
+        src1: base_reg,
+        src2: idx_reg,
+        imm_i64: src_reg,
+        imm_f64: base.imm_f64,
+        label_id: base.label_id,
+        fn_id: base.fn_id,
+        field_idx: base.field_idx,
+        bin_op: base.bin_op,
+        un_op: base.un_op,
+        name: base.name,
+        call_args: base.call_args,
+        arg_count: base.arg_count,
+    }
+}
+
+fn ir_alloc(dst: i64, type_id: i64) -> IrInstr {
+    let base = ir_instr_new(IrOpcode::IrAlloc)
+    IrInstr {
+        op: base.op,
+        dst: dst,
+        src1: base.src1,
+        src2: base.src2,
+        imm_i64: type_id,
+        imm_f64: base.imm_f64,
+        label_id: base.label_id,
+        fn_id: base.fn_id,
+        field_idx: base.field_idx,
+        bin_op: base.bin_op,
+        un_op: base.un_op,
+        name: base.name,
+        call_args: base.call_args,
+        arg_count: base.arg_count,
+    }
+}
+
+fn ir_phi(dst: i64) -> IrInstr {
+    let base = ir_instr_new(IrOpcode::IrPhi)
+    IrInstr {
+        op: base.op,
+        dst: dst,
+        src1: base.src1,
+        src2: base.src2,
+        imm_i64: base.imm_i64,
+        imm_f64: base.imm_f64,
+        label_id: base.label_id,
+        fn_id: base.fn_id,
+        field_idx: base.field_idx,
+        bin_op: base.bin_op,
+        un_op: base.un_op,
+        name: base.name,
+        call_args: base.call_args,
+        arg_count: base.arg_count,
+    }
+}
+
+fn ir_empty_function() -> IrFunction {
+    IrFunction {
+        name: ir_empty_name(),
+        instrs: [
+            ir_nop(), ir_nop(), ir_nop(), ir_nop(), ir_nop(), ir_nop(),
+            ir_nop(), ir_nop(), ir_nop(), ir_nop(), ir_nop(), ir_nop(),
+            ir_nop(), ir_nop(), ir_nop(), ir_nop(), ir_nop(), ir_nop(),
+            ir_nop(), ir_nop(), ir_nop(), ir_nop(), ir_nop(), ir_nop(),
+        ],
+        instr_count: 0,
+        reg_count: 0,
+        label_count: 0,
+        param_count: 0,
+        param_regs: [IR_INVALID_REG; 64],
+    }
+}
+
+fn ir_empty_module() -> IrModule {
+    IrModule {
+        functions: [
+            ir_empty_function(),
+            ir_empty_function(),
+            ir_empty_function(),
+            ir_empty_function(),
+        ],
+        fn_count: 0,
+        string_table: [ir_empty_name(); 16],
+        string_count: 0,
+    }
+}
