@@ -190,6 +190,14 @@ enum Commands {
         #[arg(long)]
         use_sounio_compiler: bool,
 
+        /// Emit interpreter execution trace to stderr
+        #[arg(long)]
+        trace_interp: bool,
+
+        /// Run a type-check pass before execution
+        #[arg(long)]
+        check_only: bool,
+
         /// Arguments to pass to the program
         #[arg(trailing_var_arg = true)]
         args: Vec<String>,
@@ -1808,8 +1816,10 @@ fn main() -> Result<()> {
         Commands::Run {
             input,
             use_sounio_compiler,
+            trace_interp,
+            check_only,
             args,
-        } => run(&input, &args, use_sounio_compiler),
+        } => run(&input, &args, use_sounio_compiler, trace_interp, check_only),
 
         Commands::Jit {
             input,
@@ -2971,12 +2981,20 @@ fn check(
     Ok(())
 }
 
-fn run(input: &std::path::Path, args: &[String], use_sounio_compiler: bool) -> Result<()> {
+fn run(
+    input: &std::path::Path,
+    args: &[String],
+    use_sounio_compiler: bool,
+    trace_interp: bool,
+    check_only: bool,
+) -> Result<()> {
     tracing::info!(
-        "Running {:?} with args {:?} (use_sounio_compiler={})",
+        "Running {:?} with args {:?} (use_sounio_compiler={}, trace_interp={}, check_only={})",
         input,
         args,
-        use_sounio_compiler
+        use_sounio_compiler,
+        trace_interp,
+        check_only
     );
 
     if use_sounio_compiler {
@@ -3005,12 +3023,17 @@ fn run(input: &std::path::Path, args: &[String], use_sounio_compiler: bool) -> R
         tracing::warn!("Self-hosted compiler integration in progress - using Rust compiler");
     }
 
+    if check_only {
+        let ast = sounio::module_loader::load_program_ast(input)?;
+        let _ = sounio::check::check_ast(&ast)?;
+    }
+
     // Load modules and parse (uses ModuleLoader to handle imports)
     let ast = sounio::module_loader::load_program_ast(input)?;
     let hir = sounio::check::check_ast(&ast)?;
 
     // Use tree-walking interpreter
-    let mut interpreter = sounio::interp::Interpreter::new();
+    let mut interpreter = sounio::interp::Interpreter::with_trace(trace_interp);
     match interpreter.interpret(&hir) {
         Ok(result) => {
             // Only print non-unit results

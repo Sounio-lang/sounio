@@ -39,6 +39,8 @@ pub struct Interpreter {
     async_runtime: SounioRuntime,
     /// Effect handler context for Prob/Causal/etc effects
     effect_ctx: EffectContext,
+    /// Emit interpreter trace logs to stderr
+    trace: bool,
 }
 
 impl Interpreter {
@@ -53,6 +55,7 @@ impl Interpreter {
             output: Vec::new(),
             async_runtime: SounioRuntime::new(),
             effect_ctx: EffectContext::new(),
+            trace: false,
         }
     }
 
@@ -67,6 +70,7 @@ impl Interpreter {
             output: Vec::new(),
             async_runtime: SounioRuntime::new(),
             effect_ctx: EffectContext::with_seed(seed),
+            trace: false,
         }
     }
 
@@ -91,6 +95,7 @@ impl Interpreter {
             output: Vec::new(),
             async_runtime: SounioRuntime::new(),
             effect_ctx: EffectContext::with_all_handlers(),
+            trace: false,
         }
     }
 
@@ -107,7 +112,15 @@ impl Interpreter {
             output: Vec::new(),
             async_runtime: SounioRuntime::new(),
             effect_ctx: EffectContext::with_registry(registry),
+            trace: false,
         }
+    }
+
+    /// Create a new interpreter with trace logging enabled/disabled.
+    pub fn with_trace(trace: bool) -> Self {
+        let mut interp = Self::new();
+        interp.trace = trace;
+        interp
     }
 
     /// Get mutable access to effect context
@@ -239,6 +252,36 @@ impl Interpreter {
         self.output.clear();
     }
 
+    fn trace_call(&self, name: &str, args: &[Value]) {
+        if !self.trace {
+            return;
+        }
+        let rendered = args
+            .iter()
+            .map(|v| format!("{}", v))
+            .collect::<Vec<_>>()
+            .join(", ");
+        eprintln!("[TRACE] call {}({})", name, rendered);
+    }
+
+    fn trace_return(&self, value: &Value) {
+        if self.trace {
+            eprintln!("[TRACE] return {}", value);
+        }
+    }
+
+    fn trace_undefined(&self, name: &str) {
+        if self.trace {
+            eprintln!("[TRACE] undefined: {}", name);
+        }
+    }
+
+    fn trace_binary_mismatch(&self, op: HirBinaryOp, lhs_ty: &str, rhs_ty: &str) {
+        if self.trace {
+            eprintln!("[TRACE] binary {:?}: {} vs {}", op, lhs_ty, rhs_ty);
+        }
+    }
+
     /// Get mutable access to environment (for REPL)
     pub fn env_mut(&mut self) -> &mut Environment {
         &mut self.env
@@ -301,6 +344,7 @@ impl Interpreter {
 
     /// Call a function with arguments
     fn call_function(&mut self, func: &HirFn, args: Vec<Value>) -> Result<Value> {
+        self.trace_call(&func.name, &args);
         self.env.push_scope();
 
         // Bind parameters
@@ -313,7 +357,7 @@ impl Interpreter {
 
         self.env.pop_scope();
 
-        match result {
+        let final_result = match result {
             Ok(v) => Ok(v),
             Err(ControlFlow::Return(v)) => Ok(v),
             Err(ControlFlow::Break(_)) => Err(miette!("break outside loop")),
@@ -331,7 +375,13 @@ impl Interpreter {
                     func.name
                 ))
             }
+        };
+
+        if let Ok(ref value) = final_result {
+            self.trace_return(value);
         }
+
+        final_result
     }
 
     /// Evaluate a block
@@ -417,6 +467,7 @@ impl Interpreter {
                     return Ok(Value::Builtin(name.clone()));
                 }
                 // Not found
+                self.trace_undefined(name);
                 Err(ControlFlow::Return(Value::Unit))
             }
 
@@ -435,7 +486,13 @@ impl Interpreter {
                     // Check if it's a builtin function
                     Ok(Value::Builtin(name.clone()))
                 } else {
-                    self.env.get(name).ok_or(ControlFlow::Return(Value::Unit))
+                    match self.env.get(name) {
+                        Some(v) => Ok(v),
+                        None => {
+                            self.trace_undefined(name);
+                            Err(ControlFlow::Return(Value::Unit))
+                        }
+                    }
                 }
             }
 
@@ -462,7 +519,15 @@ impl Interpreter {
                 }
 
                 let rhs = self.eval_expr(right)?;
-                self.eval_binary(*op, lhs, rhs)
+                let lhs_ty = lhs.type_name().to_string();
+                let rhs_ty = rhs.type_name().to_string();
+                match self.eval_binary(*op, lhs, rhs) {
+                    Ok(v) => Ok(v),
+                    Err(cf) => {
+                        self.trace_binary_mismatch(*op, &lhs_ty, &rhs_ty);
+                        Err(cf)
+                    }
+                }
             }
 
             HirExprKind::Unary { op, expr: inner } => {
@@ -2306,16 +2371,21 @@ impl Interpreter {
 
     /// Call a named builtin function
     pub fn call_builtin(&mut self, name: &str, args: Vec<Value>) -> Result<Value, ControlFlow> {
+        self.trace_call(name, &args);
+
         // First, try the builtin registry
         if self.builtins.is_builtin(name) {
             match self.builtins.call(name, &args) {
-                Ok(v) => return Ok(v),
+                Ok(v) => {
+                    self.trace_return(&v);
+                    return Ok(v);
+                }
                 Err(e) => return Err(ControlFlow::Return(Value::String(e))),
             }
         }
 
         // Fall back to hardcoded implementations
-        match name {
+        let result = match name {
             "print" => {
                 let output: Vec<String> = args.iter().map(|v| format!("{}", v)).collect();
                 let line = output.join(" ");
@@ -2565,7 +2635,13 @@ impl Interpreter {
                     Ok(Value::Unit)
                 }
             }
+        };
+
+        if let Ok(ref value) = result {
+            self.trace_return(value);
         }
+
+        result
     }
 
     /// Match a pattern against a value, returning bindings if successful
@@ -2966,5 +3042,10 @@ fn main() -> i32 with IO, Mut, Panic, Div, Alloc {
         let interp = Interpreter::default();
         // Default uses new() which doesn't have a registry
         assert!(interp.effect_ctx().registry().is_none());
+    }
+
+    #[test]
+    fn test_interpreter_with_trace_constructor() {
+        let _interp = Interpreter::with_trace(true);
     }
 }
