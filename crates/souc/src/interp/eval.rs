@@ -282,6 +282,14 @@ impl Interpreter {
             }
         }
 
+        // Second pass: evaluate global constants
+        for item in &hir.items {
+            if let HirItem::Global(g) = item {
+                let val = self.eval_expr(&g.value).unwrap_or(Value::Unit);
+                self.env.set(g.name.clone(), val);
+            }
+        }
+
         // Look for main function
         if let Some(main_fn) = self.functions.get("main").cloned() {
             self.call_function(&main_fn, vec![])
