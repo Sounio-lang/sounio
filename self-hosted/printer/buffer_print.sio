@@ -1,0 +1,874 @@
+// Buffer-based AST printer for roundtrip testing
+//
+// Mirrors print_ast.sio logic but writes to a PrintBuffer instead of stdout.
+// Only implements the subset needed for roundtrip tests R01-R06:
+// fn defs, struct defs, enum defs, let/var stmts, basic exprs.
+
+// ============================================================================
+// PRINT BUFFER
+// ============================================================================
+
+struct PrintBuffer {
+    data: [i8; 4096],
+    len: i64,
+}
+
+fn pb_new() -> PrintBuffer {
+    PrintBuffer { data: [0; 4096], len: 0 }
+}
+
+// Push 1-7 bytes
+fn bp1(buf: PrintBuffer, a: i8) -> PrintBuffer with Mut, Panic {
+    var b = buf
+    b.data[b.len as usize] = a
+    b.len = b.len + 1
+    b
+}
+
+fn bp2(buf: PrintBuffer, a: i8, c2: i8) -> PrintBuffer with Mut, Panic {
+    var b = buf
+    b.data[b.len as usize] = a
+    b.data[(b.len + 1) as usize] = c2
+    b.len = b.len + 2
+    b
+}
+
+fn bp3(buf: PrintBuffer, a: i8, c2: i8, c3: i8) -> PrintBuffer with Mut, Panic {
+    var b = buf
+    b.data[b.len as usize] = a
+    b.data[(b.len + 1) as usize] = c2
+    b.data[(b.len + 2) as usize] = c3
+    b.len = b.len + 3
+    b
+}
+
+fn bp4(buf: PrintBuffer, a: i8, c2: i8, c3: i8, c4: i8) -> PrintBuffer with Mut, Panic {
+    var b = buf
+    b.data[b.len as usize] = a
+    b.data[(b.len + 1) as usize] = c2
+    b.data[(b.len + 2) as usize] = c3
+    b.data[(b.len + 3) as usize] = c4
+    b.len = b.len + 4
+    b
+}
+
+fn bp5(buf: PrintBuffer, a: i8, c2: i8, c3: i8, c4: i8, c5: i8) -> PrintBuffer with Mut, Panic {
+    var b = buf
+    b.data[b.len as usize] = a
+    b.data[(b.len + 1) as usize] = c2
+    b.data[(b.len + 2) as usize] = c3
+    b.data[(b.len + 3) as usize] = c4
+    b.data[(b.len + 4) as usize] = c5
+    b.len = b.len + 5
+    b
+}
+
+fn bp6(buf: PrintBuffer, a: i8, c2: i8, c3: i8, c4: i8, c5: i8, c6: i8) -> PrintBuffer with Mut, Panic {
+    var b = buf
+    b.data[b.len as usize] = a
+    b.data[(b.len + 1) as usize] = c2
+    b.data[(b.len + 2) as usize] = c3
+    b.data[(b.len + 3) as usize] = c4
+    b.data[(b.len + 4) as usize] = c5
+    b.data[(b.len + 5) as usize] = c6
+    b.len = b.len + 6
+    b
+}
+
+fn bp7(buf: PrintBuffer, a: i8, c2: i8, c3: i8, c4: i8, c5: i8, c6: i8, c7: i8) -> PrintBuffer with Mut, Panic {
+    var b = buf
+    b.data[b.len as usize] = a
+    b.data[(b.len + 1) as usize] = c2
+    b.data[(b.len + 2) as usize] = c3
+    b.data[(b.len + 3) as usize] = c4
+    b.data[(b.len + 4) as usize] = c5
+    b.data[(b.len + 5) as usize] = c6
+    b.data[(b.len + 6) as usize] = c7
+    b.len = b.len + 7
+    b
+}
+
+// ============================================================================
+// NAME AND INT PRINTING
+// ============================================================================
+
+fn bp_name(buf: PrintBuffer, name: Name) -> PrintBuffer with Mut, Panic, Div {
+    var b = buf
+    var i: i64 = 0
+    while i < name.len {
+        b.data[b.len as usize] = name.buf[i as usize]
+        b.len = b.len + 1
+        i = i + 1
+    }
+    b
+}
+
+fn bp_int(buf: PrintBuffer, value: i64) -> PrintBuffer with Mut, Panic, Div {
+    var b = buf
+    var n = value
+    if n < 0 {
+        b = bp1(b, 45)  // '-'
+        n = 0 - n
+    }
+    if n == 0 {
+        return bp1(b, 48)  // '0'
+    }
+    // Find highest power of 10
+    var divisor: i64 = 1
+    var tmp = n
+    while tmp >= 10 {
+        divisor = divisor * 10
+        tmp = tmp / 10
+    }
+    // Emit digits
+    while divisor > 0 {
+        let digit = n / divisor
+        b = bp1(b, (48 + digit) as i8)
+        n = n % divisor
+        divisor = divisor / 10
+    }
+    b
+}
+
+fn bp_indent(buf: PrintBuffer, level: i64) -> PrintBuffer with Mut, Panic, Div {
+    var b = buf
+    var i: i64 = 0
+    while i < level {
+        // "    " (4 spaces)
+        b = bp4(b, 32, 32, 32, 32)
+        i = i + 1
+    }
+    b
+}
+
+// ============================================================================
+// PATH PRINTING
+// ============================================================================
+
+fn bp_string_list_segment(buf: PrintBuffer, seg: StringList) -> PrintBuffer with Mut, Panic, Div, Alloc {
+    var b = buf
+    var i: i64 = 0
+    while i < seg.head_len {
+        b.data[b.len as usize] = seg.head_buf[i as usize]
+        b.len = b.len + 1
+        i = i + 1
+    }
+    b
+}
+
+fn bp_path_segments(buf: PrintBuffer, segs: Option<Box<StringList>>, remaining: i64) -> PrintBuffer with Mut, Panic, Div, Alloc {
+    match segs {
+        Some(list) => {
+            var b = bp_string_list_segment(buf, *list)
+            if remaining > 1 {
+                b = bp2(b, 58, 58)  // "::"
+                b = bp_path_segments(b, (*list).tail, remaining - 1)
+            }
+            b
+        }
+        None => buf,
+    }
+}
+
+fn bp_path(buf: PrintBuffer, path: AstPath) -> PrintBuffer with Mut, Panic, Div, Alloc {
+    bp_path_segments(buf, Some(Box::new(path.segments)), path.seg_count)
+}
+
+// ============================================================================
+// TYPE EXPRESSION PRINTING
+// ============================================================================
+
+fn bp_type_expr(buf: PrintBuffer, te: TypeExpr) -> PrintBuffer with Mut, Panic, Div, Alloc {
+    match te.kind {
+        TypeNamed => {
+            var b = bp_path(buf, te.path)
+            bp_type_args_opt(b, te.type_args)
+        }
+        TypeReference => {
+            var b = bp1(buf, 38)  // "&"
+            bp_type_inner(b, te.inner)
+        }
+        TypeRefMut => {
+            var b = bp2(buf, 38, 33)  // "&!"
+            bp_type_inner(b, te.inner)
+        }
+        TypeArray => {
+            var b = bp1(buf, 91)  // "["
+            b = bp_type_inner(b, te.inner)
+            b = bp_array_size(b, te.array_size)
+            bp1(b, 93)  // "]"
+        }
+        TypeUnit => bp2(buf, 40, 41)  // "()"
+        TypeNever => bp1(buf, 33)  // "!"
+        TypeSelfUpper => bp4(buf, 83, 101, 108, 102)  // "Self"
+        TypeInfer => bp1(buf, 95)  // "_"
+        _ => buf,
+    }
+}
+
+fn bp_type_inner(buf: PrintBuffer, opt: Option<Box<TypeExpr>>) -> PrintBuffer with Mut, Panic, Div, Alloc {
+    match opt {
+        Some(te) => bp_type_expr(buf, *te)
+        None => buf,
+    }
+}
+
+fn bp_type_args_opt(buf: PrintBuffer, opt: Option<Box<TypeExprList>>) -> PrintBuffer with Mut, Panic, Div, Alloc {
+    match opt {
+        Some(list) => {
+            var b = bp1(buf, 60)  // "<"
+            b = bp_type_list_comma(*list, b, true)
+            bp1(b, 62)  // ">"
+        }
+        None => buf,
+    }
+}
+
+fn bp_type_list_comma(list: TypeExprList, buf: PrintBuffer, first: bool) -> PrintBuffer with Mut, Panic, Div, Alloc {
+    var b = buf
+    if !first {
+        b = bp2(b, 44, 32)  // ", "
+    }
+    b = bp_type_expr(b, list.head)
+    match list.tail {
+        Some(rest) => bp_type_list_comma(*rest, b, false)
+        None => b,
+    }
+}
+
+fn bp_array_size(buf: PrintBuffer, opt: Option<Box<Expr>>) -> PrintBuffer with Mut, Panic, Div, Alloc {
+    match opt {
+        Some(e) => {
+            var b = bp2(buf, 59, 32)  // "; "
+            bp_expr(b, *e)
+        }
+        None => buf,
+    }
+}
+
+// ============================================================================
+// EFFECT LIST PRINTING
+// ============================================================================
+
+fn bp_effect_list_opt(buf: PrintBuffer, opt: Option<Box<EffectList>>) -> PrintBuffer with Mut, Panic, Div, Alloc {
+    match opt {
+        Some(list) => {
+            // " with "
+            var b = bp6(buf, 32, 119, 105, 116, 104, 32)
+            bp_effect_list_inner(*list, b, true)
+        }
+        None => buf,
+    }
+}
+
+fn bp_effect_list_inner(list: EffectList, buf: PrintBuffer, first: bool) -> PrintBuffer with Mut, Panic, Div, Alloc {
+    var b = buf
+    if !first {
+        b = bp2(b, 44, 32)  // ", "
+    }
+    b = bp_effect_ref(b, list.head)
+    match list.tail {
+        Some(rest) => bp_effect_list_inner(*rest, b, false)
+        None => b,
+    }
+}
+
+fn bp_effect_ref(buf: PrintBuffer, eff: EffectRef) -> PrintBuffer with Mut, Panic, Div {
+    var b = buf
+    var i: i64 = 0
+    while i < eff.name_len {
+        b.data[b.len as usize] = eff.name_buf[i as usize]
+        b.len = b.len + 1
+        i = i + 1
+    }
+    b
+}
+
+// ============================================================================
+// EXPRESSION PRINTING
+// ============================================================================
+
+fn bp_expr(buf: PrintBuffer, e: Expr) -> PrintBuffer with Mut, Panic, Div, Alloc {
+    match e.kind {
+        ExprIntLit => bp_int(buf, e.int_val)
+        ExprBoolTrue => bp4(buf, 116, 114, 117, 101)   // "true"
+        ExprBoolFalse => bp5(buf, 102, 97, 108, 115, 101)  // "false"
+        ExprStringLit => {
+            var b = bp1(buf, 34)  // '"'
+            b = bp_name(b, e.name)
+            bp1(b, 34)  // '"'
+        }
+        ExprIdent => bp_name(buf, e.name)
+        ExprPath => bp_path(buf, e.path)
+        ExprBinary => {
+            var b = bp_expr_opt(buf, e.left)
+            b = bp_binop(b, e.bin_op)
+            bp_expr_opt(b, e.right)
+        }
+        ExprUnary => {
+            var b = bp_unaryop(buf, e.un_op)
+            bp_expr_opt(b, e.left)
+        }
+        ExprFieldAccess => {
+            var b = bp_expr_opt(buf, e.left)
+            b = bp1(b, 46)  // "."
+            bp_name(b, e.name)
+        }
+        ExprIndex => {
+            var b = bp_expr_opt(buf, e.left)
+            b = bp1(b, 91)  // "["
+            b = bp_expr_opt(b, e.right)
+            bp1(b, 93)  // "]"
+        }
+        ExprCall => {
+            var b = bp_expr_opt(buf, e.left)
+            b = bp1(b, 40)  // "("
+            b = bp_expr_list_comma(b, e.args)
+            bp1(b, 41)  // ")"
+        }
+        ExprIf => {
+            // "if "
+            var b = bp3(buf, 105, 102, 32)
+            b = bp_expr_opt(b, e.left)
+            b = bp1(b, 32)  // " "
+            b = bp_block_opt(b, e.block, 0)
+            bp_else_opt(b, e.else_expr)
+        }
+        ExprWhile => {
+            // "while "
+            var b = bp6(buf, 119, 104, 105, 108, 101, 32)
+            b = bp_expr_opt(b, e.left)
+            b = bp1(b, 32)  // " "
+            bp_block_opt(b, e.block, 0)
+        }
+        ExprBlock => bp_block_opt(buf, e.block, 0)
+        ExprReturn => {
+            // "return"
+            var b = bp6(buf, 114, 101, 116, 117, 114, 110)
+            bp_return_val(b, e.left)
+        }
+        ExprBreak => {
+            // "break"
+            var b = bp5(buf, 98, 114, 101, 97, 107)
+            bp_return_val(b, e.left)
+        }
+        ExprContinue => {
+            // "continue"
+            var b = bp1(buf, 99)   // c
+            b = bp1(b, 111)  // o
+            b = bp1(b, 110)  // n
+            b = bp1(b, 116)  // t
+            b = bp1(b, 105)  // i
+            b = bp1(b, 110)  // n
+            b = bp1(b, 117)  // u
+            bp1(b, 101)      // e
+        }
+        ExprStructLit => {
+            var b = bp_path(buf, e.path)
+            b = bp3(b, 32, 123, 32)  // " { "
+            b = bp_struct_fields(b, e.fields)
+            bp2(b, 32, 125)  // " }"
+        }
+        ExprArrayLit => {
+            var b = bp1(buf, 91)  // "["
+            b = bp_expr_list_comma(b, e.args)
+            bp1(b, 93)  // "]"
+        }
+        ExprMatch => {
+            // "match "
+            var b = bp6(buf, 109, 97, 116, 99, 104, 32)
+            b = bp_expr_opt(b, e.left)
+            b = bp3(b, 32, 123, 10)  // " {\n"
+            b = bp_match_arms(b, e.arms, 1)
+            bp1(b, 125)  // "}"
+        }
+        _ => buf,
+    }
+}
+
+fn bp_expr_opt(buf: PrintBuffer, opt: Option<Box<Expr>>) -> PrintBuffer with Mut, Panic, Div, Alloc {
+    match opt {
+        Some(e) => bp_expr(buf, *e)
+        None => buf,
+    }
+}
+
+fn bp_return_val(buf: PrintBuffer, opt: Option<Box<Expr>>) -> PrintBuffer with Mut, Panic, Div, Alloc {
+    match opt {
+        Some(e) => {
+            var b = bp1(buf, 32)  // " "
+            bp_expr(b, *e)
+        }
+        None => buf,
+    }
+}
+
+fn bp_else_opt(buf: PrintBuffer, opt: Option<Box<Expr>>) -> PrintBuffer with Mut, Panic, Div, Alloc {
+    match opt {
+        Some(e) => {
+            // " else "
+            var b = bp6(buf, 32, 101, 108, 115, 101, 32)
+            bp_expr(b, *e)
+        }
+        None => buf,
+    }
+}
+
+fn bp_binop(buf: PrintBuffer, op: BinaryOp) -> PrintBuffer with Mut, Panic {
+    match op {
+        OpAdd => bp3(buf, 32, 43, 32)       // " + "
+        OpSub => bp3(buf, 32, 45, 32)       // " - "
+        OpMul => bp3(buf, 32, 42, 32)       // " * "
+        OpDiv => bp3(buf, 32, 47, 32)       // " / "
+        OpRem => bp3(buf, 32, 37, 32)       // " % "
+        OpEq => bp4(buf, 32, 61, 61, 32)    // " == "
+        OpNe => bp4(buf, 32, 33, 61, 32)    // " != "
+        OpLt => bp3(buf, 32, 60, 32)        // " < "
+        OpLe => bp4(buf, 32, 60, 61, 32)    // " <= "
+        OpGt => bp3(buf, 32, 62, 32)        // " > "
+        OpGe => bp4(buf, 32, 62, 61, 32)    // " >= "
+        OpAnd => bp4(buf, 32, 38, 38, 32)   // " && "
+        OpOr => bp4(buf, 32, 124, 124, 32)  // " || "
+        OpBitAnd => bp3(buf, 32, 38, 32)    // " & "
+        OpBitOr => bp3(buf, 32, 124, 32)    // " | "
+        OpBitXor => bp3(buf, 32, 94, 32)    // " ^ "
+        OpShl => bp4(buf, 32, 60, 60, 32)   // " << "
+        OpShr => bp4(buf, 32, 62, 62, 32)   // " >> "
+        OpConcat => bp4(buf, 32, 43, 43, 32)  // " ++ "
+        OpRange => bp2(buf, 46, 46)          // ".."
+        OpRangeInclusive => bp3(buf, 46, 46, 61)  // "..="
+    }
+}
+
+fn bp_unaryop(buf: PrintBuffer, op: UnaryOp) -> PrintBuffer with Mut, Panic {
+    match op {
+        OpNeg => bp1(buf, 45)       // "-"
+        OpNot => bp1(buf, 33)       // "!"
+        OpRef => bp1(buf, 38)       // "&"
+        OpRefMut => bp2(buf, 38, 33)  // "&!"
+        OpDeref => bp1(buf, 42)     // "*"
+    }
+}
+
+fn bp_expr_list_comma(buf: PrintBuffer, opt: Option<Box<ExprList>>) -> PrintBuffer with Mut, Panic, Div, Alloc {
+    match opt {
+        Some(list) => bp_expr_list_inner(*list, buf, true)
+        None => buf,
+    }
+}
+
+fn bp_expr_list_inner(list: ExprList, buf: PrintBuffer, first: bool) -> PrintBuffer with Mut, Panic, Div, Alloc {
+    var b = buf
+    if !first {
+        b = bp2(b, 44, 32)  // ", "
+    }
+    b = bp_expr(b, list.head)
+    match list.tail {
+        Some(rest) => bp_expr_list_inner(*rest, b, false)
+        None => b,
+    }
+}
+
+fn bp_struct_fields(buf: PrintBuffer, opt: Option<Box<StructFieldList>>) -> PrintBuffer with Mut, Panic, Div, Alloc {
+    match opt {
+        Some(list) => bp_struct_fields_inner(*list, buf, true)
+        None => buf,
+    }
+}
+
+fn bp_struct_fields_inner(list: StructFieldList, buf: PrintBuffer, first: bool) -> PrintBuffer with Mut, Panic, Div, Alloc {
+    var b = buf
+    if !first {
+        b = bp2(b, 44, 32)  // ", "
+    }
+    b = bp_name(b, list.head.name)
+    b = bp2(b, 58, 32)  // ": "
+    b = bp_expr(b, list.head.value)
+    match list.tail {
+        Some(rest) => bp_struct_fields_inner(*rest, b, false)
+        None => b,
+    }
+}
+
+fn bp_match_arms(buf: PrintBuffer, opt: Option<Box<MatchArmList>>, indent: i64) -> PrintBuffer with Mut, Panic, Div, Alloc {
+    match opt {
+        Some(list) => bp_match_arms_inner(*list, buf, indent)
+        None => buf,
+    }
+}
+
+fn bp_match_arms_inner(list: MatchArmList, buf: PrintBuffer, indent: i64) -> PrintBuffer with Mut, Panic, Div, Alloc {
+    var b = bp_indent(buf, indent)
+    b = bp_pattern(b, list.head.pattern)
+    // " => "
+    b = bp4(b, 32, 61, 62, 32)
+    b = bp_expr(b, list.head.body)
+    b = bp1(b, 10)  // "\n"
+    match list.tail {
+        Some(rest) => bp_match_arms_inner(*rest, b, indent)
+        None => b,
+    }
+}
+
+fn bp_pattern(buf: PrintBuffer, pat: Pattern) -> PrintBuffer with Mut, Panic, Div, Alloc {
+    match pat.kind {
+        PatWildcard => bp1(buf, 95)  // "_"
+        PatBinding => {
+            var b = buf
+            if pat.is_mut {
+                b = bp4(b, 118, 97, 114, 32)  // "var "
+            }
+            bp_name(b, pat.name)
+        }
+        PatIntLit => bp_int(buf, pat.int_val)
+        PatBoolTrue => bp4(buf, 116, 114, 117, 101)   // "true"
+        PatBoolFalse => bp5(buf, 102, 97, 108, 115, 101)  // "false"
+        PatEnum => bp_path(buf, pat.path)
+        _ => buf,
+    }
+}
+
+// ============================================================================
+// BLOCK AND STATEMENT PRINTING
+// ============================================================================
+
+fn bp_block_opt(buf: PrintBuffer, opt: Option<Box<Block>>, indent: i64) -> PrintBuffer with Mut, Panic, Div, Alloc {
+    match opt {
+        Some(blk) => bp_block(buf, *blk, indent)
+        None => buf,
+    }
+}
+
+fn bp_block(buf: PrintBuffer, blk: Block, indent: i64) -> PrintBuffer with Mut, Panic, Div, Alloc {
+    var b = bp2(buf, 123, 10)  // "{\n"
+    b = bp_stmt_list(b, blk.stmts, indent + 1)
+    b = bp_indent(b, indent)
+    bp1(b, 125)  // "}"
+}
+
+fn bp_stmt_list(buf: PrintBuffer, opt: Option<Box<StmtList>>, indent: i64) -> PrintBuffer with Mut, Panic, Div, Alloc {
+    match opt {
+        Some(list) => bp_stmt_list_inner(*list, buf, indent)
+        None => buf,
+    }
+}
+
+fn bp_stmt_list_inner(list: StmtList, buf: PrintBuffer, indent: i64) -> PrintBuffer with Mut, Panic, Div, Alloc {
+    var b = bp_indent(buf, indent)
+    b = bp_stmt(b, list.head, indent)
+    b = bp1(b, 10)  // "\n"
+    match list.tail {
+        Some(rest) => bp_stmt_list_inner(*rest, b, indent)
+        None => b,
+    }
+}
+
+fn bp_stmt(buf: PrintBuffer, s: Stmt, indent: i64) -> PrintBuffer with Mut, Panic, Div, Alloc {
+    match s.kind {
+        StmtLet => {
+            // "let "
+            var b = bp4(buf, 108, 101, 116, 32)
+            b = bp_name(b, s.name)
+            b = bp_optional_type_annot(b, s.ty)
+            bp_optional_init(b, s.expr)
+        }
+        StmtVar => {
+            // "var "
+            var b = bp4(buf, 118, 97, 114, 32)
+            b = bp_name(b, s.name)
+            b = bp_optional_type_annot(b, s.ty)
+            bp_optional_init(b, s.expr)
+        }
+        StmtExpr => bp_expr_opt(buf, s.expr)
+        StmtAssign => {
+            var b = bp_expr_opt(buf, s.target)
+            b = bp_assign_op(b, s.assign_op)
+            bp_expr_opt(b, s.expr)
+        }
+    }
+}
+
+fn bp_optional_type_annot(buf: PrintBuffer, opt: Option<Box<TypeExpr>>) -> PrintBuffer with Mut, Panic, Div, Alloc {
+    match opt {
+        Some(te) => {
+            var b = bp2(buf, 58, 32)  // ": "
+            bp_type_expr(b, *te)
+        }
+        None => buf,
+    }
+}
+
+fn bp_optional_init(buf: PrintBuffer, opt: Option<Box<Expr>>) -> PrintBuffer with Mut, Panic, Div, Alloc {
+    match opt {
+        Some(e) => {
+            var b = bp3(buf, 32, 61, 32)  // " = "
+            bp_expr(b, *e)
+        }
+        None => buf,
+    }
+}
+
+fn bp_assign_op(buf: PrintBuffer, op: AssignOp) -> PrintBuffer with Mut, Panic {
+    match op {
+        AssignEq => bp3(buf, 32, 61, 32)       // " = "
+        AssignAdd => bp4(buf, 32, 43, 61, 32)   // " += "
+        AssignSub => bp4(buf, 32, 45, 61, 32)   // " -= "
+        AssignMul => bp4(buf, 32, 42, 61, 32)   // " *= "
+        AssignDiv => bp4(buf, 32, 47, 61, 32)   // " /= "
+        AssignRem => bp4(buf, 32, 37, 61, 32)   // " %= "
+    }
+}
+
+// ============================================================================
+// ITEM PRINTING
+// ============================================================================
+
+fn bp_item_list_top(buf: PrintBuffer, opt: Option<Box<ItemList>>) -> PrintBuffer with Mut, Panic, Div, Alloc {
+    match opt {
+        Some(list) => bp_item_list_top_inner(buf, *list)
+        None => buf,
+    }
+}
+
+fn bp_item_list_top_inner(buf: PrintBuffer, list: ItemList) -> PrintBuffer with Mut, Panic, Div, Alloc {
+    var b = bp_item(buf, list.head, 0)
+    b = bp1(b, 10)  // "\n"
+    match list.tail {
+        Some(rest) => {
+            b = bp1(b, 10)  // "\n"
+            bp_item_list_top_inner(b, *rest)
+        }
+        None => b,
+    }
+}
+
+fn bp_item(buf: PrintBuffer, item: Item, indent: i64) -> PrintBuffer with Mut, Panic, Div, Alloc {
+    match item.kind {
+        ItemFn => bp_fn_item(buf, item.fn_def, indent)
+        ItemStruct => bp_struct_item(buf, item.name, item.struct_def, indent)
+        ItemEnum => bp_enum_item(buf, item.name, item.enum_def, indent)
+        ItemImpl => bp_impl_item(buf, item.impl_def, indent)
+        ItemTypeAlias => {
+            var b = bp_indent(buf, indent)
+            // "type "
+            b = bp5(b, 116, 121, 112, 101, 32)
+            b = bp_name(b, item.name)
+            b = bp3(b, 32, 61, 32)  // " = "
+            bp_type_inner(b, item.type_alias_ty)
+        }
+        ItemUse => {
+            var b = bp_indent(buf, indent)
+            // "use "
+            b = bp4(b, 117, 115, 101, 32)
+            bp_path(b, item.use_path)
+        }
+    }
+}
+
+// ============================================================================
+// FUNCTION DEFINITION
+// ============================================================================
+
+fn bp_fn_item(buf: PrintBuffer, opt: Option<Box<FnDef>>, indent: i64) -> PrintBuffer with Mut, Panic, Div, Alloc {
+    match opt {
+        Some(fd) => bp_fn_def(buf, *fd, indent)
+        None => buf,
+    }
+}
+
+fn bp_fn_def(buf: PrintBuffer, fd: FnDef, indent: i64) -> PrintBuffer with Mut, Panic, Div, Alloc {
+    var b = bp_indent(buf, indent)
+    // "fn "
+    b = bp3(b, 102, 110, 32)
+    b = bp_name(b, fd.name)
+    b = bp1(b, 40)  // "("
+    b = bp_param_list(b, fd.params)
+    b = bp1(b, 41)  // ")"
+    b = bp_optional_return(b, fd.return_type)
+    b = bp_effect_list_opt(b, fd.effects)
+    b = bp1(b, 32)  // " "
+    bp_block(b, fd.body, indent)
+}
+
+fn bp_optional_return(buf: PrintBuffer, opt: Option<Box<TypeExpr>>) -> PrintBuffer with Mut, Panic, Div, Alloc {
+    match opt {
+        Some(te) => {
+            // " -> "
+            var b = bp4(buf, 32, 45, 62, 32)
+            bp_type_expr(b, *te)
+        }
+        None => buf,
+    }
+}
+
+fn bp_param_list(buf: PrintBuffer, opt: Option<Box<ParamList>>) -> PrintBuffer with Mut, Panic, Div, Alloc {
+    match opt {
+        Some(list) => bp_param_list_inner(*list, buf, true)
+        None => buf,
+    }
+}
+
+fn bp_param_list_inner(list: ParamList, buf: PrintBuffer, first: bool) -> PrintBuffer with Mut, Panic, Div, Alloc {
+    var b = buf
+    if !first {
+        b = bp2(b, 44, 32)  // ", "
+    }
+    b = bp_param(b, list.head)
+    match list.tail {
+        Some(rest) => bp_param_list_inner(*rest, b, false)
+        None => b,
+    }
+}
+
+fn bp_param(buf: PrintBuffer, p: Param) -> PrintBuffer with Mut, Panic, Div, Alloc {
+    if p.is_self {
+        if p.is_self_mut {
+            // "&!self"
+            bp6(buf, 38, 33, 115, 101, 108, 102)
+        } else {
+            // "self"
+            bp4(buf, 115, 101, 108, 102)
+        }
+    } else {
+        var b = bp_name(buf, p.name)
+        b = bp2(b, 58, 32)  // ": "
+        bp_type_expr(b, p.ty)
+    }
+}
+
+// ============================================================================
+// STRUCT DEFINITION
+// ============================================================================
+
+fn bp_struct_item(buf: PrintBuffer, name: Name, opt: Option<Box<StructDef>>, indent: i64) -> PrintBuffer with Mut, Panic, Div, Alloc {
+    match opt {
+        Some(sd) => bp_struct_def(buf, name, *sd, indent)
+        None => buf,
+    }
+}
+
+fn bp_struct_def(buf: PrintBuffer, name: Name, sd: StructDef, indent: i64) -> PrintBuffer with Mut, Panic, Div, Alloc {
+    var b = bp_indent(buf, indent)
+    if sd.is_linear {
+        // "linear "
+        b = bp7(b, 108, 105, 110, 101, 97, 114, 32)
+    }
+    // "struct "
+    b = bp7(b, 115, 116, 114, 117, 99, 116, 32)
+    b = bp_name(b, name)
+    b = bp3(b, 32, 123, 10)  // " {\n"
+    b = bp_field_def_list(b, sd.fields, indent + 1)
+    b = bp_indent(b, indent)
+    bp1(b, 125)  // "}"
+}
+
+fn bp_field_def_list(buf: PrintBuffer, opt: Option<Box<FieldDefList>>, indent: i64) -> PrintBuffer with Mut, Panic, Div, Alloc {
+    match opt {
+        Some(list) => bp_field_def_list_inner(*list, buf, indent)
+        None => buf,
+    }
+}
+
+fn bp_field_def_list_inner(list: FieldDefList, buf: PrintBuffer, indent: i64) -> PrintBuffer with Mut, Panic, Div, Alloc {
+    var b = bp_indent(buf, indent)
+    b = bp_name(b, list.head.name)
+    b = bp2(b, 58, 32)  // ": "
+    b = bp_type_expr(b, list.head.ty)
+    match list.tail {
+        Some(rest) => {
+            b = bp2(b, 44, 10)  // ",\n"
+            bp_field_def_list_inner(*rest, b, indent)
+        }
+        None => bp1(b, 10)  // "\n"
+    }
+}
+
+// ============================================================================
+// ENUM DEFINITION
+// ============================================================================
+
+fn bp_enum_item(buf: PrintBuffer, name: Name, opt: Option<Box<EnumDef>>, indent: i64) -> PrintBuffer with Mut, Panic, Div, Alloc {
+    match opt {
+        Some(ed) => bp_enum_def(buf, name, *ed, indent)
+        None => buf,
+    }
+}
+
+fn bp_enum_def(buf: PrintBuffer, name: Name, ed: EnumDef, indent: i64) -> PrintBuffer with Mut, Panic, Div, Alloc {
+    var b = bp_indent(buf, indent)
+    // "enum "
+    b = bp5(b, 101, 110, 117, 109, 32)
+    b = bp_name(b, name)
+    b = bp3(b, 32, 123, 10)  // " {\n"
+    b = bp_variant_list(b, ed.variants, indent + 1)
+    b = bp_indent(b, indent)
+    bp1(b, 125)  // "}"
+}
+
+fn bp_variant_list(buf: PrintBuffer, opt: Option<Box<VariantDefList>>, indent: i64) -> PrintBuffer with Mut, Panic, Div, Alloc {
+    match opt {
+        Some(list) => bp_variant_list_inner(*list, buf, indent)
+        None => buf,
+    }
+}
+
+fn bp_variant_list_inner(list: VariantDefList, buf: PrintBuffer, indent: i64) -> PrintBuffer with Mut, Panic, Div, Alloc {
+    var b = bp_indent(buf, indent)
+    b = bp_name(b, list.head.name)
+    match list.tail {
+        Some(rest) => {
+            b = bp2(b, 44, 10)  // ",\n"
+            bp_variant_list_inner(*rest, b, indent)
+        }
+        None => bp1(b, 10)  // "\n"
+    }
+}
+
+// ============================================================================
+// IMPL DEFINITION
+// ============================================================================
+
+fn bp_impl_item(buf: PrintBuffer, opt: Option<Box<ImplDef>>, indent: i64) -> PrintBuffer with Mut, Panic, Div, Alloc {
+    match opt {
+        Some(id) => bp_impl_def(buf, *id, indent)
+        None => buf,
+    }
+}
+
+fn bp_impl_def(buf: PrintBuffer, id: ImplDef, indent: i64) -> PrintBuffer with Mut, Panic, Div, Alloc {
+    var b = bp_indent(buf, indent)
+    // "impl "
+    b = bp5(b, 105, 109, 112, 108, 32)
+    b = bp_type_expr(b, id.target_type)
+    b = bp3(b, 32, 123, 10)  // " {\n"
+    b = bp_impl_methods(b, id.methods, indent + 1)
+    b = bp_indent(b, indent)
+    bp1(b, 125)  // "}"
+}
+
+fn bp_impl_methods(buf: PrintBuffer, opt: Option<Box<ItemList>>, indent: i64) -> PrintBuffer with Mut, Panic, Div, Alloc {
+    match opt {
+        Some(list) => bp_impl_methods_inner(*list, buf, indent)
+        None => buf,
+    }
+}
+
+fn bp_impl_methods_inner(list: ItemList, buf: PrintBuffer, indent: i64) -> PrintBuffer with Mut, Panic, Div, Alloc {
+    var b = bp_item(buf, list.head, indent)
+    b = bp1(b, 10)  // "\n"
+    match list.tail {
+        Some(rest) => {
+            b = bp1(b, 10)  // "\n"
+            bp_impl_methods_inner(*rest, b, indent)
+        }
+        None => b,
+    }
+}
+
+// ============================================================================
+// PROGRAM (TOP-LEVEL ENTRY POINT)
+// ============================================================================
+
+fn bp_program(prog: Program) -> PrintBuffer with Mut, Panic, Div, Alloc {
+    bp_item_list_top(pb_new(), prog.items)
+}

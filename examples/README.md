@@ -7,9 +7,13 @@ This directory contains comprehensive examples demonstrating Sounio's features.
 **First Steps:**
 - [arithmetic.sio](arithmetic.sio) - Basic arithmetic operations
 - [async_demo.sio](async_demo.sio) - Async/await basics
+- [hello.sio](hello.sio) - Minimal runnable program
 
 **Key Features:**
 - [Epistemic Types](beta_epistemic.sio) - Uncertainty propagation
+- [Epistemic BMI](epistemic_bmi.sio) - Uncertainty propagation demo
+- [PBPK Simple](pbpk_simple.sio) - Minimal PK/PBPK-style workflow
+- [GPU Hypercomplex](gpu_hypercomplex.sio) - Hypercomplex benchmark scaffold
 - [Automatic Differentiation](autodiff/) - Gradient computation
 - [GPU Computing](gpu/) - High-performance kernels
 
@@ -105,6 +109,6 @@ When adding new examples:
 
 ## See Also
 
-- [Language Guide](../docs/LLM_PROGRAMMING_GUIDE.md)
+- [Language Guide](../docs/guide/programming.md)
 - [Standard Library](../stdlib/)
 - [Tests](../tests/run-pass/) - Additional examples

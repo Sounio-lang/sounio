@@ -1,0 +1,683 @@
+// Bootstrap tests: self-hosted lexer tokenizing realistic Sounio source fragments
+//
+// These tests verify the lexer correctly handles multi-token sequences
+// representative of real self-hosted compiler code. While test_lexer.sio
+// tests individual token types, these tests exercise the lexer on
+// source patterns found in the actual codebase.
+//
+// 10 test vectors covering: function definitions, mutable bindings,
+// exclusive references (&!), concat operator (++), effect annotations,
+// linear structs, if/else, match, real compiler helpers, effects on functions.
+//
+// Depends on: lexer/ (token types, lex function), test_lexer.sio (run_lex helper)
+
+// ============================================================================
+// B01: Simple function definition
+// Source: "fn f(x: i64) -> i64 { x + 1 }"
+// ============================================================================
+fn bootstrap_test_01() -> bool with Mut, Div, Panic {
+    var input: [i8; 256] = [0; 256]
+    input[0] = 102    // f
+    input[1] = 110    // n
+    input[2] = 32     // ' '
+    input[3] = 102    // f
+    input[4] = 40     // (
+    input[5] = 120    // x
+    input[6] = 58     // :
+    input[7] = 32     // ' '
+    input[8] = 105    // i
+    input[9] = 54     // 6
+    input[10] = 52    // 4
+    input[11] = 41    // )
+    input[12] = 32    // ' '
+    input[13] = 45    // -
+    input[14] = 62    // >
+    input[15] = 32    // ' '
+    input[16] = 105   // i
+    input[17] = 54    // 6
+    input[18] = 52    // 4
+    input[19] = 32    // ' '
+    input[20] = 123   // {
+    input[21] = 32    // ' '
+    input[22] = 120   // x
+    input[23] = 32    // ' '
+    input[24] = 43    // +
+    input[25] = 32    // ' '
+    input[26] = 49    // 1
+    input[27] = 32    // ' '
+    input[28] = 125   // }
+    let state = run_lex(input, 29)
+    // Fn Ident("f") LParen Ident("x") Colon Ident("i64") RParen Arrow Ident("i64") LBrace Ident("x") Plus IntLit(1) RBrace Eof
+    if state.token_count != 15 { return false }
+    state.tokens[0].kind == TokenKind::Fn &&
+    state.tokens[1].kind == TokenKind::Ident &&
+    state.tokens[2].kind == TokenKind::LParen &&
+    state.tokens[3].kind == TokenKind::Ident &&
+    state.tokens[4].kind == TokenKind::Colon &&
+    state.tokens[5].kind == TokenKind::Ident &&
+    state.tokens[6].kind == TokenKind::RParen &&
+    state.tokens[7].kind == TokenKind::Arrow &&
+    state.tokens[8].kind == TokenKind::Ident &&
+    state.tokens[9].kind == TokenKind::LBrace &&
+    state.tokens[10].kind == TokenKind::Ident &&
+    state.tokens[11].kind == TokenKind::Plus &&
+    state.tokens[12].kind == TokenKind::IntLit &&
+    state.tokens[13].kind == TokenKind::RBrace &&
+    state.tokens[14].kind == TokenKind::Eof
+}
+
+// ============================================================================
+// B02: Mutable binding (Sounio-specific: var, not let mut)
+// Source: "var y = 10"
+// ============================================================================
+fn bootstrap_test_02() -> bool with Mut, Div, Panic {
+    var input: [i8; 256] = [0; 256]
+    input[0] = 118    // v
+    input[1] = 97     // a
+    input[2] = 114    // r
+    input[3] = 32     // ' '
+    input[4] = 121    // y
+    input[5] = 32     // ' '
+    input[6] = 61     // =
+    input[7] = 32     // ' '
+    input[8] = 49     // 1
+    input[9] = 48     // 0
+    let state = run_lex(input, 10)
+    // Var Ident("y") Eq IntLit(10) Eof
+    if state.token_count != 5 { return false }
+    state.tokens[0].kind == TokenKind::Var &&
+    state.tokens[1].kind == TokenKind::Ident &&
+    state.tokens[2].kind == TokenKind::Eq &&
+    state.tokens[3].kind == TokenKind::IntLit &&
+    state.tokens[3].int_value == 10 &&
+    state.tokens[4].kind == TokenKind::Eof
+}
+
+// ============================================================================
+// B03: Exclusive reference (Sounio-specific: &!, not &mut)
+// Source: "&!T"
+// ============================================================================
+fn bootstrap_test_03() -> bool with Mut, Div, Panic {
+    var input: [i8; 256] = [0; 256]
+    input[0] = 38     // &
+    input[1] = 33     // !
+    input[2] = 84     // T
+    let state = run_lex(input, 3)
+    // AmpBang Ident("T") Eof
+    if state.token_count != 3 { return false }
+    state.tokens[0].kind == TokenKind::AmpBang &&
+    state.tokens[1].kind == TokenKind::Ident &&
+    state.tokens[2].kind == TokenKind::Eof
+}
+
+// ============================================================================
+// B04: Concatenation operator (Sounio-specific: ++)
+// Source: "a ++ b"
+// ============================================================================
+fn bootstrap_test_04() -> bool with Mut, Div, Panic {
+    var input: [i8; 256] = [0; 256]
+    input[0] = 97     // a
+    input[1] = 32     // ' '
+    input[2] = 43     // +
+    input[3] = 43     // +
+    input[4] = 32     // ' '
+    input[5] = 98     // b
+    let state = run_lex(input, 6)
+    // Ident("a") PlusPlus Ident("b") Eof
+    if state.token_count != 4 { return false }
+    state.tokens[0].kind == TokenKind::Ident &&
+    state.tokens[1].kind == TokenKind::PlusPlus &&
+    state.tokens[2].kind == TokenKind::Ident &&
+    state.tokens[3].kind == TokenKind::Eof
+}
+
+// ============================================================================
+// B05: Effect annotations
+// Source: "with IO, Mut"
+// ============================================================================
+fn bootstrap_test_05() -> bool with Mut, Div, Panic {
+    var input: [i8; 256] = [0; 256]
+    input[0] = 119    // w
+    input[1] = 105    // i
+    input[2] = 116    // t
+    input[3] = 104    // h
+    input[4] = 32     // ' '
+    input[5] = 73     // I
+    input[6] = 79     // O
+    input[7] = 44     // ,
+    input[8] = 32     // ' '
+    input[9] = 77     // M
+    input[10] = 117   // u
+    input[11] = 116   // t
+    let state = run_lex(input, 12)
+    // With Ident("IO") Comma Ident("Mut") Eof
+    // Note: effect names are capitalized, so Mut is Ident, not the `mut` keyword
+    if state.token_count != 5 { return false }
+    state.tokens[0].kind == TokenKind::With &&
+    state.tokens[1].kind == TokenKind::Ident &&
+    state.tokens[2].kind == TokenKind::Comma &&
+    state.tokens[3].kind == TokenKind::Ident &&
+    state.tokens[4].kind == TokenKind::Eof
+}
+
+// ============================================================================
+// B06: Linear struct definition
+// Source: "linear struct S { x: i64 }"
+// ============================================================================
+fn bootstrap_test_06() -> bool with Mut, Div, Panic {
+    var input: [i8; 256] = [0; 256]
+    input[0] = 108    // l
+    input[1] = 105    // i
+    input[2] = 110    // n
+    input[3] = 101    // e
+    input[4] = 97     // a
+    input[5] = 114    // r
+    input[6] = 32     // ' '
+    input[7] = 115    // s
+    input[8] = 116    // t
+    input[9] = 114    // r
+    input[10] = 117   // u
+    input[11] = 99    // c
+    input[12] = 116   // t
+    input[13] = 32    // ' '
+    input[14] = 83    // S
+    input[15] = 32    // ' '
+    input[16] = 123   // {
+    input[17] = 32    // ' '
+    input[18] = 120   // x
+    input[19] = 58    // :
+    input[20] = 32    // ' '
+    input[21] = 105   // i
+    input[22] = 54    // 6
+    input[23] = 52    // 4
+    input[24] = 32    // ' '
+    input[25] = 125   // }
+    let state = run_lex(input, 26)
+    // Linear Struct Ident("S") LBrace Ident("x") Colon Ident("i64") RBrace Eof
+    if state.token_count != 9 { return false }
+    state.tokens[0].kind == TokenKind::Linear &&
+    state.tokens[1].kind == TokenKind::Struct &&
+    state.tokens[2].kind == TokenKind::Ident &&
+    state.tokens[3].kind == TokenKind::LBrace &&
+    state.tokens[4].kind == TokenKind::Ident &&
+    state.tokens[5].kind == TokenKind::Colon &&
+    state.tokens[6].kind == TokenKind::Ident &&
+    state.tokens[7].kind == TokenKind::RBrace &&
+    state.tokens[8].kind == TokenKind::Eof
+}
+
+// ============================================================================
+// B07: if/else expression
+// Source: "if x > 0 { x } else { 0 }"
+// ============================================================================
+fn bootstrap_test_07() -> bool with Mut, Div, Panic {
+    var input: [i8; 256] = [0; 256]
+    input[0] = 105    // i
+    input[1] = 102    // f
+    input[2] = 32     // ' '
+    input[3] = 120    // x
+    input[4] = 32     // ' '
+    input[5] = 62     // >
+    input[6] = 32     // ' '
+    input[7] = 48     // 0
+    input[8] = 32     // ' '
+    input[9] = 123    // {
+    input[10] = 32    // ' '
+    input[11] = 120   // x
+    input[12] = 32    // ' '
+    input[13] = 125   // }
+    input[14] = 32    // ' '
+    input[15] = 101   // e
+    input[16] = 108   // l
+    input[17] = 115   // s
+    input[18] = 101   // e
+    input[19] = 32    // ' '
+    input[20] = 123   // {
+    input[21] = 32    // ' '
+    input[22] = 48    // 0
+    input[23] = 32    // ' '
+    input[24] = 125   // }
+    let state = run_lex(input, 25)
+    // If Ident("x") Gt IntLit(0) LBrace Ident("x") RBrace Else LBrace IntLit(0) RBrace Eof
+    if state.token_count != 12 { return false }
+    state.tokens[0].kind == TokenKind::If &&
+    state.tokens[1].kind == TokenKind::Ident &&
+    state.tokens[2].kind == TokenKind::Gt &&
+    state.tokens[3].kind == TokenKind::IntLit &&
+    state.tokens[4].kind == TokenKind::LBrace &&
+    state.tokens[5].kind == TokenKind::Ident &&
+    state.tokens[6].kind == TokenKind::RBrace &&
+    state.tokens[7].kind == TokenKind::Else &&
+    state.tokens[8].kind == TokenKind::LBrace &&
+    state.tokens[9].kind == TokenKind::IntLit &&
+    state.tokens[10].kind == TokenKind::RBrace &&
+    state.tokens[11].kind == TokenKind::Eof
+}
+
+// ============================================================================
+// B08: match expression with fat arrow
+// Source: "match x { 0 => true }"
+// ============================================================================
+fn bootstrap_test_08() -> bool with Mut, Div, Panic {
+    var input: [i8; 256] = [0; 256]
+    input[0] = 109    // m
+    input[1] = 97     // a
+    input[2] = 116    // t
+    input[3] = 99     // c
+    input[4] = 104    // h
+    input[5] = 32     // ' '
+    input[6] = 120    // x
+    input[7] = 32     // ' '
+    input[8] = 123    // {
+    input[9] = 32     // ' '
+    input[10] = 48    // 0
+    input[11] = 32    // ' '
+    input[12] = 61    // =
+    input[13] = 62    // >
+    input[14] = 32    // ' '
+    input[15] = 116   // t
+    input[16] = 114   // r
+    input[17] = 117   // u
+    input[18] = 101   // e
+    input[19] = 32    // ' '
+    input[20] = 125   // }
+    let state = run_lex(input, 21)
+    // Match Ident("x") LBrace IntLit(0) FatArrow True RBrace Eof
+    if state.token_count != 8 { return false }
+    state.tokens[0].kind == TokenKind::Match &&
+    state.tokens[1].kind == TokenKind::Ident &&
+    state.tokens[2].kind == TokenKind::LBrace &&
+    state.tokens[3].kind == TokenKind::IntLit &&
+    state.tokens[4].kind == TokenKind::FatArrow &&
+    state.tokens[5].kind == TokenKind::True &&
+    state.tokens[6].kind == TokenKind::RBrace &&
+    state.tokens[7].kind == TokenKind::Eof
+}
+
+// ============================================================================
+// B09: Real compiler helper function (multi-token, realistic)
+// Source: "fn is_digit(c: i8) -> bool { c >= 48 && c <= 57 }"
+// ============================================================================
+fn bootstrap_test_09() -> bool with Mut, Div, Panic {
+    var input: [i8; 256] = [0; 256]
+    input[0] = 102    // f
+    input[1] = 110    // n
+    input[2] = 32     // ' '
+    input[3] = 105    // i
+    input[4] = 115    // s
+    input[5] = 95     // _
+    input[6] = 100    // d
+    input[7] = 105    // i
+    input[8] = 103    // g
+    input[9] = 105    // i
+    input[10] = 116   // t
+    input[11] = 40    // (
+    input[12] = 99    // c
+    input[13] = 58    // :
+    input[14] = 32    // ' '
+    input[15] = 105   // i
+    input[16] = 56    // 8
+    input[17] = 41    // )
+    input[18] = 32    // ' '
+    input[19] = 45    // -
+    input[20] = 62    // >
+    input[21] = 32    // ' '
+    input[22] = 98    // b
+    input[23] = 111   // o
+    input[24] = 111   // o
+    input[25] = 108   // l
+    input[26] = 32    // ' '
+    input[27] = 123   // {
+    input[28] = 32    // ' '
+    input[29] = 99    // c
+    input[30] = 32    // ' '
+    input[31] = 62    // >
+    input[32] = 61    // =
+    input[33] = 32    // ' '
+    input[34] = 52    // 4
+    input[35] = 56    // 8
+    input[36] = 32    // ' '
+    input[37] = 38    // &
+    input[38] = 38    // &
+    input[39] = 32    // ' '
+    input[40] = 99    // c
+    input[41] = 32    // ' '
+    input[42] = 60    // <
+    input[43] = 61    // =
+    input[44] = 32    // ' '
+    input[45] = 53    // 5
+    input[46] = 55    // 7
+    input[47] = 32    // ' '
+    input[48] = 125   // }
+    let state = run_lex(input, 49)
+    // Fn Ident("is_digit") LParen Ident("c") Colon Ident("i8") RParen Arrow
+    // Ident("bool") LBrace Ident("c") GtEq IntLit(48) AmpAmp Ident("c") LtEq IntLit(57) RBrace Eof
+    if state.token_count != 19 { return false }
+    state.tokens[0].kind == TokenKind::Fn &&
+    state.tokens[1].kind == TokenKind::Ident &&
+    state.tokens[2].kind == TokenKind::LParen &&
+    state.tokens[3].kind == TokenKind::Ident &&
+    state.tokens[4].kind == TokenKind::Colon &&
+    state.tokens[5].kind == TokenKind::Ident &&
+    state.tokens[6].kind == TokenKind::RParen &&
+    state.tokens[7].kind == TokenKind::Arrow &&
+    state.tokens[8].kind == TokenKind::Ident &&
+    state.tokens[9].kind == TokenKind::LBrace &&
+    state.tokens[10].kind == TokenKind::Ident &&
+    state.tokens[11].kind == TokenKind::GtEq &&
+    state.tokens[12].kind == TokenKind::IntLit &&
+    state.tokens[12].int_value == 48 &&
+    state.tokens[13].kind == TokenKind::AmpAmp &&
+    state.tokens[14].kind == TokenKind::Ident &&
+    state.tokens[15].kind == TokenKind::LtEq &&
+    state.tokens[16].kind == TokenKind::IntLit &&
+    state.tokens[16].int_value == 57 &&
+    state.tokens[17].kind == TokenKind::RBrace &&
+    state.tokens[18].kind == TokenKind::Eof
+}
+
+// ============================================================================
+// B10: Function with effect annotation
+// Source: "fn f() -> i64 with IO { 42 }"
+// ============================================================================
+fn bootstrap_test_10() -> bool with Mut, Div, Panic {
+    var input: [i8; 256] = [0; 256]
+    input[0] = 102    // f
+    input[1] = 110    // n
+    input[2] = 32     // ' '
+    input[3] = 102    // f
+    input[4] = 40     // (
+    input[5] = 41     // )
+    input[6] = 32     // ' '
+    input[7] = 45     // -
+    input[8] = 62     // >
+    input[9] = 32     // ' '
+    input[10] = 105   // i
+    input[11] = 54    // 6
+    input[12] = 52    // 4
+    input[13] = 32    // ' '
+    input[14] = 119   // w
+    input[15] = 105   // i
+    input[16] = 116   // t
+    input[17] = 104   // h
+    input[18] = 32    // ' '
+    input[19] = 73    // I
+    input[20] = 79    // O
+    input[21] = 32    // ' '
+    input[22] = 123   // {
+    input[23] = 32    // ' '
+    input[24] = 52    // 4
+    input[25] = 50    // 2
+    input[26] = 32    // ' '
+    input[27] = 125   // }
+    let state = run_lex(input, 28)
+    // Fn Ident("f") LParen RParen Arrow Ident("i64") With Ident("IO") LBrace IntLit(42) RBrace Eof
+    if state.token_count != 12 { return false }
+    state.tokens[0].kind == TokenKind::Fn &&
+    state.tokens[1].kind == TokenKind::Ident &&
+    state.tokens[2].kind == TokenKind::LParen &&
+    state.tokens[3].kind == TokenKind::RParen &&
+    state.tokens[4].kind == TokenKind::Arrow &&
+    state.tokens[5].kind == TokenKind::Ident &&
+    state.tokens[6].kind == TokenKind::With &&
+    state.tokens[7].kind == TokenKind::Ident &&
+    state.tokens[8].kind == TokenKind::LBrace &&
+    state.tokens[9].kind == TokenKind::IntLit &&
+    state.tokens[9].int_value == 42 &&
+    state.tokens[10].kind == TokenKind::RBrace &&
+    state.tokens[11].kind == TokenKind::Eof
+}
+
+// ============================================================================
+// B11: Multi-line function (tests line tracking and complex control flow)
+// Source: "fn abs(x: i64) -> i64 {\n    if x < 0 {\n        0 - x\n    } else {\n        x\n    }\n}"
+// ============================================================================
+fn bootstrap_test_11() -> bool with Mut, Div, Panic {
+    var input: [i8; 256] = [0; 256]
+    // Line 1: fn abs(x: i64) -> i64 {\n
+    input[0] = 102    // f
+    input[1] = 110    // n
+    input[2] = 32     // ' '
+    input[3] = 97     // a
+    input[4] = 98     // b
+    input[5] = 115    // s
+    input[6] = 40     // (
+    input[7] = 120    // x
+    input[8] = 58     // :
+    input[9] = 32     // ' '
+    input[10] = 105   // i
+    input[11] = 54    // 6
+    input[12] = 52    // 4
+    input[13] = 41    // )
+    input[14] = 32    // ' '
+    input[15] = 45    // -
+    input[16] = 62    // >
+    input[17] = 32    // ' '
+    input[18] = 105   // i
+    input[19] = 54    // 6
+    input[20] = 52    // 4
+    input[21] = 32    // ' '
+    input[22] = 123   // {
+    input[23] = 10    // \n
+    // Line 2:     if x < 0 {\n
+    input[24] = 32    // ' '
+    input[25] = 32    // ' '
+    input[26] = 32    // ' '
+    input[27] = 32    // ' '
+    input[28] = 105   // i
+    input[29] = 102   // f
+    input[30] = 32    // ' '
+    input[31] = 120   // x
+    input[32] = 32    // ' '
+    input[33] = 60    // <
+    input[34] = 32    // ' '
+    input[35] = 48    // 0
+    input[36] = 32    // ' '
+    input[37] = 123   // {
+    input[38] = 10    // \n
+    // Line 3:         0 - x\n
+    input[39] = 32    // ' '
+    input[40] = 32    // ' '
+    input[41] = 32    // ' '
+    input[42] = 32    // ' '
+    input[43] = 32    // ' '
+    input[44] = 32    // ' '
+    input[45] = 32    // ' '
+    input[46] = 32    // ' '
+    input[47] = 48    // 0
+    input[48] = 32    // ' '
+    input[49] = 45    // -
+    input[50] = 32    // ' '
+    input[51] = 120   // x
+    input[52] = 10    // \n
+    // Line 4:     } else {\n
+    input[53] = 32    // ' '
+    input[54] = 32    // ' '
+    input[55] = 32    // ' '
+    input[56] = 32    // ' '
+    input[57] = 125   // }
+    input[58] = 32    // ' '
+    input[59] = 101   // e
+    input[60] = 108   // l
+    input[61] = 115   // s
+    input[62] = 101   // e
+    input[63] = 32    // ' '
+    input[64] = 123   // {
+    input[65] = 10    // \n
+    // Line 5:         x\n
+    input[66] = 32    // ' '
+    input[67] = 32    // ' '
+    input[68] = 32    // ' '
+    input[69] = 32    // ' '
+    input[70] = 32    // ' '
+    input[71] = 32    // ' '
+    input[72] = 32    // ' '
+    input[73] = 32    // ' '
+    input[74] = 120   // x
+    input[75] = 10    // \n
+    // Line 6:     }\n
+    input[76] = 32    // ' '
+    input[77] = 32    // ' '
+    input[78] = 32    // ' '
+    input[79] = 32    // ' '
+    input[80] = 125   // }
+    input[81] = 10    // \n
+    // Line 7: }
+    input[82] = 125   // }
+    let state = run_lex(input, 83)
+    // Fn Ident("abs") LParen Ident("x") Colon Ident("i64") RParen Arrow Ident("i64") LBrace
+    // If Ident("x") Lt IntLit(0) LBrace IntLit(0) Minus Ident("x") RBrace Else LBrace
+    // Ident("x") RBrace RBrace Eof
+    if state.token_count != 25 { return false }
+    state.tokens[0].kind == TokenKind::Fn &&
+    state.tokens[1].kind == TokenKind::Ident &&
+    state.tokens[2].kind == TokenKind::LParen &&
+    state.tokens[3].kind == TokenKind::Ident &&
+    state.tokens[4].kind == TokenKind::Colon &&
+    state.tokens[5].kind == TokenKind::Ident &&
+    state.tokens[6].kind == TokenKind::RParen &&
+    state.tokens[7].kind == TokenKind::Arrow &&
+    state.tokens[8].kind == TokenKind::Ident &&
+    state.tokens[9].kind == TokenKind::LBrace &&
+    state.tokens[10].kind == TokenKind::If &&
+    state.tokens[11].kind == TokenKind::Ident &&
+    state.tokens[12].kind == TokenKind::Lt &&
+    state.tokens[13].kind == TokenKind::IntLit &&
+    state.tokens[14].kind == TokenKind::LBrace &&
+    state.tokens[15].kind == TokenKind::IntLit &&
+    state.tokens[16].kind == TokenKind::Minus &&
+    state.tokens[17].kind == TokenKind::Ident &&
+    state.tokens[18].kind == TokenKind::RBrace &&
+    state.tokens[19].kind == TokenKind::Else &&
+    state.tokens[20].kind == TokenKind::LBrace &&
+    state.tokens[21].kind == TokenKind::Ident &&
+    state.tokens[22].kind == TokenKind::RBrace &&
+    state.tokens[23].kind == TokenKind::RBrace &&
+    state.tokens[24].kind == TokenKind::Eof
+}
+
+// ============================================================================
+// B12: Struct definition with token text verification
+// Source: "struct Pt { x: i64, y: i64 }"
+// Verifies identifier text content, not just token kinds
+// ============================================================================
+fn bootstrap_test_12() -> bool with Mut, Div, Panic {
+    var input: [i8; 256] = [0; 256]
+    input[0] = 115    // s
+    input[1] = 116    // t
+    input[2] = 114    // r
+    input[3] = 117    // u
+    input[4] = 99     // c
+    input[5] = 116    // t
+    input[6] = 32     // ' '
+    input[7] = 80     // P
+    input[8] = 116    // t
+    input[9] = 32     // ' '
+    input[10] = 123   // {
+    input[11] = 32    // ' '
+    input[12] = 120   // x
+    input[13] = 58    // :
+    input[14] = 32    // ' '
+    input[15] = 105   // i
+    input[16] = 54    // 6
+    input[17] = 52    // 4
+    input[18] = 44    // ,
+    input[19] = 32    // ' '
+    input[20] = 121   // y
+    input[21] = 58    // :
+    input[22] = 32    // ' '
+    input[23] = 105   // i
+    input[24] = 54    // 6
+    input[25] = 52    // 4
+    input[26] = 32    // ' '
+    input[27] = 125   // }
+    let state = run_lex(input, 28)
+    // Struct Ident("Pt") LBrace Ident("x") Colon Ident("i64") Comma Ident("y") Colon Ident("i64") RBrace Eof
+    if state.token_count != 12 { return false }
+    // Verify token kinds
+    if !(state.tokens[0].kind == TokenKind::Struct) { return false }
+    if !(state.tokens[1].kind == TokenKind::Ident) { return false }
+    if !(state.tokens[2].kind == TokenKind::LBrace) { return false }
+    if !(state.tokens[11].kind == TokenKind::Eof) { return false }
+    // Verify identifier text: "Pt" = [80, 116]
+    if !(state.tokens[1].text_len == 2) { return false }
+    if !(state.tokens[1].text[0] == 80) { return false }   // P
+    if !(state.tokens[1].text[1] == 116) { return false }  // t
+    // Verify field name: "x" = [120]
+    if !(state.tokens[3].text_len == 1) { return false }
+    if !(state.tokens[3].text[0] == 120) { return false }  // x
+    // Verify field name: "y" = [121]
+    if !(state.tokens[7].text_len == 1) { return false }
+    if !(state.tokens[7].text[0] == 121) { return false }  // y
+    // Verify type name: "i64" = [105, 54, 52]
+    if !(state.tokens[5].text_len == 3) { return false }
+    if !(state.tokens[5].text[0] == 105) { return false }  // i
+    if !(state.tokens[5].text[1] == 54) { return false }   // 6
+    if !(state.tokens[5].text[2] == 52) { return false }   // 4
+    true
+}
+
+// ============================================================================
+// Test runner
+// ============================================================================
+
+fn run_bootstrap_tests() -> i32 with IO, Mut, Panic, Div, Alloc {
+    var passed: i64 = 0
+    var total: i64 = 0
+
+    print("=== Bootstrap Tests ===\n")
+
+    total = total + 1
+    if bootstrap_test_01() { passed = passed + 1; print("  B01 OK: fn definition\n") }
+    else { print("  FAIL: B01 fn definition\n") }
+
+    total = total + 1
+    if bootstrap_test_02() { passed = passed + 1; print("  B02 OK: var binding\n") }
+    else { print("  FAIL: B02 var binding\n") }
+
+    total = total + 1
+    if bootstrap_test_03() { passed = passed + 1; print("  B03 OK: exclusive ref &!\n") }
+    else { print("  FAIL: B03 exclusive ref\n") }
+
+    total = total + 1
+    if bootstrap_test_04() { passed = passed + 1; print("  B04 OK: concat op ++\n") }
+    else { print("  FAIL: B04 concat op\n") }
+
+    total = total + 1
+    if bootstrap_test_05() { passed = passed + 1; print("  B05 OK: effect annotation\n") }
+    else { print("  FAIL: B05 effect annotation\n") }
+
+    total = total + 1
+    if bootstrap_test_06() { passed = passed + 1; print("  B06 OK: linear struct\n") }
+    else { print("  FAIL: B06 linear struct\n") }
+
+    total = total + 1
+    if bootstrap_test_07() { passed = passed + 1; print("  B07 OK: if/else\n") }
+    else { print("  FAIL: B07 if/else\n") }
+
+    total = total + 1
+    if bootstrap_test_08() { passed = passed + 1; print("  B08 OK: match expr\n") }
+    else { print("  FAIL: B08 match expr\n") }
+
+    total = total + 1
+    if bootstrap_test_09() { passed = passed + 1; print("  B09 OK: is_digit helper\n") }
+    else { print("  FAIL: B09 is_digit helper\n") }
+
+    total = total + 1
+    if bootstrap_test_10() { passed = passed + 1; print("  B10 OK: fn with effects\n") }
+    else { print("  FAIL: B10 fn with effects\n") }
+
+    total = total + 1
+    if bootstrap_test_11() { passed = passed + 1; print("  B11 OK: multi-line fn\n") }
+    else { print("  FAIL: B11 multi-line fn\n") }
+
+    total = total + 1
+    if bootstrap_test_12() { passed = passed + 1; print("  B12 OK: struct + text verify\n") }
+    else { print("  FAIL: B12 struct + text verify\n") }
+
+    if passed == total {
+        print("ALL BOOTSTRAP TESTS PASSED\n")
+    }
+
+    if passed == total { 0 } else { 1 }
+}
