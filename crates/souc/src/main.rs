@@ -6,7 +6,7 @@ use clap::{Parser, Subcommand};
 use miette::Result;
 use sounio::sir::AllocPolicy;
 use std::path::{Path, PathBuf};
-use tracing_subscriber::{fmt, prelude::*, EnvFilter};
+use tracing_subscriber::{EnvFilter, fmt, prelude::*};
 
 #[derive(Parser)]
 #[command(name = "souc")]
@@ -2988,13 +2988,12 @@ fn run(input: &std::path::Path, args: &[String], use_sounio_compiler: bool) -> R
             std::env::var("SOUNIO_STDLIB_PATH").unwrap_or_else(|_| "stdlib/compiler".to_string());
 
         // Create the self-hosted compiler
-        let compiler =
-            sounio::compiler_loader::SounioCompiler::new(&stdlib_path).map_err(|e| {
-                miette::miette!(
-                    "Failed to initialize self-hosted compiler: {}",
-                    e.to_string()
-                )
-            })?;
+        let compiler = sounio::compiler_loader::SounioCompiler::new(&stdlib_path).map_err(|e| {
+            miette::miette!(
+                "Failed to initialize self-hosted compiler: {}",
+                e.to_string()
+            )
+        })?;
 
         // Compile through the self-hosted bridge to validate bootstrap wiring.
         let input_str = input.to_string_lossy();
@@ -3904,7 +3903,7 @@ fn run_tests(
 ) -> Result<()> {
     use sounio::test::{
         coverage::{CoverageConfig, CoverageTracker},
-        discovery::{discover_tests, TestFilter},
+        discovery::{TestFilter, discover_tests},
         runner::{OutputFormat, TestRunner, TestRunnerConfig},
     };
 
@@ -4016,7 +4015,7 @@ fn run_benchmarks(
 ) -> Result<()> {
     use sounio::test::{
         bench::{BenchConfig, BenchmarkRunner},
-        discovery::{discover_tests, TestFilter},
+        discovery::{TestFilter, discover_tests},
     };
     use std::time::Duration;
 
@@ -4334,7 +4333,7 @@ fn debug_program(
 
 /// Explain an error code
 fn explain_error(code: &str) -> Result<()> {
-    use sounio::diagnostic::codes::{explain_error as get_explanation, ErrorIndex};
+    use sounio::diagnostic::codes::{ErrorIndex, explain_error as get_explanation};
 
     if let Some(explanation) = get_explanation(code) {
         println!("{}", explanation);
@@ -4527,7 +4526,7 @@ fn diagnostics_check(
 
 /// Show similar names for typo detection
 fn diagnostics_similar(name: &str, category: &str, max_distance: usize) -> Result<()> {
-    use sounio::diagnostic::typo::{find_similar, SuggestionBuilder};
+    use sounio::diagnostic::typo::{SuggestionBuilder, find_similar};
 
     let builder = SuggestionBuilder::new();
 
@@ -5416,7 +5415,7 @@ fn target_create(triple: &str, base: Option<&str>, output: Option<&std::path::Pa
 
 /// Show host target information
 fn target_host() -> Result<()> {
-    use sounio::target::{host_triple, CfgContext, TargetSpec};
+    use sounio::target::{CfgContext, TargetSpec, host_triple};
 
     let triple = host_triple();
     println!("Host target: {}", triple);
@@ -5452,7 +5451,7 @@ fn target_host() -> Result<()> {
 
 /// Check target cfg predicates
 fn target_cfg(target: Option<&str>, predicate: Option<&str>) -> Result<()> {
-    use sounio::target::{host_triple, CfgContext, CfgPredicate, TargetRegistry, TargetSpec};
+    use sounio::target::{CfgContext, CfgPredicate, TargetRegistry, TargetSpec, host_triple};
 
     let registry = TargetRegistry::with_builtins();
 
@@ -5517,7 +5516,7 @@ fn sysroot_list(verbose: bool) -> Result<()> {
     if sysroots.is_empty() {
         println!("No sysroots installed.");
         println!();
-        println!("Install a sysroot with: dc sysroot install <target>");
+        println!("Install a sysroot with: souc sysroot install <target>");
         return Ok(());
     }
 
@@ -5587,11 +5586,21 @@ fn sysroot_show(target: &str) -> Result<()> {
             println!("Metadata:");
             println!("  Version: {}", metadata.version);
             println!("  Created: {}", format_timestamp(metadata.created));
+            println!("  Source: {:?}", metadata.source);
+            if let Some(source_kind) = metadata.extra.get("source_kind") {
+                println!("  Source kind: {}", source_kind);
+            }
+            if let Some(resolved_path) = metadata.extra.get("sysroot_path") {
+                println!("  Resolved sysroot path: {}", resolved_path);
+            }
+            if let Some(stdlib_path) = metadata.extra.get("stdlib_path") {
+                println!("  Stdlib path: {}", stdlib_path);
+            }
         }
     } else {
         println!("No sysroot installed for: {}", target);
         println!();
-        println!("Install with: dc sysroot install {}", target);
+        println!("Install with: souc sysroot install {}", target);
 
         // Try to find system sysroot
         if let Some(ref system_sysroot) = spec.os.sysroot {
@@ -5605,7 +5614,9 @@ fn sysroot_show(target: &str) -> Result<()> {
 
 /// Install sysroot for a target
 fn sysroot_install(target: &str, force: bool) -> Result<()> {
-    use sounio::target::{SysrootConfig, SysrootManager, TargetRegistry};
+    use sounio::target::{
+        SysrootConfig, SysrootManager, SysrootMetadata, SysrootSource, TargetRegistry,
+    };
 
     let registry = TargetRegistry::with_builtins();
 
@@ -5642,7 +5653,61 @@ fn sysroot_install(target: &str, force: bool) -> Result<()> {
     let spec = registry.get(target).unwrap();
     match manager.get_sysroot(&spec) {
         Ok(sysroot) => {
-            println!("Sysroot installed at: {}", sysroot.path.display());
+            // Persist a managed manifest entry so list/show use the same source of truth.
+            let cache_dir = get_sysroot_cache_dir();
+            let managed_path = cache_dir.join(target);
+            let resolved_path = sysroot.path.clone();
+            let stdlib_path = detect_stdlib_path_for_install();
+            let source_kind = if stdlib_path.is_some() {
+                "local-stdlib"
+            } else {
+                "system"
+            };
+            let is_system_sysroot =
+                resolved_path == PathBuf::from("/") || !resolved_path.starts_with(&cache_dir);
+
+            std::fs::create_dir_all(&managed_path)
+                .map_err(|e| miette::miette!("Failed to create sysroot directory: {}", e))?;
+
+            let mut metadata = SysrootMetadata::new(
+                target,
+                if is_system_sysroot {
+                    SysrootSource::System(resolved_path.clone())
+                } else {
+                    SysrootSource::Custom(resolved_path.clone())
+                },
+            );
+            metadata
+                .extra
+                .insert("source_kind".to_string(), source_kind.to_string());
+            metadata.extra.insert(
+                "sysroot_path".to_string(),
+                resolved_path.display().to_string(),
+            );
+            if let Some(path) = stdlib_path {
+                metadata
+                    .extra
+                    .insert("stdlib_path".to_string(), path.display().to_string());
+            }
+            metadata
+                .save(&managed_path.join("sysroot.json"))
+                .map_err(|e| miette::miette!("Failed to persist sysroot metadata: {}", e))?;
+
+            if resolved_path == PathBuf::from("/") {
+                println!(
+                    "Detected system sysroot at: {} (registered at {})",
+                    resolved_path.display(),
+                    managed_path.display()
+                );
+            } else if resolved_path.starts_with(&managed_path) {
+                println!("Installed managed sysroot at: {}", managed_path.display());
+            } else {
+                println!(
+                    "Registered sysroot at: {} (manifest at {})",
+                    resolved_path.display(),
+                    managed_path.display()
+                );
+            }
             Ok(())
         }
         Err(e) => Err(miette::miette!("Failed to install sysroot: {}", e)),
@@ -5746,9 +5811,36 @@ fn sysroot_stdlib_paths(_verbose: bool) -> Result<()> {
 
 /// Get the sysroot cache directory
 fn get_sysroot_cache_dir() -> PathBuf {
-    dirs::cache_dir()
-        .map(|p| p.join("sounio").join("sysroots"))
-        .unwrap_or_else(|| PathBuf::from(".sounio/sysroots"))
+    if let Ok(path) = std::env::var("SOUNIO_SYSROOT_HOME")
+        && !path.trim().is_empty()
+    {
+        return PathBuf::from(path);
+    }
+    if let Ok(path) = std::env::var("XDG_CACHE_HOME")
+        && !path.trim().is_empty()
+    {
+        return PathBuf::from(path).join("sounio").join("sysroots");
+    }
+    if let Some(home) = dirs::home_dir() {
+        return home.join(".cache").join("sounio").join("sysroots");
+    }
+    PathBuf::from(".sounio/sysroots")
+}
+
+fn detect_stdlib_path_for_install() -> Option<PathBuf> {
+    if let Ok(env_path) = std::env::var("SOUNIO_STDLIB_PATH")
+        && !env_path.trim().is_empty()
+    {
+        let path = PathBuf::from(env_path);
+        if path.exists() {
+            return Some(path);
+        }
+    }
+    let local_stdlib = std::env::current_dir().ok()?.join("stdlib");
+    if local_stdlib.exists() {
+        return Some(local_stdlib);
+    }
+    None
 }
 
 // ============================================================================
@@ -5764,7 +5856,7 @@ fn ontology_init(
     verbose: bool,
 ) -> Result<()> {
     use sounio::ontology::native::downloader::{
-        core_ontologies, DownloadConfig, OntologyDownloader,
+        DownloadConfig, OntologyDownloader, core_ontologies,
     };
 
     println!("Initializing ontology data...");
@@ -6014,11 +6106,11 @@ fn ontology_list(data_dir: &Path, verbose: bool) -> Result<()> {
 
 /// Lock ontology versions to ontology.lock
 fn ontology_lock(project_dir: &Path, output: &Path, force: bool) -> Result<()> {
+    use sounio::ontology::OntologyLayer;
     use sounio::ontology::native::NativeOntologyRegistry;
     use sounio::ontology::version::{
-        manifest::OntologySource as ManifestSource, Manifest, OntologyEntry, OntologyVersion,
+        Manifest, OntologyEntry, OntologyVersion, manifest::OntologySource as ManifestSource,
     };
-    use sounio::ontology::OntologyLayer;
 
     // Check if lock file already exists
     if output.exists() && !force {
@@ -6364,8 +6456,8 @@ fn layout_analyze(
     output: Option<&Path>,
 ) -> Result<()> {
     use sounio::layout::{
-        cluster_concepts, extract_concepts_from_types, generate_layout, generate_report,
-        DistanceMatrix, LayoutConfig,
+        DistanceMatrix, LayoutConfig, cluster_concepts, extract_concepts_from_types,
+        generate_layout, generate_report,
     };
     use sounio::ontology::native::NativeOntology;
     use std::io::Write;
@@ -6436,8 +6528,8 @@ fn layout_analyze(
 /// Simulate cache performance
 fn layout_simulate(input: &Path, data_dir: &Path, cache_size: usize, compare: bool) -> Result<()> {
     use sounio::layout::{
-        cluster_concepts, compare_layouts, generate_layout, CacheInstrumentation, ConceptUsage,
-        DistanceMatrix, LayoutConfig,
+        CacheInstrumentation, ConceptUsage, DistanceMatrix, LayoutConfig, cluster_concepts,
+        compare_layouts, generate_layout,
     };
     use sounio::ontology::native::NativeOntology;
 
@@ -6547,8 +6639,8 @@ fn layout_validate(
     iterations: usize,
 ) -> Result<()> {
     use sounio::layout::{
-        cluster_concepts, compare_layouts, generate_layout, ConceptUsage, DistanceMatrix,
-        LayoutConfig,
+        ConceptUsage, DistanceMatrix, LayoutConfig, cluster_concepts, compare_layouts,
+        generate_layout,
     };
     use sounio::ontology::native::NativeOntology;
 
@@ -6689,8 +6781,8 @@ fn layout_visualize(
     output: Option<&Path>,
 ) -> Result<()> {
     use sounio::layout::{
-        cluster_concepts, extract_concepts_from_types, generate_ascii, generate_layout,
-        generate_mermaid, generate_table, DistanceMatrix, LayoutConfig,
+        DistanceMatrix, LayoutConfig, cluster_concepts, extract_concepts_from_types,
+        generate_ascii, generate_layout, generate_mermaid, generate_table,
     };
     use sounio::ontology::native::NativeOntology;
     use std::io::Write;
@@ -6751,9 +6843,9 @@ fn layout_visualize(
 /// Validate layout constraints (Day 39 - Participatory Compilation)
 fn layout_constraints(input: &Path, data_dir: &Path, verbose: bool) -> Result<()> {
     use sounio::layout::{
-        cluster_concepts, format_diagnostics, solve_constraints, validate_constraints_diagnostic,
         ConstraintSet, ConstraintSource, DistanceMatrix, ForcedRegion, LayoutConfig,
-        LayoutConstraint,
+        LayoutConstraint, cluster_concepts, format_diagnostics, solve_constraints,
+        validate_constraints_diagnostic,
     };
 
     // Read constraint file (simple format: one constraint per line)
@@ -6888,8 +6980,8 @@ fn layout_constraints(input: &Path, data_dir: &Path, verbose: bool) -> Result<()
 /// Explain layout decision for a specific concept (Day 39)
 fn layout_explain(concept: &str, input: &Path, data_dir: &Path) -> Result<()> {
     use sounio::layout::{
-        cluster_concepts, extract_concepts_from_types, generate_layout, DistanceMatrix,
-        LayoutConfig,
+        DistanceMatrix, LayoutConfig, cluster_concepts, extract_concepts_from_types,
+        generate_layout,
     };
     use sounio::ontology::native::NativeOntology;
 
@@ -8123,8 +8215,8 @@ fn locality_codegen(
 // ============================================================================
 
 fn units_list(category: &str, format: &str, verbose: bool) -> Result<()> {
-    use sounio::units::check::UnitChecker;
     use sounio::units::Dimension;
+    use sounio::units::check::UnitChecker;
 
     let _checker = UnitChecker::new();
 
