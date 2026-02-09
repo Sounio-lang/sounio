@@ -1107,8 +1107,8 @@ impl MIRPass for MLGuidedOptimizer {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::mir::builder::ModuleBuilder;
     use crate::mir::MirType;
+    use crate::mir::builder::ModuleBuilder;
 
     #[test]
     fn test_ml_guided_optimizer_creation() {

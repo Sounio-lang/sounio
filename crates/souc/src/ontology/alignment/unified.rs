@@ -710,7 +710,9 @@ mod tests {
 
     #[test]
     fn test_recompute_stats_counts_embeddings() {
-        use crate::ontology::embedding::{Embedding, EmbeddingConfig, EmbeddingModel, EmbeddingSpace};
+        use crate::ontology::embedding::{
+            Embedding, EmbeddingConfig, EmbeddingModel, EmbeddingSpace,
+        };
 
         let mut embedding_space =
             EmbeddingSpace::new(EmbeddingConfig::default()).expect("embedding space");

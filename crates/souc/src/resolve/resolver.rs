@@ -139,6 +139,7 @@ impl Resolver {
             "assert",
             "assert_eq",
             "read_line",
+            "read_byte",
             "format",
             "to_string",
             // Type introspection

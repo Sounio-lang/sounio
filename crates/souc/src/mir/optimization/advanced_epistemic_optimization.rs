@@ -1031,8 +1031,8 @@ impl UncertaintyMonotonicityTracker {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::mir::builder::ModuleBuilder;
     use crate::mir::MirType;
+    use crate::mir::builder::ModuleBuilder;
 
     #[test]
     fn test_advanced_epistemic_optimization_creation() {
@@ -1069,9 +1069,10 @@ mod tests {
         assert!(result.is_ok());
 
         // Check that epistemic value was created
-        assert!(opt
-            .epistemic_analysis
-            .epistemic_values
-            .contains_key(&ValueId(3)));
+        assert!(
+            opt.epistemic_analysis
+                .epistemic_values
+                .contains_key(&ValueId(3))
+        );
     }
 }

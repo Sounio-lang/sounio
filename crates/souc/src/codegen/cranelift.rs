@@ -910,17 +910,9 @@ extern "C" fn runtime_prob_sample_uniform(low: f64, high: f64) -> f64 {
 #[cfg(feature = "jit")]
 extern "C" fn runtime_prob_sample_bernoulli(p: f64) -> i64 {
     if let Ok(mut state) = get_jit_effect_state().lock() {
-        if state.rng.next_f64() < p {
-            1
-        } else {
-            0
-        }
+        if state.rng.next_f64() < p { 1 } else { 0 }
     } else {
-        if p >= 0.5 {
-            1
-        } else {
-            0
-        }
+        if p >= 0.5 { 1 } else { 0 }
     }
 }
 
@@ -2005,11 +1997,11 @@ use crate::hlir::{
 use std::collections::HashMap;
 
 #[cfg(feature = "jit")]
-use cranelift_codegen::ir::{types, AbiParam, InstBuilder, MemFlags, Signature, UserFuncName};
+use cranelift_codegen::Context;
+#[cfg(feature = "jit")]
+use cranelift_codegen::ir::{AbiParam, InstBuilder, MemFlags, Signature, UserFuncName, types};
 #[cfg(feature = "jit")]
 use cranelift_codegen::settings::{self, Configurable};
-#[cfg(feature = "jit")]
-use cranelift_codegen::Context;
 #[cfg(feature = "jit")]
 use cranelift_frontend::{FunctionBuilder, FunctionBuilderContext};
 #[cfg(feature = "jit")]

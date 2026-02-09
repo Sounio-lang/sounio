@@ -9,7 +9,7 @@
 //!
 //! Run with: cargo bench --bench octonion_bench
 
-use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion};
+use criterion::{BenchmarkId, Criterion, black_box, criterion_group, criterion_main};
 
 // Mock octonion struct for benchmarking (same as in tests)
 #[derive(Clone, Copy, Debug)]

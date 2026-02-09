@@ -4480,7 +4480,7 @@ impl MetalCodegen {
 
 /// Compile HLIR to MSL
 pub fn compile_to_msl(hlir: &crate::hlir::HlirModule, gpu_family: MetalGpuFamily) -> String {
-    use super::hlir_to_gpu::{lower_with_config, LoweringConfig};
+    use super::hlir_to_gpu::{LoweringConfig, lower_with_config};
 
     let config = LoweringConfig {
         target: GpuTarget::Metal { gpu_family },
@@ -4505,7 +4505,7 @@ pub fn compile_to_msl_epistemic(
     gpu_family: MetalGpuFamily,
     epistemic: bool,
 ) -> String {
-    use super::hlir_to_gpu::{lower_with_config, LoweringConfig};
+    use super::hlir_to_gpu::{LoweringConfig, lower_with_config};
 
     let config = LoweringConfig {
         target: GpuTarget::Metal { gpu_family },

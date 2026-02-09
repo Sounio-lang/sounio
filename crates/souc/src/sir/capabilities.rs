@@ -1127,7 +1127,11 @@ impl TargetCapabilities {
         let mut missing = missing;
         let mut extra = extra;
 
-        let mut keys: Vec<u8> = self_param.keys().chain(other_param.keys()).copied().collect();
+        let mut keys: Vec<u8> = self_param
+            .keys()
+            .chain(other_param.keys())
+            .copied()
+            .collect();
         keys.sort_unstable();
         keys.dedup();
 
@@ -1371,9 +1375,10 @@ mod tests {
 
         let diff = source.diff(&target);
 
-        assert!(diff
-            .different
-            .contains(&(Capability::SharedMemKb(48), Capability::SharedMemKb(64))));
+        assert!(
+            diff.different
+                .contains(&(Capability::SharedMemKb(48), Capability::SharedMemKb(64)))
+        );
         assert!(diff.missing.is_empty());
         assert!(diff.extra.is_empty());
     }

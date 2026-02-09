@@ -6035,9 +6035,9 @@ pub fn emit_code(
         }
         Architecture::AArch64 => {
             let mut emitter = crate::backend::native::aarch64::AArch64Emitter::new();
-            let code = emitter
-                .emit_module(module)
-                .map_err(|e| EmitError::UnsupportedTarget(format!("AArch64 emission failed: {e}")))?;
+            let code = emitter.emit_module(module).map_err(|e| {
+                EmitError::UnsupportedTarget(format!("AArch64 emission failed: {e}"))
+            })?;
 
             let relocations = emitter
                 .relocations()
@@ -6050,9 +6050,7 @@ pub fn emit_code(
                         crate::backend::native::aarch64::RelocationKind::AArch64Adr21 => {
                             RelocKind::AArch64Adr21
                         }
-                        crate::backend::native::aarch64::RelocationKind::Abs64 => {
-                            RelocKind::Abs64
-                        }
+                        crate::backend::native::aarch64::RelocationKind::Abs64 => RelocKind::Abs64,
                     };
                     Relocation {
                         offset: r.offset,

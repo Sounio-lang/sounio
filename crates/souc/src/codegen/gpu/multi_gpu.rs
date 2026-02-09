@@ -561,14 +561,17 @@ fn discover_cuda_device_count() -> Option<u32> {
         }
     }
 
-    let from_nvidia_smi = run_command("nvidia-smi", &["--query-gpu=index", "--format=csv,noheader"])
-        .map(|stdout| {
-            stdout
-                .lines()
-                .filter(|line| !line.trim().is_empty())
-                .count() as u32
-        })
-        .filter(|count| *count > 0);
+    let from_nvidia_smi = run_command(
+        "nvidia-smi",
+        &["--query-gpu=index", "--format=csv,noheader"],
+    )
+    .map(|stdout| {
+        stdout
+            .lines()
+            .filter(|line| !line.trim().is_empty())
+            .count() as u32
+    })
+    .filter(|count| *count > 0);
     if from_nvidia_smi.is_some() {
         return from_nvidia_smi;
     }

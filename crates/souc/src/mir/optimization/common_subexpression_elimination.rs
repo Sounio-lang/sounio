@@ -854,10 +854,10 @@ fn apply_replacements(func: &mut MirFunction, replacements: &HashMap<ValueId, Va
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::mir::FuncId;
     use crate::mir::analysis::SSAValidator;
     use crate::mir::builder::FunctionBuilder;
     use crate::mir::types::MirConstant;
-    use crate::mir::FuncId;
 
     #[test]
     fn test_expression_from_binary() {

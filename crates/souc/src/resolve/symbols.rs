@@ -444,6 +444,7 @@ impl SymbolTable {
             "len",         // Get length of array/string/tuple
             "type_of",     // Get type name as string
             "read_line",   // Read line from stdin
+            "read_byte",   // Read single byte from stdin (-1 on EOF)
             "parse_int",   // Parse string to int
             "parse_float", // Parse string to float
             "to_string",   // Convert to string

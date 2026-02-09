@@ -1476,8 +1476,13 @@ fn compile_gpu(args: &BuildArgs) -> Result<(PathBuf, Option<NativeMetrics>), Str
         let mut output_path = args.output.clone().unwrap_or_else(|| args.input[0].clone());
         output_path.set_extension("ptx");
 
-        std::fs::write(&output_path, ptx)
-            .map_err(|e| format!("Failed to write PTX file '{}': {}", output_path.display(), e))?;
+        std::fs::write(&output_path, ptx).map_err(|e| {
+            format!(
+                "Failed to write PTX file '{}': {}",
+                output_path.display(),
+                e
+            )
+        })?;
 
         if args.verbose {
             println!("GPU: wrote PTX to {}", output_path.display());

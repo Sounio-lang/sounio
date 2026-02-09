@@ -5,14 +5,14 @@
 
 use std::collections::HashMap;
 
-use crate::epistemic::{Confidence, EpistemicStatus, Evidence, EvidenceKind, Revisability, Source};
 #[cfg(feature = "ontology")]
 use crate::epistemic::TermId;
+use crate::epistemic::{Confidence, EpistemicStatus, Evidence, EvidenceKind, Revisability, Source};
 use crate::ontology::OntologyError;
 
-use super::{DomainIndex, OntologyMetadata};
 #[cfg(feature = "ontology")]
 use super::DomainTerm;
+use super::{DomainIndex, OntologyMetadata};
 
 /// Load an ontology from its SQLite database
 #[cfg(feature = "ontology")]

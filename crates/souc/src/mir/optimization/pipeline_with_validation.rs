@@ -7,8 +7,8 @@
 #![allow(clippy::excessive_nesting)]
 
 use super::pass_manager::MIRPass;
-use crate::mir::analysis::ssa_validator::SSAValidator;
 use crate::mir::MirModule;
+use crate::mir::analysis::ssa_validator::SSAValidator;
 use std::collections::HashMap;
 
 /// Optimization pipeline with integrated SSA validation
@@ -273,8 +273,8 @@ pub fn create_validated_pipeline() -> ValidatedOptimizationPipeline {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::mir::builder::ModuleBuilder;
     use crate::mir::MirType;
+    use crate::mir::builder::ModuleBuilder;
 
     #[test]
     fn test_validated_pipeline_creation() {

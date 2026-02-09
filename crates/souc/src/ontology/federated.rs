@@ -697,7 +697,10 @@ impl FederatedResolver {
             rows
         );
         if let Some(ref ontology) = query.ontology {
-            ols4_search.push_str(&format!("&ontology={}", urlencoded(&ontology.to_lowercase())));
+            ols4_search.push_str(&format!(
+                "&ontology={}",
+                urlencoded(&ontology.to_lowercase())
+            ));
         }
         if query.include_obsolete {
             ols4_search.push_str("&obsoletes=true");
@@ -711,8 +714,10 @@ impl FederatedResolver {
             rows
         );
         if let Some(ref ontology) = query.ontology {
-            bioportal_search
-                .push_str(&format!("&ontologies={}", urlencoded(&ontology.to_uppercase())));
+            bioportal_search.push_str(&format!(
+                "&ontologies={}",
+                urlencoded(&ontology.to_uppercase())
+            ));
         }
         if query.include_obsolete {
             bioportal_search.push_str("&also_search_obsolete=true");

@@ -790,10 +790,14 @@ mod tests {
         let missing = std::env::temp_dir()
             .join(format!("sounio-missing-domain-db-{}", std::process::id()))
             .join("does-not-exist");
-        let config = ResolverConfig::default().with_data_dir(missing).no_federated();
+        let config = ResolverConfig::default()
+            .with_data_dir(missing)
+            .no_federated();
         let mut resolver = OntologyResolver::new(config).unwrap();
 
-        let result = resolver.is_subclass_of("CHEBI:15365", "CHEBI:23888").unwrap();
+        let result = resolver
+            .is_subclass_of("CHEBI:15365", "CHEBI:23888")
+            .unwrap();
         assert!(matches!(result, SubsumptionResult::Unknown));
     }
 
@@ -803,7 +807,9 @@ mod tests {
         let missing = std::env::temp_dir()
             .join(format!("sounio-missing-domain-db-{}", std::process::id()))
             .join("does-not-exist");
-        let config = ResolverConfig::default().with_data_dir(missing).no_federated();
+        let config = ResolverConfig::default()
+            .with_data_dir(missing)
+            .no_federated();
         let mut resolver = OntologyResolver::new(config).unwrap();
 
         let result = resolver.resolve("CHEBI:15365");

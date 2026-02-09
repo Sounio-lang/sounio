@@ -1084,8 +1084,8 @@ impl MIRPass for PerformanceTunedOptimizer {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::mir::builder::ModuleBuilder;
     use crate::mir::MirType;
+    use crate::mir::builder::ModuleBuilder;
 
     #[test]
     fn test_performance_tuned_optimizer_creation() {

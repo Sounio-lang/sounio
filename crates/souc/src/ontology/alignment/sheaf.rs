@@ -257,11 +257,7 @@ mod tests {
 
     #[test]
     fn test_align_federated_ontologies_populates_cells_and_restrictions() {
-        let ontology_ids = vec![
-            "CHEBI".to_string(),
-            "MONDO".to_string(),
-            "DOID".to_string(),
-        ];
+        let ontology_ids = vec!["CHEBI".to_string(), "MONDO".to_string(), "DOID".to_string()];
 
         let sheaf = align_federated_ontologies(&ontology_ids).expect("should build sheaf");
         assert_eq!(sheaf.cell_count(), 3);

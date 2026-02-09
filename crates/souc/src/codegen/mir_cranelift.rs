@@ -22,8 +22,8 @@
 //! | Unit     | types::I64     |
 
 use crate::hlir::HlirModule;
-use crate::mir::optimization::OptimizationLevel;
 use crate::mir::MirModule;
+use crate::mir::optimization::OptimizationLevel;
 
 #[cfg(feature = "jit")]
 use crate::mir::optimization::PassManager;
@@ -34,13 +34,13 @@ use crate::mir::{
 };
 
 #[cfg(feature = "jit")]
+use cranelift_codegen::Context;
+#[cfg(feature = "jit")]
 use cranelift_codegen::ir::condcodes::{FloatCC, IntCC};
 #[cfg(feature = "jit")]
-use cranelift_codegen::ir::{types, AbiParam, InstBuilder, MemFlags, Signature, UserFuncName};
+use cranelift_codegen::ir::{AbiParam, InstBuilder, MemFlags, Signature, UserFuncName, types};
 #[cfg(feature = "jit")]
 use cranelift_codegen::settings::{self, Configurable};
-#[cfg(feature = "jit")]
-use cranelift_codegen::Context;
 #[cfg(feature = "jit")]
 use cranelift_frontend::{FunctionBuilder, FunctionBuilderContext, Variable};
 #[cfg(feature = "jit")]
@@ -1744,10 +1744,10 @@ pub fn get_optimization_passes_for_level(level: OptimizationLevel) -> Vec<&'stat
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::mir::builder::ModuleBuilder;
-    use crate::mir::types::MirType;
     #[cfg(feature = "jit")]
     use crate::mir::MirConstant;
+    use crate::mir::builder::ModuleBuilder;
+    use crate::mir::types::MirType;
 
     #[test]
     fn test_translate_type() {

@@ -977,9 +977,8 @@ impl RealNetworkHandler {
 
         // Attempt real connection to validate the URL
         let rt = self.runtime.lock().unwrap();
-        let connect_result = rt.block_on(async {
-            timeout(timeout_duration, connect_async(&url)).await
-        });
+        let connect_result =
+            rt.block_on(async { timeout(timeout_duration, connect_async(&url)).await });
 
         match connect_result {
             Ok(Ok((ws_stream, _response))) => {
@@ -1092,7 +1091,10 @@ impl RealNetworkHandler {
                 {
                     Ok(Ok(())) => Ok(()),
                     Ok(Err(e)) => Err(format!("WebSocket send failed: {}", e)),
-                    Err(_) => Err(format!("WebSocket send timed out after {}ms", self.timeout_ms)),
+                    Err(_) => Err(format!(
+                        "WebSocket send timed out after {}ms",
+                        self.timeout_ms
+                    )),
                 }
             })
         };
@@ -1168,9 +1170,8 @@ impl RealNetworkHandler {
                     match timeout(timeout_duration, ws.next()).await {
                         Ok(Some(Ok(Message::Text(text)))) => return Ok(text.to_string()),
                         Ok(Some(Ok(Message::Binary(data)))) => {
-                            return String::from_utf8(data.to_vec()).map_err(|e| {
-                                format!("received non-UTF8 binary message: {}", e)
-                            });
+                            return String::from_utf8(data.to_vec())
+                                .map_err(|e| format!("received non-UTF8 binary message: {}", e));
                         }
                         Ok(Some(Ok(Message::Ping(payload)))) => {
                             if let Err(e) = ws.send(Message::Pong(payload)).await {
@@ -1266,9 +1267,10 @@ impl RealNetworkHandler {
                     match timeout(timeout_duration, ws.close(None)).await {
                         Ok(Ok(())) => Ok(()),
                         Ok(Err(e)) => Err(format!("WebSocket close failed: {}", e)),
-                        Err(_) => {
-                            Err(format!("WebSocket close timed out after {}ms", self.timeout_ms))
-                        }
+                        Err(_) => Err(format!(
+                            "WebSocket close timed out after {}ms",
+                            self.timeout_ms
+                        )),
                     }
                 })
             };
