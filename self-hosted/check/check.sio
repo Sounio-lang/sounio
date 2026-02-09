@@ -37,6 +37,92 @@ fn checker_new() -> Checker {
 // Error reporting
 // ============================================================
 
+// ============================================================
+// Type pretty-printing for diagnostics
+// ============================================================
+
+fn print_type_name(ty: TypeEntry) with IO, Mut, Panic, Div, Alloc {
+    match ty.kind {
+        TyI8 => print("i8")
+        TyI32 => print("i32")
+        TyI64 => print("i64")
+        TyU8 => print("u8")
+        TyU32 => print("u32")
+        TyU64 => print("u64")
+        TyF32 => print("f32")
+        TyF64 => print("f64")
+        TyBool => print("bool")
+        TyUnit => print("()")
+        TyString => print("string")
+        TyChar => print("char")
+        TyNamed => {
+            var i: i64 = 0
+            while i < ty.name.len {
+                print_char(ty.name.buf[i])
+                i = i + 1
+            }
+        }
+        TyArray => {
+            print("[")
+            match ty.inner {
+                Some(elem) => print_type_name(*elem)
+                None => print("?")
+            }
+            if ty.array_size >= 0 {
+                print("; ")
+                print_int(ty.array_size)
+            }
+            print("]")
+        }
+        TyRef => {
+            print("&")
+            match ty.inner {
+                Some(inner) => print_type_name(*inner)
+                None => print("?")
+            }
+        }
+        TyRefMut => {
+            print("&!")
+            match ty.inner {
+                Some(inner) => print_type_name(*inner)
+                None => print("?")
+            }
+        }
+        TyTuple => {
+            print("(")
+            print_tuple_type_elems(ty.tuple_elems)
+            print(")")
+        }
+        TyFn => {
+            print("fn#")
+            print_int(ty.fn_sig_id)
+        }
+        TyNever => print("!")
+        TyError => print("<error>")
+        TyUnknown => print("<unknown>")
+    }
+}
+
+fn print_tuple_type_elems(opt: Option<Box<TypeEntryList>>) with IO, Mut, Panic, Div, Alloc {
+    match opt {
+        None => {}
+        Some(list) => {
+            print_type_name((*list).head)
+            match (*list).tail {
+                Some(_) => {
+                    print(", ")
+                    print_tuple_type_elems((*list).tail)
+                }
+                None => {}
+            }
+        }
+    }
+}
+
+// ============================================================
+// Error reporting with diagnostics
+// ============================================================
+
 impl Checker {
     fn report_error(self) -> Checker with Mut {
         var c = self
@@ -44,6 +130,77 @@ impl Checker {
         c.had_error = true
         c
     }
+
+    fn report_error_at(self, span: Span, code: i64, msg_a: i64, msg_b: i64, msg_c: i64) -> Checker with Mut, IO, Panic, Div {
+        var c = self
+        c.error_count = c.error_count + 1
+        c.had_error = true
+        print("error[E")
+        if code < 100 { print("0") }
+        if code < 10 { print("0") }
+        print_int(code)
+        print("]")
+        if span.start > 0 || span.end > 0 {
+            print(" at ")
+            print_int(span.start)
+            print("..")
+            print_int(span.end)
+        }
+        print(": ")
+        print_error_message(code)
+        print("\n")
+        c
+    }
+
+    fn report_mismatch(self, span: Span, code: i64, expected: TypeEntry, got: TypeEntry) -> Checker with Mut, IO, Panic, Div, Alloc {
+        var c = self
+        c.error_count = c.error_count + 1
+        c.had_error = true
+        print("error[E")
+        if code < 100 { print("0") }
+        if code < 10 { print("0") }
+        print_int(code)
+        print("]")
+        if span.start > 0 || span.end > 0 {
+            print(" at ")
+            print_int(span.start)
+            print("..")
+            print_int(span.end)
+        }
+        print(": ")
+        print_error_message(code)
+        print(" (expected ")
+        print_type_name(expected)
+        print(", got ")
+        print_type_name(got)
+        print(")\n")
+        c
+    }
+}
+
+fn print_error_message(code: i64) with IO, Mut, Panic, Div {
+    if code == 1 { print("type mismatch in binding") }
+    else if code == 2 { print("type mismatch in assignment") }
+    else if code == 3 { print("cannot assign to immutable variable") }
+    else if code == 4 { print("binary operator type mismatch") }
+    else if code == 5 { print("unary operator type mismatch") }
+    else if code == 6 { print("condition must be bool") }
+    else if code == 7 { print("if-else branch type mismatch") }
+    else if code == 8 { print("return type mismatch") }
+    else if code == 9 { print("argument type mismatch") }
+    else if code == 10 { print("wrong number of arguments") }
+    else if code == 11 { print("method not found") }
+    else if code == 12 { print("field not found") }
+    else if code == 13 { print("cannot index non-array type") }
+    else if code == 14 { print("index must be integer") }
+    else if code == 15 { print("undefined struct") }
+    else if code == 16 { print("struct field type mismatch") }
+    else if code == 17 { print("expression is not callable") }
+    else if code == 18 { print("match arm type mismatch") }
+    else if code == 19 { print("cannot call method on this type") }
+    else if code == 20 { print("array element type mismatch") }
+    else if code == 21 { print("compound assign type mismatch") }
+    else { print("unknown error") }
 }
 
 // ============================================================
@@ -68,8 +225,20 @@ impl Checker {
 
     fn lower_named_type(self, path: AstPath) -> (Checker, TypeEntry) with Mut, Panic, Div, Alloc, IO {
         let name = copy_string_list_to_name(path.segments)
-        if name_is_i64(name) {
+        if name_is_i8(name) {
+            (self, ty_i8())
+        } else if name_is_i32(name) {
+            (self, ty_i32())
+        } else if name_is_i64(name) {
             (self, ty_i64())
+        } else if name_is_u8(name) {
+            (self, ty_u8())
+        } else if name_is_u32(name) {
+            (self, ty_u32())
+        } else if name_is_u64(name) {
+            (self, ty_u64())
+        } else if name_is_f32(name) {
+            (self, ty_f32())
         } else if name_is_f64(name) {
             (self, ty_f64())
         } else if name_is_bool(name) {
@@ -250,7 +419,7 @@ impl Checker {
     fn lower_opt_return_type(self, opt: Option<Box<TypeExpr>>) -> (Checker, TypeEntry) with Mut, Panic, Div, Alloc, IO {
         match opt {
             Some(te) => self.lower_type_expr(*te)
-            None => (self, ty_unit())
+            None => (self, ty_unknown())
         }
     }
 
@@ -471,7 +640,7 @@ impl Checker {
                 if sig_id >= 0 {
                     let sig2 = c.fn_sigs.get(sig_id)
                     if !types_compatible(body_ty, sig2.return_type) {
-                        c = c.report_error()
+                        c = c.report_mismatch((*fd).span, 8, sig2.return_type, body_ty)
                     }
                 }
                 c.env = c.env.pop_scope()
@@ -552,7 +721,7 @@ impl Checker {
                 if sig_id >= 0 {
                     let sig2 = c.fn_sigs.get(sig_id)
                     if !types_compatible(body_ty, sig2.return_type) {
-                        c = c.report_error()
+                        c = c.report_mismatch((*fd).span, 8, sig2.return_type, body_ty)
                     }
                 }
                 c.env = c.env.pop_scope()
@@ -615,11 +784,12 @@ impl Checker {
         var bind_ty = init_ty
         if ann_ty.kind != TypeKind::TyUnknown {
             if !types_compatible(init_ty, ann_ty) {
-                c = c.report_error()
+                c = c.report_mismatch(s.span, 1, ann_ty, init_ty)
             }
             bind_ty = ann_ty
         }
-        c.env = c.env.bind(s.name, bind_ty, false)
+        let cur_env = c.env
+        c.env = cur_env.bind(s.name, bind_ty, false)
         (c, ty_unit())
     }
 
@@ -634,7 +804,7 @@ impl Checker {
         var bind_ty = init_ty
         if ann_ty.kind != TypeKind::TyUnknown {
             if !types_compatible(init_ty, ann_ty) {
-                c = c.report_error()
+                c = c.report_mismatch(s.span, 1, ann_ty, init_ty)
             }
             bind_ty = ann_ty
         }
@@ -654,21 +824,31 @@ impl Checker {
         let val_pair = c.check_opt_expr(s.expr)
         c = val_pair.0
         let val_ty = val_pair.1
-        // Check compatibility
-        if !types_compatible(target_ty, val_ty) {
-            c = c.report_error()
+        // Compound assignments (+=, -=, etc.) require numeric operands
+        if s.assign_op != AssignOp::AssignEq {
+            if !is_error_or_unknown(target_ty) && !is_error_or_unknown(val_ty) {
+                let compound_result = binary_result_type(compound_assign_to_binop(s.assign_op), target_ty, val_ty)
+                if compound_result.kind == TypeKind::TyError {
+                    c = c.report_mismatch(s.span, 21, target_ty, val_ty)
+                }
+            }
+        } else {
+            // Simple assignment: check compatibility
+            if !types_compatible(target_ty, val_ty) {
+                c = c.report_mismatch(s.span, 2, target_ty, val_ty)
+            }
         }
         // Check mutability: if target is an ident, it must be mutable
-        c = c.check_assign_mutability(s.target)
+        c = c.check_assign_mutability(s.target, s.span)
         (c, ty_unit())
     }
 
-    fn check_assign_mutability(self, opt: Option<Box<Expr>>) -> Checker with Mut, Panic, Div, Alloc, IO {
+    fn check_assign_mutability(self, opt: Option<Box<Expr>>, span: Span) -> Checker with Mut, Panic, Div, Alloc, IO {
         match opt {
             Some(e) => {
                 if (*e).kind == ExprKind::ExprIdent {
                     if !self.env.lookup_is_mutable((*e).name) {
-                        self.report_error()
+                        self.report_error_at(span, 3, 0, 0, 0)
                     } else {
                         self
                     }
@@ -763,7 +943,7 @@ impl Checker {
         let right_ty = right_pair.1
         let result = binary_result_type(e.bin_op, left_ty, right_ty)
         if result.kind == TypeKind::TyError && !is_error_or_unknown(left_ty) && !is_error_or_unknown(right_ty) {
-            c = c.report_error()
+            c = c.report_mismatch(e.span, 4, left_ty, right_ty)
         }
         (c, result)
     }
@@ -778,7 +958,7 @@ impl Checker {
         let operand_ty = pair.1
         let result = unary_result_type(e.un_op, operand_ty)
         if result.kind == TypeKind::TyError && !is_error_or_unknown(operand_ty) {
-            c = c.report_error()
+            c = c.report_error_at(e.span, 5, 0, 0, 0)
         }
         (c, result)
     }
@@ -797,7 +977,7 @@ impl Checker {
                 let si = c.structs.get(struct_idx)
                 let field_ty = field_info_list_find(si.fields, e.name)
                 if field_ty.kind == TypeKind::TyError && !field_info_list_has(si.fields, e.name) {
-                    c = c.report_error()
+                    c = c.report_error_at(e.span, 12, 0, 0, 0)
                 }
                 (c, field_ty)
             } else {
@@ -812,7 +992,7 @@ impl Checker {
         } else if is_error_or_unknown(base_ty) {
             (c, base_ty)
         } else {
-            c = c.report_error()
+            c = c.report_error_at(e.span, 12, 0, 0, 0)
             (c, ty_error())
         }
     }
@@ -830,7 +1010,7 @@ impl Checker {
         let idx_ty = idx_pair.1
         // Index must be i64
         if !is_error_or_unknown(idx_ty) && idx_ty.kind != TypeKind::TyI64 {
-            c = c.report_error()
+            c = c.report_error_at(e.span, 14, 0, 0, 0)
         }
         // Base must be array
         if base_ty.kind == TypeKind::TyArray {
@@ -841,7 +1021,7 @@ impl Checker {
         } else if is_error_or_unknown(base_ty) {
             (c, base_ty)
         } else {
-            c = c.report_error()
+            c = c.report_error_at(e.span, 13, 0, 0, 0)
             (c, ty_error())
         }
     }
@@ -858,11 +1038,11 @@ impl Checker {
             let sig_id = c.fn_sigs.find_method(base_ty.name, e.name)
             if sig_id >= 0 {
                 let sig = c.fn_sigs.get(sig_id)
-                c = c.check_call_args(e.args, sig.params, sig.param_count)
+                c = c.check_call_args(e.args, sig.params, sig.param_count, e.span)
                 (c, sig.return_type)
             } else {
                 // Method not found
-                c = c.report_error()
+                c = c.report_error_at(e.span, 11, 0, 0, 0)
                 // Still check args to accumulate errors
                 c = c.check_expr_list_no_type(e.args)
                 (c, ty_error())
@@ -871,7 +1051,7 @@ impl Checker {
             c = c.check_expr_list_no_type(e.args)
             (c, base_ty)
         } else {
-            c = c.report_error()
+            c = c.report_error_at(e.span, 19, 0, 0, 0)
             c = c.check_expr_list_no_type(e.args)
             (c, ty_error())
         }
@@ -887,25 +1067,25 @@ impl Checker {
         let callee_ty = callee_pair.1
         if callee_ty.kind == TypeKind::TyFn && callee_ty.fn_sig_id >= 0 {
             let sig = c.fn_sigs.get(callee_ty.fn_sig_id)
-            c = c.check_call_args(e.args, sig.params, sig.param_count)
+            c = c.check_call_args(e.args, sig.params, sig.param_count, e.span)
             (c, sig.return_type)
         } else if is_error_or_unknown(callee_ty) {
             c = c.check_expr_list_no_type(e.args)
             (c, callee_ty)
         } else {
-            c = c.report_error()
+            c = c.report_error_at(e.span, 17, 0, 0, 0)
             c = c.check_expr_list_no_type(e.args)
             (c, ty_error())
         }
     }
 
-    fn check_call_args(self, args: Option<Box<ExprList>>, params: Option<Box<FnParamList>>, expected_count: i64) -> Checker with Mut, Panic, Div, Alloc, IO {
+    fn check_call_args(self, args: Option<Box<ExprList>>, params: Option<Box<FnParamList>>, expected_count: i64, call_span: Span) -> Checker with Mut, Panic, Div, Alloc, IO {
         var c = self
-        c = c.check_call_args_inner(args, params, 0, expected_count)
+        c = c.check_call_args_inner(args, params, 0, expected_count, call_span)
         c
     }
 
-    fn check_call_args_inner(self, args: Option<Box<ExprList>>, params: Option<Box<FnParamList>>, idx: i64, expected_count: i64) -> Checker with Mut, Panic, Div, Alloc, IO {
+    fn check_call_args_inner(self, args: Option<Box<ExprList>>, params: Option<Box<FnParamList>>, idx: i64, expected_count: i64, call_span: Span) -> Checker with Mut, Panic, Div, Alloc, IO {
         match args {
             Some(arg_list) => {
                 let pair = self.check_expr((*arg_list).head)
@@ -915,15 +1095,15 @@ impl Checker {
                 let param_info = fn_param_list_get(params, idx)
                 if !name_is_empty(param_info.name) || param_info.ty.kind != TypeKind::TyError {
                     if !types_compatible(arg_ty, param_info.ty) {
-                        c = c.report_error()
+                        c = c.report_mismatch(call_span, 9, param_info.ty, arg_ty)
                     }
                 }
-                c.check_call_args_inner((*arg_list).tail, params, idx + 1, expected_count)
+                c.check_call_args_inner((*arg_list).tail, params, idx + 1, expected_count, call_span)
             }
             None => {
                 // Check arity: idx should equal expected_count
                 if idx != expected_count && expected_count >= 0 {
-                    self.report_error()
+                    self.report_error_at(call_span, 10, 0, 0, 0)
                 } else {
                     self
                 }
@@ -952,7 +1132,7 @@ impl Checker {
         let cond_ty = cond_pair.1
         // Condition must be bool
         if !is_error_or_unknown(cond_ty) && !is_bool_type(cond_ty) {
-            c = c.report_error()
+            c = c.report_mismatch(e.span, 6, ty_bool(), cond_ty)
         }
         // Check then block
         let then_pair = c.check_opt_block(e.block)
@@ -965,7 +1145,7 @@ impl Checker {
                 c = else_pair.0
                 let else_ty = else_pair.1
                 if !types_compatible(then_ty, else_ty) {
-                    c = c.report_error()
+                    c = c.report_mismatch(e.span, 7, then_ty, else_ty)
                 }
                 (c, then_ty)
             }
@@ -1022,7 +1202,7 @@ impl Checker {
                 var c = pair.0
                 let arm_ty = pair.1
                 if !types_compatible(arm_ty, expected_ty) {
-                    c = c.report_error()
+                    c = c.report_mismatch((*list).head.span, 18, expected_ty, arm_ty)
                 }
                 c.check_remaining_arms((*list).tail, scrut_ty, expected_ty)
             }
@@ -1042,9 +1222,16 @@ impl Checker {
             PatBoolTrue => self
             PatBoolFalse => self
             PatStringLit => self
-            PatEnum => self.bind_pattern_list(pat.sub_patterns, scrut_ty)
-            PatStruct => self
-            PatTuple => self.bind_pattern_list(pat.sub_patterns, scrut_ty)
+            PatEnum => {
+                // Enum variant pattern — bind sub-patterns with scrut_ty
+                // (variant field types not tracked yet, use scrut_ty as fallback)
+                self.bind_pattern_list(pat.sub_patterns, scrut_ty)
+            }
+            PatStruct => {
+                // Struct destructuring — bind field patterns with their field types
+                self.bind_struct_pat_fields(pat.pat_fields, scrut_ty)
+            }
+            PatTuple => self.bind_tuple_pattern_list(pat.sub_patterns, scrut_ty)
             PatOr => self.bind_pattern_list(pat.sub_patterns, scrut_ty)
         }
     }
@@ -1059,6 +1246,45 @@ impl Checker {
         }
     }
 
+    fn bind_struct_pat_fields(self, opt: Option<Box<PatFieldList>>, scrut_ty: TypeEntry) -> Checker with Mut, Panic, Div, Alloc, IO {
+        match opt {
+            Some(list) => {
+                var c = self
+                // Look up the field type from the struct definition
+                var field_ty = ty_unknown()
+                if scrut_ty.kind == TypeKind::TyNamed {
+                    let struct_idx = c.structs.find(scrut_ty.name)
+                    if struct_idx >= 0 {
+                        let si = c.structs.get(struct_idx)
+                        field_ty = field_info_list_find(si.fields, (*list).head.name)
+                    }
+                }
+                c = c.bind_pattern((*list).head.pattern, field_ty)
+                c.bind_struct_pat_fields((*list).tail, scrut_ty)
+            }
+            None => self
+        }
+    }
+
+    fn bind_tuple_pattern_list(self, opt: Option<Box<PatternList>>, scrut_ty: TypeEntry) -> Checker with Mut, Panic, Div, Alloc, IO {
+        // For tuple patterns, assign each sub-pattern the corresponding tuple element type
+        self.bind_tuple_pattern_list_idx(opt, scrut_ty, 0)
+    }
+
+    fn bind_tuple_pattern_list_idx(self, opt: Option<Box<PatternList>>, scrut_ty: TypeEntry, idx: i64) -> Checker with Mut, Panic, Div, Alloc, IO {
+        match opt {
+            Some(list) => {
+                var elem_ty = ty_unknown()
+                if scrut_ty.kind == TypeKind::TyTuple {
+                    elem_ty = type_entry_list_get(scrut_ty.tuple_elems, idx)
+                }
+                var c = self.bind_pattern((*list).head, elem_ty)
+                c.bind_tuple_pattern_list_idx((*list).tail, scrut_ty, idx + 1)
+            }
+            None => self
+        }
+    }
+
     // --------------------------------------------------------
     // While, Loop, Block, Return
     // --------------------------------------------------------
@@ -1068,7 +1294,7 @@ impl Checker {
         var c = cond_pair.0
         let cond_ty = cond_pair.1
         if !is_error_or_unknown(cond_ty) && !is_bool_type(cond_ty) {
-            c = c.report_error()
+            c = c.report_mismatch(e.span, 6, ty_bool(), cond_ty)
         }
         let body_pair = c.check_opt_block(e.block)
         c = body_pair.0
@@ -1089,7 +1315,7 @@ impl Checker {
         var c = pair.0
         let val_ty = pair.1
         if !types_compatible(val_ty, c.current_return_type) {
-            c = c.report_error()
+            c = c.report_mismatch(e.span, 8, c.current_return_type, val_ty)
         }
         (c, ty_never())
     }
@@ -1103,16 +1329,16 @@ impl Checker {
         let struct_idx = self.structs.find(struct_name)
         if struct_idx >= 0 {
             let si = self.structs.get(struct_idx)
-            var c = self.check_struct_field_inits(e.fields, si)
+            var c = self.check_struct_field_inits(e.fields, si, e.span)
             (c, ty_named(struct_name))
         } else {
-            var c = self.report_error()
+            var c = self.report_error_at(e.span, 15, 0, 0, 0)
             c = c.check_struct_field_inits_no_type(e.fields)
             (c, ty_error())
         }
     }
 
-    fn check_struct_field_inits(self, opt: Option<Box<StructFieldList>>, si: StructInfo) -> Checker with Mut, Panic, Div, Alloc, IO {
+    fn check_struct_field_inits(self, opt: Option<Box<StructFieldList>>, si: StructInfo, lit_span: Span) -> Checker with Mut, Panic, Div, Alloc, IO {
         match opt {
             Some(list) => {
                 var c = self
@@ -1121,9 +1347,9 @@ impl Checker {
                 c = pair.0
                 let init_ty = pair.1
                 if !types_compatible(init_ty, field_ty) {
-                    c = c.report_error()
+                    c = c.report_mismatch(lit_span, 16, field_ty, init_ty)
                 }
-                c.check_struct_field_inits((*list).tail, si)
+                c.check_struct_field_inits((*list).tail, si, lit_span)
             }
             None => self
         }
@@ -1172,7 +1398,7 @@ impl Checker {
                 var c = pair.0
                 let elem_ty = pair.1
                 if !types_compatible(elem_ty, expected) {
-                    c = c.report_error()
+                    c = c.report_mismatch((*list).head.span, 20, expected, elem_ty)
                 }
                 let rest = c.check_array_rest((*list).tail, expected)
                 (rest.0, 1 + rest.1)
