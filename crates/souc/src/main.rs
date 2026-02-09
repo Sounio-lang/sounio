@@ -2997,54 +2997,68 @@ fn run(
         check_only
     );
 
-    if use_sounio_compiler {
-        // Use the self-hosted Sounio compiler (week 2 bootstrap feature)
-        tracing::info!("Using self-hosted Sounio compiler from stdin");
+    let input_path = input.to_path_buf();
+    let run_result = std::thread::Builder::new()
+        .name("interp".into())
+        .stack_size(64 * 1024 * 1024)
+        .spawn(move || -> std::result::Result<(), String> {
+            if use_sounio_compiler {
+                // Use the self-hosted Sounio compiler (week 2 bootstrap feature)
+                tracing::info!("Using self-hosted Sounio compiler from stdin");
 
-        // Get the stdlib path from environment or use default
-        let stdlib_path =
-            std::env::var("SOUNIO_STDLIB_PATH").unwrap_or_else(|_| "stdlib/compiler".to_string());
+                // Get the stdlib path from environment or use default
+                let stdlib_path = std::env::var("SOUNIO_STDLIB_PATH")
+                    .unwrap_or_else(|_| "stdlib/compiler".to_string());
 
-        // Create the self-hosted compiler
-        let compiler = sounio::compiler_loader::SounioCompiler::new(&stdlib_path).map_err(|e| {
-            miette::miette!(
-                "Failed to initialize self-hosted compiler: {}",
-                e.to_string()
-            )
-        })?;
+                // Create the self-hosted compiler
+                let compiler = sounio::compiler_loader::SounioCompiler::new(&stdlib_path)
+                    .map_err(|e| format!("Failed to initialize self-hosted compiler: {}", e))?;
 
-        // Compile through the self-hosted bridge to validate bootstrap wiring.
-        let input_str = input.to_string_lossy();
-        let _bytecode = compiler.compile_file(input_str.as_ref()).map_err(|e| {
-            miette::miette!("Self-hosted compile failed for {}: {}", input.display(), e)
-        })?;
+                // Compile through the self-hosted bridge to validate bootstrap wiring.
+                let input_str = input_path.to_string_lossy();
+                let _bytecode = compiler
+                    .compile_file(input_str.as_ref())
+                    .map_err(|e| {
+                        format!(
+                            "Self-hosted compile failed for {}: {}",
+                            input_path.display(),
+                            e
+                        )
+                    })?;
 
-        // Execution still uses the Rust interpreter path below.
-        tracing::warn!("Self-hosted compiler integration in progress - using Rust compiler");
-    }
-
-    if check_only {
-        let ast = sounio::module_loader::load_program_ast(input)?;
-        let _ = sounio::check::check_ast(&ast)?;
-    }
-
-    // Load modules and parse (uses ModuleLoader to handle imports)
-    let ast = sounio::module_loader::load_program_ast(input)?;
-    let hir = sounio::check::check_ast(&ast)?;
-
-    // Use tree-walking interpreter
-    let mut interpreter = sounio::interp::Interpreter::with_trace(trace_interp);
-    match interpreter.interpret(&hir) {
-        Ok(result) => {
-            // Only print non-unit results
-            match &result {
-                sounio::interp::Value::Unit => {}
-                _ => println!("{}", result),
+                // Execution still uses the Rust interpreter path below.
+                tracing::warn!("Self-hosted compiler integration in progress - using Rust compiler");
             }
-            Ok(())
-        }
-        Err(e) => Err(e),
-    }
+
+            if check_only {
+                let ast = sounio::module_loader::load_program_ast(&input_path)
+                    .map_err(|e| e.to_string())?;
+                let _ = sounio::check::check_ast(&ast).map_err(|e| e.to_string())?;
+            }
+
+            // Load modules and parse (uses ModuleLoader to handle imports)
+            let ast = sounio::module_loader::load_program_ast(&input_path)
+                .map_err(|e| e.to_string())?;
+            let hir = sounio::check::check_ast(&ast).map_err(|e| e.to_string())?;
+
+            // Use tree-walking interpreter
+            let mut interpreter = sounio::interp::Interpreter::with_trace(trace_interp);
+            match interpreter.interpret(&hir) {
+                Ok(result) => {
+                    // Only print non-unit results
+                    if !matches!(result, sounio::interp::Value::Unit) {
+                        println!("{}", result);
+                    }
+                    Ok(())
+                }
+                Err(e) => Err(e.to_string()),
+            }
+        })
+        .map_err(|e| miette::miette!("failed to spawn interpreter thread: {}", e))?
+        .join()
+        .map_err(|_| miette::miette!("interpreter thread panicked"))?;
+
+    run_result.map_err(|e| miette::miette!("{}", e))
 }
 
 fn jit_run(
