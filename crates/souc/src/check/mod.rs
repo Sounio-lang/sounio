@@ -45,11 +45,11 @@ use crate::ontology::fidelity::{FidelityResult, WorldFidelityChecker};
 use crate::ontology::version::DeprecationTracker;
 use crate::ontology::{OntologyResolver, ResolverConfig, SubsumptionResult};
 use crate::refinement::{
-    solver::SimpleChecker, Atom, BinOp as RefinementBinOp, CompareOp, Predicate, Term,
+    Atom, BinOp as RefinementBinOp, CompareOp, Predicate, Term, solver::SimpleChecker,
 };
 use crate::resolve;
 use crate::types::{
-    self, effects::EffectInference, units::UnitChecker, DimSize, TensorShape, Type, TypeVar,
+    self, DimSize, TensorShape, Type, TypeVar, effects::EffectInference, units::UnitChecker,
 };
 use miette::Result;
 use std::collections::HashMap;
@@ -3322,13 +3322,65 @@ impl TypeChecker {
                     // Bind all variables in the pattern (supports tuple destructuring)
                     self.bind_pattern_to_type(pattern, &binding_ty, *is_mut);
 
-                    stmts.push(HirStmt::Let {
-                        name: self.pattern_name(pattern),
-                        ty: self.type_to_hir(&binding_ty),
-                        value: value_expr,
-                        is_mut: *is_mut,
-                        layout_hint: None, // Layout hints are filled in by layout synthesis pass
-                    });
+                    // Desugar tuple destructuring: `let (a, b) = expr` becomes:
+                    //   let _tuple_destructure = expr
+                    //   let a = _tuple_destructure.0
+                    //   let b = _tuple_destructure.1
+                    if let Pattern::Tuple(patterns) = pattern {
+                        let tuple_hir_ty = self.type_to_hir(&binding_ty);
+                        let temp_name = format!("_tuple_destructure_{}", stmts.len());
+                        stmts.push(HirStmt::Let {
+                            name: temp_name.clone(),
+                            ty: tuple_hir_ty.clone(),
+                            value: value_expr,
+                            is_mut: false,
+                            layout_hint: None,
+                        });
+
+                        let elem_types = if let Type::Tuple(ref et) = binding_ty {
+                            et.clone()
+                        } else {
+                            vec![]
+                        };
+
+                        for (i, pat) in patterns.iter().enumerate() {
+                            let elem_hir_ty = if i < elem_types.len() {
+                                self.type_to_hir(&elem_types[i])
+                            } else {
+                                HirType::Error
+                            };
+
+                            let tuple_field_expr = HirExpr {
+                                id: NodeId::dummy(),
+                                kind: HirExprKind::TupleField {
+                                    base: Box::new(HirExpr {
+                                        id: NodeId::dummy(),
+                                        kind: HirExprKind::Local(temp_name.clone()),
+                                        ty: tuple_hir_ty.clone(),
+                                    }),
+                                    index: i,
+                                },
+                                ty: elem_hir_ty.clone(),
+                            };
+
+                            let elem_name = self.pattern_name(pat);
+                            stmts.push(HirStmt::Let {
+                                name: elem_name,
+                                ty: elem_hir_ty,
+                                value: Some(tuple_field_expr),
+                                is_mut: *is_mut,
+                                layout_hint: None,
+                            });
+                        }
+                    } else {
+                        stmts.push(HirStmt::Let {
+                            name: self.pattern_name(pattern),
+                            ty: self.type_to_hir(&binding_ty),
+                            value: value_expr,
+                            is_mut: *is_mut,
+                            layout_hint: None,
+                        });
+                    }
                 }
                 Stmt::Expr { expr, has_semi } => {
                     // Pass expected type for last expression without semicolon (implicit return)
@@ -8605,10 +8657,24 @@ impl TypeChecker {
                 let (hir_lit, _) = self.check_literal_with_expected(lit, None);
                 HirPattern::Literal(hir_lit)
             }
-            Pattern::Binding { name, mutable } => HirPattern::Binding {
-                name: name.clone(),
-                mutable: *mutable,
-            },
+            Pattern::Binding { name, mutable } => {
+                // Check if this bare name is actually an enum variant.
+                // The parser produces Pattern::Binding for single-segment
+                // identifiers, but names like "TyI8" or "None" may be
+                // enum variants that should match by value, not bind.
+                if let Some((enum_name, _)) = self.find_enum_variant(name) {
+                    HirPattern::Variant {
+                        enum_name,
+                        variant: name.clone(),
+                        patterns: vec![],
+                    }
+                } else {
+                    HirPattern::Binding {
+                        name: name.clone(),
+                        mutable: *mutable,
+                    }
+                }
+            }
             Pattern::Tuple(patterns) => {
                 HirPattern::Tuple(patterns.iter().map(|p| self.lower_pattern(p)).collect())
             }
@@ -8642,6 +8708,30 @@ impl TypeChecker {
                 HirPattern::Or(patterns.iter().map(|p| self.lower_pattern(p)).collect())
             }
         }
+    }
+
+    /// Check if a bare name corresponds to a known enum variant.
+    /// Returns (enum_name, variant_field_types) if found.
+    fn find_enum_variant(&self, name: &str) -> Option<(String, Vec<Type>)> {
+        // Check builtin variants first
+        match name {
+            "None" => return Some(("Option".to_string(), vec![])),
+            "Some" => return Some(("Option".to_string(), vec![Type::Unknown])),
+            "Ok" => return Some(("Result".to_string(), vec![Type::Unknown])),
+            "Err" => return Some(("Result".to_string(), vec![Type::Unknown])),
+            "true" | "false" => return None, // These are literals, not variants
+            _ => {}
+        }
+        for (enum_name, type_def) in &self.type_defs {
+            if let TypeDef::Enum { variants, .. } = type_def {
+                for (variant_name, field_types) in variants {
+                    if variant_name == name {
+                        return Some((enum_name.clone(), field_types.clone()));
+                    }
+                }
+            }
+        }
+        None
     }
 
     fn types_compatible(&mut self, t1: &Type, t2: &Type) -> bool {
