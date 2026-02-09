@@ -6010,6 +6010,7 @@ impl TypeChecker {
                 | "str_char_at"
                 | "str_from_bytes"
                 | "int_to_str"
+                | "starts_with"
                 | "read_line"
                 | "read_byte"
                 | "parse_int"
@@ -6263,6 +6264,10 @@ impl TypeChecker {
             "int_to_str" => HirType::Fn {
                 params: vec![HirType::I64],
                 return_type: Box::new(HirType::String),
+            },
+            "starts_with" => HirType::Fn {
+                params: vec![HirType::String, HirType::String],
+                return_type: Box::new(HirType::Bool),
             },
             "read_file" => HirType::Fn {
                 params: vec![HirType::String],

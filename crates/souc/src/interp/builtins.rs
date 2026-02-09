@@ -637,6 +637,24 @@ impl BuiltinRegistry {
         );
 
         self.register(
+            "starts_with",
+            Rc::new(|args| {
+                if args.len() != 2 {
+                    return Err(format!(
+                        "starts_with expects 2 arguments, got {}",
+                        args.len()
+                    ));
+                }
+                match (&args[0], &args[1]) {
+                    (Value::String(s), Value::String(prefix)) => {
+                        Ok(Value::Bool(s.starts_with(prefix.as_str())))
+                    }
+                    _ => Err("starts_with expects string arguments".to_string()),
+                }
+            }),
+        );
+
+        self.register(
             "len",
             Rc::new(|args| {
                 if args.len() != 1 {
@@ -1749,6 +1767,33 @@ mod tests {
 
         let int_to_str = registry.call("int_to_str", &[Value::Int(42)]).unwrap();
         assert_eq!(int_to_str, Value::String("42".to_string()));
+    }
+
+    #[test]
+    fn test_starts_with_builtin() {
+        let registry = BuiltinRegistry::new();
+
+        let yes = registry
+            .call(
+                "starts_with",
+                &[
+                    Value::String("--parse".to_string()),
+                    Value::String("--".to_string()),
+                ],
+            )
+            .unwrap();
+        assert_eq!(yes, Value::Bool(true));
+
+        let no = registry
+            .call(
+                "starts_with",
+                &[
+                    Value::String("hello".to_string()),
+                    Value::String("--".to_string()),
+                ],
+            )
+            .unwrap();
+        assert_eq!(no, Value::Bool(false));
     }
 
     #[test]

@@ -460,6 +460,7 @@ impl SymbolTable {
             "str_char_at", // Byte at index or -1
             "str_from_bytes", // Build string from [i8] and length
             "int_to_str",  // Convert i64 to string
+            "starts_with", // Prefix check
             // Math functions
             "sqrt",  // Square root
             "abs",   // Absolute value

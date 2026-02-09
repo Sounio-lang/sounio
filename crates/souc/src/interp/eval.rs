@@ -2345,6 +2345,7 @@ impl Interpreter {
                 | "str_char_at"
                 | "str_from_bytes"
                 | "int_to_str"
+                | "starts_with"
                 | "read_line"
                 | "parse_int"
                 | "parse_float"
