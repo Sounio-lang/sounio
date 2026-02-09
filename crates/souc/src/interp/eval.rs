@@ -268,6 +268,16 @@ impl Interpreter {
                 HirItem::Enum(e) => {
                     self.enums.insert(e.name.clone(), e.clone());
                 }
+                HirItem::Impl(imp) => {
+                    let type_name = match &imp.self_ty {
+                        HirType::Named { name, .. } => name.clone(),
+                        _ => continue,
+                    };
+                    for method in &imp.methods {
+                        let qualified = format!("{}::{}", type_name, method.name);
+                        self.functions.insert(qualified, Rc::new(method.clone()));
+                    }
+                }
                 _ => {}
             }
         }
@@ -347,9 +357,18 @@ impl Interpreter {
                     } else {
                         Value::Unit
                     };
-                    // Wrap mutable structs in Ref to allow field mutation
-                    let val = if *is_mut && matches!(val, Value::Struct { .. }) {
-                        Value::Ref(Rc::new(RefCell::new(val)))
+                    // Wrap mutable structs in Ref to allow field mutation.
+                    // Unwrap any existing Ref to prevent double-wrapping.
+                    let val = if *is_mut {
+                        let inner = match val {
+                            Value::Ref(r) => r.borrow().clone(),
+                            other => other,
+                        };
+                        if matches!(inner, Value::Struct { .. }) {
+                            Value::Ref(Rc::new(RefCell::new(inner)))
+                        } else {
+                            inner
+                        }
                     } else {
                         val
                     };
@@ -1021,8 +1040,13 @@ impl Interpreter {
                                 Ok(Value::String(result))
                             }
                             // For struct method calls on references, look up as function
-                            (Value::Struct { .. }, _) => {
-                                if let Some(func) = self.functions.get(method_name).cloned() {
+                            (Value::Struct { name, .. }, _) => {
+                                let qname = format!("{}::{}", name, method_name);
+                                if let Some(func) = self.functions.get(&qname).cloned() {
+                                    self.call_function(&func, arg_values)
+                                        .map_err(|_| ControlFlow::Return(Value::Unit))
+                                } else if let Some(func) = self.functions.get(method_name).cloned()
+                                {
                                     self.call_function(&func, arg_values)
                                         .map_err(|_| ControlFlow::Return(Value::Unit))
                                 } else {
@@ -1033,10 +1057,29 @@ impl Interpreter {
                         }
                     }
                     _ => {
-                        // Try to find a function with method name
+                        // Try qualified name (Type::method) first for struct receivers
+                        let qualified = match &arg_values[0] {
+                            Value::Struct { name, .. } => Some(format!("{}::{}", name, method)),
+                            Value::Ref(r) => {
+                                if let Value::Struct { name, .. } = &*r.borrow() {
+                                    Some(format!("{}::{}", name, method))
+                                } else {
+                                    None
+                                }
+                            }
+                            _ => None,
+                        };
+                        if let Some(ref qname) = qualified {
+                            if let Some(func) = self.functions.get(qname).cloned() {
+                                return self
+                                    .call_function(&func, arg_values)
+                                    .map_err(|_| ControlFlow::Return(Value::Unit));
+                            }
+                        }
+                        // Fall back to bare method name
                         if let Some(func) = self.functions.get(method).cloned() {
                             self.call_function(&func, arg_values)
-                                .map_err(|e| ControlFlow::Return(Value::Unit))
+                                .map_err(|_| ControlFlow::Return(Value::Unit))
                         } else {
                             Err(ControlFlow::Return(Value::Unit))
                         }
@@ -2585,7 +2628,12 @@ impl Interpreter {
                 // wrapper so subsequent field assignments continue to work.
                 if let Some(existing) = self.env.get(name) {
                     if let Value::Ref(r) = existing {
-                        *r.borrow_mut() = value;
+                        // Unwrap incoming Ref to prevent double-wrapping
+                        let inner = match value {
+                            Value::Ref(inner_r) => inner_r.borrow().clone(),
+                            other => other,
+                        };
+                        *r.borrow_mut() = inner;
                         return Ok(());
                     }
                 }
@@ -2622,9 +2670,31 @@ impl Interpreter {
                 Ok(())
             }
             HirExprKind::Index { base, index } => {
-                let base_val = self.eval_expr(base)?;
                 let idx = self.eval_expr(index)?.as_int().unwrap_or(0) as usize;
 
+                // Special case: struct_var.array_field[idx] = value
+                // Need to modify the array in-place within the Ref-wrapped struct
+                if let HirExprKind::Field {
+                    base: struct_base,
+                    field,
+                } = &base.kind
+                {
+                    let struct_val = self.eval_expr(struct_base)?;
+                    if let Value::Ref(r) = struct_val {
+                        let mut inner = r.borrow_mut();
+                        if let Value::Struct { ref mut fields, .. } = *inner {
+                            if let Some(Value::Array(arr)) = fields.get(field) {
+                                let mut arr = arr.borrow_mut();
+                                if idx < arr.len() {
+                                    arr[idx] = value;
+                                }
+                                return Ok(());
+                            }
+                        }
+                    }
+                }
+
+                let base_val = self.eval_expr(base)?;
                 if let Value::Array(arr) = base_val {
                     let mut arr = arr.borrow_mut();
                     if idx < arr.len() {

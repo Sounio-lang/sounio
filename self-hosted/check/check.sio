@@ -1,0 +1,1228 @@
+// Main type checker — Checker struct, two passes, expression dispatch
+//
+// Pass 1: collect struct/enum/fn definitions into tables
+// Pass 2: check function/method bodies for type consistency
+//
+// Methods return (Checker, ...) to thread state through value semantics.
+
+// ============================================================
+// Checker state
+// ============================================================
+
+struct Checker {
+    env: TypeEnv,
+    structs: StructTable,
+    enums: EnumTable,
+    fn_sigs: FnSigTable,
+    error_count: i64,
+    had_error: bool,
+    current_return_type: TypeEntry,
+    current_impl_type: TypeEntry,
+}
+
+fn checker_new() -> Checker {
+    Checker {
+        env: type_env_new(),
+        structs: struct_table_new(),
+        enums: enum_table_new(),
+        fn_sigs: fn_sig_table_new(),
+        error_count: 0,
+        had_error: false,
+        current_return_type: ty_unit(),
+        current_impl_type: ty_error(),
+    }
+}
+
+// ============================================================
+// Error reporting
+// ============================================================
+
+impl Checker {
+    fn report_error(self) -> Checker with Mut {
+        var c = self
+        c.error_count = c.error_count + 1
+        c.had_error = true
+        c
+    }
+}
+
+// ============================================================
+// Lower AST TypeExpr to internal TypeEntry
+// ============================================================
+
+impl Checker {
+    fn lower_type_expr(self, te: TypeExpr) -> (Checker, TypeEntry) with Mut, Panic, Div, Alloc, IO {
+        match te.kind {
+            TypeNamed => self.lower_named_type(te.path)
+            TypeUnit => (self, ty_unit())
+            TypeNever => (self, ty_never())
+            TypeInfer => (self, ty_unknown())
+            TypeSelfUpper => (self, self.current_impl_type)
+            TypeReference => self.lower_ref_type(te.inner)
+            TypeRefMut => self.lower_ref_mut_type(te.inner)
+            TypeArray => self.lower_array_type(te.inner, te.array_size)
+            TypeTuple => self.lower_tuple_type(te.type_args)
+            TypeFn => (self, ty_unknown())
+        }
+    }
+
+    fn lower_named_type(self, path: AstPath) -> (Checker, TypeEntry) with Mut, Panic, Div, Alloc, IO {
+        let name = copy_string_list_to_name(path.segments)
+        if name_is_i64(name) {
+            (self, ty_i64())
+        } else if name_is_f64(name) {
+            (self, ty_f64())
+        } else if name_is_bool(name) {
+            (self, ty_bool())
+        } else if name_is_string(name) {
+            (self, ty_string())
+        } else if name_is_char(name) {
+            (self, ty_char())
+        } else {
+            (self, ty_named(name))
+        }
+    }
+
+    fn lower_ref_type(self, opt: Option<Box<TypeExpr>>) -> (Checker, TypeEntry) with Mut, Panic, Div, Alloc, IO {
+        match opt {
+            Some(inner_te) => {
+                let pair = self.lower_type_expr(*inner_te)
+                let c = pair.0
+                let inner_ty = pair.1
+                (c, ty_ref(inner_ty))
+            }
+            None => (self, ty_error())
+        }
+    }
+
+    fn lower_ref_mut_type(self, opt: Option<Box<TypeExpr>>) -> (Checker, TypeEntry) with Mut, Panic, Div, Alloc, IO {
+        match opt {
+            Some(inner_te) => {
+                let pair = self.lower_type_expr(*inner_te)
+                let c = pair.0
+                let inner_ty = pair.1
+                (c, ty_ref_mut(inner_ty))
+            }
+            None => (self, ty_error())
+        }
+    }
+
+    fn lower_array_type(self, inner_opt: Option<Box<TypeExpr>>, size_opt: Option<Box<Expr>>) -> (Checker, TypeEntry) with Mut, Panic, Div, Alloc, IO {
+        match inner_opt {
+            Some(inner_te) => {
+                let pair = self.lower_type_expr(*inner_te)
+                let c = pair.0
+                let elem_ty = pair.1
+                let size = lower_array_size(size_opt)
+                (c, ty_array(elem_ty, size))
+            }
+            None => (self, ty_error())
+        }
+    }
+
+    fn lower_tuple_type(self, opt: Option<Box<TypeExprList>>) -> (Checker, TypeEntry) with Mut, Panic, Div, Alloc, IO {
+        match opt {
+            Some(tel) => {
+                let pair = self.lower_type_expr_list(*tel)
+                (pair.0, ty_tuple(pair.1))
+            }
+            None => (self, ty_unit())
+        }
+    }
+
+    fn lower_type_expr_list(self, tel: TypeExprList) -> (Checker, TypeEntryList) with Mut, Panic, Div, Alloc, IO {
+        let pair = self.lower_type_expr(tel.head)
+        var c = pair.0
+        let head_ty = pair.1
+        let head_entry = TypeEntryList { head: head_ty, tail: None }
+        match tel.tail {
+            None => (c, head_entry)
+            Some(rest) => {
+                let pair2 = c.lower_type_expr_list(*rest)
+                c = pair2.0
+                let rest_list = pair2.1
+                (c, TypeEntryList { head: head_ty, tail: Some(Box::new(rest_list)) })
+            }
+        }
+    }
+
+    fn lower_opt_type(self, opt: Option<Box<TypeExpr>>) -> (Checker, TypeEntry) with Mut, Panic, Div, Alloc, IO {
+        match opt {
+            Some(te) => self.lower_type_expr(*te)
+            None => (self, ty_unknown())
+        }
+    }
+}
+
+fn lower_array_size(opt: Option<Box<Expr>>) -> i64 {
+    match opt {
+        Some(e) => (*e).int_val
+        None => -1
+    }
+}
+
+// ============================================================
+// Pass 1: Collect top-level declarations
+// ============================================================
+
+impl Checker {
+    fn collect_items(self, items: Option<Box<ItemList>>) -> Checker with Mut, Panic, Div, Alloc, IO {
+        match items {
+            Some(list) => {
+                var c = self.collect_item((*list).head)
+                c.collect_items((*list).tail)
+            }
+            None => self
+        }
+    }
+
+    fn collect_item(self, item: Item) -> Checker with Mut, Panic, Div, Alloc, IO {
+        match item.kind {
+            ItemFn => self.collect_fn_def(item.name, item.fn_def)
+            ItemStruct => self.collect_struct_def(item.name, item.struct_def)
+            ItemEnum => self.collect_enum_def(item.name, item.enum_def)
+            ItemImpl => self.collect_impl_def(item.impl_def)
+            ItemTypeAlias => self
+            ItemUse => self
+        }
+    }
+
+    // --------------------------------------------------------
+    // Collect function signature
+    // --------------------------------------------------------
+
+    fn collect_fn_def(self, name: Name, opt: Option<Box<FnDef>>) -> Checker with Mut, Panic, Div, Alloc, IO {
+        match opt {
+            Some(fd) => {
+                let pair = self.collect_fn_params((*fd).params)
+                var c = pair.0
+                let params = pair.1
+                let param_count = pair.2
+                let ret_pair = c.lower_opt_return_type((*fd).return_type)
+                c = ret_pair.0
+                let ret_ty = ret_pair.1
+                let sig = FnSig {
+                    name: name,
+                    params: params,
+                    param_count: param_count,
+                    return_type: ret_ty,
+                    is_method: false,
+                    self_type_name: Name { buf: [0; 128], len: 0 },
+                }
+                let add_result = c.fn_sigs.add(sig)
+                c.fn_sigs = add_result.0
+                let sig_id = add_result.1
+                c.env = c.env.bind(name, ty_fn(sig_id), false)
+                c
+            }
+            None => self
+        }
+    }
+
+    fn collect_fn_params(self, opt: Option<Box<ParamList>>) -> (Checker, Option<Box<FnParamList>>, i64) with Mut, Panic, Div, Alloc, IO {
+        match opt {
+            Some(pl) => {
+                let pair = self.collect_fn_param_list(*pl)
+                (pair.0, Some(Box::new(pair.1)), pair.2)
+            }
+            None => (self, None, 0)
+        }
+    }
+
+    fn collect_fn_param_list(self, pl: ParamList) -> (Checker, FnParamList, i64) with Mut, Panic, Div, Alloc, IO {
+        let pair = self.lower_type_expr(pl.head.ty)
+        var c = pair.0
+        let head_ty = pair.1
+        let head_param = FnParamInfo { name: pl.head.name, ty: head_ty }
+        let head_list = FnParamList { head: head_param, tail: None }
+        match pl.tail {
+            None => (c, head_list, 1)
+            Some(rest) => {
+                let rest_result = c.collect_fn_param_list(*rest)
+                c = rest_result.0
+                let rest_list = rest_result.1
+                let rest_count = rest_result.2
+                (c, FnParamList { head: head_param, tail: Some(Box::new(rest_list)) }, 1 + rest_count)
+            }
+        }
+    }
+
+    fn lower_opt_return_type(self, opt: Option<Box<TypeExpr>>) -> (Checker, TypeEntry) with Mut, Panic, Div, Alloc, IO {
+        match opt {
+            Some(te) => self.lower_type_expr(*te)
+            None => (self, ty_unit())
+        }
+    }
+
+    // --------------------------------------------------------
+    // Collect struct definition
+    // --------------------------------------------------------
+
+    fn collect_struct_def(self, name: Name, opt: Option<Box<StructDef>>) -> Checker with Mut, Panic, Div, Alloc, IO {
+        match opt {
+            Some(sd) => {
+                let pair = self.collect_field_defs((*sd).fields)
+                var c = pair.0
+                let fields = pair.1
+                let field_count = pair.2
+                let info = StructInfo {
+                    name: name,
+                    fields: fields,
+                    field_count: field_count,
+                }
+                c.structs = c.structs.add(info)
+                c
+            }
+            None => self
+        }
+    }
+
+    fn collect_field_defs(self, opt: Option<Box<FieldDefList>>) -> (Checker, Option<Box<FieldInfoList>>, i64) with Mut, Panic, Div, Alloc, IO {
+        match opt {
+            Some(fdl) => {
+                let pair = self.collect_field_def_list(*fdl)
+                (pair.0, Some(Box::new(pair.1)), pair.2)
+            }
+            None => (self, None, 0)
+        }
+    }
+
+    fn collect_field_def_list(self, fdl: FieldDefList) -> (Checker, FieldInfoList, i64) with Mut, Panic, Div, Alloc, IO {
+        let pair = self.lower_type_expr(fdl.head.ty)
+        var c = pair.0
+        let field_ty = pair.1
+        let head_info = FieldInfo { name: fdl.head.name, ty: field_ty }
+        let head_list = FieldInfoList { head: head_info, tail: None }
+        match fdl.tail {
+            None => (c, head_list, 1)
+            Some(rest) => {
+                let rest_result = c.collect_field_def_list(*rest)
+                c = rest_result.0
+                let rest_list = rest_result.1
+                let rest_count = rest_result.2
+                (c, FieldInfoList { head: head_info, tail: Some(Box::new(rest_list)) }, 1 + rest_count)
+            }
+        }
+    }
+
+    // --------------------------------------------------------
+    // Collect enum definition
+    // --------------------------------------------------------
+
+    fn collect_enum_def(self, name: Name, opt: Option<Box<EnumDef>>) -> Checker with Mut, Panic, Div, Alloc, IO {
+        match opt {
+            Some(ed) => {
+                let pair = self.collect_variants((*ed).variants)
+                var c = pair.0
+                let variants = pair.1
+                let variant_count = pair.2
+                let info = EnumInfo {
+                    name: name,
+                    variants: variants,
+                    variant_count: variant_count,
+                }
+                c.enums = c.enums.add(info)
+                c
+            }
+            None => self
+        }
+    }
+
+    fn collect_variants(self, opt: Option<Box<VariantDefList>>) -> (Checker, Option<Box<VariantInfoList>>, i64) with Mut, Panic, Div, Alloc, IO {
+        match opt {
+            Some(vdl) => {
+                let pair = self.collect_variant_list(*vdl)
+                (pair.0, Some(Box::new(pair.1)), pair.2)
+            }
+            None => (self, None, 0)
+        }
+    }
+
+    fn collect_variant_list(self, vdl: VariantDefList) -> (Checker, VariantInfoList, i64) with Mut, Panic, Div, Alloc, IO {
+        let head_info = VariantInfo { name: vdl.head.name }
+        let head_list = VariantInfoList { head: head_info, tail: None }
+        match vdl.tail {
+            None => (self, head_list, 1)
+            Some(rest) => {
+                let rest_result = self.collect_variant_list(*rest)
+                let c = rest_result.0
+                let rest_list = rest_result.1
+                let rest_count = rest_result.2
+                (c, VariantInfoList { head: head_info, tail: Some(Box::new(rest_list)) }, 1 + rest_count)
+            }
+        }
+    }
+
+    // --------------------------------------------------------
+    // Collect impl methods
+    // --------------------------------------------------------
+
+    fn collect_impl_def(self, opt: Option<Box<ImplDef>>) -> Checker with Mut, Panic, Div, Alloc, IO {
+        match opt {
+            Some(id) => {
+                let pair = self.lower_type_expr((*id).target_type)
+                var c = pair.0
+                let impl_ty = pair.1
+                c.current_impl_type = impl_ty
+                c = c.collect_impl_methods((*id).methods, impl_ty.name)
+                c
+            }
+            None => self
+        }
+    }
+
+    fn collect_impl_methods(self, opt: Option<Box<ItemList>>, type_name: Name) -> Checker with Mut, Panic, Div, Alloc, IO {
+        match opt {
+            Some(list) => {
+                var c = self.collect_impl_method((*list).head, type_name)
+                c.collect_impl_methods((*list).tail, type_name)
+            }
+            None => self
+        }
+    }
+
+    fn collect_impl_method(self, item: Item, type_name: Name) -> Checker with Mut, Panic, Div, Alloc, IO {
+        match item.fn_def {
+            Some(fd) => {
+                let pair = self.collect_method_params((*fd).params)
+                var c = pair.0
+                let params = pair.1
+                let param_count = pair.2
+                let ret_pair = c.lower_opt_return_type((*fd).return_type)
+                c = ret_pair.0
+                let ret_ty = ret_pair.1
+                let sig = FnSig {
+                    name: item.name,
+                    params: params,
+                    param_count: param_count,
+                    return_type: ret_ty,
+                    is_method: true,
+                    self_type_name: type_name,
+                }
+                let add_result = c.fn_sigs.add(sig)
+                c.fn_sigs = add_result.0
+                c
+            }
+            None => self
+        }
+    }
+
+    fn collect_method_params(self, opt: Option<Box<ParamList>>) -> (Checker, Option<Box<FnParamList>>, i64) with Mut, Panic, Div, Alloc, IO {
+        match opt {
+            Some(pl) => {
+                // Skip self param for method signatures
+                if (*pl).head.is_self {
+                    self.collect_fn_params((*pl).tail)
+                } else {
+                    let pair = self.collect_fn_param_list(*pl)
+                    (pair.0, Some(Box::new(pair.1)), pair.2)
+                }
+            }
+            None => (self, None, 0)
+        }
+    }
+}
+
+// ============================================================
+// Pass 2: Check all items
+// ============================================================
+
+impl Checker {
+    fn check_items(self, items: Option<Box<ItemList>>) -> Checker with Mut, Panic, Div, Alloc, IO {
+        match items {
+            Some(list) => {
+                var c = self.check_item((*list).head)
+                c.check_items((*list).tail)
+            }
+            None => self
+        }
+    }
+
+    fn check_item(self, item: Item) -> Checker with Mut, Panic, Div, Alloc, IO {
+        match item.kind {
+            ItemFn => self.check_fn_item(item.fn_def)
+            ItemStruct => self
+            ItemEnum => self
+            ItemImpl => self.check_impl_item(item.impl_def)
+            ItemTypeAlias => self
+            ItemUse => self
+        }
+    }
+
+    // --------------------------------------------------------
+    // Check function definition
+    // --------------------------------------------------------
+
+    fn check_fn_item(self, opt: Option<Box<FnDef>>) -> Checker with Mut, Panic, Div, Alloc, IO {
+        match opt {
+            Some(fd) => {
+                var c = self
+                let sig_id = c.fn_sigs.find((*fd).name)
+                if sig_id >= 0 {
+                    let sig = c.fn_sigs.get(sig_id)
+                    c.current_return_type = sig.return_type
+                }
+                c.env = c.env.push_scope()
+                c = c.bind_fn_params((*fd).params)
+                let pair = c.check_block((*fd).body)
+                c = pair.0
+                let body_ty = pair.1
+                // Check return type compatibility
+                if sig_id >= 0 {
+                    let sig2 = c.fn_sigs.get(sig_id)
+                    if !types_compatible(body_ty, sig2.return_type) {
+                        c = c.report_error()
+                    }
+                }
+                c.env = c.env.pop_scope()
+                c.current_return_type = ty_unit()
+                c
+            }
+            None => self
+        }
+    }
+
+    fn bind_fn_params(self, opt: Option<Box<ParamList>>) -> Checker with Mut, Panic, Div, Alloc, IO {
+        match opt {
+            Some(pl) => {
+                var c = self.bind_fn_param((*pl).head)
+                c.bind_fn_params((*pl).tail)
+            }
+            None => self
+        }
+    }
+
+    fn bind_fn_param(self, p: Param) -> Checker with Mut, Panic, Div, Alloc, IO {
+        var c = self
+        if p.is_self {
+            c.env = c.env.bind(p.name, c.current_impl_type, p.is_self_mut)
+            c
+        } else {
+            let pair = c.lower_type_expr(p.ty)
+            c = pair.0
+            let param_ty = pair.1
+            c.env = c.env.bind(p.name, param_ty, false)
+            c
+        }
+    }
+
+    // --------------------------------------------------------
+    // Check impl definition
+    // --------------------------------------------------------
+
+    fn check_impl_item(self, opt: Option<Box<ImplDef>>) -> Checker with Mut, Panic, Div, Alloc, IO {
+        match opt {
+            Some(id) => {
+                let pair = self.lower_type_expr((*id).target_type)
+                var c = pair.0
+                let impl_ty = pair.1
+                c.current_impl_type = impl_ty
+                c = c.check_impl_methods((*id).methods)
+                c.current_impl_type = ty_error()
+                c
+            }
+            None => self
+        }
+    }
+
+    fn check_impl_methods(self, opt: Option<Box<ItemList>>) -> Checker with Mut, Panic, Div, Alloc, IO {
+        match opt {
+            Some(list) => {
+                var c = self.check_impl_method((*list).head)
+                c.check_impl_methods((*list).tail)
+            }
+            None => self
+        }
+    }
+
+    fn check_impl_method(self, item: Item) -> Checker with Mut, Panic, Div, Alloc, IO {
+        match item.fn_def {
+            Some(fd) => {
+                var c = self
+                let sig_id = c.fn_sigs.find_method(c.current_impl_type.name, (*fd).name)
+                if sig_id >= 0 {
+                    let sig = c.fn_sigs.get(sig_id)
+                    c.current_return_type = sig.return_type
+                }
+                c.env = c.env.push_scope()
+                c = c.bind_fn_params((*fd).params)
+                let pair = c.check_block((*fd).body)
+                c = pair.0
+                let body_ty = pair.1
+                if sig_id >= 0 {
+                    let sig2 = c.fn_sigs.get(sig_id)
+                    if !types_compatible(body_ty, sig2.return_type) {
+                        c = c.report_error()
+                    }
+                }
+                c.env = c.env.pop_scope()
+                c.current_return_type = ty_unit()
+                c
+            }
+            None => self
+        }
+    }
+}
+
+// ============================================================
+// Block and statement checking
+// ============================================================
+
+impl Checker {
+    fn check_block(self, blk: Block) -> (Checker, TypeEntry) with Mut, Panic, Div, Alloc, IO {
+        var c = self
+        c.env = c.env.push_scope()
+        let pair = c.check_stmts(blk.stmts)
+        c = pair.0
+        let result_ty = pair.1
+        c.env = c.env.pop_scope()
+        (c, result_ty)
+    }
+
+    fn check_stmts(self, opt: Option<Box<StmtList>>) -> (Checker, TypeEntry) with Mut, Panic, Div, Alloc, IO {
+        match opt {
+            Some(list) => {
+                let pair = self.check_stmt((*list).head)
+                var c = pair.0
+                let stmt_ty = pair.1
+                match (*list).tail {
+                    Some(_) => c.check_stmts((*list).tail)
+                    None => (c, stmt_ty)
+                }
+            }
+            None => (self, ty_unit())
+        }
+    }
+
+    fn check_stmt(self, s: Stmt) -> (Checker, TypeEntry) with Mut, Panic, Div, Alloc, IO {
+        match s.kind {
+            StmtLet => self.check_let_stmt(s)
+            StmtVar => self.check_var_stmt(s)
+            StmtExpr => self.check_expr_stmt(s)
+            StmtAssign => self.check_assign_stmt(s)
+        }
+    }
+
+    fn check_let_stmt(self, s: Stmt) -> (Checker, TypeEntry) with Mut, Panic, Div, Alloc, IO {
+        var c = self
+        let ann_pair = c.lower_opt_type(s.ty)
+        c = ann_pair.0
+        let ann_ty = ann_pair.1
+        let init_pair = c.check_opt_expr(s.expr)
+        c = init_pair.0
+        let init_ty = init_pair.1
+        // Determine binding type: annotation if present, else init type
+        var bind_ty = init_ty
+        if ann_ty.kind != TypeKind::TyUnknown {
+            if !types_compatible(init_ty, ann_ty) {
+                c = c.report_error()
+            }
+            bind_ty = ann_ty
+        }
+        c.env = c.env.bind(s.name, bind_ty, false)
+        (c, ty_unit())
+    }
+
+    fn check_var_stmt(self, s: Stmt) -> (Checker, TypeEntry) with Mut, Panic, Div, Alloc, IO {
+        var c = self
+        let ann_pair = c.lower_opt_type(s.ty)
+        c = ann_pair.0
+        let ann_ty = ann_pair.1
+        let init_pair = c.check_opt_expr(s.expr)
+        c = init_pair.0
+        let init_ty = init_pair.1
+        var bind_ty = init_ty
+        if ann_ty.kind != TypeKind::TyUnknown {
+            if !types_compatible(init_ty, ann_ty) {
+                c = c.report_error()
+            }
+            bind_ty = ann_ty
+        }
+        c.env = c.env.bind(s.name, bind_ty, true)
+        (c, ty_unit())
+    }
+
+    fn check_expr_stmt(self, s: Stmt) -> (Checker, TypeEntry) with Mut, Panic, Div, Alloc, IO {
+        self.check_opt_expr(s.expr)
+    }
+
+    fn check_assign_stmt(self, s: Stmt) -> (Checker, TypeEntry) with Mut, Panic, Div, Alloc, IO {
+        var c = self
+        let target_pair = c.check_opt_expr(s.target)
+        c = target_pair.0
+        let target_ty = target_pair.1
+        let val_pair = c.check_opt_expr(s.expr)
+        c = val_pair.0
+        let val_ty = val_pair.1
+        // Check compatibility
+        if !types_compatible(target_ty, val_ty) {
+            c = c.report_error()
+        }
+        // Check mutability: if target is an ident, it must be mutable
+        c = c.check_assign_mutability(s.target)
+        (c, ty_unit())
+    }
+
+    fn check_assign_mutability(self, opt: Option<Box<Expr>>) -> Checker with Mut, Panic, Div, Alloc, IO {
+        match opt {
+            Some(e) => {
+                if (*e).kind == ExprKind::ExprIdent {
+                    if !self.env.lookup_is_mutable((*e).name) {
+                        self.report_error()
+                    } else {
+                        self
+                    }
+                } else {
+                    // Field access, index — assume mutable for now
+                    self
+                }
+            }
+            None => self
+        }
+    }
+
+    fn check_opt_expr(self, opt: Option<Box<Expr>>) -> (Checker, TypeEntry) with Mut, Panic, Div, Alloc, IO {
+        match opt {
+            Some(e) => self.check_expr(*e)
+            None => (self, ty_unit())
+        }
+    }
+}
+
+// ============================================================
+// Expression type checking — dispatch
+// ============================================================
+
+impl Checker {
+    fn check_expr(self, e: Expr) -> (Checker, TypeEntry) with Mut, Panic, Div, Alloc, IO {
+        match e.kind {
+            ExprIntLit => (self, ty_i64())
+            ExprFloatLit => (self, ty_f64())
+            ExprBoolTrue => (self, ty_bool())
+            ExprBoolFalse => (self, ty_bool())
+            ExprStringLit => (self, ty_string())
+            ExprCharLit => (self, ty_char())
+            ExprIdent => (self, self.env.lookup(e.name))
+            ExprPath => self.check_path_expr(e)
+            ExprBinary => self.check_binary_expr(e)
+            ExprUnary => self.check_unary_expr(e)
+            ExprFieldAccess => self.check_field_access(e)
+            ExprIndex => self.check_index_expr(e)
+            ExprMethodCall => self.check_method_call(e)
+            ExprCall => self.check_call_expr(e)
+            ExprIf => self.check_if_expr(e)
+            ExprMatch => self.check_match_expr(e)
+            ExprWhile => self.check_while_expr(e)
+            ExprLoop => self.check_loop_expr(e)
+            ExprBlock => self.check_block_expr(e)
+            ExprReturn => self.check_return_expr(e)
+            ExprBreak => (self, ty_never())
+            ExprContinue => (self, ty_never())
+            ExprStructLit => self.check_struct_lit(e)
+            ExprArrayLit => self.check_array_lit(e)
+            ExprTupleLit => self.check_tuple_lit(e)
+            ExprRange => self.check_range_expr(e)
+            ExprError => (self, ty_error())
+        }
+    }
+
+    // --------------------------------------------------------
+    // Path expression — enum variant
+    // --------------------------------------------------------
+
+    fn check_path_expr(self, e: Expr) -> (Checker, TypeEntry) with Mut, Panic, Div, Alloc, IO {
+        // First segment is enum/type name, last is variant
+        // For now, look up first segment as enum name
+        let first_name = copy_string_list_to_name(e.path.segments)
+        let enum_idx = self.enums.find(first_name)
+        if enum_idx >= 0 {
+            (self, ty_named(first_name))
+        } else {
+            // Could be a variant name directly (e.g. None, Some)
+            let variant_enum_idx = self.enums.find_variant_enum(first_name)
+            if variant_enum_idx >= 0 {
+                let ei = self.enums.get(variant_enum_idx)
+                (self, ty_named(ei.name))
+            } else {
+                // Look up in env as a regular binding
+                (self, self.env.lookup(first_name))
+            }
+        }
+    }
+
+    // --------------------------------------------------------
+    // Binary expression
+    // --------------------------------------------------------
+
+    fn check_binary_expr(self, e: Expr) -> (Checker, TypeEntry) with Mut, Panic, Div, Alloc, IO {
+        let left_pair = self.check_opt_expr(e.left)
+        var c = left_pair.0
+        let left_ty = left_pair.1
+        let right_pair = c.check_opt_expr(e.right)
+        c = right_pair.0
+        let right_ty = right_pair.1
+        let result = binary_result_type(e.bin_op, left_ty, right_ty)
+        if result.kind == TypeKind::TyError && !is_error_or_unknown(left_ty) && !is_error_or_unknown(right_ty) {
+            c = c.report_error()
+        }
+        (c, result)
+    }
+
+    // --------------------------------------------------------
+    // Unary expression
+    // --------------------------------------------------------
+
+    fn check_unary_expr(self, e: Expr) -> (Checker, TypeEntry) with Mut, Panic, Div, Alloc, IO {
+        let pair = self.check_opt_expr(e.left)
+        var c = pair.0
+        let operand_ty = pair.1
+        let result = unary_result_type(e.un_op, operand_ty)
+        if result.kind == TypeKind::TyError && !is_error_or_unknown(operand_ty) {
+            c = c.report_error()
+        }
+        (c, result)
+    }
+
+    // --------------------------------------------------------
+    // Field access
+    // --------------------------------------------------------
+
+    fn check_field_access(self, e: Expr) -> (Checker, TypeEntry) with Mut, Panic, Div, Alloc, IO {
+        let pair = self.check_opt_expr(e.left)
+        var c = pair.0
+        let base_ty = pair.1
+        if base_ty.kind == TypeKind::TyNamed {
+            let struct_idx = c.structs.find(base_ty.name)
+            if struct_idx >= 0 {
+                let si = c.structs.get(struct_idx)
+                let field_ty = field_info_list_find(si.fields, e.name)
+                if field_ty.kind == TypeKind::TyError && !field_info_list_has(si.fields, e.name) {
+                    c = c.report_error()
+                }
+                (c, field_ty)
+            } else {
+                (c, ty_error())
+            }
+        } else if base_ty.kind == TypeKind::TyTuple {
+            // Tuple field access by index (e.g. t.0, t.1)
+            // The field name contains the index as ascii digits
+            let idx = e.name.buf[0] - 48
+            let elem = type_entry_list_get(base_ty.tuple_elems, idx)
+            (c, elem)
+        } else if is_error_or_unknown(base_ty) {
+            (c, base_ty)
+        } else {
+            c = c.report_error()
+            (c, ty_error())
+        }
+    }
+
+    // --------------------------------------------------------
+    // Index expression
+    // --------------------------------------------------------
+
+    fn check_index_expr(self, e: Expr) -> (Checker, TypeEntry) with Mut, Panic, Div, Alloc, IO {
+        let base_pair = self.check_opt_expr(e.left)
+        var c = base_pair.0
+        let base_ty = base_pair.1
+        let idx_pair = c.check_opt_expr(e.right)
+        c = idx_pair.0
+        let idx_ty = idx_pair.1
+        // Index must be i64
+        if !is_error_or_unknown(idx_ty) && idx_ty.kind != TypeKind::TyI64 {
+            c = c.report_error()
+        }
+        // Base must be array
+        if base_ty.kind == TypeKind::TyArray {
+            match base_ty.inner {
+                Some(elem_ty) => (c, *elem_ty)
+                None => (c, ty_error())
+            }
+        } else if is_error_or_unknown(base_ty) {
+            (c, base_ty)
+        } else {
+            c = c.report_error()
+            (c, ty_error())
+        }
+    }
+
+    // --------------------------------------------------------
+    // Method call
+    // --------------------------------------------------------
+
+    fn check_method_call(self, e: Expr) -> (Checker, TypeEntry) with Mut, Panic, Div, Alloc, IO {
+        let base_pair = self.check_opt_expr(e.left)
+        var c = base_pair.0
+        let base_ty = base_pair.1
+        if base_ty.kind == TypeKind::TyNamed {
+            let sig_id = c.fn_sigs.find_method(base_ty.name, e.name)
+            if sig_id >= 0 {
+                let sig = c.fn_sigs.get(sig_id)
+                c = c.check_call_args(e.args, sig.params, sig.param_count)
+                (c, sig.return_type)
+            } else {
+                // Method not found
+                c = c.report_error()
+                // Still check args to accumulate errors
+                c = c.check_expr_list_no_type(e.args)
+                (c, ty_error())
+            }
+        } else if is_error_or_unknown(base_ty) {
+            c = c.check_expr_list_no_type(e.args)
+            (c, base_ty)
+        } else {
+            c = c.report_error()
+            c = c.check_expr_list_no_type(e.args)
+            (c, ty_error())
+        }
+    }
+
+    // --------------------------------------------------------
+    // Function call
+    // --------------------------------------------------------
+
+    fn check_call_expr(self, e: Expr) -> (Checker, TypeEntry) with Mut, Panic, Div, Alloc, IO {
+        let callee_pair = self.check_opt_expr(e.left)
+        var c = callee_pair.0
+        let callee_ty = callee_pair.1
+        if callee_ty.kind == TypeKind::TyFn && callee_ty.fn_sig_id >= 0 {
+            let sig = c.fn_sigs.get(callee_ty.fn_sig_id)
+            c = c.check_call_args(e.args, sig.params, sig.param_count)
+            (c, sig.return_type)
+        } else if is_error_or_unknown(callee_ty) {
+            c = c.check_expr_list_no_type(e.args)
+            (c, callee_ty)
+        } else {
+            c = c.report_error()
+            c = c.check_expr_list_no_type(e.args)
+            (c, ty_error())
+        }
+    }
+
+    fn check_call_args(self, args: Option<Box<ExprList>>, params: Option<Box<FnParamList>>, expected_count: i64) -> Checker with Mut, Panic, Div, Alloc, IO {
+        var c = self
+        c = c.check_call_args_inner(args, params, 0, expected_count)
+        c
+    }
+
+    fn check_call_args_inner(self, args: Option<Box<ExprList>>, params: Option<Box<FnParamList>>, idx: i64, expected_count: i64) -> Checker with Mut, Panic, Div, Alloc, IO {
+        match args {
+            Some(arg_list) => {
+                let pair = self.check_expr((*arg_list).head)
+                var c = pair.0
+                let arg_ty = pair.1
+                // Check against param type if available
+                let param_info = fn_param_list_get(params, idx)
+                if !name_is_empty(param_info.name) || param_info.ty.kind != TypeKind::TyError {
+                    if !types_compatible(arg_ty, param_info.ty) {
+                        c = c.report_error()
+                    }
+                }
+                c.check_call_args_inner((*arg_list).tail, params, idx + 1, expected_count)
+            }
+            None => {
+                // Check arity: idx should equal expected_count
+                if idx != expected_count && expected_count >= 0 {
+                    self.report_error()
+                } else {
+                    self
+                }
+            }
+        }
+    }
+
+    fn check_expr_list_no_type(self, opt: Option<Box<ExprList>>) -> Checker with Mut, Panic, Div, Alloc, IO {
+        match opt {
+            Some(list) => {
+                let pair = self.check_expr((*list).head)
+                var c = pair.0
+                c.check_expr_list_no_type((*list).tail)
+            }
+            None => self
+        }
+    }
+
+    // --------------------------------------------------------
+    // If expression
+    // --------------------------------------------------------
+
+    fn check_if_expr(self, e: Expr) -> (Checker, TypeEntry) with Mut, Panic, Div, Alloc, IO {
+        let cond_pair = self.check_opt_expr(e.left)
+        var c = cond_pair.0
+        let cond_ty = cond_pair.1
+        // Condition must be bool
+        if !is_error_or_unknown(cond_ty) && !is_bool_type(cond_ty) {
+            c = c.report_error()
+        }
+        // Check then block
+        let then_pair = c.check_opt_block(e.block)
+        c = then_pair.0
+        let then_ty = then_pair.1
+        // Check else
+        match e.else_expr {
+            Some(else_e) => {
+                let else_pair = c.check_expr(*else_e)
+                c = else_pair.0
+                let else_ty = else_pair.1
+                if !types_compatible(then_ty, else_ty) {
+                    c = c.report_error()
+                }
+                (c, then_ty)
+            }
+            None => (c, ty_unit())
+        }
+    }
+
+    fn check_opt_block(self, opt: Option<Box<Block>>) -> (Checker, TypeEntry) with Mut, Panic, Div, Alloc, IO {
+        match opt {
+            Some(blk) => self.check_block(*blk)
+            None => (self, ty_unit())
+        }
+    }
+
+    // --------------------------------------------------------
+    // Match expression
+    // --------------------------------------------------------
+
+    fn check_match_expr(self, e: Expr) -> (Checker, TypeEntry) with Mut, Panic, Div, Alloc, IO {
+        let scrut_pair = self.check_opt_expr(e.left)
+        var c = scrut_pair.0
+        let scrut_ty = scrut_pair.1
+        c.check_match_arms(e.arms, scrut_ty)
+    }
+
+    fn check_match_arms(self, opt: Option<Box<MatchArmList>>, scrut_ty: TypeEntry) -> (Checker, TypeEntry) with Mut, Panic, Div, Alloc, IO {
+        match opt {
+            Some(list) => {
+                let pair = self.check_match_arm((*list).head, scrut_ty)
+                var c = pair.0
+                let first_ty = pair.1
+                c = c.check_remaining_arms((*list).tail, scrut_ty, first_ty)
+                (c, first_ty)
+            }
+            None => (self, ty_unit())
+        }
+    }
+
+    fn check_match_arm(self, arm: MatchArm, scrut_ty: TypeEntry) -> (Checker, TypeEntry) with Mut, Panic, Div, Alloc, IO {
+        var c = self
+        c.env = c.env.push_scope()
+        c = c.bind_pattern(arm.pattern, scrut_ty)
+        let pair = c.check_expr(arm.body)
+        c = pair.0
+        let body_ty = pair.1
+        c.env = c.env.pop_scope()
+        (c, body_ty)
+    }
+
+    fn check_remaining_arms(self, opt: Option<Box<MatchArmList>>, scrut_ty: TypeEntry, expected_ty: TypeEntry) -> Checker with Mut, Panic, Div, Alloc, IO {
+        match opt {
+            Some(list) => {
+                let pair = self.check_match_arm((*list).head, scrut_ty)
+                var c = pair.0
+                let arm_ty = pair.1
+                if !types_compatible(arm_ty, expected_ty) {
+                    c = c.report_error()
+                }
+                c.check_remaining_arms((*list).tail, scrut_ty, expected_ty)
+            }
+            None => self
+        }
+    }
+
+    fn bind_pattern(self, pat: Pattern, scrut_ty: TypeEntry) -> Checker with Mut, Panic, Div, Alloc, IO {
+        match pat.kind {
+            PatWildcard => self
+            PatBinding => {
+                var c = self
+                c.env = c.env.bind(pat.name, scrut_ty, pat.is_mut)
+                c
+            }
+            PatIntLit => self
+            PatBoolTrue => self
+            PatBoolFalse => self
+            PatStringLit => self
+            PatEnum => self.bind_pattern_list(pat.sub_patterns, scrut_ty)
+            PatStruct => self
+            PatTuple => self.bind_pattern_list(pat.sub_patterns, scrut_ty)
+            PatOr => self.bind_pattern_list(pat.sub_patterns, scrut_ty)
+        }
+    }
+
+    fn bind_pattern_list(self, opt: Option<Box<PatternList>>, scrut_ty: TypeEntry) -> Checker with Mut, Panic, Div, Alloc, IO {
+        match opt {
+            Some(list) => {
+                var c = self.bind_pattern((*list).head, scrut_ty)
+                c.bind_pattern_list((*list).tail, scrut_ty)
+            }
+            None => self
+        }
+    }
+
+    // --------------------------------------------------------
+    // While, Loop, Block, Return
+    // --------------------------------------------------------
+
+    fn check_while_expr(self, e: Expr) -> (Checker, TypeEntry) with Mut, Panic, Div, Alloc, IO {
+        let cond_pair = self.check_opt_expr(e.left)
+        var c = cond_pair.0
+        let cond_ty = cond_pair.1
+        if !is_error_or_unknown(cond_ty) && !is_bool_type(cond_ty) {
+            c = c.report_error()
+        }
+        let body_pair = c.check_opt_block(e.block)
+        c = body_pair.0
+        (c, ty_unit())
+    }
+
+    fn check_loop_expr(self, e: Expr) -> (Checker, TypeEntry) with Mut, Panic, Div, Alloc, IO {
+        let pair = self.check_opt_block(e.block)
+        (pair.0, ty_unit())
+    }
+
+    fn check_block_expr(self, e: Expr) -> (Checker, TypeEntry) with Mut, Panic, Div, Alloc, IO {
+        self.check_opt_block(e.block)
+    }
+
+    fn check_return_expr(self, e: Expr) -> (Checker, TypeEntry) with Mut, Panic, Div, Alloc, IO {
+        let pair = self.check_opt_expr(e.left)
+        var c = pair.0
+        let val_ty = pair.1
+        if !types_compatible(val_ty, c.current_return_type) {
+            c = c.report_error()
+        }
+        (c, ty_never())
+    }
+
+    // --------------------------------------------------------
+    // Struct literal
+    // --------------------------------------------------------
+
+    fn check_struct_lit(self, e: Expr) -> (Checker, TypeEntry) with Mut, Panic, Div, Alloc, IO {
+        let struct_name = copy_string_list_to_name(e.path.segments)
+        let struct_idx = self.structs.find(struct_name)
+        if struct_idx >= 0 {
+            let si = self.structs.get(struct_idx)
+            var c = self.check_struct_field_inits(e.fields, si)
+            (c, ty_named(struct_name))
+        } else {
+            var c = self.report_error()
+            c = c.check_struct_field_inits_no_type(e.fields)
+            (c, ty_error())
+        }
+    }
+
+    fn check_struct_field_inits(self, opt: Option<Box<StructFieldList>>, si: StructInfo) -> Checker with Mut, Panic, Div, Alloc, IO {
+        match opt {
+            Some(list) => {
+                var c = self
+                let field_ty = field_info_list_find(si.fields, (*list).head.name)
+                let pair = c.check_expr((*list).head.value)
+                c = pair.0
+                let init_ty = pair.1
+                if !types_compatible(init_ty, field_ty) {
+                    c = c.report_error()
+                }
+                c.check_struct_field_inits((*list).tail, si)
+            }
+            None => self
+        }
+    }
+
+    fn check_struct_field_inits_no_type(self, opt: Option<Box<StructFieldList>>) -> Checker with Mut, Panic, Div, Alloc, IO {
+        match opt {
+            Some(list) => {
+                let pair = self.check_expr((*list).head.value)
+                var c = pair.0
+                c.check_struct_field_inits_no_type((*list).tail)
+            }
+            None => self
+        }
+    }
+
+    // --------------------------------------------------------
+    // Array literal
+    // --------------------------------------------------------
+
+    fn check_array_lit(self, e: Expr) -> (Checker, TypeEntry) with Mut, Panic, Div, Alloc, IO {
+        let pair = self.check_array_elems(e.args)
+        let c = pair.0
+        let elem_ty = pair.1
+        let count = pair.2
+        (c, ty_array(elem_ty, count))
+    }
+
+    fn check_array_elems(self, opt: Option<Box<ExprList>>) -> (Checker, TypeEntry, i64) with Mut, Panic, Div, Alloc, IO {
+        match opt {
+            Some(list) => {
+                let pair = self.check_expr((*list).head)
+                var c = pair.0
+                let first_ty = pair.1
+                let rest = c.check_array_rest((*list).tail, first_ty)
+                (rest.0, first_ty, 1 + rest.1)
+            }
+            None => (self, ty_error(), 0)
+        }
+    }
+
+    fn check_array_rest(self, opt: Option<Box<ExprList>>, expected: TypeEntry) -> (Checker, i64) with Mut, Panic, Div, Alloc, IO {
+        match opt {
+            Some(list) => {
+                let pair = self.check_expr((*list).head)
+                var c = pair.0
+                let elem_ty = pair.1
+                if !types_compatible(elem_ty, expected) {
+                    c = c.report_error()
+                }
+                let rest = c.check_array_rest((*list).tail, expected)
+                (rest.0, 1 + rest.1)
+            }
+            None => (self, 0)
+        }
+    }
+
+    // --------------------------------------------------------
+    // Tuple literal
+    // --------------------------------------------------------
+
+    fn check_tuple_lit(self, e: Expr) -> (Checker, TypeEntry) with Mut, Panic, Div, Alloc, IO {
+        let pair = self.check_tuple_elems(e.args)
+        let c = pair.0
+        match pair.1 {
+            Some(elem_list) => (c, ty_tuple(*elem_list))
+            None => (c, ty_unit())
+        }
+    }
+
+    fn check_tuple_elems(self, opt: Option<Box<ExprList>>) -> (Checker, Option<Box<TypeEntryList>>) with Mut, Panic, Div, Alloc, IO {
+        match opt {
+            Some(list) => {
+                let pair = self.check_expr((*list).head)
+                var c = pair.0
+                let head_ty = pair.1
+                let rest = c.check_tuple_elems((*list).tail)
+                c = rest.0
+                let head_entry = TypeEntryList { head: head_ty, tail: None }
+                match rest.1 {
+                    Some(rest_list) => {
+                        (c, Some(Box::new(TypeEntryList { head: head_ty, tail: Some(rest_list) })))
+                    }
+                    None => (c, Some(Box::new(head_entry)))
+                }
+            }
+            None => (self, None)
+        }
+    }
+
+    // --------------------------------------------------------
+    // Range expression
+    // --------------------------------------------------------
+
+    fn check_range_expr(self, e: Expr) -> (Checker, TypeEntry) with Mut, Panic, Div, Alloc, IO {
+        let left_pair = self.check_opt_expr(e.left)
+        var c = left_pair.0
+        let right_pair = c.check_opt_expr(e.right)
+        c = right_pair.0
+        (c, ty_unit())
+    }
+}

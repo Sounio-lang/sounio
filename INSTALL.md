@@ -581,7 +581,7 @@ cargo test --release
 Expected output (summary):
 
 ```
-test result: ok. XXX passed; 0 failed; 0 ignored
+test result: ok. <N> passed; 0 failed; 0 ignored
 ```
 
 ### Step 3: Check a Source File
@@ -649,7 +649,7 @@ brew install zstd
 sudo dnf install libzstd-devel
 ```
 
-### Error: `LLVM_SYS_XXX_PREFIX not set`
+### Error: `LLVM_SYS_<MAJOR>_PREFIX not set`
 
 **Cause**: The llvm-sys crate cannot locate your LLVM installation.
 
@@ -958,7 +958,7 @@ cargo install --git https://github.com/sounio-lang/sounio.git souc
 - **[docs/LLM_PROGRAMMING_GUIDE.md](docs/LLM_PROGRAMMING_GUIDE.md)** - Complete language syntax reference
 - **[docs/MINIMUM_VIABLE_SOUNIO.md](docs/MINIMUM_VIABLE_SOUNIO.md)** - Current feature status and roadmap
 - **[docs/FEATURE_FLAGS.md](docs/FEATURE_FLAGS.md)** - Detailed feature flag documentation
-- **[compiler/docs/KNOWN_LIMITATIONS.md](compiler/docs/KNOWN_LIMITATIONS.md)** - Known issues and limitations
+- **[docs/compiler/KNOWN_LIMITATIONS.md](docs/compiler/KNOWN_LIMITATIONS.md)** - Known issues and limitations
 - **[CLAUDE.md](CLAUDE.md)** - Quick reference for LLM-assisted development
 - **[CONTRIBUTING.md](CONTRIBUTING.md)** - Contribution guidelines
 

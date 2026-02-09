@@ -171,6 +171,8 @@ pub struct MirAwareCraneliftJit {
     ml_opt_enabled: bool,
     /// Whether to collect optimization data for ML training
     collect_opt_data: bool,
+    /// Stack size for the JIT execution thread (bytes)
+    stack_size: usize,
 }
 
 #[cfg(feature = "jit")]
@@ -182,6 +184,7 @@ impl MirAwareCraneliftJit {
             glm_enabled: false,
             ml_opt_enabled: false,
             collect_opt_data: false,
+            stack_size: 64 * 1024 * 1024, // 64 MB
         }
     }
 
@@ -262,7 +265,7 @@ impl MirAwareCraneliftJit {
 
         let mut compiler = MirCraneliftCompiler::new(self.optimize)?;
         compiler.compile_mir_module(&optimized_module)?;
-        compiler.finalize()
+        compiler.finalize(self.stack_size)
     }
 
     /// Compile HLIR module via MIR
@@ -620,7 +623,7 @@ impl MirCraneliftCompiler {
     }
 
     /// Finalize compilation and return the compiled module
-    pub fn finalize(mut self) -> Result<CompiledModule, String> {
+    pub fn finalize(mut self, stack_size: usize) -> Result<CompiledModule, String> {
         self.jit_module
             .finalize_definitions()
             .map_err(|e| format!("Failed to finalize: {}", e))?;
@@ -633,7 +636,7 @@ impl MirCraneliftCompiler {
             }
         }
 
-        Ok(CompiledModule::new(self.jit_module, functions))
+        Ok(CompiledModule::new(self.jit_module, functions, stack_size))
     }
 }
 

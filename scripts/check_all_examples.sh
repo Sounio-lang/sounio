@@ -2,11 +2,11 @@
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-BIN="$ROOT_DIR/compiler/target/debug/souc"
+BIN="$ROOT_DIR/target/debug/souc"
 FAIL_LOG="/tmp/sounio_examples_failures.txt"
 
 if [[ ! -x "$BIN" ]]; then
-  (cd "$ROOT_DIR/compiler" && cargo build -q --bin souc)
+  (cd "$ROOT_DIR" && cargo build -q -p souc --bin souc)
 fi
 
 : > "$FAIL_LOG"

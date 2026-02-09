@@ -2704,7 +2704,7 @@ fn compile(
         Box::leak(Box::new(p))
     });
 
-    // TODO: Actual code generation
+    // This command path currently validates frontend stages only.
     tracing::info!("Compilation successful (codegen not yet implemented)");
     println!(
         "Compiled {} ({} items, {} functions)",
@@ -2726,7 +2726,8 @@ fn check(
     error_format: &str,
     warn_deprecated: bool,
 ) -> Result<()> {
-    let _ = warn_deprecated; // TODO: Wire up deprecation tracking when enabled
+    // Flag is parsed and reserved for future diagnostics policy wiring.
+    let _ = warn_deprecated;
     let use_json = error_format == "json";
     tracing::info!("Type-checking {:?}", input);
 
@@ -2987,7 +2988,7 @@ fn run(input: &std::path::Path, args: &[String], use_sounio_compiler: bool) -> R
             std::env::var("SOUNIO_STDLIB_PATH").unwrap_or_else(|_| "stdlib/compiler".to_string());
 
         // Create the self-hosted compiler
-        let _compiler =
+        let compiler =
             sounio::compiler_loader::SounioCompiler::new(&stdlib_path).map_err(|e| {
                 miette::miette!(
                     "Failed to initialize self-hosted compiler: {}",
@@ -2995,8 +2996,13 @@ fn run(input: &std::path::Path, args: &[String], use_sounio_compiler: bool) -> R
                 )
             })?;
 
-        // TODO: Once fully integrated, compile source to bytecode here
-        // For now, fall back to Rust compiler
+        // Compile through the self-hosted bridge to validate bootstrap wiring.
+        let input_str = input.to_string_lossy();
+        let _bytecode = compiler.compile_file(input_str.as_ref()).map_err(|e| {
+            miette::miette!("Self-hosted compile failed for {}: {}", input.display(), e)
+        })?;
+
+        // Execution still uses the Rust interpreter path below.
         tracing::warn!("Self-hosted compiler integration in progress - using Rust compiler");
     }
 

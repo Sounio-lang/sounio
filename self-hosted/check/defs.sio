@@ -1,0 +1,365 @@
+// Definition tables for the type checker
+//
+// Three flat-array tables with linear scan lookup:
+//   StructTable  — struct name + fields
+//   EnumTable    — enum name + variants
+//   FnSigTable   — fn name + params + return type + method info
+
+// ============================================================
+// Field info (for struct fields)
+// ============================================================
+
+struct FieldInfo {
+    name: Name,
+    ty: TypeEntry,
+}
+
+fn empty_field_info() -> FieldInfo {
+    FieldInfo {
+        name: Name { buf: [0; 128], len: 0 },
+        ty: empty_type_entry(),
+    }
+}
+
+struct FieldInfoList {
+    head: FieldInfo,
+    tail: Option<Box<FieldInfoList>>,
+}
+
+fn field_info_list_append(list: FieldInfoList, node: FieldInfoList) -> FieldInfoList with Mut, Alloc {
+    match list.tail {
+        None => FieldInfoList { head: list.head, tail: Some(Box::new(node)) }
+        Some(rest) => FieldInfoList {
+            head: list.head,
+            tail: Some(Box::new(field_info_list_append(*rest, node))),
+        }
+    }
+}
+
+fn field_info_list_find(opt: Option<Box<FieldInfoList>>, name: Name) -> TypeEntry with Mut, Panic, Div {
+    match opt {
+        None => empty_type_entry()
+        Some(list) => {
+            if name_eq((*list).head.name, name) {
+                (*list).head.ty
+            } else {
+                field_info_list_find((*list).tail, name)
+            }
+        }
+    }
+}
+
+fn field_info_list_has(opt: Option<Box<FieldInfoList>>, name: Name) -> bool with Mut, Panic, Div {
+    match opt {
+        None => false
+        Some(list) => {
+            if name_eq((*list).head.name, name) {
+                true
+            } else {
+                field_info_list_has((*list).tail, name)
+            }
+        }
+    }
+}
+
+// ============================================================
+// Struct info
+// ============================================================
+
+struct StructInfo {
+    name: Name,
+    fields: Option<Box<FieldInfoList>>,
+    field_count: i64,
+}
+
+fn empty_struct_info() -> StructInfo {
+    StructInfo {
+        name: Name { buf: [0; 128], len: 0 },
+        fields: None,
+        field_count: 0,
+    }
+}
+
+// ============================================================
+// Struct table
+// ============================================================
+
+struct StructTable {
+    entries: [StructInfo; 512],
+    count: i64,
+}
+
+fn struct_table_new() -> StructTable {
+    StructTable {
+        entries: [empty_struct_info(); 512],
+        count: 0,
+    }
+}
+
+impl StructTable {
+    fn add(self, info: StructInfo) -> StructTable with Mut, Panic, Div {
+        var tbl = self
+        if tbl.count < 512 {
+            tbl.entries[tbl.count] = info
+            tbl.count = tbl.count + 1
+        }
+        tbl
+    }
+
+    fn find(self, name: Name) -> i64 with Mut, Panic, Div {
+        var i: i64 = 0
+        while i < self.count {
+            if name_eq(self.entries[i].name, name) {
+                return i
+            }
+            i = i + 1
+        }
+        -1
+    }
+
+    fn get(self, idx: i64) -> StructInfo with Panic, Div {
+        self.entries[idx]
+    }
+}
+
+// ============================================================
+// Variant info (for enum variants)
+// ============================================================
+
+struct VariantInfo {
+    name: Name,
+}
+
+fn empty_variant_info() -> VariantInfo {
+    VariantInfo {
+        name: Name { buf: [0; 128], len: 0 },
+    }
+}
+
+struct VariantInfoList {
+    head: VariantInfo,
+    tail: Option<Box<VariantInfoList>>,
+}
+
+fn variant_info_list_has(opt: Option<Box<VariantInfoList>>, name: Name) -> bool with Mut, Panic, Div {
+    match opt {
+        None => false
+        Some(list) => {
+            if name_eq((*list).head.name, name) {
+                true
+            } else {
+                variant_info_list_has((*list).tail, name)
+            }
+        }
+    }
+}
+
+fn variant_info_list_append(list: VariantInfoList, node: VariantInfoList) -> VariantInfoList with Mut, Alloc {
+    match list.tail {
+        None => VariantInfoList { head: list.head, tail: Some(Box::new(node)) }
+        Some(rest) => VariantInfoList {
+            head: list.head,
+            tail: Some(Box::new(variant_info_list_append(*rest, node))),
+        }
+    }
+}
+
+// ============================================================
+// Enum info
+// ============================================================
+
+struct EnumInfo {
+    name: Name,
+    variants: Option<Box<VariantInfoList>>,
+    variant_count: i64,
+}
+
+fn empty_enum_info() -> EnumInfo {
+    EnumInfo {
+        name: Name { buf: [0; 128], len: 0 },
+        variants: None,
+        variant_count: 0,
+    }
+}
+
+// ============================================================
+// Enum table
+// ============================================================
+
+struct EnumTable {
+    entries: [EnumInfo; 256],
+    count: i64,
+}
+
+fn enum_table_new() -> EnumTable {
+    EnumTable {
+        entries: [empty_enum_info(); 256],
+        count: 0,
+    }
+}
+
+impl EnumTable {
+    fn add(self, info: EnumInfo) -> EnumTable with Mut, Panic, Div {
+        var tbl = self
+        if tbl.count < 256 {
+            tbl.entries[tbl.count] = info
+            tbl.count = tbl.count + 1
+        }
+        tbl
+    }
+
+    fn find(self, name: Name) -> i64 with Mut, Panic, Div {
+        var i: i64 = 0
+        while i < self.count {
+            if name_eq(self.entries[i].name, name) {
+                return i
+            }
+            i = i + 1
+        }
+        -1
+    }
+
+    fn get(self, idx: i64) -> EnumInfo with Panic, Div {
+        self.entries[idx]
+    }
+
+    fn find_variant_enum(self, variant_name: Name) -> i64 with Mut, Panic, Div, Alloc {
+        var i: i64 = 0
+        while i < self.count {
+            if variant_info_list_has(self.entries[i].variants, variant_name) {
+                return i
+            }
+            i = i + 1
+        }
+        -1
+    }
+}
+
+// ============================================================
+// Function parameter info
+// ============================================================
+
+struct FnParamInfo {
+    name: Name,
+    ty: TypeEntry,
+}
+
+fn empty_fn_param_info() -> FnParamInfo {
+    FnParamInfo {
+        name: Name { buf: [0; 128], len: 0 },
+        ty: empty_type_entry(),
+    }
+}
+
+struct FnParamList {
+    head: FnParamInfo,
+    tail: Option<Box<FnParamList>>,
+}
+
+fn fn_param_list_append(list: FnParamList, node: FnParamList) -> FnParamList with Mut, Alloc {
+    match list.tail {
+        None => FnParamList { head: list.head, tail: Some(Box::new(node)) }
+        Some(rest) => FnParamList {
+            head: list.head,
+            tail: Some(Box::new(fn_param_list_append(*rest, node))),
+        }
+    }
+}
+
+fn fn_param_list_count(opt: Option<Box<FnParamList>>) -> i64 with Mut, Panic, Div, Alloc {
+    match opt {
+        None => 0
+        Some(list) => 1 + fn_param_list_count((*list).tail)
+    }
+}
+
+fn fn_param_list_get(opt: Option<Box<FnParamList>>, idx: i64) -> FnParamInfo with Mut, Panic, Div, Alloc {
+    match opt {
+        None => empty_fn_param_info()
+        Some(list) => {
+            if idx == 0 {
+                (*list).head
+            } else {
+                fn_param_list_get((*list).tail, idx - 1)
+            }
+        }
+    }
+}
+
+// ============================================================
+// Function signature
+// ============================================================
+
+struct FnSig {
+    name: Name,
+    params: Option<Box<FnParamList>>,
+    param_count: i64,
+    return_type: TypeEntry,
+    is_method: bool,
+    self_type_name: Name,
+}
+
+fn empty_fn_sig() -> FnSig {
+    FnSig {
+        name: Name { buf: [0; 128], len: 0 },
+        params: None,
+        param_count: 0,
+        return_type: ty_unit(),
+        is_method: false,
+        self_type_name: Name { buf: [0; 128], len: 0 },
+    }
+}
+
+// ============================================================
+// FnSig table
+// ============================================================
+
+struct FnSigTable {
+    entries: [FnSig; 1024],
+    count: i64,
+}
+
+fn fn_sig_table_new() -> FnSigTable {
+    FnSigTable {
+        entries: [empty_fn_sig(); 1024],
+        count: 0,
+    }
+}
+
+impl FnSigTable {
+    fn add(self, sig: FnSig) -> (FnSigTable, i64) with Mut, Panic, Div {
+        var tbl = self
+        let idx = tbl.count
+        if tbl.count < 1024 {
+            tbl.entries[tbl.count] = sig
+            tbl.count = tbl.count + 1
+        }
+        (tbl, idx)
+    }
+
+    fn find(self, name: Name) -> i64 with Mut, Panic, Div {
+        var i: i64 = 0
+        while i < self.count {
+            if name_eq(self.entries[i].name, name) && !self.entries[i].is_method {
+                return i
+            }
+            i = i + 1
+        }
+        -1
+    }
+
+    fn find_method(self, type_name: Name, method_name: Name) -> i64 with Mut, Panic, Div {
+        var i: i64 = 0
+        while i < self.count {
+            if self.entries[i].is_method && name_eq(self.entries[i].self_type_name, type_name) && name_eq(self.entries[i].name, method_name) {
+                return i
+            }
+            i = i + 1
+        }
+        -1
+    }
+
+    fn get(self, idx: i64) -> FnSig with Panic, Div {
+        self.entries[idx]
+    }
+}

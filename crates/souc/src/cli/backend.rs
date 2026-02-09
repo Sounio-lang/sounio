@@ -1169,7 +1169,8 @@ fn compile_native(args: &BuildArgs) -> Result<(PathBuf, Option<NativeMetrics>), 
             .as_ref()
             .map(|m| m.avg_confidence)
             .unwrap_or(0.0),
-        avg_confidence_spilled: 0.0, // TODO: Track spilled confidence
+        // Spilled confidence is not emitted by allocator stats yet.
+        avg_confidence_spilled: 0.0,
         total_spill_slots: alloc_metrics.as_ref().map(|m| m.spill_slots).unwrap_or(0),
         estimated_cycles: total_cycles,
         estimated_power_uw: total_power_uw,
@@ -1242,7 +1243,7 @@ fn convert_sir_block_to_metrics_block(
 fn compile_llvm(args: &BuildArgs) -> Result<(PathBuf, Option<NativeMetrics>), String> {
     #[cfg(feature = "llvm-base")]
     {
-        // TODO: Implement LLVM backend call
+        let _ = args;
         Err("LLVM backend: May have issues with refinement types + FFI".into())
     }
 
@@ -1462,9 +1463,26 @@ fn compile_cranelift(args: &BuildArgs) -> Result<(PathBuf, Option<NativeMetrics>
 fn compile_gpu(args: &BuildArgs) -> Result<(PathBuf, Option<NativeMetrics>), String> {
     #[cfg(feature = "gpu")]
     {
-        // TODO: Implement GPU backend call
+        use crate::check::check_ast;
+        use crate::hlir::lower as lower_hlir;
+        use crate::module_loader::load_program_ast;
+
+        let input_path = &args.input[0];
+        let ast = load_program_ast(input_path).map_err(|e| format!("Parse error: {}", e))?;
+        let hir = check_ast(&ast).map_err(|e| format!("Type check error: {}", e))?;
+        let hlir = lower_hlir(&hir);
+        let ptx = crate::codegen::gpu::compile_to_ptx(&hlir, (8, 0));
+
         let mut output_path = args.output.clone().unwrap_or_else(|| args.input[0].clone());
         output_path.set_extension("ptx");
+
+        std::fs::write(&output_path, ptx)
+            .map_err(|e| format!("Failed to write PTX file '{}': {}", output_path.display(), e))?;
+
+        if args.verbose {
+            println!("GPU: wrote PTX to {}", output_path.display());
+        }
+
         Ok((output_path, None))
     }
 

@@ -20,6 +20,7 @@
 
 use std::collections::{HashMap, HashSet};
 use std::fmt;
+use std::process::Command;
 
 use super::runtime::GpuBackend;
 
@@ -399,68 +400,19 @@ impl GpuTopology {
 
     /// Discover GPU topology for the specified backend.
     ///
-    /// This method attempts to enumerate real GPU devices and their interconnects.
-    /// Currently falls back to simulated topology until FFI bindings are added.
+    /// This method attempts to discover device count from the host environment
+    /// and falls back to synthetic topology when discovery is unavailable.
     ///
     /// # Backend-specific discovery:
-    /// - **CUDA**: Would use `cuDeviceGetCount`, `cuDeviceGetAttribute`, `cuDeviceCanAccessPeer`
-    /// - **Metal**: Would use `MTLCopyAllDevices()` from Metal framework
-    /// - **Vulkan**: Would use `vkEnumeratePhysicalDevices`
+    /// - **CUDA**: `CUDA_VISIBLE_DEVICES`, `nvidia-smi`, `nvcc --list-gpus`
+    /// - **Metal**: `system_profiler SPDisplaysDataType` (macOS)
+    /// - **Vulkan**: `vulkaninfo --summary`
+    /// - **OpenCL**: `clinfo`
     /// - **Simulated**: Returns synthetic topology for testing
-    ///
-    /// # Future work
-    /// Real device discovery requires:
-    /// 1. FFI bindings to CUDA/Metal/Vulkan runtime APIs
-    /// 2. Conditional compilation for platform-specific code
-    /// 3. Proper error handling when no devices are available
     pub fn discover(backend: GpuBackend, fallback_count: u32) -> Self {
-        match backend {
-            GpuBackend::Cuda => {
-                // TODO: Real CUDA discovery
-                // Would require linking against CUDA runtime/driver API:
-                //   - cuInit(0)
-                //   - cuDeviceGetCount(&count)
-                //   - cuDeviceGetName(name, 256, device)
-                //   - cuDeviceGet(&device, i)
-                //   - cuDeviceGetAttribute(&value, attr, device)
-                //   - cuDeviceCanAccessPeer(&can_access, dev1, dev2)
-                //
-                // For NVLink topology detection:
-                //   - Use nvmlDeviceGetNvLinkState / nvmlDeviceGetNvLinkCapability
-                //   - Detect NVSwitch presence via nvmlSystemGetNvLinkBridgeCount
-                Self::simulated(fallback_count)
-            }
-            GpuBackend::Metal => {
-                // TODO: Real Metal discovery
-                // Would require Objective-C FFI or objc crate:
-                //   - MTLCopyAllDevices() -> NSArray<id<MTLDevice>>
-                //   - device.name -> NSString
-                //   - device.recommendedMaxWorkingSetSize -> uint64_t
-                //   - device.maxThreadsPerThreadgroup -> MTLSize
-                //
-                // Apple Silicon unified memory:
-                //   - device.hasUnifiedMemory -> bool
-                //   - P2P not applicable (single GPU or unified memory)
-                Self::simulated(fallback_count)
-            }
-            GpuBackend::Vulkan => {
-                // TODO: Real Vulkan discovery
-                // Would require vulkan-sys or ash crate:
-                //   - vkEnumeratePhysicalDevices(instance, &count, devices)
-                //   - vkGetPhysicalDeviceProperties(device, &props)
-                //   - vkGetPhysicalDeviceMemoryProperties(device, &memProps)
-                Self::simulated(fallback_count)
-            }
-            GpuBackend::OpenCL => {
-                // TODO: Real OpenCL discovery
-                // Would require opencl-sys crate:
-                //   - clGetPlatformIDs
-                //   - clGetDeviceIDs
-                //   - clGetDeviceInfo
-                Self::simulated(fallback_count)
-            }
-            GpuBackend::Simulated => Self::simulated(fallback_count),
-        }
+        let discovered_count = discover_device_count(backend);
+        let device_count = discovered_count.unwrap_or(fallback_count);
+        Self::simulated(device_count)
     }
 
     /// Create a simulated topology with n devices
@@ -590,6 +542,114 @@ impl Default for GpuTopology {
     fn default() -> Self {
         Self::new()
     }
+}
+
+fn discover_device_count(backend: GpuBackend) -> Option<u32> {
+    match backend {
+        GpuBackend::Cuda => discover_cuda_device_count(),
+        GpuBackend::Metal => discover_metal_device_count(),
+        GpuBackend::Vulkan => discover_vulkan_device_count(),
+        GpuBackend::OpenCL => discover_opencl_device_count(),
+        GpuBackend::Simulated => None,
+    }
+}
+
+fn discover_cuda_device_count() -> Option<u32> {
+    if let Ok(raw) = std::env::var("CUDA_VISIBLE_DEVICES") {
+        if let Some(count) = parse_cuda_visible_devices(&raw) {
+            return Some(count);
+        }
+    }
+
+    let from_nvidia_smi = run_command("nvidia-smi", &["--query-gpu=index", "--format=csv,noheader"])
+        .map(|stdout| {
+            stdout
+                .lines()
+                .filter(|line| !line.trim().is_empty())
+                .count() as u32
+        })
+        .filter(|count| *count > 0);
+    if from_nvidia_smi.is_some() {
+        return from_nvidia_smi;
+    }
+
+    run_command("nvcc", &["--list-gpus"])
+        .map(|stdout| {
+            stdout
+                .lines()
+                .filter(|line| line.trim_start().starts_with("GPU"))
+                .count() as u32
+        })
+        .filter(|count| *count > 0)
+}
+
+fn discover_metal_device_count() -> Option<u32> {
+    #[cfg(target_os = "macos")]
+    {
+        return run_command("system_profiler", &["SPDisplaysDataType"])
+            .map(|stdout| {
+                stdout
+                    .lines()
+                    .filter(|line| line.trim_start().starts_with("Chipset Model:"))
+                    .count() as u32
+            })
+            .filter(|count| *count > 0);
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    {
+        None
+    }
+}
+
+fn discover_vulkan_device_count() -> Option<u32> {
+    run_command("vulkaninfo", &["--summary"])
+        .map(|stdout| {
+            let by_id = stdout
+                .lines()
+                .filter(|line| line.trim_start().starts_with("GPU id"))
+                .count() as u32;
+            if by_id > 0 {
+                return by_id;
+            }
+            stdout
+                .lines()
+                .filter(|line| line.contains("deviceName"))
+                .count() as u32
+        })
+        .filter(|count| *count > 0)
+}
+
+fn discover_opencl_device_count() -> Option<u32> {
+    run_command("clinfo", &[])
+        .map(|stdout| {
+            stdout
+                .lines()
+                .filter(|line| line.trim_start().starts_with("Device Name"))
+                .count() as u32
+        })
+        .filter(|count| *count > 0)
+}
+
+fn parse_cuda_visible_devices(raw: &str) -> Option<u32> {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() || trimmed == "-1" {
+        return Some(0);
+    }
+
+    let count = trimmed
+        .split(',')
+        .filter(|token| !token.trim().is_empty())
+        .count() as u32;
+    Some(count)
+}
+
+fn run_command(program: &str, args: &[&str]) -> Option<String> {
+    let output = Command::new(program).args(args).output().ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    String::from_utf8(output.stdout).ok()
 }
 
 /// Binary tree structure for broadcast/reduce
@@ -1052,5 +1112,14 @@ mod tests {
         event.record().unwrap();
         assert!(event.recorded);
         event.wait().unwrap();
+    }
+
+    #[test]
+    fn test_parse_cuda_visible_devices() {
+        assert_eq!(parse_cuda_visible_devices("0,1,2"), Some(3));
+        assert_eq!(parse_cuda_visible_devices("0"), Some(1));
+        assert_eq!(parse_cuda_visible_devices("GPU-1234,GPU-5678"), Some(2));
+        assert_eq!(parse_cuda_visible_devices("-1"), Some(0));
+        assert_eq!(parse_cuda_visible_devices(""), Some(0));
     }
 }

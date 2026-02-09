@@ -252,6 +252,10 @@ pub struct GpuExecutor {
     #[cfg(feature = "cuda")]
     kernel_cache: HashMap<String, CachedKernel>,
 
+    /// Interned kernel/module names used by cudarc's `'static` API.
+    #[cfg(feature = "cuda")]
+    string_cache: HashMap<String, Box<str>>,
+
     /// Buffer ID counter
     next_buffer_id: u64,
 
@@ -298,7 +302,7 @@ impl GpuExecutor {
     pub fn new(device_id: u32) -> Result<Self, GpuExecutorError> {
         let device = CudaDevice::new(device_id as usize).map_err(|e| {
             GpuExecutorError::DeviceInit(format!(
-                "Failed to initialize CUDA device {}: {}",
+                "Failed to initialize CUDA device {}: {:?}",
                 device_id, e
             ))
         })?;
@@ -318,6 +322,7 @@ impl GpuExecutor {
             device_id,
             device,
             kernel_cache: HashMap::new(),
+            string_cache: HashMap::new(),
             next_buffer_id: 1,
             device_info,
         })
@@ -360,7 +365,7 @@ impl GpuExecutor {
         // Load PTX module
         self.device
             .load_ptx(Ptx::from_src(ptx), module_name, &[func_name])
-            .map_err(|e| GpuExecutorError::PtxCompilation(format!("{}", e)))?;
+            .map_err(|e| GpuExecutorError::PtxCompilation(format!("{:?}", e)))?;
 
         // Get the function handle
         let function = self
@@ -449,7 +454,7 @@ impl GpuExecutor {
         let slice: CudaSlice<u8> = self
             .device
             .alloc_zeros(size)
-            .map_err(|e| GpuExecutorError::AllocationFailed(format!("{}", e)))?;
+            .map_err(|e| GpuExecutorError::AllocationFailed(format!("{:?}", e)))?;
 
         let raw_ptr = *slice.device_ptr() as *mut c_void;
         let id = self.next_buffer_id;
@@ -537,11 +542,11 @@ impl GpuExecutor {
             let mut target_slice: CudaSlice<u8> = self
                 .device
                 .alloc_zeros(data_size)
-                .map_err(|e| GpuExecutorError::AllocationFailed(format!("{}", e)))?;
+                .map_err(|e| GpuExecutorError::AllocationFailed(format!("{:?}", e)))?;
 
             self.device
                 .htod_sync_copy_into(data_bytes, &mut target_slice)
-                .map_err(|e| GpuExecutorError::CopyFailed(format!("{}", e)))?;
+                .map_err(|e| GpuExecutorError::CopyFailed(format!("{:?}", e)))?;
 
             // Copy from temp buffer to destination using device-to-device copy
             // Note: cudarc 0.12 requires us to use dtod_copy
@@ -583,7 +588,7 @@ impl GpuExecutor {
 
             self.device
                 .dtoh_sync_copy_into(slice, data_bytes)
-                .map_err(|e| GpuExecutorError::CopyFailed(format!("{}", e)))?;
+                .map_err(|e| GpuExecutorError::CopyFailed(format!("{:?}", e)))?;
         }
 
         Ok(())
@@ -618,11 +623,11 @@ impl GpuExecutor {
             let mut target: CudaSlice<u8> = self
                 .device
                 .alloc_zeros(values_bytes.len())
-                .map_err(|e| GpuExecutorError::AllocationFailed(format!("{}", e)))?;
+                .map_err(|e| GpuExecutorError::AllocationFailed(format!("{:?}", e)))?;
 
             self.device
                 .htod_sync_copy_into(values_bytes, &mut target)
-                .map_err(|e| GpuExecutorError::CopyFailed(format!("{}", e)))?;
+                .map_err(|e| GpuExecutorError::CopyFailed(format!("{:?}", e)))?;
         }
 
         // Copy confidences (converted to f32 epsilon)
@@ -643,11 +648,11 @@ impl GpuExecutor {
             let mut target: CudaSlice<u8> = self
                 .device
                 .alloc_zeros(eps_bytes.len())
-                .map_err(|e| GpuExecutorError::AllocationFailed(format!("{}", e)))?;
+                .map_err(|e| GpuExecutorError::AllocationFailed(format!("{:?}", e)))?;
 
             self.device
                 .htod_sync_copy_into(eps_bytes, &mut target)
-                .map_err(|e| GpuExecutorError::CopyFailed(format!("{}", e)))?;
+                .map_err(|e| GpuExecutorError::CopyFailed(format!("{:?}", e)))?;
         }
 
         Ok(())
@@ -733,7 +738,7 @@ impl GpuExecutor {
                 .function
                 .clone()
                 .launch(config, &mut args)
-                .map_err(|e| GpuExecutorError::LaunchFailed(format!("{}", e)))?;
+                .map_err(|e| GpuExecutorError::LaunchFailed(format!("{:?}", e)))?;
         }
 
         Ok(())
@@ -790,7 +795,7 @@ impl GpuExecutor {
     pub fn synchronize(&self) -> Result<(), GpuExecutorError> {
         self.device
             .synchronize()
-            .map_err(|e| GpuExecutorError::SyncFailed(format!("{}", e)))?;
+            .map_err(|e| GpuExecutorError::SyncFailed(format!("{:?}", e)))?;
         Ok(())
     }
 

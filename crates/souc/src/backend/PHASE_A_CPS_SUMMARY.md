@@ -112,7 +112,7 @@ Generated code calls these runtime functions (from Phase B.1):
 2. **`__sounio_store_continuation(ptr)`**
    - Stores continuation in thread-local storage
    - Allows effect handler to access it
-   - Implemented in `src/runtime/handler_stack.rs` (TODO)
+   - Planned runtime integration point: `src/runtime/handler_stack.rs`
 
 3. **`__sounio_resume_continuation(ptr, value)`**
    - Restores saved machine state
@@ -126,7 +126,7 @@ Generated code calls these runtime functions (from Phase B.1):
 - ⚠️ Unit tests need updating to use current FunctionBuilder API
 - ⚠️ Integration tests pending
 
-Tests have been commented out with `// TODO` markers because the FunctionBuilder API changed:
+Tests have been commented out with tracked follow-up markers because the FunctionBuilder API changed:
 - Old: `builder.int_const()`, `builder.ret()`, `builder.finish()`
 - New: `builder.build_const()`, `builder.build_return()`, `builder.build()`
 

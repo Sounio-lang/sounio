@@ -1,0 +1,384 @@
+// Compatibility and operator typing for the type checker
+//
+// Standalone functions that don't need Checker state.
+// lower_type_expr is a Checker method and lives in check.sio.
+
+// ============================================================
+// Type compatibility — must be symmetric
+// ============================================================
+
+fn types_compatible(a: TypeEntry, b: TypeEntry) -> bool with Mut, Panic, Div, Alloc {
+    // Wildcard types: compatible with anything (check BOTH sides)
+    if a.kind == TypeKind::TyError || b.kind == TypeKind::TyError {
+        return true
+    }
+    if a.kind == TypeKind::TyNever || b.kind == TypeKind::TyNever {
+        return true
+    }
+    if a.kind == TypeKind::TyUnknown || b.kind == TypeKind::TyUnknown {
+        return true
+    }
+
+    // Primitives: kind must match
+    if a.kind == TypeKind::TyI64 && b.kind == TypeKind::TyI64 {
+        return true
+    }
+    if a.kind == TypeKind::TyF64 && b.kind == TypeKind::TyF64 {
+        return true
+    }
+    if a.kind == TypeKind::TyBool && b.kind == TypeKind::TyBool {
+        return true
+    }
+    if a.kind == TypeKind::TyUnit && b.kind == TypeKind::TyUnit {
+        return true
+    }
+    if a.kind == TypeKind::TyString && b.kind == TypeKind::TyString {
+        return true
+    }
+    if a.kind == TypeKind::TyChar && b.kind == TypeKind::TyChar {
+        return true
+    }
+
+    // Named types: names must match
+    if a.kind == TypeKind::TyNamed && b.kind == TypeKind::TyNamed {
+        return name_eq(a.name, b.name)
+    }
+
+    // Array: elements compatible, sizes match (or -1 = unknown)
+    if a.kind == TypeKind::TyArray && b.kind == TypeKind::TyArray {
+        let elems_ok = types_compatible_inner(a.inner, b.inner)
+        if !elems_ok {
+            return false
+        }
+        if a.array_size == -1 || b.array_size == -1 {
+            return true
+        }
+        return a.array_size == b.array_size
+    }
+
+    // References: inner compatible, mutability must match
+    if a.kind == TypeKind::TyRef && b.kind == TypeKind::TyRef {
+        return types_compatible_inner(a.inner, b.inner)
+    }
+    if a.kind == TypeKind::TyRefMut && b.kind == TypeKind::TyRefMut {
+        return types_compatible_inner(a.inner, b.inner)
+    }
+
+    // Tuples: count + pairwise compatible
+    if a.kind == TypeKind::TyTuple && b.kind == TypeKind::TyTuple {
+        return tuple_types_compatible(a.tuple_elems, b.tuple_elems)
+    }
+
+    // Function types: same sig_id
+    if a.kind == TypeKind::TyFn && b.kind == TypeKind::TyFn {
+        return a.fn_sig_id == b.fn_sig_id
+    }
+
+    false
+}
+
+fn types_compatible_inner(a: Option<Box<TypeEntry>>, b: Option<Box<TypeEntry>>) -> bool with Mut, Panic, Div, Alloc {
+    match a {
+        None => {
+            match b {
+                None => true
+                Some(_) => false
+            }
+        }
+        Some(a_inner) => {
+            match b {
+                None => false
+                Some(b_inner) => types_compatible(*a_inner, *b_inner)
+            }
+        }
+    }
+}
+
+fn tuple_types_compatible(a: Option<Box<TypeEntryList>>, b: Option<Box<TypeEntryList>>) -> bool with Mut, Panic, Div, Alloc {
+    match a {
+        None => {
+            match b {
+                None => true
+                Some(_) => false
+            }
+        }
+        Some(a_list) => {
+            match b {
+                None => false
+                Some(b_list) => {
+                    if !types_compatible((*a_list).head, (*b_list).head) {
+                        false
+                    } else {
+                        tuple_types_compatible((*a_list).tail, (*b_list).tail)
+                    }
+                }
+            }
+        }
+    }
+}
+
+// ============================================================
+// Type kind queries
+// ============================================================
+
+fn is_numeric_type(ty: TypeEntry) -> bool {
+    ty.kind == TypeKind::TyI64 || ty.kind == TypeKind::TyF64
+}
+
+fn is_integer_type(ty: TypeEntry) -> bool {
+    ty.kind == TypeKind::TyI64
+}
+
+fn is_bool_type(ty: TypeEntry) -> bool {
+    ty.kind == TypeKind::TyBool
+}
+
+fn is_error_or_unknown(ty: TypeEntry) -> bool {
+    ty.kind == TypeKind::TyError || ty.kind == TypeKind::TyUnknown || ty.kind == TypeKind::TyNever
+}
+
+// ============================================================
+// Binary operator result types
+// ============================================================
+
+fn binary_result_type(op: BinaryOp, left: TypeEntry, right: TypeEntry) -> TypeEntry with Mut, Panic, Div, Alloc {
+    // If either side is error/unknown/never, propagate
+    if is_error_or_unknown(left) {
+        return left
+    }
+    if is_error_or_unknown(right) {
+        return right
+    }
+
+    match op {
+        // Arithmetic: both numeric, result = left type
+        OpAdd => {
+            if is_numeric_type(left) && types_compatible(left, right) {
+                left
+            } else if left.kind == TypeKind::TyString && right.kind == TypeKind::TyString {
+                ty_string()
+            } else {
+                ty_error()
+            }
+        }
+        OpSub => {
+            if is_numeric_type(left) && types_compatible(left, right) {
+                left
+            } else {
+                ty_error()
+            }
+        }
+        OpMul => {
+            if is_numeric_type(left) && types_compatible(left, right) {
+                left
+            } else {
+                ty_error()
+            }
+        }
+        OpDiv => {
+            if is_numeric_type(left) && types_compatible(left, right) {
+                left
+            } else {
+                ty_error()
+            }
+        }
+        OpRem => {
+            if is_numeric_type(left) && types_compatible(left, right) {
+                left
+            } else {
+                ty_error()
+            }
+        }
+
+        // Comparison: both same type, result = bool
+        OpEq => {
+            if types_compatible(left, right) {
+                ty_bool()
+            } else {
+                ty_error()
+            }
+        }
+        OpNe => {
+            if types_compatible(left, right) {
+                ty_bool()
+            } else {
+                ty_error()
+            }
+        }
+        OpLt => {
+            if is_numeric_type(left) && types_compatible(left, right) {
+                ty_bool()
+            } else {
+                ty_error()
+            }
+        }
+        OpLe => {
+            if is_numeric_type(left) && types_compatible(left, right) {
+                ty_bool()
+            } else {
+                ty_error()
+            }
+        }
+        OpGt => {
+            if is_numeric_type(left) && types_compatible(left, right) {
+                ty_bool()
+            } else {
+                ty_error()
+            }
+        }
+        OpGe => {
+            if is_numeric_type(left) && types_compatible(left, right) {
+                ty_bool()
+            } else {
+                ty_error()
+            }
+        }
+
+        // Logical: both bool, result = bool
+        OpAnd => {
+            if is_bool_type(left) && is_bool_type(right) {
+                ty_bool()
+            } else {
+                ty_error()
+            }
+        }
+        OpOr => {
+            if is_bool_type(left) && is_bool_type(right) {
+                ty_bool()
+            } else {
+                ty_error()
+            }
+        }
+
+        // Bitwise: both i64, result = i64
+        OpBitAnd => {
+            if is_integer_type(left) && is_integer_type(right) {
+                ty_i64()
+            } else {
+                ty_error()
+            }
+        }
+        OpBitOr => {
+            if is_integer_type(left) && is_integer_type(right) {
+                ty_i64()
+            } else {
+                ty_error()
+            }
+        }
+        OpBitXor => {
+            if is_integer_type(left) && is_integer_type(right) {
+                ty_i64()
+            } else {
+                ty_error()
+            }
+        }
+        OpShl => {
+            if is_integer_type(left) && is_integer_type(right) {
+                ty_i64()
+            } else {
+                ty_error()
+            }
+        }
+        OpShr => {
+            if is_integer_type(left) && is_integer_type(right) {
+                ty_i64()
+            } else {
+                ty_error()
+            }
+        }
+
+        // Concat: arrays or strings
+        OpConcat => {
+            if left.kind == TypeKind::TyString && right.kind == TypeKind::TyString {
+                ty_string()
+            } else if left.kind == TypeKind::TyArray && right.kind == TypeKind::TyArray {
+                left
+            } else {
+                ty_error()
+            }
+        }
+
+        // Range
+        OpRange => ty_unit()
+        OpRangeInclusive => ty_unit()
+    }
+}
+
+// ============================================================
+// Unary operator result types
+// ============================================================
+
+fn unary_result_type(op: UnaryOp, operand: TypeEntry) -> TypeEntry with Alloc {
+    if is_error_or_unknown(operand) {
+        return operand
+    }
+
+    match op {
+        OpNeg => {
+            if is_numeric_type(operand) {
+                operand
+            } else {
+                ty_error()
+            }
+        }
+        OpNot => {
+            if is_bool_type(operand) {
+                ty_bool()
+            } else {
+                ty_error()
+            }
+        }
+        OpRef => ty_ref(operand)
+        OpRefMut => ty_ref_mut(operand)
+        OpDeref => {
+            match operand.inner {
+                Some(inner_ty) => *inner_ty
+                None => ty_error()
+            }
+        }
+    }
+}
+
+// ============================================================
+// Name helpers for builtin type checking
+// ============================================================
+
+fn name_matches_str3(n: Name, a: i8, b: i8, c: i8) -> bool with Panic, Div {
+    if n.len != 3 { return false }
+    n.buf[0] == a && n.buf[1] == b && n.buf[2] == c
+}
+
+fn name_matches_str4(n: Name, a: i8, b: i8, c: i8, d: i8) -> bool with Panic, Div {
+    if n.len != 4 { return false }
+    n.buf[0] == a && n.buf[1] == b && n.buf[2] == c && n.buf[3] == d
+}
+
+fn name_matches_str6(n: Name, a: i8, b: i8, c: i8, d: i8, e: i8, f: i8) -> bool with Panic, Div {
+    if n.len != 6 { return false }
+    n.buf[0] == a && n.buf[1] == b && n.buf[2] == c && n.buf[3] == d && n.buf[4] == e && n.buf[5] == f
+}
+
+// "i64" = [105, 54, 52]
+fn name_is_i64(n: Name) -> bool with Panic, Div {
+    name_matches_str3(n, 105, 54, 52)
+}
+
+// "f64" = [102, 54, 52]
+fn name_is_f64(n: Name) -> bool with Panic, Div {
+    name_matches_str3(n, 102, 54, 52)
+}
+
+// "bool" = [98, 111, 111, 108]
+fn name_is_bool(n: Name) -> bool with Panic, Div {
+    name_matches_str4(n, 98, 111, 111, 108)
+}
+
+// "char" = [99, 104, 97, 114]
+fn name_is_char(n: Name) -> bool with Panic, Div {
+    name_matches_str4(n, 99, 104, 97, 114)
+}
+
+// "string" = [115, 116, 114, 105, 110, 103]
+fn name_is_string(n: Name) -> bool with Panic, Div {
+    name_matches_str6(n, 115, 116, 114, 105, 110, 103)
+}

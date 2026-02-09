@@ -910,9 +910,17 @@ extern "C" fn runtime_prob_sample_uniform(low: f64, high: f64) -> f64 {
 #[cfg(feature = "jit")]
 extern "C" fn runtime_prob_sample_bernoulli(p: f64) -> i64 {
     if let Ok(mut state) = get_jit_effect_state().lock() {
-        if state.rng.next_f64() < p { 1 } else { 0 }
+        if state.rng.next_f64() < p {
+            1
+        } else {
+            0
+        }
     } else {
-        if p >= 0.5 { 1 } else { 0 }
+        if p >= 0.5 {
+            1
+        } else {
+            0
+        }
     }
 }
 
@@ -1997,11 +2005,11 @@ use crate::hlir::{
 use std::collections::HashMap;
 
 #[cfg(feature = "jit")]
-use cranelift_codegen::Context;
-#[cfg(feature = "jit")]
-use cranelift_codegen::ir::{AbiParam, InstBuilder, MemFlags, Signature, UserFuncName, types};
+use cranelift_codegen::ir::{types, AbiParam, InstBuilder, MemFlags, Signature, UserFuncName};
 #[cfg(feature = "jit")]
 use cranelift_codegen::settings::{self, Configurable};
+#[cfg(feature = "jit")]
+use cranelift_codegen::Context;
 #[cfg(feature = "jit")]
 use cranelift_frontend::{FunctionBuilder, FunctionBuilderContext};
 #[cfg(feature = "jit")]
@@ -2027,15 +2035,25 @@ pub fn compile(_module: &HlirModule) -> Result<Vec<u8>, String> {
 pub struct CraneliftJit {
     /// Whether to enable optimization
     optimize: bool,
+    /// Stack size for the JIT execution thread (bytes)
+    stack_size: usize,
 }
 
 impl CraneliftJit {
     pub fn new() -> Self {
-        Self { optimize: false }
+        Self {
+            optimize: false,
+            stack_size: 64 * 1024 * 1024, // 64 MB
+        }
     }
 
     pub fn with_optimization(mut self) -> Self {
         self.optimize = true;
+        self
+    }
+
+    pub fn with_stack_size(mut self, bytes: usize) -> Self {
+        self.stack_size = bytes;
         self
     }
 
@@ -2056,7 +2074,7 @@ impl CraneliftJit {
     pub fn compile(&self, module: &HlirModule) -> Result<CompiledModule, String> {
         let mut compiler = JitCompiler::new(self.optimize)?;
         compiler.compile_module(module)?;
-        compiler.finalize()
+        compiler.finalize(self.stack_size)
     }
 
     #[cfg(not(feature = "jit"))]
@@ -2078,6 +2096,8 @@ pub struct CompiledModule {
     jit_module: JITModule,
     /// Function entry points
     functions: HashMap<String, *const u8>,
+    /// Stack size for the execution thread (bytes)
+    stack_size: usize,
 }
 
 // SAFETY: The JIT module owns the compiled code and manages its lifetime
@@ -2087,16 +2107,37 @@ unsafe impl Sync for CompiledModule {}
 impl CompiledModule {
     /// Create a new compiled module from a JIT module and function pointers
     #[cfg(feature = "jit")]
-    pub fn new(jit_module: JITModule, functions: HashMap<String, *const u8>) -> Self {
+    pub fn new(
+        jit_module: JITModule,
+        functions: HashMap<String, *const u8>,
+        stack_size: usize,
+    ) -> Self {
         Self {
             jit_module,
             functions,
+            stack_size,
         }
     }
 
     /// Get a function pointer by name
     pub fn get_function(&self, name: &str) -> Option<*const u8> {
         self.functions.get(name).copied()
+    }
+
+    /// Run a closure on a dedicated thread with the configured stack size.
+    fn run_on_thread<F, R>(&self, f: F) -> Result<R, String>
+    where
+        F: FnOnce() -> R + Send + 'static,
+        R: Send + 'static,
+    {
+        let stack = self.stack_size;
+        std::thread::Builder::new()
+            .name("jit-exec".into())
+            .stack_size(stack)
+            .spawn(f)
+            .map_err(|e| format!("Failed to spawn JIT thread: {}", e))?
+            .join()
+            .map_err(|e| format!("JIT thread panicked: {:?}", e))
     }
 
     /// Call a function with no arguments returning i64
@@ -2109,7 +2150,7 @@ impl CompiledModule {
             .ok_or_else(|| format!("Function not found: {}", name))?;
 
         let func: extern "C" fn() -> i64 = unsafe { std::mem::transmute(ptr) };
-        Ok(func())
+        self.run_on_thread(move || func())
     }
 
     /// Call a function with no arguments returning void.
@@ -2122,8 +2163,7 @@ impl CompiledModule {
             .ok_or_else(|| format!("Function not found: {}", name))?;
 
         let func: extern "C" fn() = unsafe { std::mem::transmute(ptr) };
-        func();
-        Ok(())
+        self.run_on_thread(move || func())
     }
 
     /// Call a function with one i64 argument returning i64
@@ -2137,7 +2177,7 @@ impl CompiledModule {
             .ok_or_else(|| format!("Function not found: {}", name))?;
 
         let func: extern "C" fn(i64) -> i64 = unsafe { std::mem::transmute(ptr) };
-        Ok(func(arg))
+        self.run_on_thread(move || func(arg))
     }
 
     /// Call a function with two i64 arguments returning i64
@@ -2151,43 +2191,7 @@ impl CompiledModule {
             .ok_or_else(|| format!("Function not found: {}", name))?;
 
         let func: extern "C" fn(i64, i64) -> i64 = unsafe { std::mem::transmute(ptr) };
-        Ok(func(a, b))
-    }
-}
-
-/// JIT compilation settings
-#[allow(dead_code)]
-pub struct JitSettings {
-    /// Enable basic optimizations
-    pub optimize: bool,
-    /// Enable bounds checking
-    pub bounds_check: bool,
-    /// Enable overflow checking
-    pub overflow_check: bool,
-    /// Stack size in bytes
-    pub stack_size: usize,
-}
-
-impl Default for JitSettings {
-    fn default() -> Self {
-        Self {
-            optimize: false,
-            bounds_check: true,
-            overflow_check: true,
-            stack_size: 1024 * 1024, // 1 MB
-        }
-    }
-}
-
-impl JitSettings {
-    #[allow(dead_code)]
-    pub fn release() -> Self {
-        Self {
-            optimize: true,
-            bounds_check: false,
-            overflow_check: false,
-            stack_size: 8 * 1024 * 1024, // 8 MB
-        }
+        self.run_on_thread(move || func(a, b))
     }
 }
 
@@ -3789,7 +3793,7 @@ impl JitCompiler {
         Ok(())
     }
 
-    fn finalize(mut self) -> Result<CompiledModule, String> {
+    fn finalize(mut self, stack_size: usize) -> Result<CompiledModule, String> {
         self.jit_module
             .finalize_definitions()
             .map_err(|e| format!("Failed to finalize: {}", e))?;
@@ -3803,10 +3807,7 @@ impl JitCompiler {
             }
         }
 
-        Ok(CompiledModule {
-            jit_module: self.jit_module,
-            functions,
-        })
+        Ok(CompiledModule::new(self.jit_module, functions, stack_size))
     }
 }
 
@@ -6795,6 +6796,7 @@ impl CompiledModule {
     fn new_stub() -> Self {
         Self {
             functions: HashMap::new(),
+            stack_size: 64 * 1024 * 1024,
         }
     }
 }

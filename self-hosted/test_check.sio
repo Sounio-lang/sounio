@@ -1,0 +1,1014 @@
+// Type checker integration tests
+//
+// Constructs AST programs and runs check_program() to verify
+// type consistency checking. Entry point: run_check_tests()
+
+// ============================================================================
+// AST CONSTRUCTION HELPERS (tc_ prefix)
+// ============================================================================
+
+fn tc_make_name(a: i8, b: i8, c: i8, count: i64) -> Name with Mut, Panic, Div {
+    var n = Name { buf: [0; 128], len: count }
+    n.buf[0] = a
+    if count > 1 { n.buf[1] = b }
+    if count > 2 { n.buf[2] = c }
+    n
+}
+
+fn tc_make_name4(a: i8, b: i8, c: i8, d: i8) -> Name with Mut, Panic, Div {
+    var n = Name { buf: [0; 128], len: 4 }
+    n.buf[0] = a
+    n.buf[1] = b
+    n.buf[2] = c
+    n.buf[3] = d
+    n
+}
+
+fn tc_make_name5(a: i8, b: i8, c: i8, d: i8, e: i8) -> Name with Mut, Panic, Div {
+    var n = Name { buf: [0; 128], len: 5 }
+    n.buf[0] = a
+    n.buf[1] = b
+    n.buf[2] = c
+    n.buf[3] = d
+    n.buf[4] = e
+    n
+}
+
+fn tc_empty_path() -> AstPath {
+    AstPath {
+        segments: StringList { head_buf: [0; 128], head_len: 0, tail: None },
+        seg_count: 0,
+    }
+}
+
+fn tc_single_path(a: i8, b: i8, c: i8, count: i64) -> AstPath with Mut, Panic, Div {
+    var buf: [i8; 128] = [0; 128]
+    buf[0] = a
+    if count > 1 { buf[1] = b }
+    if count > 2 { buf[2] = c }
+    AstPath {
+        segments: StringList { head_buf: buf, head_len: count, tail: None },
+        seg_count: 1,
+    }
+}
+
+fn tc_single_path4(a: i8, b: i8, c: i8, d: i8) -> AstPath with Mut, Panic, Div {
+    var buf: [i8; 128] = [0; 128]
+    buf[0] = a
+    buf[1] = b
+    buf[2] = c
+    buf[3] = d
+    AstPath {
+        segments: StringList { head_buf: buf, head_len: 4, tail: None },
+        seg_count: 1,
+    }
+}
+
+fn tc_named_type(a: i8, b: i8, c: i8, count: i64) -> TypeExpr with Mut, Panic, Div {
+    TypeExpr {
+        kind: TypeExprKind::TypeNamed,
+        span: Span::dummy(),
+        path: tc_single_path(a, b, c, count),
+        type_args: None,
+        inner: None,
+        array_size: None,
+        effects: None,
+    }
+}
+
+fn tc_named_type4(a: i8, b: i8, c: i8, d: i8) -> TypeExpr with Mut, Panic, Div {
+    TypeExpr {
+        kind: TypeExprKind::TypeNamed,
+        span: Span::dummy(),
+        path: tc_single_path4(a, b, c, d),
+        type_args: None,
+        inner: None,
+        array_size: None,
+        effects: None,
+    }
+}
+
+fn tc_array_type(elem_ty: TypeExpr, size: i64) -> TypeExpr with Mut, Panic, Div, Alloc {
+    TypeExpr {
+        kind: TypeExprKind::TypeArray,
+        span: Span::dummy(),
+        path: tc_empty_path(),
+        type_args: None,
+        inner: Some(Box::new(elem_ty)),
+        array_size: Some(Box::new(tc_int_expr(size))),
+        effects: None,
+    }
+}
+
+fn tc_empty_block() -> Block {
+    Block { stmts: None, span: Span::dummy() }
+}
+
+fn tc_int_expr(val: i64) -> Expr with Mut, Panic, Div {
+    Expr {
+        kind: ExprKind::ExprIntLit,
+        span: Span::dummy(),
+        int_val: val,
+        float_val: 0.0,
+        name: tc_make_name(0, 0, 0, 0),
+        path: tc_empty_path(),
+        bin_op: BinaryOp::OpAdd,
+        un_op: UnaryOp::OpNeg,
+        left: None,
+        right: None,
+        block: None,
+        else_expr: None,
+        args: None,
+        arms: None,
+        fields: None,
+    }
+}
+
+fn tc_float_expr(val: f64) -> Expr with Mut, Panic, Div {
+    Expr {
+        kind: ExprKind::ExprFloatLit,
+        span: Span::dummy(),
+        int_val: 0,
+        float_val: val,
+        name: tc_make_name(0, 0, 0, 0),
+        path: tc_empty_path(),
+        bin_op: BinaryOp::OpAdd,
+        un_op: UnaryOp::OpNeg,
+        left: None,
+        right: None,
+        block: None,
+        else_expr: None,
+        args: None,
+        arms: None,
+        fields: None,
+    }
+}
+
+fn tc_bool_expr(val: bool) -> Expr with Mut, Panic, Div {
+    Expr {
+        kind: if val { ExprKind::ExprBoolTrue } else { ExprKind::ExprBoolFalse },
+        span: Span::dummy(),
+        int_val: 0,
+        float_val: 0.0,
+        name: tc_make_name(0, 0, 0, 0),
+        path: tc_empty_path(),
+        bin_op: BinaryOp::OpAdd,
+        un_op: UnaryOp::OpNeg,
+        left: None,
+        right: None,
+        block: None,
+        else_expr: None,
+        args: None,
+        arms: None,
+        fields: None,
+    }
+}
+
+fn tc_string_expr() -> Expr with Mut, Panic, Div {
+    Expr {
+        kind: ExprKind::ExprStringLit,
+        span: Span::dummy(),
+        int_val: 0,
+        float_val: 0.0,
+        name: tc_make_name(0, 0, 0, 0),
+        path: tc_empty_path(),
+        bin_op: BinaryOp::OpAdd,
+        un_op: UnaryOp::OpNeg,
+        left: None,
+        right: None,
+        block: None,
+        else_expr: None,
+        args: None,
+        arms: None,
+        fields: None,
+    }
+}
+
+fn tc_ident_expr(a: i8, b: i8, c: i8, count: i64) -> Expr with Mut, Panic, Div {
+    Expr {
+        kind: ExprKind::ExprIdent,
+        span: Span::dummy(),
+        int_val: 0,
+        float_val: 0.0,
+        name: tc_make_name(a, b, c, count),
+        path: tc_empty_path(),
+        bin_op: BinaryOp::OpAdd,
+        un_op: UnaryOp::OpNeg,
+        left: None,
+        right: None,
+        block: None,
+        else_expr: None,
+        args: None,
+        arms: None,
+        fields: None,
+    }
+}
+
+fn tc_binop_expr(left: Expr, op: BinaryOp, right: Expr) -> Expr with Mut, Panic, Div, Alloc {
+    Expr {
+        kind: ExprKind::ExprBinary,
+        span: Span::dummy(),
+        int_val: 0,
+        float_val: 0.0,
+        name: tc_make_name(0, 0, 0, 0),
+        path: tc_empty_path(),
+        bin_op: op,
+        un_op: UnaryOp::OpNeg,
+        left: Some(Box::new(left)),
+        right: Some(Box::new(right)),
+        block: None,
+        else_expr: None,
+        args: None,
+        arms: None,
+        fields: None,
+    }
+}
+
+fn tc_call_expr(callee: Expr, args: Option<Box<ExprList>>) -> Expr with Mut, Panic, Div, Alloc {
+    Expr {
+        kind: ExprKind::ExprCall,
+        span: Span::dummy(),
+        int_val: 0,
+        float_val: 0.0,
+        name: tc_make_name(0, 0, 0, 0),
+        path: tc_empty_path(),
+        bin_op: BinaryOp::OpAdd,
+        un_op: UnaryOp::OpNeg,
+        left: Some(Box::new(callee)),
+        right: None,
+        block: None,
+        else_expr: None,
+        args: args,
+        arms: None,
+        fields: None,
+    }
+}
+
+fn tc_field_access_expr(base: Expr, field_name: Name) -> Expr with Mut, Panic, Div, Alloc {
+    Expr {
+        kind: ExprKind::ExprFieldAccess,
+        span: Span::dummy(),
+        int_val: 0,
+        float_val: 0.0,
+        name: field_name,
+        path: tc_empty_path(),
+        bin_op: BinaryOp::OpAdd,
+        un_op: UnaryOp::OpNeg,
+        left: Some(Box::new(base)),
+        right: None,
+        block: None,
+        else_expr: None,
+        args: None,
+        arms: None,
+        fields: None,
+    }
+}
+
+fn tc_index_expr(base: Expr, index: Expr) -> Expr with Mut, Panic, Div, Alloc {
+    Expr {
+        kind: ExprKind::ExprIndex,
+        span: Span::dummy(),
+        int_val: 0,
+        float_val: 0.0,
+        name: tc_make_name(0, 0, 0, 0),
+        path: tc_empty_path(),
+        bin_op: BinaryOp::OpAdd,
+        un_op: UnaryOp::OpNeg,
+        left: Some(Box::new(base)),
+        right: Some(Box::new(index)),
+        block: None,
+        else_expr: None,
+        args: None,
+        arms: None,
+        fields: None,
+    }
+}
+
+fn tc_if_else_expr(cond: Expr, then_block: Block, else_body: Expr) -> Expr with Mut, Panic, Div, Alloc {
+    Expr {
+        kind: ExprKind::ExprIf,
+        span: Span::dummy(),
+        int_val: 0,
+        float_val: 0.0,
+        name: tc_make_name(0, 0, 0, 0),
+        path: tc_empty_path(),
+        bin_op: BinaryOp::OpAdd,
+        un_op: UnaryOp::OpNeg,
+        left: Some(Box::new(cond)),
+        right: None,
+        block: Some(Box::new(then_block)),
+        else_expr: Some(Box::new(else_body)),
+        args: None,
+        arms: None,
+        fields: None,
+    }
+}
+
+fn tc_if_no_else_expr(cond: Expr, then_block: Block) -> Expr with Mut, Panic, Div, Alloc {
+    Expr {
+        kind: ExprKind::ExprIf,
+        span: Span::dummy(),
+        int_val: 0,
+        float_val: 0.0,
+        name: tc_make_name(0, 0, 0, 0),
+        path: tc_empty_path(),
+        bin_op: BinaryOp::OpAdd,
+        un_op: UnaryOp::OpNeg,
+        left: Some(Box::new(cond)),
+        right: None,
+        block: Some(Box::new(then_block)),
+        else_expr: None,
+        args: None,
+        arms: None,
+        fields: None,
+    }
+}
+
+fn tc_while_expr(cond: Expr, body: Block) -> Expr with Mut, Panic, Div, Alloc {
+    Expr {
+        kind: ExprKind::ExprWhile,
+        span: Span::dummy(),
+        int_val: 0,
+        float_val: 0.0,
+        name: tc_make_name(0, 0, 0, 0),
+        path: tc_empty_path(),
+        bin_op: BinaryOp::OpAdd,
+        un_op: UnaryOp::OpNeg,
+        left: Some(Box::new(cond)),
+        right: None,
+        block: Some(Box::new(body)),
+        else_expr: None,
+        args: None,
+        arms: None,
+        fields: None,
+    }
+}
+
+fn tc_return_expr(val: Expr) -> Expr with Mut, Panic, Div, Alloc {
+    Expr {
+        kind: ExprKind::ExprReturn,
+        span: Span::dummy(),
+        int_val: 0,
+        float_val: 0.0,
+        name: tc_make_name(0, 0, 0, 0),
+        path: tc_empty_path(),
+        bin_op: BinaryOp::OpAdd,
+        un_op: UnaryOp::OpNeg,
+        left: Some(Box::new(val)),
+        right: None,
+        block: None,
+        else_expr: None,
+        args: None,
+        arms: None,
+        fields: None,
+    }
+}
+
+fn tc_method_call_expr(base: Expr, method: Name, args: Option<Box<ExprList>>) -> Expr with Mut, Panic, Div, Alloc {
+    Expr {
+        kind: ExprKind::ExprMethodCall,
+        span: Span::dummy(),
+        int_val: 0,
+        float_val: 0.0,
+        name: method,
+        path: tc_empty_path(),
+        bin_op: BinaryOp::OpAdd,
+        un_op: UnaryOp::OpNeg,
+        left: Some(Box::new(base)),
+        right: None,
+        block: None,
+        else_expr: None,
+        args: args,
+        arms: None,
+        fields: None,
+    }
+}
+
+fn tc_struct_lit_expr(path: AstPath, fields: Option<Box<StructFieldList>>) -> Expr with Mut, Panic, Div {
+    Expr {
+        kind: ExprKind::ExprStructLit,
+        span: Span::dummy(),
+        int_val: 0,
+        float_val: 0.0,
+        name: tc_make_name(0, 0, 0, 0),
+        path: path,
+        bin_op: BinaryOp::OpAdd,
+        un_op: UnaryOp::OpNeg,
+        left: None,
+        right: None,
+        block: None,
+        else_expr: None,
+        args: None,
+        arms: None,
+        fields: fields,
+    }
+}
+
+fn tc_array_lit_expr(elems: Option<Box<ExprList>>) -> Expr with Mut, Panic, Div {
+    Expr {
+        kind: ExprKind::ExprArrayLit,
+        span: Span::dummy(),
+        int_val: 0,
+        float_val: 0.0,
+        name: tc_make_name(0, 0, 0, 0),
+        path: tc_empty_path(),
+        bin_op: BinaryOp::OpAdd,
+        un_op: UnaryOp::OpNeg,
+        left: None,
+        right: None,
+        block: None,
+        else_expr: None,
+        args: elems,
+        arms: None,
+        fields: None,
+    }
+}
+
+fn tc_block_expr(blk: Block) -> Expr with Mut, Panic, Div, Alloc {
+    Expr {
+        kind: ExprKind::ExprBlock,
+        span: Span::dummy(),
+        int_val: 0,
+        float_val: 0.0,
+        name: tc_make_name(0, 0, 0, 0),
+        path: tc_empty_path(),
+        bin_op: BinaryOp::OpAdd,
+        un_op: UnaryOp::OpNeg,
+        left: None,
+        right: None,
+        block: Some(Box::new(blk)),
+        else_expr: None,
+        args: None,
+        arms: None,
+        fields: None,
+    }
+}
+
+// Statement helpers
+
+fn tc_let_stmt(name: Name, init: Expr) -> Stmt with Alloc {
+    Stmt {
+        kind: StmtKind::StmtLet,
+        span: Span::dummy(),
+        name: name,
+        ty: None,
+        expr: Some(Box::new(init)),
+        target: None,
+        assign_op: AssignOp::AssignEq,
+    }
+}
+
+fn tc_let_typed_stmt(name: Name, ty: TypeExpr, init: Expr) -> Stmt with Alloc {
+    Stmt {
+        kind: StmtKind::StmtLet,
+        span: Span::dummy(),
+        name: name,
+        ty: Some(Box::new(ty)),
+        expr: Some(Box::new(init)),
+        target: None,
+        assign_op: AssignOp::AssignEq,
+    }
+}
+
+fn tc_var_stmt(name: Name, init: Expr) -> Stmt with Alloc {
+    Stmt {
+        kind: StmtKind::StmtVar,
+        span: Span::dummy(),
+        name: name,
+        ty: None,
+        expr: Some(Box::new(init)),
+        target: None,
+        assign_op: AssignOp::AssignEq,
+    }
+}
+
+fn tc_expr_stmt(e: Expr) -> Stmt with Mut, Panic, Div, Alloc {
+    Stmt {
+        kind: StmtKind::StmtExpr,
+        span: Span::dummy(),
+        name: tc_make_name(0, 0, 0, 0),
+        ty: None,
+        expr: Some(Box::new(e)),
+        target: None,
+        assign_op: AssignOp::AssignEq,
+    }
+}
+
+fn tc_assign_stmt(target: Expr, val: Expr) -> Stmt with Mut, Panic, Div, Alloc {
+    Stmt {
+        kind: StmtKind::StmtAssign,
+        span: Span::dummy(),
+        name: tc_make_name(0, 0, 0, 0),
+        ty: None,
+        expr: Some(Box::new(val)),
+        target: Some(Box::new(target)),
+        assign_op: AssignOp::AssignEq,
+    }
+}
+
+// Block helpers
+
+fn tc_block1(s1: Stmt) -> Block with Alloc {
+    Block {
+        stmts: Some(Box::new(StmtList { head: s1, tail: None })),
+        span: Span::dummy(),
+    }
+}
+
+fn tc_block2(s1: Stmt, s2: Stmt) -> Block with Alloc {
+    Block {
+        stmts: Some(Box::new(StmtList {
+            head: s1,
+            tail: Some(Box::new(StmtList { head: s2, tail: None })),
+        })),
+        span: Span::dummy(),
+    }
+}
+
+fn tc_block3(s1: Stmt, s2: Stmt, s3: Stmt) -> Block with Alloc {
+    Block {
+        stmts: Some(Box::new(StmtList {
+            head: s1,
+            tail: Some(Box::new(StmtList {
+                head: s2,
+                tail: Some(Box::new(StmtList { head: s3, tail: None })),
+            })),
+        })),
+        span: Span::dummy(),
+    }
+}
+
+// Item helpers
+// ASCII: 'i'=105, '6'=54, '4'=52, 'f'=102, 'b'=98, 'o'=111, 'l'=108
+
+fn tc_i64_type() -> TypeExpr with Mut, Panic, Div {
+    tc_named_type(105, 54, 52, 3)
+}
+
+fn tc_f64_type() -> TypeExpr with Mut, Panic, Div {
+    tc_named_type(102, 54, 52, 3)
+}
+
+fn tc_bool_type() -> TypeExpr with Mut, Panic, Div {
+    tc_named_type4(98, 111, 111, 108)
+}
+
+fn tc_fn_item(name: Name, params: Option<Box<ParamList>>, ret_ty: Option<Box<TypeExpr>>, body: Block) -> Item with Alloc {
+    let fd = FnDef {
+        name: name,
+        params: params,
+        return_type: ret_ty,
+        effects: None,
+        body: body,
+        span: Span::dummy(),
+    }
+    Item {
+        kind: ItemKind::ItemFn,
+        span: Span::dummy(),
+        name: name,
+        fn_def: Some(Box::new(fd)),
+        struct_def: None,
+        enum_def: None,
+        impl_def: None,
+        type_alias_ty: None,
+        use_path: tc_empty_path(),
+        use_glob: false,
+    }
+}
+
+fn tc_struct_item(name: Name, fields: Option<Box<FieldDefList>>) -> Item with Alloc {
+    let sd = StructDef {
+        name: name,
+        fields: fields,
+        is_linear: false,
+        span: Span::dummy(),
+    }
+    Item {
+        kind: ItemKind::ItemStruct,
+        span: Span::dummy(),
+        name: name,
+        fn_def: None,
+        struct_def: Some(Box::new(sd)),
+        enum_def: None,
+        impl_def: None,
+        type_alias_ty: None,
+        use_path: tc_empty_path(),
+        use_glob: false,
+    }
+}
+
+fn tc_impl_item(target_type: TypeExpr, methods: Option<Box<ItemList>>) -> Item with Mut, Panic, Div, Alloc {
+    let id = ImplDef {
+        target_type: target_type,
+        methods: methods,
+        span: Span::dummy(),
+    }
+    Item {
+        kind: ItemKind::ItemImpl,
+        span: Span::dummy(),
+        name: tc_make_name(0, 0, 0, 0),
+        fn_def: None,
+        struct_def: None,
+        enum_def: None,
+        impl_def: Some(Box::new(id)),
+        type_alias_ty: None,
+        use_path: tc_empty_path(),
+        use_glob: false,
+    }
+}
+
+fn tc_program(items: Option<Box<ItemList>>) -> Program {
+    Program { items: items }
+}
+
+fn tc_single_item(item: Item) -> Program with Alloc {
+    Program { items: Some(Box::new(ItemList { head: item, tail: None })) }
+}
+
+fn tc_two_items(a: Item, b: Item) -> Program with Alloc {
+    Program {
+        items: Some(Box::new(ItemList {
+            head: a,
+            tail: Some(Box::new(ItemList { head: b, tail: None })),
+        })),
+    }
+}
+
+fn tc_three_items(a: Item, b: Item, c: Item) -> Program with Alloc {
+    Program {
+        items: Some(Box::new(ItemList {
+            head: a,
+            tail: Some(Box::new(ItemList {
+                head: b,
+                tail: Some(Box::new(ItemList { head: c, tail: None })),
+            })),
+        })),
+    }
+}
+
+fn tc_param(name: Name, ty: TypeExpr) -> Param {
+    Param { name: name, ty: ty, is_self: false, is_self_mut: false, span: Span::dummy() }
+}
+
+fn tc_self_param() -> Param with Mut, Panic, Div {
+    Param {
+        name: tc_make_name4(115, 101, 108, 102),
+        ty: TypeExpr {
+            kind: TypeExprKind::TypeSelfUpper,
+            span: Span::dummy(),
+            path: tc_empty_path(),
+            type_args: None,
+            inner: None,
+            array_size: None,
+            effects: None,
+        },
+        is_self: true,
+        is_self_mut: false,
+        span: Span::dummy(),
+    }
+}
+
+// ============================================================================
+// TESTS
+// ============================================================================
+
+// T01: Empty program — 0 errors
+fn tc_test_01() -> bool with Mut, Panic, Div, Alloc, IO {
+    let result = check_program(tc_program(None))
+    result.error_count == 0 && !result.had_error
+}
+
+// T02: let x = 42 — i64 inference
+fn tc_test_02() -> bool with Mut, Panic, Div, Alloc, IO {
+    // fn main() { let x = 42 }
+    let name_x = tc_make_name(120, 0, 0, 1)
+    let body = tc_block1(tc_let_stmt(name_x, tc_int_expr(42)))
+    let item = tc_fn_item(tc_make_name4(109, 97, 105, 110), None, None, body)
+    let result = check_program(tc_single_item(item))
+    result.error_count == 0
+}
+
+// T03: let x: i64 = 42 — annotation match
+fn tc_test_03() -> bool with Mut, Panic, Div, Alloc, IO {
+    let name_x = tc_make_name(120, 0, 0, 1)
+    let body = tc_block1(tc_let_typed_stmt(name_x, tc_i64_type(), tc_int_expr(42)))
+    let item = tc_fn_item(tc_make_name4(109, 97, 105, 110), None, None, body)
+    let result = check_program(tc_single_item(item))
+    result.error_count == 0
+}
+
+// T04: let x: f64 = 42 — type mismatch error
+fn tc_test_04() -> bool with Mut, Panic, Div, Alloc, IO {
+    let name_x = tc_make_name(120, 0, 0, 1)
+    let body = tc_block1(tc_let_typed_stmt(name_x, tc_f64_type(), tc_int_expr(42)))
+    let item = tc_fn_item(tc_make_name4(109, 97, 105, 110), None, None, body)
+    let result = check_program(tc_single_item(item))
+    result.error_count > 0
+}
+
+// T05: let x = true; let y: bool = x — bool + variable use
+fn tc_test_05() -> bool with Mut, Panic, Div, Alloc, IO {
+    let name_x = tc_make_name(120, 0, 0, 1)
+    let name_y = tc_make_name(121, 0, 0, 1)
+    let s1 = tc_let_stmt(name_x, tc_bool_expr(true))
+    let s2 = tc_let_typed_stmt(name_y, tc_bool_type(), tc_ident_expr(120, 0, 0, 1))
+    let body = tc_block2(s1, s2)
+    let item = tc_fn_item(tc_make_name4(109, 97, 105, 110), None, None, body)
+    let result = check_program(tc_single_item(item))
+    result.error_count == 0
+}
+
+// T06: let a = 1; let b = a + 1 — binary arithmetic
+fn tc_test_06() -> bool with Mut, Panic, Div, Alloc, IO {
+    let name_a = tc_make_name(97, 0, 0, 1)
+    let name_b = tc_make_name(98, 0, 0, 1)
+    let s1 = tc_let_stmt(name_a, tc_int_expr(1))
+    let add = tc_binop_expr(tc_ident_expr(97, 0, 0, 1), BinaryOp::OpAdd, tc_int_expr(1))
+    let s2 = tc_let_stmt(name_b, add)
+    let body = tc_block2(s1, s2)
+    let item = tc_fn_item(tc_make_name4(109, 97, 105, 110), None, None, body)
+    let result = check_program(tc_single_item(item))
+    result.error_count == 0
+}
+
+// T07: fn foo(x: i64) -> i64 { x } — param + return
+fn tc_test_07() -> bool with Mut, Panic, Div, Alloc, IO {
+    // 'f'=102 'o'=111 'o'=111
+    let name_foo = tc_make_name(102, 111, 111, 3)
+    let name_x = tc_make_name(120, 0, 0, 1)
+    let param = tc_param(name_x, tc_i64_type())
+    let params = Some(Box::new(ParamList { head: param, tail: None }))
+    let body = tc_block1(tc_expr_stmt(tc_ident_expr(120, 0, 0, 1)))
+    let ret = Some(Box::new(tc_i64_type()))
+    let item = tc_fn_item(name_foo, params, ret, body)
+    let result = check_program(tc_single_item(item))
+    result.error_count == 0
+}
+
+// T08: fn foo() -> i64 { true } — return mismatch error
+fn tc_test_08() -> bool with Mut, Panic, Div, Alloc, IO {
+    let name_foo = tc_make_name(102, 111, 111, 3)
+    let body = tc_block1(tc_expr_stmt(tc_bool_expr(true)))
+    let ret = Some(Box::new(tc_i64_type()))
+    let item = tc_fn_item(name_foo, None, ret, body)
+    let result = check_program(tc_single_item(item))
+    result.error_count > 0
+}
+
+// T09: fn foo(x: i64) { }; foo(42) — call arity + types
+fn tc_test_09() -> bool with Mut, Panic, Div, Alloc, IO {
+    let name_foo = tc_make_name(102, 111, 111, 3)
+    let name_x = tc_make_name(120, 0, 0, 1)
+    let param = tc_param(name_x, tc_i64_type())
+    let params = Some(Box::new(ParamList { head: param, tail: None }))
+    let foo_item = tc_fn_item(name_foo, params, None, tc_empty_block())
+
+    // caller: fn main() { foo(42) }
+    let call = tc_call_expr(
+        tc_ident_expr(102, 111, 111, 3),
+        Some(Box::new(ExprList { head: tc_int_expr(42), tail: None }))
+    )
+    let main_body = tc_block1(tc_expr_stmt(call))
+    let main_item = tc_fn_item(tc_make_name4(109, 97, 105, 110), None, None, main_body)
+
+    let result = check_program(tc_two_items(foo_item, main_item))
+    result.error_count == 0
+}
+
+// T10: fn foo(x: i64) { }; foo(true) — arg mismatch error
+fn tc_test_10() -> bool with Mut, Panic, Div, Alloc, IO {
+    let name_foo = tc_make_name(102, 111, 111, 3)
+    let name_x = tc_make_name(120, 0, 0, 1)
+    let param = tc_param(name_x, tc_i64_type())
+    let params = Some(Box::new(ParamList { head: param, tail: None }))
+    let foo_item = tc_fn_item(name_foo, params, None, tc_empty_block())
+
+    let call = tc_call_expr(
+        tc_ident_expr(102, 111, 111, 3),
+        Some(Box::new(ExprList { head: tc_bool_expr(true), tail: None }))
+    )
+    let main_body = tc_block1(tc_expr_stmt(call))
+    let main_item = tc_fn_item(tc_make_name4(109, 97, 105, 110), None, None, main_body)
+
+    let result = check_program(tc_two_items(foo_item, main_item))
+    result.error_count > 0
+}
+
+// T11: Struct literal — struct field types
+fn tc_test_11() -> bool with Mut, Panic, Div, Alloc, IO {
+    // struct Pt { x: i64, y: i64 }
+    // fn main() { Pt { x: 1, y: 2 } }
+    // 'P'=80 't'=116
+    let name_pt = tc_make_name(80, 116, 0, 2)
+    let name_x = tc_make_name(120, 0, 0, 1)
+    let name_y = tc_make_name(121, 0, 0, 1)
+    let f1 = FieldDef { name: name_x, ty: tc_i64_type(), span: Span::dummy() }
+    let f2 = FieldDef { name: name_y, ty: tc_i64_type(), span: Span::dummy() }
+    let fields = Some(Box::new(FieldDefList { head: f1, tail: Some(Box::new(FieldDefList { head: f2, tail: None })) }))
+    let struct_item = tc_struct_item(name_pt, fields)
+
+    let sfi1 = StructFieldInit { name: name_x, value: tc_int_expr(1) }
+    let sfi2 = StructFieldInit { name: name_y, value: tc_int_expr(2) }
+    let sfl = Some(Box::new(StructFieldList { head: sfi1, tail: Some(Box::new(StructFieldList { head: sfi2, tail: None })) }))
+    let lit = tc_struct_lit_expr(tc_single_path(80, 116, 0, 2), sfl)
+    let main_body = tc_block1(tc_expr_stmt(lit))
+    let main_item = tc_fn_item(tc_make_name4(109, 97, 105, 110), None, None, main_body)
+
+    let result = check_program(tc_two_items(struct_item, main_item))
+    result.error_count == 0
+}
+
+// T12: Field access — field type lookup
+fn tc_test_12() -> bool with Mut, Panic, Div, Alloc, IO {
+    // struct Pt { x: i64 }
+    // fn main() { let p = Pt { x: 5 }; let v: i64 = p.x }
+    let name_pt = tc_make_name(80, 116, 0, 2)
+    let name_x = tc_make_name(120, 0, 0, 1)
+    let name_p = tc_make_name(112, 0, 0, 1)
+    let name_v = tc_make_name(118, 0, 0, 1)
+    let f1 = FieldDef { name: name_x, ty: tc_i64_type(), span: Span::dummy() }
+    let fields = Some(Box::new(FieldDefList { head: f1, tail: None }))
+    let struct_item = tc_struct_item(name_pt, fields)
+
+    let sfi = StructFieldInit { name: name_x, value: tc_int_expr(5) }
+    let lit = tc_struct_lit_expr(tc_single_path(80, 116, 0, 2), Some(Box::new(StructFieldList { head: sfi, tail: None })))
+    let s1 = tc_let_stmt(name_p, lit)
+    let access = tc_field_access_expr(tc_ident_expr(112, 0, 0, 1), name_x)
+    let s2 = tc_let_typed_stmt(name_v, tc_i64_type(), access)
+    let main_body = tc_block2(s1, s2)
+    let main_item = tc_fn_item(tc_make_name4(109, 97, 105, 110), None, None, main_body)
+
+    let result = check_program(tc_two_items(struct_item, main_item))
+    result.error_count == 0
+}
+
+// T13: If-else — both branches same type
+fn tc_test_13() -> bool with Mut, Panic, Div, Alloc, IO {
+    // fn main() { let x = if true { 1 } else { 2 } }
+    let then_blk = tc_block1(tc_expr_stmt(tc_int_expr(1)))
+    let else_blk = tc_block1(tc_expr_stmt(tc_int_expr(2)))
+    let else_body = tc_block_expr(else_blk)
+    let if_expr = tc_if_else_expr(tc_bool_expr(true), then_blk, else_body)
+    let body = tc_block1(tc_let_stmt(tc_make_name(120, 0, 0, 1), if_expr))
+    let item = tc_fn_item(tc_make_name4(109, 97, 105, 110), None, None, body)
+    let result = check_program(tc_single_item(item))
+    result.error_count == 0
+}
+
+// T14: if 42 { ... } — condition not bool -> error
+fn tc_test_14() -> bool with Mut, Panic, Div, Alloc, IO {
+    let then_blk = tc_block1(tc_expr_stmt(tc_int_expr(0)))
+    let if_expr = tc_if_no_else_expr(tc_int_expr(42), then_blk)
+    let body = tc_block1(tc_expr_stmt(if_expr))
+    let item = tc_fn_item(tc_make_name4(109, 97, 105, 110), None, None, body)
+    let result = check_program(tc_single_item(item))
+    result.error_count > 0
+}
+
+// T15: var x = 0; x = 1 — mutable assign OK
+fn tc_test_15() -> bool with Mut, Panic, Div, Alloc, IO {
+    let name_x = tc_make_name(120, 0, 0, 1)
+    let s1 = tc_var_stmt(name_x, tc_int_expr(0))
+    let s2 = tc_assign_stmt(tc_ident_expr(120, 0, 0, 1), tc_int_expr(1))
+    let body = tc_block2(s1, s2)
+    let item = tc_fn_item(tc_make_name4(109, 97, 105, 110), None, None, body)
+    let result = check_program(tc_single_item(item))
+    result.error_count == 0
+}
+
+// T16: let x = 0; x = 1 — immutable assign -> error
+fn tc_test_16() -> bool with Mut, Panic, Div, Alloc, IO {
+    let name_x = tc_make_name(120, 0, 0, 1)
+    let s1 = tc_let_stmt(name_x, tc_int_expr(0))
+    let s2 = tc_assign_stmt(tc_ident_expr(120, 0, 0, 1), tc_int_expr(1))
+    let body = tc_block2(s1, s2)
+    let item = tc_fn_item(tc_make_name4(109, 97, 105, 110), None, None, body)
+    let result = check_program(tc_single_item(item))
+    result.error_count > 0
+}
+
+// T17: Array literal + index — array type + indexing
+fn tc_test_17() -> bool with Mut, Panic, Div, Alloc, IO {
+    // fn main() { let a = [1, 2, 3]; let v = a[0] }
+    let name_a = tc_make_name(97, 0, 0, 1)
+    let name_v = tc_make_name(118, 0, 0, 1)
+    let elems = Some(Box::new(ExprList {
+        head: tc_int_expr(1),
+        tail: Some(Box::new(ExprList {
+            head: tc_int_expr(2),
+            tail: Some(Box::new(ExprList {
+                head: tc_int_expr(3),
+                tail: None,
+            })),
+        })),
+    }))
+    let s1 = tc_let_stmt(name_a, tc_array_lit_expr(elems))
+    let idx = tc_index_expr(tc_ident_expr(97, 0, 0, 1), tc_int_expr(0))
+    let s2 = tc_let_stmt(name_v, idx)
+    let body = tc_block2(s1, s2)
+    let item = tc_fn_item(tc_make_name4(109, 97, 105, 110), None, None, body)
+    let result = check_program(tc_single_item(item))
+    result.error_count == 0
+}
+
+// T18: While loop returns unit
+fn tc_test_18() -> bool with Mut, Panic, Div, Alloc, IO {
+    let w = tc_while_expr(tc_bool_expr(true), tc_block1(tc_expr_stmt(tc_int_expr(0))))
+    let body = tc_block1(tc_expr_stmt(w))
+    let item = tc_fn_item(tc_make_name4(109, 97, 105, 110), None, None, body)
+    let result = check_program(tc_single_item(item))
+    result.error_count == 0
+}
+
+// T19: Forward fn ref — two-pass enables it
+fn tc_test_19() -> bool with Mut, Panic, Div, Alloc, IO {
+    // fn caller() { callee(1) }
+    // fn callee(x: i64) { }
+    let name_caller = tc_make_name(99, 108, 114, 3)
+    let name_callee = tc_make_name(99, 108, 101, 3)
+    let call = tc_call_expr(
+        tc_ident_expr(99, 108, 101, 3),
+        Some(Box::new(ExprList { head: tc_int_expr(1), tail: None }))
+    )
+    let caller_body = tc_block1(tc_expr_stmt(call))
+    let caller_item = tc_fn_item(name_caller, None, None, caller_body)
+
+    let param = tc_param(tc_make_name(120, 0, 0, 1), tc_i64_type())
+    let callee_item = tc_fn_item(name_callee, Some(Box::new(ParamList { head: param, tail: None })), None, tc_empty_block())
+
+    let result = check_program(tc_two_items(caller_item, callee_item))
+    result.error_count == 0
+}
+
+// T20: Method call — impl method resolution
+fn tc_test_20() -> bool with Mut, Panic, Div, Alloc, IO {
+    // struct Pt { x: i64 }
+    // impl Pt { fn get_x(self) -> i64 { self.x } }
+    // fn main() { let p = Pt { x: 5 }; p.get_x() }
+    let name_pt = tc_make_name(80, 116, 0, 2)
+    let name_x = tc_make_name(120, 0, 0, 1)
+    // 'g'=103 'e'=101 't'=116
+    let name_get_x = tc_make_name5(103, 101, 116, 95, 120)
+
+    // struct Pt { x: i64 }
+    let f1 = FieldDef { name: name_x, ty: tc_i64_type(), span: Span::dummy() }
+    let struct_item = tc_struct_item(name_pt, Some(Box::new(FieldDefList { head: f1, tail: None })))
+
+    // impl Pt { fn get_x(self) -> i64 { self.x } }
+    // 's'=115 'e'=101 'l'=108 'f'=102
+    let self_param = tc_self_param()
+    let self_access = tc_field_access_expr(tc_ident_expr(115, 101, 108, 4), name_x)
+    let method_body = tc_block1(tc_expr_stmt(self_access))
+    let method_item = tc_fn_item(name_get_x, Some(Box::new(ParamList { head: self_param, tail: None })), Some(Box::new(tc_i64_type())), method_body)
+    let impl_item = tc_impl_item(tc_named_type(80, 116, 0, 2), Some(Box::new(ItemList { head: method_item, tail: None })))
+
+    // fn main() { let p = Pt { x: 5 }; p.get_x() }
+    let sfi = StructFieldInit { name: name_x, value: tc_int_expr(5) }
+    let lit = tc_struct_lit_expr(tc_single_path(80, 116, 0, 2), Some(Box::new(StructFieldList { head: sfi, tail: None })))
+    let s1 = tc_let_stmt(tc_make_name(112, 0, 0, 1), lit)
+    let mcall = tc_method_call_expr(tc_ident_expr(112, 0, 0, 1), name_get_x, None)
+    let s2 = tc_expr_stmt(mcall)
+    let main_body = tc_block2(s1, s2)
+    let main_item = tc_fn_item(tc_make_name4(109, 97, 105, 110), None, None, main_body)
+
+    let result = check_program(tc_three_items(struct_item, impl_item, main_item))
+    result.error_count == 0
+}
+
+// ============================================================================
+// ENTRY POINT
+// ============================================================================
+
+fn run_check_tests() with IO, Mut, Panic, Div, Alloc {
+    var passed: i64 = 0
+    let total: i64 = 20
+
+    print("=== Type Checker Tests ===\n")
+
+    if tc_test_01() { passed = passed + 1; print("  T01 OK: empty program\n") } else { print("  FAIL: T01 empty program\n") }
+    if tc_test_02() { passed = passed + 1; print("  T02 OK: let x = 42\n") } else { print("  FAIL: T02 let x = 42\n") }
+    if tc_test_03() { passed = passed + 1; print("  T03 OK: let x: i64 = 42\n") } else { print("  FAIL: T03 let x: i64 = 42\n") }
+    if tc_test_04() { passed = passed + 1; print("  T04 OK: let x: f64 = 42 -> error\n") } else { print("  FAIL: T04 let x: f64 = 42 -> error\n") }
+    if tc_test_05() { passed = passed + 1; print("  T05 OK: bool + variable use\n") } else { print("  FAIL: T05 bool + variable use\n") }
+    if tc_test_06() { passed = passed + 1; print("  T06 OK: binary arithmetic\n") } else { print("  FAIL: T06 binary arithmetic\n") }
+    if tc_test_07() { passed = passed + 1; print("  T07 OK: param + return\n") } else { print("  FAIL: T07 param + return\n") }
+    if tc_test_08() { passed = passed + 1; print("  T08 OK: return mismatch -> error\n") } else { print("  FAIL: T08 return mismatch -> error\n") }
+    if tc_test_09() { passed = passed + 1; print("  T09 OK: call arity + types\n") } else { print("  FAIL: T09 call arity + types\n") }
+    if tc_test_10() { passed = passed + 1; print("  T10 OK: arg mismatch -> error\n") } else { print("  FAIL: T10 arg mismatch -> error\n") }
+    if tc_test_11() { passed = passed + 1; print("  T11 OK: struct literal\n") } else { print("  FAIL: T11 struct literal\n") }
+    if tc_test_12() { passed = passed + 1; print("  T12 OK: field access\n") } else { print("  FAIL: T12 field access\n") }
+    if tc_test_13() { passed = passed + 1; print("  T13 OK: if-else branches\n") } else { print("  FAIL: T13 if-else branches\n") }
+    if tc_test_14() { passed = passed + 1; print("  T14 OK: if cond not bool -> error\n") } else { print("  FAIL: T14 if cond not bool -> error\n") }
+    if tc_test_15() { passed = passed + 1; print("  T15 OK: mutable assign\n") } else { print("  FAIL: T15 mutable assign\n") }
+    if tc_test_16() { passed = passed + 1; print("  T16 OK: immutable assign -> error\n") } else { print("  FAIL: T16 immutable assign -> error\n") }
+    if tc_test_17() { passed = passed + 1; print("  T17 OK: array + index\n") } else { print("  FAIL: T17 array + index\n") }
+    if tc_test_18() { passed = passed + 1; print("  T18 OK: while returns unit\n") } else { print("  FAIL: T18 while returns unit\n") }
+    if tc_test_19() { passed = passed + 1; print("  T19 OK: forward fn ref\n") } else { print("  FAIL: T19 forward fn ref\n") }
+    if tc_test_20() { passed = passed + 1; print("  T20 OK: method call\n") } else { print("  FAIL: T20 method call\n") }
+
+    print("\nCheck tests: ")
+    print_int(passed)
+    print("/")
+    print_int(total)
+    print(" passed\n")
+}

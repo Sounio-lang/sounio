@@ -119,7 +119,14 @@ impl FederatedSource {
 
     /// Check if this source requires an API key
     pub fn requires_api_key(&self) -> bool {
-        matches!(self, FederatedSource::BioPortal { .. })
+        matches!(
+            self,
+            FederatedSource::BioPortal { .. }
+                | FederatedSource::Custom {
+                    api_key: Some(_),
+                    ..
+                }
+        )
     }
 
     /// Create OLS4 source
@@ -452,9 +459,11 @@ impl FederatedResolver {
         match source {
             FederatedSource::OLS4 => self.query_ols4(query),
             FederatedSource::BioPortal { api_key } => self.query_bioportal(query, api_key),
-            FederatedSource::Custom { .. } => Err(OntologyError::ResolutionFailed(
-                "Custom sources not yet implemented".to_string(),
-            )),
+            FederatedSource::Custom {
+                name,
+                base_url,
+                api_key,
+            } => self.query_custom(query, name, base_url, api_key.as_deref()),
         }
     }
 
@@ -635,6 +644,143 @@ impl FederatedResolver {
         let _ = query;
         Err(OntologyError::NetworkError(
             "BioPortal queries require the 'network' feature. Rebuild with --features network"
+                .to_string(),
+        ))
+    }
+
+    /// Query a custom source.
+    ///
+    /// The custom source can be OLS4-compatible, BioPortal-compatible, or a generic
+    /// JSON endpoint that returns `iri/id`, `label/prefLabel`, and optional metadata.
+    #[cfg(feature = "network")]
+    fn query_custom(
+        &self,
+        query: &FederatedQuery,
+        source_name: &str,
+        base_url: &str,
+        api_key: Option<&str>,
+    ) -> OntologyResult<FederatedTerm> {
+        let client = self.client.as_ref().ok_or_else(|| {
+            OntologyError::NetworkError("HTTP client not initialized".to_string())
+        })?;
+
+        let base = base_url.trim_end_matches('/');
+        let mut urls = Vec::new();
+
+        if let Some(ref ontology) = query.ontology {
+            let iri = format!(
+                "http://purl.obolibrary.org/obo/{}_{}",
+                ontology.to_uppercase(),
+                &query.term_id
+            );
+            let encoded_iri = urlencoded(&iri);
+            let double_encoded_iri = urlencoded(&encoded_iri);
+            urls.push(format!(
+                "{}/ontologies/{}/terms/{}",
+                base,
+                ontology.to_lowercase(),
+                double_encoded_iri
+            ));
+            urls.push(format!(
+                "{}/ontologies/{}/classes/{}",
+                base,
+                ontology.to_uppercase(),
+                encoded_iri
+            ));
+        }
+
+        let rows = query.limit.max(1);
+        let mut ols4_search = format!(
+            "{}/search?q={}&exact=true&rows={}",
+            base,
+            urlencoded(&query.term_id),
+            rows
+        );
+        if let Some(ref ontology) = query.ontology {
+            ols4_search.push_str(&format!("&ontology={}", urlencoded(&ontology.to_lowercase())));
+        }
+        if query.include_obsolete {
+            ols4_search.push_str("&obsoletes=true");
+        }
+        urls.push(ols4_search);
+
+        let mut bioportal_search = format!(
+            "{}/search?q={}&pagesize={}&include=prefLabel,definition,synonym,obsolete",
+            base,
+            urlencoded(&query.term_id),
+            rows
+        );
+        if let Some(ref ontology) = query.ontology {
+            bioportal_search
+                .push_str(&format!("&ontologies={}", urlencoded(&ontology.to_uppercase())));
+        }
+        if query.include_obsolete {
+            bioportal_search.push_str("&also_search_obsolete=true");
+        }
+        urls.push(bioportal_search);
+
+        let mut failures = Vec::new();
+
+        for url in urls {
+            let mut request = client.get(&url).header("Accept", "application/json");
+            if let Some(key) = api_key
+                && !key.trim().is_empty()
+            {
+                request = request.header("Authorization", format!("apikey token={}", key));
+            }
+
+            let response = match request.send() {
+                Ok(r) => r,
+                Err(err) => {
+                    failures.push(format!("{}: {}", url, err));
+                    continue;
+                }
+            };
+
+            if !response.status().is_success() {
+                failures.push(format!("{}: status {}", url, response.status().as_u16()));
+                continue;
+            }
+
+            let body = match response.text() {
+                Ok(body) => body,
+                Err(err) => {
+                    failures.push(format!("{}: {}", url, err));
+                    continue;
+                }
+            };
+
+            let parsed = parse_ols4_term_response(&body, query)
+                .or_else(|_| parse_ols4_search_response(&body, query))
+                .or_else(|_| parse_bioportal_class_response(&body, query))
+                .or_else(|_| parse_bioportal_search_response(&body, query))
+                .or_else(|_| parse_custom_generic_response(&body, query, source_name));
+
+            match parsed {
+                Ok(term) => return Ok(normalize_custom_term(term, source_name, query)),
+                Err(_) => failures.push(format!("{}: unsupported response schema", url)),
+            }
+        }
+
+        Err(OntologyError::ResolutionFailed(format!(
+            "Custom source `{}` failed: {}",
+            source_name,
+            failures.join("; ")
+        )))
+    }
+
+    /// Query a custom source - stub when network feature is disabled.
+    #[cfg(not(feature = "network"))]
+    fn query_custom(
+        &self,
+        query: &FederatedQuery,
+        _source_name: &str,
+        _base_url: &str,
+        _api_key: Option<&str>,
+    ) -> OntologyResult<FederatedTerm> {
+        let _ = query;
+        Err(OntologyError::NetworkError(
+            "Custom source queries require the 'network' feature. Rebuild with --features network"
                 .to_string(),
         ))
     }
@@ -949,6 +1095,122 @@ fn parse_bioportal_search_response(
 // Helper Functions
 // ============================================================================
 
+#[cfg(feature = "network")]
+fn normalize_custom_term(
+    mut term: FederatedTerm,
+    source_name: &str,
+    query: &FederatedQuery,
+) -> FederatedTerm {
+    if term.ontology.is_empty() {
+        term.ontology = query
+            .ontology
+            .clone()
+            .unwrap_or_else(|| extract_ontology_from_iri(&term.iri));
+    }
+    if term.curie.is_empty() && !term.iri.is_empty() {
+        term.curie = iri_to_curie(&term.iri);
+    }
+    term.source = source_name.to_string();
+    term.epistemic = FederatedTerm::compute_epistemic(
+        source_name,
+        &term.ontology,
+        &query.term_id,
+        term.definition.as_ref().is_some_and(|d| !d.is_empty()),
+        term.obsolete,
+    );
+    term
+}
+
+#[cfg(feature = "network")]
+fn parse_custom_generic_response(
+    json: &str,
+    query: &FederatedQuery,
+    source_name: &str,
+) -> OntologyResult<FederatedTerm> {
+    fn first_text(value: &serde_json::Value) -> Option<String> {
+        match value {
+            serde_json::Value::String(s) => Some(s.clone()),
+            serde_json::Value::Array(items) => items.iter().find_map(first_text),
+            serde_json::Value::Object(map) => map.get("value").and_then(first_text),
+            _ => None,
+        }
+    }
+
+    fn field_as_text(value: &serde_json::Value, names: &[&str]) -> Option<String> {
+        names
+            .iter()
+            .find_map(|name| value.get(*name).and_then(first_text))
+    }
+
+    fn field_as_vec(value: &serde_json::Value, names: &[&str]) -> Vec<String> {
+        for name in names {
+            if let Some(arr) = value.get(*name).and_then(|v| v.as_array()) {
+                return arr.iter().filter_map(first_text).collect();
+            }
+        }
+        Vec::new()
+    }
+
+    let root: serde_json::Value = serde_json::from_str(json).map_err(|err| {
+        OntologyError::ResolutionFailed(format!("Failed to parse custom JSON response: {}", err))
+    })?;
+
+    let entry = root
+        .pointer("/response/docs/0")
+        .or_else(|| root.pointer("/collection/0"))
+        .or_else(|| root.pointer("/results/0"))
+        .or_else(|| root.as_array().and_then(|items| items.first()))
+        .unwrap_or(&root);
+
+    let mut iri = field_as_text(entry, &["iri", "@id", "id", "uri"]).unwrap_or_default();
+    let mut curie = field_as_text(entry, &["curie", "obo_id"]).unwrap_or_default();
+
+    if curie.is_empty() && !iri.is_empty() {
+        curie = iri_to_curie(&iri);
+    }
+    if iri.is_empty()
+        && let Some((prefix, local_id)) = curie.split_once(':')
+    {
+        iri = format!(
+            "http://purl.obolibrary.org/obo/{}_{}",
+            prefix.to_uppercase(),
+            local_id
+        );
+    }
+    if iri.is_empty() && curie.is_empty() {
+        return Err(OntologyError::ResolutionFailed(
+            "Custom response did not include a resolvable term id".to_string(),
+        ));
+    }
+
+    let ontology = query.ontology.clone().unwrap_or_else(|| {
+        if let Some((prefix, _)) = curie.split_once(':') {
+            prefix.to_lowercase()
+        } else {
+            extract_ontology_from_iri(&iri)
+        }
+    });
+
+    let definition = field_as_text(entry, &["definition", "description", "desc"]);
+    let obsolete = entry
+        .get("obsolete")
+        .and_then(|v| v.as_bool())
+        .or_else(|| entry.get("is_obsolete").and_then(|v| v.as_bool()))
+        .unwrap_or(false);
+
+    Ok(FederatedTerm {
+        iri,
+        curie,
+        label: field_as_text(entry, &["label", "prefLabel", "name", "title"]),
+        definition,
+        synonyms: field_as_vec(entry, &["synonyms", "synonym"]),
+        ontology,
+        obsolete,
+        source: source_name.to_string(),
+        epistemic: EpistemicStatus::default(),
+    })
+}
+
 /// Convert an IRI to a CURIE (compact URI)
 #[cfg(feature = "network")]
 fn iri_to_curie(iri: &str) -> String {
@@ -1007,6 +1269,18 @@ mod tests {
     }
 
     #[test]
+    fn test_custom_source_metadata() {
+        let source = FederatedSource::Custom {
+            name: "Acme".to_string(),
+            base_url: "https://example.org/api".to_string(),
+            api_key: Some("secret".to_string()),
+        };
+        assert_eq!(source.name(), "Acme");
+        assert_eq!(source.base_url(), "https://example.org/api");
+        assert!(source.requires_api_key());
+    }
+
+    #[test]
     fn test_federated_query_builder() {
         let query = FederatedQuery::term("ORDO:123")
             .in_ontology("ordo")
@@ -1031,6 +1305,19 @@ mod tests {
         let query = FederatedQuery::term("TEST:123");
         let result = resolver.resolve(&query);
         assert!(result.is_err());
+    }
+
+    #[cfg(not(feature = "network"))]
+    #[test]
+    fn test_custom_source_requires_network_feature() {
+        let mut resolver = FederatedResolver::new().with_source(FederatedSource::Custom {
+            name: "Acme".to_string(),
+            base_url: "https://example.org/api".to_string(),
+            api_key: None,
+        });
+        let query = FederatedQuery::term("CHEBI:15365");
+        let result = resolver.resolve(&query);
+        assert!(matches!(result, Err(OntologyError::NetworkError(_))));
     }
 
     #[test]
@@ -1242,6 +1529,23 @@ mod tests {
             let bp_json = r#"{"collection": []}"#;
             let result = parse_bioportal_search_response(bp_json, &query);
             assert!(result.is_err());
+        }
+
+        #[test]
+        fn test_parse_custom_generic_response() {
+            let json = r#"{
+                "id": "http://purl.obolibrary.org/obo/CHEBI_15365",
+                "label": "aspirin",
+                "description": "A benzoic acid derivative",
+                "synonyms": ["acetylsalicylic acid"],
+                "obsolete": false
+            }"#;
+
+            let query = FederatedQuery::term("15365").in_ontology("chebi");
+            let term = parse_custom_generic_response(json, &query, "Acme").unwrap();
+            assert_eq!(term.curie, "CHEBI:15365");
+            assert_eq!(term.label, Some("aspirin".to_string()));
+            assert_eq!(term.ontology, "chebi");
         }
     }
 }

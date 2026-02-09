@@ -600,6 +600,15 @@ impl EpistemicChecker {
         status: &EpistemicStatus,
         constraint: &ProvenanceConstraint,
     ) -> ConstraintResult {
+        fn provenance_depth(source: &Source) -> u32 {
+            match source {
+                Source::Transformation { original, .. } => {
+                    1u32.saturating_add(provenance_depth(original))
+                }
+                _ => 0,
+            }
+        }
+
         match constraint {
             ProvenanceConstraint::FromSource(required_source) => {
                 if self.sources_compatible(&status.source, required_source) {
@@ -623,8 +632,16 @@ impl EpistemicChecker {
                     ConstraintResult::Violated("No verification evidence found".into())
                 }
             }
-            ProvenanceConstraint::MaxDepth(_) => {
-                ConstraintResult::Indeterminate("Depth tracking not yet implemented".into())
+            ProvenanceConstraint::MaxDepth(max_depth) => {
+                let depth = provenance_depth(&status.source);
+                if depth <= *max_depth {
+                    ConstraintResult::Satisfied
+                } else {
+                    ConstraintResult::Violated(format!(
+                        "Derivation depth {} exceeds max depth {}",
+                        depth, max_depth
+                    ))
+                }
             }
             ProvenanceConstraint::HumanReviewed => {
                 // Check for human review evidence
@@ -2456,5 +2473,45 @@ mod tests {
 
         // 2000-01-01 = 10957 days after Unix epoch
         assert_eq!(days_from_date(2000, 1, 1), Some(10957));
+    }
+
+    #[test]
+    fn test_provenance_max_depth_satisfied() {
+        let mut checker = EpistemicChecker::new();
+
+        let status = EpistemicStatus {
+            source: Source::Transformation {
+                original: Box::new(Source::Transformation {
+                    original: Box::new(Source::Axiom),
+                    via: "normalization".to_string(),
+                }),
+                via: "aggregation".to_string(),
+            },
+            ..Default::default()
+        };
+
+        let result =
+            checker.check_provenance_constraint(&status, &ProvenanceConstraint::MaxDepth(2));
+        assert!(matches!(result, ConstraintResult::Satisfied));
+    }
+
+    #[test]
+    fn test_provenance_max_depth_violated() {
+        let mut checker = EpistemicChecker::new();
+
+        let status = EpistemicStatus {
+            source: Source::Transformation {
+                original: Box::new(Source::Transformation {
+                    original: Box::new(Source::Axiom),
+                    via: "normalization".to_string(),
+                }),
+                via: "aggregation".to_string(),
+            },
+            ..Default::default()
+        };
+
+        let result =
+            checker.check_provenance_constraint(&status, &ProvenanceConstraint::MaxDepth(1));
+        assert!(matches!(result, ConstraintResult::Violated(_)));
     }
 }

@@ -9,7 +9,7 @@
 //!
 //! Run with: cargo bench --bench octonion_bench
 
-use criterion::{BenchmarkId, Criterion, black_box, criterion_group, criterion_main};
+use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion};
 
 // Mock octonion struct for benchmarking (same as in tests)
 #[derive(Clone, Copy, Debug)]
@@ -39,44 +39,24 @@ impl Octonion {
     }
 
     // Octonion multiplication (120 FLOPs: 64 multiplications + 56 additions)
+    // Graves-Adcock formula — uses a0..a7/b0..b7 to avoid variable shadowing
     fn mul(self, other: Octonion) -> Octonion {
-        let a1 = self.a;
-        let b1 = self.b;
-        let c1 = self.c;
-        let d1 = self.d;
-        let e1 = self.e;
-        let f1 = self.f;
-        let g1 = self.g;
-        let h1 = self.h;
-
-        let a2 = other.a;
-        let b2 = other.b;
-        let c2 = other.c;
-        let d2 = other.d;
-        let e2 = other.e;
-        let f2 = other.f;
-        let g2 = other.g;
-        let h2 = other.h;
-
-        // Graves-Adcock formula
-        let c0 = a1 * a2 - b1 * b2 - c1 * c2 - d1 * d2 - e1 * e2 - f1 * f2 - g1 * g2 - h1 * h2;
-        let c1 = a1 * b2 + b1 * a2 + c1 * d2 - d1 * c2 + e1 * f2 - f1 * e2 - g1 * h2 + h1 * g2;
-        let c2 = a1 * c2 - b1 * d2 + c1 * a2 + d1 * b2 + e1 * g2 + f1 * h2 - g1 * e2 - h1 * f2;
-        let c3 = a1 * d2 + b1 * c2 - c1 * b2 + d1 * a2 + e1 * h2 - f1 * g2 + g1 * f2 - h1 * e2;
-        let c4 = a1 * e2 - b1 * f2 - c1 * g2 - d1 * h2 + e1 * a2 + f1 * b2 + g1 * c2 + h1 * d2;
-        let c5 = a1 * f2 + b1 * e2 - c1 * h2 + d1 * g2 - e1 * b2 + f1 * a2 - g1 * d2 + h1 * c2;
-        let c6 = a1 * g2 + b1 * h2 + c1 * e2 - d1 * f2 - e1 * c2 + f1 * d2 + g1 * a2 - h1 * b2;
-        let c7 = a1 * h2 - b1 * g2 + c1 * f2 + d1 * e2 - e1 * d2 - f1 * c2 + g1 * b2 + h1 * a2;
+        let (a0, a1, a2, a3, a4, a5, a6, a7) = (
+            self.a, self.b, self.c, self.d, self.e, self.f, self.g, self.h,
+        );
+        let (b0, b1, b2, b3, b4, b5, b6, b7) = (
+            other.a, other.b, other.c, other.d, other.e, other.f, other.g, other.h,
+        );
 
         Octonion {
-            a: c0,
-            b: c1,
-            c: c2,
-            d: c3,
-            e: c4,
-            f: c5,
-            g: c6,
-            h: c7,
+            a: a0 * b0 - a1 * b1 - a2 * b2 - a3 * b3 - a4 * b4 - a5 * b5 - a6 * b6 - a7 * b7,
+            b: a0 * b1 + a1 * b0 + a2 * b3 - a3 * b2 + a4 * b5 - a5 * b4 - a6 * b7 + a7 * b6,
+            c: a0 * b2 - a1 * b3 + a2 * b0 + a3 * b1 + a4 * b6 + a5 * b7 - a6 * b4 - a7 * b5,
+            d: a0 * b3 + a1 * b2 - a2 * b1 + a3 * b0 + a4 * b7 - a5 * b6 + a6 * b5 - a7 * b4,
+            e: a0 * b4 - a1 * b5 - a2 * b6 - a3 * b7 + a4 * b0 + a5 * b1 + a6 * b2 + a7 * b3,
+            f: a0 * b5 + a1 * b4 - a2 * b7 + a3 * b6 - a4 * b1 + a5 * b0 - a6 * b3 + a7 * b2,
+            g: a0 * b6 + a1 * b7 + a2 * b4 - a3 * b5 - a4 * b2 + a5 * b3 + a6 * b0 - a7 * b1,
+            h: a0 * b7 - a1 * b6 + a2 * b5 + a3 * b4 - a4 * b3 - a5 * b2 + a6 * b1 + a7 * b0,
         }
     }
 
@@ -263,15 +243,17 @@ fn benchmark_neural_network_layer(c: &mut Criterion) {
                 for in_idx in 0..8 {
                     let w = weights[out_idx * 8 + in_idx];
                     let x = input[in_idx];
+                    let wx = w.mul(x);
+                    let acc = output[out_idx];
                     output[out_idx] = Octonion::new(
-                        output[out_idx].a + w.mul(x).a,
-                        output[out_idx].b + w.mul(x).b,
-                        output[out_idx].c + w.mul(x).c,
-                        output[out_idx].d + w.mul(x).d,
-                        output[out_idx].e + w.mul(x).e,
-                        output[out_idx].f + w.mul(x).f,
-                        output[out_idx].g + w.mul(x).g,
-                        output[out_idx].h + w.mul(x).h,
+                        acc.a + wx.a,
+                        acc.b + wx.b,
+                        acc.c + wx.c,
+                        acc.d + wx.d,
+                        acc.e + wx.e,
+                        acc.f + wx.f,
+                        acc.g + wx.g,
+                        acc.h + wx.h,
                     );
                 }
             }

@@ -437,6 +437,242 @@ pub fn gen_octonion_linear_bwd_kernel() -> GpuKernel {
     kernel
 }
 
+/// Generate octonion addition kernel
+///
+/// Component-wise addition: out[i] = o1[i] + o2[i] (8 FLOPs)
+pub fn gen_octonion_add_kernel() -> GpuKernel {
+    let mut kernel = GpuKernel::new("octonion_add");
+
+    kernel.add_param(octonion_param("o1"));
+    kernel.add_param(octonion_param("o2"));
+    kernel.add_param(octonion_param("out"));
+    kernel.add_param(GpuParam {
+        name: "n".into(),
+        ty: GpuType::I32,
+        space: MemorySpace::Generic,
+        restrict: false,
+    });
+
+    let entry = GpuBlock {
+        id: BlockId(0),
+        label: "entry".into(),
+        instructions: vec![
+            (ValueId(0), GpuOp::ThreadIdX),
+            (ValueId(1), GpuOp::BlockIdX),
+            (ValueId(2), GpuOp::BlockDimX),
+            (ValueId(3), GpuOp::Mul(ValueId(1), ValueId(2))),
+            (ValueId(4), GpuOp::Add(ValueId(0), ValueId(3))),
+            (ValueId(5), GpuOp::Param(3)), // n
+            (ValueId(6), GpuOp::Lt(ValueId(4), ValueId(5))),
+        ],
+        terminator: GpuTerminator::CondBr(ValueId(6), BlockId(1), BlockId(2)),
+    };
+
+    let compute_block = GpuBlock {
+        id: BlockId(1),
+        label: "compute".into(),
+        instructions: vec![
+            // Load o1
+            (ValueId(10), GpuOp::Param(0)),
+            (
+                ValueId(11),
+                GpuOp::GetElementPtr(ValueId(10), vec![ValueId(4)]),
+            ),
+            (ValueId(12), GpuOp::Load(ValueId(11), MemorySpace::Global)),
+            // Load o2
+            (ValueId(20), GpuOp::Param(1)),
+            (
+                ValueId(21),
+                GpuOp::GetElementPtr(ValueId(20), vec![ValueId(4)]),
+            ),
+            (ValueId(22), GpuOp::Load(ValueId(21), MemorySpace::Global)),
+            // OctonionAdd
+            (ValueId(30), GpuOp::OctonionAdd(ValueId(12), ValueId(22))),
+            // Store result
+            (ValueId(40), GpuOp::Param(2)),
+            (
+                ValueId(41),
+                GpuOp::GetElementPtr(ValueId(40), vec![ValueId(4)]),
+            ),
+            (
+                ValueId(42),
+                GpuOp::Store(ValueId(41), ValueId(30), MemorySpace::Global),
+            ),
+        ],
+        terminator: GpuTerminator::Br(BlockId(2)),
+    };
+
+    let exit_block = GpuBlock {
+        id: BlockId(2),
+        label: "exit".into(),
+        instructions: vec![],
+        terminator: GpuTerminator::ReturnVoid,
+    };
+
+    kernel.blocks = vec![entry, compute_block, exit_block];
+    kernel.entry = BlockId(0);
+    kernel
+}
+
+/// Generate octonion subtraction kernel
+///
+/// Component-wise subtraction: out[i] = o1[i] - o2[i] (8 FLOPs)
+pub fn gen_octonion_sub_kernel() -> GpuKernel {
+    let mut kernel = GpuKernel::new("octonion_sub");
+
+    kernel.add_param(octonion_param("o1"));
+    kernel.add_param(octonion_param("o2"));
+    kernel.add_param(octonion_param("out"));
+    kernel.add_param(GpuParam {
+        name: "n".into(),
+        ty: GpuType::I32,
+        space: MemorySpace::Generic,
+        restrict: false,
+    });
+
+    let entry = GpuBlock {
+        id: BlockId(0),
+        label: "entry".into(),
+        instructions: vec![
+            (ValueId(0), GpuOp::ThreadIdX),
+            (ValueId(1), GpuOp::BlockIdX),
+            (ValueId(2), GpuOp::BlockDimX),
+            (ValueId(3), GpuOp::Mul(ValueId(1), ValueId(2))),
+            (ValueId(4), GpuOp::Add(ValueId(0), ValueId(3))),
+            (ValueId(5), GpuOp::Param(3)), // n
+            (ValueId(6), GpuOp::Lt(ValueId(4), ValueId(5))),
+        ],
+        terminator: GpuTerminator::CondBr(ValueId(6), BlockId(1), BlockId(2)),
+    };
+
+    let compute_block = GpuBlock {
+        id: BlockId(1),
+        label: "compute".into(),
+        instructions: vec![
+            // Load o1
+            (ValueId(10), GpuOp::Param(0)),
+            (
+                ValueId(11),
+                GpuOp::GetElementPtr(ValueId(10), vec![ValueId(4)]),
+            ),
+            (ValueId(12), GpuOp::Load(ValueId(11), MemorySpace::Global)),
+            // Load o2
+            (ValueId(20), GpuOp::Param(1)),
+            (
+                ValueId(21),
+                GpuOp::GetElementPtr(ValueId(20), vec![ValueId(4)]),
+            ),
+            (ValueId(22), GpuOp::Load(ValueId(21), MemorySpace::Global)),
+            // OctonionSub
+            (ValueId(30), GpuOp::OctonionSub(ValueId(12), ValueId(22))),
+            // Store result
+            (ValueId(40), GpuOp::Param(2)),
+            (
+                ValueId(41),
+                GpuOp::GetElementPtr(ValueId(40), vec![ValueId(4)]),
+            ),
+            (
+                ValueId(42),
+                GpuOp::Store(ValueId(41), ValueId(30), MemorySpace::Global),
+            ),
+        ],
+        terminator: GpuTerminator::Br(BlockId(2)),
+    };
+
+    let exit_block = GpuBlock {
+        id: BlockId(2),
+        label: "exit".into(),
+        instructions: vec![],
+        terminator: GpuTerminator::ReturnVoid,
+    };
+
+    kernel.blocks = vec![entry, compute_block, exit_block];
+    kernel.entry = BlockId(0);
+    kernel
+}
+
+/// Generate octonion scalar multiplication kernel
+///
+/// Scalar-octonion product: out[i] = s * o[i] per component (8 FLOPs)
+pub fn gen_octonion_scale_kernel() -> GpuKernel {
+    let mut kernel = GpuKernel::new("octonion_scale");
+
+    kernel.add_param(octonion_param("o"));
+    kernel.add_param(GpuParam {
+        name: "scalar".into(),
+        ty: GpuType::F32,
+        space: MemorySpace::Global,
+        restrict: true,
+    });
+    kernel.add_param(octonion_param("out"));
+    kernel.add_param(GpuParam {
+        name: "n".into(),
+        ty: GpuType::I32,
+        space: MemorySpace::Generic,
+        restrict: false,
+    });
+
+    let entry = GpuBlock {
+        id: BlockId(0),
+        label: "entry".into(),
+        instructions: vec![
+            (ValueId(0), GpuOp::ThreadIdX),
+            (ValueId(1), GpuOp::BlockIdX),
+            (ValueId(2), GpuOp::BlockDimX),
+            (ValueId(3), GpuOp::Mul(ValueId(1), ValueId(2))),
+            (ValueId(4), GpuOp::Add(ValueId(0), ValueId(3))),
+            (ValueId(5), GpuOp::Param(3)), // n
+            (ValueId(6), GpuOp::Lt(ValueId(4), ValueId(5))),
+        ],
+        terminator: GpuTerminator::CondBr(ValueId(6), BlockId(1), BlockId(2)),
+    };
+
+    let compute_block = GpuBlock {
+        id: BlockId(1),
+        label: "compute".into(),
+        instructions: vec![
+            // Load octonion
+            (ValueId(10), GpuOp::Param(0)),
+            (
+                ValueId(11),
+                GpuOp::GetElementPtr(ValueId(10), vec![ValueId(4)]),
+            ),
+            (ValueId(12), GpuOp::Load(ValueId(11), MemorySpace::Global)),
+            // Load scalar
+            (ValueId(20), GpuOp::Param(1)),
+            (
+                ValueId(21),
+                GpuOp::GetElementPtr(ValueId(20), vec![ValueId(4)]),
+            ),
+            (ValueId(22), GpuOp::Load(ValueId(21), MemorySpace::Global)),
+            // OctonionScale
+            (ValueId(30), GpuOp::OctonionScale(ValueId(12), ValueId(22))),
+            // Store result
+            (ValueId(40), GpuOp::Param(2)),
+            (
+                ValueId(41),
+                GpuOp::GetElementPtr(ValueId(40), vec![ValueId(4)]),
+            ),
+            (
+                ValueId(42),
+                GpuOp::Store(ValueId(41), ValueId(30), MemorySpace::Global),
+            ),
+        ],
+        terminator: GpuTerminator::Br(BlockId(2)),
+    };
+
+    let exit_block = GpuBlock {
+        id: BlockId(2),
+        label: "exit".into(),
+        instructions: vec![],
+        terminator: GpuTerminator::ReturnVoid,
+    };
+
+    kernel.blocks = vec![entry, compute_block, exit_block];
+    kernel.entry = BlockId(0);
+    kernel
+}
+
 /// Generate all octonion kernels and add to GPU module
 pub fn add_octonion_kernels(kernels: &mut Vec<GpuKernel>) {
     kernels.push(gen_octonion_mul_kernel());
@@ -445,6 +681,9 @@ pub fn add_octonion_kernels(kernels: &mut Vec<GpuKernel>) {
     kernels.push(gen_octonion_relu_kernel());
     kernels.push(gen_octonion_linear_fwd_kernel());
     kernels.push(gen_octonion_linear_bwd_kernel());
+    kernels.push(gen_octonion_add_kernel());
+    kernels.push(gen_octonion_sub_kernel());
+    kernels.push(gen_octonion_scale_kernel());
 }
 
 #[cfg(test)]
@@ -470,7 +709,7 @@ mod tests {
     fn test_octonion_kernels_generation() {
         let mut kernels = Vec::new();
         add_octonion_kernels(&mut kernels);
-        assert_eq!(kernels.len(), 6);
+        assert_eq!(kernels.len(), 9);
 
         let names: Vec<_> = kernels.iter().map(|k| k.name.as_str()).collect();
         assert!(names.contains(&"octonion_mul"));
@@ -479,5 +718,32 @@ mod tests {
         assert!(names.contains(&"octonion_relu"));
         assert!(names.contains(&"octonion_linear_fwd"));
         assert!(names.contains(&"octonion_linear_bwd"));
+        assert!(names.contains(&"octonion_add"));
+        assert!(names.contains(&"octonion_sub"));
+        assert!(names.contains(&"octonion_scale"));
+    }
+
+    #[test]
+    fn test_octonion_add_kernel_structure() {
+        let kernel = gen_octonion_add_kernel();
+        assert_eq!(kernel.name, "octonion_add");
+        assert_eq!(kernel.params.len(), 4); // o1, o2, out, n
+        assert_eq!(kernel.blocks.len(), 3); // entry, compute, exit
+    }
+
+    #[test]
+    fn test_octonion_sub_kernel_structure() {
+        let kernel = gen_octonion_sub_kernel();
+        assert_eq!(kernel.name, "octonion_sub");
+        assert_eq!(kernel.params.len(), 4); // o1, o2, out, n
+        assert_eq!(kernel.blocks.len(), 3);
+    }
+
+    #[test]
+    fn test_octonion_scale_kernel_structure() {
+        let kernel = gen_octonion_scale_kernel();
+        assert_eq!(kernel.name, "octonion_scale");
+        assert_eq!(kernel.params.len(), 4); // o, scalar, out, n
+        assert_eq!(kernel.blocks.len(), 3);
     }
 }

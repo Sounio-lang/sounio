@@ -42,8 +42,11 @@
 use std::path::PathBuf;
 
 use super::cache::{CacheConfig, CachedTermData, OntologyCache, SubsumptionCache};
+use super::federated::{FederatedConfig, FederatedQuery, FederatedResolver, FederatedSource};
 use super::foundation::FoundationOntologies;
 use super::primitive::{PRIMITIVE_BFO, PRIMITIVE_COB, PRIMITIVE_RO};
+#[cfg(feature = "ontology")]
+use super::semantic_sql::SemanticSqlStore;
 use super::sssom::SssomMappingSet;
 use super::{OntologyError, OntologyLayer, OntologyResult, OntologyStats, ParsedTermRef};
 
@@ -420,16 +423,122 @@ impl OntologyResolver {
     /// Resolve from L3 domain ontologies (SQLite)
     #[cfg(feature = "ontology")]
     fn resolve_domain(&self, parsed: &ParsedTermRef) -> OntologyResult<Option<ResolvedTerm>> {
-        // Would use SemanticSqlManager to look up from database
-        // For now, return None as placeholder
-        Ok(None)
+        let Some(db_path) = self.find_domain_db_path(&parsed.prefix) else {
+            return Ok(None);
+        };
+
+        let store = SemanticSqlStore::open(&db_path)?;
+        let term = match store.get_term(&parsed.curie) {
+            Ok(term) => term,
+            Err(OntologyError::TermNotFound { .. }) => return Ok(None),
+            Err(err) => return Err(err),
+        };
+
+        let superclasses = store
+            .get_superclasses(&parsed.curie)
+            .unwrap_or_default()
+            .into_iter()
+            .map(|parent| parent.curie())
+            .collect();
+
+        Ok(Some(ResolvedTerm {
+            curie: term.curie(),
+            label: term.label,
+            definition: term.definition,
+            superclasses,
+            synonyms: term.synonyms,
+            layer: OntologyLayer::Domain,
+            iri: Some(term.id),
+        }))
     }
 
     /// Resolve from L4 federated sources (network)
     fn resolve_federated(&self, parsed: &ParsedTermRef) -> OntologyResult<Option<ResolvedTerm>> {
-        // Would use FederatedResolver to query BioPortal/OLS4
-        // For now, return None as placeholder
-        Ok(None)
+        let mut resolver = FederatedResolver::with_config(FederatedConfig {
+            timeout_ms: self.config.network_timeout_ms,
+            max_retries: self.config.max_retries,
+            ..FederatedConfig::default()
+        })
+        .with_ols4();
+
+        if let Ok(api_key) = std::env::var("BIOPORTAL_API_KEY")
+            && !api_key.trim().is_empty()
+        {
+            resolver = resolver.with_bioportal(api_key);
+        }
+
+        if let Ok(base_url) = std::env::var("SOUNIO_FEDERATED_CUSTOM_URL")
+            && !base_url.trim().is_empty()
+        {
+            resolver = resolver.with_source(FederatedSource::Custom {
+                name: "Custom".to_string(),
+                base_url,
+                api_key: std::env::var("SOUNIO_FEDERATED_CUSTOM_API_KEY").ok(),
+            });
+        }
+
+        let query = FederatedQuery::term(&parsed.local_id)
+            .in_ontology(parsed.prefix.to_lowercase())
+            .limit(1);
+
+        match resolver.resolve(&query) {
+            Ok(term) => Ok(Some(ResolvedTerm {
+                curie: term.curie,
+                label: term.label,
+                definition: term.definition,
+                superclasses: vec![],
+                synonyms: term.synonyms,
+                layer: OntologyLayer::Federated,
+                iri: Some(term.iri),
+            })),
+            // Network/federated backends are best-effort and should not mask "term not found".
+            Err(OntologyError::TermNotFound { .. })
+            | Err(OntologyError::NetworkError(_))
+            | Err(OntologyError::OntologyNotAvailable(_))
+            | Err(OntologyError::ResolutionFailed(_)) => Ok(None),
+            Err(err) => Err(err),
+        }
+    }
+
+    #[cfg(feature = "ontology")]
+    fn domain_search_dirs(&self) -> Vec<PathBuf> {
+        let mut dirs = Vec::new();
+
+        if let Some(path) = &self.config.data_dir {
+            dirs.push(path.clone());
+        }
+
+        if let Ok(path) = std::env::var("SOUNIO_ONTOLOGY_DB")
+            && !path.trim().is_empty()
+        {
+            dirs.push(PathBuf::from(path));
+        }
+
+        if let Ok(exe) = std::env::current_exe()
+            && let Some(parent) = exe.parent()
+        {
+            let db_path = parent.join("ontology_db");
+            dirs.push(db_path);
+        }
+
+        dirs.push(PathBuf::from("/usr/share/sounio/ontology_db"));
+        dirs
+    }
+
+    #[cfg(feature = "ontology")]
+    fn find_domain_db_path(&self, prefix: &str) -> Option<PathBuf> {
+        let prefix_lower = prefix.to_lowercase();
+
+        for dir in self.domain_search_dirs() {
+            for file in [format!("{}.db", prefix_lower), format!("{}.db", prefix)] {
+                let path = dir.join(file);
+                if path.exists() {
+                    return Some(path);
+                }
+            }
+        }
+
+        None
     }
 
     /// Check if child term is a subclass of parent term
@@ -510,7 +619,18 @@ impl OntologyResolver {
         // L3: Domain (would use SQLite)
         #[cfg(feature = "ontology")]
         {
-            // Would query semantic-sql database
+            if let Some(db_path) = self.find_domain_db_path(&child.prefix) {
+                let store = SemanticSqlStore::open(&db_path)?;
+                return store
+                    .is_subclass_of(&child.curie, &parent.curie)
+                    .map(|is_sub| {
+                        if is_sub {
+                            SubsumptionResult::IsSubclass
+                        } else {
+                            SubsumptionResult::NotSubclass
+                        }
+                    });
+            }
         }
 
         Ok(SubsumptionResult::Unknown)
@@ -662,5 +782,31 @@ mod tests {
 
         assert!(resolver.exists("BFO:0000001"));
         assert!(!resolver.exists("NONEXISTENT:12345"));
+    }
+
+    #[cfg(feature = "ontology")]
+    #[test]
+    fn test_domain_subsumption_missing_db_is_unknown() {
+        let missing = std::env::temp_dir()
+            .join(format!("sounio-missing-domain-db-{}", std::process::id()))
+            .join("does-not-exist");
+        let config = ResolverConfig::default().with_data_dir(missing).no_federated();
+        let mut resolver = OntologyResolver::new(config).unwrap();
+
+        let result = resolver.is_subclass_of("CHEBI:15365", "CHEBI:23888").unwrap();
+        assert!(matches!(result, SubsumptionResult::Unknown));
+    }
+
+    #[cfg(feature = "ontology")]
+    #[test]
+    fn test_domain_resolution_missing_db_soft_miss() {
+        let missing = std::env::temp_dir()
+            .join(format!("sounio-missing-domain-db-{}", std::process::id()))
+            .join("does-not-exist");
+        let config = ResolverConfig::default().with_data_dir(missing).no_federated();
+        let mut resolver = OntologyResolver::new(config).unwrap();
+
+        let result = resolver.resolve("CHEBI:15365");
+        assert!(matches!(result, Err(OntologyError::TermNotFound { .. })));
     }
 }

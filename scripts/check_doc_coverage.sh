@@ -23,9 +23,8 @@ echo "  Minimum coverage: ${MIN_COVERAGE}%"
 echo "  Strict mode: ${STRICT}"
 echo ""
 
-# Run souniodoc check
-cd compiler
-if cargo run --bin souniodoc -- check --min-coverage "${MIN_COVERAGE}" > /tmp/doc_coverage.txt 2>&1; then
+# Run souniodoc check from workspace root
+if cargo run -p souc --bin souniodoc -- check --min-coverage "${MIN_COVERAGE}" > /tmp/doc_coverage.txt 2>&1; then
     echo -e "${GREEN}✓ Overall documentation coverage meets minimum threshold${NC}"
     cat /tmp/doc_coverage.txt
     COVERAGE_OK=true

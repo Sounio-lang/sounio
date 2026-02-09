@@ -166,7 +166,7 @@ print("ATE: ", effect.value, " ± ", effect.uncertainty)
 | Module | Lines | Description |
 |--------|------:|-------------|
 | `epistemic/` | 31,962 | Core uncertainty types, GUM propagation, provenance |
-| `compiler/` | 17,923 | Self-hosted compiler (lexer, parser, checker, codegen) |
+| `stdlib/compiler/` | 17,923 | Self-hosted compiler (lexer, parser, checker, codegen) |
 | `nn/` | 13,693 | Neural networks, autograd, backpropagation |
 | `medlang/` | 8,147 | PK/PD domain-specific language |
 | `async/` | 7,435 | Async runtime, channels, streams, executors |
@@ -254,7 +254,7 @@ export SOUNIO_STDLIB_PATH=/path/to/sounio/stdlib
 souc run /path/to/your/program.sio
 
 # Option 2: System-wide installation
-cd compiler && cargo install --path .
+cargo install --path crates/souc
 # Stdlib will be found relative to installed binary
 
 # Option 3: Copy to user home directory

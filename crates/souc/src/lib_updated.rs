@@ -142,7 +142,7 @@ pub fn compile(source: &str) -> miette::Result<Vec<u8>> {
         let mut codegen =
             codegen::llvm::LLVMCodegen::new(&context, "main", codegen::llvm::OptLevel::O2, false);
         let _module = codegen.compile(&hlir);
-        // TODO: Actually emit machine code
+        // Machine-code emission is not wired in this library API path yet.
         return Ok(vec![]);
     }
 

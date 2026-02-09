@@ -215,19 +215,19 @@ With Phase B.1 complete, the native backend now has the infrastructure to:
 ## Technical Debt
 
 - **Large library size**: 139MB is too large
-  - TODO: Create minimal runtime-only library
-  - TODO: Enable LTO and strip debug symbols
-  - TODO: Separate compiler from runtime
+  - Planned: create minimal runtime-only library
+  - Planned: enable LTO and strip debug symbols
+  - Planned: separate compiler from runtime
 
 - **Full continuation implementation**: Assembly code not yet written
-  - TODO: Implement __sounio_capture_aarch64 in assembly
-  - TODO: Implement __sounio_resume_aarch64 in assembly
-  - TODO: Test on real AArch64 hardware
+  - Planned: implement __sounio_capture_aarch64 in assembly
+  - Planned: implement __sounio_resume_aarch64 in assembly
+  - Planned: test on real AArch64 hardware
 
 - **Platform support**: Only AArch64 infrastructure created
-  - TODO: Implement x86-64 continuation capture/resume
-  - TODO: Add RISC-V support
-  - TODO: Consider WebAssembly limitations
+  - Planned: implement x86-64 continuation capture/resume
+  - Planned: add RISC-V support
+  - Planned: assess WebAssembly limitations
 
 ## Lessons Learned
 

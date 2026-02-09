@@ -3421,8 +3421,10 @@ impl TypeChecker {
                         {
                             if path.segments.len() == 2 {
                                 let variant_name = &path.segments[1];
-                                if let Some((_, variant_types)) =
-                                    variants.iter().find(|(n, _)| n == variant_name)
+                                if let Some(variant_field_count) = variants
+                                    .iter()
+                                    .find(|(n, _)| n == variant_name)
+                                    .map(|(_, types)| types.len())
                                 {
                                     // Found enum variant - check visibility
                                     if let Some(def_id) = self
@@ -3449,7 +3451,20 @@ impl TypeChecker {
                                         name: type_name.clone(),
                                         args: vec![],
                                     };
-                                    (HirExprKind::Global(path.to_string()), result_ty)
+                                    if variant_field_count == 0 {
+                                        // Unit variant — emit as Variant value directly
+                                        (
+                                            HirExprKind::Variant {
+                                                enum_name: type_name.clone(),
+                                                variant: variant_name.clone(),
+                                                fields: vec![],
+                                            },
+                                            result_ty,
+                                        )
+                                    } else {
+                                        // Variant with fields — used as constructor fn
+                                        (HirExprKind::Global(path.to_string()), result_ty)
+                                    }
                                 } else {
                                     self.error(
                                         format!(

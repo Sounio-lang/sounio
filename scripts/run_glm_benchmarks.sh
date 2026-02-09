@@ -13,7 +13,7 @@ BLUE='\033[0;34m'
 NC='\033[0m' # No Color
 
 # Configuration
-BENCH_DIR="compiler/benches"
+BENCH_DIR="benches/compiler"
 OUTPUT_DIR="benchmark_results"
 LOG_FILE="benchmark_execution.log"
 REPORT_FILE="benchmark_report.md"

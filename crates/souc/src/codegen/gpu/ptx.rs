@@ -3808,6 +3808,197 @@ impl PtxCodegen {
             // Octonion Operations (8D Hypercomplex) - arXiv:1601.01507
             // ================================================================
 
+            // OctonionAdd: component-wise addition
+            // Math: c[i] = a[i] + b[i] for i in 0..8
+            // Complexity: 8 FAdd = 8 FLOPs
+            GpuOp::OctonionAdd(o1, o2) => {
+                let ro1 = self.get_register(*o1);
+                let ro2 = self.get_register(*o2);
+                let reg = self.alloc_register(&GpuType::Array(Box::new(GpuType::F32), 8));
+                self.registers.push(reg.clone());
+                self.value_types
+                    .push(GpuType::Array(Box::new(GpuType::F32), 8));
+
+                writeln!(
+                    self.output,
+                    "{}// OctonionAdd: component-wise addition (8 FLOPs)",
+                    indent
+                )
+                .unwrap();
+                writeln!(
+                    self.output,
+                    "{}  .reg .f32 %oadd_a<8>, %oadd_b<8>, %oadd_c<8>;",
+                    indent
+                )
+                .unwrap();
+
+                for i in 0..8 {
+                    writeln!(
+                        self.output,
+                        "{}  ld.global.f32 %oadd_a{}, [{} + {}];",
+                        indent,
+                        i,
+                        ro1,
+                        i * 4
+                    )
+                    .unwrap();
+                }
+                for i in 0..8 {
+                    writeln!(
+                        self.output,
+                        "{}  ld.global.f32 %oadd_b{}, [{} + {}];",
+                        indent,
+                        i,
+                        ro2,
+                        i * 4
+                    )
+                    .unwrap();
+                }
+                for i in 0..8 {
+                    writeln!(
+                        self.output,
+                        "{}  add.f32 %oadd_c{}, %oadd_a{}, %oadd_b{};",
+                        indent, i, i, i
+                    )
+                    .unwrap();
+                }
+                for i in 0..8 {
+                    writeln!(
+                        self.output,
+                        "{}  st.global.f32 [{} + {}], %oadd_c{};",
+                        indent,
+                        reg,
+                        i * 4,
+                        i
+                    )
+                    .unwrap();
+                }
+            }
+
+            // OctonionSub: component-wise subtraction
+            // Math: c[i] = a[i] - b[i] for i in 0..8
+            // Complexity: 8 FSub = 8 FLOPs
+            GpuOp::OctonionSub(o1, o2) => {
+                let ro1 = self.get_register(*o1);
+                let ro2 = self.get_register(*o2);
+                let reg = self.alloc_register(&GpuType::Array(Box::new(GpuType::F32), 8));
+                self.registers.push(reg.clone());
+                self.value_types
+                    .push(GpuType::Array(Box::new(GpuType::F32), 8));
+
+                writeln!(
+                    self.output,
+                    "{}// OctonionSub: component-wise subtraction (8 FLOPs)",
+                    indent
+                )
+                .unwrap();
+                writeln!(
+                    self.output,
+                    "{}  .reg .f32 %osub_a<8>, %osub_b<8>, %osub_c<8>;",
+                    indent
+                )
+                .unwrap();
+
+                for i in 0..8 {
+                    writeln!(
+                        self.output,
+                        "{}  ld.global.f32 %osub_a{}, [{} + {}];",
+                        indent,
+                        i,
+                        ro1,
+                        i * 4
+                    )
+                    .unwrap();
+                }
+                for i in 0..8 {
+                    writeln!(
+                        self.output,
+                        "{}  ld.global.f32 %osub_b{}, [{} + {}];",
+                        indent,
+                        i,
+                        ro2,
+                        i * 4
+                    )
+                    .unwrap();
+                }
+                for i in 0..8 {
+                    writeln!(
+                        self.output,
+                        "{}  sub.f32 %osub_c{}, %osub_a{}, %osub_b{};",
+                        indent, i, i, i
+                    )
+                    .unwrap();
+                }
+                for i in 0..8 {
+                    writeln!(
+                        self.output,
+                        "{}  st.global.f32 [{} + {}], %osub_c{};",
+                        indent,
+                        reg,
+                        i * 4,
+                        i
+                    )
+                    .unwrap();
+                }
+            }
+
+            // OctonionScale: scalar multiplication
+            // Math: c[i] = a[i] * s for i in 0..8
+            // Complexity: 8 FMul = 8 FLOPs
+            GpuOp::OctonionScale(o, s) => {
+                let ro = self.get_register(*o);
+                let rs = self.get_register(*s);
+                let reg = self.alloc_register(&GpuType::Array(Box::new(GpuType::F32), 8));
+                self.registers.push(reg.clone());
+                self.value_types
+                    .push(GpuType::Array(Box::new(GpuType::F32), 8));
+
+                writeln!(
+                    self.output,
+                    "{}// OctonionScale: scalar multiplication (8 FLOPs)",
+                    indent
+                )
+                .unwrap();
+                writeln!(
+                    self.output,
+                    "{}  .reg .f32 %oscl_in<8>, %oscl_out<8>, %oscl_s;",
+                    indent
+                )
+                .unwrap();
+                writeln!(self.output, "{}  ld.global.f32 %oscl_s, [{}];", indent, rs).unwrap();
+
+                for i in 0..8 {
+                    writeln!(
+                        self.output,
+                        "{}  ld.global.f32 %oscl_in{}, [{} + {}];",
+                        indent,
+                        i,
+                        ro,
+                        i * 4
+                    )
+                    .unwrap();
+                }
+                for i in 0..8 {
+                    writeln!(
+                        self.output,
+                        "{}  mul.f32 %oscl_out{}, %oscl_in{}, %oscl_s;",
+                        indent, i, i
+                    )
+                    .unwrap();
+                }
+                for i in 0..8 {
+                    writeln!(
+                        self.output,
+                        "{}  st.global.f32 [{} + {}], %oscl_out{};",
+                        indent,
+                        reg,
+                        i * 4,
+                        i
+                    )
+                    .unwrap();
+                }
+            }
+
             // Octonion multiplication via Cayley-Dickson construction
             // Math: c = a * b using Cayley-Dickson product formula
             // Ref: Baez, "The Octonions", Bull. AMS 2002
@@ -7633,7 +7824,7 @@ impl PtxCodegen {
                     indent
                 )
                 .unwrap(); // 1/8
-                // Compute variance and normalize
+                           // Compute variance and normalize
                 writeln!(self.output, "{}  mov.f32 %ln_var, 0F00000000;", indent).unwrap();
                 for i in 0..8 {
                     writeln!(
@@ -9242,7 +9433,7 @@ impl PtxCodegen {
                     indent
                 )
                 .unwrap(); // >0.95
-                // Pattern 2: check e6, e15
+                           // Pattern 2: check e6, e15
                 writeln!(
                     self.output,
                     "{}  fma.rn.f32 %sed_main, %sed_zd6, %sed_zd6, 0F00000000;",
@@ -11476,7 +11667,6 @@ impl PtxCodegen {
                 .unwrap();
                 writeln!(self.output, "{}mov.u32 {}, 0; // placeholder", indent, reg).unwrap();
             }
-
         }
 
         self.registers.clear_current();

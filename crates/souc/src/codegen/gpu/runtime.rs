@@ -434,7 +434,7 @@ impl GpuRuntime {
         // CudaDevice::new() returns Arc<CudaDevice>
         let device = CudaDevice::new(device_id as usize).map_err(|e| {
             GpuError::DriverError(format!(
-                "Failed to initialize CUDA device {}: {}",
+                "Failed to initialize CUDA device {}: {:?}",
                 device_id, e
             ))
         })?;
@@ -609,7 +609,7 @@ impl GpuRuntime {
         // Use cudarc to load PTX and get the kernel function
         device
             .load_ptx(Ptx::from_src(ptx), module_name, &[func_name])
-            .map_err(|e| GpuError::KernelLoadFailed(format!("Failed to load PTX: {}", e)))?;
+            .map_err(|e| GpuError::KernelLoadFailed(format!("Failed to load PTX: {:?}", e)))?;
 
         let func = device.get_func(module_name, func_name).ok_or_else(|| {
             GpuError::KernelLoadFailed(format!("Function '{}' not found in module", kernel_name))
@@ -703,7 +703,7 @@ impl GpuRuntime {
         unsafe {
             func.clone()
                 .launch(launch_cfg, &mut arg_ptrs)
-                .map_err(|e| GpuError::DriverError(format!("Kernel launch failed: {}", e)))?;
+                .map_err(|e| GpuError::DriverError(format!("Kernel launch failed: {:?}", e)))?;
         }
 
         // Drop storage to free allocated argument memory

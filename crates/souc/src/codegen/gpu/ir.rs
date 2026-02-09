@@ -1519,6 +1519,15 @@ pub enum GpuOp {
     // Octonions: o = a + bi + cj + dk + el + fil + gjl + hkl
     // Non-associative but alternative (power-associative, flexible)
     // Reference: arXiv:1601.01507 - Octonion-valued neural networks
+    /// Octonion component-wise addition: 8 FLOPs
+    OctonionAdd(ValueId, ValueId),
+
+    /// Octonion component-wise subtraction: 8 FLOPs
+    OctonionSub(ValueId, ValueId),
+
+    /// Octonion scalar multiplication: 8 FLOPs
+    OctonionScale(ValueId, ValueId),
+
     /// Octonion multiplication via Cayley-Dickson construction
     OctonionMul(ValueId, ValueId),
 

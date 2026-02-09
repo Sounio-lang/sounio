@@ -2289,6 +2289,51 @@ impl MetalCodegen {
 
             // Octonion operations (8D hypercomplex) - IMPLEMENTATION
 
+            // OctonionAdd: Component-wise addition (8 FLOPs)
+            GpuOp::OctonionAdd(o1, o2) => {
+                let o1_name = self.get_var_name(*o1);
+                let o2_name = self.get_var_name(*o2);
+                self.emit(&format!("// OctonionAdd: component-wise addition"));
+                self.emit(&format!(
+                    "float8 oct_add_a = *(device float8*)(&{});",
+                    o1_name
+                ));
+                self.emit(&format!(
+                    "float8 oct_add_b = *(device float8*)(&{});",
+                    o2_name
+                ));
+                self.emit(&format!("float8 {} = oct_add_a + oct_add_b;", result_name));
+            }
+
+            // OctonionSub: Component-wise subtraction (8 FLOPs)
+            GpuOp::OctonionSub(o1, o2) => {
+                let o1_name = self.get_var_name(*o1);
+                let o2_name = self.get_var_name(*o2);
+                self.emit(&format!("// OctonionSub: component-wise subtraction"));
+                self.emit(&format!(
+                    "float8 oct_sub_a = *(device float8*)(&{});",
+                    o1_name
+                ));
+                self.emit(&format!(
+                    "float8 oct_sub_b = *(device float8*)(&{});",
+                    o2_name
+                ));
+                self.emit(&format!("float8 {} = oct_sub_a - oct_sub_b;", result_name));
+            }
+
+            // OctonionScale: Scalar-octonion multiplication (8 FLOPs)
+            GpuOp::OctonionScale(o, s) => {
+                let o_name = self.get_var_name(*o);
+                let s_name = self.get_var_name(*s);
+                self.emit(&format!("// OctonionScale: scalar × octonion"));
+                self.emit(&format!("float8 oct_scl = *(device float8*)(&{});", o_name));
+                self.emit(&format!(
+                    "float {} = *(device float*)(&{});",
+                    "oct_scalar", s_name
+                ));
+                self.emit(&format!("float8 {} = oct_scl * oct_scalar;", result_name));
+            }
+
             // OctonionNormSq: Compute |o|² = sum of component squares
             // Math: |o|² = a² + b² + c² + d² + e² + f² + g² + h²
             // Uses Metal SIMD operations for efficiency
@@ -4315,7 +4360,6 @@ impl MetalCodegen {
                     result_name
                 ));
             }
-
         }
     }
 
@@ -4436,7 +4480,7 @@ impl MetalCodegen {
 
 /// Compile HLIR to MSL
 pub fn compile_to_msl(hlir: &crate::hlir::HlirModule, gpu_family: MetalGpuFamily) -> String {
-    use super::hlir_to_gpu::{LoweringConfig, lower_with_config};
+    use super::hlir_to_gpu::{lower_with_config, LoweringConfig};
 
     let config = LoweringConfig {
         target: GpuTarget::Metal { gpu_family },
@@ -4461,7 +4505,7 @@ pub fn compile_to_msl_epistemic(
     gpu_family: MetalGpuFamily,
     epistemic: bool,
 ) -> String {
-    use super::hlir_to_gpu::{LoweringConfig, lower_with_config};
+    use super::hlir_to_gpu::{lower_with_config, LoweringConfig};
 
     let config = LoweringConfig {
         target: GpuTarget::Metal { gpu_family },
