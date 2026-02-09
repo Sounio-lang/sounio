@@ -7,6 +7,7 @@
 [![License: MIT](https://img.shields.io/badge/License-MIT-gold.svg)](LICENSE)
 [![stdlib](https://img.shields.io/badge/stdlib-215K%2B%20lines-blue.svg)](#standard-library)
 [![Version](https://img.shields.io/badge/version-0.100.0-orange.svg)](CHANGELOG.md)
+[![Preprint: TechRxiv](https://img.shields.io/badge/Preprint-TechRxiv%20%28DOI%20pending%29-teal.svg)](https://www.techrxiv.org/)
 
 <img src="docs/assets/sounio-logo.svg" alt="Sounio Logo" width="200">
 
@@ -198,6 +199,21 @@ print("ATE: ", effect.value, " ± ", effect.uncertainty)
 
 ## Quick Start
 
+### Build from Source (JOSS Path)
+
+**Prerequisites**
+- Rust >= 1.80 (project currently targets edition 2024)
+- NVIDIA GPU + CUDA >= 12.0 (optional, only for GPU-specific paths)
+
+```bash
+git clone https://github.com/sounio-lang/sounio.git
+cd sounio
+cargo build --release
+./target/release/souc --version
+```
+
+### First Run
+
 ```bash
 # Clone the repository
 git clone https://github.com/sounio-lang/sounio.git
@@ -277,18 +293,19 @@ This displays all search locations and which ones exist, helping you verify corr
 ## Learning Resources
 
 ### Documentation
+- **[Documentation Site](https://sounio-lang.org/docs/)** - Hosted docs portal
 - **[Tutorial](docs/guide/tutorial.md)** - Step-by-step guide to Sounio
-- **[Language Guide](docs/LLM_PROGRAMMING_GUIDE.md)** - Complete language reference
+- **[Language Guide](docs/guide/programming.md)** - Complete language reference
 - **[API Reference](docs/reference/STDLIB_REFERENCE.md)** - Standard library documentation
 - **[FAQ](docs/FAQ.md)** - Frequently asked questions
 - **[Glossary](docs/GLOSSARY.md)** - Epistemic computing terminology
 
 ### Examples
 - **[Basic Examples](examples/)** - Hello world, syntax basics
-- **[Scientific Computing](examples/scientific/)** - ODE solvers, signal processing
-- **[Medical Applications](examples/medical/)** - PK/PD models, PBPK
+- **[Epistemic Examples](examples/epistemic/)** - Uncertainty and provenance demos
+- **[PBPK Examples](examples/pbpk/)** - PK/PD and PBPK workflows
 - **[GPU Computing](examples/gpu/)** - High-performance kernels
-- **[Advanced Examples](examples/advanced/)** - Complex applications
+- **[fMRI Examples](examples/fmri/)** - Neuroimaging workflows
 
 ### For Contributors
 - **[Architecture Overview](docs/compiler/ARCHITECTURE.md)** - Compiler design
@@ -389,12 +406,14 @@ cargo build --workspace --all-features
 If you use Sounio in academic work, please cite:
 
 ```bibtex
-@software{sounio2025,
+@software{sounio2026,
   title = {Sounio: A Systems Language for Epistemic Computing},
   author = {Agourakis, Demetrios Chiuratto},
   year = {2025--2026},
   version = {0.100.0},
-  url = {https://github.com/sounio-lang/sounio}
+  doi = {10.5281/zenodo.18190065},
+  url = {https://doi.org/10.5281/zenodo.18190065},
+  note = {Latest published release DOI: 10.5281/zenodo.18404188 (v0.99.0)}
 }
 ```
 
