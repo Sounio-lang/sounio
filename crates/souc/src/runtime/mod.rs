@@ -141,5 +141,6 @@ pub use gpu_bridge::{
 
 // FFI layer for self-hosting (new)
 pub mod syscalls;
+pub mod elf;
 pub mod ffi;
 pub use ffi::{ffi_alloc, ffi_io, ffi_path, ffi_process, ffi_stdio, ffi_time};
