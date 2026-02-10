@@ -1,8 +1,10 @@
 // self-hosted::main — Entry point for the self-hosted compiler
 //
-// Mode detection via first stdin byte:
-//   - EOF (-1): run test suite
-//   - Real byte: read rest of stdin, lex, print tokens
+// Mode detection via CLI args (after `--`):
+//   - No args: run test suite
+//   - --lex <path>: lex mode (tokenize, print tokens)
+//   - --parse <path>: parse mode (lex + parse, print item summary)
+//   - --resolve <path>: resolve mode (lex + parse + resolve)
 
 // ============================================================================
 // TOKEN KIND NAME PRINTER
@@ -178,13 +180,78 @@ fn print_token_info(tok: Token, source: [i8; 1048576]) with IO, Mut, Panic, Div 
 }
 
 // ============================================================================
-// STDIN PIPELINE
+// ITEM SUMMARY PRINTER (for parse/resolve modes)
 // ============================================================================
 
-fn run_stdin_pipeline(first_byte: i64) -> i32 with IO, Mut, Div, Panic, Alloc {
-    let state = read_stdin_with_first(first_byte)
+fn print_item_kind_label(kind: ItemKind) with IO {
+    match kind {
+        ItemFn => print("  fn ")
+        ItemStruct => print("  struct ")
+        ItemEnum => print("  enum ")
+        ItemImpl => print("  impl ")
+        ItemTypeAlias => print("  type ")
+        ItemUse => print("  use ")
+    }
+}
 
-    print("=== Stdin Lexer Pipeline ===\n")
+fn print_item_kind_tag(kind: ItemKind) with IO {
+    match kind {
+        ItemFn => print(" (Function)")
+        ItemStruct => print(" (Struct)")
+        ItemEnum => print(" (Enum)")
+        ItemImpl => print(" (Impl)")
+        ItemTypeAlias => print(" (TypeAlias)")
+        ItemUse => print(" (Use)")
+    }
+}
+
+fn print_name_bytes(name: Name) with IO, Mut, Panic, Div {
+    var i: i64 = 0
+    while i < name.len {
+        print_char(name.buf[i])
+        i = i + 1
+    }
+}
+
+fn print_items_list(items: Option<Box<ItemList>>) with IO, Mut, Panic, Div, Alloc {
+    match items {
+        None => {}
+        Some(list) => {
+            print_item_kind_label((*list).head.kind)
+            print_name_bytes((*list).head.name)
+            print_item_kind_tag((*list).head.kind)
+            print("\n")
+            print_items_list((*list).tail)
+        }
+    }
+}
+
+// ============================================================================
+// FILE READER — read a .sio file into the 1MB lex buffer
+// ============================================================================
+
+fn read_source_file(path: string) -> LexerState with IO, Mut, Div, Panic {
+    let data = read_file(path)
+    let size = file_size(path)
+    var buf: [i8; 1048576] = [0; 1048576]
+    var i: i64 = 0
+    while i < size && i < 1048576 {
+        buf[i as usize] = data[i as usize]
+        i = i + 1
+    }
+    lex(buf, size, 0)
+}
+
+// ============================================================================
+// LEX PIPELINE (--lex mode)
+// ============================================================================
+
+fn run_lex_pipeline(path: string) -> i32 with IO, Mut, Div, Panic, Alloc {
+    let state = read_source_file(path)
+
+    print("=== Lex Pipeline: ")
+    print(path)
+    print(" ===\n")
     var i: i64 = 0
     while i < state.token_count {
         print_token_info(state.tokens[i as usize], state.cursor.source)
@@ -198,14 +265,74 @@ fn run_stdin_pipeline(first_byte: i64) -> i32 with IO, Mut, Div, Panic, Alloc {
 }
 
 // ============================================================================
+// PARSE PIPELINE (--parse mode)
+// ============================================================================
+
+fn run_parse_pipeline(path: string) -> i32 with IO, Mut, Div, Panic, Alloc {
+    let state = read_source_file(path)
+    let prog = parse_program(state.tokens, state.token_count)
+    let ic = count_items(prog)
+
+    print("Items: ")
+    print_int(ic)
+    print("\n")
+    print_items_list(prog.items)
+    print("Parse OK: ")
+    print_int(ic)
+    print(" items from ")
+    print_int(state.token_count)
+    print(" tokens\n")
+    0
+}
+
+// ============================================================================
+// RESOLVE PIPELINE (--resolve mode)
+// ============================================================================
+
+fn run_resolve_pipeline(path: string) -> i32 with IO, Mut, Div, Panic, Alloc {
+    let state = read_source_file(path)
+    let prog = parse_program(state.tokens, state.token_count)
+    let ic = count_items(prog)
+    let result = resolve_program(prog)
+
+    print("Items: ")
+    print_int(ic)
+    print("\n")
+    print("Symbols defined: ")
+    print_int(result.symbols.count)
+    print("\n")
+    print("Resolve OK: ")
+    print_int(result.error_count)
+    print(" errors\n")
+    0
+}
+
+// ============================================================================
 // ENTRY POINT
 // ============================================================================
 
 fn main() -> i32 with IO, Mut, Div, Panic, Alloc {
-    let first = read_byte()
-    if first == -1 {
+    let argc = arg_count()
+    if argc == 0 {
+        // No args: run test suite
         run_all_tests()
+    } else if argc >= 2 {
+        let mode = get_arg(0)
+        let path = get_arg(1)
+        if str_eq(mode, "--lex") {
+            run_lex_pipeline(path)
+        } else if str_eq(mode, "--parse") {
+            run_parse_pipeline(path)
+        } else if str_eq(mode, "--resolve") {
+            run_resolve_pipeline(path)
+        } else {
+            print("Unknown mode: ")
+            print(mode)
+            print("\nUsage: souc run self-hosted/ -- --lex|--parse|--resolve <path.sio>\n")
+            1
+        }
     } else {
-        run_stdin_pipeline(first)
+        print("Usage: souc run self-hosted/ -- --lex|--parse|--resolve <path.sio>\n")
+        1
     }
 }
