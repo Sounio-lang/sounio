@@ -37,6 +37,10 @@ enum Commands {
         #[arg(short, long, value_name = "FILE")]
         output: Option<PathBuf>,
 
+        /// Emit a minimal native executable stub (bootstrap helper)
+        #[arg(long)]
+        native_stub: bool,
+
         /// Emit intermediate representation
         #[arg(long, value_enum)]
         emit: Option<EmitType>,
@@ -1648,10 +1652,11 @@ fn main() -> Result<()> {
         Commands::Compile {
             input,
             output,
+            native_stub,
             emit,
             opt_level,
             glm_enabled,
-        } => compile(&input, output.as_deref(), emit, opt_level, glm_enabled),
+        } => compile(&input, output.as_deref(), emit, opt_level, glm_enabled, native_stub),
 
         Commands::Build {
             input,
@@ -2647,6 +2652,7 @@ fn compile(
     emit: Option<EmitType>,
     opt_level: u8,
     glm_enabled: bool,
+    native_stub: bool,
 ) -> Result<()> {
     tracing::info!(
         "Compiling {:?} with optimization level {}{}",
@@ -2707,12 +2713,14 @@ fn compile(
     // Lower to HLIR
     let hlir = sounio::hlir::lower(&hir);
 
-    // Code generation
-    let _output_path = output.unwrap_or_else(|| {
-        let mut p = input.to_path_buf();
-        p.set_extension("");
-        Box::leak(Box::new(p))
-    });
+    if native_stub {
+        let out_path = output
+            .map(ToOwned::to_owned)
+            .unwrap_or_else(|| std::path::PathBuf::from("a.out"));
+        emit_native_stub_executable(&out_path)?;
+        println!("Compiled to {}", out_path.display());
+        return Ok(());
+    }
 
     // This command path currently validates frontend stages only.
     tracing::info!("Compilation successful (codegen not yet implemented)");
@@ -2724,6 +2732,107 @@ fn compile(
     );
 
     Ok(())
+}
+
+fn emit_native_stub_executable(output: &std::path::Path) -> Result<()> {
+    let mut e = sounio::runtime::elf::NativeEmitter::new();
+    let msg = "Hello from Sounio!\n";
+    let msg_offset = e.add_string(msg);
+
+    #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+    {
+        fn align_up(n: usize, align: usize) -> usize {
+            (n + align - 1) & !(align - 1)
+        }
+
+        fn assemble(msg_addr: u64, msg_len: usize) -> Vec<u8> {
+            let mut code = vec![
+                0x48, 0xc7, 0xc0, 0x01, 0x00, 0x00, 0x00, // mov rax, 1 (write)
+                0x48, 0xc7, 0xc7, 0x01, 0x00, 0x00, 0x00, // mov rdi, 1 (stdout)
+                0x48, 0xbe, 0, 0, 0, 0, 0, 0, 0, 0, // mov rsi, imm64 (patched)
+                0x48, 0xc7, 0xc2, 0, 0, 0, 0, // mov rdx, imm32 (patched)
+                0x0f, 0x05, // syscall
+                0x48, 0xc7, 0xc0, 0x3c, 0x00, 0x00, 0x00, // mov rax, 60 (exit)
+                0x48, 0x31, 0xff, // xor rdi, rdi
+                0x0f, 0x05, // syscall
+            ];
+            // addr imm64 starts at offset 16
+            code[16..24].copy_from_slice(&msg_addr.to_le_bytes());
+            // len imm32 starts at offset 27
+            let len_u32: u32 = msg_len.try_into().map_err(|_| ()).unwrap();
+            code[27..31].copy_from_slice(&len_u32.to_le_bytes());
+            code
+        }
+
+        let placeholder = assemble(0, msg.len());
+        let phnum = 2usize;
+        let header_and_ph = 64 + (56 * phnum);
+        let code_off = align_up(header_and_ph, 0x1000);
+        let rodata_off = align_up(code_off + placeholder.len(), 0x1000);
+        let msg_addr = 0x400000_u64 + (rodata_off as u64) + (msg_offset as u64);
+
+        let code = assemble(msg_addr, msg.len());
+        e.emit_code(&code);
+        e.write_executable(&output.to_string_lossy(), 0)
+            .map_err(|err| miette::miette!("failed to write stub executable: {err}"))?;
+        return Ok(());
+    }
+
+    #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+    {
+        fn align_up(n: usize, align: usize) -> usize {
+            (n + align - 1) & !(align - 1)
+        }
+
+        fn encode_adr(rd: u32, imm: i64) -> u32 {
+            let immlo = (imm & 0x3) as u32;
+            let immhi = ((imm >> 2) & 0x7ffff) as u32;
+            0x1000_0000u32 | (immlo << 29) | (immhi << 5) | (rd & 0x1f)
+        }
+
+        fn assemble(msg_imm: i64, msg_len: usize) -> Vec<u8> {
+            let mut code = Vec::with_capacity(40);
+            code.extend_from_slice(&0xd280_0020u32.to_le_bytes()); // movz x0, #1
+            let adr_off = code.len();
+            code.extend_from_slice(&0u32.to_le_bytes()); // ADR patch
+
+            let len_u32: u32 = msg_len.try_into().expect("msg_len fits in u32");
+            let mov_x2 = 0xd280_0000u32 + (len_u32 << 5) + 2;
+            code.extend_from_slice(&mov_x2.to_le_bytes()); // movz x2, #len
+
+            code.extend_from_slice(&0xd280_0090u32.to_le_bytes()); // movz x16, #4
+            code.extend_from_slice(&0xf2a0_4010u32.to_le_bytes()); // movk x16, #0x0200, lsl #16
+            code.extend_from_slice(&0xd400_1001u32.to_le_bytes()); // svc #0x80
+            code.extend_from_slice(&0xd280_0000u32.to_le_bytes()); // movz x0, #0
+            code.extend_from_slice(&0xd280_0030u32.to_le_bytes()); // movz x16, #1
+            code.extend_from_slice(&0xf2a0_4010u32.to_le_bytes()); // movk x16, #0x0200, lsl #16
+            code.extend_from_slice(&0xd400_1001u32.to_le_bytes()); // svc #0x80
+
+            let adr = encode_adr(1, msg_imm);
+            code[adr_off..adr_off + 4].copy_from_slice(&adr.to_le_bytes());
+            code
+        }
+
+        // Mirrors the current Mach-O layout in `runtime::elf`.
+        let placeholder = assemble(0, msg.len());
+        let sizeofcmds = 72 + 72 + 288;
+        let code_off = align_up(32 + sizeofcmds, 16);
+        let data_off = align_up(code_off + placeholder.len(), 16);
+        let msg_file_off = (data_off as u64) + (msg_offset as u64);
+        let adr_pc = 0x100000000_u64 + (code_off as u64) + 4;
+        let msg_addr = 0x100000000_u64 + msg_file_off;
+        let msg_imm = (msg_addr as i64) - (adr_pc as i64);
+
+        let code = assemble(msg_imm, msg.len());
+        e.emit_code(&code);
+        e.write_executable(&output.to_string_lossy(), 0)
+            .map_err(|err| miette::miette!("failed to write stub executable: {err}"))?;
+        return Ok(());
+    }
+
+    Err(miette::miette!(
+        "native stub emission is not implemented for this platform"
+    ))
 }
 
 fn check(
