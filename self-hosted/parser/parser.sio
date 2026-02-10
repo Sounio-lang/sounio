@@ -8,6 +8,11 @@ struct Parser {
     had_error: bool,
     error_count: i64,
     no_struct_lit: bool,
+    // When parsing nested generic type args like `Option<Box<T>>`, the lexer
+    // produces a single `>>` token. In type contexts we need to treat that as
+    // two consecutive `>` tokens. This counter tracks pending synthetic `>`
+    // tokens to emit before consuming the underlying `>>`.
+    pending_gt: i64,
 }
 
 // ============================================================
@@ -23,6 +28,7 @@ fn parser_new() -> Parser {
         had_error: false,
         error_count: 0,
         no_struct_lit: false,
+        pending_gt: 0,
     }
 }
 
@@ -40,15 +46,32 @@ impl Parser {
     }
 
     fn peek(self) -> TokenKind with Panic, Div {
-        self.current().kind
+        if self.pending_gt > 0 {
+            TokenKind::Gt
+        } else {
+            self.current().kind
+        }
     }
 
     fn peek_ahead(self, offset: i64) -> TokenKind with Panic, Div {
-        let idx = self.pos + offset
-        if idx < self.token_count {
-            self.tokens[idx].kind
+        if self.pending_gt > 0 {
+            if offset < self.pending_gt {
+                TokenKind::Gt
+            } else {
+                let idx = self.pos + 1 + (offset - self.pending_gt)
+                if idx < self.token_count {
+                    self.tokens[idx].kind
+                } else {
+                    TokenKind::Eof
+                }
+            }
         } else {
-            TokenKind::Eof
+            let idx = self.pos + offset
+            if idx < self.token_count {
+                self.tokens[idx].kind
+            } else {
+                TokenKind::Eof
+            }
         }
     }
 
@@ -66,7 +89,16 @@ impl Parser {
 
     fn advance(self) -> Parser with Mut, Panic, Div {
         var p = self
-        if p.pos < p.token_count {
+        if p.pending_gt > 0 {
+            p.pending_gt = p.pending_gt - 1
+            if p.pending_gt > 0 {
+                return p
+            }
+            // Consumed the last synthetic `>`; now consume the underlying token.
+            if p.pos < p.token_count {
+                p.pos = p.pos + 1
+            }
+        } else if p.pos < p.token_count {
             p.pos = p.pos + 1
         }
         // Skip newlines automatically (they're insignificant in most contexts)
@@ -78,10 +110,18 @@ impl Parser {
 
     fn advance_raw(self) -> Parser with Mut, Panic, Div {
         var p = self
-        if p.pos < p.token_count {
-            p.pos = p.pos + 1
+        if p.pending_gt > 0 {
+            p.pending_gt = p.pending_gt - 1
+            if p.pending_gt == 0 && p.pos < p.token_count {
+                p.pos = p.pos + 1
+            }
+            p
+        } else {
+            if p.pos < p.token_count {
+                p.pos = p.pos + 1
+            }
+            p
         }
-        p
     }
 
     // ============================================================
@@ -89,7 +129,12 @@ impl Parser {
     // ============================================================
 
     fn expect(self, kind: TokenKind) -> Parser with Mut, IO, Panic, Div {
-        if self.peek() == kind {
+        // In type contexts, allow `>>` to act as two consecutive `>` tokens.
+        if kind == TokenKind::Gt && self.pending_gt == 0 && self.peek() == TokenKind::Shr {
+            var p = self
+            p.pending_gt = 2
+            p.advance()
+        } else if self.peek() == kind {
             self.advance()
         } else {
             var p = self
