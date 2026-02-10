@@ -3028,7 +3028,22 @@ fn run(
                     })?;
 
                 // Execution still uses the Rust interpreter path below.
+                //
+                // Emit a stable, machine-readable marker so external runners can gate on it
+                // without relying on tracing formatting/timestamps.
+                eprintln!("SELFHOST=fallback backend=rust reason=integration_in_progress");
+
                 tracing::warn!("Self-hosted compiler integration in progress - using Rust compiler");
+
+                // Strict mode: when the user explicitly asked for self-host, forbid fallback.
+                // This is the source-of-truth behavior (not a runner-side grep).
+                let strict_mode = std::env::var("SOUNIO_SELFHOST_STRICT")
+                    .map(|v| v.trim() == "1")
+                    .unwrap_or(false);
+                if strict_mode {
+                    eprintln!("error: SOUNIO_SELFHOST_STRICT=1 forbids Rust fallback when --use-sounio-compiler is set");
+                    std::process::exit(2);
+                }
             }
 
             if check_only {
