@@ -39,6 +39,13 @@
 \newcommand{\HH}{\mathbb{H}}
 \newcommand{\Oct}{\mathbb{O}}
 
+% Roofline plot parameters (edit to match the evaluation machine).
+% Units: compute in GFLOP/s, bandwidth in GB/s.
+% These should be set from either measured peaks (preferred) or a clearly stated
+% theoretical bound, and must match the benchmark's threading configuration.
+\newcommand{\RooflinePeakCompute}{134} % example: single-core FP32 peak
+\newcommand{\RooflinePeakBandwidth}{25} % example: effective single-thread BW
+
 \title{\textbf{Native GPU Octonion Support for Deep Learning:\\A Compiler-First Approach}}
 \author{Demetrios Papakostas\\
 \textit{Independent Researcher}\\
@@ -302,6 +309,41 @@ $32\times32$ matmul & 471 $\mu$s & $\pm$11 $\mu$s & [460, 482] & 8.4 \\
 \label{fig:performance}
 \end{figure}
 
+\subsection{Roofline Model Analysis}
+
+To contextualize the microbenchmark results, we use the roofline model \cite{williams2009} to relate achieved throughput (GFLOP/s) to arithmetic intensity (FLOP/byte). For octonion matmul, we estimate arithmetic intensity under two bounds: a conservative ``no-reuse'' estimate and an ideal ``perfect-reuse'' estimate; the plotting script in the repository emits both values.
+
+\begin{figure}[h]
+\centering
+\begin{tikzpicture}
+\begin{loglogaxis}[
+    width=0.9\textwidth,
+    height=6.5cm,
+    xlabel={Arithmetic intensity (FLOP/byte)},
+    ylabel={Performance (GFLOP/s)},
+    grid=major,
+    legend pos=south east,
+]
+% Roofline ceiling: min(peak compute, peak bandwidth * intensity)
+\addplot[black,thick,domain=0.1:1000,samples=200] {min(\RooflinePeakCompute, x*\RooflinePeakBandwidth)};
+\addlegendentry{Roofline ceiling}
+
+% Points from Criterion (generated CSV). If the CSV is absent, keep the document buildable.
+\IfFileExists{figures/octonion_matmul_points.csv}{
+  \addplot[only marks,mark=*,blue] table[x=intensity_conservative,y=gflops,col sep=comma] {figures/octonion_matmul_points.csv};
+  \addlegendentry{Matmul (conservative AI)}
+  \addplot[only marks,mark=o,blue] table[x=intensity_ideal,y=gflops,col sep=comma] {figures/octonion_matmul_points.csv};
+  \addlegendentry{Matmul (ideal AI)}
+}{
+  \addplot[only marks,mark=*,blue] coordinates {(2,8)};
+  \addlegendentry{Matmul points (run script to populate)}
+}
+\end{loglogaxis}
+\end{tikzpicture}
+\caption{Roofline plot for octonion matrix multiplication. The ceiling uses user-configurable peak compute and bandwidth parameters; benchmark points are derived from Criterion output via \texttt{scripts/roofline\_octonion\_matmul.py}.}
+\label{fig:roofline}
+\end{figure}
+
 \section{Applications}
 \label{sec:applications}
 
@@ -440,6 +482,9 @@ C.~Trabelsi \emph{et al.}, ``Deep complex networks,'' in \emph{International Con
 \bibitem{wu2020}
 J.~Wu, L.~Xu, F.~Kong, J.~Peng, and Y.~Liu, ``Deep octonion networks,'' \emph{Neurocomputing}, vol.~397, pp.~179--191, 2020.
 
+\bibitem{williams2009}
+S.~Williams, A.~Waterman, and D.~Patterson, ``Roofline: An insightful visual performance model for multicore architectures,'' \emph{Communications of the ACM}, vol.~52, no.~4, pp.~65--76, 2009.
+
 \end{thebibliography}
 
 \appendix
@@ -453,10 +498,22 @@ All results can be reproduced using the open-source Sounio compiler.
 \textbf{Quick Start}:
 \begin{lstlisting}[language=bash]
 git clone https://github.com/Sounio-lang/sounio
-cd sounio/compiler
-cargo test --test integration_octonion_moufang
-cargo test --test integration_octonion_numerical
-cargo bench --bench octonion_benchmark
+cd sounio
+
+# Validation (octonion algebra properties)
+cargo test -p souc --features gpu --test integration_octonion_moufang -- --nocapture
+cargo test -p souc --features gpu --test integration_octonion_numerical -- --nocapture
+
+# GPU codegen presence checks (no GPU required)
+cargo test -p souc --features gpu --test integration_octonion_basic -- --nocapture
+
+# CPU microbenchmarks (Criterion)
+cargo bench -p souc --bench octonion_benchmark -- --noplot
+
+# Roofline CSV from Criterion output (for pgfplots figure)
+python3 scripts/roofline_octonion_matmul.py \
+  --criterion-dir target/criterion/octonion_matmul \
+  --out-csv docs/compiler/figures/octonion_matmul_points.csv
 \end{lstlisting}
 
 \section{Octonion Multiplication Table}

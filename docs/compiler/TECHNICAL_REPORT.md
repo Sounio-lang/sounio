@@ -612,17 +612,25 @@ All results can be reproduced using the open-source Sounio compiler.
 ```bash
 # Clone repository
 git clone https://github.com/Sounio-lang/sounio
-cd sounio/compiler
+cd sounio
 
 # Run mathematical validation (38 tests)
-cargo test --test integration_octonion_moufang -- --nocapture
-cargo test --test integration_octonion_numerical -- --nocapture
+cargo test -p souc --features gpu --test integration_octonion_moufang -- --nocapture
+cargo test -p souc --features gpu --test integration_octonion_numerical -- --nocapture
+
+# GPU codegen presence checks (no GPU required)
+cargo test -p souc --features gpu --test integration_octonion_basic -- --nocapture
 
 # Run performance benchmarks
-cargo bench --bench octonion_benchmark
+cargo bench -p souc --bench octonion_benchmark -- --noplot
+
+# Generate roofline CSV points from Criterion output (for LaTeX/pgfplots)
+python3 scripts/roofline_octonion_matmul.py \
+  --criterion-dir target/criterion/octonion_matmul \
+  --out-csv docs/compiler/figures/octonion_matmul_points.csv
 
 # Execute example program
-cargo run --features jit --bin souc -- run ../examples/octonion_example.sio
+cargo run -p souc --features jit --bin souc -- run examples/octonion_example.sio
 ```
 
 ### Expected Output
@@ -643,14 +651,14 @@ octonion_matmul/16x16     time: [57.6 µs 59.0 µs 60.4 µs]
 
 | Artifact | Path |
 |----------|------|
-| PTX codegen | `compiler/src/codegen/gpu/ptx.rs` |
-| Metal codegen | `compiler/src/codegen/gpu/metal.rs` |
+| PTX codegen | `crates/souc/src/codegen/gpu/ptx.rs` |
+| Metal codegen | `crates/souc/src/codegen/gpu/metal.rs` |
 | Octonion stdlib | `stdlib/math/octonion.sio` |
-| NN layers | `stdlib/nn/octonion.sio` |
 | G₂ activations | `stdlib/nn/g2_equivariant.sio` |
-| Moufang tests | `compiler/tests/integration_octonion_moufang.rs` |
-| Numerical tests | `compiler/tests/integration_octonion_numerical.rs` |
-| Benchmarks | `compiler/benches/octonion_bench.rs` |
+| Moufang tests | `crates/souc/tests/integration_octonion_moufang.rs` |
+| Numerical tests | `crates/souc/tests/integration_octonion_numerical.rs` |
+| Benchmarks | `benches/compiler/octonion_benchmark.rs` |
+| One-shot reproduction script | `scripts/reproduce_octonion_preprint.sh` |
 
 ---
 

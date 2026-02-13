@@ -29,6 +29,7 @@ Welcome to the Sounio programming language documentation.
 
 ### Development
 - [Roadmap](development/roadmap.md)
+- [Paper Artifact Packaging Spec](PAPER_ARTIFACT_PACKAGING_SPEC.md)
 
 ## Specification
 
