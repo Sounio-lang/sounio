@@ -1,0 +1,124 @@
+// self-hosted::native::reloc — Relocation tracking and patching
+//
+// Handles forward references and code patching for function calls and jumps.
+
+// Relocation kinds
+struct RelocKind {
+    is_rel32: i64,        // 1 if rel32, 0 if rip-rel32
+}
+
+fn reloc_rel32() -> RelocKind {
+    RelocKind { is_rel32: 1 }
+}
+
+fn reloc_rip_rel32() -> RelocKind {
+    RelocKind { is_rel32: 0 }
+}
+
+// Relocation target types
+struct RelocTarget {
+    is_function: i64,     // 1 if function, 0 if data label
+    target_index: i64,    // Function index or data offset
+}
+
+fn reloc_target_function(func_index: i64) -> RelocTarget {
+    RelocTarget { is_function: 1, target_index: func_index }
+}
+
+fn reloc_target_data(data_offset: i64) -> RelocTarget {
+    RelocTarget { is_function: 0, target_index: data_offset }
+}
+
+// Single relocation entry
+struct Relocation {
+    offset: i64,          // Code buffer position to patch
+    target: RelocTarget,  // What to patch
+    kind: RelocKind,      // How to encode the patch
+}
+
+// Relocation table (fixed-size array for bootstrap)
+struct RelocationTable {
+    entries: [Relocation; 256],
+    count: i64,
+}
+
+fn reloc_table_new() -> RelocationTable {
+    let empty_reloc = Relocation {
+        offset: 0,
+        target: reloc_target_function(0),
+        kind: reloc_rel32(),
+    }
+    RelocationTable {
+        entries: [empty_reloc; 256],
+        count: 0,
+    }
+}
+
+// Add a call relocation (rel32)
+fn add_call_reloc(table: RelocationTable, offset: i64, target_func: i64) -> RelocationTable with Mut, Panic {
+    var t = table
+    if t.count < 256 {
+        t.entries[t.count as usize] = Relocation {
+            offset: offset,
+            target: reloc_target_function(target_func),
+            kind: reloc_rel32(),
+        }
+        t.count = t.count + 1
+    }
+    t
+}
+
+// Add a data relocation (rip-relative)
+fn add_data_reloc(table: RelocationTable, offset: i64, data_offset: i64) -> RelocationTable with Mut, Panic {
+    var t = table
+    if t.count < 256 {
+        t.entries[t.count as usize] = Relocation {
+            offset: offset,
+            target: reloc_target_data(data_offset),
+            kind: reloc_rip_rel32(),
+        }
+        t.count = t.count + 1
+    }
+    t
+}
+
+// Apply all relocations (patch code buffer)
+fn apply_relocations(
+    table: RelocationTable,
+    buf: CodeBuffer,
+    fn_offsets: [i64; 256],
+    fn_count: i64
+) -> CodeBuffer with Mut, Panic, Div {
+    var b = buf
+    var i = 0
+
+    while i < table.count {
+        let reloc = table.entries[i as usize]
+        let patch_offset = reloc.offset
+
+        if reloc.target.is_function == 1 {
+            // Function call: rel32 = target_offset - (patch_offset + 4)
+            let target_idx = reloc.target.target_index
+            if target_idx < fn_count {
+                let target_offset = fn_offsets[target_idx as usize]
+                let rel32 = target_offset - (patch_offset + 4)
+                b = patch_u32_le(b, patch_offset, rel32)
+            }
+        }
+
+        i = i + 1
+    }
+    b
+}
+
+// Patch a u32 at the given offset
+fn patch_u32_le(buf: CodeBuffer, offset: i64, val: i64) -> CodeBuffer with Mut, Panic, Div {
+    var b = buf
+    if offset >= 0 && offset + 4 <= b.len {
+        b.bytes[offset as usize] = low8(val) as i8
+        b.bytes[(offset + 1) as usize] = low8(val >> 8) as i8
+        b.bytes[(offset + 2) as usize] = low8(val >> 16) as i8
+        b.bytes[(offset + 3) as usize] = low8(val >> 24) as i8
+    }
+    b
+}

@@ -1,0 +1,172 @@
+// self-hosted::native::elf — ELF64 binary emission (Linux x86-64)
+//
+// Generates a minimal ELF64 executable with .text segment.
+
+// ELF64 constants
+fn elf_magic_0() -> i64 { 0x7f }
+fn elf_magic_1() -> i64 { 0x45 }  // 'E'
+fn elf_magic_2() -> i64 { 0x4c }  // 'L'
+fn elf_magic_3() -> i64 { 0x46 }  // 'F'
+
+fn elf_class_64() -> i64 { 2 }    // 64-bit
+fn elf_data_lsb() -> i64 { 1 }    // Little-endian
+fn elf_version() -> i64 { 1 }
+fn elf_osabi_sysv() -> i64 { 0 }
+
+fn elf_type_exec() -> i64 { 2 }   // Executable file
+fn elf_machine_x86_64() -> i64 { 0x3e }
+
+fn elf_pt_load() -> i64 { 1 }     // Loadable segment
+fn elf_pf_x() -> i64 { 1 }        // Execute
+fn elf_pf_r() -> i64 { 4 }        // Read
+
+// ELF64 binary buffer (simplified for bootstrap)
+struct Elf64Binary {
+    bytes: [i8; 65536],
+    len: i64,
+}
+
+fn elf_binary_new() -> Elf64Binary {
+    Elf64Binary { bytes: [0; 65536], len: 0 }
+}
+
+// Emit a byte to the binary
+fn elf_emit_byte(bin: Elf64Binary, b: i64) -> Elf64Binary with Mut, Panic, Div {
+    var out = bin
+    if out.len < 65536 {
+        out.bytes[out.len as usize] = low8(b) as i8
+        out.len = out.len + 1
+    }
+    out
+}
+
+// Emit u16 little-endian
+fn elf_emit_u16(bin: Elf64Binary, val: i64) -> Elf64Binary with Mut, Panic, Div {
+    var b = bin
+    b = elf_emit_byte(b, low8(val))
+    b = elf_emit_byte(b, low8(val >> 8))
+    b
+}
+
+// Emit u32 little-endian
+fn elf_emit_u32(bin: Elf64Binary, val: i64) -> Elf64Binary with Mut, Panic, Div {
+    var b = bin
+    b = elf_emit_byte(b, low8(val))
+    b = elf_emit_byte(b, low8(val >> 8))
+    b = elf_emit_byte(b, low8(val >> 16))
+    b = elf_emit_byte(b, low8(val >> 24))
+    b
+}
+
+// Emit u64 little-endian
+fn elf_emit_u64(bin: Elf64Binary, val: i64) -> Elf64Binary with Mut, Panic, Div {
+    var b = bin
+    b = elf_emit_u32(b, val)
+    b = elf_emit_u32(b, val >> 32)
+    b
+}
+
+// Build minimal ELF64 executable
+fn finalize_elf64(
+    code: CodeBuffer,
+    entry_offset: i64,
+    base_addr: i64
+) -> Elf64Binary with Mut, Panic, Div {
+    var bin = elf_binary_new()
+
+    // ELF header (64 bytes)
+    bin = emit_elf_header(bin, entry_offset, base_addr)
+
+    // Program header (56 bytes per entry, we have 1)
+    bin = emit_program_header(bin, code.len, base_addr)
+
+    // Pad to page boundary (4096 bytes)
+    while bin.len < 4096 {
+        bin = elf_emit_byte(bin, 0)
+    }
+
+    // .text segment (code)
+    var i = 0
+    while i < code.len {
+        bin = elf_emit_byte(bin, code.bytes[i as usize] as i64)
+        i = i + 1
+    }
+
+    bin
+}
+
+// Emit ELF64 header
+fn emit_elf_header(bin: Elf64Binary, entry_offset: i64, base_addr: i64) -> Elf64Binary with Mut, Panic, Div {
+    var b = bin
+
+    // e_ident[16]
+    b = elf_emit_byte(b, elf_magic_0())
+    b = elf_emit_byte(b, elf_magic_1())
+    b = elf_emit_byte(b, elf_magic_2())
+    b = elf_emit_byte(b, elf_magic_3())
+    b = elf_emit_byte(b, elf_class_64())
+    b = elf_emit_byte(b, elf_data_lsb())
+    b = elf_emit_byte(b, elf_version())
+    b = elf_emit_byte(b, elf_osabi_sysv())
+    var pad = 0
+    while pad < 8 {
+        b = elf_emit_byte(b, 0)
+        pad = pad + 1
+    }
+
+    // e_type, e_machine, e_version
+    b = elf_emit_u16(b, elf_type_exec())
+    b = elf_emit_u16(b, elf_machine_x86_64())
+    b = elf_emit_u32(b, elf_version())
+
+    // e_entry (entry point virtual address)
+    let entry_va = base_addr + 4096 + entry_offset
+    b = elf_emit_u64(b, entry_va)
+
+    // e_phoff (program header offset = 64)
+    b = elf_emit_u64(b, 64)
+
+    // e_shoff (section header offset = 0, no sections)
+    b = elf_emit_u64(b, 0)
+
+    // e_flags, e_ehsize, e_phentsize
+    b = elf_emit_u32(b, 0)        // flags
+    b = elf_emit_u16(b, 64)       // ELF header size
+    b = elf_emit_u16(b, 56)       // program header entry size
+
+    // e_phnum, e_shentsize, e_shnum, e_shstrndx
+    b = elf_emit_u16(b, 1)        // 1 program header
+    b = elf_emit_u16(b, 0)        // section header entry size (none)
+    b = elf_emit_u16(b, 0)        // section header count (none)
+    b = elf_emit_u16(b, 0)        // section name string table index
+
+    b
+}
+
+// Emit program header (PT_LOAD for .text)
+fn emit_program_header(bin: Elf64Binary, code_len: i64, base_addr: i64) -> Elf64Binary with Mut, Panic, Div {
+    var b = bin
+
+    // p_type
+    b = elf_emit_u32(b, elf_pt_load())
+
+    // p_flags (R+X)
+    b = elf_emit_u32(b, elf_pf_r() + elf_pf_x())
+
+    // p_offset (file offset = 4096)
+    b = elf_emit_u64(b, 4096)
+
+    // p_vaddr, p_paddr (virtual/physical address)
+    let text_va = base_addr + 4096
+    b = elf_emit_u64(b, text_va)
+    b = elf_emit_u64(b, text_va)
+
+    // p_filesz, p_memsz (same for .text)
+    b = elf_emit_u64(b, code_len)
+    b = elf_emit_u64(b, code_len)
+
+    // p_align (4096 bytes)
+    b = elf_emit_u64(b, 4096)
+
+    b
+}

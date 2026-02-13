@@ -1,0 +1,244 @@
+// self-hosted::test_parse_all — Parse every self-hosted .sio file from disk
+//
+// This suite verifies the self-hosted lexer + parser can parse the entire
+// self-hosted codebase (including tests).
+//
+// Since we don't have a directory listing builtin yet, the file list is
+// hardcoded from `find self-hosted/ -name "*.sio" -type f | sort`.
+//
+// Entry point: run_parse_all_tests()
+
+struct ParseChecked {
+    prog: Program,
+    parse_error_count: i64,
+}
+
+fn parse_program_checked(tokens: [Token; 65536], token_count: i64) -> ParseChecked with Mut, IO, Panic, Div, Alloc {
+    var p = parser_new()
+
+    // Copy tokens into parser
+    var i: i64 = 0
+    while i < token_count && i < 65536 {
+        p.tokens[i] = tokens[i]
+        i = i + 1
+    }
+    p.token_count = token_count
+
+    // Skip leading newlines
+    while p.pos < p.token_count && p.tokens[p.pos].kind == TokenKind::Newline {
+        p.pos = p.pos + 1
+    }
+
+    // Parse items until EOF
+    var items_opt: Option<Box<ItemList>> = None
+    var first_item = true
+
+    while !p.at_eof() {
+        // Skip doc comments for now (attach to next item in future)
+        while tk_is_doc_comment(p.peek()) {
+            p = p.advance()
+        }
+
+        if p.at_eof() { break }
+
+        let result = p.parse_item()
+        let p2 = result.0
+        let item = result.1
+        p = p2
+
+        if first_item {
+            items_opt = Some(Box::new(ItemList { head: item, tail: None }))
+            first_item = false
+        } else {
+            match items_opt {
+                Some(list) => {
+                    let new_node = ItemList { head: item, tail: None }
+                    items_opt = Some(Box::new(item_list_append(*list, new_node)))
+                },
+                None => {
+                    items_opt = Some(Box::new(ItemList { head: item, tail: None }))
+                },
+            }
+        }
+    }
+
+    ParseChecked {
+        prog: Program { items: items_opt },
+        parse_error_count: p.error_count,
+    }
+}
+
+fn test_parse_file_str(path: string) -> bool with IO, Mut, Div, Panic, Alloc {
+    let size = file_size(path)
+
+    if size < 0 {
+        print("  FAIL (missing): ")
+        print(path)
+        print("\n")
+        return false
+    }
+
+    if size == 0 {
+        // Empty file is OK.
+        return true
+    }
+
+    let state = read_source_file(path)
+    let lex_ok = state.error_count == 0
+
+    let parsed = parse_program_checked(state.tokens, state.token_count)
+    let ic = count_items(parsed.prog)
+
+    let ok = lex_ok && parsed.parse_error_count == 0 && ic > 0
+
+    if !ok {
+        print("  FAIL: ")
+        print(path)
+        print(" (")
+        print_int(ic)
+        print(" items, ")
+        print_int(parsed.parse_error_count)
+        print(" parse errors)\n")
+    }
+
+    ok
+}
+
+fn run_parse_all_tests() -> i32 with IO, Mut, Panic, Div, Alloc {
+    var passed: i64 = 0
+    var failed: i64 = 0
+    var total: i64 = 0
+
+    print("=== Parse All ===\n")
+
+    total = total + 1
+    if test_parse_file_str("self-hosted/check/check.sio") { passed = passed + 1 } else { failed = failed + 1 }
+    total = total + 1
+    if test_parse_file_str("self-hosted/check/compat.sio") { passed = passed + 1 } else { failed = failed + 1 }
+    total = total + 1
+    if test_parse_file_str("self-hosted/check/defs.sio") { passed = passed + 1 } else { failed = failed + 1 }
+    total = total + 1
+    if test_parse_file_str("self-hosted/check/env.sio") { passed = passed + 1 } else { failed = failed + 1 }
+    total = total + 1
+    if test_parse_file_str("self-hosted/check/mod.sio") { passed = passed + 1 } else { failed = failed + 1 }
+    total = total + 1
+    if test_parse_file_str("self-hosted/check/types.sio") { passed = passed + 1 } else { failed = failed + 1 }
+
+    total = total + 1
+    if test_parse_file_str("self-hosted/emit/mod.sio") { passed = passed + 1 } else { failed = failed + 1 }
+    total = total + 1
+    if test_parse_file_str("self-hosted/emit/text.sio") { passed = passed + 1 } else { failed = failed + 1 }
+
+    total = total + 1
+    if test_parse_file_str("self-hosted/ir/ir.sio") { passed = passed + 1 } else { failed = failed + 1 }
+    total = total + 1
+    if test_parse_file_str("self-hosted/ir/lower.sio") { passed = passed + 1 } else { failed = failed + 1 }
+    total = total + 1
+    if test_parse_file_str("self-hosted/ir/mod.sio") { passed = passed + 1 } else { failed = failed + 1 }
+
+    total = total + 1
+    if test_parse_file_str("self-hosted/lexer/cursor.sio") { passed = passed + 1 } else { failed = failed + 1 }
+    total = total + 1
+    if test_parse_file_str("self-hosted/lexer/errors.sio") { passed = passed + 1 } else { failed = failed + 1 }
+    total = total + 1
+    if test_parse_file_str("self-hosted/lexer/mod.sio") { passed = passed + 1 } else { failed = failed + 1 }
+    total = total + 1
+    if test_parse_file_str("self-hosted/lexer/numparse.sio") { passed = passed + 1 } else { failed = failed + 1 }
+    total = total + 1
+    if test_parse_file_str("self-hosted/lexer/reader.sio") { passed = passed + 1 } else { failed = failed + 1 }
+    total = total + 1
+    if test_parse_file_str("self-hosted/lexer/span.sio") { passed = passed + 1 } else { failed = failed + 1 }
+    total = total + 1
+    if test_parse_file_str("self-hosted/lexer/tables.sio") { passed = passed + 1 } else { failed = failed + 1 }
+    total = total + 1
+    if test_parse_file_str("self-hosted/lexer/token.sio") { passed = passed + 1 } else { failed = failed + 1 }
+
+    total = total + 1
+    if test_parse_file_str("self-hosted/main.sio") { passed = passed + 1 } else { failed = failed + 1 }
+
+    total = total + 1
+    if test_parse_file_str("self-hosted/native/encode.sio") { passed = passed + 1 } else { failed = failed + 1 }
+    total = total + 1
+    if test_parse_file_str("self-hosted/native/lower_ir.sio") { passed = passed + 1 } else { failed = failed + 1 }
+    total = total + 1
+    if test_parse_file_str("self-hosted/native/mod.sio") { passed = passed + 1 } else { failed = failed + 1 }
+    total = total + 1
+    if test_parse_file_str("self-hosted/native/test_encode.sio") { passed = passed + 1 } else { failed = failed + 1 }
+
+    total = total + 1
+    if test_parse_file_str("self-hosted/parser/ast.sio") { passed = passed + 1 } else { failed = failed + 1 }
+    total = total + 1
+    if test_parse_file_str("self-hosted/parser/exprs.sio") { passed = passed + 1 } else { failed = failed + 1 }
+    total = total + 1
+    if test_parse_file_str("self-hosted/parser/items.sio") { passed = passed + 1 } else { failed = failed + 1 }
+    total = total + 1
+    if test_parse_file_str("self-hosted/parser/mod.sio") { passed = passed + 1 } else { failed = failed + 1 }
+    total = total + 1
+    if test_parse_file_str("self-hosted/parser/parser.sio") { passed = passed + 1 } else { failed = failed + 1 }
+    total = total + 1
+    if test_parse_file_str("self-hosted/parser/patterns.sio") { passed = passed + 1 } else { failed = failed + 1 }
+    total = total + 1
+    if test_parse_file_str("self-hosted/parser/stmts.sio") { passed = passed + 1 } else { failed = failed + 1 }
+    total = total + 1
+    if test_parse_file_str("self-hosted/parser/types.sio") { passed = passed + 1 } else { failed = failed + 1 }
+
+    total = total + 1
+    if test_parse_file_str("self-hosted/printer/buffer_print.sio") { passed = passed + 1 } else { failed = failed + 1 }
+    total = total + 1
+    if test_parse_file_str("self-hosted/printer/mod.sio") { passed = passed + 1 } else { failed = failed + 1 }
+    total = total + 1
+    if test_parse_file_str("self-hosted/printer/print_ast.sio") { passed = passed + 1 } else { failed = failed + 1 }
+
+    total = total + 1
+    if test_parse_file_str("self-hosted/resolve/mod.sio") { passed = passed + 1 } else { failed = failed + 1 }
+    total = total + 1
+    if test_parse_file_str("self-hosted/resolve/resolve.sio") { passed = passed + 1 } else { failed = failed + 1 }
+    total = total + 1
+    if test_parse_file_str("self-hosted/resolve/scope.sio") { passed = passed + 1 } else { failed = failed + 1 }
+    total = total + 1
+    if test_parse_file_str("self-hosted/resolve/symbol.sio") { passed = passed + 1 } else { failed = failed + 1 }
+
+    total = total + 1
+    if test_parse_file_str("self-hosted/test_all.sio") { passed = passed + 1 } else { failed = failed + 1 }
+    total = total + 1
+    if test_parse_file_str("self-hosted/test_bootstrap.sio") { passed = passed + 1 } else { failed = failed + 1 }
+    total = total + 1
+    if test_parse_file_str("self-hosted/test_check.sio") { passed = passed + 1 } else { failed = failed + 1 }
+    total = total + 1
+    if test_parse_file_str("self-hosted/test_check_real.sio") { passed = passed + 1 } else { failed = failed + 1 }
+    total = total + 1
+    if test_parse_file_str("self-hosted/test_emit.sio") { passed = passed + 1 } else { failed = failed + 1 }
+    total = total + 1
+    if test_parse_file_str("self-hosted/test_ir.sio") { passed = passed + 1 } else { failed = failed + 1 }
+    total = total + 1
+    if test_parse_file_str("self-hosted/test_lexer.sio") { passed = passed + 1 } else { failed = failed + 1 }
+    total = total + 1
+    if test_parse_file_str("self-hosted/test_parse_all.sio") { passed = passed + 1 } else { failed = failed + 1 }
+    total = total + 1
+    if test_parse_file_str("self-hosted/test_parse_real.sio") { passed = passed + 1 } else { failed = failed + 1 }
+    total = total + 1
+    if test_parse_file_str("self-hosted/test_parser.sio") { passed = passed + 1 } else { failed = failed + 1 }
+    total = total + 1
+    if test_parse_file_str("self-hosted/test_printer.sio") { passed = passed + 1 } else { failed = failed + 1 }
+    total = total + 1
+    if test_parse_file_str("self-hosted/test_resolve.sio") { passed = passed + 1 } else { failed = failed + 1 }
+    total = total + 1
+    if test_parse_file_str("self-hosted/test_resolve_real.sio") { passed = passed + 1 } else { failed = failed + 1 }
+    total = total + 1
+    if test_parse_file_str("self-hosted/test_roundtrip.sio") { passed = passed + 1 } else { failed = failed + 1 }
+    total = total + 1
+    if test_parse_file_str("self-hosted/test_vm.sio") { passed = passed + 1 } else { failed = failed + 1 }
+
+    total = total + 1
+    if test_parse_file_str("self-hosted/vm/mod.sio") { passed = passed + 1 } else { failed = failed + 1 }
+    total = total + 1
+    if test_parse_file_str("self-hosted/vm/vm.sio") { passed = passed + 1 } else { failed = failed + 1 }
+
+    print("\nParse All: ")
+    print_int(passed)
+    print("/")
+    print_int(total)
+    print(" passed\n")
+
+    if failed == 0 { 0 } else { 1 }
+}

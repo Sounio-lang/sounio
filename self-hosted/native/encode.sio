@@ -1,0 +1,230 @@
+// self-hosted::native::encode — Minimal x86-64 instruction encoder (skeleton)
+//
+// This module builds up a raw .text byte buffer. The Rust-side NativeEmitter
+// (ELF/Mach-O) will wrap these bytes into an executable later.
+
+struct CodeBuffer {
+    bytes: [i8; 65536],
+    len: i64,
+}
+
+fn code_buffer_new() -> CodeBuffer {
+    CodeBuffer { bytes: [0; 65536], len: 0 }
+}
+
+fn low8(x: i64) -> i64 with Mut, Panic, Div {
+    var n = x % 256
+    if n < 0 { n = n + 256 }
+    n
+}
+
+fn emit_byte(buf: CodeBuffer, b: i64) -> CodeBuffer with Mut, Panic, Div {
+    var out = buf
+    if out.len >= 0 {
+        if out.len < 65536 {
+            out.bytes[out.len as usize] = low8(b) as i8
+            out.len = out.len + 1
+        }
+    }
+    out
+}
+
+fn emit_u32_le(buf: CodeBuffer, val: i64) -> CodeBuffer with Mut, Panic, Div {
+    var b = buf
+    b = emit_byte(b, low8(val))
+    b = emit_byte(b, low8(val >> 8))
+    b = emit_byte(b, low8(val >> 16))
+    b = emit_byte(b, low8(val >> 24))
+    b
+}
+
+fn emit_u64_le(buf: CodeBuffer, val: i64) -> CodeBuffer with Mut, Panic, Div {
+    // Write as 2x u32 to avoid depending on bitwise ops.
+    var b = buf
+    b = emit_u32_le(b, val)
+    b = emit_u32_le(b, val >> 32)
+    b
+}
+
+fn modrm_rr(dst: i64, src: i64) -> i64 {
+    // Register-direct ModRM: 11 rrr bbb
+    // where rrr = src, bbb = dst.
+    192 + src * 8 + dst
+}
+
+fn modrm_rm_imm(dst: i64) -> i64 {
+    // mov r/m64, imm32 uses /0, so ModRM is 11 000 bbb.
+    192 + dst
+}
+
+// ============================================================================
+// x86-64 instruction snippets (not exhaustive)
+// ============================================================================
+
+fn emit_mov_rax_imm(buf: CodeBuffer, val: i64) -> CodeBuffer with Mut, Panic, Div {
+    emit_mov_reg_imm(buf, 0, val)
+}
+
+fn emit_mov_rdi_imm(buf: CodeBuffer, val: i64) -> CodeBuffer with Mut, Panic, Div {
+    emit_mov_reg_imm(buf, 7, val)
+}
+
+fn emit_mov_reg_imm32(buf: CodeBuffer, reg: i64, val: i64) -> CodeBuffer with Mut, Panic, Div {
+    // 48 c7 /0 <imm32>  — mov r/m64, imm32
+    var b = buf
+    b = emit_byte(b, 0x48)
+    b = emit_byte(b, 0xc7)
+    b = emit_byte(b, modrm_rm_imm(reg))
+    b = emit_u32_le(b, val)
+    b
+}
+
+fn emit_mov_reg_imm64(buf: CodeBuffer, reg: i64, val: i64) -> CodeBuffer with Mut, Panic, Div {
+    // 48 b8+rd <imm64>  — mov r64, imm64
+    // Note: only supports registers 0..7 (no REX.B extension).
+    var b = buf
+    b = emit_byte(b, 0x48)
+    b = emit_byte(b, 0xb8 + reg)
+    b = emit_u64_le(b, val)
+    b
+}
+
+fn emit_mov_reg_imm(buf: CodeBuffer, reg: i64, val: i64) -> CodeBuffer with Mut, Panic, Div {
+    // Prefer the shorter imm32 encoding when possible (it sign-extends to 64-bit),
+    // otherwise fall back to imm64 to avoid truncation.
+    if val >= -2147483648 && val <= 2147483647 {
+        emit_mov_reg_imm32(buf, reg, val)
+    } else {
+        emit_mov_reg_imm64(buf, reg, val)
+    }
+}
+
+fn emit_mov_reg_reg(buf: CodeBuffer, dst: i64, src: i64) -> CodeBuffer with Mut, Panic, Div {
+    // 48 89 /r — mov r/m64, r64  (dst <- src)
+    var b = buf
+    b = emit_byte(b, 0x48)
+    b = emit_byte(b, 0x89)
+    b = emit_byte(b, modrm_rr(dst, src))
+    b
+}
+
+fn emit_add_reg_reg(buf: CodeBuffer, dst: i64, src: i64) -> CodeBuffer with Mut, Panic, Div {
+    // 48 01 /r — add r/m64, r64  (dst += src)
+    var b = buf
+    b = emit_byte(b, 0x48)
+    b = emit_byte(b, 0x01)
+    b = emit_byte(b, modrm_rr(dst, src))
+    b
+}
+
+fn emit_sub_reg_reg(buf: CodeBuffer, dst: i64, src: i64) -> CodeBuffer with Mut, Panic, Div {
+    // 48 29 /r — sub r/m64, r64  (dst -= src)
+    var b = buf
+    b = emit_byte(b, 0x48)
+    b = emit_byte(b, 0x29)
+    b = emit_byte(b, modrm_rr(dst, src))
+    b
+}
+
+fn emit_imul_reg_reg(buf: CodeBuffer, dst: i64, src: i64) -> CodeBuffer with Mut, Panic, Div {
+    // 48 0f af /r — imul r64, r/m64 (dst *= src)
+    var b = buf
+    b = emit_byte(b, 0x48)
+    b = emit_byte(b, 0x0f)
+    b = emit_byte(b, 0xaf)
+    // For imul, dst is encoded in the ModRM 'reg' field.
+    b = emit_byte(b, 192 + dst * 8 + src)
+    b
+}
+
+fn emit_syscall(buf: CodeBuffer) -> CodeBuffer with Mut, Panic, Div {
+    var b = buf
+    b = emit_byte(b, 0x0f)
+    b = emit_byte(b, 0x05)
+    b
+}
+
+fn emit_ret(buf: CodeBuffer) -> CodeBuffer with Mut, Panic, Div {
+    emit_byte(buf, 0xc3)
+}
+
+fn emit_exit(buf: CodeBuffer, code: i64) -> CodeBuffer with Mut, Panic, Div {
+    // sys_exit(code)
+    var b = buf
+    b = emit_mov_rax_imm(b, 60)
+    b = emit_mov_rdi_imm(b, code)
+    b = emit_syscall(b)
+    b
+}
+
+fn emit_write_stdout(buf: CodeBuffer, data_offset: i64, data_len: i64) -> CodeBuffer with Mut, Panic, Div {
+    // sys_write(1, data, len) — placeholder encoding.
+    // TODO: RIP-relative addressing + relocations.
+    var b = buf
+    b = emit_mov_rax_imm(b, 1)   // sys_write
+    b = emit_mov_rdi_imm(b, 1)   // fd = stdout
+
+    // mov rsi, imm64 (48 be <imm64>)
+    b = emit_byte(b, 0x48)
+    b = emit_byte(b, 0xbe)
+    b = emit_u64_le(b, data_offset)
+
+    // mov rdx, imm32 (48 c7 c2 <imm32>)
+    b = emit_byte(b, 0x48)
+    b = emit_byte(b, 0xc7)
+    b = emit_byte(b, 0xc2)
+    b = emit_u32_le(b, data_len)
+
+    b = emit_syscall(b)
+    b
+}
+
+// ============================================================================
+// Stack frame management instructions (Phase 1)
+// ============================================================================
+
+fn emit_push_rbp(buf: CodeBuffer) -> CodeBuffer with Mut, Panic, Div {
+    emit_byte(buf, 0x55)  // push rbp
+}
+
+fn emit_pop_rbp(buf: CodeBuffer) -> CodeBuffer with Mut, Panic, Div {
+    emit_byte(buf, 0x5d)  // pop rbp
+}
+
+fn emit_mov_rbp_rsp(buf: CodeBuffer) -> CodeBuffer with Mut, Panic, Div {
+    // 48 89 e5 — mov rbp, rsp
+    var b = buf
+    b = emit_byte(b, 0x48)
+    b = emit_byte(b, 0x89)
+    b = emit_byte(b, 0xe5)
+    b
+}
+
+fn emit_mov_rsp_rbp(buf: CodeBuffer) -> CodeBuffer with Mut, Panic, Div {
+    // 48 89 ec — mov rsp, rbp
+    var b = buf
+    b = emit_byte(b, 0x48)
+    b = emit_byte(b, 0x89)
+    b = emit_byte(b, 0xec)
+    b
+}
+
+fn emit_sub_rsp_imm32(buf: CodeBuffer, val: i64) -> CodeBuffer with Mut, Panic, Div {
+    // 48 81 ec <imm32> — sub rsp, imm32
+    var b = buf
+    b = emit_byte(b, 0x48)
+    b = emit_byte(b, 0x81)
+    b = emit_byte(b, 0xec)
+    b = emit_u32_le(b, val)
+    b
+}
+
+fn emit_add_rsp_imm32(buf: CodeBuffer, val: i64) -> CodeBuffer with Mut, Panic, Div {
+    // 48 81 c4 <imm32> — add rsp, imm32
+    var b = buf
+    b = emit_byte(b, 0x48)
+    b = emit_byte(b, 0x81)
+    b = emit_byte(b, 0xc4)
+    b = emit_u32_le(b, val)
+    b
+}

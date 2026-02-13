@@ -1,0 +1,112 @@
+// self-hosted::native::abi — x86-64 System V ABI calling convention
+//
+// Handles function calls, parameter passing, and builtin runtime functions.
+
+// Emit a function call with up to 6 register arguments
+fn emit_call_with_args(
+    buf: CodeBuffer,
+    target_func_index: i64,
+    arg_count: i64,
+    reloc_table: RelocationTable
+) -> CodeBuffer with Mut, Panic, Div {
+    var b = buf
+
+    // Arguments are assumed to already be loaded into param registers
+    // (rdi, rsi, rdx, rcx, r8, r9) by the caller
+
+    // Emit call with placeholder offset (0x00000000)
+    b = emit_call_rel32(b, 0)
+
+    // Record relocation to patch later
+    let call_offset = b.len - 4  // Points to the rel32 operand
+    // NOTE: reloc_table is passed by value, so this doesn't persist yet
+    // Phase 3 will integrate properly
+
+    b
+}
+
+// Spill parameter registers to stack (for functions with params)
+fn spill_params(buf: CodeBuffer, frame: StackFrame, param_count: i64) -> CodeBuffer with Mut, Panic, Div {
+    var b = buf
+    var i = 0
+
+    while i < param_count && i < 6 {
+        let reg = param_reg(i)
+        let offset = param_offset(i)
+
+        // mov [rbp + offset], reg
+        b = emit_mov_rbp_offset_reg(b, offset, reg)
+        i = i + 1
+    }
+    b
+}
+
+// Load arguments into parameter registers before a call
+fn load_call_args(buf: CodeBuffer, arg_count: i64) -> CodeBuffer with Mut, Panic, Div {
+    var b = buf
+    var i = 0
+
+    // For now, assume args are already in rax, rbx, rcx, rdx
+    // and we need to move them to param registers
+
+    // TODO: Phase 2-3 will implement proper arg loading from HIR
+    b
+}
+
+// Runtime builtin: print(string_ptr, string_len)
+fn emit_builtin_print(buf: CodeBuffer) -> CodeBuffer with Mut, Panic, Div {
+    var b = buf
+    // rdi = string ptr, rsi = len
+    // Syscall: write(1, rdi, rsi)
+    b = emit_mov_rax_imm(b, 1)        // sys_write
+    b = emit_mov_rdx_rsi(b)           // count = rsi
+    // rsi already has buf pointer in rdi (swap needed)
+    b = emit_mov_rsi_rdi(b)           // buf = old rdi
+    b = emit_mov_rdi_imm(b, 1)        // fd = stdout
+    b = emit_syscall(b)
+    b = emit_ret(b)
+    b
+}
+
+// Runtime builtin: exit(code)
+fn emit_builtin_exit(buf: CodeBuffer) -> CodeBuffer with Mut, Panic, Div {
+    var b = buf
+    // rdi = exit code
+    b = emit_mov_rax_imm(b, 60)       // sys_exit (Linux)
+    b = emit_syscall(b)
+    // No return
+    b
+}
+
+// Helper: emit call instruction with rel32 offset
+fn emit_call_rel32(buf: CodeBuffer, offset: i64) -> CodeBuffer with Mut, Panic, Div {
+    var b = buf
+    b = emit_byte(b, 0xe8)            // call rel32
+    b = emit_u32_le(b, offset)
+    b
+}
+
+// Helper: mov rdx, rsi
+fn emit_mov_rdx_rsi(buf: CodeBuffer) -> CodeBuffer with Mut, Panic, Div {
+    emit_mov_reg_reg(buf, reg_rdx(), reg_rsi())
+}
+
+// Helper: mov rsi, rdi
+fn emit_mov_rsi_rdi(buf: CodeBuffer) -> CodeBuffer with Mut, Panic, Div {
+    emit_mov_reg_reg(buf, reg_rsi(), reg_rdi())
+}
+
+// Helper: mov [rbp + offset], reg (for param spilling)
+fn emit_mov_rbp_offset_reg(buf: CodeBuffer, offset: i64, reg: i64) -> CodeBuffer with Mut, Panic, Div {
+    var b = buf
+    // For now, use disp8 encoding (offset must be -128..127)
+    if offset >= -128 && offset < 128 {
+        // 48 89 45 <disp8>  — mov [rbp + disp8], rax (for rax)
+        // ModRM: 01 rrr 101 for [rbp + disp8]
+        b = emit_byte(b, 0x48)
+        b = emit_byte(b, 0x89)
+        b = emit_byte(b, 0x45 + reg * 8)  // ModRM: [rbp + disp8], reg
+        b = emit_byte(b, offset)
+    }
+    b
+}

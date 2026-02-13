@@ -1,0 +1,104 @@
+// self-hosted::native::lower_hir — HIR to x86-64 lowering
+//
+// Translates HIR instructions into x86-64 machine code.
+// This replaces lower_ir.sio with a more structured, idiomatic approach.
+
+// Placeholder HIR instruction types (will import from self-hosted HIR later)
+struct HirInstr {
+    opcode: i64,      // Instruction kind
+    dst: i64,         // Destination register/local
+    src1: i64,        // Source 1
+    src2: i64,        // Source 2
+    imm: i64,         // Immediate value
+}
+
+// HIR opcodes (simplified for bootstrap)
+fn hir_load_imm() -> i64 { 1 }
+fn hir_bin_op() -> i64 { 2 }
+fn hir_return() -> i64 { 3 }
+fn hir_call() -> i64 { 4 }
+fn hir_local_get() -> i64 { 5 }
+fn hir_local_set() -> i64 { 6 }
+
+// Binary operation kinds
+fn binop_add() -> i64 { 1 }
+fn binop_sub() -> i64 { 2 }
+fn binop_mul() -> i64 { 3 }
+
+// Lower a single HIR instruction
+fn lower_hir_instr(
+    buf: CodeBuffer,
+    instr: HirInstr,
+    frame: StackFrame
+) -> CodeBuffer with Mut, Panic, Div {
+    if instr.opcode == hir_load_imm() {
+        // Load immediate to register
+        emit_mov_rax_imm(buf, instr.imm)
+    } else if instr.opcode == hir_bin_op() {
+        // Binary operation: dst = src1 op src2
+        // For now, assume operands are in rax, rbx
+        lower_binop(buf, instr.imm, instr.src1, instr.src2)
+    } else if instr.opcode == hir_return() {
+        // Return value (assume in rax)
+        emit_ret(buf)
+    } else if instr.opcode == hir_local_get() {
+        // Load local variable from stack
+        compile_local_get(buf, frame, instr.src1)
+    } else if instr.opcode == hir_local_set() {
+        // Store to local variable on stack
+        compile_local_set(buf, frame, instr.dst)
+    } else {
+        // Unsupported instruction
+        buf
+    }
+}
+
+// Lower binary operation
+fn lower_binop(buf: CodeBuffer, op: i64, lhs: i64, rhs: i64) -> CodeBuffer with Mut, Panic, Div {
+    var b = buf
+
+    // Assume lhs in rax, rhs in rbx
+    // Result goes to rax
+
+    if op == binop_add() {
+        b = emit_add_reg_reg(b, reg_rax(), reg_rbx())
+    } else if op == binop_sub() {
+        b = emit_sub_reg_reg(b, reg_rax(), reg_rbx())
+    } else if op == binop_mul() {
+        b = emit_imul_reg_reg(b, reg_rax(), reg_rbx())
+    }
+
+    b
+}
+
+// Compile local variable load
+fn compile_local_get(buf: CodeBuffer, frame: StackFrame, local_index: i64) -> CodeBuffer with Mut, Panic, Div {
+    let offset = local_offset(frame, local_index)
+    emit_mov_rax_rbp_disp8(buf, offset)
+}
+
+// Compile local variable store
+fn compile_local_set(buf: CodeBuffer, frame: StackFrame, local_index: i64) -> CodeBuffer with Mut, Panic, Div {
+    let offset = local_offset(frame, local_index)
+    emit_mov_rbp_disp8_rax(buf, offset)
+}
+
+// Helper: mov rax, [rbp + disp8]
+fn emit_mov_rax_rbp_disp8(buf: CodeBuffer, disp: i64) -> CodeBuffer with Mut, Panic, Div {
+    var b = buf
+    b = emit_byte(b, 0x48)        // REX.W
+    b = emit_byte(b, 0x8b)        // mov r64, r/m64
+    b = emit_byte(b, 0x45)        // ModRM: [rbp + disp8], rax
+    b = emit_byte(b, disp)        // disp8
+    b
+}
+
+// Helper: mov [rbp + disp8], rax
+fn emit_mov_rbp_disp8_rax(buf: CodeBuffer, disp: i64) -> CodeBuffer with Mut, Panic, Div {
+    var b = buf
+    b = emit_byte(b, 0x48)        // REX.W
+    b = emit_byte(b, 0x89)        // mov r/m64, r64
+    b = emit_byte(b, 0x45)        // ModRM: [rbp + disp8], rax
+    b = emit_byte(b, disp)        // disp8
+    b
+}

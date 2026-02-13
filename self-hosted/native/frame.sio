@@ -1,0 +1,79 @@
+// self-hosted::native::frame — Stack frame management for x86-64 System V ABI
+//
+// Handles function prologue/epilogue, local variable allocation, and frame layout.
+
+// Stack frame state for a single function
+struct StackFrame {
+    frame_size: i64,              // Total frame size (16-byte aligned)
+    local_count: i64,             // Number of local variables
+    param_count: i64,             // Number of parameters
+    return_jump_count: i64,       // Number of pending return jumps to patch
+}
+
+fn stack_frame_new() -> StackFrame {
+    StackFrame {
+        frame_size: 0,
+        local_count: 0,
+        param_count: 0,
+        return_jump_count: 0,
+    }
+}
+
+// Prepare frame layout: allocate space for params + locals
+fn prepare_frame(params: i64, locals: i64) -> StackFrame with Mut, Panic {
+    var frame = stack_frame_new()
+    frame.param_count = params
+    frame.local_count = locals
+
+    // Each param/local gets 8 bytes (i64)
+    let total_vars = params + locals
+    let raw_size = total_vars * 8
+
+    // Align to 16 bytes (System V ABI requirement)
+    frame.frame_size = align16(raw_size)
+    frame
+}
+
+// Align size up to next 16-byte boundary
+fn align16(size: i64) -> i64 with Mut, Panic {
+    var aligned = size
+    let remainder = size % 16
+    if remainder != 0 {
+        aligned = size + (16 - remainder)
+    }
+    aligned
+}
+
+// Emit function prologue: push rbp; mov rbp, rsp; sub rsp, <frame_size>
+fn emit_prologue(buf: CodeBuffer, frame_size: i64) -> CodeBuffer with Mut, Panic, Div {
+    var b = buf
+    b = emit_push_rbp(b)
+    b = emit_mov_rbp_rsp(b)
+
+    if frame_size > 0 {
+        b = emit_sub_rsp_imm32(b, frame_size)
+    }
+    b
+}
+
+// Emit function epilogue: mov rsp, rbp; pop rbp; ret
+fn emit_epilogue(buf: CodeBuffer) -> CodeBuffer with Mut, Panic, Div {
+    var b = buf
+    b = emit_mov_rsp_rbp(b)
+    b = emit_pop_rbp(b)
+    b = emit_ret(b)
+    b
+}
+
+// Get local variable offset from rbp (negative offsets)
+fn local_offset(frame: StackFrame, local_index: i64) -> i64 {
+    // Locals: rbp-8, rbp-16, rbp-24, ...
+    // Params come first, then locals
+    -(frame.param_count + local_index + 1) * 8
+}
+
+// Get parameter offset from rbp (negative offsets)
+fn param_offset(param_index: i64) -> i64 {
+    // Params: rbp-8, rbp-16, rbp-24, ...
+    -(param_index + 1) * 8
+}

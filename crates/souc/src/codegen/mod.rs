@@ -14,6 +14,7 @@ pub mod cranelift;
 pub mod debug;
 pub mod gpu;
 pub mod mir_cranelift;
+pub mod native;
 pub mod simd;
 
 // Re-export bytecode codegen for self-hosting
