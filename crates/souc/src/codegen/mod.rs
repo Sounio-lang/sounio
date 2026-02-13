@@ -17,6 +17,9 @@ pub mod mir_cranelift;
 pub mod native;
 pub mod simd;
 
+#[cfg(all(test, target_os = "linux", target_arch = "x86_64"))]
+mod native_tests;
+
 // Re-export bytecode codegen for self-hosting
 pub use bytecode::{BytecodeCodegen, BytecodeError, BytecodeResult, compile_hir};
 
