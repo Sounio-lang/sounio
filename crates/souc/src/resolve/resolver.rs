@@ -682,73 +682,88 @@ impl Resolver {
         }
     }
 
+    fn module_name_segments(name: &str) -> Vec<&str> {
+        name.split('.').filter(|s| !s.is_empty()).collect()
+    }
+
     fn collect_module(&mut self, m: &ModuleDef) {
-        // Create a module ID from the name (for symbols)
-        let parent_path = self.symbols.current_module().path.clone();
-        let mut module_path = parent_path;
-        module_path.push(m.name.clone());
-        let module_id = ModuleId::new(module_path);
-
-        // Create tree module ID and enter the module in the tree
-        let tree_module_id = self.current_tree_module.join(&m.name);
-        let parent_tree_id = self.current_tree_module.clone();
-
-        // Create module in tree
-        {
-            let tree_module = self.module_tree.get_or_create(tree_module_id.clone());
-            tree_module.visibility = m.visibility;
+        let segments = Self::module_name_segments(&m.name);
+        if segments.is_empty() {
+            return;
         }
 
-        // Register as child of parent in tree
-        if let Some(parent) = self.module_tree.get_mut(&parent_tree_id) {
-            parent.add_child(m.name.clone(), tree_module_id.clone());
-        }
+        let mut tree_stack: Vec<TreeModuleId> = Vec::with_capacity(segments.len());
 
-        // Add module as item in parent
-        if let Some(parent) = self.module_tree.get_mut(&parent_tree_id) {
-            parent.add_item(ModuleItem {
-                name: m.name.clone(),
-                kind: ItemKind::Module(tree_module_id.clone()),
-                visibility: m.visibility,
+        for (idx, seg) in segments.iter().enumerate() {
+            // Create a module ID from the segment (for symbols)
+            let parent_path = self.symbols.current_module().path.clone();
+            let mut module_path = parent_path;
+            module_path.push((*seg).to_string());
+            let module_id = ModuleId::new(module_path);
+
+            // Create tree module ID and enter the module in the tree
+            let tree_module_id = self.current_tree_module.join(seg);
+            let parent_tree_id = self.current_tree_module.clone();
+
+            // Create module in tree
+            {
+                let tree_module = self.module_tree.get_or_create(tree_module_id.clone());
+                tree_module.visibility = m.visibility;
+            }
+
+            // Register as child of parent in tree
+            if let Some(parent) = self.module_tree.get_mut(&parent_tree_id) {
+                parent.add_child((*seg).to_string(), tree_module_id.clone());
+            }
+
+            // Add module as item in parent
+            if let Some(parent) = self.module_tree.get_mut(&parent_tree_id) {
+                parent.add_item(ModuleItem {
+                    name: (*seg).to_string(),
+                    kind: ItemKind::Module(tree_module_id.clone()),
+                    visibility: m.visibility,
+                    node_id: m.id,
+                });
+            }
+
+            // Enter the module in symbols
+            self.symbols.enter_module(module_id.clone());
+
+            // Push a new scope for the module so items defined in this module
+            // are isolated from the parent scope
+            self.symbols.push_scope(ScopeKind::Module, None);
+
+            // Define the module as a symbol
+            let def_id = self.symbols.fresh_def_id();
+            self.symbols.insert(Symbol {
+                def_id,
+                name: (*seg).to_string(),
+                kind: DefKind::Module,
                 node_id: m.id,
+                span: m.span,
+                parent: None,
             });
-        }
 
-        // Enter the module in symbols
-        self.symbols.enter_module(module_id.clone());
+            // Enter nested tree module and record stack for exit.
+            tree_stack.push(parent_tree_id);
+            self.current_tree_module = tree_module_id;
 
-        // Push a new scope for the module so items defined in this module
-        // are isolated from the parent scope
-        self.symbols.push_scope(ScopeKind::Module, None);
-
-        // Define the module as a symbol
-        let def_id = self.symbols.fresh_def_id();
-        self.symbols.insert(Symbol {
-            def_id,
-            name: m.name.clone(),
-            kind: DefKind::Module,
-            node_id: m.id,
-            span: m.span,
-            parent: None,
-        });
-
-        // Save current tree module and enter new one
-        let saved_tree_module = self.current_tree_module.clone();
-        self.current_tree_module = tree_module_id;
-
-        // Recursively collect items if inline module
-        if let Some(ref items) = m.items {
-            for item in items {
-                self.collect_item(item);
+            // Only collect items at the innermost module.
+            if idx + 1 == segments.len() {
+                if let Some(ref items) = m.items {
+                    for item in items {
+                        self.collect_item(item);
+                    }
+                }
             }
         }
 
-        // Exit module scope
-        self.symbols.pop_scope();
-
-        // Exit module
-        self.current_tree_module = saved_tree_module;
-        self.symbols.exit_module();
+        // Exit nested modules in reverse order.
+        for saved_tree_module in tree_stack.into_iter().rev() {
+            self.symbols.pop_scope();
+            self.current_tree_module = saved_tree_module;
+            self.symbols.exit_module();
+        }
     }
 
     fn collect_import(&mut self, i: &ImportDef) {
@@ -1308,28 +1323,42 @@ impl Resolver {
     }
 
     fn resolve_module(&mut self, m: &ModuleDef) {
-        // Enter the module (symbols)
-        let parent_path = self.symbols.current_module().path.clone();
-        let mut module_path = parent_path;
-        module_path.push(m.name.clone());
-        let module_id = ModuleId::new(module_path);
-        self.symbols.enter_module(module_id);
+        let segments = Self::module_name_segments(&m.name);
+        if segments.is_empty() {
+            return;
+        }
 
-        // Enter the module (tree)
-        let tree_module_id = self.current_tree_module.join(&m.name);
-        let saved_tree_module = self.current_tree_module.clone();
-        self.current_tree_module = tree_module_id;
+        let mut tree_stack: Vec<TreeModuleId> = Vec::with_capacity(segments.len());
 
-        // Resolve items if inline module
-        if let Some(ref items) = m.items {
-            for item in items {
-                self.resolve_item(item);
+        for (idx, seg) in segments.iter().enumerate() {
+            // Enter the module (symbols)
+            let parent_path = self.symbols.current_module().path.clone();
+            let mut module_path = parent_path;
+            module_path.push((*seg).to_string());
+            let module_id = ModuleId::new(module_path);
+            self.symbols.enter_module(module_id);
+
+            // Enter the module (tree)
+            let tree_module_id = self.current_tree_module.join(seg);
+            let saved_tree_module = self.current_tree_module.clone();
+            self.current_tree_module = tree_module_id;
+            tree_stack.push(saved_tree_module);
+
+            // Resolve items if inline module (innermost only).
+            if idx + 1 == segments.len() {
+                if let Some(ref items) = m.items {
+                    for item in items {
+                        self.resolve_item(item);
+                    }
+                }
             }
         }
 
-        // Exit module
-        self.current_tree_module = saved_tree_module;
-        self.symbols.exit_module();
+        // Exit nested modules (tree + symbols) in reverse order.
+        for saved_tree_module in tree_stack.into_iter().rev() {
+            self.current_tree_module = saved_tree_module;
+            self.symbols.exit_module();
+        }
     }
 
     fn resolve_function(&mut self, f: &FnDef) {
@@ -2419,6 +2448,34 @@ mod tests {
             }
         "#;
         assert!(resolves_ok(source), "Deeply nested import should resolve");
+    }
+
+    #[test]
+    fn test_dotted_module_path_creates_nested_modules() {
+        let source = r#"
+            module a.b.c {
+                pub fn deep_fn() -> i32 { 42 }
+            }
+            use a::b::c::deep_fn;
+            fn main() -> i32 {
+                deep_fn()
+            }
+        "#;
+        let tokens = crate::lexer::lex(source).expect("lexing failed");
+        let ast = crate::parser::parse(&tokens, source);
+        assert!(
+            ast.is_ok(),
+            "Parser should accept dotted module path; tokens={:?}; err={:?}",
+            tokens
+                .iter()
+                .map(|t| (t.kind, t.text.as_str()))
+                .collect::<Vec<_>>(),
+            ast.err()
+        );
+        assert!(
+            resolve(ast.unwrap()).is_ok(),
+            "Dotted module path should behave like nested modules"
+        );
     }
 
     #[test]
