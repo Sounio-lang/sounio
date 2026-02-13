@@ -504,6 +504,7 @@ fn irt_fn_item(name: Name, params: Option<Box<ParamList>>, body: Block) -> Item 
     Item {
         kind: ItemKind::ItemFn,
         span: Span::dummy(),
+        is_pub: false,
         name: name,
         fn_def: Some(Box::new(fd)),
         struct_def: None,
@@ -512,19 +513,20 @@ fn irt_fn_item(name: Name, params: Option<Box<ParamList>>, body: Block) -> Item 
         type_alias_ty: None,
         use_path: irt_empty_path(),
         use_glob: false,
+        use_items: None,
     }
 }
 
 fn irt_prog1(item: Item) -> Program with Mut, Alloc {
     let items = Some(Box::new(ItemList { head: item, tail: None }))
     ir_set_pending_items(items)
-    Program { items: None }
+    Program { module_path: irt_empty_path(), items: None }
 }
 
 fn irt_prog2(a: Item, b: Item) -> Program with Mut, Alloc {
     let items = Some(Box::new(ItemList { head: a, tail: Some(Box::new(ItemList { head: b, tail: None })) }))
     ir_set_pending_items(items)
-    Program { items: None }
+    Program { module_path: irt_empty_path(), items: None }
 }
 
 fn irt_lower_item(lo: Lowerer, item: Item) -> Lowerer with Mut, Panic, Div, Alloc, IO {
@@ -745,6 +747,7 @@ fn ir_test_15_param_regs() -> bool with Mut, Panic, Div, Alloc, IO {
             inner: None,
             array_size: None,
             effects: None,
+            knowledge_info: None,
         },
         is_self: false,
         is_self_mut: false,
@@ -787,6 +790,130 @@ fn ir_test_16_method_call_lowered() -> bool with Mut, Panic, Div, Alloc, IO {
     irt_has_call_argc(f, 1)
 }
 
+// Phase 0 tests: IR serialization and normalization
+fn ir_test_17_serialize_roundtrip() -> bool with Mut, Panic, Div {
+    var module = ir_empty_module()
+    module.fn_count = 1
+
+    var func = ir_empty_function()
+    func.name = ir_name_from_bytes(116 as i8, 101 as i8, 115 as i8, 116 as i8, 4)
+    func.instr_count = 2
+    func.reg_count = 1
+    func.instrs[0] = ir_load_imm(0, 42)
+    func.instrs[1] = ir_return(0)
+
+    module.functions[0] = func
+
+    let pair = serialize_ir_module(module)
+    let buf = pair.0
+    let len = pair.1
+
+    let restored = deserialize_ir_module(buf, len)
+
+    if restored.fn_count != 1 { return false }
+    if restored.functions[0].instr_count != 2 { return false }
+    if restored.functions[0].instrs[0].imm_i64 != 42 { return false }
+
+    true
+}
+
+fn ir_test_18_normalize_deterministic() -> bool with Mut, Panic, Div {
+    var module_a = ir_empty_module()
+    module_a.fn_count = 1
+    var func_a = ir_empty_function()
+    func_a.name = ir_name_from_bytes(102 as i8, 111 as i8, 111 as i8, 0 as i8, 3)
+    func_a.instr_count = 3
+    func_a.instrs[0] = ir_load_imm(5, 10)
+    func_a.instrs[1] = ir_load_imm(10, 20)
+    func_a.instrs[2] = ir_binop(5, 5, BinaryOp::OpAdd, 10)
+    module_a.functions[0] = func_a
+
+    var module_b = ir_empty_module()
+    module_b.fn_count = 1
+    var func_b = ir_empty_function()
+    func_b.name = ir_name_from_bytes(102 as i8, 111 as i8, 111 as i8, 0 as i8, 3)
+    func_b.instr_count = 3
+    func_b.instrs[0] = ir_load_imm(2, 10)
+    func_b.instrs[1] = ir_load_imm(7, 20)
+    func_b.instrs[2] = ir_binop(2, 2, BinaryOp::OpAdd, 7)
+    module_b.functions[0] = func_b
+
+    let norm_a = normalize_ir_module(module_a)
+    let norm_b = normalize_ir_module(module_b)
+
+    let fa = norm_a.functions[0]
+    let fb = norm_b.functions[0]
+
+    fa.instrs[0].dst == fb.instrs[0].dst && fa.instrs[1].dst == fb.instrs[1].dst
+}
+
+fn ir_test_19_normalize_label_ordering() -> bool with Mut, Panic, Div {
+    var module = ir_empty_module()
+    module.fn_count = 1
+    var func = ir_empty_function()
+    func.name = ir_name_from_bytes(98 as i8, 97 as i8, 114 as i8, 0 as i8, 3)
+    func.instr_count = 5
+    func.instrs[0] = ir_label(7)
+    func.instrs[1] = ir_load_imm(0, 1)
+    func.instrs[2] = ir_label(2)
+    func.instrs[3] = ir_load_imm(1, 2)
+    func.instrs[4] = ir_jump(7)
+    module.functions[0] = func
+
+    let normalized = normalize_ir_module(module)
+    let nf = normalized.functions[0]
+
+    nf.instrs[0].label_id == 0 && nf.instrs[2].label_id == 1 && nf.instrs[4].label_id == 0
+}
+
+fn ir_test_20_sort_functions_by_name() -> bool with Mut, Panic, Div {
+    var module = ir_empty_module()
+    module.fn_count = 3
+
+    var func_z = ir_empty_function()
+    func_z.name = ir_name_from_bytes(122 as i8, 101 as i8, 98 as i8, 0 as i8, 3)
+    module.functions[0] = func_z
+
+    var func_m = ir_empty_function()
+    func_m.name = ir_name_from_bytes(109 as i8, 105 as i8, 100 as i8, 0 as i8, 3)
+    module.functions[1] = func_m
+
+    var func_a = ir_empty_function()
+    func_a.name = ir_name_from_bytes(97 as i8, 112 as i8, 101 as i8, 0 as i8, 3)
+    module.functions[2] = func_a
+
+    let normalized = normalize_ir_module(module)
+
+    normalized.functions[0].name.buf[0] == 97 as i8 && normalized.functions[1].name.buf[0] == 109 as i8 && normalized.functions[2].name.buf[0] == 122 as i8
+}
+
+fn ir_test_21_compare_normalized_ir() -> bool with Mut, Panic, Div {
+    var module_a = ir_empty_module()
+    module_a.fn_count = 1
+    var func_a = ir_empty_function()
+    func_a.name = ir_name_from_bytes(116 as i8, 101 as i8, 115 as i8, 116 as i8, 4)
+    func_a.instr_count = 1
+    func_a.instrs[0] = ir_load_imm(0, 100)
+    module_a.functions[0] = func_a
+
+    var module_b = ir_empty_module()
+    module_b.fn_count = 1
+    var func_b = ir_empty_function()
+    func_b.name = ir_name_from_bytes(116 as i8, 101 as i8, 115 as i8, 116 as i8, 4)
+    func_b.instr_count = 1
+    func_b.instrs[0] = ir_load_imm(0, 100)
+    module_b.functions[0] = func_b
+
+    let result = compare_normalized_ir(module_a, module_b)
+    if result != 0 { return false }
+
+    func_b.instr_count = 2
+    module_b.functions[0] = func_b
+
+    let result2 = compare_normalized_ir(module_a, module_b)
+    result2 != 0
+}
+
 fn run_ir_tests() -> i32 with IO, Mut, Panic, Div, Alloc {
     var passed: i64 = 0
     var total: i64 = 0
@@ -826,7 +953,20 @@ fn run_ir_tests() -> i32 with IO, Mut, Panic, Div, Alloc {
     total = total + 1
     if ir_test_16_method_call_lowered() { passed = passed + 1; print("  T16 OK\n") } else { print("  FAIL T16\n") }
 
-    if passed == total { print("IR tests: all passed\n") } else { print("IR tests: suite fail\n") }
+    print("\n=== IR Serialization/Normalization Tests (Phase 0) ===\n")
+
+    total = total + 1
+    if ir_test_17_serialize_roundtrip() { passed = passed + 1; print("  T17 OK\n") } else { print("  FAIL T17\n") }
+    total = total + 1
+    if ir_test_18_normalize_deterministic() { passed = passed + 1; print("  T18 OK\n") } else { print("  FAIL T18\n") }
+    total = total + 1
+    if ir_test_19_normalize_label_ordering() { passed = passed + 1; print("  T19 OK\n") } else { print("  FAIL T19\n") }
+    total = total + 1
+    if ir_test_20_sort_functions_by_name() { passed = passed + 1; print("  T20 OK\n") } else { print("  FAIL T20\n") }
+    total = total + 1
+    if ir_test_21_compare_normalized_ir() { passed = passed + 1; print("  T21 OK\n") } else { print("  FAIL T21\n") }
+
+    if passed == total { print("\n✅ IR tests: all passed\n") } else { print("\n❌ IR tests: suite fail\n") }
 
     if passed == total { 0 } else { 1 }
 }
