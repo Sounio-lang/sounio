@@ -130,9 +130,7 @@ pub use gpu_executor::{
 };
 
 // Runtime handler stack for effect dispatch
-pub use handler_stack::{
-    RuntimeHandler, RuntimeHandlerStack, get_handler_stack, reset_handler_stack,
-};
+pub use handler_stack::{RuntimeHandler, RuntimeHandlerStack, reset_handler_stack};
 
 // GPU Runtime Bridge for kernel launch and memory management
 pub use gpu_bridge::{
