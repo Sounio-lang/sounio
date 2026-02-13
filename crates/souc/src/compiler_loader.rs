@@ -409,6 +409,7 @@ impl SounioCompiler {
         let entrypoint = DriverEntrypoint::CompileSource;
         let strict = Self::driver_orchestration_strict();
         let oracle_mode = Self::rust_oracle_mode();
+        let require_driver_output = env_flag_enabled("SOUNIO_SELFHOST_DRIVER_REQUIRE_OUTPUT");
         Self::emit_driver_compile_start_marker(entrypoint, strict, oracle_mode);
         let mut driver_output: Option<Vec<Bytecode>> = None;
         match self.run_driver_orchestration(entrypoint, Some(source)) {
@@ -469,6 +470,14 @@ impl SounioCompiler {
         if let Some(driver_bytecode) = driver_output {
             Self::emit_stage_boundary_marker(entrypoint, driver_bytecode.len());
             return Ok(driver_bytecode);
+        }
+
+        if require_driver_output {
+            return Err(CompilerLoaderError::CompileError(format!(
+                "SELFHOST_STRICT_DRIVER_OUTPUT_REQUIRED entrypoint={} source_len={}",
+                entrypoint.qualified_name(),
+                source.len()
+            )));
         }
 
         let boundary_bytecode = self.compile_via_stage_boundaries_source(source)?;
