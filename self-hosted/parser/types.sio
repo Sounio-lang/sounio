@@ -107,18 +107,22 @@ impl Parser {
     fn parse_type_path(self) -> (Parser, AstPath) with Mut, IO, Panic, Div {
         let name = self.current_name()
         var p = self.advance()
-        var segs = StringList { head_buf: name.buf, head_len: name.len, tail: None }
+        var rev_segs = StringList { head_buf: name.buf, head_len: name.len, tail: None }
         var count: i64 = 1
 
         while p.peek() == TokenKind::ColonColon && p.peek_ahead(1) == TokenKind::Ident {
             p = p.advance()  // skip ::
             let seg_name = p.current_name()
-            let new_node = StringList { head_buf: seg_name.buf, head_len: seg_name.len, tail: None }
-            segs = string_list_append(segs, new_node)
+            rev_segs = StringList {
+                head_buf: seg_name.buf,
+                head_len: seg_name.len,
+                tail: Some(Box::new(rev_segs)),
+            }
             count = count + 1
             p = p.advance()  // skip ident
         }
 
+        let segs = reverse_string_list(rev_segs)
         (p, AstPath { segments: segs, seg_count: count })
     }
 
@@ -131,19 +135,18 @@ impl Parser {
         let pair = p.parse_type()
         p = pair.0
         let first_ty = pair.1
-        var list = TypeExprList { head: first_ty, tail: None }
+        var rev_list = TypeExprList { head: first_ty, tail: None }
 
         while p.peek() == TokenKind::Comma {
             p = p.advance()  // skip ,
             let pair2 = p.parse_type()
             p = pair2.0
             let next_ty = pair2.1
-            let new_node = TypeExprList { head: next_ty, tail: None }
-            list = type_expr_list_append(list, new_node)
+            rev_list = TypeExprList { head: next_ty, tail: Some(Box::new(rev_list)) }
         }
 
         p = p.expect(TokenKind::Gt)
-        (p, list)
+        (p, reverse_type_expr_list(rev_list))
     }
 
     // ============================================================
@@ -241,13 +244,12 @@ impl Parser {
             if p.peek() == TokenKind::Comma {
                 // Tuple type
                 p = p.advance()  // skip ,
-                var list = TypeExprList { head: first_ty, tail: None }
+                var rev_list = TypeExprList { head: first_ty, tail: None }
                 while p.peek() != TokenKind::RParen && p.peek() != TokenKind::Eof {
                     let pair2 = p.parse_type()
                     p = pair2.0
                     let next_ty = pair2.1
-                    let new_node = TypeExprList { head: next_ty, tail: None }
-                    list = type_expr_list_append(list, new_node)
+                    rev_list = TypeExprList { head: next_ty, tail: Some(Box::new(rev_list)) }
                     if p.peek() == TokenKind::Comma {
                         p = p.advance()
                     }
@@ -258,7 +260,7 @@ impl Parser {
                     kind: TypeExprKind::TypeTuple,
                     span: span,
                     path: empty_path(),
-                    type_args: Some(Box::new(list)),
+                    type_args: Some(Box::new(reverse_type_expr_list(rev_list))),
                     inner: None,
                     array_size: None,
                     effects: None,
@@ -287,16 +289,17 @@ impl Parser {
         if p.peek() != TokenKind::RParen {
             let pair = p.parse_type()
             p = pair.0
-            param_list = TypeExprList { head: pair.1, tail: None }
+            var rev_param_list = TypeExprList { head: pair.1, tail: None }
             has_params = true
 
             while p.peek() == TokenKind::Comma {
                 p = p.advance()
                 let pair2 = p.parse_type()
                 p = pair2.0
-                let new_node = TypeExprList { head: pair2.1, tail: None }
-                param_list = type_expr_list_append(param_list, new_node)
+                rev_param_list = TypeExprList { head: pair2.1, tail: Some(Box::new(rev_param_list)) }
             }
+
+            param_list = reverse_type_expr_list(rev_param_list)
         }
 
         p = p.expect(TokenKind::RParen)
@@ -343,19 +346,18 @@ impl Parser {
         var first = copy_name_to_effect(first_name, first_eff)
         p = p.advance()  // skip effect name
 
-        var list = EffectList { head: first, tail: None }
+        var rev_list = EffectList { head: first, tail: None }
 
         while p.peek() == TokenKind::Comma {
             p = p.advance()  // skip ,
             let eff_name = p.current_name()
             let eff = EffectRef { name_buf: [0; 64], name_len: eff_name.len }
             var e = copy_name_to_effect(eff_name, eff)
-            let new_node = EffectList { head: e, tail: None }
-            list = effect_list_append(list, new_node)
+            rev_list = EffectList { head: e, tail: Some(Box::new(rev_list)) }
             p = p.advance()  // skip effect name
         }
 
-        (p, list)
+        (p, reverse_effect_list(rev_list))
     }
 
     // ============================================================
@@ -391,34 +393,42 @@ impl Parser {
 // Linked-list helpers for type parsing
 // ============================================================
 
-fn type_expr_list_append(list: TypeExprList, node: TypeExprList) -> TypeExprList with Mut, Alloc {
-    match list.tail {
-        None => TypeExprList { head: list.head, tail: Some(Box::new(node)) },
-        Some(rest) => TypeExprList {
-            head: list.head,
-            tail: Some(Box::new(type_expr_list_append(*rest, node))),
-        },
+fn reverse_type_expr_list(list: TypeExprList) -> TypeExprList with Mut, Alloc {
+    reverse_type_expr_list_loop(list, None)
+}
+
+fn reverse_type_expr_list_loop(current: TypeExprList, acc: Option<Box<TypeExprList>>) -> TypeExprList with Mut, Alloc {
+    let next = current.tail
+    let rev_node = TypeExprList { head: current.head, tail: acc }
+    match next {
+        None => rev_node,
+        Some(rest) => reverse_type_expr_list_loop(*rest, Some(Box::new(rev_node))),
     }
 }
 
-fn effect_list_append(list: EffectList, node: EffectList) -> EffectList with Mut, Alloc {
-    match list.tail {
-        None => EffectList { head: list.head, tail: Some(Box::new(node)) },
-        Some(rest) => EffectList {
-            head: list.head,
-            tail: Some(Box::new(effect_list_append(*rest, node))),
-        },
+fn reverse_effect_list(list: EffectList) -> EffectList with Mut, Alloc {
+    reverse_effect_list_loop(list, None)
+}
+
+fn reverse_effect_list_loop(current: EffectList, acc: Option<Box<EffectList>>) -> EffectList with Mut, Alloc {
+    let next = current.tail
+    let rev_node = EffectList { head: current.head, tail: acc }
+    match next {
+        None => rev_node,
+        Some(rest) => reverse_effect_list_loop(*rest, Some(Box::new(rev_node))),
     }
 }
 
-fn string_list_append(list: StringList, node: StringList) -> StringList with Mut, Alloc {
-    match list.tail {
-        None => StringList { head_buf: list.head_buf, head_len: list.head_len, tail: Some(Box::new(node)) },
-        Some(rest) => StringList {
-            head_buf: list.head_buf,
-            head_len: list.head_len,
-            tail: Some(Box::new(string_list_append(*rest, node))),
-        },
+fn reverse_string_list(list: StringList) -> StringList with Mut, Alloc {
+    reverse_string_list_loop(list, None)
+}
+
+fn reverse_string_list_loop(current: StringList, acc: Option<Box<StringList>>) -> StringList with Mut, Alloc {
+    let next = current.tail
+    let rev_node = StringList { head_buf: current.head_buf, head_len: current.head_len, tail: acc }
+    match next {
+        None => rev_node,
+        Some(rest) => reverse_string_list_loop(*rest, Some(Box::new(rev_node))),
     }
 }
 

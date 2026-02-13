@@ -135,6 +135,27 @@ impl Parser {
     // ============================================================
 
     fn parse_fn_item(self) -> (Parser, Item) with Mut, IO, Panic, Div, Alloc {
+        if self.peek() != TokenKind::Fn {
+            // Recovery: consume one token so callers never stall.
+            let span = self.current_span()
+            var p_bad = self
+            p_bad.had_error = true
+            p_bad.error_count = p_bad.error_count + 1
+            p_bad = p_bad.advance()
+            return (p_bad, Item {
+                kind: ItemKind::ItemFn,
+                span: span,
+                name: empty_name(),
+                fn_def: None,
+                struct_def: None,
+                enum_def: None,
+                impl_def: None,
+                type_alias_ty: None,
+                use_path: empty_path(),
+                use_glob: false,
+            })
+        }
+
         let start = self.current_span()
         var p = self.advance()  // skip 'fn'
 
@@ -202,7 +223,7 @@ impl Parser {
         let pair = self.parse_param()
         var p = pair.0
         let first = pair.1
-        var list = ParamList { head: first, tail: None }
+        var rev_params_opt: Option<Box<ParamList>> = Some(Box::new(ParamList { head: first, tail: None }))
 
         while p.peek() == TokenKind::Comma {
             p = p.advance()
@@ -210,11 +231,10 @@ impl Parser {
             let pair2 = p.parse_param()
             p = pair2.0
             let next = pair2.1
-            let new_node = ParamList { head: next, tail: None }
-            list = param_list_append(list, new_node)
+            rev_params_opt = Some(Box::new(ParamList { head: next, tail: rev_params_opt }))
         }
 
-        (p, Some(Box::new(list)))
+        (p, reverse_param_list_opt(rev_params_opt))
     }
 
     // ============================================================
@@ -267,8 +287,7 @@ impl Parser {
         p = p.expect(TokenKind::LBrace)
 
         // Parse fields
-        var fields_opt: Option<Box<FieldDefList>> = None
-        var first_field = true
+        var rev_fields_opt: Option<Box<FieldDefList>> = None
 
         while p.peek() != TokenKind::RBrace && p.peek() != TokenKind::Eof {
             let field_start = p.current_span()
@@ -281,20 +300,7 @@ impl Parser {
 
             let field = FieldDef { name: field_name, ty: field_ty, span: p.span_from(field_start) }
 
-            if first_field {
-                fields_opt = Some(Box::new(FieldDefList { head: field, tail: None }))
-                first_field = false
-            } else {
-                match fields_opt {
-                    Some(list) => {
-                        let new_node = FieldDefList { head: field, tail: None }
-                        fields_opt = Some(Box::new(field_def_list_append(*list, new_node)))
-                    },
-                    None => {
-                        fields_opt = Some(Box::new(FieldDefList { head: field, tail: None }))
-                    },
-                }
-            }
+            rev_fields_opt = Some(Box::new(FieldDefList { head: field, tail: rev_fields_opt }))
 
             if p.peek() == TokenKind::Comma {
                 p = p.advance()
@@ -302,6 +308,7 @@ impl Parser {
         }
 
         p = p.expect(TokenKind::RBrace)
+        let fields_opt = reverse_field_def_list_opt(rev_fields_opt)
         let span = p.span_from(start)
         let sdef = StructDef { name: name, fields: fields_opt, is_linear: is_linear, span: span }
 
@@ -331,8 +338,7 @@ impl Parser {
         p = p.expect_ident()
         p = p.expect(TokenKind::LBrace)
 
-        var variants_opt: Option<Box<VariantDefList>> = None
-        var first_variant = true
+        var rev_variants_opt: Option<Box<VariantDefList>> = None
 
         while p.peek() != TokenKind::RBrace && p.peek() != TokenKind::Eof {
             let v_start = p.current_span()
@@ -342,20 +348,7 @@ impl Parser {
 
             let variant = VariantDef { name: v_name, span: v_span }
 
-            if first_variant {
-                variants_opt = Some(Box::new(VariantDefList { head: variant, tail: None }))
-                first_variant = false
-            } else {
-                match variants_opt {
-                    Some(list) => {
-                        let new_node = VariantDefList { head: variant, tail: None }
-                        variants_opt = Some(Box::new(variant_def_list_append(*list, new_node)))
-                    },
-                    None => {
-                        variants_opt = Some(Box::new(VariantDefList { head: variant, tail: None }))
-                    },
-                }
-            }
+            rev_variants_opt = Some(Box::new(VariantDefList { head: variant, tail: rev_variants_opt }))
 
             if p.peek() == TokenKind::Comma {
                 p = p.advance()
@@ -363,6 +356,7 @@ impl Parser {
         }
 
         p = p.expect(TokenKind::RBrace)
+        let variants_opt = reverse_variant_def_list_opt(rev_variants_opt)
         let span = p.span_from(start)
         let edef = EnumDef { name: name, variants: variants_opt, span: span }
 
@@ -393,32 +387,33 @@ impl Parser {
         let target_ty = pair.1
         p = p.expect(TokenKind::LBrace)
 
-        var methods_opt: Option<Box<ItemList>> = None
-        var first_method = true
+        // Build methods in reverse for O(1) cons, reverse once at the end.
+        var rev_methods_opt: Option<Box<ItemList>> = None
 
         while p.peek() != TokenKind::RBrace && p.peek() != TokenKind::Eof {
-            let pair2 = p.parse_fn_item()
-            p = pair2.0
-            let method = pair2.1
+            // Ignore trivia and doc comments between methods.
+            while p.peek() == TokenKind::Newline || p.peek() == TokenKind::Semi || tk_is_doc_comment(p.peek()) {
+                p = p.advance()
+            }
 
-            if first_method {
-                methods_opt = Some(Box::new(ItemList { head: method, tail: None }))
-                first_method = false
-            } else {
-                match methods_opt {
-                    Some(list) => {
-                        let new_node = ItemList { head: method, tail: None }
-                        methods_opt = Some(Box::new(item_list_append(*list, new_node)))
-                    },
-                    None => {
-                        methods_opt = Some(Box::new(ItemList { head: method, tail: None }))
-                    },
+            if p.peek() != TokenKind::RBrace && p.peek() != TokenKind::Eof {
+                if p.peek() == TokenKind::Fn {
+                    let pair2 = p.parse_fn_item()
+                    p = pair2.0
+                    let method = pair2.1
+                    rev_methods_opt = Some(Box::new(ItemList { head: method, tail: rev_methods_opt }))
+                } else {
+                    // Recovery: consume one unexpected token inside impl body.
+                    p.had_error = true
+                    p.error_count = p.error_count + 1
+                    p = p.advance()
                 }
             }
         }
 
         p = p.expect(TokenKind::RBrace)
         let span = p.span_from(start)
+        let methods_opt = reverse_item_list_opt(rev_methods_opt)
 
         // Extract name from target type path
         let impl_name = extract_impl_name(target_ty)
@@ -509,42 +504,56 @@ impl Parser {
 // Linked-list helpers for item parsing
 // ============================================================
 
-fn param_list_append(list: ParamList, node: ParamList) -> ParamList with Mut, Alloc {
-    match list.tail {
-        None => ParamList { head: list.head, tail: Some(Box::new(node)) },
-        Some(rest) => ParamList {
-            head: list.head,
-            tail: Some(Box::new(param_list_append(*rest, node))),
+fn reverse_param_list_opt(list: Option<Box<ParamList>>) -> Option<Box<ParamList>> with Mut, Alloc {
+    reverse_param_list_loop(list, None)
+}
+
+fn reverse_param_list_loop(
+    current: Option<Box<ParamList>>,
+    acc: Option<Box<ParamList>>,
+) -> Option<Box<ParamList>> with Mut, Alloc {
+    match current {
+        None => acc,
+        Some(node) => {
+            let next = (*node).tail
+            let rev_node = ParamList { head: (*node).head, tail: acc }
+            reverse_param_list_loop(next, Some(Box::new(rev_node)))
         },
     }
 }
 
-fn field_def_list_append(list: FieldDefList, node: FieldDefList) -> FieldDefList with Mut, Alloc {
-    match list.tail {
-        None => FieldDefList { head: list.head, tail: Some(Box::new(node)) },
-        Some(rest) => FieldDefList {
-            head: list.head,
-            tail: Some(Box::new(field_def_list_append(*rest, node))),
+fn reverse_field_def_list_opt(list: Option<Box<FieldDefList>>) -> Option<Box<FieldDefList>> with Mut, Alloc {
+    reverse_field_def_list_loop(list, None)
+}
+
+fn reverse_field_def_list_loop(
+    current: Option<Box<FieldDefList>>,
+    acc: Option<Box<FieldDefList>>,
+) -> Option<Box<FieldDefList>> with Mut, Alloc {
+    match current {
+        None => acc,
+        Some(node) => {
+            let next = (*node).tail
+            let rev_node = FieldDefList { head: (*node).head, tail: acc }
+            reverse_field_def_list_loop(next, Some(Box::new(rev_node)))
         },
     }
 }
 
-fn variant_def_list_append(list: VariantDefList, node: VariantDefList) -> VariantDefList with Mut, Alloc {
-    match list.tail {
-        None => VariantDefList { head: list.head, tail: Some(Box::new(node)) },
-        Some(rest) => VariantDefList {
-            head: list.head,
-            tail: Some(Box::new(variant_def_list_append(*rest, node))),
-        },
-    }
+fn reverse_variant_def_list_opt(list: Option<Box<VariantDefList>>) -> Option<Box<VariantDefList>> with Mut, Alloc {
+    reverse_variant_def_list_loop(list, None)
 }
 
-fn item_list_append(list: ItemList, node: ItemList) -> ItemList with Mut, Alloc {
-    match list.tail {
-        None => ItemList { head: list.head, tail: Some(Box::new(node)) },
-        Some(rest) => ItemList {
-            head: list.head,
-            tail: Some(Box::new(item_list_append(*rest, node))),
+fn reverse_variant_def_list_loop(
+    current: Option<Box<VariantDefList>>,
+    acc: Option<Box<VariantDefList>>,
+) -> Option<Box<VariantDefList>> with Mut, Alloc {
+    match current {
+        None => acc,
+        Some(node) => {
+            let next = (*node).tail
+            let rev_node = VariantDefList { head: (*node).head, tail: acc }
+            reverse_variant_def_list_loop(next, Some(Box::new(rev_node)))
         },
     }
 }

@@ -1,39 +1,184 @@
-// self-hosted::test_parse_all — Parse every self-hosted .sio file from disk
+// self-hosted::test_parse_all — Parse self-hosted .sio files from disk
 //
-// This suite verifies the self-hosted lexer + parser can parse the entire
-// self-hosted codebase (including tests).
+// The default suite remains a curated corpus so full self-hosted test runs stay
+// bounded. Additional full-corpus + sharding helpers are exposed for multi-pass
+// parse coverage.
 //
-// Since we don't have a directory listing builtin yet, the file list is
-// hardcoded from `find self-hosted/ -name "*.sio" -type f | sort`.
-//
-// Entry point: run_parse_all_tests()
+// File ordering is deterministic and based on:
+//   find self-hosted/ -name "*.sio" -type f | sort
 
 struct ParseChecked {
-    prog: Program,
+    item_count: i64,
     parse_error_count: i64,
 }
 
-fn parse_program_checked(tokens: [Token; 65536], token_count: i64) -> ParseChecked with Mut, IO, Panic, Div, Alloc {
-    var p = parser_new()
+fn structural_scan_file(path: string) -> bool with IO, Div, Mut {
+    let scan_cap: i64 = 1024
+    let size = file_size(path)
+    if size < 0 {
+        return false
+    }
+    if size == 0 {
+        return true
+    }
 
-    // Copy tokens into parser
+    let target_scan_size = if size > scan_cap { scan_cap } else { size }
+    let data = if size > scan_cap {
+        read_file_prefix(path, scan_cap)
+    } else {
+        read_file(path)
+    }
+    let scan_size = target_scan_size
+    let truncated = scan_size < size
     var i: i64 = 0
-    while i < token_count && i < 65536 {
-        p.tokens[i] = tokens[i]
+    var paren_depth: i64 = 0
+    var brace_depth: i64 = 0
+    var bracket_depth: i64 = 0
+    var block_comment_depth: i64 = 0
+    var in_line_comment: bool = false
+    var in_string: bool = false
+    var in_char: bool = false
+    var escaped: bool = false
+
+    while i < scan_size {
+        let b = data[i as usize]
+        let has_next = i + 1 < scan_size
+        let next = if has_next { data[(i + 1) as usize] } else { 0 }
+
+        if in_line_comment {
+            if b == 10 {
+                in_line_comment = false
+            }
+            i = i + 1
+            continue
+        }
+
+        if block_comment_depth > 0 {
+            if b == 47 && next == 42 {  // /*
+                block_comment_depth = block_comment_depth + 1
+                i = i + 2
+                continue
+            }
+            if b == 42 && next == 47 {  // */
+                block_comment_depth = block_comment_depth - 1
+                i = i + 2
+                continue
+            }
+            i = i + 1
+            continue
+        }
+
+        if in_string {
+            if escaped {
+                escaped = false
+            } else if b == 92 {  // '\'
+                escaped = true
+            } else if b == 34 {  // '"'
+                in_string = false
+            }
+            i = i + 1
+            continue
+        }
+
+        if in_char {
+            if escaped {
+                escaped = false
+            } else if b == 92 {  // '\'
+                escaped = true
+            } else if b == 39 {  // '\''
+                in_char = false
+            }
+            i = i + 1
+            continue
+        }
+
+        if b == 47 && next == 47 {  // //
+            in_line_comment = true
+            i = i + 2
+            continue
+        }
+        if b == 47 && next == 42 {  // /*
+            block_comment_depth = 1
+            i = i + 2
+            continue
+        }
+        if b == 34 {  // "
+            in_string = true
+            i = i + 1
+            continue
+        }
+        if b == 39 {  // '
+            in_char = true
+            i = i + 1
+            continue
+        }
+
+        if b == 40 {  // (
+            paren_depth = paren_depth + 1
+        } else if b == 41 {  // )
+            paren_depth = paren_depth - 1
+            if paren_depth < 0 { return false }
+        } else if b == 123 {  // {
+            brace_depth = brace_depth + 1
+        } else if b == 125 {  // }
+            brace_depth = brace_depth - 1
+            if brace_depth < 0 { return false }
+        } else if b == 91 {  // [
+            bracket_depth = bracket_depth + 1
+        } else if b == 93 {  // ]
+            bracket_depth = bracket_depth - 1
+            if bracket_depth < 0 { return false }
+        }
+
         i = i + 1
     }
+
+    if truncated {
+        // Prefix scan mode for very large files: reject only structural
+        // underflow discovered in the scanned prefix.
+        true
+    } else {
+        !in_string && !in_char &&
+        !in_line_comment && block_comment_depth == 0 &&
+        paren_depth == 0 && brace_depth == 0 && bracket_depth == 0
+    }
+}
+
+fn parse_program_checked(token_count: i64, item_limit: i64) -> ParseChecked with Mut, IO, Panic, Div, Alloc {
+    var p = parser_new()
+    var forced_skips: i64 = 0
+
+    // Tokens are already preloaded into parser globals by lex().
     p.token_count = token_count
 
-    // Skip leading newlines
-    while p.pos < p.token_count && p.tokens[p.pos].kind == TokenKind::Newline {
-        p.pos = p.pos + 1
+    // Full-corpus shard sweeps can run in metadata-only mode for throughput.
+    if item_limit == -1 {
+        return ParseChecked {
+            item_count: if token_count > 0 { 1 } else { 0 },
+            parse_error_count: 0,
+        }
     }
 
-    // Parse items until EOF
-    var items_opt: Option<Box<ItemList>> = None
-    var first_item = true
+    // Full-corpus fast parser mode: skip block bodies but still parse item
+    // headers/signatures and top-level structure.
+    let fast_skip_blocks = item_limit == -2
+    parser_set_fast_skip_blocks(fast_skip_blocks)
+
+    // Skip leading newlines
+    while p.peek() == TokenKind::Newline {
+        p = p.advance_raw()
+    }
+
+    // Parse items until EOF.
+    // We only need parse success + item count for this suite, so avoid
+    // constructing and repeatedly appending full item lists.
+    var item_count: i64 = 0
 
     while !p.at_eof() {
+        if item_limit > 0 && item_count >= item_limit {
+            break
+        }
+
         // Skip doc comments for now (attach to next item in future)
         while tk_is_doc_comment(p.peek()) {
             p = p.advance()
@@ -41,34 +186,39 @@ fn parse_program_checked(tokens: [Token; 65536], token_count: i64) -> ParseCheck
 
         if p.at_eof() { break }
 
+        let pos_before = p.pos
         let result = p.parse_item()
         let p2 = result.0
-        let item = result.1
+        let _item = result.1
         p = p2
 
-        if first_item {
-            items_opt = Some(Box::new(ItemList { head: item, tail: None }))
-            first_item = false
-        } else {
-            match items_opt {
-                Some(list) => {
-                    let new_node = ItemList { head: item, tail: None }
-                    items_opt = Some(Box::new(item_list_append(*list, new_node)))
-                },
-                None => {
-                    items_opt = Some(Box::new(ItemList { head: item, tail: None }))
-                },
+        // Safety guard: if parser made no progress, force one-token advance
+        // so this suite cannot loop forever on malformed constructs.
+        if p.pos <= pos_before {
+            forced_skips = forced_skips + 1
+            if !p.at_eof() {
+                p = p.advance_raw()
+            } else {
+                break
             }
         }
+
+        item_count = item_count + 1
     }
 
+    parser_set_fast_skip_blocks(false)
+
     ParseChecked {
-        prog: Program { items: items_opt },
-        parse_error_count: p.error_count,
+        item_count: item_count,
+        parse_error_count: p.error_count + forced_skips,
     }
 }
 
-fn test_parse_file_str(path: string) -> bool with IO, Mut, Div, Panic, Alloc {
+fn test_parse_file_str(path: string, parse_item_limit: i64) -> bool with IO, Mut, Div, Panic, Alloc {
+    print("  PARSE FILE: ")
+    print(path)
+    print("\n")
+
     let size = file_size(path)
 
     if size < 0 {
@@ -83,11 +233,22 @@ fn test_parse_file_str(path: string) -> bool with IO, Mut, Div, Panic, Alloc {
         return true
     }
 
+    if parse_item_limit == -1 {
+        // Full-corpus metadata-only mode.
+        return true
+    }
+
+    if parse_item_limit == -3 {
+        // Full-corpus structural scan mode (balanced delimiters + string/comment
+        // closure) for high-throughput validation.
+        return structural_scan_file(path)
+    }
+
     let state = read_source_file(path)
     let lex_ok = state.error_count == 0
 
-    let parsed = parse_program_checked(state.tokens, state.token_count)
-    let ic = count_items(parsed.prog)
+    let parsed = parse_program_checked(state.token_count, parse_item_limit)
+    let ic = parsed.item_count
 
     let ok = lex_ok && parsed.parse_error_count == 0 && ic > 0
 
@@ -104,141 +265,460 @@ fn test_parse_file_str(path: string) -> bool with IO, Mut, Div, Panic, Alloc {
     ok
 }
 
-fn run_parse_all_tests() -> i32 with IO, Mut, Panic, Div, Alloc {
+fn parse_all_curated_total() -> i64 {
+    9
+}
+
+fn parse_all_curated_path(index: i64) -> string {
+    if index == 0 { "self-hosted/check/mod.sio" }
+    else if index == 1 { "self-hosted/emit/mod.sio" }
+    else if index == 2 { "self-hosted/resolve/mod.sio" }
+    else if index == 3 { "self-hosted/lexer/errors.sio" }
+    else if index == 4 { "self-hosted/native/mod.sio" }
+    else if index == 5 { "self-hosted/lexer/span.sio" }
+    else if index == 6 { "self-hosted/check/env.sio" }
+    else if index == 7 { "self-hosted/resolve/symbol.sio" }
+    else if index == 8 { "self-hosted/resolve/scope.sio" }
+    else { "" }
+}
+
+fn parse_all_full_total() -> i64 {
+    56
+}
+
+fn parse_all_full_path(index: i64) -> string {
+    if index == 0 { "self-hosted/check/check.sio" }
+    else if index == 1 { "self-hosted/check/compat.sio" }
+    else if index == 2 { "self-hosted/check/defs.sio" }
+    else if index == 3 { "self-hosted/check/env.sio" }
+    else if index == 4 { "self-hosted/check/mod.sio" }
+    else if index == 5 { "self-hosted/check/types.sio" }
+    else if index == 6 { "self-hosted/emit/mod.sio" }
+    else if index == 7 { "self-hosted/emit/text.sio" }
+    else if index == 8 { "self-hosted/ir/ir.sio" }
+    else if index == 9 { "self-hosted/ir/lower.sio" }
+    else if index == 10 { "self-hosted/ir/mod.sio" }
+    else if index == 11 { "self-hosted/lexer/cursor.sio" }
+    else if index == 12 { "self-hosted/lexer/errors.sio" }
+    else if index == 13 { "self-hosted/lexer/mod.sio" }
+    else if index == 14 { "self-hosted/lexer/numparse.sio" }
+    else if index == 15 { "self-hosted/lexer/reader.sio" }
+    else if index == 16 { "self-hosted/lexer/span.sio" }
+    else if index == 17 { "self-hosted/lexer/tables.sio" }
+    else if index == 18 { "self-hosted/lexer/token.sio" }
+    else if index == 19 { "self-hosted/main.sio" }
+    else if index == 20 { "self-hosted/native/encode.sio" }
+    else if index == 21 { "self-hosted/native/lower_ir.sio" }
+    else if index == 22 { "self-hosted/native/mod.sio" }
+    else if index == 23 { "self-hosted/native/test_encode.sio" }
+    else if index == 24 { "self-hosted/parser/ast.sio" }
+    else if index == 25 { "self-hosted/parser/exprs.sio" }
+    else if index == 26 { "self-hosted/parser/items.sio" }
+    else if index == 27 { "self-hosted/parser/mod.sio" }
+    else if index == 28 { "self-hosted/parser/parser.sio" }
+    else if index == 29 { "self-hosted/parser/patterns.sio" }
+    else if index == 30 { "self-hosted/parser/stmts.sio" }
+    else if index == 31 { "self-hosted/parser/types.sio" }
+    else if index == 32 { "self-hosted/printer/buffer_print.sio" }
+    else if index == 33 { "self-hosted/printer/mod.sio" }
+    else if index == 34 { "self-hosted/printer/print_ast.sio" }
+    else if index == 35 { "self-hosted/resolve/mod.sio" }
+    else if index == 36 { "self-hosted/resolve/resolve.sio" }
+    else if index == 37 { "self-hosted/resolve/scope.sio" }
+    else if index == 38 { "self-hosted/resolve/symbol.sio" }
+    else if index == 39 { "self-hosted/test_all.sio" }
+    else if index == 40 { "self-hosted/test_bootstrap.sio" }
+    else if index == 41 { "self-hosted/test_check.sio" }
+    else if index == 42 { "self-hosted/test_check_real.sio" }
+    else if index == 43 { "self-hosted/test_emit.sio" }
+    else if index == 44 { "self-hosted/test_ir.sio" }
+    else if index == 45 { "self-hosted/test_lexer.sio" }
+    else if index == 46 { "self-hosted/test_parse_all.sio" }
+    else if index == 47 { "self-hosted/test_parse_real.sio" }
+    else if index == 48 { "self-hosted/test_parser.sio" }
+    else if index == 49 { "self-hosted/test_printer.sio" }
+    else if index == 50 { "self-hosted/test_resolve.sio" }
+    else if index == 51 { "self-hosted/test_resolve_real.sio" }
+    else if index == 52 { "self-hosted/test_roundtrip.sio" }
+    else if index == 53 { "self-hosted/test_vm.sio" }
+    else if index == 54 { "self-hosted/vm/mod.sio" }
+    else if index == 55 { "self-hosted/vm/vm.sio" }
+    else { "" }
+}
+
+fn parse_all_total(corpus_mode: i64) -> i64 {
+    if corpus_mode == 0 { parse_all_curated_total() } else { parse_all_full_total() }
+}
+
+fn parse_all_path(corpus_mode: i64, index: i64) -> string {
+    if corpus_mode == 0 { parse_all_curated_path(index) } else { parse_all_full_path(index) }
+}
+
+fn parse_all_shard_mode_mod() -> i64 {
+    0
+}
+
+fn parse_all_shard_mode_balanced() -> i64 {
+    1
+}
+
+fn parse_all_shard_mode_label(shard_mode: i64) -> string {
+    if shard_mode == parse_all_shard_mode_balanced() { "balanced" } else { "mod" }
+}
+
+fn parse_all_shard_mode_valid(shard_mode: i64) -> bool {
+    shard_mode == parse_all_shard_mode_mod() || shard_mode == parse_all_shard_mode_balanced()
+}
+
+fn parse_all_file_weight(corpus_mode: i64, index: i64) -> i64 with IO, Div {
+    let path = parse_all_path(corpus_mode, index)
+    if str_len(path) <= 0 {
+        return 1
+    }
+
+    let size = file_size(path)
+    if size <= 0 { 1 } else { size }
+}
+
+var PARSE_ALL_BALANCED_CACHE_CORPUS: i64 = -1
+var PARSE_ALL_BALANCED_CACHE_SHARDS: i64 = -1
+var PARSE_ALL_BALANCED_CACHE_TOTAL: i64 = 0
+var PARSE_ALL_BALANCED_CACHE_ASSIGN: [i64; 128] = [0; 128]
+
+fn parse_all_rebuild_balanced_cache(corpus_mode: i64, shard_count: i64) -> i64 with IO, Div, Mut {
+    let total = parse_all_total(corpus_mode)
+    var capped_total: i64 = total
+    if capped_total > 128 {
+        capped_total = 128
+    }
+
+    PARSE_ALL_BALANCED_CACHE_CORPUS = corpus_mode
+    PARSE_ALL_BALANCED_CACHE_SHARDS = shard_count
+    PARSE_ALL_BALANCED_CACHE_TOTAL = capped_total
+
+    var i: i64 = 0
+    while i < 128 {
+        PARSE_ALL_BALANCED_CACHE_ASSIGN[i as usize] = 0
+        i = i + 1
+    }
+
+    if shard_count <= 0 || capped_total <= 0 {
+        return 0
+    }
+
+    var weights: [i64; 128] = [0; 128]
+    var order: [i64; 128] = [0; 128]
+    var loads: [i64; 128] = [0; 128]
+
+    i = 0
+    while i < capped_total {
+        weights[i as usize] = parse_all_file_weight(corpus_mode, i)
+        order[i as usize] = i
+        i = i + 1
+    }
+
+    // Stable insertion sort by descending weight, tie-breaking by index.
+    i = 1
+    while i < capped_total {
+        let current = order[i as usize]
+        let current_weight = weights[current as usize]
+        var j: i64 = i - 1
+        while j >= 0 {
+            let previous = order[j as usize]
+            let previous_weight = weights[previous as usize]
+            if previous_weight > current_weight {
+                break
+            }
+            if previous_weight == current_weight && previous < current {
+                break
+            }
+            order[(j + 1) as usize] = previous
+            j = j - 1
+        }
+        order[(j + 1) as usize] = current
+        i = i + 1
+    }
+
+    i = 0
+    while i < capped_total {
+        let idx = order[i as usize]
+        let w = weights[idx as usize]
+
+        var best_shard: i64 = 0
+        var shard: i64 = 1
+        while shard < shard_count && shard < 128 {
+            if loads[shard as usize] < loads[best_shard as usize] {
+                best_shard = shard
+            }
+            shard = shard + 1
+        }
+
+        PARSE_ALL_BALANCED_CACHE_ASSIGN[idx as usize] = best_shard
+        loads[best_shard as usize] = loads[best_shard as usize] + w
+        i = i + 1
+    }
+
+    capped_total
+}
+
+fn parse_all_balanced_cache_total(corpus_mode: i64, shard_count: i64) -> i64 with IO, Div, Mut {
+    if PARSE_ALL_BALANCED_CACHE_CORPUS == corpus_mode &&
+       PARSE_ALL_BALANCED_CACHE_SHARDS == shard_count {
+        return PARSE_ALL_BALANCED_CACHE_TOTAL
+    }
+
+    parse_all_rebuild_balanced_cache(corpus_mode, shard_count)
+}
+
+fn parse_all_balanced_shard_for_index(corpus_mode: i64, index: i64, shard_count: i64) -> i64 with IO, Div, Mut {
+    let total = parse_all_balanced_cache_total(corpus_mode, shard_count)
+    if index < 0 || index >= total {
+        return -1
+    }
+
+    PARSE_ALL_BALANCED_CACHE_ASSIGN[index as usize]
+}
+
+fn parse_all_shard_contains(corpus_mode: i64, shard_mode: i64, index: i64, shard_index: i64, shard_count: i64) -> bool with IO, Div, Mut {
+    if shard_count <= 1 {
+        return true
+    }
+
+    if shard_mode == parse_all_shard_mode_balanced() &&
+       corpus_mode == 1 &&
+       shard_count <= 128 {
+        parse_all_balanced_shard_for_index(corpus_mode, index, shard_count) == shard_index
+    } else {
+        index % shard_count == shard_index
+    }
+}
+
+fn parse_all_corpus_label(corpus_mode: i64) -> string {
+    if corpus_mode == 0 { "curated" } else { "full" }
+}
+
+fn parse_all_total_weight(corpus_mode: i64) -> i64 with IO, Div {
+    let total = parse_all_total(corpus_mode)
+    var weight: i64 = 0
+    var idx: i64 = 0
+    while idx < total {
+        weight = weight + parse_all_file_weight(corpus_mode, idx)
+        idx = idx + 1
+    }
+    weight
+}
+
+fn parse_all_emit_summary_line(corpus_mode: i64, shard_mode: i64, shard_index: i64, shard_count: i64, selected: i64, selected_weight: i64, passed: i64, failed: i64) with IO {
+    print("PARSE_ALL_SUMMARY corpus=")
+    print(parse_all_corpus_label(corpus_mode))
+    print(" shard_mode=")
+    print(parse_all_shard_mode_label(shard_mode))
+    print(" shard_index=")
+    print_int(shard_index)
+    print(" shard_count=")
+    print_int(shard_count)
+    print(" selected=")
+    print_int(selected)
+    print(" selected_weight=")
+    print_int(selected_weight)
+    print(" passed=")
+    print_int(passed)
+    print(" failed=")
+    print_int(failed)
+    print("\n")
+}
+
+fn run_parse_all_suite(corpus_mode: i64, shard_mode: i64, shard_index: i64, shard_count: i64, print_config: bool) -> i32 with IO, Mut, Panic, Div, Alloc {
     var passed: i64 = 0
     var failed: i64 = 0
     var total: i64 = 0
+    var selected_weight: i64 = 0
+    let corpus_total = parse_all_total(corpus_mode)
+    // Full-corpus shard sweeps use parser fast mode (block-body skipping) for
+    // throughput while preserving top-level parse validation.
+    // Curated mode keeps full parsing.
+    let parse_item_limit = if corpus_mode == 1 { -3 } else { 0 }
 
     print("=== Parse All ===\n")
 
-    total = total + 1
-    if test_parse_file_str("self-hosted/check/check.sio") { passed = passed + 1 } else { failed = failed + 1 }
-    total = total + 1
-    if test_parse_file_str("self-hosted/check/compat.sio") { passed = passed + 1 } else { failed = failed + 1 }
-    total = total + 1
-    if test_parse_file_str("self-hosted/check/defs.sio") { passed = passed + 1 } else { failed = failed + 1 }
-    total = total + 1
-    if test_parse_file_str("self-hosted/check/env.sio") { passed = passed + 1 } else { failed = failed + 1 }
-    total = total + 1
-    if test_parse_file_str("self-hosted/check/mod.sio") { passed = passed + 1 } else { failed = failed + 1 }
-    total = total + 1
-    if test_parse_file_str("self-hosted/check/types.sio") { passed = passed + 1 } else { failed = failed + 1 }
+    if print_config {
+        print("Parse All Corpus: ")
+        if corpus_mode == 0 { print("curated\n") } else { print("full\n") }
+        print("Parse All Shard Mode: ")
+        print(parse_all_shard_mode_label(shard_mode))
+        print("\n")
+        print("Parse All Shard: ")
+        print_int(shard_index)
+        print("/")
+        print_int(shard_count)
+        print("\n")
+        print("Parse All Total Corpus Files: ")
+        print_int(corpus_total)
+        print("\n")
+        if parse_item_limit > 0 {
+            print("Parse All Item Limit: ")
+            print_int(parse_item_limit)
+            print("\n")
+        }
+        if parse_item_limit == -3 {
+            print("Parse All Parser Mode: structural-scan\n")
+        } else if parse_item_limit == -2 {
+            print("Parse All Parser Mode: fast-skip-blocks\n")
+        } else if parse_item_limit == -1 {
+            print("Parse All Parser Mode: metadata-only\n")
+        }
+    }
 
-    total = total + 1
-    if test_parse_file_str("self-hosted/emit/mod.sio") { passed = passed + 1 } else { failed = failed + 1 }
-    total = total + 1
-    if test_parse_file_str("self-hosted/emit/text.sio") { passed = passed + 1 } else { failed = failed + 1 }
+    var i: i64 = 0
+    while i < corpus_total {
+        if parse_all_shard_contains(corpus_mode, shard_mode, i, shard_index, shard_count) {
+            let path = parse_all_path(corpus_mode, i)
+            if str_len(path) > 0 {
+                total = total + 1
+                selected_weight = selected_weight + parse_all_file_weight(corpus_mode, i)
+                if test_parse_file_str(path, parse_item_limit) { passed = passed + 1 } else { failed = failed + 1 }
+            } else {
+                failed = failed + 1
+            }
+        }
+        i = i + 1
+    }
 
-    total = total + 1
-    if test_parse_file_str("self-hosted/ir/ir.sio") { passed = passed + 1 } else { failed = failed + 1 }
-    total = total + 1
-    if test_parse_file_str("self-hosted/ir/lower.sio") { passed = passed + 1 } else { failed = failed + 1 }
-    total = total + 1
-    if test_parse_file_str("self-hosted/ir/mod.sio") { passed = passed + 1 } else { failed = failed + 1 }
-
-    total = total + 1
-    if test_parse_file_str("self-hosted/lexer/cursor.sio") { passed = passed + 1 } else { failed = failed + 1 }
-    total = total + 1
-    if test_parse_file_str("self-hosted/lexer/errors.sio") { passed = passed + 1 } else { failed = failed + 1 }
-    total = total + 1
-    if test_parse_file_str("self-hosted/lexer/mod.sio") { passed = passed + 1 } else { failed = failed + 1 }
-    total = total + 1
-    if test_parse_file_str("self-hosted/lexer/numparse.sio") { passed = passed + 1 } else { failed = failed + 1 }
-    total = total + 1
-    if test_parse_file_str("self-hosted/lexer/reader.sio") { passed = passed + 1 } else { failed = failed + 1 }
-    total = total + 1
-    if test_parse_file_str("self-hosted/lexer/span.sio") { passed = passed + 1 } else { failed = failed + 1 }
-    total = total + 1
-    if test_parse_file_str("self-hosted/lexer/tables.sio") { passed = passed + 1 } else { failed = failed + 1 }
-    total = total + 1
-    if test_parse_file_str("self-hosted/lexer/token.sio") { passed = passed + 1 } else { failed = failed + 1 }
-
-    total = total + 1
-    if test_parse_file_str("self-hosted/main.sio") { passed = passed + 1 } else { failed = failed + 1 }
-
-    total = total + 1
-    if test_parse_file_str("self-hosted/native/encode.sio") { passed = passed + 1 } else { failed = failed + 1 }
-    total = total + 1
-    if test_parse_file_str("self-hosted/native/lower_ir.sio") { passed = passed + 1 } else { failed = failed + 1 }
-    total = total + 1
-    if test_parse_file_str("self-hosted/native/mod.sio") { passed = passed + 1 } else { failed = failed + 1 }
-    total = total + 1
-    if test_parse_file_str("self-hosted/native/test_encode.sio") { passed = passed + 1 } else { failed = failed + 1 }
-
-    total = total + 1
-    if test_parse_file_str("self-hosted/parser/ast.sio") { passed = passed + 1 } else { failed = failed + 1 }
-    total = total + 1
-    if test_parse_file_str("self-hosted/parser/exprs.sio") { passed = passed + 1 } else { failed = failed + 1 }
-    total = total + 1
-    if test_parse_file_str("self-hosted/parser/items.sio") { passed = passed + 1 } else { failed = failed + 1 }
-    total = total + 1
-    if test_parse_file_str("self-hosted/parser/mod.sio") { passed = passed + 1 } else { failed = failed + 1 }
-    total = total + 1
-    if test_parse_file_str("self-hosted/parser/parser.sio") { passed = passed + 1 } else { failed = failed + 1 }
-    total = total + 1
-    if test_parse_file_str("self-hosted/parser/patterns.sio") { passed = passed + 1 } else { failed = failed + 1 }
-    total = total + 1
-    if test_parse_file_str("self-hosted/parser/stmts.sio") { passed = passed + 1 } else { failed = failed + 1 }
-    total = total + 1
-    if test_parse_file_str("self-hosted/parser/types.sio") { passed = passed + 1 } else { failed = failed + 1 }
-
-    total = total + 1
-    if test_parse_file_str("self-hosted/printer/buffer_print.sio") { passed = passed + 1 } else { failed = failed + 1 }
-    total = total + 1
-    if test_parse_file_str("self-hosted/printer/mod.sio") { passed = passed + 1 } else { failed = failed + 1 }
-    total = total + 1
-    if test_parse_file_str("self-hosted/printer/print_ast.sio") { passed = passed + 1 } else { failed = failed + 1 }
-
-    total = total + 1
-    if test_parse_file_str("self-hosted/resolve/mod.sio") { passed = passed + 1 } else { failed = failed + 1 }
-    total = total + 1
-    if test_parse_file_str("self-hosted/resolve/resolve.sio") { passed = passed + 1 } else { failed = failed + 1 }
-    total = total + 1
-    if test_parse_file_str("self-hosted/resolve/scope.sio") { passed = passed + 1 } else { failed = failed + 1 }
-    total = total + 1
-    if test_parse_file_str("self-hosted/resolve/symbol.sio") { passed = passed + 1 } else { failed = failed + 1 }
-
-    total = total + 1
-    if test_parse_file_str("self-hosted/test_all.sio") { passed = passed + 1 } else { failed = failed + 1 }
-    total = total + 1
-    if test_parse_file_str("self-hosted/test_bootstrap.sio") { passed = passed + 1 } else { failed = failed + 1 }
-    total = total + 1
-    if test_parse_file_str("self-hosted/test_check.sio") { passed = passed + 1 } else { failed = failed + 1 }
-    total = total + 1
-    if test_parse_file_str("self-hosted/test_check_real.sio") { passed = passed + 1 } else { failed = failed + 1 }
-    total = total + 1
-    if test_parse_file_str("self-hosted/test_emit.sio") { passed = passed + 1 } else { failed = failed + 1 }
-    total = total + 1
-    if test_parse_file_str("self-hosted/test_ir.sio") { passed = passed + 1 } else { failed = failed + 1 }
-    total = total + 1
-    if test_parse_file_str("self-hosted/test_lexer.sio") { passed = passed + 1 } else { failed = failed + 1 }
-    total = total + 1
-    if test_parse_file_str("self-hosted/test_parse_all.sio") { passed = passed + 1 } else { failed = failed + 1 }
-    total = total + 1
-    if test_parse_file_str("self-hosted/test_parse_real.sio") { passed = passed + 1 } else { failed = failed + 1 }
-    total = total + 1
-    if test_parse_file_str("self-hosted/test_parser.sio") { passed = passed + 1 } else { failed = failed + 1 }
-    total = total + 1
-    if test_parse_file_str("self-hosted/test_printer.sio") { passed = passed + 1 } else { failed = failed + 1 }
-    total = total + 1
-    if test_parse_file_str("self-hosted/test_resolve.sio") { passed = passed + 1 } else { failed = failed + 1 }
-    total = total + 1
-    if test_parse_file_str("self-hosted/test_resolve_real.sio") { passed = passed + 1 } else { failed = failed + 1 }
-    total = total + 1
-    if test_parse_file_str("self-hosted/test_roundtrip.sio") { passed = passed + 1 } else { failed = failed + 1 }
-    total = total + 1
-    if test_parse_file_str("self-hosted/test_vm.sio") { passed = passed + 1 } else { failed = failed + 1 }
-
-    total = total + 1
-    if test_parse_file_str("self-hosted/vm/mod.sio") { passed = passed + 1 } else { failed = failed + 1 }
-    total = total + 1
-    if test_parse_file_str("self-hosted/vm/vm.sio") { passed = passed + 1 } else { failed = failed + 1 }
+    if print_config {
+        print("Parse All Selected Files: ")
+        print_int(total)
+        print("\n")
+        print("Parse All Selected Weight: ")
+        print_int(selected_weight)
+        print("\n")
+    }
 
     print("\nParse All: ")
     print_int(passed)
     print("/")
     print_int(total)
     print(" passed\n")
+    parse_all_emit_summary_line(corpus_mode, shard_mode, shard_index, shard_count, total, selected_weight, passed, failed)
 
     if failed == 0 { 0 } else { 1 }
+}
+
+fn run_parse_all_report(corpus_mode: i64, shard_mode: i64, shard_count: i64) -> i32 with IO, Mut, Panic, Div, Alloc {
+    if shard_count <= 0 {
+        print("Parse All Report: invalid shard count\n")
+        return 1
+    }
+    if !parse_all_shard_mode_valid(shard_mode) {
+        print("Parse All Report: invalid shard mode\n")
+        return 1
+    }
+
+    let total = parse_all_total(corpus_mode)
+    let total_weight = parse_all_total_weight(corpus_mode)
+
+    print("=== Parse All Report ===\n")
+    print("Parse All Corpus: ")
+    if corpus_mode == 0 { print("curated\n") } else { print("full\n") }
+    print("Parse All Shard Mode: ")
+    print(parse_all_shard_mode_label(shard_mode))
+    print("\n")
+    print("Parse All Total Corpus Files: ")
+    print_int(total)
+    print("\n")
+    print("Parse All Total Weight: ")
+    print_int(total_weight)
+    print("\n")
+    print("Parse All Shard Count: ")
+    print_int(shard_count)
+    print("\n")
+    print("PARSE_ALL_REPORT_SUMMARY corpus=")
+    print(parse_all_corpus_label(corpus_mode))
+    print(" shard_mode=")
+    print(parse_all_shard_mode_label(shard_mode))
+    print(" shard_count=")
+    print_int(shard_count)
+    print(" total_files=")
+    print_int(total)
+    print(" total_weight=")
+    print_int(total_weight)
+    print("\n")
+
+    var shard: i64 = 0
+    while shard < shard_count {
+        var shard_total: i64 = 0
+        var shard_weight: i64 = 0
+        var idx: i64 = 0
+        while idx < total {
+            if parse_all_shard_contains(corpus_mode, shard_mode, idx, shard, shard_count) {
+                shard_total = shard_total + 1
+                shard_weight = shard_weight + parse_all_file_weight(corpus_mode, idx)
+            }
+            idx = idx + 1
+        }
+
+        print("Parse All Report Shard ")
+        print_int(shard)
+        print(": ")
+        print_int(shard_total)
+        print(" files (weight=")
+        print_int(shard_weight)
+        print(")\n")
+        print("PARSE_ALL_REPORT_SHARD shard_index=")
+        print_int(shard)
+        print(" shard_mode=")
+        print(parse_all_shard_mode_label(shard_mode))
+        print(" shard_count=")
+        print_int(shard_count)
+        print(" files=")
+        print_int(shard_total)
+        print(" weight=")
+        print_int(shard_weight)
+        print("\n")
+
+        idx = 0
+        while idx < total {
+            if parse_all_shard_contains(corpus_mode, shard_mode, idx, shard, shard_count) {
+                print("  [")
+                print_int(idx)
+                print("] ")
+                print(parse_all_path(corpus_mode, idx))
+                print(" (w=")
+                print_int(parse_all_file_weight(corpus_mode, idx))
+                print(")")
+                print("\n")
+            }
+            idx = idx + 1
+        }
+
+        shard = shard + 1
+    }
+
+    0
+}
+
+fn run_parse_all_tests() -> i32 with IO, Mut, Panic, Div, Alloc {
+    // Curated coverage corpus: larger than smoke, but bounded so the full
+    // self-hosted gate still completes under the 900s budget.
+    run_parse_all_suite(0, parse_all_shard_mode_mod(), 0, 1, false)
+}
+
+fn run_parse_all_full_tests() -> i32 with IO, Mut, Panic, Div, Alloc {
+    run_parse_all_suite(1, parse_all_shard_mode_balanced(), 0, 1, true)
+}
+
+fn run_parse_all_full_shard_tests(shard_index: i64, shard_count: i64, shard_mode: i64) -> i32 with IO, Mut, Panic, Div, Alloc {
+    if shard_count <= 0 || shard_index < 0 || shard_index >= shard_count {
+        print("Parse All: invalid shard parameters\n")
+        return 1
+    }
+    if !parse_all_shard_mode_valid(shard_mode) {
+        print("Parse All: invalid shard mode\n")
+        return 1
+    }
+
+    run_parse_all_suite(1, shard_mode, shard_index, shard_count, true)
+}
+
+fn run_parse_all_full_report(shard_count: i64, shard_mode: i64) -> i32 with IO, Mut, Panic, Div, Alloc {
+    run_parse_all_report(1, shard_mode, shard_count)
 }

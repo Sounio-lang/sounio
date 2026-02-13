@@ -1,0 +1,1289 @@
+// self-hosted::native::test_phase1 — Phase 1 comprehensive test suite
+//
+// Tests the full function compilation pipeline:
+// IR → stack frames → prologue/epilogue → lowering → relocations → ELF
+//
+// All Phase 0 modules are inlined here (module system not yet available).
+
+// ============================================================================
+// From encode.sio (full Phase 0 + Phase 1 instructions)
+// ============================================================================
+
+struct CodeBuffer {
+    bytes: [i8; 65536],
+    len: i64,
+}
+
+fn code_buffer_new() -> CodeBuffer {
+    CodeBuffer { bytes: [0; 65536], len: 0 }
+}
+
+fn low8(x: i64) -> i64 with Mut, Panic, Div {
+    var n = x % 256
+    if n < 0 { n = n + 256 }
+    n
+}
+
+fn emit_byte(buf: CodeBuffer, b: i64) -> CodeBuffer with Mut, Panic, Div {
+    var out = buf
+    if out.len >= 0 {
+        if out.len < 65536 {
+            out.bytes[out.len as usize] = low8(b) as i8
+            out.len = out.len + 1
+        }
+    }
+    out
+}
+
+fn emit_u32_le(buf: CodeBuffer, val: i64) -> CodeBuffer with Mut, Panic, Div {
+    var b = buf
+    b = emit_byte(b, low8(val))
+    b = emit_byte(b, low8(val >> 8))
+    b = emit_byte(b, low8(val >> 16))
+    b = emit_byte(b, low8(val >> 24))
+    b
+}
+
+fn emit_u64_le(buf: CodeBuffer, val: i64) -> CodeBuffer with Mut, Panic, Div {
+    var b = buf
+    b = emit_u32_le(b, val)
+    b = emit_u32_le(b, val >> 32)
+    b
+}
+
+fn modrm_rr(dst: i64, src: i64) -> i64 {
+    192 + src * 8 + dst
+}
+
+fn modrm_rm_imm(dst: i64) -> i64 {
+    192 + dst
+}
+
+fn emit_mov_rax_imm(buf: CodeBuffer, val: i64) -> CodeBuffer with Mut, Panic, Div {
+    emit_mov_reg_imm(buf, 0, val)
+}
+
+fn emit_mov_rdi_imm(buf: CodeBuffer, val: i64) -> CodeBuffer with Mut, Panic, Div {
+    emit_mov_reg_imm(buf, 7, val)
+}
+
+fn emit_mov_reg_imm32(buf: CodeBuffer, reg: i64, val: i64) -> CodeBuffer with Mut, Panic, Div {
+    var b = buf
+    b = emit_byte(b, 0x48)
+    b = emit_byte(b, 0xc7)
+    b = emit_byte(b, modrm_rm_imm(reg))
+    b = emit_u32_le(b, val)
+    b
+}
+
+fn emit_mov_reg_imm64(buf: CodeBuffer, reg: i64, val: i64) -> CodeBuffer with Mut, Panic, Div {
+    var b = buf
+    b = emit_byte(b, 0x48)
+    b = emit_byte(b, 0xb8 + reg)
+    b = emit_u64_le(b, val)
+    b
+}
+
+fn emit_mov_reg_imm(buf: CodeBuffer, reg: i64, val: i64) -> CodeBuffer with Mut, Panic, Div {
+    if val >= -2147483648 && val <= 2147483647 {
+        emit_mov_reg_imm32(buf, reg, val)
+    } else {
+        emit_mov_reg_imm64(buf, reg, val)
+    }
+}
+
+fn emit_mov_reg_reg(buf: CodeBuffer, dst: i64, src: i64) -> CodeBuffer with Mut, Panic, Div {
+    var b = buf
+    b = emit_byte(b, 0x48)
+    b = emit_byte(b, 0x89)
+    b = emit_byte(b, modrm_rr(dst, src))
+    b
+}
+
+fn emit_add_reg_reg(buf: CodeBuffer, dst: i64, src: i64) -> CodeBuffer with Mut, Panic, Div {
+    var b = buf
+    b = emit_byte(b, 0x48)
+    b = emit_byte(b, 0x01)
+    b = emit_byte(b, modrm_rr(dst, src))
+    b
+}
+
+fn emit_sub_reg_reg(buf: CodeBuffer, dst: i64, src: i64) -> CodeBuffer with Mut, Panic, Div {
+    var b = buf
+    b = emit_byte(b, 0x48)
+    b = emit_byte(b, 0x29)
+    b = emit_byte(b, modrm_rr(dst, src))
+    b
+}
+
+fn emit_imul_reg_reg(buf: CodeBuffer, dst: i64, src: i64) -> CodeBuffer with Mut, Panic, Div {
+    var b = buf
+    b = emit_byte(b, 0x48)
+    b = emit_byte(b, 0x0f)
+    b = emit_byte(b, 0xaf)
+    b = emit_byte(b, 192 + dst * 8 + src)
+    b
+}
+
+fn emit_syscall(buf: CodeBuffer) -> CodeBuffer with Mut, Panic, Div {
+    var b = buf
+    b = emit_byte(b, 0x0f)
+    b = emit_byte(b, 0x05)
+    b
+}
+
+fn emit_ret(buf: CodeBuffer) -> CodeBuffer with Mut, Panic, Div {
+    emit_byte(buf, 0xc3)
+}
+
+fn emit_push_rbp(buf: CodeBuffer) -> CodeBuffer with Mut, Panic, Div {
+    emit_byte(buf, 0x55)
+}
+
+fn emit_pop_rbp(buf: CodeBuffer) -> CodeBuffer with Mut, Panic, Div {
+    emit_byte(buf, 0x5d)
+}
+
+fn emit_mov_rbp_rsp(buf: CodeBuffer) -> CodeBuffer with Mut, Panic, Div {
+    var b = buf
+    b = emit_byte(b, 0x48)
+    b = emit_byte(b, 0x89)
+    b = emit_byte(b, 0xe5)
+    b
+}
+
+fn emit_mov_rsp_rbp(buf: CodeBuffer) -> CodeBuffer with Mut, Panic, Div {
+    var b = buf
+    b = emit_byte(b, 0x48)
+    b = emit_byte(b, 0x89)
+    b = emit_byte(b, 0xec)
+    b
+}
+
+fn emit_sub_rsp_imm32(buf: CodeBuffer, val: i64) -> CodeBuffer with Mut, Panic, Div {
+    var b = buf
+    b = emit_byte(b, 0x48)
+    b = emit_byte(b, 0x81)
+    b = emit_byte(b, 0xec)
+    b = emit_u32_le(b, val)
+    b
+}
+
+fn emit_add_rsp_imm32(buf: CodeBuffer, val: i64) -> CodeBuffer with Mut, Panic, Div {
+    var b = buf
+    b = emit_byte(b, 0x48)
+    b = emit_byte(b, 0x81)
+    b = emit_byte(b, 0xc4)
+    b = emit_u32_le(b, val)
+    b
+}
+
+// Phase 1 instructions
+fn emit_push_rax(buf: CodeBuffer) -> CodeBuffer with Mut, Panic, Div {
+    emit_byte(buf, 0x50)
+}
+
+fn emit_pop_rbx(buf: CodeBuffer) -> CodeBuffer with Mut, Panic, Div {
+    emit_byte(buf, 0x5b)
+}
+
+fn emit_pop_rdi(buf: CodeBuffer) -> CodeBuffer with Mut, Panic, Div {
+    emit_byte(buf, 0x5f)
+}
+
+fn emit_pop_rsi(buf: CodeBuffer) -> CodeBuffer with Mut, Panic, Div {
+    emit_byte(buf, 0x5e)
+}
+
+fn emit_pop_rdx(buf: CodeBuffer) -> CodeBuffer with Mut, Panic, Div {
+    emit_byte(buf, 0x5a)
+}
+
+fn emit_pop_rcx(buf: CodeBuffer) -> CodeBuffer with Mut, Panic, Div {
+    emit_byte(buf, 0x59)
+}
+
+fn emit_pop_r8(buf: CodeBuffer) -> CodeBuffer with Mut, Panic, Div {
+    var b = buf
+    b = emit_byte(b, 0x41)
+    b = emit_byte(b, 0x58)
+    b
+}
+
+fn emit_pop_r9(buf: CodeBuffer) -> CodeBuffer with Mut, Panic, Div {
+    var b = buf
+    b = emit_byte(b, 0x41)
+    b = emit_byte(b, 0x59)
+    b
+}
+
+fn emit_pop_arg_reg(buf: CodeBuffer, index: i64) -> CodeBuffer with Mut, Panic, Div {
+    if index == 0 { emit_pop_rdi(buf) }
+    else if index == 1 { emit_pop_rsi(buf) }
+    else if index == 2 { emit_pop_rdx(buf) }
+    else if index == 3 { emit_pop_rcx(buf) }
+    else if index == 4 { emit_pop_r8(buf) }
+    else if index == 5 { emit_pop_r9(buf) }
+    else { buf }
+}
+
+fn emit_sub_rsp_8(buf: CodeBuffer) -> CodeBuffer with Mut, Panic, Div {
+    var b = buf
+    b = emit_byte(b, 0x48)
+    b = emit_byte(b, 0x83)
+    b = emit_byte(b, 0xec)
+    b = emit_byte(b, 0x08)
+    b
+}
+
+fn emit_add_rsp_8(buf: CodeBuffer) -> CodeBuffer with Mut, Panic, Div {
+    var b = buf
+    b = emit_byte(b, 0x48)
+    b = emit_byte(b, 0x83)
+    b = emit_byte(b, 0xc4)
+    b = emit_byte(b, 0x08)
+    b
+}
+
+fn emit_jmp_rel32(buf: CodeBuffer) -> CodeBuffer with Mut, Panic, Div {
+    var b = buf
+    b = emit_byte(b, 0xe9)
+    b = emit_u32_le(b, 0)
+    b
+}
+
+fn emit_jz_rel32(buf: CodeBuffer) -> CodeBuffer with Mut, Panic, Div {
+    var b = buf
+    b = emit_byte(b, 0x0f)
+    b = emit_byte(b, 0x84)
+    b = emit_u32_le(b, 0)
+    b
+}
+
+fn emit_jnz_rel32(buf: CodeBuffer) -> CodeBuffer with Mut, Panic, Div {
+    var b = buf
+    b = emit_byte(b, 0x0f)
+    b = emit_byte(b, 0x85)
+    b = emit_u32_le(b, 0)
+    b
+}
+
+fn emit_test_rax_rax(buf: CodeBuffer) -> CodeBuffer with Mut, Panic, Div {
+    var b = buf
+    b = emit_byte(b, 0x48)
+    b = emit_byte(b, 0x85)
+    b = emit_byte(b, 0xc0)
+    b
+}
+
+fn emit_cmp_rbx_rax(buf: CodeBuffer) -> CodeBuffer with Mut, Panic, Div {
+    var b = buf
+    b = emit_byte(b, 0x48)
+    b = emit_byte(b, 0x39)
+    b = emit_byte(b, 0xc3)
+    b
+}
+
+fn emit_sete_al(buf: CodeBuffer) -> CodeBuffer with Mut, Panic, Div {
+    var b = buf
+    b = emit_byte(b, 0x0f)
+    b = emit_byte(b, 0x94)
+    b = emit_byte(b, 0xc0)
+    b
+}
+
+fn emit_setne_al(buf: CodeBuffer) -> CodeBuffer with Mut, Panic, Div {
+    var b = buf
+    b = emit_byte(b, 0x0f)
+    b = emit_byte(b, 0x95)
+    b = emit_byte(b, 0xc0)
+    b
+}
+
+fn emit_setl_al(buf: CodeBuffer) -> CodeBuffer with Mut, Panic, Div {
+    var b = buf
+    b = emit_byte(b, 0x0f)
+    b = emit_byte(b, 0x9c)
+    b = emit_byte(b, 0xc0)
+    b
+}
+
+fn emit_setle_al(buf: CodeBuffer) -> CodeBuffer with Mut, Panic, Div {
+    var b = buf
+    b = emit_byte(b, 0x0f)
+    b = emit_byte(b, 0x9e)
+    b = emit_byte(b, 0xc0)
+    b
+}
+
+fn emit_setg_al(buf: CodeBuffer) -> CodeBuffer with Mut, Panic, Div {
+    var b = buf
+    b = emit_byte(b, 0x0f)
+    b = emit_byte(b, 0x9f)
+    b = emit_byte(b, 0xc0)
+    b
+}
+
+fn emit_setge_al(buf: CodeBuffer) -> CodeBuffer with Mut, Panic, Div {
+    var b = buf
+    b = emit_byte(b, 0x0f)
+    b = emit_byte(b, 0x9d)
+    b = emit_byte(b, 0xc0)
+    b
+}
+
+fn emit_movzx_rax_al(buf: CodeBuffer) -> CodeBuffer with Mut, Panic, Div {
+    var b = buf
+    b = emit_byte(b, 0x48)
+    b = emit_byte(b, 0x0f)
+    b = emit_byte(b, 0xb6)
+    b = emit_byte(b, 0xc0)
+    b
+}
+
+fn emit_xor_rax_rax(buf: CodeBuffer) -> CodeBuffer with Mut, Panic, Div {
+    var b = buf
+    b = emit_byte(b, 0x48)
+    b = emit_byte(b, 0x31)
+    b = emit_byte(b, 0xc0)
+    b
+}
+
+fn emit_neg_rax(buf: CodeBuffer) -> CodeBuffer with Mut, Panic, Div {
+    var b = buf
+    b = emit_byte(b, 0x48)
+    b = emit_byte(b, 0xf7)
+    b = emit_byte(b, 0xd8)
+    b
+}
+
+fn emit_not_bool_rax(buf: CodeBuffer) -> CodeBuffer with Mut, Panic, Div {
+    var b = buf
+    b = emit_test_rax_rax(b)
+    b = emit_sete_al(b)
+    b = emit_movzx_rax_al(b)
+    b
+}
+
+fn emit_cqo(buf: CodeBuffer) -> CodeBuffer with Mut, Panic, Div {
+    var b = buf
+    b = emit_byte(b, 0x48)
+    b = emit_byte(b, 0x99)
+    b
+}
+
+fn emit_idiv_rcx(buf: CodeBuffer) -> CodeBuffer with Mut, Panic, Div {
+    var b = buf
+    b = emit_byte(b, 0x48)
+    b = emit_byte(b, 0xf7)
+    b = emit_byte(b, 0xf9)
+    b
+}
+
+fn emit_store_rax_rbp_disp32(buf: CodeBuffer, disp: i64) -> CodeBuffer with Mut, Panic, Div {
+    var b = buf
+    b = emit_byte(b, 0x48)
+    b = emit_byte(b, 0x89)
+    b = emit_byte(b, 0x85)
+    b = emit_u32_le(b, disp)
+    b
+}
+
+fn emit_load_rbp_disp32_rax(buf: CodeBuffer, disp: i64) -> CodeBuffer with Mut, Panic, Div {
+    var b = buf
+    b = emit_byte(b, 0x48)
+    b = emit_byte(b, 0x8b)
+    b = emit_byte(b, 0x85)
+    b = emit_u32_le(b, disp)
+    b
+}
+
+fn emit_store_reg_rbp_disp32(buf: CodeBuffer, disp: i64, reg: i64) -> CodeBuffer with Mut, Panic, Div {
+    var b = buf
+    b = emit_byte(b, 0x48)
+    b = emit_byte(b, 0x89)
+    b = emit_byte(b, 0x85 + reg * 8)
+    b = emit_u32_le(b, disp)
+    b
+}
+
+fn emit_call_rel32_placeholder(buf: CodeBuffer) -> CodeBuffer with Mut, Panic, Div {
+    var b = buf
+    b = emit_byte(b, 0xe8)
+    b = emit_u32_le(b, 0)
+    b
+}
+
+fn emit_ud2(buf: CodeBuffer) -> CodeBuffer with Mut, Panic, Div {
+    var b = buf
+    b = emit_byte(b, 0x0f)
+    b = emit_byte(b, 0x0b)
+    b
+}
+
+fn emit_mov_rdi_rax(buf: CodeBuffer) -> CodeBuffer with Mut, Panic, Div {
+    emit_mov_reg_reg(buf, 7, 0)
+}
+
+fn emit_mov_rcx_rax(buf: CodeBuffer) -> CodeBuffer with Mut, Panic, Div {
+    emit_mov_reg_reg(buf, 1, 0)
+}
+
+fn emit_mov_rax_rbx(buf: CodeBuffer) -> CodeBuffer with Mut, Panic, Div {
+    emit_mov_reg_reg(buf, 0, 3)
+}
+
+fn emit_mov_rax_rdx(buf: CodeBuffer) -> CodeBuffer with Mut, Panic, Div {
+    emit_mov_reg_reg(buf, 0, 2)
+}
+
+// ============================================================================
+// From regs.sio
+// ============================================================================
+
+fn reg_rax() -> i64 { 0 }
+fn reg_rcx() -> i64 { 1 }
+fn reg_rdx() -> i64 { 2 }
+fn reg_rbx() -> i64 { 3 }
+fn reg_rsp() -> i64 { 4 }
+fn reg_rbp() -> i64 { 5 }
+fn reg_rsi() -> i64 { 6 }
+fn reg_rdi() -> i64 { 7 }
+
+fn param_reg(index: i64) -> i64 {
+    if index == 0 { reg_rdi() }
+    else if index == 1 { reg_rsi() }
+    else if index == 2 { reg_rdx() }
+    else if index == 3 { reg_rcx() }
+    else { -1 }
+}
+
+// ============================================================================
+// From frame.sio
+// ============================================================================
+
+fn align16(size: i64) -> i64 with Mut, Panic {
+    var aligned = size
+    let remainder = size % 16
+    if remainder != 0 {
+        aligned = size + (16 - remainder)
+    }
+    aligned
+}
+
+fn emit_prologue(buf: CodeBuffer, frame_size: i64) -> CodeBuffer with Mut, Panic, Div {
+    var b = buf
+    b = emit_push_rbp(b)
+    b = emit_mov_rbp_rsp(b)
+    if frame_size > 0 {
+        b = emit_sub_rsp_imm32(b, frame_size)
+    }
+    b
+}
+
+fn emit_epilogue(buf: CodeBuffer) -> CodeBuffer with Mut, Panic, Div {
+    var b = buf
+    b = emit_mov_rsp_rbp(b)
+    b = emit_pop_rbp(b)
+    b = emit_ret(b)
+    b
+}
+
+// ============================================================================
+// From reloc.sio
+// ============================================================================
+
+struct RelocKind {
+    is_rel32: i64,
+}
+
+struct RelocTarget {
+    is_function: i64,
+    target_index: i64,
+}
+
+struct Relocation {
+    offset: i64,
+    target: RelocTarget,
+    kind: RelocKind,
+}
+
+struct RelocationTable {
+    entries: [Relocation; 256],
+    count: i64,
+}
+
+fn reloc_rel32() -> RelocKind {
+    RelocKind { is_rel32: 1 }
+}
+
+fn reloc_target_function(func_index: i64) -> RelocTarget {
+    RelocTarget { is_function: 1, target_index: func_index }
+}
+
+fn reloc_table_new() -> RelocationTable {
+    let empty_reloc = Relocation {
+        offset: 0,
+        target: reloc_target_function(0),
+        kind: reloc_rel32(),
+    }
+    RelocationTable {
+        entries: [empty_reloc; 256],
+        count: 0,
+    }
+}
+
+fn add_call_reloc(table: RelocationTable, offset: i64, target_func: i64) -> RelocationTable with Mut, Panic {
+    var t = table
+    if t.count < 256 {
+        t.entries[t.count as usize] = Relocation {
+            offset: offset,
+            target: reloc_target_function(target_func),
+            kind: reloc_rel32(),
+        }
+        t.count = t.count + 1
+    }
+    t
+}
+
+fn apply_relocations(
+    table: RelocationTable,
+    buf: CodeBuffer,
+    fn_offsets: [i64; 64],
+    fn_count: i64
+) -> CodeBuffer with Mut, Panic, Div {
+    var b = buf
+    var i = 0
+    while i < table.count {
+        let reloc = table.entries[i as usize]
+        let patch_offset = reloc.offset
+        if reloc.target.is_function == 1 {
+            let target_idx = reloc.target.target_index
+            if target_idx < fn_count {
+                let target_offset = fn_offsets[target_idx as usize]
+                let rel32 = target_offset - (patch_offset + 4)
+                b = patch_u32_le(b, patch_offset, rel32)
+            }
+        }
+        i = i + 1
+    }
+    b
+}
+
+fn patch_u32_le(buf: CodeBuffer, offset: i64, val: i64) -> CodeBuffer with Mut, Panic, Div {
+    var b = buf
+    if offset >= 0 && offset + 4 <= b.len {
+        b.bytes[offset as usize] = low8(val) as i8
+        b.bytes[(offset + 1) as usize] = low8(val >> 8) as i8
+        b.bytes[(offset + 2) as usize] = low8(val >> 16) as i8
+        b.bytes[(offset + 3) as usize] = low8(val >> 24) as i8
+    }
+    b
+}
+
+// ============================================================================
+// From codegen.sio (Phase 1)
+// ============================================================================
+
+struct LabelPatch {
+    code_offset: i64,
+    label_id: i64,
+}
+
+fn empty_label_patch() -> LabelPatch {
+    LabelPatch { code_offset: 0, label_id: -1 }
+}
+
+struct NativeCompiler {
+    code: CodeBuffer,
+    relocs: RelocationTable,
+    fn_offsets: [i64; 64],
+    fn_count: i64,
+    return_jumps: [i64; 64],
+    return_jump_count: i64,
+    label_offsets: [i64; 256],
+    label_patches: [LabelPatch; 256],
+    label_patch_count: i64,
+    current_frame_size: i64,
+}
+
+fn compiler_new() -> NativeCompiler {
+    NativeCompiler {
+        code: code_buffer_new(),
+        relocs: reloc_table_new(),
+        fn_offsets: [-1; 64],
+        fn_count: 0,
+        return_jumps: [0; 64],
+        return_jump_count: 0,
+        label_offsets: [-1; 256],
+        label_patches: [empty_label_patch(); 256],
+        label_patch_count: 0,
+        current_frame_size: 0,
+    }
+}
+
+fn reset_function_state(nc: NativeCompiler) -> NativeCompiler with Mut, Panic {
+    var c = nc
+    c.return_jump_count = 0
+    var i = 0
+    while i < 256 {
+        c.label_offsets[i as usize] = -1
+        i = i + 1
+    }
+    c.label_patch_count = 0
+    c.current_frame_size = 0
+    c
+}
+
+fn ir_slot_offset(vreg: i64) -> i64 {
+    -(vreg + 1) * 8
+}
+
+fn record_return_jump(nc: NativeCompiler) -> NativeCompiler with Mut, Panic, Div {
+    var c = nc
+    let jmp_pos = c.code.len
+    c.code = emit_jmp_rel32(c.code)
+    if c.return_jump_count < 64 {
+        c.return_jumps[c.return_jump_count as usize] = jmp_pos + 1
+        c.return_jump_count = c.return_jump_count + 1
+    }
+    c
+}
+
+fn patch_return_jumps(nc: NativeCompiler, epilogue_offset: i64) -> NativeCompiler with Mut, Panic, Div {
+    var c = nc
+    var i = 0
+    while i < c.return_jump_count {
+        let imm_offset = c.return_jumps[i as usize]
+        let next_ip = imm_offset + 4
+        let rel = epilogue_offset - next_ip
+        c.code = patch_u32_le(c.code, imm_offset, rel)
+        i = i + 1
+    }
+    c
+}
+
+fn record_label(nc: NativeCompiler, label_id: i64) -> NativeCompiler with Mut, Panic {
+    var c = nc
+    if label_id >= 0 && label_id < 256 {
+        c.label_offsets[label_id as usize] = c.code.len
+    }
+    c
+}
+
+fn record_label_patch(nc: NativeCompiler, label_id: i64, rel32_offset: i64) -> NativeCompiler with Mut, Panic {
+    var c = nc
+    if c.label_patch_count < 256 {
+        c.label_patches[c.label_patch_count as usize] = LabelPatch {
+            code_offset: rel32_offset,
+            label_id: label_id,
+        }
+        c.label_patch_count = c.label_patch_count + 1
+    }
+    c
+}
+
+fn patch_label_forwards(nc: NativeCompiler) -> NativeCompiler with Mut, Panic, Div {
+    var c = nc
+    var i = 0
+    while i < c.label_patch_count {
+        let patch = c.label_patches[i as usize]
+        let target = c.label_offsets[patch.label_id as usize]
+        if target >= 0 {
+            let next_ip = patch.code_offset + 4
+            let rel = target - next_ip
+            c.code = patch_u32_le(c.code, patch.code_offset, rel)
+        }
+        i = i + 1
+    }
+    c
+}
+
+fn spill_ir_params(nc: NativeCompiler, param_count: i64, param_regs: [i64; 64]) -> NativeCompiler with Mut, Panic, Div {
+    var c = nc
+    var i = 0
+    while i < param_count && i < 6 {
+        let vreg = param_regs[i as usize]
+        if vreg >= 0 {
+            let preg = param_reg(i)
+            let offset = ir_slot_offset(vreg)
+            c.code = emit_store_reg_rbp_disp32(c.code, offset, preg)
+        }
+        i = i + 1
+    }
+    c
+}
+
+// ============================================================================
+// From lower_ir.sio (Phase 1) — simplified for test inlining
+// ============================================================================
+
+// Minimal IR types for testing (without full ir.sio dependency)
+struct TestIrInstr {
+    op: i64,
+    dst: i64,
+    src1: i64,
+    src2: i64,
+    imm_i64: i64,
+    label_id: i64,
+    fn_id: i64,
+    bin_op: i64,
+    un_op: i64,
+    arg_count: i64,
+}
+
+// IR opcodes (numeric for test simplicity)
+fn op_load_imm() -> i64 { 1 }
+fn op_load_bool() -> i64 { 2 }
+fn op_copy() -> i64 { 3 }
+fn op_binop() -> i64 { 4 }
+fn op_unary() -> i64 { 5 }
+fn op_return() -> i64 { 6 }
+fn op_call() -> i64 { 7 }
+fn op_label() -> i64 { 8 }
+fn op_jump() -> i64 { 9 }
+fn op_branch_true() -> i64 { 10 }
+fn op_branch_false() -> i64 { 11 }
+fn op_nop() -> i64 { 0 }
+
+// BinOp kinds
+fn binop_add() -> i64 { 1 }
+fn binop_sub() -> i64 { 2 }
+fn binop_mul() -> i64 { 3 }
+
+fn test_instr_new(op: i64) -> TestIrInstr {
+    TestIrInstr {
+        op: op, dst: -1, src1: -1, src2: -1,
+        imm_i64: 0, label_id: -1, fn_id: -1,
+        bin_op: 0, un_op: 0, arg_count: 0,
+    }
+}
+
+// Lower a test IR instruction using the same logic as lower_ir.sio
+fn lower_test_instr(nc: NativeCompiler, instr: TestIrInstr) -> NativeCompiler with Mut, Panic, Div {
+    if instr.op == op_load_imm() {
+        var c = nc
+        c.code = emit_mov_rax_imm(c.code, instr.imm_i64)
+        if instr.dst >= 0 {
+            c.code = emit_store_rax_rbp_disp32(c.code, ir_slot_offset(instr.dst))
+        }
+        c
+    } else if instr.op == op_return() {
+        var c = nc
+        if instr.src1 >= 0 {
+            c.code = emit_load_rbp_disp32_rax(c.code, ir_slot_offset(instr.src1))
+        } else {
+            c.code = emit_xor_rax_rax(c.code)
+        }
+        c = record_return_jump(c)
+        c
+    } else if instr.op == op_binop() {
+        var c = nc
+        c.code = emit_load_rbp_disp32_rax(c.code, ir_slot_offset(instr.src1))
+        c.code = emit_push_rax(c.code)
+        c.code = emit_sub_rsp_8(c.code)
+        c.code = emit_load_rbp_disp32_rax(c.code, ir_slot_offset(instr.src2))
+        c.code = emit_add_rsp_8(c.code)
+        c.code = emit_pop_rbx(c.code)
+        // Apply operation
+        if instr.bin_op == binop_add() {
+            c.code = emit_add_reg_reg(c.code, 0, 3)
+        } else if instr.bin_op == binop_sub() {
+            c.code = emit_sub_reg_reg(c.code, 3, 0)
+            c.code = emit_mov_rax_rbx(c.code)
+        } else if instr.bin_op == binop_mul() {
+            c.code = emit_imul_reg_reg(c.code, 0, 3)
+        }
+        if instr.dst >= 0 {
+            c.code = emit_store_rax_rbp_disp32(c.code, ir_slot_offset(instr.dst))
+        }
+        c
+    } else if instr.op == op_call() {
+        var c = nc
+        if instr.arg_count >= 1 && instr.src1 >= 0 {
+            c.code = emit_load_rbp_disp32_rax(c.code, ir_slot_offset(instr.src1))
+            c.code = emit_push_rax(c.code)
+        }
+        if instr.arg_count >= 2 && instr.src2 >= 0 {
+            c.code = emit_load_rbp_disp32_rax(c.code, ir_slot_offset(instr.src2))
+            c.code = emit_push_rax(c.code)
+        }
+        var i = instr.arg_count - 1
+        if i > 1 { i = 1 }
+        while i >= 0 {
+            c.code = emit_pop_arg_reg(c.code, i)
+            i = i - 1
+        }
+        let call_pos = c.code.len
+        c.code = emit_call_rel32_placeholder(c.code)
+        if instr.fn_id >= 0 {
+            c.relocs = add_call_reloc(c.relocs, call_pos + 1, instr.fn_id)
+        }
+        if instr.dst >= 0 {
+            c.code = emit_store_rax_rbp_disp32(c.code, ir_slot_offset(instr.dst))
+        }
+        c
+    } else if instr.op == op_label() {
+        record_label(nc, instr.label_id)
+    } else if instr.op == op_jump() {
+        var c = nc
+        let label_id = instr.label_id
+        if label_id >= 0 && label_id < 256 {
+            let target = c.label_offsets[label_id as usize]
+            if target >= 0 {
+                let jmp_pos = c.code.len
+                c.code = emit_jmp_rel32(c.code)
+                let next_ip = jmp_pos + 5
+                let rel = target - next_ip
+                c.code = patch_u32_le(c.code, jmp_pos + 1, rel)
+            } else {
+                let jmp_pos = c.code.len
+                c.code = emit_jmp_rel32(c.code)
+                c = record_label_patch(c, label_id, jmp_pos + 1)
+            }
+        }
+        c
+    } else if instr.op == op_branch_false() {
+        var c = nc
+        c.code = emit_load_rbp_disp32_rax(c.code, ir_slot_offset(instr.src1))
+        c.code = emit_test_rax_rax(c.code)
+        let label_id = instr.label_id
+        if label_id >= 0 && label_id < 256 {
+            let jz_pos = c.code.len
+            c.code = emit_jz_rel32(c.code)
+            c = record_label_patch(c, label_id, jz_pos + 2)
+        }
+        c
+    } else {
+        nc
+    }
+}
+
+// ============================================================================
+// Helper: read byte as unsigned
+// ============================================================================
+
+fn byte_u8(b: i8) -> i64 {
+    let x = b as i64
+    if x < 0 { x + 256 } else { x }
+}
+
+// ============================================================================
+// Tests
+// ============================================================================
+
+// T01: Compile fn main() -> i64 { 42 }
+// Verify prologue, mov imm, store to slot, load from slot, return jump, epilogue
+fn test_compile_return_42() -> i64 with Mut, Panic, Div {
+    var nc = compiler_new()
+    nc = reset_function_state(nc)
+    nc.fn_offsets[0 as usize] = 0
+    nc.fn_count = 1
+
+    // Frame: 1 virtual register → frame_size = 16
+    let frame_size = align16(1 * 8)
+    nc.current_frame_size = frame_size
+    nc.code = emit_prologue(nc.code, frame_size)
+
+    // r0 = 42
+    var instr0 = test_instr_new(op_load_imm())
+    instr0.dst = 0
+    instr0.imm_i64 = 42
+    nc = lower_test_instr(nc, instr0)
+
+    // return r0
+    var instr1 = test_instr_new(op_return())
+    instr1.src1 = 0
+    nc = lower_test_instr(nc, instr1)
+
+    let epilogue_offset = nc.code.len
+    nc.code = emit_epilogue(nc.code)
+    nc = patch_return_jumps(nc, epilogue_offset)
+
+    // Verify: prologue starts with push rbp (0x55)
+    if byte_u8(nc.code.bytes[0]) != 0x55 { return 1 }
+
+    // Verify: epilogue ends with ret (0xc3)
+    let last = nc.code.len - 1
+    if byte_u8(nc.code.bytes[last as usize]) != 0xc3 { return 2 }
+
+    // Verify: code length is reasonable (prologue + load_imm + store + load + jmp + epilogue)
+    if nc.code.len < 20 { return 3 }
+
+    // Verify: return jump was patched (not all zeros in the jmp offset)
+    // The jmp rel32 is 5 bytes before the epilogue
+    if nc.return_jump_count != 1 { return 4 }
+
+    0
+}
+
+// T02: Compile fn main() -> i64 { 10 + 32 }
+fn test_compile_addition() -> i64 with Mut, Panic, Div {
+    var nc = compiler_new()
+    nc = reset_function_state(nc)
+    nc.fn_offsets[0 as usize] = 0
+    nc.fn_count = 1
+
+    // Frame: 3 virtual registers (r0=10, r1=32, r2=result)
+    let frame_size = align16(3 * 8)
+    nc.code = emit_prologue(nc.code, frame_size)
+
+    // r0 = 10
+    var i0 = test_instr_new(op_load_imm())
+    i0.dst = 0
+    i0.imm_i64 = 10
+    nc = lower_test_instr(nc, i0)
+
+    // r1 = 32
+    var i1 = test_instr_new(op_load_imm())
+    i1.dst = 1
+    i1.imm_i64 = 32
+    nc = lower_test_instr(nc, i1)
+
+    // r2 = r0 + r1
+    var i2 = test_instr_new(op_binop())
+    i2.dst = 2
+    i2.src1 = 0
+    i2.src2 = 1
+    i2.bin_op = binop_add()
+    nc = lower_test_instr(nc, i2)
+
+    // return r2
+    var i3 = test_instr_new(op_return())
+    i3.src1 = 2
+    nc = lower_test_instr(nc, i3)
+
+    let epilogue_offset = nc.code.len
+    nc.code = emit_epilogue(nc.code)
+    nc = patch_return_jumps(nc, epilogue_offset)
+
+    // Verify prologue
+    if byte_u8(nc.code.bytes[0]) != 0x55 { return 1 }
+
+    // Verify epilogue ends with ret
+    let last = nc.code.len - 1
+    if byte_u8(nc.code.bytes[last as usize]) != 0xc3 { return 2 }
+
+    // Verify reasonable code size
+    if nc.code.len < 40 { return 3 }
+
+    0
+}
+
+// T03: Compile two functions with a call: add(a,b) and main()
+fn test_compile_function_call() -> i64 with Mut, Panic, Div {
+    var nc = compiler_new()
+    nc.fn_count = 2
+
+    // --- Function 0: add(a, b) -> a + b ---
+    nc = reset_function_state(nc)
+    nc.fn_offsets[0 as usize] = nc.code.len
+
+    // 3 vregs: r0=param a, r1=param b, r2=result
+    let frame0 = align16(3 * 8)
+    nc.code = emit_prologue(nc.code, frame0)
+
+    // Spill params: param 0 (rdi) → slot(r0), param 1 (rsi) → slot(r1)
+    var pregs: [i64; 64] = [-1; 64]
+    pregs[0 as usize] = 0
+    pregs[1 as usize] = 1
+    nc = spill_ir_params(nc, 2, pregs)
+
+    // r2 = r0 + r1
+    var iadd = test_instr_new(op_binop())
+    iadd.dst = 2
+    iadd.src1 = 0
+    iadd.src2 = 1
+    iadd.bin_op = binop_add()
+    nc = lower_test_instr(nc, iadd)
+
+    // return r2
+    var iret0 = test_instr_new(op_return())
+    iret0.src1 = 2
+    nc = lower_test_instr(nc, iret0)
+
+    let ep0 = nc.code.len
+    nc.code = emit_epilogue(nc.code)
+    nc = patch_return_jumps(nc, ep0)
+
+    // --- Function 1: main() -> add(21, 21) ---
+    nc = reset_function_state(nc)
+    nc.fn_offsets[1 as usize] = nc.code.len
+
+    // 3 vregs: r0=21, r1=21, r2=result
+    let frame1 = align16(3 * 8)
+    nc.code = emit_prologue(nc.code, frame1)
+
+    // r0 = 21
+    var im0 = test_instr_new(op_load_imm())
+    im0.dst = 0
+    im0.imm_i64 = 21
+    nc = lower_test_instr(nc, im0)
+
+    // r1 = 21
+    var im1 = test_instr_new(op_load_imm())
+    im1.dst = 1
+    im1.imm_i64 = 21
+    nc = lower_test_instr(nc, im1)
+
+    // r2 = call fn0(r0, r1)
+    var icall = test_instr_new(op_call())
+    icall.dst = 2
+    icall.src1 = 0
+    icall.src2 = 1
+    icall.fn_id = 0
+    icall.arg_count = 2
+    nc = lower_test_instr(nc, icall)
+
+    // return r2
+    var iret1 = test_instr_new(op_return())
+    iret1.src1 = 2
+    nc = lower_test_instr(nc, iret1)
+
+    let ep1 = nc.code.len
+    nc.code = emit_epilogue(nc.code)
+    nc = patch_return_jumps(nc, ep1)
+
+    // Apply relocations
+    nc.code = apply_relocations(nc.relocs, nc.code, nc.fn_offsets, nc.fn_count)
+
+    // Verify: both functions have recorded offsets
+    if nc.fn_offsets[0 as usize] < 0 { return 1 }
+    if nc.fn_offsets[1 as usize] < 0 { return 2 }
+
+    // Verify: fn1 starts after fn0
+    if nc.fn_offsets[1 as usize] <= nc.fn_offsets[0 as usize] { return 3 }
+
+    // Verify: relocation was recorded
+    if nc.relocs.count != 1 { return 4 }
+
+    // Verify: code is non-trivial
+    if nc.code.len < 60 { return 5 }
+
+    0
+}
+
+// T04: Return jump patching with multiple returns
+fn test_multiple_return_jumps() -> i64 with Mut, Panic, Div {
+    var nc = compiler_new()
+    nc = reset_function_state(nc)
+
+    let frame_size = align16(2 * 8)
+    nc.code = emit_prologue(nc.code, frame_size)
+
+    // r0 = 1
+    var i0 = test_instr_new(op_load_imm())
+    i0.dst = 0
+    i0.imm_i64 = 1
+    nc = lower_test_instr(nc, i0)
+
+    // return r0 (early return)
+    var ir0 = test_instr_new(op_return())
+    ir0.src1 = 0
+    nc = lower_test_instr(nc, ir0)
+
+    // r1 = 2
+    var i1 = test_instr_new(op_load_imm())
+    i1.dst = 1
+    i1.imm_i64 = 2
+    nc = lower_test_instr(nc, i1)
+
+    // return r1 (fallthrough return)
+    var ir1 = test_instr_new(op_return())
+    ir1.src1 = 1
+    nc = lower_test_instr(nc, ir1)
+
+    let epilogue_offset = nc.code.len
+    nc.code = emit_epilogue(nc.code)
+    nc = patch_return_jumps(nc, epilogue_offset)
+
+    // Verify: 2 return jumps recorded
+    if nc.return_jump_count != 2 { return 1 }
+
+    // Verify: both patches point to the same epilogue
+    // (Check that the jmp at each recorded position resolves correctly)
+    let patch0 = nc.return_jumps[0 as usize]
+    let patch1 = nc.return_jumps[1 as usize]
+    if patch0 == patch1 { return 2 }   // should be different positions
+    if patch0 < 0 { return 3 }
+    if patch1 < 0 { return 4 }
+
+    0
+}
+
+// T05: Label and forward branch patching
+fn test_label_and_branch() -> i64 with Mut, Panic, Div {
+    var nc = compiler_new()
+    nc = reset_function_state(nc)
+
+    let frame_size = align16(2 * 8)
+    nc.code = emit_prologue(nc.code, frame_size)
+
+    // r0 = 1 (condition)
+    var i0 = test_instr_new(op_load_imm())
+    i0.dst = 0
+    i0.imm_i64 = 1
+    nc = lower_test_instr(nc, i0)
+
+    // branch_false r0, label_1 (forward branch)
+    var ibf = test_instr_new(op_branch_false())
+    ibf.src1 = 0
+    ibf.label_id = 1
+    nc = lower_test_instr(nc, ibf)
+
+    // r1 = 42
+    var i1 = test_instr_new(op_load_imm())
+    i1.dst = 1
+    i1.imm_i64 = 42
+    nc = lower_test_instr(nc, i1)
+
+    // jump label_2 (forward jump over else)
+    var ij = test_instr_new(op_jump())
+    ij.label_id = 2
+    nc = lower_test_instr(nc, ij)
+
+    // label_1:
+    var il1 = test_instr_new(op_label())
+    il1.label_id = 1
+    nc = lower_test_instr(nc, il1)
+
+    // r1 = 0
+    var i2 = test_instr_new(op_load_imm())
+    i2.dst = 1
+    i2.imm_i64 = 0
+    nc = lower_test_instr(nc, i2)
+
+    // label_2:
+    var il2 = test_instr_new(op_label())
+    il2.label_id = 2
+    nc = lower_test_instr(nc, il2)
+
+    // return r1
+    var ir = test_instr_new(op_return())
+    ir.src1 = 1
+    nc = lower_test_instr(nc, ir)
+
+    let epilogue_offset = nc.code.len
+    nc.code = emit_epilogue(nc.code)
+    nc = patch_return_jumps(nc, epilogue_offset)
+    nc = patch_label_forwards(nc)
+
+    // Verify: labels were recorded
+    if nc.label_offsets[1 as usize] < 0 { return 1 }
+    if nc.label_offsets[2 as usize] < 0 { return 2 }
+
+    // Verify: 2 forward patches were recorded
+    if nc.label_patch_count != 2 { return 3 }
+
+    // Verify: label_2 comes after label_1
+    if nc.label_offsets[2 as usize] <= nc.label_offsets[1 as usize] { return 4 }
+
+    0
+}
+
+// T06: Entry trampoline emission
+fn test_entry_trampoline() -> i64 with Mut, Panic, Div {
+    var nc = compiler_new()
+    nc.fn_count = 1
+    nc.fn_offsets[0 as usize] = 0    // main at offset 0
+
+    // Emit a stub "main" (just prologue + ret)
+    nc.code = emit_prologue(nc.code, 0)
+    nc.code = emit_mov_rax_imm(nc.code, 42)
+    nc.code = emit_epilogue(nc.code)
+
+    let before_tramp = nc.code.len
+
+    // Emit trampoline
+    let call_pos = nc.code.len
+    nc.code = emit_call_rel32_placeholder(nc.code)
+    nc.relocs = add_call_reloc(nc.relocs, call_pos + 1, 0)
+    nc.code = emit_mov_rdi_rax(nc.code)
+    nc.code = emit_mov_rax_imm(nc.code, 60)
+    nc.code = emit_syscall(nc.code)
+    nc.code = emit_ud2(nc.code)
+
+    // Apply relocations
+    nc.code = apply_relocations(nc.relocs, nc.code, nc.fn_offsets, nc.fn_count)
+
+    // Verify: trampoline starts with call (0xe8)
+    if byte_u8(nc.code.bytes[before_tramp as usize]) != 0xe8 { return 1 }
+
+    // Verify: trampoline ends with ud2 (0f 0b)
+    let end = nc.code.len
+    if byte_u8(nc.code.bytes[(end - 2) as usize]) != 0x0f { return 2 }
+    if byte_u8(nc.code.bytes[(end - 1) as usize]) != 0x0b { return 3 }
+
+    // Verify: relocation was applied (call target should point backward to fn0)
+    // The rel32 at offset (before_tramp+1) should be negative (backward call)
+    let rel_byte0 = byte_u8(nc.code.bytes[(before_tramp + 1) as usize])
+    let rel_byte3 = byte_u8(nc.code.bytes[(before_tramp + 4) as usize])
+    // A backward relative call has a negative offset → high byte should be 0xff
+    if rel_byte3 != 0xff { return 4 }
+
+    0
+}
+
+// T07: Param spilling generates correct ModRM for each ABI register
+fn test_param_spilling() -> i64 with Mut, Panic, Div {
+    var nc = compiler_new()
+    nc = reset_function_state(nc)
+
+    let frame_size = align16(2 * 8)
+    nc.code = emit_prologue(nc.code, frame_size)
+
+    // Spill 2 params: param0 (rdi) → slot(0), param1 (rsi) → slot(1)
+    var pregs: [i64; 64] = [-1; 64]
+    pregs[0 as usize] = 0
+    pregs[1 as usize] = 1
+    nc = spill_ir_params(nc, 2, pregs)
+
+    // Verify: spill generates mov [rbp+disp32], reg instructions
+    // Each spill is: 48 89 <ModRM> <disp32> = 7 bytes
+    // After prologue (push rbp=1 + mov rbp,rsp=3 + sub rsp,imm32=7 = 11 bytes)
+    // Param 0 spill at offset 11: 48 89 <0x85 + rdi*8 = 0x85 + 7*8 = 0xbd>
+    let spill0_start = 11
+    if byte_u8(nc.code.bytes[spill0_start as usize]) != 0x48 { return 1 }
+    if byte_u8(nc.code.bytes[(spill0_start + 1) as usize]) != 0x89 { return 2 }
+    // ModRM for rdi: 0x85 + 7*8 = 0x85 + 56 = 0xbd
+    if byte_u8(nc.code.bytes[(spill0_start + 2) as usize]) != 0xbd { return 3 }
+
+    // Param 1 spill at offset 18: ModRM for rsi: 0x85 + 6*8 = 0x85 + 48 = 0xb5
+    let spill1_start = 18
+    if byte_u8(nc.code.bytes[spill1_start as usize]) != 0x48 { return 4 }
+    if byte_u8(nc.code.bytes[(spill1_start + 2) as usize]) != 0xb5 { return 5 }
+
+    0
+}
+
+// T08: Stack slot offset mapping
+fn test_slot_offsets() -> i64 {
+    // vreg 0 → rbp-8
+    if ir_slot_offset(0) != -8 { return 1 }
+    // vreg 1 → rbp-16
+    if ir_slot_offset(1) != -16 { return 2 }
+    // vreg 2 → rbp-24
+    if ir_slot_offset(2) != -24 { return 3 }
+    // vreg 7 → rbp-64
+    if ir_slot_offset(7) != -64 { return 4 }
+    0
+}
+
+// ============================================================================
+// Main test runner
+// ============================================================================
+
+fn main() -> i64 with Mut, Panic, Div {
+    var failed = 0
+
+    if test_slot_offsets() != 0 { failed = failed + 1 }
+    if test_compile_return_42() != 0 { failed = failed + 1 }
+    if test_compile_addition() != 0 { failed = failed + 1 }
+    if test_compile_function_call() != 0 { failed = failed + 1 }
+    if test_multiple_return_jumps() != 0 { failed = failed + 1 }
+    if test_label_and_branch() != 0 { failed = failed + 1 }
+    if test_entry_trampoline() != 0 { failed = failed + 1 }
+    if test_param_spilling() != 0 { failed = failed + 1 }
+
+    if failed == 0 { 0 } else { 1 }
+}

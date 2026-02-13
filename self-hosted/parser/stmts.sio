@@ -12,28 +12,33 @@ impl Parser {
         let start = self.current_span()
         var p = self.expect(TokenKind::LBrace)
 
-        var stmts_opt: Option<Box<StmtList>> = None
-        var first_stmt = true
+        // Fast-path for large corpus scans: keep top-level parsing intact while
+        // skipping nested block bodies in linear time.
+        if PARSER_FAST_SKIP_BLOCKS {
+            var depth: i64 = 1
+            while depth > 0 && !p.at_eof() {
+                let k = p.peek()
+                if k == TokenKind::LBrace {
+                    depth = depth + 1
+                } else if k == TokenKind::RBrace {
+                    depth = depth - 1
+                }
+                p = p.advance_raw()
+            }
+
+            let span = p.span_from(start)
+            return (p, Block { stmts: None, span: span })
+        }
+
+        // Build in reverse for O(1) cons, reverse once at block end.
+        var rev_stmts_opt: Option<Box<StmtList>> = None
 
         while p.peek() != TokenKind::RBrace && p.peek() != TokenKind::Eof {
             let pair = p.parse_stmt()
             p = pair.0
             let stmt = pair.1
 
-            if first_stmt {
-                stmts_opt = Some(Box::new(StmtList { head: stmt, tail: None }))
-                first_stmt = false
-            } else {
-                match stmts_opt {
-                    Some(list) => {
-                        let new_node = StmtList { head: stmt, tail: None }
-                        stmts_opt = Some(Box::new(stmt_list_append(*list, new_node)))
-                    },
-                    None => {
-                        stmts_opt = Some(Box::new(StmtList { head: stmt, tail: None }))
-                    },
-                }
-            }
+            rev_stmts_opt = Some(Box::new(StmtList { head: stmt, tail: rev_stmts_opt }))
 
             // Skip optional semicolons between statements
             while p.peek() == TokenKind::Semi {
@@ -43,7 +48,7 @@ impl Parser {
 
         p = p.expect(TokenKind::RBrace)
         let span = p.span_from(start)
-        (p, Block { stmts: stmts_opt, span: span })
+        (p, Block { stmts: reverse_stmt_list_opt(rev_stmts_opt), span: span })
     }
 
     // ============================================================
@@ -198,6 +203,24 @@ fn stmt_list_append(list: StmtList, node: StmtList) -> StmtList with Mut, Alloc 
         Some(rest) => StmtList {
             head: list.head,
             tail: Some(Box::new(stmt_list_append(*rest, node))),
+        },
+    }
+}
+
+fn reverse_stmt_list_opt(list: Option<Box<StmtList>>) -> Option<Box<StmtList>> with Mut, Alloc {
+    reverse_stmt_list_loop(list, None)
+}
+
+fn reverse_stmt_list_loop(
+    current: Option<Box<StmtList>>,
+    acc: Option<Box<StmtList>>,
+) -> Option<Box<StmtList>> with Mut, Alloc {
+    match current {
+        None => acc,
+        Some(node) => {
+            let next = (*node).tail
+            let rev_node = StmtList { head: (*node).head, tail: acc }
+            reverse_stmt_list_loop(next, Some(Box::new(rev_node)))
         },
     }
 }

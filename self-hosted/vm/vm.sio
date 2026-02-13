@@ -1,4 +1,168 @@
-// Minimal IR VM
+// Minimal IR VM (extended): typed values, heap objects, hypercomplex builtins.
+
+// =========================
+// Value Model
+// =========================
+
+enum ValTag {
+    Unit,
+    Bool,
+    Int,
+    Float,
+    Ptr,
+}
+
+struct Val {
+    tag: ValTag,
+    i: i64,
+    f: f64,
+}
+
+fn val_unit() -> Val {
+    Val { tag: ValTag::Unit, i: 0, f: 0.0 }
+}
+
+fn val_bool(b: bool) -> Val {
+    Val { tag: ValTag::Bool, i: if b { 1 } else { 0 }, f: 0.0 }
+}
+
+fn val_int(i: i64) -> Val {
+    Val { tag: ValTag::Int, i: i, f: 0.0 }
+}
+
+fn val_float(f: f64) -> Val {
+    Val { tag: ValTag::Float, i: 0, f: f }
+}
+
+fn val_ptr(p: i64) -> Val {
+    Val { tag: ValTag::Ptr, i: p, f: 0.0 }
+}
+
+fn val_to_i64(v: Val) -> i64 {
+    match v.tag {
+        ValTag::Bool => v.i,
+        ValTag::Int => v.i,
+        ValTag::Float => v.f as i64,
+        ValTag::Ptr => v.i,
+        _ => 0,
+    }
+}
+
+fn val_to_f64(v: Val) -> f64 {
+    match v.tag {
+        ValTag::Float => v.f,
+        ValTag::Int => v.i as f64,
+        ValTag::Bool => v.i as f64,
+        _ => 0.0,
+    }
+}
+
+fn val_truthy(v: Val) -> bool {
+    match v.tag {
+        ValTag::Bool => v.i != 0,
+        ValTag::Int => v.i != 0,
+        ValTag::Float => v.f != 0.0,
+        ValTag::Ptr => v.i != 0,
+        _ => false,
+    }
+}
+
+// =========================
+// Heap Objects
+// =========================
+
+let PTR_BASE: i64 = 1000000
+let HEAP_MAX: i64 = 8192
+
+enum ObjTag {
+    Struct,
+    Array,
+    Tuple,
+    QuatObj,
+    OctObj,
+    SedObj,
+}
+
+struct FieldBinding {
+    name: Name,
+    value: Val,
+}
+
+struct FieldList {
+    head: FieldBinding,
+    tail: Option<Box<FieldList>>,
+}
+
+struct ValList {
+    head: Val,
+    tail: Option<Box<ValList>>,
+}
+
+struct HeapObj {
+    tag: ObjTag,
+    len: i64,
+    fields: Option<Box<FieldList>>,
+    elems: Option<Box<ValList>>,
+    quat_data: [f64; 4],
+    oct_data: [f64; 8],
+    sed_data: [f64; 16],
+}
+
+struct Heap {
+    objs: [HeapObj],
+    count: i64,
+}
+
+fn heap_empty_obj(tag: ObjTag) -> HeapObj {
+    HeapObj {
+        tag: tag,
+        len: 0,
+        fields: None,
+        elems: None,
+        quat_data: [0.0; 4],
+        oct_data: [0.0; 8],
+        sed_data: [0.0; 16],
+    }
+}
+
+fn heap_new() -> Heap {
+    Heap { objs: [], count: 0 }
+}
+
+fn heap_alloc(heap: Heap, obj: HeapObj) -> (Heap, i64) with Mut, Panic, Div, Alloc {
+    var h = heap
+    if h.count >= HEAP_MAX {
+        return (h, -1)
+    }
+    h.objs = h.objs ++ [obj]
+    let id = h.count
+    h.count = h.count + 1
+    (h, id)
+}
+
+fn heap_get(heap: Heap, id: i64) -> HeapObj with Panic {
+    if id < 0 || id >= heap.count {
+        heap_empty_obj(ObjTag::Struct)
+    } else {
+        heap.objs[id]
+    }
+}
+
+fn heap_set(heap: Heap, id: i64, obj: HeapObj) -> Heap with Mut, Panic, Div {
+    var h = heap
+    if id >= 0 && id < h.count {
+        h.objs[id] = obj
+    }
+    h
+}
+
+fn ptr_from_id(id: i64) -> Val {
+    val_ptr(PTR_BASE + id)
+}
+
+fn ptr_to_id(v: Val) -> i64 {
+    if v.tag == ValTag::Ptr { v.i - PTR_BASE } else { -1 }
+}
 
 struct CallFrame {
     fn_id: i64,
@@ -8,10 +172,12 @@ struct CallFrame {
 }
 
 struct VmState {
-    regs: [i64; 256],
-    float_regs: [f64; 256],
+    // Keep this comfortably above the current self-hosted IR's temp register usage
+    // so complex expressions (e.g. 16-arg hypercomplex calls) don't crash.
+    regs: [Val; 1024],
+    heap: Heap,
     pc: i64,
-    call_stack: [CallFrame; 256],
+    call_stack: [CallFrame; 1024],
     call_depth: i64,
     halted: bool,
     exit_code: i64,
@@ -35,10 +201,10 @@ fn vm_empty_frame() -> CallFrame {
 
 fn vm_new_state(entry_fn: i64) -> VmState {
     VmState {
-        regs: [0; 256],
-        float_regs: [0.0; 256],
+        regs: [val_unit(); 1024],
+        heap: heap_new(),
         pc: 0,
-        call_stack: [vm_empty_frame(); 256],
+        call_stack: [vm_empty_frame(); 1024],
         call_depth: 0,
         halted: false,
         exit_code: 0,
@@ -125,62 +291,205 @@ fn vm_print_i64(v: i64) with IO, Mut, Panic, Div {
     }
 }
 
+fn vm_name_eq_str(n: Name, s: string) -> bool with Mut, Panic, Div {
+    let slen = str_len(s)
+    if n.len != slen { return false }
+    var i: i64 = 0
+    while i < slen {
+        if n.buf[i] != (str_char_at(s, i) as i8) { return false }
+        i = i + 1
+    }
+    true
+}
+
+fn field_list_get(fields: Option<Box<FieldList>>, name: Name) -> Option<Val> with Mut, Panic, Div, Alloc {
+    match fields {
+        Some(list) => {
+            let b = (*list).head
+            if ir_name_eq(b.name, name) {
+                Some(b.value)
+            } else {
+                field_list_get((*list).tail, name)
+            }
+        }
+        _ => None,
+    }
+}
+
+fn field_list_set(fields: Option<Box<FieldList>>, name: Name, value: Val) -> Option<Box<FieldList>> with Mut, Panic, Div, Alloc {
+    match fields {
+        Some(list) => {
+            let b = (*list).head
+            if ir_name_eq(b.name, name) {
+                let nb = FieldBinding { name: name, value: value }
+                Some(Box::new(FieldList { head: nb, tail: (*list).tail }))
+            } else {
+                let tail2 = field_list_set((*list).tail, name, value)
+                Some(Box::new(FieldList { head: b, tail: tail2 }))
+            }
+        }
+        _ => {
+            let nb = FieldBinding { name: name, value: value }
+            Some(Box::new(FieldList { head: nb, tail: None }))
+        }
+    }
+}
+
+fn val_list_get(list: Option<Box<ValList>>, idx: i64) -> Val with Mut, Panic, Div, Alloc {
+    if idx < 0 { return val_unit() }
+    match list {
+        Some(node) => {
+            if idx == 0 { (*node).head } else { val_list_get((*node).tail, idx - 1) }
+        }
+        _ => val_unit(),
+    }
+}
+
+fn val_list_set(list: Option<Box<ValList>>, idx: i64, value: Val) -> Option<Box<ValList>> with Mut, Panic, Div, Alloc {
+    if idx < 0 { return list }
+    match list {
+        Some(node) => {
+            if idx == 0 {
+                Some(Box::new(ValList { head: value, tail: (*node).tail }))
+            } else {
+                let tail2 = val_list_set((*node).tail, idx - 1, value)
+                Some(Box::new(ValList { head: (*node).head, tail: tail2 }))
+            }
+        }
+        _ => {
+            // Out-of-bounds set: create a sparse-ish list by padding units.
+            if idx == 0 {
+                Some(Box::new(ValList { head: value, tail: None }))
+            } else {
+                let tail2 = val_list_set(None, idx - 1, value)
+                Some(Box::new(ValList { head: val_unit(), tail: tail2 }))
+            }
+        }
+    }
+}
+
+fn val_list_push(list: Option<Box<ValList>>, value: Val) -> Option<Box<ValList>> with Mut, Panic, Div, Alloc {
+    match list {
+        Some(node) => {
+            let tail2 = val_list_push((*node).tail, value)
+            Some(Box::new(ValList { head: (*node).head, tail: tail2 }))
+        }
+        _ => Some(Box::new(ValList { head: value, tail: None })),
+    }
+}
+
 fn vm_write_call_args(state: VmState, ins: IrInstr, callee: IrFunction) -> VmState with Mut, Panic, Div {
     var st = state
-    if ins.arg_count > 0 && callee.param_count > 0 {
-        let preg0 = callee.param_regs[0]
-        let src0 = ins.src1
-        if preg0 >= 0 && preg0 < 256 && src0 >= 0 && src0 < 256 {
-            st.regs[preg0] = st.regs[src0]
+    // Preferred: use the full call argument list, if present.
+    match ins.call_args {
+        Some(args) => vm_write_call_args_from_list(st, Some(args), callee, 0),
+        _ => {
+            // Compatibility: src1/src2 cache the first two args.
+            if ins.arg_count > 0 && callee.param_count > 0 {
+                let preg0 = callee.param_regs[0]
+                let src0 = ins.src1
+                if preg0 >= 0 && preg0 < 1024 && src0 >= 0 && src0 < 1024 {
+                    st.regs[preg0] = st.regs[src0]
+                }
+            }
+            if ins.arg_count > 1 && callee.param_count > 1 {
+                let preg1 = callee.param_regs[1]
+                let src1 = ins.src2
+                if preg1 >= 0 && preg1 < 1024 && src1 >= 0 && src1 < 1024 {
+                    st.regs[preg1] = st.regs[src1]
+                }
+            }
+            st
         }
     }
-    if ins.arg_count > 1 && callee.param_count > 1 {
-        let preg1 = callee.param_regs[1]
-        let src1 = ins.src2
-        if preg1 >= 0 && preg1 < 256 && src1 >= 0 && src1 < 256 {
-            st.regs[preg1] = st.regs[src1]
+}
+
+fn vm_write_call_args_from_list(
+    state: VmState,
+    args: Option<Box<IrRegList>>,
+    callee: IrFunction,
+    idx: i64
+) -> VmState with Mut, Panic, Div {
+    match args {
+        Some(list) => {
+            var st = state
+            if idx >= 0 && idx < callee.param_count {
+                let preg = callee.param_regs[idx]
+                let src = (*list).head
+                if preg >= 0 && preg < 1024 && src >= 0 && src < 1024 {
+                    st.regs[preg] = st.regs[src]
+                }
+            }
+            vm_write_call_args_from_list(st, (*list).tail, callee, idx + 1)
         }
+        _ => state,
     }
-    st
 }
 
-fn vm_eval_binop(op: BinaryOp, lhs: i64, rhs: i64) -> i64 with Div, Panic {
-    if op == BinaryOp::OpAdd { lhs + rhs }
-    else if op == BinaryOp::OpSub { lhs - rhs }
-    else if op == BinaryOp::OpMul { lhs * rhs }
-    else if op == BinaryOp::OpDiv { if rhs == 0 { 0 } else { lhs / rhs } }
-    else if op == BinaryOp::OpRem { if rhs == 0 { 0 } else { lhs % rhs } }
-    else if op == BinaryOp::OpEq { if lhs == rhs { 1 } else { 0 } }
-    else if op == BinaryOp::OpNe { if lhs != rhs { 1 } else { 0 } }
-    else if op == BinaryOp::OpLt { if lhs < rhs { 1 } else { 0 } }
-    else if op == BinaryOp::OpLe { if lhs <= rhs { 1 } else { 0 } }
-    else if op == BinaryOp::OpGt { if lhs > rhs { 1 } else { 0 } }
-    else if op == BinaryOp::OpGe { if lhs >= rhs { 1 } else { 0 } }
-    else if op == BinaryOp::OpAnd { if lhs != 0 && rhs != 0 { 1 } else { 0 } }
-    else if op == BinaryOp::OpOr { if lhs != 0 || rhs != 0 { 1 } else { 0 } }
-    else if op == BinaryOp::OpBitAnd { lhs & rhs }
-    else if op == BinaryOp::OpBitOr { lhs | rhs }
-    else if op == BinaryOp::OpBitXor { lhs ^ rhs }
-    else if op == BinaryOp::OpShl { lhs << rhs }
-    else if op == BinaryOp::OpShr { lhs >> rhs }
-    else if op == BinaryOp::OpConcat { lhs + rhs }
-    else if op == BinaryOp::OpRange { rhs - lhs }
-    else { rhs - lhs + 1 }
+fn vm_eval_binop(op: BinaryOp, lhs: Val, rhs: Val) -> Val with Div, Panic {
+    // Logical ops (returns Bool).
+    if op == BinaryOp::OpAnd { return val_bool(val_truthy(lhs) && val_truthy(rhs)) }
+    if op == BinaryOp::OpOr { return val_bool(val_truthy(lhs) || val_truthy(rhs)) }
+
+    // Promote to float when either side is float for arithmetic/comparisons.
+    if lhs.tag == ValTag::Float || rhs.tag == ValTag::Float {
+        let a = val_to_f64(lhs)
+        let b = val_to_f64(rhs)
+        if op == BinaryOp::OpAdd { return val_float(a + b) }
+        if op == BinaryOp::OpSub { return val_float(a - b) }
+        if op == BinaryOp::OpMul { return val_float(a * b) }
+        if op == BinaryOp::OpDiv { return val_float(if b == 0.0 { 0.0 } else { a / b }) }
+        if op == BinaryOp::OpEq { return val_bool(a == b) }
+        if op == BinaryOp::OpNe { return val_bool(a != b) }
+        if op == BinaryOp::OpLt { return val_bool(a < b) }
+        if op == BinaryOp::OpLe { return val_bool(a <= b) }
+        if op == BinaryOp::OpGt { return val_bool(a > b) }
+        if op == BinaryOp::OpGe { return val_bool(a >= b) }
+        return val_int(0)
+    }
+
+    let a = val_to_i64(lhs)
+    let b = val_to_i64(rhs)
+    if op == BinaryOp::OpAdd { val_int(a + b) }
+    else if op == BinaryOp::OpSub { val_int(a - b) }
+    else if op == BinaryOp::OpMul { val_int(a * b) }
+    else if op == BinaryOp::OpDiv { val_int(if b == 0 { 0 } else { a / b }) }
+    else if op == BinaryOp::OpRem { val_int(if b == 0 { 0 } else { a % b }) }
+    else if op == BinaryOp::OpEq { val_bool(a == b) }
+    else if op == BinaryOp::OpNe { val_bool(a != b) }
+    else if op == BinaryOp::OpLt { val_bool(a < b) }
+    else if op == BinaryOp::OpLe { val_bool(a <= b) }
+    else if op == BinaryOp::OpGt { val_bool(a > b) }
+    else if op == BinaryOp::OpGe { val_bool(a >= b) }
+    else if op == BinaryOp::OpBitAnd { val_int(a & b) }
+    else if op == BinaryOp::OpBitOr { val_int(a | b) }
+    else if op == BinaryOp::OpBitXor { val_int(a ^ b) }
+    else if op == BinaryOp::OpShl { val_int(a << b) }
+    else if op == BinaryOp::OpShr { val_int(a >> b) }
+    else if op == BinaryOp::OpConcat { val_int(a + b) }
+    else if op == BinaryOp::OpRange { val_int(b - a) }
+    else { val_int(b - a + 1) }
 }
 
-fn vm_eval_unop(op: UnaryOp, src: i64) -> i64 {
-    if op == UnaryOp::OpNeg { -src }
-    else if op == UnaryOp::OpNot { if src == 0 { 1 } else { 0 } }
-    else if op == UnaryOp::OpRef { src }
-    else if op == UnaryOp::OpRefMut { src }
-    else { src }
+fn vm_eval_unop(op: UnaryOp, src: Val) -> Val {
+    if op == UnaryOp::OpNeg {
+        if src.tag == ValTag::Float { val_float(-src.f) } else { val_int(-val_to_i64(src)) }
+    } else if op == UnaryOp::OpNot {
+        val_bool(!val_truthy(src))
+    } else if op == UnaryOp::OpRef {
+        src
+    } else if op == UnaryOp::OpRefMut {
+        src
+    } else {
+        src
+    }
 }
 
-fn vm_do_return(state: VmState, ret_val: i64) -> VmState with Mut, Panic, Div {
+fn vm_do_return(state: VmState, ret_val: Val) -> VmState with Mut, Panic, Div {
     var st = state
     if st.call_depth <= 0 {
         st.halted = true
-        st.exit_code = ret_val
+        st.exit_code = val_to_i64(ret_val)
         return st
     }
 
@@ -189,21 +498,668 @@ fn vm_do_return(state: VmState, ret_val: i64) -> VmState with Mut, Panic, Div {
     st.current_fn = frame.fn_id
     st.pc = frame.return_pc
 
-    if frame.return_reg >= 0 && frame.return_reg < 256 {
+    if frame.return_reg >= 0 && frame.return_reg < 1024 {
         st.regs[frame.return_reg] = ret_val
     }
     st
+}
+
+// =========================
+// Builtin Call Helpers
+// =========================
+
+struct CallArgsBuf {
+    regs: [i64; 64],
+    count: i64,
+}
+
+fn cab_empty() -> CallArgsBuf {
+    CallArgsBuf { regs: [IR_INVALID_REG; 64], count: 0 }
+}
+
+fn cab_push(buf: CallArgsBuf, reg: i64) -> CallArgsBuf with Mut {
+    var out = buf
+    if out.count >= 0 && out.count < 64 {
+        out.regs[out.count] = reg
+        out.count = out.count + 1
+    }
+    out
+}
+
+fn cab_from_list(args: Option<Box<IrRegList>>, buf: CallArgsBuf) -> CallArgsBuf with Mut, Panic, Div, Alloc {
+    match args {
+        Some(list) => {
+            let b2 = cab_push(buf, (*list).head)
+            cab_from_list((*list).tail, b2)
+        }
+        _ => buf,
+    }
+}
+
+fn vm_collect_call_args(ins: IrInstr) -> CallArgsBuf with Mut, Panic, Div, Alloc {
+    match ins.call_args {
+        Some(args) => cab_from_list(Some(args), cab_empty()),
+        _ => {
+            var buf = cab_empty()
+            if ins.arg_count > 0 {
+                buf.regs[0] = ins.src1
+                buf.count = 1
+            }
+            if ins.arg_count > 1 {
+                buf.regs[1] = ins.src2
+                buf.count = 2
+            }
+            buf
+        }
+    }
+}
+
+fn vm_arg_val(state: VmState, args: CallArgsBuf, idx: i64) -> Val {
+    if idx < 0 || idx >= args.count { return val_unit() }
+    let reg = args.regs[idx]
+    if reg < 0 || reg >= 1024 { return val_unit() }
+    state.regs[reg]
+}
+
+// =========================
+// Math Helpers (pure f64)
+// =========================
+
+fn abs_f64(x: f64) -> f64 {
+    if x < 0.0 { -x } else { x }
+}
+
+fn sqrt_f64(x: f64) -> f64 with Mut, Panic, Div {
+    if x <= 0.0 { return 0.0 }
+    var guess = x / 2.0
+    for i in 0..20 {
+        guess = (guess + x / guess) / 2.0
+    }
+    guess
+}
+
+fn exp_f64(x: f64) -> f64 with Mut, Panic, Div {
+    if x > 20.0 { return exp_f64(x / 2.0) * exp_f64(x / 2.0) }
+    if x < -20.0 { return 1.0 / exp_f64(-x) }
+    var sum = 1.0
+    var term = 1.0
+    for i in 1..30 {
+        term = term * x / (i as f64)
+        sum = sum + term
+    }
+    sum
+}
+
+fn tanh_f64(x: f64) -> f64 with Mut, Panic, Div {
+    // Stable-ish tanh via exp(2x).
+    if x > 10.0 { return 1.0 }
+    if x < -10.0 { return -1.0 }
+    let e2x = exp_f64(2.0 * x)
+    (e2x - 1.0) / (e2x + 1.0)
+}
+
+fn sigmoid_f64(x: f64) -> f64 with Mut, Panic, Div {
+    if x > 20.0 { return 1.0 }
+    if x < -20.0 { return 0.0 }
+    1.0 / (1.0 + exp_f64(-x))
+}
+
+// =========================
+// Heap Hypercomplex Helpers
+// =========================
+
+fn heap_alloc_quat(heap: Heap, q: [f64; 4]) -> (Heap, Val) with Mut, Panic, Div, Alloc {
+    var obj = heap_empty_obj(ObjTag::QuatObj)
+    obj.quat_data = q
+    let pair = heap_alloc(heap, obj)
+    let h2 = pair.0
+    let id = pair.1
+    (h2, if id >= 0 { ptr_from_id(id) } else { val_unit() })
+}
+
+fn heap_alloc_oct(heap: Heap, o: [f64; 8]) -> (Heap, Val) with Mut, Panic, Div, Alloc {
+    var obj = heap_empty_obj(ObjTag::OctObj)
+    obj.oct_data = o
+    let pair = heap_alloc(heap, obj)
+    let h2 = pair.0
+    let id = pair.1
+    (h2, if id >= 0 { ptr_from_id(id) } else { val_unit() })
+}
+
+fn heap_alloc_sed(heap: Heap, s: [f64; 16]) -> (Heap, Val) with Mut, Panic, Div, Alloc {
+    var obj = heap_empty_obj(ObjTag::SedObj)
+    obj.sed_data = s
+    let pair = heap_alloc(heap, obj)
+    let h2 = pair.0
+    let id = pair.1
+    (h2, if id >= 0 { ptr_from_id(id) } else { val_unit() })
+}
+
+fn heap_read_quat(heap: Heap, p: Val) -> [f64; 4] with Panic {
+    let id = ptr_to_id(p)
+    if id < 0 { return [0.0; 4] }
+    let obj = heap_get(heap, id)
+    obj.quat_data
+}
+
+fn heap_read_oct(heap: Heap, p: Val) -> [f64; 8] with Panic {
+    let id = ptr_to_id(p)
+    if id < 0 { return [0.0; 8] }
+    let obj = heap_get(heap, id)
+    obj.oct_data
+}
+
+fn heap_read_sed(heap: Heap, p: Val) -> [f64; 16] with Panic {
+    let id = ptr_to_id(p)
+    if id < 0 { return [0.0; 16] }
+    let obj = heap_get(heap, id)
+    obj.sed_data
+}
+
+fn heap_array_get(heap: Heap, arr_ptr: Val, idx: i64) -> Val with Mut, Panic, Div, Alloc {
+    let id = ptr_to_id(arr_ptr)
+    if id < 0 { return val_unit() }
+    let obj = heap_get(heap, id)
+    val_list_get(obj.elems, idx)
+}
+
+// =========================
+// Quaternion Ops (w,x,y,z)
+// =========================
+
+fn quat_add(a: [f64; 4], b: [f64; 4]) -> [f64; 4] {
+    [a[0] + b[0], a[1] + b[1], a[2] + b[2], a[3] + b[3]]
+}
+
+fn quat_sub(a: [f64; 4], b: [f64; 4]) -> [f64; 4] {
+    [a[0] - b[0], a[1] - b[1], a[2] - b[2], a[3] - b[3]]
+}
+
+fn quat_scale(a: [f64; 4], k: f64) -> [f64; 4] {
+    [a[0] * k, a[1] * k, a[2] * k, a[3] * k]
+}
+
+fn quat_conj(q: [f64; 4]) -> [f64; 4] {
+    [q[0], -q[1], -q[2], -q[3]]
+}
+
+fn quat_mul(a: [f64; 4], b: [f64; 4]) -> [f64; 4] {
+    let w1 = a[0]
+    let x1 = a[1]
+    let y1 = a[2]
+    let z1 = a[3]
+    let w2 = b[0]
+    let x2 = b[1]
+    let y2 = b[2]
+    let z2 = b[3]
+    [
+        w1*w2 - x1*x2 - y1*y2 - z1*z2,
+        w1*x2 + x1*w2 + y1*z2 - z1*y2,
+        w1*y2 - x1*z2 + y1*w2 + z1*x2,
+        w1*z2 + x1*y2 - y1*x2 + z1*w2
+    ]
+}
+
+fn quat_norm_sq(q: [f64; 4]) -> f64 {
+    q[0]*q[0] + q[1]*q[1] + q[2]*q[2] + q[3]*q[3]
+}
+
+fn quat_normalize(q: [f64; 4]) -> [f64; 4] with Mut, Panic, Div {
+    let n2 = quat_norm_sq(q)
+    if n2 == 0.0 { [1.0, 0.0, 0.0, 0.0] }
+    else {
+        let inv = 1.0 / sqrt_f64(n2)
+        quat_scale(q, inv)
+    }
+}
+
+// =========================
+// Octonion Ops (a..h)
+// =========================
+
+fn oct_add(a: [f64; 8], b: [f64; 8]) -> [f64; 8] {
+    [
+        a[0]+b[0], a[1]+b[1], a[2]+b[2], a[3]+b[3],
+        a[4]+b[4], a[5]+b[5], a[6]+b[6], a[7]+b[7],
+    ]
+}
+
+fn oct_sub(a: [f64; 8], b: [f64; 8]) -> [f64; 8] {
+    [
+        a[0]-b[0], a[1]-b[1], a[2]-b[2], a[3]-b[3],
+        a[4]-b[4], a[5]-b[5], a[6]-b[6], a[7]-b[7],
+    ]
+}
+
+fn oct_scale(a: [f64; 8], k: f64) -> [f64; 8] {
+    [
+        a[0]*k, a[1]*k, a[2]*k, a[3]*k,
+        a[4]*k, a[5]*k, a[6]*k, a[7]*k,
+    ]
+}
+
+fn oct_conj(o: [f64; 8]) -> [f64; 8] {
+    [o[0], -o[1], -o[2], -o[3], -o[4], -o[5], -o[6], -o[7]]
+}
+
+fn oct_norm_sq(o: [f64; 8]) -> f64 {
+    o[0]*o[0] + o[1]*o[1] + o[2]*o[2] + o[3]*o[3] +
+    o[4]*o[4] + o[5]*o[5] + o[6]*o[6] + o[7]*o[7]
+}
+
+fn oct_normalize(o: [f64; 8]) -> [f64; 8] with Mut, Panic, Div {
+    let n2 = oct_norm_sq(o)
+    if n2 == 0.0 { [1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0] }
+    else oct_scale(o, 1.0 / sqrt_f64(n2))
+}
+
+fn oct_relu(o: [f64; 8]) -> [f64; 8] {
+    [
+        if o[0] > 0.0 { o[0] } else { 0.0 },
+        if o[1] > 0.0 { o[1] } else { 0.0 },
+        if o[2] > 0.0 { o[2] } else { 0.0 },
+        if o[3] > 0.0 { o[3] } else { 0.0 },
+        if o[4] > 0.0 { o[4] } else { 0.0 },
+        if o[5] > 0.0 { o[5] } else { 0.0 },
+        if o[6] > 0.0 { o[6] } else { 0.0 },
+        if o[7] > 0.0 { o[7] } else { 0.0 },
+    ]
+}
+
+fn oct_sigmoid(o: [f64; 8]) -> [f64; 8] with Mut, Panic, Div {
+    [
+        sigmoid_f64(o[0]), sigmoid_f64(o[1]), sigmoid_f64(o[2]), sigmoid_f64(o[3]),
+        sigmoid_f64(o[4]), sigmoid_f64(o[5]), sigmoid_f64(o[6]), sigmoid_f64(o[7]),
+    ]
+}
+
+fn oct_tanh(o: [f64; 8]) -> [f64; 8] with Mut, Panic, Div {
+    [
+        tanh_f64(o[0]), tanh_f64(o[1]), tanh_f64(o[2]), tanh_f64(o[3]),
+        tanh_f64(o[4]), tanh_f64(o[5]), tanh_f64(o[6]), tanh_f64(o[7]),
+    ]
+}
+
+// Standard Cayley-Dickson multiplication table for {1,i,j,k,l,il,jl,kl}.
+fn oct_mul(a: [f64; 8], b: [f64; 8]) -> [f64; 8] {
+    let a0 = a[0]; let a1 = a[1]; let a2 = a[2]; let a3 = a[3]
+    let a4 = a[4]; let a5 = a[5]; let a6 = a[6]; let a7 = a[7]
+    let b0 = b[0]; let b1 = b[1]; let b2 = b[2]; let b3 = b[3]
+    let b4 = b[4]; let b5 = b[5]; let b6 = b[6]; let b7 = b[7]
+
+    let c0 = a0*b0 - a1*b1 - a2*b2 - a3*b3 - a4*b4 - a5*b5 - a6*b6 - a7*b7
+    let c1 = a0*b1 + a1*b0 + a2*b3 - a3*b2 + a4*b5 - a5*b4 - a6*b7 + a7*b6
+    let c2 = a0*b2 - a1*b3 + a2*b0 + a3*b1 + a4*b6 + a5*b7 - a6*b4 - a7*b5
+    let c3 = a0*b3 + a1*b2 - a2*b1 + a3*b0 + a4*b7 - a5*b6 + a6*b5 - a7*b4
+    let c4 = a0*b4 - a1*b5 - a2*b6 - a3*b7 + a4*b0 + a5*b1 + a6*b2 + a7*b3
+    let c5 = a0*b5 + a1*b4 - a2*b7 + a3*b6 - a4*b1 + a5*b0 - a6*b3 + a7*b2
+    let c6 = a0*b6 + a1*b7 + a2*b4 - a3*b5 - a4*b2 + a5*b3 + a6*b0 - a7*b1
+    let c7 = a0*b7 - a1*b6 + a2*b5 + a3*b4 - a4*b3 - a5*b2 + a6*b1 + a7*b0
+
+    [c0,c1,c2,c3,c4,c5,c6,c7]
+}
+
+// =========================
+// Sedenion Ops (e0..e15)
+// =========================
+
+fn sed_add(a: [f64; 16], b: [f64; 16]) -> [f64; 16] {
+    var out: [f64; 16] = [0.0; 16]
+    var i: i64 = 0
+    while i < 16 {
+        out[i] = a[i] + b[i]
+        i = i + 1
+    }
+    out
+}
+
+fn sed_sub(a: [f64; 16], b: [f64; 16]) -> [f64; 16] {
+    var out: [f64; 16] = [0.0; 16]
+    var i: i64 = 0
+    while i < 16 {
+        out[i] = a[i] - b[i]
+        i = i + 1
+    }
+    out
+}
+
+fn sed_scale(a: [f64; 16], k: f64) -> [f64; 16] {
+    var out: [f64; 16] = [0.0; 16]
+    var i: i64 = 0
+    while i < 16 {
+        out[i] = a[i] * k
+        i = i + 1
+    }
+    out
+}
+
+fn sed_conj(s: [f64; 16]) -> [f64; 16] {
+    var out: [f64; 16] = s
+    var i: i64 = 1
+    while i < 16 {
+        out[i] = -out[i]
+        i = i + 1
+    }
+    out
+}
+
+fn sed_norm_sq(s: [f64; 16]) -> f64 {
+    var acc = 0.0
+    var i: i64 = 0
+    while i < 16 {
+        acc = acc + s[i] * s[i]
+        i = i + 1
+    }
+    acc
+}
+
+fn sed_normalize(s: [f64; 16]) -> [f64; 16] with Mut, Panic, Div {
+    let n2 = sed_norm_sq(s)
+    if n2 == 0.0 {
+        var one: [f64; 16] = [0.0; 16]
+        one[0] = 1.0
+        one
+    } else {
+        sed_scale(s, 1.0 / sqrt_f64(n2))
+    }
+}
+
+fn sed_relu(s: [f64; 16]) -> [f64; 16] {
+    var out: [f64; 16] = [0.0; 16]
+    var i: i64 = 0
+    while i < 16 {
+        out[i] = if s[i] > 0.0 { s[i] } else { 0.0 }
+        i = i + 1
+    }
+    out
+}
+
+fn sed_sigmoid(s: [f64; 16]) -> [f64; 16] with Mut, Panic, Div {
+    var out: [f64; 16] = [0.0; 16]
+    var i: i64 = 0
+    while i < 16 {
+        out[i] = sigmoid_f64(s[i])
+        i = i + 1
+    }
+    out
+}
+
+fn sed_tanh(s: [f64; 16]) -> [f64; 16] with Mut, Panic, Div {
+    var out: [f64; 16] = [0.0; 16]
+    var i: i64 = 0
+    while i < 16 {
+        out[i] = tanh_f64(s[i])
+        i = i + 1
+    }
+    out
+}
+
+fn sed_mul(a: [f64; 16], b: [f64; 16]) -> [f64; 16] {
+    // Split into octonion pairs and apply: (o1a*o1b - conj(o2b)*o2a, o2b*o1a + o2a*conj(o1b))
+    let o1a: [f64; 8] = [a[0],a[1],a[2],a[3],a[4],a[5],a[6],a[7]]
+    let o2a: [f64; 8] = [a[8],a[9],a[10],a[11],a[12],a[13],a[14],a[15]]
+    let o1b: [f64; 8] = [b[0],b[1],b[2],b[3],b[4],b[5],b[6],b[7]]
+    let o2b: [f64; 8] = [b[8],b[9],b[10],b[11],b[12],b[13],b[14],b[15]]
+
+    let p1 = oct_mul(o1a, o1b)
+    let p2 = oct_mul(oct_conj(o2b), o2a)
+    let r1 = oct_sub(p1, p2)
+
+    let p3 = oct_mul(o2b, o1a)
+    let p4 = oct_mul(o2a, oct_conj(o1b))
+    let r2 = oct_add(p3, p4)
+
+    [
+        r1[0],r1[1],r1[2],r1[3],r1[4],r1[5],r1[6],r1[7],
+        r2[0],r2[1],r2[2],r2[3],r2[4],r2[5],r2[6],r2[7],
+    ]
+}
+
+fn sed_is_approx_identity(prod: [f64; 16]) -> bool {
+    let eps = 0.000001
+    var dev = (prod[0] - 1.0) * (prod[0] - 1.0)
+    var i: i64 = 1
+    while i < 16 {
+        dev = dev + prod[i] * prod[i]
+        i = i + 1
+    }
+    dev < eps
+}
+
+fn sed_is_zero_divisor_fast(s: [f64; 16]) -> bool with Mut, Panic, Div {
+    // Heuristic: look for a simple low-sparsity right-annihilator candidate.
+    //
+    // Note: `s * conj(s) = norm_sq(s) * 1` still holds in Cayley-Dickson algebras,
+    // so "check s * conj(s)/n2 == 1" is NOT a useful zero-divisor detector here.
+    //
+    // We probe vectors of the form (±e_i ± e_j) where i is in the first octonion
+    // half and j is in the second half. Many sedenion zero divisors appear in
+    // these low-sparsity patterns; this is deterministic and cheaper than rank.
+    let n2 = sed_norm_sq(s)
+    if n2 == 0.0 { return true }
+
+    let eps = 0.000000001
+    var i: i64 = 1
+    while i < 8 {
+        var j: i64 = 8
+        while j < 16 {
+            // Four sign combinations.
+            var y1: [f64; 16] = [0.0; 16]
+            y1[i] = 1.0
+            y1[j] = 1.0
+            if sed_norm_sq(sed_mul(s, y1)) < eps { return true }
+
+            var y2: [f64; 16] = [0.0; 16]
+            y2[i] = 1.0
+            y2[j] = -1.0
+            if sed_norm_sq(sed_mul(s, y2)) < eps { return true }
+
+            var y3: [f64; 16] = [0.0; 16]
+            y3[i] = -1.0
+            y3[j] = 1.0
+            if sed_norm_sq(sed_mul(s, y3)) < eps { return true }
+
+            var y4: [f64; 16] = [0.0; 16]
+            y4[i] = -1.0
+            y4[j] = -1.0
+            if sed_norm_sq(sed_mul(s, y4)) < eps { return true }
+
+            j = j + 1
+        }
+        i = i + 1
+    }
+
+    false
+}
+
+// Exact-ish: build 16x16 matrix for left multiplication L_s and check rank < 16.
+fn sed_is_zero_divisor_exact(s: [f64; 16]) -> bool with Mut, Panic, Div {
+    let n2 = sed_norm_sq(s)
+    if n2 == 0.0 { return true }
+
+    var mat: [f64; 256] = [0.0; 256]
+    var col: i64 = 0
+    while col < 16 {
+        var basis: [f64; 16] = [0.0; 16]
+        basis[col] = 1.0
+        let r = sed_mul(s, basis)
+        var row: i64 = 0
+        while row < 16 {
+            mat[row * 16 + col] = r[row]
+            row = row + 1
+        }
+        col = col + 1
+    }
+
+    let eps = 0.0000001
+    var rank: i64 = 0
+    var row0: i64 = 0
+    var col0: i64 = 0
+    while row0 < 16 && col0 < 16 {
+        // Find pivot
+        // Avoid relying on short-circuit semantics for bounds safety.
+        var piv = row0
+        while piv < 16 {
+            if abs_f64(mat[piv * 16 + col0]) > eps { break }
+            piv = piv + 1
+        }
+        if piv >= 16 {
+            col0 = col0 + 1
+            continue
+        }
+
+        // Swap rows piv <-> row0
+        if piv != row0 {
+            var c: i64 = col0
+            while c < 16 {
+                let tmp = mat[row0 * 16 + c]
+                mat[row0 * 16 + c] = mat[piv * 16 + c]
+                mat[piv * 16 + c] = tmp
+                c = c + 1
+            }
+        }
+
+        let piv_val = mat[row0 * 16 + col0]
+        // Eliminate below
+        var r2: i64 = row0 + 1
+        while r2 < 16 {
+            let a = mat[r2 * 16 + col0]
+            if abs_f64(a) > eps {
+                let factor = a / piv_val
+                var c2: i64 = col0
+                while c2 < 16 {
+                    mat[r2 * 16 + c2] = mat[r2 * 16 + c2] - factor * mat[row0 * 16 + c2]
+                    c2 = c2 + 1
+                }
+            }
+            r2 = r2 + 1
+        }
+
+        rank = rank + 1
+        row0 = row0 + 1
+        col0 = col0 + 1
+    }
+
+    rank < 16
+}
+
+// =========================
+// ML Kernels (Forward Only)
+// =========================
+
+fn oct_apply_activation(act: i64, o: [f64; 8]) -> [f64; 8] with Mut, Panic, Div {
+    if act == 1 { oct_relu(o) }
+    else if act == 2 { oct_sigmoid(o) }
+    else if act == 3 { oct_tanh(o) }
+    else if act == 4 { oct_normalize(o) }
+    else { o }
+}
+
+fn sed_apply_activation(act: i64, s: [f64; 16]) -> [f64; 16] with Mut, Panic, Div {
+    if act == 1 { sed_relu(s) }
+    else if act == 2 { sed_sigmoid(s) }
+    else if act == 3 { sed_tanh(s) }
+    else if act == 4 { sed_normalize(s) }
+    else { s }
+}
+
+fn vm_builtin_oct_linear_fwd(st0: VmState, args: CallArgsBuf) -> (VmState, Val) with Mut, Panic, Div, Alloc {
+    var st = st0
+    let w_ptr = vm_arg_val(st, args, 0)
+    let b_ptr = vm_arg_val(st, args, 1)
+    let x_ptr = vm_arg_val(st, args, 2)
+    let in_size = val_to_i64(vm_arg_val(st, args, 3))
+    let out_size = val_to_i64(vm_arg_val(st, args, 4))
+    let act = val_to_i64(vm_arg_val(st, args, 5))
+
+    var out_obj = heap_empty_obj(ObjTag::Array)
+    var out_i: i64 = 0
+    while out_i < out_size {
+        // bias
+        let bias_val = heap_array_get(st.heap, b_ptr, out_i)
+        var sum = heap_read_oct(st.heap, bias_val)
+
+        var in_j: i64 = 0
+        while in_j < in_size {
+            let w = heap_array_get(st.heap, w_ptr, out_i * in_size + in_j)
+            let x = heap_array_get(st.heap, x_ptr, in_j)
+            let prod = oct_mul(heap_read_oct(st.heap, w), heap_read_oct(st.heap, x))
+            sum = oct_add(sum, prod)
+            in_j = in_j + 1
+        }
+
+        sum = oct_apply_activation(act, sum)
+        let pair_o = heap_alloc_oct(st.heap, sum)
+        st.heap = pair_o.0
+        let optr = pair_o.1
+        out_obj.elems = val_list_push(out_obj.elems, optr)
+        out_obj.len = out_obj.len + 1
+        out_i = out_i + 1
+    }
+
+    let pair_arr = heap_alloc(st.heap, out_obj)
+    st.heap = pair_arr.0
+    let id = pair_arr.1
+    let arr_ptr = if id >= 0 { ptr_from_id(id) } else { val_unit() }
+    (st, arr_ptr)
+}
+
+fn vm_builtin_sed_linear_fwd(st0: VmState, args: CallArgsBuf) -> (VmState, Val) with Mut, Panic, Div, Alloc {
+    var st = st0
+    let w_ptr = vm_arg_val(st, args, 0)
+    let b_ptr = vm_arg_val(st, args, 1)
+    let x_ptr = vm_arg_val(st, args, 2)
+    let in_size = val_to_i64(vm_arg_val(st, args, 3))
+    let out_size = val_to_i64(vm_arg_val(st, args, 4))
+    let act = val_to_i64(vm_arg_val(st, args, 5))
+    let zd_eps = val_to_f64(vm_arg_val(st, args, 6))
+
+    var out_obj = heap_empty_obj(ObjTag::Array)
+    var out_i: i64 = 0
+    while out_i < out_size {
+        let bias_val = heap_array_get(st.heap, b_ptr, out_i)
+        var sum = heap_read_sed(st.heap, bias_val)
+
+        var in_j: i64 = 0
+        while in_j < in_size {
+            let w = heap_array_get(st.heap, w_ptr, out_i * in_size + in_j)
+            let x = heap_array_get(st.heap, x_ptr, in_j)
+            var prod = sed_mul(heap_read_sed(st.heap, w), heap_read_sed(st.heap, x))
+
+            // Use the exact predicate here: fast predicate can miss true zero divisors,
+            // and the self-hosted suite expects this regularization to be correctness-first.
+            if sed_is_zero_divisor_exact(prod) {
+                prod[0] = prod[0] + zd_eps
+            }
+            sum = sed_add(sum, prod)
+            in_j = in_j + 1
+        }
+
+        sum = sed_apply_activation(act, sum)
+        let pair_s = heap_alloc_sed(st.heap, sum)
+        st.heap = pair_s.0
+        let sptr = pair_s.1
+        out_obj.elems = val_list_push(out_obj.elems, sptr)
+        out_obj.len = out_obj.len + 1
+        out_i = out_i + 1
+    }
+
+    let pair_arr = heap_alloc(st.heap, out_obj)
+    st.heap = pair_arr.0
+    let id = pair_arr.1
+    let arr_ptr = if id >= 0 { ptr_from_id(id) } else { val_unit() }
+    (st, arr_ptr)
 }
 
 fn vm_try_builtin_call(state: VmState, ins: IrInstr) -> (VmState, bool) with Mut, Panic, Div, Alloc, IO {
     if vm_is_print_int_name(ins.name) {
         var st = state
         let arg_reg = ins.src1
-        if !VM_IO_SILENT && arg_reg >= 0 && arg_reg < 256 {
-            vm_print_i64(st.regs[arg_reg])
+        if !VM_IO_SILENT && arg_reg >= 0 && arg_reg < 1024 {
+            vm_print_i64(val_to_i64(st.regs[arg_reg]))
         }
-        if ins.dst >= 0 && ins.dst < 256 {
-            st.regs[ins.dst] = 0
+        if ins.dst >= 0 && ins.dst < 1024 {
+            st.regs[ins.dst] = val_unit()
         }
         st.pc = st.pc + 1
         return (st, true)
@@ -212,11 +1168,11 @@ fn vm_try_builtin_call(state: VmState, ins: IrInstr) -> (VmState, bool) with Mut
     if vm_is_print_char_name(ins.name) {
         var st = state
         let arg_reg = ins.src1
-        if !VM_IO_SILENT && arg_reg >= 0 && arg_reg < 256 {
-            print_char(st.regs[arg_reg] as i8)
+        if !VM_IO_SILENT && arg_reg >= 0 && arg_reg < 1024 {
+            print_char(val_to_i64(st.regs[arg_reg]) as i8)
         }
-        if ins.dst >= 0 && ins.dst < 256 {
-            st.regs[ins.dst] = 0
+        if ins.dst >= 0 && ins.dst < 1024 {
+            st.regs[ins.dst] = val_unit()
         }
         st.pc = st.pc + 1
         return (st, true)
@@ -225,12 +1181,374 @@ fn vm_try_builtin_call(state: VmState, ins: IrInstr) -> (VmState, bool) with Mut
     if vm_is_print_name(ins.name) {
         var st = state
         let arg_reg = ins.src1
-        if !VM_IO_SILENT && arg_reg >= 0 && arg_reg < 256 {
-            vm_print_i64(st.regs[arg_reg])
+        if !VM_IO_SILENT && arg_reg >= 0 && arg_reg < 1024 {
+            vm_print_i64(val_to_i64(st.regs[arg_reg]))
         }
-        if ins.dst >= 0 && ins.dst < 256 {
-            st.regs[ins.dst] = 0
+        if ins.dst >= 0 && ins.dst < 1024 {
+            st.regs[ins.dst] = val_unit()
         }
+        st.pc = st.pc + 1
+        return (st, true)
+    }
+
+    // Hypercomplex + ML builtins.
+    let args = vm_collect_call_args(ins)
+
+    if vm_name_eq_str(ins.name, "quat") {
+        var st = state
+        let q: [f64; 4] = [
+            val_to_f64(vm_arg_val(st, args, 0)),
+            val_to_f64(vm_arg_val(st, args, 1)),
+            val_to_f64(vm_arg_val(st, args, 2)),
+            val_to_f64(vm_arg_val(st, args, 3)),
+        ]
+        let pair = heap_alloc_quat(st.heap, q)
+        st.heap = pair.0
+        if ins.dst >= 0 && ins.dst < 1024 { st.regs[ins.dst] = pair.1 }
+        st.pc = st.pc + 1
+        return (st, true)
+    }
+
+    if vm_name_eq_str(ins.name, "quat_add") {
+        var st = state
+        let a = heap_read_quat(st.heap, vm_arg_val(st, args, 0))
+        let b = heap_read_quat(st.heap, vm_arg_val(st, args, 1))
+        let pair = heap_alloc_quat(st.heap, quat_add(a, b))
+        st.heap = pair.0
+        if ins.dst >= 0 && ins.dst < 1024 { st.regs[ins.dst] = pair.1 }
+        st.pc = st.pc + 1
+        return (st, true)
+    }
+
+    if vm_name_eq_str(ins.name, "quat_sub") {
+        var st = state
+        let a = heap_read_quat(st.heap, vm_arg_val(st, args, 0))
+        let b = heap_read_quat(st.heap, vm_arg_val(st, args, 1))
+        let pair = heap_alloc_quat(st.heap, quat_sub(a, b))
+        st.heap = pair.0
+        if ins.dst >= 0 && ins.dst < 1024 { st.regs[ins.dst] = pair.1 }
+        st.pc = st.pc + 1
+        return (st, true)
+    }
+
+    if vm_name_eq_str(ins.name, "quat_scale") {
+        var st = state
+        let a = heap_read_quat(st.heap, vm_arg_val(st, args, 0))
+        let k = val_to_f64(vm_arg_val(st, args, 1))
+        let pair = heap_alloc_quat(st.heap, quat_scale(a, k))
+        st.heap = pair.0
+        if ins.dst >= 0 && ins.dst < 1024 { st.regs[ins.dst] = pair.1 }
+        st.pc = st.pc + 1
+        return (st, true)
+    }
+
+    if vm_name_eq_str(ins.name, "quat_mul") {
+        var st = state
+        let a = heap_read_quat(st.heap, vm_arg_val(st, args, 0))
+        let b = heap_read_quat(st.heap, vm_arg_val(st, args, 1))
+        let pair = heap_alloc_quat(st.heap, quat_mul(a, b))
+        st.heap = pair.0
+        if ins.dst >= 0 && ins.dst < 1024 { st.regs[ins.dst] = pair.1 }
+        st.pc = st.pc + 1
+        return (st, true)
+    }
+
+    if vm_name_eq_str(ins.name, "quat_conj") {
+        var st = state
+        let a = heap_read_quat(st.heap, vm_arg_val(st, args, 0))
+        let pair = heap_alloc_quat(st.heap, quat_conj(a))
+        st.heap = pair.0
+        if ins.dst >= 0 && ins.dst < 1024 { st.regs[ins.dst] = pair.1 }
+        st.pc = st.pc + 1
+        return (st, true)
+    }
+
+    if vm_name_eq_str(ins.name, "quat_norm_sq") {
+        var st = state
+        let a = heap_read_quat(st.heap, vm_arg_val(st, args, 0))
+        if ins.dst >= 0 && ins.dst < 1024 { st.regs[ins.dst] = val_float(quat_norm_sq(a)) }
+        st.pc = st.pc + 1
+        return (st, true)
+    }
+
+    if vm_name_eq_str(ins.name, "quat_normalize") {
+        var st = state
+        let a = heap_read_quat(st.heap, vm_arg_val(st, args, 0))
+        let pair = heap_alloc_quat(st.heap, quat_normalize(a))
+        st.heap = pair.0
+        if ins.dst >= 0 && ins.dst < 1024 { st.regs[ins.dst] = pair.1 }
+        st.pc = st.pc + 1
+        return (st, true)
+    }
+
+    if vm_name_eq_str(ins.name, "oct") {
+        var st = state
+        let o: [f64; 8] = [
+            val_to_f64(vm_arg_val(st, args, 0)),
+            val_to_f64(vm_arg_val(st, args, 1)),
+            val_to_f64(vm_arg_val(st, args, 2)),
+            val_to_f64(vm_arg_val(st, args, 3)),
+            val_to_f64(vm_arg_val(st, args, 4)),
+            val_to_f64(vm_arg_val(st, args, 5)),
+            val_to_f64(vm_arg_val(st, args, 6)),
+            val_to_f64(vm_arg_val(st, args, 7)),
+        ]
+        let pair = heap_alloc_oct(st.heap, o)
+        st.heap = pair.0
+        if ins.dst >= 0 && ins.dst < 1024 { st.regs[ins.dst] = pair.1 }
+        st.pc = st.pc + 1
+        return (st, true)
+    }
+
+    if vm_name_eq_str(ins.name, "oct_add") {
+        var st = state
+        let a = heap_read_oct(st.heap, vm_arg_val(st, args, 0))
+        let b = heap_read_oct(st.heap, vm_arg_val(st, args, 1))
+        let pair = heap_alloc_oct(st.heap, oct_add(a, b))
+        st.heap = pair.0
+        if ins.dst >= 0 && ins.dst < 1024 { st.regs[ins.dst] = pair.1 }
+        st.pc = st.pc + 1
+        return (st, true)
+    }
+
+    if vm_name_eq_str(ins.name, "oct_sub") {
+        var st = state
+        let a = heap_read_oct(st.heap, vm_arg_val(st, args, 0))
+        let b = heap_read_oct(st.heap, vm_arg_val(st, args, 1))
+        let pair = heap_alloc_oct(st.heap, oct_sub(a, b))
+        st.heap = pair.0
+        if ins.dst >= 0 && ins.dst < 1024 { st.regs[ins.dst] = pair.1 }
+        st.pc = st.pc + 1
+        return (st, true)
+    }
+
+    if vm_name_eq_str(ins.name, "oct_scale") {
+        var st = state
+        let a = heap_read_oct(st.heap, vm_arg_val(st, args, 0))
+        let k = val_to_f64(vm_arg_val(st, args, 1))
+        let pair = heap_alloc_oct(st.heap, oct_scale(a, k))
+        st.heap = pair.0
+        if ins.dst >= 0 && ins.dst < 1024 { st.regs[ins.dst] = pair.1 }
+        st.pc = st.pc + 1
+        return (st, true)
+    }
+
+    if vm_name_eq_str(ins.name, "oct_mul") {
+        var st = state
+        let a = heap_read_oct(st.heap, vm_arg_val(st, args, 0))
+        let b = heap_read_oct(st.heap, vm_arg_val(st, args, 1))
+        let pair = heap_alloc_oct(st.heap, oct_mul(a, b))
+        st.heap = pair.0
+        if ins.dst >= 0 && ins.dst < 1024 { st.regs[ins.dst] = pair.1 }
+        st.pc = st.pc + 1
+        return (st, true)
+    }
+
+    if vm_name_eq_str(ins.name, "oct_conj") {
+        var st = state
+        let a = heap_read_oct(st.heap, vm_arg_val(st, args, 0))
+        let pair = heap_alloc_oct(st.heap, oct_conj(a))
+        st.heap = pair.0
+        if ins.dst >= 0 && ins.dst < 1024 { st.regs[ins.dst] = pair.1 }
+        st.pc = st.pc + 1
+        return (st, true)
+    }
+
+    if vm_name_eq_str(ins.name, "oct_norm_sq") {
+        var st = state
+        let a = heap_read_oct(st.heap, vm_arg_val(st, args, 0))
+        if ins.dst >= 0 && ins.dst < 1024 { st.regs[ins.dst] = val_float(oct_norm_sq(a)) }
+        st.pc = st.pc + 1
+        return (st, true)
+    }
+
+    if vm_name_eq_str(ins.name, "oct_normalize") {
+        var st = state
+        let a = heap_read_oct(st.heap, vm_arg_val(st, args, 0))
+        let pair = heap_alloc_oct(st.heap, oct_normalize(a))
+        st.heap = pair.0
+        if ins.dst >= 0 && ins.dst < 1024 { st.regs[ins.dst] = pair.1 }
+        st.pc = st.pc + 1
+        return (st, true)
+    }
+
+    if vm_name_eq_str(ins.name, "oct_relu") {
+        var st = state
+        let a = heap_read_oct(st.heap, vm_arg_val(st, args, 0))
+        let pair = heap_alloc_oct(st.heap, oct_relu(a))
+        st.heap = pair.0
+        if ins.dst >= 0 && ins.dst < 1024 { st.regs[ins.dst] = pair.1 }
+        st.pc = st.pc + 1
+        return (st, true)
+    }
+
+    if vm_name_eq_str(ins.name, "oct_sigmoid") {
+        var st = state
+        let a = heap_read_oct(st.heap, vm_arg_val(st, args, 0))
+        let pair = heap_alloc_oct(st.heap, oct_sigmoid(a))
+        st.heap = pair.0
+        if ins.dst >= 0 && ins.dst < 1024 { st.regs[ins.dst] = pair.1 }
+        st.pc = st.pc + 1
+        return (st, true)
+    }
+
+    if vm_name_eq_str(ins.name, "oct_tanh") {
+        var st = state
+        let a = heap_read_oct(st.heap, vm_arg_val(st, args, 0))
+        let pair = heap_alloc_oct(st.heap, oct_tanh(a))
+        st.heap = pair.0
+        if ins.dst >= 0 && ins.dst < 1024 { st.regs[ins.dst] = pair.1 }
+        st.pc = st.pc + 1
+        return (st, true)
+    }
+
+    if vm_name_eq_str(ins.name, "sed") {
+        var st = state
+        var s: [f64; 16] = [0.0; 16]
+        var i: i64 = 0
+        while i < 16 {
+            s[i] = val_to_f64(vm_arg_val(st, args, i))
+            i = i + 1
+        }
+        let pair = heap_alloc_sed(st.heap, s)
+        st.heap = pair.0
+        if ins.dst >= 0 && ins.dst < 1024 { st.regs[ins.dst] = pair.1 }
+        st.pc = st.pc + 1
+        return (st, true)
+    }
+
+    if vm_name_eq_str(ins.name, "sed_add") {
+        var st = state
+        let a = heap_read_sed(st.heap, vm_arg_val(st, args, 0))
+        let b = heap_read_sed(st.heap, vm_arg_val(st, args, 1))
+        let pair = heap_alloc_sed(st.heap, sed_add(a, b))
+        st.heap = pair.0
+        if ins.dst >= 0 && ins.dst < 1024 { st.regs[ins.dst] = pair.1 }
+        st.pc = st.pc + 1
+        return (st, true)
+    }
+
+    if vm_name_eq_str(ins.name, "sed_sub") {
+        var st = state
+        let a = heap_read_sed(st.heap, vm_arg_val(st, args, 0))
+        let b = heap_read_sed(st.heap, vm_arg_val(st, args, 1))
+        let pair = heap_alloc_sed(st.heap, sed_sub(a, b))
+        st.heap = pair.0
+        if ins.dst >= 0 && ins.dst < 1024 { st.regs[ins.dst] = pair.1 }
+        st.pc = st.pc + 1
+        return (st, true)
+    }
+
+    if vm_name_eq_str(ins.name, "sed_scale") {
+        var st = state
+        let a = heap_read_sed(st.heap, vm_arg_val(st, args, 0))
+        let k = val_to_f64(vm_arg_val(st, args, 1))
+        let pair = heap_alloc_sed(st.heap, sed_scale(a, k))
+        st.heap = pair.0
+        if ins.dst >= 0 && ins.dst < 1024 { st.regs[ins.dst] = pair.1 }
+        st.pc = st.pc + 1
+        return (st, true)
+    }
+
+    if vm_name_eq_str(ins.name, "sed_mul") {
+        var st = state
+        let a = heap_read_sed(st.heap, vm_arg_val(st, args, 0))
+        let b = heap_read_sed(st.heap, vm_arg_val(st, args, 1))
+        let pair = heap_alloc_sed(st.heap, sed_mul(a, b))
+        st.heap = pair.0
+        if ins.dst >= 0 && ins.dst < 1024 { st.regs[ins.dst] = pair.1 }
+        st.pc = st.pc + 1
+        return (st, true)
+    }
+
+    if vm_name_eq_str(ins.name, "sed_conj") {
+        var st = state
+        let a = heap_read_sed(st.heap, vm_arg_val(st, args, 0))
+        let pair = heap_alloc_sed(st.heap, sed_conj(a))
+        st.heap = pair.0
+        if ins.dst >= 0 && ins.dst < 1024 { st.regs[ins.dst] = pair.1 }
+        st.pc = st.pc + 1
+        return (st, true)
+    }
+
+    if vm_name_eq_str(ins.name, "sed_norm_sq") {
+        var st = state
+        let a = heap_read_sed(st.heap, vm_arg_val(st, args, 0))
+        if ins.dst >= 0 && ins.dst < 1024 { st.regs[ins.dst] = val_float(sed_norm_sq(a)) }
+        st.pc = st.pc + 1
+        return (st, true)
+    }
+
+    if vm_name_eq_str(ins.name, "sed_normalize") {
+        var st = state
+        let a = heap_read_sed(st.heap, vm_arg_val(st, args, 0))
+        let pair = heap_alloc_sed(st.heap, sed_normalize(a))
+        st.heap = pair.0
+        if ins.dst >= 0 && ins.dst < 1024 { st.regs[ins.dst] = pair.1 }
+        st.pc = st.pc + 1
+        return (st, true)
+    }
+
+    if vm_name_eq_str(ins.name, "sed_relu") {
+        var st = state
+        let a = heap_read_sed(st.heap, vm_arg_val(st, args, 0))
+        let pair = heap_alloc_sed(st.heap, sed_relu(a))
+        st.heap = pair.0
+        if ins.dst >= 0 && ins.dst < 1024 { st.regs[ins.dst] = pair.1 }
+        st.pc = st.pc + 1
+        return (st, true)
+    }
+
+    if vm_name_eq_str(ins.name, "sed_sigmoid") {
+        var st = state
+        let a = heap_read_sed(st.heap, vm_arg_val(st, args, 0))
+        let pair = heap_alloc_sed(st.heap, sed_sigmoid(a))
+        st.heap = pair.0
+        if ins.dst >= 0 && ins.dst < 1024 { st.regs[ins.dst] = pair.1 }
+        st.pc = st.pc + 1
+        return (st, true)
+    }
+
+    if vm_name_eq_str(ins.name, "sed_tanh") {
+        var st = state
+        let a = heap_read_sed(st.heap, vm_arg_val(st, args, 0))
+        let pair = heap_alloc_sed(st.heap, sed_tanh(a))
+        st.heap = pair.0
+        if ins.dst >= 0 && ins.dst < 1024 { st.regs[ins.dst] = pair.1 }
+        st.pc = st.pc + 1
+        return (st, true)
+    }
+
+    if vm_name_eq_str(ins.name, "sed_is_zero_divisor_fast") {
+        var st = state
+        let a = heap_read_sed(st.heap, vm_arg_val(st, args, 0))
+        if ins.dst >= 0 && ins.dst < 1024 { st.regs[ins.dst] = val_bool(sed_is_zero_divisor_fast(a)) }
+        st.pc = st.pc + 1
+        return (st, true)
+    }
+
+    if vm_name_eq_str(ins.name, "sed_is_zero_divisor_exact") {
+        var st = state
+        let a = heap_read_sed(st.heap, vm_arg_val(st, args, 0))
+        if ins.dst >= 0 && ins.dst < 1024 { st.regs[ins.dst] = val_bool(sed_is_zero_divisor_exact(a)) }
+        st.pc = st.pc + 1
+        return (st, true)
+    }
+
+    if vm_name_eq_str(ins.name, "oct_linear_fwd") {
+        var st = state
+        let pair = vm_builtin_oct_linear_fwd(st, args)
+        st = pair.0
+        if ins.dst >= 0 && ins.dst < 1024 { st.regs[ins.dst] = pair.1 }
+        st.pc = st.pc + 1
+        return (st, true)
+    }
+
+    if vm_name_eq_str(ins.name, "sed_linear_fwd") {
+        var st = state
+        let pair = vm_builtin_sed_linear_fwd(st, args)
+        st = pair.0
+        if ins.dst >= 0 && ins.dst < 1024 { st.regs[ins.dst] = pair.1 }
         st.pc = st.pc + 1
         return (st, true)
     }
@@ -252,50 +1570,50 @@ fn vm_step(state: VmState, m: IrModule) -> VmState with Mut, Panic, Div, Alloc, 
 
     let f = m.functions[st.current_fn]
     if st.pc < 0 || st.pc >= f.instr_count {
-        return vm_do_return(st, 0)
+        return vm_do_return(st, val_int(0))
     }
 
     let ins = f.instrs[st.pc]
 
     if ins.op == IrOpcode::IrLoadImm {
-        if ins.dst >= 0 && ins.dst < 256 {
-            st.regs[ins.dst] = ins.imm_i64
+        if ins.dst >= 0 && ins.dst < 1024 {
+            st.regs[ins.dst] = val_int(ins.imm_i64)
         }
         st.pc = st.pc + 1
         st
     } else if ins.op == IrOpcode::IrLoadFloat {
-        if ins.dst >= 0 && ins.dst < 256 {
-            st.float_regs[ins.dst] = ins.imm_f64
-            st.regs[ins.dst] = ins.imm_f64 as i64
+        if ins.dst >= 0 && ins.dst < 1024 {
+            st.regs[ins.dst] = val_float(ins.imm_f64)
         }
         st.pc = st.pc + 1
         st
     } else if ins.op == IrOpcode::IrLoadBool {
-        if ins.dst >= 0 && ins.dst < 256 {
-            st.regs[ins.dst] = ins.imm_i64
+        if ins.dst >= 0 && ins.dst < 1024 {
+            st.regs[ins.dst] = val_bool(ins.imm_i64 != 0)
         }
         st.pc = st.pc + 1
         st
     } else if ins.op == IrOpcode::IrLoadString {
-        if ins.dst >= 0 && ins.dst < 256 {
-            st.regs[ins.dst] = ins.imm_i64
+        if ins.dst >= 0 && ins.dst < 1024 {
+            // Store string table index as an int for now.
+            st.regs[ins.dst] = val_int(ins.imm_i64)
         }
         st.pc = st.pc + 1
         st
     } else if ins.op == IrOpcode::IrCopy {
-        if ins.dst >= 0 && ins.dst < 256 && ins.src1 >= 0 && ins.src1 < 256 {
+        if ins.dst >= 0 && ins.dst < 1024 && ins.src1 >= 0 && ins.src1 < 1024 {
             st.regs[ins.dst] = st.regs[ins.src1]
         }
         st.pc = st.pc + 1
         st
     } else if ins.op == IrOpcode::IrBinOp {
-        if ins.dst >= 0 && ins.dst < 256 && ins.src1 >= 0 && ins.src1 < 256 && ins.src2 >= 0 && ins.src2 < 256 {
+        if ins.dst >= 0 && ins.dst < 1024 && ins.src1 >= 0 && ins.src1 < 1024 && ins.src2 >= 0 && ins.src2 < 1024 {
             st.regs[ins.dst] = vm_eval_binop(ins.bin_op, st.regs[ins.src1], st.regs[ins.src2])
         }
         st.pc = st.pc + 1
         st
     } else if ins.op == IrOpcode::IrUnaryOp {
-        if ins.dst >= 0 && ins.dst < 256 && ins.src1 >= 0 && ins.src1 < 256 {
+        if ins.dst >= 0 && ins.dst < 1024 && ins.src1 >= 0 && ins.src1 < 1024 {
             st.regs[ins.dst] = vm_eval_unop(ins.un_op, st.regs[ins.src1])
         }
         st.pc = st.pc + 1
@@ -308,14 +1626,14 @@ fn vm_step(state: VmState, m: IrModule) -> VmState with Mut, Panic, Div, Alloc, 
         }
 
         if ins.fn_id < 0 || ins.fn_id >= m.fn_count {
-            if ins.dst >= 0 && ins.dst < 256 {
-                st.regs[ins.dst] = 0
+            if ins.dst >= 0 && ins.dst < 1024 {
+                st.regs[ins.dst] = val_unit()
             }
             st.pc = st.pc + 1
             return st
         }
 
-        if st.call_depth >= 256 {
+        if st.call_depth >= 1024 {
             st.halted = true
             st.exit_code = 2
             return st
@@ -336,8 +1654,8 @@ fn vm_step(state: VmState, m: IrModule) -> VmState with Mut, Panic, Div, Alloc, 
         st.pc = 0
         st
     } else if ins.op == IrOpcode::IrReturn {
-        var ret_val: i64 = 0
-        if ins.src1 >= 0 && ins.src1 < 256 {
+        var ret_val: Val = val_unit()
+        if ins.src1 >= 0 && ins.src1 < 1024 {
             ret_val = st.regs[ins.src1]
         }
         vm_do_return(st, ret_val)
@@ -345,42 +1663,102 @@ fn vm_step(state: VmState, m: IrModule) -> VmState with Mut, Panic, Div, Alloc, 
         st.pc = vm_find_label_pc(f, ins.label_id)
         st
     } else if ins.op == IrOpcode::IrBranchTrue {
-        let cond = if ins.src1 >= 0 && ins.src1 < 256 { st.regs[ins.src1] } else { 0 }
-        if cond != 0 {
+        let cond = if ins.src1 >= 0 && ins.src1 < 1024 { st.regs[ins.src1] } else { val_bool(false) }
+        if val_truthy(cond) {
             st.pc = vm_find_label_pc(f, ins.label_id)
         } else {
             st.pc = st.pc + 1
         }
         st
     } else if ins.op == IrOpcode::IrBranchFalse {
-        let cond = if ins.src1 >= 0 && ins.src1 < 256 { st.regs[ins.src1] } else { 0 }
-        if cond == 0 {
+        let cond = if ins.src1 >= 0 && ins.src1 < 1024 { st.regs[ins.src1] } else { val_bool(false) }
+        if !val_truthy(cond) {
             st.pc = vm_find_label_pc(f, ins.label_id)
         } else {
             st.pc = st.pc + 1
         }
         st
     } else if ins.op == IrOpcode::IrFieldGet {
-        if ins.dst >= 0 && ins.dst < 256 && ins.src1 >= 0 && ins.src1 < 256 {
-            st.regs[ins.dst] = st.regs[ins.src1]
+        if ins.dst >= 0 && ins.dst < 1024 && ins.src1 >= 0 && ins.src1 < 1024 {
+            let base = st.regs[ins.src1]
+            let id = ptr_to_id(base)
+            if id >= 0 {
+                let obj = heap_get(st.heap, id)
+                let fv = field_list_get(obj.fields, ins.name)
+                match fv {
+                    Some(v) => { st.regs[ins.dst] = v },
+                    _ => { st.regs[ins.dst] = val_unit() },
+                }
+            } else {
+                st.regs[ins.dst] = val_unit()
+            }
         }
         st.pc = st.pc + 1
         st
     } else if ins.op == IrOpcode::IrFieldSet {
+        if ins.src1 >= 0 && ins.src1 < 1024 && ins.src2 >= 0 && ins.src2 < 1024 {
+            let base = st.regs[ins.src1]
+            let id = ptr_to_id(base)
+            if id >= 0 {
+                var obj = heap_get(st.heap, id)
+                obj.fields = field_list_set(obj.fields, ins.name, st.regs[ins.src2])
+                st.heap = heap_set(st.heap, id, obj)
+            }
+        }
         st.pc = st.pc + 1
         st
     } else if ins.op == IrOpcode::IrIndexGet {
-        if ins.dst >= 0 && ins.dst < 256 && ins.src1 >= 0 && ins.src1 < 256 {
-            st.regs[ins.dst] = st.regs[ins.src1]
+        if ins.dst >= 0 && ins.dst < 1024 && ins.src1 >= 0 && ins.src1 < 1024 && ins.src2 >= 0 && ins.src2 < 1024 {
+            let base = st.regs[ins.src1]
+            let idx = val_to_i64(st.regs[ins.src2])
+            let id = ptr_to_id(base)
+            if id >= 0 {
+                let obj = heap_get(st.heap, id)
+                st.regs[ins.dst] = val_list_get(obj.elems, idx)
+            } else {
+                st.regs[ins.dst] = val_unit()
+            }
         }
         st.pc = st.pc + 1
         st
     } else if ins.op == IrOpcode::IrIndexSet {
+        if ins.src1 >= 0 && ins.src1 < 1024 && ins.src2 >= 0 && ins.src2 < 1024 {
+            let base = st.regs[ins.src1]
+            let idx = val_to_i64(st.regs[ins.src2])
+            let src_reg = ins.imm_i64
+            let src_val = if src_reg >= 0 && src_reg < 1024 { st.regs[src_reg] } else { val_unit() }
+
+            let id = ptr_to_id(base)
+            if id >= 0 {
+                var obj = heap_get(st.heap, id)
+                if obj.tag == ObjTag::Array || obj.tag == ObjTag::Tuple {
+                    if idx == obj.len {
+                        obj.elems = val_list_push(obj.elems, src_val)
+                        obj.len = obj.len + 1
+                    } else {
+                        obj.elems = val_list_set(obj.elems, idx, src_val)
+                        if idx >= obj.len {
+                            obj.len = idx + 1
+                        }
+                    }
+                    st.heap = heap_set(st.heap, id, obj)
+                }
+            }
+        }
         st.pc = st.pc + 1
         st
     } else if ins.op == IrOpcode::IrAlloc {
-        if ins.dst >= 0 && ins.dst < 256 {
-            st.regs[ins.dst] = ins.dst + 1000
+        if ins.dst >= 0 && ins.dst < 1024 {
+            let tag =
+                if ins.imm_i64 == 0 { ObjTag::Struct }
+                else if ins.imm_i64 == 1 { ObjTag::Array }
+                else if ins.imm_i64 == 2 { ObjTag::Tuple }
+                else { ObjTag::Struct }
+
+            let pair = heap_alloc(st.heap, heap_empty_obj(tag))
+            st.heap = pair.0
+            let id = pair.1
+            st.regs[ins.dst] = if id >= 0 { ptr_from_id(id) } else { val_unit() }
         }
         st.pc = st.pc + 1
         st

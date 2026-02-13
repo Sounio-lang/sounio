@@ -1,7 +1,11 @@
 // Parser core: token stream navigation, error recovery, node construction helpers.
 
+// Keep token storage out of Parser state so Parser method calls don't
+// repeatedly copy a 65k token array by value.
+var PARSER_TOKENS: [Token; 65536] = [Token::new(); 65536]
+var PARSER_FAST_SKIP_BLOCKS: bool = false
+
 struct Parser {
-    tokens: [Token; 65536],
     token_count: i64,
     pos: i64,
     next_id: i64,
@@ -21,7 +25,6 @@ struct Parser {
 
 fn parser_new() -> Parser {
     Parser {
-        tokens: [Token::new(); 65536],
         token_count: 0,
         pos: 0,
         next_id: 1,
@@ -32,6 +35,24 @@ fn parser_new() -> Parser {
     }
 }
 
+fn parser_set_tokens(tokens: [Token; 65536], token_count: i64) with Mut, Panic, Div {
+    var i: i64 = 0
+    while i < token_count && i < 65536 {
+        PARSER_TOKENS[i as usize] = tokens[i as usize]
+        i = i + 1
+    }
+}
+
+fn parser_set_token_at(idx: i64, tok: Token) with Mut, Panic {
+    if idx >= 0 && idx < 65536 {
+        PARSER_TOKENS[idx as usize] = tok
+    }
+}
+
+fn parser_set_fast_skip_blocks(enabled: bool) with Mut {
+    PARSER_FAST_SKIP_BLOCKS = enabled
+}
+
 // ============================================================
 // Token access
 // ============================================================
@@ -39,7 +60,7 @@ fn parser_new() -> Parser {
 impl Parser {
     fn current(self) -> Token with Panic, Div {
         if self.pos < self.token_count {
-            self.tokens[self.pos]
+            PARSER_TOKENS[self.pos as usize]
         } else {
             Token::eof(0, 0, 0)
         }
@@ -49,7 +70,11 @@ impl Parser {
         if self.pending_gt > 0 {
             TokenKind::Gt
         } else {
-            self.current().kind
+            if self.pos < self.token_count {
+                PARSER_TOKENS[self.pos as usize].kind
+            } else {
+                TokenKind::Eof
+            }
         }
     }
 
@@ -60,7 +85,7 @@ impl Parser {
             } else {
                 let idx = self.pos + 1 + (offset - self.pending_gt)
                 if idx < self.token_count {
-                    self.tokens[idx].kind
+                    PARSER_TOKENS[idx as usize].kind
                 } else {
                     TokenKind::Eof
                 }
@@ -68,7 +93,7 @@ impl Parser {
         } else {
             let idx = self.pos + offset
             if idx < self.token_count {
-                self.tokens[idx].kind
+                PARSER_TOKENS[idx as usize].kind
             } else {
                 TokenKind::Eof
             }
@@ -102,7 +127,7 @@ impl Parser {
             p.pos = p.pos + 1
         }
         // Skip newlines automatically (they're insignificant in most contexts)
-        while p.pos < p.token_count && p.tokens[p.pos].kind == TokenKind::Newline {
+        while p.pos < p.token_count && PARSER_TOKENS[p.pos as usize].kind == TokenKind::Newline {
             p.pos = p.pos + 1
         }
         p
@@ -185,13 +210,23 @@ impl Parser {
     // ============================================================
 
     fn current_span(self) -> Span with Panic, Div {
-        let tok = self.current()
-        Span::new(0, tok.start, tok.end)
+        if self.pos < self.token_count {
+            Span::new(
+                0,
+                PARSER_TOKENS[self.pos as usize].start,
+                PARSER_TOKENS[self.pos as usize].end
+            )
+        } else {
+            Span::new(0, 0, 0)
+        }
     }
 
     fn span_from(self, start: Span) -> Span with Panic, Div {
-        let end_tok = self.current()
-        Span::new(start.file_id, start.start, end_tok.end)
+        if self.pos < self.token_count {
+            Span::new(start.file_id, start.start, PARSER_TOKENS[self.pos as usize].end)
+        } else {
+            Span::new(start.file_id, start.start, start.end)
+        }
     }
 
     // ============================================================
@@ -199,8 +234,14 @@ impl Parser {
     // ============================================================
 
     fn current_name(self) -> Name with Panic, Div {
-        let tok = self.current()
-        Name { buf: tok.text, len: tok.text_len }
+        if self.pos < self.token_count {
+            Name {
+                buf: PARSER_TOKENS[self.pos as usize].text,
+                len: PARSER_TOKENS[self.pos as usize].text_len
+            }
+        } else {
+            Name { buf: [0; 128], len: 0 }
+        }
     }
 
     // ============================================================

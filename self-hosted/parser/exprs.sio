@@ -321,13 +321,12 @@ impl Parser {
             if p.peek() == TokenKind::Comma {
                 // Tuple literal
                 p = p.advance()
-                var list = ExprList { head: first, tail: None }
+                var rev_list_opt: Option<Box<ExprList>> = Some(Box::new(ExprList { head: first, tail: None }))
                 while p.peek() != TokenKind::RParen && p.peek() != TokenKind::Eof {
                     let pair2 = p.parse_expr()
                     p = pair2.0
                     let next = pair2.1
-                    let new_node = ExprList { head: next, tail: None }
-                    list = expr_list_append(list, new_node)
+                    rev_list_opt = Some(Box::new(ExprList { head: next, tail: rev_list_opt }))
                     if p.peek() == TokenKind::Comma {
                         p = p.advance()
                     }
@@ -335,7 +334,7 @@ impl Parser {
                 p = p.expect(TokenKind::RParen)
                 let span = p.span_from(start)
                 var e = mk_expr(ExprKind::ExprTupleLit, span)
-                e.args = Some(Box::new(list))
+                e.args = reverse_expr_list_opt(rev_list_opt)
                 (p, e)
             } else {
                 // Just grouping
@@ -376,20 +375,19 @@ impl Parser {
                 (p, e)
             } else {
                 // Array elements: [a, b, c]
-                var list = ExprList { head: first, tail: None }
+                var rev_list_opt: Option<Box<ExprList>> = Some(Box::new(ExprList { head: first, tail: None }))
                 while p.peek() == TokenKind::Comma {
                     p = p.advance()
                     if p.peek() == TokenKind::RBracket { break }
                     let pair2 = p.parse_expr()
                     p = pair2.0
                     let next = pair2.1
-                    let new_node = ExprList { head: next, tail: None }
-                    list = expr_list_append(list, new_node)
+                    rev_list_opt = Some(Box::new(ExprList { head: next, tail: rev_list_opt }))
                 }
                 p = p.expect(TokenKind::RBracket)
                 let span = p.span_from(start)
                 var e = mk_expr(ExprKind::ExprArrayLit, span)
-                e.args = Some(Box::new(list))
+                e.args = reverse_expr_list_opt(rev_list_opt)
                 (p, e)
             }
         }
@@ -471,8 +469,7 @@ impl Parser {
         p = p.expect(TokenKind::LBrace)
 
         // Parse arms
-        var arms_opt: Option<Box<MatchArmList>> = None
-        var first_arm = true
+        var rev_arms_opt: Option<Box<MatchArmList>> = None
 
         while p.peek() != TokenKind::RBrace && p.peek() != TokenKind::Eof {
             let arm_start = p.current_span()
@@ -497,21 +494,7 @@ impl Parser {
             let body = pair3.1
 
             let arm = MatchArm { pattern: pattern, body: body, span: p.span_from(arm_start) }
-
-            if first_arm {
-                arms_opt = Some(Box::new(MatchArmList { head: arm, tail: None }))
-                first_arm = false
-            } else {
-                match arms_opt {
-                    Some(list) => {
-                        let new_node = MatchArmList { head: arm, tail: None }
-                        arms_opt = Some(Box::new(match_arm_list_append(*list, new_node)))
-                    },
-                    None => {
-                        arms_opt = Some(Box::new(MatchArmList { head: arm, tail: None }))
-                    },
-                }
-            }
+            rev_arms_opt = Some(Box::new(MatchArmList { head: arm, tail: rev_arms_opt }))
 
             // Skip comma between arms
             if p.peek() == TokenKind::Comma {
@@ -523,7 +506,7 @@ impl Parser {
         let span = p.span_from(start)
         var e = mk_expr(ExprKind::ExprMatch, span)
         e.left = Some(Box::new(scrutinee))
-        e.arms = arms_opt
+        e.arms = reverse_match_arm_list_opt(rev_arms_opt)
         (p, e)
     }
 
@@ -649,8 +632,7 @@ impl Parser {
     fn parse_struct_literal(self, path: AstPath, start: Span) -> (Parser, Expr) with Mut, IO, Panic, Div, Alloc {
         var p = self.advance()  // skip {
 
-        var fields_opt: Option<Box<StructFieldList>> = None
-        var first_field = true
+        var rev_fields_opt: Option<Box<StructFieldList>> = None
 
         while p.peek() != TokenKind::RBrace && p.peek() != TokenKind::Eof {
             let field_name = p.current_name()
@@ -661,21 +643,7 @@ impl Parser {
             let field_val = pair.1
 
             let field = StructFieldInit { name: field_name, value: field_val }
-
-            if first_field {
-                fields_opt = Some(Box::new(StructFieldList { head: field, tail: None }))
-                first_field = false
-            } else {
-                match fields_opt {
-                    Some(list) => {
-                        let new_node = StructFieldList { head: field, tail: None }
-                        fields_opt = Some(Box::new(struct_field_list_append(*list, new_node)))
-                    },
-                    None => {
-                        fields_opt = Some(Box::new(StructFieldList { head: field, tail: None }))
-                    },
-                }
-            }
+            rev_fields_opt = Some(Box::new(StructFieldList { head: field, tail: rev_fields_opt }))
 
             if p.peek() == TokenKind::Comma {
                 p = p.advance()
@@ -686,7 +654,7 @@ impl Parser {
         let span = p.span_from(start)
         var e = mk_expr(ExprKind::ExprStructLit, span)
         e.path = path
-        e.fields = fields_opt
+        e.fields = reverse_struct_field_list_opt(rev_fields_opt)
         (p, e)
     }
 
@@ -704,7 +672,7 @@ impl Parser {
             let pair = p.parse_expr()
             p = pair.0
             let first = pair.1
-            var list = ExprList { head: first, tail: None }
+            var rev_list_opt: Option<Box<ExprList>> = Some(Box::new(ExprList { head: first, tail: None }))
 
             while p.peek() == TokenKind::Comma {
                 p = p.advance()
@@ -712,11 +680,10 @@ impl Parser {
                 let pair2 = p.parse_expr()
                 p = pair2.0
                 let next = pair2.1
-                let new_node = ExprList { head: next, tail: None }
-                list = expr_list_append(list, new_node)
+                rev_list_opt = Some(Box::new(ExprList { head: next, tail: rev_list_opt }))
             }
 
-            args_opt = Some(Box::new(list))
+            args_opt = reverse_expr_list_opt(rev_list_opt)
         }
 
         p = p.expect(TokenKind::RParen)
@@ -763,7 +730,7 @@ impl Parser {
                 let pair = p.parse_expr()
                 p = pair.0
                 let first = pair.1
-                var list = ExprList { head: first, tail: None }
+                var rev_list_opt: Option<Box<ExprList>> = Some(Box::new(ExprList { head: first, tail: None }))
 
                 while p.peek() == TokenKind::Comma {
                     p = p.advance()
@@ -771,10 +738,9 @@ impl Parser {
                     let pair2 = p.parse_expr()
                     p = pair2.0
                     let next = pair2.1
-                    let new_node = ExprList { head: next, tail: None }
-                    list = expr_list_append(list, new_node)
+                    rev_list_opt = Some(Box::new(ExprList { head: next, tail: rev_list_opt }))
                 }
-                args_opt = Some(Box::new(list))
+                args_opt = reverse_expr_list_opt(rev_list_opt)
             }
 
             p = p.expect(TokenKind::RParen)
@@ -830,32 +796,56 @@ fn token_to_binop(kind: TokenKind) -> BinaryOp {
 // Linked-list helpers for expression parsing
 // ============================================================
 
-fn expr_list_append(list: ExprList, node: ExprList) -> ExprList with Mut, Alloc {
-    match list.tail {
-        None => ExprList { head: list.head, tail: Some(Box::new(node)) },
-        Some(rest) => ExprList {
-            head: list.head,
-            tail: Some(Box::new(expr_list_append(*rest, node))),
+fn reverse_expr_list_opt(list: Option<Box<ExprList>>) -> Option<Box<ExprList>> with Mut, Alloc {
+    reverse_expr_list_loop(list, None)
+}
+
+fn reverse_expr_list_loop(
+    current: Option<Box<ExprList>>,
+    acc: Option<Box<ExprList>>,
+) -> Option<Box<ExprList>> with Mut, Alloc {
+    match current {
+        None => acc,
+        Some(node) => {
+            let next = (*node).tail
+            let rev_node = ExprList { head: (*node).head, tail: acc }
+            reverse_expr_list_loop(next, Some(Box::new(rev_node)))
         },
     }
 }
 
-fn match_arm_list_append(list: MatchArmList, node: MatchArmList) -> MatchArmList with Mut, Alloc {
-    match list.tail {
-        None => MatchArmList { head: list.head, tail: Some(Box::new(node)) },
-        Some(rest) => MatchArmList {
-            head: list.head,
-            tail: Some(Box::new(match_arm_list_append(*rest, node))),
+fn reverse_match_arm_list_opt(list: Option<Box<MatchArmList>>) -> Option<Box<MatchArmList>> with Mut, Alloc {
+    reverse_match_arm_list_loop(list, None)
+}
+
+fn reverse_match_arm_list_loop(
+    current: Option<Box<MatchArmList>>,
+    acc: Option<Box<MatchArmList>>,
+) -> Option<Box<MatchArmList>> with Mut, Alloc {
+    match current {
+        None => acc,
+        Some(node) => {
+            let next = (*node).tail
+            let rev_node = MatchArmList { head: (*node).head, tail: acc }
+            reverse_match_arm_list_loop(next, Some(Box::new(rev_node)))
         },
     }
 }
 
-fn struct_field_list_append(list: StructFieldList, node: StructFieldList) -> StructFieldList with Mut, Alloc {
-    match list.tail {
-        None => StructFieldList { head: list.head, tail: Some(Box::new(node)) },
-        Some(rest) => StructFieldList {
-            head: list.head,
-            tail: Some(Box::new(struct_field_list_append(*rest, node))),
+fn reverse_struct_field_list_opt(list: Option<Box<StructFieldList>>) -> Option<Box<StructFieldList>> with Mut, Alloc {
+    reverse_struct_field_list_loop(list, None)
+}
+
+fn reverse_struct_field_list_loop(
+    current: Option<Box<StructFieldList>>,
+    acc: Option<Box<StructFieldList>>,
+) -> Option<Box<StructFieldList>> with Mut, Alloc {
+    match current {
+        None => acc,
+        Some(node) => {
+            let next = (*node).tail
+            let rev_node = StructFieldList { head: (*node).head, tail: acc }
+            reverse_struct_field_list_loop(next, Some(Box::new(rev_node)))
         },
     }
 }
