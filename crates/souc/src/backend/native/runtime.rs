@@ -71,6 +71,12 @@ _start:
     # 0          = NULL
     # ...        = envp
 
+    # Align stack to 16 bytes (required by ABI)
+    andq $-16, %rsp
+
+    # Initialize bump allocator (used by native aggregate returns)
+    call _demetrios_heap_init
+
     # Get argc
     movq (%rsp), %rdi
 
@@ -82,9 +88,6 @@ _start:
     incq %rdx
     shlq $3, %rdx
     addq %rsi, %rdx
-
-    # Align stack to 16 bytes (required by ABI)
-    andq $-16, %rsp
 
     # Call main(argc, argv, envp)
     # If main is not defined, link will fail
@@ -343,7 +346,7 @@ _demetrios_panic:
 pub fn generate_memory_asm() -> String {
     r#"
 # Demetrios Runtime: Memory Management
-# Simple bump allocator using brk()
+# Simple bump allocator backed by mmap() (does not interfere with libc malloc).
 
 .section .data
 .align 8
@@ -360,25 +363,53 @@ _heap_end:
 .globl _demetrios_heap_init
 .type _demetrios_heap_init, @function
 _demetrios_heap_init:
-    # Get current brk
-    xorq %rdi, %rdi
-    movq $12, %rax      # SYS_brk
+    # Reserve a private anonymous region for the bump allocator.
+    # mmap(NULL, 256MB, PROT_READ|PROT_WRITE, MAP_PRIVATE|MAP_ANONYMOUS, -1, 0)
+    xorq %rdi, %rdi              # addr = NULL
+    movq $0x10000000, %rsi       # len = 256MB
+    movq $3, %rdx                # prot = PROT_READ|PROT_WRITE
+    movq $0x22, %r10             # flags = MAP_PRIVATE|MAP_ANONYMOUS
+    movq $-1, %r8                # fd = -1
+    xorq %r9, %r9                # off = 0
+    movq $9, %rax                # SYS_mmap
     syscall
-    
-    # Store as heap start and current
+
+    # On error, rax is negative (in -4095..-1).
+    testq %rax, %rax
+    js .Lheap_init_fail
+
     movq %rax, _heap_start(%rip)
     movq %rax, _heap_current(%rip)
-    
-    # Request initial heap (64KB)
-    addq $0x10000, %rax
-    movq %rax, %rdi
-    movq $12, %rax      # SYS_brk
-    syscall
-    
-    # Store as heap end
+    addq %rsi, %rax
+    movq %rax, _heap_end(%rip)
+    xorq %rax, %rax
+    retq
+
+.Lheap_init_fail:
+    xorq %rax, %rax
+    movq %rax, _heap_start(%rip)
+    movq %rax, _heap_current(%rip)
     movq %rax, _heap_end(%rip)
     retq
 .size _demetrios_heap_init, .-_demetrios_heap_init
+
+# Mark current heap cursor (returns pointer in rax)
+.globl _demetrios_heap_mark
+.type _demetrios_heap_mark, @function
+_demetrios_heap_mark:
+    movq _heap_current(%rip), %rax
+    retq
+.size _demetrios_heap_mark, .-_demetrios_heap_mark
+
+# Reset heap cursor to a previous mark
+# rdi = mark pointer
+.globl _demetrios_heap_reset
+.type _demetrios_heap_reset, @function
+_demetrios_heap_reset:
+    movq %rdi, _heap_current(%rip)
+    xorq %rax, %rax
+    retq
+.size _demetrios_heap_reset, .-_demetrios_heap_reset
 
 # Allocate memory (simple bump allocator)
 # rdi = size
@@ -399,36 +430,9 @@ _demetrios_alloc:
     
     # Check if we have space
     cmpq _heap_end(%rip), %rcx
-    ja .Lalloc_grow
-    
-    # Update current and return old pointer
-    movq %rcx, _heap_current(%rip)
-    retq
-
-.Lalloc_grow:
-    # Need to grow heap
-    pushq %rdi          # Save size
-    pushq %rax          # Save old pointer
-    
-    # Request more space (at least 64KB or requested size)
-    movq _heap_end(%rip), %rdi
-    addq $0x10000, %rdi
-    movq $12, %rax      # SYS_brk
-    syscall
-    
-    # Update heap end
-    movq %rax, _heap_end(%rip)
-    
-    popq %rax           # Restore old pointer
-    popq %rdi           # Restore size
-    
-    # Try allocation again
-    movq %rax, %rcx
-    addq %rdi, %rcx
-    
-    cmpq _heap_end(%rip), %rcx
     ja .Lalloc_fail
     
+    # Update current and return old pointer
     movq %rcx, _heap_current(%rip)
     retq
 
@@ -1428,6 +1432,238 @@ _demetrios_pow:
     .to_string()
 }
 
+pub fn generate_native_compat_asm() -> String {
+    r#"
+# Demetrios Runtime: Native compatibility shims
+#
+# These symbols are emitted by current native lowering for some stdlib string
+# methods and effect handler paths. Provide conservative C-string compatible
+# helpers so realistic programs can at least link and run core flows.
+
+.section .text
+
+# bool starts_with(uintptr_t value_raw, uintptr_t prefix_raw)
+.globl starts_with
+.type starts_with, @function
+starts_with:
+    jmp __sounio_chiuratto_starts_with_impl
+.size starts_with, .-starts_with
+
+# bool contains(uintptr_t value_raw, uintptr_t needle_raw)
+.globl contains
+.type contains, @function
+contains:
+    jmp __sounio_chiuratto_contains_impl
+.size contains, .-contains
+
+# const char* replace(uintptr_t value_raw, uintptr_t from_raw, uintptr_t to_raw)
+.globl replace
+.type replace, @function
+replace:
+    jmp __sounio_chiuratto_replace_impl
+.size replace, .-replace
+
+# const char* as_ptr(const char* value)
+.globl as_ptr
+.type as_ptr, @function
+as_ptr:
+    jmp __sounio_chiuratto_as_ptr_impl
+.size as_ptr, .-as_ptr
+
+# const char* concat(uintptr_t left_raw, uintptr_t right_raw)
+.globl concat
+.type concat, @function
+concat:
+    jmp __sounio_chiuratto_concat_impl
+.size concat, .-concat
+
+# Effect handler dispatch compatibility stub.
+.globl handler
+.type handler, @function
+handler:
+    xorq %rax, %rax
+    retq
+.size handler, .-handler
+
+.section .note.GNU-stack,"",@progbits
+"#
+    .to_string()
+}
+
+pub fn generate_external_ffi_stub_asm() -> String {
+    r#"
+# Demetrios Runtime: external FFI stubs for standalone demo builds
+#
+# These stubs unblock link-time for generated demo entrypoints that declare
+# http/postgres FFI symbols. They return safe defaults.
+
+.section .text
+
+.globl uuid_v4
+.type uuid_v4, @function
+uuid_v4:
+    jmp __sounio_chiuratto_uuid_v4_impl
+.size uuid_v4, .-uuid_v4
+
+	.globl unix_timestamp
+	.type unix_timestamp, @function
+	unix_timestamp:
+	    jmp __sounio_chiuratto_unix_timestamp_impl
+	.size unix_timestamp, .-unix_timestamp
+
+	.globl substring_after_first
+	.type substring_after_first, @function
+	substring_after_first:
+	    jmp __sounio_chiuratto_substring_after_first_impl
+	.size substring_after_first, .-substring_after_first
+
+.globl pg_pool_new
+.type pg_pool_new, @function
+pg_pool_new:
+    jmp __sounio_chiuratto_pg_pool_new_impl
+.size pg_pool_new, .-pg_pool_new
+
+.globl pg_pool_close
+.type pg_pool_close, @function
+pg_pool_close:
+    jmp __sounio_chiuratto_pg_pool_close_impl
+.size pg_pool_close, .-pg_pool_close
+
+.globl pg_pool_query
+.type pg_pool_query, @function
+pg_pool_query:
+    jmp __sounio_chiuratto_pg_pool_query_impl
+.size pg_pool_query, .-pg_pool_query
+
+.globl pg_pool_execute
+.type pg_pool_execute, @function
+pg_pool_execute:
+    jmp __sounio_chiuratto_pg_pool_execute_impl
+.size pg_pool_execute, .-pg_pool_execute
+
+.globl pg_result_row_count
+.type pg_result_row_count, @function
+pg_result_row_count:
+    jmp __sounio_chiuratto_pg_result_row_count_impl
+.size pg_result_row_count, .-pg_result_row_count
+
+.globl pg_result_col_count
+.type pg_result_col_count, @function
+pg_result_col_count:
+    jmp __sounio_chiuratto_pg_result_col_count_impl
+.size pg_result_col_count, .-pg_result_col_count
+
+.globl pg_result_get_value
+.type pg_result_get_value, @function
+pg_result_get_value:
+    jmp __sounio_chiuratto_pg_result_get_value_impl
+.size pg_result_get_value, .-pg_result_get_value
+
+.globl pg_result_free
+.type pg_result_free, @function
+pg_result_free:
+    jmp __sounio_chiuratto_pg_result_free_impl
+.size pg_result_free, .-pg_result_free
+
+.globl http_server_start
+.type http_server_start, @function
+http_server_start:
+    jmp __sounio_chiuratto_http_server_start_impl
+.size http_server_start, .-http_server_start
+
+.globl http_server_stop
+.type http_server_stop, @function
+http_server_stop:
+    jmp __sounio_chiuratto_http_server_stop_impl
+.size http_server_stop, .-http_server_stop
+
+.globl http_next_request
+.type http_next_request, @function
+http_next_request:
+    jmp __sounio_chiuratto_http_next_request_impl
+.size http_next_request, .-http_next_request
+
+.globl http_route_match
+.type http_route_match, @function
+http_route_match:
+    jmp __sounio_chiuratto_http_route_match_impl
+.size http_route_match, .-http_route_match
+
+.globl http_route_match_dynamic
+.type http_route_match_dynamic, @function
+http_route_match_dynamic:
+    jmp __sounio_chiuratto_http_route_match_dynamic_impl
+.size http_route_match_dynamic, .-http_route_match_dynamic
+
+.globl http_route_param_id
+.type http_route_param_id, @function
+http_route_param_id:
+    jmp __sounio_chiuratto_http_route_param_id_impl
+.size http_route_param_id, .-http_route_param_id
+
+.globl http_route_code
+.type http_route_code, @function
+http_route_code:
+    jmp __sounio_chiuratto_http_route_code_impl
+.size http_route_code, .-http_route_code
+
+.globl http_request_method
+.type http_request_method, @function
+http_request_method:
+    jmp __sounio_chiuratto_http_request_method_impl
+.size http_request_method, .-http_request_method
+
+.globl http_request_path
+.type http_request_path, @function
+http_request_path:
+    jmp __sounio_chiuratto_http_request_path_impl
+.size http_request_path, .-http_request_path
+
+.globl http_request_authorization
+.type http_request_authorization, @function
+http_request_authorization:
+    jmp __sounio_chiuratto_http_request_authorization_impl
+.size http_request_authorization, .-http_request_authorization
+
+.globl http_request_is_admin
+.type http_request_is_admin, @function
+http_request_is_admin:
+    jmp __sounio_chiuratto_http_request_is_admin_impl
+.size http_request_is_admin, .-http_request_is_admin
+
+.globl http_request_body
+.type http_request_body, @function
+http_request_body:
+    jmp __sounio_chiuratto_http_request_body_impl
+.size http_request_body, .-http_request_body
+
+.globl http_request_query
+.type http_request_query, @function
+http_request_query:
+    jmp __sounio_chiuratto_http_request_query_impl
+.size http_request_query, .-http_request_query
+
+.globl http_query_param
+.type http_query_param, @function
+http_query_param:
+    jmp __sounio_chiuratto_http_query_param_impl
+.size http_query_param, .-http_query_param
+
+.globl http_query_param_i64
+.type http_query_param_i64, @function
+http_query_param_i64:
+    jmp __sounio_chiuratto_http_query_param_i64_impl
+.size http_query_param_i64, .-http_query_param_i64
+
+.globl http_send_response
+.type http_send_response, @function
+http_send_response:
+    jmp __sounio_chiuratto_http_send_response_impl
+.size http_send_response, .-http_send_response
+"#
+    .to_string()
+}
+
 fn generate_runtime_asm_internal(include_start: bool) -> String {
     let mut asm = String::new();
 
@@ -1449,6 +1685,10 @@ fn generate_runtime_asm_internal(include_start: bool) -> String {
     asm.push_str(&generate_memory_asm());
     asm.push_str("\n");
     asm.push_str(&generate_float_asm());
+    asm.push_str("\n");
+    asm.push_str(&generate_native_compat_asm());
+    asm.push_str("\n");
+    asm.push_str(&generate_external_ffi_stub_asm());
     asm.push_str("\n");
     asm.push_str(&generate_unit_conversion_asm());
     asm.push_str("\n");
@@ -1506,6 +1746,8 @@ fn build_runtime_object_internal(
     let output_dir = output_dir.as_ref();
     let asm_path = output_dir.join("demetrios_runtime.s");
     let obj_path = output_dir.join("demetrios_runtime.o");
+    let chiuratto_obj_path = output_dir.join("demetrios_runtime_chiuratto_ffi.o");
+    let bundle_obj_path = output_dir.join("demetrios_runtime_bundle.o");
 
     // Write assembly
     write_runtime_asm_internal(&asm_path, include_start)
@@ -1526,7 +1768,49 @@ fn build_runtime_object_internal(
         ));
     }
 
-    Ok(obj_path)
+    // Compile chiuratto helper FFI C runtime.
+    let c_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("src")
+        .join("backend")
+        .join("native")
+        .join("chiuratto_ffi.c");
+
+    let cc_output = std::process::Command::new("cc")
+        .arg("-O2")
+        .arg("-std=c11")
+        .arg("-fPIC")
+        .arg("-c")
+        .arg(&c_path)
+        .arg("-o")
+        .arg(&chiuratto_obj_path)
+        .output()
+        .map_err(|e| format!("Failed to run C compiler for chiuratto FFI: {}", e))?;
+
+    if !cc_output.status.success() {
+        return Err(format!(
+            "C compiler failed for chiuratto FFI: {}",
+            String::from_utf8_lossy(&cc_output.stderr)
+        ));
+    }
+
+    // Merge runtime assembly object + chiuratto helper object into one relocatable object.
+    let ld_output = std::process::Command::new("ld")
+        .arg("-r")
+        .arg("-o")
+        .arg(&bundle_obj_path)
+        .arg(&obj_path)
+        .arg(&chiuratto_obj_path)
+        .output()
+        .map_err(|e| format!("Failed to run linker for runtime bundle: {}", e))?;
+
+    if !ld_output.status.success() {
+        return Err(format!(
+            "Runtime bundle link failed: {}",
+            String::from_utf8_lossy(&ld_output.stderr)
+        ));
+    }
+
+    Ok(bundle_obj_path)
 }
 
 /// Build runtime object file
@@ -1562,12 +1846,49 @@ pub const RUNTIME_SYMBOLS: &[&str] = &[
     "_demetrios_epistemic_panic",
     "_demetrios_panic",
     "_demetrios_heap_init",
+    "_demetrios_heap_mark",
+    "_demetrios_heap_reset",
     "_demetrios_alloc",
     "_demetrios_free",
     "_demetrios_sqrt",
     "_demetrios_ln",
     "_demetrios_exp",
     "_demetrios_pow",
+    // Native compatibility shims for stdlib method lowering
+    "starts_with",
+    "contains",
+    "replace",
+    "as_ptr",
+    "concat",
+    "handler",
+	    // Standalone FFI stubs used by generated demo entrypoints
+	    "uuid_v4",
+	    "unix_timestamp",
+	    "substring_after_first",
+	    "pg_pool_new",
+	    "pg_pool_close",
+	    "pg_pool_query",
+    "pg_pool_execute",
+    "pg_result_row_count",
+    "pg_result_col_count",
+    "pg_result_get_value",
+    "pg_result_free",
+    "http_server_start",
+    "http_server_stop",
+    "http_next_request",
+    "http_route_match",
+    "http_route_match_dynamic",
+    "http_route_param_id",
+    "http_route_code",
+    "http_request_method",
+    "http_request_path",
+    "http_request_authorization",
+    "http_request_is_admin",
+    "http_request_body",
+    "http_request_query",
+    "http_query_param",
+    "http_query_param_i64",
+    "http_send_response",
     // Unit conversion functions
     "sounio_convert_unit",
     "sounio_convert_affine",
