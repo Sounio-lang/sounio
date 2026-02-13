@@ -5209,7 +5209,8 @@ impl TypeChecker {
                     // Bind pattern variables based on scrutinee type
                     self.bind_pattern_to_type(&arm.pattern, &scrutinee_internal_ty, false);
 
-                    let body_expr = self.check_expr(&arm.body, None)?;
+                    // Pass expected type to arm body for context-driven typing
+                    let body_expr = self.check_expr(&arm.body, expected)?;
                     arm_types.push(body_expr.ty.clone());
 
                     checked_arms.push(HirMatchArm {
