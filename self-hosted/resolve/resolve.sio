@@ -152,7 +152,23 @@ impl Resolver {
                 }
             }
             ItemImpl => self
-            ItemUse => self
+            ItemUse => {
+                // For selective imports, register each imported name
+                self.collect_use_items(item.use_items, item.span)
+            }
+        }
+    }
+
+    fn collect_use_items(self, items: Option<Box<ImportItemList>>, span: Span) -> Resolver with Mut, Panic, Div, Alloc {
+        match items {
+            None => self  // glob or whole-module — handled by flat mode
+            Some(list) => {
+                var r = self
+                if !name_is_empty((*list).head) {
+                    r = r.define((*list).head, SymbolKind::SymImported, span)
+                }
+                r.collect_use_items((*list).tail, span)
+            }
         }
     }
 
@@ -196,7 +212,31 @@ impl Resolver {
             ItemEnum => self  // variants already collected, no bodies to resolve
             ItemImpl => self.resolve_impl_def(item.impl_def)
             ItemTypeAlias => self.resolve_type_alias(item.type_alias_ty)
-            ItemUse => self
+            ItemUse => {
+                // Validate selective imports: check that each name exists in scope
+                self.validate_use_items(item.use_items, item.span)
+            }
+        }
+    }
+
+    // --------------------------------------------------------
+    // Import validation
+    // --------------------------------------------------------
+
+    fn validate_use_items(self, items: Option<Box<ImportItemList>>, span: Span) -> Resolver with Mut, Panic, Div, Alloc, IO {
+        match items {
+            None => self  // glob or whole-module — nothing to validate
+            Some(list) => {
+                var r = self
+                // In flat mode, all symbols are in scope, so lookup succeeds trivially.
+                // When a real module loader exists, this validates against the module's exports.
+                let found = r.lookup((*list).head)
+                if found < 0 {
+                    // Symbol not found — emit error (in flat mode this won't happen)
+                    r = r.report_error(span)
+                }
+                r.validate_use_items((*list).tail, span)
+            }
         }
     }
 
@@ -327,6 +367,17 @@ impl Resolver {
             TypeNever => self
             TypeSelfUpper => self
             TypeInfer => self
+            TypeKnowledge => {
+                // Resolve inner type of Knowledge[T, ...]
+                self.resolve_knowledge_inner(te.knowledge_info)
+            }
+        }
+    }
+
+    fn resolve_knowledge_inner(self, opt: Option<Box<KnowledgeTypeInfo>>) -> Resolver with Mut, Panic, Div, Alloc, IO {
+        match opt {
+            None => self
+            Some(info) => self.resolve_type_expr(*(*info).inner_type)
         }
     }
 
