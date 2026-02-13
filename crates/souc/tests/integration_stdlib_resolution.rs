@@ -17,10 +17,15 @@ fn get_souc_binary() -> PathBuf {
 
 /// Helper function to get the stdlib path
 fn get_stdlib_path() -> PathBuf {
-    // Get the project root (parent of compiler dir)
-    let cargo_manifest_dir = env!("CARGO_MANIFEST_DIR");
-    let project_root = Path::new(cargo_manifest_dir).parent().unwrap();
-    project_root.join("stdlib")
+    // `CARGO_MANIFEST_DIR` is `<repo>/crates/souc`. Walk upwards until we find `<repo>/stdlib`.
+    let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    for ancestor in manifest_dir.ancestors() {
+        let candidate = ancestor.join("stdlib");
+        if candidate.is_dir() {
+            return candidate;
+        }
+    }
+    panic!("could not locate stdlib dir from {}", manifest_dir.display());
 }
 
 /// Helper to run souc check from a specific directory

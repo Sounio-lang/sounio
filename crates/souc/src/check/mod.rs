@@ -1723,6 +1723,38 @@ impl TypeChecker {
                     // Also register unqualified for now (within module scope)
                     self.env.bind(f.name.clone(), fn_type, false);
                 }
+                // Register extern functions inside modules.
+                if let Item::Extern(extern_block) = item {
+                    for ext_item in &extern_block.items {
+                        if let ExternItem::Fn(ext_fn) = ext_item {
+                            let params: Vec<Type> = ext_fn
+                                .params
+                                .iter()
+                                .map(|p| self.lower_type_expr(&p.ty))
+                                .collect();
+                            let return_type = ext_fn
+                                .return_type
+                                .as_ref()
+                                .map(|t| self.lower_type_expr(t))
+                                .unwrap_or(Type::Unit);
+
+                            // Extern functions don't declare effects (they're C functions).
+                            let fn_type = Type::Function {
+                                params,
+                                return_type: Box::new(return_type),
+                                effects: types::EffectSet::new(),
+                                abi: Some("C".to_string()),
+                            };
+
+                            // Register with module-qualified name.
+                            let qualified_name = format!("{}::{}", m.name, ext_fn.name);
+                            self.env
+                                .bind(qualified_name.clone(), fn_type.clone(), false);
+                            // Also register unqualified for now (within module scope).
+                            self.env.bind(ext_fn.name.clone(), fn_type, false);
+                        }
+                    }
+                }
                 // Register associated functions from impl blocks inside modules
                 if let Item::Impl(impl_def) = item {
                     let type_name = match &impl_def.target_type {
@@ -5999,6 +6031,7 @@ impl TypeChecker {
                 | "panic"
                 | "format"
                 | "read_file"
+                | "read_file_prefix"
                 | "file_size"
                 | "write_bytes"
                 | "arg_count"
@@ -6011,6 +6044,10 @@ impl TypeChecker {
                 | "str_from_bytes"
                 | "int_to_str"
                 | "starts_with"
+                | "ends_with"
+                | "is_dir"
+                | "path_join"
+                | "list_dir"
                 | "read_line"
                 | "read_byte"
                 | "parse_int"
@@ -6269,8 +6306,34 @@ impl TypeChecker {
                 params: vec![HirType::String, HirType::String],
                 return_type: Box::new(HirType::Bool),
             },
+            "ends_with" => HirType::Fn {
+                params: vec![HirType::String, HirType::String],
+                return_type: Box::new(HirType::Bool),
+            },
+            "is_dir" => HirType::Fn {
+                params: vec![HirType::String],
+                return_type: Box::new(HirType::Bool),
+            },
+            "path_join" => HirType::Fn {
+                params: vec![HirType::String, HirType::String],
+                return_type: Box::new(HirType::String),
+            },
+            "list_dir" => HirType::Fn {
+                params: vec![HirType::String],
+                return_type: Box::new(HirType::Array {
+                    element: Box::new(HirType::String),
+                    size: None,
+                }),
+            },
             "read_file" => HirType::Fn {
                 params: vec![HirType::String],
+                return_type: Box::new(HirType::Array {
+                    element: Box::new(HirType::I8),
+                    size: None,
+                }),
+            },
+            "read_file_prefix" => HirType::Fn {
+                params: vec![HirType::String, HirType::I64],
                 return_type: Box::new(HirType::Array {
                     element: Box::new(HirType::I8),
                     size: None,

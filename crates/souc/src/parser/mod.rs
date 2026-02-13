@@ -2717,7 +2717,13 @@ impl<'a> Parser<'a> {
         self.expect(TokenKind::RParen)?;
 
         let return_type = self.parse_return_type()?;
-        self.expect(TokenKind::Semi)?;
+        // Historical syntax allowed extern declarations without a trailing `;`.
+        // Be permissive here so both styles parse:
+        //   extern "C" { fn foo(x: i32) -> i32; }
+        //   extern "C" { fn foo(x: i32) -> i32 }
+        if self.at(TokenKind::Semi) {
+            self.advance();
+        }
 
         let end = self.span();
 
@@ -4377,6 +4383,14 @@ impl<'a> Parser<'a> {
                     };
                 }
                 TokenKind::LBracket => {
+                    // Like calls, don't treat a `[` that starts on a new line as postfix indexing.
+                    // This prevents cases like:
+                    //   let x = 3
+                    //   [1, 2]
+                    // from being parsed as `let x = 3[1, 2]`.
+                    if self.had_newline_before_current() {
+                        break;
+                    }
                     self.advance();
 
                     // Check for slice syntax: [..], [..end], [start..], [start..end]
@@ -5341,11 +5355,14 @@ impl<'a> Parser<'a> {
             self.advance();
             if self.at(TokenKind::If) {
                 Some(Box::new(self.parse_if()?))
-            } else {
+            } else if self.at(TokenKind::LBrace) {
                 Some(Box::new(Expr::Block {
                     id: self.next_id(),
                     block: self.parse_block()?,
                 }))
+            } else {
+                // Support shorthand `else expr` in addition to `else { expr }`.
+                Some(Box::new(self.parse_expr()?))
             }
         } else {
             None
@@ -5371,11 +5388,13 @@ impl<'a> Parser<'a> {
             self.advance();
             if self.at(TokenKind::If) {
                 Some(Box::new(self.parse_if()?))
-            } else {
+            } else if self.at(TokenKind::LBrace) {
                 Some(Box::new(Expr::Block {
                     id: self.next_id(),
                     block: self.parse_block()?,
                 }))
+            } else {
+                Some(Box::new(self.parse_expr()?))
             }
         } else {
             None

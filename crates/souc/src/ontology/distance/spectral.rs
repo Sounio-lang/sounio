@@ -127,9 +127,14 @@ impl SpectralDistance {
         self.iri_to_idx.clear();
         self.idx_to_iri.clear();
 
-        for (i, iri) in hierarchy.all_terms().enumerate() {
+        // `HierarchyGraph::all_terms()` iterates a HashMap keyset, so the order is not stable
+        // across process runs. The spectral embedding depends on index assignment (initial
+        // vectors, deflation order), so we sort terms to make results deterministic.
+        let mut terms: Vec<IRI> = hierarchy.all_terms().cloned().collect();
+        terms.sort_by(|a, b| a.0.cmp(&b.0));
+        for (i, iri) in terms.into_iter().enumerate() {
             self.iri_to_idx.insert(iri.clone(), i);
-            self.idx_to_iri.push(iri.clone());
+            self.idx_to_iri.push(iri);
         }
 
         let n = self.idx_to_iri.len();

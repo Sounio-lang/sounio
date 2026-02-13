@@ -992,6 +992,20 @@ impl Interpreter {
                 match (recv, method.as_str()) {
                     (Value::Array(arr), "len") => Ok(Value::Int(arr.borrow().len() as i64)),
                     (Value::String(s), "len") => Ok(Value::Int(s.len() as i64)),
+                    (Value::String(s), "starts_with") => match arg_values.get(1) {
+                        Some(Value::String(prefix)) => {
+                            Ok(Value::Bool(s.starts_with(prefix.as_str())))
+                        }
+                        _ => Err(ControlFlow::Return(Value::Unit)),
+                    },
+                    (Value::String(s), "ends_with") => match arg_values.get(1) {
+                        Some(Value::String(suffix)) => Ok(Value::Bool(s.ends_with(suffix.as_str()))),
+                        _ => Err(ControlFlow::Return(Value::Unit)),
+                    },
+                    (Value::String(s), "contains") => match arg_values.get(1) {
+                        Some(Value::String(needle)) => Ok(Value::Bool(s.contains(needle.as_str()))),
+                        _ => Err(ControlFlow::Return(Value::Unit)),
+                    },
                     (Value::String(s), "slice") => {
                         // String slice: s.slice(start, end) -> substring
                         let start = match arg_values.get(1) {
@@ -1115,6 +1129,24 @@ impl Interpreter {
                                 }
                             }
                             (Value::String(s), "len") => Ok(Value::Int(s.len() as i64)),
+                            (Value::String(s), "starts_with") => match arg_values.get(1) {
+                                Some(Value::String(prefix)) => {
+                                    Ok(Value::Bool(s.starts_with(prefix.as_str())))
+                                }
+                                _ => Err(ControlFlow::Return(Value::Unit)),
+                            },
+                            (Value::String(s), "ends_with") => match arg_values.get(1) {
+                                Some(Value::String(suffix)) => {
+                                    Ok(Value::Bool(s.ends_with(suffix.as_str())))
+                                }
+                                _ => Err(ControlFlow::Return(Value::Unit)),
+                            },
+                            (Value::String(s), "contains") => match arg_values.get(1) {
+                                Some(Value::String(needle)) => {
+                                    Ok(Value::Bool(s.contains(needle.as_str())))
+                                }
+                                _ => Err(ControlFlow::Return(Value::Unit)),
+                            },
                             (Value::String(s), "slice") => {
                                 let start = match arg_values.get(1) {
                                     Some(Value::Int(i)) => (*i).max(0) as usize,
@@ -2314,6 +2346,10 @@ impl Interpreter {
 
     /// Check if a name is a builtin function
     fn is_builtin(&self, name: &str) -> bool {
+        if self.builtins.is_builtin(name) {
+            return true;
+        }
+
         matches!(
             name,
             "print"
@@ -2334,6 +2370,7 @@ impl Interpreter {
                 | "format"
                 | "read_byte"
                 | "read_file"
+                | "read_file_prefix"
                 | "file_size"
                 | "write_bytes"
                 | "arg_count"
@@ -2345,7 +2382,12 @@ impl Interpreter {
                 | "str_char_at"
                 | "str_from_bytes"
                 | "int_to_str"
+                | "contains"
                 | "starts_with"
+                | "ends_with"
+                | "is_dir"
+                | "path_join"
+                | "list_dir"
                 | "read_line"
                 | "parse_int"
                 | "parse_float"

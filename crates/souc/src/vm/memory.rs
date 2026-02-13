@@ -1,7 +1,7 @@
 //! Memory management for the VM
 
 use crate::vm::VmError;
-use std::collections::HashMap;
+use rustc_hash::FxHashMap as HashMap;
 
 /// Manages heap memory allocations
 pub struct Heap {
@@ -13,7 +13,7 @@ impl Heap {
     /// Creates a new heap
     pub fn new() -> Self {
         Self {
-            allocations: HashMap::new(),
+            allocations: HashMap::default(),
             next_addr: 0x1000, // Start from 0x1000 to avoid null pointer issues
         }
     }

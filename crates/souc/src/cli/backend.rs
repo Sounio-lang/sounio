@@ -1105,7 +1105,11 @@ fn compile_native(args: &BuildArgs) -> Result<(PathBuf, Option<NativeMetrics>), 
                 LinkMode::SharedLib
             };
 
-            let linker_config = LinkerConfig::default();
+            let linker_config = if format == OutputFormat::Executable {
+                LinkerConfig::default().with_library("m")
+            } else {
+                LinkerConfig::default()
+            };
             let linker = Linker::new(linker_config)
                 .map_err(|e| format!("Linker initialization error: {}", e))?;
 
@@ -1390,7 +1394,11 @@ fn compile_cranelift(args: &BuildArgs) -> Result<(PathBuf, Option<NativeMetrics>
                     LinkMode::SharedLib
                 };
 
-                let linker_config = LinkerConfig::default();
+                let linker_config = if format == OutputFormat::Executable {
+                    LinkerConfig::default().with_library("m")
+                } else {
+                    LinkerConfig::default()
+                };
                 let linker = Linker::new(linker_config)
                     .map_err(|e| format!("Linker initialization error: {}", e))?;
 

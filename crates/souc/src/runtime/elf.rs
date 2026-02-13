@@ -154,12 +154,12 @@ fn finalize_elf64(e: &NativeEmitter, entry_offset: usize) -> Vec<u8> {
     // e_ident
     out.extend_from_slice(&[
         0x7f, b'E', b'L', b'F', // magic
-        2,                      // EI_CLASS = ELFCLASS64
-        1,                      // EI_DATA  = ELFDATA2LSB
-        1,                      // EI_VERSION
-        0,                      // EI_OSABI (System V)
-        0,                      // EI_ABIVERSION
-        0, 0, 0, 0, 0, 0, 0,    // EI_PAD
+        2,    // EI_CLASS = ELFCLASS64
+        1,    // EI_DATA  = ELFDATA2LSB
+        1,    // EI_VERSION
+        0,    // EI_OSABI (System V)
+        0,    // EI_ABIVERSION
+        0, 0, 0, 0, 0, 0, 0, // EI_PAD
     ]);
     push_u16(&mut out, 2); // e_type = ET_EXEC
     push_u16(&mut out, e_machine);
@@ -254,7 +254,12 @@ struct MachoLayout {
 }
 
 #[cfg(target_os = "macos")]
-fn macho_layout(code_len: usize, rodata_len: usize, bss_size: usize, entry_offset: usize) -> MachoLayout {
+fn macho_layout(
+    code_len: usize,
+    rodata_len: usize,
+    bss_size: usize,
+    entry_offset: usize,
+) -> MachoLayout {
     const MACH_HDR_SIZE: usize = 32;
     const LC_SEGMENT_64_SIZE: usize = 72;
 

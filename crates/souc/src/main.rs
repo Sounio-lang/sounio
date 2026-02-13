@@ -190,7 +190,7 @@ enum Commands {
         #[arg(value_name = "FILE")]
         input: PathBuf,
 
-        /// Use self-hosted Sounio compiler (week 2 bootstrap feature)
+        /// Deprecated compatibility flag: self-hosted compiler is now the default for `run`
         #[arg(long)]
         use_sounio_compiler: bool,
 
@@ -1656,7 +1656,14 @@ fn main() -> Result<()> {
             emit,
             opt_level,
             glm_enabled,
-        } => compile(&input, output.as_deref(), emit, opt_level, glm_enabled, native_stub),
+        } => compile(
+            &input,
+            output.as_deref(),
+            emit,
+            opt_level,
+            glm_enabled,
+            native_stub,
+        ),
 
         Commands::Build {
             input,
@@ -1824,7 +1831,14 @@ fn main() -> Result<()> {
             trace_interp,
             check_only,
             args,
-        } => run(&input, &args, use_sounio_compiler, trace_interp, check_only),
+        } => {
+            if use_sounio_compiler {
+                eprintln!(
+                    "Note: --use-sounio-compiler is deprecated; self-hosted compiler is already the default for `souc run`."
+                );
+            }
+            run(&input, &args, true, trace_interp, check_only)
+        }
 
         Commands::Jit {
             input,
@@ -3040,12 +3054,12 @@ fn run(
                     .unwrap_or_else(|_| "stdlib/compiler".to_string());
 
                 // Create the self-hosted compiler
-                let compiler = sounio::compiler_loader::SounioCompiler::new(&stdlib_path)
+                let mut compiler = sounio::compiler_loader::SounioCompiler::new(&stdlib_path)
                     .map_err(|e| format!("Failed to initialize self-hosted compiler: {}", e))?;
 
-                // Compile through the self-hosted bridge to validate bootstrap wiring.
+                // Compile through the self-hosted bridge.
                 let input_str = input_path.to_string_lossy();
-                let _bytecode = compiler
+                let bytecode = compiler
                     .compile_file(input_str.as_ref())
                     .map_err(|e| {
                         format!(
@@ -3055,23 +3069,40 @@ fn run(
                         )
                     })?;
 
-                // Execution still uses the Rust interpreter path below.
-                //
-                // Emit a stable, machine-readable marker so external runners can gate on it
-                // without relying on tracing formatting/timestamps.
-                eprintln!("SELFHOST=fallback backend=rust reason=integration_in_progress");
-
-                tracing::warn!("Self-hosted compiler integration in progress - using Rust compiler");
-
-                // Strict mode: when the user explicitly asked for self-host, forbid fallback.
-                // This is the source-of-truth behavior (not a runner-side grep).
-                let strict_mode = std::env::var("SOUNIO_SELFHOST_STRICT")
-                    .map(|v| v.trim() == "1")
-                    .unwrap_or(false);
-                if strict_mode {
-                    eprintln!("error: SOUNIO_SELFHOST_STRICT=1 forbids Rust fallback when --use-sounio-compiler is set");
-                    std::process::exit(2);
+                // check-only with the self-hosted bridge means "compile/type-check only".
+                if check_only {
+                    return Ok(());
                 }
+
+                // Select self-host execution mode.
+                // - vm (default): compile via self-host bridge, execute via bytecode VM.
+                let mode = std::env::var("SOUNIO_SELFHOST_MODE")
+                    .unwrap_or_else(|_| "vm".to_string())
+                    .to_lowercase();
+
+                if mode == "vm" {
+                    match compiler.execute_bytecode_with_args(&bytecode, &user_args) {
+                        Ok(vm_result) => {
+                            if !matches!(vm_result, sounio::vm::Value::Unit) {
+                                println!("{}", vm_result);
+                            }
+                            return Ok(());
+                        }
+                        Err(vm_error) => {
+                            return Err(format!(
+                                "Self-hosted VM execution failed for {}: {}. Rust fallback execution has been removed.",
+                                input_path.display(),
+                                vm_error
+                            ));
+                        }
+                    }
+                }
+
+                eprintln!(
+                    "error: unsupported SOUNIO_SELFHOST_MODE='{}'. Only 'vm' is supported for self-hosted `souc run`.",
+                    mode
+                );
+                std::process::exit(2);
             }
 
             if check_only {

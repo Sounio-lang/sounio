@@ -12,12 +12,18 @@ use crate::hir::{
 };
 use crate::runtime::elf::NativeEmitter;
 use crate::runtime::runtime::RuntimeCodegen;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 #[derive(Debug, Clone)]
 struct PendingRelocation {
     imm_offset: usize,
-    target_name: String,
+    target: RelocationTarget,
+}
+
+#[derive(Debug, Clone)]
+enum RelocationTarget {
+    FunctionOrBuiltin(String),
+    Builtin(String),
 }
 
 pub struct NativeCodegen {
@@ -27,6 +33,8 @@ pub struct NativeCodegen {
     fn_offsets: HashMap<String, usize>,
     /// `call rel32` patches to resolve after all functions are laid out.
     relocations: Vec<PendingRelocation>,
+    /// User-defined function names declared in the module.
+    user_functions: HashSet<String>,
     /// Local variable name -> rbp-relative slot offset (negative).
     locals: HashMap<String, i32>,
     /// Current function stack frame size in bytes (16-byte aligned).
@@ -42,6 +50,7 @@ impl NativeCodegen {
             runtime: RuntimeCodegen::new(),
             fn_offsets: HashMap::new(),
             relocations: Vec::new(),
+            user_functions: HashSet::new(),
             locals: HashMap::new(),
             frame_size: 0,
             return_jumps: Vec::new(),
@@ -72,6 +81,8 @@ impl NativeCodegen {
             return Err("No functions found in HIR module".to_string());
         }
 
+        self.user_functions = functions.iter().map(|f| f.name.clone()).collect();
+
         for func in functions {
             self.compile_fn(func)?;
         }
@@ -90,6 +101,7 @@ impl NativeCodegen {
         self.runtime = RuntimeCodegen::new();
         self.fn_offsets.clear();
         self.relocations.clear();
+        self.user_functions.clear();
         self.locals.clear();
         self.frame_size = 0;
         self.return_jumps.clear();
@@ -344,9 +356,20 @@ impl NativeCodegen {
         left: &HirExpr,
         right: &HirExpr,
     ) -> Result<(), String> {
+        match op {
+            HirBinaryOp::And => return self.compile_logical_and(left, right),
+            HirBinaryOp::Or => return self.compile_logical_or(left, right),
+            _ => {}
+        }
+
         self.compile_expr(left)?;
         self.emitter.emit_code(&[0x50]); // push rax
+        // Keep the stack 16-byte aligned while evaluating the RHS. The System V ABI requires
+        // `%rsp` to be 16-byte aligned *before* a `call`. A single push misaligns by 8, so we
+        // add a dummy 8-byte adjustment that we later undo.
+        self.emitter.emit_code(&[0x48, 0x83, 0xec, 0x08]); // sub rsp, 8
         self.compile_expr(right)?;
+        self.emitter.emit_code(&[0x48, 0x83, 0xc4, 0x08]); // add rsp, 8
         self.emitter.emit_code(&[0x5b]); // pop rbx
 
         match op {
@@ -361,6 +384,21 @@ impl NativeCodegen {
             }
             HirBinaryOp::Mul => {
                 self.emitter.emit_code(&[0x48, 0x0f, 0xaf, 0xc3]); // imul rax, rbx
+                Ok(())
+            }
+            HirBinaryOp::Div => {
+                self.emitter.emit_code(&[0x48, 0x89, 0xc1]); // mov rcx, rax (rhs)
+                self.emitter.emit_code(&[0x48, 0x89, 0xd8]); // mov rax, rbx (lhs)
+                self.emitter.emit_code(&[0x48, 0x99]); // cqo
+                self.emitter.emit_code(&[0x48, 0xf7, 0xf9]); // idiv rcx
+                Ok(())
+            }
+            HirBinaryOp::Rem => {
+                self.emitter.emit_code(&[0x48, 0x89, 0xc1]); // mov rcx, rax (rhs)
+                self.emitter.emit_code(&[0x48, 0x89, 0xd8]); // mov rax, rbx (lhs)
+                self.emitter.emit_code(&[0x48, 0x99]); // cqo
+                self.emitter.emit_code(&[0x48, 0xf7, 0xf9]); // idiv rcx
+                self.emitter.emit_code(&[0x48, 0x89, 0xd0]); // mov rax, rdx (remainder)
                 Ok(())
             }
             HirBinaryOp::Eq => {
@@ -403,10 +441,56 @@ impl NativeCodegen {
         }
     }
 
+    fn compile_logical_and(&mut self, left: &HirExpr, right: &HirExpr) -> Result<(), String> {
+        self.compile_expr(left)?;
+        self.emitter.emit_code(&[0x48, 0x85, 0xc0]); // test rax, rax
+
+        let jz_false_pos = self.emitter.code.len();
+        self.emitter
+            .emit_code(&[0x0f, 0x84, 0x00, 0x00, 0x00, 0x00]); // jz rel32
+
+        self.compile_expr(right)?;
+        self.emit_bool_from_rax();
+
+        let jmp_end_pos = self.emitter.code.len();
+        self.emitter.emit_code(&[0xe9, 0x00, 0x00, 0x00, 0x00]); // jmp rel32
+
+        let false_pos = self.emitter.code.len();
+        self.emit_zero_rax();
+
+        let end_pos = self.emitter.code.len();
+        self.patch_rel32(jz_false_pos + 2, false_pos)?;
+        self.patch_rel32(jmp_end_pos + 1, end_pos)?;
+        Ok(())
+    }
+
+    fn compile_logical_or(&mut self, left: &HirExpr, right: &HirExpr) -> Result<(), String> {
+        self.compile_expr(left)?;
+        self.emitter.emit_code(&[0x48, 0x85, 0xc0]); // test rax, rax
+
+        let jnz_true_pos = self.emitter.code.len();
+        self.emitter
+            .emit_code(&[0x0f, 0x85, 0x00, 0x00, 0x00, 0x00]); // jnz rel32
+
+        self.compile_expr(right)?;
+        self.emit_bool_from_rax();
+
+        let jmp_end_pos = self.emitter.code.len();
+        self.emitter.emit_code(&[0xe9, 0x00, 0x00, 0x00, 0x00]); // jmp rel32
+
+        let true_pos = self.emitter.code.len();
+        self.emit_mov_rax_imm64(1);
+
+        let end_pos = self.emitter.code.len();
+        self.patch_rel32(jnz_true_pos + 2, true_pos)?;
+        self.patch_rel32(jmp_end_pos + 1, end_pos)?;
+        Ok(())
+    }
+
     fn compile_call(&mut self, func: &HirExpr, args: &[HirExpr]) -> Result<(), String> {
         let callee = self.resolve_callee_name(func)?;
 
-        if callee == "print" {
+        if callee == "print" && !self.user_functions.contains("print") {
             return self.compile_print_call(args);
         }
 
@@ -427,7 +511,7 @@ impl NativeCodegen {
             self.emit_pop_arg_reg(i)?;
         }
 
-        self.emit_call_relocation(callee);
+        self.emit_call_relocation_any(callee);
         Ok(())
     }
 
@@ -443,10 +527,10 @@ impl NativeCodegen {
 
     fn emit_pop_arg_reg(&mut self, index: usize) -> Result<(), String> {
         match index {
-            0 => self.emitter.emit_code(&[0x5f]), // pop rdi
-            1 => self.emitter.emit_code(&[0x5e]), // pop rsi
-            2 => self.emitter.emit_code(&[0x5a]), // pop rdx
-            3 => self.emitter.emit_code(&[0x59]), // pop rcx
+            0 => self.emitter.emit_code(&[0x5f]),       // pop rdi
+            1 => self.emitter.emit_code(&[0x5e]),       // pop rsi
+            2 => self.emitter.emit_code(&[0x5a]),       // pop rdx
+            3 => self.emitter.emit_code(&[0x59]),       // pop rcx
             4 => self.emitter.emit_code(&[0x41, 0x58]), // pop r8
             5 => self.emitter.emit_code(&[0x41, 0x59]), // pop r9
             _ => return Err(format!("Unsupported argument register index {}", index)),
@@ -483,7 +567,7 @@ impl NativeCodegen {
         self.emitter.emit_code(&[0x48, 0xc7, 0xc6]); // mov rsi, imm32
         self.emitter.emit_code(&text_len.to_le_bytes());
 
-        self.emit_call_relocation("print".to_string());
+        self.emit_call_relocation_builtin("print".to_string());
 
         let jmp_pos = self.emitter.code.len();
         self.emitter.emit_code(&[0xe9, 0x00, 0x00, 0x00, 0x00]); // jmp over inline bytes
@@ -573,33 +657,47 @@ impl NativeCodegen {
     fn emit_entry_trampoline(&mut self) -> usize {
         let entry = self.emitter.code.len();
 
-        self.emit_call_relocation("main".to_string());
+        self.emit_call_relocation_any("main".to_string());
         self.emitter.emit_code(&[0x48, 0x89, 0xc7]); // mov rdi, rax
-        self.emit_call_relocation("exit".to_string());
+        self.emit_call_relocation_builtin("exit".to_string());
         self.emitter.emit_code(&[0x0f, 0x0b]); // ud2 (should not return)
 
         entry
     }
 
-    fn emit_call_relocation(&mut self, target_name: String) {
+    fn emit_call_relocation_any(&mut self, target_name: String) {
         let call_pos = self.emitter.code.len();
-        self.emitter
-            .emit_code(&[0xe8, 0x00, 0x00, 0x00, 0x00]); // call rel32
+        self.emitter.emit_code(&[0xe8, 0x00, 0x00, 0x00, 0x00]); // call rel32
         self.relocations.push(PendingRelocation {
             imm_offset: call_pos + 1,
-            target_name,
+            target: RelocationTarget::FunctionOrBuiltin(target_name),
+        });
+    }
+
+    fn emit_call_relocation_builtin(&mut self, target_name: String) {
+        let call_pos = self.emitter.code.len();
+        self.emitter.emit_code(&[0xe8, 0x00, 0x00, 0x00, 0x00]); // call rel32
+        self.relocations.push(PendingRelocation {
+            imm_offset: call_pos + 1,
+            target: RelocationTarget::Builtin(target_name),
         });
     }
 
     fn apply_relocations(&mut self) -> Result<(), String> {
         let relocs = std::mem::take(&mut self.relocations);
         for reloc in relocs {
-            let target = self
-                .fn_offsets
-                .get(&reloc.target_name)
-                .copied()
-                .or_else(|| self.runtime.builtin_offset(&reloc.target_name))
-                .ok_or_else(|| format!("Undefined function '{}'", reloc.target_name))?;
+            let target = match &reloc.target {
+                RelocationTarget::FunctionOrBuiltin(name) => self
+                    .fn_offsets
+                    .get(name)
+                    .copied()
+                    .or_else(|| self.runtime.builtin_offset(name))
+                    .ok_or_else(|| format!("Undefined function '{}'", name))?,
+                RelocationTarget::Builtin(name) => self
+                    .runtime
+                    .builtin_offset(name)
+                    .ok_or_else(|| format!("Undefined builtin function '{}'", name))?,
+            };
             self.patch_rel32(reloc.imm_offset, target)?;
         }
         Ok(())
@@ -619,6 +717,12 @@ impl NativeCodegen {
 
     fn emit_zero_rax(&mut self) {
         self.emitter.emit_code(&[0x48, 0x31, 0xc0]); // xor rax, rax
+    }
+
+    fn emit_bool_from_rax(&mut self) {
+        self.emitter.emit_code(&[0x48, 0x85, 0xc0]); // test rax, rax
+        self.emitter.emit_code(&[0x0f, 0x95, 0xc0]); // setne al
+        self.emitter.emit_code(&[0x48, 0x0f, 0xb6, 0xc0]); // movzx rax, al
     }
 
     fn emit_store_rax_local(&mut self, offset: i32) {
@@ -647,7 +751,8 @@ fn align16(n: i32) -> i32 {
 
 fn rel32(from_next_ip: usize, to_target: usize) -> Result<i32, String> {
     let rel = (to_target as i64) - (from_next_ip as i64);
-    i32::try_from(rel).map_err(|_| format!("rel32 out of range: from {} to {}", from_next_ip, to_target))
+    i32::try_from(rel)
+        .map_err(|_| format!("rel32 out of range: from {} to {}", from_next_ip, to_target))
 }
 
 fn collect_let_bindings_block(block: &HirBlock, out: &mut Vec<String>) {
@@ -695,7 +800,9 @@ fn collect_let_bindings_expr(expr: &HirExpr, out: &mut Vec<String>) {
             collect_let_bindings_expr(index, out);
         }
         HirExprKind::Cast { expr, .. } => collect_let_bindings_expr(expr, out),
-        HirExprKind::Block(block) | HirExprKind::Loop(block) => collect_let_bindings_block(block, out),
+        HirExprKind::Block(block) | HirExprKind::Loop(block) => {
+            collect_let_bindings_block(block, out)
+        }
         HirExprKind::If {
             condition,
             then_branch,

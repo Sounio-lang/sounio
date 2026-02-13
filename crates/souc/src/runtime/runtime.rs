@@ -44,6 +44,7 @@ impl RuntimeCodegen {
         self.emit_trap_stub("print_char");
         self.emit_trap_stub("read_byte");
         self.emit_trap_stub("read_file");
+        self.emit_trap_stub("read_file_prefix");
         self.emit_trap_stub("file_size");
         self.emit_trap_stub("write_bytes");
         self.emit_trap_stub("arg_count");

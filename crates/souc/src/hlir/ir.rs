@@ -7,6 +7,7 @@ use crate::ast::Abi;
 use crate::hir::HirType;
 use crate::runtime::EpistemicMode;
 use std::collections::HashMap;
+use std::hash::{Hash, Hasher};
 
 /// HLIR module - top-level compilation unit
 #[derive(Debug, Clone)]
@@ -125,7 +126,7 @@ pub enum HlirTypeDefKind {
 }
 
 /// HLIR type
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone)]
 pub enum HlirType {
     Void,
     Bool,
@@ -178,6 +179,118 @@ pub enum HlirType {
         epsilon_bound: Option<f64>,
         provenance_id: Option<u32>,
     },
+}
+
+impl PartialEq for HlirType {
+    fn eq(&self, other: &Self) -> bool {
+        use HlirType::*;
+        match (self, other) {
+            (Void, Void)
+            | (Bool, Bool)
+            | (I8, I8)
+            | (I16, I16)
+            | (I32, I32)
+            | (I64, I64)
+            | (I128, I128)
+            | (U8, U8)
+            | (U16, U16)
+            | (U32, U32)
+            | (U64, U64)
+            | (U128, U128)
+            | (F32, F32)
+            | (F64, F64)
+            | (Vec2, Vec2)
+            | (Vec3, Vec3)
+            | (Vec4, Vec4)
+            | (Mat2, Mat2)
+            | (Mat3, Mat3)
+            | (Mat4, Mat4)
+            | (Quat, Quat)
+            | (Octonion, Octonion)
+            | (Sedenion, Sedenion)
+            | (QuatLinear, QuatLinear)
+            | (QuatConv2d, QuatConv2d)
+            | (QuatRnnState, QuatRnnState)
+            | (QuatGate, QuatGate)
+            | (Vec2d, Vec2d)
+            | (Vec3d, Vec3d)
+            | (Vec4d, Vec4d)
+            | (Dual, Dual) => true,
+
+            (Ptr(a), Ptr(b)) => a == b,
+            (Array(a, sa), Array(b, sb)) => sa == sb && a == b,
+            (Struct(a), Struct(b)) => a == b,
+            (Tuple(a), Tuple(b)) => a == b,
+            (
+                Function {
+                    params: ap,
+                    return_type: ar,
+                },
+                Function {
+                    params: bp,
+                    return_type: br,
+                },
+            ) => ap == bp && ar == br,
+            (
+                Knowledge {
+                    inner: ai,
+                    mode: am,
+                    epsilon_bound: ae,
+                    provenance_id: ap,
+                },
+                Knowledge {
+                    inner: bi,
+                    mode: bm,
+                    epsilon_bound: be,
+                    provenance_id: bp,
+                },
+            ) => {
+                ai == bi
+                    && am == bm
+                    && ae.map(|v| v.to_bits()) == be.map(|v| v.to_bits())
+                    && ap == bp
+            }
+
+            _ => false,
+        }
+    }
+}
+
+impl Eq for HlirType {}
+
+impl Hash for HlirType {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        std::mem::discriminant(self).hash(state);
+        use HlirType::*;
+        match self {
+            Ptr(inner) => inner.hash(state),
+            Array(inner, size) => {
+                inner.hash(state);
+                size.hash(state);
+            }
+            Struct(name) => name.hash(state),
+            Tuple(elems) => elems.hash(state),
+            Function {
+                params,
+                return_type,
+            } => {
+                params.hash(state);
+                return_type.hash(state);
+            }
+            Knowledge {
+                inner,
+                mode,
+                epsilon_bound,
+                provenance_id,
+            } => {
+                inner.hash(state);
+                mode.hash(state);
+                epsilon_bound.map(|v| v.to_bits()).hash(state);
+                provenance_id.hash(state);
+            }
+            _ => {}
+        }
+    }
 }
 
 impl HlirType {

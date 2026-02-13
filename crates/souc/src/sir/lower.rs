@@ -49,13 +49,23 @@ pub struct LoweringContext {
     /// HLIR block -> SIR block mapping
     block_map: HashMap<HlirBlockId, BlockId>,
     /// Type cache for efficiency
-    type_cache: HashMap<HlirType, SirType>,
+    // NOTE: `HlirType` contains floating-point metadata (for example epistemic bounds), so it
+    // cannot soundly implement `Eq` for use as a `HashMap` key. Keep a small linear cache to
+    // avoid NaN/bitpattern subtleties for now.
+    type_cache: Vec<(HlirType, SirType)>,
+    /// Named type definitions resolved during Step 1 (structs/enums lowered to concrete SIR types).
+    ///
+    /// This is required because `HlirType::Struct(name)` appears throughout function bodies and
+    /// signatures, and the native backend needs a concrete field layout for GEP/loads.
+    named_types: HashMap<String, SirType>,
     /// Next SIR value ID
     next_value_id: u32,
     /// Next SIR block ID
     next_block_id: u32,
     /// Function name -> FuncId mapping for call resolution
     func_map: HashMap<String, FuncId>,
+    /// Function name -> lowered signature (params, return type) for call-site coercions.
+    func_sigs: HashMap<String, (Vec<SirType>, SirType)>,
     /// Metadata store for domain-specific information
     pub metadata: MetadataStore,
     /// Value type cache (for looking up types during lowering)
@@ -262,10 +272,12 @@ impl LoweringContext {
         Self {
             value_map: HashMap::new(),
             block_map: HashMap::new(),
-            type_cache: HashMap::new(),
+            type_cache: Vec::new(),
+            named_types: HashMap::new(),
             next_value_id: 0,
             next_block_id: 0,
             func_map: HashMap::new(),
+            func_sigs: HashMap::new(),
             metadata: MetadataStore::new(),
             value_types: HashMap::new(),
             epistemic_values: HashMap::new(),
@@ -383,18 +395,33 @@ pub fn lower_module(hlir: &HlirModule) -> (SirModule, LoweringContext, MetadataS
         lower_global(&mut ctx, &mut module, global);
     }
 
-    // Step 3: Create function declarations first (for forward references)
-    for (idx, func) in hlir.functions.iter().enumerate() {
-        let func_id = FuncId(idx as u32);
-        ctx.func_map.insert(func.name.clone(), func_id);
+    // Step 3: Predeclare symbols for lowering.
+    //
+    // IMPORTANT:
+    // - External declarations (no blocks) are emitted as module externs and are
+    //   resolved by name at link time.
+    // - Internal functions are mapped to contiguous FuncIds matching the order
+    //   they will be created in Step 4, so Callee::Direct IDs remain stable.
+    let mut next_internal_id: u32 = 0;
+    for func in &hlir.functions {
+        let sig_params: Vec<SirType> = func
+            .params
+            .iter()
+            .map(|p| lower_type(&mut ctx, &p.ty))
+            .collect();
+        let sig_ret = lower_type(&mut ctx, &func.return_type);
+        ctx.func_sigs
+            .insert(func.name.clone(), (sig_params.clone(), sig_ret.clone()));
 
-        // If this is an external function without blocks, add as extern
         if func.blocks.is_empty() {
-            let params: Vec<SirType> = func.params.iter().map(|p| lower_type(&p.ty)).collect();
-            let ret_ty = lower_type(&func.return_type);
-            let ext = ExternFunction::new(&func.name, params, ret_ty);
+            let ext = ExternFunction::new(&func.name, sig_params, sig_ret);
             module.add_extern(ext);
+            continue;
         }
+
+        ctx.func_map
+            .insert(func.name.clone(), FuncId(next_internal_id));
+        next_internal_id += 1;
     }
 
     // Step 4: Lower function bodies
@@ -421,10 +448,12 @@ fn lower_type_def(ctx: &mut LoweringContext, module: &mut SirModule, type_def: &
         HlirTypeDefKind::Struct(fields) => {
             let sir_fields: Vec<(Option<String>, SirType)> = fields
                 .iter()
-                .map(|(name, ty)| (Some(name.clone()), lower_type(ty)))
+                .map(|(name, ty)| (Some(name.clone()), lower_type(ctx, ty)))
                 .collect();
             let struct_ty = StructType::new(sir_fields).named(&type_def.name);
-            module.add_type(&type_def.name, SirType::Struct(struct_ty));
+            let sir_ty = SirType::Struct(struct_ty);
+            ctx.named_types.insert(type_def.name.clone(), sir_ty.clone());
+            module.add_type(&type_def.name, sir_ty);
         }
         HlirTypeDefKind::Enum(variants) => {
             // Enums are lowered to a tagged union
@@ -434,7 +463,7 @@ fn lower_type_def(ctx: &mut LoweringContext, module: &mut SirModule, type_def: &
             // Find the largest variant for union size
             let max_size: usize = variants
                 .iter()
-                .map(|(_, tys)| tys.iter().map(|t| lower_type(t).size_bytes()).sum())
+                .map(|(_, tys)| tys.iter().map(|t| lower_type(ctx, t).size_bytes()).sum())
                 .max()
                 .unwrap_or(0);
 
@@ -446,14 +475,16 @@ fn lower_type_def(ctx: &mut LoweringContext, module: &mut SirModule, type_def: &
             let payload_field = (Some("payload".to_string()), payload_ty);
 
             let struct_ty = StructType::new(vec![tag_field, payload_field]).named(&type_def.name);
-            module.add_type(&type_def.name, SirType::Struct(struct_ty));
+            let sir_ty = SirType::Struct(struct_ty);
+            ctx.named_types.insert(type_def.name.clone(), sir_ty.clone());
+            module.add_type(&type_def.name, sir_ty);
         }
     }
 }
 
 /// Lower a global variable to SIR
 fn lower_global(ctx: &mut LoweringContext, module: &mut SirModule, global: &HlirGlobal) {
-    let ty = lower_type(&global.ty);
+    let ty = lower_type(ctx, &global.ty);
     let initializer = global.init.as_ref().map(|c| lower_constant(ctx, c));
 
     let mut sir_global = SirGlobal::new(&global.name, ty);
@@ -475,15 +506,16 @@ fn lower_function(ctx: &mut LoweringContext, module: &mut SirModule, func: &Hlir
     let params: Vec<(String, SirType)> = func
         .params
         .iter()
-        .map(|p| (p.name.clone(), lower_type(&p.ty)))
+        .map(|p| (p.name.clone(), lower_type(ctx, &p.ty)))
         .collect();
-    let ret_ty = lower_type(&func.return_type);
+    let ret_ty = lower_type(ctx, &func.return_type);
 
     let func_id = module.create_function(&func.name, params.clone(), ret_ty.clone());
 
     // Create parameter values and map them
     for (idx, param) in func.params.iter().enumerate() {
-        let sir_val = ctx.alloc_value(lower_type(&param.ty));
+        let param_ty = lower_type(ctx, &param.ty);
+        let sir_val = ctx.alloc_value(param_ty);
         ctx.map_value(param.value, sir_val);
     }
 
@@ -540,7 +572,7 @@ fn lower_block(
         .params
         .iter()
         .map(|(val_id, ty)| {
-            let sir_ty = lower_type(ty);
+            let sir_ty = lower_type(ctx, ty);
             let sir_val = ctx.get_or_create_value(*val_id, sir_ty.clone());
             Value::new(sir_val, sir_ty)
         })
@@ -549,8 +581,10 @@ fn lower_block(
 
     // Lower instructions
     for instr in &block.instructions {
-        if let Some(inst) = lower_instruction(ctx, instr, locals) {
-            sir_block.push(inst);
+        if let Some(insts) = lower_instruction(ctx, instr, locals) {
+            for inst in insts {
+                sir_block.push(inst);
+            }
         }
     }
 
@@ -566,14 +600,39 @@ fn lower_instruction(
     ctx: &mut LoweringContext,
     instr: &HlirInstr,
     locals: &HashMap<HlirValueId, HlirType>,
-) -> Option<Instruction> {
-    let result_ty = lower_type(&instr.ty);
+) -> Option<Vec<Instruction>> {
+    let result_ty = lower_type(ctx, &instr.ty);
 
     match &instr.op {
         Op::Const(constant) => {
             let sir_const = lower_constant(ctx, constant);
+            // String constants are lowered to `Constant::Aggregate([i8...])` so they can live
+            // in rodata as null-terminated byte arrays. But HLIR types treat strings as `*u8`.
+            //
+            // Emit the aggregate constant into a temporary value and then bitcast the pointer
+            // to the requested result type so downstream typing/codegen treats it as a pointer.
+            if matches!(constant, HlirConstant::String(_) | HlirConstant::CString(_))
+                && matches!(result_ty, SirType::Pointer(_))
+            {
+                let raw_val = ctx.alloc_value(sir_const.ty());
+                let const_inst = Instruction::with_result(raw_val, SirInst::Const(sir_const));
+
+                let result = instr
+                    .result
+                    .map(|r| ctx.get_or_create_value(r, result_ty.clone()))?;
+                let cast_inst = Instruction::with_result(
+                    result,
+                    SirInst::Cast {
+                        op: CastOp::BitCast,
+                        val: raw_val,
+                        to_ty: result_ty,
+                    },
+                );
+                return Some(vec![const_inst, cast_inst]);
+            }
+
             let result = instr.result.map(|r| ctx.get_or_create_value(r, result_ty));
-            result.map(|r| Instruction::with_result(r, SirInst::Const(sir_const)))
+            result.map(|r| vec![Instruction::with_result(r, SirInst::Const(sir_const))])
         }
 
         Op::Copy(val) => {
@@ -587,28 +646,43 @@ fn lower_instruction(
         Op::Binary { op, left, right } => {
             let lhs = ctx.get_value(*left)?;
             let rhs = ctx.get_value(*right)?;
-            let sir_op = lower_binary_op(*op, &instr.ty);
             let result = instr
                 .result
                 .map(|r| ctx.get_or_create_value(r, result_ty.clone()))?;
 
+            if *op == BinaryOp::Concat {
+                // String/array concatenation is lowered to a runtime call for now.
+                // This keeps the SIR + native backend simple while we iterate on layouts.
+                let call_info = CallInfo {
+                    callee: Callee::Named("concat".to_string()),
+                    args: vec![lhs, rhs],
+                    ret_ty: result_ty,
+                    cc: CallingConv::C,
+                    tail: false,
+                    nounwind: false,
+                };
+                return Some(vec![Instruction::with_result(result, SirInst::Call(call_info))]);
+            }
+
+            let sir_op = lower_binary_op(*op, &instr.ty);
+
             match sir_op {
-                LoweredBinOp::Arith(arith_op) => Some(Instruction::with_result(
+                LoweredBinOp::Arith(arith_op) => Some(vec![Instruction::with_result(
                     result,
                     SirInst::BinOp {
                         op: arith_op,
                         lhs,
                         rhs,
                     },
-                )),
-                LoweredBinOp::Cmp(cmp_op) => Some(Instruction::with_result(
+                )]),
+                LoweredBinOp::Cmp(cmp_op) => Some(vec![Instruction::with_result(
                     result,
                     SirInst::Cmp {
                         op: cmp_op,
                         lhs,
                         rhs,
                     },
-                )),
+                )]),
             }
         }
 
@@ -646,7 +720,7 @@ fn lower_instruction(
                 }
             };
 
-            Some(Instruction::with_result(result, sir_inst))
+            Some(vec![Instruction::with_result(result, sir_inst)])
         }
 
         Op::Call { func: _, args } | Op::CallDirect { name: _, args } => {
@@ -664,13 +738,13 @@ fn lower_instruction(
                             .map(|r| ctx.get_or_create_value(r, result_ty.clone()))?;
 
                         // Build slice struct: { ptr, len }
-                        return Some(Instruction::with_result(
+                        return Some(vec![Instruction::with_result(
                             result,
                             SirInst::BuildAggregate {
                                 fields: vec![ptr, len],
                                 ty: result_ty,
                             },
-                        ));
+                        )]);
                     }
                 }
                 // Handle mutable slice variant
@@ -684,18 +758,19 @@ fn lower_instruction(
                             .result
                             .map(|r| ctx.get_or_create_value(r, result_ty.clone()))?;
 
-                        return Some(Instruction::with_result(
+                        return Some(vec![Instruction::with_result(
                             result,
                             SirInst::BuildAggregate {
                                 fields: vec![ptr, len],
                                 ty: result_ty,
                             },
-                        ));
+                        )]);
                     }
                 }
             }
 
-            let sir_args: Vec<ValueId> = args.iter().filter_map(|a| ctx.get_value(*a)).collect();
+            let raw_sir_args: Vec<ValueId> =
+                args.iter().filter_map(|a| ctx.get_value(*a)).collect();
 
             let callee = match &instr.op {
                 Op::Call { func, .. } => {
@@ -715,6 +790,66 @@ fn lower_instruction(
                 _ => unreachable!(),
             };
 
+            // Call-site coercions (notably fixed-array -> slice fat pointer).
+            let mut pre_insts: Vec<Instruction> = Vec::new();
+            let mut sir_args: Vec<ValueId> = Vec::with_capacity(raw_sir_args.len());
+
+            if let Op::CallDirect { name, .. } = &instr.op {
+                if let Some((param_tys, _ret_ty)) = ctx.func_sigs.get(name).cloned() {
+                    for (idx, arg_val) in raw_sir_args.iter().enumerate() {
+                        let param_ty = param_tys.get(idx);
+                        let arg_ty = ctx.get_value_type(*arg_val);
+
+                        let mut coerced: Option<ValueId> = None;
+
+                        if let (SirType::Array(arr_ty), Some(SirType::Struct(st))) =
+                            (&arg_ty, param_ty)
+                        {
+                            // Slice (`[T]`) lowered to { ptr: *T, len: i64 }.
+                            let looks_like_slice = st.fields.len() >= 2
+                                && matches!(st.fields[0].ty, SirType::Pointer(_))
+                                && matches!(st.fields[1].ty, SirType::Scalar(ScalarType::I64));
+
+                            if looks_like_slice && arr_ty.len > 0 {
+                                let ptr_field_ty = st.fields[0].ty.clone();
+                                let ptr_val = ctx.alloc_value(ptr_field_ty.clone());
+                                pre_insts.push(Instruction::with_result(
+                                    ptr_val,
+                                    SirInst::Cast {
+                                        op: CastOp::BitCast,
+                                        val: *arg_val,
+                                        to_ty: ptr_field_ty,
+                                    },
+                                ));
+
+                                let len_val = ctx.alloc_value(SirType::i64());
+                                pre_insts.push(Instruction::with_result(
+                                    len_val,
+                                    SirInst::Const(Constant::I64(arr_ty.len as i64)),
+                                ));
+
+                                let slice_val = ctx.alloc_value(SirType::Struct(st.clone()));
+                                pre_insts.push(Instruction::with_result(
+                                    slice_val,
+                                    SirInst::BuildAggregate {
+                                        fields: vec![ptr_val, len_val],
+                                        ty: SirType::Struct(st.clone()),
+                                    },
+                                ));
+
+                                coerced = Some(slice_val);
+                            }
+                        }
+
+                        sir_args.push(coerced.unwrap_or(*arg_val));
+                    }
+                } else {
+                    sir_args.extend(raw_sir_args);
+                }
+            } else {
+                sir_args.extend(raw_sir_args);
+            }
+
             let call_info = CallInfo {
                 callee,
                 args: sir_args,
@@ -726,9 +861,11 @@ fn lower_instruction(
 
             let result = instr.result.map(|r| ctx.get_or_create_value(r, result_ty));
             if let Some(r) = result {
-                Some(Instruction::with_result(r, SirInst::Call(call_info)))
+                pre_insts.push(Instruction::with_result(r, SirInst::Call(call_info)));
+                Some(pre_insts)
             } else {
-                Some(Instruction::void(SirInst::Call(call_info)))
+                pre_insts.push(Instruction::void(SirInst::Call(call_info)));
+                Some(pre_insts)
             }
         }
 
@@ -738,7 +875,7 @@ fn lower_instruction(
                 .result
                 .map(|r| ctx.get_or_create_value(r, result_ty.clone()))?;
 
-            Some(Instruction::with_result(
+            Some(vec![Instruction::with_result(
                 result,
                 SirInst::Memory(MemoryOp::Load {
                     ptr: ptr_val,
@@ -746,19 +883,19 @@ fn lower_instruction(
                     volatile: false,
                     align: None,
                 }),
-            ))
+            )])
         }
 
         Op::Store { ptr, value } => {
             let ptr_val = ctx.get_value(*ptr)?;
             let val = ctx.get_value(*value)?;
 
-            Some(Instruction::void(SirInst::Memory(MemoryOp::Store {
+            Some(vec![Instruction::void(SirInst::Memory(MemoryOp::Store {
                 ptr: ptr_val,
                 val,
                 volatile: false,
                 align: None,
-            })))
+            }))])
         }
 
         Op::GetFieldPtr { base, field } => {
@@ -774,14 +911,14 @@ fn lower_instruction(
                 _ => SirType::Void,
             };
 
-            Some(Instruction::with_result(
+            Some(vec![Instruction::with_result(
                 result,
                 SirInst::Memory(MemoryOp::GetElementPtr {
                     ptr: base_val,
                     ty: pointee_ty,
                     indices: vec![GepIndex::Const(0), GepIndex::Const(*field as i64)],
                 }),
-            ))
+            )])
         }
 
         Op::GetElementPtr { base, index } => {
@@ -792,34 +929,100 @@ fn lower_instruction(
                 .map(|r| ctx.get_or_create_value(r, result_ty.clone()))?;
 
             let base_ty = ctx.get_value_type(base_val);
-            let pointee_ty = match &base_ty {
-                SirType::Pointer(ptr) => (*ptr.pointee).clone(),
-                _ => SirType::Void,
-            };
+            match &base_ty {
+                SirType::Pointer(ptr) => {
+                    let pointee_ty = (*ptr.pointee).clone();
+                    Some(vec![Instruction::with_result(
+                        result,
+                        SirInst::Memory(MemoryOp::GetElementPtr {
+                            ptr: base_val,
+                            ty: pointee_ty,
+                            indices: vec![GepIndex::Value(idx_val)],
+                        }),
+                    )])
+                }
+                SirType::Array(_) => {
+                    // Arrays are represented as pointers to contiguous storage in the native backend.
+                    // Treat the value as a pointer to the array's element buffer.
+                    Some(vec![Instruction::with_result(
+                        result,
+                        SirInst::Memory(MemoryOp::GetElementPtr {
+                            ptr: base_val,
+                            ty: base_ty.clone(),
+                            indices: vec![GepIndex::Value(idx_val)],
+                        }),
+                    )])
+                }
+                SirType::Struct(st) => {
+                    // Slices (`[T]`) are lowered to { ptr: *T, len: i64 }.
+                    let looks_like_slice = st.fields.len() >= 2
+                        && matches!(st.fields[0].ty, SirType::Pointer(_))
+                        && matches!(st.fields[1].ty, SirType::Scalar(ScalarType::I64));
+                    if !looks_like_slice {
+                        return Some(vec![Instruction::with_result(
+                            result,
+                            SirInst::Memory(MemoryOp::GetElementPtr {
+                                ptr: base_val,
+                                ty: SirType::Void,
+                                indices: vec![GepIndex::Value(idx_val)],
+                            }),
+                        )]);
+                    }
 
-            Some(Instruction::with_result(
-                result,
-                SirInst::Memory(MemoryOp::GetElementPtr {
-                    ptr: base_val,
-                    ty: pointee_ty,
-                    indices: vec![GepIndex::Value(idx_val)],
-                }),
-            ))
+                    let ptr_field = &st.fields[0];
+                    let ptr_field_ty = ptr_field.ty.clone();
+                    let elem_ty = match &ptr_field_ty {
+                        SirType::Pointer(p) => (*p.pointee).clone(),
+                        _ => SirType::i64(),
+                    };
+
+                    // Load `ptr` from the slice struct then perform a normal GEP on the backing buffer.
+                    let data_ptr_val = ctx.alloc_value(ptr_field_ty.clone());
+                    let extract_ptr = Instruction::with_result(
+                        data_ptr_val,
+                        SirInst::Memory(MemoryOp::ExtractField {
+                            ptr: base_val,
+                            field_offset: ptr_field.offset,
+                            field_ty: ptr_field_ty,
+                        }),
+                    );
+
+                    let backing_array_ty = SirType::Array(ArrayType::new(elem_ty, 0));
+                    let gep = Instruction::with_result(
+                        result,
+                        SirInst::Memory(MemoryOp::GetElementPtr {
+                            ptr: data_ptr_val,
+                            ty: backing_array_ty,
+                            indices: vec![GepIndex::Value(idx_val)],
+                        }),
+                    );
+
+                    Some(vec![extract_ptr, gep])
+                }
+                _ => Some(vec![Instruction::with_result(
+                    result,
+                    SirInst::Memory(MemoryOp::GetElementPtr {
+                        ptr: base_val,
+                        ty: SirType::Void,
+                        indices: vec![GepIndex::Value(idx_val)],
+                    }),
+                )]),
+            }
         }
 
         Op::Alloca { ty } => {
-            let alloc_ty = lower_type(ty);
+            let alloc_ty = lower_type(ctx, ty);
             let ptr_ty = SirType::ptr(alloc_ty.clone());
             let result = instr.result.map(|r| ctx.get_or_create_value(r, ptr_ty))?;
 
-            Some(Instruction::with_result(
+            Some(vec![Instruction::with_result(
                 result,
                 SirInst::Memory(MemoryOp::Alloca {
                     ty: alloc_ty,
                     count: None,
                     align: None,
                 }),
-            ))
+            )])
         }
 
         Op::Cast {
@@ -832,17 +1035,56 @@ fn lower_instruction(
                 .result
                 .map(|r| ctx.get_or_create_value(r, result_ty.clone()))?;
 
-            let cast_op = determine_cast_op(source, target);
-            let to_ty = lower_type(target);
+            // Array-to-slice coercion:
+            // HLIR represents slices as `Array(T, 0)` and fixed arrays as `Array(T, N)`.
+            // When a fixed array is cast to a slice, we must build the fat pointer
+            // `{ ptr: *T, len: i64 }` rather than bitcasting the pointer.
+            if let (HlirType::Array(elem_src, src_len), HlirType::Array(elem_dst, dst_len)) =
+                (source, target)
+            {
+                if *dst_len == 0 && *src_len > 0 {
+                    let elem_ty = lower_type(ctx, elem_src);
+                    let ptr_ty = SirType::ptr(elem_ty);
 
-            Some(Instruction::with_result(
+                    let len_val = ctx.alloc_value(SirType::i64());
+                    let len_inst = Instruction::with_result(
+                        len_val,
+                        SirInst::Const(Constant::I64(*src_len as i64)),
+                    );
+
+                    let ptr_val = ctx.alloc_value(ptr_ty.clone());
+                    let ptr_cast = Instruction::with_result(
+                        ptr_val,
+                        SirInst::Cast {
+                            op: CastOp::BitCast,
+                            val,
+                            to_ty: ptr_ty,
+                        },
+                    );
+
+                    let slice_inst = Instruction::with_result(
+                        result,
+                        SirInst::BuildAggregate {
+                            fields: vec![ptr_val, len_val],
+                            ty: result_ty,
+                        },
+                    );
+
+                    return Some(vec![len_inst, ptr_cast, slice_inst]);
+                }
+            }
+
+            let cast_op = determine_cast_op(source, target);
+            let to_ty = lower_type(ctx, target);
+
+            Some(vec![Instruction::with_result(
                 result,
                 SirInst::Cast {
                     op: cast_op,
                     val,
                     to_ty,
                 },
-            ))
+            )])
         }
 
         Op::Phi { incoming } => {
@@ -859,13 +1101,13 @@ fn lower_instruction(
                 })
                 .collect();
 
-            Some(Instruction::with_result(
+            Some(vec![Instruction::with_result(
                 result,
                 SirInst::Phi {
                     ty: result_ty,
                     incoming: sir_incoming,
                 },
-            ))
+            )])
         }
 
         Op::ExtractValue { base, index } => {
@@ -874,21 +1116,66 @@ fn lower_instruction(
                 .result
                 .map(|r| ctx.get_or_create_value(r, result_ty.clone()))?;
 
-            // Compute field offset based on field type and index
-            // For f64 fields (8-byte aligned), offset = index * 8
-            // For f32 fields (4-byte aligned), offset = index * 4
-            let field_size = result_ty.size_bytes();
-            let field_offset = *index * field_size;
+            // Compute field offset using the base aggregate layout.
+            //
+            // The previous `index * field_size` shortcut is only correct for
+            // homogeneous tuples/arrays. It breaks for real structs (especially
+            // nested structs) and caused field projection bugs in the Chiuratto
+            // backend (e.g. reading `state.config.version` when requesting
+            // `state.db_pool`).
+            if std::env::var("SOUC_DEBUG_EXTRACT").is_ok() {
+                eprintln!(
+                    "[sir-lower] ExtractValue base_hlir={:?} base_sir={:?} index={} base_ty={:?} result_ty={:?}",
+                    base,
+                    base_val,
+                    index,
+                    ctx.value_types.get(&base_val),
+                    result_ty
+                );
+                if let Some(SirType::Struct(st)) = ctx.value_types.get(&base_val) {
+                    eprintln!(
+                        "[sir-lower]   base_struct name={:?} size={} fields={}",
+                        st.name,
+                        st.size,
+                        st.fields.len()
+                    );
+                    for (i, f) in st.fields.iter().enumerate() {
+                        eprintln!(
+                            "[sir-lower]     field[{}] name={:?} off={} ty={:?}",
+                            i, f.name, f.offset, f.ty
+                        );
+                    }
+                }
+            }
+
+            let field_offset = match ctx.value_types.get(&base_val) {
+                Some(SirType::Pointer(ptr)) => match ptr.pointee.as_ref() {
+                    SirType::Struct(st) => st
+                        .fields
+                        .get(*index)
+                        .map(|f| f.offset)
+                        .unwrap_or(*index * result_ty.size_bytes()),
+                    SirType::Array(arr) => *index * arr.elem.size_bytes(),
+                    _ => *index * result_ty.size_bytes(),
+                },
+                Some(SirType::Struct(st)) => st
+                    .fields
+                    .get(*index)
+                    .map(|f| f.offset)
+                    .unwrap_or(*index * result_ty.size_bytes()),
+                Some(SirType::Array(arr)) => *index * arr.elem.size_bytes(),
+                _ => *index * result_ty.size_bytes(),
+            };
 
             // Use ExtractField which combines GEP + Load
-            Some(Instruction::with_result(
+            Some(vec![Instruction::with_result(
                 result,
                 SirInst::Memory(MemoryOp::ExtractField {
                     ptr: base_val,
                     field_offset,
                     field_ty: result_ty,
                 }),
-            ))
+            )])
         }
 
         Op::InsertValue { base, value, index } => {
@@ -934,13 +1221,13 @@ fn lower_instruction(
                 }
             }
 
-            Some(Instruction::with_result(
+            Some(vec![Instruction::with_result(
                 result,
                 SirInst::BuildAggregate {
                     fields: sir_values,
                     ty: result_ty,
                 },
-            ))
+            )])
         }
 
         Op::Array(values) => {
@@ -951,13 +1238,73 @@ fn lower_instruction(
             let sir_values: Vec<ValueId> =
                 values.iter().filter_map(|v| ctx.get_value(*v)).collect();
 
-            Some(Instruction::with_result(
+            if let HlirType::Array(elem, size) = &instr.ty {
+                if *size == 0 {
+                    // Slice literal: build backing array + fat pointer {ptr,len}.
+                    let elem_ty = lower_type(ctx, elem);
+                    let ptr_ty = SirType::ptr(elem_ty.clone());
+                    let slice_ty = result_ty;
+
+                    let len_val = ctx.alloc_value(SirType::i64());
+                    let len_inst = Instruction::with_result(
+                        len_val,
+                        SirInst::Const(Constant::I64(sir_values.len() as i64)),
+                    );
+
+                    let ptr_val = ctx.alloc_value(ptr_ty.clone());
+
+                    if sir_values.is_empty() {
+                        let ptr_inst =
+                            Instruction::with_result(ptr_val, SirInst::Const(Constant::NullPtr));
+                        let slice_inst = Instruction::with_result(
+                            result,
+                            SirInst::BuildAggregate {
+                                fields: vec![ptr_val, len_val],
+                                ty: slice_ty,
+                            },
+                        );
+                        return Some(vec![len_inst, ptr_inst, slice_inst]);
+                    }
+
+                    let backing_arr_ty =
+                        SirType::Array(ArrayType::new(elem_ty, sir_values.len()));
+                    let backing_val = ctx.alloc_value(backing_arr_ty.clone());
+                    let backing_inst = Instruction::with_result(
+                        backing_val,
+                        SirInst::BuildAggregate {
+                            fields: sir_values,
+                            ty: backing_arr_ty,
+                        },
+                    );
+
+                    let ptr_cast = Instruction::with_result(
+                        ptr_val,
+                        SirInst::Cast {
+                            op: CastOp::BitCast,
+                            val: backing_val,
+                            to_ty: ptr_ty,
+                        },
+                    );
+
+                    let slice_inst = Instruction::with_result(
+                        result,
+                        SirInst::BuildAggregate {
+                            fields: vec![ptr_val, len_val],
+                            ty: slice_ty,
+                        },
+                    );
+
+                    return Some(vec![backing_inst, len_inst, ptr_cast, slice_inst]);
+                }
+            }
+
+            Some(vec![Instruction::with_result(
                 result,
                 SirInst::BuildAggregate {
                     fields: sir_values,
                     ty: result_ty,
                 },
-            ))
+            )])
         }
 
         Op::Struct { name, fields } => {
@@ -1015,13 +1362,13 @@ fn lower_instruction(
                 }
             }
 
-            Some(Instruction::with_result(
+            Some(vec![Instruction::with_result(
                 result,
                 SirInst::BuildAggregate {
                     fields: sir_values,
                     ty: struct_ty,
                 },
-            ))
+            )])
         }
 
         Op::PerformEffect { effect, op, args } => {
@@ -1032,7 +1379,8 @@ fn lower_instruction(
 
             // Handle epistemic effects specially
             if effect == "Epistemic" || effect == "epistemic" {
-                return lower_epistemic_effect(ctx, op, &sir_args, instr.result, &result_ty);
+                return lower_epistemic_effect(ctx, op, &sir_args, instr.result, &result_ty)
+                    .map(|inst| vec![inst]);
             }
 
             // For other effects, lower to a call to a runtime function
@@ -1048,9 +1396,9 @@ fn lower_instruction(
 
             let result = instr.result.map(|r| ctx.get_or_create_value(r, result_ty));
             if let Some(r) = result {
-                Some(Instruction::with_result(r, SirInst::Call(call_info)))
+                Some(vec![Instruction::with_result(r, SirInst::Call(call_info))])
             } else {
-                Some(Instruction::void(SirInst::Call(call_info)))
+                Some(vec![Instruction::void(SirInst::Call(call_info))])
             }
         }
 
@@ -1069,7 +1417,7 @@ fn lower_instruction(
                 tail: false,
                 nounwind: false,
             };
-            Some(Instruction::void(SirInst::Call(call_info)))
+            Some(vec![Instruction::void(SirInst::Call(call_info))])
         }
 
         Op::PopHandler => {
@@ -1082,7 +1430,7 @@ fn lower_instruction(
                 tail: false,
                 nounwind: false,
             };
-            Some(Instruction::void(SirInst::Call(call_info)))
+            Some(vec![Instruction::void(SirInst::Call(call_info))])
         }
 
         Op::DispatchEffect { effect, op, args } => {
@@ -1101,9 +1449,9 @@ fn lower_instruction(
 
             let result = instr.result.map(|r| ctx.get_or_create_value(r, result_ty));
             if let Some(r) = result {
-                Some(Instruction::with_result(r, SirInst::Call(call_info)))
+                Some(vec![Instruction::with_result(r, SirInst::Call(call_info))])
             } else {
-                Some(Instruction::void(SirInst::Call(call_info)))
+                Some(vec![Instruction::void(SirInst::Call(call_info))])
             }
         }
     }
@@ -1441,8 +1789,12 @@ fn lower_constant(ctx: &LoweringContext, constant: &HlirConstant) -> Constant {
             _ => Constant::F64(*val),
         },
         HlirConstant::String(s) => {
-            // Strings become arrays of bytes
-            let bytes: Vec<Constant> = s.bytes().map(|b| Constant::I8(b as i8)).collect();
+            // Strings become C-compatible byte arrays (null-terminated).
+            //
+            // NOTE: In the current Sounio runtime, `string` is represented as `*u8` and
+            // most operations (concat, FFI shims) assume a terminating `\\0`.
+            let mut bytes: Vec<Constant> = s.bytes().map(|b| Constant::I8(b as i8)).collect();
+            bytes.push(Constant::I8(0)); // Null terminator
             Constant::Aggregate(bytes)
         }
         HlirConstant::CString(s) => {
@@ -1460,7 +1812,7 @@ fn lower_constant(ctx: &LoweringContext, constant: &HlirConstant) -> Constant {
             Constant::Aggregate(sir_fields)
         }
         HlirConstant::Null(ty) => Constant::NullPtr,
-        HlirConstant::Undef(ty) => Constant::Undef(lower_type(ty)),
+        HlirConstant::Undef(ty) => Constant::Undef(lower_type(ctx, ty)),
         HlirConstant::FunctionRef(name) => {
             // Function references become function pointers
             Constant::NullPtr // Simplified - would need proper handling
@@ -1473,7 +1825,14 @@ fn lower_constant(ctx: &LoweringContext, constant: &HlirConstant) -> Constant {
 }
 
 /// Lower an HLIR type to SIR type
-pub fn lower_type(hlir_ty: &HlirType) -> SirType {
+pub fn lower_type(ctx: &LoweringContext, hlir_ty: &HlirType) -> SirType {
+    // Named structs must resolve to their full layout when available.
+    if let HlirType::Struct(name) = hlir_ty {
+        if let Some(full) = ctx.named_types.get(name) {
+            return full.clone();
+        }
+    }
+
     match hlir_ty {
         HlirType::Void => SirType::Void,
         HlirType::Bool => SirType::bool(),
@@ -1488,9 +1847,22 @@ pub fn lower_type(hlir_ty: &HlirType) -> SirType {
         HlirType::F32 => SirType::f32(),
         HlirType::F64 => SirType::f64(),
 
-        HlirType::Ptr(inner) => SirType::ptr(lower_type(inner)),
+        HlirType::Ptr(inner) => SirType::ptr(lower_type(ctx, inner)),
 
-        HlirType::Array(elem, size) => SirType::Array(ArrayType::new(lower_type(elem), *size)),
+        HlirType::Array(elem, size) => {
+            if *size == 0 {
+                // Slices (`[T]`) are represented in HLIR as `Array(T, 0)`.
+                // Lower them to a fat pointer: { ptr: *T, len: i64 }.
+                let elem_ty = lower_type(ctx, elem);
+                let fields = vec![
+                    (Some("ptr".to_string()), SirType::ptr(elem_ty)),
+                    (Some("len".to_string()), SirType::i64()),
+                ];
+                SirType::Struct(StructType::new(fields))
+            } else {
+                SirType::Array(ArrayType::new(lower_type(ctx, elem), *size))
+            }
+        }
 
         HlirType::Struct(name) => {
             // Reference to a named struct
@@ -1506,7 +1878,7 @@ pub fn lower_type(hlir_ty: &HlirType) -> SirType {
                 let fields: Vec<(Option<String>, SirType)> = elems
                     .iter()
                     .enumerate()
-                    .map(|(i, ty)| (Some(format!("_{}", i)), lower_type(ty)))
+                    .map(|(i, ty)| (Some(format!("_{}", i)), lower_type(ctx, ty)))
                     .collect();
                 SirType::Struct(StructType::new(fields))
             }
@@ -1516,8 +1888,8 @@ pub fn lower_type(hlir_ty: &HlirType) -> SirType {
             params,
             return_type,
         } => {
-            let param_tys: Vec<SirType> = params.iter().map(lower_type).collect();
-            let ret_ty = lower_type(return_type);
+            let param_tys: Vec<SirType> = params.iter().map(|t| lower_type(ctx, t)).collect();
+            let ret_ty = lower_type(ctx, return_type);
             SirType::Function(super::types::FunctionType {
                 params: param_tys,
                 ret: Box::new(ret_ty),
@@ -1621,7 +1993,7 @@ pub fn lower_type(hlir_ty: &HlirType) -> SirType {
             ];
             SirType::Struct(StructType::new(fields).named("Dual"))
         }
-        HlirType::Knowledge { inner, .. } => lower_type(inner),
+        HlirType::Knowledge { inner, .. } => lower_type(ctx, inner),
         // Sedenion: 16 x f32 struct (16D hypercomplex)
         HlirType::Sedenion => {
             let fields: Vec<(Option<String>, SirType)> = (0..16)
@@ -1633,8 +2005,12 @@ pub fn lower_type(hlir_ty: &HlirType) -> SirType {
 }
 
 /// Lower type with epistemic awareness
-pub fn lower_type_epistemic(hlir_ty: &HlirType, has_uncertainty: bool) -> SirType {
-    let base_ty = lower_type(hlir_ty);
+pub fn lower_type_epistemic(
+    ctx: &LoweringContext,
+    hlir_ty: &HlirType,
+    has_uncertainty: bool,
+) -> SirType {
+    let base_ty = lower_type(ctx, hlir_ty);
 
     if has_uncertainty {
         SirType::Epistemic(Box::new(base_ty))
@@ -1653,15 +2029,17 @@ mod tests {
 
     #[test]
     fn test_type_lowering() {
-        assert_eq!(lower_type(&HlirType::I32), SirType::i32());
-        assert_eq!(lower_type(&HlirType::F64), SirType::f64());
-        assert_eq!(lower_type(&HlirType::Bool), SirType::bool());
+        let mut ctx = LoweringContext::new();
+        assert_eq!(lower_type(&mut ctx, &HlirType::I32), SirType::i32());
+        assert_eq!(lower_type(&mut ctx, &HlirType::F64), SirType::f64());
+        assert_eq!(lower_type(&mut ctx, &HlirType::Bool), SirType::bool());
     }
 
     #[test]
     fn test_type_lowering_ptr() {
+        let mut ctx = LoweringContext::new();
         let ptr_ty = HlirType::Ptr(Box::new(HlirType::I32));
-        let lowered = lower_type(&ptr_ty);
+        let lowered = lower_type(&mut ctx, &ptr_ty);
         match lowered {
             SirType::Pointer(ptr) => {
                 assert_eq!(*ptr.pointee, SirType::i32());
@@ -1672,8 +2050,9 @@ mod tests {
 
     #[test]
     fn test_type_lowering_array() {
+        let mut ctx = LoweringContext::new();
         let arr_ty = HlirType::Array(Box::new(HlirType::F64), 10);
-        let lowered = lower_type(&arr_ty);
+        let lowered = lower_type(&mut ctx, &arr_ty);
         match lowered {
             SirType::Array(arr) => {
                 assert_eq!(*arr.elem, SirType::f64());
@@ -1685,8 +2064,9 @@ mod tests {
 
     #[test]
     fn test_type_lowering_tuple() {
+        let mut ctx = LoweringContext::new();
         let tuple_ty = HlirType::Tuple(vec![HlirType::I32, HlirType::F64]);
-        let lowered = lower_type(&tuple_ty);
+        let lowered = lower_type(&mut ctx, &tuple_ty);
         match lowered {
             SirType::Struct(s) => {
                 assert_eq!(s.fields.len(), 2);
@@ -1697,8 +2077,9 @@ mod tests {
 
     #[test]
     fn test_type_lowering_epistemic() {
-        let base_ty = lower_type(&HlirType::F64);
-        let epistemic_ty = lower_type_epistemic(&HlirType::F64, true);
+        let mut ctx = LoweringContext::new();
+        let base_ty = lower_type(&mut ctx, &HlirType::F64);
+        let epistemic_ty = lower_type_epistemic(&mut ctx, &HlirType::F64, true);
         match epistemic_ty {
             SirType::Epistemic(inner) => {
                 assert_eq!(*inner, base_ty);
@@ -1709,7 +2090,8 @@ mod tests {
 
     #[test]
     fn test_type_lowering_vec3() {
-        let lowered = lower_type(&HlirType::Vec3);
+        let mut ctx = LoweringContext::new();
+        let lowered = lower_type(&mut ctx, &HlirType::Vec3);
         match lowered {
             SirType::Struct(s) => {
                 assert_eq!(s.fields.len(), 4); // x, y, z, _pad
@@ -1721,7 +2103,8 @@ mod tests {
 
     #[test]
     fn test_type_lowering_dual() {
-        let lowered = lower_type(&HlirType::Dual);
+        let mut ctx = LoweringContext::new();
+        let lowered = lower_type(&mut ctx, &HlirType::Dual);
         match lowered {
             SirType::Struct(s) => {
                 assert_eq!(s.fields.len(), 2); // value, derivative
@@ -1741,15 +2124,15 @@ mod tests {
 
     #[test]
     fn test_constant_lowering() {
-        let ctx = LoweringContext::new();
+        let mut ctx = LoweringContext::new();
 
-        let int_const = lower_constant(&ctx, &HlirConstant::Int(42, HlirType::I32));
+        let int_const = lower_constant(&mut ctx, &HlirConstant::Int(42, HlirType::I32));
         assert_eq!(int_const, Constant::I32(42));
 
-        let float_const = lower_constant(&ctx, &HlirConstant::Float(3.14, HlirType::F64));
+        let float_const = lower_constant(&mut ctx, &HlirConstant::Float(3.14, HlirType::F64));
         assert_eq!(float_const, Constant::F64(3.14));
 
-        let bool_const = lower_constant(&ctx, &HlirConstant::Bool(true));
+        let bool_const = lower_constant(&mut ctx, &HlirConstant::Bool(true));
         assert_eq!(bool_const, Constant::Bool(true));
     }
 

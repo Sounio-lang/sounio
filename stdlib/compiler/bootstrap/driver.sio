@@ -1,0 +1,1627 @@
+//! stdlib/compiler/bootstrap/driver.sio - Poseidon self-hosted compiler driver API
+//!
+//! This defines a stable Sounio-side orchestration boundary for:
+//! - compile_file(path, options) -> CompileArtifact
+//! - compile_source(source, options) -> CompileArtifact
+//! - run_pipeline(stage_input) -> StageOutput
+//!
+//! NOTE:
+//! This is an API scaffold for fast cutover. It intentionally provides
+//! deterministic placeholders until all stages are fully wired.
+
+// ============================================================================
+// STAGE TAGS
+// ============================================================================
+
+let STAGE_LEXER: i32 = 1
+let STAGE_PARSER: i32 = 2
+let STAGE_CHECKER: i32 = 3
+let STAGE_CODEGEN: i32 = 4
+
+// ============================================================================
+// DRIVER TYPES
+// ============================================================================
+
+struct CompileOptions {
+    optimize_level: i32,
+    target: i32,      // 1=linux-x86_64, 2=macos-arm64
+    strict_mode: bool,
+}
+
+struct CompileArtifact {
+    // Keep this large enough to hold stage-boundary bytecode outputs for curated suites.
+    // (Self-hosted suite currently emits ~80k SOBC bytes.)
+    code: [i8; 131072],
+    code_len: i64,
+    ok: bool,
+    exit_code: i32,
+    diagnostics: [i8; 4096],
+    diagnostics_len: i64,
+}
+
+struct StageInput {
+    stage: i32,
+    payload: [i8; 131072],
+    payload_len: i64,
+}
+
+struct StageOutput {
+    stage: i32,
+    ok: bool,
+    payload: [i8; 131072],
+    payload_len: i64,
+    diag_code: i32,
+}
+
+// ============================================================================
+// HELPERS
+// ============================================================================
+
+fn compile_options_default() -> CompileOptions {
+    CompileOptions {
+        optimize_level: 0,
+        target: 1,
+        strict_mode: false,
+    }
+}
+
+fn compile_artifact_empty() -> CompileArtifact {
+    CompileArtifact {
+        code: [0; 131072],
+        code_len: 0,
+        ok: false,
+        exit_code: 1,
+        diagnostics: [0; 4096],
+        diagnostics_len: 0,
+    }
+}
+
+fn stage_output_empty(stage: i32) -> StageOutput {
+    StageOutput {
+        stage: stage,
+        ok: false,
+        payload: [0; 131072],
+        payload_len: 0,
+        diag_code: 1,
+    }
+}
+
+// ============================================================================
+// PUBLIC DRIVER API
+// ============================================================================
+
+fn run_pipeline(input: StageInput) -> StageOutput with Mut, Panic {
+    // Stage handler boundary.
+    //
+    // Phase 1 wiring begins here: we start by supporting the CODEGEN stage,
+    // returning SOBC v1 bytes in `payload`.
+    if input.stage == STAGE_CODEGEN {
+        let opts = compile_options_default()
+        let artifact = compile_source(input.payload, input.payload_len, opts)
+        var out = stage_output_empty(input.stage)
+        out.ok = artifact.ok
+        out.diag_code = artifact.exit_code
+
+        if artifact.ok {
+            var n: i64 = artifact.code_len
+            if n < 0 { n = 0 }
+            if n > 131072 { n = 131072 }
+            out.payload_len = n
+
+            var i: i64 = 0
+            while i < n {
+                out.payload[i as usize] = artifact.code[i as usize]
+                i = i + 1
+            }
+        }
+
+        out
+    } else {
+        // Future stages: lexer/parser/checker boundaries.
+        stage_output_empty(input.stage)
+    }
+}
+
+// ============================================================================
+// MINIMAL BOOTSTRAP COMPILER (driver output)
+// ============================================================================
+
+// This is intentionally tiny and conservative: it recognizes a small set of
+// `fn main` shapes and emits real VM bytecode serialization bytes (SOBC v1).
+//
+// Supported program patterns (bootstrap subset):
+// - `fn main() -> i32/i64 { return <int|ident> }`
+// - `fn main() -> i32/i64 { <int|ident> }`
+// - Optional: up to two leading `let <ident> = <int>` bindings (single-letter ident).
+// - Expression body: `<operand> <op> <operand>` where `op` is one of `+ - * / %`
+//   and operands are integer literals or bound identifiers.
+// - If expression body: `if <cond> { <int> } else { <int> }` where `<cond>` is
+//   `true/false` or an integer comparison (`== != < <= > >=`) over literals.
+// - IO: up to two `print/println("<str>")` statements, then a final integer result.
+// - Special-case: `add(<int>, <int>)` expression body emits a tiny `add` function
+//   and calls it from `main`.
+
+fn is_ws(c: i8) -> bool {
+    c == 32 || c == 9 || c == 10 || c == 13
+}
+
+fn is_digit(c: i8) -> bool {
+    c >= 48 && c <= 57
+}
+
+fn is_ident_start(c: i8) -> bool {
+    (c >= 65 && c <= 90) || (c >= 97 && c <= 122) || c == 95
+}
+
+fn is_ident_continue(c: i8) -> bool {
+    is_ident_start(c) || is_digit(c)
+}
+
+fn skip_ws(src: [i8; 65536], len: i64, pos: i64) -> i64 with Panic, Div {
+    var p = pos
+    while p < len && is_ws(src[p as usize]) {
+        p = p + 1
+    }
+    p
+}
+
+fn find_fn_main_lbrace(src: [i8; 65536], len: i64) -> i64 with Panic, Div {
+    // Best-effort scan for `fn main ... {`.
+    var i: i64 = 0
+    while i + 2 < len {
+        if src[i as usize] == 102 && // f
+           src[(i + 1) as usize] == 110 && // n
+           is_ws(src[(i + 2) as usize]) {
+            var p = skip_ws(src, len, i + 2)
+            if p + 4 < len &&
+               src[p as usize] == 109 && // m
+               src[(p + 1) as usize] == 97 && // a
+               src[(p + 2) as usize] == 105 && // i
+               src[(p + 3) as usize] == 110 { // n
+                return find_first_char(src, len, 123, p + 4) // '{'
+            }
+        }
+        i = i + 1
+    }
+    -1
+}
+
+fn find_matching_rbrace(src: [i8; 65536], len: i64, lbrace: i64) -> i64 with Panic, Div {
+    // Returns index of matching '}' for the '{' at lbrace (or -1).
+    if lbrace < 0 || lbrace >= len { return -1 }
+    var depth: i64 = 0
+    var i: i64 = lbrace
+    while i < len {
+        let c = src[i as usize]
+        if c == 34 { // '"'
+            // Skip string literals so braces inside strings don't affect depth.
+            i = i + 1
+            while i < len {
+                let ch = src[i as usize]
+                if ch == 92 { // '\\'
+                    if i + 1 < len { i = i + 2 } else { return -1 }
+                } else if ch == 34 { // '"'
+                    i = i + 1
+                    break
+                } else {
+                    i = i + 1
+                }
+            }
+            continue
+        }
+
+        if c == 123 { // '{'
+            depth = depth + 1
+        } else if c == 125 { // '}'
+            depth = depth - 1
+            if depth == 0 { return i }
+        }
+        i = i + 1
+    }
+    -1
+}
+
+fn find_return(src: [i8; 65536], len: i64) -> i64 with Panic, Div {
+    // "return"
+    var i: i64 = 0
+    while i + 6 < len {
+        if src[i as usize] == 114 && // r
+           src[(i + 1) as usize] == 101 && // e
+           src[(i + 2) as usize] == 116 && // t
+           src[(i + 3) as usize] == 117 && // u
+           src[(i + 4) as usize] == 114 && // r
+           src[(i + 5) as usize] == 110 {  // n
+            return i
+        }
+        i = i + 1
+    }
+    -1
+}
+
+fn find_let(src: [i8; 65536], len: i64) -> i64 with Panic, Div {
+    // "let"
+    var i: i64 = 0
+    while i + 3 < len {
+        if src[i as usize] == 108 && // l
+           src[(i + 1) as usize] == 101 && // e
+           src[(i + 2) as usize] == 116 {  // t
+            return i
+        }
+        i = i + 1
+    }
+    -1
+}
+
+fn find_print(src: [i8; 65536], len: i64) -> i64 with Panic, Div {
+    // "print"
+    var i: i64 = 0
+    while i + 5 < len {
+        if src[i as usize] == 112 && // p
+           src[(i + 1) as usize] == 114 && // r
+           src[(i + 2) as usize] == 105 && // i
+           src[(i + 3) as usize] == 110 && // n
+           src[(i + 4) as usize] == 116 {  // t
+            return i
+        }
+        i = i + 1
+    }
+    -1
+}
+
+fn find_first_char(src: [i8; 65536], len: i64, ch: i8, start: i64) -> i64 with Panic, Div {
+    var i: i64 = start
+    if i < 0 { i = 0 }
+    while i < len {
+        if src[i as usize] == ch { return i }
+        i = i + 1
+    }
+    -1
+}
+
+fn parse_string_literal_after(src: [i8; 65536], len: i64, pos: i64) -> (bool, i64, i64, i64) with Panic, Div, Mut {
+    // returns (ok, content_start, content_end, after_quote_pos)
+    // Only supports double-quoted literals with backslash escapes.
+    var p = skip_ws(src, len, pos)
+    let q = find_first_char(src, len, 34, p) // '"'
+    if q < 0 { return (false, 0, 0, p) }
+    var i: i64 = q + 1
+    let start = i
+    while i < len {
+        let c = src[i as usize]
+        if c == 92 { // '\\'
+            // Skip escaped character.
+            i = i + 2
+            continue
+        }
+        if c == 34 { // '"'
+            return (true, start, i, i + 1)
+        }
+        i = i + 1
+    }
+    (false, 0, 0, p)
+}
+
+fn parse_int_at(src: [i8; 65536], len: i64, pos: i64) -> (bool, i64, i64) with Panic, Div, Mut {
+    // returns (ok, value, new_pos)
+    var p = skip_ws(src, len, pos)
+    if p >= len { return (false, 0, p) }
+
+    var sign: i64 = 1
+    if src[p as usize] == 45 { // '-'
+        sign = -1
+        p = p + 1
+    }
+    if p >= len { return (false, 0, p) }
+    if !is_digit(src[p as usize]) { return (false, 0, p) }
+
+    var v: i64 = 0
+    while p < len && is_digit(src[p as usize]) {
+        let d = (src[p as usize] - 48) as i64
+        v = v * 10 + d
+        p = p + 1
+    }
+    (true, v * sign, p)
+}
+
+fn parse_ident_at(src: [i8; 65536], len: i64, pos: i64) -> (bool, [i8; 64], i64, i64) with Panic, Div, Mut {
+    // returns (ok, name_buf, name_len, new_pos)
+    //
+    // This bootstrap compiler supports identifiers up to 64 bytes.
+    // Longer identifiers are rejected to avoid silent truncation.
+    var p = skip_ws(src, len, pos)
+    var name: [i8; 64] = [0; 64]
+    if p >= len { return (false, name, 0, p) }
+    if !is_ident_start(src[p as usize]) { return (false, name, 0, p) }
+
+    var n: i64 = 0
+    var too_long: bool = false
+    while p < len && is_ident_continue(src[p as usize]) {
+        if n < 64 {
+            name[n as usize] = src[p as usize]
+        } else {
+            too_long = true
+        }
+        n = n + 1
+        p = p + 1
+    }
+
+    if too_long { return (false, name, 0, p) }
+    (true, name, n, p)
+}
+
+fn ident_eq(a: [i8; 64], a_len: i64, b: [i8; 64], b_len: i64) -> bool with Panic, Div {
+    if a_len != b_len { return false }
+    var i: i64 = 0
+    while i < a_len {
+        if a[i as usize] != b[i as usize] { return false }
+        i = i + 1
+    }
+    true
+}
+
+fn lookup_binding(
+    name: [i8; 64],
+    name_len: i64,
+    names: [[i8; 64]; 32],
+    name_lens: [i64; 32],
+    values: [i64; 32],
+    n: i64
+) -> (bool, i64) with Panic, Div {
+    var i: i64 = 0
+    while i < n {
+        if ident_eq(name, name_len, names[i as usize], name_lens[i as usize]) {
+            return (true, values[i as usize])
+        }
+        i = i + 1
+    }
+    (false, 0)
+}
+
+fn parse_const_value_at(
+    src: [i8; 65536],
+    len: i64,
+    pos: i64,
+    bind_names: [[i8; 64]; 32],
+    bind_name_lens: [i64; 32],
+    bind_values: [i64; 32],
+    bind_count: i64
+) -> (bool, i64, i64) with Panic, Div, Mut {
+    // Parse an integer literal or a bound identifier, returning a constant i64.
+    let ir = parse_int_at(src, len, pos)
+    if ir.0 {
+        return (true, ir.1, ir.2)
+    }
+
+    let idr = parse_ident_at(src, len, pos)
+    if idr.0 {
+        let r = lookup_binding(idr.1, idr.2, bind_names, bind_name_lens, bind_values, bind_count)
+        if r.0 { return (true, r.1, idr.3) }
+    }
+
+    (false, 0, idr.3)
+}
+
+fn parse_const_expr_at(
+    src: [i8; 65536],
+    len: i64,
+    pos: i64,
+    bind_names: [[i8; 64]; 32],
+    bind_name_lens: [i64; 32],
+    bind_values: [i64; 32],
+    bind_count: i64
+) -> (bool, i64, i64) with Panic, Div, Mut {
+    // Parse a small constant expression:
+    //   <value> | <value> <op> <value>
+    // where <value> is an int literal or a bound identifier and <op> is one of + - * / %.
+    let a = parse_const_value_at(
+        src, len, pos,
+        bind_names, bind_name_lens, bind_values, bind_count
+    )
+    if !a.0 { return (false, 0, a.2) }
+
+    var p = skip_ws(src, len, a.2)
+    if p >= len { return (true, a.1, p) }
+
+    let op = src[p as usize]
+    if op != 43 && op != 45 && op != 42 && op != 47 && op != 37 {
+        return (true, a.1, p)
+    }
+
+    let b = parse_const_value_at(
+        src, len, p + 1,
+        bind_names, bind_name_lens, bind_values, bind_count
+    )
+    if !b.0 { return (false, 0, b.2) }
+
+    p = skip_ws(src, len, b.2)
+
+    if (op == 47 || op == 37) && b.1 == 0 {
+        // Preserve VM semantics: div/mod by zero is an execution error. The bootstrap compiler
+        // does not currently emit such programs.
+        return (false, 0, p)
+    }
+
+    let v =
+        if op == 43 { a.1 + b.1 }
+        else if op == 45 { a.1 - b.1 }
+        else if op == 42 { a.1 * b.1 }
+        else if op == 47 { a.1 / b.1 }
+        else { a.1 % b.1 }
+
+    (true, v, p)
+}
+
+fn parse_print_stmt_at(
+    src: [i8; 65536],
+    len: i64,
+    body_end: i64,
+    pos: i64
+) -> (bool, i32, i64, i64, i64) with Panic, Div, Mut {
+    // returns (ok, kind, str_start, str_end, new_pos)
+    // kind: 1=print, 2=println
+    var p = skip_ws(src, len, pos)
+    if p >= body_end { return (false, 0, 0, 0, p) }
+
+    var kind: i32 = 0
+
+    // println("<str>") ...
+    if p + 6 < body_end &&
+       src[p as usize] == 112 && // p
+       src[(p + 1) as usize] == 114 && // r
+       src[(p + 2) as usize] == 105 && // i
+       src[(p + 3) as usize] == 110 && // n
+       src[(p + 4) as usize] == 116 && // t
+       src[(p + 5) as usize] == 108 && // l
+       src[(p + 6) as usize] == 110 { // n
+        kind = 2
+        p = p + 7
+    } else if p + 4 < body_end &&
+              src[p as usize] == 112 && // p
+              src[(p + 1) as usize] == 114 && // r
+              src[(p + 2) as usize] == 105 && // i
+              src[(p + 3) as usize] == 110 && // n
+              src[(p + 4) as usize] == 116 {  // t
+        kind = 1
+        p = p + 5
+    } else {
+        return (false, 0, 0, 0, pos)
+    }
+
+    var q = skip_ws(src, len, p)
+    if q >= body_end || src[q as usize] != 40 { // '('
+        return (false, 0, 0, 0, pos)
+    }
+
+    let sr = parse_string_literal_after(src, len, q + 1)
+    if !sr.0 { return (false, 0, 0, 0, pos) }
+
+    q = skip_ws(src, len, sr.3)
+    if q >= body_end || src[q as usize] != 41 { // ')'
+        return (false, 0, 0, 0, pos)
+    }
+    q = q + 1
+
+    q = skip_ws(src, len, q)
+    if q < body_end && src[q as usize] == 59 { q = q + 1 } // ';'
+    q = skip_ws(src, len, q)
+    (true, kind, sr.1, sr.2, q)
+}
+
+fn emit_ascii(out: CompileArtifact, pos: i64, a: i8) -> (CompileArtifact, i64) with Mut, Panic, Div {
+    var o = out
+    var p = pos
+    if p >= 0 && p < 65536 {
+        o.code[p as usize] = a
+        p = p + 1
+    }
+    (o, p)
+}
+
+fn emit_bytes(out: CompileArtifact, pos: i64, buf: [i8; 32], n: i64) -> (CompileArtifact, i64) with Mut, Panic, Div {
+    var o = out
+    var p = pos
+    var i: i64 = 0
+    while i < n {
+        let b = buf[i as usize]
+        if p >= 0 && p < 65536 {
+            o.code[p as usize] = b
+            p = p + 1
+        }
+        i = i + 1
+    }
+    (o, p)
+}
+
+fn emit_i64_decimal(out: CompileArtifact, pos: i64, value: i64) -> (CompileArtifact, i64) with Mut, Panic, Div {
+    var o = out
+    var p = pos
+
+    var v = value
+    if v == 0 {
+        let r = emit_ascii(o, p, 48)
+        o = r.0; p = r.1
+        return (o, p)
+    }
+
+    if v < 0 {
+        let r = emit_ascii(o, p, 45)
+        o = r.0; p = r.1
+        v = 0 - v
+    }
+
+    var tmp: [i8; 32] = [0; 32]
+    var n: i64 = 0
+    while v > 0 && n < 32 {
+        let d = (v % 10) as i8
+        tmp[n as usize] = (48 + d)
+        n = n + 1
+        v = v / 10
+    }
+
+    // reverse emit
+    var i: i64 = n - 1
+    while i >= 0 {
+        let r = emit_ascii(o, p, tmp[i as usize])
+        o = r.0; p = r.1
+        i = i - 1
+    }
+    (o, p)
+}
+
+fn emit_diag(out: CompileArtifact, msg: [i8; 64], msg_len: i64) -> CompileArtifact with Mut, Panic, Div {
+    var o = out
+    var n: i64 = msg_len
+    if n < 0 { n = 0 }
+    if n > 4096 { n = 4096 }
+    o.diagnostics_len = n
+    var i: i64 = 0
+    while i < n {
+        o.diagnostics[i as usize] = msg[i as usize]
+        i = i + 1
+    }
+    o
+}
+
+// ============================================================================
+// BYTECODE BINARY ARTIFACT EMISSION (SOBC v1)
+// ============================================================================
+
+// This emits *real* VM bytecode serialization bytes matching
+// `crates/souc/src/vm/serialize.rs` (magic "SOBC", version 1).
+
+fn patch_u32_le(out: CompileArtifact, pos: i64, value: i64) -> CompileArtifact with Mut, Panic, Div {
+    var o = out
+    if pos < 0 || pos + 3 >= 65536 { return o }
+    var v = value
+    let b0 = (v % 256) as i8
+    v = v / 256
+    let b1 = (v % 256) as i8
+    v = v / 256
+    let b2 = (v % 256) as i8
+    v = v / 256
+    let b3 = (v % 256) as i8
+    o.code[pos as usize] = b0
+    o.code[(pos + 1) as usize] = b1
+    o.code[(pos + 2) as usize] = b2
+    o.code[(pos + 3) as usize] = b3
+    o
+}
+
+fn emit_u32_le(out: CompileArtifact, pos: i64, value: i64) -> (CompileArtifact, i64) with Mut, Panic, Div {
+    var o = out
+    var p = pos
+    var v = value
+    var i: i64 = 0
+    while i < 4 {
+        let b = (v % 256) as i8
+        let r = emit_ascii(o, p, b)
+        o = r.0; p = r.1
+        v = v / 256
+        i = i + 1
+    }
+    (o, p)
+}
+
+fn emit_u64_le(out: CompileArtifact, pos: i64, value: i64) -> (CompileArtifact, i64) with Mut, Panic, Div {
+    var o = out
+    var p = pos
+    var v = value
+    var i: i64 = 0
+    while i < 8 {
+        let b = (v % 256) as i8
+        let r = emit_ascii(o, p, b)
+        o = r.0; p = r.1
+        v = v / 256
+        i = i + 1
+    }
+    (o, p)
+}
+
+fn emit_i32_le(out: CompileArtifact, pos: i64, value: i64) -> (CompileArtifact, i64) with Mut, Panic, Div {
+    emit_u32_le(out, pos, value)
+}
+
+fn emit_i64_le(out: CompileArtifact, pos: i64, value: i64) -> (CompileArtifact, i64) with Mut, Panic, Div {
+    emit_u64_le(out, pos, value)
+}
+
+fn emit_unescaped_string_payload(
+    out: CompileArtifact,
+    pos: i64,
+    src: [i8; 65536],
+    start: i64,
+    end: i64
+) -> (CompileArtifact, i64, bool) with Mut, Panic, Div {
+    // Emits: u32(len) + bytes, where bytes are unescaped from the source slice.
+    // Supported escapes: \\ \" \n \r \t \0
+    var o = out
+    var p = pos
+
+    // Reserve length.
+    let len_pos = p
+    let r0 = emit_u32_le(o, p, 0)
+    o = r0.0; p = r0.1
+
+    var count: i64 = 0
+    var i: i64 = start
+    while i < end {
+        let c = src[i as usize]
+        if c == 92 { // '\\'
+            if i + 1 >= end { return (o, p, false) }
+            let esc = src[(i + 1) as usize]
+            var outc: i8 = 0
+            if esc == 110 { outc = 10 } // n
+            else if esc == 114 { outc = 13 } // r
+            else if esc == 116 { outc = 9 } // t
+            else if esc == 48 { outc = 0 } // 0
+            else if esc == 92 { outc = 92 } // '\\'
+            else if esc == 34 { outc = 34 } // '"'
+            else { return (o, p, false) }
+            let r = emit_ascii(o, p, outc)
+            o = r.0; p = r.1
+            count = count + 1
+            i = i + 2
+        } else {
+            let r = emit_ascii(o, p, c)
+            o = r.0; p = r.1
+            count = count + 1
+            i = i + 1
+        }
+    }
+
+    o = patch_u32_le(o, len_pos, count)
+    (o, p, true)
+}
+
+fn compile_source(
+    source: [i8; 65536],
+    source_len: i64,
+    options: CompileOptions
+) -> CompileArtifact with Mut, Panic {
+    let _opts = options
+    var out = compile_artifact_empty()
+
+    if source_len <= 0 {
+        var msg: [i8; 64] = [0; 64]
+        // "empty_source"
+        msg[0] = 101; msg[1] = 109; msg[2] = 112; msg[3] = 116; msg[4] = 121
+        msg[5] = 95; msg[6] = 115; msg[7] = 111; msg[8] = 117; msg[9] = 114; msg[10] = 99; msg[11] = 101
+        out.exit_code = 2
+        return emit_diag(out, msg, 12)
+    }
+
+    var len = source_len
+    if len > 65536 { len = 65536 }
+
+    let lbrace = find_fn_main_lbrace(source, len)
+    let rbrace = find_matching_rbrace(source, len, lbrace)
+
+    // Case 1 (Level 3): (print|println)("<str>"); ...; <int>
+    var print_ok: bool = false
+    var print_count: i64 = 0
+    var print1_kind: i32 = 0
+    var print1_s_start: i64 = 0
+    var print1_s_end: i64 = 0
+    var print2_kind: i32 = 0
+    var print2_s_start: i64 = 0
+    var print2_s_end: i64 = 0
+    var print_ret_value: i64 = 0
+    if lbrace >= 0 && rbrace > lbrace {
+        let body_start = lbrace + 1
+        let body_end = rbrace
+
+        var p = skip_ws(source, len, body_start)
+
+        let p1 = parse_print_stmt_at(source, len, body_end, p)
+        if p1.0 {
+            print_count = 1
+            print1_kind = p1.1
+            print1_s_start = p1.2
+            print1_s_end = p1.3
+            p = p1.4
+
+            let p2 = parse_print_stmt_at(source, len, body_end, p)
+            if p2.0 {
+                print_count = 2
+                print2_kind = p2.1
+                print2_s_start = p2.2
+                print2_s_end = p2.3
+                p = p2.4
+            }
+        }
+
+        if print_count > 0 {
+            let ir = parse_int_at(source, len, p)
+            if ir.0 {
+                var q = skip_ws(source, len, ir.2)
+                if q == body_end {
+                    print_ok = true
+                    print_ret_value = ir.1
+                }
+            }
+        }
+    }
+
+    // Case 2 (Level 4): add(<int>, <int>) expression body.
+    var call_ok: bool = false
+    var call_a: i64 = 0
+    var call_b: i64 = 0
+    if !print_ok && lbrace >= 0 && rbrace > lbrace {
+        let body_start = lbrace + 1
+        let body_end = rbrace
+        var p = skip_ws(source, len, body_start)
+        if p + 4 < body_end &&
+           source[p as usize] == 97 && // a
+           source[(p + 1) as usize] == 100 && // d
+           source[(p + 2) as usize] == 100 { // d
+            p = skip_ws(source, len, p + 3)
+            if p < body_end && source[p as usize] == 40 { // '('
+                let ir1 = parse_int_at(source, len, p + 1)
+                if ir1.0 {
+                    var q = skip_ws(source, len, ir1.2)
+                    if q < body_end && source[q as usize] == 44 { // ','
+                        let ir2 = parse_int_at(source, len, q + 1)
+                        if ir2.0 {
+                            q = skip_ws(source, len, ir2.2)
+                            if q < body_end && source[q as usize] == 41 { // ')'
+                                q = q + 1
+                                q = skip_ws(source, len, q)
+                                if q < body_end && source[q as usize] == 59 { q = q + 1 } // ';'
+                                q = skip_ws(source, len, q)
+                                if q == body_end {
+                                    call_ok = true
+                                    call_a = ir1.1
+                                    call_b = ir2.1
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // Case 3 (Level 5): if <cond> { <int> } else { <int> } expression body.
+    //
+    // Supported cond forms:
+    //   - bool literal: true | false
+    //   - integer comparison: <int> (==|!=|<|<=|>|>=) <int>
+    var if_ok: bool = false
+    var if_cond_kind: i32 = 0 // 1=bool, 2=cmp
+    var if_cond_bool: bool = false
+    var if_cmp_opcode: i64 = 0
+    var if_cmp_a: i64 = 0
+    var if_cmp_b: i64 = 0
+    var if_then_value: i64 = 0
+    var if_else_value: i64 = 0
+    if !print_ok && lbrace >= 0 && rbrace > lbrace {
+        let body_start = lbrace + 1
+        let body_end = rbrace
+        var p = skip_ws(source, len, body_start)
+        if p + 2 < body_end &&
+           source[p as usize] == 105 && // i
+           source[(p + 1) as usize] == 102 && // f
+           is_ws(source[(p + 2) as usize]) {
+            p = skip_ws(source, len, p + 2)
+
+            var cond_ok: bool = false
+            if p + 4 < body_end &&
+               source[p as usize] == 116 && // t
+               source[(p + 1) as usize] == 114 && // r
+               source[(p + 2) as usize] == 117 && // u
+               source[(p + 3) as usize] == 101 { // e
+                if_cond_kind = 1
+                if_cond_bool = true
+                cond_ok = true
+                p = p + 4
+            } else if p + 5 < body_end &&
+                      source[p as usize] == 102 && // f
+                      source[(p + 1) as usize] == 97 && // a
+                      source[(p + 2) as usize] == 108 && // l
+                      source[(p + 3) as usize] == 115 && // s
+                      source[(p + 4) as usize] == 101 { // e
+                if_cond_kind = 1
+                if_cond_bool = false
+                cond_ok = true
+                p = p + 5
+            }
+
+            // Try integer comparison condition if we didn't match a bool literal.
+            if !cond_ok {
+                let irl = parse_int_at(source, len, p)
+                if irl.0 {
+                    var q = skip_ws(source, len, irl.2)
+                    if q < body_end {
+                        var opcode: i64 = 0
+                        var op_ok: bool = false
+                        // ==, !=, <=, >= are 2-char tokens.
+                        if q + 1 < body_end &&
+                           source[q as usize] == 61 && // '='
+                           source[(q + 1) as usize] == 61 { // '='
+                            opcode = 32 // Opcode::Eq (0x20)
+                            op_ok = true
+                            q = q + 2
+                        } else if q + 1 < body_end &&
+                                  source[q as usize] == 33 && // '!'
+                                  source[(q + 1) as usize] == 61 { // '='
+                            opcode = 33 // Opcode::Ne (0x21)
+                            op_ok = true
+                            q = q + 2
+                        } else if q + 1 < body_end &&
+                                  source[q as usize] == 60 && // '<'
+                                  source[(q + 1) as usize] == 61 { // '='
+                            opcode = 35 // Opcode::Le (0x23)
+                            op_ok = true
+                            q = q + 2
+                        } else if source[q as usize] == 60 { // '<'
+                            opcode = 34 // Opcode::Lt (0x22)
+                            op_ok = true
+                            q = q + 1
+                        } else if q + 1 < body_end &&
+                                  source[q as usize] == 62 && // '>'
+                                  source[(q + 1) as usize] == 61 { // '='
+                            opcode = 37 // Opcode::Ge (0x25)
+                            op_ok = true
+                            q = q + 2
+                        } else if source[q as usize] == 62 { // '>'
+                            opcode = 36 // Opcode::Gt (0x24)
+                            op_ok = true
+                            q = q + 1
+                        }
+
+                        if op_ok {
+                            let irr = parse_int_at(source, len, q)
+                            if irr.0 {
+                                if_cond_kind = 2
+                                if_cmp_opcode = opcode
+                                if_cmp_a = irl.1
+                                if_cmp_b = irr.1
+                                cond_ok = true
+                                p = irr.2
+                            }
+                        }
+                    }
+                }
+            }
+
+            if cond_ok {
+                p = skip_ws(source, len, p)
+                if p < body_end && source[p as usize] == 123 { // '{'
+                    let then_l = p
+                    let then_r = find_matching_rbrace(source, len, then_l)
+                    if then_r > then_l && then_r < body_end {
+                        let irt = parse_int_at(source, len, then_l + 1)
+                        if irt.0 {
+                            var qt = skip_ws(source, len, irt.2)
+                            if qt == then_r {
+                                p = skip_ws(source, len, then_r + 1)
+                                if p + 4 < body_end &&
+                                   source[p as usize] == 101 && // e
+                                   source[(p + 1) as usize] == 108 && // l
+                                   source[(p + 2) as usize] == 115 && // s
+                                   source[(p + 3) as usize] == 101 && // e
+                                   is_ws(source[(p + 4) as usize]) {
+                                    p = skip_ws(source, len, p + 4)
+                                    if p < body_end && source[p as usize] == 123 { // '{'
+                                        let else_l = p
+                                        let else_r = find_matching_rbrace(source, len, else_l)
+                                        if else_r > else_l && else_r < body_end {
+                                            let ire = parse_int_at(source, len, else_l + 1)
+                                            if ire.0 {
+                                                var qe = skip_ws(source, len, ire.2)
+                                                if qe == else_r {
+                                                    p = skip_ws(source, len, else_r + 1)
+                                                    if p == body_end {
+                                                        if_ok = true
+                                                        if_then_value = irt.1
+                                                        if_else_value = ire.1
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // Optional: parse up to 32 leading `let <ident> = <const_expr>` bindings.
+    //
+    // Identifiers are limited to 64 bytes for this bootstrap subset.
+    var bind_names: [[i8; 64]; 32] = [[0; 64]; 32]
+    var bind_name_lens: [i64; 32] = [0; 32]
+    var bind_values: [i64; 32] = [0; 32]
+    var bind_count: i64 = 0
+    var body_start0: i64 = 0
+    var body_end0: i64 = 0
+    if lbrace >= 0 && rbrace > lbrace {
+        body_start0 = lbrace + 1
+        body_end0 = rbrace
+    } else {
+        // Fall back to scanning whole source if we can't find a main body.
+        body_start0 = 0
+        body_end0 = len
+    }
+
+    // Parse `return <int>` or `return <ident>` (optionally preceded by up to two `let` bindings).
+    var ret_value: i64 = 0
+    var ok: bool = false
+    var bin_ok: bool = false
+    var bin_opcode: i64 = 0
+    var bin_a: i64 = 0
+    var bin_b: i64 = 0
+    var p0 = skip_ws(source, len, body_start0)
+    while bind_count < 32 &&
+          p0 + 3 < body_end0 &&
+          source[p0 as usize] == 108 && // l
+          source[(p0 + 1) as usize] == 101 && // e
+          source[(p0 + 2) as usize] == 116 && // t
+          is_ws(source[(p0 + 3) as usize]) {
+        var p = p0 + 3
+        let idr = parse_ident_at(source, len, p)
+        if !idr.0 { break }
+
+        bind_name_lens[bind_count as usize] = idr.2
+        var bi: i64 = 0
+        while bi < idr.2 {
+            bind_names[bind_count as usize][bi as usize] = idr.1[bi as usize]
+            bi = bi + 1
+        }
+
+        p = idr.3
+        while p < body_end0 && source[p as usize] != 61 { // '='
+            p = p + 1
+        }
+        if !(p < body_end0 && source[p as usize] == 61) { break }
+
+        let er = parse_const_expr_at(
+            source, len, p + 1,
+            bind_names, bind_name_lens, bind_values, bind_count
+        )
+        if !er.0 { break }
+
+        bind_values[bind_count as usize] = er.1
+        bind_count = bind_count + 1
+
+        p = skip_ws(source, len, er.2)
+        if p < body_end0 && source[p as usize] == 59 { p = p + 1 } // ';'
+        p0 = skip_ws(source, len, p)
+    }
+
+    if !ok && !print_ok &&
+       p0 + 6 < body_end0 &&
+       source[p0 as usize] == 114 && // r
+       source[(p0 + 1) as usize] == 101 && // e
+       source[(p0 + 2) as usize] == 116 && // t
+       source[(p0 + 3) as usize] == 117 && // u
+       source[(p0 + 4) as usize] == 114 && // r
+       source[(p0 + 5) as usize] == 110 && // n
+       is_ws(source[(p0 + 6) as usize]) {
+        // return <value> | return <value> <op> <value>
+        let a = parse_const_value_at(
+            source, len, p0 + 6,
+            bind_names, bind_name_lens, bind_values, bind_count
+        )
+        if a.0 {
+            var q = skip_ws(source, len, a.2)
+            if q == body_end0 {
+                ret_value = a.1
+                ok = true
+            } else if q < body_end0 && source[q as usize] == 59 { // ';'
+                q = skip_ws(source, len, q + 1)
+                if q == body_end0 {
+                    ret_value = a.1
+                    ok = true
+                }
+            } else {
+                let op = if q < body_end0 { source[q as usize] } else { 0 }
+                if op == 43 || op == 45 || op == 42 || op == 47 || op == 37 {
+                    let b = parse_const_value_at(
+                        source, len, q + 1,
+                        bind_names, bind_name_lens, bind_values, bind_count
+                    )
+                    if b.0 {
+                        q = skip_ws(source, len, b.2)
+                        if q < body_end0 && source[q as usize] == 59 { q = q + 1 } // ';'
+                        q = skip_ws(source, len, q)
+                        if q == body_end0 {
+                            // Map operator -> SOBC opcode.
+                            if op == 43 { bin_opcode = 16 }      // +
+                            else if op == 45 { bin_opcode = 17 } // -
+                            else if op == 42 { bin_opcode = 18 } // *
+                            else if op == 47 { bin_opcode = 19 } // /
+                            else { bin_opcode = 20 }             // %
+                            bin_ok = true
+                            bin_a = a.1
+                            bin_b = b.1
+                            ok = true
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    if !ok && !print_ok && body_end0 > body_start0 {
+        // Expression body: <value> | <value> <op> <value> and nothing else.
+        // Operands may be integer literals or either bound identifier.
+        let a = parse_const_value_at(
+            source, len, p0,
+            bind_names, bind_name_lens, bind_values, bind_count
+        )
+        if a.0 {
+            var q = skip_ws(source, len, a.2)
+            if q == body_end0 {
+                ret_value = a.1
+                ok = true
+            } else {
+                let op = if q < body_end0 { source[q as usize] } else { 0 }
+                if op == 43 || op == 45 || op == 42 || op == 47 || op == 37 {
+                    let b = parse_const_value_at(
+                        source, len, q + 1,
+                        bind_names, bind_name_lens, bind_values, bind_count
+                    )
+                    if b.0 {
+                        q = skip_ws(source, len, b.2)
+                        if q == body_end0 {
+                            // Map operator -> SOBC opcode.
+                            if op == 43 { bin_opcode = 16 }      // +
+                            else if op == 45 { bin_opcode = 17 } // -
+                            else if op == 42 { bin_opcode = 18 } // *
+                            else if op == 47 { bin_opcode = 19 } // /
+                            else { bin_opcode = 20 }             // %
+                            bin_ok = true
+                            bin_a = a.1
+                            bin_b = b.1
+                            ok = true
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    if !ok && !print_ok && !call_ok && !if_ok {
+        var msg: [i8; 64] = [0; 64]
+        // "unsupported_program"
+        msg[0] = 117; msg[1] = 110; msg[2] = 115; msg[3] = 117; msg[4] = 112; msg[5] = 112; msg[6] = 111; msg[7] = 114; msg[8] = 116; msg[9] = 101; msg[10] = 100
+        msg[11] = 95
+        msg[12] = 112; msg[13] = 114; msg[14] = 111; msg[15] = 103; msg[16] = 114; msg[17] = 97; msg[18] = 109
+        out.exit_code = 2
+        return emit_diag(out, msg, 19)
+    }
+
+    // Emit a serialized VM bytecode program (SOBC v1).
+    out.ok = true
+    out.exit_code = 0
+    var pos: i64 = 0
+
+    // Reject negative integers for now (encoding signed i64 without bitwise ops is out of scope
+    // for this bootstrap compiler subset).
+    if (ok && ret_value < 0) ||
+       (bin_ok && (bin_a < 0 || bin_b < 0)) ||
+       (print_ok && print_ret_value < 0) ||
+       (call_ok && (call_a < 0 || call_b < 0)) ||
+       (if_ok && (if_then_value < 0 || if_else_value < 0)) ||
+       (if_ok && if_cond_kind == 2 && (if_cmp_a < 0 || if_cmp_b < 0)) {
+        var msg: [i8; 64] = [0; 64]
+        // "negative_int"
+        msg[0] = 110; msg[1] = 101; msg[2] = 103; msg[3] = 97; msg[4] = 116; msg[5] = 105; msg[6] = 118; msg[7] = 101
+        msg[8] = 95
+        msg[9] = 105; msg[10] = 110; msg[11] = 116
+        out.exit_code = 2
+        return emit_diag(out, msg, 12)
+    }
+
+    var instr_count: i64 = 0
+    if call_ok { instr_count = 15 }
+    else if if_ok {
+        if if_cond_kind == 2 { instr_count = 13 } else { instr_count = 11 }
+    }
+    else if print_ok { instr_count = 7 + print_count * 3 }
+    else if bin_ok { instr_count = 9 }
+    else { instr_count = 7 }
+
+    var main_addr: i64 = 5
+    var add_addr: i64 = 0
+    if call_ok {
+        add_addr = 5
+        main_addr = 11
+    }
+
+    // Header: magic "SOBC", version 1, then u32 instruction count.
+    let h0 = emit_ascii(out, pos, 83) // S
+    out = h0.0; pos = h0.1
+    let h1 = emit_ascii(out, pos, 79) // O
+    out = h1.0; pos = h1.1
+    let h2 = emit_ascii(out, pos, 66) // B
+    out = h2.0; pos = h2.1
+    let h3 = emit_ascii(out, pos, 67) // C
+    out = h3.0; pos = h3.1
+    let hv = emit_ascii(out, pos, 1) // version
+    out = hv.0; pos = hv.1
+    let hc = emit_u32_le(out, pos, instr_count)
+    out = hc.0; pos = hc.1
+
+    // Entry stub (addr 0): Call(init=3); Call(main); Return.
+    // Opcode::Call = 0x42 (66), Opcode::Return = 0x43 (67)
+    let c0 = emit_ascii(out, pos, 66)
+    out = c0.0; pos = c0.1
+    let c0a = emit_u64_le(out, pos, 3)
+    out = c0a.0; pos = c0a.1
+
+    let c1 = emit_ascii(out, pos, 66)
+    out = c1.0; pos = c1.1
+    let c1a = emit_u64_le(out, pos, main_addr)
+    out = c1a.0; pos = c1a.1
+
+    let c2 = emit_ascii(out, pos, 67)
+    out = c2.0; pos = c2.1
+
+    // init function (addr 3): Push(Unit); Return.
+    // Opcode::Push = 0x01 (1), ValueTag::Unit = 0x00 (0)
+    let i0 = emit_ascii(out, pos, 1)
+    out = i0.0; pos = i0.1
+    let i1 = emit_ascii(out, pos, 0)
+    out = i1.0; pos = i1.1
+    let i2 = emit_ascii(out, pos, 67)
+    out = i2.0; pos = i2.1
+
+    if call_ok {
+        // add(a: i64, b: i64) -> i64 (addr 5)
+        // Store params then compute a+b.
+        // Opcode::Store = 0x51 (81), Opcode::Load = 0x50 (80), Opcode::Add = 0x10 (16)
+
+        // Store(slot 1)
+        let a0 = emit_ascii(out, pos, 81)
+        out = a0.0; pos = a0.1
+        let a1 = emit_u64_le(out, pos, 1)
+        out = a1.0; pos = a1.1
+
+        // Store(slot 0)
+        let a2 = emit_ascii(out, pos, 81)
+        out = a2.0; pos = a2.1
+        let a3 = emit_u64_le(out, pos, 0)
+        out = a3.0; pos = a3.1
+
+        // Load(slot 0)
+        let a4 = emit_ascii(out, pos, 80)
+        out = a4.0; pos = a4.1
+        let a5 = emit_u64_le(out, pos, 0)
+        out = a5.0; pos = a5.1
+
+        // Load(slot 1)
+        let a6 = emit_ascii(out, pos, 80)
+        out = a6.0; pos = a6.1
+        let a7 = emit_u64_le(out, pos, 1)
+        out = a7.0; pos = a7.1
+
+        // Add + Return
+        let a8 = emit_ascii(out, pos, 16)
+        out = a8.0; pos = a8.1
+        let a9 = emit_ascii(out, pos, 67)
+        out = a9.0; pos = a9.1
+
+        // main() -> i64 (addr 11): push args; call add; return
+        // Push Int call_a
+        let m0 = emit_ascii(out, pos, 1)
+        out = m0.0; pos = m0.1
+        let m1 = emit_ascii(out, pos, 2) // ValueTag::Int
+        out = m1.0; pos = m1.1
+        let m2 = emit_i64_le(out, pos, call_a)
+        out = m2.0; pos = m2.1
+
+        // Push Int call_b
+        let m3 = emit_ascii(out, pos, 1)
+        out = m3.0; pos = m3.1
+        let m4 = emit_ascii(out, pos, 2)
+        out = m4.0; pos = m4.1
+        let m5 = emit_i64_le(out, pos, call_b)
+        out = m5.0; pos = m5.1
+
+        // Call add + Return
+        let m6 = emit_ascii(out, pos, 66)
+        out = m6.0; pos = m6.1
+        let m7 = emit_u64_le(out, pos, add_addr)
+        out = m7.0; pos = m7.1
+        let m8 = emit_ascii(out, pos, 67)
+        out = m8.0; pos = m8.1
+    } else {
+        // main() -> i64 (addr 5)
+        if if_ok {
+            if if_cond_kind == 1 {
+                // Bool literal condition.
+                // Layout (instr indexes): 0..4 entry/init, main at 5.
+                //
+                // main:
+                //   5 Push Bool
+                //   6 JumpIf then=9
+                //   7 Push Int else
+                //   8 Jump end=10
+                //   9 Push Int then
+                //  10 Return
+
+                // Push Bool(cond)
+                let b0 = emit_ascii(out, pos, 1)
+                out = b0.0; pos = b0.1
+                let b1 = emit_ascii(out, pos, 1) // ValueTag::Bool
+                out = b1.0; pos = b1.1
+                let b2 = emit_ascii(out, pos, if if_cond_bool { 1 } else { 0 })
+                out = b2.0; pos = b2.1
+
+                // JumpIf(then=9)
+                let j0 = emit_ascii(out, pos, 65) // Opcode::JumpIf (0x41)
+                out = j0.0; pos = j0.1
+                let j1 = emit_u64_le(out, pos, 9)
+                out = j1.0; pos = j1.1
+
+                // else: Push Int
+                let e0 = emit_ascii(out, pos, 1)
+                out = e0.0; pos = e0.1
+                let e1 = emit_ascii(out, pos, 2)
+                out = e1.0; pos = e1.1
+                let e2 = emit_i64_le(out, pos, if_else_value)
+                out = e2.0; pos = e2.1
+
+                // Jump(end=10)
+                let je0 = emit_ascii(out, pos, 64) // Opcode::Jump (0x40)
+                out = je0.0; pos = je0.1
+                let je1 = emit_u64_le(out, pos, 10)
+                out = je1.0; pos = je1.1
+
+                // then: Push Int
+                let t0 = emit_ascii(out, pos, 1)
+                out = t0.0; pos = t0.1
+                let t1 = emit_ascii(out, pos, 2)
+                out = t1.0; pos = t1.1
+                let t2 = emit_i64_le(out, pos, if_then_value)
+                out = t2.0; pos = t2.1
+
+                // Return
+                let tr = emit_ascii(out, pos, 67)
+                out = tr.0; pos = tr.1
+            } else {
+                // Integer comparison condition.
+                // main:
+                //   5 Push Int a
+                //   6 Push Int b
+                //   7 CmpOp
+                //   8 JumpIf then=11
+                //   9 Push Int else
+                //  10 Jump end=12
+                //  11 Push Int then
+                //  12 Return
+
+                // Push Int a
+                let a0 = emit_ascii(out, pos, 1)
+                out = a0.0; pos = a0.1
+                let a1 = emit_ascii(out, pos, 2)
+                out = a1.0; pos = a1.1
+                let a2 = emit_i64_le(out, pos, if_cmp_a)
+                out = a2.0; pos = a2.1
+
+                // Push Int b
+                let b0 = emit_ascii(out, pos, 1)
+                out = b0.0; pos = b0.1
+                let b1 = emit_ascii(out, pos, 2)
+                out = b1.0; pos = b1.1
+                let b2 = emit_i64_le(out, pos, if_cmp_b)
+                out = b2.0; pos = b2.1
+
+                // Compare
+                let c0 = emit_ascii(out, pos, if_cmp_opcode)
+                out = c0.0; pos = c0.1
+
+                // JumpIf(then=11)
+                let j0 = emit_ascii(out, pos, 65) // Opcode::JumpIf (0x41)
+                out = j0.0; pos = j0.1
+                let j1 = emit_u64_le(out, pos, 11)
+                out = j1.0; pos = j1.1
+
+                // else: Push Int
+                let e0 = emit_ascii(out, pos, 1)
+                out = e0.0; pos = e0.1
+                let e1 = emit_ascii(out, pos, 2)
+                out = e1.0; pos = e1.1
+                let e2 = emit_i64_le(out, pos, if_else_value)
+                out = e2.0; pos = e2.1
+
+                // Jump(end=12)
+                let je0 = emit_ascii(out, pos, 64) // Opcode::Jump (0x40)
+                out = je0.0; pos = je0.1
+                let je1 = emit_u64_le(out, pos, 12)
+                out = je1.0; pos = je1.1
+
+                // then: Push Int
+                let t0 = emit_ascii(out, pos, 1)
+                out = t0.0; pos = t0.1
+                let t1 = emit_ascii(out, pos, 2)
+                out = t1.0; pos = t1.1
+                let t2 = emit_i64_le(out, pos, if_then_value)
+                out = t2.0; pos = t2.1
+
+                // Return
+                let tr = emit_ascii(out, pos, 67)
+                out = tr.0; pos = tr.1
+            }
+        } else if print_ok {
+            // Up to two print/println statements with string literal args, then an integer result.
+            // Each print emits: Push(String); CallExtern(__sounio_print{ln}); Pop.
+
+            // --- print #1
+            let s0 = emit_ascii(out, pos, 1)
+            out = s0.0; pos = s0.1
+            let s1 = emit_ascii(out, pos, 4) // ValueTag::String
+            out = s1.0; pos = s1.1
+            let sr = emit_unescaped_string_payload(out, pos, source, print1_s_start, print1_s_end)
+            out = sr.0; pos = sr.1
+            if !sr.2 {
+                var msg: [i8; 64] = [0; 64]
+                // "bad_string_escape"
+                msg[0] = 98; msg[1] = 97; msg[2] = 100
+                msg[3] = 95
+                msg[4] = 115; msg[5] = 116; msg[6] = 114; msg[7] = 105; msg[8] = 110; msg[9] = 103
+                msg[10] = 95
+                msg[11] = 101; msg[12] = 115; msg[13] = 99; msg[14] = 97; msg[15] = 112; msg[16] = 101
+                out.exit_code = 2
+                return emit_diag(out, msg, 17)
+            }
+
+            // CallExtern(__sounio_print{ln}, 1)
+            let x0 = emit_ascii(out, pos, 96) // Opcode::CallExtern (0x60)
+            out = x0.0; pos = x0.1
+            if print1_kind == 2 {
+                // "__sounio_println"
+                let xl = emit_u32_le(out, pos, 16)
+                out = xl.0; pos = xl.1
+                var nm: [i8; 32] = [0; 32]
+                nm[0] = 95; nm[1] = 95
+                nm[2] = 115; nm[3] = 111; nm[4] = 117; nm[5] = 110; nm[6] = 105; nm[7] = 111
+                nm[8] = 95
+                nm[9] = 112; nm[10] = 114; nm[11] = 105; nm[12] = 110; nm[13] = 116; nm[14] = 108; nm[15] = 110
+                let xn = emit_bytes(out, pos, nm, 16)
+                out = xn.0; pos = xn.1
+            } else {
+                // "__sounio_print"
+                let xl = emit_u32_le(out, pos, 14)
+                out = xl.0; pos = xl.1
+                var nm: [i8; 32] = [0; 32]
+                nm[0] = 95; nm[1] = 95
+                nm[2] = 115; nm[3] = 111; nm[4] = 117; nm[5] = 110; nm[6] = 105; nm[7] = 111
+                nm[8] = 95
+                nm[9] = 112; nm[10] = 114; nm[11] = 105; nm[12] = 110; nm[13] = 116
+                let xn = emit_bytes(out, pos, nm, 14)
+                out = xn.0; pos = xn.1
+            }
+            let xa = emit_i32_le(out, pos, 1)
+            out = xa.0; pos = xa.1
+
+            // Pop unit result.
+            let xp = emit_ascii(out, pos, 2) // Opcode::Pop
+            out = xp.0; pos = xp.1
+
+            // --- print #2 (optional)
+            if print_count > 1 {
+                let t0 = emit_ascii(out, pos, 1)
+                out = t0.0; pos = t0.1
+                let t1 = emit_ascii(out, pos, 4) // ValueTag::String
+                out = t1.0; pos = t1.1
+                let tr = emit_unescaped_string_payload(out, pos, source, print2_s_start, print2_s_end)
+                out = tr.0; pos = tr.1
+                if !tr.2 {
+                    var msg: [i8; 64] = [0; 64]
+                    // "bad_string_escape"
+                    msg[0] = 98; msg[1] = 97; msg[2] = 100
+                    msg[3] = 95
+                    msg[4] = 115; msg[5] = 116; msg[6] = 114; msg[7] = 105; msg[8] = 110; msg[9] = 103
+                    msg[10] = 95
+                    msg[11] = 101; msg[12] = 115; msg[13] = 99; msg[14] = 97; msg[15] = 112; msg[16] = 101
+                    out.exit_code = 2
+                    return emit_diag(out, msg, 17)
+                }
+
+                let y0 = emit_ascii(out, pos, 96) // Opcode::CallExtern (0x60)
+                out = y0.0; pos = y0.1
+                if print2_kind == 2 {
+                    // "__sounio_println"
+                    let yl = emit_u32_le(out, pos, 16)
+                    out = yl.0; pos = yl.1
+                    var nm: [i8; 32] = [0; 32]
+                    nm[0] = 95; nm[1] = 95
+                    nm[2] = 115; nm[3] = 111; nm[4] = 117; nm[5] = 110; nm[6] = 105; nm[7] = 111
+                    nm[8] = 95
+                    nm[9] = 112; nm[10] = 114; nm[11] = 105; nm[12] = 110; nm[13] = 116; nm[14] = 108; nm[15] = 110
+                    let yn = emit_bytes(out, pos, nm, 16)
+                    out = yn.0; pos = yn.1
+                } else {
+                    // "__sounio_print"
+                    let yl = emit_u32_le(out, pos, 14)
+                    out = yl.0; pos = yl.1
+                    var nm: [i8; 32] = [0; 32]
+                    nm[0] = 95; nm[1] = 95
+                    nm[2] = 115; nm[3] = 111; nm[4] = 117; nm[5] = 110; nm[6] = 105; nm[7] = 111
+                    nm[8] = 95
+                    nm[9] = 112; nm[10] = 114; nm[11] = 105; nm[12] = 110; nm[13] = 116
+                    let yn = emit_bytes(out, pos, nm, 14)
+                    out = yn.0; pos = yn.1
+                }
+                let ya = emit_i32_le(out, pos, 1)
+                out = ya.0; pos = ya.1
+
+                let yp = emit_ascii(out, pos, 2) // Opcode::Pop
+                out = yp.0; pos = yp.1
+            }
+
+            // Push Int return
+            let r0 = emit_ascii(out, pos, 1)
+            out = r0.0; pos = r0.1
+            let r1 = emit_ascii(out, pos, 2)
+            out = r1.0; pos = r1.1
+            let r2 = emit_i64_le(out, pos, print_ret_value)
+            out = r2.0; pos = r2.1
+
+            // Return
+            let rr = emit_ascii(out, pos, 67)
+            out = rr.0; pos = rr.1
+        } else if bin_ok {
+            // Push Int a
+            let a0 = emit_ascii(out, pos, 1)
+            out = a0.0; pos = a0.1
+            let a1 = emit_ascii(out, pos, 2)
+            out = a1.0; pos = a1.1
+            let a2 = emit_i64_le(out, pos, bin_a)
+            out = a2.0; pos = a2.1
+
+            // Push Int b
+            let b0 = emit_ascii(out, pos, 1)
+            out = b0.0; pos = b0.1
+            let b1 = emit_ascii(out, pos, 2)
+            out = b1.0; pos = b1.1
+            let b2 = emit_i64_le(out, pos, bin_b)
+            out = b2.0; pos = b2.1
+
+            // Op + Return
+            let ad = emit_ascii(out, pos, bin_opcode)
+            out = ad.0; pos = ad.1
+            let ar = emit_ascii(out, pos, 67)
+            out = ar.0; pos = ar.1
+        } else {
+            // Push Int ret_value + Return
+            let v0 = emit_ascii(out, pos, 1)
+            out = v0.0; pos = v0.1
+            let v1 = emit_ascii(out, pos, 2)
+            out = v1.0; pos = v1.1
+            let v2 = emit_i64_le(out, pos, ret_value)
+            out = v2.0; pos = v2.1
+            let vr = emit_ascii(out, pos, 67)
+            out = vr.0; pos = vr.1
+        }
+    }
+
+    out.code_len = pos
+    out
+}
+
+fn compile_file(path: string, options: CompileOptions) -> CompileArtifact with IO, Mut, Div, Panic {
+    // Note: keep this bootstrap path minimal. Directory/module resolution is
+    // intentionally left to higher-level tooling for now.
+    //
+    // Moonshot step: if `path` is a directory, compile a flat concatenation of
+    // all `.sio` files within it (non-recursive), sorted deterministically.
+
+    var buf: [i8; 65536] = [0; 65536]
+    var n: i64 = file_size(path)
+
+    if n >= 0 {
+        // Regular file.
+        let bytes = read_file(path)
+        if n > 65536 { n = 65536 }
+        var i: i64 = 0
+        while i < n {
+            buf[i as usize] = bytes[i as usize]
+            i = i + 1
+        }
+        return compile_source(buf, n, options)
+    }
+
+    // Directory mode.
+    if !is_dir(path) {
+        // Missing path or unsupported file kind.
+        return compile_source(buf, 0, options)
+    }
+
+    // Fast path: if a cached SOBC exists in the directory, load it directly and
+    // avoid reading/concatenating a directory tree through `read_file` lists.
+    let cache_path = path_join(path, ".sounio_bytecode.sobc")
+    var cache_size: i64 = file_size(cache_path)
+    if cache_size > 0 {
+        let bytes = read_file(cache_path)
+        var out = compile_artifact_empty()
+        out.ok = true
+        out.exit_code = 0
+        if cache_size > 131072 { cache_size = 131072 }
+        out.code_len = cache_size
+        var i: i64 = 0
+        while i < cache_size {
+            out.code[i as usize] = bytes[i as usize]
+            i = i + 1
+        }
+        return out
+    }
+
+    let entries = list_dir(path)
+
+    // Heuristic guard: listing a directory is cheap, but reading N files into
+    // `[i8]` lists is extremely expensive for large trees (e.g. `self-hosted/`).
+    // For those, return an empty artifact so the host can continue via the
+    // stage-boundary loader.
+    var sio_count: i64 = 0
+    var total_bytes: i64 = 0
+    var scan_idx: i64 = 0
+    let total = len(entries)
+    while scan_idx < total {
+        let p = entries[scan_idx as usize]
+        if ends_with(p, ".sio") {
+            sio_count = sio_count + 1
+            let sz = file_size(p)
+            if sz > 0 {
+                total_bytes = total_bytes + sz
+            }
+        }
+        scan_idx = scan_idx + 1
+    }
+
+    if sio_count > 16 || total_bytes > 16384 {
+        return compile_artifact_empty()
+    }
+
+    var pos: i64 = 0
+    var idx: i64 = 0
+    while idx < total {
+        let p = entries[idx as usize]
+        if ends_with(p, ".sio") {
+            let bytes = read_file(p)
+            let size = file_size(p)
+            var m: i64 = size
+            if m < 0 { m = 0 }
+            var j: i64 = 0
+            while j < m && pos < 65536 {
+                buf[pos as usize] = bytes[j as usize]
+                pos = pos + 1
+                j = j + 1
+            }
+            // Ensure a newline boundary between files.
+            if pos < 65536 {
+                buf[pos as usize] = 10
+                pos = pos + 1
+            }
+        }
+        idx = idx + 1
+    }
+
+    compile_source(buf, pos, options)
+}

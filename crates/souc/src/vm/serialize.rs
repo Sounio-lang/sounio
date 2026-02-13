@@ -70,6 +70,7 @@ enum Opcode {
     Not = 0x32,
     Shl = 0x33,
     Shr = 0x34,
+    Xor = 0x35,
     Jump = 0x40,
     JumpIf = 0x41,
     Call = 0x42,
@@ -111,6 +112,7 @@ impl Opcode {
             0x32 => Some(Opcode::Not),
             0x33 => Some(Opcode::Shl),
             0x34 => Some(Opcode::Shr),
+            0x35 => Some(Opcode::Xor),
             0x40 => Some(Opcode::Jump),
             0x41 => Some(Opcode::JumpIf),
             0x42 => Some(Opcode::Call),
@@ -142,6 +144,7 @@ enum ValueTag {
     Pointer = 0x05,
     List = 0x06,
     Struct = 0x07,
+    SparseList = 0x08,
 }
 
 impl ValueTag {
@@ -155,6 +158,7 @@ impl ValueTag {
             0x05 => Some(ValueTag::Pointer),
             0x06 => Some(ValueTag::List),
             0x07 => Some(ValueTag::Struct),
+            0x08 => Some(ValueTag::SparseList),
             _ => None,
         }
     }
@@ -214,6 +218,7 @@ impl<W: Write> BytecodeSerializer<W> {
             Bytecode::Not => self.writer.write_all(&[Opcode::Not as u8])?,
             Bytecode::Shl => self.writer.write_all(&[Opcode::Shl as u8])?,
             Bytecode::Shr => self.writer.write_all(&[Opcode::Shr as u8])?,
+            Bytecode::Xor => self.writer.write_all(&[Opcode::Xor as u8])?,
             Bytecode::Jump(addr) => {
                 self.writer.write_all(&[Opcode::Jump as u8])?;
                 self.write_usize(*addr)?;
@@ -317,6 +322,20 @@ impl<W: Write> BytecodeSerializer<W> {
                 self.write_u32(fields.len() as u32)?;
                 for (key, value) in fields {
                     self.write_string(key)?;
+                    self.write_value(value)?;
+                }
+            }
+            Value::SparseList {
+                len,
+                default,
+                overrides,
+            } => {
+                self.writer.write_all(&[ValueTag::SparseList as u8])?;
+                self.write_u32(*len as u32)?;
+                self.write_value(default)?;
+                self.write_u32(overrides.len() as u32)?;
+                for (idx, value) in overrides {
+                    self.write_usize(*idx)?;
                     self.write_value(value)?;
                 }
             }
@@ -431,6 +450,7 @@ impl<R: Read> BytecodeDeserializer<R> {
             Opcode::Not => Ok(Bytecode::Not),
             Opcode::Shl => Ok(Bytecode::Shl),
             Opcode::Shr => Ok(Bytecode::Shr),
+            Opcode::Xor => Ok(Bytecode::Xor),
             Opcode::Jump => Ok(Bytecode::Jump(self.read_usize()?)),
             Opcode::JumpIf => Ok(Bytecode::JumpIf(self.read_usize()?)),
             Opcode::Call => Ok(Bytecode::Call(self.read_usize()?)),
@@ -508,13 +528,32 @@ impl<R: Read> BytecodeDeserializer<R> {
             }
             ValueTag::Struct => {
                 let len = self.read_u32()? as usize;
-                let mut fields = std::collections::HashMap::with_capacity(len);
+                let mut fields: rustc_hash::FxHashMap<String, Value> = rustc_hash::FxHashMap::default();
+                fields.reserve(len);
                 for _ in 0..len {
                     let key = self.read_string()?;
                     let value = self.read_value()?;
                     fields.insert(key, value);
                 }
                 Ok(Value::Struct(fields))
+            }
+            ValueTag::SparseList => {
+                let len = self.read_u32()? as usize;
+                let default = Box::new(self.read_value()?);
+                let overrides_len = self.read_u32()? as usize;
+                let mut overrides: rustc_hash::FxHashMap<usize, Value> =
+                    rustc_hash::FxHashMap::default();
+                overrides.reserve(overrides_len);
+                for _ in 0..overrides_len {
+                    let idx = self.read_usize()?;
+                    let value = self.read_value()?;
+                    overrides.insert(idx, value);
+                }
+                Ok(Value::SparseList {
+                    len,
+                    default,
+                    overrides,
+                })
             }
         }
     }
@@ -630,6 +669,9 @@ mod tests {
             Bytecode::And,
             Bytecode::Or,
             Bytecode::Not,
+            Bytecode::Shl,
+            Bytecode::Shr,
+            Bytecode::Xor,
             Bytecode::Jump(100),
             Bytecode::JumpIf(200),
             Bytecode::Call(42),

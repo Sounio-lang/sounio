@@ -109,6 +109,7 @@ fn embed_stdlib_modules() {
     // Discover all .sio files
     let mut modules = Vec::new();
     discover_sio_files(stdlib_path, stdlib_path, &mut modules);
+    modules.sort();
 
     if modules.is_empty() {
         println!("cargo:warning=No .sio files found in stdlib/compiler");
@@ -185,8 +186,10 @@ fn generate_embedded_modules_file(modules: &[String], _stdlib_path: &Path) {
 
 fn discover_sio_files(base_path: &Path, current_path: &Path, modules: &mut Vec<String>) {
     if let Ok(entries) = fs::read_dir(current_path) {
-        for entry in entries.flatten() {
-            let path = entry.path();
+        let mut paths: Vec<_> = entries.flatten().map(|entry| entry.path()).collect();
+        paths.sort();
+
+        for path in paths {
             if path.is_file() && path.extension().map_or(false, |ext| ext == "sio") {
                 if let Some(rel_path) = path.strip_prefix(base_path).ok() {
                     if let Some(module_path) = rel_path.to_str() {

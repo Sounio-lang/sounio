@@ -441,26 +441,31 @@ impl SymbolTable {
             "dbg",        // Debug print
             "format",     // String formatting
             // Utility functions
-            "len",         // Get length of array/string/tuple
-            "type_of",     // Get type name as string
-            "read_line",   // Read line from stdin
-            "read_byte",   // Read single byte from stdin (-1 on EOF)
-            "read_file",   // Read file contents as byte array
-            "file_size",   // Get file size in bytes
-            "write_bytes", // Write byte array to file
-            "arg_count",   // Number of CLI user args after --
-            "get_arg",     // Get nth CLI user arg or empty string
-            "parse_int",   // Parse string to int
-            "parse_float", // Parse string to float
-            "to_string",   // Convert to string
-            "str_len",     // String length in bytes
-            "str_eq",      // String equality
-            "str_concat",  // String concatenation
-            "str_slice",   // Byte-indexed string slice
-            "str_char_at", // Byte at index or -1
+            "len",            // Get length of array/string/tuple
+            "type_of",        // Get type name as string
+            "read_line",      // Read line from stdin
+            "read_byte",      // Read single byte from stdin (-1 on EOF)
+            "read_file",      // Read file contents as byte array
+            "read_file_prefix", // Read prefix of file contents as byte array
+            "file_size",      // Get file size in bytes
+            "write_bytes",    // Write byte array to file
+            "arg_count",      // Number of CLI user args after --
+            "get_arg",        // Get nth CLI user arg or empty string
+            "parse_int",      // Parse string to int
+            "parse_float",    // Parse string to float
+            "to_string",      // Convert to string
+            "str_len",        // String length in bytes
+            "str_eq",         // String equality
+            "str_concat",     // String concatenation
+            "str_slice",      // Byte-indexed string slice
+            "str_char_at",    // Byte at index or -1
             "str_from_bytes", // Build string from [i8] and length
-            "int_to_str",  // Convert i64 to string
-            "starts_with", // Prefix check
+            "int_to_str",     // Convert i64 to string
+            "starts_with",    // Prefix check
+            "ends_with",      // Suffix check
+            "is_dir",         // Path is a directory?
+            "path_join",      // Join 2 path segments
+            "list_dir",       // List directory entries
             // Math functions
             "sqrt",  // Square root
             "abs",   // Absolute value
@@ -687,6 +692,12 @@ impl SymbolTable {
                     .get(&existing)
                     .is_some_and(|sym| matches!(sym.kind, DefKind::BuiltinFunction))
                 {
+                    // Some builtins are effectively reserved because other compiler layers treat
+                    // them specially (for example, native codegen lowers `print` directly).
+                    // Keep these non-shadowable to avoid surprising semantics.
+                    if matches!(name.as_str(), "print" | "println") {
+                        return Err(format!("Duplicate definition: {}", name));
+                    }
                     scope.names.insert(name.clone(), def_id);
                     // Also register in current module scope for cross-module imports
                     if scope.kind == ScopeKind::Module {

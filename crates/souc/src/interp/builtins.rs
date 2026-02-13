@@ -9,6 +9,7 @@
 
 use std::cell::RefCell;
 use std::collections::HashMap;
+use std::io::Read;
 use std::rc::Rc;
 use std::sync::{Mutex, OnceLock};
 use std::{fs, io};
@@ -192,7 +193,13 @@ impl BuiltinRegistry {
                 };
 
                 match fs::metadata(path) {
-                    Ok(meta) => Ok(Value::Int(i64::try_from(meta.len()).unwrap_or(i64::MAX))),
+                    Ok(meta) => {
+                        // Match VM semantics: non-regular files (directories, etc.) report -1.
+                        if !meta.is_file() {
+                            return Ok(Value::Int(-1));
+                        }
+                        Ok(Value::Int(i64::try_from(meta.len()).unwrap_or(i64::MAX)))
+                    }
                     Err(err) => {
                         eprintln!("warning: file_size('{}') failed: {}", path, err);
                         Ok(Value::Int(-1))
@@ -202,10 +209,69 @@ impl BuiltinRegistry {
         );
 
         self.register(
+            "read_file_prefix",
+            Rc::new(|args| {
+                if args.len() != 2 {
+                    return Err(format!(
+                        "read_file_prefix expects 2 arguments, got {}",
+                        args.len()
+                    ));
+                }
+
+                let path = match &args[0] {
+                    Value::String(s) => s,
+                    other => {
+                        return Err(format!(
+                            "read_file_prefix expects string path, got {}",
+                            other.type_name()
+                        ));
+                    }
+                };
+
+                let max_bytes = match &args[1] {
+                    Value::Int(n) => *n,
+                    other => {
+                        return Err(format!(
+                            "read_file_prefix expects i64 byte limit, got {}",
+                            other.type_name()
+                        ));
+                    }
+                };
+
+                if max_bytes <= 0 {
+                    return Ok(Value::Array(Rc::new(RefCell::new(Vec::new()))));
+                }
+
+                match fs::File::open(path) {
+                    Ok(file) => {
+                        let mut limited = file.take(u64::try_from(max_bytes).unwrap_or(u64::MAX));
+                        let mut bytes = Vec::new();
+                        if let Err(err) = limited.read_to_end(&mut bytes) {
+                            eprintln!("warning: read_file_prefix('{}') failed: {}", path, err);
+                            return Ok(Value::Array(Rc::new(RefCell::new(Vec::new()))));
+                        }
+                        let values = bytes
+                            .into_iter()
+                            .map(|b| Value::Int((b as i8) as i64))
+                            .collect::<Vec<_>>();
+                        Ok(Value::Array(Rc::new(RefCell::new(values))))
+                    }
+                    Err(err) => {
+                        eprintln!("warning: read_file_prefix('{}') failed: {}", path, err);
+                        Ok(Value::Array(Rc::new(RefCell::new(Vec::new()))))
+                    }
+                }
+            }),
+        );
+
+        self.register(
             "write_bytes",
             Rc::new(|args| {
                 if args.len() != 3 {
-                    return Err(format!("write_bytes expects 3 arguments, got {}", args.len()));
+                    return Err(format!(
+                        "write_bytes expects 3 arguments, got {}",
+                        args.len()
+                    ));
                 }
 
                 let path = match &args[0] {
@@ -537,10 +603,15 @@ impl BuiltinRegistry {
             "str_concat",
             Rc::new(|args| {
                 if args.len() != 2 {
-                    return Err(format!("str_concat expects 2 arguments, got {}", args.len()));
+                    return Err(format!(
+                        "str_concat expects 2 arguments, got {}",
+                        args.len()
+                    ));
                 }
                 match (&args[0], &args[1]) {
-                    (Value::String(a), Value::String(b)) => Ok(Value::String(format!("{}{}", a, b))),
+                    (Value::String(a), Value::String(b)) => {
+                        Ok(Value::String(format!("{}{}", a, b)))
+                    }
                     _ => Err("str_concat expects string arguments".to_string()),
                 }
             }),
@@ -651,6 +722,109 @@ impl BuiltinRegistry {
                     }
                     _ => Err("starts_with expects string arguments".to_string()),
                 }
+            }),
+        );
+
+        self.register(
+            "ends_with",
+            Rc::new(|args| {
+                if args.len() != 2 {
+                    return Err(format!(
+                        "ends_with expects 2 arguments, got {}",
+                        args.len()
+                    ));
+                }
+                match (&args[0], &args[1]) {
+                    (Value::String(s), Value::String(suffix)) => {
+                        Ok(Value::Bool(s.ends_with(suffix.as_str())))
+                    }
+                    _ => Err("ends_with expects string arguments".to_string()),
+                }
+            }),
+        );
+
+        self.register(
+            "contains",
+            Rc::new(|args| {
+                if args.len() != 2 {
+                    return Err(format!(
+                        "contains expects 2 arguments, got {}",
+                        args.len()
+                    ));
+                }
+                match (&args[0], &args[1]) {
+                    (Value::String(haystack), Value::String(needle)) => {
+                        Ok(Value::Bool(haystack.contains(needle.as_str())))
+                    }
+                    _ => Err("contains expects string arguments".to_string()),
+                }
+            }),
+        );
+
+        self.register(
+            "is_dir",
+            Rc::new(|args| {
+                if args.len() != 1 {
+                    return Err(format!("is_dir expects 1 argument, got {}", args.len()));
+                }
+                let path = match &args[0] {
+                    Value::String(s) => s,
+                    _ => return Err("is_dir expects a string path".to_string()),
+                };
+                match std::fs::metadata(path) {
+                    Ok(meta) => Ok(Value::Bool(meta.is_dir())),
+                    Err(_) => Ok(Value::Bool(false)),
+                }
+            }),
+        );
+
+        self.register(
+            "path_join",
+            Rc::new(|args| {
+                if args.len() != 2 {
+                    return Err(format!(
+                        "path_join expects 2 arguments, got {}",
+                        args.len()
+                    ));
+                }
+                let a = match &args[0] {
+                    Value::String(s) => s,
+                    _ => return Err("path_join expects string arguments".to_string()),
+                };
+                let b = match &args[1] {
+                    Value::String(s) => s,
+                    _ => return Err("path_join expects string arguments".to_string()),
+                };
+                let joined = std::path::Path::new(a).join(b);
+                Ok(Value::String(joined.to_string_lossy().into_owned()))
+            }),
+        );
+
+        self.register(
+            "list_dir",
+            Rc::new(|args| {
+                if args.len() != 1 {
+                    return Err(format!(
+                        "list_dir expects 1 argument, got {}",
+                        args.len()
+                    ));
+                }
+                let path = match &args[0] {
+                    Value::String(s) => s,
+                    _ => return Err("list_dir expects a string path".to_string()),
+                };
+
+                let mut entries: Vec<String> = Vec::new();
+                if let Ok(rd) = std::fs::read_dir(path) {
+                    for entry in rd.flatten() {
+                        entries.push(entry.path().to_string_lossy().into_owned());
+                    }
+                }
+                entries.sort();
+
+                Ok(Value::Array(std::rc::Rc::new(std::cell::RefCell::new(
+                    entries.into_iter().map(Value::String).collect(),
+                ))))
             }),
         );
 
@@ -1638,10 +1812,14 @@ mod tests {
         std::fs::write(&src_path, b"abc").unwrap();
 
         let src_arg = Value::String(src_path.to_string_lossy().to_string());
-        let size = registry.call("file_size", std::slice::from_ref(&src_arg)).unwrap();
+        let size = registry
+            .call("file_size", std::slice::from_ref(&src_arg))
+            .unwrap();
         assert_eq!(size, Value::Int(3));
 
-        let content = registry.call("read_file", std::slice::from_ref(&src_arg)).unwrap();
+        let content = registry
+            .call("read_file", std::slice::from_ref(&src_arg))
+            .unwrap();
         match content {
             Value::Array(arr) => {
                 let values = arr.borrow();
@@ -1651,6 +1829,19 @@ mod tests {
                 assert_eq!(values[2], Value::Int(99));
             }
             _ => panic!("expected array from read_file"),
+        }
+
+        let prefix = registry
+            .call("read_file_prefix", &[src_arg.clone(), Value::Int(2)])
+            .unwrap();
+        match prefix {
+            Value::Array(arr) => {
+                let values = arr.borrow();
+                assert_eq!(values.len(), 2);
+                assert_eq!(values[0], Value::Int(97));
+                assert_eq!(values[1], Value::Int(98));
+            }
+            _ => panic!("expected array from read_file_prefix"),
         }
 
         let dst_arg = Value::String(dst_path.to_string_lossy().to_string());
@@ -1717,7 +1908,10 @@ mod tests {
         let concat = registry
             .call(
                 "str_concat",
-                &[Value::String("foo".to_string()), Value::String("bar".to_string())],
+                &[
+                    Value::String("foo".to_string()),
+                    Value::String("bar".to_string()),
+                ],
             )
             .unwrap();
         assert_eq!(concat, Value::String("foobar".to_string()));

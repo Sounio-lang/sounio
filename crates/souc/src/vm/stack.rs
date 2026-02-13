@@ -20,6 +20,29 @@ impl Stack {
                 let strs: Vec<String> = items.iter().map(|v| Self::value_to_string(v)).collect();
                 format!("[{}]", strs.join(", "))
             }
+            Value::SparseList {
+                len,
+                default,
+                overrides,
+            } => {
+                if *len <= 16 {
+                    let mut items = Vec::with_capacity(*len);
+                    for idx in 0..*len {
+                        let value = overrides
+                            .get(&idx)
+                            .unwrap_or(default.as_ref());
+                        items.push(Self::value_to_string(value));
+                    }
+                    format!("[{}]", items.join(", "))
+                } else {
+                    format!(
+                        "<sparse-list len={} overrides={} default={}>",
+                        len,
+                        overrides.len(),
+                        Self::value_to_string(default)
+                    )
+                }
+            }
             Value::Struct(fields) => {
                 let mut entries: Vec<String> = fields
                     .iter()

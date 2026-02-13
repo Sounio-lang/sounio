@@ -2651,11 +2651,18 @@ impl X86_64Emitter {
         let int_arg_regs = X86Reg::arg_regs();
         let xmm_arg_regs = X86Reg::arg_xmm_regs();
 
-        let mut int_idx = 0;
-        let mut xmm_idx = 0;
+        let mut int_idx = 0usize;
+        let mut xmm_idx = 0usize;
+
+        // Collect register moves so we can materialize arguments into ABI registers.
+        //
+        // NOTE: Simple reverse-order moves are not sufficient: arg registers frequently form
+        // swap cycles (e.g., arg0 in RSI, arg1 in RDI). If we don't break cycles, we can
+        // accidentally pass the same value twice. We handle cycles explicitly below.
+        let mut reg_moves: Vec<(ValueId, X86Reg, bool)> = Vec::new(); // (arg, dst, is_float)
+        let mut stack_args: Vec<ValueId> = Vec::new();
 
         for &arg in args {
-            // Determine if this is a float argument
             let is_float = self
                 .register_allocator
                 .value_to_interval
@@ -2664,27 +2671,125 @@ impl X86_64Emitter {
                 .unwrap_or(false);
 
             if is_float && xmm_idx < xmm_arg_regs.len() {
-                // Float argument - move to XMM register
-                let dst = xmm_arg_regs[xmm_idx];
-                let src = self.get_value_reg(arg, dst);
-                if src != dst {
-                    self.emit_movsd_rr(dst, src);
-                }
+                reg_moves.push((arg, xmm_arg_regs[xmm_idx], true));
                 xmm_idx += 1;
             } else if !is_float && int_idx < int_arg_regs.len() {
-                // Integer argument - move to integer register
-                let dst = int_arg_regs[int_idx];
-                let src = self.get_value_reg(arg, dst);
+                reg_moves.push((arg, int_arg_regs[int_idx], false));
+                int_idx += 1;
+            } else {
+                stack_args.push(arg);
+            }
+        }
+
+        // Stack args: push right-to-left (ABI).
+        for &arg in stack_args.iter().rev() {
+            let scratch = X86Reg::R11;
+            let src = self.get_value_reg(arg, scratch);
+            self.emit_push(src);
+        }
+
+        // Split float vs int moves.
+        let mut float_moves: Vec<(ValueId, X86Reg)> = Vec::new();
+        let mut int_moves: Vec<(ValueId, X86Reg)> = Vec::new();
+        for (arg, dst, is_float) in reg_moves {
+            if is_float {
+                float_moves.push((arg, dst));
+            } else {
+                int_moves.push((arg, dst));
+            }
+        }
+
+        // Float args: keep the previous pragmatic behavior (reverse order).
+        for (arg, dst) in float_moves.into_iter().rev() {
+            let src = self.get_value_reg(arg, dst);
+            if src != dst {
+                self.emit_movsd_rr(dst, src);
+            }
+        }
+
+        // Integer args: perform a cycle-safe shuffle.
+        //
+        // We only need to shuffle register-to-register moves. Spilled args are loaded
+        // directly into their destination registers after the shuffle.
+        let mut pending_spill_loads: Vec<(ValueId, X86Reg)> = Vec::new();
+        let mut moves: Vec<(X86Reg, X86Reg)> = Vec::new(); // (dst, src)
+
+        for (arg, dst) in int_moves {
+            if let Some(src) = self.register_allocator.get_reg(arg) {
+                if src != dst {
+                    moves.push((dst, src));
+                }
+            } else if self.register_allocator.is_spilled(arg) {
+                pending_spill_loads.push((arg, dst));
+            } else {
+                // Fallback: materialize via helper and move into dst if needed.
+                let src = self.get_value_reg(arg, X86Reg::R11);
                 if src != dst {
                     self.emit_mov_rr(dst, src);
                 }
-                int_idx += 1;
+            }
+        }
+
+        // Greedy topological scheduling; break cycles by pushing the source register and
+        // popping into the destination after all dependent moves have been executed.
+        let mut pending_pops: Vec<X86Reg> = Vec::new();
+        let debug_shuffle = std::env::var("SOUNIO_DEBUG_CALL_SHUFFLE").is_ok();
+        if debug_shuffle
+            && moves.len() == 2
+            && moves.iter().any(|(d, _)| *d == X86Reg::RSI)
+            && moves.iter().any(|(d, _)| *d == X86Reg::RDI)
+        {
+            eprintln!("[call-shuffle] initial moves: {:?}", moves);
+        }
+
+        while !moves.is_empty() {
+            // Find a move whose destination is not used as a source by any remaining move.
+            //
+            // This prevents clobbering a register before its original value is consumed:
+            // example: RDI <- RSI, RSI <- R9 must execute the RDI move first.
+            let src_set: std::collections::HashSet<X86Reg> =
+                moves.iter().map(|(_, s)| *s).collect();
+            let mut idx = None;
+            for (i, (dst, _src)) in moves.iter().enumerate() {
+                if !src_set.contains(dst) {
+                    idx = Some(i);
+                    break;
+                }
+            }
+
+            if let Some(i) = idx {
+                let (dst, src) = moves.remove(i);
+                if debug_shuffle
+                    && (dst == X86Reg::RDI || dst == X86Reg::RSI)
+                    && (src == X86Reg::RDI || src == X86Reg::RSI || src == X86Reg::R9)
+                {
+                    eprintln!("[call-shuffle] emit mov {:?} <- {:?}", dst, src);
+                }
+                self.emit_mov_rr(dst, src);
+                continue;
+            }
+
+            // Cycle: pick the first move and break it with push/pop.
+            let (dst, src) = moves.remove(0);
+            if debug_shuffle {
+                eprintln!("[call-shuffle] cycle break push {:?} (dst {:?})", src, dst);
+            }
+            self.emit_push(src);
+            pending_pops.push(dst);
+        }
+
+        for dst in pending_pops.into_iter().rev() {
+            self.emit_pop(dst);
+        }
+
+        for (arg, dst) in pending_spill_loads {
+            if let Some(slot) = self.register_allocator.get_spill_slot(arg) {
+                self.emit_reload(dst, slot);
             } else {
-                // Stack argument - push onto stack
-                // Note: In a full implementation, stack args are pushed right-to-left
-                let scratch = X86Reg::R11;
-                let src = self.get_value_reg(arg, scratch);
-                self.emit_push(src);
+                let src = self.get_value_reg(arg, X86Reg::R11);
+                if src != dst {
+                    self.emit_mov_rr(dst, src);
+                }
             }
         }
     }
@@ -3168,84 +3273,79 @@ impl X86_64Emitter {
         fields: &[ValueId],
         ty: &SirType,
     ) -> Result<(), EmitError> {
-        // DEBUG: Print type info
-        eprintln!("[emit_build_aggregate] ty = {:?}", ty);
-        if let SirType::Struct(st) = ty {
-            eprintln!(
-                "[emit_build_aggregate] struct name = {:?}, fields.len() = {}",
-                st.name,
-                st.fields.len()
-            );
-            for (i, f) in st.fields.iter().enumerate() {
-                eprintln!(
-                    "[emit_build_aggregate]   field[{}]: name={:?}, ty={:?}, is_float={}",
-                    i,
-                    f.name,
-                    f.ty,
-                    f.ty.is_float()
-                );
-            }
-        }
+        match ty {
+            SirType::Struct(st) => {
+                // Always materialize aggregates in memory and use a pointer value in registers.
+                // This keeps argument passing simple (single GPR) and avoids ABI-dependent
+                // multi-register returns (which this backend does not track).
+                // Some named/opaque structs (including lowered enums) may not have a full
+                // field layout at this stage. In that case, fall back to a slot-based layout.
+                let has_layout =
+                    !st.fields.is_empty() && st.size > 0 && st.fields.len() == fields.len();
+                if !has_layout {
+                    let size = fields.len() * 8;
+                    let aligned_size = (size + 15) & !15;
+                    self.emit_sub_rsp_imm(aligned_size as i32);
 
-        // Check if this is a struct with float fields
-        let has_float_fields = if let SirType::Struct(st) = ty {
-            st.fields.iter().any(|f| f.ty.is_float())
-        } else {
-            false
-        };
-        eprintln!(
-            "[emit_build_aggregate] has_float_fields = {}",
-            has_float_fields
-        );
+                    for (i, field) in fields.iter().enumerate() {
+                        let field_reg = self.get_value_reg(*field, X86Reg::R10);
+                        let offset = (i * 8) as i32;
+                        self.emit_mov_mem_disp_r64(X86Reg::RSP, offset, field_reg);
+                    }
 
-        // For structs with float fields (like Octonion), always use stack allocation
-        if has_float_fields {
-            if let SirType::Struct(st) = ty {
-                // Allocate stack space for the struct
+                    let dst_reg = self
+                        .register_allocator
+                        .get_reg(result)
+                        .unwrap_or(X86Reg::RAX);
+                    self.emit_mov_rr(dst_reg, X86Reg::RSP);
+                    self.store_value(result, dst_reg);
+                    return Ok(());
+                }
+
                 let size = st.size;
-                eprintln!(
-                    "[emit_build_aggregate] st.size = {}, st.align = {}",
-                    size, st.align
-                );
-                let aligned_size = (size + 15) & !15; // 16-byte aligned
-                eprintln!("[emit_build_aggregate] aligned_size = {}", aligned_size);
+                let aligned_size = (size + 15) & !15; // keep stack 16-byte aligned for calls
                 self.emit_sub_rsp_imm(aligned_size as i32);
 
-                // Store each field at its proper offset
                 for (i, field) in fields.iter().enumerate() {
-                    let field_ty = &st.fields[i].ty;
-                    let offset = st.fields[i].offset as i32;
+                    let field_info = &st.fields[i];
 
-                    eprintln!(
-                        "[emit_build_aggregate] field[{}]: value={:?}, offset={}, is_float={}",
-                        i,
-                        field,
-                        offset,
-                        field_ty.is_float()
-                    );
-
-                    if field_ty.is_float() {
-                        // Get the float value (should be in XMM register)
+                    let offset = field_info.offset as i32;
+                    if field_info.ty.is_float() {
                         let field_reg = self.get_value_reg_float(*field, X86Reg::XMM0);
-                        eprintln!("[emit_build_aggregate] float field_reg = {:?}", field_reg);
-
                         if field_reg.is_xmm() {
-                            // Store to stack using movsd
                             self.emit_movsd_mem_disp_r64(X86Reg::RSP, offset, field_reg);
                         } else {
-                            // Float value is in an integer register (e.g., loaded as bits)
-                            // Move to XMM first, then store
                             self.emit_movq_xmm_r64(X86Reg::XMM0, field_reg);
                             self.emit_movsd_mem_disp_r64(X86Reg::RSP, offset, X86Reg::XMM0);
                         }
                     } else {
-                        // Integer/pointer field
-                        let field_reg = self.get_value_reg(*field, X86Reg::R10);
-                        self.emit_mov_mem_disp_r64(X86Reg::RSP, offset, field_reg);
+                        // Structs/arrays are represented as pointers in this backend.
+                        // When embedding an aggregate field by-value we must copy its bytes,
+                        // not store the pointer.
+                        if matches!(&field_info.ty, SirType::Struct(_) | SirType::Array(_)) {
+                            let src_reg = self.get_value_reg(*field, X86Reg::R10);
+                            let scratch = if src_reg == X86Reg::R11 {
+                                X86Reg::R10
+                            } else {
+                                X86Reg::R11
+                            };
+                            let size = field_info.ty.size_bytes();
+                            let copy_bytes = (size + 7) & !7; // copy in 8-byte chunks
+                            for chunk in (0..copy_bytes).step_by(8) {
+                                self.emit_mov_r64_mem_disp(scratch, src_reg, chunk as i32);
+                                self.emit_mov_mem_disp_r64(
+                                    X86Reg::RSP,
+                                    offset + chunk as i32,
+                                    scratch,
+                                );
+                            }
+                        } else {
+                            let field_reg = self.get_value_reg(*field, X86Reg::R10);
+                            self.emit_mov_mem_disp_r64(X86Reg::RSP, offset, field_reg);
+                        }
                     }
                 }
 
-                // Result is pointer to stack allocation
                 let dst_reg = self
                     .register_allocator
                     .get_reg(result)
@@ -3253,51 +3353,73 @@ impl X86_64Emitter {
                 self.emit_mov_rr(dst_reg, X86Reg::RSP);
                 self.store_value(result, dst_reg);
             }
-        } else if fields.len() == 2 {
-            // For 2-field aggregates like slices {ptr, len}, we can use register pairs
-            // System V ABI: return small structs in RAX:RDX
-            // Get field values into registers
-            let ptr_reg = self.get_value_reg(fields[0], X86Reg::RAX);
-            let len_reg = self.get_value_reg(fields[1], X86Reg::RDX);
+            SirType::Array(arr) => {
+                let size = arr.size_bytes();
+                let aligned_size = (size + 15) & !15;
+                self.emit_sub_rsp_imm(aligned_size as i32);
 
-            // Move to RAX:RDX if not already there
-            if ptr_reg != X86Reg::RAX {
-                self.emit_mov_rr(X86Reg::RAX, ptr_reg);
-            }
-            if len_reg != X86Reg::RDX {
-                self.emit_mov_rr(X86Reg::RDX, len_reg);
-            }
-
-            // Record that result is in RAX (ptr) with RDX holding len
-            // For now, we treat the aggregate as residing in RAX
-            if let Some(dst) = self.register_allocator.get_reg(result) {
-                if dst != X86Reg::RAX {
-                    self.emit_mov_rr(dst, X86Reg::RAX);
+                let elem_size = arr.elem.size_bytes();
+                for (i, field) in fields.iter().enumerate() {
+                    let offset = (i * elem_size) as i32;
+                    if arr.elem.is_float() {
+                        let field_reg = self.get_value_reg_float(*field, X86Reg::XMM0);
+                        if field_reg.is_xmm() {
+                            self.emit_movsd_mem_disp_r64(X86Reg::RSP, offset, field_reg);
+                        } else {
+                            self.emit_movq_xmm_r64(X86Reg::XMM0, field_reg);
+                            self.emit_movsd_mem_disp_r64(X86Reg::RSP, offset, X86Reg::XMM0);
+                        }
+                    } else {
+                        if matches!(arr.elem.as_ref(), SirType::Struct(_) | SirType::Array(_)) {
+                            let src_reg = self.get_value_reg(*field, X86Reg::R10);
+                            let scratch = if src_reg == X86Reg::R11 {
+                                X86Reg::R10
+                            } else {
+                                X86Reg::R11
+                            };
+                            let size = elem_size;
+                            let copy_bytes = (size + 7) & !7;
+                            for chunk in (0..copy_bytes).step_by(8) {
+                                self.emit_mov_r64_mem_disp(scratch, src_reg, chunk as i32);
+                                self.emit_mov_mem_disp_r64(
+                                    X86Reg::RSP,
+                                    offset + chunk as i32,
+                                    scratch,
+                                );
+                            }
+                        } else {
+                            let field_reg = self.get_value_reg(*field, X86Reg::R10);
+                            self.emit_mov_mem_disp_r64(X86Reg::RSP, offset, field_reg);
+                        }
+                    }
                 }
+
+                let dst_reg = self
+                    .register_allocator
+                    .get_reg(result)
+                    .unwrap_or(X86Reg::RAX);
+                self.emit_mov_rr(dst_reg, X86Reg::RSP);
+                self.store_value(result, dst_reg);
             }
-            self.store_value(result, X86Reg::RAX);
-        } else {
-            // Larger aggregates: allocate stack space and store fields
-            // Calculate total size (assume 8 bytes per field for now)
-            let size = fields.len() * 8;
+            _ => {
+                // Fallback: treat as a blob of 8-byte slots (still keep alignment sane).
+                let size = fields.len() * 8;
+                let aligned_size = (size + 15) & !15;
+                self.emit_sub_rsp_imm(aligned_size as i32);
 
-            // Allocate stack space
-            self.emit_sub_rsp_imm(size as i32);
+                for (i, field) in fields.iter().enumerate() {
+                    let field_reg = self.get_value_reg(*field, X86Reg::R10);
+                    let offset = (i * 8) as i32;
+                    self.emit_mov_mem_disp_r64(X86Reg::RSP, offset, field_reg);
+                }
 
-            // Store each field
-            for (i, field) in fields.iter().enumerate() {
-                let field_reg = self.get_value_reg(*field, X86Reg::R10);
-                let offset = (i * 8) as i32;
-                self.emit_mov_mem_disp_r64(X86Reg::RSP, offset, field_reg);
+                let dst_reg = self
+                    .register_allocator
+                    .get_reg(result)
+                    .unwrap_or(X86Reg::RAX);
+                self.emit_mov_rr(dst_reg, X86Reg::RSP);
+                self.store_value(result, dst_reg);
             }
-
-            // Result is pointer to stack allocation
-            let dst_reg = self
-                .register_allocator
-                .get_reg(result)
-                .unwrap_or(X86Reg::RAX);
-            self.emit_mov_rr(dst_reg, X86Reg::RSP);
-            self.store_value(result, dst_reg);
         }
         Ok(())
     }
@@ -3676,6 +3798,15 @@ impl X86_64Emitter {
                 let mut bytes = Vec::new();
                 if Self::append_constant_bytes(constant, &mut bytes) {
                     let symbol = self.intern_rodata(&bytes, 8);
+                    if std::env::var("SOUNIO_DEBUG_RODATA").is_ok() {
+                        if bytes == [b'{', 0] {
+                            eprintln!("[emit] rodata '{{\\\\0' -> {}", symbol);
+                        } else if bytes == [b'}', 0] {
+                            eprintln!("[emit] rodata '}}\\\\0' -> {}", symbol);
+                        } else if bytes == [b'\"', 0] {
+                            eprintln!("[emit] rodata '\"\\\\0' -> {}", symbol);
+                        }
+                    }
                     self.emit_lea_rip_relative(dst_reg, &symbol);
                 } else {
                     self.emit_mov_ri64(dst_reg, 0);
@@ -4041,6 +4172,16 @@ impl X86_64Emitter {
                     }
                 }
             }
+        }
+
+        // IMPORTANT:
+        // The register allocator may decide to spill cast results. Many callers (including the
+        // Chiuratto native runtime path) rely on spilled values being materialized.
+        //
+        // Only store scalar/pointer results here; float results typically use dedicated paths
+        // that already manage XMM vs GPR placement.
+        if !_to_ty.is_float() {
+            self.store_value(result, dst);
         }
 
         Ok(())
@@ -5363,6 +5504,31 @@ impl X86_64Emitter {
             }
         }
 
+        // ------------------------------------------------------------------
+        // Caller-saved preservation (pragmatic correctness path)
+        // ------------------------------------------------------------------
+        // The internal register allocator currently does not insert spill/reload
+        // code around calls. That means values in caller-saved registers (like
+        // R10/R11) can be clobbered by nested runtime calls, leading to subtle
+        // miscompilations in real workloads (notably the Chiuratto HTTP demo).
+        //
+        // Until call-aware allocation is fully wired, conservatively preserve a
+        // fixed set of caller-saved GPRs around every call. We intentionally do
+        // not save RAX here to avoid conflicting with the ABI return register.
+        let saved_gprs: [X86Reg; 8] = [
+            X86Reg::RCX,
+            X86Reg::RDX,
+            X86Reg::RSI,
+            X86Reg::RDI,
+            X86Reg::R8,
+            X86Reg::R9,
+            X86Reg::R10,
+            X86Reg::R11,
+        ];
+        for reg in saved_gprs {
+            self.emit_push(reg);
+        }
+
         // Set up arguments according to calling convention
         self.setup_call_args(&info.args);
 
@@ -5397,6 +5563,11 @@ impl X86_64Emitter {
                 }
                 self.emit_call_rel32(0); // Placeholder, will be patched by linker
             }
+        }
+
+        // Restore preserved GPRs before materializing return values.
+        for reg in saved_gprs.iter().rev() {
+            self.emit_pop(*reg);
         }
 
         // Store return value if present
@@ -5545,20 +5716,41 @@ impl X86_64Emitter {
         };
 
         let arg_ty = self.get_value_type(*arg, func);
-        let len = match arg_ty {
-            SirType::Array(arr) => arr.len as i64,
-            SirType::Pointer(ptr) => match ptr.pointee.as_ref() {
-                SirType::Array(arr) => arr.len as i64,
-                _ => 0,
-            },
-            _ => 0,
-        };
-
         let dst = self
             .register_allocator
             .get_reg(result_id)
             .unwrap_or(X86Reg::RAX);
-        self.emit_mov_ri64(dst, len);
+        match arg_ty {
+            SirType::Array(arr) => {
+                self.emit_mov_ri64(dst, arr.len as i64);
+                self.store_value(result_id, dst);
+                return Ok(());
+            }
+            SirType::Pointer(ptr) => {
+                if let SirType::Array(arr) = ptr.pointee.as_ref() {
+                    self.emit_mov_ri64(dst, arr.len as i64);
+                    self.store_value(result_id, dst);
+                    return Ok(());
+                }
+            }
+            SirType::Struct(st) => {
+                // Slice/fat-pointer: { ptr: *T, len: i64 }
+                if st.fields.len() >= 2
+                    && matches!(st.fields[0].ty, SirType::Pointer(_))
+                    && matches!(st.fields[1].ty, SirType::Scalar(ScalarType::I64))
+                {
+                    let base_reg = self.get_value_reg(*arg, X86Reg::R10);
+                    let offset = st.fields[1].offset as i32;
+                    self.emit_mov_r64_mem_disp(dst, base_reg, offset);
+                    self.store_value(result_id, dst);
+                    return Ok(());
+                }
+            }
+            _ => {}
+        }
+
+        // Fallback: unknown length.
+        self.emit_mov_ri64(dst, 0);
         self.store_value(result_id, dst);
 
         Ok(())
@@ -5580,13 +5772,21 @@ impl X86_64Emitter {
                         .get_reg(result_id)
                         .unwrap_or(X86Reg::RAX);
 
-                    if ty.is_float() {
+                    // Aggregates are represented as pointers to their storage.
+                    // Loading an aggregate value returns the pointer itself (no copy).
+                    if matches!(ty, SirType::Struct(_) | SirType::Array(_)) {
+                        if dst_reg != ptr_reg {
+                            self.emit_mov_rr(dst_reg, ptr_reg);
+                        }
+                    } else if ty.is_float() {
                         // MOVSD dst, [ptr] - use proper function that handles REX prefix
                         self.emit_movsd_r64_mem_disp(dst_reg, ptr_reg, 0);
                     } else {
                         // MOV dst, [ptr]
                         self.emit_mov_r64_mem_disp(dst_reg, ptr_reg, 0);
                     }
+
+                    self.store_value(result_id, dst_reg);
                 }
             }
             MemoryOp::Store { ptr, val, .. } => {
@@ -5601,10 +5801,30 @@ impl X86_64Emitter {
                     // MOVSD [ptr], xmm
                     self.emit_movsd_mem_disp_r64(ptr_reg, 0, val_reg);
                 } else {
-                    // For integer stores, use MOV with GPR
-                    let val_reg = self.get_value_reg(*val, X86Reg::R11);
-                    // MOV [ptr], val
-                    self.emit_mov_mem_disp_r64(ptr_reg, 0, val_reg);
+                    if matches!(val_ty, SirType::Struct(_) | SirType::Array(_)) {
+                        // Store aggregate by copying bytes from source pointer into destination.
+                        let src_reg = self.get_value_reg(*val, X86Reg::R11);
+                        let scratch = if src_reg == X86Reg::R11 {
+                            X86Reg::R10
+                        } else {
+                            X86Reg::R11
+                        };
+                        let size = val_ty.size_bytes();
+                        let copy_bytes = (size + 7) & !7;
+                        for chunk in (0..copy_bytes).step_by(8) {
+                            self.emit_mov_r64_mem_disp(scratch, src_reg, chunk as i32);
+                            self.emit_mov_mem_disp_r64(
+                                ptr_reg,
+                                chunk as i32,
+                                scratch,
+                            );
+                        }
+                    } else {
+                        // For integer stores, use MOV with GPR
+                        let val_reg = self.get_value_reg(*val, X86Reg::R11);
+                        // MOV [ptr], val
+                        self.emit_mov_mem_disp_r64(ptr_reg, 0, val_reg);
+                    }
                 }
             }
             MemoryOp::Alloca { ty, .. } => {
@@ -5764,8 +5984,11 @@ impl X86_64Emitter {
                         },
                     );
 
-                    // Load from ptr + offset
-                    if field_ty.is_float() {
+                    // Aggregates are represented as pointers; extracting an aggregate field returns
+                    // the address of the field (ptr + offset) rather than loading its first word.
+                    if matches!(field_ty, SirType::Struct(_) | SirType::Array(_)) {
+                        self.emit_lea(dst_reg, base_reg, *field_offset as i32);
+                    } else if field_ty.is_float() {
                         self.emit_movsd_r64_mem_disp(dst_reg, base_reg, *field_offset as i32);
                     } else {
                         self.emit_mov_r64_mem_disp(dst_reg, base_reg, *field_offset as i32);
@@ -5823,16 +6046,62 @@ impl X86_64Emitter {
                 self.emit_epilogue_with_restores(callee_saved);
             }
             Terminator::Return(Some(val)) => {
-                // Move return value to RAX (integer) or XMM0 (float)
-                let val_reg = self.get_value_reg(*val, X86Reg::RAX);
-                if val_reg != X86Reg::RAX {
-                    // Check if it's a float value
-                    if val_reg.is_xmm() {
-                        if val_reg != X86Reg::XMM0 {
-                            self.emit_movsd_rr(X86Reg::XMM0, val_reg);
+                // Native backend currently represents aggregates as pointers to memory.
+                //
+                // IMPORTANT: Values produced by BuildAggregate are stack-backed pointers.
+                // Returning those pointers directly would leak a reference to the callee's
+                // stack frame, causing use-after-return in the caller.
+                //
+                // To keep the ABI simple (single-reg returns) while remaining correct, we
+                // heap-materialize aggregate returns here and return a stable pointer.
+                let ret_val_ty = self.get_value_type(*val, func);
+                if matches!(
+                    ret_val_ty,
+                    SirType::Struct(_)
+                        | SirType::Array(_)
+                        | SirType::Epistemic(_)
+                        | SirType::Distribution(_)
+                ) {
+                    let size = ret_val_ty.size_bytes();
+                    if size == 0 {
+                        self.emit_xor_rr_32(X86Reg::RAX, X86Reg::RAX);
+                        self.emit_epilogue_with_restores(callee_saved);
+                        return Ok(());
+                    }
+
+                    // Save the source pointer in a small aligned scratch area.
+                    let src_reg = self.get_value_reg(*val, X86Reg::R10);
+                    self.emit_sub_rsp_imm(16);
+                    self.emit_mov_mem_disp_r64(X86Reg::RSP, 0, src_reg);
+
+                    // dest = _demetrios_alloc(size)
+                    self.emit_mov_ri64(X86Reg::RDI, size as i64);
+                    self.emit_call_extern("_demetrios_alloc");
+
+                    // Preserve dest pointer for return, load source pointer back.
+                    self.emit_mov_rr(X86Reg::RDX, X86Reg::RAX); // dest saved in RDX
+                    self.emit_mov_r64_mem_disp(X86Reg::RSI, X86Reg::RSP, 0); // src in RSI
+                    self.emit_add_rsp_imm(16);
+
+                    // memcpy(dest, src, size) via rep movsb
+                    self.emit_mov_rr(X86Reg::RDI, X86Reg::RDX); // dest in RDI
+                    self.emit_mov_ri64(X86Reg::RCX, size as i64);
+                    self.emit_bytes(&[0xF3, 0xA4]); // rep movsb
+
+                    // Return pointer in RAX
+                    self.emit_mov_rr(X86Reg::RAX, X86Reg::RDX);
+                } else {
+                    // Move return value to RAX (integer) or XMM0 (float)
+                    let val_reg = self.get_value_reg(*val, X86Reg::RAX);
+                    if val_reg != X86Reg::RAX {
+                        // Check if it's a float value
+                        if val_reg.is_xmm() {
+                            if val_reg != X86Reg::XMM0 {
+                                self.emit_movsd_rr(X86Reg::XMM0, val_reg);
+                            }
+                        } else {
+                            self.emit_mov_rr(X86Reg::RAX, val_reg);
                         }
-                    } else {
-                        self.emit_mov_rr(X86Reg::RAX, val_reg);
                     }
                 }
                 self.emit_epilogue_with_restores(callee_saved);

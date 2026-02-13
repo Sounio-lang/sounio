@@ -141,6 +141,7 @@ impl Resolver {
             "read_line",
             "read_byte",
             "read_file",
+            "read_file_prefix",
             "file_size",
             "write_bytes",
             "arg_count",
@@ -158,6 +159,10 @@ impl Resolver {
             "str_from_bytes",
             "int_to_str",
             "starts_with",
+            "ends_with",
+            "is_dir",
+            "path_join",
+            "list_dir",
             "parse_int",
             "parse_float",
             // Linear algebra
@@ -282,7 +287,7 @@ impl Resolver {
             self.symbols.insert(Symbol {
                 def_id,
                 name: name.to_string(),
-                kind: DefKind::Function,
+                kind: DefKind::BuiltinFunction,
                 node_id: NodeId(0),
                 span: Span::default(),
                 parent: None,

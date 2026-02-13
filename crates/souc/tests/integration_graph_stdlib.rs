@@ -6,23 +6,43 @@ use std::process::Command;
 use tempfile::TempDir;
 
 fn repo_root() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .parent()
-        .expect("compiler crate should live under repo root")
-        .to_path_buf()
+    let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+
+    // This crate lives at `<repo>/crates/souc`, so `.parent()` is `<repo>/crates`.
+    // Walk upwards until we find the workspace root that contains `stdlib/`.
+    for ancestor in manifest_dir.ancestors() {
+        if ancestor.join("Cargo.toml").exists() && ancestor.join("stdlib").is_dir() {
+            return ancestor.to_path_buf();
+        }
+    }
+
+    panic!("could not locate repo root from {}", manifest_dir.display());
 }
 
 fn souc_bin() -> PathBuf {
-    std::env::var_os("CARGO_BIN_EXE_souc")
-        .map(PathBuf::from)
-        .or_else(|| {
-            let candidate = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-                .join("target")
-                .join("debug")
-                .join(if cfg!(windows) { "souc.exe" } else { "souc" });
-            candidate.exists().then_some(candidate)
-        })
-        .expect("could not locate `souc` binary (try `cargo build --bin souc`)")
+    // Prefer the compile-time path that Cargo injects for test targets.
+    if let Some(path) = option_env!("CARGO_BIN_EXE_souc") {
+        return PathBuf::from(path);
+    }
+
+    // Fallback for ad-hoc runs outside `cargo test`: look in workspace target dirs.
+    let exe_name = if cfg!(windows) { "souc.exe" } else { "souc" };
+    let root = repo_root();
+    let candidates = [
+        root.join("target").join("debug").join(exe_name),
+        root.join("target").join("release").join(exe_name),
+    ];
+
+    for candidate in candidates {
+        if candidate.exists() {
+            return candidate;
+        }
+    }
+
+    panic!(
+        "could not locate `souc` binary (try `cargo build --bin souc`), searched from {}",
+        root.display()
+    );
 }
 
 fn compile_sounio_code(code: &str) -> Result<(), String> {

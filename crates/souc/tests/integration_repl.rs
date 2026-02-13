@@ -8,6 +8,7 @@
 //! - Error recovery
 
 use std::io::{BufRead, BufReader, Write};
+use std::path::PathBuf;
 use std::process::{Child, Command, Stdio};
 use std::thread;
 use std::time::Duration;
@@ -15,6 +16,53 @@ use std::time::Duration;
 // ============================================================================
 // Test Helpers
 // ============================================================================
+
+fn repo_root() -> PathBuf {
+    let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    for ancestor in manifest_dir.ancestors() {
+        if ancestor.join("Cargo.toml").exists() && ancestor.join("stdlib").is_dir() {
+            return ancestor.to_path_buf();
+        }
+    }
+    panic!("could not locate repo root from {}", manifest_dir.display());
+}
+
+fn souc_bin() -> PathBuf {
+    // Prefer the compile-time path injected by Cargo for test targets.
+    if let Some(path) = option_env!("CARGO_BIN_EXE_souc") {
+        return PathBuf::from(path);
+    }
+
+    let root = repo_root();
+    let exe_name = if cfg!(windows) { "souc.exe" } else { "souc" };
+    let debug = root.join("target").join("debug").join(exe_name);
+    let release = root.join("target").join("release").join(exe_name);
+
+    if debug.exists() {
+        return debug;
+    }
+    if release.exists() {
+        return release;
+    }
+
+    // Last resort: build the binary from the workspace root.
+    eprintln!("Building souc binary...");
+    let status = Command::new("cargo")
+        .args(["build", "--bin", "souc"])
+        .current_dir(&root)
+        .status()
+        .expect("Failed to build souc");
+    assert!(status.success(), "Failed to build souc binary");
+
+    if debug.exists() {
+        return debug;
+    }
+    if release.exists() {
+        return release;
+    }
+
+    panic!("built souc, but binary not found under {}", root.display());
+}
 
 /// A REPL session for testing
 struct ReplSession {
@@ -25,32 +73,9 @@ struct ReplSession {
 impl ReplSession {
     /// Start a new REPL session
     fn new() -> Self {
-        let mut souc_path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-        souc_path.push("target/debug/souc");
+        let souc_path = souc_bin();
 
-        // If debug binary doesn't exist, try release
-        if !souc_path.exists() {
-            souc_path.pop();
-            souc_path.pop();
-            souc_path.push("release/souc");
-        }
-
-        // If still doesn't exist, build it
-        if !souc_path.exists() {
-            eprintln!("Building souc binary...");
-            souc_path.pop();
-            souc_path.pop();
-            let status = Command::new("cargo")
-                .args(["build", "--bin", "souc"])
-                .current_dir(&souc_path)
-                .status()
-                .expect("Failed to build souc");
-            assert!(status.success(), "Failed to build souc binary");
-
-            souc_path.push("target/debug/souc");
-        }
-
-        let mut child = Command::new(souc_path)
+        let mut child = Command::new(&souc_path)
             .arg("repl")
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())

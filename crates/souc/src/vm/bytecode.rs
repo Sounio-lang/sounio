@@ -1,6 +1,6 @@
 //! Bytecode instruction set and value types
 
-use std::collections::HashMap;
+use rustc_hash::FxHashMap as HashMap;
 use std::fmt;
 
 /// Runtime values in the VM
@@ -13,6 +13,13 @@ pub enum Value {
     String(String),
     Pointer(usize),
     List(Vec<Value>),
+    /// Compact representation for very large repeated lists.
+    /// `default` is returned for entries not present in `overrides`.
+    SparseList {
+        len: usize,
+        default: Box<Value>,
+        overrides: HashMap<usize, Value>,
+    },
     /// Struct/record with named fields
     Struct(HashMap<String, Value>),
 }
@@ -35,6 +42,19 @@ impl fmt::Display for Value {
                     write!(f, "{}", item)?;
                 }
                 write!(f, "]")
+            }
+            Value::SparseList {
+                len,
+                default,
+                overrides,
+            } => {
+                write!(
+                    f,
+                    "<sparse-list len={} overrides={} default={}>",
+                    len,
+                    overrides.len(),
+                    default
+                )
             }
             Value::Struct(fields) => {
                 write!(f, "{{ ")?;
@@ -85,6 +105,7 @@ pub enum Bytecode {
     // Bitwise shift operations
     Shl,
     Shr,
+    Xor,
 
     // Control flow
     Jump(usize),
@@ -149,6 +170,7 @@ impl fmt::Display for Bytecode {
             Bytecode::Not => write!(f, "Not"),
             Bytecode::Shl => write!(f, "Shl"),
             Bytecode::Shr => write!(f, "Shr"),
+            Bytecode::Xor => write!(f, "Xor"),
             Bytecode::Jump(a) => write!(f, "Jump({})", a),
             Bytecode::JumpIf(a) => write!(f, "JumpIf({})", a),
             Bytecode::Call(id) => write!(f, "Call({})", id),
