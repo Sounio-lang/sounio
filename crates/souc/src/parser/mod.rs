@@ -365,19 +365,38 @@ impl<'a> Parser<'a> {
         // Collect file-level inner doc comments (`//!`)
         let inner_doc = self.collect_inner_doc_comments();
 
+        fn looks_like_inline_module_definition(p: &Parser) -> bool {
+            if p.peek() != TokenKind::Module {
+                return false;
+            }
+            // `module <path> { ... }` is an inline module definition.
+            // The path accepts both `.` and `::` separators (parse_module_path semantics).
+            //
+            // We intentionally scan the full `<path>` and only then check for `{`,
+            // otherwise dotted module names like `module a.b {}` get misclassified
+            // as a file-level module header.
+            let mut i: usize = 1;
+            if p.peek_n(i) != TokenKind::Ident {
+                return false;
+            }
+            i += 1;
+            while p.peek_n(i) == TokenKind::Dot || p.peek_n(i) == TokenKind::ColonColon {
+                i += 1;
+                if p.peek_n(i) != TokenKind::Ident {
+                    return false;
+                }
+                i += 1;
+            }
+            p.peek_n(i) == TokenKind::LBrace
+        }
+
         // Optional file-level module declaration (e.g., `module foo;` or `module foo::bar;`)
         // This is different from inline module definitions (`module foo { ... }`)
         // which are handled by parse_item.
         // We only consume this if it's followed by a path and semicolon (or EOF/items),
         // not if it's followed by `{` which indicates an inline module definition.
         let module_name = if self.at(TokenKind::Module) {
-            // Peek ahead to check if this is a file-level module declaration
-            // vs an inline module definition
-            let next = self.peek_n(1);
-            let after_name = self.peek_n(2);
-
-            // If pattern is: module <ident> { ... then it's an inline module, don't consume
-            if next == TokenKind::Ident && after_name == TokenKind::LBrace {
+            if looks_like_inline_module_definition(self) {
                 None
             } else {
                 self.advance();
