@@ -133,6 +133,23 @@ fn test_native_function_call() {
 }
 
 #[test]
+fn test_native_nested_calls_in_call_arguments_keep_stack_aligned() {
+    // Regression guard: evaluating later arguments must not misalign the stack while making calls.
+    let (code, _) = compile_and_run(
+        "fn g() -> i64 { 40 }\nfn h() -> i64 { 2 }\nfn add(a: i64, b: i64) -> i64 { a + b }\nfn main() -> i64 { add(g(), h()) }",
+    );
+    assert_eq!(code, 42);
+}
+
+#[test]
+fn test_native_three_arg_call_uses_aligned_scratch_area() {
+    let (code, _) = compile_and_run(
+        "fn a() -> i64 { 1 }\nfn b() -> i64 { 2 }\nfn c() -> i64 { 39 }\nfn sum3(x: i64, y: i64, z: i64) -> i64 { x + y + z }\nfn main() -> i64 { sum3(a(), b(), c()) }",
+    );
+    assert_eq!(code, 42);
+}
+
+#[test]
 fn test_native_call_inside_binary_expression() {
     // Regression guard: evaluating a binary op must preserve stack alignment so nested calls remain
     // ABI-correct on System V platforms.

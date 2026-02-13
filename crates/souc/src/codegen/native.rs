@@ -91,6 +91,20 @@ impl NativeCodegen {
             return Err("No main function found".to_string());
         }
 
+        // The native entry trampoline calls `main()` with no arguments.
+        // Reject other signatures early to avoid running with garbage registers.
+        if let Some(main_fn) = module.items.iter().find_map(|item| match item {
+            HirItem::Function(f) if f.name == "main" => Some(f),
+            _ => None,
+        }) {
+            if !main_fn.ty.params.is_empty() {
+                return Err(format!(
+                    "native backend requires `fn main()` to take 0 parameters (got {})",
+                    main_fn.ty.params.len()
+                ));
+            }
+        }
+
         let entry_offset = self.emit_entry_trampoline();
         self.apply_relocations()?;
         Ok(self.emitter.finalize(entry_offset))
@@ -370,69 +384,69 @@ impl NativeCodegen {
         self.emitter.emit_code(&[0x48, 0x83, 0xec, 0x08]); // sub rsp, 8
         self.compile_expr(right)?;
         self.emitter.emit_code(&[0x48, 0x83, 0xc4, 0x08]); // add rsp, 8
-        self.emitter.emit_code(&[0x5b]); // pop rbx
+        self.emitter.emit_code(&[0x41, 0x5a]); // pop r10
 
         match op {
             HirBinaryOp::Add => {
-                self.emitter.emit_code(&[0x48, 0x01, 0xd8]); // add rax, rbx
+                self.emitter.emit_code(&[0x4c, 0x01, 0xd0]); // add rax, r10
                 Ok(())
             }
             HirBinaryOp::Sub => {
-                self.emitter.emit_code(&[0x48, 0x29, 0xc3]); // sub rbx, rax
-                self.emitter.emit_code(&[0x48, 0x89, 0xd8]); // mov rax, rbx
+                self.emitter.emit_code(&[0x49, 0x29, 0xc2]); // sub r10, rax
+                self.emitter.emit_code(&[0x4c, 0x89, 0xd0]); // mov rax, r10
                 Ok(())
             }
             HirBinaryOp::Mul => {
-                self.emitter.emit_code(&[0x48, 0x0f, 0xaf, 0xc3]); // imul rax, rbx
+                self.emitter.emit_code(&[0x49, 0x0f, 0xaf, 0xc2]); // imul rax, r10
                 Ok(())
             }
             HirBinaryOp::Div => {
                 self.emitter.emit_code(&[0x48, 0x89, 0xc1]); // mov rcx, rax (rhs)
-                self.emitter.emit_code(&[0x48, 0x89, 0xd8]); // mov rax, rbx (lhs)
+                self.emitter.emit_code(&[0x4c, 0x89, 0xd0]); // mov rax, r10 (lhs)
                 self.emitter.emit_code(&[0x48, 0x99]); // cqo
                 self.emitter.emit_code(&[0x48, 0xf7, 0xf9]); // idiv rcx
                 Ok(())
             }
             HirBinaryOp::Rem => {
                 self.emitter.emit_code(&[0x48, 0x89, 0xc1]); // mov rcx, rax (rhs)
-                self.emitter.emit_code(&[0x48, 0x89, 0xd8]); // mov rax, rbx (lhs)
+                self.emitter.emit_code(&[0x4c, 0x89, 0xd0]); // mov rax, r10 (lhs)
                 self.emitter.emit_code(&[0x48, 0x99]); // cqo
                 self.emitter.emit_code(&[0x48, 0xf7, 0xf9]); // idiv rcx
                 self.emitter.emit_code(&[0x48, 0x89, 0xd0]); // mov rax, rdx (remainder)
                 Ok(())
             }
             HirBinaryOp::Eq => {
-                self.emitter.emit_code(&[0x48, 0x39, 0xc3]); // cmp rbx, rax
+                self.emitter.emit_code(&[0x49, 0x39, 0xc2]); // cmp r10, rax
                 self.emitter.emit_code(&[0x0f, 0x94, 0xc0]); // sete al
                 self.emitter.emit_code(&[0x48, 0x0f, 0xb6, 0xc0]); // movzx rax, al
                 Ok(())
             }
             HirBinaryOp::Ne => {
-                self.emitter.emit_code(&[0x48, 0x39, 0xc3]); // cmp rbx, rax
+                self.emitter.emit_code(&[0x49, 0x39, 0xc2]); // cmp r10, rax
                 self.emitter.emit_code(&[0x0f, 0x95, 0xc0]); // setne al
                 self.emitter.emit_code(&[0x48, 0x0f, 0xb6, 0xc0]); // movzx rax, al
                 Ok(())
             }
             HirBinaryOp::Lt => {
-                self.emitter.emit_code(&[0x48, 0x39, 0xc3]); // cmp rbx, rax
+                self.emitter.emit_code(&[0x49, 0x39, 0xc2]); // cmp r10, rax
                 self.emitter.emit_code(&[0x0f, 0x9c, 0xc0]); // setl al
                 self.emitter.emit_code(&[0x48, 0x0f, 0xb6, 0xc0]); // movzx rax, al
                 Ok(())
             }
             HirBinaryOp::Le => {
-                self.emitter.emit_code(&[0x48, 0x39, 0xc3]); // cmp rbx, rax
+                self.emitter.emit_code(&[0x49, 0x39, 0xc2]); // cmp r10, rax
                 self.emitter.emit_code(&[0x0f, 0x9e, 0xc0]); // setle al
                 self.emitter.emit_code(&[0x48, 0x0f, 0xb6, 0xc0]); // movzx rax, al
                 Ok(())
             }
             HirBinaryOp::Gt => {
-                self.emitter.emit_code(&[0x48, 0x39, 0xc3]); // cmp rbx, rax
+                self.emitter.emit_code(&[0x49, 0x39, 0xc2]); // cmp r10, rax
                 self.emitter.emit_code(&[0x0f, 0x9f, 0xc0]); // setg al
                 self.emitter.emit_code(&[0x48, 0x0f, 0xb6, 0xc0]); // movzx rax, al
                 Ok(())
             }
             HirBinaryOp::Ge => {
-                self.emitter.emit_code(&[0x48, 0x39, 0xc3]); // cmp rbx, rax
+                self.emitter.emit_code(&[0x49, 0x39, 0xc2]); // cmp r10, rax
                 self.emitter.emit_code(&[0x0f, 0x9d, 0xc0]); // setge al
                 self.emitter.emit_code(&[0x48, 0x0f, 0xb6, 0xc0]); // movzx rax, al
                 Ok(())
@@ -502,13 +516,33 @@ impl NativeCodegen {
             ));
         }
 
-        for arg in args {
-            self.compile_expr(arg)?;
-            self.emitter.emit_code(&[0x50]); // push rax
-        }
+        // Evaluate arguments left-to-right while keeping the stack 16-byte aligned.
+        //
+        // Important: we cannot simply `push` each arg value, because after the first push the
+        // stack becomes misaligned and any nested call during later arg evaluation would violate
+        // the System V ABI.
+        if !args.is_empty() {
+            let scratch_size = (args.len() as i32) * 8;
+            let scratch_total = align16(scratch_size);
 
-        for i in (0..args.len()).rev() {
-            self.emit_pop_arg_reg(i)?;
+            // sub rsp, scratch_total
+            self.emitter.emit_code(&[0x48, 0x81, 0xec]);
+            self.emitter
+                .emit_code(&(scratch_total as u32).to_le_bytes());
+
+            for (i, arg) in args.iter().enumerate() {
+                self.compile_expr(arg)?;
+                self.emit_store_rax_rsp_disp32((i as i32) * 8);
+            }
+
+            for i in 0..args.len() {
+                self.emit_load_arg_reg_from_rsp_disp32(i, (i as i32) * 8)?;
+            }
+
+            // add rsp, scratch_total
+            self.emitter.emit_code(&[0x48, 0x81, 0xc4]);
+            self.emitter
+                .emit_code(&(scratch_total as u32).to_le_bytes());
         }
 
         self.emit_call_relocation_any(callee);
@@ -525,17 +559,34 @@ impl NativeCodegen {
         }
     }
 
-    fn emit_pop_arg_reg(&mut self, index: usize) -> Result<(), String> {
+    fn emit_load_arg_reg_from_rsp_disp32(
+        &mut self,
+        index: usize,
+        disp: i32,
+    ) -> Result<(), String> {
         match index {
-            0 => self.emitter.emit_code(&[0x5f]),       // pop rdi
-            1 => self.emitter.emit_code(&[0x5e]),       // pop rsi
-            2 => self.emitter.emit_code(&[0x5a]),       // pop rdx
-            3 => self.emitter.emit_code(&[0x59]),       // pop rcx
-            4 => self.emitter.emit_code(&[0x41, 0x58]), // pop r8
-            5 => self.emitter.emit_code(&[0x41, 0x59]), // pop r9
+            // mov rdi, [rsp + disp32]
+            0 => self.emitter.emit_code(&[0x48, 0x8b, 0xbc, 0x24]),
+            // mov rsi, [rsp + disp32]
+            1 => self.emitter.emit_code(&[0x48, 0x8b, 0xb4, 0x24]),
+            // mov rdx, [rsp + disp32]
+            2 => self.emitter.emit_code(&[0x48, 0x8b, 0x94, 0x24]),
+            // mov rcx, [rsp + disp32]
+            3 => self.emitter.emit_code(&[0x48, 0x8b, 0x8c, 0x24]),
+            // mov r8, [rsp + disp32]
+            4 => self.emitter.emit_code(&[0x4c, 0x8b, 0x84, 0x24]),
+            // mov r9, [rsp + disp32]
+            5 => self.emitter.emit_code(&[0x4c, 0x8b, 0x8c, 0x24]),
             _ => return Err(format!("Unsupported argument register index {}", index)),
         }
+        self.emitter.emit_code(&disp.to_le_bytes());
         Ok(())
+    }
+
+    fn emit_store_rax_rsp_disp32(&mut self, disp: i32) {
+        // mov [rsp + disp32], rax
+        self.emitter.emit_code(&[0x48, 0x89, 0x84, 0x24]);
+        self.emitter.emit_code(&disp.to_le_bytes());
     }
 
     fn compile_print_call(&mut self, args: &[HirExpr]) -> Result<(), String> {
