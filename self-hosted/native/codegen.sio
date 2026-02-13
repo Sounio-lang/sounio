@@ -24,6 +24,7 @@ fn empty_label_patch() -> LabelPatch {
 struct NativeCompiler {
     code: CodeBuffer,
     relocs: RelocationTable,
+    rodata: StringTable,            // String literals for .rodata
 
     // Module-level: function layout
     fn_offsets: [i64; 64],          // function index -> code buffer offset
@@ -46,6 +47,7 @@ fn compiler_new() -> NativeCompiler {
     NativeCompiler {
         code: code_buffer_new(),
         relocs: reloc_table_new(),
+        rodata: string_table_new(),
         fn_offsets: [-1; 64],
         fn_count: 0,
         return_jumps: [0; 64],
@@ -58,7 +60,7 @@ fn compiler_new() -> NativeCompiler {
 }
 
 // Reset per-function state before compiling a new function
-fn reset_function_state(nc: NativeCompiler) -> NativeCompiler with Mut, Panic {
+fn reset_function_state(nc: NativeCompiler) -> NativeCompiler with Mut, Panic, Div {
     var c = nc
     c.return_jump_count = 0
     var i = 0
@@ -114,10 +116,22 @@ fn compile_module(nc: NativeCompiler, module: IrModule) -> NativeCompiler with M
         c = emit_entry_trampoline(c, main_idx)
     }
 
-    // Pass 3: Apply call relocations
-    c.code = apply_relocations(c.relocs, c.code, c.fn_offsets, c.fn_count)
+    // Pass 3: Apply relocations (function calls + RIP-relative data)
+    let text_file_offset = 4096
+    let rodata_file_offset = align_page(text_file_offset + c.code.len)
+    c.code = apply_relocations(c.relocs, c.code, c.fn_offsets, c.fn_count, rodata_file_offset)
 
     c
+}
+
+// Helper: align to page boundary
+fn align_page(offset: i64) -> i64 with Mut, Panic {
+    var aligned = offset
+    let remainder = offset % 4096
+    if remainder != 0 {
+        aligned = offset + (4096 - remainder)
+    }
+    aligned
 }
 
 // Find the function index for "main"
@@ -310,5 +324,5 @@ fn compile_to_elf(module: IrModule, base_addr: i64) -> Elf64Binary with Mut, Pan
     nc = compile_module(nc, module)
 
     let entry = trampoline_offset(nc, module)
-    finalize_elf64(nc.code, entry, base_addr)
+    finalize_elf64(nc.code, nc.rodata, entry, base_addr)
 }

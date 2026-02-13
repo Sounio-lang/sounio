@@ -89,6 +89,11 @@ pub enum Bytecode {
     Mod,
     Neg,
 
+    // Conversions (runtime coercions for `as` casts)
+    ToInt,
+    ToFloat,
+    ToBool,
+
     // Comparison operations
     Eq,
     Ne,
@@ -101,6 +106,10 @@ pub enum Bytecode {
     And,
     Or,
     Not,
+
+    // Bitwise operations
+    BitAnd,
+    BitOr,
 
     // Bitwise shift operations
     Shl,
@@ -159,6 +168,9 @@ impl fmt::Display for Bytecode {
             Bytecode::Div => write!(f, "Div"),
             Bytecode::Mod => write!(f, "Mod"),
             Bytecode::Neg => write!(f, "Neg"),
+            Bytecode::ToInt => write!(f, "ToInt"),
+            Bytecode::ToFloat => write!(f, "ToFloat"),
+            Bytecode::ToBool => write!(f, "ToBool"),
             Bytecode::Eq => write!(f, "Eq"),
             Bytecode::Ne => write!(f, "Ne"),
             Bytecode::Lt => write!(f, "Lt"),
@@ -168,6 +180,8 @@ impl fmt::Display for Bytecode {
             Bytecode::And => write!(f, "And"),
             Bytecode::Or => write!(f, "Or"),
             Bytecode::Not => write!(f, "Not"),
+            Bytecode::BitAnd => write!(f, "BitAnd"),
+            Bytecode::BitOr => write!(f, "BitOr"),
             Bytecode::Shl => write!(f, "Shl"),
             Bytecode::Shr => write!(f, "Shr"),
             Bytecode::Xor => write!(f, "Xor"),

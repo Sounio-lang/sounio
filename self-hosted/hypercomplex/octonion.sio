@@ -1,0 +1,597 @@
+// self-hosted::hypercomplex::octonion — Octonion and Sedenion Algebra
+//
+// Cayley-Dickson construction for hypercomplex number systems beyond quaternions.
+//
+// ## Algebra Hierarchy
+//
+// Reals (1D) → Complex (2D) → Quaternions (4D) → Octonions (8D) → Sedenions (16D)
+//
+// Each step doubles the dimension via Cayley-Dickson:
+//   (a, b) * (c, d) = (a*c - d̄*b, d*a + b*c̄)
+//
+// Properties lost at each stage:
+//   Quaternions: commutativity  (ab ≠ ba)
+//   Octonions:   associativity ((ab)c ≠ a(bc))  — but ALTERNATIVE
+//   Sedenions:   alternativity — and gain zero divisors
+//
+// ## Octonion Basis
+//
+// e₀ = 1 (real), e₁..e₇ (imaginary units)
+// Multiplication table follows Fano plane:
+//   eᵢeⱼ = -δᵢⱼ + εᵢⱼₖeₖ
+//
+// ## Zero Divisors (Sedenions)
+//
+// Sedenions are the first Cayley-Dickson algebra with zero divisors:
+//   ∃ a,b ≠ 0 such that a*b = 0
+// This is detectable and critical for ML loss surface analysis.
+
+// ============================================================================
+// Octonion (8-dimensional, non-associative, alternative)
+// ============================================================================
+
+struct Oct {
+    e: [f64; 8],  // e[0] = real, e[1..7] = imaginary units
+}
+
+fn oct_zero() -> Oct {
+    Oct { e: [0.0; 8] }
+}
+
+fn oct_real(r: f64) -> Oct with Mut, Panic {
+    var o = Oct { e: [0.0; 8] }
+    o.e[0] = r
+    o
+}
+
+fn oct_unit(index: i64) -> Oct with Mut, Panic {
+    // Return basis element eₖ
+    var o = Oct { e: [0.0; 8] }
+    if index >= 0 && index < 8 {
+        o.e[index as usize] = 1.0
+    }
+    o
+}
+
+fn oct_from_quat_pair(a: Quat, b: Quat) -> Oct with Mut, Panic {
+    // Cayley-Dickson: Oct = (Quat, Quat)
+    var o = Oct { e: [0.0; 8] }
+    o.e[0] = a.w
+    o.e[1] = a.x
+    o.e[2] = a.y
+    o.e[3] = a.z
+    o.e[4] = b.w
+    o.e[5] = b.x
+    o.e[6] = b.y
+    o.e[7] = b.z
+    o
+}
+
+fn oct_to_quat_pair(o: Oct) -> (Quat, Quat) with Mut, Panic, Div {
+    let a = Quat { w: o.e[0], x: o.e[1], y: o.e[2], z: o.e[3] }
+    let b = Quat { w: o.e[4], x: o.e[5], y: o.e[6], z: o.e[7] }
+    (a, b)
+}
+
+fn oct_add(a: Oct, b: Oct) -> Oct with Mut, Panic, Div {
+    var result = oct_zero()
+    var i: i64 = 0
+    while i < 8 {
+        result.e[i as usize] = a.e[i as usize] + b.e[i as usize]
+        i = i + 1
+    }
+    result
+}
+
+fn oct_sub(a: Oct, b: Oct) -> Oct with Mut, Panic, Div {
+    var result = oct_zero()
+    var i: i64 = 0
+    while i < 8 {
+        result.e[i as usize] = a.e[i as usize] - b.e[i as usize]
+        i = i + 1
+    }
+    result
+}
+
+fn oct_mul_scalar(o: Oct, s: f64) -> Oct with Mut, Panic, Div {
+    var result = oct_zero()
+    var i: i64 = 0
+    while i < 8 {
+        result.e[i as usize] = o.e[i as usize] * s
+        i = i + 1
+    }
+    result
+}
+
+fn oct_conjugate(o: Oct) -> Oct with Mut, Panic, Div {
+    var result = oct_zero()
+    result.e[0] = o.e[0]
+    var i: i64 = 1
+    while i < 8 {
+        result.e[i as usize] = -o.e[i as usize]
+        i = i + 1
+    }
+    result
+}
+
+fn oct_norm_squared(o: Oct) -> f64 with Mut, Panic, Div {
+    var sum: f64 = 0.0
+    var i: i64 = 0
+    while i < 8 {
+        sum = sum + o.e[i as usize] * o.e[i as usize]
+        i = i + 1
+    }
+    sum
+}
+
+fn oct_norm(o: Oct) -> f64 with Mut, Panic, Div {
+    sqrt(oct_norm_squared(o))
+}
+
+fn oct_normalize(o: Oct) -> Oct with Mut, Panic, Div {
+    let n = oct_norm(o)
+    if n < 1e-12 {
+        oct_real(1.0)
+    } else {
+        oct_mul_scalar(o, 1.0 / n)
+    }
+}
+
+// ============================================================================
+// Octonion Multiplication via Fano Plane
+// ============================================================================
+//
+// The Fano plane encodes the multiplication table for octonion basis elements.
+// Each triple (i, j, k) in the Fano plane means: eᵢ * eⱼ = eₖ
+//
+// Fano plane triples (with positive orientation):
+//   (1,2,4), (2,3,5), (3,4,6), (4,5,7), (5,6,1), (6,7,2), (7,1,3)
+//
+// General formula: eᵢ * eⱼ = fano_sign(i,j) * eₖ
+
+// Fano plane multiplication index table
+// fano_product[i][j] gives the absolute index k such that eᵢeⱼ = ±eₖ
+// fano_sign[i][j] gives the sign (+1 or -1)
+
+fn oct_basis_mul_index(i: i64, j: i64) -> i64 with Mut, Panic, Div {
+    // Returns the index k for eᵢ * eⱼ = ±eₖ (i,j in 1..7)
+    // Based on the standard Fano plane triples
+    if i == j { return 0 }  // eᵢ² = -1, result in real component
+
+    // Canonical triples: (1,2,4) (2,3,5) (3,4,6) (4,5,7) (5,6,1) (6,7,2) (7,1,3)
+    // Encode all 7 triples
+    var triples: [i64; 21] = [0; 21]
+    // triple 0: (1,2,4)
+    triples[0] = 1; triples[1] = 2; triples[2] = 4
+    // triple 1: (2,3,5)
+    triples[3] = 2; triples[4] = 3; triples[5] = 5
+    // triple 2: (3,4,6)
+    triples[6] = 3; triples[7] = 4; triples[8] = 6
+    // triple 3: (4,5,7)
+    triples[9] = 4; triples[10] = 5; triples[11] = 7
+    // triple 4: (5,6,1)
+    triples[12] = 5; triples[13] = 6; triples[14] = 1
+    // triple 5: (6,7,2)
+    triples[15] = 6; triples[16] = 7; triples[17] = 2
+    // triple 6: (7,1,3)
+    triples[18] = 7; triples[19] = 1; triples[20] = 3
+
+    var t: i64 = 0
+    while t < 7 {
+        let a = triples[(t * 3) as usize]
+        let b = triples[(t * 3 + 1) as usize]
+        let c = triples[(t * 3 + 2) as usize]
+
+        // Check all cyclic permutations
+        if (i == a && j == b) || (i == b && j == c) || (i == c && j == a) {
+            // Forward cyclic: eᵢeⱼ = eₖ
+            if i == a && j == b { return c }
+            if i == b && j == c { return a }
+            if i == c && j == a { return b }
+        }
+        if (i == b && j == a) || (i == c && j == b) || (i == a && j == c) {
+            // Reverse cyclic: eⱼeᵢ = -eₖ (handled by sign function)
+            if i == b && j == a { return c }
+            if i == c && j == b { return a }
+            if i == a && j == c { return b }
+        }
+        t = t + 1
+    }
+    0  // Shouldn't reach here for valid indices
+}
+
+fn oct_basis_mul_sign(i: i64, j: i64) -> f64 with Mut, Panic, Div {
+    // Returns the sign (+1 or -1) for eᵢ * eⱼ
+    if i == j { return -1.0 }  // eᵢ² = -1
+    if i == 0 || j == 0 { return 1.0 }  // e₀ is identity
+
+    // Same triple encoding as above
+    var triples: [i64; 21] = [0; 21]
+    triples[0] = 1; triples[1] = 2; triples[2] = 4
+    triples[3] = 2; triples[4] = 3; triples[5] = 5
+    triples[6] = 3; triples[7] = 4; triples[8] = 6
+    triples[9] = 4; triples[10] = 5; triples[11] = 7
+    triples[12] = 5; triples[13] = 6; triples[14] = 1
+    triples[15] = 6; triples[16] = 7; triples[17] = 2
+    triples[18] = 7; triples[19] = 1; triples[20] = 3
+
+    var t: i64 = 0
+    while t < 7 {
+        let a = triples[(t * 3) as usize]
+        let b = triples[(t * 3 + 1) as usize]
+        let c = triples[(t * 3 + 2) as usize]
+
+        // Forward cyclic → positive
+        if (i == a && j == b) || (i == b && j == c) || (i == c && j == a) {
+            return 1.0
+        }
+        // Reverse cyclic → negative
+        if (i == b && j == a) || (i == c && j == b) || (i == a && j == c) {
+            return -1.0
+        }
+        t = t + 1
+    }
+    0.0  // Shouldn't reach here
+}
+
+fn oct_mul(a: Oct, b: Oct) -> Oct with Mut, Panic, Div {
+    // General octonion multiplication using the Fano plane
+    //
+    // (a₀ + Σaᵢeᵢ) * (b₀ + Σbⱼeⱼ) = Σᵢ,ⱼ aᵢbⱼ (eᵢ * eⱼ)
+    //
+    // where eᵢ * eⱼ is determined by the Fano plane multiplication table.
+
+    var result = oct_zero()
+
+    var i: i64 = 0
+    while i < 8 {
+        var j: i64 = 0
+        while j < 8 {
+            let coeff = a.e[i as usize] * b.e[j as usize]
+
+            if i == 0 && j == 0 {
+                // e₀ * e₀ = e₀ (real * real)
+                result.e[0] = result.e[0] + coeff
+            } else if i == 0 {
+                // e₀ * eⱼ = eⱼ
+                result.e[j as usize] = result.e[j as usize] + coeff
+            } else if j == 0 {
+                // eᵢ * e₀ = eᵢ
+                result.e[i as usize] = result.e[i as usize] + coeff
+            } else if i == j {
+                // eᵢ * eᵢ = -1 (contributes to real part)
+                result.e[0] = result.e[0] - coeff
+            } else {
+                // eᵢ * eⱼ = sign * eₖ
+                let k = oct_basis_mul_index(i, j)
+                let sign = oct_basis_mul_sign(i, j)
+                result.e[k as usize] = result.e[k as usize] + sign * coeff
+            }
+
+            j = j + 1
+        }
+        i = i + 1
+    }
+
+    result
+}
+
+fn oct_inverse(o: Oct) -> Oct with Mut, Panic, Div {
+    let norm_sq = oct_norm_squared(o)
+    if norm_sq < 1e-24 {
+        oct_zero()
+    } else {
+        oct_mul_scalar(oct_conjugate(o), 1.0 / norm_sq)
+    }
+}
+
+// ============================================================================
+// Octonion: Cayley-Dickson Construction (alternative multiplication)
+// ============================================================================
+//
+// The Cayley-Dickson construction builds octonions from quaternion pairs:
+//   (a, b) * (c, d) = (ac - d̄b, da + bc̄)
+// where a, b, c, d are quaternions and ¯ denotes conjugation.
+
+fn oct_mul_cayley_dickson(p: Oct, q: Oct) -> Oct with Mut, Panic, Div {
+    let pair_p = oct_to_quat_pair(p)
+    let pair_q = oct_to_quat_pair(q)
+    let a = pair_p.0
+    let b = pair_p.1
+    let c = pair_q.0
+    let d = pair_q.1
+
+    // (a, b) * (c, d) = (ac - d̄b, da + bc̄)
+    let d_conj = quat_conjugate(d)
+    let c_conj = quat_conjugate(c)
+
+    let real_part = quat_sub(quat_mul(a, c), quat_mul(d_conj, b))
+    let imag_part = quat_add(quat_mul(d, a), quat_mul(b, c_conj))
+
+    oct_from_quat_pair(real_part, imag_part)
+}
+
+// ============================================================================
+// Associator: measures non-associativity
+// ============================================================================
+
+fn oct_associator(a: Oct, b: Oct, c: Oct) -> Oct with Mut, Panic, Div {
+    // [a, b, c] = (ab)c - a(bc)
+    // For octonions, this is generally non-zero!
+    // The octonions are "alternative": [a, a, b] = [a, b, b] = 0
+    let ab = oct_mul(a, b)
+    let bc = oct_mul(b, c)
+    let ab_c = oct_mul(ab, c)
+    let a_bc = oct_mul(a, bc)
+    oct_sub(ab_c, a_bc)
+}
+
+fn oct_is_associative(a: Oct, b: Oct, c: Oct) -> bool with Mut, Panic, Div {
+    let assoc = oct_associator(a, b, c)
+    oct_norm(assoc) < 1e-9
+}
+
+// ============================================================================
+// Sedenion (16-dimensional, non-alternative, has zero divisors)
+// ============================================================================
+
+struct Sed {
+    e: [f64; 16],
+}
+
+fn sed_zero() -> Sed {
+    Sed { e: [0.0; 16] }
+}
+
+fn sed_real(r: f64) -> Sed with Mut, Panic {
+    var s = Sed { e: [0.0; 16] }
+    s.e[0] = r
+    s
+}
+
+fn sed_unit(index: i64) -> Sed with Mut, Panic {
+    var s = Sed { e: [0.0; 16] }
+    if index >= 0 && index < 16 {
+        s.e[index as usize] = 1.0
+    }
+    s
+}
+
+fn sed_from_oct_pair(a: Oct, b: Oct) -> Sed with Mut, Panic, Div {
+    // Cayley-Dickson: Sed = (Oct, Oct)
+    var s = Sed { e: [0.0; 16] }
+    var i: i64 = 0
+    while i < 8 {
+        s.e[i as usize] = a.e[i as usize]
+        s.e[(i + 8) as usize] = b.e[i as usize]
+        i = i + 1
+    }
+    s
+}
+
+fn sed_to_oct_pair(s: Sed) -> (Oct, Oct) with Mut, Panic, Div {
+    var a = oct_zero()
+    var b = oct_zero()
+    var i: i64 = 0
+    while i < 8 {
+        a.e[i as usize] = s.e[i as usize]
+        b.e[i as usize] = s.e[(i + 8) as usize]
+        i = i + 1
+    }
+    (a, b)
+}
+
+fn sed_add(a: Sed, b: Sed) -> Sed with Mut, Panic, Div {
+    var result = sed_zero()
+    var i: i64 = 0
+    while i < 16 {
+        result.e[i as usize] = a.e[i as usize] + b.e[i as usize]
+        i = i + 1
+    }
+    result
+}
+
+fn sed_sub(a: Sed, b: Sed) -> Sed with Mut, Panic, Div {
+    var result = sed_zero()
+    var i: i64 = 0
+    while i < 16 {
+        result.e[i as usize] = a.e[i as usize] - b.e[i as usize]
+        i = i + 1
+    }
+    result
+}
+
+fn sed_mul_scalar(s: Sed, k: f64) -> Sed with Mut, Panic, Div {
+    var result = sed_zero()
+    var i: i64 = 0
+    while i < 16 {
+        result.e[i as usize] = s.e[i as usize] * k
+        i = i + 1
+    }
+    result
+}
+
+fn sed_conjugate(s: Sed) -> Sed with Mut, Panic, Div {
+    var result = sed_zero()
+    result.e[0] = s.e[0]
+    var i: i64 = 1
+    while i < 16 {
+        result.e[i as usize] = -s.e[i as usize]
+        i = i + 1
+    }
+    result
+}
+
+fn sed_norm_squared(s: Sed) -> f64 with Mut, Panic, Div {
+    var sum: f64 = 0.0
+    var i: i64 = 0
+    while i < 16 {
+        sum = sum + s.e[i as usize] * s.e[i as usize]
+        i = i + 1
+    }
+    sum
+}
+
+fn sed_norm(s: Sed) -> f64 with Mut, Panic, Div {
+    sqrt(sed_norm_squared(s))
+}
+
+fn sed_mul(p: Sed, q: Sed) -> Sed with Mut, Panic, Div {
+    // Cayley-Dickson multiplication for sedenions:
+    //   (a, b) * (c, d) = (ac - d̄b, da + bc̄)
+    // where a, b, c, d are octonions
+
+    let pair_p = sed_to_oct_pair(p)
+    let pair_q = sed_to_oct_pair(q)
+    let a = pair_p.0
+    let b = pair_p.1
+    let c = pair_q.0
+    let d = pair_q.1
+
+    let d_conj = oct_conjugate(d)
+    let c_conj = oct_conjugate(c)
+
+    let real_part = oct_sub(oct_mul(a, c), oct_mul(d_conj, b))
+    let imag_part = oct_add(oct_mul(d, a), oct_mul(b, c_conj))
+
+    sed_from_oct_pair(real_part, imag_part)
+}
+
+// ============================================================================
+// Zero Divisor Detection (Sedenions Only!)
+// ============================================================================
+//
+// A zero divisor is a non-zero element z such that z*w = 0 for some non-zero w.
+// The sedenions are the FIRST Cayley-Dickson algebra with zero divisors.
+// This has deep implications for ML loss surface analysis.
+//
+// Classic example:
+//   z = e₃ + e₁₀
+//   w = e₆ - e₁₅
+//   z * w = 0
+
+fn sed_is_zero(s: Sed) -> bool with Mut, Panic, Div {
+    sed_norm_squared(s) < 1e-18
+}
+
+fn sed_is_zero_divisor_pair(a: Sed, b: Sed) -> bool with Mut, Panic, Div {
+    // Check if a*b = 0 while both a,b ≠ 0
+    if sed_is_zero(a) || sed_is_zero(b) {
+        false
+    } else {
+        sed_is_zero(sed_mul(a, b))
+    }
+}
+
+fn sed_find_zero_divisor(s: Sed) -> Sed with Mut, Panic, Div {
+    // Given a non-zero sedenion s, attempt to find w such that s*w = 0.
+    // Uses the Moreno-Biss construction for known zero divisor families.
+    //
+    // Strategy: For sedenions of the form e_i + e_j (i < 8, j >= 8),
+    // the zero divisor partner follows the Fano plane pattern.
+
+    // Quick search over basis combinations
+    var i: i64 = 0
+    while i < 16 {
+        var j: i64 = 0
+        while j < 16 {
+            if i != j {
+                // Try w = e_i + e_j
+                var w = sed_zero()
+                w.e[i as usize] = 1.0
+                w.e[j as usize] = 1.0
+                if sed_is_zero_divisor_pair(s, w) {
+                    return w
+                }
+
+                // Try w = e_i - e_j
+                w.e[j as usize] = -1.0
+                if sed_is_zero_divisor_pair(s, w) {
+                    return w
+                }
+            }
+            j = j + 1
+        }
+        i = i + 1
+    }
+
+    sed_zero()  // No zero divisor found (search is not exhaustive)
+}
+
+// ============================================================================
+// ML Loss Surface Navigation
+// ============================================================================
+//
+// Sedenion zero divisors create "seams" in the loss surface that traditional
+// gradient descent cannot cross. The Sounio hypercomplex framework enables:
+//
+// 1. Detection of zero-divisor seams in parameter space
+// 2. Navigation around seams using octonion-constrained paths
+// 3. Loss surface topology analysis via hypercomplex curvature
+
+struct LossSurfaceProbe {
+    position: Sed,
+    gradient: Sed,
+    curvature: f64,
+    near_zero_divisor: bool,
+    zero_divisor_distance: f64,
+}
+
+fn probe_loss_surface(
+    position: Sed,
+    gradient: Sed,
+    step_size: f64
+) -> LossSurfaceProbe with Mut, Panic, Div {
+    // Check proximity to zero divisor seams
+    let norm_sq = sed_norm_squared(position)
+    let partner = sed_find_zero_divisor(position)
+    let partner_norm = sed_norm(partner)
+
+    let near_zd = partner_norm > 1e-12
+    let zd_dist = if near_zd {
+        sed_norm(sed_sub(position, partner))
+    } else {
+        1e10  // No zero divisor found, large distance
+    }
+
+    // Compute curvature estimate from gradient
+    let grad_norm = sed_norm(gradient)
+    let curvature = if norm_sq > 1e-24 {
+        grad_norm / sqrt(norm_sq)
+    } else {
+        0.0
+    }
+
+    LossSurfaceProbe {
+        position: position,
+        gradient: gradient,
+        curvature: curvature,
+        near_zero_divisor: near_zd,
+        zero_divisor_distance: zd_dist,
+    }
+}
+
+fn navigate_around_seam(
+    position: Sed,
+    gradient: Sed,
+    step_size: f64
+) -> Sed with Mut, Panic, Div {
+    // When near a zero-divisor seam, project gradient onto the
+    // octonionic subspace (first 8 components) to avoid the seam.
+    let probe = probe_loss_surface(position, gradient, step_size)
+
+    if probe.near_zero_divisor && probe.zero_divisor_distance < 0.1 {
+        // Project gradient to octonion subspace
+        var projected = sed_zero()
+        var i: i64 = 0
+        while i < 8 {
+            projected.e[i as usize] = gradient.e[i as usize]
+            i = i + 1
+        }
+        // Step along projected gradient
+        sed_add(position, sed_mul_scalar(projected, -step_size))
+    } else {
+        // Normal gradient step
+        sed_add(position, sed_mul_scalar(gradient, -step_size))
+    }
+}

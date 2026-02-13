@@ -72,11 +72,19 @@ fn collect_sio_files(dir: &StdPath, root: &StdPath, files: &mut Vec<PathBuf>) ->
         let entry = entry.map_err(|e| miette::miette!("Directory entry error: {}", e))?;
         let path = entry.path();
         if path.is_dir() {
-            // Self-hosted suite layout includes experimental backend subtrees (e.g. native/)
-            // that should not be pulled into the "flat directory" compilation unit.
+            // Self-hosted suite layout includes experimental subtrees that should not be pulled
+            // into the "flat directory" compilation unit. Keeping the default suite "flat"
+            // but excluding experimental directories lets `souc run self-hosted/` stay green
+            // while those subtrees are iterated on independently.
             if root.file_name().and_then(|s| s.to_str()) == Some("self-hosted") {
-                if path.file_name().and_then(|s| s.to_str()) == Some("native") {
-                    continue;
+                if let Some(name) = path.file_name().and_then(|s| s.to_str()) {
+                    // NOTE: `native/` is already special-cased (see `run_native_tests()` stub).
+                    // The others currently contain standalone experiments and often define
+                    // symbols that intentionally overlap with the core suite.
+                    const EXCLUDED: [&str; 3] = ["native", "hypercomplex", "linker"];
+                    if EXCLUDED.contains(&name) {
+                        continue;
+                    }
                 }
             }
             subdirs.push(path);

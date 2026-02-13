@@ -47,6 +47,26 @@ fn r_make_single_path(a: i8, b: i8, c: i8, count: i64) -> AstPath with Mut, Pani
     }
 }
 
+fn r_make_two_seg_path(
+    a1: i8, b1: i8, c1: i8, len1: i64,
+    a2: i8, b2: i8, c2: i8, len2: i64
+) -> AstPath with Mut, Panic, Div, Alloc {
+    var buf1: [i8; 128] = [0; 128]
+    buf1[0] = a1
+    if len1 > 1 { buf1[1] = b1 }
+    if len1 > 2 { buf1[2] = c1 }
+
+    var buf2: [i8; 128] = [0; 128]
+    buf2[0] = a2
+    if len2 > 1 { buf2[1] = b2 }
+    if len2 > 2 { buf2[2] = c2 }
+
+    let tail = StringList { head_buf: buf2, head_len: len2, tail: None }
+    let head = StringList { head_buf: buf1, head_len: len1, tail: Some(Box::new(tail)) }
+
+    AstPath { segments: head, seg_count: 2 }
+}
+
 fn r_make_empty_block() -> Block {
     Block { stmts: None, span: Span::dummy() }
 }
@@ -123,6 +143,7 @@ fn r_make_named_type(a: i8, b: i8, c: i8, count: i64) -> TypeExpr with Mut, Pani
         inner: None,
         array_size: None,
         effects: None,
+        knowledge_info: None,
     }
 }
 
@@ -198,6 +219,7 @@ fn r_make_fn_item(a: i8, b: i8, c: i8, name_len: i64, body: Block) -> Item with 
     Item {
         kind: ItemKind::ItemFn,
         span: Span::dummy(),
+        is_pub: false,
         name: name,
         fn_def: Some(Box::new(fd)),
         struct_def: None,
@@ -206,6 +228,50 @@ fn r_make_fn_item(a: i8, b: i8, c: i8, name_len: i64, body: Block) -> Item with 
         type_alias_ty: None,
         use_path: r_make_empty_path(),
         use_glob: false,
+        use_items: None,
+    }
+}
+
+fn r_make_pub_fn_item(a: i8, b: i8, c: i8, name_len: i64, body: Block) -> Item with Mut, Panic, Div, Alloc {
+    let name = r_make_name(a, b, c, name_len)
+    let fd = FnDef {
+        name: name,
+        params: None,
+        return_type: None,
+        effects: None,
+        body: body,
+        span: Span::dummy(),
+    }
+    Item {
+        kind: ItemKind::ItemFn,
+        span: Span::dummy(),
+        is_pub: true,
+        name: name,
+        fn_def: Some(Box::new(fd)),
+        struct_def: None,
+        enum_def: None,
+        impl_def: None,
+        type_alias_ty: None,
+        use_path: r_make_empty_path(),
+        use_glob: false,
+        use_items: None,
+    }
+}
+
+fn r_make_use_item(path: AstPath, is_glob: bool, items: Option<Box<ImportItemList>>) -> Item with Mut, Panic, Div, Alloc {
+    Item {
+        kind: ItemKind::ItemUse,
+        span: Span::dummy(),
+        is_pub: false,
+        name: r_make_name(0, 0, 0, 0),
+        fn_def: None,
+        struct_def: None,
+        enum_def: None,
+        impl_def: None,
+        type_alias_ty: None,
+        use_path: path,
+        use_glob: is_glob,
+        use_items: items,
     }
 }
 
@@ -222,6 +288,7 @@ fn r_make_fn_with_params(a: i8, b: i8, c: i8, name_len: i64, params: Option<Box<
     Item {
         kind: ItemKind::ItemFn,
         span: Span::dummy(),
+        is_pub: false,
         name: name,
         fn_def: Some(Box::new(fd)),
         struct_def: None,
@@ -230,6 +297,7 @@ fn r_make_fn_with_params(a: i8, b: i8, c: i8, name_len: i64, params: Option<Box<
         type_alias_ty: None,
         use_path: r_make_empty_path(),
         use_glob: false,
+        use_items: None,
     }
 }
 
@@ -244,6 +312,7 @@ fn r_make_struct_item(a: i8, b: i8, c: i8, name_len: i64, fields: Option<Box<Fie
     Item {
         kind: ItemKind::ItemStruct,
         span: Span::dummy(),
+        is_pub: false,
         name: name,
         fn_def: None,
         struct_def: Some(Box::new(sd)),
@@ -252,6 +321,7 @@ fn r_make_struct_item(a: i8, b: i8, c: i8, name_len: i64, fields: Option<Box<Fie
         type_alias_ty: None,
         use_path: r_make_empty_path(),
         use_glob: false,
+        use_items: None,
     }
 }
 
@@ -265,6 +335,7 @@ fn r_make_enum_item(a: i8, b: i8, c: i8, name_len: i64, variants: Option<Box<Var
     Item {
         kind: ItemKind::ItemEnum,
         span: Span::dummy(),
+        is_pub: false,
         name: name,
         fn_def: None,
         struct_def: None,
@@ -273,15 +344,16 @@ fn r_make_enum_item(a: i8, b: i8, c: i8, name_len: i64, variants: Option<Box<Var
         type_alias_ty: None,
         use_path: r_make_empty_path(),
         use_glob: false,
+        use_items: None,
     }
 }
 
 fn r_make_program(items: Option<Box<ItemList>>) -> Program {
-    Program { items: items }
+    Program { module_path: r_make_empty_path(), items: items }
 }
 
 fn r_make_single_item_program(item: Item) -> Program with Alloc {
-    Program { items: Some(Box::new(ItemList { head: item, tail: None })) }
+    Program { module_path: r_make_empty_path(), items: Some(Box::new(ItemList { head: item, tail: None })) }
 }
 
 // ============================================================================
@@ -482,13 +554,147 @@ fn test_resolve_param_in_body() -> bool with Mut, Panic, Div, Alloc, IO {
     result.error_count == 0
 }
 
+// T11: Selective import resolves to exported pub item in another module
+fn test_resolve_module_selective_import_ok() -> bool with Mut, Panic, Div, Alloc, IO {
+    // module a: pub fn foo() {}
+    // module b: use a::{foo}; fn bar() { foo }
+    let a_path = r_make_single_path(97, 0, 0, 1)  // "a"
+    let b_path = r_make_single_path(98, 0, 0, 1)  // "b"
+
+    let foo = r_make_pub_fn_item(102, 111, 111, 3, r_make_empty_block()) // "foo"
+    let prog_a = Program {
+        module_path: a_path,
+        items: Some(Box::new(ItemList { head: foo, tail: None })),
+    }
+
+    let use_items = Some(Box::new(ImportItemList {
+        head: r_make_name(102, 111, 111, 3),
+        tail: None,
+    }))
+    let use_a = r_make_use_item(a_path, false, use_items)
+
+    let use_foo = r_make_expr_stmt(r_make_ident_expr(102, 111, 111, 3))
+    let bar_body = Block {
+        stmts: Some(Box::new(StmtList { head: use_foo, tail: None })),
+        span: Span::dummy(),
+    }
+    let bar = r_make_fn_item(98, 97, 114, 3, bar_body) // "bar"
+
+    let items_b = ItemList {
+        head: use_a,
+        tail: Some(Box::new(ItemList { head: bar, tail: None })),
+    }
+    let prog_b = Program { module_path: b_path, items: Some(Box::new(items_b)) }
+
+    var programs: [Program; 64] = [Program { module_path: r_make_empty_path(), items: None }; 64]
+    programs[0] = prog_a
+    programs[1] = prog_b
+
+    let batch = resolve_modules(programs, 2)
+    batch.error_count == 0 && !batch.had_error
+}
+
+// T12: Selective import fails when symbol is not exported (not pub)
+fn test_resolve_module_selective_import_non_pub_fails() -> bool with Mut, Panic, Div, Alloc, IO {
+    // module a: fn foo() {}
+    // module b: use a::{foo}; fn bar() { foo }
+    let a_path = r_make_single_path(97, 0, 0, 1)  // "a"
+    let b_path = r_make_single_path(98, 0, 0, 1)  // "b"
+
+    let foo = r_make_fn_item(102, 111, 111, 3, r_make_empty_block()) // not pub
+    let prog_a = Program {
+        module_path: a_path,
+        items: Some(Box::new(ItemList { head: foo, tail: None })),
+    }
+
+    let use_items = Some(Box::new(ImportItemList {
+        head: r_make_name(102, 111, 111, 3),
+        tail: None,
+    }))
+    let use_a = r_make_use_item(a_path, false, use_items)
+
+    let use_foo = r_make_expr_stmt(r_make_ident_expr(102, 111, 111, 3))
+    let bar_body = Block {
+        stmts: Some(Box::new(StmtList { head: use_foo, tail: None })),
+        span: Span::dummy(),
+    }
+    let bar = r_make_fn_item(98, 97, 114, 3, bar_body) // "bar"
+
+    let items_b = ItemList {
+        head: use_a,
+        tail: Some(Box::new(ItemList { head: bar, tail: None })),
+    }
+    let prog_b = Program { module_path: b_path, items: Some(Box::new(items_b)) }
+
+    var programs: [Program; 64] = [Program { module_path: r_make_empty_path(), items: None }; 64]
+    programs[0] = prog_a
+    programs[1] = prog_b
+
+    let batch = resolve_modules(programs, 2)
+    batch.error_count > 0 && batch.had_error
+}
+
+// T13: Whole-module import defines module name for path-head resolution
+fn test_resolve_module_whole_import_allows_path_head() -> bool with Mut, Panic, Div, Alloc, IO {
+    // module a: pub fn foo() {}
+    // module b: use a; fn bar() { a::foo }
+    let a_path = r_make_single_path(97, 0, 0, 1)  // "a"
+    let b_path = r_make_single_path(98, 0, 0, 1)  // "b"
+
+    let foo = r_make_pub_fn_item(102, 111, 111, 3, r_make_empty_block()) // "foo"
+    let prog_a = Program {
+        module_path: a_path,
+        items: Some(Box::new(ItemList { head: foo, tail: None })),
+    }
+
+    let use_a = r_make_use_item(a_path, false, None)
+
+    let path_expr = Expr {
+        kind: ExprKind::ExprPath,
+        span: Span::dummy(),
+        int_val: 0,
+        float_val: 0.0,
+        name: r_make_name(0, 0, 0, 0),
+        path: r_make_two_seg_path(97, 0, 0, 1, 102, 111, 111, 3), // a::foo
+        bin_op: BinaryOp::OpAdd,
+        un_op: UnaryOp::OpNeg,
+        left: None,
+        right: None,
+        block: None,
+        else_expr: None,
+        args: None,
+        arms: None,
+        fields: None,
+        cast_type: None,
+    }
+    let stmt = r_make_expr_stmt(path_expr)
+    let bar_body = Block {
+        stmts: Some(Box::new(StmtList { head: stmt, tail: None })),
+        span: Span::dummy(),
+    }
+    let bar = r_make_fn_item(98, 97, 114, 3, bar_body) // "bar"
+
+    let items_b = ItemList {
+        head: use_a,
+        tail: Some(Box::new(ItemList { head: bar, tail: None })),
+    }
+    let prog_b = Program { module_path: b_path, items: Some(Box::new(items_b)) }
+
+    var programs: [Program; 64] = [Program { module_path: r_make_empty_path(), items: None }; 64]
+    programs[0] = prog_a
+    programs[1] = prog_b
+
+    let batch = resolve_modules(programs, 2)
+    batch.error_count == 0 && !batch.had_error
+}
+
 // ============================================================================
 // ENTRY POINT
 // ============================================================================
 
 fn run_resolve_tests() -> i32 with IO, Mut, Panic, Div, Alloc {
     var passed: i64 = 0
-    let total: i64 = 10
+    let total: i64 = 13
 
     print("=== Name Resolution Tests ===\n")
 
@@ -502,6 +708,9 @@ fn run_resolve_tests() -> i32 with IO, Mut, Panic, Div, Alloc {
     if test_resolve_undefined_var() { passed = passed + 1; print("  T08 OK: undefined var -> error\n") } else { print("  FAIL: T08 undefined var -> error\n") }
     if test_resolve_forward_ref() { passed = passed + 1; print("  T09 OK: forward reference\n") } else { print("  FAIL: T09 forward reference\n") }
     if test_resolve_param_in_body() { passed = passed + 1; print("  T10 OK: param in body\n") } else { print("  FAIL: T10 param in body\n") }
+    if test_resolve_module_selective_import_ok() { passed = passed + 1; print("  T11 OK: module selective import\n") } else { print("  FAIL: T11 module selective import\n") }
+    if test_resolve_module_selective_import_non_pub_fails() { passed = passed + 1; print("  T12 OK: module non-pub import -> error\n") } else { print("  FAIL: T12 module non-pub import -> error\n") }
+    if test_resolve_module_whole_import_allows_path_head() { passed = passed + 1; print("  T13 OK: whole-module import path-head\n") } else { print("  FAIL: T13 whole-module import path-head\n") }
 
     print("\nResolve tests: ")
     print_int(passed)

@@ -285,6 +285,51 @@ impl BytecodeVM {
                     };
                     self.stack.push(result);
                 }
+                Bytecode::ToInt => {
+                    let a = self.stack.pop().ok_or(VmError::StackUnderflow)?;
+                    let result = match a {
+                        Value::Int(n) => Value::Int(n),
+                        Value::Bool(b) => Value::Int(if b { 1 } else { 0 }),
+                        Value::Float(f) => Value::Int(f as i64),
+                        other => {
+                            return Err(VmError::TypeMismatch(format!(
+                                "ToInt expects int/bool/float, got {:?} at ip={}",
+                                other, ip
+                            )))
+                        }
+                    };
+                    self.stack.push(result);
+                }
+                Bytecode::ToFloat => {
+                    let a = self.stack.pop().ok_or(VmError::StackUnderflow)?;
+                    let result = match a {
+                        Value::Float(f) => Value::Float(f),
+                        Value::Int(n) => Value::Float(n as f64),
+                        Value::Bool(b) => Value::Float(if b { 1.0 } else { 0.0 }),
+                        other => {
+                            return Err(VmError::TypeMismatch(format!(
+                                "ToFloat expects int/bool/float, got {:?} at ip={}",
+                                other, ip
+                            )))
+                        }
+                    };
+                    self.stack.push(result);
+                }
+                Bytecode::ToBool => {
+                    let a = self.stack.pop().ok_or(VmError::StackUnderflow)?;
+                    let result = match a {
+                        Value::Bool(b) => Value::Bool(b),
+                        Value::Int(n) => Value::Bool(n != 0),
+                        Value::Float(f) => Value::Bool(f != 0.0),
+                        other => {
+                            return Err(VmError::TypeMismatch(format!(
+                                "ToBool expects int/bool/float, got {:?} at ip={}",
+                                other, ip
+                            )))
+                        }
+                    };
+                    self.stack.push(result);
+                }
                 Bytecode::Shl => {
                     let b = self.stack.pop().ok_or(VmError::StackUnderflow)?;
                     let a = self.stack.pop().ok_or(VmError::StackUnderflow)?;
@@ -407,6 +452,36 @@ impl BytecodeVM {
                             )))
                         }
                     }
+                }
+                Bytecode::BitAnd => {
+                    let b = self.stack.pop().ok_or(VmError::StackUnderflow)?;
+                    let a = self.stack.pop().ok_or(VmError::StackUnderflow)?;
+                    let result = match (a, b) {
+                        (Value::Int(a), Value::Int(b)) => Value::Int(a & b),
+                        (Value::Bool(a), Value::Bool(b)) => Value::Bool(a & b),
+                        (lhs, rhs) => {
+                            return Err(VmError::TypeMismatch(format!(
+                                "BitAnd expects int,int or bool,bool got lhs={:?} rhs={:?} at ip={}",
+                                lhs, rhs, ip
+                            )))
+                        }
+                    };
+                    self.stack.push(result);
+                }
+                Bytecode::BitOr => {
+                    let b = self.stack.pop().ok_or(VmError::StackUnderflow)?;
+                    let a = self.stack.pop().ok_or(VmError::StackUnderflow)?;
+                    let result = match (a, b) {
+                        (Value::Int(a), Value::Int(b)) => Value::Int(a | b),
+                        (Value::Bool(a), Value::Bool(b)) => Value::Bool(a | b),
+                        (lhs, rhs) => {
+                            return Err(VmError::TypeMismatch(format!(
+                                "BitOr expects int,int or bool,bool got lhs={:?} rhs={:?} at ip={}",
+                                lhs, rhs, ip
+                            )))
+                        }
+                    };
+                    self.stack.push(result);
                 }
 
                 // Control flow

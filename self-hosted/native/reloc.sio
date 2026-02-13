@@ -4,15 +4,15 @@
 
 // Relocation kinds
 struct RelocKind {
-    is_rel32: i64,        // 1 if rel32, 0 if rip-rel32
+    kind_code: i64,   // 1=rel32 function call, 2=RIP-relative data
 }
 
 fn reloc_rel32() -> RelocKind {
-    RelocKind { is_rel32: 1 }
+    RelocKind { kind_code: 1 }
 }
 
 fn reloc_rip_rel32() -> RelocKind {
-    RelocKind { is_rel32: 0 }
+    RelocKind { kind_code: 2 }
 }
 
 // Relocation target types
@@ -82,12 +82,27 @@ fn add_data_reloc(table: RelocationTable, offset: i64, data_offset: i64) -> Relo
     t
 }
 
+// Add RIP-relative relocation for string literals
+fn add_rip_reloc(table: RelocationTable, lea_disp_offset: i64, rodata_offset: i64) -> RelocationTable with Mut, Panic {
+    var t = table
+    if t.count < 256 {
+        t.entries[t.count as usize] = Relocation {
+            offset: lea_disp_offset,
+            target: reloc_target_data(rodata_offset),
+            kind: reloc_rip_rel32(),
+        }
+        t.count = t.count + 1
+    }
+    t
+}
+
 // Apply all relocations (patch code buffer)
 fn apply_relocations(
     table: RelocationTable,
     buf: CodeBuffer,
     fn_offsets: [i64; 256],
-    fn_count: i64
+    fn_count: i64,
+    rodata_file_offset: i64
 ) -> CodeBuffer with Mut, Panic, Div {
     var b = buf
     var i = 0
@@ -96,14 +111,24 @@ fn apply_relocations(
         let reloc = table.entries[i as usize]
         let patch_offset = reloc.offset
 
-        if reloc.target.is_function == 1 {
+        if reloc.kind.kind_code == 1 {
             // Function call: rel32 = target_offset - (patch_offset + 4)
-            let target_idx = reloc.target.target_index
-            if target_idx < fn_count {
-                let target_offset = fn_offsets[target_idx as usize]
-                let rel32 = target_offset - (patch_offset + 4)
-                b = patch_u32_le(b, patch_offset, rel32)
+            if reloc.target.is_function == 1 {
+                let target_idx = reloc.target.target_index
+                if target_idx < fn_count {
+                    let target_offset = fn_offsets[target_idx as usize]
+                    let rel32 = target_offset - (patch_offset + 4)
+                    b = patch_u32_le(b, patch_offset, rel32)
+                }
             }
+        } else if reloc.kind.kind_code == 2 {
+            // RIP-relative data: disp32 = (rodata_file_offset + str_offset) - (lea_next_ip)
+            let str_offset = reloc.target.target_index
+            let text_file_offset = 4096
+            let lea_next_ip = text_file_offset + patch_offset + 4
+            let string_va = rodata_file_offset + str_offset
+            let disp32 = string_va - lea_next_ip
+            b = patch_u32_le(b, patch_offset, disp32)
         }
 
         i = i + 1

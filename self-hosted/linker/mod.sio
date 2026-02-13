@@ -1,0 +1,297 @@
+// self-hosted::linker::mod — IR Module Linker
+//
+// Combines multiple IrModule instances into a single linked IrModule ready
+// for native code generation.
+//
+// ## Linking Process
+//
+// 1. Symbol Resolution: Build global function name → index mapping
+// 2. Function Renumbering: Assign new indices in merged module
+// 3. Call Patching: Update fn_id in IrCall instructions
+// 4. String Table Merge: Combine all string literals
+//
+// ## Usage
+//
+// ```sio
+// let modules = [module_a, module_b, module_c]
+// let result = link_modules(modules, 3)
+// if result.ok {
+//     let elf = compile_to_elf(result.module, 0x400000)
+// }
+// ```
+
+// ============================================================================
+// Linker Result
+// ============================================================================
+
+struct LinkResult {
+    module: IrModule,
+    ok: bool,
+    error_count: i64,
+    error_msg: Name,
+}
+
+fn link_result_ok(module: IrModule) -> LinkResult {
+    LinkResult {
+        module: module,
+        ok: true,
+        error_count: 0,
+        error_msg: ir_empty_name(),
+    }
+}
+
+fn link_result_error(msg: Name) -> LinkResult {
+    LinkResult {
+        module: ir_empty_module(),
+        ok: false,
+        error_count: 1,
+        error_msg: msg,
+    }
+}
+
+// ============================================================================
+// Symbol Table Entry
+// ============================================================================
+
+struct SymbolEntry {
+    name: Name,
+    module_idx: i64,    // Which input module this came from
+    fn_idx: i64,        // Function index within that module
+    global_idx: i64,    // Final index in merged module
+}
+
+fn empty_symbol_entry() -> SymbolEntry {
+    SymbolEntry {
+        name: ir_empty_name(),
+        module_idx: -1,
+        fn_idx: -1,
+        global_idx: -1,
+    }
+}
+
+// Symbol table (fixed-size for bootstrap)
+struct SymbolTable {
+    entries: [SymbolEntry; 256],
+    count: i64,
+}
+
+fn symbol_table_new() -> SymbolTable {
+    SymbolTable {
+        entries: [empty_symbol_entry(); 256],
+        count: 0,
+    }
+}
+
+// Add a symbol to the table
+fn symbol_table_add(
+    st: SymbolTable,
+    name: Name,
+    module_idx: i64,
+    fn_idx: i64,
+    global_idx: i64
+) -> SymbolTable with Mut, Panic {
+    var table = st
+    if table.count < 256 {
+        table.entries[table.count as usize] = SymbolEntry {
+            name: name,
+            module_idx: module_idx,
+            fn_idx: fn_idx,
+            global_idx: global_idx,
+        }
+        table.count = table.count + 1
+    }
+    table
+}
+
+// Lookup a symbol by name
+fn symbol_table_lookup(st: SymbolTable, name: Name) -> (bool, i64) with Mut, Panic, Div {
+    var i: i64 = 0
+    while i < st.count {
+        if ir_name_eq(st.entries[i as usize].name, name) {
+            return (true, st.entries[i as usize].global_idx)
+        }
+        i = i + 1
+    }
+    (false, -1)
+}
+
+// ============================================================================
+// String Table Merging
+// ============================================================================
+
+fn merge_string_tables(
+    dest: [Name; 256],
+    dest_count: i64,
+    src: [Name; 256],
+    src_count: i64
+) -> ([Name; 256], i64) with Mut, Panic, Div {
+    var d = dest
+    var count = dest_count
+    var i: i64 = 0
+
+    while i < src_count && count < 256 {
+        // Check if string already exists in destination
+        var found = false
+        var j: i64 = 0
+        while j < count {
+            if ir_name_eq(d[j as usize], src[i as usize]) {
+                found = true
+                break
+            }
+            j = j + 1
+        }
+
+        // Add if not found
+        if !found {
+            d[count as usize] = src[i as usize]
+            count = count + 1
+        }
+
+        i = i + 1
+    }
+
+    (d, count)
+}
+
+// ============================================================================
+// Call Instruction Patching
+// ============================================================================
+
+// Patch fn_id in all IrCall instructions within a function
+fn patch_function_calls(
+    func: IrFunction,
+    symbols: SymbolTable
+) -> IrFunction with Mut, Panic, Div {
+    var f = func
+    var i: i64 = 0
+
+    while i < f.instr_count {
+        if f.instrs[i as usize].op == IrOpcode::IrCall {
+            let old_instr = f.instrs[i as usize]
+
+            // Look up the function name to get its global index
+            let lookup = symbol_table_lookup(symbols, old_instr.name)
+
+            if lookup.0 {
+                // Found: update fn_id to global index
+                f.instrs[i as usize] = IrInstr {
+                    op: old_instr.op,
+                    dst: old_instr.dst,
+                    src1: old_instr.src1,
+                    src2: old_instr.src2,
+                    imm_i64: old_instr.imm_i64,
+                    imm_f64: old_instr.imm_f64,
+                    label_id: old_instr.label_id,
+                    fn_id: lookup.1,  // Updated!
+                    field_idx: old_instr.field_idx,
+                    bin_op: old_instr.bin_op,
+                    un_op: old_instr.un_op,
+                    name: old_instr.name,
+                    call_args: old_instr.call_args,
+                    arg_count: old_instr.arg_count,
+                }
+            }
+            // If not found, leave fn_id as -1 (unresolved reference error)
+        }
+        i = i + 1
+    }
+
+    f
+}
+
+// ============================================================================
+// Module Linking
+// ============================================================================
+
+fn link_modules(
+    modules: [IrModule; 64],
+    module_count: i64
+) -> LinkResult with Mut, Panic, Div {
+    if module_count <= 0 {
+        return link_result_error(ir_name_from_bytes(101, 109, 112, 116, 5))  // "empty"
+    }
+
+    // Phase 1: Build symbol table
+    var symbols = symbol_table_new()
+    var global_fn_idx: i64 = 0
+
+    var m_idx: i64 = 0
+    while m_idx < module_count {
+        let module = modules[m_idx as usize]
+        var f_idx: i64 = 0
+
+        while f_idx < module.fn_count {
+            let func = module.functions[f_idx as usize]
+
+            // Add to symbol table
+            symbols = symbol_table_add(
+                symbols,
+                func.name,
+                m_idx,
+                f_idx,
+                global_fn_idx
+            )
+
+            global_fn_idx = global_fn_idx + 1
+            f_idx = f_idx + 1
+        }
+
+        m_idx = m_idx + 1
+    }
+
+    // Check for overflow
+    if global_fn_idx > 64 {
+        return link_result_error(ir_name_from_bytes(111, 118, 101, 114, 8))  // "overflow"
+    }
+
+    // Phase 2: Build merged module
+    var merged = ir_empty_module()
+    merged.fn_count = global_fn_idx
+
+    // Phase 3: Copy and patch functions
+    m_idx = 0
+    var out_idx: i64 = 0
+
+    while m_idx < module_count {
+        let module = modules[m_idx as usize]
+        var f_idx: i64 = 0
+
+        while f_idx < module.fn_count {
+            var func = module.functions[f_idx as usize]
+
+            // Patch call instructions to use global indices
+            func = patch_function_calls(func, symbols)
+
+            // Copy to merged module
+            merged.functions[out_idx as usize] = func
+            out_idx = out_idx + 1
+
+            f_idx = f_idx + 1
+        }
+
+        m_idx = m_idx + 1
+    }
+
+    // Phase 4: Merge string tables
+    var strings = merged.string_table
+    var str_count: i64 = 0
+
+    m_idx = 0
+    while m_idx < module_count {
+        let module = modules[m_idx as usize]
+        let merged_result = merge_string_tables(
+            strings,
+            str_count,
+            module.string_table,
+            module.string_count
+        )
+        strings = merged_result.0
+        str_count = merged_result.1
+        m_idx = m_idx + 1
+    }
+
+    merged.string_table = strings
+    merged.string_count = str_count
+
+    link_result_ok(merged)
+}

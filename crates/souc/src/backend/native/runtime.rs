@@ -1511,16 +1511,46 @@ uuid_v4:
 	    jmp __sounio_chiuratto_unix_timestamp_impl
 	.size unix_timestamp, .-unix_timestamp
 
-	.globl substring_after_first
-	.type substring_after_first, @function
-	substring_after_first:
-	    jmp __sounio_chiuratto_substring_after_first_impl
-	.size substring_after_first, .-substring_after_first
+		.globl substring_after_first
+		.type substring_after_first, @function
+		substring_after_first:
+		    jmp __sounio_chiuratto_substring_after_first_impl
+		.size substring_after_first, .-substring_after_first
 
-.globl pg_pool_new
-.type pg_pool_new, @function
-pg_pool_new:
-    jmp __sounio_chiuratto_pg_pool_new_impl
+		.globl digits_prefix
+		.type digits_prefix, @function
+		digits_prefix:
+		    jmp __sounio_chiuratto_digits_prefix_impl
+		.size digits_prefix, .-digits_prefix
+
+		.globl values_new
+		.type values_new, @function
+		values_new:
+		    jmp __sounio_chiuratto_values_new_impl
+		.size values_new, .-values_new
+
+		.globl values_set
+		.type values_set, @function
+		values_set:
+		    jmp __sounio_chiuratto_values_set_impl
+		.size values_set, .-values_set
+
+		.globl values_array_new
+		.type values_array_new, @function
+		values_array_new:
+		    jmp __sounio_chiuratto_values_array_new_impl
+		.size values_array_new, .-values_array_new
+
+		.globl values_array_set
+		.type values_array_set, @function
+		values_array_set:
+		    jmp __sounio_chiuratto_values_array_set_impl
+		.size values_array_set, .-values_array_set
+
+	.globl pg_pool_new
+	.type pg_pool_new, @function
+	pg_pool_new:
+	    jmp __sounio_chiuratto_pg_pool_new_impl
 .size pg_pool_new, .-pg_pool_new
 
 .globl pg_pool_close
@@ -1768,49 +1798,61 @@ fn build_runtime_object_internal(
         ));
     }
 
-    // Compile chiuratto helper FFI C runtime.
-    let c_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("src")
-        .join("backend")
-        .join("native")
-        .join("chiuratto_ffi.c");
+    // CHIURATTO_FFI_DISABLED: Skip chiuratto FFI C runtime for simple programs
+    // This allows pure syscall-based print/IO to work correctly.
+    // The chiuratto_ffi.c is only needed for full HTTP/DB/ERP runtime.
+    let use_chiuratto_ffi = std::env::var("SOUNIO_ENABLE_CHIURATTO_FFI")
+        .map(|v| v == "1" || v.to_lowercase() == "true")
+        .unwrap_or(false);
 
-    let cc_output = std::process::Command::new("cc")
-        .arg("-O2")
-        .arg("-std=c11")
-        .arg("-fPIC")
-        .arg("-c")
-        .arg(&c_path)
-        .arg("-o")
-        .arg(&chiuratto_obj_path)
-        .output()
-        .map_err(|e| format!("Failed to run C compiler for chiuratto FFI: {}", e))?;
+    if use_chiuratto_ffi {
+        // Compile chiuratto helper FFI C runtime.
+        let c_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("src")
+            .join("backend")
+            .join("native")
+            .join("chiuratto_ffi.c");
 
-    if !cc_output.status.success() {
-        return Err(format!(
-            "C compiler failed for chiuratto FFI: {}",
-            String::from_utf8_lossy(&cc_output.stderr)
-        ));
+        let cc_output = std::process::Command::new("cc")
+            .arg("-O2")
+            .arg("-std=c11")
+            .arg("-fPIC")
+            .arg("-c")
+            .arg(&c_path)
+            .arg("-o")
+            .arg(&chiuratto_obj_path)
+            .output()
+            .map_err(|e| format!("Failed to run C compiler for chiuratto FFI: {}", e))?;
+
+        if !cc_output.status.success() {
+            return Err(format!(
+                "C compiler failed for chiuratto FFI: {}",
+                String::from_utf8_lossy(&cc_output.stderr)
+            ));
+        }
+
+        // Merge runtime assembly object + chiuratto helper object into one relocatable object.
+        let ld_output = std::process::Command::new("ld")
+            .arg("-r")
+            .arg("-o")
+            .arg(&bundle_obj_path)
+            .arg(&obj_path)
+            .arg(&chiuratto_obj_path)
+            .output()
+            .map_err(|e| format!("Failed to run linker for runtime bundle: {}", e))?;
+
+        if !ld_output.status.success() {
+            return Err(format!(
+                "Runtime bundle link failed: {}",
+                String::from_utf8_lossy(&ld_output.stderr)
+            ));
+        }
+
+        Ok(bundle_obj_path)
+    } else {
+        // Use pure runtime without chiuratto FFI
+        Ok(obj_path)
     }
-
-    // Merge runtime assembly object + chiuratto helper object into one relocatable object.
-    let ld_output = std::process::Command::new("ld")
-        .arg("-r")
-        .arg("-o")
-        .arg(&bundle_obj_path)
-        .arg(&obj_path)
-        .arg(&chiuratto_obj_path)
-        .output()
-        .map_err(|e| format!("Failed to run linker for runtime bundle: {}", e))?;
-
-    if !ld_output.status.success() {
-        return Err(format!(
-            "Runtime bundle link failed: {}",
-            String::from_utf8_lossy(&ld_output.stderr)
-        ));
-    }
-
-    Ok(bundle_obj_path)
 }
 
 /// Build runtime object file
@@ -1865,6 +1907,11 @@ pub const RUNTIME_SYMBOLS: &[&str] = &[
 	    "uuid_v4",
 	    "unix_timestamp",
 	    "substring_after_first",
+	    "digits_prefix",
+	    "values_new",
+	    "values_set",
+	    "values_array_new",
+	    "values_array_set",
 	    "pg_pool_new",
 	    "pg_pool_close",
 	    "pg_pool_query",

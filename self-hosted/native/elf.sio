@@ -26,6 +26,34 @@ struct Elf64Binary {
     len: i64,
 }
 
+// String table for .rodata
+struct StringTable {
+    bytes: [i8; 8192],
+    len: i64,
+}
+
+fn string_table_new() -> StringTable {
+    StringTable { bytes: [0; 8192], len: 0 }
+}
+
+// Add a string to the table, return its offset
+fn string_table_add(st: StringTable, s_bytes: [i8; 256], s_len: i64) -> (StringTable, i64) with Mut, Panic, Div {
+    var t = st
+    let offset = t.len
+    var i = 0
+    while i < s_len && t.len < 8192 {
+        t.bytes[t.len as usize] = s_bytes[i as usize]
+        t.len = t.len + 1
+        i = i + 1
+    }
+    // Add null terminator
+    if t.len < 8192 {
+        t.bytes[t.len as usize] = 0
+        t.len = t.len + 1
+    }
+    (t, offset)
+}
+
 fn elf_binary_new() -> Elf64Binary {
     Elf64Binary { bytes: [0; 65536], len: 0 }
 }
@@ -66,22 +94,28 @@ fn elf_emit_u64(bin: Elf64Binary, val: i64) -> Elf64Binary with Mut, Panic, Div 
     b
 }
 
-// Build minimal ELF64 executable
+// Build minimal ELF64 executable with .text + .rodata
 fn finalize_elf64(
     code: CodeBuffer,
+    rodata: StringTable,
     entry_offset: i64,
     base_addr: i64
 ) -> Elf64Binary with Mut, Panic, Div {
     var bin = elf_binary_new()
 
+    // Compute segment offsets (page-aligned at 4096 bytes)
+    let text_offset = 4096
+    let rodata_offset = align_page(text_offset + code.len)
+
     // ELF header (64 bytes)
-    bin = emit_elf_header(bin, entry_offset, base_addr)
+    bin = emit_elf_header(bin, entry_offset, base_addr, rodata.len)
 
-    // Program header (56 bytes per entry, we have 1)
-    bin = emit_program_header(bin, code.len, base_addr)
+    // Program headers: 2 PT_LOAD segments (56 bytes each = 112 total)
+    bin = emit_program_header_text(bin, code.len, text_offset, base_addr)
+    bin = emit_program_header_rodata(bin, rodata.len, rodata_offset, base_addr)
 
-    // Pad to page boundary (4096 bytes)
-    while bin.len < 4096 {
+    // Pad to .text start (4096 bytes)
+    while bin.len < text_offset {
         bin = elf_emit_byte(bin, 0)
     }
 
@@ -92,11 +126,33 @@ fn finalize_elf64(
         i = i + 1
     }
 
+    // Pad to .rodata start
+    while bin.len < rodata_offset {
+        bin = elf_emit_byte(bin, 0)
+    }
+
+    // .rodata segment (strings)
+    var j = 0
+    while j < rodata.len {
+        bin = elf_emit_byte(bin, rodata.bytes[j as usize] as i64)
+        j = j + 1
+    }
+
     bin
 }
 
-// Emit ELF64 header
-fn emit_elf_header(bin: Elf64Binary, entry_offset: i64, base_addr: i64) -> Elf64Binary with Mut, Panic, Div {
+// Align to page boundary (4096 bytes)
+fn align_page(offset: i64) -> i64 with Mut, Panic {
+    var aligned = offset
+    let remainder = offset % 4096
+    if remainder != 0 {
+        aligned = offset + (4096 - remainder)
+    }
+    aligned
+}
+
+// Emit ELF64 header (updated for 2 program headers)
+fn emit_elf_header(bin: Elf64Binary, entry_offset: i64, base_addr: i64, rodata_len: i64) -> Elf64Binary with Mut, Panic, Div {
     var b = bin
 
     // e_ident[16]
@@ -135,7 +191,8 @@ fn emit_elf_header(bin: Elf64Binary, entry_offset: i64, base_addr: i64) -> Elf64
     b = elf_emit_u16(b, 56)       // program header entry size
 
     // e_phnum, e_shentsize, e_shnum, e_shstrndx
-    b = elf_emit_u16(b, 1)        // 1 program header
+    let phnum = if rodata_len > 0 { 2 } else { 1 }
+    b = elf_emit_u16(b, phnum)    // 2 program headers (.text + .rodata)
     b = elf_emit_u16(b, 0)        // section header entry size (none)
     b = elf_emit_u16(b, 0)        // section header count (none)
     b = elf_emit_u16(b, 0)        // section name string table index
@@ -143,8 +200,8 @@ fn emit_elf_header(bin: Elf64Binary, entry_offset: i64, base_addr: i64) -> Elf64
     b
 }
 
-// Emit program header (PT_LOAD for .text)
-fn emit_program_header(bin: Elf64Binary, code_len: i64, base_addr: i64) -> Elf64Binary with Mut, Panic, Div {
+// Emit program header for .text segment (R+X)
+fn emit_program_header_text(bin: Elf64Binary, code_len: i64, text_offset: i64, base_addr: i64) -> Elf64Binary with Mut, Panic, Div {
     var b = bin
 
     // p_type
@@ -153,17 +210,45 @@ fn emit_program_header(bin: Elf64Binary, code_len: i64, base_addr: i64) -> Elf64
     // p_flags (R+X)
     b = elf_emit_u32(b, elf_pf_r() + elf_pf_x())
 
-    // p_offset (file offset = 4096)
-    b = elf_emit_u64(b, 4096)
+    // p_offset (file offset)
+    b = elf_emit_u64(b, text_offset)
 
     // p_vaddr, p_paddr (virtual/physical address)
-    let text_va = base_addr + 4096
+    let text_va = base_addr + text_offset
     b = elf_emit_u64(b, text_va)
     b = elf_emit_u64(b, text_va)
 
     // p_filesz, p_memsz (same for .text)
     b = elf_emit_u64(b, code_len)
     b = elf_emit_u64(b, code_len)
+
+    // p_align (4096 bytes)
+    b = elf_emit_u64(b, 4096)
+
+    b
+}
+
+// Emit program header for .rodata segment (R)
+fn emit_program_header_rodata(bin: Elf64Binary, rodata_len: i64, rodata_offset: i64, base_addr: i64) -> Elf64Binary with Mut, Panic, Div {
+    var b = bin
+
+    // p_type
+    b = elf_emit_u32(b, elf_pt_load())
+
+    // p_flags (R)
+    b = elf_emit_u32(b, elf_pf_r())
+
+    // p_offset (file offset)
+    b = elf_emit_u64(b, rodata_offset)
+
+    // p_vaddr, p_paddr (virtual/physical address)
+    let rodata_va = base_addr + rodata_offset
+    b = elf_emit_u64(b, rodata_va)
+    b = elf_emit_u64(b, rodata_va)
+
+    // p_filesz, p_memsz (same for .rodata)
+    b = elf_emit_u64(b, rodata_len)
+    b = elf_emit_u64(b, rodata_len)
 
     // p_align (4096 bytes)
     b = elf_emit_u64(b, 4096)

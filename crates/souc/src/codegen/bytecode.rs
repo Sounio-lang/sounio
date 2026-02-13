@@ -1137,10 +1137,19 @@ impl BytecodeCodegen {
             }
 
             // Cast
-            HirExprKind::Cast { expr, .. } => {
-                // For now, just compile the expression
-                // Type coercion happens at runtime
+            HirExprKind::Cast { expr, target } => {
+                // Runtime coercions used heavily by self-hosted tools.
                 self.compile_expr(expr)?;
+                use crate::hir::HirType::*;
+                match target {
+                    Bool => self.emit(Bytecode::ToBool),
+                    I8 | I16 | I32 | I64 | I128 | Isize | U8 | U16 | U32 | U64 | U128 | Usize | Char => {
+                        self.emit(Bytecode::ToInt)
+                    }
+                    F32 | F64 => self.emit(Bytecode::ToFloat),
+                    // For now, unsupported casts are treated as no-ops.
+                    _ => {}
+                }
             }
 
             // Effect operations (simplified - just call FFI)
@@ -1665,8 +1674,8 @@ impl BytecodeCodegen {
             HirBinaryOp::Ge => Bytecode::Ge,
             HirBinaryOp::And => Bytecode::And,
             HirBinaryOp::Or => Bytecode::Or,
-            HirBinaryOp::BitAnd => Bytecode::And, // Reuse logical for now
-            HirBinaryOp::BitOr => Bytecode::Or,
+            HirBinaryOp::BitAnd => Bytecode::BitAnd,
+            HirBinaryOp::BitOr => Bytecode::BitOr,
             HirBinaryOp::BitXor => Bytecode::Xor,
             HirBinaryOp::Shl => Bytecode::Shl,
             HirBinaryOp::Shr => Bytecode::Shr,

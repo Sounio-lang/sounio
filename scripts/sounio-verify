@@ -1,0 +1,373 @@
+#!/usr/bin/env bash
+# sounio-verify - CLI tool for SOIR verification and inspection
+# Part of the Rustless Cutover workflow
+
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+PROJECT_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
+SOUC="$PROJECT_ROOT/target/release/souc"
+
+# Colors
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+YELLOW='\033[0;33m'
+BLUE='\033[0;34m'
+NC='\033[0m' # No Color
+
+# Print colored output
+print_error() {
+    echo -e "${RED}✗ $*${NC}" >&2
+}
+
+print_success() {
+    echo -e "${GREEN}✓ $*${NC}"
+}
+
+print_info() {
+    echo -e "${BLUE}→ $*${NC}"
+}
+
+print_warning() {
+    echo -e "${YELLOW}⚠ $*${NC}"
+}
+
+# Show usage
+usage() {
+    cat <<EOF
+sounio-verify - SOIR verification and inspection tool
+
+USAGE:
+    sounio-verify <COMMAND> [OPTIONS]
+
+COMMANDS:
+    compare <file1> <file2>           Compare two SOIR files for equivalence
+    normalize <file>                  Show normalized IR for a Sounio source file
+    serialize <file> <output>         Compile Sounio source to SOIR bytecode
+    inspect <file>                    Disassemble SOIR bytecode to human-readable format
+    validate <file>                   Validate SOIR file structure and constraints
+    help                              Show this help message
+
+EXAMPLES:
+    # Compare two SOIR files
+    sounio-verify compare stage1.soir stage2.soir
+
+    # Show normalized IR
+    sounio-verify normalize self-hosted/check/type_check.sio
+
+    # Compile to SOIR
+    sounio-verify serialize test.sio test.soir
+
+    # Disassemble SOIR
+    sounio-verify inspect stage1.soir
+
+    # Validate SOIR structure
+    sounio-verify validate stage1.soir
+
+OPTIONS:
+    --verbose                         Show detailed output
+    --function <name>                 Filter by function name (inspect only)
+    --stats                           Show statistics (inspect only)
+
+EOF
+}
+
+# Check if souc binary exists
+check_souc() {
+    if [[ ! -f "$SOUC" ]]; then
+        print_error "souc binary not found at $SOUC"
+        print_info "Building souc..."
+        cd "$PROJECT_ROOT"
+        cargo build --release
+        if [[ ! -f "$SOUC" ]]; then
+            print_error "Failed to build souc"
+            exit 1
+        fi
+    fi
+}
+
+# Serialize: Compile Sounio source to SOIR
+cmd_serialize() {
+    local input="$1"
+    local output="$2"
+
+    if [[ ! -f "$input" ]]; then
+        print_error "Input file not found: $input"
+        exit 1
+    fi
+
+    print_info "Compiling $input to SOIR..."
+
+    # Use souc to compile to SOIR format
+    # For now, we'll compile to IR and then serialize
+    # This assumes souc has --emit-soir flag or similar
+    cd "$PROJECT_ROOT"
+
+    # Temporary: use the self-hosted serializer
+    "$SOUC" run self-hosted/ir/serialize.sio --input "$input" --output "$output" 2>&1
+
+    if [[ -f "$output" ]]; then
+        local size=$(stat -f%z "$output" 2>/dev/null || stat -c%s "$output" 2>/dev/null)
+        print_success "Compiled to $output (${size} bytes)"
+    else
+        print_error "Failed to create $output"
+        exit 1
+    fi
+}
+
+# Inspect: Disassemble SOIR to human-readable format
+cmd_inspect() {
+    local file="$1"
+    local function_filter=""
+    local show_stats=false
+
+    shift
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --function)
+                function_filter="$2"
+                shift 2
+                ;;
+            --stats)
+                show_stats=true
+                shift
+                ;;
+            *)
+                print_error "Unknown option: $1"
+                exit 1
+                ;;
+        esac
+    done
+
+    if [[ ! -f "$file" ]]; then
+        print_error "File not found: $file"
+        exit 1
+    fi
+
+    print_info "Inspecting $file..."
+
+    # Use souc to run the self-hosted inspector
+    cd "$PROJECT_ROOT"
+
+    # Read SOIR file and disassemble
+    cat "$file" | "$SOUC" run self-hosted/ir/serialize.sio --disassemble \
+        ${function_filter:+--function "$function_filter"} \
+        ${show_stats:+--stats}
+}
+
+# Normalize: Show normalized IR
+cmd_normalize() {
+    local file="$1"
+
+    if [[ ! -f "$file" ]]; then
+        print_error "File not found: $file"
+        exit 1
+    fi
+
+    print_info "Normalizing $file..."
+
+    # Compile to IR, normalize, and print
+    cd "$PROJECT_ROOT"
+    "$SOUC" compile "$file" --emit-ir | \
+        "$SOUC" run self-hosted/ir/normalize.sio --stdin
+}
+
+# Compare: Check if two SOIR files are equivalent
+cmd_compare() {
+    local file1="$1"
+    local file2="$2"
+    local verbose=false
+
+    shift 2
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --verbose)
+                verbose=true
+                shift
+                ;;
+            *)
+                print_error "Unknown option: $1"
+                exit 1
+                ;;
+        esac
+    done
+
+    if [[ ! -f "$file1" ]]; then
+        print_error "File not found: $file1"
+        exit 1
+    fi
+
+    if [[ ! -f "$file2" ]]; then
+        print_error "File not found: $file2"
+        exit 1
+    fi
+
+    print_info "Comparing $file1 and $file2..."
+
+    # Create temporary files for normalized output
+    local tmp1=$(mktemp)
+    local tmp2=$(mktemp)
+    trap "rm -f $tmp1 $tmp2" EXIT
+
+    # Normalize both files
+    print_info "Normalizing $file1..."
+    cmd_inspect "$file1" > "$tmp1"
+
+    print_info "Normalizing $file2..."
+    cmd_inspect "$file2" > "$tmp2"
+
+    # Compare normalized IR
+    if diff -q "$tmp1" "$tmp2" > /dev/null 2>&1; then
+        print_success "Files are equivalent (normalized IR matches)"
+        return 0
+    else
+        print_error "Files differ"
+
+        if $verbose; then
+            echo ""
+            echo "Differences:"
+            echo "──────────────────────────────────────────────────"
+            diff -u "$tmp1" "$tmp2" | head -50
+            echo "──────────────────────────────────────────────────"
+            echo ""
+            print_info "Full diff saved to: diff.txt"
+            diff -u "$tmp1" "$tmp2" > diff.txt || true
+        else
+            print_info "Run with --verbose to see differences"
+        fi
+
+        return 1
+    fi
+}
+
+# Validate: Check SOIR file structure
+cmd_validate() {
+    local file="$1"
+
+    if [[ ! -f "$file" ]]; then
+        print_error "File not found: $file"
+        exit 1
+    fi
+
+    print_info "Validating $file..."
+
+    local errors=0
+
+    # Check magic bytes
+    local magic=$(hexdump -n 4 -e '4/1 "%02x"' "$file")
+    if [[ "$magic" != "534f4952" ]]; then  # "SOIR" in hex
+        print_error "Invalid magic bytes: expected SOIR, got $magic"
+        ((errors++))
+    else
+        print_success "Magic bytes valid: SOIR"
+    fi
+
+    # Check version
+    local version=$(hexdump -s 4 -n 1 -e '1/1 "%d"' "$file")
+    if [[ "$version" != "1" ]]; then
+        print_error "Invalid version: expected 1, got $version"
+        ((errors++))
+    else
+        print_success "Version valid: 1"
+    fi
+
+    # Check file size (should be < 128KB)
+    local size=$(stat -f%z "$file" 2>/dev/null || stat -c%s "$file" 2>/dev/null)
+    local max_size=131072  # 128KB
+    if [[ $size -gt $max_size ]]; then
+        print_error "File too large: ${size} bytes (max: ${max_size})"
+        ((errors++))
+    else
+        print_success "File size valid: ${size} bytes"
+    fi
+
+    # Use self-hosted validator for detailed checks
+    cd "$PROJECT_ROOT"
+    if "$SOUC" run self-hosted/ir/serialize.sio --validate < "$file"; then
+        print_success "All validation checks passed"
+    else
+        print_error "Validation checks failed"
+        ((errors++))
+    fi
+
+    if [[ $errors -gt 0 ]]; then
+        print_error "Validation failed with $errors error(s)"
+        return 1
+    else
+        print_success "File is valid"
+        return 0
+    fi
+}
+
+# Main command dispatcher
+main() {
+    if [[ $# -eq 0 ]]; then
+        usage
+        exit 0
+    fi
+
+    local command="$1"
+    shift
+
+    check_souc
+
+    case "$command" in
+        compare)
+            if [[ $# -lt 2 ]]; then
+                print_error "compare requires two file arguments"
+                echo ""
+                usage
+                exit 1
+            fi
+            cmd_compare "$@"
+            ;;
+        normalize)
+            if [[ $# -lt 1 ]]; then
+                print_error "normalize requires a file argument"
+                echo ""
+                usage
+                exit 1
+            fi
+            cmd_normalize "$@"
+            ;;
+        serialize)
+            if [[ $# -lt 2 ]]; then
+                print_error "serialize requires input and output arguments"
+                echo ""
+                usage
+                exit 1
+            fi
+            cmd_serialize "$@"
+            ;;
+        inspect)
+            if [[ $# -lt 1 ]]; then
+                print_error "inspect requires a file argument"
+                echo ""
+                usage
+                exit 1
+            fi
+            cmd_inspect "$@"
+            ;;
+        validate)
+            if [[ $# -lt 1 ]]; then
+                print_error "validate requires a file argument"
+                echo ""
+                usage
+                exit 1
+            fi
+            cmd_validate "$@"
+            ;;
+        help|--help|-h)
+            usage
+            exit 0
+            ;;
+        *)
+            print_error "Unknown command: $command"
+            echo ""
+            usage
+            exit 1
+            ;;
+    esac
+}
+
+main "$@"

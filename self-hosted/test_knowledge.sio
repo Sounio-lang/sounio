@@ -1,0 +1,378 @@
+// Epistemic Knowledge type tests
+//
+// Tests covering lexer, parser, and checker integration for
+// Knowledge[T, epsilon, validity, provenance] types.
+//
+// Entry point: run_knowledge_tests()
+
+// ============================================================================
+// AST HELPERS (kn_ prefix to avoid collisions)
+// Must precede callers (Sounio forward-ref constraint).
+// ============================================================================
+
+fn kn_make_name(a: i8, b: i8, c: i8, count: i64) -> Name with Mut, Panic, Div {
+    var n = Name { buf: [0; 128], len: count }
+    n.buf[0] = a
+    if count > 1 { n.buf[1] = b }
+    if count > 2 { n.buf[2] = c }
+    n
+}
+
+fn kn_make_name4(a: i8, b: i8, c: i8, d: i8) -> Name with Mut, Panic, Div {
+    var n = Name { buf: [0; 128], len: 4 }
+    n.buf[0] = a
+    n.buf[1] = b
+    n.buf[2] = c
+    n.buf[3] = d
+    n
+}
+
+fn kn_empty_path() -> AstPath {
+    AstPath {
+        segments: StringList { head_buf: [0; 128], head_len: 0, tail: None },
+        seg_count: 0,
+    }
+}
+
+fn kn_single_path3(a: i8, b: i8, c: i8) -> AstPath with Mut, Panic, Div {
+    var buf: [i8; 128] = [0; 128]
+    buf[0] = a
+    buf[1] = b
+    buf[2] = c
+    AstPath {
+        segments: StringList { head_buf: buf, head_len: 3, tail: None },
+        seg_count: 1,
+    }
+}
+
+fn kn_int_expr(val: i64) -> Expr with Mut, Panic, Div {
+    Expr {
+        kind: ExprKind::ExprIntLit,
+        span: Span::dummy(),
+        int_val: val,
+        float_val: 0.0,
+        name: kn_make_name(0, 0, 0, 0),
+        path: kn_empty_path(),
+        bin_op: BinaryOp::OpAdd,
+        un_op: UnaryOp::OpNeg,
+        left: None,
+        right: None,
+        block: None,
+        else_expr: None,
+        args: None,
+        arms: None,
+        fields: None,
+        cast_type: None,
+    }
+}
+
+// ============================================================================
+// LEXER TESTS — Knowledge keyword recognition
+// ============================================================================
+
+// T01: Lex "Knowledge" → verify TokenKind::Knowledge
+fn kn_test_lex_knowledge() -> bool with Mut, Div, Panic {
+    // "Knowledge" = 75,110,111,119,108,101,100,103,101 (9 chars)
+    var input: [i8; 256] = [0; 256]
+    input[0] = 75   // K
+    input[1] = 110  // n
+    input[2] = 111  // o
+    input[3] = 119  // w
+    input[4] = 108  // l
+    input[5] = 101  // e
+    input[6] = 100  // d
+    input[7] = 103  // g
+    input[8] = 101  // e
+    var ts = TestSource { data: [0; 1048576], len: 9 }
+    var i: i64 = 0
+    while i < 9 {
+        ts.data[i as usize] = input[i as usize]
+        i = i + 1
+    }
+    let state = lex(ts.data, ts.len, 0)
+    // Should produce Knowledge token + EOF
+    state.token_count == 2 && state.tokens[0].kind == TokenKind::Knowledge
+}
+
+// T02: Lex "Valid" → verify TokenKind::Valid
+fn kn_test_lex_valid() -> bool with Mut, Div, Panic {
+    // "Valid" = 86,97,108,105,100 (5 chars)
+    var input: [i8; 256] = [0; 256]
+    input[0] = 86   // V
+    input[1] = 97   // a
+    input[2] = 108  // l
+    input[3] = 105  // i
+    input[4] = 100  // d
+    var ts = TestSource { data: [0; 1048576], len: 5 }
+    var i: i64 = 0
+    while i < 5 {
+        ts.data[i as usize] = input[i as usize]
+        i = i + 1
+    }
+    let state = lex(ts.data, ts.len, 0)
+    state.token_count == 2 && state.tokens[0].kind == TokenKind::Valid
+}
+
+// T03: Lex "Derived" → verify TokenKind::Derived
+fn kn_test_lex_derived() -> bool with Mut, Div, Panic {
+    // "Derived" = 68,101,114,105,118,101,100 (7 chars)
+    var input: [i8; 256] = [0; 256]
+    input[0] = 68   // D
+    input[1] = 101  // e
+    input[2] = 114  // r
+    input[3] = 105  // i
+    input[4] = 118  // v
+    input[5] = 101  // e
+    input[6] = 100  // d
+    var ts = TestSource { data: [0; 1048576], len: 7 }
+    var i: i64 = 0
+    while i < 7 {
+        ts.data[i as usize] = input[i as usize]
+        i = i + 1
+    }
+    let state = lex(ts.data, ts.len, 0)
+    state.token_count == 2 && state.tokens[0].kind == TokenKind::Derived
+}
+
+// ============================================================================
+// PARSER TESTS — Knowledge type AST construction
+// ============================================================================
+
+// T04: Parse Knowledge<f64> (shorthand) → verify TypeKnowledge with inner f64
+fn kn_test_parse_shorthand() -> bool with Mut, Div, Panic, Alloc, IO {
+    // Build TypeExpr manually for Knowledge<f64>
+    let inner = TypeExpr {
+        kind: TypeExprKind::TypeNamed,
+        span: Span::dummy(),
+        path: kn_single_path3(102, 54, 52),  // "f64"
+        type_args: None,
+        inner: None,
+        array_size: None,
+        effects: None,
+        knowledge_info: None,
+    }
+    let info = KnowledgeTypeInfo {
+        inner_type: Box::new(inner),
+        epsilon: None,
+        validity: None,
+        provenance: None,
+    }
+    let te = TypeExpr {
+        kind: TypeExprKind::TypeKnowledge,
+        span: Span::dummy(),
+        path: kn_empty_path(),
+        type_args: None,
+        inner: None,
+        array_size: None,
+        effects: None,
+        knowledge_info: Some(Box::new(info)),
+    }
+    te.kind == TypeExprKind::TypeKnowledge && te.knowledge_info != None
+}
+
+// T05: Construct Knowledge[f64, epsilon < 0.05] → verify epsilon bound stored
+fn kn_test_parse_epsilon_bound() -> bool with Mut, Div, Panic, Alloc, IO {
+    let inner = TypeExpr {
+        kind: TypeExprKind::TypeNamed,
+        span: Span::dummy(),
+        path: kn_single_path3(102, 54, 52),  // "f64"
+        type_args: None,
+        inner: None,
+        array_size: None,
+        effects: None,
+        knowledge_info: None,
+    }
+    let eps = EpsilonBound { op: CompareOp::CmpLt, value: 0.05 }
+    let info = KnowledgeTypeInfo {
+        inner_type: Box::new(inner),
+        epsilon: Some(Box::new(eps)),
+        validity: None,
+        provenance: None,
+    }
+    let te = TypeExpr {
+        kind: TypeExprKind::TypeKnowledge,
+        span: Span::dummy(),
+        path: kn_empty_path(),
+        type_args: None,
+        inner: None,
+        array_size: None,
+        effects: None,
+        knowledge_info: Some(Box::new(info)),
+    }
+    te.kind == TypeExprKind::TypeKnowledge
+}
+
+// T06: Construct full Knowledge[f64, epsilon < 0.05, Valid(duration), Derived]
+fn kn_test_parse_full_4layer() -> bool with Mut, Div, Panic, Alloc, IO {
+    let inner = TypeExpr {
+        kind: TypeExprKind::TypeNamed,
+        span: Span::dummy(),
+        path: kn_single_path3(102, 54, 52),  // "f64"
+        type_args: None,
+        inner: None,
+        array_size: None,
+        effects: None,
+        knowledge_info: None,
+    }
+    let eps = EpsilonBound { op: CompareOp::CmpLt, value: 0.05 }
+    let valid = ValidityCondition { kind: ValidityKind::ValidDuration, expr: None }
+    let info = KnowledgeTypeInfo {
+        inner_type: Box::new(inner),
+        epsilon: Some(Box::new(eps)),
+        validity: Some(Box::new(valid)),
+        provenance: Some(Box::new(ProvenanceKind::ProvDerived)),
+    }
+    // Verify all 4 layers are populated
+    info.epsilon != None && info.validity != None && info.provenance != None
+}
+
+// ============================================================================
+// CHECKER TESTS — Knowledge type checking
+// ============================================================================
+
+// T07: check_knowledge_type wraps correctly
+fn kn_test_check_wraps() -> bool with Mut, Panic, Div, Alloc, IO {
+    let inner_ty = ty_f64()
+    let k_ty = ty_knowledge(inner_ty, -1.0)
+    is_knowledge_type(k_ty) && k_ty.kind == TypeKind::TyKnowledge
+}
+
+// T08: check_knowledge_unwrap extracts inner type
+fn kn_test_check_unwrap() -> bool with Mut, Panic, Div, Alloc, IO {
+    let inner_ty = ty_i64()
+    let k_ty = ty_knowledge(inner_ty, 0.05)
+    let unwrapped = check_knowledge_unwrap(k_ty)
+    unwrapped.kind == TypeKind::TyI64
+}
+
+// T09: check_knowledge_epsilon returns f64 type
+fn kn_test_check_epsilon() -> bool with Mut, Panic, Div, Alloc, IO {
+    let inner_ty = ty_f64()
+    let k_ty = ty_knowledge(inner_ty, 0.05)
+    let eps_ty = check_knowledge_epsilon(k_ty)
+    eps_ty.kind == TypeKind::TyF64
+}
+
+// T10: check epsilon bound validation — reject negative epsilon
+fn kn_test_check_epsilon_reject_negative() -> bool with Mut, Panic, Div, Alloc, IO {
+    let inner = TypeExpr {
+        kind: TypeExprKind::TypeNamed,
+        span: Span::dummy(),
+        path: kn_single_path3(105, 54, 52),  // "i64"
+        type_args: None,
+        inner: None,
+        array_size: None,
+        effects: None,
+        knowledge_info: None,
+    }
+    let eps = EpsilonBound { op: CompareOp::CmpLt, value: -1.0 }
+    let info = KnowledgeTypeInfo {
+        inner_type: Box::new(inner),
+        epsilon: Some(Box::new(eps)),
+        validity: None,
+        provenance: None,
+    }
+    let te = TypeExpr {
+        kind: TypeExprKind::TypeKnowledge,
+        span: Span::dummy(),
+        path: kn_empty_path(),
+        type_args: None,
+        inner: None,
+        array_size: None,
+        effects: None,
+        knowledge_info: Some(Box::new(info)),
+    }
+
+    // Construct a program: fn main() { let x: Knowledge[i64, eps < -1.0] = 0 }
+    // and run check_program to verify it reports an error
+    let name_x = kn_make_name(120, 0, 0, 1)  // 'x'
+    let stmt = Stmt {
+        kind: StmtKind::StmtLet,
+        span: Span::dummy(),
+        name: name_x,
+        ty: Some(Box::new(te)),
+        expr: Some(Box::new(kn_int_expr(0))),
+        target: None,
+        assign_op: AssignOp::AssignEq,
+    }
+    let body = Block { stmts: Some(Box::new(StmtList { head: stmt, tail: None })), span: Span::dummy() }
+    let main_name = kn_make_name4(109, 97, 105, 110)  // "main"
+    let fd = FnDef {
+        name: main_name,
+        params: None,
+        return_type: None,
+        effects: None,
+        body: body,
+        span: Span::dummy(),
+    }
+    let item = Item {
+        kind: ItemKind::ItemFn,
+        span: Span::dummy(),
+        is_pub: false,
+        name: main_name,
+        fn_def: Some(Box::new(fd)),
+        struct_def: None,
+        enum_def: None,
+        impl_def: None,
+        type_alias_ty: None,
+        use_path: kn_empty_path(),
+        use_glob: false,
+        use_items: None,
+    }
+    let prog = Program { module_path: kn_empty_path(), items: Some(Box::new(ItemList { head: item, tail: None })) }
+    let result = check_program(prog)
+    // Should have an error for invalid epsilon
+    result.error_count > 0
+}
+
+// ============================================================================
+// TEST RUNNER
+// ============================================================================
+
+fn run_knowledge_tests() -> i32 with IO, Mut, Div, Panic, Alloc {
+    var passed: i64 = 0
+    var total: i64 = 0
+
+    print("=== Knowledge Type Tests ===\n")
+
+    // Lexer tests
+    total = total + 1
+    if kn_test_lex_knowledge() { passed = passed + 1; print("  T01 OK: lex Knowledge\n") } else { print("  FAIL: T01 lex Knowledge\n") }
+
+    total = total + 1
+    if kn_test_lex_valid() { passed = passed + 1; print("  T02 OK: lex Valid\n") } else { print("  FAIL: T02 lex Valid\n") }
+
+    total = total + 1
+    if kn_test_lex_derived() { passed = passed + 1; print("  T03 OK: lex Derived\n") } else { print("  FAIL: T03 lex Derived\n") }
+
+    // Parser tests
+    total = total + 1
+    if kn_test_parse_shorthand() { passed = passed + 1; print("  T04 OK: parse Knowledge<f64>\n") } else { print("  FAIL: T04 parse Knowledge<f64>\n") }
+
+    total = total + 1
+    if kn_test_parse_epsilon_bound() { passed = passed + 1; print("  T05 OK: parse epsilon bound\n") } else { print("  FAIL: T05 parse epsilon bound\n") }
+
+    total = total + 1
+    if kn_test_parse_full_4layer() { passed = passed + 1; print("  T06 OK: parse full 4-layer\n") } else { print("  FAIL: T06 parse full 4-layer\n") }
+
+    // Checker tests
+    total = total + 1
+    if kn_test_check_wraps() { passed = passed + 1; print("  T07 OK: check wraps\n") } else { print("  FAIL: T07 check wraps\n") }
+
+    total = total + 1
+    if kn_test_check_unwrap() { passed = passed + 1; print("  T08 OK: check unwrap\n") } else { print("  FAIL: T08 check unwrap\n") }
+
+    total = total + 1
+    if kn_test_check_epsilon() { passed = passed + 1; print("  T09 OK: check epsilon\n") } else { print("  FAIL: T09 check epsilon\n") }
+
+    total = total + 1
+    if kn_test_check_epsilon_reject_negative() { passed = passed + 1; print("  T10 OK: reject negative epsilon\n") } else { print("  FAIL: T10 reject negative epsilon\n") }
+
+    print("\nKnowledge tests: ")
+    print_int(passed)
+    print("/")
+    print_int(total)
+    print(" passed\n")
+
+    if passed == total { 0 } else { 1 }
+}

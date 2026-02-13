@@ -1,0 +1,245 @@
+// Import resolution helpers for selective imports (use path::{A, B, C})
+//
+// ImportItemList is a linked list of Names from the AST.
+// These helpers operate on ImportItemList for name lookup and counting.
+
+// ============================================================
+// ImportItemList helpers
+// ============================================================
+
+fn import_item_list_contains(list: Option<Box<ImportItemList>>, name: Name) -> bool with Mut, Panic, Div, Alloc {
+    match list {
+        None => false
+        Some(node) => {
+            if name_eq((*node).head, name) {
+                true
+            } else {
+                import_item_list_contains((*node).tail, name)
+            }
+        }
+    }
+}
+
+fn import_item_list_count(list: Option<Box<ImportItemList>>) -> i64 with Mut, Panic, Div, Alloc {
+    match list {
+        None => 0
+        Some(node) => 1 + import_item_list_count((*node).tail)
+    }
+}
+
+fn import_item_list_get(list: Option<Box<ImportItemList>>, idx: i64) -> Name with Mut, Panic, Div, Alloc {
+    match list {
+        None => Name { buf: [0; 128], len: 0 }
+        Some(node) => {
+            if idx == 0 {
+                (*node).head
+            } else {
+                import_item_list_get((*node).tail, idx - 1)
+            }
+        }
+    }
+}
+
+// ============================================================
+// Module registry (minimal; for cross-file imports)
+// ============================================================
+
+struct ModuleExport {
+    name: Name,
+    kind: SymbolKind,
+}
+
+struct ModuleEntry {
+    path: AstPath,
+    exports: [ModuleExport; 1024],
+    export_count: i64,
+}
+
+struct ModuleRegistry {
+    modules: [ModuleEntry; 64],
+    count: i64,
+}
+
+fn empty_module_export() -> ModuleExport {
+    ModuleExport { name: Name { buf: [0; 128], len: 0 }, kind: SymbolKind::SymVariable }
+}
+
+fn empty_module_entry() -> ModuleEntry {
+    ModuleEntry {
+        path: empty_path(),
+        exports: [empty_module_export(); 1024],
+        export_count: 0,
+    }
+}
+
+fn module_registry_new() -> ModuleRegistry {
+    ModuleRegistry {
+        modules: [empty_module_entry(); 64],
+        count: 0,
+    }
+}
+
+// StringList equality (byte-by-byte + structural)
+fn string_list_eq(a: StringList, b: StringList) -> bool with Mut, Panic, Div, Alloc {
+    if a.head_len != b.head_len { return false }
+
+    var i: i64 = 0
+    while i < a.head_len && i < 128 {
+        if a.head_buf[i] != b.head_buf[i] { return false }
+        i = i + 1
+    }
+
+    match (a.tail, b.tail) {
+        (None, None) => true
+        (Some(at), Some(bt)) => string_list_eq(*at, *bt)
+        _ => false
+    }
+}
+
+fn path_eq(a: AstPath, b: AstPath) -> bool with Mut, Panic, Div, Alloc {
+    if a.seg_count != b.seg_count { return false }
+    if a.seg_count == 0 { return true }
+    string_list_eq(a.segments, b.segments)
+}
+
+fn module_registry_find(reg: ModuleRegistry, path: AstPath) -> i64 with Mut, Panic, Div, Alloc {
+    var i: i64 = 0
+    while i < reg.count {
+        if path_eq(reg.modules[i as usize].path, path) {
+            return i
+        }
+        i = i + 1
+    }
+    -1
+}
+
+fn module_registry_put(
+    reg: ModuleRegistry,
+    path: AstPath,
+    exports: [ModuleExport; 1024],
+    export_count: i64
+) -> ModuleRegistry with Mut, Panic, Div, Alloc {
+    var r = reg
+    let idx = module_registry_find(r, path)
+    if idx >= 0 {
+        r.modules[idx as usize] = ModuleEntry {
+            path: path,
+            exports: exports,
+            export_count: export_count,
+        }
+        return r
+    }
+
+    if r.count < 64 {
+        r.modules[r.count as usize] = ModuleEntry {
+            path: path,
+            exports: exports,
+            export_count: export_count,
+        }
+        r.count = r.count + 1
+    }
+    r
+}
+
+fn module_entry_contains(entry: ModuleEntry, name: Name) -> bool with Mut, Panic, Div {
+    var i: i64 = 0
+    while i < entry.export_count && i < 1024 {
+        if name_eq(entry.exports[i as usize].name, name) {
+            return true
+        }
+        i = i + 1
+    }
+    false
+}
+
+fn exports_empty() -> [ModuleExport; 1024] {
+    [empty_module_export(); 1024]
+}
+
+fn exports_push(
+    exports: [ModuleExport; 1024],
+    count: i64,
+    name: Name,
+    kind: SymbolKind
+) -> ([ModuleExport; 1024], i64) with Mut, Panic, Div {
+    var ex = exports
+    var c = count
+    if c < 1024 && !name_is_empty(name) {
+        ex[c as usize] = ModuleExport { name: name, kind: kind }
+        c = c + 1
+    }
+    (ex, c)
+}
+
+fn collect_module_exports(items: Option<Box<ItemList>>) -> ([ModuleExport; 1024], i64) with Mut, Panic, Div, Alloc {
+    collect_module_exports_loop(items, exports_empty(), 0)
+}
+
+fn collect_module_exports_loop(
+    items: Option<Box<ItemList>>,
+    exports: [ModuleExport; 1024],
+    count: i64
+) -> ([ModuleExport; 1024], i64) with Mut, Panic, Div, Alloc {
+    match items {
+        None => (exports, count)
+        Some(list) => {
+            let item = (*list).head
+            let pair = collect_module_exports_item(item, exports, count)
+            collect_module_exports_loop((*list).tail, pair.0, pair.1)
+        }
+    }
+}
+
+fn collect_module_exports_item(
+    item: Item,
+    exports: [ModuleExport; 1024],
+    count: i64
+) -> ([ModuleExport; 1024], i64) with Mut, Panic, Div, Alloc {
+    // For now: export pub top-level items, and for pub enums also export variant names
+    match item.kind {
+        ItemFn => {
+            if item.is_pub { exports_push(exports, count, item.name, SymbolKind::SymFunction) } else { (exports, count) }
+        }
+        ItemStruct => {
+            if item.is_pub { exports_push(exports, count, item.name, SymbolKind::SymStruct) } else { (exports, count) }
+        }
+        ItemEnum => {
+            if item.is_pub {
+                let pair = exports_push(exports, count, item.name, SymbolKind::SymEnum)
+                collect_module_exports_variants(item.enum_def, pair.0, pair.1)
+            } else {
+                (exports, count)
+            }
+        }
+        ItemTypeAlias => {
+            if item.is_pub { exports_push(exports, count, item.name, SymbolKind::SymTypeAlias) } else { (exports, count) }
+        }
+        ItemImpl => (exports, count)
+        ItemUse => (exports, count)
+    }
+}
+
+fn collect_module_exports_variants(
+    opt: Option<Box<EnumDef>>,
+    exports: [ModuleExport; 1024],
+    count: i64
+) -> ([ModuleExport; 1024], i64) with Mut, Panic, Div, Alloc {
+    match opt {
+        None => (exports, count)
+        Some(ed) => collect_module_exports_variant_list((*ed).variants, exports, count)
+    }
+}
+
+fn collect_module_exports_variant_list(
+    opt: Option<Box<VariantDefList>>,
+    exports: [ModuleExport; 1024],
+    count: i64
+) -> ([ModuleExport; 1024], i64) with Mut, Panic, Div, Alloc {
+    match opt {
+        None => (exports, count)
+        Some(list) => {
+            let pair = exports_push(exports, count, (*list).head.name, SymbolKind::SymEnumVariant)
+            collect_module_exports_variant_list((*list).tail, pair.0, pair.1)
+        }
+    }
+}

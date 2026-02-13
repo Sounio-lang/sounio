@@ -8,8 +8,8 @@
 //! convention that are linked into compiled code.
 
 use std::collections::HashMap;
+use std::cell::RefCell;
 use std::ffi::CStr;
-use std::sync::{Mutex, OnceLock};
 
 /// A handler entry on the runtime handler stack
 #[derive(Debug, Clone)]
@@ -298,20 +298,33 @@ impl RuntimeHandlerStack {
 // Global Handler Stack
 // ============================================================================
 
-/// Global handler stack instance
-static HANDLER_STACK: OnceLock<Mutex<RuntimeHandlerStack>> = OnceLock::new();
-
-/// Get the global handler stack
-pub fn get_handler_stack() -> &'static Mutex<RuntimeHandlerStack> {
-    HANDLER_STACK.get_or_init(|| Mutex::new(RuntimeHandlerStack::new()))
+thread_local! {
+    /// Per-thread handler stack.
+    ///
+    /// This avoids global cross-test interference (Rust tests run in parallel by default)
+    /// and matches the typical semantics that handler stacks are thread-local.
+    static HANDLER_STACK: RefCell<RuntimeHandlerStack> = RefCell::new(RuntimeHandlerStack::new());
 }
 
-/// Reset the global handler stack
+fn try_with_handler_stack_mut<R>(f: impl FnOnce(&mut RuntimeHandlerStack) -> R) -> Option<R> {
+    HANDLER_STACK.with(|stack| {
+        stack
+            .try_borrow_mut()
+            .ok()
+            .map(|mut stack| f(&mut *stack))
+    })
+}
+
+fn try_with_handler_stack<R>(f: impl FnOnce(&RuntimeHandlerStack) -> R) -> Option<R> {
+    HANDLER_STACK.with(|stack| stack.try_borrow().ok().map(|stack| f(&*stack)))
+}
+
+/// Reset the thread-local handler stack (for the current thread).
 pub fn reset_handler_stack() {
-    if let Ok(mut stack) = get_handler_stack().lock() {
+    let _ = try_with_handler_stack_mut(|stack| {
         stack.clear();
         stack.clear_state();
-    }
+    });
 }
 
 // ============================================================================
@@ -321,123 +334,119 @@ pub fn reset_handler_stack() {
 /// Push a handler for the IO effect
 #[unsafe(no_mangle)]
 pub extern "C" fn __sounio_push_handler_io() {
-    if let Ok(mut stack) = get_handler_stack().lock() {
+    let _ = try_with_handler_stack_mut(|stack| {
         stack.push(RuntimeHandler::new("IO", "default_io", 1));
-    }
+    });
 }
 
 /// Push a handler for the Mut effect
 #[unsafe(no_mangle)]
 pub extern "C" fn __sounio_push_handler_mut() {
-    if let Ok(mut stack) = get_handler_stack().lock() {
+    let _ = try_with_handler_stack_mut(|stack| {
         stack.push(RuntimeHandler::new("Mut", "default_mut", 2));
-    }
+    });
 }
 
 /// Push a handler for the Div effect
 #[unsafe(no_mangle)]
 pub extern "C" fn __sounio_push_handler_div() {
-    if let Ok(mut stack) = get_handler_stack().lock() {
+    let _ = try_with_handler_stack_mut(|stack| {
         stack.push(RuntimeHandler::new("Div", "default_div", 3));
-    }
+    });
 }
 
 /// Push a handler for the Prob effect
 #[unsafe(no_mangle)]
 pub extern "C" fn __sounio_push_handler_prob() {
-    if let Ok(mut stack) = get_handler_stack().lock() {
+    let _ = try_with_handler_stack_mut(|stack| {
         stack.push(RuntimeHandler::new("Prob", "default_prob", 4));
-    }
+    });
 }
 
 /// Push a handler for the Alloc effect
 #[unsafe(no_mangle)]
 pub extern "C" fn __sounio_push_handler_alloc() {
-    if let Ok(mut stack) = get_handler_stack().lock() {
+    let _ = try_with_handler_stack_mut(|stack| {
         stack.push(RuntimeHandler::new("Alloc", "default_alloc", 5));
-    }
+    });
 }
 
 /// Push a handler for the Panic effect
 #[unsafe(no_mangle)]
 pub extern "C" fn __sounio_push_handler_panic() {
-    if let Ok(mut stack) = get_handler_stack().lock() {
+    let _ = try_with_handler_stack_mut(|stack| {
         stack.push(RuntimeHandler::new("Panic", "default_panic", 6));
-    }
+    });
 }
 
 /// Push a handler for the Async effect
 #[unsafe(no_mangle)]
 pub extern "C" fn __sounio_push_handler_async() {
-    if let Ok(mut stack) = get_handler_stack().lock() {
+    let _ = try_with_handler_stack_mut(|stack| {
         stack.push(RuntimeHandler::new("Async", "default_async", 7));
-    }
+    });
 }
 
 /// Push a handler for the GPU effect
 #[unsafe(no_mangle)]
 pub extern "C" fn __sounio_push_handler_gpu() {
-    if let Ok(mut stack) = get_handler_stack().lock() {
+    let _ = try_with_handler_stack_mut(|stack| {
         stack.push(RuntimeHandler::new("GPU", "default_gpu", 8));
-    }
+    });
 }
 
 /// Push a handler for the Grad effect
 #[unsafe(no_mangle)]
 pub extern "C" fn __sounio_push_handler_grad() {
-    if let Ok(mut stack) = get_handler_stack().lock() {
+    let _ = try_with_handler_stack_mut(|stack| {
         stack.push(RuntimeHandler::new("Grad", "default_grad", 9));
-    }
+    });
 }
 
 /// Push a handler for the Network effect
 #[unsafe(no_mangle)]
 pub extern "C" fn __sounio_push_handler_network() {
-    if let Ok(mut stack) = get_handler_stack().lock() {
+    let _ = try_with_handler_stack_mut(|stack| {
         stack.push(RuntimeHandler::new("Network", "default_network", 10));
-    }
+    });
 }
 
 /// Push a handler for the Sensor effect
 #[unsafe(no_mangle)]
 pub extern "C" fn __sounio_push_handler_sensor() {
-    if let Ok(mut stack) = get_handler_stack().lock() {
+    let _ = try_with_handler_stack_mut(|stack| {
         stack.push(RuntimeHandler::new("Sensor", "default_sensor", 11));
-    }
+    });
 }
 
 /// Push a handler for the Exn effect
 #[unsafe(no_mangle)]
 pub extern "C" fn __sounio_push_handler_exn() {
-    if let Ok(mut stack) = get_handler_stack().lock() {
+    let _ = try_with_handler_stack_mut(|stack| {
         stack.push(RuntimeHandler::new("Exn", "default_exn", 12));
-    }
+    });
 }
 
 /// Push a handler for the Causal effect
 #[unsafe(no_mangle)]
 pub extern "C" fn __sounio_push_handler_causal() {
-    if let Ok(mut stack) = get_handler_stack().lock() {
+    let _ = try_with_handler_stack_mut(|stack| {
         stack.push(RuntimeHandler::new("Causal", "default_causal", 13));
-    }
+    });
 }
 
 /// Pop the topmost handler from the stack
 #[unsafe(no_mangle)]
 pub extern "C" fn __sounio_pop_handler() {
-    if let Ok(mut stack) = get_handler_stack().lock() {
+    let _ = try_with_handler_stack_mut(|stack| {
         stack.pop();
-    }
+    });
 }
 
 /// Get the current handler stack depth
 #[unsafe(no_mangle)]
 pub extern "C" fn __sounio_handler_depth() -> i64 {
-    if let Ok(stack) = get_handler_stack().lock() {
-        stack.depth() as i64
-    } else {
-        0
-    }
+    try_with_handler_stack(|stack| stack.depth() as i64).unwrap_or(0)
 }
 
 // ============================================================================
@@ -448,8 +457,10 @@ pub extern "C" fn __sounio_handler_depth() -> i64 {
 
 #[unsafe(no_mangle)]
 pub extern "C" fn __sounio_dispatch_io_print(value: f64) -> f64 {
-    if let Ok(mut stack) = get_handler_stack().lock() {
-        stack.dispatch("IO", "print", &[value]).unwrap_or(0.0)
+    if let Some(v) =
+        try_with_handler_stack_mut(|stack| stack.dispatch("IO", "print", &[value]).unwrap_or(0.0))
+    {
+        v
     } else {
         println!("{}", value);
         0.0
@@ -458,8 +469,10 @@ pub extern "C" fn __sounio_dispatch_io_print(value: f64) -> f64 {
 
 #[unsafe(no_mangle)]
 pub extern "C" fn __sounio_dispatch_io_println(value: f64) -> f64 {
-    if let Ok(mut stack) = get_handler_stack().lock() {
+    if let Some(v) = try_with_handler_stack_mut(|stack| {
         stack.dispatch("IO", "println", &[value]).unwrap_or(0.0)
+    }) {
+        v
     } else {
         println!("{}", value);
         0.0
@@ -481,39 +494,36 @@ pub extern "C" fn __sounio_dispatch_io_read() -> f64 {
 
 #[unsafe(no_mangle)]
 pub extern "C" fn __sounio_dispatch_mut_get(key: f64) -> f64 {
-    if let Ok(mut stack) = get_handler_stack().lock() {
-        stack.dispatch("Mut", "get", &[key]).unwrap_or(0.0)
-    } else {
-        0.0
-    }
+    try_with_handler_stack_mut(|stack| stack.dispatch("Mut", "get", &[key]).unwrap_or(0.0))
+        .unwrap_or(0.0)
 }
 
 #[unsafe(no_mangle)]
 pub extern "C" fn __sounio_dispatch_mut_set(key: f64, value: f64) -> f64 {
-    if let Ok(mut stack) = get_handler_stack().lock() {
+    try_with_handler_stack_mut(|stack| {
         stack.dispatch("Mut", "set", &[key, value]).unwrap_or(0.0)
-    } else {
-        0.0
-    }
+    })
+    .unwrap_or(0.0)
 }
 
 #[unsafe(no_mangle)]
 pub extern "C" fn __sounio_dispatch_mut_modify(key: f64, delta: f64) -> f64 {
-    if let Ok(mut stack) = get_handler_stack().lock() {
+    try_with_handler_stack_mut(|stack| {
         stack
             .dispatch("Mut", "modify", &[key, delta])
             .unwrap_or(0.0)
-    } else {
-        0.0
-    }
+    })
+    .unwrap_or(0.0)
 }
 
 // --- Div Effect ---
 
 #[unsafe(no_mangle)]
 pub extern "C" fn __sounio_dispatch_div_div(a: f64, b: f64) -> f64 {
-    if let Ok(mut stack) = get_handler_stack().lock() {
-        stack.dispatch("Div", "div", &[a, b]).unwrap_or(0.0)
+    if let Some(v) =
+        try_with_handler_stack_mut(|stack| stack.dispatch("Div", "div", &[a, b]).unwrap_or(0.0))
+    {
+        v
     } else if b == 0.0 {
         0.0
     } else {
@@ -525,52 +535,46 @@ pub extern "C" fn __sounio_dispatch_div_div(a: f64, b: f64) -> f64 {
 
 #[unsafe(no_mangle)]
 pub extern "C" fn __sounio_dispatch_prob_sample(low: f64, high: f64) -> f64 {
-    if let Ok(mut stack) = get_handler_stack().lock() {
+    try_with_handler_stack_mut(|stack| {
         stack
             .dispatch("Prob", "sample", &[low, high])
             .unwrap_or(0.0)
-    } else {
-        low // Fallback to low bound
-    }
+    })
+    .unwrap_or(low) // Fallback to low bound
 }
 
 #[unsafe(no_mangle)]
 pub extern "C" fn __sounio_dispatch_prob_observe(mean: f64, std: f64, value: f64) -> f64 {
-    if let Ok(mut stack) = get_handler_stack().lock() {
+    try_with_handler_stack_mut(|stack| {
         stack
             .dispatch("Prob", "observe", &[mean, std, value])
             .unwrap_or(0.0)
-    } else {
-        0.0
-    }
+    })
+    .unwrap_or(0.0)
 }
 
 // --- Alloc Effect ---
 
 #[unsafe(no_mangle)]
 pub extern "C" fn __sounio_dispatch_alloc_alloc(size: f64) -> f64 {
-    if let Ok(mut stack) = get_handler_stack().lock() {
-        stack.dispatch("Alloc", "alloc", &[size]).unwrap_or(0.0)
-    } else {
-        0.0
-    }
+    try_with_handler_stack_mut(|stack| stack.dispatch("Alloc", "alloc", &[size]).unwrap_or(0.0))
+        .unwrap_or(0.0)
 }
 
 #[unsafe(no_mangle)]
 pub extern "C" fn __sounio_dispatch_alloc_dealloc(ptr: f64) -> f64 {
-    if let Ok(mut stack) = get_handler_stack().lock() {
-        stack.dispatch("Alloc", "dealloc", &[ptr]).unwrap_or(0.0)
-    } else {
-        0.0
-    }
+    try_with_handler_stack_mut(|stack| stack.dispatch("Alloc", "dealloc", &[ptr]).unwrap_or(0.0))
+        .unwrap_or(0.0)
 }
 
 // --- Panic Effect ---
 
 #[unsafe(no_mangle)]
 pub extern "C" fn __sounio_dispatch_panic_panic() -> f64 {
-    if let Ok(mut stack) = get_handler_stack().lock() {
-        stack.dispatch("Panic", "panic", &[]).unwrap_or(f64::NAN)
+    if let Some(v) =
+        try_with_handler_stack_mut(|stack| stack.dispatch("Panic", "panic", &[]).unwrap_or(f64::NAN))
+    {
+        v
     } else {
         eprintln!("Runtime panic!");
         f64::NAN
@@ -582,69 +586,57 @@ pub extern "C" fn __sounio_dispatch_panic_panic() -> f64 {
 /// Synchronize GPU execution (wait for all kernels to complete)
 #[unsafe(no_mangle)]
 pub extern "C" fn __sounio_dispatch_gpu_sync() -> f64 {
-    if let Ok(mut stack) = get_handler_stack().lock() {
-        stack.dispatch("GPU", "sync", &[]).unwrap_or(0.0)
-    } else {
-        0.0
-    }
+    try_with_handler_stack_mut(|stack| stack.dispatch("GPU", "sync", &[]).unwrap_or(0.0))
+        .unwrap_or(0.0)
 }
 
 /// Allocate GPU memory (returns buffer_id)
 #[unsafe(no_mangle)]
 pub extern "C" fn __sounio_dispatch_gpu_alloc(size: f64) -> f64 {
-    if let Ok(mut stack) = get_handler_stack().lock() {
-        stack.dispatch("GPU", "alloc", &[size]).unwrap_or(0.0)
-    } else {
-        0.0
-    }
+    try_with_handler_stack_mut(|stack| stack.dispatch("GPU", "alloc", &[size]).unwrap_or(0.0))
+        .unwrap_or(0.0)
 }
 
 /// Free GPU memory
 #[unsafe(no_mangle)]
 pub extern "C" fn __sounio_dispatch_gpu_free(buffer_id: f64) -> f64 {
-    if let Ok(mut stack) = get_handler_stack().lock() {
-        stack.dispatch("GPU", "free", &[buffer_id]).unwrap_or(0.0)
-    } else {
-        0.0
-    }
+    try_with_handler_stack_mut(|stack| stack.dispatch("GPU", "free", &[buffer_id]).unwrap_or(0.0))
+        .unwrap_or(0.0)
 }
 
 /// Copy data from host to device
 /// host_ptr is encoded as f64 (use transmute carefully)
 #[unsafe(no_mangle)]
 pub extern "C" fn __sounio_dispatch_gpu_copy_htod(buffer_id: f64, host_ptr: f64, size: f64) -> f64 {
-    if let Ok(mut stack) = get_handler_stack().lock() {
+    try_with_handler_stack_mut(|stack| {
         stack
             .dispatch("GPU", "copy_htod", &[buffer_id, host_ptr, size])
             .unwrap_or(0.0)
-    } else {
-        0.0
-    }
+    })
+    .unwrap_or(0.0)
 }
 
 /// Copy data from device to host
 #[unsafe(no_mangle)]
 pub extern "C" fn __sounio_dispatch_gpu_copy_dtoh(buffer_id: f64, host_ptr: f64, size: f64) -> f64 {
-    if let Ok(mut stack) = get_handler_stack().lock() {
+    try_with_handler_stack_mut(|stack| {
         stack
             .dispatch("GPU", "copy_dtoh", &[buffer_id, host_ptr, size])
             .unwrap_or(0.0)
-    } else {
-        0.0
-    }
+    })
+    .unwrap_or(0.0)
 }
 
 /// Load PTX kernel (returns kernel_id)
 /// name_ptr and ptx_ptr are encoded as f64
 #[unsafe(no_mangle)]
 pub extern "C" fn __sounio_dispatch_gpu_load_ptx(name_ptr: f64, ptx_ptr: f64) -> f64 {
-    if let Ok(mut stack) = get_handler_stack().lock() {
+    try_with_handler_stack_mut(|stack| {
         stack
             .dispatch("GPU", "load_ptx", &[name_ptr, ptx_ptr])
             .unwrap_or(0.0)
-    } else {
-        0.0
-    }
+    })
+    .unwrap_or(0.0)
 }
 
 #[unsafe(no_mangle)]
@@ -654,115 +646,95 @@ pub extern "C" fn __sounio_dispatch_gpu_launch(
     grid_y: f64,
     grid_z: f64,
 ) -> f64 {
-    if let Ok(mut stack) = get_handler_stack().lock() {
+    try_with_handler_stack_mut(|stack| {
         stack
             .dispatch("GPU", "launch", &[kernel_id, grid_x, grid_y, grid_z])
             .unwrap_or(0.0)
-    } else {
-        0.0
-    }
+    })
+    .unwrap_or(0.0)
 }
 
 // --- Async Effect ---
 
 #[unsafe(no_mangle)]
 pub extern "C" fn __sounio_dispatch_async_spawn(task_id: f64) -> f64 {
-    if let Ok(mut stack) = get_handler_stack().lock() {
-        stack.dispatch("Async", "spawn", &[task_id]).unwrap_or(0.0)
-    } else {
-        0.0
-    }
+    try_with_handler_stack_mut(|stack| stack.dispatch("Async", "spawn", &[task_id]).unwrap_or(0.0))
+        .unwrap_or(0.0)
 }
 
 #[unsafe(no_mangle)]
 pub extern "C" fn __sounio_dispatch_async_yield() -> f64 {
-    if let Ok(mut stack) = get_handler_stack().lock() {
-        stack.dispatch("Async", "yield", &[]).unwrap_or(0.0)
-    } else {
-        0.0
-    }
+    try_with_handler_stack_mut(|stack| stack.dispatch("Async", "yield", &[]).unwrap_or(0.0))
+        .unwrap_or(0.0)
 }
 
 #[unsafe(no_mangle)]
 pub extern "C" fn __sounio_dispatch_async_await(task_id: f64) -> f64 {
-    if let Ok(mut stack) = get_handler_stack().lock() {
-        stack.dispatch("Async", "await", &[task_id]).unwrap_or(0.0)
-    } else {
-        0.0
-    }
+    try_with_handler_stack_mut(|stack| stack.dispatch("Async", "await", &[task_id]).unwrap_or(0.0))
+        .unwrap_or(0.0)
 }
 
 /// Join multiple tasks - waits for all to complete
 /// task_ids is encoded as: count followed by task IDs (passed through additional calls)
 #[unsafe(no_mangle)]
 pub extern "C" fn __sounio_dispatch_async_join(task_count: f64) -> f64 {
-    if let Ok(mut stack) = get_handler_stack().lock() {
-        stack
-            .dispatch("Async", "join", &[task_count])
-            .unwrap_or(0.0)
-    } else {
-        0.0
-    }
+    try_with_handler_stack_mut(|stack| stack.dispatch("Async", "join", &[task_count]).unwrap_or(0.0))
+        .unwrap_or(0.0)
 }
 
 /// Add a task to a join set
 #[unsafe(no_mangle)]
 pub extern "C" fn __sounio_dispatch_async_join_add(join_id: f64, task_id: f64) -> f64 {
-    if let Ok(mut stack) = get_handler_stack().lock() {
+    try_with_handler_stack_mut(|stack| {
         stack
             .dispatch("Async", "join_add", &[join_id, task_id])
             .unwrap_or(0.0)
-    } else {
-        0.0
-    }
+    })
+    .unwrap_or(0.0)
 }
 
 /// Wait for a join to complete
 #[unsafe(no_mangle)]
 pub extern "C" fn __sounio_dispatch_async_join_await(join_id: f64) -> f64 {
-    if let Ok(mut stack) = get_handler_stack().lock() {
+    try_with_handler_stack_mut(|stack| {
         stack
             .dispatch("Async", "join_await", &[join_id])
             .unwrap_or(0.0)
-    } else {
-        0.0
-    }
+    })
+    .unwrap_or(0.0)
 }
 
 /// Select from multiple tasks - waits for any to complete
 #[unsafe(no_mangle)]
 pub extern "C" fn __sounio_dispatch_async_select(task_count: f64) -> f64 {
-    if let Ok(mut stack) = get_handler_stack().lock() {
+    try_with_handler_stack_mut(|stack| {
         stack
             .dispatch("Async", "select", &[task_count])
             .unwrap_or(0.0)
-    } else {
-        0.0
-    }
+    })
+    .unwrap_or(0.0)
 }
 
 /// Add a task to a select set
 #[unsafe(no_mangle)]
 pub extern "C" fn __sounio_dispatch_async_select_add(select_id: f64, task_id: f64) -> f64 {
-    if let Ok(mut stack) = get_handler_stack().lock() {
+    try_with_handler_stack_mut(|stack| {
         stack
             .dispatch("Async", "select_add", &[select_id, task_id])
             .unwrap_or(0.0)
-    } else {
-        0.0
-    }
+    })
+    .unwrap_or(0.0)
 }
 
 /// Wait for a select to complete
 #[unsafe(no_mangle)]
 pub extern "C" fn __sounio_dispatch_async_select_await(select_id: f64) -> f64 {
-    if let Ok(mut stack) = get_handler_stack().lock() {
+    try_with_handler_stack_mut(|stack| {
         stack
             .dispatch("Async", "select_await", &[select_id])
             .unwrap_or(0.0)
-    } else {
-        0.0
-    }
+    })
+    .unwrap_or(0.0)
 }
 
 // --- Channel Operations ---
@@ -770,119 +742,99 @@ pub extern "C" fn __sounio_dispatch_async_select_await(select_id: f64) -> f64 {
 /// Create a new unbounded channel, returns channel_id
 #[unsafe(no_mangle)]
 pub extern "C" fn __sounio_dispatch_channel_create() -> f64 {
-    if let Ok(mut stack) = get_handler_stack().lock() {
-        stack
-            .dispatch("Async", "channel_create", &[])
-            .unwrap_or(0.0)
-    } else {
-        0.0
-    }
+    try_with_handler_stack_mut(|stack| stack.dispatch("Async", "channel_create", &[]).unwrap_or(0.0))
+        .unwrap_or(0.0)
 }
 
 /// Create a new bounded channel with capacity, returns channel_id
 #[unsafe(no_mangle)]
 pub extern "C" fn __sounio_dispatch_channel_create_bounded(capacity: f64) -> f64 {
-    if let Ok(mut stack) = get_handler_stack().lock() {
+    try_with_handler_stack_mut(|stack| {
         stack
             .dispatch("Async", "channel_create_bounded", &[capacity])
             .unwrap_or(0.0)
-    } else {
-        0.0
-    }
+    })
+    .unwrap_or(0.0)
 }
 
 /// Send a value to a channel (returns 1.0 on success, 0.0 on failure)
 #[unsafe(no_mangle)]
 pub extern "C" fn __sounio_dispatch_channel_send(channel_id: f64, value: f64) -> f64 {
-    if let Ok(mut stack) = get_handler_stack().lock() {
+    try_with_handler_stack_mut(|stack| {
         stack
             .dispatch("Async", "channel_send", &[channel_id, value])
             .unwrap_or(0.0)
-    } else {
-        0.0
-    }
+    })
+    .unwrap_or(0.0)
 }
 
 /// Receive a value from a channel (returns value or NaN if empty/closed)
 #[unsafe(no_mangle)]
 pub extern "C" fn __sounio_dispatch_channel_recv(channel_id: f64) -> f64 {
-    if let Ok(mut stack) = get_handler_stack().lock() {
+    try_with_handler_stack_mut(|stack| {
         stack
             .dispatch("Async", "channel_recv", &[channel_id])
             .unwrap_or(f64::NAN)
-    } else {
-        f64::NAN
-    }
+    })
+    .unwrap_or(f64::NAN)
 }
 
 /// Close a channel
 #[unsafe(no_mangle)]
 pub extern "C" fn __sounio_dispatch_channel_close(channel_id: f64) -> f64 {
-    if let Ok(mut stack) = get_handler_stack().lock() {
+    try_with_handler_stack_mut(|stack| {
         stack
             .dispatch("Async", "channel_close", &[channel_id])
             .unwrap_or(0.0)
-    } else {
-        0.0
-    }
+    })
+    .unwrap_or(0.0)
 }
 
 /// Check if a channel is closed
 #[unsafe(no_mangle)]
 pub extern "C" fn __sounio_dispatch_channel_is_closed(channel_id: f64) -> f64 {
-    if let Ok(mut stack) = get_handler_stack().lock() {
+    try_with_handler_stack_mut(|stack| {
         stack
             .dispatch("Async", "channel_is_closed", &[channel_id])
             .unwrap_or(0.0)
-    } else {
-        0.0
-    }
+    })
+    .unwrap_or(0.0)
 }
 
 // --- Grad Effect ---
 
 #[unsafe(no_mangle)]
 pub extern "C" fn __sounio_dispatch_grad_forward(value: f64, derivative: f64) -> f64 {
-    if let Ok(mut stack) = get_handler_stack().lock() {
+    try_with_handler_stack_mut(|stack| {
         stack
             .dispatch("Grad", "forward", &[value, derivative])
             .unwrap_or(0.0)
-    } else {
-        derivative
-    }
+    })
+    .unwrap_or(derivative)
 }
 
 #[unsafe(no_mangle)]
 pub extern "C" fn __sounio_dispatch_grad_reverse(value: f64, adjoint: f64) -> f64 {
-    if let Ok(mut stack) = get_handler_stack().lock() {
+    try_with_handler_stack_mut(|stack| {
         stack
             .dispatch("Grad", "reverse", &[value, adjoint])
             .unwrap_or(0.0)
-    } else {
-        adjoint
-    }
+    })
+    .unwrap_or(adjoint)
 }
 
 // --- Causal Effect ---
 
 #[unsafe(no_mangle)]
 pub extern "C" fn __sounio_dispatch_causal_do(value: f64) -> f64 {
-    if let Ok(mut stack) = get_handler_stack().lock() {
-        stack.dispatch("Causal", "do", &[value]).unwrap_or(value)
-    } else {
-        value
-    }
+    try_with_handler_stack_mut(|stack| stack.dispatch("Causal", "do", &[value]).unwrap_or(value))
+        .unwrap_or(value)
 }
 
 #[unsafe(no_mangle)]
 pub extern "C" fn __sounio_dispatch_causal_observe(value: f64) -> f64 {
-    if let Ok(mut stack) = get_handler_stack().lock() {
-        stack
-            .dispatch("Causal", "observe", &[value])
-            .unwrap_or(value)
-    } else {
-        value
-    }
+    try_with_handler_stack_mut(|stack| stack.dispatch("Causal", "observe", &[value]).unwrap_or(value))
+        .unwrap_or(value)
 }
 
 // --- Generic Dispatch ---
@@ -917,11 +869,8 @@ pub extern "C" fn __sounio_dispatch_generic(
         unsafe { std::slice::from_raw_parts(args_ptr, args_len).to_vec() }
     };
 
-    if let Ok(mut stack) = get_handler_stack().lock() {
-        stack.dispatch(effect, op, &args).unwrap_or(f64::NAN)
-    } else {
-        f64::NAN
-    }
+    try_with_handler_stack_mut(|stack| stack.dispatch(effect, op, &args).unwrap_or(f64::NAN))
+        .unwrap_or(f64::NAN)
 }
 
 // ============================================================================

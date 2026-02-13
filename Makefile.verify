@@ -1,0 +1,172 @@
+# Makefile.verify - Rustless Cutover Verification Targets
+#
+# This Makefile provides convenient targets for the 3-stage bootstrap
+# verification workflow.
+
+.PHONY: verify verify-quick verify-full clean-verify help-verify
+
+# Project paths
+PROJECT_ROOT := $(shell pwd)
+SOUC := $(PROJECT_ROOT)/target/release/souc
+SCRIPTS := $(PROJECT_ROOT)/scripts
+SELFHOST := $(PROJECT_ROOT)/self-hosted
+
+# Artifact paths
+STAGE1_SOIR := $(PROJECT_ROOT)/stage1_compiler.soir
+STAGE2_SOIR := $(PROJECT_ROOT)/stage2_compiler.soir
+STAGE1_NORM := $(PROJECT_ROOT)/stage1_normalized.soir
+STAGE2_NORM := $(PROJECT_ROOT)/stage2_normalized.soir
+
+# Colors
+RED := \033[0;31m
+GREEN := \033[0;32m
+YELLOW := \033[0;33m
+BLUE := \033[0;34m
+NC := \033[0m
+
+# Default target
+verify: verify-full
+
+# Quick verification (single-stage, for rapid iteration)
+verify-quick:
+	@echo "$(BLUE)→ Running quick verification...$(NC)"
+	@echo "$(BLUE)→ Building souc...$(NC)"
+	@cargo build --release
+	@echo "$(GREEN)✓ souc built$(NC)"
+	@echo ""
+	@echo "$(BLUE)→ Running self-hosted test suite...$(NC)"
+	@$(SOUC) run $(SELFHOST)/test_check.sio || exit 1
+	@$(SOUC) run $(SELFHOST)/test_parser.sio || exit 1
+	@$(SOUC) run $(SELFHOST)/test_ir.sio || exit 1
+	@echo "$(GREEN)✓ All quick tests passed$(NC)"
+
+# Full 3-stage bootstrap verification
+verify-full: $(SOUC) stage1 stage2 compare-stages test-stages
+	@echo ""
+	@echo "$(GREEN)✓✓✓ Full 3-stage bootstrap verification complete ✓✓✓$(NC)"
+	@echo ""
+
+# Build souc compiler
+$(SOUC):
+	@echo "$(BLUE)→ Building souc...$(NC)"
+	@cargo build --release
+	@echo "$(GREEN)✓ souc built$(NC)"
+	@echo ""
+
+# Stage 1: Compile self-hosted compiler with Rust
+stage1: $(SOUC)
+	@echo "$(BLUE)→ Stage 1: Compiling self-hosted compiler with Rust...$(NC)"
+	@$(SCRIPTS)/sounio-verify serialize $(SELFHOST)/bootstrap/driver.sio $(STAGE1_SOIR)
+	@echo "$(GREEN)✓ Stage 1 complete$(NC)"
+	@echo ""
+
+# Stage 2: Compile self-hosted compiler with Stage 1
+stage2: stage1
+	@echo "$(BLUE)→ Stage 2: Compiling self-hosted compiler with Stage 1...$(NC)"
+	@$(SOUC) run $(STAGE1_SOIR) $(SELFHOST)/bootstrap/driver.sio --output $(STAGE2_SOIR)
+	@echo "$(GREEN)✓ Stage 2 complete$(NC)"
+	@echo ""
+
+# Compare Stage 1 and Stage 2
+compare-stages: stage1 stage2
+	@echo "$(BLUE)→ Comparing Stage 1 and Stage 2...$(NC)"
+	@$(SCRIPTS)/sounio-verify compare $(STAGE1_SOIR) $(STAGE2_SOIR) || \
+		(echo "$(RED)✗ Stage 1 ≠ Stage 2: Bootstrap failed$(NC)" && exit 1)
+	@echo "$(GREEN)✓ Stage 1 ≡ Stage 2 (reproducibility verified)$(NC)"
+	@echo ""
+
+# Run test suite on both stages
+test-stages: stage1 stage2
+	@echo "$(BLUE)→ Running test suite on Stage 1...$(NC)"
+	@$(SOUC) run $(STAGE1_SOIR) $(SELFHOST)/test_check.sio || \
+		(echo "$(RED)✗ Stage 1 tests failed$(NC)" && exit 1)
+	@echo "$(GREEN)✓ Stage 1 tests passed$(NC)"
+	@echo ""
+	@echo "$(BLUE)→ Running test suite on Stage 2...$(NC)"
+	@$(SOUC) run $(STAGE2_SOIR) $(SELFHOST)/test_check.sio || \
+		(echo "$(RED)✗ Stage 2 tests failed$(NC)" && exit 1)
+	@echo "$(GREEN)✓ Stage 2 tests passed$(NC)"
+	@echo ""
+
+# Inspect Stage 1 SOIR
+inspect-stage1: stage1
+	@$(SCRIPTS)/sounio-verify inspect $(STAGE1_SOIR)
+
+# Inspect Stage 2 SOIR
+inspect-stage2: stage2
+	@$(SCRIPTS)/sounio-verify inspect $(STAGE2_SOIR)
+
+# Show normalized Stage 1
+normalize-stage1: stage1
+	@$(SCRIPTS)/sounio-verify normalize $(STAGE1_SOIR) > $(STAGE1_NORM)
+	@echo "$(GREEN)✓ Normalized Stage 1 saved to $(STAGE1_NORM)$(NC)"
+
+# Show normalized Stage 2
+normalize-stage2: stage2
+	@$(SCRIPTS)/sounio-verify normalize $(STAGE2_SOIR) > $(STAGE2_NORM)
+	@echo "$(GREEN)✓ Normalized Stage 2 saved to $(STAGE2_NORM)$(NC)"
+
+# Validate Stage 1 SOIR
+validate-stage1: stage1
+	@$(SCRIPTS)/sounio-verify validate $(STAGE1_SOIR)
+
+# Validate Stage 2 SOIR
+validate-stage2: stage2
+	@$(SCRIPTS)/sounio-verify validate $(STAGE2_SOIR)
+
+# Show statistics
+stats: stage1 stage2
+	@echo "$(BLUE)Stage 1 Statistics:$(NC)"
+	@$(SCRIPTS)/sounio-verify inspect $(STAGE1_SOIR) --stats
+	@echo ""
+	@echo "$(BLUE)Stage 2 Statistics:$(NC)"
+	@$(SCRIPTS)/sounio-verify inspect $(STAGE2_SOIR) --stats
+
+# Clean verification artifacts
+clean-verify:
+	@echo "$(YELLOW)→ Cleaning verification artifacts...$(NC)"
+	@rm -f $(STAGE1_SOIR) $(STAGE2_SOIR) $(STAGE1_NORM) $(STAGE2_NORM)
+	@rm -f diff.txt
+	@echo "$(GREEN)✓ Cleaned$(NC)"
+
+# Help for verification targets
+help-verify:
+	@echo "Sounio Rustless Cutover Verification Targets"
+	@echo ""
+	@echo "Quick Verification:"
+	@echo "  make verify-quick       - Fast single-stage validation"
+	@echo ""
+	@echo "Full Verification:"
+	@echo "  make verify            - Full 3-stage bootstrap (default)"
+	@echo "  make verify-full       - Alias for 'verify'"
+	@echo ""
+	@echo "Individual Stages:"
+	@echo "  make stage1            - Compile Stage 1 (Rust → self-hosted)"
+	@echo "  make stage2            - Compile Stage 2 (Stage 1 → self-hosted)"
+	@echo "  make compare-stages    - Verify Stage 1 ≡ Stage 2"
+	@echo "  make test-stages       - Run tests on both stages"
+	@echo ""
+	@echo "Inspection:"
+	@echo "  make inspect-stage1    - Disassemble Stage 1 SOIR"
+	@echo "  make inspect-stage2    - Disassemble Stage 2 SOIR"
+	@echo "  make normalize-stage1  - Show normalized Stage 1 IR"
+	@echo "  make normalize-stage2  - Show normalized Stage 2 IR"
+	@echo "  make validate-stage1   - Validate Stage 1 structure"
+	@echo "  make validate-stage2   - Validate Stage 2 structure"
+	@echo "  make stats            - Show size/instruction statistics"
+	@echo ""
+	@echo "Cleanup:"
+	@echo "  make clean-verify      - Remove verification artifacts"
+	@echo ""
+	@echo "Documentation:"
+	@echo "  docs/RUSTLESS_CUTOVER.md     - Complete documentation"
+	@echo "  docs/DEVELOPER_WORKFLOW.md   - Daily workflow guide"
+	@echo "  docs/SOIR_REFERENCE.md       - SOIR format specification"
+	@echo ""
+
+# Continuous Integration target
+ci-verify: $(SOUC) stage1 stage2
+	@echo "$(BLUE)→ CI: Running 3-stage bootstrap verification...$(NC)"
+	@$(MAKE) compare-stages
+	@$(MAKE) test-stages
+	@echo "$(GREEN)✓✓✓ CI verification passed ✓✓✓$(NC)"

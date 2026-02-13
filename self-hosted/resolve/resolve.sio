@@ -15,6 +15,7 @@
 struct Resolver {
     symbols: SymbolTable,
     scopes: ScopeStack,
+    modules: ModuleRegistry,
     error_count: i64,
     had_error: bool,
     next_id: i64,
@@ -24,6 +25,18 @@ fn resolver_new() -> Resolver {
     Resolver {
         symbols: symbol_table_new(),
         scopes: scope_stack_new(),
+        modules: module_registry_new(),
+        error_count: 0,
+        had_error: false,
+        next_id: 0,
+    }
+}
+
+fn resolver_with_modules(mods: ModuleRegistry) -> Resolver {
+    Resolver {
+        symbols: symbol_table_new(),
+        scopes: scope_stack_new(),
+        modules: mods,
         error_count: 0,
         had_error: false,
         next_id: 0,
@@ -153,8 +166,13 @@ impl Resolver {
             }
             ItemImpl => self
             ItemUse => {
-                // For selective imports, register each imported name
-                self.collect_use_items(item.use_items, item.span)
+                if self.modules.count > 0 {
+                    // Cross-module import mode: validate and import from registry
+                    self.import_use(item.use_path, item.use_glob, item.use_items, item.span)
+                } else {
+                    // Flat mode: treat selective imports as defining names (no validation yet)
+                    self.collect_use_items(item.use_items, item.span)
+                }
             }
         }
     }
@@ -168,6 +186,61 @@ impl Resolver {
                     r = r.define((*list).head, SymbolKind::SymImported, span)
                 }
                 r.collect_use_items((*list).tail, span)
+            }
+        }
+    }
+
+    fn import_use(
+        self,
+        path: AstPath,
+        is_glob: bool,
+        items: Option<Box<ImportItemList>>,
+        span: Span
+    ) -> Resolver with Mut, Panic, Div, Alloc, IO {
+        var r = self
+        let idx = module_registry_find(r.modules, path)
+        if idx < 0 {
+            return r.report_error(span)
+        }
+
+        let entry = r.modules.modules[idx as usize]
+
+        // Whole-module import (`use foo::bar`): define the last segment name so `bar::x` paths resolve.
+        if !is_glob && items == None {
+            let mod_name = copy_string_list_tail_to_name(path.segments)
+            if !name_is_empty(mod_name) {
+                r = r.define(mod_name, SymbolKind::SymImported, span)
+            }
+            return r
+        }
+
+        // Glob import (`use foo::*`): import all exports.
+        if is_glob {
+            var i: i64 = 0
+            while i < entry.export_count && i < 1024 {
+                r = r.define(entry.exports[i as usize].name, SymbolKind::SymImported, span)
+                i = i + 1
+            }
+            return r
+        }
+
+        // Selective import (`use foo::{A, B}`): import only requested names, validating exports.
+        r.import_use_items(entry, items, span)
+    }
+
+    fn import_use_items(self, entry: ModuleEntry, items: Option<Box<ImportItemList>>, span: Span) -> Resolver
+        with Mut, Panic, Div, Alloc, IO {
+        match items {
+            None => self
+            Some(list) => {
+                var r = self
+                let name = (*list).head
+                if module_entry_contains(entry, name) {
+                    r = r.define(name, SymbolKind::SymImported, span)
+                } else {
+                    r = r.report_error(span)
+                }
+                r.import_use_items(entry, (*list).tail, span)
             }
         }
     }
@@ -213,8 +286,9 @@ impl Resolver {
             ItemImpl => self.resolve_impl_def(item.impl_def)
             ItemTypeAlias => self.resolve_type_alias(item.type_alias_ty)
             ItemUse => {
-                // Validate selective imports: check that each name exists in scope
-                self.validate_use_items(item.use_items, item.span)
+                // Imports are validated during pass 1 for multi-module mode.
+                // Flat mode keeps legacy behavior.
+                if self.modules.count > 0 { self } else { self.validate_use_items(item.use_items, item.span) }
             }
         }
     }

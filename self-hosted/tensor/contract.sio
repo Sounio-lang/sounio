@@ -1,0 +1,706 @@
+// self-hosted::tensor::contract — Tensor Contraction Compiler
+//
+// Compiles Einstein summation notation into optimized loop nests.
+//
+// ## Einstein Notation
+//
+// C_{ij} = A_{ik} B_{kj}   →  matrix multiplication (contraction over k)
+// c_{i}  = A_{ij} B_{j}    →  matrix-vector product
+// s      = A_{ij} B_{ij}   →  Frobenius inner product (full contraction)
+// C_{ijk} = A_{ij} B_{jk}  →  batched matmul
+//
+// ## Contraction Rules
+//
+// 1. FREE indices appear on the output (exactly once on each side)
+// 2. CONTRACTED indices appear twice on the input side, summed over
+// 3. Loop order determines memory access pattern → performance
+//
+// ## Optimizations
+//
+// - Loop reordering for row-major cache locality
+// - Tiling (blocking) for L1/L2 cache utilization
+// - Strength reduction (hoisting invariant expressions)
+// - Fusion of element-wise operations
+//
+// ## Architecture
+//
+// EinsteinExpr → IndexAnalysis → LoopNest → TiledLoopNest → IR
+
+// ============================================================================
+// Index Representation
+// ============================================================================
+
+// An index is identified by a single character (a-z, A-Z)
+// Internally stored as its ASCII code for comparison.
+
+struct TensorIndex {
+    label: i8,     // ASCII character: 'i'=105, 'j'=106, 'k'=107, etc.
+    dim: i64,      // Dimension size (-1 if unknown)
+}
+
+fn index_new(label: i8, dim: i64) -> TensorIndex {
+    TensorIndex { label: label, dim: dim }
+}
+
+fn index_eq(a: TensorIndex, b: TensorIndex) -> bool {
+    a.label == b.label
+}
+
+// ============================================================================
+// Tensor Descriptor
+// ============================================================================
+
+struct TensorDesc {
+    name: Name,
+    rank: i64,                     // Number of dimensions
+    indices: [TensorIndex; 8],     // Index labels for each dimension
+    dims: [i64; 8],                // Dimension sizes
+    is_output: bool,               // True if this is the output tensor
+}
+
+fn tensor_desc_new() -> TensorDesc {
+    TensorDesc {
+        name: ir_empty_name(),
+        rank: 0,
+        indices: [index_new(0, 0); 8],
+        dims: [0; 8],
+        is_output: false,
+    }
+}
+
+// ============================================================================
+// Einstein Expression
+// ============================================================================
+
+struct EinsteinExpr {
+    output: TensorDesc,            // Left-hand side
+    inputs: [TensorDesc; 8],       // Right-hand side operands
+    input_count: i64,
+    op: ContractionOp,             // What operation to perform
+}
+
+enum ContractionOp {
+    Contract,      // Standard Einstein contraction (sum over repeated indices)
+    ElementWise,   // Element-wise operation (no contraction)
+    OuterProduct,  // Outer product (no shared indices)
+}
+
+fn einstein_expr_new() -> EinsteinExpr {
+    EinsteinExpr {
+        output: tensor_desc_new(),
+        inputs: [tensor_desc_new(); 8],
+        input_count: 0,
+        op: ContractionOp::Contract,
+    }
+}
+
+// ============================================================================
+// Index Analysis
+// ============================================================================
+
+struct IndexSet {
+    indices: [TensorIndex; 26],    // One slot per letter (a-z)
+    count: i64,
+    appears_in: [i64; 26],        // Bit mask: which tensors use this index
+}
+
+fn index_set_new() -> IndexSet {
+    IndexSet {
+        indices: [index_new(0, 0); 26],
+        count: 0,
+        appears_in: [0; 26],
+    }
+}
+
+fn index_set_add(set: IndexSet, idx: TensorIndex, tensor_id: i64) -> IndexSet with Mut, Panic, Div {
+    var s = set
+    let slot = (idx.label - 97) as i64  // 'a' = 97
+    if slot < 0 || slot >= 26 { return s }
+
+    // Mark this index as appearing in tensor_id
+    if s.indices[slot as usize].label == 0 {
+        s.indices[slot as usize] = idx
+        s.count = s.count + 1
+    }
+
+    // Set bit for tensor_id
+    let bit = 1
+    var i: i64 = 0
+    var mask: i64 = 1
+    while i < tensor_id {
+        mask = mask * 2
+        i = i + 1
+    }
+    s.appears_in[slot as usize] = s.appears_in[slot as usize] + mask
+
+    // Update dimension if known
+    if idx.dim > 0 && s.indices[slot as usize].dim <= 0 {
+        s.indices[slot as usize] = TensorIndex { label: idx.label, dim: idx.dim }
+    }
+
+    s
+}
+
+struct IndexClassification {
+    free_indices: [TensorIndex; 8],      // Appear in output
+    free_count: i64,
+    contracted_indices: [TensorIndex; 8], // Appear twice, summed over
+    contracted_count: i64,
+    batch_indices: [TensorIndex; 8],     // Appear in all tensors
+    batch_count: i64,
+}
+
+fn classify_indices(expr: EinsteinExpr) -> IndexClassification with Mut, Panic, Div {
+    // Build index set from all tensors
+    var set = index_set_new()
+
+    // Add output indices (tensor_id = 0)
+    var i: i64 = 0
+    while i < expr.output.rank {
+        set = index_set_add(set, expr.output.indices[i as usize], 0)
+        i = i + 1
+    }
+
+    // Add input indices (tensor_id = 1, 2, ...)
+    var t: i64 = 0
+    while t < expr.input_count {
+        i = 0
+        while i < expr.inputs[t as usize].rank {
+            set = index_set_add(set, expr.inputs[t as usize].indices[i as usize], t + 1)
+            i = i + 1
+        }
+        t = t + 1
+    }
+
+    // Classify
+    var result = IndexClassification {
+        free_indices: [index_new(0, 0); 8],
+        free_count: 0,
+        contracted_indices: [index_new(0, 0); 8],
+        contracted_count: 0,
+        batch_indices: [index_new(0, 0); 8],
+        batch_count: 0,
+    }
+
+    var s: i64 = 0
+    while s < 26 {
+        let idx = set.indices[s as usize]
+        if idx.label != 0 {
+            let mask = set.appears_in[s as usize]
+
+            // Count how many tensors this index appears in
+            var appearances: i64 = 0
+            var m = mask
+            while m > 0 {
+                appearances = appearances + (m % 2)
+                m = m / 2
+            }
+
+            // Check if it appears in output (bit 0)
+            let in_output = (mask % 2) == 1
+
+            if in_output && appearances == 1 {
+                // Only in output → free index (unusual, but valid)
+                if result.free_count < 8 {
+                    result.free_indices[result.free_count as usize] = idx
+                    result.free_count = result.free_count + 1
+                }
+            } else if in_output {
+                // In output and inputs → free index
+                if result.free_count < 8 {
+                    result.free_indices[result.free_count as usize] = idx
+                    result.free_count = result.free_count + 1
+                }
+            } else {
+                // Not in output → contracted index
+                if result.contracted_count < 8 {
+                    result.contracted_indices[result.contracted_count as usize] = idx
+                    result.contracted_count = result.contracted_count + 1
+                }
+            }
+        }
+        s = s + 1
+    }
+
+    result
+}
+
+// ============================================================================
+// Loop Nest Generation
+// ============================================================================
+
+enum LoopKind {
+    FreeLoop,        // Iterates over a free (output) index
+    ContractLoop,    // Iterates over a contracted (summed) index
+    TiledOuter,      // Outer tile loop
+    TiledInner,      // Inner tile loop (within a tile)
+}
+
+struct LoopLevel {
+    index: TensorIndex,
+    kind: LoopKind,
+    lo: i64,         // Loop lower bound
+    hi: i64,         // Loop upper bound (exclusive)
+    stride: i64,     // Loop stride (1 for untiled, tile_size for outer tile loop)
+}
+
+fn loop_level_new(idx: TensorIndex, kind: LoopKind) -> LoopLevel {
+    LoopLevel {
+        index: idx,
+        kind: kind,
+        lo: 0,
+        hi: idx.dim,
+        stride: 1,
+    }
+}
+
+struct LoopNest {
+    levels: [LoopLevel; 16],   // Up to 16 nested loops
+    depth: i64,
+    body_op: ContractionOp,
+}
+
+fn loop_nest_new() -> LoopNest {
+    LoopNest {
+        levels: [loop_level_new(index_new(0, 0), LoopKind::FreeLoop); 16],
+        depth: 0,
+        body_op: ContractionOp::Contract,
+    }
+}
+
+fn loop_nest_add(nest: LoopNest, level: LoopLevel) -> LoopNest with Mut, Panic {
+    var n = nest
+    if n.depth < 16 {
+        n.levels[n.depth as usize] = level
+        n.depth = n.depth + 1
+    }
+    n
+}
+
+fn generate_loop_nest(expr: EinsteinExpr) -> LoopNest with Mut, Panic, Div {
+    let classification = classify_indices(expr)
+    var nest = loop_nest_new()
+    nest.body_op = expr.op
+
+    // Loop ordering for cache efficiency (row-major):
+    // 1. Free indices (output dimensions) — outermost
+    // 2. Contracted indices — innermost (for locality on accumulation)
+
+    // Add free loops
+    var i: i64 = 0
+    while i < classification.free_count {
+        let level = loop_level_new(
+            classification.free_indices[i as usize],
+            LoopKind::FreeLoop
+        )
+        nest = loop_nest_add(nest, level)
+        i = i + 1
+    }
+
+    // Add contraction loops
+    i = 0
+    while i < classification.contracted_count {
+        let level = loop_level_new(
+            classification.contracted_indices[i as usize],
+            LoopKind::ContractLoop
+        )
+        nest = loop_nest_add(nest, level)
+        i = i + 1
+    }
+
+    nest
+}
+
+// ============================================================================
+// Cache-Aware Tiling
+// ============================================================================
+//
+// Tiling transforms a loop like:
+//   for i in 0..N:
+//     body(i)
+//
+// Into:
+//   for i_outer in 0..N step TILE:
+//     for i_inner in i_outer..min(i_outer+TILE, N):
+//       body(i_inner)
+//
+// This improves cache utilization by ensuring that the working set
+// fits in L1/L2 cache.
+
+struct TilingConfig {
+    l1_cache_size: i64,    // L1 data cache size (bytes)
+    l2_cache_size: i64,    // L2 cache size (bytes)
+    element_size: i64,     // Size of each tensor element (bytes)
+    tile_sizes: [i64; 8],  // Tile size for each dimension
+}
+
+fn default_tiling_config() -> TilingConfig {
+    TilingConfig {
+        l1_cache_size: 32768,    // 32 KB L1
+        l2_cache_size: 262144,   // 256 KB L2
+        element_size: 8,         // f64 = 8 bytes
+        tile_sizes: [64; 8],     // Default tile size
+    }
+}
+
+fn compute_tile_size(dim: i64, cache_size: i64, element_size: i64, num_arrays: i64) -> i64 with Mut, Panic, Div {
+    // Compute optimal tile size such that num_arrays tiles fit in cache
+    // tile_size² * element_size * num_arrays ≤ cache_size
+    // tile_size ≤ sqrt(cache_size / (element_size * num_arrays))
+
+    if dim <= 0 || element_size <= 0 || num_arrays <= 0 {
+        return 32  // Default fallback
+    }
+
+    let budget = cache_size / (element_size * num_arrays)
+
+    // Integer square root approximation
+    var tile_sz: i64 = 1
+    while tile_sz * tile_sz <= budget {
+        tile_sz = tile_sz + 1
+    }
+    tile_sz = tile_sz - 1
+
+    // Clamp to dimension size
+    if tile_sz > dim { tile_sz = dim }
+    if tile_sz < 1 { tile_sz = 1 }
+
+    tile_sz
+}
+
+fn tile_loop_nest(nest: LoopNest, config: TilingConfig) -> LoopNest with Mut, Panic, Div {
+    // Apply tiling to contraction loops for cache efficiency
+    var tiled = loop_nest_new()
+    tiled.body_op = nest.body_op
+
+    // First pass: add outer tile loops for contracted dimensions
+    var i: i64 = 0
+    while i < nest.depth {
+        let level = nest.levels[i as usize]
+
+        if level.kind == LoopKind::ContractLoop && level.hi > 0 {
+            let tile_size = compute_tile_size(
+                level.hi,
+                config.l1_cache_size,
+                config.element_size,
+                2  // Typically 2 input arrays involved
+            )
+
+            if tile_size < level.hi {
+                // Add outer tile loop
+                let outer = LoopLevel {
+                    index: level.index,
+                    kind: LoopKind::TiledOuter,
+                    lo: 0,
+                    hi: level.hi,
+                    stride: tile_size,
+                }
+                tiled = loop_nest_add(tiled, outer)
+            }
+        }
+
+        i = i + 1
+    }
+
+    // Second pass: add all loops (free loops as-is, contract loops as inner tile)
+    i = 0
+    while i < nest.depth {
+        let level = nest.levels[i as usize]
+
+        if level.kind == LoopKind::FreeLoop {
+            tiled = loop_nest_add(tiled, level)
+        } else if level.kind == LoopKind::ContractLoop && level.hi > 0 {
+            let tile_size = compute_tile_size(
+                level.hi,
+                config.l1_cache_size,
+                config.element_size,
+                2
+            )
+
+            if tile_size < level.hi {
+                // Inner tile loop
+                let inner = LoopLevel {
+                    index: level.index,
+                    kind: LoopKind::TiledInner,
+                    lo: 0,
+                    hi: tile_size,
+                    stride: 1,
+                }
+                tiled = loop_nest_add(tiled, inner)
+            } else {
+                // Not worth tiling, keep original
+                tiled = loop_nest_add(tiled, level)
+            }
+        }
+
+        i = i + 1
+    }
+
+    tiled
+}
+
+// ============================================================================
+// Common Tensor Operations (Convenience Builders)
+// ============================================================================
+
+// Matrix multiplication: C_{ij} = A_{ik} B_{kj}
+fn matmul_expr(m: i64, n: i64, k: i64) -> EinsteinExpr with Mut, Panic {
+    var expr = einstein_expr_new()
+
+    // Output: C_{ij}
+    expr.output.rank = 2
+    expr.output.indices[0] = index_new(105, m)  // 'i'
+    expr.output.indices[1] = index_new(106, n)  // 'j'
+    expr.output.dims[0] = m
+    expr.output.dims[1] = n
+    expr.output.is_output = true
+
+    // Input 0: A_{ik}
+    expr.inputs[0].rank = 2
+    expr.inputs[0].indices[0] = index_new(105, m)  // 'i'
+    expr.inputs[0].indices[1] = index_new(107, k)  // 'k'
+    expr.inputs[0].dims[0] = m
+    expr.inputs[0].dims[1] = k
+
+    // Input 1: B_{kj}
+    expr.inputs[1].rank = 2
+    expr.inputs[1].indices[0] = index_new(107, k)  // 'k'
+    expr.inputs[1].indices[1] = index_new(106, n)  // 'j'
+    expr.inputs[1].dims[0] = k
+    expr.inputs[1].dims[1] = n
+
+    expr.input_count = 2
+    expr.op = ContractionOp::Contract
+
+    expr
+}
+
+// Matrix-vector product: c_i = A_{ij} b_j
+fn matvec_expr(m: i64, n: i64) -> EinsteinExpr with Mut, Panic {
+    var expr = einstein_expr_new()
+
+    // Output: c_i
+    expr.output.rank = 1
+    expr.output.indices[0] = index_new(105, m)  // 'i'
+    expr.output.dims[0] = m
+    expr.output.is_output = true
+
+    // Input 0: A_{ij}
+    expr.inputs[0].rank = 2
+    expr.inputs[0].indices[0] = index_new(105, m)  // 'i'
+    expr.inputs[0].indices[1] = index_new(106, n)  // 'j'
+    expr.inputs[0].dims[0] = m
+    expr.inputs[0].dims[1] = n
+
+    // Input 1: b_j
+    expr.inputs[1].rank = 1
+    expr.inputs[1].indices[0] = index_new(106, n)  // 'j'
+    expr.inputs[1].dims[0] = n
+
+    expr.input_count = 2
+    expr.op = ContractionOp::Contract
+
+    expr
+}
+
+// Dot product (inner product): s = a_i b_i
+fn dot_expr(n: i64) -> EinsteinExpr with Mut, Panic {
+    var expr = einstein_expr_new()
+
+    // Output: scalar (rank 0)
+    expr.output.rank = 0
+    expr.output.is_output = true
+
+    // Input 0: a_i
+    expr.inputs[0].rank = 1
+    expr.inputs[0].indices[0] = index_new(105, n)  // 'i'
+    expr.inputs[0].dims[0] = n
+
+    // Input 1: b_i
+    expr.inputs[1].rank = 1
+    expr.inputs[1].indices[0] = index_new(105, n)  // 'i'
+    expr.inputs[1].dims[0] = n
+
+    expr.input_count = 2
+    expr.op = ContractionOp::Contract
+
+    expr
+}
+
+// Outer product: C_{ij} = a_i b_j
+fn outer_expr(m: i64, n: i64) -> EinsteinExpr with Mut, Panic {
+    var expr = einstein_expr_new()
+
+    // Output: C_{ij}
+    expr.output.rank = 2
+    expr.output.indices[0] = index_new(105, m)  // 'i'
+    expr.output.indices[1] = index_new(106, n)  // 'j'
+    expr.output.dims[0] = m
+    expr.output.dims[1] = n
+    expr.output.is_output = true
+
+    // Input 0: a_i
+    expr.inputs[0].rank = 1
+    expr.inputs[0].indices[0] = index_new(105, m)  // 'i'
+    expr.inputs[0].dims[0] = m
+
+    // Input 1: b_j
+    expr.inputs[1].rank = 1
+    expr.inputs[1].indices[0] = index_new(106, n)  // 'j'
+    expr.inputs[1].dims[0] = n
+
+    expr.input_count = 2
+    expr.op = ContractionOp::OuterProduct
+
+    expr
+}
+
+// Batched matmul: C_{bij} = A_{bik} B_{bkj}
+fn batched_matmul_expr(batch: i64, m: i64, n: i64, k: i64) -> EinsteinExpr with Mut, Panic {
+    var expr = einstein_expr_new()
+
+    // Output: C_{bij}
+    expr.output.rank = 3
+    expr.output.indices[0] = index_new(98, batch)  // 'b'
+    expr.output.indices[1] = index_new(105, m)     // 'i'
+    expr.output.indices[2] = index_new(106, n)     // 'j'
+    expr.output.dims[0] = batch
+    expr.output.dims[1] = m
+    expr.output.dims[2] = n
+    expr.output.is_output = true
+
+    // Input 0: A_{bik}
+    expr.inputs[0].rank = 3
+    expr.inputs[0].indices[0] = index_new(98, batch)  // 'b'
+    expr.inputs[0].indices[1] = index_new(105, m)     // 'i'
+    expr.inputs[0].indices[2] = index_new(107, k)     // 'k'
+    expr.inputs[0].dims[0] = batch
+    expr.inputs[0].dims[1] = m
+    expr.inputs[0].dims[2] = k
+
+    // Input 1: B_{bkj}
+    expr.inputs[1].rank = 3
+    expr.inputs[1].indices[0] = index_new(98, batch)  // 'b'
+    expr.inputs[1].indices[1] = index_new(107, k)     // 'k'
+    expr.inputs[1].indices[2] = index_new(106, n)     // 'j'
+    expr.inputs[1].dims[0] = batch
+    expr.inputs[1].dims[1] = k
+    expr.inputs[1].dims[2] = n
+
+    expr.input_count = 2
+    expr.op = ContractionOp::Contract
+
+    expr
+}
+
+// Trace: s = A_{ii}
+fn trace_expr(n: i64) -> EinsteinExpr with Mut, Panic {
+    var expr = einstein_expr_new()
+
+    // Output: scalar (rank 0)
+    expr.output.rank = 0
+    expr.output.is_output = true
+
+    // Input 0: A_{ii}
+    expr.inputs[0].rank = 2
+    expr.inputs[0].indices[0] = index_new(105, n)  // 'i'
+    expr.inputs[0].indices[1] = index_new(105, n)  // 'i' (same index = contraction)
+    expr.inputs[0].dims[0] = n
+    expr.inputs[0].dims[1] = n
+
+    expr.input_count = 1
+    expr.op = ContractionOp::Contract
+
+    expr
+}
+
+// ============================================================================
+// FLOP Estimation
+// ============================================================================
+
+fn estimate_flops(expr: EinsteinExpr) -> i64 with Mut, Panic, Div {
+    // Total FLOPs = product of all dimension sizes * (ops per element)
+    // For contraction: 2 FLOPs per element (multiply + add)
+    let classification = classify_indices(expr)
+
+    var total_iters: i64 = 1
+
+    // Free indices
+    var i: i64 = 0
+    while i < classification.free_count {
+        let dim = classification.free_indices[i as usize].dim
+        if dim > 0 { total_iters = total_iters * dim }
+        i = i + 1
+    }
+
+    // Contracted indices
+    i = 0
+    while i < classification.contracted_count {
+        let dim = classification.contracted_indices[i as usize].dim
+        if dim > 0 { total_iters = total_iters * dim }
+        i = i + 1
+    }
+
+    // 2 FLOPs per iteration (fused multiply-add)
+    total_iters * 2
+}
+
+// ============================================================================
+// Memory Access Analysis
+// ============================================================================
+
+struct MemoryProfile {
+    total_reads: i64,        // Total read bytes
+    total_writes: i64,       // Total write bytes
+    arithmetic_intensity: f64,  // FLOPs / bytes moved
+    is_compute_bound: bool,  // True if compute-bound, false if memory-bound
+}
+
+fn analyze_memory(expr: EinsteinExpr) -> MemoryProfile with Mut, Panic, Div {
+    let flops = estimate_flops(expr)
+
+    // Estimate memory access
+    var read_elements: i64 = 0
+    var i: i64 = 0
+    while i < expr.input_count {
+        var tensor_size: i64 = 1
+        var j: i64 = 0
+        while j < expr.inputs[i as usize].rank {
+            let d = expr.inputs[i as usize].dims[j as usize]
+            if d > 0 { tensor_size = tensor_size * d }
+            j = j + 1
+        }
+        read_elements = read_elements + tensor_size
+        i = i + 1
+    }
+
+    var write_elements: i64 = 1
+    i = 0
+    while i < expr.output.rank {
+        let d = expr.output.dims[i as usize]
+        if d > 0 { write_elements = write_elements * d }
+        i = i + 1
+    }
+
+    let element_size: i64 = 8  // f64
+    let total_reads = read_elements * element_size
+    let total_writes = write_elements * element_size
+    let total_bytes = total_reads + total_writes
+
+    let ai = if total_bytes > 0 {
+        (flops as f64) / (total_bytes as f64)
+    } else {
+        0.0
+    }
+
+    // Machine balance for modern CPUs is roughly 10-20 FLOPS/byte
+    // If AI > machine_balance, we're compute-bound (good!)
+    let machine_balance = 10.0
+
+    MemoryProfile {
+        total_reads: total_reads,
+        total_writes: total_writes,
+        arithmetic_intensity: ai,
+        is_compute_bound: ai > machine_balance,
+    }
+}

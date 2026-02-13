@@ -1,0 +1,476 @@
+// self-hosted::tensor::test_contract — Tensor Contraction Compiler Tests
+
+fn approx_eq(a: f64, b: f64, epsilon: f64) -> bool {
+    let diff = if a > b { a - b } else { b - a }
+    diff < epsilon
+}
+
+// ============================================================================
+// Index Tests
+// ============================================================================
+
+// T01: Index creation and equality
+fn test_index_basics() -> i64 {
+    let i = index_new(105, 64)   // 'i', dim=64
+    let j = index_new(106, 128)  // 'j', dim=128
+    let i2 = index_new(105, 64)  // another 'i'
+
+    // Same label → equal
+    if !index_eq(i, i2) { return 1 }
+
+    // Different label → not equal
+    if index_eq(i, j) { return 2 }
+
+    // Check stored values
+    if i.label != 105 { return 3 }
+    if i.dim != 64 { return 4 }
+    if j.label != 106 { return 5 }
+    if j.dim != 128 { return 6 }
+
+    0
+}
+
+// ============================================================================
+// Classification Tests
+// ============================================================================
+
+// T02: Matmul C_{ij} = A_{ik} B_{kj} — free: i,j; contracted: k
+fn test_classify_matmul() -> i64 with Mut, Panic, Div {
+    let expr = matmul_expr(64, 128, 32)
+    let cls = classify_indices(expr)
+
+    // 2 free indices (i, j)
+    if cls.free_count != 2 { return 1 }
+
+    // 1 contracted index (k)
+    if cls.contracted_count != 1 { return 2 }
+
+    // The contracted index should be 'k' (label 107)
+    if cls.contracted_indices[0].label != 107 { return 3 }
+
+    // Check contracted dimension is 32
+    if cls.contracted_indices[0].dim != 32 { return 4 }
+
+    0
+}
+
+// T03: Matvec c_i = A_{ij} b_j — free: i; contracted: j
+fn test_classify_matvec() -> i64 with Mut, Panic, Div {
+    let expr = matvec_expr(64, 128)
+    let cls = classify_indices(expr)
+
+    // 1 free index (i)
+    if cls.free_count != 1 { return 1 }
+
+    // 1 contracted index (j)
+    if cls.contracted_count != 1 { return 2 }
+
+    // Free index is 'i' (label 105)
+    if cls.free_indices[0].label != 105 { return 3 }
+
+    // Contracted index is 'j' (label 106)
+    if cls.contracted_indices[0].label != 106 { return 4 }
+
+    0
+}
+
+// T04: Dot product s = a_i b_i — free: none; contracted: i
+fn test_classify_dot() -> i64 with Mut, Panic, Div {
+    let expr = dot_expr(256)
+    let cls = classify_indices(expr)
+
+    // 0 free indices (scalar output)
+    if cls.free_count != 0 { return 1 }
+
+    // 1 contracted index (i)
+    if cls.contracted_count != 1 { return 2 }
+
+    // Contracted index is 'i' with dim 256
+    if cls.contracted_indices[0].label != 105 { return 3 }
+    if cls.contracted_indices[0].dim != 256 { return 4 }
+
+    0
+}
+
+// T05: Outer product C_{ij} = a_i b_j — free: i,j; contracted: none
+fn test_classify_outer() -> i64 with Mut, Panic, Div {
+    let expr = outer_expr(32, 64)
+    let cls = classify_indices(expr)
+
+    // 2 free indices (i, j)
+    if cls.free_count != 2 { return 1 }
+
+    // 0 contracted indices (no shared input indices)
+    if cls.contracted_count != 0 { return 2 }
+
+    0
+}
+
+// T06: Batched matmul C_{bij} = A_{bik} B_{bkj} — free: b,i,j; contracted: k
+fn test_classify_batched_matmul() -> i64 with Mut, Panic, Div {
+    let expr = batched_matmul_expr(16, 32, 64, 128)
+    let cls = classify_indices(expr)
+
+    // 3 free indices (b, i, j)
+    if cls.free_count != 3 { return 1 }
+
+    // 1 contracted index (k)
+    if cls.contracted_count != 1 { return 2 }
+
+    // Contracted index is 'k' (label 107) with dim 128
+    if cls.contracted_indices[0].label != 107 { return 3 }
+    if cls.contracted_indices[0].dim != 128 { return 4 }
+
+    0
+}
+
+// T07: Trace s = A_{ii} — free: none; contracted: i
+fn test_classify_trace() -> i64 with Mut, Panic, Div {
+    let expr = trace_expr(100)
+    let cls = classify_indices(expr)
+
+    // 0 free indices (scalar output)
+    if cls.free_count != 0 { return 1 }
+
+    // 1 contracted index (i summed over diagonal)
+    if cls.contracted_count != 1 { return 2 }
+
+    if cls.contracted_indices[0].label != 105 { return 3 }
+    if cls.contracted_indices[0].dim != 100 { return 4 }
+
+    0
+}
+
+// ============================================================================
+// Loop Nest Generation Tests
+// ============================================================================
+
+// T08: Matmul loop nest — 3 levels: i(Free), j(Free), k(Contract)
+fn test_loop_nest_matmul() -> i64 with Mut, Panic, Div {
+    let expr = matmul_expr(64, 128, 32)
+    let nest = generate_loop_nest(expr)
+
+    // Should have 3 loop levels
+    if nest.depth != 3 { return 1 }
+
+    // First two should be FreeLoop, last should be ContractLoop
+    // (free loops come first for cache efficiency)
+    var free_count: i64 = 0
+    var contract_count: i64 = 0
+    var i: i64 = 0
+    while i < nest.depth {
+        if nest.levels[i as usize].kind == LoopKind::FreeLoop {
+            free_count = free_count + 1
+        }
+        if nest.levels[i as usize].kind == LoopKind::ContractLoop {
+            contract_count = contract_count + 1
+        }
+        i = i + 1
+    }
+
+    if free_count != 2 { return 2 }
+    if contract_count != 1 { return 3 }
+
+    // Contract loop should be innermost (last)
+    if nest.levels[(nest.depth - 1) as usize].kind != LoopKind::ContractLoop { return 4 }
+
+    0
+}
+
+// T09: Dot product loop nest — 1 level: i(Contract)
+fn test_loop_nest_dot() -> i64 with Mut, Panic, Div {
+    let expr = dot_expr(1024)
+    let nest = generate_loop_nest(expr)
+
+    // 1 contraction loop only
+    if nest.depth != 1 { return 1 }
+    if nest.levels[0].kind != LoopKind::ContractLoop { return 2 }
+
+    // Loop bounds
+    if nest.levels[0].lo != 0 { return 3 }
+    if nest.levels[0].hi != 1024 { return 4 }
+    if nest.levels[0].stride != 1 { return 5 }
+
+    0
+}
+
+// T10: Outer product loop nest — 2 FreeLoops, 0 ContractLoops
+fn test_loop_nest_outer() -> i64 with Mut, Panic, Div {
+    let expr = outer_expr(16, 32)
+    let nest = generate_loop_nest(expr)
+
+    // 2 free loops, no contraction
+    if nest.depth != 2 { return 1 }
+    if nest.levels[0].kind != LoopKind::FreeLoop { return 2 }
+    if nest.levels[1].kind != LoopKind::FreeLoop { return 3 }
+
+    0
+}
+
+// ============================================================================
+// Tiling Tests
+// ============================================================================
+
+// T11: Compute tile size respects cache budget
+fn test_compute_tile_size() -> i64 with Mut, Panic, Div {
+    // L1 = 32KB, element = 8 bytes, 2 arrays
+    // Budget per array: 32768 / (8 * 2) = 2048 elements
+    // Tile: sqrt(2048) ≈ 45
+    let tile = compute_tile_size(1024, 32768, 8, 2)
+
+    // Should be around 45 (isqrt of 2048)
+    if tile < 40 { return 1 }
+    if tile > 50 { return 2 }
+
+    // Small dimension should not be tiled beyond its size
+    let small_tile = compute_tile_size(8, 32768, 8, 2)
+    if small_tile != 8 { return 3 }
+
+    0
+}
+
+// T12: Tiling splits contraction loop into outer + inner
+fn test_tiling_matmul() -> i64 with Mut, Panic, Div {
+    let expr = matmul_expr(512, 512, 512)
+    let nest = generate_loop_nest(expr)
+    let config = default_tiling_config()
+    let tiled = tile_loop_nest(nest, config)
+
+    // Tiled nest should have more levels than untiled
+    if tiled.depth <= nest.depth { return 1 }
+
+    // Should have at least one TiledOuter loop
+    var has_outer: bool = false
+    var has_inner: bool = false
+    var i: i64 = 0
+    while i < tiled.depth {
+        if tiled.levels[i as usize].kind == LoopKind::TiledOuter {
+            has_outer = true
+        }
+        if tiled.levels[i as usize].kind == LoopKind::TiledInner {
+            has_inner = true
+        }
+        i = i + 1
+    }
+
+    if !has_outer { return 2 }
+    if !has_inner { return 3 }
+
+    0
+}
+
+// T13: Small dimensions should not be tiled
+fn test_tiling_small() -> i64 with Mut, Panic, Div {
+    let expr = matmul_expr(4, 4, 4)
+    let nest = generate_loop_nest(expr)
+    let config = default_tiling_config()
+    let tiled = tile_loop_nest(nest, config)
+
+    // Small dimensions fit in cache → no tiling → same depth
+    if tiled.depth != nest.depth { return 1 }
+
+    // No tiled loops should appear
+    var i: i64 = 0
+    while i < tiled.depth {
+        if tiled.levels[i as usize].kind == LoopKind::TiledOuter { return 2 }
+        if tiled.levels[i as usize].kind == LoopKind::TiledInner { return 3 }
+        i = i + 1
+    }
+
+    0
+}
+
+// ============================================================================
+// FLOP Estimation Tests
+// ============================================================================
+
+// T14: Matmul FLOPs = 2 * M * N * K
+fn test_flops_matmul() -> i64 with Mut, Panic, Div {
+    let expr = matmul_expr(64, 128, 32)
+    let flops = estimate_flops(expr)
+
+    // Expected: 2 * 64 * 128 * 32 = 524288
+    let expected: i64 = 2 * 64 * 128 * 32
+    if flops != expected { return 1 }
+
+    0
+}
+
+// T15: Dot product FLOPs = 2 * N
+fn test_flops_dot() -> i64 with Mut, Panic, Div {
+    let expr = dot_expr(1000)
+    let flops = estimate_flops(expr)
+
+    // Expected: 2 * 1000 = 2000
+    if flops != 2000 { return 1 }
+
+    0
+}
+
+// T16: Batched matmul FLOPs = 2 * B * M * N * K
+fn test_flops_batched() -> i64 with Mut, Panic, Div {
+    let expr = batched_matmul_expr(8, 16, 32, 64)
+    let flops = estimate_flops(expr)
+
+    // Expected: 2 * 8 * 16 * 32 * 64 = 524288
+    let expected: i64 = 2 * 8 * 16 * 32 * 64
+    if flops != expected { return 1 }
+
+    0
+}
+
+// T17: Trace FLOPs = 2 * N (sum over diagonal)
+fn test_flops_trace() -> i64 with Mut, Panic, Div {
+    let expr = trace_expr(100)
+    let flops = estimate_flops(expr)
+
+    // Expected: 2 * 100 = 200
+    if flops != 200 { return 1 }
+
+    0
+}
+
+// ============================================================================
+// Memory Profile Tests
+// ============================================================================
+
+// T18: Matmul memory profile
+fn test_memory_matmul() -> i64 with Mut, Panic, Div {
+    let expr = matmul_expr(64, 128, 32)
+    let profile = analyze_memory(expr)
+
+    // Read: A(64*32) + B(32*128) = 2048 + 4096 = 6144 elements = 49152 bytes
+    let expected_reads: i64 = (64 * 32 + 32 * 128) * 8
+    if profile.total_reads != expected_reads { return 1 }
+
+    // Write: C(64*128) = 8192 elements = 65536 bytes
+    let expected_writes: i64 = 64 * 128 * 8
+    if profile.total_writes != expected_writes { return 2 }
+
+    // Arithmetic intensity should be positive
+    if profile.arithmetic_intensity < 0.1 { return 3 }
+
+    0
+}
+
+// T19: Large matmul should be compute-bound
+fn test_memory_compute_bound() -> i64 with Mut, Panic, Div {
+    // Large matmul: AI = 2*N³ / (3*N²*8) = N/12
+    // For N=1024: AI ≈ 85 >> 10 (machine balance)
+    let expr = matmul_expr(1024, 1024, 1024)
+    let profile = analyze_memory(expr)
+
+    if !profile.is_compute_bound { return 1 }
+
+    0
+}
+
+// T20: Dot product should be memory-bound
+fn test_memory_bound_dot() -> i64 with Mut, Panic, Div {
+    // Dot product: AI = 2N / (2*N*8) = 1/8 << 10
+    let expr = dot_expr(1024)
+    let profile = analyze_memory(expr)
+
+    if profile.is_compute_bound { return 1 }
+
+    // AI should be very low (1/8 = 0.125)
+    if profile.arithmetic_intensity > 1.0 { return 2 }
+
+    0
+}
+
+// ============================================================================
+// Expression Builder Tests
+// ============================================================================
+
+// T21: Matmul builder dimensions are correct
+fn test_matmul_builder() -> i64 with Mut, Panic {
+    let expr = matmul_expr(100, 200, 50)
+
+    // Output shape: [100, 200]
+    if expr.output.rank != 2 { return 1 }
+    if expr.output.dims[0] != 100 { return 2 }
+    if expr.output.dims[1] != 200 { return 3 }
+
+    // 2 inputs
+    if expr.input_count != 2 { return 4 }
+
+    // A shape: [100, 50]
+    if expr.inputs[0].rank != 2 { return 5 }
+    if expr.inputs[0].dims[0] != 100 { return 6 }
+    if expr.inputs[0].dims[1] != 50 { return 7 }
+
+    // B shape: [50, 200]
+    if expr.inputs[1].rank != 2 { return 8 }
+    if expr.inputs[1].dims[0] != 50 { return 9 }
+    if expr.inputs[1].dims[1] != 200 { return 10 }
+
+    0
+}
+
+// T22: Trace builder is single-input
+fn test_trace_builder() -> i64 with Mut, Panic {
+    let expr = trace_expr(64)
+
+    // Scalar output
+    if expr.output.rank != 0 { return 1 }
+
+    // 1 input
+    if expr.input_count != 1 { return 2 }
+
+    // Input is square matrix
+    if expr.inputs[0].rank != 2 { return 3 }
+    if expr.inputs[0].dims[0] != 64 { return 4 }
+    if expr.inputs[0].dims[1] != 64 { return 5 }
+
+    // Both indices are 'i' (contraction over diagonal)
+    if expr.inputs[0].indices[0].label != expr.inputs[0].indices[1].label { return 6 }
+
+    0
+}
+
+// ============================================================================
+// Main Test Runner
+// ============================================================================
+
+fn main() -> i64 with Mut, Panic, Div {
+    var failed: i64 = 0
+
+    // Index tests
+    if test_index_basics() != 0 { failed = failed + 1 }
+
+    // Classification tests
+    if test_classify_matmul() != 0 { failed = failed + 1 }
+    if test_classify_matvec() != 0 { failed = failed + 1 }
+    if test_classify_dot() != 0 { failed = failed + 1 }
+    if test_classify_outer() != 0 { failed = failed + 1 }
+    if test_classify_batched_matmul() != 0 { failed = failed + 1 }
+    if test_classify_trace() != 0 { failed = failed + 1 }
+
+    // Loop nest tests
+    if test_loop_nest_matmul() != 0 { failed = failed + 1 }
+    if test_loop_nest_dot() != 0 { failed = failed + 1 }
+    if test_loop_nest_outer() != 0 { failed = failed + 1 }
+
+    // Tiling tests
+    if test_compute_tile_size() != 0 { failed = failed + 1 }
+    if test_tiling_matmul() != 0 { failed = failed + 1 }
+    if test_tiling_small() != 0 { failed = failed + 1 }
+
+    // FLOP estimation tests
+    if test_flops_matmul() != 0 { failed = failed + 1 }
+    if test_flops_dot() != 0 { failed = failed + 1 }
+    if test_flops_batched() != 0 { failed = failed + 1 }
+    if test_flops_trace() != 0 { failed = failed + 1 }
+
+    // Memory profile tests
+    if test_memory_matmul() != 0 { failed = failed + 1 }
+    if test_memory_compute_bound() != 0 { failed = failed + 1 }
+    if test_memory_bound_dot() != 0 { failed = failed + 1 }
+
+    // Builder tests
+    if test_matmul_builder() != 0 { failed = failed + 1 }
+    if test_trace_builder() != 0 { failed = failed + 1 }
+
+    if failed == 0 { 0 } else { 1 }
+}

@@ -27,3 +27,58 @@ fn resolve_program(prog: Program) -> ResolveResult with Mut, Panic, Div, Alloc, 
         had_error: r.had_error,
     }
 }
+
+// Multi-module resolution: build an export registry then resolve each module with validated imports.
+
+struct ResolveBatchResult {
+    results: [ResolveResult; 64],
+    count: i64,
+    error_count: i64,
+    had_error: bool,
+}
+
+fn empty_resolve_result() -> ResolveResult with Mut, Panic, Div {
+    ResolveResult { symbols: symbol_table_new(), error_count: 0, had_error: false }
+}
+
+fn resolve_modules(programs: [Program; 64], count: i64) -> ResolveBatchResult with Mut, Panic, Div, Alloc, IO {
+    var reg = module_registry_new()
+
+    // Pass 0: collect pub exports for each module
+    var i: i64 = 0
+    while i < count && i < 64 {
+        let prog = programs[i as usize]
+        let pair = collect_module_exports(prog.items)
+        reg = module_registry_put(reg, prog.module_path, pair.0, pair.1)
+        i = i + 1
+    }
+
+    // Resolve each module using the shared export registry
+    var results: [ResolveResult; 64] = [empty_resolve_result(); 64]
+    var total_err: i64 = 0
+    var had: bool = false
+
+    var j: i64 = 0
+    while j < count && j < 64 {
+        var r = resolver_with_modules(reg)
+        r = r.collect_items(programs[j as usize].items)
+        r = r.resolve_items(programs[j as usize].items)
+
+        results[j as usize] = ResolveResult {
+            symbols: r.symbols,
+            error_count: r.error_count,
+            had_error: r.had_error,
+        }
+
+        total_err = total_err + r.error_count
+        if r.had_error { had = true }
+        j = j + 1
+    }
+
+    ResolveBatchResult {
+        results: results,
+        count: count,
+        error_count: total_err,
+        had_error: had,
+    }
+}
