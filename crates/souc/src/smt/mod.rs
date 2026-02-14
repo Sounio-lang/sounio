@@ -20,6 +20,7 @@
 //! - **ProvenanceValid**: Data lineage is traceable
 //! - **KnowledgeConsistent**: Knowledge values satisfy type constraints
 
+pub mod causal_encoding;
 mod epistemic;
 mod formula;
 mod interval;

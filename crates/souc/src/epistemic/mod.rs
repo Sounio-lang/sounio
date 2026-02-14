@@ -50,6 +50,7 @@ pub mod knowledge;
 pub mod mcmc;
 pub mod merkle;
 pub mod models;
+pub mod nonlinear_propagation;
 pub mod operations;
 pub mod pce;
 pub mod provenance;
@@ -109,6 +110,13 @@ pub use models::{
     FuzzyConfig, IntervalConfig, ProbabilisticConfig, UncertainValue, UncertaintyModel,
     propagate_binary,
 };
+// Nonlinear confidence propagation (sin, cos, exp, log, sqrt, pow, control flow)
+pub use nonlinear_propagation::{
+    ConfidenceFlowResult, ConfidenceWarning, FunctionConfidenceSummary, NonlinearOp,
+    NonlinearPropagationRule, PropagationChainBuilder, propagate_conditional, propagate_loop,
+    propagate_nonlinear, propagate_with_rule,
+};
+
 pub use wasserstein::{
     WassersteinBarycenter, WassersteinDistance, transport_cost, wasserstein_barycenter,
     wasserstein2_distance,
