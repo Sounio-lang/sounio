@@ -499,6 +499,10 @@ impl CausalPredicate {
     }
 
     /// Check if backdoor criterion is satisfied
+    ///
+    /// Z satisfies the backdoor criterion relative to (X, Y) in G if:
+    /// 1. No node in Z is a descendant of X
+    /// 2. Z d-separates X from Y in G_X̄ (graph with incoming edges to X removed)
     pub fn check_backdoor(
         graph: &CausalGraphType,
         treatment: &str,
@@ -511,18 +515,18 @@ impl CausalPredicate {
             return false;
         }
 
-        // 2. Z blocks all backdoor paths from X to Y
-        // A backdoor path is a path that starts with an edge INTO X
-        // For simplicity, we check that after removing X→Y edges,
-        // Z d-separates X from Y
-
-        // This is a simplified check - full d-separation would need
-        // to be implemented properly
-        let g_x = graph.remove_outgoing(treatment);
-        Self::check_d_separation(&g_x, treatment, outcome, adjustment)
+        // 2. Z d-separates X from Y in G_X̄ (remove outgoing from X)
+        // This is the graph where we've performed do(X) — cut arrows out of X
+        let g_x_bar = graph.remove_outgoing(treatment);
+        g_x_bar.d_separated_single(treatment, outcome, adjustment)
     }
 
     /// Check if frontdoor criterion is satisfied
+    ///
+    /// M satisfies the frontdoor criterion relative to (X, Y) in G if:
+    /// 1. X intercepts all directed paths from X to Y (every path goes through M)
+    /// 2. There is no unblocked backdoor path from X to M
+    /// 3. All backdoor paths from M to Y are blocked by X
     pub fn check_frontdoor(
         graph: &CausalGraphType,
         treatment: &str,
@@ -530,55 +534,90 @@ impl CausalPredicate {
         mediators: &HashSet<String>,
     ) -> bool {
         // 1. M intercepts all directed paths from X to Y
-        let x_children = graph.children(treatment);
-        if !mediators.iter().all(|m| x_children.contains(m)) {
-            // Mediators must be direct children of treatment
-            // (simplified check)
+        let path_nodes = graph.nodes_on_directed_paths(treatment, outcome);
+        if path_nodes.is_empty() {
+            return false; // No directed path exists
+        }
+        // Every node on a directed path from X to Y must be in M or M must
+        // cover all paths. Check: in G with M removed, no directed path X→Y
+        let mut g_no_m = graph.clone();
+        for m in mediators {
+            g_no_m.edges.retain(|(from, to)| from != m && to != m);
+        }
+        if g_no_m.has_directed_path(treatment, outcome) {
+            return false; // M doesn't intercept all directed paths
         }
 
         // 2. No unblocked backdoor path from X to M
-        // 3. All backdoor paths from M to Y are blocked by X
-
-        // Simplified: just check that M is between X and Y
+        // Equivalent to: X d-separated from M in G_X̄ (remove outgoing from X)
+        // with empty conditioning (no confounders between X and M)
+        let g_x_bar = graph.remove_outgoing(treatment);
+        let x_set: HashSet<String> = [treatment.to_string()].into_iter().collect();
         for m in mediators {
-            if !graph.has_directed_path(treatment, m) {
-                return false;
+            if !g_x_bar.d_separated_single(treatment, m, &HashSet::new()) {
+                // There's an unblocked backdoor from X to M; this is allowed
+                // IF there are no bidirected edges (latent confounders) between them
+                // For now, check bidirected edges directly
+                let canonical = if treatment < m.as_str() {
+                    (treatment.to_string(), m.clone())
+                } else {
+                    (m.clone(), treatment.to_string())
+                };
+                if graph.bidirected.contains(&canonical) {
+                    return false;
+                }
             }
-            if !graph.has_directed_path(m, outcome) {
-                return false;
+        }
+
+        // 3. All backdoor paths from M to Y are blocked by X
+        for m in mediators {
+            if !Self::check_backdoor(graph, m, outcome, &x_set) {
+                // Try: X blocks backdoor paths from M to Y
+                let g_m_bar = graph.remove_outgoing(m);
+                if !g_m_bar.d_separated_single(m, outcome, &x_set) {
+                    return false;
+                }
             }
         }
 
         true
     }
 
-    /// Simple d-separation check (Bayes-Ball simplified)
-    fn check_d_separation(graph: &CausalGraphType, x: &str, y: &str, z: &HashSet<String>) -> bool {
-        // If Z contains X or Y, trivially separated
-        if z.contains(x) || z.contains(y) {
-            return true;
-        }
-
-        // Simplified: check if all paths are blocked
-        // A proper implementation would use Bayes-Ball algorithm
-        // For now, we just check direct connectivity
-
-        // If there's a direct edge and no intervention, not separated
-        if graph.edges.contains(&(x.to_string(), y.to_string())) {
+    /// Check instrumental variable validity
+    ///
+    /// Z is a valid instrument for (X, Y) if:
+    /// 1. Z is associated with X (Z not d-separated from X)
+    /// 2. Z affects Y only through X (Z d-separated from Y given X in G_X̄)
+    /// 3. No confounding between Z and Y
+    pub fn check_instrument(
+        graph: &CausalGraphType,
+        instrument: &str,
+        treatment: &str,
+        outcome: &str,
+    ) -> bool {
+        // 1. Relevance: Z must be associated with X
+        // Check: Z is an ancestor of X (or directly connected)
+        if !graph.has_directed_path(instrument, treatment)
+            && !graph.edges.contains(&(instrument.to_string(), treatment.to_string()))
+        {
             return false;
         }
-        if graph.edges.contains(&(y.to_string(), x.to_string())) {
+
+        // 2. Exclusion: Z affects Y only through X
+        // In G with X removed from paths, Z should not reach Y
+        let mut g_no_x = graph.clone();
+        g_no_x.edges.retain(|(from, _)| from != treatment);
+        if g_no_x.has_directed_path(instrument, outcome) {
             return false;
         }
 
-        // Check through common ancestors (simplified)
-        let x_ancestors = graph.ancestors(x);
-        let y_ancestors = graph.ancestors(y);
-        let common: HashSet<_> = x_ancestors.intersection(&y_ancestors).collect();
-
-        // If common ancestors exist and none are in Z, might not be separated
-        if !common.is_empty() && !common.iter().any(|a| z.contains(*a)) {
-            // This is a very simplified check
+        // 3. No confounding between Z and Y
+        let canonical = if instrument < outcome {
+            (instrument.to_string(), outcome.to_string())
+        } else {
+            (outcome.to_string(), instrument.to_string())
+        };
+        if graph.bidirected.contains(&canonical) {
             return false;
         }
 

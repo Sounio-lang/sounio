@@ -737,6 +737,162 @@ impl CausalGraphType {
         self.descendants(from).contains(to)
     }
 
+    /// Full Bayes-Ball d-separation algorithm
+    ///
+    /// Tests whether X ⊥⊥ Y | Z in the causal graph, handling
+    /// chains, forks, and colliders correctly.
+    pub fn d_separated(
+        &self,
+        x: &HashSet<String>,
+        y: &HashSet<String>,
+        z: &HashSet<String>,
+    ) -> bool {
+        // Bayes-Ball: find all nodes reachable from X that are not blocked by Z
+        // A node in Y is reachable iff X and Y are d-connected given Z
+        //
+        // Phase 1: Find ancestors of Z (needed for collider activation)
+        let z_ancestors = {
+            let mut ancestors = z.clone();
+            let mut stack: Vec<String> = z.iter().cloned().collect();
+            while let Some(node) = stack.pop() {
+                for parent in self.parents(&node) {
+                    if ancestors.insert(parent.clone()) {
+                        stack.push(parent);
+                    }
+                }
+            }
+            ancestors
+        };
+
+        // Phase 2: Bayes-Ball traversal
+        // State: (node, direction) where direction is "up" (from child) or "down" (from parent)
+        #[derive(Clone, Debug, PartialEq, Eq, Hash)]
+        enum Direction {
+            Up,   // visited from a child (going towards parents)
+            Down, // visited from a parent (going towards children)
+        }
+
+        let mut visited: HashSet<(String, Direction)> = HashSet::new();
+        let mut reachable: HashSet<String> = HashSet::new();
+        let mut queue: Vec<(String, Direction)> = Vec::new();
+
+        // Start from X nodes, going both up and down
+        for xn in x {
+            queue.push((xn.clone(), Direction::Up));
+            queue.push((xn.clone(), Direction::Down));
+        }
+
+        while let Some((node, dir)) = queue.pop() {
+            if !visited.insert((node.clone(), dir.clone())) {
+                continue;
+            }
+
+            // If we reached a Y node, X and Y are d-connected
+            if y.contains(&node) && !x.contains(&node) {
+                reachable.insert(node.clone());
+            }
+
+            let in_z = z.contains(&node);
+
+            match dir {
+                Direction::Up => {
+                    // Arrived from a child (traversing upward)
+                    if !in_z {
+                        // Non-collider not in Z: can pass through
+                        // Continue to parents (fork: ← W →)
+                        for parent in self.parents(&node) {
+                            queue.push((parent, Direction::Up));
+                        }
+                        // Continue to other children (chain: → W →)
+                        for child in self.children(&node) {
+                            queue.push((child, Direction::Down));
+                        }
+                    }
+                    // If in Z: blocked at non-collider (correct behavior)
+                }
+                Direction::Down => {
+                    // Arrived from a parent (traversing downward)
+                    if !in_z {
+                        // Not in Z: continue to children (chain)
+                        for child in self.children(&node) {
+                            queue.push((child, Direction::Down));
+                        }
+                    }
+                    // Collider handling: if this node or a descendant is in Z,
+                    // the collider path is activated
+                    if z_ancestors.contains(&node) {
+                        // Collider (or ancestor of conditioned node): path opens upward
+                        for parent in self.parents(&node) {
+                            queue.push((parent, Direction::Up));
+                        }
+                    }
+                }
+            }
+
+            // Also handle bidirected edges (latent common causes)
+            if !in_z {
+                for (a, b) in &self.bidirected {
+                    if a == &node {
+                        queue.push((b.clone(), Direction::Up));
+                        queue.push((b.clone(), Direction::Down));
+                    } else if b == &node {
+                        queue.push((a.clone(), Direction::Up));
+                        queue.push((a.clone(), Direction::Down));
+                    }
+                }
+            }
+        }
+
+        // d-separated iff no Y node is reachable from X
+        reachable.is_empty()
+    }
+
+    /// Check d-separation for single nodes (convenience method)
+    pub fn d_separated_single(
+        &self,
+        x: &str,
+        y: &str,
+        z: &HashSet<String>,
+    ) -> bool {
+        let x_set = [x.to_string()].into_iter().collect();
+        let y_set = [y.to_string()].into_iter().collect();
+        self.d_separated(&x_set, &y_set, z)
+    }
+
+    /// Find all nodes on directed paths from source to target
+    pub fn nodes_on_directed_paths(&self, from: &str, to: &str) -> HashSet<String> {
+        let mut result = HashSet::new();
+        let mut path = Vec::new();
+
+        fn dfs(
+            graph: &CausalGraphType,
+            current: &str,
+            target: &str,
+            path: &mut Vec<String>,
+            result: &mut HashSet<String>,
+        ) {
+            path.push(current.to_string());
+            if current == target {
+                for node in path.iter() {
+                    result.insert(node.clone());
+                }
+            } else {
+                for child in graph.children(current) {
+                    if !path.contains(&child) {
+                        dfs(graph, &child, target, path, result);
+                    }
+                }
+            }
+            path.pop();
+        }
+
+        dfs(self, from, to, &mut path, &mut result);
+        // Remove source and target themselves
+        result.remove(from);
+        result.remove(to);
+        result
+    }
+
     /// Remove incoming edges to a node (for graph surgery G_X̄)
     pub fn remove_incoming(&self, node: &str) -> Self {
         let mut new_graph = self.clone();
@@ -1187,6 +1343,109 @@ mod tests {
                 .edges
                 .contains(&("X".to_string(), "Y".to_string()))
         );
+    }
+
+    #[test]
+    fn test_d_separation_chain() {
+        // Chain: X → Z → Y
+        let mut graph = CausalGraphType::new();
+        graph.add_edge("X", "Z");
+        graph.add_edge("Z", "Y");
+
+        // Without conditioning: X and Y are d-connected
+        assert!(!graph.d_separated_single("X", "Y", &HashSet::new()));
+
+        // Conditioning on Z: blocks the chain
+        let z: HashSet<String> = ["Z".to_string()].into_iter().collect();
+        assert!(graph.d_separated_single("X", "Y", &z));
+    }
+
+    #[test]
+    fn test_d_separation_fork() {
+        // Fork: X ← Z → Y
+        let mut graph = CausalGraphType::new();
+        graph.add_edge("Z", "X");
+        graph.add_edge("Z", "Y");
+
+        // Without conditioning: X and Y are d-connected
+        assert!(!graph.d_separated_single("X", "Y", &HashSet::new()));
+
+        // Conditioning on Z: blocks the fork
+        let z: HashSet<String> = ["Z".to_string()].into_iter().collect();
+        assert!(graph.d_separated_single("X", "Y", &z));
+    }
+
+    #[test]
+    fn test_d_separation_collider() {
+        // Collider: X → Z ← Y
+        let mut graph = CausalGraphType::new();
+        graph.add_edge("X", "Z");
+        graph.add_edge("Y", "Z");
+
+        // Without conditioning: X and Y are d-separated (collider blocks)
+        assert!(graph.d_separated_single("X", "Y", &HashSet::new()));
+
+        // Conditioning on Z: opens the collider path
+        let z: HashSet<String> = ["Z".to_string()].into_iter().collect();
+        assert!(!graph.d_separated_single("X", "Y", &z));
+    }
+
+    #[test]
+    fn test_d_separation_collider_descendant() {
+        // Collider with descendant: X → Z ← Y, Z → W
+        // Conditioning on W (descendant of collider) should also open path
+        let mut graph = CausalGraphType::new();
+        graph.add_edge("X", "Z");
+        graph.add_edge("Y", "Z");
+        graph.add_edge("Z", "W");
+
+        // Conditioning on W: opens collider path through Z
+        let w: HashSet<String> = ["W".to_string()].into_iter().collect();
+        assert!(!graph.d_separated_single("X", "Y", &w));
+    }
+
+    #[test]
+    fn test_d_separation_bidirected() {
+        // X → Y with bidirected edge X ↔ Y
+        let mut graph = CausalGraphType::new();
+        graph.add_edge("X", "Y");
+        graph.add_bidirected("X", "Y");
+
+        // With bidirected edge: always d-connected (latent confounder)
+        assert!(!graph.d_separated_single("X", "Y", &HashSet::new()));
+    }
+
+    #[test]
+    fn test_d_separation_complex_graph() {
+        // Complex: A → B → D, A → C → D, B → C
+        let mut graph = CausalGraphType::new();
+        graph.add_edge("A", "B");
+        graph.add_edge("A", "C");
+        graph.add_edge("B", "C");
+        graph.add_edge("B", "D");
+        graph.add_edge("C", "D");
+
+        // A and D: d-connected (via B → D or C → D)
+        assert!(!graph.d_separated_single("A", "D", &HashSet::new()));
+
+        // Conditioning on B and C: should block all paths from A to D
+        let bc: HashSet<String> = ["B".to_string(), "C".to_string()].into_iter().collect();
+        assert!(graph.d_separated_single("A", "D", &bc));
+    }
+
+    #[test]
+    fn test_nodes_on_directed_paths() {
+        let mut graph = CausalGraphType::new();
+        graph.add_edge("X", "M1");
+        graph.add_edge("M1", "Y");
+        graph.add_edge("X", "M2");
+        graph.add_edge("M2", "Y");
+
+        let nodes = graph.nodes_on_directed_paths("X", "Y");
+        assert!(nodes.contains("M1"));
+        assert!(nodes.contains("M2"));
+        assert!(!nodes.contains("X"));
+        assert!(!nodes.contains("Y"));
     }
 
     #[test]
