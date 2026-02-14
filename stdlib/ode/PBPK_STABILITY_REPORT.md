@@ -2,11 +2,13 @@
 
 ## Summary
 
-Investigated improving numerical stability of PBPK models in Sounio. Created multiple implementations using RK4 integration (more stable than Euler) and simplified model structures. **However, discovered a critical compiler limitation that prevents long-running ODE simulations.**
+Investigated improving numerical stability of PBPK models in Sounio. Created multiple implementations using RK4 integration (more stable than Euler) and simplified model structures.
 
-## Compiler Limitation Discovered
+**UPDATE (2026-02-14): The while-loop struct mutation bug has been RESOLVED.** ODE simulations now run correctly for 240+ steps. Validated with 2-compartment Euler (240 steps), 3-compartment RK2 (480 steps), and nested struct returns. Regression tests added: `tests/run-pass/while_struct_mutation_ode.sio`, `tests/run-pass/while_struct_mutation_rk4.sio`.
 
-**Critical Issue**: While loops with struct mutation exhibit incorrect behavior after ~2-5 iterations.
+## Compiler Limitation (RESOLVED)
+
+**Previously Critical Issue**: While loops with struct mutation exhibited incorrect behavior after ~2-5 iterations. **This has been fixed by compiler improvements to struct mutation handling.**
 
 ### Symptoms
 - Loop executes but state stops updating after first few iterations
