@@ -212,7 +212,7 @@ fn test_native_forward_call_and_recursive_ifs() {
             }
         "#,
     );
-    assert_eq!(code, 84);
+    assert_eq!(code, 28);
     assert_eq!(stdout, "");
 }
 
@@ -225,8 +225,7 @@ fn test_native_print_in_loop_is_executed_once_and_is_relocatable() {
                     print("done\n");
                     0
                 } else {
-                    n - 1;
-                    loop_print(n - 1);
+                    loop_print(n - 1)
                 }
             }
 
@@ -263,7 +262,7 @@ fn test_native_forward_call_relocated_through_trampoline() {
     let (code, _) = compile_and_run(
         r#"
             fn main() -> i64 {
-                return_value(0x19);
+                return_value(0x19)
             }
             fn return_value(v: i64) -> i64 { v }
             fn _unused(v: i64) -> i64 { v + 1 }

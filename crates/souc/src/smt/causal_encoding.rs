@@ -425,20 +425,20 @@ fn check_d_separation(
     let cond_descendants = get_descendants_of_set(&children, &conditioning_set);
 
     // Bayes-Ball BFS.
-    // State: (current_node, arrived_from_child).
-    //   arrived_from_child == true  => we traversed a parent->child edge to get here
-    //   arrived_from_child == false => we traversed a child->parent edge to get here
+    // State: (current_node, arrived_from_parent).
+    //   arrived_from_parent == true  => we traversed a parent->child edge to get here
+    //   arrived_from_parent == false => we traversed a child->parent edge to get here
     let mut visited: HashSet<(&str, bool)> = HashSet::new();
     let mut queue: VecDeque<(&str, bool)> = VecDeque::new();
 
     queue.push_back((x, true));
     queue.push_back((x, false));
 
-    while let Some((current, from_child)) = queue.pop_front() {
-        if visited.contains(&(current, from_child)) {
+    while let Some((current, arrived_from_parent)) = queue.pop_front() {
+        if visited.contains(&(current, arrived_from_parent)) {
             continue;
         }
-        visited.insert((current, from_child));
+        visited.insert((current, arrived_from_parent));
 
         if current == y {
             // Active path found => NOT d-separated
@@ -459,12 +459,15 @@ fn check_d_separation(
         // Traverse to parents (going against edge direction)
         if let Some(node_parents) = parents.get(current) {
             for parent in node_parents {
-                let can_traverse = if from_child {
-                    // Chain / fork: blocked if middle node in Z
-                    !in_z
-                } else {
-                    // Collider: open if collider or its descendant is in Z
+                // Moving to another parent traverses through the current node
+                // as an "incoming" edge. That transition is:
+                // - blocked for chain/fork when the node is conditioned,
+                // - opened for collider paths when the node is conditioned or
+                //   has a conditioned descendant.
+                let can_traverse = if arrived_from_parent {
                     in_z || descendant_in_z
+                } else {
+                    !in_z
                 };
                 if can_traverse {
                     queue.push_back((parent, false));
@@ -488,6 +491,28 @@ fn check_d_separation(
         property: property.clone(),
         confidence_factor: 1.0, // Pure graphical criterion
     }
+}
+
+fn is_d_separated_local(
+    graph: &CausalGraphDef,
+    x: &str,
+    y: &str,
+    conditioning: &HashSet<String>,
+) -> bool {
+    let conditioning_vec: Vec<String> = conditioning.iter().cloned().collect();
+    let result = check_d_separation(
+        graph,
+        x,
+        y,
+        &conditioning_vec,
+        &CausalProperty::DSeparated {
+            graph_name: graph.name.clone(),
+            x: x.to_string(),
+            y: y.to_string(),
+            conditioning: conditioning_vec.clone(),
+        },
+    );
+    matches!(result, CausalVerificationResult::Verified { .. })
 }
 
 // ---------------------------------------------------------------------------
@@ -543,12 +568,7 @@ fn check_backdoor_criterion(
     let mutilated = mutilate_graph(graph, treatment);
 
     let conditioning_set: HashSet<String> = adjustment.iter().cloned().collect();
-    let separated = crate::types::causal::check_d_separation(
-        &mutilated,
-        treatment,
-        outcome,
-        &conditioning_set,
-    );
+    let separated = is_d_separated_local(&mutilated, treatment, outcome, &conditioning_set);
 
     if separated {
         // Confidence: NUC * Positivity * Causal Markov
@@ -634,8 +654,7 @@ fn check_frontdoor_criterion(
     // *unblocked* backdoor from X to M -- which means X _|_ M in G_{X-bar}.
     let mutilated_x = mutilate_graph(graph, treatment);
     for m in &mediator_set {
-        let separated =
-            crate::types::causal::check_d_separation(&mutilated_x, treatment, m, &HashSet::new());
+        let separated = is_d_separated_local(&mutilated_x, treatment, m, &HashSet::new());
         if !separated {
             return CausalVerificationResult::Refuted {
                 property: property.clone(),
@@ -653,8 +672,7 @@ fn check_frontdoor_criterion(
     let treatment_set: HashSet<String> = [treatment.to_string()].into();
     for m in &mediator_set {
         let mutilated_m = mutilate_graph(graph, m);
-        let separated =
-            crate::types::causal::check_d_separation(&mutilated_m, m, outcome, &treatment_set);
+        let separated = is_d_separated_local(&mutilated_m, m, outcome, &treatment_set);
         if !separated {
             return CausalVerificationResult::Refuted {
                 property: property.clone(),
@@ -705,12 +723,7 @@ fn check_iv_criterion(
     let has_path = has_directed_path(graph, instrument, treatment);
     if !has_path {
         // Fall back to d-connection check
-        let separated = crate::types::causal::check_d_separation(
-            graph,
-            instrument,
-            treatment,
-            &HashSet::new(),
-        );
+        let separated = is_d_separated_local(graph, instrument, treatment, &HashSet::new());
         if separated {
             return CausalVerificationResult::Refuted {
                 property: property.clone(),
@@ -729,8 +742,7 @@ fn check_iv_criterion(
     // path to Y bypassing X, and Z shares no common cause with Y.
     let mutilated = mutilate_graph(graph, treatment);
     let conditioning: HashSet<String> = HashSet::new();
-    let separated =
-        crate::types::causal::check_d_separation(&mutilated, instrument, outcome, &conditioning);
+    let separated = is_d_separated_local(&mutilated, instrument, outcome, &conditioning);
 
     if !separated {
         return CausalVerificationResult::Refuted {
@@ -776,7 +788,7 @@ fn check_identifiable(
     if let Some(treatment_parents) = parents_map.get(treatment) {
         let adjustment: Vec<String> = treatment_parents
             .iter()
-            .filter(|p| !treatment_descendants.contains((**p).as_str()))
+            .filter(|p| !treatment_descendants.iter().any(|d| d == *p))
             .map(|p| p.to_string())
             .collect();
 
@@ -804,7 +816,7 @@ fn check_identifiable(
     if let Some(treatment_children) = children_map.get(treatment) {
         let mediators: Vec<String> = treatment_children
             .iter()
-            .filter(|c| outcome_ancestors.contains((**c).as_str()))
+            .filter(|c| outcome_ancestors.iter().any(|a| a == *c))
             .filter(|c| **c != outcome)
             .map(|c| c.to_string())
             .collect();
@@ -832,12 +844,7 @@ fn check_identifiable(
     if let Some(treatment_parents) = parents_map.get(treatment) {
         for parent in treatment_parents {
             let mutilated = mutilate_graph(graph, treatment);
-            let separated = crate::types::causal::check_d_separation(
-                &mutilated,
-                parent,
-                outcome,
-                &HashSet::new(),
-            );
+            let separated = is_d_separated_local(&mutilated, parent, outcome, &HashSet::new());
             if separated && has_directed_path(graph, parent, treatment) {
                 return CausalVerificationResult::Verified {
                     property: property.clone(),
@@ -1103,17 +1110,14 @@ pub fn has_directed_path(graph: &CausalGraphDef, from: &str, to: &str) -> bool {
 /// Construct the mutilated graph G_{node-bar}: remove all *outgoing* edges
 /// from the given node.
 ///
-/// This corresponds to Pearl's do-operator: do(X = x) severs all incoming
-/// causal influences on X, which in graph terms means removing edges *into* X.
-/// However, for the backdoor criterion check (condition 2), we actually need
-/// to remove outgoing edges from treatment and check d-separation on the
-/// backdoor paths.  The convention here follows the standard: `mutilate_graph`
-/// removes **incoming** edges to `node`, simulating `do(node)`.
+/// This is the standard intervention-style mutilation used by our backdoor/frontdoor
+/// checks: sever the treatment's outgoing causal influence while preserving incoming
+/// edges.
 pub fn mutilate_graph(graph: &CausalGraphDef, node: &str) -> CausalGraphDef {
     let edges = graph
         .edges
         .iter()
-        .filter(|e| e.to != node)
+        .filter(|e| e.from != node)
         .cloned()
         .collect();
 
@@ -1632,11 +1636,11 @@ mod tests {
     fn test_mutilate_graph() {
         let graph = confounded_graph();
         // A <- U -> B, A -> B
-        // Mutilating at A removes U -> A (incoming to A)
+        // Mutilating at A removes A -> B (outgoing from A)
         let mutilated = mutilate_graph(&graph, "A");
-        assert_eq!(mutilated.edges.len(), 2); // U -> B and A -> B remain
+        assert_eq!(mutilated.edges.len(), 2); // U -> A and U -> B remain
         for e in &mutilated.edges {
-            assert_ne!(e.to, "A", "no edge should point to A after mutilation");
+            assert_ne!(e.from, "A", "no edge should leave A after mutilation");
         }
     }
 
