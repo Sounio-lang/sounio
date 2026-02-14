@@ -15,7 +15,7 @@ const BOOTSTRAP_DRIVER_MODULE: &str = "bootstrap::driver";
 const REQUIRED_DRIVER_ENTRYPOINTS: [&str; 3] = ["compile_file", "compile_source", "run_pipeline"];
 const DIR_BYTECODE_CACHE_FILENAME: &str = ".sounio_bytecode.sobc";
 // Keep in sync with stdlib/compiler/bootstrap/driver.sio CompileArtifact.code capacity.
-const DIR_BYTECODE_CACHE_MAX_BYTES: usize = 131_072;
+const DIR_BYTECODE_CACHE_MAX_BYTES: usize = 1_048_576;
 
 fn env_flag_enabled(name: &str) -> bool {
     std::env::var(name)
@@ -65,11 +65,20 @@ fn driver_harness_cache() -> &'static Mutex<HashMap<DriverHarnessCacheKey, Vec<B
 }
 
 fn driver_harness_cache_dir() -> Option<PathBuf> {
-    let raw = std::env::var_os("SOUNIO_SELFHOST_DRIVER_HARNESS_CACHE_DIR")?;
-    if raw.is_empty() {
+    if let Some(raw) = std::env::var_os("SOUNIO_SELFHOST_DRIVER_HARNESS_CACHE_DIR") {
+        if raw.is_empty() {
+            return None;
+        }
+        return Some(PathBuf::from(raw));
+    }
+
+    if env_flag_enabled("SOUNIO_SELFHOST_DISABLE_HARNESS_DISK_CACHE") {
         return None;
     }
-    Some(PathBuf::from(raw))
+
+    // Default to a temp-backed cache so driver harness compilation doesn't pay a
+    // Rust bridge cost on every invocation.
+    Some(std::env::temp_dir().join("sounio_driver_harness_cache"))
 }
 
 fn driver_harness_cache_path(dir: &Path, key: DriverHarnessCacheKey) -> PathBuf {
@@ -409,7 +418,8 @@ impl SounioCompiler {
         let entrypoint = DriverEntrypoint::CompileSource;
         let strict = Self::driver_orchestration_strict();
         let oracle_mode = Self::rust_oracle_mode();
-        let require_driver_output = env_flag_enabled("SOUNIO_SELFHOST_DRIVER_REQUIRE_OUTPUT");
+        // In strict mode, disallow stage-boundary fallback: driver must produce a valid artifact.
+        let require_driver_output = strict || env_flag_enabled("SOUNIO_SELFHOST_DRIVER_REQUIRE_OUTPUT");
         Self::emit_driver_compile_start_marker(entrypoint, strict, oracle_mode);
         let mut driver_output: Option<Vec<Bytecode>> = None;
         match self.run_driver_orchestration(entrypoint, Some(source)) {
@@ -490,7 +500,8 @@ impl SounioCompiler {
         let entrypoint = DriverEntrypoint::CompileFile;
         let strict = Self::driver_orchestration_strict();
         let oracle_mode = Self::rust_oracle_mode();
-        let require_driver_output = env_flag_enabled("SOUNIO_SELFHOST_DRIVER_REQUIRE_OUTPUT");
+        // In strict mode, disallow stage-boundary fallback: driver must produce a valid artifact.
+        let require_driver_output = strict || env_flag_enabled("SOUNIO_SELFHOST_DRIVER_REQUIRE_OUTPUT");
         if !std::path::Path::new(path).exists() {
             return Err(CompilerLoaderError::IoError(format!(
                 "Input path not found '{}'",
@@ -499,6 +510,26 @@ impl SounioCompiler {
         }
 
         Self::emit_driver_compile_start_marker(entrypoint, strict, oracle_mode);
+
+        // The bootstrap driver is intentionally tiny and can take an unbounded amount of time
+        // if we hand it a directory-sized compilation unit (e.g. `self-hosted/`).
+        // For non-strict runs, prefer the Rust stage-boundary loader for directories.
+        if !require_driver_output
+            && std::path::Path::new(path).is_dir()
+            && !env_flag_enabled("SOUNIO_SELFHOST_DRIVER_ALLOW_DIR")
+        {
+            Self::emit_driver_orchestration_marker(entrypoint, strict, "skip_dir", None);
+            let boundary_bytecode = self.compile_path_via_stage_boundaries(path)?;
+            Self::emit_stage_boundary_marker(entrypoint, boundary_bytecode.len());
+            self.maybe_run_rust_oracle_for_path(
+                oracle_mode,
+                strict,
+                path,
+                &boundary_bytecode,
+            )?;
+            return Ok(boundary_bytecode);
+        }
+
         let mut driver_output: Option<Vec<Bytecode>> = None;
         match self.run_driver_orchestration(entrypoint, Some(path)) {
             Ok(vm_result) => {
@@ -528,6 +559,32 @@ impl SounioCompiler {
                                 path,
                                 err
                             );
+                        }
+                    }
+
+                    // If the driver signaled a directory bytecode cache, load it directly in the host.
+                    // This avoids copying large `.sobc` blobs through the VM value model.
+                    if driver_output.is_none() {
+                        match Self::maybe_decode_driver_dir_cache(&vm_result, path) {
+                            Ok(Some(bytecode)) => {
+                                eprintln!(
+                                    "SELFHOST=driver-first schema=v1 event=driver_output entrypoint={} status=dir_cache bytecode_len={}",
+                                    entrypoint.qualified_name(),
+                                    bytecode.len()
+                                );
+                                driver_output = Some(bytecode);
+                            }
+                            Ok(None) => {}
+                            Err(err) => {
+                                if strict {
+                                    return Err(err);
+                                }
+                                tracing::debug!(
+                                    "Driver dir cache decode failed for '{}': {} (falling back to stage boundaries)",
+                                    path,
+                                    err
+                                );
+                            }
                         }
                     }
                 }
@@ -601,7 +658,12 @@ impl SounioCompiler {
                 driver_source.len()
             );
         }
-        let driver_fingerprint = Self::fingerprint_driver_source(&driver_source);
+        let driver_fingerprint = {
+            let base = Self::fingerprint_driver_source(&driver_source);
+            // Include the compiler stdlib tree fingerprint so the harness cache invalidates
+            // when the driver depends on other Sounio-side compiler modules.
+            base ^ self.fingerprint_driver_dependency_sources().rotate_left(1)
+        };
         if debug {
             eprintln!(
                 "SELFHOST_DEBUG event=driver_orch step=driver_fingerprint entrypoint={} fingerprint={:016x}",
@@ -672,7 +734,7 @@ impl SounioCompiler {
                                 harness_source.len()
                             );
                         }
-                        let compiled = self.compile_via_rust_bridge(&harness_source).map_err(|e| {
+                        let compiled = self.compile_driver_harness_via_rust_bridge(entrypoint, driver_fingerprint, &harness_source).map_err(|e| {
                             CompilerLoaderError::CompileError(format!(
                                 "{} harness lowering failed: {}",
                                 entrypoint.qualified_name(),
@@ -730,7 +792,7 @@ impl SounioCompiler {
                             harness_source.len()
                         );
                     }
-                    let compiled = self.compile_via_rust_bridge(&harness_source).map_err(|e| {
+                    let compiled = self.compile_driver_harness_via_rust_bridge(entrypoint, driver_fingerprint, &harness_source).map_err(|e| {
                         CompilerLoaderError::CompileError(format!(
                             "{} harness lowering failed: {}",
                             entrypoint.qualified_name(),
@@ -794,6 +856,58 @@ impl SounioCompiler {
         hasher.finish()
     }
 
+
+
+    fn fingerprint_driver_dependency_sources(&self) -> u64 {
+        if self.use_embedded || self.stdlib_path.is_empty() {
+            return 0;
+        }
+
+        let base = Path::new(&self.stdlib_path);
+        if !base.exists() {
+            return 0;
+        }
+
+        fn visit(dir: &Path, base: &Path, hasher: &mut rustc_hash::FxHasher) -> std::io::Result<()> {
+            let mut entries: Vec<std::fs::DirEntry> = std::fs::read_dir(dir)?
+                .filter_map(|e| e.ok())
+                .collect();
+            entries.sort_by(|a, b| a.path().cmp(&b.path()));
+
+            for entry in entries {
+                let path = entry.path();
+                if path.is_dir() {
+                    visit(&path, base, hasher)?;
+                    continue;
+                }
+
+                if path.extension().and_then(|s| s.to_str()) != Some("sio") {
+                    continue;
+                }
+
+                let rel = path.strip_prefix(base).unwrap_or(&path);
+                rel.to_string_lossy().hash(hasher);
+
+                let meta = std::fs::metadata(&path)?;
+                meta.len().hash(hasher);
+                if let Ok(modified) = meta.modified() {
+                    if let Ok(duration) = modified.duration_since(std::time::SystemTime::UNIX_EPOCH) {
+                        duration.as_secs().hash(hasher);
+                        duration.subsec_nanos().hash(hasher);
+                    }
+                }
+            }
+
+            Ok(())
+        }
+
+        let mut hasher = rustc_hash::FxHasher::default();
+        if visit(base, base, &mut hasher).is_err() {
+            return 0;
+        }
+
+        hasher.finish()
+    }
     fn driver_harness_main(entrypoint: DriverEntrypoint) -> String {
         match entrypoint {
             DriverEntrypoint::CompileSource => r#"
@@ -1042,6 +1156,62 @@ fn main() -> CompileArtifact with IO, Mut, Div, Panic {
         }
 
         Ok(None)
+    }
+
+    fn maybe_decode_driver_dir_cache(
+        vm_result: &crate::vm::Value,
+        path: &str,
+    ) -> LoadResult<Option<Vec<Bytecode>>> {
+        let crate::vm::Value::Struct(fields) = vm_result else {
+            return Ok(None);
+        };
+        let ok = matches!(fields.get("ok"), Some(crate::vm::Value::Bool(true)));
+        if !ok {
+            return Ok(None);
+        }
+
+        // Protocol: ok=true and code_len=0 means:
+        // "Host should load and deserialize the directory cache at <dir>/.sounio_bytecode.sobc".
+        let code_len = match fields.get("code_len") {
+            Some(crate::vm::Value::Int(n)) => *n,
+            _ => return Ok(None),
+        };
+        if code_len != 0 {
+            return Ok(None);
+        }
+
+        let dir = Path::new(path);
+        if !dir.is_dir() {
+            return Ok(None);
+        }
+
+        let cache_path = dir.join(DIR_BYTECODE_CACHE_FILENAME);
+        let bytes = std::fs::read(&cache_path).map_err(|e| {
+            CompilerLoaderError::IoError(format!(
+                "Selfhost dir cache read failed for {}: {}",
+                cache_path.display(),
+                e
+            ))
+        })?;
+        if bytes.is_empty() {
+            return Ok(None);
+        }
+        if bytes.len() > DIR_BYTECODE_CACHE_MAX_BYTES {
+            return Err(CompilerLoaderError::CompileError(format!(
+                "Selfhost dir cache too large: {} ({} bytes > max {})",
+                cache_path.display(),
+                bytes.len(),
+                DIR_BYTECODE_CACHE_MAX_BYTES
+            )));
+        }
+        let decoded = crate::vm::serialize::deserialize(&bytes).map_err(|e| {
+            CompilerLoaderError::CompileError(format!(
+                "Selfhost dir cache bytecode deserialization failed for {}: {}",
+                cache_path.display(),
+                e
+            ))
+        })?;
+        Ok(Some(decoded))
     }
 
     fn verify_driver_interface(&self, source: &str) -> LoadResult<()> {
@@ -1320,6 +1490,87 @@ fn main() -> CompileArtifact with IO, Mut, Div, Panic {
             bytecode.len()
         );
         Ok(CodegenBoundary { bytecode })
+    }
+
+
+    fn compile_driver_harness_via_rust_bridge(
+        &self,
+        entrypoint: DriverEntrypoint,
+        driver_fingerprint: u64,
+        harness_source: &str,
+    ) -> LoadResult<Vec<Bytecode>> {
+        let tag = match entrypoint {
+            DriverEntrypoint::CompileSource => "compile_source",
+            DriverEntrypoint::CompileFile => "compile_file",
+        };
+        let filename = format!("driver_harness_{}_{}.sio", tag, driver_fingerprint);
+
+        if let Some(cache_dir) = driver_harness_cache_dir() {
+            std::fs::create_dir_all(&cache_dir).map_err(|e| {
+                CompilerLoaderError::IoError(format!(
+                    "Failed to create driver harness cache dir {}: {}",
+                    cache_dir.display(),
+                    e
+                ))
+            })?;
+
+            let path = cache_dir.join(filename);
+            let tmp_path = path.with_extension("sio.tmp");
+
+            let write_needed = match std::fs::read_to_string(&path) {
+                Ok(existing) => existing != harness_source,
+                Err(_) => true,
+            };
+
+            if write_needed {
+                std::fs::write(&tmp_path, harness_source).map_err(|e| {
+                    CompilerLoaderError::IoError(format!(
+                        "Failed to write driver harness source to {}: {}",
+                        tmp_path.display(),
+                        e
+                    ))
+                })?;
+                std::fs::rename(&tmp_path, &path).map_err(|e| {
+                    CompilerLoaderError::IoError(format!(
+                        "Failed to finalize driver harness source {}: {}",
+                        path.display(),
+                        e
+                    ))
+                })?;
+            }
+
+            let path_str = path.to_string_lossy().to_string();
+            let compiled = self.compile_path_via_rust_bridge(&path_str);
+            if self.use_embedded && compiled.is_err() {
+                return self.compile_via_rust_bridge(harness_source);
+            }
+            return compiled;
+        }
+
+        let unique = std::time::SystemTime::now()
+            .duration_since(std::time::SystemTime::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos();
+        let tmp_path = std::env::temp_dir().join(format!(
+            "sounio_driver_harness_{}_{}_{}.sio",
+            tag, driver_fingerprint, unique
+        ));
+
+        std::fs::write(&tmp_path, harness_source).map_err(|e| {
+            CompilerLoaderError::IoError(format!(
+                "Failed to write temp harness file {}: {}",
+                tmp_path.display(),
+                e
+            ))
+        })?;
+
+        let path_str = tmp_path.to_string_lossy().to_string();
+        let compiled = self.compile_path_via_rust_bridge(&path_str);
+        let _ = std::fs::remove_file(&tmp_path);
+        if self.use_embedded && compiled.is_err() {
+            return self.compile_via_rust_bridge(harness_source);
+        }
+        compiled
     }
 
     fn compile_via_rust_bridge(&self, source: &str) -> LoadResult<Vec<Bytecode>> {

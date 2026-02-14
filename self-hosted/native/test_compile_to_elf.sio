@@ -1,0 +1,234 @@
+// Test: Verify compile_to_elf() produces valid ELF64 binaries
+//
+// This test manually constructs simple IR modules and verifies that
+// compile_to_elf() produces ELF64 binaries with correct structure.
+
+// T1: Compile fn main() -> i64 { 42 } and verify ELF structure
+fn test_compile_simple_function() -> i64 with Mut, Panic, Div {
+    // Build IR: fn main() -> i64 { r0 = 42; return r0 }
+    var module = ir_empty_module()
+
+    var func = ir_empty_function()
+    func.name = make_name("main")
+    func.param_count = 0
+    func.max_reg = 1  // r0
+    func.instr_count = 2
+
+    // r0 = 42
+    var i0 = ir_empty_instr()
+    i0.op = IrOpcode::IrLoadImm
+    i0.dst = 0
+    i0.imm_i64 = 42
+    func.instrs[0] = i0
+
+    // return r0
+    var i1 = ir_empty_instr()
+    i1.op = IrOpcode::IrReturn
+    i1.src1 = 0
+    func.instrs[1] = i1
+
+    module.functions[0] = func
+    module.fn_count = 1
+
+    // Compile to ELF
+    let base_addr = 4194304  // 0x400000 - standard Linux load address
+    let elf = compile_to_elf(module, base_addr)
+
+    // Verify ELF magic: 0x7F 'E' 'L' 'F'
+    if elf.len < 64 { return 1 }  // Too small
+
+    let b0 = byte_u8(elf.bytes[0])
+    let b1 = byte_u8(elf.bytes[1])
+    let b2 = byte_u8(elf.bytes[2])
+    let b3 = byte_u8(elf.bytes[3])
+
+    if b0 != 0x7f { return 2 }  // Wrong magic byte 0
+    if b1 != 69 { return 3 }    // Wrong magic byte 1 ('E')
+    if b2 != 76 { return 4 }    // Wrong magic byte 2 ('L')
+    if b3 != 70 { return 5 }    // Wrong magic byte 3 ('F')
+
+    // Verify ELF class: 64-bit (byte 4 = 2)
+    if byte_u8(elf.bytes[4]) != 2 { return 6 }
+
+    // Verify data encoding: little-endian (byte 5 = 1)
+    if byte_u8(elf.bytes[5]) != 1 { return 7 }
+
+    // Verify version: current (byte 6 = 1)
+    if byte_u8(elf.bytes[6]) != 1 { return 8 }
+
+    // Verify e_type: ET_EXEC (offset 16, value 2)
+    if byte_u8(elf.bytes[16]) != 2 { return 9 }
+
+    // Verify e_machine: EM_X86_64 (offset 18, value 0x3e = 62)
+    if byte_u8(elf.bytes[18]) != 62 { return 10 }
+
+    // Verify reasonable size (> 128 bytes for headers + code)
+    if elf.len < 128 { return 11 }
+
+    0  // Success
+}
+
+// T2: Compile function with arithmetic and verify code section exists
+fn test_compile_with_arithmetic() -> i64 with Mut, Panic, Div {
+    // Build IR: fn main() -> i64 { r0 = 10; r1 = 32; r2 = r0 + r1; return r2 }
+    var module = ir_empty_module()
+
+    var func = ir_empty_function()
+    func.name = make_name("main")
+    func.param_count = 0
+    func.max_reg = 3
+    func.instr_count = 4
+
+    // r0 = 10
+    var i0 = ir_empty_instr()
+    i0.op = IrOpcode::IrLoadImm
+    i0.dst = 0
+    i0.imm_i64 = 10
+    func.instrs[0] = i0
+
+    // r1 = 32
+    var i1 = ir_empty_instr()
+    i1.op = IrOpcode::IrLoadImm
+    i1.dst = 1
+    i1.imm_i64 = 32
+    func.instrs[1] = i1
+
+    // r2 = r0 + r1
+    var i2 = ir_empty_instr()
+    i2.op = IrOpcode::IrBinOp
+    i2.dst = 2
+    i2.src1 = 0
+    i2.src2 = 1
+    i2.bin_op = IrBinOp::IrAdd
+    func.instrs[2] = i2
+
+    // return r2
+    var i3 = ir_empty_instr()
+    i3.op = IrOpcode::IrReturn
+    i3.src1 = 2
+    func.instrs[3] = i3
+
+    module.functions[0] = func
+    module.fn_count = 1
+
+    let elf = compile_to_elf(module, 4194304)
+
+    // Verify ELF structure
+    if elf.len < 64 { return 1 }
+    if byte_u8(elf.bytes[0]) != 0x7f { return 2 }
+
+    // Verify larger size (has arithmetic operations)
+    if elf.len < 256 { return 3 }
+
+    0
+}
+
+// T3: Compile two functions with call and verify relocations
+fn test_compile_with_function_call() -> i64 with Mut, Panic, Div {
+    // Build IR:
+    // fn add(a: i64, b: i64) -> i64 { r2 = r0 + r1; return r2 }
+    // fn main() -> i64 { r0 = 21; r1 = 21; r2 = call add(r0, r1); return r2 }
+
+    var module = ir_empty_module()
+
+    // Function 0: add
+    var fn_add = ir_empty_function()
+    fn_add.name = make_name("add")
+    fn_add.param_count = 2
+    fn_add.max_reg = 3
+    fn_add.instr_count = 2
+    fn_add.params[0] = 0  // param a -> r0
+    fn_add.params[1] = 1  // param b -> r1
+
+    // r2 = r0 + r1
+    var ia = ir_empty_instr()
+    ia.op = IrOpcode::IrBinOp
+    ia.dst = 2
+    ia.src1 = 0
+    ia.src2 = 1
+    ia.bin_op = IrBinOp::IrAdd
+    fn_add.instrs[0] = ia
+
+    // return r2
+    var ir0 = ir_empty_instr()
+    ir0.op = IrOpcode::IrReturn
+    ir0.src1 = 2
+    fn_add.instrs[1] = ir0
+
+    module.functions[0] = fn_add
+
+    // Function 1: main
+    var fn_main = ir_empty_function()
+    fn_main.name = make_name("main")
+    fn_main.param_count = 0
+    fn_main.max_reg = 3
+    fn_main.instr_count = 4
+
+    // r0 = 21
+    var i0 = ir_empty_instr()
+    i0.op = IrOpcode::IrLoadImm
+    i0.dst = 0
+    i0.imm_i64 = 21
+    fn_main.instrs[0] = i0
+
+    // r1 = 21
+    var i1 = ir_empty_instr()
+    i1.op = IrOpcode::IrLoadImm
+    i1.dst = 1
+    i1.imm_i64 = 21
+    fn_main.instrs[1] = i1
+
+    // r2 = call fn0(r0, r1)
+    var ic = ir_empty_instr()
+    ic.op = IrOpcode::IrCall
+    ic.dst = 2
+    ic.fn_id = 0  // call function 0 (add)
+    ic.src1 = 0   // arg0 = r0
+    ic.src2 = 1   // arg1 = r1
+    ic.arg_count = 2
+    fn_main.instrs[2] = ic
+
+    // return r2
+    var ir1 = ir_empty_instr()
+    ir1.op = IrOpcode::IrReturn
+    ir1.src1 = 2
+    fn_main.instrs[3] = ir1
+
+    module.functions[1] = fn_main
+    module.fn_count = 2
+
+    let elf = compile_to_elf(module, 4194304)
+
+    // Verify ELF structure
+    if elf.len < 64 { return 1 }
+    if byte_u8(elf.bytes[0]) != 0x7f { return 2 }
+
+    // Verify substantial size (has two functions + relocations)
+    if elf.len < 512 { return 3 }
+
+    0
+}
+
+// Helper: read byte as unsigned
+fn byte_u8(b: i8) -> i64 {
+    let x = b as i64
+    if x < 0 { x + 256 } else { x }
+}
+
+fn main() -> i64 with Mut, Panic, Div {
+    var failed = 0
+
+    if test_compile_simple_function() != 0 {
+        failed = failed + 1
+    }
+
+    if test_compile_with_arithmetic() != 0 {
+        failed = failed + 1
+    }
+
+    if test_compile_with_function_call() != 0 {
+        failed = failed + 1
+    }
+
+    if failed == 0 { 0 } else { 1 }
+}

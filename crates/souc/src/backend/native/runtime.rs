@@ -1798,61 +1798,49 @@ fn build_runtime_object_internal(
         ));
     }
 
-    // CHIURATTO_FFI_DISABLED: Skip chiuratto FFI C runtime for simple programs
-    // This allows pure syscall-based print/IO to work correctly.
-    // The chiuratto_ffi.c is only needed for full HTTP/DB/ERP runtime.
-    let use_chiuratto_ffi = std::env::var("SOUNIO_ENABLE_CHIURATTO_FFI")
-        .map(|v| v == "1" || v.to_lowercase() == "true")
-        .unwrap_or(false);
+    // Compile chiuratto helper FFI C runtime.
+    let c_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("src")
+        .join("backend")
+        .join("native")
+        .join("chiuratto_ffi.c");
 
-    if use_chiuratto_ffi {
-        // Compile chiuratto helper FFI C runtime.
-        let c_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("src")
-            .join("backend")
-            .join("native")
-            .join("chiuratto_ffi.c");
+    let cc_output = std::process::Command::new("cc")
+        .arg("-O2")
+        .arg("-std=c11")
+        .arg("-fPIC")
+        .arg("-c")
+        .arg(&c_path)
+        .arg("-o")
+        .arg(&chiuratto_obj_path)
+        .output()
+        .map_err(|e| format!("Failed to run C compiler for chiuratto FFI: {}", e))?;
 
-        let cc_output = std::process::Command::new("cc")
-            .arg("-O2")
-            .arg("-std=c11")
-            .arg("-fPIC")
-            .arg("-c")
-            .arg(&c_path)
-            .arg("-o")
-            .arg(&chiuratto_obj_path)
-            .output()
-            .map_err(|e| format!("Failed to run C compiler for chiuratto FFI: {}", e))?;
-
-        if !cc_output.status.success() {
-            return Err(format!(
-                "C compiler failed for chiuratto FFI: {}",
-                String::from_utf8_lossy(&cc_output.stderr)
-            ));
-        }
-
-        // Merge runtime assembly object + chiuratto helper object into one relocatable object.
-        let ld_output = std::process::Command::new("ld")
-            .arg("-r")
-            .arg("-o")
-            .arg(&bundle_obj_path)
-            .arg(&obj_path)
-            .arg(&chiuratto_obj_path)
-            .output()
-            .map_err(|e| format!("Failed to run linker for runtime bundle: {}", e))?;
-
-        if !ld_output.status.success() {
-            return Err(format!(
-                "Runtime bundle link failed: {}",
-                String::from_utf8_lossy(&ld_output.stderr)
-            ));
-        }
-
-        Ok(bundle_obj_path)
-    } else {
-        // Use pure runtime without chiuratto FFI
-        Ok(obj_path)
+    if !cc_output.status.success() {
+        return Err(format!(
+            "C compiler failed for chiuratto FFI: {}",
+            String::from_utf8_lossy(&cc_output.stderr)
+        ));
     }
+
+    // Merge runtime assembly object + chiuratto helper object into one relocatable object.
+    let ld_output = std::process::Command::new("ld")
+        .arg("-r")
+        .arg("-o")
+        .arg(&bundle_obj_path)
+        .arg(&obj_path)
+        .arg(&chiuratto_obj_path)
+        .output()
+        .map_err(|e| format!("Failed to run linker for runtime bundle: {}", e))?;
+
+    if !ld_output.status.success() {
+        return Err(format!(
+            "Runtime bundle link failed: {}",
+            String::from_utf8_lossy(&ld_output.stderr)
+        ));
+    }
+
+    Ok(bundle_obj_path)
 }
 
 /// Build runtime object file

@@ -37,43 +37,66 @@ let SOIR_MAGIC: i64 = 1380206931  // "SOIR" as i32 cast to i64
 let SOIR_VERSION: i8 = 1
 let SOIR_MAX_SIZE: i64 = 131072  // 128KB max module size
 
-fn write_i8(buf: [i8; 131072], pos: i64, val: i8) -> i64 with Mut, Panic, Div {
-    buf[pos] = val
-    pos + 1
+fn write_i8(buf: [i8; 131072], pos: i64, val: i8) -> ([i8; 131072], i64) with Mut, Panic, Div {
+    var b = buf
+    b[pos] = val
+    (b, pos + 1)
 }
 
-fn write_i64(buf: [i8; 131072], pos: i64, val: i64) -> i64 with Mut, Panic, Div {
+fn write_i64(buf: [i8; 131072], pos: i64, val: i64) -> ([i8; 131072], i64) with Mut, Panic, Div {
     // Little-endian encoding - use write_i8 helper to avoid type issues
+    var b = buf
     var p = pos
-    p = write_i8(buf, p, ((val) & 255) as i8)
-    p = write_i8(buf, p, ((val >> 8) & 255) as i8)
-    p = write_i8(buf, p, ((val >> 16) & 255) as i8)
-    p = write_i8(buf, p, ((val >> 24) & 255) as i8)
-    p = write_i8(buf, p, ((val >> 32) & 255) as i8)
-    p = write_i8(buf, p, ((val >> 40) & 255) as i8)
-    p = write_i8(buf, p, ((val >> 48) & 255) as i8)
-    p = write_i8(buf, p, ((val >> 56) & 255) as i8)
-    p
+
+    let p0 = write_i8(b, p, ((val) & 255) as i8)
+    b = p0.0
+    p = p0.1
+    let p1 = write_i8(b, p, ((val >> 8) & 255) as i8)
+    b = p1.0
+    p = p1.1
+    let p2 = write_i8(b, p, ((val >> 16) & 255) as i8)
+    b = p2.0
+    p = p2.1
+    let p3 = write_i8(b, p, ((val >> 24) & 255) as i8)
+    b = p3.0
+    p = p3.1
+    let p4 = write_i8(b, p, ((val >> 32) & 255) as i8)
+    b = p4.0
+    p = p4.1
+    let p5 = write_i8(b, p, ((val >> 40) & 255) as i8)
+    b = p5.0
+    p = p5.1
+    let p6 = write_i8(b, p, ((val >> 48) & 255) as i8)
+    b = p6.0
+    p = p6.1
+    let p7 = write_i8(b, p, ((val >> 56) & 255) as i8)
+    b = p7.0
+    p = p7.1
+
+    (b, p)
 }
 
-fn write_f64(buf: [i8; 131072], pos: i64, val: f64) -> i64 with Mut, Panic, Div {
+fn write_f64(buf: [i8; 131072], pos: i64, val: f64) -> ([i8; 131072], i64) with Mut, Panic, Div {
     // IEEE 754 double as i64 bits (reinterpret cast via arithmetic)
     // In self-hosted context, we serialize as raw bits
     let bits = val as i64  // FIXME: needs proper bit reinterpretation
     write_i64(buf, pos, bits)
 }
 
-fn write_name(buf: [i8; 131072], pos: i64, n: Name) -> i64 with Mut, Panic, Div {
+fn write_name(buf: [i8; 131072], pos: i64, n: Name) -> ([i8; 131072], i64) with Mut, Panic, Div {
+    var b = buf
     var p = pos
     // Write length first
-    p = write_i64(buf, p, n.len)
+    let pair = write_i64(b, p, n.len)
+    b = pair.0
+    p = pair.1
     // Write buffer bytes
     var i: i64 = 0
     while i < 128 {
-        buf[p + i] = n.buf[i]
+        b[p + i] = n.buf[i]
         i = i + 1
     }
-    p + 128
+    (b, p + 128)
 }
 
 fn read_i8(buf: [i8; 131072], pos: i64) -> (i8, i64) with Mut, Panic, Div {
@@ -124,7 +147,7 @@ fn read_name(buf: [i8; 131072], pos: i64) -> (Name, i64) with Mut, Panic, Div {
     (n, p + 128)
 }
 
-fn write_opcode(buf: [i8; 131072], pos: i64, op: IrOpcode) -> i64 with Mut, Panic, Div {
+fn write_opcode(buf: [i8; 131072], pos: i64, op: IrOpcode) -> ([i8; 131072], i64) with Mut, Panic, Div {
     let tag: i8 = match op {
         IrOpcode::IrLoadImm => 0,
         IrOpcode::IrLoadFloat => 1,
@@ -177,7 +200,7 @@ fn read_opcode(buf: [i8; 131072], pos: i64) -> (IrOpcode, i64) with Mut, Panic, 
     (op, next_pos)
 }
 
-fn write_binary_op(buf: [i8; 131072], pos: i64, op: BinaryOp) -> i64 with Mut, Panic, Div {
+fn write_binary_op(buf: [i8; 131072], pos: i64, op: BinaryOp) -> ([i8; 131072], i64) with Mut, Panic, Div {
     let tag: i8 = match op {
         BinaryOp::OpAdd => 0,
         BinaryOp::OpSub => 1,
@@ -232,7 +255,7 @@ fn read_binary_op(buf: [i8; 131072], pos: i64) -> (BinaryOp, i64) with Mut, Pani
     (op, next_pos)
 }
 
-fn write_unary_op(buf: [i8; 131072], pos: i64, op: UnaryOp) -> i64 with Mut, Panic, Div {
+fn write_unary_op(buf: [i8; 131072], pos: i64, op: UnaryOp) -> ([i8; 131072], i64) with Mut, Panic, Div {
     let tag: i8 = match op {
         UnaryOp::OpNeg => 0,
         UnaryOp::OpNot => 1,
@@ -255,26 +278,63 @@ fn read_unary_op(buf: [i8; 131072], pos: i64) -> (UnaryOp, i64) with Mut, Panic,
     (op, next_pos)
 }
 
-fn serialize_ir_instr(buf: [i8; 131072], pos: i64, instr: IrInstr) -> i64 with Mut, Panic, Div {
+fn serialize_ir_instr(buf: [i8; 131072], pos: i64, instr: IrInstr) -> ([i8; 131072], i64) with Mut, Panic, Div {
+    var b = buf
     var p = pos
-    p = write_opcode(buf, p, instr.op)
+
+    let op_pair = write_opcode(b, p, instr.op)
+    b = op_pair.0
+    p = op_pair.1
     p = p + 7  // 7-byte padding for alignment
-    p = write_i64(buf, p, instr.dst)
-    p = write_i64(buf, p, instr.src1)
-    p = write_i64(buf, p, instr.src2)
-    p = write_i64(buf, p, instr.imm_i64)
-    p = write_f64(buf, p, instr.imm_f64)
-    p = write_i64(buf, p, instr.label_id)
-    p = write_i64(buf, p, instr.fn_id)
-    p = write_i64(buf, p, instr.field_idx)
-    p = write_binary_op(buf, p, instr.bin_op)
+
+    let dst_pair = write_i64(b, p, instr.dst)
+    b = dst_pair.0
+    p = dst_pair.1
+    let src1_pair = write_i64(b, p, instr.src1)
+    b = src1_pair.0
+    p = src1_pair.1
+    let src2_pair = write_i64(b, p, instr.src2)
+    b = src2_pair.0
+    p = src2_pair.1
+
+    let imm_i64_pair = write_i64(b, p, instr.imm_i64)
+    b = imm_i64_pair.0
+    p = imm_i64_pair.1
+
+    let imm_f64_pair = write_f64(b, p, instr.imm_f64)
+    b = imm_f64_pair.0
+    p = imm_f64_pair.1
+
+    let label_id_pair = write_i64(b, p, instr.label_id)
+    b = label_id_pair.0
+    p = label_id_pair.1
+    let fn_id_pair = write_i64(b, p, instr.fn_id)
+    b = fn_id_pair.0
+    p = fn_id_pair.1
+    let field_idx_pair = write_i64(b, p, instr.field_idx)
+    b = field_idx_pair.0
+    p = field_idx_pair.1
+
+    let bin_op_pair = write_binary_op(b, p, instr.bin_op)
+    b = bin_op_pair.0
+    p = bin_op_pair.1
     p = p + 7  // 7-byte padding
-    p = write_unary_op(buf, p, instr.un_op)
+
+    let un_op_pair = write_unary_op(b, p, instr.un_op)
+    b = un_op_pair.0
+    p = un_op_pair.1
     p = p + 7  // 7-byte padding
-    p = write_name(buf, p, instr.name)
-    p = write_i64(buf, p, instr.arg_count)
+
+    let name_pair = write_name(b, p, instr.name)
+    b = name_pair.0
+    p = name_pair.1
+
+    let arg_count_pair = write_i64(b, p, instr.arg_count)
+    b = arg_count_pair.0
+    p = arg_count_pair.1
     // Note: call_args linked list is NOT serialized (reconstructed from arg_count)
-    p
+
+    (b, p)
 }
 
 fn deserialize_ir_instr(buf: [i8; 131072], pos: i64) -> (IrInstr, i64) with Mut, Panic, Div {
@@ -350,29 +410,45 @@ fn deserialize_ir_instr(buf: [i8; 131072], pos: i64) -> (IrInstr, i64) with Mut,
     (instr, p)
 }
 
-fn serialize_ir_function(buf: [i8; 131072], pos: i64, func: IrFunction) -> i64 with Mut, Panic, Div {
+fn serialize_ir_function(buf: [i8; 131072], pos: i64, func: IrFunction) -> ([i8; 131072], i64) with Mut, Panic, Div {
+    var b = buf
     var p = pos
-    p = write_name(buf, p, func.name)
-    p = write_i64(buf, p, func.instr_count)
-    p = write_i64(buf, p, func.reg_count)
-    p = write_i64(buf, p, func.label_count)
-    p = write_i64(buf, p, func.param_count)
+
+    let name_pair = write_name(b, p, func.name)
+    b = name_pair.0
+    p = name_pair.1
+    let instr_count_pair = write_i64(b, p, func.instr_count)
+    b = instr_count_pair.0
+    p = instr_count_pair.1
+    let reg_count_pair = write_i64(b, p, func.reg_count)
+    b = reg_count_pair.0
+    p = reg_count_pair.1
+    let label_count_pair = write_i64(b, p, func.label_count)
+    b = label_count_pair.0
+    p = label_count_pair.1
+    let param_count_pair = write_i64(b, p, func.param_count)
+    b = param_count_pair.0
+    p = param_count_pair.1
 
     // Write param_regs array
     var i: i64 = 0
     while i < 64 {
-        p = write_i64(buf, p, func.param_regs[i])
+        let reg_pair = write_i64(b, p, func.param_regs[i])
+        b = reg_pair.0
+        p = reg_pair.1
         i = i + 1
     }
 
     // Write instructions
     var j: i64 = 0
     while j < func.instr_count {
-        p = serialize_ir_instr(buf, p, func.instrs[j])
+        let instr_pair = serialize_ir_instr(b, p, func.instrs[j])
+        b = instr_pair.0
+        p = instr_pair.1
         j = j + 1
     }
 
-    p
+    (b, p)
 }
 
 fn deserialize_ir_function(buf: [i8; 131072], pos: i64) -> (IrFunction, i64) with Mut, Panic, Div {
@@ -445,22 +521,30 @@ fn serialize_ir_module(module: IrModule) -> ([i8; 131072], i64) with Mut, Panic,
     pos = 8
 
     // Write function count
-    pos = write_i64(buf, pos, module.fn_count)
+    let fn_count_pair = write_i64(buf, pos, module.fn_count)
+    buf = fn_count_pair.0
+    pos = fn_count_pair.1
 
     // Write functions
     var i: i64 = 0
     while i < module.fn_count {
-        pos = serialize_ir_function(buf, pos, module.functions[i])
+        let func_pair = serialize_ir_function(buf, pos, module.functions[i])
+        buf = func_pair.0
+        pos = func_pair.1
         i = i + 1
     }
 
     // Write string count
-    pos = write_i64(buf, pos, module.string_count)
+    let string_count_pair = write_i64(buf, pos, module.string_count)
+    buf = string_count_pair.0
+    pos = string_count_pair.1
 
     // Write string table
     var j: i64 = 0
     while j < module.string_count {
-        pos = write_name(buf, pos, module.string_table[j])
+        let name_pair = write_name(buf, pos, module.string_table[j])
+        buf = name_pair.0
+        pos = name_pair.1
         j = j + 1
     }
 
