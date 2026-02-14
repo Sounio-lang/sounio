@@ -1,0 +1,107 @@
+// self-hosted::gpu::ptx — PTX text emitter (phase 0)
+//
+// PTX-first strategy:
+// - Emit deterministic PTX text as a string-like byte buffer (no GPU execution yet).
+// - Keep this module pure and testable via substring checks in self-hosted tests.
+//
+// Later phases (not in this file yet):
+// - Lower Sounio IR -> PTX
+// - Emit kernel parameter layouts + address spaces
+// - Host-side launch (CUDA Driver API) or static assembly path
+
+struct PtxBuf {
+    data: [i8; 65536],
+    len: i64,
+}
+
+fn ptx_buf_new() -> PtxBuf {
+    PtxBuf { data: [0; 65536], len: 0 }
+}
+
+fn ptx_push_byte(buf: PtxBuf, b: i8) -> PtxBuf with Mut, Panic {
+    var out = buf
+    if out.len >= 0 {
+        if out.len < 65536 {
+            out.data[out.len as usize] = b
+            out.len = out.len + 1
+        }
+    }
+    out
+}
+
+fn ptx_push_str(buf: PtxBuf, s: string) -> PtxBuf with Mut, Panic, Div {
+    var out = buf
+    let n = str_len(s)
+    var i: i64 = 0
+    while i < n {
+        if out.len < 65536 {
+            out.data[out.len as usize] = str_char_at(s, i) as i8
+            out.len = out.len + 1
+        }
+        i = i + 1
+    }
+    out
+}
+
+fn ptx_buf_contains(buf: PtxBuf, needle: string) -> bool with Mut, Panic, Div {
+    let nlen = str_len(needle)
+    if nlen == 0 { return true }
+    if buf.len < nlen { return false }
+
+    var i: i64 = 0
+    while i <= (buf.len - nlen) {
+        var j: i64 = 0
+        var ok: bool = true
+        while j < nlen {
+            if buf.data[(i + j) as usize] != (str_char_at(needle, j) as i8) {
+                ok = false
+                break
+            }
+            j = j + 1
+        }
+        if ok { return true }
+        i = i + 1
+    }
+    false
+}
+
+// Demo PTX module: a trivial vector add kernel skeleton.
+// This is text-only and not executed yet; it's used to validate we can produce
+// stable PTX output from Sounio without involving Rust codegen.
+fn ptx_emit_demo_vec_add() -> PtxBuf with Mut, Panic, Div {
+    var b = ptx_buf_new()
+
+    b = ptx_push_str(b, ".version 7.0\n")
+    b = ptx_push_str(b, ".target sm_50\n")
+    b = ptx_push_str(b, ".address_size 64\n\n")
+
+    b = ptx_push_str(b, ".visible .entry vec_add(\n")
+    b = ptx_push_str(b, "    .param .u64 param_a,\n")
+    b = ptx_push_str(b, "    .param .u64 param_b,\n")
+    b = ptx_push_str(b, "    .param .u64 param_c\n")
+    b = ptx_push_str(b, ")\n")
+    b = ptx_push_str(b, "{\n")
+    b = ptx_push_str(b, "    .reg .pred %p<2>;\n")
+    b = ptx_push_str(b, "    .reg .b32 %r<3>;\n")
+    b = ptx_push_str(b, "    .reg .b64 %rd<9>;\n")
+    b = ptx_push_str(b, "    .reg .f32 %f<4>;\n\n")
+
+    b = ptx_push_str(b, "    mov.u32 %r1, %tid.x;\n")
+    b = ptx_push_str(b, "    cvt.u64.u32 %rd1, %r1;\n")
+    b = ptx_push_str(b, "    mul.lo.u64 %rd2, %rd1, 4;\n")
+    b = ptx_push_str(b, "    ld.param.u64 %rd3, [param_a];\n")
+    b = ptx_push_str(b, "    ld.param.u64 %rd4, [param_b];\n")
+    b = ptx_push_str(b, "    ld.param.u64 %rd5, [param_c];\n")
+    b = ptx_push_str(b, "    add.u64 %rd6, %rd3, %rd2;\n")
+    b = ptx_push_str(b, "    add.u64 %rd7, %rd4, %rd2;\n")
+    b = ptx_push_str(b, "    add.u64 %rd8, %rd5, %rd2;\n")
+    b = ptx_push_str(b, "    ld.global.f32 %f1, [%rd6];\n")
+    b = ptx_push_str(b, "    ld.global.f32 %f2, [%rd7];\n")
+    b = ptx_push_str(b, "    add.f32 %f3, %f1, %f2;\n")
+    b = ptx_push_str(b, "    st.global.f32 [%rd8], %f3;\n")
+    b = ptx_push_str(b, "    ret;\n")
+    b = ptx_push_str(b, "}\n")
+
+    b
+}
+
