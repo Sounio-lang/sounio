@@ -20,64 +20,89 @@ use std::process::Command;
 fn create_minimal_elf_return42() -> Vec<u8> {
     // Pre-built minimal ELF header + code
     // This is equivalent to what compile_to_elf() should produce
-    vec![
-        // ELF Header (64 bytes)
-        0x7f, b'E', b'L', b'F',  // Magic: 0x7f 'E' 'L' 'F'
-        2,     // EI_CLASS: 64-bit
-        1,     // EI_DATA: little-endian
-        1,     // EI_VERSION: current
-        0,     // EI_OSABI
-        0,     // EI_ABIVERSION
-        0, 0, 0, 0, 0, 0, 0,     // Padding (7 bytes)
-        2, 0,  // e_type: ET_EXEC (2)
-        62, 0, // e_machine: EM_X86_64 (62)
-        1, 0, 0, 0,              // e_version
-        0x00, 0x40, 0, 0, 0, 0, 0, 0,     // e_entry: 0x400000
-        64, 0, 0, 0, 0, 0, 0, 0,         // e_phoff: 64
-        0, 0, 0, 0, 0, 0, 0, 0,          // e_shoff: 0
-        0, 0, 0, 0,                      // e_flags
-        64, 0,                           // e_ehsize: 64
-        56, 0,                           // e_phentsize: 56
-        1, 0,                            // e_phnum: 1 (only .text)
-        0, 0,                            // e_shentsize: 0
-        0, 0,                            // e_shnum: 0
-        0, 0,                            // e_shstrndx: 0
-        // Program header (.text, PT_LOAD)
-        1, 0, 0, 0,                      // p_type: PT_LOAD
-        0x00, 0x10, 0, 0, 0, 0, 0, 0,   // p_offset: 0x1000
-        0x00, 0x40, 0, 0, 0, 0, 0, 0,   // p_vaddr: 0x400000
-        0x00, 0x40, 0, 0, 0, 0, 0, 0,   // p_paddr: 0x400000
-        0x13, 0, 0, 0, 0, 0, 0, 0,      // p_filesz: 19 bytes (code size)
-        0x13, 0, 0, 0, 0, 0, 0, 0,      // p_memsz: 19 bytes
-        5, 0, 0, 0, 0, 0, 0, 0,         // p_flags: PF_X | PF_R
-        0x00, 0x10, 0, 0, 0, 0, 0, 0,   // p_align: 0x1000
-        // Padding to reach 0x1000
-        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-        // Code at 0x1000
-        // mov rax, 42 (0x2a)
-        0x48, 0xc7, 0xc0, 0x2a, 0x00, 0x00, 0x00,
-        // mov rdi, rax
-        0x48, 0x89, 0xc7,
-        // mov rax, 60 (sys_exit)
-        0x48, 0xc7, 0xc0, 0x3c, 0x00, 0x00, 0x00,
-        // syscall
-        0x0f, 0x05,
-    ]
+    let mut elf = vec![0u8; 0x1020];  // Allocate space for ELF header + padding + code
+
+    // ELF Header (64 bytes)
+    elf[0..4].copy_from_slice(b"\x7fELF");  // Magic
+    elf[4] = 2;      // EI_CLASS: 64-bit
+    elf[5] = 1;      // EI_DATA: little-endian
+    elf[6] = 1;      // EI_VERSION: current
+
+    // e_type: ET_EXEC (2) at offset 16
+    elf[16] = 2;
+
+    // e_machine: EM_X86_64 (62) at offset 18
+    elf[18] = 62;
+
+    // e_version at offset 20
+    elf[20] = 1;
+
+    // e_entry: 0x400000 at offset 32
+    elf[32..40].copy_from_slice(&0x400000u64.to_le_bytes());
+
+    // e_phoff: 64 at offset 40
+    elf[40..48].copy_from_slice(&64u64.to_le_bytes());
+
+    // e_shoff: 0 at offset 48 (no section headers)
+
+    // e_flags at offset 56 (0)
+
+    // e_ehsize: 64 at offset 58
+    elf[58..60].copy_from_slice(&64u16.to_le_bytes());
+
+    // e_phentsize: 56 at offset 60
+    elf[60..62].copy_from_slice(&56u16.to_le_bytes());
+
+    // e_phnum: 1 at offset 62
+    elf[62..64].copy_from_slice(&1u16.to_le_bytes());
+
+    // Program header (.text, PT_LOAD) at offset 64
+    // ELF64 Phdr structure (56 bytes):
+    // uint32_t p_type        (0)
+    // uint32_t p_flags       (4)
+    // uint64_t p_offset      (8)
+    // uint64_t p_vaddr       (16)
+    // uint64_t p_paddr       (24)
+    // uint64_t p_filesz      (32)
+    // uint64_t p_memsz       (40)
+    // uint64_t p_align       (48)
+    let ph_off = 64;
+
+    // p_type: PT_LOAD (1) at offset 0
+    elf[ph_off..ph_off+4].copy_from_slice(&1u32.to_le_bytes());
+
+    // p_flags: PF_X | PF_R (5 = 4+1) at offset 4
+    elf[ph_off+4..ph_off+8].copy_from_slice(&5u32.to_le_bytes());
+
+    // p_offset: 0x1000 at offset 8
+    elf[ph_off+8..ph_off+16].copy_from_slice(&0x1000u64.to_le_bytes());
+
+    // p_vaddr: 0x400000 at offset 16
+    elf[ph_off+16..ph_off+24].copy_from_slice(&0x400000u64.to_le_bytes());
+
+    // p_paddr: 0x400000 at offset 24
+    elf[ph_off+24..ph_off+32].copy_from_slice(&0x400000u64.to_le_bytes());
+
+    // p_filesz: 19 bytes (code size) at offset 32
+    elf[ph_off+32..ph_off+40].copy_from_slice(&19u64.to_le_bytes());
+
+    // p_memsz: 19 bytes at offset 40
+    elf[ph_off+40..ph_off+48].copy_from_slice(&19u64.to_le_bytes());
+
+    // p_align: 0x1000 at offset 48
+    elf[ph_off+48..ph_off+56].copy_from_slice(&0x1000u64.to_le_bytes());
+
+    // Code at 0x1000
+    let code_off = 0x1000;
+    let code = [
+        0x48, 0xc7, 0xc0, 0x2a, 0x00, 0x00, 0x00,  // mov rax, 42
+        0x48, 0x89, 0xc7,                           // mov rdi, rax
+        0x48, 0xc7, 0xc0, 0x3c, 0x00, 0x00, 0x00,  // mov rax, 60
+        0x0f, 0x05,                                 // syscall
+    ];
+    elf[code_off..code_off+code.len()].copy_from_slice(&code);
+
+    elf
 }
 
 #[test]
