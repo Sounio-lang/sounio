@@ -388,25 +388,56 @@ impl ExecutionContext {
 
         match interp.run(&hir) {
             Ok(value) => {
-                let output = if is_binding {
+                let (output, display_data) = if is_binding {
                     if let Some(name) = self.extract_binding_name(input) {
                         // Store binding
                         self.binding_stmts.retain(|(n, _)| n != &name);
                         self.binding_stmts.push((name.clone(), input.to_string()));
                         self.bindings.insert(name.clone(), value.clone());
-                        Some(format!("{} = {:?}", name, value))
+                        let (plain, html, latex) = format_value_rich(&value);
+                        let text = format!("{} = {}", name, plain);
+                        let dd = if html.is_some() || latex.is_some() {
+                            let mut data = serde_json::json!({
+                                "text/plain": &text
+                            });
+                            if let Some(h) = html {
+                                data["text/html"] = serde_json::json!(h);
+                            }
+                            if let Some(l) = latex {
+                                data["text/latex"] = serde_json::json!(l);
+                            }
+                            Some(data)
+                        } else {
+                            None
+                        };
+                        (Some(text), dd)
                     } else {
-                        Some(format!("{:?}", value))
+                        (Some(format!("{:?}", value)), None)
                     }
                 } else if value != sounio::interp::Value::Unit {
-                    Some(format!("{:?}", value))
+                    let (plain, html, latex) = format_value_rich(&value);
+                    let dd = if html.is_some() || latex.is_some() {
+                        let mut data = serde_json::json!({
+                            "text/plain": &plain
+                        });
+                        if let Some(h) = html {
+                            data["text/html"] = serde_json::json!(h);
+                        }
+                        if let Some(l) = latex {
+                            data["text/latex"] = serde_json::json!(l);
+                        }
+                        Some(data)
+                    } else {
+                        None
+                    };
+                    (Some(plain), dd)
                 } else {
-                    None
+                    (None, None)
                 };
 
                 Ok(ExecutionResult {
                     output,
-                    display_data: None,
+                    display_data,
                 })
             }
             Err(e) => Err(format!("Runtime error: {}", e)),
@@ -695,8 +726,10 @@ Examples:
             source.push('\n');
         }
 
-        // Build main function with previous bindings
-        source.push_str("fn main() -> i64 {\n");
+        // Use i32 return type (standard Sounio main signature)
+        // The expression's actual value is captured via the interpreter,
+        // so the return type here just needs to type-check
+        source.push_str("fn main() -> i32 {\n");
 
         // Add previous binding statements
         for (_, stmt) in &self.binding_stmts {
@@ -749,6 +782,53 @@ impl Default for ExecutionContext {
 pub struct ExecutionResult {
     pub output: Option<String>,
     pub display_data: Option<serde_json::Value>,
+}
+
+/// Format a value for rich display in Jupyter
+///
+/// Returns (plain_text, optional_html, optional_latex) for display_data
+fn format_value_rich(value: &sounio::interp::Value) -> (String, Option<String>, Option<String>) {
+    let plain = format!("{:?}", value);
+
+    // Detect epistemic/Knowledge values by inspecting the Debug representation
+    // Knowledge values contain "uncertainty" or "confidence" fields
+    let debug_str = &plain;
+
+    if debug_str.contains("uncertainty") || debug_str.contains("Knowledge") {
+        // Parse epistemic value components for rich display
+        let html = format!(
+            "<div style=\"font-family: 'SF Mono', monospace; padding: 8px; \
+             border-left: 3px solid #4a9eff; background: #f8f9fa;\">\
+             <span style=\"color: #333;\">{}</span>\
+             </div>",
+            html_escape(&plain)
+        );
+
+        let latex = format!("\\texttt{{{}}}", latex_escape(&plain));
+        (plain, Some(html), Some(latex))
+    } else {
+        (plain, None, None)
+    }
+}
+
+/// Escape HTML special characters
+fn html_escape(s: &str) -> String {
+    s.replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+        .replace('"', "&quot;")
+}
+
+/// Escape LaTeX special characters
+fn latex_escape(s: &str) -> String {
+    s.replace('\\', "\\textbackslash{}")
+        .replace('{', "\\{")
+        .replace('}', "\\}")
+        .replace('_', "\\_")
+        .replace('%', "\\%")
+        .replace('#', "\\#")
+        .replace('&', "\\&")
+        .replace('$', "\\$")
 }
 
 /// The Sounio Jupyter kernel
@@ -895,6 +975,9 @@ impl SounioKernel {
             "complete_request" => {
                 self.handle_complete_request(msg, shell).await?;
             }
+            "inspect_request" => {
+                self.handle_inspect_request(msg, shell).await?;
+            }
             "comm_info_request" => {
                 // Comm info request - return empty comms
                 let reply = msg.reply(
@@ -992,6 +1075,15 @@ impl SounioKernel {
                 // Publish output if any
                 if let Some(output) = &exec_result.output {
                     if !silent {
+                        // Use rich display_data if available, else plain text
+                        let data = if let Some(dd) = &exec_result.display_data {
+                            dd.clone()
+                        } else {
+                            serde_json::json!({
+                                "text/plain": output
+                            })
+                        };
+
                         let result_msg = Message {
                             identities: vec![b"execute_result".to_vec()],
                             header: Header::new("execute_result", &self.session),
@@ -999,9 +1091,7 @@ impl SounioKernel {
                             metadata: serde_json::json!({}),
                             content: serde_json::json!({
                                 "execution_count": current_count,
-                                "data": {
-                                    "text/plain": output
-                                },
+                                "data": data,
                                 "metadata": {}
                             }),
                             buffers: vec![],
@@ -1072,12 +1162,38 @@ impl SounioKernel {
     ) -> Result<()> {
         let code = msg.content["code"].as_str().unwrap_or("");
 
-        // Simple heuristic: check if braces are balanced
-        let open_braces = code.matches('{').count();
-        let close_braces = code.matches('}').count();
+        // Check balanced delimiters (braces, parens, brackets)
+        let mut depth = 0i32;
+        let mut in_string = false;
+        let mut escape_next = false;
 
-        let status = if open_braces > close_braces {
+        for ch in code.chars() {
+            if escape_next {
+                escape_next = false;
+                continue;
+            }
+            if ch == '\\' && in_string {
+                escape_next = true;
+                continue;
+            }
+            if ch == '"' {
+                in_string = !in_string;
+                continue;
+            }
+            if in_string {
+                continue;
+            }
+            match ch {
+                '{' | '(' | '[' => depth += 1,
+                '}' | ')' | ']' => depth -= 1,
+                _ => {}
+            }
+        }
+
+        let status = if depth > 0 || in_string {
             "incomplete"
+        } else if depth < 0 {
+            "invalid"
         } else {
             "complete"
         };
@@ -1124,7 +1240,7 @@ impl SounioKernel {
             .collect();
 
         // Add user-defined names (functions, types, variables)
-        let ctx = self.context.blocking_lock();
+        let ctx = self.context.lock().await;
         for name in ctx.all_names() {
             if name.starts_with(prefix) && !matches.contains(&name) {
                 matches.push(name);
@@ -1152,6 +1268,125 @@ impl SounioKernel {
 
         let reply = msg.reply("complete_reply", content);
         self.send_message(shell, reply).await
+    }
+
+    /// Handle inspect_request (shift-tab documentation lookup)
+    async fn handle_inspect_request(
+        &self,
+        msg: Message,
+        shell: &mut zeromq::RouterSocket,
+    ) -> Result<()> {
+        let code = msg.content["code"].as_str().unwrap_or("");
+        let cursor_pos = msg.content["cursor_pos"].as_u64().unwrap_or(0) as usize;
+
+        // Extract the word at cursor position
+        let before_cursor = &code[..cursor_pos.min(code.len())];
+        let word_start = before_cursor
+            .rfind(|c: char| !c.is_alphanumeric() && c != '_' && c != '<' && c != '>')
+            .map(|i| i + 1)
+            .unwrap_or(0);
+        let word = &before_cursor[word_start..];
+
+        let (found, data) = self.get_inspect_info(word).await;
+
+        let content = serde_json::json!({
+            "status": "ok",
+            "found": found,
+            "data": data,
+            "metadata": {}
+        });
+
+        let reply = msg.reply("inspect_reply", content);
+        self.send_message(shell, reply).await
+    }
+
+    /// Get inspection info for a symbol
+    async fn get_inspect_info(&self, word: &str) -> (bool, serde_json::Value) {
+        // Built-in type documentation
+        let doc = match word {
+            "Knowledge" | "Knowledge<" => Some((
+                "Knowledge<T>",
+                "Epistemic type wrapping a value with uncertainty, confidence, and provenance.\n\n\
+                 Fields:\n  value: T          — the measured value\n  uncertainty: f64  — standard uncertainty (GUM)\n  \
+                 confidence: f64   — confidence level [0, 1]\n  provenance: Prov  — measurement origin\n\n\
+                 Example:\n  let m = measure(500.0, uncertainty: 2.5)\n  let combined = m + measure(100.0, uncertainty: 1.0)\n  \
+                 // uncertainty propagates via RSS: sqrt(2.5² + 1.0²)",
+            )),
+            "CausalKnowledge" | "CausalKnowledge<" => Some((
+                "CausalKnowledge<T>",
+                "Knowledge with causal graph structure attached.\n\n\
+                 Extends Knowledge<T> with a causal DAG ensuring:\n  \
+                 - Identifiability verified at compile time\n  \
+                 - do-calculus interventions are type-safe\n  \
+                 - Confounding is structurally prevented",
+            )),
+            "CausalGraph" => Some((
+                "CausalGraph",
+                "Directed acyclic graph for causal reasoning.\n\n\
+                 Methods:\n  new(edges) -> CausalGraph\n  add_edge(from, to)\n  \
+                 is_identifiable(treatment, outcome) -> bool\n  \
+                 backdoor_criterion(treatment, outcome) -> Set<Node>",
+            )),
+            "measure" => Some((
+                "fn measure(value: f64, uncertainty: f64) -> Knowledge<f64>",
+                "Create a measurement with GUM-compliant uncertainty.\n\n\
+                 Parameters:\n  value       — the measured value\n  uncertainty — standard uncertainty (1σ)\n\n\
+                 Example:\n  let dose = measure(500.0, uncertainty: 2.5)\n  // dose.confidence ≈ 0.68 (1σ)",
+            )),
+            "do" => Some((
+                "do(graph, intervention)",
+                "Causal do-operator for interventional queries.\n\n\
+                 Performs do-calculus intervention on a causal graph.\n\
+                 Type system verifies identifiability at compile time.\n\n\
+                 Example:\n  let effect = do(graph, treatment: 100.0)",
+            )),
+            "linear" => Some((
+                "linear struct Name { ... }",
+                "Linear type: must be used exactly once.\n\n\
+                 Linear types prevent resource leaks and double-free bugs.\n\
+                 The compiler enforces that linear values are consumed.",
+            )),
+            "effect" | "with" => Some((
+                "fn f(x: T) -> U with Effect1, Effect2",
+                "Algebraic effect annotation.\n\n\
+                 Available effects:\n  IO    — file/network I/O\n  Mut   — mutable state\n  \
+                 Alloc — heap allocation\n  Panic — may panic\n  Async — asynchronous\n  \
+                 GPU   — GPU computation\n  Prob  — probabilistic\n  Div   — may diverge",
+            )),
+            _ => None,
+        };
+
+        if let Some((sig, description)) = doc {
+            let plain = format!("{}\n\n{}", sig, description);
+            let html = format!(
+                "<pre style=\"font-family: 'SF Mono', monospace;\"><b>{}</b></pre>\n<p>{}</p>",
+                html_escape(sig),
+                html_escape(description).replace('\n', "<br/>")
+            );
+            return (
+                true,
+                serde_json::json!({
+                    "text/plain": plain,
+                    "text/html": html
+                }),
+            );
+        }
+
+        // Check user-defined functions
+        let ctx = self.context.lock().await;
+        if let Some(def) = ctx.functions.get(word) {
+            let effects = ExecutionContext::extract_effects(def);
+            let plain = format!("fn {} {}\n\n{}", word, effects, def);
+            return (true, serde_json::json!({ "text/plain": plain }));
+        }
+
+        // Check user-defined variables
+        if let Some(value) = ctx.bindings.get(word) {
+            let plain = format!("{} = {:?}", word, value);
+            return (true, serde_json::json!({ "text/plain": plain }));
+        }
+
+        (false, serde_json::json!({}))
     }
 
     /// Publish execution status on iopub
