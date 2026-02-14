@@ -27,7 +27,7 @@ pub use conformal::{
     CalibrationExample, ConformalConfig, ConformalResult, ConformalTypeChecker,
     MondrianConformalChecker,
 };
-pub use dependent::{DependentTypeChecker, RefinementValidator};
+pub use dependent::{CheckResult, DependentType, DependentTypeChecker, DependentTypeConfig, RefinementValidator};
 pub use probabilistic::{ProbabilisticTypeInference, SubtypePolymorphismChecker};
 
 #[cfg(test)]
