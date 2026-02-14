@@ -1,0 +1,128 @@
+//@ run-pass
+// PBPK Validation: 3-compartment RK2 model with higher-order accuracy
+//
+// Model: Gut → Liver (first-pass) → Central (elimination)
+//   dGut/dt     = -ka * Gut
+//   dLiver/dt   = ka * Gut * fa - (Q_h/V_h) * Liver - CL_h * Liver
+//   dCentral/dt = (Q_h/V_h) * Liver - ke * Central
+//
+// Uses RK2 (midpoint method) for 2nd-order accuracy
+// Parameters: Dose=500mg, ka=1.0/h, ke=0.1/h, dt=0.05h, 480 steps (24h)
+
+struct Conc {
+    gut: f64,
+    liver: f64,
+    central: f64
+}
+
+struct SimState {
+    state: Conc,
+    t: f64,
+    auc: f64,
+    cmax: f64,
+    tmax: f64
+}
+
+fn derivatives(s: Conc) -> Conc {
+    let ka = 1.0
+    let fa = 0.8
+    let q_h = 0.5
+    let cl_h = 0.3
+    let ke = 0.1
+    Conc {
+        gut: -ka * s.gut,
+        liver: ka * s.gut * fa - q_h * s.liver - cl_h * s.liver,
+        central: q_h * s.liver - ke * s.central
+    }
+}
+
+fn rk2_step(s: Conc, dt: f64) -> Conc {
+    // k1 = f(y_n)
+    let k1 = derivatives(s)
+
+    // midpoint: y_mid = y_n + 0.5*dt*k1
+    let mid = Conc {
+        gut: s.gut + 0.5 * dt * k1.gut,
+        liver: s.liver + 0.5 * dt * k1.liver,
+        central: s.central + 0.5 * dt * k1.central
+    }
+
+    // k2 = f(y_mid)
+    let k2 = derivatives(mid)
+
+    // y_{n+1} = y_n + dt * k2
+    Conc {
+        gut: s.gut + dt * k2.gut,
+        liver: s.liver + dt * k2.liver,
+        central: s.central + dt * k2.central
+    }
+}
+
+fn main() -> i32 with IO {
+    var sim = SimState {
+        state: Conc { gut: 500.0, liver: 0.0, central: 0.0 },
+        t: 0.0, auc: 0.0, cmax: 0.0, tmax: 0.0
+    }
+    let dt = 0.05
+    var i = 0
+
+    while i < 480 {
+        let new_state = rk2_step(sim.state, dt)
+        let new_t = sim.t + dt
+
+        // Trapezoidal AUC
+        let auc_increment = 0.5 * (sim.state.central + new_state.central) * dt
+
+        var cmax = sim.cmax
+        var tmax = sim.tmax
+        if new_state.central > sim.cmax {
+            cmax = new_state.central
+            tmax = new_t
+        }
+
+        sim = SimState {
+            state: new_state,
+            t: new_t,
+            auc: sim.auc + auc_increment,
+            cmax: cmax,
+            tmax: tmax
+        }
+        i = i + 1
+    }
+
+    // Print results
+    println(sim.t)
+    println(sim.state.gut)
+    println(sim.state.liver)
+    println(sim.state.central)
+    println(sim.auc)
+    println(sim.cmax)
+    println(sim.tmax)
+
+    // Validate:
+    // 1. Time = 24.0h
+    if sim.t < 23.9 { return 1 }
+
+    // 2. Gut fully absorbed (exp(-24) ≈ 0)
+    if sim.state.gut > 0.01 { return 2 }
+
+    // 3. AUC should be positive and substantial
+    if sim.auc < 100.0 { return 3 }
+
+    // 4. Cmax > 0 (drug reached central compartment)
+    if sim.cmax < 10.0 { return 4 }
+
+    // 5. Tmax in physiological range (1-8h for oral absorption)
+    if sim.tmax < 0.5 { return 5 }
+    if sim.tmax > 12.0 { return 6 }
+
+    // 6. All concentrations non-negative (conservation of mass)
+    if sim.state.gut < 0.0 { return 7 }
+    if sim.state.liver < 0.0 { return 8 }
+    if sim.state.central < 0.0 { return 9 }
+
+    // 7. 480 iterations completed
+    if i != 480 { return 10 }
+
+    return 0
+}

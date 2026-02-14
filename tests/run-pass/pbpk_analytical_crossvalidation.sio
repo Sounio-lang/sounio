@@ -1,0 +1,140 @@
+//@ run-pass
+// Cross-validation: Sounio Euler vs analytical Bateman equation
+//
+// Validates numerical accuracy of the 2-compartment PBPK solver against
+// the closed-form Bateman solution at multiple time points.
+//
+// Analytical solution (Bateman equation):
+//   Gut(t)     = Dose * exp(-ka * t)
+//   Central(t) = Dose * ka / (ka - ke) * (exp(-ke * t) - exp(-ka * t))
+//
+// Reference: Gibaldi & Perrier, "Pharmacokinetics", 2nd Ed., Ch. 2
+
+// Approximate exp(x) using Taylor series with range reduction
+// For negative x, compute exp(|x|) and invert to avoid catastrophic cancellation
+fn exp_pos(x: f64) -> f64 {
+    // Taylor series for positive x converges well
+    var sum = 1.0
+    var term = 1.0
+    var n = 1
+    while n < 40 {
+        let nf = n as f64
+        term = term * x / nf
+        sum = sum + term
+        n = n + 1
+    }
+    sum
+}
+
+fn exp_approx(x: f64) -> f64 {
+    if x < -30.0 {
+        return 0.0
+    }
+    if x < 0.0 {
+        // exp(-a) = 1/exp(a) — avoids alternating-sign cancellation
+        return 1.0 / exp_pos(-x)
+    }
+    exp_pos(x)
+}
+
+fn abs_f64(x: f64) -> f64 {
+    if x < 0.0 { return -x }
+    x
+}
+
+struct PBPKState {
+    t: f64,
+    gut: f64,
+    central: f64
+}
+
+fn euler_step(s: PBPKState, dt: f64) -> PBPKState {
+    let ka = 1.0
+    let ke = 0.1
+    PBPKState {
+        t: s.t + dt,
+        gut: s.gut + (-ka * s.gut) * dt,
+        central: s.central + (ka * s.gut - ke * s.central) * dt
+    }
+}
+
+fn main() -> i32 with IO {
+    let dose = 500.0
+    let ka = 1.0
+    let ke = 0.1
+    let dt = 0.01   // Small dt for accuracy
+    let total_steps = 2400   // 24 hours
+
+    // Run simulation
+    var s = PBPKState { t: 0.0, gut: dose, central: 0.0 }
+    var i = 0
+    while i < total_steps {
+        s = euler_step(s, dt)
+        i = i + 1
+    }
+
+    // Analytical solution at t=24h
+    let t = 24.0
+    let gut_analytical = dose * exp_approx(-ka * t)
+    let coeff = dose * ka / (ka - ke)
+    let central_analytical = coeff * (exp_approx(-ke * t) - exp_approx(-ka * t))
+
+    // Print comparison
+    println(s.gut)
+    println(gut_analytical)
+    println(s.central)
+    println(central_analytical)
+
+    // Validate relative errors
+    // Euler is O(dt) global error; with dt=0.01 expect ~1-5% error
+    let gut_error = abs_f64(s.gut - gut_analytical)
+    let central_error = abs_f64(s.central - central_analytical)
+
+    // Gut: both should be ~0, absolute check
+    if gut_error > 0.01 { return 1 }
+
+    // Central: relative error < 5% (Euler first-order accumulation)
+    if central_analytical > 1.0 {
+        let rel_error = central_error / central_analytical
+        if rel_error > 0.05 { return 2 }
+    }
+
+    // Check at intermediate time points via checkpoints
+    // Re-run and verify at t=2h (near Tmax), t=6h, t=12h
+    var s2 = PBPKState { t: 0.0, gut: dose, central: 0.0 }
+    var j = 0
+    while j < 200 {
+        s2 = euler_step(s2, dt)
+        j = j + 1
+    }
+    // t=2h: near Cmax, analytical Central ≈ 379.7
+    let c2_analytical = coeff * (exp_approx(-ke * 2.0) - exp_approx(-ka * 2.0))
+    if c2_analytical > 1.0 {
+        let c2_rel = abs_f64(s2.central - c2_analytical) / c2_analytical
+        if c2_rel > 0.05 { return 3 }
+    }
+
+    // Continue to t=6h
+    while j < 600 {
+        s2 = euler_step(s2, dt)
+        j = j + 1
+    }
+    let c6_analytical = coeff * (exp_approx(-ke * 6.0) - exp_approx(-ka * 6.0))
+    if c6_analytical > 1.0 {
+        let c6_rel = abs_f64(s2.central - c6_analytical) / c6_analytical
+        if c6_rel > 0.05 { return 4 }
+    }
+
+    // Continue to t=12h
+    while j < 1200 {
+        s2 = euler_step(s2, dt)
+        j = j + 1
+    }
+    let c12_analytical = coeff * (exp_approx(-ke * 12.0) - exp_approx(-ka * 12.0))
+    if c12_analytical > 1.0 {
+        let c12_rel = abs_f64(s2.central - c12_analytical) / c12_analytical
+        if c12_rel > 0.05 { return 5 }
+    }
+
+    return 0
+}

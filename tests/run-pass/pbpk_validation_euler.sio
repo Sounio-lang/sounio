@@ -1,0 +1,106 @@
+//@ run-pass
+// PBPK Validation: 2-compartment Euler model vs analytical Bateman equation
+//
+// Model: Dose → Gut (absorption) → Central (elimination)
+//   dGut/dt     = -ka * Gut
+//   dCentral/dt = ka * Gut - ke * Central
+//
+// Analytical (Bateman equation):
+//   Gut(t)     = Dose * exp(-ka * t)
+//   Central(t) = Dose * ka / (ka - ke) * (exp(-ke * t) - exp(-ka * t))
+//   AUC(0→∞)   = Dose / ke  (for complete absorption)
+//
+// Parameters: Dose=500mg, ka=1.0/h, ke=0.1/h, dt=0.1h, 240 steps (24h)
+
+struct PBPKState {
+    t: f64,
+    gut: f64,
+    central: f64,
+    auc: f64,
+    cmax: f64,
+    tmax: f64
+}
+
+fn euler_step(s: PBPKState, dt: f64) -> PBPKState {
+    let ka = 1.0
+    let ke = 0.1
+    let d_gut = -ka * s.gut
+    let d_central = ka * s.gut - ke * s.central
+    let new_central = s.central + d_central * dt
+
+    // Track Cmax/Tmax
+    let new_t = s.t + dt
+    var cmax = s.cmax
+    var tmax = s.tmax
+    if new_central > s.cmax {
+        cmax = new_central
+        tmax = new_t
+    }
+
+    PBPKState {
+        t: new_t,
+        gut: s.gut + d_gut * dt,
+        central: new_central,
+        auc: s.auc + s.central * dt,
+        cmax: cmax,
+        tmax: tmax
+    }
+}
+
+fn main() -> i32 with IO {
+    var s = PBPKState {
+        t: 0.0, gut: 500.0, central: 0.0,
+        auc: 0.0, cmax: 0.0, tmax: 0.0
+    }
+    let dt = 0.1
+    var i = 0
+
+    while i < 240 {
+        s = euler_step(s, dt)
+        i = i + 1
+    }
+
+    // Print results for validation
+    println(s.t)
+    println(s.gut)
+    println(s.central)
+    println(s.auc)
+    println(s.cmax)
+    println(s.tmax)
+
+    // Validate against analytical expectations:
+    //
+    // 1. Time should be 24.0h
+    if s.t < 23.9 { return 1 }
+    if s.t > 24.1 { return 2 }
+
+    // 2. Gut should be ~0 (exp(-24) ≈ 1.9e-11)
+    if s.gut > 0.01 { return 3 }
+
+    // 3. Central: Bateman at t=24h
+    //    C(24) = 500 * 1.0/(1.0-0.1) * (exp(-0.1*24) - exp(-1.0*24))
+    //          = 555.56 * (exp(-2.4) - exp(-24))
+    //          = 555.56 * (0.0907 - ~0)
+    //          = ~50.4 mg
+    //    Euler with dt=0.1 will be close but not exact
+    if s.central < 30.0 { return 4 }
+    if s.central > 70.0 { return 5 }
+
+    // 4. AUC should be substantial (analytical AUC_0-inf = Dose/ke = 5000)
+    //    But we only integrate to 24h, so expect ~4000-5000
+    if s.auc < 3000.0 { return 6 }
+    if s.auc > 6000.0 { return 7 }
+
+    // 5. Cmax should be ~200-300 mg (depends on ka/ke ratio)
+    //    Analytical Cmax at tmax = ln(ka/ke)/(ka-ke) = ln(10)/0.9 ≈ 2.56h
+    //    Cmax = 500*(1.0/0.9)*(0.1^(0.1/0.9) - 0.1^(1.0/0.9))
+    //    Euler approximation: should be in ballpark
+    if s.cmax < 100.0 { return 8 }
+    if s.cmax > 400.0 { return 9 }
+
+    // 6. Tmax should be near 2.56h (analytical)
+    if s.tmax < 1.5 { return 10 }
+    if s.tmax > 4.0 { return 11 }
+
+    return 0
+}
