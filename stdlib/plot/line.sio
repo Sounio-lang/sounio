@@ -1,0 +1,436 @@
+// Line Plot Rendering
+//
+// ASCII line plots with:
+// - Multiple series support
+// - Automatic axis scaling
+// - Grid lines
+// - Series markers and colors
+// - Y-axis labels
+
+// ============================================================================
+// LINE PLOT TYPES
+// ============================================================================
+
+struct LineSeries {
+    values: [f64; 1024],
+    n: i64,
+    label: string,
+    marker: string,
+    color_code: string,
+}
+
+struct LinePlotConfig {
+    title: string,
+    width: i64,
+    height: i64,
+    x_label: string,
+    y_label: string,
+    show_grid: bool,
+    show_legend: bool,
+}
+
+fn line_series_new(label: string, marker: string, color: string) -> LineSeries {
+    LineSeries {
+        values: [0.0; 1024],
+        n: 0,
+        label: label,
+        marker: marker,
+        color_code: color,
+    }
+}
+
+fn line_series_add(s: &!LineSeries, value: f64) {
+    if s.n < 1024 {
+        s.values[s.n as usize] = value
+        s.n = s.n + 1
+    }
+}
+
+fn line_config_default() -> LinePlotConfig {
+    LinePlotConfig {
+        title: "",
+        width: 60,
+        height: 20,
+        x_label: "",
+        y_label: "",
+        show_grid: false,
+        show_legend: true,
+    }
+}
+
+fn line_config_new(title: string, width: i64, height: i64) -> LinePlotConfig {
+    LinePlotConfig {
+        title: title,
+        width: width,
+        height: height,
+        x_label: "",
+        y_label: "",
+        show_grid: false,
+        show_legend: true,
+    }
+}
+
+// ============================================================================
+// SINGLE SERIES LINE PLOT
+// ============================================================================
+
+// Plot a single array of values
+fn line_plot(values: &[f64], n: i64, title: string) with IO {
+    let config = line_config_new(title, 60, 20)
+    line_plot_single(values, n, &config)
+}
+
+fn line_plot_single(values: &[f64], n: i64, config: &LinePlotConfig) with IO {
+    if n <= 0 { return }
+
+    let reset = "\x1b[0m"
+    let margin_left: i64 = 10  // space for y-axis labels
+
+    // Find data range
+    var min_val = values[0]
+    var max_val = values[0]
+    var i: i64 = 1
+    while i < n {
+        if values[i as usize] < min_val { min_val = values[i as usize] }
+        if values[i as usize] > max_val { max_val = values[i as usize] }
+        i = i + 1
+    }
+
+    // Add 5% padding
+    let range = max_val - min_val
+    let padding = if range > 0.0 { range * 0.05 } else { 1.0 }
+    min_val = min_val - padding
+    max_val = max_val + padding
+
+    // Title
+    if config.title.len() > 0 {
+        var pad: i64 = 0
+        while pad < margin_left + config.width / 2 - config.title.len() as i64 / 2 {
+            print(" ")
+            pad = pad + 1
+        }
+        print("\x1b[1m")
+        println(config.title)
+        print(reset)
+    }
+
+    // Render rows from top (max_val) to bottom (min_val)
+    var row: i64 = 0
+    while row < config.height {
+        let y_val = max_val - (row as f64 / (config.height - 1) as f64) * (max_val - min_val)
+
+        // Y-axis label
+        print_y_label(y_val, margin_left)
+
+        // Vertical axis
+        if row == config.height - 1 {
+            print("└")
+        } else {
+            print("│")
+        }
+
+        // Plot area
+        var col: i64 = 0
+        while col < config.width {
+            // Map column to data index
+            let data_idx = (col as f64 / (config.width - 1) as f64 * (n - 1) as f64) as i64
+            let data_val = values[data_idx as usize]
+
+            // Map data value to row
+            let data_row = ((max_val - data_val) / (max_val - min_val) * (config.height - 1) as f64) as i64
+
+            if data_row == row {
+                print("\x1b[36m")  // cyan
+                print("●")
+                print(reset)
+            } else {
+                if config.show_grid && col > 0 && col % 10 == 0 {
+                    print("\x1b[2m")  // dim
+                    print("·")
+                    print(reset)
+                } else {
+                    print(" ")
+                }
+            }
+            col = col + 1
+        }
+
+        println("")
+        row = row + 1
+    }
+
+    // X-axis
+    var pad: i64 = 0
+    while pad < margin_left {
+        print(" ")
+        pad = pad + 1
+    }
+    print("└")
+    var j: i64 = 0
+    while j < config.width {
+        print("─")
+        j = j + 1
+    }
+    println("→")
+
+    // X-axis label
+    if config.x_label.len() > 0 {
+        var pad2: i64 = 0
+        while pad2 < margin_left + config.width / 2 - config.x_label.len() as i64 / 2 {
+            print(" ")
+            pad2 = pad2 + 1
+        }
+        println(config.x_label)
+    }
+}
+
+// ============================================================================
+// MULTI-SERIES LINE PLOT
+// ============================================================================
+
+// Plot multiple series with different colors and markers
+fn line_plot_multi(
+    series: &[LineSeries],
+    n_series: i64,
+    config: &LinePlotConfig,
+) with IO {
+    if n_series <= 0 { return }
+
+    let reset = "\x1b[0m"
+    let margin_left: i64 = 10
+
+    // Find global data range across all series
+    var min_val = series[0].values[0]
+    var max_val = series[0].values[0]
+    var max_n: i64 = 0
+
+    var s: i64 = 0
+    while s < n_series {
+        var i: i64 = 0
+        while i < series[s as usize].n {
+            let v = series[s as usize].values[i as usize]
+            if v < min_val { min_val = v }
+            if v > max_val { max_val = v }
+            i = i + 1
+        }
+        if series[s as usize].n > max_n { max_n = series[s as usize].n }
+        s = s + 1
+    }
+
+    let range = max_val - min_val
+    let padding = if range > 0.0 { range * 0.05 } else { 1.0 }
+    min_val = min_val - padding
+    max_val = max_val + padding
+
+    // Title
+    if config.title.len() > 0 {
+        var pad: i64 = 0
+        while pad < margin_left + config.width / 2 - config.title.len() as i64 / 2 {
+            print(" ")
+            pad = pad + 1
+        }
+        print("\x1b[1m")
+        println(config.title)
+        print(reset)
+    }
+
+    // Render rows
+    var row: i64 = 0
+    while row < config.height {
+        let y_val = max_val - (row as f64 / (config.height - 1) as f64) * (max_val - min_val)
+        print_y_label(y_val, margin_left)
+
+        if row == config.height - 1 {
+            print("└")
+        } else {
+            print("│")
+        }
+
+        // For each column, check each series
+        var col: i64 = 0
+        while col < config.width {
+            var drawn = false
+            var si: i64 = 0
+            while si < n_series && !drawn {
+                let ser = series[si as usize]
+                if ser.n > 0 {
+                    let data_idx = (col as f64 / (config.width - 1) as f64 * (ser.n - 1) as f64) as i64
+                    let data_val = ser.values[data_idx as usize]
+                    let data_row = ((max_val - data_val) / (max_val - min_val) * (config.height - 1) as f64) as i64
+
+                    if data_row == row {
+                        if ser.color_code.len() > 0 {
+                            print(ser.color_code)
+                        }
+                        if ser.marker.len() > 0 {
+                            print(ser.marker)
+                        } else {
+                            print("●")
+                        }
+                        if ser.color_code.len() > 0 {
+                            print(reset)
+                        }
+                        drawn = true
+                    }
+                }
+                si = si + 1
+            }
+            if !drawn {
+                print(" ")
+            }
+            col = col + 1
+        }
+        println("")
+        row = row + 1
+    }
+
+    // X-axis
+    var pad: i64 = 0
+    while pad < margin_left {
+        print(" ")
+        pad = pad + 1
+    }
+    print("└")
+    var j: i64 = 0
+    while j < config.width {
+        print("─")
+        j = j + 1
+    }
+    println("→")
+
+    // Legend
+    if config.show_legend {
+        println("")
+        print("  Legend: ")
+        var si: i64 = 0
+        while si < n_series {
+            let ser = series[si as usize]
+            if ser.color_code.len() > 0 { print(ser.color_code) }
+            if ser.marker.len() > 0 { print(ser.marker) } else { print("●") }
+            if ser.color_code.len() > 0 { print(reset) }
+            print(" ")
+            print(ser.label)
+            if si < n_series - 1 { print("  ") }
+            si = si + 1
+        }
+        println("")
+    }
+}
+
+// ============================================================================
+// SPARKLINE (inline mini-chart)
+// ============================================================================
+
+// Render a sparkline: compact single-line chart using block characters
+// ▁▂▃▄▅▆▇█ (8 levels)
+fn sparkline(values: &[f64], n: i64) with IO {
+    if n <= 0 { return }
+
+    let blocks = "▁▂▃▄▅▆▇█"
+
+    var min_val = values[0]
+    var max_val = values[0]
+    var i: i64 = 1
+    while i < n {
+        if values[i as usize] < min_val { min_val = values[i as usize] }
+        if values[i as usize] > max_val { max_val = values[i as usize] }
+        i = i + 1
+    }
+
+    let range = max_val - min_val
+    i = 0
+    while i < n {
+        let normalized = if range > 0.0 {
+            (values[i as usize] - min_val) / range
+        } else {
+            0.5
+        }
+        let level = (normalized * 7.0) as i64
+        let idx = if level > 7 { 7 } else { if level < 0 { 0 } else { level } }
+        // Print block character at level
+        if idx == 0 { print("▁") }
+        if idx == 1 { print("▂") }
+        if idx == 2 { print("▃") }
+        if idx == 3 { print("▄") }
+        if idx == 4 { print("▅") }
+        if idx == 5 { print("▆") }
+        if idx == 6 { print("▇") }
+        if idx == 7 { print("█") }
+        i = i + 1
+    }
+}
+
+// Sparkline with color gradient
+fn sparkline_colored(values: &[f64], n: i64) with IO {
+    if n <= 0 { return }
+
+    let reset = "\x1b[0m"
+
+    var min_val = values[0]
+    var max_val = values[0]
+    var i: i64 = 1
+    while i < n {
+        if values[i as usize] < min_val { min_val = values[i as usize] }
+        if values[i as usize] > max_val { max_val = values[i as usize] }
+        i = i + 1
+    }
+
+    let range = max_val - min_val
+    i = 0
+    while i < n {
+        let normalized = if range > 0.0 {
+            (values[i as usize] - min_val) / range
+        } else {
+            0.5
+        }
+
+        // Color based on value
+        if normalized < 0.33 { print("\x1b[34m") }       // blue (low)
+        if normalized >= 0.33 && normalized < 0.66 { print("\x1b[33m") }  // yellow (mid)
+        if normalized >= 0.66 { print("\x1b[31m") }       // red (high)
+
+        let level = (normalized * 7.0) as i64
+        if level <= 0 { print("▁") }
+        if level == 1 { print("▂") }
+        if level == 2 { print("▃") }
+        if level == 3 { print("▄") }
+        if level == 4 { print("▅") }
+        if level == 5 { print("▆") }
+        if level == 6 { print("▇") }
+        if level >= 7 { print("█") }
+
+        print(reset)
+        i = i + 1
+    }
+}
+
+// ============================================================================
+// HELPERS
+// ============================================================================
+
+fn print_y_label(value: f64, width: i64) with IO {
+    // Format value and right-align to width
+    let int_part = value as i64
+    let frac = value - int_part as f64
+    let frac_abs = if frac < 0.0 { -frac } else { frac }
+
+    // Simple formatting: right-align a number in `width` chars
+    // We approximate label length as 8 chars
+    var pad = width - 8
+    while pad > 0 {
+        print(" ")
+        pad = pad - 1
+    }
+
+    if value < 0.0 && int_part == 0 {
+        print("-0")
+    } else {
+        print(int_part)
+    }
+    print(".")
+    let d1 = (frac_abs * 10.0) as i64
+    let d2 = (frac_abs * 100.0) as i64 - d1 * 10
+    print(d1)
+    print(d2)
+    print(" ")
+}

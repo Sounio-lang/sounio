@@ -1,0 +1,486 @@
+// Epistemic Visualization: Uncertainty and Confidence Display
+//
+// Specialized plot functions for Knowledge<T> types:
+// - Error bars showing uncertainty ranges
+// - Confidence color-coded bars
+// - Provenance chain display
+// - Uncertainty comparison tables
+// - Temporal decay visualization
+
+// ============================================================================
+// ERROR BAR TYPES
+// ============================================================================
+
+struct ErrorBarEntry {
+    label: string,
+    value: f64,
+    uncertainty: f64,   // +/- range (1 sigma)
+    confidence: f64,    // [0.0, 1.0]
+}
+
+fn error_bar_entry(label: string, value: f64, uncertainty: f64, confidence: f64) -> ErrorBarEntry {
+    ErrorBarEntry {
+        label: label,
+        value: value,
+        uncertainty: uncertainty,
+        confidence: confidence,
+    }
+}
+
+// ============================================================================
+// ERROR BAR CHART
+// ============================================================================
+
+// Horizontal bar chart with error bars showing uncertainty
+fn error_bar_chart(entries: &[ErrorBarEntry], n: i64, title: string) with IO {
+    if n <= 0 { return }
+
+    let reset = "\x1b[0m"
+
+    // Find max value + uncertainty for scaling
+    var max_val = 0.0
+    var max_label_len: i64 = 0
+    var i: i64 = 0
+    while i < n {
+        let upper = entries[i as usize].value + entries[i as usize].uncertainty
+        if upper > max_val { max_val = upper }
+        let label_len = entries[i as usize].label.len() as i64
+        if label_len > max_label_len { max_label_len = label_len }
+        i = i + 1
+    }
+    if max_val <= 0.0 { max_val = 1.0 }
+
+    let width: i64 = 40
+
+    // Title
+    if title.len() > 0 {
+        print("\x1b[1m")
+        println(title)
+        print(reset)
+        println("")
+    }
+
+    // Render entries
+    i = 0
+    while i < n {
+        let entry = entries[i as usize]
+        let bar_len = (entry.value / max_val * width as f64) as i64
+        let err_lower = ((entry.value - entry.uncertainty) / max_val * width as f64) as i64
+        let err_upper = ((entry.value + entry.uncertainty) / max_val * width as f64) as i64
+
+        // Label
+        let padding = max_label_len - entry.label.len() as i64
+        var p: i64 = 0
+        while p < padding {
+            print(" ")
+            p = p + 1
+        }
+        print(entry.label)
+        print(" │ ")
+
+        // Confidence-colored bar
+        if entry.confidence >= 0.95 {
+            print("\x1b[92m")  // bright green
+        }
+        if entry.confidence >= 0.8 && entry.confidence < 0.95 {
+            print("\x1b[32m")  // green
+        }
+        if entry.confidence >= 0.5 && entry.confidence < 0.8 {
+            print("\x1b[33m")  // yellow
+        }
+        if entry.confidence < 0.5 {
+            print("\x1b[31m")  // red
+        }
+
+        // Draw bar with error range
+        var col: i64 = 0
+        while col < width {
+            if col < err_lower {
+                print(" ")
+            }
+            if col >= err_lower && col < bar_len {
+                if col >= err_lower && col < bar_len {
+                    print("▓")
+                }
+            }
+            if col == bar_len {
+                print("│")  // center mark
+            }
+            if col > bar_len && col <= err_upper {
+                print("░")
+            }
+            if col > err_upper {
+                print(" ")
+            }
+            col = col + 1
+        }
+
+        print(reset)
+
+        // Value +/- uncertainty
+        print(" ")
+        print_f64_ep(entry.value, 2)
+        print(" ± ")
+        print_f64_ep(entry.uncertainty, 2)
+
+        // Confidence badge
+        print(" [")
+        if entry.confidence >= 0.95 {
+            print("\x1b[92m")
+        }
+        if entry.confidence >= 0.8 && entry.confidence < 0.95 {
+            print("\x1b[32m")
+        }
+        if entry.confidence >= 0.5 && entry.confidence < 0.8 {
+            print("\x1b[33m")
+        }
+        if entry.confidence < 0.5 {
+            print("\x1b[31m")
+        }
+        print_f64_ep(entry.confidence * 100.0, 0)
+        print("%")
+        print(reset)
+        print("]")
+
+        println("")
+        i = i + 1
+    }
+}
+
+// ============================================================================
+// CONFIDENCE GAUGE
+// ============================================================================
+
+// Visual confidence gauge: ████████░░ 80%
+fn confidence_gauge(label: string, confidence: f64, width: i64) with IO {
+    let reset = "\x1b[0m"
+
+    print("  ")
+    print(label)
+    print(": ")
+
+    let filled = (confidence * width as f64) as i64
+    let empty = width - filled
+
+    // Color based on confidence
+    if confidence >= 0.95 { print("\x1b[92m") }
+    if confidence >= 0.8 && confidence < 0.95 { print("\x1b[32m") }
+    if confidence >= 0.5 && confidence < 0.8 { print("\x1b[33m") }
+    if confidence < 0.5 { print("\x1b[31m") }
+
+    var i: i64 = 0
+    while i < filled {
+        print("█")
+        i = i + 1
+    }
+    print(reset)
+    print("\x1b[2m")
+    i = 0
+    while i < empty {
+        print("░")
+        i = i + 1
+    }
+    print(reset)
+
+    print(" ")
+    print_f64_ep(confidence * 100.0, 1)
+    print("%")
+    println("")
+}
+
+// Multiple confidence gauges stacked
+fn confidence_dashboard(
+    labels: &[string],
+    confidences: &[f64],
+    n: i64,
+    title: string,
+) with IO {
+    let reset = "\x1b[0m"
+
+    if title.len() > 0 {
+        print("\x1b[1m")
+        println(title)
+        print(reset)
+        println("")
+    }
+
+    var i: i64 = 0
+    while i < n {
+        confidence_gauge(labels[i as usize], confidences[i as usize], 30)
+        i = i + 1
+    }
+}
+
+// ============================================================================
+// UNCERTAINTY DECOMPOSITION CHART
+// ============================================================================
+
+// Visualize uncertainty breakdown: statistical + identification + structural
+fn uncertainty_decomposition(
+    stat: f64,
+    identification: f64,
+    structural: f64,
+    total: f64,
+    title: string,
+) with IO {
+    let reset = "\x1b[0m"
+    let width: i64 = 40
+
+    if title.len() > 0 {
+        print("\x1b[1m")
+        println(title)
+        print(reset)
+    }
+
+    println("")
+    println("  Uncertainty Decomposition (GUM)")
+    println("  ─────────────────────────────────────")
+
+    // Normalize to total for proportional bars
+    let max_comp = if stat > identification {
+        if stat > structural { stat } else { structural }
+    } else {
+        if identification > structural { identification } else { structural }
+    }
+    let scale = if max_comp > 0.0 { max_comp } else { 1.0 }
+
+    // Statistical
+    print("  Statistical:     ")
+    print("\x1b[36m")  // cyan
+    let stat_len = (stat / scale * width as f64) as i64
+    var i: i64 = 0
+    while i < stat_len {
+        print("█")
+        i = i + 1
+    }
+    print(reset)
+    print(" ")
+    print_f64_ep(stat, 4)
+    println("")
+
+    // Identification
+    print("  Identification:  ")
+    print("\x1b[33m")  // yellow
+    let id_len = (identification / scale * width as f64) as i64
+    i = 0
+    while i < id_len {
+        print("█")
+        i = i + 1
+    }
+    print(reset)
+    print(" ")
+    print_f64_ep(identification, 4)
+    println("")
+
+    // Structural
+    print("  Structural:      ")
+    print("\x1b[35m")  // magenta
+    let struct_len = (structural / scale * width as f64) as i64
+    i = 0
+    while i < struct_len {
+        print("█")
+        i = i + 1
+    }
+    print(reset)
+    print(" ")
+    print_f64_ep(structural, 4)
+    println("")
+
+    println("  ─────────────────────────────────────")
+
+    // Total
+    print("  Total (GUM):     ")
+    print("\x1b[1m\x1b[37m")
+    let total_len = (total / scale * width as f64) as i64
+    i = 0
+    while i < total_len {
+        print("█")
+        i = i + 1
+    }
+    print(reset)
+    print(" ")
+    print_f64_ep(total, 4)
+    println("")
+}
+
+// ============================================================================
+// PROVENANCE CHAIN DISPLAY
+// ============================================================================
+
+// Display a provenance chain as a vertical timeline
+struct ProvenanceStep {
+    operation: string,
+    source: string,
+    uncertainty_before: f64,
+    uncertainty_after: f64,
+}
+
+fn provenance_step(op: string, src: string, unc_before: f64, unc_after: f64) -> ProvenanceStep {
+    ProvenanceStep {
+        operation: op,
+        source: src,
+        uncertainty_before: unc_before,
+        uncertainty_after: unc_after,
+    }
+}
+
+fn provenance_chain(steps: &[ProvenanceStep], n: i64, title: string) with IO {
+    let reset = "\x1b[0m"
+
+    if title.len() > 0 {
+        print("\x1b[1m")
+        println(title)
+        print(reset)
+    }
+
+    println("")
+    var i: i64 = 0
+    while i < n {
+        let step = steps[i as usize]
+
+        // Step indicator
+        if i == 0 {
+            print("  ◉ ")  // origin
+        } else {
+            print("  ├─")
+        }
+
+        // Operation
+        print("\x1b[1m")
+        print(step.operation)
+        print(reset)
+
+        // Source
+        print(" (")
+        print("\x1b[2m")
+        print(step.source)
+        print(reset)
+        print(")")
+
+        println("")
+
+        // Uncertainty change
+        if i > 0 {
+            print("  │  ε: ")
+            print_f64_ep(step.uncertainty_before, 4)
+            print(" → ")
+
+            // Color based on direction
+            if step.uncertainty_after > step.uncertainty_before {
+                print("\x1b[31m")  // red = increased
+            } else {
+                print("\x1b[32m")  // green = decreased
+            }
+            print_f64_ep(step.uncertainty_after, 4)
+            print(reset)
+            println("")
+        } else {
+            print("  │  ε: ")
+            print_f64_ep(step.uncertainty_after, 4)
+            println("")
+        }
+
+        // Connector
+        if i < n - 1 {
+            println("  │")
+        } else {
+            println("  ╰─ [current]")
+        }
+
+        i = i + 1
+    }
+}
+
+// ============================================================================
+// TEMPORAL DECAY VISUALIZATION
+// ============================================================================
+
+// Show how confidence decays over time
+fn temporal_decay(
+    timestamps: &[f64],
+    confidences: &[f64],
+    n: i64,
+    title: string,
+) with IO {
+    let reset = "\x1b[0m"
+
+    if title.len() > 0 {
+        print("\x1b[1m")
+        println(title)
+        print(reset)
+    }
+
+    println("")
+    let width: i64 = 40
+
+    var i: i64 = 0
+    while i < n {
+        let t = timestamps[i as usize]
+        let c = confidences[i as usize]
+
+        // Timestamp
+        print("  t=")
+        print_f64_ep(t, 1)
+        print("  ")
+
+        // Confidence bar
+        let filled = (c * width as f64) as i64
+
+        if c >= 0.8 { print("\x1b[32m") }
+        if c >= 0.5 && c < 0.8 { print("\x1b[33m") }
+        if c < 0.5 { print("\x1b[31m") }
+
+        var j: i64 = 0
+        while j < filled {
+            print("█")
+            j = j + 1
+        }
+        print(reset)
+
+        j = filled
+        while j < width {
+            print("░")
+            j = j + 1
+        }
+
+        print(" ")
+        print_f64_ep(c * 100.0, 1)
+        print("%")
+
+        // Decay warning
+        if c < 0.5 {
+            print(" ⚠")
+        }
+        if c < 0.2 {
+            print(" STALE")
+        }
+
+        println("")
+        i = i + 1
+    }
+}
+
+// ============================================================================
+// HELPERS
+// ============================================================================
+
+fn print_f64_ep(value: f64, decimals: i64) with IO {
+    let int_part = value as i64
+    let frac = value - int_part as f64
+    let frac_abs = if frac < 0.0 { -frac } else { frac }
+    if value < 0.0 && int_part == 0 { print("-") }
+    print(int_part)
+
+    if decimals > 0 {
+        print(".")
+        var d: i64 = 0
+        var remaining = frac_abs
+        while d < decimals {
+            remaining = remaining * 10.0
+            let digit = remaining as i64
+            print(digit)
+            remaining = remaining - digit as f64
+            d = d + 1
+        }
+    }
+}

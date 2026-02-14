@@ -1,0 +1,241 @@
+// Text-Based Drawing Canvas
+//
+// A 2D character grid for composing plots. Supports:
+// - Fixed-size character buffer
+// - Point, line, and rect drawing
+// - Unicode block characters for sub-cell resolution
+// - Axis labels and titles
+
+// ============================================================================
+// UNICODE DRAWING CHARACTERS
+// ============================================================================
+
+// Block shading characters (increasing density)
+fn shade_empty() -> string { " " }
+fn shade_light() -> string { "░" }
+fn shade_medium() -> string { "▒" }
+fn shade_dense() -> string { "▓" }
+fn shade_full() -> string { "█" }
+
+// Map a normalized value [0.0, 1.0] to a block shade character
+fn shade_char(normalized: f64) -> string {
+    if normalized <= 0.0 { return " " }
+    if normalized < 0.25 { return "░" }
+    if normalized < 0.5 { return "▒" }
+    if normalized < 0.75 { return "▓" }
+    "█"
+}
+
+// Box drawing characters
+fn box_top_left() -> string { "╔" }
+fn box_top_right() -> string { "╗" }
+fn box_bottom_left() -> string { "╚" }
+fn box_bottom_right() -> string { "╝" }
+fn box_horizontal() -> string { "═" }
+fn box_vertical() -> string { "║" }
+fn box_cross() -> string { "╬" }
+
+// Light box drawing
+fn light_top_left() -> string { "┌" }
+fn light_top_right() -> string { "┐" }
+fn light_bottom_left() -> string { "└" }
+fn light_bottom_right() -> string { "┘" }
+fn light_horizontal() -> string { "─" }
+fn light_vertical() -> string { "│" }
+fn light_cross() -> string { "┼" }
+fn light_t_right() -> string { "├" }
+fn light_t_left() -> string { "┤" }
+fn light_t_down() -> string { "┬" }
+fn light_t_up() -> string { "┴" }
+
+// Braille dot characters for high-resolution scatter plots
+// Each braille cell is 2x4 dots in a single character
+fn braille_base() -> i64 { 10240 } // Unicode U+2800
+
+// Plot markers
+fn marker_dot() -> string { "●" }
+fn marker_circle() -> string { "○" }
+fn marker_square() -> string { "■" }
+fn marker_diamond() -> string { "◆" }
+fn marker_triangle() -> string { "▲" }
+fn marker_star() -> string { "★" }
+fn marker_cross() -> string { "×" }
+fn marker_plus() -> string { "+" }
+
+// Arrows for axis labels
+fn arrow_right() -> string { "→" }
+fn arrow_up() -> string { "↑" }
+
+// ============================================================================
+// CANVAS STRUCT
+// ============================================================================
+
+struct Canvas {
+    width: i64,
+    height: i64,
+    cells: [string; 16384],  // max 128x128
+    title: string,
+}
+
+fn canvas_new(width: i64, height: i64) -> Canvas {
+    var c = Canvas {
+        width: width,
+        height: height,
+        cells: [" "; 16384],
+        title: "",
+    }
+    c
+}
+
+fn canvas_with_title(width: i64, height: i64, title: string) -> Canvas {
+    var c = canvas_new(width, height)
+    c.title = title
+    c
+}
+
+// ============================================================================
+// CANVAS OPERATIONS
+// ============================================================================
+
+// Set a single cell. Origin (0,0) is bottom-left.
+fn canvas_set(c: &!Canvas, x: i64, y: i64, ch: string) {
+    if x < 0 || x >= c.width || y < 0 || y >= c.height { return }
+    // Flip y: row 0 is bottom, stored at index (height-1-y)*width
+    let row = c.height - 1 - y
+    let idx = row * c.width + x
+    c.cells[idx as usize] = ch
+}
+
+// Get cell value
+fn canvas_get(c: &Canvas, x: i64, y: i64) -> string {
+    if x < 0 || x >= c.width || y < 0 || y >= c.height { return " " }
+    let row = c.height - 1 - y
+    let idx = row * c.width + x
+    c.cells[idx as usize]
+}
+
+// Draw a horizontal line
+fn canvas_hline(c: &!Canvas, x1: i64, x2: i64, y: i64, ch: string) {
+    var x = x1
+    while x <= x2 {
+        canvas_set(c, x, y, ch)
+        x = x + 1
+    }
+}
+
+// Draw a vertical line
+fn canvas_vline(c: &!Canvas, x: i64, y1: i64, y2: i64, ch: string) {
+    var y = y1
+    while y <= y2 {
+        canvas_set(c, x, y, ch)
+        y = y + 1
+    }
+}
+
+// Draw axes at x=0, y=0 position with margins
+fn canvas_draw_axes(c: &!Canvas, margin_left: i64, margin_bottom: i64) {
+    // Vertical axis
+    canvas_vline(c, margin_left, margin_bottom, c.height - 1, light_vertical())
+    // Horizontal axis
+    canvas_hline(c, margin_left, c.width - 1, margin_bottom, light_horizontal())
+    // Origin corner
+    canvas_set(c, margin_left, margin_bottom, light_bottom_left())
+    // Arrow tips
+    canvas_set(c, c.width - 1, margin_bottom, arrow_right())
+    canvas_set(c, margin_left, c.height - 1, arrow_up())
+}
+
+// Fill a rectangle
+fn canvas_fill_rect(c: &!Canvas, x1: i64, y1: i64, x2: i64, y2: i64, ch: string) {
+    var y = y1
+    while y <= y2 {
+        var x = x1
+        while x <= x2 {
+            canvas_set(c, x, y, ch)
+            x = x + 1
+        }
+        y = y + 1
+    }
+}
+
+// Write text horizontally starting at (x, y)
+fn canvas_text(c: &!Canvas, x: i64, y: i64, text: string) {
+    var i: i64 = 0
+    while i < text.len() as i64 {
+        canvas_set(c, x + i, y, text[i as usize])
+        i = i + 1
+    }
+}
+
+// ============================================================================
+// RENDERING
+// ============================================================================
+
+// Render canvas to terminal
+fn canvas_render(c: &Canvas) with IO {
+    // Title
+    if c.title.len() > 0 {
+        let padding = (c.width as i64 - c.title.len() as i64) / 2
+        var i: i64 = 0
+        while i < padding {
+            print(" ")
+            i = i + 1
+        }
+        print("\x1b[1m")  // bold
+        println(c.title)
+        print("\x1b[0m")  // reset
+    }
+
+    // Render rows top to bottom
+    var row: i64 = 0
+    while row < c.height {
+        var col: i64 = 0
+        while col < c.width {
+            let idx = row * c.width + col
+            print(c.cells[idx as usize])
+            col = col + 1
+        }
+        println("")
+        row = row + 1
+    }
+}
+
+// ============================================================================
+// SCALE UTILITIES
+// ============================================================================
+
+// Map a value from data range to canvas coordinate
+fn scale_linear(value: f64, min_val: f64, max_val: f64, min_px: i64, max_px: i64) -> i64 {
+    if max_val <= min_val { return min_px }
+    let range = max_val - min_val
+    let px_range = (max_px - min_px) as f64
+    let normalized = (value - min_val) / range
+    let result = min_px as f64 + normalized * px_range
+    result as i64
+}
+
+// Find min of a float array
+fn array_min(data: &[f64], n: i64) -> f64 {
+    var min_val = data[0]
+    var i: i64 = 1
+    while i < n {
+        if data[i as usize] < min_val {
+            min_val = data[i as usize]
+        }
+        i = i + 1
+    }
+    min_val
+}
+
+// Find max of a float array
+fn array_max(data: &[f64], n: i64) -> f64 {
+    var max_val = data[0]
+    var i: i64 = 1
+    while i < n {
+        if data[i as usize] > max_val {
+            max_val = data[i as usize]
+        }
+        i = i + 1
+    }
+    max_val
+}

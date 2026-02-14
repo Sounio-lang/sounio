@@ -1,0 +1,291 @@
+// Scatter Plot Rendering
+//
+// 2D scatter plots with:
+// - Multiple series with distinct markers
+// - Automatic axis scaling
+// - Quadrant labels
+// - Correlation display
+
+// ============================================================================
+// SCATTER PLOT TYPES
+// ============================================================================
+
+struct ScatterPoint {
+    x: f64,
+    y: f64,
+}
+
+struct ScatterSeries {
+    points: [ScatterPoint; 512],
+    n: i64,
+    label: string,
+    marker: string,
+    color_code: string,
+}
+
+struct ScatterConfig {
+    title: string,
+    width: i64,
+    height: i64,
+    x_label: string,
+    y_label: string,
+    show_axes: bool,
+    show_correlation: bool,
+}
+
+fn scatter_point(x: f64, y: f64) -> ScatterPoint {
+    ScatterPoint { x: x, y: y }
+}
+
+fn scatter_series_new(label: string, marker: string, color: string) -> ScatterSeries {
+    ScatterSeries {
+        points: [scatter_point(0.0, 0.0); 512],
+        n: 0,
+        label: label,
+        marker: marker,
+        color_code: color,
+    }
+}
+
+fn scatter_series_add(s: &!ScatterSeries, x: f64, y: f64) {
+    if s.n < 512 {
+        s.points[s.n as usize] = scatter_point(x, y)
+        s.n = s.n + 1
+    }
+}
+
+fn scatter_config_default() -> ScatterConfig {
+    ScatterConfig {
+        title: "",
+        width: 60,
+        height: 20,
+        x_label: "x",
+        y_label: "y",
+        show_axes: true,
+        show_correlation: true,
+    }
+}
+
+fn scatter_config_new(title: string, width: i64, height: i64) -> ScatterConfig {
+    ScatterConfig {
+        title: title,
+        width: width,
+        height: height,
+        x_label: "x",
+        y_label: "y",
+        show_axes: true,
+        show_correlation: true,
+    }
+}
+
+// ============================================================================
+// SCATTER PLOT RENDERING
+// ============================================================================
+
+// Plot x,y arrays as a scatter plot
+fn scatter_plot(
+    xs: &[f64],
+    ys: &[f64],
+    n: i64,
+    title: string,
+) with IO {
+    let config = scatter_config_new(title, 60, 20)
+    scatter_plot_arrays(xs, ys, n, &config)
+}
+
+fn scatter_plot_arrays(
+    xs: &[f64],
+    ys: &[f64],
+    n: i64,
+    config: &ScatterConfig,
+) with IO {
+    if n <= 0 { return }
+
+    let reset = "\x1b[0m"
+    let margin_left: i64 = 10
+
+    // Data range
+    var x_min = xs[0]
+    var x_max = xs[0]
+    var y_min = ys[0]
+    var y_max = ys[0]
+    var i: i64 = 1
+    while i < n {
+        if xs[i as usize] < x_min { x_min = xs[i as usize] }
+        if xs[i as usize] > x_max { x_max = xs[i as usize] }
+        if ys[i as usize] < y_min { y_min = ys[i as usize] }
+        if ys[i as usize] > y_max { y_max = ys[i as usize] }
+        i = i + 1
+    }
+
+    // Padding
+    let x_range = x_max - x_min
+    let y_range = y_max - y_min
+    let x_pad = if x_range > 0.0 { x_range * 0.05 } else { 1.0 }
+    let y_pad = if y_range > 0.0 { y_range * 0.05 } else { 1.0 }
+    x_min = x_min - x_pad
+    x_max = x_max + x_pad
+    y_min = y_min - y_pad
+    y_max = y_max + y_pad
+
+    // Title
+    if config.title.len() > 0 {
+        var pad: i64 = 0
+        while pad < margin_left + config.width / 2 - config.title.len() as i64 / 2 {
+            print(" ")
+            pad = pad + 1
+        }
+        print("\x1b[1m")
+        println(config.title)
+        print(reset)
+    }
+
+    // Build occupancy grid
+    var grid: [bool; 4096] = [false; 4096]  // max 64x64
+    i = 0
+    while i < n {
+        let col = ((xs[i as usize] - x_min) / (x_max - x_min) * (config.width - 1) as f64) as i64
+        let row = config.height - 1 - ((ys[i as usize] - y_min) / (y_max - y_min) * (config.height - 1) as f64) as i64
+        if row >= 0 && row < config.height && col >= 0 && col < config.width {
+            grid[(row * config.width + col) as usize] = true
+        }
+        i = i + 1
+    }
+
+    // Render
+    var row: i64 = 0
+    while row < config.height {
+        let y_val = y_max - (row as f64 / (config.height - 1) as f64) * (y_max - y_min)
+
+        // Y-axis label
+        print_y_label_scatter(y_val, margin_left)
+
+        if row == config.height - 1 {
+            print("└")
+        } else {
+            print("│")
+        }
+
+        var col: i64 = 0
+        while col < config.width {
+            if grid[(row * config.width + col) as usize] {
+                print("\x1b[35m")  // magenta
+                print("●")
+                print(reset)
+            } else {
+                print(" ")
+            }
+            col = col + 1
+        }
+        println("")
+        row = row + 1
+    }
+
+    // X-axis
+    var pad: i64 = 0
+    while pad < margin_left {
+        print(" ")
+        pad = pad + 1
+    }
+    print("└")
+    var j: i64 = 0
+    while j < config.width {
+        print("─")
+        j = j + 1
+    }
+    println("→")
+
+    // Correlation
+    if config.show_correlation {
+        let r = pearson_corr(xs, ys, n)
+        print("  r = ")
+        print_f64_scatter(r, 4)
+        println("")
+    }
+}
+
+// ============================================================================
+// STATISTICS
+// ============================================================================
+
+fn pearson_corr(xs: &[f64], ys: &[f64], n: i64) -> f64 {
+    if n <= 1 { return 0.0 }
+
+    var sum_x = 0.0
+    var sum_y = 0.0
+    var sum_xy = 0.0
+    var sum_x2 = 0.0
+    var sum_y2 = 0.0
+
+    var i: i64 = 0
+    while i < n {
+        sum_x = sum_x + xs[i as usize]
+        sum_y = sum_y + ys[i as usize]
+        sum_xy = sum_xy + xs[i as usize] * ys[i as usize]
+        sum_x2 = sum_x2 + xs[i as usize] * xs[i as usize]
+        sum_y2 = sum_y2 + ys[i as usize] * ys[i as usize]
+        i = i + 1
+    }
+
+    let nf = n as f64
+    let num = nf * sum_xy - sum_x * sum_y
+    let den_x = nf * sum_x2 - sum_x * sum_x
+    let den_y = nf * sum_y2 - sum_y * sum_y
+
+    if den_x <= 0.0 || den_y <= 0.0 { return 0.0 }
+
+    let den = sqrt_approx(den_x * den_y)
+    if den <= 0.0 { return 0.0 }
+    num / den
+}
+
+fn sqrt_approx(x: f64) -> f64 {
+    if x <= 0.0 { return 0.0 }
+    var y = x
+    var i = 0
+    while i < 10 {
+        y = (y + x / y) / 2.0
+        i = i + 1
+    }
+    y
+}
+
+// ============================================================================
+// HELPERS
+// ============================================================================
+
+fn print_y_label_scatter(value: f64, width: i64) with IO {
+    var pad = width - 8
+    while pad > 0 {
+        print(" ")
+        pad = pad - 1
+    }
+    let int_part = value as i64
+    let frac = value - int_part as f64
+    let frac_abs = if frac < 0.0 { -frac } else { frac }
+    if value < 0.0 && int_part == 0 { print("-0") } else { print(int_part) }
+    print(".")
+    let d1 = (frac_abs * 10.0) as i64
+    let d2 = (frac_abs * 100.0) as i64 - d1 * 10
+    print(d1)
+    print(d2)
+    print(" ")
+}
+
+fn print_f64_scatter(value: f64, decimals: i64) with IO {
+    let int_part = value as i64
+    let frac = value - int_part as f64
+    let frac_abs = if frac < 0.0 { -frac } else { frac }
+    if value < 0.0 && int_part == 0 { print("-") }
+    print(int_part)
+    print(".")
+    var d: i64 = 0
+    var remaining = frac_abs
+    while d < decimals {
+        remaining = remaining * 10.0
+        let digit = remaining as i64
+        print(digit)
+        remaining = remaining - digit as f64
+        d = d + 1
+    }
+}

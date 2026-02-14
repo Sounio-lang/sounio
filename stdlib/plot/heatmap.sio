@@ -1,0 +1,422 @@
+// 2D Heatmap Rendering
+//
+// Grid-based heatmaps using Unicode block characters and ANSI colors.
+// Supports:
+// - Float matrices
+// - Custom color scales
+// - Row/column labels
+// - Color legend
+
+// ============================================================================
+// HEATMAP TYPES
+// ============================================================================
+
+struct HeatmapConfig {
+    title: string,
+    cell_width: i64,      // characters per cell (1=compact, 2=normal, 3=wide)
+    show_values: bool,    // show numeric values in cells
+    show_legend: bool,    // show color scale legend
+    color_scale: i64,     // 0=blue-red, 1=grayscale, 2=green-red
+}
+
+fn heatmap_config_default() -> HeatmapConfig {
+    HeatmapConfig {
+        title: "",
+        cell_width: 2,
+        show_values: false,
+        show_legend: true,
+        color_scale: 0,
+    }
+}
+
+fn heatmap_config_new(title: string) -> HeatmapConfig {
+    HeatmapConfig {
+        title: title,
+        cell_width: 2,
+        show_values: false,
+        show_legend: true,
+        color_scale: 0,
+    }
+}
+
+// ============================================================================
+// HEATMAP RENDERING
+// ============================================================================
+
+// Render a 2D matrix as a heatmap
+// data: row-major array
+// rows: number of rows
+// cols: number of columns
+fn heatmap(data: &[f64], rows: i64, cols: i64, title: string) with IO {
+    let config = heatmap_config_new(title)
+    heatmap_matrix(data, rows, cols, &config)
+}
+
+fn heatmap_matrix(
+    data: &[f64],
+    rows: i64,
+    cols: i64,
+    config: &HeatmapConfig,
+) with IO {
+    if rows <= 0 || cols <= 0 { return }
+
+    let reset = "\x1b[0m"
+
+    // Find range
+    var min_val = data[0]
+    var max_val = data[0]
+    var i: i64 = 0
+    while i < rows * cols {
+        if data[i as usize] < min_val { min_val = data[i as usize] }
+        if data[i as usize] > max_val { max_val = data[i as usize] }
+        i = i + 1
+    }
+    let range = max_val - min_val
+    if range <= 0.0 { return }
+
+    // Title
+    if config.title.len() > 0 {
+        print("\x1b[1m")
+        println(config.title)
+        print(reset)
+        println("")
+    }
+
+    // Top border
+    print("    ┌")
+    var c: i64 = 0
+    while c < cols * config.cell_width {
+        print("─")
+        c = c + 1
+    }
+    println("┐")
+
+    // Render rows
+    var r: i64 = 0
+    while r < rows {
+        // Row label
+        print_row_label(r, 4)
+        print("│")
+
+        c = 0
+        while c < cols {
+            let idx = r * cols + c
+            let normalized = (data[idx as usize] - min_val) / range
+
+            // Apply color
+            heatmap_cell_color(normalized, config.color_scale)
+
+            // Cell content
+            if config.cell_width == 1 {
+                print(shade_char_hm(normalized))
+            }
+            if config.cell_width >= 2 {
+                print(shade_char_hm(normalized))
+                print(shade_char_hm(normalized))
+            }
+            if config.cell_width >= 3 {
+                print(shade_char_hm(normalized))
+            }
+
+            print(reset)
+            c = c + 1
+        }
+
+        println("│")
+        r = r + 1
+    }
+
+    // Bottom border
+    print("    └")
+    c = 0
+    while c < cols * config.cell_width {
+        print("─")
+        c = c + 1
+    }
+    println("┘")
+
+    // Legend
+    if config.show_legend {
+        println("")
+        print("    ")
+        print_heatmap_legend(min_val, max_val, config.color_scale)
+        println("")
+    }
+}
+
+// ============================================================================
+// LABELED HEATMAP
+// ============================================================================
+
+// Heatmap with row and column labels
+fn heatmap_labeled(
+    data: &[f64],
+    rows: i64,
+    cols: i64,
+    row_labels: &[string],
+    col_labels: &[string],
+    title: string,
+) with IO {
+    let reset = "\x1b[0m"
+
+    if rows <= 0 || cols <= 0 { return }
+
+    // Find max label width
+    var max_label: i64 = 0
+    var i: i64 = 0
+    while i < rows {
+        let l = row_labels[i as usize].len() as i64
+        if l > max_label { max_label = l }
+        i = i + 1
+    }
+    max_label = max_label + 1
+
+    // Find range
+    var min_val = data[0]
+    var max_val = data[0]
+    i = 0
+    while i < rows * cols {
+        if data[i as usize] < min_val { min_val = data[i as usize] }
+        if data[i as usize] > max_val { max_val = data[i as usize] }
+        i = i + 1
+    }
+    let range = if max_val > min_val { max_val - min_val } else { 1.0 }
+
+    // Title
+    if title.len() > 0 {
+        print("\x1b[1m")
+        println(title)
+        print(reset)
+    }
+
+    // Column headers
+    var pad: i64 = 0
+    while pad < max_label + 1 {
+        print(" ")
+        pad = pad + 1
+    }
+    var c: i64 = 0
+    while c < cols {
+        print(" ")
+        print(col_labels[c as usize])
+        c = c + 1
+    }
+    println("")
+
+    // Rows
+    var r: i64 = 0
+    while r < rows {
+        // Label with padding
+        let label = row_labels[r as usize]
+        let lpad = max_label - label.len() as i64
+        var p: i64 = 0
+        while p < lpad {
+            print(" ")
+            p = p + 1
+        }
+        print(label)
+        print(" ")
+
+        c = 0
+        while c < cols {
+            let idx = r * cols + c
+            let normalized = (data[idx as usize] - min_val) / range
+
+            heatmap_cell_color(normalized, 0)
+            print(shade_char_hm(normalized))
+            print(shade_char_hm(normalized))
+            print(reset)
+            c = c + 1
+        }
+        println("")
+        r = r + 1
+    }
+}
+
+// ============================================================================
+// CORRELATION MATRIX
+// ============================================================================
+
+// Specialized heatmap for correlation matrices [-1, 1]
+fn correlation_matrix(
+    data: &[f64],
+    n: i64,
+    labels: &[string],
+    title: string,
+) with IO {
+    let reset = "\x1b[0m"
+
+    if title.len() > 0 {
+        print("\x1b[1m")
+        println(title)
+        print(reset)
+    }
+
+    // Find max label width
+    var max_label: i64 = 0
+    var i: i64 = 0
+    while i < n {
+        let l = labels[i as usize].len() as i64
+        if l > max_label { max_label = l }
+        i = i + 1
+    }
+    max_label = max_label + 1
+
+    // Column headers
+    var pad: i64 = 0
+    while pad < max_label + 1 {
+        print(" ")
+        pad = pad + 1
+    }
+    var c: i64 = 0
+    while c < n {
+        print("  ")
+        // Truncate label to 2 chars
+        if labels[c as usize].len() >= 2 {
+            print(labels[c as usize][0])
+            print(labels[c as usize][1])
+        } else {
+            print(labels[c as usize])
+            print(" ")
+        }
+        c = c + 1
+    }
+    println("")
+
+    // Rows
+    var r: i64 = 0
+    while r < n {
+        let label = labels[r as usize]
+        let lpad = max_label - label.len() as i64
+        var p: i64 = 0
+        while p < lpad {
+            print(" ")
+            p = p + 1
+        }
+        print(label)
+        print(" ")
+
+        c = 0
+        while c < n {
+            let val = data[(r * n + c) as usize]
+            // Map [-1, 1] to [0, 1] for coloring
+            let normalized = (val + 1.0) / 2.0
+
+            // Blue for negative, red for positive
+            if val < -0.3 {
+                print("\x1b[34m")  // blue
+            }
+            if val >= -0.3 && val < 0.3 {
+                print("\x1b[37m")  // white/neutral
+            }
+            if val >= 0.3 {
+                print("\x1b[31m")  // red
+            }
+
+            // Print value as 2-char
+            if val >= 0.0 { print(" ") } else { print("-") }
+            let abs_val = if val < 0.0 { -val } else { val }
+            let d1 = (abs_val * 10.0) as i64
+            print(".")
+            print(d1)
+
+            print(reset)
+            c = c + 1
+        }
+        println("")
+        r = r + 1
+    }
+
+    // Legend
+    println("")
+    print("  ")
+    print("\x1b[34m")
+    print("████")
+    print(reset)
+    print(" -1.0  ")
+    print("\x1b[37m")
+    print("████")
+    print(reset)
+    print("  0.0  ")
+    print("\x1b[31m")
+    print("████")
+    print(reset)
+    print(" +1.0")
+    println("")
+}
+
+// ============================================================================
+// HELPERS
+// ============================================================================
+
+fn shade_char_hm(normalized: f64) -> string {
+    if normalized <= 0.0 { return " " }
+    if normalized < 0.25 { return "░" }
+    if normalized < 0.5 { return "▒" }
+    if normalized < 0.75 { return "▓" }
+    "█"
+}
+
+fn heatmap_cell_color(normalized: f64, scale: i64) with IO {
+    if scale == 0 {
+        // Blue-red scale
+        if normalized < 0.25 { print("\x1b[34m") }
+        if normalized >= 0.25 && normalized < 0.5 { print("\x1b[36m") }
+        if normalized >= 0.5 && normalized < 0.75 { print("\x1b[33m") }
+        if normalized >= 0.75 { print("\x1b[31m") }
+    }
+    if scale == 1 {
+        // Grayscale
+        if normalized < 0.5 { print("\x1b[90m") }
+        if normalized >= 0.5 { print("\x1b[37m") }
+    }
+    if scale == 2 {
+        // Green-red
+        if normalized < 0.5 { print("\x1b[32m") }
+        if normalized >= 0.5 { print("\x1b[31m") }
+    }
+}
+
+fn print_row_label(row: i64, width: i64) with IO {
+    let pad = width - 2
+    var p: i64 = 0
+    while p < pad {
+        print(" ")
+        p = p + 1
+    }
+    print(row)
+    print(" ")
+}
+
+fn print_heatmap_legend(min_val: f64, max_val: f64, scale: i64) with IO {
+    let reset = "\x1b[0m"
+
+    // Print gradient bar
+    var i: i64 = 0
+    while i < 20 {
+        let normalized = i as f64 / 19.0
+        heatmap_cell_color(normalized, scale)
+        print("█")
+        i = i + 1
+    }
+    print(reset)
+
+    // Range labels
+    print("  ")
+    print_f64_hm(min_val)
+    print(" → ")
+    print_f64_hm(max_val)
+}
+
+fn print_f64_hm(value: f64) with IO {
+    let int_part = value as i64
+    let frac = value - int_part as f64
+    let frac_abs = if frac < 0.0 { -frac } else { frac }
+    if value < 0.0 && int_part == 0 { print("-") }
+    print(int_part)
+    print(".")
+    let d1 = (frac_abs * 10.0) as i64
+    let d2 = (frac_abs * 100.0) as i64 - d1 * 10
+    print(d1)
+    print(d2)
+}
