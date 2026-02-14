@@ -87,6 +87,242 @@ fn stage_output_empty(stage: i32) -> StageOutput {
 }
 
 // ============================================================================
+// TYPE STUBS (for standalone compilation - real types from self-hosted suite)
+// ============================================================================
+//
+// These are minimal stub types that allow driver.sio to compile standalone.
+// When loaded as part of the self-hosted suite, the real types from
+// parser/ast.sio will be available and these stubs are not used.
+
+struct StringList {
+    head_buf: [i8; 128],
+    head_len: i64,
+    tail: Option<Box<StringList>>,
+}
+
+struct AstPath {
+    segments: StringList,
+    seg_count: i64,
+}
+
+struct ItemList {
+    head: Item,
+    tail: Option<Box<ItemList>>,
+}
+
+enum ItemKind {
+    ItemFn,
+    ItemStruct,
+    ItemEnum,
+    ItemImpl,
+    ItemTypeAlias,
+    ItemUse,
+}
+
+struct Item {
+    kind: ItemKind,
+    name: Name,
+    use_path: AstPath,
+    use_glob: bool,
+    is_pub: bool,
+}
+
+struct Name {
+    buf: [i8; 128],
+    len: i64,
+}
+
+struct Program {
+    module_path: AstPath,
+    items: Option<Box<ItemList>>,
+}
+
+struct LexerState {
+    tokens: [Token; 65536],
+    token_count: i64,
+}
+
+struct Token {
+    kind: i32,
+    lexeme: [i8; 256],
+    lexeme_len: i64,
+}
+
+struct ResolveResult {
+    symbols: i64,
+    error_count: i64,
+    had_error: bool,
+}
+
+struct ResolveBatchResult {
+    results: [ResolveResult; 64],
+    count: i64,
+    error_count: i64,
+    had_error: bool,
+}
+
+// Stub functions (real implementations from self-hosted suite)
+
+fn read_source_file(path: string) -> LexerState with IO, Mut, Div, Panic {
+    LexerState {
+        tokens: [Token { kind: 0, lexeme: [0; 256], lexeme_len: 0 }; 65536],
+        token_count: 0,
+    }
+}
+
+fn parse_program_preloaded(token_count: i64) -> Program with Mut, IO, Panic, Div, Alloc {
+    empty_program()
+}
+
+fn resolve_modules(programs: [Program; 64], count: i64) -> ResolveBatchResult with Mut, Panic, Div, Alloc, IO {
+    ResolveBatchResult {
+        results: [ResolveResult { symbols: 0, error_count: 0, had_error: false }; 64],
+        count: 0,
+        error_count: 0,
+        had_error: true,
+    }
+}
+
+// ============================================================================
+// STRING HELPERS (bootstrap subset)
+// ============================================================================
+
+fn str_len(s: string) -> i64 with Mut, Panic, Div {
+    // Count bytes until null terminator
+    var n: i64 = 0
+    while n < 65536 {
+        if s[n as usize] == 0 { return n }
+        n = n + 1
+    }
+    65536
+}
+
+fn str_eq(a: string, b: string) -> bool with Mut, Panic, Div {
+    let len_a = str_len(a)
+    let len_b = str_len(b)
+    if len_a != len_b { return false }
+
+    var i: i64 = 0
+    while i < len_a {
+        if a[i as usize] != b[i as usize] { return false }
+        i = i + 1
+    }
+    true
+}
+
+fn str_concat_buf(a: string, b: string, out: [i8; 1024]) -> ([i8; 1024], i64) with Mut, Panic, Div {
+    // Concatenate a + b into out buffer, return (out, length)
+    var buf = out
+    var pos: i64 = 0
+
+    let len_a = str_len(a)
+    var i: i64 = 0
+    while i < len_a && pos < 1024 {
+        buf[pos as usize] = a[i as usize]
+        pos = pos + 1
+        i = i + 1
+    }
+
+    let len_b = str_len(b)
+    var j: i64 = 0
+    while j < len_b && pos < 1024 {
+        buf[pos as usize] = b[j as usize]
+        pos = pos + 1
+        j = j + 1
+    }
+
+    if pos < 1024 { buf[pos as usize] = 0 }
+    (buf, pos)
+}
+
+// ============================================================================
+// MULTI-MODULE COMPILATION TYPES
+// ============================================================================
+
+struct ModulePath {
+    segments: [string; 16],
+    seg_count: i64,
+}
+
+struct ModuleEntry {
+    path: string,
+    loaded: bool,
+}
+
+struct ModuleRegistry {
+    modules: [ModuleEntry; 128],
+    count: i64,
+}
+
+fn empty_module_path() -> ModulePath {
+    ModulePath {
+        segments: [""; 16],
+        seg_count: 0,
+    }
+}
+
+fn empty_module_entry() -> ModuleEntry {
+    ModuleEntry {
+        path: "",
+        loaded: false,
+    }
+}
+
+fn module_registry_new() -> ModuleRegistry {
+    ModuleRegistry {
+        modules: [empty_module_entry(); 128],
+        count: 0,
+    }
+}
+
+fn module_registry_contains(reg: ModuleRegistry, path: string) -> bool with Mut, Panic, Div {
+    var i: i64 = 0
+    while i < reg.count && i < 128 {
+        if str_eq(reg.modules[i as usize].path, path) {
+            return true
+        }
+        i = i + 1
+    }
+    false
+}
+
+fn module_registry_add(reg: ModuleRegistry, path: string) -> ModuleRegistry with Mut, Panic, Div {
+    var r = reg
+    if !module_registry_contains(r, path) && r.count < 128 {
+        r.modules[r.count as usize] = ModuleEntry {
+            path: path,
+            loaded: true,
+        }
+        r.count = r.count + 1
+    }
+    r
+}
+
+// ============================================================================
+// MODULE RESOLUTION HELPERS (bootstrap subset with hardcoded common paths)
+// ============================================================================
+
+fn resolve_module_file_path(module_path: string) -> (bool, string) with IO, Mut, Panic, Div {
+    // Bootstrap module resolution with hardcoded common paths.
+    // For generalized resolution, use the host resolver.
+
+    // Core library modules
+    if str_eq(module_path, "core") { return (true, "stdlib/core/lib.sio") }
+    if str_eq(module_path, "core::option") { return (true, "stdlib/core/option.sio") }
+    if str_eq(module_path, "core::result") { return (true, "stdlib/core/result.sio") }
+    if str_eq(module_path, "core::prelude") { return (true, "stdlib/core/prelude.sio") }
+
+    // Compiler modules
+    if str_eq(module_path, "compiler::bootstrap") { return (true, "stdlib/compiler/bootstrap/driver.sio") }
+    if str_eq(module_path, "compiler::lexer") { return (true, "stdlib/compiler/lexer/mod.sio") }
+    if str_eq(module_path, "compiler::parser") { return (true, "stdlib/compiler/parser/mod.sio") }
+    if str_eq(module_path, "compiler::types") { return (true, "stdlib/compiler/types/mod.sio") }
+
+    // Not found in hardcoded table
+    (false, "")
+}
+
+// ============================================================================
 // PUBLIC DRIVER API
 // ============================================================================
 
@@ -1525,6 +1761,205 @@ fn compile_source(
     out.code_len = pos
     out
 }
+
+// ============================================================================
+// MULTI-MODULE COMPILATION
+// ============================================================================
+//
+// NOTE: This module compilation path assumes the self-hosted suite
+// (parser, resolver, checker) is loaded. These functions are available
+// when driver.sio is loaded as part of the full self-hosted compilation suite.
+//
+// When used standalone, compile_file (single-file bootstrap path) is used instead.
+
+fn ast_path_to_string(path: AstPath) -> string with Mut, Panic, Div, Alloc {
+    // Convert AstPath to string representation for module lookup.
+    // For bootstrap: handle common patterns.
+    //
+    // AstPath structure: StringList of segments + seg_count
+    // Example: std::io::File -> segments = ["std", "io", "File"]
+
+    if path.seg_count == 0 { return "" }
+
+    // For bootstrap, build a simple string from first segment only
+    // (full path concatenation requires string builder not available in bootstrap)
+
+    var buf: [i8; 256] = [0; 256]
+    let seg = path.segments
+    var i: i64 = 0
+    while i < seg.head_len && i < 256 {
+        buf[i as usize] = seg.head_buf[i as usize]
+        i = i + 1
+    }
+    if i < 256 { buf[i as usize] = 0 }
+
+    // Convert buffer to string by copying to a fresh string
+    // (This is a simplified bootstrap version; real impl would concatenate all segments)
+    ""
+}
+
+fn extract_imports_from_program(prog: Program) -> ([string; 64], i64) with Mut, Panic, Div, Alloc {
+    // Extract use/import declarations from Program AST.
+    // Returns (module_paths, count)
+
+    var paths: [string; 64] = [""; 64]
+    var count: i64 = 0
+
+    // For bootstrap: return empty imports list.
+    // Full implementation would traverse AST and extract use/import items.
+    //
+    // TODO: Implement AST traversal when ItemKind enum is available:
+    // - Match on prog.items Some/None
+    // - For each Item, check if kind == ItemKind::ItemUse
+    // - Extract use_path and convert to string
+
+    (paths, count)
+}
+
+fn load_module_recursive(
+    module_path: string,
+    registry: ModuleRegistry,
+    programs: [Program; 64],
+    loaded: i64
+) -> (ModuleRegistry, [Program; 64], i64, bool) with IO, Mut, Panic, Div, Alloc {
+    // Load a module and its transitive dependencies.
+    // Returns (updated_registry, updated_programs, new_loaded_count, had_error)
+
+    // Check if already loaded
+    if module_registry_contains(registry, module_path) {
+        return (registry, programs, loaded, false)
+    }
+
+    // Resolve file path
+    let resolution = resolve_module_file_path(module_path)
+    if !resolution.0 {
+        // Module not found
+        return (registry, programs, loaded, true)
+    }
+
+    let file_path = resolution.1
+
+    // Load and parse
+    let state = read_source_file(file_path)
+    let prog = parse_program_preloaded(state.token_count)
+
+    // Add to registry
+    var reg = module_registry_add(registry, module_path)
+
+    // Add to programs array
+    var progs = programs
+    var load_count = loaded
+    if load_count < 64 {
+        progs[load_count as usize] = prog
+        load_count = load_count + 1
+    }
+
+    // Extract imports from this module and load them recursively
+    let imports = extract_imports_from_program(prog)
+    var i: i64 = 0
+    var had_error: bool = false
+    while i < imports.1 && i < 64 {
+        let import_path = imports.0[i as usize]
+        let rec = load_module_recursive(import_path, reg, progs, load_count)
+        reg = rec.0
+        progs = rec.1
+        load_count = rec.2
+        if rec.3 { had_error = true }
+        i = i + 1
+    }
+
+    (reg, progs, load_count, had_error)
+}
+
+fn compile_multimodule_program(main_path: string) -> CompileArtifact with IO, Mut, Div, Panic, Alloc {
+    // Multi-module compilation with full parse + resolve + check pipeline.
+    //
+    // This function assumes the self-hosted suite (lexer, parser, resolver, checker)
+    // is loaded and provides: read_source_file, parse_program_preloaded, resolve_modules.
+
+    var out = compile_artifact_empty()
+
+    // Step 1: Parse main file
+    let main_state = read_source_file(main_path)
+    let main_prog = parse_program_preloaded(main_state.token_count)
+
+    // Step 2: Initialize module registry and programs array
+    var registry = module_registry_new()
+    var programs: [Program; 64] = [empty_program(); 64]
+    programs[0] = main_prog
+    var loaded: i64 = 1
+
+    // Add main to registry
+    registry = module_registry_add(registry, main_path)
+
+    // Step 3: Load all imported modules recursively
+    let imports = extract_imports_from_program(main_prog)
+    var i: i64 = 0
+    var had_error: bool = false
+    while i < imports.1 && i < 64 {
+        let import_path = imports.0[i as usize]
+        let rec = load_module_recursive(import_path, registry, programs, loaded)
+        registry = rec.0
+        programs = rec.1
+        loaded = rec.2
+        if rec.3 { had_error = true }
+        i = i + 1
+    }
+
+    if had_error {
+        var msg: [i8; 64] = [0; 64]
+        // "module_not_found"
+        msg[0] = 109; msg[1] = 111; msg[2] = 100; msg[3] = 117; msg[4] = 108; msg[5] = 101
+        msg[6] = 95; msg[7] = 110; msg[8] = 111; msg[9] = 116; msg[10] = 95; msg[11] = 102
+        msg[12] = 111; msg[13] = 117; msg[14] = 110; msg[15] = 100
+        out.exit_code = 2
+        return emit_diag(out, msg, 16)
+    }
+
+    // Step 4: Resolve all modules together
+    let resolve_result = resolve_modules(programs, loaded)
+    if resolve_result.had_error {
+        var msg: [i8; 64] = [0; 64]
+        // "resolve_failed"
+        msg[0] = 114; msg[1] = 101; msg[2] = 115; msg[3] = 111; msg[4] = 108; msg[5] = 118; msg[6] = 101
+        msg[7] = 95; msg[8] = 102; msg[9] = 97; msg[10] = 105; msg[11] = 108; msg[12] = 101; msg[13] = 100
+        out.exit_code = 2
+        return emit_diag(out, msg, 14)
+    }
+
+    // Step 5: For bootstrap, return success with empty bytecode
+    // (Full implementation would type check, lower to IR, and serialize)
+    out.ok = true
+    out.exit_code = 0
+    out.code_len = 0
+    out
+}
+
+fn empty_program() -> Program {
+    Program {
+        module_path: empty_path(),
+        items: None,
+    }
+}
+
+fn empty_path() -> AstPath {
+    AstPath {
+        segments: empty_string_list(),
+        seg_count: 0,
+    }
+}
+
+fn empty_string_list() -> StringList {
+    StringList {
+        head_buf: [0; 128],
+        head_len: 0,
+        tail: None,
+    }
+}
+
+// ============================================================================
+// SINGLE-FILE COMPILATION (existing bootstrap path)
+// ============================================================================
 
 fn compile_file(path: string, options: CompileOptions) -> CompileArtifact with IO, Mut, Div, Panic {
     // Note: keep this bootstrap path minimal. Directory/module resolution is
