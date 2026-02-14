@@ -111,16 +111,19 @@ fn gpu_lower_ops(buf: PtxBuf, kernel: GpuKernelIr) -> PtxBuf with Mut, Panic, Di
 
 // Lower a single GPU operation to PTX
 fn gpu_lower_op(buf: PtxBuf, op: GpuOp, kernel: GpuKernelIr) -> PtxBuf with Mut, Panic, Div {
-    match op {
-        GpuOp::GpuGetTid { dst_reg, axis } => {
+    // Struct-first representation avoids enum field destructuring in the
+    // self-hosted IR; switch on opcode and use struct fields explicitly.
+    let opcode = op.opcode
+    match opcode {
+        GpuOpcode::GpuGetTid => {
             // mov.u32 %rN, %tid.x
-            let tid_special = if axis == 0 { "%tid.x" }
-                             else if axis == 1 { "%tid.y" }
+            let tid_special = if op.axis == 0 { "%tid.x" }
+                             else if op.axis == 1 { "%tid.y" }
                              else { "%tid.z" }
-            ptx_push_binary2(buf, ptx_opcode_mov_u32(), gpu_reg_u32(dst_reg), tid_special)
+            ptx_push_binary2(buf, ptx_opcode_mov_u32(), gpu_reg_u32(op.dst_reg), tid_special)
         }
 
-        GpuOp::GpuCvt { dst_reg, src_reg, dst_ty, src_ty } => {
+        GpuOpcode::GpuCvt => {
             // cvt.dst_ty.src_ty %rdN, %rM
             //
             // For now, hardcode the specific conversions we need.
@@ -128,80 +131,80 @@ fn gpu_lower_op(buf: PtxBuf, op: GpuOp, kernel: GpuKernelIr) -> PtxBuf with Mut,
             //
             // TODO: Build opcode string dynamically when we have str_concat
             let opcode = ptx_opcode_cvt_u64_u32()
-            let dst_str = gpu_reg_u64(dst_reg)
-            let src_str = gpu_reg_u32(src_reg)
+            let dst_str = gpu_reg_u64(op.dst_reg)
+            let src_str = gpu_reg_u32(op.src_reg)
 
             ptx_push_binary2(buf, opcode, dst_str, src_str)
         }
 
-        GpuOp::GpuMulImm { dst_reg, lhs_reg, rhs_imm, ty } => {
+        GpuOpcode::GpuMulImm => {
             // mul.lo.u64 %rdN, %rdM, imm
-            let dst_str = if ty == GpuType::GpuU64 { gpu_reg_u64(dst_reg) } else { gpu_reg_u32(dst_reg) }
-            let lhs_str = if ty == GpuType::GpuU64 { gpu_reg_u64(lhs_reg) } else { gpu_reg_u32(lhs_reg) }
-            let imm_str = i64_to_string(rhs_imm)
+            let dst_str = if op.ty == GpuType::GpuU64 { gpu_reg_u64(op.dst_reg) } else { gpu_reg_u32(op.dst_reg) }
+            let lhs_str = if op.ty == GpuType::GpuU64 { gpu_reg_u64(op.lhs_reg) } else { gpu_reg_u32(op.lhs_reg) }
+            let imm_str = i64_to_string(op.rhs_imm)
 
             ptx_push_binary3(buf, ptx_opcode_mul_lo_u64(), dst_str, lhs_str, imm_str)
         }
 
-        GpuOp::GpuAdd { dst_reg, lhs_reg, rhs_reg, ty } => {
+        GpuOpcode::GpuAdd => {
             // add.ty %dstN, %lhsM, %rhsK
-            let opcode = match ty {
+            let opcode = match op.ty {
                 GpuType::GpuU64 => ptx_opcode_add_u64(),
                 GpuType::GpuF32 => ptx_opcode_add_f32(),
                 _ => ptx_opcode_add_u64(),
             }
-            let dst_str = match ty {
-                GpuType::GpuU64 => gpu_reg_u64(dst_reg),
-                GpuType::GpuF32 => gpu_reg_f32(dst_reg),
-                _ => gpu_reg_u64(dst_reg),
+            let dst_str = match op.ty {
+                GpuType::GpuU64 => gpu_reg_u64(op.dst_reg),
+                GpuType::GpuF32 => gpu_reg_f32(op.dst_reg),
+                _ => gpu_reg_u64(op.dst_reg),
             }
-            let lhs_str = match ty {
-                GpuType::GpuU64 => gpu_reg_u64(lhs_reg),
-                GpuType::GpuF32 => gpu_reg_f32(lhs_reg),
-                _ => gpu_reg_u64(lhs_reg),
+            let lhs_str = match op.ty {
+                GpuType::GpuU64 => gpu_reg_u64(op.lhs_reg),
+                GpuType::GpuF32 => gpu_reg_f32(op.lhs_reg),
+                _ => gpu_reg_u64(op.lhs_reg),
             }
-            let rhs_str = match ty {
-                GpuType::GpuU64 => gpu_reg_u64(rhs_reg),
-                GpuType::GpuF32 => gpu_reg_f32(rhs_reg),
-                _ => gpu_reg_u64(rhs_reg),
+            let rhs_str = match op.ty {
+                GpuType::GpuU64 => gpu_reg_u64(op.rhs_reg),
+                GpuType::GpuF32 => gpu_reg_f32(op.rhs_reg),
+                _ => gpu_reg_u64(op.rhs_reg),
             }
 
             ptx_push_binary3(buf, opcode, dst_str, lhs_str, rhs_str)
         }
 
-        GpuOp::GpuLoadParam { dst_reg, param_idx } => {
+        GpuOpcode::GpuLoadParam => {
             // ld.param.u64 %rdN, [param_name]
-            let param_name = kernel.params[param_idx as usize].name
-            ptx_push_binary_mem2(buf, ptx_opcode_ld_param_u64(), gpu_reg_u64(dst_reg), name_to_string(param_name))
+            let param_name = kernel.params[op.param_idx as usize].name
+            ptx_push_binary_mem2(buf, ptx_opcode_ld_param_u64(), gpu_reg_u64(op.dst_reg), name_to_string(param_name))
         }
 
-        GpuOp::GpuLoadGlobal { dst_reg, addr_reg, ty } => {
+        GpuOpcode::GpuLoadGlobal => {
             // ld.global.f32 %fN, [%rdM]
-            let opcode = match ty {
+            let opcode = match op.ty {
                 GpuType::GpuF32 => ptx_opcode_ld_global_f32(),
                 _ => ptx_opcode_ld_global_f32(),  // Default to f32 for now
             }
-            let dst_str = match ty {
-                GpuType::GpuF32 => gpu_reg_f32(dst_reg),
-                _ => gpu_reg_f32(dst_reg),
+            let dst_str = match op.ty {
+                GpuType::GpuF32 => gpu_reg_f32(op.dst_reg),
+                _ => gpu_reg_f32(op.dst_reg),
             }
-            ptx_push_binary_mem2(buf, opcode, dst_str, gpu_reg_u64(addr_reg))
+            ptx_push_binary_mem2(buf, opcode, dst_str, gpu_reg_u64(op.addr_reg))
         }
 
-        GpuOp::GpuStoreGlobal { addr_reg, src_reg, ty } => {
+        GpuOpcode::GpuStoreGlobal => {
             // st.global.f32 [%rdN], %fM
-            let opcode = match ty {
+            let opcode = match op.ty {
                 GpuType::GpuF32 => ptx_opcode_st_global_f32(),
                 _ => ptx_opcode_st_global_f32(),
             }
-            let src_str = match ty {
-                GpuType::GpuF32 => gpu_reg_f32(src_reg),
-                _ => gpu_reg_f32(src_reg),
+            let src_str = match op.ty {
+                GpuType::GpuF32 => gpu_reg_f32(op.src_reg),
+                _ => gpu_reg_f32(op.src_reg),
             }
-            ptx_push_store_mem(buf, opcode, gpu_reg_u64(addr_reg), src_str)
+            ptx_push_store_mem(buf, opcode, gpu_reg_u64(op.addr_reg), src_str)
         }
 
-        GpuOp::GpuRet => {
+        GpuOpcode::GpuRet => {
             ptx_push_ret(buf)
         }
     }
@@ -258,7 +261,7 @@ fn name_to_string(name: Name) -> string with Mut, Panic, Div, Alloc {
 }
 
 // Helper: Convert i64 to string
-fn i64_to_string(n: i64) -> string with Mut, Panic, Div, Alloc {
+fn i64_to_string(n: i64) -> string {
     // Simple implementation for small positive integers
     if n == 0 { return "0" }
     if n == 1 { return "1" }

@@ -9,6 +9,7 @@
 // - Direct mapping to PTX instructions
 // - No SSA/phi nodes (GPU kernels are simple)
 // - Fixed register allocation for now
+// - Struct-based representation (no enum field destructuring - not supported by self-hosted)
 
 // GPU data types (subset needed for vec_add)
 enum GpuType {
@@ -18,37 +19,38 @@ enum GpuType {
     GpuPtr,  // .u64 pointer type
 }
 
+// GPU operation opcodes (simple enum, no fields)
+enum GpuOpcode {
+    GpuGetTid,       // Get thread ID
+    GpuCvt,          // Type conversion
+    GpuMulImm,       // Multiply with immediate
+    GpuAdd,          // Add
+    GpuLoadParam,    // Load from kernel parameter
+    GpuLoadGlobal,   // Load from global memory
+    GpuStoreGlobal,  // Store to global memory
+    GpuRet,          // Return
+}
+
+// GPU operation (struct with all possible fields, like IrInstr)
+struct GpuOp {
+    opcode: GpuOpcode,
+    dst_reg: i64,
+    src_reg: i64,
+    lhs_reg: i64,
+    rhs_reg: i64,
+    addr_reg: i64,
+    rhs_imm: i64,
+    param_idx: i64,
+    axis: i64,  // 0=x, 1=y, 2=z for GetTid
+    ty: GpuType,
+    dst_ty: GpuType,
+    src_ty: GpuType,
+}
+
 // GPU kernel parameter (e.g., .param .u64 param_a)
 struct GpuParam {
     name: Name,
     ty: GpuType,
-}
-
-// GPU operations (maps closely to PTX instructions)
-enum GpuOp {
-    // Get thread ID: dst = %tid.x (axis: 0=x, 1=y, 2=z)
-    GpuGetTid { dst_reg: i64, axis: i64 },
-
-    // Type conversion: dst = cvt.dst_ty.src_ty src
-    GpuCvt { dst_reg: i64, src_reg: i64, dst_ty: GpuType, src_ty: GpuType },
-
-    // Multiply (with immediate): dst = lhs * rhs_imm
-    GpuMulImm { dst_reg: i64, lhs_reg: i64, rhs_imm: i64, ty: GpuType },
-
-    // Add: dst = lhs + rhs
-    GpuAdd { dst_reg: i64, lhs_reg: i64, rhs_reg: i64, ty: GpuType },
-
-    // Load from kernel parameter: dst = param[param_idx]
-    GpuLoadParam { dst_reg: i64, param_idx: i64 },
-
-    // Load from global memory: dst = global[addr]
-    GpuLoadGlobal { dst_reg: i64, addr_reg: i64, ty: GpuType },
-
-    // Store to global memory: global[addr] = src
-    GpuStoreGlobal { addr_reg: i64, src_reg: i64, ty: GpuType },
-
-    // Return from kernel
-    GpuRet,
 }
 
 // GPU kernel IR (represents a single kernel)
@@ -90,7 +92,20 @@ fn gpu_param_new() -> GpuParam {
 }
 
 fn gpu_op_new() -> GpuOp {
-    GpuOp::GpuRet
+    GpuOp {
+        opcode: GpuOpcode::GpuRet,
+        dst_reg: -1,
+        src_reg: -1,
+        lhs_reg: -1,
+        rhs_reg: -1,
+        addr_reg: -1,
+        rhs_imm: 0,
+        param_idx: -1,
+        axis: 0,
+        ty: GpuType::GpuU64,
+        dst_ty: GpuType::GpuU64,
+        src_ty: GpuType::GpuU32,
+    }
 }
 
 fn gpu_type_to_string(ty: GpuType) -> string {
@@ -103,29 +118,6 @@ fn gpu_type_to_string(ty: GpuType) -> string {
 }
 
 // Build a vec_add kernel IR (canonical example)
-//
-// This IR represents:
-//   __global__ void vec_add(float *a, float *b, float *c) {
-//       int i = threadIdx.x;
-//       c[i] = a[i] + b[i];
-//   }
-//
-// Lowering to PTX:
-//   r1 = tid.x (u32)
-//   rd1 = cvt.u64.u32 r1
-//   rd2 = rd1 * 4      // sizeof(f32)
-//   rd3 = param_a      // load pointer params
-//   rd4 = param_b
-//   rd5 = param_c
-//   rd6 = rd3 + rd2    // offset into a
-//   rd7 = rd4 + rd2    // offset into b
-//   rd8 = rd5 + rd2    // offset into c
-//   f1 = global[rd6]   // load a[i]
-//   f2 = global[rd7]   // load b[i]
-//   f3 = f1 + f2       // add
-//   global[rd8] = f3   // store to c[i]
-//   ret
-//
 fn gpu_build_vec_add_ir() -> GpuKernelIr with Mut, Panic, Div {
     var k = gpu_kernel_new()
 
@@ -166,101 +158,241 @@ fn gpu_build_vec_add_ir() -> GpuKernelIr with Mut, Panic, Div {
     var idx: i64 = 0
 
     // r1 = tid.x
-    k.ops[idx] = GpuOp::GpuGetTid { dst_reg: 1, axis: 0 }
+    k.ops[idx] = GpuOp {
+        opcode: GpuOpcode::GpuGetTid,
+        dst_reg: 1,
+        axis: 0,
+        src_reg: -1,
+        lhs_reg: -1,
+        rhs_reg: -1,
+        addr_reg: -1,
+        rhs_imm: 0,
+        param_idx: -1,
+        ty: GpuType::GpuU32,
+        dst_ty: GpuType::GpuU32,
+        src_ty: GpuType::GpuU32,
+    }
     idx = idx + 1
 
     // rd1 = cvt.u64.u32 r1
-    k.ops[idx] = GpuOp::GpuCvt {
+    k.ops[idx] = GpuOp {
+        opcode: GpuOpcode::GpuCvt,
         dst_reg: 1,
         src_reg: 1,
+        dst_ty: GpuType::GpuU64,
+        src_ty: GpuType::GpuU32,
+        lhs_reg: -1,
+        rhs_reg: -1,
+        addr_reg: -1,
+        rhs_imm: 0,
+        param_idx: -1,
+        axis: 0,
+        ty: GpuType::GpuU64,
+    }
+    idx = idx + 1
+
+    // rd2 = rd1 * 4 (sizeof f32)
+    k.ops[idx] = GpuOp {
+        opcode: GpuOpcode::GpuMulImm,
+        dst_reg: 2,
+        lhs_reg: 1,
+        rhs_imm: 4,
+        ty: GpuType::GpuU64,
+        src_reg: -1,
+        rhs_reg: -1,
+        addr_reg: -1,
+        param_idx: -1,
+        axis: 0,
         dst_ty: GpuType::GpuU64,
         src_ty: GpuType::GpuU32,
     }
     idx = idx + 1
 
-    // rd2 = rd1 * 4 (sizeof f32)
-    k.ops[idx] = GpuOp::GpuMulImm {
-        dst_reg: 2,
-        lhs_reg: 1,
-        rhs_imm: 4,
+    // rd3 = param_a
+    k.ops[idx] = GpuOp {
+        opcode: GpuOpcode::GpuLoadParam,
+        dst_reg: 3,
+        param_idx: 0,
+        src_reg: -1,
+        lhs_reg: -1,
+        rhs_reg: -1,
+        addr_reg: -1,
+        rhs_imm: 0,
+        axis: 0,
         ty: GpuType::GpuU64,
+        dst_ty: GpuType::GpuU64,
+        src_ty: GpuType::GpuU32,
     }
     idx = idx + 1
 
-    // rd3 = param_a
-    k.ops[idx] = GpuOp::GpuLoadParam { dst_reg: 3, param_idx: 0 }
-    idx = idx + 1
-
     // rd4 = param_b
-    k.ops[idx] = GpuOp::GpuLoadParam { dst_reg: 4, param_idx: 1 }
+    k.ops[idx] = GpuOp {
+        opcode: GpuOpcode::GpuLoadParam,
+        dst_reg: 4,
+        param_idx: 1,
+        src_reg: -1,
+        lhs_reg: -1,
+        rhs_reg: -1,
+        addr_reg: -1,
+        rhs_imm: 0,
+        axis: 0,
+        ty: GpuType::GpuU64,
+        dst_ty: GpuType::GpuU64,
+        src_ty: GpuType::GpuU32,
+    }
     idx = idx + 1
 
     // rd5 = param_c
-    k.ops[idx] = GpuOp::GpuLoadParam { dst_reg: 5, param_idx: 2 }
+    k.ops[idx] = GpuOp {
+        opcode: GpuOpcode::GpuLoadParam,
+        dst_reg: 5,
+        param_idx: 2,
+        src_reg: -1,
+        lhs_reg: -1,
+        rhs_reg: -1,
+        addr_reg: -1,
+        rhs_imm: 0,
+        axis: 0,
+        ty: GpuType::GpuU64,
+        dst_ty: GpuType::GpuU64,
+        src_ty: GpuType::GpuU32,
+    }
     idx = idx + 1
 
     // rd6 = rd3 + rd2
-    k.ops[idx] = GpuOp::GpuAdd {
+    k.ops[idx] = GpuOp {
+        opcode: GpuOpcode::GpuAdd,
         dst_reg: 6,
         lhs_reg: 3,
         rhs_reg: 2,
         ty: GpuType::GpuU64,
+        src_reg: -1,
+        addr_reg: -1,
+        rhs_imm: 0,
+        param_idx: -1,
+        axis: 0,
+        dst_ty: GpuType::GpuU64,
+        src_ty: GpuType::GpuU32,
     }
     idx = idx + 1
 
     // rd7 = rd4 + rd2
-    k.ops[idx] = GpuOp::GpuAdd {
+    k.ops[idx] = GpuOp {
+        opcode: GpuOpcode::GpuAdd,
         dst_reg: 7,
         lhs_reg: 4,
         rhs_reg: 2,
         ty: GpuType::GpuU64,
+        src_reg: -1,
+        addr_reg: -1,
+        rhs_imm: 0,
+        param_idx: -1,
+        axis: 0,
+        dst_ty: GpuType::GpuU64,
+        src_ty: GpuType::GpuU32,
     }
     idx = idx + 1
 
     // rd8 = rd5 + rd2
-    k.ops[idx] = GpuOp::GpuAdd {
+    k.ops[idx] = GpuOp {
+        opcode: GpuOpcode::GpuAdd,
         dst_reg: 8,
         lhs_reg: 5,
         rhs_reg: 2,
         ty: GpuType::GpuU64,
+        src_reg: -1,
+        addr_reg: -1,
+        rhs_imm: 0,
+        param_idx: -1,
+        axis: 0,
+        dst_ty: GpuType::GpuU64,
+        src_ty: GpuType::GpuU32,
     }
     idx = idx + 1
 
     // f1 = global[rd6]
-    k.ops[idx] = GpuOp::GpuLoadGlobal {
+    k.ops[idx] = GpuOp {
+        opcode: GpuOpcode::GpuLoadGlobal,
         dst_reg: 1,
         addr_reg: 6,
         ty: GpuType::GpuF32,
+        src_reg: -1,
+        lhs_reg: -1,
+        rhs_reg: -1,
+        rhs_imm: 0,
+        param_idx: -1,
+        axis: 0,
+        dst_ty: GpuType::GpuF32,
+        src_ty: GpuType::GpuU32,
     }
     idx = idx + 1
 
     // f2 = global[rd7]
-    k.ops[idx] = GpuOp::GpuLoadGlobal {
+    k.ops[idx] = GpuOp {
+        opcode: GpuOpcode::GpuLoadGlobal,
         dst_reg: 2,
         addr_reg: 7,
         ty: GpuType::GpuF32,
+        src_reg: -1,
+        lhs_reg: -1,
+        rhs_reg: -1,
+        rhs_imm: 0,
+        param_idx: -1,
+        axis: 0,
+        dst_ty: GpuType::GpuF32,
+        src_ty: GpuType::GpuU32,
     }
     idx = idx + 1
 
     // f3 = f1 + f2
-    k.ops[idx] = GpuOp::GpuAdd {
+    k.ops[idx] = GpuOp {
+        opcode: GpuOpcode::GpuAdd,
         dst_reg: 3,
         lhs_reg: 1,
         rhs_reg: 2,
         ty: GpuType::GpuF32,
+        src_reg: -1,
+        addr_reg: -1,
+        rhs_imm: 0,
+        param_idx: -1,
+        axis: 0,
+        dst_ty: GpuType::GpuF32,
+        src_ty: GpuType::GpuU32,
     }
     idx = idx + 1
 
     // global[rd8] = f3
-    k.ops[idx] = GpuOp::GpuStoreGlobal {
+    k.ops[idx] = GpuOp {
+        opcode: GpuOpcode::GpuStoreGlobal,
         addr_reg: 8,
         src_reg: 3,
         ty: GpuType::GpuF32,
+        dst_reg: -1,
+        lhs_reg: -1,
+        rhs_reg: -1,
+        rhs_imm: 0,
+        param_idx: -1,
+        axis: 0,
+        dst_ty: GpuType::GpuF32,
+        src_ty: GpuType::GpuU32,
     }
     idx = idx + 1
 
     // ret
-    k.ops[idx] = GpuOp::GpuRet
+    k.ops[idx] = GpuOp {
+        opcode: GpuOpcode::GpuRet,
+        dst_reg: -1,
+        src_reg: -1,
+        lhs_reg: -1,
+        rhs_reg: -1,
+        addr_reg: -1,
+        rhs_imm: 0,
+        param_idx: -1,
+        axis: 0,
+        ty: GpuType::GpuU64,
+        dst_ty: GpuType::GpuU64,
+        src_ty: GpuType::GpuU32,
+    }
     idx = idx + 1
 
     k.op_count = idx
