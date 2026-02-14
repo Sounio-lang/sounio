@@ -541,6 +541,95 @@ for i in 0..10 {
 ```"#
             }
 
+            "var" => {
+                r#"**var** — Mutable variable binding
+
+```d
+var x = 5
+x = 10  // OK: x is mutable
+```
+
+Variables bound with `var` can be reassigned. Equivalent to mutable bindings."#
+            }
+
+            "Knowledge" => {
+                r#"**Knowledge<T>** — Epistemic type
+
+```d
+let m: Knowledge<f64> = measure(500.0, uncertainty: 2.5)
+let derived = m + Knowledge::new(100.0, epsilon: 1.0)
+```
+
+Wraps a value `T` with epistemic metadata:
+- **Confidence** — How certain is this value? (0.0 to 1.0)
+- **Uncertainty (epsilon)** — GUM-compliant uncertainty propagation
+- **Provenance** — Where did this knowledge come from?
+- **Temporal bounds** — When is this knowledge valid?
+
+Arithmetic operations automatically propagate uncertainty via GUM rules."#
+            }
+
+            "CausalKnowledge" => {
+                r#"**CausalKnowledge<T>** — Causal epistemic type (Level 2)
+
+```d
+let effect: CausalKnowledge<f64> = model.do_intervention(dose: 100.0)
+```
+
+Extends `Knowledge<T>` with causal structure:
+- **Causal graph** — DAG encoding causal relationships
+- **Identifiability** — Verified at compile time via type system
+- **do-operator** — Interventional queries (Pearl's do-calculus)
+- **Uncertainty** — Includes both epistemic and causal uncertainty
+
+The type system verifies identifiability at compile time:
+- Identifiable queries type-check
+- Non-identifiable queries produce compile errors"#
+            }
+
+            "do" => {
+                r#"**do** — Causal intervention operator
+
+```d
+let result = do(graph, treatment = value)
+```
+
+Pearl's do-operator for interventional queries:
+- `P(Y | do(X = x))` — What happens when we *set* X to x?
+- Different from `P(Y | X = x)` — What we *observe* when X is x
+
+The type system verifies that the interventional query is identifiable
+from observational data before allowing the computation."#
+            }
+
+            "counterfactual" => {
+                r#"**counterfactual** — Counterfactual query (Level 3)
+
+```d
+let cf = counterfactual(model, X_x | X = x', Y = y)
+```
+
+Level 3 of Pearl's causal hierarchy:
+- What *would have happened* if X had been x, given that we observed X=x' and Y=y?
+- Requires full structural causal model (not just DAG)
+- Most powerful but most demanding form of causal reasoning"#
+            }
+
+            "measure" => {
+                r#"**measure** — Create epistemic knowledge from measurement
+
+```d
+let temp: Knowledge<f64> = measure(37.5, uncertainty: 0.2)
+let dose: Knowledge<mg> = measure(500.0, confidence: 0.95)
+```
+
+Creates a `Knowledge<T>` value with:
+- The measured value
+- Measurement uncertainty (epsilon)
+- Confidence level
+- Source provenance (instrument, protocol, timestamp)"#
+            }
+
             "true" | "false" => {
                 r#"**bool** — Boolean literal
 

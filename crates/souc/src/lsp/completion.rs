@@ -250,6 +250,25 @@ impl CompletionProvider {
             simple_type("char", "Unicode character"),
             simple_type("String", "UTF-8 string"),
             simple_type("str", "String slice"),
+            // Epistemic types
+            snippet_item(
+                "Knowledge",
+                "Knowledge<${1:T}>",
+                "Epistemic type with uncertainty tracking",
+                CompletionItemKind::STRUCT,
+            ),
+            snippet_item(
+                "CausalKnowledge",
+                "CausalKnowledge<${1:T}>",
+                "Causal epistemic type (Level 2)",
+                CompletionItemKind::STRUCT,
+            ),
+            snippet_item(
+                "CausalGraph",
+                "CausalGraph",
+                "Causal directed acyclic graph",
+                CompletionItemKind::STRUCT,
+            ),
             // Generic containers
             snippet_item(
                 "Vec",
@@ -403,6 +422,37 @@ impl CompletionProvider {
                 "observe",
                 "observe(${1:distribution}, ${2:value})",
                 "Condition on observation",
+                CompletionItemKind::FUNCTION,
+            ),
+            // Epistemic / Causal
+            snippet_item(
+                "measure",
+                "measure(${1:value}, uncertainty: ${2:epsilon})",
+                "Create epistemic knowledge from measurement",
+                CompletionItemKind::FUNCTION,
+            ),
+            snippet_item(
+                "do",
+                "do(${1:graph}, ${2:treatment} = ${3:value})",
+                "Causal intervention (do-calculus)",
+                CompletionItemKind::KEYWORD,
+            ),
+            snippet_item(
+                "counterfactual",
+                "counterfactual(${1:model}, ${2:query})",
+                "Counterfactual query (Level 3)",
+                CompletionItemKind::KEYWORD,
+            ),
+            snippet_item(
+                "Knowledge::new",
+                "Knowledge::new(${1:value}, epsilon: ${2:uncertainty})",
+                "Create new epistemic knowledge",
+                CompletionItemKind::FUNCTION,
+            ),
+            snippet_item(
+                "CausalGraph::new",
+                "CausalGraph::new([\n\tedge(\"${1:from}\", \"${2:to}\"),\n])",
+                "Create new causal graph",
                 CompletionItemKind::FUNCTION,
             ),
         ];
@@ -623,6 +673,74 @@ impl CompletionProvider {
                 method_item("map", "map(|${1:x}| $0)", "Transform elements"),
                 method_item("filter", "filter(|${1:x}| $0)", "Filter elements"),
                 method_item("collect", "collect::<${1:Vec<_>>>()", "Collect iterator"),
+            ];
+        }
+
+        if hint_lower.contains("knowledge") || hint_lower.contains("epistemic") {
+            let mut items = vec![
+                method_item("confidence", "confidence()", "Get confidence level (0.0-1.0)"),
+                method_item("uncertainty", "uncertainty()", "Get uncertainty epsilon"),
+                method_item("value", "value()", "Extract the underlying value"),
+                method_item("source", "source()", "Get knowledge provenance"),
+                method_item("extract", "extract()", "Extract value (requires confidence proof)"),
+                method_item(
+                    "with_confidence",
+                    "with_confidence(${1:level})",
+                    "Set confidence level",
+                ),
+                method_item("revise", "revise(${1:new_evidence})", "Update with new evidence"),
+            ];
+            // Add causal-specific methods if CausalKnowledge
+            if hint_lower.contains("causal") {
+                items.extend(vec![
+                    method_item(
+                        "do_intervention",
+                        "do_intervention(${1:treatment}: ${2:value})",
+                        "Perform causal intervention",
+                    ),
+                    method_item("graph", "graph()", "Get the causal graph"),
+                    method_item("identify", "identify()", "Check identifiability"),
+                    method_item(
+                        "ate",
+                        "ate(${1:treatment}, ${2:control})",
+                        "Average treatment effect",
+                    ),
+                    method_item(
+                        "cate",
+                        "cate(${1:treatment}, ${2:control}, ${3:subgroup})",
+                        "Conditional average treatment effect",
+                    ),
+                ]);
+            }
+            return items;
+        }
+
+        if hint_lower.contains("causalgraph") || hint_lower.contains("graph") && hint_lower.contains("causal") {
+            return vec![
+                method_item("add_node", "add_node(${1:node})", "Add node to causal graph"),
+                method_item(
+                    "add_edge",
+                    "add_edge(\"${1:from}\", \"${2:to}\")",
+                    "Add directed edge",
+                ),
+                method_item(
+                    "d_separated",
+                    "d_separated(\"${1:x}\", \"${2:y}\", [${3:z}])",
+                    "Check d-separation",
+                ),
+                method_item(
+                    "backdoor_set",
+                    "backdoor_set(\"${1:treatment}\", \"${2:outcome}\")",
+                    "Find valid backdoor adjustment set",
+                ),
+                method_item("nodes", "nodes()", "Get all nodes"),
+                method_item("edges", "edges()", "Get all edges"),
+                method_item("ancestors", "ancestors(\"${1:node}\")", "Get ancestors of node"),
+                method_item(
+                    "descendants",
+                    "descendants(\"${1:node}\")",
+                    "Get descendants of node",
+                ),
             ];
         }
 

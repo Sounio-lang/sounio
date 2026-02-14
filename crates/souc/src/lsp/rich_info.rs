@@ -16,7 +16,9 @@ use crate::ast::{Ast, FnDef, Item, TypeExpr};
 use crate::common::Span;
 use crate::resolve::SymbolTable;
 
-use super::query_bridge::{EffectInfo, EpistemicInfo, RefinementInfo, SmtStatus, UnitInfo};
+use super::query_bridge::{
+    CausalIdMethod, CausalInfo, EffectInfo, EpistemicInfo, RefinementInfo, SmtStatus, UnitInfo,
+};
 
 /// Rich type information combining all Sounio type system features
 #[derive(Debug, Clone)]
@@ -35,6 +37,9 @@ pub struct RichTypeInfo {
 
     /// Refinement predicate (for refined types)
     pub refinement: Option<RefinementInfo>,
+
+    /// Causal graph information (for CausalKnowledge types)
+    pub causal: Option<CausalInfo>,
 
     /// Source span
     pub span: Option<Span>,
@@ -94,6 +99,7 @@ impl RichTypeInfo {
             unit: None,
             epistemic: None,
             refinement: None,
+            causal: None,
             span: None,
             name: None,
             kind: RichInfoKind::Unknown,
@@ -219,6 +225,45 @@ impl RichTypeInfo {
             }
         }
 
+        // Causal section
+        if let Some(ref causal) = self.causal {
+            let id_badge = if causal.identifiability.identifiable {
+                "IDENTIFIABLE"
+            } else {
+                "NON-IDENTIFIABLE"
+            };
+            let method_str = match &causal.identifiability.method {
+                CausalIdMethod::Backdoor => format!(
+                    "backdoor on {{{}}}",
+                    causal.identifiability.adjustment_set.join(", ")
+                ),
+                CausalIdMethod::Frontdoor => format!(
+                    "frontdoor via {{{}}}",
+                    causal.identifiability.adjustment_set.join(", ")
+                ),
+                CausalIdMethod::InstrumentalVariable => format!(
+                    "IV: {{{}}}",
+                    causal.identifiability.adjustment_set.join(", ")
+                ),
+                CausalIdMethod::Unconfounded => "unconfounded".to_string(),
+                CausalIdMethod::NonIdentifiable => {
+                    causal
+                        .identifiability
+                        .reason
+                        .clone()
+                        .unwrap_or_else(|| "confounded".to_string())
+                }
+                CausalIdMethod::Unknown => "unknown".to_string(),
+            };
+            parts.push(MarkedString::String(format!(
+                "**Causal:** {} ({}) | {} nodes, {} edges",
+                id_badge,
+                method_str,
+                causal.nodes.len(),
+                causal.edges.len()
+            )));
+        }
+
         parts
     }
 
@@ -247,6 +292,15 @@ impl RichTypeInfo {
         if let Some(ref epistemic) = self.epistemic {
             let badge = confidence_badge(epistemic.confidence);
             parts.push(format!("{} {:.0}%", badge, epistemic.confidence * 100.0));
+        }
+
+        // Causal badge
+        if let Some(ref causal) = self.causal {
+            if causal.identifiability.identifiable {
+                parts.push("[ID]".to_string());
+            } else {
+                parts.push("[!ID]".to_string());
+            }
         }
 
         parts.join(" ")

@@ -424,6 +424,14 @@ pub mod semantic_tokens {
     /// Ontology-backed modifier
     pub const ONTOLOGY_BACKED: SemanticTokenModifier = SemanticTokenModifier::new("ontologyBacked");
 
+    /// Causal identifiable modifier
+    pub const CAUSAL_IDENTIFIABLE: SemanticTokenModifier =
+        SemanticTokenModifier::new("causalIdentifiable");
+
+    /// Causal non-identifiable modifier
+    pub const CAUSAL_NON_IDENTIFIABLE: SemanticTokenModifier =
+        SemanticTokenModifier::new("causalNonIdentifiable");
+
     /// Get all epistemic semantic token modifiers
     pub fn epistemic_modifiers() -> Vec<SemanticTokenModifier> {
         vec![
@@ -432,6 +440,8 @@ pub mod semantic_tokens {
             UNCERTAIN,
             MUST_REVISE,
             ONTOLOGY_BACKED,
+            CAUSAL_IDENTIFIABLE,
+            CAUSAL_NON_IDENTIFIABLE,
         ]
     }
 
@@ -463,6 +473,130 @@ pub mod semantic_tokens {
         }
 
         flags
+    }
+}
+
+// ============================================================================
+// Causal Hover Provider
+// ============================================================================
+
+/// Causal hover provider — shows causal graph structure and identifiability
+pub struct CausalHoverProvider;
+
+impl CausalHoverProvider {
+    /// Generate hover content for causal information
+    pub fn format_causal_hover(
+        info: &super::query_bridge::CausalInfo,
+    ) -> Vec<MarkedString> {
+        let mut parts = Vec::new();
+
+        // Graph structure
+        let node_names: Vec<&str> = info.nodes.iter().map(|n| n.name.as_str()).collect();
+        parts.push(MarkedString::String(format!(
+            "**Causal Graph** ({} nodes, {} edges)",
+            info.nodes.len(),
+            info.edges.len() + info.bidirected.len()
+        )));
+
+        // DAG visualization (text-based)
+        let mut dag_lines = Vec::new();
+        for edge in &info.edges {
+            if let Some(strength) = edge.strength {
+                dag_lines.push(format!("  {} --({:.2})--> {}", edge.from, strength, edge.to));
+            } else {
+                dag_lines.push(format!("  {} --> {}", edge.from, edge.to));
+            }
+        }
+        for (a, b) in &info.bidirected {
+            dag_lines.push(format!("  {} <~~> {} (latent confounder)", a, b));
+        }
+        if !dag_lines.is_empty() {
+            parts.push(MarkedString::LanguageString(
+                tower_lsp::lsp_types::LanguageString {
+                    language: "text".to_string(),
+                    value: dag_lines.join("\n"),
+                },
+            ));
+        }
+
+        // Treatment/outcome
+        if !info.treatments.is_empty() || !info.outcomes.is_empty() {
+            let mut roles = Vec::new();
+            if !info.treatments.is_empty() {
+                roles.push(format!(
+                    "Treatment: `{}`",
+                    info.treatments.join("`, `")
+                ));
+            }
+            if !info.outcomes.is_empty() {
+                roles.push(format!(
+                    "Outcome: `{}`",
+                    info.outcomes.join("`, `")
+                ));
+            }
+            parts.push(MarkedString::String(roles.join(" | ")));
+        }
+
+        // Identifiability
+        parts.push(MarkedString::String(
+            Self::format_identifiability(&info.identifiability),
+        ));
+
+        parts
+    }
+
+    /// Format identifiability status
+    fn format_identifiability(
+        id_info: &super::query_bridge::CausalIdentifiabilityInfo,
+    ) -> String {
+        use super::query_bridge::CausalIdMethod;
+
+        let badge = if id_info.identifiable {
+            "IDENTIFIABLE"
+        } else {
+            "NON-IDENTIFIABLE"
+        };
+
+        let method_str = match &id_info.method {
+            CausalIdMethod::Backdoor => {
+                format!(
+                    "Backdoor criterion on {{{}}}",
+                    id_info.adjustment_set.join(", ")
+                )
+            }
+            CausalIdMethod::Frontdoor => {
+                format!(
+                    "Frontdoor criterion via {{{}}}",
+                    id_info.adjustment_set.join(", ")
+                )
+            }
+            CausalIdMethod::InstrumentalVariable => {
+                format!(
+                    "Instrumental variable: {{{}}}",
+                    id_info.adjustment_set.join(", ")
+                )
+            }
+            CausalIdMethod::Unconfounded => "Direct (no confounders)".to_string(),
+            CausalIdMethod::NonIdentifiable => {
+                let reason = id_info
+                    .reason
+                    .as_deref()
+                    .unwrap_or("unobserved confounders");
+                format!("Not identifiable: {}", reason)
+            }
+            CausalIdMethod::Unknown => "Not yet analyzed".to_string(),
+        };
+
+        format!("**Identifiability:** {} — {}", badge, method_str)
+    }
+
+    /// Generate a compact causal badge for inlay hints
+    pub fn causal_badge(identifiable: bool) -> &'static str {
+        if identifiable {
+            "ID"  // Identifiable
+        } else {
+            "!ID" // Non-identifiable
+        }
     }
 }
 
@@ -666,6 +800,81 @@ mod tests {
     #[test]
     fn test_epistemic_modifiers_list() {
         let mods = semantic_tokens::epistemic_modifiers();
-        assert_eq!(mods.len(), 5);
+        assert_eq!(mods.len(), 7); // 5 original + 2 causal
+    }
+
+    #[test]
+    fn test_causal_hover_identifiable() {
+        use crate::lsp::query_bridge::*;
+
+        let info = CausalInfo {
+            nodes: vec![
+                CausalNodeInfo { name: "Dose".into(), role: "treatment".into() },
+                CausalNodeInfo { name: "Effect".into(), role: "outcome".into() },
+                CausalNodeInfo { name: "Genotype".into(), role: "confounder".into() },
+            ],
+            edges: vec![
+                CausalEdgeInfo { from: "Dose".into(), to: "Effect".into(), strength: Some(0.8) },
+                CausalEdgeInfo { from: "Genotype".into(), to: "Effect".into(), strength: None },
+            ],
+            bidirected: vec![],
+            treatments: vec!["Dose".into()],
+            outcomes: vec!["Effect".into()],
+            identifiability: CausalIdentifiabilityInfo {
+                identifiable: true,
+                method: CausalIdMethod::Backdoor,
+                adjustment_set: vec!["Genotype".into()],
+                reason: None,
+            },
+        };
+
+        let hover = CausalHoverProvider::format_causal_hover(&info);
+        assert!(!hover.is_empty());
+        // Check that identifiability info is present
+        let text: String = hover.iter().map(|m| match m {
+            MarkedString::String(s) => s.clone(),
+            MarkedString::LanguageString(ls) => ls.value.clone(),
+        }).collect::<Vec<_>>().join("\n");
+        assert!(text.contains("IDENTIFIABLE"));
+        assert!(text.contains("Backdoor"));
+        assert!(text.contains("Genotype"));
+    }
+
+    #[test]
+    fn test_causal_hover_non_identifiable() {
+        use crate::lsp::query_bridge::*;
+
+        let info = CausalInfo {
+            nodes: vec![
+                CausalNodeInfo { name: "X".into(), role: "treatment".into() },
+                CausalNodeInfo { name: "Y".into(), role: "outcome".into() },
+            ],
+            edges: vec![
+                CausalEdgeInfo { from: "X".into(), to: "Y".into(), strength: None },
+            ],
+            bidirected: vec![("X".into(), "Y".into())],
+            treatments: vec!["X".into()],
+            outcomes: vec!["Y".into()],
+            identifiability: CausalIdentifiabilityInfo {
+                identifiable: false,
+                method: CausalIdMethod::NonIdentifiable,
+                adjustment_set: vec![],
+                reason: Some("latent confounder between X and Y".into()),
+            },
+        };
+
+        let hover = CausalHoverProvider::format_causal_hover(&info);
+        let text: String = hover.iter().map(|m| match m {
+            MarkedString::String(s) => s.clone(),
+            MarkedString::LanguageString(ls) => ls.value.clone(),
+        }).collect::<Vec<_>>().join("\n");
+        assert!(text.contains("NON-IDENTIFIABLE"));
+        assert!(text.contains("latent confounder"));
+    }
+
+    #[test]
+    fn test_causal_badge() {
+        assert_eq!(CausalHoverProvider::causal_badge(true), "ID");
+        assert_eq!(CausalHoverProvider::causal_badge(false), "!ID");
     }
 }

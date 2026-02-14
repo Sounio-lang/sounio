@@ -156,6 +156,114 @@ pub struct Counterexample {
     pub bindings: Vec<(String, String)>,
 }
 
+/// Causal graph information for LSP features
+#[derive(Debug, Clone)]
+pub struct CausalInfo {
+    /// Nodes in the causal graph
+    pub nodes: Vec<CausalNodeInfo>,
+
+    /// Directed edges (from → to)
+    pub edges: Vec<CausalEdgeInfo>,
+
+    /// Bidirected edges (latent confounders)
+    pub bidirected: Vec<(String, String)>,
+
+    /// Treatment variable(s)
+    pub treatments: Vec<String>,
+
+    /// Outcome variable(s)
+    pub outcomes: Vec<String>,
+
+    /// Identifiability status
+    pub identifiability: CausalIdentifiabilityInfo,
+}
+
+/// A node in the causal graph
+#[derive(Debug, Clone)]
+pub struct CausalNodeInfo {
+    /// Node name
+    pub name: String,
+
+    /// Node role (treatment, outcome, confounder, mediator, instrument)
+    pub role: String,
+}
+
+/// A directed edge in the causal graph
+#[derive(Debug, Clone)]
+pub struct CausalEdgeInfo {
+    /// Source node
+    pub from: String,
+
+    /// Target node
+    pub to: String,
+
+    /// Effect strength (if estimated)
+    pub strength: Option<f64>,
+}
+
+/// Identifiability status for a causal query
+#[derive(Debug, Clone)]
+pub struct CausalIdentifiabilityInfo {
+    /// Whether the causal effect is identifiable
+    pub identifiable: bool,
+
+    /// Identification method used
+    pub method: CausalIdMethod,
+
+    /// Adjustment set (if backdoor/frontdoor)
+    pub adjustment_set: Vec<String>,
+
+    /// Reason for non-identifiability (if not identifiable)
+    pub reason: Option<String>,
+}
+
+/// Causal identification method
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CausalIdMethod {
+    /// Backdoor criterion satisfied
+    Backdoor,
+    /// Frontdoor criterion satisfied
+    Frontdoor,
+    /// Instrumental variable
+    InstrumentalVariable,
+    /// No confounders (direct identification)
+    Unconfounded,
+    /// Not identifiable
+    NonIdentifiable,
+    /// Not yet checked
+    Unknown,
+}
+
+impl Default for CausalIdMethod {
+    fn default() -> Self {
+        CausalIdMethod::Unknown
+    }
+}
+
+impl Default for CausalIdentifiabilityInfo {
+    fn default() -> Self {
+        Self {
+            identifiable: false,
+            method: CausalIdMethod::Unknown,
+            adjustment_set: Vec::new(),
+            reason: None,
+        }
+    }
+}
+
+impl Default for CausalInfo {
+    fn default() -> Self {
+        Self {
+            nodes: Vec::new(),
+            edges: Vec::new(),
+            bidirected: Vec::new(),
+            treatments: Vec::new(),
+            outcomes: Vec::new(),
+            identifiability: CausalIdentifiabilityInfo::default(),
+        }
+    }
+}
+
 // ============================================================================
 // LSP Analysis Result
 // ============================================================================
@@ -189,6 +297,9 @@ pub struct LspAnalysisResult {
 
     /// Refinement information
     pub refinements: Vec<RefinementInfo>,
+
+    /// Causal graph information per variable/expression
+    pub causal: HashMap<String, CausalInfo>,
 
     /// Source text (for span conversion)
     pub source: String,

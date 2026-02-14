@@ -38,7 +38,7 @@ use crate::lexer::{self, TokenKind};
 use crate::resolve::SymbolTable;
 use crate::types::Type;
 
-use super::query_bridge::{EffectInfo, EpistemicInfo, UnitInfo};
+use super::query_bridge::{CausalIdMethod, CausalInfo, EffectInfo, EpistemicInfo, UnitInfo};
 use super::rich_info::confidence_badge;
 
 // ============================================================================
@@ -1213,6 +1213,95 @@ impl InlayHintProvider {
             position: self.offset_to_position(source, span.end),
             label: InlayHintLabel::String(label),
             kind: None, // Not a type hint
+            text_edits: None,
+            tooltip: Some(InlayHintTooltip::String(tooltip_parts.join("\n"))),
+            padding_left: Some(true),
+            padding_right: Some(false),
+            data: None,
+        })
+    }
+
+    // ========================================================================
+    // Causal Hints
+    // ========================================================================
+
+    /// Generate causal identifiability badge hint
+    ///
+    /// Shows identifiability status next to causal expressions:
+    /// - `[ID] backdoor {Z}` for identifiable queries
+    /// - `[!ID] confounded` for non-identifiable queries
+    pub fn causal_identifiability_hint(
+        &self,
+        causal: &CausalInfo,
+        span: Span,
+        source: &str,
+    ) -> Option<InlayHint> {
+        if !self.config.epistemic_hints {
+            return None;
+        }
+
+        let (badge, label) = if causal.identifiability.identifiable {
+            let method = match &causal.identifiability.method {
+                CausalIdMethod::Backdoor => format!(
+                    "backdoor {{{}}}",
+                    causal.identifiability.adjustment_set.join(", ")
+                ),
+                CausalIdMethod::Frontdoor => format!(
+                    "frontdoor {{{}}}",
+                    causal.identifiability.adjustment_set.join(", ")
+                ),
+                CausalIdMethod::InstrumentalVariable => format!(
+                    "IV {{{}}}",
+                    causal.identifiability.adjustment_set.join(", ")
+                ),
+                CausalIdMethod::Unconfounded => "unconfounded".to_string(),
+                _ => "identifiable".to_string(),
+            };
+            ("[ID]", format!(" [ID] {}", method))
+        } else {
+            let reason = causal
+                .identifiability
+                .reason
+                .as_deref()
+                .unwrap_or("confounded");
+            ("[!ID]", format!(" [!ID] {}", reason))
+        };
+
+        let mut tooltip_parts = vec![
+            format!(
+                "**Causal Identifiability:** {}",
+                if causal.identifiability.identifiable {
+                    "IDENTIFIABLE"
+                } else {
+                    "NON-IDENTIFIABLE"
+                }
+            ),
+            format!(
+                "Graph: {} nodes, {} directed edges, {} bidirected edges",
+                causal.nodes.len(),
+                causal.edges.len(),
+                causal.bidirected.len()
+            ),
+        ];
+
+        if !causal.treatments.is_empty() {
+            tooltip_parts.push(format!("Treatment: {}", causal.treatments.join(", ")));
+        }
+        if !causal.outcomes.is_empty() {
+            tooltip_parts.push(format!("Outcome: {}", causal.outcomes.join(", ")));
+        }
+
+        if !causal.identifiability.adjustment_set.is_empty() {
+            tooltip_parts.push(format!(
+                "Adjustment set: {{{}}}",
+                causal.identifiability.adjustment_set.join(", ")
+            ));
+        }
+
+        Some(InlayHint {
+            position: self.offset_to_position(source, span.end),
+            label: InlayHintLabel::String(label),
+            kind: None,
             text_edits: None,
             tooltip: Some(InlayHintTooltip::String(tooltip_parts.join("\n"))),
             padding_left: Some(true),
