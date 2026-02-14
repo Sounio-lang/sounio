@@ -1,0 +1,489 @@
+// stdlib/epistemic/gum_supplement1.sio
+// GUM Supplement 1: Propagation of distributions using a Monte Carlo method
+//
+// Implements multivariate uncertainty propagation with full covariance:
+//   Sigma_y = J * Sigma_x * J^T
+//
+// where J is the Jacobian matrix of partial derivatives.
+//
+// This extends GUM (JCGM 100:2008) to handle:
+//   - Correlated input quantities
+//   - Multivariate output quantities
+//   - Non-zero off-diagonal covariance terms
+//
+// The key equation (GUM Supplement 1, Section 7.3):
+//   u^2(y) = sum_i sum_j (df/dx_i)(df/dx_j) u(x_i,x_j)
+//
+// When inputs are uncorrelated, u(x_i,x_j) = 0 for i != j, and this
+// reduces to the standard GUM formula.
+//
+// Reference: JCGM 101:2008
+
+// =============================================================================
+// Helper Functions
+// =============================================================================
+
+fn sqrt_f64(x: f64) -> f64 {
+    if x <= 0.0 { return 0.0 }
+    var y = x;
+    var i: usize = 0;
+    while i < 20 {
+        y = 0.5 * (y + x / y);
+        i = i + 1;
+    }
+    y
+}
+
+fn abs_f64(x: f64) -> f64 {
+    if x < 0.0 { 0.0 - x } else { x }
+}
+
+fn min_f64(a: f64, b: f64) -> f64 {
+    if a < b { a } else { b }
+}
+
+fn max_f64(a: f64, b: f64) -> f64 {
+    if a > b { a } else { b }
+}
+
+// =============================================================================
+// Upper-Triangular Index (must match covariance.sio)
+// =============================================================================
+
+fn tri_index(n: i32, i: i32, j: i32) -> i32 {
+    var row = i
+    var col = j
+    if i > j {
+        row = j
+        col = i
+    }
+    return row * n - (row * (row - 1)) / 2 + (col - row)
+}
+
+// =============================================================================
+// Covariance Matrix Type (mirrors covariance.sio)
+// =============================================================================
+
+pub struct CovarianceMatrix {
+    pub n: i32,
+    pub data: [f64; 300],
+}
+
+fn cov_new(n: i32) -> CovarianceMatrix {
+    var dim = n
+    if dim < 1 { dim = 1 }
+    if dim > 24 { dim = 24 }
+    return CovarianceMatrix {
+        n: dim,
+        data: [0.0; 300],
+    }
+}
+
+fn cov_get(cov: &CovarianceMatrix, i: i32, j: i32) -> f64 {
+    if i < 0 { return 0.0 }
+    if j < 0 { return 0.0 }
+    if i >= cov.n { return 0.0 }
+    if j >= cov.n { return 0.0 }
+    return cov.data[tri_index(cov.n, i, j)]
+}
+
+fn cov_set(cov: &!CovarianceMatrix, i: i32, j: i32, val: f64) {
+    if i < 0 { return }
+    if j < 0 { return }
+    if i >= cov.n { return }
+    if j >= cov.n { return }
+    cov.data[tri_index(cov.n, i, j)] = val
+}
+
+// =============================================================================
+// GUM Result Type (mirrors gum.sio)
+// =============================================================================
+
+pub struct GUMResult {
+    pub value: f64,
+    pub std_uncertainty: f64,
+    pub degrees_of_freedom: f64,
+    pub coverage_factor_95: f64,
+    pub expanded_uncertainty_95: f64,
+}
+
+// Coverage factor for 95% at infinite DoF (normal distribution)
+fn k_normal_95() -> f64 { 1.96 }
+
+fn gum_result_from(value: f64, std_u: f64) -> GUMResult {
+    let k = k_normal_95()
+    return GUMResult {
+        value: value,
+        std_uncertainty: abs_f64(std_u),
+        degrees_of_freedom: 1.0e9,
+        coverage_factor_95: k,
+        expanded_uncertainty_95: k * abs_f64(std_u),
+    }
+}
+
+// =============================================================================
+// GUM Multivariate Result
+// =============================================================================
+
+// Result of multivariate propagation: scalar output with full covariance info
+pub struct GUMMultiResult {
+    // Best estimate of the output
+    pub value: f64,
+
+    // Combined standard uncertainty u_c(y)
+    pub std_uncertainty: f64,
+
+    // Degrees of freedom (infinite for analytic propagation)
+    pub degrees_of_freedom: f64,
+
+    // Coverage factor k (95%)
+    pub coverage_factor_95: f64,
+
+    // Expanded uncertainty U = k * u_c
+    pub expanded_uncertainty_95: f64,
+
+    // Number of input variables
+    pub n_inputs: i32,
+
+    // Input covariance matrix (for reference)
+    pub input_covariance: CovarianceMatrix,
+}
+
+fn gum_multi_result(value: f64, std_u: f64, n_in: i32, cov_x: CovarianceMatrix) -> GUMMultiResult {
+    let k = k_normal_95()
+    let su = abs_f64(std_u)
+    return GUMMultiResult {
+        value: value,
+        std_uncertainty: su,
+        degrees_of_freedom: 1.0e9,
+        coverage_factor_95: k,
+        expanded_uncertainty_95: k * su,
+        n_inputs: n_in,
+        input_covariance: cov_x,
+    }
+}
+
+// =============================================================================
+// Numerical Jacobian Computation
+// =============================================================================
+
+// Central difference approximation for df/dx at point x
+// df/dx ~ (f(x+h) - f(x-h)) / (2h)
+//
+// Step size h should be ~ sqrt(epsilon_machine) * |x|
+// For f64: epsilon ~ 2.2e-16, so h ~ 1.5e-8 * |x|
+pub fn numerical_jacobian_1d(f: fn(f64) -> f64, x: f64, h: f64) -> f64 {
+    let step = if abs_f64(h) > 0.0 { abs_f64(h) } else { 1.0e-8 * max_f64(abs_f64(x), 1.0) }
+    let f_plus = f(x + step)
+    let f_minus = f(x - step)
+    return (f_plus - f_minus) / (2.0 * step)
+}
+
+// Numerical gradient of f(x1, x2) -> [df/dx1, df/dx2]
+pub fn numerical_jacobian_2d(f: fn(f64, f64) -> f64, x1: f64, x2: f64, h: f64) -> [f64; 2] {
+    let step = if abs_f64(h) > 0.0 { abs_f64(h) } else { 1.0e-8 }
+
+    // df/dx1 via central difference (hold x2 fixed)
+    let h1 = step * max_f64(abs_f64(x1), 1.0)
+    let df_dx1 = (f(x1 + h1, x2) - f(x1 - h1, x2)) / (2.0 * h1)
+
+    // df/dx2 via central difference (hold x1 fixed)
+    let h2 = step * max_f64(abs_f64(x2), 1.0)
+    let df_dx2 = (f(x1, x2 + h2) - f(x1, x2 - h2)) / (2.0 * h2)
+
+    return [df_dx1, df_dx2]
+}
+
+// Numerical gradient of f(x1, x2, x3) -> [df/dx1, df/dx2, df/dx3]
+pub fn numerical_jacobian_3d(f: fn(f64, f64, f64) -> f64, x1: f64, x2: f64, x3: f64, h: f64) -> [f64; 3] {
+    let step = if abs_f64(h) > 0.0 { abs_f64(h) } else { 1.0e-8 }
+
+    let h1 = step * max_f64(abs_f64(x1), 1.0)
+    let df_dx1 = (f(x1 + h1, x2, x3) - f(x1 - h1, x2, x3)) / (2.0 * h1)
+
+    let h2 = step * max_f64(abs_f64(x2), 1.0)
+    let df_dx2 = (f(x1, x2 + h2, x3) - f(x1, x2 - h2, x3)) / (2.0 * h2)
+
+    let h3 = step * max_f64(abs_f64(x3), 1.0)
+    let df_dx3 = (f(x1, x2, x3 + h3) - f(x1, x2, x3 - h3)) / (2.0 * h3)
+
+    return [df_dx1, df_dx2, df_dx3]
+}
+
+// =============================================================================
+// 2D Covariance Propagation
+// =============================================================================
+
+// Propagate covariance for y = f(x1, x2) with correlated inputs
+//
+// Var(y) = J * Sigma_x * J^T
+//        = (df/dx1)^2 * Var(x1) + (df/dx2)^2 * Var(x2)
+//          + 2 * (df/dx1) * (df/dx2) * Cov(x1, x2)
+//
+// The cross-term 2*(df/dx1)*(df/dx2)*Cov(x1,x2) is what distinguishes
+// GUM Supplement 1 from basic GUM propagation.
+pub fn propagate_covariance_2d(
+    f: fn(f64, f64) -> f64,
+    x: [f64; 2],
+    cov_x: CovarianceMatrix
+) -> GUMMultiResult {
+    // Compute function value
+    let y_val = f(x[0], x[1])
+
+    // Compute numerical Jacobian
+    let jac = numerical_jacobian_2d(f, x[0], x[1], 1.0e-8)
+
+    // Propagate: Var(y) = J * Sigma_x * J^T
+    let j0 = jac[0]
+    let j1 = jac[1]
+
+    let s00 = cov_get(&cov_x, 0, 0)
+    let s01 = cov_get(&cov_x, 0, 1)
+    let s11 = cov_get(&cov_x, 1, 1)
+
+    let var_y = j0 * j0 * s00 + 2.0 * j0 * j1 * s01 + j1 * j1 * s11
+
+    let std_y = sqrt_f64(abs_f64(var_y))
+    return gum_multi_result(y_val, std_y, 2, cov_x)
+}
+
+// =============================================================================
+// 3D Covariance Propagation
+// =============================================================================
+
+// Propagate covariance for y = f(x1, x2, x3) with correlated inputs
+pub fn propagate_covariance_3d(
+    f: fn(f64, f64, f64) -> f64,
+    x: [f64; 3],
+    cov_x: CovarianceMatrix
+) -> GUMMultiResult {
+    let y_val = f(x[0], x[1], x[2])
+
+    let jac = numerical_jacobian_3d(f, x[0], x[1], x[2], 1.0e-8)
+
+    let j0 = jac[0]
+    let j1 = jac[1]
+    let j2 = jac[2]
+
+    let s00 = cov_get(&cov_x, 0, 0)
+    let s01 = cov_get(&cov_x, 0, 1)
+    let s02 = cov_get(&cov_x, 0, 2)
+    let s11 = cov_get(&cov_x, 1, 1)
+    let s12 = cov_get(&cov_x, 1, 2)
+    let s22 = cov_get(&cov_x, 2, 2)
+
+    let var_y = j0*j0*s00 + j1*j1*s11 + j2*j2*s22
+              + 2.0*j0*j1*s01 + 2.0*j0*j2*s02 + 2.0*j1*j2*s12
+
+    let std_y = sqrt_f64(abs_f64(var_y))
+    return gum_multi_result(y_val, std_y, 3, cov_x)
+}
+
+// =============================================================================
+// Correlated Operations on GUMResult
+// =============================================================================
+
+// Add two correlated measurements: y = x1 + x2
+//
+// Var(y) = Var(x1) + Var(x2) + 2*rho*sigma_1*sigma_2
+//
+// When rho = 0: reduces to standard GUM RSS
+// When rho = 1: uncertainties add linearly (worst case)
+// When rho = -1: uncertainties cancel (best case)
+pub fn gum_s1_add_correlated(x1: GUMResult, x2: GUMResult, correlation: f64) -> GUMResult {
+    let value = x1.value + x2.value
+
+    let u1 = x1.std_uncertainty
+    let u2 = x2.std_uncertainty
+
+    // Clamp correlation to [-1, 1]
+    var rho = correlation
+    if rho > 1.0 { rho = 1.0 }
+    if rho < 0.0 - 1.0 { rho = 0.0 - 1.0 }
+
+    // Var(y) = u1^2 + u2^2 + 2*rho*u1*u2
+    let var_y = u1*u1 + u2*u2 + 2.0 * rho * u1 * u2
+
+    // Protect against numerical noise giving negative variance
+    let std_u = sqrt_f64(abs_f64(var_y))
+
+    return gum_result_from(value, std_u)
+}
+
+// Subtract two correlated measurements: y = x1 - x2
+//
+// Var(y) = Var(x1) + Var(x2) - 2*rho*sigma_1*sigma_2
+//
+// Note the sign flip vs. addition: positive correlation REDUCES
+// uncertainty in subtraction (common-mode rejection).
+pub fn gum_s1_sub_correlated(x1: GUMResult, x2: GUMResult, correlation: f64) -> GUMResult {
+    let value = x1.value - x2.value
+
+    let u1 = x1.std_uncertainty
+    let u2 = x2.std_uncertainty
+
+    var rho = correlation
+    if rho > 1.0 { rho = 1.0 }
+    if rho < 0.0 - 1.0 { rho = 0.0 - 1.0 }
+
+    // Var(y) = u1^2 + u2^2 - 2*rho*u1*u2
+    let var_y = u1*u1 + u2*u2 - 2.0 * rho * u1 * u2
+
+    let std_u = sqrt_f64(abs_f64(var_y))
+    return gum_result_from(value, std_u)
+}
+
+// Multiply two correlated measurements: y = x1 * x2
+//
+// Using first-order Taylor expansion:
+//   dy/dx1 = x2,  dy/dx2 = x1
+//   Var(y) = x2^2*Var(x1) + x1^2*Var(x2) + 2*x1*x2*rho*u1*u2
+pub fn gum_s1_product_correlated(x1: GUMResult, x2: GUMResult, correlation: f64) -> GUMResult {
+    let value = x1.value * x2.value
+
+    let u1 = x1.std_uncertainty
+    let u2 = x2.std_uncertainty
+    let v1 = x1.value
+    let v2 = x2.value
+
+    var rho = correlation
+    if rho > 1.0 { rho = 1.0 }
+    if rho < 0.0 - 1.0 { rho = 0.0 - 1.0 }
+
+    // Var(y) = x2^2*u1^2 + x1^2*u2^2 + 2*x1*x2*rho*u1*u2
+    let var_y = v2*v2*u1*u1 + v1*v1*u2*u2 + 2.0*v1*v2*rho*u1*u2
+
+    let std_u = sqrt_f64(abs_f64(var_y))
+    return gum_result_from(value, std_u)
+}
+
+// Divide two correlated measurements: y = x1 / x2
+//
+// Using first-order Taylor expansion:
+//   dy/dx1 = 1/x2,  dy/dx2 = -x1/x2^2
+//   Var(y) = (1/x2)^2*Var(x1) + (x1/x2^2)^2*Var(x2)
+//            + 2*(1/x2)*(-x1/x2^2)*rho*u1*u2
+pub fn gum_s1_div_correlated(x1: GUMResult, x2: GUMResult, correlation: f64) -> GUMResult {
+    if abs_f64(x2.value) < 1.0e-15 {
+        return gum_result_from(0.0, 1.0e308)
+    }
+
+    let value = x1.value / x2.value
+
+    let u1 = x1.std_uncertainty
+    let u2 = x2.std_uncertainty
+    let v1 = x1.value
+    let v2 = x2.value
+
+    var rho = correlation
+    if rho > 1.0 { rho = 1.0 }
+    if rho < 0.0 - 1.0 { rho = 0.0 - 1.0 }
+
+    // Sensitivity coefficients
+    let c1 = 1.0 / v2                   // dy/dx1
+    let c2 = 0.0 - v1 / (v2 * v2)       // dy/dx2
+
+    // Var(y) = c1^2*u1^2 + c2^2*u2^2 + 2*c1*c2*rho*u1*u2
+    let var_y = c1*c1*u1*u1 + c2*c2*u2*u2 + 2.0*c1*c2*rho*u1*u2
+
+    let std_u = sqrt_f64(abs_f64(var_y))
+    return gum_result_from(value, std_u)
+}
+
+// =============================================================================
+// Convenience: Build covariance from two GUMResults + correlation
+// =============================================================================
+
+// Create a 2x2 covariance matrix from two GUMResults and their correlation
+pub fn cov_from_gum_results_2(r1: GUMResult, r2: GUMResult, correlation: f64) -> CovarianceMatrix {
+    var cov = cov_new(2)
+
+    let u1 = r1.std_uncertainty
+    let u2 = r2.std_uncertainty
+
+    var rho = correlation
+    if rho > 1.0 { rho = 1.0 }
+    if rho < 0.0 - 1.0 { rho = 0.0 - 1.0 }
+
+    // Diagonal: variances
+    cov_set(&!cov, 0, 0, u1 * u1)
+    cov_set(&!cov, 1, 1, u2 * u2)
+
+    // Off-diagonal: covariance = rho * u1 * u2
+    cov_set(&!cov, 0, 1, rho * u1 * u2)
+
+    return cov
+}
+
+// Create a 3x3 covariance matrix from three GUMResults and pairwise correlations
+pub fn cov_from_gum_results_3(
+    r1: GUMResult, r2: GUMResult, r3: GUMResult,
+    rho_12: f64, rho_13: f64, rho_23: f64
+) -> CovarianceMatrix {
+    var cov = cov_new(3)
+
+    let u1 = r1.std_uncertainty
+    let u2 = r2.std_uncertainty
+    let u3 = r3.std_uncertainty
+
+    // Diagonal: variances
+    cov_set(&!cov, 0, 0, u1 * u1)
+    cov_set(&!cov, 1, 1, u2 * u2)
+    cov_set(&!cov, 2, 2, u3 * u3)
+
+    // Off-diagonal: covariances
+    cov_set(&!cov, 0, 1, rho_12 * u1 * u2)
+    cov_set(&!cov, 0, 2, rho_13 * u1 * u3)
+    cov_set(&!cov, 1, 2, rho_23 * u2 * u3)
+
+    return cov
+}
+
+// =============================================================================
+// Validation: Compare Supplement 1 with basic GUM for uncorrelated case
+// =============================================================================
+
+// For uncorrelated inputs, GUM Supplement 1 should reduce to basic GUM.
+// This function computes the relative difference between the two approaches.
+// A small value (< 1e-6) confirms consistency.
+pub fn validate_s1_vs_gum(s1_uncertainty: f64, gum_uncertainty: f64) -> f64 {
+    let avg = 0.5 * (abs_f64(s1_uncertainty) + abs_f64(gum_uncertainty))
+    if avg < 1.0e-30 { return 0.0 }
+    return abs_f64(s1_uncertainty - gum_uncertainty) / avg
+}
+
+// =============================================================================
+// Effective degrees of freedom for correlated case
+// =============================================================================
+
+// Welch-Satterthwaite with correlation (extended form)
+// For two correlated inputs:
+//   v_eff = u_c^4 / (c1^4*u1^4/v1 + c2^4*u2^4/v2)
+//
+// Note: The correlation affects u_c but not the W-S denominator
+// (which depends on individual contributions, not their correlation).
+pub fn welch_satterthwaite_correlated_2(
+    u1: f64, dof1: f64, c1: f64,
+    u2: f64, dof2: f64, c2: f64,
+    correlation: f64
+) -> f64 {
+    var rho = correlation
+    if rho > 1.0 { rho = 1.0 }
+    if rho < 0.0 - 1.0 { rho = 0.0 - 1.0 }
+
+    // Combined variance including correlation
+    let var_y = c1*c1*u1*u1 + c2*c2*u2*u2 + 2.0*c1*c2*rho*u1*u2
+    let u_c_sq = abs_f64(var_y)
+    let u_c_4 = u_c_sq * u_c_sq
+
+    // Denominator: sum of (c_i * u_i)^4 / v_i
+    let term1 = c1*c1*u1*u1 * c1*c1*u1*u1 / max_f64(dof1, 1.0)
+    let term2 = c2*c2*u2*u2 * c2*c2*u2*u2 / max_f64(dof2, 1.0)
+    let denom = term1 + term2
+
+    if denom < 1.0e-30 {
+        return 1.0e9
+    }
+
+    return min_f64(u_c_4 / denom, 1.0e9)
+}

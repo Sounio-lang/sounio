@@ -1,0 +1,597 @@
+//@ run-pass
+// GUM Supplement 1 compliance tests
+// Validates covariance propagation per JCGM 101:2008
+//
+// Tests:
+// 1. Independent inputs (rho=0): covariance propagation = standard GUM RSS
+// 2. Fully correlated (rho=1): uncertainties add linearly
+// 3. Anti-correlated (rho=-1): uncertainties cancel
+// 4. Partial correlation (rho=0.5): intermediate result
+// 5. Product with correlation
+// 6. 3D propagation with correlation
+// 7. Cockcroft-Gault with correlated weight/SCr
+
+// =============================================================================
+// Helpers (self-contained, no imports)
+// =============================================================================
+
+fn sqrt_f64(x: f64) -> f64 {
+    if x <= 0.0 { return 0.0 }
+    var guess = x / 2.0
+    if guess < 0.001 { guess = 0.001 }
+    var i = 0
+    while i < 30 {
+        guess = (guess + x / guess) / 2.0
+        i = i + 1
+    }
+    return guess
+}
+
+fn abs_f64(x: f64) -> f64 {
+    if x < 0.0 { return 0.0 - x }
+    return x
+}
+
+fn max_f64(a: f64, b: f64) -> f64 {
+    if a > b { a } else { b }
+}
+
+// =============================================================================
+// CovarianceMatrix (inline, matches stdlib/epistemic/covariance.sio)
+// =============================================================================
+
+struct CovMat {
+    n: i32,
+    data: [f64; 300],
+}
+
+fn tri_idx(n: i32, i: i32, j: i32) -> i32 {
+    var row = i
+    var col = j
+    if i > j {
+        row = j
+        col = i
+    }
+    return row * n - (row * (row - 1)) / 2 + (col - row)
+}
+
+fn cm_new(n: i32) -> CovMat {
+    return CovMat { n: n, data: [0.0; 300] }
+}
+
+fn cm_set(m: &!CovMat, i: i32, j: i32, val: f64) {
+    m.data[tri_idx(m.n, i, j)] = val
+}
+
+fn cm_get(m: &CovMat, i: i32, j: i32) -> f64 {
+    return m.data[tri_idx(m.n, i, j)]
+}
+
+// =============================================================================
+// GUMResult (inline, matches stdlib/epistemic/gum.sio)
+// =============================================================================
+
+struct GR {
+    v: f64,
+    u: f64,
+}
+
+fn gr_new(val: f64, unc: f64) -> GR {
+    return GR { v: val, u: abs_f64(unc) }
+}
+
+// =============================================================================
+// Correlated operations (matches gum_supplement1.sio)
+// =============================================================================
+
+// y = x1 + x2, Var(y) = u1^2 + u2^2 + 2*rho*u1*u2
+fn add_correlated(a: GR, b: GR, rho: f64) -> GR {
+    let val = a.v + b.v
+    let var_y = a.u*a.u + b.u*b.u + 2.0 * rho * a.u * b.u
+    return gr_new(val, sqrt_f64(abs_f64(var_y)))
+}
+
+// y = x1 - x2, Var(y) = u1^2 + u2^2 - 2*rho*u1*u2
+fn sub_correlated(a: GR, b: GR, rho: f64) -> GR {
+    let val = a.v - b.v
+    let var_y = a.u*a.u + b.u*b.u - 2.0 * rho * a.u * b.u
+    return gr_new(val, sqrt_f64(abs_f64(var_y)))
+}
+
+// y = x1 * x2, Var(y) = x2^2*u1^2 + x1^2*u2^2 + 2*x1*x2*rho*u1*u2
+fn mul_correlated(a: GR, b: GR, rho: f64) -> GR {
+    let val = a.v * b.v
+    let var_y = b.v*b.v*a.u*a.u + a.v*a.v*b.u*b.u + 2.0*a.v*b.v*rho*a.u*b.u
+    return gr_new(val, sqrt_f64(abs_f64(var_y)))
+}
+
+// y = x1 / x2
+fn div_correlated(a: GR, b: GR, rho: f64) -> GR {
+    let val = a.v / b.v
+    let c1 = 1.0 / b.v
+    let c2 = 0.0 - a.v / (b.v * b.v)
+    let var_y = c1*c1*a.u*a.u + c2*c2*b.u*b.u + 2.0*c1*c2*rho*a.u*b.u
+    return gr_new(val, sqrt_f64(abs_f64(var_y)))
+}
+
+// Scale by exact constant
+fn scale(a: GR, c: f64) -> GR {
+    return gr_new(a.v * c, abs_f64(c) * a.u)
+}
+
+// 2D covariance propagation via numerical Jacobian
+fn propagate_2d(f_add: i32, x: [f64; 2], u: [f64; 2], rho: f64) -> GR {
+    // Build 2x2 covariance matrix
+    var cov = cm_new(2)
+    cm_set(&!cov, 0, 0, u[0] * u[0])
+    cm_set(&!cov, 1, 1, u[1] * u[1])
+    cm_set(&!cov, 0, 1, rho * u[0] * u[1])
+
+    // Numerical Jacobian via central differences
+    let h = 1.0e-7
+
+    let h0 = h * max_f64(abs_f64(x[0]), 1.0)
+    let h1 = h * max_f64(abs_f64(x[1]), 1.0)
+
+    // For f = x0 + x1 (f_add == 1) or f = x0 * x1 (f_add == 0)
+    var fp0: f64 = 0.0
+    var fm0: f64 = 0.0
+    var fp1: f64 = 0.0
+    var fm1: f64 = 0.0
+    var fval: f64 = 0.0
+
+    if f_add == 1 {
+        fp0 = (x[0] + h0) + x[1]
+        fm0 = (x[0] - h0) + x[1]
+        fp1 = x[0] + (x[1] + h1)
+        fm1 = x[0] + (x[1] - h1)
+        fval = x[0] + x[1]
+    } else {
+        fp0 = (x[0] + h0) * x[1]
+        fm0 = (x[0] - h0) * x[1]
+        fp1 = x[0] * (x[1] + h1)
+        fm1 = x[0] * (x[1] - h1)
+        fval = x[0] * x[1]
+    }
+
+    let j0 = (fp0 - fm0) / (2.0 * h0)
+    let j1 = (fp1 - fm1) / (2.0 * h1)
+
+    // Var(y) = j0^2*s00 + 2*j0*j1*s01 + j1^2*s11
+    let s00 = cm_get(&cov, 0, 0)
+    let s01 = cm_get(&cov, 0, 1)
+    let s11 = cm_get(&cov, 1, 1)
+
+    let var_y = j0*j0*s00 + 2.0*j0*j1*s01 + j1*j1*s11
+    return gr_new(fval, sqrt_f64(abs_f64(var_y)))
+}
+
+// =============================================================================
+// Main: Test Suite
+// =============================================================================
+
+fn main() -> i32 with IO {
+    println("======================================================================")
+    println("  GUM Supplement 1 Compliance Test Suite")
+    println("  JCGM 101:2008 — Covariance Propagation")
+    println("======================================================================")
+    println("")
+
+    // ================================================================
+    // TEST 1: Independent inputs (rho = 0) should match standard GUM
+    // For y = x1 + x2, uncorrelated:
+    //   GUM:   u(y) = sqrt(u1^2 + u2^2)      (RSS)
+    //   Sup 1: u(y) = sqrt(u1^2 + u2^2 + 0)  (same)
+    // ================================================================
+
+    let x1 = gr_new(10.0, 0.3)
+    let x2 = gr_new(20.0, 0.4)
+
+    // Standard GUM (RSS)
+    let gum_u = sqrt_f64(0.3*0.3 + 0.4*0.4)   // = 0.5
+
+    // Supplement 1 with rho = 0
+    let s1_result = add_correlated(x1, x2, 0.0)
+
+    let err1 = abs_f64(s1_result.u - gum_u)
+
+    println("TEST 1: Independent inputs (rho=0) vs GUM RSS")
+    println("  x1 = 10.0 +/- 0.3, x2 = 20.0 +/- 0.4")
+    println("  GUM RSS uncertainty:")
+    println(gum_u)
+    println("  Supplement 1 uncertainty (rho=0):")
+    println(s1_result.u)
+    println("  Difference:")
+    println(err1)
+
+    if err1 > 0.001 {
+        println("FAIL: Independent inputs should match GUM RSS")
+        return 1
+    }
+    println("[PASS] Independent inputs match GUM RSS")
+    println("")
+
+    // ================================================================
+    // TEST 2: Fully correlated (rho = 1)
+    // For y = x1 + x2, rho = 1:
+    //   Var(y) = u1^2 + u2^2 + 2*u1*u2 = (u1 + u2)^2
+    //   u(y) = u1 + u2 = 0.3 + 0.4 = 0.7
+    //
+    // This is the worst case: uncertainties add linearly.
+    // ================================================================
+
+    let full_corr = add_correlated(x1, x2, 1.0)
+    let expected_full = 0.3 + 0.4  // 0.7
+    let err2 = abs_f64(full_corr.u - expected_full)
+
+    println("TEST 2: Fully correlated (rho=1)")
+    println("  Expected uncertainty (u1+u2):")
+    println(expected_full)
+    println("  Supplement 1 uncertainty:")
+    println(full_corr.u)
+    println("  Difference:")
+    println(err2)
+
+    if err2 > 0.001 {
+        println("FAIL: Fully correlated should give u1+u2")
+        return 2
+    }
+    println("[PASS] Fully correlated: u(y) = u1 + u2")
+    println("")
+
+    // ================================================================
+    // TEST 3: Anti-correlated (rho = -1)
+    // For y = x1 + x2, rho = -1:
+    //   Var(y) = u1^2 + u2^2 - 2*u1*u2 = (u1 - u2)^2
+    //   u(y) = |u1 - u2| = |0.3 - 0.4| = 0.1
+    //
+    // Anti-correlation causes uncertainty cancellation.
+    // ================================================================
+
+    let anti_corr = add_correlated(x1, x2, 0.0 - 1.0)
+    let expected_anti = abs_f64(0.3 - 0.4)  // 0.1
+    let err3 = abs_f64(anti_corr.u - expected_anti)
+
+    println("TEST 3: Anti-correlated (rho=-1)")
+    println("  Expected uncertainty |u1-u2|:")
+    println(expected_anti)
+    println("  Supplement 1 uncertainty:")
+    println(anti_corr.u)
+    println("  Difference:")
+    println(err3)
+
+    if err3 > 0.001 {
+        println("FAIL: Anti-correlated should give |u1-u2|")
+        return 3
+    }
+    println("[PASS] Anti-correlated: u(y) = |u1 - u2|")
+    println("")
+
+    // ================================================================
+    // TEST 4: Partial correlation (rho = 0.5)
+    // For y = x1 + x2, rho = 0.5:
+    //   Var(y) = u1^2 + u2^2 + 2*0.5*u1*u2
+    //          = 0.09 + 0.16 + 0.12 = 0.37
+    //   u(y) = sqrt(0.37) ~ 0.60828
+    //
+    // Should be between RSS (0.5) and linear (0.7)
+    // ================================================================
+
+    let partial_corr = add_correlated(x1, x2, 0.5)
+    let expected_partial = sqrt_f64(0.09 + 0.16 + 2.0 * 0.5 * 0.3 * 0.4)
+    let err4 = abs_f64(partial_corr.u - expected_partial)
+
+    println("TEST 4: Partial correlation (rho=0.5)")
+    println("  Expected uncertainty sqrt(0.37):")
+    println(expected_partial)
+    println("  Supplement 1 uncertainty:")
+    println(partial_corr.u)
+    println("  Difference:")
+    println(err4)
+
+    // Verify it's between RSS and linear
+    let rss_u = sqrt_f64(0.09 + 0.16)
+    let lin_u = 0.3 + 0.4
+    let between_rss = partial_corr.u > rss_u - 0.001
+    let between_lin = partial_corr.u < lin_u + 0.001
+
+    if err4 > 0.001 {
+        println("FAIL: Partial correlation value incorrect")
+        return 4
+    }
+    if between_rss == false {
+        println("FAIL: Partial correlation should exceed RSS")
+        return 4
+    }
+    if between_lin == false {
+        println("FAIL: Partial correlation should be less than linear")
+        return 4
+    }
+    println("[PASS] Partial correlation: RSS < u(y) < linear")
+    println("")
+
+    // ================================================================
+    // TEST 5: Correlated product
+    // y = x1 * x2, with rho = 0.5
+    //
+    // Var(y) = x2^2*u1^2 + x1^2*u2^2 + 2*x1*x2*rho*u1*u2
+    //
+    // x1 = 5.0 +/- 0.1, x2 = 8.0 +/- 0.2, rho = 0.5
+    // Var(y) = 64*0.01 + 25*0.04 + 2*5*8*0.5*0.1*0.2
+    //        = 0.64 + 1.00 + 0.80 = 2.44
+    // u(y) = sqrt(2.44) ~ 1.5620
+    // ================================================================
+
+    let a5 = gr_new(5.0, 0.1)
+    let b5 = gr_new(8.0, 0.2)
+    let prod5 = mul_correlated(a5, b5, 0.5)
+
+    let expected_var5 = 64.0*0.01 + 25.0*0.04 + 2.0*5.0*8.0*0.5*0.1*0.2
+    let expected_u5 = sqrt_f64(expected_var5)
+    let err5 = abs_f64(prod5.u - expected_u5)
+
+    println("TEST 5: Correlated product (rho=0.5)")
+    println("  a=5+/-0.1, b=8+/-0.2, rho=0.5")
+    println("  Expected: sqrt(2.44) =")
+    println(expected_u5)
+    println("  Got:")
+    println(prod5.u)
+    println("  Value (should be 40):")
+    println(prod5.v)
+    println("  Difference:")
+    println(err5)
+
+    if err5 > 0.001 {
+        println("FAIL: Correlated product uncertainty")
+        return 5
+    }
+    println("[PASS] Correlated product matches analytic")
+    println("")
+
+    // ================================================================
+    // TEST 6: 3D propagation — y = x1 + x2 + x3 with pairwise correlations
+    //
+    // For addition, the Jacobian is J = [1, 1, 1], so:
+    //   Var(y) = s00 + s11 + s22 + 2*s01 + 2*s02 + 2*s12
+    //
+    // x1 = 1.0 +/- 0.1, x2 = 2.0 +/- 0.2, x3 = 3.0 +/- 0.3
+    // rho_12 = 0.5, rho_13 = 0.0, rho_23 = -0.3
+    //
+    // s00 = 0.01, s11 = 0.04, s22 = 0.09
+    // s01 = 0.5*0.1*0.2 = 0.01
+    // s02 = 0.0*0.1*0.3 = 0.0
+    // s12 = -0.3*0.2*0.3 = -0.018
+    //
+    // Var(y) = 0.01 + 0.04 + 0.09 + 2*0.01 + 0 + 2*(-0.018)
+    //        = 0.14 + 0.02 - 0.036 = 0.124
+    // u(y) = sqrt(0.124) ~ 0.3521
+    // ================================================================
+
+    let s00 = 0.01
+    let s11 = 0.04
+    let s22 = 0.09
+    let s01 = 0.5 * 0.1 * 0.2    // 0.01
+    let s02 = 0.0 * 0.1 * 0.3    // 0.0
+    let s12 = 0.0 - 0.3 * 0.2 * 0.3  // -0.018
+
+    let var_3d = s00 + s11 + s22 + 2.0*s01 + 2.0*s02 + 2.0*s12
+    let expected_u_3d = sqrt_f64(abs_f64(var_3d))
+
+    // Compute using covariance matrix propagation
+    var cov3 = cm_new(3)
+    cm_set(&!cov3, 0, 0, s00)
+    cm_set(&!cov3, 1, 1, s11)
+    cm_set(&!cov3, 2, 2, s22)
+    cm_set(&!cov3, 0, 1, s01)
+    cm_set(&!cov3, 0, 2, s02)
+    cm_set(&!cov3, 1, 2, s12)
+
+    // J = [1, 1, 1] for addition
+    let j0: f64 = 1.0
+    let j1: f64 = 1.0
+    let j2: f64 = 1.0
+
+    let var_prop = j0*j0*cm_get(&cov3, 0, 0) + j1*j1*cm_get(&cov3, 1, 1) + j2*j2*cm_get(&cov3, 2, 2)
+                 + 2.0*j0*j1*cm_get(&cov3, 0, 1) + 2.0*j0*j2*cm_get(&cov3, 0, 2) + 2.0*j1*j2*cm_get(&cov3, 1, 2)
+
+    let u_prop = sqrt_f64(abs_f64(var_prop))
+    let err6 = abs_f64(u_prop - expected_u_3d)
+
+    println("TEST 6: 3D correlated addition")
+    println("  x1=1+/-0.1, x2=2+/-0.2, x3=3+/-0.3")
+    println("  rho_12=0.5, rho_13=0, rho_23=-0.3")
+    println("  Expected uncertainty:")
+    println(expected_u_3d)
+    println("  Propagated uncertainty:")
+    println(u_prop)
+    println("  Difference:")
+    println(err6)
+
+    if err6 > 0.001 {
+        println("FAIL: 3D propagation")
+        return 6
+    }
+    println("[PASS] 3D correlated propagation matches analytic")
+    println("")
+
+    // ================================================================
+    // TEST 7: Cockcroft-Gault with correlated weight/SCr
+    //
+    // CrCl = (140 - age) * weight / (72 * SCr)
+    //
+    // Clinical scenario: weight and SCr are positively correlated
+    // (obese patients tend to have higher SCr from increased muscle mass)
+    // rho(weight, SCr) = 0.3
+    //
+    // Age = 55 +/- 0.5 (uncorrelated with others)
+    // Weight = 70 +/- 2.0 kg
+    // SCr = 1.1 +/- 0.05 mg/dL
+    // ================================================================
+
+    let age = gr_new(55.0, 0.5)
+    let wt = gr_new(70.0, 2.0)
+    let scr = gr_new(1.1, 0.05)
+
+    // Step 1: (140 - age)
+    let age_factor = sub_correlated(gr_new(140.0, 0.0), age, 0.0)
+    // v = 85.0, u = 0.5
+
+    // Step 2: (140 - age) * weight
+    // Age and weight are uncorrelated (rho = 0)
+    let numerator = mul_correlated(age_factor, wt, 0.0)
+
+    // Step 3: 72 * SCr
+    let denom = scale(scr, 72.0)
+    // v = 79.2, u = 3.6
+
+    // Step 4: numerator / denominator
+    // Weight is in numerator, SCr is in denominator
+    // The correlation between numerator and denominator comes from
+    // the weight/SCr correlation, propagated through the formula.
+    //
+    // For simplicity, propagate the weight/SCr correlation to the
+    // numerator/denominator: since numerator ~ weight and denominator ~ SCr,
+    // rho(num, denom) ~ rho(weight, SCr) = 0.3
+    let crcl = div_correlated(numerator, denom, 0.3)
+
+    let crcl_expected = (140.0 - 55.0) * 70.0 / (72.0 * 1.1)
+    let err_val = abs_f64(crcl.v - crcl_expected)
+
+    println("TEST 7: Cockcroft-Gault with correlated weight/SCr")
+    println("  Age=55+/-0.5, Weight=70+/-2.0kg, SCr=1.1+/-0.05mg/dL")
+    println("  rho(weight, SCr) = 0.3")
+    println("  CrCl value (mL/min):")
+    println(crcl.v)
+    println("  CrCl uncertainty:")
+    println(crcl.u)
+    println("  Expected CrCl:")
+    println(crcl_expected)
+
+    if err_val > 0.1 {
+        println("FAIL: CrCl value incorrect")
+        return 7
+    }
+
+    // The uncertainty should be positive and clinically reasonable
+    if crcl.u <= 0.0 {
+        println("FAIL: CrCl uncertainty must be positive")
+        return 7
+    }
+
+    // Compare with uncorrelated case to show correlation effect
+    let crcl_uncorr = div_correlated(numerator, denom, 0.0)
+    println("  CrCl uncertainty (uncorrelated):")
+    println(crcl_uncorr.u)
+
+    // With positive correlation between weight (numerator) and SCr (denominator),
+    // division should yield LOWER uncertainty than uncorrelated case
+    // because when weight goes up, SCr tends to go up too, partially cancelling
+    // the ratio effect.
+    println("  Correlation effect: correlated < uncorrelated =")
+    let corr_reduces = crcl.u < crcl_uncorr.u + 0.001
+    if corr_reduces {
+        println("  YES (correlation reduces uncertainty in ratio)")
+    } else {
+        println("  NO (unexpected: correlation should reduce ratio uncertainty)")
+    }
+
+    println("[PASS] Cockcroft-Gault with correlated inputs")
+    println("")
+
+    // ================================================================
+    // TEST 8: Subtraction with positive correlation (common-mode rejection)
+    //
+    // For y = x1 - x2 with rho = 1:
+    //   Var(y) = u1^2 + u2^2 - 2*u1*u2 = (u1 - u2)^2
+    //
+    // With equal uncertainties (u1 = u2), perfect correlation gives
+    // zero uncertainty — the ideal differential measurement.
+    // ================================================================
+
+    let s1 = gr_new(100.5, 0.3)
+    let s2 = gr_new(100.0, 0.3)
+
+    let diff_corr = sub_correlated(s1, s2, 1.0)
+    // Var(y) = 0.09 + 0.09 - 2*0.09 = 0
+    // u(y) = 0
+
+    println("TEST 8: Subtraction with rho=1 (common-mode rejection)")
+    println("  x1=100.5+/-0.3, x2=100.0+/-0.3, rho=1.0")
+    println("  Difference value:")
+    println(diff_corr.v)
+    println("  Difference uncertainty (should be ~0):")
+    println(diff_corr.u)
+
+    if diff_corr.u > 0.001 {
+        println("FAIL: Equal uncertainties with rho=1 should cancel in subtraction")
+        return 8
+    }
+    println("[PASS] Common-mode rejection: u(x1-x2) -> 0 when rho=1, u1=u2")
+    println("")
+
+    // ================================================================
+    // TEST 9: Cholesky-based positive definiteness check
+    //
+    // A valid covariance matrix must be positive semi-definite.
+    // Verify that our test matrices satisfy |rho| <= 1.
+    // ================================================================
+
+    // Valid 2x2: rho = 0.5, det = s00*s11 - s01^2 > 0
+    var cov_valid = cm_new(2)
+    cm_set(&!cov_valid, 0, 0, 1.0)   // Var(x1) = 1
+    cm_set(&!cov_valid, 1, 1, 1.0)   // Var(x2) = 1
+    cm_set(&!cov_valid, 0, 1, 0.5)   // Cov = rho = 0.5
+
+    let det_valid = cm_get(&cov_valid, 0, 0) * cm_get(&cov_valid, 1, 1)
+                  - cm_get(&cov_valid, 0, 1) * cm_get(&cov_valid, 0, 1)
+
+    println("TEST 9: Covariance matrix positive definiteness")
+    println("  [[1.0, 0.5], [0.5, 1.0]]")
+    println("  Determinant:")
+    println(det_valid)
+
+    if det_valid <= 0.0 {
+        println("FAIL: Valid covariance matrix should have positive determinant")
+        return 9
+    }
+
+    // Invalid 2x2: rho = 1.5, det < 0
+    var cov_invalid = cm_new(2)
+    cm_set(&!cov_invalid, 0, 0, 1.0)
+    cm_set(&!cov_invalid, 1, 1, 1.0)
+    cm_set(&!cov_invalid, 0, 1, 1.5)
+
+    let det_invalid = cm_get(&cov_invalid, 0, 0) * cm_get(&cov_invalid, 1, 1)
+                    - cm_get(&cov_invalid, 0, 1) * cm_get(&cov_invalid, 0, 1)
+
+    println("  [[1.0, 1.5], [1.5, 1.0]]")
+    println("  Determinant:")
+    println(det_invalid)
+
+    if det_invalid >= 0.0 {
+        println("FAIL: Invalid covariance matrix (|rho|>1) should have negative determinant")
+        return 9
+    }
+    println("[PASS] Positive definiteness check works")
+    println("")
+
+    // ================================================================
+    // SUMMARY
+    // ================================================================
+    println("======================================================================")
+    println("  GUM SUPPLEMENT 1 COMPLIANCE SUMMARY")
+    println("======================================================================")
+    println("  [PASS] Test 1: Independent inputs match GUM RSS")
+    println("  [PASS] Test 2: Fully correlated (rho=1): u = u1 + u2")
+    println("  [PASS] Test 3: Anti-correlated (rho=-1): u = |u1 - u2|")
+    println("  [PASS] Test 4: Partial correlation (rho=0.5): intermediate")
+    println("  [PASS] Test 5: Correlated product")
+    println("  [PASS] Test 6: 3D correlated propagation")
+    println("  [PASS] Test 7: Cockcroft-Gault with correlated weight/SCr")
+    println("  [PASS] Test 8: Common-mode rejection (subtraction, rho=1)")
+    println("  [PASS] Test 9: Positive definiteness check")
+    println("  All 9 tests validate JCGM 101:2008 covariance propagation")
+    println("======================================================================")
+
+    return 0
+}

@@ -1,0 +1,546 @@
+// stdlib/epistemic/covariance.sio
+// Full covariance matrix for multivariate uncertainty propagation
+//
+// Implements GUM Supplement 1 (JCGM 101:2008) covariance tracking
+// for correlated input quantities.
+//
+// A covariance matrix Sigma is symmetric positive semi-definite:
+//   Sigma_ij = Cov(X_i, X_j) = E[(X_i - mu_i)(X_j - mu_j)]
+//   Sigma_ii = Var(X_i)
+//
+// Stored as flattened upper-triangular (including diagonal):
+//   For n variables, upper triangle has n*(n+1)/2 elements.
+//   Max n = 24 => 24*25/2 = 300 elements.
+//
+// Reference: JCGM 101:2008, Section 7
+
+// =============================================================================
+// Helper Functions
+// =============================================================================
+
+fn sqrt_f64(x: f64) -> f64 {
+    if x <= 0.0 { return 0.0 }
+    var y = x;
+    var i: usize = 0;
+    while i < 20 {
+        y = 0.5 * (y + x / y);
+        i = i + 1;
+    }
+    y
+}
+
+fn abs_f64(x: f64) -> f64 {
+    if x < 0.0 { 0.0 - x } else { x }
+}
+
+fn min_f64(a: f64, b: f64) -> f64 {
+    if a < b { a } else { b }
+}
+
+fn max_f64(a: f64, b: f64) -> f64 {
+    if a > b { a } else { b }
+}
+
+// =============================================================================
+// Upper-Triangular Index Mapping
+// =============================================================================
+
+// Map (i, j) with i <= j to flattened upper-triangular index
+// Row i starts at offset i*n - i*(i-1)/2, column offset is j - i
+//
+// For row i: elements at columns i, i+1, ..., n-1
+//   index = i*n - i*(i-1)/2 + (j - i)
+fn tri_index(n: i32, i: i32, j: i32) -> i32 {
+    // Canonicalize: ensure i <= j (symmetric matrix)
+    var row = i
+    var col = j
+    if i > j {
+        row = j
+        col = i
+    }
+    // Offset for row `row`: sum of (n - k) for k = 0..row-1
+    // = row*n - row*(row-1)/2
+    // Then add (col - row) within the row
+    return row * n - (row * (row - 1)) / 2 + (col - row)
+}
+
+// =============================================================================
+// Covariance Matrix Type
+// =============================================================================
+
+// Symmetric covariance matrix stored as upper triangle
+// Maximum dimension: 24 variables (300 upper-triangular elements)
+pub struct CovarianceMatrix {
+    // Dimension (number of variables)
+    pub n: i32,
+
+    // Flattened upper-triangular storage (row-major)
+    // Element (i,j) with i <= j is at tri_index(n, i, j)
+    // Max capacity: 24 * 25 / 2 = 300
+    pub data: [f64; 300],
+}
+
+// =============================================================================
+// Constructors
+// =============================================================================
+
+// Create a zero-initialized covariance matrix for n variables
+// n must be in [1, 24]
+pub fn cov_new(n: i32) -> CovarianceMatrix {
+    var dim = n
+    if dim < 1 { dim = 1 }
+    if dim > 24 { dim = 24 }
+
+    var mat = CovarianceMatrix {
+        n: dim,
+        data: [0.0; 300],
+    }
+    return mat
+}
+
+// Create a diagonal covariance matrix from variances
+// variances: array of Var(X_i) for i = 0..n-1
+pub fn cov_diagonal(n: i32, variances: [f64; 24]) -> CovarianceMatrix {
+    var mat = cov_new(n)
+
+    var i: i32 = 0
+    while i < mat.n {
+        let idx = tri_index(mat.n, i, i)
+        mat.data[idx] = abs_f64(variances[i])
+        i = i + 1
+    }
+    return mat
+}
+
+// Create covariance matrix from standard deviations and a correlation matrix
+// std_devs: standard deviations sigma_i
+// corr_matrix: flattened upper-triangular correlation coefficients rho_ij
+//
+// Sigma_ij = sigma_i * sigma_j * rho_ij
+pub fn cov_from_correlation(n: i32, std_devs: [f64; 24], corr_matrix: [f64; 300]) -> CovarianceMatrix {
+    var mat = cov_new(n)
+
+    var i: i32 = 0
+    while i < mat.n {
+        var j: i32 = i
+        while j < mat.n {
+            let idx = tri_index(mat.n, i, j)
+            let rho = corr_matrix[idx]
+            let cov_val = std_devs[i] * std_devs[j] * rho
+            mat.data[idx] = cov_val
+            j = j + 1
+        }
+        i = i + 1
+    }
+    return mat
+}
+
+// =============================================================================
+// Element Access
+// =============================================================================
+
+// Set covariance element Sigma(i, j)
+// Automatically handles symmetry: Sigma(i,j) = Sigma(j,i)
+pub fn cov_set(cov: &!CovarianceMatrix, i: i32, j: i32, val: f64) {
+    if i < 0 { return }
+    if j < 0 { return }
+    if i >= cov.n { return }
+    if j >= cov.n { return }
+
+    let idx = tri_index(cov.n, i, j)
+    cov.data[idx] = val
+}
+
+// Get covariance element Sigma(i, j)
+pub fn cov_get(cov: &CovarianceMatrix, i: i32, j: i32) -> f64 {
+    if i < 0 { return 0.0 }
+    if j < 0 { return 0.0 }
+    if i >= cov.n { return 0.0 }
+    if j >= cov.n { return 0.0 }
+
+    let idx = tri_index(cov.n, i, j)
+    return cov.data[idx]
+}
+
+// Set variance for variable i: Sigma(i, i) = variance
+pub fn cov_set_variance(cov: &!CovarianceMatrix, i: i32, variance: f64) {
+    cov_set(cov, i, i, abs_f64(variance))
+}
+
+// Get variance for variable i: Var(X_i) = Sigma(i, i)
+pub fn cov_get_variance(cov: &CovarianceMatrix, i: i32) -> f64 {
+    return cov_get(cov, i, i)
+}
+
+// Get standard deviation for variable i: sigma_i = sqrt(Var(X_i))
+pub fn cov_get_std(cov: &CovarianceMatrix, i: i32) -> f64 {
+    return sqrt_f64(cov_get_variance(cov, i))
+}
+
+// =============================================================================
+// Correlation Coefficient
+// =============================================================================
+
+// Compute Pearson correlation coefficient rho_ij
+// rho_ij = Sigma_ij / (sigma_i * sigma_j)
+//
+// Returns:
+//   -1 <= rho <= 1  (perfect anti-correlation to perfect correlation)
+//   0 if either variance is zero
+pub fn correlation_coefficient(cov: &CovarianceMatrix, i: i32, j: i32) -> f64 {
+    let sigma_i = cov_get_std(cov, i)
+    let sigma_j = cov_get_std(cov, j)
+
+    if sigma_i < 1.0e-30 { return 0.0 }
+    if sigma_j < 1.0e-30 { return 0.0 }
+
+    let cov_ij = cov_get(cov, i, j)
+    var rho = cov_ij / (sigma_i * sigma_j)
+
+    // Clamp to [-1, 1] for numerical safety
+    if rho > 1.0 { rho = 1.0 }
+    if rho < 0.0 - 1.0 { rho = 0.0 - 1.0 }
+
+    return rho
+}
+
+// Set correlation between variables i and j
+// Updates Sigma(i,j) = rho * sigma_i * sigma_j
+// Requires variances to be set first
+pub fn cov_set_correlation(cov: &!CovarianceMatrix, i: i32, j: i32, rho: f64) {
+    let sigma_i = sqrt_f64(cov_get(cov, i, i))
+    let sigma_j = sqrt_f64(cov_get(cov, j, j))
+
+    // Clamp rho to [-1, 1]
+    var r = rho
+    if r > 1.0 { r = 1.0 }
+    if r < 0.0 - 1.0 { r = 0.0 - 1.0 }
+
+    let cov_val = r * sigma_i * sigma_j
+    cov_set(cov, i, j, cov_val)
+}
+
+// =============================================================================
+// Matrix Properties
+// =============================================================================
+
+// Check if the covariance matrix is positive definite
+// Uses attempted Cholesky decomposition: Sigma is PD iff Cholesky succeeds
+// with all positive diagonal elements.
+pub fn cov_is_positive_definite(cov: &CovarianceMatrix) -> bool {
+    let n = cov.n
+
+    // Work array for Cholesky factor L (lower triangular, stored as upper)
+    var L: [f64; 300] = [0.0; 300]
+
+    var j: i32 = 0
+    while j < n {
+        // Diagonal element: L(j,j) = sqrt(Sigma(j,j) - sum_{k<j} L(j,k)^2)
+        var diag_sum: f64 = 0.0
+        var k: i32 = 0
+        while k < j {
+            let l_jk = L[tri_index(n, k, j)]
+            diag_sum = diag_sum + l_jk * l_jk
+            k = k + 1
+        }
+
+        let remainder = cov_get(cov, j, j) - diag_sum
+        if remainder <= 0.0 {
+            return false
+        }
+        L[tri_index(n, j, j)] = sqrt_f64(remainder)
+
+        // Off-diagonal: L(i,j) = (Sigma(i,j) - sum_{k<j} L(i,k)*L(j,k)) / L(j,j)
+        var i: i32 = j + 1
+        while i < n {
+            var off_sum: f64 = 0.0
+            var kk: i32 = 0
+            while kk < j {
+                let l_ik = L[tri_index(n, kk, i)]
+                let l_jk2 = L[tri_index(n, kk, j)]
+                off_sum = off_sum + l_ik * l_jk2
+                kk = kk + 1
+            }
+
+            let l_jj = L[tri_index(n, j, j)]
+            if abs_f64(l_jj) < 1.0e-30 {
+                return false
+            }
+            L[tri_index(n, j, i)] = (cov_get(cov, j, i) - off_sum) / l_jj
+            i = i + 1
+        }
+
+        j = j + 1
+    }
+
+    return true
+}
+
+// =============================================================================
+// Cholesky Decomposition
+// =============================================================================
+
+// Compute Cholesky factor L such that Sigma = L * L^T
+// L is lower triangular. We store it in upper-triangular format as L^T
+// so that L(i,j) for i >= j is stored at tri_index(n, j, i).
+//
+// If the matrix is not positive definite, returns a zero matrix.
+//
+// Algorithm: Cholesky-Banachiewicz (row-by-row)
+//   L(j,j) = sqrt(Sigma(j,j) - sum_{k<j} L(j,k)^2)
+//   L(i,j) = (Sigma(i,j) - sum_{k<j} L(i,k)*L(j,k)) / L(j,j)  for i > j
+pub fn cov_cholesky(cov: &CovarianceMatrix) -> CovarianceMatrix {
+    let n = cov.n
+    var result = cov_new(n)
+
+    var j: i32 = 0
+    while j < n {
+        // Diagonal element
+        var diag_sum: f64 = 0.0
+        var k: i32 = 0
+        while k < j {
+            // L(j,k) is stored at tri_index(n, k, j) in our upper-tri format
+            let l_jk = result.data[tri_index(n, k, j)]
+            diag_sum = diag_sum + l_jk * l_jk
+            k = k + 1
+        }
+
+        let remainder = cov_get(cov, j, j) - diag_sum
+        if remainder <= 0.0 {
+            // Not positive definite - return zero matrix
+            return cov_new(n)
+        }
+        let l_jj = sqrt_f64(remainder)
+        result.data[tri_index(n, j, j)] = l_jj
+
+        // Off-diagonal: L(i,j) for i > j
+        var i: i32 = j + 1
+        while i < n {
+            var off_sum: f64 = 0.0
+            var kk: i32 = 0
+            while kk < j {
+                let l_ik = result.data[tri_index(n, kk, i)]
+                let l_jk2 = result.data[tri_index(n, kk, j)]
+                off_sum = off_sum + l_ik * l_jk2
+                kk = kk + 1
+            }
+
+            // L(i,j) stored at tri_index(n, j, i) [j < i so j,i is upper tri]
+            result.data[tri_index(n, j, i)] = (cov_get(cov, j, i) - off_sum) / l_jj
+            i = i + 1
+        }
+
+        j = j + 1
+    }
+
+    return result
+}
+
+// =============================================================================
+// Matrix Arithmetic
+// =============================================================================
+
+// Add two covariance matrices element-wise: C = A + B
+// Matrices must have the same dimension
+pub fn cov_add(a: &CovarianceMatrix, b: &CovarianceMatrix) -> CovarianceMatrix {
+    let n = a.n
+    var result = cov_new(n)
+
+    var i: i32 = 0
+    while i < n {
+        var j: i32 = i
+        while j < n {
+            let idx = tri_index(n, i, j)
+            result.data[idx] = a.data[idx] + b.data[idx]
+            j = j + 1
+        }
+        i = i + 1
+    }
+    return result
+}
+
+// Scale covariance matrix: C = alpha * A
+pub fn cov_scale(cov: &CovarianceMatrix, alpha: f64) -> CovarianceMatrix {
+    let n = cov.n
+    var result = cov_new(n)
+
+    var i: i32 = 0
+    while i < n {
+        var j: i32 = i
+        while j < n {
+            let idx = tri_index(n, i, j)
+            result.data[idx] = alpha * cov.data[idx]
+            j = j + 1
+        }
+        i = i + 1
+    }
+    return result
+}
+
+// =============================================================================
+// Covariance Propagation: Sigma_y = J * Sigma_x * J^T
+// =============================================================================
+
+// Propagate covariance through a linear transformation for 2 inputs, 1 output
+// Given y = J * x, compute Var(y) = J * Sigma_x * J^T
+// where J is a 1xn Jacobian (gradient vector)
+//
+// For 2 inputs: Var(y) = j1^2*s11 + 2*j1*j2*s12 + j2^2*s22
+pub fn cov_propagate_1x2(jacobian: [f64; 2], cov_x: &CovarianceMatrix) -> f64 {
+    let j0 = jacobian[0]
+    let j1 = jacobian[1]
+
+    let s00 = cov_get(cov_x, 0, 0)
+    let s01 = cov_get(cov_x, 0, 1)
+    let s11 = cov_get(cov_x, 1, 1)
+
+    return j0 * j0 * s00 + 2.0 * j0 * j1 * s01 + j1 * j1 * s11
+}
+
+// Propagate covariance for 3 inputs, 1 output
+// Var(y) = sum_i sum_j j_i * j_j * Sigma_ij
+pub fn cov_propagate_1x3(jacobian: [f64; 3], cov_x: &CovarianceMatrix) -> f64 {
+    let j0 = jacobian[0]
+    let j1 = jacobian[1]
+    let j2 = jacobian[2]
+
+    let s00 = cov_get(cov_x, 0, 0)
+    let s01 = cov_get(cov_x, 0, 1)
+    let s02 = cov_get(cov_x, 0, 2)
+    let s11 = cov_get(cov_x, 1, 1)
+    let s12 = cov_get(cov_x, 1, 2)
+    let s22 = cov_get(cov_x, 2, 2)
+
+    // Var(y) = J * Sigma * J^T (full expansion)
+    return j0*j0*s00 + j1*j1*s11 + j2*j2*s22
+         + 2.0*j0*j1*s01 + 2.0*j0*j2*s02 + 2.0*j1*j2*s12
+}
+
+// General propagation for up to n inputs, 1 output
+// Var(y) = sum_i sum_j J_i * Sigma_ij * J_j
+pub fn cov_propagate_general(n: i32, jacobian: [f64; 24], cov_x: &CovarianceMatrix) -> f64 {
+    var result: f64 = 0.0
+
+    var i: i32 = 0
+    while i < n {
+        // Diagonal term
+        result = result + jacobian[i] * jacobian[i] * cov_get(cov_x, i, i)
+
+        // Off-diagonal terms (factor of 2 from symmetry)
+        var j: i32 = i + 1
+        while j < n {
+            result = result + 2.0 * jacobian[i] * jacobian[j] * cov_get(cov_x, i, j)
+            j = j + 1
+        }
+        i = i + 1
+    }
+
+    return result
+}
+
+// =============================================================================
+// Multi-output Covariance Propagation
+// =============================================================================
+
+// Propagate covariance for m outputs from n inputs
+// Sigma_y = J * Sigma_x * J^T  where J is m x n
+//
+// J is stored row-major in a flat array: J[i*n + j] = dY_i/dX_j
+// Result is an m x m covariance matrix
+pub fn cov_propagate_full(n_in: i32, n_out: i32, jacobian: [f64; 576], cov_x: &CovarianceMatrix) -> CovarianceMatrix {
+    // 576 = 24 * 24 max
+    var result = cov_new(n_out)
+
+    // Sigma_y(a,b) = sum_i sum_j J(a,i) * Sigma_x(i,j) * J(b,j)
+    var a: i32 = 0
+    while a < n_out {
+        var b: i32 = a
+        while b < n_out {
+            var val: f64 = 0.0
+            var i: i32 = 0
+            while i < n_in {
+                var j: i32 = 0
+                while j < n_in {
+                    let j_ai = jacobian[a * n_in + i]
+                    let j_bj = jacobian[b * n_in + j]
+                    // Sigma_x(i,j) — use cov_get which handles symmetry
+                    let s_ij = cov_get(cov_x, i, j)
+                    val = val + j_ai * s_ij * j_bj
+                    j = j + 1
+                }
+                i = i + 1
+            }
+            cov_set(&!result, a, b, val)
+            b = b + 1
+        }
+        a = a + 1
+    }
+
+    return result
+}
+
+// =============================================================================
+// Diagnostic Utilities
+// =============================================================================
+
+// Compute the trace: Tr(Sigma) = sum of variances
+pub fn cov_trace(cov: &CovarianceMatrix) -> f64 {
+    var total: f64 = 0.0
+    var i: i32 = 0
+    while i < cov.n {
+        total = total + cov_get(cov, i, i)
+        i = i + 1
+    }
+    return total
+}
+
+// Compute the determinant for a 2x2 covariance matrix
+// det = s00*s11 - s01^2
+pub fn cov_det_2x2(cov: &CovarianceMatrix) -> f64 {
+    let s00 = cov_get(cov, 0, 0)
+    let s01 = cov_get(cov, 0, 1)
+    let s11 = cov_get(cov, 1, 1)
+    return s00 * s11 - s01 * s01
+}
+
+// Compute the determinant for a 3x3 covariance matrix (Sarrus' rule)
+pub fn cov_det_3x3(cov: &CovarianceMatrix) -> f64 {
+    let a = cov_get(cov, 0, 0)
+    let b = cov_get(cov, 0, 1)
+    let c = cov_get(cov, 0, 2)
+    let d = cov_get(cov, 1, 1)
+    let e = cov_get(cov, 1, 2)
+    let f = cov_get(cov, 2, 2)
+
+    // For symmetric matrix [a b c; b d e; c e f]:
+    // det = a(df - e^2) - b(bf - ce) + c(be - cd)
+    return a * (d * f - e * e) - b * (b * f - c * e) + c * (b * e - c * d)
+}
+
+// Check if all diagonal elements (variances) are non-negative
+pub fn cov_is_valid(cov: &CovarianceMatrix) -> bool {
+    var i: i32 = 0
+    while i < cov.n {
+        if cov_get(cov, i, i) < 0.0 {
+            return false
+        }
+        i = i + 1
+    }
+    return true
+}
+
+// Check if all correlation coefficients are in [-1, 1]
+pub fn cov_correlations_valid(cov: &CovarianceMatrix) -> bool {
+    var i: i32 = 0
+    while i < cov.n {
+        var j: i32 = i + 1
+        while j < cov.n {
+            let rho = correlation_coefficient(cov, i, j)
+            if rho > 1.0 + 1.0e-10 { return false }
+            if rho < 0.0 - 1.0 - 1.0e-10 { return false }
+            j = j + 1
+        }
+        i = i + 1
+    }
+    return true
+}
