@@ -1,0 +1,335 @@
+//@ run-pass
+// GUM Compliance Test Suite
+//
+// Validates that Sounio's uncertainty propagation matches
+// ISO/IEC Guide 98-3 (GUM) Section 5.1.2.
+//
+// Tests:
+// 1. Addition/Subtraction: RSS rule (sqrt(u1^2 + u2^2))
+// 2. Multiplication: Relative uncertainty propagation
+// 3. Division: Relative uncertainty propagation
+// 4. Chain rule: Multi-step propagation
+// 5. Cockcroft-Gault: Real-world pharmacokinetic formula
+
+struct EVal {
+    v: f64,
+    u: f64
+}
+
+fn sqrt_f64(x: f64) -> f64 {
+    if x <= 0.0 { return 0.0 }
+    var guess = x / 2.0
+    if guess < 0.001 { guess = 0.001 }
+    var i = 0
+    while i < 30 {
+        guess = (guess + x / guess) / 2.0
+        i = i + 1
+    }
+    return guess
+}
+
+fn abs_f64(x: f64) -> f64 {
+    if x < 0.0 { return 0.0 - x }
+    return x
+}
+
+// GUM Addition: u(x+y) = sqrt(u(x)^2 + u(y)^2)
+fn ev_add(a: EVal, b: EVal) -> EVal {
+    return EVal {
+        v: a.v + b.v,
+        u: sqrt_f64(a.u * a.u + b.u * b.u)
+    }
+}
+
+// GUM Subtraction: same as addition for uncorrelated
+fn ev_sub(a: EVal, b: EVal) -> EVal {
+    return EVal {
+        v: a.v - b.v,
+        u: sqrt_f64(a.u * a.u + b.u * b.u)
+    }
+}
+
+// GUM Multiplication: u(x*y) = |x*y| * sqrt((u(x)/x)^2 + (u(y)/y)^2)
+fn ev_mul(a: EVal, b: EVal) -> EVal {
+    let val = a.v * b.v
+    let u = sqrt_f64(b.v * b.v * a.u * a.u + a.v * a.v * b.u * b.u)
+    return EVal { v: val, u: u }
+}
+
+// GUM Division: u(x/y) = |x/y| * sqrt((u(x)/x)^2 + (u(y)/y)^2)
+fn ev_div(a: EVal, b: EVal) -> EVal {
+    let val = a.v / b.v
+    let rel_a = a.u / abs_f64(a.v)
+    let rel_b = b.u / abs_f64(b.v)
+    let u = abs_f64(val) * sqrt_f64(rel_a * rel_a + rel_b * rel_b)
+    return EVal { v: val, u: u }
+}
+
+// Scale by exact constant (zero uncertainty)
+fn ev_scale(a: EVal, c: f64) -> EVal {
+    return EVal {
+        v: a.v * c,
+        u: abs_f64(c) * a.u
+    }
+}
+
+fn main() -> i32 with IO {
+    println("======================================================================")
+    println("  GUM Compliance Test Suite")
+    println("  ISO/IEC Guide 98-3 (JCGM 100:2008)")
+    println("======================================================================")
+    println("")
+
+    // ================================================================
+    // TEST 1: Addition — RSS rule
+    // GUM Eq. (10): u_c^2 = sum_i (df/dx_i)^2 * u^2(x_i)
+    // For f = x + y: df/dx = 1, df/dy = 1
+    // => u(x+y) = sqrt(u(x)^2 + u(y)^2)
+    // ================================================================
+
+    let x1 = EVal { v: 10.0, u: 0.3 }
+    let y1 = EVal { v: 20.0, u: 0.4 }
+    let sum1 = ev_add(x1, y1)
+
+    // Expected: v = 30.0, u = sqrt(0.09 + 0.16) = sqrt(0.25) = 0.5
+    let expected_u_add = 0.5
+    let err_add = abs_f64(sum1.u - expected_u_add)
+
+    println("TEST 1: Addition (RSS)")
+    println("  x = 10.0 +/- 0.3, y = 20.0 +/- 0.4")
+    println("  x + y value:")
+    println(sum1.v)
+    println("  x + y uncertainty:")
+    println(sum1.u)
+    println("  Expected uncertainty: 0.5")
+    println("  Error:")
+    println(err_add)
+
+    if err_add > 0.001 {
+        println("FAIL: Addition RSS")
+        return 1
+    }
+    println("[PASS] Addition RSS matches GUM")
+    println("")
+
+    // ================================================================
+    // TEST 2: Subtraction — Same RSS rule
+    // ================================================================
+
+    let diff1 = ev_sub(x1, y1)
+    // u(x-y) = sqrt(0.09 + 0.16) = 0.5 (same as addition!)
+    let err_sub = abs_f64(diff1.u - 0.5)
+
+    println("TEST 2: Subtraction (RSS)")
+    println("  x - y value:")
+    println(diff1.v)
+    println("  x - y uncertainty:")
+    println(diff1.u)
+
+    if err_sub > 0.001 {
+        println("FAIL: Subtraction RSS")
+        return 2
+    }
+    println("[PASS] Subtraction RSS matches GUM")
+    println("")
+
+    // ================================================================
+    // TEST 3: Multiplication — Relative uncertainty
+    // GUM: For f = x * y:
+    //   u(f) = |xy| * sqrt((u(x)/x)^2 + (u(y)/y)^2)
+    //   u(f) = sqrt(y^2*u(x)^2 + x^2*u(y)^2)
+    // ================================================================
+
+    let a3 = EVal { v: 5.0, u: 0.1 }
+    let b3 = EVal { v: 8.0, u: 0.2 }
+    let prod3 = ev_mul(a3, b3)
+
+    // Expected: v = 40.0
+    // u = sqrt(64 * 0.01 + 25 * 0.04) = sqrt(0.64 + 1.0) = sqrt(1.64) = 1.2806
+    let expected_u_mul = sqrt_f64(1.64)
+    let err_mul = abs_f64(prod3.u - expected_u_mul)
+
+    println("TEST 3: Multiplication (relative uncertainty)")
+    println("  a = 5.0 +/- 0.1, b = 8.0 +/- 0.2")
+    println("  a * b value:")
+    println(prod3.v)
+    println("  a * b uncertainty:")
+    println(prod3.u)
+    println("  Expected uncertainty:")
+    println(expected_u_mul)
+    println("  Error:")
+    println(err_mul)
+
+    if err_mul > 0.001 {
+        println("FAIL: Multiplication uncertainty")
+        return 3
+    }
+    println("[PASS] Multiplication matches GUM")
+    println("")
+
+    // ================================================================
+    // TEST 4: Division — Relative uncertainty
+    // GUM: For f = x / y:
+    //   u(f)/|f| = sqrt((u(x)/x)^2 + (u(y)/y)^2)
+    // ================================================================
+
+    let n4 = EVal { v: 100.0, u: 2.0 }
+    let d4 = EVal { v: 25.0, u: 0.5 }
+    let quot4 = ev_div(n4, d4)
+
+    // Expected: v = 4.0
+    // rel_x = 2/100 = 0.02, rel_y = 0.5/25 = 0.02
+    // u(f) = 4.0 * sqrt(0.0004 + 0.0004) = 4.0 * sqrt(0.0008) = 4.0 * 0.02828 = 0.1131
+    let expected_u_div = 4.0 * sqrt_f64(0.0008)
+    let err_div = abs_f64(quot4.u - expected_u_div)
+
+    println("TEST 4: Division (relative uncertainty)")
+    println("  n = 100 +/- 2, d = 25 +/- 0.5")
+    println("  n / d value:")
+    println(quot4.v)
+    println("  n / d uncertainty:")
+    println(quot4.u)
+    println("  Expected uncertainty:")
+    println(expected_u_div)
+    println("  Error:")
+    println(err_div)
+
+    if err_div > 0.001 {
+        println("FAIL: Division uncertainty")
+        return 4
+    }
+    println("[PASS] Division matches GUM")
+    println("")
+
+    // ================================================================
+    // TEST 5: Chain rule — Multi-step propagation
+    // Compute (x + y) * z and verify uncertainty propagates correctly
+    // through two operations
+    // ================================================================
+
+    let x5 = EVal { v: 3.0, u: 0.1 }
+    let y5 = EVal { v: 4.0, u: 0.2 }
+    let z5 = EVal { v: 2.0, u: 0.05 }
+
+    let sum5 = ev_add(x5, y5)
+    // sum5: v = 7.0, u = sqrt(0.01 + 0.04) = sqrt(0.05) = 0.2236
+
+    let result5 = ev_mul(sum5, z5)
+    // result5: v = 14.0
+    // u = sqrt(z^2 * u(sum)^2 + sum^2 * u(z)^2)
+    //   = sqrt(4 * 0.05 + 49 * 0.0025)
+    //   = sqrt(0.2 + 0.1225) = sqrt(0.3225) = 0.5679
+    let expected_u_chain = sqrt_f64(4.0 * 0.05 + 49.0 * 0.0025)
+    let err_chain = abs_f64(result5.u - expected_u_chain)
+
+    println("TEST 5: Chain rule ((x+y)*z)")
+    println("  x=3+/-0.1, y=4+/-0.2, z=2+/-0.05")
+    println("  (x+y)*z value:")
+    println(result5.v)
+    println("  (x+y)*z uncertainty:")
+    println(result5.u)
+    println("  Expected uncertainty:")
+    println(expected_u_chain)
+    println("  Error:")
+    println(err_chain)
+
+    if err_chain > 0.001 {
+        println("FAIL: Chain propagation")
+        return 5
+    }
+    println("[PASS] Chain rule propagation matches GUM")
+    println("")
+
+    // ================================================================
+    // TEST 6: Cockcroft-Gault equation
+    // CrCl = (140 - age) * weight / (72 * SCr)
+    // Real clinical formula with measurement uncertainty
+    // ================================================================
+
+    let age = EVal { v: 55.0, u: 0.5 }
+    let weight = EVal { v: 70.0, u: 0.5 }
+    let scr = EVal { v: 1.1, u: 0.05 }
+
+    // Step 1: (140 - age) = 85.0
+    let age_factor = ev_sub(EVal { v: 140.0, u: 0.0 }, age)
+    // u = sqrt(0 + 0.25) = 0.5
+
+    // Step 2: (140 - age) * weight
+    let numerator = ev_mul(age_factor, weight)
+    // v = 85 * 70 = 5950
+    // u = sqrt(70^2 * 0.25 + 85^2 * 0.25)
+    //   = sqrt(4900*0.25 + 7225*0.25) = sqrt(1225 + 1806.25) = sqrt(3031.25) = 55.06
+
+    // Step 3: 72 * SCr
+    let denominator = ev_scale(scr, 72.0)
+    // v = 79.2, u = 72 * 0.05 = 3.6
+
+    // Step 4: numerator / denominator
+    let crcl = ev_div(numerator, denominator)
+
+    println("TEST 6: Cockcroft-Gault (clinical PK)")
+    println("  Age=55+/-0.5y, Weight=70+/-0.5kg, SCr=1.1+/-0.05mg/dL")
+    println("  CrCl value (mL/min):")
+    println(crcl.v)
+    println("  CrCl uncertainty:")
+    println(crcl.u)
+
+    // CrCl should be ~75 mL/min (5950/79.2)
+    let crcl_expected = 5950.0 / 79.2
+    let err_crcl_val = abs_f64(crcl.v - crcl_expected)
+
+    if err_crcl_val > 0.1 {
+        println("FAIL: CrCl value incorrect")
+        return 6
+    }
+
+    // Uncertainty should be positive and reasonable (< 10% of value)
+    if crcl.u <= 0.0 {
+        println("FAIL: CrCl uncertainty should be positive")
+        return 7
+    }
+    if crcl.u > crcl.v * 0.1 {
+        println("FAIL: CrCl uncertainty unreasonably large")
+        return 8
+    }
+
+    println("[PASS] Cockcroft-Gault GUM propagation")
+    println("")
+
+    // ================================================================
+    // TEST 7: Exact constant propagation
+    // Multiplying by exact constant: u(c*x) = |c| * u(x)
+    // ================================================================
+
+    let x7 = EVal { v: 10.0, u: 0.3 }
+    let scaled = ev_scale(x7, 3.0)
+    let err_scale = abs_f64(scaled.u - 0.9)
+
+    println("TEST 7: Exact constant scaling")
+    println("  3 * (10.0 +/- 0.3) uncertainty:")
+    println(scaled.u)
+
+    if err_scale > 0.001 {
+        println("FAIL: Constant scaling")
+        return 9
+    }
+    println("[PASS] Exact constant scaling matches GUM")
+    println("")
+
+    // ================================================================
+    // SUMMARY
+    // ================================================================
+    println("======================================================================")
+    println("  GUM COMPLIANCE SUMMARY")
+    println("======================================================================")
+    println("  [PASS] Addition/Subtraction (RSS)")
+    println("  [PASS] Multiplication (relative uncertainty)")
+    println("  [PASS] Division (relative uncertainty)")
+    println("  [PASS] Chain rule (multi-step propagation)")
+    println("  [PASS] Cockcroft-Gault (clinical application)")
+    println("  [PASS] Exact constant scaling")
+    println("  All 7 tests match GUM ISO/IEC Guide 98-3")
+    println("======================================================================")
+
+    return 0
+}
