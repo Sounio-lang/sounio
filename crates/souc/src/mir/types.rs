@@ -70,6 +70,12 @@ pub enum MirType {
     Void,
     /// Error type (for type checking failures)
     Error,
+    /// SIMD vector type (e.g., <4 x f32> for 128-bit SSE)
+    /// Created by the vectorization optimization pass, not from source code
+    Vector {
+        element: Box<MirType>,
+        lanes: usize,
+    },
 }
 
 impl MirType {
@@ -115,6 +121,27 @@ impl MirType {
         matches!(self, MirType::F32 | MirType::F64)
     }
 
+    /// Check if this is a SIMD vector type
+    pub fn is_vector(&self) -> bool {
+        matches!(self, MirType::Vector { .. })
+    }
+
+    /// Get the element type and lane count if this is a vector type
+    pub fn vector_info(&self) -> Option<(&MirType, usize)> {
+        match self {
+            MirType::Vector { element, lanes } => Some((element, *lanes)),
+            _ => None,
+        }
+    }
+
+    /// Create a vector type from a scalar element type and lane count
+    pub fn vectorize(&self, lanes: usize) -> MirType {
+        MirType::Vector {
+            element: Box::new(self.clone()),
+            lanes,
+        }
+    }
+
     /// Check if this is a pointer type
     pub fn is_pointer(&self) -> bool {
         matches!(self, MirType::Ptr(_))
@@ -152,6 +179,7 @@ impl MirType {
                     Some(fields.iter().filter_map(|(_, t)| t.size_bytes()).sum())
                 }
             }
+            MirType::Vector { element, lanes } => element.size_bytes().map(|s| s * lanes),
             MirType::Function { .. } | MirType::String | MirType::Void | MirType::Error => None,
         }
     }
@@ -378,6 +406,7 @@ impl fmt::Display for MirType {
             }
             MirType::Void => write!(f, "!"),
             MirType::Error => write!(f, "error"),
+            MirType::Vector { element, lanes } => write!(f, "<{} x {}>", lanes, element),
         }
     }
 }
@@ -486,5 +515,59 @@ mod tests {
         assert_eq!(MirType::F64.size_bytes(), Some(8));
         assert_eq!(MirType::Bool.size_bytes(), Some(1));
         assert_eq!(MirType::Ptr(Box::new(MirType::I32)).size_bytes(), Some(8));
+    }
+
+    #[test]
+    fn test_vector_type() {
+        let vec_f32x4 = MirType::Vector {
+            element: Box::new(MirType::F32),
+            lanes: 4,
+        };
+        assert!(vec_f32x4.is_vector());
+        assert!(!vec_f32x4.is_float());
+        assert!(!vec_f32x4.is_integer());
+        assert_eq!(vec_f32x4.size_bytes(), Some(16)); // 4 * 4 bytes
+
+        let vec_f64x2 = MirType::Vector {
+            element: Box::new(MirType::F64),
+            lanes: 2,
+        };
+        assert_eq!(vec_f64x2.size_bytes(), Some(16)); // 2 * 8 bytes
+        assert_eq!(format!("{}", vec_f64x2), "<2 x f64>");
+
+        let vec_i32x8 = MirType::Vector {
+            element: Box::new(MirType::I32),
+            lanes: 8,
+        };
+        assert_eq!(vec_i32x8.size_bytes(), Some(32)); // 8 * 4 = 256-bit AVX
+        assert_eq!(format!("{}", vec_i32x8), "<8 x i32>");
+    }
+
+    #[test]
+    fn test_vector_info() {
+        let vec_ty = MirType::Vector {
+            element: Box::new(MirType::F64),
+            lanes: 2,
+        };
+        let (elem, lanes) = vec_ty.vector_info().unwrap();
+        assert_eq!(*elem, MirType::F64);
+        assert_eq!(lanes, 2);
+
+        assert!(MirType::I32.vector_info().is_none());
+    }
+
+    #[test]
+    fn test_vectorize_scalar() {
+        let scalar = MirType::F32;
+        let vec4 = scalar.vectorize(4);
+        assert_eq!(
+            vec4,
+            MirType::Vector {
+                element: Box::new(MirType::F32),
+                lanes: 4,
+            }
+        );
+        assert!(vec4.is_vector());
+        assert_eq!(vec4.size_bytes(), Some(16));
     }
 }

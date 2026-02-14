@@ -207,6 +207,13 @@ impl PassManager {
             if fi.run_on_function(func)? {
                 total_modified = true;
             }
+
+            // Loop vectorization: widen simple array-processing loops to SIMD width
+            let mut vectorizer =
+                performance_tuning::LoopVectorizer::new();
+            if vectorizer.run(func)? {
+                total_modified = true;
+            }
         }
 
         Ok(PassResult {
@@ -370,6 +377,10 @@ impl PassManager {
             OT::FunctionInlining => FunctionInlining::new().run_on_function(func),
             OT::LoopInvariantCodeMotion => LoopInvariantCodeMotion.run_on_function(func),
             OT::ScalarReplacementOfAggregates => Sroa::new().run_on_function(func),
+            OT::LoopVectorization => {
+                let mut vectorizer = performance_tuning::LoopVectorizer::new();
+                vectorizer.run(func)
+            }
             _ => {
                 tracing::debug!(
                     "Suggested {:?} but no pass implements it yet",
@@ -422,4 +433,9 @@ pub fn create_sroa_pass() -> Sroa {
 /// Create an Alias Analysis pass
 pub fn create_alias_analysis() -> AliasAnalysis {
     AliasAnalysis::new()
+}
+
+/// Create a Loop Vectorization pass
+pub fn create_loop_vectorizer() -> performance_tuning::LoopVectorizer {
+    performance_tuning::LoopVectorizer::new()
 }

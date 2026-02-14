@@ -65,6 +65,7 @@ pub enum OptimizationType {
     LoopInvariantCodeMotion,
     AliasAnalysis,
     ScalarReplacementOfAggregates,
+    LoopVectorization,
     // ML-specific optimizations
     PredictiveInlining,
     AdaptiveUnrolling,
