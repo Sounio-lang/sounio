@@ -351,9 +351,28 @@ impl<'a> ProofSearcher<'a> {
     /// Decision procedure for confidence predicates
     fn confidence_decision(&self, pred: &ConfidencePredicate) -> ProofResult {
         match pred {
-            ConfidencePredicate::Geq(lhs, rhs) => self.confidence_geq(lhs, rhs),
-            ConfidencePredicate::Leq(lhs, rhs) => self.confidence_geq(rhs, lhs), // Swap
-            ConfidencePredicate::Eq(lhs, rhs) => self.confidence_eq(lhs, rhs),
+            ConfidencePredicate::Geq(lhs, rhs) => {
+                let result = self.confidence_geq(lhs, rhs);
+                // If built-in procedure fails, try Z3
+                if matches!(result, ProofResult::Unknown { .. }) {
+                    return self.try_z3_confidence(pred);
+                }
+                result
+            }
+            ConfidencePredicate::Leq(lhs, rhs) => {
+                let result = self.confidence_geq(rhs, lhs); // Swap
+                if matches!(result, ProofResult::Unknown { .. }) {
+                    return self.try_z3_confidence(pred);
+                }
+                result
+            }
+            ConfidencePredicate::Eq(lhs, rhs) => {
+                let result = self.confidence_eq(lhs, rhs);
+                if matches!(result, ProofResult::Unknown { .. }) {
+                    return self.try_z3_confidence(pred);
+                }
+                result
+            }
             ConfidencePredicate::Gt(lhs, rhs) => {
                 // lhs > rhs iff lhs ≥ rhs ∧ ¬(lhs = rhs)
                 let geq = self.confidence_geq(lhs, rhs);
@@ -368,9 +387,10 @@ impl<'a> ProofSearcher<'a> {
                             ))),
                         ))
                     }
-                    _ => ProofResult::Unknown {
-                        reason: format!("Cannot prove {} > {}", lhs, rhs),
-                    },
+                    _ => {
+                        // Try Z3 if built-in procedure fails
+                        self.try_z3_confidence(pred)
+                    }
                 }
             }
             ConfidencePredicate::Lt(lhs, rhs) => {
@@ -901,6 +921,169 @@ impl<'a> ProofSearcher<'a> {
                         reason: "LTL until/since requires model checking".to_string(),
                     }
                 }
+            }
+        }
+    }
+
+    /// Try Z3 SMT solver when built-in decision procedures fail
+    #[cfg(feature = "smt")]
+    fn try_z3_confidence(&self, pred: &ConfidencePredicate) -> ProofResult {
+        use crate::smt::formula::{SmtFormula, SmtTerm};
+        use crate::smt::solver::{SmtSolver, VerificationResult};
+        use crate::smt::z3_solver::Z3Solver;
+
+        // Translate predicate to SMT formula
+        let formula = self.translate_confidence_to_smt(pred);
+
+        // Create Z3 context and solver
+        let config = z3::Config::new();
+        let ctx = z3::Context::new(&config);
+        let mut solver = Z3Solver::new(&ctx);
+
+        // Verify the formula
+        match solver.verify(&formula) {
+            Ok(VerificationResult::Sat) => {
+                // Formula is satisfiable - predicate holds
+                ProofResult::Proven(Proof::trusted(
+                    "Z3 SMT solver",
+                    Predicate::new(PredicateKind::Confidence(pred.clone())),
+                ))
+            }
+            Ok(VerificationResult::Unsat) => {
+                // Formula is unsatisfiable - predicate does not hold
+                let cex = solver.extract_counterexample();
+                ProofResult::Disproven {
+                    reason: format!("Z3 counterexample: {:?}", cex),
+                }
+            }
+            Ok(VerificationResult::Unknown) => ProofResult::Unknown {
+                reason: "Z3 returned unknown".to_string(),
+            },
+            Ok(VerificationResult::Timeout) => ProofResult::Unknown {
+                reason: "Z3 timeout".to_string(),
+            },
+            Ok(VerificationResult::Error(e)) => ProofResult::Unknown {
+                reason: format!("Z3 error: {}", e),
+            },
+            Err(e) => ProofResult::Unknown {
+                reason: format!("SMT solver error: {}", e),
+            },
+        }
+    }
+
+    #[cfg(not(feature = "smt"))]
+    fn try_z3_confidence(&self, _pred: &ConfidencePredicate) -> ProofResult {
+        ProofResult::Unknown {
+            reason: "SMT feature not enabled (compile with --features smt)".to_string(),
+        }
+    }
+
+    /// Translate ConfidencePredicate to SmtFormula
+    #[cfg(feature = "smt")]
+    fn translate_confidence_to_smt(&self, pred: &ConfidencePredicate) -> crate::smt::formula::SmtFormula {
+        use crate::smt::formula::{SmtFormula, SmtTerm};
+
+        match pred {
+            ConfidencePredicate::Geq(lhs, rhs) => {
+                let lhs_term = self.confidence_type_to_term(lhs);
+                let rhs_term = self.confidence_type_to_term(rhs);
+                SmtFormula::Ge(Box::new(lhs_term), Box::new(rhs_term))
+            }
+            ConfidencePredicate::Leq(lhs, rhs) => {
+                let lhs_term = self.confidence_type_to_term(lhs);
+                let rhs_term = self.confidence_type_to_term(rhs);
+                SmtFormula::Le(Box::new(lhs_term), Box::new(rhs_term))
+            }
+            ConfidencePredicate::Eq(lhs, rhs) => {
+                let lhs_term = self.confidence_type_to_term(lhs);
+                let rhs_term = self.confidence_type_to_term(rhs);
+                SmtFormula::Eq(Box::new(lhs_term), Box::new(rhs_term))
+            }
+            ConfidencePredicate::Gt(lhs, rhs) => {
+                let lhs_term = self.confidence_type_to_term(lhs);
+                let rhs_term = self.confidence_type_to_term(rhs);
+                SmtFormula::Gt(Box::new(lhs_term), Box::new(rhs_term))
+            }
+            ConfidencePredicate::Lt(lhs, rhs) => {
+                let lhs_term = self.confidence_type_to_term(lhs);
+                let rhs_term = self.confidence_type_to_term(rhs);
+                SmtFormula::Lt(Box::new(lhs_term), Box::new(rhs_term))
+            }
+        }
+    }
+
+    /// Translate ConfidenceType to SmtTerm
+    #[cfg(feature = "smt")]
+    fn confidence_type_to_term(&self, conf_ty: &ConfidenceType) -> crate::smt::formula::SmtTerm {
+        use crate::smt::formula::SmtTerm;
+        use std::time::Duration;
+
+        match conf_ty {
+            ConfidenceType::Literal(v) => SmtTerm::Real(*v),
+
+            ConfidenceType::Var(name) => SmtTerm::Var(name.clone()),
+
+            ConfidenceType::Product(a, b) => {
+                let a_term = self.confidence_type_to_term(a);
+                let b_term = self.confidence_type_to_term(b);
+                SmtTerm::Mul(Box::new(a_term), Box::new(b_term))
+            }
+
+            ConfidenceType::DempsterShafer(a, b) => {
+                // DS(a, b) = 1 - (1-a)*(1-b)
+                let a_term = self.confidence_type_to_term(a);
+                let b_term = self.confidence_type_to_term(b);
+                let one = SmtTerm::Real(1.0);
+
+                let one_minus_a = SmtTerm::Sub(Box::new(one.clone()), Box::new(a_term));
+                let one_minus_b = SmtTerm::Sub(Box::new(one.clone()), Box::new(b_term));
+                let product = SmtTerm::Mul(Box::new(one_minus_a), Box::new(one_minus_b));
+
+                SmtTerm::Sub(Box::new(one), Box::new(product))
+            }
+
+            ConfidenceType::Decay { base, lambda, elapsed } => {
+                // base * exp(-lambda * t)
+                let base_term = self.confidence_type_to_term(base);
+                let t = SmtTerm::Real(elapsed.as_secs_f64());
+                let neg_lambda = SmtTerm::Real(-lambda);
+                let neg_lambda_t = SmtTerm::Mul(Box::new(neg_lambda), Box::new(t));
+
+                // exp(x) is represented as a function application
+                let exp_term = SmtTerm::App("exp".to_string(), vec![neg_lambda_t]);
+
+                SmtTerm::Mul(Box::new(base_term), Box::new(exp_term))
+            }
+
+            ConfidenceType::Min(a, b) => {
+                let a_term = self.confidence_type_to_term(a);
+                let b_term = self.confidence_type_to_term(b);
+
+                // min(a, b) - use function application
+                SmtTerm::App("min".to_string(), vec![a_term, b_term])
+            }
+
+            ConfidenceType::Max(a, b) => {
+                let a_term = self.confidence_type_to_term(a);
+                let b_term = self.confidence_type_to_term(b);
+
+                // max(a, b) - use function application
+                SmtTerm::App("max".to_string(), vec![a_term, b_term])
+            }
+
+            ConfidenceType::Conditional { prior, likelihood, evidence } => {
+                // P(H|E) = P(E|H) * P(H) / P(E)
+                let prior_term = self.confidence_type_to_term(prior);
+                let likelihood_term = self.confidence_type_to_term(likelihood);
+                let evidence_term = self.confidence_type_to_term(evidence);
+
+                let numerator = SmtTerm::Mul(Box::new(likelihood_term), Box::new(prior_term));
+                SmtTerm::Div(Box::new(numerator), Box::new(evidence_term))
+            }
+
+            ConfidenceType::Unknown => {
+                // For unknown, use a fresh variable
+                SmtTerm::Var("_unknown_conf".to_string())
             }
         }
     }
