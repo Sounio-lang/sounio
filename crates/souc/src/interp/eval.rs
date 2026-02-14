@@ -885,9 +885,14 @@ impl Interpreter {
                         });
                     }
                 }
-                // Default: evaluate and wrap in Ref
+                // Default: evaluate and wrap in Ref.
+                // If the value is already a Ref (e.g. mutable struct variable),
+                // return the same Ref to preserve shared-mutation semantics for &!.
                 let val = self.eval_expr(inner)?;
-                Ok(Value::Ref(Rc::new(RefCell::new(val))))
+                match val {
+                    Value::Ref(r) => Ok(Value::Ref(r)),
+                    other => Ok(Value::Ref(Rc::new(RefCell::new(other)))),
+                }
             }
 
             HirExprKind::Deref(inner) => {
@@ -2291,7 +2296,10 @@ impl Interpreter {
                 Value::Int(n) => Ok(Value::Int(!n)),
                 _ => Err(ControlFlow::Return(Value::Unit)),
             },
-            HirUnaryOp::Ref | HirUnaryOp::RefMut => Ok(Value::Ref(Rc::new(RefCell::new(val)))),
+            HirUnaryOp::Ref | HirUnaryOp::RefMut => match val {
+                Value::Ref(r) => Ok(Value::Ref(r)),
+                other => Ok(Value::Ref(Rc::new(RefCell::new(other)))),
+            },
             HirUnaryOp::Deref => match val {
                 Value::Ref(r) => Ok(r.borrow().clone()),
                 Value::ArrayRef { array, index } => {
@@ -2905,6 +2913,18 @@ impl Interpreter {
                 }
 
                 let base_val = self.eval_expr(base)?;
+                // Unwrap potentially nested Refs (e.g. &! of mutable struct)
+                if let Value::Ref(outer) = &base_val {
+                    let inner = outer.borrow();
+                    if let Value::Ref(inner_r) = &*inner {
+                        let inner_r = inner_r.clone();
+                        drop(inner);
+                        if let Value::Struct { ref mut fields, .. } = *inner_r.borrow_mut() {
+                            fields.insert(field.clone(), value);
+                            return Ok(());
+                        }
+                    }
+                }
                 if let Value::Ref(r) = base_val
                     && let Value::Struct { ref mut fields, .. } = *r.borrow_mut()
                 {
@@ -2923,7 +2943,20 @@ impl Interpreter {
                 } = &base.kind
                 {
                     let struct_val = self.eval_expr(struct_base)?;
-                    if let Value::Ref(r) = struct_val {
+                    // Unwrap potentially nested Refs (e.g. &! of mutable struct)
+                    let r = match &struct_val {
+                        Value::Ref(r) => {
+                            let inner = r.borrow();
+                            if let Value::Ref(inner_r) = &*inner {
+                                inner_r.clone()
+                            } else {
+                                drop(inner);
+                                r.clone()
+                            }
+                        }
+                        _ => Rc::new(RefCell::new(struct_val.clone())),
+                    };
+                    {
                         let mut inner = r.borrow_mut();
                         if let Value::Struct { ref mut fields, .. } = *inner {
                             if let Some(Value::Array(arr)) = fields.get(field) {
