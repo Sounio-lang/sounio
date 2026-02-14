@@ -338,14 +338,77 @@ impl<'ctx> Z3Solver<'ctx> {
         result
     }
 
-    /// Verify quadrature correctness
+    /// Verify quadrature correctness (GUM RSS rule)
+    ///
+    /// Checks: ε_out² ≤ Σ ε_in² for all declared epsilon relationships.
+    /// Input epsilons are identified by the `epsilon_in_` prefix.
+    /// Output epsilons are identified by the `epsilon_out_` prefix.
     fn verify_quadrature_correctness(&mut self) -> EpistemicVerifyResult {
-        // Quadrature: ε_out² ≤ Σ ε_in²
-        // This requires tracking input/output relationships
-        // Simplified: check that output epsilon is properly computed
+        self.push();
 
-        // For now, return valid (would need dataflow analysis for real impl)
-        EpistemicVerifyResult::Valid
+        let input_eps: Vec<String> = self
+            .variables
+            .keys()
+            .filter(|k| k.starts_with("epsilon_in_"))
+            .cloned()
+            .collect();
+
+        let output_eps: Vec<String> = self
+            .variables
+            .keys()
+            .filter(|k| k.starts_with("epsilon_out_"))
+            .cloned()
+            .collect();
+
+        if output_eps.is_empty() {
+            self.pop(1);
+            return EpistemicVerifyResult::Valid;
+        }
+
+        // For each output epsilon, check: ε_out² > Σ ε_in² (violation)
+        let mut disjuncts = Vec::new();
+        for out_name in &output_eps {
+            if let Some(out_var) = self.variables.get(out_name).and_then(|v| v.as_real()) {
+                let out_sq = &out_var * &out_var;
+
+                // Sum of input epsilon squares
+                let mut in_sum_parts = Vec::new();
+                for in_name in &input_eps {
+                    if let Some(in_var) = self.variables.get(in_name).and_then(|v| v.as_real()) {
+                        in_sum_parts.push(&in_var * &in_var);
+                    }
+                }
+
+                if !in_sum_parts.is_empty() {
+                    let mut in_sum = in_sum_parts[0].clone();
+                    for part in &in_sum_parts[1..] {
+                        in_sum = &in_sum + part;
+                    }
+                    // Violation: ε_out² > Σ ε_in²
+                    disjuncts.push(out_sq.gt(&in_sum));
+                }
+            }
+        }
+
+        if disjuncts.is_empty() {
+            self.pop(1);
+            return EpistemicVerifyResult::Valid;
+        }
+
+        let any_violates = Bool::or(self.context, &disjuncts.iter().collect::<Vec<_>>());
+        self.solver.assert(&any_violates);
+
+        let result = match self.solver.check() {
+            SatResult::Unsat => EpistemicVerifyResult::Valid,
+            SatResult::Sat => {
+                let cex = self.extract_counterexample();
+                EpistemicVerifyResult::Invalid(cex)
+            }
+            SatResult::Unknown => EpistemicVerifyResult::Unknown,
+        };
+
+        self.pop(1);
+        result
     }
 
     /// Verify validity implies confidence
@@ -393,9 +456,53 @@ impl<'ctx> Z3Solver<'ctx> {
     }
 
     /// Verify epsilon non-widening
+    ///
+    /// Checks that output uncertainty is bounded by input uncertainty.
+    /// For each (epsilon_out_X, epsilon_in_X) pair, verifies ε_out ≤ ε_in.
+    /// This ensures that pure computations (without new measurements) cannot
+    /// increase uncertainty — a key soundness property of epistemic types.
     fn verify_epsilon_non_widening(&mut self) -> EpistemicVerifyResult {
-        // Would need to track data flow to verify
-        EpistemicVerifyResult::Valid
+        self.push();
+
+        let output_eps: Vec<String> = self
+            .variables
+            .keys()
+            .filter(|k| k.starts_with("epsilon_out_"))
+            .cloned()
+            .collect();
+
+        let mut disjuncts = Vec::new();
+        for out_name in &output_eps {
+            // Find corresponding input: epsilon_out_X -> epsilon_in_X
+            let in_name = out_name.replace("epsilon_out_", "epsilon_in_");
+            if let (Some(out_var), Some(in_var)) = (
+                self.variables.get(out_name).and_then(|v| v.as_real()),
+                self.variables.get(&in_name).and_then(|v| v.as_real()),
+            ) {
+                // Violation: ε_out > ε_in
+                disjuncts.push(out_var.gt(&in_var));
+            }
+        }
+
+        if disjuncts.is_empty() {
+            self.pop(1);
+            return EpistemicVerifyResult::Valid;
+        }
+
+        let any_violates = Bool::or(self.context, &disjuncts.iter().collect::<Vec<_>>());
+        self.solver.assert(&any_violates);
+
+        let result = match self.solver.check() {
+            SatResult::Unsat => EpistemicVerifyResult::Valid,
+            SatResult::Sat => {
+                let cex = self.extract_counterexample();
+                EpistemicVerifyResult::Invalid(cex)
+            }
+            SatResult::Unknown => EpistemicVerifyResult::Unknown,
+        };
+
+        self.pop(1);
+        result
     }
 
     /// Verify provenance completeness
@@ -944,9 +1051,19 @@ pub trait EpistemicVerifier: Send + Sync {
 }
 
 #[cfg(feature = "smt")]
-/// Z3-backed epistemic verifier
+/// Z3-backed epistemic verifier with persistent state
+///
+/// Maintains epsilon bounds, validity declarations, and asserted constraints
+/// across verify() calls, so that context built up incrementally is available
+/// when checking properties.
 pub struct Z3EpistemicVerifier {
     context: Context,
+    /// Accumulated epsilon declarations: (name, bound)
+    epsilon_decls: Vec<(String, f64)>,
+    /// Accumulated validity declarations
+    validity_decls: Vec<String>,
+    /// Accumulated constraint formulas
+    constraints: Vec<SmtFormula>,
 }
 
 #[cfg(feature = "smt")]
@@ -954,7 +1071,27 @@ impl Z3EpistemicVerifier {
     pub fn new() -> Self {
         let cfg = Config::new();
         let context = Context::new(&cfg);
-        Self { context }
+        Self {
+            context,
+            epsilon_decls: Vec::new(),
+            validity_decls: Vec::new(),
+            constraints: Vec::new(),
+        }
+    }
+
+    /// Replay all accumulated state onto a fresh solver
+    fn create_solver_with_state(&self) -> Z3Solver<'_> {
+        let mut solver = Z3Solver::new(&self.context);
+        for (name, bound) in &self.epsilon_decls {
+            solver.declare_epsilon(name, *bound);
+        }
+        for name in &self.validity_decls {
+            solver.declare_validity(name);
+        }
+        for formula in &self.constraints {
+            let _ = solver.assert(formula);
+        }
+        solver
     }
 }
 
@@ -968,25 +1105,27 @@ impl Default for Z3EpistemicVerifier {
 #[cfg(feature = "smt")]
 impl EpistemicVerifier for Z3EpistemicVerifier {
     fn verify(&mut self, property: &EpistemicProperty) -> EpistemicVerifyResult {
-        let mut solver = Z3Solver::new(&self.context);
+        let mut solver = self.create_solver_with_state();
         solver.verify_epistemic(property)
     }
 
     fn declare_epsilon(&mut self, name: &str, bound: f64) {
-        // Will be declared when solver is created
-        let _ = (name, bound);
+        self.epsilon_decls.push((name.to_string(), bound));
     }
 
     fn declare_validity(&mut self, name: &str) {
-        let _ = name;
+        self.validity_decls.push(name.to_string());
     }
 
-    fn assert_constraint(&mut self, _formula: &SmtFormula) -> Result<(), SolverError> {
+    fn assert_constraint(&mut self, formula: &SmtFormula) -> Result<(), SolverError> {
+        self.constraints.push(formula.clone());
         Ok(())
     }
 
     fn reset(&mut self) {
-        // Context persists, solver is created fresh each time
+        self.epsilon_decls.clear();
+        self.validity_decls.clear();
+        self.constraints.clear();
     }
 
     fn name(&self) -> &str {

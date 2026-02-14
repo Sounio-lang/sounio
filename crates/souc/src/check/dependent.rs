@@ -87,6 +87,8 @@ pub struct DependentTypeChecker {
     satisfied_constraints: HashMap<String, bool>,
     /// Epistemic type context for proof search
     dep_ctx: DepTypeContext,
+    /// Cache of proof results to avoid recomputing identical proofs
+    proof_cache: HashMap<String, CheckResult>,
 }
 
 impl DependentTypeChecker {
@@ -102,6 +104,7 @@ impl DependentTypeChecker {
             config,
             satisfied_constraints: HashMap::new(),
             dep_ctx,
+            proof_cache: HashMap::new(),
         }
     }
 
@@ -162,8 +165,15 @@ impl DependentTypeChecker {
         }
     }
 
-    /// Prove an epistemic predicate using the proof search engine
-    pub fn prove_epistemic(&self, predicate: &EpistemicPredicate) -> CheckResult {
+    /// Prove an epistemic predicate using the proof search engine.
+    ///
+    /// Results are cached by predicate key so identical proofs are not recomputed.
+    pub fn prove_epistemic(&mut self, predicate: &EpistemicPredicate) -> CheckResult {
+        let cache_key = format!("{:?}", predicate);
+        if let Some(cached) = self.proof_cache.get(&cache_key) {
+            return cached.clone();
+        }
+
         let search_config = ProofSearchConfig {
             max_depth: self.config.proof_search_depth,
             allow_gradual: self.config.allow_gradual,
@@ -173,7 +183,7 @@ impl DependentTypeChecker {
         let mut searcher = ProofSearcher::with_config(&self.dep_ctx, search_config);
         let result = searcher.search(predicate);
 
-        match result {
+        let check = match result {
             ProofResult::Proven(_proof) => CheckResult::Proven,
             ProofResult::Disproven { reason } => CheckResult::Disproven { reason },
             ProofResult::Unknown { reason } => {
@@ -185,12 +195,20 @@ impl DependentTypeChecker {
                     }
                 }
             }
-        }
+        };
+
+        self.proof_cache.insert(cache_key, check.clone());
+        check
+    }
+
+    /// Invalidate the proof cache (call when context changes)
+    pub fn invalidate_cache(&mut self) {
+        self.proof_cache.clear();
     }
 
     /// Check a confidence bound: verify that confidence >= threshold
     pub fn check_confidence_bound(
-        &self,
+        &mut self,
         var_name: &str,
         threshold: f64,
     ) -> CheckResult {
@@ -212,7 +230,7 @@ impl DependentTypeChecker {
     }
 
     /// Check if a value satisfies a predicate constraint
-    pub fn satisfies_constraint(&self, _value: &str, constraint: &Predicate) -> bool {
+    pub fn satisfies_constraint(&mut self, _value: &str, constraint: &Predicate) -> bool {
         // Try simple check first
         if let Some(result) = SimpleChecker::check(constraint) {
             return result;
@@ -314,7 +332,7 @@ impl RefinementValidator {
 
         // Try epistemic proof search for complex predicates
         if let Some(ep) = translate_to_epistemic(predicate) {
-            let checker = DependentTypeChecker::new(self.config.clone());
+            let mut checker = DependentTypeChecker::new(self.config.clone());
             match checker.prove_epistemic(&ep) {
                 CheckResult::Disproven { reason } => return Err(reason),
                 _ => {}
@@ -333,7 +351,7 @@ impl RefinementValidator {
 
         // Epistemic proof search
         if let Some(ep) = translate_to_epistemic(predicate) {
-            let checker = DependentTypeChecker::new(self.config.clone());
+            let mut checker = DependentTypeChecker::new(self.config.clone());
             return checker.prove_epistemic(&ep).is_satisfied();
         }
 
@@ -520,7 +538,7 @@ mod tests {
 
     #[test]
     fn test_prove_trivially_true() {
-        let checker = DependentTypeChecker::new(DependentTypeConfig::default());
+        let mut checker = DependentTypeChecker::new(DependentTypeConfig::default());
         let pred = EpistemicPredicate::true_();
         match checker.prove_epistemic(&pred) {
             CheckResult::Proven => {}
@@ -532,7 +550,7 @@ mod tests {
     fn test_prove_trivially_false() {
         let mut config = DependentTypeConfig::default();
         config.allow_gradual = false;
-        let checker = DependentTypeChecker::new(config);
+        let mut checker = DependentTypeChecker::new(config);
         let pred = EpistemicPredicate::false_();
         match checker.prove_epistemic(&pred) {
             CheckResult::Disproven { .. } => {}
