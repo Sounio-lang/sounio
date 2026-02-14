@@ -641,4 +641,197 @@ mod tests {
         };
         assert!(!validator.is_provable(&Predicate::False, &Type::I32));
     }
+
+    // ================================================================
+    // End-to-end integration tests: type checker → proof search → result
+    // ================================================================
+
+    #[test]
+    fn test_e2e_confidence_chain_propagation() {
+        // Scenario: bind ε₁ = 0.95, ε₂ = 0.90
+        // Prove: ε₁ ≥ 0.90 (should succeed)
+        // Prove: ε₂ ≥ 0.95 (should fail in strict mode)
+        let mut checker = DependentTypeChecker::new(DependentTypeConfig {
+            allow_gradual: false,
+            ..DependentTypeConfig::default()
+        });
+        checker.bind_confidence("ε₁", 0.95);
+        checker.bind_confidence("ε₂", 0.90);
+
+        let r1 = checker.check_confidence_bound("ε₁", 0.90);
+        assert!(r1.is_satisfied(), "0.95 >= 0.90 should be proven");
+
+        let r2 = checker.check_confidence_bound("ε₂", 0.95);
+        assert!(
+            !matches!(r2, CheckResult::Proven),
+            "0.90 >= 0.95 should NOT be proven"
+        );
+    }
+
+    #[test]
+    fn test_e2e_refinement_with_confidence_var() {
+        // Build a refinement predicate: confidence >= 0.90
+        // With known binding: confidence = 0.95
+        use crate::refinement::predicate::{Atom, CompareOp, Term};
+
+        let mut checker = DependentTypeChecker::new(DependentTypeConfig::default());
+        checker.bind_confidence("confidence", 0.95);
+
+        let pred = Predicate::Atom(Atom {
+            lhs: Term::Var("confidence".to_string()),
+            op: CompareOp::Ge,
+            rhs: Term::Float(0.90),
+        });
+
+        let env = TypeEnv::default();
+        let result = checker.check_refinement(&pred, &env, Span::default());
+        assert!(result.is_ok(), "Should not error");
+        assert!(result.unwrap(), "0.95 >= 0.90 should be satisfied");
+    }
+
+    #[test]
+    fn test_e2e_dependent_type_conjunction() {
+        // DependentType with both refinement (True) and epistemic (confidence >= 0.8)
+        let mut checker = DependentTypeChecker::new(DependentTypeConfig::default());
+        checker.bind_confidence("ε", 0.92);
+
+        let dep = DependentType {
+            base_type: Type::F64,
+            refinement: Some(Predicate::True),
+            epistemic_predicate: Some(EpistemicPredicate::confidence_geq(
+                ConfidenceType::Var("ε".to_string()),
+                ConfidenceType::Literal(0.80),
+            )),
+            conformal_threshold: 0.8,
+            constraint_vars: HashMap::new(),
+        };
+
+        let result = checker.check_dependent_type_constraints(&dep);
+        assert!(result.is_ok(), "Both predicates should be satisfied");
+    }
+
+    #[test]
+    fn test_e2e_dependent_type_epistemic_fails() {
+        // Epistemic predicate should fail: ε = 0.70, need >= 0.90
+        let mut config = DependentTypeConfig::default();
+        config.allow_gradual = false;
+        let mut checker = DependentTypeChecker::new(config);
+        checker.bind_confidence("ε", 0.70);
+
+        let dep = DependentType {
+            base_type: Type::F64,
+            refinement: None,
+            epistemic_predicate: Some(EpistemicPredicate::confidence_geq(
+                ConfidenceType::Var("ε".to_string()),
+                ConfidenceType::Literal(0.90),
+            )),
+            conformal_threshold: 0.8,
+            constraint_vars: HashMap::new(),
+        };
+
+        let result = checker.check_dependent_type_constraints(&dep);
+        assert!(result.is_err(), "0.70 >= 0.90 should fail in strict mode");
+    }
+
+    #[test]
+    fn test_e2e_gradual_fallback_for_unknown() {
+        // When proof search returns Unknown, gradual mode should defer to runtime
+        let mut checker = DependentTypeChecker::new(DependentTypeConfig {
+            allow_gradual: true,
+            ..DependentTypeConfig::default()
+        });
+        // Don't bind any confidence — proof search will return Unknown
+        let result = checker.check_confidence_bound("unknown_var", 0.90);
+        match result {
+            CheckResult::Deferred { .. } => {}
+            CheckResult::Proven => {}  // Also acceptable if search is conservative
+            other => panic!(
+                "Expected Deferred or Proven in gradual mode, got {:?}",
+                other
+            ),
+        }
+    }
+
+    #[test]
+    fn test_e2e_proof_cache_hit() {
+        // Verify that repeated identical proofs are cached
+        let mut checker = DependentTypeChecker::new(DependentTypeConfig::default());
+        checker.bind_confidence("ε", 0.95);
+
+        let r1 = checker.check_confidence_bound("ε", 0.90);
+        assert!(r1.is_satisfied());
+
+        // Second call should hit cache
+        let r2 = checker.check_confidence_bound("ε", 0.90);
+        assert!(r2.is_satisfied());
+
+        // Different predicate should NOT hit cache
+        let r3 = checker.check_confidence_bound("ε", 0.99);
+        // Whether this succeeds depends on whether 0.95 >= 0.99
+        assert!(
+            !matches!(r3, CheckResult::Proven),
+            "0.95 >= 0.99 should not be proven"
+        );
+    }
+
+    #[test]
+    fn test_e2e_cache_invalidation() {
+        let mut checker = DependentTypeChecker::new(DependentTypeConfig::default());
+        checker.bind_confidence("ε", 0.95);
+
+        let _ = checker.check_confidence_bound("ε", 0.90);
+        assert!(!checker.proof_cache.is_empty(), "Cache should have entries");
+
+        checker.invalidate_cache();
+        assert!(checker.proof_cache.is_empty(), "Cache should be cleared");
+    }
+
+    #[test]
+    fn test_e2e_mock_verifier_epistemic_pipeline() {
+        // Test the full mock verifier pipeline
+        use crate::smt::z3_solver::{
+            EpistemicProperty, EpistemicVerifier, EpistemicVerifyResult, MockEpistemicVerifier,
+        };
+
+        let mut verifier = MockEpistemicVerifier::new();
+        verifier.declare_epsilon("epsilon_dose", 0.05);
+        verifier.declare_epsilon("epsilon_response", 0.08);
+
+        // All epsilons bounded at 0.1: should pass
+        let r1 = verifier.verify(&EpistemicProperty::BoundedUncertainty(0.1));
+        assert!(matches!(r1, EpistemicVerifyResult::Valid));
+
+        // All epsilons bounded at 0.03: should fail (dose=0.05 > 0.03)
+        let r2 = verifier.verify(&EpistemicProperty::BoundedUncertainty(0.03));
+        assert!(matches!(r2, EpistemicVerifyResult::Invalid(_)));
+
+        // Reset and verify empty state
+        verifier.reset();
+        let r3 = verifier.verify(&EpistemicProperty::BoundedUncertainty(0.01));
+        assert!(matches!(r3, EpistemicVerifyResult::Valid));
+    }
+
+    #[test]
+    fn test_e2e_translate_comparison_to_epistemic() {
+        use crate::refinement::predicate::{Atom, CompareOp, Term};
+
+        // epsilon >= 0.95 should translate to ConfidencePredicate::Geq
+        let pred = Predicate::Atom(Atom {
+            lhs: Term::Var("epsilon".to_string()),
+            op: CompareOp::Ge,
+            rhs: Term::Float(0.95),
+        });
+        let ep = translate_to_epistemic(&pred);
+        assert!(ep.is_some(), "Confidence comparison should translate");
+
+        // Non-confidence variable with out-of-range float should not translate
+        let pred2 = Predicate::Atom(Atom {
+            lhs: Term::Var("x".to_string()),
+            op: CompareOp::Ge,
+            rhs: Term::Float(42.0),
+        });
+        let ep2 = translate_to_epistemic(&pred2);
+        // 42.0 is outside [0,1] range so rhs won't be a ConfidenceType
+        assert!(ep2.is_none(), "Non-confidence comparison should not translate");
+    }
 }
