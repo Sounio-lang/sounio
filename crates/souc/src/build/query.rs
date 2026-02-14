@@ -23,6 +23,11 @@ impl Revision {
         Revision(n)
     }
 
+    /// Get the revision number
+    pub fn get(&self) -> u64 {
+        self.0
+    }
+
     /// Increment revision
     pub fn increment(&mut self) {
         self.0 += 1;

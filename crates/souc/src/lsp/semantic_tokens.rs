@@ -1167,6 +1167,10 @@ impl SemanticTokensProvider {
                     self.analyze_stmt(stmt, symbols, builder);
                 }
             }
+            Expr::ArrayRepeat { value, count, .. } => {
+                self.analyze_expr(value, symbols, builder);
+                self.analyze_expr(count, symbols, builder);
+            }
         }
     }
 

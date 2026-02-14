@@ -1413,6 +1413,17 @@ impl LspQueryDatabase {
                     );
                 }
             }
+            Expr::Closure { body, .. } => {
+                Self::collect_effect_sources_from_expr(
+                    body,
+                    ast,
+                    source,
+                    effect_names,
+                    seen_effects,
+                    sources,
+                    seen_sources,
+                );
+            }
             Expr::Literal { .. }
             | Expr::Path { .. }
             | Expr::Continue { .. }
@@ -1904,8 +1915,10 @@ impl LspQueryDatabase {
                     );
                 }
             }
-            Expr::Literal { .. }
-            | Expr::Path { .. }
+            Expr::Closure { body, .. } | Expr::AsyncClosure { body, .. } => {
+                Self::extract_expr_facts(body, None, ast, source, units, epistemic, refinements);
+            }
+            Expr::Path { .. }
             | Expr::Continue { .. }
             | Expr::Perform { .. }
             | Expr::MacroInvocation(_)
