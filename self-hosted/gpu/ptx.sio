@@ -99,42 +99,200 @@ fn ptx_str_contains(haystack: string, needle: string) -> bool with Mut, Panic, D
     false
 }
 
-// Demo PTX module: a trivial vector add kernel skeleton.
-// This is text-only and not executed yet; it's used to validate we can produce
-// stable PTX output from Sounio without involving Rust codegen.
+// Core PTX emitter pieces used for deterministic text scaffolding.
+// Keeps phase-0 output stable and easy to extend in later PTX-first passes.
+
+fn ptx_header_version() -> string { "7.0" }
+
+fn ptx_header_target() -> string { "sm_50" }
+
+fn ptx_header_address_size() -> string { ".address_size 64" }
+
+fn ptx_opcode_mov_u32() -> string { "mov.u32" }
+
+fn ptx_opcode_cvt_u64_u32() -> string { "cvt.u64.u32" }
+
+fn ptx_opcode_mul_lo_u64() -> string { "mul.lo.u64" }
+
+fn ptx_opcode_ld_param_u64() -> string { "ld.param.u64" }
+
+fn ptx_opcode_add_u64() -> string { "add.u64" }
+
+fn ptx_opcode_ld_global_f32() -> string { "ld.global.f32" }
+
+fn ptx_opcode_add_f32() -> string { "add.f32" }
+
+fn ptx_opcode_st_global_f32() -> string { "st.global.f32" }
+
+fn ptx_opcode_ret() -> string { "ret" }
+
+fn ptx_push_binary3(
+    buf: PtxBuf,
+    opcode: string,
+    dst: string,
+    lhs: string,
+    rhs: string
+) -> PtxBuf with Mut, Panic, Div {
+    var out = buf
+    out = ptx_push_str(out, "    ")
+    out = ptx_push_str(out, opcode)
+    out = ptx_push_str(out, " ")
+    out = ptx_push_str(out, dst)
+    out = ptx_push_str(out, ", ")
+    out = ptx_push_str(out, lhs)
+    out = ptx_push_str(out, ", ")
+    out = ptx_push_str(out, rhs)
+    out = ptx_push_str(out, ";\n")
+    out
+}
+
+fn ptx_push_binary2(
+    buf: PtxBuf,
+    opcode: string,
+    lhs: string,
+    rhs: string
+) -> PtxBuf with Mut, Panic, Div {
+    var out = buf
+    out = ptx_push_str(out, "    ")
+    out = ptx_push_str(out, opcode)
+    out = ptx_push_str(out, " ")
+    out = ptx_push_str(out, lhs)
+    out = ptx_push_str(out, ", ")
+    out = ptx_push_str(out, rhs)
+    out = ptx_push_str(out, ";\n")
+    out
+}
+
+fn ptx_push_binary_mem2(
+    buf: PtxBuf,
+    opcode: string,
+    dst_or_dst_ptr: string,
+    rhs_or_rhs_ptr: string
+) -> PtxBuf with Mut, Panic, Div {
+    var out = buf
+    out = ptx_push_str(out, "    ")
+    out = ptx_push_str(out, opcode)
+    out = ptx_push_str(out, " ")
+    out = ptx_push_str(out, dst_or_dst_ptr)
+    out = ptx_push_str(out, ", [")
+    out = ptx_push_str(out, rhs_or_rhs_ptr)
+    out = ptx_push_str(out, "];\n")
+    out
+}
+
+fn ptx_push_store_mem(
+    buf: PtxBuf,
+    opcode: string,
+    dst_ptr: string,
+    src: string
+) -> PtxBuf with Mut, Panic, Div {
+    var out = buf
+    out = ptx_push_str(out, "    ")
+    out = ptx_push_str(out, opcode)
+    out = ptx_push_str(out, " [")
+    out = ptx_push_str(out, dst_ptr)
+    out = ptx_push_str(out, "], ")
+    out = ptx_push_str(out, src)
+    out = ptx_push_str(out, ";\n")
+    out
+}
+
+fn ptx_push_ret(buf: PtxBuf) -> PtxBuf with Mut, Panic, Div {
+    ptx_push_str(buf, "    ret;\n")
+}
+
+fn ptx_emit_header(buf: PtxBuf) -> PtxBuf with Mut, Panic, Div {
+    var out = buf
+    out = ptx_push_str(out, ".version ")
+    out = ptx_push_str(out, ptx_header_version())
+    out = ptx_push_str(out, "\n")
+    out = ptx_push_str(out, ".target ")
+    out = ptx_push_str(out, ptx_header_target())
+    out = ptx_push_str(out, "\n")
+    out = ptx_push_str(out, ptx_header_address_size())
+    out = ptx_push_str(out, "\n\n")
+    out
+}
+
+fn ptx_emit_vec_add_signature(
+    buf: PtxBuf,
+    kernel_name: string,
+    param_a: string,
+    param_b: string,
+    param_c: string
+) -> PtxBuf with Mut, Panic, Div {
+    var out = buf
+    out = ptx_push_str(out, ".visible .entry ")
+    out = ptx_push_str(out, kernel_name)
+    out = ptx_push_str(out, "(\n")
+    out = ptx_push_str(out, "    .param .u64 ")
+    out = ptx_push_str(out, param_a)
+    out = ptx_push_str(out, ",\n")
+    out = ptx_push_str(out, "    .param .u64 ")
+    out = ptx_push_str(out, param_b)
+    out = ptx_push_str(out, ",\n")
+    out = ptx_push_str(out, "    .param .u64 ")
+    out = ptx_push_str(out, param_c)
+    out = ptx_push_str(out, "\n)\n")
+    out
+}
+
+fn ptx_emit_vec_add_reg_decl(buf: PtxBuf) -> PtxBuf with Mut, Panic, Div {
+    var out = buf
+    out = ptx_push_str(out, "{\n")
+    out = ptx_push_str(out, "    .reg .pred %p<2>;\n")
+    out = ptx_push_str(out, "    .reg .b32 %r<3>;\n")
+    out = ptx_push_str(out, "    .reg .b64 %rd<9>;\n")
+    out = ptx_push_str(out, "    .reg .f32 %f<4>;\n\n")
+    out
+}
+
+fn ptx_emit_vec_add_body(buf: PtxBuf) -> PtxBuf with Mut, Panic, Div {
+    var out = buf
+    out = ptx_push_binary2(out, ptx_opcode_mov_u32(), "%r1", "%tid.x")
+    // NOTE: Keep behavior identical to the current phase-0 reference by retaining the
+    // exact source shape and register allocation.
+    out = ptx_push_binary2(out, ptx_opcode_cvt_u64_u32(), "%rd1", "%r1")
+    out = ptx_push_binary3(out, ptx_opcode_mul_lo_u64(), "%rd2", "%rd1", "4")
+    out = ptx_push_binary_mem2(out, ptx_opcode_ld_param_u64(), "%rd3", "param_a")
+    out = ptx_push_binary_mem2(out, ptx_opcode_ld_param_u64(), "%rd4", "param_b")
+    out = ptx_push_binary_mem2(out, ptx_opcode_ld_param_u64(), "%rd5", "param_c")
+    out = ptx_push_binary3(out, ptx_opcode_add_u64(), "%rd6", "%rd3", "%rd2")
+    out = ptx_push_binary3(out, ptx_opcode_add_u64(), "%rd7", "%rd4", "%rd2")
+    out = ptx_push_binary3(out, ptx_opcode_add_u64(), "%rd8", "%rd5", "%rd2")
+    out = ptx_push_binary_mem2(out, ptx_opcode_ld_global_f32(), "%f1", "%rd6")
+    out = ptx_push_binary_mem2(out, ptx_opcode_ld_global_f32(), "%f2", "%rd7")
+    out = ptx_push_binary3(out, ptx_opcode_add_f32(), "%f3", "%f1", "%f2")
+    out = ptx_push_store_mem(out, ptx_opcode_st_global_f32(), "%rd8", "%f3")
+    out = ptx_push_ret(out)
+    out = ptx_push_str(out, "}\n")
+    out
+}
+
+fn ptx_emit_vec3_f32_add(
+    buf: PtxBuf,
+    out0: string,
+    in0_0: string,
+    in0_1: string,
+    out1: string,
+    in1_0: string,
+    in1_1: string,
+    out2: string,
+    in2_0: string,
+    in2_1: string
+) -> PtxBuf with Mut, Panic, Div {
+    var out = buf
+    out = ptx_push_binary3(out, ptx_opcode_add_f32(), out0, in0_0, in0_1)
+    out = ptx_push_binary3(out, ptx_opcode_add_f32(), out1, in1_0, in1_1)
+    out = ptx_push_binary3(out, ptx_opcode_add_f32(), out2, in2_0, in2_1)
+    out
+}
+
 fn ptx_emit_demo_vec_add() -> PtxBuf with Mut, Panic, Div {
     var b = ptx_buf_new()
-
-    b = ptx_push_str(b, ".version 7.0\n")
-    b = ptx_push_str(b, ".target sm_50\n")
-    b = ptx_push_str(b, ".address_size 64\n\n")
-
-    b = ptx_push_str(b, ".visible .entry vec_add(\n")
-    b = ptx_push_str(b, "    .param .u64 param_a,\n")
-    b = ptx_push_str(b, "    .param .u64 param_b,\n")
-    b = ptx_push_str(b, "    .param .u64 param_c\n")
-    b = ptx_push_str(b, ")\n")
-    b = ptx_push_str(b, "{\n")
-    b = ptx_push_str(b, "    .reg .pred %p<2>;\n")
-    b = ptx_push_str(b, "    .reg .b32 %r<3>;\n")
-    b = ptx_push_str(b, "    .reg .b64 %rd<9>;\n")
-    b = ptx_push_str(b, "    .reg .f32 %f<4>;\n\n")
-
-    b = ptx_push_str(b, "    mov.u32 %r1, %tid.x;\n")
-    b = ptx_push_str(b, "    cvt.u64.u32 %rd1, %r1;\n")
-    b = ptx_push_str(b, "    mul.lo.u64 %rd2, %rd1, 4;\n")
-    b = ptx_push_str(b, "    ld.param.u64 %rd3, [param_a];\n")
-    b = ptx_push_str(b, "    ld.param.u64 %rd4, [param_b];\n")
-    b = ptx_push_str(b, "    ld.param.u64 %rd5, [param_c];\n")
-    b = ptx_push_str(b, "    add.u64 %rd6, %rd3, %rd2;\n")
-    b = ptx_push_str(b, "    add.u64 %rd7, %rd4, %rd2;\n")
-    b = ptx_push_str(b, "    add.u64 %rd8, %rd5, %rd2;\n")
-    b = ptx_push_str(b, "    ld.global.f32 %f1, [%rd6];\n")
-    b = ptx_push_str(b, "    ld.global.f32 %f2, [%rd7];\n")
-    b = ptx_push_str(b, "    add.f32 %f3, %f1, %f2;\n")
-    b = ptx_push_str(b, "    st.global.f32 [%rd8], %f3;\n")
-    b = ptx_push_str(b, "    ret;\n")
-    b = ptx_push_str(b, "}\n")
-
+    b = ptx_emit_header(b)
+    b = ptx_emit_vec_add_signature(b, "vec_add", "param_a", "param_b", "param_c")
+    b = ptx_emit_vec_add_reg_decl(b)
+    b = ptx_emit_vec_add_body(b)
     b
 }

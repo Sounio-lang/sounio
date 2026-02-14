@@ -34,6 +34,62 @@ fn gpu_ptx_test_05_to_string_smoke() -> bool with Mut, Panic, Div, Alloc {
     ends_with(s, "}\n")
 }
 
+fn gpu_ptx_test_06_emit_default_header() -> bool with Mut, Panic, Div, Alloc {
+    let p = ptx_to_string(ptx_emit_header(ptx_buf_new()))
+    p == ".version 7.0\n.target sm_50\n.address_size 64\n\n"
+}
+
+fn gpu_ptx_test_07_vec3_add_op_helper() -> bool with Mut, Panic, Div, Alloc {
+    var b = ptx_buf_new()
+    b = ptx_emit_vec3_f32_add(
+        b,
+        "%f3", "%f1", "%f2",
+        "%f4", "%f2", "%f3",
+        "%f5", "%f3", "%f4"
+    )
+    let s = ptx_to_string(b)
+    s == "    add.f32 %f3, %f1, %f2;\n    add.f32 %f4, %f2, %f3;\n    add.f32 %f5, %f3, %f4;\n"
+}
+
+fn gpu_ptx_test_08_full_kernel_deterministic() -> bool with Mut, Panic, Div, Alloc {
+    let s = ptx_to_string(ptx_emit_demo_vec_add())
+    s == ".version 7.0\n.target sm_50\n.address_size 64\n\n.visible .entry vec_add(\n    .param .u64 param_a,\n    .param .u64 param_b,\n    .param .u64 param_c\n)\n{\n    .reg .pred %p<2>;\n    .reg .b32 %r<3>;\n    .reg .b64 %rd<9>;\n    .reg .f32 %f<4>;\n\n    mov.u32 %r1, %tid.x;\n    cvt.u64.u32 %rd1, %r1;\n    mul.lo.u64 %rd2, %rd1, 4;\n    ld.param.u64 %rd3, [param_a];\n    ld.param.u64 %rd4, [param_b];\n    ld.param.u64 %rd5, [param_c];\n    add.u64 %rd6, %rd3, %rd2;\n    add.u64 %rd7, %rd4, %rd2;\n    add.u64 %rd8, %rd5, %rd2;\n    ld.global.f32 %f1, [%rd6];\n    ld.global.f32 %f2, [%rd7];\n    add.f32 %f3, %f1, %f2;\n    st.global.f32 [%rd8], %f3;\n    ret;\n}\n"
+}
+
+// ===== PHASE 1: IR-Driven Lowering Tests =====
+//
+// These tests validate the new structured kernel-lowering system
+// (kernel_ir.sio + lower_to_ptx.sio)
+
+fn gpu_ptx_test_09_ir_lowering_smoke() -> bool with Mut, Panic, Div, Alloc {
+    // Build vec_add kernel IR
+    let ir = gpu_build_vec_add_ir()
+
+    // Lower to PTX
+    let ptx = gpu_lower_to_ptx(ir)
+    let s = ptx_to_string(ptx)
+
+    // Verify it has expected PTX structure
+    starts_with(s, ".version") &&
+    ptx_str_contains(s, ".entry vec_add") &&
+    ptx_str_contains(s, "%tid.x") &&
+    ptx_str_contains(s, "ld.global") &&
+    ptx_str_contains(s, "st.global") &&
+    ends_with(s, "}\n")
+}
+
+fn gpu_ptx_test_10_ir_lowering_matches_hardcoded() -> bool with Mut, Panic, Div, Alloc {
+    // IR-driven lowering
+    let ir = gpu_build_vec_add_ir()
+    let ptx_from_ir = ptx_to_string(gpu_lower_to_ptx(ir))
+
+    // Hardcoded reference
+    let ptx_hardcoded = ptx_to_string(ptx_emit_demo_vec_add())
+
+    // Should be byte-for-byte identical
+    ptx_from_ir == ptx_hardcoded
+}
+
 fn run_gpu_ptx_tests() -> i32 with IO, Mut, Panic, Div, Alloc {
     var passed: i64 = 0
     var total: i64 = 0
@@ -50,6 +106,16 @@ fn run_gpu_ptx_tests() -> i32 with IO, Mut, Panic, Div, Alloc {
     if gpu_ptx_test_04_load_store() { passed = passed + 1; print("  T04 OK\n") } else { print("  FAIL T04\n") }
     total = total + 1
     if gpu_ptx_test_05_to_string_smoke() { passed = passed + 1; print("  T05 OK\n") } else { print("  FAIL T05\n") }
+    total = total + 1
+    if gpu_ptx_test_06_emit_default_header() { passed = passed + 1; print("  T06 OK\n") } else { print("  FAIL T06\n") }
+    total = total + 1
+    if gpu_ptx_test_07_vec3_add_op_helper() { passed = passed + 1; print("  T07 OK\n") } else { print("  FAIL T07\n") }
+    total = total + 1
+    if gpu_ptx_test_08_full_kernel_deterministic() { passed = passed + 1; print("  T08 OK\n") } else { print("  FAIL T08\n") }
+    total = total + 1
+    if gpu_ptx_test_09_ir_lowering_smoke() { passed = passed + 1; print("  T09 OK (IR lowering smoke)\n") } else { print("  FAIL T09\n") }
+    total = total + 1
+    if gpu_ptx_test_10_ir_lowering_matches_hardcoded() { passed = passed + 1; print("  T10 OK (IR ≡ hardcoded)\n") } else { print("  FAIL T10\n") }
 
     if passed == total { print("GPU PTX tests: all passed\n") } else { print("GPU PTX tests: suite fail\n") }
 

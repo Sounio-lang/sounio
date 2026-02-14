@@ -1,0 +1,275 @@
+// self-hosted::gpu::kernel_ir — Minimal GPU Kernel IR
+//
+// A tiny, GPU-focused IR for representing CUDA/PTX kernels.
+// This is NOT the general-purpose IrModule - it's specifically designed
+// for GPU kernel patterns (thread IDs, global memory, vector ops).
+//
+// Design philosophy:
+// - Keep it minimal (only what vec_add needs, then expand)
+// - Direct mapping to PTX instructions
+// - No SSA/phi nodes (GPU kernels are simple)
+// - Fixed register allocation for now
+
+// GPU data types (subset needed for vec_add)
+enum GpuType {
+    GpuU32,
+    GpuU64,
+    GpuF32,
+    GpuPtr,  // .u64 pointer type
+}
+
+// GPU kernel parameter (e.g., .param .u64 param_a)
+struct GpuParam {
+    name: Name,
+    ty: GpuType,
+}
+
+// GPU operations (maps closely to PTX instructions)
+enum GpuOp {
+    // Get thread ID: dst = %tid.x (axis: 0=x, 1=y, 2=z)
+    GpuGetTid { dst_reg: i64, axis: i64 },
+
+    // Type conversion: dst = cvt.dst_ty.src_ty src
+    GpuCvt { dst_reg: i64, src_reg: i64, dst_ty: GpuType, src_ty: GpuType },
+
+    // Multiply (with immediate): dst = lhs * rhs_imm
+    GpuMulImm { dst_reg: i64, lhs_reg: i64, rhs_imm: i64, ty: GpuType },
+
+    // Add: dst = lhs + rhs
+    GpuAdd { dst_reg: i64, lhs_reg: i64, rhs_reg: i64, ty: GpuType },
+
+    // Load from kernel parameter: dst = param[param_idx]
+    GpuLoadParam { dst_reg: i64, param_idx: i64 },
+
+    // Load from global memory: dst = global[addr]
+    GpuLoadGlobal { dst_reg: i64, addr_reg: i64, ty: GpuType },
+
+    // Store to global memory: global[addr] = src
+    GpuStoreGlobal { addr_reg: i64, src_reg: i64, ty: GpuType },
+
+    // Return from kernel
+    GpuRet,
+}
+
+// GPU kernel IR (represents a single kernel)
+struct GpuKernelIr {
+    kernel_name: Name,
+    params: [GpuParam; 8],
+    param_count: i64,
+    ops: [GpuOp; 256],
+    op_count: i64,
+
+    // Register allocation info (simple for now)
+    max_reg_u32: i64,
+    max_reg_u64: i64,
+    max_reg_f32: i64,
+    max_reg_pred: i64,
+}
+
+// Constructors and helpers
+
+fn gpu_kernel_new() -> GpuKernelIr {
+    GpuKernelIr {
+        kernel_name: ir_empty_name(),
+        params: [gpu_param_new(); 8],
+        param_count: 0,
+        ops: [gpu_op_new(); 256],
+        op_count: 0,
+        max_reg_u32: 0,
+        max_reg_u64: 0,
+        max_reg_f32: 0,
+        max_reg_pred: 0,
+    }
+}
+
+fn gpu_param_new() -> GpuParam {
+    GpuParam {
+        name: ir_empty_name(),
+        ty: GpuType::GpuU64,
+    }
+}
+
+fn gpu_op_new() -> GpuOp {
+    GpuOp::GpuRet
+}
+
+fn gpu_type_to_string(ty: GpuType) -> string {
+    match ty {
+        GpuType::GpuU32 => "u32",
+        GpuType::GpuU64 => "u64",
+        GpuType::GpuF32 => "f32",
+        GpuType::GpuPtr => "u64",
+    }
+}
+
+// Build a vec_add kernel IR (canonical example)
+//
+// This IR represents:
+//   __global__ void vec_add(float *a, float *b, float *c) {
+//       int i = threadIdx.x;
+//       c[i] = a[i] + b[i];
+//   }
+//
+// Lowering to PTX:
+//   r1 = tid.x (u32)
+//   rd1 = cvt.u64.u32 r1
+//   rd2 = rd1 * 4      // sizeof(f32)
+//   rd3 = param_a      // load pointer params
+//   rd4 = param_b
+//   rd5 = param_c
+//   rd6 = rd3 + rd2    // offset into a
+//   rd7 = rd4 + rd2    // offset into b
+//   rd8 = rd5 + rd2    // offset into c
+//   f1 = global[rd6]   // load a[i]
+//   f2 = global[rd7]   // load b[i]
+//   f3 = f1 + f2       // add
+//   global[rd8] = f3   // store to c[i]
+//   ret
+//
+fn gpu_build_vec_add_ir() -> GpuKernelIr with Mut, Panic, Div {
+    var k = gpu_kernel_new()
+
+    // Kernel name: "vec_add"
+    k.kernel_name = ir_name_from_bytes(118, 101, 99, 95, 7)  // "vec_add" (7 chars)
+    k.kernel_name.buf[4] = 97   // 'a'
+    k.kernel_name.buf[5] = 100  // 'd'
+    k.kernel_name.buf[6] = 100  // 'd'
+
+    // Parameters: .param .u64 param_a, param_b, param_c
+    k.params[0] = GpuParam {
+        name: ir_name_from_bytes(112, 97, 114, 97, 7),  // "param_a"
+        ty: GpuType::GpuPtr,
+    }
+    k.params[0].name.buf[4] = 109  // 'm'
+    k.params[0].name.buf[5] = 95   // '_'
+    k.params[0].name.buf[6] = 97   // 'a'
+
+    k.params[1] = GpuParam {
+        name: ir_name_from_bytes(112, 97, 114, 97, 7),  // "param_b"
+        ty: GpuType::GpuPtr,
+    }
+    k.params[1].name.buf[4] = 109  // 'm'
+    k.params[1].name.buf[5] = 95   // '_'
+    k.params[1].name.buf[6] = 98   // 'b'
+
+    k.params[2] = GpuParam {
+        name: ir_name_from_bytes(112, 97, 114, 97, 7),  // "param_c"
+        ty: GpuType::GpuPtr,
+    }
+    k.params[2].name.buf[4] = 109  // 'm'
+    k.params[2].name.buf[5] = 95   // '_'
+    k.params[2].name.buf[6] = 99   // 'c'
+
+    k.param_count = 3
+
+    // Operations (following PTX register allocation from reference)
+    var idx: i64 = 0
+
+    // r1 = tid.x
+    k.ops[idx] = GpuOp::GpuGetTid { dst_reg: 1, axis: 0 }
+    idx = idx + 1
+
+    // rd1 = cvt.u64.u32 r1
+    k.ops[idx] = GpuOp::GpuCvt {
+        dst_reg: 1,
+        src_reg: 1,
+        dst_ty: GpuType::GpuU64,
+        src_ty: GpuType::GpuU32,
+    }
+    idx = idx + 1
+
+    // rd2 = rd1 * 4 (sizeof f32)
+    k.ops[idx] = GpuOp::GpuMulImm {
+        dst_reg: 2,
+        lhs_reg: 1,
+        rhs_imm: 4,
+        ty: GpuType::GpuU64,
+    }
+    idx = idx + 1
+
+    // rd3 = param_a
+    k.ops[idx] = GpuOp::GpuLoadParam { dst_reg: 3, param_idx: 0 }
+    idx = idx + 1
+
+    // rd4 = param_b
+    k.ops[idx] = GpuOp::GpuLoadParam { dst_reg: 4, param_idx: 1 }
+    idx = idx + 1
+
+    // rd5 = param_c
+    k.ops[idx] = GpuOp::GpuLoadParam { dst_reg: 5, param_idx: 2 }
+    idx = idx + 1
+
+    // rd6 = rd3 + rd2
+    k.ops[idx] = GpuOp::GpuAdd {
+        dst_reg: 6,
+        lhs_reg: 3,
+        rhs_reg: 2,
+        ty: GpuType::GpuU64,
+    }
+    idx = idx + 1
+
+    // rd7 = rd4 + rd2
+    k.ops[idx] = GpuOp::GpuAdd {
+        dst_reg: 7,
+        lhs_reg: 4,
+        rhs_reg: 2,
+        ty: GpuType::GpuU64,
+    }
+    idx = idx + 1
+
+    // rd8 = rd5 + rd2
+    k.ops[idx] = GpuOp::GpuAdd {
+        dst_reg: 8,
+        lhs_reg: 5,
+        rhs_reg: 2,
+        ty: GpuType::GpuU64,
+    }
+    idx = idx + 1
+
+    // f1 = global[rd6]
+    k.ops[idx] = GpuOp::GpuLoadGlobal {
+        dst_reg: 1,
+        addr_reg: 6,
+        ty: GpuType::GpuF32,
+    }
+    idx = idx + 1
+
+    // f2 = global[rd7]
+    k.ops[idx] = GpuOp::GpuLoadGlobal {
+        dst_reg: 2,
+        addr_reg: 7,
+        ty: GpuType::GpuF32,
+    }
+    idx = idx + 1
+
+    // f3 = f1 + f2
+    k.ops[idx] = GpuOp::GpuAdd {
+        dst_reg: 3,
+        lhs_reg: 1,
+        rhs_reg: 2,
+        ty: GpuType::GpuF32,
+    }
+    idx = idx + 1
+
+    // global[rd8] = f3
+    k.ops[idx] = GpuOp::GpuStoreGlobal {
+        addr_reg: 8,
+        src_reg: 3,
+        ty: GpuType::GpuF32,
+    }
+    idx = idx + 1
+
+    // ret
+    k.ops[idx] = GpuOp::GpuRet
+    idx = idx + 1
+
+    k.op_count = idx
+
+    // Register usage tracking
+    k.max_reg_u32 = 3   // %r<3>: r0 unused, r1, r2 unused
+    k.max_reg_u64 = 9   // %rd<9>: rd0 unused, rd1-rd8
+    k.max_reg_f32 = 4   // %f<4>: f0 unused, f1, f2, f3
+    k.max_reg_pred = 2  // %p<2>: not used yet, but keep for compatibility
+
+    k
+}
