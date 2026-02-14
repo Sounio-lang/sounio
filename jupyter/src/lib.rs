@@ -270,6 +270,12 @@ impl Serialize for ExecutionState {
     }
 }
 
+/// Result of processing a magic command
+pub struct MagicResult {
+    pub output: Option<String>,
+    pub display_data: Option<serde_json::Value>,
+}
+
 /// Execution context that persists across cells
 pub struct ExecutionContext {
     /// Accumulated function definitions
@@ -282,6 +288,8 @@ pub struct ExecutionContext {
     binding_stmts: Vec<(String, String)>,
     /// Execution counter
     execution_count: u32,
+    /// History of execution times (cell_number, duration_ms)
+    timing_history: Vec<(u32, f64)>,
 }
 
 impl ExecutionContext {
@@ -292,6 +300,7 @@ impl ExecutionContext {
             bindings: HashMap::new(),
             binding_stmts: Vec::new(),
             execution_count: 0,
+            timing_history: Vec::new(),
         }
     }
 
@@ -305,6 +314,11 @@ impl ExecutionContext {
                 output: None,
                 display_data: None,
             });
+        }
+
+        // Check for magic commands
+        if input.starts_with('%') {
+            return self.handle_magic(input);
         }
 
         // Check if this is a definition
@@ -397,6 +411,273 @@ impl ExecutionContext {
             }
             Err(e) => Err(format!("Runtime error: {}", e)),
         }
+    }
+
+    // ================================================================
+    // Magic Commands
+    // ================================================================
+
+    /// Handle magic commands (lines starting with %)
+    fn handle_magic(&mut self, input: &str) -> std::result::Result<ExecutionResult, String> {
+        let input = input.trim();
+
+        // Parse magic: %command [args]
+        let (command, args) = if let Some(space_idx) = input.find(' ') {
+            (&input[1..space_idx], input[space_idx + 1..].trim())
+        } else {
+            (&input[1..], "")
+        };
+
+        match command {
+            "time" => self.magic_time(args),
+            "effects" => self.magic_effects(args),
+            "provenance" => self.magic_provenance(args),
+            "uncertainty" => self.magic_uncertainty(args),
+            "who" | "whos" => self.magic_who(),
+            "reset" => self.magic_reset(),
+            "help" => self.magic_help(),
+            _ => Err(format!(
+                "Unknown magic command: %{}\n\nAvailable magics: %time, %effects, %provenance, %uncertainty, %who, %reset, %help",
+                command
+            )),
+        }
+    }
+
+    /// %time <code> — Execute code and report wall-clock timing
+    fn magic_time(&mut self, code: &str) -> std::result::Result<ExecutionResult, String> {
+        if code.is_empty() {
+            return Err("%time requires code to execute.\nUsage: %time <expression>".to_string());
+        }
+
+        let start = std::time::Instant::now();
+        let result = self.execute(code);
+        let elapsed = start.elapsed();
+        let ms = elapsed.as_secs_f64() * 1000.0;
+
+        self.timing_history.push((self.execution_count, ms));
+
+        match result {
+            Ok(mut exec_result) => {
+                let timing_info = format!(
+                    "\n--- Timing ---\nWall time: {:.3} ms ({:.6} s)",
+                    ms,
+                    elapsed.as_secs_f64()
+                );
+                if let Some(ref mut output) = exec_result.output {
+                    output.push_str(&timing_info);
+                } else {
+                    exec_result.output = Some(timing_info);
+                }
+                Ok(exec_result)
+            }
+            Err(e) => Err(e),
+        }
+    }
+
+    /// %effects <fn_name> — Show the effect signature of a function
+    fn magic_effects(&self, fn_name: &str) -> std::result::Result<ExecutionResult, String> {
+        if fn_name.is_empty() {
+            // List all defined functions with effects
+            if self.functions.is_empty() {
+                return Ok(ExecutionResult {
+                    output: Some("No functions defined in this session.".to_string()),
+                    display_data: None,
+                });
+            }
+
+            let mut output = String::from("Defined functions:\n");
+            for (name, def) in &self.functions {
+                let effect_sig = Self::extract_effects(def);
+                output.push_str(&format!("  {} {}\n", name, effect_sig));
+            }
+            return Ok(ExecutionResult {
+                output: Some(output),
+                display_data: None,
+            });
+        }
+
+        // Look up specific function
+        if let Some(def) = self.functions.get(fn_name) {
+            let effect_sig = Self::extract_effects(def);
+            let output = format!("fn {} {}\n\nFull definition:\n{}", fn_name, effect_sig, def);
+            Ok(ExecutionResult {
+                output: Some(output),
+                display_data: None,
+            })
+        } else {
+            Err(format!("Function '{}' not found in session.", fn_name))
+        }
+    }
+
+    /// %provenance <var_name> — Show provenance chain of a Knowledge value
+    fn magic_provenance(&self, var_name: &str) -> std::result::Result<ExecutionResult, String> {
+        if var_name.is_empty() {
+            return Err("%provenance requires a variable name.\nUsage: %provenance <variable>".to_string());
+        }
+
+        if let Some(value) = self.bindings.get(var_name) {
+            let output = format!(
+                "Provenance for '{}':\n  Type: {:?}\n  Value: {:?}\n\n  (Full provenance tracking requires Knowledge<T> values.\n   Use `measure()` or `Knowledge::new()` to create epistemic values.)",
+                var_name, value, value
+            );
+            Ok(ExecutionResult {
+                output: Some(output),
+                display_data: None,
+            })
+        } else {
+            Err(format!("Variable '{}' not found in session.", var_name))
+        }
+    }
+
+    /// %uncertainty <var_name> — Show uncertainty breakdown for a variable
+    fn magic_uncertainty(&self, var_name: &str) -> std::result::Result<ExecutionResult, String> {
+        if var_name.is_empty() {
+            // List all variables with their types
+            if self.bindings.is_empty() {
+                return Ok(ExecutionResult {
+                    output: Some("No variables defined in this session.".to_string()),
+                    display_data: None,
+                });
+            }
+
+            let mut output = String::from("Variables with uncertainty info:\n\n");
+            for (name, value) in &self.bindings {
+                output.push_str(&format!("  {} = {:?}\n", name, value));
+            }
+            output.push_str("\n(Use %uncertainty <name> for detailed breakdown)");
+            return Ok(ExecutionResult {
+                output: Some(output),
+                display_data: None,
+            });
+        }
+
+        if let Some(value) = self.bindings.get(var_name) {
+            let output = format!(
+                "Uncertainty Analysis for '{}':\n\n  Value: {:?}\n\n  Decomposition:\n    Statistical:    (from data variance)\n    Identification: (from causal model)\n    Structural:     (from graph uncertainty)\n    Total (GUM):    (quadrature sum)\n\n  (Full uncertainty decomposition requires Knowledge<T> types.\n   Use `measure(value, uncertainty: u)` to create epistemic values.)",
+                var_name, value
+            );
+            Ok(ExecutionResult {
+                output: Some(output),
+                display_data: None,
+            })
+        } else {
+            Err(format!("Variable '{}' not found in session.", var_name))
+        }
+    }
+
+    /// %who — List all defined names in the session
+    fn magic_who(&self) -> std::result::Result<ExecutionResult, String> {
+        let mut output = String::new();
+
+        if !self.types.is_empty() {
+            output.push_str("Types:\n");
+            for name in self.types.keys() {
+                output.push_str(&format!("  {}\n", name));
+            }
+            output.push('\n');
+        }
+
+        if !self.functions.is_empty() {
+            output.push_str("Functions:\n");
+            for name in self.functions.keys() {
+                output.push_str(&format!("  {}\n", name));
+            }
+            output.push('\n');
+        }
+
+        if !self.bindings.is_empty() {
+            output.push_str("Variables:\n");
+            for (name, value) in &self.bindings {
+                output.push_str(&format!("  {} = {:?}\n", name, value));
+            }
+            output.push('\n');
+        }
+
+        if output.is_empty() {
+            output = "No names defined in this session.".to_string();
+        }
+
+        Ok(ExecutionResult {
+            output: Some(output),
+            display_data: None,
+        })
+    }
+
+    /// %reset — Clear all definitions and bindings
+    fn magic_reset(&mut self) -> std::result::Result<ExecutionResult, String> {
+        let n_types = self.types.len();
+        let n_functions = self.functions.len();
+        let n_bindings = self.bindings.len();
+
+        self.types.clear();
+        self.functions.clear();
+        self.bindings.clear();
+        self.binding_stmts.clear();
+        self.timing_history.clear();
+
+        Ok(ExecutionResult {
+            output: Some(format!(
+                "Reset session: cleared {} types, {} functions, {} variables.",
+                n_types, n_functions, n_bindings
+            )),
+            display_data: None,
+        })
+    }
+
+    /// %help — Show available magic commands
+    fn magic_help(&self) -> std::result::Result<ExecutionResult, String> {
+        let help = "\
+Sounio Jupyter Magic Commands:
+
+  %time <code>          Execute code and report wall-clock timing
+  %effects [fn_name]    Show effect signatures of defined functions
+  %provenance <var>     Show provenance chain of an epistemic value
+  %uncertainty [var]    Show uncertainty breakdown for a variable
+  %who / %whos          List all defined names in the session
+  %reset                Clear all definitions and bindings
+  %help                 Show this help message
+
+Epistemic Types:
+  Knowledge<T>          Value with uncertainty, confidence, provenance
+  CausalKnowledge<T>    Knowledge with causal graph structure
+  measure(v, u)         Create a measurement with uncertainty
+
+Examples:
+  let dose = measure(500.0, uncertainty: 2.5)
+  %uncertainty dose
+  %time dose * 2.0
+";
+        Ok(ExecutionResult {
+            output: Some(help.to_string()),
+            display_data: None,
+        })
+    }
+
+    /// Extract effect annotations from a function definition
+    fn extract_effects(def: &str) -> String {
+        // Look for "with ..." before the function body "{"
+        if let Some(brace_idx) = def.find('{') {
+            let before_brace = &def[..brace_idx];
+            if let Some(with_idx) = before_brace.rfind("with ") {
+                return format!("with {}", before_brace[with_idx + 5..].trim());
+            }
+        }
+        "(pure)".to_string()
+    }
+
+    /// Get all defined names for tab completion
+    pub fn all_names(&self) -> Vec<String> {
+        let mut names: Vec<String> = Vec::new();
+        for name in self.types.keys() {
+            names.push(name.clone());
+        }
+        for name in self.functions.keys() {
+            names.push(name.clone());
+        }
+        for name in self.bindings.keys() {
+            names.push(name.clone());
+        }
+        names
     }
 
     fn build_source(&self, expr: &str) -> String {
@@ -832,13 +1113,34 @@ impl SounioKernel {
             "let", "var", "fn", "struct", "enum", "effect", "if", "else", "while", "for", "in",
             "return", "true", "false", "pub", "use", "mod", "match", "with", "linear", "kernel",
             "type", "import",
+            // Epistemic / causal keywords
+            "Knowledge", "CausalKnowledge", "CausalGraph", "measure", "do", "counterfactual",
         ];
 
-        let matches: Vec<&str> = keywords
+        let mut matches: Vec<String> = keywords
             .iter()
             .filter(|kw| kw.starts_with(prefix))
-            .copied()
+            .map(|kw| kw.to_string())
             .collect();
+
+        // Add user-defined names (functions, types, variables)
+        let ctx = self.context.blocking_lock();
+        for name in ctx.all_names() {
+            if name.starts_with(prefix) && !matches.contains(&name) {
+                matches.push(name);
+            }
+        }
+
+        // Add magic commands if prefix starts with %
+        if prefix.starts_with('%') {
+            let magic_prefix = &prefix[1..];
+            let magics = ["%time", "%effects", "%provenance", "%uncertainty", "%who", "%reset", "%help"];
+            for m in &magics {
+                if m[1..].starts_with(magic_prefix) {
+                    matches.push(m.to_string());
+                }
+            }
+        }
 
         let content = serde_json::json!({
             "status": "ok",
