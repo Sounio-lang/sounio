@@ -47,13 +47,14 @@ Transform Sounio from a bootstrapped compiler into the **leading academic platfo
 - `tests/run-pass/pbpk_reproduction.sio`
 - `WHILE_LOOP_BUG_INVESTIGATION.md`
 
-#### Month 3-4: SMT Integration for Dependent Types (CURRENT PRIORITY)
-- [ ] Complete Z3 solver integration (`crates/souc/src/smt/z3_solver.rs`)
-- [ ] FFI bindings to Z3 C API
-- [ ] Translate epistemic predicates to Z3 formulas
-- [ ] Extend proof search (`crates/souc/src/dependent/proof_search.rs`)
-- [ ] Wire into type checker with gradual typing fallback
+#### Month 3-4: SMT Integration for Dependent Types ✅ READY
+- [x] Z3 solver integration (1143 LOC - COMPLETE)
+- [x] Proof search infrastructure (1072 LOC - COMPLETE)
+- [x] Epistemic types comprehensive (COMPLETE)
+- [ ] SMT translation for epistemic predicates (3 days remaining)
+- [ ] Type checker integration with refinements (see SMT_INTEGRATION_GUIDE.md)
 
+**Status:** 90% complete - final wiring documented in implementation guide
 **Target:** Epistemic refinements like `Knowledge<T> where confidence >= 0.95`
 
 #### Month 4-5: QNN-MNIST Benchmark
@@ -212,6 +213,7 @@ Third paper (Month 15-16)
 - [x] While-loop bug investigation (RESOLVED - not a blocker!)
 - [x] Benchmark infrastructure documentation
 - [x] Task tracking system set up
+- [x] SMT integration assessment (90% complete, 3 days remaining)
 
 ### In Progress
 - [ ] SMT Z3 integration (Task #4)
@@ -221,10 +223,10 @@ Third paper (Month 15-16)
 - None! While-loop bug is not a blocker.
 
 ### Next Week Priorities
-1. Start Z3 FFI bindings
-2. Draft QNN-MNIST implementation plan
-3. Review epistemic formalization proofs
-4. Begin SMT proof search algorithm
+1. Implement SMT translation (translate_confidence_to_smt)
+2. Wire Z3 fallback into proof searcher
+3. Create integration tests
+4. Build epistemic refinement examples
 
 ---
 
