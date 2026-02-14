@@ -776,7 +776,7 @@ fn check_identifiable(
     if let Some(treatment_parents) = parents_map.get(treatment) {
         let adjustment: Vec<String> = treatment_parents
             .iter()
-            .filter(|p| !treatment_descendants.iter().any(|d| d == *p))
+            .filter(|p| !treatment_descendants.contains((**p).as_str()))
             .map(|p| p.to_string())
             .collect();
 
@@ -804,7 +804,7 @@ fn check_identifiable(
     if let Some(treatment_children) = children_map.get(treatment) {
         let mediators: Vec<String> = treatment_children
             .iter()
-            .filter(|c| outcome_ancestors.iter().any(|a| a == *c))
+            .filter(|c| outcome_ancestors.contains((**c).as_str()))
             .filter(|c| **c != outcome)
             .map(|c| c.to_string())
             .collect();

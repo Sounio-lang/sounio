@@ -41,6 +41,10 @@ pub struct NativeCodegen {
     frame_size: i32,
     /// `return` jumps that must branch to the function epilogue.
     return_jumps: Vec<usize>,
+    /// Stack adjustment in bytes relative to function entry prologue.
+    ///
+    /// 0 means the stack is 16-byte aligned at the current point.
+    stack_delta: i32,
 }
 
 impl NativeCodegen {
@@ -54,6 +58,7 @@ impl NativeCodegen {
             locals: HashMap::new(),
             frame_size: 0,
             return_jumps: Vec::new(),
+            stack_delta: 0,
         }
     }
 
@@ -105,7 +110,7 @@ impl NativeCodegen {
             }
         }
 
-        let entry_offset = self.emit_entry_trampoline();
+        let entry_offset = self.emit_entry_trampoline()?;
         self.apply_relocations()?;
         Ok(self.emitter.finalize(entry_offset))
     }
@@ -119,6 +124,7 @@ impl NativeCodegen {
         self.locals.clear();
         self.frame_size = 0;
         self.return_jumps.clear();
+        self.stack_delta = 0;
     }
 
     fn compile_fn(&mut self, func: &HirFn) -> Result<(), String> {
@@ -135,6 +141,13 @@ impl NativeCodegen {
         self.compile_block(&func.body)?;
 
         let epilogue_offset = self.emitter.code.len();
+        // stack_delta includes the fixed frame allocation; require no transient imbalance.
+        if self.stack_delta != self.frame_size {
+            return Err(format!(
+                "unbalanced stack in '{}': expected {} got {}",
+                func.name, self.frame_size, self.stack_delta
+            ));
+        }
         self.emit_epilogue();
         self.patch_return_jumps(epilogue_offset)?;
         Ok(())
@@ -172,11 +185,13 @@ impl NativeCodegen {
             0x55, // push rbp
             0x48, 0x89, 0xe5, // mov rbp, rsp
         ]);
+        self.stack_delta = 0;
 
         if self.frame_size > 0 {
             self.emitter.emit_code(&[0x48, 0x81, 0xec]); // sub rsp, imm32
             self.emitter
                 .emit_code(&(self.frame_size as u32).to_le_bytes());
+            self.stack_delta = self.stack_delta.saturating_add(self.frame_size);
         }
     }
 
@@ -377,14 +392,14 @@ impl NativeCodegen {
         }
 
         self.compile_expr(left)?;
-        self.emitter.emit_code(&[0x50]); // push rax
+        self.emit_push_rax();
         // Keep the stack 16-byte aligned while evaluating the RHS. The System V ABI requires
         // `%rsp` to be 16-byte aligned *before* a `call`. A single push misaligns by 8, so we
         // add a dummy 8-byte adjustment that we later undo.
-        self.emitter.emit_code(&[0x48, 0x83, 0xec, 0x08]); // sub rsp, 8
+        self.emit_sub_rsp8(0x08); // sub rsp, 8
         self.compile_expr(right)?;
-        self.emitter.emit_code(&[0x48, 0x83, 0xc4, 0x08]); // add rsp, 8
-        self.emitter.emit_code(&[0x41, 0x5a]); // pop r10
+        self.emit_add_rsp8(0x08); // add rsp, 8
+        self.emit_pop_r10();
 
         match op {
             HirBinaryOp::Add => {
@@ -526,9 +541,7 @@ impl NativeCodegen {
             let scratch_total = align16(scratch_size);
 
             // sub rsp, scratch_total
-            self.emitter.emit_code(&[0x48, 0x81, 0xec]);
-            self.emitter
-                .emit_code(&(scratch_total as u32).to_le_bytes());
+            self.emit_sub_rsp32(scratch_total);
 
             for (i, arg) in args.iter().enumerate() {
                 self.compile_expr(arg)?;
@@ -540,12 +553,11 @@ impl NativeCodegen {
             }
 
             // add rsp, scratch_total
-            self.emitter.emit_code(&[0x48, 0x81, 0xc4]);
-            self.emitter
-                .emit_code(&(scratch_total as u32).to_le_bytes());
+            self.emit_add_rsp32(scratch_total);
         }
 
-        self.emit_call_relocation_any(callee);
+        self.assert_aligned_for_call(&format!("call to {callee}"))?;
+        self.emit_call_relocation_any(callee)?;
         Ok(())
     }
 
@@ -559,11 +571,7 @@ impl NativeCodegen {
         }
     }
 
-    fn emit_load_arg_reg_from_rsp_disp32(
-        &mut self,
-        index: usize,
-        disp: i32,
-    ) -> Result<(), String> {
+    fn emit_load_arg_reg_from_rsp_disp32(&mut self, index: usize, disp: i32) -> Result<(), String> {
         match index {
             // mov rdi, [rsp + disp32]
             0 => self.emitter.emit_code(&[0x48, 0x8b, 0xbc, 0x24]),
@@ -601,6 +609,7 @@ impl NativeCodegen {
             return Err("print currently supports only string literals".to_string());
         };
 
+        self.assert_aligned_for_call("builtin print")?;
         self.emit_inline_print_string(text)?;
         self.emit_zero_rax(); // print returns unit
         Ok(())
@@ -618,7 +627,7 @@ impl NativeCodegen {
         self.emitter.emit_code(&[0x48, 0xc7, 0xc6]); // mov rsi, imm32
         self.emitter.emit_code(&text_len.to_le_bytes());
 
-        self.emit_call_relocation_builtin("print".to_string());
+        self.emit_call_relocation_builtin("print".to_string())?;
 
         let jmp_pos = self.emitter.code.len();
         self.emitter.emit_code(&[0xe9, 0x00, 0x00, 0x00, 0x00]); // jmp over inline bytes
@@ -705,33 +714,37 @@ impl NativeCodegen {
         Ok(())
     }
 
-    fn emit_entry_trampoline(&mut self) -> usize {
+    fn emit_entry_trampoline(&mut self) -> Result<usize, String> {
         let entry = self.emitter.code.len();
 
-        self.emit_call_relocation_any("main".to_string());
+        // Ensure Linux SysV ABI alignment before the first `call main`.
+        self.emitter.emit_code(&[0x48, 0x83, 0xe4, 0xf0]); // and rsp, -16
+        self.emit_call_relocation_any("main".to_string())?;
         self.emitter.emit_code(&[0x48, 0x89, 0xc7]); // mov rdi, rax
-        self.emit_call_relocation_builtin("exit".to_string());
+        self.emit_call_relocation_builtin("exit".to_string())?;
         self.emitter.emit_code(&[0x0f, 0x0b]); // ud2 (should not return)
 
-        entry
+        Ok(entry)
     }
 
-    fn emit_call_relocation_any(&mut self, target_name: String) {
+    fn emit_call_relocation_any(&mut self, target_name: String) -> Result<(), String> {
         let call_pos = self.emitter.code.len();
         self.emitter.emit_code(&[0xe8, 0x00, 0x00, 0x00, 0x00]); // call rel32
         self.relocations.push(PendingRelocation {
             imm_offset: call_pos + 1,
             target: RelocationTarget::FunctionOrBuiltin(target_name),
         });
+        Ok(())
     }
 
-    fn emit_call_relocation_builtin(&mut self, target_name: String) {
+    fn emit_call_relocation_builtin(&mut self, target_name: String) -> Result<(), String> {
         let call_pos = self.emitter.code.len();
         self.emitter.emit_code(&[0xe8, 0x00, 0x00, 0x00, 0x00]); // call rel32
         self.relocations.push(PendingRelocation {
             imm_offset: call_pos + 1,
             target: RelocationTarget::Builtin(target_name),
         });
+        Ok(())
     }
 
     fn apply_relocations(&mut self) -> Result<(), String> {
@@ -755,9 +768,58 @@ impl NativeCodegen {
     }
 
     fn patch_rel32(&mut self, imm_offset: usize, target: usize) -> Result<(), String> {
+        if imm_offset + 4 > self.emitter.code.len() {
+            return Err(format!(
+                "relocation out of bounds: offset {} (code size {})",
+                imm_offset,
+                self.emitter.code.len()
+            ));
+        }
         let next_ip = imm_offset + 4;
         let rel = rel32(next_ip, target)?;
         self.emitter.code[imm_offset..imm_offset + 4].copy_from_slice(&rel.to_le_bytes());
+        Ok(())
+    }
+
+    fn emit_push_rax(&mut self) {
+        self.emitter.emit_code(&[0x50]); // push rax
+        self.stack_delta = self.stack_delta.saturating_add(8);
+    }
+
+    fn emit_pop_r10(&mut self) {
+        self.emitter.emit_code(&[0x41, 0x5a]); // pop r10
+        self.stack_delta = self.stack_delta.saturating_sub(8);
+    }
+
+    fn emit_sub_rsp8(&mut self, imm: u8) {
+        self.emitter.emit_code(&[0x48, 0x83, 0xec, imm]);
+        self.stack_delta = self.stack_delta.saturating_add(imm as i32);
+    }
+
+    fn emit_add_rsp8(&mut self, imm: u8) {
+        self.emitter.emit_code(&[0x48, 0x83, 0xc4, imm]);
+        self.stack_delta = self.stack_delta.saturating_sub(imm as i32);
+    }
+
+    fn emit_sub_rsp32(&mut self, imm: i32) {
+        self.emitter.emit_code(&[0x48, 0x81, 0xec]);
+        self.emitter.emit_code(&(imm as u32).to_le_bytes());
+        self.stack_delta = self.stack_delta.saturating_add(imm);
+    }
+
+    fn emit_add_rsp32(&mut self, imm: i32) {
+        self.emitter.emit_code(&[0x48, 0x81, 0xc4]);
+        self.emitter.emit_code(&(imm as u32).to_le_bytes());
+        self.stack_delta = self.stack_delta.saturating_sub(imm);
+    }
+
+    fn assert_aligned_for_call(&self, target: &str) -> Result<(), String> {
+        if self.stack_delta % 16 != 0 {
+            return Err(format!(
+                "Stack misaligned by {} bytes before {target}",
+                self.stack_delta
+            ));
+        }
         Ok(())
     }
 

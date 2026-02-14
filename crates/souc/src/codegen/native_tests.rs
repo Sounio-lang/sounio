@@ -32,6 +32,10 @@ fn unique_test_path() -> PathBuf {
 }
 
 fn compile_and_run(source: &str) -> (i32, String) {
+    if !cfg!(all(target_os = "linux", target_arch = "x86_64")) {
+        panic!("native tests currently target Linux x86-64");
+    }
+
     let binary = compile_only(source).expect("native compile should succeed");
 
     let path = unique_test_path();
@@ -153,8 +157,7 @@ fn test_native_three_arg_call_uses_aligned_scratch_area() {
 fn test_native_call_inside_binary_expression() {
     // Regression guard: evaluating a binary op must preserve stack alignment so nested calls remain
     // ABI-correct on System V platforms.
-    let (code, _) =
-        compile_and_run("fn aux() -> i64 { 39 }\nfn main() -> i64 { aux() + 3 }");
+    let (code, _) = compile_and_run("fn aux() -> i64 { 39 }\nfn main() -> i64 { aux() + 3 }");
     assert_eq!(code, 42);
 }
 
@@ -195,6 +198,106 @@ fn test_native_print_non_string_error_is_explicit() {
 }
 
 #[test]
+fn test_native_forward_call_and_recursive_ifs() {
+    let (code, stdout) = compile_and_run(
+        r#"
+            fn helper(x: i64) -> i64 {
+                if x == 0 { 1 } else { helper(x - 1) * 2 }
+            }
+            fn branch(v: i64) -> i64 {
+                if v == 0 { 20 } else { helper(v) + 22 }
+            }
+            fn main() -> i64 {
+                branch(2) + helper(1)
+            }
+        "#,
+    );
+    assert_eq!(code, 84);
+    assert_eq!(stdout, "");
+}
+
+#[test]
+fn test_native_print_in_loop_is_executed_once_and_is_relocatable() {
+    let (code, stdout) = compile_and_run(
+        r#"
+            fn loop_print(n: i64) -> i64 with IO {
+                if n == 0 {
+                    print("done\n");
+                    0
+                } else {
+                    n - 1;
+                    loop_print(n - 1);
+                }
+            }
+
+            fn main() -> i64 {
+                loop_print(3)
+            }
+        "#,
+    );
+    assert_eq!(code, 0);
+    assert_eq!(stdout, "done\n");
+}
+
+#[test]
+fn test_native_call_in_binary_and_return_if() {
+    let (code, _) = compile_and_run(
+        r#"
+            fn sum(a: i64, b: i64) -> i64 { a + b }
+            fn branch(v: i64) -> i64 {
+                if v % 2 == 0 {
+                    return sum(v, 5);
+                }
+                sum(v, 3)
+            }
+            fn main() -> i64 {
+                branch(42) + branch(3)
+            }
+        "#,
+    );
+    assert_eq!(code, 53);
+}
+
+#[test]
+fn test_native_forward_call_relocated_through_trampoline() {
+    let (code, _) = compile_and_run(
+        r#"
+            fn main() -> i64 {
+                return_value(0x19);
+            }
+            fn return_value(v: i64) -> i64 { v }
+            fn _unused(v: i64) -> i64 { v + 1 }
+        "#,
+    );
+    assert_eq!(code, 0x19);
+}
+
+#[test]
+fn test_native_local_frames_keep_alignment_with_calls_and_if_print() {
+    let (code, stdout) = compile_and_run(
+        r#"
+            fn adder(a: i64, b: i64) -> i64 {
+                let sum: i64 = a + b;
+                let one: i64 = 1;
+                sum + one
+            }
+
+            fn main() -> i64 with IO {
+                let x: i64 = 41;
+                if (x == 41) {
+                    print("ok\n");
+                    adder(x, 1)
+                } else {
+                    0
+                }
+            }
+        "#,
+    );
+    assert_eq!(code, 43);
+    assert_eq!(stdout, "ok\n");
+}
+
+#[test]
 fn test_native_while_loop() {
     let (code, _) =
         compile_and_run("fn main() -> i64 { let x: i64 = 0; while x < 42 { x = x + 1 }; x }");
@@ -212,7 +315,8 @@ fn test_native_user_defined_print_is_rejected_with_clear_error() {
 
 #[test]
 fn test_native_entry_uses_builtin_exit_even_if_user_exit_exists() {
-    let (code, _) = compile_and_run("fn exit(code: i64) -> i64 { code + 1 }\nfn main() -> i64 { exit(41) }");
+    let (code, _) =
+        compile_and_run("fn exit(code: i64) -> i64 { code + 1 }\nfn main() -> i64 { exit(41) }");
     assert_eq!(code, 42);
 }
 
