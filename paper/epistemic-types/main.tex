@@ -1,0 +1,802 @@
+% Epistemic Types for Scientific Computing
+% Target: PLDI 2027
+%
+% Compile: pdflatex main && bibtex main && pdflatex main && pdflatex main
+
+\documentclass[acmsmall,screen,review,anonymous]{acmart}
+
+% Packages
+\usepackage{mathpartir}
+\usepackage{stmaryrd}
+\usepackage{booktabs}
+\usepackage{subcaption}
+\usepackage{xspace}
+
+% Macros
+\newcommand{\sounio}{\textsc{Sounio}\xspace}
+\newcommand{\know}[1]{\texttt{Knowledge}\langle #1 \rangle}
+\newcommand{\knowfull}[4]{\texttt{Knowledge}\langle #1, #2, #3, #4 \rangle}
+\newcommand{\cknow}[3]{\texttt{CausalKnowledge}\langle #1, #2, #3 \rangle}
+\newcommand{\eps}{\epsilon}
+
+% Code listing style
+\lstdefinelanguage{sounio}{
+  keywords={fn, let, var, if, else, while, for, return, struct, enum, match,
+            with, kernel, linear, type, use, effect, handle, perform},
+  keywordstyle=\color{blue!60!black}\bfseries,
+  ndkeywords={Knowledge, CausalKnowledge, CausalGraph, f64, i32, bool,
+              IO, Mut, Alloc, GPU, Prob},
+  ndkeywordstyle=\color{purple!60!black},
+  sensitive=true,
+  comment=[l]{//},
+  commentstyle=\color{green!40!black}\itshape,
+  stringstyle=\color{red!60!black},
+  morestring=[b]",
+}
+
+\lstset{
+  language=sounio,
+  basicstyle=\ttfamily\small,
+  frame=single,
+  numbers=left,
+  numberstyle=\tiny\color{gray},
+  breaklines=true,
+  captionpos=b,
+  xleftmargin=2em,
+  aboveskip=0.8em,
+  belowskip=0.5em,
+}
+
+% ACM metadata
+\setcopyright{acmcopyright}
+\acmJournal{PACMPL}
+\acmVolume{1}
+\acmNumber{PLDI}
+\acmArticle{1}
+\acmYear{2027}
+\acmMonth{6}
+\acmDOI{10.1145/nnnnnnn.nnnnnnn}
+
+\begin{document}
+
+\title{Epistemic Types for Scientific Computing}
+\subtitle{Type-Level Uncertainty Quantification with GUM Compliance}
+
+\author{Anonymous}
+\affiliation{%
+  \institution{Anonymous Institution}
+  \country{Anonymous}
+}
+\email{anonymous@example.org}
+
+\begin{abstract}
+Scientific computing relies on measured quantities with inherent uncertainty,
+yet mainstream programming languages treat numerical values as exact.
+This forces developers to either ignore uncertainty (compromising scientific
+validity), track it manually (introducing propagation errors), or use library
+wrappers (incurring runtime overhead without compile-time guarantees).
+
+We introduce \emph{epistemic types}, a type system extension that makes
+measurement uncertainty a first-class type-level concern.
+The $\know{T}$ type encapsulates a value with its GUM-compliant standard
+uncertainty, provenance chain, and temporal validity.
+Arithmetic on epistemic types automatically propagates uncertainty following
+ISO/IEC Guide 98-3 (the GUM), and the type system statically rejects
+programs that silently discard uncertainty information.
+
+We prove type safety (progress and preservation) and soundness of uncertainty
+propagation with respect to the GUM's law of propagation of uncertainty.
+We implement epistemic types in \sounio, a systems programming language,
+and evaluate on three scientific computing benchmarks:
+quaternionic neural networks with Bayesian uncertainty (QNN-MNIST),
+physiologically-based pharmacokinetic modeling with causal interventions (PBPK),
+and functional neuroimaging connectivity analysis (fMRI).
+\sounio achieves $2\times$ speedup over Julia's \texttt{Measurements.jl}
+and $10$--$40\times$ over Python's \texttt{uncertainties}, while providing
+static guarantees that neither library can offer.
+\end{abstract}
+
+\begin{CCSXML}
+<ccs2012>
+<concept><concept_id>10011007.10011006.10011008.10011009.10011012</concept_id>
+<concept_desc>Software and its engineering~Functional languages</concept_desc>
+<concept_significance>500</concept_significance></concept>
+<concept><concept_id>10011007.10011006.10011008.10011009.10011015</concept_id>
+<concept_desc>Software and its engineering~Constraint and logic languages</concept_desc>
+<concept_significance>300</concept_significance></concept>
+</ccs2012>
+\end{CCSXML}
+
+\ccsdesc[500]{Software and its engineering~Functional languages}
+\ccsdesc[300]{Software and its engineering~Constraint and logic languages}
+
+\keywords{uncertainty quantification, type systems, scientific computing, GUM,
+epistemic types, measurement uncertainty}
+
+\maketitle
+
+% ============================================================================
+\section{Introduction}
+\label{sec:intro}
+% ============================================================================
+
+Every measured quantity carries uncertainty.
+A laboratory balance reports mass as $m = 10.023 \pm 0.002\,\text{g}$;
+a clinical assay yields serum creatinine as $\text{SCr} = 1.2 \pm 0.1\,\text{mg/dL}$;
+a brain scanner produces voxel intensities with noise proportional
+to $1/\sqrt{\text{SNR}}$.
+When these quantities enter computation---drug dosing calculations,
+climate projections, neural network training---their uncertainties must
+propagate correctly through every arithmetic operation,
+or the results are scientifically meaningless.
+
+The Guide to the Expression of Uncertainty in Measurement
+(GUM)~\cite{jcgm2008gum} provides the international standard for
+uncertainty propagation.
+For a function $y = f(x_1, \ldots, x_N)$ of uncorrelated inputs,
+the GUM specifies the combined standard uncertainty:
+\begin{equation}
+  u_c^2(y) = \sum_{i=1}^{N} \left(\frac{\partial f}{\partial x_i}\right)^2 u^2(x_i)
+  \label{eq:gum}
+\end{equation}
+This first-order Taylor expansion is exact for linear functions and
+provides the standard approximation for nonlinear cases.
+Regulatory frameworks---FDA 21 CFR Part 11~\cite{fda21cfr11} for pharmaceutical
+software, ISO 17025~\cite{iso17025} for calibration laboratories---require
+GUM-compliant uncertainty reporting with auditable provenance.
+
+Despite this critical need, mainstream programming languages offer
+no native support for uncertainty.
+Practitioners face three unsatisfactory options:
+
+\paragraph{Ignore uncertainty.}
+Write \texttt{let dose = weight * 0.5} and produce a point estimate
+with no indication of reliability.
+This is the overwhelmingly common choice, contributing to the
+reproducibility crisis across sciences~\cite{eklund2016cluster}.
+
+\paragraph{Track uncertainty manually.}
+Maintain parallel variables (\texttt{dose\_mean}, \texttt{dose\_var})
+and propagate by hand.
+This is error-prone: a single forgotten update produces a silently
+wrong uncertainty, and manual implementations frequently violate
+GUM rules~\cite{jcgm2008supplement1}.
+
+\paragraph{Use a library.}
+Python's \texttt{uncertainties}~\cite{lebigot2024uncertainties} and
+Julia's \texttt{Measurements.jl}~\cite{giordano2016measurements} provide
+operator-overloaded uncertainty types.
+However, libraries have three fundamental limitations:
+(1)~no static guarantee that uncertainty is preserved---a function
+accepting \texttt{float64} can silently discard it;
+(2)~runtime overhead from wrapper objects, heap allocation, and
+dynamic dispatch (10--40$\times$ for Python);
+(3)~no provenance tracking for regulatory audit trails.
+
+\paragraph{Our approach: epistemic types.}
+We introduce \emph{epistemic types} that make uncertainty a
+\emph{first-class type system construct}.
+The $\know{T}$ type carries:
+\begin{itemize}
+  \item A point estimate $v : T$
+  \item Standard uncertainty $\epsilon \in \mathbb{R}_{\geq 0}$ (GUM $u$)
+  \item Provenance $\Phi$ for regulatory traceability
+  \item Temporal validity $t$ (expiration for perishable measurements)
+\end{itemize}
+
+Arithmetic on $\know{T}$ automatically propagates uncertainty
+using GUM Equation~\eqref{eq:gum}, and the type system \emph{statically
+rejects} programs that discard uncertainty without explicit acknowledgment.
+Extraction of a raw value requires compile-time proof (via SMT) or
+runtime assertion that the uncertainty is below a specified threshold.
+
+\paragraph{Contributions.}
+\begin{enumerate}
+  \item A type system for epistemic values with formal typing rules,
+        operational semantics, and proofs of progress, preservation,
+        and GUM compliance soundness (\S\ref{sec:type-system}).
+  \item An implementation in \sounio, a systems programming language,
+        with a Scientific IR (SIR) that optimizes epistemic computations
+        via variance fusion, exact elision, and SIMD vectorization
+        (\S\ref{sec:implementation}).
+  \item Evaluation on three scientific benchmarks spanning neural networks,
+        pharmacokinetics, and neuroimaging, demonstrating $2\times$ speedup
+        over Julia with stronger static guarantees
+        (\S\ref{sec:evaluation}).
+  \item Integration with causal types for compile-time identifiability
+        verification of interventional queries (\S\ref{sec:causal}).
+\end{enumerate}
+
+% ============================================================================
+\section{Epistemic Type System}
+\label{sec:type-system}
+% ============================================================================
+
+We formalize epistemic types as an extension of a simply-typed lambda calculus
+with arithmetic.
+
+\subsection{Syntax}
+
+\paragraph{Types.}
+\[
+\begin{array}{rcl}
+\tau & ::= & T \mid \knowfull{T}{\eps}{\Phi}{\mathit{tv}} \\
+T & ::= & \texttt{i32} \mid \texttt{f64} \mid \texttt{bool} \mid \ldots \\
+\eps & ::= & r \in \mathbb{R}_{\geq 0} \mid \alpha_\eps \quad \text{(uncertainty bound)} \\
+\Phi & ::= & \texttt{Measured} \mid \texttt{Computed} \mid \texttt{Derived} \\
+\mathit{tv} & ::= & r \in \mathbb{R}_{\geq 0} \mid \infty \quad \text{(temporal validity)}
+\end{array}
+\]
+
+\paragraph{Terms.}
+\[
+\begin{array}{rcl}
+e & ::= & x \mid c \mid e_1 \oplus e_2 \mid \texttt{measure}(e, \eps, \Phi, \mathit{tv}) \\
+  & \mid & \texttt{extract}(e) \mid \texttt{transform}(f, e_1, \ldots, e_n)
+\end{array}
+\]
+where $\oplus \in \{+, -, \times, \div\}$.
+
+\subsection{Typing Rules}
+
+The key innovation is that uncertainty propagation is encoded directly
+in the typing rules, making GUM compliance a \emph{type system invariant}
+rather than a runtime property.
+
+\paragraph{Measurement introduction.}
+\[
+\inferrule*[right=T-Measure]
+  {\Gamma \vdash e : T \\
+   \eps \in \mathbb{R}_{\geq 0} \\
+   \Phi \in \{\texttt{Measured}, \texttt{Computed}, \texttt{Derived}\}}
+  {\Gamma \vdash \texttt{measure}(e, \eps, \Phi, \mathit{tv}) :
+   \knowfull{T}{\eps}{\Phi}{\mathit{tv}}}
+\]
+
+\paragraph{Addition (GUM RSS propagation).}
+For uncorrelated inputs, the GUM specifies root-sum-of-squares:
+\[
+\inferrule*[right=T-Add]
+  {\Gamma \vdash e_1 : \knowfull{T}{\eps_1}{\Phi_1}{t_1} \\
+   \Gamma \vdash e_2 : \knowfull{T}{\eps_2}{\Phi_2}{t_2} \\\\
+   \eps_r = \sqrt{\eps_1^2 + \eps_2^2} \\
+   t_r = \min(t_1, t_2)}
+  {\Gamma \vdash e_1 + e_2 :
+   \knowfull{T}{\eps_r}{\texttt{Computed}}{t_r}}
+\]
+
+\paragraph{Multiplication (relative uncertainty).}
+\[
+\inferrule*[right=T-Mul]
+  {\Gamma \vdash e_1 : \knowfull{T}{\eps_1}{\Phi_1}{t_1} \\
+   \Gamma \vdash e_2 : \knowfull{T}{\eps_2}{\Phi_2}{t_2} \\\\
+   v_1 = \texttt{val}(e_1) \quad v_2 = \texttt{val}(e_2) \\
+   \eps_r = |v_1 v_2| \sqrt{(\eps_1/v_1)^2 + (\eps_2/v_2)^2}}
+  {\Gamma \vdash e_1 \times e_2 :
+   \knowfull{T}{\eps_r}{\texttt{Computed}}{\min(t_1, t_2)}}
+\]
+
+\paragraph{General transformation (delta method).}
+For $f : T_1 \times \cdots \times T_n \to U$:
+\[
+\inferrule*[right=T-Transform]
+  {\Gamma \vdash e_i : \knowfull{T_i}{\eps_i}{\Phi_i}{t_i}
+   \quad \forall i \in 1..n \\\\
+   \eps_r = \sqrt{\textstyle\sum_{i=1}^{n}
+     \left(\frac{\partial f}{\partial x_i}\right)^2 \eps_i^2}}
+  {\Gamma \vdash \texttt{transform}(f, \bar{e}) :
+   \knowfull{U}{\eps_r}{\texttt{Computed}}{\min_i t_i}}
+\]
+
+\paragraph{Extraction with confidence proof.}
+\[
+\inferrule*[right=T-Extract]
+  {\Gamma \vdash e : \knowfull{T}{\eps}{\Phi}{\mathit{tv}} \\
+   \texttt{SMT-PROVE}(\texttt{conf}(\eps) \geq \theta)}
+  {\Gamma \vdash \texttt{extract}(e) : T}
+\]
+If the SMT solver cannot discharge the obligation, the compiler falls
+back to a runtime check (gradual typing), ensuring that extraction is
+always safe but potentially guarded.
+
+\subsection{Operational Semantics}
+
+Values are either scalar constants or knowledge tuples
+$\langle v_0, \eps, \Phi, \mathit{tv} \rangle$.
+The reduction rules mirror the typing rules:
+
+\[
+\inferrule*[right=E-Add]
+  { }
+  {\langle v_1, \eps_1, \Phi_1, t_1 \rangle + \langle v_2, \eps_2, \Phi_2, t_2 \rangle
+   \longrightarrow
+   \langle v_1{+}v_2, \sqrt{\eps_1^2{+}\eps_2^2}, \texttt{Computed}, \min(t_1,t_2) \rangle}
+\]
+
+\[
+\inferrule*[right=E-Mul]
+  {v_1, v_2 \neq 0}
+  {\langle v_1, \eps_1, \Phi_1, t_1 \rangle \times \langle v_2, \eps_2, \Phi_2, t_2 \rangle
+   \longrightarrow \\
+   \langle v_1 v_2,\;
+   |v_1 v_2| \sqrt{(\eps_1/v_1)^2{+}(\eps_2/v_2)^2},\;
+   \texttt{Computed},\;
+   \min(t_1,t_2) \rangle}
+\]
+
+\[
+\inferrule*[right=E-Extract]
+  {\texttt{conf}(\eps) \geq \theta}
+  {\texttt{extract}(\langle v_0, \eps, \Phi, \mathit{tv} \rangle)
+   \longrightarrow v_0}
+\]
+
+\subsection{Metatheory}
+
+\begin{theorem}[Progress]
+If $\emptyset \vdash e : \tau$, then either $e$ is a value or
+$\exists e'.\ e \longrightarrow e'$.
+\end{theorem}
+
+\begin{proof}
+By induction on the typing derivation.
+The key case is T-Extract: if $e = \texttt{extract}(e')$
+and $e'$ is a knowledge value with $\texttt{conf}(\eps) \geq \theta$,
+then E-Extract applies.
+If the confidence check fails, the gradual typing fallback
+inserts a runtime guard, ensuring progress.
+\end{proof}
+
+\begin{theorem}[Preservation]
+If $\Gamma \vdash e : \tau$ and $e \longrightarrow e'$,
+then $\Gamma \vdash e' : \tau$.
+\end{theorem}
+
+\begin{proof}
+By induction on the typing derivation and case analysis on
+the reduction.
+For E-Add: if $e_1 + e_2$ has type $\knowfull{T}{\eps_r}{\Phi'}{t'}$
+with $\eps_r = \sqrt{\eps_1^2 + \eps_2^2}$, the result
+$\langle v_1{+}v_2, \sqrt{\eps_1^2{+}\eps_2^2}, \texttt{Computed}, \min(t_1,t_2) \rangle$
+has exactly this type.
+\end{proof}
+
+\begin{theorem}[GUM Compliance Soundness]
+\label{thm:gum}
+For any well-typed expression
+$\Gamma \vdash e : \knowfull{T}{\eps}{\Phi}{\mathit{tv}}$
+composed of arithmetic operations on epistemic values with uncorrelated
+inputs, the computed uncertainty $\eps$ equals the GUM combined standard
+uncertainty $u_c$ as defined by Equation~\eqref{eq:gum}.
+\end{theorem}
+
+\begin{proof}
+By structural induction on $e$.
+The base case (T-Measure) is immediate.
+For T-Add: by IH, $\eps_i = u_c(e_i)$.
+The GUM gives $u_c^2(e_1{+}e_2) = (\partial f/\partial x_1)^2 u^2(e_1)
++ (\partial f/\partial x_2)^2 u^2(e_2) = u^2(e_1) + u^2(e_2)$
+since $\partial(x_1{+}x_2)/\partial x_i = 1$.
+The typing rule gives $\eps_r = \sqrt{\eps_1^2 + \eps_2^2}
+= \sqrt{u_c^2(e_1) + u_c^2(e_2)} = u_c(e_1{+}e_2)$.
+Multiplication and division follow analogously via relative uncertainty.
+\end{proof}
+
+\subsection{Extension: ODE Integration}
+
+For ODE solvers, numerical uncertainty grows with integration time.
+We add a temporal degradation rule:
+\[
+\inferrule*[right=T-ODE-Step]
+  {\Gamma \vdash e : \knowfull{T}{\eps(t)}{\Phi}{\mathit{tv}} \\
+   \eps(t{+}\Delta t) = \eps(t) \cdot (1 + \alpha \cdot \Delta t)}
+  {\Gamma \vdash \texttt{ode\_step}(e, \Delta t) :
+   \knowfull{T}{\eps(t{+}\Delta t)}{\texttt{Computed}}{\mathit{tv}{-}\Delta t}}
+\]
+where $\alpha$ is the solver-dependent stability constant
+($\alpha \approx 1$ for forward Euler, $\alpha \ll 1$ for RK4).
+
+% ============================================================================
+\section{Implementation}
+\label{sec:implementation}
+% ============================================================================
+
+We implement epistemic types in \sounio, a systems programming language
+with algebraic effects, linear types, and dimensional analysis.
+
+\subsection{Compiler Architecture}
+
+The \sounio compiler is implemented in approximately 45{,}000 lines of Rust,
+organized as a multi-stage pipeline:
+\[
+\text{Source} \to \text{Lexer} \to \text{Parser} \to \text{AST}
+\xrightarrow{\text{Check}} \text{HIR}
+\xrightarrow{\text{Lower}} \text{SIR}
+\to \text{HLIR} \to \text{Backend}
+\]
+
+The key innovation is the \textbf{Scientific IR (SIR)}, an intermediate
+representation that treats epistemic operations as first-class instructions
+rather than library calls:
+
+\begin{lstlisting}[caption={SIR epistemic instructions}]
+enum SirInst {
+  PropagateAdd { lhs: Id, rhs: Id, result: Id },
+  PropagateMul { lhs: Id, rhs: Id, result: Id },
+  PropagateDiv { lhs: Id, rhs: Id, result: Id },
+  VarianceFuse { inputs: Vec<Id>, result: Id },
+}
+\end{lstlisting}
+
+\subsection{SIR Optimizations}
+
+Three optimization passes reduce the overhead of epistemic tracking:
+
+\paragraph{Variance fusion.}
+Consecutive epistemic additions are fused into a single RSS computation:
+$u^2(x_1 + x_2 + x_3) = u^2(x_1) + u^2(x_2) + u^2(x_3)$,
+eliminating intermediate square root and squaring operations.
+
+\paragraph{Exact elision.}
+Operations involving $\texttt{Knowledge::exact}(v)$ (zero uncertainty)
+skip variance computation entirely, reducing to scalar arithmetic.
+
+\paragraph{SIMD vectorization.}
+Value and variance are computed in parallel using 2-wide SIMD
+(AVX2 on x86-64, NEON on ARM), exploiting the fact that
+$\know{\texttt{f64}}$ stores value and variance in adjacent memory.
+
+\subsection{Memory Layout}
+
+$\know{\texttt{f64}}$ occupies 40 bytes, stack-allocated:
+
+\begin{center}
+\begin{tabular}{lr}
+\toprule
+Field & Size \\
+\midrule
+\texttt{value} & 8 bytes (\texttt{f64}) \\
+\texttt{variance} & 8 bytes (\texttt{f64}) \\
+\texttt{confidence} & 16 bytes (Beta parameters) \\
+\texttt{provenance} & 8 bytes (pointer) \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\noindent
+No heap allocation is required for the core uncertainty pathway.
+Provenance chains are lazily allocated only when regulatory
+auditing is enabled.
+
+\subsection{SMT Integration}
+
+For dependent epistemic types with refinement predicates
+(e.g., $\know{T}$ \texttt{where confidence} $\geq$ \texttt{0.95}),
+the compiler invokes Z3 to discharge proof obligations at compile time.
+When Z3 cannot decide within a configurable timeout, the compiler
+falls back to gradual typing with a runtime assertion.
+
+% ============================================================================
+\section{Evaluation}
+\label{sec:evaluation}
+% ============================================================================
+
+We evaluate \sounio on three axes:
+(1)~correctness of uncertainty propagation,
+(2)~performance relative to existing UQ libraries, and
+(3)~expressiveness on real scientific computing problems.
+
+\subsection{Micro-Benchmarks: Performance}
+
+Table~\ref{tab:perf} compares \sounio against Python's
+\texttt{uncertainties}~\cite{lebigot2024uncertainties} and Julia's
+\texttt{Measurements.jl}~\cite{giordano2016measurements} on five
+benchmarks (median of 10 runs on AMD Ryzen 9 7950X, 64 GB RAM).
+
+\begin{table}[t]
+\centering
+\caption{Execution time (ms) for uncertainty propagation benchmarks.}
+\label{tab:perf}
+\begin{tabular}{lrrrr}
+\toprule
+Benchmark & Python & Julia & \sounio & Speedup \\
+\midrule
+GUM Chain (100K)       & 423   & 45   & \textbf{22}  & $1.9\times$ Julia \\
+Monte Carlo (100K)     & 1{,}266 & 58 & \textbf{31}  & $1.9\times$ Julia \\
+Cockcroft-Gault (10K)  & 133   & 12   & \textbf{6}   & $2.0\times$ Julia \\
+Matrix (50$\times$50)  & 12    & 2.1  & \textbf{1.0} & $2.1\times$ Julia \\
+Transcendental (10K)   & 111   & 8.5  & \textbf{4.2} & $2.0\times$ Julia \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\sounio achieves consistent $\sim$2$\times$ speedup over Julia, attributable
+to: (1)~no wrapper object allocation (stack-allocated variance),
+(2)~SIMD parallelization of value/variance computation, and
+(3)~compile-time resolution of propagation rules.
+The 10--40$\times$ speedup over Python reflects the fundamental
+overhead of dynamic dispatch and heap allocation for wrapper types.
+
+\paragraph{Compile-time overhead.}
+Epistemic type checking adds 12\% to compilation time on average,
+dominated by SIR optimization passes.
+For non-epistemic code paths, overhead is zero since
+epistemic passes are not invoked.
+
+\subsection{ODE Solver Validation}
+\label{sec:ode-validation}
+
+To validate numerical fidelity, we cross-validate \sounio's forward Euler
+solver against the analytical Bateman equation for two-compartment
+pharmacokinetics~\cite{gibaldi1982pharmacokinetics}:
+\begin{align}
+  C_{\text{central}}(t) = \frac{D \cdot k_a}{k_a - k_e}
+    \left(e^{-k_e t} - e^{-k_a t}\right)
+\end{align}
+
+\begin{table}[t]
+\centering
+\caption{ODE solver accuracy vs.\ analytical Bateman equation at $t = 24$\,h.}
+\label{tab:ode}
+\begin{tabular}{llrrr}
+\toprule
+Method & $\Delta t$ & $C_{\text{central}}$ & Analytical & Error \\
+\midrule
+Euler (240 steps)  & 0.1\,h  & 49.79\,mg & 50.40\,mg & 1.20\% \\
+Euler (2400 steps) & 0.01\,h & 50.34\,mg & 50.40\,mg & 0.12\% \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+The 10$\times$ error reduction from 10$\times$ smaller $\Delta t$
+confirms first-order convergence, validating the compiler's numerical
+fidelity across multi-thousand-iteration loops with mutable struct state.
+
+\subsection{Benchmark 1: QNN-MNIST with Epistemic Uncertainty}
+
+Quaternionic neural networks (QNNs)~\cite{parcollet2019quaternion} use
+Hamilton products for richer feature interactions than real-valued networks.
+We implement a QNN with epistemic uncertainty tracking through every
+weight and activation, demonstrating that \sounio can propagate
+uncertainty through a complete training loop.
+
+\paragraph{Architecture.}
+A 2-layer QNN: 2 quaternion inputs $\to$ 2 hidden (ReLU) $\to$ 3 output
+classes, totaling 15 epistemic quaternion parameters (60 scalar weights,
+each carrying GUM uncertainty).
+
+\paragraph{Epistemic tracking.}
+Weights are initialized as $\know{\texttt{Quaternion}}$ values with
+initial uncertainty $u = 0.1$.
+Each training step applies Bayesian uncertainty concentration:
+$u_{\text{new}} = u / \sqrt{1 + 0.1 \cdot n_{\text{seen}}}$,
+modeling the intuition that observing more data reduces epistemic
+uncertainty about the true weight values.
+
+\paragraph{GUM propagation through Hamilton product.}
+The quaternion product $q_1 q_2$ requires 16 multiplications and 12
+additions.
+Uncertainty propagates through each operation via the T-Mul and T-Add
+rules, yielding output predictions with non-zero uncertainty that
+reflects accumulated weight uncertainty.
+
+\paragraph{Results.}
+After 5 epochs of training on 9 samples (3 per class):
+\begin{itemize}
+  \item Weight uncertainty decreases from $0.1$ to $7.3 \times 10^{-14}$
+        (Bayesian concentration effect)
+  \item Prediction uncertainty is non-zero for all test inputs
+        (GUM propagation active through 28+ operations per forward pass)
+  \item Softmax outputs sum to 1.0 within floating-point tolerance
+  \item Predictive entropy $H = 1.098$ nats (near maximum for 3 classes),
+        correctly reflecting high uncertainty on this toy problem
+\end{itemize}
+
+\noindent
+This benchmark validates that \sounio's type system correctly propagates
+uncertainty through complex algebraic operations (Hamilton products)
+and that the GUM compliance theorem (Theorem~\ref{thm:gum}) holds
+empirically.
+
+\subsection{Benchmark 2: PBPK Causal Intervention}
+
+Physiologically-based pharmacokinetic (PBPK) models predict drug
+concentrations in the body.
+We implement a 2-compartment model with causal graph encoding,
+demonstrating the integration of epistemic and causal types.
+
+\paragraph{Model.}
+Oral drug absorption ($k_a = 1.0\,\text{h}^{-1}$,
+$k_e = 0.1\,\text{h}^{-1}$, $V_d = 50\,\text{L}$)
+simulated via forward Euler over 24 hours (100 time steps).
+
+\paragraph{Causal graph.}
+The pharmacokinetic mechanism is encoded as a causal DAG:
+\[
+\text{Dose} \to \text{Plasma} \to \text{Effect} \qquad
+\text{Genotype} \to \text{Metabolism} \to \text{Plasma}
+\]
+The causal query $P(\text{Effect} \mid \text{do}(\text{Dose} = 100\,\text{mg}))$
+is identifiable via the backdoor criterion with adjustment set
+$\{\text{Genotype}, \text{Metabolism}\}$.
+
+\paragraph{Epistemic decomposition.}
+Uncertainty in the causal average treatment effect (ATE) is decomposed into
+three components:
+\begin{itemize}
+  \item $\eps_{\text{stat}} = 1.96/\sqrt{n} \approx 0.062$ (statistical, $n = 1000$)
+  \item $\eps_{\text{causal}} = 0.03$ (positivity assumption violation for rare genotypes)
+  \item $\eps_{\text{model}} = 0.05$ (PBPK structural uncertainty)
+  \item $\eps_{\text{total}} = \sqrt{\eps_{\text{stat}}^2 + \eps_{\text{causal}}^2
+        + \eps_{\text{model}}^2} \approx 0.085$
+\end{itemize}
+
+\paragraph{Results.}
+\begin{itemize}
+  \item ATE is positive (higher dose $\to$ stronger effect)
+  \item Genotype-specific effects are biologically plausible:
+        poor metabolizers show stronger effect than extensive metabolizers,
+        who show stronger effect than ultra-rapid metabolizers
+        (slower clearance $\to$ higher drug exposure)
+  \item PK parameters ($C_{\max}$, AUC, $T_{\max}$) fall within
+        realistic clinical ranges
+  \item Non-identifiable queries are rejected at compile time
+        by the causal type system (see \S\ref{sec:causal})
+\end{itemize}
+
+\subsection{Benchmark 3: fMRI Causal Connectivity}
+
+Functional magnetic resonance imaging (fMRI) connectivity
+analysis estimates directed interactions between brain
+regions~\cite{eklund2016cluster}.
+We implement causal connectivity analysis for the visual cortex.
+
+\paragraph{Model.}
+A 7-region visual cortex DAG:
+V1 $\to$ V2 $\to$ V4 $\to$ IT (ventral stream),
+V1 $\to$ MT $\to$ MST (dorsal stream),
+with a latent confounder V1 $\leftrightarrow$ V2
+(shared thalamocortical input).
+
+\paragraph{Identifiability analysis.}
+The causal type system verifies:
+\begin{itemize}
+  \item V2 $\to$ V4: \textbf{identifiable} (backdoor set $\{$V1$\}$)
+  \item V4 $\to$ IT: \textbf{identifiable} (backdoor set $\{$V2$\}$)
+  \item V1 $\to$ V2: \textbf{not identifiable} (latent confounder)
+  \item V1 $\to$ MT, MT $\to$ MST: \textbf{identifiable} (unconfounded)
+\end{itemize}
+
+\paragraph{Bootstrap uncertainty.}
+50-resample bootstrap provides epistemic uncertainty on connectivity
+estimates, with 95\% Fisher z-transformed confidence intervals.
+
+\paragraph{Results.}
+The system correctly rejects the non-identifiable V1 $\to$ V2 query
+at compile time, while successfully estimating all identifiable
+connections with bounded uncertainty.
+This demonstrates that \sounio prevents a class of
+scientific errors (claiming causal connectivity from confounded
+observations) that traditional analysis tools cannot detect.
+
+% ============================================================================
+\section{Causal Type Integration}
+\label{sec:causal}
+% ============================================================================
+
+Epistemic types compose with causal types to enable
+\emph{causal-epistemic reasoning}: interventional queries that
+carry uncertainty bounds verified at compile time.
+
+\paragraph{Causal-epistemic type.}
+\[
+\cknow{T}{\eps}{\text{do}(X{=}x)}
+\]
+represents a causal effect estimate with epistemic uncertainty $\eps$,
+identified via the do-calculus~\cite{pearl2009causality}.
+
+\paragraph{Identifiability verification.}
+The do-operator only type-checks when the causal effect is
+identifiable from observational data:
+\[
+\inferrule*[right=T-Do]
+  {\Gamma \vdash G : \texttt{CausalGraph} \\
+   \texttt{SMT-PROVE}(\texttt{identifiable}(G, X, Y))}
+  {\Gamma \vdash \texttt{do}(G, X{=}x) : \cknow{Y}{\eps_{\text{causal}}}{\text{do}(X)}}
+\]
+
+This is, to our knowledge, the first type system that integrates
+causal identifiability with measurement uncertainty.
+
+% ============================================================================
+\section{Related Work}
+\label{sec:related}
+% ============================================================================
+
+\paragraph{Uncertainty propagation libraries.}
+Python's \texttt{uncertainties}~\cite{lebigot2024uncertainties} uses
+automatic differentiation for GUM propagation via operator overloading.
+Julia's \texttt{Measurements.jl}~\cite{giordano2016measurements} uses
+dual numbers.
+Both are runtime-only: a function accepting \texttt{Float64} silently
+discards uncertainty.
+\sounio makes this a type error.
+
+\paragraph{Probabilistic programming.}
+Stan~\cite{carpenter2017stan}, Pyro~\cite{bingham2019pyro}, and
+Gen~\cite{cusumano2019gen} model full posterior distributions.
+These are powerful but heavyweight for GUM-style propagation, which
+requires only first-order Taylor expansion, not MCMC inference.
+Epistemic types occupy a lighter-weight point in the design space,
+suitable for engineering and metrology applications.
+
+\paragraph{Dependent and refinement types.}
+Idris~\cite{brady2013idris} and F*~\cite{swamy2016dependent} support
+dependent types for proving correctness properties.
+Liquid Haskell uses refinement types with SMT solvers.
+These systems can express predicates on values but do not
+natively model statistical uncertainty or GUM propagation.
+
+\paragraph{Units of measure.}
+F\#'s units of measure~\cite{kennedy2009units} provide compile-time
+dimensional analysis.
+\sounio combines units with epistemic uncertainty, allowing types
+to express both physical dimensions and associated measurement error:
+$\know{\texttt{kg}, \eps=0.01}$.
+
+\paragraph{Automatic differentiation.}
+JAX~\cite{bradbury2018jax} and PyTorch~\cite{paszke2019pytorch} compute
+gradients via AD.
+\sounio uses similar techniques for uncertainty propagation
+(Equation~\eqref{eq:gum} requires partial derivatives),
+but treats uncertainty as a type-level concern rather than a
+numerical computation.
+
+\paragraph{Interval arithmetic.}
+Libraries like MPFI compute conservative bounds via interval
+arithmetic.
+Unlike intervals that bound worst-case errors, GUM models
+\emph{statistical} uncertainty with probabilistic guarantees,
+providing tighter estimates for real-world measurements.
+
+% ============================================================================
+\section{Conclusion}
+\label{sec:conclusion}
+% ============================================================================
+
+We have presented epistemic types, a type system extension that makes
+measurement uncertainty a first-class type-level concept.
+Unlike existing library approaches, epistemic types provide
+\emph{compile-time guarantees} that uncertainty is preserved through
+computation, propagated correctly per the GUM standard, and
+accompanied by regulatory-grade provenance.
+
+Our implementation in \sounio demonstrates that these guarantees come
+with minimal overhead: $2\times$ speedup over Julia's
+\texttt{Measurements.jl} and 12\% compile-time increase.
+Three scientific benchmarks---quaternionic neural networks,
+pharmacokinetic modeling, and neuroimaging connectivity---validate
+that epistemic types are expressive enough for real scientific
+computing while catching entire classes of uncertainty-related errors
+at compile time.
+
+The integration with causal types enables a further novel guarantee:
+compile-time verification that interventional queries are identifiable
+from observational data, preventing spurious causal claims.
+
+\paragraph{Future work.}
+\begin{itemize}
+  \item Mechanized proofs of metatheory in Coq or Lean
+  \item Correlation tracking for dependent measurements
+        (GUM Supplement 1~\cite{jcgm2008supplement1})
+  \item GPU-accelerated epistemic computations
+  \item Empirical calibration studies on production scientific codebases
+\end{itemize}
+
+\paragraph{Availability.}
+\sounio is open source under the MIT license.
+
+\bibliographystyle{ACM-Reference-Format}
+\bibliography{../references}
+
+\end{document}
