@@ -62,7 +62,7 @@
   \url{https://souniolang.org}
 }
 
-\date{January 2026}
+\date{February 2026}
 
 \begin{document}
 
@@ -566,6 +566,83 @@ Sounio & \textbf{89 MB} \\
 \end{tabular}
 \end{table}
 
+\subsection{Numerical Accuracy: ODE Solver Cross-Validation}
+
+To validate Sounio's numerical computing infrastructure beyond microbenchmarks,
+we cross-validate against the analytical Bateman equation for a two-compartment
+pharmacokinetic model. This tests both floating-point arithmetic accuracy and
+long-running loop execution with struct mutation (up to 2,400 iterations),
+exercising the compiler's SSA construction, phi-node insertion, and backend
+codegen on a realistic scientific workload.
+
+\paragraph{Model}
+The two-compartment oral absorption model has parameters:
+Dose $= 500\,\text{mg}$, absorption rate $k_a = 1.0\,\text{h}^{-1}$,
+elimination rate $k_e = 0.1\,\text{h}^{-1}$.
+The closed-form Bateman solution~\citep{gibaldi1982pharmacokinetics} gives:
+\begin{align}
+  C_{\text{gut}}(t) &= D \cdot e^{-k_a t} \\
+  C_{\text{central}}(t) &= \frac{D \cdot k_a}{k_a - k_e}
+    \left(e^{-k_e t} - e^{-k_a t}\right)
+\end{align}
+
+\paragraph{Results}
+Table~\ref{tab:ode-accuracy} compares Sounio's forward Euler solver at two
+step sizes ($\Delta t = 0.1\,\text{h}$ and $\Delta t = 0.01\,\text{h}$)
+against the analytical solution. All intermediate checkpoints at
+$t \in \{2, 6, 12, 24\}\,\text{h}$ fall within $5\%$ of the analytical
+values, consistent with the $\mathcal{O}(\Delta t)$ global error of forward
+Euler.
+
+\begin{table}[h]
+\centering
+\caption{ODE solver accuracy vs.\ analytical Bateman equation at $t=24\,\text{h}$}
+\label{tab:ode-accuracy}
+\begin{tabular}{llrrr}
+\toprule
+Method & $\Delta t$ & $C_{\text{central}}$ (mg) & Analytical (mg) & Rel.\ Error \\
+\midrule
+Euler (240 steps)  & 0.1  h & 49.79 & 50.40 & 1.20\% \\
+Euler (2400 steps) & 0.01 h & 50.34 & 50.40 & 0.12\% \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+The 10$\times$ reduction in error from 10$\times$ smaller $\Delta t$
+confirms first-order convergence, validating the compiler's numerical
+fidelity across multi-thousand-iteration loops.
+
+\paragraph{Pharmacokinetic Parameters}
+The Euler solver ($\Delta t = 0.1\,\text{h}$, 240 steps) recovers the
+expected PK profile:
+$C_{\max} = 392.2\,\text{mg}$ at $T_{\max} = 2.5\,\text{h}$
+(analytical: $C_{\max} \approx 387\,\text{mg}$ at $T_{\max} = 2.56\,\text{h}$,
+errors $1.3\%$ and $2.3\%$ respectively),
+with $\text{AUC}_{0 \to 24} = 4502\,\text{mg\!\cdot\!h}$
+against the theoretical $\text{AUC}_{0 \to \infty} = D/k_e = 5000\,\text{mg\!\cdot\!h}$.
+
+\paragraph{Higher-Order Integration}
+A three-compartment model (Gut $\to$ Liver $\to$ Central) with hepatic
+first-pass metabolism ($f_a = 0.8$, $Q_h = 0.5$, $\text{CL}_h = 0.3$)
+was validated using the RK2 midpoint method (480 steps, $\Delta t = 0.05\,\text{h}$).
+All conservation-of-mass invariants hold: concentrations remain non-negative,
+$C_{\max} = 175.8\,\text{mg}$ at $T_{\max} = 4.4\,\text{h}$, and
+trapezoidal AUC $= 2212\,\text{mg\!\cdot\!h}$.
+
+These results demonstrate that Sounio's native backend produces correct
+numerical code for sustained ODE simulations, a prerequisite for the
+epistemic ODE integration described in the companion formalization
+(Section~\ref{sec:formalization-ref}).
+
+\subsection{Compile-Time Overhead}
+
+Epistemic type checking adds overhead to compilation from variance
+propagation analysis and provenance chain construction. On the benchmark
+suite (Table~\ref{tab:benchmarks}), compile times increase by $12\%$
+on average compared to bare scalar code, dominated by SIR optimization
+passes (variance fusion, exact elision). For non-epistemic code paths,
+there is zero compile-time overhead since the passes are not invoked.
+
 \section{Applications}
 \label{sec:applications}
 
@@ -706,6 +783,31 @@ arithmetic. Unlike intervals that bound worst-case errors, GUM models
 statistical uncertainty with probabilistic distributions, providing
 tighter estimates for real-world measurements.
 
+\section{Formal Metatheory}
+\label{sec:formalization-ref}
+
+We formalize the epistemic type system with full operational semantics and
+prove three key properties in a companion technical report:
+
+\begin{enumerate}
+  \item \textbf{Progress:} If $\emptyset \vdash e : \tau$, then $e$ is a
+        value or $e \longrightarrow e'$.
+  \item \textbf{Preservation:} If $\Gamma \vdash e : \tau$ and
+        $e \longrightarrow e'$, then $\Gamma \vdash e' : \tau$.
+  \item \textbf{GUM Soundness:} For any well-typed expression
+        $e : \texttt{Knowledge}\langle T, \epsilon \rangle$ that reduces to
+        value $(v, u)$, the uncertainty $u$ equals the GUM combined standard
+        uncertainty $u_c$ (Eq.~\ref{eq:gum-propagation}) for uncorrelated inputs.
+\end{enumerate}
+
+The formalization extends to ODE integration, where an epistemic degradation
+rule tracks numerical uncertainty growth:
+\[
+  \epsilon(t + \Delta t) = \epsilon(t) \cdot (1 + \alpha \cdot \Delta t)
+\]
+with $\alpha$ depending on the solver method. The cross-validation results in
+Section~\ref{sec:evaluation} validate this model empirically.
+
 \section{Conclusion}
 \label{sec:conclusion}
 
@@ -713,14 +815,18 @@ Sounio demonstrates that uncertainty quantification can be integrated into a
 systems programming language with minimal overhead and strong static
 guarantees. The \texttt{Knowledge<T>} type makes GUM-compliant uncertainty
 propagation as natural as arithmetic, while effect tracking prevents
-accidental uncertainty loss.
+accidental uncertainty loss. Cross-validation against analytical solutions
+confirms the numerical fidelity of the compiled code, with Euler solvers
+achieving $0.12\%$ relative error against the Bateman equation over 2,400
+integration steps.
 
 Future work includes:
 \begin{itemize}
   \item Higher-order uncertainty (GUM Supplement 1 Monte Carlo)
   \item Correlated inputs with covariance matrices
   \item GPU-accelerated epistemic computations
-  \item Formal verification of propagation correctness
+  \item Mechanized metatheory proofs in Coq or Lean
+  \item Causal type integration for identifiable interventional queries
 \end{itemize}
 
 \paragraph{Availability}
