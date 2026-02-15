@@ -1,0 +1,289 @@
+// self-hosted::native::suite — native backend tests for the self-hosted suite
+//
+// This file is NOT prefixed with test_ so it is loaded in the flat namespace.
+// It provides run_native_tests() called by test_all.sio.
+
+// Helper: read byte as unsigned (i8 -> 0..255)
+fn native_byte_u8(b: i8) -> i64 {
+    let x = b as i64
+    if x < 0 { x + 256 } else { x }
+}
+
+// ============================================================================
+// T01: emit_exit produces correct syscall bytes
+// ============================================================================
+fn native_test_emit_exit_bytes() -> bool with Mut, Panic, Div {
+    var buf = code_buffer_new()
+    buf = emit_exit(buf, 0)
+
+    // Expected: 48 c7 c0 3c 00 00 00 48 c7 c7 00 00 00 00 0f 05
+    if !(buf.len == 16) { return false }
+    if !(native_byte_u8(buf.bytes[0]) == 0x48) { return false }
+    if !(native_byte_u8(buf.bytes[1]) == 0xc7) { return false }
+    if !(native_byte_u8(buf.bytes[2]) == 0xc0) { return false }
+    if !(native_byte_u8(buf.bytes[3]) == 60) { return false }
+    if !(native_byte_u8(buf.bytes[14]) == 0x0f) { return false }
+    if !(native_byte_u8(buf.bytes[15]) == 0x05) { return false }
+    true
+}
+
+// ============================================================================
+// T02: Compile fn main() -> i64 { 42 } and verify ELF structure
+// ============================================================================
+fn native_test_compile_simple() -> i64 with Mut, Panic, Div {
+    var module = ir_empty_module()
+
+    var func = ir_empty_function()
+    func.name = ir_name_from_bytes(109, 97, 105, 110, 4)  // "main"
+    func.param_count = 0
+    func.max_reg = 1
+    func.instr_count = 2
+    func.instrs[0] = ir_load_imm(0, 42)
+    func.instrs[1] = ir_return(0)
+
+    module.functions[0] = func
+    module.fn_count = 1
+
+    let elf = compile_to_elf(module, 4194304)
+
+    // Verify ELF magic: 0x7F 'E' 'L' 'F'
+    if elf.len < 64 { return 1 }
+    if native_byte_u8(elf.bytes[0]) != 0x7f { return 2 }
+    if native_byte_u8(elf.bytes[1]) != 69 { return 3 }    // 'E'
+    if native_byte_u8(elf.bytes[2]) != 76 { return 4 }    // 'L'
+    if native_byte_u8(elf.bytes[3]) != 70 { return 5 }    // 'F'
+
+    // ELF class: 64-bit (byte 4 = 2)
+    if native_byte_u8(elf.bytes[4]) != 2 { return 6 }
+    // Data encoding: little-endian (byte 5 = 1)
+    if native_byte_u8(elf.bytes[5]) != 1 { return 7 }
+    // e_type: ET_EXEC (offset 16, value 2)
+    if native_byte_u8(elf.bytes[16]) != 2 { return 9 }
+    // e_machine: EM_X86_64 (offset 18, value 62)
+    if native_byte_u8(elf.bytes[18]) != 62 { return 10 }
+
+    if elf.len < 128 { return 11 }
+
+    0
+}
+
+// ============================================================================
+// T03: Compile function with arithmetic and verify code section exists
+// ============================================================================
+fn native_test_compile_arithmetic() -> i64 with Mut, Panic, Div {
+    var module = ir_empty_module()
+
+    var func = ir_empty_function()
+    func.name = ir_name_from_bytes(109, 97, 105, 110, 4)  // "main"
+    func.param_count = 0
+    func.max_reg = 3
+    func.instr_count = 4
+    func.instrs[0] = ir_load_imm(0, 10)
+    func.instrs[1] = ir_load_imm(1, 32)
+    func.instrs[2] = ir_binop(2, 0, BinaryOp::OpAdd, 1)
+    func.instrs[3] = ir_return(2)
+
+    module.functions[0] = func
+    module.fn_count = 1
+
+    let elf = compile_to_elf(module, 4194304)
+
+    if elf.len < 64 { return 1 }
+    if native_byte_u8(elf.bytes[0]) != 0x7f { return 2 }
+    if elf.len < 256 { return 3 }
+
+    0
+}
+
+// ============================================================================
+// T04: Compile two functions with call and verify relocations
+// ============================================================================
+fn native_test_compile_call() -> i64 with Mut, Panic, Div {
+    var module = ir_empty_module()
+
+    // Function 0: add(a, b) -> a + b
+    var fn_add = ir_empty_function()
+    fn_add.name = ir_name_from_bytes(97, 100, 100, 0, 3)  // "add"
+    fn_add.param_count = 2
+    fn_add.max_reg = 3
+    fn_add.instr_count = 2
+    fn_add.instrs[0] = ir_binop(2, 0, BinaryOp::OpAdd, 1)
+    fn_add.instrs[1] = ir_return(2)
+
+    module.functions[0] = fn_add
+
+    // Function 1: main() -> call add(21, 21)
+    var fn_main = ir_empty_function()
+    fn_main.name = ir_name_from_bytes(109, 97, 105, 110, 4)  // "main"
+    fn_main.param_count = 0
+    fn_main.max_reg = 3
+    fn_main.instr_count = 4
+    fn_main.instrs[0] = ir_load_imm(0, 21)
+    fn_main.instrs[1] = ir_load_imm(1, 21)
+
+    // r2 = call fn0(r0, r1) — build call instruction manually
+    var ic = ir_instr_new(IrOpcode::IrCall)
+    ic = IrInstr {
+        op: ic.op, dst: 2, src1: 0, src2: 1,
+        imm_i64: ic.imm_i64, imm_f64: ic.imm_f64,
+        label_id: ic.label_id, fn_id: 0,
+        field_idx: ic.field_idx, bin_op: ic.bin_op, un_op: ic.un_op,
+        name: ic.name, call_args: ic.call_args, arg_count: 2,
+    }
+    fn_main.instrs[2] = ic
+    fn_main.instrs[3] = ir_return(2)
+
+    module.functions[1] = fn_main
+    module.fn_count = 2
+
+    let elf = compile_to_elf(module, 4194304)
+
+    if elf.len < 64 { return 1 }
+    if native_byte_u8(elf.bytes[0]) != 0x7f { return 2 }
+    if elf.len < 512 { return 3 }
+
+    0
+}
+
+// ============================================================================
+// T05: Compile struct alloc + field set + field get
+// Equivalent to: struct P { x, y }; let p = P { x: 10, y: 32 }; p.x + p.y
+// ============================================================================
+fn native_test_compile_struct() -> i64 with Mut, Panic, Div {
+    var module = ir_empty_module()
+    var func = ir_empty_function()
+    func.name = ir_name_from_bytes(109, 97, 105, 110, 4)  // "main"
+    func.param_count = 0
+    func.max_reg = 5
+    func.instr_count = 9
+
+    // field_idx: "x" = 120 % 64 = 56, "y" = 121 % 64 = 57
+    let fx_name = ir_name_from_bytes(120, 0, 0, 0, 1)  // "x"
+    let fy_name = ir_name_from_bytes(121, 0, 0, 0, 1)  // "y"
+
+    // r0 = alloc (struct)
+    func.instrs[0] = ir_alloc(0, 0)
+
+    // r1 = 10
+    func.instrs[1] = ir_load_imm(1, 10)
+
+    // r0.x = r1  (field_set: base=r0, field_idx=56, src=r1)
+    func.instrs[2] = ir_field_set(0, 56, 1, fx_name)
+
+    // r1 = 32
+    func.instrs[3] = ir_load_imm(1, 32)
+
+    // r0.y = r1  (field_set: base=r0, field_idx=57, src=r1)
+    func.instrs[4] = ir_field_set(0, 57, 1, fy_name)
+
+    // r2 = r0.x  (field_get: dst=r2, base=r0, field_idx=56)
+    func.instrs[5] = ir_field_get(2, 0, 56, fx_name)
+
+    // r3 = r0.y  (field_get: dst=r3, base=r0, field_idx=57)
+    func.instrs[6] = ir_field_get(3, 0, 57, fy_name)
+
+    // r4 = r2 + r3
+    func.instrs[7] = ir_binop(4, 2, BinaryOp::OpAdd, 3)
+
+    // return r4
+    func.instrs[8] = ir_return(4)
+
+    module.functions[0] = func
+    module.fn_count = 1
+
+    let elf = compile_to_elf(module, 4194304)
+
+    if elf.len < 64 { return 1 }
+    if native_byte_u8(elf.bytes[0]) != 0x7f { return 2 }
+    if native_byte_u8(elf.bytes[1]) != 69 { return 3 }
+    if elf.len < 256 { return 4 }
+
+    0
+}
+
+// ============================================================================
+// T06: Compile array alloc + index set + index get
+// Equivalent to: var arr = [10, 32]; arr[0] + arr[1]
+// ============================================================================
+fn native_test_compile_array() -> i64 with Mut, Panic, Div {
+    var module = ir_empty_module()
+    var func = ir_empty_function()
+    func.name = ir_name_from_bytes(109, 97, 105, 110, 4)  // "main"
+    func.param_count = 0
+    func.max_reg = 7
+    func.instr_count = 11
+
+    // r0 = alloc (array, type_id=1)
+    func.instrs[0] = ir_alloc(0, 1)
+
+    // r1 = 10
+    func.instrs[1] = ir_load_imm(1, 10)
+
+    // r2 = 0 (index)
+    func.instrs[2] = ir_load_imm(2, 0)
+
+    // arr[0] = r1  (index_set: base=r0, idx=r2, src=r1)
+    func.instrs[3] = ir_index_set(0, 2, 1)
+
+    // r1 = 32
+    func.instrs[4] = ir_load_imm(1, 32)
+
+    // r5 = 1 (index)
+    func.instrs[5] = ir_load_imm(5, 1)
+
+    // arr[1] = r1  (index_set: base=r0, idx=r5, src=r1)
+    func.instrs[6] = ir_index_set(0, 5, 1)
+
+    // r3 = arr[0]  (index_get: dst=r3, base=r0, idx=r2)
+    func.instrs[7] = ir_index_get(3, 0, 2)
+
+    // r4 = arr[1]  (index_get: dst=r4, base=r0, idx=r5)
+    func.instrs[8] = ir_index_get(4, 0, 5)
+
+    // r6 = r3 + r4
+    func.instrs[9] = ir_binop(6, 3, BinaryOp::OpAdd, 4)
+
+    // return r6
+    func.instrs[10] = ir_return(6)
+
+    module.functions[0] = func
+    module.fn_count = 1
+
+    let elf = compile_to_elf(module, 4194304)
+
+    if elf.len < 64 { return 1 }
+    if native_byte_u8(elf.bytes[0]) != 0x7f { return 2 }
+    if elf.len < 256 { return 3 }
+
+    0
+}
+
+// ============================================================================
+// Test runner
+// ============================================================================
+fn run_native_tests() -> i32 with IO, Mut, Panic, Div, Alloc {
+    var passed: i64 = 0
+    let total: i64 = 6
+
+    print("=== Native Backend Tests ===\n")
+
+    if native_test_emit_exit_bytes() { passed = passed + 1; print("  T01 OK (emit_exit bytes)\n") } else { print("  FAIL: T01 emit_exit bytes\n") }
+
+    if native_test_compile_simple() == 0 { passed = passed + 1; print("  T02 OK (simple function -> ELF)\n") } else { print("  FAIL: T02 compile simple function\n") }
+
+    if native_test_compile_arithmetic() == 0 { passed = passed + 1; print("  T03 OK (arithmetic -> ELF)\n") } else { print("  FAIL: T03 compile with arithmetic\n") }
+
+    if native_test_compile_call() == 0 { passed = passed + 1; print("  T04 OK (function calls -> ELF)\n") } else { print("  FAIL: T04 compile with function call\n") }
+
+    if native_test_compile_struct() == 0 { passed = passed + 1; print("  T05 OK (struct alloc+field -> ELF)\n") } else { print("  FAIL: T05 compile with struct\n") }
+
+    if native_test_compile_array() == 0 { passed = passed + 1; print("  T06 OK (array alloc+index -> ELF)\n") } else { print("  FAIL: T06 compile with array\n") }
+
+    print("\nNative tests: ")
+    print_int(passed)
+    print("/")
+    print_int(total)
+    print(" passed\n")
+
+    if passed == total { 0 } else { 1 }
+}
