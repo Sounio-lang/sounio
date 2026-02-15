@@ -4,7 +4,7 @@
 // This is "phase 1" of GPU codegen: structured IR-driven lowering.
 
 // Lower a complete GPU kernel IR to PTX
-fn gpu_lower_to_ptx(kernel: GpuKernelIr) -> PtxBuf with Mut, Panic, Div {
+fn gpu_lower_to_ptx(kernel: GpuKernelIr) -> PtxBuf with Mut, Panic, Div, Alloc {
     var buf = ptx_buf_new()
 
     // 1. Emit header (.version, .target, .address_size)
@@ -58,7 +58,7 @@ fn gpu_emit_kernel_signature(buf: PtxBuf, kernel: GpuKernelIr) -> PtxBuf with Mu
 }
 
 // Emit register declarations based on kernel.max_reg_*
-fn gpu_emit_reg_decls(buf: PtxBuf, kernel: GpuKernelIr) -> PtxBuf with Mut, Panic, Div {
+fn gpu_emit_reg_decls(buf: PtxBuf, kernel: GpuKernelIr) -> PtxBuf with Mut, Panic, Div, Alloc {
     var out = buf
 
     out = ptx_push_str(out, "{\n")
@@ -109,7 +109,7 @@ fn gpu_emit_reg_decls(buf: PtxBuf, kernel: GpuKernelIr) -> PtxBuf with Mut, Pani
 }
 
 // Lower all operations in sequence
-fn gpu_lower_ops(buf: PtxBuf, kernel: GpuKernelIr) -> PtxBuf with Mut, Panic, Div {
+fn gpu_lower_ops(buf: PtxBuf, kernel: GpuKernelIr) -> PtxBuf with Mut, Panic, Div, Alloc {
     var out = buf
     var i: i64 = 0
 
@@ -123,7 +123,7 @@ fn gpu_lower_ops(buf: PtxBuf, kernel: GpuKernelIr) -> PtxBuf with Mut, Panic, Di
 }
 
 // Lower a single GPU operation to PTX
-fn gpu_lower_op(buf: PtxBuf, op: GpuOp, kernel: GpuKernelIr) -> PtxBuf with Mut, Panic, Div {
+fn gpu_lower_op(buf: PtxBuf, op: GpuOp, kernel: GpuKernelIr) -> PtxBuf with Mut, Panic, Div, Alloc {
     // Struct-first representation avoids enum field destructuring in the
     // self-hosted IR; switch on opcode and use struct fields explicitly.
     let opcode = op.opcode
@@ -483,6 +483,37 @@ fn gpu_lower_op(buf: PtxBuf, op: GpuOp, kernel: GpuKernelIr) -> PtxBuf with Mut,
             ptx_push_setp2(buf, opcode, gpu_pred_reg(op.dst_reg), lhs_str, rhs_str)
         }
 
+        GpuOpcode::GpuSetpGe => {
+            let opcode = match op.ty {
+                GpuType::GpuU32 => ptx_opcode_setp_ge_u32(),
+                GpuType::GpuU64 => ptx_opcode_setp_ge_u64(),
+                GpuType::GpuF32 => ptx_opcode_setp_ge_f32(),
+                GpuType::GpuF64 => ptx_opcode_setp_ge_f64(),
+                GpuType::GpuI32 => ptx_opcode_setp_ge_s32(),
+                GpuType::GpuI64 => ptx_opcode_setp_ge_s64(),
+                _ => ptx_opcode_setp_ge_u32(),
+            }
+            let lhs_str = match op.ty {
+                GpuType::GpuU32 => gpu_reg_u32(op.lhs_reg),
+                GpuType::GpuU64 => gpu_reg_u64(op.lhs_reg),
+                GpuType::GpuF32 => gpu_reg_f32(op.lhs_reg),
+                GpuType::GpuF64 => gpu_reg_f64(op.lhs_reg),
+                GpuType::GpuI32 => gpu_reg_i32(op.lhs_reg),
+                GpuType::GpuI64 => gpu_reg_i64(op.lhs_reg),
+                _ => gpu_reg_u32(op.lhs_reg),
+            }
+            let rhs_str = match op.ty {
+                GpuType::GpuU32 => gpu_reg_u32(op.rhs_reg),
+                GpuType::GpuU64 => gpu_reg_u64(op.rhs_reg),
+                GpuType::GpuF32 => gpu_reg_f32(op.rhs_reg),
+                GpuType::GpuF64 => gpu_reg_f64(op.rhs_reg),
+                GpuType::GpuI32 => gpu_reg_i32(op.rhs_reg),
+                GpuType::GpuI64 => gpu_reg_i64(op.rhs_reg),
+                _ => gpu_reg_u32(op.rhs_reg),
+            }
+            ptx_push_setp2(buf, opcode, gpu_pred_reg(op.dst_reg), lhs_str, rhs_str)
+        }
+
         GpuOpcode::GpuSetpEq => {
             let opcode = match op.ty {
                 GpuType::GpuU32 => ptx_opcode_setp_eq_u32(),
@@ -820,10 +851,11 @@ fn gpu_lower_op(buf: PtxBuf, op: GpuOp, kernel: GpuKernelIr) -> PtxBuf with Mut,
 
         // Phase 4: Add immediate (like MulImm but for addition)
         GpuOpcode::GpuAddImm => {
-            let dst_str = if op.ty == GpuType::GpuU64 { gpu_reg_u64(op.dst_reg) } else { gpu_reg_u32(op.dst_reg) }
-            let src_str = if op.ty == GpuType::GpuU64 { gpu_reg_u64(op.src_reg) } else { gpu_reg_u32(op.src_reg) }
+            let opcode = if op.ty == GpuType::GpuU32 { ptx_opcode_add_u32() } else { ptx_opcode_add_u64() }
+            let dst_str = if op.ty == GpuType::GpuU32 { gpu_reg_u32(op.dst_reg) } else { gpu_reg_u64(op.dst_reg) }
+            let src_str = if op.ty == GpuType::GpuU32 { gpu_reg_u32(op.src_reg) } else { gpu_reg_u64(op.src_reg) }
             let imm_str = i64_to_string(op.rhs_imm)
-            ptx_push_binary3(buf, ptx_opcode_add_u64(), dst_str, src_str, imm_str)
+            ptx_push_binary3(buf, opcode, dst_str, src_str, imm_str)
         }
     }
 }

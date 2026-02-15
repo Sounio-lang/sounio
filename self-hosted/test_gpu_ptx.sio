@@ -373,6 +373,83 @@ fn gpu_ptx_test_49_barrier_present_for_shared_tiled() -> bool with Mut, Panic, D
     ptx_str_contains(s, "bar.sync 0")
 }
 
+fn gpu_ptx_test_62_setp_ge_u32() -> bool with Mut, Panic, Div, Alloc {
+    var k = gpu_kernel_new()
+    k.ops[0] = GpuOp {
+        opcode: GpuOpcode::GpuSetpGe,
+        dst_reg: 0,
+        lhs_reg: 1,
+        rhs_reg: 2,
+        src_reg: -1,
+        addr_reg: -1,
+        rhs_imm: 0,
+        param_idx: -1,
+        axis: 0,
+        shared_addr: -1,
+        ty: GpuType::GpuU32,
+        dst_ty: GpuType::GpuU32,
+        src_ty: GpuType::GpuU32,
+    }
+    k.op_count = 1
+    k.max_reg_pred = 1
+    k.max_reg_u32 = 3
+    let s = ptx_to_string(gpu_lower_to_ptx(k))
+    ptx_str_contains(s, "setp.ge.u32") && ptx_str_contains(s, "%p0")
+}
+
+fn gpu_ptx_test_63_setp_ge_f64() -> bool with Mut, Panic, Div, Alloc {
+    var k = gpu_kernel_new()
+    k.ops[0] = GpuOp {
+        opcode: GpuOpcode::GpuSetpGe,
+        dst_reg: 1,
+        lhs_reg: 2,
+        rhs_reg: 3,
+        src_reg: -1,
+        addr_reg: -1,
+        rhs_imm: 0,
+        param_idx: -1,
+        axis: 0,
+        shared_addr: -1,
+        ty: GpuType::GpuF64,
+        dst_ty: GpuType::GpuF64,
+        src_ty: GpuType::GpuF64,
+    }
+    k.op_count = 1
+    k.max_reg_pred = 2
+    k.max_reg_f64 = 4
+    let s = ptx_to_string(gpu_lower_to_ptx(k))
+    ptx_str_contains(s, "setp.ge.f64") && ptx_str_contains(s, "%p1")
+}
+
+fn gpu_ptx_test_64_tiled_gemm_f32_barrier_and_shared() -> bool with Mut, Panic, Div, Alloc {
+    let s = ptx_to_string(gpu_lower_to_ptx(gpu_build_gemm_shared_f32_ir()))
+    ptx_str_contains(s, "bar.sync 0") &&
+    ptx_str_contains(s, ".shared .align 4 .b8 shared_array[") &&
+    ptx_str_contains(s, "ld.shared.f32")
+}
+
+fn gpu_ptx_test_65_tiled_gemm_f64_barrier_and_shared() -> bool with Mut, Panic, Div, Alloc {
+    let s = ptx_to_string(gpu_lower_to_ptx(gpu_build_gemm_shared_f64_ir()))
+    ptx_str_contains(s, "bar.sync 0") &&
+    ptx_str_contains(s, ".shared .align 4 .b8 shared_array[") &&
+    ptx_str_contains(s, "ld.shared.f64")
+}
+
+fn gpu_ptx_test_66_tiled_gemm_predication_contract() -> bool with Mut, Panic, Div, Alloc {
+    let s = ptx_to_string(gpu_lower_to_ptx(gpu_build_gemm_shared_f32_ir()))
+    ptx_str_contains(s, "setp.lt.u32") &&
+    ptx_str_contains(s, "@%p0") &&
+    ptx_str_contains(s, "st.global.f32")
+}
+
+fn gpu_ptx_test_67_predicated_store_guard() -> bool with Mut, Panic, Div, Alloc {
+    let s = ptx_to_string(gpu_lower_to_ptx(gpu_build_gemm_shared_f32_ir()))
+    let has_predicated_store = ptx_str_contains(s, "@%p0 st.global.f32")
+    if !has_predicated_store { return false }
+    // Ensure global stores remain predicate-guarded in this kernel (no unconditional write path).
+    !ptx_str_contains(s, "\n    st.global.f32 [")
+}
+
 fn gpu_ptx_test_50_op_buffer_append_ok() -> bool with Mut, Panic, Div, Alloc {
     let k0 = gpu_kernel_new()
     let op = gpu_op_new()
@@ -479,14 +556,14 @@ fn gpu_ptx_test_59_reduction_shuffle_consistency() -> bool with Mut, Panic, Div,
 
 // Verify instruction budget: element-wise kernels are compact
 fn gpu_ptx_test_60_elemwise_instruction_budget() -> bool with Mut, Panic, Div, Alloc {
-    let k = gpu_build_vec_add_f32_ir()
+    let k = gpu_build_vec_add_ir()
     // Element-wise vec_add should have ~15 ops (tid, cvt, mulimm, 3x loadparam, 3x add, 2x load, 1x add_elem, 1x store, 1x ret)
     k.op_count > 8 && k.op_count < 30
 }
 
 // Verify instruction budget: stencil kernels are more complex than element-wise
 fn gpu_ptx_test_61_stencil_larger_than_elemwise() -> bool with Mut, Panic, Div, Alloc {
-    let elemwise = gpu_build_vec_add_f32_ir()
+    let elemwise = gpu_build_vec_add_ir()
     let stencil = gpu_build_conv1d_f32_ir()
     stencil.op_count > elemwise.op_count
 }
@@ -630,6 +707,20 @@ fn run_gpu_ptx_tests() -> i32 with IO, Mut, Panic, Div, Alloc {
     if gpu_ptx_test_60_elemwise_instruction_budget() { passed = passed + 1; print("  T60 OK (instr budget)\n") } else { print("  FAIL T60\n") }
     total = total + 1
     if gpu_ptx_test_61_stencil_larger_than_elemwise() { passed = passed + 1; print("  T61 OK (stencil > elemwise)\n") } else { print("  FAIL T61\n") }
+
+    // Phase 7 tests (T62-T67): Predication, tiled GEMM, and negative store contract
+    total = total + 1
+    if gpu_ptx_test_62_setp_ge_u32() { passed = passed + 1; print("  T62 OK (setp.ge u32)\n") } else { print("  FAIL T62\n") }
+    total = total + 1
+    if gpu_ptx_test_63_setp_ge_f64() { passed = passed + 1; print("  T63 OK (setp.ge f64)\n") } else { print("  FAIL T63\n") }
+    total = total + 1
+    if gpu_ptx_test_64_tiled_gemm_f32_barrier_and_shared() { passed = passed + 1; print("  T64 OK (tiled gemm f32)\n") } else { print("  FAIL T64\n") }
+    total = total + 1
+    if gpu_ptx_test_65_tiled_gemm_f64_barrier_and_shared() { passed = passed + 1; print("  T65 OK (tiled gemm f64)\n") } else { print("  FAIL T65\n") }
+    total = total + 1
+    if gpu_ptx_test_66_tiled_gemm_predication_contract() { passed = passed + 1; print("  T66 OK (tiled gemm predicate)\n") } else { print("  FAIL T66\n") }
+    total = total + 1
+    if gpu_ptx_test_67_predicated_store_guard() { passed = passed + 1; print("  T67 OK (predicated store guard)\n") } else { print("  FAIL T67\n") }
 
     if passed == total { print("GPU PTX tests: all passed\n") } else { print("GPU PTX tests: suite fail\n") }
 
