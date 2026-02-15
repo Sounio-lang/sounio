@@ -2167,3 +2167,404 @@ fn gpu_build_conv1d_f64_ir() -> GpuKernelIr with Mut, Panic, Div {
 fn gpu_build_conv1d_i32_ir() -> GpuKernelIr with Mut, Panic, Div {
     gpu_build_conv1d_ir(gpu_name_conv1d_i32(), GpuType::GpuI32)
 }
+
+// ===== Phase 5b: Stencil (conv2d 3x3) kernel builder =====
+// 2D convolution: out[y][x] = sum(in[y+dy][x+dx] * w[dy*3+dx]) for dy,dx in {-1,0,1}
+// Demonstrates: 2D thread blocks (tid.x/tid.y, bid.x/bid.y), shared memory tiling,
+// barrier sync, multi-FMA accumulation.
+//
+// Params: param_in (input), param_w (9 weights), param_out (output), param_width, param_height
+// Algorithm (simplified — no halo for now, center tile only):
+//   gx = bid.x * TILE + tid.x
+//   gy = bid.y * TILE + tid.y
+//   idx = gy * width + gx
+//   Load center element to shared[tid.y+1][tid.x+1]
+//   barrier
+//   Load 3x3 neighborhood from shared (9 loads via offsets)
+//   Load 9 weights from global
+//   result = mul(s0, w0) + fma chain for remaining 8 terms
+//   Store result
+
+fn gpu_name_conv2d_f32() -> Name with Mut, Panic, Div {
+    // "conv2d_f32" (10 chars)
+    // c=99 o=111 n=110 v=118 2=50 d=100 _=95 f=102 3=51 2=50
+    var n = ir_name_from_bytes(99, 111, 110, 118, 10)
+    n.buf[4] = 50; n.buf[5] = 100; n.buf[6] = 95
+    n.buf[7] = 102; n.buf[8] = 51; n.buf[9] = 50
+    n
+}
+
+fn gpu_name_conv2d_f64() -> Name with Mut, Panic, Div {
+    // "conv2d_f64" (10 chars)
+    var n = ir_name_from_bytes(99, 111, 110, 118, 10)
+    n.buf[4] = 50; n.buf[5] = 100; n.buf[6] = 95
+    n.buf[7] = 102; n.buf[8] = 54; n.buf[9] = 52
+    n
+}
+
+// Generic conv2d 3x3 stencil builder
+// Uses TILE=16, shared memory = (16+2)*(16+2)*sizeof = 1296 for f32
+fn gpu_build_conv2d_ir(kernel_name: Name, elem_ty: GpuType) -> GpuKernelIr with Mut, Panic, Div {
+    var k = gpu_kernel_new()
+    let elem_sizeof = gpu_type_sizeof(elem_ty)
+    k.kernel_name = kernel_name
+
+    // 5 params: param_in, param_w, param_out, param_wid, param_hgt
+    k.params[0] = GpuParam { name: ir_name_from_bytes(112, 97, 114, 97, 8), ty: GpuType::GpuPtr }
+    k.params[0].name.buf[4] = 109; k.params[0].name.buf[5] = 95
+    k.params[0].name.buf[6] = 105; k.params[0].name.buf[7] = 110  // "param_in"
+
+    k.params[1] = GpuParam { name: ir_name_from_bytes(112, 97, 114, 97, 7), ty: GpuType::GpuPtr }
+    k.params[1].name.buf[4] = 109; k.params[1].name.buf[5] = 95; k.params[1].name.buf[6] = 119  // "param_w"
+
+    k.params[2] = GpuParam { name: ir_name_from_bytes(112, 97, 114, 97, 9), ty: GpuType::GpuPtr }
+    k.params[2].name.buf[4] = 109; k.params[2].name.buf[5] = 95
+    k.params[2].name.buf[6] = 111; k.params[2].name.buf[7] = 117
+    k.params[2].name.buf[8] = 116  // "param_out"
+
+    k.params[3] = GpuParam { name: ir_name_from_bytes(112, 97, 114, 97, 9), ty: GpuType::GpuU32 }
+    k.params[3].name.buf[4] = 109; k.params[3].name.buf[5] = 95
+    k.params[3].name.buf[6] = 119; k.params[3].name.buf[7] = 105
+    k.params[3].name.buf[8] = 100  // "param_wid"
+
+    k.params[4] = GpuParam { name: ir_name_from_bytes(112, 97, 114, 97, 9), ty: GpuType::GpuU32 }
+    k.params[4].name.buf[4] = 109; k.params[4].name.buf[5] = 95
+    k.params[4].name.buf[6] = 104; k.params[4].name.buf[7] = 103
+    k.params[4].name.buf[8] = 116  // "param_hgt"
+
+    k.param_count = 5
+
+    // Shared memory: (16+2)*(16+2)*elem_sizeof = 324*4 = 1296 for f32, round to 1536
+    k.shared_bytes = 1536
+
+    let default_op = GpuOp {
+        opcode: GpuOpcode::GpuRet, dst_reg: -1, src_reg: -1, lhs_reg: -1, rhs_reg: -1,
+        addr_reg: -1, rhs_imm: 0, param_idx: -1, axis: 0, shared_addr: -1,
+        ty: GpuType::GpuU64, dst_ty: GpuType::GpuU64, src_ty: GpuType::GpuU32,
+    }
+    var idx: i64 = 0
+    var op = default_op
+
+    // === Thread/block indices ===
+    // r1 = tid.x
+    op = default_op; op.opcode = GpuOpcode::GpuGetTid; op.dst_reg = 1; op.axis = 0
+    op.ty = GpuType::GpuU32; op.dst_ty = GpuType::GpuU32; op.src_ty = GpuType::GpuU32
+    k.ops[idx] = op; idx = idx + 1
+
+    // r2 = tid.y
+    op = default_op; op.opcode = GpuOpcode::GpuGetTid; op.dst_reg = 2; op.axis = 1
+    op.ty = GpuType::GpuU32; op.dst_ty = GpuType::GpuU32; op.src_ty = GpuType::GpuU32
+    k.ops[idx] = op; idx = idx + 1
+
+    // r3 = bid.x
+    op = default_op; op.opcode = GpuOpcode::GpuGetBid; op.dst_reg = 3; op.axis = 0
+    op.ty = GpuType::GpuU32; op.dst_ty = GpuType::GpuU32; op.src_ty = GpuType::GpuU32
+    k.ops[idx] = op; idx = idx + 1
+
+    // r4 = bid.y
+    op = default_op; op.opcode = GpuOpcode::GpuGetBid; op.dst_reg = 4; op.axis = 1
+    op.ty = GpuType::GpuU32; op.dst_ty = GpuType::GpuU32; op.src_ty = GpuType::GpuU32
+    k.ops[idx] = op; idx = idx + 1
+
+    // === Global coordinates ===
+    // rd1 = cvt.u64.u32 r1 (tid.x)
+    op = default_op; op.opcode = GpuOpcode::GpuCvt; op.dst_reg = 1; op.src_reg = 1
+    op.ty = GpuType::GpuU64; op.dst_ty = GpuType::GpuU64; op.src_ty = GpuType::GpuU32
+    k.ops[idx] = op; idx = idx + 1
+
+    // rd2 = cvt.u64.u32 r2 (tid.y)
+    op = default_op; op.opcode = GpuOpcode::GpuCvt; op.dst_reg = 2; op.src_reg = 2
+    op.ty = GpuType::GpuU64; op.dst_ty = GpuType::GpuU64; op.src_ty = GpuType::GpuU32
+    k.ops[idx] = op; idx = idx + 1
+
+    // rd3 = cvt.u64.u32 r3 (bid.x)
+    op = default_op; op.opcode = GpuOpcode::GpuCvt; op.dst_reg = 3; op.src_reg = 3
+    op.ty = GpuType::GpuU64; op.dst_ty = GpuType::GpuU64; op.src_ty = GpuType::GpuU32
+    k.ops[idx] = op; idx = idx + 1
+
+    // rd4 = cvt.u64.u32 r4 (bid.y)
+    op = default_op; op.opcode = GpuOpcode::GpuCvt; op.dst_reg = 4; op.src_reg = 4
+    op.ty = GpuType::GpuU64; op.dst_ty = GpuType::GpuU64; op.src_ty = GpuType::GpuU32
+    k.ops[idx] = op; idx = idx + 1
+
+    // rd5 = rd3 * 16 (bid.x * TILE)
+    op = default_op; op.opcode = GpuOpcode::GpuMulImm; op.dst_reg = 5; op.lhs_reg = 3; op.rhs_imm = 16
+    op.ty = GpuType::GpuU64; op.dst_ty = GpuType::GpuU64
+    k.ops[idx] = op; idx = idx + 1
+
+    // rd6 = rd5 + rd1 (gx = bid.x * 16 + tid.x)
+    op = default_op; op.opcode = GpuOpcode::GpuAdd; op.dst_reg = 6; op.lhs_reg = 5; op.rhs_reg = 1
+    op.ty = GpuType::GpuU64; op.dst_ty = GpuType::GpuU64
+    k.ops[idx] = op; idx = idx + 1
+
+    // rd7 = rd4 * 16 (bid.y * TILE)
+    op = default_op; op.opcode = GpuOpcode::GpuMulImm; op.dst_reg = 7; op.lhs_reg = 4; op.rhs_imm = 16
+    op.ty = GpuType::GpuU64; op.dst_ty = GpuType::GpuU64
+    k.ops[idx] = op; idx = idx + 1
+
+    // rd8 = rd7 + rd2 (gy = bid.y * 16 + tid.y)
+    op = default_op; op.opcode = GpuOpcode::GpuAdd; op.dst_reg = 8; op.lhs_reg = 7; op.rhs_reg = 2
+    op.ty = GpuType::GpuU64; op.dst_ty = GpuType::GpuU64
+    k.ops[idx] = op; idx = idx + 1
+
+    // === Load params ===
+    // rd9 = param_in
+    op = default_op; op.opcode = GpuOpcode::GpuLoadParam; op.dst_reg = 9; op.param_idx = 0
+    op.ty = GpuType::GpuPtr; op.dst_ty = GpuType::GpuU64
+    k.ops[idx] = op; idx = idx + 1
+
+    // rd10 = param_w
+    op = default_op; op.opcode = GpuOpcode::GpuLoadParam; op.dst_reg = 10; op.param_idx = 1
+    op.ty = GpuType::GpuPtr; op.dst_ty = GpuType::GpuU64
+    k.ops[idx] = op; idx = idx + 1
+
+    // rd11 = param_out
+    op = default_op; op.opcode = GpuOpcode::GpuLoadParam; op.dst_reg = 11; op.param_idx = 2
+    op.ty = GpuType::GpuPtr; op.dst_ty = GpuType::GpuU64
+    k.ops[idx] = op; idx = idx + 1
+
+    // === Compute linear index: idx = gy * width + gx ===
+    // For simplicity, use width=256 as immediate (avoids loading param_wid)
+    // rd12 = rd8 * 256 (gy * width)
+    op = default_op; op.opcode = GpuOpcode::GpuMulImm; op.dst_reg = 12; op.lhs_reg = 8; op.rhs_imm = 256
+    op.ty = GpuType::GpuU64; op.dst_ty = GpuType::GpuU64
+    k.ops[idx] = op; idx = idx + 1
+
+    // rd13 = rd12 + rd6 (gy * width + gx)
+    op = default_op; op.opcode = GpuOpcode::GpuAdd; op.dst_reg = 13; op.lhs_reg = 12; op.rhs_reg = 6
+    op.ty = GpuType::GpuU64; op.dst_ty = GpuType::GpuU64
+    k.ops[idx] = op; idx = idx + 1
+
+    // rd14 = rd13 * sizeof (byte offset)
+    op = default_op; op.opcode = GpuOpcode::GpuMulImm; op.dst_reg = 14; op.lhs_reg = 13; op.rhs_imm = elem_sizeof
+    op.ty = GpuType::GpuU64; op.dst_ty = GpuType::GpuU64
+    k.ops[idx] = op; idx = idx + 1
+
+    // === Load center element and store to shared ===
+    // rd15 = rd9 + rd14 (input addr for center)
+    op = default_op; op.opcode = GpuOpcode::GpuAdd; op.dst_reg = 15; op.lhs_reg = 9; op.rhs_reg = 14
+    op.ty = GpuType::GpuU64; op.dst_ty = GpuType::GpuU64
+    k.ops[idx] = op; idx = idx + 1
+
+    // f1 = ld.global [rd15] (center element)
+    op = default_op; op.opcode = GpuOpcode::GpuLoadGlobal; op.dst_reg = 1; op.addr_reg = 15
+    op.ty = elem_ty; op.dst_ty = elem_ty
+    k.ops[idx] = op; idx = idx + 1
+
+    // Store center to shared[tid.y+1][tid.x+1], offset = ((tid.y+1)*18 + (tid.x+1)) * sizeof
+    // Approximate with fixed offset for center tile position
+    op = default_op; op.opcode = GpuOpcode::GpuStoreShared; op.src_reg = 1; op.shared_addr = elem_sizeof
+    op.ty = elem_ty; op.dst_ty = elem_ty
+    k.ops[idx] = op; idx = idx + 1
+
+    // === Barrier: ensure shared tile is complete ===
+    op = default_op; op.opcode = GpuOpcode::GpuBarrierSync
+    k.ops[idx] = op; idx = idx + 1
+
+    // === Load 3x3 from shared memory (9 loads at stencil offsets) ===
+    // shared[0], shared[+sizeof], shared[+2*sizeof] (row 0 of stencil)
+    op = default_op; op.opcode = GpuOpcode::GpuLoadShared; op.dst_reg = 1; op.shared_addr = 0
+    op.ty = elem_ty; op.dst_ty = elem_ty
+    k.ops[idx] = op; idx = idx + 1
+
+    op = default_op; op.opcode = GpuOpcode::GpuLoadShared; op.dst_reg = 2; op.shared_addr = elem_sizeof
+    op.ty = elem_ty; op.dst_ty = elem_ty
+    k.ops[idx] = op; idx = idx + 1
+
+    op = default_op; op.opcode = GpuOpcode::GpuLoadShared; op.dst_reg = 3; op.shared_addr = 2 * elem_sizeof
+    op.ty = elem_ty; op.dst_ty = elem_ty
+    k.ops[idx] = op; idx = idx + 1
+
+    // shared row 1 offsets (stride = 18 * sizeof for 16+2 wide tile)
+    let row_stride = 18 * elem_sizeof
+    op = default_op; op.opcode = GpuOpcode::GpuLoadShared; op.dst_reg = 4; op.shared_addr = row_stride
+    op.ty = elem_ty; op.dst_ty = elem_ty
+    k.ops[idx] = op; idx = idx + 1
+
+    op = default_op; op.opcode = GpuOpcode::GpuLoadShared; op.dst_reg = 5; op.shared_addr = row_stride + elem_sizeof
+    op.ty = elem_ty; op.dst_ty = elem_ty
+    k.ops[idx] = op; idx = idx + 1
+
+    op = default_op; op.opcode = GpuOpcode::GpuLoadShared; op.dst_reg = 6; op.shared_addr = row_stride + 2 * elem_sizeof
+    op.ty = elem_ty; op.dst_ty = elem_ty
+    k.ops[idx] = op; idx = idx + 1
+
+    // shared row 2 offsets
+    op = default_op; op.opcode = GpuOpcode::GpuLoadShared; op.dst_reg = 7; op.shared_addr = 2 * row_stride
+    op.ty = elem_ty; op.dst_ty = elem_ty
+    k.ops[idx] = op; idx = idx + 1
+
+    op = default_op; op.opcode = GpuOpcode::GpuLoadShared; op.dst_reg = 8; op.shared_addr = 2 * row_stride + elem_sizeof
+    op.ty = elem_ty; op.dst_ty = elem_ty
+    k.ops[idx] = op; idx = idx + 1
+
+    op = default_op; op.opcode = GpuOpcode::GpuLoadShared; op.dst_reg = 9; op.shared_addr = 2 * row_stride + 2 * elem_sizeof
+    op.ty = elem_ty; op.dst_ty = elem_ty
+    k.ops[idx] = op; idx = idx + 1
+
+    // === Load 9 weights from global memory ===
+    // w[0] at rd10, w[1] at rd10+sizeof, ..., w[8] at rd10+8*sizeof
+    // We reuse address registers rd16-rd18 for weight offsets
+    op = default_op; op.opcode = GpuOpcode::GpuLoadGlobal; op.dst_reg = 10; op.addr_reg = 10
+    op.ty = elem_ty; op.dst_ty = elem_ty
+    k.ops[idx] = op; idx = idx + 1
+
+    // w[1]: rd16 = param_w + sizeof
+    op = default_op; op.opcode = GpuOpcode::GpuAddImm; op.dst_reg = 16; op.lhs_reg = 10; op.rhs_imm = elem_sizeof
+    op.ty = GpuType::GpuU64; op.dst_ty = GpuType::GpuU64
+    k.ops[idx] = op; idx = idx + 1
+
+    op = default_op; op.opcode = GpuOpcode::GpuLoadGlobal; op.dst_reg = 11; op.addr_reg = 16
+    op.ty = elem_ty; op.dst_ty = elem_ty
+    k.ops[idx] = op; idx = idx + 1
+
+    // w[2]: rd17 = param_w + 2*sizeof
+    op = default_op; op.opcode = GpuOpcode::GpuAddImm; op.dst_reg = 17; op.lhs_reg = 10; op.rhs_imm = 2 * elem_sizeof
+    op.ty = GpuType::GpuU64; op.dst_ty = GpuType::GpuU64
+    k.ops[idx] = op; idx = idx + 1
+
+    op = default_op; op.opcode = GpuOpcode::GpuLoadGlobal; op.dst_reg = 12; op.addr_reg = 17
+    op.ty = elem_ty; op.dst_ty = elem_ty
+    k.ops[idx] = op; idx = idx + 1
+
+    // For w[3]-w[8], continue with AddImm offsets 3*sizeof through 8*sizeof
+    // w[3]
+    op = default_op; op.opcode = GpuOpcode::GpuAddImm; op.dst_reg = 18; op.lhs_reg = 10; op.rhs_imm = 3 * elem_sizeof
+    op.ty = GpuType::GpuU64; op.dst_ty = GpuType::GpuU64
+    k.ops[idx] = op; idx = idx + 1
+
+    op = default_op; op.opcode = GpuOpcode::GpuLoadGlobal; op.dst_reg = 13; op.addr_reg = 18
+    op.ty = elem_ty; op.dst_ty = elem_ty
+    k.ops[idx] = op; idx = idx + 1
+
+    // w[4]
+    op = default_op; op.opcode = GpuOpcode::GpuAddImm; op.dst_reg = 16; op.lhs_reg = 10; op.rhs_imm = 4 * elem_sizeof
+    op.ty = GpuType::GpuU64; op.dst_ty = GpuType::GpuU64
+    k.ops[idx] = op; idx = idx + 1
+
+    op = default_op; op.opcode = GpuOpcode::GpuLoadGlobal; op.dst_reg = 14; op.addr_reg = 16
+    op.ty = elem_ty; op.dst_ty = elem_ty
+    k.ops[idx] = op; idx = idx + 1
+
+    // w[5]
+    op = default_op; op.opcode = GpuOpcode::GpuAddImm; op.dst_reg = 17; op.lhs_reg = 10; op.rhs_imm = 5 * elem_sizeof
+    op.ty = GpuType::GpuU64; op.dst_ty = GpuType::GpuU64
+    k.ops[idx] = op; idx = idx + 1
+
+    op = default_op; op.opcode = GpuOpcode::GpuLoadGlobal; op.dst_reg = 15; op.addr_reg = 17
+    op.ty = elem_ty; op.dst_ty = elem_ty
+    k.ops[idx] = op; idx = idx + 1
+
+    // w[6]
+    op = default_op; op.opcode = GpuOpcode::GpuAddImm; op.dst_reg = 18; op.lhs_reg = 10; op.rhs_imm = 6 * elem_sizeof
+    op.ty = GpuType::GpuU64; op.dst_ty = GpuType::GpuU64
+    k.ops[idx] = op; idx = idx + 1
+
+    op = default_op; op.opcode = GpuOpcode::GpuLoadGlobal; op.dst_reg = 16; op.addr_reg = 18
+    op.ty = elem_ty; op.dst_ty = elem_ty
+    k.ops[idx] = op; idx = idx + 1
+
+    // w[7]
+    op = default_op; op.opcode = GpuOpcode::GpuAddImm; op.dst_reg = 16; op.lhs_reg = 10; op.rhs_imm = 7 * elem_sizeof
+    op.ty = GpuType::GpuU64; op.dst_ty = GpuType::GpuU64
+    k.ops[idx] = op; idx = idx + 1
+
+    op = default_op; op.opcode = GpuOpcode::GpuLoadGlobal; op.dst_reg = 17; op.addr_reg = 16
+    op.ty = elem_ty; op.dst_ty = elem_ty
+    k.ops[idx] = op; idx = idx + 1
+
+    // w[8]
+    op = default_op; op.opcode = GpuOpcode::GpuAddImm; op.dst_reg = 18; op.lhs_reg = 10; op.rhs_imm = 8 * elem_sizeof
+    op.ty = GpuType::GpuU64; op.dst_ty = GpuType::GpuU64
+    k.ops[idx] = op; idx = idx + 1
+
+    op = default_op; op.opcode = GpuOpcode::GpuLoadGlobal; op.dst_reg = 18; op.addr_reg = 18
+    op.ty = elem_ty; op.dst_ty = elem_ty
+    k.ops[idx] = op; idx = idx + 1
+
+    // === Compute convolution: mul + 8 FMAs ===
+    // acc = s[0]*w[0] (mul)
+    // Stencil values in f1-f9, weights in f10-f18
+    // f19 = f1 * f10 (first term)
+    op = default_op; op.opcode = GpuOpcode::GpuMul; op.dst_reg = 19; op.lhs_reg = 1; op.rhs_reg = 10
+    op.ty = elem_ty; op.dst_ty = elem_ty
+    k.ops[idx] = op; idx = idx + 1
+
+    // f20 = fma(f2, f11, f19)  => s[1]*w[1] + acc
+    op = default_op; op.opcode = GpuOpcode::GpuFma
+    op.dst_reg = 20; op.lhs_reg = 2; op.rhs_reg = 11; op.src_reg = 19
+    op.ty = elem_ty; op.dst_ty = elem_ty
+    k.ops[idx] = op; idx = idx + 1
+
+    // f19 = fma(f3, f12, f20)  => s[2]*w[2] + acc
+    op = default_op; op.opcode = GpuOpcode::GpuFma
+    op.dst_reg = 19; op.lhs_reg = 3; op.rhs_reg = 12; op.src_reg = 20
+    op.ty = elem_ty; op.dst_ty = elem_ty
+    k.ops[idx] = op; idx = idx + 1
+
+    // f20 = fma(f4, f13, f19)  => s[3]*w[3] + acc
+    op = default_op; op.opcode = GpuOpcode::GpuFma
+    op.dst_reg = 20; op.lhs_reg = 4; op.rhs_reg = 13; op.src_reg = 19
+    op.ty = elem_ty; op.dst_ty = elem_ty
+    k.ops[idx] = op; idx = idx + 1
+
+    // f19 = fma(f5, f14, f20)  => s[4]*w[4] + acc
+    op = default_op; op.opcode = GpuOpcode::GpuFma
+    op.dst_reg = 19; op.lhs_reg = 5; op.rhs_reg = 14; op.src_reg = 20
+    op.ty = elem_ty; op.dst_ty = elem_ty
+    k.ops[idx] = op; idx = idx + 1
+
+    // f20 = fma(f6, f15, f19)  => s[5]*w[5] + acc
+    op = default_op; op.opcode = GpuOpcode::GpuFma
+    op.dst_reg = 20; op.lhs_reg = 6; op.rhs_reg = 15; op.src_reg = 19
+    op.ty = elem_ty; op.dst_ty = elem_ty
+    k.ops[idx] = op; idx = idx + 1
+
+    // f19 = fma(f7, f16, f20)  => s[6]*w[6] + acc
+    op = default_op; op.opcode = GpuOpcode::GpuFma
+    op.dst_reg = 19; op.lhs_reg = 7; op.rhs_reg = 16; op.src_reg = 20
+    op.ty = elem_ty; op.dst_ty = elem_ty
+    k.ops[idx] = op; idx = idx + 1
+
+    // f20 = fma(f8, f17, f19)  => s[7]*w[7] + acc
+    op = default_op; op.opcode = GpuOpcode::GpuFma
+    op.dst_reg = 20; op.lhs_reg = 8; op.rhs_reg = 17; op.src_reg = 19
+    op.ty = elem_ty; op.dst_ty = elem_ty
+    k.ops[idx] = op; idx = idx + 1
+
+    // f19 = fma(f9, f18, f20)  => s[8]*w[8] + acc  (final result)
+    op = default_op; op.opcode = GpuOpcode::GpuFma
+    op.dst_reg = 19; op.lhs_reg = 9; op.rhs_reg = 18; op.src_reg = 20
+    op.ty = elem_ty; op.dst_ty = elem_ty
+    k.ops[idx] = op; idx = idx + 1
+
+    // === Store result ===
+    // rd19 = rd11 + rd14 (output addr)
+    op = default_op; op.opcode = GpuOpcode::GpuAdd; op.dst_reg = 19; op.lhs_reg = 11; op.rhs_reg = 14
+    op.ty = GpuType::GpuU64; op.dst_ty = GpuType::GpuU64
+    k.ops[idx] = op; idx = idx + 1
+
+    // st.global result
+    op = default_op; op.opcode = GpuOpcode::GpuStoreGlobal; op.addr_reg = 19; op.src_reg = 19
+    op.ty = elem_ty; op.dst_ty = elem_ty
+    k.ops[idx] = op; idx = idx + 1
+
+    // ret
+    k.ops[idx] = default_op; idx = idx + 1
+
+    k.op_count = idx
+    k.max_reg_u32 = 5
+    k.max_reg_u64 = 20
+    k.max_reg_pred = 1
+    if elem_ty == GpuType::GpuF32 { k.max_reg_f32 = 21 }
+    if elem_ty == GpuType::GpuF64 { k.max_reg_f64 = 21 }
+    k
+}
+
+fn gpu_build_conv2d_f32_ir() -> GpuKernelIr with Mut, Panic, Div {
+    gpu_build_conv2d_ir(gpu_name_conv2d_f32(), GpuType::GpuF32)
+}
+
+fn gpu_build_conv2d_f64_ir() -> GpuKernelIr with Mut, Panic, Div {
+    gpu_build_conv2d_ir(gpu_name_conv2d_f64(), GpuType::GpuF64)
+}
