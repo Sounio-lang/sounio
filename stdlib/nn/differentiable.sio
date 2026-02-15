@@ -1,780 +1,725 @@
-// Sounio Standard Library: Differentiable Effects
+// stdlib/nn/differentiable.sio — Differentiable Module Interfaces
 //
-// Neural computation as an algebraic effect. This enables:
-// - Automatic differentiation through effect handlers
-// - Epistemic propagation through gradient flow
-// - Clean separation of forward/backward passes
-// - Composability with other effects (search, construct)
+// Differentiable computation as effect-driven forward/backward passes.
+// Every module tracks epistemic confidence through gradient updates:
+//   - Confidence decays through each backward pass
+//   - Gradient magnitude affects confidence degradation rate
+//   - Converging training increases confidence; diverging decreases it
 //
-// Key insight: Differentiation is a computational effect, not a type.
-// The handler manages the tape and gradient accumulation.
-
-import epistemic::Knowledge;
-import epistemic::Confidence;
-import epistemic::Source;
-import epistemic::bayesian::BetaConfidence;
+// SOTA: Tesseract (SciPy 2025): Pipeline-level AD across heterogeneous modules
+//       Affect (POPL 2025): Effect handlers for one-shot/multi-shot continuations
+//
+// Design: Fixed-size arrays, no heap allocation, pure Sounio.
+// Max 256 parameters per layer, max 8 layers per network.
 
 // =============================================================================
-// Tensor Types (Minimal for Geometry LM)
+// Math helpers
 // =============================================================================
 
-// N-dimensional tensor with shape tracking
-struct Tensor {
-    /// Flat data storage
-    data: Vec[f32],
-    /// Shape (dimensions)
-    shape: Vec[usize],
-    /// Whether this tensor requires gradient
-    requires_grad: bool,
-    /// Gradient (same shape as data)
-    grad: Option[Vec[f32]],
+fn abs_diff(x: f64) -> f64 {
+    if x < 0.0 { 0.0 - x } else { x }
 }
 
-impl Tensor {
-    /// Create tensor from data and shape
-    fn new(data: Vec[f32], shape: Vec[usize]) -> Tensor {
-        Tensor {
-            data: data,
-            shape: shape,
-            requires_grad: false,
-            grad: None,
-        }
-    }
-
-    /// Create tensor requiring gradient (parameter)
-    fn param(data: Vec[f32], shape: Vec[usize]) -> Tensor {
-        Tensor {
-            data: data,
-            shape: shape,
-            requires_grad: true,
-            grad: Some(vec![0.0; data.len()]),
-        }
-    }
-
-    /// Create zeros
-    fn zeros(shape: Vec[usize]) -> Tensor {
-        let size = shape.iter().product();
-        Tensor::new(vec![0.0; size], shape)
-    }
-
-    /// Create ones
-    fn ones(shape: Vec[usize]) -> Tensor {
-        let size = shape.iter().product();
-        Tensor::new(vec![1.0; size], shape)
-    }
-
-    /// Total number of elements
-    fn numel(self) -> usize {
-        self.data.len()
-    }
-
-    /// Get element at flat index
-    fn get(self, idx: usize) -> f32 {
-        self.data[idx]
-    }
-
-    /// Set element at flat index
-    fn set(mut self, idx: usize, val: f32) {
-        self.data[idx] = val;
-    }
-
-    /// Zero gradients
-    fn zero_grad(mut self) {
-        if let Some(ref mut g) = self.grad {
-            for x in g.iter_mut() {
-                *x = 0.0;
-            }
-        }
-    }
-
-    /// Accumulate gradient
-    fn accumulate_grad(mut self, grad: &[f32]) {
-        if let Some(ref mut g) = self.grad {
-            for (i, x) in g.iter_mut().enumerate() {
-                *x += grad[i];
-            }
-        }
-    }
+fn sqrt_diff(x: f64) -> f64 with Mut, Div, Panic {
+    if x <= 0.0 { return 0.0 }
+    var y = x
+    var i = 0
+    while i < 20 { y = 0.5 * (y + x / y); i = i + 1 }
+    y
 }
 
-// Epistemic tensor - tensor with confidence
+fn min_diff(a: f64, b: f64) -> f64 {
+    if a < b { a } else { b }
+}
+
+fn max_diff(a: f64, b: f64) -> f64 {
+    if a > b { a } else { b }
+}
+
+fn exp_diff(x: f64) -> f64 with Mut, Div, Panic {
+    let clamped = if x > 700.0 { 700.0 } else if x < -700.0 { -700.0 } else { x }
+    var result = 1.0
+    var term = 1.0
+    var i = 1
+    while i < 30 {
+        term = term * clamped / (i as f64)
+        result = result + term
+        i = i + 1
+    }
+    result
+}
+
+// =============================================================================
+// Dense Tensor (fixed-size, stack-allocated)
+// =============================================================================
+// Max 256 elements — sufficient for layers up to 16x16
+
+struct DenseTensor {
+    data: [f64; 256],
+    rows: i32,
+    cols: i32,
+}
+
+fn tensor_zeros(rows: i32, cols: i32) -> DenseTensor {
+    DenseTensor { data: [0.0; 256], rows: rows, cols: cols }
+}
+
+fn tensor_set(t: &!DenseTensor, row: i32, col: i32, val: f64) with Mut, Panic {
+    t.data[row * t.cols + col] = val
+}
+
+fn tensor_get(t: &DenseTensor, row: i32, col: i32) -> f64 with Panic {
+    t.data[row * t.cols + col]
+}
+
+fn tensor_flat_get(t: &DenseTensor, idx: i32) -> f64 with Panic {
+    t.data[idx]
+}
+
+fn tensor_flat_set(t: &!DenseTensor, idx: i32, val: f64) with Mut, Panic {
+    t.data[idx] = val
+}
+
+fn tensor_numel(t: &DenseTensor) -> i32 {
+    t.rows * t.cols
+}
+
+// =============================================================================
+// Epistemic Tensor — Tensor + confidence tracking
+// =============================================================================
+
 struct EpistemicTensor {
-    /// Underlying tensor
-    tensor: Tensor,
-    /// Confidence in values (can vary per-element or be scalar)
-    confidence: BetaConfidence,
-    /// Source of this tensor
-    source: Source,
+    data: [f64; 256],
+    grad: [f64; 256],
+    confidence: [f64; 256],
+    rows: i32,
+    cols: i32,
+    requires_grad: bool,
 }
 
-impl EpistemicTensor {
-    /// Create from tensor with uniform confidence
-    fn new(tensor: Tensor, confidence: f64) -> EpistemicTensor {
-        EpistemicTensor {
-            tensor: tensor,
-            confidence: BetaConfidence::from_confidence(confidence, 10.0),
-            source: Source::Unknown,
-        }
+fn etensor_zeros(rows: i32, cols: i32, needs_grad: bool) -> EpistemicTensor {
+    EpistemicTensor {
+        data: [0.0; 256],
+        grad: [0.0; 256],
+        confidence: [1.0; 256],
+        rows: rows,
+        cols: cols,
+        requires_grad: needs_grad,
+    }
+}
+
+fn etensor_set(t: &!EpistemicTensor, idx: i32, val: f64, conf: f64) with Mut, Panic {
+    t.data[idx] = val
+    t.confidence[idx] = conf
+}
+
+fn etensor_get(t: &EpistemicTensor, idx: i32) -> f64 with Panic {
+    t.data[idx]
+}
+
+fn etensor_zero_grad(t: &!EpistemicTensor) with Mut, Div, Panic {
+    var i = 0
+    let n = t.rows * t.cols
+    while i < n {
+        t.grad[i] = 0.0
+        i = i + 1
+    }
+}
+
+fn etensor_accumulate_grad(t: &!EpistemicTensor, incoming: &[f64; 256], n: i32) with Mut, Div, Panic {
+    var i = 0
+    while i < n {
+        t.grad[i] = t.grad[i] + incoming[i]
+        i = i + 1
+    }
+}
+
+// Min confidence across all elements
+fn etensor_min_confidence(t: &EpistemicTensor) -> f64 with Mut, Div, Panic {
+    var min_c = 1.0
+    var i = 0
+    let n = t.rows * t.cols
+    while i < n {
+        if t.confidence[i] < min_c { min_c = t.confidence[i] }
+        i = i + 1
+    }
+    min_c
+}
+
+// =============================================================================
+// Differentiable Operations — Forward + Backward
+// =============================================================================
+
+// Each operation returns the forward result AND can compute gradients.
+// This is the "split tape" approach: we store activations inline.
+
+// --- Linear (Dense) Layer ---
+
+struct LinearLayer {
+    weights: EpistemicTensor,  // [out_size x in_size]
+    biases: EpistemicTensor,   // [out_size x 1]
+    in_size: i32,
+    out_size: i32,
+    // Cached input for backward pass
+    cached_input: [f64; 256],
+    cached_output: [f64; 256],
+}
+
+fn linear_new(in_size: i32, out_size: i32) -> LinearLayer {
+    LinearLayer {
+        weights: etensor_zeros(out_size, in_size, true),
+        biases: etensor_zeros(out_size, 1, true),
+        in_size: in_size,
+        out_size: out_size,
+        cached_input: [0.0; 256],
+        cached_output: [0.0; 256],
+    }
+}
+
+// Initialize with small random-like values (deterministic for reproducibility)
+fn linear_init(layer: &!LinearLayer, seed: f64) with Mut, Div, Panic {
+    let n = layer.in_size * layer.out_size
+    var s = seed
+    var i = 0
+    while i < n {
+        // Simple deterministic pseudo-random via fractional multiply
+        s = s * 16807.123 + 0.4231
+        var v = s
+        while v >= 1.0 { v = v - 1.0 }
+        while v < 0.0 { v = v + 1.0 }
+        // Xavier initialization: scale by sqrt(2 / (fan_in + fan_out))
+        let scale = sqrt_diff(2.0 / ((layer.in_size + layer.out_size) as f64))
+        let val = (v - 0.5) * 2.0 * scale
+        layer.weights.data[i] = val
+        layer.weights.confidence[i] = 0.5  // initial confidence: moderate
+        i = i + 1
+    }
+    // Biases start at zero with full confidence
+    i = 0
+    while i < layer.out_size {
+        layer.biases.data[i] = 0.0
+        layer.biases.confidence[i] = 1.0
+        i = i + 1
+    }
+}
+
+// Forward: output = W * input + bias
+fn linear_forward(
+    layer: &!LinearLayer,
+    input: &[f64; 256],
+    input_size: i32,
+) -> [f64; 256] with Mut, Div, Panic {
+    // Cache input for backward
+    var i = 0
+    while i < input_size {
+        layer.cached_input[i] = input[i]
+        i = i + 1
     }
 
-    /// Create from model prediction
-    fn from_model(tensor: Tensor, model_name: &str, confidence: f64) -> EpistemicTensor {
-        EpistemicTensor {
-            tensor: tensor,
-            confidence: BetaConfidence::from_confidence(confidence, 5.0), // Lower effective n for model
-            source: Source::ModelPrediction {
-                model: model_name.to_string(),
-                version: None,
+    var output: [f64; 256] = [0.0; 256]
+    var o = 0
+    while o < layer.out_size {
+        var sum = layer.biases.data[o]
+        var j = 0
+        while j < layer.in_size {
+            sum = sum + layer.weights.data[o * layer.in_size + j] * input[j]
+            j = j + 1
+        }
+        output[o] = sum
+        layer.cached_output[o] = sum
+        o = o + 1
+    }
+    output
+}
+
+// Backward: compute gradients for weights, biases, and input
+// grad_output: gradient from the next layer [out_size]
+// Returns: gradient w.r.t. input [in_size]
+fn linear_backward(
+    layer: &!LinearLayer,
+    grad_output: &[f64; 256],
+) -> [f64; 256] with Mut, Div, Panic {
+    // Gradient w.r.t. weights: dW = grad_output * input^T
+    var o = 0
+    while o < layer.out_size {
+        var j = 0
+        while j < layer.in_size {
+            let dw = grad_output[o] * layer.cached_input[j]
+            let idx = o * layer.in_size + j
+            layer.weights.grad[idx] = layer.weights.grad[idx] + dw
+            j = j + 1
+        }
+        // Gradient w.r.t. bias: db = grad_output
+        layer.biases.grad[o] = layer.biases.grad[o] + grad_output[o]
+        o = o + 1
+    }
+
+    // Gradient w.r.t. input: dx = W^T * grad_output
+    var grad_input: [f64; 256] = [0.0; 256]
+    var j = 0
+    while j < layer.in_size {
+        var sum = 0.0
+        o = 0
+        while o < layer.out_size {
+            sum = sum + layer.weights.data[o * layer.in_size + j] * grad_output[o]
+            o = o + 1
+        }
+        grad_input[j] = sum
+        j = j + 1
+    }
+    grad_input
+}
+
+// =============================================================================
+// Activation Functions — Forward + Backward
+// =============================================================================
+
+// ReLU: y = max(0, x)
+fn relu_forward(input: &[f64; 256], n: i32, output: &![f64; 256]) with Mut, Div, Panic {
+    var i = 0
+    while i < n {
+        output[i] = if input[i] > 0.0 { input[i] } else { 0.0 }
+        i = i + 1
+    }
+}
+
+fn relu_backward(
+    input: &[f64; 256],
+    grad_output: &[f64; 256],
+    n: i32,
+    grad_input: &![f64; 256],
+) with Mut, Div, Panic {
+    var i = 0
+    while i < n {
+        grad_input[i] = if input[i] > 0.0 { grad_output[i] } else { 0.0 }
+        i = i + 1
+    }
+}
+
+// Sigmoid: y = 1 / (1 + exp(-x))
+fn sigmoid_forward(input: &[f64; 256], n: i32, output: &![f64; 256]) with Mut, Div, Panic {
+    var i = 0
+    while i < n {
+        let ex = exp_diff(0.0 - input[i])
+        output[i] = 1.0 / (1.0 + ex)
+        i = i + 1
+    }
+}
+
+fn sigmoid_backward(
+    output: &[f64; 256],
+    grad_output: &[f64; 256],
+    n: i32,
+    grad_input: &![f64; 256],
+) with Mut, Div, Panic {
+    var i = 0
+    while i < n {
+        let s = output[i]
+        grad_input[i] = grad_output[i] * s * (1.0 - s)
+        i = i + 1
+    }
+}
+
+// Softmax (numerically stable)
+fn softmax_forward(input: &[f64; 256], n: i32, output: &![f64; 256]) with Mut, Div, Panic {
+    // Find max for numerical stability
+    var max_val = input[0]
+    var i = 1
+    while i < n {
+        if input[i] > max_val { max_val = input[i] }
+        i = i + 1
+    }
+
+    // Compute exp(x - max) and sum
+    var sum = 0.0
+    i = 0
+    while i < n {
+        output[i] = exp_diff(input[i] - max_val)
+        sum = sum + output[i]
+        i = i + 1
+    }
+
+    // Normalize
+    i = 0
+    while i < n {
+        output[i] = output[i] / sum
+        i = i + 1
+    }
+}
+
+// =============================================================================
+// Loss Functions
+// =============================================================================
+
+// Mean Squared Error: L = (1/n) * sum((pred - target)^2)
+fn mse_loss(
+    pred: &[f64; 256],
+    target: &[f64; 256],
+    n: i32,
+) -> f64 with Mut, Div, Panic {
+    var sum = 0.0
+    var i = 0
+    while i < n {
+        let d = pred[i] - target[i]
+        sum = sum + d * d
+        i = i + 1
+    }
+    sum / (n as f64)
+}
+
+fn mse_grad(
+    pred: &[f64; 256],
+    target: &[f64; 256],
+    n: i32,
+    grad: &![f64; 256],
+) with Mut, Div, Panic {
+    var i = 0
+    let scale = 2.0 / (n as f64)
+    while i < n {
+        grad[i] = scale * (pred[i] - target[i])
+        i = i + 1
+    }
+}
+
+// Cross-entropy loss: L = -sum(target * log(pred))
+fn cross_entropy_loss(
+    pred: &[f64; 256],
+    target: &[f64; 256],
+    n: i32,
+) -> f64 with Mut, Div, Panic {
+    var sum = 0.0
+    var i = 0
+    while i < n {
+        let p = if pred[i] < 1.0e-10 { 1.0e-10 } else { pred[i] }
+        // ln via artanh series
+        var lp = 0.0
+        var m = p
+        var e_val = 0
+        while m >= 2.0 { m = m / 2.0; e_val = e_val + 1 }
+        while m < 0.5 { m = m * 2.0; e_val = e_val - 1 }
+        let t = (m - 1.0) / (m + 1.0)
+        let t2 = t * t
+        var s = t
+        var term = t
+        var k = 1
+        while k < 20 { term = term * t2; s = s + term / (2 * k + 1) as f64; k = k + 1 }
+        lp = 2.0 * s + (e_val as f64) * 0.6931471805599453
+
+        sum = sum - target[i] * lp
+        i = i + 1
+    }
+    sum
+}
+
+// =============================================================================
+// SGD Optimizer — with epistemic confidence update
+// =============================================================================
+
+struct SGDConfig {
+    learning_rate: f64,
+    momentum: f64,
+    weight_decay: f64,
+    confidence_decay_rate: f64,  // how much confidence decays per update
+}
+
+fn sgd_default() -> SGDConfig {
+    SGDConfig {
+        learning_rate: 0.01,
+        momentum: 0.9,
+        weight_decay: 0.0001,
+        confidence_decay_rate: 0.001,
+    }
+}
+
+// Update a single epistemic tensor's parameters using SGD
+fn sgd_step(
+    params: &!EpistemicTensor,
+    velocity: &![f64; 256],
+    n: i32,
+    config: &SGDConfig,
+) with Mut, Div, Panic {
+    var i = 0
+    while i < n {
+        // Weight decay
+        let grad_with_decay = params.grad[i] + config.weight_decay * params.data[i]
+
+        // Momentum
+        velocity[i] = config.momentum * velocity[i] + grad_with_decay
+
+        // Update parameter
+        params.data[i] = params.data[i] - config.learning_rate * velocity[i]
+
+        // Confidence update:
+        // Large gradient magnitude → less confidence (model is still changing)
+        // Small gradient → more confidence (converging)
+        let grad_mag = abs_diff(grad_with_decay)
+        let decay = config.confidence_decay_rate * (1.0 + 10.0 * grad_mag)
+        params.confidence[i] = params.confidence[i] * (1.0 - min_diff(decay, 0.1))
+
+        // Floor confidence
+        if params.confidence[i] < 0.01 { params.confidence[i] = 0.01 }
+
+        i = i + 1
+    }
+}
+
+// =============================================================================
+// Multi-Layer Perceptron (MLP) — up to 8 layers
+// =============================================================================
+
+struct MLP {
+    layers: [LinearLayer; 8],
+    n_layers: i32,
+    // Cached activations for backward pass
+    activations: [[f64; 256]; 9],  // n_layers + 1 (input + each layer output)
+    relu_masks: [[f64; 256]; 8],   // ReLU activations (pre-activation for backward)
+    layer_sizes: [i32; 9],         // input_size, hidden1, hidden2, ..., output_size
+}
+
+fn mlp_new(layer_sizes: &[i32; 9], n_layers: i32) -> MLP with Mut, Div, Panic {
+    var mlp = MLP {
+        layers: [LinearLayer {
+            weights: EpistemicTensor {
+                data: [0.0; 256], grad: [0.0; 256], confidence: [1.0; 256],
+                rows: 0, cols: 0, requires_grad: true,
             },
+            biases: EpistemicTensor {
+                data: [0.0; 256], grad: [0.0; 256], confidence: [1.0; 256],
+                rows: 0, cols: 0, requires_grad: true,
+            },
+            in_size: 0, out_size: 0,
+            cached_input: [0.0; 256], cached_output: [0.0; 256],
+        }; 8],
+        n_layers: n_layers,
+        activations: [[0.0; 256]; 9],
+        relu_masks: [[0.0; 256]; 8],
+        layer_sizes: [0; 9],
+    }
+
+    var i = 0
+    while i <= n_layers {
+        mlp.layer_sizes[i] = layer_sizes[i]
+        i = i + 1
+    }
+
+    // Initialize layers
+    i = 0
+    while i < n_layers {
+        mlp.layers[i] = linear_new(layer_sizes[i], layer_sizes[i + 1])
+        linear_init(&!mlp.layers[i], 0.42 + (i as f64) * 0.137)
+        i = i + 1
+    }
+
+    mlp
+}
+
+// Forward pass through the MLP
+// Returns output activations
+fn mlp_forward(
+    mlp: &!MLP,
+    input: &[f64; 256],
+    input_size: i32,
+) -> [f64; 256] with Mut, Div, Panic {
+    // Store input as first activation
+    var i = 0
+    while i < input_size {
+        mlp.activations[0][i] = input[i]
+        i = i + 1
+    }
+
+    // Forward through each layer
+    var layer_idx = 0
+    while layer_idx < mlp.n_layers {
+        let act = linear_forward(
+            &!mlp.layers[layer_idx],
+            &mlp.activations[layer_idx],
+            mlp.layer_sizes[layer_idx],
+        )
+
+        // Apply ReLU for all layers except the last
+        if layer_idx < mlp.n_layers - 1 {
+            var j = 0
+            while j < mlp.layer_sizes[layer_idx + 1] {
+                mlp.relu_masks[layer_idx][j] = act[j]  // store pre-relu
+                mlp.activations[layer_idx + 1][j] = if act[j] > 0.0 { act[j] } else { 0.0 }
+                j = j + 1
+            }
+        } else {
+            // Last layer: no activation (or softmax applied separately)
+            var j = 0
+            while j < mlp.layer_sizes[layer_idx + 1] {
+                mlp.activations[layer_idx + 1][j] = act[j]
+                j = j + 1
+            }
         }
+
+        layer_idx = layer_idx + 1
     }
 
-    /// Compute confidence from softmax entropy
-    /// High entropy = low confidence, low entropy = high confidence
-    fn confidence_from_entropy(logits: &Tensor) -> f64 {
-        // Softmax
-        let max_val = logits.data.iter().cloned().fold(f32::NEG_INFINITY, f32::max);
-        let exp_sum: f32 = logits.data.iter().map(|x| (x - max_val).exp()).sum();
-        let probs: Vec[f32] = logits.data.iter().map(|x| (x - max_val).exp() / exp_sum).collect();
-
-        // Entropy: -sum(p * log(p))
-        let entropy: f32 = probs.iter()
-            .filter(|&&p| p > 1e-10)
-            .map(|&p| -p * p.ln())
-            .sum();
-
-        // Normalize by max entropy (log(n))
-        let max_entropy = (logits.data.len() as f32).ln();
-        let normalized_entropy = entropy / max_entropy;
-
-        // Convert to confidence: low entropy = high confidence
-        (1.0 - normalized_entropy as f64).clamp(0.1, 0.99)
-    }
-
-    /// Decay confidence through gradient step
-    fn decay_confidence(mut self, factor: f64) -> EpistemicTensor {
-        // Model confidence in gradient-updated values
-        let current_mean = self.confidence.mean();
-        self.confidence = BetaConfidence::from_confidence(
-            current_mean * factor,
-            self.confidence.sample_size() * 0.9, // Reduce certainty
-        );
-        self
-    }
+    mlp.activations[mlp.n_layers]
 }
 
-// =============================================================================
-// Differentiable Effect
-// =============================================================================
-
-// Effect for differentiable computation
-//
-// This effect captures the context of gradient-tracked computation.
-// Handlers can implement various autodiff strategies:
-// - Eager (immediate gradient computation)
-// - Lazy (tape-based, compute on backward)
-// - Checkpointed (memory-efficient)
-effect gradient {
-    /// Record a forward operation
-    fn record_op(op: DiffOp, inputs: Vec[TensorId], output: TensorId);
-
-    /// Get tensor by ID
-    fn get_tensor(id: TensorId) -> Tensor;
-
-    /// Store tensor, return ID
-    fn store_tensor(tensor: Tensor) -> TensorId;
-
-    /// Trigger backward pass from a tensor
-    fn backward(id: TensorId);
-
-    /// Get current gradient for a tensor
-    fn get_grad(id: TensorId) -> Option[Tensor];
-}
-
-// Tensor identifier for tape tracking
-type TensorId = usize;
-
-// Differentiable operations
-enum DiffOp {
-    /// Matrix multiply: C = A @ B
-    MatMul,
-    /// Element-wise add: C = A + B
-    Add,
-    /// Element-wise multiply: C = A * B
-    Mul,
-    /// ReLU activation
-    ReLU,
-    /// Softmax
-    Softmax,
-    /// Layer normalization
-    LayerNorm { eps: f32 },
-    /// Embedding lookup
-    Embedding,
-    /// Cross entropy loss
-    CrossEntropy,
-    /// Mean squared error
-    MSE,
-}
-
-// A recorded operation on the tape
-struct TapeEntry {
-    op: DiffOp,
-    inputs: Vec[TensorId],
-    output: TensorId,
-    /// Cached values for backward pass
-    cache: Option[Vec[Tensor]],
-}
-
-// =============================================================================
-// Tape-Based Autodiff Handler
-// =============================================================================
-
-// Handler implementing reverse-mode autodiff via tape
-handler autodiff_handler for gradient {
-    /// Tensor storage
-    tensors: Vec[Tensor],
-    /// Operation tape
-    tape: Vec[TapeEntry],
-    /// Gradients (indexed by tensor ID)
-    grads: Map[TensorId, Tensor],
-    /// Epistemic decay factor per backward step
-    epistemic_decay: f64,
-}
-
-impl autodiff_handler {
-    fn new() -> autodiff_handler {
-        autodiff_handler {
-            tensors: vec![],
-            tape: vec![],
-            grads: Map::new(),
-            epistemic_decay: 0.99,
-        }
+// Backward pass: propagate gradients through the MLP
+fn mlp_backward(
+    mlp: &!MLP,
+    grad_output: &[f64; 256],
+) with Mut, Div, Panic {
+    var current_grad: [f64; 256] = [0.0; 256]
+    var i = 0
+    let out_size = mlp.layer_sizes[mlp.n_layers]
+    while i < out_size {
+        current_grad[i] = grad_output[i]
+        i = i + 1
     }
 
-    /// Handle: store_tensor
-    fn handle_store_tensor(mut self, tensor: Tensor) -> TensorId {
-        let id = self.tensors.len();
-        self.tensors.push(tensor);
-        id
-    }
-
-    /// Handle: get_tensor
-    fn handle_get_tensor(self, id: TensorId) -> Tensor {
-        self.tensors[id].clone()
-    }
-
-    /// Handle: record_op
-    fn handle_record_op(mut self, op: DiffOp, inputs: Vec[TensorId], output: TensorId) {
-        self.tape.push(TapeEntry {
-            op: op,
-            inputs: inputs,
-            output: output,
-            cache: None,
-        });
-    }
-
-    /// Handle: backward
-    fn handle_backward(mut self, loss_id: TensorId) {
-        // Initialize gradient of loss to 1.0
-        let loss_tensor = &self.tensors[loss_id];
-        let ones = Tensor::ones(loss_tensor.shape.clone());
-        self.grads.insert(loss_id, ones);
-
-        // Traverse tape in reverse
-        for entry in self.tape.iter().rev() {
-            let out_grad = match self.grads.get(&entry.output) {
-                Some(g) => g.clone(),
-                None => continue,
-            };
-
-            // Compute input gradients based on operation
-            let input_grads = self.compute_backward(&entry.op, &entry.inputs, &out_grad);
-
-            // Accumulate into input gradients
-            for (i, in_id) in entry.inputs.iter().enumerate() {
-                if let Some(in_grad) = input_grads.get(i) {
-                    self.grads.entry(*in_id)
-                        .and_modify(|g| {
-                            for (j, v) in g.data.iter_mut().enumerate() {
-                                *v += in_grad.data[j];
-                            }
-                        })
-                        .or_insert(in_grad.clone());
-
-                    // Also accumulate into tensor's grad if it requires_grad
-                    if self.tensors[*in_id].requires_grad {
-                        self.tensors[*in_id].accumulate_grad(&in_grad.data);
-                    }
+    // Backward through layers in reverse
+    var layer_idx = mlp.n_layers - 1
+    while layer_idx >= 0 {
+        // Apply ReLU backward for all layers except the last
+        if layer_idx < mlp.n_layers - 1 {
+            var j = 0
+            while j < mlp.layer_sizes[layer_idx + 1] {
+                if mlp.relu_masks[layer_idx][j] <= 0.0 {
+                    current_grad[j] = 0.0
                 }
-            }
-        }
-    }
-
-    /// Handle: get_grad
-    fn handle_get_grad(self, id: TensorId) -> Option[Tensor] {
-        self.grads.get(&id).cloned()
-    }
-
-    /// Compute backward pass for an operation
-    fn compute_backward(self, op: &DiffOp, inputs: &[TensorId], out_grad: &Tensor) -> Vec[Tensor] {
-        match op {
-            DiffOp::Add => {
-                // d(A + B)/dA = 1, d(A + B)/dB = 1
-                vec![out_grad.clone(), out_grad.clone()]
-            },
-            DiffOp::Mul => {
-                // d(A * B)/dA = B, d(A * B)/dB = A
-                let a = &self.tensors[inputs[0]];
-                let b = &self.tensors[inputs[1]];
-
-                let grad_a: Vec[f32] = out_grad.data.iter()
-                    .zip(b.data.iter())
-                    .map(|(g, bv)| g * bv)
-                    .collect();
-                let grad_b: Vec[f32] = out_grad.data.iter()
-                    .zip(a.data.iter())
-                    .map(|(g, av)| g * av)
-                    .collect();
-
-                vec![
-                    Tensor::new(grad_a, a.shape.clone()),
-                    Tensor::new(grad_b, b.shape.clone()),
-                ]
-            },
-            DiffOp::ReLU => {
-                // d(ReLU(x))/dx = 1 if x > 0, else 0
-                let input = &self.tensors[inputs[0]];
-                let grad: Vec[f32] = input.data.iter()
-                    .zip(out_grad.data.iter())
-                    .map(|(x, g)| if *x > 0.0 { *g } else { 0.0 })
-                    .collect();
-                vec![Tensor::new(grad, input.shape.clone())]
-            },
-            DiffOp::MatMul => {
-                // d(A @ B)/dA = out_grad @ B^T
-                // d(A @ B)/dB = A^T @ out_grad
-                // Simplified for 2D matrices
-                let a = &self.tensors[inputs[0]];
-                let b = &self.tensors[inputs[1]];
-
-                // Assuming a: [M, K], b: [K, N], out_grad: [M, N]
-                let m = a.shape[0];
-                let k = a.shape[1];
-                let n = b.shape[1];
-
-                // grad_a = out_grad @ b^T: [M, N] @ [N, K] = [M, K]
-                let mut grad_a = vec![0.0f32; m * k];
-                for i in 0..m {
-                    for j in 0..k {
-                        for l in 0..n {
-                            grad_a[i * k + j] += out_grad.data[i * n + l] * b.data[j * n + l];
-                        }
-                    }
-                }
-
-                // grad_b = a^T @ out_grad: [K, M] @ [M, N] = [K, N]
-                let mut grad_b = vec![0.0f32; k * n];
-                for i in 0..k {
-                    for j in 0..n {
-                        for l in 0..m {
-                            grad_b[i * n + j] += a.data[l * k + i] * out_grad.data[l * n + j];
-                        }
-                    }
-                }
-
-                vec![
-                    Tensor::new(grad_a, vec![m, k]),
-                    Tensor::new(grad_b, vec![k, n]),
-                ]
-            },
-            _ => {
-                // Other ops - return zero grads as placeholder
-                inputs.iter().map(|id| {
-                    let t = &self.tensors[*id];
-                    Tensor::zeros(t.shape.clone())
-                }).collect()
-            }
-        }
-    }
-
-    /// Clear the tape (call after optimizer step)
-    fn clear(mut self) {
-        self.tape.clear();
-        self.grads.clear();
-    }
-}
-
-// =============================================================================
-// Differentiable Operations (Using Effect)
-// =============================================================================
-
-// Matrix multiplication with gradient tracking
-fn matmul(a: TensorId, b: TensorId) -> TensorId with gradient {
-    let a_tensor = get_tensor(a);
-    let b_tensor = get_tensor(b);
-
-    // Compute C = A @ B
-    let m = a_tensor.shape[0];
-    let k = a_tensor.shape[1];
-    let n = b_tensor.shape[1];
-
-    let mut c_data = vec![0.0f32; m * n];
-    for i in 0..m {
-        for j in 0..n {
-            for l in 0..k {
-                c_data[i * n + j] += a_tensor.data[i * k + l] * b_tensor.data[l * n + j];
-            }
-        }
-    }
-
-    let c = Tensor::new(c_data, vec![m, n]);
-    let c_id = store_tensor(c);
-    record_op(DiffOp::MatMul, vec![a, b], c_id);
-    c_id
-}
-
-// Element-wise addition with gradient tracking
-fn add(a: TensorId, b: TensorId) -> TensorId with gradient {
-    let a_tensor = get_tensor(a);
-    let b_tensor = get_tensor(b);
-
-    let c_data: Vec[f32] = a_tensor.data.iter()
-        .zip(b_tensor.data.iter())
-        .map(|(x, y)| x + y)
-        .collect();
-
-    let c = Tensor::new(c_data, a_tensor.shape.clone());
-    let c_id = store_tensor(c);
-    record_op(DiffOp::Add, vec![a, b], c_id);
-    c_id
-}
-
-// Element-wise multiplication with gradient tracking
-fn mul(a: TensorId, b: TensorId) -> TensorId with gradient {
-    let a_tensor = get_tensor(a);
-    let b_tensor = get_tensor(b);
-
-    let c_data: Vec[f32] = a_tensor.data.iter()
-        .zip(b_tensor.data.iter())
-        .map(|(x, y)| x * y)
-        .collect();
-
-    let c = Tensor::new(c_data, a_tensor.shape.clone());
-    let c_id = store_tensor(c);
-    record_op(DiffOp::Mul, vec![a, b], c_id);
-    c_id
-}
-
-// ReLU activation with gradient tracking
-fn relu(x: TensorId) -> TensorId with gradient {
-    let x_tensor = get_tensor(x);
-
-    let y_data: Vec[f32] = x_tensor.data.iter()
-        .map(|&v| if v > 0.0 { v } else { 0.0 })
-        .collect();
-
-    let y = Tensor::new(y_data, x_tensor.shape.clone());
-    let y_id = store_tensor(y);
-    record_op(DiffOp::ReLU, vec![x], y_id);
-    y_id
-}
-
-// Softmax with gradient tracking
-fn softmax(x: TensorId) -> TensorId with gradient {
-    let x_tensor = get_tensor(x);
-
-    let max_val = x_tensor.data.iter().cloned().fold(f32::NEG_INFINITY, f32::max);
-    let exp_sum: f32 = x_tensor.data.iter().map(|v| (v - max_val).exp()).sum();
-    let y_data: Vec[f32] = x_tensor.data.iter()
-        .map(|v| (v - max_val).exp() / exp_sum)
-        .collect();
-
-    let y = Tensor::new(y_data, x_tensor.shape.clone());
-    let y_id = store_tensor(y);
-    record_op(DiffOp::Softmax, vec![x], y_id);
-    y_id
-}
-
-// =============================================================================
-// Simple Neural Network Layers
-// =============================================================================
-
-// Linear layer: y = x @ W + b
-struct Linear {
-    weight: TensorId,
-    bias: TensorId,
-    in_features: usize,
-    out_features: usize,
-}
-
-impl Linear {
-    /// Create linear layer with random initialization
-    fn new(in_features: usize, out_features: usize) -> Linear with gradient {
-        // Xavier initialization
-        let scale = (2.0 / (in_features + out_features) as f32).sqrt();
-        let weight_data: Vec[f32] = (0..in_features * out_features)
-            .map(|_| (rand::random::<f32>() - 0.5) * 2.0 * scale)
-            .collect();
-        let bias_data = vec![0.0f32; out_features];
-
-        let weight = Tensor::param(weight_data, vec![in_features, out_features]);
-        let bias = Tensor::param(bias_data, vec![out_features]);
-
-        Linear {
-            weight: store_tensor(weight),
-            bias: store_tensor(bias),
-            in_features: in_features,
-            out_features: out_features,
-        }
-    }
-
-    /// Forward pass
-    fn forward(self, x: TensorId) -> TensorId with gradient {
-        let wx = matmul(x, self.weight);
-        add(wx, self.bias)
-    }
-}
-
-// Simple MLP for construction suggestion
-struct ConstructionMLP {
-    layers: Vec[Linear],
-    hidden_dim: usize,
-}
-
-impl ConstructionMLP {
-    fn new(input_dim: usize, hidden_dim: usize, output_dim: usize, num_layers: usize) -> ConstructionMLP with gradient {
-        let mut layers = vec![];
-
-        // Input layer
-        layers.push(Linear::new(input_dim, hidden_dim));
-
-        // Hidden layers
-        for _ in 1..num_layers - 1 {
-            layers.push(Linear::new(hidden_dim, hidden_dim));
-        }
-
-        // Output layer
-        layers.push(Linear::new(hidden_dim, output_dim));
-
-        ConstructionMLP {
-            layers: layers,
-            hidden_dim: hidden_dim,
-        }
-    }
-
-    /// Forward pass with ReLU activations
-    fn forward(self, x: TensorId) -> TensorId with gradient {
-        let mut h = x;
-
-        for (i, layer) in self.layers.iter().enumerate() {
-            h = layer.forward(h);
-            // ReLU on all but last layer
-            if i < self.layers.len() - 1 {
-                h = relu(h);
+                j = j + 1
             }
         }
 
-        h
+        // Linear backward
+        let prev_grad = linear_backward(&!mlp.layers[layer_idx], &current_grad)
+        i = 0
+        while i < mlp.layer_sizes[layer_idx] {
+            current_grad[i] = prev_grad[i]
+            i = i + 1
+        }
+
+        layer_idx = layer_idx - 1
     }
+}
 
-    /// Forward with epistemic output
-    fn forward_epistemic(self, x: TensorId) -> EpistemicTensor with gradient {
-        let logits_id = self.forward(x);
-        let logits = get_tensor(logits_id);
-
-        // Compute confidence from entropy
-        let confidence = EpistemicTensor::confidence_from_entropy(&logits);
-
-        // Apply softmax for probabilities
-        let probs_id = softmax(logits_id);
-        let probs = get_tensor(probs_id);
-
-        EpistemicTensor::from_model(probs, "construction_mlp", confidence)
+// Zero all gradients in the MLP
+fn mlp_zero_grad(mlp: &!MLP) with Mut, Div, Panic {
+    var l = 0
+    while l < mlp.n_layers {
+        etensor_zero_grad(&!mlp.layers[l].weights)
+        etensor_zero_grad(&!mlp.layers[l].biases)
+        l = l + 1
     }
 }
 
 // =============================================================================
-// Optimizer
+// Training Step — with epistemic tracking
 // =============================================================================
 
-// Simple SGD optimizer
-struct SGD {
-    learning_rate: f32,
-    parameters: Vec[TensorId],
+struct TrainingState {
+    epoch: i32,
+    total_loss: f64,
+    min_confidence: f64,     // min across all parameters
+    mean_confidence: f64,    // mean across all parameters
+    n_params: i32,
 }
 
-impl SGD {
-    fn new(parameters: Vec[TensorId], lr: f32) -> SGD {
-        SGD {
-            learning_rate: lr,
-            parameters: parameters,
-        }
-    }
-
-    /// Perform optimization step
-    fn step(self) with gradient {
-        for param_id in &self.parameters {
-            if let Some(grad) = get_grad(*param_id) {
-                let mut param = get_tensor(*param_id);
-                for (i, g) in grad.data.iter().enumerate() {
-                    param.data[i] -= self.learning_rate * g;
-                }
-                // Note: In real impl, would need to update in storage
-            }
-        }
-    }
-
-    /// Zero all gradients
-    fn zero_grad(self) with gradient {
-        for param_id in &self.parameters {
-            let mut param = get_tensor(*param_id);
-            param.zero_grad();
-        }
-    }
+// Forward pass helper that computes loss gradient directly.
+// Avoids holding forward output while mlp is borrowed elsewhere.
+fn mlp_forward_and_grad(
+    mlp: &!MLP,
+    input: &[f64; 256],
+    target: &[f64; 256],
+    input_size: i32,
+    output_size: i32,
+    loss_grad: &![f64; 256],
+) -> f64 with Mut, Div, Panic {
+    let output = mlp_forward(mlp, input, input_size)
+    let loss = mse_loss(&output, target, output_size)
+    mse_grad(&output, target, output_size, loss_grad)
+    loss
 }
 
-// =============================================================================
-// Integration with Geometry Engine
-// =============================================================================
-
-// Neural construction suggester for geometry proofs
-struct NeuralConstructionSuggester {
-    /// MLP for scoring constructions
-    model: ConstructionMLP,
-    /// Number of construction types
-    num_constructions: usize,
-    /// Embedding dimension for proof state
-    state_dim: usize,
-}
-
-impl NeuralConstructionSuggester {
-    fn new(state_dim: usize, hidden_dim: usize, num_constructions: usize) -> NeuralConstructionSuggester with gradient {
-        NeuralConstructionSuggester {
-            model: ConstructionMLP::new(state_dim, hidden_dim, num_constructions, 3),
-            num_constructions: num_constructions,
-            state_dim: state_dim,
-        }
-    }
-
-    /// Encode proof state as tensor
-    fn encode_state(self, state: &ProofState) -> Tensor {
-        // Simple encoding: count of each predicate type + confidence
-        let mut encoding = vec![0.0f32; self.state_dim];
-
-        // Count predicates by type
-        for (_, pred) in state.predicates.iter() {
-            let idx = match pred {
-                Predicate::Collin(_) => 0,
-                Predicate::Concyc(_) => 1,
-                Predicate::Para(_) => 2,
-                Predicate::Perp(_) => 3,
-                Predicate::EqLen(_) => 4,
-                Predicate::EqAng(_) => 5,
-                Predicate::OnCir(_) => 6,
-                Predicate::Mid(_) => 7,
-                _ => 8,
-            };
-            if idx < self.state_dim {
-                encoding[idx] += 1.0;
-            }
-        }
-
-        // Add overall confidence
-        if self.state_dim > 10 {
-            encoding[10] = state.confidence.mean() as f32;
-        }
-
-        Tensor::new(encoding, vec![1, self.state_dim])
-    }
-
-    /// Suggest constructions with epistemic confidence
-    fn suggest(self, state: &ProofState) -> Vec[Construction] with gradient {
-        let state_tensor = self.encode_state(state);
-        let state_id = store_tensor(state_tensor);
-
-        let output = self.model.forward_epistemic(state_id);
-
-        // Convert probabilities to constructions
-        let mut constructions = vec![];
-
-        for (i, &prob) in output.tensor.data.iter().enumerate() {
-            if prob > 0.1 {  // Threshold
-                let kind = match i {
-                    0 => ConstructionType::ConstructMidpoint {
-                        p1: "A".to_string(),
-                        p2: "B".to_string()
-                    },
-                    1 => ConstructionType::ConstructPerpendicular {
-                        point: "C".to_string(),
-                        line_p1: "A".to_string(),
-                        line_p2: "B".to_string(),
-                    },
-                    2 => ConstructionType::ConstructCircumcircle {
-                        p1: "A".to_string(),
-                        p2: "B".to_string(),
-                        p3: "C".to_string(),
-                    },
-                    _ => continue,
-                };
-
-                // Confidence combines model confidence and per-construction probability
-                let conf = output.confidence.mean() * prob as f64;
-
-                constructions.push(Construction::from_neural(
-                    kind,
-                    conf,
-                    vec![format!("aux_{}", i)],
-                ));
-            }
-        }
-
-        // Sort by confidence
-        constructions.sort_by(|a, b| b.confidence.value().partial_cmp(&a.confidence.value()).unwrap());
-
-        constructions
-    }
-}
-
-// =============================================================================
-// Training Loop Integration
-// =============================================================================
-
-// Loss for construction suggestion (reward if proof succeeds)
-fn compute_loss(predicted: TensorId, success: bool) -> TensorId with gradient {
-    let pred = get_tensor(predicted);
-
-    // Simple reward signal: if proof succeeded, reward high-confidence predictions
-    let reward = if success { 1.0f32 } else { -0.1f32 };
-
-    // Loss = -reward * log(max_prob)
-    let max_prob = pred.data.iter().cloned().fold(0.0f32, f32::max);
-    let loss_val = -reward * max_prob.ln().max(-10.0);
-
-    let loss = Tensor::new(vec![loss_val], vec![1]);
-    store_tensor(loss)
-}
-
-// Train on a single proof attempt
-fn train_step(
-    suggester: &NeuralConstructionSuggester,
-    state: &ProofState,
-    success: bool,
-    optimizer: &SGD,
-) with gradient {
+// Complete training step: forward, loss, backward, SGD update.
+fn training_step(
+    mlp: &!MLP,
+    input: &[f64; 256],
+    target: &[f64; 256],
+    input_size: i32,
+    output_size: i32,
+    config: &SGDConfig,
+    velocities_w: &![[f64; 256]; 8],
+    velocities_b: &![[f64; 256]; 8],
+) -> f64 with Mut, Div, Panic {
     // Zero gradients
-    optimizer.zero_grad();
+    mlp_zero_grad(mlp)
 
-    // Forward pass
-    let state_tensor = suggester.encode_state(state);
-    let state_id = store_tensor(state_tensor);
-    let logits = suggester.model.forward(state_id);
-
-    // Compute loss
-    let loss_id = compute_loss(logits, success);
+    // Forward + compute loss gradient in one call
+    var loss_grad: [f64; 256] = [0.0; 256]
+    let loss = mlp_forward_and_grad(mlp, input, target, input_size, output_size, &!loss_grad)
 
     // Backward pass
-    backward(loss_id);
+    mlp_backward(mlp, &loss_grad)
 
-    // Optimizer step
-    optimizer.step();
+    // SGD update with epistemic tracking
+    var l = 0
+    while l < mlp.n_layers {
+        let w_n = mlp.layers[l].in_size * mlp.layers[l].out_size
+        let out_sz = mlp.layers[l].out_size
+        sgd_step(&!mlp.layers[l].weights, &!velocities_w[l], w_n, config)
+        sgd_step(&!mlp.layers[l].biases, &!velocities_b[l], out_sz, config)
+        l = l + 1
+    }
+
+    loss
+}
+
+// =============================================================================
+// Epistemic Summary — How confident is the model?
+// =============================================================================
+
+struct ModelConfidence {
+    min_weight_confidence: f64,
+    mean_weight_confidence: f64,
+    max_grad_magnitude: f64,
+    is_converging: bool,
+    n_total_params: i32,
+}
+
+fn mlp_confidence(mlp: &MLP) -> ModelConfidence with Mut, Div, Panic {
+    var min_conf = 1.0
+    var sum_conf = 0.0
+    var max_grad = 0.0
+    var total_params = 0
+
+    var l = 0
+    while l < mlp.n_layers {
+        let w_n = mlp.layers[l].in_size * mlp.layers[l].out_size
+        var i = 0
+        while i < w_n {
+            let c = mlp.layers[l].weights.confidence[i]
+            if c < min_conf { min_conf = c }
+            sum_conf = sum_conf + c
+            let gm = abs_diff(mlp.layers[l].weights.grad[i])
+            if gm > max_grad { max_grad = gm }
+            total_params = total_params + 1
+            i = i + 1
+        }
+        // Biases
+        i = 0
+        while i < mlp.layers[l].out_size {
+            let c = mlp.layers[l].biases.confidence[i]
+            if c < min_conf { min_conf = c }
+            sum_conf = sum_conf + c
+            total_params = total_params + 1
+            i = i + 1
+        }
+        l = l + 1
+    }
+
+    let mean_conf = if total_params > 0 { sum_conf / (total_params as f64) } else { 0.0 }
+
+    ModelConfidence {
+        min_weight_confidence: min_conf,
+        mean_weight_confidence: mean_conf,
+        max_grad_magnitude: max_grad,
+        is_converging: max_grad < 0.01,
+        n_total_params: total_params,
+    }
 }
