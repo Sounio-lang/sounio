@@ -541,7 +541,7 @@ impl<'ctx> Z3Solver<'ctx> {
     }
 
     /// Extract counterexample from current model
-    fn extract_counterexample(&self) -> Counterexample {
+    pub fn extract_counterexample(&self) -> Counterexample {
         let mut assignments = HashMap::new();
 
         if let Some(model) = self.solver.get_model() {
@@ -639,33 +639,33 @@ impl<'ctx> Z3Solver<'ctx> {
             SmtFormula::Forall(var, sort, body) => {
                 // Create bound variable
                 let z3_sort = self.translate_sort(sort);
-                let bound = Dynamic::new_const(self.context, Symbol::String(var.clone()), &z3_sort);
+                let bound = self.make_const(var.clone(), &z3_sort);
                 self.variables.insert(var.clone(), bound.clone());
 
                 let body_ast = self.translate_formula(body)?;
 
-                // Create forall
-                let pattern: [&dyn Ast; 0] = [];
+                // Create forall with no patterns
+                let patterns: &[&z3::Pattern] = &[];
                 Ok(z3::ast::forall_const(
                     self.context,
-                    &[&bound],
-                    &pattern,
+                    &[&bound as &dyn Ast],
+                    patterns,
                     &body_ast,
                 ))
             }
 
             SmtFormula::Exists(var, sort, body) => {
                 let z3_sort = self.translate_sort(sort);
-                let bound = Dynamic::new_const(self.context, Symbol::String(var.clone()), &z3_sort);
+                let bound = self.make_const(var.clone(), &z3_sort);
                 self.variables.insert(var.clone(), bound.clone());
 
                 let body_ast = self.translate_formula(body)?;
 
-                let pattern: [&dyn Ast; 0] = [];
+                let patterns: &[&z3::Pattern] = &[];
                 Ok(z3::ast::exists_const(
                     self.context,
-                    &[&bound],
-                    &pattern,
+                    &[&bound as &dyn Ast],
+                    patterns,
                     &body_ast,
                 ))
             }
@@ -699,11 +699,7 @@ impl<'ctx> Z3Solver<'ctx> {
                     Ok(var.clone())
                 } else {
                     // Create a new Real variable by default
-                    let var = Dynamic::new_const(
-                        self.context,
-                        Symbol::String(name.clone()),
-                        &Sort::real(self.context),
-                    );
+                    let var = self.make_const(name.clone(), &Sort::real(self.context));
                     self.variables.insert(name.clone(), var.clone());
                     Ok(var)
                 }
@@ -791,11 +787,7 @@ impl<'ctx> Z3Solver<'ctx> {
                 // Simplified: return a fresh variable
                 let t = self.translate_term(inner)?;
                 let len_name = format!("len_{:?}", t);
-                let var = Dynamic::new_const(
-                    self.context,
-                    Symbol::String(len_name),
-                    &Sort::int(self.context),
-                );
+                let var = self.make_const(len_name, &Sort::int(self.context));
                 Ok(var)
             }
 
@@ -844,6 +836,13 @@ impl<'ctx> Z3Solver<'ctx> {
         })
     }
 
+    /// Create a Dynamic constant with the given name and sort.
+    /// Workaround for z3 0.12.1 where Dynamic::new_const doesn't exist.
+    fn make_const(&self, name: impl Into<Symbol>, sort: &Sort<'ctx>) -> Dynamic<'ctx> {
+        let decl = z3::FuncDecl::new(self.context, name, &[], sort);
+        decl.apply(&[])
+    }
+
     /// Translate SmtSort to Z3 Sort
     fn translate_sort(&mut self, sort: &SmtSort) -> Sort<'ctx> {
         match sort {
@@ -867,6 +866,10 @@ impl<'ctx> Z3Solver<'ctx> {
             }
             SmtSort::Epsilon => Sort::real(self.context),
             SmtSort::Provenance => Sort::bitvector(self.context, 64),
+            // Hypercomplex types modeled as tuples of reals via uninterpreted sorts
+            SmtSort::Quaternion => Sort::uninterpreted(self.context, Symbol::String("Quaternion".to_string())),
+            SmtSort::Octonion => Sort::uninterpreted(self.context, Symbol::String("Octonion".to_string())),
+            SmtSort::Sedenion => Sort::uninterpreted(self.context, Symbol::String("Sedenion".to_string())),
         }
     }
 
@@ -900,7 +903,7 @@ impl<'ctx> Z3Solver<'ctx> {
     /// Declare a variable with specific sort
     pub fn declare_var(&mut self, name: &str, sort: &SmtSort) {
         let z3_sort = self.translate_sort(sort);
-        let var = Dynamic::new_const(self.context, Symbol::String(name.to_string()), &z3_sort);
+        let var = self.make_const(name.to_string(), &z3_sort);
         self.variables.insert(name.to_string(), var);
     }
 
@@ -1030,7 +1033,7 @@ pub fn create_epistemic_verifier() -> Box<dyn EpistemicVerifier> {
 }
 
 /// Trait for epistemic property verification
-pub trait EpistemicVerifier: Send + Sync {
+pub trait EpistemicVerifier {
     /// Verify an epistemic property
     fn verify(&mut self, property: &EpistemicProperty) -> EpistemicVerifyResult;
 

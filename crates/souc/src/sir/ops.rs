@@ -442,6 +442,117 @@ pub enum AutodiffMode {
     Reverse,
 }
 
+/// Causal inference operations in SIR
+///
+/// Implements Pearl's three-step counterfactual algorithm:
+///   1. Abduction: Infer exogenous variables from observations
+///   2. Action: Modify structural equations per intervention
+///   3. Prediction: Forward-propagate through modified model
+///
+/// Reference: Pearl, J. (2009). Causality. Cambridge University Press.
+#[derive(Debug, Clone, PartialEq)]
+pub enum CausalOp {
+    /// Step 1: Abduction — infer exogenous variables U from observed data.
+    /// For linear models: U = X - f(Pa(X)).
+    /// For nonlinear models: Newton-Raphson iteration.
+    Abduction {
+        /// Observed variable values
+        observed: Vec<ValueId>,
+        /// Structural equation coefficients (for linear case)
+        coefficients: Vec<f64>,
+        /// Result: inferred exogenous variables
+        result: ValueId,
+    },
+
+    /// Step 2: Action — apply do(X=v) intervention.
+    /// Removes incoming edges to X, sets X=v in the structural model.
+    DoIntervention {
+        /// Variable being intervened on
+        target_var: String,
+        /// Value to set
+        value: ValueId,
+        /// Model state before intervention
+        pre_state: ValueId,
+        /// Model state after intervention
+        post_state: ValueId,
+    },
+
+    /// Step 3: Prediction — forward propagation through modified model.
+    /// Computes Y under do(X=v) using structural equations with
+    /// exogenous variables from abduction.
+    Prediction {
+        /// Exogenous variables from abduction
+        exogenous: ValueId,
+        /// Intervention state
+        intervention_state: ValueId,
+        /// Target outcome variable
+        outcome_var: String,
+        /// Computed outcome
+        result: ValueId,
+    },
+
+    /// Full counterfactual query: combines all three steps.
+    /// "What would Y have been if we had set X=v, given factual observations?"
+    CounterfactualQuery {
+        /// Factual observations
+        factual_observations: Vec<ValueId>,
+        /// Intervention specification
+        intervention_var: String,
+        intervention_value: ValueId,
+        /// Query outcome variable
+        outcome_var: String,
+        /// Result of counterfactual
+        result: ValueId,
+    },
+
+    /// Causal effect estimation using an identification formula.
+    /// Corresponds to the output of Pearl's ID algorithm.
+    EstimateEffect {
+        /// Which formula to use (from ID algorithm)
+        formula_kind: CausalFormulaKind,
+        /// Treatment value
+        treatment: ValueId,
+        /// Outcome variable
+        outcome: ValueId,
+        /// Adjustment set variables (for backdoor/frontdoor)
+        adjustment_set: Vec<ValueId>,
+        /// Result
+        result: ValueId,
+    },
+
+    /// D-separation test at runtime (for dynamic graphs).
+    /// Returns a boolean indicating whether source and target are
+    /// d-separated given the conditioning set.
+    DSeparationTest {
+        /// Source node
+        source: String,
+        /// Target node
+        target: String,
+        /// Conditioning set
+        conditioning: Vec<String>,
+        /// Boolean result
+        result: ValueId,
+    },
+}
+
+/// Which identification formula to apply for causal effect estimation.
+///
+/// These correspond to the identification strategies from Pearl's ID
+/// algorithm (Pearl 2009, Section 3.4).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CausalFormulaKind {
+    /// P(y|do(x)) = Sum_z P(y|x,z)P(z) — backdoor adjustment
+    BackdoorAdjustment,
+    /// P(y|do(x)) = Sum_m P(m|x) Sum_x' P(y|m,x')P(x') — frontdoor
+    FrontdoorAdjustment,
+    /// Wald estimator: Cov(Y,Z)/Cov(X,Z) — instrumental variable
+    InstrumentalVariable,
+    /// Direct conditional: P(y|x) when no confounding
+    Conditional,
+    /// Marginal distribution: P(y)
+    Marginal,
+}
+
 /// Failure mode for assertion violations
 #[derive(Debug, Clone, PartialEq)]
 pub enum FailureMode {
@@ -536,6 +647,7 @@ pub enum SirInst {
     Epistemic(EpistemicOp),
     Prob(ProbOp),
     Scientific(ScientificOp),
+    Causal(CausalOp),
 
     // === Debugging/Metadata ===
     /// Debug value intrinsic
@@ -575,6 +687,7 @@ impl SirInst {
             | SirInst::DebugValue { .. }
             | SirInst::Assert { .. } => true,
             SirInst::Prob(ProbOp::Sample { .. } | ProbOp::SampleN { .. }) => true,
+            SirInst::Causal(CausalOp::DoIntervention { .. }) => true,
             _ => false,
         }
     }
@@ -706,6 +819,51 @@ impl SirInst {
                     ..
                 } => vec![*input],
             },
+            SirInst::Causal(causal) => match causal {
+                CausalOp::Abduction {
+                    observed, result, ..
+                } => {
+                    let mut ops: Vec<ValueId> = observed.clone();
+                    ops.push(*result);
+                    ops
+                }
+                CausalOp::DoIntervention {
+                    value,
+                    pre_state,
+                    post_state,
+                    ..
+                } => vec![*value, *pre_state, *post_state],
+                CausalOp::Prediction {
+                    exogenous,
+                    intervention_state,
+                    result,
+                    ..
+                } => vec![*exogenous, *intervention_state, *result],
+                CausalOp::CounterfactualQuery {
+                    factual_observations,
+                    intervention_value,
+                    result,
+                    ..
+                } => {
+                    let mut ops: Vec<ValueId> = factual_observations.clone();
+                    ops.push(*intervention_value);
+                    ops.push(*result);
+                    ops
+                }
+                CausalOp::EstimateEffect {
+                    treatment,
+                    outcome,
+                    adjustment_set,
+                    result,
+                    ..
+                } => {
+                    let mut ops = vec![*treatment, *outcome];
+                    ops.extend(adjustment_set.iter().copied());
+                    ops.push(*result);
+                    ops
+                }
+                CausalOp::DSeparationTest { result, .. } => vec![*result],
+            },
             SirInst::DebugValue { value, .. } => vec![*value],
             SirInst::Assert { cond, .. } | SirInst::Assume(cond) => vec![*cond],
             SirInst::BuildAggregate { fields, .. } => fields.clone(),
@@ -746,6 +904,7 @@ impl fmt::Display for SirInst {
             SirInst::Epistemic(ep) => write!(f, "epistemic.{:?}", ep),
             SirInst::Prob(prob) => write!(f, "prob.{:?}", prob),
             SirInst::Scientific(sci) => write!(f, "sci.{:?}", sci),
+            SirInst::Causal(causal) => write!(f, "causal.{:?}", causal),
             SirInst::DebugValue { value, name } => write!(f, "debug.value {} = {}", name, value),
             SirInst::Assert {
                 cond,

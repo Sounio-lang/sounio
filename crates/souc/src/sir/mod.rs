@@ -49,6 +49,7 @@ pub mod alloc_policy;
 pub mod blocks;
 pub mod builder;
 pub mod capabilities;
+pub mod causal;
 pub mod cost;
 pub mod emit;
 pub mod gpu_attention;

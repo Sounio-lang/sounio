@@ -56,6 +56,9 @@ pub mod uplift;
 pub mod uplift_syntax;
 pub mod z3_identify;
 
+// Causal discovery (PC algorithm)
+pub mod discovery;
+
 // Epistemic-causal modules (new)
 pub mod dag;
 pub mod do_calculus;

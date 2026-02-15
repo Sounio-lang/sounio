@@ -452,7 +452,8 @@ fn lower_type_def(ctx: &mut LoweringContext, module: &mut SirModule, type_def: &
                 .collect();
             let struct_ty = StructType::new(sir_fields).named(&type_def.name);
             let sir_ty = SirType::Struct(struct_ty);
-            ctx.named_types.insert(type_def.name.clone(), sir_ty.clone());
+            ctx.named_types
+                .insert(type_def.name.clone(), sir_ty.clone());
             module.add_type(&type_def.name, sir_ty);
         }
         HlirTypeDefKind::Enum(variants) => {
@@ -476,7 +477,8 @@ fn lower_type_def(ctx: &mut LoweringContext, module: &mut SirModule, type_def: &
 
             let struct_ty = StructType::new(vec![tag_field, payload_field]).named(&type_def.name);
             let sir_ty = SirType::Struct(struct_ty);
-            ctx.named_types.insert(type_def.name.clone(), sir_ty.clone());
+            ctx.named_types
+                .insert(type_def.name.clone(), sir_ty.clone());
             module.add_type(&type_def.name, sir_ty);
         }
     }
@@ -661,7 +663,10 @@ fn lower_instruction(
                     tail: false,
                     nounwind: false,
                 };
-                return Some(vec![Instruction::with_result(result, SirInst::Call(call_info))]);
+                return Some(vec![Instruction::with_result(
+                    result,
+                    SirInst::Call(call_info),
+                )]);
             }
 
             let sir_op = lower_binary_op(*op, &instr.ty);
@@ -1266,8 +1271,7 @@ fn lower_instruction(
                         return Some(vec![len_inst, ptr_inst, slice_inst]);
                     }
 
-                    let backing_arr_ty =
-                        SirType::Array(ArrayType::new(elem_ty, sir_values.len()));
+                    let backing_arr_ty = SirType::Array(ArrayType::new(elem_ty, sir_values.len()));
                     let backing_val = ctx.alloc_value(backing_arr_ty.clone());
                     let backing_inst = Instruction::with_result(
                         backing_val,

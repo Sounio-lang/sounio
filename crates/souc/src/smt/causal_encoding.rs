@@ -300,10 +300,7 @@ pub fn verify_causal_property(
 
     let result = match property {
         CausalProperty::DSeparated {
-            x,
-            y,
-            conditioning,
-            ..
+            x, y, conditioning, ..
         } => check_d_separation(graph, x, y, conditioning, property),
 
         CausalProperty::BackdoorValid {
@@ -344,10 +341,7 @@ fn validate_property_nodes(
 
     let referenced: Vec<&str> = match property {
         CausalProperty::DSeparated {
-            x,
-            y,
-            conditioning,
-            ..
+            x, y, conditioning, ..
         } => {
             let mut v: Vec<&str> = vec![x.as_str(), y.as_str()];
             v.extend(conditioning.iter().map(|s| s.as_str()));
@@ -629,7 +623,8 @@ fn check_frontdoor_criterion(
 
     for path in &paths {
         // Path includes endpoints; intermediaries are path[1..path.len()-1]
-        let intermediaries: HashSet<&str> = path[1..path.len() - 1].iter().map(|s| s.as_str()).collect();
+        let intermediaries: HashSet<&str> =
+            path[1..path.len() - 1].iter().map(|s| s.as_str()).collect();
         let passes_through_mediator = mediator_set
             .iter()
             .any(|m| intermediaries.contains(m.as_str()));
@@ -822,7 +817,10 @@ fn check_identifiable(
 /// Build parent and child adjacency maps from a causal graph.
 fn build_adjacency<'a>(
     graph: &'a CausalGraphDef,
-) -> (HashMap<&'a str, HashSet<&'a str>>, HashMap<&'a str, HashSet<&'a str>>) {
+) -> (
+    HashMap<&'a str, HashSet<&'a str>>,
+    HashMap<&'a str, HashSet<&'a str>>,
+) {
     let mut parents: HashMap<&str, HashSet<&str>> = HashMap::new();
     let mut children: HashMap<&str, HashSet<&str>> = HashMap::new();
 
@@ -1132,7 +1130,9 @@ pub fn is_path_blocked(graph: &CausalGraphDef, path: &[String], conditioning: &[
             // descendant is in the conditioning set.
             let descendants = get_descendants(graph, node);
             let collider_or_desc_in_z = conditioning_set.contains(node.as_str())
-                || descendants.iter().any(|d| conditioning_set.contains(d.as_str()));
+                || descendants
+                    .iter()
+                    .any(|d| conditioning_set.contains(d.as_str()));
             if !collider_or_desc_in_z {
                 return true; // Blocked at this collider
             }

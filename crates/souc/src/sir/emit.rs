@@ -5813,11 +5813,7 @@ impl X86_64Emitter {
                         let copy_bytes = (size + 7) & !7;
                         for chunk in (0..copy_bytes).step_by(8) {
                             self.emit_mov_r64_mem_disp(scratch, src_reg, chunk as i32);
-                            self.emit_mov_mem_disp_r64(
-                                ptr_reg,
-                                chunk as i32,
-                                scratch,
-                            );
+                            self.emit_mov_mem_disp_r64(ptr_reg, chunk as i32, scratch);
                         }
                     } else {
                         // For integer stores, use MOV with GPR

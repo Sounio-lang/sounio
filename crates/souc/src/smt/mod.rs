@@ -22,9 +22,9 @@
 
 pub mod causal_encoding;
 mod epistemic;
-mod formula;
+pub mod formula;
 mod interval;
-mod solver;
+pub mod solver;
 pub mod z3_solver;
 
 pub use epistemic::{EpistemicConstraint, EpistemicProperty, EpistemicVerifier};

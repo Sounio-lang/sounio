@@ -346,13 +346,11 @@ pub fn identify(
         // Step 6: Try instrumental variable
         // ------------------------------------------------------------------
         if let Some(instrument) = find_instrument(&ancestor_graph, t, y) {
-            return IdentificationResult::Identified(
-                IdentificationFormula::InstrumentalVariable {
-                    instrument: vec![instrument],
-                    treatment: effective_treatment,
-                    outcome: outcome.to_vec(),
-                },
-            );
+            return IdentificationResult::Identified(IdentificationFormula::InstrumentalVariable {
+                instrument: vec![instrument],
+                treatment: effective_treatment,
+                outcome: outcome.to_vec(),
+            });
         }
     }
 
@@ -399,9 +397,12 @@ pub fn identify(
 
         if all_identified && !factors.is_empty() {
             if factors.len() == 1 {
-                return IdentificationResult::Identified(factors.into_iter().next().expect(
-                    "factors vector is non-empty",
-                ));
+                return IdentificationResult::Identified(
+                    factors
+                        .into_iter()
+                        .next()
+                        .expect("factors vector is non-empty"),
+                );
             }
             return IdentificationResult::Identified(IdentificationFormula::Product { factors });
         }
@@ -445,9 +446,7 @@ fn find_backdoor_set(
         .nodes
         .iter()
         .map(|n| n.name.clone())
-        .filter(|n| {
-            n != treatment && n != outcome && !treatment_desc.contains(n)
-        })
+        .filter(|n| n != treatment && n != outcome && !treatment_desc.contains(n))
         .collect();
 
     let mutilated = causal_encoding::mutilate_graph(graph, treatment);
@@ -510,7 +509,15 @@ fn find_valid_subset(
 
     for i in start..candidates.len() {
         current.push(candidates[i].clone());
-        if find_valid_subset(mutilated, treatment, outcome, candidates, size, i + 1, current) {
+        if find_valid_subset(
+            mutilated,
+            treatment,
+            outcome,
+            candidates,
+            size,
+            i + 1,
+            current,
+        ) {
             return true;
         }
         current.pop();
@@ -536,12 +543,8 @@ fn find_frontdoor_set(
 ) -> Option<Vec<String>> {
     // Candidate mediators: nodes on directed paths from treatment to outcome
     // (excluding endpoints).
-    let directed_paths = causal_encoding::enumerate_directed_paths(
-        graph,
-        treatment,
-        outcome,
-        graph.nodes.len(),
-    );
+    let directed_paths =
+        causal_encoding::enumerate_directed_paths(graph, treatment, outcome, graph.nodes.len());
 
     if directed_paths.is_empty() {
         return None;
@@ -663,11 +666,7 @@ fn find_valid_frontdoor_subset(
 ///
 /// Conditions 2+3 are tested jointly by checking Z _|_ Y in the graph with
 /// all outgoing edges from X removed.
-fn find_instrument(
-    graph: &CausalGraphDef,
-    treatment: &str,
-    outcome: &str,
-) -> Option<String> {
+fn find_instrument(graph: &CausalGraphDef, treatment: &str, outcome: &str) -> Option<String> {
     let mutilated = causal_encoding::mutilate_graph(graph, treatment);
 
     for node in &graph.nodes {
@@ -734,8 +733,7 @@ fn find_c_components(graph: &CausalGraphDef) -> Vec<HashSet<String>> {
     // Union-Find for c-components.
     // Two nodes are in the same c-component if they share a common parent
     // (indicating potential latent confounding).
-    let mut component_id: std::collections::HashMap<&str, usize> =
-        std::collections::HashMap::new();
+    let mut component_id: std::collections::HashMap<&str, usize> = std::collections::HashMap::new();
     for (i, &node) in all_nodes.iter().enumerate() {
         component_id.insert(node, i);
     }
@@ -801,17 +799,14 @@ pub fn identification_confidence(formula: &IdentificationFormula) -> f64 {
             CONFIDENCE_BACKDOOR * CONFIDENCE_POSITIVITY * CONFIDENCE_CAUSAL_MARKOV
         }
 
-        IdentificationFormula::Frontdoor { .. } => {
-            CONFIDENCE_FRONTDOOR * CONFIDENCE_CAUSAL_MARKOV
-        }
+        IdentificationFormula::Frontdoor { .. } => CONFIDENCE_FRONTDOOR * CONFIDENCE_CAUSAL_MARKOV,
 
-        IdentificationFormula::InstrumentalVariable { .. } => {
-            CONFIDENCE_IV * CONFIDENCE_POSITIVITY
-        }
+        IdentificationFormula::InstrumentalVariable { .. } => CONFIDENCE_IV * CONFIDENCE_POSITIVITY,
 
-        IdentificationFormula::Product { factors } => {
-            factors.iter().map(|f| identification_confidence(f)).product()
-        }
+        IdentificationFormula::Product { factors } => factors
+            .iter()
+            .map(|f| identification_confidence(f))
+            .product(),
     }
 }
 
@@ -1000,11 +995,7 @@ mod tests {
         }
     }
 
-    fn graph(
-        name: &str,
-        nodes: Vec<CausalNodeDef>,
-        edges: Vec<CausalEdgeDef>,
-    ) -> CausalGraphDef {
+    fn graph(name: &str, nodes: Vec<CausalNodeDef>, edges: Vec<CausalEdgeDef>) -> CausalGraphDef {
         CausalGraphDef {
             name: name.to_string(),
             nodes,
@@ -1020,11 +1011,7 @@ mod tests {
 
     #[test]
     fn test_empty_treatment_marginal() {
-        let g = graph(
-            "simple",
-            vec![node("A"), node("B")],
-            vec![edge("A", "B")],
-        );
+        let g = graph("simple", vec![node("A"), node("B")], vec![edge("A", "B")]);
 
         let result = identify(&g, &[], &["B".into()]);
         match result {
@@ -1041,11 +1028,7 @@ mod tests {
 
     #[test]
     fn test_no_confounding_conditional() {
-        let g = graph(
-            "simple",
-            vec![node("A"), node("B")],
-            vec![edge("A", "B")],
-        );
+        let g = graph("simple", vec![node("A"), node("B")], vec![edge("A", "B")]);
 
         let result = identify(&g, &["A".into()], &["B".into()]);
         match result {
@@ -1443,7 +1426,10 @@ mod tests {
             IdentificationResult::Identified(IdentificationFormula::Marginal { ref outcome }) => {
                 assert_eq!(outcome, &["B"]);
             }
-            _ => panic!("expected Marginal (treatment not ancestor), got: {:?}", result),
+            _ => panic!(
+                "expected Marginal (treatment not ancestor), got: {:?}",
+                result
+            ),
         }
     }
 
@@ -1476,11 +1462,7 @@ mod tests {
     #[test]
     fn test_find_c_components_independent() {
         // Independent nodes: A, B (no edges)
-        let g = graph(
-            "independent",
-            vec![node("A"), node("B")],
-            vec![],
-        );
+        let g = graph("independent", vec![node("A"), node("B")], vec![]);
 
         let components = find_c_components(&g);
         assert_eq!(
@@ -1502,9 +1484,9 @@ mod tests {
 
         let components = find_c_components(&g);
         // A and B share parent U, so they should be in the same c-component
-        let ab_together = components.iter().any(|c| {
-            c.contains("A") && c.contains("B")
-        });
+        let ab_together = components
+            .iter()
+            .any(|c| c.contains("A") && c.contains("B"));
         assert!(
             ab_together,
             "A and B should be in the same c-component (shared parent U), got: {:?}",
