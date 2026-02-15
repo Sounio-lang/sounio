@@ -41,6 +41,13 @@ pub enum Backend {
     #[value(name = "native")]
     Native,
 
+    /// Self-hosted native backend (produces ELF/Mach-O)
+    /// - Written in Sounio, not Rust
+    /// - Produces standalone native executables
+    /// - Linux x86-64, macOS x86-64/ARM64 support
+    #[value(name = "selfhosted-native")]
+    SelfhostedNative,
+
     /// LLVM backend (AOT compilation)
     /// - Wide architecture support
     /// - Mature optimizations
@@ -65,6 +72,7 @@ impl Backend {
     pub fn all() -> &'static [Backend] {
         &[
             Backend::Native,
+            Backend::SelfhostedNative,
             Backend::Llvm,
             Backend::Cranelift,
             Backend::Gpu,
@@ -81,6 +89,7 @@ impl Backend {
     pub fn is_available(&self) -> bool {
         match self {
             Backend::Native => true, // Always available
+            Backend::SelfhostedNative => cfg!(feature = "selfhost-native"),
             Backend::Llvm => cfg!(feature = "llvm-base"),
             Backend::Cranelift => cfg!(feature = "jit"),
             Backend::Gpu => cfg!(feature = "gpu"),
@@ -91,6 +100,7 @@ impl Backend {
     pub fn name(&self) -> &'static str {
         match self {
             Backend::Native => "native",
+            Backend::SelfhostedNative => "selfhosted-native",
             Backend::Llvm => "llvm",
             Backend::Cranelift => "cranelift",
             Backend::Gpu => "gpu",
@@ -101,6 +111,7 @@ impl Backend {
     pub fn description(&self) -> &'static str {
         match self {
             Backend::Native => "Native SIR backend with epistemic-aware allocation (x86-64)",
+            Backend::SelfhostedNative => "Self-hosted native backend producing ELF/Mach-O binaries",
             Backend::Llvm => "LLVM backend for AOT compilation (multi-arch)",
             Backend::Cranelift => "Cranelift JIT backend for fast compilation",
             Backend::Gpu => "GPU backend for NVIDIA PTX emission",
@@ -110,6 +121,7 @@ impl Backend {
     /// Get known issues/warnings
     pub fn warnings(&self) -> Option<&'static str> {
         match self {
+            Backend::SelfhostedNative => Some("⚠️  Linux/macOS x86-64/ARM64 only; Windows deferred"),
             Backend::Llvm => Some("⚠️  May have issues with refinement types + FFI"),
             Backend::Gpu => Some("Requires CUDA toolkit"),
             _ => None,
@@ -120,6 +132,7 @@ impl Backend {
     pub fn to_codegen(&self) -> Option<CodegenBackend> {
         match self {
             Backend::Native => None, // Not in codegen enum yet
+            Backend::SelfhostedNative => None, // Uses Sounio interpreter, not codegen
             Backend::Llvm => Some(CodegenBackend::LLVM),
             Backend::Cranelift => Some(CodegenBackend::Cranelift),
             Backend::Gpu => Some(CodegenBackend::GPU),
@@ -145,6 +158,8 @@ impl FromStr for Backend {
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         match s.to_lowercase().as_str() {
             "native" | "sir" | "x86" | "x86-64" | "x86_64" => Ok(Backend::Native),
+            "selfhosted-native" | "selfhosted_native" | "selfhost-native" | "selfhost_native"
+            | "sio-native" => Ok(Backend::SelfhostedNative),
             "llvm" => Ok(Backend::Llvm),
             "cranelift" | "cl" | "jit" => Ok(Backend::Cranelift),
             "gpu" | "cuda" | "ptx" => Ok(Backend::Gpu),
@@ -161,7 +176,7 @@ impl fmt::Display for BackendParseError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(
             f,
-            "Unknown backend '{}'. Available: native, llvm, cranelift, gpu",
+            "Unknown backend '{}'. Available: native, selfhosted-native, llvm, cranelift, gpu",
             self.0
         )
     }
@@ -712,6 +727,7 @@ pub fn compile(args: &BuildArgs) -> CompileOutput {
     // Dispatch to appropriate backend
     let result = match args.backend {
         Backend::Native => compile_native(args),
+        Backend::SelfhostedNative => compile_native(args),
         Backend::Llvm => compile_llvm(args),
         Backend::Cranelift => compile_cranelift(args),
         Backend::Gpu => compile_gpu(args),

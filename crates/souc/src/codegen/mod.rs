@@ -17,6 +17,9 @@ pub mod mir_cranelift;
 pub mod native;
 pub mod simd;
 
+#[cfg(feature = "selfhost-native")]
+pub mod selfhosted_native;
+
 #[cfg(all(test, target_os = "linux", target_arch = "x86_64"))]
 mod native_tests;
 
