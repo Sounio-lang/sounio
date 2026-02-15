@@ -8,9 +8,8 @@
 
 use proptest::prelude::*;
 use soir::{
-    BinaryOp, IrFunction, IrInstr, IrOpcode, Name, SoirModule, UnaryOp,
-    deserialize, normalize, serialize, IR_INVALID_REG,
-    IR_MAX_FUNCS, IR_MAX_INSTRS, IR_MAX_PARAMS, IR_MAX_STRINGS,
+    BinaryOp, IR_INVALID_REG, IR_MAX_FUNCS, IR_MAX_INSTRS, IR_MAX_PARAMS, IR_MAX_STRINGS,
+    IrFunction, IrInstr, IrOpcode, Name, SoirModule, UnaryOp, deserialize, normalize, serialize,
 };
 
 // Strategy for generating valid Name instances
@@ -95,24 +94,27 @@ fn arb_instr() -> impl Strategy<Value = IrInstr> {
     (
         (
             arb_opcode(),
-            -1..1024_i64,  // dst register
-            -1..1024_i64,  // src1
-            -1..1024_i64,  // src2
-            any::<i64>(),  // imm_i64
+            -1..1024_i64, // dst register
+            -1..1024_i64, // src1
+            -1..1024_i64, // src2
+            any::<i64>(), // imm_i64
             any::<f64>().prop_filter("No NaN or Inf", |f| f.is_finite()),
         ),
         (
-            -1..256_i64,   // label_id
-            -1..64_i64,    // fn_id
-            0..64_i64,     // field_idx
+            -1..256_i64, // label_id
+            -1..64_i64,  // fn_id
+            0..64_i64,   // field_idx
             arb_binop(),
             arb_unop(),
             arb_name(),
-            0..16_i64,     // arg_count
+            0..16_i64, // arg_count
         ),
     )
         .prop_map(
-            |((op, dst, src1, src2, imm_i64, imm_f64), (label_id, fn_id, field_idx, bin_op, un_op, name, arg_count))| {
+            |(
+                (op, dst, src1, src2, imm_i64, imm_f64),
+                (label_id, fn_id, field_idx, bin_op, un_op, name, arg_count),
+            )| {
                 IrInstr {
                     op,
                     dst,
@@ -137,40 +139,42 @@ fn arb_instr() -> impl Strategy<Value = IrInstr> {
 fn arb_function() -> impl Strategy<Value = IrFunction> {
     (
         arb_name(),
-        1..32_usize,  // instr_count (generate the count first)
+        1..32_usize, // instr_count (generate the count first)
     )
         .prop_flat_map(|(name, instr_count)| {
             (
                 Just(name),
                 Just(instr_count),
-                prop::collection::vec(arb_instr(), instr_count..=instr_count),  // exact size
-                1..128_i64,  // reg_count
-                0..32_i64,   // label_count
-                0..8_i64,    // param_count
+                prop::collection::vec(arb_instr(), instr_count..=instr_count), // exact size
+                1..128_i64,                                                    // reg_count
+                0..32_i64,                                                     // label_count
+                0..8_i64,                                                      // param_count
                 prop::collection::vec(-1..1024_i64, IR_MAX_PARAMS),
             )
         })
-        .prop_map(|(name, instr_count, instrs, reg_count, label_count, param_count, param_regs_vec)| {
-            let mut instr_array = vec![IrInstr::default(); IR_MAX_INSTRS];
-            for (i, instr) in instrs.into_iter().enumerate() {
-                instr_array[i] = instr;
-            }
+        .prop_map(
+            |(name, instr_count, instrs, reg_count, label_count, param_count, param_regs_vec)| {
+                let mut instr_array = vec![IrInstr::default(); IR_MAX_INSTRS];
+                for (i, instr) in instrs.into_iter().enumerate() {
+                    instr_array[i] = instr;
+                }
 
-            let mut param_regs = [IR_INVALID_REG; IR_MAX_PARAMS];
-            for (i, &reg) in param_regs_vec.iter().enumerate() {
-                param_regs[i] = reg;
-            }
+                let mut param_regs = [IR_INVALID_REG; IR_MAX_PARAMS];
+                for (i, &reg) in param_regs_vec.iter().enumerate() {
+                    param_regs[i] = reg;
+                }
 
-            IrFunction {
-                name,
-                instrs: instr_array,
-                instr_count: instr_count as i64,
-                reg_count,
-                label_count,
-                param_count,
-                param_regs,
-            }
-        })
+                IrFunction {
+                    name,
+                    instrs: instr_array,
+                    instr_count: instr_count as i64,
+                    reg_count,
+                    label_count,
+                    param_count,
+                    param_regs,
+                }
+            },
+        )
 }
 
 // Strategy for generating valid modules
@@ -357,7 +361,13 @@ mod unit_tests {
         let normalized = normalize(&module);
 
         // Instruction counts should be preserved
-        assert_eq!(module.functions[0].instr_count, normalized.functions[0].instr_count);
-        assert_eq!(module.functions[1].instr_count, normalized.functions[1].instr_count);
+        assert_eq!(
+            module.functions[0].instr_count,
+            normalized.functions[0].instr_count
+        );
+        assert_eq!(
+            module.functions[1].instr_count,
+            normalized.functions[1].instr_count
+        );
     }
 }

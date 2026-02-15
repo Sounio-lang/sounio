@@ -27,8 +27,20 @@ fn main() {
     println!("cargo:rerun-if-changed={}/vm.h", poseidon_dir.display());
     println!("cargo:rerun-if-changed={}/loader.c", poseidon_dir.display());
     println!("cargo:rerun-if-changed={}/loader.h", poseidon_dir.display());
-    println!("cargo:rerun-if-changed={}/runtime.c", poseidon_dir.display());
-    println!("cargo:rerun-if-changed={}/runtime.h", poseidon_dir.display());
-    println!("cargo:rerun-if-changed={}/opcodes.h", poseidon_dir.display());
-    println!("cargo:rerun-if-changed={}/platform.h", poseidon_dir.display());
+    println!(
+        "cargo:rerun-if-changed={}/runtime.c",
+        poseidon_dir.display()
+    );
+    println!(
+        "cargo:rerun-if-changed={}/runtime.h",
+        poseidon_dir.display()
+    );
+    println!(
+        "cargo:rerun-if-changed={}/opcodes.h",
+        poseidon_dir.display()
+    );
+    println!(
+        "cargo:rerun-if-changed={}/platform.h",
+        poseidon_dir.display()
+    );
 }

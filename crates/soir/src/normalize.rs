@@ -6,7 +6,7 @@
 //! 3. Renumber registers by first use order
 //! 4. Sort string table alphabetically
 
-use crate::{SoirModule, IrFunction, IrOpcode, IR_INVALID_REG, IR_INVALID_LABEL};
+use crate::{IR_INVALID_LABEL, IR_INVALID_REG, IrFunction, IrOpcode, SoirModule};
 
 /// Normalize a SOIR module for deterministic comparison
 pub fn normalize(module: &SoirModule) -> SoirModule {

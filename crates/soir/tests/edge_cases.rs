@@ -1,11 +1,9 @@
 //! Edge case and boundary condition tests for SOIR
 
 use soir::{
-    BinaryOp, IrFunction, IrInstr, IrOpcode, Name, SoirModule,
-    deserialize, normalize, serialize, SoirError,
-    IR_INVALID_REG,
-    IR_MAX_FUNCS, IR_MAX_INSTRS, IR_MAX_PARAMS, IR_MAX_STRINGS,
-    SOIR_MAGIC, SOIR_VERSION,
+    BinaryOp, IR_INVALID_REG, IR_MAX_FUNCS, IR_MAX_INSTRS, IR_MAX_PARAMS, IR_MAX_STRINGS,
+    IrFunction, IrInstr, IrOpcode, Name, SOIR_MAGIC, SOIR_VERSION, SoirError, SoirModule,
+    deserialize, normalize, serialize,
 };
 
 #[test]
@@ -183,7 +181,11 @@ fn all_opcodes() {
             src2: 1,
             imm_i64: 42,
             imm_f64: 3.14,
-            label_id: if matches!(opcode, IrOpcode::IrLabel) { i as i64 } else { 0 },
+            label_id: if matches!(opcode, IrOpcode::IrLabel) {
+                i as i64
+            } else {
+                0
+            },
             ..Default::default()
         };
     }
@@ -199,7 +201,8 @@ fn all_opcodes() {
     for (i, expected_op) in opcodes.iter().enumerate() {
         assert_eq!(
             restored.functions[0].instrs[i].op, *expected_op,
-            "Opcode mismatch at index {}", i
+            "Opcode mismatch at index {}",
+            i
         );
     }
 }
@@ -339,9 +342,15 @@ fn normalize_sorts_functions_alphabetically() {
     let normalized = normalize(&module);
 
     // After normalization, should be alphabetically sorted
-    let name0 = std::str::from_utf8(&normalized.functions[0].name.buf[..normalized.functions[0].name.len]).unwrap();
-    let name1 = std::str::from_utf8(&normalized.functions[1].name.buf[..normalized.functions[1].name.len]).unwrap();
-    let name2 = std::str::from_utf8(&normalized.functions[2].name.buf[..normalized.functions[2].name.len]).unwrap();
+    let name0 =
+        std::str::from_utf8(&normalized.functions[0].name.buf[..normalized.functions[0].name.len])
+            .unwrap();
+    let name1 =
+        std::str::from_utf8(&normalized.functions[1].name.buf[..normalized.functions[1].name.len])
+            .unwrap();
+    let name2 =
+        std::str::from_utf8(&normalized.functions[2].name.buf[..normalized.functions[2].name.len])
+            .unwrap();
 
     assert_eq!(name0, "alpha");
     assert_eq!(name1, "middle");

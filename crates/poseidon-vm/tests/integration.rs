@@ -1,6 +1,6 @@
 //! Integration tests for Poseidon VM wrapper
 
-use poseidon_vm::{PoseidonVm, VmError, MAX_REGISTERS};
+use poseidon_vm::{MAX_REGISTERS, PoseidonVm, VmError};
 use soir::*;
 
 /// Helper to create a simple instruction with defaults
@@ -17,14 +17,14 @@ fn create_simple_module() -> SoirModule {
     main_fn.name = Name::from("main");
     main_fn.instr_count = 2;
     main_fn.reg_count = 1;
-    
+
     main_fn.instrs[0] = IrInstr {
         op: IrOpcode::IrLoadImm,
         dst: 0,
         imm_i64: 42,
         ..Default::default()
     };
-    
+
     main_fn.instrs[1] = IrInstr {
         op: IrOpcode::IrReturn,
         src1: 0,
@@ -43,21 +43,21 @@ fn create_add_module() -> SoirModule {
     main_fn.name = Name::from("main");
     main_fn.instr_count = 4;
     main_fn.reg_count = 3;
-    
+
     main_fn.instrs[0] = IrInstr {
         op: IrOpcode::IrLoadImm,
         dst: 0,
         imm_i64: 10,
         ..Default::default()
     };
-    
+
     main_fn.instrs[1] = IrInstr {
         op: IrOpcode::IrLoadImm,
         dst: 1,
         imm_i64: 32,
         ..Default::default()
     };
-    
+
     main_fn.instrs[2] = IrInstr {
         op: IrOpcode::IrBinOp,
         dst: 2,
@@ -66,7 +66,7 @@ fn create_add_module() -> SoirModule {
         bin_op: BinaryOp::OpAdd,
         ..Default::default()
     };
-    
+
     main_fn.instrs[3] = IrInstr {
         op: IrOpcode::IrReturn,
         src1: 2,
@@ -89,7 +89,7 @@ fn create_call_module() -> SoirModule {
     add_fn.param_count = 2;
     add_fn.param_regs[0] = 0;
     add_fn.param_regs[1] = 1;
-    
+
     add_fn.instrs[0] = IrInstr {
         op: IrOpcode::IrBinOp,
         dst: 2,
@@ -98,7 +98,7 @@ fn create_call_module() -> SoirModule {
         bin_op: BinaryOp::OpAdd,
         ..Default::default()
     };
-    
+
     add_fn.instrs[1] = IrInstr {
         op: IrOpcode::IrReturn,
         src1: 2,
@@ -110,31 +110,31 @@ fn create_call_module() -> SoirModule {
     main_fn.name = Name::from("main");
     main_fn.instr_count = 4;
     main_fn.reg_count = 3;
-    
+
     main_fn.instrs[0] = IrInstr {
         op: IrOpcode::IrLoadImm,
         dst: 0,
         imm_i64: 10,
         ..Default::default()
     };
-    
+
     main_fn.instrs[1] = IrInstr {
         op: IrOpcode::IrLoadImm,
         dst: 1,
         imm_i64: 20,
         ..Default::default()
     };
-    
+
     main_fn.instrs[2] = IrInstr {
         op: IrOpcode::IrCall,
         dst: 2,
-        src1: 0,    // first arg in r0
-        src2: 1,    // second arg in r1
-        fn_id: 0,   // call add function
+        src1: 0,  // first arg in r0
+        src2: 1,  // second arg in r1
+        fn_id: 0, // call add function
         arg_count: 2,
         ..Default::default()
     };
-    
+
     main_fn.instrs[3] = IrInstr {
         op: IrOpcode::IrReturn,
         src1: 2,
@@ -155,53 +155,53 @@ fn create_branch_module(condition_value: i64) -> SoirModule {
     main_fn.instr_count = 8;
     main_fn.reg_count = 2;
     main_fn.label_count = 3;
-    
+
     main_fn.instrs[0] = IrInstr {
         op: IrOpcode::IrLoadImm,
         dst: 0,
         imm_i64: condition_value,
         ..Default::default()
     };
-    
+
     main_fn.instrs[1] = IrInstr {
         op: IrOpcode::IrBranchTrue,
         src1: 0,
         label_id: 1,
         ..Default::default()
     };
-    
+
     main_fn.instrs[2] = IrInstr {
         op: IrOpcode::IrLoadImm,
         dst: 1,
         imm_i64: 100,
         ..Default::default()
     };
-    
+
     main_fn.instrs[3] = IrInstr {
         op: IrOpcode::IrJump,
         label_id: 2,
         ..Default::default()
     };
-    
+
     main_fn.instrs[4] = IrInstr {
         op: IrOpcode::IrLabel,
         label_id: 1,
         ..Default::default()
     };
-    
+
     main_fn.instrs[5] = IrInstr {
         op: IrOpcode::IrLoadImm,
         dst: 1,
         imm_i64: 200,
         ..Default::default()
     };
-    
+
     main_fn.instrs[6] = IrInstr {
         op: IrOpcode::IrLabel,
         label_id: 2,
         ..Default::default()
     };
-    
+
     main_fn.instrs[7] = IrInstr {
         op: IrOpcode::IrReturn,
         src1: 1,
@@ -389,20 +389,20 @@ fn test_max_steps_limit() {
     loop_fn.instr_count = 3;
     loop_fn.reg_count = 1;
     loop_fn.label_count = 1;
-    
+
     loop_fn.instrs[0] = IrInstr {
         op: IrOpcode::IrLabel,
         label_id: 0,
         ..Default::default()
     };
-    
+
     loop_fn.instrs[1] = IrInstr {
         op: IrOpcode::IrLoadImm,
         dst: 0,
         imm_i64: 1,
         ..Default::default()
     };
-    
+
     loop_fn.instrs[2] = IrInstr {
         op: IrOpcode::IrJump,
         label_id: 0,

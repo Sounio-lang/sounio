@@ -3,8 +3,7 @@
 //! This module provides serialization of IR modules to the SOIR binary format.
 
 use crate::{
-    SoirError, Result, SoirModule, IrFunction, IrInstr,
-    SOIR_MAGIC, SOIR_VERSION, SOIR_MAX_SIZE,
+    IrFunction, IrInstr, Result, SOIR_MAGIC, SOIR_MAX_SIZE, SOIR_VERSION, SoirError, SoirModule,
 };
 use std::io::Write;
 

@@ -46,20 +46,17 @@
 use std::io;
 use thiserror::Error;
 
-pub mod types;
-pub mod serialize;
+pub mod compare;
 pub mod deserialize;
 pub mod normalize;
-pub mod compare;
+pub mod serialize;
+pub mod types;
 
-pub use types::{
-    SoirModule, IrFunction, IrInstr, IrOpcode, IrRegList,
-    BinaryOp, UnaryOp, Name,
-};
-pub use serialize::serialize;
+pub use compare::compare;
 pub use deserialize::deserialize;
 pub use normalize::normalize;
-pub use compare::compare;
+pub use serialize::serialize;
+pub use types::{BinaryOp, IrFunction, IrInstr, IrOpcode, IrRegList, Name, SoirModule, UnaryOp};
 
 /// SOIR format version
 pub const SOIR_VERSION: u8 = 1;

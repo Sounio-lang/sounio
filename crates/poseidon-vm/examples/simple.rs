@@ -9,7 +9,7 @@ fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
     main_fn.name = Name::from("main");
     main_fn.instr_count = 2;
     main_fn.reg_count = 1;
-    
+
     // Load immediate value 42 into register 0
     main_fn.instrs[0] = IrInstr {
         op: IrOpcode::IrLoadImm,
@@ -17,7 +17,7 @@ fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
         imm_i64: 42,
         ..Default::default()
     };
-    
+
     // Return value in register 0
     main_fn.instrs[1] = IrInstr {
         op: IrOpcode::IrReturn,
@@ -38,10 +38,10 @@ fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
     vm.load(&bytecode)?;
 
     println!("Executing program...");
-    
+
     // Execute and get result
     let exit_code = vm.execute()?;
-    
+
     println!("Program exited with code: {}", exit_code);
     assert_eq!(exit_code, 42);
 

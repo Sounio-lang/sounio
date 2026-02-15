@@ -1,6 +1,6 @@
 //! Compare normalized IR modules for semantic equivalence
 
-use crate::{SoirModule, IrFunction, IrInstr};
+use crate::{IrFunction, IrInstr, SoirModule};
 
 /// Compare two normalized IR modules for semantic equivalence
 ///
@@ -118,13 +118,36 @@ fn compare_instr(a: &IrInstr, b: &IrInstr) -> bool {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CompareResult {
     Equal,
-    DifferentFunctionCount { a: i64, b: i64 },
-    DifferentStringCount { a: i64, b: i64 },
-    DifferentFunctionName { index: usize, a: String, b: String },
-    DifferentInstrCount { func_index: usize, a: i64, b: i64 },
-    DifferentOpcode { func_index: usize, instr_index: usize },
-    DifferentRegisters { func_index: usize, instr_index: usize },
-    DifferentImmediate { func_index: usize, instr_index: usize },
+    DifferentFunctionCount {
+        a: i64,
+        b: i64,
+    },
+    DifferentStringCount {
+        a: i64,
+        b: i64,
+    },
+    DifferentFunctionName {
+        index: usize,
+        a: String,
+        b: String,
+    },
+    DifferentInstrCount {
+        func_index: usize,
+        a: i64,
+        b: i64,
+    },
+    DifferentOpcode {
+        func_index: usize,
+        instr_index: usize,
+    },
+    DifferentRegisters {
+        func_index: usize,
+        instr_index: usize,
+    },
+    DifferentImmediate {
+        func_index: usize,
+        instr_index: usize,
+    },
 }
 
 /// Compare two modules with detailed diagnostics
@@ -196,8 +219,8 @@ pub fn compare_detailed(a: &SoirModule, b: &SoirModule) -> CompareResult {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::types::*;
     use crate::normalize::normalize;
+    use crate::types::*;
 
     #[test]
     fn test_compare_equal_modules() {

@@ -3,9 +3,9 @@
 //! This module provides deserialization of the SOIR binary format.
 
 use crate::{
-    SoirError, Result, SoirModule, IrFunction, IrInstr, IrOpcode, BinaryOp, UnaryOp, Name,
-    SOIR_MAGIC, SOIR_VERSION, SOIR_MAX_SIZE, IR_MAX_FUNCS, IR_MAX_STRINGS, IR_MAX_INSTRS,
-    IR_MAX_PARAMS,
+    BinaryOp, IR_MAX_FUNCS, IR_MAX_INSTRS, IR_MAX_PARAMS, IR_MAX_STRINGS, IrFunction, IrInstr,
+    IrOpcode, Name, Result, SOIR_MAGIC, SOIR_MAX_SIZE, SOIR_VERSION, SoirError, SoirModule,
+    UnaryOp,
 };
 
 /// Deserialize a SOIR module from bytes
@@ -101,8 +101,7 @@ fn deserialize_function(cursor: &mut Cursor) -> Result<IrFunction> {
 fn deserialize_instr(cursor: &mut Cursor) -> Result<IrInstr> {
     // Read opcode
     let op_byte = cursor.read_u8()?;
-    let op = IrOpcode::from_u8(op_byte)
-        .ok_or(SoirError::InvalidOpcode(op_byte))?;
+    let op = IrOpcode::from_u8(op_byte).ok_or(SoirError::InvalidOpcode(op_byte))?;
     cursor.skip(7)?; // padding
 
     // Read register fields
@@ -121,14 +120,12 @@ fn deserialize_instr(cursor: &mut Cursor) -> Result<IrInstr> {
 
     // Read binary op
     let bin_op_byte = cursor.read_u8()?;
-    let bin_op = BinaryOp::from_u8(bin_op_byte)
-        .ok_or(SoirError::InvalidBinaryOp(bin_op_byte))?;
+    let bin_op = BinaryOp::from_u8(bin_op_byte).ok_or(SoirError::InvalidBinaryOp(bin_op_byte))?;
     cursor.skip(7)?; // padding
 
     // Read unary op
     let un_op_byte = cursor.read_u8()?;
-    let un_op = UnaryOp::from_u8(un_op_byte)
-        .ok_or(SoirError::InvalidUnaryOp(un_op_byte))?;
+    let un_op = UnaryOp::from_u8(un_op_byte).ok_or(SoirError::InvalidUnaryOp(un_op_byte))?;
     cursor.skip(7)?; // padding
 
     // Read name

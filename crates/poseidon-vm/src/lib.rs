@@ -101,20 +101,20 @@ impl PoseidonVm {
         self.free_module();
 
         // Load module from bytecode
-        let module = unsafe {
-            ffi::load_soir_buffer(bytecode.as_ptr(), bytecode.len())
-        };
+        let module = unsafe { ffi::load_soir_buffer(bytecode.as_ptr(), bytecode.len()) };
 
         if module.is_null() {
             return Err(VmError::InvalidBytecode(
-                "Failed to load SOIR bytecode".to_string()
+                "Failed to load SOIR bytecode".to_string(),
             ));
         }
 
         // Find main function
         let main_fn = unsafe { ffi::vm_find_main_fn(module) };
         if main_fn < 0 {
-            unsafe { ffi::free_module(module); }
+            unsafe {
+                ffi::free_module(module);
+            }
             return Err(VmError::NoMainFunction);
         }
 
@@ -147,9 +147,7 @@ impl PoseidonVm {
     /// - An execution error occurs
     pub fn execute(&mut self) -> Result<i64> {
         if self.module.is_null() {
-            return Err(VmError::InvalidBytecode(
-                "No module loaded".to_string()
-            ));
+            return Err(VmError::InvalidBytecode("No module loaded".to_string()));
         }
 
         if self.vm_state.halted {
@@ -157,13 +155,7 @@ impl PoseidonVm {
         }
 
         // Safety: module is non-null and valid
-        let result = unsafe {
-            ffi::vm_run(
-                self.vm_state.as_mut(),
-                self.module,
-                self.max_steps
-            )
-        };
+        let result = unsafe { ffi::vm_run(self.vm_state.as_mut(), self.module, self.max_steps) };
 
         match result {
             -2 => Err(VmError::Timeout(self.max_steps)),
@@ -186,9 +178,7 @@ impl PoseidonVm {
     /// - An execution error occurs
     pub fn step(&mut self) -> Result<bool> {
         if self.module.is_null() {
-            return Err(VmError::InvalidBytecode(
-                "No module loaded".to_string()
-            ));
+            return Err(VmError::InvalidBytecode("No module loaded".to_string()));
         }
 
         if self.vm_state.halted {
@@ -196,14 +186,13 @@ impl PoseidonVm {
         }
 
         // Safety: module is non-null and valid
-        let result = unsafe {
-            ffi::vm_step(self.vm_state.as_mut(), self.module)
-        };
+        let result = unsafe { ffi::vm_step(self.vm_state.as_mut(), self.module) };
 
         if result < 0 {
-            return Err(VmError::ExecutionError(
-                format!("Step failed with code {}", result)
-            ));
+            return Err(VmError::ExecutionError(format!(
+                "Step failed with code {}",
+                result
+            )));
         }
 
         Ok(!self.vm_state.halted)
@@ -262,9 +251,7 @@ impl PoseidonVm {
     /// Returns an error if no module is loaded.
     pub fn reset(&mut self) -> Result<()> {
         if self.module.is_null() {
-            return Err(VmError::InvalidBytecode(
-                "No module loaded".to_string()
-            ));
+            return Err(VmError::InvalidBytecode("No module loaded".to_string()));
         }
 
         // Find main function again

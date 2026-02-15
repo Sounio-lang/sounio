@@ -4,8 +4,8 @@
 //! These types closely mirror the self-hosted IR definitions but provide
 //! idiomatic Rust representations with proper ownership semantics.
 
-use crate::{IR_MAX_FUNCS, IR_MAX_INSTRS, IR_MAX_PARAMS, IR_MAX_STRINGS};
 use crate::{IR_INVALID_FN, IR_INVALID_LABEL, IR_INVALID_REG};
+use crate::{IR_MAX_FUNCS, IR_MAX_INSTRS, IR_MAX_PARAMS, IR_MAX_STRINGS};
 
 /// Fixed-size string buffer matching Sounio's Name type (128 bytes + length)
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
@@ -436,9 +436,7 @@ mod tests {
 
     #[test]
     fn test_reg_list_count() {
-        let list = IrRegList::single(1)
-            .append(2)
-            .append(3);
+        let list = IrRegList::single(1).append(2).append(3);
         assert_eq!(list.count(), 3);
     }
 
