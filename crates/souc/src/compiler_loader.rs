@@ -92,10 +92,7 @@ fn driver_harness_cache_path(dir: &Path, key: DriverHarnessCacheKey) -> PathBuf 
     ))
 }
 
-fn driver_harness_cache_read(
-    dir: &Path,
-    key: DriverHarnessCacheKey,
-) -> Option<Vec<Bytecode>> {
+fn driver_harness_cache_read(dir: &Path, key: DriverHarnessCacheKey) -> Option<Vec<Bytecode>> {
     let path = driver_harness_cache_path(dir, key);
     let bytes = std::fs::read(&path).ok()?;
     crate::vm::serialize::deserialize(&bytes).ok()
@@ -109,9 +106,8 @@ fn driver_harness_cache_write(
     std::fs::create_dir_all(dir)?;
     let path = driver_harness_cache_path(dir, key);
     let tmp_path = path.with_extension("sobc.tmp");
-    let bytes = crate::vm::serialize::serialize(bytecode).map_err(|e| {
-        std::io::Error::new(std::io::ErrorKind::InvalidData, e.to_string())
-    })?;
+    let bytes = crate::vm::serialize::serialize(bytecode)
+        .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e.to_string()))?;
     std::fs::write(&tmp_path, bytes)?;
     std::fs::rename(&tmp_path, &path)?;
     Ok(())
@@ -419,7 +415,8 @@ impl SounioCompiler {
         let strict = Self::driver_orchestration_strict();
         let oracle_mode = Self::rust_oracle_mode();
         // In strict mode, disallow stage-boundary fallback: driver must produce a valid artifact.
-        let require_driver_output = strict || env_flag_enabled("SOUNIO_SELFHOST_DRIVER_REQUIRE_OUTPUT");
+        let require_driver_output =
+            strict || env_flag_enabled("SOUNIO_SELFHOST_DRIVER_REQUIRE_OUTPUT");
         Self::emit_driver_compile_start_marker(entrypoint, strict, oracle_mode);
         let mut driver_output: Option<Vec<Bytecode>> = None;
         match self.run_driver_orchestration(entrypoint, Some(source)) {
@@ -501,43 +498,73 @@ impl SounioCompiler {
         let strict = Self::driver_orchestration_strict();
         let oracle_mode = Self::rust_oracle_mode();
         // In strict mode, disallow stage-boundary fallback: driver must produce a valid artifact.
-        let require_driver_output = strict || env_flag_enabled("SOUNIO_SELFHOST_DRIVER_REQUIRE_OUTPUT");
-        if !std::path::Path::new(path).exists() {
+        let require_driver_output =
+            strict || env_flag_enabled("SOUNIO_SELFHOST_DRIVER_REQUIRE_OUTPUT");
+        let path = std::path::Path::new(path);
+        if !path.exists() {
             return Err(CompilerLoaderError::IoError(format!(
                 "Input path not found '{}'",
-                path
+                path.display()
             )));
         }
+        let path_str = path.to_string_lossy();
 
         Self::emit_driver_compile_start_marker(entrypoint, strict, oracle_mode);
 
         // The bootstrap driver is intentionally tiny and can take an unbounded amount of time
         // if we hand it a directory-sized compilation unit (e.g. `self-hosted/`).
-        // For non-strict runs, prefer the Rust stage-boundary loader for directories.
+        // For non-strict runs, prefer the Rust stage-boundary loader for directories and
+        // the self-hosted suite entrypoint (`self-hosted/main.sio`).
+        let path_is_self_hosted_suite = path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .is_some_and(|name| name == "main.sio")
+            && path
+                .parent()
+                .and_then(|parent| parent.file_name())
+                .and_then(|parent| parent.to_str())
+                .is_some_and(|name| name == "self-hosted");
+        if env_flag_enabled("SOUNIO_SELFHOST_DEBUG_DRIVER_ORCH") {
+            eprintln!(
+                "SELFHOST_DEBUG event=driver_orch step=compile_file_path path={} is_dir={} is_self_hosted_suite={} target={}",
+                path.display(),
+                path.is_dir(),
+                path_is_self_hosted_suite,
+                path.parent().unwrap_or(path).display()
+            );
+        }
+
+        let compile_target = if path_is_self_hosted_suite {
+            path.parent().unwrap_or(path)
+        } else {
+            path
+        };
+
         if !require_driver_output
-            && std::path::Path::new(path).is_dir()
+            && (path_is_self_hosted_suite || path.is_dir())
             && !env_flag_enabled("SOUNIO_SELFHOST_DRIVER_ALLOW_DIR")
         {
             Self::emit_driver_orchestration_marker(entrypoint, strict, "skip_dir", None);
-            let boundary_bytecode = self.compile_path_via_stage_boundaries(path)?;
+            let compile_target_str = compile_target.to_string_lossy();
+            let boundary_bytecode = self.compile_path_via_stage_boundaries(&compile_target_str)?;
             Self::emit_stage_boundary_marker(entrypoint, boundary_bytecode.len());
             self.maybe_run_rust_oracle_for_path(
                 oracle_mode,
                 strict,
-                path,
+                &compile_target_str,
                 &boundary_bytecode,
             )?;
             return Ok(boundary_bytecode);
         }
 
         let mut driver_output: Option<Vec<Bytecode>> = None;
-        match self.run_driver_orchestration(entrypoint, Some(path)) {
+        match self.run_driver_orchestration(entrypoint, Some(path_str.as_ref())) {
             Ok(vm_result) => {
                 Self::emit_driver_orchestration_marker(entrypoint, strict, "ok", None);
                 tracing::debug!(
                     "Driver VM orchestration completed via {} for '{}' (result={}); lowering through explicit stage boundaries",
                     entrypoint.qualified_name(),
-                    path,
+                    path_str,
                     vm_result
                 );
                 // If the driver returned a headered compile artifact, prefer it for tiny bootstrap programs.
@@ -556,7 +583,7 @@ impl SounioCompiler {
                         Err(err) => {
                             tracing::debug!(
                                 "Driver artifact decode failed for '{}': {} (falling back to stage boundaries)",
-                                path,
+                                path_str,
                                 err
                             );
                         }
@@ -565,7 +592,7 @@ impl SounioCompiler {
                     // If the driver signaled a directory bytecode cache, load it directly in the host.
                     // This avoids copying large `.sobc` blobs through the VM value model.
                     if driver_output.is_none() {
-                        match Self::maybe_decode_driver_dir_cache(&vm_result, path) {
+                        match Self::maybe_decode_driver_dir_cache(&vm_result, path_str.as_ref()) {
                             Ok(Some(bytecode)) => {
                                 eprintln!(
                                     "SELFHOST=driver-first schema=v1 event=driver_output entrypoint={} status=dir_cache bytecode_len={}",
@@ -581,7 +608,7 @@ impl SounioCompiler {
                                 }
                                 tracing::debug!(
                                     "Driver dir cache decode failed for '{}': {} (falling back to stage boundaries)",
-                                    path,
+                                    path_str,
                                     err
                                 );
                             }
@@ -610,7 +637,7 @@ impl SounioCompiler {
                 tracing::debug!(
                     "Driver VM orchestration via {} for '{}' failed ({}); continuing via stage-boundary handoff",
                     entrypoint.qualified_name(),
-                    path,
+                    path_str,
                     err
                 );
             }
@@ -626,13 +653,18 @@ impl SounioCompiler {
             return Err(CompilerLoaderError::CompileError(format!(
                 "SELFHOST_STRICT_DRIVER_OUTPUT_REQUIRED entrypoint={} path={}",
                 entrypoint.qualified_name(),
-                path
+                path_str
             )));
         }
 
-        let boundary_bytecode = self.compile_path_via_stage_boundaries(path)?;
+        let boundary_bytecode = self.compile_path_via_stage_boundaries(path_str.as_ref())?;
         Self::emit_stage_boundary_marker(entrypoint, boundary_bytecode.len());
-        self.maybe_run_rust_oracle_for_path(oracle_mode, strict, path, &boundary_bytecode)?;
+        self.maybe_run_rust_oracle_for_path(
+            oracle_mode,
+            strict,
+            path_str.as_ref(),
+            &boundary_bytecode,
+        )?;
         Ok(boundary_bytecode)
     }
 
@@ -734,13 +766,19 @@ impl SounioCompiler {
                                 harness_source.len()
                             );
                         }
-                        let compiled = self.compile_driver_harness_via_rust_bridge(entrypoint, driver_fingerprint, &harness_source).map_err(|e| {
-                            CompilerLoaderError::CompileError(format!(
-                                "{} harness lowering failed: {}",
-                                entrypoint.qualified_name(),
-                                e
-                            ))
-                        })?;
+                        let compiled = self
+                            .compile_driver_harness_via_rust_bridge(
+                                entrypoint,
+                                driver_fingerprint,
+                                &harness_source,
+                            )
+                            .map_err(|e| {
+                                CompilerLoaderError::CompileError(format!(
+                                    "{} harness lowering failed: {}",
+                                    entrypoint.qualified_name(),
+                                    e
+                                ))
+                            })?;
                         if debug {
                             eprintln!(
                                 "SELFHOST_DEBUG event=driver_orch step=harness_compiled entrypoint={} bytecode_len={}",
@@ -784,7 +822,8 @@ impl SounioCompiler {
                             entrypoint.qualified_name()
                         );
                     }
-                    let harness_source = Self::build_driver_harness_module(entrypoint, &driver_source);
+                    let harness_source =
+                        Self::build_driver_harness_module(entrypoint, &driver_source);
                     if debug {
                         eprintln!(
                             "SELFHOST_DEBUG event=driver_orch step=harness_source_built entrypoint={} harness_len={}",
@@ -792,13 +831,19 @@ impl SounioCompiler {
                             harness_source.len()
                         );
                     }
-                    let compiled = self.compile_driver_harness_via_rust_bridge(entrypoint, driver_fingerprint, &harness_source).map_err(|e| {
-                        CompilerLoaderError::CompileError(format!(
-                            "{} harness lowering failed: {}",
-                            entrypoint.qualified_name(),
-                            e
-                        ))
-                    })?;
+                    let compiled = self
+                        .compile_driver_harness_via_rust_bridge(
+                            entrypoint,
+                            driver_fingerprint,
+                            &harness_source,
+                        )
+                        .map_err(|e| {
+                            CompilerLoaderError::CompileError(format!(
+                                "{} harness lowering failed: {}",
+                                entrypoint.qualified_name(),
+                                e
+                            ))
+                        })?;
                     if debug {
                         eprintln!(
                             "SELFHOST_DEBUG event=driver_orch step=harness_compiled entrypoint={} bytecode_len={}",
@@ -833,10 +878,7 @@ impl SounioCompiler {
         })
     }
 
-    fn build_driver_harness_module(
-        entrypoint: DriverEntrypoint,
-        driver_source: &str,
-    ) -> String {
+    fn build_driver_harness_module(entrypoint: DriverEntrypoint, driver_source: &str) -> String {
         // Build a deterministic, self-contained harness module by concatenating the driver
         // snapshot with an entrypoint `main`.
         let mut source = Self::normalize_driver_for_vm(driver_source);
@@ -856,8 +898,6 @@ impl SounioCompiler {
         hasher.finish()
     }
 
-
-
     fn fingerprint_driver_dependency_sources(&self) -> u64 {
         if self.use_embedded || self.stdlib_path.is_empty() {
             return 0;
@@ -868,10 +908,13 @@ impl SounioCompiler {
             return 0;
         }
 
-        fn visit(dir: &Path, base: &Path, hasher: &mut rustc_hash::FxHasher) -> std::io::Result<()> {
-            let mut entries: Vec<std::fs::DirEntry> = std::fs::read_dir(dir)?
-                .filter_map(|e| e.ok())
-                .collect();
+        fn visit(
+            dir: &Path,
+            base: &Path,
+            hasher: &mut rustc_hash::FxHasher,
+        ) -> std::io::Result<()> {
+            let mut entries: Vec<std::fs::DirEntry> =
+                std::fs::read_dir(dir)?.filter_map(|e| e.ok()).collect();
             entries.sort_by(|a, b| a.path().cmp(&b.path()));
 
             for entry in entries {
@@ -891,7 +934,8 @@ impl SounioCompiler {
                 let meta = std::fs::metadata(&path)?;
                 meta.len().hash(hasher);
                 if let Ok(modified) = meta.modified() {
-                    if let Ok(duration) = modified.duration_since(std::time::SystemTime::UNIX_EPOCH) {
+                    if let Ok(duration) = modified.duration_since(std::time::SystemTime::UNIX_EPOCH)
+                    {
                         duration.as_secs().hash(hasher);
                         duration.subsec_nanos().hash(hasher);
                     }
@@ -1121,7 +1165,9 @@ fn main() -> CompileArtifact with IO, Mut, Div, Panic {
         }
     }
 
-    fn maybe_decode_driver_artifact(vm_result: &crate::vm::Value) -> LoadResult<Option<Vec<Bytecode>>> {
+    fn maybe_decode_driver_artifact(
+        vm_result: &crate::vm::Value,
+    ) -> LoadResult<Option<Vec<Bytecode>>> {
         let crate::vm::Value::Struct(fields) = vm_result else {
             return Ok(None);
         };
@@ -1492,7 +1538,6 @@ fn main() -> CompileArtifact with IO, Mut, Div, Panic {
         Ok(CodegenBoundary { bytecode })
     }
 
-
     fn compile_driver_harness_via_rust_bridge(
         &self,
         entrypoint: DriverEntrypoint,
@@ -1644,10 +1689,32 @@ fn main() -> CompileArtifact with IO, Mut, Div, Panic {
     /// Returns `CompilerLoaderError` if file cannot be read or compilation fails
     pub fn compile_file(&self, path: &str) -> LoadResult<Vec<Bytecode>> {
         tracing::info!("Compiling file: {}", path);
+        let compile_path = Self::normalize_self_hosted_suite_entrypoint(path);
         match SelfhostCompilePipeline::from_env() {
-            SelfhostCompilePipeline::DriverPreferred => self.compile_via_driver_file(path),
-            SelfhostCompilePipeline::RustBridge => self.compile_path_via_rust_bridge(path),
+            SelfhostCompilePipeline::DriverPreferred => {
+                let compile_path = compile_path.to_string_lossy();
+                self.compile_via_driver_file(&compile_path)
+            }
+            SelfhostCompilePipeline::RustBridge => {
+                let compile_path = compile_path.to_string_lossy();
+                self.compile_path_via_rust_bridge(&compile_path)
+            }
         }
+    }
+
+    fn normalize_self_hosted_suite_entrypoint(path: &str) -> std::path::PathBuf {
+        let path = Path::new(path);
+        let is_self_hosted_main = path.file_name().and_then(|name| name.to_str())
+            == Some("main.sio")
+            && path
+                .parent()
+                .and_then(|parent| parent.file_name())
+                .and_then(|name| name.to_str())
+                == Some("self-hosted");
+        if is_self_hosted_main {
+            return path.parent().unwrap_or(path).to_path_buf();
+        }
+        path.to_path_buf()
     }
 
     /// Compiles a Sounio source file to a native ELF binary (Phase 6).
@@ -1698,7 +1765,7 @@ fn main() -> CompileArtifact with IO, Mut, Div, Panic {
         // Verify the output file was created
         if !std::path::Path::new(output_path).exists() {
             return Err(CompilerLoaderError::CompileError(
-                "Native compilation reported success but output file not found".to_string()
+                "Native compilation reported success but output file not found".to_string(),
             ));
         }
 
@@ -1713,9 +1780,7 @@ fn main() -> CompileArtifact with IO, Mut, Div, Panic {
             }
         }
 
-        let file_size = std::fs::metadata(output_path)
-            .map(|m| m.len())
-            .unwrap_or(0);
+        let file_size = std::fs::metadata(output_path).map(|m| m.len()).unwrap_or(0);
         tracing::info!(
             "Native ELF binary: {} ({} bytes, executable)",
             output_path,
@@ -2295,10 +2360,31 @@ mod tests {
 
         let decoded = SounioCompiler::maybe_decode_driver_artifact(&vm_result)
             .expect("driver result should be decodable");
-        let bytecode = decoded.expect("driver should return a compile artifact for directory input");
+        let bytecode =
+            decoded.expect("driver should return a compile artifact for directory input");
         assert!(!bytecode.is_empty(), "decoded bytecode should not be empty");
 
         let _ = std::fs::remove_dir_all(&temp_dir);
+    }
+
+    #[test]
+    fn test_normalize_self_hosted_suite_entrypoint() {
+        assert_eq!(
+            SounioCompiler::normalize_self_hosted_suite_entrypoint("self-hosted/main.sio"),
+            std::path::Path::new("self-hosted").to_path_buf()
+        );
+
+        assert_eq!(
+            SounioCompiler::normalize_self_hosted_suite_entrypoint(
+                "/abs/path/self-hosted/main.sio"
+            ),
+            std::path::Path::new("/abs/path/self-hosted").to_path_buf()
+        );
+
+        assert_eq!(
+            SounioCompiler::normalize_self_hosted_suite_entrypoint("self-hosted/other.sio"),
+            std::path::Path::new("self-hosted/other.sio").to_path_buf()
+        );
     }
 
     #[test]
@@ -2474,10 +2560,7 @@ RETURN\n";
 
         assert_eq!(
             decoded,
-            vec![
-                Bytecode::Push(crate::vm::Value::Int(123)),
-                Bytecode::Return
-            ]
+            vec![Bytecode::Push(crate::vm::Value::Int(123)), Bytecode::Return]
         );
     }
 
@@ -2525,7 +2608,8 @@ RETURN\n";
 
     #[test]
     fn test_driver_artifact_compiles_print_then_int() {
-        let decoded = decode_driver_artifact("fn main() -> i64 with IO { print(\"hello\\n\"); 0 }\n");
+        let decoded =
+            decode_driver_artifact("fn main() -> i64 with IO { print(\"hello\\n\"); 0 }\n");
         assert!(
             decoded.iter().any(|bc| matches!(
                 bc,

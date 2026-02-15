@@ -209,8 +209,7 @@ impl PassManager {
             }
 
             // Loop vectorization: widen simple array-processing loops to SIMD width
-            let mut vectorizer =
-                performance_tuning::LoopVectorizer::new();
+            let mut vectorizer = performance_tuning::LoopVectorizer::new();
             if vectorizer.run(func)? {
                 total_modified = true;
             }

@@ -6,6 +6,8 @@ use clap::{Parser, Subcommand};
 use miette::Result;
 use sounio::sir::AllocPolicy;
 use std::path::{Path, PathBuf};
+use std::sync::mpsc::{self, RecvTimeoutError};
+use std::time::Duration;
 use tracing_subscriber::{EnvFilter, fmt, prelude::*};
 
 #[derive(Parser)]
@@ -3039,100 +3041,227 @@ fn run(
         check_only
     );
 
-    let input_path = input.to_path_buf();
-    let user_args = args.to_vec();
-    let run_result = std::thread::Builder::new()
-        .name("interp".into())
-        .stack_size(64 * 1024 * 1024)
-        .spawn(move || -> std::result::Result<(), String> {
-            if use_sounio_compiler {
-                // Use the self-hosted Sounio compiler (week 2 bootstrap feature)
-                tracing::info!("Using self-hosted Sounio compiler from stdin");
+    let mut input_path = input.to_path_buf();
+    let mut user_args = args.to_vec();
 
-                // Get the stdlib path from environment or use default
-                let stdlib_path = std::env::var("SOUNIO_STDLIB_PATH")
-                    .unwrap_or_else(|_| "stdlib/compiler".to_string());
+    let is_self_hosted_root = use_sounio_compiler
+        && input_path.is_dir()
+        && input_path
+            .file_name()
+            .and_then(|part| part.to_str())
+            .is_some_and(|name| name == "self-hosted");
 
-                // Create the self-hosted compiler
-                let mut compiler = sounio::compiler_loader::SounioCompiler::new(&stdlib_path)
-                    .map_err(|e| format!("Failed to initialize self-hosted compiler: {}", e))?;
+    if is_self_hosted_root {
+        let main_path = input_path.join("main.sio");
 
-                // Compile through the self-hosted bridge.
-                let input_str = input_path.to_string_lossy();
-                let bytecode = compiler
-                    .compile_file(input_str.as_ref())
-                    .map_err(|e| {
-                        format!(
-                            "Self-hosted compile failed for {}: {}",
-                            input_path.display(),
-                            e
-                        )
-                    })?;
+        if !main_path.exists() {
+            eprintln!(
+                "SELFHOST=run schema=v1 event=selfhost_input_check status=missing_main path={} required={}",
+                input_path.display(),
+                main_path.display()
+            );
+            return Err(miette::miette!(
+                "Incomplete self-hosted suite at {}: missing main.sio",
+                input_path.display()
+            ));
+        }
+        let preflight_err = sounio::module_loader::load_program_ast(&main_path).map_err(|e| {
+            eprintln!(
+                "SELFHOST=run schema=v1 event=selfhost_preflight status=error path={} reason={}",
+                main_path.display(),
+                e
+            );
+            miette::miette!(
+                "Self-hosted preflight parse failed for {}: {}",
+                main_path.display(),
+                e
+            )
+        });
+        preflight_err?;
 
-                // check-only with the self-hosted bridge means "compile/type-check only".
-                if check_only {
-                    return Ok(());
-                }
+        input_path = main_path;
 
-                // Select self-host execution mode.
-                // - vm (default): compile via self-host bridge, execute via bytecode VM.
-                let mode = std::env::var("SOUNIO_SELFHOST_MODE")
-                    .unwrap_or_else(|_| "vm".to_string())
-                    .to_lowercase();
+        if user_args.is_empty() {
+            user_args.push("test".to_string());
+        }
 
-                if mode == "vm" {
-                    match compiler.execute_bytecode_with_args(&bytecode, &user_args) {
-                        Ok(vm_result) => {
-                            if !matches!(vm_result, sounio::vm::Value::Unit) {
-                                println!("{}", vm_result);
-                            }
-                            return Ok(());
-                        }
-                        Err(vm_error) => {
-                            return Err(format!(
-                                "Self-hosted VM execution failed for {}: {}. Rust fallback execution has been removed.",
-                                input_path.display(),
-                                vm_error
-                            ));
-                        }
-                    }
-                }
+        eprintln!(
+            "SELFHOST=run schema=v1 event=selfhost_input_check status=resolved input={} args={}",
+            input_path.display(),
+            user_args.len()
+        );
+    }
 
+    fn parse_duration_from_env(name: &str, unit: &str, factor: u64) -> Option<Duration> {
+        let raw = std::env::var(name).ok()?;
+        let value = raw.trim();
+        let parsed = match value.parse::<u64>() {
+            Ok(v) if v > 0 => v,
+            Ok(_) => return None,
+            Err(_) => {
                 eprintln!(
-                    "error: unsupported SOUNIO_SELFHOST_MODE='{}'. Only 'vm' is supported for self-hosted `souc run`.",
-                    mode
+                    "SELFHOST=run schema=v1 event=run_timeout_config status=invalid var={} value={}",
+                    name, raw
                 );
-                std::process::exit(2);
+                return None;
             }
+        };
 
+        let ms = parsed.checked_mul(factor).or_else(|| {
+            eprintln!(
+                "SELFHOST=run schema=v1 event=run_timeout_config status=overflow var={} value={}",
+                name, raw
+            );
+            None
+        })?;
+
+        eprintln!(
+            "SELFHOST=run schema=v1 event=run_timeout_config status=ok var={} value={}{}",
+            name, value, unit
+        );
+        Some(Duration::from_millis(ms))
+    }
+
+    let timeout = if is_self_hosted_root {
+        parse_duration_from_env("SOUNIO_SELFHOST_RUN_TIMEOUT_MS", "ms", 1)
+            .or_else(|| parse_duration_from_env("SOUNIO_SELFHOST_RUN_TIMEOUT_SECS", "s", 1000))
+    } else {
+        None
+    };
+
+    let run_payload = move || -> std::result::Result<(), String> {
+        if use_sounio_compiler {
+            // Use the self-hosted Sounio compiler (week 2 bootstrap feature)
+            tracing::info!("Using self-hosted Sounio compiler from stdin");
+
+            // Get the stdlib path from environment or use default
+            let stdlib_path = std::env::var("SOUNIO_STDLIB_PATH")
+                .unwrap_or_else(|_| "stdlib/compiler".to_string());
+
+            // Create the self-hosted compiler
+            let mut compiler = sounio::compiler_loader::SounioCompiler::new(&stdlib_path)
+                .map_err(|e| format!("Failed to initialize self-hosted compiler: {}", e))?;
+
+            // Compile through the self-hosted bridge.
+            let input_str = input_path.to_string_lossy();
+            let bytecode = compiler.compile_file(input_str.as_ref()).map_err(|e| {
+                format!(
+                    "Self-hosted compile failed for {}: {}",
+                    input_path.display(),
+                    e
+                )
+            })?;
+
+            // check-only with the self-hosted bridge means "compile/type-check only".
             if check_only {
-                let ast = sounio::module_loader::load_program_ast(&input_path)
-                    .map_err(|e| e.to_string())?;
-                let _ = sounio::check::check_ast(&ast).map_err(|e| e.to_string())?;
+                return Ok(());
             }
 
-            // Load modules and parse (uses ModuleLoader to handle imports)
-            let ast = sounio::module_loader::load_program_ast(&input_path)
-                .map_err(|e| e.to_string())?;
-            let hir = sounio::check::check_ast(&ast).map_err(|e| e.to_string())?;
+            // Select self-host execution mode.
+            // - vm (default): compile via self-host bridge, execute via bytecode VM.
+            let mode = std::env::var("SOUNIO_SELFHOST_MODE")
+                .unwrap_or_else(|_| "vm".to_string())
+                .to_lowercase();
 
-            // Use tree-walking interpreter
-            let mut interpreter = sounio::interp::Interpreter::with_trace(trace_interp);
-            interpreter.set_user_args(user_args);
-            match interpreter.interpret(&hir) {
-                Ok(result) => {
-                    // Only print non-unit results
-                    if !matches!(result, sounio::interp::Value::Unit) {
-                        println!("{}", result);
+            if mode == "vm" {
+                match compiler.execute_bytecode_with_args(&bytecode, &user_args) {
+                    Ok(vm_result) => {
+                        if !matches!(vm_result, sounio::vm::Value::Unit) {
+                            println!("{}", vm_result);
+                        }
+                        return Ok(());
                     }
-                    Ok(())
+                    Err(vm_error) => {
+                        return Err(format!(
+                            "Self-hosted VM execution failed for {}: {}. Rust fallback execution has been removed.",
+                            input_path.display(),
+                            vm_error
+                        ));
+                    }
                 }
-                Err(e) => Err(e.to_string()),
             }
-        })
-        .map_err(|e| miette::miette!("failed to spawn interpreter thread: {}", e))?
-        .join()
-        .map_err(|_| miette::miette!("interpreter thread panicked"))?;
+
+            eprintln!(
+                "error: unsupported SOUNIO_SELFHOST_MODE='{}'. Only 'vm' is supported for self-hosted `souc run`.",
+                mode
+            );
+            std::process::exit(2);
+        }
+
+        if check_only {
+            let ast =
+                sounio::module_loader::load_program_ast(&input_path).map_err(|e| e.to_string())?;
+            let _ = sounio::check::check_ast(&ast).map_err(|e| e.to_string())?;
+        }
+
+        // Load modules and parse (uses ModuleLoader to handle imports)
+        let ast =
+            sounio::module_loader::load_program_ast(&input_path).map_err(|e| e.to_string())?;
+        let hir = sounio::check::check_ast(&ast).map_err(|e| e.to_string())?;
+
+        // Use tree-walking interpreter
+        let mut interpreter = sounio::interp::Interpreter::with_trace(trace_interp);
+        interpreter.set_user_args(user_args);
+        match interpreter.interpret(&hir) {
+            Ok(result) => {
+                // Only print non-unit results
+                if !matches!(result, sounio::interp::Value::Unit) {
+                    println!("{}", result);
+                }
+                Ok(())
+            }
+            Err(e) => Err(e.to_string()),
+        }
+    };
+
+    let input_path_display = input.to_path_buf();
+    let run_result = if let Some(timeout) = timeout {
+        let (tx, rx) = mpsc::channel();
+
+        let handle = std::thread::Builder::new()
+            .name("interp".into())
+            .stack_size(64 * 1024 * 1024)
+            .spawn(move || {
+                let result = run_payload();
+                let _ = tx.send(result);
+            })
+            .map_err(|e| miette::miette!("failed to spawn interpreter thread: {}", e))?;
+
+        let output = match rx.recv_timeout(timeout) {
+            Ok(output) => {
+                if handle.join().is_err() {
+                    return Err(miette::miette!("interpreter thread panicked"));
+                }
+                output
+            }
+            Err(RecvTimeoutError::Timeout) => {
+                eprintln!(
+                    "SELFHOST=run schema=v1 event=run_timeout status=timeout input={} timeout_ms={}",
+                    input_path_display.display(),
+                    timeout.as_millis()
+                );
+                std::process::exit(124);
+            }
+            Err(RecvTimeoutError::Disconnected) => {
+                if handle.join().is_err() {
+                    return Err(miette::miette!("interpreter thread panicked"));
+                }
+                return Err(miette::miette!(
+                    "interpreter thread exited without reporting status"
+                ));
+            }
+        };
+
+        output
+    } else {
+        std::thread::Builder::new()
+            .name("interp".into())
+            .stack_size(64 * 1024 * 1024)
+            .spawn(run_payload)
+            .map_err(|e| miette::miette!("failed to spawn interpreter thread: {}", e))?
+            .join()
+            .map_err(|_| miette::miette!("interpreter thread panicked"))?
+    };
 
     run_result.map_err(|e| miette::miette!("{}", e))
 }

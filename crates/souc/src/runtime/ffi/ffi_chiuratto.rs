@@ -138,7 +138,10 @@ pub extern "C" fn pg_pool_query(
     }
 
     let stdout = String::from_utf8_lossy(&out.stdout);
-    let row_count = stdout.lines().filter(|line| !line.trim().is_empty()).count() as i32;
+    let row_count = stdout
+        .lines()
+        .filter(|line| !line.trim().is_empty())
+        .count() as i32;
     Box::into_raw(Box::new(PgResult { row_count }))
 }
 

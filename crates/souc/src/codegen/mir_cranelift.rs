@@ -443,7 +443,7 @@ impl MirCraneliftCompiler {
             MirType::Error => types::I64,           // Fallback
             // Vector types: use the scalar element type for now.
             // Full SIMD lowering happens in a later codegen phase.
-            MirType::Vector { ref element, .. } => self.translate_type(element),
+            MirType::Vector { element, .. } => self.translate_type(element),
         }
     }
 
@@ -863,7 +863,7 @@ impl<'a, 'b> FunctionTranslator<'a, 'b> {
             MirType::Void => types::I64,
             MirType::Struct { .. } => types::I64, // Structs are treated as pointers
             MirType::Error => types::I64,
-            MirType::Vector { ref element, .. } => self.translate_type(element),
+            MirType::Vector { element, .. } => self.translate_type(element),
         }
     }
 

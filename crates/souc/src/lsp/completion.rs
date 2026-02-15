@@ -678,17 +678,29 @@ impl CompletionProvider {
 
         if hint_lower.contains("knowledge") || hint_lower.contains("epistemic") {
             let mut items = vec![
-                method_item("confidence", "confidence()", "Get confidence level (0.0-1.0)"),
+                method_item(
+                    "confidence",
+                    "confidence()",
+                    "Get confidence level (0.0-1.0)",
+                ),
                 method_item("uncertainty", "uncertainty()", "Get uncertainty epsilon"),
                 method_item("value", "value()", "Extract the underlying value"),
                 method_item("source", "source()", "Get knowledge provenance"),
-                method_item("extract", "extract()", "Extract value (requires confidence proof)"),
+                method_item(
+                    "extract",
+                    "extract()",
+                    "Extract value (requires confidence proof)",
+                ),
                 method_item(
                     "with_confidence",
                     "with_confidence(${1:level})",
                     "Set confidence level",
                 ),
-                method_item("revise", "revise(${1:new_evidence})", "Update with new evidence"),
+                method_item(
+                    "revise",
+                    "revise(${1:new_evidence})",
+                    "Update with new evidence",
+                ),
             ];
             // Add causal-specific methods if CausalKnowledge
             if hint_lower.contains("causal") {
@@ -715,9 +727,15 @@ impl CompletionProvider {
             return items;
         }
 
-        if hint_lower.contains("causalgraph") || hint_lower.contains("graph") && hint_lower.contains("causal") {
+        if hint_lower.contains("causalgraph")
+            || hint_lower.contains("graph") && hint_lower.contains("causal")
+        {
             return vec![
-                method_item("add_node", "add_node(${1:node})", "Add node to causal graph"),
+                method_item(
+                    "add_node",
+                    "add_node(${1:node})",
+                    "Add node to causal graph",
+                ),
                 method_item(
                     "add_edge",
                     "add_edge(\"${1:from}\", \"${2:to}\")",
@@ -735,7 +753,11 @@ impl CompletionProvider {
                 ),
                 method_item("nodes", "nodes()", "Get all nodes"),
                 method_item("edges", "edges()", "Get all edges"),
-                method_item("ancestors", "ancestors(\"${1:node}\")", "Get ancestors of node"),
+                method_item(
+                    "ancestors",
+                    "ancestors(\"${1:node}\")",
+                    "Get ancestors of node",
+                ),
                 method_item(
                     "descendants",
                     "descendants(\"${1:node}\")",

@@ -10,10 +10,10 @@ pub mod stack;
 
 pub use bytecode::{Bytecode, Value};
 pub use memory::Heap;
+use rustc_hash::FxHashMap as HashMap;
 pub use serialize::{BYTECODE_MAGIC, BYTECODE_VERSION, SerializeError, deserialize, serialize};
 use std::io::Read;
 use std::sync::{Arc, Mutex};
-use rustc_hash::FxHashMap as HashMap;
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum VmError {
@@ -296,7 +296,7 @@ impl BytecodeVM {
                             return Err(VmError::TypeMismatch(format!(
                                 "ToInt expects int/bool/float, got {:?} at ip={}",
                                 other, ip
-                            )))
+                            )));
                         }
                     };
                     self.stack.push(result);
@@ -311,7 +311,7 @@ impl BytecodeVM {
                             return Err(VmError::TypeMismatch(format!(
                                 "ToFloat expects int/bool/float, got {:?} at ip={}",
                                 other, ip
-                            )))
+                            )));
                         }
                     };
                     self.stack.push(result);
@@ -326,7 +326,7 @@ impl BytecodeVM {
                             return Err(VmError::TypeMismatch(format!(
                                 "ToBool expects int/bool/float, got {:?} at ip={}",
                                 other, ip
-                            )))
+                            )));
                         }
                     };
                     self.stack.push(result);
@@ -425,7 +425,7 @@ impl BytecodeVM {
                             return Err(VmError::TypeMismatch(format!(
                                 "And expects bool,bool got lhs={:?} rhs={:?} at ip={}",
                                 lhs, rhs, ip
-                            )))
+                            )));
                         }
                     }
                 }
@@ -438,7 +438,7 @@ impl BytecodeVM {
                             return Err(VmError::TypeMismatch(format!(
                                 "Or expects bool,bool got lhs={:?} rhs={:?} at ip={}",
                                 lhs, rhs, ip
-                            )))
+                            )));
                         }
                     }
                 }
@@ -450,7 +450,7 @@ impl BytecodeVM {
                             return Err(VmError::TypeMismatch(format!(
                                 "Not expects bool, got {:?} at ip={}",
                                 other, ip
-                            )))
+                            )));
                         }
                     }
                 }
@@ -464,7 +464,7 @@ impl BytecodeVM {
                             return Err(VmError::TypeMismatch(format!(
                                 "BitAnd expects int,int or bool,bool got lhs={:?} rhs={:?} at ip={}",
                                 lhs, rhs, ip
-                            )))
+                            )));
                         }
                     };
                     self.stack.push(result);
@@ -479,7 +479,7 @@ impl BytecodeVM {
                             return Err(VmError::TypeMismatch(format!(
                                 "BitOr expects int,int or bool,bool got lhs={:?} rhs={:?} at ip={}",
                                 lhs, rhs, ip
-                            )))
+                            )));
                         }
                     };
                     self.stack.push(result);
@@ -804,7 +804,10 @@ impl BytecodeVM {
                                     }
                                 }
                                 _ => {
-                                    tracing::trace!("VM: GetIndex {} on non-list Ref, returning Unit", index);
+                                    tracing::trace!(
+                                        "VM: GetIndex {} on non-list Ref, returning Unit",
+                                        index
+                                    );
                                     self.stack.push(Value::Unit);
                                 }
                             }
@@ -915,46 +918,55 @@ impl BytecodeVM {
                             }
                         }
                     } else {
-                    match (target, index) {
-                        (Value::List(items), Value::Int(idx)) => {
-                            let idx = idx as usize;
-                            if idx < items.len() {
-                                self.stack.push(items[idx].clone());
-                            } else {
-                                return Err(VmError::MemoryError(format!(
-                                    "Index {} out of bounds for list of length {}",
-                                    idx,
-                                    items.len()
-                                )));
-                            }
-                        }
-                        (
-                            Value::SparseList {
-                                len,
-                                default,
-                                overrides,
-                            },
-                            Value::Int(idx),
-                        ) => {
-                            let idx = idx as usize;
-                            if idx < len {
-                                if let Some(value) = overrides.get(&idx) {
-                                    self.stack.push(value.clone());
+                        match (target, index) {
+                            (Value::List(items), Value::Int(idx)) => {
+                                let idx = idx as usize;
+                                if idx < items.len() {
+                                    self.stack.push(items[idx].clone());
                                 } else {
-                                    self.stack.push((*default).clone());
+                                    return Err(VmError::MemoryError(format!(
+                                        "Index {} out of bounds for list of length {}",
+                                        idx,
+                                        items.len()
+                                    )));
                                 }
-                            } else {
-                                return Err(VmError::MemoryError(format!(
-                                    "Index {} out of bounds for list of length {}",
-                                    idx, len
-                                )));
                             }
-                        }
-                        (Value::String(s), Value::Int(idx)) => {
-                            let idx = idx as usize;
-                            if s.is_ascii() {
-                                if let Some(&b) = s.as_bytes().get(idx) {
-                                    self.stack.push(Value::Int((b as i8) as i64));
+                            (
+                                Value::SparseList {
+                                    len,
+                                    default,
+                                    overrides,
+                                },
+                                Value::Int(idx),
+                            ) => {
+                                let idx = idx as usize;
+                                if idx < len {
+                                    if let Some(value) = overrides.get(&idx) {
+                                        self.stack.push(value.clone());
+                                    } else {
+                                        self.stack.push((*default).clone());
+                                    }
+                                } else {
+                                    return Err(VmError::MemoryError(format!(
+                                        "Index {} out of bounds for list of length {}",
+                                        idx, len
+                                    )));
+                                }
+                            }
+                            (Value::String(s), Value::Int(idx)) => {
+                                let idx = idx as usize;
+                                if s.is_ascii() {
+                                    if let Some(&b) = s.as_bytes().get(idx) {
+                                        self.stack.push(Value::Int((b as i8) as i64));
+                                    } else {
+                                        return Err(VmError::MemoryError(format!(
+                                            "Index {} out of bounds for string of length {}",
+                                            idx,
+                                            s.len()
+                                        )));
+                                    }
+                                } else if let Some(c) = s.chars().nth(idx) {
+                                    self.stack.push(Value::Int(c as i64));
                                 } else {
                                     return Err(VmError::MemoryError(format!(
                                         "Index {} out of bounds for string of length {}",
@@ -962,22 +974,13 @@ impl BytecodeVM {
                                         s.len()
                                     )));
                                 }
-                            } else if let Some(c) = s.chars().nth(idx) {
-                                self.stack.push(Value::Int(c as i64));
-                            } else {
-                                return Err(VmError::MemoryError(format!(
-                                    "Index {} out of bounds for string of length {}",
-                                    idx,
-                                    s.len()
-                                )));
+                            }
+                            _ => {
+                                return Err(VmError::TypeMismatch(
+                                    "IndexOp requires list/string and integer".to_string(),
+                                ));
                             }
                         }
-                        _ => {
-                            return Err(VmError::TypeMismatch(
-                                "IndexOp requires list/string and integer".to_string(),
-                            ));
-                        }
-                    }
                     } // close else block
                 }
 
@@ -1061,7 +1064,9 @@ impl BytecodeVM {
         let result = match name {
             "__sounio_print" => {
                 if arg_count < 1 {
-                    return Err(VmError::FfiError("print requires at least 1 argument".to_string()));
+                    return Err(VmError::FfiError(
+                        "print requires at least 1 argument".to_string(),
+                    ));
                 }
                 let count = arg_count as usize;
                 let mut args = Vec::with_capacity(count);
@@ -1162,7 +1167,10 @@ impl BytecodeVM {
                     self.stdin_bytes = Some(buf);
                     self.stdin_pos = 0;
                 }
-                let bytes = self.stdin_bytes.as_ref().expect("stdin buffer should exist");
+                let bytes = self
+                    .stdin_bytes
+                    .as_ref()
+                    .expect("stdin buffer should exist");
                 if self.stdin_pos < bytes.len() {
                     let b = bytes[self.stdin_pos];
                     self.stdin_pos += 1;
@@ -1180,7 +1188,11 @@ impl BytecodeVM {
                 let path = self.stack.pop().ok_or(VmError::StackUnderflow)?;
                 let path = match path {
                     Value::String(s) => s,
-                    _ => return Err(VmError::TypeMismatch("read_file expects string".to_string())),
+                    _ => {
+                        return Err(VmError::TypeMismatch(
+                            "read_file expects string".to_string(),
+                        ));
+                    }
                 };
                 match std::fs::read(&path) {
                     Ok(bytes) => {
@@ -1248,7 +1260,11 @@ impl BytecodeVM {
                 let path = self.stack.pop().ok_or(VmError::StackUnderflow)?;
                 let path = match path {
                     Value::String(s) => s,
-                    _ => return Err(VmError::TypeMismatch("file_size expects string".to_string())),
+                    _ => {
+                        return Err(VmError::TypeMismatch(
+                            "file_size expects string".to_string(),
+                        ));
+                    }
                 };
                 match std::fs::metadata(&path) {
                     Ok(meta) => {
@@ -1291,7 +1307,7 @@ impl BytecodeVM {
                     _ => {
                         return Err(VmError::TypeMismatch(
                             "path_join expects strings".to_string(),
-                        ))
+                        ));
                     }
                 };
                 let joined = std::path::PathBuf::from(a).join(b);
@@ -1299,9 +1315,7 @@ impl BytecodeVM {
             }
             "list_dir" => {
                 if arg_count != 1 {
-                    return Err(VmError::FfiError(
-                        "list_dir expects 1 argument".to_string(),
-                    ));
+                    return Err(VmError::FfiError("list_dir expects 1 argument".to_string()));
                 }
                 let path = self.stack.pop().ok_or(VmError::StackUnderflow)?;
                 let path = match path {
@@ -1310,10 +1324,8 @@ impl BytecodeVM {
                 };
                 let mut out = Vec::new();
                 if let Ok(rd) = std::fs::read_dir(&path) {
-                    let mut entries: Vec<std::path::PathBuf> = rd
-                        .filter_map(|e| e.ok())
-                        .map(|e| e.path())
-                        .collect();
+                    let mut entries: Vec<std::path::PathBuf> =
+                        rd.filter_map(|e| e.ok()).map(|e| e.path()).collect();
                     // Deterministic ordering: lexicographic by full path.
                     entries.sort_by(|a, b| a.to_string_lossy().cmp(&b.to_string_lossy()));
                     for p in entries {
@@ -1332,14 +1344,16 @@ impl BytecodeVM {
             }
             "get_arg" => {
                 if arg_count != 1 {
-                    return Err(VmError::FfiError(
-                        "get_arg expects 1 argument".to_string(),
-                    ));
+                    return Err(VmError::FfiError("get_arg expects 1 argument".to_string()));
                 }
                 let idx = self.stack.pop().ok_or(VmError::StackUnderflow)?;
                 let idx = match idx {
                     Value::Int(i) => i,
-                    _ => return Err(VmError::TypeMismatch("get_arg expects int index".to_string())),
+                    _ => {
+                        return Err(VmError::TypeMismatch(
+                            "get_arg expects int index".to_string(),
+                        ));
+                    }
                 };
                 if idx < 0 {
                     return Ok(Value::String(String::new()));
@@ -1353,9 +1367,7 @@ impl BytecodeVM {
             }
             "str_len" => {
                 if arg_count != 1 {
-                    return Err(VmError::FfiError(
-                        "str_len expects 1 argument".to_string(),
-                    ));
+                    return Err(VmError::FfiError("str_len expects 1 argument".to_string()));
                 }
                 let s = self.stack.pop().ok_or(VmError::StackUnderflow)?;
                 match s {
@@ -1365,9 +1377,7 @@ impl BytecodeVM {
             }
             "str_eq" => {
                 if arg_count != 2 {
-                    return Err(VmError::FfiError(
-                        "str_eq expects 2 arguments".to_string(),
-                    ));
+                    return Err(VmError::FfiError("str_eq expects 2 arguments".to_string()));
                 }
                 let b = self.stack.pop().ok_or(VmError::StackUnderflow)?;
                 let a = self.stack.pop().ok_or(VmError::StackUnderflow)?;
@@ -1385,8 +1395,12 @@ impl BytecodeVM {
                 let b = self.stack.pop().ok_or(VmError::StackUnderflow)?;
                 let a = self.stack.pop().ok_or(VmError::StackUnderflow)?;
                 match (a, b) {
-                    (Value::String(a), Value::String(b)) => Ok(Value::String(format!("{}{}", a, b))),
-                    _ => Err(VmError::TypeMismatch("str_concat expects strings".to_string())),
+                    (Value::String(a), Value::String(b)) => {
+                        Ok(Value::String(format!("{}{}", a, b)))
+                    }
+                    _ => Err(VmError::TypeMismatch(
+                        "str_concat expects strings".to_string(),
+                    )),
                 }
             }
             "str_char_at" => {
@@ -1512,7 +1526,9 @@ impl BytecodeVM {
                     (Value::String(haystack), Value::String(needle)) => {
                         Ok(Value::Bool(haystack.contains(needle.as_str())))
                     }
-                    _ => Err(VmError::TypeMismatch("contains expects strings".to_string())),
+                    _ => Err(VmError::TypeMismatch(
+                        "contains expects strings".to_string(),
+                    )),
                 }
             }
             "starts_with" => {
@@ -1544,7 +1560,9 @@ impl BytecodeVM {
                     (Value::String(s), Value::String(suffix)) => {
                         Ok(Value::Bool(s.ends_with(suffix.as_str())))
                     }
-                    _ => Err(VmError::TypeMismatch("ends_with expects strings".to_string())),
+                    _ => Err(VmError::TypeMismatch(
+                        "ends_with expects strings".to_string(),
+                    )),
                 }
             }
             "str_slice" => {
@@ -1561,7 +1579,11 @@ impl BytecodeVM {
                         let len = s.len() as i64;
                         let start = start.clamp(0, len) as usize;
                         let end = end.clamp(0, len) as usize;
-                        let (from, to) = if start <= end { (start, end) } else { (end, start) };
+                        let (from, to) = if start <= end {
+                            (start, end)
+                        } else {
+                            (end, start)
+                        };
                         Ok(Value::String(s[from..to].to_string()))
                     }
                     _ => Err(VmError::TypeMismatch(
@@ -1843,7 +1865,9 @@ impl BytecodeVM {
                 }
                 let name = self.stack.pop().ok_or(VmError::StackUnderflow)?;
                 match name {
-                    Value::String(name) => Ok(self.globals.get(&name).cloned().unwrap_or(Value::Unit)),
+                    Value::String(name) => {
+                        Ok(self.globals.get(&name).cloned().unwrap_or(Value::Unit))
+                    }
                     _ => Err(VmError::TypeMismatch(
                         "get_global expects a string name".to_string(),
                     )),

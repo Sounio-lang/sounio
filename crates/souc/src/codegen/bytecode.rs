@@ -681,9 +681,10 @@ impl BytecodeCodegen {
                                     unique_candidates.push(candidate);
                                 }
                             }
-                            let has_declared_qualified = unique_candidates
-                                .iter()
-                                .any(|candidate| candidate != name && self.is_declared_function(candidate));
+                            let has_declared_qualified =
+                                unique_candidates.iter().any(|candidate| {
+                                    candidate != name && self.is_declared_function(candidate)
+                                });
                             let trace_call_resolve =
                                 std::env::var_os("SOUNIO_CALL_RESOLVE_TRACE").is_some();
                             if trace_call_resolve && (name == "peek" || name == "advance") {
@@ -717,8 +718,7 @@ impl BytecodeCodegen {
                                     Some(arg_types.as_slice()),
                                 ) {
                                     resolved = Some(addr);
-                                    if trace_call_resolve && (name == "peek" || name == "advance")
-                                    {
+                                    if trace_call_resolve && (name == "peek" || name == "advance") {
                                         eprintln!(
                                             "CALL_RESOLVE hit name={} candidate={} addr={}",
                                             name, candidate, addr
@@ -1012,10 +1012,7 @@ impl BytecodeCodegen {
                     ))
                 })?;
                 self.emit(Bytecode::Push(Value::Int(count_i64)));
-                self.emit(Bytecode::CallExtern(
-                    "__sounio_repeat_list".to_string(),
-                    2,
-                ));
+                self.emit(Bytecode::CallExtern("__sounio_repeat_list".to_string(), 2));
             }
 
             // Method call - delegate to function call
@@ -1162,9 +1159,8 @@ impl BytecodeCodegen {
                 use crate::hir::HirType::*;
                 match target {
                     Bool => self.emit(Bytecode::ToBool),
-                    I8 | I16 | I32 | I64 | I128 | Isize | U8 | U16 | U32 | U64 | U128 | Usize | Char => {
-                        self.emit(Bytecode::ToInt)
-                    }
+                    I8 | I16 | I32 | I64 | I128 | Isize | U8 | U16 | U32 | U64 | U128 | Usize
+                    | Char => self.emit(Bytecode::ToInt),
                     F32 | F64 => self.emit(Bytecode::ToFloat),
                     // For now, unsupported casts are treated as no-ops.
                     _ => {}
@@ -1198,7 +1194,11 @@ impl BytecodeCodegen {
         Ok(())
     }
 
-    fn compile_match_expr(&mut self, scrutinee: &HirExpr, arms: &[HirMatchArm]) -> BytecodeResult<()> {
+    fn compile_match_expr(
+        &mut self,
+        scrutinee: &HirExpr,
+        arms: &[HirMatchArm],
+    ) -> BytecodeResult<()> {
         // Evaluate scrutinee once and keep it in a hidden local.
         self.compile_expr(scrutinee)?;
         let scrutinee_slot = self.allocate_local(&format!("__match_scrutinee_{}", self.next_local));
@@ -1375,8 +1375,7 @@ impl BytecodeCodegen {
 
                 if patterns.iter().any(Self::pattern_has_bindings) {
                     return Err(BytecodeError::Unsupported(
-                        "Or-pattern bindings are not yet supported in bytecode backend"
-                            .to_string(),
+                        "Or-pattern bindings are not yet supported in bytecode backend".to_string(),
                     ));
                 }
 
@@ -1479,20 +1478,9 @@ impl BytecodeCodegen {
         match name {
             "print" => Some("__sounio_print".to_string()),
             "println" => Some("__sounio_println".to_string()),
-            "print_int"
-            | "print_char"
-            | "read_byte"
-            | "read_file"
-            | "read_file_prefix"
-            | "file_size"
-            | "contains"
-            | "starts_with"
-            | "ends_with"
-            | "is_dir"
-            | "path_join"
-            | "list_dir" => {
-                Some(name.to_string())
-            }
+            "print_int" | "print_char" | "read_byte" | "read_file" | "read_file_prefix"
+            | "file_size" | "contains" | "starts_with" | "ends_with" | "is_dir" | "path_join"
+            | "list_dir" => Some(name.to_string()),
             _ => None,
         }
     }
@@ -1793,7 +1781,6 @@ impl BytecodeCodegen {
             .copied()
             .ok_or_else(|| BytecodeError::UnknownVariable(name.to_string()))
     }
-
 }
 
 impl Default for BytecodeCodegen {

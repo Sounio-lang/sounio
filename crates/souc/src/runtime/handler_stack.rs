@@ -7,8 +7,8 @@
 //! The module exports C-callable functions with the `__sounio_*` naming
 //! convention that are linked into compiled code.
 
-use std::collections::HashMap;
 use std::cell::RefCell;
+use std::collections::HashMap;
 use std::ffi::CStr;
 
 /// A handler entry on the runtime handler stack
@@ -307,12 +307,7 @@ thread_local! {
 }
 
 fn try_with_handler_stack_mut<R>(f: impl FnOnce(&mut RuntimeHandlerStack) -> R) -> Option<R> {
-    HANDLER_STACK.with(|stack| {
-        stack
-            .try_borrow_mut()
-            .ok()
-            .map(|mut stack| f(&mut *stack))
-    })
+    HANDLER_STACK.with(|stack| stack.try_borrow_mut().ok().map(|mut stack| f(&mut *stack)))
 }
 
 fn try_with_handler_stack<R>(f: impl FnOnce(&RuntimeHandlerStack) -> R) -> Option<R> {
@@ -469,9 +464,9 @@ pub extern "C" fn __sounio_dispatch_io_print(value: f64) -> f64 {
 
 #[unsafe(no_mangle)]
 pub extern "C" fn __sounio_dispatch_io_println(value: f64) -> f64 {
-    if let Some(v) = try_with_handler_stack_mut(|stack| {
-        stack.dispatch("IO", "println", &[value]).unwrap_or(0.0)
-    }) {
+    if let Some(v) =
+        try_with_handler_stack_mut(|stack| stack.dispatch("IO", "println", &[value]).unwrap_or(0.0))
+    {
         v
     } else {
         println!("{}", value);
@@ -500,10 +495,8 @@ pub extern "C" fn __sounio_dispatch_mut_get(key: f64) -> f64 {
 
 #[unsafe(no_mangle)]
 pub extern "C" fn __sounio_dispatch_mut_set(key: f64, value: f64) -> f64 {
-    try_with_handler_stack_mut(|stack| {
-        stack.dispatch("Mut", "set", &[key, value]).unwrap_or(0.0)
-    })
-    .unwrap_or(0.0)
+    try_with_handler_stack_mut(|stack| stack.dispatch("Mut", "set", &[key, value]).unwrap_or(0.0))
+        .unwrap_or(0.0)
 }
 
 #[unsafe(no_mangle)]
@@ -571,9 +564,9 @@ pub extern "C" fn __sounio_dispatch_alloc_dealloc(ptr: f64) -> f64 {
 
 #[unsafe(no_mangle)]
 pub extern "C" fn __sounio_dispatch_panic_panic() -> f64 {
-    if let Some(v) =
-        try_with_handler_stack_mut(|stack| stack.dispatch("Panic", "panic", &[]).unwrap_or(f64::NAN))
-    {
+    if let Some(v) = try_with_handler_stack_mut(|stack| {
+        stack.dispatch("Panic", "panic", &[]).unwrap_or(f64::NAN)
+    }) {
         v
     } else {
         eprintln!("Runtime panic!");
@@ -678,8 +671,12 @@ pub extern "C" fn __sounio_dispatch_async_await(task_id: f64) -> f64 {
 /// task_ids is encoded as: count followed by task IDs (passed through additional calls)
 #[unsafe(no_mangle)]
 pub extern "C" fn __sounio_dispatch_async_join(task_count: f64) -> f64 {
-    try_with_handler_stack_mut(|stack| stack.dispatch("Async", "join", &[task_count]).unwrap_or(0.0))
-        .unwrap_or(0.0)
+    try_with_handler_stack_mut(|stack| {
+        stack
+            .dispatch("Async", "join", &[task_count])
+            .unwrap_or(0.0)
+    })
+    .unwrap_or(0.0)
 }
 
 /// Add a task to a join set
@@ -742,8 +739,12 @@ pub extern "C" fn __sounio_dispatch_async_select_await(select_id: f64) -> f64 {
 /// Create a new unbounded channel, returns channel_id
 #[unsafe(no_mangle)]
 pub extern "C" fn __sounio_dispatch_channel_create() -> f64 {
-    try_with_handler_stack_mut(|stack| stack.dispatch("Async", "channel_create", &[]).unwrap_or(0.0))
-        .unwrap_or(0.0)
+    try_with_handler_stack_mut(|stack| {
+        stack
+            .dispatch("Async", "channel_create", &[])
+            .unwrap_or(0.0)
+    })
+    .unwrap_or(0.0)
 }
 
 /// Create a new bounded channel with capacity, returns channel_id
@@ -833,8 +834,12 @@ pub extern "C" fn __sounio_dispatch_causal_do(value: f64) -> f64 {
 
 #[unsafe(no_mangle)]
 pub extern "C" fn __sounio_dispatch_causal_observe(value: f64) -> f64 {
-    try_with_handler_stack_mut(|stack| stack.dispatch("Causal", "observe", &[value]).unwrap_or(value))
-        .unwrap_or(value)
+    try_with_handler_stack_mut(|stack| {
+        stack
+            .dispatch("Causal", "observe", &[value])
+            .unwrap_or(value)
+    })
+    .unwrap_or(value)
 }
 
 // --- Generic Dispatch ---

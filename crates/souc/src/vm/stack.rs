@@ -28,9 +28,7 @@ impl Stack {
                 if *len <= 16 {
                     let mut items = Vec::with_capacity(*len);
                     for idx in 0..*len {
-                        let value = overrides
-                            .get(&idx)
-                            .unwrap_or(default.as_ref());
+                        let value = overrides.get(&idx).unwrap_or(default.as_ref());
                         items.push(Self::value_to_string(value));
                     }
                     format!("[{}]", items.join(", "))

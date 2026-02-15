@@ -998,9 +998,7 @@ impl LoopVectorizer {
                     // Stores to GEP-derived addresses are safe (array writes indexed by IV)
                     MirInstruction::Store { address, .. } => {
                         if !gep_results.contains(address) {
-                            return Some(
-                                "Contains non-array memory stores".to_string(),
-                            );
+                            return Some("Contains non-array memory stores".to_string());
                         }
                         // GEP-indexed store is allowed — array write pattern
                     }
@@ -1107,7 +1105,14 @@ impl LoopVectorizer {
         }
 
         // Step 4: Apply the transformation
-        self.apply_vectorization(func, natural_loop, &iv_info, &bound_info, &vectorizable, factor)
+        self.apply_vectorization(
+            func,
+            natural_loop,
+            &iv_info,
+            &bound_info,
+            &vectorizable,
+            factor,
+        )
     }
 
     /// Induction variable information
@@ -1145,11 +1150,11 @@ impl LoopVectorizer {
                     }
                 }
 
-                let (init, step_val, latch_block) =
-                    match (init_value, step_value, back_edge_block) {
-                        (Some(i), Some(s), Some(b)) => (i, s, b),
-                        _ => continue,
-                    };
+                let (init, step_val, latch_block) = match (init_value, step_value, back_edge_block)
+                {
+                    (Some(i), Some(s), Some(b)) => (i, s, b),
+                    _ => continue,
+                };
 
                 // Verify that step_val = iv + constant (usually 1)
                 if let Some(stride) =
@@ -1322,9 +1327,9 @@ impl LoopVectorizer {
             for (idx, instr) in block.instructions.iter().enumerate() {
                 match instr {
                     // Binary arithmetic on numeric types
-                    MirInstruction::Binary { result: r, op, ty, .. }
-                        if (ty.is_float() || ty.is_integer()) && ty != &iv.ty =>
-                    {
+                    MirInstruction::Binary {
+                        result: r, op, ty, ..
+                    } if (ty.is_float() || ty.is_integer()) && ty != &iv.ty => {
                         result.push(VectorizableInstr {
                             block_id: block.id,
                             instr_idx: idx,
@@ -1334,9 +1339,9 @@ impl LoopVectorizer {
                         });
                     }
                     // Unary operations on numeric types
-                    MirInstruction::Unary { result: r, op, ty, .. }
-                        if ty.is_float() || ty.is_integer() =>
-                    {
+                    MirInstruction::Unary {
+                        result: r, op, ty, ..
+                    } if ty.is_float() || ty.is_integer() => {
                         result.push(VectorizableInstr {
                             block_id: block.id,
                             instr_idx: idx,
@@ -1881,16 +1886,12 @@ mod tests {
 
     #[test]
     fn test_induction_variable_detection() {
-        use crate::mir::{MirBinaryOp, MirBlock, MirConstant, MirTerminator, MirCompareOp};
+        use crate::mir::{MirBinaryOp, MirBlock, MirCompareOp, MirConstant, MirTerminator};
 
         let vectorizer = LoopVectorizer::new();
 
         // Build: for (i = 0; i < N; i++) { a[i] = a[i] + 1.0 }
-        let mut func = MirFunction::new(
-            crate::mir::FuncId(0),
-            "test_iv".to_string(),
-            MirType::I64,
-        );
+        let mut func = MirFunction::new(crate::mir::FuncId(0), "test_iv".to_string(), MirType::I64);
 
         // Block 0: entry — set i_init = 0, branch to header
         let mut entry = MirBlock::new(BlockId(0), "entry".to_string());
@@ -1973,7 +1974,7 @@ mod tests {
 
     #[test]
     fn test_loop_bound_detection() {
-        use crate::mir::{MirBinaryOp, MirBlock, MirConstant, MirTerminator, MirCompareOp};
+        use crate::mir::{MirBinaryOp, MirBlock, MirCompareOp, MirConstant, MirTerminator};
 
         let vectorizer = LoopVectorizer::new();
 
@@ -1996,10 +1997,7 @@ mod tests {
         let mut header = MirBlock::new(BlockId(1), "header".to_string());
         header.add_instruction(MirInstruction::Phi {
             result: ValueId(1),
-            incoming: vec![
-                (BlockId(0), ValueId(0)),
-                (BlockId(2), ValueId(3)),
-            ],
+            incoming: vec![(BlockId(0), ValueId(0)), (BlockId(2), ValueId(3))],
             ty: MirType::I64,
         });
         header.set_terminator(MirTerminator::Branch { target: BlockId(2) });
@@ -2049,7 +2047,9 @@ mod tests {
             depth: 1,
         };
 
-        let iv = vectorizer.find_induction_variable(&func, &natural_loop).unwrap();
+        let iv = vectorizer
+            .find_induction_variable(&func, &natural_loop)
+            .unwrap();
         let bound = vectorizer.find_loop_bound(&func, &natural_loop, &iv);
         assert!(bound.is_some(), "Should detect loop bound");
         let bound = bound.unwrap();
@@ -2160,10 +2160,7 @@ mod tests {
         let mut header = MirBlock::new(BlockId(1), "header".to_string());
         header.add_instruction(MirInstruction::Phi {
             result: ValueId(1),
-            incoming: vec![
-                (BlockId(0), ValueId(0)),
-                (BlockId(2), ValueId(5)),
-            ],
+            incoming: vec![(BlockId(0), ValueId(0)), (BlockId(2), ValueId(5))],
             ty: MirType::I64,
         });
         header.set_terminator(MirTerminator::Branch { target: BlockId(2) });
@@ -2221,6 +2218,10 @@ mod tests {
 
         let vec_instrs = vectorizer.collect_vectorizable_instructions(&func, &natural_loop, &iv);
         // Should find the Load (F64) and Binary Mul (F64), but NOT the IV add (I64 == IV type)
-        assert_eq!(vec_instrs.len(), 2, "Should find 2 vectorizable instructions (load + mul)");
+        assert_eq!(
+            vec_instrs.len(),
+            2,
+            "Should find 2 vectorizable instructions (load + mul)"
+        );
     }
 }

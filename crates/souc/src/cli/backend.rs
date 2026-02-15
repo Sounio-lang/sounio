@@ -121,7 +121,9 @@ impl Backend {
     /// Get known issues/warnings
     pub fn warnings(&self) -> Option<&'static str> {
         match self {
-            Backend::SelfhostedNative => Some("⚠️  Linux/macOS x86-64/ARM64 only; Windows deferred"),
+            Backend::SelfhostedNative => {
+                Some("⚠️  Linux/macOS x86-64/ARM64 only; Windows deferred")
+            }
             Backend::Llvm => Some("⚠️  May have issues with refinement types + FFI"),
             Backend::Gpu => Some("Requires CUDA toolkit"),
             _ => None,
@@ -131,7 +133,7 @@ impl Backend {
     /// Convert to codegen::Backend
     pub fn to_codegen(&self) -> Option<CodegenBackend> {
         match self {
-            Backend::Native => None, // Not in codegen enum yet
+            Backend::Native => None,           // Not in codegen enum yet
             Backend::SelfhostedNative => None, // Uses Sounio interpreter, not codegen
             Backend::Llvm => Some(CodegenBackend::LLVM),
             Backend::Cranelift => Some(CodegenBackend::Cranelift),
@@ -761,10 +763,17 @@ pub fn compile(args: &BuildArgs) -> CompileOutput {
 /// Compile using self-hosted native backend (Phase 6: compile_to_elf via Sounio VM)
 fn compile_selfhosted_native(args: &BuildArgs) -> Result<(PathBuf, Option<NativeMetrics>), String> {
     let input_path = &args.input[0];
-    let output_path = args.output.clone().unwrap_or_else(|| PathBuf::from("a.out"));
+    let output_path = args
+        .output
+        .clone()
+        .unwrap_or_else(|| PathBuf::from("a.out"));
 
     if args.verbose {
-        println!("Self-hosted native backend: {} -> {}", input_path.display(), output_path.display());
+        println!(
+            "Self-hosted native backend: {} -> {}",
+            input_path.display(),
+            output_path.display()
+        );
     }
 
     let mut compiler = crate::compiler_loader::SounioCompiler::new_embedded()

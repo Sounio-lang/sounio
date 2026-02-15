@@ -1004,7 +1004,9 @@ impl Interpreter {
                         _ => Err(ControlFlow::Return(Value::Unit)),
                     },
                     (Value::String(s), "ends_with") => match arg_values.get(1) {
-                        Some(Value::String(suffix)) => Ok(Value::Bool(s.ends_with(suffix.as_str()))),
+                        Some(Value::String(suffix)) => {
+                            Ok(Value::Bool(s.ends_with(suffix.as_str())))
+                        }
                         _ => Err(ControlFlow::Return(Value::Unit)),
                     },
                     (Value::String(s), "contains") => match arg_values.get(1) {

@@ -559,7 +559,8 @@ impl<R: Read> BytecodeDeserializer<R> {
             }
             ValueTag::Struct => {
                 let len = self.read_u32()? as usize;
-                let mut fields: rustc_hash::FxHashMap<String, Value> = rustc_hash::FxHashMap::default();
+                let mut fields: rustc_hash::FxHashMap<String, Value> =
+                    rustc_hash::FxHashMap::default();
                 fields.reserve(len);
                 for _ in 0..len {
                     let key = self.read_string()?;

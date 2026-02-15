@@ -485,9 +485,7 @@ pub struct CausalHoverProvider;
 
 impl CausalHoverProvider {
     /// Generate hover content for causal information
-    pub fn format_causal_hover(
-        info: &super::query_bridge::CausalInfo,
-    ) -> Vec<MarkedString> {
+    pub fn format_causal_hover(info: &super::query_bridge::CausalInfo) -> Vec<MarkedString> {
         let mut parts = Vec::new();
 
         // Graph structure
@@ -502,7 +500,10 @@ impl CausalHoverProvider {
         let mut dag_lines = Vec::new();
         for edge in &info.edges {
             if let Some(strength) = edge.strength {
-                dag_lines.push(format!("  {} --({:.2})--> {}", edge.from, strength, edge.to));
+                dag_lines.push(format!(
+                    "  {} --({:.2})--> {}",
+                    edge.from, strength, edge.to
+                ));
             } else {
                 dag_lines.push(format!("  {} --> {}", edge.from, edge.to));
             }
@@ -523,32 +524,24 @@ impl CausalHoverProvider {
         if !info.treatments.is_empty() || !info.outcomes.is_empty() {
             let mut roles = Vec::new();
             if !info.treatments.is_empty() {
-                roles.push(format!(
-                    "Treatment: `{}`",
-                    info.treatments.join("`, `")
-                ));
+                roles.push(format!("Treatment: `{}`", info.treatments.join("`, `")));
             }
             if !info.outcomes.is_empty() {
-                roles.push(format!(
-                    "Outcome: `{}`",
-                    info.outcomes.join("`, `")
-                ));
+                roles.push(format!("Outcome: `{}`", info.outcomes.join("`, `")));
             }
             parts.push(MarkedString::String(roles.join(" | ")));
         }
 
         // Identifiability
-        parts.push(MarkedString::String(
-            Self::format_identifiability(&info.identifiability),
-        ));
+        parts.push(MarkedString::String(Self::format_identifiability(
+            &info.identifiability,
+        )));
 
         parts
     }
 
     /// Format identifiability status
-    fn format_identifiability(
-        id_info: &super::query_bridge::CausalIdentifiabilityInfo,
-    ) -> String {
+    fn format_identifiability(id_info: &super::query_bridge::CausalIdentifiabilityInfo) -> String {
         use super::query_bridge::CausalIdMethod;
 
         let badge = if id_info.identifiable {
@@ -593,7 +586,7 @@ impl CausalHoverProvider {
     /// Generate a compact causal badge for inlay hints
     pub fn causal_badge(identifiable: bool) -> &'static str {
         if identifiable {
-            "ID"  // Identifiable
+            "ID" // Identifiable
         } else {
             "!ID" // Non-identifiable
         }
@@ -809,13 +802,30 @@ mod tests {
 
         let info = CausalInfo {
             nodes: vec![
-                CausalNodeInfo { name: "Dose".into(), role: "treatment".into() },
-                CausalNodeInfo { name: "Effect".into(), role: "outcome".into() },
-                CausalNodeInfo { name: "Genotype".into(), role: "confounder".into() },
+                CausalNodeInfo {
+                    name: "Dose".into(),
+                    role: "treatment".into(),
+                },
+                CausalNodeInfo {
+                    name: "Effect".into(),
+                    role: "outcome".into(),
+                },
+                CausalNodeInfo {
+                    name: "Genotype".into(),
+                    role: "confounder".into(),
+                },
             ],
             edges: vec![
-                CausalEdgeInfo { from: "Dose".into(), to: "Effect".into(), strength: Some(0.8) },
-                CausalEdgeInfo { from: "Genotype".into(), to: "Effect".into(), strength: None },
+                CausalEdgeInfo {
+                    from: "Dose".into(),
+                    to: "Effect".into(),
+                    strength: Some(0.8),
+                },
+                CausalEdgeInfo {
+                    from: "Genotype".into(),
+                    to: "Effect".into(),
+                    strength: None,
+                },
             ],
             bidirected: vec![],
             treatments: vec!["Dose".into()],
@@ -831,10 +841,14 @@ mod tests {
         let hover = CausalHoverProvider::format_causal_hover(&info);
         assert!(!hover.is_empty());
         // Check that identifiability info is present
-        let text: String = hover.iter().map(|m| match m {
-            MarkedString::String(s) => s.clone(),
-            MarkedString::LanguageString(ls) => ls.value.clone(),
-        }).collect::<Vec<_>>().join("\n");
+        let text: String = hover
+            .iter()
+            .map(|m| match m {
+                MarkedString::String(s) => s.clone(),
+                MarkedString::LanguageString(ls) => ls.value.clone(),
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
         assert!(text.contains("IDENTIFIABLE"));
         assert!(text.contains("Backdoor"));
         assert!(text.contains("Genotype"));
@@ -846,12 +860,20 @@ mod tests {
 
         let info = CausalInfo {
             nodes: vec![
-                CausalNodeInfo { name: "X".into(), role: "treatment".into() },
-                CausalNodeInfo { name: "Y".into(), role: "outcome".into() },
+                CausalNodeInfo {
+                    name: "X".into(),
+                    role: "treatment".into(),
+                },
+                CausalNodeInfo {
+                    name: "Y".into(),
+                    role: "outcome".into(),
+                },
             ],
-            edges: vec![
-                CausalEdgeInfo { from: "X".into(), to: "Y".into(), strength: None },
-            ],
+            edges: vec![CausalEdgeInfo {
+                from: "X".into(),
+                to: "Y".into(),
+                strength: None,
+            }],
             bidirected: vec![("X".into(), "Y".into())],
             treatments: vec!["X".into()],
             outcomes: vec!["Y".into()],
@@ -864,10 +886,14 @@ mod tests {
         };
 
         let hover = CausalHoverProvider::format_causal_hover(&info);
-        let text: String = hover.iter().map(|m| match m {
-            MarkedString::String(s) => s.clone(),
-            MarkedString::LanguageString(ls) => ls.value.clone(),
-        }).collect::<Vec<_>>().join("\n");
+        let text: String = hover
+            .iter()
+            .map(|m| match m {
+                MarkedString::String(s) => s.clone(),
+                MarkedString::LanguageString(ls) => ls.value.clone(),
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
         assert!(text.contains("NON-IDENTIFIABLE"));
         assert!(text.contains("latent confounder"));
     }

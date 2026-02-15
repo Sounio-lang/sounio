@@ -101,6 +101,9 @@ mod tests {
     #[test]
     fn test_backend_default() {
         let backend = SelfhostedNativeBackend::default();
-        assert!(!backend.initialized, "Default backend should be uninitialized");
+        assert!(
+            !backend.initialized,
+            "Default backend should be uninitialized"
+        );
     }
 }

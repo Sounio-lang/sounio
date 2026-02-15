@@ -246,13 +246,11 @@ impl RichTypeInfo {
                     causal.identifiability.adjustment_set.join(", ")
                 ),
                 CausalIdMethod::Unconfounded => "unconfounded".to_string(),
-                CausalIdMethod::NonIdentifiable => {
-                    causal
-                        .identifiability
-                        .reason
-                        .clone()
-                        .unwrap_or_else(|| "confounded".to_string())
-                }
+                CausalIdMethod::NonIdentifiable => causal
+                    .identifiability
+                    .reason
+                    .clone()
+                    .unwrap_or_else(|| "confounded".to_string()),
                 CausalIdMethod::Unknown => "unknown".to_string(),
             };
             parts.push(MarkedString::String(format!(

@@ -337,6 +337,82 @@ impl BuiltinRegistry {
                 }
             }),
         );
+
+        // write_file(path, array, length) -> i64 (0 = success, non-zero = error)
+        // Used by self-hosted native backend to write ELF binaries
+        self.register(
+            "write_file",
+            Rc::new(|args| {
+                if args.len() != 3 {
+                    return Err(format!(
+                        "write_file expects 3 arguments, got {}",
+                        args.len()
+                    ));
+                }
+
+                let path = match &args[0] {
+                    Value::String(s) => s.clone(),
+                    other => {
+                        return Err(format!(
+                            "write_file expects string path as arg0, got {}",
+                            other.type_name()
+                        ));
+                    }
+                };
+
+                let byte_values = match &args[1] {
+                    Value::Array(arr) => arr.borrow().clone(),
+                    Value::Ref(r) => match &*r.borrow() {
+                        Value::Array(arr) => arr.borrow().clone(),
+                        other => {
+                            return Err(format!(
+                                "write_file expects array as arg1, got {}",
+                                other.type_name()
+                            ));
+                        }
+                    },
+                    other => {
+                        return Err(format!(
+                            "write_file expects array as arg1, got {}",
+                            other.type_name()
+                        ));
+                    }
+                };
+
+                let length = match &args[2] {
+                    Value::Int(n) if *n >= 0 => *n as usize,
+                    Value::Int(_) => 0usize,
+                    other => {
+                        return Err(format!(
+                            "write_file expects i64 length as arg2, got {}",
+                            other.type_name()
+                        ));
+                    }
+                };
+
+                let mut bytes = Vec::with_capacity(byte_values.len().min(length));
+                for value in byte_values.iter().take(length) {
+                    match value {
+                        Value::Int(n) => bytes.push((*n as i8) as u8),
+                        other => {
+                            return Err(format!(
+                                "write_file data must contain ints, got {}",
+                                other.type_name()
+                            ));
+                        }
+                    }
+                }
+
+                match fs::File::create(&path).and_then(|mut f| io::Write::write_all(&mut f, &bytes))
+                {
+                    Ok(()) => Ok(Value::Int(0)),
+                    Err(err) => {
+                        eprintln!("warning: write_file('{}') failed: {}", path, err);
+                        Ok(Value::Int(1))
+                    }
+                }
+            }),
+        );
     }
 
     /// Register math builtins (sqrt, sin, cos, etc)
@@ -729,10 +805,7 @@ impl BuiltinRegistry {
             "ends_with",
             Rc::new(|args| {
                 if args.len() != 2 {
-                    return Err(format!(
-                        "ends_with expects 2 arguments, got {}",
-                        args.len()
-                    ));
+                    return Err(format!("ends_with expects 2 arguments, got {}", args.len()));
                 }
                 match (&args[0], &args[1]) {
                     (Value::String(s), Value::String(suffix)) => {
@@ -747,10 +820,7 @@ impl BuiltinRegistry {
             "contains",
             Rc::new(|args| {
                 if args.len() != 2 {
-                    return Err(format!(
-                        "contains expects 2 arguments, got {}",
-                        args.len()
-                    ));
+                    return Err(format!("contains expects 2 arguments, got {}", args.len()));
                 }
                 match (&args[0], &args[1]) {
                     (Value::String(haystack), Value::String(needle)) => {
@@ -782,10 +852,7 @@ impl BuiltinRegistry {
             "path_join",
             Rc::new(|args| {
                 if args.len() != 2 {
-                    return Err(format!(
-                        "path_join expects 2 arguments, got {}",
-                        args.len()
-                    ));
+                    return Err(format!("path_join expects 2 arguments, got {}", args.len()));
                 }
                 let a = match &args[0] {
                     Value::String(s) => s,
@@ -804,10 +871,7 @@ impl BuiltinRegistry {
             "list_dir",
             Rc::new(|args| {
                 if args.len() != 1 {
-                    return Err(format!(
-                        "list_dir expects 1 argument, got {}",
-                        args.len()
-                    ));
+                    return Err(format!("list_dir expects 1 argument, got {}", args.len()));
                 }
                 let path = match &args[0] {
                     Value::String(s) => s,
