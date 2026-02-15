@@ -11,6 +11,7 @@
 
 pub mod c_layout;
 pub mod causal;
+pub mod causal_id;
 pub mod core;
 pub mod dimension_solver;
 pub mod effects;
@@ -42,8 +43,9 @@ pub use units::{Unit, UnitChecker, UnitError, UnitOp};
 // Epistemic types - the key differentiator of Sounio
 pub use epistemic::{
     ConfidenceAnalysisError, ConfidenceBound, ConfidenceFlowAnalysis, ConfidenceOp,
-    EpistemicCheckResult, EpistemicChecker, KnowledgeType, PropagationRule, PropagationRules,
-    ProvenanceConstraint, TemporalConstraint,
+    EpistemicCheckResult, EpistemicChecker, EpistemicRefinement, KnowledgeType, PropagationRule,
+    PropagationRules, ProvenanceConstraint, RefinementMode, RefinementPredicate,
+    RefinementPropagation, TemporalConstraint,
 };
 
 // Semantic types - ontological type checking
@@ -69,6 +71,12 @@ pub use causal::{
     CausalAssumption, CausalEdgeDef, CausalError, CausalGraphDef, CausalGraphRegistry,
     CausalNodeDef, CausalResult, causal_confidence_factor, check_d_separation,
     find_backdoor_adjustment, validate_dag,
+};
+
+// Pearl's ID algorithm - causal effect identification
+pub use causal_id::{
+    IdentificationFormula, IdentificationResult, NotIdentifiable, identification_confidence,
+    identify,
 };
 
 // Tropical geometry - min-plus algebra for resource analysis

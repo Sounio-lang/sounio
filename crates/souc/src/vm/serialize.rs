@@ -90,6 +90,7 @@ enum Opcode {
     IndexOp = 0x57,
     MakeVariant = 0x58,
     MakeRange = 0x59,
+    MakeRef = 0x5A,
     CallExtern = 0x60,
 }
 
@@ -137,6 +138,7 @@ impl Opcode {
             0x57 => Some(Opcode::IndexOp),
             0x58 => Some(Opcode::MakeVariant),
             0x59 => Some(Opcode::MakeRange),
+            0x5A => Some(Opcode::MakeRef),
             0x60 => Some(Opcode::CallExtern),
             _ => None,
         }
@@ -296,6 +298,9 @@ impl<W: Write> BytecodeSerializer<W> {
                 self.writer.write_all(&[Opcode::MakeRange as u8])?;
                 self.writer.write_all(&[if *inclusive { 1 } else { 0 }])?;
             }
+            Bytecode::MakeRef => {
+                self.writer.write_all(&[Opcode::MakeRef as u8])?;
+            }
         }
         Ok(())
     }
@@ -353,6 +358,11 @@ impl<W: Write> BytecodeSerializer<W> {
                     self.write_usize(*idx)?;
                     self.write_value(value)?;
                 }
+            }
+            Value::Ref(rc) => {
+                // Serialize the inner value (Ref is a runtime-only concept)
+                let inner = rc.lock().unwrap();
+                self.write_value(&inner)?;
             }
         }
         Ok(())
@@ -508,6 +518,7 @@ impl<R: Read> BytecodeDeserializer<R> {
                     inclusive: b[0] != 0,
                 })
             }
+            Opcode::MakeRef => Ok(Bytecode::MakeRef),
             Opcode::CallExtern => {
                 let name = self.read_string()?;
                 let arg_count = self.read_i32()?;

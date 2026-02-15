@@ -1265,7 +1265,7 @@ impl HirBinaryOp {
 }
 
 /// HIR unary operator
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub enum HirUnaryOp {
     Neg,
     Not,

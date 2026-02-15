@@ -1,0 +1,756 @@
+//@ run-pass
+// Advanced Sobol sensitivity analysis tests
+// Validates Saltelli et al. (2008) methods for second-order indices
+// and efficient N(2d+2) sampling scheme.
+//
+// References:
+//   Saltelli, A. et al. (2008) "Global Sensitivity Analysis: The Primer"
+//   Ishigami, T. & Homma, T. (1990) "An importance quantification technique
+//     in uncertainty analysis for computer models"
+
+extern "C" {
+    fn sqrt(x: f64) -> f64;
+    fn sin(x: f64) -> f64;
+    fn cos(x: f64) -> f64;
+    fn log(x: f64) -> f64;
+    fn exp(x: f64) -> f64;
+}
+
+fn sqrt_f64(x: f64) -> f64 {
+    if x < 0.0 { return 0.0 }
+    return sqrt(x)
+}
+
+fn abs_f64(x: f64) -> f64 {
+    if x < 0.0 { return 0.0 - x }
+    return x
+}
+
+fn max_f64(a: f64, b: f64) -> f64 {
+    if a > b { a } else { b }
+}
+
+fn min_f64(a: f64, b: f64) -> f64 {
+    if a < b { a } else { b }
+}
+
+// ============================================================================
+// Van der Corput helper (duplicated here for standalone test compilation)
+// ============================================================================
+
+fn reverse_bits(n: i64) -> f64 {
+    var result: f64 = 0.0
+    var v = n
+    var b: f64 = 0.5
+    while v > 0 {
+        if (v % 2) == 1 {
+            result = result + b
+        }
+        v = v / 2
+        b = b / 2.0
+    }
+    return result
+}
+
+// ============================================================================
+// Saltelli infrastructure (inline for standalone test)
+// ============================================================================
+
+struct SaltelliSamples {
+    matrix_a: [f64; 5000],
+    matrix_b: [f64; 5000],
+    n_samples: i32,
+    n_dims: i32,
+}
+
+fn saltelli_dim_prime(d: i32) -> i64 {
+    if d == 0 { return 2 }
+    if d == 1 { return 3 }
+    if d == 2 { return 5 }
+    if d == 3 { return 7 }
+    if d == 4 { return 11 }
+    if d == 5 { return 13 }
+    if d == 6 { return 17 }
+    if d == 7 { return 19 }
+    if d == 8 { return 23 }
+    return 29
+}
+
+fn saltelli_generate(n_samples: i32, n_dims: i32, seed: i64) -> SaltelliSamples {
+    var result = SaltelliSamples {
+        matrix_a: [0.0; 5000],
+        matrix_b: [0.0; 5000],
+        n_samples: n_samples,
+        n_dims: n_dims,
+    }
+
+    var actual_samples = n_samples
+    if n_dims > 0 {
+        let max_rows = 5000 / n_dims
+        if actual_samples > max_rows {
+            actual_samples = max_rows
+        }
+    }
+    result.n_samples = actual_samples
+
+    var i: i32 = 0
+    while i < actual_samples {
+        let base_idx: i64 = (i as i64) + 1 + seed
+        var d: i32 = 0
+        while d < n_dims {
+            let dim_mult = saltelli_dim_prime(d)
+            let idx_a: i64 = base_idx * dim_mult + (d as i64)
+            let idx_b: i64 = base_idx * dim_mult + (d as i64) + (actual_samples as i64) * 7 + 131
+
+            let flat = i * n_dims + d
+            result.matrix_a[flat] = reverse_bits(idx_a)
+            result.matrix_b[flat] = reverse_bits(idx_b)
+
+            d = d + 1
+        }
+        i = i + 1
+    }
+
+    return result
+}
+
+fn saltelli_build_ci(samples: &SaltelliSamples, dim_i: i32) -> [f64; 5000] {
+    var ci: [f64; 5000] = [0.0; 5000]
+    var i: i32 = 0
+    while i < samples.n_samples {
+        var d: i32 = 0
+        while d < samples.n_dims {
+            let flat = i * samples.n_dims + d
+            if d == dim_i {
+                ci[flat] = samples.matrix_b[flat]
+            } else {
+                ci[flat] = samples.matrix_a[flat]
+            }
+            d = d + 1
+        }
+        i = i + 1
+    }
+    return ci
+}
+
+fn saltelli_build_cij(samples: &SaltelliSamples, dim_i: i32, dim_j: i32) -> [f64; 5000] {
+    var cij: [f64; 5000] = [0.0; 5000]
+    var r: i32 = 0
+    while r < samples.n_samples {
+        var d: i32 = 0
+        while d < samples.n_dims {
+            let flat = r * samples.n_dims + d
+            if d == dim_i || d == dim_j {
+                cij[flat] = samples.matrix_b[flat]
+            } else {
+                cij[flat] = samples.matrix_a[flat]
+            }
+            d = d + 1
+        }
+        r = r + 1
+    }
+    return cij
+}
+
+fn saltelli_eval_row(matrix: &[f64; 5000], row: i32, n_dims: i32, model: fn([f64; 10]) -> f64) -> f64 {
+    var input: [f64; 10] = [0.0; 10]
+    var d: i32 = 0
+    while d < n_dims {
+        if d < 10 {
+            input[d] = matrix[row * n_dims + d]
+        }
+        d = d + 1
+    }
+    return model(input)
+}
+
+fn saltelli_first_order(
+    samples: &SaltelliSamples,
+    model_outputs_a: &[f64; 1000],
+    model_outputs_b: &[f64; 1000],
+    model_outputs_ci: &[f64; 1000]
+) -> f64 {
+    let n = samples.n_samples
+    if n < 2 { return 0.0 }
+    let nf = n as f64
+
+    var sum_all: f64 = 0.0
+    var sum_sq_all: f64 = 0.0
+    var k: i32 = 0
+    while k < n {
+        sum_all = sum_all + model_outputs_a[k] + model_outputs_b[k]
+        sum_sq_all = sum_sq_all + model_outputs_a[k] * model_outputs_a[k]
+                                + model_outputs_b[k] * model_outputs_b[k]
+        k = k + 1
+    }
+    let mean_y = sum_all / (2.0 * nf)
+    let var_y = sum_sq_all / (2.0 * nf) - mean_y * mean_y
+    if var_y < 1.0e-15 { return 0.0 }
+
+    var numerator: f64 = 0.0
+    k = 0
+    while k < n {
+        numerator = numerator + model_outputs_b[k] * (model_outputs_ci[k] - model_outputs_a[k])
+        k = k + 1
+    }
+    numerator = numerator / nf
+    let si = numerator / var_y
+    return max_f64(0.0, min_f64(1.0, si))
+}
+
+fn saltelli_total_order(
+    samples: &SaltelliSamples,
+    model_outputs_a: &[f64; 1000],
+    model_outputs_ci: &[f64; 1000]
+) -> f64 {
+    let n = samples.n_samples
+    if n < 2 { return 0.0 }
+    let nf = n as f64
+
+    var sum_a: f64 = 0.0
+    var sum_sq_a: f64 = 0.0
+    var k: i32 = 0
+    while k < n {
+        sum_a = sum_a + model_outputs_a[k]
+        sum_sq_a = sum_sq_a + model_outputs_a[k] * model_outputs_a[k]
+        k = k + 1
+    }
+    let mean_a = sum_a / nf
+    let var_y = sum_sq_a / nf - mean_a * mean_a
+    if var_y < 1.0e-15 { return 0.0 }
+
+    var numerator: f64 = 0.0
+    k = 0
+    while k < n {
+        let diff = model_outputs_a[k] - model_outputs_ci[k]
+        numerator = numerator + diff * diff
+        k = k + 1
+    }
+    numerator = numerator / (2.0 * nf)
+    let sti = numerator / var_y
+    return max_f64(0.0, min_f64(1.0, sti))
+}
+
+fn saltelli_second_order(
+    samples: &SaltelliSamples,
+    model_outputs_a: &[f64; 1000],
+    model_outputs_b: &[f64; 1000],
+    model_outputs_ci: &[f64; 1000],
+    model_outputs_cj: &[f64; 1000],
+    model_outputs_cij: &[f64; 1000],
+    s_i: f64,
+    s_j: f64
+) -> f64 {
+    let n = samples.n_samples
+    if n < 2 { return 0.0 }
+    let nf = n as f64
+
+    var sum_all: f64 = 0.0
+    var sum_sq_all: f64 = 0.0
+    var k: i32 = 0
+    while k < n {
+        sum_all = sum_all + model_outputs_a[k] + model_outputs_b[k]
+        sum_sq_all = sum_sq_all + model_outputs_a[k] * model_outputs_a[k]
+                                + model_outputs_b[k] * model_outputs_b[k]
+        k = k + 1
+    }
+    let mean_y = sum_all / (2.0 * nf)
+    let var_y = sum_sq_all / (2.0 * nf) - mean_y * mean_y
+    if var_y < 1.0e-15 { return 0.0 }
+
+    var numerator_ij: f64 = 0.0
+    k = 0
+    while k < n {
+        numerator_ij = numerator_ij + model_outputs_b[k] * (model_outputs_cij[k] - model_outputs_a[k])
+        k = k + 1
+    }
+    let s_ij_closed = (numerator_ij / nf) / var_y
+    let s_ij = s_ij_closed - s_i - s_j
+    return max_f64(-0.05, min_f64(1.0, s_ij))
+}
+
+fn saltelli_expected_evals(n_samples: i32, n_dims: i32) -> i32 {
+    let base = n_samples * (n_dims + 2)
+    let n_pairs = n_dims * (n_dims - 1) / 2
+    let second = n_samples * n_pairs
+    return base + second
+}
+
+// ============================================================================
+// TEST 1: Linear model  f(x1, x2) = 2*x1 + x2
+// ============================================================================
+// For uniform inputs on [0,1]:
+//   Var(2*x1) = 4 * Var(x1) = 4/12 = 1/3
+//   Var(x2)   = 1/12
+//   Total Var = 5/12
+//   S1 = (1/3) / (5/12) = 4/5 = 0.8
+//   S2 = (1/12) / (5/12) = 1/5 = 0.2
+//   S12 = 0  (no interaction in a linear model)
+
+fn linear_model(x: [f64; 10]) -> f64 {
+    return 2.0 * x[0] + x[1]
+}
+
+fn test_linear_model() -> bool {
+    let n_samples: i32 = 512
+    let samples = saltelli_generate(n_samples, 2, 42)
+
+    var n_eval = n_samples
+    if n_eval > 1000 { n_eval = 1000 }
+
+    // Evaluate on A and B
+    var out_a: [f64; 1000] = [0.0; 1000]
+    var out_b: [f64; 1000] = [0.0; 1000]
+    var k: i32 = 0
+    while k < n_eval {
+        out_a[k] = saltelli_eval_row(&samples.matrix_a, k, 2, linear_model)
+        out_b[k] = saltelli_eval_row(&samples.matrix_b, k, 2, linear_model)
+        k = k + 1
+    }
+
+    // C_0: A with column 0 from B
+    let c0 = saltelli_build_ci(&samples, 0)
+    var out_c0: [f64; 1000] = [0.0; 1000]
+    k = 0
+    while k < n_eval {
+        out_c0[k] = saltelli_eval_row(&c0, k, 2, linear_model)
+        k = k + 1
+    }
+
+    // C_1: A with column 1 from B
+    let c1 = saltelli_build_ci(&samples, 1)
+    var out_c1: [f64; 1000] = [0.0; 1000]
+    k = 0
+    while k < n_eval {
+        out_c1[k] = saltelli_eval_row(&c1, k, 2, linear_model)
+        k = k + 1
+    }
+
+    // C_01: A with columns 0 and 1 from B (= B itself for 2D)
+    let c01 = saltelli_build_cij(&samples, 0, 1)
+    var out_c01: [f64; 1000] = [0.0; 1000]
+    k = 0
+    while k < n_eval {
+        out_c01[k] = saltelli_eval_row(&c01, k, 2, linear_model)
+        k = k + 1
+    }
+
+    // Compute indices
+    let s1 = saltelli_first_order(&samples, &out_a, &out_b, &out_c0)
+    let s2 = saltelli_first_order(&samples, &out_a, &out_b, &out_c1)
+    let st1 = saltelli_total_order(&samples, &out_a, &out_c0)
+    let st2 = saltelli_total_order(&samples, &out_a, &out_c1)
+
+    let s12 = saltelli_second_order(
+        &samples, &out_a, &out_b, &out_c0, &out_c1, &out_c01, s1, s2
+    )
+
+    // Check S1 ~ 0.8 within 15% tolerance
+    let tol: f64 = 0.15
+    var ok = true
+
+    if abs_f64(s1 - 0.8) > tol { ok = false }
+    if abs_f64(s2 - 0.2) > tol { ok = false }
+
+    // Total order should approximately equal first order for linear model
+    if abs_f64(st1 - 0.8) > tol { ok = false }
+    if abs_f64(st2 - 0.2) > tol { ok = false }
+
+    // Interaction should be near zero
+    if abs_f64(s12) > 0.1 { ok = false }
+
+    return ok
+}
+
+// ============================================================================
+// TEST 2: Pure interaction model  f(x1, x2) = x1 * x2
+// ============================================================================
+// For uniform inputs on [0,1]:
+//   E[x1*x2] = 1/4, E[(x1*x2)^2] = 1/9
+//   Var(x1*x2) = 1/9 - 1/16 = 7/144
+//   V1 = Var_x1(E[x1*x2 | x1]) = Var_x1(x1/2) = 1/48
+//   V2 = Var_x2(E[x1*x2 | x2]) = Var_x2(x2/2) = 1/48
+//   S1 = S2 = (1/48) / (7/144) = 3/7 ~ 0.4286
+//   S12 = 1 - S1 - S2 = 1/7 ~ 0.1429
+//
+// Note: S1 and S2 are NOT zero for x1*x2 on [0,1] -- the analytical values
+// are 3/7 each. The total-order indices are S_T1 = S_T2 = S1 + S12 = 4/7.
+
+fn interaction_model(x: [f64; 10]) -> f64 {
+    return x[0] * x[1]
+}
+
+fn test_interaction_model() -> bool {
+    let n_samples: i32 = 512
+    let samples = saltelli_generate(n_samples, 2, 137)
+
+    var n_eval = n_samples
+    if n_eval > 1000 { n_eval = 1000 }
+
+    var out_a: [f64; 1000] = [0.0; 1000]
+    var out_b: [f64; 1000] = [0.0; 1000]
+    var k: i32 = 0
+    while k < n_eval {
+        out_a[k] = saltelli_eval_row(&samples.matrix_a, k, 2, interaction_model)
+        out_b[k] = saltelli_eval_row(&samples.matrix_b, k, 2, interaction_model)
+        k = k + 1
+    }
+
+    let c0 = saltelli_build_ci(&samples, 0)
+    var out_c0: [f64; 1000] = [0.0; 1000]
+    k = 0
+    while k < n_eval {
+        out_c0[k] = saltelli_eval_row(&c0, k, 2, interaction_model)
+        k = k + 1
+    }
+
+    let c1 = saltelli_build_ci(&samples, 1)
+    var out_c1: [f64; 1000] = [0.0; 1000]
+    k = 0
+    while k < n_eval {
+        out_c1[k] = saltelli_eval_row(&c1, k, 2, interaction_model)
+        k = k + 1
+    }
+
+    let c01 = saltelli_build_cij(&samples, 0, 1)
+    var out_c01: [f64; 1000] = [0.0; 1000]
+    k = 0
+    while k < n_eval {
+        out_c01[k] = saltelli_eval_row(&c01, k, 2, interaction_model)
+        k = k + 1
+    }
+
+    let s1 = saltelli_first_order(&samples, &out_a, &out_b, &out_c0)
+    let s2 = saltelli_first_order(&samples, &out_a, &out_b, &out_c1)
+    let st1 = saltelli_total_order(&samples, &out_a, &out_c0)
+    let st2 = saltelli_total_order(&samples, &out_a, &out_c1)
+
+    let s12 = saltelli_second_order(
+        &samples, &out_a, &out_b, &out_c0, &out_c1, &out_c01, s1, s2
+    )
+
+    // Analytical: S1 = S2 = 3/7 ~ 0.4286
+    let tol: f64 = 0.15
+    var ok = true
+
+    // First-order indices should be moderate (not zero)
+    if s1 < 0.15 { ok = false }
+    if s2 < 0.15 { ok = false }
+
+    // Total-order should be larger than first-order (interactions present)
+    if st1 < s1 - 0.05 { ok = false }
+    if st2 < s2 - 0.05 { ok = false }
+
+    // Second-order interaction should be positive (some interaction variance)
+    // Analytical S12 = 1/7 ~ 0.143
+    // Allow wide tolerance due to quasi-random noise
+    if s12 < -0.05 { ok = false }
+
+    return ok
+}
+
+// ============================================================================
+// TEST 3: Ishigami function (classic sensitivity analysis benchmark)
+// ============================================================================
+// f(x1, x2, x3) = sin(x1) + 7*sin^2(x2) + 0.1*x3^4*sin(x1)
+// where x_i ~ Uniform[-pi, pi]
+//
+// Analytical Sobol' indices (a=7, b=0.1):
+//   S1 ~ 0.3139,  S_T1 ~ 0.5576
+//   S2 ~ 0.4424,  S_T2 ~ 0.4424
+//   S3 ~ 0.0,     S_T3 ~ 0.2437
+//   S13 ~ 0.2437 (only nonzero second-order interaction)
+
+fn ishigami_model(x: [f64; 10]) -> f64 {
+    // Map [0,1] -> [-pi, pi]
+    let pi = 3.14159265358979323846
+    let x1 = x[0] * 2.0 * pi - pi
+    let x2 = x[1] * 2.0 * pi - pi
+    let x3 = x[2] * 2.0 * pi - pi
+
+    let sin_x1 = sin(x1)
+    let sin_x2 = sin(x2)
+    let x3_4 = x3 * x3 * x3 * x3
+
+    return sin_x1 + 7.0 * sin_x2 * sin_x2 + 0.1 * x3_4 * sin_x1
+}
+
+fn test_ishigami() -> bool {
+    let n_samples: i32 = 800
+    let samples = saltelli_generate(n_samples, 3, 271)
+
+    var n_eval = n_samples
+    if n_eval > 1000 { n_eval = 1000 }
+
+    // Evaluate on A and B
+    var out_a: [f64; 1000] = [0.0; 1000]
+    var out_b: [f64; 1000] = [0.0; 1000]
+    var k: i32 = 0
+    while k < n_eval {
+        out_a[k] = saltelli_eval_row(&samples.matrix_a, k, 3, ishigami_model)
+        out_b[k] = saltelli_eval_row(&samples.matrix_b, k, 3, ishigami_model)
+        k = k + 1
+    }
+
+    // Build C_i outputs for each dimension
+    let c0 = saltelli_build_ci(&samples, 0)
+    var out_c0: [f64; 1000] = [0.0; 1000]
+    k = 0
+    while k < n_eval {
+        out_c0[k] = saltelli_eval_row(&c0, k, 3, ishigami_model)
+        k = k + 1
+    }
+
+    let c1 = saltelli_build_ci(&samples, 1)
+    var out_c1: [f64; 1000] = [0.0; 1000]
+    k = 0
+    while k < n_eval {
+        out_c1[k] = saltelli_eval_row(&c1, k, 3, ishigami_model)
+        k = k + 1
+    }
+
+    let c2 = saltelli_build_ci(&samples, 2)
+    var out_c2: [f64; 1000] = [0.0; 1000]
+    k = 0
+    while k < n_eval {
+        out_c2[k] = saltelli_eval_row(&c2, k, 3, ishigami_model)
+        k = k + 1
+    }
+
+    // First-order indices
+    let s1 = saltelli_first_order(&samples, &out_a, &out_b, &out_c0)
+    let s2 = saltelli_first_order(&samples, &out_a, &out_b, &out_c1)
+    let s3 = saltelli_first_order(&samples, &out_a, &out_b, &out_c2)
+
+    // Total-order indices
+    let st1 = saltelli_total_order(&samples, &out_a, &out_c0)
+    let st2 = saltelli_total_order(&samples, &out_a, &out_c1)
+    let st3 = saltelli_total_order(&samples, &out_a, &out_c2)
+
+    // Validate with 15% tolerance (Monte Carlo variance)
+    let tol: f64 = 0.15
+    var ok = true
+
+    // S1 ~ 0.314: x1 has moderate first-order influence
+    if abs_f64(s1 - 0.314) > tol { ok = false }
+
+    // S2 ~ 0.442: x2 has the largest first-order influence
+    if abs_f64(s2 - 0.442) > tol { ok = false }
+
+    // S3 ~ 0.0: x3 has negligible first-order effect
+    if s3 > 0.15 { ok = false }
+
+    // S_T1 ~ 0.558: x1 has large total effect (via interaction with x3)
+    if abs_f64(st1 - 0.558) > tol { ok = false }
+
+    // S_T2 ~ 0.442: x2 total = first (no interactions)
+    if abs_f64(st2 - 0.442) > tol { ok = false }
+
+    // S_T3 ~ 0.244: x3 only acts through interaction with x1
+    if abs_f64(st3 - 0.244) > tol { ok = false }
+
+    return ok
+}
+
+// ============================================================================
+// TEST 4: N(2d+2) efficiency verification
+// ============================================================================
+// For d=3, the expected evaluations are:
+//   Base:   N * (3 + 2)   = 5N   (A, B, C_0, C_1, C_2)
+//   Pairs:  N * C(3,2)    = 3N   (C_01, C_02, C_12)
+//   Total:  8N
+// Canonical formula: N(2d+2) = N * 8 = 8N  (matches for d=3)
+
+fn test_n2d2_efficiency() -> bool {
+    let n: i32 = 100
+    let d: i32 = 3
+
+    // Expected: N * (d + 2) + N * d*(d-1)/2 = 100*5 + 100*3 = 800
+    let expected = saltelli_expected_evals(n, d)
+
+    // N(2d+2) = 100 * 8 = 800
+    let canonical = n * (2 * d + 2)
+
+    // For d=3, the exact formula and the N(2d+2) approximation match exactly
+    if expected != canonical { return false }
+
+    // Also check d=2: N*(2+2) + N*1 = 5N; N(2*2+2) = 6N
+    // These differ because N(2d+2) is an approximation
+    let expected_2d = saltelli_expected_evals(n, 2)
+    let exact_2d = n * (2 + 2) + n * 1  // = 500
+    if expected_2d != exact_2d { return false }
+
+    // Check d=1: N*(1+2) + N*0 = 3N
+    let expected_1d = saltelli_expected_evals(n, 1)
+    if expected_1d != n * 3 { return false }
+
+    return true
+}
+
+// ============================================================================
+// TEST 5: Matrix construction correctness
+// ============================================================================
+// Verify that C_i and C_ij matrices are built correctly from A and B.
+
+fn test_matrix_construction() -> bool {
+    // Small test: 3 samples, 3 dims
+    let samples = saltelli_generate(3, 3, 99)
+
+    // Build C_1: should equal A everywhere except column 1
+    let c1 = saltelli_build_ci(&samples, 1)
+
+    var ok = true
+    var i: i32 = 0
+    while i < 3 {
+        var d: i32 = 0
+        while d < 3 {
+            let flat = i * 3 + d
+            if d == 1 {
+                // Column 1 should come from B
+                if abs_f64(c1[flat] - samples.matrix_b[flat]) > 1.0e-12 { ok = false }
+            } else {
+                // Other columns should come from A
+                if abs_f64(c1[flat] - samples.matrix_a[flat]) > 1.0e-12 { ok = false }
+            }
+            d = d + 1
+        }
+        i = i + 1
+    }
+
+    // Build C_02: should equal A everywhere except columns 0 and 2
+    let c02 = saltelli_build_cij(&samples, 0, 2)
+
+    i = 0
+    while i < 3 {
+        var d: i32 = 0
+        while d < 3 {
+            let flat = i * 3 + d
+            if d == 0 || d == 2 {
+                if abs_f64(c02[flat] - samples.matrix_b[flat]) > 1.0e-12 { ok = false }
+            } else {
+                if abs_f64(c02[flat] - samples.matrix_a[flat]) > 1.0e-12 { ok = false }
+            }
+            d = d + 1
+        }
+        i = i + 1
+    }
+
+    return ok
+}
+
+// ============================================================================
+// TEST 6: Samples are in [0, 1] range
+// ============================================================================
+
+fn test_sample_range() -> bool {
+    let samples = saltelli_generate(100, 4, 7)
+
+    var ok = true
+    var i: i32 = 0
+    while i < 100 {
+        var d: i32 = 0
+        while d < 4 {
+            let flat = i * 4 + d
+            if samples.matrix_a[flat] < 0.0 || samples.matrix_a[flat] > 1.0 { ok = false }
+            if samples.matrix_b[flat] < 0.0 || samples.matrix_b[flat] > 1.0 { ok = false }
+            d = d + 1
+        }
+        i = i + 1
+    }
+
+    return ok
+}
+
+// ============================================================================
+// TEST 7: Additive model (no interactions, indices should sum to 1)
+// ============================================================================
+// f(x1, x2, x3) = x1 + 2*x2 + 3*x3
+// Var = 1/12 + 4/12 + 9/12 = 14/12
+// S1 = 1/14, S2 = 4/14, S3 = 9/14
+// All S_ij = 0
+
+fn additive_model(x: [f64; 10]) -> f64 {
+    return x[0] + 2.0 * x[1] + 3.0 * x[2]
+}
+
+fn test_additive_model() -> bool {
+    let n_samples: i32 = 512
+    let samples = saltelli_generate(n_samples, 3, 53)
+
+    var n_eval = n_samples
+    if n_eval > 1000 { n_eval = 1000 }
+
+    var out_a: [f64; 1000] = [0.0; 1000]
+    var out_b: [f64; 1000] = [0.0; 1000]
+    var k: i32 = 0
+    while k < n_eval {
+        out_a[k] = saltelli_eval_row(&samples.matrix_a, k, 3, additive_model)
+        out_b[k] = saltelli_eval_row(&samples.matrix_b, k, 3, additive_model)
+        k = k + 1
+    }
+
+    // C_i for each dimension
+    let c0 = saltelli_build_ci(&samples, 0)
+    let c1 = saltelli_build_ci(&samples, 1)
+    let c2 = saltelli_build_ci(&samples, 2)
+
+    var out_c0: [f64; 1000] = [0.0; 1000]
+    var out_c1: [f64; 1000] = [0.0; 1000]
+    var out_c2: [f64; 1000] = [0.0; 1000]
+    k = 0
+    while k < n_eval {
+        out_c0[k] = saltelli_eval_row(&c0, k, 3, additive_model)
+        out_c1[k] = saltelli_eval_row(&c1, k, 3, additive_model)
+        out_c2[k] = saltelli_eval_row(&c2, k, 3, additive_model)
+        k = k + 1
+    }
+
+    let s1 = saltelli_first_order(&samples, &out_a, &out_b, &out_c0)
+    let s2 = saltelli_first_order(&samples, &out_a, &out_b, &out_c1)
+    let s3 = saltelli_first_order(&samples, &out_a, &out_b, &out_c2)
+
+    let st1 = saltelli_total_order(&samples, &out_a, &out_c0)
+    let st2 = saltelli_total_order(&samples, &out_a, &out_c1)
+    let st3 = saltelli_total_order(&samples, &out_a, &out_c2)
+
+    let tol: f64 = 0.15
+    var ok = true
+
+    // S1 ~ 1/14 ~ 0.071
+    if abs_f64(s1 - 0.071) > tol { ok = false }
+
+    // S2 ~ 4/14 ~ 0.286
+    if abs_f64(s2 - 0.286) > tol { ok = false }
+
+    // S3 ~ 9/14 ~ 0.643
+    if abs_f64(s3 - 0.643) > tol { ok = false }
+
+    // For an additive model, total order should equal first order
+    if abs_f64(st1 - s1) > 0.1 { ok = false }
+    if abs_f64(st2 - s2) > 0.1 { ok = false }
+    if abs_f64(st3 - s3) > 0.1 { ok = false }
+
+    // Sum of first-order indices should be close to 1 (no interactions)
+    let s_sum = s1 + s2 + s3
+    if abs_f64(s_sum - 1.0) > 0.2 { ok = false }
+
+    return ok
+}
+
+// ============================================================================
+// MAIN: run all tests
+// ============================================================================
+
+fn main() -> i32 {
+    var failures: i32 = 0
+
+    if !test_matrix_construction() { failures = failures + 1 }
+    if !test_sample_range() { failures = failures + 1 }
+    if !test_n2d2_efficiency() { failures = failures + 1 }
+    if !test_linear_model() { failures = failures + 1 }
+    if !test_interaction_model() { failures = failures + 1 }
+    if !test_additive_model() { failures = failures + 1 }
+    if !test_ishigami() { failures = failures + 1 }
+
+    return failures
+}

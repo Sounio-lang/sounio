@@ -28,6 +28,9 @@ pub struct KnowledgeType {
 
     /// Temporal validity constraint
     pub temporal_constraint: Option<TemporalConstraint>,
+
+    /// Optional refinement predicate that must hold at the given confidence level
+    pub refinement: Option<EpistemicRefinement>,
 }
 
 impl KnowledgeType {
@@ -37,6 +40,7 @@ impl KnowledgeType {
             confidence_bound: None,
             provenance_constraint: None,
             temporal_constraint: None,
+            refinement: None,
         }
     }
 
@@ -52,6 +56,16 @@ impl KnowledgeType {
 
     pub fn with_temporal(mut self, constraint: TemporalConstraint) -> Self {
         self.temporal_constraint = Some(constraint);
+        self
+    }
+
+    /// Attach an epistemic refinement predicate to this knowledge type
+    ///
+    /// The refinement predicate is only guaranteed to hold when the confidence
+    /// meets or exceeds the refinement's threshold. Below threshold, behavior
+    /// depends on the refinement mode (Gradual vs Strict).
+    pub fn with_refinement(mut self, refinement: EpistemicRefinement) -> Self {
+        self.refinement = Some(refinement);
         self
     }
 
@@ -89,6 +103,7 @@ impl KnowledgeType {
                 epsilon, samples_used
             )])),
             temporal_constraint: None,
+            refinement: None,
         }
     }
 
@@ -109,6 +124,285 @@ impl KnowledgeType {
         } else {
             None
         }
+    }
+}
+
+// =============================================================================
+// Epistemic Refinement Types
+// =============================================================================
+
+/// Refinement type with epistemic confidence qualification
+///
+/// Represents: `{ x : T | P(x) }` with confidence `ε`
+/// The refinement predicate `P(x)` is only guaranteed to hold when
+/// `ε >= threshold`. Below threshold, behavior depends on the mode.
+///
+/// # Theory
+///
+/// This bridges Liquid Types (Rondon et al., 2008) with epistemic
+/// type theory. Traditional refinement types give hard guarantees:
+/// `{ x : int | x > 0 }` means `x` is *always* positive. Epistemic
+/// refinement qualifies that guarantee with a confidence level:
+/// the predicate holds when confidence meets the threshold.
+///
+/// # Example (Sounio)
+///
+/// ```sounio
+/// let dose: Knowledge[mg, ε >= 0.95] with { d | d > 0 && d <= 500 } =
+///     measure_dose(sample)
+/// ```
+#[derive(Debug, Clone, PartialEq)]
+pub struct EpistemicRefinement {
+    /// The refinement predicate
+    pub predicate: RefinementPredicate,
+    /// Minimum confidence required for the refinement to hold
+    pub confidence_threshold: f64,
+    /// What happens below threshold: Gradual (warning) or Strict (error)
+    pub mode: RefinementMode,
+}
+
+impl EpistemicRefinement {
+    /// Create a new epistemic refinement with strict mode
+    pub fn strict(predicate: RefinementPredicate, threshold: f64) -> Self {
+        Self {
+            predicate,
+            confidence_threshold: threshold,
+            mode: RefinementMode::Strict,
+        }
+    }
+
+    /// Create a new epistemic refinement with gradual mode
+    pub fn gradual(predicate: RefinementPredicate, threshold: f64) -> Self {
+        Self {
+            predicate,
+            confidence_threshold: threshold,
+            mode: RefinementMode::Gradual,
+        }
+    }
+
+    /// Check whether the given confidence meets this refinement's threshold
+    pub fn is_confident(&self, confidence: f64) -> bool {
+        confidence >= self.confidence_threshold
+    }
+}
+
+/// Behavior when confidence is below the refinement threshold
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RefinementMode {
+    /// Below threshold: emit warning, allow usage (gradual typing)
+    Gradual,
+    /// Below threshold: emit error, reject usage (strict)
+    Strict,
+}
+
+impl std::fmt::Display for RefinementMode {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            RefinementMode::Gradual => write!(f, "gradual"),
+            RefinementMode::Strict => write!(f, "strict"),
+        }
+    }
+}
+
+/// Predicate that can be checked by SMT solver
+///
+/// These are common refinement predicates for numeric types. The `Custom`
+/// variant allows arbitrary predicates expressed as SMT-compatible strings.
+#[derive(Debug, Clone, PartialEq)]
+pub enum RefinementPredicate {
+    /// x > 0
+    Positive,
+    /// x >= 0
+    NonNegative,
+    /// x != 0
+    NonZero,
+    /// lo <= x <= hi
+    InRange { lo: f64, hi: f64 },
+    /// Custom predicate string for SMT
+    Custom(String),
+}
+
+impl RefinementPredicate {
+    /// Check whether a concrete f64 value satisfies this predicate
+    pub fn check_value(&self, value: f64) -> bool {
+        match self {
+            RefinementPredicate::Positive => value > 0.0,
+            RefinementPredicate::NonNegative => value >= 0.0,
+            RefinementPredicate::NonZero => value.abs() > f64::EPSILON,
+            RefinementPredicate::InRange { lo, hi } => value >= *lo && value <= *hi,
+            RefinementPredicate::Custom(_) => {
+                // Custom predicates require SMT verification; cannot check statically here
+                true
+            }
+        }
+    }
+
+    /// Human-readable description of this predicate
+    pub fn description(&self) -> String {
+        match self {
+            RefinementPredicate::Positive => "x > 0".to_string(),
+            RefinementPredicate::NonNegative => "x >= 0".to_string(),
+            RefinementPredicate::NonZero => "x != 0".to_string(),
+            RefinementPredicate::InRange { lo, hi } => format!("{} <= x <= {}", lo, hi),
+            RefinementPredicate::Custom(s) => s.clone(),
+        }
+    }
+}
+
+impl std::fmt::Display for RefinementPredicate {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.description())
+    }
+}
+
+impl std::fmt::Display for EpistemicRefinement {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "{{ x | {} }} @ ε >= {:.2} ({})",
+            self.predicate, self.confidence_threshold, self.mode
+        )
+    }
+}
+
+// =============================================================================
+// Refinement Propagation Rules
+// =============================================================================
+
+/// Rules for how refinement predicates propagate through arithmetic operations
+///
+/// When two epistemic-refined values are combined through arithmetic, the
+/// resulting refinement depends on the operand refinements and the operation.
+/// Confidence degrades according to the propagation rules.
+pub struct RefinementPropagation;
+
+impl RefinementPropagation {
+    /// Propagate refinement through addition
+    ///
+    /// - Positive + Positive => Positive (sum of positives is positive)
+    /// - NonNegative + NonNegative => NonNegative
+    /// - InRange(a,b) + InRange(c,d) => InRange(a+c, b+d)
+    /// - Otherwise => None (refinement lost)
+    pub fn propagate_add(
+        lhs: &RefinementPredicate,
+        rhs: &RefinementPredicate,
+    ) -> Option<RefinementPredicate> {
+        match (lhs, rhs) {
+            (RefinementPredicate::Positive, RefinementPredicate::Positive) => {
+                Some(RefinementPredicate::Positive)
+            }
+            (RefinementPredicate::Positive, RefinementPredicate::NonNegative)
+            | (RefinementPredicate::NonNegative, RefinementPredicate::Positive) => {
+                Some(RefinementPredicate::Positive)
+            }
+            (RefinementPredicate::NonNegative, RefinementPredicate::NonNegative) => {
+                Some(RefinementPredicate::NonNegative)
+            }
+            (
+                RefinementPredicate::InRange { lo: l1, hi: h1 },
+                RefinementPredicate::InRange { lo: l2, hi: h2 },
+            ) => Some(RefinementPredicate::InRange {
+                lo: l1 + l2,
+                hi: h1 + h2,
+            }),
+            _ => None,
+        }
+    }
+
+    /// Propagate refinement through multiplication
+    ///
+    /// - NonNegative * NonNegative => NonNegative
+    /// - Positive * Positive => Positive
+    /// - NonZero * NonZero => NonZero
+    /// - InRange(a,b) * InRange(c,d) => InRange(min corners, max corners) when all non-negative
+    /// - Otherwise => None (refinement lost)
+    pub fn propagate_mul(
+        lhs: &RefinementPredicate,
+        rhs: &RefinementPredicate,
+    ) -> Option<RefinementPredicate> {
+        match (lhs, rhs) {
+            (RefinementPredicate::Positive, RefinementPredicate::Positive) => {
+                Some(RefinementPredicate::Positive)
+            }
+            (RefinementPredicate::NonNegative, RefinementPredicate::NonNegative) => {
+                Some(RefinementPredicate::NonNegative)
+            }
+            (RefinementPredicate::NonNegative, RefinementPredicate::Positive)
+            | (RefinementPredicate::Positive, RefinementPredicate::NonNegative) => {
+                Some(RefinementPredicate::NonNegative)
+            }
+            (RefinementPredicate::NonZero, RefinementPredicate::NonZero) => {
+                Some(RefinementPredicate::NonZero)
+            }
+            (
+                RefinementPredicate::InRange { lo: l1, hi: h1 },
+                RefinementPredicate::InRange { lo: l2, hi: h2 },
+            ) if *l1 >= 0.0 && *l2 >= 0.0 => {
+                // Both non-negative ranges: product range is straightforward
+                Some(RefinementPredicate::InRange {
+                    lo: l1 * l2,
+                    hi: h1 * h2,
+                })
+            }
+            _ => None,
+        }
+    }
+
+    /// Propagate refinement through division
+    ///
+    /// - Division by NonZero preserves the divisor's NonZero guarantee
+    /// - Positive / Positive => Positive
+    /// - NonNegative / Positive => NonNegative
+    /// - Otherwise => None (refinement lost)
+    pub fn propagate_div(
+        lhs: &RefinementPredicate,
+        rhs: &RefinementPredicate,
+    ) -> Option<RefinementPredicate> {
+        match (lhs, rhs) {
+            (RefinementPredicate::Positive, RefinementPredicate::Positive) => {
+                Some(RefinementPredicate::Positive)
+            }
+            (RefinementPredicate::NonNegative, RefinementPredicate::Positive) => {
+                Some(RefinementPredicate::NonNegative)
+            }
+            (_, RefinementPredicate::NonZero) | (_, RefinementPredicate::Positive) => {
+                // Division by non-zero is defined but doesn't preserve lhs refinement
+                None
+            }
+            _ => None,
+        }
+    }
+
+    /// Propagate refinement through subtraction
+    ///
+    /// Subtraction is more conservative: we generally lose refinement
+    /// except for range arithmetic.
+    pub fn propagate_sub(
+        lhs: &RefinementPredicate,
+        rhs: &RefinementPredicate,
+    ) -> Option<RefinementPredicate> {
+        match (lhs, rhs) {
+            (
+                RefinementPredicate::InRange { lo: l1, hi: h1 },
+                RefinementPredicate::InRange { lo: l2, hi: h2 },
+            ) => Some(RefinementPredicate::InRange {
+                lo: l1 - h2, // minimum: smallest lhs minus largest rhs
+                hi: h1 - l2, // maximum: largest lhs minus smallest rhs
+            }),
+            _ => None,
+        }
+    }
+
+    /// Propagate confidence through an arithmetic operation
+    ///
+    /// Each operation degrades confidence by a factor. The output confidence
+    /// is the minimum of the inputs, further degraded by the operation's factor.
+    pub fn propagate_confidence(
+        lhs_confidence: f64,
+        rhs_confidence: f64,
+        degradation_factor: f64,
+    ) -> f64 {
+        lhs_confidence.min(rhs_confidence) * degradation_factor
     }
 }
 

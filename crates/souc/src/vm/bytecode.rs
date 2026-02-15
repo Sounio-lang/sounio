@@ -2,9 +2,10 @@
 
 use rustc_hash::FxHashMap as HashMap;
 use std::fmt;
+use std::sync::{Arc, Mutex};
 
 /// Runtime values in the VM
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone)]
 pub enum Value {
     Unit,
     Bool(bool),
@@ -22,6 +23,38 @@ pub enum Value {
     },
     /// Struct/record with named fields
     Struct(HashMap<String, Value>),
+    /// Shared mutable reference — enables `&!` parameter mutation semantics.
+    /// Multiple Value::Ref values can point to the same underlying data via Arc.
+    Ref(Arc<Mutex<Value>>),
+}
+
+impl PartialEq for Value {
+    fn eq(&self, other: &Self) -> bool {
+        match (self, other) {
+            (Value::Unit, Value::Unit) => true,
+            (Value::Bool(a), Value::Bool(b)) => a == b,
+            (Value::Int(a), Value::Int(b)) => a == b,
+            (Value::Float(a), Value::Float(b)) => a == b,
+            (Value::String(a), Value::String(b)) => a == b,
+            (Value::Pointer(a), Value::Pointer(b)) => a == b,
+            (Value::List(a), Value::List(b)) => a == b,
+            (
+                Value::SparseList {
+                    len: l1,
+                    default: d1,
+                    overrides: o1,
+                },
+                Value::SparseList {
+                    len: l2,
+                    default: d2,
+                    overrides: o2,
+                },
+            ) => l1 == l2 && d1 == d2 && o1 == o2,
+            (Value::Struct(a), Value::Struct(b)) => a == b,
+            (Value::Ref(a), Value::Ref(b)) => Arc::ptr_eq(a, b),
+            _ => false,
+        }
+    }
 }
 
 impl fmt::Display for Value {
@@ -67,6 +100,13 @@ impl fmt::Display for Value {
                     first = false;
                 }
                 write!(f, " }}")
+            }
+            Value::Ref(rc) => {
+                if let Ok(inner) = rc.lock() {
+                    write!(f, "&!{}", *inner)
+                } else {
+                    write!(f, "&!<locked>")
+                }
             }
         }
     }
@@ -151,6 +191,9 @@ pub enum Bytecode {
         inclusive: bool,
     },
 
+    /// Wrap TOS in a shared mutable reference (Ref). If TOS is already a Ref, no-op.
+    MakeRef,
+
     // FFI calls: (function_name, argument_count)
     CallExtern(String, i32),
 }
@@ -207,6 +250,7 @@ impl fmt::Display for Bytecode {
                 enum_name, variant, field_count
             ),
             Bytecode::MakeRange { inclusive } => write!(f, "MakeRange(inclusive={})", inclusive),
+            Bytecode::MakeRef => write!(f, "MakeRef"),
             Bytecode::CallExtern(name, args) => write!(f, "CallExtern({}, args={})", name, args),
         }
     }

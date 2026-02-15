@@ -12,6 +12,7 @@ pub use bytecode::{Bytecode, Value};
 pub use memory::Heap;
 pub use serialize::{BYTECODE_MAGIC, BYTECODE_VERSION, SerializeError, deserialize, serialize};
 use std::io::Read;
+use std::sync::{Arc, Mutex};
 use rustc_hash::FxHashMap as HashMap;
 
 #[derive(Debug, Clone, PartialEq)]
@@ -572,12 +573,21 @@ impl BytecodeVM {
 
                 // Field and index operations
                 Bytecode::StoreField(field_name) => {
-                    // Stack: [... target, value] -> [...]
+                    // Stack: [... target, value] -> [... updated_target]
                     // Pop value and target, store value in target's field
                     let value = self.stack.pop().ok_or(VmError::StackUnderflow)?;
                     let target = self.stack.pop().ok_or(VmError::StackUnderflow)?;
 
                     match target {
+                        Value::Ref(rc) => {
+                            // Write through the shared mutable reference in-place.
+                            let mut inner = rc.lock().unwrap();
+                            if let Value::Struct(ref mut fields) = *inner {
+                                fields.insert(field_name.clone(), value);
+                            }
+                            drop(inner);
+                            self.stack.push(Value::Ref(rc));
+                        }
                         Value::Struct(mut fields) => {
                             fields.insert(field_name.clone(), value);
                             self.stack.push(Value::Struct(fields));
@@ -591,62 +601,136 @@ impl BytecodeVM {
                 }
 
                 Bytecode::StoreIndex => {
-                    // Stack: [... target, index, value] -> [...]
+                    // Stack: [... target, index, value] -> [... updated_target]
                     // Pop value, index, and target; store value at target[index]
                     let value = self.stack.pop().ok_or(VmError::StackUnderflow)?;
                     let index = self.stack.pop().ok_or(VmError::StackUnderflow)?;
-                    let mut target = self.stack.pop().ok_or(VmError::StackUnderflow)?;
+                    let target = self.stack.pop().ok_or(VmError::StackUnderflow)?;
 
-                    // Handle list/array indexing
-                    match (&mut target, index) {
-                        (Value::List(items), Value::Int(idx)) => {
-                            let idx = idx as usize;
-                            if idx < items.len() {
-                                items[idx] = value;
-                                self.stack.push(target);
-                            } else {
-                                return Err(VmError::MemoryError(format!(
-                                    "Index {} out of bounds for list of length {}",
-                                    idx,
-                                    items.len()
-                                )));
+                    if let Value::Ref(rc) = &target {
+                        // Write through the shared mutable reference in-place.
+                        let idx = match &index {
+                            Value::Int(i) => *i as usize,
+                            _ => {
+                                return Err(VmError::TypeMismatch(
+                                    "StoreIndex on Ref requires integer index".to_string(),
+                                ));
                             }
-                        }
-                        (
+                        };
+                        let mut inner = rc.lock().unwrap();
+                        match &mut *inner {
+                            Value::List(items) => {
+                                if idx < items.len() {
+                                    items[idx] = value;
+                                } else {
+                                    return Err(VmError::MemoryError(format!(
+                                        "Index {} out of bounds for ref-list of length {}",
+                                        idx,
+                                        items.len()
+                                    )));
+                                }
+                            }
                             Value::SparseList {
                                 len,
                                 default,
                                 overrides,
-                            },
-                            Value::Int(idx),
-                        ) => {
-                            let idx = idx as usize;
-                            if idx < *len {
-                                if value == **default {
-                                    overrides.remove(&idx);
+                            } => {
+                                if idx < *len {
+                                    if value == **default {
+                                        overrides.remove(&idx);
+                                    } else {
+                                        overrides.insert(idx, value);
+                                    }
                                 } else {
-                                    overrides.insert(idx, value);
+                                    return Err(VmError::MemoryError(format!(
+                                        "Index {} out of bounds for ref-list of length {}",
+                                        idx, len
+                                    )));
                                 }
-                                self.stack.push(target);
-                            } else {
-                                return Err(VmError::MemoryError(format!(
-                                    "Index {} out of bounds for list of length {}",
-                                    idx, len
-                                )));
+                            }
+                            _ => {
+                                return Err(VmError::TypeMismatch(
+                                    "StoreIndex on Ref requires list inner type".to_string(),
+                                ));
                             }
                         }
-                        _ => {
-                            return Err(VmError::TypeMismatch(
-                                "StoreIndex requires list and integer index".to_string(),
-                            ));
+                        drop(inner);
+                        self.stack.push(target);
+                    } else {
+                        // Non-ref path: modify by value
+                        let mut target = target;
+                        match (&mut target, index) {
+                            (Value::List(items), Value::Int(idx)) => {
+                                let idx = idx as usize;
+                                if idx < items.len() {
+                                    items[idx] = value;
+                                    self.stack.push(target);
+                                } else {
+                                    return Err(VmError::MemoryError(format!(
+                                        "Index {} out of bounds for list of length {}",
+                                        idx,
+                                        items.len()
+                                    )));
+                                }
+                            }
+                            (
+                                Value::SparseList {
+                                    len,
+                                    default,
+                                    overrides,
+                                },
+                                Value::Int(idx),
+                            ) => {
+                                let idx = idx as usize;
+                                if idx < *len {
+                                    if value == **default {
+                                        overrides.remove(&idx);
+                                    } else {
+                                        overrides.insert(idx, value);
+                                    }
+                                    self.stack.push(target);
+                                } else {
+                                    return Err(VmError::MemoryError(format!(
+                                        "Index {} out of bounds for list of length {}",
+                                        idx, len
+                                    )));
+                                }
+                            }
+                            _ => {
+                                return Err(VmError::TypeMismatch(
+                                    "StoreIndex requires list and integer index".to_string(),
+                                ));
+                            }
                         }
                     }
                 }
 
-                // GetField: get field from struct/map
+                // GetField: get field from struct/map (auto-derefs through Ref)
                 Bytecode::GetField(field_name) => {
                     let target = self.stack.pop().ok_or(VmError::StackUnderflow)?;
-                    match target {
+                    match &target {
+                        Value::Ref(rc) => {
+                            let inner = rc.lock().unwrap();
+                            match &*inner {
+                                Value::Struct(fields) => {
+                                    if let Some(value) = fields.get(field_name) {
+                                        self.stack.push(value.clone());
+                                    } else {
+                                        return Err(VmError::TypeMismatch(format!(
+                                            "Field '{}' not found in ref-struct at ip={}",
+                                            field_name, ip
+                                        )));
+                                    }
+                                }
+                                _ => {
+                                    tracing::trace!(
+                                        "VM: GetField {} on non-struct Ref, returning Unit",
+                                        field_name
+                                    );
+                                    self.stack.push(Value::Unit);
+                                }
+                            }
+                        }
                         Value::Struct(fields) => {
                             if let Some(value) = fields.get(field_name) {
                                 self.stack.push(value.clone());
@@ -683,10 +767,48 @@ impl BytecodeVM {
                     }
                 }
 
-                // GetIndex: get element from tuple/array at constant index
+                // GetIndex: get element from tuple/array at constant index (auto-derefs Ref)
                 Bytecode::GetIndex(index) => {
                     let target = self.stack.pop().ok_or(VmError::StackUnderflow)?;
-                    match target {
+                    match &target {
+                        Value::Ref(rc) => {
+                            let inner = rc.lock().unwrap();
+                            match &*inner {
+                                Value::List(items) => {
+                                    if *index < items.len() {
+                                        self.stack.push(items[*index].clone());
+                                    } else {
+                                        return Err(VmError::MemoryError(format!(
+                                            "Index {} out of bounds for ref-list of length {}",
+                                            index,
+                                            items.len()
+                                        )));
+                                    }
+                                }
+                                Value::SparseList {
+                                    len,
+                                    default,
+                                    overrides,
+                                } => {
+                                    if *index < *len {
+                                        if let Some(value) = overrides.get(index) {
+                                            self.stack.push(value.clone());
+                                        } else {
+                                            self.stack.push((**default).clone());
+                                        }
+                                    } else {
+                                        return Err(VmError::MemoryError(format!(
+                                            "Index {} out of bounds for ref-list of length {}",
+                                            index, len
+                                        )));
+                                    }
+                                }
+                                _ => {
+                                    tracing::trace!("VM: GetIndex {} on non-list Ref, returning Unit", index);
+                                    self.stack.push(Value::Unit);
+                                }
+                            }
+                        }
                         Value::List(items) => {
                             if *index < items.len() {
                                 self.stack.push(items[*index].clone());
@@ -703,11 +825,11 @@ impl BytecodeVM {
                             default,
                             overrides,
                         } => {
-                            if *index < len {
+                            if *index < *len {
                                 if let Some(value) = overrides.get(index) {
                                     self.stack.push(value.clone());
                                 } else {
-                                    self.stack.push((*default).clone());
+                                    self.stack.push((**default).clone());
                                 }
                             } else {
                                 return Err(VmError::MemoryError(format!(
@@ -723,10 +845,76 @@ impl BytecodeVM {
                     }
                 }
 
-                // IndexOp: runtime indexing (array and index on stack)
+                // IndexOp: runtime indexing (array and index on stack, auto-derefs Ref)
                 Bytecode::IndexOp => {
                     let index = self.stack.pop().ok_or(VmError::StackUnderflow)?;
                     let target = self.stack.pop().ok_or(VmError::StackUnderflow)?;
+                    if let Value::Ref(rc) = &target {
+                        let inner = rc.lock().unwrap();
+                        match (&*inner, &index) {
+                            (Value::List(items), Value::Int(idx)) => {
+                                let idx = *idx as usize;
+                                if idx < items.len() {
+                                    self.stack.push(items[idx].clone());
+                                } else {
+                                    return Err(VmError::MemoryError(format!(
+                                        "Index {} out of bounds for ref-list of length {}",
+                                        idx,
+                                        items.len()
+                                    )));
+                                }
+                            }
+                            (
+                                Value::SparseList {
+                                    len,
+                                    default,
+                                    overrides,
+                                },
+                                Value::Int(idx),
+                            ) => {
+                                let idx = *idx as usize;
+                                if idx < *len {
+                                    if let Some(value) = overrides.get(&idx) {
+                                        self.stack.push(value.clone());
+                                    } else {
+                                        self.stack.push((**default).clone());
+                                    }
+                                } else {
+                                    return Err(VmError::MemoryError(format!(
+                                        "Index {} out of bounds for ref-list of length {}",
+                                        idx, len
+                                    )));
+                                }
+                            }
+                            (Value::String(s), Value::Int(idx)) => {
+                                let idx = *idx as usize;
+                                if s.is_ascii() {
+                                    if let Some(&b) = s.as_bytes().get(idx) {
+                                        self.stack.push(Value::Int((b as i8) as i64));
+                                    } else {
+                                        return Err(VmError::MemoryError(format!(
+                                            "Index {} out of bounds for ref-string of length {}",
+                                            idx,
+                                            s.len()
+                                        )));
+                                    }
+                                } else if let Some(c) = s.chars().nth(idx) {
+                                    self.stack.push(Value::Int(c as i64));
+                                } else {
+                                    return Err(VmError::MemoryError(format!(
+                                        "Index {} out of bounds for ref-string of length {}",
+                                        idx,
+                                        s.len()
+                                    )));
+                                }
+                            }
+                            _ => {
+                                return Err(VmError::TypeMismatch(
+                                    "IndexOp on Ref requires list/string and integer".to_string(),
+                                ));
+                            }
+                        }
+                    } else {
                     match (target, index) {
                         (Value::List(items), Value::Int(idx)) => {
                             let idx = idx as usize;
@@ -790,6 +978,7 @@ impl BytecodeVM {
                             ));
                         }
                     }
+                    } // close else block
                 }
 
                 // MakeVariant: construct an enum variant
@@ -822,6 +1011,16 @@ impl BytecodeVM {
                     range_fields.insert("end".to_string(), end);
                     range_fields.insert("inclusive".to_string(), Value::Bool(*inclusive));
                     self.stack.push(Value::Struct(range_fields));
+                }
+
+                // Reference creation
+                Bytecode::MakeRef => {
+                    let val = self.stack.pop().ok_or(VmError::StackUnderflow)?;
+                    match val {
+                        // Already a Ref — reuse the same Rc (don't double-wrap)
+                        Value::Ref(_) => self.stack.push(val),
+                        other => self.stack.push(Value::Ref(Arc::new(Mutex::new(other)))),
+                    }
                 }
 
                 // FFI calls
@@ -1586,6 +1785,7 @@ impl BytecodeVM {
                         Value::List(_) => "list",
                         Value::SparseList { .. } => "sparse_list",
                         Value::Struct(_) => "struct",
+                        Value::Ref(_) => "ref",
                     };
                     eprintln!(
                         "VM_PROGRESS repeat_list idx={} count={} value_kind={}",

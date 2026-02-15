@@ -1611,6 +1611,238 @@ impl Default for EpistemicRefinementContext {
     }
 }
 
+// =============================================================================
+// Epistemic Refinement Type Checking (Issue #8 - Workstream 1, Task 1.3)
+// =============================================================================
+
+/// Result of verifying an epistemic refinement predicate
+#[derive(Debug, Clone, PartialEq)]
+pub enum EpistemicRefinementCheckResult {
+    /// Confidence meets threshold: refinement is guaranteed to hold
+    RefinementHolds,
+    /// Confidence below threshold in Gradual mode: emits a warning but allows usage
+    RefinementWarning {
+        /// The refinement predicate description
+        predicate: String,
+        /// Current confidence level
+        current_confidence: f64,
+        /// Required confidence threshold
+        required_threshold: f64,
+    },
+    /// Confidence below threshold in Strict mode: error, reject usage
+    RefinementViolation {
+        /// The refinement predicate description
+        predicate: String,
+        /// Current confidence level
+        current_confidence: f64,
+        /// Required confidence threshold
+        required_threshold: f64,
+    },
+}
+
+impl EpistemicRefinementCheckResult {
+    /// Returns true if the result allows the program to continue (holds or warning)
+    pub fn is_allowed(&self) -> bool {
+        matches!(
+            self,
+            EpistemicRefinementCheckResult::RefinementHolds
+                | EpistemicRefinementCheckResult::RefinementWarning { .. }
+        )
+    }
+
+    /// Returns true if the refinement is fully guaranteed (confidence >= threshold)
+    pub fn is_guaranteed(&self) -> bool {
+        matches!(self, EpistemicRefinementCheckResult::RefinementHolds)
+    }
+
+    /// Returns true if this result is a hard error
+    pub fn is_error(&self) -> bool {
+        matches!(
+            self,
+            EpistemicRefinementCheckResult::RefinementViolation { .. }
+        )
+    }
+}
+
+/// Check if an epistemic refinement holds given current confidence
+///
+/// Returns `RefinementHolds` if:
+///   confidence >= threshold (refinement guaranteed)
+///
+/// Returns `RefinementWarning` if:
+///   confidence < threshold AND mode is Gradual
+///
+/// Returns `RefinementViolation` if:
+///   confidence < threshold AND mode is Strict
+///
+/// The `span` parameter is reserved for future diagnostic integration.
+pub fn check_epistemic_refinement(
+    refinement: &crate::types::epistemic::EpistemicRefinement,
+    current_confidence: f64,
+    _span: crate::common::Span,
+) -> EpistemicRefinementCheckResult {
+    if refinement.is_confident(current_confidence) {
+        EpistemicRefinementCheckResult::RefinementHolds
+    } else {
+        match refinement.mode {
+            crate::types::epistemic::RefinementMode::Gradual => {
+                EpistemicRefinementCheckResult::RefinementWarning {
+                    predicate: refinement.predicate.description(),
+                    current_confidence,
+                    required_threshold: refinement.confidence_threshold,
+                }
+            }
+            crate::types::epistemic::RefinementMode::Strict => {
+                EpistemicRefinementCheckResult::RefinementViolation {
+                    predicate: refinement.predicate.description(),
+                    current_confidence,
+                    required_threshold: refinement.confidence_threshold,
+                }
+            }
+        }
+    }
+}
+
+/// Result of SMT-based refinement verification with confidence qualification
+#[derive(Debug, Clone, PartialEq)]
+pub enum RefinementVerificationResult {
+    /// Predicate verified by SMT solver and confidence meets threshold
+    Verified,
+    /// Predicate verified but confidence below threshold (warning if Gradual, error if Strict)
+    VerifiedLowConfidence {
+        /// Current confidence level
+        confidence: f64,
+        /// Required threshold
+        threshold: f64,
+    },
+    /// Predicate could not be verified by SMT solver
+    Unverified {
+        /// Reason for failure
+        reason: String,
+    },
+    /// SMT solver returned unknown (timeout, undecidable, etc.)
+    Unknown,
+}
+
+impl RefinementVerificationResult {
+    /// Returns true if the predicate is verified (regardless of confidence)
+    pub fn is_verified(&self) -> bool {
+        matches!(
+            self,
+            RefinementVerificationResult::Verified
+                | RefinementVerificationResult::VerifiedLowConfidence { .. }
+        )
+    }
+}
+
+/// Verify a refinement predicate with confidence qualification
+///
+/// For `confidence >= threshold`:
+///   Attempt SMT proof. If proven, return `Verified`.
+///
+/// For `confidence < threshold`:
+///   Attempt SMT proof. If proven, return `VerifiedLowConfidence`
+///   (caller decides warning vs error based on mode).
+///
+/// This function performs a lightweight semantic check of the predicate.
+/// For full Z3 integration, use the `smt::z3_solver` module directly.
+pub fn verify_epistemic_refinement(
+    predicate: &crate::types::epistemic::RefinementPredicate,
+    confidence: f64,
+    threshold: f64,
+) -> RefinementVerificationResult {
+    // Lightweight verification: check if the predicate is trivially satisfiable
+    // For non-trivial predicates (Custom), we'd delegate to Z3 in the full impl
+    let predicate_valid = match predicate {
+        crate::types::epistemic::RefinementPredicate::Positive
+        | crate::types::epistemic::RefinementPredicate::NonNegative
+        | crate::types::epistemic::RefinementPredicate::NonZero
+        | crate::types::epistemic::RefinementPredicate::InRange { .. } => {
+            // These are well-formed predicates; they're valid as constraints
+            // Actual value checking happens at the use site
+            true
+        }
+        crate::types::epistemic::RefinementPredicate::Custom(expr) => {
+            // Custom predicates need SMT verification
+            // For now, accept non-empty custom predicates as potentially valid
+            !expr.is_empty()
+        }
+    };
+
+    if !predicate_valid {
+        return RefinementVerificationResult::Unverified {
+            reason: "Predicate could not be verified".to_string(),
+        };
+    }
+
+    if confidence >= threshold {
+        RefinementVerificationResult::Verified
+    } else {
+        RefinementVerificationResult::VerifiedLowConfidence {
+            confidence,
+            threshold,
+        }
+    }
+}
+
+/// Propagate epistemic refinement through a binary arithmetic operation
+///
+/// Given two epistemic-refined operands and an operation, compute the
+/// resulting refinement predicate and confidence level.
+///
+/// The `degradation_factor` controls how much confidence is lost through
+/// the operation (typically 0.99 for basic arithmetic, 0.95 for complex ops).
+pub fn propagate_epistemic_refinement_binary(
+    lhs_refinement: &crate::types::epistemic::EpistemicRefinement,
+    rhs_refinement: &crate::types::epistemic::EpistemicRefinement,
+    lhs_confidence: f64,
+    rhs_confidence: f64,
+    op: &str,
+    degradation_factor: f64,
+) -> Option<crate::types::epistemic::EpistemicRefinement> {
+    use crate::types::epistemic::{RefinementMode, RefinementPropagation};
+
+    let propagated_predicate = match op {
+        "add" | "+" => {
+            RefinementPropagation::propagate_add(&lhs_refinement.predicate, &rhs_refinement.predicate)
+        }
+        "mul" | "*" => {
+            RefinementPropagation::propagate_mul(&lhs_refinement.predicate, &rhs_refinement.predicate)
+        }
+        "div" | "/" => {
+            RefinementPropagation::propagate_div(&lhs_refinement.predicate, &rhs_refinement.predicate)
+        }
+        "sub" | "-" => {
+            RefinementPropagation::propagate_sub(&lhs_refinement.predicate, &rhs_refinement.predicate)
+        }
+        _ => None,
+    };
+
+    let propagated_predicate = propagated_predicate?;
+
+    let new_confidence_threshold = lhs_refinement
+        .confidence_threshold
+        .max(rhs_refinement.confidence_threshold);
+
+    let _new_confidence = RefinementPropagation::propagate_confidence(
+        lhs_confidence,
+        rhs_confidence,
+        degradation_factor,
+    );
+
+    // Use the stricter mode of the two operands
+    let mode = match (&lhs_refinement.mode, &rhs_refinement.mode) {
+        (RefinementMode::Strict, _) | (_, RefinementMode::Strict) => RefinementMode::Strict,
+        _ => RefinementMode::Gradual,
+    };
+
+    Some(crate::types::epistemic::EpistemicRefinement {
+        predicate: propagated_predicate,
+        confidence_threshold: new_confidence_threshold,
+        mode,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2505,5 +2737,384 @@ mod tests {
         let result =
             checker.check_provenance_constraint(&status, &ProvenanceConstraint::MaxDepth(1));
         assert!(matches!(result, ConstraintResult::Violated(_)));
+    }
+
+    // ===================================================================
+    // Tests for Epistemic Refinement Integration (Issue #8, Task 1.3)
+    // ===================================================================
+
+    #[test]
+    fn test_epistemic_refinement_creation_strict() {
+        use crate::types::epistemic::{
+            EpistemicRefinement as EpRefinement, RefinementMode, RefinementPredicate,
+        };
+
+        let refinement = EpRefinement::strict(RefinementPredicate::Positive, 0.9);
+        assert_eq!(refinement.predicate, RefinementPredicate::Positive);
+        assert!((refinement.confidence_threshold - 0.9).abs() < f64::EPSILON);
+        assert_eq!(refinement.mode, RefinementMode::Strict);
+    }
+
+    #[test]
+    fn test_epistemic_refinement_creation_gradual() {
+        use crate::types::epistemic::{
+            EpistemicRefinement as EpRefinement, RefinementMode, RefinementPredicate,
+        };
+
+        let refinement = EpRefinement::gradual(RefinementPredicate::NonNegative, 0.8);
+        assert_eq!(refinement.predicate, RefinementPredicate::NonNegative);
+        assert!((refinement.confidence_threshold - 0.8).abs() < f64::EPSILON);
+        assert_eq!(refinement.mode, RefinementMode::Gradual);
+    }
+
+    #[test]
+    fn test_check_epistemic_refinement_holds() {
+        use crate::types::epistemic::{EpistemicRefinement as EpRefinement, RefinementPredicate};
+
+        let refinement = EpRefinement::strict(RefinementPredicate::Positive, 0.9);
+        let span = crate::common::Span::dummy();
+
+        let result = check_epistemic_refinement(&refinement, 0.95, span);
+        assert!(result.is_guaranteed());
+        assert!(result.is_allowed());
+        assert!(!result.is_error());
+    }
+
+    #[test]
+    fn test_check_epistemic_refinement_gradual_allows_low_confidence() {
+        use crate::types::epistemic::{EpistemicRefinement as EpRefinement, RefinementPredicate};
+
+        let refinement = EpRefinement::gradual(RefinementPredicate::Positive, 0.9);
+        let span = crate::common::Span::dummy();
+
+        // Confidence 0.7 < threshold 0.9, but Gradual mode allows it
+        let result = check_epistemic_refinement(&refinement, 0.7, span);
+        assert!(!result.is_guaranteed());
+        assert!(result.is_allowed()); // Allowed with warning
+        assert!(!result.is_error());
+
+        match result {
+            EpistemicRefinementCheckResult::RefinementWarning {
+                current_confidence,
+                required_threshold,
+                ..
+            } => {
+                assert!((current_confidence - 0.7).abs() < f64::EPSILON);
+                assert!((required_threshold - 0.9).abs() < f64::EPSILON);
+            }
+            _ => panic!("Expected RefinementWarning"),
+        }
+    }
+
+    #[test]
+    fn test_check_epistemic_refinement_strict_rejects_low_confidence() {
+        use crate::types::epistemic::{EpistemicRefinement as EpRefinement, RefinementPredicate};
+
+        let refinement = EpRefinement::strict(RefinementPredicate::Positive, 0.9);
+        let span = crate::common::Span::dummy();
+
+        // Confidence 0.7 < threshold 0.9, Strict mode rejects
+        let result = check_epistemic_refinement(&refinement, 0.7, span);
+        assert!(!result.is_guaranteed());
+        assert!(!result.is_allowed());
+        assert!(result.is_error());
+
+        match result {
+            EpistemicRefinementCheckResult::RefinementViolation {
+                predicate,
+                current_confidence,
+                required_threshold,
+            } => {
+                assert_eq!(predicate, "x > 0");
+                assert!((current_confidence - 0.7).abs() < f64::EPSILON);
+                assert!((required_threshold - 0.9).abs() < f64::EPSILON);
+            }
+            _ => panic!("Expected RefinementViolation"),
+        }
+    }
+
+    #[test]
+    fn test_refinement_predicate_check_value() {
+        use crate::types::epistemic::RefinementPredicate;
+
+        assert!(RefinementPredicate::Positive.check_value(1.0));
+        assert!(!RefinementPredicate::Positive.check_value(-1.0));
+        assert!(!RefinementPredicate::Positive.check_value(0.0));
+
+        assert!(RefinementPredicate::NonNegative.check_value(0.0));
+        assert!(RefinementPredicate::NonNegative.check_value(5.0));
+        assert!(!RefinementPredicate::NonNegative.check_value(-0.001));
+
+        assert!(RefinementPredicate::NonZero.check_value(1.0));
+        assert!(RefinementPredicate::NonZero.check_value(-1.0));
+        assert!(!RefinementPredicate::NonZero.check_value(0.0));
+
+        let range = RefinementPredicate::InRange {
+            lo: 0.0,
+            hi: 100.0,
+        };
+        assert!(range.check_value(50.0));
+        assert!(range.check_value(0.0));
+        assert!(range.check_value(100.0));
+        assert!(!range.check_value(-1.0));
+        assert!(!range.check_value(101.0));
+    }
+
+    #[test]
+    fn test_refinement_propagation_add_positive() {
+        use crate::types::epistemic::{RefinementPredicate, RefinementPropagation};
+
+        // Positive + Positive => Positive
+        let result =
+            RefinementPropagation::propagate_add(&RefinementPredicate::Positive, &RefinementPredicate::Positive);
+        assert_eq!(result, Some(RefinementPredicate::Positive));
+
+        // Positive + NonNegative => Positive
+        let result =
+            RefinementPropagation::propagate_add(&RefinementPredicate::Positive, &RefinementPredicate::NonNegative);
+        assert_eq!(result, Some(RefinementPredicate::Positive));
+
+        // NonNegative + NonNegative => NonNegative
+        let result = RefinementPropagation::propagate_add(
+            &RefinementPredicate::NonNegative,
+            &RefinementPredicate::NonNegative,
+        );
+        assert_eq!(result, Some(RefinementPredicate::NonNegative));
+    }
+
+    #[test]
+    fn test_refinement_propagation_add_range() {
+        use crate::types::epistemic::{RefinementPredicate, RefinementPropagation};
+
+        let r1 = RefinementPredicate::InRange {
+            lo: 1.0,
+            hi: 10.0,
+        };
+        let r2 = RefinementPredicate::InRange {
+            lo: 2.0,
+            hi: 5.0,
+        };
+        let result = RefinementPropagation::propagate_add(&r1, &r2);
+        match result {
+            Some(RefinementPredicate::InRange { lo, hi }) => {
+                assert!((lo - 3.0).abs() < f64::EPSILON);
+                assert!((hi - 15.0).abs() < f64::EPSILON);
+            }
+            _ => panic!("Expected InRange"),
+        }
+    }
+
+    #[test]
+    fn test_refinement_propagation_mul() {
+        use crate::types::epistemic::{RefinementPredicate, RefinementPropagation};
+
+        // NonNegative * NonNegative => NonNegative
+        let result = RefinementPropagation::propagate_mul(
+            &RefinementPredicate::NonNegative,
+            &RefinementPredicate::NonNegative,
+        );
+        assert_eq!(result, Some(RefinementPredicate::NonNegative));
+
+        // Positive * Positive => Positive
+        let result =
+            RefinementPropagation::propagate_mul(&RefinementPredicate::Positive, &RefinementPredicate::Positive);
+        assert_eq!(result, Some(RefinementPredicate::Positive));
+
+        // NonZero * NonZero => NonZero
+        let result =
+            RefinementPropagation::propagate_mul(&RefinementPredicate::NonZero, &RefinementPredicate::NonZero);
+        assert_eq!(result, Some(RefinementPredicate::NonZero));
+    }
+
+    #[test]
+    fn test_refinement_propagation_div() {
+        use crate::types::epistemic::{RefinementPredicate, RefinementPropagation};
+
+        // Positive / Positive => Positive
+        let result =
+            RefinementPropagation::propagate_div(&RefinementPredicate::Positive, &RefinementPredicate::Positive);
+        assert_eq!(result, Some(RefinementPredicate::Positive));
+
+        // NonNegative / Positive => NonNegative
+        let result =
+            RefinementPropagation::propagate_div(&RefinementPredicate::NonNegative, &RefinementPredicate::Positive);
+        assert_eq!(result, Some(RefinementPredicate::NonNegative));
+    }
+
+    #[test]
+    fn test_refinement_propagation_confidence() {
+        use crate::types::epistemic::RefinementPropagation;
+
+        // min(0.9, 0.8) * 0.99 = 0.792
+        let result = RefinementPropagation::propagate_confidence(0.9, 0.8, 0.99);
+        assert!((result - 0.792).abs() < 0.001);
+
+        // min(0.95, 0.95) * 1.0 = 0.95
+        let result = RefinementPropagation::propagate_confidence(0.95, 0.95, 1.0);
+        assert!((result - 0.95).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn test_verify_epistemic_refinement_verified() {
+        use crate::types::epistemic::RefinementPredicate;
+
+        let result = verify_epistemic_refinement(&RefinementPredicate::Positive, 0.95, 0.9);
+        assert_eq!(result, RefinementVerificationResult::Verified);
+        assert!(result.is_verified());
+    }
+
+    #[test]
+    fn test_verify_epistemic_refinement_low_confidence() {
+        use crate::types::epistemic::RefinementPredicate;
+
+        let result = verify_epistemic_refinement(&RefinementPredicate::Positive, 0.7, 0.9);
+        match result {
+            RefinementVerificationResult::VerifiedLowConfidence {
+                confidence,
+                threshold,
+            } => {
+                assert!((confidence - 0.7).abs() < f64::EPSILON);
+                assert!((threshold - 0.9).abs() < f64::EPSILON);
+            }
+            _ => panic!("Expected VerifiedLowConfidence"),
+        }
+        assert!(result.is_verified());
+    }
+
+    #[test]
+    fn test_verify_epistemic_refinement_custom_empty() {
+        use crate::types::epistemic::RefinementPredicate;
+
+        let result =
+            verify_epistemic_refinement(&RefinementPredicate::Custom(String::new()), 0.95, 0.9);
+        assert_eq!(
+            result,
+            RefinementVerificationResult::Unverified {
+                reason: "Predicate could not be verified".to_string()
+            }
+        );
+        assert!(!result.is_verified());
+    }
+
+    #[test]
+    fn test_propagate_epistemic_refinement_binary_add() {
+        use crate::types::epistemic::{
+            EpistemicRefinement as EpRefinement, RefinementMode, RefinementPredicate,
+        };
+
+        let lhs = EpRefinement::gradual(RefinementPredicate::Positive, 0.8);
+        let rhs = EpRefinement::gradual(RefinementPredicate::Positive, 0.9);
+
+        let result = propagate_epistemic_refinement_binary(&lhs, &rhs, 0.95, 0.90, "add", 0.99);
+        assert!(result.is_some());
+        let result = result.unwrap();
+        assert_eq!(result.predicate, RefinementPredicate::Positive);
+        // Threshold should be max(0.8, 0.9) = 0.9
+        assert!((result.confidence_threshold - 0.9).abs() < f64::EPSILON);
+        assert_eq!(result.mode, RefinementMode::Gradual);
+    }
+
+    #[test]
+    fn test_propagate_epistemic_refinement_binary_strict_wins() {
+        use crate::types::epistemic::{
+            EpistemicRefinement as EpRefinement, RefinementMode, RefinementPredicate,
+        };
+
+        let lhs = EpRefinement::gradual(RefinementPredicate::NonNegative, 0.8);
+        let rhs = EpRefinement::strict(RefinementPredicate::NonNegative, 0.9);
+
+        let result = propagate_epistemic_refinement_binary(&lhs, &rhs, 0.95, 0.90, "mul", 0.99);
+        assert!(result.is_some());
+        let result = result.unwrap();
+        assert_eq!(result.mode, RefinementMode::Strict);
+    }
+
+    #[test]
+    fn test_propagate_epistemic_refinement_binary_no_propagation() {
+        use crate::types::epistemic::{
+            EpistemicRefinement as EpRefinement, RefinementPredicate,
+        };
+
+        // NonZero + Positive => None (cannot guarantee any refinement for addition)
+        let lhs = EpRefinement::gradual(RefinementPredicate::NonZero, 0.8);
+        let rhs = EpRefinement::gradual(RefinementPredicate::Positive, 0.9);
+
+        let result = propagate_epistemic_refinement_binary(&lhs, &rhs, 0.95, 0.90, "add", 0.99);
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn test_knowledge_type_with_refinement() {
+        use crate::types::epistemic::{
+            EpistemicRefinement as EpRefinement, RefinementPredicate,
+        };
+        use crate::types::{KnowledgeType, Type, ConfidenceBound as TypeConfBound};
+
+        let kt = KnowledgeType::new(Type::F64)
+            .with_confidence(TypeConfBound::at_least(0.9))
+            .with_refinement(EpRefinement::strict(RefinementPredicate::Positive, 0.9));
+
+        assert!(kt.refinement.is_some());
+        let refinement = kt.refinement.unwrap();
+        assert_eq!(refinement.predicate, RefinementPredicate::Positive);
+        assert!((refinement.confidence_threshold - 0.9).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn test_epistemic_refinement_display() {
+        use crate::types::epistemic::{
+            EpistemicRefinement as EpRefinement, RefinementPredicate,
+        };
+
+        let refinement = EpRefinement::strict(RefinementPredicate::Positive, 0.9);
+        let display = format!("{}", refinement);
+        assert!(display.contains("x > 0"));
+        assert!(display.contains("0.90"));
+        assert!(display.contains("strict"));
+    }
+
+    #[test]
+    fn test_refinement_predicate_descriptions() {
+        use crate::types::epistemic::RefinementPredicate;
+
+        assert_eq!(RefinementPredicate::Positive.description(), "x > 0");
+        assert_eq!(RefinementPredicate::NonNegative.description(), "x >= 0");
+        assert_eq!(RefinementPredicate::NonZero.description(), "x != 0");
+        assert_eq!(
+            RefinementPredicate::InRange {
+                lo: 0.0,
+                hi: 100.0
+            }
+            .description(),
+            "0 <= x <= 100"
+        );
+        assert_eq!(
+            RefinementPredicate::Custom("custom_pred".to_string()).description(),
+            "custom_pred"
+        );
+    }
+
+    #[test]
+    fn test_refinement_propagation_sub_range() {
+        use crate::types::epistemic::{RefinementPredicate, RefinementPropagation};
+
+        let r1 = RefinementPredicate::InRange {
+            lo: 10.0,
+            hi: 20.0,
+        };
+        let r2 = RefinementPredicate::InRange {
+            lo: 1.0,
+            hi: 5.0,
+        };
+
+        let result = RefinementPropagation::propagate_sub(&r1, &r2);
+        match result {
+            Some(RefinementPredicate::InRange { lo, hi }) => {
+                // min: 10 - 5 = 5, max: 20 - 1 = 19
+                assert!((lo - 5.0).abs() < f64::EPSILON);
+                assert!((hi - 19.0).abs() < f64::EPSILON);
+            }
+            _ => panic!("Expected InRange"),
+        }
     }
 }

@@ -991,5 +991,534 @@ fn test_type_b_diagnostic() -> bool {
     return true
 }
 
+// =============================================================================
+// Saltelli et al. (2008) Extended Sensitivity Analysis
+// =============================================================================
+// Reference: Saltelli, A. et al. "Global Sensitivity Analysis: The Primer"
+// John Wiley & Sons, ISBN 978-0-470-05997-5
+//
+// Implements:
+//   - Efficient N(2d+2) sampling scheme using quasi-random base matrices
+//   - C_i matrix construction (A with column i replaced from B)
+//   - C_ij matrix construction (A with columns i and j replaced from B)
+//   - First-order indices S_i via Saltelli's improved estimator
+//   - Total-order indices S_Ti via Jansen (1999) estimator
+//   - Second-order interaction indices S_ij
+//
+// The key insight: by reusing base matrices A and B, the total number of
+// model evaluations is N(2d+2) instead of the naive N*2^d, making higher-
+// dimensional analysis tractable.
+
+// Saltelli sample matrices: base matrices A and B, each n_samples x n_dims
+// Stored as flattened row-major arrays.
+// Element (i, j) = matrix[i * n_dims + j]
+struct SaltelliSamples {
+    matrix_a: [f64; 5000],   // flattened: row i, col j = matrix_a[i * n_dims + j]
+    matrix_b: [f64; 5000],   // same layout
+    n_samples: i32,
+    n_dims: i32,
+}
+
+// Return a prime multiplier for dimension d (up to 10 dims).
+// Used to decorrelate quasi-random streams across dimensions.
+fn saltelli_dim_prime(d: i32) -> i64 {
+    if d == 0 { return 2 }
+    if d == 1 { return 3 }
+    if d == 2 { return 5 }
+    if d == 3 { return 7 }
+    if d == 4 { return 11 }
+    if d == 5 { return 13 }
+    if d == 6 { return 17 }
+    if d == 7 { return 19 }
+    if d == 8 { return 23 }
+    return 29
+}
+
+// Generate Saltelli base sample matrices A and B using quasi-random sequences.
+// Each matrix has n_samples rows and n_dims columns, filled with values in [0,1].
+// Uses the van der Corput / reverse_bits low-discrepancy generator already in
+// this file, with different multiplier offsets per dimension to decorrelate.
+fn saltelli_generate(n_samples: i32, n_dims: i32, seed: i64) -> SaltelliSamples {
+    var result = SaltelliSamples {
+        matrix_a: [0.0; 5000],
+        matrix_b: [0.0; 5000],
+        n_samples: n_samples,
+        n_dims: n_dims,
+    }
+
+    // Ensure we do not exceed the flattened array capacity
+    var actual_samples = n_samples
+    if n_dims > 0 {
+        let max_rows = 5000 / n_dims
+        if actual_samples > max_rows {
+            actual_samples = max_rows
+        }
+    }
+    result.n_samples = actual_samples
+
+    // Fill matrix A: use base indices [1 .. actual_samples] with dimension
+    // multipliers chosen to be coprime (primes) for decorrelation.
+    // Primes for up to 10 dimensions: 2, 3, 5, 7, 11, 13, 17, 19, 23, 29
+    var i: i32 = 0
+    while i < actual_samples {
+        let base_idx: i64 = (i as i64) + 1 + seed
+        var d: i32 = 0
+        while d < n_dims {
+            // Dimension-dependent multiplier to decorrelate quasi-random streams
+            let dim_mult = saltelli_dim_prime(d)
+            let idx_a: i64 = base_idx * dim_mult + (d as i64)
+            let idx_b: i64 = base_idx * dim_mult + (d as i64) + (actual_samples as i64) * 7 + 131
+
+            let flat = i * n_dims + d
+            result.matrix_a[flat] = reverse_bits(idx_a)
+            result.matrix_b[flat] = reverse_bits(idx_b)
+
+            d = d + 1
+        }
+        i = i + 1
+    }
+
+    return result
+}
+
+// =============================================================================
+// C_i Matrix Construction
+// =============================================================================
+
+// Build the C_i matrix: start from matrix A and replace column dim_i with
+// the corresponding column from matrix B.
+// This is the core of Saltelli's method: f(C_i) isolates the effect of
+// varying input i while holding all other inputs at their A-matrix values.
+fn saltelli_build_ci(samples: &SaltelliSamples, dim_i: i32) -> [f64; 5000] {
+    var ci: [f64; 5000] = [0.0; 5000]
+
+    var i: i32 = 0
+    while i < samples.n_samples {
+        var d: i32 = 0
+        while d < samples.n_dims {
+            let flat = i * samples.n_dims + d
+            if d == dim_i {
+                // Column dim_i comes from B
+                ci[flat] = samples.matrix_b[flat]
+            } else {
+                // All other columns come from A
+                ci[flat] = samples.matrix_a[flat]
+            }
+            d = d + 1
+        }
+        i = i + 1
+    }
+
+    return ci
+}
+
+// =============================================================================
+// First-Order Indices via Saltelli Estimator
+// =============================================================================
+
+// Compute the first-order Sobol' index S_i using Saltelli's (2010) estimator.
+//
+// Formula (Saltelli et al. 2010, Eq. 4):
+//   S_i = [ (1/N) * sum_{k=1}^{N} f(B)_k * (f(C_i)_k - f(A)_k) ] / Var(Y)
+//
+// where Var(Y) is estimated from the combined A and B outputs.
+//
+// This estimator has lower variance than the original Sobol' (1993) formulation
+// and is the recommended default for first-order index computation.
+fn saltelli_first_order(
+    samples: &SaltelliSamples,
+    model_outputs_a: &[f64; 1000],
+    model_outputs_b: &[f64; 1000],
+    model_outputs_ci: &[f64; 1000]
+) -> f64 {
+    let n = samples.n_samples
+    if n < 2 { return 0.0 }
+
+    let nf = n as f64
+
+    // Compute grand mean and variance from combined A and B outputs
+    var sum_all: f64 = 0.0
+    var sum_sq_all: f64 = 0.0
+    var k: i32 = 0
+    while k < n {
+        sum_all = sum_all + model_outputs_a[k] + model_outputs_b[k]
+        sum_sq_all = sum_sq_all + model_outputs_a[k] * model_outputs_a[k]
+                                + model_outputs_b[k] * model_outputs_b[k]
+        k = k + 1
+    }
+
+    let mean_y = sum_all / (2.0 * nf)
+    let var_y = sum_sq_all / (2.0 * nf) - mean_y * mean_y
+
+    if var_y < 1.0e-15 { return 0.0 }
+
+    // Saltelli numerator: (1/N) * sum( f(B) * (f(C_i) - f(A)) )
+    var numerator: f64 = 0.0
+    k = 0
+    while k < n {
+        numerator = numerator + model_outputs_b[k] * (model_outputs_ci[k] - model_outputs_a[k])
+        k = k + 1
+    }
+    numerator = numerator / nf
+
+    let si = numerator / var_y
+
+    // Clamp to [0, 1] — negative values indicate sampling noise
+    return max_f64(0.0, min_f64(1.0, si))
+}
+
+// =============================================================================
+// Total-Order Indices via Jansen (1999) Estimator
+// =============================================================================
+
+// Compute the total-order Sobol' index S_Ti using the Jansen estimator.
+//
+// Formula (Jansen 1999):
+//   S_Ti = (1 / (2N)) * sum_{k=1}^{N} (f(A)_k - f(C_i)_k)^2 / Var(Y)
+//
+// This estimator is more stable than Homma-Saltelli (1996) for total-order
+// indices and is the recommended default.
+fn saltelli_total_order(
+    samples: &SaltelliSamples,
+    model_outputs_a: &[f64; 1000],
+    model_outputs_ci: &[f64; 1000]
+) -> f64 {
+    let n = samples.n_samples
+    if n < 2 { return 0.0 }
+
+    let nf = n as f64
+
+    // Estimate Var(Y) from A outputs alone
+    var sum_a: f64 = 0.0
+    var sum_sq_a: f64 = 0.0
+    var k: i32 = 0
+    while k < n {
+        sum_a = sum_a + model_outputs_a[k]
+        sum_sq_a = sum_sq_a + model_outputs_a[k] * model_outputs_a[k]
+        k = k + 1
+    }
+    let mean_a = sum_a / nf
+    let var_y = sum_sq_a / nf - mean_a * mean_a
+
+    if var_y < 1.0e-15 { return 0.0 }
+
+    // Jansen estimator numerator: (1/2N) * sum( (f(A) - f(C_i))^2 )
+    var numerator: f64 = 0.0
+    k = 0
+    while k < n {
+        let diff = model_outputs_a[k] - model_outputs_ci[k]
+        numerator = numerator + diff * diff
+        k = k + 1
+    }
+    numerator = numerator / (2.0 * nf)
+
+    let sti = numerator / var_y
+
+    // Clamp to [0, 1]
+    return max_f64(0.0, min_f64(1.0, sti))
+}
+
+// =============================================================================
+// Second-Order Indices
+// =============================================================================
+
+// Build C_ij matrix: start from A and replace columns i and j with those from B.
+// This matrix is needed for computing the second-order interaction index S_ij.
+fn saltelli_build_cij(samples: &SaltelliSamples, dim_i: i32, dim_j: i32) -> [f64; 5000] {
+    var cij: [f64; 5000] = [0.0; 5000]
+
+    var r: i32 = 0
+    while r < samples.n_samples {
+        var d: i32 = 0
+        while d < samples.n_dims {
+            let flat = r * samples.n_dims + d
+            if d == dim_i || d == dim_j {
+                // Columns i and j come from B
+                cij[flat] = samples.matrix_b[flat]
+            } else {
+                // All other columns come from A
+                cij[flat] = samples.matrix_a[flat]
+            }
+            d = d + 1
+        }
+        r = r + 1
+    }
+
+    return cij
+}
+
+// Compute the second-order interaction index S_ij.
+//
+// Formula (Saltelli 2002):
+//   V_ij = V_{ij}^{closed} - V_i - V_j
+//   S_ij = V_ij / V(Y)
+//
+// where V_{ij}^{closed} is estimated from C_ij outputs and V_i, V_j are the
+// first-order variance contributions (i.e., s_i * Var(Y) and s_j * Var(Y)).
+//
+// The closed second-order variance uses the Saltelli estimator:
+//   V_{ij}^{closed} = (1/N) * sum( f(B) * (f(C_ij) - f(A)) )
+//
+// Then: S_ij = V_{ij}^{closed}/V(Y) - S_i - S_j
+fn saltelli_second_order(
+    samples: &SaltelliSamples,
+    model_outputs_a: &[f64; 1000],
+    model_outputs_b: &[f64; 1000],
+    model_outputs_ci: &[f64; 1000],
+    model_outputs_cj: &[f64; 1000],
+    model_outputs_cij: &[f64; 1000],
+    s_i: f64,
+    s_j: f64
+) -> f64 {
+    let n = samples.n_samples
+    if n < 2 { return 0.0 }
+
+    let nf = n as f64
+
+    // Compute Var(Y) from combined A and B
+    var sum_all: f64 = 0.0
+    var sum_sq_all: f64 = 0.0
+    var k: i32 = 0
+    while k < n {
+        sum_all = sum_all + model_outputs_a[k] + model_outputs_b[k]
+        sum_sq_all = sum_sq_all + model_outputs_a[k] * model_outputs_a[k]
+                                + model_outputs_b[k] * model_outputs_b[k]
+        k = k + 1
+    }
+    let mean_y = sum_all / (2.0 * nf)
+    let var_y = sum_sq_all / (2.0 * nf) - mean_y * mean_y
+
+    if var_y < 1.0e-15 { return 0.0 }
+
+    // Closed second-order variance estimator:
+    // V_{ij}^{closed} / V(Y) = (1/N) * sum( f(B) * (f(C_ij) - f(A)) ) / V(Y)
+    var numerator_ij: f64 = 0.0
+    k = 0
+    while k < n {
+        numerator_ij = numerator_ij + model_outputs_b[k] * (model_outputs_cij[k] - model_outputs_a[k])
+        k = k + 1
+    }
+    let s_ij_closed = (numerator_ij / nf) / var_y
+
+    // Second-order index: subtract main effects
+    let s_ij = s_ij_closed - s_i - s_j
+
+    // Interaction indices can be slightly negative due to sampling noise;
+    // clamp to [-0.05, 1.0] to allow small negative noise but prevent nonsense
+    return max_f64(-0.05, min_f64(1.0, s_ij))
+}
+
+// =============================================================================
+// Full Saltelli Analysis
+// =============================================================================
+
+// Result of a complete Saltelli sensitivity analysis
+struct SaltelliResult {
+    first_order: [f64; 10],     // S_i for each input dimension
+    total_order: [f64; 10],     // S_Ti for each input dimension
+    second_order: [f64; 45],    // S_ij upper triangle (max 10 dims -> C(10,2) = 45 pairs)
+    n_dims: i32,
+    n_model_evals: i32,         // Total model evaluations: N(2d+2)
+}
+
+// Helper: evaluate a model function on a sample matrix row.
+// Extracts row `row` from a flattened matrix and passes it to the model.
+fn saltelli_eval_row(matrix: &[f64; 5000], row: i32, n_dims: i32, model: fn([f64; 10]) -> f64) -> f64 {
+    var input: [f64; 10] = [0.0; 10]
+    var d: i32 = 0
+    while d < n_dims {
+        if d < 10 {
+            input[d] = matrix[row * n_dims + d]
+        }
+        d = d + 1
+    }
+    return model(input)
+}
+
+// Compute all Sobol' indices for a model using the Saltelli N(2d+2) scheme.
+//
+// This is the main entry point for a complete sensitivity analysis.
+// For d input dimensions and N base samples, the total evaluations are:
+//   - N evaluations of f(A)
+//   - N evaluations of f(B)
+//   - N * d evaluations of f(C_i) for each dimension
+//   - N * C(d,2) evaluations of f(C_ij) for second-order indices
+//   Total without second-order: N(d+2)
+//   Total with second-order: N(d+2) + N*C(d,2) ~ N(2d+2) for moderate d
+//
+// The function:
+//   1. Generates quasi-random base matrices A and B
+//   2. Evaluates the model at all required sample points
+//   3. Computes first-order, total-order, and second-order indices
+fn saltelli_analyze(
+    samples: &SaltelliSamples,
+    model: fn([f64; 10]) -> f64
+) -> SaltelliResult {
+    let n = samples.n_samples
+    let d = samples.n_dims
+
+    var result = SaltelliResult {
+        first_order: [0.0; 10],
+        total_order: [0.0; 10],
+        second_order: [0.0; 45],
+        n_dims: d,
+        n_model_evals: 0,
+    }
+
+    // Limit to 1000 samples for the output arrays
+    var n_eval = n
+    if n_eval > 1000 {
+        n_eval = 1000
+    }
+
+    // Step 1: Evaluate model on base matrices A and B
+    var outputs_a: [f64; 1000] = [0.0; 1000]
+    var outputs_b: [f64; 1000] = [0.0; 1000]
+    var eval_count: i32 = 0
+
+    var k: i32 = 0
+    while k < n_eval {
+        outputs_a[k] = saltelli_eval_row(&samples.matrix_a, k, d, model)
+        outputs_b[k] = saltelli_eval_row(&samples.matrix_b, k, d, model)
+        eval_count = eval_count + 2
+        k = k + 1
+    }
+
+    // Step 2: For each dimension, build C_i, evaluate, compute S_i and S_Ti
+    var di: i32 = 0
+    while di < d {
+        if di >= 10 { di = d } else {
+            let ci = saltelli_build_ci(samples, di)
+
+            var outputs_ci: [f64; 1000] = [0.0; 1000]
+            k = 0
+            while k < n_eval {
+                outputs_ci[k] = saltelli_eval_row(&ci, k, d, model)
+                eval_count = eval_count + 1
+                k = k + 1
+            }
+
+            // First-order index S_i
+            result.first_order[di] = saltelli_first_order(
+                samples, &outputs_a, &outputs_b, &outputs_ci
+            )
+
+            // Total-order index S_Ti
+            result.total_order[di] = saltelli_total_order(
+                samples, &outputs_a, &outputs_ci
+            )
+
+            di = di + 1
+        }
+    }
+
+    // Step 3: Second-order indices S_ij for all pairs (i < j)
+    var pair_idx: i32 = 0
+    var si: i32 = 0
+    while si < d {
+        if si >= 10 { si = d } else {
+            // Rebuild C_i outputs for dimension si
+            let ci_si = saltelli_build_ci(samples, si)
+            var out_ci_si: [f64; 1000] = [0.0; 1000]
+            k = 0
+            while k < n_eval {
+                out_ci_si[k] = saltelli_eval_row(&ci_si, k, d, model)
+                k = k + 1
+            }
+            // Note: these evaluations were already counted in Step 2; we recompute
+            // the outputs here for clarity, but a production implementation would
+            // cache them. No additional eval_count increment.
+
+            var sj: i32 = si + 1
+            while sj < d {
+                if sj >= 10 || pair_idx >= 45 { sj = d } else {
+                    // Build C_j outputs
+                    let ci_sj = saltelli_build_ci(samples, sj)
+                    var out_ci_sj: [f64; 1000] = [0.0; 1000]
+                    k = 0
+                    while k < n_eval {
+                        out_ci_sj[k] = saltelli_eval_row(&ci_sj, k, d, model)
+                        k = k + 1
+                    }
+
+                    // Build C_ij and evaluate
+                    let cij = saltelli_build_cij(samples, si, sj)
+                    var out_cij: [f64; 1000] = [0.0; 1000]
+                    k = 0
+                    while k < n_eval {
+                        out_cij[k] = saltelli_eval_row(&cij, k, d, model)
+                        eval_count = eval_count + 1
+                        k = k + 1
+                    }
+
+                    result.second_order[pair_idx] = saltelli_second_order(
+                        samples,
+                        &outputs_a, &outputs_b,
+                        &out_ci_si, &out_ci_sj, &out_cij,
+                        result.first_order[si], result.first_order[sj]
+                    )
+
+                    pair_idx = pair_idx + 1
+                    sj = sj + 1
+                }
+            }
+            si = si + 1
+        }
+    }
+
+    result.n_model_evals = eval_count
+    return result
+}
+
+// Convenience: generate samples and run analysis in one call
+fn saltelli_run(
+    n_samples: i32,
+    n_dims: i32,
+    seed: i64,
+    model: fn([f64; 10]) -> f64
+) -> SaltelliResult {
+    let samples = saltelli_generate(n_samples, n_dims, seed)
+    return saltelli_analyze(&samples, model)
+}
+
+// =============================================================================
+// Variance computation helper (public, reusable)
+// =============================================================================
+
+// Compute sample variance from an output array
+fn saltelli_variance(outputs: &[f64; 1000], n: i32) -> f64 {
+    if n < 2 { return 0.0 }
+    let nf = n as f64
+    var sum: f64 = 0.0
+    var sum_sq: f64 = 0.0
+    var k: i32 = 0
+    while k < n {
+        sum = sum + outputs[k]
+        sum_sq = sum_sq + outputs[k] * outputs[k]
+        k = k + 1
+    }
+    let mean = sum / nf
+    return sum_sq / nf - mean * mean
+}
+
+// =============================================================================
+// N(2d+2) Efficiency Verification
+// =============================================================================
+
+// Compute the expected number of model evaluations for the Saltelli scheme.
+// For d dimensions and N base samples:
+//   - Without second-order: N * (d + 2)
+//   - With second-order:    N * (d + 2) + N * d*(d-1)/2
+// The second expression simplifies to N * (2d + 2 + d*(d-1)/2 - d) but
+// the canonical "N(2d+2)" is an approximation for moderate d.
+fn saltelli_expected_evals(n_samples: i32, n_dims: i32) -> i32 {
+    // Base evaluations: A + B + d C_i matrices
+    let base = n_samples * (n_dims + 2)
+    // Second-order: one C_ij per pair
+    let n_pairs = n_dims * (n_dims - 1) / 2
+    let second = n_samples * n_pairs
+    return base + second
+}
+
 // ============================================================================
 // MAIN

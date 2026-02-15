@@ -616,7 +616,17 @@ impl BytecodeCodegen {
             // Unary operations
             HirExprKind::Unary { op, expr } => {
                 self.compile_expr(expr)?;
-                self.compile_unary_op(*op)?;
+                if matches!(op, HirUnaryOp::RefMut) {
+                    // Wrap TOS in a shared mutable Ref and store back
+                    // so caller and callee share the same Arc.
+                    self.emit(Bytecode::MakeRef);
+                    if let HirExprKind::Local(name) = &expr.kind {
+                        self.emit(Bytecode::Dup);
+                        self.store_named_binding(name)?;
+                    }
+                } else {
+                    self.compile_unary_op(*op)?;
+                }
             }
 
             // Function calls
@@ -1125,15 +1135,24 @@ impl BytecodeCodegen {
             }
 
             // Reference and dereference
-            HirExprKind::Ref { expr, .. } => {
-                // For now, just compile the expression
-                // In a full implementation, we'd track addresses
+            HirExprKind::Ref { expr, mutable } => {
                 self.compile_expr(expr)?;
+                if *mutable {
+                    // Wrap in a shared mutable reference. This enables &! semantics:
+                    // mutations through the Ref propagate back to the original binding.
+                    self.emit(Bytecode::MakeRef);
+                    // If the inner expression is a local variable, store the Ref back
+                    // to its slot so caller and callee share the same Ref.
+                    if let HirExprKind::Local(name) = &expr.kind {
+                        self.emit(Bytecode::Dup);
+                        self.store_named_binding(name)?;
+                    }
+                }
             }
 
             HirExprKind::Deref(expr) => {
                 self.compile_expr(expr)?;
-                // TODO: Add proper dereference handling
+                // Ref values auto-deref on field/index access, no explicit deref needed.
             }
 
             // Cast

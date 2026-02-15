@@ -51,6 +51,13 @@ impl Stack {
                 entries.sort();
                 format!("{{ {} }}", entries.join(", "))
             }
+            Value::Ref(rc) => {
+                if let Ok(inner) = rc.lock() {
+                    format!("&!{}", Self::value_to_string(&inner))
+                } else {
+                    "&!<locked>".to_string()
+                }
+            }
         }
     }
 

@@ -257,8 +257,13 @@ impl NativeCodegen {
         for stmt in &block.stmts {
             match stmt {
                 HirStmt::Expr(expr) => {
+                    let is_return = matches!(expr.kind, HirExprKind::Return(_));
                     self.compile_expr(expr)?;
                     has_tail_expr = true;
+
+                    if is_return {
+                        return Ok(());
+                    }
                 }
                 HirStmt::Let { .. } | HirStmt::Assign { .. } => {
                     self.compile_stmt(stmt)?;

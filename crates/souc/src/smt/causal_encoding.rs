@@ -766,97 +766,52 @@ fn check_iv_criterion(
 // ---------------------------------------------------------------------------
 
 /// Check whether the causal effect of treatment on outcome is identifiable
-/// by trying all known identification strategies.
+/// using Pearl's ID algorithm.
 ///
-/// Tries (in order):
-/// 1. Backdoor criterion with parents of treatment (minus descendants)
-/// 2. Frontdoor criterion with children of treatment that are parents of outcome
-/// 3. Instrumental variable with parents of treatment that are not ancestors of outcome
+/// Delegates to the full ID algorithm in `crate::types::causal_id::identify`
+/// which implements Pearl (2009) Section 3.4.  The algorithm tries (in order):
+///
+/// 1. Empty treatment → marginal P(Y)
+/// 2. Ancestor restriction (treatment not ancestor of outcome → marginal)
+/// 3. No confounding → conditional P(Y|X)
+/// 4. Backdoor adjustment (minimal adjustment set search)
+/// 5. Frontdoor adjustment (mediator set search)
+/// 6. Instrumental variable (instrument search)
+/// 7. C-component factorisation
 ///
 /// If any strategy succeeds, the effect is identifiable.  If none succeeds,
-/// we report Unknown (not Refuted, since there may be strategies we have not tried).
+/// we report Unknown (not Refuted, since there may be strategies we have
+/// not yet implemented — e.g., full do-calculus derivations).
 fn check_identifiable(
     graph: &CausalGraphDef,
     treatment: &str,
     outcome: &str,
     property: &CausalProperty,
 ) -> CausalVerificationResult {
-    // Strategy 1: Try backdoor with parents(treatment) \ descendants(treatment)
-    let (parents_map, children_map) = build_adjacency(graph);
-    let treatment_descendants = get_descendants(graph, treatment);
+    use crate::types::causal_id;
 
-    if let Some(treatment_parents) = parents_map.get(treatment) {
-        let adjustment: Vec<String> = treatment_parents
-            .iter()
-            .filter(|p| !treatment_descendants.iter().any(|d| d == *p))
-            .map(|p| p.to_string())
-            .collect();
+    let treatment_vec = vec![treatment.to_string()];
+    let outcome_vec = vec![outcome.to_string()];
 
-        if !adjustment.is_empty() {
-            let backdoor_prop = CausalProperty::BackdoorValid {
-                graph_name: graph.name.clone(),
-                treatment: treatment.to_string(),
-                outcome: outcome.to_string(),
-                adjustment: adjustment.clone(),
-            };
-            let result =
-                check_backdoor_criterion(graph, treatment, outcome, &adjustment, &backdoor_prop);
-            if matches!(result, CausalVerificationResult::Verified { .. }) {
-                return CausalVerificationResult::Verified {
-                    property: property.clone(),
-                    confidence_factor: CONFIDENCE_BACKDOOR * CONFIDENCE_POSITIVITY * CONFIDENCE_CAUSAL_MARKOV,
-                };
+    let id_result = causal_id::identify(graph, &treatment_vec, &outcome_vec);
+
+    match id_result {
+        causal_id::IdentificationResult::Identified(ref formula) => {
+            let confidence = causal_id::identification_confidence(formula);
+            CausalVerificationResult::Verified {
+                property: property.clone(),
+                confidence_factor: confidence,
             }
         }
-    }
-
-    // Strategy 2: Try frontdoor with mediators = children(treatment) that are
-    // ancestors of outcome.
-    let outcome_ancestors = get_ancestors(graph, outcome);
-    if let Some(treatment_children) = children_map.get(treatment) {
-        let mediators: Vec<String> = treatment_children
-            .iter()
-            .filter(|c| outcome_ancestors.iter().any(|a| a == *c))
-            .filter(|c| **c != outcome)
-            .map(|c| c.to_string())
-            .collect();
-
-        if !mediators.is_empty() {
-            let frontdoor_prop = CausalProperty::FrontdoorValid {
-                graph_name: graph.name.clone(),
-                treatment: treatment.to_string(),
-                outcome: outcome.to_string(),
-                mediator: mediators.clone(),
-            };
-            let result =
-                check_frontdoor_criterion(graph, treatment, outcome, &mediators, &frontdoor_prop);
-            if matches!(result, CausalVerificationResult::Verified { .. }) {
-                return CausalVerificationResult::Verified {
-                    property: property.clone(),
-                    confidence_factor: CONFIDENCE_FRONTDOOR * CONFIDENCE_CAUSAL_MARKOV,
-                };
+        causal_id::IdentificationResult::NotIdentified(ref reason) => {
+            CausalVerificationResult::Unknown {
+                property: property.clone(),
+                reason: format!(
+                    "Pearl's ID algorithm: {}; the effect may still be identifiable via full do-calculus",
+                    reason.reason
+                ),
             }
         }
-    }
-
-    // Strategy 3: Try IV with parents(treatment) that have no path to outcome
-    // except through treatment.
-    if let Some(treatment_parents) = parents_map.get(treatment) {
-        for parent in treatment_parents {
-            let mutilated = mutilate_graph(graph, treatment);
-            let separated = is_d_separated_local(&mutilated, parent, outcome, &HashSet::new());
-            if separated && has_directed_path(graph, parent, treatment) {
-                return CausalVerificationResult::Verified {
-                    property: property.clone(),
-                    confidence_factor: CONFIDENCE_IV * CONFIDENCE_POSITIVITY,
-                };
-            }
-        }
-    }
-
-    CausalVerificationResult::Unknown {
-        property: property.clone(),
-        reason: "no known identification strategy succeeded; the effect may still be identifiable via more advanced criteria (e.g., do-calculus)".to_string(),
     }
 }
 
