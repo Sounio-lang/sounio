@@ -3,6 +3,7 @@
 //! Tests that the self-hosted compiler can generate native ELF binaries
 //! via compile_to_elf(), now that module imports are resolved.
 
+use sounio::ast::Item;
 use std::path::PathBuf;
 
 fn workspace_root() -> PathBuf {
@@ -13,25 +14,32 @@ fn workspace_root() -> PathBuf {
         .to_path_buf()
 }
 
+fn fn_names_in_ast(ast: &sounio::ast::Ast) -> Vec<&str> {
+    ast.items
+        .iter()
+        .filter_map(|item| match item {
+            Item::Function(f) => Some(f.name.as_str()),
+            _ => None,
+        })
+        .collect()
+}
+
 /// Verify the self-hosted compiler loads with native/ directory included.
 /// This was previously blocked by native/ being in the EXCLUDED list.
 #[test]
 fn selfhosted_loads_native_module() {
     let selfhost_dir = workspace_root().join("self-hosted");
     let ast = sounio::module_loader::load_program_ast(&selfhost_dir);
-    assert!(ast.is_ok(), "Self-hosted suite should load (including native/): {:?}", ast.err());
+    assert!(
+        ast.is_ok(),
+        "Self-hosted suite should load (including native/): {:?}",
+        ast.err()
+    );
 
     let ast = ast.unwrap();
-    // Verify compile_to_elf is among the loaded functions
-    let has_compile_to_elf = ast.items.iter().any(|item| {
-        if let sounio::ast::ItemKind::Function(f) = &item.kind {
-            f.name.as_str() == "compile_to_elf"
-        } else {
-            false
-        }
-    });
+    let names = fn_names_in_ast(&ast);
     assert!(
-        has_compile_to_elf,
+        names.contains(&"compile_to_elf"),
         "compile_to_elf() should be visible after module import fix"
     );
 }
@@ -41,16 +49,9 @@ fn selfhosted_loads_native_module() {
 fn selfhosted_loads_write_elf_to_file() {
     let selfhost_dir = workspace_root().join("self-hosted");
     let ast = sounio::module_loader::load_program_ast(&selfhost_dir).unwrap();
-
-    let has_write_elf = ast.items.iter().any(|item| {
-        if let sounio::ast::ItemKind::Function(f) = &item.kind {
-            f.name.as_str() == "write_elf_to_file"
-        } else {
-            false
-        }
-    });
+    let names = fn_names_in_ast(&ast);
     assert!(
-        has_write_elf,
+        names.contains(&"write_elf_to_file"),
         "write_elf_to_file() should be visible in self-hosted suite"
     );
 }
@@ -61,36 +62,24 @@ fn selfhosted_no_duplicate_symbols() {
     let selfhost_dir = workspace_root().join("self-hosted");
     let ast = sounio::module_loader::load_program_ast(&selfhost_dir).unwrap();
 
-    // Check for duplicate function names
-    let mut fn_names: Vec<&str> = ast
-        .items
-        .iter()
-        .filter_map(|item| {
-            if let sounio::ast::ItemKind::Function(f) = &item.kind {
-                Some(f.name.as_str())
-            } else {
-                None
-            }
-        })
-        .collect();
+    let mut names: Vec<&str> = fn_names_in_ast(&ast);
+    names.sort();
 
-    fn_names.sort();
-    let unique_count = {
-        let mut deduped = fn_names.clone();
-        deduped.dedup();
-        deduped.len()
-    };
-
-    // Find any duplicates for diagnostics
     let mut duplicates = Vec::new();
-    for window in fn_names.windows(2) {
+    for window in names.windows(2) {
         if window[0] == window[1] && !duplicates.contains(&window[0]) {
             duplicates.push(window[0]);
         }
     }
 
+    let unique_count = {
+        let mut deduped = names.clone();
+        deduped.dedup();
+        deduped.len()
+    };
+
     assert_eq!(
-        fn_names.len(),
+        names.len(),
         unique_count,
         "No duplicate function definitions should exist. Duplicates: {:?}",
         duplicates
