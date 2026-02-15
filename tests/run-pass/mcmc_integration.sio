@@ -1,0 +1,787 @@
+//@ run-pass
+// Bayesian-MCMC Integration Test Suite
+//
+// Tests the MCMC sampling infrastructure and its integration
+// with BayesianKnowledge (epistemic type bridge).
+//
+// Tests:
+//  1. LCG produces values in [0, 1)
+//  2. Box-Muller normal proposal is centered around current
+//  3. Chain mean/variance computation
+//  4. Metropolis-Hastings sampling from known normal target
+//  5. Effective sample size computation
+//  6. Normal prior log-density
+//  7. Uniform prior log-density
+//  8. Gamma prior log-density
+//  9. Knowledge conversion from chain
+// 10. Convergence confidence scoring
+
+// =============================================================================
+// Math Helpers
+// =============================================================================
+
+fn abs_f64(x: f64) -> f64 {
+    if x < 0.0 { 0.0 - x } else { x }
+}
+
+fn max_f64(a: f64, b: f64) -> f64 {
+    if a > b { a } else { b }
+}
+
+fn min_f64(a: f64, b: f64) -> f64 {
+    if a < b { a } else { b }
+}
+
+fn sqrt_f64(x: f64) -> f64 {
+    if x <= 0.0 { return 0.0 }
+    var y = x;
+    var i = 0
+    while i < 20 {
+        y = 0.5 * (y + x / y)
+        i = i + 1
+    }
+    y
+}
+
+fn pi_val() -> f64 {
+    3.14159265358979323846
+}
+
+fn ln_f64(x: f64) -> f64 {
+    if x <= 0.0 { return 0.0 - 1.0e30 }
+    if x == 1.0 { return 0.0 }
+
+    var m = x
+    var e = 0
+    while m >= 2.0 { m = m / 2.0; e = e + 1 }
+    while m < 0.5 { m = m * 2.0; e = e - 1 }
+
+    let t = (m - 1.0) / (m + 1.0)
+    let t2 = t * t
+    var sum = t
+    var term = t
+    var k = 1
+    while k < 30 {
+        term = term * t2
+        sum = sum + term / ((2 * k + 1) as f64)
+        k = k + 1
+    }
+    return 2.0 * sum + (e as f64) * 0.6931471805599453
+}
+
+fn cos_approx(x: f64) -> f64 {
+    var a = x
+    let twopi = 2.0 * pi_val()
+    while a >= twopi { a = a - twopi }
+    while a < 0.0 { a = a + twopi }
+    if a > pi_val() { a = a - twopi }
+    let a2 = a * a
+    var sum = 1.0
+    var term = 1.0
+    var n = 1
+    while n < 15 {
+        term = 0.0 - term * a2 / ((2 * n - 1) * 2 * n) as f64
+        sum = sum + term
+        n = n + 1
+    }
+    return sum
+}
+
+fn lgamma_f64(x: f64) -> f64 {
+    if x <= 0.0 { return 1.0e30 }
+    var val = x
+    var shift: f64 = 0.0
+    while val < 8.0 {
+        shift = shift + ln_f64(val)
+        val = val + 1.0
+    }
+    let ln_2pi = 1.8378770664093453
+    var result = (val - 0.5) * ln_f64(val) - val + 0.5 * ln_2pi
+    let inv_v = 1.0 / val
+    let inv_v2 = inv_v * inv_v
+    result = result + inv_v / 12.0
+    result = result - inv_v * inv_v2 / 360.0
+    result = result + inv_v * inv_v2 * inv_v2 / 1260.0
+    return result - shift
+}
+
+// =============================================================================
+// LCG PRNG via RngState struct (VM cannot do &!f64 arithmetic)
+// =============================================================================
+
+struct RngState {
+    seed: f64
+}
+
+fn frac(x: f64) -> f64 {
+    var v = x
+    while v >= 1.0 { v = v - 1.0 }
+    while v < 0.0 { v = v + 1.0 }
+    return v
+}
+
+fn lcg_next(rng: &!RngState) -> f64 {
+    let a = 16807.1234
+    let c = 0.4231567890
+    let s = rng.seed
+    rng.seed = frac(a * s + c)
+    return rng.seed
+}
+
+// =============================================================================
+// Box-Muller Normal Proposal
+// =============================================================================
+
+fn mcmc_normal_proposal(current: f64, step_size: f64, rng: &!RngState) -> f64 {
+    var u1 = lcg_next(rng)
+    if u1 < 1.0e-10 { u1 = 1.0e-10 }
+    let u2 = lcg_next(rng)
+    let z = sqrt_f64(0.0 - 2.0 * ln_f64(u1)) * cos_approx(2.0 * pi_val() * u2)
+    return current + step_size * z
+}
+
+// =============================================================================
+// MCMC Chain
+// =============================================================================
+
+struct MCMCChain {
+    samples: [f64; 5000],
+    n_stored: i32,
+    n_accepted: i32,
+    n_total: i32
+}
+
+fn mcmc_chain_new() -> MCMCChain {
+    return MCMCChain {
+        samples: [0.0; 5000],
+        n_stored: 0,
+        n_accepted: 0,
+        n_total: 0
+    }
+}
+
+fn mcmc_store_sample(chain: &!MCMCChain, value: f64) {
+    if chain.n_stored < 5000 {
+        chain.samples[chain.n_stored] = value
+        chain.n_stored = chain.n_stored + 1
+    }
+}
+
+fn mcmc_chain_mean(chain: &MCMCChain) -> f64 {
+    if chain.n_stored == 0 { return 0.0 }
+    var sum: f64 = 0.0
+    var i: i32 = 0
+    while i < chain.n_stored {
+        sum = sum + chain.samples[i]
+        i = i + 1
+    }
+    return sum / (chain.n_stored as f64)
+}
+
+fn mcmc_chain_variance(chain: &MCMCChain) -> f64 {
+    if chain.n_stored < 2 { return 0.0 }
+    let mean = mcmc_chain_mean(chain)
+    var sum_sq: f64 = 0.0
+    var i: i32 = 0
+    while i < chain.n_stored {
+        let diff = chain.samples[i] - mean
+        sum_sq = sum_sq + diff * diff
+        i = i + 1
+    }
+    return sum_sq / ((chain.n_stored - 1) as f64)
+}
+
+fn mcmc_chain_std(chain: &MCMCChain) -> f64 {
+    return sqrt_f64(mcmc_chain_variance(chain))
+}
+
+// =============================================================================
+// ESS and R-hat
+// =============================================================================
+
+fn mcmc_autocorrelation(chain: &MCMCChain, lag: i32) -> f64 {
+    if chain.n_stored < lag + 2 { return 0.0 }
+    let mean = mcmc_chain_mean(chain)
+    var cov: f64 = 0.0
+    var var_sum: f64 = 0.0
+    let n = chain.n_stored - lag
+    var i: i32 = 0
+    while i < n {
+        let d1 = chain.samples[i] - mean
+        let d2 = chain.samples[i + lag] - mean
+        cov = cov + d1 * d2
+        var_sum = var_sum + d1 * d1
+        i = i + 1
+    }
+    if var_sum < 1.0e-30 { return 0.0 }
+    return cov / var_sum
+}
+
+fn mcmc_effective_sample_size(chain: &MCMCChain) -> f64 {
+    if chain.n_stored < 10 { return chain.n_stored as f64 }
+    let n = chain.n_stored as f64
+
+    var sum_rho: f64 = 0.0
+    var max_check = chain.n_stored / 2
+    if max_check > 100 { max_check = 100 }
+
+    var lag: i32 = 1
+    while lag < max_check {
+        let rho = mcmc_autocorrelation(chain, lag)
+        if rho < 0.05 {
+            lag = max_check
+        } else {
+            sum_rho = sum_rho + rho
+            lag = lag + 1
+        }
+    }
+
+    let tau = 1.0 + 2.0 * sum_rho
+    if tau < 1.0 { return n }
+    return n / tau
+}
+
+fn mcmc_split_rhat(chain: &MCMCChain) -> f64 {
+    if chain.n_stored < 10 { return 2.0 }
+    let half = chain.n_stored / 2
+    let n = half as f64
+
+    var sum1: f64 = 0.0
+    var sum2: f64 = 0.0
+    var i: i32 = 0
+    while i < half {
+        sum1 = sum1 + chain.samples[i]
+        sum2 = sum2 + chain.samples[i + half]
+        i = i + 1
+    }
+    let mean1 = sum1 / n
+    let mean2 = sum2 / n
+
+    var var1: f64 = 0.0
+    var var2: f64 = 0.0
+    i = 0
+    while i < half {
+        let d1 = chain.samples[i] - mean1
+        let d2 = chain.samples[i + half] - mean2
+        var1 = var1 + d1 * d1
+        var2 = var2 + d2 * d2
+        i = i + 1
+    }
+    var1 = var1 / (n - 1.0)
+    var2 = var2 / (n - 1.0)
+
+    let W = (var1 + var2) / 2.0
+    let grand_mean = (mean1 + mean2) / 2.0
+    let dm1 = mean1 - grand_mean
+    let dm2 = mean2 - grand_mean
+    let B = n * (dm1 * dm1 + dm2 * dm2)
+    if W < 1.0e-30 { return 1.0 }
+    let var_plus = (n - 1.0) / n * W + B / n
+    return sqrt_f64(var_plus / W)
+}
+
+// =============================================================================
+// Prior Log-Densities
+// =============================================================================
+
+fn normal_log_density(x: f64, mu: f64, sigma: f64) -> f64 {
+    if sigma <= 0.0 { return 0.0 - 1.0e30 }
+    let z = (x - mu) / sigma
+    let log_2pi = 1.8378770664093453
+    return 0.0 - 0.5 * log_2pi - ln_f64(sigma) - 0.5 * z * z
+}
+
+fn uniform_log_density(x: f64, lo: f64, hi: f64) -> f64 {
+    if x < lo { return 0.0 - 1.0e30 }
+    if x > hi { return 0.0 - 1.0e30 }
+    if hi <= lo { return 0.0 - 1.0e30 }
+    return 0.0 - ln_f64(hi - lo)
+}
+
+fn gamma_log_density(x: f64, alpha: f64, beta: f64) -> f64 {
+    if x <= 0.0 { return 0.0 - 1.0e30 }
+    if alpha <= 0.0 { return 0.0 - 1.0e30 }
+    if beta <= 0.0 { return 0.0 - 1.0e30 }
+    return alpha * ln_f64(beta) - lgamma_f64(alpha) + (alpha - 1.0) * ln_f64(x) - beta * x
+}
+
+// =============================================================================
+// BayesianKnowledge + Quantile + Confidence
+// =============================================================================
+
+struct BayesianKnowledge {
+    mean: f64,
+    std_dev: f64,
+    ci_lower: f64,
+    ci_upper: f64,
+    confidence: f64,
+    n_effective: f64
+}
+
+fn sort_partial(arr: &![f64; 5000], n: i32) {
+    // Insertion sort
+    var i: i32 = 1
+    while i < n {
+        let key = arr[i]
+        var j = i - 1
+        while j >= 0 {
+            if arr[j] > key {
+                arr[j + 1] = arr[j]
+                j = j - 1
+            } else {
+                j = 0 - 1
+            }
+        }
+        arr[j + 1] = key
+        i = i + 1
+    }
+}
+
+fn compute_quantile(chain: &MCMCChain, q: f64) -> f64 {
+    if chain.n_stored == 0 { return 0.0 }
+    if chain.n_stored == 1 { return chain.samples[0] }
+
+    var sorted: [f64; 5000] = [0.0; 5000]
+    var i: i32 = 0
+    while i < chain.n_stored {
+        sorted[i] = chain.samples[i]
+        i = i + 1
+    }
+    sort_partial(&!sorted, chain.n_stored)
+
+    let pos = q * ((chain.n_stored - 1) as f64)
+    var lo_idx = pos as i32
+    if lo_idx < 0 { lo_idx = 0 }
+    if lo_idx >= chain.n_stored - 1 { lo_idx = chain.n_stored - 2 }
+    let hi_idx = lo_idx + 1
+    let frac_val = pos - (lo_idx as f64)
+    return sorted[lo_idx] * (1.0 - frac_val) + sorted[hi_idx] * frac_val
+}
+
+fn compute_credible_interval(chain: &MCMCChain, level: f64) -> [f64; 2] {
+    let alpha = 1.0 - level
+    let lower_q = alpha / 2.0
+    let upper_q = 1.0 - alpha / 2.0
+    var result: [f64; 2] = [0.0; 2]
+    result[0] = compute_quantile(chain, lower_q)
+    result[1] = compute_quantile(chain, upper_q)
+    return result
+}
+
+fn convergence_confidence(ess: f64, r_hat: f64) -> f64 {
+    if ess >= 400.0 {
+        if r_hat < 1.05 {
+            let base = 0.95
+            let bonus = min_f64(0.04, (ess - 400.0) / 10000.0)
+            return base + bonus
+        }
+    }
+    if ess >= 100.0 {
+        if r_hat < 1.10 {
+            let base = 0.80
+            let bonus = min_f64(0.14, (ess - 100.0) / 3000.0)
+            return base + bonus
+        }
+    }
+    return max_f64(0.5, ess / 1000.0)
+}
+
+fn chain_to_knowledge(chain: &MCMCChain) -> BayesianKnowledge {
+    let mean = mcmc_chain_mean(chain)
+    let std_dev = mcmc_chain_std(chain)
+    let ci = compute_credible_interval(chain, 0.95)
+    let ess = mcmc_effective_sample_size(chain)
+    let r_hat = mcmc_split_rhat(chain)
+    let conf = convergence_confidence(ess, r_hat)
+    return BayesianKnowledge {
+        mean: mean,
+        std_dev: std_dev,
+        ci_lower: ci[0],
+        ci_upper: ci[1],
+        confidence: conf,
+        n_effective: ess
+    }
+}
+
+// =============================================================================
+// TESTS
+// =============================================================================
+
+fn main() -> i32 with IO {
+    println("======================================================================")
+    println("  Bayesian-MCMC Integration Test Suite")
+    println("  Workstream 2, Task 2.4")
+    println("======================================================================")
+    println("")
+
+    var passed = 0
+    var failed = 0
+    var rng = RngState { seed: 0.7123456789 }
+
+    // ================================================================
+    // TEST 1: LCG produces values in [0, 1)
+    // ================================================================
+
+    println("TEST 1: LCG range [0, 1)")
+    var lcg_ok = true
+    var t1_i = 0
+    while t1_i < 1000 {
+        let v = lcg_next(&!rng)
+        if v < 0.0 { lcg_ok = false }
+        if v >= 1.0 { lcg_ok = false }
+        t1_i = t1_i + 1
+    }
+    if lcg_ok {
+        println("  [PASS] All 1000 LCG values in [0, 1)")
+        passed = passed + 1
+    } else {
+        println("  FAIL: LCG produced value outside [0, 1)")
+        failed = failed + 1
+    }
+    println("")
+
+    // ================================================================
+    // TEST 2: Box-Muller normal proposal centered
+    // ================================================================
+
+    println("TEST 2: Box-Muller normal proposal centered")
+    rng.seed = 0.12345
+    var prop_sum: f64 = 0.0
+    let n_prop = 2000
+    var t2_i = 0
+    while t2_i < n_prop {
+        let p = mcmc_normal_proposal(5.0, 1.0, &!rng)
+        prop_sum = prop_sum + p
+        t2_i = t2_i + 1
+    }
+    let prop_mean = prop_sum / (n_prop as f64)
+    let prop_err = abs_f64(prop_mean - 5.0)
+    println("  Mean of proposals (target=5.0):")
+    println(prop_mean)
+    if prop_err < 0.2 {
+        println("  [PASS] Proposal mean within 0.2 of target")
+        passed = passed + 1
+    } else {
+        println("  FAIL: Proposal mean too far from target")
+        println(prop_err)
+        failed = failed + 1
+    }
+    println("")
+
+    // ================================================================
+    // TEST 3: Chain mean/variance computation
+    // ================================================================
+
+    println("TEST 3: Chain mean/variance")
+    var chain3 = mcmc_chain_new()
+    mcmc_store_sample(&!chain3, 1.0)
+    mcmc_store_sample(&!chain3, 2.0)
+    mcmc_store_sample(&!chain3, 3.0)
+    mcmc_store_sample(&!chain3, 4.0)
+    mcmc_store_sample(&!chain3, 5.0)
+
+    let m3 = mcmc_chain_mean(&chain3)
+    let v3 = mcmc_chain_variance(&chain3)
+    let err_mean3 = abs_f64(m3 - 3.0)
+    let err_var3 = abs_f64(v3 - 2.5)
+
+    println("  Mean (expected 3.0):")
+    println(m3)
+    println("  Variance (expected 2.5):")
+    println(v3)
+
+    if err_mean3 < 0.001 {
+        if err_var3 < 0.001 {
+            println("  [PASS] Mean and variance correct")
+            passed = passed + 1
+        } else {
+            println("  FAIL: Variance incorrect")
+            failed = failed + 1
+        }
+    } else {
+        println("  FAIL: Mean incorrect")
+        failed = failed + 1
+    }
+    println("")
+
+    // ================================================================
+    // TEST 4: M-H sampling from known normal target N(3, 1)
+    // ================================================================
+
+    println("TEST 4: M-H sampling from N(3, 1)")
+    var chain4 = mcmc_chain_new()
+    rng.seed = 0.987654321
+    var current: f64 = 0.0
+    var current_lp = normal_log_density(current, 3.0, 1.0)
+    let n_warmup = 500
+    let n_samples = 2000
+
+    var t4_i = 0
+    while t4_i < n_warmup + n_samples {
+        let proposal = mcmc_normal_proposal(current, 0.8, &!rng)
+        let proposal_lp = normal_log_density(proposal, 3.0, 1.0)
+        let log_alpha = proposal_lp - current_lp
+        let u = lcg_next(&!rng)
+        let ln_u = ln_f64(u)
+        if ln_u < log_alpha {
+            current = proposal
+            current_lp = proposal_lp
+            chain4.n_accepted = chain4.n_accepted + 1
+        }
+        chain4.n_total = chain4.n_total + 1
+        if t4_i >= n_warmup {
+            mcmc_store_sample(&!chain4, current)
+        }
+        t4_i = t4_i + 1
+    }
+
+    let m4 = mcmc_chain_mean(&chain4)
+    let s4 = mcmc_chain_std(&chain4)
+    let err_m4 = abs_f64(m4 - 3.0)
+    let err_s4 = abs_f64(s4 - 1.0)
+    let accept_rate = (chain4.n_accepted as f64) / (chain4.n_total as f64)
+
+    println("  Posterior mean (target=3.0):")
+    println(m4)
+    println("  Posterior std (target=1.0):")
+    println(s4)
+    println("  Acceptance rate:")
+    println(accept_rate)
+
+    if err_m4 < 0.3 {
+        if err_s4 < 0.3 {
+            println("  [PASS] M-H recovered N(3,1) posterior")
+            passed = passed + 1
+        } else {
+            println("  FAIL: Std too far from 1.0")
+            failed = failed + 1
+        }
+    } else {
+        println("  FAIL: Mean too far from 3.0")
+        failed = failed + 1
+    }
+    println("")
+
+    // ================================================================
+    // TEST 5: Effective sample size
+    // ================================================================
+
+    println("TEST 5: Effective sample size")
+    let ess4 = mcmc_effective_sample_size(&chain4)
+    println("  ESS for N(3,1) chain:")
+    println(ess4)
+
+    if ess4 > 10.0 {
+        if ess4 <= (n_samples as f64) {
+            println("  [PASS] ESS in valid range")
+            passed = passed + 1
+        } else {
+            println("  FAIL: ESS exceeds n_samples")
+            failed = failed + 1
+        }
+    } else {
+        println("  FAIL: ESS too low")
+        failed = failed + 1
+    }
+    println("")
+
+    // ================================================================
+    // TEST 6: Normal prior log-density
+    // ================================================================
+
+    println("TEST 6: Normal log-density")
+    let lp_norm = normal_log_density(0.0, 0.0, 1.0)
+    let expected_lp = 0.0 - 0.9189385332046727
+    let err_lp = abs_f64(lp_norm - expected_lp)
+    println("  log N(0|0,1) (expected -0.9189):")
+    println(lp_norm)
+
+    let lp_norm_1 = normal_log_density(1.0, 0.0, 1.0)
+    let expected_lp_1 = 0.0 - 1.4189385332046727
+    let err_lp_1 = abs_f64(lp_norm_1 - expected_lp_1)
+
+    if err_lp < 0.01 {
+        if err_lp_1 < 0.01 {
+            println("  [PASS] Normal log-density correct")
+            passed = passed + 1
+        } else {
+            println("  FAIL: Normal log-density at x=1 incorrect")
+            failed = failed + 1
+        }
+    } else {
+        println("  FAIL: Normal log-density at x=0 incorrect")
+        failed = failed + 1
+    }
+    println("")
+
+    // ================================================================
+    // TEST 7: Uniform prior log-density
+    // ================================================================
+
+    println("TEST 7: Uniform log-density")
+    let lp_unif = uniform_log_density(5.0, 0.0, 10.0)
+    let expected_unif = 0.0 - ln_f64(10.0)
+    let err_unif = abs_f64(lp_unif - expected_unif)
+
+    let lp_unif_out = uniform_log_density(11.0, 0.0, 10.0)
+
+    println("  log U(5|0,10) (expected -2.3026):")
+    println(lp_unif)
+
+    if err_unif < 0.01 {
+        if lp_unif_out < 0.0 - 1.0e20 {
+            println("  [PASS] Uniform log-density correct")
+            passed = passed + 1
+        } else {
+            println("  FAIL: Uniform should be -inf outside support")
+            failed = failed + 1
+        }
+    } else {
+        println("  FAIL: Uniform log-density value incorrect")
+        failed = failed + 1
+    }
+    println("")
+
+    // ================================================================
+    // TEST 8: Gamma prior log-density
+    // ================================================================
+
+    println("TEST 8: Gamma log-density")
+    let lp_gamma = gamma_log_density(1.0, 2.0, 1.0)
+    let err_gamma = abs_f64(lp_gamma - (0.0 - 1.0))
+    println("  log Gamma(1|2,1) (expected -1.0):")
+    println(lp_gamma)
+
+    let lp_gamma_neg = gamma_log_density(0.0 - 1.0, 2.0, 1.0)
+
+    if err_gamma < 0.05 {
+        if lp_gamma_neg < 0.0 - 1.0e20 {
+            println("  [PASS] Gamma log-density correct")
+            passed = passed + 1
+        } else {
+            println("  FAIL: Gamma should be -inf for x<0")
+            failed = failed + 1
+        }
+    } else {
+        println("  FAIL: Gamma log-density value incorrect")
+        println(err_gamma)
+        failed = failed + 1
+    }
+    println("")
+
+    // ================================================================
+    // TEST 9: Knowledge conversion from chain
+    // ================================================================
+
+    println("TEST 9: Chain to BayesianKnowledge")
+    let know = chain_to_knowledge(&chain4)
+    println("  Knowledge mean (target ~3.0):")
+    println(know.mean)
+    println("  Knowledge std_dev (target ~1.0):")
+    println(know.std_dev)
+    println("  95% CI lower:")
+    println(know.ci_lower)
+    println("  95% CI upper:")
+    println(know.ci_upper)
+    println("  Confidence:")
+    println(know.confidence)
+    println("  Effective N:")
+    println(know.n_effective)
+
+    let err_know_mean = abs_f64(know.mean - 3.0)
+    let ci_contains_lower = know.ci_lower < 3.0
+    let ci_contains_upper = know.ci_upper > 3.0
+    let conf_ok = know.confidence >= 0.5
+
+    if err_know_mean < 0.3 {
+        if ci_contains_lower {
+            if ci_contains_upper {
+                if conf_ok {
+                    println("  [PASS] BayesianKnowledge conversion correct")
+                    passed = passed + 1
+                } else {
+                    println("  FAIL: Confidence too low")
+                    failed = failed + 1
+                }
+            } else {
+                println("  FAIL: CI upper bound does not contain target")
+                failed = failed + 1
+            }
+        } else {
+            println("  FAIL: CI lower bound does not contain target")
+            failed = failed + 1
+        }
+    } else {
+        println("  FAIL: Knowledge mean too far from 3.0")
+        failed = failed + 1
+    }
+    println("")
+
+    // ================================================================
+    // TEST 10: Convergence confidence scoring
+    // ================================================================
+
+    println("TEST 10: Convergence confidence scoring")
+
+    let conf1 = convergence_confidence(500.0, 1.01)
+    let conf2 = convergence_confidence(200.0, 1.08)
+    let conf3 = convergence_confidence(50.0, 1.20)
+
+    println("  Tier 1 (ESS=500, R-hat=1.01):")
+    println(conf1)
+    println("  Tier 2 (ESS=200, R-hat=1.08):")
+    println(conf2)
+    println("  Tier 3 (ESS=50, R-hat=1.20):")
+    println(conf3)
+
+    var conf_test_ok = true
+    if conf1 < 0.95 {
+        println("  FAIL: Tier 1 confidence should be >= 0.95")
+        conf_test_ok = false
+    }
+    if conf2 < 0.80 {
+        println("  FAIL: Tier 2 confidence should be >= 0.80")
+        conf_test_ok = false
+    }
+    if conf2 >= 0.95 {
+        println("  FAIL: Tier 2 confidence should be < 0.95")
+        conf_test_ok = false
+    }
+    if conf3 < 0.5 {
+        println("  FAIL: Tier 3 confidence should be >= 0.5")
+        conf_test_ok = false
+    }
+    if conf3 >= 0.80 {
+        println("  FAIL: Tier 3 confidence should be < 0.80")
+        conf_test_ok = false
+    }
+
+    if conf_test_ok {
+        println("  [PASS] Convergence confidence tiers correct")
+        passed = passed + 1
+    } else {
+        failed = failed + 1
+    }
+    println("")
+
+    // ================================================================
+    // SUMMARY
+    // ================================================================
+
+    println("======================================================================")
+    println("  MCMC INTEGRATION TEST SUMMARY")
+    println("======================================================================")
+    println("  Passed:")
+    println(passed)
+    println("  Failed:")
+    println(failed)
+
+    if failed == 0 {
+        println("  ALL 10 TESTS PASSED")
+    } else {
+        println("  SOME TESTS FAILED")
+    }
+    println("======================================================================")
+
+    return failed
+}

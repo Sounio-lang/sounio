@@ -22,8 +22,8 @@ fn workspace_root() -> PathBuf {
 }
 
 fn run_sio_file(path: &std::path::Path) -> Result<Value, String> {
-    let ast = module_loader::load_program_ast(path)
-        .map_err(|e| format!("Load/parse error: {}", e))?;
+    let ast =
+        module_loader::load_program_ast(path).map_err(|e| format!("Load/parse error: {}", e))?;
     let hir = sounio::check::check_ast(&ast).map_err(|e| format!("Type error: {}", e))?;
     let mut interpreter = Interpreter::new();
     interpreter
@@ -38,7 +38,10 @@ fn rustless_e2e_fibonacci() {
     let test_file = root.join("tests/rustless-regressions/01_fibonacci.sio");
 
     if !test_file.exists() {
-        eprintln!("Skipping: {:?} not found (test suite not yet created)", test_file);
+        eprintln!(
+            "Skipping: {:?} not found (test suite not yet created)",
+            test_file
+        );
         return;
     }
 

@@ -4,7 +4,6 @@
 /// 1. Self-hosted compiler can serialize SOIR bytecode
 /// 2. Poseidon VM can execute the bytecode correctly
 /// 3. Round-trip works end-to-end
-
 use std::path::PathBuf;
 use std::process::Command;
 
@@ -119,11 +118,7 @@ fn test_poseidon_basic_execution() {
             .output()
             .expect("Failed to run Poseidon");
 
-        assert_eq!(
-            output.status.code(),
-            Some(42),
-            "add.soir should return 42"
-        );
+        assert_eq!(output.status.code(), Some(42), "add.soir should return 42");
     } else {
         eprintln!("Skipping test - add.soir not found");
     }

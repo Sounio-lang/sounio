@@ -37,7 +37,10 @@ fn native_phase0_selfhost_tests_pass() {
 
     match run_sio_file(&test_file) {
         Ok(Value::Int(0)) => {} // all tests passed
-        Ok(Value::Int(n)) => panic!("Phase 0 tests failed: {} test(s) failed (exit code {})", n, n),
+        Ok(Value::Int(n)) => panic!(
+            "Phase 0 tests failed: {} test(s) failed (exit code {})",
+            n, n
+        ),
         Ok(v) => panic!("Expected Int(0), got {:?}", v),
         Err(e) => panic!("Phase 0 test execution failed: {}", e),
     }
@@ -55,7 +58,10 @@ fn native_phase1_selfhost_tests_pass() {
 
     match run_sio_file(&test_file) {
         Ok(Value::Int(0)) => {} // all tests passed
-        Ok(Value::Int(n)) => panic!("Phase 1 tests failed: {} test(s) failed (exit code {})", n, n),
+        Ok(Value::Int(n)) => panic!(
+            "Phase 1 tests failed: {} test(s) failed (exit code {})",
+            n, n
+        ),
         Ok(v) => panic!("Expected Int(0), got {:?}", v),
         Err(e) => panic!("Phase 1 test execution failed: {}", e),
     }

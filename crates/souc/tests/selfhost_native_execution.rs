@@ -20,13 +20,13 @@ use std::process::Command;
 fn create_minimal_elf_return42() -> Vec<u8> {
     // Pre-built minimal ELF header + code
     // This is equivalent to what compile_to_elf() should produce
-    let mut elf = vec![0u8; 0x1020];  // Allocate space for ELF header + padding + code
+    let mut elf = vec![0u8; 0x1020]; // Allocate space for ELF header + padding + code
 
     // ELF Header (64 bytes)
-    elf[0..4].copy_from_slice(b"\x7fELF");  // Magic
-    elf[4] = 2;      // EI_CLASS: 64-bit
-    elf[5] = 1;      // EI_DATA: little-endian
-    elf[6] = 1;      // EI_VERSION: current
+    elf[0..4].copy_from_slice(b"\x7fELF"); // Magic
+    elf[4] = 2; // EI_CLASS: 64-bit
+    elf[5] = 1; // EI_DATA: little-endian
+    elf[6] = 1; // EI_VERSION: current
 
     // e_type: ET_EXEC (2) at offset 16
     elf[16] = 2;
@@ -69,38 +69,38 @@ fn create_minimal_elf_return42() -> Vec<u8> {
     let ph_off = 64;
 
     // p_type: PT_LOAD (1) at offset 0
-    elf[ph_off..ph_off+4].copy_from_slice(&1u32.to_le_bytes());
+    elf[ph_off..ph_off + 4].copy_from_slice(&1u32.to_le_bytes());
 
     // p_flags: PF_X | PF_R (5 = 4+1) at offset 4
-    elf[ph_off+4..ph_off+8].copy_from_slice(&5u32.to_le_bytes());
+    elf[ph_off + 4..ph_off + 8].copy_from_slice(&5u32.to_le_bytes());
 
     // p_offset: 0x1000 at offset 8
-    elf[ph_off+8..ph_off+16].copy_from_slice(&0x1000u64.to_le_bytes());
+    elf[ph_off + 8..ph_off + 16].copy_from_slice(&0x1000u64.to_le_bytes());
 
     // p_vaddr: 0x400000 at offset 16
-    elf[ph_off+16..ph_off+24].copy_from_slice(&0x400000u64.to_le_bytes());
+    elf[ph_off + 16..ph_off + 24].copy_from_slice(&0x400000u64.to_le_bytes());
 
     // p_paddr: 0x400000 at offset 24
-    elf[ph_off+24..ph_off+32].copy_from_slice(&0x400000u64.to_le_bytes());
+    elf[ph_off + 24..ph_off + 32].copy_from_slice(&0x400000u64.to_le_bytes());
 
     // p_filesz: 19 bytes (code size) at offset 32
-    elf[ph_off+32..ph_off+40].copy_from_slice(&19u64.to_le_bytes());
+    elf[ph_off + 32..ph_off + 40].copy_from_slice(&19u64.to_le_bytes());
 
     // p_memsz: 19 bytes at offset 40
-    elf[ph_off+40..ph_off+48].copy_from_slice(&19u64.to_le_bytes());
+    elf[ph_off + 40..ph_off + 48].copy_from_slice(&19u64.to_le_bytes());
 
     // p_align: 0x1000 at offset 48
-    elf[ph_off+48..ph_off+56].copy_from_slice(&0x1000u64.to_le_bytes());
+    elf[ph_off + 48..ph_off + 56].copy_from_slice(&0x1000u64.to_le_bytes());
 
     // Code at 0x1000
     let code_off = 0x1000;
     let code = [
-        0x48, 0xc7, 0xc0, 0x2a, 0x00, 0x00, 0x00,  // mov rax, 42
-        0x48, 0x89, 0xc7,                           // mov rdi, rax
-        0x48, 0xc7, 0xc0, 0x3c, 0x00, 0x00, 0x00,  // mov rax, 60
-        0x0f, 0x05,                                 // syscall
+        0x48, 0xc7, 0xc0, 0x2a, 0x00, 0x00, 0x00, // mov rax, 42
+        0x48, 0x89, 0xc7, // mov rdi, rax
+        0x48, 0xc7, 0xc0, 0x3c, 0x00, 0x00, 0x00, // mov rax, 60
+        0x0f, 0x05, // syscall
     ];
-    elf[code_off..code_off+code.len()].copy_from_slice(&code);
+    elf[code_off..code_off + code.len()].copy_from_slice(&code);
 
     elf
 }

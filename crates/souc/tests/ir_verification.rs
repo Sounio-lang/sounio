@@ -63,20 +63,17 @@ fn verify_ir_pair(file_a: &str, file_b: &str) -> Result<(), String> {
 
 #[test]
 fn test_math_commutative() {
-    verify_ir_pair("math_a.sio", "math_b.sio")
-        .expect("Math commutative test failed");
+    verify_ir_pair("math_a.sio", "math_b.sio").expect("Math commutative test failed");
 }
 
 #[test]
 fn test_control_flow_equivalent() {
-    verify_ir_pair("control_a.sio", "control_b.sio")
-        .expect("Control flow equivalence test failed");
+    verify_ir_pair("control_a.sio", "control_b.sio").expect("Control flow equivalence test failed");
 }
 
 #[test]
 fn test_call_order_commutative() {
-    verify_ir_pair("call_a.sio", "call_b.sio")
-        .expect("Call order commutative test failed");
+    verify_ir_pair("call_a.sio", "call_b.sio").expect("Call order commutative test failed");
 }
 
 #[test]

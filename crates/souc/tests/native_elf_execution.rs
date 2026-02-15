@@ -85,7 +85,9 @@ fn native_elf_structure_validation() {
 
     let mut interp = Interpreter::new();
     match interp.interpret(&hir) {
-        Ok(Value::Int(0)) => println!("✓ Phase 1 tests passed (ELF generation validated internally)"),
+        Ok(Value::Int(0)) => {
+            println!("✓ Phase 1 tests passed (ELF generation validated internally)")
+        }
         Ok(Value::Int(n)) => panic!("Phase 1 tests failed with code: {}", n),
         Ok(v) => panic!("Unexpected return value: {:?}", v),
         Err(e) => panic!("Execution error: {}", e),

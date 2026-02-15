@@ -27,9 +27,7 @@ fn main() -> i64 {
         .expect("Failed to set executable");
 
     // Execute
-    let output = Command::new(temp_path)
-        .output()
-        .expect("Failed to execute");
+    let output = Command::new(temp_path).output().expect("Failed to execute");
 
     // Verify exit code
     assert_eq!(output.status.code(), Some(42), "Expected exit code 42");

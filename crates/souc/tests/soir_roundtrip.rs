@@ -18,7 +18,10 @@ fn test_data_dir() -> PathBuf {
 #[test]
 fn simple_program_roundtrip() {
     // Create a minimal SOIR module directly
-    use soir::{IrFunction, IrInstr, IrOpcode, Name, SoirModule, IR_INVALID_REG, IR_MAX_FUNCS, IR_MAX_INSTRS, IR_MAX_PARAMS, IR_MAX_STRINGS};
+    use soir::{
+        IR_INVALID_REG, IR_MAX_FUNCS, IR_MAX_INSTRS, IR_MAX_PARAMS, IR_MAX_STRINGS, IrFunction,
+        IrInstr, IrOpcode, Name, SoirModule,
+    };
 
     let mut module = SoirModule {
         functions: vec![IrFunction::default(); IR_MAX_FUNCS],
@@ -73,7 +76,10 @@ fn simple_program_roundtrip() {
 #[test]
 fn normalization_equivalence() {
     // Create two syntactically different but semantically equivalent modules
-    use soir::{BinaryOp, IrFunction, IrInstr, IrOpcode, Name, SoirModule, IR_INVALID_REG, IR_MAX_FUNCS, IR_MAX_INSTRS, IR_MAX_PARAMS, IR_MAX_STRINGS};
+    use soir::{
+        BinaryOp, IR_INVALID_REG, IR_MAX_FUNCS, IR_MAX_INSTRS, IR_MAX_PARAMS, IR_MAX_STRINGS,
+        IrFunction, IrInstr, IrOpcode, Name, SoirModule,
+    };
 
     // Module A: Uses registers R5 and R10
     let mut module_a = SoirModule {
@@ -190,7 +196,10 @@ fn normalization_equivalence() {
 
 #[test]
 fn multi_function_module() {
-    use soir::{IrFunction, IrInstr, IrOpcode, Name, SoirModule, IR_INVALID_REG, IR_MAX_FUNCS, IR_MAX_INSTRS, IR_MAX_PARAMS, IR_MAX_STRINGS};
+    use soir::{
+        IR_INVALID_REG, IR_MAX_FUNCS, IR_MAX_INSTRS, IR_MAX_PARAMS, IR_MAX_STRINGS, IrFunction,
+        IrInstr, IrOpcode, Name, SoirModule,
+    };
 
     let mut module = SoirModule {
         functions: vec![IrFunction::default(); IR_MAX_FUNCS],
@@ -290,9 +299,15 @@ fn multi_function_module() {
     assert_eq!(restored.fn_count, 3);
 
     // Verify function names are preserved
-    let name0 = std::str::from_utf8(&restored.functions[0].name.buf[..restored.functions[0].name.len]).unwrap();
-    let name1 = std::str::from_utf8(&restored.functions[1].name.buf[..restored.functions[1].name.len]).unwrap();
-    let name2 = std::str::from_utf8(&restored.functions[2].name.buf[..restored.functions[2].name.len]).unwrap();
+    let name0 =
+        std::str::from_utf8(&restored.functions[0].name.buf[..restored.functions[0].name.len])
+            .unwrap();
+    let name1 =
+        std::str::from_utf8(&restored.functions[1].name.buf[..restored.functions[1].name.len])
+            .unwrap();
+    let name2 =
+        std::str::from_utf8(&restored.functions[2].name.buf[..restored.functions[2].name.len])
+            .unwrap();
 
     assert_eq!(name0, "helper");
     assert_eq!(name1, "main");
@@ -301,7 +316,10 @@ fn multi_function_module() {
 
 #[test]
 fn control_flow_preservation() {
-    use soir::{IrFunction, IrInstr, IrOpcode, Name, SoirModule, IR_INVALID_REG, IR_MAX_FUNCS, IR_MAX_INSTRS, IR_MAX_PARAMS, IR_MAX_STRINGS};
+    use soir::{
+        IR_INVALID_REG, IR_MAX_FUNCS, IR_MAX_INSTRS, IR_MAX_PARAMS, IR_MAX_STRINGS, IrFunction,
+        IrInstr, IrOpcode, Name, SoirModule,
+    };
 
     let mut module = SoirModule {
         functions: vec![IrFunction::default(); IR_MAX_FUNCS],

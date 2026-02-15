@@ -18,7 +18,10 @@ fn knowledge_selfhost_parses() {
     let ast = match module_loader::load_program_ast(&suite_path) {
         Ok(ast) => ast,
         Err(e) => {
-            panic!("Failed to load self-hosted suite with Knowledge types: {:?}", e);
+            panic!(
+                "Failed to load self-hosted suite with Knowledge types: {:?}",
+                e
+            );
         }
     };
 

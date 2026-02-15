@@ -66,7 +66,10 @@ fn cross_validate_return_42() {
 }
 
 #[test]
-#[cfg_attr(not(target_os = "linux"), ignore = "Linux-only test (native execution)")]
+#[cfg_attr(
+    not(target_os = "linux"),
+    ignore = "Linux-only test (native execution)"
+)]
 fn cross_validate_arithmetic() {
     // Same as above but for arithmetic (21 + 21 = 42)
     eprintln!("⚠ Test blocked on module system");

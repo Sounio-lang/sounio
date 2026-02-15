@@ -1,0 +1,910 @@
+//@ run-pass
+// PK Domain Uncertainty Plugin Test Suite
+//
+// Validates WS2 Track 5 — PK-specific uncertainty analysis:
+//   1.  Clearance dominance detection (CL contributes >70%)
+//   2.  Volume dominance detection (V contributes most)
+//   3.  Balanced contributions (no single dominant)
+//   4.  SCr as proxy for clearance (Cockcroft-Gault scenario)
+//   5.  Sensitivity index S_Ti > 0.7 triggers clearance dominance flag
+//   6.  PK recommendations: clearance dominant -> TDM
+//   7.  PK recommendations: absorption dominant -> bioequivalence
+//   8.  Clinical significance: uncertainty > therapeutic window
+//   9.  Clinical significance: uncertainty < therapeutic window
+//  10.  Edge case: single parameter is 100% dominant
+//  11.  Recommendation for SCr dominant -> cystatin C
+//  12.  Sensitivity indices sum to 1.0
+//
+// Reference: Saltelli et al. (2008), FDA PopPK Guidance (2022)
+
+// ============================================================================
+// HELPERS (self-contained, no imports)
+// ============================================================================
+
+fn abs_val(x: f64) -> f64 {
+    if x < 0.0 { return 0.0 - x }
+    return x
+}
+
+fn sqrt_val(x: f64) -> f64 {
+    if x <= 0.0 { return 0.0 }
+    var guess = x / 2.0
+    if guess < 0.001 { guess = 0.001 }
+    var i = 0
+    while i < 30 {
+        guess = (guess + x / guess) / 2.0
+        i = i + 1
+    }
+    return guess
+}
+
+fn max_val(a: f64, b: f64) -> f64 {
+    if a > b { return a }
+    return b
+}
+
+fn min_val(a: f64, b: f64) -> f64 {
+    if a < b { return a }
+    return b
+}
+
+// ============================================================================
+// PK PARAMETER STRUCTURES (inlined from pk_plugin.sio)
+// ============================================================================
+
+struct PKParameter {
+    code: i32,
+    value: f64,
+    std_uncert: f64,
+    sensitivity: f64,
+    contribution: f64,
+    source_type: i32
+}
+
+fn empty_pk_param() -> PKParameter {
+    return PKParameter {
+        code: 0,
+        value: 0.0,
+        std_uncert: 0.0,
+        sensitivity: 0.0,
+        contribution: 0.0,
+        source_type: 0
+    }
+}
+
+fn make_pk_param(code: i32, value: f64, std_uncert: f64, sensitivity: f64, source_type: i32) -> PKParameter {
+    let contrib = sensitivity * sensitivity * std_uncert * std_uncert
+    return PKParameter {
+        code: code,
+        value: value,
+        std_uncert: std_uncert,
+        sensitivity: sensitivity,
+        contribution: contrib,
+        source_type: source_type
+    }
+}
+
+// ============================================================================
+// PK UNCERTAINTY PROFILE (inlined)
+// ============================================================================
+
+struct PKUncertaintyProfile {
+    n_params: i32,
+    p0: PKParameter,
+    p1: PKParameter,
+    p2: PKParameter,
+    p3: PKParameter,
+    p4: PKParameter,
+    p5: PKParameter,
+    p6: PKParameter,
+    p7: PKParameter,
+    combined_variance: f64,
+    combined_std_uncert: f64,
+    clearance_contribution: f64,
+    volume_contribution: f64,
+    absorption_contribution: f64,
+    is_clearance_dominant: bool,
+    dominant_param_idx: i32,
+    dominant_param_contribution: f64,
+    r0: i32,
+    r1: i32,
+    r2: i32,
+    r3: i32,
+    n_recommendations: i32
+}
+
+fn empty_pk_profile() -> PKUncertaintyProfile {
+    return PKUncertaintyProfile {
+        n_params: 0,
+        p0: empty_pk_param(),
+        p1: empty_pk_param(),
+        p2: empty_pk_param(),
+        p3: empty_pk_param(),
+        p4: empty_pk_param(),
+        p5: empty_pk_param(),
+        p6: empty_pk_param(),
+        p7: empty_pk_param(),
+        combined_variance: 0.0,
+        combined_std_uncert: 0.0,
+        clearance_contribution: 0.0,
+        volume_contribution: 0.0,
+        absorption_contribution: 0.0,
+        is_clearance_dominant: false,
+        dominant_param_idx: 0,
+        dominant_param_contribution: 0.0,
+        r0: 0,
+        r1: 0,
+        r2: 0,
+        r3: 0,
+        n_recommendations: 0
+    }
+}
+
+// ============================================================================
+// PK SENSITIVITY RESULT (inlined)
+// ============================================================================
+
+struct PKSensitivityResult {
+    s_ti_0: f64,
+    s_ti_1: f64,
+    s_ti_2: f64,
+    s_ti_3: f64,
+    s_ti_4: f64,
+    s_ti_5: f64,
+    s_ti_6: f64,
+    s_ti_7: f64,
+    s_i_0: f64,
+    s_i_1: f64,
+    s_i_2: f64,
+    s_i_3: f64,
+    s_i_4: f64,
+    s_i_5: f64,
+    s_i_6: f64,
+    s_i_7: f64,
+    n_params: i32,
+    dominant_idx: i32,
+    dominant_s_ti: f64,
+    clearance_dominant: bool
+}
+
+fn empty_pk_sensitivity() -> PKSensitivityResult {
+    return PKSensitivityResult {
+        s_ti_0: 0.0, s_ti_1: 0.0, s_ti_2: 0.0, s_ti_3: 0.0,
+        s_ti_4: 0.0, s_ti_5: 0.0, s_ti_6: 0.0, s_ti_7: 0.0,
+        s_i_0: 0.0, s_i_1: 0.0, s_i_2: 0.0, s_i_3: 0.0,
+        s_i_4: 0.0, s_i_5: 0.0, s_i_6: 0.0, s_i_7: 0.0,
+        n_params: 0,
+        dominant_idx: 0,
+        dominant_s_ti: 0.0,
+        clearance_dominant: false
+    }
+}
+
+// ============================================================================
+// PK PARAMETER CLASSIFICATION (inlined)
+// ============================================================================
+
+fn pk_param_is_clearance_related(code: i32) -> bool {
+    if code == 0 { return true }
+    if code == 3 { return true }
+    if code == 7 { return true }
+    if code == 6 { return true }
+    return false
+}
+
+fn pk_param_is_volume_related(code: i32) -> bool {
+    if code == 1 { return true }
+    if code == 6 { return true }
+    return false
+}
+
+fn pk_param_is_absorption_related(code: i32) -> bool {
+    if code == 2 { return true }
+    if code == 4 { return true }
+    return false
+}
+
+// ============================================================================
+// PARAMETER ACCESS HELPERS (inlined)
+// ============================================================================
+
+fn get_pk_param(profile: PKUncertaintyProfile, idx: i32) -> PKParameter {
+    if idx == 0 { return profile.p0 }
+    if idx == 1 { return profile.p1 }
+    if idx == 2 { return profile.p2 }
+    if idx == 3 { return profile.p3 }
+    if idx == 4 { return profile.p4 }
+    if idx == 5 { return profile.p5 }
+    if idx == 6 { return profile.p6 }
+    if idx == 7 { return profile.p7 }
+    return empty_pk_param()
+}
+
+fn set_pk_param(profile: PKUncertaintyProfile, idx: i32, param: PKParameter) -> PKUncertaintyProfile {
+    var result = profile
+    if idx == 0 { result.p0 = param }
+    else if idx == 1 { result.p1 = param }
+    else if idx == 2 { result.p2 = param }
+    else if idx == 3 { result.p3 = param }
+    else if idx == 4 { result.p4 = param }
+    else if idx == 5 { result.p5 = param }
+    else if idx == 6 { result.p6 = param }
+    else if idx == 7 { result.p7 = param }
+    return result
+}
+
+// ============================================================================
+// CORE ANALYSIS FUNCTIONS (inlined)
+// ============================================================================
+
+fn compute_pk_contributions(profile: PKUncertaintyProfile, n: i32) -> PKUncertaintyProfile {
+    var result = profile
+    result.n_params = n
+
+    var total_var: f64 = 0.0
+    var idx = 0
+    while idx < n {
+        let p = get_pk_param(profile, idx)
+        total_var = total_var + p.contribution
+        idx = idx + 1
+    }
+
+    result.combined_variance = total_var
+    result.combined_std_uncert = sqrt_val(total_var)
+
+    if total_var < 1.0e-15 {
+        return result
+    }
+
+    var cl_contrib: f64 = 0.0
+    var v_contrib: f64 = 0.0
+    var abs_contrib: f64 = 0.0
+    var best_idx = 0
+    var best_pct: f64 = 0.0
+
+    idx = 0
+    while idx < n {
+        let p = get_pk_param(profile, idx)
+        let pct = 100.0 * p.contribution / total_var
+
+        if pct > best_pct {
+            best_pct = pct
+            best_idx = idx
+        }
+
+        if pk_param_is_clearance_related(p.code) {
+            cl_contrib = cl_contrib + pct
+        }
+        if pk_param_is_volume_related(p.code) {
+            v_contrib = v_contrib + pct
+        }
+        if pk_param_is_absorption_related(p.code) {
+            abs_contrib = abs_contrib + pct
+        }
+
+        idx = idx + 1
+    }
+
+    result.clearance_contribution = cl_contrib
+    result.volume_contribution = v_contrib
+    result.absorption_contribution = abs_contrib
+    result.dominant_param_idx = best_idx
+    result.dominant_param_contribution = best_pct
+
+    if cl_contrib > 70.0 {
+        result.is_clearance_dominant = true
+    } else {
+        result.is_clearance_dominant = false
+    }
+
+    return result
+}
+
+fn compute_pk_sensitivity(profile: PKUncertaintyProfile, n: i32) -> PKSensitivityResult {
+    var result = empty_pk_sensitivity()
+    result.n_params = n
+
+    var total_var: f64 = 0.0
+    var idx = 0
+    while idx < n {
+        let p = get_pk_param(profile, idx)
+        total_var = total_var + p.contribution
+        idx = idx + 1
+    }
+
+    if total_var < 1.0e-15 {
+        return result
+    }
+
+    var best_idx = 0
+    var best_s_ti: f64 = 0.0
+
+    idx = 0
+    while idx < n {
+        let p = get_pk_param(profile, idx)
+        let s_ti = p.contribution / total_var
+        let s_i = s_ti
+
+        if idx == 0 { result.s_ti_0 = s_ti; result.s_i_0 = s_i }
+        else if idx == 1 { result.s_ti_1 = s_ti; result.s_i_1 = s_i }
+        else if idx == 2 { result.s_ti_2 = s_ti; result.s_i_2 = s_i }
+        else if idx == 3 { result.s_ti_3 = s_ti; result.s_i_3 = s_i }
+        else if idx == 4 { result.s_ti_4 = s_ti; result.s_i_4 = s_i }
+        else if idx == 5 { result.s_ti_5 = s_ti; result.s_i_5 = s_i }
+        else if idx == 6 { result.s_ti_6 = s_ti; result.s_i_6 = s_i }
+        else if idx == 7 { result.s_ti_7 = s_ti; result.s_i_7 = s_i }
+
+        if s_ti > best_s_ti {
+            best_s_ti = s_ti
+            best_idx = idx
+        }
+
+        idx = idx + 1
+    }
+
+    result.dominant_idx = best_idx
+    result.dominant_s_ti = best_s_ti
+
+    var cl_total_s_ti: f64 = 0.0
+    idx = 0
+    while idx < n {
+        let p = get_pk_param(profile, idx)
+        if pk_param_is_clearance_related(p.code) {
+            let s_ti = p.contribution / total_var
+            cl_total_s_ti = cl_total_s_ti + s_ti
+        }
+        idx = idx + 1
+    }
+
+    if cl_total_s_ti > 0.7 {
+        result.clearance_dominant = true
+    } else {
+        result.clearance_dominant = false
+    }
+
+    return result
+}
+
+fn generate_pk_recommendations(profile: PKUncertaintyProfile) -> PKUncertaintyProfile {
+    var result = profile
+    var n_rec = 0
+
+    if profile.is_clearance_dominant {
+        if n_rec == 0 { result.r0 = 10 }
+        else if n_rec == 1 { result.r1 = 10 }
+        else if n_rec == 2 { result.r2 = 10 }
+        else if n_rec == 3 { result.r3 = 10 }
+        n_rec = n_rec + 1
+    }
+
+    if profile.volume_contribution > 50.0 {
+        if n_rec == 0 { result.r0 = 11 }
+        else if n_rec == 1 { result.r1 = 11 }
+        else if n_rec == 2 { result.r2 = 11 }
+        else if n_rec == 3 { result.r3 = 11 }
+        n_rec = n_rec + 1
+    }
+
+    if profile.absorption_contribution > 50.0 {
+        if n_rec == 0 { result.r0 = 12 }
+        else if n_rec == 1 { result.r1 = 12 }
+        else if n_rec == 2 { result.r2 = 12 }
+        else if n_rec == 3 { result.r3 = 12 }
+        n_rec = n_rec + 1
+    }
+
+    if profile.is_clearance_dominant {
+        var scr_pct: f64 = 0.0
+        var idx = 0
+        while idx < profile.n_params {
+            let p = get_pk_param(profile, idx)
+            if p.code == 7 {
+                if profile.combined_variance > 1.0e-15 {
+                    scr_pct = 100.0 * p.contribution / profile.combined_variance
+                }
+            }
+            idx = idx + 1
+        }
+        if scr_pct > 20.0 {
+            if n_rec < 4 {
+                if n_rec == 0 { result.r0 = 13 }
+                else if n_rec == 1 { result.r1 = 13 }
+                else if n_rec == 2 { result.r2 = 13 }
+                else if n_rec == 3 { result.r3 = 13 }
+                n_rec = n_rec + 1
+            }
+        }
+    }
+
+    if profile.combined_std_uncert > 0.0 {
+        let dom_p = get_pk_param(profile, profile.dominant_param_idx)
+        if abs_val(dom_p.value) > 1.0e-15 {
+            let rel_uncert = 100.0 * profile.combined_std_uncert / abs_val(dom_p.value)
+            if rel_uncert > 30.0 {
+                if n_rec < 4 {
+                    if n_rec == 0 { result.r0 = 14 }
+                    else if n_rec == 1 { result.r1 = 14 }
+                    else if n_rec == 2 { result.r2 = 14 }
+                    else if n_rec == 3 { result.r3 = 14 }
+                    n_rec = n_rec + 1
+                }
+            }
+        }
+    }
+
+    if n_rec > 4 { result.n_recommendations = 4 }
+    else { result.n_recommendations = n_rec }
+
+    return result
+}
+
+fn pk_analyze(profile: PKUncertaintyProfile, n: i32) -> PKUncertaintyProfile {
+    var result = compute_pk_contributions(profile, n)
+    result = generate_pk_recommendations(result)
+    return result
+}
+
+fn pk_is_clinically_significant(profile: PKUncertaintyProfile, therapeutic_window: f64) -> bool {
+    if therapeutic_window <= 1.0 { return true }
+    let half_width = 2.0 * profile.combined_std_uncert
+    let dom_p = get_pk_param(profile, profile.dominant_param_idx)
+    if abs_val(dom_p.value) < 1.0e-15 { return true }
+    let rel_half = half_width / abs_val(dom_p.value)
+    let margin = 1.0 - 1.0 / therapeutic_window
+    if rel_half > margin {
+        return true
+    }
+    return false
+}
+
+fn get_s_ti(sens: PKSensitivityResult, idx: i32) -> f64 {
+    if idx == 0 { return sens.s_ti_0 }
+    if idx == 1 { return sens.s_ti_1 }
+    if idx == 2 { return sens.s_ti_2 }
+    if idx == 3 { return sens.s_ti_3 }
+    if idx == 4 { return sens.s_ti_4 }
+    if idx == 5 { return sens.s_ti_5 }
+    if idx == 6 { return sens.s_ti_6 }
+    if idx == 7 { return sens.s_ti_7 }
+    return 0.0
+}
+
+// ============================================================================
+// MAIN TEST SUITE
+// ============================================================================
+
+fn main() -> i32 with IO {
+    println("======================================================================")
+    println("  PK Domain Uncertainty Plugin Test Suite")
+    println("  WS2 Track 5 — Pharmacokinetic Sensitivity Analysis")
+    println("======================================================================")
+    println("")
+
+    var passed = 0
+    var failed = 0
+
+    // ================================================================
+    // TEST 1: Clearance dominance detection
+    //
+    // CL(code=0): value=5.0, u=1.5, sensitivity=0.8 -> contrib=(0.8*1.5)^2=1.44
+    // V (code=1): value=50,  u=5.0, sensitivity=0.2 -> contrib=(0.2*5.0)^2=1.00
+    // ka(code=2): value=1.0, u=0.1, sensitivity=0.1 -> contrib=(0.1*0.1)^2=0.0001
+    //
+    // Total = 1.44 + 1.00 + 0.0001 = 2.4401
+    // CL is code 0 (clearance-related): 1.44/2.4401 = 59%
+    // V is code 1 (volume-related): 1.00/2.4401 = 41%
+    // Weight (code 6) is both CL and V related, but not present here.
+    //
+    // For CL dominance, need CL-related > 70%. Let us use a stronger CL.
+    // CL(code=0): value=5.0, u=2.0, sensitivity=0.9 -> contrib=(0.9*2.0)^2=3.24
+    // V (code=1): value=50,  u=2.0, sensitivity=0.2 -> contrib=(0.2*2.0)^2=0.16
+    // ka(code=2): value=1.0, u=0.1, sensitivity=0.1 -> contrib=(0.1*0.1)^2=0.0001
+    //
+    // Total = 3.24 + 0.16 + 0.0001 = 3.4001
+    // CL%: 3.24/3.4001*100 = 95.3%  -> clearance dominant
+    // ================================================================
+
+    println("TEST 1: Clearance dominance detection (CL > 70%)")
+
+    var profile1 = empty_pk_profile()
+    profile1.p0 = make_pk_param(0, 5.0, 2.0, 0.9, 0)
+    profile1.p1 = make_pk_param(1, 50.0, 2.0, 0.2, 1)
+    profile1.p2 = make_pk_param(2, 1.0, 0.1, 0.1, 0)
+    profile1 = pk_analyze(profile1, 3)
+
+    println("  CL contribution %:")
+    println(profile1.clearance_contribution)
+    println("  Is clearance dominant:")
+    if profile1.is_clearance_dominant { println("  true") } else { println("  false") }
+
+    if profile1.is_clearance_dominant == false {
+        println("FAIL: Should detect clearance dominance (CL > 70%)")
+        failed = failed + 1
+    } else if profile1.clearance_contribution < 70.0 {
+        println("FAIL: CL contribution should be > 70%")
+        failed = failed + 1
+    } else {
+        println("[PASS] Clearance dominance correctly detected")
+        passed = passed + 1
+    }
+    println("")
+
+    // ================================================================
+    // TEST 2: Volume dominance (V contributes most)
+    //
+    // CL(code=0): value=5.0, u=0.1, sensitivity=0.1 -> contrib=0.0001
+    // V (code=1): value=50,  u=15.0, sensitivity=0.9 -> contrib=(0.9*15)^2=182.25
+    // ka(code=2): value=1.0, u=0.1, sensitivity=0.1 -> contrib=0.0001
+    //
+    // Total = 182.2502
+    // V%: 182.25/182.2502*100 = ~100%
+    // ================================================================
+
+    println("TEST 2: Volume dominance (V contributes most)")
+
+    var profile2 = empty_pk_profile()
+    profile2.p0 = make_pk_param(0, 5.0, 0.1, 0.1, 0)
+    profile2.p1 = make_pk_param(1, 50.0, 15.0, 0.9, 1)
+    profile2.p2 = make_pk_param(2, 1.0, 0.1, 0.1, 0)
+    profile2 = pk_analyze(profile2, 3)
+
+    println("  Volume contribution %:")
+    println(profile2.volume_contribution)
+    println("  Is clearance dominant:")
+    if profile2.is_clearance_dominant { println("  true") } else { println("  false") }
+
+    if profile2.is_clearance_dominant {
+        println("FAIL: Should NOT be clearance dominant when V dominates")
+        failed = failed + 1
+    } else if profile2.volume_contribution < 50.0 {
+        println("FAIL: Volume contribution should be > 50%")
+        failed = failed + 1
+    } else {
+        println("[PASS] Volume dominance correctly detected")
+        passed = passed + 1
+    }
+    println("")
+
+    // ================================================================
+    // TEST 3: Balanced contributions (no single dominant)
+    //
+    // CL(code=0): u=1.0, sensitivity=1.0 -> contrib=1.0
+    // V (code=1): u=1.0, sensitivity=1.0 -> contrib=1.0
+    // ka(code=2): u=1.0, sensitivity=1.0 -> contrib=1.0
+    //
+    // Each is 33.3%. CL-related = 33.3%, not > 70%.
+    // Dominant param contribution = 33.3%.
+    // ================================================================
+
+    println("TEST 3: Balanced contributions (no dominance)")
+
+    var profile3 = empty_pk_profile()
+    profile3.p0 = make_pk_param(0, 5.0, 1.0, 1.0, 0)
+    profile3.p1 = make_pk_param(1, 50.0, 1.0, 1.0, 1)
+    profile3.p2 = make_pk_param(2, 1.0, 1.0, 1.0, 0)
+    profile3 = pk_analyze(profile3, 3)
+
+    println("  CL contribution %:")
+    println(profile3.clearance_contribution)
+    println("  Dominant param contribution %:")
+    println(profile3.dominant_param_contribution)
+
+    if profile3.is_clearance_dominant {
+        println("FAIL: Should NOT be clearance dominant with balanced inputs")
+        failed = failed + 1
+    } else if profile3.dominant_param_contribution > 50.0 {
+        println("FAIL: No single param should dominate (>50%)")
+        failed = failed + 1
+    } else {
+        println("[PASS] Balanced contributions correctly identified")
+        passed = passed + 1
+    }
+    println("")
+
+    // ================================================================
+    // TEST 4: SCr as proxy for clearance (Cockcroft-Gault scenario)
+    //
+    // SCr(code=7): high sensitivity, high uncertainty
+    // Weight(code=6): moderate
+    //
+    // CrCl = (140-Age)*Weight/(72*SCr)
+    //
+    // SCr(code=7): value=1.2, u=0.3, sensitivity=54.4 -> contrib=(54.4*0.3)^2=266.5
+    // Weight(code=6): value=70, u=2.0, sensitivity=0.926 -> contrib=(0.926*2)^2=3.43
+    // V(code=1): value=50, u=1.0, sensitivity=0.1 -> contrib=0.01
+    //
+    // Total ~ 269.94
+    // CL-related = SCr(7) + Weight(6) = (266.5+3.43)/269.94*100 = 99.9%
+    // ================================================================
+
+    println("TEST 4: SCr dominance (Cockcroft-Gault clearance)")
+
+    let age_val = 60.0
+    let wt_val = 70.0
+    let scr_val = 1.2
+    // dCrCl/dSCr = -(140-Age)*Weight/(72*SCr^2)
+    let s_scr = abs_val((140.0 - age_val) * wt_val / (72.0 * scr_val * scr_val))
+    // dCrCl/dWeight = (140-Age)/(72*SCr)
+    let s_wt = (140.0 - age_val) / (72.0 * scr_val)
+
+    var profile4 = empty_pk_profile()
+    profile4.p0 = make_pk_param(7, scr_val, 0.3, s_scr, 0)
+    profile4.p1 = make_pk_param(6, wt_val, 2.0, s_wt, 0)
+    profile4.p2 = make_pk_param(1, 50.0, 1.0, 0.1, 1)
+    profile4 = pk_analyze(profile4, 3)
+
+    println("  SCr sensitivity coefficient:")
+    println(s_scr)
+    println("  CL contribution % (SCr+Weight):")
+    println(profile4.clearance_contribution)
+    println("  Is clearance dominant:")
+    if profile4.is_clearance_dominant { println("  true") } else { println("  false") }
+
+    if profile4.is_clearance_dominant == false {
+        println("FAIL: SCr+Weight should trigger clearance dominance")
+        failed = failed + 1
+    } else {
+        println("[PASS] SCr correctly identified as clearance proxy")
+        passed = passed + 1
+    }
+    println("")
+
+    // ================================================================
+    // TEST 5: Sensitivity index S_Ti > 0.7 triggers flag
+    //
+    // Use profile1 (CL-dominant). Compute sensitivity indices.
+    // CL S_Ti should be > 0.7.
+    // ================================================================
+
+    println("TEST 5: Sensitivity index S_Ti > 0.7 for CL dominance")
+
+    // Re-use profile1 data (already analyzed)
+    var sens_profile = empty_pk_profile()
+    sens_profile.p0 = make_pk_param(0, 5.0, 2.0, 0.9, 0)
+    sens_profile.p1 = make_pk_param(1, 50.0, 2.0, 0.2, 1)
+    sens_profile.p2 = make_pk_param(2, 1.0, 0.1, 0.1, 0)
+    let sens5 = compute_pk_sensitivity(sens_profile, 3)
+
+    println("  S_Ti(CL):")
+    println(sens5.s_ti_0)
+    println("  Dominant S_Ti:")
+    println(sens5.dominant_s_ti)
+    println("  Clearance dominant by Sobol:")
+    if sens5.clearance_dominant { println("  true") } else { println("  false") }
+
+    if sens5.clearance_dominant == false {
+        println("FAIL: CL S_Ti should trigger clearance dominance flag")
+        failed = failed + 1
+    } else if sens5.dominant_s_ti < 0.7 {
+        println("FAIL: Dominant S_Ti should be > 0.7")
+        failed = failed + 1
+    } else {
+        println("[PASS] S_Ti > 0.7 correctly triggers clearance dominance")
+        passed = passed + 1
+    }
+    println("")
+
+    // ================================================================
+    // TEST 6: PK recommendations — clearance dominant -> TDM (code 10)
+    // ================================================================
+
+    println("TEST 6: Clearance dominant -> TDM recommendation")
+
+    println("  Recommendation r0:")
+    println(profile1.r0)
+    println("  n_recommendations:")
+    println(profile1.n_recommendations)
+
+    if profile1.r0 != 10 {
+        println("FAIL: CL dominant should recommend TDM (code 10)")
+        failed = failed + 1
+    } else {
+        println("[PASS] TDM correctly recommended for CL dominance")
+        passed = passed + 1
+    }
+    println("")
+
+    // ================================================================
+    // TEST 7: PK recommendations — absorption dominant -> bioequivalence (code 12)
+    //
+    // ka(code=2): u=2.0, sensitivity=0.9 -> contrib=3.24
+    // F (code=4): u=0.1, sensitivity=0.5 -> contrib=0.0025
+    // CL(code=0): u=0.05, sensitivity=0.1 -> contrib=0.000025
+    //
+    // Absorption = ka+F = (3.24+0.0025)/3.242525*100 = 99.9%
+    // ================================================================
+
+    println("TEST 7: Absorption dominant -> bioequivalence recommendation")
+
+    var profile7 = empty_pk_profile()
+    profile7.p0 = make_pk_param(2, 1.0, 2.0, 0.9, 0)
+    profile7.p1 = make_pk_param(4, 0.8, 0.1, 0.5, 2)
+    profile7.p2 = make_pk_param(0, 5.0, 0.05, 0.1, 0)
+    profile7 = pk_analyze(profile7, 3)
+
+    println("  Absorption contribution %:")
+    println(profile7.absorption_contribution)
+    println("  Recommendation r0:")
+    println(profile7.r0)
+
+    if profile7.r0 != 12 {
+        println("FAIL: Absorption dominant should recommend bioequivalence (code 12)")
+        failed = failed + 1
+    } else {
+        println("[PASS] Bioequivalence correctly recommended for absorption dominance")
+        passed = passed + 1
+    }
+    println("")
+
+    // ================================================================
+    // TEST 8: Clinical significance — uncertainty > therapeutic window
+    //
+    // Narrow therapeutic window drug (e.g., digoxin, TW ~ 2.0)
+    // CL value=5.0, combined_std_uncert ~ large relative to CL.
+    //
+    // Use profile1: combined_std_uncert = sqrt(3.4001) = 1.844
+    // dom param = CL (value=5.0)
+    // half_width = 2*1.844 = 3.688
+    // rel_half = 3.688/5.0 = 0.7376
+    // margin for TW=2.0 = 1 - 1/2 = 0.5
+    // 0.7376 > 0.5 -> clinically significant
+    // ================================================================
+
+    println("TEST 8: Clinical significance (uncertainty > therapeutic window)")
+
+    let sig8 = pk_is_clinically_significant(profile1, 2.0)
+    println("  Clinically significant (TW=2.0):")
+    if sig8 { println("  true") } else { println("  false") }
+
+    if sig8 == false {
+        println("FAIL: Should be clinically significant for narrow TW")
+        failed = failed + 1
+    } else {
+        println("[PASS] Correctly identifies clinically significant uncertainty")
+        passed = passed + 1
+    }
+    println("")
+
+    // ================================================================
+    // TEST 9: Clinical significance — uncertainty < therapeutic window
+    //
+    // Wide therapeutic window drug (e.g., amoxicillin, TW ~ 10.0)
+    // Use a profile with small uncertainty relative to value.
+    //
+    // CL(code=0): value=100.0, u=1.0, sensitivity=0.1 -> contrib=0.01
+    // combined_std_uncert = sqrt(0.01) = 0.1
+    // half_width = 2*0.1 = 0.2
+    // rel_half = 0.2/100.0 = 0.002
+    // margin for TW=10.0 = 1 - 1/10 = 0.9
+    // 0.002 < 0.9 -> NOT clinically significant
+    // ================================================================
+
+    println("TEST 9: Clinical significance (uncertainty < therapeutic window)")
+
+    var profile9 = empty_pk_profile()
+    profile9.p0 = make_pk_param(0, 100.0, 1.0, 0.1, 0)
+    profile9 = compute_pk_contributions(profile9, 1)
+
+    let sig9 = pk_is_clinically_significant(profile9, 10.0)
+    println("  Combined std uncert:")
+    println(profile9.combined_std_uncert)
+    println("  Clinically significant (TW=10.0):")
+    if sig9 { println("  true") } else { println("  false") }
+
+    if sig9 {
+        println("FAIL: Should NOT be clinically significant for wide TW")
+        failed = failed + 1
+    } else {
+        println("[PASS] Correctly identifies non-significant uncertainty")
+        passed = passed + 1
+    }
+    println("")
+
+    // ================================================================
+    // TEST 10: Edge case — single parameter is 100% dominant
+    //
+    // Only CL present. It should be 100% dominant.
+    // CL(code=0): value=5.0, u=1.0, sensitivity=1.0 -> contrib=1.0
+    // ================================================================
+
+    println("TEST 10: Single parameter (100% dominant)")
+
+    var profile10 = empty_pk_profile()
+    profile10.p0 = make_pk_param(0, 5.0, 1.0, 1.0, 0)
+    profile10 = pk_analyze(profile10, 1)
+
+    println("  Dominant param idx:")
+    println(profile10.dominant_param_idx)
+    println("  Dominant contribution %:")
+    println(profile10.dominant_param_contribution)
+    println("  CL contribution %:")
+    println(profile10.clearance_contribution)
+
+    if profile10.dominant_param_idx != 0 {
+        println("FAIL: Single param should be at idx 0")
+        failed = failed + 1
+    } else if abs_val(profile10.dominant_param_contribution - 100.0) > 0.1 {
+        println("FAIL: Single param should be 100% dominant")
+        failed = failed + 1
+    } else {
+        println("[PASS] Single parameter correctly shows 100% dominance")
+        passed = passed + 1
+    }
+    println("")
+
+    // ================================================================
+    // TEST 11: SCr dominant -> cystatin C recommendation (code 13)
+    //
+    // SCr(code=7): high contribution, CL-dominant scenario
+    // Use profile4 (SCr+Weight in CrCl context).
+    // SCr contributes >20% AND CL is dominant -> recommend cystatin C.
+    // ================================================================
+
+    println("TEST 11: SCr dominant -> cystatin C recommendation")
+
+    // Check that cystatin C (13) is among recommendations
+    var has_cystatin_c = false
+    if profile4.r0 == 13 { has_cystatin_c = true }
+    if profile4.r1 == 13 { has_cystatin_c = true }
+    if profile4.r2 == 13 { has_cystatin_c = true }
+    if profile4.r3 == 13 { has_cystatin_c = true }
+
+    println("  Recommendations: r0=")
+    println(profile4.r0)
+    println("  r1=")
+    println(profile4.r1)
+    println("  Has cystatin C rec:")
+    if has_cystatin_c { println("  true") } else { println("  false") }
+
+    if has_cystatin_c == false {
+        println("FAIL: SCr dominance should recommend cystatin C (code 13)")
+        failed = failed + 1
+    } else {
+        println("[PASS] Cystatin C correctly recommended for SCr dominance")
+        passed = passed + 1
+    }
+    println("")
+
+    // ================================================================
+    // TEST 12: Sensitivity indices sum to 1.0
+    //
+    // For 3 parameters, S_Ti_0 + S_Ti_1 + S_Ti_2 should equal 1.0
+    // (since linear model: total Sobol = sum of first-order = 1.0)
+    // ================================================================
+
+    println("TEST 12: Sensitivity indices sum to 1.0")
+
+    let sum_sti = sens5.s_ti_0 + sens5.s_ti_1 + sens5.s_ti_2
+    println("  S_Ti_0 + S_Ti_1 + S_Ti_2:")
+    println(sum_sti)
+
+    if abs_val(sum_sti - 1.0) > 0.01 {
+        println("FAIL: Sensitivity indices should sum to 1.0")
+        failed = failed + 1
+    } else {
+        println("[PASS] Sensitivity indices correctly sum to 1.0")
+        passed = passed + 1
+    }
+    println("")
+
+    // ================================================================
+    // SUMMARY
+    // ================================================================
+    println("======================================================================")
+    println("  PK DOMAIN UNCERTAINTY PLUGIN — TEST SUMMARY")
+    println("======================================================================")
+    println("  Passed:")
+    println(passed)
+    println("  Failed:")
+    println(failed)
+
+    if failed == 0 {
+        println("  ALL 12 TESTS PASSED")
+        println("  PK uncertainty plugin validated for clinical pharmacology")
+    } else {
+        println("  SOME TESTS FAILED")
+    }
+    println("======================================================================")
+
+    return failed
+}

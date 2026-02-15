@@ -51,11 +51,7 @@ fn linker_selfhost_tests_pass() {
     };
     match exit_value {
         Value::Int(code) => {
-            assert_eq!(
-                code, 0,
-                "Linker tests failed with exit code: {}",
-                code
-            );
+            assert_eq!(code, 0, "Linker tests failed with exit code: {}", code);
         }
         _ => panic!("Expected integer return value, got: {:?}", exit_value),
     }

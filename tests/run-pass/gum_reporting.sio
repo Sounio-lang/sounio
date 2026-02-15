@@ -1,0 +1,1037 @@
+//@ run-pass
+// GUM Automated Reporting Test Suite
+//
+// Validates WS2 automated GUM reporting:
+//   1. Cockcroft-Gault CrCl budget — SCr dominates >60%
+//   2. Simple 2-input addition — equal contributions ~50% each
+//   3. Budget validation — contributions sum to ~100%
+//   4. Expanded uncertainty with known coverage factor
+//   5. Sensitivity ranking — correct descending order
+//   6. Dominant source identification
+//   7. Recommendation generation — dominant source case
+//   8. Recommendation generation — balanced case
+//   9. Report generation and validation
+//  10. Report integrity check
+//
+// Reference: JCGM 100:2008 Section 8 (Reporting)
+
+// ============================================================================
+// HELPERS (self-contained, no imports)
+// ============================================================================
+
+fn abs_f64(x: f64) -> f64 {
+    if x < 0.0 { return 0.0 - x }
+    return x
+}
+
+fn sqrt_f64(x: f64) -> f64 {
+    if x <= 0.0 { return 0.0 }
+    var guess = x / 2.0
+    if guess < 0.001 { guess = 0.001 }
+    var i = 0
+    while i < 30 {
+        guess = (guess + x / guess) / 2.0
+        i = i + 1
+    }
+    return guess
+}
+
+fn max_f64(a: f64, b: f64) -> f64 {
+    if a > b { return a }
+    return b
+}
+
+// ============================================================================
+// BUDGET ENTRY
+// ============================================================================
+
+struct BudgetEntry {
+    source_type: i32,
+    estimate: f64,
+    std_uncert: f64,
+    sensitivity: f64,
+    contribution: f64,
+    dof: f64
+}
+
+fn budget_entry_a(estimate: f64, std_uncert: f64, sensitivity: f64, dof: f64) -> BudgetEntry {
+    let contrib = sensitivity * sensitivity * std_uncert * std_uncert
+    return BudgetEntry {
+        source_type: 0,
+        estimate: estimate,
+        std_uncert: std_uncert,
+        sensitivity: sensitivity,
+        contribution: contrib,
+        dof: dof
+    }
+}
+
+fn budget_entry_b(estimate: f64, std_uncert: f64, sensitivity: f64) -> BudgetEntry {
+    let contrib = sensitivity * sensitivity * std_uncert * std_uncert
+    return BudgetEntry {
+        source_type: 1,
+        estimate: estimate,
+        std_uncert: std_uncert,
+        sensitivity: sensitivity,
+        contribution: contrib,
+        dof: 1.0e30
+    }
+}
+
+fn empty_entry() -> BudgetEntry {
+    return BudgetEntry {
+        source_type: 0,
+        estimate: 0.0,
+        std_uncert: 0.0,
+        sensitivity: 0.0,
+        contribution: 0.0,
+        dof: 1.0
+    }
+}
+
+// ============================================================================
+// UNCERTAINTY BUDGET (4 entries max)
+// ============================================================================
+
+struct UncertaintyBudget {
+    result_value: f64,
+    entry_count: i32,
+    e0: BudgetEntry,
+    e1: BudgetEntry,
+    e2: BudgetEntry,
+    e3: BudgetEntry,
+    combined_variance: f64,
+    combined_std_uncert: f64,
+    effective_dof: f64,
+    confidence: f64
+}
+
+fn budget_new(result_value: f64, confidence: f64) -> UncertaintyBudget {
+    return UncertaintyBudget {
+        result_value: result_value,
+        entry_count: 0,
+        e0: empty_entry(),
+        e1: empty_entry(),
+        e2: empty_entry(),
+        e3: empty_entry(),
+        combined_variance: 0.0,
+        combined_std_uncert: 0.0,
+        effective_dof: 0.0,
+        confidence: confidence
+    }
+}
+
+fn get_entry(budget: UncertaintyBudget, idx: i32) -> BudgetEntry {
+    if idx == 0 { return budget.e0 }
+    if idx == 1 { return budget.e1 }
+    if idx == 2 { return budget.e2 }
+    if idx == 3 { return budget.e3 }
+    return empty_entry()
+}
+
+fn add_entry(budget: UncertaintyBudget, entry: BudgetEntry) -> UncertaintyBudget {
+    var result = budget
+    let idx = budget.entry_count
+    if idx == 0 { result.e0 = entry }
+    else if idx == 1 { result.e1 = entry }
+    else if idx == 2 { result.e2 = entry }
+    else if idx == 3 { result.e3 = entry }
+    if idx < 4 {
+        result.entry_count = idx + 1
+    }
+    return result
+}
+
+fn add_type_a(budget: UncertaintyBudget, estimate: f64, std_uncert: f64, sensitivity: f64, n_samples: f64) -> UncertaintyBudget {
+    let dof = n_samples - 1.0
+    let entry = budget_entry_a(estimate, std_uncert, sensitivity, dof)
+    return add_entry(budget, entry)
+}
+
+fn add_type_b(budget: UncertaintyBudget, estimate: f64, std_uncert: f64, sensitivity: f64) -> UncertaintyBudget {
+    let entry = budget_entry_b(estimate, std_uncert, sensitivity)
+    return add_entry(budget, entry)
+}
+
+fn compute_combined(budget: UncertaintyBudget) -> UncertaintyBudget {
+    var result = budget
+    var total_var: f64 = 0.0
+    if budget.entry_count > 0 {
+        total_var = total_var + budget.e0.contribution
+    }
+    if budget.entry_count > 1 {
+        total_var = total_var + budget.e1.contribution
+    }
+    if budget.entry_count > 2 {
+        total_var = total_var + budget.e2.contribution
+    }
+    if budget.entry_count > 3 {
+        total_var = total_var + budget.e3.contribution
+    }
+    result.combined_variance = total_var
+    result.combined_std_uncert = sqrt_f64(total_var)
+    return result
+}
+
+fn compute_dof(budget: UncertaintyBudget) -> UncertaintyBudget {
+    var result = budget
+    let u_c4 = budget.combined_variance * budget.combined_variance
+    var denom: f64 = 0.0
+    if budget.entry_count > 0 {
+        if budget.e0.dof < 1.0e20 {
+            let c4 = budget.e0.contribution * budget.e0.contribution
+            denom = denom + c4 / budget.e0.dof
+        }
+    }
+    if budget.entry_count > 1 {
+        if budget.e1.dof < 1.0e20 {
+            let c4 = budget.e1.contribution * budget.e1.contribution
+            denom = denom + c4 / budget.e1.dof
+        }
+    }
+    if budget.entry_count > 2 {
+        if budget.e2.dof < 1.0e20 {
+            let c4 = budget.e2.contribution * budget.e2.contribution
+            denom = denom + c4 / budget.e2.dof
+        }
+    }
+    if budget.entry_count > 3 {
+        if budget.e3.dof < 1.0e20 {
+            let c4 = budget.e3.contribution * budget.e3.contribution
+            denom = denom + c4 / budget.e3.dof
+        }
+    }
+    if denom > 1.0e-15 {
+        result.effective_dof = u_c4 / denom
+    } else {
+        result.effective_dof = 1.0e30
+    }
+    return result
+}
+
+fn finalize_budget(budget: UncertaintyBudget) -> UncertaintyBudget {
+    var result = compute_combined(budget)
+    result = compute_dof(result)
+    return result
+}
+
+fn percent_contribution(budget: UncertaintyBudget, idx: i32) -> f64 {
+    if budget.combined_variance < 1.0e-15 { return 0.0 }
+    let entry = get_entry(budget, idx)
+    return 100.0 * entry.contribution / budget.combined_variance
+}
+
+// ============================================================================
+// REPORT STRUCTURES
+// ============================================================================
+
+struct ReportInput {
+    name_code: i32,
+    estimate: f64,
+    std_uncert: f64,
+    dist_type: i32,
+    dof: f64,
+    unit_code: i32
+}
+
+fn empty_report_input() -> ReportInput {
+    return ReportInput {
+        name_code: 0,
+        estimate: 0.0,
+        std_uncert: 0.0,
+        dist_type: 0,
+        dof: 1.0,
+        unit_code: 0
+    }
+}
+
+struct GUMReport {
+    title_code: i32,
+    n_inputs: i32,
+    i0: ReportInput,
+    i1: ReportInput,
+    i2: ReportInput,
+    i3: ReportInput,
+    result_value: f64,
+    combined_std_uncert: f64,
+    effective_dof: f64,
+    coverage_factor: f64,
+    expanded_uncert: f64,
+    confidence_level: f64,
+    dominant_source_idx: i32,
+    dominant_contribution_pct: f64,
+    r0: i32,
+    r1: i32,
+    r2: i32,
+    r3: i32,
+    n_recommendations: i32
+}
+
+fn empty_gum_report() -> GUMReport {
+    return GUMReport {
+        title_code: 0,
+        n_inputs: 0,
+        i0: empty_report_input(),
+        i1: empty_report_input(),
+        i2: empty_report_input(),
+        i3: empty_report_input(),
+        result_value: 0.0,
+        combined_std_uncert: 0.0,
+        effective_dof: 0.0,
+        coverage_factor: 1.96,
+        expanded_uncert: 0.0,
+        confidence_level: 0.95,
+        dominant_source_idx: 0,
+        dominant_contribution_pct: 0.0,
+        r0: 0,
+        r1: 0,
+        r2: 0,
+        r3: 0,
+        n_recommendations: 0
+    }
+}
+
+struct SensitivityRanking {
+    idx0: i32,
+    idx1: i32,
+    idx2: i32,
+    idx3: i32,
+    c0: f64,
+    c1: f64,
+    c2: f64,
+    c3: f64,
+    n_entries: i32
+}
+
+fn empty_ranking() -> SensitivityRanking {
+    return SensitivityRanking {
+        idx0: 0, idx1: 0, idx2: 0, idx3: 0,
+        c0: 0.0, c1: 0.0, c2: 0.0, c3: 0.0,
+        n_entries: 0
+    }
+}
+
+// ============================================================================
+// REPORTING FUNCTIONS
+// ============================================================================
+
+fn t_factor_approx(dof: f64, confidence: f64) -> f64 {
+    if dof > 1.0e10 {
+        if confidence >= 0.99 { return 2.576 }
+        if confidence >= 0.95 { return 1.960 }
+        if confidence >= 0.90 { return 1.645 }
+        return 1.0
+    }
+    if confidence >= 0.945 {
+        if confidence < 0.955 {
+            if dof < 2.0 { return 12.71 }
+            if dof < 3.0 { return 4.303 }
+            if dof < 4.0 { return 3.182 }
+            if dof < 5.0 { return 2.776 }
+            if dof < 6.0 { return 2.571 }
+            if dof < 8.0 { return 2.447 }
+            if dof < 10.0 { return 2.306 }
+            if dof < 15.0 { return 2.228 }
+            if dof < 20.0 { return 2.131 }
+            if dof < 30.0 { return 2.086 }
+            if dof < 50.0 { return 2.042 }
+            if dof < 100.0 { return 2.009 }
+            return 1.960
+        }
+    }
+    if confidence >= 0.985 {
+        if dof < 2.0 { return 63.66 }
+        if dof < 3.0 { return 9.925 }
+        if dof < 4.0 { return 5.841 }
+        if dof < 5.0 { return 4.604 }
+        if dof < 6.0 { return 4.032 }
+        if dof < 8.0 { return 3.707 }
+        if dof < 10.0 { return 3.355 }
+        if dof < 15.0 { return 3.169 }
+        if dof < 20.0 { return 2.947 }
+        if dof < 30.0 { return 2.845 }
+        if dof < 50.0 { return 2.756 }
+        if dof < 100.0 { return 2.678 }
+        return 2.576
+    }
+    if confidence >= 0.895 {
+        if confidence < 0.945 {
+            if dof < 2.0 { return 6.314 }
+            if dof < 3.0 { return 2.920 }
+            if dof < 4.0 { return 2.353 }
+            if dof < 5.0 { return 2.132 }
+            if dof < 6.0 { return 2.015 }
+            if dof < 8.0 { return 1.943 }
+            if dof < 10.0 { return 1.860 }
+            if dof < 15.0 { return 1.812 }
+            if dof < 20.0 { return 1.753 }
+            if dof < 30.0 { return 1.725 }
+            if dof < 50.0 { return 1.697 }
+            if dof < 100.0 { return 1.676 }
+            return 1.645
+        }
+    }
+    if dof < 2.0 { return 12.71 }
+    return 1.96 + 2.4 / dof
+}
+
+fn get_pct(budget: UncertaintyBudget, idx: i32) -> f64 {
+    if budget.combined_variance < 1.0e-15 { return 0.0 }
+    let entry = get_entry(budget, idx)
+    return 100.0 * entry.contribution / budget.combined_variance
+}
+
+fn sensitivity_ranking(budget: UncertaintyBudget) -> SensitivityRanking {
+    var ranking = empty_ranking()
+    ranking.n_entries = budget.entry_count
+    if budget.entry_count == 0 { return ranking }
+
+    var pct0 = get_pct(budget, 0)
+    var pct1: f64 = 0.0
+    var pct2: f64 = 0.0
+    var pct3: f64 = 0.0
+    if budget.entry_count > 1 { pct1 = get_pct(budget, 1) }
+    if budget.entry_count > 2 { pct2 = get_pct(budget, 2) }
+    if budget.entry_count > 3 { pct3 = get_pct(budget, 3) }
+
+    var i0 = 0
+    var i1 = 1
+    var i2 = 2
+    var i3 = 3
+    var v0 = pct0
+    var v1 = pct1
+    var v2 = pct2
+    var v3 = pct3
+
+    // Selection sort pass 1: find largest
+    if budget.entry_count > 1 {
+        if v1 > v0 {
+            var ti = i0
+            i0 = i1
+            i1 = ti
+            var tv = v0
+            v0 = v1
+            v1 = tv
+        }
+    }
+    if budget.entry_count > 2 {
+        if v2 > v0 {
+            var ti = i0
+            i0 = i2
+            i2 = ti
+            var tv = v0
+            v0 = v2
+            v2 = tv
+        }
+    }
+    if budget.entry_count > 3 {
+        if v3 > v0 {
+            var ti = i0
+            i0 = i3
+            i3 = ti
+            var tv = v0
+            v0 = v3
+            v3 = tv
+        }
+    }
+
+    // Pass 2: find second largest
+    if budget.entry_count > 2 {
+        if v2 > v1 {
+            var ti = i1
+            i1 = i2
+            i2 = ti
+            var tv = v1
+            v1 = v2
+            v2 = tv
+        }
+    }
+    if budget.entry_count > 3 {
+        if v3 > v1 {
+            var ti = i1
+            i1 = i3
+            i3 = ti
+            var tv = v1
+            v1 = v3
+            v3 = tv
+        }
+    }
+
+    // Pass 3: find third largest
+    if budget.entry_count > 3 {
+        if v3 > v2 {
+            var ti = i2
+            i2 = i3
+            i3 = ti
+            var tv = v2
+            v2 = v3
+            v3 = tv
+        }
+    }
+
+    ranking.idx0 = i0
+    ranking.idx1 = i1
+    ranking.idx2 = i2
+    ranking.idx3 = i3
+    ranking.c0 = v0
+    ranking.c1 = v1
+    ranking.c2 = v2
+    ranking.c3 = v3
+
+    return ranking
+}
+
+fn identify_dominant(budget: UncertaintyBudget) -> i32 {
+    if budget.entry_count == 0 { return 0 }
+    var best_idx = 0
+    var best_pct = get_pct(budget, 0)
+    if budget.entry_count > 1 {
+        let pct1 = get_pct(budget, 1)
+        if pct1 > best_pct {
+            best_idx = 1
+            best_pct = pct1
+        }
+    }
+    if budget.entry_count > 2 {
+        let pct2 = get_pct(budget, 2)
+        if pct2 > best_pct {
+            best_idx = 2
+            best_pct = pct2
+        }
+    }
+    if budget.entry_count > 3 {
+        let pct3 = get_pct(budget, 3)
+        if pct3 > best_pct {
+            best_idx = 3
+            best_pct = pct3
+        }
+    }
+    return best_idx
+}
+
+fn dominant_contribution_pct(budget: UncertaintyBudget) -> f64 {
+    let idx = identify_dominant(budget)
+    return get_pct(budget, idx)
+}
+
+fn compute_expanded_uncertainty(combined_u: f64, dof: f64, confidence: f64) -> f64 {
+    let k = t_factor_approx(dof, confidence)
+    return k * combined_u
+}
+
+fn budget_validate(budget: UncertaintyBudget) -> bool {
+    if budget.entry_count == 0 { return true }
+    if budget.combined_variance < 1.0e-15 { return true }
+    var total_pct: f64 = 0.0
+    var idx = 0
+    while idx < budget.entry_count {
+        total_pct = total_pct + get_pct(budget, idx)
+        idx = idx + 1
+    }
+    let diff = abs_f64(total_pct - 100.0)
+    if diff < 1.0 { return true }
+    return false
+}
+
+// Recommendation codes:
+//   1 = Reduce dominant source (>50%)
+//   2 = Increase measurements (DoF < 10)
+//   3 = Target highest sensitivity
+//   4 = Well-balanced budget
+//   5 = Reduce second-largest source
+//   6 = Consider correlations
+//   7 = Increase replicates
+fn generate_rec_code_0(budget: UncertaintyBudget) -> i32 {
+    let dom_pct = dominant_contribution_pct(budget)
+    if dom_pct > 50.0 { return 1 }
+    if budget.effective_dof < 10.0 {
+        if budget.effective_dof > 0.0 { return 2 }
+    }
+    return 3
+}
+
+fn generate_rec_code_1(budget: UncertaintyBudget) -> i32 {
+    let dom_pct = dominant_contribution_pct(budget)
+    if dom_pct > 50.0 {
+        if budget.effective_dof < 10.0 {
+            if budget.effective_dof > 0.0 { return 2 }
+        }
+        return 5
+    }
+    if budget.effective_dof < 10.0 {
+        if budget.effective_dof > 0.0 { return 7 }
+    }
+    return 4
+}
+
+fn generate_report(budget: UncertaintyBudget, confidence: f64) -> GUMReport {
+    var report = empty_gum_report()
+    report.n_inputs = budget.entry_count
+    report.result_value = budget.result_value
+    report.combined_std_uncert = budget.combined_std_uncert
+    report.effective_dof = budget.effective_dof
+    report.confidence_level = confidence
+
+    let k = t_factor_approx(budget.effective_dof, confidence)
+    report.coverage_factor = k
+    report.expanded_uncert = k * budget.combined_std_uncert
+
+    if budget.entry_count > 0 {
+        report.i0 = ReportInput {
+            name_code: 0,
+            estimate: budget.e0.estimate,
+            std_uncert: budget.e0.std_uncert,
+            dist_type: budget.e0.source_type,
+            dof: budget.e0.dof,
+            unit_code: 0
+        }
+    }
+    if budget.entry_count > 1 {
+        report.i1 = ReportInput {
+            name_code: 1,
+            estimate: budget.e1.estimate,
+            std_uncert: budget.e1.std_uncert,
+            dist_type: budget.e1.source_type,
+            dof: budget.e1.dof,
+            unit_code: 0
+        }
+    }
+    if budget.entry_count > 2 {
+        report.i2 = ReportInput {
+            name_code: 2,
+            estimate: budget.e2.estimate,
+            std_uncert: budget.e2.std_uncert,
+            dist_type: budget.e2.source_type,
+            dof: budget.e2.dof,
+            unit_code: 0
+        }
+    }
+    if budget.entry_count > 3 {
+        report.i3 = ReportInput {
+            name_code: 3,
+            estimate: budget.e3.estimate,
+            std_uncert: budget.e3.std_uncert,
+            dist_type: budget.e3.source_type,
+            dof: budget.e3.dof,
+            unit_code: 0
+        }
+    }
+
+    report.dominant_source_idx = identify_dominant(budget)
+    report.dominant_contribution_pct = dominant_contribution_pct(budget)
+
+    report.r0 = generate_rec_code_0(budget)
+    report.r1 = generate_rec_code_1(budget)
+    report.r2 = 6
+    report.r3 = 0
+
+    var n_rec = 0
+    if report.r0 != 0 { n_rec = n_rec + 1 }
+    if report.r1 != 0 { n_rec = n_rec + 1 }
+    if report.r2 != 0 { n_rec = n_rec + 1 }
+    if report.r3 != 0 { n_rec = n_rec + 1 }
+    report.n_recommendations = n_rec
+
+    return report
+}
+
+fn report_is_valid(report: GUMReport) -> bool {
+    if report.combined_std_uncert < 0.0 { return false }
+    if report.coverage_factor <= 0.0 { return false }
+    let expected_exp = report.coverage_factor * report.combined_std_uncert
+    let diff = abs_f64(report.expanded_uncert - expected_exp)
+    if diff > 0.001 {
+        if expected_exp > 0.001 { return false }
+    }
+    if report.confidence_level <= 0.0 { return false }
+    if report.confidence_level >= 1.0 { return false }
+    if report.dominant_contribution_pct < 0.0 { return false }
+    if report.dominant_contribution_pct > 100.01 { return false }
+    if report.n_inputs < 0 { return false }
+    if report.n_inputs > 8 { return false }
+    return true
+}
+
+// ============================================================================
+// MAIN — Test Suite
+// ============================================================================
+
+fn main() -> i32 with IO {
+    println("======================================================================")
+    println("  GUM Automated Reporting Test Suite")
+    println("  JCGM 100:2008 Section 8 — Reporting Uncertainty")
+    println("======================================================================")
+    println("")
+
+    var passed = 0
+    var failed = 0
+
+    // ================================================================
+    // TEST 1: Cockcroft-Gault CrCl uncertainty budget
+    //
+    // CrCl = (140 - Age) * Weight / (72 * SCr)
+    //
+    // We build the budget with sensitivity coefficients:
+    //   dCrCl/dAge    = -Weight / (72 * SCr)
+    //   dCrCl/dWeight = (140 - Age) / (72 * SCr)
+    //   dCrCl/dSCr    = -(140 - Age) * Weight / (72 * SCr^2)
+    //
+    // Age = 60 +/- 0.5 (n=10), Weight = 70 +/- 1.0 (Type B),
+    // SCr = 1.2 +/- 0.15 (n=5)
+    //
+    // Expected: SCr dominates because of high sensitivity coefficient.
+    // ================================================================
+
+    println("TEST 1: Cockcroft-Gault CrCl budget (SCr dominance)")
+
+    let age_val = 60.0
+    let wt_val = 70.0
+    let scr_val = 1.2
+    let crcl_val = (140.0 - age_val) * wt_val / (72.0 * scr_val)
+
+    // Sensitivity coefficients
+    let s_age = 0.0 - wt_val / (72.0 * scr_val)
+    let s_wt = (140.0 - age_val) / (72.0 * scr_val)
+    let s_scr = 0.0 - (140.0 - age_val) * wt_val / (72.0 * scr_val * scr_val)
+
+    var budget1 = budget_new(crcl_val, 0.95)
+    budget1 = add_type_a(budget1, age_val, 0.5, abs_f64(s_age), 10.0)
+    budget1 = add_type_b(budget1, wt_val, 1.0, abs_f64(s_wt))
+    budget1 = add_type_a(budget1, scr_val, 0.15, abs_f64(s_scr), 5.0)
+    budget1 = finalize_budget(budget1)
+
+    let dom_idx1 = identify_dominant(budget1)
+    let dom_pct1 = dominant_contribution_pct(budget1)
+
+    println("  CrCl value:")
+    println(crcl_val)
+    println("  Combined std uncertainty:")
+    println(budget1.combined_std_uncert)
+    println("  Dominant source index (expect 2 = SCr):")
+    println(dom_idx1)
+    println("  Dominant contribution %:")
+    println(dom_pct1)
+
+    // SCr should be the dominant source (index 2) with > 60%
+    if dom_idx1 != 2 {
+        println("FAIL: Expected SCr (index 2) as dominant source")
+        failed = failed + 1
+    } else if dom_pct1 < 60.0 {
+        println("FAIL: SCr should contribute >60% of total variance")
+        failed = failed + 1
+    } else {
+        println("[PASS] SCr dominates CrCl budget")
+        passed = passed + 1
+    }
+    println("")
+
+    // ================================================================
+    // TEST 2: Simple 2-input equal-contribution addition
+    //
+    // y = x1 + x2, both with u=1.0, sensitivity=1.0
+    // Each contributes 50% of total variance.
+    // ================================================================
+
+    println("TEST 2: Equal contributions (two inputs)")
+
+    var budget2 = budget_new(20.0, 0.95)
+    budget2 = add_type_b(budget2, 10.0, 1.0, 1.0)
+    budget2 = add_type_b(budget2, 10.0, 1.0, 1.0)
+    budget2 = finalize_budget(budget2)
+
+    let pct2_0 = percent_contribution(budget2, 0)
+    let pct2_1 = percent_contribution(budget2, 1)
+
+    println("  Source 0 contribution %:")
+    println(pct2_0)
+    println("  Source 1 contribution %:")
+    println(pct2_1)
+
+    if abs_f64(pct2_0 - 50.0) > 1.0 {
+        println("FAIL: Source 0 should be ~50%")
+        failed = failed + 1
+    } else if abs_f64(pct2_1 - 50.0) > 1.0 {
+        println("FAIL: Source 1 should be ~50%")
+        failed = failed + 1
+    } else {
+        println("[PASS] Equal contributions verified")
+        passed = passed + 1
+    }
+    println("")
+
+    // ================================================================
+    // TEST 3: Budget validation — contributions sum to 100%
+    // ================================================================
+
+    println("TEST 3: Budget validation (contributions sum to 100%)")
+
+    let valid1 = budget_validate(budget1)
+    let valid2 = budget_validate(budget2)
+
+    println("  CrCl budget valid:")
+    if valid1 { println("  true") } else { println("  false") }
+    println("  Equal budget valid:")
+    if valid2 { println("  true") } else { println("  false") }
+
+    if valid1 == false {
+        println("FAIL: CrCl budget should be valid")
+        failed = failed + 1
+    } else if valid2 == false {
+        println("FAIL: Equal budget should be valid")
+        failed = failed + 1
+    } else {
+        println("[PASS] Budget validation correct")
+        passed = passed + 1
+    }
+    println("")
+
+    // ================================================================
+    // TEST 4: Expanded uncertainty with known coverage factor
+    //
+    // For infinite DoF and 95% confidence, k = 1.96
+    // u_c = 2.0 => U = 1.96 * 2.0 = 3.92
+    // ================================================================
+
+    println("TEST 4: Expanded uncertainty (k * u_c)")
+
+    let u_exp = compute_expanded_uncertainty(2.0, 1.0e30, 0.95)
+    let expected_uexp = 1.960 * 2.0
+    let err4 = abs_f64(u_exp - expected_uexp)
+
+    println("  Combined u = 2.0, infinite DoF, 95% confidence")
+    println("  Expanded uncertainty:")
+    println(u_exp)
+    println("  Expected:")
+    println(expected_uexp)
+    println("  Error:")
+    println(err4)
+
+    if err4 > 0.01 {
+        println("FAIL: Expanded uncertainty incorrect")
+        failed = failed + 1
+    } else {
+        println("[PASS] Expanded uncertainty matches k * u_c")
+        passed = passed + 1
+    }
+    println("")
+
+    // ================================================================
+    // TEST 5: Sensitivity ranking — correct descending order
+    //
+    // 3-input budget: contributions 10%, 70%, 20%
+    // Ranking should be: [1, 2, 0] with contributions [70%, 20%, 10%]
+    // ================================================================
+
+    println("TEST 5: Sensitivity ranking (descending order)")
+
+    // Build a budget where:
+    //   e0: u=1, c=1 => contribution = 1  (10%)
+    //   e1: u=1, c=sqrt(7) => contribution = 7  (70%)
+    //   e2: u=1, c=sqrt(2) => contribution = 2  (20%)
+    var budget5 = budget_new(50.0, 0.95)
+    budget5 = add_type_b(budget5, 10.0, 1.0, 1.0)
+    budget5 = add_type_b(budget5, 20.0, 1.0, sqrt_f64(7.0))
+    budget5 = add_type_b(budget5, 20.0, 1.0, sqrt_f64(2.0))
+    budget5 = finalize_budget(budget5)
+
+    let ranking5 = sensitivity_ranking(budget5)
+
+    println("  Ranking index 0 (should be 1 = 70% source):")
+    println(ranking5.idx0)
+    println("  Ranking contribution 0:")
+    println(ranking5.c0)
+    println("  Ranking index 1 (should be 2 = 20% source):")
+    println(ranking5.idx1)
+    println("  Ranking contribution 1:")
+    println(ranking5.c1)
+    println("  Ranking index 2 (should be 0 = 10% source):")
+    println(ranking5.idx2)
+    println("  Ranking contribution 2:")
+    println(ranking5.c2)
+
+    if ranking5.idx0 != 1 {
+        println("FAIL: Highest contributor should be index 1")
+        failed = failed + 1
+    } else if ranking5.idx1 != 2 {
+        println("FAIL: Second contributor should be index 2")
+        failed = failed + 1
+    } else if ranking5.idx2 != 0 {
+        println("FAIL: Third contributor should be index 0")
+        failed = failed + 1
+    } else if ranking5.c0 < ranking5.c1 {
+        println("FAIL: Contributions not in descending order")
+        failed = failed + 1
+    } else {
+        println("[PASS] Sensitivity ranking correctly ordered")
+        passed = passed + 1
+    }
+    println("")
+
+    // ================================================================
+    // TEST 6: Dominant source identification
+    //
+    // Same budget as test 5: dominant should be index 1 (~70%)
+    // ================================================================
+
+    println("TEST 6: Dominant source identification")
+
+    let dom5 = identify_dominant(budget5)
+    let dom5_pct = dominant_contribution_pct(budget5)
+
+    println("  Dominant index:")
+    println(dom5)
+    println("  Dominant contribution %:")
+    println(dom5_pct)
+
+    if dom5 != 1 {
+        println("FAIL: Dominant source should be index 1")
+        failed = failed + 1
+    } else if abs_f64(dom5_pct - 70.0) > 2.0 {
+        println("FAIL: Dominant contribution should be ~70%")
+        failed = failed + 1
+    } else {
+        println("[PASS] Dominant source correctly identified")
+        passed = passed + 1
+    }
+    println("")
+
+    // ================================================================
+    // TEST 7: Recommendation generation — dominant source case
+    //
+    // When one source > 50%, primary recommendation should be code 1
+    // (reduce dominant source uncertainty).
+    // ================================================================
+
+    println("TEST 7: Recommendations (dominant source)")
+
+    let rec7 = generate_rec_code_0(budget5)
+    println("  Primary recommendation code (expect 1 = reduce dominant):")
+    println(rec7)
+
+    if rec7 != 1 {
+        println("FAIL: Should recommend reducing dominant source (code 1)")
+        failed = failed + 1
+    } else {
+        println("[PASS] Correct recommendation for dominant source")
+        passed = passed + 1
+    }
+    println("")
+
+    // ================================================================
+    // TEST 8: Recommendation generation — balanced case
+    //
+    // When no single source dominates (all ~equal), recommendation
+    // should be code 3 (target highest sensitivity).
+    // ================================================================
+
+    println("TEST 8: Recommendations (balanced case)")
+
+    let rec8 = generate_rec_code_0(budget2)
+    println("  Primary recommendation code (expect 3 = target sensitivity):")
+    println(rec8)
+
+    if rec8 != 3 {
+        println("FAIL: Balanced budget should recommend targeting sensitivity (code 3)")
+        failed = failed + 1
+    } else {
+        println("[PASS] Correct recommendation for balanced budget")
+        passed = passed + 1
+    }
+    println("")
+
+    // ================================================================
+    // TEST 9: Full report generation and validation
+    //
+    // Generate a complete GUM report from the CrCl budget
+    // and verify it passes integrity checks.
+    // ================================================================
+
+    println("TEST 9: Full report generation")
+
+    let report9 = generate_report(budget1, 0.95)
+    let valid9 = report_is_valid(report9)
+
+    println("  Report result value:")
+    println(report9.result_value)
+    println("  Report combined std uncert:")
+    println(report9.combined_std_uncert)
+    println("  Report coverage factor:")
+    println(report9.coverage_factor)
+    println("  Report expanded uncert:")
+    println(report9.expanded_uncert)
+    println("  Report dominant source idx:")
+    println(report9.dominant_source_idx)
+    println("  Report dominant contribution %:")
+    println(report9.dominant_contribution_pct)
+    println("  Report n_recommendations:")
+    println(report9.n_recommendations)
+    println("  Report is valid:")
+    if valid9 { println("  true") } else { println("  false") }
+
+    if valid9 == false {
+        println("FAIL: Generated report should be valid")
+        failed = failed + 1
+    } else if report9.n_inputs != 3 {
+        println("FAIL: Report should have 3 inputs")
+        failed = failed + 1
+    } else if report9.coverage_factor < 1.5 {
+        println("FAIL: Coverage factor should be reasonable (>1.5)")
+        failed = failed + 1
+    } else if report9.expanded_uncert <= 0.0 {
+        println("FAIL: Expanded uncertainty should be positive")
+        failed = failed + 1
+    } else {
+        println("[PASS] Report generation and validation correct")
+        passed = passed + 1
+    }
+    println("")
+
+    // ================================================================
+    // TEST 10: Report integrity — expanded = k * u_c
+    //
+    // Verify that the expanded uncertainty in the report is
+    // exactly k * combined_std_uncert.
+    // ================================================================
+
+    println("TEST 10: Report integrity (U = k * u_c)")
+
+    let expected_exp10 = report9.coverage_factor * report9.combined_std_uncert
+    let err10 = abs_f64(report9.expanded_uncert - expected_exp10)
+
+    println("  k * u_c:")
+    println(expected_exp10)
+    println("  Report expanded U:")
+    println(report9.expanded_uncert)
+    println("  Error:")
+    println(err10)
+
+    if err10 > 0.001 {
+        println("FAIL: Expanded uncertainty != k * u_c")
+        failed = failed + 1
+    } else {
+        println("[PASS] Report integrity verified: U = k * u_c")
+        passed = passed + 1
+    }
+    println("")
+
+    // ================================================================
+    // SUMMARY
+    // ================================================================
+    println("======================================================================")
+    println("  GUM AUTOMATED REPORTING — TEST SUMMARY")
+    println("======================================================================")
+    println("  Passed:")
+    println(passed)
+    println("  Failed:")
+    println(failed)
+
+    if failed == 0 {
+        println("  ALL 10 TESTS PASSED")
+        println("  GUM reporting compliant with JCGM 100:2008 Section 8")
+    } else {
+        println("  SOME TESTS FAILED")
+    }
+    println("======================================================================")
+
+    return failed
+}

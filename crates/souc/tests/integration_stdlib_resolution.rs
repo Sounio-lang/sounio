@@ -25,7 +25,10 @@ fn get_stdlib_path() -> PathBuf {
             return candidate;
         }
     }
-    panic!("could not locate stdlib dir from {}", manifest_dir.display());
+    panic!(
+        "could not locate stdlib dir from {}",
+        manifest_dir.display()
+    );
 }
 
 /// Helper to run souc check from a specific directory
