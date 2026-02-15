@@ -848,12 +848,7 @@ impl CausalGraphType {
     }
 
     /// Check d-separation for single nodes (convenience method)
-    pub fn d_separated_single(
-        &self,
-        x: &str,
-        y: &str,
-        z: &HashSet<String>,
-    ) -> bool {
+    pub fn d_separated_single(&self, x: &str, y: &str, z: &HashSet<String>) -> bool {
         let x_set = [x.to_string()].into_iter().collect();
         let y_set = [y.to_string()].into_iter().collect();
         self.d_separated(&x_set, &y_set, z)

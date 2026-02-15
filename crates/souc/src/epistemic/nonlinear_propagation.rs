@@ -411,13 +411,18 @@ fn check_warnings(
     // Domain concerns for specific operations
     match op {
         NonlinearOp::Log if input_uncertainty > 0.5 => Some(ConfidenceWarning::DomainConcern {
-            description: "log(x) with large relative uncertainty; input may include non-positive values".to_string(),
+            description:
+                "log(x) with large relative uncertainty; input may include non-positive values"
+                    .to_string(),
         }),
         NonlinearOp::Sqrt if input_uncertainty > 0.5 => Some(ConfidenceWarning::DomainConcern {
-            description: "sqrt(x) with large relative uncertainty; input may include negative values".to_string(),
+            description:
+                "sqrt(x) with large relative uncertainty; input may include negative values"
+                    .to_string(),
         }),
         NonlinearOp::Tan if input_uncertainty > 0.3 => Some(ConfidenceWarning::DomainConcern {
-            description: "tan(x) with large uncertainty; input may be near pi/2 singularity".to_string(),
+            description: "tan(x) with large uncertainty; input may be near pi/2 singularity"
+                .to_string(),
         }),
         _ => None,
     }
@@ -522,7 +527,11 @@ pub fn propagate_loop(body_confidence: f64, max_iterations: u32) -> ConfidenceFl
 
     let diagnostic = format!(
         "loop ({} iters): {:.6} * {:.6}^{} = {:.6}",
-        max_iterations, body_confidence, LOOP_DECAY_PER_ITERATION, max_iterations, output_confidence
+        max_iterations,
+        body_confidence,
+        LOOP_DECAY_PER_ITERATION,
+        max_iterations,
+        output_confidence
     );
 
     let warning = if output_confidence < DEFAULT_WARNING_THRESHOLD {
@@ -622,7 +631,10 @@ impl FunctionConfidenceSummary {
 
         let diagnostic = format!(
             "call {}(): {:.6} * {:.4} = {:.6} (conservative, {} ops)",
-            self.function_name, input_confidence, self.min_degradation, output_confidence,
+            self.function_name,
+            input_confidence,
+            self.min_degradation,
+            output_confidence,
             self.operation_count
         );
 
@@ -751,11 +763,7 @@ impl PropagationChainBuilder {
 
     /// Finalize and return the composite result.
     pub fn build(self) -> ConfidenceFlowResult {
-        let total_degradation: f64 = self
-            .steps
-            .iter()
-            .map(|s| s.degradation_applied)
-            .product();
+        let total_degradation: f64 = self.steps.iter().map(|s| s.degradation_applied).product();
 
         let diagnostics: Vec<String> = self.steps.iter().map(|s| s.diagnostic.clone()).collect();
 
@@ -976,9 +984,9 @@ mod tests {
     fn test_composition_triple() {
         // log(sin(exp(x))): exp -> sin -> log
         let result = PropagationChainBuilder::new(1.0, 0.01)
-            .apply(NonlinearOp::Exp)  // * 0.95
-            .apply(NonlinearOp::Sin)  // * 0.98
-            .apply(NonlinearOp::Log)  // * 0.90
+            .apply(NonlinearOp::Exp) // * 0.95
+            .apply(NonlinearOp::Sin) // * 0.98
+            .apply(NonlinearOp::Log) // * 0.90
             .build();
 
         let expected = 0.95 * 0.98 * 0.90;

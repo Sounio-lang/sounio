@@ -734,6 +734,173 @@ impl MerkleProvenanceDAG {
     pub fn is_empty(&self) -> bool {
         self.nodes.is_empty()
     }
+
+    // ================================================================
+    // Provenance Query API for Merkle DAG
+    // ================================================================
+
+    /// Filter nodes by operation kind
+    pub fn filter_by_operation(&self, op_kind: OperationKind) -> Vec<&MerkleProvenanceNode> {
+        self.nodes
+            .values()
+            .filter(|n| n.operation.kind() == op_kind)
+            .collect()
+    }
+
+    /// Find a path between two hashes using BFS.
+    /// Traverses from `from` toward `to` following child edges (parent -> child).
+    pub fn find_path(&self, from: &Hash256, to: &Hash256) -> Option<Vec<Hash256>> {
+        if !self.nodes.contains_key(from) || !self.nodes.contains_key(to) {
+            return None;
+        }
+        if from == to {
+            return Some(vec![*from]);
+        }
+
+        // Build a children map
+        let mut children_map: HashMap<Hash256, Vec<Hash256>> = HashMap::new();
+        for (id, node) in &self.nodes {
+            for parent in &node.parents {
+                children_map.entry(*parent).or_default().push(*id);
+            }
+        }
+
+        // BFS from `from` to `to`
+        let mut queue = std::collections::VecDeque::new();
+        let mut visited: HashSet<Hash256> = HashSet::new();
+        let mut parent_map: HashMap<Hash256, Hash256> = HashMap::new();
+
+        queue.push_back(*from);
+        visited.insert(*from);
+
+        while let Some(current) = queue.pop_front() {
+            if current == *to {
+                // Reconstruct path
+                let mut path = vec![*to];
+                let mut node = *to;
+                while node != *from {
+                    node = parent_map[&node];
+                    path.push(node);
+                }
+                path.reverse();
+                return Some(path);
+            }
+            if let Some(children) = children_map.get(&current) {
+                for child in children {
+                    if !visited.contains(child) {
+                        visited.insert(*child);
+                        parent_map.insert(*child, current);
+                        queue.push_back(*child);
+                    }
+                }
+            }
+        }
+
+        None // No path found
+    }
+
+    /// Get all root-to-head paths
+    pub fn all_paths(&self) -> Vec<Vec<Hash256>> {
+        let mut result = Vec::new();
+        for root_id in &self.roots {
+            for head_id in &self.heads {
+                if let Some(path) = self.find_path(root_id, head_id) {
+                    result.push(path);
+                }
+            }
+        }
+        result
+    }
+
+    /// Filter nodes by minimum confidence factor
+    pub fn filter_by_min_confidence(&self, threshold: f64) -> Vec<&MerkleProvenanceNode> {
+        self.nodes
+            .values()
+            .filter(|n| n.operation.confidence_factor() >= threshold)
+            .collect()
+    }
+
+    /// Get the confidence chain for a specific node (product from roots to this node)
+    pub fn confidence_chain(&self, node_hash: &Hash256) -> Option<f64> {
+        let node = self.nodes.get(node_hash)?;
+        Some(self.confidence_factor_to(node))
+    }
+
+    /// Count nodes by operation kind, returning a map of kind name to count
+    pub fn count_by_operation(&self) -> HashMap<String, usize> {
+        let mut counts: HashMap<String, usize> = HashMap::new();
+        for node in self.nodes.values() {
+            *counts.entry(format!("{:?}", node.operation.kind())).or_insert(0) += 1;
+        }
+        counts
+    }
+
+    /// Find nodes with signatures from a specific authority
+    pub fn find_signed_by(&self, authority: &str) -> Vec<&MerkleProvenanceNode> {
+        self.nodes
+            .values()
+            .filter(|n| n.has_signature_from(authority))
+            .collect()
+    }
+
+    /// Get DAG depth (longest path from any root to any head)
+    pub fn dag_depth(&self) -> usize {
+        if self.nodes.is_empty() {
+            return 0;
+        }
+
+        // Build children map
+        let mut children_map: HashMap<Hash256, Vec<Hash256>> = HashMap::new();
+        for (id, node) in &self.nodes {
+            for parent in &node.parents {
+                children_map.entry(*parent).or_default().push(*id);
+            }
+        }
+
+        // BFS from roots, tracking maximum depth
+        let mut max_depth: usize = 0;
+        let mut depth_map: HashMap<Hash256, usize> = HashMap::new();
+
+        let mut queue = std::collections::VecDeque::new();
+        for root in &self.roots {
+            queue.push_back(*root);
+            depth_map.insert(*root, 1);
+        }
+
+        while let Some(current) = queue.pop_front() {
+            let current_depth = depth_map[&current];
+            if current_depth > max_depth {
+                max_depth = current_depth;
+            }
+            if let Some(children) = children_map.get(&current) {
+                for child in children {
+                    let child_depth = current_depth + 1;
+                    let existing = depth_map.get(child).copied().unwrap_or(0);
+                    if child_depth > existing {
+                        depth_map.insert(*child, child_depth);
+                        queue.push_back(*child);
+                    }
+                }
+            }
+        }
+
+        max_depth
+    }
+
+    /// Verify a subset of nodes by their hashes, returning (hash, is_valid) pairs
+    pub fn verify_subset(&self, hashes: &[Hash256]) -> Vec<(Hash256, bool)> {
+        hashes
+            .iter()
+            .map(|h| {
+                let valid = self
+                    .nodes
+                    .get(h)
+                    .map(|n| n.verify().is_ok())
+                    .unwrap_or(false);
+                (*h, valid)
+            })
+            .collect()
+    }
 }
 
 impl Default for MerkleProvenanceDAG {
@@ -1021,5 +1188,204 @@ mod tests {
         // Convert back
         let prov2 = Provenance::from(&dag);
         assert!(prov2.integrity_hash.is_some());
+    }
+
+    // ================================================================
+    // Merkle DAG Query API tests
+    // ================================================================
+
+    /// Helper: build a sample DAG for testing
+    /// root(Literal) -> transform(Transformation, 0.95) -> compute(Computation, 1.0)
+    fn sample_dag() -> (MerkleProvenanceDAG, Vec<Hash256>) {
+        let mut dag = MerkleProvenanceDAG::new();
+        let root = dag.add_root(ProvenanceOperation::literal("42"));
+        let t1 = dag.add_derived(
+            vec![root],
+            ProvenanceOperation::transformation("calibrate", 0.95),
+        );
+        let t2 = dag.add_derived(
+            vec![t1],
+            ProvenanceOperation::computation("compute"),
+        );
+        (dag, vec![root, t1, t2])
+    }
+
+    #[test]
+    fn test_filter_by_operation() {
+        let (dag, _) = sample_dag();
+        let literals = dag.filter_by_operation(OperationKind::Literal);
+        assert_eq!(literals.len(), 1);
+
+        let transforms = dag.filter_by_operation(OperationKind::Transformation);
+        assert_eq!(transforms.len(), 1);
+
+        let computations = dag.filter_by_operation(OperationKind::Computation);
+        assert_eq!(computations.len(), 1);
+
+        let measurements = dag.filter_by_operation(OperationKind::Measurement);
+        assert_eq!(measurements.len(), 0);
+    }
+
+    #[test]
+    fn test_find_path_linear() {
+        let (dag, ids) = sample_dag();
+        let path = dag.find_path(&ids[0], &ids[2]).unwrap();
+        assert_eq!(path.len(), 3);
+        assert_eq!(path[0], ids[0]);
+        assert_eq!(path[1], ids[1]);
+        assert_eq!(path[2], ids[2]);
+    }
+
+    #[test]
+    fn test_find_path_same_node() {
+        let (dag, ids) = sample_dag();
+        let path = dag.find_path(&ids[0], &ids[0]).unwrap();
+        assert_eq!(path.len(), 1);
+        assert_eq!(path[0], ids[0]);
+    }
+
+    #[test]
+    fn test_find_path_nonexistent() {
+        let (dag, ids) = sample_dag();
+        let fake = Hash256::from_bytes([0xff; 32]);
+        assert!(dag.find_path(&ids[0], &fake).is_none());
+    }
+
+    #[test]
+    fn test_find_path_reverse_direction() {
+        let (dag, ids) = sample_dag();
+        // head -> root direction: no path in forward traversal
+        assert!(dag.find_path(&ids[2], &ids[0]).is_none());
+    }
+
+    #[test]
+    fn test_all_paths() {
+        let (dag, ids) = sample_dag();
+        let paths = dag.all_paths();
+        assert_eq!(paths.len(), 1);
+        assert_eq!(paths[0][0], ids[0]);
+        assert_eq!(*paths[0].last().unwrap(), ids[2]);
+    }
+
+    #[test]
+    fn test_filter_by_min_confidence() {
+        let (dag, _) = sample_dag();
+        // Transformation has 0.95, computation defaults to 1.0, literal defaults to 1.0
+        let high_conf = dag.filter_by_min_confidence(0.99);
+        assert_eq!(high_conf.len(), 2); // literal(1.0) + computation(1.0)
+
+        let all_conf = dag.filter_by_min_confidence(0.5);
+        assert_eq!(all_conf.len(), 3);
+    }
+
+    #[test]
+    fn test_confidence_chain() {
+        let (dag, ids) = sample_dag();
+        // Root: literal -> confidence 1.0
+        let root_conf = dag.confidence_chain(&ids[0]).unwrap();
+        assert!((root_conf - 1.0).abs() < 0.001);
+
+        // Transform: 0.95 * root(1.0) = 0.95
+        let t1_conf = dag.confidence_chain(&ids[1]).unwrap();
+        assert!((t1_conf - 0.95).abs() < 0.001);
+
+        // Compute: 1.0 * 0.95 = 0.95
+        let t2_conf = dag.confidence_chain(&ids[2]).unwrap();
+        assert!((t2_conf - 0.95).abs() < 0.001);
+    }
+
+    #[test]
+    fn test_confidence_chain_nonexistent() {
+        let (dag, _) = sample_dag();
+        let fake = Hash256::from_bytes([0xff; 32]);
+        assert!(dag.confidence_chain(&fake).is_none());
+    }
+
+    #[test]
+    fn test_count_by_operation() {
+        let (dag, _) = sample_dag();
+        let counts = dag.count_by_operation();
+        assert_eq!(*counts.get("Literal").unwrap_or(&0), 1);
+        assert_eq!(*counts.get("Transformation").unwrap_or(&0), 1);
+        assert_eq!(*counts.get("Computation").unwrap_or(&0), 1);
+    }
+
+    #[test]
+    fn test_find_signed_by() {
+        let (mut dag, ids) = sample_dag();
+
+        // Sign the first node
+        let sig = ProvenanceSignature::new("FDA_authority", &[1u8; 64], &ids[0]);
+        dag.get_mut(&ids[0]).unwrap().sign(sig);
+
+        let signed = dag.find_signed_by("FDA_authority");
+        assert_eq!(signed.len(), 1);
+        assert_eq!(signed[0].id, ids[0]);
+
+        let empty = dag.find_signed_by("unknown_authority");
+        assert_eq!(empty.len(), 0);
+    }
+
+    #[test]
+    fn test_dag_depth_linear() {
+        let (dag, _) = sample_dag();
+        // root -> t1 -> t2 = depth 3
+        assert_eq!(dag.dag_depth(), 3);
+    }
+
+    #[test]
+    fn test_dag_depth_empty() {
+        let dag = MerkleProvenanceDAG::new();
+        assert_eq!(dag.dag_depth(), 0);
+    }
+
+    #[test]
+    fn test_dag_depth_branching() {
+        let mut dag = MerkleProvenanceDAG::new();
+        let r1 = dag.add_root(ProvenanceOperation::literal("a"));
+        let r2 = dag.add_root(ProvenanceOperation::literal("b"));
+        let merge = dag.add_derived(
+            vec![r1, r2],
+            ProvenanceOperation::computation("merge"),
+        );
+        let _final_node = dag.add_derived(
+            vec![merge],
+            ProvenanceOperation::transformation("finalize", 0.99),
+        );
+        // Longest path: r1 -> merge -> finalize = depth 3
+        assert_eq!(dag.dag_depth(), 3);
+    }
+
+    #[test]
+    fn test_verify_subset() {
+        let (dag, ids) = sample_dag();
+        let results = dag.verify_subset(&ids);
+        for (_, valid) in &results {
+            assert!(valid);
+        }
+
+        // Nonexistent hash should be invalid
+        let fake = Hash256::from_bytes([0xfe; 32]);
+        let results2 = dag.verify_subset(&[fake]);
+        assert!(!results2[0].1);
+    }
+
+    #[test]
+    fn test_all_paths_multi_root() {
+        let mut dag = MerkleProvenanceDAG::new();
+        let r1 = dag.add_root(ProvenanceOperation::measurement("sensor_a"));
+        let r2 = dag.add_root(ProvenanceOperation::measurement("sensor_b"));
+        let merged = dag.add_derived(
+            vec![r1, r2],
+            ProvenanceOperation::computation("average"),
+        );
+        let _ = dag.add_derived(
+            vec![merged],
+            ProvenanceOperation::transformation("scale", 0.9),
+        );
+
+        let paths = dag.all_paths();
+        // Both roots should produce a path to the head
+        assert_eq!(paths.len(), 2);
     }
 }

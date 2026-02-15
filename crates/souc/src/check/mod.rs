@@ -14,6 +14,7 @@
 // This is acceptable for maintainability in this context.
 #![allow(clippy::excessive_nesting)]
 
+pub mod causal;
 pub mod compatibility;
 pub mod conformal;
 pub mod dependent;
@@ -27,7 +28,9 @@ pub use conformal::{
     CalibrationExample, ConformalConfig, ConformalResult, ConformalTypeChecker,
     MondrianConformalChecker,
 };
-pub use dependent::{CheckResult, DependentType, DependentTypeChecker, DependentTypeConfig, RefinementValidator};
+pub use dependent::{
+    CheckResult, DependentType, DependentTypeChecker, DependentTypeConfig, RefinementValidator,
+};
 pub use probabilistic::{ProbabilisticTypeInference, SubtypePolymorphismChecker};
 
 #[cfg(test)]
@@ -46,6 +49,11 @@ use crate::ontology::version::DeprecationTracker;
 use crate::ontology::{OntologyResolver, ResolverConfig, SubsumptionResult};
 use crate::refinement::{
     Atom, BinOp as RefinementBinOp, CompareOp, Predicate, Term, solver::SimpleChecker,
+};
+#[cfg(feature = "smt")]
+use crate::refinement::{
+    Constraint, ConstraintReason,
+    solver::VerifyResult,
 };
 use crate::resolve;
 use crate::types::{
@@ -791,6 +799,60 @@ impl TypeChecker {
         }
     }
 
+    /// Verify a refinement predicate using the Z3 SMT solver.
+    ///
+    /// Called when SimpleChecker cannot evaluate a predicate (returns None).
+    /// Constructs a Constraint and delegates to the Z3Solver for full
+    /// satisfiability checking with counterexample extraction.
+    ///
+    /// Returns Ok(()) if valid or inconclusive, Err(msg) if Z3 proves invalid.
+    #[cfg(feature = "smt")]
+    fn verify_predicate_with_z3(
+        &self,
+        predicate: &Predicate,
+        base_type: &Type,
+    ) -> Result<(), String> {
+        use crate::refinement::constraint::Span as RefinementSpan;
+
+        let constraint = Constraint::new(
+            Vec::new(), // No environment bindings needed for fully-substituted predicates
+            predicate.clone(),
+            RefinementSpan::dummy(),
+            ConstraintReason::Assert {
+                message: "refinement type check".to_string(),
+            },
+        );
+
+        let cfg = z3::Config::new();
+        let ctx = z3::Context::new(&cfg);
+        let mut solver = crate::refinement::solver::Z3Solver::new(&ctx);
+        solver.set_timeout(1000); // 1-second timeout for compilation speed
+
+        let results = solver.verify(&[constraint]);
+        match results.first() {
+            Some(VerifyResult::Valid) => Ok(()),
+            Some(VerifyResult::Invalid { counterexample, .. }) => {
+                let mut msg = "does not satisfy refinement predicate".to_string();
+                if let Some(ce) = counterexample {
+                    msg.push_str(&format!(" ({})", ce));
+                }
+                Err(msg)
+            }
+            // Unknown or no result — accept conservatively (gradual typing)
+            _ => Ok(()),
+        }
+    }
+
+    /// Stub when Z3 is not available — accept conservatively.
+    #[cfg(not(feature = "smt"))]
+    fn verify_predicate_with_z3(
+        &self,
+        _predicate: &Predicate,
+        _base_type: &Type,
+    ) -> Result<(), String> {
+        Ok(())
+    }
+
     /// Check if a literal value satisfies a refinement predicate.
     /// Returns an error message if the check fails.
     fn check_literal_refinement(
@@ -814,7 +876,8 @@ impl TypeChecker {
                 "value {} does not satisfy refinement predicate",
                 value
             )),
-            None => Ok(()), // Can't evaluate, skip check
+            // SimpleChecker can't evaluate — try Z3 SMT solver
+            None => self.verify_predicate_with_z3(&substituted, &Type::I32),
         }
     }
 
@@ -893,7 +956,40 @@ impl TypeChecker {
                 "value {} does not satisfy refinement predicate",
                 value
             )),
-            None => Ok(()), // Can't evaluate, skip check
+            // SimpleChecker can't evaluate — try Z3 SMT solver
+            None => self.verify_predicate_with_z3(&substituted, &Type::F64),
+        }
+    }
+
+    /// Check if an arbitrary expression satisfies a refinement predicate.
+    ///
+    /// Converts the expression to a refinement Term and verifies the
+    /// substituted predicate using SimpleChecker (fast) then Z3 (thorough).
+    /// Used for non-literal arguments at function call sites.
+    fn check_expr_refinement(
+        &self,
+        arg_expr: &Expr,
+        var_name: &str,
+        predicate: &Expr,
+    ) -> Result<(), String> {
+        let pred = match self.expr_to_predicate(predicate, var_name) {
+            Some(p) => p,
+            None => return Ok(()), // Can't convert, skip check
+        };
+
+        let arg_term = match self.expr_to_term(arg_expr, var_name) {
+            Some(t) => t,
+            None => return Ok(()), // Can't convert, skip check
+        };
+
+        // Substitute the refinement variable with the argument expression
+        let substituted = pred.substitute(var_name, &arg_term);
+
+        match SimpleChecker::check(&substituted) {
+            Some(true) => Ok(()),
+            Some(false) => Err("expression does not satisfy refinement predicate".to_string()),
+            // SimpleChecker can't evaluate — try Z3 SMT solver
+            None => self.verify_predicate_with_z3(&substituted, &Type::I64),
         }
     }
 
@@ -3351,6 +3447,50 @@ impl TypeChecker {
                         );
                     }
 
+                    // Check refinement type constraint on let-binding
+                    // e.g., `let pos: { x: i32 | x > 0 } = 42` should verify 42 > 0
+                    if let Some(type_expr) = ty.as_ref() {
+                        if let TypeExpr::Refinement {
+                            var: ref_var,
+                            predicate: ref_pred,
+                            ..
+                        } = type_expr
+                        {
+                            if let Some(val_expr) = value.as_ref() {
+                                let check_result =
+                                    if let Some(int_val) = self.try_extract_const_value(val_expr) {
+                                        Some(self.check_literal_refinement(
+                                            int_val, ref_var, ref_pred,
+                                        ))
+                                    } else if let Some(float_val) =
+                                        self.try_extract_float_value(val_expr)
+                                    {
+                                        Some(self.check_float_literal_refinement(
+                                            float_val, ref_var, ref_pred,
+                                        ))
+                                    } else {
+                                        Some(self.check_expr_refinement(
+                                            val_expr, ref_var, ref_pred,
+                                        ))
+                                    };
+
+                                if let Some(Err(msg)) = check_result {
+                                    let value_span =
+                                        if let Some(ast_ref) = &self.ast {
+                                            self.expr_span(val_expr, ast_ref.as_ref())
+                                        } else {
+                                            Span::dummy()
+                                        };
+                                    self.error_with_code(
+                                        "E0600",
+                                        format!("refinement type violation: {}", msg),
+                                        value_span,
+                                    );
+                                }
+                            }
+                        }
+                    }
+
                     // Bind all variables in the pattern (supports tuple destructuring)
                     self.bind_pattern_to_type(pattern, &binding_ty, *is_mut);
 
@@ -4011,7 +4151,12 @@ impl TypeChecker {
                                             &refinement.predicate,
                                         ))
                                     } else {
-                                        None
+                                        // Non-literal argument: convert to term and try Z3
+                                        Some(self.check_expr_refinement(
+                                            arg_expr,
+                                            &refinement.var,
+                                            &refinement.predicate,
+                                        ))
                                     };
 
                                     if let Some(Err(msg)) = check_result {

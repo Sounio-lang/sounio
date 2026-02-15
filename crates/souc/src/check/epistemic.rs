@@ -1803,18 +1803,22 @@ pub fn propagate_epistemic_refinement_binary(
     use crate::types::epistemic::{RefinementMode, RefinementPropagation};
 
     let propagated_predicate = match op {
-        "add" | "+" => {
-            RefinementPropagation::propagate_add(&lhs_refinement.predicate, &rhs_refinement.predicate)
-        }
-        "mul" | "*" => {
-            RefinementPropagation::propagate_mul(&lhs_refinement.predicate, &rhs_refinement.predicate)
-        }
-        "div" | "/" => {
-            RefinementPropagation::propagate_div(&lhs_refinement.predicate, &rhs_refinement.predicate)
-        }
-        "sub" | "-" => {
-            RefinementPropagation::propagate_sub(&lhs_refinement.predicate, &rhs_refinement.predicate)
-        }
+        "add" | "+" => RefinementPropagation::propagate_add(
+            &lhs_refinement.predicate,
+            &rhs_refinement.predicate,
+        ),
+        "mul" | "*" => RefinementPropagation::propagate_mul(
+            &lhs_refinement.predicate,
+            &rhs_refinement.predicate,
+        ),
+        "div" | "/" => RefinementPropagation::propagate_div(
+            &lhs_refinement.predicate,
+            &rhs_refinement.predicate,
+        ),
+        "sub" | "-" => RefinementPropagation::propagate_sub(
+            &lhs_refinement.predicate,
+            &rhs_refinement.predicate,
+        ),
         _ => None,
     };
 
@@ -2849,10 +2853,7 @@ mod tests {
         assert!(RefinementPredicate::NonZero.check_value(-1.0));
         assert!(!RefinementPredicate::NonZero.check_value(0.0));
 
-        let range = RefinementPredicate::InRange {
-            lo: 0.0,
-            hi: 100.0,
-        };
+        let range = RefinementPredicate::InRange { lo: 0.0, hi: 100.0 };
         assert!(range.check_value(50.0));
         assert!(range.check_value(0.0));
         assert!(range.check_value(100.0));
@@ -2865,13 +2866,17 @@ mod tests {
         use crate::types::epistemic::{RefinementPredicate, RefinementPropagation};
 
         // Positive + Positive => Positive
-        let result =
-            RefinementPropagation::propagate_add(&RefinementPredicate::Positive, &RefinementPredicate::Positive);
+        let result = RefinementPropagation::propagate_add(
+            &RefinementPredicate::Positive,
+            &RefinementPredicate::Positive,
+        );
         assert_eq!(result, Some(RefinementPredicate::Positive));
 
         // Positive + NonNegative => Positive
-        let result =
-            RefinementPropagation::propagate_add(&RefinementPredicate::Positive, &RefinementPredicate::NonNegative);
+        let result = RefinementPropagation::propagate_add(
+            &RefinementPredicate::Positive,
+            &RefinementPredicate::NonNegative,
+        );
         assert_eq!(result, Some(RefinementPredicate::Positive));
 
         // NonNegative + NonNegative => NonNegative
@@ -2886,14 +2891,8 @@ mod tests {
     fn test_refinement_propagation_add_range() {
         use crate::types::epistemic::{RefinementPredicate, RefinementPropagation};
 
-        let r1 = RefinementPredicate::InRange {
-            lo: 1.0,
-            hi: 10.0,
-        };
-        let r2 = RefinementPredicate::InRange {
-            lo: 2.0,
-            hi: 5.0,
-        };
+        let r1 = RefinementPredicate::InRange { lo: 1.0, hi: 10.0 };
+        let r2 = RefinementPredicate::InRange { lo: 2.0, hi: 5.0 };
         let result = RefinementPropagation::propagate_add(&r1, &r2);
         match result {
             Some(RefinementPredicate::InRange { lo, hi }) => {
@@ -2916,13 +2915,17 @@ mod tests {
         assert_eq!(result, Some(RefinementPredicate::NonNegative));
 
         // Positive * Positive => Positive
-        let result =
-            RefinementPropagation::propagate_mul(&RefinementPredicate::Positive, &RefinementPredicate::Positive);
+        let result = RefinementPropagation::propagate_mul(
+            &RefinementPredicate::Positive,
+            &RefinementPredicate::Positive,
+        );
         assert_eq!(result, Some(RefinementPredicate::Positive));
 
         // NonZero * NonZero => NonZero
-        let result =
-            RefinementPropagation::propagate_mul(&RefinementPredicate::NonZero, &RefinementPredicate::NonZero);
+        let result = RefinementPropagation::propagate_mul(
+            &RefinementPredicate::NonZero,
+            &RefinementPredicate::NonZero,
+        );
         assert_eq!(result, Some(RefinementPredicate::NonZero));
     }
 
@@ -2931,13 +2934,17 @@ mod tests {
         use crate::types::epistemic::{RefinementPredicate, RefinementPropagation};
 
         // Positive / Positive => Positive
-        let result =
-            RefinementPropagation::propagate_div(&RefinementPredicate::Positive, &RefinementPredicate::Positive);
+        let result = RefinementPropagation::propagate_div(
+            &RefinementPredicate::Positive,
+            &RefinementPredicate::Positive,
+        );
         assert_eq!(result, Some(RefinementPredicate::Positive));
 
         // NonNegative / Positive => NonNegative
-        let result =
-            RefinementPropagation::propagate_div(&RefinementPredicate::NonNegative, &RefinementPredicate::Positive);
+        let result = RefinementPropagation::propagate_div(
+            &RefinementPredicate::NonNegative,
+            &RefinementPredicate::Positive,
+        );
         assert_eq!(result, Some(RefinementPredicate::NonNegative));
     }
 
@@ -3031,9 +3038,7 @@ mod tests {
 
     #[test]
     fn test_propagate_epistemic_refinement_binary_no_propagation() {
-        use crate::types::epistemic::{
-            EpistemicRefinement as EpRefinement, RefinementPredicate,
-        };
+        use crate::types::epistemic::{EpistemicRefinement as EpRefinement, RefinementPredicate};
 
         // NonZero + Positive => None (cannot guarantee any refinement for addition)
         let lhs = EpRefinement::gradual(RefinementPredicate::NonZero, 0.8);
@@ -3045,10 +3050,8 @@ mod tests {
 
     #[test]
     fn test_knowledge_type_with_refinement() {
-        use crate::types::epistemic::{
-            EpistemicRefinement as EpRefinement, RefinementPredicate,
-        };
-        use crate::types::{KnowledgeType, Type, ConfidenceBound as TypeConfBound};
+        use crate::types::epistemic::{EpistemicRefinement as EpRefinement, RefinementPredicate};
+        use crate::types::{ConfidenceBound as TypeConfBound, KnowledgeType, Type};
 
         let kt = KnowledgeType::new(Type::F64)
             .with_confidence(TypeConfBound::at_least(0.9))
@@ -3062,9 +3065,7 @@ mod tests {
 
     #[test]
     fn test_epistemic_refinement_display() {
-        use crate::types::epistemic::{
-            EpistemicRefinement as EpRefinement, RefinementPredicate,
-        };
+        use crate::types::epistemic::{EpistemicRefinement as EpRefinement, RefinementPredicate};
 
         let refinement = EpRefinement::strict(RefinementPredicate::Positive, 0.9);
         let display = format!("{}", refinement);
@@ -3081,11 +3082,7 @@ mod tests {
         assert_eq!(RefinementPredicate::NonNegative.description(), "x >= 0");
         assert_eq!(RefinementPredicate::NonZero.description(), "x != 0");
         assert_eq!(
-            RefinementPredicate::InRange {
-                lo: 0.0,
-                hi: 100.0
-            }
-            .description(),
+            RefinementPredicate::InRange { lo: 0.0, hi: 100.0 }.description(),
             "0 <= x <= 100"
         );
         assert_eq!(
@@ -3098,14 +3095,8 @@ mod tests {
     fn test_refinement_propagation_sub_range() {
         use crate::types::epistemic::{RefinementPredicate, RefinementPropagation};
 
-        let r1 = RefinementPredicate::InRange {
-            lo: 10.0,
-            hi: 20.0,
-        };
-        let r2 = RefinementPredicate::InRange {
-            lo: 1.0,
-            hi: 5.0,
-        };
+        let r1 = RefinementPredicate::InRange { lo: 10.0, hi: 20.0 };
+        let r2 = RefinementPredicate::InRange { lo: 1.0, hi: 5.0 };
 
         let result = RefinementPropagation::propagate_sub(&r1, &r2);
         match result {

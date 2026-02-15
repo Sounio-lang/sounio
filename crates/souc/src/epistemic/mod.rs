@@ -69,6 +69,10 @@ pub mod refined_epistemic;
 // SIMD-accelerated epistemic operations
 pub mod simd_knowledge;
 
+// Evidence collection and temporal validity enforcement
+pub mod evidence_collector;
+pub mod temporal_validity;
+
 pub use confidence::{Confidence, EpistemicStatus, Evidence, EvidenceKind, Revisability, Source};
 pub use heterogeneity::{
     HeterogeneityConfig, HeterogeneityResolver, ResolutionResult, ResolutionStrategy,

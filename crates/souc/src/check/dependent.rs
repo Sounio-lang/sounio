@@ -10,14 +10,19 @@
 
 use crate::check::TypeEnv;
 use crate::common::Span;
-use crate::dependent::{
-    ProofResult, ProofSearchConfig, ProofSearcher, SearchStrategy, TypeContext as DepTypeContext,
-};
 use crate::dependent::predicates::{
     ConfidencePredicate, Predicate as EpistemicPredicate, PredicateKind,
 };
 use crate::dependent::types::ConfidenceType;
+use crate::dependent::{
+    ProofResult, ProofSearchConfig, ProofSearcher, SearchStrategy, TypeContext as DepTypeContext,
+};
 use crate::refinement::{Predicate, solver::SimpleChecker};
+#[cfg(feature = "smt")]
+use crate::refinement::{
+    constraint::{Constraint, ConstraintReason, Span as RefinementSpan},
+    solver::{VerifyResult, Z3Solver},
+};
 use crate::types::Type;
 use std::collections::HashMap;
 
@@ -94,9 +99,7 @@ pub struct DependentTypeChecker {
 impl DependentTypeChecker {
     pub fn new(config: DependentTypeConfig) -> Self {
         let dep_ctx = if config.allow_gradual {
-            DepTypeContext::with_gradual(
-                crate::dependent::GradualMode::Permissive,
-            )
+            DepTypeContext::with_gradual(crate::dependent::GradualMode::Permissive)
         } else {
             DepTypeContext::new()
         };
@@ -156,6 +159,17 @@ impl DependentTypeChecker {
                 }
             }
         } else {
+            // Stage 2.5: Z3 SMT solver for general arithmetic predicates
+            if let Some(result) = try_z3_verify(predicate) {
+                let key = format!("{:?}", predicate);
+                self.satisfied_constraints.insert(key, result);
+                if result {
+                    return Ok(true);
+                } else {
+                    return Err("Z3 proved refinement predicate unsatisfiable".to_string());
+                }
+            }
+
             // Stage 3: Cannot analyze — accept conservatively if gradual mode
             if self.config.allow_gradual {
                 Ok(true)
@@ -207,11 +221,7 @@ impl DependentTypeChecker {
     }
 
     /// Check a confidence bound: verify that confidence >= threshold
-    pub fn check_confidence_bound(
-        &mut self,
-        var_name: &str,
-        threshold: f64,
-    ) -> CheckResult {
+    pub fn check_confidence_bound(&mut self, var_name: &str, threshold: f64) -> CheckResult {
         let pred = EpistemicPredicate::confidence_geq(
             ConfidenceType::Var(var_name.to_string()),
             ConfidenceType::Literal(threshold),
@@ -238,6 +248,10 @@ impl DependentTypeChecker {
         // Try epistemic proof search
         if let Some(ep) = translate_to_epistemic(constraint) {
             return self.prove_epistemic(&ep).is_satisfied();
+        }
+        // Try Z3 SMT solver
+        if let Some(result) = try_z3_verify(constraint) {
+            return result;
         }
         // Conservative: accept in gradual mode
         self.config.allow_gradual
@@ -280,6 +294,8 @@ impl DependentTypeChecker {
                     CheckResult::Disproven { reason } => return Err(reason),
                     CheckResult::Deferred { .. } => {}
                 }
+            } else if let Some(false) = try_z3_verify(pred) {
+                return Err("Z3 proved refinement predicate unsatisfiable".to_string());
             }
         }
 
@@ -337,6 +353,8 @@ impl RefinementValidator {
                 CheckResult::Disproven { reason } => return Err(reason),
                 _ => {}
             }
+        } else if let Some(false) = try_z3_verify(predicate) {
+            return Err("Z3 proved refinement predicate unsatisfiable".to_string());
         }
 
         Ok(())
@@ -355,9 +373,48 @@ impl RefinementValidator {
             return checker.prove_epistemic(&ep).is_satisfied();
         }
 
+        // Z3 SMT solver
+        if let Some(result) = try_z3_verify(predicate) {
+            return result;
+        }
+
         // Conservative: accept in gradual mode
         self.config.allow_gradual
     }
+}
+
+/// Try to verify a predicate using the Z3 SMT solver.
+///
+/// Returns `Some(true)` if Z3 proves valid, `Some(false)` if Z3 proves invalid,
+/// `None` if Z3 is inconclusive (timeout, unknown). Used as a fallback when
+/// SimpleChecker returns `None` and the predicate has no epistemic interpretation.
+#[cfg(feature = "smt")]
+fn try_z3_verify(predicate: &Predicate) -> Option<bool> {
+    let constraint = Constraint::new(
+        Vec::new(),
+        predicate.clone(),
+        RefinementSpan::dummy(),
+        ConstraintReason::Assert {
+            message: "dependent type refinement check".to_string(),
+        },
+    );
+
+    let cfg = z3::Config::new();
+    let ctx = z3::Context::new(&cfg);
+    let mut solver = Z3Solver::new(&ctx);
+    solver.set_timeout(1000);
+
+    let results = solver.verify(&[constraint]);
+    match results.first() {
+        Some(VerifyResult::Valid) => Some(true),
+        Some(VerifyResult::Invalid { .. }) => Some(false),
+        _ => None,
+    }
+}
+
+#[cfg(not(feature = "smt"))]
+fn try_z3_verify(_predicate: &Predicate) -> Option<bool> {
+    None
 }
 
 /// Translate a refinement predicate to an epistemic predicate where possible.
@@ -371,16 +428,13 @@ fn translate_to_epistemic(pred: &Predicate) -> Option<EpistemicPredicate> {
         Predicate::True => Some(EpistemicPredicate::true_()),
         Predicate::False => Some(EpistemicPredicate::false_()),
 
-        Predicate::Not(inner) => {
-            translate_to_epistemic(inner).map(EpistemicPredicate::not)
-        }
+        Predicate::Not(inner) => translate_to_epistemic(inner).map(EpistemicPredicate::not),
 
         Predicate::And(preds) => {
             let eps: Vec<_> = preds.iter().filter_map(translate_to_epistemic).collect();
             if eps.len() == preds.len() {
                 // All translated successfully — fold into conjunction
-                eps.into_iter()
-                    .reduce(EpistemicPredicate::and)
+                eps.into_iter().reduce(EpistemicPredicate::and)
             } else {
                 None
             }
@@ -389,8 +443,7 @@ fn translate_to_epistemic(pred: &Predicate) -> Option<EpistemicPredicate> {
         Predicate::Or(preds) => {
             let eps: Vec<_> = preds.iter().filter_map(translate_to_epistemic).collect();
             if eps.len() == preds.len() {
-                eps.into_iter()
-                    .reduce(EpistemicPredicate::or)
+                eps.into_iter().reduce(EpistemicPredicate::or)
             } else {
                 None
             }
@@ -432,22 +485,14 @@ fn translate_atom_to_epistemic(atom: &crate::refinement::Atom) -> Option<Epistem
     match (lhs_conf, rhs_conf) {
         (Some(lc), Some(rc)) => {
             let pred = match atom.op {
-                CompareOp::Ge | CompareOp::Gt => {
-                    ConfidencePredicate::Geq(lc, rc)
-                }
-                CompareOp::Le | CompareOp::Lt => {
-                    ConfidencePredicate::Leq(lc, rc)
-                }
-                CompareOp::Eq => {
-                    ConfidencePredicate::Eq(lc, rc)
-                }
+                CompareOp::Ge | CompareOp::Gt => ConfidencePredicate::Geq(lc, rc),
+                CompareOp::Le | CompareOp::Lt => ConfidencePredicate::Leq(lc, rc),
+                CompareOp::Eq => ConfidencePredicate::Eq(lc, rc),
                 CompareOp::Ne => {
                     // ε ≠ threshold → ¬(ε = threshold)
-                    return Some(EpistemicPredicate::not(
-                        EpistemicPredicate::new(PredicateKind::Confidence(
-                            ConfidencePredicate::Eq(lc, rc),
-                        )),
-                    ));
+                    return Some(EpistemicPredicate::not(EpistemicPredicate::new(
+                        PredicateKind::Confidence(ConfidencePredicate::Eq(lc, rc)),
+                    )));
                 }
             };
             Some(EpistemicPredicate::new(PredicateKind::Confidence(pred)))
@@ -744,7 +789,7 @@ mod tests {
         let result = checker.check_confidence_bound("unknown_var", 0.90);
         match result {
             CheckResult::Deferred { .. } => {}
-            CheckResult::Proven => {}  // Also acceptable if search is conservative
+            CheckResult::Proven => {} // Also acceptable if search is conservative
             other => panic!(
                 "Expected Deferred or Proven in gradual mode, got {:?}",
                 other
@@ -832,6 +877,9 @@ mod tests {
         });
         let ep2 = translate_to_epistemic(&pred2);
         // 42.0 is outside [0,1] range so rhs won't be a ConfidenceType
-        assert!(ep2.is_none(), "Non-confidence comparison should not translate");
+        assert!(
+            ep2.is_none(),
+            "Non-confidence comparison should not translate"
+        );
     }
 }

@@ -598,7 +598,9 @@ impl CausalPredicate {
         // 1. Relevance: Z must be associated with X
         // Check: Z is an ancestor of X (or directly connected)
         if !graph.has_directed_path(instrument, treatment)
-            && !graph.edges.contains(&(instrument.to_string(), treatment.to_string()))
+            && !graph
+                .edges
+                .contains(&(instrument.to_string(), treatment.to_string()))
         {
             return false;
         }

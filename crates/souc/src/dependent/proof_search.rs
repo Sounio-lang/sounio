@@ -638,10 +638,7 @@ impl<'a> ProofSearcher<'a> {
                     ))
                 } else {
                     ProofResult::Disproven {
-                        reason: format!(
-                            "{:?} not d-separated from {:?} given {:?}",
-                            x, y, z
-                        ),
+                        reason: format!("{:?} not d-separated from {:?} given {:?}", x, y, z),
                     }
                 }
             }
@@ -816,10 +813,9 @@ impl<'a> ProofSearcher<'a> {
         let candidates_vec: Vec<_> = candidates.iter().cloned().collect();
         for i in 0..candidates_vec.len() {
             for j in (i + 1)..candidates_vec.len() {
-                let pair: HashSet<String> =
-                    [candidates_vec[i].clone(), candidates_vec[j].clone()]
-                        .into_iter()
-                        .collect();
+                let pair: HashSet<String> = [candidates_vec[i].clone(), candidates_vec[j].clone()]
+                    .into_iter()
+                    .collect();
                 if CausalPredicate::check_backdoor(graph, treatment, outcome, &pair) {
                     return Some(pair);
                 }
@@ -1069,51 +1065,62 @@ impl<'a> ProofSearcher<'a> {
         use crate::smt::formula::{SmtFormula, SmtTerm};
 
         match pred {
-            CausalPredicate::Identifiable { graph, treatment, outcome } => {
+            CausalPredicate::Identifiable {
+                graph,
+                treatment,
+                outcome,
+            } => {
                 // identifiable(G, X, Y) iff ∃Z. backdoor(G, X, Y, Z) ∨ ∃M. frontdoor(G, X, Y, M)
                 // Encode as: there exists a set of nodes that satisfies the criterion
                 // For SMT: encode the graph structure and check satisfiability
                 let has_path = SmtTerm::Bool(graph.has_directed_path(treatment, outcome));
-                let has_confounding = SmtTerm::Bool(
-                    graph.bidirected.iter().any(|(a, b)| {
-                        (a == treatment && b == outcome) || (b == treatment && a == outcome)
-                    }),
-                );
+                let has_confounding = SmtTerm::Bool(graph.bidirected.iter().any(|(a, b)| {
+                    (a == treatment && b == outcome) || (b == treatment && a == outcome)
+                }));
                 // identifiable if: path exists AND (no confounding OR adjustment exists)
-                SmtFormula::And(
-                    Box::new(SmtFormula::Term(has_path)),
-                    Box::new(SmtFormula::Or(
-                        Box::new(SmtFormula::Not(Box::new(SmtFormula::Term(has_confounding)))),
-                        Box::new(SmtFormula::Term(SmtTerm::Bool(
+                SmtFormula::And(vec![
+                    SmtFormula::Term(has_path),
+                    SmtFormula::Or(vec![
+                        SmtFormula::Not(Box::new(SmtFormula::Term(has_confounding))),
+                        SmtFormula::Term(SmtTerm::Bool(
                             self.find_backdoor_set(graph, treatment, outcome).is_some()
                                 || self.find_frontdoor_set(graph, treatment, outcome).is_some()
                                 || self.find_instrument(graph, treatment, outcome).is_some(),
-                        ))),
-                    )),
-                )
+                        )),
+                    ]),
+                ])
             }
 
             CausalPredicate::DSeparated { graph, x, y, z } => {
                 SmtFormula::Term(SmtTerm::Bool(graph.d_separated(x, y, z)))
             }
 
-            CausalPredicate::BackdoorSatisfied { graph, treatment, outcome, adjustment } => {
-                SmtFormula::Term(SmtTerm::Bool(
-                    CausalPredicate::check_backdoor(graph, treatment, outcome, adjustment),
-                ))
-            }
+            CausalPredicate::BackdoorSatisfied {
+                graph,
+                treatment,
+                outcome,
+                adjustment,
+            } => SmtFormula::Term(SmtTerm::Bool(CausalPredicate::check_backdoor(
+                graph, treatment, outcome, adjustment,
+            ))),
 
-            CausalPredicate::FrontdoorSatisfied { graph, treatment, outcome, mediators } => {
-                SmtFormula::Term(SmtTerm::Bool(
-                    CausalPredicate::check_frontdoor(graph, treatment, outcome, mediators),
-                ))
-            }
+            CausalPredicate::FrontdoorSatisfied {
+                graph,
+                treatment,
+                outcome,
+                mediators,
+            } => SmtFormula::Term(SmtTerm::Bool(CausalPredicate::check_frontdoor(
+                graph, treatment, outcome, mediators,
+            ))),
 
-            CausalPredicate::InstrumentValid { graph, instrument, treatment, outcome } => {
-                SmtFormula::Term(SmtTerm::Bool(
-                    CausalPredicate::check_instrument(graph, instrument, treatment, outcome),
-                ))
-            }
+            CausalPredicate::InstrumentValid {
+                graph,
+                instrument,
+                treatment,
+                outcome,
+            } => SmtFormula::Term(SmtTerm::Bool(CausalPredicate::check_instrument(
+                graph, instrument, treatment, outcome,
+            ))),
 
             CausalPredicate::Unconfounded { graph, x, y } => {
                 let canonical = if x < y {
@@ -1181,7 +1188,10 @@ impl<'a> ProofSearcher<'a> {
 
     /// Translate ConfidencePredicate to SmtFormula
     #[cfg(feature = "smt")]
-    fn translate_confidence_to_smt(&self, pred: &ConfidencePredicate) -> crate::smt::formula::SmtFormula {
+    fn translate_confidence_to_smt(
+        &self,
+        pred: &ConfidencePredicate,
+    ) -> crate::smt::formula::SmtFormula {
         use crate::smt::formula::{SmtFormula, SmtTerm};
 
         match pred {
@@ -1243,7 +1253,11 @@ impl<'a> ProofSearcher<'a> {
                 SmtTerm::Sub(Box::new(one), Box::new(product))
             }
 
-            ConfidenceType::Decay { base, lambda, elapsed } => {
+            ConfidenceType::Decay {
+                base,
+                lambda,
+                elapsed,
+            } => {
                 // base * exp(-lambda * t)
                 let base_term = self.confidence_type_to_term(base);
                 let t = SmtTerm::Real(elapsed.as_secs_f64());
@@ -1272,7 +1286,11 @@ impl<'a> ProofSearcher<'a> {
                 SmtTerm::App("max".to_string(), vec![a_term, b_term])
             }
 
-            ConfidenceType::Conditional { prior, likelihood, evidence } => {
+            ConfidenceType::Conditional {
+                prior,
+                likelihood,
+                evidence,
+            } => {
                 // P(H|E) = P(E|H) * P(H) / P(E)
                 let prior_term = self.confidence_type_to_term(prior);
                 let likelihood_term = self.confidence_type_to_term(likelihood);

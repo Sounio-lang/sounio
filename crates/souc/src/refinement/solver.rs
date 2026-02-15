@@ -146,7 +146,7 @@ impl<'ctx> Z3Solver<'ctx> {
     /// Set the solver timeout
     pub fn set_timeout(&mut self, ms: u32) {
         self.timeout_ms = ms;
-        let params = z3::Params::new(self.ctx);
+        let mut params = z3::Params::new(self.ctx);
         params.set_u32("timeout", ms);
         self.solver.set_params(&params);
     }
@@ -290,7 +290,7 @@ impl<'ctx> Z3Solver<'ctx> {
 
     /// Translate a predicate to Z3
     fn translate_predicate(&mut self, pred: &Predicate) -> Option<z3::ast::Bool<'ctx>> {
-        use z3::ast::Bool;
+        use z3::ast::{Ast, Bool};
 
         match pred {
             Predicate::True => Some(Bool::from_bool(self.ctx, true)),
@@ -340,7 +340,7 @@ impl<'ctx> Z3Solver<'ctx> {
                 let body_z3 = self.translate_predicate(body)?;
 
                 // Create forall quantifier
-                let bound_vars: Vec<_> = vec![&var_ast];
+                let bound_vars: Vec<&dyn Ast> = vec![&var_ast];
                 Some(z3::ast::forall_const(self.ctx, &bound_vars, &[], &body_z3))
             }
 
@@ -351,7 +351,7 @@ impl<'ctx> Z3Solver<'ctx> {
                 let body_z3 = self.translate_predicate(body)?;
 
                 // Create exists quantifier
-                let bound_vars: Vec<_> = vec![&var_ast];
+                let bound_vars: Vec<&dyn Ast> = vec![&var_ast];
                 Some(z3::ast::exists_const(self.ctx, &bound_vars, &[], &body_z3))
             }
 
@@ -379,6 +379,7 @@ impl<'ctx> Z3Solver<'ctx> {
 
     /// Translate an atomic predicate
     fn translate_atom(&mut self, atom: &Atom) -> Option<z3::ast::Bool<'ctx>> {
+        use z3::ast::Ast;
         let lhs = self.translate_term(&atom.lhs)?;
         let rhs = self.translate_term(&atom.rhs)?;
 
@@ -436,7 +437,7 @@ impl<'ctx> Z3Solver<'ctx> {
 
     /// Translate a term to Z3
     fn translate_term(&mut self, term: &Term) -> Option<z3::ast::Dynamic<'ctx>> {
-        use z3::ast::{Bool, Dynamic, Int, Real};
+        use z3::ast::{Ast, Bool, Int, Real};
 
         match term {
             Term::Var(name) => {
@@ -622,7 +623,7 @@ impl<'ctx> Z3Solver<'ctx> {
     ) -> Option<z3::ast::Dynamic<'ctx>> {
         use z3::ast::{Int, Real};
 
-        match (name, args.as_slice()) {
+        match (name, args) {
             // sample_complexity(d, eps, delta) -> (1/eps²) * (d * ln(1/eps) + ln(1/delta))
             // We approximate this with a conservative lower bound: 100 * d / (eps * eps)
             ("sample_complexity", [d, eps, delta]) => {
@@ -701,7 +702,7 @@ impl<'ctx> Z3Solver<'ctx> {
                     // Bound decreases with more samples (monotonicity)
                     let m_real = Int::to_real(&m_z3);
                     let m_inv = Real::from_real(self.ctx, 1, 1).div(&m_real);
-                    let sqrt_bound = kl_z3.add(&[&m_inv]); // Simplified approximation
+                    let sqrt_bound = Real::add(self.ctx, &[&kl_z3, &m_inv]); // Simplified approximation
                     self.solver.assert(&result_var.le(&sqrt_bound));
 
                     // Bound increases with KL divergence
@@ -738,7 +739,7 @@ impl<'ctx> Z3Solver<'ctx> {
 
                     // VC dim <= 4 * W * log2(W) (approximate upper bound)
                     // Simplified: VC dim <= W^2 for small W
-                    let w_squared = w_z3.mul(&[&w_z3]);
+                    let w_squared = Int::mul(self.ctx, &[&w_z3, &w_z3]);
                     self.solver.assert(&result_var.le(&w_squared));
 
                     // VC dim >= W (lower bound)
@@ -807,7 +808,7 @@ impl<'ctx> Z3Solver<'ctx> {
         eps: &z3::ast::Real<'ctx>,
         delta: &z3::ast::Real<'ctx>,
     ) {
-        use z3::ast::{Int, Real};
+        use z3::ast::{Bool, Int, Real};
 
         let zero = Real::from_real(self.ctx, 0, 1);
         let one = Real::from_real(self.ctx, 1, 1);
@@ -815,10 +816,10 @@ impl<'ctx> Z3Solver<'ctx> {
         let one_int = Int::from_i64(self.ctx, 1);
 
         // Valid parameter constraints
-        let valid_eps = eps.gt(&zero).and(&[&eps.lt(&one)]);
-        let valid_delta = delta.gt(&zero).and(&[&delta.lt(&one)]);
+        let valid_eps = Bool::and(self.ctx, &[&eps.gt(&zero), &eps.lt(&one)]);
+        let valid_delta = Bool::and(self.ctx, &[&delta.gt(&zero), &delta.lt(&one)]);
         let valid_d = d.gt(&zero_int);
-        let valid_params = valid_eps.and(&[&valid_delta, &valid_d]);
+        let valid_params = Bool::and(self.ctx, &[&valid_eps, &valid_delta, &valid_d]);
 
         // Axiom 1: Sample complexity is positive for valid inputs
         self.solver.assert(&z3::ast::Bool::implies(
@@ -834,11 +835,11 @@ impl<'ctx> Z3Solver<'ctx> {
         // This is a simplified but sound approximation
         // For eps = 0.1: result >= 100 * d
         // For eps = 0.01: result >= 10000 * d
-        let eps_sq = eps.mul(&[eps]);
+        let eps_sq = Real::mul(self.ctx, &[eps, eps]);
         let eps_sq_inv = one.div(&eps_sq);
         let d_real = Int::to_real(d);
         let ten = Real::from_real(self.ctx, 10, 1);
-        let lower_bound_real = ten.mul(&[&d_real, &eps_sq_inv]);
+        let lower_bound_real = Real::mul(self.ctx, &[&ten, &d_real, &eps_sq_inv]);
 
         // Convert to int ceiling (approximate)
         // We use a weaker bound: result >= d (always true and sound)
@@ -861,17 +862,17 @@ impl<'ctx> Z3Solver<'ctx> {
         m: &z3::ast::Int<'ctx>,
         delta: &z3::ast::Real<'ctx>,
     ) {
-        use z3::ast::{Int, Real};
+        use z3::ast::{Bool, Int, Real};
 
         let zero = Real::from_real(self.ctx, 0, 1);
         let one = Real::from_real(self.ctx, 1, 1);
         let zero_int = Int::from_i64(self.ctx, 0);
 
         // Valid parameter constraints
-        let valid_delta = delta.gt(&zero).and(&[&delta.lt(&one)]);
+        let valid_delta = Bool::and(self.ctx, &[&delta.gt(&zero), &delta.lt(&one)]);
         let valid_d = d.gt(&zero_int);
         let valid_m = m.gt(&zero_int);
-        let valid_params = valid_delta.and(&[&valid_d, &valid_m]);
+        let valid_params = Bool::and(self.ctx, &[&valid_delta, &valid_d, &valid_m]);
 
         // Axiom 1: Generalization bound is non-negative
         self.solver
@@ -889,8 +890,9 @@ impl<'ctx> Z3Solver<'ctx> {
 
         // We can't easily do sqrt in SMT, so use a weaker bound
         // result <= d / m (which is >= sqrt(d/m) when d/m < 1)
+        let valid_and_enough = Bool::and(self.ctx, &[&valid_params, &m.ge(d)]);
         self.solver.assert(&z3::ast::Bool::implies(
-            &valid_params.and(&[&m.ge(d)]),
+            &valid_and_enough,
             &result.le(&ratio),
         ));
     }

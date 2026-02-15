@@ -320,7 +320,7 @@ impl MerkleProvenanceDAG {
         let to_depth = self.depth_to_node(to);
 
         // Find path between nodes
-        let path = self.find_path(from, to)?;
+        let path = self.find_path_bfs(from, to)?;
 
         let mut operations = Vec::new();
         let mut degrading_operations = Vec::new();
@@ -364,8 +364,8 @@ impl MerkleProvenanceDAG {
         })
     }
 
-    /// Find a path between two nodes (if one exists)
-    fn find_path(&self, from: &Hash256, to: &Hash256) -> Option<Vec<Hash256>> {
+    /// Find a path between two nodes via bidirectional BFS
+    fn find_path_bfs(&self, from: &Hash256, to: &Hash256) -> Option<Vec<Hash256>> {
         // BFS from 'from' to 'to'
         let mut queue = VecDeque::new();
         let mut visited = HashSet::new();
