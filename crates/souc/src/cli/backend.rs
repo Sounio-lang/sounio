@@ -727,7 +727,7 @@ pub fn compile(args: &BuildArgs) -> CompileOutput {
     // Dispatch to appropriate backend
     let result = match args.backend {
         Backend::Native => compile_native(args),
-        Backend::SelfhostedNative => compile_native(args),
+        Backend::SelfhostedNative => compile_selfhosted_native(args),
         Backend::Llvm => compile_llvm(args),
         Backend::Cranelift => compile_cranelift(args),
         Backend::Gpu => compile_gpu(args),
@@ -756,6 +756,28 @@ pub fn compile(args: &BuildArgs) -> CompileOutput {
     }
 
     output
+}
+
+/// Compile using self-hosted native backend (Phase 6: compile_to_elf via Sounio VM)
+fn compile_selfhosted_native(args: &BuildArgs) -> Result<(PathBuf, Option<NativeMetrics>), String> {
+    let input_path = &args.input[0];
+    let output_path = args.output.clone().unwrap_or_else(|| PathBuf::from("a.out"));
+
+    if args.verbose {
+        println!("Self-hosted native backend: {} -> {}", input_path.display(), output_path.display());
+    }
+
+    let mut compiler = crate::compiler_loader::SounioCompiler::new_embedded()
+        .map_err(|e| format!("Failed to initialize self-hosted compiler: {}", e))?;
+
+    compiler
+        .compile_file_to_native(
+            &input_path.to_string_lossy(),
+            &output_path.to_string_lossy(),
+        )
+        .map_err(|e| format!("Self-hosted native compilation failed: {}", e))?;
+
+    Ok((output_path, None))
 }
 
 /// Compile using native backend

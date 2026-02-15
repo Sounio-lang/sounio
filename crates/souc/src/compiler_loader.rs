@@ -1515,7 +1515,16 @@ fn main() -> CompileArtifact with IO, Mut, Div, Panic {
             })?;
 
             let path = cache_dir.join(filename);
-            let tmp_path = path.with_extension("sio.tmp");
+            let unique = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0);
+            let tmp_path = cache_dir.join(format!(
+                "{}.tmp.{unique}",
+                path.file_name()
+                    .and_then(|n| n.to_str())
+                    .unwrap_or("driver_harness")
+            ));
 
             let write_needed = match std::fs::read_to_string(&path) {
                 Ok(existing) => existing != harness_source,
@@ -1639,6 +1648,81 @@ fn main() -> CompileArtifact with IO, Mut, Div, Panic {
             SelfhostCompilePipeline::DriverPreferred => self.compile_via_driver_file(path),
             SelfhostCompilePipeline::RustBridge => self.compile_path_via_rust_bridge(path),
         }
+    }
+
+    /// Compiles a Sounio source file to a native ELF binary (Phase 6).
+    ///
+    /// Loads the self-hosted compiler suite, executes it with `--backend=native`,
+    /// and the self-hosted `compile_to_elf()` generates the ELF binary directly.
+    /// The self-hosted compiler handles the full pipeline:
+    ///   parse -> resolve -> check -> lower -> compile_to_elf -> write_elf_to_file
+    pub fn compile_file_to_native(&mut self, path: &str, output_path: &str) -> LoadResult<()> {
+        tracing::info!("Compiling file to native ELF: {} -> {}", path, output_path);
+
+        if !std::path::Path::new(path).exists() {
+            return Err(CompilerLoaderError::IoError(format!(
+                "Input path not found '{}'",
+                path
+            )));
+        }
+
+        // Load self-hosted compiler suite as bytecode
+        let selfhost_dir = "self-hosted/";
+        let bytecode = self.compile_file(selfhost_dir)?;
+
+        // Execute with native backend args:
+        //   compile --backend=native -o <output> <input>
+        let user_args: Vec<String> = vec![
+            "compile".to_string(),
+            "--backend=native".to_string(),
+            "-o".to_string(),
+            output_path.to_string(),
+            path.to_string(),
+        ];
+
+        let result = self.execute_bytecode_with_args(&bytecode, &user_args)?;
+
+        // Check exit code from self-hosted compiler
+        let exit_code = match &result {
+            crate::vm::Value::Int(n) => *n,
+            _ => -1,
+        };
+
+        if exit_code != 0 {
+            return Err(CompilerLoaderError::CompileError(format!(
+                "Native compilation exited with code {}",
+                exit_code
+            )));
+        }
+
+        // Verify the output file was created
+        if !std::path::Path::new(output_path).exists() {
+            return Err(CompilerLoaderError::CompileError(
+                "Native compilation reported success but output file not found".to_string()
+            ));
+        }
+
+        // Make executable on Unix
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            if let Ok(metadata) = std::fs::metadata(output_path) {
+                let mut perms = metadata.permissions();
+                perms.set_mode(0o755);
+                let _ = std::fs::set_permissions(output_path, perms);
+            }
+        }
+
+        let file_size = std::fs::metadata(output_path)
+            .map(|m| m.len())
+            .unwrap_or(0);
+        tracing::info!(
+            "Native ELF binary: {} ({} bytes, executable)",
+            output_path,
+            file_size
+        );
+
+        Ok(())
     }
 
     /// Execute precompiled bytecode with the self-hosted VM.
