@@ -1,0 +1,245 @@
+// stdlib/epistemic/priors.sio
+// Prior Distribution Log-Density Functions for Bayesian MCMC
+//
+// Implements log-density functions for common prior distributions:
+// - Normal (Gaussian)
+// - Uniform
+// - Gamma
+// - Half-Normal (for scale parameters)
+// - Exponential
+//
+// All densities are returned on the log scale for numerical stability.
+// These are used in the Metropolis-Hastings acceptance ratio:
+//   log alpha = log p(proposal) - log p(current)
+//
+// References:
+// - Gelman et al. (2013): "Bayesian Data Analysis", 3rd ed.
+// - Stan Development Team (2023): "Stan Reference Manual"
+
+// =============================================================================
+// Math Helpers (must precede callers, no extern)
+// =============================================================================
+
+fn abs_f64(x: f64) -> f64 {
+    if x < 0.0 { 0.0 - x } else { x }
+}
+
+fn max_f64(a: f64, b: f64) -> f64 {
+    if a > b { a } else { b }
+}
+
+fn pi() -> f64 {
+    3.14159265358979323846
+}
+
+fn sqrt_f64(x: f64) -> f64 {
+    if x <= 0.0 { return 0.0 }
+    var y = x;
+    var i = 0
+    while i < 20 {
+        y = 0.5 * (y + x / y)
+        i = i + 1
+    }
+    y
+}
+
+// Natural logarithm
+fn ln_f64(x: f64) -> f64 {
+    if x <= 0.0 { return 0.0 - 1.0e30 }
+    if x == 1.0 { return 0.0 }
+
+    var m = x
+    var e = 0
+    while m >= 2.0 {
+        m = m / 2.0
+        e = e + 1
+    }
+    while m < 0.5 {
+        m = m * 2.0
+        e = e - 1
+    }
+
+    let t = (m - 1.0) / (m + 1.0)
+    let t2 = t * t
+    var sum = t
+    var term = t
+    var k = 1
+    while k < 30 {
+        term = term * t2
+        let denom = (2 * k + 1) as f64
+        sum = sum + term / denom
+        k = k + 1
+    }
+    let ln_m = 2.0 * sum
+    let ln2 = 0.6931471805599453
+    return ln_m + (e as f64) * ln2
+}
+
+// Exponential function
+fn exp_f64(x: f64) -> f64 {
+    if x > 500.0 { return 1.0e200 }
+    if x < -500.0 { return 0.0 }
+
+    let ln2 = 0.6931471805599453
+    var k_f = x / ln2
+    var k: i32 = 0
+    if k_f >= 0.0 {
+        k = k_f as i32
+    } else {
+        k = (k_f as i32) - 1
+    }
+    let r = x - (k as f64) * ln2
+
+    var sum = 1.0
+    var term = 1.0
+    var n = 1
+    while n < 25 {
+        term = term * r / (n as f64)
+        sum = sum + term
+        n = n + 1
+    }
+
+    var result = sum
+    if k >= 0 {
+        var i = 0
+        while i < k {
+            result = result * 2.0
+            i = i + 1
+        }
+    } else {
+        var i = 0
+        while i < (0 - k) {
+            result = result / 2.0
+            i = i + 1
+        }
+    }
+    return result
+}
+
+// Log-gamma function via Stirling approximation for x >= 1
+// ln Gamma(x) ~ (x - 0.5)*ln(x) - x + 0.5*ln(2*pi) + 1/(12x) - ...
+fn lgamma_f64(x: f64) -> f64 {
+    if x <= 0.0 { return 1.0e30 }
+
+    // For small x, use the recurrence: Gamma(x) = Gamma(x+1)/x
+    var val = x
+    var shift: f64 = 0.0
+    while val < 8.0 {
+        shift = shift + ln_f64(val)
+        val = val + 1.0
+    }
+
+    // Stirling series for val >= 8
+    let ln_2pi = 1.8378770664093453
+    var result = (val - 0.5) * ln_f64(val) - val + 0.5 * ln_2pi
+
+    // Correction terms (Bernoulli numbers)
+    let inv_v = 1.0 / val
+    let inv_v2 = inv_v * inv_v
+    result = result + inv_v / 12.0
+    result = result - inv_v * inv_v2 / 360.0
+    result = result + inv_v * inv_v2 * inv_v2 / 1260.0
+
+    return result - shift
+}
+
+// =============================================================================
+// Prior Distribution Structs
+// =============================================================================
+
+struct NormalPrior {
+    mu: f64,
+    sigma: f64
+}
+
+struct UniformPrior {
+    lo: f64,
+    hi: f64
+}
+
+struct GammaPrior {
+    alpha: f64,
+    beta: f64
+}
+
+struct HalfNormalPrior {
+    sigma: f64
+}
+
+struct ExponentialPrior {
+    lambda: f64
+}
+
+// =============================================================================
+// Log-Density Functions
+// =============================================================================
+
+// Normal log-density:
+// log p(x | mu, sigma) = -0.5*log(2*pi) - log(sigma) - 0.5*((x-mu)/sigma)^2
+fn normal_log_density(x: f64, mu: f64, sigma: f64) -> f64 {
+    if sigma <= 0.0 { return 0.0 - 1.0e30 }
+    let z = (x - mu) / sigma
+    let log_2pi = 1.8378770664093453
+    return 0.0 - 0.5 * log_2pi - ln_f64(sigma) - 0.5 * z * z
+}
+
+// Uniform log-density:
+// log p(x | lo, hi) = -log(hi - lo) if lo <= x <= hi, else -inf
+fn uniform_log_density(x: f64, lo: f64, hi: f64) -> f64 {
+    if x < lo { return 0.0 - 1.0e30 }
+    if x > hi { return 0.0 - 1.0e30 }
+    if hi <= lo { return 0.0 - 1.0e30 }
+    return 0.0 - ln_f64(hi - lo)
+}
+
+// Gamma log-density:
+// log p(x | alpha, beta) = alpha*log(beta) - lgamma(alpha) + (alpha-1)*log(x) - beta*x
+// x > 0
+fn gamma_log_density(x: f64, alpha: f64, beta: f64) -> f64 {
+    if x <= 0.0 { return 0.0 - 1.0e30 }
+    if alpha <= 0.0 { return 0.0 - 1.0e30 }
+    if beta <= 0.0 { return 0.0 - 1.0e30 }
+    return alpha * ln_f64(beta) - lgamma_f64(alpha) + (alpha - 1.0) * ln_f64(x) - beta * x
+}
+
+// Half-normal log-density (x >= 0):
+// log p(x | sigma) = 0.5*log(2/pi) - log(sigma) - 0.5*(x/sigma)^2
+fn half_normal_log_density(x: f64, sigma: f64) -> f64 {
+    if x < 0.0 { return 0.0 - 1.0e30 }
+    if sigma <= 0.0 { return 0.0 - 1.0e30 }
+    let log_2_over_pi = 0.0 - 0.4515827052894548
+    let z = x / sigma
+    return 0.5 * log_2_over_pi - ln_f64(sigma) - 0.5 * z * z
+}
+
+// Exponential log-density:
+// log p(x | lambda) = log(lambda) - lambda*x, x >= 0
+fn exponential_log_density(x: f64, lambda: f64) -> f64 {
+    if x < 0.0 { return 0.0 - 1.0e30 }
+    if lambda <= 0.0 { return 0.0 - 1.0e30 }
+    return ln_f64(lambda) - lambda * x
+}
+
+// =============================================================================
+// Convenience: struct-based log-density evaluation
+// =============================================================================
+
+fn normal_prior_log_density(prior: &NormalPrior, x: f64) -> f64 {
+    return normal_log_density(x, prior.mu, prior.sigma)
+}
+
+fn uniform_prior_log_density(prior: &UniformPrior, x: f64) -> f64 {
+    return uniform_log_density(x, prior.lo, prior.hi)
+}
+
+fn gamma_prior_log_density(prior: &GammaPrior, x: f64) -> f64 {
+    return gamma_log_density(x, prior.alpha, prior.beta)
+}
+
+fn half_normal_prior_log_density(prior: &HalfNormalPrior, x: f64) -> f64 {
+    return half_normal_log_density(x, prior.sigma)
+}
+
+fn exponential_prior_log_density(prior: &ExponentialPrior, x: f64) -> f64 {
+    return exponential_log_density(x, prior.lambda)
+}

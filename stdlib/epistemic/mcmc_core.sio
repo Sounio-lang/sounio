@@ -1,0 +1,453 @@
+// stdlib/epistemic/mcmc_core.sio
+// Metropolis-Hastings MCMC Sampler with Diagnostics
+//
+// Implements:
+// - LCG pseudo-random number generator (f64-based, via RngState struct)
+// - Box-Muller normal proposal
+// - Metropolis-Hastings acceptance
+// - Chain statistics: mean, variance, std
+// - Effective sample size (autocorrelation-based)
+// - Gelman-Rubin R-hat (multi-chain via split-chain)
+// - Full diagnostics struct
+//
+// References:
+// - Metropolis et al. (1953): "Equation of State Calculations"
+// - Gelman & Rubin (1992): "Inference from Iterative Simulation"
+// - Geyer (1992): "Practical Markov Chain Monte Carlo"
+
+// =============================================================================
+// Helper Functions (must precede callers)
+// =============================================================================
+
+fn abs_f64(x: f64) -> f64 {
+    if x < 0.0 { 0.0 - x } else { x }
+}
+
+fn max_f64(a: f64, b: f64) -> f64 {
+    if a > b { a } else { b }
+}
+
+fn min_f64(a: f64, b: f64) -> f64 {
+    if a < b { a } else { b }
+}
+
+fn sqrt_f64(x: f64) -> f64 {
+    if x <= 0.0 { return 0.0 }
+    var y = x;
+    var i = 0
+    while i < 20 {
+        y = 0.5 * (y + x / y)
+        i = i + 1
+    }
+    y
+}
+
+fn pi_val() -> f64 {
+    3.14159265358979323846
+}
+
+// Natural logarithm via range reduction + Taylor series
+// ln(x) = ln(m * 2^e) = ln(m) + e*ln(2)
+// where m is in [0.5, 2). Series: ln(m) = 2*(t + t^3/3 + t^5/5 + ...)
+// with t = (m-1)/(m+1)
+fn ln_f64(x: f64) -> f64 {
+    if x <= 0.0 { return 0.0 - 1.0e30 }
+    if x == 1.0 { return 0.0 }
+
+    var m = x
+    var e = 0
+    while m >= 2.0 {
+        m = m / 2.0
+        e = e + 1
+    }
+    while m < 0.5 {
+        m = m * 2.0
+        e = e - 1
+    }
+
+    let t = (m - 1.0) / (m + 1.0)
+    let t2 = t * t
+    var sum = t
+    var term = t
+    var k = 1
+    while k < 30 {
+        term = term * t2
+        let denom = (2 * k + 1) as f64
+        sum = sum + term / denom
+        k = k + 1
+    }
+    let ln_m = 2.0 * sum
+
+    let ln2 = 0.6931471805599453
+    return ln_m + (e as f64) * ln2
+}
+
+// Exponential function via Taylor series with range reduction
+// exp(x) = 2^k * exp(r) where r = x - k*ln2
+fn exp_f64(x: f64) -> f64 {
+    if x > 500.0 { return 1.0e200 }
+    if x < -500.0 { return 0.0 }
+
+    let ln2 = 0.6931471805599453
+    var k_f = x / ln2
+    var k: i32 = 0
+    if k_f >= 0.0 {
+        k = k_f as i32
+    } else {
+        k = (k_f as i32) - 1
+    }
+    let r = x - (k as f64) * ln2
+
+    // Taylor series for exp(r) where |r| < ln2
+    var sum = 1.0
+    var term = 1.0
+    var n = 1
+    while n < 25 {
+        term = term * r / (n as f64)
+        sum = sum + term
+        n = n + 1
+    }
+
+    // Multiply by 2^k
+    var result = sum
+    if k >= 0 {
+        var i = 0
+        while i < k {
+            result = result * 2.0
+            i = i + 1
+        }
+    } else {
+        var i = 0
+        while i < (0 - k) {
+            result = result / 2.0
+            i = i + 1
+        }
+    }
+    return result
+}
+
+// Cosine approximation via Taylor series (must precede mcmc_normal_proposal)
+fn cos_approx(x: f64) -> f64 {
+    var a = x
+    let twopi = 2.0 * pi_val()
+    while a >= twopi { a = a - twopi }
+    while a < 0.0 { a = a + twopi }
+
+    // Shift to [-pi, pi] for better convergence
+    if a > pi_val() { a = a - twopi }
+    let a2 = a * a
+    var sum = 1.0
+    var term = 1.0
+    var n = 1
+    while n < 15 {
+        term = 0.0 - term * a2 / ((2 * n - 1) * 2 * n) as f64
+        sum = sum + term
+        n = n + 1
+    }
+    return sum
+}
+
+// Sine approximation via Taylor series
+fn sin_approx(x: f64) -> f64 {
+    return cos_approx(x - pi_val() / 2.0)
+}
+
+// =============================================================================
+// LCG Pseudo-Random Number Generator
+// =============================================================================
+// Uses an f64-based multiplicative LCG with fractional part extraction.
+// The RngState struct wraps the seed to avoid VM limitations with &!f64
+// primitive references (the VM dereferences &!f64 as Pointer, not Float,
+// which breaks arithmetic operations).
+//
+// LCG recurrence: seed <- frac(a * seed + c)
+// where a = 16807.1234, c = 0.4231567890
+// Output is in [0, 1).
+
+struct RngState {
+    seed: f64
+}
+
+fn frac(x: f64) -> f64 {
+    var v = x
+    while v >= 1.0 { v = v - 1.0 }
+    while v < 0.0 { v = v + 1.0 }
+    return v
+}
+
+fn lcg_next(rng: &!RngState) -> f64 {
+    let a = 16807.1234
+    let c = 0.4231567890
+    let s = rng.seed
+    rng.seed = frac(a * s + c)
+    return rng.seed
+}
+
+// =============================================================================
+// Box-Muller Transform for Normal Proposals
+// =============================================================================
+// Generates a sample from N(current, step_size^2) using two uniform samples.
+// Uses the polar form: z = sqrt(-2*ln(u1)) * cos(2*pi*u2)
+
+fn mcmc_normal_proposal(current: f64, step_size: f64, rng: &!RngState) -> f64 {
+    var u1 = lcg_next(rng)
+    if u1 < 1.0e-10 { u1 = 1.0e-10 }
+    let u2 = lcg_next(rng)
+    let z = sqrt_f64(0.0 - 2.0 * ln_f64(u1)) * cos_approx(2.0 * pi_val() * u2)
+    return current + step_size * z
+}
+
+// =============================================================================
+// MCMC Configuration
+// =============================================================================
+
+struct MCMCConfig {
+    n_samples: i32,
+    n_warmup: i32,
+    step_size: f64,
+    target_accept: f64,
+    initial_seed: f64
+}
+
+fn mcmc_config_default() -> MCMCConfig {
+    return MCMCConfig {
+        n_samples: 5000,
+        n_warmup: 1000,
+        step_size: 0.5,
+        target_accept: 0.44,
+        initial_seed: 0.7123456789
+    }
+}
+
+// =============================================================================
+// MCMC Chain Storage
+// =============================================================================
+
+struct MCMCChain {
+    samples: [f64; 10000],
+    n_stored: i32,
+    n_accepted: i32,
+    n_total: i32
+}
+
+fn mcmc_chain_new() -> MCMCChain {
+    return MCMCChain {
+        samples: [0.0; 10000],
+        n_stored: 0,
+        n_accepted: 0,
+        n_total: 0
+    }
+}
+
+fn mcmc_store_sample(chain: &!MCMCChain, value: f64) {
+    if chain.n_stored < 10000 {
+        chain.samples[chain.n_stored] = value
+        chain.n_stored = chain.n_stored + 1
+    }
+}
+
+// =============================================================================
+// Chain Statistics
+// =============================================================================
+
+fn mcmc_chain_mean(chain: &MCMCChain) -> f64 {
+    if chain.n_stored == 0 { return 0.0 }
+    var sum: f64 = 0.0
+    var i: i32 = 0
+    while i < chain.n_stored {
+        sum = sum + chain.samples[i]
+        i = i + 1
+    }
+    return sum / (chain.n_stored as f64)
+}
+
+fn mcmc_chain_variance(chain: &MCMCChain) -> f64 {
+    if chain.n_stored < 2 { return 0.0 }
+    let mean = mcmc_chain_mean(chain)
+    var sum_sq: f64 = 0.0
+    var i: i32 = 0
+    while i < chain.n_stored {
+        let diff = chain.samples[i] - mean
+        sum_sq = sum_sq + diff * diff
+        i = i + 1
+    }
+    return sum_sq / ((chain.n_stored - 1) as f64)
+}
+
+fn mcmc_chain_std(chain: &MCMCChain) -> f64 {
+    return sqrt_f64(mcmc_chain_variance(chain))
+}
+
+// =============================================================================
+// Effective Sample Size (autocorrelation-based)
+// =============================================================================
+// ESS = n / (1 + 2 * sum_{k=1}^{K} rho_k)
+// where rho_k is the lag-k autocorrelation.
+// We truncate the sum when rho_k drops below 0.05 (Geyer initial positive
+// sequence estimator, simplified).
+
+fn mcmc_autocorrelation(chain: &MCMCChain, lag: i32) -> f64 {
+    if chain.n_stored < lag + 2 { return 0.0 }
+    let mean = mcmc_chain_mean(chain)
+    var cov: f64 = 0.0
+    var var_sum: f64 = 0.0
+    let n = chain.n_stored - lag
+    var i: i32 = 0
+    while i < n {
+        let d1 = chain.samples[i] - mean
+        let d2 = chain.samples[i + lag] - mean
+        cov = cov + d1 * d2
+        var_sum = var_sum + d1 * d1
+        i = i + 1
+    }
+    if var_sum < 1.0e-30 { return 0.0 }
+    return cov / var_sum
+}
+
+fn mcmc_effective_sample_size(chain: &MCMCChain) -> f64 {
+    if chain.n_stored < 10 { return chain.n_stored as f64 }
+    let n = chain.n_stored as f64
+
+    var sum_rho: f64 = 0.0
+    let max_lag = chain.n_stored / 2
+    var max_check = max_lag
+    if max_check > 500 { max_check = 500 }
+
+    var lag: i32 = 1
+    while lag < max_check {
+        let rho = mcmc_autocorrelation(chain, lag)
+        if rho < 0.05 {
+            lag = max_check
+        } else {
+            sum_rho = sum_rho + rho
+            lag = lag + 1
+        }
+    }
+
+    let tau = 1.0 + 2.0 * sum_rho
+    if tau < 1.0 { return n }
+    return n / tau
+}
+
+// =============================================================================
+// Gelman-Rubin R-hat (split-chain version)
+// =============================================================================
+// For a single chain, we split it in half to compute split R-hat.
+// R-hat = sqrt(var_plus / W) where:
+//   W = average within-half variance
+//   B = n * variance of half-means
+//   var_plus = (n-1)/n * W + B/n
+
+fn mcmc_split_rhat(chain: &MCMCChain) -> f64 {
+    if chain.n_stored < 10 { return 2.0 }
+
+    let half = chain.n_stored / 2
+    let n = half as f64
+
+    // Compute mean for each half
+    var sum1: f64 = 0.0
+    var sum2: f64 = 0.0
+    var i: i32 = 0
+    while i < half {
+        sum1 = sum1 + chain.samples[i]
+        sum2 = sum2 + chain.samples[i + half]
+        i = i + 1
+    }
+    let mean1 = sum1 / n
+    let mean2 = sum2 / n
+
+    // Compute variance for each half
+    var var1: f64 = 0.0
+    var var2: f64 = 0.0
+    i = 0
+    while i < half {
+        let d1 = chain.samples[i] - mean1
+        let d2 = chain.samples[i + half] - mean2
+        var1 = var1 + d1 * d1
+        var2 = var2 + d2 * d2
+        i = i + 1
+    }
+    var1 = var1 / (n - 1.0)
+    var2 = var2 / (n - 1.0)
+
+    // Within-chain variance
+    let W = (var1 + var2) / 2.0
+
+    // Between-chain variance
+    let grand_mean = (mean1 + mean2) / 2.0
+    let d1 = mean1 - grand_mean
+    let d2 = mean2 - grand_mean
+    let B = n * (d1 * d1 + d2 * d2)
+
+    if W < 1.0e-30 { return 1.0 }
+
+    // Pooled variance
+    let var_plus = (n - 1.0) / n * W + B / n
+
+    return sqrt_f64(var_plus / W)
+}
+
+// =============================================================================
+// Full Diagnostics
+// =============================================================================
+
+struct MCMCDiagnostics {
+    mean: f64,
+    std_dev: f64,
+    acceptance_rate: f64,
+    ess: f64,
+    r_hat: f64
+}
+
+fn mcmc_diagnostics(chain: &MCMCChain) -> MCMCDiagnostics {
+    let mean = mcmc_chain_mean(chain)
+    let std_dev = mcmc_chain_std(chain)
+    var accept_rate: f64 = 0.0
+    if chain.n_total > 0 {
+        accept_rate = (chain.n_accepted as f64) / (chain.n_total as f64)
+    }
+    let ess = mcmc_effective_sample_size(chain)
+    let r_hat = mcmc_split_rhat(chain)
+
+    return MCMCDiagnostics {
+        mean: mean,
+        std_dev: std_dev,
+        acceptance_rate: accept_rate,
+        ess: ess,
+        r_hat: r_hat
+    }
+}
+
+// =============================================================================
+// Metropolis-Hastings Sampler
+// =============================================================================
+// Runs MH sampling given a log-density function evaluated inline.
+// Because Sounio does not support function pointers in self-hosted codegen,
+// the actual sampling loop that calls a target log-density must be written
+// at the call site. This module provides all the building blocks.
+//
+// Usage pattern:
+//   var chain = mcmc_chain_new()
+//   var config = mcmc_config_default()
+//   var rng = RngState { seed: config.initial_seed }
+//   var current = 0.0
+//   var current_lp = <log_density(current)>
+//   var i = 0
+//   while i < config.n_samples + config.n_warmup {
+//       let proposal = mcmc_normal_proposal(current, config.step_size, &!rng)
+//       let proposal_lp = <log_density(proposal)>
+//       let log_alpha = proposal_lp - current_lp
+//       let u = lcg_next(&!rng)
+//       let accept = ln_f64(u) < log_alpha
+//       if accept {
+//           current = proposal
+//           current_lp = proposal_lp
+//           chain.n_accepted = chain.n_accepted + 1
+//       }
+//       chain.n_total = chain.n_total + 1
+//       if i >= config.n_warmup {
+//           mcmc_store_sample(&!chain, current)
+//       }
+//       i = i + 1
+//   }
+//   let diag = mcmc_diagnostics(&chain)

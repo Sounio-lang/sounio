@@ -1,0 +1,318 @@
+// stdlib/epistemic/bayesian_knowledge.sio
+// Convert MCMC Posterior Samples to Knowledge<T> Values
+//
+// Bridges Bayesian inference (MCMC chains) with Sounio's epistemic type
+// system. Given posterior samples from an MCMC chain, produces a
+// BayesianKnowledge struct containing:
+//
+// - Posterior mean and standard deviation
+// - Credible intervals (highest posterior density)
+// - Convergence-derived confidence score
+// - Effective sample size
+//
+// The confidence score integrates multiple convergence diagnostics:
+//   ESS >= 400 and R-hat < 1.05  =>  confidence >= 0.95
+//   ESS >= 100 and R-hat < 1.10  =>  confidence >= 0.80
+//   Otherwise: confidence = max(0.5, ESS/1000)
+//
+// References:
+// - Gelman et al. (2013): "Bayesian Data Analysis", 3rd ed., Ch. 11
+// - Vehtari et al. (2021): "Rank-normalization, folding, and localization"
+
+// =============================================================================
+// Math Helpers
+// =============================================================================
+
+fn abs_f64(x: f64) -> f64 {
+    if x < 0.0 { 0.0 - x } else { x }
+}
+
+fn max_f64(a: f64, b: f64) -> f64 {
+    if a > b { a } else { b }
+}
+
+fn min_f64(a: f64, b: f64) -> f64 {
+    if a < b { a } else { b }
+}
+
+fn sqrt_f64(x: f64) -> f64 {
+    if x <= 0.0 { return 0.0 }
+    var y = x;
+    var i = 0
+    while i < 20 {
+        y = 0.5 * (y + x / y)
+        i = i + 1
+    }
+    y
+}
+
+// =============================================================================
+// BayesianKnowledge Struct
+// =============================================================================
+// This is the bridge between MCMC samples and Knowledge<T>.
+// A BayesianKnowledge value captures what we learned from the posterior.
+
+struct BayesianKnowledge {
+    mean: f64,
+    std_dev: f64,
+    ci_lower: f64,
+    ci_upper: f64,
+    confidence: f64,
+    n_effective: f64
+}
+
+// =============================================================================
+// Chain representation (matches mcmc_core.sio)
+// =============================================================================
+// We re-declare the chain struct here to keep this module self-contained
+// when used as a standalone library. When the import system is ready,
+// this will import from mcmc_core.
+
+struct MCMCChain {
+    samples: [f64; 10000],
+    n_stored: i32,
+    n_accepted: i32,
+    n_total: i32
+}
+
+// =============================================================================
+// Chain Statistics (duplicated here for self-containment)
+// =============================================================================
+
+fn bk_chain_mean(chain: &MCMCChain) -> f64 {
+    if chain.n_stored == 0 { return 0.0 }
+    var sum: f64 = 0.0
+    var i: i32 = 0
+    while i < chain.n_stored {
+        sum = sum + chain.samples[i]
+        i = i + 1
+    }
+    return sum / (chain.n_stored as f64)
+}
+
+fn bk_chain_variance(chain: &MCMCChain) -> f64 {
+    if chain.n_stored < 2 { return 0.0 }
+    let mean = bk_chain_mean(chain)
+    var sum_sq: f64 = 0.0
+    var i: i32 = 0
+    while i < chain.n_stored {
+        let diff = chain.samples[i] - mean
+        sum_sq = sum_sq + diff * diff
+        i = i + 1
+    }
+    return sum_sq / ((chain.n_stored - 1) as f64)
+}
+
+fn bk_chain_std(chain: &MCMCChain) -> f64 {
+    return sqrt_f64(bk_chain_variance(chain))
+}
+
+// =============================================================================
+// Quantile Computation (selection-sort based)
+// =============================================================================
+// We sort a copy of the samples and then interpolate at the desired
+// quantile. Since we cannot dynamically allocate, we work on a
+// temporary copy using the chain's fixed-size array.
+
+// Selection sort in-place on first n elements of an array
+fn sort_partial(arr: &![f64; 10000], n: i32) {
+    var i: i32 = 0
+    while i < n - 1 {
+        var min_idx = i
+        var j = i + 1
+        while j < n {
+            if arr[j] < arr[min_idx] {
+                min_idx = j
+            }
+            j = j + 1
+        }
+        if min_idx != i {
+            let tmp = arr[i]
+            arr[i] = arr[min_idx]
+            arr[min_idx] = tmp
+        }
+        i = i + 1
+    }
+}
+
+fn compute_quantile(chain: &MCMCChain, q: f64) -> f64 {
+    if chain.n_stored == 0 { return 0.0 }
+    if chain.n_stored == 1 { return chain.samples[0] }
+
+    // Copy samples into a temporary array for sorting
+    var sorted: [f64; 10000] = [0.0; 10000]
+    var i: i32 = 0
+    while i < chain.n_stored {
+        sorted[i] = chain.samples[i]
+        i = i + 1
+    }
+    sort_partial(&!sorted, chain.n_stored)
+
+    // Interpolate at quantile q
+    let pos = q * ((chain.n_stored - 1) as f64)
+    var lo_idx = pos as i32
+    if lo_idx < 0 { lo_idx = 0 }
+    if lo_idx >= chain.n_stored - 1 { lo_idx = chain.n_stored - 2 }
+    let hi_idx = lo_idx + 1
+    let frac = pos - (lo_idx as f64)
+
+    return sorted[lo_idx] * (1.0 - frac) + sorted[hi_idx] * frac
+}
+
+// Compute credible interval [lower, upper] at given probability level
+// Returns lower bound at index 0, upper bound at index 1
+fn compute_credible_interval(chain: &MCMCChain, level: f64) -> [f64; 2] {
+    let alpha = 1.0 - level
+    let lower_q = alpha / 2.0
+    let upper_q = 1.0 - alpha / 2.0
+
+    var result: [f64; 2] = [0.0; 2]
+    result[0] = compute_quantile(chain, lower_q)
+    result[1] = compute_quantile(chain, upper_q)
+    return result
+}
+
+// =============================================================================
+// Convergence Confidence Scoring
+// =============================================================================
+// Maps MCMC diagnostics (ESS, R-hat) to an epistemic confidence score
+// in [0, 1]. Higher ESS and lower R-hat yield higher confidence.
+//
+// Tier 1: ESS >= 400 and R-hat < 1.05 => confidence >= 0.95
+// Tier 2: ESS >= 100 and R-hat < 1.10 => confidence >= 0.80
+// Tier 3: Otherwise => confidence = max(0.5, ESS/1000)
+
+fn convergence_confidence(ess: f64, r_hat: f64) -> f64 {
+    // Tier 1: well-converged
+    if ess >= 400.0 {
+        if r_hat < 1.05 {
+            // Scale between 0.95 and 0.99 based on ESS
+            let base = 0.95
+            let bonus = min_f64(0.04, (ess - 400.0) / 10000.0)
+            return base + bonus
+        }
+    }
+
+    // Tier 2: moderately converged
+    if ess >= 100.0 {
+        if r_hat < 1.10 {
+            // Scale between 0.80 and 0.94
+            let base = 0.80
+            let bonus = min_f64(0.14, (ess - 100.0) / 3000.0)
+            return base + bonus
+        }
+    }
+
+    // Tier 3: poorly converged
+    return max_f64(0.5, ess / 1000.0)
+}
+
+// =============================================================================
+// ESS and R-hat (duplicated for self-containment)
+// =============================================================================
+
+fn bk_autocorrelation(chain: &MCMCChain, lag: i32) -> f64 {
+    if chain.n_stored < lag + 2 { return 0.0 }
+    let mean = bk_chain_mean(chain)
+    var cov: f64 = 0.0
+    var var_sum: f64 = 0.0
+    let n = chain.n_stored - lag
+    var i: i32 = 0
+    while i < n {
+        let d1 = chain.samples[i] - mean
+        let d2 = chain.samples[i + lag] - mean
+        cov = cov + d1 * d2
+        var_sum = var_sum + d1 * d1
+        i = i + 1
+    }
+    if var_sum < 1.0e-30 { return 0.0 }
+    return cov / var_sum
+}
+
+fn bk_effective_sample_size(chain: &MCMCChain) -> f64 {
+    if chain.n_stored < 10 { return chain.n_stored as f64 }
+    let n = chain.n_stored as f64
+
+    var sum_rho: f64 = 0.0
+    var max_check = chain.n_stored / 2
+    if max_check > 500 { max_check = 500 }
+
+    var lag: i32 = 1
+    while lag < max_check {
+        let rho = bk_autocorrelation(chain, lag)
+        if rho < 0.05 {
+            lag = max_check
+        } else {
+            sum_rho = sum_rho + rho
+            lag = lag + 1
+        }
+    }
+
+    let tau = 1.0 + 2.0 * sum_rho
+    if tau < 1.0 { return n }
+    return n / tau
+}
+
+fn bk_split_rhat(chain: &MCMCChain) -> f64 {
+    if chain.n_stored < 10 { return 2.0 }
+
+    let half = chain.n_stored / 2
+    let n = half as f64
+
+    var sum1: f64 = 0.0
+    var sum2: f64 = 0.0
+    var i: i32 = 0
+    while i < half {
+        sum1 = sum1 + chain.samples[i]
+        sum2 = sum2 + chain.samples[i + half]
+        i = i + 1
+    }
+    let mean1 = sum1 / n
+    let mean2 = sum2 / n
+
+    var var1: f64 = 0.0
+    var var2: f64 = 0.0
+    i = 0
+    while i < half {
+        let d1 = chain.samples[i] - mean1
+        let d2 = chain.samples[i + half] - mean2
+        var1 = var1 + d1 * d1
+        var2 = var2 + d2 * d2
+        i = i + 1
+    }
+    var1 = var1 / (n - 1.0)
+    var2 = var2 / (n - 1.0)
+
+    let W = (var1 + var2) / 2.0
+    let grand_mean = (mean1 + mean2) / 2.0
+    let d1 = mean1 - grand_mean
+    let d2 = mean2 - grand_mean
+    let B = n * (d1 * d1 + d2 * d2)
+
+    if W < 1.0e-30 { return 1.0 }
+
+    let var_plus = (n - 1.0) / n * W + B / n
+    return sqrt_f64(var_plus / W)
+}
+
+// =============================================================================
+// Main Conversion: Chain -> BayesianKnowledge
+// =============================================================================
+
+fn chain_to_knowledge(chain: &MCMCChain) -> BayesianKnowledge {
+    let mean = bk_chain_mean(chain)
+    let std_dev = bk_chain_std(chain)
+    let ci = compute_credible_interval(chain, 0.95)
+    let ess = bk_effective_sample_size(chain)
+    let r_hat = bk_split_rhat(chain)
+    let conf = convergence_confidence(ess, r_hat)
+
+    return BayesianKnowledge {
+        mean: mean,
+        std_dev: std_dev,
+        ci_lower: ci[0],
+        ci_upper: ci[1],
+        confidence: conf,
+        n_effective: ess
+    }
+}

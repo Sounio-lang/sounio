@@ -1,0 +1,338 @@
+// stdlib/quantum/linear.sio — Quantum Computing via Linear Types
+//
+// The no-cloning theorem of quantum mechanics states that an unknown
+// quantum state cannot be copied. Sounio enforces this at COMPILE TIME
+// via linear types: a Qubit is a linear resource that must be consumed
+// exactly once. Attempting to copy produces a compile error.
+//
+// SOTA: Guppy (Quantinuum, Oct 2025): "Imperative Quantum Programming
+//       with Ownership and Borrowing"
+//       — Linear types enforce no-cloning at the type level
+//       — Statically compiled, strongly typed quantum programs
+//
+//       Beryllium (Horizon Quantum, Dec 2025):
+//       — "Manage information, not qubits" philosophy
+//       — Quantum computation as effectful computation
+//
+// This module provides:
+//   - Linear Qubit type (cannot be cloned)
+//   - Standard quantum gates (H, X, Y, Z, CNOT, T, S)
+//   - Measurement (consumes qubit, returns classical bit)
+//   - Quantum state simulation (for testing)
+//   - Bell pair creation and teleportation primitives
+
+// =============================================================================
+// Math helpers for state simulation
+// =============================================================================
+
+fn sqrt_sim(x: f64) -> f64 with Mut, Div, Panic {
+    if x <= 0.0 { return 0.0 }
+    var y = x
+    var i = 0
+    while i < 20 { y = 0.5 * (y + x / y); i = i + 1 }
+    y
+}
+
+// =============================================================================
+// Qubit — A Linear Resource
+// =============================================================================
+
+// A qubit is a linear type: it MUST be consumed exactly once.
+// The compiler will reject programs that:
+//   1. Use a qubit twice (violates no-cloning)
+//   2. Forget to use a qubit (violates no-deleting — optional)
+//
+// Internally, state_id indexes into the quantum simulator.
+linear struct Qubit {
+    state_id: i64,
+}
+
+// =============================================================================
+// Quantum State Simulator
+// =============================================================================
+// For simulation/testing. A real quantum backend would replace this.
+// State vector: 2^n complex amplitudes (max 8 qubits = 256 amplitudes)
+// We store real and imaginary parts separately.
+
+struct QuantumState {
+    real: [f64; 256],
+    imag: [f64; 256],
+    n_qubits: i32,
+    n_amplitudes: i32,      // 2^n_qubits
+    next_id: i64,
+}
+
+fn quantum_state_new() -> QuantumState with Mut, Div, Panic {
+    var qs = QuantumState {
+        real: [0.0; 256],
+        imag: [0.0; 256],
+        n_qubits: 0,
+        n_amplitudes: 1,
+        next_id: 0,
+    }
+    // |0...0⟩ state
+    qs.real[0] = 1.0
+    return qs
+}
+
+// =============================================================================
+// Qubit Allocation
+// =============================================================================
+
+// Allocate a new qubit in the |0⟩ state
+fn qubit_alloc(qs: &!QuantumState) -> Qubit with Mut, Div, Panic {
+    let qid = qs.next_id
+    qs.next_id = qs.next_id + 1
+    qs.n_qubits = qs.n_qubits + 1
+
+    // Double the state space
+    let old_n = qs.n_amplitudes
+    qs.n_amplitudes = old_n * 2
+    // New qubit in |0⟩: amplitudes for |...0⟩ stay, |...1⟩ = 0
+    // Already correct since we initialized to zeros
+
+    Qubit { state_id: qid }
+}
+
+// =============================================================================
+// Single-Qubit Gates
+// =============================================================================
+// Each gate CONSUMES the input qubit and RETURNS a new one.
+// This is the linear type pattern: the old state is gone, replaced by new state.
+
+// Hadamard gate: |0⟩ → (|0⟩ + |1⟩)/sqrt(2), |1⟩ → (|0⟩ - |1⟩)/sqrt(2)
+fn hadamard(q: Qubit, qs: &!QuantumState) -> Qubit with Mut, Div, Panic {
+    let target = q.state_id as i32
+    let inv_sqrt2 = 0.7071067811865476
+
+    let n = qs.n_amplitudes
+    let stride = 1 << target  // 2^target
+    var i = 0
+    while i < n {
+        let bit = (i >> target) & 1
+        if bit == 0 {
+            let j = i | stride  // partner with bit=1
+            let r0 = qs.real[i]
+            let i0 = qs.imag[i]
+            let r1 = qs.real[j]
+            let i1 = qs.imag[j]
+            qs.real[i] = inv_sqrt2 * (r0 + r1)
+            qs.imag[i] = inv_sqrt2 * (i0 + i1)
+            qs.real[j] = inv_sqrt2 * (r0 - r1)
+            qs.imag[j] = inv_sqrt2 * (i0 - i1)
+        }
+        i = i + 1
+    }
+
+    Qubit { state_id: q.state_id }
+}
+
+// Pauli-X (NOT gate): |0⟩ → |1⟩, |1⟩ → |0⟩
+fn pauli_x(q: Qubit, qs: &!QuantumState) -> Qubit with Mut, Div, Panic {
+    let target = q.state_id as i32
+    let stride = 1 << target
+    var i = 0
+    while i < qs.n_amplitudes {
+        let bit = (i >> target) & 1
+        if bit == 0 {
+            let j = i | stride
+            let tmp_r = qs.real[i]
+            let tmp_i = qs.imag[i]
+            qs.real[i] = qs.real[j]
+            qs.imag[i] = qs.imag[j]
+            qs.real[j] = tmp_r
+            qs.imag[j] = tmp_i
+        }
+        i = i + 1
+    }
+    Qubit { state_id: q.state_id }
+}
+
+// Pauli-Z: |0⟩ → |0⟩, |1⟩ → -|1⟩
+fn pauli_z(q: Qubit, qs: &!QuantumState) -> Qubit with Mut, Div, Panic {
+    let target = q.state_id as i32
+    let stride = 1 << target
+    var i = 0
+    while i < qs.n_amplitudes {
+        let bit = (i >> target) & 1
+        if bit == 1 {
+            qs.real[i] = 0.0 - qs.real[i]
+            qs.imag[i] = 0.0 - qs.imag[i]
+        }
+        i = i + 1
+    }
+    Qubit { state_id: q.state_id }
+}
+
+// S gate (phase gate): |0⟩ → |0⟩, |1⟩ → i|1⟩
+fn s_gate(q: Qubit, qs: &!QuantumState) -> Qubit with Mut, Div, Panic {
+    let target = q.state_id as i32
+    var i = 0
+    while i < qs.n_amplitudes {
+        let bit = (i >> target) & 1
+        if bit == 1 {
+            // Multiply by i: (a + bi) * i = -b + ai
+            let r = qs.real[i]
+            let im = qs.imag[i]
+            qs.real[i] = 0.0 - im
+            qs.imag[i] = r
+        }
+        i = i + 1
+    }
+    Qubit { state_id: q.state_id }
+}
+
+// T gate: |0⟩ → |0⟩, |1⟩ → e^{i*pi/4}|1⟩
+fn t_gate(q: Qubit, qs: &!QuantumState) -> Qubit with Mut, Div, Panic {
+    let target = q.state_id as i32
+    let cos_pi4 = 0.7071067811865476
+    let sin_pi4 = 0.7071067811865476
+    var i = 0
+    while i < qs.n_amplitudes {
+        let bit = (i >> target) & 1
+        if bit == 1 {
+            let r = qs.real[i]
+            let im = qs.imag[i]
+            qs.real[i] = r * cos_pi4 - im * sin_pi4
+            qs.imag[i] = r * sin_pi4 + im * cos_pi4
+        }
+        i = i + 1
+    }
+    Qubit { state_id: q.state_id }
+}
+
+// =============================================================================
+// Two-Qubit Gates
+// =============================================================================
+
+// CNOT: Controlled-NOT
+// |control, target⟩: flips target if control is |1⟩
+// Consumes BOTH qubits linearly, returns BOTH
+struct QubitPair {
+    first: Qubit,
+    second: Qubit,
+}
+
+fn cnot(control: Qubit, target: Qubit, qs: &!QuantumState) -> QubitPair with Mut, Div, Panic {
+    let c = control.state_id as i32
+    let t = target.state_id as i32
+    let c_stride = 1 << c
+    let t_stride = 1 << t
+
+    var i = 0
+    while i < qs.n_amplitudes {
+        let c_bit = (i >> c) & 1
+        let t_bit = (i >> t) & 1
+        // Only swap when control=1, target=0
+        if c_bit == 1 {
+            if t_bit == 0 {
+                let j = i | t_stride  // same but target=1
+                let tmp_r = qs.real[i]
+                let tmp_i = qs.imag[i]
+                qs.real[i] = qs.real[j]
+                qs.imag[i] = qs.imag[j]
+                qs.real[j] = tmp_r
+                qs.imag[j] = tmp_i
+            }
+        }
+        i = i + 1
+    }
+
+    QubitPair {
+        first: Qubit { state_id: control.state_id },
+        second: Qubit { state_id: target.state_id },
+    }
+}
+
+// =============================================================================
+// Measurement — Collapses the Qubit (consumes it forever!)
+// =============================================================================
+// Measurement is the ultimate linear consumption: the qubit ceases to exist
+// as a quantum resource and becomes a classical bit.
+//
+// Returns: true for |1⟩, false for |0⟩
+
+struct MeasurementResult {
+    outcome: bool,          // true = |1⟩, false = |0⟩
+    probability: f64,       // probability of the observed outcome
+}
+
+fn measure(q: Qubit, qs: &!QuantumState, rng_seed: f64) -> MeasurementResult with Mut, Div, Panic {
+    let target = q.state_id as i32
+    let stride = 1 << target
+
+    // Compute probability of measuring |1⟩
+    var prob_one: f64 = 0.0
+    var i = 0
+    while i < qs.n_amplitudes {
+        let bit = (i >> target) & 1
+        if bit == 1 {
+            prob_one = prob_one + qs.real[i] * qs.real[i] + qs.imag[i] * qs.imag[i]
+        }
+        i = i + 1
+    }
+
+    // Pseudo-random "coin flip" using seed (deterministic for reproducibility)
+    let coin = rng_seed  // should be uniform [0,1)
+    let outcome = coin < prob_one
+
+    // Collapse: zero out the non-observed branch and renormalize
+    let prob_observed = if outcome { prob_one } else { 1.0 - prob_one }
+    let norm = if prob_observed > 1.0e-30 { 1.0 / sqrt_sim(prob_observed) } else { 0.0 }
+
+    i = 0
+    while i < qs.n_amplitudes {
+        let bit = (i >> target) & 1
+        let keep = if outcome { bit == 1 } else { bit == 0 }
+        if keep {
+            qs.real[i] = qs.real[i] * norm
+            qs.imag[i] = qs.imag[i] * norm
+        } else {
+            qs.real[i] = 0.0
+            qs.imag[i] = 0.0
+        }
+        i = i + 1
+    }
+
+    // Qubit q is consumed here — linear type system ensures it cannot be used again
+    MeasurementResult {
+        outcome: outcome,
+        probability: prob_observed,
+    }
+}
+
+// =============================================================================
+// Bell Pair — Entanglement via H + CNOT
+// =============================================================================
+// Creates the Bell state |Φ+⟩ = (|00⟩ + |11⟩)/sqrt(2)
+
+fn bell_pair(q1: Qubit, q2: Qubit, qs: &!QuantumState) -> QubitPair with Mut, Div, Panic {
+    let h_q1 = hadamard(q1, qs)
+    cnot(h_q1, q2, qs)
+}
+
+// =============================================================================
+// State Inspection (for simulation/testing only)
+// =============================================================================
+
+struct StateInfo {
+    n_qubits: i32,
+    prob_zero: f64,     // probability of all-zeros state
+    total_prob: f64,    // should be 1.0 (normalization check)
+}
+
+fn quantum_state_info(qs: &QuantumState) -> StateInfo with Mut, Div, Panic {
+    var total: f64 = 0.0
+    var i = 0
+    while i < qs.n_amplitudes {
+        total = total + qs.real[i] * qs.real[i] + qs.imag[i] * qs.imag[i]
+        i = i + 1
+    }
+    let p0 = qs.real[0] * qs.real[0] + qs.imag[0] * qs.imag[0]
+
+    StateInfo {
+        n_qubits: qs.n_qubits,
+        prob_zero: p0,
+        total_prob: total,
+    }
+}

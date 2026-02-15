@@ -1,0 +1,311 @@
+// stdlib/geometry/information.sio — Information Geometry on Statistical Manifolds
+//
+// Fisher-Rao metric, natural gradient, geodesics on manifolds of probability
+// distributions. The correct geometry for optimization on parameter spaces.
+//
+// SOTA: GSI 2025 (Saint-Malo): "From Classical to Quantum Information Geometry"
+//       Geomstats (2023-2025): Computations on manifolds
+//       Amari (2016): "Information Geometry and Its Applications"
+//
+// Theory:
+//   A statistical model {p(x|theta)} is a manifold M with coordinates theta.
+//   The Fisher information matrix g_ij(theta) = E[d_i log p * d_j log p]
+//   defines a Riemannian metric. The natural gradient is:
+//     grad_nat = g^{-1} * grad_euclidean
+//   which gives the steepest descent direction ON THE MANIFOLD.
+//
+// Why it matters:
+//   Euclidean gradient descent on probability distributions is WRONG.
+//   It treats the parameter space as flat, but probability distributions
+//   live on curved manifolds. Natural gradient respects the geometry.
+
+// =============================================================================
+// Math helpers
+// =============================================================================
+
+fn abs_val(x: f64) -> f64 {
+    if x < 0.0 { 0.0 - x } else { x }
+}
+
+fn sqrt_val(x: f64) -> f64 with Mut, Div, Panic {
+    if x <= 0.0 { return 0.0 }
+    var y = x
+    var i = 0
+    while i < 20 { y = 0.5 * (y + x / y); i = i + 1 }
+    y
+}
+
+fn ln_val(x: f64) -> f64 with Mut, Div, Panic {
+    if x <= 0.0 { return 0.0 - 1.0e30 }
+    if x == 1.0 { return 0.0 }
+    var m = x
+    var e_val = 0
+    while m >= 2.0 { m = m / 2.0; e_val = e_val + 1 }
+    while m < 0.5 { m = m * 2.0; e_val = e_val - 1 }
+    let t = (m - 1.0) / (m + 1.0)
+    let t2 = t * t
+    var sum = t
+    var term = t
+    var k = 1
+    while k < 30 { term = term * t2; sum = sum + term / (2 * k + 1) as f64; k = k + 1 }
+    2.0 * sum + (e_val as f64) * 0.6931471805599453
+}
+
+fn exp_val(x: f64) -> f64 with Mut, Div, Panic {
+    if x > 500.0 { return 1.0e200 }
+    if x < -500.0 { return 0.0 }
+    let ln2_c = 0.6931471805599453
+    var k_f = x / ln2_c
+    var k: i32 = 0
+    if k_f >= 0.0 { k = k_f as i32 } else { k = (k_f as i32) - 1 }
+    let r = x - (k as f64) * ln2_c
+    var sum = 1.0
+    var term = 1.0
+    var n = 1
+    while n < 25 { term = term * r / (n as f64); sum = sum + term; n = n + 1 }
+    var result = sum
+    if k >= 0 { var i = 0; while i < k { result = result * 2.0; i = i + 1 } }
+    else { var i = 0; while i < (0 - k) { result = result / 2.0; i = i + 1 } }
+    result
+}
+
+// =============================================================================
+// Statistical Manifold
+// =============================================================================
+
+// A point on a statistical manifold with its Fisher information matrix
+struct StatisticalManifold {
+    params: [f64; 16],              // manifold coordinates (max 16 parameters)
+    n_params: i32,
+    fisher: [f64; 256],             // Fisher information matrix (16x16 max)
+}
+
+fn manifold_new(n: i32) -> StatisticalManifold {
+    StatisticalManifold {
+        params: [0.0; 16],
+        n_params: n,
+        fisher: [0.0; 256],
+    }
+}
+
+// Access Fisher matrix element
+fn fisher_get(m: &StatisticalManifold, i: i32, j: i32) -> f64 with Panic {
+    m.fisher[i * m.n_params + j]
+}
+
+fn fisher_set(m: &!StatisticalManifold, i: i32, j: i32, val: f64) with Mut, Panic {
+    m.fisher[i * m.n_params + j] = val
+}
+
+// =============================================================================
+// Fisher Information for Common Distributions
+// =============================================================================
+
+// Normal distribution: theta = (mu, sigma)
+// Fisher matrix: [[1/sigma^2, 0], [0, 2/sigma^2]]
+fn fisher_normal(mu: f64, sigma: f64) -> StatisticalManifold with Mut, Panic {
+    var m = manifold_new(2)
+    m.params[0] = mu
+    m.params[1] = sigma
+    let s2 = sigma * sigma
+    // F[0,0] = 1/sigma^2, F[0,1] = 0, F[1,0] = 0, F[1,1] = 2/sigma^2
+    m.fisher[0] = 1.0 / s2
+    m.fisher[1] = 0.0
+    m.fisher[2] = 0.0
+    m.fisher[3] = 2.0 / s2
+    return m
+}
+
+// Exponential distribution: theta = lambda
+// Fisher matrix: [[1/lambda^2]]
+fn fisher_exponential(lambda: f64) -> StatisticalManifold with Mut, Panic {
+    var m = manifold_new(1)
+    m.params[0] = lambda
+    m.fisher[0] = 1.0 / (lambda * lambda)
+    return m
+}
+
+// Bernoulli distribution: theta = p
+// Fisher matrix: [[1/(p*(1-p))]]
+fn fisher_bernoulli(p: f64) -> StatisticalManifold with Mut, Panic {
+    var m = manifold_new(1)
+    m.params[0] = p
+    m.fisher[0] = 1.0 / (p * (1.0 - p))
+    return m
+}
+
+// Gamma distribution: theta = (alpha, beta)
+// Fisher[0,0] = trigamma(alpha), Fisher[1,1] = alpha/beta^2
+// Fisher[0,1] = Fisher[1,0] = -1/beta
+fn fisher_gamma(alpha: f64, beta_param: f64) -> StatisticalManifold with Mut, Div, Panic {
+    var m = manifold_new(2)
+    m.params[0] = alpha
+    m.params[1] = beta_param
+
+    // Trigamma approximation: psi_1(x) ~ 1/x + 1/(2x^2) + 1/(6x^3) - ...
+    var tx = alpha
+    var shift: f64 = 0.0
+    while tx < 8.0 { shift = shift + 1.0 / (tx * tx); tx = tx + 1.0 }
+    let inv_t = 1.0 / tx
+    let trigamma = inv_t + 0.5 * inv_t * inv_t + inv_t * inv_t * inv_t / 6.0 + shift
+
+    m.fisher[0] = trigamma
+    m.fisher[1] = 0.0 - 1.0 / beta_param
+    m.fisher[2] = 0.0 - 1.0 / beta_param
+    m.fisher[3] = alpha / (beta_param * beta_param)
+    return m
+}
+
+// =============================================================================
+// Natural Gradient
+// =============================================================================
+// g_nat = F^{-1} * g_euclidean
+// For optimization on manifolds, this is the correct gradient direction.
+
+// 2x2 matrix inverse (covers Normal, Gamma, etc.)
+fn fisher_inverse_2x2(m: &StatisticalManifold) -> [f64; 4] with Panic {
+    let a = m.fisher[0]
+    let b = m.fisher[1]
+    let c = m.fisher[2]
+    let d = m.fisher[3]
+    let det = a * d - b * c
+    var inv: [f64; 4] = [0.0; 4]
+    inv[0] = d / det
+    inv[1] = (0.0 - b) / det
+    inv[2] = (0.0 - c) / det
+    inv[3] = a / det
+    return inv
+}
+
+// Natural gradient for 2-parameter manifold
+fn natural_gradient_2d(
+    m: &StatisticalManifold,
+    euclidean_grad: &[f64; 2],
+) -> [f64; 2] with Panic, Mut {
+    let inv = fisher_inverse_2x2(m)
+    var nat_grad: [f64; 2] = [0.0; 2]
+    nat_grad[0] = inv[0] * euclidean_grad[0] + inv[1] * euclidean_grad[1]
+    nat_grad[1] = inv[2] * euclidean_grad[0] + inv[3] * euclidean_grad[1]
+    return nat_grad
+}
+
+// General natural gradient via Cholesky solve (for n_params <= 16)
+fn natural_gradient(
+    m: &StatisticalManifold,
+    euclidean_grad: &[f64; 16],
+    result: &![f64; 16],
+) with Mut, Div, Panic {
+    let n = m.n_params
+
+    // Cholesky decomposition: F = L * L^T
+    var lower: [f64; 256] = [0.0; 256]
+    var i = 0
+    while i < n {
+        var j = 0
+        while j <= i {
+            var sum: f64 = 0.0
+            if i == j {
+                var k = 0
+                while k < j {
+                    let l_jk = lower[j * n + k]
+                    sum = sum + l_jk * l_jk
+                    k = k + 1
+                }
+                lower[j * n + j] = sqrt_val(m.fisher[j * n + j] - sum)
+            } else {
+                var k = 0
+                while k < j {
+                    sum = sum + lower[i * n + k] * lower[j * n + k]
+                    k = k + 1
+                }
+                lower[i * n + j] = (m.fisher[i * n + j] - sum) / lower[j * n + j]
+            }
+            j = j + 1
+        }
+        i = i + 1
+    }
+
+    // Forward substitution: L * y = g
+    var y: [f64; 16] = [0.0; 16]
+    i = 0
+    while i < n {
+        var s: f64 = 0.0
+        var k = 0
+        while k < i { s = s + lower[i * n + k] * y[k]; k = k + 1 }
+        y[i] = (euclidean_grad[i] - s) / lower[i * n + i]
+        i = i + 1
+    }
+
+    // Back substitution: L^T * x = y
+    i = n - 1
+    while i >= 0 {
+        var s: f64 = 0.0
+        var k = i + 1
+        while k < n { s = s + lower[k * n + i] * result[k]; k = k + 1 }
+        result[i] = (y[i] - s) / lower[i * n + i]
+        i = i - 1
+    }
+}
+
+// =============================================================================
+// KL Divergence via Fisher Metric (local approximation)
+// =============================================================================
+// KL(p_theta || p_{theta+d}) ~ 0.5 * d^T * F * d
+// Valid for small perturbations d
+
+fn fisher_kl_local(
+    m: &StatisticalManifold,
+    delta: &[f64; 16],
+) -> f64 with Mut, Div, Panic {
+    let n = m.n_params
+    var kl: f64 = 0.0
+    var i = 0
+    while i < n {
+        var j = 0
+        while j < n {
+            kl = kl + delta[i] * m.fisher[i * n + j] * delta[j]
+            j = j + 1
+        }
+        i = i + 1
+    }
+    0.5 * kl
+}
+
+// =============================================================================
+// Geodesic Distance (approximate via shooting)
+// =============================================================================
+// Geodesic equation: d^2 theta^k / dt^2 + Gamma^k_{ij} dtheta^i/dt dtheta^j/dt = 0
+// We approximate via the local Fisher metric: d ~ sqrt(delta^T F delta)
+
+fn fisher_distance(
+    m1: &StatisticalManifold,
+    m2: &StatisticalManifold,
+) -> f64 with Mut, Div, Panic {
+    var delta: [f64; 16] = [0.0; 16]
+    var i = 0
+    while i < m1.n_params {
+        delta[i] = m2.params[i] - m1.params[i]
+        i = i + 1
+    }
+    // Use m1's Fisher metric as the local metric
+    let kl_sq = fisher_kl_local(m1, &delta)
+    sqrt_val(2.0 * kl_sq)
+}
+
+// =============================================================================
+// Natural Gradient Descent Step
+// =============================================================================
+
+fn natural_gradient_step(
+    m: &!StatisticalManifold,
+    euclidean_grad: &[f64; 16],
+    learning_rate: f64,
+) with Mut, Div, Panic {
+    var nat_grad: [f64; 16] = [0.0; 16]
+    natural_gradient(m, euclidean_grad, &!nat_grad)
+    var i = 0
+    while i < m.n_params {
+        m.params[i] = m.params[i] - learning_rate * nat_grad[i]
+        i = i + 1
+    }
+}

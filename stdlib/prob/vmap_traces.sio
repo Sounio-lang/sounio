@@ -1,0 +1,404 @@
+// stdlib/prob/vmap_traces.sio — Vectorized Probabilistic Inference
+//
+// vmap-over-traces: run N independent MCMC chains in parallel,
+// combine with multi-chain R-hat for stronger convergence diagnostics.
+//
+// SOTA: GenJAX (POPL 2026, MIT Probcomp):
+//       — Integrates vmap from JAX into probabilistic programming
+//       — Formalizes vectorization as source-to-source transformation
+//       — Compositional vectorization of traces and inference
+//
+// Key insight: probabilistic programs can be vectorized by mapping
+// over independent traces. Each trace is an independent MCMC chain
+// with different random seeds.
+//
+// References:
+//   Lew et al. (2023): "Adev: Sound AD for Expectation Semantics of PPLs"
+//   Cusumano-Towner et al. (2019): "Gen: General-Purpose PPL"
+
+// =============================================================================
+// Math helpers
+// =============================================================================
+
+fn abs_vt(x: f64) -> f64 { if x < 0.0 { 0.0 - x } else { x } }
+
+fn sqrt_vt(x: f64) -> f64 with Mut, Div, Panic {
+    if x <= 0.0 { return 0.0 }
+    var y = x
+    var i = 0
+    while i < 20 { y = 0.5 * (y + x / y); i = i + 1 }
+    y
+}
+
+fn ln_vt(x: f64) -> f64 with Mut, Div, Panic {
+    if x <= 0.0 { return 0.0 - 1.0e30 }
+    if x == 1.0 { return 0.0 }
+    var m = x
+    var e_val = 0
+    while m >= 2.0 { m = m / 2.0; e_val = e_val + 1 }
+    while m < 0.5 { m = m * 2.0; e_val = e_val - 1 }
+    let t = (m - 1.0) / (m + 1.0)
+    let t2 = t * t
+    var sum = t
+    var term = t
+    var k = 1
+    while k < 30 { term = term * t2; sum = sum + term / (2 * k + 1) as f64; k = k + 1 }
+    2.0 * sum + (e_val as f64) * 0.6931471805599453
+}
+
+fn cos_vt(x: f64) -> f64 with Mut, Div, Panic {
+    var a = x
+    let twopi = 6.28318530717958647692
+    while a >= twopi { a = a - twopi }
+    while a < 0.0 { a = a + twopi }
+    if a > 3.14159265358979323846 { a = a - twopi }
+    let a2 = a * a
+    var sum = 1.0
+    var term = 1.0
+    var n = 1
+    while n < 15 {
+        term = 0.0 - term * a2 / ((2 * n - 1) * 2 * n) as f64
+        sum = sum + term
+        n = n + 1
+    }
+    sum
+}
+
+// =============================================================================
+// RNG (f64-based LCG, matches mcmc_core.sio pattern)
+// =============================================================================
+
+struct RngState {
+    seed: f64,
+}
+
+fn frac_vt(x: f64) -> f64 with Mut, Div {
+    var v = x
+    while v >= 1.0 { v = v - 1.0 }
+    while v < 0.0 { v = v + 1.0 }
+    v
+}
+
+fn lcg_next(rng: &!RngState) -> f64 with Mut, Div {
+    let s = rng.seed
+    rng.seed = frac_vt(16807.1234 * s + 0.4231567890)
+    rng.seed
+}
+
+fn normal_proposal(current: f64, step_size: f64, rng: &!RngState) -> f64 with Mut, Div, Panic {
+    var u1 = lcg_next(rng)
+    if u1 < 1.0e-10 { u1 = 1.0e-10 }
+    let u2 = lcg_next(rng)
+    let z = sqrt_vt(0.0 - 2.0 * ln_vt(u1)) * cos_vt(2.0 * 3.14159265358979323846 * u2)
+    current + step_size * z
+}
+
+// =============================================================================
+// Single Chain (from mcmc_core.sio pattern)
+// =============================================================================
+
+struct MCMCChain {
+    samples: [f64; 5000],
+    n_stored: i32,
+    n_accepted: i32,
+    n_total: i32,
+}
+
+fn chain_new() -> MCMCChain {
+    MCMCChain {
+        samples: [0.0; 5000],
+        n_stored: 0,
+        n_accepted: 0,
+        n_total: 0,
+    }
+}
+
+fn chain_store(chain: &!MCMCChain, value: f64) with Mut, Panic {
+    if chain.n_stored < 5000 {
+        chain.samples[chain.n_stored] = value
+        chain.n_stored = chain.n_stored + 1
+    }
+}
+
+fn chain_mean(chain: &MCMCChain) -> f64 with Mut, Div, Panic {
+    if chain.n_stored == 0 { return 0.0 }
+    var sum: f64 = 0.0
+    var i = 0
+    while i < chain.n_stored { sum = sum + chain.samples[i]; i = i + 1 }
+    sum / (chain.n_stored as f64)
+}
+
+fn chain_variance(chain: &MCMCChain) -> f64 with Mut, Div, Panic {
+    if chain.n_stored < 2 { return 0.0 }
+    let mean = chain_mean(chain)
+    var ss: f64 = 0.0
+    var i = 0
+    while i < chain.n_stored {
+        let d = chain.samples[i] - mean
+        ss = ss + d * d
+        i = i + 1
+    }
+    ss / ((chain.n_stored - 1) as f64)
+}
+
+// =============================================================================
+// Trace Bundle — N parallel chains
+// =============================================================================
+
+struct TraceBundle {
+    chains: [MCMCChain; 8],    // up to 8 parallel chains
+    n_chains: i32,
+}
+
+fn trace_bundle_new(n_chains: i32) -> TraceBundle with Mut, Div, Panic {
+    var bundle = TraceBundle {
+        chains: [MCMCChain {
+            samples: [0.0; 5000], n_stored: 0, n_accepted: 0, n_total: 0,
+        }; 8],
+        n_chains: n_chains,
+    }
+    var i = 0
+    while i < n_chains {
+        bundle.chains[i] = chain_new()
+        i = i + 1
+    }
+    bundle
+}
+
+// =============================================================================
+// vmap: Run MH across all chains with different seeds
+// =============================================================================
+// The log-density function must be evaluated inline at the call site
+// (Sounio doesn't support function pointers in self-hosted codegen).
+//
+// This provides the framework; the user fills in the log_density evaluation.
+// See usage pattern in the comments below.
+
+struct VmapConfig {
+    n_samples: i32,
+    n_warmup: i32,
+    step_size: f64,
+    base_seed: f64,
+}
+
+fn vmap_config_default() -> VmapConfig {
+    VmapConfig {
+        n_samples: 2000,
+        n_warmup: 500,
+        step_size: 0.5,
+        base_seed: 0.7123456789,
+    }
+}
+
+// Run a single chain of MH for a normal target (for demonstration)
+// Target: N(mu_target, sigma_target^2)
+fn vmap_mh_normal_chain(
+    chain: &!MCMCChain,
+    config: &VmapConfig,
+    chain_seed: f64,
+    mu_target: f64,
+    sigma_target: f64,
+) with Mut, Div, Panic {
+    var rng = RngState { seed: chain_seed }
+    var current = 0.0
+    let log_2pi = 1.8378770664093453
+    let ls = ln_vt(sigma_target)
+    var current_lp = 0.0 - 0.5 * log_2pi - ls - 0.5 * current * current / (sigma_target * sigma_target)
+
+    var i = 0
+    let total = config.n_samples + config.n_warmup
+    while i < total {
+        let proposal = normal_proposal(current, config.step_size, &!rng)
+        let z = (proposal - mu_target) / sigma_target
+        let proposal_lp = 0.0 - 0.5 * log_2pi - ls - 0.5 * z * z
+
+        let log_alpha = proposal_lp - current_lp
+        let u = lcg_next(&!rng)
+        let accept = ln_vt(u) < log_alpha
+
+        if accept {
+            current = proposal
+            current_lp = proposal_lp
+            chain.n_accepted = chain.n_accepted + 1
+        }
+        chain.n_total = chain.n_total + 1
+        if i >= config.n_warmup {
+            chain_store(chain, current)
+        }
+        i = i + 1
+    }
+}
+
+// Run all chains in the bundle (vectorized over seeds)
+fn vmap_run_normal(
+    bundle: &!TraceBundle,
+    config: &VmapConfig,
+    mu_target: f64,
+    sigma_target: f64,
+) with Mut, Div, Panic {
+    var idx = 0
+    while idx < bundle.n_chains {
+        // Each chain gets a different seed derived from base + chain index
+        let chain_seed = frac_vt(config.base_seed + (idx as f64) * 0.13579)
+        vmap_mh_normal_chain(&!bundle.chains[idx], config, chain_seed, mu_target, sigma_target)
+        idx = idx + 1
+    }
+}
+
+// =============================================================================
+// Multi-Chain Diagnostics
+// =============================================================================
+
+struct MultiChainDiagnostics {
+    grand_mean: f64,
+    grand_std: f64,
+    r_hat: f64,             // Gelman-Rubin convergence diagnostic
+    min_ess: f64,           // minimum ESS across chains
+    max_ess: f64,           // maximum ESS across chains
+    mean_accept_rate: f64,
+    n_chains: i32,
+    converged: bool,        // r_hat < 1.1
+}
+
+// Multi-chain R-hat: uses BETWEEN-chain variance (stronger than split-chain)
+fn multi_chain_rhat(bundle: &TraceBundle) -> f64 with Mut, Div, Panic {
+    if bundle.n_chains < 2 { return 2.0 }
+
+    let m = bundle.n_chains as f64
+    // Assume all chains have same length
+    let n = bundle.chains[0].n_stored as f64
+    if n < 2.0 { return 2.0 }
+
+    // Compute per-chain means and variances
+    var chain_means: [f64; 8] = [0.0; 8]
+    var chain_vars: [f64; 8] = [0.0; 8]
+    var i = 0
+    while i < bundle.n_chains {
+        chain_means[i] = chain_mean(&bundle.chains[i])
+        chain_vars[i] = chain_variance(&bundle.chains[i])
+        i = i + 1
+    }
+
+    // Grand mean
+    var grand: f64 = 0.0
+    i = 0
+    while i < bundle.n_chains { grand = grand + chain_means[i]; i = i + 1 }
+    grand = grand / m
+
+    // Between-chain variance: B = n * var(chain_means)
+    var B: f64 = 0.0
+    i = 0
+    while i < bundle.n_chains {
+        let d = chain_means[i] - grand
+        B = B + d * d
+        i = i + 1
+    }
+    B = n * B / (m - 1.0)
+
+    // Within-chain variance: W = mean(chain_vars)
+    var W: f64 = 0.0
+    i = 0
+    while i < bundle.n_chains { W = W + chain_vars[i]; i = i + 1 }
+    W = W / m
+
+    if W < 1.0e-30 { return 1.0 }
+
+    // Pooled variance
+    let var_plus = (n - 1.0) / n * W + B / n
+    sqrt_vt(var_plus / W)
+}
+
+fn multi_chain_diagnostics(bundle: &TraceBundle) -> MultiChainDiagnostics with Mut, Div, Panic {
+    let r_hat = multi_chain_rhat(bundle)
+
+    // Grand mean and std
+    var all_sum: f64 = 0.0
+    var all_count: i32 = 0
+    var total_accepted: i32 = 0
+    var total_total: i32 = 0
+    var i = 0
+    while i < bundle.n_chains {
+        var j = 0
+        while j < bundle.chains[i].n_stored {
+            all_sum = all_sum + bundle.chains[i].samples[j]
+            all_count = all_count + 1
+            j = j + 1
+        }
+        total_accepted = total_accepted + bundle.chains[i].n_accepted
+        total_total = total_total + bundle.chains[i].n_total
+        i = i + 1
+    }
+    let grand_mean = if all_count > 0 { all_sum / (all_count as f64) } else { 0.0 }
+
+    var ss: f64 = 0.0
+    i = 0
+    while i < bundle.n_chains {
+        var j = 0
+        while j < bundle.chains[i].n_stored {
+            let d = bundle.chains[i].samples[j] - grand_mean
+            ss = ss + d * d
+            j = j + 1
+        }
+        i = i + 1
+    }
+    let grand_std = if all_count > 1 { sqrt_vt(ss / ((all_count - 1) as f64)) } else { 0.0 }
+
+    let mean_accept = if total_total > 0 {
+        (total_accepted as f64) / (total_total as f64)
+    } else { 0.0 }
+
+    MultiChainDiagnostics {
+        grand_mean: grand_mean,
+        grand_std: grand_std,
+        r_hat: r_hat,
+        min_ess: 0.0,  // TODO: per-chain ESS
+        max_ess: 0.0,
+        mean_accept_rate: mean_accept,
+        n_chains: bundle.n_chains,
+        converged: r_hat < 1.1,
+    }
+}
+
+// =============================================================================
+// Convert multi-chain result to epistemic value
+// =============================================================================
+
+struct BayesianKnowledge {
+    mean: f64,
+    std_dev: f64,
+    ci_lower: f64,      // 95% credible interval lower
+    ci_upper: f64,      // 95% credible interval upper
+    confidence: f64,     // based on R-hat convergence
+    n_effective: f64,    // total effective samples
+}
+
+fn traces_to_knowledge(bundle: &TraceBundle) -> BayesianKnowledge with Mut, Div, Panic {
+    let diag = multi_chain_diagnostics(bundle)
+
+    // Credible interval: use sorted samples from all chains
+    // For simplicity, use mean +/- 1.96 * std (normal approximation)
+    let ci_lo = diag.grand_mean - 1.96 * diag.grand_std
+    let ci_hi = diag.grand_mean + 1.96 * diag.grand_std
+
+    // Confidence: R-hat-based
+    // R-hat = 1.0 → perfect convergence → confidence = 1.0
+    // R-hat = 1.1 → threshold → confidence = 0.9
+    // R-hat > 2.0 → not converged → confidence = 0.0
+    let rh = diag.r_hat
+    var confidence: f64 = 0.0
+    if rh < 1.01 { confidence = 0.99 }
+    else if rh < 1.05 { confidence = 0.95 }
+    else if rh < 1.1 { confidence = 0.90 }
+    else if rh < 1.2 { confidence = 0.75 }
+    else if rh < 1.5 { confidence = 0.50 }
+    else { confidence = 0.25 }
+
+    BayesianKnowledge {
+        mean: diag.grand_mean,
+        std_dev: diag.grand_std,
+        ci_lower: ci_lo,
+        ci_upper: ci_hi,
+        confidence: confidence,
+        n_effective: (diag.n_chains as f64) * (bundle.chains[0].n_stored as f64),
+    }
+}

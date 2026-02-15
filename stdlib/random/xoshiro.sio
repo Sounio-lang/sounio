@@ -1,0 +1,257 @@
+// stdlib/random/xoshiro.sio — Xoshiro256** PRNG with Prob Effect
+//
+// A proper pseudo-random number generator for Sounio.
+// Every probabilistic function declares `with Prob` — effects are the API contract.
+//
+// Xoshiro256** is the current state-of-the-art PRNG:
+//   - Period: 2^256 - 1
+//   - Passes BigCrush, PractRand
+//   - Very fast: ~1ns per generation
+//   - No heap allocation, fixed 256-bit state
+//
+// SOTA: Blackman & Vigna (2021): "Scrambled Linear Pseudorandom Number Generators"
+//
+// Note on Prob effect: In Sounio, any function that involves randomness
+// MUST declare `with Prob`. This makes non-determinism visible at the type
+// level. Pure functions cannot call probabilistic functions.
+
+// =============================================================================
+// Math helpers
+// =============================================================================
+
+fn sqrt_rng(x: f64) -> f64 with Mut, Div, Panic {
+    if x <= 0.0 { return 0.0 }
+    var y = x
+    var i = 0
+    while i < 20 { y = 0.5 * (y + x / y); i = i + 1 }
+    y
+}
+
+fn ln_rng(x: f64) -> f64 with Mut, Div, Panic {
+    if x <= 0.0 { return 0.0 - 1.0e30 }
+    if x == 1.0 { return 0.0 }
+    var m = x
+    var e_val = 0
+    while m >= 2.0 { m = m / 2.0; e_val = e_val + 1 }
+    while m < 0.5 { m = m * 2.0; e_val = e_val - 1 }
+    let t = (m - 1.0) / (m + 1.0)
+    let t2 = t * t
+    var sum = t
+    var term = t
+    var k = 1
+    while k < 30 { term = term * t2; sum = sum + term / (2 * k + 1) as f64; k = k + 1 }
+    2.0 * sum + (e_val as f64) * 0.6931471805599453
+}
+
+fn cos_rng(x: f64) -> f64 with Mut, Div, Panic {
+    var a = x
+    let twopi = 6.28318530717958647692
+    while a >= twopi { a = a - twopi }
+    while a < 0.0 { a = a + twopi }
+    if a > 3.14159265358979323846 { a = a - twopi }
+    let a2 = a * a
+    var sum = 1.0
+    var term = 1.0
+    var n = 1
+    while n < 15 {
+        term = 0.0 - term * a2 / ((2 * n - 1) * 2 * n) as f64
+        sum = sum + term
+        n = n + 1
+    }
+    sum
+}
+
+// =============================================================================
+// Xoshiro256** State
+// =============================================================================
+
+struct Xoshiro256 {
+    s0: i64,
+    s1: i64,
+    s2: i64,
+    s3: i64,
+}
+
+// =============================================================================
+// Seed from a single i64
+// =============================================================================
+// Uses SplitMix64 to expand a single seed into the 256-bit state.
+
+fn xoshiro_seed(seed: i64) -> Xoshiro256 with Mut {
+    // SplitMix64 expansion
+    var s = seed
+    s = s + 0x9e3779b97f4a7c15
+    var z = s
+    z = (z ^ (z >> 30)) * 0xbf58476d1ce4e5b9
+    z = (z ^ (z >> 27)) * 0x94d049bb133111eb
+    let s0 = z ^ (z >> 31)
+
+    s = s + 0x9e3779b97f4a7c15
+    z = s
+    z = (z ^ (z >> 30)) * 0xbf58476d1ce4e5b9
+    z = (z ^ (z >> 27)) * 0x94d049bb133111eb
+    let s1 = z ^ (z >> 31)
+
+    s = s + 0x9e3779b97f4a7c15
+    z = s
+    z = (z ^ (z >> 30)) * 0xbf58476d1ce4e5b9
+    z = (z ^ (z >> 27)) * 0x94d049bb133111eb
+    let s2 = z ^ (z >> 31)
+
+    s = s + 0x9e3779b97f4a7c15
+    z = s
+    z = (z ^ (z >> 30)) * 0xbf58476d1ce4e5b9
+    z = (z ^ (z >> 27)) * 0x94d049bb133111eb
+    let s3 = z ^ (z >> 31)
+
+    Xoshiro256 { s0: s0, s1: s1, s2: s2, s3: s3 }
+}
+
+// =============================================================================
+// Core: next_i64
+// =============================================================================
+
+fn rotl(x: i64, k: i32) -> i64 {
+    (x << k) | (x >> (64 - k))
+}
+
+fn xoshiro_next_i64(rng: &!Xoshiro256) -> i64 with Mut {
+    let result = rotl(rng.s1 * 5, 7) * 9
+
+    let t = rng.s1 << 17
+    rng.s2 = rng.s2 ^ rng.s0
+    rng.s3 = rng.s3 ^ rng.s1
+    rng.s1 = rng.s1 ^ rng.s2
+    rng.s0 = rng.s0 ^ rng.s3
+    rng.s2 = rng.s2 ^ t
+    rng.s3 = rotl(rng.s3, 45)
+
+    result
+}
+
+// =============================================================================
+// Uniform [0, 1) — The fundamental distribution
+// =============================================================================
+
+fn uniform(rng: &!Xoshiro256) -> f64 with Prob, Mut {
+    let bits = xoshiro_next_i64(rng)
+    // Use upper 53 bits for double precision
+    let shifted = bits >> 11
+    // Convert to f64 in [0, 1)
+    // Note: i64 to f64 conversion, then divide by 2^53
+    let val = (shifted as f64) * 1.1102230246251565e-16
+    if val < 0.0 { 0.0 - val } else { val }
+}
+
+// Uniform in [lo, hi)
+fn uniform_range(rng: &!Xoshiro256, lo: f64, hi: f64) -> f64 with Prob, Mut {
+    lo + uniform(rng) * (hi - lo)
+}
+
+// =============================================================================
+// Normal (Gaussian) — Box-Muller transform
+// =============================================================================
+
+fn normal(rng: &!Xoshiro256, mu: f64, sigma: f64) -> f64 with Prob, Mut, Div, Panic {
+    var u1 = uniform(rng)
+    if u1 < 1.0e-10 { u1 = 1.0e-10 }
+    let u2 = uniform(rng)
+    let z = sqrt_rng(0.0 - 2.0 * ln_rng(u1)) * cos_rng(2.0 * 3.14159265358979323846 * u2)
+    mu + sigma * z
+}
+
+// Standard normal N(0, 1)
+fn standard_normal(rng: &!Xoshiro256) -> f64 with Prob, Mut, Div, Panic {
+    normal(rng, 0.0, 1.0)
+}
+
+// =============================================================================
+// Exponential distribution
+// =============================================================================
+
+fn exponential(rng: &!Xoshiro256, lambda: f64) -> f64 with Prob, Mut, Div, Panic {
+    var u = uniform(rng)
+    if u < 1.0e-10 { u = 1.0e-10 }
+    (0.0 - ln_rng(u)) / lambda
+}
+
+// =============================================================================
+// Bernoulli distribution
+// =============================================================================
+
+fn bernoulli(rng: &!Xoshiro256, p: f64) -> bool with Prob, Mut {
+    uniform(rng) < p
+}
+
+// =============================================================================
+// Discrete uniform [lo, hi] (inclusive)
+// =============================================================================
+
+fn discrete_uniform(rng: &!Xoshiro256, lo: i32, hi: i32) -> i32 with Prob, Mut, Panic {
+    let range = (hi - lo + 1) as f64
+    let u = uniform(rng)
+    lo + (u * range) as i32
+}
+
+// =============================================================================
+// Shuffle (Fisher-Yates)
+// =============================================================================
+
+fn shuffle_f64(rng: &!Xoshiro256, arr: &![f64; 1024], n: i32) with Prob, Mut, Div, Panic {
+    var i = n - 1
+    while i > 0 {
+        let j = discrete_uniform(rng, 0, i)
+        // Swap arr[i] and arr[j]
+        let tmp = arr[i]
+        arr[i] = arr[j]
+        arr[j] = tmp
+        i = i - 1
+    }
+}
+
+// =============================================================================
+// Summary Statistics (for testing/validation)
+// =============================================================================
+
+struct SampleStats {
+    mean: f64,
+    variance: f64,
+    min_val: f64,
+    max_val: f64,
+    n: i32,
+}
+
+fn sample_stats(samples: &[f64; 10000], n: i32) -> SampleStats with Mut, Div, Panic {
+    if n == 0 {
+        return SampleStats { mean: 0.0, variance: 0.0, min_val: 0.0, max_val: 0.0, n: 0 }
+    }
+
+    var sum: f64 = 0.0
+    var min_v = samples[0]
+    var max_v = samples[0]
+    var i = 0
+    while i < n {
+        sum = sum + samples[i]
+        if samples[i] < min_v { min_v = samples[i] }
+        if samples[i] > max_v { max_v = samples[i] }
+        i = i + 1
+    }
+    let mean = sum / (n as f64)
+
+    var ss: f64 = 0.0
+    i = 0
+    while i < n {
+        let d = samples[i] - mean
+        ss = ss + d * d
+        i = i + 1
+    }
+    let variance = ss / ((n - 1) as f64)
+
+    SampleStats {
+        mean: mean,
+        variance: variance,
+        min_val: min_v,
+        max_val: max_v,
+        n: n,
+    }
+}

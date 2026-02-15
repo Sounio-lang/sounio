@@ -1,0 +1,252 @@
+// stdlib/gpu/tilelang.sio — Dataflow/Scheduling Separation for GPU Kernels
+//
+// Separates WHAT to compute (dataflow specification) from HOW to compute it
+// (scheduling policy). This enables:
+//   1. Writing kernels in terms of tiles and data movement
+//   2. Independently tuning scheduling parameters
+//   3. Auto-tuning by searching the scheduling space
+//
+// SOTA: TileLang (Jan 2025): 98% of FlashMLA performance in ~70 lines
+//       — Separation of dataflow and scheduling
+//       — Multi-backend: NVIDIA, AMD, Apple Metal
+//
+//       ParallelKittens (Stanford, Nov 2025):
+//       — Generalizes tile-based programming to multi-GPU
+//
+//       ML-Triton (Mar 2025):
+//       — Multi-level compilation: workgroup → warp → intrinsic
+//
+// References:
+//   Zheng et al. (2020): "Ansor: Generating High-Performance Tensor Programs"
+//   Ragan-Kelley et al. (2013): "Halide: Decoupling Algorithms from Schedules"
+
+// =============================================================================
+// Tile Specification — WHAT to compute
+// =============================================================================
+
+// A tile is a rectangular block of data processed as a unit
+struct BlockSpec {
+    blk_m: i32,    // tile height
+    blk_n: i32,    // tile width
+    blk_k: i32,    // reduction dimension tile size
+}
+
+fn block_spec_new(m: i32, n: i32, k: i32) -> BlockSpec {
+    BlockSpec { blk_m: m, blk_n: n, blk_k: k }
+}
+
+// Common tile sizes for different operations
+fn block_spec_matmul() -> BlockSpec { BlockSpec { blk_m: 128, blk_n: 128, blk_k: 32 } }
+fn block_spec_attention() -> BlockSpec { BlockSpec { blk_m: 64, blk_n: 64, blk_k: 64 } }
+fn block_spec_elementwise() -> BlockSpec { BlockSpec { blk_m: 256, blk_n: 1, blk_k: 1 } }
+fn block_spec_reduction() -> BlockSpec { BlockSpec { blk_m: 1024, blk_n: 1, blk_k: 1 } }
+
+// =============================================================================
+// Schedule — HOW to compute it
+// =============================================================================
+
+// Thread block configuration
+struct BlockConfig {
+    dim_x: i32,     // threads per block (x dimension)
+    dim_y: i32,     // threads per block (y dimension)
+    dim_z: i32,     // threads per block (z dimension)
+}
+
+// Memory configuration
+enum MemoryLevel {
+    Global,          // HBM/DRAM (slow, large)
+    Shared,          // shared memory (fast, limited)
+    Register,        // registers (fastest, most limited)
+}
+
+struct MemoryConfig {
+    shared_mem_bytes: i32,
+    use_async_copy: bool,
+    prefetch_depth: i32,      // how many tiles ahead to prefetch
+}
+
+// Loop optimization
+struct LoopConfig {
+    unroll_factor: i32,       // loop unrolling factor
+    vectorize_width: i32,     // SIMD vectorization width
+    pipeline_depth: i32,      // software pipelining depth
+}
+
+// Complete schedule
+struct Schedule {
+    block: BlockConfig,
+    memory: MemoryConfig,
+    loops: LoopConfig,
+    n_warps: i32,             // warps per block (for warp-level primitives)
+    use_tensor_cores: bool,
+}
+
+// =============================================================================
+// Schedule Constructors
+// =============================================================================
+
+fn schedule_default() -> Schedule {
+    Schedule {
+        block: BlockConfig { dim_x: 128, dim_y: 1, dim_z: 1 },
+        memory: MemoryConfig { shared_mem_bytes: 49152, use_async_copy: false, prefetch_depth: 1 },
+        loops: LoopConfig { unroll_factor: 4, vectorize_width: 4, pipeline_depth: 1 },
+        n_warps: 4,
+        use_tensor_cores: false,
+    }
+}
+
+fn schedule_matmul(m: i32, n: i32, k: i32) -> Schedule {
+    Schedule {
+        block: BlockConfig { dim_x: 16, dim_y: 16, dim_z: 1 },
+        memory: MemoryConfig {
+            shared_mem_bytes: 16 * 16 * 8 * 2,  // two tiles of f64
+            use_async_copy: true,
+            prefetch_depth: 2,
+        },
+        loops: LoopConfig { unroll_factor: 4, vectorize_width: 4, pipeline_depth: 2 },
+        n_warps: 8,
+        use_tensor_cores: false,
+    }
+}
+
+fn schedule_attention(seq_len: i32, head_dim: i32) -> Schedule {
+    // FlashAttention-style schedule: tile over sequence length
+    let block_m = if seq_len > 128 { 128 } else { seq_len }
+    Schedule {
+        block: BlockConfig { dim_x: block_m, dim_y: 1, dim_z: 1 },
+        memory: MemoryConfig {
+            shared_mem_bytes: 98304,  // 96KB for Q, K, V tiles
+            use_async_copy: true,
+            prefetch_depth: 2,
+        },
+        loops: LoopConfig { unroll_factor: 8, vectorize_width: 4, pipeline_depth: 3 },
+        n_warps: 4,
+        use_tensor_cores: true,
+    }
+}
+
+fn schedule_elementwise(n_elements: i32) -> Schedule {
+    Schedule {
+        block: BlockConfig { dim_x: 256, dim_y: 1, dim_z: 1 },
+        memory: MemoryConfig { shared_mem_bytes: 0, use_async_copy: false, prefetch_depth: 0 },
+        loops: LoopConfig { unroll_factor: 4, vectorize_width: 8, pipeline_depth: 1 },
+        n_warps: 8,
+        use_tensor_cores: false,
+    }
+}
+
+// =============================================================================
+// Kernel Descriptor — Combines dataflow + schedule
+// =============================================================================
+
+enum KernelOp {
+    MatMul,          // C = A @ B
+    Attention,       // softmax(Q K^T / sqrt(d)) V
+    Elementwise,     // C = f(A)
+    Reduction,       // y = reduce(A)
+    Conv2D,          // convolution
+    Scatter,         // scatter/gather
+}
+
+struct KernelDescriptor {
+    op: KernelOp,
+    block: BlockSpec,
+    schedule: Schedule,
+    // Problem dimensions
+    m: i32, n: i32, k: i32,
+    // Data type (0=f32, 1=f64, 2=f16, 3=bf16, 4=i32)
+    dtype: i32,
+}
+
+fn kernel_matmul(m: i32, n: i32, k: i32) -> KernelDescriptor {
+    KernelDescriptor {
+        op: KernelOp::MatMul,
+        block: block_spec_matmul(),
+        schedule: schedule_matmul(m, n, k),
+        m: m, n: n, k: k,
+        dtype: 1,  // f64
+    }
+}
+
+fn kernel_attention(seq_len: i32, head_dim: i32) -> KernelDescriptor {
+    KernelDescriptor {
+        op: KernelOp::Attention,
+        block: block_spec_attention(),
+        schedule: schedule_attention(seq_len, head_dim),
+        m: seq_len, n: seq_len, k: head_dim,
+        dtype: 1,
+    }
+}
+
+fn kernel_elementwise(n: i32) -> KernelDescriptor {
+    KernelDescriptor {
+        op: KernelOp::Elementwise,
+        block: block_spec_elementwise(),
+        schedule: schedule_elementwise(n),
+        m: n, n: 1, k: 1,
+        dtype: 1,
+    }
+}
+
+// =============================================================================
+// Grid Configuration — Compute launch parameters
+// =============================================================================
+
+struct GridConfig {
+    grid_x: i32,
+    grid_y: i32,
+    grid_z: i32,
+    block_x: i32,
+    block_y: i32,
+    block_z: i32,
+    shared_mem: i32,
+}
+
+fn compute_grid(desc: &KernelDescriptor) -> GridConfig with Panic {
+    let grid_x = (desc.m + desc.block.blk_m - 1) / desc.block.blk_m
+    let grid_y = (desc.n + desc.block.blk_n - 1) / desc.block.blk_n
+
+    GridConfig {
+        grid_x: grid_x,
+        grid_y: grid_y,
+        grid_z: 1,
+        block_x: desc.schedule.block.dim_x,
+        block_y: desc.schedule.block.dim_y,
+        block_z: desc.schedule.block.dim_z,
+        shared_mem: desc.schedule.memory.shared_mem_bytes,
+    }
+}
+
+// =============================================================================
+// Performance Model — Estimate kernel performance
+// =============================================================================
+
+struct PerfEstimate {
+    flops: f64,              // total floating-point operations
+    bytes_loaded: f64,       // total bytes loaded from global memory
+    arithmetic_intensity: f64, // flops / bytes
+    estimated_occupancy: f64,  // fraction of GPU utilized (0-1)
+    is_compute_bound: bool,
+    is_memory_bound: bool,
+}
+
+fn estimate_matmul_perf(m: i32, n: i32, k: i32, desc: &KernelDescriptor) -> PerfEstimate with Panic {
+    let flops = 2.0 * (m as f64) * (n as f64) * (k as f64)
+    let bytes_per_elem = if desc.dtype == 1 { 8.0 } else { 4.0 }
+    let bytes = bytes_per_elem * ((m as f64) * (k as f64) + (k as f64) * (n as f64) + (m as f64) * (n as f64))
+    let ai = flops / bytes
+
+    // Rough occupancy estimate based on shared memory usage
+    let max_shared = 163840.0  // 160KB on A100
+    let shmem_fraction = (desc.schedule.memory.shared_mem_bytes as f64) / max_shared
+    let occupancy = if shmem_fraction > 0.5 { 0.5 } else { 1.0 - shmem_fraction }
+
+    PerfEstimate {
+        flops: flops,
+        bytes_loaded: bytes,
+        arithmetic_intensity: ai,
+        estimated_occupancy: occupancy,
+        is_compute_bound: ai > 100.0,
+        is_memory_bound: ai < 10.0,
+    }
+}

@@ -1,0 +1,260 @@
+// stdlib/autodiff/activity.sio — Activity Analysis for Automatic Differentiation
+//
+// Marks variables as Active/Inactive to skip unnecessary gradient computation.
+// Active variables contribute to the loss; inactive ones are constants w.r.t.
+// differentiation. Skipping inactive variables yields 1.24x CPU, 1.7x GPU speedup.
+//
+// SOTA: Peng, Moses et al. (OOPSLA 2025):
+//       "Sound and Modular Activity Analysis for AD in MLIR"
+//       — Formalizes activity analysis as abstract interpretation
+//       — Function summaries enable modular/separate compilation
+//
+// Theory:
+//   A variable v is ACTIVE if it lies on a data-flow path from an
+//   independent (input) to a dependent (output) variable. Otherwise inactive.
+//
+//   Activity propagation rules:
+//     Active + Active   = Active
+//     Active + Inactive = Active
+//     Active * Inactive = Active   (if the active part is non-zero)
+//     Inactive * Inactive = Inactive
+//     f(Active) = Active            (for any differentiable f)
+//     f(Inactive) = Inactive
+
+// =============================================================================
+// Activity Label
+// =============================================================================
+
+enum Activity {
+    Active,      // contributes to gradient
+    Inactive,    // constant w.r.t. differentiation — skip gradient
+}
+
+fn activity_is_active(a: Activity) -> bool {
+    match a {
+        Activity::Active => true,
+        Activity::Inactive => false,
+    }
+}
+
+// Activity join (lattice meet): Active wins
+fn activity_join(a: Activity, b: Activity) -> Activity {
+    match a {
+        Activity::Active => Activity::Active,
+        Activity::Inactive => b,
+    }
+}
+
+// =============================================================================
+// Activity-Aware Dual Number
+// =============================================================================
+
+// A dual number augmented with activity status.
+// When activity is Inactive, gradient computation is skipped entirely.
+struct ADual {
+    val: f64,
+    dot: f64,
+    activity: Activity,
+}
+
+// Constructors
+fn adual_active(val: f64, dot: f64) -> ADual {
+    ADual { val: val, dot: dot, activity: Activity::Active }
+}
+
+fn adual_inactive(val: f64) -> ADual {
+    ADual { val: val, dot: 0.0, activity: Activity::Inactive }
+}
+
+fn adual_const(val: f64) -> ADual {
+    ADual { val: val, dot: 0.0, activity: Activity::Inactive }
+}
+
+fn adual_var(val: f64) -> ADual {
+    ADual { val: val, dot: 1.0, activity: Activity::Active }
+}
+
+// =============================================================================
+// Activity-Aware Arithmetic
+// =============================================================================
+
+// Addition: skip if both inactive
+fn adual_add(a: ADual, b: ADual) -> ADual {
+    let act = activity_join(a.activity, b.activity)
+    match act {
+        Activity::Inactive => ADual { val: a.val + b.val, dot: 0.0, activity: Activity::Inactive },
+        Activity::Active => ADual { val: a.val + b.val, dot: a.dot + b.dot, activity: Activity::Active },
+    }
+}
+
+// Subtraction
+fn adual_sub(a: ADual, b: ADual) -> ADual {
+    let act = activity_join(a.activity, b.activity)
+    match act {
+        Activity::Inactive => ADual { val: a.val - b.val, dot: 0.0, activity: Activity::Inactive },
+        Activity::Active => ADual { val: a.val - b.val, dot: a.dot - b.dot, activity: Activity::Active },
+    }
+}
+
+// Multiplication: product rule, but skip if both inactive
+fn adual_mul(a: ADual, b: ADual) -> ADual {
+    match (a.activity, b.activity) {
+        (Activity::Inactive, Activity::Inactive) =>
+            ADual { val: a.val * b.val, dot: 0.0, activity: Activity::Inactive },
+        _ => ADual {
+            val: a.val * b.val,
+            dot: a.dot * b.val + a.val * b.dot,
+            activity: Activity::Active,
+        },
+    }
+}
+
+// Division: quotient rule, skip if both inactive
+fn adual_div(a: ADual, b: ADual) -> ADual with Panic {
+    match (a.activity, b.activity) {
+        (Activity::Inactive, Activity::Inactive) =>
+            ADual { val: a.val / b.val, dot: 0.0, activity: Activity::Inactive },
+        _ => {
+            let b2 = b.val * b.val
+            ADual {
+                val: a.val / b.val,
+                dot: (a.dot * b.val - a.val * b.dot) / b2,
+                activity: Activity::Active,
+            }
+        },
+    }
+}
+
+// Negation
+fn adual_neg(a: ADual) -> ADual {
+    match a.activity {
+        Activity::Inactive => ADual { val: 0.0 - a.val, dot: 0.0, activity: Activity::Inactive },
+        Activity::Active => ADual { val: 0.0 - a.val, dot: 0.0 - a.dot, activity: Activity::Active },
+    }
+}
+
+// Scale by constant
+fn adual_scale(a: ADual, c: f64) -> ADual {
+    match a.activity {
+        Activity::Inactive => ADual { val: c * a.val, dot: 0.0, activity: Activity::Inactive },
+        Activity::Active => ADual { val: c * a.val, dot: c * a.dot, activity: Activity::Active },
+    }
+}
+
+// =============================================================================
+// Activity-Aware Transcendentals
+// =============================================================================
+
+// exp(a): skip gradient if inactive
+fn adual_exp(a: ADual) -> ADual with Mut, Div, Panic {
+    if a.val > 500.0 { return ADual { val: 1.0e200, dot: 0.0, activity: a.activity } }
+    if a.val < -500.0 { return ADual { val: 0.0, dot: 0.0, activity: a.activity } }
+
+    // Inline exp
+    let ln2_val = 0.6931471805599453
+    var k_f = a.val / ln2_val
+    var k: i32 = 0
+    if k_f >= 0.0 { k = k_f as i32 } else { k = (k_f as i32) - 1 }
+    let r = a.val - (k as f64) * ln2_val
+    var sum = 1.0
+    var term = 1.0
+    var n = 1
+    while n < 25 { term = term * r / (n as f64); sum = sum + term; n = n + 1 }
+    var result = sum
+    if k >= 0 { var i = 0; while i < k { result = result * 2.0; i = i + 1 } }
+    else { var i = 0; while i < (0 - k) { result = result / 2.0; i = i + 1 } }
+
+    match a.activity {
+        Activity::Inactive => ADual { val: result, dot: 0.0, activity: Activity::Inactive },
+        Activity::Active => ADual { val: result, dot: result * a.dot, activity: Activity::Active },
+    }
+}
+
+// ln(a)
+fn adual_ln(a: ADual) -> ADual with Mut, Div, Panic {
+    if a.val <= 0.0 { return ADual { val: 0.0 - 1.0e30, dot: 0.0, activity: a.activity } }
+
+    var m = a.val
+    var e_val = 0
+    while m >= 2.0 { m = m / 2.0; e_val = e_val + 1 }
+    while m < 0.5 { m = m * 2.0; e_val = e_val - 1 }
+    let t = (m - 1.0) / (m + 1.0)
+    let t2 = t * t
+    var sm = t
+    var tm = t
+    var k = 1
+    while k < 30 { tm = tm * t2; sm = sm + tm / (2 * k + 1) as f64; k = k + 1 }
+    let ln_val = 2.0 * sm + (e_val as f64) * 0.6931471805599453
+
+    match a.activity {
+        Activity::Inactive => ADual { val: ln_val, dot: 0.0, activity: Activity::Inactive },
+        Activity::Active => ADual { val: ln_val, dot: a.dot / a.val, activity: Activity::Active },
+    }
+}
+
+// sqrt(a)
+fn adual_sqrt(a: ADual) -> ADual with Mut, Div, Panic {
+    if a.val <= 0.0 { return ADual { val: 0.0, dot: 0.0, activity: a.activity } }
+    var y = a.val
+    var i = 0
+    while i < 20 { y = 0.5 * (y + a.val / y); i = i + 1 }
+
+    match a.activity {
+        Activity::Inactive => ADual { val: y, dot: 0.0, activity: Activity::Inactive },
+        Activity::Active => ADual { val: y, dot: a.dot / (2.0 * y), activity: Activity::Active },
+    }
+}
+
+// =============================================================================
+// Function Summary — Modular Activity Analysis
+// =============================================================================
+// SOTA: Function summaries from OOPSLA 2025 paper
+// A summary records: which inputs are active → which outputs are active
+// This enables modular/separate compilation of differentiable modules.
+
+struct ActivitySummary {
+    n_inputs: i32,
+    n_outputs: i32,
+    // Flattened dependency matrix: output[i] depends on input[j]
+    // If depends[i * n_inputs + j] == 1, then input j's activity
+    // propagates to output i
+    depends: [i32; 256],    // max 16 inputs x 16 outputs
+}
+
+fn summary_new(n_in: i32, n_out: i32) -> ActivitySummary {
+    ActivitySummary {
+        n_inputs: n_in,
+        n_outputs: n_out,
+        depends: [0; 256],
+    }
+}
+
+fn summary_set_dep(s: &!ActivitySummary, output: i32, input: i32) with Mut, Panic {
+    s.depends[output * s.n_inputs + input] = 1
+}
+
+// Query: is output active given input activities?
+fn summary_output_activity(
+    s: &ActivitySummary,
+    output: i32,
+    input_activities: &[i32; 16],
+) -> Activity with Mut, Div, Panic {
+    var j = 0
+    while j < s.n_inputs {
+        if s.depends[output * s.n_inputs + j] == 1 {
+            if input_activities[j] == 1 {
+                return Activity::Active
+            }
+        }
+        j = j + 1
+    }
+    Activity::Inactive
+}
+
+// =============================================================================
+// Utility
+// =============================================================================
+
+fn adual_value(a: &ADual) -> f64 { a.val }
+fn adual_gradient(a: &ADual) -> f64 { a.dot }
+fn adual_is_active(a: &ADual) -> bool { activity_is_active(a.activity) }

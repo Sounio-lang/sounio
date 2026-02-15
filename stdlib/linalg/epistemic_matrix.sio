@@ -1,0 +1,356 @@
+// stdlib/linalg/epistemic_matrix.sio — Epistemic Matrices
+//
+// Matrix where every element carries uncertainty and confidence.
+// GUM-compliant uncertainty propagation through all matrix operations.
+//
+// When you multiply two epistemic matrices, the uncertainty PROPAGATES
+// according to the law of propagation of uncertainty (GUM Section 5.1):
+//   u(c_ij)^2 = sum_k( u(a_ik)^2 * b_kj^2 + a_ik^2 * u(b_kj)^2 )
+// And confidence DEGRADES monotonically:
+//   conf(c_ij) = min over all contributing elements
+//
+// This is the matrix algebra that scientific computing SHOULD have:
+// every result knows how uncertain it is.
+//
+// SOTA: GUM (2008): "Guide to Expression of Uncertainty in Measurement"
+//       GUM Supplement 1 (2008): Monte Carlo propagation
+//
+// References:
+//   JCGM 100:2008: "Evaluation of measurement data"
+//   Sounio GUM compliance tests: tests/run-pass/gum_compliance.sio
+
+// =============================================================================
+// Math helpers
+// =============================================================================
+
+fn sqrt_em(x: f64) -> f64 with Mut, Div, Panic {
+    if x <= 0.0 { return 0.0 }
+    var y = x
+    var i = 0
+    while i < 20 { y = 0.5 * (y + x / y); i = i + 1 }
+    y
+}
+
+fn abs_em(x: f64) -> f64 {
+    if x < 0.0 { 0.0 - x } else { x }
+}
+
+fn min_em(a: f64, b: f64) -> f64 {
+    if a < b { a } else { b }
+}
+
+// =============================================================================
+// Core Type
+// =============================================================================
+
+// Maximum size: 16x16 = 256 elements
+struct EpistemicMatrix {
+    values: [f64; 256],         // matrix elements
+    uncertainties: [f64; 256],  // standard uncertainty per element
+    confidences: [f64; 256],    // confidence level per element [0, 1]
+    rows: i32,
+    cols: i32,
+}
+
+// =============================================================================
+// Constructors
+// =============================================================================
+
+fn ematrix_zeros(rows: i32, cols: i32) -> EpistemicMatrix {
+    EpistemicMatrix {
+        values: [0.0; 256],
+        uncertainties: [0.0; 256],
+        confidences: [1.0; 256],
+        rows: rows,
+        cols: cols,
+    }
+}
+
+fn ematrix_identity(n: i32) -> EpistemicMatrix with Mut, Div, Panic {
+    var m = ematrix_zeros(n, n)
+    var i = 0
+    while i < n {
+        m.values[i * n + i] = 1.0
+        m.uncertainties[i * n + i] = 0.0
+        m.confidences[i * n + i] = 1.0
+        i = i + 1
+    }
+    m
+}
+
+// Set element with uncertainty
+fn ematrix_set(
+    m: &!EpistemicMatrix,
+    row: i32, col: i32,
+    val: f64, unc: f64, conf: f64,
+) with Mut, Panic {
+    let idx = row * m.cols + col
+    m.values[idx] = val
+    m.uncertainties[idx] = unc
+    m.confidences[idx] = conf
+}
+
+fn ematrix_get_val(m: &EpistemicMatrix, row: i32, col: i32) -> f64 with Panic {
+    m.values[row * m.cols + col]
+}
+
+fn ematrix_get_unc(m: &EpistemicMatrix, row: i32, col: i32) -> f64 with Panic {
+    m.uncertainties[row * m.cols + col]
+}
+
+fn ematrix_get_conf(m: &EpistemicMatrix, row: i32, col: i32) -> f64 with Panic {
+    m.confidences[row * m.cols + col]
+}
+
+// =============================================================================
+// Matrix Addition — GUM propagation
+// =============================================================================
+// C = A + B
+// c_ij = a_ij + b_ij
+// u(c_ij) = sqrt(u(a_ij)^2 + u(b_ij)^2)   [uncorrelated]
+// conf(c_ij) = min(conf(a_ij), conf(b_ij))
+
+fn ematrix_add(a: &EpistemicMatrix, b: &EpistemicMatrix) -> EpistemicMatrix with Mut, Div, Panic {
+    var c = ematrix_zeros(a.rows, a.cols)
+    var i = 0
+    while i < a.rows {
+        var j = 0
+        while j < a.cols {
+            let idx = i * a.cols + j
+            c.values[idx] = a.values[idx] + b.values[idx]
+            // GUM: u(c) = sqrt(u(a)^2 + u(b)^2)
+            let ua = a.uncertainties[idx]
+            let ub = b.uncertainties[idx]
+            c.uncertainties[idx] = sqrt_em(ua * ua + ub * ub)
+            // Confidence: monotone non-increasing
+            c.confidences[idx] = min_em(a.confidences[idx], b.confidences[idx])
+            j = j + 1
+        }
+        i = i + 1
+    }
+    c
+}
+
+// =============================================================================
+// Matrix Subtraction
+// =============================================================================
+
+fn ematrix_sub(a: &EpistemicMatrix, b: &EpistemicMatrix) -> EpistemicMatrix with Mut, Div, Panic {
+    var c = ematrix_zeros(a.rows, a.cols)
+    var i = 0
+    while i < a.rows {
+        var j = 0
+        while j < a.cols {
+            let idx = i * a.cols + j
+            c.values[idx] = a.values[idx] - b.values[idx]
+            let ua = a.uncertainties[idx]
+            let ub = b.uncertainties[idx]
+            c.uncertainties[idx] = sqrt_em(ua * ua + ub * ub)
+            c.confidences[idx] = min_em(a.confidences[idx], b.confidences[idx])
+            j = j + 1
+        }
+        i = i + 1
+    }
+    c
+}
+
+// =============================================================================
+// Matrix Multiplication — GUM quadrature propagation
+// =============================================================================
+// C = A * B where A is (m x k) and B is (k x n)
+// c_ij = sum_l a_il * b_lj
+// u(c_ij)^2 = sum_l( u(a_il)^2 * b_lj^2 + a_il^2 * u(b_lj)^2 )
+// conf(c_ij) = min over all (a_il, b_lj) that contribute
+
+fn ematrix_mul(a: &EpistemicMatrix, b: &EpistemicMatrix) -> EpistemicMatrix with Mut, Div, Panic {
+    var c = ematrix_zeros(a.rows, b.cols)
+    let k = a.cols  // inner dimension
+
+    var i = 0
+    while i < a.rows {
+        var j = 0
+        while j < b.cols {
+            var sum_val: f64 = 0.0
+            var sum_unc_sq: f64 = 0.0
+            var min_conf: f64 = 1.0
+
+            var l = 0
+            while l < k {
+                let a_il = a.values[i * k + l]
+                let b_lj = b.values[l * b.cols + j]
+                let ua_il = a.uncertainties[i * k + l]
+                let ub_lj = b.uncertainties[l * b.cols + j]
+
+                sum_val = sum_val + a_il * b_lj
+
+                // GUM quadrature: u^2 = sum(partial_a^2 * u_a^2 + partial_b^2 * u_b^2)
+                // partial c/partial a_il = b_lj
+                // partial c/partial b_lj = a_il
+                sum_unc_sq = sum_unc_sq + ua_il * ua_il * b_lj * b_lj + a_il * a_il * ub_lj * ub_lj
+
+                // Confidence degrades through the chain
+                let conf_a = a.confidences[i * k + l]
+                let conf_b = b.confidences[l * b.cols + j]
+                let local_min = min_em(conf_a, conf_b)
+                min_conf = min_em(min_conf, local_min)
+
+                l = l + 1
+            }
+
+            let idx = i * b.cols + j
+            c.values[idx] = sum_val
+            c.uncertainties[idx] = sqrt_em(sum_unc_sq)
+            c.confidences[idx] = min_conf
+
+            j = j + 1
+        }
+        i = i + 1
+    }
+    c
+}
+
+// =============================================================================
+// Scalar Operations
+// =============================================================================
+
+// Scale by constant: u(c*A) = |c| * u(A), conf unchanged
+fn ematrix_scale(m: &EpistemicMatrix, scalar: f64) -> EpistemicMatrix with Mut, Div, Panic {
+    var result = ematrix_zeros(m.rows, m.cols)
+    let as_val = abs_em(scalar)
+    var i = 0
+    while i < m.rows * m.cols {
+        result.values[i] = scalar * m.values[i]
+        result.uncertainties[i] = as_val * m.uncertainties[i]
+        result.confidences[i] = m.confidences[i]
+        i = i + 1
+    }
+    result
+}
+
+// =============================================================================
+// Transpose
+// =============================================================================
+
+fn ematrix_transpose(m: &EpistemicMatrix) -> EpistemicMatrix with Mut, Div, Panic {
+    var result = ematrix_zeros(m.cols, m.rows)
+    var i = 0
+    while i < m.rows {
+        var j = 0
+        while j < m.cols {
+            let src = i * m.cols + j
+            let dst = j * m.rows + i
+            result.values[dst] = m.values[src]
+            result.uncertainties[dst] = m.uncertainties[src]
+            result.confidences[dst] = m.confidences[src]
+            j = j + 1
+        }
+        i = i + 1
+    }
+    result
+}
+
+// =============================================================================
+// Matrix Norms (with uncertainty)
+// =============================================================================
+
+struct EpistemicScalar {
+    value: f64,
+    uncertainty: f64,
+    confidence: f64,
+}
+
+// Frobenius norm: ||A||_F = sqrt(sum(a_ij^2))
+fn ematrix_frobenius(m: &EpistemicMatrix) -> EpistemicScalar with Mut, Div, Panic {
+    var sum_sq: f64 = 0.0
+    var sum_unc_sq: f64 = 0.0
+    var min_conf: f64 = 1.0
+
+    var i = 0
+    while i < m.rows * m.cols {
+        let v = m.values[i]
+        let u = m.uncertainties[i]
+        sum_sq = sum_sq + v * v
+        // d(||A||_F^2)/d(a_ij) = 2*a_ij, so u(sum)^2 += (2*a_ij)^2 * u_ij^2
+        sum_unc_sq = sum_unc_sq + 4.0 * v * v * u * u
+        min_conf = min_em(min_conf, m.confidences[i])
+        i = i + 1
+    }
+
+    let norm = sqrt_em(sum_sq)
+    // u(sqrt(x)) = u(x) / (2*sqrt(x))
+    let norm_unc = if norm > 1.0e-30 { sqrt_em(sum_unc_sq) / (2.0 * norm) } else { 0.0 }
+
+    EpistemicScalar {
+        value: norm,
+        uncertainty: norm_unc,
+        confidence: min_conf,
+    }
+}
+
+// =============================================================================
+// Trace (with uncertainty)
+// =============================================================================
+
+fn ematrix_trace(m: &EpistemicMatrix) -> EpistemicScalar with Mut, Div, Panic {
+    var sum: f64 = 0.0
+    var sum_unc_sq: f64 = 0.0
+    var min_conf: f64 = 1.0
+
+    let n = if m.rows < m.cols { m.rows } else { m.cols }
+    var i = 0
+    while i < n {
+        let idx = i * m.cols + i
+        sum = sum + m.values[idx]
+        let u = m.uncertainties[idx]
+        sum_unc_sq = sum_unc_sq + u * u
+        min_conf = min_em(min_conf, m.confidences[idx])
+        i = i + 1
+    }
+
+    EpistemicScalar {
+        value: sum,
+        uncertainty: sqrt_em(sum_unc_sq),
+        confidence: min_conf,
+    }
+}
+
+// =============================================================================
+// Confidence Summary
+// =============================================================================
+
+struct MatrixConfidenceSummary {
+    min_confidence: f64,
+    max_confidence: f64,
+    mean_confidence: f64,
+    max_relative_uncertainty: f64,  // max(u/|v|) across all elements
+}
+
+fn ematrix_confidence_summary(m: &EpistemicMatrix) -> MatrixConfidenceSummary with Mut, Div, Panic {
+    var min_c: f64 = 1.0
+    var max_c: f64 = 0.0
+    var sum_c: f64 = 0.0
+    var max_rel: f64 = 0.0
+    let n = m.rows * m.cols
+
+    var i = 0
+    while i < n {
+        let c = m.confidences[i]
+        if c < min_c { min_c = c }
+        if c > max_c { max_c = c }
+        sum_c = sum_c + c
+
+        let v = abs_em(m.values[i])
+        if v > 1.0e-30 {
+            let rel = m.uncertainties[i] / v
+            if rel > max_rel { max_rel = rel }
+        }
+        i = i + 1
+    }
+
+    MatrixConfidenceSummary {
+        min_confidence: min_c,
+        max_confidence: max_c,
+        mean_confidence: sum_c / (n as f64),
+        max_relative_uncertainty: max_rel,
+    }
+}

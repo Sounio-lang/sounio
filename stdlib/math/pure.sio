@@ -1,0 +1,520 @@
+// stdlib/math/pure.sio — Pure Sounio mathematical functions (zero FFI)
+//
+// Canonical implementations of core math functions. All modules that
+// need math should use these instead of reimplementing locally.
+//
+// Effect annotations follow Sounio's effect system:
+//   Mut   — function uses mutable local state (var)
+//   Div   — function contains loops (may diverge)
+//   Panic — function contains division or indexing (may panic)
+//
+// Algorithms:
+//   sqrt   — Newton-Raphson (20 iterations)
+//   ln     — Range reduction to [0.5, 2) + artanh series
+//   exp    — Range reduction by ln2 + Taylor series (25 terms)
+//   sin    — Range reduction to [-pi, pi] + Taylor series (15 terms)
+//   cos    — Range reduction to [-pi, pi] + Taylor series (15 terms)
+//   atan   — Argument reduction + Taylor series
+//   lgamma — Recurrence to x >= 8 + Stirling series with Bernoulli corrections
+//   erf    — Abramowitz-Stegun 5-term rational approximation (max error 1.5e-7)
+//
+// References:
+//   - Abramowitz & Stegun (1964): "Handbook of Mathematical Functions"
+//   - Cody & Waite (1980): "Software Manual for the Elementary Functions"
+
+// =============================================================================
+// Constants (pure — no effects)
+// =============================================================================
+
+fn pi() -> f64 { 3.14159265358979323846 }
+fn two_pi() -> f64 { 6.28318530717958647692 }
+fn half_pi() -> f64 { 1.57079632679489661923 }
+fn e() -> f64 { 2.71828182845904523536 }
+fn ln2() -> f64 { 0.6931471805599453 }
+fn ln10() -> f64 { 2.302585092994046 }
+fn ln_2pi() -> f64 { 1.8378770664093453 }
+fn sqrt2() -> f64 { 1.4142135623730951 }
+fn inv_sqrt_2pi() -> f64 { 0.3989422804014327 }
+
+// =============================================================================
+// Arithmetic helpers (pure — no effects)
+// =============================================================================
+
+fn abs(x: f64) -> f64 {
+    if x < 0.0 { 0.0 - x } else { x }
+}
+
+fn max(a: f64, b: f64) -> f64 {
+    if a > b { a } else { b }
+}
+
+fn min(a: f64, b: f64) -> f64 {
+    if a < b { a } else { b }
+}
+
+fn clamp(x: f64, lo: f64, hi: f64) -> f64 {
+    if x < lo { lo }
+    else if x > hi { hi }
+    else { x }
+}
+
+fn sign(x: f64) -> f64 {
+    if x > 0.0 { 1.0 }
+    else if x < 0.0 { 0.0 - 1.0 }
+    else { 0.0 }
+}
+
+fn abs_i32(x: i32) -> i32 {
+    if x < 0 { 0 - x } else { x }
+}
+
+fn max_i32(a: i32, b: i32) -> i32 {
+    if a > b { a } else { b }
+}
+
+fn min_i32(a: i32, b: i32) -> i32 {
+    if a < b { a } else { b }
+}
+
+// =============================================================================
+// Square root — Newton-Raphson
+// =============================================================================
+
+fn sqrt(x: f64) -> f64 with Mut, Div, Panic {
+    if x <= 0.0 { return 0.0 }
+    var y = x
+    var i = 0
+    while i < 20 {
+        y = 0.5 * (y + x / y)
+        i = i + 1
+    }
+    y
+}
+
+// =============================================================================
+// Natural logarithm — range reduction + artanh series
+// =============================================================================
+// ln(x) = ln(m * 2^e) = ln(m) + e*ln(2)
+// where m in [0.5, 2). Series: ln(m) = 2*(t + t^3/3 + t^5/5 + ...)
+// with t = (m-1)/(m+1)
+
+fn ln(x: f64) -> f64 with Mut, Div, Panic {
+    if x <= 0.0 { return 0.0 - 1.0e30 }
+    if x == 1.0 { return 0.0 }
+
+    // Range reduce to [0.5, 2)
+    var m = x
+    var e_val = 0
+    while m >= 2.0 {
+        m = m / 2.0
+        e_val = e_val + 1
+    }
+    while m < 0.5 {
+        m = m * 2.0
+        e_val = e_val - 1
+    }
+
+    // artanh series: ln(m) = 2 * sum_{k=0}^{N} t^(2k+1)/(2k+1)
+    let t = (m - 1.0) / (m + 1.0)
+    let t2 = t * t
+    var sum = t
+    var term = t
+    var k = 1
+    while k < 30 {
+        term = term * t2
+        let denom = (2 * k + 1) as f64
+        sum = sum + term / denom
+        k = k + 1
+    }
+    let ln_m = 2.0 * sum
+
+    return ln_m + (e_val as f64) * ln2()
+}
+
+// Common logarithm
+fn log10(x: f64) -> f64 with Mut, Div, Panic {
+    ln(x) / ln10()
+}
+
+// Base-2 logarithm
+fn log2(x: f64) -> f64 with Mut, Div, Panic {
+    ln(x) / ln2()
+}
+
+// =============================================================================
+// Exponential — range reduction + Taylor
+// =============================================================================
+// exp(x) = 2^k * exp(r) where r = x - k*ln2, |r| < ln2
+
+fn exp(x: f64) -> f64 with Mut, Div, Panic {
+    if x > 500.0 { return 1.0e200 }
+    if x < -500.0 { return 0.0 }
+
+    // Range reduce: find k such that r = x - k*ln2 is in [-ln2/2, ln2/2]
+    var k_f = x / ln2()
+    var k: i32 = 0
+    if k_f >= 0.0 {
+        k = k_f as i32
+    } else {
+        k = (k_f as i32) - 1
+    }
+    let r = x - (k as f64) * ln2()
+
+    // Taylor series for exp(r) where |r| < ln2
+    var sum = 1.0
+    var term = 1.0
+    var n = 1
+    while n < 25 {
+        term = term * r / (n as f64)
+        sum = sum + term
+        n = n + 1
+    }
+
+    // Multiply by 2^k
+    var result = sum
+    if k >= 0 {
+        var i = 0
+        while i < k {
+            result = result * 2.0
+            i = i + 1
+        }
+    } else {
+        var i = 0
+        while i < (0 - k) {
+            result = result / 2.0
+            i = i + 1
+        }
+    }
+    return result
+}
+
+// General power: x^n = exp(n * ln(x))
+fn pow(x: f64, n: f64) -> f64 with Mut, Div, Panic {
+    if x == 0.0 {
+        if n > 0.0 { return 0.0 }
+        else { return 1.0e30 }
+    }
+    if n == 0.0 { return 1.0 }
+    if n == 1.0 { return x }
+    if n == 2.0 { return x * x }
+    exp(n * ln(x))
+}
+
+// =============================================================================
+// Trigonometric — range reduction + Taylor
+// =============================================================================
+
+// Cosine via Taylor series (range-reduced to [-pi, pi])
+fn cos(x: f64) -> f64 with Mut, Div, Panic {
+    var a = x
+    let twopi = two_pi()
+    while a >= twopi { a = a - twopi }
+    while a < 0.0 { a = a + twopi }
+
+    // Shift to [-pi, pi] for better convergence
+    if a > pi() { a = a - twopi }
+    let a2 = a * a
+    var sum = 1.0
+    var term = 1.0
+    var n = 1
+    while n < 15 {
+        term = 0.0 - term * a2 / ((2 * n - 1) * 2 * n) as f64
+        sum = sum + term
+        n = n + 1
+    }
+    return sum
+}
+
+// Sine via cos(x - pi/2)
+fn sin(x: f64) -> f64 with Mut, Div, Panic {
+    return cos(x - half_pi())
+}
+
+// Tangent
+fn tan(x: f64) -> f64 with Mut, Div, Panic {
+    let c = cos(x)
+    if abs(c) < 1.0e-15 { return sign(sin(x)) * 1.0e30 }
+    return sin(x) / c
+}
+
+// =============================================================================
+// Inverse trigonometric
+// =============================================================================
+
+// atan via Taylor series with argument reduction
+// For |x| <= 1: atan(x) = x - x^3/3 + x^5/5 - x^7/7 + ...
+// For |x| > 1: atan(x) = pi/2 - atan(1/x)
+fn atan(x: f64) -> f64 with Mut, Div, Panic {
+    if x > 1.0 {
+        return half_pi() - atan(1.0 / x)
+    }
+    if x < -1.0 {
+        return 0.0 - half_pi() - atan(1.0 / x)
+    }
+    // |x| <= 1: Taylor series
+    var sum = x
+    var term = x
+    let x2 = x * x
+    var k = 1
+    while k < 40 {
+        term = 0.0 - term * x2
+        sum = sum + term / (2 * k + 1) as f64
+        k = k + 1
+    }
+    return sum
+}
+
+// atan2(y, x) — full-quadrant arctangent
+fn atan2(y: f64, x: f64) -> f64 with Mut, Div, Panic {
+    if x > 0.0 { return atan(y / x) }
+    if x < 0.0 {
+        if y >= 0.0 { return atan(y / x) + pi() }
+        else { return atan(y / x) - pi() }
+    }
+    // x == 0
+    if y > 0.0 { return half_pi() }
+    if y < 0.0 { return 0.0 - half_pi() }
+    return 0.0
+}
+
+// asin(x) = atan(x / sqrt(1 - x^2))
+fn asin(x: f64) -> f64 with Mut, Div, Panic {
+    if x >= 1.0 { return half_pi() }
+    if x <= -1.0 { return 0.0 - half_pi() }
+    return atan(x / sqrt(1.0 - x * x))
+}
+
+// acos(x) = pi/2 - asin(x)
+fn acos(x: f64) -> f64 with Mut, Div, Panic {
+    return half_pi() - asin(x)
+}
+
+// =============================================================================
+// Hyperbolic functions
+// =============================================================================
+
+fn sinh(x: f64) -> f64 with Mut, Div, Panic {
+    let ex = exp(x)
+    (ex - 1.0 / ex) / 2.0
+}
+
+fn cosh(x: f64) -> f64 with Mut, Div, Panic {
+    let ex = exp(x)
+    (ex + 1.0 / ex) / 2.0
+}
+
+fn tanh(x: f64) -> f64 with Mut, Div, Panic {
+    if x > 20.0 { return 1.0 }
+    if x < -20.0 { return 0.0 - 1.0 }
+    let e2x = exp(2.0 * x)
+    (e2x - 1.0) / (e2x + 1.0)
+}
+
+// =============================================================================
+// Gamma function — Stirling series with recurrence
+// =============================================================================
+// For x >= 8: ln(Gamma(x)) ~ (x-0.5)*ln(x) - x + 0.5*ln(2*pi) + Bernoulli corrections
+// For x < 8: use recurrence Gamma(x) = Gamma(x+1)/x
+
+fn lgamma(x: f64) -> f64 with Mut, Div, Panic {
+    if x <= 0.0 { return 1.0e30 }
+
+    // Recurrence: shift to x >= 8 for Stirling accuracy
+    var val = x
+    var shift: f64 = 0.0
+    while val < 8.0 {
+        shift = shift + ln(val)
+        val = val + 1.0
+    }
+
+    // Stirling series for val >= 8
+    var result = (val - 0.5) * ln(val) - val + 0.5 * ln_2pi()
+
+    // Bernoulli correction terms
+    let inv_v = 1.0 / val
+    let inv_v2 = inv_v * inv_v
+    result = result + inv_v / 12.0
+    result = result - inv_v * inv_v2 / 360.0
+    result = result + inv_v * inv_v2 * inv_v2 / 1260.0
+    result = result - inv_v * inv_v2 * inv_v2 * inv_v2 / 1680.0
+
+    return result - shift
+}
+
+// Gamma function via exp(lgamma(x))
+fn gamma(x: f64) -> f64 with Mut, Div, Panic {
+    exp(lgamma(x))
+}
+
+// Beta function: B(a,b) = Gamma(a)*Gamma(b)/Gamma(a+b)
+fn lbeta(a: f64, b: f64) -> f64 with Mut, Div, Panic {
+    lgamma(a) + lgamma(b) - lgamma(a + b)
+}
+
+fn beta(a: f64, b: f64) -> f64 with Mut, Div, Panic {
+    exp(lbeta(a, b))
+}
+
+// Factorial via lgamma (for integer arguments)
+fn factorial(n: i32) -> f64 with Mut, Div, Panic {
+    if n <= 1 { return 1.0 }
+    gamma((n + 1) as f64)
+}
+
+// Log-factorial
+fn lfactorial(n: i32) -> f64 with Mut, Div, Panic {
+    if n <= 1 { return 0.0 }
+    lgamma((n + 1) as f64)
+}
+
+// =============================================================================
+// Error function — Abramowitz-Stegun 5-term rational approximation
+// =============================================================================
+// erf(x) = 1 - (a1*t + a2*t^2 + ... + a5*t^5) * exp(-x^2)
+// where t = 1/(1 + p*|x|)
+// Maximum error: 1.5e-7
+
+fn erf(x: f64) -> f64 with Mut, Div, Panic {
+    let a1 = 0.254829592
+    let a2 = 0.0 - 0.284496736
+    let a3 = 1.421413741
+    let a4 = 0.0 - 1.453152027
+    let a5 = 1.061405429
+    let p = 0.3275911
+
+    let ax = abs(x)
+    let t = 1.0 / (1.0 + p * ax)
+    let t2 = t * t
+    let t3 = t2 * t
+    let t4 = t3 * t
+    let t5 = t4 * t
+
+    let y = 1.0 - (a1 * t + a2 * t2 + a3 * t3 + a4 * t4 + a5 * t5) * exp(0.0 - x * x)
+
+    if x >= 0.0 { y } else { 0.0 - y }
+}
+
+// Complementary error function
+fn erfc(x: f64) -> f64 with Mut, Div, Panic {
+    1.0 - erf(x)
+}
+
+// =============================================================================
+// Rounding
+// =============================================================================
+
+fn floor(x: f64) -> f64 {
+    let i = x as i32
+    if (i as f64) > x { (i - 1) as f64 } else { i as f64 }
+}
+
+fn ceil(x: f64) -> f64 {
+    let i = x as i32
+    if (i as f64) < x { (i + 1) as f64 } else { i as f64 }
+}
+
+fn round(x: f64) -> f64 {
+    floor(x + 0.5)
+}
+
+fn trunc(x: f64) -> f64 {
+    (x as i32) as f64
+}
+
+// Fractional part
+fn frac(x: f64) -> f64 {
+    x - floor(x)
+}
+
+// Modulo (Euclidean)
+fn fmod(x: f64, y: f64) -> f64 with Panic {
+    x - floor(x / y) * y
+}
+
+// =============================================================================
+// Statistical helper functions
+// =============================================================================
+
+// Standard normal PDF: phi(x) = (1/sqrt(2*pi)) * exp(-x^2/2)
+fn normal_pdf(x: f64, mu: f64, sigma: f64) -> f64 with Mut, Div, Panic {
+    let z = (x - mu) / sigma
+    inv_sqrt_2pi() / sigma * exp(0.0 - 0.5 * z * z)
+}
+
+// Standard normal log-PDF
+fn normal_log_pdf(x: f64, mu: f64, sigma: f64) -> f64 with Mut, Div, Panic {
+    if sigma <= 0.0 { return 0.0 - 1.0e30 }
+    let z = (x - mu) / sigma
+    0.0 - 0.5 * ln_2pi() - ln(sigma) - 0.5 * z * z
+}
+
+// Standard normal CDF via erf
+fn normal_cdf(x: f64, mu: f64, sigma: f64) -> f64 with Mut, Div, Panic {
+    let z = (x - mu) / (sigma * sqrt2())
+    0.5 * (1.0 + erf(z))
+}
+
+// =============================================================================
+// Miscellaneous
+// =============================================================================
+
+// Cube root via Newton's method
+fn cbrt(x: f64) -> f64 with Mut, Div, Panic {
+    if x == 0.0 { return 0.0 }
+    let neg = x < 0.0
+    var y = abs(x)
+    // Initial guess: x^(1/3) ~ exp(ln(x)/3)
+    y = exp(ln(y) / 3.0)
+    // Newton iterations: y_{n+1} = (2*y_n + x/y_n^2) / 3
+    var i = 0
+    while i < 10 {
+        y = (2.0 * y + abs(x) / (y * y)) / 3.0
+        i = i + 1
+    }
+    if neg { 0.0 - y } else { y }
+}
+
+// Hypotenuse: sqrt(a^2 + b^2) without overflow
+fn hypot(a: f64, b: f64) -> f64 with Mut, Div, Panic {
+    let ax = abs(a)
+    let bx = abs(b)
+    if ax > bx {
+        let r = bx / ax
+        ax * sqrt(1.0 + r * r)
+    } else if bx > 0.0 {
+        let r = ax / bx
+        bx * sqrt(1.0 + r * r)
+    } else {
+        0.0
+    }
+}
+
+// Linear interpolation (pure — no effects)
+fn lerp(a: f64, b: f64, t: f64) -> f64 {
+    a + t * (b - a)
+}
+
+// Check if two floats are approximately equal (pure — no effects)
+fn approx_eq(a: f64, b: f64, tol: f64) -> bool {
+    abs(a - b) <= tol
+}
+
+// Sigmoid function: 1/(1 + exp(-x))
+fn sigmoid(x: f64) -> f64 with Mut, Div, Panic {
+    if x > 20.0 { return 1.0 }
+    if x < -20.0 { return 0.0 }
+    1.0 / (1.0 + exp(0.0 - x))
+}
+
+// Softplus: ln(1 + exp(x))
+fn softplus(x: f64) -> f64 with Mut, Div, Panic {
+    if x > 20.0 { return x }
+    if x < -20.0 { return 0.0 }
+    ln(1.0 + exp(x))
+}
+
+// Log-sum-exp for two values: ln(exp(a) + exp(b))
+fn log_sum_exp(a: f64, b: f64) -> f64 with Mut, Div, Panic {
+    let m = max(a, b)
+    m + ln(exp(a - m) + exp(b - m))
+}

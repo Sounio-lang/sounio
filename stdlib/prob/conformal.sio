@@ -1,0 +1,353 @@
+// stdlib/prob/conformal.sio — Conformal Prediction for Epistemic Computing
+//
+// Distribution-free uncertainty quantification that converts model predictions
+// into Knowledge<T> with PROVEN coverage guarantees. No distributional
+// assumptions needed — works for any exchangeable data.
+//
+// This is the bridge between ML predictions and Sounio's epistemic type system.
+//
+// Theory:
+//   Given calibration data {(X_i, Y_i)} and a new input X_{n+1},
+//   conformal prediction constructs a set C(X_{n+1}) such that:
+//     P(Y_{n+1} in C(X_{n+1})) >= 1 - alpha
+//   under only the assumption of exchangeability.
+//
+// SOTA: Conformal Prediction (Feb 2026, arXiv:2602.01667)
+//       Vovk et al. (2005): "Algorithmic Learning in a Random World"
+//       Angelopoulos & Bates (2023): "Conformal Prediction: A Gentle Introduction"
+//
+// References:
+//   - Lei et al. (2018): "Distribution-Free Predictive Inference for Regression"
+//   - Romano et al. (2019): "Conformalized Quantile Regression"
+
+// =============================================================================
+// Math helpers (from math/pure.sio pattern — avoids cross-module dependency)
+// =============================================================================
+
+fn abs_val(x: f64) -> f64 {
+    if x < 0.0 { 0.0 - x } else { x }
+}
+
+// =============================================================================
+// Core Types
+// =============================================================================
+
+// Nonconformity score function result
+struct NonconformityScore {
+    score: f64,
+    index: i32,
+}
+
+// Calibration set of nonconformity scores
+struct ConformalCalibration {
+    scores: [f64; 10000],      // sorted nonconformity scores
+    n_scores: i32,
+    alpha: f64,                 // target miscoverage rate (e.g. 0.05 for 95%)
+    is_sorted: bool,
+}
+
+// Prediction interval with coverage guarantee
+struct ConformalInterval {
+    lower: f64,
+    upper: f64,
+    coverage: f64,              // guaranteed coverage >= 1 - alpha
+    n_calibration: i32,         // calibration set size (affects finite-sample correction)
+}
+
+// Epistemic value with conformal guarantee
+struct ConformalKnowledge {
+    point_estimate: f64,
+    interval_lower: f64,
+    interval_upper: f64,
+    confidence: f64,            // from finite-sample coverage guarantee
+    provenance_tag: i32,        // 1 = conformal, 2 = split-conformal, 3 = CQR
+}
+
+// =============================================================================
+// Calibration
+// =============================================================================
+
+fn conformal_calibration_new(alpha: f64) -> ConformalCalibration {
+    ConformalCalibration {
+        scores: [0.0; 10000],
+        n_scores: 0,
+        alpha: alpha,
+        is_sorted: false,
+    }
+}
+
+fn conformal_add_score(cal: &!ConformalCalibration, score: f64) with Mut {
+    if cal.n_scores < 10000 {
+        cal.scores[cal.n_scores] = score
+        cal.n_scores = cal.n_scores + 1
+        cal.is_sorted = false
+    }
+}
+
+// Insertion sort for calibration scores (called once after all scores added)
+fn conformal_sort_scores(cal: &!ConformalCalibration) with Mut, Div {
+    var i = 1
+    while i < cal.n_scores {
+        let key = cal.scores[i]
+        var j = i - 1
+        while j >= 0 {
+            if cal.scores[j] > key {
+                cal.scores[j + 1] = cal.scores[j]
+                j = j - 1
+            } else {
+                j = -1  // break
+            }
+        }
+        cal.scores[j + 1] = key
+        i = i + 1
+    }
+    cal.is_sorted = true
+}
+
+// =============================================================================
+// Quantile Computation — the core of conformal prediction
+// =============================================================================
+
+// Compute the conformal quantile: ceil((1-alpha)(n+1))/n -th quantile
+// This is the threshold that guarantees coverage >= 1 - alpha
+fn conformal_quantile(cal: &ConformalCalibration) -> f64 with Mut, Div, Panic {
+    if cal.n_scores == 0 { return 1.0e30 }
+
+    // The conformal quantile level
+    let n = cal.n_scores as f64
+    let level = (1.0 - cal.alpha) * (n + 1.0) / n
+
+    // If level >= 1, the prediction set is infinite (not enough calibration data)
+    if level >= 1.0 { return 1.0e30 }
+
+    // Find the ceil(level * n)-th smallest score
+    let idx_f = level * n
+    var idx = idx_f as i32
+    if (idx as f64) < idx_f {
+        idx = idx + 1
+    }
+    if idx >= cal.n_scores { idx = cal.n_scores - 1 }
+    if idx < 0 { idx = 0 }
+
+    return cal.scores[idx]
+}
+
+// =============================================================================
+// Split Conformal Prediction
+// =============================================================================
+
+// Calibrate using residuals: |y_i - y_hat_i|
+fn split_conformal_calibrate(
+    predictions: &[f64; 10000],
+    actuals: &[f64; 10000],
+    n: i32,
+    alpha: f64,
+) -> ConformalCalibration with Mut, Div, Panic {
+    var cal = conformal_calibration_new(alpha)
+    var i = 0
+    while i < n {
+        let residual = abs_val(actuals[i] - predictions[i])
+        conformal_add_score(&!cal, residual)
+        i = i + 1
+    }
+    conformal_sort_scores(&!cal)
+    return cal
+}
+
+// Predict with conformal interval
+fn split_conformal_predict(
+    cal: &ConformalCalibration,
+    point_estimate: f64,
+) -> ConformalInterval with Mut, Div, Panic {
+    let q = conformal_quantile(cal)
+    let n = cal.n_scores as f64
+
+    // Finite-sample coverage guarantee
+    let coverage = 1.0 - cal.alpha
+
+    ConformalInterval {
+        lower: point_estimate - q,
+        upper: point_estimate + q,
+        coverage: coverage,
+        n_calibration: cal.n_scores,
+    }
+}
+
+// =============================================================================
+// Conformalized Quantile Regression (CQR)
+// =============================================================================
+// Uses quantile regression predictions to get adaptive-width intervals
+// SOTA: Romano et al. (2019)
+
+struct CQRCalibration {
+    scores: [f64; 10000],      // max(q_lo - y, y - q_hi) scores
+    n_scores: i32,
+    alpha: f64,
+    is_sorted: bool,
+}
+
+fn cqr_calibrate(
+    q_lower: &[f64; 10000],    // alpha/2 quantile predictions
+    q_upper: &[f64; 10000],    // 1-alpha/2 quantile predictions
+    actuals: &[f64; 10000],
+    n: i32,
+    alpha: f64,
+) -> CQRCalibration with Mut, Div, Panic {
+    var cal = CQRCalibration {
+        scores: [0.0; 10000],
+        n_scores: 0,
+        alpha: alpha,
+        is_sorted: false,
+    }
+    var i = 0
+    while i < n {
+        // CQR score: max(q_lower - y, y - q_upper)
+        let s1 = q_lower[i] - actuals[i]
+        let s2 = actuals[i] - q_upper[i]
+        let score = if s1 > s2 { s1 } else { s2 }
+        if cal.n_scores < 10000 {
+            cal.scores[cal.n_scores] = score
+            cal.n_scores = cal.n_scores + 1
+        }
+        i = i + 1
+    }
+    // Sort scores
+    var j = 1
+    while j < cal.n_scores {
+        let key = cal.scores[j]
+        var k = j - 1
+        while k >= 0 {
+            if cal.scores[k] > key {
+                cal.scores[k + 1] = cal.scores[k]
+                k = k - 1
+            } else {
+                k = -1
+            }
+        }
+        cal.scores[k + 1] = key
+        j = j + 1
+    }
+    cal.is_sorted = true
+    return cal
+}
+
+fn cqr_predict(
+    cal: &CQRCalibration,
+    q_lo_new: f64,
+    q_hi_new: f64,
+) -> ConformalInterval with Mut, Div, Panic {
+    if cal.n_scores == 0 {
+        return ConformalInterval {
+            lower: q_lo_new,
+            upper: q_hi_new,
+            coverage: 0.0,
+            n_calibration: 0,
+        }
+    }
+
+    let n = cal.n_scores as f64
+    let level = (1.0 - cal.alpha) * (n + 1.0) / n
+    var idx = (level * n) as i32
+    if idx >= cal.n_scores { idx = cal.n_scores - 1 }
+    if idx < 0 { idx = 0 }
+    let q = cal.scores[idx]
+
+    ConformalInterval {
+        lower: q_lo_new - q,
+        upper: q_hi_new + q,
+        coverage: 1.0 - cal.alpha,
+        n_calibration: cal.n_scores,
+    }
+}
+
+// =============================================================================
+// Bridge to Epistemic System: ConformalInterval → Knowledge<f64>
+// =============================================================================
+
+// Convert a conformal interval to an epistemic value with guaranteed confidence
+// This is THE key function: the mathematical guarantee of conformal prediction
+// becomes the confidence bound in Sounio's epistemic type system.
+fn interval_to_knowledge(interval: &ConformalInterval) -> ConformalKnowledge with Panic {
+    let midpoint = (interval.lower + interval.upper) / 2.0
+
+    // Finite-sample confidence:
+    // With n calibration points, coverage >= 1 - alpha - 1/(n+1)
+    let n = interval.n_calibration as f64
+    let finite_correction = 1.0 / (n + 1.0)
+    let confidence = interval.coverage - finite_correction
+
+    ConformalKnowledge {
+        point_estimate: midpoint,
+        interval_lower: interval.lower,
+        interval_upper: interval.upper,
+        confidence: confidence,
+        provenance_tag: 1,  // split-conformal
+    }
+}
+
+// Convert CQR interval to knowledge (adaptive width)
+fn cqr_to_knowledge(interval: &ConformalInterval) -> ConformalKnowledge with Panic {
+    let midpoint = (interval.lower + interval.upper) / 2.0
+    let n = interval.n_calibration as f64
+    let finite_correction = 1.0 / (n + 1.0)
+    let confidence = interval.coverage - finite_correction
+
+    ConformalKnowledge {
+        point_estimate: midpoint,
+        interval_lower: interval.lower,
+        interval_upper: interval.upper,
+        confidence: confidence,
+        provenance_tag: 3,  // CQR
+    }
+}
+
+// =============================================================================
+// Diagnostics
+// =============================================================================
+
+struct ConformalDiagnostics {
+    empirical_coverage: f64,    // fraction of calibration points inside interval
+    mean_width: f64,            // average interval width
+    median_width: f64,          // median interval width
+    n_calibration: i32,
+}
+
+fn conformal_diagnostics(
+    cal: &ConformalCalibration,
+    predictions: &[f64; 10000],
+    actuals: &[f64; 10000],
+    n_test: i32,
+) -> ConformalDiagnostics with Mut, Div, Panic {
+    let q = conformal_quantile(cal)
+    var covered = 0
+    var total_width: f64 = 0.0
+    var widths: [f64; 10000] = [0.0; 10000]
+    var i = 0
+    while i < n_test {
+        let lower = predictions[i] - q
+        let upper = predictions[i] + q
+        let width = 2.0 * q
+        widths[i] = width
+        total_width = total_width + width
+        if actuals[i] >= lower {
+            if actuals[i] <= upper {
+                covered = covered + 1
+            }
+        }
+        i = i + 1
+    }
+
+    let emp_cov = (covered as f64) / (n_test as f64)
+    let mean_w = total_width / (n_test as f64)
+
+    // Median width (use middle value of sorted widths)
+    let med_idx = n_test / 2
+    let median_w = widths[med_idx]
+
+    ConformalDiagnostics {
+        empirical_coverage: emp_cov,
+        mean_width: mean_w,
+        median_width: median_w,
+        n_calibration: cal.n_scores,
+    }
+}
