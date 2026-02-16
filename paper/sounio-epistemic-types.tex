@@ -78,25 +78,26 @@ Scientific computing requires rigorous handling of measurement uncertainty,
 yet systems programming languages lack native support for propagating
 uncertainties in compliance with the Guide to the Expression of Uncertainty
 in Measurement (GUM, JCGM 100:2008). This leads to error-prone manual
-implementations and challenges in regulatory contexts such as FDA 21 CFR
-Part 11 and ISO 17025.
+implementations and difficulties maintaining audit trails for regulatory
+contexts such as FDA 21 CFR Part 11 and ISO 17025.
 
 We introduce \textbf{Sounio}, a systems programming language for
 \emph{epistemic computing}---computation where uncertainty, confidence, and
 provenance are first-class type-level concerns. The \texttt{Knowledge<T>}
-type encapsulates a value, its GUM-compliant variance, a Beta-distributed
-confidence measure, and a provenance chain for traceability. An algebraic
-effect system prevents accidental uncertainty loss at compile time.
+type encapsulates a value, its GUM-compliant variance, a confidence measure,
+and a provenance chain for traceability. An algebraic effect system tracks
+epistemic operations, and the compiler warns when uncertainty is silently
+discarded.
 
-Novel contributions include: (1)~\emph{EpistemicDual}, a four-component
-automatic differentiation number that propagates GUM uncertainty alongside
-gradients; (2)~compile-time causal identifiability verification via SMT
-solving, which rejects causally unidentifiable models before runtime;
-and (3)~\emph{MedLang}, a domain-specific language for pharmacometric
-modeling with epistemic parameters. Benchmarks show 2$\times$ speedup
-over Julia's \texttt{Measurements.jl} and 10--30$\times$ over Python's
-\texttt{uncertainties}. We demonstrate applications in pharmacokinetics,
-climate modeling, and neuroimaging.
+Our contributions are: (1)~a type system for epistemic values with formal
+GUM-compliance guarantees (Theorem~\ref{thm:gum-compliance});
+(2)~a Scientific IR that represents uncertainty propagation as first-class
+compiler nodes; (3)~provenance tracking with Merkle-hashed audit chains;
+and (4)~cross-validation of compiled numerical code against analytical
+pharmacokinetic solutions, demonstrating first-order convergence.
+We illustrate the language design through applications in pharmacokinetics,
+climate modeling, and neuroimaging. The compiler comprises approximately
+627,000 lines of Rust, with a 42,500-line self-hosted bootstrap in Sounio.
 
 Sounio is open source under the Apache License 2.0:
 \url{https://github.com/sounio-lang/sounio}
@@ -124,13 +125,13 @@ compilers cannot enforce.
 We propose \emph{epistemic computing} as a paradigm in which uncertainty,
 confidence, and provenance are native type-level constructs rather than
 library concerns. We introduce \textbf{Sounio}, a systems programming language
-that realizes this paradigm, where uncertainty is a first-class type-level concept. The \texttt{Knowledge<T>} type
+that realizes this paradigm. The \texttt{Knowledge<T>} type
 carries not just a value but also:
 
 \begin{itemize}
   \item \textbf{Variance}: Uncertainty in the GUM sense ($u^2$)
-  \item \textbf{Confidence}: A Beta distribution over credibility
-  \item \textbf{Provenance}: Audit trail for regulatory compliance
+  \item \textbf{Confidence}: A Beta distribution over credibility (library-level)
+  \item \textbf{Provenance}: Audit trail for traceability
 \end{itemize}
 
 Arithmetic on \texttt{Knowledge<T>} automatically propagates uncertainty using
@@ -140,13 +141,13 @@ Supplement 1), with the choice configurable per-computation.
 \paragraph{Contributions}
 \begin{itemize}
   \item A type system for epistemic values with compile-time effect tracking
-        (Section~\ref{sec:type-system})
+        and formal GUM-compliance proof (Section~\ref{sec:type-system})
   \item GUM-compliant uncertainty propagation integrated into the compiler's
         intermediate representation (Section~\ref{sec:propagation})
-  \item Benchmarks showing 2--30$\times$ speedup over existing solutions
-        (Section~\ref{sec:evaluation})
-  \item Case studies in pharmacokinetics, climate science, and neuroimaging
-        (Section~\ref{sec:applications})
+  \item Cross-validation of compiled numerical code against analytical
+        solutions (Section~\ref{sec:evaluation})
+  \item Illustrative case studies in pharmacokinetics, climate science, and
+        neuroimaging (Section~\ref{sec:applications})
 \end{itemize}
 
 \section{Background}
@@ -219,7 +220,9 @@ struct Knowledge<T> {
 \end{lstlisting}
 
 \texttt{BetaConfidence} represents epistemic confidence as a Beta distribution,
-supporting Bayesian updating:
+supporting Bayesian updating. In the current implementation, confidence
+handling is provided at the library level rather than enforced by the
+compiler's type checker:
 
 \begin{lstlisting}[caption={Confidence representation}]
 struct BetaConfidence {
@@ -287,12 +290,13 @@ enum Source {
 
 struct Provenance {
     sources: Vec<Source>,
-    merkle_hash: [u8; 32],  // Tamper-evident hash
+    merkle_hash: [u8; 32],  // Structural hash (placeholder crypto)
 }
 \end{lstlisting}
 
-This supports regulatory requirements (FDA 21 CFR Part 11, ISO 17025) for
-audit trails in validated computational systems.
+This provides structural support for audit trails relevant to regulated
+computational systems (e.g., FDA 21 CFR Part 11, ISO 17025), though
+full regulatory validation remains future work.
 
 \subsection{Formal Type System}
 
@@ -441,35 +445,40 @@ where $\text{combine}$ pools evidence under the assumption of conditional
 independence.
 \end{proposition}
 
-\subsection{Scientific IR (SIR) Optimizations}
+\subsection{Scientific IR (SIR) Design}
 
-Sounio's compiler includes a Scientific IR pass that optimizes epistemic
-computations:
+Sounio's compiler includes a Scientific IR that represents epistemic
+operations as first-class nodes. The SIR is designed to enable
+domain-specific optimizations:
 
 \begin{enumerate}
-  \item \textbf{Variance fusion}: $u^2(x + y + z)$ computed in one pass
-  \item \textbf{Exact propagation}: Operations on \texttt{Knowledge::exact}
-        skip variance computation
-  \item \textbf{Provenance elision}: When not required, provenance chains
-        are not allocated
+  \item \textbf{Variance fusion}: Fusing $u^2(x + y + z)$ into a single pass
+  \item \textbf{Exact elision}: Skipping variance computation for
+        \texttt{Knowledge::exact} (zero variance) operands
+  \item \textbf{Provenance elision}: Skipping Merkle hash computation when
+        provenance is not required
 \end{enumerate}
 
-\textbf{SIMD vectorization} enables parallel value and variance computation
-on supported platforms (AVX2, NEON).
+These optimizations are designed into the SIR node structure; their
+implementation as automated compiler passes is ongoing work. The native
+backend includes SIMD support (AVX2 and NEON) for quaternion algebra,
+with extension to general epistemic arithmetic planned.
 
 \section{Implementation}
 \label{sec:implementation}
 
 \subsection{Implementation Status}
 
-The v1.0.0-beta release provides full native code generation for epistemic types,
-including GUM-compliant uncertainty propagation and SIMD optimizations.
-A self-hosted compiler (39,500 lines of Sounio) implements a parallel pipeline
-from lexer through native x86-64 ELF generation.
+The v1.0.0-beta release provides native code generation for epistemic types,
+including GUM-compliant uncertainty propagation.
+A self-hosted compiler (42,500 lines of Sounio) implements a pipeline
+from lexer through native x86-64 ELF generation. The standard library
+comprises 235,000 lines of Sounio covering scientific computing modules
+including autodiff, pharmacometric modeling, and numerical methods.
 
 \subsection{Compiler Architecture}
 
-Sounio's compiler is implemented in approximately 614,000 lines of Rust
+Sounio's compiler is implemented in approximately 627,000 lines of Rust
 (including type checker, effect system, SMT integration, and backend code generation),
 organized as a multi-stage pipeline:
 \[
@@ -488,21 +497,24 @@ enum SirInst {
 }
 \end{lstlisting}
 
-\subsection{SIR Optimization Passes}
+\subsection{Planned SIR Optimization Passes}
+
+The SIR node structure is designed to enable the following optimization passes,
+which are specified but not yet implemented as automated compiler transforms:
 
 \paragraph{Variance Fusion}
-Consecutive epistemic additions are fused into a single variance computation:
+Consecutive epistemic additions can be fused into a single variance computation:
 \begin{center}
 \texttt{t1 = x + y; t2 = t1 + z} $\Rightarrow$ \texttt{t2 = x + y + z}\\
 (2 variance computations $\to$ 1 fused: $\sigma_x^2 + \sigma_y^2 + \sigma_z^2$)
 \end{center}
 
 \paragraph{Exact Elision}
-Operations involving \texttt{Knowledge::exact} (zero variance) skip variance
-propagation entirely, reducing to scalar multiplication.
+Operations involving \texttt{Knowledge::exact} (zero variance) can skip variance
+propagation entirely, reducing to scalar arithmetic.
 
 \paragraph{Provenance Elision}
-When provenance tracking is not required, Merkle hash computation is skipped,
+When provenance tracking is not required, Merkle hash computation can be skipped,
 reducing overhead for non-audited computations.
 
 \subsection{Memory Layout}
@@ -521,79 +533,43 @@ Field & Size \\
 \end{tabular}
 \end{center}
 
-The native backend computes value and variance in parallel using SIMD
-(AVX2 on x86-64, NEON on ARM), enabling 2-wide parallelism for epistemic arithmetic.
+The 40-byte layout is designed for SIMD-friendly access; the native backend
+currently uses SIMD (AVX2, AVX-512, NEON) for quaternion and octonion algebra,
+with extension to general epistemic arithmetic planned.
 
 \section{Evaluation}
 \label{sec:evaluation}
 
-\subsection{Benchmark Suite}
+\subsection{Performance Considerations}
 
-We compare Sounio against Python's \texttt{uncertainties}~(v3.2) and Julia's
-\texttt{Measurements.jl}~(v2.11) on five benchmarks. All measurements were
-performed on an Intel Xeon Gold 6148 (2.40\,GHz, 20 cores) with 128\,GB RAM,
-running Linux 6.x. Julia~1.11 and Python~3.12 were used. Reproduction scripts
-are available in the project repository under \texttt{benchmarks/}.
-
-The benchmarks are:
+Sounio's design offers several structural advantages over library-based
+uncertainty propagation:
 
 \begin{enumerate}
-  \item \textbf{GUM Chain}: 100K arithmetic operations with uncertainty
-  \item \textbf{Monte Carlo}: 100K portfolio simulations
-  \item \textbf{Cockcroft-Gault}: 10K pharmacokinetic calculations
-  \item \textbf{Matrix}: 50$\times$50 matrix-vector multiply with uncertainty
-  \item \textbf{Transcendental}: 10K chained sin/cos/exp/log/sqrt
+  \item \textbf{Stack allocation}: \texttt{Knowledge<f64>} is a 40-byte
+        stack-allocated value, avoiding the heap allocation and indirection
+        required by Python's \texttt{ufloat} wrapper objects.
+  \item \textbf{Static dispatch}: All epistemic operations are monomorphized
+        at compile time, eliminating the runtime dispatch overhead of
+        operator overloading in dynamic languages.
+  \item \textbf{Compiler-visible structure}: Because uncertainty propagation
+        is part of the IR, the compiler can in principle apply
+        domain-specific optimizations (Section~\ref{sec:propagation})
+        that are unavailable to library approaches.
 \end{enumerate}
 
-\subsection{Results}
+Cross-language benchmark scripts (Python \texttt{uncertainties},
+Julia \texttt{Measurements.jl}, and Sounio) are included in the repository
+under \texttt{benches/misc/uncertainty/}. Formal benchmarking with
+statistical rigor (multiple runs, confidence intervals, controlled
+environments) is planned for a follow-up evaluation paper.
 
-\begin{table}[h]
-\centering
-\caption{Benchmark results (median of 10 runs, in milliseconds)}
-\label{tab:benchmarks}
-\begin{tabular}{lrrr}
-\toprule
-Benchmark & Python & Julia & Sounio \\
-\midrule
-GUM Chain (100K) & 423 & 45 & \textbf{22} \\
-Monte Carlo (100K) & 1,266 & 58 & \textbf{31} \\
-Cockcroft-Gault (10K) & 133 & 12 & \textbf{6} \\
-Matrix (50$\times$50) & 12 & 2.1 & \textbf{1.0} \\
-Transcendental (10K) & 111 & 8.5 & \textbf{4.2} \\
-\bottomrule
-\end{tabular}
-\end{table}
-
-\paragraph{Analysis} Sounio achieves consistent 2$\times$ speedup over Julia
-due to compiler-level optimizations unavailable to library approaches:
-\begin{itemize}
-  \item \textbf{Variance fusion}: The SIR pass fuses consecutive epistemic
-        operations into single variance computations ($n$ additions $\to$ 1
-        fused variance sum), eliminating intermediate \texttt{Knowledge} allocations
-  \item \textbf{Exact elision}: Operations on \texttt{Knowledge::exact} (zero variance)
-        are lowered to scalar arithmetic with no epistemic overhead
-  \item \textbf{SIMD parallelization}: Value and variance are computed in parallel
-        using AVX2 (x86-64) or NEON (ARM), achieving 2-wide epistemic arithmetic
-\end{itemize}
-
-The 10--40$\times$ speedup over Python reflects the fundamental overhead of
-dynamic typing and operator overloading.
-
-\subsection{Memory Usage}
-
-\begin{table}[h]
-\centering
-\caption{Peak memory for GUM Chain (100K operations)}
-\begin{tabular}{lr}
-\toprule
-Implementation & Peak Memory \\
-\midrule
-Python & 847 MB \\
-Julia & 124 MB \\
-Sounio & \textbf{89 MB} \\
-\bottomrule
-\end{tabular}
-\end{table}
+\paragraph{Qualitative comparison}
+On informal single-run tests, Sounio's compiled output executes uncertainty
+chains substantially faster than Python's interpreted operator overloading,
+and competitively with Julia's JIT-compiled \texttt{Measurements.jl}.
+We defer precise quantitative claims to future work with proper
+benchmarking methodology.
 
 \subsection{Numerical Accuracy: ODE Solver Cross-Validation}
 
@@ -616,47 +592,36 @@ The closed-form Bateman solution~\citep{gibaldi1982pharmacokinetics} gives:
 \end{align}
 
 \paragraph{Results}
-Table~\ref{tab:ode-accuracy} compares Sounio's forward Euler solver at two
-step sizes ($\Delta t = 0.1\,\text{h}$ and $\Delta t = 0.01\,\text{h}$)
-against the analytical solution. All intermediate checkpoints at
-$t \in \{2, 6, 12, 24\}\,\text{h}$ fall within $5\%$ of the analytical
-values, consistent with the $\mathcal{O}(\Delta t)$ global error of forward
-Euler.
+The test suite validates Sounio's forward Euler solver at two step sizes
+($\Delta t = 0.1\,\text{h}$ and $\Delta t = 0.01\,\text{h}$) against the
+analytical Bateman solution. Integration tests assert that all intermediate
+checkpoints at $t \in \{2, 6, 12, 24\}\,\text{h}$ fall within $5\%$ of
+the analytical values, consistent with the $\mathcal{O}(\Delta t)$ global
+error of forward Euler.
 
-\begin{table}[h]
-\centering
-\caption{ODE solver accuracy vs.\ analytical Bateman equation at $t=24\,\text{h}$}
-\label{tab:ode-accuracy}
-\begin{tabular}{llrrr}
-\toprule
-Method & $\Delta t$ & $C_{\text{central}}$ (mg) & Analytical (mg) & Rel.\ Error \\
-\midrule
-Euler (240 steps)  & 0.1  h & 49.79 & 50.40 & 1.20\% \\
-Euler (2400 steps) & 0.01 h & 50.34 & 50.40 & 0.12\% \\
-\bottomrule
-\end{tabular}
-\end{table}
-
-The 10$\times$ reduction in error from 10$\times$ smaller $\Delta t$
-confirms first-order convergence, validating the compiler's numerical
-fidelity across multi-thousand-iteration loops.
+The analytical solution at $t = 24\,\text{h}$ gives
+$C_{\text{central}} \approx 50.4\,\text{mg}$. Both solver configurations
+pass the $5\%$ tolerance tests, and reducing $\Delta t$ by $10\times$
+correspondingly reduces the observed error, confirming first-order
+convergence and validating the compiler's numerical fidelity across
+multi-thousand-iteration loops.
 
 \paragraph{Pharmacokinetic Parameters}
 The Euler solver ($\Delta t = 0.1\,\text{h}$, 240 steps) recovers the
-expected PK profile:
-$C_{\max} = 392.2\,\text{mg}$ at $T_{\max} = 2.5\,\text{h}$
-(analytical: $C_{\max} \approx 387\,\text{mg}$ at $T_{\max} = 2.56\,\text{h}$,
-errors $1.3\%$ and $2.3\%$ respectively),
-with $\text{AUC}_{0 \to 24} = 4502\,\text{mg}\!\cdot\!\text{h}$
-against the theoretical $\text{AUC}_{0 \to \infty} = D/k_e = 5000\,\text{mg}\!\cdot\!\text{h}$.
+expected PK profile within test tolerances:
+$C_{\max}$ in the range $[100, 400]\,\text{mg}$
+(analytical: $C_{\max} \approx 387\,\text{mg}$),
+$\text{AUC}_{0 \to 24}$ in $[3000, 6000]\,\text{mg}\!\cdot\!\text{h}$
+(theoretical $\text{AUC}_{0 \to \infty} = D/k_e = 5000\,\text{mg}\!\cdot\!\text{h}$).
+All integration tests pass in the CI suite.
 
 \paragraph{Higher-Order Integration}
 A three-compartment model (Gut $\to$ Liver $\to$ Central) with hepatic
 first-pass metabolism ($f_a = 0.8$, $Q_h = 0.5$, $\text{CL}_h = 0.3$)
 was validated using the RK2 midpoint method (480 steps, $\Delta t = 0.05\,\text{h}$).
-All conservation-of-mass invariants hold: concentrations remain non-negative,
-$C_{\max} = 175.8\,\text{mg}$ at $T_{\max} = 4.4\,\text{h}$, and
-trapezoidal AUC $= 2212\,\text{mg}\!\cdot\!\text{h}$.
+Conservation-of-mass invariants hold: concentrations remain non-negative,
+and pharmacokinetic endpoints ($C_{\max}$, $T_{\max}$, AUC) fall within
+physiologically plausible ranges verified by automated tests.
 
 These results demonstrate that Sounio's native backend produces correct
 numerical code for sustained ODE simulations, a prerequisite for the
@@ -666,14 +631,19 @@ epistemic ODE integration described in the companion formalization
 \subsection{Compile-Time Overhead}
 
 Epistemic type checking adds overhead to compilation from variance
-propagation analysis and provenance chain construction. On the benchmark
-suite (Table~\ref{tab:benchmarks}), compile times increase by $12\%$
-on average compared to bare scalar code, dominated by SIR optimization
-passes (variance fusion, exact elision). For non-epistemic code paths,
-there is zero compile-time overhead since the passes are not invoked.
+propagation analysis and provenance chain construction. For non-epistemic
+code paths, there is no additional compile-time overhead since the
+epistemic passes are not invoked. Quantitative measurement of compile-time
+overhead is deferred to the benchmarking follow-up.
 
 \section{Applications}
 \label{sec:applications}
+
+The following examples illustrate Sounio's language design in three
+scientific domains. These are representative programs showing how
+epistemic types express domain concerns; the pharmacokinetics example
+is validated by the ODE cross-validation tests described above, while
+the climate and neuroimaging examples demonstrate language expressiveness.
 
 \subsection{Pharmacokinetics}
 
@@ -698,8 +668,8 @@ fn creatinine_clearance(
 }
 \end{lstlisting}
 
-The result includes propagated uncertainty suitable for FDA-compliant
-documentation.
+The result includes propagated uncertainty with provenance metadata,
+which can support documentation workflows in regulated environments.
 
 \subsection{Climate Modeling}
 
@@ -735,9 +705,10 @@ fn sea_level_rise_projection(
 }
 \end{lstlisting}
 
-This approach aligns with IPCC guidelines for reporting uncertainty ranges
-in climate projections, distinguishing ``likely'' (66\%) from ``very likely''
-(90\%) ranges based on the confidence distribution.
+This approach structures uncertainty in a way compatible with IPCC
+conventions for reporting ranges in climate projections, where
+``likely'' (66\%) and ``very likely'' (90\%) ranges can be derived
+from the confidence distribution.
 
 \subsection{Neuroimaging}
 
@@ -766,9 +737,9 @@ fn first_level_glm(
 }
 \end{lstlisting}
 
-This enables reproducible neuroimaging analysis where scanner measurement
-uncertainty is rigorously tracked through to final statistical maps,
-supporting BIDS-compliant provenance for data sharing.
+This illustrates how scanner measurement uncertainty could be tracked
+through to final statistical maps, with provenance metadata supporting
+reproducibility and data sharing.
 
 \section{Related Work}
 \label{sec:related}
@@ -846,24 +817,28 @@ Section~\ref{sec:evaluation} validate this model empirically.
 \label{sec:conclusion}
 
 Sounio demonstrates that uncertainty quantification can be integrated into a
-systems programming language with minimal overhead and strong static
-guarantees. The \texttt{Knowledge<T>} type makes GUM-compliant uncertainty
-propagation as natural as arithmetic, while effect tracking prevents
-accidental uncertainty loss. Cross-validation against analytical solutions
-confirms the numerical fidelity of the compiled code, with Euler solvers
-achieving $0.12\%$ relative error against the Bateman equation over 2,400
-integration steps.
+systems programming language with strong static guarantees. The
+\texttt{Knowledge<T>} type makes GUM-compliant uncertainty propagation as
+natural as arithmetic, while the algebraic effect system warns when
+uncertainty is silently discarded. Cross-validation against analytical
+solutions confirms the numerical fidelity of the compiled code across
+multi-thousand-iteration ODE simulations.
 
-The standard library already provides extensions beyond the core type system
-described here, including GUM Supplement~1 Monte Carlo propagation
-(JCGM~101:2008), multivariate covariance handling, GPU-accelerated epistemic
-kernels, and compile-time causal identifiability via Z3 SMT solving.
-These are implemented and tested but not benchmarked in this paper.
+The standard library provides extensions beyond the core type system
+described here, including an EpistemicDual type for forward-mode AD with
+uncertainty propagation (590 lines), a MedLang embedded DSL for
+pharmacometric modeling (8,100 lines with lexer/parser/codegen), and
+compile-time causal identifiability checking via Z3 SMT solving
+(integrated into the dependent type checker). These are implemented but
+not described in detail in this paper; we plan separate publications
+for each.
 
-Remaining future work includes:
+Future work includes:
 \begin{itemize}
+  \item Rigorous cross-language benchmarking with statistical methodology
+  \item Implementing SIR optimization passes (variance fusion, exact/provenance elision)
   \item Mechanized metatheory proofs in Coq or Lean
-  \item Higher-order effects for epistemic monad transformers
+  \item Full regulatory validation for FDA 21 CFR Part 11 compliance
   \item Distributed epistemic computing across heterogeneous nodes
 \end{itemize}
 

@@ -28,7 +28,7 @@ bibliography: paper.bib
 
 Scientific and engineering software routinely mixes measured data, model assumptions, and computed results, but most general-purpose languages represent all values as if they were exact. This creates a recurring failure mode: uncertainty is recorded in comments, spreadsheets, or side documents rather than encoded in program semantics. Sounio addresses this by treating uncertainty as a first-class language concern. Its central abstraction, `Knowledge<T>`, couples a value with uncertainty and provenance information so computations can preserve epistemic context throughout pipelines.
 
-Sounio is implemented as an open-source systems language and compiler focused on scientific workflows where traceability and uncertainty propagation are required. The project combines static checking, domain-oriented standard-library modules, and effect annotations for side-effect control in high-stakes code paths. The implementation includes native code generation, optional GPU-oriented paths, and a large scientific standard library intended for reproducible computational research.
+Sounio is implemented as an open-source systems language and compiler (approximately 627,000 lines of Rust, with a 42,500-line self-hosted bootstrap) focused on scientific workflows where traceability and uncertainty propagation are required. The project combines static checking, domain-oriented standard-library modules (235,000 lines), and effect annotations for side-effect control in high-stakes code paths. The implementation includes native code generation and a scientific standard library covering autodiff, pharmacometric modeling, numerical methods, and dimensional analysis.
 
 # Statement of need
 
@@ -40,7 +40,7 @@ Current practice usually falls into one of three unsatisfactory patterns:
 2. Uncertainty is tracked manually outside the type system, which is error-prone.
 3. Library wrappers are used selectively, without language-level guarantees that uncertainty metadata is preserved.
 
-Sounio is designed for researchers and engineers who need uncertainty-aware computation without abandoning systems-level performance and tooling. The target audience includes scientific software developers in pharmacometrics, neuroimaging, causal inference, and adjacent computational science workflows where provenance and confidence handling are part of the core task, not optional post-processing.
+Sounio is designed for researchers and engineers who need uncertainty-aware computation without abandoning systems-level tooling. The target audience includes scientific software developers in pharmacometrics, causal inference, and adjacent computational science workflows where provenance and confidence handling are part of the core task, not optional post-processing.
 
 # State of the field
 
