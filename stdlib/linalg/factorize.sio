@@ -1,0 +1,656 @@
+// factorize.sio - Matrix Factorizations for Sounio Linear Algebra
+//
+// Fixed-size LU, Cholesky, and LDL factorizations for matrices up to 8x8.
+// Uses flat array representation [f64; 64] for 8x8 row-major storage.
+// Element at (i, j) = data[i * n + j].
+//
+// Algorithms:
+//   LU:       Doolittle with partial pivoting (PA = LU)
+//   Cholesky: A = LL^T for symmetric positive definite matrices
+//   LDL:      A = LDL^T, avoids square roots
+
+// ============================================================================
+// HELPERS (must precede callers)
+// ============================================================================
+
+fn abs_f64(x: f64) -> f64 {
+    if x < 0.0 {
+        return 0.0 - x
+    }
+    return x
+}
+
+fn sqrt_f64(x: f64) -> f64 with Mut, Panic, Div {
+    if x <= 0.0 { return 0.0 }
+    // Range reduction: scale x into [1, 4) by multiplying by powers of 4
+    // then scale the result back by dividing by the power of 2
+    var scaled = x
+    var scale_back = 1.0
+    // Scale up small numbers
+    while scaled < 1.0 {
+        scaled = scaled * 4.0
+        scale_back = scale_back * 2.0
+    }
+    // Scale down large numbers
+    while scaled > 4.0 {
+        scaled = scaled * 0.25
+        scale_back = scale_back * 0.5
+    }
+    // Newton-Raphson on scaled value (now in [1, 4))
+    var y = 1.5
+    y = 0.5 * (y + scaled / y)
+    y = 0.5 * (y + scaled / y)
+    y = 0.5 * (y + scaled / y)
+    y = 0.5 * (y + scaled / y)
+    y = 0.5 * (y + scaled / y)
+    y = 0.5 * (y + scaled / y)
+    y = 0.5 * (y + scaled / y)
+    y = 0.5 * (y + scaled / y)
+    y = 0.5 * (y + scaled / y)
+    y = 0.5 * (y + scaled / y)
+    y = 0.5 * (y + scaled / y)
+    y = 0.5 * (y + scaled / y)
+    y = 0.5 * (y + scaled / y)
+    y = 0.5 * (y + scaled / y)
+    y = 0.5 * (y + scaled / y)
+    return y / scale_back
+}
+
+fn mat_get(A: [f64; 64], n: i32, i: i32, j: i32) -> f64 with Panic {
+    let idx = i * n + j
+    return A[idx]
+}
+
+fn mat_set(A: [f64; 64], n: i32, i: i32, j: i32, val: f64) -> [f64; 64] with Mut, Panic {
+    var result = A
+    let idx = i * n + j
+    result[idx] = val
+    return result
+}
+
+fn zeros64() -> [f64; 64] {
+    let z: [f64; 64] = [0.0; 64]
+    return z
+}
+
+fn zeros8() -> [f64; 8] {
+    let z: [f64; 8] = [0.0; 8]
+    return z
+}
+
+fn izeros8() -> [i32; 8] {
+    let z: [i32; 8] = [0; 8]
+    return z
+}
+
+// Build an n x n identity matrix in flat [f64; 64]
+fn mat_identity(n: i32) -> [f64; 64] with Mut, Panic, Div {
+    var m = zeros64()
+    var i = 0
+    while i < n {
+        m = mat_set(m, n, i, i, 1.0)
+        i = i + 1
+    }
+    return m
+}
+
+// ============================================================================
+// DATA STRUCTURES
+// ============================================================================
+
+struct LUResult {
+    L: [f64; 64],
+    U: [f64; 64],
+    perm: [i32; 8],
+    n: i32,
+    sign: i32,
+    singular: bool
+}
+
+struct CholeskyResult {
+    L: [f64; 64],
+    n: i32,
+    success: bool
+}
+
+struct LDLResult {
+    L: [f64; 64],
+    D: [f64; 8],
+    n: i32,
+    success: bool
+}
+
+// ============================================================================
+// LU FACTORIZATION (Doolittle with partial pivoting)
+// ============================================================================
+// For A (n x n), compute P, L, U such that PA = LU.
+// L is unit lower triangular, U is upper triangular.
+// perm[i] = row index in original A that maps to row i after pivoting.
+// sign tracks determinant sign from row swaps.
+
+fn lu_factorize(A: [f64; 64], n: i32) -> LUResult with Mut, Panic, Div {
+    // Work on a copy that will become U
+    var work = A
+    // Initialize permutation to identity
+    var perm = izeros8()
+    var i = 0
+    while i < n {
+        perm[i] = i
+        i = i + 1
+    }
+
+    // L starts as identity (unit lower triangular)
+    var L = mat_identity(n)
+    var sign = 1
+    var singular = false
+
+    // For each column k
+    var k = 0
+    while k < n {
+        // Find pivot: row with max |work[i, k]| for i >= k
+        var max_val = abs_f64(mat_get(work, n, k, k))
+        var max_row = k
+        i = k + 1
+        while i < n {
+            let val = abs_f64(mat_get(work, n, i, k))
+            if val > max_val {
+                max_val = val
+                max_row = i
+            }
+            i = i + 1
+        }
+
+        // Check for singularity
+        if max_val < 1e-15 {
+            singular = true
+        }
+
+        // Swap rows k and max_row in work matrix
+        if max_row != k {
+            var j = 0
+            while j < n {
+                let tmp_w = mat_get(work, n, k, j)
+                work = mat_set(work, n, k, j, mat_get(work, n, max_row, j))
+                work = mat_set(work, n, max_row, j, tmp_w)
+                j = j + 1
+            }
+
+            // Swap in permutation vector
+            let tmp_p = perm[k]
+            perm[k] = perm[max_row]
+            perm[max_row] = tmp_p
+
+            // Swap previously computed L entries (columns 0..k)
+            j = 0
+            while j < k {
+                let tmp_l = mat_get(L, n, k, j)
+                L = mat_set(L, n, k, j, mat_get(L, n, max_row, j))
+                L = mat_set(L, n, max_row, j, tmp_l)
+                j = j + 1
+            }
+
+            sign = 0 - sign
+        }
+
+        // Compute multipliers and eliminate
+        let pivot = mat_get(work, n, k, k)
+        if abs_f64(pivot) > 1e-15 {
+            i = k + 1
+            while i < n {
+                let mult = mat_get(work, n, i, k) / pivot
+                L = mat_set(L, n, i, k, mult)
+
+                // Eliminate: work[i, j] -= mult * work[k, j] for j >= k
+                var j = k
+                while j < n {
+                    let old_val = mat_get(work, n, i, j)
+                    let sub_val = mult * mat_get(work, n, k, j)
+                    work = mat_set(work, n, i, j, old_val - sub_val)
+                    j = j + 1
+                }
+                i = i + 1
+            }
+        }
+
+        k = k + 1
+    }
+
+    return LUResult {
+        L: L,
+        U: work,
+        perm: perm,
+        n: n,
+        sign: sign,
+        singular: singular
+    }
+}
+
+// Solve Ax = b using LU factorization.
+// First apply permutation: Pb
+// Forward substitution: Ly = Pb
+// Back substitution: Ux = y
+fn lu_solve(lu: LUResult, b: [f64; 8]) -> [f64; 8] with Mut, Panic, Div {
+    let n = lu.n
+
+    // Apply permutation to b: pb[i] = b[perm[i]]
+    var pb = zeros8()
+    var i = 0
+    while i < n {
+        pb[i] = b[lu.perm[i]]
+        i = i + 1
+    }
+
+    // Forward substitution: Ly = pb
+    // L is unit lower triangular (L[i,i] = 1)
+    var y = zeros8()
+    i = 0
+    while i < n {
+        var sum = 0.0
+        var j = 0
+        while j < i {
+            sum = sum + mat_get(lu.L, n, i, j) * y[j]
+            j = j + 1
+        }
+        y[i] = pb[i] - sum
+        i = i + 1
+    }
+
+    // Back substitution: Ux = y
+    var x = zeros8()
+    i = n - 1
+    while i >= 0 {
+        var sum = 0.0
+        var j = i + 1
+        while j < n {
+            sum = sum + mat_get(lu.U, n, i, j) * x[j]
+            j = j + 1
+        }
+        let diag = mat_get(lu.U, n, i, i)
+        if abs_f64(diag) > 1e-15 {
+            x[i] = (y[i] - sum) / diag
+        } else {
+            x[i] = 0.0
+        }
+        i = i - 1
+    }
+
+    return x
+}
+
+// Compute determinant from LU: det(A) = sign * product of U[i,i]
+fn lu_determinant(lu: LUResult) -> f64 with Mut, Panic, Div {
+    let n = lu.n
+    var det = 1.0
+    var i = 0
+    while i < n {
+        det = det * mat_get(lu.U, n, i, i)
+        i = i + 1
+    }
+    if lu.sign < 0 {
+        det = 0.0 - det
+    }
+    return det
+}
+
+// Compute inverse by solving LU * X_col = e_col for each column
+fn lu_inverse(lu: LUResult) -> [f64; 64] with Mut, Panic, Div {
+    let n = lu.n
+    var inv = zeros64()
+
+    var col = 0
+    while col < n {
+        // Build unit vector e_col
+        var e = zeros8()
+        e[col] = 1.0
+
+        // Solve for this column of the inverse
+        let x = lu_solve(lu, e)
+
+        // Store in result
+        var i = 0
+        while i < n {
+            inv = mat_set(inv, n, i, col, x[i])
+            i = i + 1
+        }
+        col = col + 1
+    }
+
+    return inv
+}
+
+// ============================================================================
+// CHOLESKY FACTORIZATION (A = LL^T)
+// ============================================================================
+// For symmetric positive definite A, compute lower triangular L such that
+// A = L * L^T.
+
+fn cholesky_factorize(A: [f64; 64], n: i32) -> CholeskyResult with Mut, Panic, Div {
+    var L = zeros64()
+    var success = true
+
+    var j = 0
+    while j < n {
+        // Compute L[j, j] = sqrt(A[j,j] - sum_{k<j} L[j,k]^2)
+        var sum_sq = 0.0
+        var k = 0
+        while k < j {
+            let ljk = mat_get(L, n, j, k)
+            sum_sq = sum_sq + ljk * ljk
+            k = k + 1
+        }
+        let diag_val = mat_get(A, n, j, j) - sum_sq
+        if diag_val <= 0.0 {
+            // Matrix is not positive definite
+            success = false
+            // Set remaining to zero and return
+            return CholeskyResult { L: L, n: n, success: false }
+        }
+        let ljj = sqrt_f64(diag_val)
+        L = mat_set(L, n, j, j, ljj)
+
+        // Compute L[i, j] for i > j
+        var i = j + 1
+        while i < n {
+            var sum = 0.0
+            k = 0
+            while k < j {
+                sum = sum + mat_get(L, n, i, k) * mat_get(L, n, j, k)
+                k = k + 1
+            }
+            let lij = (mat_get(A, n, i, j) - sum) / ljj
+            L = mat_set(L, n, i, j, lij)
+            i = i + 1
+        }
+
+        j = j + 1
+    }
+
+    return CholeskyResult { L: L, n: n, success: success }
+}
+
+// Solve Ax = b using Cholesky: Ly = b, L^T x = y
+fn cholesky_solve(ch: CholeskyResult, b: [f64; 8]) -> [f64; 8] with Mut, Panic, Div {
+    let n = ch.n
+
+    // Forward substitution: Ly = b
+    var y = zeros8()
+    var i = 0
+    while i < n {
+        var sum = 0.0
+        var j = 0
+        while j < i {
+            sum = sum + mat_get(ch.L, n, i, j) * y[j]
+            j = j + 1
+        }
+        let diag = mat_get(ch.L, n, i, i)
+        if abs_f64(diag) > 1e-15 {
+            y[i] = (b[i] - sum) / diag
+        } else {
+            y[i] = 0.0
+        }
+        i = i + 1
+    }
+
+    // Back substitution: L^T x = y
+    // L^T is upper triangular: L^T[i,j] = L[j,i]
+    var x = zeros8()
+    i = n - 1
+    while i >= 0 {
+        var sum = 0.0
+        var j = i + 1
+        while j < n {
+            // L^T[i,j] = L[j,i]
+            sum = sum + mat_get(ch.L, n, j, i) * x[j]
+            j = j + 1
+        }
+        let diag = mat_get(ch.L, n, i, i)
+        if abs_f64(diag) > 1e-15 {
+            x[i] = (y[i] - sum) / diag
+        } else {
+            x[i] = 0.0
+        }
+        i = i - 1
+    }
+
+    return x
+}
+
+// Determinant via Cholesky: det(A) = (product of L[i,i])^2
+fn cholesky_determinant(ch: CholeskyResult) -> f64 with Mut, Panic, Div {
+    let n = ch.n
+    var prod = 1.0
+    var i = 0
+    while i < n {
+        prod = prod * mat_get(ch.L, n, i, i)
+        i = i + 1
+    }
+    return prod * prod
+}
+
+// Inverse via Cholesky: solve A * X_col = e_col for each column
+fn cholesky_inverse(ch: CholeskyResult) -> [f64; 64] with Mut, Panic, Div {
+    let n = ch.n
+    var inv = zeros64()
+
+    var col = 0
+    while col < n {
+        var e = zeros8()
+        e[col] = 1.0
+
+        let x = cholesky_solve(ch, e)
+
+        var i = 0
+        while i < n {
+            inv = mat_set(inv, n, i, col, x[i])
+            i = i + 1
+        }
+        col = col + 1
+    }
+
+    return inv
+}
+
+// ============================================================================
+// LDL FACTORIZATION (A = LDL^T)
+// ============================================================================
+// For symmetric positive definite A, compute unit lower triangular L and
+// diagonal D such that A = L * D * L^T. Avoids square roots.
+
+fn ldl_factorize(A: [f64; 64], n: i32) -> LDLResult with Mut, Panic, Div {
+    var L = mat_identity(n)
+    var D = zeros8()
+    var success = true
+
+    var j = 0
+    while j < n {
+        // D[j] = A[j,j] - sum_{k<j} L[j,k]^2 * D[k]
+        var sum = 0.0
+        var k = 0
+        while k < j {
+            let ljk = mat_get(L, n, j, k)
+            sum = sum + ljk * ljk * D[k]
+            k = k + 1
+        }
+        D[j] = mat_get(A, n, j, j) - sum
+
+        if abs_f64(D[j]) < 1e-15 {
+            success = false
+            return LDLResult { L: L, D: D, n: n, success: false }
+        }
+
+        // L[i,j] = (A[i,j] - sum_{k<j} L[i,k] * L[j,k] * D[k]) / D[j]
+        var i = j + 1
+        while i < n {
+            var sum_ij = 0.0
+            k = 0
+            while k < j {
+                sum_ij = sum_ij + mat_get(L, n, i, k) * mat_get(L, n, j, k) * D[k]
+                k = k + 1
+            }
+            let lij = (mat_get(A, n, i, j) - sum_ij) / D[j]
+            L = mat_set(L, n, i, j, lij)
+            i = i + 1
+        }
+
+        j = j + 1
+    }
+
+    return LDLResult { L: L, D: D, n: n, success: success }
+}
+
+// Solve Ax = b using LDL: Lz = b, Dy = z, L^T x = y
+fn ldl_solve(ldl: LDLResult, b: [f64; 8]) -> [f64; 8] with Mut, Panic, Div {
+    let n = ldl.n
+
+    // Forward substitution: Lz = b (L is unit lower triangular)
+    var z = zeros8()
+    var i = 0
+    while i < n {
+        var sum = 0.0
+        var j = 0
+        while j < i {
+            sum = sum + mat_get(ldl.L, n, i, j) * z[j]
+            j = j + 1
+        }
+        z[i] = b[i] - sum
+        i = i + 1
+    }
+
+    // Diagonal solve: Dy = z
+    var y = zeros8()
+    i = 0
+    while i < n {
+        if abs_f64(ldl.D[i]) > 1e-15 {
+            y[i] = z[i] / ldl.D[i]
+        } else {
+            y[i] = 0.0
+        }
+        i = i + 1
+    }
+
+    // Back substitution: L^T x = y (L^T is unit upper triangular)
+    var x = zeros8()
+    i = n - 1
+    while i >= 0 {
+        var sum = 0.0
+        var j = i + 1
+        while j < n {
+            // L^T[i,j] = L[j,i]
+            sum = sum + mat_get(ldl.L, n, j, i) * x[j]
+            j = j + 1
+        }
+        x[i] = y[i] - sum
+        i = i - 1
+    }
+
+    return x
+}
+
+// ============================================================================
+// VALIDATION UTILITIES
+// ============================================================================
+
+// Compute ||PA - LU||_F (Frobenius norm of reconstruction error)
+fn lu_reconstruction_error(lu: LUResult, A: [f64; 64], n: i32) -> f64 with Mut, Panic, Div {
+    // Compute L * U
+    var LU = zeros64()
+    var i = 0
+    while i < n {
+        var j = 0
+        while j < n {
+            var sum = 0.0
+            var k = 0
+            while k < n {
+                sum = sum + mat_get(lu.L, n, i, k) * mat_get(lu.U, n, k, j)
+                k = k + 1
+            }
+            LU = mat_set(LU, n, i, j, sum)
+            j = j + 1
+        }
+        i = i + 1
+    }
+
+    // Compute PA (apply permutation to rows of A)
+    var PA = zeros64()
+    i = 0
+    while i < n {
+        var j = 0
+        while j < n {
+            PA = mat_set(PA, n, i, j, mat_get(A, n, lu.perm[i], j))
+            j = j + 1
+        }
+        i = i + 1
+    }
+
+    // Compute ||PA - LU||_F
+    var sum_sq = 0.0
+    i = 0
+    while i < n {
+        var j = 0
+        while j < n {
+            let diff = mat_get(PA, n, i, j) - mat_get(LU, n, i, j)
+            sum_sq = sum_sq + diff * diff
+            j = j + 1
+        }
+        i = i + 1
+    }
+    return sqrt_f64(sum_sq)
+}
+
+// Compute ||A - LL^T||_F
+fn cholesky_reconstruction_error(ch: CholeskyResult, A: [f64; 64], n: i32) -> f64 with Mut, Panic, Div {
+    // Compute L * L^T
+    var LLt = zeros64()
+    var i = 0
+    while i < n {
+        var j = 0
+        while j < n {
+            var sum = 0.0
+            var k = 0
+            while k < n {
+                sum = sum + mat_get(ch.L, n, i, k) * mat_get(ch.L, n, j, k)
+                k = k + 1
+            }
+            LLt = mat_set(LLt, n, i, j, sum)
+            j = j + 1
+        }
+        i = i + 1
+    }
+
+    // Compute ||A - LL^T||_F
+    var sum_sq = 0.0
+    i = 0
+    while i < n {
+        var j = 0
+        while j < n {
+            let diff = mat_get(A, n, i, j) - mat_get(LLt, n, i, j)
+            sum_sq = sum_sq + diff * diff
+            j = j + 1
+        }
+        i = i + 1
+    }
+    return sqrt_f64(sum_sq)
+}
+
+// Check if matrix is symmetric within tolerance
+fn matrix_is_symmetric(A: [f64; 64], n: i32, tol: f64) -> bool with Mut, Panic, Div {
+    var i = 0
+    while i < n {
+        var j = i + 1
+        while j < n {
+            let diff = abs_f64(mat_get(A, n, i, j) - mat_get(A, n, j, i))
+            if diff > tol {
+                return false
+            }
+            j = j + 1
+        }
+        i = i + 1
+    }
+    return true
+}
+
+// Check positive definiteness by attempting Cholesky
+fn matrix_is_positive_definite(A: [f64; 64], n: i32) -> bool with Mut, Panic, Div {
+    let ch = cholesky_factorize(A, n)
+    return ch.success
+}

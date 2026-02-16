@@ -1,0 +1,529 @@
+// interpolation/mod.sio - Interpolation Algorithms for Sounio
+//
+// Provides production-quality interpolation methods for scientific computing:
+//   - Piecewise Linear Interpolation (table lookup with binary search)
+//   - Natural Cubic Spline (tridiagonal system, C2 continuity)
+//   - Lagrange Interpolation (barycentric form for numerical stability)
+//   - Akima Interpolation (smooth, local, wiggle-free)
+//
+// All methods use fixed-size arrays to avoid heap allocation.
+// Binary search is O(log n) for interval location.
+//
+// References:
+//   de Boor (1978) "A Practical Guide to Splines"
+//   Akima (1970) "A New Method of Interpolation and Smooth Curve Fitting"
+//   Berrut, Trefethen (2004) "Barycentric Lagrange Interpolation"
+
+// ============================================================================
+// HELPERS (must precede callers)
+// ============================================================================
+
+fn abs_f64(x: f64) -> f64 {
+    if x < 0.0 { return 0.0 - x }
+    return x
+}
+
+// Binary search to find interval index i such that xs[i] <= x < xs[i+1].
+// Returns 0 for x <= xs[0], n-2 for x >= xs[n-1].
+// Requires xs to be sorted in ascending order.
+fn binary_search_interval(xs: [f64; 256], n: i32, x: f64) -> i32 with Mut, Panic {
+    if n < 2 { return 0 }
+    if x <= xs[0] { return 0 }
+    if x >= xs[n - 1] { return n - 2 }
+
+    var lo: i32 = 0
+    var hi: i32 = n - 1
+    while hi - lo > 1 {
+        let mid = lo + (hi - lo) / 2
+        if xs[mid] <= x {
+            lo = mid
+        } else {
+            hi = mid
+        }
+    }
+    return lo
+}
+
+// Thomas algorithm for solving tridiagonal systems.
+// Solves: lower[i]*x[i-1] + diag[i]*x[i] + upper[i]*x[i+1] = rhs[i]
+// for i = 0..n-1, where lower[0] and upper[n-1] are unused.
+// Result is written into x_out.
+fn tridiag_solve(
+    lower: [f64; 256],
+    diag: [f64; 256],
+    upper: [f64; 256],
+    rhs: [f64; 256],
+    n: i32
+) -> [f64; 256] with Mut, Panic, Div {
+    var c_prime: [f64; 256] = [0.0; 256]
+    var d_prime: [f64; 256] = [0.0; 256]
+    var x_out: [f64; 256] = [0.0; 256]
+
+    // Forward sweep
+    c_prime[0] = upper[0] / diag[0]
+    d_prime[0] = rhs[0] / diag[0]
+
+    var i: i32 = 1
+    while i < n {
+        let m = lower[i] / (diag[i] - lower[i] * c_prime[i - 1])
+        c_prime[i] = upper[i] / (diag[i] - lower[i] * c_prime[i - 1])
+        d_prime[i] = (rhs[i] - lower[i] * d_prime[i - 1]) / (diag[i] - lower[i] * c_prime[i - 1])
+        i = i + 1
+    }
+
+    // Back substitution
+    x_out[n - 1] = d_prime[n - 1]
+    i = n - 2
+    while i >= 0 {
+        x_out[i] = d_prime[i] - c_prime[i] * x_out[i + 1]
+        i = i - 1
+    }
+
+    return x_out
+}
+
+// ============================================================================
+// DATA STRUCTURES
+// ============================================================================
+
+struct PiecewiseLinear {
+    xs: [f64; 256],
+    ys: [f64; 256],
+    n: i32
+}
+
+struct CubicSpline {
+    xs: [f64; 256],
+    a: [f64; 256],
+    b: [f64; 256],
+    c: [f64; 256],
+    d: [f64; 256],
+    n: i32
+}
+
+struct LagrangeInterp {
+    xs: [f64; 64],
+    ys: [f64; 64],
+    n: i32
+}
+
+struct AkimaSpline {
+    xs: [f64; 256],
+    a: [f64; 256],
+    b: [f64; 256],
+    c: [f64; 256],
+    d: [f64; 256],
+    n: i32
+}
+
+// ============================================================================
+// PIECEWISE LINEAR INTERPOLATION
+// ============================================================================
+
+// Create a piecewise linear interpolant from sorted x and y arrays.
+// xs must be sorted in ascending order. n is the number of data points.
+fn piecewise_linear_new(xs: [f64; 256], ys: [f64; 256], n: i32) -> PiecewiseLinear {
+    return PiecewiseLinear {
+        xs: xs,
+        ys: ys,
+        n: n
+    }
+}
+
+// Evaluate the piecewise linear interpolant at point x.
+// Clamps to boundary values for x outside the data range.
+fn piecewise_linear_eval(interp: PiecewiseLinear, x: f64) -> f64 with Mut, Panic, Div {
+    if interp.n < 2 {
+        if interp.n == 1 { return interp.ys[0] }
+        return 0.0
+    }
+
+    // Clamp to boundary values
+    if x <= interp.xs[0] { return interp.ys[0] }
+    if x >= interp.xs[interp.n - 1] { return interp.ys[interp.n - 1] }
+
+    // Binary search for interval
+    let i = binary_search_interval(interp.xs, interp.n, x)
+
+    // Linear interpolation within interval
+    let h = interp.xs[i + 1] - interp.xs[i]
+    if abs_f64(h) < 1.0e-30 { return interp.ys[i] }
+
+    let t = (x - interp.xs[i]) / h
+    return interp.ys[i] + t * (interp.ys[i + 1] - interp.ys[i])
+}
+
+// Evaluate the piecewise linear interpolant at multiple points.
+fn piecewise_linear_eval_batch(
+    interp: PiecewiseLinear,
+    xs_in: [f64; 256],
+    count: i32
+) -> [f64; 256] with Mut, Panic, Div {
+    var ys_out: [f64; 256] = [0.0; 256]
+    var k: i32 = 0
+    while k < count {
+        ys_out[k] = piecewise_linear_eval(interp, xs_in[k])
+        k = k + 1
+    }
+    return ys_out
+}
+
+// ============================================================================
+// NATURAL CUBIC SPLINE
+// ============================================================================
+// Classic cubic spline with natural boundary conditions (c_0 = c_{n-1} = 0).
+//
+// For each interval [x_i, x_{i+1}]:
+//   S_i(x) = a_i + b_i*(x - x_i) + c_i*(x - x_i)^2 + d_i*(x - x_i)^3
+//
+// where a_i = y_i, and b_i, c_i, d_i are computed from the tridiagonal
+// system arising from C2 continuity conditions.
+
+// Fit a natural cubic spline to the given data points.
+fn cubic_spline_fit(xs: [f64; 256], ys: [f64; 256], n: i32) -> CubicSpline with Mut, Panic, Div {
+    var spline = CubicSpline {
+        xs: xs,
+        a: ys,
+        b: [0.0; 256],
+        c: [0.0; 256],
+        d: [0.0; 256],
+        n: n
+    }
+
+    if n < 2 { return spline }
+
+    // Compute interval lengths h_i = x_{i+1} - x_i
+    var h: [f64; 256] = [0.0; 256]
+    var i: i32 = 0
+    while i < n - 1 {
+        h[i] = xs[i + 1] - xs[i]
+        i = i + 1
+    }
+
+    if n == 2 {
+        // Only one interval, linear segment
+        if abs_f64(h[0]) > 1.0e-30 {
+            spline.b[0] = (ys[1] - ys[0]) / h[0]
+        }
+        return spline
+    }
+
+    // Set up tridiagonal system for c coefficients.
+    // For i = 1..n-2:
+    //   h_{i-1}*c_{i-1} + 2*(h_{i-1}+h_i)*c_i + h_i*c_{i+1}
+    //   = 3*((y_{i+1}-y_i)/h_i - (y_i-y_{i-1})/h_{i-1})
+    //
+    // Natural boundary: c_0 = 0, c_{n-1} = 0
+    // So we solve for c_1 .. c_{n-2} (interior points) if n > 2.
+
+    let m = n - 2  // number of interior unknowns
+    var lower: [f64; 256] = [0.0; 256]
+    var diag: [f64; 256] = [0.0; 256]
+    var upper: [f64; 256] = [0.0; 256]
+    var rhs: [f64; 256] = [0.0; 256]
+
+    i = 0
+    while i < m {
+        let idx = i + 1  // maps to interior point index in original arrays
+        diag[i] = 2.0 * (h[idx - 1] + h[idx])
+        if i > 0 {
+            lower[i] = h[idx - 1]
+        }
+        if i < m - 1 {
+            upper[i] = h[idx]
+        }
+        let slope_right = (ys[idx + 1] - ys[idx]) / h[idx]
+        let slope_left = (ys[idx] - ys[idx - 1]) / h[idx - 1]
+        rhs[i] = 3.0 * (slope_right - slope_left)
+        i = i + 1
+    }
+
+    // Solve tridiagonal system
+    let c_interior = tridiag_solve(lower, diag, upper, rhs, m)
+
+    // Map interior c values back, with natural BC c[0] = c[n-1] = 0
+    spline.c[0] = 0.0
+    i = 0
+    while i < m {
+        spline.c[i + 1] = c_interior[i]
+        i = i + 1
+    }
+    spline.c[n - 1] = 0.0
+
+    // Compute b and d coefficients
+    i = 0
+    while i < n - 1 {
+        let hi = h[i]
+        if abs_f64(hi) < 1.0e-30 {
+            spline.b[i] = 0.0
+            spline.d[i] = 0.0
+        } else {
+            spline.b[i] = (ys[i + 1] - ys[i]) / hi - hi * (2.0 * spline.c[i] + spline.c[i + 1]) / 3.0
+            spline.d[i] = (spline.c[i + 1] - spline.c[i]) / (3.0 * hi)
+        }
+        i = i + 1
+    }
+
+    return spline
+}
+
+// Evaluate the cubic spline at point x.
+// Clamps to boundary values for x outside the data range.
+fn cubic_spline_eval(spline: CubicSpline, x: f64) -> f64 with Mut, Panic, Div {
+    if spline.n < 2 {
+        if spline.n == 1 { return spline.a[0] }
+        return 0.0
+    }
+
+    // Clamp to data range
+    var xc: f64 = x
+    if xc < spline.xs[0] { xc = spline.xs[0] }
+    if xc > spline.xs[spline.n - 1] { xc = spline.xs[spline.n - 1] }
+
+    // Binary search for interval
+    let i = binary_search_interval(spline.xs, spline.n, xc)
+
+    // Evaluate S_i(x) = a_i + b_i*dx + c_i*dx^2 + d_i*dx^3
+    let dx = xc - spline.xs[i]
+    return spline.a[i] + dx * (spline.b[i] + dx * (spline.c[i] + dx * spline.d[i]))
+}
+
+// Evaluate the first derivative of the cubic spline at point x.
+// S'_i(x) = b_i + 2*c_i*(x - x_i) + 3*d_i*(x - x_i)^2
+fn cubic_spline_derivative(spline: CubicSpline, x: f64) -> f64 with Mut, Panic, Div {
+    if spline.n < 2 { return 0.0 }
+
+    // Clamp to data range
+    var xc: f64 = x
+    if xc < spline.xs[0] { xc = spline.xs[0] }
+    if xc > spline.xs[spline.n - 1] { xc = spline.xs[spline.n - 1] }
+
+    // Binary search for interval
+    let i = binary_search_interval(spline.xs, spline.n, xc)
+
+    let dx = xc - spline.xs[i]
+    return spline.b[i] + dx * (2.0 * spline.c[i] + 3.0 * spline.d[i] * dx)
+}
+
+// ============================================================================
+// LAGRANGE INTERPOLATION (Barycentric Form)
+// ============================================================================
+// Uses the barycentric formula for O(n) evaluation after O(n^2) precomputation.
+//
+// L(x) = (sum_i w_i * y_i / (x - x_i)) / (sum_i w_i / (x - x_i))
+// where w_i = 1 / prod_{j != i} (x_i - x_j) are the barycentric weights.
+//
+// This form is numerically stable and avoids catastrophic cancellation.
+
+// Create a Lagrange interpolant from data points.
+fn lagrange_new(xs: [f64; 64], ys: [f64; 64], n: i32) -> LagrangeInterp {
+    return LagrangeInterp {
+        xs: xs,
+        ys: ys,
+        n: n
+    }
+}
+
+// Binary search for interval in [f64; 64] arrays (Lagrange uses smaller arrays).
+fn binary_search_interval_64(xs: [f64; 64], n: i32, x: f64) -> i32 with Mut, Panic {
+    if n < 2 { return 0 }
+    if x <= xs[0] { return 0 }
+    if x >= xs[n - 1] { return n - 2 }
+
+    var lo: i32 = 0
+    var hi: i32 = n - 1
+    while hi - lo > 1 {
+        let mid = lo + (hi - lo) / 2
+        if xs[mid] <= x {
+            lo = mid
+        } else {
+            hi = mid
+        }
+    }
+    return lo
+}
+
+// Evaluate Lagrange interpolant at point x using the barycentric formula.
+fn lagrange_eval(interp: LagrangeInterp, x: f64) -> f64 with Mut, Panic, Div {
+    let n = interp.n
+    if n < 1 { return 0.0 }
+    if n == 1 { return interp.ys[0] }
+
+    // Check if x is exactly at a node (avoid division by zero)
+    var k: i32 = 0
+    while k < n {
+        if abs_f64(x - interp.xs[k]) < 1.0e-15 {
+            return interp.ys[k]
+        }
+        k = k + 1
+    }
+
+    // Compute barycentric weights w_i = 1 / prod_{j != i}(x_i - x_j)
+    var weights: [f64; 64] = [0.0; 64]
+    var i: i32 = 0
+    while i < n {
+        var prod: f64 = 1.0
+        var j: i32 = 0
+        while j < n {
+            if j != i {
+                prod = prod * (interp.xs[i] - interp.xs[j])
+            }
+            j = j + 1
+        }
+        if abs_f64(prod) < 1.0e-30 {
+            weights[i] = 0.0
+        } else {
+            weights[i] = 1.0 / prod
+        }
+        i = i + 1
+    }
+
+    // Barycentric formula:
+    // L(x) = (sum_i w_i * y_i / (x - x_i)) / (sum_i w_i / (x - x_i))
+    var numerator: f64 = 0.0
+    var denominator: f64 = 0.0
+    i = 0
+    while i < n {
+        let diff = x - interp.xs[i]
+        let term = weights[i] / diff
+        numerator = numerator + term * interp.ys[i]
+        denominator = denominator + term
+        i = i + 1
+    }
+
+    if abs_f64(denominator) < 1.0e-30 { return 0.0 }
+    return numerator / denominator
+}
+
+// ============================================================================
+// AKIMA INTERPOLATION
+// ============================================================================
+// Akima's method computes slopes as weighted averages of neighboring divided
+// differences, where the weights are based on how different consecutive slopes
+// are. This produces a smooth interpolant that avoids the oscillations of
+// cubic splines near sharp changes.
+//
+// Reference: Akima (1970) "A New Method of Interpolation and Smooth Curve
+// Fitting Based on Local Procedures"
+
+// Fit an Akima spline to the given data points.
+fn akima_fit(xs: [f64; 256], ys: [f64; 256], n: i32) -> AkimaSpline with Mut, Panic, Div {
+    var spline = AkimaSpline {
+        xs: xs,
+        a: ys,
+        b: [0.0; 256],
+        c: [0.0; 256],
+        d: [0.0; 256],
+        n: n
+    }
+
+    if n < 2 { return spline }
+
+    if n == 2 {
+        let h = xs[1] - xs[0]
+        if abs_f64(h) > 1.0e-30 {
+            spline.b[0] = (ys[1] - ys[0]) / h
+        }
+        return spline
+    }
+
+    // Compute divided differences m_i = (y_{i+1} - y_i) / (x_{i+1} - x_i)
+    // We need m for indices -2..n+1 conceptually. We store in a shifted array:
+    // dm[k] corresponds to m_{k-2}  (so dm[0] = m_{-2}, dm[2] = m_0, etc.)
+    // Total needed: n-1 interior + 4 extrapolated = n+3
+    var dm: [f64; 260] = [0.0; 260]
+
+    // Interior differences m_0 .. m_{n-2}
+    var i: i32 = 0
+    while i < n - 1 {
+        let h = xs[i + 1] - xs[i]
+        if abs_f64(h) < 1.0e-30 {
+            dm[i + 2] = 0.0
+        } else {
+            dm[i + 2] = (ys[i + 1] - ys[i]) / h
+        }
+        i = i + 1
+    }
+
+    // Extrapolate slopes for boundary handling:
+    // m_{-1} = 2*m_0 - m_1, m_{-2} = 2*m_{-1} - m_0
+    // m_{n-1} = 2*m_{n-2} - m_{n-3}, m_n = 2*m_{n-1} - m_{n-2}
+    if n >= 3 {
+        dm[1] = 2.0 * dm[2] - dm[3]           // m_{-1}
+        dm[0] = 2.0 * dm[1] - dm[2]           // m_{-2}
+        let last = n - 2  // index of last interior diff: m_{n-2} is at dm[n]
+        dm[n + 1] = 2.0 * dm[n] - dm[n - 1]   // m_{n-1}
+        dm[n + 2] = 2.0 * dm[n + 1] - dm[n]   // m_n
+    } else {
+        // n == 2: only one difference, no extrapolation needed
+        dm[1] = dm[2]
+        dm[0] = dm[2]
+        dm[3] = dm[2]
+        dm[4] = dm[2]
+    }
+
+    // Compute Akima slopes t_i at each data point.
+    // t_i = (w1 * m_{i-1} + w2 * m_i) / (w1 + w2)
+    // where w1 = |m_{i+1} - m_i|, w2 = |m_{i-1} - m_{i-2}|
+    var slopes: [f64; 256] = [0.0; 256]
+    i = 0
+    while i < n {
+        // Indices into dm: m_{i-2} = dm[i], m_{i-1} = dm[i+1],
+        //                  m_i = dm[i+2], m_{i+1} = dm[i+3]
+        let w1 = abs_f64(dm[i + 3] - dm[i + 2])  // |m_{i+1} - m_i|
+        let w2 = abs_f64(dm[i + 1] - dm[i])       // |m_{i-1} - m_{i-2}|
+
+        if w1 + w2 < 1.0e-30 {
+            // All slopes are equal; use simple average
+            slopes[i] = (dm[i + 1] + dm[i + 2]) / 2.0
+        } else {
+            slopes[i] = (w1 * dm[i + 1] + w2 * dm[i + 2]) / (w1 + w2)
+        }
+        i = i + 1
+    }
+
+    // Compute cubic Hermite coefficients for each interval.
+    // Given slopes t_i, t_{i+1} at endpoints and values y_i, y_{i+1}:
+    //   a_i = y_i
+    //   b_i = t_i
+    //   c_i = (3*m_i - 2*t_i - t_{i+1}) / h_i
+    //   d_i = (t_i + t_{i+1} - 2*m_i) / h_i^2
+    // where m_i = (y_{i+1} - y_i) / h_i
+    i = 0
+    while i < n - 1 {
+        let h = xs[i + 1] - xs[i]
+        if abs_f64(h) < 1.0e-30 {
+            spline.b[i] = slopes[i]
+            spline.c[i] = 0.0
+            spline.d[i] = 0.0
+        } else {
+            let mi = (ys[i + 1] - ys[i]) / h
+            spline.b[i] = slopes[i]
+            spline.c[i] = (3.0 * mi - 2.0 * slopes[i] - slopes[i + 1]) / h
+            spline.d[i] = (slopes[i] + slopes[i + 1] - 2.0 * mi) / (h * h)
+        }
+        i = i + 1
+    }
+
+    return spline
+}
+
+// Evaluate the Akima spline at point x.
+fn akima_eval(spline: AkimaSpline, x: f64) -> f64 with Mut, Panic, Div {
+    if spline.n < 2 {
+        if spline.n == 1 { return spline.a[0] }
+        return 0.0
+    }
+
+    // Clamp to data range
+    var xc: f64 = x
+    if xc < spline.xs[0] { xc = spline.xs[0] }
+    if xc > spline.xs[spline.n - 1] { xc = spline.xs[spline.n - 1] }
+
+    // Binary search for interval
+    let i = binary_search_interval(spline.xs, spline.n, xc)
+
+    // Evaluate S_i(x) = a_i + b_i*dx + c_i*dx^2 + d_i*dx^3
+    let dx = xc - spline.xs[i]
+    return spline.a[i] + dx * (spline.b[i] + dx * (spline.c[i] + dx * spline.d[i]))
+}

@@ -1,0 +1,869 @@
+// sparse.sio - Sparse Matrix Library (CSR Format) for Sounio Linear Algebra
+//
+// Compressed Sparse Row (CSR) format for efficient sparse matrix operations.
+// Designed for scientific computing: FDM/FEM stiffness matrices, Jacobians,
+// Laplacians, and iterative solvers (Conjugate Gradient).
+//
+// Fixed-size arrays with limits:
+//   - Up to 1024 non-zero entries
+//   - Up to 128 rows/columns
+//   - Dense vectors up to 128 elements
+//
+// Key operations:
+//   - SpMV (sparse matrix-vector multiply) — the critical kernel
+//   - Sparse-sparse addition and transpose
+//   - Triangular solves (forward/backward substitution)
+//   - Conjugate Gradient iterative solver for SPD systems
+
+// ============================================================================
+// HELPERS (must precede callers)
+// ============================================================================
+
+fn abs_f64(x: f64) -> f64 {
+    if x < 0.0 {
+        return 0.0 - x
+    }
+    return x
+}
+
+fn sqrt_f64(x: f64) -> f64 with Mut, Panic, Div {
+    if x <= 0.0 { return 0.0 }
+    // Range reduction: scale x into [1, 4) by multiplying by powers of 4
+    // then scale the result back by dividing by the power of 2
+    var scaled = x
+    var scale_back = 1.0
+    // Scale up small numbers
+    while scaled < 1.0 {
+        scaled = scaled * 4.0
+        scale_back = scale_back * 2.0
+    }
+    // Scale down large numbers
+    while scaled > 4.0 {
+        scaled = scaled * 0.25
+        scale_back = scale_back * 0.5
+    }
+    // Newton-Raphson on scaled value (now in [1, 4))
+    var y = 1.5
+    y = 0.5 * (y + scaled / y)
+    y = 0.5 * (y + scaled / y)
+    y = 0.5 * (y + scaled / y)
+    y = 0.5 * (y + scaled / y)
+    y = 0.5 * (y + scaled / y)
+    y = 0.5 * (y + scaled / y)
+    y = 0.5 * (y + scaled / y)
+    y = 0.5 * (y + scaled / y)
+    y = 0.5 * (y + scaled / y)
+    y = 0.5 * (y + scaled / y)
+    y = 0.5 * (y + scaled / y)
+    y = 0.5 * (y + scaled / y)
+    y = 0.5 * (y + scaled / y)
+    y = 0.5 * (y + scaled / y)
+    y = 0.5 * (y + scaled / y)
+    return y / scale_back
+}
+
+fn max_i32(a: i32, b: i32) -> i32 {
+    if a > b { return a }
+    return b
+}
+
+fn min_i32(a: i32, b: i32) -> i32 {
+    if a < b { return a }
+    return b
+}
+
+// ============================================================================
+// DENSE VECTOR HELPERS (operate on [f64; 128])
+// ============================================================================
+
+fn vec_dot(a: [f64; 128], b: [f64; 128], n: i32) -> f64 with Mut, Panic {
+    var sum = 0.0
+    var i = 0
+    while i < n {
+        sum = sum + a[i] * b[i]
+        i = i + 1
+    }
+    return sum
+}
+
+fn vec_axpy(alpha: f64, x: [f64; 128], y: [f64; 128], n: i32) -> [f64; 128] with Mut, Panic {
+    // result = alpha*x + y
+    var result: [f64; 128] = y
+    var i = 0
+    while i < n {
+        result[i] = alpha * x[i] + y[i]
+        i = i + 1
+    }
+    return result
+}
+
+fn vec_copy(src: [f64; 128], n: i32) -> [f64; 128] with Mut, Panic {
+    var dst: [f64; 128] = [0.0; 128]
+    var i = 0
+    while i < n {
+        dst[i] = src[i]
+        i = i + 1
+    }
+    return dst
+}
+
+fn vec_norm(x: [f64; 128], n: i32) -> f64 with Mut, Panic, Div {
+    var sum = 0.0
+    var i = 0
+    while i < n {
+        sum = sum + x[i] * x[i]
+        i = i + 1
+    }
+    return sqrt_f64(sum)
+}
+
+fn vec_scale(alpha: f64, x: [f64; 128], n: i32) -> [f64; 128] with Mut, Panic {
+    var result: [f64; 128] = [0.0; 128]
+    var i = 0
+    while i < n {
+        result[i] = alpha * x[i]
+        i = i + 1
+    }
+    return result
+}
+
+fn vec_sub(a: [f64; 128], b: [f64; 128], n: i32) -> [f64; 128] with Mut, Panic {
+    var result: [f64; 128] = [0.0; 128]
+    var i = 0
+    while i < n {
+        result[i] = a[i] - b[i]
+        i = i + 1
+    }
+    return result
+}
+
+fn vec_add(a: [f64; 128], b: [f64; 128], n: i32) -> [f64; 128] with Mut, Panic {
+    var result: [f64; 128] = [0.0; 128]
+    var i = 0
+    while i < n {
+        result[i] = a[i] + b[i]
+        i = i + 1
+    }
+    return result
+}
+
+fn vec_zeros(n: i32) -> [f64; 128] {
+    let result: [f64; 128] = [0.0; 128]
+    return result
+}
+
+// ============================================================================
+// DATA STRUCTURES
+// ============================================================================
+
+// Compressed Sparse Row (CSR) matrix format.
+// For an m x n matrix with nnz non-zeros:
+//   values[0..nnz]:    non-zero values in row-major order
+//   col_idx[0..nnz]:   column index of each non-zero value
+//   row_ptr[0..m+1]:   row_ptr[i] is the start index in values/col_idx for row i
+//                      row_ptr[m] = nnz
+struct SparseCSR {
+    values: [f64; 1024],
+    col_idx: [i32; 1024],
+    row_ptr: [i32; 129],
+    nrows: i32,
+    ncols: i32,
+    nnz: i32
+}
+
+// Result of the Conjugate Gradient solver
+struct CGResult {
+    x: [f64; 128],
+    iterations: i32,
+    residual: f64,
+    converged: bool
+}
+
+// ============================================================================
+// CONSTRUCTION
+// ============================================================================
+
+// Create an empty sparse matrix with given dimensions
+fn sparse_new(nrows: i32, ncols: i32) -> SparseCSR with Mut, Panic {
+    var result = SparseCSR {
+        values: [0.0; 1024],
+        col_idx: [0; 1024],
+        row_ptr: [0; 129],
+        nrows: nrows,
+        ncols: ncols,
+        nnz: 0
+    }
+    // All row pointers start at 0
+    var i = 0
+    while i <= nrows {
+        result.row_ptr[i] = 0
+        i = i + 1
+    }
+    return result
+}
+
+// Build a CSR matrix from COO (coordinate) format triplets.
+// Sorts by row then column. Sums duplicate entries.
+// rows[0..count], cols[0..count], vals[0..count] are the triplets.
+fn sparse_from_triplets(
+    rows: [i32; 1024],
+    cols: [i32; 1024],
+    vals: [f64; 1024],
+    count: i32,
+    nrows: i32,
+    ncols: i32
+) -> SparseCSR with Mut, Panic, Div {
+    // Sort triplets by (row, col) using insertion sort (stable, good for small count)
+    var s_rows: [i32; 1024] = rows
+    var s_cols: [i32; 1024] = cols
+    var s_vals: [f64; 1024] = vals
+
+    var i = 1
+    while i < count {
+        let r = s_rows[i]
+        let c = s_cols[i]
+        let v = s_vals[i]
+        var j = i - 1
+        var done = false
+        while j >= 0 && !done {
+            // Compare (row, col) lexicographically
+            let should_shift = s_rows[j] > r || (s_rows[j] == r && s_cols[j] > c)
+            if should_shift {
+                s_rows[j + 1] = s_rows[j]
+                s_cols[j + 1] = s_cols[j]
+                s_vals[j + 1] = s_vals[j]
+                j = j - 1
+            } else {
+                done = true
+            }
+        }
+        s_rows[j + 1] = r
+        s_cols[j + 1] = c
+        s_vals[j + 1] = v
+        i = i + 1
+    }
+
+    // Merge duplicates: if consecutive entries have same (row, col), sum values
+    var m_rows: [i32; 1024] = [0; 1024]
+    var m_cols: [i32; 1024] = [0; 1024]
+    var m_vals: [f64; 1024] = [0.0; 1024]
+    var m_count = 0
+
+    if count > 0 {
+        m_rows[0] = s_rows[0]
+        m_cols[0] = s_cols[0]
+        m_vals[0] = s_vals[0]
+        m_count = 1
+
+        i = 1
+        while i < count {
+            if s_rows[i] == m_rows[m_count - 1] && s_cols[i] == m_cols[m_count - 1] {
+                // Duplicate: sum values
+                m_vals[m_count - 1] = m_vals[m_count - 1] + s_vals[i]
+            } else {
+                m_rows[m_count] = s_rows[i]
+                m_cols[m_count] = s_cols[i]
+                m_vals[m_count] = s_vals[i]
+                m_count = m_count + 1
+            }
+            i = i + 1
+        }
+    }
+
+    // Build CSR from sorted, merged triplets
+    var result = SparseCSR {
+        values: [0.0; 1024],
+        col_idx: [0; 1024],
+        row_ptr: [0; 129],
+        nrows: nrows,
+        ncols: ncols,
+        nnz: m_count
+    }
+
+    // Count entries per row
+    var row_count: [i32; 129] = [0; 129]
+    i = 0
+    while i < m_count {
+        row_count[m_rows[i]] = row_count[m_rows[i]] + 1
+        i = i + 1
+    }
+
+    // Compute row_ptr as cumulative sum
+    result.row_ptr[0] = 0
+    i = 0
+    while i < nrows {
+        result.row_ptr[i + 1] = result.row_ptr[i] + row_count[i]
+        i = i + 1
+    }
+
+    // Fill values and col_idx (already sorted)
+    i = 0
+    while i < m_count {
+        result.values[i] = m_vals[i]
+        result.col_idx[i] = m_cols[i]
+        i = i + 1
+    }
+
+    return result
+}
+
+// Create an n x n identity matrix in CSR format
+fn sparse_identity(n: i32) -> SparseCSR with Mut, Panic {
+    var result = SparseCSR {
+        values: [0.0; 1024],
+        col_idx: [0; 1024],
+        row_ptr: [0; 129],
+        nrows: n,
+        ncols: n,
+        nnz: n
+    }
+    var i = 0
+    while i < n {
+        result.values[i] = 1.0
+        result.col_idx[i] = i
+        result.row_ptr[i] = i
+        i = i + 1
+    }
+    result.row_ptr[n] = n
+    return result
+}
+
+// Create a diagonal matrix from an array of diagonal values
+fn sparse_diagonal(diag: [f64; 128], n: i32) -> SparseCSR with Mut, Panic {
+    var result = SparseCSR {
+        values: [0.0; 1024],
+        col_idx: [0; 1024],
+        row_ptr: [0; 129],
+        nrows: n,
+        ncols: n,
+        nnz: n
+    }
+    var i = 0
+    while i < n {
+        result.values[i] = diag[i]
+        result.col_idx[i] = i
+        result.row_ptr[i] = i
+        i = i + 1
+    }
+    result.row_ptr[n] = n
+    return result
+}
+
+// Create a tridiagonal matrix (common in FDM discretizations).
+// lower[0..n-1]: sub-diagonal values (lower[0] is at position (1,0))
+// main[0..n]:    main diagonal values
+// upper[0..n-1]: super-diagonal values (upper[0] is at position (0,1))
+fn sparse_tridiagonal(
+    lower: [f64; 128],
+    main: [f64; 128],
+    upper: [f64; 128],
+    n: i32
+) -> SparseCSR with Mut, Panic {
+    var result = SparseCSR {
+        values: [0.0; 1024],
+        col_idx: [0; 1024],
+        row_ptr: [0; 129],
+        nrows: n,
+        ncols: n,
+        nnz: 0
+    }
+
+    var pos = 0
+
+    // Row 0: main[0], upper[0]
+    result.row_ptr[0] = 0
+    if n >= 1 {
+        result.values[pos] = main[0]
+        result.col_idx[pos] = 0
+        pos = pos + 1
+        if n > 1 {
+            result.values[pos] = upper[0]
+            result.col_idx[pos] = 1
+            pos = pos + 1
+        }
+    }
+
+    // Middle rows i (1..n-2): lower[i-1], main[i], upper[i]
+    var i = 1
+    while i < n - 1 {
+        result.row_ptr[i] = pos
+        result.values[pos] = lower[i - 1]
+        result.col_idx[pos] = i - 1
+        pos = pos + 1
+        result.values[pos] = main[i]
+        result.col_idx[pos] = i
+        pos = pos + 1
+        result.values[pos] = upper[i]
+        result.col_idx[pos] = i + 1
+        pos = pos + 1
+        i = i + 1
+    }
+
+    // Last row (n-1): lower[n-2], main[n-1]
+    if n > 1 {
+        result.row_ptr[n - 1] = pos
+        result.values[pos] = lower[n - 2]
+        result.col_idx[pos] = n - 2
+        pos = pos + 1
+        result.values[pos] = main[n - 1]
+        result.col_idx[pos] = n - 1
+        pos = pos + 1
+    }
+
+    result.row_ptr[n] = pos
+    result.nnz = pos
+
+    return result
+}
+
+// ============================================================================
+// ELEMENT ACCESS
+// ============================================================================
+
+// Get element (i, j) from a CSR matrix.
+// Uses linear search within the row (rows are typically short).
+fn sparse_get(a: SparseCSR, i: i32, j: i32) -> f64 with Panic {
+    let row_start = a.row_ptr[i]
+    let row_end = a.row_ptr[i + 1]
+    var k = row_start
+    while k < row_end {
+        if a.col_idx[k] == j {
+            return a.values[k]
+        }
+        k = k + 1
+    }
+    return 0.0
+}
+
+// Return the number of non-zero entries
+fn sparse_nnz(a: SparseCSR) -> i32 {
+    return a.nnz
+}
+
+// Return the number of non-zeros in a specific row
+fn sparse_row_nnz(a: SparseCSR, row: i32) -> i32 with Panic {
+    return a.row_ptr[row + 1] - a.row_ptr[row]
+}
+
+// ============================================================================
+// SPARSE-DENSE OPERATIONS
+// ============================================================================
+
+// Sparse matrix-vector multiply: y = A*x  (SpMV)
+// This is the critical kernel for iterative solvers.
+fn sparse_matvec(a: SparseCSR, x: [f64; 128], n: i32) -> [f64; 128] with Mut, Panic {
+    var y: [f64; 128] = [0.0; 128]
+    var i = 0
+    while i < a.nrows {
+        var sum = 0.0
+        var k = a.row_ptr[i]
+        let row_end = a.row_ptr[i + 1]
+        while k < row_end {
+            let col = a.col_idx[k]
+            sum = sum + a.values[k] * x[col]
+            k = k + 1
+        }
+        y[i] = sum
+        i = i + 1
+    }
+    return y
+}
+
+// Sparse matrix-vector multiply with scaling: y = alpha*A*x + beta*y
+fn sparse_matvec_add(
+    a: SparseCSR,
+    x: [f64; 128],
+    y: [f64; 128],
+    alpha: f64,
+    beta: f64,
+    n: i32
+) -> [f64; 128] with Mut, Panic {
+    var result: [f64; 128] = [0.0; 128]
+    var i = 0
+    while i < a.nrows {
+        var sum = 0.0
+        var k = a.row_ptr[i]
+        let row_end = a.row_ptr[i + 1]
+        while k < row_end {
+            let col = a.col_idx[k]
+            sum = sum + a.values[k] * x[col]
+            k = k + 1
+        }
+        result[i] = alpha * sum + beta * y[i]
+        i = i + 1
+    }
+    return result
+}
+
+// ============================================================================
+// SPARSE-SPARSE OPERATIONS
+// ============================================================================
+
+// Sparse addition: C = A + B (merge sorted rows)
+// Both A and B must have the same dimensions.
+fn sparse_add(a: SparseCSR, b: SparseCSR) -> SparseCSR with Mut, Panic {
+    var result = SparseCSR {
+        values: [0.0; 1024],
+        col_idx: [0; 1024],
+        row_ptr: [0; 129],
+        nrows: a.nrows,
+        ncols: a.ncols,
+        nnz: 0
+    }
+
+    var pos = 0
+    var i = 0
+    while i < a.nrows {
+        result.row_ptr[i] = pos
+
+        // Merge sorted entries from row i of A and B
+        var ka = a.row_ptr[i]
+        let ka_end = a.row_ptr[i + 1]
+        var kb = b.row_ptr[i]
+        let kb_end = b.row_ptr[i + 1]
+
+        while ka < ka_end && kb < kb_end {
+            if a.col_idx[ka] < b.col_idx[kb] {
+                result.values[pos] = a.values[ka]
+                result.col_idx[pos] = a.col_idx[ka]
+                pos = pos + 1
+                ka = ka + 1
+            } else if a.col_idx[ka] > b.col_idx[kb] {
+                result.values[pos] = b.values[kb]
+                result.col_idx[pos] = b.col_idx[kb]
+                pos = pos + 1
+                kb = kb + 1
+            } else {
+                // Same column: sum values
+                let sum = a.values[ka] + b.values[kb]
+                if abs_f64(sum) > 1e-30 {
+                    result.values[pos] = sum
+                    result.col_idx[pos] = a.col_idx[ka]
+                    pos = pos + 1
+                }
+                ka = ka + 1
+                kb = kb + 1
+            }
+        }
+        // Remaining entries from A
+        while ka < ka_end {
+            result.values[pos] = a.values[ka]
+            result.col_idx[pos] = a.col_idx[ka]
+            pos = pos + 1
+            ka = ka + 1
+        }
+        // Remaining entries from B
+        while kb < kb_end {
+            result.values[pos] = b.values[kb]
+            result.col_idx[pos] = b.col_idx[kb]
+            pos = pos + 1
+            kb = kb + 1
+        }
+
+        i = i + 1
+    }
+    result.row_ptr[a.nrows] = pos
+    result.nnz = pos
+    return result
+}
+
+// Scale all values in a sparse matrix: B = alpha * A
+fn sparse_scale(a: SparseCSR, alpha: f64) -> SparseCSR with Mut, Panic {
+    var result = a
+    var i = 0
+    while i < a.nnz {
+        result.values[i] = alpha * a.values[i]
+        i = i + 1
+    }
+    return result
+}
+
+// Compute the transpose of a CSR matrix: B = A^T
+// Uses a two-pass algorithm: first count, then fill.
+fn sparse_transpose(a: SparseCSR) -> SparseCSR with Mut, Panic {
+    var result = SparseCSR {
+        values: [0.0; 1024],
+        col_idx: [0; 1024],
+        row_ptr: [0; 129],
+        nrows: a.ncols,
+        ncols: a.nrows,
+        nnz: a.nnz
+    }
+
+    // Pass 1: count entries per column of A (= per row of A^T)
+    var col_count: [i32; 129] = [0; 129]
+    var k = 0
+    while k < a.nnz {
+        col_count[a.col_idx[k]] = col_count[a.col_idx[k]] + 1
+        k = k + 1
+    }
+
+    // Build row_ptr for transposed matrix
+    result.row_ptr[0] = 0
+    var i = 0
+    while i < a.ncols {
+        result.row_ptr[i + 1] = result.row_ptr[i] + col_count[i]
+        i = i + 1
+    }
+
+    // Pass 2: fill values and col_idx
+    // Use a position tracker for each row of the result
+    var pos: [i32; 129] = [0; 129]
+    i = 0
+    while i < a.ncols {
+        pos[i] = result.row_ptr[i]
+        i = i + 1
+    }
+
+    i = 0
+    while i < a.nrows {
+        k = a.row_ptr[i]
+        let row_end = a.row_ptr[i + 1]
+        while k < row_end {
+            let col = a.col_idx[k]
+            let dest = pos[col]
+            result.values[dest] = a.values[k]
+            result.col_idx[dest] = i
+            pos[col] = pos[col] + 1
+            k = k + 1
+        }
+        i = i + 1
+    }
+
+    return result
+}
+
+// ============================================================================
+// SPARSE TRIANGULAR SOLVE
+// ============================================================================
+
+// Forward substitution: solve Lx = b where L is lower triangular.
+// Assumes the diagonal is the last entry in each row of L.
+fn sparse_lower_solve(l: SparseCSR, b: [f64; 128], n: i32) -> [f64; 128] with Mut, Panic, Div {
+    var x: [f64; 128] = [0.0; 128]
+    var i = 0
+    while i < n {
+        x[i] = b[i]
+        var k = l.row_ptr[i]
+        let row_end = l.row_ptr[i + 1]
+        var diag_val = 1.0
+
+        // Process all entries in row i
+        while k < row_end {
+            let col = l.col_idx[k]
+            if col < i {
+                // Off-diagonal: subtract L[i,col] * x[col]
+                x[i] = x[i] - l.values[k] * x[col]
+            } else if col == i {
+                // Diagonal entry
+                diag_val = l.values[k]
+            }
+            k = k + 1
+        }
+        // Divide by diagonal
+        x[i] = x[i] / diag_val
+        i = i + 1
+    }
+    return x
+}
+
+// Back substitution: solve Ux = b where U is upper triangular.
+// Assumes the diagonal is the first entry in each row of U.
+fn sparse_upper_solve(u: SparseCSR, b: [f64; 128], n: i32) -> [f64; 128] with Mut, Panic, Div {
+    var x: [f64; 128] = [0.0; 128]
+    // Copy b into x
+    var i = 0
+    while i < n {
+        x[i] = b[i]
+        i = i + 1
+    }
+
+    // Backward sweep
+    i = n - 1
+    while i >= 0 {
+        var k = u.row_ptr[i]
+        let row_end = u.row_ptr[i + 1]
+        var diag_val = 1.0
+
+        while k < row_end {
+            let col = u.col_idx[k]
+            if col > i {
+                // Off-diagonal: subtract U[i,col] * x[col]
+                x[i] = x[i] - u.values[k] * x[col]
+            } else if col == i {
+                diag_val = u.values[k]
+            }
+            k = k + 1
+        }
+        x[i] = x[i] / diag_val
+        i = i - 1
+    }
+    return x
+}
+
+// ============================================================================
+// SPARSE MATRIX PROPERTIES
+// ============================================================================
+
+// Frobenius norm: sqrt(sum of values[i]^2)
+fn sparse_frobenius_norm(a: SparseCSR) -> f64 with Mut, Panic, Div {
+    var sum = 0.0
+    var i = 0
+    while i < a.nnz {
+        sum = sum + a.values[i] * a.values[i]
+        i = i + 1
+    }
+    return sqrt_f64(sum)
+}
+
+// Maximum absolute value of any entry
+fn sparse_max_abs(a: SparseCSR) -> f64 with Mut, Panic {
+    var mx = 0.0
+    var i = 0
+    while i < a.nnz {
+        let av = abs_f64(a.values[i])
+        if av > mx {
+            mx = av
+        }
+        i = i + 1
+    }
+    return mx
+}
+
+// Check if a sparse matrix is symmetric within tolerance.
+// Tests whether A[i,j] == A[j,i] for all stored entries.
+fn sparse_is_symmetric(a: SparseCSR, tol: f64) -> bool with Mut, Panic {
+    if a.nrows != a.ncols {
+        return false
+    }
+    var i = 0
+    while i < a.nrows {
+        var k = a.row_ptr[i]
+        let row_end = a.row_ptr[i + 1]
+        while k < row_end {
+            let j = a.col_idx[k]
+            let aij = a.values[k]
+            // Look up A[j,i]
+            let aji = sparse_get(a, j, i)
+            if abs_f64(aij - aji) > tol {
+                return false
+            }
+            k = k + 1
+        }
+        i = i + 1
+    }
+    return true
+}
+
+// ============================================================================
+// CONJUGATE GRADIENT SOLVER
+// ============================================================================
+
+// Conjugate Gradient method for symmetric positive definite systems Ax = b.
+//
+// Parameters:
+//   a:        SPD sparse matrix
+//   b:        right-hand side vector
+//   x0:       initial guess
+//   n:        dimension
+//   tol:      convergence tolerance (on ||r||)
+//   max_iter: maximum number of iterations
+//
+// Returns a CGResult with the solution, iteration count, residual, and convergence flag.
+fn cg_solve(
+    a: SparseCSR,
+    b: [f64; 128],
+    x0: [f64; 128],
+    n: i32,
+    tol: f64,
+    max_iter: i32
+) -> CGResult with Mut, Panic, Div {
+    // x = x0
+    var x: [f64; 128] = [0.0; 128]
+    var i = 0
+    while i < n {
+        x[i] = x0[i]
+        i = i + 1
+    }
+
+    // r = b - A*x
+    let ax = sparse_matvec(a, x, n)
+    var r = vec_sub(b, ax, n)
+
+    // p = r
+    var p = vec_copy(r, n)
+
+    // rsold = r . r
+    var rsold = vec_dot(r, r, n)
+
+    // Check initial residual
+    if sqrt_f64(rsold) < tol {
+        return CGResult {
+            x: x,
+            iterations: 0,
+            residual: sqrt_f64(rsold),
+            converged: true
+        }
+    }
+
+    var iter = 0
+    var converged = false
+    var done = false
+    while iter < max_iter && !done {
+        // Ap = A * p
+        let ap = sparse_matvec(a, p, n)
+
+        // alpha = rsold / (p . Ap)
+        let pap = vec_dot(p, ap, n)
+        if abs_f64(pap) < 1e-30 {
+            // Breakdown: p is orthogonal to Ap
+            converged = false
+            done = true
+        } else {
+            let alpha = rsold / pap
+
+            // x = x + alpha * p
+            i = 0
+            while i < n {
+                x[i] = x[i] + alpha * p[i]
+                i = i + 1
+            }
+
+            // r = r - alpha * Ap
+            i = 0
+            while i < n {
+                r[i] = r[i] - alpha * ap[i]
+                i = i + 1
+            }
+
+            // rsnew = r . r
+            let rsnew = vec_dot(r, r, n)
+
+            // Check convergence
+            if sqrt_f64(rsnew) < tol {
+                converged = true
+                done = true
+            } else {
+                // p = r + (rsnew/rsold) * p
+                let beta = rsnew / rsold
+                i = 0
+                while i < n {
+                    p[i] = r[i] + beta * p[i]
+                    i = i + 1
+                }
+
+                rsold = rsnew
+            }
+        }
+        iter = iter + 1
+    }
+
+    let final_res = sqrt_f64(vec_dot(r, r, n))
+
+    return CGResult {
+        x: x,
+        iterations: iter,
+        residual: final_res,
+        converged: converged
+    }
+}
