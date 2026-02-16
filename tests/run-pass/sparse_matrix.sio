@@ -1,0 +1,1400 @@
+//@ run-pass
+// sparse_matrix.sio - Integration tests for sparse matrix library (CSR format)
+//
+// Tests CSR construction, SpMV, sparse-sparse operations, triangular solves,
+// matrix properties, and the Conjugate Gradient iterative solver.
+//
+// All structs and functions are inlined since tests cannot import.
+
+// ============================================================================
+// HELPERS (must precede callers)
+// ============================================================================
+
+fn abs_f64(x: f64) -> f64 {
+    if x < 0.0 {
+        return 0.0 - x
+    }
+    return x
+}
+
+fn sqrt_f64(x: f64) -> f64 with Mut, Panic, Div {
+    if x <= 0.0 { return 0.0 }
+    var scaled = x
+    var scale_back = 1.0
+    while scaled < 1.0 {
+        scaled = scaled * 4.0
+        scale_back = scale_back * 2.0
+    }
+    while scaled > 4.0 {
+        scaled = scaled * 0.25
+        scale_back = scale_back * 0.5
+    }
+    var y = 1.5
+    y = 0.5 * (y + scaled / y)
+    y = 0.5 * (y + scaled / y)
+    y = 0.5 * (y + scaled / y)
+    y = 0.5 * (y + scaled / y)
+    y = 0.5 * (y + scaled / y)
+    y = 0.5 * (y + scaled / y)
+    y = 0.5 * (y + scaled / y)
+    y = 0.5 * (y + scaled / y)
+    y = 0.5 * (y + scaled / y)
+    y = 0.5 * (y + scaled / y)
+    y = 0.5 * (y + scaled / y)
+    y = 0.5 * (y + scaled / y)
+    y = 0.5 * (y + scaled / y)
+    y = 0.5 * (y + scaled / y)
+    y = 0.5 * (y + scaled / y)
+    return y / scale_back
+}
+
+// ============================================================================
+// DENSE VECTOR HELPERS
+// ============================================================================
+
+fn vec_dot(a: [f64; 128], b: [f64; 128], n: i32) -> f64 with Mut, Panic {
+    var sum = 0.0
+    var i = 0
+    while i < n {
+        sum = sum + a[i] * b[i]
+        i = i + 1
+    }
+    return sum
+}
+
+fn vec_copy(src: [f64; 128], n: i32) -> [f64; 128] with Mut, Panic {
+    var dst: [f64; 128] = [0.0; 128]
+    var i = 0
+    while i < n {
+        dst[i] = src[i]
+        i = i + 1
+    }
+    return dst
+}
+
+fn vec_sub(a: [f64; 128], b: [f64; 128], n: i32) -> [f64; 128] with Mut, Panic {
+    var result: [f64; 128] = [0.0; 128]
+    var i = 0
+    while i < n {
+        result[i] = a[i] - b[i]
+        i = i + 1
+    }
+    return result
+}
+
+fn vec_norm(x: [f64; 128], n: i32) -> f64 with Mut, Panic, Div {
+    var sum = 0.0
+    var i = 0
+    while i < n {
+        sum = sum + x[i] * x[i]
+        i = i + 1
+    }
+    return sqrt_f64(sum)
+}
+
+// ============================================================================
+// DATA STRUCTURES
+// ============================================================================
+
+struct SparseCSR {
+    values: [f64; 1024],
+    col_idx: [i32; 1024],
+    row_ptr: [i32; 129],
+    nrows: i32,
+    ncols: i32,
+    nnz: i32
+}
+
+struct CGResult {
+    x: [f64; 128],
+    iterations: i32,
+    residual: f64,
+    converged: bool
+}
+
+// ============================================================================
+// CONSTRUCTION
+// ============================================================================
+
+fn sparse_new(nrows: i32, ncols: i32) -> SparseCSR with Mut, Panic {
+    var result = SparseCSR {
+        values: [0.0; 1024],
+        col_idx: [0; 1024],
+        row_ptr: [0; 129],
+        nrows: nrows,
+        ncols: ncols,
+        nnz: 0
+    }
+    var i = 0
+    while i <= nrows {
+        result.row_ptr[i] = 0
+        i = i + 1
+    }
+    return result
+}
+
+fn sparse_from_triplets(
+    rows: [i32; 1024],
+    cols: [i32; 1024],
+    vals: [f64; 1024],
+    count: i32,
+    nrows: i32,
+    ncols: i32
+) -> SparseCSR with Mut, Panic, Div {
+    var s_rows: [i32; 1024] = rows
+    var s_cols: [i32; 1024] = cols
+    var s_vals: [f64; 1024] = vals
+
+    // Insertion sort by (row, col)
+    var i = 1
+    while i < count {
+        let r = s_rows[i]
+        let c = s_cols[i]
+        let v = s_vals[i]
+        var j = i - 1
+        var done = false
+        while j >= 0 && !done {
+            let should_shift = s_rows[j] > r || (s_rows[j] == r && s_cols[j] > c)
+            if should_shift {
+                s_rows[j + 1] = s_rows[j]
+                s_cols[j + 1] = s_cols[j]
+                s_vals[j + 1] = s_vals[j]
+                j = j - 1
+            } else {
+                done = true
+            }
+        }
+        s_rows[j + 1] = r
+        s_cols[j + 1] = c
+        s_vals[j + 1] = v
+        i = i + 1
+    }
+
+    // Merge duplicates
+    var m_rows: [i32; 1024] = [0; 1024]
+    var m_cols: [i32; 1024] = [0; 1024]
+    var m_vals: [f64; 1024] = [0.0; 1024]
+    var m_count = 0
+
+    if count > 0 {
+        m_rows[0] = s_rows[0]
+        m_cols[0] = s_cols[0]
+        m_vals[0] = s_vals[0]
+        m_count = 1
+
+        i = 1
+        while i < count {
+            if s_rows[i] == m_rows[m_count - 1] && s_cols[i] == m_cols[m_count - 1] {
+                m_vals[m_count - 1] = m_vals[m_count - 1] + s_vals[i]
+            } else {
+                m_rows[m_count] = s_rows[i]
+                m_cols[m_count] = s_cols[i]
+                m_vals[m_count] = s_vals[i]
+                m_count = m_count + 1
+            }
+            i = i + 1
+        }
+    }
+
+    var result = SparseCSR {
+        values: [0.0; 1024],
+        col_idx: [0; 1024],
+        row_ptr: [0; 129],
+        nrows: nrows,
+        ncols: ncols,
+        nnz: m_count
+    }
+
+    var row_count: [i32; 129] = [0; 129]
+    i = 0
+    while i < m_count {
+        row_count[m_rows[i]] = row_count[m_rows[i]] + 1
+        i = i + 1
+    }
+
+    result.row_ptr[0] = 0
+    i = 0
+    while i < nrows {
+        result.row_ptr[i + 1] = result.row_ptr[i] + row_count[i]
+        i = i + 1
+    }
+
+    i = 0
+    while i < m_count {
+        result.values[i] = m_vals[i]
+        result.col_idx[i] = m_cols[i]
+        i = i + 1
+    }
+
+    return result
+}
+
+fn sparse_identity(n: i32) -> SparseCSR with Mut, Panic {
+    var result = SparseCSR {
+        values: [0.0; 1024],
+        col_idx: [0; 1024],
+        row_ptr: [0; 129],
+        nrows: n,
+        ncols: n,
+        nnz: n
+    }
+    var i = 0
+    while i < n {
+        result.values[i] = 1.0
+        result.col_idx[i] = i
+        result.row_ptr[i] = i
+        i = i + 1
+    }
+    result.row_ptr[n] = n
+    return result
+}
+
+fn sparse_diagonal(diag: [f64; 128], n: i32) -> SparseCSR with Mut, Panic {
+    var result = SparseCSR {
+        values: [0.0; 1024],
+        col_idx: [0; 1024],
+        row_ptr: [0; 129],
+        nrows: n,
+        ncols: n,
+        nnz: n
+    }
+    var i = 0
+    while i < n {
+        result.values[i] = diag[i]
+        result.col_idx[i] = i
+        result.row_ptr[i] = i
+        i = i + 1
+    }
+    result.row_ptr[n] = n
+    return result
+}
+
+fn sparse_tridiagonal(
+    lower: [f64; 128],
+    main: [f64; 128],
+    upper: [f64; 128],
+    n: i32
+) -> SparseCSR with Mut, Panic {
+    var result = SparseCSR {
+        values: [0.0; 1024],
+        col_idx: [0; 1024],
+        row_ptr: [0; 129],
+        nrows: n,
+        ncols: n,
+        nnz: 0
+    }
+
+    var pos = 0
+
+    // Row 0
+    result.row_ptr[0] = 0
+    if n >= 1 {
+        result.values[pos] = main[0]
+        result.col_idx[pos] = 0
+        pos = pos + 1
+        if n > 1 {
+            result.values[pos] = upper[0]
+            result.col_idx[pos] = 1
+            pos = pos + 1
+        }
+    }
+
+    // Middle rows
+    var i = 1
+    while i < n - 1 {
+        result.row_ptr[i] = pos
+        result.values[pos] = lower[i - 1]
+        result.col_idx[pos] = i - 1
+        pos = pos + 1
+        result.values[pos] = main[i]
+        result.col_idx[pos] = i
+        pos = pos + 1
+        result.values[pos] = upper[i]
+        result.col_idx[pos] = i + 1
+        pos = pos + 1
+        i = i + 1
+    }
+
+    // Last row
+    if n > 1 {
+        result.row_ptr[n - 1] = pos
+        result.values[pos] = lower[n - 2]
+        result.col_idx[pos] = n - 2
+        pos = pos + 1
+        result.values[pos] = main[n - 1]
+        result.col_idx[pos] = n - 1
+        pos = pos + 1
+    }
+
+    result.row_ptr[n] = pos
+    result.nnz = pos
+
+    return result
+}
+
+// ============================================================================
+// ELEMENT ACCESS
+// ============================================================================
+
+fn sparse_get(a: SparseCSR, i: i32, j: i32) -> f64 with Panic {
+    let row_start = a.row_ptr[i]
+    let row_end = a.row_ptr[i + 1]
+    var k = row_start
+    while k < row_end {
+        if a.col_idx[k] == j {
+            return a.values[k]
+        }
+        k = k + 1
+    }
+    return 0.0
+}
+
+fn sparse_nnz(a: SparseCSR) -> i32 {
+    return a.nnz
+}
+
+fn sparse_row_nnz(a: SparseCSR, row: i32) -> i32 with Panic {
+    return a.row_ptr[row + 1] - a.row_ptr[row]
+}
+
+// ============================================================================
+// SPARSE-DENSE OPERATIONS
+// ============================================================================
+
+fn sparse_matvec(a: SparseCSR, x: [f64; 128], n: i32) -> [f64; 128] with Mut, Panic {
+    var y: [f64; 128] = [0.0; 128]
+    var i = 0
+    while i < a.nrows {
+        var sum = 0.0
+        var k = a.row_ptr[i]
+        let row_end = a.row_ptr[i + 1]
+        while k < row_end {
+            let col = a.col_idx[k]
+            sum = sum + a.values[k] * x[col]
+            k = k + 1
+        }
+        y[i] = sum
+        i = i + 1
+    }
+    return y
+}
+
+fn sparse_matvec_add(
+    a: SparseCSR,
+    x: [f64; 128],
+    y: [f64; 128],
+    alpha: f64,
+    beta: f64,
+    n: i32
+) -> [f64; 128] with Mut, Panic {
+    var result: [f64; 128] = [0.0; 128]
+    var i = 0
+    while i < a.nrows {
+        var sum = 0.0
+        var k = a.row_ptr[i]
+        let row_end = a.row_ptr[i + 1]
+        while k < row_end {
+            let col = a.col_idx[k]
+            sum = sum + a.values[k] * x[col]
+            k = k + 1
+        }
+        result[i] = alpha * sum + beta * y[i]
+        i = i + 1
+    }
+    return result
+}
+
+// ============================================================================
+// SPARSE-SPARSE OPERATIONS
+// ============================================================================
+
+fn sparse_add(a: SparseCSR, b: SparseCSR) -> SparseCSR with Mut, Panic {
+    var result = SparseCSR {
+        values: [0.0; 1024],
+        col_idx: [0; 1024],
+        row_ptr: [0; 129],
+        nrows: a.nrows,
+        ncols: a.ncols,
+        nnz: 0
+    }
+
+    var pos = 0
+    var i = 0
+    while i < a.nrows {
+        result.row_ptr[i] = pos
+
+        var ka = a.row_ptr[i]
+        let ka_end = a.row_ptr[i + 1]
+        var kb = b.row_ptr[i]
+        let kb_end = b.row_ptr[i + 1]
+
+        while ka < ka_end && kb < kb_end {
+            if a.col_idx[ka] < b.col_idx[kb] {
+                result.values[pos] = a.values[ka]
+                result.col_idx[pos] = a.col_idx[ka]
+                pos = pos + 1
+                ka = ka + 1
+            } else if a.col_idx[ka] > b.col_idx[kb] {
+                result.values[pos] = b.values[kb]
+                result.col_idx[pos] = b.col_idx[kb]
+                pos = pos + 1
+                kb = kb + 1
+            } else {
+                let sum = a.values[ka] + b.values[kb]
+                if abs_f64(sum) > 1e-30 {
+                    result.values[pos] = sum
+                    result.col_idx[pos] = a.col_idx[ka]
+                    pos = pos + 1
+                }
+                ka = ka + 1
+                kb = kb + 1
+            }
+        }
+        while ka < ka_end {
+            result.values[pos] = a.values[ka]
+            result.col_idx[pos] = a.col_idx[ka]
+            pos = pos + 1
+            ka = ka + 1
+        }
+        while kb < kb_end {
+            result.values[pos] = b.values[kb]
+            result.col_idx[pos] = b.col_idx[kb]
+            pos = pos + 1
+            kb = kb + 1
+        }
+
+        i = i + 1
+    }
+    result.row_ptr[a.nrows] = pos
+    result.nnz = pos
+    return result
+}
+
+fn sparse_scale(a: SparseCSR, alpha: f64) -> SparseCSR with Mut, Panic {
+    var result = a
+    var i = 0
+    while i < a.nnz {
+        result.values[i] = alpha * a.values[i]
+        i = i + 1
+    }
+    return result
+}
+
+fn sparse_transpose(a: SparseCSR) -> SparseCSR with Mut, Panic {
+    var result = SparseCSR {
+        values: [0.0; 1024],
+        col_idx: [0; 1024],
+        row_ptr: [0; 129],
+        nrows: a.ncols,
+        ncols: a.nrows,
+        nnz: a.nnz
+    }
+
+    var col_count: [i32; 129] = [0; 129]
+    var k = 0
+    while k < a.nnz {
+        col_count[a.col_idx[k]] = col_count[a.col_idx[k]] + 1
+        k = k + 1
+    }
+
+    result.row_ptr[0] = 0
+    var i = 0
+    while i < a.ncols {
+        result.row_ptr[i + 1] = result.row_ptr[i] + col_count[i]
+        i = i + 1
+    }
+
+    var pos: [i32; 129] = [0; 129]
+    i = 0
+    while i < a.ncols {
+        pos[i] = result.row_ptr[i]
+        i = i + 1
+    }
+
+    i = 0
+    while i < a.nrows {
+        k = a.row_ptr[i]
+        let row_end = a.row_ptr[i + 1]
+        while k < row_end {
+            let col = a.col_idx[k]
+            let dest = pos[col]
+            result.values[dest] = a.values[k]
+            result.col_idx[dest] = i
+            pos[col] = pos[col] + 1
+            k = k + 1
+        }
+        i = i + 1
+    }
+
+    return result
+}
+
+// ============================================================================
+// TRIANGULAR SOLVES
+// ============================================================================
+
+fn sparse_lower_solve(l: SparseCSR, b: [f64; 128], n: i32) -> [f64; 128] with Mut, Panic, Div {
+    var x: [f64; 128] = [0.0; 128]
+    var i = 0
+    while i < n {
+        x[i] = b[i]
+        var k = l.row_ptr[i]
+        let row_end = l.row_ptr[i + 1]
+        var diag_val = 1.0
+
+        while k < row_end {
+            let col = l.col_idx[k]
+            if col < i {
+                x[i] = x[i] - l.values[k] * x[col]
+            } else if col == i {
+                diag_val = l.values[k]
+            }
+            k = k + 1
+        }
+        x[i] = x[i] / diag_val
+        i = i + 1
+    }
+    return x
+}
+
+fn sparse_upper_solve(u: SparseCSR, b: [f64; 128], n: i32) -> [f64; 128] with Mut, Panic, Div {
+    var x: [f64; 128] = [0.0; 128]
+    var i = 0
+    while i < n {
+        x[i] = b[i]
+        i = i + 1
+    }
+
+    i = n - 1
+    while i >= 0 {
+        var k = u.row_ptr[i]
+        let row_end = u.row_ptr[i + 1]
+        var diag_val = 1.0
+
+        while k < row_end {
+            let col = u.col_idx[k]
+            if col > i {
+                x[i] = x[i] - u.values[k] * x[col]
+            } else if col == i {
+                diag_val = u.values[k]
+            }
+            k = k + 1
+        }
+        x[i] = x[i] / diag_val
+        i = i - 1
+    }
+    return x
+}
+
+// ============================================================================
+// MATRIX PROPERTIES
+// ============================================================================
+
+fn sparse_frobenius_norm(a: SparseCSR) -> f64 with Mut, Panic, Div {
+    var sum = 0.0
+    var i = 0
+    while i < a.nnz {
+        sum = sum + a.values[i] * a.values[i]
+        i = i + 1
+    }
+    return sqrt_f64(sum)
+}
+
+fn sparse_is_symmetric(a: SparseCSR, tol: f64) -> bool with Mut, Panic {
+    if a.nrows != a.ncols {
+        return false
+    }
+    var i = 0
+    while i < a.nrows {
+        var k = a.row_ptr[i]
+        let row_end = a.row_ptr[i + 1]
+        while k < row_end {
+            let j = a.col_idx[k]
+            let aij = a.values[k]
+            let aji = sparse_get(a, j, i)
+            if abs_f64(aij - aji) > tol {
+                return false
+            }
+            k = k + 1
+        }
+        i = i + 1
+    }
+    return true
+}
+
+// ============================================================================
+// CONJUGATE GRADIENT SOLVER
+// ============================================================================
+
+fn cg_solve(
+    a: SparseCSR,
+    b: [f64; 128],
+    x0: [f64; 128],
+    n: i32,
+    tol: f64,
+    max_iter: i32
+) -> CGResult with Mut, Panic, Div {
+    var x: [f64; 128] = [0.0; 128]
+    var i = 0
+    while i < n {
+        x[i] = x0[i]
+        i = i + 1
+    }
+
+    let ax = sparse_matvec(a, x, n)
+    var r = vec_sub(b, ax, n)
+    var p = vec_copy(r, n)
+    var rsold = vec_dot(r, r, n)
+
+    if sqrt_f64(rsold) < tol {
+        return CGResult {
+            x: x,
+            iterations: 0,
+            residual: sqrt_f64(rsold),
+            converged: true
+        }
+    }
+
+    var iter = 0
+    var converged = false
+    var done = false
+    while iter < max_iter && !done {
+        let ap = sparse_matvec(a, p, n)
+        let pap = vec_dot(p, ap, n)
+        if abs_f64(pap) < 1e-30 {
+            // Breakdown
+            done = true
+        } else {
+            let alpha = rsold / pap
+
+            i = 0
+            while i < n {
+                x[i] = x[i] + alpha * p[i]
+                i = i + 1
+            }
+
+            i = 0
+            while i < n {
+                r[i] = r[i] - alpha * ap[i]
+                i = i + 1
+            }
+
+            let rsnew = vec_dot(r, r, n)
+
+            if sqrt_f64(rsnew) < tol {
+                converged = true
+                done = true
+            } else {
+                let beta = rsnew / rsold
+                i = 0
+                while i < n {
+                    p[i] = r[i] + beta * p[i]
+                    i = i + 1
+                }
+
+                rsold = rsnew
+            }
+        }
+        iter = iter + 1
+    }
+
+    let final_res = sqrt_f64(vec_dot(r, r, n))
+
+    return CGResult {
+        x: x,
+        iterations: iter,
+        residual: final_res,
+        converged: converged
+    }
+}
+
+// ============================================================================
+// TEST FUNCTIONS
+// ============================================================================
+
+// Test 1: Identity matrix * x = x
+fn test_identity_matvec() -> bool with IO, Mut, Panic, Div {
+    let eye = sparse_identity(5)
+
+    var x: [f64; 128] = [0.0; 128]
+    x[0] = 1.0
+    x[1] = 2.0
+    x[2] = 3.0
+    x[3] = 4.0
+    x[4] = 5.0
+
+    let y = sparse_matvec(eye, x, 5)
+
+    var err = 0.0
+    var i = 0
+    while i < 5 {
+        err = err + abs_f64(y[i] - x[i])
+        i = i + 1
+    }
+    print("  err=")
+    println(err)
+    return err < 1e-12
+}
+
+// Test 2: Diagonal matrix * x = d.*x (element-wise)
+fn test_diagonal_matvec() -> bool with IO, Mut, Panic, Div {
+    var d: [f64; 128] = [0.0; 128]
+    d[0] = 2.0
+    d[1] = 3.0
+    d[2] = 5.0
+    d[3] = 7.0
+
+    let diag = sparse_diagonal(d, 4)
+
+    var x: [f64; 128] = [0.0; 128]
+    x[0] = 1.0
+    x[1] = 1.0
+    x[2] = 1.0
+    x[3] = 1.0
+
+    let y = sparse_matvec(diag, x, 4)
+
+    let e0 = abs_f64(y[0] - 2.0)
+    let e1 = abs_f64(y[1] - 3.0)
+    let e2 = abs_f64(y[2] - 5.0)
+    let e3 = abs_f64(y[3] - 7.0)
+
+    print("  y=[")
+    print(y[0])
+    print(", ")
+    print(y[1])
+    print(", ")
+    print(y[2])
+    print(", ")
+    print(y[3])
+    println("]")
+
+    return e0 < 1e-12 && e1 < 1e-12 && e2 < 1e-12 && e3 < 1e-12
+}
+
+// Test 3: Build 5x5 tridiagonal and verify get()
+fn test_tridiagonal_build() -> bool with IO, Mut, Panic, Div {
+    // Tridiagonal: [-1, 2, -1] pattern (1D Laplacian)
+    var lower: [f64; 128] = [0.0; 128]
+    var main: [f64; 128] = [0.0; 128]
+    var upper: [f64; 128] = [0.0; 128]
+
+    var i = 0
+    while i < 5 {
+        main[i] = 2.0
+        i = i + 1
+    }
+    i = 0
+    while i < 4 {
+        lower[i] = 0.0 - 1.0
+        upper[i] = 0.0 - 1.0
+        i = i + 1
+    }
+
+    let t = sparse_tridiagonal(lower, main, upper, 5)
+
+    // Verify structure
+    let ok_diag = abs_f64(sparse_get(t, 2, 2) - 2.0) < 1e-12
+    let ok_sub = abs_f64(sparse_get(t, 2, 1) - (0.0 - 1.0)) < 1e-12
+    let ok_sup = abs_f64(sparse_get(t, 2, 3) - (0.0 - 1.0)) < 1e-12
+    let ok_zero = abs_f64(sparse_get(t, 0, 3)) < 1e-12
+    let ok_corner = abs_f64(sparse_get(t, 4, 3) - (0.0 - 1.0)) < 1e-12
+
+    // Verify nnz = 5*3 - 2 = 13 (corners lose one each)
+    let ok_nnz = sparse_nnz(t) == 13
+
+    print("  nnz=")
+    println(sparse_nnz(t))
+    print("  A[2,2]=")
+    println(sparse_get(t, 2, 2))
+    print("  A[2,1]=")
+    println(sparse_get(t, 2, 1))
+
+    return ok_diag && ok_sub && ok_sup && ok_zero && ok_corner && ok_nnz
+}
+
+// Test 4: Sparse add: A + B computed correctly
+fn test_sparse_add() -> bool with IO, Mut, Panic, Div {
+    // A = diag(1, 2, 3)
+    var da: [f64; 128] = [0.0; 128]
+    da[0] = 1.0
+    da[1] = 2.0
+    da[2] = 3.0
+    let a = sparse_diagonal(da, 3)
+
+    // B = diag(10, 20, 30)
+    var db: [f64; 128] = [0.0; 128]
+    db[0] = 10.0
+    db[1] = 20.0
+    db[2] = 30.0
+    let b = sparse_diagonal(db, 3)
+
+    let c = sparse_add(a, b)
+
+    let e0 = abs_f64(sparse_get(c, 0, 0) - 11.0)
+    let e1 = abs_f64(sparse_get(c, 1, 1) - 22.0)
+    let e2 = abs_f64(sparse_get(c, 2, 2) - 33.0)
+    let e_off = abs_f64(sparse_get(c, 0, 1))
+
+    print("  C[0,0]=")
+    println(sparse_get(c, 0, 0))
+    print("  C[1,1]=")
+    println(sparse_get(c, 1, 1))
+    print("  C[2,2]=")
+    println(sparse_get(c, 2, 2))
+
+    return e0 < 1e-12 && e1 < 1e-12 && e2 < 1e-12 && e_off < 1e-12
+}
+
+// Test 5: (A^T)^T = A identity for transpose
+fn test_sparse_transpose() -> bool with IO, Mut, Panic, Div {
+    // Build a non-symmetric 3x3 matrix via triplets
+    var rows: [i32; 1024] = [0; 1024]
+    var cols: [i32; 1024] = [0; 1024]
+    var vals: [f64; 1024] = [0.0; 1024]
+
+    // (0,0)=1, (0,1)=2, (1,0)=3, (1,1)=4, (2,0)=5, (2,2)=6
+    rows[0] = 0; cols[0] = 0; vals[0] = 1.0
+    rows[1] = 0; cols[1] = 1; vals[1] = 2.0
+    rows[2] = 1; cols[2] = 0; vals[2] = 3.0
+    rows[3] = 1; cols[3] = 1; vals[3] = 4.0
+    rows[4] = 2; cols[4] = 0; vals[4] = 5.0
+    rows[5] = 2; cols[5] = 2; vals[5] = 6.0
+
+    let a = sparse_from_triplets(rows, cols, vals, 6, 3, 3)
+
+    let at = sparse_transpose(a)
+    let att = sparse_transpose(at)
+
+    // Check (A^T)^T == A
+    var err = 0.0
+    var i = 0
+    while i < 3 {
+        var j = 0
+        while j < 3 {
+            let diff = abs_f64(sparse_get(att, i, j) - sparse_get(a, i, j))
+            if diff > err {
+                err = diff
+            }
+            j = j + 1
+        }
+        i = i + 1
+    }
+
+    // Also check A^T values directly
+    let at_10 = sparse_get(at, 1, 0)  // should be A[0,1] = 2
+    let at_01 = sparse_get(at, 0, 1)  // should be A[1,0] = 3
+
+    print("  max_err=")
+    println(err)
+    print("  AT[1,0]=")
+    println(at_10)
+    print("  AT[0,1]=")
+    println(at_01)
+
+    let ok_inv = err < 1e-12
+    let ok_vals = abs_f64(at_10 - 2.0) < 1e-12 && abs_f64(at_01 - 3.0) < 1e-12
+
+    return ok_inv && ok_vals
+}
+
+// Test 6: 2*A has values doubled
+fn test_sparse_scale() -> bool with IO, Mut, Panic, Div {
+    var d: [f64; 128] = [0.0; 128]
+    d[0] = 1.0
+    d[1] = 2.0
+    d[2] = 3.0
+    let a = sparse_diagonal(d, 3)
+
+    let b = sparse_scale(a, 2.0)
+
+    let e0 = abs_f64(sparse_get(b, 0, 0) - 2.0)
+    let e1 = abs_f64(sparse_get(b, 1, 1) - 4.0)
+    let e2 = abs_f64(sparse_get(b, 2, 2) - 6.0)
+
+    print("  B[0,0]=")
+    println(sparse_get(b, 0, 0))
+
+    return e0 < 1e-12 && e1 < 1e-12 && e2 < 1e-12
+}
+
+// Test 7: Lower triangular solve Lx = b
+fn test_lower_triangular_solve() -> bool with IO, Mut, Panic, Div {
+    // L = [[2, 0, 0],
+    //      [1, 3, 0],
+    //      [4, 5, 6]]
+    // Build via triplets
+    var rows: [i32; 1024] = [0; 1024]
+    var cols: [i32; 1024] = [0; 1024]
+    var vals: [f64; 1024] = [0.0; 1024]
+
+    rows[0] = 0; cols[0] = 0; vals[0] = 2.0
+    rows[1] = 1; cols[1] = 0; vals[1] = 1.0
+    rows[2] = 1; cols[2] = 1; vals[2] = 3.0
+    rows[3] = 2; cols[3] = 0; vals[3] = 4.0
+    rows[4] = 2; cols[4] = 1; vals[4] = 5.0
+    rows[5] = 2; cols[5] = 2; vals[5] = 6.0
+
+    let l = sparse_from_triplets(rows, cols, vals, 6, 3, 3)
+
+    // b = [2, 7, 45]
+    // Exact solution: x[0] = 1, x[1] = 2, x[2] = 3
+    // Forward sub: x[0] = 2/2 = 1
+    //              x[1] = (7 - 1*1)/3 = 6/3 = 2
+    //              x[2] = (45 - 4*1 - 5*2)/6 = (45-4-10)/6 = 31/6
+    // Let's compute exact b for x = [1, 2, 3]:
+    // b[0] = 2*1 = 2
+    // b[1] = 1*1 + 3*2 = 7
+    // b[2] = 4*1 + 5*2 + 6*3 = 4+10+18 = 32
+    var b: [f64; 128] = [0.0; 128]
+    b[0] = 2.0
+    b[1] = 7.0
+    b[2] = 32.0
+
+    let x = sparse_lower_solve(l, b, 3)
+
+    let e0 = abs_f64(x[0] - 1.0)
+    let e1 = abs_f64(x[1] - 2.0)
+    let e2 = abs_f64(x[2] - 3.0)
+
+    print("  x=[")
+    print(x[0])
+    print(", ")
+    print(x[1])
+    print(", ")
+    print(x[2])
+    println("]")
+
+    return e0 < 1e-10 && e1 < 1e-10 && e2 < 1e-10
+}
+
+// Test 8: Upper triangular solve Ux = b
+fn test_upper_triangular_solve() -> bool with IO, Mut, Panic, Div {
+    // U = [[2, 1, 4],
+    //      [0, 3, 5],
+    //      [0, 0, 6]]
+    var rows: [i32; 1024] = [0; 1024]
+    var cols: [i32; 1024] = [0; 1024]
+    var vals: [f64; 1024] = [0.0; 1024]
+
+    rows[0] = 0; cols[0] = 0; vals[0] = 2.0
+    rows[1] = 0; cols[1] = 1; vals[1] = 1.0
+    rows[2] = 0; cols[2] = 2; vals[2] = 4.0
+    rows[3] = 1; cols[3] = 1; vals[3] = 3.0
+    rows[4] = 1; cols[4] = 2; vals[4] = 5.0
+    rows[5] = 2; cols[5] = 2; vals[5] = 6.0
+
+    let u = sparse_from_triplets(rows, cols, vals, 6, 3, 3)
+
+    // For x = [1, 2, 3]:
+    // b[0] = 2*1 + 1*2 + 4*3 = 2+2+12 = 16
+    // b[1] = 3*2 + 5*3 = 6+15 = 21
+    // b[2] = 6*3 = 18
+    var b: [f64; 128] = [0.0; 128]
+    b[0] = 16.0
+    b[1] = 21.0
+    b[2] = 18.0
+
+    let x = sparse_upper_solve(u, b, 3)
+
+    let e0 = abs_f64(x[0] - 1.0)
+    let e1 = abs_f64(x[1] - 2.0)
+    let e2 = abs_f64(x[2] - 3.0)
+
+    print("  x=[")
+    print(x[0])
+    print(", ")
+    print(x[1])
+    print(", ")
+    print(x[2])
+    println("]")
+
+    return e0 < 1e-10 && e1 < 1e-10 && e2 < 1e-10
+}
+
+// Test 9: Build from COO triplets, verify CSR structure
+fn test_from_triplets() -> bool with IO, Mut, Panic, Div {
+    // Build a 3x3 matrix with duplicates:
+    // (0,0)=1, (0,0)=2 (duplicate -> sums to 3), (1,2)=5, (2,1)=7
+    var rows: [i32; 1024] = [0; 1024]
+    var cols: [i32; 1024] = [0; 1024]
+    var vals: [f64; 1024] = [0.0; 1024]
+
+    rows[0] = 0; cols[0] = 0; vals[0] = 1.0
+    rows[1] = 0; cols[1] = 0; vals[1] = 2.0  // duplicate
+    rows[2] = 1; cols[2] = 2; vals[2] = 5.0
+    rows[3] = 2; cols[3] = 1; vals[3] = 7.0
+
+    let a = sparse_from_triplets(rows, cols, vals, 4, 3, 3)
+
+    // After merging duplicates: (0,0)=3, (1,2)=5, (2,1)=7
+    let ok_dup = abs_f64(sparse_get(a, 0, 0) - 3.0) < 1e-12
+    let ok_12 = abs_f64(sparse_get(a, 1, 2) - 5.0) < 1e-12
+    let ok_21 = abs_f64(sparse_get(a, 2, 1) - 7.0) < 1e-12
+    let ok_zero = abs_f64(sparse_get(a, 1, 1)) < 1e-12
+    let ok_nnz = sparse_nnz(a) == 3
+
+    print("  A[0,0]=")
+    println(sparse_get(a, 0, 0))
+    print("  nnz=")
+    println(sparse_nnz(a))
+
+    return ok_dup && ok_12 && ok_21 && ok_zero && ok_nnz
+}
+
+// Test 10: Frobenius norm of known matrix
+fn test_frobenius_norm() -> bool with IO, Mut, Panic, Div {
+    // diag(3, 4) -> norm = sqrt(9 + 16) = sqrt(25) = 5
+    var d: [f64; 128] = [0.0; 128]
+    d[0] = 3.0
+    d[1] = 4.0
+    let a = sparse_diagonal(d, 2)
+
+    let norm = sparse_frobenius_norm(a)
+    let err = abs_f64(norm - 5.0)
+
+    print("  norm=")
+    println(norm)
+
+    return err < 1e-10
+}
+
+// Test 11: CG on identity converges in 1 iteration
+fn test_cg_identity() -> bool with IO, Mut, Panic, Div {
+    let n = 5
+    let eye = sparse_identity(n)
+
+    var b: [f64; 128] = [0.0; 128]
+    b[0] = 1.0
+    b[1] = 2.0
+    b[2] = 3.0
+    b[3] = 4.0
+    b[4] = 5.0
+
+    var x0: [f64; 128] = [0.0; 128]
+
+    let result = cg_solve(eye, b, x0, n, 1e-10, 100)
+
+    var err = 0.0
+    var i = 0
+    while i < n {
+        let diff = abs_f64(result.x[i] - b[i])
+        if diff > err {
+            err = diff
+        }
+        i = i + 1
+    }
+
+    print("  iters=")
+    println(result.iterations)
+    print("  err=")
+    println(err)
+
+    // Identity system: CG should converge in 1 iteration
+    return result.converged && result.iterations <= 2 && err < 1e-8
+}
+
+// Test 12: CG on SPD tridiagonal: -u'' = f (1D Poisson-like)
+fn test_cg_tridiagonal() -> bool with IO, Mut, Panic, Div {
+    let n = 10
+
+    // SPD tridiagonal: [2, -1; -1, 2, -1; ...; -1, 2]
+    var lower: [f64; 128] = [0.0; 128]
+    var main: [f64; 128] = [0.0; 128]
+    var upper: [f64; 128] = [0.0; 128]
+
+    var i = 0
+    while i < n {
+        main[i] = 2.0
+        i = i + 1
+    }
+    i = 0
+    while i < n - 1 {
+        lower[i] = 0.0 - 1.0
+        upper[i] = 0.0 - 1.0
+        i = i + 1
+    }
+
+    let a = sparse_tridiagonal(lower, main, upper, n)
+
+    // Choose a known solution x_exact = [1, 2, 3, ..., 10]
+    // Compute b = A * x_exact
+    var x_exact: [f64; 128] = [0.0; 128]
+    i = 0
+    while i < n {
+        x_exact[i] = (i + 1) as f64
+        i = i + 1
+    }
+
+    let b = sparse_matvec(a, x_exact, n)
+
+    var x0: [f64; 128] = [0.0; 128]
+    let result = cg_solve(a, b, x0, n, 1e-8, 200)
+
+    // Check solution accuracy
+    var max_err = 0.0
+    i = 0
+    while i < n {
+        let diff = abs_f64(result.x[i] - x_exact[i])
+        if diff > max_err {
+            max_err = diff
+        }
+        i = i + 1
+    }
+
+    print("  iters=")
+    println(result.iterations)
+    print("  max_err=")
+    println(max_err)
+    print("  residual=")
+    println(result.residual)
+
+    return result.converged && max_err < 1e-6
+}
+
+// Test 13: CG on 1D Poisson equation discretization
+// -u'' = f on [0, 1], u(0) = u(1) = 0
+// With f(x) = pi^2 * sin(pi*x), exact u(x) = sin(pi*x)
+fn test_cg_poisson() -> bool with IO, Mut, Panic, Div {
+    let n = 20
+    let h = 1.0 / ((n + 1) as f64)
+    let pi = 3.14159265358979323846
+
+    // Build SPD tridiagonal: (1/h^2) * [2, -1; -1, 2, -1; ...; -1, 2]
+    var lower: [f64; 128] = [0.0; 128]
+    var main: [f64; 128] = [0.0; 128]
+    var upper: [f64; 128] = [0.0; 128]
+
+    let h2_inv = 1.0 / (h * h)
+    var i = 0
+    while i < n {
+        main[i] = 2.0 * h2_inv
+        i = i + 1
+    }
+    i = 0
+    while i < n - 1 {
+        lower[i] = 0.0 - h2_inv
+        upper[i] = 0.0 - h2_inv
+        i = i + 1
+    }
+
+    let a = sparse_tridiagonal(lower, main, upper, n)
+
+    // RHS: f(x_i) = pi^2 * sin(pi * x_i)
+    // Use Taylor series for sin(x) near small arguments
+    // sin(x) = x - x^3/6 + x^5/120 - x^7/5040 + x^9/362880
+    var b: [f64; 128] = [0.0; 128]
+    i = 0
+    while i < n {
+        let xi = (i + 1) as f64 * h
+        let arg = pi * xi
+        // Compute sin(arg) via Taylor series (sufficient for arg in [0, pi])
+        // Reduce to [0, pi/2]: sin(pi - x) = sin(x)
+        var t = arg
+        if t > pi / 2.0 {
+            t = pi - t
+        }
+        let t2 = t * t
+        let t3 = t2 * t
+        let t5 = t3 * t2
+        let t7 = t5 * t2
+        let t9 = t7 * t2
+        let t11 = t9 * t2
+        let sin_t = t - t3 / 6.0 + t5 / 120.0 - t7 / 5040.0 + t9 / 362880.0 - t11 / 39916800.0
+        b[i] = pi * pi * sin_t
+        i = i + 1
+    }
+
+    var x0: [f64; 128] = [0.0; 128]
+    let result = cg_solve(a, b, x0, n, 1e-10, 500)
+
+    // Check against exact solution u(x_i) = sin(pi * x_i)
+    var max_err = 0.0
+    i = 0
+    while i < n {
+        let xi = (i + 1) as f64 * h
+        let arg = pi * xi
+        var t = arg
+        if t > pi / 2.0 {
+            t = pi - t
+        }
+        let t2 = t * t
+        let t3 = t2 * t
+        let t5 = t3 * t2
+        let t7 = t5 * t2
+        let t9 = t7 * t2
+        let t11 = t9 * t2
+        let exact = t - t3 / 6.0 + t5 / 120.0 - t7 / 5040.0 + t9 / 362880.0 - t11 / 39916800.0
+        let diff = abs_f64(result.x[i] - exact)
+        if diff > max_err {
+            max_err = diff
+        }
+        i = i + 1
+    }
+
+    print("  iters=")
+    println(result.iterations)
+    print("  max_err=")
+    println(max_err)
+    print("  converged=")
+    if result.converged { println("true") } else { println("false") }
+
+    // The discretization error is O(h^2) ~ 1/(21^2) ~ 0.002
+    // So we expect the CG solution to match the exact solution within O(h^2)
+    return result.converged && max_err < 0.01
+}
+
+// ============================================================================
+// MAIN TEST RUNNER
+// ============================================================================
+
+fn main() -> i32 with IO, Mut, Panic, Div {
+    println("=== Sparse Matrix (CSR) Tests ===")
+    println("")
+
+    var passed = 0
+    var failed = 0
+
+    // Test 1
+    print("Test  1: Identity matvec......... ")
+    if test_identity_matvec() {
+        println("PASS")
+        passed = passed + 1
+    } else {
+        println("FAIL")
+        failed = failed + 1
+    }
+
+    // Test 2
+    print("Test  2: Diagonal matvec......... ")
+    if test_diagonal_matvec() {
+        println("PASS")
+        passed = passed + 1
+    } else {
+        println("FAIL")
+        failed = failed + 1
+    }
+
+    // Test 3
+    print("Test  3: Tridiagonal build....... ")
+    if test_tridiagonal_build() {
+        println("PASS")
+        passed = passed + 1
+    } else {
+        println("FAIL")
+        failed = failed + 1
+    }
+
+    // Test 4
+    print("Test  4: Sparse add.............. ")
+    if test_sparse_add() {
+        println("PASS")
+        passed = passed + 1
+    } else {
+        println("FAIL")
+        failed = failed + 1
+    }
+
+    // Test 5
+    print("Test  5: Sparse transpose........ ")
+    if test_sparse_transpose() {
+        println("PASS")
+        passed = passed + 1
+    } else {
+        println("FAIL")
+        failed = failed + 1
+    }
+
+    // Test 6
+    print("Test  6: Sparse scale............ ")
+    if test_sparse_scale() {
+        println("PASS")
+        passed = passed + 1
+    } else {
+        println("FAIL")
+        failed = failed + 1
+    }
+
+    // Test 7
+    print("Test  7: Lower triangular solve.. ")
+    if test_lower_triangular_solve() {
+        println("PASS")
+        passed = passed + 1
+    } else {
+        println("FAIL")
+        failed = failed + 1
+    }
+
+    // Test 8
+    print("Test  8: Upper triangular solve.. ")
+    if test_upper_triangular_solve() {
+        println("PASS")
+        passed = passed + 1
+    } else {
+        println("FAIL")
+        failed = failed + 1
+    }
+
+    // Test 9
+    print("Test  9: From triplets (COO)..... ")
+    if test_from_triplets() {
+        println("PASS")
+        passed = passed + 1
+    } else {
+        println("FAIL")
+        failed = failed + 1
+    }
+
+    // Test 10
+    print("Test 10: Frobenius norm.......... ")
+    if test_frobenius_norm() {
+        println("PASS")
+        passed = passed + 1
+    } else {
+        println("FAIL")
+        failed = failed + 1
+    }
+
+    // Test 11
+    print("Test 11: CG identity............. ")
+    if test_cg_identity() {
+        println("PASS")
+        passed = passed + 1
+    } else {
+        println("FAIL")
+        failed = failed + 1
+    }
+
+    // Test 12
+    print("Test 12: CG tridiagonal.......... ")
+    if test_cg_tridiagonal() {
+        println("PASS")
+        passed = passed + 1
+    } else {
+        println("FAIL")
+        failed = failed + 1
+    }
+
+    // Test 13
+    print("Test 13: CG Poisson 1D.......... ")
+    if test_cg_poisson() {
+        println("PASS")
+        passed = passed + 1
+    } else {
+        println("FAIL")
+        failed = failed + 1
+    }
+
+    println("")
+    print("Passed: ")
+    println(passed)
+    print("Failed: ")
+    println(failed)
+
+    if failed == 0 {
+        println("ALL 13 TESTS PASSED")
+        return 0
+    }
+    println("SOME TESTS FAILED")
+    return 1
+}

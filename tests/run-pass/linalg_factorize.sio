@@ -1,0 +1,1130 @@
+//@ run-pass
+// linalg_factorize.sio - Integration tests for LU, Cholesky, and LDL factorizations
+//
+// Tests matrix factorizations on small matrices (up to 4x4).
+// All structs and functions are inlined since tests cannot import.
+
+// ============================================================================
+// HELPERS
+// ============================================================================
+
+fn abs_f64(x: f64) -> f64 {
+    if x < 0.0 {
+        return 0.0 - x
+    }
+    return x
+}
+
+fn sqrt_f64(x: f64) -> f64 with Mut, Panic, Div {
+    if x <= 0.0 { return 0.0 }
+    var scaled = x
+    var scale_back = 1.0
+    while scaled < 1.0 {
+        scaled = scaled * 4.0
+        scale_back = scale_back * 2.0
+    }
+    while scaled > 4.0 {
+        scaled = scaled * 0.25
+        scale_back = scale_back * 0.5
+    }
+    var y = 1.5
+    y = 0.5 * (y + scaled / y)
+    y = 0.5 * (y + scaled / y)
+    y = 0.5 * (y + scaled / y)
+    y = 0.5 * (y + scaled / y)
+    y = 0.5 * (y + scaled / y)
+    y = 0.5 * (y + scaled / y)
+    y = 0.5 * (y + scaled / y)
+    y = 0.5 * (y + scaled / y)
+    y = 0.5 * (y + scaled / y)
+    y = 0.5 * (y + scaled / y)
+    y = 0.5 * (y + scaled / y)
+    y = 0.5 * (y + scaled / y)
+    y = 0.5 * (y + scaled / y)
+    y = 0.5 * (y + scaled / y)
+    y = 0.5 * (y + scaled / y)
+    return y / scale_back
+}
+
+fn mat_get(A: [f64; 64], n: i32, i: i32, j: i32) -> f64 with Panic {
+    let idx = i * n + j
+    return A[idx]
+}
+
+fn mat_set(A: [f64; 64], n: i32, i: i32, j: i32, val: f64) -> [f64; 64] with Mut, Panic {
+    var result = A
+    let idx = i * n + j
+    result[idx] = val
+    return result
+}
+
+fn zeros64() -> [f64; 64] {
+    let z: [f64; 64] = [0.0; 64]
+    return z
+}
+
+fn zeros8() -> [f64; 8] {
+    let z: [f64; 8] = [0.0; 8]
+    return z
+}
+
+fn izeros8() -> [i32; 8] {
+    let z: [i32; 8] = [0; 8]
+    return z
+}
+
+fn mat_identity(n: i32) -> [f64; 64] with Mut, Panic, Div {
+    var m = zeros64()
+    var i = 0
+    while i < n {
+        m = mat_set(m, n, i, i, 1.0)
+        i = i + 1
+    }
+    return m
+}
+
+// ============================================================================
+// DATA STRUCTURES
+// ============================================================================
+
+struct LUResult {
+    L: [f64; 64],
+    U: [f64; 64],
+    perm: [i32; 8],
+    n: i32,
+    sign: i32,
+    singular: bool
+}
+
+struct CholeskyResult {
+    L: [f64; 64],
+    n: i32,
+    success: bool
+}
+
+struct LDLResult {
+    L: [f64; 64],
+    D: [f64; 8],
+    n: i32,
+    success: bool
+}
+
+// ============================================================================
+// LU FACTORIZATION
+// ============================================================================
+
+fn lu_factorize(A: [f64; 64], n: i32) -> LUResult with Mut, Panic, Div {
+    var work = A
+    var perm = izeros8()
+    var i = 0
+    while i < n {
+        perm[i] = i
+        i = i + 1
+    }
+
+    var L = mat_identity(n)
+    var sign = 1
+    var singular = false
+
+    var k = 0
+    while k < n {
+        var max_val = abs_f64(mat_get(work, n, k, k))
+        var max_row = k
+        i = k + 1
+        while i < n {
+            let val = abs_f64(mat_get(work, n, i, k))
+            if val > max_val {
+                max_val = val
+                max_row = i
+            }
+            i = i + 1
+        }
+
+        if max_val < 1e-15 {
+            singular = true
+        }
+
+        if max_row != k {
+            var j = 0
+            while j < n {
+                let tmp_w = mat_get(work, n, k, j)
+                work = mat_set(work, n, k, j, mat_get(work, n, max_row, j))
+                work = mat_set(work, n, max_row, j, tmp_w)
+                j = j + 1
+            }
+
+            let tmp_p = perm[k]
+            perm[k] = perm[max_row]
+            perm[max_row] = tmp_p
+
+            j = 0
+            while j < k {
+                let tmp_l = mat_get(L, n, k, j)
+                L = mat_set(L, n, k, j, mat_get(L, n, max_row, j))
+                L = mat_set(L, n, max_row, j, tmp_l)
+                j = j + 1
+            }
+
+            sign = 0 - sign
+        }
+
+        let pivot = mat_get(work, n, k, k)
+        if abs_f64(pivot) > 1e-15 {
+            i = k + 1
+            while i < n {
+                let mult = mat_get(work, n, i, k) / pivot
+                L = mat_set(L, n, i, k, mult)
+
+                var j = k
+                while j < n {
+                    let old_val = mat_get(work, n, i, j)
+                    let sub_val = mult * mat_get(work, n, k, j)
+                    work = mat_set(work, n, i, j, old_val - sub_val)
+                    j = j + 1
+                }
+                i = i + 1
+            }
+        }
+
+        k = k + 1
+    }
+
+    return LUResult {
+        L: L,
+        U: work,
+        perm: perm,
+        n: n,
+        sign: sign,
+        singular: singular
+    }
+}
+
+fn lu_solve(lu: LUResult, b: [f64; 8]) -> [f64; 8] with Mut, Panic, Div {
+    let n = lu.n
+
+    var pb = zeros8()
+    var i = 0
+    while i < n {
+        pb[i] = b[lu.perm[i]]
+        i = i + 1
+    }
+
+    var y = zeros8()
+    i = 0
+    while i < n {
+        var sum = 0.0
+        var j = 0
+        while j < i {
+            sum = sum + mat_get(lu.L, n, i, j) * y[j]
+            j = j + 1
+        }
+        y[i] = pb[i] - sum
+        i = i + 1
+    }
+
+    var x = zeros8()
+    i = n - 1
+    while i >= 0 {
+        var sum = 0.0
+        var j = i + 1
+        while j < n {
+            sum = sum + mat_get(lu.U, n, i, j) * x[j]
+            j = j + 1
+        }
+        let diag = mat_get(lu.U, n, i, i)
+        if abs_f64(diag) > 1e-15 {
+            x[i] = (y[i] - sum) / diag
+        } else {
+            x[i] = 0.0
+        }
+        i = i - 1
+    }
+
+    return x
+}
+
+fn lu_determinant(lu: LUResult) -> f64 with Mut, Panic, Div {
+    let n = lu.n
+    var det = 1.0
+    var i = 0
+    while i < n {
+        det = det * mat_get(lu.U, n, i, i)
+        i = i + 1
+    }
+    if lu.sign < 0 {
+        det = 0.0 - det
+    }
+    return det
+}
+
+fn lu_inverse(lu: LUResult) -> [f64; 64] with Mut, Panic, Div {
+    let n = lu.n
+    var inv = zeros64()
+
+    var col = 0
+    while col < n {
+        var e = zeros8()
+        e[col] = 1.0
+        let x = lu_solve(lu, e)
+        var i = 0
+        while i < n {
+            inv = mat_set(inv, n, i, col, x[i])
+            i = i + 1
+        }
+        col = col + 1
+    }
+
+    return inv
+}
+
+// ============================================================================
+// CHOLESKY FACTORIZATION
+// ============================================================================
+
+fn cholesky_factorize(A: [f64; 64], n: i32) -> CholeskyResult with Mut, Panic, Div {
+    var L = zeros64()
+    var success = true
+
+    var j = 0
+    while j < n {
+        var sum_sq = 0.0
+        var k = 0
+        while k < j {
+            let ljk = mat_get(L, n, j, k)
+            sum_sq = sum_sq + ljk * ljk
+            k = k + 1
+        }
+        let diag_val = mat_get(A, n, j, j) - sum_sq
+        if diag_val <= 0.0 {
+            success = false
+            return CholeskyResult { L: L, n: n, success: false }
+        }
+        let ljj = sqrt_f64(diag_val)
+        L = mat_set(L, n, j, j, ljj)
+
+        var i = j + 1
+        while i < n {
+            var sum = 0.0
+            k = 0
+            while k < j {
+                sum = sum + mat_get(L, n, i, k) * mat_get(L, n, j, k)
+                k = k + 1
+            }
+            let lij = (mat_get(A, n, i, j) - sum) / ljj
+            L = mat_set(L, n, i, j, lij)
+            i = i + 1
+        }
+
+        j = j + 1
+    }
+
+    return CholeskyResult { L: L, n: n, success: success }
+}
+
+fn cholesky_solve(ch: CholeskyResult, b: [f64; 8]) -> [f64; 8] with Mut, Panic, Div {
+    let n = ch.n
+
+    var y = zeros8()
+    var i = 0
+    while i < n {
+        var sum = 0.0
+        var j = 0
+        while j < i {
+            sum = sum + mat_get(ch.L, n, i, j) * y[j]
+            j = j + 1
+        }
+        let diag = mat_get(ch.L, n, i, i)
+        if abs_f64(diag) > 1e-15 {
+            y[i] = (b[i] - sum) / diag
+        } else {
+            y[i] = 0.0
+        }
+        i = i + 1
+    }
+
+    var x = zeros8()
+    i = n - 1
+    while i >= 0 {
+        var sum = 0.0
+        var j = i + 1
+        while j < n {
+            sum = sum + mat_get(ch.L, n, j, i) * x[j]
+            j = j + 1
+        }
+        let diag = mat_get(ch.L, n, i, i)
+        if abs_f64(diag) > 1e-15 {
+            x[i] = (y[i] - sum) / diag
+        } else {
+            x[i] = 0.0
+        }
+        i = i - 1
+    }
+
+    return x
+}
+
+fn cholesky_determinant(ch: CholeskyResult) -> f64 with Mut, Panic, Div {
+    let n = ch.n
+    var prod = 1.0
+    var i = 0
+    while i < n {
+        prod = prod * mat_get(ch.L, n, i, i)
+        i = i + 1
+    }
+    return prod * prod
+}
+
+fn cholesky_inverse(ch: CholeskyResult) -> [f64; 64] with Mut, Panic, Div {
+    let n = ch.n
+    var inv = zeros64()
+
+    var col = 0
+    while col < n {
+        var e = zeros8()
+        e[col] = 1.0
+        let x = cholesky_solve(ch, e)
+        var i = 0
+        while i < n {
+            inv = mat_set(inv, n, i, col, x[i])
+            i = i + 1
+        }
+        col = col + 1
+    }
+
+    return inv
+}
+
+// ============================================================================
+// LDL FACTORIZATION
+// ============================================================================
+
+fn ldl_factorize(A: [f64; 64], n: i32) -> LDLResult with Mut, Panic, Div {
+    var L = mat_identity(n)
+    var D = zeros8()
+    var success = true
+
+    var j = 0
+    while j < n {
+        var sum = 0.0
+        var k = 0
+        while k < j {
+            let ljk = mat_get(L, n, j, k)
+            sum = sum + ljk * ljk * D[k]
+            k = k + 1
+        }
+        D[j] = mat_get(A, n, j, j) - sum
+
+        if abs_f64(D[j]) < 1e-15 {
+            success = false
+            return LDLResult { L: L, D: D, n: n, success: false }
+        }
+
+        var i = j + 1
+        while i < n {
+            var sum_ij = 0.0
+            k = 0
+            while k < j {
+                sum_ij = sum_ij + mat_get(L, n, i, k) * mat_get(L, n, j, k) * D[k]
+                k = k + 1
+            }
+            let lij = (mat_get(A, n, i, j) - sum_ij) / D[j]
+            L = mat_set(L, n, i, j, lij)
+            i = i + 1
+        }
+
+        j = j + 1
+    }
+
+    return LDLResult { L: L, D: D, n: n, success: success }
+}
+
+fn ldl_solve(ldl: LDLResult, b: [f64; 8]) -> [f64; 8] with Mut, Panic, Div {
+    let n = ldl.n
+
+    var z = zeros8()
+    var i = 0
+    while i < n {
+        var sum = 0.0
+        var j = 0
+        while j < i {
+            sum = sum + mat_get(ldl.L, n, i, j) * z[j]
+            j = j + 1
+        }
+        z[i] = b[i] - sum
+        i = i + 1
+    }
+
+    var y = zeros8()
+    i = 0
+    while i < n {
+        if abs_f64(ldl.D[i]) > 1e-15 {
+            y[i] = z[i] / ldl.D[i]
+        } else {
+            y[i] = 0.0
+        }
+        i = i + 1
+    }
+
+    var x = zeros8()
+    i = n - 1
+    while i >= 0 {
+        var sum = 0.0
+        var j = i + 1
+        while j < n {
+            sum = sum + mat_get(ldl.L, n, j, i) * x[j]
+            j = j + 1
+        }
+        x[i] = y[i] - sum
+        i = i - 1
+    }
+
+    return x
+}
+
+// ============================================================================
+// VALIDATION HELPERS
+// ============================================================================
+
+// Compute ||PA - LU||_F
+fn lu_reconstruction_error(lu: LUResult, A: [f64; 64], n: i32) -> f64 with Mut, Panic, Div {
+    var LU = zeros64()
+    var i = 0
+    while i < n {
+        var j = 0
+        while j < n {
+            var sum = 0.0
+            var k = 0
+            while k < n {
+                sum = sum + mat_get(lu.L, n, i, k) * mat_get(lu.U, n, k, j)
+                k = k + 1
+            }
+            LU = mat_set(LU, n, i, j, sum)
+            j = j + 1
+        }
+        i = i + 1
+    }
+
+    var PA = zeros64()
+    i = 0
+    while i < n {
+        var j = 0
+        while j < n {
+            PA = mat_set(PA, n, i, j, mat_get(A, n, lu.perm[i], j))
+            j = j + 1
+        }
+        i = i + 1
+    }
+
+    var sum_sq = 0.0
+    i = 0
+    while i < n {
+        var j = 0
+        while j < n {
+            let diff = mat_get(PA, n, i, j) - mat_get(LU, n, i, j)
+            sum_sq = sum_sq + diff * diff
+            j = j + 1
+        }
+        i = i + 1
+    }
+    return sqrt_f64(sum_sq)
+}
+
+// Compute ||A - LL^T||_F
+fn cholesky_reconstruction_error(ch: CholeskyResult, A: [f64; 64], n: i32) -> f64 with Mut, Panic, Div {
+    var LLt = zeros64()
+    var i = 0
+    while i < n {
+        var j = 0
+        while j < n {
+            var sum = 0.0
+            var k = 0
+            while k < n {
+                sum = sum + mat_get(ch.L, n, i, k) * mat_get(ch.L, n, j, k)
+                k = k + 1
+            }
+            LLt = mat_set(LLt, n, i, j, sum)
+            j = j + 1
+        }
+        i = i + 1
+    }
+
+    var sum_sq = 0.0
+    i = 0
+    while i < n {
+        var j = 0
+        while j < n {
+            let diff = mat_get(A, n, i, j) - mat_get(LLt, n, i, j)
+            sum_sq = sum_sq + diff * diff
+            j = j + 1
+        }
+        i = i + 1
+    }
+    return sqrt_f64(sum_sq)
+}
+
+// Matrix-vector multiply: y = A * x
+fn mat_vec_mul(A: [f64; 64], n: i32, x: [f64; 8]) -> [f64; 8] with Mut, Panic, Div {
+    var y = zeros8()
+    var i = 0
+    while i < n {
+        var sum = 0.0
+        var j = 0
+        while j < n {
+            sum = sum + mat_get(A, n, i, j) * x[j]
+            j = j + 1
+        }
+        y[i] = sum
+        i = i + 1
+    }
+    return y
+}
+
+// Matrix multiply: C = A * B (n x n)
+fn mat_mul(A: [f64; 64], B: [f64; 64], n: i32) -> [f64; 64] with Mut, Panic, Div {
+    var C = zeros64()
+    var i = 0
+    while i < n {
+        var j = 0
+        while j < n {
+            var sum = 0.0
+            var k = 0
+            while k < n {
+                sum = sum + mat_get(A, n, i, k) * mat_get(B, n, k, j)
+                k = k + 1
+            }
+            C = mat_set(C, n, i, j, sum)
+            j = j + 1
+        }
+        i = i + 1
+    }
+    return C
+}
+
+// Frobenius norm of (A - B)
+fn mat_diff_norm(A: [f64; 64], B: [f64; 64], n: i32) -> f64 with Mut, Panic, Div {
+    var sum_sq = 0.0
+    var i = 0
+    while i < n {
+        var j = 0
+        while j < n {
+            let diff = mat_get(A, n, i, j) - mat_get(B, n, i, j)
+            sum_sq = sum_sq + diff * diff
+            j = j + 1
+        }
+        i = i + 1
+    }
+    return sqrt_f64(sum_sq)
+}
+
+// ============================================================================
+// MATRIX BUILDERS
+// ============================================================================
+
+fn make_2x2(a00: f64, a01: f64, a10: f64, a11: f64) -> [f64; 64] with Mut, Panic {
+    var m = zeros64()
+    m = mat_set(m, 2, 0, 0, a00)
+    m = mat_set(m, 2, 0, 1, a01)
+    m = mat_set(m, 2, 1, 0, a10)
+    m = mat_set(m, 2, 1, 1, a11)
+    return m
+}
+
+fn make_3x3(
+    a00: f64, a01: f64, a02: f64,
+    a10: f64, a11: f64, a12: f64,
+    a20: f64, a21: f64, a22: f64
+) -> [f64; 64] with Mut, Panic {
+    var m = zeros64()
+    m = mat_set(m, 3, 0, 0, a00)
+    m = mat_set(m, 3, 0, 1, a01)
+    m = mat_set(m, 3, 0, 2, a02)
+    m = mat_set(m, 3, 1, 0, a10)
+    m = mat_set(m, 3, 1, 1, a11)
+    m = mat_set(m, 3, 1, 2, a12)
+    m = mat_set(m, 3, 2, 0, a20)
+    m = mat_set(m, 3, 2, 1, a21)
+    m = mat_set(m, 3, 2, 2, a22)
+    return m
+}
+
+// ============================================================================
+// TESTS
+// ============================================================================
+
+// Test 1: LU of identity gives L=I, U=I
+fn test_lu_identity() -> bool with Mut, Panic, Div {
+    let n = 3
+    let A = mat_identity(n)
+    let lu = lu_factorize(A, n)
+
+    let I = mat_identity(n)
+    let err_L = mat_diff_norm(lu.L, I, n)
+    let err_U = mat_diff_norm(lu.U, I, n)
+
+    return err_L < 1e-10 && err_U < 1e-10
+}
+
+// Test 2: LU of known 2x2, verify L*U = P*A
+fn test_lu_2x2() -> bool with Mut, Panic, Div {
+    // A = [[4, 3], [6, 3]]
+    let A = make_2x2(4.0, 3.0, 6.0, 3.0)
+    let n = 2
+    let lu = lu_factorize(A, n)
+
+    let err = lu_reconstruction_error(lu, A, n)
+    return err < 1e-10
+}
+
+// Test 3: LU of 3x3, verify reconstruction
+fn test_lu_3x3() -> bool with Mut, Panic, Div {
+    let A = make_3x3(
+        2.0, 1.0, 1.0,
+        4.0, 3.0, 3.0,
+        8.0, 7.0, 9.0
+    )
+    let n = 3
+    let lu = lu_factorize(A, n)
+
+    let err = lu_reconstruction_error(lu, A, n)
+    return err < 1e-10
+}
+
+// Test 4: Solve Ax = b, verify A*x ~ b
+fn test_lu_solve() -> bool with Mut, Panic, Div {
+    // A = [[2, 1, 1], [4, 3, 3], [8, 7, 9]]
+    let A = make_3x3(
+        2.0, 1.0, 1.0,
+        4.0, 3.0, 3.0,
+        8.0, 7.0, 9.0
+    )
+    let n = 3
+    var b = zeros8()
+    b[0] = 1.0
+    b[1] = 1.0
+    b[2] = 1.0
+
+    let lu = lu_factorize(A, n)
+    let x = lu_solve(lu, b)
+
+    // Verify A*x ~ b
+    let Ax = mat_vec_mul(A, n, x)
+    var err = 0.0
+    var i = 0
+    while i < n {
+        let diff = Ax[i] - b[i]
+        err = err + diff * diff
+        i = i + 1
+    }
+    err = sqrt_f64(err)
+
+    return err < 1e-10
+}
+
+// Test 5: Determinant of known matrix
+fn test_lu_determinant() -> bool with Mut, Panic, Div {
+    // A = [[1, 2, 3], [4, 5, 6], [7, 8, 10]]
+    // det = 1*(5*10 - 6*8) - 2*(4*10 - 6*7) + 3*(4*8 - 5*7)
+    //     = 1*(50-48) - 2*(40-42) + 3*(32-35)
+    //     = 2 + 4 - 9 = -3
+    let A = make_3x3(
+        1.0, 2.0, 3.0,
+        4.0, 5.0, 6.0,
+        7.0, 8.0, 10.0
+    )
+    let n = 3
+    let lu = lu_factorize(A, n)
+    let det = lu_determinant(lu)
+
+    return abs_f64(det - (0.0 - 3.0)) < 1e-10
+}
+
+// Test 6: A * A^{-1} ~ I
+fn test_lu_inverse() -> bool with Mut, Panic, Div {
+    let A = make_3x3(
+        2.0, 1.0, 1.0,
+        4.0, 3.0, 3.0,
+        8.0, 7.0, 9.0
+    )
+    let n = 3
+    let lu = lu_factorize(A, n)
+    let Ainv = lu_inverse(lu)
+
+    let prod = mat_mul(A, Ainv, n)
+    let I = mat_identity(n)
+    let err = mat_diff_norm(prod, I, n)
+
+    return err < 1e-10
+}
+
+// Test 7: Matrix requiring pivoting (small diagonal element)
+fn test_lu_pivoting() -> bool with Mut, Panic, Div {
+    // A = [[1e-15, 1], [1, 1]] -- tiny pivot in (0,0) forces row swap
+    let A = make_2x2(1e-15, 1.0, 1.0, 1.0)
+    let n = 2
+    let lu = lu_factorize(A, n)
+
+    // Verify reconstruction
+    let err = lu_reconstruction_error(lu, A, n)
+
+    // Also verify that pivoting occurred (sign should be -1)
+    let pivoted = lu.sign < 0
+
+    return err < 1e-10 && pivoted
+}
+
+// Test 8: Cholesky of identity gives L=I
+fn test_cholesky_identity() -> bool with Mut, Panic, Div {
+    let n = 3
+    let A = mat_identity(n)
+    let ch = cholesky_factorize(A, n)
+
+    if ch.success == false { return false }
+
+    let I = mat_identity(n)
+    let err = mat_diff_norm(ch.L, I, n)
+
+    return err < 1e-10
+}
+
+// Test 9: Known SPD 2x2, verify LL^T = A
+fn test_cholesky_2x2() -> bool with Mut, Panic, Div {
+    // A = [[4, 2], [2, 3]] (SPD: eigenvalues ~1.17 and ~5.83)
+    let A = make_2x2(4.0, 2.0, 2.0, 3.0)
+    let n = 2
+    let ch = cholesky_factorize(A, n)
+
+    if ch.success == false { return false }
+
+    let err = cholesky_reconstruction_error(ch, A, n)
+    return err < 1e-10
+}
+
+// Test 10: Solve SPD system via Cholesky
+fn test_cholesky_solve() -> bool with Mut, Panic, Div {
+    // SPD: A = [[4, 2, 0], [2, 5, 1], [0, 1, 3]]
+    let A = make_3x3(
+        4.0, 2.0, 0.0,
+        2.0, 5.0, 1.0,
+        0.0, 1.0, 3.0
+    )
+    let n = 3
+    var b = zeros8()
+    b[0] = 6.0
+    b[1] = 8.0
+    b[2] = 4.0
+
+    let ch = cholesky_factorize(A, n)
+    if ch.success == false { return false }
+
+    let x = cholesky_solve(ch, b)
+
+    // Verify A*x ~ b
+    let Ax = mat_vec_mul(A, n, x)
+    var err = 0.0
+    var i = 0
+    while i < n {
+        let diff = Ax[i] - b[i]
+        err = err + diff * diff
+        i = i + 1
+    }
+    err = sqrt_f64(err)
+
+    return err < 1e-10
+}
+
+// Test 11: Non-SPD matrix returns success = false
+fn test_cholesky_not_spd() -> bool with Mut, Panic, Div {
+    // A = [[1, 2], [2, 1]] has eigenvalues 3, -1 (not positive definite)
+    let A = make_2x2(1.0, 2.0, 2.0, 1.0)
+    let n = 2
+    let ch = cholesky_factorize(A, n)
+
+    // Should fail
+    return ch.success == false
+}
+
+// Test 12: Determinant via Cholesky vs LU
+fn test_cholesky_determinant() -> bool with Mut, Panic, Div {
+    // SPD: A = [[4, 2, 0], [2, 5, 1], [0, 1, 3]]
+    let A = make_3x3(
+        4.0, 2.0, 0.0,
+        2.0, 5.0, 1.0,
+        0.0, 1.0, 3.0
+    )
+    let n = 3
+
+    let ch = cholesky_factorize(A, n)
+    if ch.success == false { return false }
+    let det_ch = cholesky_determinant(ch)
+
+    let lu = lu_factorize(A, n)
+    let det_lu = lu_determinant(lu)
+
+    return abs_f64(det_ch - det_lu) < 1e-10
+}
+
+// Test 13: LDL of SPD 3x3, verify L*D*L^T = A
+fn test_ldl_3x3() -> bool with Mut, Panic, Div {
+    // SPD: A = [[4, 2, 0], [2, 5, 1], [0, 1, 3]]
+    let A = make_3x3(
+        4.0, 2.0, 0.0,
+        2.0, 5.0, 1.0,
+        0.0, 1.0, 3.0
+    )
+    let n = 3
+    let ldl = ldl_factorize(A, n)
+
+    if ldl.success == false { return false }
+
+    // Compute L * D * L^T
+    // First build D as a matrix
+    var D_mat = zeros64()
+    var i = 0
+    while i < n {
+        D_mat = mat_set(D_mat, n, i, i, ldl.D[i])
+        i = i + 1
+    }
+
+    // Compute L^T
+    var Lt = zeros64()
+    i = 0
+    while i < n {
+        var j = 0
+        while j < n {
+            Lt = mat_set(Lt, n, i, j, mat_get(ldl.L, n, j, i))
+            j = j + 1
+        }
+        i = i + 1
+    }
+
+    // LD = L * D
+    let LD = mat_mul(ldl.L, D_mat, n)
+    // LDLt = LD * L^T
+    let LDLt = mat_mul(LD, Lt, n)
+
+    let err = mat_diff_norm(LDLt, A, n)
+    return err < 1e-10
+}
+
+// Test 14: LDL solve matches LU solve
+fn test_ldl_solve() -> bool with Mut, Panic, Div {
+    let A = make_3x3(
+        4.0, 2.0, 0.0,
+        2.0, 5.0, 1.0,
+        0.0, 1.0, 3.0
+    )
+    let n = 3
+    var b = zeros8()
+    b[0] = 1.0
+    b[1] = 2.0
+    b[2] = 3.0
+
+    let ldl = ldl_factorize(A, n)
+    if ldl.success == false { return false }
+    let x_ldl = ldl_solve(ldl, b)
+
+    let lu = lu_factorize(A, n)
+    let x_lu = lu_solve(lu, b)
+
+    // Both solutions should match
+    var err = 0.0
+    var i = 0
+    while i < n {
+        let diff = x_ldl[i] - x_lu[i]
+        err = err + diff * diff
+        i = i + 1
+    }
+    err = sqrt_f64(err)
+
+    return err < 1e-10
+}
+
+// Test 15: Cholesky inverse * A ~ I
+fn test_cholesky_inverse() -> bool with Mut, Panic, Div {
+    let A = make_3x3(
+        4.0, 2.0, 0.0,
+        2.0, 5.0, 1.0,
+        0.0, 1.0, 3.0
+    )
+    let n = 3
+
+    let ch = cholesky_factorize(A, n)
+    if ch.success == false { return false }
+
+    let Ainv = cholesky_inverse(ch)
+    let prod = mat_mul(A, Ainv, n)
+    let I = mat_identity(n)
+    let err = mat_diff_norm(prod, I, n)
+
+    return err < 1e-10
+}
+
+// ============================================================================
+// MAIN TEST RUNNER
+// ============================================================================
+
+fn main() -> i32 with IO, Mut, Panic, Div {
+    println("=== LU / Cholesky / LDL Factorization Tests ===")
+    println("")
+
+    var passed = 0
+    var failed = 0
+
+    // Test 1
+    print("Test  1: LU identity............. ")
+    if test_lu_identity() {
+        println("PASS")
+        passed = passed + 1
+    } else {
+        println("FAIL")
+        failed = failed + 1
+    }
+
+    // Test 2
+    print("Test  2: LU 2x2 reconstruct...... ")
+    if test_lu_2x2() {
+        println("PASS")
+        passed = passed + 1
+    } else {
+        println("FAIL")
+        failed = failed + 1
+    }
+
+    // Test 3
+    print("Test  3: LU 3x3 reconstruct...... ")
+    if test_lu_3x3() {
+        println("PASS")
+        passed = passed + 1
+    } else {
+        println("FAIL")
+        failed = failed + 1
+    }
+
+    // Test 4
+    print("Test  4: LU solve Ax=b........... ")
+    if test_lu_solve() {
+        println("PASS")
+        passed = passed + 1
+    } else {
+        println("FAIL")
+        failed = failed + 1
+    }
+
+    // Test 5
+    print("Test  5: LU determinant.......... ")
+    if test_lu_determinant() {
+        println("PASS")
+        passed = passed + 1
+    } else {
+        println("FAIL")
+        failed = failed + 1
+    }
+
+    // Test 6
+    print("Test  6: LU inverse A*Ainv=I..... ")
+    if test_lu_inverse() {
+        println("PASS")
+        passed = passed + 1
+    } else {
+        println("FAIL")
+        failed = failed + 1
+    }
+
+    // Test 7
+    print("Test  7: LU pivoting required.... ")
+    if test_lu_pivoting() {
+        println("PASS")
+        passed = passed + 1
+    } else {
+        println("FAIL")
+        failed = failed + 1
+    }
+
+    // Test 8
+    print("Test  8: Cholesky identity....... ")
+    if test_cholesky_identity() {
+        println("PASS")
+        passed = passed + 1
+    } else {
+        println("FAIL")
+        failed = failed + 1
+    }
+
+    // Test 9
+    print("Test  9: Cholesky 2x2 LLt=A..... ")
+    if test_cholesky_2x2() {
+        println("PASS")
+        passed = passed + 1
+    } else {
+        println("FAIL")
+        failed = failed + 1
+    }
+
+    // Test 10
+    print("Test 10: Cholesky solve Ax=b..... ")
+    if test_cholesky_solve() {
+        println("PASS")
+        passed = passed + 1
+    } else {
+        println("FAIL")
+        failed = failed + 1
+    }
+
+    // Test 11
+    print("Test 11: Cholesky not SPD........ ")
+    if test_cholesky_not_spd() {
+        println("PASS")
+        passed = passed + 1
+    } else {
+        println("FAIL")
+        failed = failed + 1
+    }
+
+    // Test 12
+    print("Test 12: Cholesky det vs LU det.. ")
+    if test_cholesky_determinant() {
+        println("PASS")
+        passed = passed + 1
+    } else {
+        println("FAIL")
+        failed = failed + 1
+    }
+
+    // Test 13
+    print("Test 13: LDL 3x3 reconstruct.... ")
+    if test_ldl_3x3() {
+        println("PASS")
+        passed = passed + 1
+    } else {
+        println("FAIL")
+        failed = failed + 1
+    }
+
+    // Test 14
+    print("Test 14: LDL solve vs LU solve.. ")
+    if test_ldl_solve() {
+        println("PASS")
+        passed = passed + 1
+    } else {
+        println("FAIL")
+        failed = failed + 1
+    }
+
+    // Test 15
+    print("Test 15: Cholesky inverse........ ")
+    if test_cholesky_inverse() {
+        println("PASS")
+        passed = passed + 1
+    } else {
+        println("FAIL")
+        failed = failed + 1
+    }
+
+    println("")
+    if failed == 0 {
+        println("ALL 15 TESTS PASSED")
+        return 0
+    }
+    println("SOME TESTS FAILED")
+    return 1
+}

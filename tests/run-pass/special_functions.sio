@@ -1,0 +1,817 @@
+//@ run-pass
+// Special Functions Integration Tests
+//
+// Validates pure Sounio implementations of classical special functions:
+//   Gamma, log-gamma, beta, erf, erfc, incomplete gamma/beta, digamma
+//
+// All functions are inlined since tests cannot import.
+//
+// References:
+//   Abramowitz & Stegun (1964), Table 6.1, 7.1
+//   DLMF (https://dlmf.nist.gov) chapters 5, 7, 8
+
+// ============================================================================
+// CONSTANTS
+// ============================================================================
+
+fn pi_val() -> f64 {
+    3.14159265358979323846
+}
+
+fn two_pi_val() -> f64 {
+    6.28318530717958647692
+}
+
+fn sqrt_two_pi_val() -> f64 {
+    2.5066282746310005
+}
+
+fn euler_gamma_val() -> f64 {
+    0.5772156649015329
+}
+
+fn ln2_val() -> f64 {
+    0.6931471805599453
+}
+
+// ============================================================================
+// HELPERS (must precede callers)
+// ============================================================================
+
+fn abs_f64(x: f64) -> f64 {
+    if x < 0.0 { return 0.0 - x }
+    return x
+}
+
+fn max_f64(a: f64, b: f64) -> f64 {
+    if a > b { return a }
+    return b
+}
+
+fn min_f64(a: f64, b: f64) -> f64 {
+    if a < b { return a }
+    return b
+}
+
+fn floor_f64(x: f64) -> f64 with Mut, Panic, Div {
+    if x >= 0.0 {
+        if x < 1.0 { return 0.0 }
+        var result = 0.0
+        var remaining = x
+        var power = 1000000000000000.0
+        while power >= 1.0 {
+            while remaining >= power {
+                remaining = remaining - power
+                result = result + power
+            }
+            power = power / 10.0
+        }
+        return result
+    } else {
+        let pos = 0.0 - x
+        let pos_floor = floor_f64(pos)
+        if pos > pos_floor {
+            return 0.0 - pos_floor - 1.0
+        }
+        return 0.0 - pos_floor
+    }
+}
+
+fn sqrt_f64(x: f64) -> f64 with Mut, Panic, Div {
+    if x <= 0.0 { return 0.0 }
+    var scaled = x
+    var scale_back = 1.0
+    while scaled < 1.0 {
+        scaled = scaled * 4.0
+        scale_back = scale_back * 2.0
+    }
+    while scaled > 4.0 {
+        scaled = scaled * 0.25
+        scale_back = scale_back * 0.5
+    }
+    var y = 1.5
+    y = 0.5 * (y + scaled / y)
+    y = 0.5 * (y + scaled / y)
+    y = 0.5 * (y + scaled / y)
+    y = 0.5 * (y + scaled / y)
+    y = 0.5 * (y + scaled / y)
+    y = 0.5 * (y + scaled / y)
+    y = 0.5 * (y + scaled / y)
+    y = 0.5 * (y + scaled / y)
+    y = 0.5 * (y + scaled / y)
+    y = 0.5 * (y + scaled / y)
+    y = 0.5 * (y + scaled / y)
+    y = 0.5 * (y + scaled / y)
+    y = 0.5 * (y + scaled / y)
+    y = 0.5 * (y + scaled / y)
+    y = 0.5 * (y + scaled / y)
+    return y / scale_back
+}
+
+fn exp_f64(x: f64) -> f64 with Mut, Panic, Div {
+    if x > 20.0 { return exp_f64(x / 2.0) * exp_f64(x / 2.0) }
+    if x < 0.0 - 20.0 { return 1.0 / exp_f64(0.0 - x) }
+    var sum = 1.0
+    var term = 1.0
+    var i = 1
+    while i <= 25 {
+        term = term * x / (i as f64)
+        sum = sum + term
+        i = i + 1
+    }
+    return sum
+}
+
+fn ln_f64(x: f64) -> f64 with Mut, Panic, Div {
+    if x <= 0.0 { return 0.0 - 1.0e30 }
+    if x == 1.0 { return 0.0 }
+    var m = x
+    var e = 0
+    while m >= 2.0 { m = m / 2.0; e = e + 1 }
+    while m < 0.5 { m = m * 2.0; e = e - 1 }
+    let t = (m - 1.0) / (m + 1.0)
+    let t2 = t * t
+    var sum = t
+    var term = t
+    var k = 1
+    while k < 30 {
+        term = term * t2
+        sum = sum + term / ((2 * k + 1) as f64)
+        k = k + 1
+    }
+    return 2.0 * sum + (e as f64) * ln2_val()
+}
+
+fn sin_f64(x: f64) -> f64 with Mut, Panic, Div {
+    var a = x
+    let tp = two_pi_val()
+    if a > tp || a < 0.0 - tp {
+        let n = floor_f64(a / tp)
+        a = a - n * tp
+    }
+    while a > pi_val() { a = a - tp }
+    while a < 0.0 - pi_val() { a = a + tp }
+    let a2 = a * a
+    var sum = a
+    var term = a
+    var n = 1
+    while n < 18 {
+        term = 0.0 - term * a2 / ((2 * n) * (2 * n + 1)) as f64
+        sum = sum + term
+        n = n + 1
+    }
+    return sum
+}
+
+fn cos_f64(x: f64) -> f64 with Mut, Panic, Div {
+    return sin_f64(x + pi_val() / 2.0)
+}
+
+fn pow_f64(base: f64, exponent: f64) -> f64 with Mut, Panic, Div {
+    if exponent == 0.0 { return 1.0 }
+    if base == 0.0 {
+        if exponent > 0.0 { return 0.0 }
+        return 1.0e30
+    }
+    if base == 1.0 { return 1.0 }
+    if base > 0.0 {
+        return exp_f64(exponent * ln_f64(base))
+    }
+    let abs_base = abs_f64(base)
+    let iexp = floor_f64(exponent)
+    if abs_f64(exponent - iexp) < 1.0e-12 {
+        let result = exp_f64(exponent * ln_f64(abs_base))
+        let half = iexp / 2.0
+        let half_floor = floor_f64(half)
+        if abs_f64(half - half_floor) > 0.25 {
+            return 0.0 - result
+        }
+        return result
+    }
+    return 0.0 - 1.0e30
+}
+
+// ============================================================================
+// SPECIAL FUNCTIONS (inlined from stdlib/special/mod.sio)
+// ============================================================================
+
+fn sp_gamma(z: f64) -> f64 with Mut, Panic, Div {
+    if z < 0.5 {
+        let sin_pz = sin_f64(pi_val() * z)
+        if abs_f64(sin_pz) < 1.0e-15 {
+            return 1.0e30
+        }
+        return pi_val() / (sin_pz * sp_gamma(1.0 - z))
+    }
+
+    var p: [f64; 9] = [0.0; 9]
+    p[0] = 0.99999999999980993
+    p[1] = 676.5203681218851
+    p[2] = 0.0 - 1259.1392167224028
+    p[3] = 771.32342877765313
+    p[4] = 0.0 - 176.61502916214059
+    p[5] = 12.507343278686905
+    p[6] = 0.0 - 0.13857109526572012
+    p[7] = 9.9843695780195716e-6
+    p[8] = 1.5056327351493116e-7
+
+    let w = z - 1.0
+    var ag = p[0]
+    var i = 1
+    while i < 9 {
+        ag = ag + p[i] / (w + (i as f64))
+        i = i + 1
+    }
+
+    let t = w + 7.0 - 0.5
+    return sqrt_two_pi_val() * pow_f64(t, w + 0.5) * exp_f64(0.0 - t) * ag
+}
+
+fn sp_lgamma(x: f64) -> f64 with Mut, Panic, Div {
+    if x <= 0.0 { return 1.0e30 }
+
+    var val = x
+    var shift = 0.0
+    while val < 10.0 {
+        shift = shift + ln_f64(val)
+        val = val + 1.0
+    }
+
+    let ln_2pi = 1.8378770664093453
+    var result = (val - 0.5) * ln_f64(val) - val + 0.5 * ln_2pi
+
+    let inv_v = 1.0 / val
+    let inv_v2 = inv_v * inv_v
+    result = result + inv_v / 12.0
+    result = result - inv_v * inv_v2 / 360.0
+    result = result + inv_v * inv_v2 * inv_v2 / 1260.0
+    result = result - inv_v * inv_v2 * inv_v2 * inv_v2 / 1680.0
+
+    return result - shift
+}
+
+fn sp_beta(a: f64, b: f64) -> f64 with Mut, Panic, Div {
+    return exp_f64(sp_lgamma(a) + sp_lgamma(b) - sp_lgamma(a + b))
+}
+
+fn sp_erf(x: f64) -> f64 with Mut, Panic, Div {
+    if x < 0.0 {
+        return 0.0 - sp_erf(0.0 - x)
+    }
+    if x == 0.0 { return 0.0 }
+    if x > 6.0 { return 1.0 }
+
+    let p = 0.3275911
+    let a1 = 0.254829592
+    let a2 = 0.0 - 0.284496736
+    let a3 = 1.421413741
+    let a4 = 0.0 - 1.453152027
+    let a5 = 1.061405429
+
+    let t = 1.0 / (1.0 + p * x)
+    let t2 = t * t
+    let t3 = t2 * t
+    let t4 = t3 * t
+    let t5 = t4 * t
+
+    let poly = a1 * t + a2 * t2 + a3 * t3 + a4 * t4 + a5 * t5
+    return 1.0 - poly * exp_f64(0.0 - x * x)
+}
+
+fn sp_erfc(x: f64) -> f64 with Mut, Panic, Div {
+    if x < 0.0 {
+        return 2.0 - sp_erfc(0.0 - x)
+    }
+    if x == 0.0 { return 1.0 }
+    if x > 6.0 { return 0.0 }
+
+    let p = 0.3275911
+    let a1 = 0.254829592
+    let a2 = 0.0 - 0.284496736
+    let a3 = 1.421413741
+    let a4 = 0.0 - 1.453152027
+    let a5 = 1.061405429
+
+    let t = 1.0 / (1.0 + p * x)
+    let t2 = t * t
+    let t3 = t2 * t
+    let t4 = t3 * t
+    let t5 = t4 * t
+
+    let poly = a1 * t + a2 * t2 + a3 * t3 + a4 * t4 + a5 * t5
+    return poly * exp_f64(0.0 - x * x)
+}
+
+fn sp_gamma_inc_series(a: f64, x: f64) -> f64 with Mut, Panic, Div {
+    var ap = a
+    var sum = 1.0 / a
+    var term = 1.0 / a
+    var n = 0
+    while n < 200 {
+        ap = ap + 1.0
+        term = term * x / ap
+        sum = sum + term
+        if abs_f64(term) < abs_f64(sum) * 1.0e-12 {
+            return sum * exp_f64(0.0 - x + a * ln_f64(x) - sp_lgamma(a))
+        }
+        n = n + 1
+    }
+    return sum * exp_f64(0.0 - x + a * ln_f64(x) - sp_lgamma(a))
+}
+
+fn sp_gamma_inc_cf(a: f64, x: f64) -> f64 with Mut, Panic, Div {
+    let tiny = 1.0e-30
+    let b0 = x + 1.0 - a
+    var f = b0
+    if abs_f64(b0) < tiny { f = tiny }
+    var c = f
+    var d = 0.0
+
+    var n = 1
+    while n < 200 {
+        let an = (n as f64) * ((n as f64) - a)
+        let bn = x + 2.0 * (n as f64) + 1.0 - a
+
+        d = bn + an * d
+        if abs_f64(d) < tiny { d = tiny }
+        d = 1.0 / d
+
+        c = bn + an / c
+        if abs_f64(c) < tiny { c = tiny }
+
+        let delta = c * d
+        f = f * delta
+
+        if abs_f64(delta - 1.0) < 1.0e-12 {
+            n = 200
+        } else {
+            n = n + 1
+        }
+    }
+
+    let log_prefix = 0.0 - x + a * ln_f64(x) - sp_lgamma(a)
+    return exp_f64(log_prefix) / f
+}
+
+fn sp_gamma_inc_p(a: f64, x: f64) -> f64 with Mut, Panic, Div {
+    if x < 0.0 { return 0.0 }
+    if x == 0.0 { return 0.0 }
+    if a <= 0.0 { return 1.0 }
+
+    if x < a + 1.0 {
+        return sp_gamma_inc_series(a, x)
+    } else {
+        return 1.0 - sp_gamma_inc_cf(a, x)
+    }
+}
+
+fn sp_beta_inc_cf(a: f64, b: f64, x: f64) -> f64 with Mut, Panic, Div {
+    let tiny = 1.0e-30
+
+    var d = 1.0 - (a + b) * x / (a + 1.0)
+    if abs_f64(d) < tiny { d = tiny }
+    d = 1.0 / d
+    var f = d
+    var c = 1.0
+
+    var m = 1
+    while m < 200 {
+        let mf = m as f64
+
+        let num_even = mf * (b - mf) * x / ((a + 2.0 * mf - 1.0) * (a + 2.0 * mf))
+
+        d = 1.0 + num_even * d
+        if abs_f64(d) < tiny { d = tiny }
+        d = 1.0 / d
+
+        c = 1.0 + num_even / c
+        if abs_f64(c) < tiny { c = tiny }
+
+        f = f * d * c
+
+        let num_odd = 0.0 - (a + mf) * (a + b + mf) * x / ((a + 2.0 * mf) * (a + 2.0 * mf + 1.0))
+
+        d = 1.0 + num_odd * d
+        if abs_f64(d) < tiny { d = tiny }
+        d = 1.0 / d
+
+        c = 1.0 + num_odd / c
+        if abs_f64(c) < tiny { c = tiny }
+
+        let delta = d * c
+        f = f * delta
+
+        if abs_f64(delta - 1.0) < 1.0e-12 {
+            m = 200
+        } else {
+            m = m + 1
+        }
+    }
+
+    return f
+}
+
+fn sp_beta_inc(a: f64, b: f64, x: f64) -> f64 with Mut, Panic, Div {
+    if x <= 0.0 { return 0.0 }
+    if x >= 1.0 { return 1.0 }
+
+    let pivot = (a + 1.0) / (a + b + 2.0)
+    if x > pivot {
+        return 1.0 - sp_beta_inc(b, a, 1.0 - x)
+    }
+
+    let log_prefix = a * ln_f64(x) + b * ln_f64(1.0 - x) - ln_f64(a) - sp_lgamma(a) - sp_lgamma(b) + sp_lgamma(a + b)
+    let prefix = exp_f64(log_prefix)
+
+    let cf = sp_beta_inc_cf(a, b, x)
+    return prefix * cf
+}
+
+fn sp_digamma(x: f64) -> f64 with Mut, Panic, Div {
+    if x < 0.0 {
+        let s = sin_f64(pi_val() * x)
+        if abs_f64(s) < 1.0e-15 { return 1.0e30 }
+        return sp_digamma(1.0 - x) - pi_val() * cos_f64(pi_val() * x) / s
+    }
+
+    if x == 0.0 { return 0.0 - 1.0e30 }
+
+    var val = x
+    var shift = 0.0
+    while val < 7.0 {
+        shift = shift - 1.0 / val
+        val = val + 1.0
+    }
+
+    let inv_v = 1.0 / val
+    let inv_v2 = inv_v * inv_v
+
+    var result = ln_f64(val) - 0.5 * inv_v
+    result = result - inv_v2 / 12.0
+    result = result + inv_v2 * inv_v2 / 120.0
+    result = result - inv_v2 * inv_v2 * inv_v2 / 252.0
+    result = result + inv_v2 * inv_v2 * inv_v2 * inv_v2 / 240.0
+    result = result - 5.0 * inv_v2 * inv_v2 * inv_v2 * inv_v2 * inv_v2 / 660.0
+
+    return result + shift
+}
+
+// ============================================================================
+// TEST FUNCTIONS
+// ============================================================================
+
+// Test 1: Gamma at positive integers -- Gamma(n) = (n-1)!
+fn test_gamma_integers() -> bool with IO, Mut, Panic, Div {
+    let g1 = sp_gamma(1.0)
+    let g2 = sp_gamma(2.0)
+    let g3 = sp_gamma(3.0)
+    let g4 = sp_gamma(4.0)
+    let g5 = sp_gamma(5.0)
+    let g6 = sp_gamma(6.0)
+
+    print("  G(1)=")
+    println(g1)
+    print("  G(2)=")
+    println(g2)
+    print("  G(3)=")
+    println(g3)
+    print("  G(4)=")
+    println(g4)
+    print("  G(5)=")
+    println(g5)
+    print("  G(6)=")
+    println(g6)
+
+    let tol = 1.0e-6
+    let ok1 = abs_f64(g1 - 1.0) < tol
+    let ok2 = abs_f64(g2 - 1.0) < tol
+    let ok3 = abs_f64(g3 - 2.0) < tol
+    let ok4 = abs_f64(g4 - 6.0) < tol
+    let ok5 = abs_f64(g5 - 24.0) < tol
+    let ok6 = abs_f64(g6 - 120.0) < tol
+    return ok1 && ok2 && ok3 && ok4 && ok5 && ok6
+}
+
+// Test 2: Gamma(0.5) = sqrt(pi)
+fn test_gamma_half() -> bool with IO, Mut, Panic, Div {
+    let g = sp_gamma(0.5)
+    let expected = sqrt_f64(pi_val())
+
+    print("  G(0.5)=")
+    println(g)
+    print("  sqrt(pi)=")
+    println(expected)
+
+    return abs_f64(g - expected) < 1.0e-6
+}
+
+// Test 3: Gamma reflection formula: Gamma(z)*Gamma(1-z) = pi/sin(pi*z)
+fn test_gamma_reflection() -> bool with IO, Mut, Panic, Div {
+    let z = 0.25
+    let gz = sp_gamma(z)
+    let g1z = sp_gamma(1.0 - z)
+    let product = gz * g1z
+    let expected = pi_val() / sin_f64(pi_val() * z)
+
+    print("  G(0.25)*G(0.75)=")
+    println(product)
+    print("  pi/sin(pi/4)=")
+    println(expected)
+
+    return abs_f64(product - expected) < 1.0e-4
+}
+
+// Test 4: lgamma(100) ~ 359.13420536957...
+fn test_lgamma_large() -> bool with IO, Mut, Panic, Div {
+    let lg = sp_lgamma(100.0)
+    let expected = 359.1342053695754
+
+    print("  lgamma(100)=")
+    println(lg)
+    print("  expected=")
+    println(expected)
+
+    return abs_f64(lg - expected) < 1.0e-4
+}
+
+// Test 5: Beta symmetry: B(a,b) = B(b,a)
+fn test_beta_symmetry() -> bool with IO, Mut, Panic, Div {
+    let b1 = sp_beta(2.0, 5.0)
+    let b2 = sp_beta(5.0, 2.0)
+
+    print("  B(2,5)=")
+    println(b1)
+    print("  B(5,2)=")
+    println(b2)
+
+    return abs_f64(b1 - b2) < 1.0e-6
+}
+
+// Test 6: Beta identities: B(1,1)=1, B(1,n)=1/n, B(0.5,0.5)=pi
+fn test_beta_identity() -> bool with IO, Mut, Panic, Div {
+    let b11 = sp_beta(1.0, 1.0)
+    let b13 = sp_beta(1.0, 3.0)
+    let b15 = sp_beta(1.0, 5.0)
+    let bhh = sp_beta(0.5, 0.5)
+
+    print("  B(1,1)=")
+    println(b11)
+    print("  B(1,3)=")
+    println(b13)
+    print("  B(1,5)=")
+    println(b15)
+    print("  B(0.5,0.5)=")
+    println(bhh)
+
+    let tol = 1.0e-4
+    let ok1 = abs_f64(b11 - 1.0) < tol
+    let ok2 = abs_f64(b13 - 1.0 / 3.0) < tol
+    let ok3 = abs_f64(b15 - 1.0 / 5.0) < tol
+    let ok4 = abs_f64(bhh - pi_val()) < tol
+    return ok1 && ok2 && ok3 && ok4
+}
+
+// Test 7: erf known values: erf(0)=0, erf(1)~0.8427, erf(2)~0.9953
+fn test_erf_values() -> bool with IO, Mut, Panic, Div {
+    let e0 = sp_erf(0.0)
+    let e1 = sp_erf(1.0)
+    let e2 = sp_erf(2.0)
+
+    print("  erf(0)=")
+    println(e0)
+    print("  erf(1)=")
+    println(e1)
+    print("  erf(2)=")
+    println(e2)
+
+    let tol = 1.0e-4
+    let ok0 = abs_f64(e0) < tol
+    let ok1 = abs_f64(e1 - 0.8427007929) < tol
+    let ok2 = abs_f64(e2 - 0.9953222650) < tol
+    return ok0 && ok1 && ok2
+}
+
+// Test 8: erf symmetry: erf(-x) = -erf(x)
+fn test_erf_symmetry() -> bool with IO, Mut, Panic, Div {
+    let x1 = 0.5
+    let x2 = 1.5
+    let x3 = 2.5
+
+    let sym1 = sp_erf(x1) + sp_erf(0.0 - x1)
+    let sym2 = sp_erf(x2) + sp_erf(0.0 - x2)
+    let sym3 = sp_erf(x3) + sp_erf(0.0 - x3)
+
+    print("  erf(0.5)+erf(-0.5)=")
+    println(sym1)
+    print("  erf(1.5)+erf(-1.5)=")
+    println(sym2)
+    print("  erf(2.5)+erf(-2.5)=")
+    println(sym3)
+
+    let tol = 1.0e-6
+    return abs_f64(sym1) < tol && abs_f64(sym2) < tol && abs_f64(sym3) < tol
+}
+
+// Test 9: erfc complement: erf(x) + erfc(x) = 1
+fn test_erfc_complement() -> bool with IO, Mut, Panic, Div {
+    let x1 = 0.5
+    let x2 = 1.0
+    let x3 = 2.0
+
+    let sum1 = sp_erf(x1) + sp_erfc(x1)
+    let sum2 = sp_erf(x2) + sp_erfc(x2)
+    let sum3 = sp_erf(x3) + sp_erfc(x3)
+
+    print("  erf(0.5)+erfc(0.5)=")
+    println(sum1)
+    print("  erf(1)+erfc(1)=")
+    println(sum2)
+    print("  erf(2)+erfc(2)=")
+    println(sum3)
+
+    let tol = 1.0e-6
+    return abs_f64(sum1 - 1.0) < tol && abs_f64(sum2 - 1.0) < tol && abs_f64(sum3 - 1.0) < tol
+}
+
+// Test 10: Incomplete gamma: P(1,1) = 1-e^{-1}, P(0.5,1) = erf(1)
+fn test_incomplete_gamma() -> bool with IO, Mut, Panic, Div {
+    let p11 = sp_gamma_inc_p(1.0, 1.0)
+    let expected_p11 = 1.0 - exp_f64(0.0 - 1.0)
+
+    // P(0.5, x) = erf(sqrt(x)) for x > 0
+    let p05_1 = sp_gamma_inc_p(0.5, 1.0)
+    let expected_p05 = sp_erf(sqrt_f64(1.0))
+
+    print("  P(1,1)=")
+    println(p11)
+    print("  1-e^(-1)=")
+    println(expected_p11)
+    print("  P(0.5,1)=")
+    println(p05_1)
+    print("  erf(1)=")
+    println(expected_p05)
+
+    let tol = 1.0e-4
+    let ok1 = abs_f64(p11 - expected_p11) < tol
+    let ok2 = abs_f64(p05_1 - expected_p05) < tol
+    return ok1 && ok2
+}
+
+// Test 11: Digamma at positive integers: psi(1) = -gamma, psi(2) = 1 - gamma
+fn test_digamma_integers() -> bool with IO, Mut, Panic, Div {
+    let psi1 = sp_digamma(1.0)
+    let psi2 = sp_digamma(2.0)
+    let psi3 = sp_digamma(3.0)
+
+    let neg_gamma = 0.0 - euler_gamma_val()
+    let one_minus_gamma = 1.0 - euler_gamma_val()
+    // psi(3) = 1 + 1/2 - gamma = 1.5 - gamma
+    let psi3_expected = 1.5 - euler_gamma_val()
+
+    print("  psi(1)=")
+    println(psi1)
+    print("  -gamma=")
+    println(neg_gamma)
+    print("  psi(2)=")
+    println(psi2)
+    print("  1-gamma=")
+    println(one_minus_gamma)
+    print("  psi(3)=")
+    println(psi3)
+
+    let tol = 1.0e-4
+    let ok1 = abs_f64(psi1 - neg_gamma) < tol
+    let ok2 = abs_f64(psi2 - one_minus_gamma) < tol
+    let ok3 = abs_f64(psi3 - psi3_expected) < tol
+    return ok1 && ok2 && ok3
+}
+
+// ============================================================================
+// MAIN TEST RUNNER
+// ============================================================================
+
+fn main() -> i32 with IO, Mut, Panic, Div {
+    println("=== Special Functions Tests ===")
+    println("")
+
+    var passed = 0
+    var failed = 0
+
+    // Test 1
+    print("Test  1: Gamma integers.......... ")
+    if test_gamma_integers() {
+        println("PASS")
+        passed = passed + 1
+    } else {
+        println("FAIL")
+        failed = failed + 1
+    }
+
+    // Test 2
+    print("Test  2: Gamma(0.5) = sqrt(pi)... ")
+    if test_gamma_half() {
+        println("PASS")
+        passed = passed + 1
+    } else {
+        println("FAIL")
+        failed = failed + 1
+    }
+
+    // Test 3
+    print("Test  3: Gamma reflection........ ")
+    if test_gamma_reflection() {
+        println("PASS")
+        passed = passed + 1
+    } else {
+        println("FAIL")
+        failed = failed + 1
+    }
+
+    // Test 4
+    print("Test  4: lgamma(100)............. ")
+    if test_lgamma_large() {
+        println("PASS")
+        passed = passed + 1
+    } else {
+        println("FAIL")
+        failed = failed + 1
+    }
+
+    // Test 5
+    print("Test  5: Beta symmetry........... ")
+    if test_beta_symmetry() {
+        println("PASS")
+        passed = passed + 1
+    } else {
+        println("FAIL")
+        failed = failed + 1
+    }
+
+    // Test 6
+    print("Test  6: Beta identities......... ")
+    if test_beta_identity() {
+        println("PASS")
+        passed = passed + 1
+    } else {
+        println("FAIL")
+        failed = failed + 1
+    }
+
+    // Test 7
+    print("Test  7: erf known values........ ")
+    if test_erf_values() {
+        println("PASS")
+        passed = passed + 1
+    } else {
+        println("FAIL")
+        failed = failed + 1
+    }
+
+    // Test 8
+    print("Test  8: erf symmetry............ ")
+    if test_erf_symmetry() {
+        println("PASS")
+        passed = passed + 1
+    } else {
+        println("FAIL")
+        failed = failed + 1
+    }
+
+    // Test 9
+    print("Test  9: erfc complement......... ")
+    if test_erfc_complement() {
+        println("PASS")
+        passed = passed + 1
+    } else {
+        println("FAIL")
+        failed = failed + 1
+    }
+
+    // Test 10
+    print("Test 10: Incomplete gamma........ ")
+    if test_incomplete_gamma() {
+        println("PASS")
+        passed = passed + 1
+    } else {
+        println("FAIL")
+        failed = failed + 1
+    }
+
+    // Test 11
+    print("Test 11: Digamma integers........ ")
+    if test_digamma_integers() {
+        println("PASS")
+        passed = passed + 1
+    } else {
+        println("FAIL")
+        failed = failed + 1
+    }
+
+    println("")
+    if failed == 0 {
+        println("ALL 11 TESTS PASSED")
+        return 0
+    }
+    println("SOME TESTS FAILED")
+    return 1
+}

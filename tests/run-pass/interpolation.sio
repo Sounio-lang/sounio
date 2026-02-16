@@ -1,0 +1,919 @@
+//@ run-pass
+// interpolation.sio - Integration tests for interpolation algorithms
+//
+// Tests piecewise linear, natural cubic spline, Lagrange, and Akima
+// interpolation methods. Validates exactness at data points, correct
+// behavior between points, boundary clamping, derivative accuracy,
+// and monotonicity preservation.
+
+// ============================================================================
+// HELPERS (must precede callers)
+// ============================================================================
+
+fn abs_f64(x: f64) -> f64 {
+    if x < 0.0 { return 0.0 - x }
+    return x
+}
+
+// Binary search for interval i such that xs[i] <= x < xs[i+1].
+fn binary_search_interval(xs: [f64; 256], n: i32, x: f64) -> i32 with Mut, Panic {
+    if n < 2 { return 0 }
+    if x <= xs[0] { return 0 }
+    if x >= xs[n - 1] { return n - 2 }
+
+    var lo: i32 = 0
+    var hi: i32 = n - 1
+    while hi - lo > 1 {
+        let mid = lo + (hi - lo) / 2
+        if xs[mid] <= x {
+            lo = mid
+        } else {
+            hi = mid
+        }
+    }
+    return lo
+}
+
+fn binary_search_interval_64(xs: [f64; 64], n: i32, x: f64) -> i32 with Mut, Panic {
+    if n < 2 { return 0 }
+    if x <= xs[0] { return 0 }
+    if x >= xs[n - 1] { return n - 2 }
+
+    var lo: i32 = 0
+    var hi: i32 = n - 1
+    while hi - lo > 1 {
+        let mid = lo + (hi - lo) / 2
+        if xs[mid] <= x {
+            lo = mid
+        } else {
+            hi = mid
+        }
+    }
+    return lo
+}
+
+// Thomas algorithm for tridiagonal systems.
+fn tridiag_solve(
+    lower: [f64; 256],
+    diag: [f64; 256],
+    upper: [f64; 256],
+    rhs: [f64; 256],
+    n: i32
+) -> [f64; 256] with Mut, Panic, Div {
+    var c_prime: [f64; 256] = [0.0; 256]
+    var d_prime: [f64; 256] = [0.0; 256]
+    var x_out: [f64; 256] = [0.0; 256]
+
+    c_prime[0] = upper[0] / diag[0]
+    d_prime[0] = rhs[0] / diag[0]
+
+    var i: i32 = 1
+    while i < n {
+        let m = lower[i] / (diag[i] - lower[i] * c_prime[i - 1])
+        c_prime[i] = upper[i] / (diag[i] - lower[i] * c_prime[i - 1])
+        d_prime[i] = (rhs[i] - lower[i] * d_prime[i - 1]) / (diag[i] - lower[i] * c_prime[i - 1])
+        i = i + 1
+    }
+
+    x_out[n - 1] = d_prime[n - 1]
+    i = n - 2
+    while i >= 0 {
+        x_out[i] = d_prime[i] - c_prime[i] * x_out[i + 1]
+        i = i - 1
+    }
+
+    return x_out
+}
+
+// ============================================================================
+// DATA STRUCTURES (inlined since tests cannot import)
+// ============================================================================
+
+struct PiecewiseLinear {
+    xs: [f64; 256],
+    ys: [f64; 256],
+    n: i32
+}
+
+struct CubicSpline {
+    xs: [f64; 256],
+    a: [f64; 256],
+    b: [f64; 256],
+    c: [f64; 256],
+    d: [f64; 256],
+    n: i32
+}
+
+struct LagrangeInterp {
+    xs: [f64; 64],
+    ys: [f64; 64],
+    n: i32
+}
+
+struct AkimaSpline {
+    xs: [f64; 256],
+    a: [f64; 256],
+    b: [f64; 256],
+    c: [f64; 256],
+    d: [f64; 256],
+    n: i32
+}
+
+// ============================================================================
+// PIECEWISE LINEAR INTERPOLATION
+// ============================================================================
+
+fn piecewise_linear_new(xs: [f64; 256], ys: [f64; 256], n: i32) -> PiecewiseLinear {
+    return PiecewiseLinear { xs: xs, ys: ys, n: n }
+}
+
+fn piecewise_linear_eval(interp: PiecewiseLinear, x: f64) -> f64 with Mut, Panic, Div {
+    if interp.n < 2 {
+        if interp.n == 1 { return interp.ys[0] }
+        return 0.0
+    }
+    if x <= interp.xs[0] { return interp.ys[0] }
+    if x >= interp.xs[interp.n - 1] { return interp.ys[interp.n - 1] }
+
+    let i = binary_search_interval(interp.xs, interp.n, x)
+    let h = interp.xs[i + 1] - interp.xs[i]
+    if abs_f64(h) < 1.0e-30 { return interp.ys[i] }
+    let t = (x - interp.xs[i]) / h
+    return interp.ys[i] + t * (interp.ys[i + 1] - interp.ys[i])
+}
+
+// ============================================================================
+// NATURAL CUBIC SPLINE
+// ============================================================================
+
+fn cubic_spline_fit(xs: [f64; 256], ys: [f64; 256], n: i32) -> CubicSpline with Mut, Panic, Div {
+    var spline = CubicSpline {
+        xs: xs,
+        a: ys,
+        b: [0.0; 256],
+        c: [0.0; 256],
+        d: [0.0; 256],
+        n: n
+    }
+
+    if n < 2 { return spline }
+
+    var h: [f64; 256] = [0.0; 256]
+    var i: i32 = 0
+    while i < n - 1 {
+        h[i] = xs[i + 1] - xs[i]
+        i = i + 1
+    }
+
+    if n == 2 {
+        if abs_f64(h[0]) > 1.0e-30 {
+            spline.b[0] = (ys[1] - ys[0]) / h[0]
+        }
+        return spline
+    }
+
+    let m = n - 2
+    var lower: [f64; 256] = [0.0; 256]
+    var diag: [f64; 256] = [0.0; 256]
+    var upper: [f64; 256] = [0.0; 256]
+    var rhs: [f64; 256] = [0.0; 256]
+
+    i = 0
+    while i < m {
+        let idx = i + 1
+        diag[i] = 2.0 * (h[idx - 1] + h[idx])
+        if i > 0 {
+            lower[i] = h[idx - 1]
+        }
+        if i < m - 1 {
+            upper[i] = h[idx]
+        }
+        let slope_right = (ys[idx + 1] - ys[idx]) / h[idx]
+        let slope_left = (ys[idx] - ys[idx - 1]) / h[idx - 1]
+        rhs[i] = 3.0 * (slope_right - slope_left)
+        i = i + 1
+    }
+
+    let c_interior = tridiag_solve(lower, diag, upper, rhs, m)
+
+    spline.c[0] = 0.0
+    i = 0
+    while i < m {
+        spline.c[i + 1] = c_interior[i]
+        i = i + 1
+    }
+    spline.c[n - 1] = 0.0
+
+    i = 0
+    while i < n - 1 {
+        let hi = h[i]
+        if abs_f64(hi) < 1.0e-30 {
+            spline.b[i] = 0.0
+            spline.d[i] = 0.0
+        } else {
+            spline.b[i] = (ys[i + 1] - ys[i]) / hi - hi * (2.0 * spline.c[i] + spline.c[i + 1]) / 3.0
+            spline.d[i] = (spline.c[i + 1] - spline.c[i]) / (3.0 * hi)
+        }
+        i = i + 1
+    }
+
+    return spline
+}
+
+fn cubic_spline_eval(spline: CubicSpline, x: f64) -> f64 with Mut, Panic, Div {
+    if spline.n < 2 {
+        if spline.n == 1 { return spline.a[0] }
+        return 0.0
+    }
+
+    var xc: f64 = x
+    if xc < spline.xs[0] { xc = spline.xs[0] }
+    if xc > spline.xs[spline.n - 1] { xc = spline.xs[spline.n - 1] }
+
+    let i = binary_search_interval(spline.xs, spline.n, xc)
+    let dx = xc - spline.xs[i]
+    return spline.a[i] + dx * (spline.b[i] + dx * (spline.c[i] + dx * spline.d[i]))
+}
+
+fn cubic_spline_derivative(spline: CubicSpline, x: f64) -> f64 with Mut, Panic, Div {
+    if spline.n < 2 { return 0.0 }
+
+    var xc: f64 = x
+    if xc < spline.xs[0] { xc = spline.xs[0] }
+    if xc > spline.xs[spline.n - 1] { xc = spline.xs[spline.n - 1] }
+
+    let i = binary_search_interval(spline.xs, spline.n, xc)
+    let dx = xc - spline.xs[i]
+    return spline.b[i] + dx * (2.0 * spline.c[i] + 3.0 * spline.d[i] * dx)
+}
+
+// ============================================================================
+// LAGRANGE INTERPOLATION (Barycentric)
+// ============================================================================
+
+fn lagrange_new(xs: [f64; 64], ys: [f64; 64], n: i32) -> LagrangeInterp {
+    return LagrangeInterp { xs: xs, ys: ys, n: n }
+}
+
+fn lagrange_eval(interp: LagrangeInterp, x: f64) -> f64 with Mut, Panic, Div {
+    let n = interp.n
+    if n < 1 { return 0.0 }
+    if n == 1 { return interp.ys[0] }
+
+    var k: i32 = 0
+    while k < n {
+        if abs_f64(x - interp.xs[k]) < 1.0e-15 {
+            return interp.ys[k]
+        }
+        k = k + 1
+    }
+
+    var weights: [f64; 64] = [0.0; 64]
+    var i: i32 = 0
+    while i < n {
+        var prod: f64 = 1.0
+        var j: i32 = 0
+        while j < n {
+            if j != i {
+                prod = prod * (interp.xs[i] - interp.xs[j])
+            }
+            j = j + 1
+        }
+        if abs_f64(prod) < 1.0e-30 {
+            weights[i] = 0.0
+        } else {
+            weights[i] = 1.0 / prod
+        }
+        i = i + 1
+    }
+
+    var numerator: f64 = 0.0
+    var denominator: f64 = 0.0
+    i = 0
+    while i < n {
+        let diff = x - interp.xs[i]
+        let term = weights[i] / diff
+        numerator = numerator + term * interp.ys[i]
+        denominator = denominator + term
+        i = i + 1
+    }
+
+    if abs_f64(denominator) < 1.0e-30 { return 0.0 }
+    return numerator / denominator
+}
+
+// ============================================================================
+// AKIMA INTERPOLATION
+// ============================================================================
+
+fn akima_fit(xs: [f64; 256], ys: [f64; 256], n: i32) -> AkimaSpline with Mut, Panic, Div {
+    var spline = AkimaSpline {
+        xs: xs,
+        a: ys,
+        b: [0.0; 256],
+        c: [0.0; 256],
+        d: [0.0; 256],
+        n: n
+    }
+
+    if n < 2 { return spline }
+
+    if n == 2 {
+        let h = xs[1] - xs[0]
+        if abs_f64(h) > 1.0e-30 {
+            spline.b[0] = (ys[1] - ys[0]) / h
+        }
+        return spline
+    }
+
+    var dm: [f64; 260] = [0.0; 260]
+    var i: i32 = 0
+    while i < n - 1 {
+        let h = xs[i + 1] - xs[i]
+        if abs_f64(h) < 1.0e-30 {
+            dm[i + 2] = 0.0
+        } else {
+            dm[i + 2] = (ys[i + 1] - ys[i]) / h
+        }
+        i = i + 1
+    }
+
+    if n >= 3 {
+        dm[1] = 2.0 * dm[2] - dm[3]
+        dm[0] = 2.0 * dm[1] - dm[2]
+        dm[n + 1] = 2.0 * dm[n] - dm[n - 1]
+        dm[n + 2] = 2.0 * dm[n + 1] - dm[n]
+    } else {
+        dm[1] = dm[2]
+        dm[0] = dm[2]
+        dm[3] = dm[2]
+        dm[4] = dm[2]
+    }
+
+    var slopes: [f64; 256] = [0.0; 256]
+    i = 0
+    while i < n {
+        let w1 = abs_f64(dm[i + 3] - dm[i + 2])
+        let w2 = abs_f64(dm[i + 1] - dm[i])
+
+        if w1 + w2 < 1.0e-30 {
+            slopes[i] = (dm[i + 1] + dm[i + 2]) / 2.0
+        } else {
+            slopes[i] = (w1 * dm[i + 1] + w2 * dm[i + 2]) / (w1 + w2)
+        }
+        i = i + 1
+    }
+
+    i = 0
+    while i < n - 1 {
+        let h = xs[i + 1] - xs[i]
+        if abs_f64(h) < 1.0e-30 {
+            spline.b[i] = slopes[i]
+            spline.c[i] = 0.0
+            spline.d[i] = 0.0
+        } else {
+            let mi = (ys[i + 1] - ys[i]) / h
+            spline.b[i] = slopes[i]
+            spline.c[i] = (3.0 * mi - 2.0 * slopes[i] - slopes[i + 1]) / h
+            spline.d[i] = (slopes[i] + slopes[i + 1] - 2.0 * mi) / (h * h)
+        }
+        i = i + 1
+    }
+
+    return spline
+}
+
+fn akima_eval(spline: AkimaSpline, x: f64) -> f64 with Mut, Panic, Div {
+    if spline.n < 2 {
+        if spline.n == 1 { return spline.a[0] }
+        return 0.0
+    }
+
+    var xc: f64 = x
+    if xc < spline.xs[0] { xc = spline.xs[0] }
+    if xc > spline.xs[spline.n - 1] { xc = spline.xs[spline.n - 1] }
+
+    let i = binary_search_interval(spline.xs, spline.n, xc)
+    let dx = xc - spline.xs[i]
+    return spline.a[i] + dx * (spline.b[i] + dx * (spline.c[i] + dx * spline.d[i]))
+}
+
+// ============================================================================
+// TESTS
+// ============================================================================
+
+// Test 1: Piecewise linear interpolation at data points returns exact values
+fn test_piecewise_linear_exact() -> bool with IO, Mut, Panic, Div {
+    var xs: [f64; 256] = [0.0; 256]
+    var ys: [f64; 256] = [0.0; 256]
+    xs[0] = 0.0; ys[0] = 0.0
+    xs[1] = 1.0; ys[1] = 2.0
+    xs[2] = 2.0; ys[2] = 1.0
+    xs[3] = 3.0; ys[3] = 4.0
+    xs[4] = 4.0; ys[4] = 3.0
+
+    let interp = piecewise_linear_new(xs, ys, 5)
+
+    var max_err: f64 = 0.0
+    var i: i32 = 0
+    while i < 5 {
+        let val = piecewise_linear_eval(interp, xs[i])
+        let err = abs_f64(val - ys[i])
+        if err > max_err { max_err = err }
+        i = i + 1
+    }
+
+    print("  max_err=")
+    println(max_err)
+    return max_err < 1.0e-12
+}
+
+// Test 2: Piecewise linear interpolation at midpoints
+fn test_piecewise_linear_midpoint() -> bool with IO, Mut, Panic, Div {
+    var xs: [f64; 256] = [0.0; 256]
+    var ys: [f64; 256] = [0.0; 256]
+    xs[0] = 0.0; ys[0] = 0.0
+    xs[1] = 1.0; ys[1] = 2.0
+    xs[2] = 2.0; ys[2] = 1.0
+    xs[3] = 3.0; ys[3] = 4.0
+
+    let interp = piecewise_linear_new(xs, ys, 4)
+
+    // Midpoint of [0,1]: expected (0+2)/2 = 1.0
+    let v1 = piecewise_linear_eval(interp, 0.5)
+    let e1 = abs_f64(v1 - 1.0)
+
+    // Midpoint of [1,2]: expected (2+1)/2 = 1.5
+    let v2 = piecewise_linear_eval(interp, 1.5)
+    let e2 = abs_f64(v2 - 1.5)
+
+    // Midpoint of [2,3]: expected (1+4)/2 = 2.5
+    let v3 = piecewise_linear_eval(interp, 2.5)
+    let e3 = abs_f64(v3 - 2.5)
+
+    print("  e1=")
+    println(e1)
+    print("  e2=")
+    println(e2)
+    print("  e3=")
+    println(e3)
+
+    return e1 < 1.0e-12 && e2 < 1.0e-12 && e3 < 1.0e-12
+}
+
+// Test 3: Piecewise linear extrapolation clamps at boundaries
+fn test_piecewise_linear_extrapolate() -> bool with IO, Mut, Panic, Div {
+    var xs: [f64; 256] = [0.0; 256]
+    var ys: [f64; 256] = [0.0; 256]
+    xs[0] = 1.0; ys[0] = 10.0
+    xs[1] = 2.0; ys[1] = 20.0
+    xs[2] = 3.0; ys[2] = 30.0
+
+    let interp = piecewise_linear_new(xs, ys, 3)
+
+    // Below range: should clamp to ys[0] = 10.0
+    let v_low = piecewise_linear_eval(interp, 0.0 - 5.0)
+    let e_low = abs_f64(v_low - 10.0)
+
+    // Above range: should clamp to ys[2] = 30.0
+    let v_high = piecewise_linear_eval(interp, 100.0)
+    let e_high = abs_f64(v_high - 30.0)
+
+    print("  v_low=")
+    println(v_low)
+    print("  v_high=")
+    println(v_high)
+
+    return e_low < 1.0e-12 && e_high < 1.0e-12
+}
+
+// Test 4: Cubic spline passes through data points
+fn test_cubic_spline_exact() -> bool with IO, Mut, Panic, Div {
+    var xs: [f64; 256] = [0.0; 256]
+    var ys: [f64; 256] = [0.0; 256]
+    xs[0] = 0.0; ys[0] = 0.0
+    xs[1] = 1.0; ys[1] = 1.0
+    xs[2] = 2.0; ys[2] = 0.0
+    xs[3] = 3.0; ys[3] = 1.0
+    xs[4] = 4.0; ys[4] = 0.0
+
+    let spline = cubic_spline_fit(xs, ys, 5)
+
+    var max_err: f64 = 0.0
+    var i: i32 = 0
+    while i < 5 {
+        let val = cubic_spline_eval(spline, xs[i])
+        let err = abs_f64(val - ys[i])
+        if err > max_err { max_err = err }
+        i = i + 1
+    }
+
+    print("  max_err=")
+    println(max_err)
+    return max_err < 1.0e-10
+}
+
+// Test 5: Cubic spline evaluates smoothly between points (no jumps)
+fn test_cubic_spline_smooth() -> bool with IO, Mut, Panic, Div {
+    var xs: [f64; 256] = [0.0; 256]
+    var ys: [f64; 256] = [0.0; 256]
+    xs[0] = 0.0; ys[0] = 0.0
+    xs[1] = 1.0; ys[1] = 1.0
+    xs[2] = 2.0; ys[2] = 4.0
+    xs[3] = 3.0; ys[3] = 9.0
+    xs[4] = 4.0; ys[4] = 16.0
+
+    let spline = cubic_spline_fit(xs, ys, 5)
+
+    // Evaluate at fine grid and check that consecutive values differ smoothly
+    var max_jump: f64 = 0.0
+    var prev_val: f64 = cubic_spline_eval(spline, 0.0)
+    let step = 0.01
+    var t: f64 = 0.01
+    var count: i32 = 0
+    while t <= 4.0 {
+        let val = cubic_spline_eval(spline, t)
+        let jump = abs_f64(val - prev_val)
+        if jump > max_jump { max_jump = jump }
+        prev_val = val
+        t = t + step
+        count = count + 1
+    }
+
+    print("  max_jump=")
+    println(max_jump)
+    print("  n_points=")
+    println(count)
+
+    // For step=0.01 on quadratic data, jumps should be small (no discontinuities)
+    return max_jump < 0.5
+}
+
+// Test 6: Cubic spline fits quadratic data exactly (C2 continuity)
+// For y = x^2, a natural cubic spline with enough points should reproduce it well.
+fn test_cubic_spline_quadratic() -> bool with IO, Mut, Panic, Div {
+    var xs: [f64; 256] = [0.0; 256]
+    var ys: [f64; 256] = [0.0; 256]
+    xs[0] = 0.0; ys[0] = 0.0
+    xs[1] = 1.0; ys[1] = 1.0
+    xs[2] = 2.0; ys[2] = 4.0
+    xs[3] = 3.0; ys[3] = 9.0
+    xs[4] = 4.0; ys[4] = 16.0
+
+    let spline = cubic_spline_fit(xs, ys, 5)
+
+    // Test at interior points where the spline should closely match x^2.
+    // Natural cubic spline reproduces quadratics exactly on interior intervals
+    // (only boundary intervals may deviate due to natural BC).
+    var max_err: f64 = 0.0
+    let v1 = cubic_spline_eval(spline, 1.5)
+    let e1 = abs_f64(v1 - 2.25)
+    if e1 > max_err { max_err = e1 }
+
+    let v2 = cubic_spline_eval(spline, 2.5)
+    let e2 = abs_f64(v2 - 6.25)
+    if e2 > max_err { max_err = e2 }
+
+    let v3 = cubic_spline_eval(spline, 2.0)
+    let e3 = abs_f64(v3 - 4.0)
+    if e3 > max_err { max_err = e3 }
+
+    print("  v(1.5)=")
+    println(v1)
+    print("  v(2.5)=")
+    println(v2)
+    print("  max_err=")
+    println(max_err)
+
+    // Natural cubic spline reproduces quadratics exactly on interior intervals
+    return max_err < 0.1
+}
+
+// Test 7: Derivative of cubic spline on quadratic data matches 2x
+fn test_cubic_spline_derivative() -> bool with IO, Mut, Panic, Div {
+    var xs: [f64; 256] = [0.0; 256]
+    var ys: [f64; 256] = [0.0; 256]
+    xs[0] = 0.0; ys[0] = 0.0
+    xs[1] = 1.0; ys[1] = 1.0
+    xs[2] = 2.0; ys[2] = 4.0
+    xs[3] = 3.0; ys[3] = 9.0
+    xs[4] = 4.0; ys[4] = 16.0
+
+    let spline = cubic_spline_fit(xs, ys, 5)
+
+    // For y=x^2, derivative should be 2x.
+    // Test at interior points.
+    let d1 = cubic_spline_derivative(spline, 1.5)
+    let e1 = abs_f64(d1 - 3.0)
+
+    let d2 = cubic_spline_derivative(spline, 2.0)
+    let e2 = abs_f64(d2 - 4.0)
+
+    let d3 = cubic_spline_derivative(spline, 2.5)
+    let e3 = abs_f64(d3 - 5.0)
+
+    print("  d(1.5)=")
+    println(d1)
+    print("  d(2.0)=")
+    println(d2)
+    print("  d(2.5)=")
+    println(d3)
+
+    var max_err: f64 = e1
+    if e2 > max_err { max_err = e2 }
+    if e3 > max_err { max_err = e3 }
+
+    print("  max_err=")
+    println(max_err)
+
+    return max_err < 0.5
+}
+
+// Test 8: Lagrange interpolation at nodes returns exact values
+fn test_lagrange_exact() -> bool with IO, Mut, Panic, Div {
+    var xs: [f64; 64] = [0.0; 64]
+    var ys: [f64; 64] = [0.0; 64]
+    xs[0] = 0.0; ys[0] = 1.0
+    xs[1] = 1.0; ys[1] = 3.0
+    xs[2] = 2.0; ys[2] = 2.0
+    xs[3] = 3.0; ys[3] = 5.0
+
+    let interp = lagrange_new(xs, ys, 4)
+
+    var max_err: f64 = 0.0
+    var i: i32 = 0
+    while i < 4 {
+        let val = lagrange_eval(interp, xs[i])
+        let err = abs_f64(val - ys[i])
+        if err > max_err { max_err = err }
+        i = i + 1
+    }
+
+    print("  max_err=")
+    println(max_err)
+    return max_err < 1.0e-10
+}
+
+// Test 9: Lagrange fits polynomial data exactly
+// Data from y = x^2 - x + 1 at x=0,1,2,3 (degree-2 polynomial, 4 points is enough)
+fn test_lagrange_polynomial() -> bool with IO, Mut, Panic, Div {
+    var xs: [f64; 64] = [0.0; 64]
+    var ys: [f64; 64] = [0.0; 64]
+    // y = x^2 - x + 1: y(0)=1, y(1)=1, y(2)=3, y(3)=7
+    xs[0] = 0.0; ys[0] = 1.0
+    xs[1] = 1.0; ys[1] = 1.0
+    xs[2] = 2.0; ys[2] = 3.0
+    xs[3] = 3.0; ys[3] = 7.0
+
+    let interp = lagrange_new(xs, ys, 4)
+
+    // Test at non-node points
+    // y(0.5) = 0.25 - 0.5 + 1 = 0.75
+    let v1 = lagrange_eval(interp, 0.5)
+    let e1 = abs_f64(v1 - 0.75)
+
+    // y(1.5) = 2.25 - 1.5 + 1 = 1.75
+    let v2 = lagrange_eval(interp, 1.5)
+    let e2 = abs_f64(v2 - 1.75)
+
+    // y(2.5) = 6.25 - 2.5 + 1 = 4.75
+    let v3 = lagrange_eval(interp, 2.5)
+    let e3 = abs_f64(v3 - 4.75)
+
+    print("  v(0.5)=")
+    println(v1)
+    print("  v(1.5)=")
+    println(v2)
+    print("  v(2.5)=")
+    println(v3)
+
+    var max_err: f64 = e1
+    if e2 > max_err { max_err = e2 }
+    if e3 > max_err { max_err = e3 }
+
+    print("  max_err=")
+    println(max_err)
+
+    return max_err < 1.0e-8
+}
+
+// Test 10: Akima interpolation passes through data points
+fn test_akima_exact() -> bool with IO, Mut, Panic, Div {
+    var xs: [f64; 256] = [0.0; 256]
+    var ys: [f64; 256] = [0.0; 256]
+    xs[0] = 0.0; ys[0] = 0.0
+    xs[1] = 1.0; ys[1] = 1.0
+    xs[2] = 2.0; ys[2] = 0.5
+    xs[3] = 3.0; ys[3] = 2.0
+    xs[4] = 4.0; ys[4] = 1.5
+    xs[5] = 5.0; ys[5] = 3.0
+
+    let spline = akima_fit(xs, ys, 6)
+
+    var max_err: f64 = 0.0
+    var i: i32 = 0
+    while i < 6 {
+        let val = akima_eval(spline, xs[i])
+        let err = abs_f64(val - ys[i])
+        if err > max_err { max_err = err }
+        i = i + 1
+    }
+
+    print("  max_err=")
+    println(max_err)
+    return max_err < 1.0e-10
+}
+
+// Test 11: Akima on monotone data produces monotone interpolant
+fn test_akima_no_wiggle() -> bool with IO, Mut, Panic, Div {
+    // Strictly monotone increasing data
+    var xs: [f64; 256] = [0.0; 256]
+    var ys: [f64; 256] = [0.0; 256]
+    xs[0] = 0.0; ys[0] = 0.0
+    xs[1] = 1.0; ys[1] = 1.0
+    xs[2] = 2.0; ys[2] = 2.0
+    xs[3] = 3.0; ys[3] = 3.0
+    xs[4] = 4.0; ys[4] = 4.0
+    xs[5] = 5.0; ys[5] = 5.0
+
+    let spline = akima_fit(xs, ys, 6)
+
+    // Check monotonicity at several points
+    var prev_val: f64 = akima_eval(spline, 0.0)
+    var monotone: bool = true
+    var t: f64 = 0.1
+    while t <= 5.0 {
+        let val = akima_eval(spline, t)
+        if val < prev_val - 1.0e-10 {
+            monotone = false
+        }
+        prev_val = val
+        t = t + 0.1
+    }
+
+    // Also test a specific non-trivial monotone dataset
+    var xs2: [f64; 256] = [0.0; 256]
+    var ys2: [f64; 256] = [0.0; 256]
+    xs2[0] = 0.0; ys2[0] = 0.0
+    xs2[1] = 1.0; ys2[1] = 0.5
+    xs2[2] = 2.0; ys2[2] = 2.0
+    xs2[3] = 3.0; ys2[3] = 3.5
+    xs2[4] = 4.0; ys2[4] = 5.0
+    xs2[5] = 5.0; ys2[5] = 8.0
+
+    let spline2 = akima_fit(xs2, ys2, 6)
+
+    var prev_val2: f64 = akima_eval(spline2, 0.0)
+    var t2: f64 = 0.25
+    while t2 <= 5.0 {
+        let val2 = akima_eval(spline2, t2)
+        if val2 < prev_val2 - 1.0e-10 {
+            monotone = false
+        }
+        prev_val2 = val2
+        t2 = t2 + 0.25
+    }
+
+    if monotone {
+        println("  monotone=true")
+    } else {
+        println("  monotone=false")
+    }
+
+    return monotone
+}
+
+// ============================================================================
+// MAIN
+// ============================================================================
+
+fn main() -> i32 with IO, Mut, Panic, Div {
+    println("=== Interpolation Algorithm Tests ===")
+    println("")
+
+    var passed: i32 = 0
+    var failed: i32 = 0
+
+    // Test 1
+    print("Test  1: Piecewise linear exact..... ")
+    if test_piecewise_linear_exact() {
+        println("PASS")
+        passed = passed + 1
+    } else {
+        println("FAIL")
+        failed = failed + 1
+    }
+
+    // Test 2
+    print("Test  2: Piecewise linear midpoint.. ")
+    if test_piecewise_linear_midpoint() {
+        println("PASS")
+        passed = passed + 1
+    } else {
+        println("FAIL")
+        failed = failed + 1
+    }
+
+    // Test 3
+    print("Test  3: Piecewise linear clamp..... ")
+    if test_piecewise_linear_extrapolate() {
+        println("PASS")
+        passed = passed + 1
+    } else {
+        println("FAIL")
+        failed = failed + 1
+    }
+
+    // Test 4
+    print("Test  4: Cubic spline exact......... ")
+    if test_cubic_spline_exact() {
+        println("PASS")
+        passed = passed + 1
+    } else {
+        println("FAIL")
+        failed = failed + 1
+    }
+
+    // Test 5
+    print("Test  5: Cubic spline smooth........ ")
+    if test_cubic_spline_smooth() {
+        println("PASS")
+        passed = passed + 1
+    } else {
+        println("FAIL")
+        failed = failed + 1
+    }
+
+    // Test 6
+    print("Test  6: Cubic spline quadratic..... ")
+    if test_cubic_spline_quadratic() {
+        println("PASS")
+        passed = passed + 1
+    } else {
+        println("FAIL")
+        failed = failed + 1
+    }
+
+    // Test 7
+    print("Test  7: Cubic spline derivative.... ")
+    if test_cubic_spline_derivative() {
+        println("PASS")
+        passed = passed + 1
+    } else {
+        println("FAIL")
+        failed = failed + 1
+    }
+
+    // Test 8
+    print("Test  8: Lagrange exact............. ")
+    if test_lagrange_exact() {
+        println("PASS")
+        passed = passed + 1
+    } else {
+        println("FAIL")
+        failed = failed + 1
+    }
+
+    // Test 9
+    print("Test  9: Lagrange polynomial........ ")
+    if test_lagrange_polynomial() {
+        println("PASS")
+        passed = passed + 1
+    } else {
+        println("FAIL")
+        failed = failed + 1
+    }
+
+    // Test 10
+    print("Test 10: Akima exact................ ")
+    if test_akima_exact() {
+        println("PASS")
+        passed = passed + 1
+    } else {
+        println("FAIL")
+        failed = failed + 1
+    }
+
+    // Test 11
+    print("Test 11: Akima no wiggle............ ")
+    if test_akima_no_wiggle() {
+        println("PASS")
+        passed = passed + 1
+    } else {
+        println("FAIL")
+        failed = failed + 1
+    }
+
+    println("")
+    print("Passed: ")
+    println(passed)
+    print("Failed: ")
+    println(failed)
+
+    if failed == 0 {
+        println("ALL 11 TESTS PASSED")
+        return 0
+    }
+    println("SOME TESTS FAILED")
+    return 1
+}
