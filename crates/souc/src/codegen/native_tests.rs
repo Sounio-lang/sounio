@@ -313,6 +313,55 @@ fn test_native_user_defined_print_is_rejected_with_clear_error() {
 }
 
 #[test]
+fn test_native_too_many_function_params_is_deterministic_error() {
+    let err = compile_error(
+        "fn too_many(a: i64, b: i64, c: i64, d: i64, e: i64, f: i64, g: i64) -> i64 {\n\
+         a + b + c + d + e + f + g\n\
+         }\n\
+         fn main() -> i64 { too_many(1,2,3,4,5,6,7) }",
+    );
+    assert!(
+        err.contains("Function 'too_many' has 7 params; max supported is 6"),
+        "unexpected error: {err}"
+    );
+}
+
+#[test]
+fn test_native_too_many_call_args_is_deterministic_error() {
+    let err = compile_error(
+        "fn add6(a: i64, b: i64, c: i64, d: i64, e: i64, f: i64) -> i64 { a + b + c + d + e + f }\n\
+         fn main() -> i64 { add6(1,2,3,4,5,6,7) }",
+    );
+    assert!(
+        err.contains("Function call 'add6' has 7 args; max supported is 6"),
+        "unexpected error: {err}"
+    );
+}
+
+#[test]
+fn test_native_too_many_locals_is_deterministic_error() {
+    let mut source = String::from("fn main() -> i64 { ");
+    for i in 0..1025 {
+        source.push_str(&format!("let x{i}: i64 = {i}; "));
+    }
+    source.push_str("0 }");
+    let err = compile_error(&source);
+    assert!(
+        err.contains("Function 'main' exceeds native local limit: got 1025 locals, max 1024"),
+        "unexpected error: {err}"
+    );
+}
+
+#[test]
+fn test_native_undefined_symbol_is_deterministic_error() {
+    let err = compile_error("fn main() -> i64 { missing_builtin(41) }");
+    assert!(
+        err.contains("Undefined variable: missing_builtin"),
+        "unexpected error: {err}"
+    );
+}
+
+#[test]
 fn test_native_entry_uses_builtin_exit_even_if_user_exit_exists() {
     let (code, _) =
         compile_and_run("fn exit(code: i64) -> i64 { code + 1 }\nfn main() -> i64 { exit(41) }");

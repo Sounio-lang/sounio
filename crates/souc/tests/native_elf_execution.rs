@@ -20,15 +20,17 @@ fn workspace_root() -> PathBuf {
 /// 3. Execute the produced ELF binary
 /// 4. Verify exit code
 #[test]
-#[cfg_attr(not(target_os = "linux"), ignore = "Linux-only: requires ELF execution")]
+#[cfg_attr(
+    not(target_os = "linux"),
+    ignore = "Linux-only: requires ELF execution"
+)]
 fn native_elf_compile_and_execute_return_42() {
     let root = workspace_root();
     let compiler_dir = root.join("compiler");
 
     // Create a simple test fixture
     let fixture_path = std::env::temp_dir().join("sounio_fixture_42.sio");
-    std::fs::write(&fixture_path, "fn main() -> i64 { 42 }\n")
-        .expect("failed to write fixture");
+    std::fs::write(&fixture_path, "fn main() -> i64 { 42 }\n").expect("failed to write fixture");
 
     let elf_path = std::env::temp_dir().join("sounio_e2e_42.elf");
 
@@ -58,7 +60,10 @@ fn native_elf_compile_and_execute_return_42() {
     let stderr = String::from_utf8_lossy(&compile_output.stderr);
 
     if !compile_output.status.success() {
-        eprintln!("souc compile failed (exit {:?}):", compile_output.status.code());
+        eprintln!(
+            "souc compile failed (exit {:?}):",
+            compile_output.status.code()
+        );
         eprintln!("stdout: {}", stdout);
         eprintln!("stderr: {}", stderr);
         panic!("Native compilation failed");
@@ -95,7 +100,8 @@ fn native_elf_compile_and_execute_return_42() {
         Ok(output) => {
             let exit_code = output.status.code().unwrap_or(-1);
             assert_eq!(
-                exit_code, 42,
+                exit_code,
+                42,
                 "Expected exit code 42, got {}. stdout={:?}, stderr={:?}",
                 exit_code,
                 String::from_utf8_lossy(&output.stdout),

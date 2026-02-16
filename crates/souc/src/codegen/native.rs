@@ -14,6 +14,10 @@ use crate::runtime::elf::NativeEmitter;
 use crate::runtime::runtime::RuntimeCodegen;
 use std::collections::{HashMap, HashSet};
 
+const MAX_PARAMS: usize = 6;
+const MAX_CALL_ARGS: usize = 6;
+const MAX_LOCALS: usize = 1024;
+
 #[derive(Debug, Clone)]
 struct PendingRelocation {
     imm_offset: usize,
@@ -135,7 +139,7 @@ impl NativeCodegen {
         let offset = self.emitter.code.len();
         self.fn_offsets.insert(func.name.clone(), offset);
 
-        self.prepare_frame(func);
+        self.prepare_frame(func)?;
         self.emit_prologue();
         self.spill_params(func)?;
         self.compile_block(&func.body)?;
@@ -153,31 +157,67 @@ impl NativeCodegen {
         Ok(())
     }
 
-    fn prepare_frame(&mut self, func: &HirFn) {
+    fn prepare_frame(&mut self, func: &HirFn) -> Result<(), String> {
         self.locals.clear();
         self.frame_size = 0;
         self.return_jumps.clear();
 
+        if func.ty.params.len() > MAX_PARAMS {
+            return Err(format!(
+                "Function '{}' has {} params; max supported is {}",
+                func.name,
+                func.ty.params.len(),
+                MAX_PARAMS
+            ));
+        }
+
         for param in &func.ty.params {
-            self.allocate_local_slot(&param.name);
+            self.allocate_local_slot(&param.name)?;
         }
 
         let mut let_bindings = Vec::new();
         collect_let_bindings_block(&func.body, &mut let_bindings);
         for name in let_bindings {
-            self.allocate_local_slot(&name);
+            self.allocate_local_slot(&name)?;
+        }
+
+        if self.locals.len() > MAX_LOCALS {
+            return Err(format!(
+                "Function '{}' exceeds native local limit: got {} locals, max {}",
+                func.name,
+                self.locals.len(),
+                MAX_LOCALS
+            ));
         }
 
         let raw_size = (self.locals.len() as i32) * 8;
         self.frame_size = align16(raw_size);
+
+        Ok(())
     }
 
-    fn allocate_local_slot(&mut self, name: &str) {
+    fn allocate_local_slot(&mut self, name: &str) -> Result<(), String> {
         if self.locals.contains_key(name) {
-            return;
+            return Ok(());
         }
         let slot_index = self.locals.len() as i32 + 1;
-        self.locals.insert(name.to_string(), -(slot_index * 8));
+        if slot_index <= 0 {
+            return Err("native local slot allocation underflow".to_string());
+        }
+
+        let slot_offset = slot_index
+            .checked_mul(8)
+            .ok_or_else(|| format!("Cannot allocate local '{}': frame too large", name))?;
+        if slot_offset > i32::MAX {
+            return Err(format!(
+                "Cannot allocate local '{}': frame offset overflow",
+                name
+            ));
+        }
+
+        // Convert to the rbp-relative form used throughout this backend.
+        self.locals.insert(name.to_string(), -slot_offset);
+        Ok(())
     }
 
     fn emit_prologue(&mut self) {
@@ -196,11 +236,12 @@ impl NativeCodegen {
     }
 
     fn spill_params(&mut self, func: &HirFn) -> Result<(), String> {
-        if func.ty.params.len() > 6 {
+        if func.ty.params.len() > MAX_PARAMS {
             return Err(format!(
-                "Function '{}' has {} params; max supported is 6",
+                "Function '{}' has {} params; max supported is {}",
                 func.name,
-                func.ty.params.len()
+                func.ty.params.len(),
+                MAX_PARAMS
             ));
         }
 
@@ -528,11 +569,12 @@ impl NativeCodegen {
             return self.compile_print_call(args);
         }
 
-        if args.len() > 6 {
+        if args.len() > MAX_CALL_ARGS {
             return Err(format!(
-                "Function call '{}' has {} args; max supported is 6",
+                "Function call '{}' has {} args; max supported is {}",
                 callee,
-                args.len()
+                args.len(),
+                MAX_CALL_ARGS
             ));
         }
 
