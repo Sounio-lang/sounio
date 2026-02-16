@@ -1,0 +1,251 @@
+//! stdlib/snn/sedenion_similarity.sio - Sedenion Similarity & Distance Metrics
+//!
+//! Similarity and distance functions for sedenion-valued embeddings on S^15.
+//!
+//! Metrics:
+//!   - Cosine similarity: inner product of unit vectors
+//!   - Euclidean distance: L2 norm of difference
+//!   - Geodesic distance: arc length on 15-sphere
+//!   - Semantic distance: normalized [0,1] dissimilarity
+//!
+//! Knowledge Graph scoring functions:
+//!   - CayleyProduct: <h * r, t> via Cayley-Dickson product (generalizes QuatE)
+//!   - DistMult: <h * r, t> via component-wise product
+//!   - Bilinear: sum(h_i * r_i * t_i) for i=0..15
+//!
+//! References:
+//!   - QuatE (Zhang et al., 2019): arXiv:1904.10281
+//!   - DistMult (Yang et al., 2015): arXiv:1412.6575
+//!   - Cayley-Dickson construction: R -> C -> H -> O -> S
+
+use math::sedenion::*
+
+// ============================================================================
+// BASIC SIMILARITY & DISTANCE
+// ============================================================================
+
+// Cosine similarity between two sedenions
+// Returns dot(a,b) / (||a|| * ||b||) in [-1, 1]
+// For unit sedenions on S^15, this simplifies to dot(a,b)
+pub fn sed_cosine_similarity(a: Sedenion, b: Sedenion) -> f32 with Panic {
+    let dot = sed_dot(a, b)
+    let na = sed_norm(a)
+    let nb = sed_norm(b)
+    let denom = na * nb
+    if denom < 0.0000001 {
+        0.0
+    } else {
+        dot / denom
+    }
+}
+
+// Euclidean distance between two sedenions
+// Returns ||a - b||
+pub fn sed_euclidean_distance(a: Sedenion, b: Sedenion) -> f32 {
+    let diff = sed_sub(a, b)
+    sed_norm(diff)
+}
+
+// Squared Euclidean distance (avoids sqrt, faster for comparisons)
+pub fn sed_euclidean_distance_sq(a: Sedenion, b: Sedenion) -> f32 {
+    let diff = sed_sub(a, b)
+    sed_norm_sq(diff)
+}
+
+// Geodesic distance on the 15-sphere S^15
+// For unit sedenions: d(a,b) = arccos(clamp(dot(a,b), -1, 1))
+// This is the great-circle distance on S^15
+pub fn sed_geodesic_distance(a: Sedenion, b: Sedenion) -> f32 with Panic {
+    let a_unit = sed_normalize(a)
+    let b_unit = sed_normalize(b)
+    let dot = sed_dot(a_unit, b_unit)
+
+    // Clamp to [-1, 1] for numerical stability
+    let clamped = if dot > 1.0 { 1.0 }
+                  else if dot < -1.0 { -1.0 }
+                  else { dot }
+
+    acos_f32(clamped)
+}
+
+// Convert cosine similarity to semantic distance in [0, 1]
+// Maps: similarity 1.0 -> distance 0.0, similarity -1.0 -> distance 1.0
+pub fn sed_to_semantic_distance(similarity: f32) -> f32 {
+    (1.0 - similarity) / 2.0
+}
+
+// ============================================================================
+// KNOWLEDGE GRAPH SCORING FUNCTIONS
+// ============================================================================
+
+// Cayley-Dickson product scoring (SedenionE)
+// score = <h * r, t> where * is the sedenion product
+//
+// Generalizes QuatE (arXiv:1904.10281) from quaternions (4D) to sedenions (16D).
+// The Cayley-Dickson product captures richer rotational structure:
+// - Quaternions: 3 rotation planes (SO(3))
+// - Sedenions: 120 rotation planes in 16D
+//
+// Non-associativity means (h*r)*t != h*(r*t), which gives two distinct
+// scoring modes. We use the left-associative convention: (h * r) scored against t.
+pub fn sed_cayley_score(head: Sedenion, relation: Sedenion, tail: Sedenion) -> f32 {
+    let transformed = sed_mul(head, relation)
+    sed_dot(transformed, tail)
+}
+
+// DistMult-style scoring via Cayley-Dickson product
+// score = dot(h * r, t) where * is sedenion multiplication
+// This is the same as sed_cayley_score but named for clarity
+// when used in a DistMult-like framework
+pub fn sed_distmult_score(head: Sedenion, relation: Sedenion, tail: Sedenion) -> f32 {
+    let hr = sed_mul(head, relation)
+    sed_dot(hr, tail)
+}
+
+// Bilinear scoring: component-wise trilinear product
+// score = sum_i(h_i * r_i * t_i) for i = 0..15
+//
+// Unlike CayleyProduct, this is commutative in h and t,
+// making it suitable for symmetric relations.
+pub fn sed_bilinear_score(head: Sedenion, relation: Sedenion, tail: Sedenion) -> f32 {
+    head.e0 * relation.e0 * tail.e0 +
+    head.e1 * relation.e1 * tail.e1 +
+    head.e2 * relation.e2 * tail.e2 +
+    head.e3 * relation.e3 * tail.e3 +
+    head.e4 * relation.e4 * tail.e4 +
+    head.e5 * relation.e5 * tail.e5 +
+    head.e6 * relation.e6 * tail.e6 +
+    head.e7 * relation.e7 * tail.e7 +
+    head.e8 * relation.e8 * tail.e8 +
+    head.e9 * relation.e9 * tail.e9 +
+    head.e10 * relation.e10 * tail.e10 +
+    head.e11 * relation.e11 * tail.e11 +
+    head.e12 * relation.e12 * tail.e12 +
+    head.e13 * relation.e13 * tail.e13 +
+    head.e14 * relation.e14 * tail.e14 +
+    head.e15 * relation.e15 * tail.e15
+}
+
+// ============================================================================
+// LOSS FUNCTIONS FOR EMBEDDINGS
+// ============================================================================
+
+// Margin-based ranking loss for knowledge graph embeddings
+// L = max(0, margin - pos_score + neg_score)
+//
+// Positive triples should score higher than negative triples by at least margin.
+pub fn sed_margin_loss(pos_score: f32, neg_score: f32, margin: f32) -> f32 {
+    let loss = margin - pos_score + neg_score
+    if loss > 0.0 { loss } else { 0.0 }
+}
+
+// Batch margin loss over multiple positive/negative score pairs
+pub fn sed_batch_margin_loss(
+    pos_scores: [f32],
+    neg_scores: [f32],
+    margin: f32
+) -> f32 with Panic, Mut {
+    var total = 0.0
+    let n = if len(pos_scores) < len(neg_scores) { len(pos_scores) } else { len(neg_scores) }
+    for i in 0..(n as i32) {
+        total = total + sed_margin_loss(pos_scores[i], neg_scores[i], margin)
+    }
+    if n > 0 { total / (n as f32) } else { 0.0 }
+}
+
+// ============================================================================
+// UTILITY
+// ============================================================================
+
+// arccos approximation (Sounio doesn't have a built-in acos yet)
+// Uses Chebyshev polynomial approximation valid for x in [-1, 1]
+// Max error < 0.0003 radians
+fn acos_f32(x: f32) -> f32 {
+    // Handle edge cases
+    if x >= 1.0 { return 0.0 }
+    if x <= -1.0 { return 3.14159265 }
+
+    // Abramowitz and Stegun approximation (formula 4.4.45)
+    let abs_x = if x < 0.0 { -x } else { x }
+
+    // sqrt(1-x) * (a0 + a1*x + a2*x^2 + a3*x^3)
+    let a0 = 1.5707963
+    let a1 = -0.2145988
+    let a2 = 0.0889789
+    let a3 = -0.0501743
+
+    let one_minus_abs = 1.0 - abs_x
+    let sqrt_part = if one_minus_abs > 0.0 { one_minus_abs.sqrt() } else { 0.0 }
+    let poly = a0 + a1 * abs_x + a2 * abs_x * abs_x + a3 * abs_x * abs_x * abs_x
+
+    let result = sqrt_part * poly
+
+    if x < 0.0 {
+        3.14159265 - result
+    } else {
+        result
+    }
+}
+
+// Nearest neighbor search (brute force, for small embedding tables)
+// Returns index of the closest embedding to query
+pub fn sed_nearest_neighbor(
+    query: Sedenion,
+    embeddings: [Sedenion]
+) -> i32 with Panic, Mut {
+    var best_idx = 0
+    var best_sim = -2.0
+    let n = len(embeddings) as i32
+
+    for i in 0..n {
+        let sim = sed_cosine_similarity(query, embeddings[i])
+        if sim > best_sim {
+            best_sim = sim
+            best_idx = i
+        }
+    }
+
+    best_idx
+}
+
+// K nearest neighbors (brute force)
+// Returns array of (index, similarity) pairs sorted by descending similarity
+pub fn sed_k_nearest(
+    query: Sedenion,
+    embeddings: [Sedenion],
+    k: i32
+) -> [(i32, f32)] with Panic, Mut {
+    let n = len(embeddings) as i32
+    let actual_k = if k < n { k } else { n }
+
+    // Compute all similarities
+    var sims: [(i32, f32)] = []
+    for i in 0..n {
+        let sim = sed_cosine_similarity(query, embeddings[i])
+        sims = sims ++ [(i, sim)]
+    }
+
+    // Selection sort top-k (simple, fine for moderate n)
+    for i in 0..actual_k {
+        var best_j = i
+        var best_val = sims[i].1
+        for j in (i + 1)..n {
+            if sims[j].1 > best_val {
+                best_j = j
+                best_val = sims[j].1
+            }
+        }
+        if best_j != i {
+            let tmp = sims[i]
+            sims[i] = sims[best_j]
+            sims[best_j] = tmp
+        }
+    }
+
+    // Return top-k
+    var result: [(i32, f32)] = []
+    for i in 0..actual_k {
+        result = result ++ [sims[i]]
+    }
+    result
+}

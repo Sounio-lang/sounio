@@ -1,0 +1,448 @@
+//! stdlib/snn/sedenion_training.sio - Sedenion Embedding Training Loop
+//!
+//! End-to-end training pipeline for sedenion knowledge graph embeddings.
+//! Handles: forward scoring, loss computation, backward pass, optimizer step,
+//! zero-divisor regularization, gradient clipping, and learning rate scheduling.
+//!
+//! Training flow per batch:
+//!   1. Score positive triple: s+ = score(h, r, t)
+//!   2. Score negative triple: s- = score(h', r, t) or score(h, r, t')
+//!   3. Loss = margin_loss(s+, s-) + λ * ZD_regularization
+//!   4. Backward: compute ∂L/∂h, ∂L/∂r, ∂L/∂t
+//!   5. Gradient clipping
+//!   6. Optimizer step (Adam or SGD)
+//!   7. Re-normalize embeddings (if on S^15)
+//!
+//! Pattern from: stdlib/onn/training.sio
+
+use math::sedenion::*
+use snn::sedenion_similarity::*
+use snn::sedenion_backward::*
+use snn::sedenion_optimizer::*
+use snn::sedenion_embedding::*
+
+// ============================================================================
+// TRAINING CONFIGURATION
+// ============================================================================
+
+pub struct SedTrainingConfig {
+    learning_rate: f32,
+    max_epochs: i32,
+    batch_size: i32,
+    margin: f32,                    // Margin for ranking loss (default 1.0)
+    zero_divisor_penalty: f32,      // λ for ZD regularization (default 0.001)
+    lr_schedule: i32,               // 0: const, 1: linear, 2: exp, 3: cosine
+    grad_clip_norm: f32,            // Max gradient norm (0 = no clipping)
+    patience: i32,                  // Early stopping patience (epochs)
+    normalize_embeddings: bool,     // Re-normalize to S^15 after updates
+}
+
+// Default training configuration
+pub fn sed_training_config_default() -> SedTrainingConfig {
+    SedTrainingConfig {
+        learning_rate: 0.001,
+        max_epochs: 100,
+        batch_size: 128,
+        margin: 1.0,
+        zero_divisor_penalty: 0.001,
+        lr_schedule: 0,
+        grad_clip_norm: 5.0,
+        patience: 10,
+        normalize_embeddings: true
+    }
+}
+
+// ============================================================================
+// TRAINING STATE
+// ============================================================================
+
+pub struct SedTrainingState {
+    epoch: i32,
+    global_step: i32,
+    best_loss: f32,
+    total_loss: f32,
+    batch_count: i32,
+    patience_counter: i32,
+    should_stop: bool,
+}
+
+pub fn create_training_state() -> SedTrainingState {
+    SedTrainingState {
+        epoch: 0,
+        global_step: 0,
+        best_loss: 1000000.0,
+        total_loss: 0.0,
+        batch_count: 0,
+        patience_counter: 0,
+        should_stop: false
+    }
+}
+
+pub fn update_training_metrics(state: &!SedTrainingState, batch_loss: f32) {
+    state.total_loss = state.total_loss + batch_loss
+    state.batch_count = state.batch_count + 1
+    state.global_step = state.global_step + 1
+}
+
+pub fn get_epoch_loss(state: SedTrainingState) -> f32 {
+    if state.batch_count == 0 { 0.0 }
+    else { state.total_loss / (state.batch_count as f32) }
+}
+
+pub fn reset_epoch_metrics(state: &!SedTrainingState, patience: i32) {
+    let epoch_loss = get_epoch_loss(*state)
+
+    if epoch_loss < state.best_loss {
+        state.best_loss = epoch_loss
+        state.patience_counter = 0
+    } else {
+        state.patience_counter = state.patience_counter + 1
+        if state.patience_counter >= patience {
+            state.should_stop = true
+        }
+    }
+
+    state.total_loss = 0.0
+    state.batch_count = 0
+    state.epoch = state.epoch + 1
+}
+
+// ============================================================================
+// LEARNING RATE SCHEDULER
+// ============================================================================
+
+pub struct SedLrScheduler {
+    initial_lr: f32,
+    schedule_type: i32,     // 0: const, 1: linear, 2: exp, 3: cosine
+    total_steps: i32,
+    current_step: i32,
+    decay_rate: f32,
+}
+
+pub fn create_lr_scheduler(
+    initial_lr: f32,
+    schedule_type: i32,
+    total_steps: i32,
+    decay_rate: f32
+) -> SedLrScheduler {
+    SedLrScheduler {
+        initial_lr: initial_lr,
+        schedule_type: schedule_type,
+        total_steps: total_steps,
+        current_step: 0,
+        decay_rate: decay_rate
+    }
+}
+
+pub fn get_learning_rate(scheduler: SedLrScheduler) -> f32 {
+    let progress = if scheduler.total_steps > 0 {
+        (scheduler.current_step as f32) / (scheduler.total_steps as f32)
+    } else {
+        0.0
+    }
+
+    if scheduler.schedule_type == 0 {
+        // Constant
+        scheduler.initial_lr
+    } else if scheduler.schedule_type == 1 {
+        // Linear decay: lr = initial * (1 - progress)
+        let factor = 1.0 - progress
+        scheduler.initial_lr * (if factor > 0.0 { factor } else { 0.0 })
+    } else if scheduler.schedule_type == 2 {
+        // Exponential decay: lr = initial * decay^step
+        let factor = pow_f32_approx(scheduler.decay_rate, scheduler.current_step)
+        scheduler.initial_lr * factor
+    } else {
+        // Cosine annealing: lr = initial * (1 + cos(pi * progress)) / 2
+        let cos_val = cos_f32_approx(3.14159265 * progress)
+        scheduler.initial_lr * (1.0 + cos_val) / 2.0
+    }
+}
+
+pub fn step_scheduler(scheduler: &!SedLrScheduler) {
+    scheduler.current_step = scheduler.current_step + 1
+}
+
+// ============================================================================
+// TRAINING STEP (single triple pair)
+// ============================================================================
+
+// Train on a single positive + negative triple pair.
+// Returns the loss value for this pair.
+pub fn sed_train_triple_pair(
+    model: &!SedenionKGModel,
+    pos_head: i32, pos_rel: i32, pos_tail: i32,
+    neg_head: i32, neg_rel: i32, neg_tail: i32,
+    entity_optimizer: &!SedAdamOptimizer,
+    relation_optimizer: &!SedAdamOptimizer,
+    config: SedTrainingConfig
+) -> f32 with Panic, Mut {
+    // Forward: score positive and negative triples
+    let pos_score = kg_score_triple(*model, pos_head, pos_rel, pos_tail)
+    let neg_score = kg_score_triple(*model, neg_head, neg_rel, neg_tail)
+
+    // Margin loss
+    let loss = kg_margin_loss(pos_score, neg_score, config.margin)
+
+    // Skip if loss is zero (margin already satisfied)
+    if loss <= 0.0 {
+        return 0.0
+    }
+
+    // Backward: compute gradients
+    let (pos_grad_sign, neg_grad_sign) = sed_margin_loss_backward(pos_score, neg_score, config.margin)
+
+    // Positive triple gradients
+    let (grad_h_pos, grad_r_pos, grad_t_pos) = kg_score_backward(
+        *model, pos_head, pos_rel, pos_tail, pos_grad_sign
+    )
+
+    // Negative triple gradients
+    let (grad_h_neg, grad_r_neg, grad_t_neg) = kg_score_backward(
+        *model, neg_head, neg_rel, neg_tail, neg_grad_sign
+    )
+
+    // Apply gradient clipping
+    let max_norm = config.grad_clip_norm
+    let clipped_gh_pos = if max_norm > 0.0 { clip_single_grad(grad_h_pos, max_norm) } else { grad_h_pos }
+    let clipped_gr_pos = if max_norm > 0.0 { clip_single_grad(grad_r_pos, max_norm) } else { grad_r_pos }
+    let clipped_gt_pos = if max_norm > 0.0 { clip_single_grad(grad_t_pos, max_norm) } else { grad_t_pos }
+    let clipped_gh_neg = if max_norm > 0.0 { clip_single_grad(grad_h_neg, max_norm) } else { grad_h_neg }
+    let clipped_gr_neg = if max_norm > 0.0 { clip_single_grad(grad_r_neg, max_norm) } else { grad_r_neg }
+    let clipped_gt_neg = if max_norm > 0.0 { clip_single_grad(grad_t_neg, max_norm) } else { grad_t_neg }
+
+    // Apply optimizer steps to entity embeddings
+    sed_adam_step(entity_optimizer, &!model.entity_embeddings.embeddings, [clipped_gh_pos])
+    sed_adam_step(entity_optimizer, &!model.entity_embeddings.embeddings, [clipped_gt_pos])
+    sed_adam_step(entity_optimizer, &!model.entity_embeddings.embeddings, [clipped_gh_neg])
+    sed_adam_step(entity_optimizer, &!model.entity_embeddings.embeddings, [clipped_gt_neg])
+
+    // Apply optimizer steps to relation embeddings
+    sed_adam_step(relation_optimizer, &!model.relation_embeddings.embeddings, [clipped_gr_pos])
+    sed_adam_step(relation_optimizer, &!model.relation_embeddings.embeddings, [clipped_gr_neg])
+
+    // Update epistemic uncertainty for touched embeddings
+    let gh_norm = sed_norm(clipped_gh_pos)
+    let gr_norm = sed_norm(clipped_gr_pos)
+    let gt_norm = sed_norm(clipped_gt_pos)
+    embedding_update(&!model.entity_embeddings, pos_head,
+                     model.entity_embeddings.embeddings[pos_head], gh_norm)
+    embedding_update(&!model.entity_embeddings, pos_tail,
+                     model.entity_embeddings.embeddings[pos_tail], gt_norm)
+    embedding_update(&!model.relation_embeddings, pos_rel,
+                     model.relation_embeddings.embeddings[pos_rel], gr_norm)
+
+    // Re-normalize if configured
+    if config.normalize_embeddings {
+        model.entity_embeddings.embeddings[pos_head] =
+            sed_normalize(model.entity_embeddings.embeddings[pos_head])
+        model.entity_embeddings.embeddings[pos_tail] =
+            sed_normalize(model.entity_embeddings.embeddings[pos_tail])
+        model.entity_embeddings.embeddings[neg_head] =
+            sed_normalize(model.entity_embeddings.embeddings[neg_head])
+        model.entity_embeddings.embeddings[neg_tail] =
+            sed_normalize(model.entity_embeddings.embeddings[neg_tail])
+    }
+
+    // Add zero divisor penalty
+    let zd_loss = config.zero_divisor_penalty * (
+        embedding_zero_divisor_loss(model.entity_embeddings) +
+        embedding_zero_divisor_loss(model.relation_embeddings)
+    )
+
+    loss + zd_loss
+}
+
+// ============================================================================
+// EPOCH TRAINING
+// ============================================================================
+
+// Train for one epoch over all triples.
+// triples and neg_triples should be aligned: neg_triples[i] is the negative
+// sample for triples[i].
+//
+// Returns average epoch loss.
+pub fn sed_train_embedding_epoch(
+    model: &!SedenionKGModel,
+    triples: [(i32, i32, i32)],
+    neg_triples: [(i32, i32, i32)],
+    entity_optimizer: &!SedAdamOptimizer,
+    relation_optimizer: &!SedAdamOptimizer,
+    config: SedTrainingConfig
+) -> f32 with Panic, Mut {
+    let n = if len(triples) < len(neg_triples) { len(triples) } else { len(neg_triples) }
+    var total_loss = 0.0
+
+    for i in 0..(n as i32) {
+        let pos = triples[i]
+        let neg = neg_triples[i]
+
+        let loss = sed_train_triple_pair(
+            model,
+            pos.0, pos.1, pos.2,
+            neg.0, neg.1, neg.2,
+            entity_optimizer,
+            relation_optimizer,
+            config
+        )
+
+        total_loss = total_loss + loss
+    }
+
+    if n > 0 { total_loss / (n as f32) } else { 0.0 }
+}
+
+// Full training loop with early stopping and LR scheduling
+pub fn sed_train_kg_model(
+    model: &!SedenionKGModel,
+    triples: [(i32, i32, i32)],
+    neg_triples: [(i32, i32, i32)],
+    config: SedTrainingConfig
+) -> SedTrainingState with Panic, Mut {
+    let num_entities = embedding_table_size(model.entity_embeddings)
+    let num_relations = embedding_table_size(model.relation_embeddings)
+
+    var entity_opt = create_sed_adam(num_entities, config.learning_rate)
+    var relation_opt = create_sed_adam(num_relations, config.learning_rate)
+    var state = create_training_state()
+
+    var scheduler = create_lr_scheduler(
+        config.learning_rate,
+        config.lr_schedule,
+        config.max_epochs,
+        0.95  // default decay rate for exponential
+    )
+
+    for epoch in 0..config.max_epochs {
+        if state.should_stop { break }
+
+        // Update learning rate
+        let lr = get_learning_rate(scheduler)
+        sed_adam_set_lr(&!entity_opt, lr)
+        sed_adam_set_lr(&!relation_opt, lr)
+        step_scheduler(&!scheduler)
+
+        // Train one epoch
+        let epoch_loss = sed_train_embedding_epoch(
+            model, triples, neg_triples,
+            &!entity_opt, &!relation_opt, config
+        )
+
+        update_training_metrics(&!state, epoch_loss)
+        reset_epoch_metrics(&!state, config.patience)
+    }
+
+    state
+}
+
+// ============================================================================
+// EVALUATION
+// ============================================================================
+
+// Evaluate model on a set of triples.
+// Returns (mean_rank, hits_at_10) metrics (simplified).
+pub fn sed_evaluate_kg(
+    model: SedenionKGModel,
+    test_triples: [(i32, i32, i32)],
+    num_entities: i32
+) -> (f32, f32) with Panic, Mut {
+    var total_rank = 0.0
+    var hits_10 = 0
+    let n = len(test_triples) as i32
+
+    for i in 0..n {
+        let triple = test_triples[i]
+        let h = triple.0
+        let r = triple.1
+        let t = triple.2
+
+        // Score the correct triple
+        let true_score = kg_score_triple(model, h, r, t)
+
+        // Count how many entities score higher (simplified ranking)
+        var rank = 1
+        let check_count = if num_entities < 100 { num_entities } else { 100 }
+        for j in 0..check_count {
+            if j != t {
+                let candidate_score = kg_score_triple(model, h, r, j)
+                if candidate_score > true_score {
+                    rank = rank + 1
+                }
+            }
+        }
+
+        total_rank = total_rank + (rank as f32)
+        if rank <= 10 {
+            hits_10 = hits_10 + 1
+        }
+    }
+
+    let mean_rank = if n > 0 { total_rank / (n as f32) } else { 0.0 }
+    let hits_at_10 = if n > 0 { (hits_10 as f32) / (n as f32) } else { 0.0 }
+
+    (mean_rank, hits_at_10)
+}
+
+// ============================================================================
+// TRAINING METRICS
+// ============================================================================
+
+pub struct SedTrainingMetrics {
+    epoch: i32,
+    train_loss: f32,
+    avg_entity_uncertainty: f32,
+    avg_relation_uncertainty: f32,
+    entity_zd_count: i32,
+    relation_zd_count: i32,
+    learning_rate: f32,
+}
+
+pub fn compute_training_metrics(
+    model: SedenionKGModel,
+    state: SedTrainingState,
+    lr: f32
+) -> SedTrainingMetrics with Panic, Mut {
+    SedTrainingMetrics {
+        epoch: state.epoch,
+        train_loss: get_epoch_loss(state),
+        avg_entity_uncertainty: embedding_avg_uncertainty(model.entity_embeddings),
+        avg_relation_uncertainty: embedding_avg_uncertainty(model.relation_embeddings),
+        entity_zd_count: count_zero_divisors(model.entity_embeddings),
+        relation_zd_count: count_zero_divisors(model.relation_embeddings),
+        learning_rate: lr
+    }
+}
+
+// ============================================================================
+// UTILITIES
+// ============================================================================
+
+// Clip a single sedenion gradient by norm
+fn clip_single_grad(grad: Sedenion, max_norm: f32) -> Sedenion {
+    let norm = sed_norm(grad)
+    if norm <= max_norm {
+        grad
+    } else {
+        sed_scale(grad, max_norm / (norm + 0.000001))
+    }
+}
+
+// Approximate pow for f32 (for exponential LR decay)
+fn pow_f32_approx(base: f32, exp: i32) -> f32 with Mut {
+    var result = 1.0
+    var i = 0
+    while i < exp {
+        result = result * base
+        i = i + 1
+    }
+    result
+}
+
+// Approximate cos for f32 (for cosine LR annealing)
+// Taylor series: cos(x) ≈ 1 - x²/2 + x⁴/24 - x⁶/720
+fn cos_f32_approx(x: f32) -> f32 {
+    let x2 = x * x
+    let x4 = x2 * x2
+    let x6 = x4 * x2
+    1.0 - x2 / 2.0 + x4 / 24.0 - x6 / 720.0
+}

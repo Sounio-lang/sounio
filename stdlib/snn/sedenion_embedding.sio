@@ -1,0 +1,371 @@
+//! stdlib/snn/sedenion_embedding.sio - Sedenion Embedding Tables & KG Models
+//!
+//! Embedding tables mapping discrete IDs to sedenion-valued vectors on S^15.
+//! Supports knowledge graph embedding (SedenionE) with three scoring functions:
+//!   - CayleyProduct: non-commutative rotation via Cayley-Dickson product
+//!   - DistMult: symmetric bilinear via component-wise product
+//!   - Bilinear: trilinear component-wise scoring
+//!
+//! Epistemic integration: Each embedding carries uncertainty that decreases
+//! as the embedding is trained (GUM-style uncertainty propagation).
+//!
+//! References:
+//!   - QuatE (Zhang et al., 2019): arXiv:1904.10281
+//!   - DistMult (Yang et al., 2015): arXiv:1412.6575
+//!   - GUM (JCGM 100:2008): Uncertainty propagation
+
+use math::sedenion::*
+use snn::sedenion_similarity::*
+use snn::sedenion_backward::*
+
+// ============================================================================
+// EPISTEMIC TYPES
+// ============================================================================
+
+// Sedenion value with associated uncertainty (GUM-style)
+pub struct KnowledgeSedenion {
+    value: Sedenion,
+    uncertainty: f32,       // Standard uncertainty (scalar, >= 0)
+    confidence: f32,        // Confidence level [0, 1]
+}
+
+// Scalar knowledge value (for scores)
+pub struct KnowledgeF32 {
+    value: f32,
+    uncertainty: f32,
+}
+
+// Construct a KnowledgeSedenion with default confidence
+pub fn knowledge_sed(value: Sedenion, uncertainty: f32) -> KnowledgeSedenion {
+    KnowledgeSedenion {
+        value: value,
+        uncertainty: if uncertainty < 0.0 { 0.0 } else { uncertainty },
+        confidence: 1.0 - uncertainty  // simple mapping: low uncertainty = high confidence
+    }
+}
+
+// Construct from value only (zero uncertainty = full knowledge)
+pub fn knowledge_sed_certain(value: Sedenion) -> KnowledgeSedenion {
+    KnowledgeSedenion {
+        value: value,
+        uncertainty: 0.0,
+        confidence: 1.0
+    }
+}
+
+// ============================================================================
+// EMBEDDING TABLE
+// ============================================================================
+
+// Lookup table mapping integer IDs to sedenion embeddings.
+// Optionally normalizes embeddings to lie on S^15 (unit 15-sphere).
+pub struct SedenionEmbeddingTable {
+    embeddings: [Sedenion],
+    uncertainties: [f32],       // Per-embedding uncertainty
+    num_entries: i32,
+    normalize: bool,
+}
+
+// Initialize embedding table with pseudo-random points on S^15.
+//
+// Initialization uses a deterministic hash-based scheme to generate
+// diverse points. Each embedding starts with high uncertainty (1.0)
+// that decreases during training.
+pub fn create_embedding_table(
+    num_entries: i32,
+    normalize: bool
+) -> SedenionEmbeddingTable with Panic, Mut {
+    var embeddings: [Sedenion] = []
+    var uncertainties: [f32] = []
+
+    for i in 0..num_entries {
+        // Deterministic pseudo-random initialization
+        // Hash-based to ensure reproducibility
+        let seed = (i * 2654435761 + 1013904223) as f32  // Knuth multiplicative hash
+        let inv = 1.0 / 65536.0
+
+        let s = sed(
+            ((seed as i32 * 73 + 17) % 65536) as f32 * inv - 0.5,
+            ((seed as i32 * 179 + 31) % 65536) as f32 * inv - 0.5,
+            ((seed as i32 * 283 + 47) % 65536) as f32 * inv - 0.5,
+            ((seed as i32 * 389 + 61) % 65536) as f32 * inv - 0.5,
+            ((seed as i32 * 491 + 79) % 65536) as f32 * inv - 0.5,
+            ((seed as i32 * 599 + 89) % 65536) as f32 * inv - 0.5,
+            ((seed as i32 * 701 + 97) % 65536) as f32 * inv - 0.5,
+            ((seed as i32 * 811 + 103) % 65536) as f32 * inv - 0.5,
+            ((seed as i32 * 907 + 113) % 65536) as f32 * inv - 0.5,
+            ((seed as i32 * 1013 + 127) % 65536) as f32 * inv - 0.5,
+            ((seed as i32 * 1117 + 139) % 65536) as f32 * inv - 0.5,
+            ((seed as i32 * 1223 + 151) % 65536) as f32 * inv - 0.5,
+            ((seed as i32 * 1327 + 163) % 65536) as f32 * inv - 0.5,
+            ((seed as i32 * 1433 + 173) % 65536) as f32 * inv - 0.5,
+            ((seed as i32 * 1543 + 181) % 65536) as f32 * inv - 0.5,
+            ((seed as i32 * 1657 + 191) % 65536) as f32 * inv - 0.5
+        )
+
+        let emb = if normalize { sed_normalize(s) } else { s }
+        embeddings = embeddings ++ [emb]
+        uncertainties = uncertainties ++ [1.0]  // High initial uncertainty
+    }
+
+    SedenionEmbeddingTable {
+        embeddings: embeddings,
+        uncertainties: uncertainties,
+        num_entries: num_entries,
+        normalize: normalize
+    }
+}
+
+// Look up an embedding by ID, returning value with uncertainty
+pub fn embedding_lookup(table: SedenionEmbeddingTable, id: i32) -> KnowledgeSedenion with Panic {
+    KnowledgeSedenion {
+        value: table.embeddings[id],
+        uncertainty: table.uncertainties[id],
+        confidence: 1.0 - table.uncertainties[id]
+    }
+}
+
+// Look up raw embedding value (without epistemic wrapper)
+pub fn embedding_lookup_raw(table: SedenionEmbeddingTable, id: i32) -> Sedenion with Panic {
+    table.embeddings[id]
+}
+
+// Update an embedding and reduce its uncertainty
+// grad_norm indicates how much signal was received (higher = more information)
+pub fn embedding_update(
+    table: &!SedenionEmbeddingTable,
+    id: i32,
+    new_value: Sedenion,
+    grad_norm: f32
+) with Panic {
+    let emb = if table.normalize { sed_normalize(new_value) } else { new_value }
+    table.embeddings[id] = emb
+
+    // Reduce uncertainty: more gradient signal = more confidence
+    // Decay formula: u_new = u_old * (1 / (1 + alpha * |grad|))
+    let alpha = 0.1
+    let decay = 1.0 / (1.0 + alpha * grad_norm)
+    let new_unc = table.uncertainties[id] * decay
+    table.uncertainties[id] = if new_unc < 0.001 { 0.001 } else { new_unc }
+}
+
+// Get number of entries in table
+pub fn embedding_table_size(table: SedenionEmbeddingTable) -> i32 {
+    table.num_entries
+}
+
+// Get average uncertainty across all embeddings
+pub fn embedding_avg_uncertainty(table: SedenionEmbeddingTable) -> f32 with Panic, Mut {
+    var total = 0.0
+    for i in 0..table.num_entries {
+        total = total + table.uncertainties[i]
+    }
+    total / (table.num_entries as f32)
+}
+
+// ============================================================================
+// SCORING FUNCTION ENUM
+// ============================================================================
+
+// Scoring functions for knowledge graph triple evaluation
+pub enum SedScoringFn {
+    // Cayley-Dickson product: score = <h * r, t>
+    // Non-commutative, captures asymmetric relations
+    // 120 rotation planes in 16D (vs 3 in quaternions)
+    CayleyProduct,
+
+    // DistMult: score = <h * r, t> via Cayley-Dickson
+    // Same computation as CayleyProduct (provided for API clarity)
+    DistMult,
+
+    // Bilinear: score = sum(h_i * r_i * t_i)
+    // Symmetric in h and t, suitable for symmetric relations
+    Bilinear,
+}
+
+// ============================================================================
+// KNOWLEDGE GRAPH MODEL
+// ============================================================================
+
+// SedenionE: Knowledge graph embedding model using sedenion-valued embeddings.
+//
+// Entities and relations are represented as sedenions (16D hypercomplex numbers).
+// The Cayley-Dickson product enables richer rotational modeling than quaternions:
+// - Quaternions (4D): 3 independent rotation planes
+// - Octonions (8D): 21 rotation planes (non-associative)
+// - Sedenions (16D): 120 rotation planes (non-associative, zero divisors)
+//
+// Zero divisors are handled by the training loop via regularization.
+pub struct SedenionKGModel {
+    entity_embeddings: SedenionEmbeddingTable,
+    relation_embeddings: SedenionEmbeddingTable,
+    scoring: SedScoringFn,
+}
+
+// Create a knowledge graph embedding model
+pub fn create_kg_model(
+    num_entities: i32,
+    num_relations: i32,
+    scoring: SedScoringFn
+) -> SedenionKGModel with Panic, Mut {
+    SedenionKGModel {
+        entity_embeddings: create_embedding_table(num_entities, true),
+        relation_embeddings: create_embedding_table(num_relations, false),
+        scoring: scoring
+    }
+}
+
+// Score a knowledge graph triple (head_id, relation_id, tail_id)
+pub fn kg_score_triple(
+    model: SedenionKGModel,
+    head_id: i32,
+    rel_id: i32,
+    tail_id: i32
+) -> f32 with Panic {
+    let h = embedding_lookup_raw(model.entity_embeddings, head_id)
+    let r = embedding_lookup_raw(model.relation_embeddings, rel_id)
+    let t = embedding_lookup_raw(model.entity_embeddings, tail_id)
+
+    match model.scoring {
+        SedScoringFn::CayleyProduct => sed_cayley_score(h, r, t),
+        SedScoringFn::DistMult => sed_distmult_score(h, r, t),
+        SedScoringFn::Bilinear => sed_bilinear_score(h, r, t),
+    }
+}
+
+// Score a triple with epistemic uncertainty propagation (GUM-style)
+//
+// Propagates uncertainty from entity/relation embeddings to the final score.
+// Uses first-order (linear) uncertainty propagation:
+//   u_score^2 = u_h^2 * ||d(score)/dh||^2 + u_r^2 * ||d(score)/dr||^2 + u_t^2 * ||d(score)/dt||^2
+//
+// Simplified approximation for Cayley scoring:
+//   u_score ≈ sqrt(u_h^2 * ||r*t||^2 + u_r^2 * ||h*t||^2 + u_t^2 * ||h*r||^2)
+pub fn kg_score_triple_epistemic(
+    model: SedenionKGModel,
+    head_id: i32,
+    rel_id: i32,
+    tail_id: i32
+) -> KnowledgeF32 with Panic {
+    let hk = embedding_lookup(model.entity_embeddings, head_id)
+    let rk = embedding_lookup(model.relation_embeddings, rel_id)
+    let tk = embedding_lookup(model.entity_embeddings, tail_id)
+
+    let h = hk.value
+    let r = rk.value
+    let t = tk.value
+
+    // Compute score
+    let score = match model.scoring {
+        SedScoringFn::CayleyProduct => sed_cayley_score(h, r, t),
+        SedScoringFn::DistMult => sed_distmult_score(h, r, t),
+        SedScoringFn::Bilinear => sed_bilinear_score(h, r, t),
+    }
+
+    // First-order uncertainty propagation
+    // Sensitivity coefficients (approximate magnitudes)
+    let hr = sed_mul(h, r)
+    let rt = sed_mul(r, t)
+    let ht_norm_sq = sed_dot(h, t) * sed_dot(h, t)  // simplified
+
+    let u_h = hk.uncertainty
+    let u_r = rk.uncertainty
+    let u_t = tk.uncertainty
+
+    let sens_h_sq = sed_norm_sq(rt)
+    let sens_r_sq = sed_norm_sq(h) * sed_norm_sq(t)  // approximate
+    let sens_t_sq = sed_norm_sq(hr)
+
+    let u_score_sq = u_h * u_h * sens_h_sq + u_r * u_r * sens_r_sq + u_t * u_t * sens_t_sq
+    let u_score = u_score_sq.sqrt()
+
+    KnowledgeF32 {
+        value: score,
+        uncertainty: u_score
+    }
+}
+
+// Margin-based ranking loss
+pub fn kg_margin_loss(pos_score: f32, neg_score: f32, margin: f32) -> f32 {
+    sed_margin_loss(pos_score, neg_score, margin)
+}
+
+// ============================================================================
+// SCORING BACKWARD (delegates to sedenion_backward module)
+// ============================================================================
+
+// Compute gradients for a scored triple
+// Returns (grad_head, grad_relation, grad_tail)
+pub fn kg_score_backward(
+    model: SedenionKGModel,
+    head_id: i32,
+    rel_id: i32,
+    tail_id: i32,
+    grad_score: f32
+) -> (Sedenion, Sedenion, Sedenion) with Panic {
+    let h = embedding_lookup_raw(model.entity_embeddings, head_id)
+    let r = embedding_lookup_raw(model.relation_embeddings, rel_id)
+    let t = embedding_lookup_raw(model.entity_embeddings, tail_id)
+
+    match model.scoring {
+        SedScoringFn::CayleyProduct => sed_cayley_score_backward(grad_score, h, r, t),
+        SedScoringFn::DistMult => sed_cayley_score_backward(grad_score, h, r, t),
+        SedScoringFn::Bilinear => sed_bilinear_score_backward(grad_score, h, r, t),
+    }
+}
+
+// ============================================================================
+// ZERO DIVISOR UTILITIES
+// ============================================================================
+
+// Count how many embeddings in a table are near zero divisors
+pub fn count_zero_divisors(table: SedenionEmbeddingTable) -> i32 with Panic, Mut {
+    var count = 0
+    for i in 0..table.num_entries {
+        if sed_is_zero_divisor(table.embeddings[i]) {
+            count = count + 1
+        }
+    }
+    count
+}
+
+// Compute zero-divisor regularization loss for an embedding table.
+// Penalizes embeddings whose putative inverse doesn't produce identity.
+//
+// loss = (1/n) * sum_i ||e_i * inv(e_i) - 1||^2
+pub fn embedding_zero_divisor_loss(table: SedenionEmbeddingTable) -> f32 with Panic, Mut {
+    var total_loss = 0.0
+    for i in 0..table.num_entries {
+        let e = table.embeddings[i]
+        let norm_sq = sed_norm_sq(e)
+        if norm_sq > 0.0000001 {
+            let inv = sed_putative_inv(e)
+            let product = sed_mul(e, inv)
+            let diff = sed_sub(product, sed_one())
+            total_loss = total_loss + sed_norm_sq(diff)
+        }
+    }
+    total_loss / (table.num_entries as f32)
+}
+
+// ============================================================================
+// ANALOGY OPERATIONS
+// ============================================================================
+
+// Sedenion analogy: a is to b as c is to ?
+// Computes: normalize(c * b^(-1) * a) ... but with safe inverse
+// Falls back to additive analogy: normalize(c - b + a) if inverse fails
+pub fn sed_analogy(a: Sedenion, b: Sedenion, c: Sedenion) -> Sedenion with Panic {
+    // Try multiplicative analogy (preferred for non-commutative space)
+    let b_inv = sed_putative_inv(b)
+    let product = sed_mul(b, b_inv)
+    if sed_is_approx_one(product) {
+        // b is invertible: use multiplicative analogy
+        let ratio = sed_mul(a, b_inv)
+        sed_normalize(sed_mul(c, ratio))
+    } else {
+        // b is near zero divisor: fall back to additive
+        let diff = sed_sub(a, b)
+        sed_normalize(sed_add(c, diff))
+    }
+}

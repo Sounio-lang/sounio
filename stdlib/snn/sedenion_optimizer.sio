@@ -1,0 +1,327 @@
+//! stdlib/snn/sedenion_optimizer.sio - Sedenion Optimizers
+//!
+//! Gradient-based optimization for sedenion-valued parameters.
+//! All operations are component-wise on the 16 sedenion components (e0..e15).
+//!
+//! Algorithms:
+//!   - Adam (adaptive moment estimation) with bias correction
+//!   - SGD with momentum and weight decay
+//!
+//! Pattern follows stdlib/onn/optimizer.sio extended to 16 components.
+
+use math::sedenion::*
+
+// ============================================================================
+// ADAM OPTIMIZER
+// ============================================================================
+
+// Adam optimizer state for sedenion parameters
+// Maintains first and second moment estimates per parameter.
+pub struct SedAdamOptimizer {
+    learning_rate: f32,
+    beta1: f32,             // First moment decay (default 0.9)
+    beta2: f32,             // Second moment decay (default 0.999)
+    epsilon: f32,           // Numerical stability (default 1e-8)
+    weight_decay: f32,      // L2 regularization coefficient
+    timestep: i32,          // Current step (for bias correction)
+    first_moment: [Sedenion],   // m_t: exponential moving average of gradients
+    second_moment: [Sedenion],  // v_t: exponential moving average of squared gradients
+}
+
+// Create Adam optimizer with default hyperparameters
+pub fn create_sed_adam(num_params: i32, lr: f32) -> SedAdamOptimizer with Panic, Mut {
+    var m: [Sedenion] = []
+    var v: [Sedenion] = []
+    for i in 0..num_params {
+        m = m ++ [sed_zero()]
+        v = v ++ [sed_zero()]
+    }
+
+    SedAdamOptimizer {
+        learning_rate: lr,
+        beta1: 0.9,
+        beta2: 0.999,
+        epsilon: 0.00000001,
+        weight_decay: 0.0,
+        timestep: 0,
+        first_moment: m,
+        second_moment: v
+    }
+}
+
+// Create Adam optimizer with custom hyperparameters
+pub fn create_sed_adam_custom(
+    num_params: i32,
+    lr: f32,
+    beta1: f32,
+    beta2: f32,
+    epsilon: f32,
+    weight_decay: f32
+) -> SedAdamOptimizer with Panic, Mut {
+    var m: [Sedenion] = []
+    var v: [Sedenion] = []
+    for i in 0..num_params {
+        m = m ++ [sed_zero()]
+        v = v ++ [sed_zero()]
+    }
+
+    SedAdamOptimizer {
+        learning_rate: lr,
+        beta1: beta1,
+        beta2: beta2,
+        epsilon: epsilon,
+        weight_decay: weight_decay,
+        timestep: 0,
+        first_moment: m,
+        second_moment: v
+    }
+}
+
+// Helper: compute pow(base, exp) for f32 via repeated multiplication
+fn pow_f32(base: f32, exp: i32) -> f32 with Mut {
+    var result = 1.0
+    for i in 0..exp {
+        result = result * base
+    }
+    result
+}
+
+// Adam step: update parameters using gradients
+//
+// For each component c in {e0..e15}:
+//   m_c = β1 * m_c + (1-β1) * g_c
+//   v_c = β2 * v_c + (1-β2) * g_c²
+//   m̂_c = m_c / (1 - β1^t)
+//   v̂_c = v_c / (1 - β2^t)
+//   θ_c = θ_c - lr * (m̂_c / (√v̂_c + ε) + weight_decay * θ_c)
+pub fn sed_adam_step(
+    optimizer: &!SedAdamOptimizer,
+    params: &![Sedenion],
+    grads: [Sedenion]
+) with Panic, Mut {
+    optimizer.timestep = optimizer.timestep + 1
+    let t = optimizer.timestep
+
+    let b1 = optimizer.beta1
+    let b2 = optimizer.beta2
+    let lr = optimizer.learning_rate
+    let eps = optimizer.epsilon
+    let wd = optimizer.weight_decay
+
+    // Bias correction factors
+    let b1_t = pow_f32(b1, t)
+    let b2_t = pow_f32(b2, t)
+    let bc1 = 1.0 / (1.0 - b1_t)
+    let bc2 = 1.0 / (1.0 - b2_t)
+
+    let n = len(grads) as i32
+
+    for i in 0..n {
+        let g = grads[i]
+        let p = params[i]
+        let m = optimizer.first_moment[i]
+        let v = optimizer.second_moment[i]
+
+        // Update first moment (mean of gradients)
+        let new_m = Sedenion {
+            e0: b1 * m.e0 + (1.0 - b1) * g.e0,
+            e1: b1 * m.e1 + (1.0 - b1) * g.e1,
+            e2: b1 * m.e2 + (1.0 - b1) * g.e2,
+            e3: b1 * m.e3 + (1.0 - b1) * g.e3,
+            e4: b1 * m.e4 + (1.0 - b1) * g.e4,
+            e5: b1 * m.e5 + (1.0 - b1) * g.e5,
+            e6: b1 * m.e6 + (1.0 - b1) * g.e6,
+            e7: b1 * m.e7 + (1.0 - b1) * g.e7,
+            e8: b1 * m.e8 + (1.0 - b1) * g.e8,
+            e9: b1 * m.e9 + (1.0 - b1) * g.e9,
+            e10: b1 * m.e10 + (1.0 - b1) * g.e10,
+            e11: b1 * m.e11 + (1.0 - b1) * g.e11,
+            e12: b1 * m.e12 + (1.0 - b1) * g.e12,
+            e13: b1 * m.e13 + (1.0 - b1) * g.e13,
+            e14: b1 * m.e14 + (1.0 - b1) * g.e14,
+            e15: b1 * m.e15 + (1.0 - b1) * g.e15
+        }
+
+        // Update second moment (mean of squared gradients)
+        let new_v = Sedenion {
+            e0: b2 * v.e0 + (1.0 - b2) * g.e0 * g.e0,
+            e1: b2 * v.e1 + (1.0 - b2) * g.e1 * g.e1,
+            e2: b2 * v.e2 + (1.0 - b2) * g.e2 * g.e2,
+            e3: b2 * v.e3 + (1.0 - b2) * g.e3 * g.e3,
+            e4: b2 * v.e4 + (1.0 - b2) * g.e4 * g.e4,
+            e5: b2 * v.e5 + (1.0 - b2) * g.e5 * g.e5,
+            e6: b2 * v.e6 + (1.0 - b2) * g.e6 * g.e6,
+            e7: b2 * v.e7 + (1.0 - b2) * g.e7 * g.e7,
+            e8: b2 * v.e8 + (1.0 - b2) * g.e8 * g.e8,
+            e9: b2 * v.e9 + (1.0 - b2) * g.e9 * g.e9,
+            e10: b2 * v.e10 + (1.0 - b2) * g.e10 * g.e10,
+            e11: b2 * v.e11 + (1.0 - b2) * g.e11 * g.e11,
+            e12: b2 * v.e12 + (1.0 - b2) * g.e12 * g.e12,
+            e13: b2 * v.e13 + (1.0 - b2) * g.e13 * g.e13,
+            e14: b2 * v.e14 + (1.0 - b2) * g.e14 * g.e14,
+            e15: b2 * v.e15 + (1.0 - b2) * g.e15 * g.e15
+        }
+
+        optimizer.first_moment[i] = new_m
+        optimizer.second_moment[i] = new_v
+
+        // Bias-corrected estimates and parameter update
+        params[i] = Sedenion {
+            e0: p.e0 - lr * ((new_m.e0 * bc1) / ((new_v.e0 * bc2).sqrt() + eps) + wd * p.e0),
+            e1: p.e1 - lr * ((new_m.e1 * bc1) / ((new_v.e1 * bc2).sqrt() + eps) + wd * p.e1),
+            e2: p.e2 - lr * ((new_m.e2 * bc1) / ((new_v.e2 * bc2).sqrt() + eps) + wd * p.e2),
+            e3: p.e3 - lr * ((new_m.e3 * bc1) / ((new_v.e3 * bc2).sqrt() + eps) + wd * p.e3),
+            e4: p.e4 - lr * ((new_m.e4 * bc1) / ((new_v.e4 * bc2).sqrt() + eps) + wd * p.e4),
+            e5: p.e5 - lr * ((new_m.e5 * bc1) / ((new_v.e5 * bc2).sqrt() + eps) + wd * p.e5),
+            e6: p.e6 - lr * ((new_m.e6 * bc1) / ((new_v.e6 * bc2).sqrt() + eps) + wd * p.e6),
+            e7: p.e7 - lr * ((new_m.e7 * bc1) / ((new_v.e7 * bc2).sqrt() + eps) + wd * p.e7),
+            e8: p.e8 - lr * ((new_m.e8 * bc1) / ((new_v.e8 * bc2).sqrt() + eps) + wd * p.e8),
+            e9: p.e9 - lr * ((new_m.e9 * bc1) / ((new_v.e9 * bc2).sqrt() + eps) + wd * p.e9),
+            e10: p.e10 - lr * ((new_m.e10 * bc1) / ((new_v.e10 * bc2).sqrt() + eps) + wd * p.e10),
+            e11: p.e11 - lr * ((new_m.e11 * bc1) / ((new_v.e11 * bc2).sqrt() + eps) + wd * p.e11),
+            e12: p.e12 - lr * ((new_m.e12 * bc1) / ((new_v.e12 * bc2).sqrt() + eps) + wd * p.e12),
+            e13: p.e13 - lr * ((new_m.e13 * bc1) / ((new_v.e13 * bc2).sqrt() + eps) + wd * p.e13),
+            e14: p.e14 - lr * ((new_m.e14 * bc1) / ((new_v.e14 * bc2).sqrt() + eps) + wd * p.e14),
+            e15: p.e15 - lr * ((new_m.e15 * bc1) / ((new_v.e15 * bc2).sqrt() + eps) + wd * p.e15)
+        }
+    }
+}
+
+// ============================================================================
+// SGD WITH MOMENTUM
+// ============================================================================
+
+// SGD optimizer state for sedenion parameters
+pub struct SedSgdOptimizer {
+    learning_rate: f32,
+    momentum: f32,          // Momentum coefficient (default 0.9)
+    weight_decay: f32,      // L2 regularization
+    velocity: [Sedenion],   // Momentum buffer
+}
+
+// Create SGD optimizer
+pub fn create_sed_sgd(
+    num_params: i32,
+    lr: f32,
+    momentum: f32
+) -> SedSgdOptimizer with Panic, Mut {
+    var vel: [Sedenion] = []
+    for i in 0..num_params {
+        vel = vel ++ [sed_zero()]
+    }
+
+    SedSgdOptimizer {
+        learning_rate: lr,
+        momentum: momentum,
+        weight_decay: 0.0,
+        velocity: vel
+    }
+}
+
+// Create SGD optimizer with weight decay
+pub fn create_sed_sgd_wd(
+    num_params: i32,
+    lr: f32,
+    momentum: f32,
+    weight_decay: f32
+) -> SedSgdOptimizer with Panic, Mut {
+    var vel: [Sedenion] = []
+    for i in 0..num_params {
+        vel = vel ++ [sed_zero()]
+    }
+
+    SedSgdOptimizer {
+        learning_rate: lr,
+        momentum: momentum,
+        weight_decay: weight_decay,
+        velocity: vel
+    }
+}
+
+// SGD step: v = momentum * v - lr * (grad + weight_decay * param)
+//           param = param + v
+pub fn sed_sgd_step(
+    optimizer: &!SedSgdOptimizer,
+    params: &![Sedenion],
+    grads: [Sedenion]
+) with Panic, Mut {
+    let lr = optimizer.learning_rate
+    let mu = optimizer.momentum
+    let wd = optimizer.weight_decay
+    let n = len(grads) as i32
+
+    for i in 0..n {
+        let g = grads[i]
+        let p = params[i]
+        let v = optimizer.velocity[i]
+
+        // Gradient with weight decay
+        let gwd = Sedenion {
+            e0: g.e0 + wd * p.e0,
+            e1: g.e1 + wd * p.e1,
+            e2: g.e2 + wd * p.e2,
+            e3: g.e3 + wd * p.e3,
+            e4: g.e4 + wd * p.e4,
+            e5: g.e5 + wd * p.e5,
+            e6: g.e6 + wd * p.e6,
+            e7: g.e7 + wd * p.e7,
+            e8: g.e8 + wd * p.e8,
+            e9: g.e9 + wd * p.e9,
+            e10: g.e10 + wd * p.e10,
+            e11: g.e11 + wd * p.e11,
+            e12: g.e12 + wd * p.e12,
+            e13: g.e13 + wd * p.e13,
+            e14: g.e14 + wd * p.e14,
+            e15: g.e15 + wd * p.e15
+        }
+
+        // Update velocity
+        let new_v = Sedenion {
+            e0: mu * v.e0 - lr * gwd.e0,
+            e1: mu * v.e1 - lr * gwd.e1,
+            e2: mu * v.e2 - lr * gwd.e2,
+            e3: mu * v.e3 - lr * gwd.e3,
+            e4: mu * v.e4 - lr * gwd.e4,
+            e5: mu * v.e5 - lr * gwd.e5,
+            e6: mu * v.e6 - lr * gwd.e6,
+            e7: mu * v.e7 - lr * gwd.e7,
+            e8: mu * v.e8 - lr * gwd.e8,
+            e9: mu * v.e9 - lr * gwd.e9,
+            e10: mu * v.e10 - lr * gwd.e10,
+            e11: mu * v.e11 - lr * gwd.e11,
+            e12: mu * v.e12 - lr * gwd.e12,
+            e13: mu * v.e13 - lr * gwd.e13,
+            e14: mu * v.e14 - lr * gwd.e14,
+            e15: mu * v.e15 - lr * gwd.e15
+        }
+
+        optimizer.velocity[i] = new_v
+
+        // Update parameter
+        params[i] = sed_add(p, new_v)
+    }
+}
+
+// ============================================================================
+// LEARNING RATE UTILITIES
+// ============================================================================
+
+// Update Adam learning rate (for external scheduling)
+pub fn sed_adam_set_lr(optimizer: &!SedAdamOptimizer, lr: f32) {
+    optimizer.learning_rate = lr
+}
+
+// Update SGD learning rate
+pub fn sed_sgd_set_lr(optimizer: &!SedSgdOptimizer, lr: f32) {
+    optimizer.learning_rate = lr
+}
+
+// Reset optimizer state (e.g., for fine-tuning)
+pub fn sed_adam_reset(optimizer: &!SedAdamOptimizer) with Panic, Mut {
+    optimizer.timestep = 0
+    let n = len(optimizer.first_moment) as i32
+    for i in 0..n {
+        optimizer.first_moment[i] = sed_zero()
+        optimizer.second_moment[i] = sed_zero()
+    }
+}

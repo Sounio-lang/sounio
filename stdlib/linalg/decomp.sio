@@ -1,0 +1,866 @@
+// decomp.sio - Matrix Decompositions for Sounio Linear Algebra
+//
+// Fixed-size QR, Eigendecomposition, and SVD for matrices up to 8x8.
+// Uses flat array representation [f64; 64] for 8x8 row-major storage.
+//
+// Algorithms:
+//   QR:    Householder reflections
+//   Eigen: QR algorithm with Wilkinson shift
+//   SVD:   Via eigendecomposition of A^T A
+
+// ============================================================================
+// HELPERS
+// ============================================================================
+
+fn abs_f64(x: f64) -> f64 {
+    if x < 0.0 {
+        return 0.0 - x
+    }
+    return x
+}
+
+fn sqrt_f64(x: f64) -> f64 with Mut, Panic, Div {
+    if x <= 0.0 { return 0.0 }
+    // Range reduction: scale x into [1, 4) by multiplying by powers of 4
+    // then scale the result back by dividing by the power of 2
+    var scaled = x
+    var scale_back = 1.0
+    // Scale up small numbers
+    while scaled < 1.0 {
+        scaled = scaled * 4.0
+        scale_back = scale_back * 2.0
+    }
+    // Scale down large numbers
+    while scaled > 4.0 {
+        scaled = scaled * 0.25
+        scale_back = scale_back * 0.5
+    }
+    // Newton-Raphson on scaled value (now in [1, 4))
+    var y = 1.5
+    y = 0.5 * (y + scaled / y)
+    y = 0.5 * (y + scaled / y)
+    y = 0.5 * (y + scaled / y)
+    y = 0.5 * (y + scaled / y)
+    y = 0.5 * (y + scaled / y)
+    y = 0.5 * (y + scaled / y)
+    y = 0.5 * (y + scaled / y)
+    y = 0.5 * (y + scaled / y)
+    y = 0.5 * (y + scaled / y)
+    y = 0.5 * (y + scaled / y)
+    y = 0.5 * (y + scaled / y)
+    y = 0.5 * (y + scaled / y)
+    y = 0.5 * (y + scaled / y)
+    y = 0.5 * (y + scaled / y)
+    y = 0.5 * (y + scaled / y)
+    return y / scale_back
+}
+
+fn sign_f64(x: f64) -> f64 {
+    if x >= 0.0 { return 1.0 }
+    return 0.0 - 1.0
+}
+
+fn max_i32(a: i32, b: i32) -> i32 {
+    if a > b { return a }
+    return b
+}
+
+fn min_i32(a: i32, b: i32) -> i32 {
+    if a < b { return a }
+    return b
+}
+
+// ============================================================================
+// DATA STRUCTURES
+// ============================================================================
+
+struct Matrix8 {
+    data: [f64; 64],
+    rows: i32,
+    cols: i32
+}
+
+struct QRResult {
+    q: Matrix8,
+    r: Matrix8,
+    rows: i32,
+    cols: i32
+}
+
+struct EigenResult {
+    eigenvalues_real: [f64; 8],
+    eigenvalues_imag: [f64; 8],
+    eigenvectors: Matrix8,
+    n: i32
+}
+
+struct SVDResult {
+    u: Matrix8,
+    sigma: [f64; 8],
+    vt: Matrix8,
+    rows: i32,
+    cols: i32
+}
+
+// ============================================================================
+// MATRIX8 BASIC OPERATIONS
+// ============================================================================
+
+fn mat8_get(m: Matrix8, r: i32, c: i32) -> f64 with Panic {
+    let idx = r * m.cols + c
+    return m.data[idx]
+}
+
+fn mat8_set(m: Matrix8, r: i32, c: i32, val: f64) -> Matrix8 with Mut, Panic {
+    var result = m
+    let idx = r * m.cols + c
+    result.data[idx] = val
+    return result
+}
+
+fn mat8_zeros(rows: i32, cols: i32) -> Matrix8 {
+    let data: [f64; 64] = [0.0; 64]
+    return Matrix8 { data: data, rows: rows, cols: cols }
+}
+
+fn mat8_identity(n: i32) -> Matrix8 with Mut, Panic, Div {
+    var m = mat8_zeros(n, n)
+    var i = 0
+    while i < n {
+        m = mat8_set(m, i, i, 1.0)
+        i = i + 1
+    }
+    return m
+}
+
+fn mat8_copy(src: Matrix8) -> Matrix8 {
+    return Matrix8 { data: src.data, rows: src.rows, cols: src.cols }
+}
+
+fn mat8_multiply(a: Matrix8, b: Matrix8) -> Matrix8 with Mut, Panic, Div {
+    var c = mat8_zeros(a.rows, b.cols)
+    var i = 0
+    while i < a.rows {
+        var j = 0
+        while j < b.cols {
+            var sum = 0.0
+            var k = 0
+            while k < a.cols {
+                sum = sum + mat8_get(a, i, k) * mat8_get(b, k, j)
+                k = k + 1
+            }
+            c = mat8_set(c, i, j, sum)
+            j = j + 1
+        }
+        i = i + 1
+    }
+    return c
+}
+
+fn mat8_transpose(m: Matrix8) -> Matrix8 with Mut, Panic, Div {
+    var t = mat8_zeros(m.cols, m.rows)
+    var i = 0
+    while i < m.rows {
+        var j = 0
+        while j < m.cols {
+            t = mat8_set(t, j, i, mat8_get(m, i, j))
+            j = j + 1
+        }
+        i = i + 1
+    }
+    return t
+}
+
+fn mat8_subtract(a: Matrix8, b: Matrix8) -> Matrix8 with Mut, Panic, Div {
+    var c = mat8_zeros(a.rows, a.cols)
+    var i = 0
+    while i < a.rows {
+        var j = 0
+        while j < a.cols {
+            c = mat8_set(c, i, j, mat8_get(a, i, j) - mat8_get(b, i, j))
+            j = j + 1
+        }
+        i = i + 1
+    }
+    return c
+}
+
+fn mat8_frobenius_norm(m: Matrix8) -> f64 with Mut, Panic, Div {
+    var sum = 0.0
+    var i = 0
+    while i < m.rows {
+        var j = 0
+        while j < m.cols {
+            let v = mat8_get(m, i, j)
+            sum = sum + v * v
+            j = j + 1
+        }
+        i = i + 1
+    }
+    return sqrt_f64(sum)
+}
+
+fn vec8_norm(v: [f64; 8], n: i32) -> f64 with Mut, Panic, Div {
+    var sum = 0.0
+    var i = 0
+    while i < n {
+        sum = sum + v[i] * v[i]
+        i = i + 1
+    }
+    return sqrt_f64(sum)
+}
+
+fn vec8_dot(a: [f64; 8], b: [f64; 8], n: i32) -> f64 with Mut, Panic, Div {
+    var sum = 0.0
+    var i = 0
+    while i < n {
+        sum = sum + a[i] * b[i]
+        i = i + 1
+    }
+    return sum
+}
+
+// ============================================================================
+// QR DECOMPOSITION (Householder reflections)
+// ============================================================================
+// For A (m x n), compute Q (m x m orthogonal) and R (m x n upper triangular)
+// such that A = Q * R.
+//
+// Householder reflection: for column x, compute v = x + sign(x_0)|x|e_1,
+// then H = I - 2*v*v^T / (v^T*v) is a reflection that zeroes out below-diagonal.
+
+fn qr_decompose(a: Matrix8) -> QRResult with Mut, Panic, Div {
+    let m = a.rows
+    let n = a.cols
+    let mn = min_i32(m, n)
+
+    // Work on a copy that becomes R
+    var r = mat8_copy(a)
+    // Q starts as identity
+    var q = mat8_identity(m)
+
+    var k = 0
+    while k < mn {
+        // Extract the column below the diagonal into a working vector
+        var x: [f64; 8] = [0.0; 8]
+        let col_len = m - k
+        var i = 0
+        while i < col_len {
+            x[i] = mat8_get(r, k + i, k)
+            i = i + 1
+        }
+
+        // Compute norm of x
+        let x_norm = vec8_norm(x, col_len)
+
+        if x_norm > 1e-15 {
+            // Compute Householder vector v = x + sign(x_0)|x|e_1
+            var v: [f64; 8] = [0.0; 8]
+            i = 0
+            while i < col_len {
+                v[i] = x[i]
+                i = i + 1
+            }
+            v[0] = v[0] + sign_f64(x[0]) * x_norm
+
+            // Compute v^T * v
+            let vtv = vec8_dot(v, v, col_len)
+
+            if vtv > 1e-30 {
+                let scale = 2.0 / vtv
+
+                // Apply H to remaining columns of R: R[k:m, j] -= scale * v * (v^T * R[k:m, j])
+                var j = k
+                while j < n {
+                    // Compute v^T * R[k:m, j]
+                    var dot = 0.0
+                    i = 0
+                    while i < col_len {
+                        dot = dot + v[i] * mat8_get(r, k + i, j)
+                        i = i + 1
+                    }
+                    // Update R[k:m, j]
+                    i = 0
+                    while i < col_len {
+                        let old = mat8_get(r, k + i, j)
+                        r = mat8_set(r, k + i, j, old - scale * v[i] * dot)
+                        i = i + 1
+                    }
+                    j = j + 1
+                }
+
+                // Apply H to Q from the right: Q[:, k:m] -= scale * Q[:, k:m] * v * v^T
+                // Equivalently Q[i, :] -= scale * (Q[i, k:m] . v) * v^T for each row i
+                i = 0
+                while i < m {
+                    // Compute Q[i, k:m] . v
+                    var dot2 = 0.0
+                    var p = 0
+                    while p < col_len {
+                        dot2 = dot2 + mat8_get(q, i, k + p) * v[p]
+                        p = p + 1
+                    }
+                    // Update Q[i, k:m]
+                    p = 0
+                    while p < col_len {
+                        let old2 = mat8_get(q, i, k + p)
+                        q = mat8_set(q, i, k + p, old2 - scale * dot2 * v[p])
+                        p = p + 1
+                    }
+                    i = i + 1
+                }
+            }
+        }
+
+        k = k + 1
+    }
+
+    // Clean up near-zero entries in R below diagonal
+    var ci = 0
+    while ci < m {
+        var cj = 0
+        while cj < min_i32(ci, n) {
+            let rv = mat8_get(r, ci, cj)
+            if abs_f64(rv) < 1e-14 {
+                r = mat8_set(r, ci, cj, 0.0)
+            }
+            cj = cj + 1
+        }
+        ci = ci + 1
+    }
+
+    return QRResult { q: q, r: r, rows: m, cols: n }
+}
+
+// ============================================================================
+// EIGENDECOMPOSITION (QR algorithm with Wilkinson shift)
+// ============================================================================
+// For a square matrix A (n x n), computes eigenvalues and eigenvectors.
+// Uses iterated QR decomposition with implicit shifts for convergence.
+//
+// The QR algorithm: A_{k+1} = R_k * Q_k (where Q_k * R_k = A_k - sigma*I)
+// converges to a quasi-upper-triangular (Schur) form.
+// Eigenvalues appear on the diagonal (real) or in 2x2 blocks (complex pairs).
+
+fn eigen_decompose(a: Matrix8) -> EigenResult with Mut, Panic, Div {
+    let n = a.rows
+    var eigenvalues_real: [f64; 8] = [0.0; 8]
+    var eigenvalues_imag: [f64; 8] = [0.0; 8]
+
+    // Work matrix that converges to quasi-upper-triangular form
+    var work = mat8_copy(a)
+    // Accumulate eigenvector transformations
+    var vecs = mat8_identity(n)
+
+    let max_iter = 200
+    let tol = 1e-10
+
+    // Deflation: process from bottom-right
+    var p = n - 1
+    var total_iter = 0
+
+    while p > 0 {
+        if total_iter > max_iter {
+            // Did not converge, take what we have
+            p = 0
+        } else {
+            // Check convergence of subdiagonal element work[p, p-1]
+            let subdiag = abs_f64(mat8_get(work, p, p - 1))
+            let diag_sum = abs_f64(mat8_get(work, p, p)) + abs_f64(mat8_get(work, p - 1, p - 1))
+            let threshold = tol * diag_sum
+            let use_threshold = tol
+            // Use absolute threshold if diag_sum is tiny
+            let effective_tol = tol
+            if diag_sum > 1.0 {
+                // Use relative threshold
+                if subdiag < tol * diag_sum {
+                    work = mat8_set(work, p, p - 1, 0.0)
+                    p = p - 1
+                } else {
+                    // Perform one QR step with Wilkinson shift on active submatrix [0..p+1, 0..p+1]
+                    // Wilkinson shift: eigenvalue of trailing 2x2 block closest to work[p,p]
+                    let app = mat8_get(work, p, p)
+                    let apm = mat8_get(work, p - 1, p - 1)
+                    let apmp = mat8_get(work, p - 1, p)
+                    let appm = mat8_get(work, p, p - 1)
+
+                    let dd = (apm - app) / 2.0
+                    let det_2x2 = appm * apmp
+                    let disc = dd * dd + det_2x2
+                    var sigma = app
+
+                    if disc >= 0.0 {
+                        let sq = sqrt_f64(disc)
+                        let s1 = app - dd + sq
+                        let s2 = app - dd - sq
+                        // Pick the one closer to app
+                        if abs_f64(s1 - app) < abs_f64(s2 - app) {
+                            sigma = s1
+                        } else {
+                            sigma = s2
+                        }
+                    }
+
+                    // Shift: work = work - sigma * I
+                    var si = 0
+                    while si <= p {
+                        let old_d = mat8_get(work, si, si)
+                        work = mat8_set(work, si, si, old_d - sigma)
+                        si = si + 1
+                    }
+
+                    // Build a temporary submatrix for QR
+                    var sub = mat8_zeros(p + 1, p + 1)
+                    si = 0
+                    while si <= p {
+                        var sj = 0
+                        while sj <= p {
+                            sub = mat8_set(sub, si, sj, mat8_get(work, si, sj))
+                            sj = sj + 1
+                        }
+                        si = si + 1
+                    }
+
+                    let qr = qr_decompose(sub)
+
+                    // work = R * Q + sigma * I
+                    let rq = mat8_multiply(qr.r, qr.q)
+                    si = 0
+                    while si <= p {
+                        var sj = 0
+                        while sj <= p {
+                            var val = mat8_get(rq, si, sj)
+                            if si == sj {
+                                val = val + sigma
+                            }
+                            work = mat8_set(work, si, sj, val)
+                            sj = sj + 1
+                        }
+                        si = si + 1
+                    }
+
+                    // Accumulate eigenvectors: vecs = vecs * Q
+                    var new_vecs = mat8_zeros(n, n)
+                    si = 0
+                    while si < n {
+                        var sj = 0
+                        while sj <= p {
+                            var sum = 0.0
+                            var sk = 0
+                            while sk <= p {
+                                sum = sum + mat8_get(vecs, si, sk) * mat8_get(qr.q, sk, sj)
+                                sk = sk + 1
+                            }
+                            new_vecs = mat8_set(new_vecs, si, sj, sum)
+                            sj = sj + 1
+                        }
+                        // Copy unchanged columns
+                        sj = p + 1
+                        while sj < n {
+                            new_vecs = mat8_set(new_vecs, si, sj, mat8_get(vecs, si, sj))
+                            sj = sj + 1
+                        }
+                        si = si + 1
+                    }
+                    vecs = new_vecs
+
+                    total_iter = total_iter + 1
+                }
+            } else {
+                // Small diagonal sum, use absolute tolerance
+                if subdiag < tol {
+                    work = mat8_set(work, p, p - 1, 0.0)
+                    p = p - 1
+                } else {
+                    // Same QR step as above
+                    let app2 = mat8_get(work, p, p)
+                    let apm2 = mat8_get(work, p - 1, p - 1)
+                    let apmp2 = mat8_get(work, p - 1, p)
+                    let appm2 = mat8_get(work, p, p - 1)
+
+                    let dd2 = (apm2 - app2) / 2.0
+                    let det2 = appm2 * apmp2
+                    let disc2 = dd2 * dd2 + det2
+                    var sigma2 = app2
+                    if disc2 >= 0.0 {
+                        let sq2 = sqrt_f64(disc2)
+                        let s12 = app2 - dd2 + sq2
+                        let s22 = app2 - dd2 - sq2
+                        if abs_f64(s12 - app2) < abs_f64(s22 - app2) {
+                            sigma2 = s12
+                        } else {
+                            sigma2 = s22
+                        }
+                    }
+
+                    var si2 = 0
+                    while si2 <= p {
+                        let old_d2 = mat8_get(work, si2, si2)
+                        work = mat8_set(work, si2, si2, old_d2 - sigma2)
+                        si2 = si2 + 1
+                    }
+
+                    var sub2 = mat8_zeros(p + 1, p + 1)
+                    si2 = 0
+                    while si2 <= p {
+                        var sj2 = 0
+                        while sj2 <= p {
+                            sub2 = mat8_set(sub2, si2, sj2, mat8_get(work, si2, sj2))
+                            sj2 = sj2 + 1
+                        }
+                        si2 = si2 + 1
+                    }
+
+                    let qr2 = qr_decompose(sub2)
+                    let rq2 = mat8_multiply(qr2.r, qr2.q)
+
+                    si2 = 0
+                    while si2 <= p {
+                        var sj2 = 0
+                        while sj2 <= p {
+                            var val2 = mat8_get(rq2, si2, sj2)
+                            if si2 == sj2 {
+                                val2 = val2 + sigma2
+                            }
+                            work = mat8_set(work, si2, sj2, val2)
+                            sj2 = sj2 + 1
+                        }
+                        si2 = si2 + 1
+                    }
+
+                    var new_v2 = mat8_zeros(n, n)
+                    si2 = 0
+                    while si2 < n {
+                        var sj2 = 0
+                        while sj2 <= p {
+                            var sum2 = 0.0
+                            var sk2 = 0
+                            while sk2 <= p {
+                                sum2 = sum2 + mat8_get(vecs, si2, sk2) * mat8_get(qr2.q, sk2, sj2)
+                                sk2 = sk2 + 1
+                            }
+                            new_v2 = mat8_set(new_v2, si2, sj2, sum2)
+                            sj2 = sj2 + 1
+                        }
+                        sj2 = p + 1
+                        while sj2 < n {
+                            new_v2 = mat8_set(new_v2, si2, sj2, mat8_get(vecs, si2, sj2))
+                            sj2 = sj2 + 1
+                        }
+                        si2 = si2 + 1
+                    }
+                    vecs = new_v2
+
+                    total_iter = total_iter + 1
+                }
+            }
+        }
+    }
+
+    // Extract eigenvalues from the quasi-upper-triangular work matrix
+    var ei = 0
+    while ei < n {
+        if ei < n - 1 {
+            let sub_el = abs_f64(mat8_get(work, ei + 1, ei))
+            if sub_el > tol {
+                // 2x2 block: complex eigenvalue pair
+                let a11 = mat8_get(work, ei, ei)
+                let a12 = mat8_get(work, ei, ei + 1)
+                let a21 = mat8_get(work, ei + 1, ei)
+                let a22 = mat8_get(work, ei + 1, ei + 1)
+                let tr = a11 + a22
+                let det = a11 * a22 - a12 * a21
+                let disc_e = tr * tr - 4.0 * det
+                if disc_e < 0.0 {
+                    eigenvalues_real[ei] = tr / 2.0
+                    eigenvalues_imag[ei] = sqrt_f64(0.0 - disc_e) / 2.0
+                    eigenvalues_real[ei + 1] = tr / 2.0
+                    eigenvalues_imag[ei + 1] = 0.0 - sqrt_f64(0.0 - disc_e) / 2.0
+                } else {
+                    let sq_e = sqrt_f64(disc_e)
+                    eigenvalues_real[ei] = (tr + sq_e) / 2.0
+                    eigenvalues_imag[ei] = 0.0
+                    eigenvalues_real[ei + 1] = (tr - sq_e) / 2.0
+                    eigenvalues_imag[ei + 1] = 0.0
+                }
+                ei = ei + 2
+            } else {
+                eigenvalues_real[ei] = mat8_get(work, ei, ei)
+                eigenvalues_imag[ei] = 0.0
+                ei = ei + 1
+            }
+        } else {
+            eigenvalues_real[ei] = mat8_get(work, ei, ei)
+            eigenvalues_imag[ei] = 0.0
+            ei = ei + 1
+        }
+    }
+
+    return EigenResult {
+        eigenvalues_real: eigenvalues_real,
+        eigenvalues_imag: eigenvalues_imag,
+        eigenvectors: vecs,
+        n: n
+    }
+}
+
+// ============================================================================
+// SVD DECOMPOSITION (via eigendecomposition of A^T A)
+// ============================================================================
+// For A (m x n), compute U (m x m), sigma (min(m,n)), V^T (n x n)
+// such that A = U * diag(sigma) * V^T.
+//
+// Method: eigendecompose A^T * A to get V and sigma^2,
+//         then U columns = A * v_i / sigma_i.
+
+fn svd_decompose(a: Matrix8) -> SVDResult with Mut, Panic, Div {
+    let m = a.rows
+    let n = a.cols
+    let mn = min_i32(m, n)
+
+    // Compute A^T * A (n x n, symmetric positive semi-definite)
+    let at = mat8_transpose(a)
+    let ata = mat8_multiply(at, a)
+
+    // Eigendecompose A^T A
+    let eig = eigen_decompose(ata)
+
+    // Singular values = sqrt(eigenvalues of A^T A)
+    // Eigenvalues should be non-negative for A^T A
+    var sigma: [f64; 8] = [0.0; 8]
+    var order: [i32; 8] = [0; 8]
+    var i = 0
+    while i < n {
+        let ev = eig.eigenvalues_real[i]
+        if ev > 0.0 {
+            sigma[i] = sqrt_f64(ev)
+        } else {
+            sigma[i] = 0.0
+        }
+        order[i] = i
+        i = i + 1
+    }
+
+    // Sort singular values in descending order (bubble sort for small n)
+    i = 0
+    while i < n - 1 {
+        var j = 0
+        while j < n - 1 - i {
+            if sigma[j] < sigma[j + 1] {
+                // Swap sigma
+                let tmp_s = sigma[j]
+                sigma[j] = sigma[j + 1]
+                sigma[j + 1] = tmp_s
+                // Swap order
+                let tmp_o = order[j]
+                order[j] = order[j + 1]
+                order[j + 1] = tmp_o
+            }
+            j = j + 1
+        }
+        i = i + 1
+    }
+
+    // Build V^T from eigenvectors in sorted order
+    // V columns are eigenvectors of A^T A
+    var vt = mat8_zeros(n, n)
+    i = 0
+    while i < n {
+        let col_idx = order[i]
+        var j = 0
+        while j < n {
+            // V^T row i = eigenvector col_idx (transposed)
+            vt = mat8_set(vt, i, j, mat8_get(eig.eigenvectors, j, col_idx))
+            j = j + 1
+        }
+        i = i + 1
+    }
+
+    // Build U: u_i = A * v_i / sigma_i
+    var u = mat8_zeros(m, m)
+    i = 0
+    while i < mn {
+        if sigma[i] > 1e-14 {
+            // v_i is row i of V^T (transposed back to column)
+            var vi: [f64; 8] = [0.0; 8]
+            var j = 0
+            while j < n {
+                vi[j] = mat8_get(vt, i, j)
+                j = j + 1
+            }
+
+            // Compute A * v_i
+            j = 0
+            while j < m {
+                var dot = 0.0
+                var k = 0
+                while k < n {
+                    dot = dot + mat8_get(a, j, k) * vi[k]
+                    k = k + 1
+                }
+                u = mat8_set(u, j, i, dot / sigma[i])
+                j = j + 1
+            }
+        }
+        i = i + 1
+    }
+
+    // For remaining columns of U (if m > n), fill with orthogonal complement
+    // Use Gram-Schmidt on standard basis vectors
+    if m > mn {
+        var col = mn
+        while col < m {
+            // Start with e_{col}
+            var candidate: [f64; 8] = [0.0; 8]
+            candidate[col] = 1.0
+
+            // Orthogonalize against existing U columns
+            var oi = 0
+            while oi < col {
+                var dot_o = 0.0
+                var oj = 0
+                while oj < m {
+                    dot_o = dot_o + candidate[oj] * mat8_get(u, oj, oi)
+                    oj = oj + 1
+                }
+                oj = 0
+                while oj < m {
+                    candidate[oj] = candidate[oj] - dot_o * mat8_get(u, oj, oi)
+                    oj = oj + 1
+                }
+                oi = oi + 1
+            }
+
+            // Normalize
+            let cn = vec8_norm(candidate, m)
+            if cn > 1e-14 {
+                var ci = 0
+                while ci < m {
+                    u = mat8_set(u, ci, col, candidate[ci] / cn)
+                    ci = ci + 1
+                }
+            }
+            col = col + 1
+        }
+    }
+
+    return SVDResult {
+        u: u,
+        sigma: sigma,
+        vt: vt,
+        rows: m,
+        cols: n
+    }
+}
+
+// ============================================================================
+// VALIDATION UTILITIES
+// ============================================================================
+
+// Check Q*R = A (within tolerance)
+fn qr_reconstruction_error(a: Matrix8, result: QRResult) -> f64 with Mut, Panic, Div {
+    let qr_prod = mat8_multiply(result.q, result.r)
+    let diff = mat8_subtract(qr_prod, a)
+    return mat8_frobenius_norm(diff)
+}
+
+// Check Q^T * Q = I (orthogonality)
+fn qr_orthogonality_error(result: QRResult) -> f64 with Mut, Panic, Div {
+    let qt = mat8_transpose(result.q)
+    let qtq = mat8_multiply(qt, result.q)
+    let eye = mat8_identity(result.rows)
+    let diff = mat8_subtract(qtq, eye)
+    return mat8_frobenius_norm(diff)
+}
+
+// Check R is upper triangular: max |R[i][j]| for i > j
+fn qr_upper_triangular_error(result: QRResult) -> f64 with Mut, Panic, Div {
+    var max_err = 0.0
+    var i = 0
+    while i < result.rows {
+        var j = 0
+        while j < min_i32(i, result.cols) {
+            let v = abs_f64(mat8_get(result.r, i, j))
+            if v > max_err {
+                max_err = v
+            }
+            j = j + 1
+        }
+        i = i + 1
+    }
+    return max_err
+}
+
+// Check Av = lambda*v for each eigenpair (max relative residual)
+fn eigen_residual(a: Matrix8, result: EigenResult) -> f64 with Mut, Panic, Div {
+    var max_err = 0.0
+    let n = result.n
+
+    var i = 0
+    while i < n {
+        // Only check real eigenvalues
+        if abs_f64(result.eigenvalues_imag[i]) < 1e-10 {
+            let lambda = result.eigenvalues_real[i]
+
+            // Compute Av
+            var av: [f64; 8] = [0.0; 8]
+            var j = 0
+            while j < n {
+                var sum = 0.0
+                var k = 0
+                while k < n {
+                    sum = sum + mat8_get(a, j, k) * mat8_get(result.eigenvectors, k, i)
+                    k = k + 1
+                }
+                av[j] = sum
+                j = j + 1
+            }
+
+            // Compute Av - lambda*v
+            var err_sq = 0.0
+            var v_sq = 0.0
+            j = 0
+            while j < n {
+                let vi = mat8_get(result.eigenvectors, j, i)
+                let diff = av[j] - lambda * vi
+                err_sq = err_sq + diff * diff
+                v_sq = v_sq + vi * vi
+                j = j + 1
+            }
+
+            if v_sq > 1e-20 {
+                let rel = sqrt_f64(err_sq) / sqrt_f64(v_sq)
+                if rel > max_err {
+                    max_err = rel
+                }
+            }
+        }
+        i = i + 1
+    }
+    return max_err
+}
+
+// Check U*Sigma*V^T = A (reconstruction error)
+fn svd_reconstruction_error(a: Matrix8, result: SVDResult) -> f64 with Mut, Panic, Div {
+    let m = result.rows
+    let n = result.cols
+    let mn = min_i32(m, n)
+
+    // Build U * diag(sigma) * V^T
+    // First: diag(sigma) * V^T  (mn x n)
+    var sv = mat8_zeros(m, n)
+    var i = 0
+    while i < mn {
+        var j = 0
+        while j < n {
+            sv = mat8_set(sv, i, j, result.sigma[i] * mat8_get(result.vt, i, j))
+            j = j + 1
+        }
+        i = i + 1
+    }
+
+    // U * (diag(sigma) * V^T)
+    let usv = mat8_multiply(result.u, sv)
+    let diff = mat8_subtract(usv, a)
+    return mat8_frobenius_norm(diff)
+}
