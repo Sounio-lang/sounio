@@ -750,7 +750,11 @@ mod tests {
         ];
         let result = validate_three_step_sequence(&ops);
         assert!(result.is_err());
-        assert!(result.unwrap_err().contains("step 2 must be DoIntervention"));
+        assert!(
+            result
+                .unwrap_err()
+                .contains("step 2 must be DoIntervention")
+        );
     }
 
     #[test]
@@ -864,10 +868,7 @@ mod tests {
             CausalFormulaKind::BackdoorAdjustment,
             CausalFormulaKind::FrontdoorAdjustment
         );
-        assert_ne!(
-            CausalFormulaKind::Conditional,
-            CausalFormulaKind::Marginal
-        );
+        assert_ne!(CausalFormulaKind::Conditional, CausalFormulaKind::Marginal);
         assert_eq!(
             CausalFormulaKind::InstrumentalVariable,
             CausalFormulaKind::InstrumentalVariable

@@ -180,7 +180,9 @@ impl CausalGraphBuilder {
 
     /// Add a directed causal edge: from → to
     pub fn edge(mut self, from: impl Into<String>, to: impl Into<String>) -> Self {
-        let _ = self.graph.add_edge(&from.into(), &to.into(), EdgeType::Direct);
+        let _ = self
+            .graph
+            .add_edge(&from.into(), &to.into(), EdgeType::Direct);
         self
     }
 
@@ -420,7 +422,7 @@ impl CausalAnalysis {
         let total = (statistical_variance
             + identification_uncertainty * identification_uncertainty
             + structural_uncertainty * structural_uncertainty)
-        .sqrt();
+            .sqrt();
 
         CausalUncertaintyDecomposition {
             statistical: statistical_variance.sqrt(),
@@ -536,7 +538,11 @@ pub struct IdentificationSummary {
 
 impl fmt::Display for IdentificationSummary {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let status = if self.identified { "IDENTIFIED" } else { "NOT IDENTIFIED" };
+        let status = if self.identified {
+            "IDENTIFIED"
+        } else {
+            "NOT IDENTIFIED"
+        };
         write!(f, "{} -> {}: {}", self.treatment, self.outcome, status)?;
         if let Some(ref method) = self.method {
             write!(f, " via {}", method)?;
@@ -579,7 +585,11 @@ impl fmt::Display for CausalUncertaintyDecomposition {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         writeln!(f, "Causal Uncertainty Decomposition:")?;
         writeln!(f, "  Statistical:     {:.4}", self.statistical)?;
-        writeln!(f, "  Identification:  {:.4} ({} adjustment sets)", self.identification, self.n_adjustment_sets)?;
+        writeln!(
+            f,
+            "  Identification:  {:.4} ({} adjustment sets)",
+            self.identification, self.n_adjustment_sets
+        )?;
         writeln!(f, "  Structural:      {:.4}", self.structural)?;
         write!(f, "  Total (GUM):     {:.4}", self.total)
     }
@@ -604,10 +614,7 @@ impl fmt::Display for CausalUncertaintyDecomposition {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum CausalTypePredicate {
     /// The causal effect P(Y|do(X)) is identifiable in graph G
-    Identifiable {
-        treatment: String,
-        outcome: String,
-    },
+    Identifiable { treatment: String, outcome: String },
 
     /// Variables X and Y are d-separated given Z in graph G
     DSeparated {
@@ -740,12 +747,7 @@ pub fn identify_effect(
 }
 
 /// Quick d-separation test
-pub fn is_d_separated(
-    graph: &CausalGraph,
-    x: &str,
-    y: &str,
-    conditioning: &[&str],
-) -> bool {
+pub fn is_d_separated(graph: &CausalGraph, x: &str, y: &str, conditioning: &[&str]) -> bool {
     let z: HashSet<String> = conditioning.iter().map(|s| s.to_string()).collect();
     graph.d_separated(x, y, &z)
 }
@@ -754,11 +756,7 @@ pub fn is_d_separated(
 ///
 /// This is the simplest graph where backdoor adjustment fails without
 /// observing U. Useful for testing and pedagogy.
-pub fn confounded_graph(
-    treatment: &str,
-    outcome: &str,
-    confounder: &str,
-) -> CausalGraph {
+pub fn confounded_graph(treatment: &str, outcome: &str, confounder: &str) -> CausalGraph {
     CausalGraphBuilder::new()
         .treatment(treatment)
         .outcome(outcome)
@@ -791,12 +789,7 @@ pub fn mediation_graph(
 }
 
 /// Build an instrumental variable graph: Z → X → Y with U → X, U → Y
-pub fn iv_graph(
-    instrument: &str,
-    treatment: &str,
-    outcome: &str,
-    confounder: &str,
-) -> CausalGraph {
+pub fn iv_graph(instrument: &str, treatment: &str, outcome: &str, confounder: &str) -> CausalGraph {
     CausalGraphBuilder::new()
         .observed(instrument)
         .treatment(treatment)

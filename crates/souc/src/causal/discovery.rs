@@ -259,11 +259,9 @@ impl std::fmt::Display for PCError {
                 "insufficient data: {} samples, need at least {}",
                 n_samples, min_required
             ),
-            PCError::DimensionMismatch { row, expected, got } => write!(
-                f,
-                "row {} has {} columns, expected {}",
-                row, got, expected
-            ),
+            PCError::DimensionMismatch { row, expected, got } => {
+                write!(f, "row {} has {} columns, expected {}", row, got, expected)
+            }
             PCError::SingularMatrix => write!(f, "singular matrix in partial correlation"),
             PCError::NumericalError { message } => write!(f, "numerical error: {}", message),
         }
@@ -492,11 +490,7 @@ fn discover_skeleton(
 /// Orient v-structures (colliders): for each triple X - Z - Y where
 /// X and Y are non-adjacent, orient as X → Z ← Y if Z is NOT in
 /// sep(X, Y).
-fn orient_v_structures(
-    n: usize,
-    adj: &[Vec<bool>],
-    sep_sets: &SepSets,
-) -> Vec<Vec<EdgeMark>> {
+fn orient_v_structures(n: usize, adj: &[Vec<bool>], sep_sets: &SepSets) -> Vec<Vec<EdgeMark>> {
     let mut mark = vec![vec![EdgeMark::Absent; n]; n];
 
     // Initialize with undirected edges from skeleton
@@ -527,9 +521,7 @@ fn orient_v_structures(
 
                 // Check if z is in sep(x, y)
                 let key = if x < y { (x, y) } else { (y, x) };
-                let z_in_sep = sep_sets
-                    .get(&key)
-                    .map_or(false, |s| s.contains(&z));
+                let z_in_sep = sep_sets.get(&key).map_or(false, |s| s.contains(&z));
 
                 if !z_in_sep {
                     // Orient as x -> z <- y (collider)
@@ -1002,10 +994,7 @@ pub fn pc_result_to_graph(result: &PCResult, name: &str) -> CausalGraphDef {
 }
 
 /// Compute topological order from directed edges using Kahn's algorithm.
-fn compute_topological_order(
-    variables: &[String],
-    edges: &[CausalEdgeDef],
-) -> Option<Vec<String>> {
+fn compute_topological_order(variables: &[String], edges: &[CausalEdgeDef]) -> Option<Vec<String>> {
     let n = variables.len();
     let var_idx: HashMap<&str, usize> = variables
         .iter()
@@ -1101,7 +1090,9 @@ fn generate_subsets(
 
 /// Linear congruential generator for deterministic pseudorandom numbers.
 fn lcg_next(state: &mut u64) -> f64 {
-    *state = state.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+    *state = state
+        .wrapping_mul(6364136223846793005)
+        .wrapping_add(1442695040888963407);
     // Map to [0, 1)
     (*state >> 33) as f64 / (1u64 << 31) as f64
 }
@@ -1287,11 +1278,7 @@ mod tests {
     fn test_partial_correlation_chain() {
         // X → Y → Z: controlling for Y should make X and Z independent
         let data_raw = generate_chain_data(2000, 42);
-        let data = DataMatrix::new(
-            vec!["X".into(), "Y".into(), "Z".into()],
-            data_raw,
-        )
-        .unwrap();
+        let data = DataMatrix::new(vec!["X".into(), "Y".into(), "Z".into()], data_raw).unwrap();
         let corr = correlation_matrix(&data).unwrap();
 
         // Marginal correlation between X and Z should be significant
@@ -1375,7 +1362,11 @@ mod tests {
         let corr = correlation_matrix(&data).unwrap();
 
         let (indep, p) = conditional_independence_test(&data, 0, 1, &[], &corr, 0.05).unwrap();
-        assert!(indep, "independent variables should test as independent, p={}", p);
+        assert!(
+            indep,
+            "independent variables should test as independent, p={}",
+            p
+        );
     }
 
     #[test]
@@ -1462,11 +1453,7 @@ mod tests {
     fn test_skeleton_chain() {
         // X → Y → Z: skeleton should have X-Y and Y-Z but not X-Z
         let data_raw = generate_chain_data(2000, 42);
-        let data = DataMatrix::new(
-            vec!["X".into(), "Y".into(), "Z".into()],
-            data_raw,
-        )
-        .unwrap();
+        let data = DataMatrix::new(vec!["X".into(), "Y".into(), "Z".into()], data_raw).unwrap();
         let config = PCConfig {
             alpha: 0.05,
             ..Default::default()
@@ -1486,11 +1473,7 @@ mod tests {
     fn test_skeleton_fork() {
         // X ← Z → Y: skeleton should have Z-X and Z-Y but not X-Y
         let data_raw = generate_fork_data(2000, 42);
-        let data = DataMatrix::new(
-            vec!["X".into(), "Y".into(), "Z".into()],
-            data_raw,
-        )
-        .unwrap();
+        let data = DataMatrix::new(vec!["X".into(), "Y".into(), "Z".into()], data_raw).unwrap();
         let config = PCConfig {
             alpha: 0.05,
             ..Default::default()
@@ -1510,11 +1493,7 @@ mod tests {
     fn test_skeleton_collider() {
         // X → Z ← Y: skeleton should have X-Z and Y-Z but not X-Y
         let data_raw = generate_collider_data(2000, 42);
-        let data = DataMatrix::new(
-            vec!["X".into(), "Y".into(), "Z".into()],
-            data_raw,
-        )
-        .unwrap();
+        let data = DataMatrix::new(vec!["X".into(), "Y".into(), "Z".into()], data_raw).unwrap();
         let config = PCConfig {
             alpha: 0.05,
             ..Default::default()
@@ -1539,9 +1518,9 @@ mod tests {
         // sep(X,Y) = {} (empty), Z not in sep ⇒ orient as X→Z←Y
         let n = 3;
         let adj = vec![
-            vec![false, false, true],  // X: adj to Z
-            vec![false, false, true],  // Y: adj to Z
-            vec![true, true, false],   // Z: adj to X, Y
+            vec![false, false, true], // X: adj to Z
+            vec![false, false, true], // Y: adj to Z
+            vec![true, true, false],  // Z: adj to X, Y
         ];
         let sep_sets: SepSets = {
             let mut s = HashMap::new();
@@ -1566,9 +1545,9 @@ mod tests {
         // Y IS in sep(X,Z), so no v-structure
         let n = 3;
         let adj = vec![
-            vec![false, true, false],  // X: adj to Y
-            vec![true, false, true],   // Y: adj to X, Z
-            vec![false, true, false],  // Z: adj to Y
+            vec![false, true, false], // X: adj to Y
+            vec![true, false, true],  // Y: adj to X, Z
+            vec![false, true, false], // Z: adj to Y
         ];
         let sep_sets: SepSets = {
             let mut s = HashMap::new();
@@ -1627,11 +1606,7 @@ mod tests {
     #[test]
     fn test_pc_chain() {
         let data_raw = generate_chain_data(2000, 42);
-        let data = DataMatrix::new(
-            vec!["X".into(), "Y".into(), "Z".into()],
-            data_raw,
-        )
-        .unwrap();
+        let data = DataMatrix::new(vec!["X".into(), "Y".into(), "Z".into()], data_raw).unwrap();
         let config = PCConfig::default();
         let result = pc_algorithm(&data, &config).unwrap();
 
@@ -1646,11 +1621,7 @@ mod tests {
     fn test_pc_fork() {
         // Data layout: [X, Y, Z] where Z is the common cause
         let data_raw = generate_fork_data(2000, 42);
-        let data = DataMatrix::new(
-            vec!["X".into(), "Y".into(), "Z".into()],
-            data_raw,
-        )
-        .unwrap();
+        let data = DataMatrix::new(vec!["X".into(), "Y".into(), "Z".into()], data_raw).unwrap();
         let config = PCConfig::default();
         let result = pc_algorithm(&data, &config).unwrap();
 
@@ -1663,11 +1634,7 @@ mod tests {
     #[test]
     fn test_pc_collider() {
         let data_raw = generate_collider_data(2000, 42);
-        let data = DataMatrix::new(
-            vec!["X".into(), "Y".into(), "Z".into()],
-            data_raw,
-        )
-        .unwrap();
+        let data = DataMatrix::new(vec!["X".into(), "Y".into(), "Z".into()], data_raw).unwrap();
         let config = PCConfig::default();
         let result = pc_algorithm(&data, &config).unwrap();
 
@@ -1677,14 +1644,8 @@ mod tests {
         assert!(!result.has_edge(0, 1), "collider: no X-Y edge");
 
         // V-structure: X → Z ← Y
-        assert!(
-            result.has_directed(0, 2),
-            "collider: X → Z directed"
-        );
-        assert!(
-            result.has_directed(1, 2),
-            "collider: Y → Z directed"
-        );
+        assert!(result.has_directed(0, 2), "collider: X → Z directed");
+        assert!(result.has_directed(1, 2), "collider: Y → Z directed");
     }
 
     #[test]
@@ -1744,11 +1705,7 @@ mod tests {
     #[test]
     fn test_pc_result_to_graph() {
         let data_raw = generate_collider_data(2000, 42);
-        let data = DataMatrix::new(
-            vec!["X".into(), "Y".into(), "Z".into()],
-            data_raw,
-        )
-        .unwrap();
+        let data = DataMatrix::new(vec!["X".into(), "Y".into(), "Z".into()], data_raw).unwrap();
         let config = PCConfig::default();
         let result = pc_algorithm(&data, &config).unwrap();
 
@@ -1762,11 +1719,7 @@ mod tests {
     #[test]
     fn test_pc_result_to_graph_topological_order() {
         let data_raw = generate_chain_data(2000, 42);
-        let data = DataMatrix::new(
-            vec!["X".into(), "Y".into(), "Z".into()],
-            data_raw,
-        )
-        .unwrap();
+        let data = DataMatrix::new(vec!["X".into(), "Y".into(), "Z".into()], data_raw).unwrap();
         let config = PCConfig::default();
         let result = pc_algorithm(&data, &config).unwrap();
 
@@ -1784,11 +1737,7 @@ mod tests {
     #[test]
     fn test_pc_result_methods() {
         let data_raw = generate_collider_data(2000, 42);
-        let data = DataMatrix::new(
-            vec!["X".into(), "Y".into(), "Z".into()],
-            data_raw,
-        )
-        .unwrap();
+        let data = DataMatrix::new(vec!["X".into(), "Y".into(), "Z".into()], data_raw).unwrap();
         let config = PCConfig::default();
         let result = pc_algorithm(&data, &config).unwrap();
 
@@ -1812,11 +1761,7 @@ mod tests {
     #[test]
     fn test_pc_config_max_depth() {
         let data_raw = generate_chain_data(1000, 42);
-        let data = DataMatrix::new(
-            vec!["X".into(), "Y".into(), "Z".into()],
-            data_raw,
-        )
-        .unwrap();
+        let data = DataMatrix::new(vec!["X".into(), "Y".into(), "Z".into()], data_raw).unwrap();
         let config = PCConfig {
             max_depth: 0,
             ..Default::default()
@@ -1915,11 +1860,7 @@ mod tests {
         let total = 10;
         for seed in 0..total {
             let data_raw = generate_chain_data(2000, 100 + seed);
-            let data = DataMatrix::new(
-                vec!["X".into(), "Y".into(), "Z".into()],
-                data_raw,
-            )
-            .unwrap();
+            let data = DataMatrix::new(vec!["X".into(), "Y".into(), "Z".into()], data_raw).unwrap();
             let config = PCConfig::default();
             let result = pc_algorithm(&data, &config).unwrap();
 
@@ -1946,11 +1887,7 @@ mod tests {
         let total = 10;
         for seed in 0..total {
             let data_raw = generate_fork_data(2000, 200 + seed);
-            let data = DataMatrix::new(
-                vec!["X".into(), "Y".into(), "Z".into()],
-                data_raw,
-            )
-            .unwrap();
+            let data = DataMatrix::new(vec!["X".into(), "Y".into(), "Z".into()], data_raw).unwrap();
             let config = PCConfig::default();
             let result = pc_algorithm(&data, &config).unwrap();
 
@@ -1976,11 +1913,7 @@ mod tests {
         let total = 10;
         for seed in 0..total {
             let data_raw = generate_collider_data(2000, 300 + seed);
-            let data = DataMatrix::new(
-                vec!["X".into(), "Y".into(), "Z".into()],
-                data_raw,
-            )
-            .unwrap();
+            let data = DataMatrix::new(vec!["X".into(), "Y".into(), "Z".into()], data_raw).unwrap();
             let config = PCConfig::default();
             let result = pc_algorithm(&data, &config).unwrap();
 
