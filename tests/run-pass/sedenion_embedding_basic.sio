@@ -1,0 +1,191 @@
+//@ run-pass
+// Basic sedenion embedding integration test.
+//
+// Tests:
+// 1. Embedding table creation and lookup
+// 2. Similarity metrics (cosine, euclidean, geodesic)
+// 3. KG model creation and triple scoring (all 3 scoring functions)
+// 4. Epistemic uncertainty propagation
+// 5. Zero divisor detection in embeddings
+// 6. Backward pass correctness (gradient non-zero)
+// 7. Optimizer step (Adam)
+
+use math::sedenion::*
+use snn::sedenion_similarity::*
+use snn::sedenion_backward::*
+use snn::sedenion_optimizer::*
+use snn::sedenion_embedding::*
+
+fn abs_f32(x: f32) -> f32 {
+    if x < 0.0 { -x } else { x }
+}
+
+fn assert_near(a: f32, b: f32, eps: f32, msg: str) with IO, Panic {
+    if abs_f32(a - b) > eps {
+        println("FAIL: " ++ msg)
+        println("  expected: near " ++ f32_to_string(b))
+        println("  got: " ++ f32_to_string(a))
+        panic("assertion failed")
+    }
+}
+
+fn assert_true(cond: bool, msg: str) with IO, Panic {
+    if !cond {
+        println("FAIL: " ++ msg)
+        panic("assertion failed")
+    }
+}
+
+fn f32_to_string(x: f32) -> str {
+    // Placeholder
+    ""
+}
+
+fn main() with IO, Panic, Mut {
+    println("=== Sedenion Embedding Tests ===")
+
+    // ---- Test 1: Embedding table creation and lookup ----
+    println("T01: Embedding table creation")
+    let table = create_embedding_table(10, true)
+    assert_true(embedding_table_size(table) == 10, "table size should be 10")
+
+    let emb0 = embedding_lookup(table, 0)
+    let emb1 = embedding_lookup(table, 1)
+
+    // Normalized embeddings should have unit norm
+    let norm0 = sed_norm(emb0.value)
+    assert_near(norm0, 1.0, 0.01, "embedding 0 should be unit norm")
+
+    // Initial uncertainty should be high (1.0)
+    assert_near(emb0.uncertainty, 1.0, 0.01, "initial uncertainty should be 1.0")
+    println("  PASS")
+
+    // ---- Test 2: Similarity metrics ----
+    println("T02: Similarity metrics")
+
+    // Self-similarity should be 1.0
+    let self_sim = sed_cosine_similarity(emb0.value, emb0.value)
+    assert_near(self_sim, 1.0, 0.001, "self cosine similarity should be 1.0")
+
+    // Self-distance should be 0.0
+    let self_dist = sed_euclidean_distance(emb0.value, emb0.value)
+    assert_near(self_dist, 0.0, 0.001, "self euclidean distance should be 0.0")
+
+    // Geodesic self-distance should be 0.0
+    let self_geo = sed_geodesic_distance(emb0.value, emb0.value)
+    assert_near(self_geo, 0.0, 0.01, "self geodesic distance should be 0.0")
+
+    // Different embeddings should have similarity < 1.0
+    let cross_sim = sed_cosine_similarity(emb0.value, emb1.value)
+    assert_true(cross_sim < 1.0, "different embeddings should have sim < 1")
+
+    // Semantic distance in [0, 1]
+    let sem_dist = sed_to_semantic_distance(cross_sim)
+    assert_true(sem_dist >= 0.0, "semantic distance >= 0")
+    assert_true(sem_dist <= 1.0, "semantic distance <= 1")
+    println("  PASS")
+
+    // ---- Test 3: KG scoring functions ----
+    println("T03: KG scoring (CayleyProduct)")
+    let kg_cayley = create_kg_model(10, 5, SedScoringFn::CayleyProduct)
+    let score_c = kg_score_triple(kg_cayley, 0, 0, 1)
+    // Score should be a finite number
+    assert_true(score_c == score_c, "Cayley score should not be NaN")
+
+    println("T04: KG scoring (DistMult)")
+    let kg_distmult = create_kg_model(10, 5, SedScoringFn::DistMult)
+    let score_d = kg_score_triple(kg_distmult, 0, 0, 1)
+    assert_true(score_d == score_d, "DistMult score should not be NaN")
+
+    println("T05: KG scoring (Bilinear)")
+    let kg_bilinear = create_kg_model(10, 5, SedScoringFn::Bilinear)
+    let score_b = kg_score_triple(kg_bilinear, 0, 0, 1)
+    assert_true(score_b == score_b, "Bilinear score should not be NaN")
+    println("  PASS (all 3 scoring functions)")
+
+    // ---- Test 4: Epistemic scoring ----
+    println("T06: Epistemic triple scoring")
+    let epistemic_score = kg_score_triple_epistemic(kg_cayley, 0, 0, 1)
+    assert_true(epistemic_score.uncertainty >= 0.0, "uncertainty should be non-negative")
+    assert_true(epistemic_score.value == epistemic_score.value, "epistemic score should not be NaN")
+    println("  PASS")
+
+    // ---- Test 5: Zero divisor detection ----
+    println("T07: Zero divisor detection")
+    let zd_count = count_zero_divisors(kg_cayley.entity_embeddings)
+    // Most random embeddings should NOT be zero divisors
+    assert_true(zd_count < 5, "most embeddings should not be zero divisors")
+
+    let zd_loss = embedding_zero_divisor_loss(kg_cayley.entity_embeddings)
+    assert_true(zd_loss >= 0.0, "ZD loss should be non-negative")
+    println("  PASS")
+
+    // ---- Test 6: Backward pass ----
+    println("T08: Backward pass (Cayley score)")
+    let h = embedding_lookup_raw(kg_cayley.entity_embeddings, 0)
+    let r = embedding_lookup_raw(kg_cayley.relation_embeddings, 0)
+    let t = embedding_lookup_raw(kg_cayley.entity_embeddings, 1)
+
+    let (grad_h, grad_r, grad_t) = sed_cayley_score_backward(1.0, h, r, t)
+    let gh_norm = sed_norm(grad_h)
+    let gr_norm = sed_norm(grad_r)
+    let gt_norm = sed_norm(grad_t)
+    assert_true(gh_norm > 0.0, "head gradient should be non-zero")
+    assert_true(gr_norm > 0.0, "relation gradient should be non-zero")
+    assert_true(gt_norm > 0.0, "tail gradient should be non-zero")
+
+    println("T09: Backward pass (Bilinear score)")
+    let (grad_h2, grad_r2, grad_t2) = sed_bilinear_score_backward(1.0, h, r, t)
+    assert_true(sed_norm(grad_h2) > 0.0, "bilinear head gradient should be non-zero")
+    println("  PASS")
+
+    // ---- Test 7: sed_mul backward consistency ----
+    println("T10: sed_mul backward")
+    let a = sed(1.0, 0.5, -0.3, 0.2, 0.1, -0.4, 0.6, -0.1,
+                0.3, -0.2, 0.4, 0.1, -0.5, 0.3, -0.1, 0.2)
+    let b = sed(0.3, -0.1, 0.4, -0.2, 0.5, 0.1, -0.3, 0.2,
+                -0.1, 0.6, -0.4, 0.3, 0.2, -0.5, 0.1, -0.3)
+    let grad_out = sed_one()
+
+    let grad_a = sed_mul_backward_a(grad_out, a, b)
+    let grad_b = sed_mul_backward_b(grad_out, a, b)
+
+    // Gradients should be non-zero for non-trivial inputs
+    assert_true(sed_norm(grad_a) > 0.001, "grad_a should be non-zero")
+    assert_true(sed_norm(grad_b) > 0.001, "grad_b should be non-zero")
+    println("  PASS")
+
+    // ---- Test 8: Optimizer ----
+    println("T11: Adam optimizer step")
+    var opt = create_sed_adam(1, 0.1)
+    var params = [sed(1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+                      0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0)]
+    let grads = [sed(0.5, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+                     0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0)]
+    let before = params[0].e0
+
+    sed_adam_step(&!opt, &!params, grads)
+
+    let after = params[0].e0
+    // Parameter should have changed in direction opposite to gradient
+    assert_true(after < before, "Adam should decrease param when grad is positive")
+    println("  PASS")
+
+    // ---- Test 9: Margin loss ----
+    println("T12: Margin loss")
+    let ml1 = sed_margin_loss(2.0, 1.0, 0.5)
+    assert_near(ml1, 0.0, 0.001, "margin satisfied: loss should be 0")
+
+    let ml2 = sed_margin_loss(1.0, 2.0, 1.5)
+    assert_near(ml2, 2.5, 0.001, "margin violated: loss should be 2.5")
+    println("  PASS")
+
+    // ---- Test 10: Nearest neighbor ----
+    println("T13: Nearest neighbor search")
+    let nn_idx = sed_nearest_neighbor(emb0.value, table.embeddings)
+    assert_true(nn_idx == 0, "nearest neighbor of emb[0] should be index 0")
+    println("  PASS")
+
+    println("")
+    println("=== All sedenion embedding tests passed ===")
+}
