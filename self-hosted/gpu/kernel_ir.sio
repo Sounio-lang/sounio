@@ -2585,3 +2585,425 @@ fn gpu_build_conv2d_f32_ir() -> GpuKernelIr with Mut, Panic, Div {
 fn gpu_build_conv2d_f64_ir() -> GpuKernelIr with Mut, Panic, Div {
     gpu_build_conv2d_ir(gpu_name_conv2d_f64(), GpuType::GpuF64)
 }
+
+// ===== Phase 7: Scan (inclusive prefix sum) kernel builder =====
+//
+// Warp-level inclusive scan using shuffle-up:
+//   For each thread i in a warp of 32:
+//     result[i] = input[0] + input[1] + ... + input[i]
+//
+// Algorithm (Hillis-Steele):
+//   val = load(input[tid])
+//   for offset in [1, 2, 4, 8, 16]:
+//     tmp = shfl.up(val, offset)
+//     if tid >= offset: val = val + tmp
+//   store(output[tid], val)
+
+// Name helpers for scan kernels
+fn gpu_name_scan_f32() -> Name with Mut, Panic, Div {
+    // "scan_f32" (8 chars)
+    var n = ir_name_from_bytes(115, 99, 97, 110, 8)
+    n.buf[4] = 95; n.buf[5] = 102; n.buf[6] = 51; n.buf[7] = 50
+    n
+}
+
+fn gpu_name_scan_f64() -> Name with Mut, Panic, Div {
+    // "scan_f64" (8 chars)
+    var n = ir_name_from_bytes(115, 99, 97, 110, 8)
+    n.buf[4] = 95; n.buf[5] = 102; n.buf[6] = 54; n.buf[7] = 52
+    n
+}
+
+fn gpu_name_scan_i32() -> Name with Mut, Panic, Div {
+    // "scan_i32" (8 chars)
+    var n = ir_name_from_bytes(115, 99, 97, 110, 8)
+    n.buf[4] = 95; n.buf[5] = 105; n.buf[6] = 51; n.buf[7] = 50
+    n
+}
+
+// Generic inclusive scan builder (warp-level Hillis-Steele)
+// Uses shfl.sync.up for the scan, setp.ge for conditional add
+fn gpu_build_scan_ir(kernel_name: Name, elem_ty: GpuType) -> GpuKernelIr with Mut, Panic, Div {
+    var k = gpu_kernel_new()
+    k.kernel_name = kernel_name
+    let sizeof_ty = gpu_type_sizeof(elem_ty)
+
+    // param_in, param_out, param_n
+    k.params[0] = GpuParam { name: ir_name_from_bytes(112, 97, 114, 97, 8), ty: GpuType::GpuPtr }
+    k.params[0].name.buf[4] = 109; k.params[0].name.buf[5] = 95
+    k.params[0].name.buf[6] = 105; k.params[0].name.buf[7] = 110
+    k.params[1] = GpuParam { name: ir_name_from_bytes(112, 97, 114, 97, 9), ty: GpuType::GpuPtr }
+    k.params[1].name.buf[4] = 109; k.params[1].name.buf[5] = 95
+    k.params[1].name.buf[6] = 111; k.params[1].name.buf[7] = 117; k.params[1].name.buf[8] = 116
+    k.params[2] = GpuParam { name: ir_name_from_bytes(112, 97, 114, 97, 7), ty: GpuType::GpuU32 }
+    k.params[2].name.buf[4] = 109; k.params[2].name.buf[5] = 95; k.params[2].name.buf[6] = 110
+    k.param_count = 3
+
+    var idx: i64 = 0
+    let default_op = GpuOp { opcode: GpuOpcode::GpuRet, dst_reg: -1, src_reg: -1, lhs_reg: -1, rhs_reg: -1, addr_reg: -1, rhs_imm: 0, param_idx: -1, axis: 0, shared_addr: -1, ty: GpuType::GpuU64, dst_ty: GpuType::GpuU64, src_ty: GpuType::GpuU32 }
+    var op = default_op
+
+    // 1. r1 = tid.x
+    op = default_op; op.opcode = GpuOpcode::GpuGetTid; op.dst_reg = 1; op.axis = 0
+    op.ty = GpuType::GpuU32; op.dst_ty = GpuType::GpuU32; op.src_ty = GpuType::GpuU32
+    k.ops[idx] = op; idx = idx + 1
+
+    // 2. rd1 = cvt.u64.u32 r1
+    op = default_op; op.opcode = GpuOpcode::GpuCvt; op.dst_reg = 1; op.src_reg = 1
+    op.ty = GpuType::GpuU64; op.dst_ty = GpuType::GpuU64; op.src_ty = GpuType::GpuU32
+    k.ops[idx] = op; idx = idx + 1
+
+    // 3. rd2 = rd1 * sizeof
+    op = default_op; op.opcode = GpuOpcode::GpuMulImm; op.dst_reg = 2; op.lhs_reg = 1; op.rhs_imm = sizeof_ty
+    op.ty = GpuType::GpuU64; op.dst_ty = GpuType::GpuU64
+    k.ops[idx] = op; idx = idx + 1
+
+    // 4. rd3 = ld.param [param_in]
+    op = default_op; op.opcode = GpuOpcode::GpuLoadParam; op.dst_reg = 3; op.param_idx = 0
+    op.ty = GpuType::GpuPtr; op.dst_ty = GpuType::GpuU64
+    k.ops[idx] = op; idx = idx + 1
+
+    // 5. rd4 = rd3 + rd2  (input addr)
+    op = default_op; op.opcode = GpuOpcode::GpuAdd; op.dst_reg = 4; op.lhs_reg = 3; op.rhs_reg = 2
+    op.ty = GpuType::GpuU64; op.dst_ty = GpuType::GpuU64
+    k.ops[idx] = op; idx = idx + 1
+
+    // 6. val1 = ld.global [rd4]
+    op = default_op; op.opcode = GpuOpcode::GpuLoadGlobal; op.dst_reg = 1; op.addr_reg = 4
+    op.ty = elem_ty; op.dst_ty = elem_ty
+    k.ops[idx] = op; idx = idx + 1
+
+    // 7-16. Hillis-Steele scan: shuffle up + conditional add for offsets 1, 2, 4, 8, 16
+    // For each offset:
+    //   val2 = shfl.up(val1, offset)
+    //   p0 = setp.ge(r1, offset)   -- only add if tid >= offset
+    //   val3 = add(val1, val2)
+    //   val1 = selp(val3, val1, p0) -- select sum if predicate true
+    var scan_offset: i64 = 1
+    while scan_offset <= 16 {
+        // val2 = shfl.sync.up val1, offset  (uses shfl.down with negative? No — use shfl.down but we emit shfl.sync.up)
+        // Note: We reuse GpuShflDown opcode but with negative offset to signal "up" direction
+        // Actually, for the PTX lowering we'll emit shfl.sync.down with the proper direction
+        // Simpler: use shfl.sync.down with offset (peer reads from lane-offset)
+        // For inclusive scan with shfl.down: tmp = shfl.down(val, -offset) is not valid
+        // Instead: use shfl.sync.up which reads from lane-offset
+        // We'll mark this with a negative rhs_imm to tell the lowering to use shfl.sync.up
+        op = default_op; op.opcode = GpuOpcode::GpuShflDown
+        op.dst_reg = 2; op.src_reg = 1; op.rhs_imm = 0 - scan_offset
+        op.ty = elem_ty; op.dst_ty = elem_ty; op.src_ty = elem_ty
+        k.ops[idx] = op; idx = idx + 1
+
+        // p0 = setp.ge r1, offset
+        op = default_op; op.opcode = GpuOpcode::GpuSetpGe
+        op.dst_reg = 0; op.lhs_reg = 1; op.rhs_imm = scan_offset
+        op.ty = GpuType::GpuU32; op.dst_ty = GpuType::GpuU32
+        k.ops[idx] = op; idx = idx + 1
+
+        // val3 = val1 + val2
+        op = default_op; op.opcode = GpuOpcode::GpuAdd
+        op.dst_reg = 3; op.lhs_reg = 1; op.rhs_reg = 2
+        op.ty = elem_ty; op.dst_ty = elem_ty
+        k.ops[idx] = op; idx = idx + 1
+
+        // val1 = selp(val3, val1, p0)
+        op = default_op; op.opcode = GpuOpcode::GpuSelp
+        op.dst_reg = 1; op.lhs_reg = 3; op.rhs_reg = 1; op.src_reg = 0
+        op.ty = elem_ty; op.dst_ty = elem_ty
+        k.ops[idx] = op; idx = idx + 1
+
+        scan_offset = scan_offset * 2
+    }
+
+    // 17. rd5 = ld.param [param_out]
+    op = default_op; op.opcode = GpuOpcode::GpuLoadParam; op.dst_reg = 5; op.param_idx = 1
+    op.ty = GpuType::GpuPtr; op.dst_ty = GpuType::GpuU64
+    k.ops[idx] = op; idx = idx + 1
+
+    // 18. rd6 = rd5 + rd2  (output addr, reusing byte offset)
+    op = default_op; op.opcode = GpuOpcode::GpuAdd; op.dst_reg = 6; op.lhs_reg = 5; op.rhs_reg = 2
+    op.ty = GpuType::GpuU64; op.dst_ty = GpuType::GpuU64
+    k.ops[idx] = op; idx = idx + 1
+
+    // 19. st.global [rd6], val1
+    op = default_op; op.opcode = GpuOpcode::GpuStoreGlobal; op.addr_reg = 6; op.src_reg = 1
+    op.ty = elem_ty; op.dst_ty = elem_ty; op.src_ty = elem_ty
+    k.ops[idx] = op; idx = idx + 1
+
+    // 20. ret
+    k.ops[idx] = default_op; idx = idx + 1
+
+    k.op_count = idx
+    k.max_reg_u32 = 2
+    k.max_reg_u64 = 7
+    k.max_reg_pred = 1
+    if elem_ty == GpuType::GpuF32 { k.max_reg_f32 = 4 }
+    if elem_ty == GpuType::GpuF64 { k.max_reg_f64 = 4 }
+    if elem_ty == GpuType::GpuI32 { k.max_reg_i32 = 4 }
+    k
+}
+
+fn gpu_build_scan_f32_ir() -> GpuKernelIr with Mut, Panic, Div {
+    gpu_build_scan_ir(gpu_name_scan_f32(), GpuType::GpuF32)
+}
+
+fn gpu_build_scan_f64_ir() -> GpuKernelIr with Mut, Panic, Div {
+    gpu_build_scan_ir(gpu_name_scan_f64(), GpuType::GpuF64)
+}
+
+fn gpu_build_scan_i32_ir() -> GpuKernelIr with Mut, Panic, Div {
+    gpu_build_scan_ir(gpu_name_scan_i32(), GpuType::GpuI32)
+}
+
+// ===== Phase 7: Transpose kernel builder =====
+//
+// Tiled matrix transpose using shared memory:
+//   output[j * rows + i] = input[i * cols + j]
+//
+// Uses TILE×TILE shared memory tile to coalesce global memory accesses.
+// TILE = 32 (warp size), shared_bytes = TILE * TILE * sizeof(elem)
+//
+// Thread indexing: tid.x, tid.y for intra-tile; bid.x, bid.y for tile position.
+
+fn gpu_name_transpose_f32() -> Name with Mut, Panic, Div {
+    // "xpose_f32" (9 chars) — "transpose" is 9 but we use "xpose" to fit
+    var n = ir_name_from_bytes(120, 112, 111, 115, 9)
+    n.buf[4] = 101; n.buf[5] = 95; n.buf[6] = 102; n.buf[7] = 51; n.buf[8] = 50
+    n
+}
+
+fn gpu_name_transpose_f64() -> Name with Mut, Panic, Div {
+    // "xpose_f64" (9 chars)
+    var n = ir_name_from_bytes(120, 112, 111, 115, 9)
+    n.buf[4] = 101; n.buf[5] = 95; n.buf[6] = 102; n.buf[7] = 54; n.buf[8] = 52
+    n
+}
+
+fn gpu_name_transpose_i32() -> Name with Mut, Panic, Div {
+    // "xpose_i32" (9 chars)
+    var n = ir_name_from_bytes(120, 112, 111, 115, 9)
+    n.buf[4] = 101; n.buf[5] = 95; n.buf[6] = 105; n.buf[7] = 51; n.buf[8] = 50
+    n
+}
+
+// Generic transpose builder
+// TILE = 32. Each thread loads one element, stores one element after barrier.
+// Params: param_in (src matrix), param_out (dst matrix), param_rows (u32), param_cols (u32)
+fn gpu_build_transpose_ir(kernel_name: Name, elem_ty: GpuType) -> GpuKernelIr with Mut, Panic, Div {
+    var k = gpu_kernel_new()
+    k.kernel_name = kernel_name
+    let sizeof_ty = gpu_type_sizeof(elem_ty)
+    k.shared_bytes = 32 * 32 * sizeof_ty  // TILE * TILE * sizeof
+
+    // param_in, param_out, param_rows, param_cols
+    k.params[0] = GpuParam { name: ir_name_from_bytes(112, 97, 114, 97, 8), ty: GpuType::GpuPtr }
+    k.params[0].name.buf[4] = 109; k.params[0].name.buf[5] = 95
+    k.params[0].name.buf[6] = 105; k.params[0].name.buf[7] = 110
+    k.params[1] = GpuParam { name: ir_name_from_bytes(112, 97, 114, 97, 9), ty: GpuType::GpuPtr }
+    k.params[1].name.buf[4] = 109; k.params[1].name.buf[5] = 95
+    k.params[1].name.buf[6] = 111; k.params[1].name.buf[7] = 117; k.params[1].name.buf[8] = 116
+    k.params[2] = GpuParam { name: ir_name_from_bytes(112, 95, 114, 111, 6), ty: GpuType::GpuU32 }
+    k.params[2].name.buf[4] = 119; k.params[2].name.buf[5] = 115
+    k.params[3] = GpuParam { name: ir_name_from_bytes(112, 95, 99, 111, 6), ty: GpuType::GpuU32 }
+    k.params[3].name.buf[4] = 108; k.params[3].name.buf[5] = 115
+    k.param_count = 4
+
+    var idx: i64 = 0
+    let default_op = GpuOp { opcode: GpuOpcode::GpuRet, dst_reg: -1, src_reg: -1, lhs_reg: -1, rhs_reg: -1, addr_reg: -1, rhs_imm: 0, param_idx: -1, axis: 0, shared_addr: -1, ty: GpuType::GpuU64, dst_ty: GpuType::GpuU64, src_ty: GpuType::GpuU32 }
+    var op = default_op
+
+    // === Compute source (row-major) address ===
+    // r1 = tid.x, r2 = tid.y
+    op = default_op; op.opcode = GpuOpcode::GpuGetTid; op.dst_reg = 1; op.axis = 0
+    op.ty = GpuType::GpuU32; op.dst_ty = GpuType::GpuU32; op.src_ty = GpuType::GpuU32
+    k.ops[idx] = op; idx = idx + 1
+
+    op = default_op; op.opcode = GpuOpcode::GpuGetTid; op.dst_reg = 2; op.axis = 1
+    op.ty = GpuType::GpuU32; op.dst_ty = GpuType::GpuU32; op.src_ty = GpuType::GpuU32
+    k.ops[idx] = op; idx = idx + 1
+
+    // r3 = bid.x, r4 = bid.y
+    op = default_op; op.opcode = GpuOpcode::GpuGetBid; op.dst_reg = 3; op.axis = 0
+    op.ty = GpuType::GpuU32; op.dst_ty = GpuType::GpuU32
+    k.ops[idx] = op; idx = idx + 1
+
+    op = default_op; op.opcode = GpuOpcode::GpuGetBid; op.dst_reg = 4; op.axis = 1
+    op.ty = GpuType::GpuU32; op.dst_ty = GpuType::GpuU32
+    k.ops[idx] = op; idx = idx + 1
+
+    // r5 = bid.x * 32 + tid.x  (global col)
+    op = default_op; op.opcode = GpuOpcode::GpuMulImm; op.dst_reg = 5; op.lhs_reg = 3; op.rhs_imm = 32
+    op.ty = GpuType::GpuU32; op.dst_ty = GpuType::GpuU32
+    k.ops[idx] = op; idx = idx + 1
+
+    op = default_op; op.opcode = GpuOpcode::GpuAdd; op.dst_reg = 5; op.lhs_reg = 5; op.rhs_reg = 1
+    op.ty = GpuType::GpuU32; op.dst_ty = GpuType::GpuU32
+    k.ops[idx] = op; idx = idx + 1
+
+    // r6 = bid.y * 32 + tid.y  (global row)
+    op = default_op; op.opcode = GpuOpcode::GpuMulImm; op.dst_reg = 6; op.lhs_reg = 4; op.rhs_imm = 32
+    op.ty = GpuType::GpuU32; op.dst_ty = GpuType::GpuU32
+    k.ops[idx] = op; idx = idx + 1
+
+    op = default_op; op.opcode = GpuOpcode::GpuAdd; op.dst_reg = 6; op.lhs_reg = 6; op.rhs_reg = 2
+    op.ty = GpuType::GpuU32; op.dst_ty = GpuType::GpuU32
+    k.ops[idx] = op; idx = idx + 1
+
+    // r7 = ld.param param_cols (u32)
+    op = default_op; op.opcode = GpuOpcode::GpuLoadParam; op.dst_reg = 7; op.param_idx = 3
+    op.ty = GpuType::GpuU32; op.dst_ty = GpuType::GpuU32
+    k.ops[idx] = op; idx = idx + 1
+
+    // r8 = r6 * cols + r5  (linear index in source: row * cols + col)
+    op = default_op; op.opcode = GpuOpcode::GpuMul; op.dst_reg = 8; op.lhs_reg = 6; op.rhs_reg = 7
+    op.ty = GpuType::GpuU32; op.dst_ty = GpuType::GpuU32
+    k.ops[idx] = op; idx = idx + 1
+
+    op = default_op; op.opcode = GpuOpcode::GpuAdd; op.dst_reg = 8; op.lhs_reg = 8; op.rhs_reg = 5
+    op.ty = GpuType::GpuU32; op.dst_ty = GpuType::GpuU32
+    k.ops[idx] = op; idx = idx + 1
+
+    // rd1 = cvt.u64.u32 r8
+    op = default_op; op.opcode = GpuOpcode::GpuCvt; op.dst_reg = 1; op.src_reg = 8
+    op.ty = GpuType::GpuU64; op.dst_ty = GpuType::GpuU64; op.src_ty = GpuType::GpuU32
+    k.ops[idx] = op; idx = idx + 1
+
+    // rd2 = rd1 * sizeof
+    op = default_op; op.opcode = GpuOpcode::GpuMulImm; op.dst_reg = 2; op.lhs_reg = 1; op.rhs_imm = sizeof_ty
+    op.ty = GpuType::GpuU64; op.dst_ty = GpuType::GpuU64
+    k.ops[idx] = op; idx = idx + 1
+
+    // rd3 = ld.param [param_in]
+    op = default_op; op.opcode = GpuOpcode::GpuLoadParam; op.dst_reg = 3; op.param_idx = 0
+    op.ty = GpuType::GpuPtr; op.dst_ty = GpuType::GpuU64
+    k.ops[idx] = op; idx = idx + 1
+
+    // rd4 = rd3 + rd2 (source address)
+    op = default_op; op.opcode = GpuOpcode::GpuAdd; op.dst_reg = 4; op.lhs_reg = 3; op.rhs_reg = 2
+    op.ty = GpuType::GpuU64; op.dst_ty = GpuType::GpuU64
+    k.ops[idx] = op; idx = idx + 1
+
+    // val1 = ld.global [rd4]
+    op = default_op; op.opcode = GpuOpcode::GpuLoadGlobal; op.dst_reg = 1; op.addr_reg = 4
+    op.ty = elem_ty; op.dst_ty = elem_ty
+    k.ops[idx] = op; idx = idx + 1
+
+    // === Store to shared memory: shared[tid.y * 32 + tid.x] ===
+    // r9 = tid.y * 32 + tid.x (shared mem index within tile)
+    op = default_op; op.opcode = GpuOpcode::GpuMulImm; op.dst_reg = 9; op.lhs_reg = 2; op.rhs_imm = 32
+    op.ty = GpuType::GpuU32; op.dst_ty = GpuType::GpuU32
+    k.ops[idx] = op; idx = idx + 1
+
+    op = default_op; op.opcode = GpuOpcode::GpuAdd; op.dst_reg = 9; op.lhs_reg = 9; op.rhs_reg = 1
+    op.ty = GpuType::GpuU32; op.dst_ty = GpuType::GpuU32
+    k.ops[idx] = op; idx = idx + 1
+
+    // st.shared [r9], val1
+    op = default_op; op.opcode = GpuOpcode::GpuStoreShared; op.addr_reg = 9; op.src_reg = 1; op.shared_addr = 0
+    op.ty = elem_ty; op.dst_ty = elem_ty; op.src_ty = elem_ty
+    k.ops[idx] = op; idx = idx + 1
+
+    // === Barrier sync ===
+    op = default_op; op.opcode = GpuOpcode::GpuBarrierSync
+    op.ty = GpuType::GpuU32; op.dst_ty = GpuType::GpuU32
+    k.ops[idx] = op; idx = idx + 1
+
+    // === Load from shared memory with transposed indices: shared[tid.x * 32 + tid.y] ===
+    // r10 = tid.x * 32 + tid.y  (transposed index)
+    op = default_op; op.opcode = GpuOpcode::GpuMulImm; op.dst_reg = 10; op.lhs_reg = 1; op.rhs_imm = 32
+    op.ty = GpuType::GpuU32; op.dst_ty = GpuType::GpuU32
+    k.ops[idx] = op; idx = idx + 1
+
+    op = default_op; op.opcode = GpuOpcode::GpuAdd; op.dst_reg = 10; op.lhs_reg = 10; op.rhs_reg = 2
+    op.ty = GpuType::GpuU32; op.dst_ty = GpuType::GpuU32
+    k.ops[idx] = op; idx = idx + 1
+
+    // val2 = ld.shared [r10]
+    op = default_op; op.opcode = GpuOpcode::GpuLoadShared; op.dst_reg = 2; op.addr_reg = 10; op.shared_addr = 0
+    op.ty = elem_ty; op.dst_ty = elem_ty
+    k.ops[idx] = op; idx = idx + 1
+
+    // === Compute destination (transposed) address ===
+    // dst_col = bid.y * 32 + tid.x  (note: bid.y for output col)
+    // dst_row = bid.x * 32 + tid.y  (note: bid.x for output row)
+    // r11 = bid.y * 32 + tid.x
+    op = default_op; op.opcode = GpuOpcode::GpuMulImm; op.dst_reg = 11; op.lhs_reg = 4; op.rhs_imm = 32
+    op.ty = GpuType::GpuU32; op.dst_ty = GpuType::GpuU32
+    k.ops[idx] = op; idx = idx + 1
+
+    op = default_op; op.opcode = GpuOpcode::GpuAdd; op.dst_reg = 11; op.lhs_reg = 11; op.rhs_reg = 1
+    op.ty = GpuType::GpuU32; op.dst_ty = GpuType::GpuU32
+    k.ops[idx] = op; idx = idx + 1
+
+    // r12 = bid.x * 32 + tid.y
+    op = default_op; op.opcode = GpuOpcode::GpuMulImm; op.dst_reg = 12; op.lhs_reg = 3; op.rhs_imm = 32
+    op.ty = GpuType::GpuU32; op.dst_ty = GpuType::GpuU32
+    k.ops[idx] = op; idx = idx + 1
+
+    op = default_op; op.opcode = GpuOpcode::GpuAdd; op.dst_reg = 12; op.lhs_reg = 12; op.rhs_reg = 2
+    op.ty = GpuType::GpuU32; op.dst_ty = GpuType::GpuU32
+    k.ops[idx] = op; idx = idx + 1
+
+    // r13 = ld.param param_rows
+    op = default_op; op.opcode = GpuOpcode::GpuLoadParam; op.dst_reg = 13; op.param_idx = 2
+    op.ty = GpuType::GpuU32; op.dst_ty = GpuType::GpuU32
+    k.ops[idx] = op; idx = idx + 1
+
+    // r14 = dst_row * rows + dst_col  (linear index in output: row_out * rows + col_out)
+    // Note: output has dimensions cols × rows (transposed), so stride = rows
+    op = default_op; op.opcode = GpuOpcode::GpuMul; op.dst_reg = 14; op.lhs_reg = 12; op.rhs_reg = 13
+    op.ty = GpuType::GpuU32; op.dst_ty = GpuType::GpuU32
+    k.ops[idx] = op; idx = idx + 1
+
+    op = default_op; op.opcode = GpuOpcode::GpuAdd; op.dst_reg = 14; op.lhs_reg = 14; op.rhs_reg = 11
+    op.ty = GpuType::GpuU32; op.dst_ty = GpuType::GpuU32
+    k.ops[idx] = op; idx = idx + 1
+
+    // rd5 = cvt.u64.u32 r14
+    op = default_op; op.opcode = GpuOpcode::GpuCvt; op.dst_reg = 5; op.src_reg = 14
+    op.ty = GpuType::GpuU64; op.dst_ty = GpuType::GpuU64; op.src_ty = GpuType::GpuU32
+    k.ops[idx] = op; idx = idx + 1
+
+    // rd6 = rd5 * sizeof
+    op = default_op; op.opcode = GpuOpcode::GpuMulImm; op.dst_reg = 6; op.lhs_reg = 5; op.rhs_imm = sizeof_ty
+    op.ty = GpuType::GpuU64; op.dst_ty = GpuType::GpuU64
+    k.ops[idx] = op; idx = idx + 1
+
+    // rd7 = ld.param [param_out]
+    op = default_op; op.opcode = GpuOpcode::GpuLoadParam; op.dst_reg = 7; op.param_idx = 1
+    op.ty = GpuType::GpuPtr; op.dst_ty = GpuType::GpuU64
+    k.ops[idx] = op; idx = idx + 1
+
+    // rd8 = rd7 + rd6 (dest address)
+    op = default_op; op.opcode = GpuOpcode::GpuAdd; op.dst_reg = 8; op.lhs_reg = 7; op.rhs_reg = 6
+    op.ty = GpuType::GpuU64; op.dst_ty = GpuType::GpuU64
+    k.ops[idx] = op; idx = idx + 1
+
+    // st.global [rd8], val2
+    op = default_op; op.opcode = GpuOpcode::GpuStoreGlobal; op.addr_reg = 8; op.src_reg = 2
+    op.ty = elem_ty; op.dst_ty = elem_ty; op.src_ty = elem_ty
+    k.ops[idx] = op; idx = idx + 1
+
+    // ret
+    k.ops[idx] = default_op; idx = idx + 1
+
+    k.op_count = idx
+    k.max_reg_u32 = 15
+    k.max_reg_u64 = 9
+    k.max_reg_pred = 1
+    if elem_ty == GpuType::GpuF32 { k.max_reg_f32 = 3 }
+    if elem_ty == GpuType::GpuF64 { k.max_reg_f64 = 3 }
+    if elem_ty == GpuType::GpuI32 { k.max_reg_i32 = 3 }
+    k
+}
+
+fn gpu_build_transpose_f32_ir() -> GpuKernelIr with Mut, Panic, Div {
+    gpu_build_transpose_ir(gpu_name_transpose_f32(), GpuType::GpuF32)
+}
+
+fn gpu_build_transpose_f64_ir() -> GpuKernelIr with Mut, Panic, Div {
+    gpu_build_transpose_ir(gpu_name_transpose_f64(), GpuType::GpuF64)
+}
+
+fn gpu_build_transpose_i32_ir() -> GpuKernelIr with Mut, Panic, Div {
+    gpu_build_transpose_ir(gpu_name_transpose_i32(), GpuType::GpuI32)
+}

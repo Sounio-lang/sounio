@@ -732,6 +732,100 @@ fn gpu_ptx_test_84_conv2d_f64() -> bool with Mut, Panic, Div, Alloc {
     ptx_str_contains(s, "fma.rn.f64")
 }
 
+// ===== Phase 7: Scan (prefix sum) tests =====
+
+// T87: scan_f32 entry point and shfl.sync.up (Hillis-Steele scan)
+fn gpu_ptx_test_87_scan_f32_entry_and_shfl_up() -> bool with Mut, Panic, Div, Alloc {
+    let s = ptx_to_string(gpu_lower_to_ptx(gpu_build_scan_f32_ir()))
+    ptx_str_contains(s, ".entry scan_f32") &&
+    ptx_str_contains(s, "shfl.sync.up")
+}
+
+// T88: scan_f32 uses setp.ge for conditional accumulation
+fn gpu_ptx_test_88_scan_f32_setp_ge() -> bool with Mut, Panic, Div, Alloc {
+    let s = ptx_to_string(gpu_lower_to_ptx(gpu_build_scan_f32_ir()))
+    ptx_str_contains(s, "setp.ge") &&
+    ptx_str_contains(s, "selp")
+}
+
+// T89: scan_f32 uses add.f32 for partial sums
+fn gpu_ptx_test_89_scan_f32_add() -> bool with Mut, Panic, Div, Alloc {
+    let s = ptx_to_string(gpu_lower_to_ptx(gpu_build_scan_f32_ir()))
+    ptx_str_contains(s, "add.f32")
+}
+
+// T90: scan_f64 entry + shfl.sync.up.b64
+fn gpu_ptx_test_90_scan_f64() -> bool with Mut, Panic, Div, Alloc {
+    let s = ptx_to_string(gpu_lower_to_ptx(gpu_build_scan_f64_ir()))
+    ptx_str_contains(s, ".entry scan_f64") &&
+    ptx_str_contains(s, "shfl.sync.up.b64")
+}
+
+// T91: scan_i32 entry + add.s32
+fn gpu_ptx_test_91_scan_i32() -> bool with Mut, Panic, Div, Alloc {
+    let s = ptx_to_string(gpu_lower_to_ptx(gpu_build_scan_i32_ir()))
+    ptx_str_contains(s, ".entry scan_i32") &&
+    ptx_str_contains(s, "add.s32")
+}
+
+// T92: scan has 5 shfl.sync.up calls (offsets 1,2,4,8,16)
+fn gpu_ptx_test_92_scan_5_shuffle_stages() -> bool with Mut, Panic, Div, Alloc {
+    let k = gpu_build_scan_f32_ir()
+    // 5 offsets × 4 ops each (shfl, setp, add, selp) = 20, plus setup/teardown
+    k.op_count > 25
+}
+
+// ===== Phase 7: Transpose tests =====
+
+// T93: transpose_f32 entry point + shared memory
+fn gpu_ptx_test_93_transpose_f32_entry() -> bool with Mut, Panic, Div, Alloc {
+    let s = ptx_to_string(gpu_lower_to_ptx(gpu_build_transpose_f32_ir()))
+    ptx_str_contains(s, ".entry xpose_f32") &&
+    ptx_str_contains(s, "bar.sync 0")
+}
+
+// T94: transpose uses both ld.shared and st.shared (tile through shared memory)
+fn gpu_ptx_test_94_transpose_shared_mem() -> bool with Mut, Panic, Div, Alloc {
+    let s = ptx_to_string(gpu_lower_to_ptx(gpu_build_transpose_f32_ir()))
+    ptx_str_contains(s, "ld.shared") &&
+    ptx_str_contains(s, "st.shared")
+}
+
+// T95: transpose uses 2D thread indexing (tid.x + tid.y)
+fn gpu_ptx_test_95_transpose_2d_threads() -> bool with Mut, Panic, Div, Alloc {
+    let s = ptx_to_string(gpu_lower_to_ptx(gpu_build_transpose_f32_ir()))
+    ptx_str_contains(s, "%tid.x") &&
+    ptx_str_contains(s, "%tid.y")
+}
+
+// T96: transpose uses 2D block indexing (bid.x + bid.y)
+fn gpu_ptx_test_96_transpose_2d_blocks() -> bool with Mut, Panic, Div, Alloc {
+    let s = ptx_to_string(gpu_lower_to_ptx(gpu_build_transpose_f32_ir()))
+    ptx_str_contains(s, "%ctaid.x") &&
+    ptx_str_contains(s, "%ctaid.y")
+}
+
+// T97: transpose_f64 entry + shared memory declaration
+fn gpu_ptx_test_97_transpose_f64() -> bool with Mut, Panic, Div, Alloc {
+    let s = ptx_to_string(gpu_lower_to_ptx(gpu_build_transpose_f64_ir()))
+    ptx_str_contains(s, ".entry xpose_f64") &&
+    ptx_str_contains(s, ".shared")
+}
+
+// T98: transpose has shared_bytes = TILE*TILE*sizeof (4096 for f32, 8192 for f64)
+fn gpu_ptx_test_98_transpose_shared_bytes() -> bool with Mut, Panic, Div, Alloc {
+    let kf32 = gpu_build_transpose_f32_ir()
+    let kf64 = gpu_build_transpose_f64_ir()
+    kf32.shared_bytes == 4096 && kf64.shared_bytes == 8192
+}
+
+// T99: scan op_count > elemwise op_count (scan is more complex)
+fn gpu_ptx_test_99_scan_larger_than_elemwise() -> bool with Mut, Panic, Div, Alloc {
+    let elemwise = gpu_build_vec_add_ir()
+    let scan = gpu_build_scan_f32_ir()
+    scan.op_count > elemwise.op_count
+}
+
 fn run_gpu_ptx_tests() -> i32 with IO, Mut, Panic, Div, Alloc {
     var passed: i64 = 0
     var total: i64 = 0
@@ -926,6 +1020,34 @@ fn run_gpu_ptx_tests() -> i32 with IO, Mut, Panic, Div, Alloc {
     if gpu_ptx_test_83_conv2d_2d_threads() { passed = passed + 1; print("  T83 OK (conv2d 2d threads)\n") } else { print("  FAIL T83\n") }
     total = total + 1
     if gpu_ptx_test_84_conv2d_f64() { passed = passed + 1; print("  T84 OK (conv2d f64)\n") } else { print("  FAIL T84\n") }
+
+    // Phase 7 tests (T87-T99): Scan + Transpose
+    total = total + 1
+    if gpu_ptx_test_87_scan_f32_entry_and_shfl_up() { passed = passed + 1; print("  T87 OK (scan f32 entry+shfl.up)\n") } else { print("  FAIL T87\n") }
+    total = total + 1
+    if gpu_ptx_test_88_scan_f32_setp_ge() { passed = passed + 1; print("  T88 OK (scan setp.ge+selp)\n") } else { print("  FAIL T88\n") }
+    total = total + 1
+    if gpu_ptx_test_89_scan_f32_add() { passed = passed + 1; print("  T89 OK (scan add.f32)\n") } else { print("  FAIL T89\n") }
+    total = total + 1
+    if gpu_ptx_test_90_scan_f64() { passed = passed + 1; print("  T90 OK (scan f64)\n") } else { print("  FAIL T90\n") }
+    total = total + 1
+    if gpu_ptx_test_91_scan_i32() { passed = passed + 1; print("  T91 OK (scan i32)\n") } else { print("  FAIL T91\n") }
+    total = total + 1
+    if gpu_ptx_test_92_scan_5_shuffle_stages() { passed = passed + 1; print("  T92 OK (scan 5 stages)\n") } else { print("  FAIL T92\n") }
+    total = total + 1
+    if gpu_ptx_test_93_transpose_f32_entry() { passed = passed + 1; print("  T93 OK (xpose f32 entry)\n") } else { print("  FAIL T93\n") }
+    total = total + 1
+    if gpu_ptx_test_94_transpose_shared_mem() { passed = passed + 1; print("  T94 OK (xpose shared mem)\n") } else { print("  FAIL T94\n") }
+    total = total + 1
+    if gpu_ptx_test_95_transpose_2d_threads() { passed = passed + 1; print("  T95 OK (xpose 2d threads)\n") } else { print("  FAIL T95\n") }
+    total = total + 1
+    if gpu_ptx_test_96_transpose_2d_blocks() { passed = passed + 1; print("  T96 OK (xpose 2d blocks)\n") } else { print("  FAIL T96\n") }
+    total = total + 1
+    if gpu_ptx_test_97_transpose_f64() { passed = passed + 1; print("  T97 OK (xpose f64)\n") } else { print("  FAIL T97\n") }
+    total = total + 1
+    if gpu_ptx_test_98_transpose_shared_bytes() { passed = passed + 1; print("  T98 OK (xpose shared bytes)\n") } else { print("  FAIL T98\n") }
+    total = total + 1
+    if gpu_ptx_test_99_scan_larger_than_elemwise() { passed = passed + 1; print("  T99 OK (scan > elemwise)\n") } else { print("  FAIL T99\n") }
 
     if passed == total { print("GPU PTX tests: all passed\n") } else { print("GPU PTX tests: suite fail\n") }
 
