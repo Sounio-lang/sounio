@@ -188,6 +188,21 @@ impl CausalGraphRegistry {
     pub fn contains(&self, name: &str) -> bool {
         self.graphs.contains_key(name)
     }
+
+    /// Return the number of registered graphs
+    pub fn len(&self) -> usize {
+        self.graphs.len()
+    }
+
+    /// Check if the registry is empty
+    pub fn is_empty(&self) -> bool {
+        self.graphs.is_empty()
+    }
+
+    /// Return the names of all registered graphs
+    pub fn names(&self) -> Vec<&str> {
+        self.graphs.keys().map(|s| s.as_str()).collect()
+    }
 }
 
 /// Validate that edges form a DAG and return topological order

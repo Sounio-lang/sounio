@@ -818,10 +818,17 @@ impl<'ctx> Z3Solver<'ctx> {
         }
     }
 
-    /// Translate term expecting Real result
+    /// Translate term expecting Real result, coercing Int→Real if needed
     fn translate_term_real(&mut self, term: &SmtTerm) -> Result<Real<'ctx>, SolverError> {
         let t = self.translate_term(term)?;
-        t.as_real().ok_or_else(|| SolverError::TypeMismatch {
+        if let Some(r) = t.as_real() {
+            return Ok(r);
+        }
+        // Coerce Int to Real (standard Z3 Int2Real semantics)
+        if let Some(i) = t.as_int() {
+            return Ok(Int::to_real(&i));
+        }
+        Err(SolverError::TypeMismatch {
             expected: SmtSort::Real,
             got: SmtSort::Int,
         })

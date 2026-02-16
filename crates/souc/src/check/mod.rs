@@ -223,6 +223,8 @@ pub struct TypeChecker {
     conformal_checker: Option<ConformalTypeChecker>,
     /// Cache for expand_type_alias results (avoids re-expanding common aliases)
     alias_expansion_cache: std::cell::RefCell<std::collections::HashMap<String, Type>>,
+    /// Registry of declared causal graphs for compile-time identifiability checking
+    causal_graph_registry: types::CausalGraphRegistry,
 }
 
 /// Type environment with scopes and module awareness
@@ -365,6 +367,7 @@ impl TypeChecker {
             hyperbolic_generator: Some(HyperbolicGenerator::new(64)), // Default 64 dimensions
             conformal_checker: Some(ConformalTypeChecker::new(ConformalConfig::default())),
             alias_expansion_cache: std::cell::RefCell::new(std::collections::HashMap::new()),
+            causal_graph_registry: types::CausalGraphRegistry::new(),
         }
     }
 
@@ -2739,6 +2742,38 @@ impl TypeChecker {
                 let hir_impl = self.check_impl(i)?;
                 Ok(Some(HirItem::Impl(hir_impl)))
             }
+            Item::CausalModel(c) => {
+                // Register the causal graph and validate DAG structure
+                if let Err(e) = self.causal_graph_registry.register(c) {
+                    match e {
+                        types::CausalError::CyclicGraph { cycle, span } => {
+                            self.error_with_code(
+                                "E0900",
+                                format!(
+                                    "causal model '{}' contains a cycle: {}",
+                                    c.name,
+                                    cycle.join(" -> ")
+                                ),
+                                span,
+                            );
+                        }
+                        types::CausalError::UnknownNode { node, graph, span } => {
+                            self.error_with_code(
+                                "E0901",
+                                format!(
+                                    "edge references unknown node '{}' in causal model '{}'",
+                                    node, graph
+                                ),
+                                span,
+                            );
+                        }
+                        _ => {
+                            self.error(format!("invalid causal model '{}': {:?}", c.name, e), c.span);
+                        }
+                    }
+                }
+                Ok(None) // Causal models don't produce HIR items directly
+            }
             _ => Ok(None),
         }
     }
@@ -5056,10 +5091,90 @@ impl TypeChecker {
                     })
                     .collect::<Result<_>>()?;
 
+                // Causal identifiability check: when interventions are present
+                // and causal graphs are registered, verify identifiability
+                let mut causal_confidence: Option<f64> = None;
+                if !interventions.is_empty() && !self.causal_graph_registry.is_empty() {
+                    // Extract query variable name from target expression
+                    let query_var = match target.as_ref() {
+                        Expr::Path { path, .. } if path.segments.len() == 1 => {
+                            Some(path.segments[0].as_str())
+                        }
+                        _ => None,
+                    };
+
+                    // Build intervention list for causal checker
+                    let intervention_vars: Vec<(String, ())> = interventions
+                        .iter()
+                        .map(|(var, _)| (var.clone(), ()))
+                        .collect();
+
+                    // Determine which causal model to check against.
+                    // If exactly one model is registered, use it as default.
+                    // Future: support explicit model annotation on Query syntax.
+                    let model_name: Option<String> = if self.causal_graph_registry.len() == 1 {
+                        self.causal_graph_registry.names().into_iter().next().map(|s| s.to_string())
+                    } else {
+                        None
+                    };
+
+                    if let Some(ref model) = model_name {
+                        let result = causal::check_do_expr(
+                            &self.causal_graph_registry,
+                            &intervention_vars,
+                            Some(model.as_str()),
+                            query_var,
+                        );
+
+                        match result {
+                            causal::CausalCheckResult::Identified { confidence, .. } => {
+                                causal_confidence = Some(confidence);
+                            }
+                            causal::CausalCheckResult::NotIdentifiable {
+                                reason,
+                                treatment,
+                                outcome,
+                                graph_name,
+                            } => {
+                                self.error_with_code(
+                                    "E0902",
+                                    format!(
+                                        "causal effect P({} | do({})) is not identifiable in model '{}': {}",
+                                        outcome.join(", "),
+                                        treatment.join(", "),
+                                        graph_name,
+                                        reason,
+                                    ),
+                                    Span::dummy(),
+                                );
+                            }
+                            causal::CausalCheckResult::InvalidTarget {
+                                variable,
+                                graph_name,
+                                available_nodes,
+                            } => {
+                                self.error_with_code(
+                                    "E0903",
+                                    format!(
+                                        "variable '{}' not found in causal model '{}' (available: {})",
+                                        variable,
+                                        graph_name,
+                                        available_nodes.join(", "),
+                                    ),
+                                    Span::dummy(),
+                                );
+                            }
+                            causal::CausalCheckResult::GraphNotFound { .. } => {
+                                // Should not happen since we checked len() > 0
+                            }
+                        }
+                    }
+                }
+
                 // Query returns a probability (Knowledge[f64])
                 let result_ty = HirType::Knowledge {
                     inner: Box::new(HirType::F64),
-                    epsilon_bound: None,
+                    epsilon_bound: causal_confidence,
                     provenance: None,
                 };
 

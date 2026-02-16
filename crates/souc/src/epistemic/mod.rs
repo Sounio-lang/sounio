@@ -73,6 +73,10 @@ pub mod simd_knowledge;
 pub mod evidence_collector;
 pub mod temporal_validity;
 
+// Cross-cutting integration tests
+#[cfg(test)]
+mod integration_tests;
+
 pub use confidence::{Confidence, EpistemicStatus, Evidence, EvidenceKind, Revisability, Source};
 pub use heterogeneity::{
     HeterogeneityConfig, HeterogeneityResolver, ResolutionResult, ResolutionStrategy,

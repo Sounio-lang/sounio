@@ -763,6 +763,18 @@ impl<'a> ProofSearcher<'a> {
             ));
         }
 
+        // If there's known confounding and we exhausted all strategies,
+        // this is definitively non-identifiable (not unknown).
+        if has_confounding {
+            return ProofResult::Disproven {
+                reason: format!(
+                    "Effect {} → {} is not identifiable: \
+                     confounding present, no backdoor set, frontdoor set, or instrument found",
+                    treatment, outcome
+                ),
+            };
+        }
+
         if self.config.allow_gradual {
             ProofResult::Proven(Proof::runtime_check(Predicate::causal(ident_pred)))
         } else {
