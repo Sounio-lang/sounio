@@ -449,6 +449,7 @@ impl SymbolTable {
             "read_file_prefix", // Read prefix of file contents as byte array
             "file_size",        // Get file size in bytes
             "write_bytes",      // Write byte array to file
+            "write_file",       // Write byte array to file (path, bytes, length) -> i64
             "arg_count",        // Number of CLI user args after --
             "get_arg",          // Get nth CLI user arg or empty string
             "parse_int",        // Parse string to int

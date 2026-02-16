@@ -6295,6 +6295,7 @@ impl TypeChecker {
                 | "read_file_prefix"
                 | "file_size"
                 | "write_bytes"
+                | "write_file"
                 | "arg_count"
                 | "get_arg"
                 | "str_len"
@@ -6614,6 +6615,17 @@ impl TypeChecker {
                     HirType::I64,
                 ],
                 return_type: Box::new(HirType::Bool),
+            },
+            "write_file" => HirType::Fn {
+                params: vec![
+                    HirType::String,
+                    HirType::Array {
+                        element: Box::new(HirType::I8),
+                        size: None,
+                    },
+                    HirType::I64,
+                ],
+                return_type: Box::new(HirType::I64),
             },
             "parse_int" | "parse_float" => HirType::Fn {
                 params: vec![HirType::String],

@@ -1278,6 +1278,104 @@ impl BytecodeVM {
                     Err(_) => Ok(Value::Int(-1)),
                 }
             }
+            "write_file" => {
+                if arg_count != 3 {
+                    return Err(VmError::FfiError(
+                        "write_file expects 3 arguments".to_string(),
+                    ));
+                }
+                let length = self.stack.pop().ok_or(VmError::StackUnderflow)?;
+                let length = match length {
+                    Value::Int(n) if n >= 0 => usize::try_from(n).unwrap_or(usize::MAX),
+                    Value::Int(_) => 0usize,
+                    other => {
+                        return Err(VmError::TypeMismatch(format!(
+                            "write_file expects i64 length as arg2, got {}",
+                            std::any::type_name_of_val(&other)
+                        )));
+                    }
+                };
+                let bytes_value = self.stack.pop().ok_or(VmError::StackUnderflow)?;
+                // Unwrap Ref if needed
+                let bytes_inner = match bytes_value {
+                    Value::Ref(inner) => inner
+                        .lock()
+                        .map_err(|_| VmError::TypeMismatch("write_file".to_string()))?
+                        .clone(),
+                    other => other,
+                };
+                let path = self.stack.pop().ok_or(VmError::StackUnderflow)?;
+                let path = match path {
+                    Value::String(s) => s,
+                    other => {
+                        return Err(VmError::TypeMismatch(format!(
+                            "write_file expects string path as arg0, got {}",
+                            std::any::type_name_of_val(&other)
+                        )));
+                    }
+                };
+
+                let mut out = Vec::with_capacity(length);
+                match bytes_inner {
+                    Value::List(list) => {
+                        for item in list.into_iter().take(length) {
+                            match item {
+                                Value::Int(n) => out.push(n as u8),
+                                _ => {
+                                    return Err(VmError::TypeMismatch(
+                                        "write_file data must contain ints".to_string(),
+                                    ));
+                                }
+                            }
+                        }
+                    }
+                    Value::SparseList {
+                        len: _,
+                        default,
+                        overrides,
+                    } => {
+                        let default_byte = match *default {
+                            Value::Int(n) => n as u8,
+                            _ => 0u8,
+                        };
+                        for i in 0..length {
+                            if let Some(val) = overrides.get(&i) {
+                                match val {
+                                    Value::Int(n) => out.push(*n as u8),
+                                    _ => out.push(default_byte),
+                                }
+                            } else {
+                                out.push(default_byte);
+                            }
+                        }
+                    }
+                    other => {
+                        return Err(VmError::TypeMismatch(format!(
+                            "write_file expects array as arg1, got {:?}",
+                            std::mem::discriminant(&other)
+                        )));
+                    }
+                }
+
+                match std::fs::File::create(&path).and_then(|mut f| {
+                    use std::io::Write;
+                    f.write_all(&out)?;
+                    // Set executable permissions for ELF binaries
+                    #[cfg(unix)]
+                    {
+                        use std::os::unix::fs::PermissionsExt;
+                        let perms = std::fs::Permissions::from_mode(0o755);
+                        f.set_permissions(perms)?;
+                    }
+                    Ok(())
+                }) {
+                    Ok(_) => Ok(Value::Int(0)),
+                    Err(err) => {
+                        eprintln!("warning: write_file('{}') failed: {}", path, err);
+                        Ok(Value::Int(1))
+                    }
+                }
+            }
             "is_dir" => {
                 if arg_count != 1 {
                     return Err(VmError::FfiError(

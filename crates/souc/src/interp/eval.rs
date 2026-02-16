@@ -2383,6 +2383,7 @@ impl Interpreter {
                 | "read_file_prefix"
                 | "file_size"
                 | "write_bytes"
+                | "write_file"
                 | "arg_count"
                 | "get_arg"
                 | "str_len"
