@@ -594,8 +594,21 @@ impl Resolver {
     /// Resolve all names in the AST
     pub fn resolve(mut self, ast: Ast) -> Result<ResolvedAst> {
         // First pass: collect all top-level definitions and build module tree
+        // Process in two phases: modules first (to build tree), then everything else
+        // This ensures module tree is populated before imports check for module paths
+
+        // Phase 1: Process modules to build the module tree structure
         for item in &ast.items {
-            self.collect_item(item);
+            if let Item::Module(_) = item {
+                self.collect_item(item);
+            }
+        }
+
+        // Phase 2: Process all other items (imports, functions, types, etc.)
+        for item in &ast.items {
+            if !matches!(item, Item::Module(_)) {
+                self.collect_item(item);
+            }
         }
 
         // Resolve imports in the module tree (multi-pass algorithm)
@@ -770,7 +783,7 @@ impl Resolver {
         let full_path: Vec<String> = i.path.segments.clone();
 
         // Compute the effective module path and items for resolution
-        // For `use foo::bar;` (no braces), treat as importing item `bar` from module `foo`
+        // For `use foo::bar;` (no braces), check if full path is a module first
         let (module_path, effective_items): (Vec<String>, Option<Vec<ImportItem>>) = match &i.items
         {
             Some(items) => {
@@ -778,17 +791,30 @@ impl Resolver {
                 (full_path.clone(), Some(items.clone()))
             }
             None if full_path.len() > 1 => {
-                // `use foo::bar;` -> module=foo, item=bar
-                let item_name = full_path.last().cloned().unwrap_or_default();
-                let mod_path = full_path[..full_path.len() - 1].to_vec();
-                (
-                    mod_path,
-                    Some(vec![ImportItem {
-                        name: item_name,
-                        alias: None,
-                        is_glob: false,
-                    }]),
-                )
+                // `use foo::bar;` - could be either:
+                // 1. Module import: `bar` is a submodule of `foo`
+                // 2. Item import: `bar` is an item in module `foo`
+                //
+                // Check if full_path is a module in the tree (e.g., ["foo", "bar"]).
+                // The module_loader wraps imported modules in nested Module items,
+                // so the tree should have the module if it was loaded as a module.
+                let full_tree_id = TreeModuleId::from(full_path.clone());
+                if self.module_tree.contains(&full_tree_id) {
+                    // Full path is a module - import the module itself
+                    (full_path.clone(), None)
+                } else {
+                    // Treat as item import: `use foo::bar;` -> module=foo, item=bar
+                    let item_name = full_path.last().cloned().unwrap_or_default();
+                    let mod_path = full_path[..full_path.len() - 1].to_vec();
+                    (
+                        mod_path,
+                        Some(vec![ImportItem {
+                            name: item_name,
+                            alias: None,
+                            is_glob: false,
+                        }]),
+                    )
+                }
             }
             None => {
                 // `use foo;` -> import entire module
@@ -812,6 +838,7 @@ impl Resolver {
         if let Some(module) = self.module_tree.get_mut(&self.current_tree_module) {
             match effective_items {
                 Some(items) => {
+                    // Item import: `use foo::{bar, baz}` or `use foo::bar` (treated as item)
                     for item in items {
                         let local_name = item.alias.clone().unwrap_or_else(|| item.name.clone());
                         module.add_import(ImportEntry {
@@ -826,6 +853,7 @@ impl Resolver {
                     }
                 }
                 None => {
+                    // Module import: `use foo::bar` where bar is a module
                     let module_name = module_path.last().cloned().unwrap_or_default();
                     module.add_import(ImportEntry {
                         local_name: module_name.clone(),

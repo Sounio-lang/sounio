@@ -4,9 +4,9 @@
 
 ### *Compute at the Horizon of Certainty*
 
-[![License: MIT](https://img.shields.io/badge/License-MIT-gold.svg)](LICENSE)
+[![License: Apache-2.0](https://img.shields.io/badge/License-Apache%202.0-gold.svg)](LICENSE)
 [![stdlib](https://img.shields.io/badge/stdlib-215K%2B%20lines-blue.svg)](#standard-library)
-[![Version](https://img.shields.io/badge/version-0.100.0-orange.svg)](CHANGELOG.md)
+[![Version](https://img.shields.io/badge/version-1.0.0-beta-orange.svg)](CHANGELOG.md)
 [![Preprint: TechRxiv](https://img.shields.io/badge/Preprint-TechRxiv%20%28DOI%20pending%29-teal.svg)](https://www.techrxiv.org/)
 
 <img src="docs/assets/sounio-logo.svg" alt="Sounio Logo" width="200">
@@ -332,7 +332,7 @@ See [MANIFESTO.md](MANIFESTO.md) for the complete philosophy.
 
 ## Project Status
 
-**Current Version**: 0.100.0
+**Current Version**: 1.0.0-beta
 
 ### Implemented ✅
 - Core epistemic type system with `Knowledge<T>` (25K+ lines in compiler, 31K+ in stdlib)
@@ -455,7 +455,7 @@ If you use Sounio in academic work, please cite:
   title = {Sounio: A Systems Language for Epistemic Computing},
   author = {Agourakis, Demetrios Chiuratto},
   year = {2025--2026},
-  version = {0.100.0},
+  version = {1.0.0-beta},
   doi = {10.5281/zenodo.18190065},
   url = {https://doi.org/10.5281/zenodo.18190065},
   note = {Latest published release DOI: 10.5281/zenodo.18404188 (v0.99.0)}
@@ -466,7 +466,7 @@ If you use Sounio in academic work, please cite:
 
 ## License
 
-MIT License. See [LICENSE](LICENSE).
+Apache License 2.0. See [LICENSE](LICENSE).
 
 ---
 

@@ -2,7 +2,13 @@
 
 All notable changes to the Sounio programming language and compiler are documented in this file. Sounio follows semantic versioning and this changelog is maintained for each release.
 
-## [Unreleased] - v0.101.x In Development
+## [1.0.0-beta] - 2026-02-15
+
+### Release — First Public Beta
+
+Sounio v1.0.0-beta marks the first public release of the Sounio programming language for epistemic computing. All features below are implemented and tested.
+
+## [Unreleased] - v1.1.x In Development
 
 ### Added
 

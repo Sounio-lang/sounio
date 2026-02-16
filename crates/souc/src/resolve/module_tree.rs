@@ -427,19 +427,22 @@ impl ModuleTree {
                 None => continue,
             };
             for import in &module.imports {
-                if import.resolved.is_none() && !import.is_glob && !import.is_module_import {
+                if import.resolved.is_none() && !import.is_module_import {
                     // Check if it's a module not found vs item not found
                     let target_id = ModuleId(import.source_path.clone());
                     if !self.contains(&target_id) {
                         errors.push(ImportError::ModuleNotFound {
                             path: import.source_path.join("::"),
                         });
-                    } else {
+                    } else if !import.is_glob {
+                        // For non-glob imports, report specific item not found
                         errors.push(ImportError::Unresolved {
                             name: import.original_name.clone(),
                             path: import.source_path.join("::"),
                         });
                     }
+                    // For glob imports where module exists but has no public items,
+                    // this is not an error - the glob just imports nothing
                 }
             }
         }
@@ -1336,6 +1339,94 @@ mod tests {
         assert!(
             bar_imports.is_empty(),
             "Glob should not overwrite existing items"
+        );
+    }
+
+    #[test]
+    fn test_glob_import_nested_module() {
+        // Test: use outer::inner::* imports items from nested module
+        let mut tree = ModuleTree::new();
+
+        // Create outer module
+        let outer_id = ModuleId::root().join("outer");
+        {
+            let outer = tree.get_or_create(outer_id.clone());
+            outer.visibility = Visibility::Public;
+        }
+
+        // Create inner module as child of outer
+        let inner_id = outer_id.join("inner");
+        {
+            let inner = tree.get_or_create(inner_id.clone());
+            inner.visibility = Visibility::Public;
+            inner.add_item(ModuleItem {
+                name: "NestedStruct".to_string(),
+                kind: ItemKind::Struct,
+                visibility: Visibility::Public,
+                node_id: NodeId(100),
+            });
+            inner.add_item(ModuleItem {
+                name: "nested_fn".to_string(),
+                kind: ItemKind::Function,
+                visibility: Visibility::Public,
+                node_id: NodeId(101),
+            });
+            inner.add_item(ModuleItem {
+                name: "private_item".to_string(),
+                kind: ItemKind::Function,
+                visibility: Visibility::Private,
+                node_id: NodeId(102),
+            });
+        }
+
+        // Register inner as child of outer
+        if let Some(outer) = tree.get_mut(&outer_id) {
+            outer.add_child("inner".to_string(), inner_id.clone());
+        }
+
+        // Add glob import from nested module: use outer::inner::*
+        {
+            let root = tree.get_mut(&ModuleId::root()).unwrap();
+            root.add_import(ImportEntry {
+                local_name: "*".to_string(),
+                source_path: vec!["outer".to_string(), "inner".to_string()],
+                original_name: "*".to_string(),
+                is_glob: true,
+                is_reexport: false,
+                is_module_import: false,
+                resolved: None,
+            });
+        }
+
+        // Resolve imports
+        let result = tree.resolve_imports();
+        assert!(result.is_ok(), "Nested glob import should succeed");
+
+        // Verify public items were imported
+        let root = tree.get(&ModuleId::root()).unwrap();
+
+        let struct_import = root
+            .imports
+            .iter()
+            .find(|i| i.local_name == "NestedStruct" && !i.is_glob);
+        assert!(
+            struct_import.is_some(),
+            "NestedStruct should be imported via glob"
+        );
+        assert_eq!(struct_import.unwrap().resolved, Some(NodeId(100)));
+
+        let fn_import = root
+            .imports
+            .iter()
+            .find(|i| i.local_name == "nested_fn" && !i.is_glob);
+        assert!(fn_import.is_some(), "nested_fn should be imported via glob");
+        assert_eq!(fn_import.unwrap().resolved, Some(NodeId(101)));
+
+        // Verify private item was NOT imported
+        let private_import = root.imports.iter().find(|i| i.local_name == "private_item");
+        assert!(
+            private_import.is_none(),
+            "Private items should not be imported via glob"
         );
     }
 }

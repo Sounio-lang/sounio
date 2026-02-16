@@ -827,27 +827,19 @@ pub fn get_stdlib_search_paths() -> Vec<PathBuf> {
     paths
 }
 
+/// Collects import paths from AST, returning the full path for each import.
+/// For `use math::sedenion;`, returns `["math", "sedenion"]` - the resolution
+/// code will probe the filesystem to determine if it's a module or item import.
 fn collect_import_paths(ast: &Ast) -> Vec<Vec<String>> {
     let paths: Vec<Vec<String>> = ast
         .items
         .iter()
         .filter_map(|item| match item {
             Item::Import(import_def) => {
-                let full_path = &import_def.path.segments;
-
-                // For `use foo::bar;` (no braces, items is None), only the first part
-                // is the module path, and the last part is an item name.
-                // For `use foo::{bar, baz};` (with braces), the full path is the module.
-                let module_path = match &import_def.items {
-                    Some(_) => full_path.clone(), // Has explicit items: full path is module
-                    None if full_path.len() > 1 => {
-                        // No braces, path > 1 segment: last segment is item name
-                        full_path[..full_path.len() - 1].to_vec()
-                    }
-                    None => full_path.clone(), // Single segment: `use foo;` imports module
-                };
-
-                Some(module_path)
+                // Always return the full path. Resolution will try:
+                // 1. Full path as module (e.g., math/sedenion.sio)
+                // 2. If not found, treat last segment as item (e.g., math.sio importing sedenion)
+                Some(import_def.path.segments.clone())
             }
             _ => None,
         })
@@ -855,6 +847,10 @@ fn collect_import_paths(ast: &Ast) -> Vec<Vec<String>> {
     paths
 }
 
+/// Returns valid module prefixes for path annotation.
+/// For `use math::sedenion`, includes both:
+/// - `["sedenion"]` - the last segment as standalone prefix
+/// - `["math", "sedenion"]` - full path prefix for qualified access
 fn module_prefixes(import_paths: &[Vec<String>], module_path: &StdPath) -> Vec<Vec<String>> {
     let mut prefixes = Vec::new();
 
@@ -862,10 +858,14 @@ fn module_prefixes(import_paths: &[Vec<String>], module_path: &StdPath) -> Vec<V
         if import_path.is_empty() {
             continue;
         }
-        if import_path.len() == 1 {
+        // Always include the last segment as a prefix (e.g., `sedenion` for `use math::sedenion`)
+        if let Some(last) = import_path.last() {
+            prefixes.push(vec![last.clone()]);
+        }
+        // For multi-segment paths, also include the full path
+        // This allows both `sedenion::Transform` and `math::sedenion::Transform`
+        if import_path.len() > 1 {
             prefixes.push(import_path.clone());
-        } else {
-            prefixes.push(import_path[..import_path.len() - 1].to_vec());
         }
     }
 
@@ -910,7 +910,10 @@ enum ImportScope {
     Invalid(String),
 }
 
-/// Comprehensive import path resolver with clean architecture
+/// Comprehensive import path resolver with clean architecture.
+/// Tries to resolve the full path as a module first (e.g., `math/sedenion.sio`).
+/// If that fails and path has >1 segment, tries with last segment stripped
+/// (treating it as an item import from parent module).
 fn resolve_import_path(
     current_path: &StdPath,
     import_path: &[String],
@@ -927,19 +930,49 @@ fn resolve_import_path(
     // Determine search strategy based on import structure
     let scope = determine_import_scope(import_path);
 
-    match scope {
+    // First try: resolve full path as a module
+    let full_path_result = match &scope {
         ImportScope::DirectOrLocal => {
             resolve_direct_or_local_import(current_path, import_path, stdlib_dir)
         }
         ImportScope::StdlibQualified => {
             resolve_stdlib_qualified_import(current_path, import_path, stdlib_dir)
         }
-        ImportScope::Invalid(msg) => Err(miette::miette!(
-            "Invalid import path: {} in {}",
-            msg,
-            current_path.display()
-        )),
+        ImportScope::Invalid(msg) => {
+            return Err(miette::miette!(
+                "Invalid import path: {} in {}",
+                msg,
+                current_path.display()
+            ));
+        }
+    };
+
+    // If full path resolved, use it
+    if full_path_result.is_ok() {
+        return full_path_result;
     }
+
+    // Fallback: if path has >1 segment, try with last segment stripped
+    // This handles `use math::Transform` where Transform is an item in math module
+    if import_path.len() > 1 {
+        let parent_path = &import_path[..import_path.len() - 1];
+        let fallback_result = match &scope {
+            ImportScope::DirectOrLocal => {
+                resolve_direct_or_local_import(current_path, parent_path, stdlib_dir)
+            }
+            ImportScope::StdlibQualified => {
+                resolve_stdlib_qualified_import(current_path, parent_path, stdlib_dir)
+            }
+            ImportScope::Invalid(_) => unreachable!(), // Already handled above
+        };
+
+        if fallback_result.is_ok() {
+            return fallback_result;
+        }
+    }
+
+    // Neither worked - return the original error for better diagnostics
+    full_path_result
 }
 
 /// Resolves direct imports (e.g., `import linalg;`) and local imports
