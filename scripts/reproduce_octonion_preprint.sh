@@ -55,6 +55,10 @@ echo
 echo "== [4/8] ONN vs real-valued NN baseline comparison (7 tests) =="
 cargo test -p souc --test integration_onn_vs_real_baseline -- --nocapture
 
+echo
+echo "== [4b/8] ONN MNIST toy training (real data, 80 train / 20 test) =="
+cargo test -p souc --test integration_onn_mnist_toy -- --nocapture
+
 # ---- Phase 3: GPU Codegen + Execution ----------------------------------------
 
 echo
@@ -105,6 +109,7 @@ echo "Test Results:"
 echo "  - Moufang exhaustive: ~181,274 algebraic identity checks"
 echo "  - ONN training sanity: 11 tests (forward/loss/gradient/converge)"
 echo "  - ONN vs real-valued: 7 tests (iso-FLOP, ~8x param efficiency)"
+echo "  - MNIST toy training: real data pipeline (80 train / 20 test)"
 echo "  - GPU PTX codegen: 6 tests (4 kernels x 4 SM architectures)"
 if [ "$GPU_MODE" = true ]; then
 echo "  - CUDA execution: OctonionMul + NormSq on NVIDIA GPU"

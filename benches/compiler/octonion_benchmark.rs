@@ -389,19 +389,11 @@ fn bench_f32_matmul(c: &mut Criterion) {
 
     for size in [4, 8, 16, 32, 64, 128].iter() {
         let mat_a: Vec<Vec<f32>> = (0..*size)
-            .map(|i| {
-                (0..*size)
-                    .map(|j| (i * *size + j) as f32 * 0.01)
-                    .collect()
-            })
+            .map(|i| (0..*size).map(|j| (i * *size + j) as f32 * 0.01).collect())
             .collect();
 
         let mat_b: Vec<Vec<f32>> = (0..*size)
-            .map(|i| {
-                (0..*size)
-                    .map(|j| (i * *size + j) as f32 * 0.001)
-                    .collect()
-            })
+            .map(|i| (0..*size).map(|j| (i * *size + j) as f32 * 0.001).collect())
             .collect();
 
         group.bench_with_input(
