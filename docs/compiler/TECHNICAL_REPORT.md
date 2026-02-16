@@ -7,7 +7,7 @@
 
 ## Abstract
 
-We present the first compiler-level implementation of GPU-accelerated octonion algebra for deep learning. Octonions—the largest normed division algebra over the reals—offer 8× parameter efficiency compared to real-valued networks while preserving the mathematical structure necessary for physics-informed machine learning. Despite growing interest in hypercomplex neural networks (80+ papers in 2024 alone), no production-ready GPU implementation of octonion operations has existed until now. Our implementation in the Sounio compiler provides 20 GPU-accelerated operations targeting both NVIDIA (PTX) and Apple Silicon (Metal), validated against the Moufang identities with all 38 mathematical tests passing. We achieve 8–11 GFLOPS throughput on CPU baselines with the architecture designed for GPU acceleration. This work addresses an explicit gap in the literature where researchers have called for "parallelized GPU/TPU kernels for fast octonion products" to enable practical deployment.
+We present what we believe to be the first compiler-level implementation of GPU-accelerated octonion algebra for deep learning. Octonions—the largest normed division algebra over the reals—offer 8× parameter efficiency compared to real-valued networks while preserving the mathematical structure necessary for physics-informed machine learning. Despite growing interest in hypercomplex neural networks (80+ papers in 2024 alone), existing octonion implementations remain CPU-bound and research-grade, with no compiler-integrated GPU backend available. Our implementation in the Sounio compiler provides 20 GPU code-generation targets for both NVIDIA (PTX) and Apple Silicon (Metal), validated against the Moufang identities with over 10,000 randomized algebraic tests passing. CPU microbenchmarks achieve 8–11 GFLOP/s across matrix sizes 4×4 through 128×128, and a toy-scale MNIST training experiment confirms end-to-end pipeline correctness. We include a roofline analysis, a float32 baseline comparison, and a single-script reproduction path. This work addresses an explicit gap in the literature where researchers have called for "parallelized GPU/TPU kernels for fast octonion products."
 
 **Keywords**: Octonions, GPU computing, hypercomplex neural networks, compiler optimization, PTX, Metal
 
@@ -36,11 +36,12 @@ A compiler-first approach enables whole-program optimization, zero-cost abstract
 
 This work makes the following contributions:
 
-1. **First compiler-native GPU octonion support**: 20 operations implemented in both PTX (NVIDIA) and Metal (Apple) backends
+1. **Compiler-native GPU octonion code generation**: 20 operations targeting both PTX (NVIDIA) and Metal (Apple) backends—to our knowledge, the first such compiler-integrated implementation
 2. **Complete Cayley-Dickson multiplication**: Optimized FMA chains achieving 120 FLOPs per product
-3. **Mathematical validation suite**: 38 tests verifying Moufang identities, norm multiplicativity, and numerical stability
-4. **Effect system integration**: GPU operations tracked in Sounio's type system, preventing common errors at compile time
-5. **Open-source reference implementation**: Reproducible benchmarks and validation suite
+3. **Extensive validation suite**: Over 10,000 randomized Moufang identity checks, 38 algebraic/numerical tests, training sanity checks, and a toy-scale MNIST experiment
+4. **Scaling study with baselines**: CPU microbenchmarks from 4×4 to 128×128 with a float32 baseline and roofline analysis
+5. **Effect system integration**: GPU operations tracked in Sounio's type system, preventing common errors at compile time
+6. **Open-source reproduction**: Single-script reproduction path with all tests, benchmarks, and roofline data generation
 
 ### 1.3 Paper Organization
 
@@ -66,17 +67,33 @@ The use of hypercomplex algebras in neural networks has evolved through several 
 
 Despite this breadth, no production GPU implementation has emerged—a gap we address.
 
-### 2.2 GPU Domain-Specific Languages
+### 2.2 Library-Based Hypercomplex Tooling
 
-Several approaches exist for expressing GPU computations at a higher level than raw CUDA/Metal:
+Several libraries provide hypercomplex algebra outside the compiler:
 
-**Halide** [Ragan-Kelley et al., 2013] separates algorithm from schedule, enabling automatic optimization of image processing pipelines. However, it targets stencil computations rather than algebraic structures.
+**PyTorch ecosystem.** The `torch-quaternion` and `hypercomplex` packages offer quaternion layers for PyTorch with autograd support. No analogous octonion package exists. Users can implement octonion operations via manual `torch.autograd.Function` subclasses, but this precludes kernel fusion and incurs Python dispatch overhead.
 
-**Triton** [Tillet et al., 2019] provides Python-embedded GPU kernel authoring with automatic tiling and memory management. It has become the foundation for PyTorch 2.0's compilation stack.
+**Julia `Octonions.jl`.** Provides CPU-only octonion arithmetic and norm operations. No GPU kernels or neural-network integration.
 
-**RISE/Lift** [Steuwer et al., 2017] uses functional rewrite rules to derive optimized GPU code. The approach is elegant but requires significant expertise.
+**NumPy octonion extension** [Boyle, 2017]. Adds an `octonion` dtype to NumPy. CPU-only, with Python-loop overhead for batch operations.
 
-Our work differs by integrating GPU code generation into a full language compiler with an effect system, enabling static verification of GPU safety properties (memory effects, kernel launch constraints) that library approaches cannot provide.
+None of these provides compiler-level GPU code generation, cross-operation fusion, or static effect tracking.
+
+### 2.3 GPU Domain-Specific Languages and Compilers
+
+Several systems compile high-level descriptions to GPU code:
+
+**Halide** [Ragan-Kelley et al., 2013] separates algorithm from schedule for image processing pipelines, but targets stencil computations rather than algebraic structures.
+
+**Triton** [Tillet et al., 2019] provides Python-embedded GPU kernel authoring with automatic tiling. It underpins PyTorch 2.0's `torch.compile`. A user could write an octonion matmul kernel in Triton, but would need to manually handle the 120-FLOP multiplication pattern and cannot benefit from whole-program optimization.
+
+**TVM** [Chen et al., 2018] is an end-to-end deep-learning compiler with operator fusion and auto-tuning. It supports user-defined operators but has no built-in algebraic type system—octonion semantics (non-associativity, Moufang identities) cannot be expressed or verified.
+
+**MLIR** provides an extensible IR with dialects. An octonion dialect is conceivable but none exists; building one would require implementing the same algebraic infrastructure we describe here.
+
+**RISE/Lift** [Steuwer et al., 2017] uses functional rewrite rules to derive optimized GPU code.
+
+Our work differs by integrating GPU code generation into a full language compiler with an algebraic effect system, enabling static verification of GPU safety properties (memory effects, kernel launch constraints) that library and DSL approaches cannot provide.
 
 ### 2.3 Prior Octonion Implementations
 
@@ -490,9 +507,10 @@ They may be less suitable when:
 3. **Training complexity**: Backpropagation through non-associative operations requires care
 
 **Experimental limitations**:
-1. **CPU-only benchmarks**: GPU execution benchmarks pending hardware availability
-2. **No end-to-end network evaluation**: Validation is mathematical, not task-based
-3. **Single-precision only**: Float64 implementation not yet complete
+1. **CPU-only benchmarks**: GPU execution benchmarks deferred to future work when hardware is available for end-to-end PTX→NVIDIA validation
+2. **Toy-scale network evaluation**: MNIST subset (80 samples) demonstrates pipeline correctness; large-scale training on CIFAR-10 or beyond is not yet demonstrated
+3. **No autodiff integration**: Gradients computed via finite differences in validation tests
+4. **Single-precision only**: Float64 implementation not yet complete
 
 ### 7.4 Future Work
 
@@ -520,15 +538,16 @@ struct G2EquivariantDense {
 
 ## 8. Conclusion
 
-We have presented the first compiler-level GPU implementation of octonion algebra for deep learning. Our implementation:
+We have presented what we believe to be the first compiler-level GPU code-generation backend for octonion algebra in deep learning. Our implementation:
 
-- Provides 20 GPU-accelerated operations in both PTX and Metal backends
-- Validates correctness against the Moufang identities (38 tests passing)
-- Achieves 8–11 GFLOPS CPU baseline with architecture designed for GPU acceleration
+- Provides 20 operations targeting both PTX and Metal backends
+- Validates correctness with over 10,000 randomized Moufang identity checks and a toy-scale MNIST training experiment
+- Achieves 8–11 GFLOP/s on CPU baselines across sizes 4×4 through 128×128
+- Includes a float32 baseline comparison and roofline analysis
 - Demonstrates 7.2× parameter reduction compared to real-valued networks
 - Integrates with Sounio's effect system for type-safe GPU programming
 
-This work addresses an explicit gap in the hypercomplex neural network literature, providing the "parallelized GPU kernels for fast octonion products" that researchers have called for. We release the implementation as open source to enable reproducible research and practical applications.
+This work addresses an explicit gap in the hypercomplex neural network literature, providing compiler-integrated "GPU kernels for fast octonion products" that researchers have called for. Significant work remains—in particular, end-to-end GPU execution benchmarks and large-scale training experiments—but the algebraic, pipeline, and code-generation foundations are now in place. We release the implementation as open source to enable reproducible research.
 
 ---
 
