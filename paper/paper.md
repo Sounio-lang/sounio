@@ -8,12 +8,18 @@ tags:
   - epistemic computing
 authors:
   - name: Demetrios Chiuratto Agourakis
-    affiliation: 1
+    affiliation: "1, 2"
     orcid: 0009-0008-2276-5847
     email: demetrios@agourakis.med.br
+    corresponding: true
+  - name: Marli Gerenutti
+    affiliation: 1
+    orcid: 0000-0001-7165-646X
 affiliations:
-  - name: Independent Researcher, Sounio Project
+  - name: "Faculdade de Ciências Médicas e da Saúde, Pontifícia Universidade Católica de São Paulo (PUC-SP), Brazil"
     index: 1
+  - name: Sounio Project
+    index: 2
 date: 2026-02-16
 bibliography: paper.bib
 ---
