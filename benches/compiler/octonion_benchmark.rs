@@ -310,7 +310,7 @@ fn bench_octonion_matmul(c: &mut Criterion) {
     let mut group = c.benchmark_group("octonion_matmul");
     group.measurement_time(Duration::from_secs(10));
 
-    for size in [4, 8, 16, 32].iter() {
+    for size in [4, 8, 16, 32, 64, 128].iter() {
         // Create square matrices of octonions
         let mat_a: Vec<Vec<Octonion>> = (0..*size)
             .map(|i| {
@@ -382,6 +382,134 @@ fn bench_octonion_matmul(c: &mut Criterion) {
     group.finish();
 }
 
+/// Benchmark f32 matrix multiplication (baseline comparison for reviewers)
+fn bench_f32_matmul(c: &mut Criterion) {
+    let mut group = c.benchmark_group("f32_matmul_baseline");
+    group.measurement_time(Duration::from_secs(10));
+
+    for size in [4, 8, 16, 32, 64, 128].iter() {
+        let mat_a: Vec<Vec<f32>> = (0..*size)
+            .map(|i| {
+                (0..*size)
+                    .map(|j| (i * *size + j) as f32 * 0.01)
+                    .collect()
+            })
+            .collect();
+
+        let mat_b: Vec<Vec<f32>> = (0..*size)
+            .map(|i| {
+                (0..*size)
+                    .map(|j| (i * *size + j) as f32 * 0.001)
+                    .collect()
+            })
+            .collect();
+
+        group.bench_with_input(
+            BenchmarkId::from_parameter(format!("matmul_{}x{}", size, size)),
+            size,
+            |b, _| {
+                b.iter(|| {
+                    let mut result = vec![vec![0.0f32; *size]; *size];
+
+                    for i in 0..*size {
+                        for j in 0..*size {
+                            let mut sum = 0.0f32;
+                            for k in 0..*size {
+                                sum += black_box(mat_a[i][k]) * black_box(mat_b[k][j]);
+                            }
+                            result[i][j] = sum;
+                        }
+                    }
+
+                    black_box(result);
+                });
+            },
+        );
+    }
+
+    group.finish();
+}
+
+/// Benchmark octonion matmul with GFLOP/s throughput reporting
+fn bench_octonion_matmul_scaling(c: &mut Criterion) {
+    let mut group = c.benchmark_group("octonion_matmul_scaling");
+    group.measurement_time(Duration::from_secs(10));
+
+    for size in [4, 8, 16, 32, 64, 128].iter() {
+        let n = *size as u64;
+        // Each inner iteration: n^3 octonion muls (128 FLOPs each)
+        group.throughput(criterion::Throughput::Elements(128 * n * n * n));
+
+        let mat_a: Vec<Vec<Octonion>> = (0..*size)
+            .map(|i| {
+                (0..*size)
+                    .map(|j| {
+                        let x = (i * *size + j) as f32 * 0.01;
+                        Octonion::new(
+                            x,
+                            x + 0.01,
+                            x + 0.02,
+                            x + 0.03,
+                            x + 0.04,
+                            x + 0.05,
+                            x + 0.06,
+                            x + 0.07,
+                        )
+                    })
+                    .collect()
+            })
+            .collect();
+
+        let mat_b: Vec<Vec<Octonion>> = (0..*size)
+            .map(|i| {
+                (0..*size)
+                    .map(|j| {
+                        let x = (i * *size + j) as f32 * 0.001;
+                        Octonion::new(
+                            x,
+                            x + 0.001,
+                            x + 0.002,
+                            x + 0.003,
+                            x + 0.004,
+                            x + 0.005,
+                            x + 0.006,
+                            x + 0.007,
+                        )
+                    })
+                    .collect()
+            })
+            .collect();
+
+        group.bench_with_input(
+            BenchmarkId::new("octonion", format!("{}x{}", size, size)),
+            size,
+            |b, _| {
+                b.iter(|| {
+                    let mut result =
+                        vec![
+                            vec![Octonion::new(0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0); *size];
+                            *size
+                        ];
+
+                    for i in 0..*size {
+                        for j in 0..*size {
+                            let mut sum = Octonion::new(0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0);
+                            for k in 0..*size {
+                                sum = sum.add(black_box(mat_a[i][k]).mul(black_box(mat_b[k][j])));
+                            }
+                            result[i][j] = sum;
+                        }
+                    }
+
+                    black_box(result);
+                });
+            },
+        );
+    }
+
+    group.finish();
+}
+
 criterion_group!(
     benches,
     bench_octonion_mul,
@@ -389,7 +517,9 @@ criterion_group!(
     bench_octonion_norm,
     bench_octonion_activations,
     bench_octonion_vec_dot,
-    bench_octonion_matmul
+    bench_octonion_matmul,
+    bench_f32_matmul,
+    bench_octonion_matmul_scaling
 );
 
 criterion_main!(benches);
