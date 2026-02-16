@@ -13,7 +13,7 @@ authors:
 affiliations:
   - name: Independent Researcher, Sounio Project
     index: 1
-date: 2026-02-09
+date: 2026-02-16
 bibliography: paper.bib
 ---
 
@@ -50,7 +50,7 @@ This approach is inspired by adjacent lines of work in types for physical units 
 
 # Software availability and documentation
 
-Sounio is distributed under the MIT License and developed in a public Git repository with open issue tracking. The repository includes source code, examples, automated tests, and contributor documentation. Core documentation covers language usage, epistemic types, effects, and standard-library modules. Examples include uncertainty-aware epidemiological and pharmacometric workflows, along with focused compiler test fixtures.
+Sounio is distributed under the Apache License 2.0 and developed in a public Git repository (<https://github.com/Sounio-lang/sounio>) with open issue tracking. The repository includes source code, examples, automated tests, and contributor documentation. Core documentation covers language usage, epistemic types, effects, and standard-library modules. Examples include uncertainty-aware epidemiological and pharmacometric workflows, along with focused compiler test fixtures.
 
 # Acknowledgements
 
