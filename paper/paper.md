@@ -1,5 +1,5 @@
 ---
-title: "Sounio: Epistemic Types for Scientific Computing"
+title: "Sounio: A Systems Programming Language for Epistemic Computing"
 tags:
   - programming languages
   - scientific computing
@@ -10,6 +10,7 @@ authors:
   - name: Demetrios Chiuratto Agourakis
     affiliation: 1
     orcid: 0009-0008-2276-5847
+    email: demetrios@agourakis.med.br
 affiliations:
   - name: Independent Researcher, Sounio Project
     index: 1
