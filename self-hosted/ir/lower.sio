@@ -10,6 +10,10 @@ struct Lowerer {
     loop_depth: i64,
     error_count: i64,
     had_error: bool,
+    // Phase 3.1: Enum variant discriminants
+    enum_variants: EnumVariantTable,
+    // Phase 3.2: Struct field layouts
+    struct_layouts: StructLayoutTable,
 }
 
 fn lowerer_new() -> Lowerer {
@@ -23,6 +27,8 @@ fn lowerer_new() -> Lowerer {
         loop_depth: 0,
         error_count: 0,
         had_error: false,
+        enum_variants: empty_enum_variant_table(),
+        struct_layouts: empty_struct_layout_table(),
     }
 }
 
@@ -226,7 +232,41 @@ impl Lowerer {
         }
     }
 
-    fn field_idx_from_name(self, n: Name) -> i64 with Mut, Panic, Div {
+    // Phase 3.2: Proper struct field index lookup via layout table
+    fn field_idx_from_name(self, struct_name: Name, field_name: Name) -> i64 with Mut, Panic, Div {
+        // Search layout table for the struct
+        var si: i64 = 0
+        while si < self.struct_layouts.count {
+            if ir_name_eq(self.struct_layouts.entries[si].type_name, struct_name) {
+                // Found struct — search its fields
+                var fi: i64 = 0
+                while fi < self.struct_layouts.entries[si].field_count {
+                    if ir_name_eq(self.struct_layouts.entries[si].fields[fi].name, field_name) {
+                        return self.struct_layouts.entries[si].fields[fi].index
+                    }
+                    fi = fi + 1
+                }
+                // Field not found in layout — fallback to sequential index
+                return 0
+            }
+            si = si + 1
+        }
+        // Struct not in layout table — fallback: use first byte hash (legacy compat)
+        if field_name.len <= 0 {
+            0
+        } else {
+            (field_name.buf[0] as i64) % 64
+        }
+    }
+
+    // Phase 3.2: Lookup struct field index without needing struct name
+    // Used when we don't know the struct type at the call site
+    fn field_idx_from_name_simple(self, n: Name) -> i64 with Mut, Panic, Div {
+        // Try numeric field access first (.0, .1, .2, ...)
+        if n.len == 1 && n.buf[0] >= 48 && n.buf[0] <= 57 {
+            return (n.buf[0] - 48) as i64
+        }
+        // Fallback: hash-based (will be replaced when we track types)
         if n.len <= 0 {
             0
         } else {
@@ -234,17 +274,91 @@ impl Lowerer {
         }
     }
 
+    // Phase 3.1: Register enum variant discriminants
+    fn register_enum_variants(self, enum_name: Name, variants: Option<Box<VariantDefList>>, next_disc: i64) -> Lowerer with Mut, Panic, Div, Alloc {
+        match variants {
+            Some(list) => {
+                var lo = self
+                if lo.enum_variants.count < 1024 {
+                    var table = lo.enum_variants
+                    table.entries[table.count] = EnumVariantEntry {
+                        enum_name: enum_name,
+                        variant_name: (*list).head.name,
+                        discriminant: next_disc,
+                    }
+                    table.count = table.count + 1
+                    lo.enum_variants = table
+                }
+                lo.register_enum_variants(enum_name, (*list).tail, next_disc + 1)
+            }
+            _ => self,
+        }
+    }
+
+    // Phase 3.1: Lookup enum variant discriminant by variant name
+    fn lookup_variant_discriminant(self, variant_name: Name) -> i64 with Mut, Panic, Div {
+        var i: i64 = 0
+        while i < self.enum_variants.count {
+            if ir_name_eq(self.enum_variants.entries[i].variant_name, variant_name) {
+                return self.enum_variants.entries[i].discriminant
+            }
+            i = i + 1
+        }
+        -1
+    }
+
+    // Phase 3.2: Register struct field layout
+    fn register_struct_fields(self, type_name: Name, fields: Option<Box<FieldDefList>>, idx: i64) -> Lowerer with Mut, Panic, Div, Alloc {
+        match fields {
+            Some(list) => {
+                var lo = self
+                // Find or create layout entry for this struct
+                var layout_idx: i64 = -1
+                var si: i64 = 0
+                while si < lo.struct_layouts.count {
+                    if ir_name_eq(lo.struct_layouts.entries[si].type_name, type_name) {
+                        layout_idx = si
+                    }
+                    si = si + 1
+                }
+                if layout_idx < 0 {
+                    // New struct — add layout entry
+                    if lo.struct_layouts.count < 256 {
+                        layout_idx = lo.struct_layouts.count
+                        var table = lo.struct_layouts
+                        table.entries[layout_idx] = StructLayoutEntry {
+                            type_name: type_name,
+                            fields: [empty_struct_field_entry(); 64],
+                            field_count: 0,
+                        }
+                        table.count = table.count + 1
+                        lo.struct_layouts = table
+                    } else {
+                        return lo.report_error()
+                    }
+                }
+                // Add field to layout
+                var table = lo.struct_layouts
+                let fc = table.entries[layout_idx].field_count
+                if fc < 64 {
+                    table.entries[layout_idx].fields[fc] = StructFieldEntry {
+                        name: (*list).head.name,
+                        index: idx,
+                    }
+                    table.entries[layout_idx].field_count = fc + 1
+                    lo.struct_layouts = table
+                }
+                lo.register_struct_fields(type_name, (*list).tail, idx + 1)
+            }
+            _ => self,
+        }
+    }
+
     fn lower_program_items(self, items: Option<Box<ItemList>>) -> Lowerer with Mut, Panic, Div, Alloc, IO {
         match items {
             Some(list) => {
                 let tail_items: Option<Box<ItemList>> = (*list).tail
-                var lo1 = self
-                let head_kind = (*list).head.kind
-                if head_kind == ItemKind::ItemFn {
-                    let head_name = (*list).head.name
-                    let head_fn_def = (*list).head.fn_def
-                    lo1 = lo1.lower_fn_item(head_name, head_fn_def)
-                }
+                let lo1 = self.lower_item((*list).head)
                 lo1.lower_program_items(tail_items)
             }
             _ => self,
@@ -254,19 +368,49 @@ impl Lowerer {
     fn lower_item(self, item: Item) -> Lowerer with Mut, Panic, Div, Alloc, IO {
         let k = item.kind
         let name = item.name
-        let fn_def = item.fn_def
         if k == ItemKind::ItemFn {
-            self.lower_fn_item(name, fn_def)
+            self.lower_fn_item(name, item.fn_def)
         } else if k == ItemKind::ItemStruct {
-            self
+            // Phase 3.2: Register struct field layout
+            match item.struct_def {
+                Some(sd) => self.register_struct_fields(name, (*sd).fields, 0),
+                _ => self,
+            }
         } else if k == ItemKind::ItemEnum {
-            self
+            // Phase 3.1: Register enum variant discriminants
+            match item.enum_def {
+                Some(ed) => self.register_enum_variants(name, (*ed).variants, 0),
+                _ => self,
+            }
         } else if k == ItemKind::ItemImpl {
-            self
+            // Phase 3.3: Lower impl methods as free functions
+            match item.impl_def {
+                Some(id) => self.lower_impl_methods(name, (*id).methods),
+                _ => self,
+            }
         } else if k == ItemKind::ItemTypeAlias {
             self
         } else {
             self
+        }
+    }
+
+    // Phase 3.3: Lower impl block methods as mangled free functions
+    // e.g., `impl Checker { fn check_expr(self, e: Expr) -> ... }`
+    //     becomes `Checker_check_expr(self: Checker, e: Expr) -> ...`
+    fn lower_impl_methods(self, type_name: Name, methods: Option<Box<ItemList>>) -> Lowerer with Mut, Panic, Div, Alloc, IO {
+        match methods {
+            Some(list) => {
+                var lo = self
+                let head = (*list).head
+                if head.kind == ItemKind::ItemFn {
+                    // Mangle name: TypeName_method_name
+                    let mangled = ir_mangle_method_name(type_name, head.name)
+                    lo = lo.lower_fn_item(mangled, head.fn_def)
+                }
+                lo.lower_impl_methods(type_name, (*list).tail)
+            }
+            _ => self,
         }
     }
 
@@ -401,7 +545,7 @@ impl Lowerer {
                                 let pair_base = lo.lower_expr(*base_expr)
                                 lo = pair_base.0
                                 let base_reg = pair_base.1
-                                let fidx = lo.field_idx_from_name((*target_expr).name)
+                                let fidx = lo.field_idx_from_name_simple((*target_expr).name)
                                 lo = lo.emit(ir_field_set(base_reg, fidx, rhs, (*target_expr).name))
                                 (lo, rhs)
                             }
@@ -507,6 +651,198 @@ impl Lowerer {
         }
     }
 
+    // Lower match arms as a linear if/else chain
+    fn lower_match_arms(self, scrut: i64, res: i64, l_end: i64, arms: Option<Box<MatchArmList>>) -> Lowerer with Mut, Panic, Div, Alloc, IO {
+        match arms {
+            Some(list) => {
+                let arm = (*list).head
+                let lo = self.lower_match_arm(scrut, res, l_end, arm)
+                lo.lower_match_arms(scrut, res, l_end, (*list).tail)
+            }
+            _ => self,
+        }
+    }
+
+    // Lower a single match arm: test pattern, conditionally execute body
+    fn lower_match_arm(self, scrut: i64, res: i64, l_end: i64, arm: MatchArm) -> Lowerer with Mut, Panic, Div, Alloc, IO {
+        let pat = arm.pattern
+        if pat.kind == PatternKind::PatWildcard {
+            // Wildcard always matches — evaluate body unconditionally
+            let pair = self.lower_expr(arm.body)
+            var lo = pair.0
+            let body_reg = pair.1
+            lo = lo.emit(ir_copy(res, body_reg))
+            lo = lo.emit(ir_jump(l_end))
+            lo
+        } else if pat.kind == PatternKind::PatBinding {
+            // Binding always matches — bind scrutinee to name, evaluate body
+            var lo = self.bind_local(pat.name, scrut, pat.is_mut)
+            let pair = lo.lower_expr(arm.body)
+            lo = pair.0
+            let body_reg = pair.1
+            lo = lo.emit(ir_copy(res, body_reg))
+            lo = lo.emit(ir_jump(l_end))
+            lo
+        } else if pat.kind == PatternKind::PatEnum {
+            let variant_name = ir_path_last_name(pat.path)
+            // Check for Some/None (Option<Box<T>> as nullable pointer)
+            let is_some = ir_name_is_some(variant_name)
+            let is_none = ir_name_is_none(variant_name)
+            if is_some {
+                // Some(x): test scrutinee != 0, bind inner x = scrutinee
+                let pair_l = self.fresh_label()
+                var lo = pair_l.0
+                let l_skip = pair_l.1
+                // Branch if scrutinee == 0 (skip this arm)
+                lo = lo.emit(ir_branch_false(scrut, l_skip))
+                // Bind the inner pattern (first sub_pattern) to scrutinee value
+                lo = lo.bind_match_sub_pattern(scrut, pat.sub_patterns)
+                let pair_b = lo.lower_expr(arm.body)
+                lo = pair_b.0
+                let body_reg = pair_b.1
+                lo = lo.emit(ir_copy(res, body_reg))
+                lo = lo.emit(ir_jump(l_end))
+                lo = lo.emit(ir_label(l_skip))
+                lo
+            } else if is_none {
+                // None: test scrutinee == 0
+                let pair_l = self.fresh_label()
+                var lo = pair_l.0
+                let l_skip = pair_l.1
+                // Branch if scrutinee != 0 (skip this arm)
+                lo = lo.emit(ir_branch_true(scrut, l_skip))
+                let pair_b = lo.lower_expr(arm.body)
+                lo = pair_b.0
+                let body_reg = pair_b.1
+                lo = lo.emit(ir_copy(res, body_reg))
+                lo = lo.emit(ir_jump(l_end))
+                lo = lo.emit(ir_label(l_skip))
+                lo
+            } else {
+                // Enum variant: compare scrutinee to discriminant
+                let disc = self.lookup_variant_discriminant(variant_name)
+                if disc >= 0 {
+                    let pair_l = self.fresh_label()
+                    var lo = pair_l.0
+                    let l_skip = pair_l.1
+                    let pair_d = lo.fresh_reg()
+                    lo = pair_d.0
+                    let disc_reg = pair_d.1
+                    lo = lo.emit(ir_load_imm(disc_reg, disc))
+                    let pair_cmp = lo.fresh_reg()
+                    lo = pair_cmp.0
+                    let cmp_reg = pair_cmp.1
+                    lo = lo.emit(ir_binop(cmp_reg, scrut, BinaryOp::OpEq, disc_reg))
+                    lo = lo.emit(ir_branch_false(cmp_reg, l_skip))
+                    let pair_b = lo.lower_expr(arm.body)
+                    lo = pair_b.0
+                    let body_reg = pair_b.1
+                    lo = lo.emit(ir_copy(res, body_reg))
+                    lo = lo.emit(ir_jump(l_end))
+                    lo = lo.emit(ir_label(l_skip))
+                    lo
+                } else {
+                    // Unknown variant — skip this arm
+                    self
+                }
+            }
+        } else if pat.kind == PatternKind::PatIntLit {
+            // Integer literal: compare scrutinee to int_val
+            let pair_l = self.fresh_label()
+            var lo = pair_l.0
+            let l_skip = pair_l.1
+            let pair_d = lo.fresh_reg()
+            lo = pair_d.0
+            let lit_reg = pair_d.1
+            lo = lo.emit(ir_load_imm(lit_reg, pat.int_val))
+            let pair_cmp = lo.fresh_reg()
+            lo = pair_cmp.0
+            let cmp_reg = pair_cmp.1
+            lo = lo.emit(ir_binop(cmp_reg, scrut, BinaryOp::OpEq, lit_reg))
+            lo = lo.emit(ir_branch_false(cmp_reg, l_skip))
+            let pair_b = lo.lower_expr(arm.body)
+            lo = pair_b.0
+            let body_reg = pair_b.1
+            lo = lo.emit(ir_copy(res, body_reg))
+            lo = lo.emit(ir_jump(l_end))
+            lo = lo.emit(ir_label(l_skip))
+            lo
+        } else if pat.kind == PatternKind::PatBoolTrue {
+            let pair_l = self.fresh_label()
+            var lo = pair_l.0
+            let l_skip = pair_l.1
+            lo = lo.emit(ir_branch_false(scrut, l_skip))
+            let pair_b = lo.lower_expr(arm.body)
+            lo = pair_b.0
+            let body_reg = pair_b.1
+            lo = lo.emit(ir_copy(res, body_reg))
+            lo = lo.emit(ir_jump(l_end))
+            lo = lo.emit(ir_label(l_skip))
+            lo
+        } else if pat.kind == PatternKind::PatBoolFalse {
+            let pair_l = self.fresh_label()
+            var lo = pair_l.0
+            let l_skip = pair_l.1
+            lo = lo.emit(ir_branch_true(scrut, l_skip))
+            let pair_b = lo.lower_expr(arm.body)
+            lo = pair_b.0
+            let body_reg = pair_b.1
+            lo = lo.emit(ir_copy(res, body_reg))
+            lo = lo.emit(ir_jump(l_end))
+            lo = lo.emit(ir_label(l_skip))
+            lo
+        } else {
+            // Unsupported pattern — skip
+            self
+        }
+    }
+
+    // Lower Some(x) — just evaluate the first argument (identity)
+    fn lower_expr_args_first(self, args: Option<Box<ExprList>>) -> (Lowerer, i64) with Mut, Panic, Div, Alloc, IO {
+        match args {
+            Some(list) => self.lower_expr((*list).head),
+            _ => self.emit_unit(),
+        }
+    }
+
+    // Lower Box::new(x) — alloc 8 bytes, store value, return pointer
+    fn lower_box_new(self, args: Option<Box<ExprList>>) -> (Lowerer, i64) with Mut, Panic, Div, Alloc, IO {
+        match args {
+            Some(list) => {
+                let pair_v = self.lower_expr((*list).head)
+                var lo = pair_v.0
+                let val_reg = pair_v.1
+                // Allocate 8 bytes on heap
+                let pair_dst = lo.fresh_reg()
+                lo = pair_dst.0
+                let ptr_reg = pair_dst.1
+                lo = lo.emit(ir_alloc(ptr_reg, 8))
+                // Store value at ptr[0]
+                lo = lo.emit(ir_field_set(ptr_reg, 0, val_reg, ir_empty_name()))
+                (lo, ptr_reg)
+            }
+            _ => self.emit_unit(),
+        }
+    }
+
+    // Bind the first sub-pattern of a Some(x) match to the scrutinee value
+    fn bind_match_sub_pattern(self, scrut: i64, pats: Option<Box<PatternList>>) -> Lowerer with Mut, Panic, Div, Alloc {
+        match pats {
+            Some(list) => {
+                let inner = (*list).head
+                if inner.kind == PatternKind::PatBinding {
+                    self.bind_local(inner.name, scrut, inner.is_mut)
+                } else if inner.kind == PatternKind::PatWildcard {
+                    // _ inside Some(_) — no binding needed
+                    self
+                } else {
+                    self
+                }
+            }
+            _ => self,
+        }
+    }
+
     fn lower_expr(self, e: Expr) -> (Lowerer, i64) with Mut, Panic, Div, Alloc, IO {
         if e.kind == ExprKind::ExprIntLit {
             let pair = self.fresh_reg()
@@ -548,6 +884,14 @@ impl Lowerer {
             let lo2 = lo.emit(ir_load_imm(reg, e.int_val))
             (lo2, reg)
         } else if e.kind == ExprKind::ExprIdent {
+            // Check for None (null pointer for Option)
+            if ir_name_is_none(e.name) {
+                let pair = self.fresh_reg()
+                let lo = pair.0
+                let reg = pair.1
+                let lo2 = lo.emit(ir_load_imm(reg, 0))
+                return (lo2, reg)
+            }
             let src = self.lookup_local(e.name)
             if src >= 0 {
                 (self, src)
@@ -556,11 +900,44 @@ impl Lowerer {
                 loe.emit_unit()
             }
         } else if e.kind == ExprKind::ExprPath {
+            // Check if this is an enum variant reference (e.g., IrOpcode::IrLoadImm)
+            if e.path.seg_count >= 2 {
+                let variant_name = ir_path_last_name(e.path)
+                // Check for None (Option::None)
+                if ir_name_is_none(variant_name) {
+                    let pair = self.fresh_reg()
+                    let lo = pair.0
+                    let reg = pair.1
+                    let lo2 = lo.emit(ir_load_imm(reg, 0))
+                    return (lo2, reg)
+                }
+                let disc = self.lookup_variant_discriminant(variant_name)
+                if disc >= 0 {
+                    let pair = self.fresh_reg()
+                    let lo = pair.0
+                    let reg = pair.1
+                    let lo2 = lo.emit(ir_load_imm(reg, disc))
+                    return (lo2, reg)
+                }
+            }
+            // Check for single-segment None
+            if e.path.seg_count == 1 {
+                let n = ir_path_first_name(e.path)
+                if ir_name_is_none(n) {
+                    let pair = self.fresh_reg()
+                    let lo = pair.0
+                    let reg = pair.1
+                    let lo2 = lo.emit(ir_load_imm(reg, 0))
+                    return (lo2, reg)
+                }
+            }
+            // Not an enum variant — try local variable lookup
             let n = ir_path_first_name(e.path)
             let src = self.lookup_local(n)
             if src >= 0 {
                 (self, src)
             } else {
+                // Could be a function name used as a value — emit unit for now
                 let loe = self.report_error()
                 loe.emit_unit()
             }
@@ -568,6 +945,14 @@ impl Lowerer {
             let callee_name = match e.left {
                 Some(c) => self.expr_to_callee_name(*c),
                 None => ir_empty_name(),
+            }
+            // Special case: Some(x) — identity (Option = nullable pointer)
+            if ir_name_is_some(callee_name) {
+                return self.lower_expr_args_first(e.args)
+            }
+            // Special case: Box::new(x) — alloc 8 bytes, store value, return pointer
+            if ir_name_is_box(callee_name) {
+                return self.lower_box_new(e.args)
             }
             let pair_fn = self.find_or_add_fn_id(callee_name)
             let lo1 = pair_fn.0
@@ -606,7 +991,7 @@ impl Lowerer {
             let pair_b = self.lower_opt_expr(e.left)
             let lo1 = pair_b.0
             let base = pair_b.1
-            let fidx = lo1.field_idx_from_name(e.name)
+            let fidx = lo1.field_idx_from_name_simple(e.name)
             let pair_d = lo1.fresh_reg()
             let lo2 = pair_d.0
             let dst = pair_d.1
@@ -680,9 +1065,19 @@ impl Lowerer {
         } else if e.kind == ExprKind::ExprMatch {
             let pair_scrut = self.lower_opt_expr(e.left)
             var lo = pair_scrut.0
-            let _scrut = pair_scrut.1
-            lo = lo.report_error()
-            lo.emit_unit()
+            let scrut = pair_scrut.1
+            // Allocate result register and end label
+            let pair_res = lo.fresh_reg()
+            lo = pair_res.0
+            let res = pair_res.1
+            let pair_end = lo.fresh_label()
+            lo = pair_end.0
+            let l_end = pair_end.1
+            lo = lo.lower_match_arms(scrut, res, l_end, e.arms)
+            // Default fallback: result = 0
+            lo = lo.emit(ir_load_imm(res, 0))
+            lo = lo.emit(ir_label(l_end))
+            (lo, res)
         } else if e.kind == ExprKind::ExprWhile {
             let pair_l_top = self.fresh_label()
             let lo1 = pair_l_top.0
@@ -802,6 +1197,22 @@ impl Lowerer {
             let loe = self.report_error()
             loe.emit_unit()
         }
+    }
+}
+
+// Count struct field initializers in a StructFieldList
+fn count_struct_fields(fields: Option<Box<StructFieldList>>) -> i64 with Alloc {
+    match fields {
+        Some(list) => 1 + count_struct_fields((*list).tail),
+        _ => 0,
+    }
+}
+
+// Count expression list elements (used for array/tuple literals)
+fn count_expr_list(elems: Option<Box<ExprList>>) -> i64 with Alloc {
+    match elems {
+        Some(list) => 1 + count_expr_list((*list).tail),
+        _ => 0,
     }
 }
 

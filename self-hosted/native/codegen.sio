@@ -27,7 +27,7 @@ struct NativeCompiler {
     rodata: StringTable,            // String literals for .rodata
 
     // Module-level: function layout
-    fn_offsets: [i64; 64],          // function index -> code buffer offset
+    fn_offsets: [i64; 1024],         // function index -> code buffer offset
     fn_count: i64,
 
     // Per-function: return jump patching
@@ -51,7 +51,7 @@ fn compiler_new() -> NativeCompiler {
         code: code_buffer_new(),
         relocs: reloc_table_new(),
         rodata: string_table_new(),
-        fn_offsets: [-1; 64],
+        fn_offsets: [-1; 1024],
         fn_count: 0,
         return_jumps: [0; 64],
         return_jump_count: 0,
@@ -193,6 +193,38 @@ fn name_is_str_eq(n: Name) -> bool with Mut, Panic, Div {
     if n.buf[3] != 95 { return false }      // '_'
     if n.buf[4] != 101 { return false }     // 'e'
     if n.buf[5] != 113 { return false }     // 'q'
+    true
+}
+
+fn name_is_str_slice(n: Name) -> bool with Mut, Panic, Div {
+    // "str_slice" = 9 chars
+    if n.len != 9 { return false }
+    if n.buf[0] != 115 { return false }     // 's'
+    if n.buf[1] != 116 { return false }     // 't'
+    if n.buf[2] != 114 { return false }     // 'r'
+    if n.buf[3] != 95 { return false }      // '_'
+    if n.buf[4] != 115 { return false }     // 's'
+    if n.buf[5] != 108 { return false }     // 'l'
+    if n.buf[6] != 105 { return false }     // 'i'
+    if n.buf[7] != 99 { return false }      // 'c'
+    if n.buf[8] != 101 { return false }     // 'e'
+    true
+}
+
+fn name_is_starts_with(n: Name) -> bool with Mut, Panic, Div {
+    // "starts_with" = 11 chars
+    if n.len != 11 { return false }
+    if n.buf[0] != 115 { return false }     // 's'
+    if n.buf[1] != 116 { return false }     // 't'
+    if n.buf[2] != 97 { return false }      // 'a'
+    if n.buf[3] != 114 { return false }     // 'r'
+    if n.buf[4] != 116 { return false }     // 't'
+    if n.buf[5] != 115 { return false }     // 's'
+    if n.buf[6] != 95 { return false }      // '_'
+    if n.buf[7] != 119 { return false }     // 'w'
+    if n.buf[8] != 105 { return false }     // 'i'
+    if n.buf[9] != 116 { return false }     // 't'
+    if n.buf[10] != 104 { return false }    // 'h'
     true
 }
 
@@ -418,6 +450,55 @@ fn emit_builtin_str_eq(nc: NativeCompiler) -> NativeCompiler with Mut, Panic, Di
     c
 }
 
+// str_slice(s: *u8, start: i64) -> *u8
+// Returns s + start (pointer arithmetic — string is null-terminated)
+fn emit_builtin_str_slice(nc: NativeCompiler) -> NativeCompiler with Mut, Panic, Div {
+    var c = nc
+    // rdi = string pointer, rsi = start offset
+    // result = rdi + rsi
+    c.code = emit_add_reg_reg(c.code, 7, 6)  // add rdi, rsi
+    c.code = emit_mov_reg_reg(c.code, 0, 7)  // mov rax, rdi
+    c.code = emit_ret(c.code)
+    c
+}
+
+// starts_with(s: *u8, prefix: *u8) -> i64 (1 if starts with, 0 if not)
+// Compares prefix against beginning of s until prefix reaches null.
+fn emit_builtin_starts_with(nc: NativeCompiler) -> NativeCompiler with Mut, Panic, Div {
+    var c = nc
+    // rdi = s, rsi = prefix
+    // Layout:
+    //   0:  movzx rax, byte [rsi]    — 4 bytes  (load prefix char)
+    //   4:  test al, al               — 2 bytes  (end of prefix?)
+    //   6:  jz match                  — 2 bytes  (rel8 = 12, target = 20)
+    //   8:  cmp al, [rdi]             — 2 bytes  (compare with s)
+    //   10: jnz no_match              — 2 bytes  (rel8 = 16, target = 28)
+    //   12: inc rdi                   — 3 bytes
+    //   15: inc rsi                   — 3 bytes
+    //   18: jmp loop                  — 2 bytes  (rel8 = -20, target = 0)
+    //   20: mov rax, 1                — 7 bytes  [match]
+    //   27: ret                       — 1 byte
+    //   28: xor rax, rax              — 3 bytes  [no_match]
+    //   31: ret                       — 1 byte
+
+    // loop:
+    c.code = emit_movzx_rax_byte_rsi(c.code)      // 4: movzx rax, byte [rsi]
+    c.code = emit_test_al_al(c.code)               // 2: test al, al
+    c.code = emit_jz_rel8(c.code, 12)              // 2: jz match (skip 2+2+3+3+2 = 12)
+    c.code = emit_cmp_al_mem_rdi(c.code)           // 2: cmp al, [rdi]
+    c.code = emit_jnz_rel8(c.code, 16)             // 2: jnz no_match (skip 3+3+2+7+1 = 16)
+    c.code = emit_inc_rdi(c.code)                   // 3: inc rdi
+    c.code = emit_inc_rsi(c.code)                   // 3: inc rsi
+    c.code = emit_jmp_rel8(c.code, -20)             // 2: jmp loop (-20 back to offset 0)
+    // match:
+    c.code = emit_mov_rax_imm(c.code, 1)           // 7: mov rax, 1
+    c.code = emit_ret(c.code)                       // 1
+    // no_match:
+    c.code = emit_xor_rax_rax(c.code)              // 3
+    c.code = emit_ret(c.code)                       // 1
+    c
+}
+
 // ============================================================================
 // M5: File I/O builtins
 // ============================================================================
@@ -487,7 +568,7 @@ fn emit_builtin_write_file(nc: NativeCompiler) -> NativeCompiler with Mut, Panic
     // sys_open(path, O_WRONLY|O_CREAT|O_TRUNC=577, 0644=420)
     // rdi already = path
     c.code = emit_mov_reg_imm(c.code, 6, 577)            // rsi = flags
-    c.code = emit_mov_reg_imm(c.code, 2, 420)            // rdx = mode 0644
+    c.code = emit_mov_reg_imm(c.code, 2, 493)            // rdx = mode 0755 (executable)
     c.code = emit_mov_rax_imm(c.code, 2)                 // sys_open = 2
     c.code = emit_syscall(c.code)
 
@@ -613,6 +694,8 @@ fn compile_ir_function(nc: NativeCompiler, func: IrFunction, fn_index: i64) -> N
     if name_is_get_arg(func.name) { return emit_builtin_get_arg(c) }
     if name_is_str_len(func.name) { return emit_builtin_str_len(c) }
     if name_is_str_eq(func.name) { return emit_builtin_str_eq(c) }
+    if name_is_str_slice(func.name) { return emit_builtin_str_slice(c) }
+    if name_is_starts_with(func.name) { return emit_builtin_starts_with(c) }
     // M5: file I/O builtins
     if name_is_read_file(func.name) { return emit_builtin_read_file(c) }
     if name_is_write_file(func.name) { return emit_builtin_write_file(c) }
@@ -752,7 +835,7 @@ fn emit_entry_trampoline(nc: NativeCompiler, main_fn_index: i64) -> NativeCompil
     // mmap anonymous heap: sys_mmap(NULL, 1MB, PROT_READ|PROT_WRITE, MAP_PRIVATE|MAP_ANONYMOUS, -1, 0)
     c.code = emit_mov_rax_imm(c.code, 9)          // sys_mmap = 9
     c.code = emit_mov_rdi_imm(c.code, 0)          // addr = NULL
-    c.code = emit_mov_reg_imm(c.code, 6, 1048576) // len = 1MB
+    c.code = emit_mov_reg_imm(c.code, 6, 67108864) // len = 64MB
     c.code = emit_mov_reg_imm(c.code, 2, 3)       // prot = PROT_READ|PROT_WRITE
     // syscall ABI uses: rdi, rsi, rdx, r10, r8, r9 (NOT rcx for arg4)
     c.code = emit_mov_r10_imm32(c.code, 34)       // r10 = flags = MAP_PRIVATE|MAP_ANONYMOUS (0x22)

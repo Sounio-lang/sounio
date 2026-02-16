@@ -2,9 +2,9 @@
 
 // These caps gate what the self-hosted pipeline can lower and execute.
 // They used to be tiny for bring-up, but hypercomplex + ML demos need more room.
-let IR_MAX_FUNCS: i64 = 64
-let IR_MAX_STRINGS: i64 = 256
-let IR_MAX_INSTRS: i64 = 2048
+let IR_MAX_FUNCS: i64 = 1024
+let IR_MAX_STRINGS: i64 = 4096
+let IR_MAX_INSTRS: i64 = 8192
 let IR_MAX_PARAMS: i64 = 64
 let IR_INVALID_REG: i64 = -1
 let IR_INVALID_LABEL: i64 = -1
@@ -57,7 +57,7 @@ struct IrInstr {
 
 struct IrFunction {
     name: Name,
-    instrs: [IrInstr; 2048],
+    instrs: [IrInstr; 8192],
     instr_count: i64,
     reg_count: i64,
     label_count: i64,
@@ -66,9 +66,9 @@ struct IrFunction {
 }
 
 struct IrModule {
-    functions: [IrFunction; 64],
+    functions: [IrFunction; 1024],
     fn_count: i64,
-    string_table: [Name; 256],
+    string_table: [Name; 4096],
     string_count: i64,
 }
 
@@ -88,6 +88,104 @@ struct IrLowerResult {
     module: IrModule,
     error_count: i64,
     had_error: bool,
+}
+
+// ============================================================================
+// Struct layout tracking (Phase 3.2)
+// ============================================================================
+
+// A single struct field: name + sequential index
+struct StructFieldEntry {
+    name: Name,
+    index: i64,
+}
+
+// Layout for one struct type: name + ordered fields
+struct StructLayoutEntry {
+    type_name: Name,
+    fields: [StructFieldEntry; 64],
+    field_count: i64,
+}
+
+// Table of all known struct layouts (populated during lowering)
+struct StructLayoutTable {
+    entries: [StructLayoutEntry; 256],
+    count: i64,
+}
+
+fn empty_struct_field_entry() -> StructFieldEntry {
+    StructFieldEntry { name: ir_empty_name(), index: 0 }
+}
+
+fn empty_struct_layout_entry() -> StructLayoutEntry {
+    StructLayoutEntry {
+        type_name: ir_empty_name(),
+        fields: [empty_struct_field_entry(); 64],
+        field_count: 0,
+    }
+}
+
+fn empty_struct_layout_table() -> StructLayoutTable {
+    StructLayoutTable {
+        entries: [empty_struct_layout_entry(); 256],
+        count: 0,
+    }
+}
+
+// ============================================================================
+// Enum discriminant tracking (Phase 3.1)
+// ============================================================================
+
+// Maps enum variant path "EnumName::Variant" to its discriminant value
+struct EnumVariantEntry {
+    enum_name: Name,
+    variant_name: Name,
+    discriminant: i64,
+}
+
+struct EnumVariantTable {
+    entries: [EnumVariantEntry; 1024],
+    count: i64,
+}
+
+fn empty_enum_variant_entry() -> EnumVariantEntry {
+    EnumVariantEntry {
+        enum_name: ir_empty_name(),
+        variant_name: ir_empty_name(),
+        discriminant: 0,
+    }
+}
+
+fn empty_enum_variant_table() -> EnumVariantTable {
+    EnumVariantTable {
+        entries: [empty_enum_variant_entry(); 1024],
+        count: 0,
+    }
+}
+
+// Mangle a method name: "TypeName" + "_" + "method_name"
+fn ir_mangle_method_name(type_name: Name, method_name: Name) -> Name with Mut, Panic, Div {
+    var result = Name { buf: [0; 128], len: 0 }
+    // Copy type_name
+    var i: i64 = 0
+    while i < type_name.len && result.len < 127 {
+        result.buf[result.len] = type_name.buf[i]
+        result.len = result.len + 1
+        i = i + 1
+    }
+    // Add underscore separator
+    if result.len < 127 {
+        result.buf[result.len] = 95  // '_'
+        result.len = result.len + 1
+    }
+    // Copy method_name
+    var j: i64 = 0
+    while j < method_name.len && result.len < 128 {
+        result.buf[result.len] = method_name.buf[j]
+        result.len = result.len + 1
+        j = j + 1
+    }
+    result
 }
 
 fn ir_empty_name() -> Name {
@@ -133,6 +231,39 @@ fn ir_path_first_name(p: AstPath) -> Name with Mut, Panic, Div {
     } else {
         ir_name_from_string_list(p.segments)
     }
+}
+
+// Get the last segment of a path (e.g., "Variant" from "Enum::Variant")
+fn ir_path_last_name(p: AstPath) -> Name with Mut, Panic, Div, Alloc {
+    if p.seg_count <= 0 {
+        ir_empty_name()
+    } else if p.seg_count == 1 {
+        ir_name_from_string_list(p.segments)
+    } else {
+        ir_string_list_last(p.segments)
+    }
+}
+
+fn ir_string_list_last(sl: StringList) -> Name with Mut, Panic, Div, Alloc {
+    match sl.tail {
+        Some(rest) => ir_string_list_last(*rest),
+        _ => ir_name_from_string_list(sl),
+    }
+}
+
+// Check if a name is "Some" (for Option matching)
+fn ir_name_is_some(n: Name) -> bool {
+    n.len == 4 && n.buf[0] == 83 && n.buf[1] == 111 && n.buf[2] == 109 && n.buf[3] == 101
+}
+
+// Check if a name is "Box" (for Box::new lowering)
+fn ir_name_is_box(n: Name) -> bool {
+    n.len == 3 && n.buf[0] == 66 && n.buf[1] == 111 && n.buf[2] == 120
+}
+
+// Check if a name is "None" (for Option matching)
+fn ir_name_is_none(n: Name) -> bool {
+    n.len == 4 && n.buf[0] == 78 && n.buf[1] == 111 && n.buf[2] == 110 && n.buf[3] == 101
 }
 
 fn ir_empty_reg_list() -> Option<Box<IrRegList>> {
@@ -611,7 +742,7 @@ fn ir_phi(dst: i64) -> IrInstr {
 fn ir_empty_function() -> IrFunction {
     IrFunction {
         name: ir_empty_name(),
-        instrs: [ir_nop(); 2048],
+        instrs: [ir_nop(); 8192],
         instr_count: 0,
         reg_count: 0,
         label_count: 0,
@@ -622,9 +753,9 @@ fn ir_empty_function() -> IrFunction {
 
 fn ir_empty_module() -> IrModule {
     IrModule {
-        functions: [ir_empty_function(); 64],
+        functions: [ir_empty_function(); 1024],
         fn_count: 0,
-        string_table: [ir_empty_name(); 256],
+        string_table: [ir_empty_name(); 4096],
         string_count: 0,
     }
 }

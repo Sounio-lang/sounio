@@ -62,13 +62,10 @@ fn lower_alloc(nc: NativeCompiler, instr: IrInstr) -> NativeCompiler with Mut, P
 
     // Return pointer to start of newly allocated object in dst slot.
     // Heap objects are backed by a monotonic bump allocator starting at r13.
-    // For now, allocate enough space for small structs/arrays used by current pipeline
-    // (field-indexed struct access uses hashed names like 56/57, so use generous size).
-    let alloc_size = if instr.imm_i64 == 1 {
-        2048   // array
-    } else {
-        2048   // struct or fallback
-    }
+    // imm_i64 carries the actual allocation size in bytes (computed during IR lowering).
+    // Minimum 64 bytes to handle edge cases; align up to 8-byte boundary.
+    let raw_size = instr.imm_i64
+    let alloc_size = if raw_size < 64 { 64 } else { ((raw_size + 7) / 8) * 8 }
     c.code = emit_mov_rax_r13(c.code)                // rax = current heap pointer
     if instr.dst >= 0 {
         c.code = emit_store_rax_rbp_disp32(c.code, ir_slot_offset(instr.dst))
@@ -87,7 +84,6 @@ fn lower_field_get(nc: NativeCompiler, instr: IrInstr) -> NativeCompiler with Mu
     // Compute address: base + field_idx * 8, load value to rax
     c.code = emit_load_rbp_disp32_rax(c.code, ir_slot_offset(instr.src1))   // rax = base
     c.code = emit_mov_reg_imm(c.code, 3, instr.field_idx)                  // rbx = field_idx
-    c.code = emit_imul_rbx_rbx_imm8(c.code, 8)                            // rbx *= 8
     c.code = emit_mov_rax_mem_rax_rbx8(c.code)                             // rax = [rax + rbx*8]
 
     if instr.dst >= 0 {
@@ -105,7 +101,6 @@ fn lower_field_set(nc: NativeCompiler, instr: IrInstr) -> NativeCompiler with Mu
 
     c.code = emit_load_rbp_disp32_rax(c.code, ir_slot_offset(instr.src2))  // rax = src value
     c.code = emit_mov_reg_imm(c.code, 3, instr.field_idx)                 // rbx = field_idx
-    c.code = emit_imul_rbx_rbx_imm8(c.code, 8)                            // rbx *= 8
     c.code = emit_store_rax_mem_rdx_rbx8(c.code)                           // [rdx + rbx*8] = rax
     c
 }
@@ -122,7 +117,6 @@ fn lower_index_get(nc: NativeCompiler, instr: IrInstr) -> NativeCompiler with Mu
     c.code = emit_mov_rdx_rax(c.code)                                     // rdx = base
     c.code = emit_load_rbp_disp32_rax(c.code, ir_slot_offset(instr.src2))  // rax = idx
     c.code = emit_mov_rbx_rax(c.code)                                     // rbx = idx
-    c.code = emit_imul_rbx_rbx_imm8(c.code, 8)                            // rbx *= 8
     c.code = emit_load_rax_mem_rdx_rbx8(c.code)                            // rax = [rdx + rbx*8]
 
     if instr.dst >= 0 {
@@ -139,7 +133,6 @@ fn lower_index_set(nc: NativeCompiler, instr: IrInstr) -> NativeCompiler with Mu
     c.code = emit_mov_rdx_rax(c.code)                                     // rdx = base
     c.code = emit_load_rbp_disp32_rax(c.code, ir_slot_offset(instr.src2))  // rax = idx
     c.code = emit_mov_rbx_rax(c.code)                                     // rbx = idx
-    c.code = emit_imul_rbx_rbx_imm8(c.code, 8)                            // rbx *= 8
     c.code = emit_load_rbp_disp32_rax(c.code, ir_slot_offset(instr.imm_i64)) // rax = src
     c.code = emit_store_rax_mem_rdx_rbx8(c.code)                           // [rdx + rbx*8] = rax
     c
@@ -305,6 +298,9 @@ fn lower_unaryop(nc: NativeCompiler, instr: IrInstr) -> NativeCompiler with Mut,
         c.code = emit_neg_rax(c.code)
     } else if instr.un_op == UnaryOp::OpNot {
         c.code = emit_not_bool_rax(c.code)
+    } else if instr.un_op == UnaryOp::OpDeref {
+        // Dereference: rax = [rax] (load qword at pointer address)
+        c.code = emit_load_rax_mem_rax(c.code)
     }
 
     if instr.dst >= 0 {
