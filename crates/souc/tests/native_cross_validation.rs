@@ -42,13 +42,9 @@ fn extract_elf_bytes(elf_struct: &Value) -> Vec<u8> {
 }
 
 #[test]
-#[ignore = "Blocked on module imports - READY TO ENABLE once multi-module compilation works"]
 #[cfg_attr(not(target_os = "linux"), ignore = "Linux-only test")]
 fn cross_validate_return_42() {
-    // STATUS: Test infrastructure complete, waiting for module imports
-    //
-    // TO ENABLE: Remove #[ignore] attribute once Project Poseidon multi-module
-    // compilation is fully integrated (see .claude/pending.md)
+    // STATUS: ENABLED - Module loader implemented (Phase 0 complete)
     //
     // This test will:
     // 1. Load self-hosted suite via interpreter (includes native codegen)
