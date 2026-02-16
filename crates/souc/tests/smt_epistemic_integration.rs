@@ -10,10 +10,10 @@
 
 #![cfg(feature = "smt")]
 
+use sounio::dependent::TypeContext;
 use sounio::dependent::predicates::{ConfidencePredicate, Predicate};
 use sounio::dependent::proof_search::{ProofResult, ProofSearchConfig, ProofSearcher};
 use sounio::dependent::types::ConfidenceType;
-use sounio::dependent::TypeContext;
 
 // =============================================================================
 // Built-in decision procedures (baseline — these don't need Z3)
@@ -23,10 +23,8 @@ use sounio::dependent::TypeContext;
 fn builtin_literal_geq_proven() {
     let ctx = TypeContext::new();
     let mut s = ProofSearcher::new(&ctx);
-    let pred = Predicate::confidence_geq(
-        ConfidenceType::literal(0.97),
-        ConfidenceType::literal(0.95),
-    );
+    let pred =
+        Predicate::confidence_geq(ConfidenceType::literal(0.97), ConfidenceType::literal(0.95));
     assert!(s.search(&pred).is_proven());
 }
 
@@ -34,10 +32,8 @@ fn builtin_literal_geq_proven() {
 fn builtin_literal_geq_disproven() {
     let ctx = TypeContext::new();
     let mut s = ProofSearcher::new(&ctx);
-    let pred = Predicate::confidence_geq(
-        ConfidenceType::literal(0.80),
-        ConfidenceType::literal(0.95),
-    );
+    let pred =
+        Predicate::confidence_geq(ConfidenceType::literal(0.80), ConfidenceType::literal(0.95));
     assert!(s.search(&pred).is_disproven());
 }
 
@@ -47,10 +43,7 @@ fn builtin_product_bound() {
     let mut s = ProofSearcher::new(&ctx);
     // 0.9 * 0.9 = 0.81 >= 0.80
     let pred = Predicate::confidence_geq(
-        ConfidenceType::product(
-            ConfidenceType::literal(0.9),
-            ConfidenceType::literal(0.9),
-        ),
+        ConfidenceType::product(ConfidenceType::literal(0.9), ConfidenceType::literal(0.9)),
         ConfidenceType::literal(0.80),
     );
     assert!(s.search(&pred).is_proven());
@@ -62,10 +55,7 @@ fn builtin_ds_combination() {
     let mut s = ProofSearcher::new(&ctx);
     // DS(0.6, 0.7) = 1 - 0.4*0.3 = 0.88 >= 0.85
     let pred = Predicate::confidence_geq(
-        ConfidenceType::dempster_shafer(
-            ConfidenceType::literal(0.6),
-            ConfidenceType::literal(0.7),
-        ),
+        ConfidenceType::dempster_shafer(ConfidenceType::literal(0.6), ConfidenceType::literal(0.7)),
         ConfidenceType::literal(0.85),
     );
     assert!(s.search(&pred).is_proven());
@@ -93,10 +83,7 @@ fn z3_unbound_variable_unknown_without_gradual() {
     // (since it's universally quantified)
     let ctx = TypeContext::new();
     let mut s = ProofSearcher::new(&ctx);
-    let pred = Predicate::confidence_geq(
-        ConfidenceType::var("x"),
-        ConfidenceType::literal(0.95),
-    );
+    let pred = Predicate::confidence_geq(ConfidenceType::var("x"), ConfidenceType::literal(0.95));
     let result = s.search(&pred);
     // Z3 should say Unknown or Unsat (not all x satisfy x >= 0.95)
     assert!(!result.is_proven(), "unbound variable cannot be proven");
@@ -111,12 +98,12 @@ fn z3_unbound_variable_gradual_fallback() {
         ..Default::default()
     };
     let mut s = ProofSearcher::with_config(&ctx, config);
-    let pred = Predicate::confidence_geq(
-        ConfidenceType::var("x"),
-        ConfidenceType::literal(0.95),
-    );
+    let pred = Predicate::confidence_geq(ConfidenceType::var("x"), ConfidenceType::literal(0.95));
     let result = s.search(&pred);
-    assert!(result.is_proven(), "gradual typing should allow runtime check");
+    assert!(
+        result.is_proven(),
+        "gradual typing should allow runtime check"
+    );
 }
 
 // =============================================================================
@@ -134,10 +121,7 @@ fn z3_solver_simple_satisfiable() {
     let mut solver = Z3Solver::new(&ctx);
 
     // Verify: 0.97 >= 0.95 (trivially true)
-    let formula = SmtFormula::Ge(
-        Box::new(SmtTerm::Real(0.97)),
-        Box::new(SmtTerm::Real(0.95)),
-    );
+    let formula = SmtFormula::Ge(Box::new(SmtTerm::Real(0.97)), Box::new(SmtTerm::Real(0.95)));
     let result = solver.verify(&formula).expect("Z3 should not error");
     assert_eq!(result, VerificationResult::Sat, "0.97 >= 0.95 should hold");
 }
@@ -153,10 +137,7 @@ fn z3_solver_unsatisfiable() {
     let mut solver = Z3Solver::new(&ctx);
 
     // Verify: 0.80 >= 0.95 (false)
-    let formula = SmtFormula::Ge(
-        Box::new(SmtTerm::Real(0.80)),
-        Box::new(SmtTerm::Real(0.95)),
-    );
+    let formula = SmtFormula::Ge(Box::new(SmtTerm::Real(0.80)), Box::new(SmtTerm::Real(0.95)));
     let result = solver.verify(&formula).expect("Z3 should not error");
     assert_eq!(
         result,
@@ -185,10 +166,7 @@ fn z3_solver_ds_combination_formula() {
     let product = SmtTerm::Mul(Box::new(one_minus_a), Box::new(one_minus_b));
     let ds_result = SmtTerm::Sub(Box::new(one), Box::new(product));
 
-    let formula = SmtFormula::Ge(
-        Box::new(ds_result),
-        Box::new(SmtTerm::Real(0.85)),
-    );
+    let formula = SmtFormula::Ge(Box::new(ds_result), Box::new(SmtTerm::Real(0.85)));
     let result = solver.verify(&formula).expect("Z3 should not error");
     assert_eq!(result, VerificationResult::Sat, "DS(0.6, 0.7) >= 0.85");
 }
@@ -204,14 +182,8 @@ fn z3_solver_product_formula() {
     let mut solver = Z3Solver::new(&ctx);
 
     // 0.9 * 0.9 = 0.81 >= 0.80
-    let product = SmtTerm::Mul(
-        Box::new(SmtTerm::Real(0.9)),
-        Box::new(SmtTerm::Real(0.9)),
-    );
-    let formula = SmtFormula::Ge(
-        Box::new(product),
-        Box::new(SmtTerm::Real(0.80)),
-    );
+    let product = SmtTerm::Mul(Box::new(SmtTerm::Real(0.9)), Box::new(SmtTerm::Real(0.9)));
+    let formula = SmtFormula::Ge(Box::new(product), Box::new(SmtTerm::Real(0.80)));
     let result = solver.verify(&formula).expect("Z3 should not error");
     assert_eq!(result, VerificationResult::Sat, "0.9 * 0.9 >= 0.80");
 }
@@ -234,12 +206,13 @@ fn z3_solver_bayesian_update_formula() {
     let numerator = SmtTerm::Mul(Box::new(likelihood), Box::new(prior));
     let posterior = SmtTerm::Div(Box::new(numerator), Box::new(evidence));
 
-    let formula = SmtFormula::Ge(
-        Box::new(posterior),
-        Box::new(SmtTerm::Real(0.60)),
-    );
+    let formula = SmtFormula::Ge(Box::new(posterior), Box::new(SmtTerm::Real(0.60)));
     let result = solver.verify(&formula).expect("Z3 should not error");
-    assert_eq!(result, VerificationResult::Sat, "Bayesian posterior >= 0.60");
+    assert_eq!(
+        result,
+        VerificationResult::Sat,
+        "Bayesian posterior >= 0.60"
+    );
 }
 
 // =============================================================================
@@ -253,17 +226,13 @@ fn translation_literal_roundtrip() {
     let mut s = ProofSearcher::new(&ctx);
 
     // Leq: 0.5 <= 0.8 (true)
-    let pred = Predicate::confidence_leq(
-        ConfidenceType::literal(0.5),
-        ConfidenceType::literal(0.8),
-    );
+    let pred =
+        Predicate::confidence_leq(ConfidenceType::literal(0.5), ConfidenceType::literal(0.8));
     assert!(s.search(&pred).is_proven());
 
     // Leq: 0.9 <= 0.8 (false)
-    let pred2 = Predicate::confidence_leq(
-        ConfidenceType::literal(0.9),
-        ConfidenceType::literal(0.8),
-    );
+    let pred2 =
+        Predicate::confidence_leq(ConfidenceType::literal(0.9), ConfidenceType::literal(0.8));
     assert!(s.search(&pred2).is_disproven());
 }
 
@@ -273,17 +242,13 @@ fn translation_equality() {
     let mut s = ProofSearcher::new(&ctx);
 
     // 0.95 = 0.95 (true by reflexivity)
-    let pred = Predicate::confidence_eq(
-        ConfidenceType::literal(0.95),
-        ConfidenceType::literal(0.95),
-    );
+    let pred =
+        Predicate::confidence_eq(ConfidenceType::literal(0.95), ConfidenceType::literal(0.95));
     assert!(s.search(&pred).is_proven());
 
     // 0.95 = 0.90 (false)
-    let pred2 = Predicate::confidence_eq(
-        ConfidenceType::literal(0.95),
-        ConfidenceType::literal(0.90),
-    );
+    let pred2 =
+        Predicate::confidence_eq(ConfidenceType::literal(0.95), ConfidenceType::literal(0.90));
     assert!(s.search(&pred2).is_disproven());
 }
 
@@ -293,14 +258,10 @@ fn translation_conjunction_of_confidences() {
     let mut s = ProofSearcher::new(&ctx);
 
     // (0.97 >= 0.95) AND (0.88 >= 0.85)
-    let p1 = Predicate::confidence_geq(
-        ConfidenceType::literal(0.97),
-        ConfidenceType::literal(0.95),
-    );
-    let p2 = Predicate::confidence_geq(
-        ConfidenceType::literal(0.88),
-        ConfidenceType::literal(0.85),
-    );
+    let p1 =
+        Predicate::confidence_geq(ConfidenceType::literal(0.97), ConfidenceType::literal(0.95));
+    let p2 =
+        Predicate::confidence_geq(ConfidenceType::literal(0.88), ConfidenceType::literal(0.85));
     let conj = Predicate::and(p1, p2);
     assert!(s.search(&conj).is_proven());
 }
@@ -312,14 +273,10 @@ fn translation_disjunction_partial() {
 
     // (0.97 >= 0.95) OR (0.70 >= 0.90)
     // First is true, second is false; disjunction is true
-    let p1 = Predicate::confidence_geq(
-        ConfidenceType::literal(0.97),
-        ConfidenceType::literal(0.95),
-    );
-    let p2 = Predicate::confidence_geq(
-        ConfidenceType::literal(0.70),
-        ConfidenceType::literal(0.90),
-    );
+    let p1 =
+        Predicate::confidence_geq(ConfidenceType::literal(0.97), ConfidenceType::literal(0.95));
+    let p2 =
+        Predicate::confidence_geq(ConfidenceType::literal(0.70), ConfidenceType::literal(0.90));
     let disj = Predicate::or(p1, p2);
     assert!(s.search(&disj).is_proven());
 }
@@ -427,11 +384,7 @@ fn builtin_decay_confidence() {
 
     // decay(0.95, 0.01, 10s) = 0.95 * exp(-0.1) ≈ 0.8591 >= 0.85
     let pred = Predicate::confidence_geq(
-        ConfidenceType::decay(
-            ConfidenceType::literal(0.95),
-            0.01,
-            Duration::from_secs(10),
-        ),
+        ConfidenceType::decay(ConfidenceType::literal(0.95), 0.01, Duration::from_secs(10)),
         ConfidenceType::literal(0.85),
     );
     assert!(s.search(&pred).is_proven());
@@ -446,11 +399,7 @@ fn builtin_decay_expired() {
 
     // decay(0.95, 0.1, 30s) = 0.95 * exp(-3.0) ≈ 0.0473 — below 0.50
     let pred = Predicate::confidence_geq(
-        ConfidenceType::decay(
-            ConfidenceType::literal(0.95),
-            0.1,
-            Duration::from_secs(30),
-        ),
+        ConfidenceType::decay(ConfidenceType::literal(0.95), 0.1, Duration::from_secs(30)),
         ConfidenceType::literal(0.50),
     );
     assert!(s.search(&pred).is_disproven());
@@ -467,10 +416,7 @@ fn builtin_min_confidence() {
 
     // min(0.95, 0.90) = 0.90 >= 0.85
     let pred = Predicate::confidence_geq(
-        ConfidenceType::min(
-            ConfidenceType::literal(0.95),
-            ConfidenceType::literal(0.90),
-        ),
+        ConfidenceType::min(ConfidenceType::literal(0.95), ConfidenceType::literal(0.90)),
         ConfidenceType::literal(0.85),
     );
     assert!(s.search(&pred).is_proven());
@@ -483,10 +429,7 @@ fn builtin_max_confidence() {
 
     // max(0.80, 0.90) = 0.90 >= 0.85
     let pred = Predicate::confidence_geq(
-        ConfidenceType::max(
-            ConfidenceType::literal(0.80),
-            ConfidenceType::literal(0.90),
-        ),
+        ConfidenceType::max(ConfidenceType::literal(0.80), ConfidenceType::literal(0.90)),
         ConfidenceType::literal(0.85),
     );
     assert!(s.search(&pred).is_proven());

@@ -85,8 +85,10 @@ mod onn_training_sanity {
 
         /// Cayley-Dickson multiplication (120 FLOPs)
         fn mul(&self, other: &Self) -> Self {
-            let (a0, a1, a2, a3, a4, a5, a6, a7) =
-                (self.e[0], self.e[1], self.e[2], self.e[3], self.e[4], self.e[5], self.e[6], self.e[7]);
+            let (a0, a1, a2, a3, a4, a5, a6, a7) = (
+                self.e[0], self.e[1], self.e[2], self.e[3], self.e[4], self.e[5], self.e[6],
+                self.e[7],
+            );
             let (b0, b1, b2, b3, b4, b5, b6, b7) = (
                 other.e[0], other.e[1], other.e[2], other.e[3], other.e[4], other.e[5], other.e[6],
                 other.e[7],
@@ -159,7 +161,8 @@ mod onn_training_sanity {
         }
 
         fn next_u64(&mut self) -> u64 {
-            self.state = self.state
+            self.state = self
+                .state
                 .wrapping_mul(6364136223846793005)
                 .wrapping_add(1442695040888963407);
             self.state
@@ -352,9 +355,11 @@ mod onn_training_sanity {
         assert_eq!(output.len(), 8, "Output dimension mismatch");
         eprintln!("  Input dim:  4 octonions (32 real components)");
         eprintln!("  Output dim: 8 octonions (64 real components)");
-        eprintln!("  Parameters: {} octonions ({} real-equivalent)",
+        eprintln!(
+            "  Parameters: {} octonions ({} real-equivalent)",
             layer.octonion_param_count(),
-            layer.real_equivalent_param_count());
+            layer.real_equivalent_param_count()
+        );
         eprintln!("  PASS");
     }
 
@@ -380,7 +385,10 @@ mod onn_training_sanity {
 
         // Loss(x, y) > 0 for x != y
         let diff_loss = mse_loss(&a, &b);
-        assert!(diff_loss > 0.0, "Loss between different inputs should be > 0");
+        assert!(
+            diff_loss > 0.0,
+            "Loss between different inputs should be > 0"
+        );
 
         // Loss(x, y) = Loss(y, x) (symmetric)
         let reverse_loss = mse_loss(&b, &a);
@@ -434,7 +442,6 @@ mod onn_training_sanity {
             if epoch % 20 == 0 || epoch == n_epochs {
                 eprintln!("  Epoch {:3}: loss = {:.6}", epoch, loss);
             }
-
         }
 
         let final_loss = *loss_history.last().unwrap();
@@ -471,7 +478,9 @@ mod onn_training_sanity {
         let target_layer = OctLinearLayer::new(in_dim, out_dim, &mut rng);
 
         for _ in 0..batch_size {
-            let x: Vec<Octonion> = (0..in_dim).map(|_| rng.random_octonion().scale(0.3)).collect();
+            let x: Vec<Octonion> = (0..in_dim)
+                .map(|_| rng.random_octonion().scale(0.3))
+                .collect();
             let y = target_layer.forward(&x);
             inputs.push(x);
             targets.push(y);
@@ -529,7 +538,10 @@ mod onn_training_sanity {
             final_loss
         );
 
-        eprintln!("  Loss reduction: {:.2}x", initial_loss / final_loss.max(1e-15));
+        eprintln!(
+            "  Loss reduction: {:.2}x",
+            initial_loss / final_loss.max(1e-15)
+        );
         eprintln!("  PASS");
     }
 
@@ -639,10 +651,7 @@ mod onn_training_sanity {
             (sig_large.e[0] - 1.0).abs() < 1e-10,
             "sigmoid(100) should be ~1.0"
         );
-        assert!(
-            sig_large.e[1] < 1e-10,
-            "sigmoid(-100) should be ~0.0"
-        );
+        assert!(sig_large.e[1] < 1e-10, "sigmoid(-100) should be ~0.0");
 
         let tanh_large = large.tanh_act();
         assert!(
@@ -719,7 +728,10 @@ mod onn_training_sanity {
 
         eprintln!("  fan_in={}, fan_out={}", fan_in, fan_out);
         eprintln!("  Expected std: {:.4}", expected_std);
-        eprintln!("  10,000 samples: mean~0, std~{:.4} per component", expected_std);
+        eprintln!(
+            "  10,000 samples: mean~0, std~{:.4} per component",
+            expected_std
+        );
         eprintln!("  PASS");
     }
 
@@ -791,7 +803,10 @@ mod onn_training_sanity {
         eprintln!("  Architecture: 32 -> 64 -> 32 -> 16 (real dims)");
         eprintln!("  Total oct params: {}", total_params);
         eprintln!("  Real-equivalent params: {}", total_real_equiv);
-        eprintln!("  Compression ratio: {:.1}x", total_real_equiv as f64 / total_params as f64);
+        eprintln!(
+            "  Compression ratio: {:.1}x",
+            total_real_equiv as f64 / total_params as f64
+        );
         eprintln!("  Output finite: yes, deterministic: yes");
         eprintln!("  PASS");
     }
@@ -810,7 +825,9 @@ mod onn_training_sanity {
         let mut layer = OctLinearLayer::new(in_dim, out_dim, &mut rng);
 
         let input: Vec<Octonion> = (0..in_dim).map(|_| rng.random_octonion()).collect();
-        let target: Vec<Octonion> = (0..out_dim).map(|_| rng.random_octonion().scale(0.5)).collect();
+        let target: Vec<Octonion> = (0..out_dim)
+            .map(|_| rng.random_octonion().scale(0.5))
+            .collect();
 
         let (wg, bg) = compute_gradient_fd(&mut layer, &input, &target, 1e-5);
 
@@ -824,7 +841,10 @@ mod onn_training_sanity {
             for i in 0..in_dim {
                 for c in 0..8 {
                     let g = wg[j][i][c];
-                    assert!(g.is_finite(), "Weight gradient not finite at [{j}][{i}][{c}]");
+                    assert!(
+                        g.is_finite(),
+                        "Weight gradient not finite at [{j}][{i}][{c}]"
+                    );
                     max_grad = max_grad.max(g.abs());
                     if g.abs() > 1e-12 {
                         min_nonzero_grad = min_nonzero_grad.min(g.abs());
@@ -846,10 +866,7 @@ mod onn_training_sanity {
         eprintln!("  Min nonzero |gradient|: {:.2e}", min_nonzero_grad);
         eprintln!("  Zero gradients: {}/{}", zero_count, total_count);
 
-        assert!(
-            max_grad > 1e-8,
-            "Gradients should be non-trivially large"
-        );
+        assert!(max_grad > 1e-8, "Gradients should be non-trivially large");
         assert!(
             max_grad < 1e6,
             "Gradients should be bounded: max={}",

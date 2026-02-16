@@ -51,10 +51,7 @@ use crate::refinement::{
     Atom, BinOp as RefinementBinOp, CompareOp, Predicate, Term, solver::SimpleChecker,
 };
 #[cfg(feature = "smt")]
-use crate::refinement::{
-    Constraint, ConstraintReason,
-    solver::VerifyResult,
-};
+use crate::refinement::{Constraint, ConstraintReason, solver::VerifyResult};
 use crate::resolve;
 use crate::types::{
     self, DimSize, TensorShape, Type, TypeVar, effects::EffectInference, units::UnitChecker,
@@ -2768,7 +2765,10 @@ impl TypeChecker {
                             );
                         }
                         _ => {
-                            self.error(format!("invalid causal model '{}': {:?}", c.name, e), c.span);
+                            self.error(
+                                format!("invalid causal model '{}': {:?}", c.name, e),
+                                c.span,
+                            );
                         }
                     }
                 }
@@ -3492,30 +3492,26 @@ impl TypeChecker {
                         } = type_expr
                         {
                             if let Some(val_expr) = value.as_ref() {
-                                let check_result =
-                                    if let Some(int_val) = self.try_extract_const_value(val_expr) {
-                                        Some(self.check_literal_refinement(
-                                            int_val, ref_var, ref_pred,
-                                        ))
-                                    } else if let Some(float_val) =
-                                        self.try_extract_float_value(val_expr)
-                                    {
-                                        Some(self.check_float_literal_refinement(
-                                            float_val, ref_var, ref_pred,
-                                        ))
-                                    } else {
-                                        Some(self.check_expr_refinement(
-                                            val_expr, ref_var, ref_pred,
-                                        ))
-                                    };
+                                let check_result = if let Some(int_val) =
+                                    self.try_extract_const_value(val_expr)
+                                {
+                                    Some(self.check_literal_refinement(int_val, ref_var, ref_pred))
+                                } else if let Some(float_val) =
+                                    self.try_extract_float_value(val_expr)
+                                {
+                                    Some(self.check_float_literal_refinement(
+                                        float_val, ref_var, ref_pred,
+                                    ))
+                                } else {
+                                    Some(self.check_expr_refinement(val_expr, ref_var, ref_pred))
+                                };
 
                                 if let Some(Err(msg)) = check_result {
-                                    let value_span =
-                                        if let Some(ast_ref) = &self.ast {
-                                            self.expr_span(val_expr, ast_ref.as_ref())
-                                        } else {
-                                            Span::dummy()
-                                        };
+                                    let value_span = if let Some(ast_ref) = &self.ast {
+                                        self.expr_span(val_expr, ast_ref.as_ref())
+                                    } else {
+                                        Span::dummy()
+                                    };
                                     self.error_with_code(
                                         "E0600",
                                         format!("refinement type violation: {}", msg),
@@ -5113,7 +5109,11 @@ impl TypeChecker {
                     // If exactly one model is registered, use it as default.
                     // Future: support explicit model annotation on Query syntax.
                     let model_name: Option<String> = if self.causal_graph_registry.len() == 1 {
-                        self.causal_graph_registry.names().into_iter().next().map(|s| s.to_string())
+                        self.causal_graph_registry
+                            .names()
+                            .into_iter()
+                            .next()
+                            .map(|s| s.to_string())
                     } else {
                         None
                     };

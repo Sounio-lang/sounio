@@ -113,8 +113,10 @@ mod octonion_exhaustive_validation {
         /// Cayley-Dickson multiplication (Graves-Adcock formula)
         /// 64 multiplications + 56 additions = 120 FLOPs
         fn mul(&self, other: &Self) -> Self {
-            let (a0, a1, a2, a3, a4, a5, a6, a7) =
-                (self.e[0], self.e[1], self.e[2], self.e[3], self.e[4], self.e[5], self.e[6], self.e[7]);
+            let (a0, a1, a2, a3, a4, a5, a6, a7) = (
+                self.e[0], self.e[1], self.e[2], self.e[3], self.e[4], self.e[5], self.e[6],
+                self.e[7],
+            );
             let (b0, b1, b2, b3, b4, b5, b6, b7) = (
                 other.e[0], other.e[1], other.e[2], other.e[3], other.e[4], other.e[5], other.e[6],
                 other.e[7],
@@ -145,7 +147,13 @@ mod octonion_exhaustive_validation {
             write!(
                 f,
                 "({:.4}, {:.4}, {:.4}, {:.4}, {:.4}, {:.4}, {:.4}, {:.4})",
-                self.e[0], self.e[1], self.e[2], self.e[3], self.e[4], self.e[5], self.e[6],
+                self.e[0],
+                self.e[1],
+                self.e[2],
+                self.e[3],
+                self.e[4],
+                self.e[5],
+                self.e[6],
                 self.e[7]
             )
         }
@@ -165,7 +173,10 @@ mod octonion_exhaustive_validation {
         }
 
         fn next_u64(&mut self) -> u64 {
-            self.state = self.state.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+            self.state = self
+                .state
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
             self.state
         }
 
@@ -685,7 +696,7 @@ mod octonion_exhaustive_validation {
         let e2 = Octonion::basis(2);
         let e4 = Octonion::basis(4);
 
-        let left = e1.mul(&e2).mul(&e4);  // (e1*e2)*e4
+        let left = e1.mul(&e2).mul(&e4); // (e1*e2)*e4
         let right = e1.mul(&e2.mul(&e4)); // e1*(e2*e4)
         let diff = left.distance(&right);
 
@@ -751,21 +762,93 @@ mod octonion_exhaustive_validation {
         // Using convention: {1, i, j, k, l, il, jl, kl} = {e0, e1, e2, e3, e4, e5, e6, e7}
         let table: [[(i8, usize); 8]; 8] = [
             // e0 * e_j
-            [(1, 0), (1, 1), (1, 2), (1, 3), (1, 4), (1, 5), (1, 6), (1, 7)],
+            [
+                (1, 0),
+                (1, 1),
+                (1, 2),
+                (1, 3),
+                (1, 4),
+                (1, 5),
+                (1, 6),
+                (1, 7),
+            ],
             // e1 * e_j
-            [(1, 1), (-1, 0), (1, 3), (-1, 2), (1, 5), (-1, 4), (-1, 7), (1, 6)],
+            [
+                (1, 1),
+                (-1, 0),
+                (1, 3),
+                (-1, 2),
+                (1, 5),
+                (-1, 4),
+                (-1, 7),
+                (1, 6),
+            ],
             // e2 * e_j
-            [(1, 2), (-1, 3), (-1, 0), (1, 1), (1, 6), (1, 7), (-1, 4), (-1, 5)],
+            [
+                (1, 2),
+                (-1, 3),
+                (-1, 0),
+                (1, 1),
+                (1, 6),
+                (1, 7),
+                (-1, 4),
+                (-1, 5),
+            ],
             // e3 * e_j
-            [(1, 3), (1, 2), (-1, 1), (-1, 0), (1, 7), (-1, 6), (1, 5), (-1, 4)],
+            [
+                (1, 3),
+                (1, 2),
+                (-1, 1),
+                (-1, 0),
+                (1, 7),
+                (-1, 6),
+                (1, 5),
+                (-1, 4),
+            ],
             // e4 * e_j
-            [(1, 4), (-1, 5), (-1, 6), (-1, 7), (-1, 0), (1, 1), (1, 2), (1, 3)],
+            [
+                (1, 4),
+                (-1, 5),
+                (-1, 6),
+                (-1, 7),
+                (-1, 0),
+                (1, 1),
+                (1, 2),
+                (1, 3),
+            ],
             // e5 * e_j
-            [(1, 5), (1, 4), (-1, 7), (1, 6), (-1, 1), (-1, 0), (-1, 3), (1, 2)],
+            [
+                (1, 5),
+                (1, 4),
+                (-1, 7),
+                (1, 6),
+                (-1, 1),
+                (-1, 0),
+                (-1, 3),
+                (1, 2),
+            ],
             // e6 * e_j
-            [(1, 6), (1, 7), (1, 4), (-1, 5), (-1, 2), (1, 3), (-1, 0), (-1, 1)],
+            [
+                (1, 6),
+                (1, 7),
+                (1, 4),
+                (-1, 5),
+                (-1, 2),
+                (1, 3),
+                (-1, 0),
+                (-1, 1),
+            ],
             // e7 * e_j
-            [(1, 7), (-1, 6), (1, 5), (1, 4), (-1, 3), (-1, 2), (1, 1), (-1, 0)],
+            [
+                (1, 7),
+                (-1, 6),
+                (1, 5),
+                (1, 4),
+                (-1, 3),
+                (-1, 2),
+                (1, 1),
+                (-1, 0),
+            ],
         ];
 
         let mut errors = 0;
@@ -790,7 +873,10 @@ mod octonion_exhaustive_validation {
             }
         }
 
-        eprintln!("  Verified: {}/64 multiplication table entries", 64 - errors);
+        eprintln!(
+            "  Verified: {}/64 multiplication table entries",
+            64 - errors
+        );
         assert_eq!(errors, 0, "Multiplication table has {} errors", errors);
     }
 

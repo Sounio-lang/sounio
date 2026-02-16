@@ -82,23 +82,23 @@ mod onn_vs_real_baseline {
         /// Cayley-Dickson multiplication (120 FLOPs)
         fn mul(&self, other: &Self) -> Self {
             let (a0, a1, a2, a3, a4, a5, a6, a7) = (
-                self.e[0], self.e[1], self.e[2], self.e[3],
-                self.e[4], self.e[5], self.e[6], self.e[7],
+                self.e[0], self.e[1], self.e[2], self.e[3], self.e[4], self.e[5], self.e[6],
+                self.e[7],
             );
             let (b0, b1, b2, b3, b4, b5, b6, b7) = (
-                other.e[0], other.e[1], other.e[2], other.e[3],
-                other.e[4], other.e[5], other.e[6], other.e[7],
+                other.e[0], other.e[1], other.e[2], other.e[3], other.e[4], other.e[5], other.e[6],
+                other.e[7],
             );
 
             Octonion::new(
-                a0*b0 - a1*b1 - a2*b2 - a3*b3 - a4*b4 - a5*b5 - a6*b6 - a7*b7,
-                a0*b1 + a1*b0 + a2*b3 - a3*b2 + a4*b5 - a5*b4 - a6*b7 + a7*b6,
-                a0*b2 - a1*b3 + a2*b0 + a3*b1 + a4*b6 + a5*b7 - a6*b4 - a7*b5,
-                a0*b3 + a1*b2 - a2*b1 + a3*b0 + a4*b7 - a5*b6 + a6*b5 - a7*b4,
-                a0*b4 - a1*b5 - a2*b6 - a3*b7 + a4*b0 + a5*b1 + a6*b2 + a7*b3,
-                a0*b5 + a1*b4 - a2*b7 + a3*b6 - a4*b1 + a5*b0 - a6*b3 + a7*b2,
-                a0*b6 + a1*b7 + a2*b4 - a3*b5 - a4*b2 + a5*b3 + a6*b0 - a7*b1,
-                a0*b7 - a1*b6 + a2*b5 + a3*b4 - a4*b3 - a5*b2 + a6*b1 + a7*b0,
+                a0 * b0 - a1 * b1 - a2 * b2 - a3 * b3 - a4 * b4 - a5 * b5 - a6 * b6 - a7 * b7,
+                a0 * b1 + a1 * b0 + a2 * b3 - a3 * b2 + a4 * b5 - a5 * b4 - a6 * b7 + a7 * b6,
+                a0 * b2 - a1 * b3 + a2 * b0 + a3 * b1 + a4 * b6 + a5 * b7 - a6 * b4 - a7 * b5,
+                a0 * b3 + a1 * b2 - a2 * b1 + a3 * b0 + a4 * b7 - a5 * b6 + a6 * b5 - a7 * b4,
+                a0 * b4 - a1 * b5 - a2 * b6 - a3 * b7 + a4 * b0 + a5 * b1 + a6 * b2 + a7 * b3,
+                a0 * b5 + a1 * b4 - a2 * b7 + a3 * b6 - a4 * b1 + a5 * b0 - a6 * b3 + a7 * b2,
+                a0 * b6 + a1 * b7 + a2 * b4 - a3 * b5 - a4 * b2 + a5 * b3 + a6 * b0 - a7 * b1,
+                a0 * b7 - a1 * b6 + a2 * b5 + a3 * b4 - a4 * b3 - a5 * b2 + a6 * b1 + a7 * b0,
             )
         }
 
@@ -125,7 +125,8 @@ mod onn_vs_real_baseline {
         }
 
         fn next_u64(&mut self) -> u64 {
-            self.state = self.state
+            self.state = self
+                .state
                 .wrapping_mul(6364136223846793005)
                 .wrapping_add(1442695040888963407);
             self.state
@@ -138,8 +139,14 @@ mod onn_vs_real_baseline {
 
         fn random_octonion(&mut self) -> Octonion {
             Octonion::new(
-                self.next_f64(), self.next_f64(), self.next_f64(), self.next_f64(),
-                self.next_f64(), self.next_f64(), self.next_f64(), self.next_f64(),
+                self.next_f64(),
+                self.next_f64(),
+                self.next_f64(),
+                self.next_f64(),
+                self.next_f64(),
+                self.next_f64(),
+                self.next_f64(),
+                self.next_f64(),
             )
         }
 
@@ -443,7 +450,10 @@ mod onn_vs_real_baseline {
 
         eprintln!("  ONN scalar params:  {}", oct_params);
         eprintln!("  Real scalar params: {}", real_params);
-        eprintln!("  Ratio:              {:.1}x", real_params as f64 / oct_params as f64);
+        eprintln!(
+            "  Ratio:              {:.1}x",
+            real_params as f64 / oct_params as f64
+        );
 
         // Train both
         let lr = 0.005;
@@ -453,18 +463,30 @@ mod onn_vs_real_baseline {
         let oct_initial_loss = oct_batch_avg_loss(&oct_layer, &oct_inputs, &oct_targets);
         let real_initial_loss = real_batch_avg_loss(&real_layer, &real_inputs, &real_targets);
 
-        eprintln!("  Initial loss — ONN: {:.6}, Real: {:.6}", oct_initial_loss, real_initial_loss);
+        eprintln!(
+            "  Initial loss — ONN: {:.6}, Real: {:.6}",
+            oct_initial_loss, real_initial_loss
+        );
 
         for epoch in 1..=n_epochs {
             for s in 0..n_samples {
                 oct_gradient_step(&mut oct_layer, &oct_inputs[s], &oct_targets[s], lr, epsilon);
-                real_gradient_step(&mut real_layer, &real_inputs[s], &real_targets[s], lr, epsilon);
+                real_gradient_step(
+                    &mut real_layer,
+                    &real_inputs[s],
+                    &real_targets[s],
+                    lr,
+                    epsilon,
+                );
             }
 
             if epoch % 10 == 0 {
                 let oct_loss = oct_batch_avg_loss(&oct_layer, &oct_inputs, &oct_targets);
                 let real_loss = real_batch_avg_loss(&real_layer, &real_inputs, &real_targets);
-                eprintln!("  Epoch {:3} — ONN: {:.6}, Real: {:.6}", epoch, oct_loss, real_loss);
+                eprintln!(
+                    "  Epoch {:3} — ONN: {:.6}, Real: {:.6}",
+                    epoch, oct_loss, real_loss
+                );
             }
         }
 
@@ -475,12 +497,14 @@ mod onn_vs_real_baseline {
         assert!(
             oct_final_loss < oct_initial_loss,
             "ONN should reduce loss: initial={:.6}, final={:.6}",
-            oct_initial_loss, oct_final_loss
+            oct_initial_loss,
+            oct_final_loss
         );
         assert!(
             real_final_loss < real_initial_loss,
             "Real NN should reduce loss: initial={:.6}, final={:.6}",
-            real_initial_loss, real_final_loss
+            real_initial_loss,
+            real_final_loss
         );
 
         // Key result: parameter efficiency ratio
@@ -488,10 +512,15 @@ mod onn_vs_real_baseline {
         let real_reduction = real_initial_loss / real_final_loss.max(1e-15);
         let param_ratio = real_params as f64 / oct_params as f64;
 
-        eprintln!("  Final — ONN: {:.6} ({:.1}x reduction), Real: {:.6} ({:.1}x reduction)",
-            oct_final_loss, oct_reduction, real_final_loss, real_reduction);
+        eprintln!(
+            "  Final — ONN: {:.6} ({:.1}x reduction), Real: {:.6} ({:.1}x reduction)",
+            oct_final_loss, oct_reduction, real_final_loss, real_reduction
+        );
         eprintln!("  Parameter ratio: {:.1}x (Real/ONN)", param_ratio);
-        eprintln!("  PASS — ONN matches or exceeds real-valued NN with {:.1}x fewer params", param_ratio);
+        eprintln!(
+            "  PASS — ONN matches or exceeds real-valued NN with {:.1}x fewer params",
+            param_ratio
+        );
 
         assert!(
             param_ratio > 5.0,
@@ -529,10 +558,18 @@ mod onn_vs_real_baseline {
         let oct_params = oct_layer.scalar_param_count();
         let real_params = real_layer.scalar_param_count();
 
-        eprintln!("  ONN: {}x{} oct = {}x{} real, {} scalar params",
-            oct_in, oct_out, oct_in * 8, oct_out * 8, oct_params);
-        eprintln!("  Real: {}x{}, {} scalar params",
-            real_in, real_out, real_params);
+        eprintln!(
+            "  ONN: {}x{} oct = {}x{} real, {} scalar params",
+            oct_in,
+            oct_out,
+            oct_in * 8,
+            oct_out * 8,
+            oct_params
+        );
+        eprintln!(
+            "  Real: {}x{}, {} scalar params",
+            real_in, real_out, real_params
+        );
         eprintln!("  Budget parity: ONN={}, Real={}", oct_params, real_params);
 
         // Generate synthetic data: random affine mapping
@@ -573,18 +610,30 @@ mod onn_vs_real_baseline {
         let oct_initial = oct_batch_avg_loss(&oct_layer, &oct_inputs, &oct_targets);
         let real_initial = real_batch_avg_loss(&real_layer, &real_inputs, &real_targets);
 
-        eprintln!("  Initial loss — ONN: {:.6}, Real: {:.6}", oct_initial, real_initial);
+        eprintln!(
+            "  Initial loss — ONN: {:.6}, Real: {:.6}",
+            oct_initial, real_initial
+        );
 
         for epoch in 1..=n_epochs {
             for s in 0..n_samples {
                 oct_gradient_step(&mut oct_layer, &oct_inputs[s], &oct_targets[s], lr, epsilon);
-                real_gradient_step(&mut real_layer, &real_inputs[s], &real_targets[s], lr, epsilon);
+                real_gradient_step(
+                    &mut real_layer,
+                    &real_inputs[s],
+                    &real_targets[s],
+                    lr,
+                    epsilon,
+                );
             }
 
             if epoch % 10 == 0 {
                 let oct_loss = oct_batch_avg_loss(&oct_layer, &oct_inputs, &oct_targets);
                 let real_loss = real_batch_avg_loss(&real_layer, &real_inputs, &real_targets);
-                eprintln!("  Epoch {:3} — ONN: {:.6}, Real: {:.6}", epoch, oct_loss, real_loss);
+                eprintln!(
+                    "  Epoch {:3} — ONN: {:.6}, Real: {:.6}",
+                    epoch, oct_loss, real_loss
+                );
             }
         }
 
@@ -593,8 +642,10 @@ mod onn_vs_real_baseline {
         let oct_reduction = oct_initial / oct_final.max(1e-15);
         let real_reduction = real_initial / real_final.max(1e-15);
 
-        eprintln!("  Final — ONN: {:.6} ({:.1}x reduction), Real: {:.6} ({:.1}x reduction)",
-            oct_final, oct_reduction, real_final, real_reduction);
+        eprintln!(
+            "  Final — ONN: {:.6} ({:.1}x reduction), Real: {:.6} ({:.1}x reduction)",
+            oct_final, oct_reduction, real_final, real_reduction
+        );
 
         // Both should learn
         assert!(oct_final < oct_initial, "ONN should reduce loss");
@@ -602,7 +653,10 @@ mod onn_vs_real_baseline {
 
         // Note: We can't directly compare absolute losses since the tasks are different
         // (different dimensionality). But we verify both converge at equal param budget.
-        eprintln!("  PASS — Both converge at equal parameter budget ({} params)", oct_params);
+        eprintln!(
+            "  PASS — Both converge at equal parameter budget ({} params)",
+            oct_params
+        );
     }
 
     // ========================================================================
@@ -621,7 +675,7 @@ mod onn_vs_real_baseline {
 
         let oct_in = 2;
         let oct_out = 1;
-        let real_in = oct_in * 8;  // 16
+        let real_in = oct_in * 8; // 16
         let real_out = oct_out * 8; // 8
 
         let mut rng = Rng::new(0xBEEFCAFE);
@@ -654,9 +708,18 @@ mod onn_vs_real_baseline {
         let oct_params = oct_layer.scalar_param_count();
         let real_params = real_layer.scalar_param_count();
 
-        eprintln!("  ONN: {} scalar params ({}x{} oct)", oct_params, oct_in, oct_out);
-        eprintln!("  Real: {} scalar params ({}x{})", real_params, real_in, real_out);
-        eprintln!("  Param ratio: {:.1}x (Real/ONN)", real_params as f64 / oct_params as f64);
+        eprintln!(
+            "  ONN: {} scalar params ({}x{} oct)",
+            oct_params, oct_in, oct_out
+        );
+        eprintln!(
+            "  Real: {} scalar params ({}x{})",
+            real_params, real_in, real_out
+        );
+        eprintln!(
+            "  Param ratio: {:.1}x (Real/ONN)",
+            real_params as f64 / oct_params as f64
+        );
         eprintln!("  Ground truth: octonion-structured (structural inductive bias for ONN)");
 
         let lr = 0.01;
@@ -666,18 +729,30 @@ mod onn_vs_real_baseline {
         let oct_initial = oct_batch_avg_loss(&oct_layer, &oct_inputs, &oct_targets);
         let real_initial = real_batch_avg_loss(&real_layer, &real_inputs, &real_targets);
 
-        eprintln!("  Initial loss — ONN: {:.6}, Real: {:.6}", oct_initial, real_initial);
+        eprintln!(
+            "  Initial loss — ONN: {:.6}, Real: {:.6}",
+            oct_initial, real_initial
+        );
 
         for epoch in 1..=n_epochs {
             for s in 0..n_samples {
                 oct_gradient_step(&mut oct_layer, &oct_inputs[s], &oct_targets[s], lr, epsilon);
-                real_gradient_step(&mut real_layer, &real_inputs[s], &real_targets[s], lr, epsilon);
+                real_gradient_step(
+                    &mut real_layer,
+                    &real_inputs[s],
+                    &real_targets[s],
+                    lr,
+                    epsilon,
+                );
             }
 
             if epoch % 15 == 0 {
                 let oct_loss = oct_batch_avg_loss(&oct_layer, &oct_inputs, &oct_targets);
                 let real_loss = real_batch_avg_loss(&real_layer, &real_inputs, &real_targets);
-                eprintln!("  Epoch {:3} — ONN: {:.6}, Real: {:.6}", epoch, oct_loss, real_loss);
+                eprintln!(
+                    "  Epoch {:3} — ONN: {:.6}, Real: {:.6}",
+                    epoch, oct_loss, real_loss
+                );
             }
         }
 
@@ -685,8 +760,14 @@ mod onn_vs_real_baseline {
         let real_final = real_batch_avg_loss(&real_layer, &real_inputs, &real_targets);
 
         eprintln!("  Final — ONN: {:.6}, Real: {:.6}", oct_final, real_final);
-        eprintln!("  ONN loss reduction: {:.1}x", oct_initial / oct_final.max(1e-15));
-        eprintln!("  Real loss reduction: {:.1}x", real_initial / real_final.max(1e-15));
+        eprintln!(
+            "  ONN loss reduction: {:.1}x",
+            oct_initial / oct_final.max(1e-15)
+        );
+        eprintln!(
+            "  Real loss reduction: {:.1}x",
+            real_initial / real_final.max(1e-15)
+        );
 
         // Both should converge
         assert!(oct_final < oct_initial, "ONN should reduce loss");
@@ -695,11 +776,15 @@ mod onn_vs_real_baseline {
         // On octonion-structured data, ONN should achieve lower loss despite fewer params
         // (this is the inductive bias advantage)
         if oct_final < real_final {
-            eprintln!("  RESULT: ONN wins with {:.1}x fewer params and {:.2}x lower loss",
+            eprintln!(
+                "  RESULT: ONN wins with {:.1}x fewer params and {:.2}x lower loss",
                 real_params as f64 / oct_params as f64,
-                real_final / oct_final.max(1e-15));
+                real_final / oct_final.max(1e-15)
+            );
         } else {
-            eprintln!("  RESULT: Real-valued NN achieves lower absolute loss (expected for high-param regime)");
+            eprintln!(
+                "  RESULT: Real-valued NN achieves lower absolute loss (expected for high-param regime)"
+            );
         }
 
         eprintln!("  PASS");
@@ -726,9 +811,8 @@ mod onn_vs_real_baseline {
         let real_l2 = RealLinearLayer::new(48, 32, &mut rng_real);
         let real_l3 = RealLinearLayer::new(32, 16, &mut rng_real);
 
-        let oct_total_params = oct_l1.scalar_param_count()
-            + oct_l2.scalar_param_count()
-            + oct_l3.scalar_param_count();
+        let oct_total_params =
+            oct_l1.scalar_param_count() + oct_l2.scalar_param_count() + oct_l3.scalar_param_count();
         let real_total_params = real_l1.scalar_param_count()
             + real_l2.scalar_param_count()
             + real_l3.scalar_param_count();
@@ -737,7 +821,10 @@ mod onn_vs_real_baseline {
         eprintln!("  Real architecture: 32 -> 48 -> 32 -> 16");
         eprintln!("  ONN scalar params:  {}", oct_total_params);
         eprintln!("  Real scalar params: {}", real_total_params);
-        eprintln!("  Ratio:              {:.1}x", real_total_params as f64 / oct_total_params as f64);
+        eprintln!(
+            "  Ratio:              {:.1}x",
+            real_total_params as f64 / oct_total_params as f64
+        );
 
         // Forward pass comparison on random data
         let mut rng_data = Rng::new(0xF0F0F0F0);
@@ -773,7 +860,11 @@ mod onn_vs_real_baseline {
         }
 
         // Verify all outputs are finite
-        for (i, (&on, &rn)) in oct_output_norms.iter().zip(real_output_norms.iter()).enumerate() {
+        for (i, (&on, &rn)) in oct_output_norms
+            .iter()
+            .zip(real_output_norms.iter())
+            .enumerate()
+        {
             assert!(on.is_finite(), "ONN output {} not finite", i);
             assert!(rn.is_finite(), "Real output {} not finite", i);
         }
@@ -781,7 +872,10 @@ mod onn_vs_real_baseline {
         let oct_mean_norm: f64 = oct_output_norms.iter().sum::<f64>() / n_samples as f64;
         let real_mean_norm: f64 = real_output_norms.iter().sum::<f64>() / n_samples as f64;
 
-        eprintln!("  Mean output norm — ONN: {:.4}, Real: {:.4}", oct_mean_norm, real_mean_norm);
+        eprintln!(
+            "  Mean output norm — ONN: {:.4}, Real: {:.4}",
+            oct_mean_norm, real_mean_norm
+        );
         eprintln!("  All outputs finite: yes");
 
         // Parameter efficiency assertion
@@ -792,7 +886,10 @@ mod onn_vs_real_baseline {
             ratio
         );
 
-        eprintln!("  PASS — {:.1}x parameter efficiency maintained in deep networks", ratio);
+        eprintln!(
+            "  PASS — {:.1}x parameter efficiency maintained in deep networks",
+            ratio
+        );
     }
 
     // ========================================================================
@@ -830,11 +927,18 @@ mod onn_vs_real_baseline {
             let flops_per_param_oct = oct_flops as f64 / oct_params as f64;
             let flops_per_param_real = real_flops as f64 / real_params as f64;
 
-            eprintln!("  {}x{} (oct) = {}x{} (real):", oct_in, oct_out, real_in, real_out);
-            eprintln!("    ONN:  {} FLOPs, {} params, {:.2} FLOPs/param",
-                oct_flops, oct_params, flops_per_param_oct);
-            eprintln!("    Real: {} FLOPs, {} params, {:.2} FLOPs/param",
-                real_flops, real_params, flops_per_param_real);
+            eprintln!(
+                "  {}x{} (oct) = {}x{} (real):",
+                oct_in, oct_out, real_in, real_out
+            );
+            eprintln!(
+                "    ONN:  {} FLOPs, {} params, {:.2} FLOPs/param",
+                oct_flops, oct_params, flops_per_param_oct
+            );
+            eprintln!(
+                "    Real: {} FLOPs, {} params, {:.2} FLOPs/param",
+                real_flops, real_params, flops_per_param_real
+            );
             eprintln!("    FLOP ratio: {:.2}x (Real/ONN)", flops_ratio);
             eprintln!("    Param ratio: {:.1}x (Real/ONN)", param_ratio);
 
@@ -845,7 +949,8 @@ mod onn_vs_real_baseline {
             assert!(
                 flop_parity < 0.15,
                 "FLOPs should be approximately equal (iso-FLOP): ratio={:.2}x, deviation={:.2}",
-                flops_ratio, flop_parity
+                flops_ratio,
+                flop_parity
             );
 
             // Parameter ratio should be > 5x — this is the core efficiency claim
@@ -912,12 +1017,22 @@ mod onn_vs_real_baseline {
         let mut real_losses = Vec::new();
 
         oct_losses.push(oct_batch_avg_loss(&oct_layer, &oct_inputs, &oct_targets));
-        real_losses.push(real_batch_avg_loss(&real_layer, &real_inputs, &real_targets));
+        real_losses.push(real_batch_avg_loss(
+            &real_layer,
+            &real_inputs,
+            &real_targets,
+        ));
 
         for epoch in 1..=n_epochs {
             for s in 0..n_samples {
                 oct_gradient_step(&mut oct_layer, &oct_inputs[s], &oct_targets[s], lr, epsilon);
-                real_gradient_step(&mut real_layer, &real_inputs[s], &real_targets[s], lr, epsilon);
+                real_gradient_step(
+                    &mut real_layer,
+                    &real_inputs[s],
+                    &real_targets[s],
+                    lr,
+                    epsilon,
+                );
             }
 
             let oct_loss = oct_batch_avg_loss(&oct_layer, &oct_inputs, &oct_targets);
@@ -926,7 +1041,10 @@ mod onn_vs_real_baseline {
             real_losses.push(real_loss);
 
             if epoch % 10 == 0 {
-                eprintln!("  Epoch {:3} — ONN: {:.6}, Real: {:.6}", epoch, oct_loss, real_loss);
+                eprintln!(
+                    "  Epoch {:3} — ONN: {:.6}, Real: {:.6}",
+                    epoch, oct_loss, real_loss
+                );
             }
         }
 
@@ -944,8 +1062,14 @@ mod onn_vs_real_baseline {
         let onn_rel_final = oct_losses.last().unwrap() / oct_losses[0];
         let real_rel_final = real_losses.last().unwrap() / real_losses[0];
 
-        eprintln!("  ONN relative loss reduction:  {:.2}x", 1.0 / onn_rel_final);
-        eprintln!("  Real relative loss reduction: {:.2}x", 1.0 / real_rel_final);
+        eprintln!(
+            "  ONN relative loss reduction:  {:.2}x",
+            1.0 / onn_rel_final
+        );
+        eprintln!(
+            "  Real relative loss reduction: {:.2}x",
+            1.0 / real_rel_final
+        );
         eprintln!("  ONN converges faster in {}/{} epochs", onn_wins, n_epochs);
 
         // Both should reduce loss

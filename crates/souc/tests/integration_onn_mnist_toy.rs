@@ -83,12 +83,12 @@ mod onn_mnist_toy {
         /// Cayley-Dickson multiplication (120 FLOPs)
         fn mul(&self, other: &Self) -> Self {
             let (a0, a1, a2, a3, a4, a5, a6, a7) = (
-                self.e[0], self.e[1], self.e[2], self.e[3],
-                self.e[4], self.e[5], self.e[6], self.e[7],
+                self.e[0], self.e[1], self.e[2], self.e[3], self.e[4], self.e[5], self.e[6],
+                self.e[7],
             );
             let (b0, b1, b2, b3, b4, b5, b6, b7) = (
-                other.e[0], other.e[1], other.e[2], other.e[3],
-                other.e[4], other.e[5], other.e[6], other.e[7],
+                other.e[0], other.e[1], other.e[2], other.e[3], other.e[4], other.e[5], other.e[6],
+                other.e[7],
             );
 
             Octonion::new(
@@ -512,10 +512,7 @@ mod onn_mnist_toy {
     }
 
     /// Compute classification accuracy on precomputed data
-    fn evaluate_accuracy_precomputed(
-        net: &TwoLayerONN,
-        precomputed: &[PrecomputedSample],
-    ) -> f64 {
+    fn evaluate_accuracy_precomputed(net: &TwoLayerONN, precomputed: &[PrecomputedSample]) -> f64 {
         let mut correct = 0;
         for sample in precomputed {
             let pred = net.classify_from_hidden(&sample.hidden_activation);
@@ -633,8 +630,7 @@ mod onn_mnist_toy {
         );
         eprintln!(
             "  Trainable params: {} octonion ({} scalar)",
-            trainable_oct_params,
-            trainable_scalar_params
+            trainable_oct_params, trainable_scalar_params
         );
 
         // Precompute hidden activations (frozen random projection)
