@@ -286,11 +286,10 @@ mod tests {
         let resolved = collector.resolve_conflict(&evidence_a, &evidence_b);
 
         // Record resolution in provenance
-        let prov = Provenance::external("https://resolver.example.com")
-            .extend(
-                Transformation::new("conflict_resolution", TransformationKind::Statistical)
-                    .with_confidence(resolved.strength.value()),
-            );
+        let prov = Provenance::external("https://resolver.example.com").extend(
+            Transformation::new("conflict_resolution", TransformationKind::Statistical)
+                .with_confidence(resolved.strength.value()),
+        );
 
         assert!(prov.includes(TransformationKind::Statistical));
         let summary = prov.summarize();
@@ -325,8 +324,9 @@ mod tests {
             );
 
         // Filter by Statistical kind
-        let statistical =
-            prov.query(&TransformationFilter::ByKind(TransformationKind::Statistical));
+        let statistical = prov.query(&TransformationFilter::ByKind(
+            TransformationKind::Statistical,
+        ));
         assert_eq!(statistical.match_count, 1);
         assert_eq!(statistical.matched_transformations[0].1.name, "aggregate");
 
@@ -350,10 +350,10 @@ mod tests {
     fn test_merkle_dag_tracks_evidence_with_signatures() {
         let mut dag = MerkleProvenanceDAG::new();
 
-        let obs_id =
-            dag.add_root(ProvenanceOperation::measurement("clinical_observation"));
-        let rct_id =
-            dag.add_root(ProvenanceOperation::measurement("randomized_controlled_trial"));
+        let obs_id = dag.add_root(ProvenanceOperation::measurement("clinical_observation"));
+        let rct_id = dag.add_root(ProvenanceOperation::measurement(
+            "randomized_controlled_trial",
+        ));
 
         let merge_id = dag.add_derived(
             vec![obs_id, rct_id],
@@ -524,10 +524,7 @@ mod tests {
             "weakest link should shift to aged step 0 at 0.3, got {}",
             min_after
         );
-        assert!(
-            (aged_0 - 0.3).abs() < 1e-6,
-            "step 0 degraded to 0.3"
-        );
+        assert!((aged_0 - 0.3).abs() < 1e-6, "step 0 degraded to 0.3");
     }
 
     /// Test 15: Subchain extraction preserves temporal ordering.
@@ -680,11 +677,17 @@ mod tests {
 
         for _ in 0..n {
             // Simple LCG pseudo-random
-            rng_state = rng_state.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+            rng_state = rng_state
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
             let noise_x = ((rng_state >> 33) as f64) / (u32::MAX as f64) - 0.5;
-            rng_state = rng_state.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+            rng_state = rng_state
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
             let noise_y = ((rng_state >> 33) as f64) / (u32::MAX as f64) - 0.5;
-            rng_state = rng_state.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+            rng_state = rng_state
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
             let noise_z = ((rng_state >> 33) as f64) / (u32::MAX as f64) - 0.5;
 
             let x = noise_x * 2.0;
@@ -693,11 +696,7 @@ mod tests {
             data.push(vec![x, y, z]);
         }
 
-        let matrix = DataMatrix::new(
-            vec!["X".into(), "Y".into(), "Z".into()],
-            data,
-        )
-        .unwrap();
+        let matrix = DataMatrix::new(vec!["X".into(), "Y".into(), "Z".into()], data).unwrap();
 
         let config = PCConfig {
             alpha: 0.05,
@@ -758,7 +757,9 @@ mod tests {
     /// causal query correctly remains non-identifiable.
     #[test]
     fn test_non_identifiable_not_overridden_by_evidence() {
-        use crate::check::causal::{CausalCheckResult, causal_effect_type_confidence, format_non_identifiable_error};
+        use crate::check::causal::{
+            CausalCheckResult, causal_effect_type_confidence, format_non_identifiable_error,
+        };
 
         let non_id = CausalCheckResult::NotIdentifiable {
             reason: "no valid adjustment set exists (latent confounding)".into(),
@@ -777,9 +778,11 @@ mod tests {
         // The causal query is still not identifiable
         assert!(causal_effect_type_confidence(&non_id).is_none());
         assert!(format_non_identifiable_error(&non_id).is_some());
-        assert!(format_non_identifiable_error(&non_id)
-            .unwrap()
-            .contains("not identifiable"));
+        assert!(
+            format_non_identifiable_error(&non_id)
+                .unwrap()
+                .contains("not identifiable")
+        );
     }
 
     // ========================================================================
@@ -790,7 +793,7 @@ mod tests {
     #[test]
     fn test_counterfactual_lowering_creates_provenance_trackable_sequence() {
         use crate::sir::causal::{
-            lower_counterfactual, validate_three_step_sequence, count_causal_ops,
+            count_causal_ops, lower_counterfactual, validate_three_step_sequence,
         };
         use crate::sir::values::ValueId;
 
@@ -930,10 +933,7 @@ mod tests {
         }
 
         // Verify EstimateEffect has adjustment set
-        if let CausalOp::EstimateEffect {
-            adjustment_set, ..
-        } = &ops[1]
-        {
+        if let CausalOp::EstimateEffect { adjustment_set, .. } = &ops[1] {
             assert_eq!(adjustment_set.len(), 2);
         }
     }
@@ -961,8 +961,7 @@ mod tests {
             data.push(vec![a, b]);
         }
 
-        let matrix =
-            DataMatrix::new(vec!["A".into(), "B".into()], data).unwrap();
+        let matrix = DataMatrix::new(vec!["A".into(), "B".into()], data).unwrap();
 
         // Step 1: Discovery via PC algorithm
         let config = PCConfig::default();
@@ -981,10 +980,7 @@ mod tests {
 
         // Step 4: Convert to SIR kind
         let sir_kind = formula_to_sir_kind(&formula);
-        assert_eq!(
-            sir_kind,
-            crate::sir::ops::CausalFormulaKind::Conditional
-        );
+        assert_eq!(sir_kind, crate::sir::ops::CausalFormulaKind::Conditional);
 
         // Step 5: Lower to SIR operations
         let ops = lower_do_expression(
@@ -1020,7 +1016,11 @@ mod tests {
         // Phase 2: Add evidence from multiple sources
         let mut collector = EvidenceCollector::new(ConflictStrategy::BayesianFusion);
         collector.collect(pub_evidence("NCT12345678", 0.9), "trial_db".into(), 1000);
-        collector.collect(exp_evidence("replication_study", 0.85), "lab_eu".into(), 2000);
+        collector.collect(
+            exp_evidence("replication_study", 0.85),
+            "lab_eu".into(),
+            2000,
+        );
         collector.collect(pub_evidence("meta_analysis", 0.88), "cochrane".into(), 3000);
 
         let evidence_agg = collector.aggregate().unwrap();
@@ -1152,8 +1152,7 @@ mod tests {
         assert!(matches!(validity, TemporalValidityResult::Valid { .. }));
 
         // Step 5: Export audit trail
-        let mut evidence_collector =
-            EvidenceCollector::new(ConflictStrategy::DempsterShafer);
+        let mut evidence_collector = EvidenceCollector::new(ConflictStrategy::DempsterShafer);
         evidence_collector.collect(evidence_rct, "rct_site".into(), 5000);
         evidence_collector.collect(evidence_observational, "cohort_study".into(), 6000);
         let trail = evidence_collector.export_audit_trail();
@@ -1287,7 +1286,11 @@ mod tests {
     fn test_full_audit_trail_evidence_to_merkle() {
         // Phase 1: Collect evidence
         let mut collector = EvidenceCollector::new(ConflictStrategy::BayesianFusion);
-        collector.collect(pub_evidence("doi:10.1000/trial", 0.88), "site_a".into(), 1000);
+        collector.collect(
+            pub_evidence("doi:10.1000/trial", 0.88),
+            "site_a".into(),
+            1000,
+        );
         collector.collect(exp_evidence("gmp_protocol_v2", 0.82), "site_b".into(), 2000);
 
         let evidence_agg = collector.aggregate().unwrap();

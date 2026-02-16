@@ -475,10 +475,8 @@ fn matches_filter(t: &Transformation, filter: &TransformationFilter) -> bool {
         }
         TransformationFilter::MetadataEquals(key, value) => {
             t.metadata.extra.iter().any(|(k, v)| k == key && v == value)
-                || (key == "commit"
-                    && t.metadata.commit.as_deref() == Some(value.as_str()))
-                || (key == "timestamp"
-                    && t.metadata.timestamp.as_deref() == Some(value.as_str()))
+                || (key == "commit" && t.metadata.commit.as_deref() == Some(value.as_str()))
+                || (key == "timestamp" && t.metadata.timestamp.as_deref() == Some(value.as_str()))
         }
         TransformationFilter::Any(filters) => filters.iter().any(|f| matches_filter(t, f)),
         TransformationFilter::All(filters) => filters.iter().all(|f| matches_filter(t, f)),
@@ -666,16 +664,29 @@ mod tests {
     fn sample_provenance() -> Provenance {
         Provenance::external("https://sensor.example.com")
             .extend(Transformation::function("read_sensor").with_confidence(1.0))
-            .extend(Transformation::new("calibrate", TransformationKind::Conversion).with_confidence(0.98))
-            .extend(Transformation::new("scale", TransformationKind::Statistical).with_confidence(0.92))
-            .extend(Transformation::new("predict", TransformationKind::MLInference).with_confidence(0.85))
-            .extend(Transformation::new("override_val", TransformationKind::ExternalCall).with_confidence(0.90))
+            .extend(
+                Transformation::new("calibrate", TransformationKind::Conversion)
+                    .with_confidence(0.98),
+            )
+            .extend(
+                Transformation::new("scale", TransformationKind::Statistical).with_confidence(0.92),
+            )
+            .extend(
+                Transformation::new("predict", TransformationKind::MLInference)
+                    .with_confidence(0.85),
+            )
+            .extend(
+                Transformation::new("override_val", TransformationKind::ExternalCall)
+                    .with_confidence(0.90),
+            )
     }
 
     #[test]
     fn test_query_by_kind() {
         let prov = sample_provenance();
-        let result = prov.query(&TransformationFilter::ByKind(TransformationKind::MLInference));
+        let result = prov.query(&TransformationFilter::ByKind(
+            TransformationKind::MLInference,
+        ));
         assert_eq!(result.match_count, 1);
         assert_eq!(result.matched_transformations[0].0, 3); // index 3
         assert_eq!(result.matched_transformations[0].1.name, "predict");
@@ -793,11 +804,28 @@ mod tests {
         let summary = prov.summarize();
 
         assert_eq!(summary.total_steps, 5);
-        assert_eq!(summary.origin, Origin::External { uri: "https://sensor.example.com".to_string() });
+        assert_eq!(
+            summary.origin,
+            Origin::External {
+                uri: "https://sensor.example.com".to_string()
+            }
+        );
         assert!(summary.has_user_override);
         assert!(summary.has_ml_inference);
-        assert_eq!(*summary.kind_counts.get(&TransformationKind::Function).unwrap_or(&0), 1);
-        assert_eq!(*summary.kind_counts.get(&TransformationKind::MLInference).unwrap_or(&0), 1);
+        assert_eq!(
+            *summary
+                .kind_counts
+                .get(&TransformationKind::Function)
+                .unwrap_or(&0),
+            1
+        );
+        assert_eq!(
+            *summary
+                .kind_counts
+                .get(&TransformationKind::MLInference)
+                .unwrap_or(&0),
+            1
+        );
 
         // Weakest link should be predict at 0.85
         let (idx, conf) = summary.min_confidence_step.unwrap();

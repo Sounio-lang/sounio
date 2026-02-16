@@ -830,7 +830,9 @@ impl MerkleProvenanceDAG {
     pub fn count_by_operation(&self) -> HashMap<String, usize> {
         let mut counts: HashMap<String, usize> = HashMap::new();
         for node in self.nodes.values() {
-            *counts.entry(format!("{:?}", node.operation.kind())).or_insert(0) += 1;
+            *counts
+                .entry(format!("{:?}", node.operation.kind()))
+                .or_insert(0) += 1;
         }
         counts
     }
@@ -1203,10 +1205,7 @@ mod tests {
             vec![root],
             ProvenanceOperation::transformation("calibrate", 0.95),
         );
-        let t2 = dag.add_derived(
-            vec![t1],
-            ProvenanceOperation::computation("compute"),
-        );
+        let t2 = dag.add_derived(vec![t1], ProvenanceOperation::computation("compute"));
         (dag, vec![root, t1, t2])
     }
 
@@ -1344,10 +1343,7 @@ mod tests {
         let mut dag = MerkleProvenanceDAG::new();
         let r1 = dag.add_root(ProvenanceOperation::literal("a"));
         let r2 = dag.add_root(ProvenanceOperation::literal("b"));
-        let merge = dag.add_derived(
-            vec![r1, r2],
-            ProvenanceOperation::computation("merge"),
-        );
+        let merge = dag.add_derived(vec![r1, r2], ProvenanceOperation::computation("merge"));
         let _final_node = dag.add_derived(
             vec![merge],
             ProvenanceOperation::transformation("finalize", 0.99),
@@ -1375,10 +1371,7 @@ mod tests {
         let mut dag = MerkleProvenanceDAG::new();
         let r1 = dag.add_root(ProvenanceOperation::measurement("sensor_a"));
         let r2 = dag.add_root(ProvenanceOperation::measurement("sensor_b"));
-        let merged = dag.add_derived(
-            vec![r1, r2],
-            ProvenanceOperation::computation("average"),
-        );
+        let merged = dag.add_derived(vec![r1, r2], ProvenanceOperation::computation("average"));
         let _ = dag.add_derived(
             vec![merged],
             ProvenanceOperation::transformation("scale", 0.9),

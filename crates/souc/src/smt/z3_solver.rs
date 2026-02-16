@@ -874,9 +874,15 @@ impl<'ctx> Z3Solver<'ctx> {
             SmtSort::Epsilon => Sort::real(self.context),
             SmtSort::Provenance => Sort::bitvector(self.context, 64),
             // Hypercomplex types modeled as tuples of reals via uninterpreted sorts
-            SmtSort::Quaternion => Sort::uninterpreted(self.context, Symbol::String("Quaternion".to_string())),
-            SmtSort::Octonion => Sort::uninterpreted(self.context, Symbol::String("Octonion".to_string())),
-            SmtSort::Sedenion => Sort::uninterpreted(self.context, Symbol::String("Sedenion".to_string())),
+            SmtSort::Quaternion => {
+                Sort::uninterpreted(self.context, Symbol::String("Quaternion".to_string()))
+            }
+            SmtSort::Octonion => {
+                Sort::uninterpreted(self.context, Symbol::String("Octonion".to_string()))
+            }
+            SmtSort::Sedenion => {
+                Sort::uninterpreted(self.context, Symbol::String("Sedenion".to_string()))
+            }
         }
     }
 
