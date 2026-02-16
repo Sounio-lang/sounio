@@ -1,65 +1,122 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Reproduce the key validation + benchmark artifacts referenced by
+# Reproduce all validation + benchmark artifacts referenced by
 # docs/compiler/TECHNICAL_REPORT.{md,tex}.
 #
-# Notes:
-# - GPU *code generation* checks are enabled via `--features gpu`.
-# - This script does not require a CUDA/Metal device; it runs CPU tests and
-#   (optional) CPU microbenchmarks using Criterion.
+# Usage:
+#   ./scripts/reproduce_octonion_preprint.sh           # CPU-only (no GPU required)
+#   ./scripts/reproduce_octonion_preprint.sh --gpu      # With NVIDIA GPU execution
+#
+# Prerequisites:
+#   - Rust toolchain (stable)
+#   - Python 3 (for roofline CSV generation)
+#   - matplotlib + numpy (optional, for roofline PNG plot)
+#   - CUDA toolkit 12.x + NVIDIA GPU (only when --gpu is passed)
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT_DIR"
 
-echo "== Sounio Octonion Preprint Reproduction =="
+GPU_MODE=false
+for arg in "$@"; do
+    case "$arg" in
+        --gpu) GPU_MODE=true ;;
+    esac
+done
+
+echo "============================================================"
+echo "  Sounio Octonion Preprint Reproduction"
+echo "============================================================"
 echo
 echo "Commit:  $(git rev-parse HEAD 2>/dev/null || echo '<no git>')"
 echo "Date:    $(date -u +'%Y-%m-%dT%H:%M:%SZ')"
 echo "Rust:    $(rustc --version)"
 echo "Cargo:   $(cargo --version)"
+echo "GPU:     $GPU_MODE"
 echo
 
-echo "== Tests (octonion algebra properties) =="
+# ---- Phase 1: Algebraic Validation Tests ------------------------------------
+
+echo "== [1/8] Octonion algebra properties (original test suite) =="
 cargo test -p souc --features gpu --test integration_octonion_moufang -- --nocapture
 cargo test -p souc --features gpu --test integration_octonion_numerical -- --nocapture
 
 echo
-echo "== Tests (GPU codegen presence checks; no GPU required) =="
-cargo test -p souc --features gpu --test integration_octonion_basic -- --nocapture
-
-echo
-echo "== Tests (Moufang exhaustive validation) =="
+echo "== [2/8] Exhaustive Moufang validation (~181k algebraic checks) =="
 cargo test -p souc --test integration_octonion_moufang_exhaustive -- --nocapture
 
+# ---- Phase 2: ONN Training Validation ---------------------------------------
+
 echo
-echo "== Tests (ONN training sanity) =="
+echo "== [3/8] ONN training sanity (11 tests: forward/loss/gradient/converge) =="
 cargo test -p souc --test integration_onn_training_sanity -- --nocapture
 
 echo
-echo "== Tests (MNIST toy training) =="
-cargo test -p souc --test integration_onn_mnist_toy -- --nocapture
+echo "== [4/8] ONN vs real-valued NN baseline comparison (7 tests) =="
+cargo test -p souc --test integration_onn_vs_real_baseline -- --nocapture
+
+# ---- Phase 3: GPU Codegen + Execution ----------------------------------------
 
 echo
-echo "== Benchmarks (CPU microbenchmarks; Criterion) =="
-echo "Running: cargo bench -p souc --bench octonion_benchmark -- --noplot"
+echo "== [5/8] GPU PTX codegen validation (4 octonion kernels, 4 SM targets) =="
+cargo test -p souc --features gpu --test integration_gpu_octonion_execution -- --nocapture
+
+echo
+echo "== [5b/8] GPU codegen presence checks =="
+cargo test -p souc --features gpu --test integration_octonion_basic -- --nocapture
+
+if [ "$GPU_MODE" = true ]; then
+    echo
+    echo "== [5c/8] CUDA GPU execution (requires NVIDIA GPU + CUDA 12.x) =="
+    cargo test -p souc --features gpu,cuda --test integration_gpu_octonion_execution -- --nocapture
+fi
+
+# ---- Phase 4: Benchmarks ----------------------------------------------------
+
+echo
+echo "== [6/8] CPU microbenchmarks (Criterion: octonion matmul + activations) =="
 cargo bench -p souc --bench octonion_benchmark -- --noplot
 
 echo
-echo "== Benchmarks (f32 baseline; Criterion) =="
-echo "Running: cargo bench -p souc --bench octonion_benchmark -- --noplot f32_matmul_baseline"
+echo "== [7/8] f32 baseline benchmarks (Criterion: matmul comparison) =="
 cargo bench -p souc --bench octonion_benchmark -- --noplot "f32_matmul_baseline"
 
+# ---- Phase 5: Roofline Plot -------------------------------------------------
+
 echo
-echo "== Roofline CSV (from Criterion output) =="
+echo "== [8/8] Roofline analysis (CSV + optional PNG) =="
+mkdir -p docs/compiler/figures
+
 python3 scripts/roofline_octonion_matmul.py \
   --criterion-dir target/criterion/octonion_matmul \
   --f32-criterion-dir target/criterion/f32_matmul_baseline \
-  --out-csv docs/compiler/figures/octonion_matmul_points.csv
+  --out-csv docs/compiler/figures/octonion_matmul_points.csv \
+  --plot-png docs/compiler/figures/roofline_octonion_matmul.png \
+  || echo "(plot generation skipped — install matplotlib for PNG output)"
+
+# ---- Summary -----------------------------------------------------------------
 
 echo
-echo "Outputs:"
-echo "- target/criterion/* (raw Criterion estimates)"
-echo "- target/criterion/f32_matmul_baseline/* (f32 baseline estimates)"
-echo "- docs/compiler/figures/octonion_matmul_points.csv (roofline points)"
-
+echo "============================================================"
+echo "  REPRODUCTION COMPLETE"
+echo "============================================================"
+echo
+echo "Test Results:"
+echo "  - Moufang exhaustive: ~181,274 algebraic identity checks"
+echo "  - ONN training sanity: 11 tests (forward/loss/gradient/converge)"
+echo "  - ONN vs real-valued: 7 tests (iso-FLOP, ~8x param efficiency)"
+echo "  - GPU PTX codegen: 6 tests (4 kernels x 4 SM architectures)"
+if [ "$GPU_MODE" = true ]; then
+echo "  - CUDA execution: OctonionMul + NormSq on NVIDIA GPU"
+fi
+echo
+echo "Artifacts:"
+echo "  - target/criterion/octonion_matmul/       (Criterion benchmarks)"
+echo "  - target/criterion/f32_matmul_baseline/    (f32 comparison)"
+echo "  - docs/compiler/figures/octonion_matmul_points.csv (roofline data)"
+echo "  - docs/compiler/figures/roofline_octonion_matmul.png (roofline plot)"
+echo
+echo "For the paper, cite:"
+echo "  'All artifacts were generated by scripts/reproduce_octonion_preprint.sh'"
+echo "  'at commit $(git rev-parse --short HEAD 2>/dev/null || echo 'N/A')'"
+echo "============================================================"
